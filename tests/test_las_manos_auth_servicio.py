@@ -325,8 +325,9 @@ def test_la_jaula_de_hyde_no_recibe_la_credencial(monkeypatch, tmp_path):
     Se prueba sobre el argv que arma la función REAL (`wrap_hyde_command`), sin
     ejecutar bwrap: el runner de CI no lo tiene. Lo único que se sustituye es la
     ruta del binario (un ejecutable vacío, para pasar el chequeo fail-closed de
-    existencia) y el directorio del template de $HOME (el real vive bajo
-    /home/fruiz, que en el runner no existe). La forma de la jaula no cambia.
+    existencia), el directorio del template de $HOME (el real vive bajo
+    /home/fruiz, que en el runner no existe) y la credencial de Anthropic (ver
+    abajo). La forma de la jaula no cambia.
     """
     import hyde_sandbox
 
@@ -335,6 +336,18 @@ def test_la_jaula_de_hyde_no_recibe_la_credencial(monkeypatch, tmp_path):
     bwrap_falso.chmod(0o755)
     monkeypatch.setattr(hyde_sandbox, "_BWRAP_BIN", str(bwrap_falso))
     monkeypatch.setattr(hyde_sandbox, "_TEMPLATE_DIR", tmp_path / "home-template")
+    # Credencial de Anthropic determinista: este test no es sobre ESA
+    # credencial (es sobre JAX_LAS_MANOS_CREDENCIAL_*, más abajo), pero desde
+    # que wrap_hyde_command falla cerrado sin ninguna credencial usable
+    # (HydeCredentialUnavailable, ver hyde_sandbox.py) necesita una para
+    # poder construir el argv que el resto del test inspecciona. No se puede
+    # depender de que la máquina que corre la suite tenga
+    # ~/.claude/.credentials.json (no existe en el runner de CI) ni de que
+    # CLAUDE_CODE_OAUTH_TOKEN esté en el entorno ambiente.
+    monkeypatch.delenv(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, raising=False)
+    credencial_anthropic = tmp_path / "credencial-anthropic-de-mentira.json"
+    credencial_anthropic.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(hyde_sandbox, "REAL_CREDENTIALS", str(credencial_anthropic))
     # El proceso padre TIENE las credenciales en su entorno, como LAS MANOS.
     for identidad, variable in VARIABLES.items():
         monkeypatch.setenv(variable, CRED[identidad])

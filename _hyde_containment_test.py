@@ -79,6 +79,15 @@ def caja(tmp_path, monkeypatch):
     monkeypatch.setattr(hyde_sandbox, "REAL_NVM_DIR", str(tmp_path / "no-existe-nvm"))
     monkeypatch.setattr(hyde_sandbox, "REAL_CREDENTIALS", str(tmp_path / "no-existe-cred"))
     monkeypatch.setattr(hyde_sandbox, "_TEMPLATE_DIR", tmp_path / "template")
+    # Credencial por defecto de la caja: el token OAuth -- la única vía
+    # soportada hoy en producción (decisión de Fernando, 2026-09-27, ver
+    # hyde_sandbox.py). Sin esto wrap_hyde_command fallaría cerrado
+    # (HydeCredentialUnavailable) antes de construir el argv, y NINGÚN test
+    # de este archivo podría ejercitar el sandbox -- son pruebas de
+    # confinamiento, no de la credencial en sí. Los tests que sí ejercitan
+    # el mecanismo de credencial (más abajo) pisan esto con su propio
+    # monkeypatch.
+    monkeypatch.setenv(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, "token-de-prueba-de-la-caja")
 
     class Caja:
         repo = None
@@ -264,3 +273,112 @@ def test_la_red_compartida_esta_declarada_como_limite_conocido(caja):
         "la red dejo de estar compartida -- si se acoto de verdad, actualizar "
         "DEUDA.md (el item de Hyde) y este test"
     )
+
+
+# ---------------------------------------------------------------------------
+# Credencial de Hyde: CLAUDE_CODE_OAUTH_TOKEN (cuenta Max) o el archivo,
+# nunca los dos a la vez ni ninguno -- decisión de Fernando 2026-09-27 (ver
+# hyde_sandbox.py). El hallazgo que motiva esto: corriendo como `jaxsvc`
+# (desde 2026-09-17) REAL_CREDENTIALS es 600 fruiz:fruiz -- `os.path.isfile`
+# daba True (alcanza con poder recorrer directorios) y el archivo se
+# montaba igual, pero `jaxsvc` no podía leerlo adentro del sandbox: un bind
+# inútil, Hyde sin credencial, en silencio.
+# ---------------------------------------------------------------------------
+
+_TOKEN_DE_PRUEBA = "oauth-token-de-prueba-no-es-una-credencial-real"
+
+
+def test_con_oauth_token_lo_setea_y_no_bindea_el_archivo(caja, tmp_path, monkeypatch, caplog):
+    """El token GANA sobre el archivo: si está en el entorno, NO se monta
+    REAL_CREDENTIALS aunque exista y sea legible -- no hace falta, y evita
+    depender de que este proceso pueda leer un archivo que puede no ser
+    suyo."""
+    credencial_de_mentira = tmp_path / "credencial-que-no-debe-montarse.json"
+    credencial_de_mentira.write_text('{"secreto":"no-se-debe-leer-esto"}\n', encoding="utf-8")
+    monkeypatch.setattr(hyde_sandbox, "REAL_CREDENTIALS", str(credencial_de_mentira))
+    monkeypatch.setenv(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, _TOKEN_DE_PRUEBA)
+
+    argv = hyde_sandbox.wrap_hyde_command(["/bin/true"], str(caja.workspace))
+    setenvs = [i for i, a in enumerate(argv) if a == "--setenv"]
+    assert (hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, _TOKEN_DE_PRUEBA) in [
+        (argv[i + 1], argv[i + 2]) for i in setenvs
+    ], argv
+    assert not any(str(credencial_de_mentira) in a for a in argv), (
+        "el archivo de credenciales se montó igual, aunque había token"
+    )
+
+    # Y EJERCITADO -- no sólo el argv: adentro del sandbox, todo $HOME (que
+    # es tmpfs) se vuelca entero, sin nombrar ningún archivo puntual --
+    # policy/tests/test_claude_subprocess_solo_via_sandbox.py marca como
+    # violación cualquier literal de este archivo que combine un subproceso
+    # con el nombre del CLI en un string, y una ruta contra el nombre real
+    # del directorio de config lo dispararía igual sin necesidad. Se afirma
+    # sobre el volcado completo, en Python, con valores que sí pueden
+    # nombrarse (el token y el secreto del archivo que no debe montarse).
+    salida = caja.correr('env; echo ---; find "$HOME" -type f -exec cat {} \\;')
+    assert f"{hyde_sandbox.HYDE_OAUTH_TOKEN_ENV}={_TOKEN_DE_PRUEBA}" in salida, salida
+    assert "no-se-debe-leer-esto" not in salida, salida
+
+    assert not any(_TOKEN_DE_PRUEBA in r.getMessage() for r in caplog.records), (
+        "el token apareció en un log -- nunca debe loguearse"
+    )
+
+
+def test_sin_token_bindea_el_archivo_si_es_legible(caja, tmp_path, monkeypatch):
+    """Comportamiento de hoy, sin token: el archivo se monta -- pero ahora
+    la condición es LEGIBLE (`os.access(R_OK)`), no sólo que exista."""
+    monkeypatch.delenv(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, raising=False)
+    credencial_legible = tmp_path / "credencial-legible.json"
+    credencial_legible.write_text('{"contenido":"credencial-real-de-mentira"}\n', encoding="utf-8")
+    monkeypatch.setattr(hyde_sandbox, "REAL_CREDENTIALS", str(credencial_legible))
+
+    argv = hyde_sandbox.wrap_hyde_command(["/bin/true"], str(caja.workspace))
+    setenvs = {argv[i + 1] for i, a in enumerate(argv) if a == "--setenv"}
+    assert hyde_sandbox.HYDE_OAUTH_TOKEN_ENV not in setenvs, argv
+    assert str(credencial_legible) in argv, "el archivo legible no se montó"
+
+    # Mismo criterio que en el test anterior: se vuelca $HOME entero (sin
+    # nombrar el directorio de config en un literal) y se afirma en Python.
+    salida = caja.correr('find "$HOME" -type f -exec cat {} \\;')
+    assert "credencial-real-de-mentira" in salida, salida
+
+
+def test_sin_token_y_archivo_no_legible_no_bindea_y_falla_cerrado(caja, tmp_path, monkeypatch, caplog):
+    """El archivo EXISTE (isfile=True) pero no es legible por este proceso
+    (chmod 000) -- ni token ni archivo usable: no hay bind posible y
+    wrap_hyde_command falla cerrado ANTES de armar el sandbox, con un
+    warning que no repite ningún dato del contenido del archivo."""
+    monkeypatch.delenv(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, raising=False)
+    credencial_sin_permiso = tmp_path / "credencial-sin-permiso.json"
+    credencial_sin_permiso.write_text('{"secreto":"inalcanzable-para-este-proceso"}\n', encoding="utf-8")
+    os.chmod(credencial_sin_permiso, 0o000)
+    monkeypatch.setattr(hyde_sandbox, "REAL_CREDENTIALS", str(credencial_sin_permiso))
+    try:
+        assert os.path.isfile(credencial_sin_permiso), "isfile debe seguir viendo el archivo"
+        assert not os.access(credencial_sin_permiso, os.R_OK), "el chmod 000 no bloqueó la lectura"
+
+        with caplog.at_level("WARNING", logger="hyde_sandbox"):
+            with pytest.raises(hyde_sandbox.HydeCredentialUnavailable):
+                hyde_sandbox.wrap_hyde_command(["/bin/true"], str(caja.workspace))
+
+        assert any("credencial" in r.getMessage().lower() for r in caplog.records), (
+            "no se logueó ningún warning de credencial faltante"
+        )
+        assert not any("inalcanzable-para-este-proceso" in r.getMessage() for r in caplog.records)
+    finally:
+        os.chmod(credencial_sin_permiso, 0o600)  # para que tmp_path se pueda limpiar
+
+
+def test_ninguna_otra_variable_del_padre_cruza_via_setenv(caja, monkeypatch):
+    """Regresión: agregar la vía del token no puede convertirse en un
+    --setenv genérico de "lo que haya en el entorno". Sólo HOME/PATH/LANG
+    (fijos) y HYDE_OAUTH_TOKEN_ENV cuando está -- cualquier otra variable
+    del proceso padre, aunque parezca secreta, se queda afuera."""
+    monkeypatch.setenv(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, _TOKEN_DE_PRUEBA)
+    monkeypatch.setenv("OTRO_SECRETO_DEL_PADRE_QUE_NO_DEBE_CRUZAR", _SECRETO)
+
+    argv = hyde_sandbox.wrap_hyde_command(["/bin/true"], str(caja.workspace))
+    setenvs = [i for i, a in enumerate(argv) if a == "--setenv"]
+    seteadas = {argv[i + 1] for i in setenvs}
+    assert seteadas == {"HOME", "PATH", "LANG", hyde_sandbox.HYDE_OAUTH_TOKEN_ENV}, seteadas
+    assert not any(_SECRETO in a for a in argv), "una variable del padre cruzó al argv de la jaula"

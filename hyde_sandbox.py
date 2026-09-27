@@ -28,20 +28,46 @@ Alcance decidido por Fernando (opcion b, sesion sandbox 2026-08-22):
     de --allowedTools -- eso es un camino de ejecucion de Fernando, no de
     Hyde, que ninguna gobernanza cubrio nunca (ver hallazgo aparte,
     conectado a "sub-agentes sin gobernanza", en memoria). Este modulo lo
-    cierra para Hyde dandole un $HOME propio: solo credenciales (bind
-    read-only EN VIVO desde el archivo real -- nunca copiadas, mismo
-    criterio que el refresh de OAuth: leer en caliente, nunca stale) +
-    trust del workspace + settings.json vacio. Sin hooks, sin plugins,
-    sin historial.
+    cierra para Hyde dandole un $HOME propio: trust del workspace +
+    settings.json vacio, sin hooks, sin plugins, sin historial. Mas la
+    credencial de Anthropic, por UNA de dos vias (2026-09-27, decision de
+    Fernando: NADA de API key para Hyde):
+      1. `CLAUDE_CODE_OAUTH_TOKEN` en el entorno del proceso que llama a
+         `wrap_hyde_command` -- la cuenta Max de Fernando via
+         `claude setup-token`, guardada en /etc/jax/.env. Si esta presente
+         (no vacia), es la UNICA credencial que se usa: cruza como
+         `--setenv` (la unica variable secreta que cruza --clearenv, ver
+         abajo) y el archivo de REAL_CREDENTIALS NO se monta -- no hace
+         falta y evita depender de que jaxsvc pueda leer un archivo
+         600 fruiz:fruiz que nunca le perteneció.
+      2. Sin esa variable: el archivo REAL_CREDENTIALS (bind read-only EN
+         VIVO desde el archivo real -- nunca copiado, mismo criterio que el
+         refresh de OAuth: leer en caliente, nunca stale), pero SOLO si es
+         legible por este proceso (`os.access(..., os.R_OK)`, no sólo
+         `os.path.isfile`). Corrida como `jaxsvc` (desde el 2026-09-17) ese
+         archivo real es 600 fruiz:fruiz -- `isfile` daba True (alcanza con
+         poder recorrer directorios) y lo montaba igual, pero el `claude`
+         de adentro no podia leerlo: Hyde quedaba con un bind inútil y sin
+         credencial, en silencio. Ahora, si ninguna de las dos vías da una
+         credencial usable, `wrap_hyde_command` NO arma el sandbox: loguea
+         un warning (sin datos sensibles) y lanza `HydeCredentialUnavailable`
+         -- fail-closed, mismo criterio que `CredentialUnavailableError` en
+         `credential_resolver.py` (DEUDA.md, E-25): lanzar `claude` sabiendo
+         que no puede autenticar sólo gasta el lock cross-proceso y el
+         presupuesto de tiempo del llamador para terminar en un error de
+         auth genérico.
   - Entorno: --clearenv + --setenv puntual. jax-las-manos.service carga
     TODOS los secretos de /etc/jax/.env como variables de entorno
-    (DEEPSEEK_API_KEY, JAX_DB_PASSWORD, FERNET_KEY, KIMI_API_KEY, etc. --
-    confirmado, 23 variables). Sin este --clearenv, el proceso de Hyde
+    (DEEPSEEK_API_KEY, JAX_DB_PASSWORD, FERNET_KEY, KIMI_API_KEY,
+    CLAUDE_CODE_OAUTH_TOKEN, etc.). Sin este --clearenv, el proceso de Hyde
     heredaria eso por default (asyncio.create_subprocess_exec hereda el
     entorno del padre si no se le pasa `env=`) -- un vector que ni
     siquiera necesita tocar el filesystem, ningun hallazgo previo lo
     cubria. Se resuelve ACÁ, en el wrapper, para que sea una sola fuente
-    de verdad sin importar que pase el llamador.
+    de verdad sin importar que pase el llamador. `CLAUDE_CODE_OAUTH_TOKEN`
+    es la ÚNICA excepción deliberada: es la credencial que Hyde necesita
+    para funcionar, y cruza por `--setenv` explícito (ver arriba), nunca
+    por heredar el entorno completo del padre.
   - Red: --share-net (host completo). bwrap NO tiene forma de acotar red
     por dominio/IP -- es namespace de red compartido o nada (unshare-net
     aislaria a Hyde de la API de Anthropic, que es su unica funcion). Un
@@ -59,15 +85,26 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import shutil
 import time
 from pathlib import Path
 
+logger = logging.getLogger("hyde_sandbox")
+
 REAL_JAX_REPO = "/home/fruiz/jax"
 REAL_JAX_PLATFORM_REPO = "/home/fruiz/jax-platform"
 REAL_NVM_DIR = "/home/fruiz/.nvm"
 REAL_CREDENTIALS = "/home/fruiz/.claude/.credentials.json"
+
+# Variable de entorno que el CLI de Claude Code honra de forma nativa para
+# autenticar con una cuenta Max/Pro via `claude setup-token` -- decision de
+# Fernando (2026-09-27): NADA de API key para Hyde. Es la UNICA variable
+# secreta que cruza --clearenv (ver wrap_hyde_command). Nombre en una
+# constante, no repetido como literal, para que _hyde_sandbox_test.py y
+# _hyde_containment_test.py no puedan desalinearse del valor real.
+HYDE_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 
 # $HOME virtual DENTRO del sandbox -- nunca /home/fruiz real. Path elegido
 # para no solapar con ningun bind de arriba (evita el problema de montar
@@ -99,6 +136,19 @@ class SandboxUnavailable(Exception):
     sandbox -- Hyde simplemente no arranca."""
 
 
+class HydeCredentialUnavailable(Exception):
+    """Ni HYDE_OAUTH_TOKEN_ENV en el entorno del proceso que arma el sandbox
+    ni REAL_CREDENTIALS legible por ese mismo proceso. Fail-closed, mismo
+    criterio que CredentialUnavailableError en credential_resolver.py
+    (DEUDA.md, E-25 "retiro del fallback a .env de credenciales"): el
+    llamador NO debe atrapar esto para lanzar `claude` sin credencial --
+    haría gastar el lock cross-proceso y el presupuesto de tiempo del
+    llamador para terminar en un error de autenticación genérico, en vez de
+    fallar acá con un motivo explícito antes de tocar el filesystem del
+    sandbox o el lock. El mensaje de esta excepción NUNCA lleva el valor de
+    ninguna credencial -- sólo dice cuál de las dos vías faltó."""
+
+
 def _ensure_home_template(workspace_dir: str) -> Path:
     """Crea/actualiza (idempotente) el template de $HOME que se bindea
     read-only dentro del tmpfs de SANDBOX_HOME. Se reescribe en cada
@@ -123,11 +173,47 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> list[str]:
     adentro del sandbox, no el `cwd` del create_subprocess_exec externo).
 
     Lanza SandboxUnavailable si bwrap no esta disponible -- el llamador NO
-    debe atrapar esta excepcion para caer a ejecucion sin sandbox."""
+    debe atrapar esta excepcion para caer a ejecucion sin sandbox. Lanza
+    HydeCredentialUnavailable si no hay ninguna credencial de Anthropic
+    usable (ni HYDE_OAUTH_TOKEN_ENV en el entorno, ni REAL_CREDENTIALS
+    legible) -- mismo criterio fail-closed, ver esa excepción."""
     if not (_BWRAP_BIN and os.path.isfile(_BWRAP_BIN) and os.access(_BWRAP_BIN, os.X_OK)):
         raise SandboxUnavailable(
             f"bwrap no encontrado o no ejecutable ({_BWRAP_BIN!r}) -- "
             "Hyde no arranca sin confinamiento (fail-closed, P10)"
+        )
+
+    # Credencial de Anthropic -- se resuelve ACÁ (antes de tocar el
+    # filesystem del sandbox) para no gastar el lock cross-proceso ni el
+    # presupuesto de tiempo del llamador (ver run_sandboxed_claude) lanzando
+    # `claude` sabiendo que no va a poder autenticar. Orden de precedencia:
+    # 1) HYDE_OAUTH_TOKEN_ENV (cuenta Max de Fernando, `claude setup-token`,
+    #    decisión de Fernando 2026-09-27: nunca una API key); 2) el archivo
+    # REAL_CREDENTIALS, sólo si es legible por ESTE proceso -- `os.access`
+    # con R_OK, no `os.path.isfile`: corriendo como `jaxsvc` (desde el
+    # 2026-09-17) el archivo real es 600 fruiz:fruiz, `isfile` da True
+    # (alcanza con poder recorrer directorios) pero `jaxsvc` no puede leerlo,
+    # así que montarlo igual sólo dejaba un bind inútil sin que nadie se
+    # enterara -- ver hallazgo verificado 2026-09-27 (`sudo -u jaxsvc test -r`).
+    oauth_token = os.environ.get(HYDE_OAUTH_TOKEN_ENV) or ""
+    credentials_file_readable = (
+        os.path.isfile(REAL_CREDENTIALS) and os.access(REAL_CREDENTIALS, os.R_OK)
+    )
+    if not oauth_token and not credentials_file_readable:
+        if os.path.exists(REAL_CREDENTIALS):
+            motivo = (
+                f"{HYDE_OAUTH_TOKEN_ENV} no está en el entorno y "
+                f"REAL_CREDENTIALS existe pero no es legible por este proceso"
+            )
+        else:
+            motivo = (
+                f"{HYDE_OAUTH_TOKEN_ENV} no está en el entorno y no hay "
+                "archivo de credenciales de Anthropic"
+            )
+        logger.warning("Hyde sin credencial de Anthropic usable (%s) -- no arranca", motivo)
+        raise HydeCredentialUnavailable(
+            f"Hyde no tiene credencial de Anthropic usable ({motivo}) -- "
+            "no arranca sin poder autenticar (fail-closed)"
         )
 
     os.makedirs(workspace_dir, exist_ok=True)
@@ -173,14 +259,20 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> list[str]:
     argv += ["--bind", workspace_dir, workspace_dir]
 
     # $HOME minimo, efimero -- tmpfs fresco en CADA invocacion, nada
-    # persiste entre corridas de Hyde. Credenciales bindeadas en vivo
-    # desde el archivo real, solo lectura -- nunca copiadas.
+    # persiste entre corridas de Hyde.
     argv += [
         "--tmpfs", SANDBOX_HOME,
         "--ro-bind", str(template_dir / ".claude.json"), f"{SANDBOX_HOME}/.claude.json",
         "--ro-bind", str(template_dir / ".claude" / "settings.json"), f"{SANDBOX_HOME}/.claude/settings.json",
     ]
-    if os.path.isfile(REAL_CREDENTIALS):
+    # Credencial de Anthropic -- ya validada arriba (una de las dos existe,
+    # si no ya se lanzó HydeCredentialUnavailable). El token, cuando está,
+    # GANA sobre el archivo: no hace falta el bind (evita depender de que
+    # este proceso pueda leer un archivo que puede no ser suyo) y es la vía
+    # que Fernando decidió como la única soportada hoy.
+    if oauth_token:
+        argv += ["--setenv", HYDE_OAUTH_TOKEN_ENV, oauth_token]
+    elif credentials_file_readable:
         argv += ["--ro-bind", REAL_CREDENTIALS, f"{SANDBOX_HOME}/.claude/.credentials.json"]
 
     argv += ["--chdir", workspace_dir, "--"]
