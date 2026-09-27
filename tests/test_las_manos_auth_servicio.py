@@ -325,8 +325,9 @@ def test_la_jaula_de_hyde_no_recibe_la_credencial(monkeypatch, tmp_path):
     Se prueba sobre el argv que arma la función REAL (`wrap_hyde_command`), sin
     ejecutar bwrap: el runner de CI no lo tiene. Lo único que se sustituye es la
     ruta del binario (un ejecutable vacío, para pasar el chequeo fail-closed de
-    existencia) y el directorio del template de $HOME (el real vive bajo
-    /home/fruiz, que en el runner no existe). La forma de la jaula no cambia.
+    existencia), el directorio del template de $HOME (el real vive bajo
+    /home/fruiz, que en el runner no existe) y la credencial de Anthropic (ver
+    abajo). La forma de la jaula no cambia.
     """
     import hyde_sandbox
 
@@ -335,21 +336,42 @@ def test_la_jaula_de_hyde_no_recibe_la_credencial(monkeypatch, tmp_path):
     bwrap_falso.chmod(0o755)
     monkeypatch.setattr(hyde_sandbox, "_BWRAP_BIN", str(bwrap_falso))
     monkeypatch.setattr(hyde_sandbox, "_TEMPLATE_DIR", tmp_path / "home-template")
+    # Credencial de Anthropic determinista: este test no es sobre ESA
+    # credencial (es sobre JAX_LAS_MANOS_CREDENCIAL_*, más abajo), pero desde
+    # que wrap_hyde_command falla cerrado sin ninguna credencial usable
+    # (HydeCredentialUnavailable, ver hyde_sandbox.py) necesita una para
+    # poder construir el argv que el resto del test inspecciona. No se puede
+    # depender de que la máquina que corre la suite tenga
+    # ~/.claude/.credentials.json (no existe en el runner de CI) ni de que
+    # CLAUDE_CODE_OAUTH_TOKEN esté en el entorno ambiente.
+    monkeypatch.delenv(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, raising=False)
+    credencial_anthropic = tmp_path / "credencial-anthropic-de-mentira.json"
+    credencial_anthropic.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(hyde_sandbox, "REAL_CREDENTIALS", str(credencial_anthropic))
     # El proceso padre TIENE las credenciales en su entorno, como LAS MANOS.
     for identidad, variable in VARIABLES.items():
         monkeypatch.setenv(variable, CRED[identidad])
 
     workspace = tmp_path / "workspace"
-    argv = hyde_sandbox.wrap_hyde_command(["claude", "-p"], str(workspace))
+    # wrap_hyde_command devuelve (argv, env) desde B-1 (auditoría
+    # adversarial 2026-09-27, ver hyde_sandbox.py): la frontera de entorno
+    # ya no es --clearenv/--setenv dentro del argv, sino el `env` mínimo
+    # que el llamador (run_sandboxed_claude) pasa TAL CUAL a
+    # create_subprocess_exec -- nunca fusionado con os.environ. El motivo
+    # es que el argv completo de un proceso es legible por CUALQUIER
+    # usuario del host vía /proc/<pid>/cmdline, a diferencia del entorno
+    # (/proc/<pid>/environ exige el mismo UID o CAP_SYS_PTRACE).
+    argv, env = hyde_sandbox.wrap_hyde_command(["claude", "-p"], str(workspace))
     assert argv[0] == str(bwrap_falso) and argv[-2:] == ["claude", "-p"]
     jaula = argv[:argv.index("--")]
 
-    # (a) entorno limpio y namespaces propios.
-    assert "--clearenv" in jaula
+    # (a) namespaces propios, y SIN --clearenv/--setenv en absoluto (B-1):
+    # sin esas banderas bwrap hereda sin tocarlo el entorno de quien lo
+    # exec-ea, que es exactamente `env` -- por eso ya no hace falta
+    # --clearenv para bloquear nada acá.
     assert "--unshare-all" in jaula and "--proc" in jaula
-    # --clearenv antes de cualquier --setenv: bwrap aplica en orden.
-    setenvs = [i for i, a in enumerate(jaula) if a == "--setenv"]
-    assert setenvs and jaula.index("--clearenv") < min(setenvs)
+    assert "--clearenv" not in jaula, jaula
+    assert "--setenv" not in jaula, jaula
 
     # (b) ningún montaje de /etc/jax ni de /etc/jax/.env (ni de /etc entero).
     montajes = {"--bind", "--ro-bind", "--dev-bind", "--bind-try", "--ro-bind-try",
@@ -364,10 +386,12 @@ def test_la_jaula_de_hyde_no_recibe_la_credencial(monkeypatch, tmp_path):
         assert "/etc/jax" not in arg, arg
         assert not any(v in arg for v in CRED.values()), "credencial en el argv de la jaula"
 
-    # (c) --setenv es la única vía de entrada de variables tras --clearenv:
-    # ninguna JAX_LAS_MANOS_CREDENCIAL_* (ni otra JAX_*) entra por ahí.
-    seteadas = {jaula[i + 1] for i in setenvs}
-    assert seteadas == {"HOME", "PATH", "LANG"}, seteadas
-    assert not any(v.startswith("JAX_LAS_MANOS_CREDENCIAL_") for v in seteadas)
+    # (c) el `env` de retorno -- que es la única vía de entrada de
+    # variables ahora -- es SIEMPRE {HOME, PATH, LANG} (sin token en este
+    # test, se borró arriba): ninguna JAX_LAS_MANOS_CREDENCIAL_* (ni otra
+    # JAX_*) entra por ahí.
+    assert set(env) == {"HOME", "PATH", "LANG"}, env
+    assert not any(v.startswith("JAX_LAS_MANOS_CREDENCIAL_") for v in env)
     assert all(v.startswith("JAX_LAS_MANOS_CREDENCIAL_") for v in VARIABLES.values())
-    assert seteadas.isdisjoint(VARIABLES.values())
+    assert set(env).isdisjoint(VARIABLES.values())
+    assert not any(v in env.values() for v in CRED.values()), "credencial en el env de la jaula"

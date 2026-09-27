@@ -66,24 +66,37 @@ class _FakeProc:
 
 class RunSandboxedClaudeWrappingTest(unittest.IsolatedAsyncioTestCase):
     async def test_aplica_wrap_hyde_command_antes_de_lanzar(self):
-        captured_argv = {}
+        captured = {}
 
         async def fake_communicate():
             return b"hola", b""
 
         async def fake_create_subprocess_exec(*argv, **kwargs):
-            captured_argv["argv"] = argv
+            captured["argv"] = argv
+            captured["kwargs"] = kwargs
             return _FakeProc(fake_communicate)
 
+        # wrap_hyde_command devuelve (argv, env) desde B-1 (auditoría
+        # adversarial 2026-09-27, ver hyde_sandbox.py) -- ya no un argv
+        # pelado. El env de mentira es distinguible de {} para poder
+        # afirmar que ES el que se pasó, no un default cualquiera.
+        env_de_mentira = {"HOME": "/home/hyde-sandbox", "PATH": "/bin", "LANG": "C.UTF-8"}
         with tempfile.TemporaryDirectory() as ws:
-            with patch.object(hyde_sandbox, "wrap_hyde_command", return_value=["BWRAP_MARKER", "claude"]) as fake_wrap, \
+            with patch.object(
+                hyde_sandbox, "wrap_hyde_command",
+                return_value=(["BWRAP_MARKER", "claude"], env_de_mentira),
+            ) as fake_wrap, \
                  patch("asyncio.create_subprocess_exec", fake_create_subprocess_exec):
                 proc, stdout, stderr = await hyde_sandbox.run_sandboxed_claude(
                     ["claude", "--print"], ws, "prompt", timeout=5,
                 )
 
             fake_wrap.assert_called_once_with(["claude", "--print"], ws)
-            self.assertEqual(captured_argv["argv"], ("BWRAP_MARKER", "claude"))
+            self.assertEqual(captured["argv"], ("BWRAP_MARKER", "claude"))
+            # B-1: el `env` que wrap_hyde_command devuelve viaja EXPLÍCITO y
+            # TAL CUAL a create_subprocess_exec -- nunca fusionado con
+            # os.environ (ver docstring de run_sandboxed_claude).
+            self.assertEqual(captured["kwargs"].get("env"), env_de_mentira)
             self.assertEqual(stdout, b"hola")
             self.assertEqual(proc.returncode, 0)
 
@@ -109,7 +122,7 @@ class RunSandboxedClaudeConcurrencyTest(unittest.IsolatedAsyncioTestCase):
             return _FakeProc(make_communicate(tag))
 
         with tempfile.TemporaryDirectory() as ws:
-            with patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, w: cmd), \
+            with patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, w: (cmd, {})), \
                  patch("asyncio.create_subprocess_exec", fake_create_subprocess_exec):
                 await asyncio.gather(
                     hyde_sandbox.run_sandboxed_claude(["claude"], ws, "p1", timeout=5),
@@ -138,7 +151,7 @@ class RunSandboxedClaudeTimeoutTest(unittest.IsolatedAsyncioTestCase):
             return fake_proc
 
         with tempfile.TemporaryDirectory() as ws:
-            with patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, w: cmd), \
+            with patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, w: (cmd, {})), \
                  patch("asyncio.create_subprocess_exec", fake_create_subprocess_exec):
                 with self.assertRaises(asyncio.TimeoutError):
                     await hyde_sandbox.run_sandboxed_claude(["claude"], ws, "p", timeout=0.01)
@@ -238,7 +251,7 @@ class ClaudeSubprocessLockTimeoutBudgetTest(unittest.IsolatedAsyncioTestCase):
             raise TimeoutError("lock cross-proceso (fake)")
 
         with tempfile.TemporaryDirectory() as ws:
-            with patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, w: cmd), \
+            with patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, w: (cmd, {})), \
                  patch.object(hyde_sandbox, "_acquire_cross_process_lock", fake_acquire):
                 with self.assertRaises(TimeoutError):
                     await hyde_sandbox.run_sandboxed_claude(
