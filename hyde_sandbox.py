@@ -35,11 +35,11 @@ Alcance decidido por Fernando (opcion b, sesion sandbox 2026-08-22):
       1. `CLAUDE_CODE_OAUTH_TOKEN` en el entorno del proceso que llama a
          `wrap_hyde_command` -- la cuenta Max de Fernando via
          `claude setup-token`, guardada en /etc/jax/.env. Si esta presente
-         (no vacia), es la UNICA credencial que se usa: cruza como
-         `--setenv` (la unica variable secreta que cruza --clearenv, ver
-         abajo) y el archivo de REAL_CREDENTIALS NO se monta -- no hace
-         falta y evita depender de que jaxsvc pueda leer un archivo
-         600 fruiz:fruiz que nunca le perteneció.
+         (no vacia tras `.strip()` -- un valor de solo espacios cuenta como
+         ausente), es la UNICA credencial que se usa y el archivo de
+         REAL_CREDENTIALS NO se monta -- no hace falta y evita depender de
+         que jaxsvc pueda leer un archivo 600 fruiz:fruiz que nunca le
+         perteneció.
       2. Sin esa variable: el archivo REAL_CREDENTIALS (bind read-only EN
          VIVO desde el archivo real -- nunca copiado, mismo criterio que el
          refresh de OAuth: leer en caliente, nunca stale), pero SOLO si es
@@ -56,18 +56,41 @@ Alcance decidido por Fernando (opcion b, sesion sandbox 2026-08-22):
          que no puede autenticar sólo gasta el lock cross-proceso y el
          presupuesto de tiempo del llamador para terminar en un error de
          auth genérico.
-  - Entorno: --clearenv + --setenv puntual. jax-las-manos.service carga
-    TODOS los secretos de /etc/jax/.env como variables de entorno
-    (DEEPSEEK_API_KEY, JAX_DB_PASSWORD, FERNET_KEY, KIMI_API_KEY,
-    CLAUDE_CODE_OAUTH_TOKEN, etc.). Sin este --clearenv, el proceso de Hyde
-    heredaria eso por default (asyncio.create_subprocess_exec hereda el
-    entorno del padre si no se le pasa `env=`) -- un vector que ni
-    siquiera necesita tocar el filesystem, ningun hallazgo previo lo
-    cubria. Se resuelve ACÁ, en el wrapper, para que sea una sola fuente
-    de verdad sin importar que pase el llamador. `CLAUDE_CODE_OAUTH_TOKEN`
-    es la ÚNICA excepción deliberada: es la credencial que Hyde necesita
-    para funcionar, y cruza por `--setenv` explícito (ver arriba), nunca
-    por heredar el entorno completo del padre.
+    CORREGIDO 2026-09-27 (auditoría adversarial, hallazgo B-1 BLOCK sobre
+    el primer intento de este mismo cambio): el token NUNCA va en el argv
+    de bwrap. La primera versión lo pasaba con `--setenv
+    CLAUDE_CODE_OAUTH_TOKEN <valor>`, y el argv completo de un proceso es
+    legible por CUALQUIER usuario del host vía `/proc/<pid>/cmdline`
+    (world-readable por defecto; a diferencia de `/proc/<pid>/environ`,
+    que exige el mismo UID o CAP_SYS_PTRACE) -- verificado en hall9000:
+    `/proc` no tiene `hidepid` montado, y `fruiz`/`axioma` ven con `ps` los
+    procesos de `jaxsvc`. Ver la sección "Entorno" de abajo: ahora
+    `wrap_hyde_command` devuelve `(argv, env)`, y el `env` -- nunca el
+    argv -- es la única vía por la que cruza el token.
+  - Entorno: la frontera es el parámetro `env=` de
+    `asyncio.create_subprocess_exec`, no `--clearenv`/`--setenv` de bwrap.
+    `wrap_hyde_command` devuelve una tupla `(argv, env)`: `env` es el
+    entorno MÍNIMO y COMPLETO (HOME=SANDBOX_HOME, PATH segura, LANG, y
+    CLAUDE_CODE_OAUTH_TOKEN si hay token) que el llamador debe pasar TAL
+    CUAL -- nunca fusionado con `os.environ` -- como `env=` a
+    `create_subprocess_exec` (lo hace `run_sandboxed_claude`, el único
+    llamador aprobado). Como `env=` REEMPLAZA el entorno del proceso
+    exec-ado en vez de heredarlo, bwrap arranca viendo EXACTAMENTE ese
+    diccionario -- nunca los 20+ secretos que jax-las-manos.service carga
+    de /etc/jax/.env (DEEPSEEK_API_KEY, JAX_DB_PASSWORD, FERNET_KEY,
+    KIMI_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, etc.) -- y por eso bwrap YA NO
+    necesita `--clearenv` ni `--setenv`: sin esas banderas, bwrap
+    simplemente hereda sin tocarlo el entorno de quien lo exec-ea, que es
+    justo ese diccionario mínimo. Antes de este cambio (2026-09-27) la
+    frontera era `--clearenv` + `--setenv` puntual dentro del argv de
+    bwrap -- funcionaba para bloquear los secretos del padre, pero
+    cualquier `--setenv` (incluida una credencial) terminaba en el argv,
+    que es más expuesto que el entorno (ver el hallazgo B-1 de arriba).
+    RIESGO RESIDUAL ACEPTADO (B-4, mismo que existía con el archivo, que
+    además incluía el refreshToken): DENTRO del sandbox, el propio agente
+    (que tiene Bash y red completa) puede leer su propio
+    CLAUDE_CODE_OAUTH_TOKEN en su propio entorno -- eso no cambia con este
+    fix, que sólo saca el token de la vista de OTROS procesos del host.
   - Red: --share-net (host completo). bwrap NO tiene forma de acotar red
     por dominio/IP -- es namespace de red compartido o nada (unshare-net
     aislaria a Hyde de la API de Anthropic, que es su unica funcion). Un
@@ -101,9 +124,11 @@ REAL_CREDENTIALS = "/home/fruiz/.claude/.credentials.json"
 # Variable de entorno que el CLI de Claude Code honra de forma nativa para
 # autenticar con una cuenta Max/Pro via `claude setup-token` -- decision de
 # Fernando (2026-09-27): NADA de API key para Hyde. Es la UNICA variable
-# secreta que cruza --clearenv (ver wrap_hyde_command). Nombre en una
-# constante, no repetido como literal, para que _hyde_sandbox_test.py y
-# _hyde_containment_test.py no puedan desalinearse del valor real.
+# secreta que entra al `env` mínimo que wrap_hyde_command devuelve (ver esa
+# función) -- nunca al argv de bwrap (B-1, auditoría adversarial 2026-09-27).
+# Nombre en una constante, no repetido como literal, para que
+# _hyde_sandbox_test.py y _hyde_containment_test.py no puedan desalinearse
+# del valor real.
 HYDE_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 
 # $HOME virtual DENTRO del sandbox -- nunca /home/fruiz real. Path elegido
@@ -164,13 +189,25 @@ def _ensure_home_template(workspace_dir: str) -> Path:
     return _TEMPLATE_DIR
 
 
-def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> list[str]:
+def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> tuple[list[str], dict[str, str]]:
     """Envuelve `cmd` (la invocacion real de `claude`) en un bwrap que lo
-    confina a nivel de namespace de montaje. Devuelve la lista completa
-    para pasar tal cual a asyncio.create_subprocess_exec -- el `cwd`/`env`
-    que el llamador ya usaba siguen siendo validos (bwrap ignora el `env`
-    heredado via --clearenv, y el `cwd` del proceso real lo fija --chdir
-    adentro del sandbox, no el `cwd` del create_subprocess_exec externo).
+    confina a nivel de namespace de montaje. Devuelve `(argv, env)`:
+
+    - `argv`: la lista completa para pasar tal cual a
+      asyncio.create_subprocess_exec. El `cwd` del proceso real lo fija
+      --chdir adentro del sandbox, no el `cwd` del create_subprocess_exec
+      externo (ese sigue siendo válido para lo que el llamador ya hacía).
+    - `env`: el entorno MÍNIMO Y COMPLETO que el llamador debe pasar TAL
+      CUAL -- nunca fusionado con os.environ -- como `env=` a
+      create_subprocess_exec. Esa es la frontera real de aislamiento de
+      entorno (B-1, auditoría adversarial 2026-09-27): `argv` NUNCA lleva
+      ninguna credencial -- el argv completo de un proceso es legible por
+      cualquier usuario del host vía /proc/<pid>/cmdline (a diferencia de
+      /proc/<pid>/environ, que exige el mismo UID o CAP_SYS_PTRACE). Por
+      eso el argv de bwrap ya no usa --clearenv ni --setenv: sin esas
+      banderas, bwrap hereda sin tocarlo el entorno de quien lo exec-ea,
+      que es exactamente este `env` -- ni más (los secretos reales de
+      jaxsvc) ni menos (HOME/PATH/LANG/token).
 
     Lanza SandboxUnavailable si bwrap no esta disponible -- el llamador NO
     debe atrapar esta excepcion para caer a ejecucion sin sandbox. Lanza
@@ -195,7 +232,9 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> list[str]:
     # (alcanza con poder recorrer directorios) pero `jaxsvc` no puede leerlo,
     # así que montarlo igual sólo dejaba un bind inútil sin que nadie se
     # enterara -- ver hallazgo verificado 2026-09-27 (`sudo -u jaxsvc test -r`).
-    oauth_token = os.environ.get(HYDE_OAUTH_TOKEN_ENV) or ""
+    # `.strip()`: un valor de solo espacios en /etc/jax/.env no cuenta como
+    # token presente (B-3, auditoría adversarial 2026-09-27).
+    oauth_token = (os.environ.get(HYDE_OAUTH_TOKEN_ENV) or "").strip()
     credentials_file_readable = (
         os.path.isfile(REAL_CREDENTIALS) and os.access(REAL_CREDENTIALS, os.R_OK)
     )
@@ -224,10 +263,8 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> list[str]:
         "--unshare-all", "--share-net",  # red completa: es la unica forma de que bwrap deje llegar a la API de Anthropic
         "--die-with-parent",
         "--new-session",
-        "--clearenv",
-        "--setenv", "HOME", SANDBOX_HOME,
-        "--setenv", "PATH", _SAFE_PATH,
-        "--setenv", "LANG", "C.UTF-8",
+        # SIN --clearenv/--setenv (B-1, 2026-09-27): la frontera de entorno
+        # es el `env` que esta función devuelve, ver docstring de arriba.
         "--proc", "/proc",
         "--dev", "/dev",
         "--tmpfs", "/tmp",
@@ -269,15 +306,29 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> list[str]:
     # si no ya se lanzó HydeCredentialUnavailable). El token, cuando está,
     # GANA sobre el archivo: no hace falta el bind (evita depender de que
     # este proceso pueda leer un archivo que puede no ser suyo) y es la vía
-    # que Fernando decidió como la única soportada hoy.
-    if oauth_token:
-        argv += ["--setenv", HYDE_OAUTH_TOKEN_ENV, oauth_token]
-    elif credentials_file_readable:
+    # que Fernando decidió como la única soportada hoy. A diferencia del
+    # intento anterior (B-1), el token NUNCA se agrega al argv -- va sólo
+    # en el `env` de retorno, más abajo.
+    if not oauth_token and credentials_file_readable:
         argv += ["--ro-bind", REAL_CREDENTIALS, f"{SANDBOX_HOME}/.claude/.credentials.json"]
 
     argv += ["--chdir", workspace_dir, "--"]
     argv += cmd
-    return argv
+
+    # Entorno mínimo y completo -- ver docstring de arriba (B-1). El
+    # llamador lo pasa TAL CUAL como `env=`, nunca fusionado con
+    # os.environ: eso es lo que impide que los secretos reales del proceso
+    # que arma el sandbox (jaxsvc, con /etc/jax/.env cargado entero) lleguen
+    # a bwrap o al `claude` de adentro.
+    env = {
+        "HOME": SANDBOX_HOME,
+        "PATH": _SAFE_PATH,
+        "LANG": "C.UTF-8",
+    }
+    if oauth_token:
+        env[HYDE_OAUTH_TOKEN_ENV] = oauth_token
+
+    return argv, env
 
 
 # Serializa TODAS las invocaciones de `claude` sandboxeado entre si, sin
@@ -409,8 +460,17 @@ async def run_sandboxed_claude(
     cancelacion de asyncio). TimeoutError del lock y TimeoutError del
     wait_for son la misma clase (asyncio.TimeoutError es alias de
     TimeoutError desde Python 3.11) -- ambos llamadores ya distinguen por
-    esa clase, no hace falta un tipo nuevo."""
-    sandboxed_cmd = wrap_hyde_command(cmd, workspace_dir)
+    esa clase, no hace falta un tipo nuevo.
+
+    `env=sandbox_env` se pasa EXPLÍCITO y TAL CUAL a
+    create_subprocess_exec -- nunca fusionado con os.environ (B-1,
+    auditoría adversarial 2026-09-27): ese diccionario mínimo (ver
+    wrap_hyde_command) es la frontera real de aislamiento de entorno.
+    Pasarlo es obligatorio -- sin `env=`, asyncio.create_subprocess_exec
+    hereda el entorno completo de ESTE proceso (jax-las-manos, con los
+    20+ secretos de /etc/jax/.env), que es exactamente el vector que
+    wrap_hyde_command existe para cerrar."""
+    sandboxed_cmd, sandbox_env = wrap_hyde_command(cmd, workspace_dir)
 
     # El presupuesto del lock es el del llamador, no una constante fija
     # (ver docstring) -- un step encolado espera lo que su step realmente
@@ -422,6 +482,7 @@ async def run_sandboxed_claude(
         proc = await asyncio.create_subprocess_exec(
             *sandboxed_cmd,
             cwd=workspace_dir,
+            env=sandbox_env,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
