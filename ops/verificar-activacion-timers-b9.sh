@@ -52,12 +52,12 @@ mapfile -t timers < <(awk -F'\t' '$2 ~ /^\/etc\/systemd\/system\/jax-memory-[^\/
 
 fallo=0
 for timer in "${timers[@]}"; do
-  if ! salida="$("$SYSTEMCTL_CMD" show -p UnitFileState -p ActiveState -p SubState -p NextElapseUSecRealtime "$timer" 2>&1)"; then
+  if ! salida="$("$SYSTEMCTL_CMD" show -p UnitFileState -p ActiveState -p SubState -p NextElapseUSecRealtime -p NextElapseUSecMonotonic "$timer" 2>&1)"; then
     echo "SYSTEMCTL SHOW FALLÓ para $timer: $salida" >&2
     fallo=1
     continue
   fi
-  unit_file_state="" active_state="" sub_state="" next_elapse=""
+  unit_file_state="" active_state="" sub_state="" next_elapse="" next_monotonic=""
   while IFS= read -r linea; do
     clave="${linea%%=*}"; valor="${linea#*=}"
     case "$clave" in
@@ -65,13 +65,14 @@ for timer in "${timers[@]}"; do
       ActiveState) active_state="$valor" ;;
       SubState) sub_state="$valor" ;;
       NextElapseUSecRealtime) next_elapse="$valor" ;;
+      NextElapseUSecMonotonic) next_monotonic="$valor" ;;
     esac
   done <<< "$salida"
 
   # Cada propiedad es obligatoria y se valida por valor exacto: una salida
   # truncada, "n/a" o un estado nuevo/desconocido es roja por diseño.
-  if [ "$unit_file_state" != enabled ] || [ "$active_state" != active ] || [ "$sub_state" != waiting ] || [ -z "$next_elapse" ] || [ "$next_elapse" = n/a ]; then
-    echo "TIMER B9 NO ACTIVADO: $timer UnitFileState=${unit_file_state:-<vacío>} ActiveState=${active_state:-<vacío>} SubState=${sub_state:-<vacío>} NextElapseUSecRealtime=${next_elapse:-<vacío>} -- se exige enabled/active/waiting/próximo disparo" >&2
+  if [ "$unit_file_state" != enabled ] || [ "$active_state" != active ] || [ "$sub_state" != waiting ] || { [ -z "$next_elapse" ] || [ "$next_elapse" = n/a ]; } && { [ -z "$next_monotonic" ] || [ "$next_monotonic" = n/a ]; }; then
+    echo "TIMER B9 NO ACTIVADO: $timer UnitFileState=${unit_file_state:-<vacío>} ActiveState=${active_state:-<vacío>} SubState=${sub_state:-<vacío>} NextElapseUSecRealtime=${next_elapse:-<vacío>} NextElapseUSecMonotonic=${next_monotonic:-<vacío>} -- se exige enabled/active/waiting/próximo disparo" >&2
     fallo=1
   fi
 done
