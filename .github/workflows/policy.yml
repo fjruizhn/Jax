@@ -1194,8 +1194,21 @@ jobs:
   # Los tests EJECUTAN ataques reales adentro del sandbox y, cuando el ataque es
   # una escritura, afirman SOBRE EL HOST -- un `touch` puede "fallar" y aun asi
   # haber dejado el archivo. Se auto-verifican por mutacion: cambiando
-  # --ro-bind por --bind caen 3, quitando --clearenv caen 2 (verificado, no
-  # supuesto).
+  # --ro-bind por --bind caen 3 (verificado, no supuesto).
+  #
+  # CORREGIDO 2026-09-27 (segunda auditoria adversarial sobre el fix del token
+  # OAuth de Hyde): esta linea decia "quitando --clearenv caen 2" -- desde B-1
+  # de esa auditoria, bwrap ya NO usa --clearenv/--setenv en absoluto (la
+  # frontera de entorno paso a ser el `env=` que run_sandboxed_claude pasa a
+  # create_subprocess_exec, ver hyde_sandbox.py), asi que esa mutacion ya no
+  # existe. La equivalente hoy -- quitar ese `env=` o fusionarlo con
+  # os.environ en run_sandboxed_claude -- se verifico a mano (las dos
+  # variantes): pone en rojo **1** test, y solo en
+  # _hyde_sandbox_test.py::RunSandboxedClaudeWrappingTest, nunca en
+  # _hyde_containment_test.py -- su Caja.correr llama a wrap_hyde_command
+  # DIRECTO, sin pasar por run_sandboxed_claude, asi que este job (que solo
+  # corre _hyde_containment_test.py) no puede ejercitar esa propiedad; la
+  # ejercita el job hyde-sandbox-unit, mas abajo.
   #
   # bubblewrap no viene en el runner. Y en Ubuntu 23.10+ AppArmor bloquea los
   # user namespaces sin privilegios, que es justamente lo que bwrap necesita:
@@ -1217,10 +1230,15 @@ jobs:
       - run: python -m pytest _hyde_containment_test.py -v
       # El archivo entero se auto-saltea si falta bwrap (skipif de modulo), y un
       # skip masivo se ve igual que verde. Se exige el numero real.
+      #
+      # Piso subido de 14 a 21 el 2026-09-27 (fix del token OAuth de Hyde,
+      # segunda auditoria adversarial): 7 tests nuevos de la credencial
+      # (CLAUDE_CODE_OAUTH_TOKEN vs REAL_CREDENTIALS, ver hyde_sandbox.py) --
+      # medido dos veces contra el arbol real, sin DB de por medio.
       - run: |
           python -m pytest _hyde_containment_test.py -q 2>&1 | tee /tmp/hyde
-          grep -qE "^14 passed" /tmp/hyde || {
-            echo "PISO ROTO: se esperaban 14 tests CORRIDOS (no skipeados)."; exit 1; }
+          grep -qE "^21 passed" /tmp/hyde || {
+            echo "PISO ROTO: se esperaban 21 tests CORRIDOS (no skipeados)."; exit 1; }
 
   facet-resolver-seal:
     runs-on: ubuntu-latest

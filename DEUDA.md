@@ -809,7 +809,12 @@ en el runner con `AssertionError: 0 != 3` — admitió cero — y en local daba 
 - **DECISIÓN (autonomía de Fernando, 2026-09-17): credencial de servicio, no SO_PEERCRED.** Hyde, jax-platform y LAS
   MANOS corren como `fruiz`: el uid del par no distingue a Hyde. Lo que los distingue es qué pueden leer: la jaula no
   monta `/etc/jax`, corre con `--clearenv` y `--unshare-all` (PID propio: no ve `/proc/<pid>/environ` de los
-  servicios). `las_manos/auth_servicio.py`: middleware ASGI **deny by default** (público sólo `GET /health`), cabecera
+  servicios). **CORREGIDO 2026-09-27 (Mr. Hyde, segunda auditoría adversarial sobre el fix del token OAuth de Hyde):**
+  desde B-1 de esa auditoría, la jaula ya NO corre con `--clearenv` -- bwrap no usa `--clearenv`/`--setenv` en
+  absoluto; la frontera de entorno pasó a ser el `env=` mínimo que `hyde_sandbox.run_sandboxed_claude` pasa
+  explícito (sin fusionar con `os.environ`) a `create_subprocess_exec`. El efecto que este párrafo describe
+  (Hyde no ve los secretos de `/etc/jax/.env` de LAS MANOS) sigue siendo cierto -- lo que cambió es el mecanismo, no
+  la propiedad. `las_manos/auth_servicio.py`: middleware ASGI **deny by default** (público sólo `GET /health`), cabecera
   `X-Jax-Credencial-Servicio`, `hmac.compare_digest` contra todas, identidades `plataforma`
   (`JAX_LAS_MANOS_CREDENCIAL_PLATAFORMA`: `/jacobs/*` + `POST /motor/authorize-facet`; declara `invoked_by=plataforma`,
   `caller=jax_platform_chat`) y `jacobs` (`JAX_LAS_MANOS_CREDENCIAL_JACOBS`: `/motor/dispatch`, `/motor/job/*`,
@@ -2543,7 +2548,18 @@ retractaciones, que no se borran. Ninguno requiere acción.
   es una escritura, afirman **sobre el host**: un `touch` puede "fallar" y aun
   así haber dejado el archivo, y ese caso es peor que el que se estaba
   probando. Se auto-verifican por mutación: `--ro-bind` → `--bind` pone 3 en
-  rojo, quitar `--clearenv` pone 2.
+  rojo, quitar `--clearenv` pone 2. **CORREGIDO 2026-09-27 (Mr. Hyde, segunda
+  auditoría adversarial sobre el fix del token OAuth de Hyde):** esa segunda
+  mutación ya no existe -- `--clearenv` se retiró del argv de bwrap (B-1: la
+  frontera de entorno pasó a ser el `env=` que `run_sandboxed_claude` pasa a
+  `create_subprocess_exec`, ver hyde_sandbox.py). La equivalente hoy es
+  quitar ese `env=` (o fusionarlo con `os.environ`) en `run_sandboxed_claude`
+  -- verificado a mano las dos variantes (quitarlo entero y fusionarlo con
+  `os.environ`): las dos ponen **1** test en rojo, y sólo en
+  `_hyde_sandbox_test.py::RunSandboxedClaudeWrappingTest`, nunca en
+  `_hyde_containment_test.py` -- su `Caja.correr` llama a `wrap_hyde_command`
+  directo, sin pasar por `run_sandboxed_claude`, así que no puede ejercitar
+  esta propiedad.
 
   **El control positivo no es decorativo.** `test_el_workspace_si_es_escribible`
   existe porque sin él todos los tests de bloqueo pasarían igual si bwrap no

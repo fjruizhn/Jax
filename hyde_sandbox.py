@@ -209,6 +209,30 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> tuple[list[str], di
       que es exactamente este `env` -- ni más (los secretos reales de
       jaxsvc) ni menos (HOME/PATH/LANG/token).
 
+    ADVERTENCIA -- ESTA FUNCIÓN, POR SÍ SOLA, NO AÍSLA NADA DEL ENTORNO.
+    Es una función PURA: arma el `argv` y calcula el `env` que hacen falta,
+    pero no lanza ningún subproceso ni toca `os.environ`. El aislamiento
+    real ocurre recién en el llamador, y sólo SI ese llamador pasa el
+    `env` de retorno TAL CUAL -- sin fusionarlo con `os.environ`, ni con
+    `{**os.environ, **env}`, ni con ningún otro merge -- al parámetro
+    `env=` de `asyncio.create_subprocess_exec` (o de `subprocess.run`,
+    para quien la use fuera de asyncio). Si un llamador ignora el `env` de
+    retorno (no le pasa `env=` a create_subprocess_exec) o lo funde con el
+    propio, el proceso exec-ado hereda el entorno REAL de quien llama --
+    con los 20+ secretos de /etc/jax/.env si el llamador es jax-las-manos
+    -- sin que `wrap_hyde_command` tenga forma de impedirlo: no controla
+    el `env=` de nadie más que a través de lo que devuelve.
+
+    El ÚNICO llamador aprobado hoy es `run_sandboxed_claude` (más abajo en
+    este mismo módulo), que hace exactamente eso -- ver su docstring y
+    `_hyde_sandbox_test.py::RunSandboxedClaudeWrappingTest`, que falla si
+    el `env=` que llega a create_subprocess_exec no es el que esta función
+    devolvió. Cualquier código nuevo que llame a `wrap_hyde_command`
+    directo (sin pasar por `run_sandboxed_claude`) es responsable de
+    reproducir esa misma disciplina -- ver `_hyde_containment_test.py`,
+    cuyo `Caja.correr` lo hace a mano precisamente porque llama a esta
+    función directo, sin `run_sandboxed_claude` de por medio.
+
     Lanza SandboxUnavailable si bwrap no esta disponible -- el llamador NO
     debe atrapar esta excepcion para caer a ejecucion sin sandbox. Lanza
     HydeCredentialUnavailable si no hay ninguna credencial de Anthropic
