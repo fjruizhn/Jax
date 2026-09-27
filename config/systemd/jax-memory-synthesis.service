@@ -1,14 +1,13 @@
 [Unit]
-Description=JAX — Worker de sintesis de segundo orden (item #8, insights sobre facts YA verificados)
-After=network.target docker.service
-Wants=docker.service
+Description=JAX B9 memory synthesis
+After=network-online.target mariadb.service
 
 [Service]
 Type=oneshot
-User=fruiz
-WorkingDirectory=/home/fruiz/jax
+User=jaxsvc
+Group=jaxsvc
+WorkingDirectory=/srv/jax-prod/jax
 EnvironmentFile=/etc/jax/.env
-Environment=PYTHONPATH=/home/fruiz/jax
-ExecStart=/home/fruiz/jax/.venv/bin/python -m jax.memory.synthesis_worker
+ExecStart=/srv/jax-prod/jax/.venv/bin/python -m jax.memory.synthesis_worker
 StandardOutput=journal
 StandardError=journal

@@ -43,9 +43,9 @@ INSTALADORES = ("instalar_contratos.sh", "instalar_vigia.sh", "instalar_registro
 @pytest.mark.parametrize("nombre", UNIDADES)
 def test_las_unidades_corren_como_la_cuenta_de_servicio(nombre):
     """Desde ops/versionar-drop-ins (2026-09-25) la unidad base en el repo es
-    el fragmento CRUDO tal como está instalado en /etc (`User=fruiz`, sin
-    `Environment=HOME=`) -- el `User=jaxsvc`/`HOME` propio llegan por
-    `cuenta-de-servicio.conf`. Mirar sólo la base ya no prueba nada real:
+    las bases worker/synthesis se preservan tal como están instaladas en
+    master (`User=jaxsvc`), mientras LAS MANOS/proxy se completan con sus
+    drop-ins. Mirar sólo la base no prueba la configuración real de todas:
     pasaría igual si alguien borrara el drop-in. Por eso este control mira
     la configuración EFECTIVA -- exactamente lo que corre -- y no sólo el
     archivo base."""

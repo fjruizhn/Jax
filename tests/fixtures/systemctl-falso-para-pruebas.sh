@@ -11,10 +11,10 @@
 # -p Names`, ronda 6 -- sin `--value`, ver abajo).
 #
 # Ronda 6, MINOR-1: la capa cargado ahora puede activarse bajo
-# RAIZ_PRUEBA (`SYSTEMCTL_DE_PRUEBA`), y el guion la corre para las 6
+# RAIZ_PRUEBA (`SYSTEMCTL_DE_PRUEBA`), y el guion la corre para las 12
 # unidades del manifiesto -- no sólo jax-las-manos.service. Por eso este
 # systemctl falso responde con datos CORRECTOS (calcados del manifiesto)
-# para las 6 unidades siempre, y sólo desvía el comportamiento de
+# para las 12 unidades siempre, y sólo desvía el comportamiento de
 # jax-las-manos.service según $SYSTEMCTL_FALSO_MODO.
 #
 # Ronda 7, MINOR-D: este archivo NUNCA delega a un `systemctl` real

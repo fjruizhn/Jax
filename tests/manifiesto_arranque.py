@@ -31,6 +31,20 @@ def leer_manifiesto() -> list[tuple[Path, Path]]:
     return pares
 
 
+def timers_b9() -> list[str]:
+    """Timers B9 versionados en el manifiesto, sin lista paralela.
+
+    El contrato de activación los deriva de aquí: una unidad nueva no puede
+    quedar fuera de su verificación por olvido de mantener otro catálogo.
+    """
+    prefijo = "/etc/systemd/system/jax-memory-"
+    return sorted(
+        instalada.name
+        for _, instalada in leer_manifiesto()
+        if str(instalada).startswith(prefijo) and instalada.suffix == ".timer"
+    )
+
+
 def _archivos_de_unidad(nombre_unidad: str) -> list[Path]:
     """La unidad base MÁS sus drop-ins, en orden alfabético de nombre de
     archivo (systemd.unit(5): drop-ins de <unidad>.d/ se aplican en ese

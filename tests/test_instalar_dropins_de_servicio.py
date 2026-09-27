@@ -139,7 +139,7 @@ def test_rechaza_archivo_de_repo_que_resuelve_fuera_del_repo(tmp_path):
 
 
 def test_todo_bajo_destdir_nunca_fuera(tmp_path):
-    """Instala las 4 unidades y el guion de sanidad: TODO lo escrito queda
+    """Instala todos los drop-ins versionados y el guion de sanidad: TODO lo escrito queda
     bajo tmp_path, nada se sale -- si algo colgara de una ruta absoluta sin
     pasar por DESTDIR, este glob lo encontraría vacío o el test de arriba
     ya habría fallado contra el /etc real (que en CI ni existe)."""
@@ -147,6 +147,9 @@ def test_todo_bajo_destdir_nunca_fuera(tmp_path):
         "jax-las-manos.service.d",
         "jax-memory-worker.service.d",
         "jax-memory-synthesis.service.d",
+        "jax-memory-embedding.service.d",
+        "jax-memory-lifecycle.service.d",
+        "jax-memory-vector-health.service.d",
         "jax-ejecutor-proxy.service.d",
         "/usr/local/sbin/jax-checkout-de-produccion-sano.sh",
     ):
@@ -154,7 +157,7 @@ def test_todo_bajo_destdir_nunca_fuera(tmp_path):
         assert resultado.returncode == 0, f"{patron}: {resultado.stderr}"
     instalados = list(tmp_path.rglob("*"))
     archivos = [p for p in instalados if p.is_file()]
-    assert len(archivos) == 13, f"se esperaban 13 archivos instalados (12 drop-ins + el guion), hubo {len(archivos)}: {archivos}"
+    assert len(archivos) == 18, f"se esperaban 18 archivos instalados (17 drop-ins + el guion), hubo {len(archivos)}: {archivos}"
 
 
 @pytest.mark.parametrize("destdir_literal", ["/", "", "/tmp/../"])

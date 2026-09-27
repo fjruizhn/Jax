@@ -535,36 +535,41 @@ repo, con `PYTHONPATH=/srv/jax-prod/jax` (el mismo que fija el drop-in
 Fernando, 2026-09-25, opción A -- **el repo describe lo que corre, y
 producción no se toca**, decisión reafirmada el mismo día al cerrar el
 hallazgo de abajo, y otra vez al cerrar los 6 MAJOR/4 MINOR de la
-auditoría escalón 3 sobre jax#274): **19 archivos** en total (contados,
+auditoría escalón 3 sobre jax#274): **30 archivos** en total (contados,
 no una cifra redonda -- ver `ops/manifiesto-arranque-instalado.tsv`, que es
 la lista real):
 
 > **CADUCADA (confirmado 2026-09-25, ronda 5)**: la nota anterior sobre
 > `jax-las-manos.service` con `NeedDaemonReload=yes` real en hall9000 ya
 > no aplica -- `sudo -n ops/verificar-arranque-instalado.sh` contra la
-> producción real dio `EXIT=0` ("repo e instalado coinciden, 19
-> archivos"), lo que sólo es posible con `NeedDaemonReload=no` en las 4
+> producción real dio `EXIT=0` ("repo e instalado coinciden, 21
+> archivos"), lo que sólo es posible con `NeedDaemonReload=no` en las 6
 > unidades (el guion actual lo exige explícitamente, ver más abajo). No
 > fue el subagente de esta ronda quien corrió el `daemon-reload` --
 > alguien con autoridad lo resolvió entre rondas.
-- 4 unidades base: `jax-las-manos.service`, `jax-memory-worker.service`,
-  `jax-memory-synthesis.service`, `jax-ejecutor-proxy.service`. Son el
-  fragmento CRUDO tal como está instalado en `/etc` (`User=fruiz`,
-  `WorkingDirectory=/home/fruiz/jax...`, sin `Environment=HOME=`) -- el
-  `User=jaxsvc`/`WorkingDirectory=/srv/jax-prod/jax`/`HOME`/`PYTHONPATH`
-  propios llegan SIEMPRE por los drop-ins, nunca horneados en la base.
-  Ningún consumidor del repo depende ya de que la base sola describa el
-  resultado final (ver el punto de la configuración EFECTIVA, abajo).
-- 12 drop-ins: TRES por cada una de las 4 unidades --
+- 12 unidades base: `jax-las-manos.service`, `jax-ejecutor-proxy.service`
+  y los cinco pares B9 (`jax-memory-worker`, `jax-memory-synthesis`,
+  `jax-memory-embedding`, `jax-memory-lifecycle`,
+  `jax-memory-vector-health`, cada uno `.service` + `.timer`). Las bases
+  de worker/synthesis se preservan byte a byte como están instaladas en
+  `master`; los servicios B9 restantes ya usan `jaxsvc` y
+  `/srv/jax-prod/jax` en su fragmento.
+- 17 drop-ins: TRES para LAS MANOS, proxy, worker y synthesis --
   `checkout-de-produccion.conf`, `cuenta-de-servicio.conf` y
   `z-pythonpath.conf` (el PYTHONPATH efectivo de las 3 últimas apuntaba a
   `/home/fruiz/jax` -- el checkout de TRABAJO de un agente, en rama ajena,
   no el de producción; cerrado en la misma auditoría, ver el hallazgo M1
-  más abajo).
-- 2 timers (`jax-memory-worker.timer`, `jax-memory-synthesis.timer`),
-  también copia byte a byte de lo instalado (el de synthesis decía
-  `OnCalendar=hourly` en el repo contra `*-*-* 04:30:00` instalado -- el
-  repo mentía sobre CUÁNDO corre, no sólo sobre cómo).
+  más abajo), y `50-memory-runtime-limits.conf` para los cinco servicios
+  B9. Los timers no llevan drop-ins.
+- 5 timers B9. `jax-memory-worker.timer` y
+  `jax-memory-synthesis.timer` preservan la forma instalada de `master`;
+  embedding, lifecycle y vector-health quedan versionados junto a sus
+  servicios. Su activación NO se infiere de que los archivos existan:
+  `ops/verificar-activacion-timers-b9.sh` es sólo lectura y exige por cada
+  timer `UnitFileState=enabled`, `ActiveState=active`, `SubState=waiting`
+  y `NextElapseUSecRealtime` presente; el estado actual
+  `disabled/inactive` queda rojo y requiere una operación humana, nunca una
+  habilitación automática del verificador.
 - 1 guion de sanidad, `ops/sbin/jax-checkout-de-produccion-sano.sh`.
 - **Instalación, con GO de Fernando** -- dos caminos, no contradictorios:
   - **El camino normal es correr el instalador del servicio -- SÓLO
@@ -626,8 +631,10 @@ la lista real):
   sale 1 en cualquier otro caso. **En producción se corre así**: `sudo -n
   ops/verificar-arranque-instalado.sh` (sin argumento -- `RAIZ_PRUEBA`
   vacío es modo producción), que hoy tiene que dar `rc=0` con
-  `verificar-arranque-instalado: repo e instalado coinciden (19
-  archivos)` -- confirmado contra la producción real al cerrar la ronda 6.
+  `verificar-arranque-instalado: repo e instalado coinciden (30
+  archivos)`. La ampliación a los tres servicios B9 aún no instala ni
+  habilita nada por sí sola: el contrato separado de activación debe quedar
+  verde después de una operación humana autorizada.
   **UN SOLO CAMINO (ronda 5)** -- RECHAZADA la ronda 4 porque tenía DOS
   implementaciones distintas de la capa disco (`systemd-delta` en
   producción, una enumeración a mano bajo `RAIZ_PRUEBA`): eso dejaba a
@@ -811,7 +818,7 @@ la lista real):
 
     El `systemctl` de mentira (`tests/fixtures/systemctl-falso-para-pruebas.sh`)
     es HERMÉTICO desde la ronda 6: responde con datos correctos (calcados
-    del manifiesto) para las 6 unidades declaradas, no sólo
+    del manifiesto) para las 12 unidades declaradas, no sólo
     `jax-las-manos.service` -- así la capa cargado de prueba nunca cae al
     `systemctl` real, en ningún runner (confirmado rompiendo a propósito
     el `systemctl` real de respaldo en una copia del fixture y viendo que
