@@ -1185,9 +1185,10 @@ jobs:
           #   de jax_tenants que su FK exige) y se arreglaron en esta misma ronda, así
           #   que vuelven a contar como CORRIDOS. Medido con la credencial de pruebas
           #   dedicada (~/.config/jax/test-db.env, usuario jax_test), MISMO comando:
-          #   185 passed.
-          grep -qE "^185 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 185 tests CORRIDOS (no skipeados)."; exit 1; }
+          #   185 passed. PR-J1 suma seis casos de autoridad en esta misma
+          #   suite; GitHub Actions midió 191 en la primera corrida del PR.
+          grep -qE "^191 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 191 tests CORRIDOS (no skipeados)."; exit 1; }
       - name: Publicar resumen de segunda corrida de memoria
         if: failure()
         run: |
@@ -1691,6 +1692,7 @@ jobs:
           tests/test_memory_correction.py tests/test_memory_helpers.py
           tests/test_read_audit_log_unbound.py tests/test_template_hash.py
           tests/test_validate_capability_typed.py
+          tests/test_project_authority_input_validation.py
           tests/test_jacobs_timeout_by_capability.py tests/test_memory_schema_drift.py
           tests/test_no_blocking_in_async.py tests/test_load_test_harness.py
           tests/test_hnsw_recall_tripwire.py

@@ -47,7 +47,6 @@ def _conn_params() -> dict:
     return dict(
         host=os.environ.get("JAX_DB_HOST", ""), port=int(os.environ.get("JAX_DB_PORT", "3306")),
         user=os.getenv("JAX_DB_USER", ""), password=os.getenv("JAX_DB_PASSWORD", ""),
-        connect_timeout=db_connect_timeout_seconds(),
     )
 
 
@@ -60,7 +59,9 @@ def _projects_ddl() -> str:
 
 
 async def _sql(query, args=(), fetch=False):
-    conn = await aiomysql.connect(db=_DB, autocommit=True, cursorclass=aiomysql.DictCursor, **_conn_params())
+    conn = await aiomysql.connect(
+        db=_DB, autocommit=True, cursorclass=aiomysql.DictCursor,
+        connect_timeout=db_connect_timeout_seconds(), **_conn_params())
     try:
         async with conn.cursor() as cur:
             await cur.execute(query, args)
@@ -77,7 +78,9 @@ def _esquema():
         return
 
     async def _ensure():
-        conn = await aiomysql.connect(db=_DB, autocommit=True, **_conn_params())
+        conn = await aiomysql.connect(
+            db=_DB, autocommit=True, connect_timeout=db_connect_timeout_seconds(),
+            **_conn_params())
         try:
             async with conn.cursor() as cur:
                 await cur.execute("SHOW TABLES LIKE 'projects'")
@@ -93,8 +96,9 @@ def _esquema():
 @requiere_db_de_prueba
 @asincrono
 async def test_dry_run_sin_filas_bloqueantes_da_cero_y_no_escribe():
-    pool = await aiomysql.create_pool(db=_DB, autocommit=True, minsize=1, maxsize=2,
-                                      **_conn_params())
+    pool = await aiomysql.create_pool(
+        db=_DB, autocommit=True, minsize=1, maxsize=2,
+        connect_timeout=db_connect_timeout_seconds(), **_conn_params())
     try:
         antes = await _sql("SELECT COUNT(*) AS n FROM jax_project_scope", fetch=True)
         resultado = await _dry_run(pool)
@@ -118,8 +122,9 @@ async def test_dry_run_con_fila_archivada_da_uno_y_no_escribe():
     await _sql(
         "INSERT INTO jax_project_scope (project_id,tenant_id,status,created_at,created_by,updated_at) "
         "VALUES (%s,%s,'ARCHIVED',NOW(6),'test',NOW(6))", (project_id, tenant_id))
-    pool = await aiomysql.create_pool(db=_DB, autocommit=True, minsize=1, maxsize=2,
-                                      **_conn_params())
+    pool = await aiomysql.create_pool(
+        db=_DB, autocommit=True, minsize=1, maxsize=2,
+        connect_timeout=db_connect_timeout_seconds(), **_conn_params())
     try:
         resultado = await _dry_run(pool)
         assert resultado == 1

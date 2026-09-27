@@ -69,7 +69,6 @@ def _conn_params() -> dict:
     return dict(
         host=os.environ.get("JAX_DB_HOST", ""), port=int(os.environ.get("JAX_DB_PORT", "3306")),
         user=os.getenv("JAX_DB_USER", ""), password=os.getenv("JAX_DB_PASSWORD", ""),
-        connect_timeout=db_connect_timeout_seconds(),
     )
 
 
@@ -84,7 +83,9 @@ async def _ensure_schema(db_name: str) -> None:
     """`projects` (from the repo's schema file, matching what CI's mysql-client
     step applies) + jax_project_scope/membership/event/creation_request via
     the REAL migration (003 DDL + 005), never a hand-rolled copy."""
-    conn = await aiomysql.connect(db=db_name, autocommit=True, **_conn_params())
+    conn = await aiomysql.connect(
+        db=db_name, autocommit=True, connect_timeout=db_connect_timeout_seconds(),
+        **_conn_params())
     try:
         async with conn.cursor() as cur:
             await cur.execute("SHOW TABLES LIKE 'projects'")
@@ -100,7 +101,9 @@ async def _ensure_legacy_tenant(db_name: str) -> None:
     bootstrap test runs. Claimed EARLY (this fixture runs before any test),
     with an explicit id, so no other test's `_crear_tenant()` (AUTO_INCREMENT)
     can grab id 1 first in a freshly-created session database."""
-    conn = await aiomysql.connect(db=db_name, autocommit=True, **_conn_params())
+    conn = await aiomysql.connect(
+        db=db_name, autocommit=True, connect_timeout=db_connect_timeout_seconds(),
+        **_conn_params())
     try:
         async with conn.cursor() as cur:
             await cur.execute(
@@ -119,7 +122,9 @@ def _esquema_de_proyectos():
 
 
 async def _sql(query: str, args: tuple = (), *, db: str | None = None, fetch: bool = False):
-    conn = await aiomysql.connect(db=db or _DB, autocommit=True, cursorclass=aiomysql.DictCursor, **_conn_params())
+    conn = await aiomysql.connect(
+        db=db or _DB, autocommit=True, cursorclass=aiomysql.DictCursor,
+        connect_timeout=db_connect_timeout_seconds(), **_conn_params())
     try:
         async with conn.cursor() as cur:
             await cur.execute(query, args)
@@ -162,7 +167,9 @@ async def _crear_membresia(project_id: int, tenant_id: int, user_id: int, *, rol
 
 async def _pool(maxsize: int = 6):
     return await aiomysql.create_pool(
-        db=_DB, autocommit=True, minsize=1, maxsize=maxsize, cursorclass=aiomysql.DictCursor, **_conn_params())
+        db=_DB, autocommit=True, minsize=1, maxsize=maxsize,
+        cursorclass=aiomysql.DictCursor, connect_timeout=db_connect_timeout_seconds(),
+        **_conn_params())
 
 
 def _scope(user_id: int, tenant_id: int, project_id: int | None = None) -> ScopeContext:
@@ -339,14 +346,17 @@ async def _contar_eventos_de_sincronizacion(project_id: int, user_id: int) -> in
 async def test_migracion_apply_apply_revert_apply_y_falla_cerrado_con_fila_archivada():
     mig_db = f"{_DB}_mig{uuid.uuid4().hex[:8]}"
     assert es_base_de_test(mig_db)
-    setup_conn = await aiomysql.connect(autocommit=True, **_conn_params())
+    setup_conn = await aiomysql.connect(
+        autocommit=True, connect_timeout=db_connect_timeout_seconds(), **_conn_params())
     try:
         async with setup_conn.cursor() as cur:
             await cur.execute(f"CREATE DATABASE `{mig_db}`")
     finally:
         setup_conn.close()
     try:
-        conn = await aiomysql.connect(db=mig_db, autocommit=True, cursorclass=aiomysql.DictCursor, **_conn_params())
+        conn = await aiomysql.connect(
+            db=mig_db, autocommit=True, cursorclass=aiomysql.DictCursor,
+            connect_timeout=db_connect_timeout_seconds(), **_conn_params())
         try:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -395,7 +405,8 @@ async def test_migracion_apply_apply_revert_apply_y_falla_cerrado_con_fila_archi
         finally:
             conn.close()
     finally:
-        drop_conn = await aiomysql.connect(autocommit=True, **_conn_params())
+        drop_conn = await aiomysql.connect(
+            autocommit=True, connect_timeout=db_connect_timeout_seconds(), **_conn_params())
         async with drop_conn.cursor() as cur:
             await cur.execute(f"DROP DATABASE IF EXISTS `{mig_db}`")
         drop_conn.close()
@@ -615,14 +626,17 @@ async def test_hidden_niega_a_miembro_comun_y_permite_a_admin_miembro():
 async def test_rango_reservado_rechaza_creacion_sin_dejar_filas_nuevas():
     db_name = f"{_DB}_rango{uuid.uuid4().hex[:8]}"
     assert es_base_de_test(db_name)
-    setup_conn = await aiomysql.connect(autocommit=True, **_conn_params())
+    setup_conn = await aiomysql.connect(
+        autocommit=True, connect_timeout=db_connect_timeout_seconds(), **_conn_params())
     try:
         async with setup_conn.cursor() as cur:
             await cur.execute(f"CREATE DATABASE `{db_name}`")
     finally:
         setup_conn.close()
     try:
-        conn = await aiomysql.connect(db=db_name, autocommit=True, cursorclass=aiomysql.DictCursor, **_conn_params())
+        conn = await aiomysql.connect(
+            db=db_name, autocommit=True, cursorclass=aiomysql.DictCursor,
+            connect_timeout=db_connect_timeout_seconds(), **_conn_params())
         pool = None
         try:
             async with conn.cursor() as cur:
@@ -644,7 +658,9 @@ async def test_rango_reservado_rechaza_creacion_sin_dejar_filas_nuevas():
                 await cur.execute("ALTER TABLE projects AUTO_INCREMENT=900001")
 
             pool = await aiomysql.create_pool(
-                db=db_name, autocommit=True, minsize=1, maxsize=2, cursorclass=aiomysql.DictCursor, **_conn_params())
+                db=db_name, autocommit=True, minsize=1, maxsize=2,
+                cursorclass=aiomysql.DictCursor, connect_timeout=db_connect_timeout_seconds(),
+                **_conn_params())
             admin_api = _admin(pool)
             scope = ScopeContext(f"user:{owner_id}", "USER", str(owner_id), str(tenant_id), None)
             with pytest.raises(ReservedProjectIdRange):
@@ -661,7 +677,8 @@ async def test_rango_reservado_rechaza_creacion_sin_dejar_filas_nuevas():
                 pool.close(); await pool.wait_closed()
             conn.close()
     finally:
-        drop_conn = await aiomysql.connect(autocommit=True, **_conn_params())
+        drop_conn = await aiomysql.connect(
+            autocommit=True, connect_timeout=db_connect_timeout_seconds(), **_conn_params())
         async with drop_conn.cursor() as cur:
             await cur.execute(f"DROP DATABASE IF EXISTS `{db_name}`")
         drop_conn.close()
@@ -1068,7 +1085,9 @@ async def test_orden_de_bloqueo_evita_1213_contra_el_chat_real():
             # Same two locks as `resolve_mutation_in_transaction`: jax_users
             # (target) via `_tenant_user_cur`, THEN jax_project_scope via
             # `_project_membership_cur` -- paused right before the second one.
-            conn = await aiomysql.connect(db=_DB, cursorclass=aiomysql.DictCursor, autocommit=False, **_conn_params())
+            conn = await aiomysql.connect(
+                db=_DB, cursorclass=aiomysql.DictCursor, autocommit=False,
+                connect_timeout=db_connect_timeout_seconds(), **_conn_params())
             try:
                 async with conn.cursor() as real_cur:
                     wrapped = _PausingCursor(
@@ -1151,7 +1170,9 @@ async def _tercer_owner_deadlock_scenario(pool, tenant_id, project_id, owner_c):
     resolver = MariaDBScopeAuthorityResolver(pool)
 
     async def t2_chat_as_owner_c(ready, go, outcome):
-        conn = await aiomysql.connect(db=_DB, cursorclass=aiomysql.DictCursor, autocommit=False, **_conn_params())
+        conn = await aiomysql.connect(
+            db=_DB, cursorclass=aiomysql.DictCursor, autocommit=False,
+            connect_timeout=db_connect_timeout_seconds(), **_conn_params())
         try:
             async with conn.cursor() as real_cur:
                 wrapped = _PausingCursor(
@@ -1401,8 +1422,9 @@ async def test_create_project_de_otro_tenant_no_bloquea_el_chat_de_este_tenant()
         # DIFFERENT tenant's user, must complete with a SHORT timeout --
         # never wait on t1 at all.
         scope1 = _scope(user1, tenant1, project1)
-        async with aiomysql.connect(db=_DB, cursorclass=aiomysql.DictCursor, autocommit=True,
-                                    **_conn_params()) as conn:
+        async with aiomysql.connect(
+                db=_DB, cursorclass=aiomysql.DictCursor, autocommit=True,
+                connect_timeout=db_connect_timeout_seconds(), **_conn_params()) as conn:
             async with conn.cursor() as cur:
                 await asyncio.wait_for(
                     resolver.resolve_mutation_in_transaction(cur, scope1, "RETRIEVE", Visibility.PROJECT_SHARED),
