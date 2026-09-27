@@ -55,6 +55,32 @@ async def test_requested_project_id_does_not_bypass_membership_lookup():
     with pytest.raises(ScopeDenied,match="missing"): await MariaDBScopeAuthorityResolver(pool).resolve_scope(requested())
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", [
+    ScopeContext("service:memory-extraction", "SERVICE", "7", "1", "9", calling_component="memory-extraction"),
+    ScopeContext("agent:7", "AGENT", "7", "1", "9"),
+    ScopeContext("user:8", "USER", "7", "1", "9"),
+])
+async def test_project_read_rejects_nonhuman_or_forged_subject_before_sql(scope):
+    pool = Pool([])
+    with pytest.raises(ScopeDenied):
+        await MariaDBScopeAuthorityResolver(pool).resolve_project_read(scope)
+    assert pool.conn.cursor_obj.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", [
+    ScopeContext("service:memory-extraction", "SERVICE", "7", "1", None, calling_component="memory-extraction"),
+    ScopeContext("agent:7", "AGENT", "7", "1", None),
+    ScopeContext("user:8", "USER", "7", "1", None),
+])
+async def test_tenant_admin_lookup_rejects_nonhuman_or_forged_subject_before_sql(scope):
+    pool = Pool([])
+    with pytest.raises(ScopeDenied):
+        await MariaDBScopeAuthorityResolver(pool).is_active_tenant_admin(scope)
+    assert pool.conn.cursor_obj.calls == []
+
+
 def test_ningun_resolver_falso_se_usa_como_si_fuera_el_real():
     """Section 3-bis (2026-09-25 plan): project-authority tests exercise the
     REAL transactional resolver against MariaDB (see

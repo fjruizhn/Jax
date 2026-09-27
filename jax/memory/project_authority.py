@@ -730,6 +730,12 @@ class ProjectAuthorityAdmin:
 
     async def change_project_role(self, request: MutationAuthorizationRequest, project_id: int,
                                   user_id: int, role: ProjectRole) -> None:
+        # REVIEWER is an approval/audit function, not an assignable project
+        # membership role.  Reject it before opening a transaction so an
+        # invalid request cannot acquire locks or issue any SQL.
+        if role is ProjectRole.REVIEWER:
+            raise AuthorizationDenied("REVIEWER cannot be assigned through change_project_role")
+
         async def op(cur: Any) -> None:
             try:
                 scope = request.scope

@@ -114,7 +114,7 @@ async def _aplicar(pool) -> int:
         async with conn.cursor() as cur:
             try:
                 await revert_project_lifecycle_migration(cur)
-            except Exception as exc:
+            except Exception as exc:  # fail-soft: the CLI reports the failed irreversible DDL and exits non-zero
                 print(f"RECHAZADO A MITAD DE CAMINO (posible estado intermedio -- ver arriba): {exc}",
                      file=sys.stderr)
                 return 1

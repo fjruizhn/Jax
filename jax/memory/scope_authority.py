@@ -76,6 +76,21 @@ def require_subject(scope: ScopeContext) -> None:
         raise ScopeDenied("user actor and subject do not match")
 
 
+def _require_human_subject(scope: ScopeContext) -> None:
+    """Require an authenticated human USER for user-facing project reads.
+
+    ``require_subject`` intentionally also admits SERVICE actors because the
+    fixed service-operation path needs their originating subject as
+    provenance.  Project reads and tenant-admin lookups are not that path:
+    allowing a service (or an unknown actor type) to use them would turn the
+    subject's tenant role into service authority.  Keep the USER
+    principal/subject consistency check in the shared baseline helper.
+    """
+    require_subject(scope)
+    if scope.actor_type != "USER":
+        raise ScopeDenied("project reads require a human USER actor")
+
+
 class MariaDBScopeAuthorityResolver:
     """Each resolution reads current `jax_users`, scope and membership state."""
     authority_source = "jax_users+jax_project_scope+jax_project_membership"
@@ -171,7 +186,7 @@ class MariaDBScopeAuthorityResolver:
         are not modified so their existing ARCHIVED/HIDDEN denial is
         preserved by construction.
         """
-        self._require_subject(requested)
+        _require_human_subject(requested)
         if not requested.project_id: raise ScopeDenied("project id is required for project read resolution")
         _, role = await self._tenant_user(requested)
         project = await self._one("SELECT tenant_id,status FROM jax_project_scope WHERE project_id=%s LIMIT 1",(requested.project_id,))
@@ -198,6 +213,7 @@ class MariaDBScopeAuthorityResolver:
 
     async def is_active_tenant_admin(self, requested: ScopeContext) -> bool:
         """Whether the current DB-backed role of the subject is a tenant admin."""
+        _require_human_subject(requested)
         _, role = await self._tenant_user(requested)
         return role in TENANT_ADMIN_ROLES
 

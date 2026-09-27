@@ -1077,7 +1077,7 @@ async def test_orden_de_bloqueo_evita_1213_contra_el_chat_real():
                     try:
                         await resolver.resolve_mutation_in_transaction(wrapped, scope, "RETRIEVE", Visibility.PROJECT_SHARED)
                         outcome["t1"] = "ok"
-                    except Exception as e:
+                    except Exception as e:  # fail-soft: retained as outcome; the assertion below fails the deadlock test
                         outcome["t1"] = e
                 await conn.commit()
             finally:
@@ -1096,7 +1096,7 @@ async def test_orden_de_bloqueo_evita_1213_contra_el_chat_real():
                 await admin_api.grant_member(
                     _request(owner_scope, "GRANT_MEMBER"), project_id, email=target_email, role=ProjectRole.VIEWER)
                 outcome["t2"] = "ok"
-            except Exception as e:
+            except Exception as e:  # fail-soft: retained as outcome; the assertion below fails the deadlock test
                 outcome["t2"] = e
 
         t1_task = asyncio.create_task(t1_chat_as_target())
@@ -1160,7 +1160,7 @@ async def _tercer_owner_deadlock_scenario(pool, tenant_id, project_id, owner_c):
                 try:
                     await resolver.resolve_mutation_in_transaction(wrapped, scope_c, "RETRIEVE", Visibility.PROJECT_SHARED)
                     outcome["t2"] = "ok"
-                except Exception as e:
+                except Exception as e:  # fail-soft: retained as outcome; the caller asserts this concurrent path succeeds
                     outcome["t2"] = e
             await conn.commit()
         finally:
@@ -1195,7 +1195,7 @@ async def test_interbloqueo_revoke_member_no_bloquea_jax_users_de_terceros():
             try:
                 await api.revoke_member(_request(scope_a, "REVOKE_MEMBER"), project_id, owner_b)
                 outcome["t1"] = "ok"
-            except Exception as e:
+            except Exception as e:  # fail-soft: retained as outcome; the assertion below fails the deadlock test
                 outcome["t1"] = e
 
         t1_task = asyncio.create_task(t1_revoke())
@@ -1239,7 +1239,7 @@ async def test_interbloqueo_change_project_role_descenso_de_owner_no_bloquea_jax
                 await api.change_project_role(
                     _request(scope_a, "CHANGE_PROJECT_ROLE"), project_id, owner_b, ProjectRole.VIEWER)
                 outcome["t1"] = "ok"
-            except Exception as e:
+            except Exception as e:  # fail-soft: retained as outcome; the assertion below fails the deadlock test
                 outcome["t1"] = e
 
         t1_task = asyncio.create_task(t1_demote())
@@ -1303,7 +1303,7 @@ async def test_interbloqueo_descenso_de_sync_no_bloquea_jax_users_de_terceros():
                         await admin_api.sync_tenant_admin_memberships_in_transaction(
                             wrapped, actor_scope=promoter_scope, user_id=x, tenant_id=tenant_id)
                         outcome["t1"] = "ok"
-                    except Exception as e:
+                    except Exception as e:  # fail-soft: retained as outcome; the assertion below fails the deadlock test
                         outcome["t1"] = e
                 await conn.commit()
             except Exception:
@@ -1391,7 +1391,7 @@ async def test_create_project_de_otro_tenant_no_bloquea_el_chat_de_este_tenant()
                     _request(scope2, "CREATE_PROJECT"), name="p", description=None,
                     idempotency_key=str(uuid.uuid4()))
                 outcome["t1"] = "ok"
-            except Exception as e:
+            except Exception as e:  # fail-soft: retained as outcome; the assertion below fails the isolation test
                 outcome["t1"] = e
 
         t1_task = asyncio.create_task(t1_create_en_tenant2())
