@@ -1,10 +1,9 @@
 [Unit]
-Description=Schedule JAX B9 memory synthesis
+Description=JAX — Worker de sintesis de segundo orden, una vez por dia (depende de facts verificados, ritmo humano, no de cada conversacion)
 
 [Timer]
-OnCalendar=hourly
+OnCalendar=*-*-* 04:30:00
 Persistent=true
-Unit=jax-memory-synthesis.service
 
 [Install]
 WantedBy=timers.target

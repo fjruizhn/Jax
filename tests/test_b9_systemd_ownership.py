@@ -16,7 +16,15 @@ def test_every_b9_scheduled_job_has_a_systemd_owner():
         service = (ROOT / f"{name}.service").read_text(encoding="utf-8")
         timer = (ROOT / f"{name}.timer").read_text(encoding="utf-8")
         assert f"-m {module}" in service
-        assert f"Unit={name}.service" in timer
+        # `Unit=` en [Timer] es OPCIONAL: sin él, systemd dispara el .service del
+        # MISMO nombre por convención (systemd.timer(5)). worker y synthesis
+        # preservan byte a byte el timer de master instalado, que no trae la
+        # línea; los otros B9 pueden declararla explícitamente. Lo que este
+        # control protege de verdad es que, SI alguien escribe un `Unit=`
+        # explícito, apunte al servicio correcto -- no que la línea exista.
+        assert "Unit=" not in timer or f"Unit={name}.service" in timer, (
+            f"{name}.timer fija Unit= a otro servicio -- revisar cuál dispara"
+        )
 
 
 def test_extraction_worker_does_not_launch_embedding_work():
