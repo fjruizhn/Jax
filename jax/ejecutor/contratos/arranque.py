@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import shlex
 import time
 from dataclasses import dataclass, field
@@ -54,9 +55,13 @@ from jax.ejecutor.contratos.fallo import Fallo
 # El freno late cada INTERVALO_DE_SONDEO (0,25 s); el instalador (ops/ejecutor/instalar_freno.sh)
 # exige el mismo margen de 2 s. Tolerancia del código, no configuración de despliegue.
 LATIDO_MAX_S = 2.0
-_ORDEN = ("instalacion", "exportar", "c1", "c3", "c4", "c5", "c6")
+# "codigo" va AL FINAL y solo corre en un turno de código (Contexto.tipo == "codigo",
+# spec 2026-09-28 §5.1, Tarea 12): fuera de eso, `pruebas_reales` no la agrega al diccionario
+# y `verificar_contratos` la salta -- ni "prueba_ausente" ni red para una misión de servidores.
+_ORDEN = ("instalacion", "exportar", "c1", "c3", "c4", "c5", "c6", "codigo")
 _CONTRATO_DE = {"instalacion": "arranque", "exportar": "c1"}
 _TOPE_C6_S = 30
+JAX_GITHUB_TOKEN = "JAX_GITHUB_TOKEN"
 
 
 class ContratosNoVerificados(RuntimeError):
@@ -84,9 +89,11 @@ class Contexto:
     linger_dir: Path = field(default=Path("/var/lib/systemd/linger"))
     unidad_freno: Path = field(default=Path("/etc/systemd/system/ejecutor-freno.service"))
     unidad_freno_habilitada: Path = field(default=Path("/etc/systemd/system/multi-user.target.wants/ejecutor-freno.service"))
+    # El tipo de turno ("codigo" o None/"servidor"): decide si el contrato "codigo" corre.
+    tipo: str | None = None
 
 
-def contexto_desde_entorno(env, hosts_mision=None) -> Contexto:
+def contexto_desde_entorno(env, hosts_mision=None, tipo=None) -> Contexto:
     latido_max_s = float(env[pausa.VARIABLE_LATIDO_MAX_S])
     if not 0 < latido_max_s < float("inf"):
         raise ValueError("latido_max_invalido")
@@ -98,7 +105,8 @@ def contexto_desde_entorno(env, hosts_mision=None) -> Contexto:
         estado_freno=Path(env["JAX_EJECUTOR_FRENO_ESTADO"]), llaves_root=Path(env["JAX_EJECUTOR_LLAVES_ROOT"]),
         tope_gancho_s=int(env["JAX_EJECUTOR_GANCHO_TOPE_S"]),
         hosts_mision=None if hosts_mision is None else frozenset(hosts_mision),
-        pausa=pausa.ruta_de_la_pausa(env), latido=pausa.ruta_del_latido(env), latido_max_s=latido_max_s)
+        pausa=pausa.ruta_de_la_pausa(env), latido=pausa.ruta_del_latido(env), latido_max_s=latido_max_s,
+        tipo=tipo)
 
 
 def _sha(datos: bytes) -> str:
@@ -370,6 +378,16 @@ async def eleccion_del_auditor(conn, *, hosts_mision, cfg: eleccion_c5.ConfigC5,
         admite_mismo_proveedor=cfg.admite_mismo_proveedor)
 
 
+def verificar_token_github(env=None) -> tuple:
+    """El token de GitHub, presente y no vacío -- SIN tocar la red: eso lo hace el
+    canario (canario_codigo.verificar_codigo, Tarea 13) y la preparación real del turno
+    (empujar/abrir el PR). Un token ausente o en blanco se rechaza antes de cualquier
+    E/S de red."""
+    env = os.environ if env is None else env
+    token = (env.get(JAX_GITHUB_TOKEN) or "").strip()
+    return () if token else (Fallo("codigo", "sin_token_github"),)
+
+
 def pruebas_reales(ctx: Contexto) -> dict:
     from facet_resolver import resolve_facet
     from jacobs.store import conexion
@@ -415,14 +433,22 @@ def pruebas_reales(ctx: Contexto) -> dict:
     async def p_c6():
         return await verificar_maquinas(ctx, (await asyncio.to_thread(_politica)).hosts)
 
-    return {"instalacion": p_instalacion, "exportar": p_exportar, "c1": p_c1, "c3": p_c3, "c4": p_c4,
-            "c5": p_c5, "c6": p_c6}
+    async def p_codigo():
+        return verificar_token_github()
+
+    pruebas = {"instalacion": p_instalacion, "exportar": p_exportar, "c1": p_c1, "c3": p_c3, "c4": p_c4,
+               "c5": p_c5, "c6": p_c6}
+    if ctx.tipo == "codigo":
+        pruebas["codigo"] = p_codigo
+    return pruebas
 
 
 async def verificar_contratos(ctx: Contexto, pruebas: dict | None = None) -> tuple:
     pruebas = pruebas if pruebas is not None else pruebas_reales(ctx)
     fallos = []
     for nombre in _ORDEN:
+        if nombre == "codigo" and ctx.tipo != "codigo":
+            continue  # solo corre en un turno de código -- ni "prueba_ausente" para el resto
         contrato = _CONTRATO_DE.get(nombre, nombre)
         prueba = pruebas.get(nombre)
         if prueba is None:

@@ -101,8 +101,47 @@ def test_corre_todas_en_orden_aunque_falle_la_primera(tmp_path):
 
     pruebas = {n: prueba(n) for n in AR._ORDEN}
     pruebas["instalacion"] = prueba("instalacion", Fallo("arranque", "instalado_distinto_del_repo"))
-    asyncio.run(AR.verificar_contratos(_ctx(tmp_path), pruebas))
+    # tipo="codigo": si no, "codigo" se salta (no es turno de código) y no aparecería en `vistas`.
+    asyncio.run(AR.verificar_contratos(_ctx(tmp_path, tipo="codigo"), pruebas))
     assert vistas == list(AR._ORDEN)
+
+
+# --- codigo: contrato de arranque (Tarea 12 Step 2) --------------------------
+
+def test_verificar_token_github_ausente():
+    assert AR.verificar_token_github({}) == (Fallo("codigo", "sin_token_github"),)
+
+
+def test_verificar_token_github_vacio():
+    assert AR.verificar_token_github({"JAX_GITHUB_TOKEN": "   "}) == (Fallo("codigo", "sin_token_github"),)
+
+
+def test_verificar_token_github_presente():
+    assert AR.verificar_token_github({"JAX_GITHUB_TOKEN": "github_pat_" + "A" * 60}) == ()
+
+
+def test_codigo_sin_token_no_arranca_sin_tocar_la_red(tmp_path):
+    async def solo_token():
+        return AR.verificar_token_github({})
+
+    with pytest.raises(AR.ContratosNoVerificados) as e:
+        asyncio.run(AR.exigir_contratos(_ctx(tmp_path, tipo="codigo"), _vivas(codigo=solo_token)))
+    assert e.value.fallos == (Fallo("codigo", "sin_token_github"),)
+
+
+def test_codigo_con_token_la_prueba_pasa(tmp_path):
+    async def solo_token():
+        return AR.verificar_token_github({"JAX_GITHUB_TOKEN": "github_pat_" + "A" * 60})
+
+    asyncio.run(AR.exigir_contratos(_ctx(tmp_path, tipo="codigo"), _vivas(codigo=solo_token)))
+
+
+def test_codigo_no_corre_fuera_de_un_turno_de_codigo(tmp_path):
+    async def rota():
+        raise AssertionError("codigo no debia correr fuera de un turno de codigo")
+
+    # tipo=None (default): "codigo" ni se evalúa, aunque esté rota.
+    asyncio.run(AR.exigir_contratos(_ctx(tmp_path), _vivas(codigo=rota)))
 
 
 # --- contexto ----------------------------------------------------------------
@@ -339,7 +378,13 @@ def test_instalacion_con_la_unidad_del_freno_cambiada(tmp_path, monkeypatch):
 
 
 def test_pruebas_reales_cubren_el_orden(tmp_path):
-    assert set(AR.pruebas_reales(_ctx(tmp_path))) == set(AR._ORDEN)
+    # "codigo" solo corre para turnos de código (tipo="codigo"); fuera de eso, pruebas_reales
+    # no la incluye y verificar_contratos la salta -- ver la sección "codigo" más abajo.
+    assert set(AR.pruebas_reales(_ctx(tmp_path))) == set(AR._ORDEN) - {"codigo"}
+
+
+def test_pruebas_reales_de_un_turno_de_codigo_cubren_el_orden_completo(tmp_path):
+    assert set(AR.pruebas_reales(_ctx(tmp_path, tipo="codigo"))) == set(AR._ORDEN)
 
 
 # --- instalación: CLAUDE.md y skills (2026-09-22) -----------------------------
