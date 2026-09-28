@@ -1794,6 +1794,7 @@ jobs:
           tests/test_ejecutor_codigo_entrega.py
           tests/test_ejecutor_codigo_preparar.py
           tests/test_ejecutor_codigo_git_token.py
+          tests/test_ejecutor_codigo_sandbox.py
           tests/test_ejecutor_vigia_stderr.py
           tests/test_workers_background_log.py
           tests/test_loadtest_apps_protegidas.py
@@ -1972,6 +1973,7 @@ jobs:
             tests/test_ejecutor_codigo_entrega.py \
             tests/test_ejecutor_codigo_preparar.py \
             tests/test_ejecutor_codigo_git_token.py \
+            tests/test_ejecutor_codigo_sandbox.py \
             tests/test_ejecutor_vigia_stderr.py \
             tests/test_workers_background_log.py \
             tests/test_loadtest_apps_protegidas.py \
@@ -4528,8 +4530,20 @@ jobs:
           #   tests/test_ejecutor_contratos_cuenta_axioma.py 46 -> 51 (+5: setfacl -P, permiso
           #   r-X, dar_paso con -k). Ningún test nuevo se saltea (setfacl/getfacl en el runner):
           #   los 45 skipped no cambian. Medido en local archivo por archivo; manda el runner.
-          grep -qE "^2876 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2876 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 2876 -> 2912 el 2026-09-28 (re-revision de escalon 3, BLOCK-1: instalaciones en bwrap
+          #   por lista blanca; MINOR-1/2/4): +36 puras -- tests/test_ejecutor_codigo_sandbox.py
+          #   0 -> 8 (archivo nuevo: argv por lista blanca sin rutas prohibidas y con --clearenv,
+          #   rechazo de montajes prohibidos x5, cwd fuera de deps, y bwrap REAL: el instalador no
+          #   lee un secreto ni el checkout, no ve HOME ni el espejo, no escribe fuera de deps ni su
+          #   copia, no ve JAX_*), tests/test_ejecutor_codigo_preparar.py 18 -> 39 (+21: opciones
+          #   de requirements rechazadas y declaradas x16, arrastre por -r, repo y rama de la API
+          #   validados x4) y tests/test_ejecutor_codigo_entrega.py 20 -> 27 (+7: objeto mal
+          #   formado falla cerrado sin mover la rama, ref temporal limpia, reintento con el empuje
+          #   ya hecho, rama remota borrada, reconciliacion con git inyectado x3). El test de bwrap
+          #   real NO se saltea en este job (instala bubblewrap y habilita user namespaces arriba):
+          #   los 45 skipped no cambian. Medido en local archivo por archivo; manda el runner.
+          grep -qE "^2912 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2912 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
