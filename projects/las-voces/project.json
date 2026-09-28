@@ -214,10 +214,16 @@
       "id": "LV-002",
       "title": "Definir sync AGENTS/CLAUDE/QWEN + skills/agents",
       "owner": "Hyde + Thot",
-      "status": "READY",
+      "status": "DONE",
       "priority": "P0",
       "depends": [
         "LV-000"
+      ],
+      "acceptance_evidence": [
+        "scripts/axioma_sync.py",
+        "tests/test_las_voces_sync.py",
+        "sync/manifest.json",
+        "activity.ndjson#lv-002-003"
       ]
     },
     {

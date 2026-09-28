@@ -1703,6 +1703,7 @@ jobs:
             { echo "exch no aparece con PATH=/usr/bin:/bin -- el mismo PATH hermético que usa test_ejecutor_reemplazar_directorio_atomico.py::_correr"; exit 1; }
       - run: >-
           python -m pytest -v --junitxml=/tmp/tests-puros-first.xml
+          tests/test_las_voces_sync.py
           tests/test_capability_unbound_schema.py tests/test_chunking.py
           tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py
           tests/test_vocativo_faceta.py tests/test_router_easter_egg.py
