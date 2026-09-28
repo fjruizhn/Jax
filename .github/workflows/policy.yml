@@ -1795,6 +1795,7 @@ jobs:
           tests/test_ejecutor_codigo_preparar.py
           tests/test_ejecutor_codigo_git_token.py
           tests/test_ejecutor_codigo_sandbox.py
+          tests/test_ejecutor_codigo_mision.py
           tests/test_ejecutor_vigia_stderr.py
           tests/test_workers_background_log.py
           tests/test_loadtest_apps_protegidas.py
@@ -1974,6 +1975,7 @@ jobs:
             tests/test_ejecutor_codigo_preparar.py \
             tests/test_ejecutor_codigo_git_token.py \
             tests/test_ejecutor_codigo_sandbox.py \
+            tests/test_ejecutor_codigo_mision.py \
             tests/test_ejecutor_vigia_stderr.py \
             tests/test_workers_background_log.py \
             tests/test_loadtest_apps_protegidas.py \
@@ -4550,8 +4552,27 @@ jobs:
           #   enlaces) y tests/test_ejecutor_codigo_sandbox.py 8 -> 13 (+5: el prefijo de node que se
           #   monta se valida x4, un origen que contiene una ruta prohibida). Los 45 skipped no
           #   cambian. Medido en local archivo por archivo; manda el runner.
-          grep -qE "^2936 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2936 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 2936 -> 3013 el 2026-09-28 (Tarea 9: el turno de código en mision.py/mision_servicio.py,
+          #   mision_codigo.entregar en el espejo): +77 netas, es una RE-MEDICIÓN porque se borran 3 --
+          #   tests/test_ejecutor_codigo_barrido.py 3 -> 5 (se borran test_detecta_tokens_y_llaves,
+          #   test_tope_de_tamano y test_borrado_no_se_mide con la API `barrer()` que medía el tamaño
+          #   con stat en el CLON; entran 5 sobre las funciones puras lineas_con_secretos /
+          #   tamanos_excedidos / tapar_secretos), tests/test_ejecutor_codigo_entrega.py 27 -> 35
+          #   (+8: diff con --text ante un NUL, historial por commit con identidad, merge malvado,
+          #   NUL + secreto que ya no está en el diff neto, tamaños con cat-file -s en el espejo x2),
+          #   tests/test_ejecutor_codigo_mision.py 0 -> 26 (archivo nuevo: orden y estados con
+          #   dobles; con git real, secreto agregado y quitado dentro de la rama, NUL + secreto,
+          #   commit con otra identidad x2 y solo el author, archivo grande commiteado y chico en el
+          #   disco -- sin empujar nada), tests/test_ejecutor_mision.py 45 -> 69 (+24: Turno de
+          #   código legible/ilegible x13, instrucciones, orden preparar -> cerebro -> C5 -> entrega,
+          #   pausa del auditor, cerebro fallido, vigía sin latir, servidor no prepara ni entrega,
+          #   sin dependencias de código), tests/test_ejecutor_mision_servicio.py 16 -> 30 (+14:
+          #   token obligatorio, herramientas y directorio del clon, config de código x6, informe de
+          #   C5) y tests/test_ejecutor_contratos_cuenta_axioma.py 51 -> 54 (+3: remoto_claude con
+          #   directorio_trabajo y safe.directory). Ningún test nuevo se saltea: los 45 skipped no
+          #   cambian. Medido en local archivo por archivo contra 7bf39a0; manda el runner.
+          grep -qE "^3013 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3013 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
