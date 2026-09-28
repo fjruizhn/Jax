@@ -4633,8 +4633,18 @@ jobs:
           #   tipo ausente/no-string cae a None fail-safe, _principal pasa mision.tipo al
           #   contexto real de verdad). Los 45 skipped no cambian. Medido archivo por archivo
           #   local contra 51f30e4: manda el runner.
-          grep -qE "^3137 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3137 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 3137 -> 3142 el 2026-09-28 (ola final de arreglos, plan "El Ejecutor programa"): +5
+          #   puras -- tests/test_ejecutor_codigo_diff.py 21 -> 22 (+1: `diff --git` asimétrico
+          #   con el literal " b/" en la ruta vieja ya no pierde `.github/workflows/` de la
+          #   ruta nueva), tests/test_ejecutor_codigo_mision.py 65 -> 68 (+3: MAJOR-1 -- pausa
+          #   antes del empuje, fallo al leer la punta y empuje fallido sin rama, los tres con
+          #   un PR previo ya conocido, dan su `pr_url`; la extensión de
+          #   test_sin_cambios_con_un_pr_previo_abierto_lo_declara no suma función) y
+          #   tests/test_ejecutor_mision_servicio.py 40 -> 41 (+1: MINOR-5 -- el turno >= 2 usa
+          #   la `rama_por_omision` de `preparado.json`, no un GET fresco a GitHub). Los 45
+          #   skipped no cambian. Medido archivo por archivo local: manda el runner.
+          grep -qE "^3142 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3142 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
