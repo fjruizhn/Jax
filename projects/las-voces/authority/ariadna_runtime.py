@@ -176,7 +176,7 @@ class AriadnaRuntime:
         return {"lifecycle": self.lifecycle.value, "instance_id": self.instance_id, "local_only": True, "stale_owner_detected": self.control.previous_stale}
     def acquire_task(self, lease: TaskLease) -> bool:
         with self._mutex:
-            if self.lifecycle is not Lifecycle.READY or lease.runtime_instance_id != self.instance_id: return False
+            if self.lifecycle is not Lifecycle.READY or self._stop.is_set() or lease.runtime_instance_id != self.instance_id: return False
             try:
                 project = json.loads((self.root / "projects/las-voces/project.json").read_text())
                 if project.get("project", {}).get("id") != PROJECT_ID or not lease.owner or len([x for x in project.get("tasks", []) if x.get("id") == lease.task_id]) != 1: return False
@@ -205,8 +205,16 @@ class AriadnaRuntime:
         if project.get("project", {}).get("id") != PROJECT_ID or len(tasks) != 1 or proposal.expected_project_hash != observed_hash: return "NOOP_STALE_OR_INVALID"
         if proposal.action in {"coordinate_verified_work", "emit_handoff"} and not self.leases.owns(lease_id, proposal.task_id, self.instance_id): return "NOOP_UNOWNED_LEASE"
         try:
-            evidence_binding = {ref: hashlib.sha256((self.root / ref).resolve().read_bytes()).hexdigest() for ref in proposal.evidence_refs}
-        except OSError:
+            evidence_binding = {}
+            for ref in proposal.evidence_refs:
+                if ref.startswith("commit:"):
+                    evidence_binding[ref] = hashlib.sha256(ref.encode()).hexdigest(); continue
+                if not ref or ref.startswith(("/", "~")): raise ValueError("unsafe evidence reference")
+                path = (self.root / ref).resolve()
+                path.relative_to(self.root.resolve())
+                if path.is_symlink() or not path.is_file(): raise ValueError("unsafe evidence reference")
+                evidence_binding[ref] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except (OSError, ValueError):
             return "NOOP_INVALID_EVIDENCE"
         material = {"hash": observed_hash, "task": proposal.task_id, "action": proposal.action, "target": proposal.target_status, "evidence": evidence_binding, "handoff": proposal.handoff, "lease": lease_id}
         key = hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode()).hexdigest()
@@ -217,7 +225,8 @@ class AriadnaRuntime:
         if self._stop.is_set(): return "NOOP_STOPPING"
         if verdict == "ALLOW" and proposal.action == "transition_status":
             final = self.engine.transition(sender_agent=ARIADNA_ID, task_id=proposal.task_id, target_status=proposal.target_status, evidence_refs=list(proposal.evidence_refs), expected_project_hash=observed_hash)
-            verdict, result = final.verdict.value, "EFFECT_" + final.verdict.value
+            verdict = final.verdict.value
+            result = "EFFECT_ALLOW" if verdict == "ALLOW" else "NOOP_" + verdict
         elif verdict == "ALLOW" and proposal.action in {"coordinate_verified_work", "emit_handoff"}:
             if project_hash(state) != observed_hash: return "NOOP_STALE_OR_INVALID"
             with self.outbox_path.open("a") as outbox:
