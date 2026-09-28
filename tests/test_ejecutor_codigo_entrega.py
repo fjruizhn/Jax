@@ -410,3 +410,25 @@ def test_pr_422_ya_existe_se_vuelve_a_listar(tmp_path):
     assert pr.url == "https://gh/pr/9"
     assert ("PATCH", "/repos/o/r/pulls/9") in api.metodos()
     assert ("POST", "/repos/o/r/issues/9/labels") in api.metodos()
+
+
+# --- lo que ve C1: el diff neto, siempre como texto ------------------------------------------
+
+SECRETO = "github_pat_" + "S" * 40
+
+
+def _commit_bytes(repo: Path, archivo: str, datos: bytes, mensaje: str) -> str:
+    (repo / archivo).write_bytes(datos)
+    _git("add", archivo, cwd=repo)
+    _git("commit", "-m", mensaje, cwd=repo)
+    return _git("rev-parse", "HEAD", cwd=repo)
+
+
+def test_diff_en_el_espejo_trata_un_archivo_con_nul_como_texto(tmp_path, github):
+    """Verificado 2026-09-28: un byte NUL hace que git diga «Binary files differ» y el diff
+    no trae ni una línea -- el secreto pasaba el barrido. Con `--text`, las líneas llegan."""
+    c = _preparar(tmp_path)
+    _commit_bytes(c.ruta, "datos.bin", b"\x00cabecera\nclave = '" + SECRETO.encode() + b"'\n", "binario")
+    asyncio.run(E.traer_del_clon(c.espejo, c.ruta, mision_id=MID, upload_pack="git-upload-pack"))
+    (cambio,) = asyncio.run(E.diff_en_el_espejo(c.espejo, mision_id=MID, rama_por_omision="main"))
+    assert cambio.ruta == "datos.bin" and any(SECRETO in l for l in cambio.agregadas), cambio

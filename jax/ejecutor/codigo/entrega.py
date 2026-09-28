@@ -125,14 +125,18 @@ async def traer_del_clon(espejo: Path, clon: Path, *, mision_id: str, upload_pac
 
 
 async def diff_en_el_espejo(espejo: Path, *, mision_id: str, rama_por_omision: str) -> tuple[Cambio, ...]:
-    """El diff que revisa C1: `origin/<base>...axioma/<id>`, calculado en el espejo."""
+    """El diff que revisa C1: `origin/<base>...axioma/<id>`, calculado en el espejo.
+
+    `--text` (2026-09-28, verificado): sin él, un byte NUL en un archivo hace que git diga
+    «Binary files differ» y el diff no trae ninguna línea -- un secreto pasaba el barrido."""
     rama = rama_de_la_mision(mision_id)
     base = validar_rama_base(rama_por_omision)
     with hogar_temporal() as home:
         try:
             salida = await correr_git(["-C", str(espejo), "diff", "--no-color", "--no-ext-diff", "--no-textconv",
-                                       "--find-renames", "-U0", f"refs/remotes/origin/{base}...refs/heads/{rama}",
-                                       "--"], env=entorno_base(home), error="diff_fallo")
+                                       "--text", "--find-renames", "-U0",
+                                       f"refs/remotes/origin/{base}...refs/heads/{rama}", "--"],
+                                      env=entorno_base(home), error="diff_fallo")
         except GitFallo as exc:
             raise EntregaRechazada(str(exc)) from None
     return parsear(salida.decode("utf-8", errors="replace"))
