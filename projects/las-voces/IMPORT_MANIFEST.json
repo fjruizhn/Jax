@@ -33,5 +33,5 @@
       "change": "Three Markdown hard-break trailing spaces were removed so the repository passes git diff --check; no charter wording changed."
     }
   ],
-  "import_commit": "Recorded by the LV-000 integration report after commit creation; a Git object cannot self-identify its own final hash."
+  "import_commit": "9a63721dd891884ce59203850c5ec35bac227518"
 }
