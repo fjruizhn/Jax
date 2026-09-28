@@ -147,11 +147,61 @@ def test_ruta_projects_de_la_mision_rechaza_un_id_que_no_es_uuid(mision_id):
         CA.ruta_projects_de_la_mision(Path("/var/lib/jax-ejecutor-misiones"), mision_id)
 
 
-def test_preparar_directorio_projects_llama_a_sudo_install_con_el_dueno_correcto():
-    vistos = {}
+# --- directorio de la cuenta por ACL, sin sudo (2026-09-28, Task 0) ------------------
+#
+# `jaxsvc` no tiene sudo: la versión con `sudo install -o axioma` dejó al Ejecutor sin
+# arrancar desde el 2026-09-20 (`mision_servicio.py` llama esto antes de CADA turno). El
+# dueño pasa a ser el proceso (jaxsvc); `axioma` entra por ACL, también en lo que se cree
+# adentro (ACL por omisión).
+
+def _cuenta(tmp_path):
+    return CA.Cuenta("axioma", 22, tmp_path / "k", tmp_path / "n", tmp_path / "l", tmp_path / "p", tmp_path / "h")
+
+
+def test_preparar_directorio_no_usa_sudo_y_pone_acl(tmp_path):
+    llamadas = []
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def correr(*argv, **kw):
+        llamadas.append(argv)
+        return _Proc()
+
+    ruta = tmp_path / "m" / "claude-projects"
+    asyncio.run(CA.preparar_directorio_de_la_cuenta(_cuenta(tmp_path), ruta, correr=correr))
+    assert ruta.is_dir()
+    assert all(a[0] != "sudo" for a in llamadas)
+    assert ("setfacl", "-m", "u:axioma:rwx,d:u:axioma:rwx", str(ruta)) in llamadas
+
+
+def test_preparar_directorio_falla_cerrado_si_setfacl_falla(tmp_path):
+    class _Proc:
+        returncode = 1
+
+        async def communicate(self):
+            return b"", b"setfacl: Operation not permitted"
+
+    async def correr(*argv, **kw):
+        return _Proc()
+
+    with pytest.raises(RuntimeError, match="preparar_directorio_fallo"):
+        asyncio.run(CA.preparar_directorio_de_la_cuenta(_cuenta(tmp_path), tmp_path / "x", correr=correr))
+
+
+def test_preparar_directorio_projects_llama_a_setfacl_con_el_dueno_correcto(tmp_path):
+    """Adaptado de `test_preparar_directorio_projects_llama_a_sudo_install_con_el_dueno_correcto`
+    (2026-09-28): `preparar_directorio_projects` pasa a ser un alias de
+    `preparar_directorio_de_la_cuenta` -- mismo contrato para los llamadores
+    (`mision_servicio.py`), sin `sudo`. La ruta ya no puede ser un literal fuera de
+    `tmp_path`: antes `sudo install` la creaba; ahora el propio proceso hace `mkdir`."""
+    llamadas = []
 
     async def correr_falso(*argv, **kw):
-        vistos["argv"] = argv
+        llamadas.append(argv)
 
         class ProcFalso:
             returncode = 0
@@ -161,12 +211,13 @@ def test_preparar_directorio_projects_llama_a_sudo_install_con_el_dueno_correcto
         return ProcFalso()
 
     c = CA.cuenta_desde_entorno(ENV)
-    ruta = Path("/var/lib/jax-ejecutor-misiones/m1/claude-projects")
+    ruta = tmp_path / "m1" / "claude-projects"
     asyncio.run(CA.preparar_directorio_projects(c, ruta, correr=correr_falso))
-    assert vistos["argv"] == ("sudo", "install", "-d", "-o", "axioma", "-g", "axioma", "-m", "0700", str(ruta))
+    assert ruta.is_dir()
+    assert ("setfacl", "-m", "u:axioma:rwx,d:u:axioma:rwx", str(ruta)) in llamadas
 
 
-def test_preparar_directorio_projects_propaga_el_fallo():
+def test_preparar_directorio_projects_propaga_el_fallo(tmp_path):
     async def correr_falso(*argv, **kw):
         class ProcFalso:
             returncode = 1
@@ -177,7 +228,7 @@ def test_preparar_directorio_projects_propaga_el_fallo():
 
     c = CA.cuenta_desde_entorno(ENV)
     with pytest.raises(RuntimeError):
-        asyncio.run(CA.preparar_directorio_projects(c, Path("/var/lib/jax-ejecutor-misiones/m1/claude-projects"),
+        asyncio.run(CA.preparar_directorio_projects(c, tmp_path / "m1" / "claude-projects",
                                                      correr=correr_falso))
 
 

@@ -212,9 +212,10 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
     async def cerebro(ctx, prompt, sesion, reanudar):
         # B-1/M-4 (ronda 3): el directorio de "$HOME/.claude/projects" es POR MISIÓN, no
         # por turno -- mismo directorio en todos los turnos de `turno.mision_id`, así
-        # "--resume" encuentra la sesión que el turno anterior dejó. Se prepara (dueño
-        # axioma) ANTES de cada turno: barato si ya existe (`install -d` es idempotente)
-        # y así no hace falta un paso previo separado que pueda quedar desincronizado.
+        # "--resume" encuentra la sesión que el turno anterior dejó. Se prepara (dueño el
+        # proceso, ACL para axioma -- 2026-09-28, Task 0: `jaxsvc` no tiene sudo) ANTES de
+        # cada turno: barato si ya existe (`mkdir`+`setfacl` son idempotentes) y así no
+        # hace falta un paso previo separado que pueda quedar desincronizado.
         directorio_projects = cuenta_axioma.ruta_projects_de_la_mision(
             Path(env["JAX_EJECUTOR_MISIONES"]), turno.mision_id)
         await cuenta_axioma.preparar_directorio_projects(ctx.cuenta, directorio_projects)

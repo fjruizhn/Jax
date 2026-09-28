@@ -199,7 +199,8 @@ def ruta_projects_de_la_mision(misiones: Path, mision_id: str) -> Path:
     donde ya vive `<id_vigia>.json` (mision_servicio.py::abrir_vigia) -- éste va en un
     subdirectorio nuevo, `<mision_id>/claude-projects`, para no mezclarse con esos
     archivos. Sólo un UUID canónico en minúsculas: termina en una ruta de sistema de
-    archivos y en el argv de `sudo install` (`preparar_directorio_projects`).
+    archivos y en el argv de `setfacl` (`preparar_directorio_projects`,
+    `preparar_directorio_de_la_cuenta`).
 
     LÍMITE (MINOR, ronda 6, auditoría adversarial 2026-09-22) -- `claude-projects` de
     OTRA misión: hoy no hay misiones CONCURRENTES. C5 (`arranque.verificar_c5_estatico`,
@@ -219,18 +220,24 @@ def ruta_projects_de_la_mision(misiones: Path, mision_id: str) -> Path:
     return misiones / mision_id / "claude-projects"
 
 
-async def preparar_directorio_projects(c: Cuenta, ruta: Path, *, correr=None) -> None:
-    """Crea `ruta`, dueño `c.nombre` (axioma), 0700 -- root:root o jaxsvc:jaxsvc no
-    alcanza: `axioma` tiene que poder escribir ahí desde DENTRO de la jaula. Requiere
-    NOPASSWD sudo para `install` en el controlador (fruiz en hall9000, ya lo tiene para
-    el resto de `ops/ejecutor/instalar_*.sh`); si falla, se propaga (fail-closed: sin
-    directorio propio no hay `--resume` posible, y el llamador no debe seguir)."""
+async def preparar_directorio_de_la_cuenta(c: Cuenta, ruta: Path, *, correr=None) -> None:
+    """Crea `ruta` para que la cuenta escriba DESDE LA JAULA, sin sudo (2026-09-28: `jaxsvc`
+    no tiene sudo; la versión con `sudo install -o axioma` dejó al Ejecutor sin arrancar desde
+    el 2026-09-20). El dueño es el proceso (jaxsvc); `axioma` entra por ACL, también en lo que
+    se cree adentro (ACL por omisión). Falla cerrado: sin ACL no hay directorio utilizable."""
     correr = correr or asyncio.create_subprocess_exec
-    proc = await correr("sudo", "install", "-d", "-o", c.nombre, "-g", c.nombre, "-m", "0700", str(ruta),
+    await asyncio.to_thread(ruta.mkdir, mode=0o770, parents=True, exist_ok=True)
+    proc = await correr("setfacl", "-m", f"u:{c.nombre}:rwx,d:u:{c.nombre}:rwx", str(ruta),
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     _, errores = await proc.communicate()
     if proc.returncode != 0:
-        raise RuntimeError(f"preparar_directorio_projects_fallo: {errores.decode(errors='replace')}")
+        raise RuntimeError(f"preparar_directorio_fallo: {errores.decode(errors='replace')}")
+
+
+async def preparar_directorio_projects(c: Cuenta, ruta: Path, *, correr=None) -> None:
+    """Alias de `preparar_directorio_de_la_cuenta` -- mismo contrato para los llamadores
+    (`mision_servicio.py`)."""
+    await preparar_directorio_de_la_cuenta(c, ruta, correr=correr)
 
 
 async def correr_en_la_cuenta(c: Cuenta, remoto: str, *, entrada: bytes = b"", tope_s: float):
