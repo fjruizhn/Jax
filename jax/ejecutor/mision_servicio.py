@@ -258,12 +258,17 @@ def informe_c5(entrega, faceta_auditor: str | None) -> str:
     tal como la presenta `cita.presentar` -- valores con `repr`, sin saltos de línea crudos --,
     una por línea dentro de un bloque de código SANGRADO: nada de lo que dijo el modelo puede
     salirse del bloque y convertirse en Markdown del PR."""
-    lineas = [f"C5: {faceta_auditor or '?'}", ""]
-    for a in entrega.respaldadas:
+    def campos(a) -> str:
         p = cita.presentar(a)
-        lineas.append("    " + " ".join(f"{campo}={getattr(p, campo)}" for campo in cita.CAMPOS_PRESENTACION))
-    if not entrega.respaldadas:
-        lineas.append("    -")
+        return " ".join(f"{campo}={getattr(p, campo)}" for campo in cita.CAMPOS_PRESENTACION)
+
+    lineas = [f"C5: {faceta_auditor or '?'}", ""]
+    lineas += ["    " + campos(a) for a in entrega.respaldadas] or ["    -"]
+    # MAJOR-2 (DC5: Fernando revisa): lo descartado también se ve, con su estado y su motivo
+    # (códigos estables, sin prosa). Mismo bloque sangrado: nada se sale a Markdown.
+    lineas += ["", "Descartadas por el verificador/C5", ""]
+    lineas += [f"    estado={d.estado} motivo={d.motivo.codigo} " + campos(d.afirmacion)
+               for d in entrega.descartadas] or ["    -"]
     return "\n".join(lineas)
 
 

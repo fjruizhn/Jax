@@ -360,6 +360,21 @@ def test_informe_c5_va_en_un_bloque_de_codigo_sangrado_sin_saltos_crudos():
     assert not any(l.startswith("#") for l in lineas)
 
 
+def test_informe_c5_incluye_las_descartadas_con_estado_y_motivo():
+    """MAJOR-2 (DC5: Fernando revisa): lo que el verificador o C5 descartó también va en el PR. «3
+    passed» contra una salida real «3 failed» no se respalda -- y se ve."""
+    captura = cita.Captura(maquina="hall9000", comando="pytest -q", salida="3 failed in 0.10s\n", stderr="",
+                           truncada=False)
+    mala = cita.Afirmacion("hall9000", "pytest -q", "3 passed in 0.10s", "3 passed", "¿pasan?")
+    entrega = transporte.entregar((mala,), (captura,))
+    assert entrega.respaldadas == () and len(entrega.descartadas) == 1
+    texto = S.informe_c5(entrega, "thot")
+    assert "Descartadas por el verificador/C5" in texto
+    (item,) = [l for l in texto.splitlines() if "'3 passed'" in l]
+    d = entrega.descartadas[0]
+    assert item.startswith("    ") and f"estado={d.estado}" in item and f"motivo={d.motivo.codigo}" in item
+
+
 @pytest.mark.parametrize("filas, esperado", [
     ({}, S.ConfigCodigo(S.AUTOR_POR_OMISION, S.TOPE_BYTES_POR_OMISION, 100 * 1024 * 1024)),
     ({"ejecutor.codigo.autor": "Otro <o@x.io>", "ejecutor.codigo.tope_bytes": "10",
