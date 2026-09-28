@@ -36,11 +36,14 @@ def _bajo(ruta: Path, raiz: Path) -> bool:
 
 
 def _permitida(ruta: Path) -> Path:
+    """La ruta que SE MONTA (no otra): ni dentro de una prohibida ni conteniéndola (montar
+    `/etc` expondría `/etc/jax`; montar `/` lo expondría todo). Se mira también el realpath."""
     ruta = Path(os.path.abspath(ruta))
     real = Path(os.path.realpath(ruta))
     for prohibida in PROHIBIDAS:
-        if _bajo(ruta, prohibida) or _bajo(real, prohibida):
-            raise ValueError(f"montaje_prohibido: {ruta}")
+        for r in (ruta, real):
+            if _bajo(r, prohibida) or _bajo(prohibida, r):
+                raise ValueError(f"montaje_prohibido: {ruta}")
     return ruta
 
 
@@ -71,8 +74,9 @@ def argv_sandbox(comando: Sequence[str], *, deps: Path, cwd: Path,
     argv += _sistema()
     argv += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", HOME]
     if node_bin is not None:
-        node_bin = _permitida(Path(node_bin))
-        prefijo = node_bin.parent
+        # MINOR-B: se valida lo que efectivamente se monta, el prefijo (padre de node_bin).
+        node_bin = Path(os.path.abspath(node_bin))
+        prefijo = _permitida(node_bin.parent)
         argv += ["--ro-bind-try", str(prefijo), str(prefijo)]
         path = f"{node_bin}:{path}"
     argv += ["--bind", str(deps), str(deps)]

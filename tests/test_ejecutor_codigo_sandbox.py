@@ -73,6 +73,24 @@ def test_argv_rechaza_node_bajo_home(tmp_path):
         S.argv_sandbox(["true"], deps=deps, cwd=deps, node_bin=Path("/home/fruiz/.nvm/versions/node/v24/bin"))
 
 
+@pytest.mark.parametrize("node_bin", ["/etc/node", "/node", "/var/lib/node", "/srv/node/bin"])
+def test_argv_valida_lo_que_se_monta_para_node(tmp_path, node_bin):
+    """MINOR-B: se monta el PADRE de node_bin; si ese padre contiene una ruta prohibida
+    (`/etc` contiene `/etc/jax`, `/` contiene todo), se rechaza."""
+    deps = tmp_path / "deps"
+    deps.mkdir()
+    with pytest.raises(ValueError, match="montaje_prohibido"):
+        S.argv_sandbox(["true"], deps=deps, cwd=deps, node_bin=Path(node_bin))
+
+
+def test_argv_rechaza_un_origen_que_contiene_una_prohibida(tmp_path):
+    deps = tmp_path / "deps"
+    deps.mkdir()
+    for origen in ("/", "/etc", "/var/lib"):
+        with pytest.raises(ValueError, match="montaje_prohibido"):
+            S.argv_sandbox(["true"], deps=deps, cwd=deps, solo_lectura=[(Path(origen), deps / "x")])
+
+
 def test_argv_rechaza_cwd_fuera_de_deps(tmp_path):
     deps = tmp_path / "deps"
     deps.mkdir()

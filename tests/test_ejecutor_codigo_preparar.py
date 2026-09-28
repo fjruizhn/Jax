@@ -183,7 +183,7 @@ def test_dependencias_con_banderas_y_sin_entorno_de_jax(tmp_path, monkeypatch):
     npm = [a for a in internos if a[0] == "npm"]
     assert npm == [("npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund")] * 2
     assert [a for a in internos if a[0] == "composer"] == [
-        ("composer", "install", "--no-interaction", "--no-scripts", "--no-plugins")]
+        ("composer", "install", "--no-interaction", "--no-scripts", "--no-plugins", "--prefer-dist")]
     pips = [a for a in internos if a[0].endswith("/pip")]
     # UNA invocación por venv, con todos sus requirements juntos.
     assert len(pips) == 2, pips
@@ -236,6 +236,135 @@ def test_la_opcion_rechazada_arrastra_a_quien_la_incluye_y_no_al_resto(tmp_path,
     assert "pip_opcion_rechazada:requirements-mala.txt" in c.dependencias
     assert "pip_opcion_rechazada:requirements-dev.txt" in c.dependencias
     assert "requirements.txt" in c.dependencias
+
+
+# --- BLOCK-A (re-revisión 3): ninguna instalación ejecuta código de terceros -------------
+# npm prepara las dependencias git aunque lleve --ignore-scripts (verificado por el revisor con
+# el node de producción): el lockfile se revisa ANTES y solo se instala si todo viene del
+# registro con integridad. Composer igual: solo packagist / zip de GitHub.
+
+REGISTRO = "https://registry.npmjs.org/"
+SRI = "sha512-" + "A" * 86 + "=="
+
+
+def _lock_v3(**paquetes):
+    return json.dumps({"name": "x", "lockfileVersion": 3, "requires": True,
+                       "packages": {"": {"name": "x", "version": "1.0.0"}, **paquetes}})
+
+
+LIMPIO = {"node_modules/bueno": {"version": "1.0.0", "resolved": f"{REGISTRO}bueno/-/bueno-1.0.0.tgz",
+                                 "integrity": SRI},
+          "node_modules/@esc/otro": {"version": "2.0.0", "resolved": f"{REGISTRO}@esc/otro/-/otro-2.0.0.tgz",
+                                     "integrity": SRI, "dev": True}}
+
+
+@pytest.mark.parametrize("nombre,entrada", [
+    ("malo", {"version": "1.0.0", "resolved": "git+ssh://git@github.com/atacante/malo.git#0123abc",
+              "integrity": SRI}),
+    ("malo", {"version": "git+https://github.com/atacante/malo.git#0123abc"}),
+    ("malo", {"version": "github:atacante/malo"}),
+    ("malo", {"version": "1.0.0", "resolved": "https://evil.example/malo-1.0.0.tgz", "integrity": SRI}),
+    ("malo", {"version": "1.0.0", "resolved": "http://registry.npmjs.org/malo/-/malo-1.0.0.tgz",
+              "integrity": SRI}),
+    ("malo", {"version": "1.0.0", "resolved": "https://registry.npmjs.org.evil.io/malo/-/malo-1.0.0.tgz",
+              "integrity": SRI}),
+    ("malo", {"version": "1.0.0", "resolved": f"{REGISTRO}malo/-/malo-1.0.0.tgz"}),  # sin integrity
+    ("malo", {"resolved": "../malo", "link": True}),
+    ("malo", {"version": "file:../malo", "resolved": "file:../malo"}),
+])
+def test_npm_lockfile_con_fuente_ajena_no_se_instala(tmp_path, monkeypatch, nombre, entrada):
+    lock = _lock_v3(**LIMPIO, **{f"node_modules/{nombre}": entrada})
+    _remoto(tmp_path, monkeypatch, archivos={"package.json": "{}", "package-lock.json": lock})
+    instalar = _Instalador()
+    c = _preparar(tmp_path, instalar=instalar)
+    assert not any(a[0] == "npm" for a in instalar.internos()), "npm no debía correr"
+    assert f"npm_fuente_rechazada:package-lock.json:{nombre}" in c.dependencias
+    assert not (c.ruta / "node_modules").is_symlink()
+
+
+def test_npm_lockfile_v1_con_dependencia_git_anidada_no_se_instala(tmp_path, monkeypatch):
+    lock = json.dumps({"lockfileVersion": 1, "dependencies": {
+        "bueno": {"version": "1.0.0", "resolved": f"{REGISTRO}bueno/-/bueno-1.0.0.tgz", "integrity": SRI,
+                  "dependencies": {"malo": {"version": "git+https://github.com/atacante/malo.git#abc"}}}}})
+    _remoto(tmp_path, monkeypatch, archivos={"frontend/package.json": "{}", "frontend/package-lock.json": lock})
+    instalar = _Instalador()
+    c = _preparar(tmp_path, instalar=instalar)
+    assert not any(a[0] == "npm" for a in instalar.internos())
+    assert "npm_fuente_rechazada:frontend/package-lock.json:malo" in c.dependencias
+
+
+def test_npm_lockfile_ilegible_no_se_instala(tmp_path, monkeypatch):
+    _remoto(tmp_path, monkeypatch, archivos={"package.json": "{}", "package-lock.json": "{no es json"})
+    instalar = _Instalador()
+    c = _preparar(tmp_path, instalar=instalar)
+    assert instalar.llamadas == []
+    assert "npm_fuente_rechazada:package-lock.json:<ilegible>" in c.dependencias
+
+
+def test_npm_lockfile_limpio_si_se_instala(tmp_path, monkeypatch):
+    _remoto(tmp_path, monkeypatch, archivos={"package.json": "{}", "package-lock.json": _lock_v3(**LIMPIO)})
+    instalar = _Instalador()
+    c = _preparar(tmp_path, instalar=instalar)
+    assert [a for a in instalar.internos() if a[0] == "npm"] == [
+        ("npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund")]
+    assert "package-lock.json" in c.dependencias
+
+
+def _composer_lock(*paquetes):
+    return json.dumps({"packages": list(paquetes), "packages-dev": []})
+
+
+BUENO_PHP = {"name": "vendor/bueno", "version": "1.0.0",
+             "source": {"type": "git", "url": "https://github.com/vendor/bueno.git", "reference": "abc"},
+             "dist": {"type": "zip", "url": "https://api.github.com/repos/vendor/bueno/zipball/abc",
+                      "reference": "abc", "shasum": ""}}
+
+
+@pytest.mark.parametrize("composer_json,lock,rechazo", [
+    ({"repositories": [{"type": "vcs", "url": "https://evil/r.git"}]}, _composer_lock(BUENO_PHP),
+     "composer_fuente_rechazada:composer.json:repositories"),
+    ({"repositories": {"x": {"type": "path", "url": "../x"}}}, _composer_lock(BUENO_PHP),
+     "composer_fuente_rechazada:composer.json:repositories"),
+    ({}, _composer_lock({**BUENO_PHP, "name": "vendor/malo",
+                         "dist": {"type": "zip", "url": "https://evil.example/malo.zip", "reference": "x"}}),
+     "composer_fuente_rechazada:composer.lock:vendor/malo"),
+    ({}, _composer_lock({"name": "vendor/malo", "version": "dev-main",
+                         "source": {"type": "git", "url": "https://evil.example/malo.git", "reference": "x"}}),
+     "composer_fuente_rechazada:composer.lock:vendor/malo"),
+    ({}, _composer_lock({**BUENO_PHP, "name": "vendor/malo",
+                         "dist": {"type": "path", "url": "../malo", "reference": "x"}}),
+     "composer_fuente_rechazada:composer.lock:vendor/malo"),
+])
+def test_composer_con_fuente_ajena_no_se_instala(tmp_path, monkeypatch, composer_json, lock, rechazo):
+    _remoto(tmp_path, monkeypatch, archivos={"composer.json": json.dumps(composer_json), "composer.lock": lock})
+    instalar = _Instalador()
+    c = _preparar(tmp_path, instalar=instalar)
+    assert instalar.llamadas == []
+    assert rechazo in c.dependencias
+
+
+def test_composer_limpio_si_se_instala(tmp_path, monkeypatch):
+    _remoto(tmp_path, monkeypatch, archivos={"composer.json": "{}", "composer.lock": _composer_lock(BUENO_PHP)})
+    instalar = _Instalador()
+    c = _preparar(tmp_path, instalar=instalar)
+    assert [a[0] for a in instalar.internos()] == ["composer"] and "composer.lock" in c.dependencias
+
+
+# --- MINOR-C: los directorios dentro de deps/ se crean sin seguir enlaces -----------------
+
+def test_crear_bajo_deps_rechaza_un_enlace_en_el_camino(tmp_path):
+    deps = tmp_path / "deps"
+    deps.mkdir()
+    afuera = tmp_path / "afuera"
+    afuera.mkdir()
+    (deps / "node").symlink_to(afuera, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="enlace_en_deps"):
+        P._crear_bajo(deps, deps / "node" / "_raiz")
+    assert list(afuera.iterdir()) == []
+    P._crear_bajo(deps, deps / "python" / "_raiz")
+    assert (deps / "python" / "_raiz").is_dir() and not (deps / "python").is_symlink()
+    with pytest.raises(RuntimeError, match="fuera_de_deps"):
+        P._crear_bajo(deps, tmp_path / "otro")
 
 
 def test_pip_sin_wheel_se_declara_y_sigue(tmp_path, monkeypatch):

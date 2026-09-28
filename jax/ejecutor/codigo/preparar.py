@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import stat
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -171,7 +172,8 @@ async def _instalar_dependencias(espejo: Path, deps: Path, base: str, instalar: 
         env = entorno_minimo(home)
 
         async def correr(comando: list[str], destino: Path, solo_lectura) -> tuple[int, bytes]:
-            await asyncio.to_thread(destino.mkdir, mode=0o700, parents=True, exist_ok=True)
+            # MINOR-C: una instalación anterior pudo dejar enlaces dentro de deps/.
+            await asyncio.to_thread(_crear_bajo, deps, destino)
             argv = argv_sandbox(comando, deps=deps, cwd=destino, solo_lectura=solo_lectura, node_bin=node_bin)
             return await instalar(argv, destino, env)
 
@@ -222,6 +224,12 @@ async def _instalar_dependencias(espejo: Path, deps: Path, base: str, instalar: 
             carpeta = fuentes / "node" / (d or "_raiz")
             destino = deps / "node" / (d or "_raiz")
             montajes = [(await copiar(f, carpeta), destino / PurePosixPath(f).name) for f in (p, lock)]
+            # BLOCK-A: npm prepara las dependencias git aunque lleve --ignore-scripts. Se instala
+            # solo si TODO el lockfile viene del registro con integridad.
+            malos = _npm_rechazos(await asyncio.to_thread(montajes[1][0].read_text, errors="replace"))
+            if malos:
+                hechas += [f"npm_fuente_rechazada:{lock}:{m}" for m in malos]
+                continue
             rc, _ = await correr(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], destino, montajes)
             if rc != 0:
                 raise RuntimeError(f"preparar_fallo: npm ci en {d or '.'} (rc={rc})")
@@ -235,13 +243,122 @@ async def _instalar_dependencias(espejo: Path, deps: Path, base: str, instalar: 
             carpeta = fuentes / "php" / "_raiz"
             destino = deps / "php" / "_raiz"
             montajes = [(await copiar(f, carpeta), destino / f) for f in ("composer.json", "composer.lock")]
-            rc, _ = await correr(["composer", "install", "--no-interaction", "--no-scripts", "--no-plugins"],
-                                 destino, montajes)
-            if rc != 0:
-                raise RuntimeError(f"preparar_fallo: composer install (rc={rc})")
-            hechas.append("composer.lock")
-            enlaces.append(("vendor", destino / "vendor"))
+            textos = [await asyncio.to_thread(c.read_text, errors="replace") for c, _ in montajes]
+            malos = _composer_rechazos(*textos)
+            if malos:
+                hechas += [f"composer_fuente_rechazada:{m}" for m in malos]
+            else:
+                rc, _ = await correr(["composer", "install", "--no-interaction", "--no-scripts", "--no-plugins",
+                                      "--prefer-dist"], destino, montajes)
+                if rc != 0:
+                    raise RuntimeError(f"preparar_fallo: composer install (rc={rc})")
+                hechas.append("composer.lock")
+                enlaces.append(("vendor", destino / "vendor"))
     return hechas, enlaces
+
+
+def _crear_bajo(deps: Path, ruta: Path) -> None:
+    """`mkdir -p` dentro de `deps/` que NO sigue enlaces: cada componente se mira con `lstat`;
+    un enlace o algo que no es directorio → falla cerrado. Quien pudo dejar un enlace ahí es una
+    instalación anterior (escribe en deps/ desde el sandbox), y un `mkdir` que lo siguiera
+    crearía -- y luego montaría escribible -- un directorio fuera de deps/."""
+    try:
+        relativa = ruta.relative_to(deps)
+    except ValueError:
+        raise RuntimeError(f"preparar_fallo: fuera_de_deps: {ruta}") from None
+    actual = deps
+    for parte in relativa.parts:
+        actual = actual / parte
+        try:
+            info = os.lstat(actual)
+        except FileNotFoundError:
+            os.mkdir(actual, 0o700)
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError(f"preparar_fallo: enlace_en_deps: {actual}")
+
+
+_REGISTRO_NPM = "https://registry.npmjs.org/"
+
+
+def _npm_mala(e) -> bool:
+    if not isinstance(e, dict) or e.get("link"):
+        return True
+    version = str(e.get("version", ""))
+    resolved = e.get("resolved")
+    # Una versión del registro es semver: `git+…`, `github:…`, `file:…`, `http(s):…`, `npm:alias`
+    # o una ruta llevan ':' o '/'.
+    if ":" in version or "/" in version:
+        return True
+    return not (isinstance(resolved, str) and resolved.startswith(_REGISTRO_NPM) and e.get("integrity"))
+
+
+def _npm_rechazos(texto: str) -> list[str]:
+    """Paquetes del package-lock.json que NO vienen del registro con integridad (v2/v3:
+    `packages`; v1: `dependencies`, recursivo; si están los dos, se miran los dos)."""
+    try:
+        datos = json.loads(texto)
+    except ValueError:
+        return ["<ilegible>"]
+    if not isinstance(datos, dict):
+        return ["<ilegible>"]
+    malos: set[str] = set()
+    paquetes = datos.get("packages")
+    if paquetes is not None:
+        if not isinstance(paquetes, dict):
+            return ["<ilegible>"]
+        for clave, entrada in paquetes.items():
+            if clave != "" and _npm_mala(entrada):
+                malos.add(clave.rsplit("node_modules/", 1)[-1])
+
+    def recorrer(deps) -> None:
+        if not isinstance(deps, dict):
+            malos.add("<ilegible>")
+            return
+        for nombre, entrada in deps.items():
+            if _npm_mala(entrada):
+                malos.add(nombre)
+            if isinstance(entrada, dict) and "dependencies" in entrada:
+                recorrer(entrada["dependencies"])
+    if "dependencies" in datos:
+        recorrer(datos["dependencies"])
+    return sorted(malos)
+
+
+_DIST_COMPOSER = ("https://api.github.com/repos/", "https://codeload.github.com/", "https://repo.packagist.org/")
+
+
+def _composer_rechazos(composer_json: str, composer_lock: str) -> list[str]:
+    """`composer.json:repositories` si declara repositorios que no son packagist (vcs, path, git,
+    artifact, package…); `composer.lock:<paquete>` si su `dist` no es un zip de packagist/GitHub o
+    su `source` no es git de github.com."""
+    try:
+        cj, cl = json.loads(composer_json), json.loads(composer_lock)
+    except ValueError:
+        return ["composer:<ilegible>"]
+    if not isinstance(cj, dict) or not isinstance(cl, dict):
+        return ["composer:<ilegible>"]
+    malos: list[str] = []
+    repos = cj.get("repositories")
+    lista = repos.values() if isinstance(repos, dict) else (repos or [])
+    for r in lista:
+        if r is False or (isinstance(r, dict) and set(r) == {"packagist.org"} and r["packagist.org"] is False):
+            continue  # apagar packagist no agrega fuentes
+        if not (isinstance(r, dict) and r.get("type") == "composer"
+                and str(r.get("url", "")).startswith("https://repo.packagist.org")):
+            malos.append("composer.json:repositories")
+            break
+    for p in list(cl.get("packages") or []) + list(cl.get("packages-dev") or []):
+        nombre = p.get("name", "<sin nombre>") if isinstance(p, dict) else "<ilegible>"
+        dist = p.get("dist") if isinstance(p, dict) else None
+        source = p.get("source") if isinstance(p, dict) else None
+        dist_ok = (isinstance(dist, dict) and dist.get("type") == "zip"
+                   and str(dist.get("url", "")).startswith(_DIST_COMPOSER))
+        source_ok = source is None or (isinstance(source, dict) and source.get("type") == "git"
+                                       and str(source.get("url", "")).startswith("https://github.com/"))
+        if not (dist_ok and source_ok):
+            malos.append(f"composer.lock:{nombre}")
+    return malos
 
 
 _COMENTARIO = re.compile(r"(^|\s)#.*$")
