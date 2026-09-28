@@ -68,6 +68,7 @@ from pathlib import Path
 from jax.ejecutor.contratos import contexto
 
 _NOMBRE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+_PERMISOS_RECURSIVOS = ("rwX", "r-X")
 
 
 class CuentaSinConfigurar(RuntimeError):
@@ -268,7 +269,7 @@ async def preparar_directorio_de_la_cuenta(c: Cuenta, ruta: Path, *, correr=None
         raise RuntimeError(f"preparar_directorio_fallo: {errores.decode(errors='replace')}")
 
 
-async def dar_acceso_recursivo(c: Cuenta, ruta: Path, *, correr=None) -> None:
+async def dar_acceso_recursivo(c: Cuenta, ruta: Path, *, permiso: str = "rwX", correr=None) -> None:
     """Mismo patrón endurecido de `preparar_directorio_de_la_cuenta` (Task 0, 757ca62),
     pero RECURSIVO (`setfacl -R --set`): lo usa `preparar.preparar()` (Tarea 6, misiones
     de código) para dar acceso al clon DESPUÉS de que `git clone`/`git checkout` lo
@@ -290,7 +291,16 @@ async def dar_acceso_recursivo(c: Cuenta, ruta: Path, *, correr=None) -> None:
     `default:u:<usuario del proceso>:rwX` -- medido 2026-09-28 con los usuarios reales:
     sin esa entrada por omisión, `jaxsvc` (el proceso) deja de poder LEER lo que
     `axioma` cree DESPUÉS dentro de ese árbol (los commits de Qwen), y la entrega
-    (Tarea 5, corre como jaxsvc) no podría verlos."""
+    (Tarea 5, corre como jaxsvc) no podría verlos.
+
+    Retrabajo por auditoría (espejo privado, spec v1.2, 2026-09-28):
+    - `setfacl -P`: recorrido físico, nunca sigue un enlace dentro del árbol (el clon lleva
+      `.venv`/`node_modules` enlazados a `deps/`, y Qwen puede crear enlaces a cualquier lado).
+    - `permiso="r-X"` para `<misión>/deps`: la cuenta lee y atraviesa, no escribe. Sin la
+      entrada por omisión del proceso: en `deps/` solo escribe el proceso, que ya es el dueño.
+      Cualquier otro valor se rechaza -- `permiso` termina dentro de la especificación de ACL."""
+    if permiso not in _PERMISOS_RECURSIVOS:
+        raise ValueError(f"permiso_invalido: {permiso!r}")
     correr = correr or asyncio.create_subprocess_exec
     info = await asyncio.to_thread(os.lstat, ruta)
     if not stat.S_ISDIR(info.st_mode):
@@ -301,10 +311,37 @@ async def dar_acceso_recursivo(c: Cuenta, ruta: Path, *, correr=None) -> None:
         raise RuntimeError(
             f"preparar_directorio_fallo: {ruta} pertenece a otro dueño (uid={info.st_uid}, "
             f"esperado uid={os.geteuid()})")
-    usuario_proceso = pwd.getpwuid(os.geteuid()).pw_name
-    acl = (f"u::rwX,g::---,o::---,m::rwX,u:{c.nombre}:rwX,"
-           f"d:u::rwX,d:g::---,d:o::---,d:m::rwX,d:u:{c.nombre}:rwX,d:u:{usuario_proceso}:rwX")
-    proc = await correr("setfacl", "-R", "--set", acl, str(ruta),
+    acl = (f"u::rwX,g::---,o::---,m::rwX,u:{c.nombre}:{permiso},"
+           f"d:u::rwX,d:g::---,d:o::---,d:m::rwX,d:u:{c.nombre}:{permiso}")
+    if permiso == "rwX":
+        acl += f",d:u:{pwd.getpwuid(os.geteuid()).pw_name}:rwX"
+    proc = await correr("setfacl", "-P", "-R", "--set", acl, str(ruta),
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    _, errores = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"preparar_directorio_fallo: {errores.decode(errors='replace')}")
+
+
+async def dar_paso(c: Cuenta, ruta: Path, *, correr=None) -> None:
+    """`<raiz>/<misión>` de una misión de código (spec v1.2 §3.1): la cuenta solo ATRAVIESA
+    (`--x`) para llegar a `repo/` (escritura) y a `deps/` (lectura); no lista ni crea nada
+    ahí, y no ve `espejo.git` (0700, sin ACL para ella). Sin ACL por omisión (`-k`): lo que
+    el proceso cree adentro no hereda nada -- medido 2026-09-28, `setfacl --set` sin
+    entradas `d:` deja intacta la ACL por omisión heredada del padre (en producción,
+    `default:user:fruiz:rwx` de `/var/lib/jax-ejecutor-misiones`). Mismas comprobaciones
+    con `os.lstat` que `preparar_directorio_de_la_cuenta`, antes de llamar a `setfacl`."""
+    correr = correr or asyncio.create_subprocess_exec
+    info = await asyncio.to_thread(os.lstat, ruta)
+    if not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(
+            f"preparar_directorio_fallo: {ruta} no es un directorio real (¿symlink?), "
+            f"modo={oct(stat.S_IFMT(info.st_mode))}")
+    if info.st_uid != os.geteuid():
+        raise RuntimeError(
+            f"preparar_directorio_fallo: {ruta} pertenece a otro dueño (uid={info.st_uid}, "
+            f"esperado uid={os.geteuid()})")
+    acl = f"u::rwx,g::---,o::---,m::--x,u:{c.nombre}:--x"
+    proc = await correr("setfacl", "-P", "-k", "--set", acl, str(ruta),
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     _, errores = await proc.communicate()
     if proc.returncode != 0:

@@ -514,7 +514,7 @@ def test_dar_acceso_recursivo_llama_setfacl_r_set_con_el_dueno_correcto(tmp_path
     c = _cuenta(tmp_path)
     asyncio.run(CA.dar_acceso_recursivo(c, ruta, correr=correr))
     usuario_proceso = getpass.getuser()
-    assert ("setfacl", "-R", "--set", _acl_recursiva_esperada("axioma", usuario_proceso), str(ruta)) in llamadas
+    assert ("setfacl", "-P", "-R", "--set", _acl_recursiva_esperada("axioma", usuario_proceso), str(ruta)) in llamadas
 
 
 def test_dar_acceso_recursivo_rechaza_un_symlink(tmp_path):
@@ -583,3 +583,82 @@ def test_dar_acceso_recursivo_pone_la_acl_real_recursiva_sin_heredar_del_padre(t
         f"({nombre}) del default ACL -- sin esto jaxsvc no podría leer lo que axioma escriba: "
         f"{lineas_nuevo}"
     )
+
+
+# --- Retrabajo por auditoría (espejo privado, 2026-09-28) -------------------------------
+#
+# `setfacl -P` (nunca sigue un enlace dentro del árbol: el clon lleva `.venv` y
+# `node_modules` enlazados a `deps/`), `permiso="r-X"` para `deps/` (la cuenta lee, no
+# escribe), y `dar_paso` para `<raiz>/<misión>`: la cuenta solo atraviesa, sin ACL por
+# omisión -- medido 2026-09-28: `setfacl --set` SIN entradas `d:` deja intacta la ACL por
+# omisión heredada del padre; hace falta `-k`.
+
+class _ProcOk:
+    returncode = 0
+
+    async def communicate(self):
+        return b"", b""
+
+
+def _correr_que_registra(llamadas):
+    async def correr(*argv, **kw):
+        llamadas.append(argv)
+        return _ProcOk()
+    return correr
+
+
+def test_dar_acceso_recursivo_de_solo_lectura(tmp_path):
+    llamadas = []
+    ruta = tmp_path / "deps"
+    ruta.mkdir()
+    asyncio.run(CA.dar_acceso_recursivo(_cuenta(tmp_path), ruta, permiso="r-X", correr=_correr_que_registra(llamadas)))
+    assert llamadas == [("setfacl", "-P", "-R", "--set",
+                         "u::rwX,g::---,o::---,m::rwX,u:axioma:r-X,d:u::rwX,d:g::---,d:o::---,d:m::rwX,d:u:axioma:r-X",
+                         str(ruta))]
+
+
+def test_dar_acceso_recursivo_rechaza_un_permiso_desconocido(tmp_path):
+    ruta = tmp_path / "x"
+    ruta.mkdir()
+    with pytest.raises(ValueError, match="permiso_invalido"):
+        asyncio.run(CA.dar_acceso_recursivo(_cuenta(tmp_path), ruta, permiso="rwx,u:root:rwx",
+                                            correr=_correr_que_registra([])))
+
+
+def test_dar_paso_solo_atravesar_y_sin_acl_por_omision(tmp_path):
+    llamadas = []
+    ruta = tmp_path / "mision"
+    ruta.mkdir()
+    asyncio.run(CA.dar_paso(_cuenta(tmp_path), ruta, correr=_correr_que_registra(llamadas)))
+    assert llamadas == [("setfacl", "-P", "-k", "--set", "u::rwx,g::---,o::---,m::--x,u:axioma:--x", str(ruta))]
+
+
+def test_dar_paso_rechaza_un_symlink(tmp_path):
+    destino = tmp_path / "destino"
+    destino.mkdir()
+    ruta = tmp_path / "mision"
+    ruta.symlink_to(destino, target_is_directory=True)
+
+    async def correr(*argv, **kw):
+        raise AssertionError("no debe llegar a setfacl si la ruta es un symlink")
+    with pytest.raises(RuntimeError, match="preparar_directorio_fallo"):
+        asyncio.run(CA.dar_paso(_cuenta(tmp_path), ruta, correr=correr))
+
+
+@requiere_acl_recursiva
+def test_dar_paso_real_quita_la_acl_por_omision_heredada(tmp_path):
+    nombre = getpass.getuser()
+    padre = tmp_path / "padre"
+    padre.mkdir()
+    subprocess.run(["setfacl", "-d", "-m", "u:99999:rwx", str(padre)], check=True)
+    ruta = padre / "mision"
+    ruta.mkdir()
+    c = CA.Cuenta(nombre, 22, tmp_path / "k", tmp_path / "n", tmp_path / "l", tmp_path / "p", tmp_path / "h")
+    asyncio.run(CA.dar_paso(c, ruta))
+    salida = subprocess.run(["getfacl", "-p", str(ruta)], capture_output=True, text=True, check=True).stdout
+    lineas = {l.split("\t", 1)[0].strip() for l in salida.splitlines() if l.strip() and not l.startswith("#")}
+    assert f"user:{nombre}:--x" in lineas and "other::---" in lineas
+    assert not any(l.startswith("default:") for l in lineas), lineas
+    (ruta / "nuevo").mkdir()
+    salida = subprocess.run(["getfacl", "-p", str(ruta / "nuevo")], capture_output=True, text=True, check=True).stdout
+    assert "99999" not in salida and "default:" not in salida
