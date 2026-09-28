@@ -10,6 +10,7 @@ cuyas decisiones siguen vigentes salvo lo que este documento enmienda explícita
 | Versión | Commit | Qué cambió |
 |---|---|---|
 | v1 | (este commit) | Diseño original, aprobado por secciones en chat. |
+| v1.1 | (este commit) | Correcciones medidas contra el código vivo antes de planificar. |
 
 ## 1. Por qué
 
@@ -47,15 +48,18 @@ auditor. Nadie interviene entre el pedido y el PR. Integrar sigue siendo de Fern
  chat (modo Ejecutor, tipo Código)
    │  repo + pedido
    ▼
- [1] PREPARAR   LAS MANOS · jaxsvc · fuera de la jaula
+ [1] PREPARAR   `mision_servicio` (proceso de `jaxsvc`, fuera de la jaula)
    │  clon + rama axioma/<misión> + dependencias desde lockfiles
    ▼
  [2] TRABAJAR   Qwen · jaula `codigo` · sin red salvo el proxy del cerebro · sin credenciales
    │  editar · probar · git commit local       (C1 gancho · C3 registro · C4 pausa · C5 auditor)
    ▼
- [3] ENTREGAR   LAS MANOS · jaxsvc · fuera de la jaula · ÚNICA pieza con el token
+ [3] ENTREGAR   `mision_servicio` (proceso de `jaxsvc`, fuera de la jaula) · ÚNICA pieza con el token
       revisa el diff contra C1 · empuja SOLO axioma/<misión> · abre el PR con el informe de C5
 ```
+
+> *El Ejecutor no pasa por LAS MANOS (medido 2026-09-28: es un subproceso de jax-platform); la
+> propiedad que el diseño exige —fuera de la jaula, el modelo nunca ve el token— se conserva.*
 
 ### 3.1 Preparar
 
@@ -70,22 +74,29 @@ auditor. Nadie interviene entre el pedido y el PR. Integrar sigue siendo de Fern
 
 ### 3.2 Trabajar (la jaula `codigo`)
 
-Perfil nuevo en `hyde_sandbox.py`, mismo punto único de entrada (`run_sandboxed_claude()`; el control
-de CI `no-naked-claude-subprocess` sigue vigente).
+Variante de la jaula de `jax/ejecutor/contratos/cuenta_axioma.py` (`_jaula` + `remoto_claude`), la misma
+del Ejecutor: `--dev-bind / /` como `axioma`; la red la limita el cerco `inet ejecutor_cerco` (uid de
+`axioma`: solo proxy del carril en loopback y SSH del inventario; GitHub bloqueado).
 
 | Monta / permite | Modo | Por qué |
 |---|---|---|
-| El clon de la misión | rw | su único lugar de trabajo |
+| El clon de la misión | rw | su único lugar de trabajo; ACL `u:axioma:rwX` (Tarea 0) |
 | Dependencias instaladas en la preparación | ro | la jaula no tiene internet |
 | Plugins/skills fijados del Ejecutor | ro | igual que el perfil `ejecutor` |
 | `CLAUDE.md` generado (constitución + reglas del repo + `CLAUDE.md`/`CONTEXT.md` del propio repo) | ro | §6 del spec del 2026-09-15 |
 | Red | **solo el proxy del cerebro** | ni GitHub, ni MariaDB 3308, ni otras máquinas |
-| Token de GitHub, `/etc/jax/.env`, llaves SSH, credenciales de Anthropic | **no se montan** | el modelo nunca las tiene |
+| Token de GitHub, `/etc/jax/.env` (`root:jaxsvc 640`, `axioma` no lo lee — medido), llaves SSH, credenciales de Anthropic | **no se montan** | el modelo nunca las tiene |
 
 Herramientas: Bash, lectura/edición, `git` local (commit, diff, log). `git push` dentro de la jaula
-falla por red **y** por C1 (dos barreras).
+falla por red **y** por C1 (dos barreras). El entorno de la jaula lleva `GIT_CONFIG_COUNT=1
+GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=<clon>` (medido con git 2.53: sin esto, `axioma`
+recibe «dubious ownership» al operar sobre un repo cuyo directorio pertenece a `jaxsvc`).
 
 ### 3.3 Entregar
+
+`mision_servicio` lee el diff y los commits de `axioma` desde fuera de la jaula sin ser su dueño: la
+ACL del clon también da `d:u:<usuario del proceso>:rwX` (medido), así los objetos que `axioma` crea
+dentro de la jaula quedan legibles para `jaxsvc` desde el primer momento.
 
 1. Lee el diff completo `origin/<rama por omisión>...axioma/<misión>` **fuera de la jaula** y lo pasa
    por C1 de código (§5.1) en su forma estructural (lista de rutas y hunks, no regex sobre texto
@@ -214,9 +225,34 @@ Cada paso con su auditoría de escalón 3 antes del siguiente; cada contrato vis
 ## 11. A verificar contra el código vivo antes de planificar
 
 - Cómo resuelve hoy `hyde_sandbox.py` el perfil `ejecutor` y qué hace falta para uno `codigo` sin red
-  general.
-- Si el proxy del carril admite sesiones largas de edición (contexto de 131k).
-- Columnas reales de `ejecutor_mision` y `ejecutor_regla` en `jax_memory` (esquema vivo, no el archivo).
-- Nombre y formato del token de grano fino de GitHub vigente.
+  general. **Verificado (2026-09-28):** no hay perfil `ejecutor` en `hyde_sandbox.py` — la jaula del
+  Ejecutor la arma `jax/ejecutor/contratos/cuenta_axioma.py` (`_jaula` + `remoto_claude`,
+  `--dev-bind / /` como `axioma`). Para código no hace falta un perfil nuevo: se reutiliza esa misma
+  jaula (§3.2), y la red ya queda acotada por el cerco `inet ejecutor_cerco` existente (uid de
+  `axioma`: solo proxy del carril en loopback y SSH del inventario; GitHub ya está bloqueado por ese
+  mismo cerco, sin cambio adicional).
+- Si el proxy del carril admite sesiones largas de edición (contexto de 131k). **Verificado
+  (2026-09-28), con dato existente, no con un ensayo nuevo:** Fase 0 (`docs/superpowers/specs/
+  2026-09-15-ejecutor-fase0-resultado.md`, prueba U1) midió `num_ctx=131072` con 100% GPU y
+  `load_duration` ≤ 300 s — pasó, y es el mayor `num_ctx` elegido; en producción el proxy del carril
+  sirve `qwen3.6-mesa-131k` con ese contexto (`DEUDA.md:979-980`). No se corrió una misión de código
+  real contra el proxy en esta tarea: la evidencia es la de Fase 0 sobre el mismo modelo/`num_ctx`,
+  no una sesión de edición nueva — sigue pendiente medir el caso de uso real (edición, no solo chat).
+- Columnas reales de `ejecutor_mision` y `ejecutor_regla` en `jax_memory` (esquema vivo, no el
+  archivo). **Verificado (2026-09-28)** con `SHOW COLUMNS` contra producción (127.0.0.1:3308):
+  `ejecutor_mision` tiene `id, user_id, objetivo, maquinas, sesion_id, created_at, updated_at` — **no**
+  tiene `tipo`, `repo_id`, `rama`, URL de PR ni estado de entrega; §6 los da como columnas nuevas por
+  agregar, y en efecto no existen hoy. `ejecutor_regla` tiene `id, codigo, tipo('prohibido',
+  'destructivo'), herramientas, campo('command','file_path','cualquiera'), patron, ambito_host,
+  ambito_roles(set), es_canario, activa, origen, ejemplos_coincide, ejemplos_no_coincide, created_at`
+  — el `campo` de hoy no tiene un valor para diff/rutas estructurales; C1 de código (§5.1) necesitará
+  ampliarlo o resolverlo aparte cuando se implemente, no asumir que `command`/`file_path` alcanzan.
+- Nombre y formato del token de grano fino de GitHub vigente. **Verificado (2026-09-28):** la variable
+  es `JAX_GITHUB_TOKEN` en `/etc/jax/.env` (`root:jaxsvc 640`); hoy está **ausente**
+  (`grep -c '^JAX_GITHUB_TOKEN='` da 0), consistente con que el paso 6 de §8 («Fernando guarda el
+  token real») todavía no se ejecutó. El formato que exige el guion previsto
+  (`ops/guardar-token-github.sh`, `docs/superpowers/plans/2026-09-28-ejecutor-codigo.md:1190`) es
+  `^github_pat_[A-Za-z0-9_]+$`, largo 40–255; un token clásico `ghp_…` se rechaza (DC3 exige grano
+  fino).
 
 *En memoria de Jairo Urbina. En honor al Prof. Raúl Jacobs.*
