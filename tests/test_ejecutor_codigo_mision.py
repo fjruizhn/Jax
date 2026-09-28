@@ -640,3 +640,30 @@ def test_real_pr_sin_url_https_valida_no_esta_confirmado(tmp_path, github, url):
                                                    httpx.Response(201, json={"number": 1, "html_url": url})))
     assert (r["estado_entrega"], r["rama_empujada"], r["pr_url"]) == ("empujado_sin_pr", True, None)
     assert r["violaciones"] == [{"regla": "entrega", "ruta": "", "detalle": "github_api: pr_url_invalida"}]
+
+
+# --- MINOR-A (ronda final): cabecera `encoding` distinta de UTF-8 ----------------------------------
+
+def test_real_commit_con_encoding_no_utf8_se_rechaza(tmp_path, github):
+    """El barrido lee el objeto como UTF-8; un mensaje en otra codificación no se decodifica: se rechaza."""
+    c = _preparar(tmp_path)
+    (c.ruta / "a").write_text("2")
+    _git("add", "a", cwd=c.ruta)
+    _git("-c", "i18n.commitEncoding=ISO-8859-1", "commit", "-q", "-m", "mensaje", cwd=c.ruta)
+    pedidos: list = []
+    r = _entregar_real(c, pedidos)
+    assert r["estado_entrega"] == "rechazada_por_contrato", r
+    assert [v["regla"] for v in r["violaciones"]] == ["encoding_no_permitido"]
+    assert _nada_empujado(github, pedidos)
+
+
+@pytest.mark.parametrize("cabecera, rechaza", [
+    ("encoding UTF-8", False), ("encoding utf8", False), ("encoding ISO-8859-1", True), ("encoding UTF-16", True),
+    ("", False),
+])
+def test_encoding_de_la_cabecera(cabecera, rechaza):
+    crudo = "tree " + "a" * 40 + "\nauthor x <x@x> 1 +0000\n" + (cabecera + "\n" if cabecera else "") + \
+        "\nencoding ISO-8859-1 (en el mensaje no cuenta)\n"
+    d = Dobles((A_PY,), commits=(E.Commit("a" * 40, AXIOMA, AXIOMA, (A_PY,), crudo),))
+    r = _entregar(d)
+    assert (r["estado_entrega"] == "rechazada_por_contrato") is rechaza

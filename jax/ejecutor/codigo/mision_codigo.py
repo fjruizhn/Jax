@@ -106,6 +106,20 @@ def _cuerpo_con_secretos(titulo: str, *textos: str, token: str) -> tuple[Violaci
     return ()
 
 
+def _encoding_no_permitido(historial) -> tuple[Violacion, ...]:
+    """MINOR-A: el barrido lee cada objeto como UTF-8. Un commit con cabecera `encoding` distinta NO
+    se decodifica con ella: se rechaza. Solo cuentan las cabeceras (hasta la primera línea vacía)."""
+    v: list[Violacion] = []
+    for c in historial:
+        for linea in c.crudo.split("\n"):
+            if linea == "":
+                break
+            if linea.startswith("encoding ") and linea[len("encoding "):].strip().lower() not in ("utf-8", "utf8"):
+                v.append(Violacion("encoding_no_permitido", "", f"commit {c.sha[:12]}: cabecera encoding no UTF-8"))
+                break
+    return tuple(v)
+
+
 def _sin_repetir(violaciones) -> tuple[Violacion, ...]:
     return tuple(dict.fromkeys(violaciones))
 
@@ -152,7 +166,8 @@ async def entregar(clon: Clon, *, mision_id: str, repo: str, revision_legible: b
     titulo = f"Axioma: misión {mision_id[:8]}"
     cuerpo = cuerpo_del_pr(informe, mision_id, modelo)
     violaciones = _sin_repetir(
-        _identidad(historial, esperada) + revisar(cambios, repo) + lineas_con_secretos(cambios)
+        _identidad(historial, esperada) + _encoding_no_permitido(historial) + revisar(cambios, repo)
+        + lineas_con_secretos(cambios)
         + rutas_con_secretos(cambios)
         + tuple(v for c in historial for v in lineas_con_secretos(c.cambios) + rutas_con_secretos(c.cambios))
         + tuple(Violacion("secretos", "", f"commit {c.sha[:12]}: patrón de credencial en el mensaje o la cabecera")
