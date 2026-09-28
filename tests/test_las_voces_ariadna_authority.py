@@ -12,6 +12,15 @@ mod = importlib.util.module_from_spec(SPEC); sys.modules[SPEC.name] = mod; SPEC.
 @pytest.fixture()
 def root(tmp_path: Path) -> Path:
     shutil.copytree(REPO / "projects/las-voces", tmp_path / "projects/las-voces")
+
+    # These tests exercise the LV-003 authority transition contract from its
+    # pre-closure lifecycle state. Do not depend on canonical master remaining
+    # READY after human acceptance closes LV-003.
+    project_path = tmp_path / "projects/las-voces/project.json"
+    project = json.loads(project_path.read_text())
+    next(item for item in project["tasks"] if item["id"] == "LV-003")["status"] = "READY"
+    project_path.write_text(json.dumps(project), encoding="utf-8")
+
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     for key, value in (("user.email", "test@example.invalid"), ("user.name", "Test")):
         subprocess.run(["git", "-C", str(tmp_path), "config", key, value], check=True)
