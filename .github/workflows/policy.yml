@@ -4597,8 +4597,18 @@ jobs:
           #   captura de máquina ajena, ssh no literal), tests/test_ejecutor_mision_servicio.py 30 -> 34
           #   (+4: descartadas en el informe, pausa del contexto, config total x2), barrido 5 -> 6 y
           #   entrega 38 -> 39. Los 45 skipped no cambian. Medido archivo por archivo contra 52600db.
-          grep -qE "^3090 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3090 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 3090 -> 3112 el 2026-09-28 (Tarea 9, ronda final de la auditoría: MAJOR-A/B, MINOR-A/B/C, tope de
+          #   correr_git): +22 netas, RE-MEDICIÓN porque se borra 1 -- tests/test_ejecutor_codigo_mision.py
+          #   48 -> 65 (+18 -1: empuje fallido x4 -- remoto con la punta, sin ella x2, ls-remote caído --,
+          #   PR previo con pausa y sin él, turno 2 con PATCH 502 y html_url inválida x5 con git real,
+          #   encoding no UTF-8 con git real y x5 de cabecera; sale el caso "empujar" de
+          #   test_un_paso_que_falla_antes_del_empuje: ahora lo cubren los de empuje fallido),
+          #   tests/test_ejecutor_codigo_git_token.py 7 -> 9 (tope vencido mata el grupo, tope por omisión),
+          #   tests/test_ejecutor_codigo_entrega.py 39 -> 41 (ls-remote real x2) y
+          #   tests/test_ejecutor_mision_servicio.py 34 -> 35 (descartadas antes y recorte de respaldadas).
+          #   Los 45 skipped no cambian. Medido archivo por archivo contra 705629f; manda el runner.
+          grep -qE "^3112 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3112 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
