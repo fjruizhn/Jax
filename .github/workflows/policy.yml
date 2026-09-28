@@ -4571,8 +4571,21 @@ jobs:
           #   C5) y tests/test_ejecutor_contratos_cuenta_axioma.py 51 -> 54 (+3: remoto_claude con
           #   directorio_trabajo y safe.directory). Ningún test nuevo se saltea: los 45 skipped no
           #   cambian. Medido en local archivo por archivo contra 7bf39a0; manda el runner.
-          grep -qE "^3013 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3013 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 3013 -> 3048 el 2026-09-28 (Tarea 9, rulings del controlador): +35 netas, RE-MEDICIÓN porque
+          #   se borran 10 -- tests/test_ejecutor_codigo_diff.py 2 -> 21 (+19: solo "\n" parte líneas,
+          #   secreto tras \x1c/\r/u2028… x9, "++"/"--" dentro del hunk son contenido x2, rutas UTF-8 /
+          #   con espacios / " b/" adentro x4, TAB tras ruta con espacios, comillas con octal, borrado y
+          #   modo, renombre), tests/test_ejecutor_codigo_entrega.py 35 -> 38 (+5 -2: año.py y "dir con
+          #   espacio" con git real, quotePath=false fijado, tamanos_de_la_rama x3; se borran los 2 de
+          #   tamanos_en_el_espejo, que solo medía la punta y se retiró), tests/test_ejecutor_codigo_
+          #   git_token.py 6 -> 7 (+1: stdin de correr_git), tests/test_ejecutor_codigo_mision.py 26 -> 28
+          #   (+2: blob grande en un commit intermedio ya borrado, rutas raras entregadas) y
+          #   tests/test_ejecutor_mision.py 69 -> 79 (+18 -8: la entrega al final y solo si todo pasó x9
+          #   condiciones, estados de la entrega x3, orden, vigía sin latir no prepara, máquina local
+          #   para C5 x3; se reescriben 8 propias de la Tarea 9 que fijaban el orden anterior). Los 45
+          #   skipped no cambian. Medido archivo por archivo contra 093f8a2; manda el runner.
+          grep -qE "^3048 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3048 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
