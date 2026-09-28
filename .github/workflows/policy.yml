@@ -1854,6 +1854,7 @@ jobs:
           jacobs/_devolucion_ejecutor_test.py
           tests/test_jacobs_descarte.py
           tests/test_store_columna_descarte_acotada.py
+          projects/las-voces/projections/tests/test_lv002_projection.py
       - name: Publicar fallos de tests puros
         if: failure()
         run: |
@@ -2026,6 +2027,7 @@ jobs:
             jacobs/_devolucion_ejecutor_test.py \
             tests/test_jacobs_descarte.py \
             tests/test_store_columna_descarte_acotada.py \
+            projects/las-voces/projections/tests/test_lv002_projection.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
