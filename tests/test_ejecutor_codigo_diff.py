@@ -51,7 +51,7 @@ def _un_archivo(linea_agregada: str, ruta: str = "a.py") -> str:
     return (f"diff --git a/{ruta} b/{ruta}\n--- a/{ruta}\n+++ b/{ruta}\n@@ -0,0 +1 @@\n+{linea_agregada}\n")
 
 
-@pytest.mark.parametrize("separador", ["\x1c", "\x1d", "\x1e", "\r", "\x0b", "\x0c", "\x85", " ", " "])
+@pytest.mark.parametrize("separador", ["\x1c", "\x1d", "\x1e", "\r", "\x0b", "\x0c", "\x85", "\u2028", "\u2029"])
 def test_un_separador_que_no_es_salto_de_linea_no_esconde_un_secreto(separador):
     """`str.splitlines()` corta en todos estos: la segunda mitad no empezaba con '+' y se perdía."""
     (c,) = parsear(_un_archivo(f"x = 1{separador}{PAT}"))
