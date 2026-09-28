@@ -258,6 +258,19 @@ def test_real_camino_feliz_empuja_la_rama_y_abre_el_pr(tmp_path, github):
     assert cuerpo.startswith("informe C5") and cuerpo.endswith(PIE)
 
 
+def test_real_rutas_no_ascii_y_con_espacios_se_entregan(tmp_path, github):
+    """Antes del ruling, `año.py` salía citado por git y el parser reventaba con IndexError."""
+    c = _preparar(tmp_path)
+    (c.ruta / "dir con espacio").mkdir()
+    for ruta in ("año.py", "dir con espacio/x.py"):
+        (c.ruta / ruta).write_text("x = 1\n")
+    _git("add", "-A", cwd=c.ruta)
+    _git("commit", "-q", "-m", "raras", cwd=c.ruta)
+    pedidos: list = []
+    assert _entregar_real(c, pedidos)["estado_entrega"] == "abierto"
+    assert f"refs/heads/{RAMA}" in _refs(github)
+
+
 def test_real_sin_commits_es_sin_cambios(tmp_path, github):
     c = _preparar(tmp_path)
     (c.ruta / "sin-commitear.txt").write_text("x")

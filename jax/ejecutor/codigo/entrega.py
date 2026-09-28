@@ -133,7 +133,8 @@ async def diff_en_el_espejo(espejo: Path, *, mision_id: str, rama_por_omision: s
     base = validar_rama_base(rama_por_omision)
     with hogar_temporal() as home:
         try:
-            salida = await correr_git(["-C", str(espejo), "diff", "--no-color", "--no-ext-diff", "--no-textconv",
+            salida = await correr_git(["-c", "core.quotePath=false", "-C", str(espejo), "diff", "--no-color",
+                                       "--no-ext-diff", "--no-textconv",
                                        "--text", "--find-renames", "-U0",
                                        f"refs/remotes/origin/{base}...refs/heads/{rama}", "--"],
                                       env=entorno_base(home), error="diff_fallo")
@@ -182,7 +183,8 @@ async def commits_de_la_rama(espejo: Path, *, mision_id: str, rama_por_omision: 
     base = validar_rama_base(rama_por_omision)
     with hogar_temporal() as home:
         try:
-            salida = await correr_git(["-C", str(espejo), "--no-replace-objects", "log", "--no-color", "--no-ext-diff",
+            salida = await correr_git(["-c", "core.quotePath=false", "-C", str(espejo), "--no-replace-objects", "log",
+                                       "--no-color", "--no-ext-diff",
                                        "--no-textconv", "--text", "--no-renames", "--no-mailmap", "--no-notes",
                                        "--no-show-signature", "--diff-merges=separate", "-p", "-U0", _FORMATO,
                                        f"refs/remotes/origin/{base}..refs/heads/{rama}", "--"],

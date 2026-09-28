@@ -525,3 +525,36 @@ def test_commits_de_la_rama_lee_como_texto_un_archivo_con_nul_que_ya_no_esta(tmp
     _traer(c)
     assert asyncio.run(E.diff_en_el_espejo(c.espejo, mision_id=MID, rama_por_omision="main")) == ()
     assert any(SECRETO in l for x in _commits(c) for cambio in x.cambios for l in cambio.agregadas)
+
+
+# --- ruling (Tarea 9): rutas no ASCII y con espacios, con git real -------------------------------
+
+RUTAS_RARAS = ("año.py", "dir con espacio/x.py")
+
+
+def test_rutas_no_ascii_y_con_espacios_en_diff_historial_y_tamanos(tmp_path, github):
+    c = _preparar(tmp_path)
+    (c.ruta / "dir con espacio").mkdir()
+    for ruta in RUTAS_RARAS:
+        (c.ruta / ruta).write_text(f"{SECRETO}\n")
+    _git("add", "-A", cwd=c.ruta)
+    _git("commit", "-q", "-m", "raras", cwd=c.ruta)
+    _traer(c)
+    neto = asyncio.run(E.diff_en_el_espejo(c.espejo, mision_id=MID, rama_por_omision="main"))
+    assert sorted(x.ruta for x in neto) == sorted(RUTAS_RARAS)
+    assert all(x.agregadas == (SECRETO,) for x in neto)
+    (commit,) = _commits(c)
+    assert sorted(x.ruta for x in commit.cambios) == sorted(RUTAS_RARAS)
+
+
+def test_diff_y_log_de_la_entrega_van_con_quotepath_false(tmp_path, monkeypatch):
+    llamadas = []
+
+    async def espia(args, **kw):
+        llamadas.append(list(args))
+        return b""
+    monkeypatch.setattr(E, "correr_git", espia)
+    asyncio.run(E.diff_en_el_espejo(tmp_path, mision_id=MID, rama_por_omision="main"))
+    asyncio.run(E.commits_de_la_rama(tmp_path, mision_id=MID, rama_por_omision="main"))
+    assert len(llamadas) == 2
+    assert all(a[:2] == ["-c", "core.quotePath=false"] for a in llamadas), llamadas

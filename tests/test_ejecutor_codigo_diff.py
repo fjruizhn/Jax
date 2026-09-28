@@ -77,6 +77,13 @@ def test_rutas_utf8_y_con_espacios_sin_comillas(ruta):
     assert c.ruta == ruta and c.agregadas == ("x",)
 
 
+def test_git_agrega_un_tab_tras_una_ruta_con_espacios_en_mas_mas_mas():
+    texto = ("diff --git a/dir con espacio/x.py b/dir con espacio/x.py\nnew file mode 100644\n"
+             "--- /dev/null\n+++ b/dir con espacio/x.py\t\n@@ -0,0 +1 @@\n+x\n")
+    (c,) = parsear(texto)
+    assert c.ruta == "dir con espacio/x.py"
+
+
 def test_rutas_entre_comillas_con_escapes_y_octal():
     texto = ('diff --git "a/a\\303\\261o\\t.py" "b/a\\303\\261o\\t.py"\n'
              'new file mode 100644\n--- /dev/null\n+++ "b/a\\303\\261o\\t.py"\n@@ -0,0 +1 @@\n+x\n')

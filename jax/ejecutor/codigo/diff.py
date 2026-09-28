@@ -56,9 +56,13 @@ def _cita(texto: str, i: int) -> tuple[str, int]:
 
 
 def _ruta(token: str, prefijo: str) -> str | None:
-    """`a/x`, `"a/x"` o `/dev/null` (→ None)."""
+    """`a/x`, `"a/x"` o `/dev/null` (→ None). En `---`/`+++`, git agrega un TAB al final de una
+    ruta con espacios (verificado con git 2.53); una ruta sin comillas no puede terminar en TAB
+    (un TAB la haría citar), así que se quita uno."""
     if token.startswith('"'):
         token = _cita(token, 0)[0]
+    elif token.endswith("\t"):
+        token = token[:-1]
     if token == "/dev/null":
         return None
     return token[len(prefijo):] if token.startswith(prefijo) else token
