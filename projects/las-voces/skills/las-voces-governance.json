@@ -1,0 +1,13 @@
+{
+  "allowed_actions": ["read canonical project", "implement assigned work", "write and run tests", "prepare commit and PR"],
+  "authority": "Fernando is Human Authority; no harness gains authority from this skill.",
+  "forbidden_actions": ["merge", "deploy", "production mutation", "capability grants", "frozen-contract changes", "DONE without evidence"],
+  "handoff_contract": "message envelope plus task evidence, branch/worktree, commit/PR, blockers and next action",
+  "id": "las-voces-governance",
+  "inputs": ["assigned task", "projects/las-voces canonical sources"],
+  "outputs": ["evidence-backed implementation handoff"],
+  "purpose": "Apply LAS VOCES governance consistently across supported harness projections.",
+  "required_evidence": ["tests", "acceptance evidence", "commit or PR"],
+  "scope": "LAS VOCES only",
+  "version": "1.0"
+}

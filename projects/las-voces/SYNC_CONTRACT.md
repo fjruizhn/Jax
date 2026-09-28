@@ -13,24 +13,28 @@ Canónico:
 - skills/
 
 ## Proyecciones
-Shared:
-- AGENTS.md
-
 Codex:
-- .codex/skills/
+- `projects/las-voces/AGENTS.md` (nested instructions discovered by Codex from
+  the project working directory). This environment has no repository-local
+  Codex skill path; no `.codex/skills/` projection is invented.
 
 Claude Code:
-- CLAUDE.md
-- .claude/skills/
-- .claude/agents/
+- `projects/las-voces/CLAUDE.md`
 
 Qwen Code:
-- QWEN.md
-- .qwen/skills/
-- .qwen/agents/
+- `projects/las-voces/QWEN.md`
+- `projects/las-voces/.qwen/skills/`
+- `projects/las-voces/.qwen/agents/`
 
 ## Regla
 Canonical first. Las copias específicas de harness son generadas. `axioma sync las-voces` debe detectar drift por hash y negarse a sobrescribir silenciosamente modificaciones manuales.
+
+## Reconciliation
+`python3 scripts/axioma_sync.py las-voces --check` is non-mutating and fails
+closed on stale or manually edited projections. `python3 scripts/axioma_sync.py
+las-voces` is the explicit reconciliation mode; it stages all files, atomically
+replaces them, restores prior files if a replacement fails, writes
+`sync/manifest.json`, and verifies the result.
 
 ## Agent Bus
 Toda conversación/handoff relevante entre agentes debe producir un envelope auditable:
