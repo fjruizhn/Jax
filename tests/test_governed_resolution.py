@@ -55,6 +55,48 @@ def test_f2ba02_b9_evidence_is_explicit_preserved_and_not_freshened():
     assert r.resolve(b.predicate,args,scope(),validation_time=NOW,server_input=server_input((("B8/jaxctl",obs()),))).status is ResolutionStatus.UNAVAILABLE
     with pytest.raises(GovernanceContractError):mod._b9_evidence_from_server({"state":"RESOLVED_CURRENT"},scope(),"fake")
 
+def test_b9_h1_evidence_value_is_canonical_frozen_and_digest_bound():
+    original={"nested":{"items":["x",{"v":1}]}}
+    upstream=ResolutionResult(ResolutionState.RESOLVED_CURRENT,"B8/jaxctl",NOW.timestamp(),original)
+    evidence=mod._b9_evidence_from_server(upstream,scope(),"b9:frozen")
+    retained=evidence.result.value
+    original["nested"]["items"][1]["v"]=2
+    original["nested"]["items"].append("later")
+    assert retained["nested"]["items"]==("x",MappingProxyType({"v":1}))
+    with pytest.raises(TypeError):retained["nested"]["items"][1]["v"]=3
+    same=mod._b9_evidence_from_server(ResolutionResult(ResolutionState.RESOLVED_CURRENT,"B8/jaxctl",NOW.timestamp(),{"nested":{"items":["x",{"v":1}]}}),scope(),"b9:same")
+    changed=mod._b9_evidence_from_server(ResolutionResult(ResolutionState.RESOLVED_CURRENT,"B8/jaxctl",NOW.timestamp(),{"nested":{"items":["x",{"v":2}]}}),scope(),"b9:changed")
+    assert mod._digest(evidence.result.value)==mod._digest(same.result.value)
+    assert mod._digest(evidence.result.value)!=mod._digest(changed.result.value)
+
+@pytest.mark.parametrize("value",["text",42,["list"],object(),{1:"bad-key"}])
+def test_b9_h1_rejects_unsupported_or_noncanonical_current_values(value):
+    with pytest.raises(GovernanceContractError):
+        mod._b9_evidence_from_server(ResolutionResult(ResolutionState.RESOLVED_CURRENT,"B8/jaxctl",NOW.timestamp(),value),scope(),"b9:invalid")
+
+def test_b9_h2_binding_and_runtime_are_strictly_single_source():
+    a,c=rules()
+    common=dict(predicate="B9_DESIGNATED_CURRENT_SOURCE",designated_source_identity="B8/jaxctl",resolver_implementation_identity="jax.memory.b9_resolvers:DesignatedSourceResolver",resolver_version="existing-v1",source_configuration_digest=None)
+    with pytest.raises(GovernanceContractError):
+        RegistryEntry(
+            binding(**common,conflict_policy=ConflictPolicy.ALL_SOURCES_AGREE,designated_source_identities=("B8/jaxctl","B8/other")),
+            TrustedAdapterRegistration(AdapterKind.B9_DESIGNATED_CURRENT_SOURCE,"jax.memory.b9_resolvers:DesignatedSourceResolver","existing-v1","B8/jaxctl",None,{}),
+            ("reference_type","reference_value"),
+        )
+    with pytest.raises(GovernanceContractError):
+        RegistryEntry(
+            binding(**common,designated_source_identities=("B8/jaxctl","B8/other")),
+            TrustedAdapterRegistration(AdapterKind.B9_DESIGNATED_CURRENT_SOURCE,"jax.memory.b9_resolvers:DesignatedSourceResolver","existing-v1","B8/jaxctl",None,{}),
+            ("reference_type","reference_value"),
+        )
+    with pytest.raises(GovernanceContractError):
+        binding(**common,designated_source_identities=())
+    b=binding(**common,designated_source_identities=("B8/jaxctl",))
+    r=registry(RegistryEntry(b,TrustedAdapterRegistration(AdapterKind.B9_DESIGNATED_CURRENT_SOURCE,b.resolver_implementation_identity,b.resolver_version,b.designated_source_identity,None,{}),("reference_type","reference_value")))
+    evidence=mod._b9_evidence_from_server(ResolutionResult(ResolutionState.RESOLVED_CURRENT,"B8/jaxctl",NOW.timestamp(),{"value":"x"}),scope(),"b9:single")
+    assert r.resolve(b.predicate,{"reference_type":"health","reference_value":"hall"},scope(),validation_time=NOW,b9_evidence=evidence).status is ResolutionStatus.RESOLVED
+    assert r.resolve(b.predicate,{"reference_type":"health","reference_value":"hall"},scope(),validation_time=NOW,b9_evidence=evidence,server_input=server_input((("B8/jaxctl",obs()),))).status is ResolutionStatus.SOURCE_MISMATCH
+
 def test_f2ba03_receipt_is_authenticated_and_replay_checked():
     b=binding();r=registry();rec=r.resolve("CAPABILITY_AVAILABLE",ARGS,scope(),validation_time=NOW,server_input=inp(b))
     assert r.verify_receipt(rec,scope(),validation_time=NOW)

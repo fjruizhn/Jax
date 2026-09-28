@@ -44,7 +44,7 @@ class ScopeRule:
 
 @dataclass(frozen=True)
 class PredicateAuthorityBinding:
-    predicate:str; predicate_version:str; designated_source_identity:str; source_owner_authority_ref:str; environment:str; tenant_project_scope_rule:ScopeRule; subject_audience_scope_rule:ScopeRule; freshness_sla_seconds:int; conflict_policy:ConflictPolicy; resolver_implementation_identity:str; resolver_version:str; source_configuration_digest:str|None; binding_version:str; enabled:bool=True; designated_source_identities:tuple[str,...]=()
+    predicate:str; predicate_version:str; designated_source_identity:str; source_owner_authority_ref:str; environment:str; tenant_project_scope_rule:ScopeRule; subject_audience_scope_rule:ScopeRule; freshness_sla_seconds:int; conflict_policy:ConflictPolicy; resolver_implementation_identity:str; resolver_version:str; source_configuration_digest:str|None; binding_version:str; enabled:bool=True; designated_source_identities:tuple[str,...]|None=None
     def __post_init__(self):
         for n in ("predicate","predicate_version","designated_source_identity","source_owner_authority_ref","environment","resolver_implementation_identity","resolver_version","binding_version"):object.__setattr__(self,n,_text(getattr(self,n),n))
         _enum(self.conflict_policy,ConflictPolicy,"conflict_policy")
@@ -52,7 +52,10 @@ class PredicateAuthorityBinding:
         if self.environment!=self.tenant_project_scope_rule.environment or self.environment!=self.subject_audience_scope_rule.environment:raise GovernanceContractError("binding environment must match scope rules")
         if not isinstance(self.freshness_sla_seconds,int) or self.freshness_sla_seconds<=0:raise GovernanceContractError("freshness_sla_seconds must be positive int")
         if self.source_configuration_digest is not None:object.__setattr__(self,"source_configuration_digest",_text(self.source_configuration_digest,"source_configuration_digest"))
-        sources=self.designated_source_identities or (self.designated_source_identity,)
+        # Omission means the legacy single designated source.  An explicit
+        # empty tuple is an invalid accredited source set, never a silent
+        # fallback to the primary identity.
+        sources=(self.designated_source_identity,) if self.designated_source_identities is None else self.designated_source_identities
         if not isinstance(sources,tuple) or not sources or len(set(sources))!=len(sources):raise GovernanceContractError("designated source set must be nonempty unique tuple")
         sources=tuple(_text(x,"designated_source_identity") for x in sources)
         if self.designated_source_identity not in sources:raise GovernanceContractError("primary source absent from source set")
@@ -98,6 +101,17 @@ class RegistryEntry:
         if (a.resolver_id,a.resolver_version,a.source_identity,a.source_configuration_digest)!=(b.resolver_implementation_identity,b.resolver_version,b.designated_source_identity,b.source_configuration_digest):raise GovernanceContractError("adapter must exactly match approved binding")
         expected={AdapterKind.CAPABILITY_AVAILABLE:"CAPABILITY_AVAILABLE",AdapterKind.FILE_EXISTS:"FILE_EXISTS",AdapterKind.B9_DESIGNATED_CURRENT_SOURCE:"B9_DESIGNATED_CURRENT_SOURCE"}[a.adapter_kind]
         if b.predicate!=expected:raise GovernanceContractError("adapter kind/predicate mismatch")
+        # B9's existing designated-current-source resolver has exactly one
+        # upstream source.  It is not a multi-source reconciliation adapter;
+        # accepting an agreement policy here would make its one-result
+        # dispatch path bypass the accredited source-set contract.
+        if a.adapter_kind is AdapterKind.B9_DESIGNATED_CURRENT_SOURCE and (
+            b.conflict_policy is not ConflictPolicy.SINGLE_SOURCE_REQUIRED
+            or b.designated_source_identities != (b.designated_source_identity,)
+        ):
+            raise GovernanceContractError(
+                "B9 designated current source requires exactly one SINGLE_SOURCE_REQUIRED source"
+            )
     def projection(self):return {"binding":self.binding.projection(),"adapter":self.adapter.projection(),"argument_keys":list(self.argument_keys),"template_contract_ref":self.template_contract_ref}
 
 class ReceiptAuthenticator:
@@ -176,9 +190,23 @@ class B9ResolutionEvidence:
     def _from_b9_result(cls,t,result,observation_scope,provenance_ref):
         if t is not _B9_EVIDENCE_TOKEN or not isinstance(result,B9ResolutionResult) or not isinstance(observation_scope,ResponseScope):
             raise GovernanceContractError("typed B9 ResolutionResult and scope required")
+        if not isinstance(result.state,B9ResolutionState):
+            raise GovernanceContractError("B9 resolution state must be typed")
+        source=_text(result.source,"B9 source")
         if not isinstance(result.observed_at,(int,float)) or isinstance(result.observed_at,bool) or not math.isfinite(result.observed_at):
             raise GovernanceContractError("B9 observed_at must be numeric")
-        x=object.__new__(cls);object.__setattr__(x,"result",result);object.__setattr__(x,"observation_scope",observation_scope);object.__setattr__(x,"provenance_ref",_text(provenance_ref,"b9 provenance_ref"));return x
+        # ``ResolutionResult`` is frozen but its optional Mapping value is
+        # caller-owned.  Snapshot its exact supported contract here so a
+        # later caller mutation cannot change an authenticated receipt.
+        # Current B9 results are mapping-valued by the B9 contract; never
+        # collapse an unsupported value into an empty mapping.
+        if result.value is not None and not isinstance(result.value,Mapping):
+            raise GovernanceContractError("B9 resolution value must be a mapping or None")
+        if result.state is B9ResolutionState.RESOLVED_CURRENT and not isinstance(result.value,Mapping):
+            raise GovernanceContractError("current B9 resolution requires mapping value")
+        value=None if result.value is None else _freeze(result.value,"B9 resolution value")
+        snapshot=B9ResolutionResult(result.state,source,result.observed_at,value)
+        x=object.__new__(cls);object.__setattr__(x,"result",snapshot);object.__setattr__(x,"observation_scope",observation_scope);object.__setattr__(x,"provenance_ref",_text(provenance_ref,"b9 provenance_ref"));return x
 
 
 _B9_EVIDENCE_TOKEN=object()
@@ -231,13 +259,23 @@ class ResolverRegistry:
             # to be the real typed B9 result plus trusted scope provenance.
             if b9_evidence is None:
                 return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,"server:b9-missing-evidence",{})
+            # The typed evidence is one, and only one, upstream B9
+            # observation.  Generic adapter observations are not an
+            # additional source channel for B9.
+            if inp is not None:
+                return ResolutionStatus.SOURCE_MISMATCH,ResolutionObservation(ResolutionStatus.SOURCE_MISMATCH,now,"server:b9-unexpected-observations",{})
             if not isinstance(b9_evidence,B9ResolutionEvidence) or b9_evidence.observation_scope.scope_digest!=scope.scope_digest:
                 return ResolutionStatus.WRONG_SCOPE,ResolutionObservation(ResolutionStatus.WRONG_SCOPE,now,"server:b9-scope",{})
             result=b9_evidence.result
             if result.state is not B9ResolutionState.RESOLVED_CURRENT:return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,b9_evidence.provenance_ref,{})
             if result.source!=b.designated_source_identity:return ResolutionStatus.SOURCE_MISMATCH,ResolutionObservation(ResolutionStatus.SOURCE_MISMATCH,now,b9_evidence.provenance_ref,{})
             observed=_time(datetime.fromtimestamp(result.observed_at,timezone.utc),"b9 observed_at")
-            value=result.value if isinstance(result.value,Mapping) else {}
+            # B9ResolutionEvidence has already frozen and validated this
+            # mapping.  Keep the exact value; a malformed value is never
+            # normalized into a successful empty result.
+            if not isinstance(result.value,Mapping):
+                return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,b9_evidence.provenance_ref,{})
+            value=result.value
             o=ResolutionObservation(ResolutionStatus.RESOLVED,observed,b9_evidence.provenance_ref,value)
             return self._fresh_observation(o,b,now),o
         if not isinstance(inp,ServerAdapterInput):return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,"server:missing-input",{})

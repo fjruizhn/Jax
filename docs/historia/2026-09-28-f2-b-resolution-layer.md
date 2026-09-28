@@ -94,6 +94,13 @@ F2-C/D will own presentation and transport-time revalidation.
 
 `tests/test_governed_resolution.py` includes final adversarial regressions for
 the sealed registry, explicit B9 upstream timing/source data, authenticated
-receipt tampering and exact-scope replay, and multi-source agreement. The
-previous adapter-specific integration examples were deliberately replaced by
-the trusted dispatcher contract; host wiring is not authorized in F2-B.
+receipt tampering and exact-scope replay, and multi-source agreement. B9
+evidence snapshots its mapping-valued `ResolutionResult.value` using the F2-A
+canonical immutable-value rules; malformed/non-mapping current values are
+rejected, never normalized to `{}`. The existing B9 designated-current-source
+adapter is explicitly one-source only: its binding must use
+`SINGLE_SOURCE_REQUIRED` with exactly one designated source. Multi-source B9
+agreement is deferred until a future authorized adapter implements its full
+source-set semantics. The previous adapter-specific integration examples were
+deliberately replaced by the trusted dispatcher contract; host wiring is not
+authorized in F2-B.
