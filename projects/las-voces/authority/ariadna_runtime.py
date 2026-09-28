@@ -53,7 +53,7 @@ def project_hash(path: Path) -> str:
 def _state_dir(root: Path) -> Path:
     """Git-common control plane when available; a test-only local fallback."""
     try:
-        common = subprocess.check_output(["git", "-C", str(root), "rev-parse", "--git-common-dir"], text=True, stderr=subprocess.DEVNULL).strip()
+        common = subprocess.check_output(["git", "-C", str(root), "rev-parse", "--git-common-dir"], text=True, stderr=subprocess.PIPE).strip()
         base = (root / common).resolve() if not Path(common).is_absolute() else Path(common)
     except (OSError, subprocess.CalledProcessError):
         base = root / ".ariadna-local-state"
