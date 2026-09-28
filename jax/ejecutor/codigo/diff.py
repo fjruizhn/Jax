@@ -2,9 +2,7 @@
 C1 de la entrega decide sobre ESTO, no sobre texto plano con regex."""
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
-from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -49,12 +47,3 @@ def parsear(texto_diff: str) -> tuple[Cambio, ...]:
     _cerrar(actual, salida)
     return tuple(salida)
 
-
-async def diff_de_la_rama(clon: Path, base: str) -> tuple[Cambio, ...]:
-    proc = await asyncio.create_subprocess_exec(
-        "git", "-C", str(clon), "diff", "--no-color", "--find-renames", "-U0", f"{base}...HEAD",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    salida, errores = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"diff_fallo: {errores.decode(errors='replace')[-500:]}")
-    return parsear(salida.decode("utf-8", errors="replace"))
