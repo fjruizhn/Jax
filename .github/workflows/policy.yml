@@ -1760,6 +1760,7 @@ jobs:
           tests/test_ejecutor_contratos_cuenta_axioma.py
           tests/test_ejecutor_contratos_canario_upstream.py
           tests/test_ejecutor_contratos_canario_c1.py
+          tests/test_ejecutor_contratos_canario_codigo.py
           tests/test_ejecutor_contratos_registro.py
           tests/test_ejecutor_contratos_lectura.py
           tests/test_ejecutor_contratos_cerco.py
@@ -1940,6 +1941,7 @@ jobs:
             tests/test_ejecutor_contratos_cuenta_axioma.py \
             tests/test_ejecutor_contratos_canario_upstream.py \
             tests/test_ejecutor_contratos_canario_c1.py \
+            tests/test_ejecutor_contratos_canario_codigo.py \
             tests/test_ejecutor_contratos_registro.py \
             tests/test_ejecutor_contratos_lectura.py \
             tests/test_ejecutor_contratos_cerco.py \
@@ -4607,8 +4609,21 @@ jobs:
           #   tests/test_ejecutor_codigo_entrega.py 39 -> 41 (ls-remote real x2) y
           #   tests/test_ejecutor_mision_servicio.py 34 -> 35 (descartadas antes y recorte de respaldadas).
           #   Los 45 skipped no cambian. Medido archivo por archivo contra 705629f; manda el runner.
-          grep -qE "^3112 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3112 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 3112 -> 3128 el 2026-09-28 (Tarea 12 Step 2 + Tarea 13: contrato de arranque "codigo" y
+          #   sus canarios): +16 puras -- tests/test_ejecutor_contratos_arranque.py 73 -> 82 (+9:
+          #   verificar_token_github x3, codigo sin/con token vía exigir_contratos x2, codigo no
+          #   corre fuera de un turno de código, pruebas_reales cubre el orden con/sin "codigo" x1
+          #   modificado + 1 nuevo, pruebas_reales["codigo"] corre/no corre el canario según el
+          #   token x2) y tests/test_ejecutor_contratos_canario_codigo.py 0 -> 7 (archivo nuevo:
+          #   push bloqueado/no bloqueado/sin su regla, cerco deja o no salir a GitHub, ls-remote
+          #   corre como la cuenta y no por el gancho, diff no bloquea flujos_ci, todos los fallos
+          #   son del contrato "codigo"). Los 45 skipped no cambian. Medido archivo por archivo
+          #   local (checkout de este PR, 43e42da como base): manda el runner. NOTA: origin/master
+          #   avanzó 52 commits más allá del merge-base de esta rama (LV-004) mientras se escribía
+          #   esta ronda -- no se rebasó (fuera del alcance de esta tarea); si el runner mide otro
+          #   número sobre la rama rebasada, ese manda.
+          grep -qE "^3128 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3128 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
