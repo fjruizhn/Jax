@@ -81,9 +81,13 @@ protocol. `authority_context.handoff` must provide `owner`, `branch_worktree`,
 ## LV-004 hosted runtime
 
 ariadna_runtime.py is a local, host-invoked run_once control loop, not an
-activation, service, daemon, network endpoint, or execution capability. Host
-readiness means only that its local lease is held; ACTIVE_GOVERNED is a
-canonical human-authorized lifecycle, not a production deployment claim. It accepts data-only proposals, rebinds them to the
+activation, network endpoint, or execution capability. `ariadna_host.py` is
+the privileged local composition root: it constructs fixed verifier adapters,
+the engine, scheduler, kill-switch checks, and health state; proposal data
+cannot replace any of them. Its repository systemd unit is an uninstalled
+template, not a production deployment claim. Host readiness means only that
+its local lease is held; ACTIVE_GOVERNED is a canonical human-authorized
+lifecycle, not a production deployment claim. It accepts data-only proposals, rebinds them to the
 current project hash, and passes authorized transitions through this contract's
 locked expected-hash/CAS journal path. It cannot provide or replace verifiers,
 edit this contract, execute commands, or make runtime_execution ALLOW.
@@ -95,6 +99,12 @@ Task leases are append-only records and deny concurrent identical task,
 worktree, or ancestor/descendant writable-scope ownership. A host stop request
 prevents a new effectful tick; explicit shutdown releases only its local
 control lease.
+
+An unreleased task lease from a dead or unknown process is surfaced as
+`RECONCILIATION_REQUIRED`, never silently stolen. The GitHub Actions adapter
+requires a configured repository and exact numeric run/job plus commit binding;
+unavailable API evidence is `HUMAN_REQUIRED`. The Human Authority adapter
+requires a strict append-only task-acceptance record, not an actor string.
 
 Each terminal cycle is idempotently appended with host-built instance, cycle,
 project hash, task/action, verdict, evidence refs, lease, and result fields.

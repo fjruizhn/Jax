@@ -46,6 +46,7 @@ class TaskLease:
     writable_scope: str
     lease_id: str
     runtime_instance_id: str
+    pid: int = 0
 
 def project_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -81,7 +82,10 @@ class LocalControlLease:
             os.close(fd); return False
         try:
             prior = json.loads(os.read(fd, 65536) or b"{}")
-            self.previous_stale = isinstance(prior, dict) and prior.get("state") == "ACTIVE" and isinstance(prior.get("pid"), int) and not _pid_alive(prior["pid"])
+            # A live holder cannot be replaced because flock above would fail.
+            # Once this process owns flock, retained ACTIVE metadata is stale
+            # even if its old PID was later reused by an unrelated process.
+            self.previous_stale = isinstance(prior, dict) and prior.get("state") == "ACTIVE"
         except json.JSONDecodeError:
             self.previous_stale = True
         os.lseek(fd, 0, os.SEEK_SET); os.ftruncate(fd, 0)
@@ -125,7 +129,7 @@ class TaskLeaseRegistry:
         self.lock.parent.mkdir(parents=True, exist_ok=True)
         with self.lock.open("a+") as guard:
             fcntl.flock(guard, fcntl.LOCK_EX)
-            lease = TaskLease(lease.task_id, lease.owner, self._scope(lease.worktree), self._scope(lease.writable_scope), lease.lease_id, lease.runtime_instance_id)
+            lease = TaskLease(lease.task_id, lease.owner, self._scope(lease.worktree), self._scope(lease.writable_scope), lease.lease_id, lease.runtime_instance_id, os.getpid())
             active = self._active().values()
             if any(x.task_id == lease.task_id or x.worktree == lease.worktree or self._overlap(x.writable_scope, lease.writable_scope) for x in active): return False
             self._append({"event": "ACQUIRED", "lease": asdict(lease)}); return True
@@ -139,6 +143,9 @@ class TaskLeaseRegistry:
         if lease_id is None: return False
         lease = self._active().get(lease_id)
         return lease is not None and lease.task_id == task_id and lease.runtime_instance_id == instance_id
+    def stale(self) -> list[TaskLease]:
+        """Report unreleased dead/unknown ownership; never silently steal it."""
+        return [lease for lease in self._active().values() if lease.pid <= 0 or not _pid_alive(lease.pid)]
     def _append(self, value: dict[str, Any]) -> None:
         with self.path.open("a") as log:
             log.write(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"); log.flush(); os.fsync(log.fileno())
@@ -158,7 +165,7 @@ class AriadnaRuntime:
         if not self.control.acquire():
             self.lifecycle = Lifecycle.STOPPED; return self.lifecycle
         # The supplied LV-003 engine exposes the authoritative journal state.
-        if self.engine.interrupted_transitions():
+        if self.engine.interrupted_transitions() or self.leases.stale():
             self.lifecycle = Lifecycle.RECONCILIATION_REQUIRED
         elif not self.engine.activation_approved():
             self.control.release(); self.lifecycle = Lifecycle.STOPPED
@@ -184,12 +191,16 @@ class AriadnaRuntime:
                 if project.get("project", {}).get("id") != PROJECT_ID or not lease.owner or len([x for x in project.get("tasks", []) if x.get("id") == lease.task_id]) != 1: return False
             except (OSError, json.JSONDecodeError):
                 return False
+            # Registry records the current PID durably; keep the same normalized
+            # lease locally so later release cannot be confused with stale input.
+            lease = TaskLease(lease.task_id, lease.owner, lease.worktree, lease.writable_scope, lease.lease_id, lease.runtime_instance_id, os.getpid())
             if self.leases.acquire(lease): self._owned_leases[lease.lease_id] = lease; return True
             return False
     def release_task(self, lease: TaskLease) -> bool:
         with self._mutex:
-            if self._owned_leases.get(lease.lease_id) != lease: return False
-            if self.leases.release(lease): self._owned_leases.pop(lease.lease_id, None); return True
+            owned = self._owned_leases.get(lease.lease_id)
+            if owned is None or owned.task_id != lease.task_id or owned.runtime_instance_id != lease.runtime_instance_id: return False
+            if self.leases.release(owned): self._owned_leases.pop(lease.lease_id, None); return True
             return False
     def _audit(self, record: dict[str, Any]) -> None:
         key = record["idempotency_key"]
@@ -231,8 +242,12 @@ class AriadnaRuntime:
             result = "EFFECT_ALLOW" if verdict == "ALLOW" else "NOOP_" + verdict
         elif verdict == "ALLOW" and proposal.action in {"coordinate_verified_work", "emit_handoff"}:
             if project_hash(state) != observed_hash: return "NOOP_STALE_OR_INVALID"
-            with self.outbox_path.open("a") as outbox:
-                outbox.write(json.dumps({"event_type": proposal.action, "idempotency_key": key, "task_id": proposal.task_id, "handoff": proposal.handoff, "lease_id": lease_id}, sort_keys=True) + "\n"); outbox.flush(); os.fsync(outbox.fileno())
-            result = "EFFECT_" + proposal.action.upper()
+            duplicate = self.outbox_path.exists() and any(json.loads(line).get("idempotency_key") == key for line in self.outbox_path.read_text().splitlines() if line)
+            if duplicate:
+                result = "NOOP_IDEMPOTENT"
+            else:
+                with self.outbox_path.open("a") as outbox:
+                    outbox.write(json.dumps({"event_type": proposal.action, "idempotency_key": key, "task_id": proposal.task_id, "handoff": proposal.handoff, "lease_id": lease_id}, sort_keys=True) + "\n"); outbox.flush(); os.fsync(outbox.fileno())
+                result = "EFFECT_" + proposal.action.upper()
         self._audit({"event_type": "ARIADNA_CYCLE", "runtime_instance_id": self.instance_id, "cycle_id": key, "idempotency_key": key, "project_hash": observed_hash, "task_id": proposal.task_id, "action": proposal.action, "verdict": verdict, "result": result, "lease_id": lease_id, "evidence_refs": list(proposal.evidence_refs)})
         return result
