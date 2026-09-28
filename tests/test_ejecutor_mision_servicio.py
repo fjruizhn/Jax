@@ -193,3 +193,170 @@ def test_el_cerebro_le_da_bash_y_skill_al_arnes(monkeypatch):
     assert vistos["herramientas"] == "Bash,Skill"
     assert vistos["directorio_preparado"] == Path(
         f"/var/lib/jax-ejecutor-misiones/{TURNO['mision_id']}/claude-projects")
+
+
+# --- misión de CÓDIGO (spec 2026-09-28 v1.3, Tarea 9) ------------------------------------------
+
+from jax.ejecutor.codigo import mision_codigo as MC  # noqa: E402
+from jax.ejecutor.codigo import preparar as P  # noqa: E402
+from jax.ejecutor import transporte, cita  # noqa: E402
+
+TOKEN = "github_pat_TOKEN_FALSO_" + "0" * 30
+ENV_CODIGO = {"JAX_PROXY_CARRIL_MODELO": "qwen-carril", "JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS": "1024",
+              "JAX_EJECUTOR_MISIONES": "/var/lib/jax-ejecutor-misiones", "JAX_GITHUB_TOKEN": TOKEN}
+
+
+def _turno_codigo() -> M.Turno:
+    return M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])}, tipo="codigo",
+                   repo={"owner_repo": "o/r", "comandos_prueba": ("pytest -q",)})
+
+
+class _Cuenta:
+    nombre = "axioma"
+    puerto = 2222
+    llave = Path("/etc/jax-ejecutor/llave")
+    node_bin = Path("/opt/ejecutor/node/bin")
+
+
+class _CtxCodigo:
+    cuenta = _Cuenta()
+    puerto_proxy = 18435
+
+
+CLON = P.Clon(Path(f"/var/lib/jax-ejecutor-misiones/{TURNO['mision_id']}/repo"), f"axioma/{TURNO['mision_id']}",
+              "trunk", ("package-lock.json",), Path(f"/var/lib/jax-ejecutor-misiones/{TURNO['mision_id']}/espejo.git"))
+
+
+@pytest.fixture
+def codigo(monkeypatch):
+    """Todo lo de afuera (API de GitHub, DB, preparar, entregar, la jaula) reemplazado por dobles
+    que anotan con qué se los llamó."""
+    vistos: dict = {"config_leida": 0}
+
+    async def config():
+        vistos["config_leida"] += 1
+        return S.ConfigCodigo("Axioma Prueba <ax@prueba.io>", 1234)
+
+    async def rama(cliente, repo):
+        vistos["rama"] = (repo, str(cliente.base_url), cliente.headers.get("authorization"))
+        return "trunk"
+
+    async def preparar(repo, **kw):
+        vistos["preparar"] = (repo, kw)
+        return CLON
+
+    async def entregar(clon, **kw):
+        vistos["entregar"] = (clon, kw)
+        return {"estado_entrega": "abierto", "pr_url": "https://gh/pr/1", "violaciones": [], "notas": []}
+
+    def remoto(cuenta, **kw):
+        vistos["remoto"] = kw
+        return "remoto-de-prueba"
+
+    async def correr(cuenta, remoto, *, entrada, tope_s):
+        return 0, b"{}", b""
+
+    async def nada(*a, **k):
+        return None
+
+    monkeypatch.setattr(S, "leer_config_codigo", config)
+    monkeypatch.setattr(P, "rama_por_omision", rama)
+    monkeypatch.setattr(P, "preparar", preparar)
+    monkeypatch.setattr(MC, "entregar", entregar)
+    monkeypatch.setattr(S.cuenta_axioma, "remoto_claude", remoto)
+    monkeypatch.setattr(S.cuenta_axioma, "correr_en_la_cuenta", correr)
+    monkeypatch.setattr(S.cuenta_axioma, "preparar_directorio_projects", nada)
+    return vistos
+
+
+def test_codigo_sin_token_no_se_configura():
+    env = {k: v for k, v in ENV_CODIGO.items() if k != "JAX_GITHUB_TOKEN"}
+    with pytest.raises(S.SinConfigurar) as exc:
+        S.dependencias_reales(env, _turno_codigo(), tope_s=1.0, espera_s=1.0)
+    assert exc.value.args[0] == "JAX_GITHUB_TOKEN"
+    with pytest.raises(S.SinConfigurar):
+        S.dependencias_reales({**env, "JAX_GITHUB_TOKEN": "  "}, _turno_codigo(), tope_s=1.0, espera_s=1.0)
+
+
+def test_servidor_no_trae_dependencias_de_codigo_ni_pide_token():
+    turno = M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])})
+    deps = S.dependencias_reales({}, turno, tope_s=1.0, espera_s=1.0)
+    assert deps.preparar_codigo is None and deps.entregar_codigo is None
+
+
+def test_codigo_prepara_con_la_rama_de_la_api_el_autor_de_la_config_y_los_accesos_de_la_cuenta(codigo):
+    deps = S.dependencias_reales(ENV_CODIGO, _turno_codigo(), tope_s=1.0, espera_s=1.0)
+    assert asyncio.run(deps.preparar_codigo(_CtxCodigo())) is CLON
+    assert codigo["rama"] == ("o/r", "https://api.github.com", f"Bearer {TOKEN}")
+    repo, kw = codigo["preparar"]
+    assert repo == P.Repo("o/r", ("pytest -q",))
+    assert kw["mision_id"] == TURNO["mision_id"] and kw["raiz"] == Path("/var/lib/jax-ejecutor-misiones")
+    assert kw["rama_por_omision"] == "trunk" and kw["token"] == TOKEN and kw["autor"] == "Axioma Prueba <ax@prueba.io>"
+    assert kw["node_bin"] == _Cuenta.node_bin and isinstance(kw["accesos"], P.Accesos)
+
+
+def test_codigo_el_cerebro_trabaja_en_el_clon_con_las_herramientas_de_codigo(codigo):
+    deps = S.dependencias_reales(ENV_CODIGO, _turno_codigo(), tope_s=1.0, espera_s=1.0)
+    asyncio.run(deps.preparar_codigo(_CtxCodigo()))
+    asyncio.run(deps.correr_cerebro(_CtxCodigo(), "prompt", TURNO["sesion"], False))
+    assert codigo["remoto"]["herramientas"] == "Bash,Read,Edit,Write,Glob,Grep,Skill"
+    assert codigo["remoto"]["directorio_trabajo"] == CLON.ruta
+    assert TOKEN not in json.dumps({k: str(v) for k, v in codigo["remoto"].items()})
+
+
+def test_codigo_sin_clon_preparado_el_cerebro_no_corre(codigo):
+    deps = S.dependencias_reales(ENV_CODIGO, _turno_codigo(), tope_s=1.0, espera_s=1.0)
+    with pytest.raises(RuntimeError, match="codigo_sin_clon"):
+        asyncio.run(deps.correr_cerebro(_CtxCodigo(), "prompt", TURNO["sesion"], False))
+    assert "remoto" not in codigo
+
+
+def test_codigo_entrega_con_token_tope_autor_y_upload_pack_de_la_cuenta(codigo):
+    deps = S.dependencias_reales(ENV_CODIGO, _turno_codigo(), tope_s=1.0, espera_s=1.0)
+    afirmacion = cita.Afirmacion("m", "ssh -tt m pytest", "3 passed", "3 passed", "¿pasan?")
+    entrega = transporte.Entrega((), (afirmacion,), ())
+    r = asyncio.run(deps.entregar_codigo(_CtxCodigo(), CLON, entrega, True))
+    assert r["estado_entrega"] == "abierto"
+    clon, kw = codigo["entregar"]
+    assert clon is CLON and kw["repo"] == "o/r" and kw["mision_id"] == TURNO["mision_id"]
+    assert kw["token"] == TOKEN and kw["tope_bytes"] == 1234 and kw["autor"] == "Axioma Prueba <ax@prueba.io>"
+    assert kw["modelo"] == "qwen-carril" and kw["revision_legible"] is True
+    assert kw["upload_pack"].startswith("ssh ") and kw["upload_pack"].endswith("axioma@127.0.0.1 git-upload-pack")
+    assert "'3 passed'" in kw["informe"] and "'ssh -tt m pytest'" in kw["informe"]
+    assert str(kw["cliente"].base_url) == "https://api.github.com"
+    assert codigo["config_leida"] == 1
+
+
+def test_codigo_la_config_se_lee_una_vez_por_turno(codigo):
+    deps = S.dependencias_reales(ENV_CODIGO, _turno_codigo(), tope_s=1.0, espera_s=1.0)
+    asyncio.run(deps.preparar_codigo(_CtxCodigo()))
+    asyncio.run(deps.entregar_codigo(_CtxCodigo(), CLON, transporte.Entrega((), (), ()), False))
+    assert codigo["config_leida"] == 1
+    assert codigo["preparar"][1]["autor"] == codigo["entregar"][1]["autor"]
+
+
+def test_informe_c5_va_en_un_bloque_de_codigo_sangrado_sin_saltos_crudos():
+    """Cada valor sale con `repr` (cita.presentar): sin saltos de línea crudos, así que nada
+    puede salirse del bloque sangrado y convertirse en Markdown del PR."""
+    a = cita.Afirmacion("m", "cmd", "linea\n## titulo falso", "linea", "p")
+    texto = S.informe_c5(transporte.Entrega((), (a,), ()), "thot")
+    assert "thot" in texto
+    lineas = texto.splitlines()
+    (item,) = [l for l in lineas if "cmd" in l]
+    assert item.startswith("    ") and "\\n## titulo falso" in item
+    assert not any(l.startswith("#") for l in lineas)
+
+
+@pytest.mark.parametrize("filas, esperado", [
+    ({}, S.ConfigCodigo(S.AUTOR_POR_OMISION, S.TOPE_BYTES_POR_OMISION)),
+    ({"ejecutor.codigo.autor": "Otro <o@x.io>", "ejecutor.codigo.tope_bytes": "10"}, S.ConfigCodigo("Otro <o@x.io>", 10)),
+])
+def test_config_de_codigo_con_y_sin_filas(filas, esperado):
+    assert S.config_codigo_desde_filas(filas) == esperado
+
+
+@pytest.mark.parametrize("filas", [{"ejecutor.codigo.autor": "sin correo"}, {"ejecutor.codigo.tope_bytes": "0"},
+                                   {"ejecutor.codigo.tope_bytes": "x"}, {"ejecutor.codigo.tope_bytes": "-5"}])
+def test_config_de_codigo_invalida_falla_cerrado(filas):
+    with pytest.raises(ValueError):
+        S.config_codigo_desde_filas(filas)

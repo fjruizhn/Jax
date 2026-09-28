@@ -50,11 +50,17 @@ import math
 import os
 import signal
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
 import redaccion
 
+from jax.ejecutor import cita
 from jax.ejecutor import mision as M
+from jax.ejecutor.codigo import entrega as E
+from jax.ejecutor.codigo import mision_codigo as MC
+from jax.ejecutor.codigo import preparar as P
 from jax.ejecutor.contratos import arranque, cuenta_axioma, pausa, politica
 from jax.ejecutor.contratos import auditor as A
 from jax.ejecutor.contratos.registro import verificar_cadena
@@ -191,7 +197,82 @@ def _eventos_desde(registro: Path, desde: int) -> list:
         return [json.loads(l) for l in f.read().splitlines() if l.strip()]
 
 
+# --- misión de código (spec 2026-09-28 v1.3) ------------------------------------------------
+
+VARIABLE_TOKEN = "JAX_GITHUB_TOKEN"
+API_GITHUB = "https://api.github.com"
+HERRAMIENTAS_SERVIDOR = "Bash,Skill"
+HERRAMIENTAS_CODIGO = "Bash,Read,Edit,Write,Glob,Grep,Skill"
+#: Valores por omisión de `axioma_config` (spec §4.3: el autor es configurable; §3.3: 5 MB).
+#: Medido 2026-09-28: ninguna de las dos claves existe todavía en producción.
+AUTOR_POR_OMISION = "Axioma (Ejecutor) <axioma@axioma-ia.io>"
+TOPE_BYTES_POR_OMISION = 5 * 1024 * 1024
+CLAVES_CODIGO = ("ejecutor.codigo.autor", "ejecutor.codigo.tope_bytes")
+SQL_CONFIG_CODIGO = ("SELECT config_key, config_value FROM axioma_config WHERE config_key IN "
+                     f"({', '.join(['%s'] * len(CLAVES_CODIGO))})")
+
+
+@dataclass(frozen=True)
+class ConfigCodigo:
+    autor: str
+    tope_bytes: int
+
+
+def config_codigo_desde_filas(filas: dict) -> ConfigCodigo:
+    """Fail-closed: una clave PRESENTE con un valor inválido es error, no el valor por omisión."""
+    autor = (filas.get("ejecutor.codigo.autor") or AUTOR_POR_OMISION).strip()
+    P.parsear_autor(autor)  # ValueError si no es 'Nombre <correo>'
+    texto = (filas.get("ejecutor.codigo.tope_bytes") or str(TOPE_BYTES_POR_OMISION)).strip()
+    try:
+        tope = int(texto)
+    except ValueError:
+        raise ValueError("config_codigo_invalida", "ejecutor.codigo.tope_bytes") from None
+    if tope <= 0:
+        raise ValueError("config_codigo_invalida", "ejecutor.codigo.tope_bytes")
+    return ConfigCodigo(autor, tope)
+
+
+async def leer_config_codigo() -> ConfigCodigo:
+    from jacobs.store import conexion
+    async with conexion(desechable=True) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(SQL_CONFIG_CODIGO, CLAVES_CODIGO)
+            return config_codigo_desde_filas(dict(await cur.fetchall()))
+
+
+def _cliente_github(token: str) -> httpx.AsyncClient:
+    return httpx.AsyncClient(base_url=API_GITHUB, timeout=30,
+                             headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
+
+
+def informe_c5(entrega, faceta_auditor: str | None) -> str:
+    """El cuerpo del PR (antes del pie `Hecho-por:`): quién auditó y cada afirmación respaldada
+    tal como la presenta `cita.presentar` -- valores con `repr`, sin saltos de línea crudos --,
+    una por línea dentro de un bloque de código SANGRADO: nada de lo que dijo el modelo puede
+    salirse del bloque y convertirse en Markdown del PR."""
+    lineas = [f"C5: {faceta_auditor or '?'}", ""]
+    for a in entrega.respaldadas:
+        p = cita.presentar(a)
+        lineas.append("    " + " ".join(f"{campo}={getattr(p, campo)}" for campo in cita.CAMPOS_PRESENTACION))
+    if not entrega.respaldadas:
+        lineas.append("    -")
+    return "\n".join(lineas)
+
+
 def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) -> M.Dependencias:
+    es_codigo = turno.tipo == "codigo"
+    # El token se lee UNA vez, aquí; nunca entra a la jaula ni a un evento (spec §4).
+    token = (env.get(VARIABLE_TOKEN) or "").strip() if es_codigo else ""
+    if es_codigo and not token:
+        raise SinConfigurar(VARIABLE_TOKEN)
+    # Estado del turno: el clon que preparó `preparar_codigo` (el cerebro trabaja ahí), la faceta
+    # que auditó (va en el informe) y la configuración de código (una lectura por turno).
+    estado: dict = {}
+
+    async def config_codigo() -> ConfigCodigo:
+        if "config" not in estado:
+            estado["config"] = await leer_config_codigo()
+        return estado["config"]
 
     async def contexto():
         return arranque.contexto_desde_entorno(env, turno.hosts)
@@ -218,12 +299,17 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
         # hace falta un paso previo separado que pueda quedar desincronizado.
         directorio_projects = cuenta_axioma.ruta_projects_de_la_mision(
             Path(env["JAX_EJECUTOR_MISIONES"]), turno.mision_id)
+        de_codigo = {}
+        if es_codigo:
+            if "clon" not in estado:  # fail-closed: sin clon preparado, el cerebro no corre en ningún lado
+                raise RuntimeError("codigo_sin_clon")
+            de_codigo = {"directorio_trabajo": estado["clon"].ruta}
         await cuenta_axioma.preparar_directorio_projects(ctx.cuenta, directorio_projects)
         remoto = cuenta_axioma.remoto_claude(
             ctx.cuenta, base_url=f"http://127.0.0.1:{ctx.puerto_proxy}", modelo=env["JAX_PROXY_CARRIL_MODELO"],
-            prompt=prompt, herramientas="Bash,Skill",
+            prompt=prompt, herramientas=HERRAMIENTAS_CODIGO if es_codigo else HERRAMIENTAS_SERVIDOR,
             max_salida_tokens=int(env["JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS"]),
-            sesion=sesion, reanudar=reanudar, directorio_projects=directorio_projects)
+            sesion=sesion, reanudar=reanudar, directorio_projects=directorio_projects, **de_codigo)
         rc, crudo, _ = await cuenta_axioma.correr_en_la_cuenta(ctx.cuenta, remoto, entrada=b"sin-clave\n",
                                                                tope_s=tope_s)
         return rc, crudo
@@ -242,6 +328,7 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
             cfg = await eleccion_c5.leer_config(conn)
             faceta, _, _ = await eleccion_c5.elegir_y_resolver_auditor(
                 conn, cfg=cfg, hosts_mision=turno.hosts, resolve_facet=resolve_facet)
+        estado["faceta_auditor"] = faceta
         return await auditor_cliente.auditar(A.Lote(texto, (), A.afirmaciones_auditables(entrega), maquinas),
                                              faceta=faceta, max_tokens=cfg.max_tokens)
 
@@ -251,10 +338,33 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
     async def pausa_leida(ctx):
         return await asyncio.to_thread(leer_pausa, ctx.pausa)
 
+    async def preparar_codigo(ctx):
+        cfg = await config_codigo()
+        async with _cliente_github(token) as cliente:
+            base = await P.rama_por_omision(cliente, turno.repo["owner_repo"])
+        clon = await P.preparar(P.Repo(turno.repo["owner_repo"], tuple(turno.repo["comandos_prueba"])),
+                                mision_id=turno.mision_id, raiz=Path(env["JAX_EJECUTOR_MISIONES"]),
+                                rama_por_omision=base, token=token, autor=cfg.autor,
+                                accesos=P.accesos_de_la_cuenta(ctx.cuenta), node_bin=ctx.cuenta.node_bin)
+        estado["clon"] = clon
+        return clon
+
+    async def entregar_codigo(ctx, clon, entrega, auditor_legible):
+        cfg = await config_codigo()
+        async with _cliente_github(token) as cliente:
+            return await MC.entregar(clon, mision_id=turno.mision_id, repo=turno.repo["owner_repo"],
+                                     revision_legible=auditor_legible,
+                                     informe=informe_c5(entrega, estado.get("faceta_auditor")), token=token,
+                                     cliente=cliente, tope_bytes=cfg.tope_bytes,
+                                     modelo=env["JAX_PROXY_CARRIL_MODELO"], autor=cfg.autor,
+                                     upload_pack=E.upload_pack_por_ssh(ctx.cuenta))
+
     return M.Dependencias(contexto=contexto, hosts=hosts, exigir=arranque.exigir_contratos,
                           tamano_registro=tamano_registro, abrir_vigia=vigia, latido_fresco=latido,
                           correr_cerebro=cerebro, eventos_desde=eventos, auditar=auditar, cadena_ok=cadena,
-                          leer_pausa=pausa_leida, espera_latido_s=espera_s)
+                          leer_pausa=pausa_leida, espera_latido_s=espera_s,
+                          preparar_codigo=preparar_codigo if es_codigo else None,
+                          entregar_codigo=entregar_codigo if es_codigo else None)
 
 
 def principal(entrada, salida, env) -> int:
