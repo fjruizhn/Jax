@@ -260,7 +260,17 @@ arranca**.
 - Tabla nueva **`ejecutor_repo`** (nombre, `owner/repo`, rama por omisión observada, `activo`,
   comandos de prueba declarados). La lista de repos sale de ahí, nunca del código.
 - `ejecutor_mision` gana el tipo (`servidor` | `codigo`), `repo_id`, rama, URL del PR y estado de
-  entrega (`abierto` | `rechazada_por_contrato` | `sin_informe_c5` | `fallo_entrega`).
+  entrega (`abierto` | `sin_cambios` | `rechazada_por_contrato` | `sin_informe_c5` | `fallo_entrega`
+  | `sin_entregar` | `empujado_sin_pr`). *(Tarea 9, auditoría de escalón 3, 2026-09-28.)*
+  - `sin_cambios`: la rama no tiene commits respecto de la rama por omisión; no se empuja. Nota
+    `pr_previo_sin_cambios_nuevos` si ya hay un PR abierto de la misión.
+  - `sin_entregar` (con `motivo`): no se tocó GitHub porque algo más del turno falló (pausa de C4,
+    registro de C3, cadena, vigía, C5 pausó o ilegible, cerebro, preparación, cero afirmaciones) o
+    la pausa apareció justo antes del empuje. El motivo es el código del turno.
+  - `empujado_sin_pr`: la rama **ya está en GitHub** (`rama_empujada: true`, `sha`) pero el PR no
+    se abrió (fallo de la API, respuesta ilegible, pausa puesta tras el empuje). Lo revisa Fernando.
+  - `abierto` puede llevar la nota `sin_etiqueta` (el PR existe, falló solo la etiqueta).
+  Todo resultado de entrega lleva `rama_empujada` y `sha`.
 - Concurrencia: una misión a la vez (config en DB), porque Qwen atiende una inferencia por turno.
 
 ## 7. Pruebas que no pueden correr aquí
