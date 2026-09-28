@@ -1556,8 +1556,9 @@ jobs:
           # candidate/sealed boundaries, current-receipt temporality, and
           # attribution binding add three net governance-contract regressions.
           # 116 -> 134 el 2026-09-28 (F2-B): accredited resolver/receipt layer.
-          grep -qE "^134 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 134 tests CORRIDOS."; exit 1; }
+          # 134 -> 135 el 2026-09-28 (F2-B remediation): adapter source derivation.
+          grep -qE "^135 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 135 tests CORRIDOS."; exit 1; }
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en

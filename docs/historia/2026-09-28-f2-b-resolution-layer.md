@@ -10,7 +10,7 @@ any existing response path governed.
 | --- | --- | --- |
 | `CAPABILITY_AVAILABLE` | `policy.governance.validator._resolve_capability_available` | adapter-capable; enabled only with a human-owned binding and configuration digest |
 | `FILE_EXISTS` | `policy.governance.validator._resolve_file_exists` | adapter-capable; enabled only with an allowlisted filesystem binding and configuration digest |
-| `B9_DESIGNATED_CURRENT_SOURCE` | `jax.memory.b9_resolvers.DesignatedSourceResolver` | adapter-capable; preserves B9's explicit unavailable outcomes |
+| `B9_DESIGNATED_CURRENT_SOURCE` | `jax.memory.b9_resolvers.DesignatedSourceResolver` | adapter-capable only when upstream source, observation time, and scope evidence are independently preserved; otherwise unavailable |
 | `ENGINE_STATUS` | none | disabled / unaccredited |
 | `FACET_EXISTS` | none | disabled / unaccredited |
 | `CONFIG_VALUE` | none | disabled / unaccredited |
@@ -23,10 +23,23 @@ owner, environment, explicit scope rules, freshness SLA, conflict policy,
 resolver identity/version, and source configuration digest where meaningful.
 Registration of a callable is never accreditation.
 
+`ResolverRegistry` seals an immutable approved graph (binding, trusted adapter
+identity, argument contract, and configuration identity) before calculating
+its snapshot digest. A callable returns untrusted observation data only; it
+cannot select source, resolver identity, version, or configuration digest.
 `GovernedResolutionReceipt` is minted only by `ResolverRegistry`; it includes
-an absolute `observed_at` and `not_after`.  A receipt can be current only when
-`RESOLVED` and checked within that interval.  B7 evidence, B8 authority, and
-B9 memory remain references; none can mint current truth.
+an absolute upstream-derived `observed_at` and `not_after`. Only
+`ResolverRegistry.verify_receipt(receipt, expected_scope, validation_time)`
+may decide currentness. Reuse is exact-scope in F2-B, including request and
+trace identity, and fails after binding, registry, source configuration, or
+resolver changes. B7 evidence, B8 authority, and B9 memory remain references;
+none can mint current truth.
+
+The currently supported conflict policies are typed registry policy:
+`SINGLE_SOURCE_REQUIRED`, `ALL_SOURCES_AGREE`, and
+`PREFERRED_SOURCE_WITH_EXPLICIT_FALLBACK`. Current adapters use the strict
+single-source form; conflict and malformed/partial upstream observations stay
+non-current.
 
 Human decisions remain required before any unresolved predicate gains an
 approved source binding.  F2-B creates no universal current-state claim path;
