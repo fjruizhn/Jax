@@ -373,6 +373,21 @@ def test_codigo_prepara_con_la_rama_de_la_api_el_autor_de_la_config_y_los_acceso
     assert kw["node_bin"] == _Cuenta.node_bin and isinstance(kw["accesos"], P.Accesos)
 
 
+def test_codigo_en_turno_2_usa_la_rama_guardada_sin_llamar_a_la_api(codigo, tmp_path):
+    """MINOR-5: si ya hay `preparado.json` (turno >= 2), la base sale de ahí -- no de un GET
+    fresco a GitHub, que además podría no coincidir con la que se usó en el turno 1."""
+    mision_id = TURNO["mision_id"]
+    (tmp_path / mision_id).mkdir()
+    (tmp_path / mision_id / "preparado.json").write_text(
+        json.dumps({"rama_por_omision": "trunk-guardada", "dependencias": ["package-lock.json"]}))
+    env = {**ENV_CODIGO, "JAX_EJECUTOR_MISIONES": str(tmp_path)}
+    deps = S.dependencias_reales(env, _turno_codigo(), tope_s=1.0, espera_s=1.0)
+    asyncio.run(deps.preparar_codigo(_CtxCodigo()))
+    assert "rama" not in codigo
+    repo, kw = codigo["preparar"]
+    assert kw["rama_por_omision"] == "trunk-guardada"
+
+
 def test_codigo_el_cerebro_trabaja_en_el_clon_con_las_herramientas_de_codigo(codigo):
     deps = S.dependencias_reales(ENV_CODIGO, _turno_codigo(), tope_s=1.0, espera_s=1.0)
     asyncio.run(deps.preparar_codigo(_CtxCodigo()))

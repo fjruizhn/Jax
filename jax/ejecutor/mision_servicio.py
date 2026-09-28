@@ -358,10 +358,13 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
 
     async def preparar_codigo(ctx):
         cfg = await config_codigo()
-        async with _cliente_github(token) as cliente:
-            base = await P.rama_por_omision(cliente, turno.repo["owner_repo"])
+        raiz = Path(env["JAX_EJECUTOR_MISIONES"])
+        base = await P.rama_guardada(raiz, turno.mision_id)
+        if base is None:  # turno 1: todavía no hay preparado.json con la base guardada
+            async with _cliente_github(token) as cliente:
+                base = await P.rama_por_omision(cliente, turno.repo["owner_repo"])
         clon = await P.preparar(P.Repo(turno.repo["owner_repo"], tuple(turno.repo["comandos_prueba"])),
-                                mision_id=turno.mision_id, raiz=Path(env["JAX_EJECUTOR_MISIONES"]),
+                                mision_id=turno.mision_id, raiz=raiz,
                                 rama_por_omision=base, token=token, autor=cfg.autor,
                                 accesos=P.accesos_de_la_cuenta(ctx.cuenta), node_bin=ctx.cuenta.node_bin)
         estado["clon"] = clon

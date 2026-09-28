@@ -99,6 +99,16 @@ async def rama_por_omision(cliente: httpx.AsyncClient, repo: str) -> str:
     return validar_rama_base(r.json()["default_branch"])
 
 
+async def rama_guardada(raiz: Path, mision_id: str) -> str | None:
+    """MINOR-5: la base del turno 1 queda en `preparado.json`; el turno >= 2 la reusa en vez de
+    pedirle a GitHub de nuevo. `None` si el turno 1 todavía no terminó (sin marca)."""
+    marca = raiz / mision_id / "preparado.json"
+    if not await asyncio.to_thread(marca.is_file):
+        return None
+    estado = json.loads(await asyncio.to_thread(marca.read_text))
+    return estado["rama_por_omision"]
+
+
 async def _git(args: list[str], env: dict[str, str], error: str, token: str | None = None) -> bytes:
     try:
         return await correr_git(args, env=env, error=f"preparar_fallo: {error}", sanear_con=token)
