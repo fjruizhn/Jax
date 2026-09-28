@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import pwd
 import re
 import shlex
 import stat
@@ -261,6 +262,49 @@ async def preparar_directorio_de_la_cuenta(c: Cuenta, ruta: Path, *, correr=None
     acl = (f"u::rwx,g::---,o::---,m::rwx,u:{c.nombre}:rwx,"
            f"d:u::rwx,d:g::---,d:o::---,d:m::rwx,d:u:{c.nombre}:rwx")
     proc = await correr("setfacl", "--set", acl, str(ruta),
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    _, errores = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"preparar_directorio_fallo: {errores.decode(errors='replace')}")
+
+
+async def dar_acceso_recursivo(c: Cuenta, ruta: Path, *, correr=None) -> None:
+    """Mismo patrón endurecido de `preparar_directorio_de_la_cuenta` (Task 0, 757ca62),
+    pero RECURSIVO (`setfacl -R --set`): lo usa `preparar.preparar()` (Tarea 6, misiones
+    de código) para dar acceso al clon DESPUÉS de que `git clone`/`git checkout` lo
+    llenaron de archivos y directorios nuevos, propiedad del proceso (jaxsvc) -- a
+    diferencia de `preparar_directorio_de_la_cuenta`, que sólo prepara un directorio
+    VACÍO antes de que nada se escriba ahí, acá ya hay contenido que necesita la ACL
+    también, no sólo la ruta hoja.
+
+    `ruta` tiene que existir de antemano -- esta función NUNCA hace `mkdir` (el llamador
+    lo hace, ver `preparar.preparar`, ruling del controlador 2026-09-28: `dar_acceso`
+    exige la ruta ya creada porque `git clone` también la necesita como cwd existente
+    antes de correr).
+
+    Mismas dos comprobaciones que Task 0, con `os.lstat` (no sigue symlinks), ANTES de
+    llamar a `setfacl`: (a) que `ruta` sea un directorio real, no un enlace; (b) que el
+    dueño sea este mismo proceso (`os.geteuid()`). Cualquiera de las dos falla cerrado.
+
+    Además de `u:<cuenta>:rwX` y su `default` correspondiente, se agrega
+    `default:u:<usuario del proceso>:rwX` -- medido 2026-09-28 con los usuarios reales:
+    sin esa entrada por omisión, `jaxsvc` (el proceso) deja de poder LEER lo que
+    `axioma` cree DESPUÉS dentro de ese árbol (los commits de Qwen), y la entrega
+    (Tarea 5, corre como jaxsvc) no podría verlos."""
+    correr = correr or asyncio.create_subprocess_exec
+    info = await asyncio.to_thread(os.lstat, ruta)
+    if not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(
+            f"preparar_directorio_fallo: {ruta} no es un directorio real (¿symlink?), "
+            f"modo={oct(stat.S_IFMT(info.st_mode))}")
+    if info.st_uid != os.geteuid():
+        raise RuntimeError(
+            f"preparar_directorio_fallo: {ruta} pertenece a otro dueño (uid={info.st_uid}, "
+            f"esperado uid={os.geteuid()})")
+    usuario_proceso = pwd.getpwuid(os.geteuid()).pw_name
+    acl = (f"u::rwX,g::---,o::---,m::rwX,u:{c.nombre}:rwX,"
+           f"d:u::rwX,d:g::---,d:o::---,d:m::rwX,d:u:{c.nombre}:rwX,d:u:{usuario_proceso}:rwX")
+    proc = await correr("setfacl", "-R", "--set", acl, str(ruta),
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     _, errores = await proc.communicate()
     if proc.returncode != 0:

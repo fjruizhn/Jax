@@ -475,3 +475,111 @@ def test_bwrap_real_sin_mision_projects_tampoco_sobrevive(tmp_path):
     salida = _correr_en_la_jaula(c, home_externo,
                                  'test -e "$HOME/.claude/projects/sesion-1.json" && echo SOBREVIVIO || echo limpio')
     assert salida.strip() == "limpio"
+
+
+# --- dar_acceso_recursivo: mismo patrón endurecido de Task 0, pero RECURSIVO --------
+#
+# (Ruling del controlador, plan "El Ejecutor programa", Tarea 6, 2026-09-28.) El clon de
+# la misión de código (`preparar.preparar`, Tarea 6) lo crea `git clone`/`git checkout` --
+# dueño el PROCESO (jaxsvc), no `axioma` -- y hay que dar acceso RECURSIVO a lo que ya
+# existe adentro (a diferencia de `preparar_directorio_de_la_cuenta`, que sólo prepara un
+# directorio vacío antes de que nada se escriba ahí). Mismo patrón: `setfacl` con `--set`
+# fijo (no `-m`, no hereda del padre), `os.lstat` ANTES para rechazar symlink/dueño ajeno.
+#
+# Se agrega, además de `u:<cuenta>:rwX` y su `default` correspondiente, un
+# `default:u:<usuario del proceso>:rwX` -- medido 2026-09-28 con los usuarios reales: sin
+# esa entrada por omisión, `jaxsvc` deja de poder leer lo que `axioma` cree DESPUÉS
+# (commits de Qwen) y la entrega (Tarea 5, corre como jaxsvc) no vería nada.
+
+def _acl_recursiva_esperada(nombre_cuenta, usuario_proceso):
+    return (f"u::rwX,g::---,o::---,m::rwX,u:{nombre_cuenta}:rwX,"
+           f"d:u::rwX,d:g::---,d:o::---,d:m::rwX,d:u:{nombre_cuenta}:rwX,d:u:{usuario_proceso}:rwX")
+
+
+def test_dar_acceso_recursivo_llama_setfacl_r_set_con_el_dueno_correcto(tmp_path):
+    llamadas = []
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def correr(*argv, **kw):
+        llamadas.append(argv)
+        return _Proc()
+
+    ruta = tmp_path / "m1" / "repo"
+    ruta.mkdir(parents=True)
+    c = _cuenta(tmp_path)
+    asyncio.run(CA.dar_acceso_recursivo(c, ruta, correr=correr))
+    usuario_proceso = getpass.getuser()
+    assert ("setfacl", "-R", "--set", _acl_recursiva_esperada("axioma", usuario_proceso), str(ruta)) in llamadas
+
+
+def test_dar_acceso_recursivo_rechaza_un_symlink(tmp_path):
+    destino = tmp_path / "destino-real"
+    destino.mkdir()
+    ruta = tmp_path / "m1" / "repo"
+    ruta.parent.mkdir()
+    ruta.symlink_to(destino, target_is_directory=True)
+
+    async def correr(*argv, **kw):
+        raise AssertionError("no debe llegar a setfacl si la ruta es un symlink")
+
+    with pytest.raises(RuntimeError, match="preparar_directorio_fallo"):
+        asyncio.run(CA.dar_acceso_recursivo(_cuenta(tmp_path), ruta, correr=correr))
+
+
+requiere_acl_recursiva = pytest.mark.skipif(shutil.which("setfacl") is None or shutil.which("getfacl") is None,
+                                            reason="setfacl/getfacl no están instalados en este runner")
+
+
+@requiere_acl_recursiva
+def test_dar_acceso_recursivo_pone_la_acl_real_recursiva_sin_heredar_del_padre(tmp_path):
+    """`setfacl`/`getfacl` REALES. El padre lleva una ACL por omisión ajena (UID 99999,
+    no resuelve a ningún usuario real) -- la hoja NO debe heredarla. Se crea un
+    subdirectorio y un archivo DENTRO de `ruta` ANTES de llamar (simula lo que `git
+    clone` deja) para comprobar que `-R` de verdad alcanza lo existente, y que la ACL
+    por omisión de `ruta` (no la del padre) es la que gobierna lo que se cree DESPUÉS
+    dentro del subdirectorio -- y que el usuario del PROCESO tiene su propia entrada por
+    omisión."""
+    nombre = getpass.getuser()
+    padre = tmp_path / "padre"
+    padre.mkdir()
+    subprocess.run(["setfacl", "-d", "-m", "u:99999:rwx", str(padre)], check=True)
+    ruta = padre / "repo"
+    ruta.mkdir()
+    (ruta / "archivo-ya-existente").write_text("de git clone")
+    sub = ruta / "sub"
+    sub.mkdir()
+
+    c = CA.Cuenta(nombre, 22, tmp_path / "k", tmp_path / "n", tmp_path / "l", tmp_path / "p", tmp_path / "h")
+    asyncio.run(CA.dar_acceso_recursivo(c, ruta))
+
+    salida_ruta = subprocess.run(["getfacl", "-p", str(ruta)], capture_output=True, text=True,
+                                 check=True).stdout
+    lineas_ruta = {l.strip() for l in salida_ruta.splitlines() if l.strip() and not l.startswith("#")}
+    assert "user:99999:rwx" not in lineas_ruta and "default:user:99999:rwx" not in lineas_ruta
+    assert f"user:{nombre}:rwx" in lineas_ruta
+    assert f"default:user:{nombre}:rwx" in lineas_ruta
+
+    salida_sub = subprocess.run(["getfacl", "-p", str(sub)], capture_output=True, text=True, check=True).stdout
+    lineas_sub = {l.strip() for l in salida_sub.splitlines() if l.strip() and not l.startswith("#")}
+    assert "user:99999:rwx" not in lineas_sub and "default:user:99999:rwx" not in lineas_sub
+    assert f"user:{nombre}:rwx" in lineas_sub, "la ACL -R no alcanzó lo que ya existía adentro"
+
+    (sub / "nuevo-dentro").write_text("creado por axioma, simulado")
+    salida_nuevo = subprocess.run(["getfacl", "-p", str(sub / "nuevo-dentro")], capture_output=True, text=True,
+                                  check=True).stdout
+    # El nuevo archivo hereda la entrada NAMED USER del default ACL de `sub/` verbatim
+    # (getfacl la muestra como "user:<nombre>:rwx", con un comentario aparte
+    # "#effective:rw-" cuando la máscara del propio archivo la recorta) -- se compara
+    # sólo la parte antes del tabulador, sin el comentario de efectivo.
+    lineas_nuevo = {l.split("\t", 1)[0].strip() for l in salida_nuevo.splitlines()
+                    if l.strip() and not l.startswith("#")}
+    assert f"user:{nombre}:rwx" in lineas_nuevo, (
+        "lo creado DESPUÉS dentro de sub/ no heredó la entrada del propio proceso "
+        f"({nombre}) del default ACL -- sin esto jaxsvc no podría leer lo que axioma escriba: "
+        f"{lineas_nuevo}"
+    )

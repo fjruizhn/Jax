@@ -1791,6 +1791,8 @@ jobs:
           tests/test_ejecutor_codigo_diff.py
           tests/test_ejecutor_codigo_reglas_diff.py
           tests/test_ejecutor_codigo_barrido.py
+          tests/test_ejecutor_codigo_entrega.py
+          tests/test_ejecutor_codigo_preparar.py
           tests/test_ejecutor_vigia_stderr.py
           tests/test_workers_background_log.py
           tests/test_loadtest_apps_protegidas.py
@@ -1966,6 +1968,8 @@ jobs:
             tests/test_ejecutor_codigo_diff.py \
             tests/test_ejecutor_codigo_reglas_diff.py \
             tests/test_ejecutor_codigo_barrido.py \
+            tests/test_ejecutor_codigo_entrega.py \
+            tests/test_ejecutor_codigo_preparar.py \
             tests/test_ejecutor_vigia_stderr.py \
             tests/test_workers_background_log.py \
             tests/test_loadtest_apps_protegidas.py \
@@ -4488,8 +4492,26 @@ jobs:
           #   tests/test_ejecutor_codigo_reglas_diff.py (+7 sobre C1 del diff: flujos_ci,
           #   archivo_de_fernando, prueba_debilitada, ganchos, secretos) y
           #   tests/test_ejecutor_codigo_barrido.py (+3 sobre barrido de secretos y tamaño).
-          grep -qE "^2824 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2824 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 2824 -> 2836 el 2026-09-28 (plan ejecutor-codigo, Tareas 5 y 6): +12 puras --
+          #   tests/test_ejecutor_codigo_entrega.py (+5: rama permitida/rechazada, empujar
+          #   solo axioma/<misión> con un remoto bare local, rechazo si HEAD no es la rama
+          #   de la misión, abrir/actualizar el PR con httpx.MockTransport y etiqueta
+          #   axioma, el token nunca en argv ni en .git/config -- espía sobre
+          #   asyncio.create_subprocess_exec); tests/test_ejecutor_codigo_preparar.py
+          #   (+4: clona la rama de la misión desde la rama por omisión y fija el autor,
+          #   el turno 2 reusa el clon con fetch, rama por omisión desde la API con
+          #   httpx.MockTransport, dar_acceso se llama con la ruta ya creada); y +3 en
+          #   tests/test_ejecutor_contratos_cuenta_axioma.py (dar_acceso_recursivo: mismo
+          #   patrón endurecido de preparar_directorio_de_la_cuenta pero con `setfacl -R
+          #   --set` -- argv exacto, rechazo de symlink antes de llamar a setfacl, y ACL
+          #   real con setfacl/getfacl que alcanza lo que ya existía adentro y lo que se
+          #   crea después, sin heredar del padre). Los 45 skipped no cambian (setfacl
+          #   está disponible en el runner: ningún test nuevo se saltea). Medido en local,
+          #   archivo por archivo: test_ejecutor_codigo_entrega.py 5 passed (0 -> 5, archivo
+          #   nuevo), test_ejecutor_codigo_preparar.py 4 passed (0 -> 4, archivo nuevo),
+          #   test_ejecutor_contratos_cuenta_axioma.py 46 passed (43 -> 46); manda el runner.
+          grep -qE "^2836 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2836 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
