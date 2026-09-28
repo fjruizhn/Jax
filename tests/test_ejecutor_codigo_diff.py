@@ -36,3 +36,66 @@ def test_parsea_estados_y_lineas():
 
 def test_diff_vacio_es_tupla_vacia():
     assert parsear("") == ()
+
+
+# --- ruling del controlador (Tarea 9): solo "\n" parte líneas; rutas UTF-8, con espacios y entre comillas ---
+
+from jax.ejecutor.codigo.barrido import lineas_con_secretos  # noqa: E402
+
+import pytest  # noqa: E402
+
+PAT = "github_pat_" + "Z" * 30
+
+
+def _un_archivo(linea_agregada: str, ruta: str = "a.py") -> str:
+    return (f"diff --git a/{ruta} b/{ruta}\n--- a/{ruta}\n+++ b/{ruta}\n@@ -0,0 +1 @@\n+{linea_agregada}\n")
+
+
+@pytest.mark.parametrize("separador", ["\x1c", "\x1d", "\x1e", "\r", "\x0b", "\x0c", "\x85", " ", " "])
+def test_un_separador_que_no_es_salto_de_linea_no_esconde_un_secreto(separador):
+    """`str.splitlines()` corta en todos estos: la segunda mitad no empezaba con '+' y se perdía."""
+    (c,) = parsear(_un_archivo(f"x = 1{separador}{PAT}"))
+    assert c.agregadas == (f"x = 1{separador}{PAT}",)
+    assert [v.regla for v in lineas_con_secretos((c,))] == ["secretos"]
+
+
+def test_una_linea_agregada_que_empieza_con_mas_mas_es_contenido():
+    """Dentro de un hunk, `+++ …` es una línea agregada cuyo texto empieza con «++», no una cabecera."""
+    (c,) = parsear(_un_archivo(f"++ {PAT}"))
+    assert c.agregadas == (f"++ {PAT}",)
+
+
+def test_una_linea_quitada_que_empieza_con_menos_menos_es_contenido():
+    texto = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +0,0 @@\n--- x\n"
+    (c,) = parsear(texto)
+    assert c.quitadas == ("-- x",) and c.agregadas == ()
+
+
+@pytest.mark.parametrize("ruta", ["año.py", "dir con espacio/x.py", "x b/y.py", "ñandú/ç a/b.txt"])
+def test_rutas_utf8_y_con_espacios_sin_comillas(ruta):
+    (c,) = parsear(_un_archivo("x", ruta))
+    assert c.ruta == ruta and c.agregadas == ("x",)
+
+
+def test_rutas_entre_comillas_con_escapes_y_octal():
+    texto = ('diff --git "a/a\\303\\261o\\t.py" "b/a\\303\\261o\\t.py"\n'
+             'new file mode 100644\n--- /dev/null\n+++ "b/a\\303\\261o\\t.py"\n@@ -0,0 +1 @@\n+x\n')
+    (c,) = parsear(texto)
+    assert (c.ruta, c.estado, c.agregadas) == ("año\t.py", "A", ("x",))
+
+
+def test_borrado_y_modo_sin_contenido_con_espacios():
+    texto = ("diff --git a/dir con espacio/v.py b/dir con espacio/v.py\ndeleted file mode 100644\n"
+             "--- a/dir con espacio/v.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+             "diff --git a/s p.sh b/s p.sh\nold mode 100644\nnew mode 100755\n")
+    c = {x.ruta: x for x in parsear(texto)}
+    assert c["dir con espacio/v.py"].estado == "D" and c["dir con espacio/v.py"].quitadas == ("x",)
+    assert c["s p.sh"].estado == "M"
+
+
+def test_renombre_con_espacios():
+    texto = ("diff --git a/tests/test a.py b/otro dir/c.py\nsimilarity index 90%\n"
+             "rename from tests/test a.py\nrename to otro dir/c.py\n--- a/tests/test a.py\n+++ b/otro dir/c.py\n"
+             "@@ -1 +1 @@\n-x\n+y\n")
+    (c,) = parsear(texto)
+    assert (c.ruta, c.estado, c.ruta_anterior, c.agregadas) == ("otro dir/c.py", "R", "tests/test a.py", ("y",))
