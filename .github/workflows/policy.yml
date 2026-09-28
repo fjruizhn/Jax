@@ -4542,8 +4542,16 @@ jobs:
           #   ya hecho, rama remota borrada, reconciliacion con git inyectado x3). El test de bwrap
           #   real NO se saltea en este job (instala bubblewrap y habilita user namespaces arriba):
           #   los 45 skipped no cambian. Medido en local archivo por archivo; manda el runner.
-          grep -qE "^2912 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2912 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 2912 -> 2936 el 2026-09-28 (re-revision 3, BLOCK-A: ninguna instalacion ejecuta codigo
+          #   de terceros; MINOR-B/C): +24 puras -- tests/test_ejecutor_codigo_preparar.py 39 -> 58
+          #   (+19: package-lock con fuente ajena x9 -- git, github:, file:, link, resolved fuera del
+          #   registro, http, sin integrity --, v1 anidado, ilegible, limpio SI instala; composer con
+          #   repositories/dist/source ajenos x5, limpio SI instala; mkdir en deps sin seguir
+          #   enlaces) y tests/test_ejecutor_codigo_sandbox.py 8 -> 13 (+5: el prefijo de node que se
+          #   monta se valida x4, un origen que contiene una ruta prohibida). Los 45 skipped no
+          #   cambian. Medido en local archivo por archivo; manda el runner.
+          grep -qE "^2936 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2936 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
