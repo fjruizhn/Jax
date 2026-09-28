@@ -142,6 +142,97 @@ async def diff_en_el_espejo(espejo: Path, *, mision_id: str, rama_por_omision: s
     return parsear(salida.decode("utf-8", errors="replace"))
 
 
+@dataclass(frozen=True)
+class Commit:
+    """Un commit de `origin/<base>..axioma/<id>` visto EN EL ESPEJO. `autor`/`committer` son
+    (nombre, correo) crudos (sin .mailmap); `None` si la cabecera no se pudo leer."""
+    sha: str
+    autor: tuple[str, str] | None
+    committer: tuple[str, str] | None
+    cambios: tuple[Cambio, ...]
+
+
+# La cabecera de cada commit en `git log -p`: empieza con \x01, que ninguna línea de un parche
+# puede tener al principio (las de contenido llevan su prefijo +/-/espacio y las de cabecera son
+# palabras fijas; una ruta con caracteres de control sale entre comillas).
+_MARCA = "\x01jax-commit\x01"
+_FORMATO = "--format=%x01jax-commit%x01%H%x00%an%x00%ae%x00%cn%x00%ce"
+_OID = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
+
+
+def _commit(cabecera: str, lineas: list[str]) -> Commit:
+    campos = cabecera[len(_MARCA):].split("\x00")
+    cambios = parsear("\n".join(lineas))
+    if len(campos) != 5 or not _OID.fullmatch(campos[0]):
+        return Commit(campos[0][:64], None, None, cambios)
+    return Commit(campos[0], (campos[1], campos[2]), (campos[3], campos[4]), cambios)
+
+
+async def commits_de_la_rama(espejo: Path, *, mision_id: str, rama_por_omision: str) -> tuple[Commit, ...]:
+    """Cada commit de `origin/<base>..axioma/<id>` con su identidad y su parche, en el espejo.
+
+    Lo usa la entrega para dos cosas: exigir la identidad de Axioma en author Y committer de
+    TODOS los commits (Qwen puede fijar cualquier autor), y barrer secretos commit por commit (un
+    secreto agregado y luego quitado dentro de la rama no está en el diff neto, pero llegaría a
+    GitHub en el historial). `--text` por lo mismo que `diff_en_el_espejo`; `--no-renames` para
+    que un archivo renombrado traiga su contenido; `--diff-merges=separate` porque, sin eso, `log
+    -p` no muestra lo que un merge agrega por su cuenta; `--no-mailmap` para leer la identidad
+    tal como está en el commit."""
+    rama = rama_de_la_mision(mision_id)
+    base = validar_rama_base(rama_por_omision)
+    with hogar_temporal() as home:
+        try:
+            salida = await correr_git(["-C", str(espejo), "--no-replace-objects", "log", "--no-color", "--no-ext-diff",
+                                       "--no-textconv", "--text", "--no-renames", "--no-mailmap", "--no-notes",
+                                       "--no-show-signature", "--diff-merges=separate", "-p", "-U0", _FORMATO,
+                                       f"refs/remotes/origin/{base}..refs/heads/{rama}", "--"],
+                                      env=entorno_base(home), error="log_fallo")
+        except GitFallo as exc:
+            raise EntregaRechazada(str(exc)) from None
+    commits: list[Commit] = []
+    cabecera, lineas = None, []
+    for linea in salida.decode("utf-8", errors="replace").split("\n"):
+        if linea.startswith(_MARCA):
+            if cabecera is not None:
+                commits.append(_commit(cabecera, lineas))
+            cabecera, lineas = linea, []
+        elif cabecera is not None:
+            lineas.append(linea)
+    if cabecera is not None:
+        commits.append(_commit(cabecera, lineas))
+    return tuple(commits)
+
+
+async def tamanos_en_el_espejo(espejo: Path, *, mision_id: str, rama_por_omision: str) -> dict[str, int]:
+    """Tamaño en bytes (`git cat-file -s`) del blob de cada archivo que cambia en
+    `origin/<base>...axioma/<id>`, tal como está EN LA RAMA DEL ESPEJO. Nunca `stat` en el clon:
+    Qwen puede commitear un archivo grande y dejar uno chico en el disco. Lo borrado no se mide;
+    un enlace simbólico mide lo que git guarda de él (el destino como texto); un submódulo
+    (160000) no tiene blob."""
+    rama = rama_de_la_mision(mision_id)
+    base = validar_rama_base(rama_por_omision)
+    tamanos: dict[str, int] = {}
+    with hogar_temporal() as home:
+        env = entorno_base(home)
+        try:
+            crudo = await correr_git(["-C", str(espejo), "diff", "--raw", "-z", "--no-renames", "--no-abbrev",
+                                      "--no-ext-diff", "--no-textconv",
+                                      f"refs/remotes/origin/{base}...refs/heads/{rama}", "--"],
+                                     env=env, error="diff_fallo")
+            partes = crudo.split(b"\0")
+            for meta, ruta in zip(partes[0::2], partes[1::2]):
+                _, modo_nuevo, _, oid, estado = meta.decode(errors="replace").lstrip(":").split(" ")
+                if estado == "D" or modo_nuevo == "160000":
+                    continue
+                if not _OID.fullmatch(oid):
+                    raise EntregaRechazada("tamano_ilegible")
+                n = await correr_git(["-C", str(espejo), "cat-file", "-s", oid], env=env, error="cat_file_fallo")
+                tamanos[ruta.decode("utf-8", errors="replace")] = int(n.decode().strip())
+        except GitFallo as exc:
+            raise EntregaRechazada(str(exc)) from None
+    return tamanos
+
+
 async def empujar(espejo: Path, *, mision_id: str, rama_por_omision: str, token: str) -> None:
     rama = rama_de_la_mision(mision_id)
     if not referencia_permitida(rama, rama_por_omision, mision_id):

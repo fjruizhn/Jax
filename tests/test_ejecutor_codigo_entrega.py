@@ -432,3 +432,96 @@ def test_diff_en_el_espejo_trata_un_archivo_con_nul_como_texto(tmp_path, github)
     asyncio.run(E.traer_del_clon(c.espejo, c.ruta, mision_id=MID, upload_pack="git-upload-pack"))
     (cambio,) = asyncio.run(E.diff_en_el_espejo(c.espejo, mision_id=MID, rama_por_omision="main"))
     assert cambio.ruta == "datos.bin" and any(SECRETO in l for l in cambio.agregadas), cambio
+
+
+# --- el historial de la rama, commit por commit, en el espejo --------------------------------
+
+AXIOMA = ("Axioma (Ejecutor)", "axioma@axioma-ia.io")
+
+
+def _traer(c: P.Clon) -> None:
+    asyncio.run(E.traer_del_clon(c.espejo, c.ruta, mision_id=MID, upload_pack="git-upload-pack"))
+
+
+def _commits(c: P.Clon):
+    return asyncio.run(E.commits_de_la_rama(c.espejo, mision_id=MID, rama_por_omision="main"))
+
+
+def test_commits_de_la_rama_trae_cada_commit_con_su_identidad_y_sus_lineas(tmp_path, github):
+    """Un secreto agregado en un commit y quitado en el siguiente no está en el diff neto,
+    pero SÍ llegaría a GitHub en el historial: cada commit se ve por separado."""
+    c = _preparar(tmp_path)
+    uno = _commit_bytes(c.ruta, "cfg.py", f"T = '{SECRETO}'\n".encode(), "pongo")
+    dos = _commit_bytes(c.ruta, "cfg.py", b"T = None\n", "saco")
+    _traer(c)
+    assert asyncio.run(E.diff_en_el_espejo(c.espejo, mision_id=MID, rama_por_omision="main"))[0].agregadas \
+        == ("T = None",)
+    commits = {x.sha: x for x in _commits(c)}
+    assert set(commits) == {uno, dos}
+    assert all(x.autor == AXIOMA and x.committer == AXIOMA for x in commits.values())
+    assert any(SECRETO in l for l in commits[uno].cambios[0].agregadas)
+
+
+def test_commits_de_la_rama_lee_la_identidad_real_de_cada_commit(tmp_path, github):
+    c = _preparar(tmp_path)
+    _git("-c", "user.name=Fernando Ruiz", "-c", "user.email=fruiztorres@gmail.com", "commit", "--allow-empty",
+         "-m", "yo", cwd=c.ruta)
+    ajeno = _git("rev-parse", "HEAD", cwd=c.ruta)
+    _traer(c)
+    (x,) = _commits(c)
+    assert x.sha == ajeno and x.autor == ("Fernando Ruiz", "fruiztorres@gmail.com") and x.committer == x.autor
+
+
+def test_commits_de_la_rama_sin_commits_nuevos_es_vacio(tmp_path, github):
+    c = _preparar(tmp_path)
+    _traer(c)
+    assert _commits(c) == ()
+
+
+def test_commits_de_la_rama_ve_lo_que_agrega_un_merge_por_su_cuenta(tmp_path, github):
+    """Un merge «malvado» (contenido que no está en ninguno de los padres) no aparece en
+    `git log -p` por omisión: sin `--diff-merges`, el secreto no se barrería."""
+    c = _preparar(tmp_path)
+    _git("checkout", "-q", "-b", "lado", cwd=c.ruta)
+    _commit_bytes(c.ruta, "lado.txt", b"lado\n", "lado")
+    _git("checkout", "-q", RAMA, cwd=c.ruta)
+    _commit_bytes(c.ruta, "rama.txt", b"rama\n", "rama")
+    _git("merge", "--no-ff", "--no-commit", "lado", cwd=c.ruta)
+    (c.ruta / "malvado.txt").write_text(f"{SECRETO}\n")
+    _git("add", "malvado.txt", cwd=c.ruta)
+    _git("commit", "-m", "merge", cwd=c.ruta)
+    _traer(c)
+    agregadas = [l for x in _commits(c) for cambio in x.cambios for l in cambio.agregadas]
+    assert any(SECRETO in l for l in agregadas)
+
+
+def test_tamanos_se_miden_en_el_espejo_no_en_el_disco_del_clon(tmp_path, github):
+    """Qwen commitea un archivo grande y deja uno chico en el disco sin commitear: lo que se
+    empujaría es el grande. El tamaño sale de los blobs de la rama EN EL ESPEJO."""
+    c = _preparar(tmp_path)
+    _commit_bytes(c.ruta, "grande.bin", b"0" * 5000, "grande")
+    _traer(c)
+    (c.ruta / "grande.bin").write_bytes(b"0")
+    assert asyncio.run(E.tamanos_en_el_espejo(c.espejo, mision_id=MID, rama_por_omision="main")) == \
+        {"grande.bin": 5000}
+
+
+def test_tamanos_ignoran_lo_borrado_y_miden_los_enlaces_como_enlaces(tmp_path, github):
+    c = _preparar(tmp_path)
+    _git("rm", "-q", "a", cwd=c.ruta)
+    (c.ruta / "enlace").symlink_to("/etc/passwd")
+    _git("add", "enlace", cwd=c.ruta)
+    _git("commit", "-q", "-m", "x", cwd=c.ruta)
+    _traer(c)
+    assert asyncio.run(E.tamanos_en_el_espejo(c.espejo, mision_id=MID, rama_por_omision="main")) == \
+        {"enlace": len("/etc/passwd")}
+
+
+def test_commits_de_la_rama_lee_como_texto_un_archivo_con_nul_que_ya_no_esta(tmp_path, github):
+    c = _preparar(tmp_path)
+    _commit_bytes(c.ruta, "x.bin", b"\x00\n" + SECRETO.encode() + b"\n", "pongo")
+    _git("rm", "-q", "x.bin", cwd=c.ruta)
+    _git("commit", "-q", "-m", "saco", cwd=c.ruta)
+    _traer(c)
+    assert asyncio.run(E.diff_en_el_espejo(c.espejo, mision_id=MID, rama_por_omision="main")) == ()
+    assert any(SECRETO in l for x in _commits(c) for cambio in x.cambios for l in cambio.agregadas)
