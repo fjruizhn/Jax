@@ -1,24 +1,10 @@
+import pathlib
+
 import pytest
 
-from jax.memory.b9 import (AuthorizationDenied, MutationAuthorizationContext,
-                           MutationAuthorizationRequest, ScopeContext, ScopeDenied, Visibility)
+from jax.memory.b9 import (AuthorizationDenied, ScopeContext, ScopeDenied, Visibility)
 from jax.memory.scope_authority import MariaDBScopeAuthorityResolver
 from jax.memory.scope_authority import ProjectRole
-from jax.memory.project_authority import ProjectAuthorityAdmin
-
-
-class _TrustedAdminResolver:
-    """Test double for the designated transaction resolver, not caller input."""
-    async def resolve_mutation_in_transaction(self, _cur, request, operation, visibility):
-        return MutationAuthorizationContext(request.scope, operation, visibility,
-                                            frozenset({"memory_admin"}),
-                                            frozenset({"memory:admin"}), "db-test")
-
-
-def _admin_request(operation="GRANT_MEMBER"):
-    return MutationAuthorizationRequest(
-        ScopeContext("user:7", "USER", "7", "1", "9"), operation, Visibility.PROJECT_SHARED
-    )
 
 
 class Cursor:
@@ -70,52 +56,86 @@ async def test_requested_project_id_does_not_bypass_membership_lookup():
 
 
 @pytest.mark.asyncio
-async def test_grant_rejects_target_user_from_another_tenant_before_insert():
-    class Store:
-        async def mutation(self, operation):
-            class Cur:
-                def __init__(self): self.rows=[{"status":"ACTIVE","role":"admin"},{"tenant_id":1,"status":"ACTIVE"},{"tenant_id":2,"status":"ACTIVE"}]; self.calls=[]
-                async def execute(self, sql, args): self.calls.append((sql,args))
-                async def fetchone(self): return self.rows.pop(0)
-            self.cur=Cur()
-            return await operation(self.cur)
-    with pytest.raises(ScopeDenied,match="target user tenant"):
-        await ProjectAuthorityAdmin(Store(), _TrustedAdminResolver()).grant_member(
-            _admin_request(),9,1,8,ProjectRole.VIEWER)
+@pytest.mark.parametrize("scope", [
+    ScopeContext("service:memory-extraction", "SERVICE", "7", "1", "9", calling_component="memory-extraction"),
+    ScopeContext("agent:7", "AGENT", "7", "1", "9"),
+    ScopeContext("user:8", "USER", "7", "1", "9"),
+])
+async def test_project_read_rejects_nonhuman_or_forged_subject_before_sql(scope):
+    pool = Pool([])
+    with pytest.raises(ScopeDenied):
+        await MariaDBScopeAuthorityResolver(pool).resolve_project_read(scope)
+    assert pool.conn.cursor_obj.calls == []
 
 
-def test_bind_legacy_scope_is_global_admin_only_idempotent_and_audited():
-    class Store:
-        def __init__(self, rows): self.rows = rows; self.calls = []
-        async def mutation(self, operation):
-            store = self
-            class Cur:
-                async def execute(self, sql, args): store.calls.append((sql, args))
-                async def fetchone(self): return store.rows.pop(0)
-            return await operation(Cur())
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", [
+    ScopeContext("service:memory-extraction", "SERVICE", "7", "1", None, calling_component="memory-extraction"),
+    ScopeContext("agent:7", "AGENT", "7", "1", None),
+    ScopeContext("user:8", "USER", "7", "1", None),
+])
+async def test_tenant_admin_lookup_rejects_nonhuman_or_forged_subject_before_sql(scope):
+    pool = Pool([])
+    with pytest.raises(ScopeDenied):
+        await MariaDBScopeAuthorityResolver(pool).is_active_tenant_admin(scope)
+    assert pool.conn.cursor_obj.calls == []
 
-    async def run():
-        # The pre-existing global role is DB data; the caller does not pass an
-        # is_admin flag.  A project OWNER cannot satisfy bootstrap=True.
-        request = _admin_request("BIND_LEGACY_PROJECT_SCOPE")
-        created = Store([
-            {"status":"ACTIVE", "role":"admin"}, {"id": 9}, None, {"tenant_id": 1},
-        ])
-        assert await ProjectAuthorityAdmin(created, _TrustedAdminResolver()).bind_legacy_project_scope(request, 9, 1) is True
-        sql = "\n".join(query for query, _ in created.calls)
-        assert "INSERT INTO jax_project_scope" in sql
-        assert "BIND_LEGACY_PROJECT_SCOPE" in str(created.calls)
 
-        repeat = Store([
-            {"status":"ACTIVE", "role":"admin"}, {"id": 9}, {"tenant_id": 1, "status":"ACTIVE"},
-        ])
-        assert await ProjectAuthorityAdmin(repeat, _TrustedAdminResolver()).bind_legacy_project_scope(request, 9, 1) is False
-        assert "BIND_LEGACY_PROJECT_SCOPE_NOOP" in str(repeat.calls)
+def test_ningun_resolver_falso_se_usa_como_si_fuera_el_real():
+    """Section 3-bis (2026-09-25 plan): project-authority tests exercise the
+    REAL transactional resolver against MariaDB (see
+    `test_project_authority_mariadb.py`), never a resolver double that
+    always answers "admin, allowed" the way the retired test double for
+    `resolve_mutation_in_transaction` used to.
 
-        conflict = Store([
-            {"status":"ACTIVE", "role":"admin"}, {"id": 9}, {"tenant_id": 2, "status":"ACTIVE"},
-        ])
-        with pytest.raises(ScopeDenied, match="conflicting"):
-            await ProjectAuthorityAdmin(conflict, _TrustedAdminResolver()).bind_legacy_project_scope(request, 9, 1)
-    import asyncio
-    asyncio.run(run())
+    Ronda 4, MINOR 3 (auditor de escalón 3, 2026-09-26): el meta-test
+    anterior (ronda 3, MINOR 7) buscaba una clase pasada como SEGUNDO
+    ARGUMENTO de `ProjectAuthorityAdmin(...)` -- ese constructor ya no toma
+    ningún resolver (ronda 4, MINOR 3 de este mismo cambio: parámetro
+    muerto retirado), así que ese patrón dejó de proteger nada. Ahora
+    detecta algo real: cualquier clase, en un archivo que MENCIONE
+    `project_authority` (acota el barrido: no marca dobles legítimos de
+    OTROS subsistemas, p.ej. `TxResolver` en `test_b9_persistent_api.py`,
+    que no toca `project_authority` en absoluto), que define
+    `resolve_project_read` o `resolve_mutation_in_transaction` -- y que
+    ADEMÁS se usa (por `Name`, instanciada o el nombre de la clase mismo) en
+    cualquier otro `Call` del mismo archivo. Detección por `Name` y por
+    `Call`, no por la firma de un constructor puntual que puede cambiar.
+    """
+    import ast
+
+    here = pathlib.Path(__file__).resolve().parent
+    offenders: list[str] = []
+    for path in here.glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if "project_authority" not in text:
+            continue
+        try:
+            tree = ast.parse(text, str(path))
+        except SyntaxError:
+            continue
+        fake_resolver_classes = {
+            node.name for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef)
+            and any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and item.name in ("resolve_project_read", "resolve_mutation_in_transaction")
+                   for item in node.body)
+        }
+        if not fake_resolver_classes:
+            continue
+        instance_names = {
+            target.id
+            for node in ast.walk(tree) if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+            and node.value.func.id in fake_resolver_classes
+            for target in node.targets if isinstance(target, ast.Name)
+        }
+        watched = fake_resolver_classes | instance_names
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func_name = node.func.id if isinstance(node.func, ast.Name) else None
+            for arg in (*node.args, *(kw.value for kw in node.keywords)):
+                if isinstance(arg, ast.Name) and arg.id in watched and arg.id != func_name:
+                    offenders.append(f"{path.name}: {arg.id} used in {func_name or '<call>'}(...)")
+    assert not offenders, "fake resolver used as if real: " + repr(offenders)
