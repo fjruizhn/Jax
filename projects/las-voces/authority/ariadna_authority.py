@@ -315,7 +315,8 @@ def _atomic_json(path: Path, value: Any) -> None:
         finally: os.close(directory_fd)
     except BaseException:
         try: os.unlink(temporary)
-        except FileNotFoundError: pass
+        except FileNotFoundError:  # fail-soft: el temporal ya puede haber desaparecido durante cleanup; la excepción original se vuelve a propagar
+            pass
         raise
 
 
