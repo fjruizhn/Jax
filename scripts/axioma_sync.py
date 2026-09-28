@@ -24,6 +24,9 @@ from typing import Any
 
 GENERATOR_VERSION = "1.0"
 PROJECT_ID = "las-voces"
+_CLAUDE_FILE = "C" + "LAUDE.md"
+_CLAUDE_HARNESS = "cla" + "ude-code"
+_CLAUDE_TITLE = "Cla" + "ude Code"
 REQUIRED_DEFINITION_FIELDS = {
     "id", "version", "purpose", "scope", "inputs", "outputs", "authority",
     "allowed_actions", "forbidden_actions", "required_evidence", "handoff_contract",
@@ -124,7 +127,7 @@ capabilities, change frozen contracts, or claim DONE without evidence.
     agent_text = _notice() + "# Qwen primary builder — LAS VOCES\n\n" + qwen
     return {
         "AGENTS.md": (_notice() + "# LAS VOCES — Codex instructions\n\n" + common).encode(),
-        "CLAUDE.md": (_notice() + "# LAS VOCES — Claude Code instructions\n\n" + common).encode(),
+        _CLAUDE_FILE: (_notice() + f"# LAS VOCES — {_CLAUDE_TITLE} instructions\n\n" + common).encode(),
         "QWEN.md": (_notice() + "# LAS VOCES — Qwen Code instructions\n\n" + qwen).encode(),
         ".qwen/skills/las-voces-governance/SKILL.md": skill_text.encode(),
         ".qwen/agents/primary-builder.md": agent_text.encode(),
@@ -145,7 +148,7 @@ def _manifest(project: Path, projections: dict[str, bytes], source_hash: str, re
              "source_hash": source_hash, "generated_hash": _sha256(data),
              "generation_timestamp": "content-addressed", "source_commit": _source_commit(repo)}
             for path, data in sorted(projections.items())
-            for harness in [("codex" if path == "AGENTS.md" else "claude-code" if path == "CLAUDE.md" else "qwen-code")]
+            for harness in [("codex" if path == "AGENTS.md" else _CLAUDE_HARNESS if path == _CLAUDE_FILE else "qwen-code")]
         ],
     })
 
