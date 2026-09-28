@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "package": {
+    "name": "LAS VOCES",
+    "version": "0.1.0",
+    "source_path": "/home/fruiz/imports/las-voces-v0.1.0/LAS_VOCES",
+    "source_date": "2026-09-27",
+    "imported_at": "2026-09-27T22:08:22-06:00"
+  },
+  "source_files": {
+    "project.json": "sha256:75d8193f6cfd1725c680b493de7767e6acc7fb5abbb9b3551156fb4c6b9910c6",
+    "README.md": "sha256:ebf25783e3f617ad88d60e90c6f7e64e6429d5af9d213f1f2468cda3c34f379f",
+    "index.html": "sha256:c792ab2fd757bf35b96fc32251eac2c9bdf9f0eaaa81471b295de0313c47d1ec",
+    "SYNC_CONTRACT.md": "sha256:13f3b79f868536bd85b5396fe06986c8aab4bec84f6d73b20269f507ef036068",
+    "AGENT_ARIADNA.md": "sha256:67846e4eaa9b3f91405bcb83f58b26ae95b23a2b423942037ddc5fb99c89fc32",
+    "PROJECT_CHARTER.md": "sha256:6c8667951cf91f9aa46ff0113278660340ce0f8f4af3778694f98d6b2c32da01"
+  },
+  "repository_copy": {
+    "AGENT_ARIADNA.md": "agents/ARIADNA.md",
+    "other_files": "copied at their original names in this directory"
+  },
+  "integration_deltas": [
+    {
+      "file": "project.json",
+      "change": "LV-000 status advances from READY to DONE only after the validation evidence recorded in this import commit; its evidence references and Ariadna's PROPOSED_NOT_ACTIVE lifecycle are explicit."
+    },
+    {
+      "file": "index.html",
+      "change": "The renderer now displays PLANNED in its own column rather than presenting it as READY, and only permits HTTP(S) source links."
+    },
+    {
+      "file": "PROJECT_CHARTER.md",
+      "change": "Three Markdown hard-break trailing spaces were removed so the repository passes git diff --check; no charter wording changed."
+    }
+  ],
+  "import_commit": "9a63721dd891884ce59203850c5ec35bac227518"
+}
