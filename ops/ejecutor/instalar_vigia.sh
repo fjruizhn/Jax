@@ -26,10 +26,12 @@ python3 -c "import sys; c, m = float(sys.argv[1]), float(sys.argv[2]); sys.exit(
 # recibe SÓLO travesía (--x, sin +r): puede entrar a `<mision_id>/claude-projects` si ya
 # sabe el UUID exacto (se lo da la propia misión que está corriendo), pero no puede LISTAR
 # este directorio ni leer `<id>.json` de ninguna misión. Cada subcarpeta la crea
-# `cuenta_axioma.preparar_directorio_projects` con `sudo install -d -o axioma -g axioma -m
-# 0700`, así que ni con el --x de acá alcanza para tocar la de OTRA misión sin adivinar su
-# UUID Y que ese UUID sea, además, dueño=axioma -- que lo es siempre, así que el límite real
-# es "conocer el UUID de la misión en curso", el mismo que ya protege todo lo demás del
+# `cuenta_axioma.preparar_directorio_de_la_cuenta` (alias `preparar_directorio_projects`),
+# SIN sudo (jaxsvc no tiene sudo, ver ese código): la crea el propio proceso -- dueño -- y
+# a `axioma` le da paso por ACL (`setfacl --set`, con ACL por omisión), nunca por `chown`.
+# Así que ni con el --x de acá alcanza para tocar la de OTRA misión sin adivinar su UUID Y
+# que esa carpeta le dé paso a `axioma` por ACL -- que se lo da siempre, así que el límite
+# real es "conocer el UUID de la misión en curso", el mismo que ya protege todo lo demás del
 # Ejecutor (machine-id, políticas, etc.).
 "$REPO/ops/ejecutor/preparar_directorio_misiones.sh" "$JAX_EJECUTOR_MISIONES" "$JAX_EJECUTOR_ADMIN_USUARIO" \
   "$JAX_EJECUTOR_CUENTA"
