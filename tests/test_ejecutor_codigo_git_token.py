@@ -102,3 +102,33 @@ def test_correr_git_con_entrada_la_pasa_por_stdin_y_sin_entrada_stdin_es_devnull
     vacia = asyncio.run(G.correr_git(["-C", str(tmp_path / "r.git"), "cat-file", "--batch-check"], env=env,
                                      error="x"))
     assert vacia == b""
+
+
+# --- tope de tiempo (ronda final de la auditoría, Tarea 9) ---------------------------------------
+
+import time  # noqa: E402
+
+
+def test_correr_git_con_tope_vencido_mata_el_proceso_y_falla_cerrado(tmp_path):
+    """Un git que no termina (red colgada, upload-pack trabado) no cuelga el turno: al vencer el tope se
+    mata el grupo de procesos entero y se lanza GitFallo."""
+    marca = tmp_path / "siguio-vivo"
+    env = G.entorno_base(tmp_path)
+    inicio = time.monotonic()
+    with pytest.raises(G.GitFallo, match="lento: tope_vencido"):
+        asyncio.run(G.correr_git(["-c", f"alias.dormir=!sleep 3; touch {marca}", "dormir"], env=env,
+                                 error="lento", tope_s=0.5))
+    assert time.monotonic() - inicio < 2.5
+    time.sleep(3.2)
+    assert not marca.exists(), "el sleep hijo siguió vivo: no se mató el grupo"
+
+
+def test_tope_por_omision_300_y_configurable(monkeypatch):
+    monkeypatch.delenv("JAX_EJECUTOR_GIT_TOPE_S", raising=False)
+    assert G.tope_por_omision() == 300.0
+    monkeypatch.setenv("JAX_EJECUTOR_GIT_TOPE_S", "42")
+    assert G.tope_por_omision() == 42.0
+    for malo in ("0", "-1", "x", "inf", "nan"):
+        monkeypatch.setenv("JAX_EJECUTOR_GIT_TOPE_S", malo)
+        with pytest.raises(ValueError):
+            G.tope_por_omision()

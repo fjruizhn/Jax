@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import os
+import signal
 import tempfile
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -81,15 +83,40 @@ def sanear(texto: str, token: str | None) -> str:
     return texto[-TOPE_ERROR:]
 
 
+VARIABLE_TOPE = "JAX_EJECUTOR_GIT_TOPE_S"
+TOPE_S_POR_OMISION = 300.0
+
+
+def tope_por_omision() -> float:
+    """El tope de cada git: `JAX_EJECUTOR_GIT_TOPE_S`, o 300 s. Un valor presente e inválido es error
+    (fail-closed), no el valor por omisión."""
+    texto = os.environ.get(VARIABLE_TOPE)
+    if texto is None:
+        return TOPE_S_POR_OMISION
+    valor = float(texto)
+    if not math.isfinite(valor) or valor <= 0:
+        raise ValueError(f"{VARIABLE_TOPE}_invalido")
+    return valor
+
+
 async def correr_git(args: Sequence[str], *, env: dict[str, str], error: str, sanear_con: str | None = None,
-                     mostrar_error: bool = True, entrada: bytes | None = None) -> bytes:
+                     mostrar_error: bool = True, entrada: bytes | None = None, tope_s: float | None = None) -> bytes:
     """`git <BLINDAJE> <args>`. Devuelve stdout en bytes; si falla, `GitFallo(error[: …])`.
     `entrada`: lo que va por stdin (p. ej. oids para `cat-file --batch-check`); sin ella, stdin
-    es /dev/null."""
+    es /dev/null. `tope_s` (por omisión `tope_por_omision()`): al vencer se mata el GRUPO de procesos
+    entero (git lanza hijos: upload-pack, ssh, askpass) y se lanza `GitFallo(error: tope_vencido)`."""
+    tope = tope_por_omision() if tope_s is None else tope_s
     stdin = asyncio.subprocess.DEVNULL if entrada is None else asyncio.subprocess.PIPE
     proc = await asyncio.create_subprocess_exec("git", *BLINDAJE, *args, env=env, stdin=stdin,
-                                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    salida, errores = await proc.communicate(entrada)
+                                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                                                start_new_session=True)
+    try:
+        salida, errores = await asyncio.wait_for(proc.communicate(entrada), tope)
+    except asyncio.TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        await proc.wait()
+        raise GitFallo(f"{error}: tope_vencido") from None
     if proc.returncode != 0:
         if not mostrar_error:
             raise GitFallo(error, salida)
