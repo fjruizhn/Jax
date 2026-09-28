@@ -1525,7 +1525,7 @@ jobs:
       # Desde E-19 (2026-09-16) todo sale de requirements.txt.
       - run: pip install -r requirements.txt pytest
       - name: Suite de gobernanza
-        run: python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py -v
+        run: python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py -v
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-03: 39 (SP1 + arreglo del test rojo) + 39
         # (tests/test_governance_grounding.py, SP3 + ola de fixes de la
@@ -1551,9 +1551,12 @@ jobs:
         # secciones, citación VALID + su CONTROL, render, P10). Rojos vistos; los
         # 2 que pasan antes son declarados y validados por mutación.
         run: |
-          python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py -q 2>&1 | tee /tmp/gov
-          grep -qE "^90 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 90 tests CORRIDOS."; exit 1; }
+          python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py -q 2>&1 | tee /tmp/gov
+          # 113 -> 116 el 2026-09-28 (F2-A remediation): immutable sealing,
+          # candidate/sealed boundaries, current-receipt temporality, and
+          # attribution binding add three net governance-contract regressions.
+          grep -qE "^116 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 116 tests CORRIDOS."; exit 1; }
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en
