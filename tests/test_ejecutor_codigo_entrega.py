@@ -584,3 +584,19 @@ def test_tamanos_de_la_rama_mide_un_enlace_como_enlace(tmp_path, github):
     _git("commit", "-q", "-m", "x", cwd=c.ruta)
     _traer(c)
     assert _tamanos_rango(c).por_ruta == {"enlace": len("/etc/passwd")}
+
+
+# --- MAJOR-A (ronda final): ¿está la rama en GitHub? --------------------------------------------
+
+def test_oid_remoto_de_la_rama_antes_y_despues_de_empujar(tmp_path, github):
+    c = _preparar(tmp_path)
+    qwen = _commit(c.ruta, "a", "2", "uno")
+    _traer(c)
+    assert asyncio.run(E.oid_remoto_de_la_rama(c.espejo, mision_id=MID, token=TOKEN)) is None
+    asyncio.run(E.empujar(c.espejo, mision_id=MID, rama_por_omision="main", token=TOKEN))
+    assert asyncio.run(E.oid_remoto_de_la_rama(c.espejo, mision_id=MID, token=TOKEN)) == qwen
+
+
+def test_oid_remoto_de_la_rama_que_no_responde_es_entrega_rechazada(tmp_path):
+    with pytest.raises(E.EntregaRechazada):
+        asyncio.run(E.oid_remoto_de_la_rama(tmp_path / "no-existe.git", mision_id=MID, token=TOKEN))

@@ -64,15 +64,26 @@ def _limpio(texto: str, token: str) -> str:
 
 
 def _resultado(estado: str, *, violaciones=(), pr_url: str | None = None, notas=(), token: str = "",
-               sha: str | None = None, **extra) -> dict:
+               sha: str | None = None, rama_empujada: bool | str | None = None, **extra) -> dict:
+    """`rama_empujada`: True/False, o "desconocido" (MAJOR-A: ni el empuje ni `ls-remote` respondieron)."""
     return {"estado_entrega": estado, "pr_url": pr_url,
             "violaciones": [{"regla": v.regla, "ruta": _limpio(v.ruta, token), "detalle": _limpio(v.detalle, token)}
                             for v in violaciones],
-            "notas": list(notas), "rama_empujada": sha is not None, "sha": sha, **extra}
+            "notas": list(notas), "rama_empujada": sha is not None if rama_empujada is None else rama_empujada,
+            "sha": sha, **extra}
 
 
-def _fallo(motivo: str, token: str) -> dict:
-    return _resultado("fallo_entrega", violaciones=(Violacion("entrega", "", motivo),), token=token)
+def _fallo(motivo: str, token: str, rama_empujada: bool | str | None = None) -> dict:
+    return _resultado("fallo_entrega", violaciones=(Violacion("entrega", "", motivo),), token=token,
+                      rama_empujada=rama_empujada)
+
+
+def _sin_pr(sha: str, pr_previo: str | None, *, notas=(), motivo: str | None = None) -> dict:
+    """MAJOR-B: `empujado_sin_pr` = la rama está en GitHub y el PR de ESTE turno no se confirmó. Si ya
+    había un PR abierto de la misión, se da su URL y se avisa que su informe es el de antes."""
+    extra = ("pr_con_informe_desactualizado",) if pr_previo else ()
+    return _resultado("empujado_sin_pr", sha=sha, pr_url=pr_previo, notas=(*notas, *extra),
+                      violaciones=(Violacion("entrega", "", motivo),) if motivo else ())
 
 
 def _identidad(historial, esperada: tuple[str, str]) -> tuple[Violacion, ...]:
@@ -106,18 +117,21 @@ async def _pausa(pausa_puesta) -> bool:
         return True
 
 
-async def _nota_pr_previo(pr_abierto, cliente, repo: str, rama: str) -> tuple[str, ...]:
+async def _pr_previo(pr_abierto, cliente, repo: str, rama: str) -> tuple[str | None, tuple[str, ...]]:
+    """(URL del PR abierto de la misión o None, notas). Se mira con `_listar` antes de empujar."""
     try:
-        return ("pr_previo_sin_cambios_nuevos",) if await pr_abierto(cliente, repo=repo, rama=rama) else ()
-    except Exception:  # fail-soft: sin_cambios no empuja nada; que no se pudo mirar se declara en la nota
-        return ("pr_previo_no_verificado",)
+        url = await pr_abierto(cliente, repo=repo, rama=rama)
+        return (url if E.url_de_pr_valida(url) else None), ()
+    except Exception:  # fail-soft: no decide ningún empuje; que no se pudo mirar se declara en la nota
+        return None, ("pr_previo_no_verificado",)
 
 
 async def entregar(clon: Clon, *, mision_id: str, repo: str, revision_legible: bool, informe: str, token: str,
                    cliente, tope_bytes: int, tope_total_bytes: int, modelo: str, autor: str, upload_pack: str,
                    pausa_puesta, traer=E.traer_del_clon, commits=E.commits_de_la_rama, diff=E.diff_en_el_espejo,
                    tamanos=E.tamanos_de_la_rama, punta=E.punta_de_la_rama, empujar=E.empujar,
-                   abrir_pr=E.abrir_o_actualizar_pr, pr_abierto=E.hay_pr_abierto) -> dict:
+                   abrir_pr=E.abrir_o_actualizar_pr, pr_abierto=E.pr_abierto,
+                   consultar_remoto=E.oid_remoto_de_la_rama) -> dict:
     esperada = parsear_autor(autor)
     base = clon.rama_por_omision
     try:
@@ -126,7 +140,8 @@ async def entregar(clon: Clon, *, mision_id: str, repo: str, revision_legible: b
     except EntregaRechazada as exc:  # fail-closed: sin push ni PR; el motivo (saneado) queda en la bitácora
         return _fallo(str(exc), token)
     if not historial:
-        return _resultado("sin_cambios", notas=await _nota_pr_previo(pr_abierto, cliente, repo, clon.rama))
+        previo, notas = await _pr_previo(pr_abierto, cliente, repo, clon.rama)
+        return _resultado("sin_cambios", notas=(("pr_previo_sin_cambios_nuevos",) if previo else ()) + notas)
     if not revision_legible:
         return _resultado("sin_informe_c5")
     try:
@@ -149,20 +164,30 @@ async def entregar(clon: Clon, *, mision_id: str, repo: str, revision_legible: b
         return _resultado("rechazada_por_contrato", violaciones=violaciones, token=token)
     if await _pausa(pausa_puesta):  # MINOR-1: la pausa pudo ponerse mientras se revisaba
         return _resultado("sin_entregar", motivo="pausa_puesta")
+    previo, notas_previas = await _pr_previo(pr_abierto, cliente, repo, clon.rama)
     try:
         sha = await punta(clon.espejo, mision_id=mision_id)
-        await empujar(clon.espejo, mision_id=mision_id, rama_por_omision=base, token=token)
-    except EntregaRechazada as exc:  # fail-closed: el motivo (saneado) queda en la bitácora
+    except EntregaRechazada as exc:  # fail-closed: sin push ni PR
         return _fallo(str(exc), token)
+    try:
+        await empujar(clon.espejo, mision_id=mision_id, rama_por_omision=base, token=token)
+    except EntregaRechazada as exc:  # fail-closed: MAJOR-A -- antes de decidir, ¿llegó igual?
+        try:
+            remoto = await consultar_remoto(clon.espejo, mision_id=mision_id, token=token)
+        except EntregaRechazada:  # fail-closed: no se sabe si la rama llegó; se declara así
+            return _fallo(str(exc), token, rama_empujada="desconocido")
+        if remoto != sha:
+            return _fallo(str(exc), token, rama_empujada=False)
+        # El remoto tiene exactamente lo que íbamos a empujar: el empuje llegó. Se sigue al PR.
     # --- desde aquí la rama YA está en GitHub: todo resultado lo declara ---
     if await _pausa(pausa_puesta):
-        return _resultado("empujado_sin_pr", sha=sha, notas=("pausa_puesta",))
+        return _sin_pr(sha, previo, notas=("pausa_puesta", *notas_previas))
     try:
         pr = await abrir_pr(cliente, repo=repo, rama=clon.rama, base=base, titulo=titulo, cuerpo=cuerpo)
     except httpx.HTTPStatusError as exc:  # fail-closed: rama empujada, PR no; solo el código HTTP a la bitácora
-        return _resultado("empujado_sin_pr", sha=sha,
-                          violaciones=(Violacion("entrega", "", f"github_api: {exc.response.status_code}"),))
+        return _sin_pr(sha, previo, notas=notas_previas, motivo=f"github_api: {exc.response.status_code}")
     except Exception as exc:  # fail-closed: rama empujada, PR no; solo el tipo (el mensaje puede traer cualquier cosa)
-        return _resultado("empujado_sin_pr", sha=sha,
-                          violaciones=(Violacion("entrega", "", f"github_api: {type(exc).__name__}"),))
-    return _resultado("abierto", pr_url=pr.url, notas=pr.notas, sha=sha)
+        return _sin_pr(sha, previo, notas=notas_previas, motivo=f"github_api: {type(exc).__name__}")
+    if not E.url_de_pr_valida(pr.url):  # MINOR-C: sin URL https válida, el PR no está confirmado
+        return _sin_pr(sha, previo, notas=notas_previas, motivo="github_api: pr_url_invalida")
+    return _resultado("abierto", pr_url=pr.url, notas=(*pr.notas, *notas_previas), sha=sha)

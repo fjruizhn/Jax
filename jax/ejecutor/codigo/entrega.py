@@ -313,8 +313,28 @@ async def punta_de_la_rama(espejo: Path, *, mision_id: str) -> str:
     return oid
 
 
-async def hay_pr_abierto(cliente: httpx.AsyncClient, *, repo: str, rama: str) -> bool:
-    return bool(await _listar(cliente, validar_owner_repo(repo), rama, "open"))
+async def pr_abierto(cliente: httpx.AsyncClient, *, repo: str, rama: str) -> str | None:
+    """La URL del PR abierto de la rama, o None. Solo una URL https válida cuenta."""
+    abiertos = await _listar(cliente, validar_owner_repo(repo), rama, "open")
+    url = abiertos[0].get("html_url") if abiertos and isinstance(abiertos[0], dict) else None
+    return url if url_de_pr_valida(url) else None
+
+
+def url_de_pr_valida(url) -> bool:
+    """MINOR-C (auditoría): una URL de PR es un texto https no vacío y sin espacios ni controles."""
+    return (isinstance(url, str) and url.startswith("https://") and len(url) > len("https://")
+            and not any(c.isspace() or ord(c) < 32 for c in url))
+
+
+async def oid_remoto_de_la_rama(espejo: Path, *, mision_id: str, token: str) -> str | None:
+    """El oid de `axioma/<id>` EN GITHUB (`ls-remote` desde el espejo), o None si no existe. MAJOR-A:
+    tras un empuje que falló, decide si la rama llegó igual. Un fallo de git -> EntregaRechazada."""
+    ref = f"refs/heads/{rama_de_la_mision(mision_id)}"
+    with hogar_temporal() as home:
+        try:
+            return await _oid_remoto(espejo, ref, entorno_red(home, token), token)
+        except GitFallo as exc:
+            raise EntregaRechazada(str(exc)) from None
 
 
 async def empujar(espejo: Path, *, mision_id: str, rama_por_omision: str, token: str) -> None:
