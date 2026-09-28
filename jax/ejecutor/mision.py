@@ -295,6 +295,18 @@ def afirmaciones_del_texto(texto) -> tuple:
                  if isinstance(d, dict) and all(isinstance(d.get(c), str) for c in CAMPOS))
 
 
+def _maquinas_para_c5(turno: Turno, hosts) -> frozenset:
+    """Las máquinas que C5 recibe como «de la misión». En una misión de CÓDIGO (ruling 4a, Tarea 9)
+    el Bash del cerebro corre en la jaula, en la máquina local: `destinos` ya le atribuye esas
+    capturas a la ÚNICA máquina `es_local` del inventario, y C5 tiene que verla como de la misión o
+    una afirmación sobre las pruebas corridas le llega como ajena. Si no hay exactamente una local,
+    no se suma nada (`destinos` tampoco produce capturas locales en ese caso)."""
+    if turno.tipo != "codigo":
+        return turno.hosts
+    locales = [h.nombre for h in hosts if h.es_local]
+    return turno.hosts | frozenset(locales) if len(locales) == 1 else turno.hosts
+
+
 def sha_de_resultado(contenido) -> str:
     return hashlib.sha256(json.dumps(contenido, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode()).hexdigest()
@@ -425,7 +437,8 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                 dice("paso", comando=comando, en_registro=en_registro, cuadra=cuadra)
             entrega = transporte.entregar(afirmaciones_del_texto(final), capturas(pedidas, resultados, hosts))
             try:
-                revision = await deps.auditar(turno.texto_de_mision, entrega, A.maquinas_de(hosts, turno.hosts))
+                revision = await deps.auditar(turno.texto_de_mision, entrega,
+                                              A.maquinas_de(hosts, _maquinas_para_c5(turno, hosts)))
                 auditor_pauso = revision.pausar
                 entrega = A.aplicar_revision(entrega, revision)
             except Exception as exc:  # fail-soft: el turno entrega las crudas; fail-CLOSED para las afirmaciones: con el auditor ilegible o caído no sale ninguna

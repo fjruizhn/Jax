@@ -676,6 +676,42 @@ def test_codigo_no_entrega_si_algo_mas_fallo_y_queda_sin_entregar_con_el_codigo_
     assert entregado["datos"] == esperado
 
 
+AFIRMACION_LOCAL = {"maquina": "hall9000", "comando": "pytest -q", "linea": "3 passed in 0.10s", "dato": "3 passed",
+                    "proposito": "¿pasan las pruebas?"}
+
+
+def _cerebro_local(f):
+    f.cerebro = (0, _crudo(json.dumps([AFIRMACION_LOCAL]), comando="pytest -q", salida="3 passed in 0.10s\n"))
+    f.registro = [{"evento": "herramienta_pedida", "tool_use_id": "t1"},
+                  {"evento": "resultado_devuelto", "tool_use_id": "t1", "sha256": _sha("3 passed in 0.10s\n")}]
+
+
+def test_codigo_una_prueba_corrida_en_la_jaula_respalda_su_afirmacion_y_c5_ve_la_maquina_local():
+    """Ruling 4a: en una misión de código el Bash del cerebro corre en la máquina local (la jaula);
+    su salida es una captura citable de ESA máquina, y C5 la recibe como máquina de la misión --
+    si no, una afirmación sobre la máquina local le llega como fuera de la misión."""
+    f = FalsasCodigo()
+    _cerebro_local(f)
+    r, _ = _correr(f, _turno_codigo())
+    assert r["afirmaciones"] == [AFIRMACION_LOCAL] and r["codigo"] is None
+    assert {m.nombre for m in f.maquinas_auditadas} == {"ejecutor-prueba", "hall9000"}
+
+
+def test_servidor_no_suma_la_maquina_local_a_c5():
+    f = Falsas()
+    _correr(f)
+    assert {m.nombre for m in f.maquinas_auditadas} == {"ejecutor-prueba"}
+
+
+def test_codigo_lo_que_no_se_cita_de_la_jaula_sigue_descartado():
+    f = FalsasCodigo()
+    _cerebro_local(f)
+    otra = {**AFIRMACION_LOCAL, "linea": "5 passed in 0.10s", "dato": "5 passed"}
+    f.cerebro = (0, _crudo(json.dumps([otra]), comando="pytest -q", salida="3 passed in 0.10s\n"))
+    r, _ = _correr(f, _turno_codigo())
+    assert r["afirmaciones"] == [] and [d["dato"] for d in r["descartadas"]] == ["5 passed"]
+
+
 def test_codigo_con_el_vigia_sin_latir_no_prepara():
     f = FalsasCodigo()
     f.latido = False
