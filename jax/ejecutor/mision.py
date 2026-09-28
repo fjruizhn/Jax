@@ -169,6 +169,27 @@ def instrucciones_de_codigo(repo: dict) -> str:
             "\nCita la salida real de cada prueba que corras; lo que no corriste, dilo como no corrido.")
 
 
+def prompt_de_codigo(instruccion: str, repo: dict, maquina_local: str | None, reanudar: bool = False) -> str:
+    """El pedido de una misión de CÓDIGO (MAJOR-3 de la auditoría de escalón 3). Sin lista de ssh: medido
+    por el controlador con los usuarios reales, desde la jaula no hay salida (la llave de axioma no
+    entra a axioma@hall9000 y el cerco rechaza 127.0.0.1:58291). Todo corre en el directorio actual,
+    y la máquina de cada afirmación es la local -- la misma a la que `destinos` atribuye esas capturas."""
+    maquina = maquina_local or "local"
+    vigencia = ("Los datos de turnos anteriores ya no valen: todo comando que respalde una afirmación se corre "
+                "EN ESTE TURNO, aunque ya lo hayas corrido antes.\n" if reanudar else "")
+    return (
+        f"Misión: {instruccion}\n{vigencia}"
+        "Todos los comandos corren en ESTA máquina, en el directorio actual, con la herramienta Bash, uno por "
+        "llamada. No hay red ni otras máquinas: no intentes conectarte a ninguna."
+        + instrucciones_de_codigo(repo) + "\n"
+        "Al terminar responde SOLO un arreglo JSON, sin texto alrededor y sin bloque de código, con una "
+        f'afirmación por dato: {{"maquina": "{maquina}", "comando": <el comando COMPLETO tal como lo pasaste a '
+        'Bash, carácter por carácter>, "linea": <una línea COPIADA LITERAL de su salida>, "dato": <UN valor '
+        'copiado tal cual de esa línea>, "proposito": <la pregunta que responde>}. Sin línea literal que lo '
+        "respalde, un dato no se escribe."
+    )
+
+
 def evento(nombre: str, turno: int, /, **datos) -> str:
     return json.dumps({"evento": nombre, "turno": turno, "datos": datos}, ensure_ascii=False)
 
@@ -228,18 +249,20 @@ def sesion_anunciada(salida: bytes, sesion: str) -> bool:
     return any(ev.get("session_id") == sesion for ev in _eventos_del_stream(salida))
 
 
-def capturas(pedidas: dict, resultados: dict, hosts) -> tuple:
+def capturas(pedidas: dict, resultados: dict, hosts, permitidas: frozenset | None = None) -> tuple:
     """Una captura por comando con resultado. La máquina la decide `destinos` (lo que el gancho
-    ve), no el modelo; un comando que toca más de una máquina, o ninguna legible, no respalda."""
+    ve), no el modelo; un comando que toca más de una máquina, o ninguna legible, no respalda.
+    `permitidas` (MINOR-2 de la auditoría): una captura de una máquina fuera de ese conjunto -- las
+    máquinas de C5 del turno -- se descarta, de forma determinista, antes de la cita."""
     salida = []
     for tid, comando in pedidas.items():
-        if tid not in resultados or not isinstance(comando, str):
+        if tid not in resultados or not isinstance(comando, str) or destinos.ssh_no_literal(comando):
             continue
         try:
             tocadas = destinos.destinos(comando, hosts)
         except (destinos.HostDesconocido, destinos.ComandoIlegible):
             continue
-        if len(tocadas) != 1:
+        if len(tocadas) != 1 or (permitidas is not None and not tocadas <= permitidas):
             continue
         contenido, es_error = resultados[tid]
         texto = _texto_de_resultado(contenido)
@@ -409,15 +432,26 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                 dice("vigia_no_latio", vivo=vigia.vive(), espera_s=deps.espera_latido_s)
                 break
             await asyncio.sleep(deps.paso_espera_s)
+        maquinas_c5 = _maquinas_para_c5(turno, hosts)
         if codigo is None:
             dice("vigia_late")
-            prompt = prompt_del_turno(turno.instruccion, hosts, turno.hosts, turno.reanudar)
             if es_codigo:
                 # Antes del cerebro: espejo + clon + dependencias (turno 1) o fetch del espejo (≥ 2).
-                clon = await deps.preparar_codigo(ctx)
-                dice("codigo_preparado", rama=clon.rama, base=clon.rama_por_omision,
-                     dependencias=list(clon.dependencias))
-                prompt += instrucciones_de_codigo(turno.repo)
+                try:
+                    clon = await deps.preparar_codigo(ctx)
+                except Exception as exc:  # fail-closed: sin clon no hay cerebro ni entrega; a la bitácora solo el tipo
+                    codigo = "preparar_fallo"
+                    dice("preparar_fallo", tipo=type(exc).__name__)
+                else:
+                    dice("codigo_preparado", rama=clon.rama, base=clon.rama_por_omision,
+                         dependencias=list(clon.dependencias))
+        if codigo is None:
+            if es_codigo:
+                locales = [h.nombre for h in hosts if h.es_local]
+                prompt = prompt_de_codigo(turno.instruccion, turno.repo, locales[0] if len(locales) == 1 else None,
+                                          turno.reanudar)
+            else:
+                prompt = prompt_del_turno(turno.instruccion, hosts, turno.hosts, turno.reanudar)
             try:
                 rc, crudo = await deps.correr_cerebro(ctx, prompt, turno.sesion, turno.reanudar)
             except asyncio.TimeoutError:
@@ -435,10 +469,11 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                 cuadra = en_registro and (tid not in resultados or devueltos.get(tid) == sha_de_resultado(resultados[tid][0]))
                 registro_cuadra = registro_cuadra and cuadra
                 dice("paso", comando=comando, en_registro=en_registro, cuadra=cuadra)
-            entrega = transporte.entregar(afirmaciones_del_texto(final), capturas(pedidas, resultados, hosts))
+            entrega = transporte.entregar(afirmaciones_del_texto(final), capturas(pedidas, resultados, hosts,
+                                                                                     maquinas_c5))
             try:
                 revision = await deps.auditar(turno.texto_de_mision, entrega,
-                                              A.maquinas_de(hosts, _maquinas_para_c5(turno, hosts)))
+                                              A.maquinas_de(hosts, maquinas_c5))
                 auditor_pauso = revision.pausar
                 entrega = A.aplicar_revision(entrega, revision)
             except Exception as exc:  # fail-soft: el turno entrega las crudas; fail-CLOSED para las afirmaciones: con el auditor ilegible o caído no sale ninguna
@@ -508,7 +543,8 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                 codigo = resultado_entrega["estado_entrega"]
         else:
             resultado_entrega = {"estado_entrega": "sin_entregar", "motivo": codigo or "codigo_sin_clon",
-                                 "pr_url": None, "violaciones": [], "notas": []}
+                                 "pr_url": None, "violaciones": [], "notas": [], "rama_empujada": False,
+                                 "sha": None}
             codigo = codigo or "codigo_sin_clon"
         dice("entrega_codigo", **resultado_entrega)
     verificacion = {"registro_cuadra": registro_cuadra, "cadena_ok": cadena, "pausa_puesta": puesta,
