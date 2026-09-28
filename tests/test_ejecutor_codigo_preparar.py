@@ -181,7 +181,7 @@ def test_dependencias_con_banderas_y_sin_entorno_de_jax(tmp_path, monkeypatch):
     deps = tmp_path / "m" / MID / "deps"
     internos = instalar.internos()  # todas pasan por bwrap con --clearenv
     npm = [a for a in internos if a[0] == "npm"]
-    assert npm == [("npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund")] * 2
+    assert npm == [("npm", "ci", "--ignore-scripts", "--allow-git=none", "--no-audit", "--no-fund")] * 2
     assert [a for a in internos if a[0] == "composer"] == [
         ("composer", "install", "--no-interaction", "--no-scripts", "--no-plugins", "--prefer-dist")]
     pips = [a for a in internos if a[0].endswith("/pip")]
@@ -306,7 +306,7 @@ def test_npm_lockfile_limpio_si_se_instala(tmp_path, monkeypatch):
     instalar = _Instalador()
     c = _preparar(tmp_path, instalar=instalar)
     assert [a for a in instalar.internos() if a[0] == "npm"] == [
-        ("npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund")]
+        ("npm", "ci", "--ignore-scripts", "--allow-git=none", "--no-audit", "--no-fund")]
     assert "package-lock.json" in c.dependencias
 
 

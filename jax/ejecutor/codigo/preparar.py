@@ -230,7 +230,11 @@ async def _instalar_dependencias(espejo: Path, deps: Path, base: str, instalar: 
             if malos:
                 hechas += [f"npm_fuente_rechazada:{lock}:{m}" for m in malos]
                 continue
-            rc, _ = await correr(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], destino, montajes)
+            # --allow-git=none (npm >= 11; verificado en 11.13 del node de producción): con un
+            # package.json que declare una dependencia git ausente del lockfile, npm ci bajaba el
+            # tarball antes de fallar. Ahora ni lo baja.
+            rc, _ = await correr(["npm", "ci", "--ignore-scripts", "--allow-git=none", "--no-audit", "--no-fund"],
+                                 destino, montajes)
             if rc != 0:
                 raise RuntimeError(f"preparar_fallo: npm ci en {d or '.'} (rc={rc})")
             hechas.append(lock)
