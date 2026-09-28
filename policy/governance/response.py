@@ -10,9 +10,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import Enum
 import hashlib
+import json
 from typing import Any, Mapping
-
-from policy.canonicalization.canonical_json import canonical_json_bytes
 
 
 class GovernanceContractError(ValueError):
@@ -138,6 +137,25 @@ def _contains_trusted_key(value: Any) -> bool:
     return False
 
 
+def _canonical_response_bytes(value: Any) -> bytes:
+    """Stable JSON for the F2-A sealed value object.
+
+    The policy-wide Unicode-normalizing canonicalizer intentionally fails
+    closed outside its pinned Unicode runtime.  Governance CI currently runs
+    Python 3.12 with Unicode 15 while that package pins Unicode 16, so using
+    it would make this pure structural contract unconstructable in its
+    supported CI environment.  F2-A instead uses the established B9-style
+    compact, sorted JSON representation and accepts only JSON-native values.
+    """
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 @dataclass(frozen=True)
 class ResponseScope:
     environment: str
@@ -162,7 +180,7 @@ class ResponseScope:
 
     @property
     def scope_digest(self) -> str:
-        return "sha256:" + hashlib.sha256(canonical_json_bytes(self.semantic_projection())).hexdigest()
+        return "sha256:" + hashlib.sha256(_canonical_response_bytes(self.semantic_projection())).hexdigest()
 
     def semantic_projection(self) -> dict[str, Any]:
         return {
@@ -391,7 +409,7 @@ class GovernedResponseEnvelope:
 
     def to_canonical_bytes(self) -> bytes:
         """Stable F2-A serialization used for sealing and storage boundaries."""
-        return canonical_json_bytes(self.canonical_projection())
+        return _canonical_response_bytes(self.canonical_projection())
 
     @classmethod
     def from_canonical_projection(cls, value: Mapping[str, Any]) -> "GovernedResponseEnvelope":
