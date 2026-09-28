@@ -1704,6 +1704,7 @@ jobs:
       - run: >-
           python -m pytest -v --junitxml=/tmp/tests-puros-first.xml
           tests/test_las_voces_sync.py
+          tests/test_las_voces_ariadna_authority.py
           tests/test_capability_unbound_schema.py tests/test_chunking.py
           tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py
           tests/test_vocativo_faceta.py tests/test_router_easter_egg.py

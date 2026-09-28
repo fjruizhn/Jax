@@ -1,7 +1,14 @@
 # LAS VOCES — Sync Contract v0.1
 
 ## Canonical source
-`axioma/projects/las-voces/`
+`projects/las-voces/`
+
+**LV-003 documentation correction (2026-09-28):** the original LV-000 import
+used `axioma/projects/las-voces/` as its intended repository-relative target.
+The LV-000 commit `9a63721` created the actual canonical tree at
+`projects/las-voces/`, and LV-002's `scripts/axioma_sync.py` reads that same
+path. This corrects documentation drift only; it does not rewrite historical
+events or alter canonical content.
 
 Canónico:
 - project.json
