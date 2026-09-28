@@ -11,6 +11,7 @@ cuyas decisiones siguen vigentes salvo lo que este documento enmienda explícita
 |---|---|---|
 | v1 | (este commit) | Diseño original, aprobado por secciones en chat. |
 | v1.1 | (este commit) | Correcciones medidas contra el código vivo antes de planificar. |
+| v1.2 | (este commit) | Espejo privado de `jaxsvc` + clon de trabajo de Qwen (§3.1, §3.3, §4.2). La auditoría de escalón 3 de las Tareas 5-6 rechazó la v1.1 con tres BLOCK nacidos del diseño: `jaxsvc` corría git (con el token), npm y pip **dentro del clon que Qwen puede reescribir**. Ruling ARQUITECTURA del controlador, 2026-09-28. |
 
 ## 1. Por qué
 
@@ -63,14 +64,37 @@ auditor. Nadie interviene entre el pedido y el PR. Integrar sigue siendo de Fern
 
 ### 3.1 Preparar
 
-- Clona o actualiza el repo en `$JAX_EJECUTOR_CODIGO_DIR/<repo>/<misión>` (ruta en config; valor
-  propuesto `/srv/jax-data/ejecutor/codigo`), crea `axioma/<misión>` desde la rama por omisión del
-  remoto (leída de la API, nunca asumida `main`/`master`).
-- Instala dependencias **solo desde archivos de bloqueo** del repo (`requirements*.txt`,
-  `package-lock.json`, `composer.lock`); sin lockfile, no instala y lo declara en el informe.
+*(v1.2.)* Todo vive bajo `<raiz>/<misión>/`, dueño `jaxsvc`, con ACL `u:axioma:--x` (la cuenta
+solo lo **atraviesa**: no lista ni crea nada ahí) y sin ACL por omisión (`setfacl -k`: medido,
+`--set` sin entradas `d:` conserva la heredada del padre). Tres piezas:
+
+| Pieza | Qué es | Quién la toca |
+|---|---|---|
+| `espejo.git` | bare, `0700`, **sin ACL para `axioma`**. `origin` = `https://github.com/<owner_repo>.git`, **derivada** de un `owner_repo` validado (`^[\w.-]+/[\w.-]+$`, sin `.`/`..`), nunca un campo libre | solo `jaxsvc`: único lugar con el token |
+| `deps/` | dependencias instaladas desde la rama por omisión | escribe `jaxsvc`; `axioma` lee (`r-X`) |
+| `repo/` | el clon de trabajo, clonado **desde el espejo** con `--no-hardlinks`, en `axioma/<misión>` | `axioma` escribe (`rwX`, `setfacl -P -R`) |
+
+- El espejo trae **solo** la rama por omisión (leída de la API, nunca asumida `main`/`master`);
+  la rama de la misión en GitHub no se trae nunca (§3.3, lease).
+- Dependencias **solo en el turno 1**, desde los archivos de bloqueo del commit de la rama por
+  omisión (leídos del espejo, no del clon), en `deps/`, con un entorno que no hereda del proceso
+  más que `PATH` y `LANG` (HOME temporal; nada de `/etc/jax/.env`): `npm ci --ignore-scripts
+  --no-audit --no-fund` (raíz y `frontend/`), `composer install --no-interaction --no-scripts
+  --no-plugins`, `pip install --only-binary=:all: -r <archivo>` en un venv bajo `deps/` por
+  directorio (`requirements*.txt` de la raíz y de `backend/`). Lo que no se instala se declara:
+  `sin_lockfile:<ruta>` (un `package.json` sin su `package-lock.json`), `pip_sin_wheel:<archivo>`,
+  `npm_no_instalado:<ruta>`. En el clon, enlaces `.venv`/`node_modules`/`vendor` → `deps/`,
+  anotados en `.git/info/exclude` (para git un enlace no es un directorio: `node_modules/` en
+  `.gitignore` no lo tapa).
+- **Turno ≥ 2**: solo `fetch` del espejo desde GitHub. Ni reinstala, ni vuelve a aplicar ACL (la
+  ACL por omisión del clon gobierna lo nuevo), ni ejecuta nada dentro del clon: su `.git` y sus
+  binarios ya son de quien los puede reescribir.
 - Nunca copia un `.env` real. Si el repo trae `.env.example`, la misión lo ve como ejemplo.
-- La clonación usa el token por un *credential helper* de un solo uso, nunca en la URL ni en
-  `.git/config` del clon (el clon entra a la jaula).
+- Todo git de `jaxsvc` corre con entorno en lista blanca (`PATH`, `HOME` temporal, `LANG`; las
+  variables de askpass solo en operaciones de red), `GIT_CONFIG_NOSYSTEM=1`,
+  `GIT_CONFIG_GLOBAL=/dev/null`, `-c core.hooksPath=/dev/null -c credential.helper=` y `--` antes
+  de los posicionales. El token llega por un `GIT_ASKPASS` que lee una variable del entorno del
+  subproceso y responde **solo** a los dos avisos exactos de `https://github.com`.
 
 ### 3.2 Trabajar (la jaula `codigo`)
 
@@ -94,20 +118,36 @@ recibe «dubious ownership» al operar sobre un repo cuyo directorio pertenece a
 
 ### 3.3 Entregar
 
-`mision_servicio` lee el diff y los commits de `axioma` desde fuera de la jaula sin ser su dueño: la
-ACL del clon también da `d:u:<usuario del proceso>:rwX` (medido), así los objetos que `axioma` crea
-dentro de la jaula quedan legibles para `jaxsvc` desde el primer momento.
+*(v1.2.)* `jaxsvc` **no corre git dentro del clon**. `man git`, sección SECURITY: *«it is not safe
+to run Git commands in a .git directory (or the working tree that surrounds it) when that .git
+directory itself comes from an untrusted source. The commands in its config and hooks are executed
+in the usual way»*; y para un `.git` no confiable recomienda *«serve the repository as an
+unprivileged user (either via git-daemon(1), ssh, or using other tools to change user ids)»*. Eso
+es lo que se hace:
 
-1. Lee el diff completo `origin/<rama por omisión>...axioma/<misión>` **fuera de la jaula** y lo pasa
+0. **Traer.** Desde el espejo: `git fetch --no-tags --upload-pack=<ssh a axioma@127.0.0.1, la misma
+   cuenta, llave y puerto de cuenta_axioma> <clon> +refs/heads/axioma/<misión>:refs/heads/axioma/<misión>`.
+   El lado que lee el clon (`upload-pack`) corre **como `axioma`**; `jaxsvc` solo recibe objetos, y
+   después corre `git fsck --no-dangling` en el espejo. Ningún error de este paso lleva salida de
+   los comandos (la escribe o la provoca el clon).
+1. Lee el diff completo `origin/<rama por omisión>...axioma/<misión>` **en el espejo** y lo pasa
    por C1 de código (§5.1) en su forma estructural (lista de rutas y hunks, no regex sobre texto
    plano). Si algo choca: no hay push, la misión termina **«rechazada por contrato»** con qué y dónde.
 2. Barrido de secretos (el mismo de los respaldos) y tope de tamaño por archivo (5 MB, configurable).
 3. Exige el **informe firmado por C5** (§5.3). Sin informe: no hay PR (DC8).
-4. `git push --force-with-lease` **solo** a `refs/heads/axioma/<misión>`. La función de entrega
-   rechaza cualquier otra referencia antes de llamar a git, y rechaza la rama por omisión aunque el
-   nombre coincidiera (defensa en profundidad para repos sin protección de rama).
-5. Abre o actualiza el PR (API de GitHub), **listo para revisión**, con etiqueta `axioma` y pie
-   `Hecho-por: Axioma (Ejecutor, misión <id>, cerebro <modelo resuelto>)`.
+4. Desde el espejo, `git push origin refs/heads/axioma/<misión>:refs/heads/axioma/<misión>` con
+   `--force-with-lease=refs/heads/axioma/<misión>`, `--no-follow-tags` y
+   `--recurse-submodules=no`. El valor esperado del lease es el seguimiento
+   `refs/remotes/origin/axioma/<misión>` **del espejo**, que solo mueve nuestro propio empuje (todo
+   `fetch` del espejo nombra solo la rama por omisión): si otro movió la rama en GitHub, el empuje
+   falla y no se pisa. La función de entrega rechaza cualquier otra referencia antes de llamar a
+   git, y rechaza la rama por omisión aunque el nombre coincidiera (defensa en profundidad para
+   repos sin protección de rama). Los errores de git del espejo llevan a lo sumo los últimos 300
+   caracteres, con el token reemplazado por `***`.
+5. Abre o actualiza el PR (API de GitHub), **listo para revisión** (`draft: false` también al
+   actualizar), con etiqueta `axioma` y pie `Hecho-por: Axioma (Ejecutor, misión <id>, cerebro
+   <modelo resuelto>)`. Un PR **cerrado no se reabre**: se abre otro y el resultado lo declara
+   (`pr_reabierto_nuevo`). Un 422 «already exists» (carrera) se resuelve volviendo a listar.
 
 ### 3.4 Sesiones
 
@@ -131,6 +171,16 @@ Los repos privados en plan gratuito no admiten protección de rama (medido: 403 
 un token de grano fino no se acota por rama. Con este token, **nada del lado de GitHub impide un push a
 `main`** en `ateneaerp`, `claude-skills` y los demás privados. La barrera es: el modelo nunca tiene el
 token, y quien lo tiene solo sabe empujar a `axioma/*` (§3.3.4).
+
+*(v1.2.)* «Quien lo tiene» es `jaxsvc`, y eso solo vale si **nada que el modelo escriba se ejecuta
+con el token a mano**. En la v1.1 no se cumplía: `jaxsvc` empujaba desde el clon, y el `.git` del
+clon es del modelo — un gancho `pre-push` leía el token del entorno; `credential.helper`,
+`url.<x>.insteadOf`, `http.proxy` o `push.followTags` en su `.git/config` lo mandaban a otro lado o
+empujaban de más (reproducido contra la v1.1: un `pre-push` del clon recibió el token). Por eso el
+token vive solo en el **espejo** (§3.1), que el modelo no puede leer ni escribir, y los commits
+cruzan con `upload-pack` corriendo como `axioma` (§3.3, paso 0). Se descartó filtrar la
+configuración del clon: una lista negra de claves de git es frágil (cada versión suma claves que
+ejecutan cosas).
 
 ### 4.3 Distinguir lo de Axioma
 

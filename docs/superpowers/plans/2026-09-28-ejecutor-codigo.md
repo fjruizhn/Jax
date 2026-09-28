@@ -1098,7 +1098,7 @@ y antes de `deps.correr_cerebro`, si `turno.tipo == "codigo"`: `clon = await dep
   - `entregar_codigo(ctx, entrega, auditor_legible)`: informe = `cita.presentar` de `entrega.respaldadas` + faceta del auditor; llama a `mision_codigo.entregar(..., diff=diff_de_la_rama, empujar=entrega_mod.empujar, abrir_pr=<abrir_o_actualizar_pr envuelto>)`; `tope_bytes` de `axioma_config` `ejecutor.codigo.tope_bytes` (default 5242880).
   - El token se lee UNA vez de `env` y nunca se emite en eventos.
 
-- [ ] **Step 7: Verde** de todo `tests/test_ejecutor_*` + `policy/tests/test_ejecutor_lanza_solo_con_contratos.py` (piso `^5 passed` intacto) + `policy/tests/test_claude_subprocess_solo_via_sandbox.py` (los módulos nuevos no contienen el literal `claude`: verifícalo con `grep -n "claude" jax/ejecutor/codigo/*.py` → vacío).
+- [ ] **Step 7: Verde** de todo `tests/test_ejecutor_*` + `policy/tests/test_ejecutor_lanza_solo_con_contratos.py` (piso `^5 passed` intacto) + `policy/tests/test_claude_subprocess_solo_via_sandbox.py`. *(Ajustado 2026-09-28, ruling del controlador: el criterio es que ESE guardia de CI pase -- exige subproceso + literal en el mismo archivo --, no un `grep -n "claude"` vacío, que da falso positivo con el literal `fjruizhn/claude-skills` de `reglas_diff.py`, un módulo sin subproceso.)*
 - [ ] **Step 8: Commit** — `feat(ejecutor): turno de código — preparar, trabajar en el clon, entregar`.
 
 ---
