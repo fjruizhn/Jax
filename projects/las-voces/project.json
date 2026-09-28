@@ -246,10 +246,24 @@
       "id": "LV-004",
       "title": "Activar Ariadna como PM autónomo gobernado",
       "owner": "Fernando + Thot",
-      "status": "READY",
+      "status": "DONE",
       "priority": "P0",
       "depends": [
         "LV-003"
+      ],
+      "acceptance_evidence": [
+        "authority/CONTRACT.md",
+        "authority/ariadna_runtime.py",
+        "authority/ariadna_host.py",
+        "authority/HOSTING.md",
+        "tests/test_las_voces_ariadna_authority.py",
+        "tests/test_las_voces_ariadna_runtime.py",
+        "tests/test_las_voces_ariadna_activation.py",
+        "tests/test_las_voces_ariadna_host.py",
+        "activity.ndjson#lv-004-004",
+        "activity.ndjson#lv-004-005",
+        "activity.ndjson#lv-004-006",
+        "git:aaad749d78c2a1eb80d7593e870ffdebab30fe16"
       ]
     },
     {
