@@ -51,7 +51,7 @@ def engine(root, verifier=None):
     return mod.AuthorityEngine(root, ci_verifier=verifier, human_authority_verifier=verifier)
 def decide(root, status, refs, verifier=None): return engine(root, verifier).evaluate(sender_agent=mod.ARIADNA_ID, task_id="LV-003", action="transition_status", target_status=status, evidence_refs=refs)
 
-@pytest.mark.parametrize("action", ["merge", "deploy", "production_mutation", "capability_grant", "runtime_execution"])
+@pytest.mark.parametrize("action", sorted(mod.FORBIDDEN))
 def test_forbidden_actions_are_deny(root, action): assert mod.evaluate(root, sender_agent=mod.ARIADNA_ID, task_id="LV-003", action=action).verdict is mod.Verdict.DENY
 
 def test_unknown_action_is_human_required_and_nonactive_ariadna_cannot_run(root):
@@ -114,6 +114,26 @@ def test_transition_internal_audit_binding_and_append_only(root):
     events = [json.loads(x) for x in lines.decode().splitlines() if "TRANSITION_" in x]
     assert len(events) == 2 and events[0]["transition_id"] == events[1]["transition_id"]
     assert events[0]["task_id"] == "LV-003" and events[1]["decision"] == "ALLOW"
+
+def test_expected_project_hash_rejects_stale_plan_before_journal_intent(root):
+    before = (root / "projects/las-voces/activity.ndjson").read_bytes()
+    ref = blocker(root)
+    decision = mod.transition(root, sender_agent=mod.ARIADNA_ID, task_id="LV-003", target_status="BLOCKED", evidence_refs=[ref], expected_project_hash="0" * 64)
+    assert decision.verdict is mod.Verdict.DENY
+    assert (root / "projects/las-voces/activity.ndjson").read_bytes() == before
+
+def test_state_change_during_authorization_leaves_no_stale_intent(root):
+    controlled = engine(root)
+    original = controlled._evaluate
+    def raced(**request):
+        result = original(**request)
+        path = root / "projects/las-voces/project.json"
+        path.write_bytes(path.read_bytes() + b" ")
+        return result
+    controlled._evaluate = raced
+    before = (root / "projects/las-voces/activity.ndjson").read_bytes()
+    assert controlled.transition(sender_agent=mod.ARIADNA_ID, task_id="LV-003", target_status="BLOCKED", evidence_refs=[blocker(root)]).verdict is mod.Verdict.DENY
+    assert (root / "projects/las-voces/activity.ndjson").read_bytes() == before
 
 def test_validated_evidence_binds_exact_contents_not_reference_names(root):
     in_progress(root); tests, accepted = manifest(root), acceptance(root)

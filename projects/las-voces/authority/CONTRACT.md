@@ -77,3 +77,29 @@ Handoffs use the existing `sync/message-envelope.schema.json`, not a third
 protocol. `authority_context.handoff` must provide `owner`, `branch_worktree`,
 `scope`, `acceptance_criteria`, `commit_pr`, `test_evidence`, `blockers`, and
 `next_action`, alongside the MessageEnvelope fields.
+
+## LV-004 hosted runtime
+
+ariadna_runtime.py is a local, host-invoked run_once control loop, not an
+activation, service, daemon, network endpoint, or execution capability. Host
+readiness means only that its local lease is held; Ariadna remains
+PROPOSED_NOT_ACTIVE. It accepts data-only proposals, rebinds them to the
+current project hash, and passes authorized transitions through this contract's
+locked expected-hash/CAS journal path. It cannot provide or replace verifiers,
+edit this contract, execute commands, or make runtime_execution ALLOW.
+
+The host uses nonblocking local flock ownership. This is intentionally not
+distributed consensus: a competing local process fails closed, stale metadata
+is reported after an OS-released crash lock, and no lock is silently stolen.
+Task leases are append-only records and deny concurrent identical task,
+worktree, or ancestor/descendant writable-scope ownership. A host stop request
+prevents a new effectful tick; explicit shutdown releases only its local
+control lease.
+
+Each terminal cycle is idempotently appended with host-built instance, cycle,
+project hash, task/action, verdict, evidence refs, lease, and result fields.
+Planner data cannot provide an audit verdict. Repeated unchanged proposals do
+not append duplicate handoffs, escalations, or cycle records. DENY and
+HUMAN_REQUIRED never execute; time/retry alone cannot change either verdict.
+An unresolved LV-003 transition intent places a new host in
+RECONCILIATION_REQUIRED, emits no automatic repair, and permits no work.
