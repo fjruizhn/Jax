@@ -29,6 +29,17 @@ def lineas_con_secretos(cambios: tuple[Cambio, ...]) -> tuple[Violacion, ...]:
     return tuple(v)
 
 
+def hay_secreto(texto: str) -> bool:
+    return bool(texto) and _SECRETOS.search(texto) is not None
+
+
+def rutas_con_secretos(cambios: tuple[Cambio, ...]) -> tuple[Violacion, ...]:
+    """BLOCK-1 (auditoría escalón 3): el NOMBRE de un archivo también viaja a GitHub -- `ruta` y,
+    en un renombre, `ruta_anterior`."""
+    return tuple(Violacion("secretos", c.ruta, "patrón de credencial en la ruta de un archivo")
+                 for c in cambios if hay_secreto(c.ruta) or hay_secreto(c.ruta_anterior or ""))
+
+
 def tamanos_excedidos(tamanos: Mapping[str, int], *, tope_bytes: int) -> tuple[Violacion, ...]:
     return tuple(Violacion("tamano", ruta, f"{n} > {tope_bytes} bytes")
                  for ruta, n in sorted(tamanos.items()) if n > tope_bytes)

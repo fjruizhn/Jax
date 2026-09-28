@@ -33,3 +33,11 @@ def test_tope_sobre_tamanos_ya_medidos():
 
 def test_tapar_secretos():
     assert tapar_secretos("a " + TOKENS[0] + " b") == "a t = '***' b"
+
+
+def test_hay_secreto_y_rutas_con_secretos():
+    from jax.ejecutor.codigo.barrido import hay_secreto, rutas_con_secretos
+    assert hay_secreto("x " + TOKENS[0]) and not hay_secreto("") and not hay_secreto("limpio")
+    vs = rutas_con_secretos((C("ok.py"), C(TOKENS[4] + ".txt"),
+                             Cambio("nuevo.py", "R", "viejo_" + TOKENS[4], (), ())))
+    assert [(v.regla, v.ruta) for v in vs] == [("secretos", TOKENS[4] + ".txt"), ("secretos", "nuevo.py")]

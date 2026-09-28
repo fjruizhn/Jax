@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import httpx
@@ -151,6 +151,9 @@ class Commit:
     autor: tuple[str, str] | None
     committer: tuple[str, str] | None
     cambios: tuple[Cambio, ...]
+    # El objeto commit ENTERO (cabeceras + mensaje), tal como viajaría: BLOCK-1, el mensaje
+    # también se barre. Leído con `cat-file --batch`, que lo entrega con su largo.
+    crudo: str = ""
 
 
 # La cabecera de cada commit en `git log -p`: empieza con \x01, que ninguna línea de un parche
@@ -202,7 +205,42 @@ async def commits_de_la_rama(espejo: Path, *, mision_id: str, rama_por_omision: 
             lineas.append(linea)
     if cabecera is not None:
         commits.append(_commit(cabecera, lineas))
-    return tuple(commits)
+    if not commits:
+        return ()
+    crudos = await _objetos_commit(espejo, [c.sha for c in commits])
+    return tuple(replace(c, crudo=crudos[c.sha]) for c in commits)
+
+
+async def _objetos_commit(espejo: Path, shas: list[str]) -> dict[str, str]:
+    """El objeto de cada commit con `cat-file --batch`: `<oid> <tipo> <largo>\\n<largo bytes>\\n`.
+    El largo delimita el mensaje sin ambigüedad (puede traer cualquier cosa, también una línea
+    `diff --git` o bytes de control). Lo que no cuadre falla cerrado: `mensajes_ilegibles`."""
+    unicos = list(dict.fromkeys(shas))
+    if not all(_OID.fullmatch(s) for s in unicos):
+        raise EntregaRechazada("mensajes_ilegibles")
+    with hogar_temporal() as home:
+        try:
+            salida = await correr_git(["-C", str(espejo), "--no-replace-objects", "cat-file", "--batch"],
+                                      env=entorno_base(home), error="cat_file_fallo",
+                                      entrada="".join(f"{s}\n" for s in unicos).encode())
+        except GitFallo as exc:
+            raise EntregaRechazada(str(exc)) from None
+    crudos: dict[str, str] = {}
+    i = 0
+    while i < len(salida):
+        fin = salida.find(b"\n", i)
+        partes = salida[i:fin].decode(errors="replace").split(" ") if fin >= 0 else []
+        if len(partes) != 3 or partes[1] != "commit" or not partes[2].isdigit() or partes[0] not in unicos:
+            raise EntregaRechazada("mensajes_ilegibles")
+        largo = int(partes[2])
+        cuerpo = salida[fin + 1:fin + 1 + largo]
+        if len(cuerpo) != largo or salida[fin + 1 + largo:fin + 2 + largo] != b"\n":
+            raise EntregaRechazada("mensajes_ilegibles")
+        crudos[partes[0]] = cuerpo.decode("utf-8", errors="replace")
+        i = fin + 2 + largo
+    if set(crudos) != set(unicos):
+        raise EntregaRechazada("mensajes_ilegibles")
+    return crudos
 
 
 async def tamanos_de_la_rama(espejo: Path, *, mision_id: str, rama_por_omision: str) -> dict[str, int]:

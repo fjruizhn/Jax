@@ -25,7 +25,8 @@ from __future__ import annotations
 import httpx
 
 from jax.ejecutor.codigo import entrega as E
-from jax.ejecutor.codigo.barrido import lineas_con_secretos, tamanos_excedidos, tapar_secretos
+from jax.ejecutor.codigo.barrido import (hay_secreto, lineas_con_secretos, rutas_con_secretos, tamanos_excedidos,
+                                         tapar_secretos)
 from jax.ejecutor.codigo.entrega import EntregaRechazada
 from jax.ejecutor.codigo.preparar import Clon, parsear_autor
 from jax.ejecutor.codigo.reglas_diff import Violacion, revisar
@@ -67,6 +68,14 @@ def _identidad(historial, esperada: tuple[str, str]) -> tuple[Violacion, ...]:
     return tuple(v)
 
 
+def _cuerpo_con_secretos(titulo: str, cuerpo: str, token: str) -> tuple[Violacion, ...]:
+    """BLOCK-1: el título y el cuerpo del PR (informe + pie) salen a GitHub; el informe lleva texto
+    del modelo (dato, línea, comando). Se barren ANTES de empujar."""
+    if hay_secreto(titulo) or hay_secreto(cuerpo) or (token and (token in titulo or token in cuerpo)):
+        return (Violacion("secretos", "", "patrón de credencial en el título o el cuerpo del PR"),)
+    return ()
+
+
 def _sin_repetir(violaciones) -> tuple[Violacion, ...]:
     return tuple(dict.fromkeys(violaciones))
 
@@ -91,16 +100,21 @@ async def entregar(clon: Clon, *, mision_id: str, repo: str, revision_legible: b
         medidos = await tamanos(clon.espejo, mision_id=mision_id, rama_por_omision=base)
     except EntregaRechazada as exc:  # fail-closed: sin push ni PR
         return _fallo(str(exc), token)
+    titulo = f"Axioma: misión {mision_id[:8]}"
+    cuerpo = informe + pie(mision_id, modelo)
     violaciones = _sin_repetir(
         _identidad(historial, esperada) + revisar(cambios, repo) + lineas_con_secretos(cambios)
-        + tuple(v for c in historial for v in lineas_con_secretos(c.cambios))
+        + rutas_con_secretos(cambios)
+        + tuple(v for c in historial for v in lineas_con_secretos(c.cambios) + rutas_con_secretos(c.cambios))
+        + tuple(Violacion("secretos", "", f"commit {c.sha[:12]}: patrón de credencial en el mensaje o la cabecera")
+                for c in historial if hay_secreto(c.crudo))
+        + _cuerpo_con_secretos(titulo, cuerpo, token)
         + tamanos_excedidos(medidos, tope_bytes=tope_bytes))
     if violaciones:
         return _resultado("rechazada_por_contrato", violaciones=violaciones, token=token)
     try:
         await empujar(clon.espejo, mision_id=mision_id, rama_por_omision=base, token=token)
-        pr = await abrir_pr(cliente, repo=repo, rama=clon.rama, base=base, titulo=f"Axioma: misión {mision_id[:8]}",
-                            cuerpo=informe + pie(mision_id, modelo))
+        pr = await abrir_pr(cliente, repo=repo, rama=clon.rama, base=base, titulo=titulo, cuerpo=cuerpo)
     except EntregaRechazada as exc:  # fail-closed: el motivo (saneado) queda en la bitácora
         return _fallo(str(exc), token)
     except httpx.HTTPStatusError as exc:  # fail-closed: la rama pudo quedar empujada, el PR no se abrió

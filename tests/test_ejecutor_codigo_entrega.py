@@ -462,6 +462,19 @@ def test_commits_de_la_rama_trae_cada_commit_con_su_identidad_y_sus_lineas(tmp_p
     assert any(SECRETO in l for l in commits[uno].cambios[0].agregadas)
 
 
+def test_commits_de_la_rama_trae_el_objeto_entero_y_un_mensaje_con_diff_no_confunde_el_parche(tmp_path, github):
+    """BLOCK-1: el mensaje también se barre. Viene de `cat-file --batch` (delimitado por largo): un
+    mensaje con una línea `diff --git …` no se mezcla con los cambios del parche."""
+    c = _preparar(tmp_path)
+    mensaje = f"titulo\n\ndiff --git a/falso b/falso\n+{SECRETO}\n"
+    (c.ruta / "a").write_text("2")
+    _git("commit", "-q", "-a", "-m", mensaje, cwd=c.ruta)
+    _traer(c)
+    (x,) = _commits(c)
+    assert SECRETO in x.crudo and "author Axioma (Ejecutor) <axioma@axioma-ia.io>" in x.crudo
+    assert [(k.ruta, k.agregadas) for k in x.cambios] == [("a", ("2",))]
+
+
 def test_commits_de_la_rama_lee_la_identidad_real_de_cada_commit(tmp_path, github):
     c = _preparar(tmp_path)
     _git("-c", "user.name=Fernando Ruiz", "-c", "user.email=fruiztorres@gmail.com", "commit", "--allow-empty",

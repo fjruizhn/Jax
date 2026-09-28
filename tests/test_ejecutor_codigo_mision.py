@@ -234,13 +234,71 @@ def _api(pedidos: list):
     return httpx.AsyncClient(transport=httpx.MockTransport(manejar), base_url="https://api.github.com")
 
 
-def _entregar_real(c: P.Clon, pedidos: list, *, tope_bytes: int = 1_000_000) -> dict:
+def _entregar_real(c: P.Clon, pedidos: list, *, tope_bytes: int = 1_000_000, api=None, **extra) -> dict:
+    base = dict(mision_id=MID, repo="o/r", revision_legible=True, informe="informe C5", token=TOKEN,
+                tope_bytes=tope_bytes, modelo="qwen", autor=AUTOR, upload_pack="git-upload-pack")
+    base.update(extra)
+
     async def correr():
-        async with _api(pedidos) as cliente:
-            return await MC.entregar(c, mision_id=MID, repo="o/r", revision_legible=True, informe="informe C5",
-                                     token=TOKEN, cliente=cliente, tope_bytes=tope_bytes, modelo="qwen",
-                                     autor=AUTOR, upload_pack="git-upload-pack")
+        async with (api or _api(pedidos)) as cliente:
+            return await MC.entregar(c, cliente=cliente, **base)
     return asyncio.run(correr())
+
+
+def _en_la_base(tmp_path: Path, archivo: str, datos: bytes) -> None:
+    """Agrega un archivo a `main` del «GitHub» de prueba (antes de preparar la misión)."""
+    w = tmp_path / "w"
+    _commit(w, archivo, datos, "base+", "-c", "user.name=q", "-c", "user.email=q@q")
+    _git("push", "-q", "origin", "main", cwd=w)
+
+
+# --- BLOCK-1 (auditoría escalón 3): el barrido mira TODO lo que sale, no solo las líneas agregadas ----
+
+def test_real_secreto_en_el_mensaje_de_un_commit_se_rechaza(tmp_path, github):
+    c = _preparar(tmp_path)
+    _commit(c.ruta, "a", b"2", f"arreglo\n\nclave: {SECRETO}")
+    pedidos: list = []
+    r = _entregar_real(c, pedidos)
+    assert r["estado_entrega"] == "rechazada_por_contrato", r
+    assert [v["regla"] for v in r["violaciones"]] == ["secretos"]
+    assert _nada_empujado(github, pedidos) and SECRETO not in json.dumps(r)
+
+
+def test_real_secreto_en_el_nombre_de_un_archivo_se_rechaza(tmp_path, github):
+    c = _preparar(tmp_path)
+    _commit(c.ruta, f"{SECRETO}.txt", b"x\n", "archivo")
+    pedidos: list = []
+    r = _entregar_real(c, pedidos)
+    assert r["estado_entrega"] == "rechazada_por_contrato", r
+    assert {v["regla"] for v in r["violaciones"]} == {"secretos"}
+    assert _nada_empujado(github, pedidos) and SECRETO not in json.dumps(r)
+
+
+def test_real_secreto_en_la_ruta_anterior_de_un_renombre_se_rechaza(tmp_path, github):
+    _en_la_base(tmp_path, f"{SECRETO}.txt", b"contenido largo que se mantiene\n" * 5)
+    c = _preparar(tmp_path)
+    _git("mv", f"{SECRETO}.txt", "limpio.txt", cwd=c.ruta)
+    _git("commit", "-q", "-m", "renombro", cwd=c.ruta)
+    pedidos: list = []
+    r = _entregar_real(c, pedidos)
+    assert r["estado_entrega"] == "rechazada_por_contrato", r
+    assert _nada_empujado(github, pedidos) and SECRETO not in json.dumps(r)
+
+
+def test_real_secreto_en_el_cuerpo_del_pr_se_rechaza_antes_de_empujar(tmp_path, github):
+    c = _preparar(tmp_path)
+    _commit(c.ruta, "a", b"2", "cambio")
+    pedidos: list = []
+    r = _entregar_real(c, pedidos, informe=f"dato='{SECRETO}'")
+    assert r["estado_entrega"] == "rechazada_por_contrato", r
+    assert _nada_empujado(github, pedidos) and SECRETO not in json.dumps(r)
+
+
+def test_ruta_anterior_con_secreto_en_el_diff_neto_se_rechaza():
+    d = Dobles((Cambio("limpio.py", "R", f"{SECRETO}.py", (), ()),))
+    r = _entregar(d)
+    assert r["estado_entrega"] == "rechazada_por_contrato" and "empujar" not in d.llamadas
+    assert SECRETO not in json.dumps(r)
 
 
 def _nada_empujado(github: Path, pedidos: list) -> bool:
