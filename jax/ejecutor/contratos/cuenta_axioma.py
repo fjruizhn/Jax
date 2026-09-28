@@ -59,6 +59,7 @@ import asyncio
 import os
 import re
 import shlex
+import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -224,10 +225,42 @@ async def preparar_directorio_de_la_cuenta(c: Cuenta, ruta: Path, *, correr=None
     """Crea `ruta` para que la cuenta escriba DESDE LA JAULA, sin sudo (2026-09-28: `jaxsvc`
     no tiene sudo; la versión con `sudo install -o axioma` dejó al Ejecutor sin arrancar desde
     el 2026-09-20). El dueño es el proceso (jaxsvc); `axioma` entra por ACL, también en lo que
-    se cree adentro (ACL por omisión). Falla cerrado: sin ACL no hay directorio utilizable."""
+    se cree adentro (ACL por omisión). Falla cerrado: sin ACL no hay directorio utilizable.
+
+    Fix round 1 (2026-09-28, hallazgos I-1/I-2 de la auditoría del escalón 3 sobre esta misma
+    tarea):
+    - I-1: la ACL se FIJA con `setfacl --set` (no `-m`) -- si sólo se agrega, la hoja hereda
+      `default:user:fruiz:rwx` del padre (`/var/lib/jax-ejecutor-misiones`), y fruiz (o
+      cualquier proceso con su UID) puede leer y ESCRIBIR la sesión que `--resume` reanuda:
+      un canal de inyección sobre un agente con acceso SSH a máquinas remotas.
+    - I-2: `mkdir(exist_ok=True)` acepta un symlink a directorio (`Path.is_dir()` sigue el
+      enlace) y `setfacl` seguiría ese mismo enlace -- con `-P` incluso da rc 0 sin aplicar
+      nada, fallo abierto. También aceptaría, en silencio, un directorio YA EXISTENTE de
+      OTRO dueño (m-1). Por eso, después del `mkdir`, se hace `os.lstat` (que NO sigue
+      symlinks) y se exige: (a) que sea un directorio real, no un enlace; (b) que el dueño
+      sea este mismo proceso (`os.geteuid()`). Cualquiera de las dos falla cerrado, con el
+      tipo o el dueño encontrado en el mensaje.
+
+    Riesgo residual, declarado a propósito: `jaxsvc` (dueño del directorio) sí controla su
+    contenido -- eso no se puede evitar sin sudo. Se considera tolerable porque `jaxsvc` ya
+    escribe el prompt de cada turno (mismo nivel de confianza que hoy)."""
     correr = correr or asyncio.create_subprocess_exec
-    await asyncio.to_thread(ruta.mkdir, mode=0o770, parents=True, exist_ok=True)
-    proc = await correr("setfacl", "-m", f"u:{c.nombre}:rwx,d:u:{c.nombre}:rwx", str(ruta),
+    try:
+        await asyncio.to_thread(ruta.mkdir, mode=0o700, parents=True, exist_ok=True)
+    except OSError as error:
+        raise RuntimeError(f"preparar_directorio_fallo: no_se_pudo_crear {ruta}: {error}") from error
+    info = await asyncio.to_thread(os.lstat, ruta)
+    if not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(
+            f"preparar_directorio_fallo: {ruta} no es un directorio real (¿symlink?), "
+            f"modo={oct(stat.S_IFMT(info.st_mode))}")
+    if info.st_uid != os.geteuid():
+        raise RuntimeError(
+            f"preparar_directorio_fallo: {ruta} pertenece a otro dueño (uid={info.st_uid}, "
+            f"esperado uid={os.geteuid()})")
+    acl = (f"u::rwx,g::---,o::---,m::rwx,u:{c.nombre}:rwx,"
+           f"d:u::rwx,d:g::---,d:o::---,d:m::rwx,d:u:{c.nombre}:rwx")
+    proc = await correr("setfacl", "--set", acl, str(ruta),
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     _, errores = await proc.communicate()
     if proc.returncode != 0:

@@ -3,6 +3,7 @@
 llave del cerebro nunca en argv; el lanzamiento siempre dentro de la jaula
 superpuesta con los settings de solo lectura."""
 import asyncio
+import getpass
 import os
 import shlex
 import shutil
@@ -153,9 +154,24 @@ def test_ruta_projects_de_la_mision_rechaza_un_id_que_no_es_uuid(mision_id):
 # arrancar desde el 2026-09-20 (`mision_servicio.py` llama esto antes de CADA turno). El
 # dueño pasa a ser el proceso (jaxsvc); `axioma` entra por ACL, también en lo que se cree
 # adentro (ACL por omisión).
+#
+# Fix round 1 (2026-09-28, hallazgos I-1/I-2 de la auditoría del escalón 3):
+# - I-1: `setfacl --set` (no `-m`) FIJA la ACL entera de la hoja -- si sólo se agrega,
+#   la hoja hereda `default:user:fruiz:rwx` de `/var/lib/jax-ejecutor-misiones`, y fruiz
+#   (o cualquier proceso con su UID) puede leer y ESCRIBIR la sesión que `--resume`
+#   reanuda: canal de inyección sobre un agente con SSH.
+# - I-2: `mkdir(exist_ok=True)` acepta un symlink a directorio (y `setfacl` seguiría el
+#   enlace) y también aceptaría un directorio YA EXISTENTE de otro dueño (m-1) sin que
+#   nadie se entere. `os.lstat` (no sigue symlinks) después del `mkdir` exige directorio
+#   real y dueño == `os.geteuid()`; cualquiera de las dos falla cerrado.
 
 def _cuenta(tmp_path):
     return CA.Cuenta("axioma", 22, tmp_path / "k", tmp_path / "n", tmp_path / "l", tmp_path / "p", tmp_path / "h")
+
+
+def _acl_esperada(nombre):
+    return (f"u::rwx,g::---,o::---,m::rwx,u:{nombre}:rwx,"
+            f"d:u::rwx,d:g::---,d:o::---,d:m::rwx,d:u:{nombre}:rwx")
 
 
 def test_preparar_directorio_no_usa_sudo_y_pone_acl(tmp_path):
@@ -175,7 +191,7 @@ def test_preparar_directorio_no_usa_sudo_y_pone_acl(tmp_path):
     asyncio.run(CA.preparar_directorio_de_la_cuenta(_cuenta(tmp_path), ruta, correr=correr))
     assert ruta.is_dir()
     assert all(a[0] != "sudo" for a in llamadas)
-    assert ("setfacl", "-m", "u:axioma:rwx,d:u:axioma:rwx", str(ruta)) in llamadas
+    assert ("setfacl", "--set", _acl_esperada("axioma"), str(ruta)) in llamadas
 
 
 def test_preparar_directorio_falla_cerrado_si_setfacl_falla(tmp_path):
@@ -190,6 +206,70 @@ def test_preparar_directorio_falla_cerrado_si_setfacl_falla(tmp_path):
 
     with pytest.raises(RuntimeError, match="preparar_directorio_fallo"):
         asyncio.run(CA.preparar_directorio_de_la_cuenta(_cuenta(tmp_path), tmp_path / "x", correr=correr))
+
+
+def test_preparar_directorio_rechaza_un_symlink_en_vez_de_directorio_real(tmp_path):
+    """I-2: un symlink a directorio pasa `mkdir(exist_ok=True)` sin problema (Path.is_dir()
+    sigue el enlace) y `setfacl` seguiría el enlace también (con `-P` incluso da rc 0 sin
+    aplicar nada -- fallo abierto). `os.lstat` no sigue symlinks: lo detecta y falla
+    cerrado ANTES de llamar a `setfacl`."""
+    destino = tmp_path / "destino-real"
+    destino.mkdir()
+    ruta = tmp_path / "m" / "claude-projects"
+    ruta.parent.mkdir()
+    ruta.symlink_to(destino, target_is_directory=True)
+
+    async def correr(*argv, **kw):
+        raise AssertionError("no debe llegar a setfacl si la ruta es un symlink")
+
+    with pytest.raises(RuntimeError, match="preparar_directorio_fallo"):
+        asyncio.run(CA.preparar_directorio_de_la_cuenta(_cuenta(tmp_path), ruta, correr=correr))
+
+
+def test_preparar_directorio_rechaza_una_ruta_ocupada_por_otra_cosa(tmp_path):
+    """m-1 (vía I-2): un `claude-projects` previo de OTRO dueño no se puede fabricar sin
+    sudo dentro de un test -- se simula con un archivo regular en la misma ruta. El punto
+    es el mismo: lo que ya está ahí no es un directorio propio de este proceso, y el
+    código tiene que fallar cerrado en vez de dejar que `mkdir`/`setfacl` sigan de largo."""
+    ruta = tmp_path / "m" / "claude-projects"
+    ruta.parent.mkdir()
+    ruta.write_text("no soy un directorio")
+
+    async def correr(*argv, **kw):
+        raise AssertionError("no debe llegar a setfacl si la ruta no es un directorio propio")
+
+    with pytest.raises(RuntimeError, match="preparar_directorio_fallo"):
+        asyncio.run(CA.preparar_directorio_de_la_cuenta(_cuenta(tmp_path), ruta, correr=correr))
+
+
+requiere_acl = pytest.mark.skipif(shutil.which("setfacl") is None or shutil.which("getfacl") is None,
+                                  reason="setfacl/getfacl no están instalados en este runner")
+
+
+@requiere_acl
+def test_preparar_directorio_pone_la_acl_real_sin_heredar_del_padre(tmp_path):
+    """I-1 con `setfacl`/`getfacl` REALES (no mockeados). El padre lleva una ACL por
+    omisión ajena (UID 99999 -- no resuelve a ningún usuario del sistema, así `getfacl`
+    no puede disfrazarlo con un nombre real y esconder el chequeo) -- lo que I-1 dice
+    que la hoja NO debe heredar, porque el problema real era justo ese: heredar
+    `default:user:fruiz:rwx` del padre (`/var/lib/jax-ejecutor-misiones`). `setfacl
+    --set` tiene que reemplazar TODO, no sólo agregar."""
+    nombre = getpass.getuser()
+    padre = tmp_path / "padre"
+    padre.mkdir()
+    subprocess.run(["setfacl", "-d", "-m", "u:99999:rwx", str(padre)], check=True)
+    ruta = padre / "claude-projects"
+
+    c = CA.Cuenta(nombre, 22, tmp_path / "k", tmp_path / "n", tmp_path / "l", tmp_path / "p", tmp_path / "h")
+    asyncio.run(CA.preparar_directorio_de_la_cuenta(c, ruta))
+
+    salida = subprocess.run(["getfacl", "-p", str(ruta)], capture_output=True, text=True, check=True).stdout
+    lineas = {l.strip() for l in salida.splitlines() if l.strip() and not l.startswith("#")}
+    assert "user:99999:rwx" not in lineas and "default:user:99999:rwx" not in lineas
+    assert f"user:{nombre}:rwx" in lineas
+    assert f"default:user:{nombre}:rwx" in lineas
+    assert "mask::rwx" in lineas
+    assert "default:mask::rwx" in lineas
 
 
 def test_preparar_directorio_projects_llama_a_setfacl_con_el_dueno_correcto(tmp_path):
@@ -214,7 +294,7 @@ def test_preparar_directorio_projects_llama_a_setfacl_con_el_dueno_correcto(tmp_
     ruta = tmp_path / "m1" / "claude-projects"
     asyncio.run(CA.preparar_directorio_projects(c, ruta, correr=correr_falso))
     assert ruta.is_dir()
-    assert ("setfacl", "-m", "u:axioma:rwx,d:u:axioma:rwx", str(ruta)) in llamadas
+    assert ("setfacl", "--set", _acl_esperada("axioma"), str(ruta)) in llamadas
 
 
 def test_preparar_directorio_projects_propaga_el_fallo(tmp_path):
