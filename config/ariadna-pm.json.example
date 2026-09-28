@@ -1,0 +1,8 @@
+{
+  "mode": "production",
+  "production_effects_enabled": false,
+  "tick_seconds": 30,
+  "github_repository": "fjruizhn/Jax",
+  "github_token_env": "ARIADNA_GITHUB_TOKEN",
+  "kill_switch_path": "/etc/jax/ariadna-pm.kill"
+}
