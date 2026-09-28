@@ -1789,6 +1789,8 @@ jobs:
           tests/test_ejecutor_fase0_retirada.py
           tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py
           tests/test_ejecutor_codigo_diff.py
+          tests/test_ejecutor_codigo_reglas_diff.py
+          tests/test_ejecutor_codigo_barrido.py
           tests/test_ejecutor_vigia_stderr.py
           tests/test_workers_background_log.py
           tests/test_loadtest_apps_protegidas.py
@@ -1962,6 +1964,8 @@ jobs:
             tests/test_ejecutor_fase0_retirada.py \
             tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py \
             tests/test_ejecutor_codigo_diff.py \
+            tests/test_ejecutor_codigo_reglas_diff.py \
+            tests/test_ejecutor_codigo_barrido.py \
             tests/test_ejecutor_vigia_stderr.py \
             tests/test_workers_background_log.py \
             tests/test_loadtest_apps_protegidas.py \
@@ -4480,8 +4484,12 @@ jobs:
           #   coincide con el del runner (falta el aislamiento con
           #   `sudo unshare --mount` de la nota de arriba), pero el delta de +2/+0 sí
           #   es reproducible y es lo que se aplica aquí; manda el runner.
-          grep -qE "^2814 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2814 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 2814 -> 2824 el 2026-09-28 (plan ejecutor-codigo, Tareas 3 y 4): +10 puras en
+          #   tests/test_ejecutor_codigo_reglas_diff.py (+7 sobre C1 del diff: flujos_ci,
+          #   archivo_de_fernando, prueba_debilitada, ganchos, secretos) y
+          #   tests/test_ejecutor_codigo_barrido.py (+3 sobre barrido de secretos y tamaño).
+          grep -qE "^2824 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2824 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
