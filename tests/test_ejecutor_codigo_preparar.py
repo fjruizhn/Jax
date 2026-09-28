@@ -67,19 +67,40 @@ class _Instalador:
     def __init__(self, fallos=None):
         self.llamadas = []
         self.fallos = fallos or {}
+        self.copias = {}
 
     async def __call__(self, argv, cwd, env):
+        # Lo que el sandbox monta de solo lectura se lee AHORA: la copia se borra al terminar.
+        copias = {argv[i + 2]: Path(argv[i + 1]).read_text() for i, a in enumerate(argv)
+                  if a == "--ro-bind" and argv[i + 1].startswith(self.copias_bajo) and Path(argv[i + 1]).is_file()}
         self.llamadas.append((tuple(argv), Path(cwd), dict(env)))
+        self.copias.update(copias)
         for clave, (rc, err) in self.fallos.items():
             if clave in " ".join(argv):
                 return rc, err
         return 0, b""
 
+    copias_bajo = "/tmp"
 
-def _preparar(tmp_path, *, accesos=None, instalar=None, rama="master", owner_repo="o/r", autor="A <a@a.io>"):
+    def internos(self):
+        """Los comandos DENTRO del sandbox (lo que va después de `--`)."""
+        salida = []
+        for argv, _, _ in self.llamadas:
+            assert argv[0] == "bwrap" and "--clearenv" in argv, f"instalación fuera del sandbox: {argv}"
+            salida.append(argv[argv.index("--") + 1:])
+        return salida
+
+    def entornos(self):
+        return [{argv[i + 1]: argv[i + 2] for i, a in enumerate(argv[:argv.index("--")]) if a == "--setenv"}
+                for argv, _, _ in self.llamadas]
+
+
+def _preparar(tmp_path, *, accesos=None, instalar=None, rama="master", owner_repo="o/r", autor="A <a@a.io>",
+              node_bin=None):
     return asyncio.run(P.preparar(P.Repo(owner_repo, ()), mision_id=MID, raiz=tmp_path / "m",
                                   rama_por_omision=rama, token=TOKEN, autor=autor,
-                                  accesos=accesos or _accesos(), instalar=instalar or _Instalador()))
+                                  accesos=accesos or _accesos(), instalar=instalar or _Instalador(),
+                                  node_bin=node_bin))
 
 
 def test_espejo_privado_y_clon_desde_el_espejo(tmp_path, monkeypatch):
@@ -156,21 +177,27 @@ def test_dependencias_con_banderas_y_sin_entorno_de_jax(tmp_path, monkeypatch):
         "composer.json": "{}", "composer.lock": "{}",
     })
     instalar = _Instalador()
-    c = _preparar(tmp_path, instalar=instalar)
+    c = _preparar(tmp_path, instalar=instalar, node_bin=Path("/opt/ejecutor/node-v24/bin"))
     deps = tmp_path / "m" / MID / "deps"
-    argvs = [a for a, _, _ in instalar.llamadas]
-    npm = [a for a in argvs if a[0] == "npm"]
+    internos = instalar.internos()  # todas pasan por bwrap con --clearenv
+    npm = [a for a in internos if a[0] == "npm"]
     assert npm == [("npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund")] * 2
-    assert [a for a in argvs if a[0] == "composer"] == [
+    assert [a for a in internos if a[0] == "composer"] == [
         ("composer", "install", "--no-interaction", "--no-scripts", "--no-plugins")]
-    pips = [a for a in argvs if a[0].endswith("/pip")]
-    assert len(pips) == 3 and all(a[1:4] == ("install", "--only-binary=:all:", "-r") for a in pips)
-    assert all(Path(a[4]).is_relative_to(deps) for a in pips)
+    pips = [a for a in internos if a[0].endswith("/pip")]
+    # UNA invocación por venv, con todos sus requirements juntos.
+    assert len(pips) == 2, pips
+    raiz = next(a for a in pips if "/_raiz/" in a[0])
+    assert raiz[1:3] == ("install", "--only-binary=:all:")
+    assert [Path(x).name for x in raiz[3:][1::2]] == ["requirements-dev.txt", "requirements.txt"]
+    assert list(raiz[3:][0::2]) == ["-r", "-r"]
     for argv, cwd, env in instalar.llamadas:
-        assert set(env) <= {"PATH", "HOME", "LANG"}, argv
         assert not any(k.startswith("JAX_") for k in env) and "NPM_TOKEN" not in env
         assert cwd.is_relative_to(deps), f"{argv} corrió fuera de deps: {cwd}"
-        assert Path(env["HOME"]) != Path.home()
+    for env in instalar.entornos():
+        assert set(env) == {"PATH", "HOME", "LANG"} and env["HOME"] == "/tmp/h"
+    npm_argv = next(a for a, _, _ in instalar.llamadas if "npm" in a[a.index("--"):])
+    assert "/opt/ejecutor/node-v24" in npm_argv
     assert "sin_lockfile:tools/package.json" in c.dependencias
     for enlace in (".venv", "backend/.venv", "node_modules", "frontend/node_modules", "vendor"):
         ruta = c.ruta / enlace
@@ -178,8 +205,37 @@ def test_dependencias_con_banderas_y_sin_entorno_de_jax(tmp_path, monkeypatch):
     excluidos = (c.ruta / ".git" / "info" / "exclude").read_text().splitlines()
     for enlace in ("/.venv", "/backend/.venv", "/node_modules", "/frontend/node_modules", "/vendor"):
         assert enlace in excluidos
-    # Los archivos de bloqueo salen de la rama por omisión del ESPEJO, no del clon.
-    assert (deps / "node" / "frontend" / "package-lock.json").read_text() == "{}"
+    # Los archivos de bloqueo salen de la rama por omisión del ESPEJO (no del clon) y entran
+    # al sandbox como COPIA de solo lectura, montada sobre la ruta que npm espera.
+    assert instalar.copias[str(deps / "node" / "frontend" / "package-lock.json")] == "{}"
+    assert instalar.copias[str(deps / "php" / "_raiz" / "composer.lock")] == "{}"
+
+
+@pytest.mark.parametrize("linea", ["--no-binary x", "--no-binary=:all:", "--index-url https://evil/simple",
+                                   "-i https://evil/simple", "--extra-index-url https://evil/simple",
+                                   "-f https://evil/links", "--find-links=/tmp/x", "-e .", "--editable git+https://x",
+                                   "--trusted-host evil", "-c constraints.txt", "-r ../fuera.txt",
+                                   "paquete @ https://evil/paquete-1.0.tar.gz", "https://evil/p-1.0.tar.gz",
+                                   "./local", "git+https://evil/r.git#egg=r"])
+def test_requirements_con_opcion_no_se_instala_y_se_declara(tmp_path, monkeypatch, linea):
+    _remoto(tmp_path, monkeypatch, archivos={"requirements.txt": f"x==1\n{linea}\n"})
+    instalar = _Instalador()
+    c = _preparar(tmp_path, instalar=instalar)
+    assert instalar.llamadas == [], "no debía ejecutarse nada: ni venv ni pip"
+    assert "pip_opcion_rechazada:requirements.txt" in c.dependencias
+
+
+def test_la_opcion_rechazada_arrastra_a_quien_la_incluye_y_no_al_resto(tmp_path, monkeypatch):
+    _remoto(tmp_path, monkeypatch, archivos={"requirements.txt": "x==1\n",
+                                             "requirements-mala.txt": "--no-binary x\n",
+                                             "requirements-dev.txt": "-r requirements-mala.txt\ny==1  # nota\n"})
+    instalar = _Instalador()
+    c = _preparar(tmp_path, instalar=instalar)
+    pips = [a for a in instalar.internos() if a[0].endswith("/pip")]
+    assert len(pips) == 1 and [Path(x).name for x in pips[0][3:][1::2]] == ["requirements.txt"]
+    assert "pip_opcion_rechazada:requirements-mala.txt" in c.dependencias
+    assert "pip_opcion_rechazada:requirements-dev.txt" in c.dependencias
+    assert "requirements.txt" in c.dependencias
 
 
 def test_pip_sin_wheel_se_declara_y_sigue(tmp_path, monkeypatch):
@@ -236,6 +292,22 @@ def test_preparacion_a_medias_se_rehace(tmp_path, monkeypatch):
     (base / "repo" / "resto").write_text("de un turno 1 que se cayó")
     c = _preparar(tmp_path)
     assert not (c.ruta / "resto").exists() and (c.ruta / "a").exists()
+
+
+@pytest.mark.parametrize("repo", ["o/r/../../x", "o", "o/r?x=1"])
+def test_rama_por_omision_valida_el_repo_antes_de_pedir(repo):
+    def prohibido(req):
+        raise AssertionError("no debía llamar a la API")
+    cli = httpx.AsyncClient(transport=httpx.MockTransport(prohibido), base_url="https://api.github.com")
+    with pytest.raises(ValueError, match="owner_repo_invalido"):
+        asyncio.run(P.rama_por_omision(cli, repo))
+
+
+def test_rama_por_omision_de_la_api_mal_formada_se_rechaza():
+    cli = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json={"default_branch": "--upload-pack=x"})), base_url="https://api.github.com")
+    with pytest.raises(ValueError, match="rama_por_omision_invalida"):
+        asyncio.run(P.rama_por_omision(cli, "o/r"))
 
 
 def test_rama_por_omision_de_la_api():

@@ -31,7 +31,9 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
-from jax.ejecutor.codigo.entrega import (rama_de_la_mision, url_del_repo, validar_rama_base, validar_ruta_segura)
+from jax.ejecutor.codigo.entrega import (rama_de_la_mision, url_del_repo, validar_owner_repo, validar_rama_base,
+                                         validar_ruta_segura)
+from jax.ejecutor.codigo.sandbox import argv_sandbox
 from jax.ejecutor.codigo.git_token import (GitFallo, correr_git, entorno_base, entorno_minimo, entorno_red,
                                            hogar_temporal)
 from jax.ejecutor.contratos import cuenta_axioma
@@ -41,6 +43,7 @@ _REQUIREMENTS = re.compile(r"(?:backend/)?requirements[^/]*\.txt")
 _SIN_WHEEL = (b"No matching distribution found", b"Could not find a version that satisfies")
 _DIRS_NPM = ("", "frontend")
 
+# El ejecutor de instalaciones recibe el argv COMPLETO de bwrap (sandbox.argv_sandbox).
 Instalador = Callable[[list[str], Path, dict[str, str]], Awaitable[tuple[int, bytes]]]
 
 
@@ -88,9 +91,11 @@ def parsear_autor(autor: str) -> tuple[str, str]:
 
 
 async def rama_por_omision(cliente: httpx.AsyncClient, repo: str) -> str:
-    r = await cliente.get(f"/repos/{repo}")
+    """`repo` se valida antes de armar la ruta de la API (MINOR-4); lo que responde GitHub se
+    valida como nombre de rama antes de que llegue a un refspec."""
+    r = await cliente.get(f"/repos/{validar_owner_repo(repo)}")
     r.raise_for_status()
-    return r.json()["default_branch"]
+    return validar_rama_base(r.json()["default_branch"])
 
 
 async def _git(args: list[str], env: dict[str, str], error: str, token: str | None = None) -> bytes:
@@ -136,53 +141,71 @@ async def _escribir(ruta: Path, datos: bytes) -> None:
     await asyncio.to_thread(escribir)
 
 
-async def _instalar_dependencias(espejo: Path, deps: Path, base: str, instalar: Instalador
-                                 ) -> tuple[list[str], list[tuple[str, Path]]]:
-    """Devuelve (lo instalado o declarado, enlaces a crear en el clon: (ruta relativa, destino))."""
+async def _instalar_dependencias(espejo: Path, deps: Path, base: str, instalar: Instalador,
+                                 node_bin: Path | None) -> tuple[list[str], list[tuple[str, Path]]]:
+    """Devuelve (lo instalado o declarado, enlaces a crear en el clon: (ruta relativa, destino)).
+
+    Cada instalación corre en `sandbox.argv_sandbox`: el único escribible es `deps/`, y los
+    archivos de dependencias entran como COPIA de solo lectura (hecha aquí, fuera de `deps/`, en
+    un temporal que se borra al terminar)."""
     hechas: list[str] = []
     enlaces: list[tuple[str, Path]] = []
     await asyncio.to_thread(deps.mkdir, mode=0o700)
     with hogar_temporal() as home:
         env_git = entorno_base(home)
+        fuentes = home / "fuentes"
         commit = (await _git(["-C", str(espejo), "rev-parse", "--verify", "--end-of-options",
                               f"refs/remotes/origin/{base}^{{commit}}"], env_git, "rama por omisión")).decode().strip()
         listado = await _git(["-C", str(espejo), "ls-tree", "-r", "-z", "--name-only", "--end-of-options", commit],
                              env_git, "archivos de la rama por omisión")
         archivos = {n for n in listado.decode("utf-8", errors="replace").split("\0") if n}
 
-        async def copiar(ruta_repo: str, destino: Path) -> None:
+        async def copiar(ruta_repo: str, carpeta: Path) -> Path:
             datos = await _git(["-C", str(espejo), "cat-file", "blob", f"{commit}:{ruta_repo}"], env_git,
-                               "leer archivo de bloqueo")
-            await _escribir(destino / PurePosixPath(ruta_repo).name, datos)
+                               "leer archivo de dependencias")
+            copia = carpeta / PurePosixPath(ruta_repo).name
+            await _escribir(copia, datos)
+            return copia
 
-        # Instalaciones: NADA del entorno del proceso salvo PATH y LANG (ni /etc/jax/.env, ni
-        # NPM_TOKEN, ni PIP_*), HOME propio y temporal.
+        # El proceso bwrap no hereda más que PATH/LANG/HOME, y adentro --clearenv.
         env = entorno_minimo(home)
 
-        async def correr(argv: list[str], cwd: Path) -> tuple[int, bytes]:
-            return await instalar(argv, cwd, env)
+        async def correr(comando: list[str], destino: Path, solo_lectura) -> tuple[int, bytes]:
+            await asyncio.to_thread(destino.mkdir, mode=0o700, parents=True, exist_ok=True)
+            argv = argv_sandbox(comando, deps=deps, cwd=destino, solo_lectura=solo_lectura, node_bin=node_bin)
+            return await instalar(argv, destino, env)
 
-        # Python: un venv por directorio (raíz, backend/), todos sus requirements*.txt adentro.
+        # Python: UNA invocación de pip por venv (raíz, backend/), con sus requirements*.txt
+        # aceptados juntos. Los que traen opciones o requisitos que no son del índice no se
+        # instalan: se declaran.
         por_dir: dict[str, list[str]] = {}
         for n in sorted(a for a in archivos if _REQUIREMENTS.fullmatch(a)):
             por_dir.setdefault("" if "/" not in n else str(PurePosixPath(n).parent), []).append(n)
         for d, reqs in por_dir.items():
+            carpeta = fuentes / "python" / (d or "_raiz")
+            copias = {n: await copiar(n, carpeta) for n in reqs}
+            textos = {PurePosixPath(n).name: (await asyncio.to_thread(c.read_text, errors="replace"))
+                      for n, c in copias.items()}
+            rechazados = _requirements_rechazados(textos)
+            aceptados = [n for n in reqs if PurePosixPath(n).name not in rechazados]
+            hechas += [f"pip_opcion_rechazada:{n}" for n in reqs if PurePosixPath(n).name in rechazados]
+            if not aceptados:
+                continue
             destino = deps / "python" / (d or "_raiz")
-            for n in reqs:
-                await copiar(n, destino)
             venv = destino / "venv"
-            rc, _ = await correr(["python3", "-m", "venv", str(venv)], destino)
+            rc, _ = await correr(["python3", "-m", "venv", str(venv)], destino, [])
             if rc != 0:
                 raise RuntimeError(f"preparar_fallo: venv en {d or '.'} (rc={rc})")
-            for n in reqs:
-                rc, err = await correr([str(venv / "bin" / "pip"), "install", "--only-binary=:all:", "-r",
-                                        str(destino / PurePosixPath(n).name)], destino)
-                if rc == 0:
-                    hechas.append(n)
-                elif any(m in err for m in _SIN_WHEEL):
-                    hechas.append(f"pip_sin_wheel:{n}")
-                else:
-                    raise RuntimeError(f"preparar_fallo: pip install -r {n} (rc={rc})")
+            pip = [str(venv / "bin" / "pip"), "install", "--only-binary=:all:"]
+            for n in aceptados:
+                pip += ["-r", str(copias[n])]
+            rc, err = await correr(pip, destino, [(carpeta, carpeta)])
+            if rc == 0:
+                hechas += aceptados
+            elif any(m in err for m in _SIN_WHEEL):
+                hechas += [f"pip_sin_wheel:{n}" for n in aceptados]
+            else:
+                raise RuntimeError(f"preparar_fallo: pip install en {d or '.'} (rc={rc})")
             enlaces.append((f"{d}/.venv" if d else ".venv", venv))
 
         # Node: `npm ci` sin scripts, solo en la raíz y en frontend/.
@@ -196,10 +219,10 @@ async def _instalar_dependencias(espejo: Path, deps: Path, base: str, instalar: 
             if d not in _DIRS_NPM:
                 hechas.append(f"npm_no_instalado:{p}")
                 continue
+            carpeta = fuentes / "node" / (d or "_raiz")
             destino = deps / "node" / (d or "_raiz")
-            await copiar(p, destino)
-            await copiar(lock, destino)
-            rc, _ = await correr(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], destino)
+            montajes = [(await copiar(f, carpeta), destino / PurePosixPath(f).name) for f in (p, lock)]
+            rc, _ = await correr(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], destino, montajes)
             if rc != 0:
                 raise RuntimeError(f"preparar_fallo: npm ci en {d or '.'} (rc={rc})")
             hechas.append(lock)
@@ -209,16 +232,51 @@ async def _instalar_dependencias(espejo: Path, deps: Path, base: str, instalar: 
         if "composer.json" in archivos and "composer.lock" not in archivos:
             hechas.append("sin_lockfile:composer.json")
         elif "composer.lock" in archivos and "composer.json" in archivos:
+            carpeta = fuentes / "php" / "_raiz"
             destino = deps / "php" / "_raiz"
-            await copiar("composer.json", destino)
-            await copiar("composer.lock", destino)
+            montajes = [(await copiar(f, carpeta), destino / f) for f in ("composer.json", "composer.lock")]
             rc, _ = await correr(["composer", "install", "--no-interaction", "--no-scripts", "--no-plugins"],
-                                 destino)
+                                 destino, montajes)
             if rc != 0:
                 raise RuntimeError(f"preparar_fallo: composer install (rc={rc})")
             hechas.append("composer.lock")
             enlaces.append(("vendor", destino / "vendor"))
     return hechas, enlaces
+
+
+_COMENTARIO = re.compile(r"(^|\s)#.*$")
+_INCLUIR = re.compile(r"(?:-r|--requirement)(?:\s+|=)(\S+)")
+
+
+def _requirements_rechazados(textos: dict[str, str]) -> set[str]:
+    """Nombres (del mismo directorio) que NO se instalan. Se rechaza un archivo con cualquier
+    línea de opción (`--no-binary`, `--index-url`, `-f`, `-e`, `-c`, `--trusted-host`, `-i`…)
+    salvo `-r <hermano>`, o con un requisito que no sale del índice (URL, `pkg @ …`, ruta local:
+    pip los construye aunque diga `--only-binary`). Y el que incluye (`-r`) a uno rechazado."""
+    incluye: dict[str, set[str]] = {}
+    rechazados: set[str] = set()
+    for nombre, texto in textos.items():
+        incluye[nombre] = set()
+        for linea in texto.replace("\\\n", " ").splitlines():
+            linea = _COMENTARIO.sub("", linea).strip()
+            if not linea:
+                continue
+            if linea.startswith("-"):
+                m = _INCLUIR.fullmatch(linea)
+                if m and m.group(1) in textos:
+                    incluye[nombre].add(m.group(1))
+                else:
+                    rechazados.add(nombre)
+            elif "://" in linea or "@" in linea.split(";", 1)[0] or linea.startswith((".", "/", "~")):
+                rechazados.add(nombre)
+    cambio = True
+    while cambio:
+        cambio = False
+        for nombre, hijos in incluye.items():
+            if nombre not in rechazados and hijos & rechazados:
+                rechazados.add(nombre)
+                cambio = True
+    return rechazados
 
 
 async def _crear_clon(espejo: Path, ruta: Path, *, rama: str, nombre: str, correo: str,
@@ -252,7 +310,7 @@ async def _crear_clon(espejo: Path, ruta: Path, *, rama: str, nombre: str, corre
 
 
 async def preparar(repo: Repo, *, mision_id: str, raiz: Path, rama_por_omision: str, token: str, autor: str,
-                   accesos: Accesos, instalar: Instalador = instalar_real) -> Clon:
+                   accesos: Accesos, instalar: Instalador = instalar_real, node_bin: Path | None = None) -> Clon:
     # Todo se valida ANTES de crear un directorio o correr un comando.
     rama = rama_de_la_mision(mision_id)
     url = url_del_repo(repo.owner_repo)
@@ -276,7 +334,7 @@ async def preparar(repo: Repo, *, mision_id: str, raiz: Path, rama_por_omision: 
         if await asyncio.to_thread(os.path.lexists, resto):
             await asyncio.to_thread(shutil.rmtree, resto)
     await _crear_espejo(espejo, url=url, base=base, rama=rama, token=token)
-    hechas, enlaces = await _instalar_dependencias(espejo, deps, base, instalar)
+    hechas, enlaces = await _instalar_dependencias(espejo, deps, base, instalar, node_bin)
     await accesos.lectura(deps)
     hechas += await _crear_clon(espejo, ruta, rama=rama, nombre=nombre, correo=correo, enlaces=enlaces)
     await accesos.escritura(ruta)

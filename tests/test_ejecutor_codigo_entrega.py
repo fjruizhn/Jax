@@ -280,6 +280,102 @@ def test_push_ajeno_entre_entregas_no_se_pisa(tmp_path, github):
     assert _refs(github)[f"refs/heads/{RAMA}"] == ajeno
 
 
+def test_objeto_mal_formado_falla_cerrado_sin_mover_la_rama_del_espejo(tmp_path, github):
+    """MINOR-1: `fetch.fsckObjects` rechaza el pack, y el fetch va a una ref temporal: la rama
+    del espejo solo se mueve después de un fsck limpio."""
+    c = _preparar(tmp_path)
+    antes = _refs(c.espejo)[f"refs/heads/{RAMA}"]
+    blob = _git("hash-object", "-w", "--stdin", cwd=c.ruta, input="hola\n")
+    b = bytes.fromhex(blob)
+    arbol = subprocess.run(["git", "hash-object", "-w", "-t", "tree", "--literally", "--stdin"], cwd=c.ruta,
+                           input=b"100644 b\0" + b + b"100644 a\0" + b,  # desordenado: treeNotSorted
+                           check=True, capture_output=True).stdout.decode().strip()
+    malo = _git("-c", "user.name=q", "-c", "user.email=q@q", "commit-tree", arbol, "-p", "HEAD", "-m", "malo",
+                cwd=c.ruta)
+    _git("update-ref", f"refs/heads/{RAMA}", malo, cwd=c.ruta)
+    with pytest.raises(E.EntregaRechazada, match="traer_del_clon_fallo"):
+        asyncio.run(E.traer_del_clon(c.espejo, c.ruta, mision_id=MID, upload_pack="git-upload-pack"))
+    refs = _refs(c.espejo)
+    assert refs[f"refs/heads/{RAMA}"] == antes
+    assert not any(r.startswith("refs/jax/") for r in refs), refs
+    assert subprocess.run(["git", "cat-file", "-e", malo], cwd=c.espejo).returncode != 0
+
+
+def test_traer_deja_la_ref_temporal_limpia(tmp_path, github):
+    c = _preparar(tmp_path)
+    qwen = _commit(c.ruta, "a", "2", "uno")
+    asyncio.run(E.traer_del_clon(c.espejo, c.ruta, mision_id=MID, upload_pack="git-upload-pack"))
+    refs = _refs(c.espejo)
+    assert refs[f"refs/heads/{RAMA}"] == qwen and not any(r.startswith("refs/jax/") for r in refs)
+
+
+def test_reintento_cuando_el_empuje_anterior_si_llego(tmp_path, github):
+    """MINOR-2 (a): el empuje llegó pero el seguimiento no se movió (p. ej. corte de red antes de
+    la respuesta). El lease falla; `ls-remote` muestra el mismo oid que íbamos a empujar → éxito
+    y el seguimiento se actualiza."""
+    c = _preparar(tmp_path)
+    api = _GitHubApi()
+    qwen = _commit(c.ruta, "a", "2", "uno")
+    _entregar(c, api)
+    _git("update-ref", "-d", f"refs/remotes/origin/{RAMA}", cwd=c.espejo)
+    _entregar(c, api)
+    assert _refs(github)[f"refs/heads/{RAMA}"] == qwen
+    assert _refs(c.espejo)[f"refs/remotes/origin/{RAMA}"] == qwen
+
+
+@pytest.mark.parametrize("remoto,esperado", [
+    ("a" * 40, "exito_y_seguimiento"),       # el oid remoto ES el que íbamos a empujar
+    (None, "empuje_sin_lease"),              # la rama remota no existe
+    ("b" * 40, "lease_rechazado"),           # otro la movió
+])
+def test_reconciliacion_tras_lease_rechazado_con_git_inyectado(tmp_path, monkeypatch, remoto, esperado):
+    """La rama «remoto == local» no se alcanza con git 2.53 real (lo da por «up to date» antes del
+    lease: ver test_reintento_cuando_el_empuje_anterior_si_llego), así que se ejercita inyectando
+    la salida de git."""
+    from jax.ejecutor.codigo import git_token as G
+    ref = f"refs/heads/{RAMA}"
+    llamadas = []
+
+    async def falso(args, **kw):
+        llamadas.append(list(args))
+        if "push" in args and any(a.startswith("--force-with-lease") for a in args):
+            raise G.GitFallo("git_fallo: push", f"!\t{ref}:{ref}\t[rejected] (stale info)\n".encode())
+        if "ls-remote" in args:
+            return b"" if remoto is None else f"{remoto}\t{ref}\n".encode()
+        if "rev-parse" in args:
+            return ("a" * 40 + "\n").encode()
+        return b""
+    monkeypatch.setattr(E, "correr_git", falso)
+    corrida = E.empujar(tmp_path / "espejo.git", mision_id=MID, rama_por_omision="main", token=TOKEN)
+    if esperado == "lease_rechazado":
+        with pytest.raises(E.EntregaRechazada, match="lease_rechazado"):
+            asyncio.run(corrida)
+        assert not any("update-ref" in a for a in llamadas)
+        return
+    asyncio.run(corrida)
+    if esperado == "exito_y_seguimiento":
+        assert ["-C", str(tmp_path / "espejo.git"), "update-ref", "--", f"refs/remotes/origin/{RAMA}", "a" * 40] \
+            in llamadas
+        assert sum("push" in a for a in llamadas) == 1
+    else:
+        segundo = [a for a in llamadas if "push" in a][1]
+        assert not any(x.startswith("--force") for x in segundo) and segundo[-3:] == ["--", "origin", f"{ref}:{ref}"]
+
+
+def test_rama_remota_borrada_se_vuelve_a_crear(tmp_path, github):
+    """MINOR-2 (b): alguien borró la rama en GitHub (p. ej. al cerrar el PR). El lease falla,
+    `ls-remote` no la encuentra → se empuja sin lease (creación, sin forzar)."""
+    c = _preparar(tmp_path)
+    api = _GitHubApi()
+    _commit(c.ruta, "a", "2", "uno")
+    _entregar(c, api)
+    _git("update-ref", "-d", f"refs/heads/{RAMA}", cwd=github)
+    segundo = _commit(c.ruta, "a", "3", "dos")
+    _entregar(c, api)
+    assert _refs(github)[f"refs/heads/{RAMA}"] == segundo
+    assert _refs(c.espejo)[f"refs/remotes/origin/{RAMA}"] == segundo
+
+
 def test_pr_cerrado_no_se_reabre_se_abre_otro_y_se_declara(tmp_path, github):
     c = _preparar(tmp_path)
     api = _GitHubApi()

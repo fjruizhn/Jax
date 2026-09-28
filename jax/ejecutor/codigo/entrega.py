@@ -99,17 +99,29 @@ async def traer_del_clon(espejo: Path, clon: Path, *, mision_id: str, upload_pac
     salida de estos comandos: la escribe (o la provoca) lo que hay en el clon."""
     rama = rama_de_la_mision(mision_id)
     ruta_clon = validar_ruta_segura(clon)
+    # MINOR-1 (re-revisión): `fetch.fsckObjects` rechaza un pack mal formado al recibirlo, y lo
+    # recibido va a una ref TEMPORAL; la rama del espejo solo se mueve tras un fsck limpio.
+    temporal = f"refs/jax/entrante/{rama}"
     with hogar_temporal() as home:
         env = entorno_base(home)
         try:
-            await correr_git(["-C", str(espejo), "fetch", "--no-tags", "--no-recurse-submodules", "--no-auto-gc",
-                              "--no-auto-maintenance", "--no-write-fetch-head", f"--upload-pack={upload_pack}",
-                              "--", ruta_clon, f"+refs/heads/{rama}:refs/heads/{rama}"],
+            await correr_git(["-c", "fetch.fsckObjects=true", "-C", str(espejo), "fetch", "--no-tags",
+                              "--no-recurse-submodules", "--no-auto-gc", "--no-auto-maintenance",
+                              "--no-write-fetch-head", f"--upload-pack={upload_pack}",
+                              "--", ruta_clon, f"+refs/heads/{rama}:{temporal}"],
                              env=env, error="traer_del_clon_fallo", mostrar_error=False)
             await correr_git(["-C", str(espejo), "fsck", "--no-dangling", "--no-progress"],
                              env=env, error="fsck_fallo", mostrar_error=False)
+            await correr_git(["-C", str(espejo), "update-ref", "--", f"refs/heads/{rama}", temporal],
+                             env=env, error="traer_del_clon_fallo", mostrar_error=False)
         except GitFallo as exc:
             raise EntregaRechazada(str(exc)) from None
+        finally:
+            try:
+                await correr_git(["-C", str(espejo), "update-ref", "-d", "--", temporal],
+                                 env=env, error="limpiar_ref_temporal", mostrar_error=False)
+            except GitFallo:  # fail-soft: la ref temporal no existía (el fetch falló antes); si quedara, el próximo fetch la pisa con "+" y nunca decide nada
+                pass
 
 
 async def diff_en_el_espejo(espejo: Path, *, mision_id: str, rama_por_omision: str) -> tuple[Cambio, ...]:
@@ -131,16 +143,48 @@ async def empujar(espejo: Path, *, mision_id: str, rama_por_omision: str, token:
     if not referencia_permitida(rama, rama_por_omision, mision_id):
         raise EntregaRechazada(f"rama_no_permitida: {rama}")
     ref = f"refs/heads/{rama}"
+    seguimiento = f"refs/remotes/origin/{rama}"
+    base_push = ["-C", str(espejo), "push", "--porcelain", "--no-follow-tags", "--recurse-submodules=no"]
     with hogar_temporal() as home:
+        env = entorno_red(home, token)
         try:
-            await correr_git(["-C", str(espejo), "push", "--porcelain", "--no-follow-tags",
-                              "--recurse-submodules=no", f"--force-with-lease={ref}", "--", "origin", f"{ref}:{ref}"],
-                             env=entorno_red(home, token), error="git_fallo: push", sanear_con=token)
+            await correr_git([*base_push, f"--force-with-lease={ref}", "--", "origin", f"{ref}:{ref}"],
+                             env=env, error="git_fallo: push", sanear_con=token)
+            return
         except GitFallo as exc:
-            if b"stale info" in exc.salida:
-                raise EntregaRechazada(
-                    f"lease_rechazado: {ref} cambió en el remoto fuera de la misión; no se pisa") from None
+            if b"stale info" not in exc.salida:
+                raise EntregaRechazada(str(exc)) from None
+        # MINOR-2 (re-revisión): reconciliación mínima tras un lease rechazado.
+        try:
+            remoto = await _oid_remoto(espejo, ref, env, token)
+            local = (await correr_git(["-C", str(espejo), "rev-parse", "--verify", "--end-of-options", ref],
+                                      env=env, error="git_fallo: rev-parse")).decode().strip()
+            if remoto == local:
+                # El empuje anterior sí llegó (p. ej. se cortó la red antes de la respuesta): éxito,
+                # y el seguimiento se pone al día. (Con git 2.53 este caso ni siquiera llega aquí:
+                # git lo da por «up to date» antes de mirar el lease.)
+                await correr_git(["-C", str(espejo), "update-ref", "--", seguimiento, local],
+                                 env=env, error="git_fallo: update-ref")
+                return
+            if remoto is None:
+                # La rama ya no existe en GitHub (borrada al cerrar el PR, p. ej.): se crea de nuevo
+                # SIN lease y SIN forzar -- si alguien la recrea en medio, no es avance rápido y falla.
+                await correr_git([*base_push, "--", "origin", f"{ref}:{ref}"],
+                                 env=env, error="git_fallo: push", sanear_con=token)
+                return
+        except GitFallo as exc:
             raise EntregaRechazada(str(exc)) from None
+    raise EntregaRechazada(f"lease_rechazado: {ref} cambió en el remoto fuera de la misión; no se pisa")
+
+
+async def _oid_remoto(espejo: Path, ref: str, env: dict[str, str], token: str) -> str | None:
+    salida = await correr_git(["-C", str(espejo), "ls-remote", "--", "origin", ref],
+                              env=env, error="git_fallo: ls-remote", sanear_con=token)
+    for linea in salida.decode(errors="replace").splitlines():
+        oid, _, nombre = linea.partition("\t")
+        if nombre == ref:
+            return oid
+    return None
 
 
 async def _listar(cliente: httpx.AsyncClient, repo: str, rama: str, estado: str) -> list[dict]:
