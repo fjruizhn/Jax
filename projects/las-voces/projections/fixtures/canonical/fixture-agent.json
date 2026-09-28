@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "id": "fixture-agent",
+  "display_name": "Fixture Agent",
+  "status": "ACTIVE",
+  "role": "PROJECT_MANAGER",
+  "purpose": "Synthetic test-only projection subject.",
+  "instructions": ["Use canonical data only."],
+  "runtime_targets": ["codex", "claude", "qwen"],
+  "skills": [],
+  "capabilities": [],
+  "tools": ["NONE"],
+  "constraints": ["Do not reverse sync."],
+  "authority": {"can": ["PROJECT_COORDINATION"], "cannot": ["MERGE"], "human_approval_required": ["MERGE"]},
+  "provenance": {"canonical_source": "agents/fixture-agent.json", "evidence_refs": ["fixtures/canonical/fixture-agent.json"]},
+  "version": "1.0.0"
+}

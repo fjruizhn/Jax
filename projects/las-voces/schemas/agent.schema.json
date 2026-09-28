@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jax.local/projects/las-voces/schemas/agent.schema.json",
+  "title": "LAS VOCES canonical agent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "display_name", "status", "role", "purpose", "instructions", "runtime_targets", "skills", "capabilities", "tools", "constraints", "authority", "provenance", "version"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,62}$"},
+    "display_name": {"type": "string", "minLength": 1},
+    "status": {"enum": ["PROPOSED_NOT_ACTIVE", "ACTIVE", "DISABLED", "RETIRED"]},
+    "role": {"enum": ["PROJECT_MANAGER", "PRIMARY_BUILDER", "INTEGRATOR", "ADVERSARIAL_REVIEWER", "RUNTIME_COORDINATOR"]},
+    "purpose": {"type": "string", "minLength": 1},
+    "instructions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "runtime_targets": {"type": "array", "uniqueItems": true, "items": {"enum": ["codex", "claude", "qwen"]}},
+    "skills": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,62}$"}},
+    "capabilities": {"type": "array", "uniqueItems": true, "items": {"enum": ["PROJECT_COORDINATION"]}},
+    "tools": {"type": "array", "uniqueItems": true, "items": {"enum": ["NONE"]}},
+    "constraints": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "authority": {
+      "type": "object", "additionalProperties": false, "required": ["can", "cannot", "human_approval_required"],
+      "properties": {
+        "can": {"type": "array", "uniqueItems": true, "items": {"enum": ["PROJECT_COORDINATION"]}},
+        "cannot": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["MERGE", "DEPLOY", "PRODUCTION_MUTATION", "CAPABILITY_GRANT", "INFER_HUMAN_AUTHORITY", "DECLARE_DONE_WITHOUT_EVIDENCE"]}},
+        "human_approval_required": {"type": "array", "uniqueItems": true, "items": {"enum": ["MERGE", "DEPLOY", "PRODUCTION_MUTATION", "CAPABILITY_GRANT"]}}
+      }
+    },
+    "provenance": {
+      "type": "object", "additionalProperties": false, "required": ["canonical_source", "evidence_refs"],
+      "properties": {
+        "canonical_source": {"type": "string", "pattern": "^agents/[a-z][a-z0-9-]{1,62}\\.json$"},
+        "evidence_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"}
+  }
+}

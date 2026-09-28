@@ -45,3 +45,18 @@ without acceptance evidence.
 LV-002 should first define an approved canonical schema in this project
 directory, then generate provider projections with hashes and fail on manual
 drift. It must not overwrite the existing JAX root adapter or Claude shim.
+
+## LV-002 canonical projections
+
+The projection input is exclusively `agents/*.json`, validated by
+`schemas/agent.schema.json`; its contract and read-only detector are in
+`projections/`. `project.json.agents` remains operational context and is not
+an input to projection. This avoids a second authority while preserving the
+LV-000 record. Existing `agents/ARIADNA.md` is imported evidence; its
+canonical structured successor is `agents/ariadna.json`.
+
+LV-002 owns no personal home configuration. In particular it does not
+overwrite `~/.codex/AGENTS.md` or `~/.claude/CLAUDE.md`, which are existing
+monolithic adapters. The first implementation is fixture/sandbox-only and
+emits isolated per-agent definitions where a target format was verified.
+Qwen remains `HUMAN_DECISION_REQUIRED`; no Qwen projection is emitted.

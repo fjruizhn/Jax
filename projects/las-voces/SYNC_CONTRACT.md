@@ -1,4 +1,10 @@
-# LAS VOCES — Sync Contract v0.1
+# LAS VOCES — Sync Contract v0.1 (historical import)
+
+This imported LV-000 document records the intended target families. The
+implemented LV-002 contract is `projections/CONTRACT.md`; where they differ,
+the LV-002 fail-closed rules govern. In particular, it does not claim ownership
+of existing home-level monolithic files and Qwen is not projected until its
+runtime format is verified.
 
 ## Canonical source
 `axioma/projects/las-voces/`
