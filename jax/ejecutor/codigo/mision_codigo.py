@@ -13,7 +13,7 @@ Orden -- cada paso que falla corta ahí, y nada se empuja antes del paso 9:
 5. C1 de código sobre el diff neto (`--text`) y barrido de secretos sobre él.
 6. Barrido de secretos commit por commit (lo agregado y quitado dentro de la rama también
    viajaría a GitHub en el historial).
-7. Tope de tamaño sobre los blobs de la rama del espejo (`cat-file -s`).
+7. Tope de tamaño sobre TODOS los blobs que el empuje llevaría (`rev-list --objects` + `cat-file`).
 8. Cualquier violación → `rechazada_por_contrato` con (regla, ruta, detalle), sin secretos.
 9. Empujar; 10. abrir o actualizar el PR → `abierto`. Un fallo en 1, 9 o 10 (o al leer el
    espejo) → `fallo_entrega` con el motivo saneado.
@@ -74,7 +74,7 @@ def _sin_repetir(violaciones) -> tuple[Violacion, ...]:
 async def entregar(clon: Clon, *, mision_id: str, repo: str, revision_legible: bool, informe: str, token: str,
                    cliente, tope_bytes: int, modelo: str, autor: str, upload_pack: str,
                    traer=E.traer_del_clon, commits=E.commits_de_la_rama, diff=E.diff_en_el_espejo,
-                   tamanos=E.tamanos_en_el_espejo, empujar=E.empujar, abrir_pr=E.abrir_o_actualizar_pr) -> dict:
+                   tamanos=E.tamanos_de_la_rama, empujar=E.empujar, abrir_pr=E.abrir_o_actualizar_pr) -> dict:
     esperada = parsear_autor(autor)
     base = clon.rama_por_omision
     try:

@@ -235,6 +235,50 @@ async def tamanos_en_el_espejo(espejo: Path, *, mision_id: str, rama_por_omision
     return tamanos
 
 
+async def tamanos_de_la_rama(espejo: Path, *, mision_id: str, rama_por_omision: str) -> dict[str, int]:
+    """Tamaño en bytes de TODO blob que el empuje de `axioma/<id>` llevaría a GitHub -- los de cada
+    commit de `origin/<base>..axioma/<id>`, no solo los de la punta (ruling 4b de la Tarea 9: un
+    archivo grande agregado y borrado dentro de la rama viaja igual en el historial). Medido EN EL
+    ESPEJO: `rev-list --objects` y `cat-file --batch-check`; nunca `stat` en el clon.
+
+    Por ruta, el mayor. Una línea de `rev-list` que no empieza con un oid (una ruta con un salto de
+    línea, p. ej.) falla cerrado: `tamano_ilegible`."""
+    rama = rama_de_la_mision(mision_id)
+    base = validar_rama_base(rama_por_omision)
+    rutas: dict[str, str] = {}
+    with hogar_temporal() as home:
+        env = entorno_base(home)
+        try:
+            listado = await correr_git(["-C", str(espejo), "--no-replace-objects", "rev-list", "--objects",
+                                        f"refs/remotes/origin/{base}..refs/heads/{rama}", "--"],
+                                       env=env, error="rev_list_fallo")
+            for linea in listado.decode("utf-8", errors="replace").split("\n"):
+                if not linea:
+                    continue
+                oid, _, ruta = linea.partition(" ")
+                if not _OID.fullmatch(oid):
+                    raise EntregaRechazada("tamano_ilegible")
+                rutas.setdefault(oid, ruta)
+            if not rutas:
+                return {}
+            tipos = await correr_git(["-C", str(espejo), "--no-replace-objects", "cat-file",
+                                      "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+                                     env=env, error="cat_file_fallo", entrada="".join(f"{o}\n" for o in rutas).encode())
+        except GitFallo as exc:
+            raise EntregaRechazada(str(exc)) from None
+    tamanos: dict[str, int] = {}
+    for linea in tipos.decode().split("\n"):
+        if not linea:
+            continue
+        partes = linea.split(" ")
+        if len(partes) != 3 or partes[0] not in rutas or not partes[2].isdigit():
+            raise EntregaRechazada("tamano_ilegible")  # incluye "<oid> missing"
+        if partes[1] == "blob":
+            ruta = rutas[partes[0]] or partes[0]
+            tamanos[ruta] = max(tamanos.get(ruta, 0), int(partes[2]))
+    return tamanos
+
+
 async def empujar(espejo: Path, *, mision_id: str, rama_por_omision: str, token: str) -> None:
     rama = rama_de_la_mision(mision_id)
     if not referencia_permitida(rama, rama_por_omision, mision_id):

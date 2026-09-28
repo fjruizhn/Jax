@@ -82,11 +82,14 @@ def sanear(texto: str, token: str | None) -> str:
 
 
 async def correr_git(args: Sequence[str], *, env: dict[str, str], error: str, sanear_con: str | None = None,
-                     mostrar_error: bool = True) -> bytes:
-    """`git <BLINDAJE> <args>`. Devuelve stdout en bytes; si falla, `GitFallo(error[: …])`."""
-    proc = await asyncio.create_subprocess_exec("git", *BLINDAJE, *args, env=env, stdin=asyncio.subprocess.DEVNULL,
+                     mostrar_error: bool = True, entrada: bytes | None = None) -> bytes:
+    """`git <BLINDAJE> <args>`. Devuelve stdout en bytes; si falla, `GitFallo(error[: …])`.
+    `entrada`: lo que va por stdin (p. ej. oids para `cat-file --batch-check`); sin ella, stdin
+    es /dev/null."""
+    stdin = asyncio.subprocess.DEVNULL if entrada is None else asyncio.subprocess.PIPE
+    proc = await asyncio.create_subprocess_exec("git", *BLINDAJE, *args, env=env, stdin=stdin,
                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    salida, errores = await proc.communicate()
+    salida, errores = await proc.communicate(entrada)
     if proc.returncode != 0:
         if not mostrar_error:
             raise GitFallo(error, salida)

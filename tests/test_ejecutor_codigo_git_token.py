@@ -88,3 +88,17 @@ def test_error_sin_stderr_cuando_la_salida_no_es_confiable(tmp_path):
         asyncio.run(G.correr_git(["-C", str(tmp_path), "rev-parse", "--verify", "DATO-DEL-CLON"],
                                  env=G.entorno_base(tmp_path), error="traer_del_clon_fallo", mostrar_error=False))
     assert str(e.value) == "traer_del_clon_fallo" and "DATO-DEL-CLON" not in str(e.value)
+
+
+def test_correr_git_con_entrada_la_pasa_por_stdin_y_sin_entrada_stdin_es_devnull(tmp_path):
+    """`cat-file --batch-check` lee los oids por stdin (ruling 4b, Tarea 9)."""
+    subprocess.run(["git", "init", "-q", "--bare", str(tmp_path / "r.git")], check=True)
+    oid = subprocess.run(["git", "-C", str(tmp_path / "r.git"), "hash-object", "-w", "--stdin"], input=b"hola\n",
+                         capture_output=True, check=True).stdout.decode().strip()
+    env = G.entorno_base(tmp_path)
+    salida = asyncio.run(G.correr_git(["-C", str(tmp_path / "r.git"), "cat-file", "--batch-check"], env=env,
+                                      error="x", entrada=f"{oid}\n".encode()))
+    assert salida.decode().split() == [oid, "blob", "5"]
+    vacia = asyncio.run(G.correr_git(["-C", str(tmp_path / "r.git"), "cat-file", "--batch-check"], env=env,
+                                     error="x"))
+    assert vacia == b""

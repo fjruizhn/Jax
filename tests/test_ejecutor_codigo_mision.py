@@ -258,6 +258,20 @@ def test_real_camino_feliz_empuja_la_rama_y_abre_el_pr(tmp_path, github):
     assert cuerpo.startswith("informe C5") and cuerpo.endswith(PIE)
 
 
+def test_real_blob_grande_de_un_commit_intermedio_luego_borrado_se_rechaza(tmp_path, github):
+    """Ruling 4b: el diff neto no lo muestra, pero el empuje lo llevaría a GitHub en el historial."""
+    c = _preparar(tmp_path)
+    _commit(c.ruta, "grande.bin", b"0" * 5000, "grande")
+    _git("rm", "-q", "grande.bin", cwd=c.ruta)
+    _git("commit", "-q", "-m", "lo borro", cwd=c.ruta)
+    _commit(c.ruta, "a", b"2", "otro")
+    pedidos: list = []
+    r = _entregar_real(c, pedidos, tope_bytes=1000)
+    assert r["estado_entrega"] == "rechazada_por_contrato", r
+    assert r["violaciones"] == [{"regla": "tamano", "ruta": "grande.bin", "detalle": "5000 > 1000 bytes"}]
+    assert _nada_empujado(github, pedidos)
+
+
 def test_real_rutas_no_ascii_y_con_espacios_se_entregan(tmp_path, github):
     """Antes del ruling, `año.py` salía citado por git y el parser reventaba con IndexError."""
     c = _preparar(tmp_path)
