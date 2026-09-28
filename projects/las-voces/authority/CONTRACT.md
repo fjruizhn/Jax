@@ -1,0 +1,79 @@
+# Ariadna authority contract — LV-003
+
+Ariadna (`ariadna-project-manager`) remains proposed and not active. This
+contract grants no runtime projection, capability, human authority, merge,
+deploy, or production-mutation power. The deterministic evaluator returns only
+`ALLOW`, `DENY`, or `HUMAN_REQUIRED`; no LLM decides authorization. Merge,
+deploy, production mutation, capability grant, and runtime execution are always
+`DENY`, including if a human could separately authorize the real-world action.
+
+## DONE evidence and trust boundary
+
+`DONE` needs a task-bound `JAX_TEST_EVIDENCE_MANIFEST`, a `commit:<sha>` or
+PR record resolving to the exact same SHA, and one task-bound acceptance record
+for that exact SHA. The test manifest follows the existing policy CI evidence
+shape: schema/version, task, GitHub Actions provider, repository, commit,
+workflow/run/job identity, CI environment, test list/counts, and raw artifact
+hash. The acceptance record names task, human acceptance actor, human authority
+source/record, commit, explicit criteria/results, evidence refs, and decision.
+
+Hashes bind artifacts but do not prove who ran CI or approved acceptance. The
+local evaluator therefore requires controlled CI and human-authority verifiers
+configured only when the privileged integration constructs an
+`AuthorityEngine`. They are not request fields and a request cannot select,
+replace, or inject either verifier. A local JUnit file, JSON
+manifest, filename, git message, commit author, actor string, or self-computed
+hash is never sufficient. If that independent service is unavailable, the
+result is `HUMAN_REQUIRED`; a rejected/malformed/missing record is `DENY`.
+This is the explicit offline trust boundary, not invented cryptographic trust.
+
+For one authorization, every direct local evidence record and the complete
+supported transitive closure (currently a PR record's
+`execution_manifest`) is opened exactly once into an immutable in-memory
+snapshot. Structural validation and controlled CI/human verification consume
+only those snapshots; they never reopen an evidence path. The normalized
+evidence digest includes each snapshot's repository-relative reference and
+byte digest, including a transitively referenced PR execution manifest. Thus
+the intent/commit binding is for the exact bytes evaluated, rather than just
+the names of mutable files.
+
+The implementation commit must resolve and be an ancestor of the repository
+context under evaluation. Test manifest, commit/PR evidence, and acceptance
+must name precisely one identical SHA. Commit-message wording is informational
+only. A PR record names its provider, repository, numeric id, exact head SHA,
+and a controlled execution-manifest reference. Offline PR numbers cannot
+independently prove a head; without that bound controlled record completion is
+not allowed.
+
+`BLOCKED` requires a task-bound, open blocker with a non-empty blocker fact.
+All other allowed status transitions still validate canonical task identity and
+lifecycle. Unknown actions outside the deterministic scope are
+`HUMAN_REQUIRED`, never executed automatically.
+
+## Recoverable state/audit protocol
+
+`transition()` obtains an exclusive lock and fails closed if prior journal
+intents are unfinished. It creates its audit fields internally; callers cannot
+supply duplicate event fields. For a transition id it durably appends and
+fsyncs `TRANSITION_INTENT`, performs a byte-for-byte compare-and-swap guarded
+atomic state write plus directory fsync, then durably appends and fsyncs
+`TRANSITION_COMMITTED`. Both records bind transition id, task, from/to status,
+project hash before, actor, and decision. Its `evidence_binding_hash` is a
+digest of the normalized, byte-digested evidence snapshot that produced
+authorization (test-manifest, acceptance-record, PR if present, and commit
+bindings), never merely evidence path names. The committed event repeats that
+exact binding and its component digests; commit also binds the resulting
+project hash. An intent without a matching bound commit is
+explicitly `interrupted` and requires human reconciliation. It is never
+silently repaired or discarded.
+
+Per-file atomic replacement is not represented as multi-file atomicity. The
+journal makes every persistence-boundary failure detectable. The activity log
+is append-only; past events are neither rewritten nor caller-authored.
+
+## Handoffs
+
+Handoffs use the existing `sync/message-envelope.schema.json`, not a third
+protocol. `authority_context.handoff` must provide `owner`, `branch_worktree`,
+`scope`, `acceptance_criteria`, `commit_pr`, `test_evidence`, `blockers`, and
+`next_action`, alongside the MessageEnvelope fields.
