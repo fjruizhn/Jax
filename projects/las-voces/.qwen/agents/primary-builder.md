@@ -4,7 +4,7 @@
 Project source of truth: `projects/las-voces/`.
 
 Human Authority is Fernando. Task ownership follows `project.json`; do not take
-an unassigned task. Ariadna is PROPOSED / NOT ACTIVE. Qwen is the PRIMARY
+an unassigned task. Ariadna is ACTIVE_GOVERNED as a hosted PM runtime; it has no human authority. Qwen is the PRIMARY
 BUILDER — LAS VOCES and works only in a worktree/sandbox.
 
 No merge, deployment, production mutation, capability grant, or frozen-contract

@@ -15,7 +15,7 @@ LAS VOCES es el canal humano de JAX: voz natural, gobernada, soberana y ubicua. 
 
 ## Operating model
 - Fernando: Human Authority / Product Owner.
-- Ariadna (propuesta): PM Agent; coordina pero no hace merge/deploy.
+- Ariadna (ACTIVE_GOVERNED): PM runtime gobernado; coordina pero no hace merge/deploy ni tiene autoridad humana.
 - Qwen: primary builder en worktree aislado.
 - Hyde/Claude: integrador / segundo carril.
 - Thot/Codex: revisión adversarial, diagnóstico y gates.

@@ -5,56 +5,56 @@
   "projections": [
     {
       "canonical_source": "projects/las-voces",
-      "generated_hash": "c5f47deb622b49804a584971843e5679bb0051d455daa8d980019c118fa6f25b",
+      "generated_hash": "2626cc056820237c3d5fb74a51933d5309a731469d083da4603b59259a1ae7d8",
       "generation_timestamp": "content-addressed",
       "generator_template_version": "1.0",
-      "source_commit": "0011d4d1012d728f77cf7d93b8c2a8e2f9150d3a",
-      "source_hash": "418d1f0a4b461b64184dd615b8f035b816b8cbf76742795472630f756d5d4040",
+      "source_commit": "36ce608425aab759200d2c277df43c00c1958744",
+      "source_hash": "40b60e8e3317dc25ea734c0f26950bec68b8124d1f76656ab3153b5cfed628ea",
       "target_harness": "qwen-code",
       "target_path": ".qwen/agents/primary-builder.md"
     },
     {
       "canonical_source": "projects/las-voces",
-      "generated_hash": "4f0ab2b0881ba1c4d0c2157abe67e60714e082f8bd64f68250182e100d160eb1",
+      "generated_hash": "a793f263e1ec7ba5d9bd4cb6024db3b4ebd9fa5bbbfa30ad5cde4056894e610f",
       "generation_timestamp": "content-addressed",
       "generator_template_version": "1.0",
-      "source_commit": "0011d4d1012d728f77cf7d93b8c2a8e2f9150d3a",
-      "source_hash": "418d1f0a4b461b64184dd615b8f035b816b8cbf76742795472630f756d5d4040",
+      "source_commit": "36ce608425aab759200d2c277df43c00c1958744",
+      "source_hash": "40b60e8e3317dc25ea734c0f26950bec68b8124d1f76656ab3153b5cfed628ea",
       "target_harness": "qwen-code",
       "target_path": ".qwen/skills/las-voces-governance/SKILL.md"
     },
     {
       "canonical_source": "projects/las-voces",
-      "generated_hash": "438d2e5e6019331ea98a2f9a3b8b6921ccc4f7af6a63fd5f672e215ba32119ca",
+      "generated_hash": "b4f9d92d583a9c136b81b5ede1505384ae3caa157b46fbbca474473c980694f4",
       "generation_timestamp": "content-addressed",
       "generator_template_version": "1.0",
-      "source_commit": "0011d4d1012d728f77cf7d93b8c2a8e2f9150d3a",
-      "source_hash": "418d1f0a4b461b64184dd615b8f035b816b8cbf76742795472630f756d5d4040",
+      "source_commit": "36ce608425aab759200d2c277df43c00c1958744",
+      "source_hash": "40b60e8e3317dc25ea734c0f26950bec68b8124d1f76656ab3153b5cfed628ea",
       "target_harness": "codex",
       "target_path": "AGENTS.md"
     },
     {
       "canonical_source": "projects/las-voces",
-      "generated_hash": "2a923b55b01fe0ca8ca683c619fbd1337eea68ec39e4f233bcdf9864de626f6f",
+      "generated_hash": "e73b612f8b5636a11d3fc754327f062be7f53f342e45a5f24407638c83ede987",
       "generation_timestamp": "content-addressed",
       "generator_template_version": "1.0",
-      "source_commit": "0011d4d1012d728f77cf7d93b8c2a8e2f9150d3a",
-      "source_hash": "418d1f0a4b461b64184dd615b8f035b816b8cbf76742795472630f756d5d4040",
+      "source_commit": "36ce608425aab759200d2c277df43c00c1958744",
+      "source_hash": "40b60e8e3317dc25ea734c0f26950bec68b8124d1f76656ab3153b5cfed628ea",
       "target_harness": "claude-code",
       "target_path": "CLAUDE.md"
     },
     {
       "canonical_source": "projects/las-voces",
-      "generated_hash": "681c08a15933577b0ad8e26b8a48df7d85f927d142595c288e79a5f97e65c35a",
+      "generated_hash": "89bd86adcb7aba5b0021eb9fbd0330274d01d25988872996a2fc0d287552b65d",
       "generation_timestamp": "content-addressed",
       "generator_template_version": "1.0",
-      "source_commit": "0011d4d1012d728f77cf7d93b8c2a8e2f9150d3a",
-      "source_hash": "418d1f0a4b461b64184dd615b8f035b816b8cbf76742795472630f756d5d4040",
+      "source_commit": "36ce608425aab759200d2c277df43c00c1958744",
+      "source_hash": "40b60e8e3317dc25ea734c0f26950bec68b8124d1f76656ab3153b5cfed628ea",
       "target_harness": "qwen-code",
       "target_path": "QWEN.md"
     }
   ],
   "schema_version": "1.0",
-  "source_commit": "0011d4d1012d728f77cf7d93b8c2a8e2f9150d3a",
-  "source_hash": "418d1f0a4b461b64184dd615b8f035b816b8cbf76742795472630f756d5d4040"
+  "source_commit": "36ce608425aab759200d2c277df43c00c1958744",
+  "source_hash": "40b60e8e3317dc25ea734c0f26950bec68b8124d1f76656ab3153b5cfed628ea"
 }

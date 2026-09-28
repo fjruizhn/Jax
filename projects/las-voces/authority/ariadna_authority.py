@@ -1,4 +1,4 @@
-"""Deterministic, fail-closed authority contract for proposed Ariadna.
+"""Deterministic, fail-closed authority contract for governed Ariadna.
 
 This module has no runtime runner or reverse-sync operation. The only writer
 uses a recoverable journal protocol; it does not pretend independent files are
@@ -304,6 +304,10 @@ class AuthorityEngine:
     def interrupted_transitions(self) -> list[dict[str, Any]]:
         return interrupted_transitions(self.root / "projects/las-voces/activity.ndjson")
 
+    def activation_approved(self) -> bool:
+        """ACTIVE_GOVERNED needs the append-only human activation record."""
+        return activation_approved(self.root)
+
     def transition(self, *, sender_agent: str, task_id: str, target_status: str, evidence_refs: list[str], expected_project_hash: str | None = None, failure_hook: Callable[[str], None] | None = None) -> Decision:
         return _transition(self, sender_agent=sender_agent, task_id=task_id, target_status=target_status, evidence_refs=evidence_refs, expected_project_hash=expected_project_hash, failure_hook=failure_hook)
 
@@ -392,6 +396,29 @@ def evaluate(root: Path, **request: Any) -> Decision:
 def transition(root: Path, *, sender_agent: str, task_id: str, target_status: str, evidence_refs: list[str], expected_project_hash: str | None = None, failure_hook: Callable[[str], None] | None = None) -> Decision:
     """Unconfigured convenience entrypoint; no request-controlled verifier."""
     return AuthorityEngine(root).transition(sender_agent=sender_agent, task_id=task_id, target_status=target_status, evidence_refs=evidence_refs, expected_project_hash=expected_project_hash, failure_hook=failure_hook)
+
+
+def activation_approved(root: Path) -> bool:
+    """Fail closed unless one well-formed Human Authority activation exists."""
+    try:
+        project = _load(root / "projects/las-voces/project.json")
+        agent = _load(root / "projects/las-voces/agents/ariadna.json")
+        entries = [item for item in project.get("agents", []) if item.get("name") == "Ariadna"]
+        if len(entries) != 1 or entries[0].get("lifecycle_status") != "ACTIVE_GOVERNED": return False
+        if agent.get("lifecycle_status") != "ACTIVE_GOVERNED": return False
+        events = []
+        for line in (root / "projects/las-voces/activity.ndjson").read_text(encoding="utf-8").splitlines():
+            event = json.loads(line)
+            if not isinstance(event, dict) or not isinstance(event.get("event_id"), str) or not event["event_id"]: return False
+            events.append(event)
+        if len({event["event_id"] for event in events}) != len(events): return False
+        approvals = [event for event in events if event.get("event_type") == "HUMAN_AUTHORITY_ARIADNA_ACTIVATION_APPROVED"]
+        if len(approvals) != 1: return False
+        approval = approvals[0]
+        required_refs = {"authority/CONTRACT.md", "authority/ariadna_authority.py", "authority/ariadna_runtime.py", "project.json", "git:cd0905dbe7aca9f146a255f0eca566aecaea6215", "git:36ce608425aab759200d2c277df43c00c1958744"}
+        return approval.get("event_id") == "lv-004-002" and approval.get("status") == "RECORDED" and approval.get("project_id") == PROJECT_ID and approval.get("actor") == "Fernando / Human Authority" and approval.get("decision") == "ACTIVATE ARIADNA AS GOVERNED AUTONOMOUS PROJECT MANAGER" and approval.get("target_lifecycle") == "ACTIVE_GOVERNED" and approval.get("scope") == "LAS VOCES PM runtime" and required_refs <= set(approval.get("evidence_refs", []))
+    except (AuthorityError, OSError, json.JSONDecodeError, TypeError):
+        return False
 
 
 def validate_handoff(root: Path, envelope: dict[str, Any]) -> None:

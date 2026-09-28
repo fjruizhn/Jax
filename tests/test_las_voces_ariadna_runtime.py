@@ -72,6 +72,6 @@ def test_done_remains_governed_and_expected_hash_reaches_lv003(root):
     host = runtime.AriadnaRuntime(root, engine(root)); host.start()
     assert host.run_once(proposal(root, "merge")) == "NOOP_DENY"
     assert host.run_once(proposal(root, "transition_status", target_status="DONE")) in {"NOOP_DENY", "NOOP_HUMAN_REQUIRED"}
-    assert "proposed and not active" in json.loads((root / "projects/las-voces/agents/ariadna.json").read_text())["authority"].lower()
+    assert "no human authority" in json.loads((root / "projects/las-voces/agents/ariadna.json").read_text())["authority"].lower()
     # Direct LV-003 caller can also bind an observed hash without allowing stale mutation.
     assert authority.transition(root, sender_agent=authority.ARIADNA_ID, task_id="LV-004", target_status="BLOCKED", evidence_refs=[], expected_project_hash="0" * 64).verdict is authority.Verdict.DENY
