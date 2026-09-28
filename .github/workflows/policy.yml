@@ -1552,10 +1552,11 @@ jobs:
         # 2 que pasan antes son declarados y validados por mutación.
         run: |
           python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py -q 2>&1 | tee /tmp/gov
-          # F2-A adds 23 structural-contract adversarial tests.  They belong
-          # here because policy/governance owns the pure output contract.
-          grep -qE "^113 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 113 tests CORRIDOS."; exit 1; }
+          # 113 -> 116 el 2026-09-28 (F2-A remediation): immutable sealing,
+          # candidate/sealed boundaries, current-receipt temporality, and
+          # attribution binding add three net governance-contract regressions.
+          grep -qE "^116 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 116 tests CORRIDOS."; exit 1; }
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en
