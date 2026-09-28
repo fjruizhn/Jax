@@ -47,6 +47,39 @@ the key is never serialized or provided by a resolver. F2-B supplies only the
 abstraction and ephemeral test keys. Production key provisioning remains a
 future composition-root concern and no production receipt path is enabled.
 
+## F2-B trust-boundary amendment
+
+The reviewed JAX core process is the trusted computing base (TCB): its
+repository-reviewed registry, dispatcher, authenticator, and approved
+composition configuration are trusted. Model/client/tool input, resolver
+observation payloads, serialized receipts, memory, user assertions, and
+external responses are untrusted data. Supported/public APIs expose no
+registry mutation or raw receipt key material; a digest identifies content,
+the domain-separated receipt HMAC proves server issuance, and registry
+verification proves current accreditation.
+
+Arbitrary Python execution already obtained inside this same interpreter is
+outside this object-level boundary: it can monkey-patch code, inspect process
+memory, or use `object.__setattr__`. If JAX later permits untrusted or
+third-party executable Python in the core process, authority minting and
+receipt authentication must move behind process/IPC isolation or an equivalent
+external trust service. This is a mandatory architectural trigger, not a claim
+that Python object conventions isolate malicious in-process code.
+
+Receipt MACs use the fixed, versioned domain
+`AXIOMA:F2B:RESOLUTION_RECEIPT:v1` and authenticate the key identifier as part
+of the canonical receipt body. Unknown key identifiers fail verification.
+Future trusted composition must obtain key material from an approved source
+(for example a systemd credential, permissioned secret file, or OS key
+service); F2-B neither provisions nor activates a production key.
+
+The B9 adapter accepts only a real typed `jax.memory.b9.ResolutionResult`
+through the server B9 boundary, alongside typed scope/provenance evidence.
+Generic maps, envelopes, lookalikes, historical results, and memory-only
+values cannot be upgraded to current truth. `ALL_SOURCES_AGREE` validates each
+named accredited source for scope, status, and freshness before comparing
+results; the aggregate receipt never outlives its earliest supporting source.
+
 The currently supported conflict policies are typed registry policy:
 `SINGLE_SOURCE_REQUIRED`, `ALL_SOURCES_AGREE`, and
 `PREFERRED_SOURCE_WITH_EXPLICIT_FALLBACK`. Current adapters use the strict

@@ -2,10 +2,12 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
+import hashlib, hmac, json
 import pytest
 from policy.governance.response import GovernanceContractError, ResponseScope
 from policy.governance.resolution import *
 import policy.governance.resolution as mod
+from jax.memory.b9 import MemoryEnvelope, ResolutionResult, ResolutionState
 
 NOW=datetime(2026,9,28,12,tzinfo=timezone.utc)
 KEY=b"f2-b-test-secret-material-longer-than-thirty-two-bytes"
@@ -39,13 +41,19 @@ def test_f2ba02_b9_evidence_is_explicit_preserved_and_not_freshened():
     b=binding(predicate="B9_DESIGNATED_CURRENT_SOURCE",designated_source_identity="B8/jaxctl",designated_source_identities=("B8/jaxctl",),resolver_implementation_identity="jax.memory.b9_resolvers:DesignatedSourceResolver",resolver_version="existing-v1",source_configuration_digest=None)
     e=RegistryEntry(b,TrustedAdapterRegistration(AdapterKind.B9_DESIGNATED_CURRENT_SOURCE,b.resolver_implementation_identity,b.resolver_version,b.designated_source_identity,None,{}),("reference_type","reference_value"));r=registry(e)
     old=NOW-timedelta(seconds=20);args={"reference_type":"health","reference_value":"hall"}
-    good=server_input((("B8/jaxctl",ResolutionObservation(ResolutionStatus.RESOLVED,old,"b9:immutable-upstream",{"value":"x"})),))
-    rec=r.resolve(b.predicate,args,scope(),validation_time=NOW,server_input=good)
+    upstream=ResolutionResult(ResolutionState.RESOLVED_CURRENT,"B8/jaxctl",old.timestamp(),{"value":"x"})
+    good=mod._b9_evidence_from_server(upstream,scope(),"b9:immutable-upstream")
+    rec=r.resolve(b.predicate,args,scope(),validation_time=NOW,b9_evidence=good)
     assert rec.status is ResolutionStatus.RESOLVED and rec.observed_at==old
-    assert r.resolve(b.predicate,args,scope(),validation_time=NOW,server_input=server_input((("wrong",obs()),))).status is ResolutionStatus.SOURCE_MISMATCH
+    wrong=mod._b9_evidence_from_server(ResolutionResult(ResolutionState.RESOLVED_CURRENT,"wrong",old.timestamp(),{}),scope(),"b9:wrong")
+    assert r.resolve(b.predicate,args,scope(),validation_time=NOW,b9_evidence=wrong).status is ResolutionStatus.SOURCE_MISMATCH
     assert r.resolve(b.predicate,args,scope(),validation_time=NOW).status is ResolutionStatus.UNAVAILABLE
-    assert r.resolve(b.predicate,args,scope(),validation_time=NOW,server_input=server_input((("B8/jaxctl",obs(ResolutionStatus.UNAVAILABLE,old,{})),))).status is ResolutionStatus.UNAVAILABLE
-    assert r.resolve(b.predicate,args,scope(),validation_time=NOW,server_input=server_input((("B8/jaxctl",obs(at=NOW-timedelta(seconds=61))),))).status is ResolutionStatus.STALE
+    unavailable=mod._b9_evidence_from_server(ResolutionResult(ResolutionState.SOURCE_UNAVAILABLE,"B8/jaxctl",old.timestamp(),{}),scope(),"b9:unavailable")
+    assert r.resolve(b.predicate,args,scope(),validation_time=NOW,b9_evidence=unavailable).status is ResolutionStatus.UNAVAILABLE
+    stale=mod._b9_evidence_from_server(ResolutionResult(ResolutionState.RESOLVED_CURRENT,"B8/jaxctl",(NOW-timedelta(seconds=61)).timestamp(),{}),scope(),"b9:stale")
+    assert r.resolve(b.predicate,args,scope(),validation_time=NOW,b9_evidence=stale).status is ResolutionStatus.STALE
+    assert r.resolve(b.predicate,args,scope(),validation_time=NOW,server_input=server_input((("B8/jaxctl",obs()),))).status is ResolutionStatus.UNAVAILABLE
+    with pytest.raises(GovernanceContractError):mod._b9_evidence_from_server({"state":"RESOLVED_CURRENT"},scope(),"fake")
 
 def test_f2ba03_receipt_is_authenticated_and_replay_checked():
     b=binding();r=registry();rec=r.resolve("CAPABILITY_AVAILABLE",ARGS,scope(),validation_time=NOW,server_input=inp(b))
@@ -89,12 +97,26 @@ def test_material_source_change_requires_new_snapshot():assert registry().snapsh
 def test_all_sources_agree_unavailable_member_is_noncurrent():
     a,c=rules();b=PredicateAuthorityBinding("CAPABILITY_AVAILABLE","v1","a","owner","production",a,c,60,ConflictPolicy.ALL_SOURCES_AGREE,"i","1",None,"b",designated_source_identities=("a","b"));r=registry(RegistryEntry(b,TrustedAdapterRegistration(AdapterKind.CAPABILITY_AVAILABLE,"i","1","a",None,{}),("name","mode")))
     assert r.resolve("CAPABILITY_AVAILABLE",ARGS,scope(),validation_time=NOW,server_input=server_input((("a",obs(result={"x":1})),("b",obs(ResolutionStatus.UNAVAILABLE,result={}))))).status is ResolutionStatus.UNAVAILABLE
+def test_all_sources_agree_stale_member_is_noncurrent_and_expiry_is_earliest():
+    a,c=rules();b=PredicateAuthorityBinding("CAPABILITY_AVAILABLE","v1","a","owner","production",a,c,60,ConflictPolicy.ALL_SOURCES_AGREE,"i","1",None,"b",designated_source_identities=("a","b"));r=registry(RegistryEntry(b,TrustedAdapterRegistration(AdapterKind.CAPABILITY_AVAILABLE,"i","1","a",None,{}),("name","mode")))
+    stale=obs(at=NOW-timedelta(seconds=61),result={"x":1})
+    assert r.resolve("CAPABILITY_AVAILABLE",ARGS,scope(),validation_time=NOW,server_input=server_input((("a",obs(result={"x":1})),("b",stale)))).status is ResolutionStatus.STALE
+    early=obs(result={"x":1});late=ResolutionObservation(ResolutionStatus.RESOLVED,NOW,"b",{"x":1},NOW+timedelta(seconds=10))
+    rec=r.resolve("CAPABILITY_AVAILABLE",ARGS,scope(),validation_time=NOW,server_input=server_input((("a",early),("b",late))))
+    assert rec.status is ResolutionStatus.RESOLVED and rec.not_after<=NOW+timedelta(seconds=10)
 def test_unexpected_source_is_rejected():
     b=binding();assert registry().resolve("CAPABILITY_AVAILABLE",ARGS,scope(),validation_time=NOW,server_input=server_input((("other",obs()),))).status is ResolutionStatus.SOURCE_MISMATCH
 def test_receipt_tag_tampering_is_rejected():
     b=binding();r=registry();x=r.resolve("CAPABILITY_AVAILABLE",ARGS,scope(),validation_time=NOW,server_input=inp(b));f=object.__new__(GovernedResolutionReceipt)
     for n in x.__annotations__:object.__setattr__(f,n,getattr(x,n))
     object.__setattr__(f,"authentication_tag","0"*64);assert not r.verify_receipt(f,scope(),validation_time=NOW)
+def test_receipt_domain_and_key_id_are_authenticated():
+    auth=ReceiptAuthenticator.for_testing(KEY);body={"x":"y"}
+    assert auth.sign(body)==hmac.new(KEY,mod._RECEIPT_DOMAIN+json.dumps(body,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode(),hashlib.sha256).hexdigest()
+    b=binding();r=registry();rec=r.resolve("CAPABILITY_AVAILABLE",ARGS,scope(),validation_time=NOW,server_input=inp(b));f=object.__new__(GovernedResolutionReceipt)
+    for n in rec.__annotations__:object.__setattr__(f,n,getattr(rec,n))
+    object.__setattr__(f,"issuer_key_id","unknown-key")
+    assert not r.verify_receipt(f,scope(),validation_time=NOW)
 def test_receipt_rejects_config_and_resolver_change():
     b=binding();x=registry().resolve("CAPABILITY_AVAILABLE",ARGS,scope(),validation_time=NOW,server_input=inp(b))
     assert not registry(entry(source_configuration_digest="sha256:new")).verify_receipt(x,scope(),validation_time=NOW)

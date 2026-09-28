@@ -7,10 +7,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-import hashlib, hmac, json, secrets
+import hashlib, hmac, json, secrets, math
 from types import MappingProxyType
 from typing import Any, Mapping
 from .response import ExistenceState, GovernanceContractError, ReferenceRef, ReferenceType, ResponseScope, TemporalClass, _freeze, _plain, _text
+from jax.memory.b9 import ResolutionResult as B9ResolutionResult, ResolutionState as B9ResolutionState
+
+_RECEIPT_DOMAIN = b"AXIOMA:F2B:RESOLUTION_RECEIPT:v1\x00"
 
 class ResolutionStatus(str,Enum):
     RESOLVED="RESOLVED"; UNAVAILABLE="UNAVAILABLE"; STALE="STALE"; CONFLICT="CONFLICT"; WRONG_SCOPE="WRONG_SCOPE"; WRONG_ENVIRONMENT="WRONG_ENVIRONMENT"; SOURCE_MISMATCH="SOURCE_MISMATCH"; UNSUPPORTED="UNSUPPORTED"; UNACCREDITED="UNACCREDITED"; CONFIGURATION_MISMATCH="CONFIGURATION_MISMATCH"; VERSION_MISMATCH="VERSION_MISMATCH"; AUTHENTICATION_FAILED="AUTHENTICATION_FAILED"
@@ -107,7 +110,10 @@ class ReceiptAuthenticator:
         object.__setattr__(self,n,v)
     @classmethod
     def for_testing(cls,key:bytes|None=None):return cls(key or secrets.token_bytes(32))
-    def sign(self,b:Mapping[str,Any]):return hmac.new(self._key,_digest(b).encode(),hashlib.sha256).hexdigest()
+    def _authenticated_bytes(self,b:Mapping[str,Any])->bytes:
+        """Canonical, domain-separated bytes; this format is receipt-only."""
+        return _RECEIPT_DOMAIN+json.dumps(_plain(_freeze(b,"receipt body")),sort_keys=True,separators=(",",":"),ensure_ascii=True).encode("utf-8")
+    def sign(self,b:Mapping[str,Any]):return hmac.new(self._key,self._authenticated_bytes(b),hashlib.sha256).hexdigest()
     def verify(self,b:Mapping[str,Any],tag:str,key_id:str):return key_id==self.key_id and isinstance(tag,str) and hmac.compare_digest(self.sign(b),tag)
 
 _RECEIPT_TOKEN=object()
@@ -122,12 +128,13 @@ class GovernedResolutionReceipt:
         if v["not_after"]<v["observed_at"]:raise GovernanceContractError("not_after precedes observed_at")
         for n in ("predicate","arguments_digest","binding_version","registry_snapshot_digest","actual_source_identity","observation_scope_digest","provenance_ref","resolver_id","resolver_version","result_digest"):v[n]=_text(v[n],n)
         if v.get("source_configuration_digest") is not None:v["source_configuration_digest"]=_text(v["source_configuration_digest"],"source_configuration_digest")
-        body={k:(v[k].isoformat() if k in {"observed_at","not_after"} else _plain(v[k])) for k in ("predicate","arguments_digest","binding_version","registry_snapshot_digest","actual_source_identity","source_configuration_digest","observation_scope_digest","observed_at","not_after","status","provenance_ref","resolver_id","resolver_version","result_digest")}
-        v["issuer_key_id"]=auth.key_id;v["authentication_tag"]=auth.sign(body);v["receipt_id"]="receipt:"+_digest({**body,"issuer_key_id":v["issuer_key_id"],"authentication_tag":v["authentication_tag"]})[7:]
+        v["issuer_key_id"]=auth.key_id
+        body={k:(v[k].isoformat() if k in {"observed_at","not_after"} else _plain(v[k])) for k in ("predicate","arguments_digest","binding_version","registry_snapshot_digest","actual_source_identity","source_configuration_digest","observation_scope_digest","observed_at","not_after","status","provenance_ref","resolver_id","resolver_version","result_digest","issuer_key_id")}
+        v["authentication_tag"]=auth.sign(body);v["receipt_id"]="receipt:"+_digest({**body,"authentication_tag":v["authentication_tag"]})[7:]
         x=object.__new__(cls)
         for n,value in v.items():object.__setattr__(x,n,value)
         return x
-    def authenticated_body(self):return {k:(getattr(self,k).isoformat() if k in {"observed_at","not_after"} else _plain(getattr(self,k))) for k in ("predicate","arguments_digest","binding_version","registry_snapshot_digest","actual_source_identity","source_configuration_digest","observation_scope_digest","observed_at","not_after","status","provenance_ref","resolver_id","resolver_version","result_digest")}
+    def authenticated_body(self):return {k:(getattr(self,k).isoformat() if k in {"observed_at","not_after"} else _plain(getattr(self,k))) for k in ("predicate","arguments_digest","binding_version","registry_snapshot_digest","actual_source_identity","source_configuration_digest","observation_scope_digest","observed_at","not_after","status","provenance_ref","resolver_id","resolver_version","result_digest","issuer_key_id")}
     def is_temporally_fresh_at(self,n):n=_time(n,"validation_time");return self.status is ResolutionStatus.RESOLVED and self.observed_at<=n<=self.not_after
     def is_current_at(self,n):raise GovernanceContractError("use ResolverRegistry.verify_receipt")
 
@@ -152,6 +159,33 @@ class ServerAdapterInput:
             seen.add(source)
         x=object.__new__(cls);object.__setattr__(x,"observations",tuple(observations));return x
 
+
+@dataclass(frozen=True, init=False)
+class B9ResolutionEvidence:
+    """Narrow server boundary over an actual B9 ``ResolutionResult``.
+
+    It intentionally cannot be built from a dict, a MemoryEnvelope, or a
+    lookalike object. Scope/provenance are supplied by the trusted B9 adapter
+    composition, while source/time/value remain those returned by B9.
+    """
+    result: B9ResolutionResult
+    observation_scope: ResponseScope
+    provenance_ref: str
+    def __init__(self,*a,**kw):raise GovernanceContractError("B9 evidence requires server B9 pathway")
+    @classmethod
+    def _from_b9_result(cls,t,result,observation_scope,provenance_ref):
+        if t is not _B9_EVIDENCE_TOKEN or not isinstance(result,B9ResolutionResult) or not isinstance(observation_scope,ResponseScope):
+            raise GovernanceContractError("typed B9 ResolutionResult and scope required")
+        if not isinstance(result.observed_at,(int,float)) or isinstance(result.observed_at,bool) or not math.isfinite(result.observed_at):
+            raise GovernanceContractError("B9 observed_at must be numeric")
+        x=object.__new__(cls);object.__setattr__(x,"result",result);object.__setattr__(x,"observation_scope",observation_scope);object.__setattr__(x,"provenance_ref",_text(provenance_ref,"b9 provenance_ref"));return x
+
+
+_B9_EVIDENCE_TOKEN=object()
+def _b9_evidence_from_server(result, observation_scope, provenance_ref):
+    """Internal composition-only conversion; external serialized data is rejected."""
+    return B9ResolutionEvidence._from_b9_result(_B9_EVIDENCE_TOKEN,result,observation_scope,provenance_ref)
+
 class ResolverRegistry:
     __slots__=("_entries","_snapshot_projection","_snapshot_digest","_authenticator","_sealed")
     def __init__(self,*a,**kw):raise GovernanceContractError("registries require server-approved sealing")
@@ -172,7 +206,7 @@ class ResolverRegistry:
         if _digest(self._snapshot_projection)!=self._snapshot_digest:raise GovernanceContractError("registry snapshot integrity failure")
         return self._entries.get(p)
     def status_table(self):return tuple(MappingProxyType({"predicate":p,"enabled":e.binding.enabled,"source_owner":e.binding.source_owner_authority_ref,"freshness_sla_seconds":e.binding.freshness_sla_seconds,"human_decision_required":not e.binding.enabled}) for p,e in self._entries.items())
-    def resolve(self,predicate,args,scope,*,validation_time,server_input:ServerAdapterInput|None=None):
+    def resolve(self,predicate,args,scope,*,validation_time,server_input:ServerAdapterInput|None=None,b9_evidence:B9ResolutionEvidence|None=None):
         predicate=_text(predicate,"predicate");now=_time(validation_time,"validation_time")
         if not isinstance(args,Mapping) or not isinstance(scope,ResponseScope):raise GovernanceContractError("arguments and scope must be typed")
         e=self._entry(predicate)
@@ -182,23 +216,47 @@ class ResolverRegistry:
         if set(args)!=set(e.argument_keys):return self._failure(predicate,args,scope,now,ResolutionStatus.UNAVAILABLE,b,a)
         mismatch=b.tenant_project_scope_rule.matches(scope) or b.subject_audience_scope_rule.matches(scope)
         if mismatch:return self._failure(predicate,args,scope,now,mismatch,b,a)
-        status,o=self._dispatch(e,server_input,now)
+        status,o=self._dispatch(e,server_input,b9_evidence,scope,now)
         if status is ResolutionStatus.RESOLVED and (o.observed_at>now or now>o.observed_at+timedelta(seconds=b.freshness_sla_seconds) or(o.upstream_not_after and now>o.upstream_not_after)):status=ResolutionStatus.STALE
         not_after=min(o.upstream_not_after or o.observed_at+timedelta(seconds=b.freshness_sla_seconds),o.observed_at+timedelta(seconds=b.freshness_sla_seconds))
         return self._mint(predicate,args,scope,b,a,o,status,not_after)
-    def _dispatch(self,e,inp,now):
+    def _fresh_observation(self,o,b,now):
+        if o.status is not ResolutionStatus.RESOLVED:return o.status
+        if o.observed_at>now or now>o.observed_at+timedelta(seconds=b.freshness_sla_seconds) or (o.upstream_not_after and now>o.upstream_not_after):return ResolutionStatus.STALE
+        return ResolutionStatus.RESOLVED
+    def _dispatch(self,e,inp,b9_evidence,scope,now):
+        b=e.binding
+        if e.adapter.adapter_kind is AdapterKind.B9_DESIGNATED_CURRENT_SOURCE:
+            # B9 is never adapted from generic observations.  Its evidence has
+            # to be the real typed B9 result plus trusted scope provenance.
+            if b9_evidence is None:
+                return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,"server:b9-missing-evidence",{})
+            if not isinstance(b9_evidence,B9ResolutionEvidence) or b9_evidence.observation_scope.scope_digest!=scope.scope_digest:
+                return ResolutionStatus.WRONG_SCOPE,ResolutionObservation(ResolutionStatus.WRONG_SCOPE,now,"server:b9-scope",{})
+            result=b9_evidence.result
+            if result.state is not B9ResolutionState.RESOLVED_CURRENT:return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,b9_evidence.provenance_ref,{})
+            if result.source!=b.designated_source_identity:return ResolutionStatus.SOURCE_MISMATCH,ResolutionObservation(ResolutionStatus.SOURCE_MISMATCH,now,b9_evidence.provenance_ref,{})
+            observed=_time(datetime.fromtimestamp(result.observed_at,timezone.utc),"b9 observed_at")
+            value=result.value if isinstance(result.value,Mapping) else {}
+            o=ResolutionObservation(ResolutionStatus.RESOLVED,observed,b9_evidence.provenance_ref,value)
+            return self._fresh_observation(o,b,now),o
         if not isinstance(inp,ServerAdapterInput):return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,"server:missing-input",{})
-        b=e.binding;got=dict(inp.observations)
+        got=dict(inp.observations)
         if set(got)-set(b.designated_source_identities):return ResolutionStatus.SOURCE_MISMATCH,ResolutionObservation(ResolutionStatus.SOURCE_MISMATCH,now,"server:unexpected-source",{})
         if b.conflict_policy is ConflictPolicy.SINGLE_SOURCE_REQUIRED:
             if set(got)!={b.designated_source_identity}:return ResolutionStatus.SOURCE_MISMATCH,ResolutionObservation(ResolutionStatus.SOURCE_MISMATCH,now,"server:source-set",{})
-            o=got[b.designated_source_identity];return o.status,o
+            o=got[b.designated_source_identity];return self._fresh_observation(o,b,now),o
         if b.conflict_policy is ConflictPolicy.ALL_SOURCES_AGREE:
             if set(got)!=set(b.designated_source_identities):return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,"server:incomplete-source-set",{})
             values=list(got.values())
-            if any(o.status is not ResolutionStatus.RESOLVED for o in values):return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,"server:source-unavailable",{})
+            states=[self._fresh_observation(o,b,now) for o in values]
+            if any(x is ResolutionStatus.STALE for x in states):return ResolutionStatus.STALE,ResolutionObservation(ResolutionStatus.STALE,now,"server:source-stale",{})
+            if any(x is not ResolutionStatus.RESOLVED for x in states):return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,"server:source-unavailable",{})
             if len({_digest(o.result) for o in values})!=1:return ResolutionStatus.CONFLICT,ResolutionObservation(ResolutionStatus.CONFLICT,now,"server:source-conflict",{})
-            return ResolutionStatus.RESOLVED,values[0]
+            # Receipt lifetime is bounded by every independently valid source.
+            ends=[o.upstream_not_after or o.observed_at+timedelta(seconds=b.freshness_sla_seconds) for o in values]
+            selected=min(zip(ends,values),key=lambda pair:pair[0])[1]
+            return ResolutionStatus.RESOLVED,ResolutionObservation(ResolutionStatus.RESOLVED,selected.observed_at,selected.provenance_ref,selected.result,min(ends))
         return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,"server:fallback-not-implemented",{})
     def _failure(self,predicate,args,scope,now,status,b=None,a=None):return self._mint(predicate,args,scope,b,a,ResolutionObservation(status,now,"none",{}),status,now)
     def _mint(self,predicate,args,scope,b,a,o,status,not_after):
@@ -209,7 +267,7 @@ class ResolverRegistry:
         try:now=_time(validation_time,"validation_time");e=self._entry(r.predicate)
         except GovernanceContractError:return False
         if e is None or not e.binding.enabled or not self._authenticator.verify(r.authenticated_body(),r.authentication_tag,r.issuer_key_id):return False
-        b,a=e.binding,e.adapter;expected_id="receipt:"+_digest({**r.authenticated_body(),"issuer_key_id":r.issuer_key_id,"authentication_tag":r.authentication_tag})[7:]
+        b,a=e.binding,e.adapter;expected_id="receipt:"+_digest({**r.authenticated_body(),"authentication_tag":r.authentication_tag})[7:]
         if r.receipt_id!=expected_id or r.status is not ResolutionStatus.RESOLVED or r.registry_snapshot_digest!=self.snapshot_digest:return False
         if (r.binding_version,r.resolver_id,r.resolver_version,r.actual_source_identity,r.source_configuration_digest)!=(b.binding_version,a.resolver_id,a.resolver_version,a.source_identity,a.source_configuration_digest):return False
         return r.observation_scope_digest==expected_scope.scope_digest and r.is_temporally_fresh_at(now)
