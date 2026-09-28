@@ -381,7 +381,7 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
     vigia = await deps.abrir_vigia(ctx, turno.id_vigia, turno.texto_de_mision, turno.hosts)
     entrega, codigo, sesion_iniciada = None, None, False
     registro_cuadra, auditor_pauso, auditor_legible = False, False, True
-    resultado_entrega = None
+    resultado_entrega, clon = None, None
     try:
         limite = time.monotonic() + deps.espera_latido_s
         while not await deps.latido_fresco(ctx):
@@ -440,12 +440,6 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                 dice("afirmacion_descartada", estado=d.estado, codigo=d.motivo.codigo, dato=d.afirmacion.dato)
             if codigo is None and rc != 0:
                 codigo = "cerebro_fallo"
-            if es_codigo and codigo is None and not auditor_pauso:
-                # Después del cerebro Y de C5. Sin informe legible, la entrega misma no abre PR.
-                resultado_entrega = await deps.entregar_codigo(ctx, clon, entrega, auditor_legible)
-                dice("entrega_codigo", **resultado_entrega)
-                if resultado_entrega["estado_entrega"] not in ENTREGA_SIN_FALLO:
-                    codigo = resultado_entrega["estado_entrega"]
     finally:
         rc_vigia, salida_vigia, err_vigia = await vigia.cerrar()
         cerro = rc_vigia == 0 and "cerrada=true" in salida_vigia
@@ -490,6 +484,20 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
     # Un pausa o un auditor que pausó mandan sobre un fallo de latido o de cerebro: es lo que hay que leer.
     if puesta:
         codigo = "pausa_puesta"
+    if es_codigo:
+        # Ruling 3 (Tarea 9): la entrega va AL FINAL y SOLO si todo lo demás pasó -- vigía que latió
+        # y cerró, cerebro sin fallo, C3 (registro) que cuadra, cadena entera, C5 legible y sin
+        # pausa, C4 (pausa) libre y afirmaciones entregadas. Si algo falló, no se toca GitHub: queda
+        # `sin_entregar` con el código del turno como motivo.
+        if codigo is None and clon is not None:
+            resultado_entrega = await deps.entregar_codigo(ctx, clon, entrega, auditor_legible)
+            if resultado_entrega["estado_entrega"] not in ENTREGA_SIN_FALLO:
+                codigo = resultado_entrega["estado_entrega"]
+        else:
+            resultado_entrega = {"estado_entrega": "sin_entregar", "motivo": codigo or "codigo_sin_clon",
+                                 "pr_url": None, "violaciones": [], "notas": []}
+            codigo = codigo or "codigo_sin_clon"
+        dice("entrega_codigo", **resultado_entrega)
     verificacion = {"registro_cuadra": registro_cuadra, "cadena_ok": cadena, "pausa_puesta": puesta,
                     "auditor_pauso": auditor_pauso, "auditor_legible": auditor_legible}
     estado = "completado" if codigo is None else "fallido"

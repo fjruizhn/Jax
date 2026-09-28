@@ -607,14 +607,15 @@ def _entrego(f) -> bool:
     return any(isinstance(x, tuple) and x[0] == "entregar_codigo" for x in f.llamadas)
 
 
-def test_codigo_prepara_antes_del_cerebro_y_entrega_despues_del_auditor():
+def test_codigo_prepara_antes_del_cerebro_y_entrega_al_final():
+    """Ruling 3 (Tarea 9): la entrega va DESPUÉS del cierre del vigía, de la cadena y de la pausa."""
     f = FalsasCodigo()
     r, eventos = _correr(f, _turno_codigo())
     assert r["estado"] == "completado" and r["codigo"] is None
     assert r["entrega_codigo"] == f.entrega
     codigos = _codigos(eventos)
     assert codigos.index("vigia_late") < codigos.index("codigo_preparado") < codigos.index("cerebro_termino")
-    assert codigos.index("afirmacion_entregada") < codigos.index("entrega_codigo") < codigos.index("vigia_cerrado")
+    assert codigos.index("vigia_cerrado") < codigos.index("entrega_codigo") < codigos.index("turno_completado")
     (preparado,) = [e for e in eventos if e["evento"] == "codigo_preparado"]
     assert preparado["datos"] == {"rama": f"axioma/{MISION}", "base": "main",
                                   "dependencias": ["package-lock.json", "sin_lockfile:backend/package.json"]}
@@ -624,17 +625,7 @@ def test_codigo_prepara_antes_del_cerebro_y_entrega_despues_del_auditor():
     assert "NO empujes" in f.prompts[0] and "fjruizhn/jax-platform" in f.prompts[0]
 
 
-def test_codigo_con_el_auditor_ilegible_entrega_sin_informe_y_ese_es_el_codigo():
-    f = FalsasCodigo()
-    f.auditor_revienta = True
-    f.entrega = {"estado_entrega": "sin_informe_c5", "pr_url": None, "violaciones": [], "notas": []}
-    r, eventos = _correr(f, _turno_codigo())
-    assert ("entregar_codigo", "/m/repo", False, 0) in f.llamadas
-    assert (r["estado"], r["codigo"]) == ("fallido", "sin_informe_c5")
-    assert "entrega_codigo" in _codigos(eventos)
-
-
-@pytest.mark.parametrize("estado", ["rechazada_por_contrato", "fallo_entrega"])
+@pytest.mark.parametrize("estado", ["rechazada_por_contrato", "fallo_entrega", "sin_informe_c5"])
 def test_codigo_con_la_entrega_rechazada_o_fallida_es_el_codigo_del_turno(estado):
     f = FalsasCodigo()
     f.entrega = {"estado_entrega": estado, "pr_url": None,
@@ -651,27 +642,45 @@ def test_codigo_sin_cambios_no_es_un_fallo_de_la_entrega():
     assert (r["estado"], r["codigo"]) == ("completado", None)
 
 
-def test_codigo_con_el_auditor_en_pausa_no_entrega():
+def _pausa_puesta(f):
+    f.pausa_leida = {"puesta": True, "origen": "c4", "motivo": "freno", "paso": 1, "legible": True}
+
+
+def _sin_afirmaciones(f):
+    f.cerebro = (0, _crudo("[]"))
+
+
+@pytest.mark.parametrize("romper, codigo", [
+    (_pausa_puesta, "pausa_puesta"),                                                   # C4
+    (lambda f: setattr(f, "registro", []), "registro_no_cuadra"),                       # C3
+    (lambda f: setattr(f, "cadena", False), "cadena_rota"),
+    (lambda f: setattr(f, "vigia_cierre", (1, "arranco=true", "boom")), "vigia_no_cerro"),
+    (lambda f: setattr(f, "revision", Revision(True, "fuera_de_mision", 1, (), frozenset(), frozenset())),
+     "auditor_pauso"),
+    (lambda f: setattr(f, "auditor_revienta", True), "auditor_ilegible"),
+    (lambda f: setattr(f, "cerebro", (1, f.cerebro[1])), "cerebro_fallo"),
+    (lambda f: setattr(f, "latido", False), "vigia_no_latio"),
+    (_sin_afirmaciones, "sin_afirmaciones"),
+])
+def test_codigo_no_entrega_si_algo_mas_fallo_y_queda_sin_entregar_con_el_codigo_del_turno(romper, codigo):
+    """Ruling 3: la entrega SOLO si todo lo demás pasó. Si no, `estado_entrega = sin_entregar` y el
+    motivo es el código del turno."""
     f = FalsasCodigo()
-    f.revision = Revision(True, "fuera_de_mision", 1, (), frozenset(), frozenset())
+    romper(f)
     r, eventos = _correr(f, _turno_codigo())
     assert not _entrego(f)
-    assert "entrega_codigo" not in _codigos(eventos) and "entrega_codigo" not in r
-    assert r["codigo"] == "auditor_pauso"
+    assert (r["estado"], r["codigo"]) == ("fallido", codigo)
+    esperado = {"estado_entrega": "sin_entregar", "motivo": codigo, "pr_url": None, "violaciones": [], "notas": []}
+    assert r["entrega_codigo"] == esperado
+    (entregado,) = [e for e in eventos if e["evento"] == "entrega_codigo"]
+    assert entregado["datos"] == esperado
 
 
-def test_codigo_con_el_cerebro_fallido_no_entrega():
-    f = FalsasCodigo()
-    f.cerebro = (1, f.cerebro[1])
-    r, _ = _correr(f, _turno_codigo())
-    assert not _entrego(f) and r["codigo"] == "cerebro_fallo"
-
-
-def test_codigo_con_el_vigia_sin_latir_no_prepara_ni_entrega():
+def test_codigo_con_el_vigia_sin_latir_no_prepara():
     f = FalsasCodigo()
     f.latido = False
-    r, _ = _correr(f, _turno_codigo())
-    assert "preparar_codigo" not in f.llamadas and not _entrego(f) and r["codigo"] == "vigia_no_latio"
+    _correr(f, _turno_codigo())
+    assert "preparar_codigo" not in f.llamadas
 
 
 def test_servidor_no_prepara_ni_entrega_codigo_aunque_tenga_con_que():
