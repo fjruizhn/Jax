@@ -21,12 +21,18 @@ any existing response path governed.
 `PredicateAuthorityBinding` pins predicate/version, source identity and
 owner, environment, explicit scope rules, freshness SLA, conflict policy,
 resolver identity/version, and source configuration digest where meaningful.
-Registration of a callable is never accreditation.
+Registration of a callable is never accreditation.  The sealed registry stores
+only an immutable `TrustedAdapterRegistration` specification (`adapter_kind`,
+identity/version, designated source, and canonical configuration).  A
+server-owned dispatcher consumes explicit observed inputs; neither a callable,
+closure, nor resolver-returned strings can self-attest authority metadata.
 
 `ResolverRegistry` seals an immutable approved graph (binding, trusted adapter
 identity, argument contract, and configuration identity) before calculating
-its snapshot digest. A callable returns untrusted observation data only; it
-cannot select source, resolver identity, version, or configuration digest.
+its snapshot digest. The registry object itself is sealed: its graph,
+snapshot, and authenticator cannot be replaced in place. Observation data is
+untrusted and cannot select source, resolver identity, version, or
+configuration digest.
 `GovernedResolutionReceipt` is minted only by `ResolverRegistry`; it includes
 an absolute upstream-derived `observed_at` and `not_after`. Only
 `ResolverRegistry.verify_receipt(receipt, expected_scope, validation_time)`
@@ -34,6 +40,12 @@ may decide currentness. Reuse is exact-scope in F2-B, including request and
 trace identity, and fails after binding, registry, source configuration, or
 resolver changes. B7 evidence, B8 authority, and B9 memory remain references;
 none can mint current truth.
+
+Receipt content identity is not treated as issuer authority. Each receipt also
+carries an HMAC authentication tag from a server-owned `ReceiptAuthenticator`;
+the key is never serialized or provided by a resolver. F2-B supplies only the
+abstraction and ephemeral test keys. Production key provisioning remains a
+future composition-root concern and no production receipt path is enabled.
 
 The currently supported conflict policies are typed registry policy:
 `SINGLE_SOURCE_REQUIRED`, `ALL_SOURCES_AGREE`, and
@@ -47,20 +59,8 @@ F2-C/D will own presentation and transport-time revalidation.
 
 ## Required adversarial coverage map
 
-`tests/test_governed_resolution.py` maps requirements 1–30 as follows:
-
-| Requirements | Test coverage |
-| --- | --- |
-| 1, 15, 16 | `test_f2b_registered_resolver_without_binding_is_not_current`, `test_f2b_conflict_unknown_and_disabled_never_become_current` |
-| 2, 11–13 | `test_f2b_accreditation_mismatches_fail_closed` |
-| 3–7 | `test_f2b_complete_scope_rejects_environment_tenant_project_subject_audience_and_actor_substitution` |
-| 8–10 | `test_f2b_stale_expired_and_not_after_are_deterministic` |
-| 14 | `test_f2b_conflict_unknown_and_disabled_never_become_current` |
-| 17–18 | `test_f2b_receipt_is_server_minted_and_receipt_identity_changes_with_binding` |
-| 19–22 | `test_f2b_no_b7_b8_b9_reference_can_mint_current_receipt`, `test_f2b_reference_validation_preserves_historical_and_fails_closed` |
-| 23–24 | `test_f2b_reference_validation_preserves_historical_and_fails_closed` |
-| 25 | `test_f2b_25_capability_adapter_distinguishes_ops_catalog_and_conflict` |
-| 26 | `test_f2b_26_file_exists_adapter_mints_valid_receipt_with_mocked_source` |
-| 27 | `test_f2b_27_b9_adapter_preserves_designated_source_result_with_mock` |
-| 28–29 | `test_f2b_registry_digest_is_deterministic_and_import_has_no_runtime_side_effects`, `test_f2b_receipt_is_server_minted_and_receipt_identity_changes_with_binding` |
-| 30 | `test_f2b_registry_digest_is_deterministic_and_import_has_no_runtime_side_effects` |
+`tests/test_governed_resolution.py` includes final adversarial regressions for
+the sealed registry, explicit B9 upstream timing/source data, authenticated
+receipt tampering and exact-scope replay, and multi-source agreement. The
+previous adapter-specific integration examples were deliberately replaced by
+the trusted dispatcher contract; host wiring is not authorized in F2-B.
