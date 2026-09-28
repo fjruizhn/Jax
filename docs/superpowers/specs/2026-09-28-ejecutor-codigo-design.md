@@ -12,6 +12,7 @@ cuyas decisiones siguen vigentes salvo lo que este documento enmienda explícita
 | v1 | (este commit) | Diseño original, aprobado por secciones en chat. |
 | v1.1 | (este commit) | Correcciones medidas contra el código vivo antes de planificar. |
 | v1.2 | (este commit) | Espejo privado de `jaxsvc` + clon de trabajo de Qwen (§3.1, §3.3, §4.2). La auditoría de escalón 3 de las Tareas 5-6 rechazó la v1.1 con tres BLOCK nacidos del diseño: `jaxsvc` corría git (con el token), npm y pip **dentro del clon que Qwen puede reescribir**. Ruling ARQUITECTURA del controlador, 2026-09-28. |
+| v1.3 | (este commit) | Sandbox bwrap por lista blanca para toda instalación de dependencias y reglas de rechazo de fuentes (§3.1), riesgo residual del sandbox (§9). Dos re-revisiones de escalón 3: con la v1.2, pip ejecutaba código de terceros como `jaxsvc` (un `.pth` de rueda, `--no-binary` en requirements) y `npm ci --ignore-scripts` ejecutó el código de una dependencia git (verificado por el revisor con el node de producción). Rulings del controlador, 2026-09-28. |
 
 ## 1. Por qué
 
@@ -77,15 +78,38 @@ solo lo **atraviesa**: no lista ni crea nada ahí) y sin ACL por omisión (`setf
 - El espejo trae **solo** la rama por omisión (leída de la API, nunca asumida `main`/`master`);
   la rama de la misión en GitHub no se trae nunca (§3.3, lease).
 - Dependencias **solo en el turno 1**, desde los archivos de bloqueo del commit de la rama por
-  omisión (leídos del espejo, no del clon), en `deps/`, con un entorno que no hereda del proceso
-  más que `PATH` y `LANG` (HOME temporal; nada de `/etc/jax/.env`): `npm ci --ignore-scripts
-  --no-audit --no-fund` (raíz y `frontend/`), `composer install --no-interaction --no-scripts
-  --no-plugins`, `pip install --only-binary=:all: -r <archivo>` en un venv bajo `deps/` por
-  directorio (`requirements*.txt` de la raíz y de `backend/`). Lo que no se instala se declara:
-  `sin_lockfile:<ruta>` (un `package.json` sin su `package-lock.json`), `pip_sin_wheel:<archivo>`,
-  `npm_no_instalado:<ruta>`. En el clon, enlaces `.venv`/`node_modules`/`vendor` → `deps/`,
-  anotados en `.git/info/exclude` (para git un enlace no es un directorio: `node_modules/` en
-  `.gitignore` no lo tapa).
+  omisión (leídos del espejo, no del clon), en `deps/`. En el clon, enlaces
+  `.venv`/`node_modules`/`vendor` → `deps/`, anotados en `.git/info/exclude` (para git un enlace no
+  es un directorio: `node_modules/` en `.gitignore` no lo tapa).
+
+#### 3.1.1 Sandbox de instalación *(v1.3)*
+
+pip, npm y composer pueden ejecutar código de terceros, y `jaxsvc` lee `/etc/jax/.env`: filtrar
+el entorno no alcanza (el código lee archivos). Toda instalación —el `python3 -m venv`, pip, npm,
+composer— corre en `bwrap` por **lista blanca** (`jax/ejecutor/codigo/sandbox.py`):
+
+| | Qué |
+|---|---|
+| Espacios de nombres | `--unshare-all --share-net --die-with-parent --new-session`: todo nuevo salvo la red |
+| Entorno | `--clearenv`; solo `PATH`, `HOME=/tmp/h`, `LANG=C.UTF-8` |
+| Solo lectura | `/usr`; `/lib`, `/lib64`, `/bin`, `/sbin` (enlace como enlace, directorio real montado); `/etc/ssl`, `/etc/ca-certificates`, `/etc/resolv.conf`, `/etc/hosts`, `/etc/nsswitch.conf`, `/etc/passwd`, `/etc/group`; el prefijo de node (padre de `JAX_EJECUTOR_NODE_BIN`); las **copias** de los archivos de dependencias, hechas antes y fuera de `deps/` (npm/composer las ven montadas encima de `package.json`/lockfile: no pueden reescribirlos) |
+| Escribible | **solo** `<misión>/deps/`; `/tmp` es un tmpfs propio; `/proc` y `/dev` propios |
+| Nunca | `/etc/jax`, `/var/lib/jaxsvc`, `/srv`, `/home`, el directorio de misiones (ni el espejo ni el clon). Un origen dentro de esas rutas **o que las contenga** (`/etc`, `/`) se rechaza antes de lanzar nada |
+
+Los directorios dentro de `deps/` se crean componente a componente con `lstat` (una instalación
+anterior pudo dejar un enlace ahí): un enlace en el camino falla cerrado.
+
+#### 3.1.2 Reglas de fuentes *(v1.3)*: ninguna instalación ejecuta código de terceros
+
+`--ignore-scripts` no basta: npm prepara las dependencias git igual (verificado). Se revisa la
+forma de cada fuente ANTES de instalar; lo que no pasa **no se ejecuta** y se declara en
+`dependencias` (visible en el informe), y la misión sigue sin eso.
+
+| Gestor | Se instala solo si… | Comando | Si no, se declara |
+|---|---|---|---|
+| pip | el `requirements*.txt` (raíz y `backend/`) no tiene ninguna línea de opción salvo `-r <hermano>` (`--no-binary`, `--index-url`/`-i`, `--extra-index-url`, `-f`/`--find-links`, `-e`/`--editable`, `--trusted-host`, `-c`…) ni requisitos fuera del índice (URL, `pkg @ …`, ruta local); tampoco el que incluye a uno rechazado | `pip install --only-binary=:all: -r a -r b` — **una sola** invocación por venv | `pip_opcion_rechazada:<archivo>`; sin rueda: `pip_sin_wheel:<archivo>` |
+| npm | TODA entrada de `package-lock.json` (v2/v3 `packages`, v1 `dependencies` recursivo) tiene `resolved` bajo `https://registry.npmjs.org/` e `integrity`, no es `link`, y su versión no es `git+`/`github:`/`file:`/`http:`/URL | `npm ci --ignore-scripts --no-audit --no-fund` (raíz y `frontend/`) | `npm_fuente_rechazada:<lockfile>:<paquete>`; `sin_lockfile:<package.json>`; `npm_no_instalado:<ruta>` fuera de raíz/`frontend/` |
+| composer | `composer.json` no declara `repositories` que no sean packagist (vcs, path, git, artifact, package…) y cada paquete de `composer.lock` tiene `dist` zip de packagist/GitHub y, si lo tiene, `source` git de github.com | `composer install --no-interaction --no-scripts --no-plugins --prefer-dist` | `composer_fuente_rechazada:<archivo>:<paquete o repositories>` |
 - **Turno ≥ 2**: solo `fetch` del espejo desde GitHub. Ni reinstala, ni vuelve a aplicar ACL (la
   ACL por omisión del clon gobierna lo nuevo), ni ejecuta nada dentro del clon: su `.git` y sus
   binarios ya son de quien los puede reescribir.
@@ -265,6 +289,21 @@ Cada paso con su auditoría de escalón 3 antes del siguiente; cada contrato vis
   revisión del diff en la entrega, C5 y que integrar sea de Fernando.
 - **Calidad de Qwen en código:** en la Fase 0 no pasó U3/U5/U6. Aceptado por DC5: «si falla lo
   arreglamos». Cada misión deja su informe; los fallos se ven, no se esconden.
+- **Espejo y clon (v1.2):** el token, el diff de C1 y el empuje viven solo en el espejo privado de
+  `jaxsvc`; el clon de Qwen se clona desde él y sus commits vuelven con `upload-pack` corriendo
+  como la cuenta, más `fetch.fsckObjects` y `fsck` a una ref temporal (§3.1, §3.3). Riesgo que
+  queda: la superficie de `upload-pack` es grande (`man git`, SECURITY), pero corre sin privilegios
+  de `jaxsvc`.
+- **Sandbox de instalación (v1.3):** comparte la **red del host** (a propósito: hace falta para bajar
+  paquetes). Desde adentro se alcanza lo que alcanza `jaxsvc` por red — `127.0.0.1:11434` (Ollama,
+  sin autenticación), la LAN e internet —, pero **no corre código de terceros**: el único binario
+  que se ejecuta es npm, pip o composer (y `python3 -m venv`), que son de confianza, sobre fuentes
+  que pasaron §3.1.2. Queda: (a) un defecto del propio npm/pip/composer al procesar un paquete
+  malicioso daría ejecución con esa red, dentro del sandbox; (b) un paquete malicioso **publicado
+  en el registro** con integridad correcta se instala (sin scripts) y su código podría correr
+  después, cuando Qwen lo use dentro de la jaula `codigo` — sin red salvo el proxy y sin
+  credenciales. Costo aceptado: dependencias legítimas de git o de registros privados no se
+  instalan (se declaran).
 
 ## 10. Fuera de alcance
 
