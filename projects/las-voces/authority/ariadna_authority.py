@@ -24,7 +24,13 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 PROJECT_ID = "las-voces"
 ARIADNA_ID = "ariadna-project-manager"
-FORBIDDEN = {"merge", "deploy", "production_mutation", "capability_grant", "runtime_execution"}
+FORBIDDEN = {
+    "merge", "deploy", "production_mutation", "capability_grant", "runtime_execution",
+    "authority_change", "authority_contract_edit", "verifier_replacement",
+    "verifier_configuration_change", "policy_gate_disable", "self_activation",
+    "self_approval", "bypass_human_required", "arbitrary_command_execution",
+    "shell_execution",
+}
 TRANSITIONS = {"READY": {"IN_PROGRESS", "BLOCKED"}, "IN_PROGRESS": {"BLOCKED", "READY", "DONE"}, "BLOCKED": {"READY", "IN_PROGRESS"}}
 TEST_MANIFEST_KIND = "JAX_TEST_EVIDENCE_MANIFEST"
 
@@ -295,8 +301,11 @@ class AuthorityEngine:
     def evaluate(self, **request: Any) -> Decision:
         return self._evaluate(**request)[0]
 
-    def transition(self, *, sender_agent: str, task_id: str, target_status: str, evidence_refs: list[str], failure_hook: Callable[[str], None] | None = None) -> Decision:
-        return _transition(self, sender_agent=sender_agent, task_id=task_id, target_status=target_status, evidence_refs=evidence_refs, failure_hook=failure_hook)
+    def interrupted_transitions(self) -> list[dict[str, Any]]:
+        return interrupted_transitions(self.root / "projects/las-voces/activity.ndjson")
+
+    def transition(self, *, sender_agent: str, task_id: str, target_status: str, evidence_refs: list[str], expected_project_hash: str | None = None, failure_hook: Callable[[str], None] | None = None) -> Decision:
+        return _transition(self, sender_agent=sender_agent, task_id=task_id, target_status=target_status, evidence_refs=evidence_refs, expected_project_hash=expected_project_hash, failure_hook=failure_hook)
 
 
 def _append_fsync(path: Path, value: dict[str, Any]) -> None:
@@ -343,7 +352,7 @@ def _transition_lock(root: Path):
     finally: fcntl.flock(fd, fcntl.LOCK_UN); os.close(fd)
 
 
-def _transition(engine: AuthorityEngine, *, sender_agent: str, task_id: str, target_status: str, evidence_refs: list[str], failure_hook: Callable[[str], None] | None = None) -> Decision:
+def _transition(engine: AuthorityEngine, *, sender_agent: str, task_id: str, target_status: str, evidence_refs: list[str], expected_project_hash: str | None = None, failure_hook: Callable[[str], None] | None = None) -> Decision:
     """Journal intent → CAS state → committed record under exclusive lock."""
     root = engine.root
     project_path, history_path = root / "projects/las-voces/project.json", root / "projects/las-voces/activity.ndjson"
@@ -353,9 +362,15 @@ def _transition(engine: AuthorityEngine, *, sender_agent: str, task_id: str, tar
         try:
             if interrupted_transitions(history_path): return Decision(Verdict.DENY, "interrupted transition requires human reconciliation")
             before_bytes, before = project_path.read_bytes(), _load(project_path); task = _task(before, task_id)
+            if expected_project_hash is not None and _sha(before_bytes) != expected_project_hash:
+                return Decision(Verdict.DENY, "stale project observation")
             decision, evidence = engine._evaluate(sender_agent=sender_agent, task_id=task_id, action="transition_status", target_status=target_status, evidence_refs=evidence_refs)
             if decision.verdict is not Verdict.ALLOW: return decision
             if evidence is None: raise AuthorityError("authorized transition lacks validated evidence binding")
+            # Evidence evaluation may be slow or invoke controlled verifiers.
+            # A change during that interval must not leave a stale intent.
+            if project_path.read_bytes() != before_bytes:
+                return Decision(Verdict.DENY, "stale project state before transition intent")
             base = {"transition_id": str(uuid.uuid4()), "project_id": PROJECT_ID, "task_id": task_id, "from_status": task["status"], "to_status": target_status, "project_hash_before": _sha(before_bytes), "evidence_binding_hash": evidence.normalized_evidence_digest, "implementation_commit_sha": evidence.implementation_commit_sha, "test_manifest_digest": evidence.test_manifest_digest, "acceptance_record_digest": evidence.acceptance_record_digest, "pr_record_digest": evidence.pr_record_digest, "actor": sender_agent, "decision": "ALLOW"}
             intent = {**base, "event_id": f"{base['transition_id']}:intent", "event_type": "TRANSITION_INTENT", "state": "INTENT"}
             hook("before_intent_append"); _append_fsync(history_path, intent)
@@ -374,9 +389,9 @@ def evaluate(root: Path, **request: Any) -> Decision:
     return AuthorityEngine(root).evaluate(**request)
 
 
-def transition(root: Path, *, sender_agent: str, task_id: str, target_status: str, evidence_refs: list[str], failure_hook: Callable[[str], None] | None = None) -> Decision:
+def transition(root: Path, *, sender_agent: str, task_id: str, target_status: str, evidence_refs: list[str], expected_project_hash: str | None = None, failure_hook: Callable[[str], None] | None = None) -> Decision:
     """Unconfigured convenience entrypoint; no request-controlled verifier."""
-    return AuthorityEngine(root).transition(sender_agent=sender_agent, task_id=task_id, target_status=target_status, evidence_refs=evidence_refs, failure_hook=failure_hook)
+    return AuthorityEngine(root).transition(sender_agent=sender_agent, task_id=task_id, target_status=target_status, evidence_refs=evidence_refs, expected_project_hash=expected_project_hash, failure_hook=failure_hook)
 
 
 def validate_handoff(root: Path, envelope: dict[str, Any]) -> None:

@@ -243,6 +243,16 @@
       ]
     },
     {
+      "id": "LV-004",
+      "title": "Activar Ariadna como PM autónomo gobernado",
+      "owner": "Fernando + Thot",
+      "status": "READY",
+      "priority": "P0",
+      "depends": [
+        "LV-003"
+      ]
+    },
+    {
       "id": "LV-010",
       "title": "Benchmark Qwen3-ASR local",
       "owner": "Qwen",
