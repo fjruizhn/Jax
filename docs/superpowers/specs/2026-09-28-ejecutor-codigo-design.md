@@ -264,11 +264,24 @@ arranca**.
   | `sin_entregar` | `empujado_sin_pr`). *(Tarea 9, auditoría de escalón 3, 2026-09-28.)*
   - `sin_cambios`: la rama no tiene commits respecto de la rama por omisión; no se empuja. Nota
     `pr_previo_sin_cambios_nuevos` si ya hay un PR abierto de la misión.
-  - `sin_entregar` (con `motivo`): no se tocó GitHub porque algo más del turno falló (pausa de C4,
-    registro de C3, cadena, vigía, C5 pausó o ilegible, cerebro, preparación, cero afirmaciones) o
-    la pausa apareció justo antes del empuje. El motivo es el código del turno.
-  - `empujado_sin_pr`: la rama **ya está en GitHub** (`rama_empujada: true`, `sha`) pero el PR no
-    se abrió (fallo de la API, respuesta ilegible, pausa puesta tras el empuje). Lo revisa Fernando.
+  - `rechazada_por_contrato`: C1 de código, identidad, secretos (líneas agregadas, rutas, mensaje y
+    cabeceras de cada commit, título y cuerpo del PR), `encoding` no UTF-8 o topes de tamaño; no se
+    empuja.
+  - `sin_entregar` (con `motivo`): no se tocó GitHub porque otra parte del turno falló -- pausa de
+    C4, registro de C3, cadena, vigía, C5 que **pausó** o quedó **ilegible**, cerebro, preparación,
+    o el turno no produjo **ninguna** afirmación (ni respaldada ni descartada) -- o la pausa apareció
+    justo antes del empuje. El motivo es el código del turno.
+  - **C5 que descarta afirmaciones NO impide el PR** (DC5: lo revisa Fernando). Si el verificador o
+    C5 retienen algunas o todas, el turno sigue y el PR se abre igual; el informe lleva primero el
+    bloque «Descartadas por el verificador/C5» (estado y motivo) y después las respaldadas. El tope
+    del cuerpo (60 000 caracteres) recorta primero las respaldadas.
+  - `fallo_entrega`: falló el espejo o el empuje. Si el empuje falló se consulta `ls-remote`: si la
+    rama remota ya es el SHA que se iba a empujar, cuenta como empujada y se sigue al PR; si no,
+    `rama_empujada: false`; si tampoco responde, `rama_empujada: "desconocido"`.
+  - `empujado_sin_pr`: la rama **ya está en GitHub** (`rama_empujada: true`, `sha`) pero el PR de
+    este turno **no se confirmó** (fallo de la API, respuesta ilegible o sin `html_url` https válida,
+    pausa puesta tras el empuje). Si ya había un PR abierto de la misión, lleva su `pr_url` y la
+    nota `pr_con_informe_desactualizado`. Lo revisa Fernando.
   - `abierto` puede llevar la nota `sin_etiqueta` (el PR existe, falló solo la etiqueta).
   Todo resultado de entrega lleva `rama_empujada` y `sha`.
 - Concurrencia: una misión a la vez (config en DB), porque Qwen atiende una inferencia por turno.
