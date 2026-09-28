@@ -1,0 +1,612 @@
+{
+  "schema_version": "1.0",
+  "project": {
+    "id": "las-voces",
+    "name": "LAS VOCES",
+    "subtitle": "Canal humano de JAX — voz natural, ubicua, soberana y gobernada",
+    "status": "PLANNING",
+    "version": "0.1.0",
+    "created": "2026-09-27",
+    "target_rc": "2026-11-30",
+    "target_rc_note": "Objetivo operativo, no compromiso contractual.",
+    "program": "AXIOMA 3.0",
+    "sponsor": "Fernando Ruiz",
+    "human_authority": "Fernando",
+    "primary_builder": "Qwen local",
+    "project_manager_agent": "Ariadna (propuesta)",
+    "principle": "Software libre primero. Memoria ≠ autoridad. Memoria ≠ evidencia."
+  },
+  "north_star": {
+    "statement": "Hablar con JAX debe sentirse como presencia, no como usar un asistente de voz.",
+    "experience": [
+      "Voz humana, consistente y no robotizada.",
+      "Respuesta audible rápida y progresiva.",
+      "Barge-in real: Fernando puede interrumpir y JAX se calla.",
+      "Turn-taking natural, sin silencios artificiales.",
+      "Continuidad mediante B9 sin convertir memoria en autoridad.",
+      "Acceso 24/7 desde teléfono y anteojos inteligentes.",
+      "Telefonía UCM6300: recibir, filtrar y realizar llamadas bajo política."
+    ]
+  },
+  "slo_targets": [
+    {
+      "metric": "First audible response",
+      "target": "P50 ≤ 700 ms; P95 ≤ 1.2 s",
+      "note": "Meta inicial; validar empíricamente."
+    },
+    {
+      "metric": "Barge-in mute",
+      "target": "≤ 200 ms",
+      "note": "Desde detección de voz hasta corte perceptual del TTS."
+    },
+    {
+      "metric": "Voice naturalness",
+      "target": "≥ 4.2/5",
+      "note": "Pruebas A/B humanas."
+    },
+    {
+      "metric": "Voice identity consistency",
+      "target": "≥ 4.5/5",
+      "note": "Misma identidad perceptual entre sesiones."
+    },
+    {
+      "metric": "ASR Spanish quiet",
+      "target": "WER ≤ 8%",
+      "note": "Meta inicial; recalibrar con dataset propio."
+    },
+    {
+      "metric": "ASR noisy/mobile",
+      "target": "WER ≤ 15%",
+      "note": "Automóvil/calle/anteojos."
+    },
+    {
+      "metric": "Domain term recall",
+      "target": "≥ 95%",
+      "note": "JAX/Axioma/nombres técnicos."
+    },
+    {
+      "metric": "Voice availability",
+      "target": "≥ 99.5% inicial",
+      "note": "Subir después de hardening."
+    }
+  ],
+  "phases": [
+    {
+      "id": "LV0",
+      "name": "Foundation & PMO",
+      "start": "2026-09-28",
+      "end": "2026-10-01",
+      "status": "PLANNED",
+      "outcome": "Proyecto canónico en Axioma, Ariadna, Qwen local y baseline de sync."
+    },
+    {
+      "id": "LV1",
+      "name": "Push-to-talk local",
+      "start": "2026-10-01",
+      "end": "2026-10-06",
+      "status": "PLANNED",
+      "outcome": "Mic → VAD → ASR → JAX → Speech Renderer → TTS → speaker."
+    },
+    {
+      "id": "LV2",
+      "name": "Realtime conversation",
+      "start": "2026-10-06",
+      "end": "2026-10-17",
+      "status": "PLANNED",
+      "outcome": "Streaming, end-of-turn, barge-in, latencia instrumentada."
+    },
+    {
+      "id": "LV3",
+      "name": "VoiceIdentity + B9",
+      "start": "2026-10-17",
+      "end": "2026-10-27",
+      "status": "PLANNED",
+      "outcome": "JAX primary voice v1, prosody policy, preferencias gobernadas."
+    },
+    {
+      "id": "LV4",
+      "name": "Mobile 24/7",
+      "start": "2026-10-27",
+      "end": "2026-11-07",
+      "status": "PLANNED",
+      "outcome": "Voice Edge remoto, WebRTC, handoff Wi‑Fi/celular, reconexión."
+    },
+    {
+      "id": "LV5",
+      "name": "Smart glasses",
+      "start": "2026-11-05",
+      "end": "2026-11-14",
+      "status": "PLANNED",
+      "outcome": "Anteojos como periférico hands-free a través del teléfono."
+    },
+    {
+      "id": "LV6",
+      "name": "UCM6300 telephony",
+      "start": "2026-11-10",
+      "end": "2026-11-22",
+      "status": "PLANNED",
+      "outcome": "Extensión JAX, inbound screening y outbound con human gate."
+    },
+    {
+      "id": "LV7",
+      "name": "Production hardening",
+      "start": "2026-11-20",
+      "end": "2026-11-30",
+      "status": "PLANNED",
+      "outcome": "Observability, seguridad, runbooks y Axioma 3.0 RC."
+    }
+  ],
+  "milestones": [
+    {
+      "id": "M0",
+      "date": "2026-10-01",
+      "name": "Project control plane live",
+      "acceptance": "project.json + dashboard + Ariadna + sync contract"
+    },
+    {
+      "id": "M1",
+      "date": "2026-10-06",
+      "name": "JAX habla localmente",
+      "acceptance": "PTT E2E sin dependencia cloud"
+    },
+    {
+      "id": "M2",
+      "date": "2026-10-17",
+      "name": "Conversación natural",
+      "acceptance": "streaming + barge-in + latencia medida"
+    },
+    {
+      "id": "M3",
+      "date": "2026-10-27",
+      "name": "VoiceIdentity v1",
+      "acceptance": "human eval gate o excepción explícita"
+    },
+    {
+      "id": "M4",
+      "date": "2026-11-07",
+      "name": "JAX 24/7 desde teléfono",
+      "acceptance": "sesión remota segura + reconexión"
+    },
+    {
+      "id": "M5",
+      "date": "2026-11-14",
+      "name": "Smart glasses loop",
+      "acceptance": "hands-free listen/speak vía anteojos"
+    },
+    {
+      "id": "M6",
+      "date": "2026-11-22",
+      "name": "JAX atiende y realiza llamadas",
+      "acceptance": "UCM6300 E2E; outbound bajo gate"
+    },
+    {
+      "id": "M7",
+      "date": "2026-11-30",
+      "name": "Axioma 3.0 RC",
+      "acceptance": "SLO evidence + runbooks + commercial-readiness backlog"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "LV-000",
+      "title": "Crear fuente canónica del proyecto en Axioma",
+      "owner": "Ariadna",
+      "status": "DONE",
+      "priority": "P0",
+      "depends": [],
+      "acceptance_evidence": [
+        "activity.ndjson#lv-000-001",
+        "IMPORT_MANIFEST.json",
+        "INTEGRATION.md"
+      ]
+    },
+    {
+      "id": "LV-001",
+      "title": "Instalar/configurar Qwen Code local en Hall9000",
+      "owner": "Qwen/Infra",
+      "status": "READY",
+      "priority": "P0",
+      "depends": [
+        "LV-000"
+      ]
+    },
+    {
+      "id": "LV-002",
+      "title": "Definir sync AGENTS/CLAUDE/QWEN + skills/agents",
+      "owner": "Hyde + Thot",
+      "status": "READY",
+      "priority": "P0",
+      "depends": [
+        "LV-000"
+      ]
+    },
+    {
+      "id": "LV-003",
+      "title": "Crear agente PM Ariadna y contrato de autoridad",
+      "owner": "Thot",
+      "status": "READY",
+      "priority": "P0",
+      "depends": [
+        "LV-000"
+      ]
+    },
+    {
+      "id": "LV-010",
+      "title": "Benchmark Qwen3-ASR local",
+      "owner": "Qwen",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-001"
+      ]
+    },
+    {
+      "id": "LV-011",
+      "title": "Benchmark Qwen3-TTS y streaming",
+      "owner": "Qwen",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-001"
+      ]
+    },
+    {
+      "id": "LV-012",
+      "title": "Integrar Silero VAD",
+      "owner": "Qwen",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-001"
+      ]
+    },
+    {
+      "id": "LV-013",
+      "title": "Voice Session state machine v0.1",
+      "owner": "Qwen",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-010",
+        "LV-011",
+        "LV-012"
+      ]
+    },
+    {
+      "id": "LV-014",
+      "title": "Speech Renderer v0.1",
+      "owner": "Qwen",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-013"
+      ]
+    },
+    {
+      "id": "LV-015",
+      "title": "PTT local E2E",
+      "owner": "Qwen",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-014"
+      ]
+    },
+    {
+      "id": "LV-020",
+      "title": "Streaming ASR/TTS incremental",
+      "owner": "Qwen",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-015"
+      ]
+    },
+    {
+      "id": "LV-021",
+      "title": "End-of-turn detector y turn manager",
+      "owner": "Qwen",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-020"
+      ]
+    },
+    {
+      "id": "LV-022",
+      "title": "Barge-in ≤200 ms objetivo",
+      "owner": "Qwen",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-021"
+      ]
+    },
+    {
+      "id": "LV-030",
+      "title": "Diseñar VoiceIdentity jax.primary.v1",
+      "owner": "Fernando + Qwen",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-011"
+      ]
+    },
+    {
+      "id": "LV-031",
+      "title": "Construir voice eval set español LATAM/Honduras",
+      "owner": "Fernando + Thot",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-030"
+      ]
+    },
+    {
+      "id": "LV-040",
+      "title": "Self-host WebRTC gateway",
+      "owner": "Qwen",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-022"
+      ]
+    },
+    {
+      "id": "LV-041",
+      "title": "Voice Edge móvil mínimo",
+      "owner": "Qwen",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-040"
+      ]
+    },
+    {
+      "id": "LV-050",
+      "title": "Perfil Bluetooth smart glasses",
+      "owner": "Qwen",
+      "status": "PLANNED",
+      "priority": "P1",
+      "depends": [
+        "LV-041"
+      ]
+    },
+    {
+      "id": "LV-051",
+      "title": "Hands-free loop con anteojos",
+      "owner": "Qwen",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-050"
+      ]
+    },
+    {
+      "id": "LV-060",
+      "title": "Lab SIP con extensión JAX en UCM6300",
+      "owner": "Qwen + Hyde",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-015"
+      ]
+    },
+    {
+      "id": "LV-061",
+      "title": "Inbound screening + message + transfer",
+      "owner": "Qwen",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-060"
+      ]
+    },
+    {
+      "id": "LV-062",
+      "title": "Outbound calls con human gate y allowlist",
+      "owner": "Qwen + Thot",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-060"
+      ]
+    },
+    {
+      "id": "LV-070",
+      "title": "Failover y degradación ASR/TTS",
+      "owner": "Hyde + Qwen",
+      "status": "PLANNED",
+      "priority": "P1",
+      "depends": [
+        "LV-051",
+        "LV-062"
+      ]
+    },
+    {
+      "id": "LV-071",
+      "title": "Dashboard SLO/quality/audit",
+      "owner": "Ariadna",
+      "status": "PLANNED",
+      "priority": "P1",
+      "depends": [
+        "LV-020"
+      ]
+    },
+    {
+      "id": "LV-072",
+      "title": "Runbooks + threat model + privacy review",
+      "owner": "Thot",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-070"
+      ]
+    },
+    {
+      "id": "LV-080",
+      "title": "Packaging Axioma 3.0 RC",
+      "owner": "Ariadna + Fernando",
+      "status": "PLANNED",
+      "priority": "P0",
+      "depends": [
+        "LV-072"
+      ]
+    }
+  ],
+  "agents": [
+    {
+      "name": "Fernando",
+      "role": "Human Authority / Product Owner",
+      "authority": "freeze, merge, deploy, capability grants"
+    },
+    {
+      "name": "Ariadna",
+      "role": "Project Manager Agent (propuesto)",
+      "authority": "plan, dependencies, status, risk, sync; no merge/deploy",
+      "lifecycle_status": "PROPOSED_NOT_ACTIVE"
+    },
+    {
+      "name": "Qwen",
+      "role": "Primary Builder — LAS VOCES",
+      "authority": "sandbox/worktree implementation, tests, PR"
+    },
+    {
+      "name": "Hyde / Claude Code",
+      "role": "Integrator / lane 2",
+      "authority": "bounded implementation/review"
+    },
+    {
+      "name": "Thot / Codex",
+      "role": "Adversarial reviewer / gates",
+      "authority": "review, root-cause, tests"
+    },
+    {
+      "name": "Jacobs",
+      "role": "Runtime pipeline coordinator",
+      "authority": "governed runtime orchestration"
+    },
+    {
+      "name": "Kimi/GLM",
+      "role": "Surge capacity future",
+      "authority": "none until explicitly onboarded"
+    }
+  ],
+  "sync": {
+    "canonical_root": "axioma/projects/las-voces/",
+    "rule": "Canonical first. Harness-specific files are generated projections.",
+    "command": "axioma sync las-voces",
+    "targets": {
+      "shared": [
+        "AGENTS.md"
+      ],
+      "codex": [
+        ".codex/skills/"
+      ],
+      "claude": [
+        "CLAUDE.md",
+        ".claude/skills/",
+        ".claude/agents/"
+      ],
+      "qwen": [
+        "QWEN.md",
+        ".qwen/skills/",
+        ".qwen/agents/"
+      ]
+    }
+  },
+  "risks": [
+    {
+      "id": "R1",
+      "risk": "Voz correcta pero robótica",
+      "impact": "HIGH",
+      "mitigation": "Voice eval gate + A/B + Speech Renderer + prosody tuning"
+    },
+    {
+      "id": "R2",
+      "risk": "Latencia rompe conversación",
+      "impact": "CRITICAL",
+      "mitigation": "Streaming E2E + budget por tramo + observability"
+    },
+    {
+      "id": "R3",
+      "risk": "Barge-in falla",
+      "impact": "HIGH",
+      "mitigation": "cancel token + VAD edge + interruption SLO"
+    },
+    {
+      "id": "R4",
+      "risk": "Dos agentes escriben mismo boundary",
+      "impact": "HIGH",
+      "mitigation": "Ariadna + task lease + worktree ownership"
+    },
+    {
+      "id": "R5",
+      "risk": "Skills divergen entre harnesses",
+      "impact": "HIGH",
+      "mitigation": "canonical registry + generated projections + hash drift gate"
+    },
+    {
+      "id": "R6",
+      "risk": "Audio 24/7 invade privacidad",
+      "impact": "CRITICAL",
+      "mitigation": "no continuous upstream; wake/VAD local; explicit sessions"
+    },
+    {
+      "id": "R7",
+      "risk": "Telefonía ejecuta acción no autorizada",
+      "impact": "CRITICAL",
+      "mitigation": "human gate, allowlists, Intent Envelope, audit, fail-closed"
+    },
+    {
+      "id": "R8",
+      "risk": "Licencia incompatible con comercialización",
+      "impact": "HIGH",
+      "mitigation": "SBOM + license gate"
+    },
+    {
+      "id": "R9",
+      "risk": "Modelos locales saturan GPU",
+      "impact": "HIGH",
+      "mitigation": "ResourceManager + quotas + profiling"
+    },
+    {
+      "id": "R10",
+      "risk": "Anteojos/wake consumen batería o activan falso",
+      "impact": "MEDIUM",
+      "mitigation": "PTT first + benchmark edge"
+    }
+  ],
+  "sources": [
+    {
+      "name": "Qwen3-ASR",
+      "url": "https://github.com/QwenLM/Qwen3-ASR",
+      "note": "ASR open-source; Apache-2.0."
+    },
+    {
+      "name": "Qwen3-TTS",
+      "url": "https://github.com/QwenLM/Qwen3-TTS",
+      "note": "TTS/VoiceDesign open-source; Apache-2.0."
+    },
+    {
+      "name": "Qwen Code",
+      "url": "https://github.com/QwenLM/qwen-code",
+      "note": "Coding agent open-source; local providers."
+    },
+    {
+      "name": "Silero VAD",
+      "url": "https://github.com/snakers4/silero-vad",
+      "note": "MIT; local/edge VAD."
+    },
+    {
+      "name": "LiveKit",
+      "url": "https://github.com/livekit/livekit",
+      "note": "Apache-2.0; self-hosted realtime/WebRTC."
+    },
+    {
+      "name": "Grandstream UCM RemoteConnect",
+      "url": "https://documentation.grandstream.com/knowledge-base/ucm-remoteconnect-user-guide/",
+      "note": "Reference for UCM6300/Wave/WebRTC ecosystem."
+    }
+  ]
+}

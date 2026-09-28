@@ -79,6 +79,15 @@ def caja(tmp_path, monkeypatch):
     monkeypatch.setattr(hyde_sandbox, "REAL_NVM_DIR", str(tmp_path / "no-existe-nvm"))
     monkeypatch.setattr(hyde_sandbox, "REAL_CREDENTIALS", str(tmp_path / "no-existe-cred"))
     monkeypatch.setattr(hyde_sandbox, "_TEMPLATE_DIR", tmp_path / "template")
+    # Credencial por defecto de la caja: el token OAuth -- la única vía
+    # soportada hoy en producción (decisión de Fernando, 2026-09-27, ver
+    # hyde_sandbox.py). Sin esto wrap_hyde_command fallaría cerrado
+    # (HydeCredentialUnavailable) antes de construir el argv, y NINGÚN test
+    # de este archivo podría ejercitar el sandbox -- son pruebas de
+    # confinamiento, no de la credencial en sí. Los tests que sí ejercitan
+    # el mecanismo de credencial (más abajo) pisan esto con su propio
+    # monkeypatch.
+    monkeypatch.setenv(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, "token-de-prueba-de-la-caja")
 
     class Caja:
         repo = None
@@ -87,11 +96,37 @@ def caja(tmp_path, monkeypatch):
         workspace = None
 
         def correr(self, sh: str, env: dict | None = None) -> str:
-            argv = hyde_sandbox.wrap_hyde_command(["/bin/sh", "-c", sh], str(workspace))
-            entorno = dict(os.environ)
-            entorno.update(env or {})
+            """Arma el sandbox con wrap_hyde_command y lo ejecuta pasando el
+            `env` que esa función devuelve TAL CUAL a subprocess.run --
+            exactamente lo que hace el único punto de entrada aprobado en
+            producción (ver hyde_sandbox.py) para B-1 (auditoría
+            adversarial 2026-09-27): nunca fusionado con el os.environ
+            real. Antes esa frontera la ponía `--clearenv` DENTRO del argv
+            de bwrap y acá se le pasaba el os.environ completo (más lo que
+            pidiera el test); ahora bwrap no usa --clearenv/--setenv en
+            absoluto, así que la frontera es el `env` de retorno.
+
+            El parámetro `env` de este método simula variables que YA
+            estarían en el os.environ del proceso real que arma el sandbox
+            (jaxsvc, con /etc/jax/.env cargado) -- se inyectan
+            temporalmente en os.environ antes de llamar a
+            wrap_hyde_command (que sí lee os.environ, para
+            HYDE_OAUTH_TOKEN_ENV) y se restauran después, para poder
+            probar que NO terminan en el `env` que esa función devuelve."""
+            previos = {k: os.environ.get(k) for k in (env or {})}
+            os.environ.update(env or {})
+            try:
+                argv, sandbox_env = hyde_sandbox.wrap_hyde_command(
+                    ["/bin/sh", "-c", sh], str(workspace)
+                )
+            finally:
+                for k, v in previos.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
             r = subprocess.run(
-                argv, capture_output=True, text=True, timeout=120, env=entorno
+                argv, capture_output=True, text=True, timeout=120, env=sandbox_env
             )
             return (r.stdout + r.stderr).strip()
 
@@ -164,10 +199,14 @@ def test_un_archivo_fuera_de_los_binds_no_es_legible(caja):
 
 
 def test_el_entorno_del_padre_no_se_hereda(caja):
-    """--clearenv. El proceso padre (jax-las-manos) tiene EnvironmentFile=
-    /etc/jax/.env cargado: sin esto, las claves viajan como variables de
+    """El proceso padre (jax-las-manos) tiene EnvironmentFile=/etc/jax/.env
+    cargado: sin esta frontera, las claves viajan como variables de
     entorno aunque el filesystem este cerrado. Es la leccion de metodo
-    `feedback-verificar-herencia-entorno-no-solo-filesystem`."""
+    `feedback-verificar-herencia-entorno-no-solo-filesystem`. Desde B-1
+    (auditoría adversarial 2026-09-27) la frontera ya no es --clearenv
+    dentro del argv de bwrap, sino el `env` mínimo que wrap_hyde_command
+    devuelve y que Caja.correr pasa TAL CUAL a subprocess.run -- este test
+    sigue probando la misma propiedad, con el mecanismo nuevo."""
     salida = caja.correr(
         'test -n "$SECRETO_DEL_PADRE" && echo HEREDO || echo BLOQUEADO',
         env={"SECRETO_DEL_PADRE": _SECRETO},
@@ -259,8 +298,173 @@ def test_la_red_compartida_esta_declarada_como_limite_conocido(caja):
     # /bin/true y no el literal "claude": ver el comentario en
     # test_sin_bwrap_falla_cerrado. Lo que se afirma es el argv de bwrap, que
     # no depende del comando envuelto.
-    argv = hyde_sandbox.wrap_hyde_command(["/bin/true"], str(caja.workspace))
+    argv, _env = hyde_sandbox.wrap_hyde_command(["/bin/true"], str(caja.workspace))
     assert "--share-net" in argv, (
         "la red dejo de estar compartida -- si se acoto de verdad, actualizar "
         "DEUDA.md (el item de Hyde) y este test"
     )
+
+
+# ---------------------------------------------------------------------------
+# Credencial de Hyde: CLAUDE_CODE_OAUTH_TOKEN (cuenta Max) o el archivo,
+# nunca los dos a la vez ni ninguno -- decisión de Fernando 2026-09-27 (ver
+# hyde_sandbox.py). El hallazgo que motiva esto: corriendo como `jaxsvc`
+# (desde 2026-09-17) REAL_CREDENTIALS es 600 fruiz:fruiz -- `os.path.isfile`
+# daba True (alcanza con poder recorrer directorios) y el archivo se
+# montaba igual, pero `jaxsvc` no podía leerlo adentro del sandbox: un bind
+# inútil, Hyde sin credencial, en silencio.
+#
+# CORREGIDO 2026-09-27 (auditoría adversarial, hallazgo B-1 BLOCK sobre el
+# primer intento): el token NUNCA va en el argv de bwrap -- un intento
+# anterior lo pasaba con `--setenv CLAUDE_CODE_OAUTH_TOKEN <valor>`, y el
+# argv completo de un proceso es legible por CUALQUIER usuario del host vía
+# /proc/<pid>/cmdline (world-readable por defecto; a diferencia de
+# /proc/<pid>/environ, que exige el mismo UID o CAP_SYS_PTRACE) --
+# verificado en hall9000: /proc no tiene hidepid, y fruiz/axioma ven con
+# `ps` los procesos de jaxsvc. Ahora wrap_hyde_command devuelve `(argv,
+# env)`: el token, si existe, va SÓLO en `env`, y ni bwrap usa ya
+# --clearenv/--setenv para nada -- ver el docstring de wrap_hyde_command.
+# ---------------------------------------------------------------------------
+
+_TOKEN_DE_PRUEBA = "oauth-token-de-prueba-no-es-una-credencial-real"
+
+
+def test_con_oauth_token_lo_setea_y_no_bindea_el_archivo(caja, tmp_path, monkeypatch, caplog):
+    """El token GANA sobre el archivo: si está en el entorno, NO se monta
+    REAL_CREDENTIALS aunque exista y sea legible -- no hace falta, y evita
+    depender de que este proceso pueda leer un archivo que puede no ser
+    suyo."""
+    credencial_de_mentira = tmp_path / "credencial-que-no-debe-montarse.json"
+    credencial_de_mentira.write_text('{"secreto":"no-se-debe-leer-esto"}\n', encoding="utf-8")
+    monkeypatch.setattr(hyde_sandbox, "REAL_CREDENTIALS", str(credencial_de_mentira))
+    monkeypatch.setenv(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, _TOKEN_DE_PRUEBA)
+
+    argv, env = hyde_sandbox.wrap_hyde_command(["/bin/true"], str(caja.workspace))
+    assert env.get(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV) == _TOKEN_DE_PRUEBA, env
+    assert not any(str(credencial_de_mentira) in a for a in argv), (
+        "el archivo de credenciales se montó igual, aunque había token"
+    )
+
+    # Y EJERCITADO -- no sólo el argv/env: adentro del sandbox, todo $HOME
+    # (que es tmpfs) se vuelca entero, sin nombrar ningún archivo puntual --
+    # policy/tests/test_claude_subprocess_solo_via_sandbox.py marca como
+    # violación cualquier literal de este archivo que combine un subproceso
+    # con el nombre del CLI en un string, y una ruta contra el nombre real
+    # del directorio de config lo dispararía igual sin necesidad. Se afirma
+    # sobre el volcado completo, en Python, con valores que sí pueden
+    # nombrarse (el token y el secreto del archivo que no debe montarse).
+    salida = caja.correr('env; echo ---; find "$HOME" -type f -exec cat {} \\;')
+    assert f"{hyde_sandbox.HYDE_OAUTH_TOKEN_ENV}={_TOKEN_DE_PRUEBA}" in salida, salida
+    assert "no-se-debe-leer-esto" not in salida, salida
+
+    assert not any(_TOKEN_DE_PRUEBA in r.getMessage() for r in caplog.records), (
+        "el token apareció en un log -- nunca debe loguearse"
+    )
+
+
+def test_el_token_nunca_aparece_en_el_argv(caja, monkeypatch):
+    """B-1 BLOCK (auditoría adversarial 2026-09-27): regresión dedicada del
+    hallazgo que rechazó el primer intento. El argv completo de bwrap es
+    legible por cualquier usuario del host vía /proc/<pid>/cmdline -- el
+    token va SÓLO en el `env` de retorno, jamás en ningún elemento del
+    argv, con o sin --setenv de por medio."""
+    monkeypatch.setenv(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, _TOKEN_DE_PRUEBA)
+    argv, env = hyde_sandbox.wrap_hyde_command(["/bin/true"], str(caja.workspace))
+    assert not any(_TOKEN_DE_PRUEBA in a for a in argv), (
+        f"el token apareció en el argv de bwrap: {argv}"
+    )
+    assert not any("--setenv" in a or "--clearenv" in a for a in argv), (
+        "bwrap ya no debería usar --setenv/--clearenv en absoluto"
+    )
+    assert env[hyde_sandbox.HYDE_OAUTH_TOKEN_ENV] == _TOKEN_DE_PRUEBA
+
+
+def test_sin_token_bindea_el_archivo_si_es_legible(caja, tmp_path, monkeypatch):
+    """Comportamiento de hoy, sin token: el archivo se monta -- pero ahora
+    la condición es LEGIBLE (`os.access(R_OK)`), no sólo que exista."""
+    monkeypatch.delenv(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, raising=False)
+    credencial_legible = tmp_path / "credencial-legible.json"
+    credencial_legible.write_text('{"contenido":"credencial-real-de-mentira"}\n', encoding="utf-8")
+    monkeypatch.setattr(hyde_sandbox, "REAL_CREDENTIALS", str(credencial_legible))
+
+    argv, env = hyde_sandbox.wrap_hyde_command(["/bin/true"], str(caja.workspace))
+    assert hyde_sandbox.HYDE_OAUTH_TOKEN_ENV not in env, env
+    assert str(credencial_legible) in argv, "el archivo legible no se montó"
+
+    # Mismo criterio que en el test anterior: se vuelca $HOME entero (sin
+    # nombrar el directorio de config en un literal) y se afirma en Python.
+    salida = caja.correr('find "$HOME" -type f -exec cat {} \\;')
+    assert "credencial-real-de-mentira" in salida, salida
+
+
+def test_sin_token_y_archivo_no_legible_no_bindea_y_falla_cerrado(caja, tmp_path, monkeypatch, caplog):
+    """El archivo EXISTE (isfile=True) pero no es legible por este proceso
+    (chmod 000) -- ni token ni archivo usable: no hay bind posible y
+    wrap_hyde_command falla cerrado ANTES de armar el sandbox, con un
+    warning que no repite ningún dato del contenido del archivo."""
+    monkeypatch.delenv(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, raising=False)
+    credencial_sin_permiso = tmp_path / "credencial-sin-permiso.json"
+    credencial_sin_permiso.write_text('{"secreto":"inalcanzable-para-este-proceso"}\n', encoding="utf-8")
+    os.chmod(credencial_sin_permiso, 0o000)
+    monkeypatch.setattr(hyde_sandbox, "REAL_CREDENTIALS", str(credencial_sin_permiso))
+    try:
+        assert os.path.isfile(credencial_sin_permiso), "isfile debe seguir viendo el archivo"
+        assert not os.access(credencial_sin_permiso, os.R_OK), "el chmod 000 no bloqueó la lectura"
+
+        with caplog.at_level("WARNING", logger="hyde_sandbox"):
+            with pytest.raises(hyde_sandbox.HydeCredentialUnavailable):
+                hyde_sandbox.wrap_hyde_command(["/bin/true"], str(caja.workspace))
+
+        assert any("credencial" in r.getMessage().lower() for r in caplog.records), (
+            "no se logueó ningún warning de credencial faltante"
+        )
+        assert not any("inalcanzable-para-este-proceso" in r.getMessage() for r in caplog.records)
+    finally:
+        os.chmod(credencial_sin_permiso, 0o600)  # para que tmp_path se pueda limpiar
+
+
+def test_ninguna_otra_variable_del_padre_cruza_al_entorno_devuelto(caja, monkeypatch):
+    """Regresión: agregar la vía del token no puede convertirse en "lo que
+    haya en el entorno". `env` devuelto es SIEMPRE {HOME, PATH, LANG} más
+    HYDE_OAUTH_TOKEN_ENV cuando está -- cualquier otra variable del proceso
+    padre, aunque parezca secreta, se queda afuera, tanto del `env` como
+    del `argv` (que ya no lleva --setenv en absoluto)."""
+    monkeypatch.setenv(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, _TOKEN_DE_PRUEBA)
+    monkeypatch.setenv("OTRO_SECRETO_DEL_PADRE_QUE_NO_DEBE_CRUZAR", _SECRETO)
+
+    argv, env = hyde_sandbox.wrap_hyde_command(["/bin/true"], str(caja.workspace))
+    assert env == {
+        "HOME": hyde_sandbox.SANDBOX_HOME,
+        "PATH": hyde_sandbox._SAFE_PATH,
+        "LANG": "C.UTF-8",
+        hyde_sandbox.HYDE_OAUTH_TOKEN_ENV: _TOKEN_DE_PRUEBA,
+    }, env
+    assert not any(_SECRETO in v for v in env.values()), "una variable del padre cruzó al env del sandbox"
+    assert not any(a == "--setenv" for a in argv), "bwrap ya no debería usar --setenv en absoluto"
+    assert not any(_SECRETO in a for a in argv), "una variable del padre cruzó al argv de la jaula"
+
+
+def test_token_de_solo_espacios_cuenta_como_ausente(caja, tmp_path, monkeypatch):
+    """B-3 MINOR (auditoría adversarial 2026-09-27): un token OAuth
+    (HYDE_OAUTH_TOKEN_ENV) de sólo espacios (typo en /etc/jax/.env, o una
+    variable declarada pero vacía con padding) no cuenta como token
+    presente -- cae al archivo, igual que si la variable no existiera."""
+    monkeypatch.setenv(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, "   ")
+    credencial_legible = tmp_path / "credencial-legible.json"
+    credencial_legible.write_text('{"contenido":"credencial-real-de-mentira"}\n', encoding="utf-8")
+    monkeypatch.setattr(hyde_sandbox, "REAL_CREDENTIALS", str(credencial_legible))
+
+    argv, env = hyde_sandbox.wrap_hyde_command(["/bin/true"], str(caja.workspace))
+    assert hyde_sandbox.HYDE_OAUTH_TOKEN_ENV not in env, env
+    assert str(credencial_legible) in argv, "con token de sólo espacios, debía caer al archivo"
+
+
+def test_token_de_solo_espacios_y_sin_archivo_falla_cerrado(caja, monkeypatch):
+    """Mismo caso que arriba, pero sin archivo de respaldo: un token de
+    sólo espacios equivale a ausente, así que sin archivo legible no hay
+    ninguna credencial usable -- falla cerrado, no arranca con un token
+    OAuth vacío."""
+    monkeypatch.setenv(hyde_sandbox.HYDE_OAUTH_TOKEN_ENV, "    ")
+    monkeypatch.setattr(hyde_sandbox, "REAL_CREDENTIALS", "/no/existe/de/verdad-en-este-test.json")
+    with pytest.raises(hyde_sandbox.HydeCredentialUnavailable):
+        hyde_sandbox.wrap_hyde_command(["/bin/true"], str(caja.workspace))
