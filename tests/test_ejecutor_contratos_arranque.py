@@ -144,6 +144,38 @@ def test_codigo_no_corre_fuera_de_un_turno_de_codigo(tmp_path):
     asyncio.run(AR.exigir_contratos(_ctx(tmp_path), _vivas(codigo=rota)))
 
 
+# --- codigo: pruebas_reales corre también el canario (Tarea 13) --------------
+
+def test_pruebas_reales_codigo_corre_el_canario_con_token(tmp_path, monkeypatch):
+    from jax.ejecutor.contratos import canario_codigo
+
+    llamado = []
+
+    async def falso(cuenta, *, correr=None):
+        llamado.append(cuenta)
+        return (Fallo("codigo", "el_canario_corrio"),)
+
+    monkeypatch.setattr(canario_codigo, "verificar_codigo", falso)
+    monkeypatch.setenv("JAX_GITHUB_TOKEN", "github_pat_" + "A" * 60)
+    ctx = _ctx(tmp_path, tipo="codigo")
+    fallos = asyncio.run(AR.pruebas_reales(ctx)["codigo"]())
+    assert fallos == (Fallo("codigo", "el_canario_corrio"),)
+    assert llamado == [ctx.cuenta]
+
+
+def test_pruebas_reales_codigo_no_corre_el_canario_sin_token(tmp_path, monkeypatch):
+    from jax.ejecutor.contratos import canario_codigo
+
+    async def explota(cuenta, *, correr=None):
+        raise AssertionError("el canario no debia correr sin token")
+
+    monkeypatch.setattr(canario_codigo, "verificar_codigo", explota)
+    monkeypatch.delenv("JAX_GITHUB_TOKEN", raising=False)
+    ctx = _ctx(tmp_path, tipo="codigo")
+    fallos = asyncio.run(AR.pruebas_reales(ctx)["codigo"]())
+    assert fallos == (Fallo("codigo", "sin_token_github"),)
+
+
 # --- contexto ----------------------------------------------------------------
 
 def _entorno(tmp_path):

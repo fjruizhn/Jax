@@ -391,7 +391,7 @@ def verificar_token_github(env=None) -> tuple:
 def pruebas_reales(ctx: Contexto) -> dict:
     from facet_resolver import resolve_facet
     from jacobs.store import conexion
-    from jax.ejecutor.contratos import auditor_cliente, canario_c1, canario_c3, canario_c5, exportar
+    from jax.ejecutor.contratos import auditor_cliente, canario_c1, canario_c3, canario_c5, canario_codigo, exportar
 
     def _politica():
         return politica.validar(json.loads(ctx.cuenta.politica.read_bytes()))
@@ -434,7 +434,12 @@ def pruebas_reales(ctx: Contexto) -> dict:
         return await verificar_maquinas(ctx, (await asyncio.to_thread(_politica)).hosts)
 
     async def p_codigo():
-        return verificar_token_github()
+        # El token primero, y sin red (Tarea 12): un token ausente/vacío niega el turno antes de
+        # que el canario toque el gancho, el cerco o el diff (Tarea 13).
+        fallos = verificar_token_github()
+        if fallos:
+            return fallos
+        return await canario_codigo.verificar_codigo(ctx.cuenta)
 
     pruebas = {"instalacion": p_instalacion, "exportar": p_exportar, "c1": p_c1, "c3": p_c3, "c4": p_c4,
                "c5": p_c5, "c6": p_c6}
