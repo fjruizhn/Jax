@@ -262,13 +262,14 @@ def informe_c5(entrega, faceta_auditor: str | None) -> str:
         p = cita.presentar(a)
         return " ".join(f"{campo}={getattr(p, campo)}" for campo in cita.CAMPOS_PRESENTACION)
 
-    lineas = [f"C5: {faceta_auditor or '?'}", ""]
-    lineas += ["    " + campos(a) for a in entrega.respaldadas] or ["    -"]
-    # MAJOR-2 (DC5: Fernando revisa): lo descartado también se ve, con su estado y su motivo
-    # (códigos estables, sin prosa). Mismo bloque sangrado: nada se sale a Markdown.
-    lineas += ["", "Descartadas por el verificador/C5", ""]
+    # MAJOR-2 (DC5: Fernando revisa): lo descartado también se ve, con su estado y su motivo (códigos
+    # estables, sin prosa). MINOR-B: va PRIMERO -- el tope del cuerpo del PR corta la cola del
+    # informe, así que lo que se pierde primero son las respaldadas, nunca lo descartado.
+    lineas = [f"C5: {faceta_auditor or '?'}", "", "Descartadas por el verificador/C5", ""]
     lineas += [f"    estado={d.estado} motivo={d.motivo.codigo} " + campos(d.afirmacion)
                for d in entrega.descartadas] or ["    -"]
+    lineas += ["", "Respaldadas", ""]
+    lineas += ["    " + campos(a) for a in entrega.respaldadas] or ["    -"]
     return "\n".join(lineas)
 
 

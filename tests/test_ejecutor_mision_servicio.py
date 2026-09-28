@@ -375,6 +375,23 @@ def test_informe_c5_incluye_las_descartadas_con_estado_y_motivo():
     assert item.startswith("    ") and f"estado={d.estado}" in item and f"motivo={d.motivo.codigo}" in item
 
 
+def test_informe_enorme_conserva_las_descartadas_y_recorta_primero_las_respaldadas():
+    """MINOR-B (ronda final): «Descartadas» va ANTES que las respaldadas, así el recorte del cuerpo
+    del PR (`cuerpo_del_pr`, que corta la cola del informe) se lleva primero las respaldadas."""
+    captura = cita.Captura(maquina="hall9000", comando="pytest -q", salida="3 failed in 0.10s\n", stderr="",
+                           truncada=False)
+    mala = cita.Afirmacion("hall9000", "pytest -q", "3 passed in 0.10s", "3 passed", "¿pasan?")
+    buenas = tuple(cita.Afirmacion("hall9000", "pytest -q", f"linea {i} " + "x" * 200, f"linea {i}", "p")
+                   for i in range(400))
+    entrega = transporte.Entrega((), buenas, transporte.entregar((mala,), (captura,)).descartadas)
+    informe = S.informe_c5(entrega, "thot")
+    assert len(informe) > MC.TOPE_CUERPO
+    assert informe.index("Descartadas por el verificador/C5") < informe.index("'linea 0'")
+    cuerpo = MC.cuerpo_del_pr(informe, TURNO["mision_id"], "qwen")
+    assert len(cuerpo) <= MC.TOPE_CUERPO and "[informe recortado" in cuerpo
+    assert "'3 passed'" in cuerpo and "'linea 0'" in cuerpo and "'linea 399'" not in cuerpo
+
+
 @pytest.mark.parametrize("filas, esperado", [
     ({}, S.ConfigCodigo(S.AUTOR_POR_OMISION, S.TOPE_BYTES_POR_OMISION, 100 * 1024 * 1024)),
     ({"ejecutor.codigo.autor": "Otro <o@x.io>", "ejecutor.codigo.tope_bytes": "10",
