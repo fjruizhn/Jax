@@ -230,10 +230,16 @@
       "id": "LV-003",
       "title": "Crear agente PM Ariadna y contrato de autoridad",
       "owner": "Thot",
-      "status": "READY",
+      "status": "DONE",
       "priority": "P0",
       "depends": [
         "LV-000"
+      ],
+      "acceptance_evidence": [
+        "authority/CONTRACT.md",
+        "authority/ariadna_authority.py",
+        "tests/test_las_voces_ariadna_authority.py",
+        "activity.ndjson#lv-003-005"
       ]
     },
     {
