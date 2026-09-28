@@ -73,9 +73,9 @@ def _resultado(estado: str, *, violaciones=(), pr_url: str | None = None, notas=
             "sha": sha, **extra}
 
 
-def _fallo(motivo: str, token: str, rama_empujada: bool | str | None = None) -> dict:
+def _fallo(motivo: str, token: str, rama_empujada: bool | str | None = None, pr_url: str | None = None) -> dict:
     return _resultado("fallo_entrega", violaciones=(Violacion("entrega", "", motivo),), token=token,
-                      rama_empujada=rama_empujada)
+                      rama_empujada=rama_empujada, pr_url=pr_url)
 
 
 def _sin_pr(sha: str, pr_previo: str | None, *, notas=(), motivo: str | None = None) -> dict:
@@ -155,7 +155,8 @@ async def entregar(clon: Clon, *, mision_id: str, repo: str, revision_legible: b
         return _fallo(str(exc), token)
     if not historial:
         previo, notas = await _pr_previo(pr_abierto, cliente, repo, clon.rama)
-        return _resultado("sin_cambios", notas=(("pr_previo_sin_cambios_nuevos",) if previo else ()) + notas)
+        return _resultado("sin_cambios", pr_url=previo,  # MAJOR-1: se miraba y no se devolvía
+                          notas=(("pr_previo_sin_cambios_nuevos",) if previo else ()) + notas)
     if not revision_legible:
         return _resultado("sin_informe_c5")
     try:
@@ -177,22 +178,24 @@ async def entregar(clon: Clon, *, mision_id: str, repo: str, revision_legible: b
         + total_excedido(medidos.total, tope_total_bytes=tope_total_bytes))
     if violaciones:
         return _resultado("rechazada_por_contrato", violaciones=violaciones, token=token)
-    if await _pausa(pausa_puesta):  # MINOR-1: la pausa pudo ponerse mientras se revisaba
-        return _resultado("sin_entregar", motivo="pausa_puesta")
+    # MAJOR-1: desde acá, si ya hay un PR abierto de la misión, cualquier resultado lo declara
+    # -- se mira UNA sola vez y se pasa a todo lo que sigue (incluida la relectura de la pausa).
     previo, notas_previas = await _pr_previo(pr_abierto, cliente, repo, clon.rama)
+    if await _pausa(pausa_puesta):  # MINOR-1: la pausa pudo ponerse mientras se revisaba
+        return _resultado("sin_entregar", motivo="pausa_puesta", pr_url=previo, notas=notas_previas)
     try:
         sha = await punta(clon.espejo, mision_id=mision_id)
     except EntregaRechazada as exc:  # fail-closed: sin push ni PR
-        return _fallo(str(exc), token)
+        return _fallo(str(exc), token, pr_url=previo)
     try:
         await empujar(clon.espejo, mision_id=mision_id, rama_por_omision=base, token=token)
     except EntregaRechazada as exc:  # fail-closed: MAJOR-A -- antes de decidir, ¿llegó igual?
         try:
             remoto = await consultar_remoto(clon.espejo, mision_id=mision_id, token=token)
         except EntregaRechazada:  # fail-closed: no se sabe si la rama llegó; se declara así
-            return _fallo(str(exc), token, rama_empujada="desconocido")
+            return _fallo(str(exc), token, rama_empujada="desconocido", pr_url=previo)
         if remoto != sha:
-            return _fallo(str(exc), token, rama_empujada=False)
+            return _fallo(str(exc), token, rama_empujada=False, pr_url=previo)
         # El remoto tiene exactamente lo que íbamos a empujar: el empuje llegó. Se sigue al PR.
     # --- desde aquí la rama YA está en GitHub: todo resultado lo declara ---
     if await _pausa(pausa_puesta):

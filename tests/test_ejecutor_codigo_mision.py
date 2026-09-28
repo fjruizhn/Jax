@@ -127,7 +127,9 @@ def test_sin_commits_nuevos_es_sin_cambios_y_no_empuja():
 
 def test_sin_cambios_con_un_pr_previo_abierto_lo_declara():
     """MINOR-5: un turno ≥ 2 que deja la rama sin commits propios mientras hay un PR abierto."""
-    assert _entregar(Dobles(pr_previo="https://gh/pr/9"))["notas"] == ["pr_previo_sin_cambios_nuevos"]
+    r = _entregar(Dobles(pr_previo="https://gh/pr/9"))
+    assert r["notas"] == ["pr_previo_sin_cambios_nuevos"]
+    assert r["pr_url"] == "https://gh/pr/9"  # MAJOR-1: `previo` se calculaba y no se devolvía
     falla = Dobles(falla={"pr_abierto": httpx.ConnectError("x")})
     assert _entregar(falla)["notas"] == ["pr_previo_no_verificado"]
 
@@ -232,6 +234,14 @@ def test_un_paso_que_falla_antes_del_empuje_es_fallo_entrega_con_el_motivo_sanea
     assert d.llamadas[-1] == paso
 
 
+def test_fallo_al_leer_la_punta_con_pr_previo_ya_conocido_da_su_url():
+    """MAJOR-1: para cuando se intenta leer la punta ya se miró si hay un PR abierto (antes del
+    empuje) -- si lo hay, este `fallo_entrega` también lo declara."""
+    d = Dobles((A_PY,), falla={"punta": E.EntregaRechazada("git_fallo: punta")}, pr_previo="https://gh/pr/9")
+    r = _entregar(d)
+    assert (r["estado_entrega"], r["pr_url"]) == ("fallo_entrega", "https://gh/pr/9")
+
+
 @pytest.mark.parametrize("error, detalle", [
     (httpx.HTTPStatusError("x", request=httpx.Request("POST", "https://api.github.com/repos/o/r/pulls"),
                            response=httpx.Response(422)), "github_api: 422"),
@@ -259,6 +269,13 @@ def test_pausa_puesta_antes_del_empuje_no_empuja():
 def test_pausa_ilegible_cuenta_como_puesta():
     d = Dobles((A_PY,), pausas=[OSError("no se lee")])
     assert _entregar(d)["estado_entrega"] == "sin_entregar" and "empujar" not in d.llamadas
+
+
+def test_pausa_puesta_antes_del_empuje_con_pr_previo_da_su_url():
+    """MAJOR-1: en este punto ya se miró si hay un PR abierto de la misión -- se declara."""
+    d = Dobles((A_PY,), pausas=[True], pr_previo="https://gh/pr/9")
+    r = _entregar(d)
+    assert (r["estado_entrega"], r["motivo"], r["pr_url"]) == ("sin_entregar", "pausa_puesta", "https://gh/pr/9")
 
 
 def test_pausa_puesta_despues_del_empuje_no_abre_el_pr():
@@ -577,6 +594,13 @@ def test_empuje_fallido_y_el_remoto_sin_la_punta_es_fallo_sin_rama(remoto):
     r = _entregar(d)
     assert (r["estado_entrega"], r["rama_empujada"]) == ("fallo_entrega", False)
     assert "pr" not in d.llamadas and TOKEN not in json.dumps(r)
+
+
+def test_empuje_fallido_sin_rama_con_pr_previo_ya_conocido_da_su_url():
+    """MAJOR-1: idem con un PR previo abierto de la misión -- ya se sabía antes del empuje."""
+    d = Dobles((A_PY,), falla={"empujar": _EMPUJE_CAIDO}, remoto=None, pr_previo="https://gh/pr/9")
+    r = _entregar(d)
+    assert (r["estado_entrega"], r["pr_url"]) == ("fallo_entrega", "https://gh/pr/9")
 
 
 def test_empuje_fallido_y_ls_remote_tambien_es_fallo_con_rama_desconocida():
