@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from jax.ejecutor import cita, transporte
+from jax.ejecutor.codigo.entrega import validar_owner_repo
 from jax.ejecutor.contratos import auditor as A
 from jax.ejecutor.contratos import destinos
 from jax.ejecutor.contratos.arranque import ContratosNoVerificados
@@ -42,6 +43,9 @@ from jax.ejecutor.contratos.arranque import ContratosNoVerificados
 _TRUNCADO = re.compile(r"truncat", re.I)
 CAMPOS = ("maquina", "comando", "linea", "dato", "proposito")
 AUDITOR_ILEGIBLE = "auditor_ilegible"
+TIPOS = ("servidor", "codigo")
+#: Estados de `mision_codigo.entregar` que NO son un fallo del turno.
+ENTREGA_SIN_FALLO = ("abierto", "sin_cambios")
 
 
 class TurnoIlegible(ValueError):
@@ -56,6 +60,10 @@ class Turno:
     objetivo: str
     instruccion: str
     hosts: frozenset
+    # Misión de código (spec 2026-09-28 v1.3): `repo` = {"owner_repo", "comandos_prueba" (tupla)},
+    # ya validado por `turno_desde_json`. `None` en una misión de servidor.
+    tipo: str = "servidor"
+    repo: dict | None = None
 
     @property
     def reanudar(self) -> bool:
@@ -102,8 +110,30 @@ def turno_desde_json(datos: bytes) -> Turno:
         raise TurnoIlegible("turno_sin_instruccion")
     if not isinstance(hosts, list) or not hosts or not all(isinstance(h, str) and h.strip() for h in hosts):
         raise TurnoIlegible("turno_sin_maquinas")
+    tipo = doc.get("tipo", "servidor")
+    if tipo not in TIPOS:
+        raise TurnoIlegible("turno_tipo_invalido")
+    if tipo == "servidor" and doc.get("repo") is not None:
+        raise TurnoIlegible("turno_repo_invalido")
+    repo = _repo_del_turno(doc.get("repo")) if tipo == "codigo" else None
     return Turno(doc["mision_id"], n, doc["sesion"], objetivo.strip(), instruccion.strip(),
-                 frozenset(h.strip() for h in hosts))
+                 frozenset(h.strip() for h in hosts), tipo, repo)
+
+
+def _repo_del_turno(repo) -> dict:
+    """Fail-closed: exactamente `owner_repo` (dueño/repo validado; la URL la deriva la entrega,
+    nunca llega como campo) y `comandos_prueba` (lista de textos no vacíos). Una clave de más
+    -- p. ej. un `remoto_url` de la versión anterior del plan -- se rechaza, no se ignora."""
+    if not isinstance(repo, dict) or set(repo) != {"owner_repo", "comandos_prueba"}:
+        raise TurnoIlegible("turno_repo_invalido")
+    try:
+        owner_repo = validar_owner_repo(repo["owner_repo"])
+    except ValueError:
+        raise TurnoIlegible("turno_repo_invalido") from None
+    comandos = repo["comandos_prueba"]
+    if not isinstance(comandos, list) or not all(isinstance(c, str) and c.strip() for c in comandos):
+        raise TurnoIlegible("turno_repo_invalido")
+    return {"owner_repo": owner_repo, "comandos_prueba": tuple(c.strip() for c in comandos)}
 
 
 def prompt_del_turno(instruccion: str, hosts, de_la_mision: frozenset, reanudar: bool = False) -> str:
@@ -127,6 +157,16 @@ def prompt_del_turno(instruccion: str, hosts, de_la_mision: frozenset, reanudar:
         "(ni porcentajes ni totales) y no agregues palabras tuyas. Si la misión pregunta dos cosas, "
         "manda una afirmación por cada una. Sin línea literal que lo respalde, un dato no se escribe."
     )
+
+
+def instrucciones_de_codigo(repo: dict) -> str:
+    """Lo que se agrega al pedido en una misión de código (es prompt del modelo, no UI: no va
+    por i18n). La entrega al remoto y el PR los hace el sistema, fuera de la jaula."""
+    comandos = "\n".join(f"- `{c}`" for c in repo["comandos_prueba"]) or "- (el repo no declara comandos)"
+    return ("\n\nMISIÓN DE CÓDIGO. Trabajas en el directorio actual, un clon de "
+            f"{repo['owner_repo']} en la rama de la misión. Haz commits locales (git add/commit). "
+            "NO empujes: la entrega la hace el sistema. Pruebas del repo:\n" + comandos +
+            "\nCita la salida real de cada prueba que corras; lo que no corriste, dilo como no corrido.")
 
 
 def evento(nombre: str, turno: int, /, **datos) -> str:
@@ -297,10 +337,16 @@ class Dependencias:
     leer_pausa: Callable
     espera_latido_s: float
     paso_espera_s: float = 0.5
+    # Misión de código: `preparar_codigo(ctx) -> Clon` y
+    # `entregar_codigo(ctx, clon, entrega, auditor_legible) -> dict` (mision_codigo.entregar).
+    preparar_codigo: Callable | None = None
+    entregar_codigo: Callable | None = None
 
 
-def _resultado(estado, codigo, *, rechazo=(), entrega=None, verificacion=None, sesion_iniciada=False) -> dict:
-    return {
+def _resultado(estado, codigo, *, rechazo=(), entrega=None, verificacion=None, sesion_iniciada=False,
+               entrega_codigo=None) -> dict:
+    extra = {} if entrega_codigo is None else {"entrega_codigo": entrega_codigo}
+    return {**extra,
         "estado": estado, "codigo": codigo, "rechazo": list(rechazo), "sesion_iniciada": sesion_iniciada,
         "afirmaciones": [_afirmacion(a) for a in entrega.respaldadas] if entrega else [],
         "descartadas": [_descartada(d) for d in entrega.descartadas] if entrega else [],
@@ -316,6 +362,11 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
         emitir(evento(nombre, n, **datos))
 
     dice("turno_lanzado", reanudar=turno.reanudar, maquinas=sorted(turno.hosts))
+    es_codigo = turno.tipo == "codigo"
+    if es_codigo and (deps.preparar_codigo is None or deps.entregar_codigo is None):
+        # Fail-closed: un turno de código sin con qué preparar Y entregar no arranca nada.
+        dice("turno_fallido", codigo="codigo_sin_dependencias")
+        return _resultado("fallido", "codigo_sin_dependencias")
     ctx = await deps.contexto()
     try:
         await deps.exigir(ctx)
@@ -330,6 +381,7 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
     vigia = await deps.abrir_vigia(ctx, turno.id_vigia, turno.texto_de_mision, turno.hosts)
     entrega, codigo, sesion_iniciada = None, None, False
     registro_cuadra, auditor_pauso, auditor_legible = False, False, True
+    resultado_entrega = None
     try:
         limite = time.monotonic() + deps.espera_latido_s
         while not await deps.latido_fresco(ctx):
@@ -347,9 +399,15 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
             await asyncio.sleep(deps.paso_espera_s)
         if codigo is None:
             dice("vigia_late")
+            prompt = prompt_del_turno(turno.instruccion, hosts, turno.hosts, turno.reanudar)
+            if es_codigo:
+                # Antes del cerebro: espejo + clon + dependencias (turno 1) o fetch del espejo (≥ 2).
+                clon = await deps.preparar_codigo(ctx)
+                dice("codigo_preparado", rama=clon.rama, base=clon.rama_por_omision,
+                     dependencias=list(clon.dependencias))
+                prompt += instrucciones_de_codigo(turno.repo)
             try:
-                rc, crudo = await deps.correr_cerebro(ctx, prompt_del_turno(turno.instruccion, hosts, turno.hosts, turno.reanudar),
-                                                      turno.sesion, turno.reanudar)
+                rc, crudo = await deps.correr_cerebro(ctx, prompt, turno.sesion, turno.reanudar)
             except asyncio.TimeoutError:
                 rc, crudo, codigo = None, b"", "cerebro_tope_vencido"
             sesion_iniciada = sesion_anunciada(crudo, turno.sesion)
@@ -382,6 +440,12 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                 dice("afirmacion_descartada", estado=d.estado, codigo=d.motivo.codigo, dato=d.afirmacion.dato)
             if codigo is None and rc != 0:
                 codigo = "cerebro_fallo"
+            if es_codigo and codigo is None and not auditor_pauso:
+                # Después del cerebro Y de C5. Sin informe legible, la entrega misma no abre PR.
+                resultado_entrega = await deps.entregar_codigo(ctx, clon, entrega, auditor_legible)
+                dice("entrega_codigo", **resultado_entrega)
+                if resultado_entrega["estado_entrega"] not in ENTREGA_SIN_FALLO:
+                    codigo = resultado_entrega["estado_entrega"]
     finally:
         rc_vigia, salida_vigia, err_vigia = await vigia.cerrar()
         cerro = rc_vigia == 0 and "cerrada=true" in salida_vigia
@@ -430,4 +494,5 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                     "auditor_pauso": auditor_pauso, "auditor_legible": auditor_legible}
     estado = "completado" if codigo is None else "fallido"
     dice("turno_completado" if codigo is None else "turno_fallido", codigo=codigo)
-    return _resultado(estado, codigo, entrega=entrega, verificacion=verificacion, sesion_iniciada=sesion_iniciada)
+    return _resultado(estado, codigo, entrega=entrega, verificacion=verificacion, sesion_iniciada=sesion_iniciada,
+                      entrega_codigo=resultado_entrega)
