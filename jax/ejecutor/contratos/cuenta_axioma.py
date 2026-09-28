@@ -158,7 +158,7 @@ def _sesion_valida(sesion: str) -> bool:
 
 def remoto_claude(c: Cuenta, *, base_url: str, modelo: str, prompt: str, herramientas: str = "Bash,Read",
                   max_salida_tokens: int | None = None, sesion: str | None = None, reanudar: bool = False,
-                  directorio_projects: Path | None = None) -> str:
+                  directorio_projects: Path | None = None, directorio_trabajo: Path | None = None) -> str:
     """`max_salida_tokens`: el tope que el proxy exige (JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS) cuando
     `base_url` es un proxy con carril; sin él el arnés pide su propio `max_tokens` y el proxy da 403.
 
@@ -169,7 +169,13 @@ def remoto_claude(c: Cuenta, *, base_url: str, modelo: str, prompt: str, herrami
     `directorio_projects` (B-1/M-4, ronda 3): la carpeta que la jaula monta en lectura y
     escritura sobre "$HOME/.claude/projects" -- ver `ruta_projects_de_la_mision` y el
     docstring del módulo. `None` (canario, humo, sin misión): ni siquiera dentro de esta
-    corrida sobrevive nada ahí."""
+    corrida sobrevive nada ahí.
+
+    `directorio_trabajo` (misión de código, spec 2026-09-28 v1.3 §3.2): el clon de la misión.
+    El arnés arranca ahí (`cd <dir>` en vez de `cd ~`), y SOLO en ese caso el entorno de la
+    jaula lleva `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=<dir>`:
+    medido 2026-09-28 con git 2.53 y los usuarios reales, sin eso `axioma` recibe «dubious
+    ownership» sobre un clon cuyo directorio es de `jaxsvc`. Solo rutas absolutas."""
     if sesion is not None and not _sesion_valida(sesion):
         raise ValueError("sesion_invalida")
     if reanudar and sesion is None:
@@ -182,11 +188,17 @@ def remoto_claude(c: Cuenta, *, base_url: str, modelo: str, prompt: str, herrami
     ]
     if max_salida_tokens is not None:
         variables.append(f"CLAUDE_CODE_MAX_OUTPUT_TOKENS={int(max_salida_tokens)}")
+    if directorio_trabajo is not None:
+        if not Path(directorio_trabajo).is_absolute():
+            raise ValueError("directorio_trabajo_relativo")
+        variables += ["GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory",
+                      f"GIT_CONFIG_VALUE_0={q(str(directorio_trabajo))}"]
     entorno = " ".join(variables)
     claude = " ".join(q(a) for a in [str(c.node_bin / "claude"), "-p", prompt, "--output-format", "stream-json",
                                       "--verbose", "--model", modelo, "--allowedTools", herramientas]
                       + ([] if sesion is None else ["--resume" if reanudar else "--session-id", sesion]))
-    return f"read -r K; cd ~ && env {entorno} {_jaula(c, directorio_projects=directorio_projects)} {claude}"
+    ir = "cd ~" if directorio_trabajo is None else f"cd {q(str(directorio_trabajo))}"
+    return f"read -r K; {ir} && env {entorno} {_jaula(c, directorio_projects=directorio_projects)} {claude}"
 
 
 _MISION_ID_VALIDA = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")

@@ -360,6 +360,33 @@ def test_remoto_claude_rechaza_una_sesion_que_no_es_un_uuid_canonico(sesion):
                          sesion=sesion)
 
 
+def test_remoto_claude_con_directorio_de_trabajo_entra_ahi_y_marca_el_clon_como_seguro():
+    """Misión de código (spec 2026-09-28 v1.3 §3.2): el cerebro trabaja EN el clon, no en `~`.
+    Medido 2026-09-28 con git 2.53 y los usuarios reales: sin `safe.directory`, `axioma` recibe
+    «dubious ownership» sobre un clon cuyo directorio es de `jaxsvc`. Va por GIT_CONFIG_* en el
+    entorno de la jaula (no en un archivo que la cuenta pueda reescribir)."""
+    c = CA.cuenta_desde_entorno(ENV)
+    remoto = CA.remoto_claude(c, base_url="http://127.0.0.1:1", modelo="m", prompt="p",
+                              directorio_trabajo=Path("/var/lib/x/con espacio/repo"))
+    assert remoto.startswith("read -r K; cd '/var/lib/x/con espacio/repo' && env ") and "cd ~" not in remoto
+    palabras = shlex.split(remoto.split(" && ", 1)[1].replace('"$K"', "K"))
+    entorno = palabras[1:palabras.index("bwrap")]
+    assert entorno[-3:] == ["GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory",
+                            "GIT_CONFIG_VALUE_0=/var/lib/x/con espacio/repo"]
+
+
+def test_remoto_claude_sin_directorio_de_trabajo_no_toca_git():
+    remoto = CA.remoto_claude(CA.cuenta_desde_entorno(ENV), base_url="http://127.0.0.1:1", modelo="m", prompt="p")
+    assert remoto.startswith("read -r K; cd ~ && env ")
+    assert "GIT_CONFIG" not in remoto and "safe.directory" not in remoto
+
+
+def test_remoto_claude_rechaza_un_directorio_de_trabajo_relativo():
+    with pytest.raises(ValueError, match="directorio_trabajo"):
+        CA.remoto_claude(CA.cuenta_desde_entorno(ENV), base_url="http://127.0.0.1:1", modelo="m", prompt="p",
+                         directorio_trabajo=Path("repo"))
+
+
 def test_reanudar_sin_sesion_no_vale():
     with pytest.raises(ValueError):
         CA.remoto_claude(CA.cuenta_desde_entorno(ENV), base_url="http://127.0.0.1:18436", modelo="m", prompt="x",
