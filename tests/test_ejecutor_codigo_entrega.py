@@ -495,28 +495,6 @@ def test_commits_de_la_rama_ve_lo_que_agrega_un_merge_por_su_cuenta(tmp_path, gi
     assert any(SECRETO in l for l in agregadas)
 
 
-def test_tamanos_se_miden_en_el_espejo_no_en_el_disco_del_clon(tmp_path, github):
-    """Qwen commitea un archivo grande y deja uno chico en el disco sin commitear: lo que se
-    empujaría es el grande. El tamaño sale de los blobs de la rama EN EL ESPEJO."""
-    c = _preparar(tmp_path)
-    _commit_bytes(c.ruta, "grande.bin", b"0" * 5000, "grande")
-    _traer(c)
-    (c.ruta / "grande.bin").write_bytes(b"0")
-    assert asyncio.run(E.tamanos_en_el_espejo(c.espejo, mision_id=MID, rama_por_omision="main")) == \
-        {"grande.bin": 5000}
-
-
-def test_tamanos_ignoran_lo_borrado_y_miden_los_enlaces_como_enlaces(tmp_path, github):
-    c = _preparar(tmp_path)
-    _git("rm", "-q", "a", cwd=c.ruta)
-    (c.ruta / "enlace").symlink_to("/etc/passwd")
-    _git("add", "enlace", cwd=c.ruta)
-    _git("commit", "-q", "-m", "x", cwd=c.ruta)
-    _traer(c)
-    assert asyncio.run(E.tamanos_en_el_espejo(c.espejo, mision_id=MID, rama_por_omision="main")) == \
-        {"enlace": len("/etc/passwd")}
-
-
 def test_commits_de_la_rama_lee_como_texto_un_archivo_con_nul_que_ya_no_esta(tmp_path, github):
     c = _preparar(tmp_path)
     _commit_bytes(c.ruta, "x.bin", b"\x00\n" + SECRETO.encode() + b"\n", "pongo")

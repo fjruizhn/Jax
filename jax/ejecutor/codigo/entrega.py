@@ -205,36 +205,6 @@ async def commits_de_la_rama(espejo: Path, *, mision_id: str, rama_por_omision: 
     return tuple(commits)
 
 
-async def tamanos_en_el_espejo(espejo: Path, *, mision_id: str, rama_por_omision: str) -> dict[str, int]:
-    """Tamaño en bytes (`git cat-file -s`) del blob de cada archivo que cambia en
-    `origin/<base>...axioma/<id>`, tal como está EN LA RAMA DEL ESPEJO. Nunca `stat` en el clon:
-    Qwen puede commitear un archivo grande y dejar uno chico en el disco. Lo borrado no se mide;
-    un enlace simbólico mide lo que git guarda de él (el destino como texto); un submódulo
-    (160000) no tiene blob."""
-    rama = rama_de_la_mision(mision_id)
-    base = validar_rama_base(rama_por_omision)
-    tamanos: dict[str, int] = {}
-    with hogar_temporal() as home:
-        env = entorno_base(home)
-        try:
-            crudo = await correr_git(["-C", str(espejo), "diff", "--raw", "-z", "--no-renames", "--no-abbrev",
-                                      "--no-ext-diff", "--no-textconv",
-                                      f"refs/remotes/origin/{base}...refs/heads/{rama}", "--"],
-                                     env=env, error="diff_fallo")
-            partes = crudo.split(b"\0")
-            for meta, ruta in zip(partes[0::2], partes[1::2]):
-                _, modo_nuevo, _, oid, estado = meta.decode(errors="replace").lstrip(":").split(" ")
-                if estado == "D" or modo_nuevo == "160000":
-                    continue
-                if not _OID.fullmatch(oid):
-                    raise EntregaRechazada("tamano_ilegible")
-                n = await correr_git(["-C", str(espejo), "cat-file", "-s", oid], env=env, error="cat_file_fallo")
-                tamanos[ruta.decode("utf-8", errors="replace")] = int(n.decode().strip())
-        except GitFallo as exc:
-            raise EntregaRechazada(str(exc)) from None
-    return tamanos
-
-
 async def tamanos_de_la_rama(espejo: Path, *, mision_id: str, rama_por_omision: str) -> dict[str, int]:
     """Tamaño en bytes de TODO blob que el empuje de `axioma/<id>` llevaría a GitHub -- los de cada
     commit de `origin/<base>..axioma/<id>`, no solo los de la punta (ruling 4b de la Tarea 9: un
