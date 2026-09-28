@@ -152,7 +152,7 @@ class AriadnaRuntime:
         self.control, self.leases = LocalControlLease(root, self.instance_id), TaskLeaseRegistry(root)
         self.audit_path = _state_dir(root) / "runtime-audit.ndjson"
         self.outbox_path = _state_dir(root) / "handoffs.ndjson"
-        self._mutex, self._owned_leases = threading.RLock(), {}
+        self._mutex, self._owned_leases, self._stop = threading.RLock(), {}, threading.Event()
     def start(self) -> Lifecycle:
         if self.lifecycle is not Lifecycle.NOT_STARTED: return self.lifecycle
         if not self.control.acquire():
@@ -163,6 +163,7 @@ class AriadnaRuntime:
         else: self.lifecycle = Lifecycle.READY
         return self.lifecycle
     def request_stop(self) -> None:
+        self._stop.set()
         with self._mutex:
             if self.lifecycle in {Lifecycle.READY, Lifecycle.RECONCILIATION_REQUIRED}: self.lifecycle = Lifecycle.STOPPING
     def shutdown(self) -> Lifecycle:
@@ -195,20 +196,30 @@ class AriadnaRuntime:
             log.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"); log.flush(); os.fsync(log.fileno())
     def run_once(self, proposal: Proposal, *, lease_id: str | None = None) -> str:
       with self._mutex:
-        if self.lifecycle is not Lifecycle.READY or self.engine.interrupted_transitions(): return "NOOP_NOT_READY"
+        if self.lifecycle is not Lifecycle.READY or self._stop.is_set(): return "NOOP_NOT_READY"
+        if self.engine.interrupted_transitions():
+            self.lifecycle = Lifecycle.RECONCILIATION_REQUIRED
+            return "NOOP_NOT_READY"
         state = self.root / "projects/las-voces/project.json"; observed_hash = project_hash(state)
         project = json.loads(state.read_text()); tasks = [x for x in project.get("tasks", []) if x.get("id") == proposal.task_id]
         if project.get("project", {}).get("id") != PROJECT_ID or len(tasks) != 1 or proposal.expected_project_hash != observed_hash: return "NOOP_STALE_OR_INVALID"
         if proposal.action in {"coordinate_verified_work", "emit_handoff"} and not self.leases.owns(lease_id, proposal.task_id, self.instance_id): return "NOOP_UNOWNED_LEASE"
-        material = {"hash": observed_hash, "task": proposal.task_id, "action": proposal.action, "target": proposal.target_status, "refs": proposal.evidence_refs, "handoff": proposal.handoff, "lease": lease_id}
+        try:
+            evidence_binding = {ref: hashlib.sha256((self.root / ref).resolve().read_bytes()).hexdigest() for ref in proposal.evidence_refs}
+        except OSError:
+            return "NOOP_INVALID_EVIDENCE"
+        material = {"hash": observed_hash, "task": proposal.task_id, "action": proposal.action, "target": proposal.target_status, "evidence": evidence_binding, "handoff": proposal.handoff, "lease": lease_id}
         key = hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode()).hexdigest()
         if self.audit_path.exists() and any(json.loads(line).get("idempotency_key") == key for line in self.audit_path.read_text().splitlines() if line): return "NOOP_IDEMPOTENT"
         decision = self.engine.evaluate(sender_agent=ARIADNA_ID, task_id=proposal.task_id, action=proposal.action, target_status=proposal.target_status, evidence_refs=list(proposal.evidence_refs), handoff=proposal.handoff)
         verdict = decision.verdict.value
         result = "NOOP_" + verdict
+        if self._stop.is_set(): return "NOOP_STOPPING"
         if verdict == "ALLOW" and proposal.action == "transition_status":
-            result = "EFFECT_" + self.engine.transition(sender_agent=ARIADNA_ID, task_id=proposal.task_id, target_status=proposal.target_status, evidence_refs=list(proposal.evidence_refs), expected_project_hash=observed_hash).verdict.value
+            final = self.engine.transition(sender_agent=ARIADNA_ID, task_id=proposal.task_id, target_status=proposal.target_status, evidence_refs=list(proposal.evidence_refs), expected_project_hash=observed_hash)
+            verdict, result = final.verdict.value, "EFFECT_" + final.verdict.value
         elif verdict == "ALLOW" and proposal.action in {"coordinate_verified_work", "emit_handoff"}:
+            if project_hash(state) != observed_hash: return "NOOP_STALE_OR_INVALID"
             with self.outbox_path.open("a") as outbox:
                 outbox.write(json.dumps({"event_type": proposal.action, "idempotency_key": key, "task_id": proposal.task_id, "handoff": proposal.handoff, "lease_id": lease_id}, sort_keys=True) + "\n"); outbox.flush(); os.fsync(outbox.fileno())
             result = "EFFECT_" + proposal.action.upper()
