@@ -240,7 +240,8 @@ class ResolverRegistry:
         mismatch = binding.tenant_project_scope_rule.matches(scope) or binding.subject_audience_scope_rule.matches(scope)
         if mismatch: return self._failure(predicate, arguments, scope, now, mismatch, binding)
         try: observation = entry.resolver(_freeze(arguments, "arguments"), scope)
-        except Exception: return self._failure(predicate, arguments, scope, now, ResolutionStatus.UNAVAILABLE, binding)
+        except Exception:  # fail-soft: resolver failure is sealed as UNAVAILABLE, never a current observation.
+            return self._failure(predicate, arguments, scope, now, ResolutionStatus.UNAVAILABLE, binding)
         if not isinstance(observation, ResolutionObservation): return self._failure(predicate, arguments, scope, now, ResolutionStatus.UNAVAILABLE, binding)
         status = observation.status
         # Existing resolver outcomes (notably SOURCE_CONFLICT) remain their
