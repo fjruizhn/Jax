@@ -81,8 +81,11 @@ def _cabecera(resto: str) -> str:
         p = resto[2:2 + n]
         if resto == f"a/{p} b/{p}":
             return p
-    # Asimétrico (renombre): la fijan después `rename to` o `+++`.
-    return resto.split(" b/", 1)[1] if " b/" in resto else resto
+    # Asimétrico (renombre): la fijan después `rename to` o `+++`. Best-effort nomás -- pero
+    # la ÚLTIMA " b/" (no la primera) es el candidato correcto cuando la ruta VIEJA (que va
+    # primero) contiene el literal " b/": partir por la primera cortaba ahí y el resto de la
+    # ruta nueva (p. ej. bajo `.github/workflows/`) quedaba pegado a la vieja.
+    return resto.rsplit(" b/", 1)[1] if " b/" in resto else resto
 
 
 def _cerrar(actual: dict | None, salida: list) -> None:

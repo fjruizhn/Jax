@@ -77,6 +77,16 @@ def test_rutas_utf8_y_con_espacios_sin_comillas(ruta):
     assert c.ruta == ruta and c.agregadas == ("x",)
 
 
+def test_cabecera_asimetrica_con_b_barra_en_la_ruta_vieja_no_pierde_el_workflow():
+    """El candidato de `diff --git a/VIEJA b/NUEVA` para un renombre es best-effort (`rename
+    to`/`+++` lo fijan después de verdad); pero si VIEJA contiene el literal " b/", partir por
+    la PRIMERA ocurrencia cortaba ahí y el candidato dejaba de empezar con
+    `.github/workflows/` -- si nada más lo corrige, C1 no lo ve."""
+    texto = "diff --git a/x b/decoy.txt b/.github/workflows/y.yml\n"
+    (c,) = parsear(texto)
+    assert c.ruta == ".github/workflows/y.yml"
+
+
 def test_git_agrega_un_tab_tras_una_ruta_con_espacios_en_mas_mas_mas():
     texto = ("diff --git a/dir con espacio/x.py b/dir con espacio/x.py\nnew file mode 100644\n"
              "--- /dev/null\n+++ b/dir con espacio/x.py\t\n@@ -0,0 +1 @@\n+x\n")
