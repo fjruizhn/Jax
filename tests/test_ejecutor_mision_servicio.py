@@ -12,6 +12,7 @@ import pytest
 
 from jax.ejecutor import mision as M
 from jax.ejecutor import mision_servicio as S
+from jax.ejecutor.contratos import arranque as AR
 from jax.ejecutor.contratos.cuenta_axioma import CuentaSinConfigurar
 
 TURNO = {"mision_id": str(uuid.uuid4()), "n": 1, "sesion": str(uuid.uuid4()), "objetivo": "x",
@@ -149,7 +150,8 @@ def test_el_vigia_se_abre_con_el_archivo_de_mision_y_se_cierra_con_sigterm(tmp_p
                                 argv=[sys.executable, str(falso)])
         await asyncio.sleep(0.3)
         assert v.vive()
-        assert json.loads((tmp_path / "m-t1.json").read_text()) == {"mision": "texto", "hosts": ["a", "b"]}
+        assert json.loads((tmp_path / "m-t1.json").read_text()) == {"mision": "texto", "hosts": ["a", "b"],
+                                                                     "tipo": None}
         rc, salida, err = await v.cerrar()
         # El proceso falso escribe el archivo de mision en stderr: sirve para
         # comprobar, de paso, que el stderr YA NO se tira (2026-09-20).
@@ -157,6 +159,18 @@ def test_el_vigia_se_abre_con_el_archivo_de_mision_y_se_cierra_con_sigterm(tmp_p
         return rc, salida
     rc, salida = asyncio.run(probar())
     assert rc == 0 and "cerrada=true" in salida and not (tmp_path / "m-t1.json").exists()
+
+
+def test_abrir_vigia_incluye_el_tipo_recibido_en_el_archivo_de_mision(tmp_path, monkeypatch):
+    """Ruling del coordinador (seguimiento Tarea 12/13): sin el tipo en el archivo que lee el
+    vigía, el contrato "codigo" queda dormido -- el vigía es quien de verdad exige los
+    contratos, en un proceso aparte que no comparte memoria con el turno."""
+    import sys
+    falso = tmp_path / "no_arranca_de_verdad.py"
+    falso.write_text("import sys; sys.exit(0)\n")
+    asyncio.run(S.abrir_vigia(tmp_path, "m-t2", "texto", frozenset({"a"}),
+                              argv=[sys.executable, str(falso)], tipo="codigo"))
+    assert json.loads((tmp_path / "m-t2.json").read_text())["tipo"] == "codigo"
 
 
 def test_el_cerebro_le_da_bash_y_skill_al_arnes(monkeypatch):
@@ -282,6 +296,70 @@ def test_servidor_no_trae_dependencias_de_codigo_ni_pide_token():
     turno = M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])})
     deps = S.dependencias_reales({}, turno, tope_s=1.0, espera_s=1.0)
     assert deps.preparar_codigo is None and deps.entregar_codigo is None
+
+
+# --- ruling del coordinador, seguimiento Tarea 12/13: turno.tipo llega de verdad al contrato
+# de arranque -- "un contrato dormido en producción no es un contrato" (Principio IX). Con
+# DOBLES MÍNIMOS: `contexto()`/`arranque.contexto_desde_entorno` son parseo puro de entorno,
+# sin red ni DB, así que corren de verdad; sólo el proceso del vigía (subprocess real) se
+# reemplaza. ----------------------------------------------------------------------------
+
+def _entorno_arranque(tmp_path):
+    return {"JAX_EJECUTOR_CUENTA": "axioma", "JAX_EJECUTOR_SSH_PUERTO": "58291",
+            "JAX_EJECUTOR_CONTROLADOR_LLAVE": "/k", "JAX_EJECUTOR_NODE_BIN": "/n",
+            "JAX_EJECUTOR_LIB": str(tmp_path / "lib"), "JAX_EJECUTOR_CUENTA_HOME": "/home/axioma",
+            "JAX_EJECUTOR_POLITICA": str(tmp_path / "politica.json"), "JAX_EJECUTOR_CANARIO_PUERTO": "18436",
+            "JAX_EJECUTOR_REGISTRO": str(tmp_path / "r.jsonl"), "JAX_PROXY_CARRIL_PUERTO": "18435",
+            "JAX_EJECUTOR_CERCO_SONDAS": "7777,11434", "JAX_EJECUTOR_FRENO_ESTADO": str(tmp_path / "e.json"),
+            "JAX_EJECUTOR_LLAVES_ROOT": "/etc/ssh/authorized_keys.d/axioma", "JAX_EJECUTOR_GANCHO_TOPE_S": "10",
+            "JAX_EJECUTOR_PAUSA": str(tmp_path / "PAUSA"),
+            "JAX_EJECUTOR_VIGIA_LATIDO": str(tmp_path / "v.latido"), "JAX_EJECUTOR_VIGIA_LATIDO_MAX_S": "30"}
+
+
+def test_deps_contexto_de_un_turno_de_codigo_trae_tipo_codigo_de_verdad(tmp_path):
+    env = {**_entorno_arranque(tmp_path), **ENV_CODIGO}
+    deps = S.dependencias_reales(env, _turno_codigo(), tope_s=1.0, espera_s=1.0)
+    ctx = asyncio.run(deps.contexto())
+    assert ctx.tipo == "codigo"
+    assert "codigo" in AR.pruebas_reales(ctx)
+
+
+def test_deps_contexto_de_un_turno_de_servidor_no_trae_codigo_de_verdad(tmp_path):
+    env = _entorno_arranque(tmp_path)
+    turno = M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])})
+    deps = S.dependencias_reales(env, turno, tope_s=1.0, espera_s=1.0)
+    ctx = asyncio.run(deps.contexto())
+    assert ctx.tipo == "servidor"
+    assert "codigo" not in AR.pruebas_reales(ctx)
+
+
+def _sin_arrancar_de_verdad(tmp_path, monkeypatch):
+    import sys
+    original = asyncio.create_subprocess_exec
+
+    async def espia(*argv, **kwargs):
+        falso = tmp_path / "vigia_no_arranca_de_verdad.py"
+        falso.write_text("import sys; sys.exit(0)\n")
+        return await original(sys.executable, str(falso), **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", espia)
+
+
+def test_deps_abrir_vigia_de_un_turno_de_codigo_escribe_tipo_codigo(tmp_path, monkeypatch):
+    _sin_arrancar_de_verdad(tmp_path, monkeypatch)
+    env = {**_entorno_arranque(tmp_path), **ENV_CODIGO, "JAX_EJECUTOR_MISIONES": str(tmp_path)}
+    deps = S.dependencias_reales(env, _turno_codigo(), tope_s=1.0, espera_s=1.0)
+    asyncio.run(deps.abrir_vigia(None, "m-tc", "texto", frozenset({"a"})))
+    assert json.loads((tmp_path / "m-tc.json").read_text())["tipo"] == "codigo"
+
+
+def test_deps_abrir_vigia_de_un_turno_de_servidor_escribe_tipo_servidor(tmp_path, monkeypatch):
+    _sin_arrancar_de_verdad(tmp_path, monkeypatch)
+    env = {**_entorno_arranque(tmp_path), "JAX_EJECUTOR_MISIONES": str(tmp_path)}
+    turno = M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])})
+    deps = S.dependencias_reales(env, turno, tope_s=1.0, espera_s=1.0)
+    asyncio.run(deps.abrir_vigia(None, "m-ts", "texto", frozenset({"a"})))
+    assert json.loads((tmp_path / "m-ts.json").read_text())["tipo"] == "servidor"
 
 
 def test_codigo_prepara_con_la_rama_de_la_api_el_autor_de_la_config_y_los_accesos_de_la_cuenta(codigo):

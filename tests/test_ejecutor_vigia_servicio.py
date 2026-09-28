@@ -170,6 +170,64 @@ def test_mision_legible():
         "uptime", frozenset({"hall9000", "atemai"}))
 
 
+# --- tipo del turno, propagado al contrato de arranque (ruling del coordinador, seguimiento
+# de Tarea 12/13: "un contrato dormido en producción no es un contrato" -- Principio IX) -----
+
+def test_mision_legible_con_tipo_codigo():
+    doc = b'{"mision": "x", "hosts": ["hall9000"], "tipo": "codigo"}'
+    assert S.mision_desde_bytes(doc) == S.Mision("x", frozenset({"hall9000"}), tipo="codigo")
+
+
+def test_mision_sin_tipo_es_None():
+    assert S.mision_desde_bytes(b'{"mision": "x", "hosts": ["hall9000"]}').tipo is None
+
+
+def test_mision_con_tipo_no_string_se_ignora():
+    # fail-safe, no fail-closed: un "tipo" corrupto no debe tumbar la lectura de la misión
+    # entera -- simplemente no llega como turno de código (ctx.tipo != "codigo" de sobra).
+    doc = json.dumps({"mision": "x", "hosts": ["hall9000"], "tipo": 5}).encode()
+    assert S.mision_desde_bytes(doc).tipo is None
+
+
+def test_principal_pasa_el_tipo_de_la_mision_al_contexto(tmp_path, monkeypatch):
+    import jacobs.store as jstore
+    from jax.ejecutor.contratos import eleccion_c5
+
+    env = _entorno_principal(tmp_path)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+
+    ruta_mision = tmp_path / f"{MISION_ID}.json"
+    ruta_mision.write_text(json.dumps({"mision": "uptime de atemai", "hosts": ["atemai"], "tipo": "codigo"}))
+
+    monkeypatch.setattr(jstore, "conexion", lambda **kw: _ConexionFalsa())
+
+    async def _leer_config_falso(conn):
+        return eleccion_c5.ConfigC5(
+            cerebro_faceta="x", auditor_faceta="y", auditor_faceta_local="z",
+            lote_max=5, intervalo_s=1.0, max_tokens=100,
+            admite_datos_de_clientes=False, admite_mismo_proveedor=False)
+
+    async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet):
+        return ("faceta-fake", None, None)
+
+    monkeypatch.setattr(eleccion_c5, "leer_config", _leer_config_falso)
+    monkeypatch.setattr(eleccion_c5, "elegir_y_resolver_auditor", _elegir_falso)
+
+    llamadas = {}
+
+    async def _correr_mision_falso(ctx, mision, **kw):
+        llamadas["ctx_tipo"] = ctx.tipo
+        return ()
+
+    monkeypatch.setattr(S, "correr_mision", _correr_mision_falso)
+
+    rc = asyncio.run(S._principal(ruta_mision))
+
+    assert rc == 0
+    assert llamadas["ctx_tipo"] == "codigo"
+
+
 @pytest.mark.parametrize("valor", [None, "x", "0", "-1", "30", "31"])
 def test_latido_cada_tiene_que_ser_menor_que_el_maximo(valor):
     env = {} if valor is None else {S.VARIABLE_LATIDO_CADA_S: valor}

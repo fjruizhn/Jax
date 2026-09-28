@@ -177,9 +177,13 @@ class Vigia:
             self._ruta.unlink(missing_ok=True)
 
 
-async def abrir_vigia(directorio, id_vigia: str, texto: str, hosts, *, argv=None) -> Vigia:
+async def abrir_vigia(directorio, id_vigia: str, texto: str, hosts, *, argv=None, tipo=None) -> Vigia:
+    # `tipo` (Tarea 12/13, ruling del coordinador): el vigía es un PROCESO APARTE
+    # (`vigia_servicio._principal`) que exige los contratos antes de que el proxy sirva -- sin
+    # el tipo del turno en este archivo, "codigo" queda dormido ahí aunque `arranque.py` ya lo
+    # sepa correr. `None` (misión de humo, sin turno): igual que antes.
     ruta = Path(directorio) / f"{id_vigia}.json"
-    await asyncio.to_thread(ruta.write_text, json.dumps({"mision": texto, "hosts": sorted(hosts)}), "utf-8")
+    await asyncio.to_thread(ruta.write_text, json.dumps({"mision": texto, "hosts": sorted(hosts), "tipo": tipo}), "utf-8")
     argv = argv or [sys.executable, "-m", "jax.ejecutor.contratos.vigia_servicio"]
     proc = await asyncio.create_subprocess_exec(*argv, str(ruta), stdout=asyncio.subprocess.PIPE,
                                                 stderr=asyncio.subprocess.PIPE, start_new_session=True)
@@ -289,7 +293,7 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
         return estado["config"]
 
     async def contexto():
-        return arranque.contexto_desde_entorno(env, turno.hosts)
+        return arranque.contexto_desde_entorno(env, turno.hosts, tipo=turno.tipo)
 
     async def hosts(ctx):
         doc = json.loads(await asyncio.to_thread(ctx.cuenta.politica.read_bytes))
@@ -299,7 +303,7 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
         return (await asyncio.to_thread(os.stat, ctx.registro)).st_size
 
     async def vigia(ctx, id_vigia, texto, maquinas):
-        return await abrir_vigia(env["JAX_EJECUTOR_MISIONES"], id_vigia, texto, maquinas)
+        return await abrir_vigia(env["JAX_EJECUTOR_MISIONES"], id_vigia, texto, maquinas, tipo=turno.tipo)
 
     async def latido(ctx):
         return await asyncio.to_thread(pausa.latido_fresco, ctx.latido, ctx.latido_max_s)

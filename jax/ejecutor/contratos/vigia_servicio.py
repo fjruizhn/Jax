@@ -82,6 +82,12 @@ class MisionIlegible(ValueError):
 class Mision:
     texto: str
     hosts: frozenset
+    # El tipo del turno ("codigo" o "servidor"), Tarea 12/13 (ruling del coordinador,
+    # seguimiento): sin esto el contrato "codigo" queda dormido en el vigía -- que es quien de
+    # verdad exige los contratos antes de que el proxy sirva (arranque.exigir_contratos, línea
+    # más abajo en correr_mision). `None`: una misión escrita ANTES de este cambio, o sin tipo
+    # -- se trata como fuera de un turno de código (arranque.py ya lo hace con `!= "codigo"`).
+    tipo: str | None = None
 
 
 def mision_desde_bytes(datos: bytes) -> Mision:
@@ -97,7 +103,8 @@ def mision_desde_bytes(datos: bytes) -> Mision:
     if (not isinstance(hosts, list) or not hosts
             or not all(isinstance(h, str) and h.strip() for h in hosts)):
         raise MisionIlegible("mision_sin_maquinas")
-    return Mision(texto.strip(), frozenset(h.strip() for h in hosts))
+    tipo = doc.get("tipo")
+    return Mision(texto.strip(), frozenset(h.strip() for h in hosts), tipo=tipo if isinstance(tipo, str) else None)
 
 
 def latido_cada_desde_entorno(env, latido_max_s: float) -> float:
@@ -388,7 +395,7 @@ async def _principal(ruta_mision: Path) -> int:
     from jax.ejecutor.contratos import auditor_cliente, eleccion_c5
 
     mision = mision_desde_bytes(await asyncio.to_thread(ruta_mision.read_bytes))
-    ctx = arranque.contexto_desde_entorno(os.environ, mision.hosts)
+    ctx = arranque.contexto_desde_entorno(os.environ, mision.hosts, tipo=mision.tipo)
     # Barrido (ronda 9): al arrancar el vigía, limpia los temporales huérfanos que un
     # kill puede haber dejado de una corrida anterior de `quitar_pausa_si` -- nunca la
     # pausa misma (ver `pausa.barrer_temporales_huerfanos`).
