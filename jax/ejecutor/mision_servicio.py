@@ -203,11 +203,13 @@ VARIABLE_TOKEN = "JAX_GITHUB_TOKEN"
 API_GITHUB = "https://api.github.com"
 HERRAMIENTAS_SERVIDOR = "Bash,Skill"
 HERRAMIENTAS_CODIGO = "Bash,Read,Edit,Write,Glob,Grep,Skill"
-#: Valores por omisión de `axioma_config` (spec §4.3: el autor es configurable; §3.3: 5 MB).
-#: Medido 2026-09-28: ninguna de las dos claves existe todavía en producción.
+#: Valores por omisión de `axioma_config` (spec §4.3: el autor es configurable; §3.3: 5 MB por
+#: archivo; MINOR-3 de la auditoría: 100 MB en total). Medido 2026-09-28: ninguna de estas claves
+#: existe todavía en producción -- rige el valor por omisión.
 AUTOR_POR_OMISION = "Axioma (Ejecutor) <axioma@axioma-ia.io>"
 TOPE_BYTES_POR_OMISION = 5 * 1024 * 1024
-CLAVES_CODIGO = ("ejecutor.codigo.autor", "ejecutor.codigo.tope_bytes")
+TOPE_TOTAL_BYTES_POR_OMISION = 100 * 1024 * 1024
+CLAVES_CODIGO = ("ejecutor.codigo.autor", "ejecutor.codigo.tope_bytes", "ejecutor.codigo.tope_total_bytes")
 SQL_CONFIG_CODIGO = ("SELECT config_key, config_value FROM axioma_config WHERE config_key IN "
                      f"({', '.join(['%s'] * len(CLAVES_CODIGO))})")
 
@@ -216,20 +218,26 @@ SQL_CONFIG_CODIGO = ("SELECT config_key, config_value FROM axioma_config WHERE c
 class ConfigCodigo:
     autor: str
     tope_bytes: int
+    tope_total_bytes: int = TOPE_TOTAL_BYTES_POR_OMISION
+
+
+def _entero_positivo(filas: dict, clave: str, por_omision: int) -> int:
+    texto = (filas.get(clave) or str(por_omision)).strip()
+    try:
+        valor = int(texto)
+    except ValueError:
+        raise ValueError("config_codigo_invalida", clave) from None
+    if valor <= 0:
+        raise ValueError("config_codigo_invalida", clave)
+    return valor
 
 
 def config_codigo_desde_filas(filas: dict) -> ConfigCodigo:
     """Fail-closed: una clave PRESENTE con un valor inválido es error, no el valor por omisión."""
     autor = (filas.get("ejecutor.codigo.autor") or AUTOR_POR_OMISION).strip()
     P.parsear_autor(autor)  # ValueError si no es 'Nombre <correo>'
-    texto = (filas.get("ejecutor.codigo.tope_bytes") or str(TOPE_BYTES_POR_OMISION)).strip()
-    try:
-        tope = int(texto)
-    except ValueError:
-        raise ValueError("config_codigo_invalida", "ejecutor.codigo.tope_bytes") from None
-    if tope <= 0:
-        raise ValueError("config_codigo_invalida", "ejecutor.codigo.tope_bytes")
-    return ConfigCodigo(autor, tope)
+    return ConfigCodigo(autor, _entero_positivo(filas, "ejecutor.codigo.tope_bytes", TOPE_BYTES_POR_OMISION),
+                        _entero_positivo(filas, "ejecutor.codigo.tope_total_bytes", TOPE_TOTAL_BYTES_POR_OMISION))
 
 
 async def leer_config_codigo() -> ConfigCodigo:
@@ -351,11 +359,17 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
 
     async def entregar_codigo(ctx, clon, entrega, auditor_legible):
         cfg = await config_codigo()
+
+        async def pausa_ahora() -> bool:
+            # MINOR-1: la entrega la vuelve a leer justo antes de empujar y antes del PR. `leer_pausa`
+            # ya falla cerrado (ilegible = puesta).
+            return bool((await asyncio.to_thread(leer_pausa, ctx.pausa))["puesta"])
         async with _cliente_github(token) as cliente:
             return await MC.entregar(clon, mision_id=turno.mision_id, repo=turno.repo["owner_repo"],
                                      revision_legible=auditor_legible,
                                      informe=informe_c5(entrega, estado.get("faceta_auditor")), token=token,
                                      cliente=cliente, tope_bytes=cfg.tope_bytes,
+                                     tope_total_bytes=cfg.tope_total_bytes, pausa_puesta=pausa_ahora,
                                      modelo=env["JAX_PROXY_CARRIL_MODELO"], autor=cfg.autor,
                                      upload_pack=E.upload_pack_por_ssh(ctx.cuenta))
 

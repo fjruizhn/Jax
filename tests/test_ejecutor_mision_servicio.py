@@ -235,7 +235,7 @@ def codigo(monkeypatch):
 
     async def config():
         vistos["config_leida"] += 1
-        return S.ConfigCodigo("Axioma Prueba <ax@prueba.io>", 1234)
+        return S.ConfigCodigo("Axioma Prueba <ax@prueba.io>", 1234, 5678)
 
     async def rama(cliente, repo):
         vistos["rama"] = (repo, str(cliente.base_url), cliente.headers.get("authorization"))
@@ -320,11 +320,24 @@ def test_codigo_entrega_con_token_tope_autor_y_upload_pack_de_la_cuenta(codigo):
     clon, kw = codigo["entregar"]
     assert clon is CLON and kw["repo"] == "o/r" and kw["mision_id"] == TURNO["mision_id"]
     assert kw["token"] == TOKEN and kw["tope_bytes"] == 1234 and kw["autor"] == "Axioma Prueba <ax@prueba.io>"
+    assert kw["tope_total_bytes"] == 5678
     assert kw["modelo"] == "qwen-carril" and kw["revision_legible"] is True
     assert kw["upload_pack"].startswith("ssh ") and kw["upload_pack"].endswith("axioma@127.0.0.1 git-upload-pack")
     assert "'3 passed'" in kw["informe"] and "'ssh -tt m pytest'" in kw["informe"]
     assert str(kw["cliente"].base_url) == "https://api.github.com"
     assert codigo["config_leida"] == 1
+
+
+def test_codigo_la_entrega_relee_la_pausa_del_contexto(codigo, tmp_path):
+    """MINOR-1: la pausa que `mision_codigo` vuelve a leer es la de ESTE contexto (ilegible = puesta)."""
+    class Ctx(_CtxCodigo):
+        pausa = tmp_path / "pausa"
+    deps = S.dependencias_reales(ENV_CODIGO, _turno_codigo(), tope_s=1.0, espera_s=1.0)
+    asyncio.run(deps.entregar_codigo(Ctx(), CLON, transporte.Entrega((), (), ()), True))
+    leer = codigo["entregar"][1]["pausa_puesta"]
+    assert asyncio.run(leer()) is False
+    (tmp_path / "pausa").write_text("{}")
+    assert asyncio.run(leer()) is True
 
 
 def test_codigo_la_config_se_lee_una_vez_por_turno(codigo):
@@ -348,15 +361,17 @@ def test_informe_c5_va_en_un_bloque_de_codigo_sangrado_sin_saltos_crudos():
 
 
 @pytest.mark.parametrize("filas, esperado", [
-    ({}, S.ConfigCodigo(S.AUTOR_POR_OMISION, S.TOPE_BYTES_POR_OMISION)),
-    ({"ejecutor.codigo.autor": "Otro <o@x.io>", "ejecutor.codigo.tope_bytes": "10"}, S.ConfigCodigo("Otro <o@x.io>", 10)),
+    ({}, S.ConfigCodigo(S.AUTOR_POR_OMISION, S.TOPE_BYTES_POR_OMISION, 100 * 1024 * 1024)),
+    ({"ejecutor.codigo.autor": "Otro <o@x.io>", "ejecutor.codigo.tope_bytes": "10",
+      "ejecutor.codigo.tope_total_bytes": "20"}, S.ConfigCodigo("Otro <o@x.io>", 10, 20)),
 ])
 def test_config_de_codigo_con_y_sin_filas(filas, esperado):
     assert S.config_codigo_desde_filas(filas) == esperado
 
 
 @pytest.mark.parametrize("filas", [{"ejecutor.codigo.autor": "sin correo"}, {"ejecutor.codigo.tope_bytes": "0"},
-                                   {"ejecutor.codigo.tope_bytes": "x"}, {"ejecutor.codigo.tope_bytes": "-5"}])
+                                   {"ejecutor.codigo.tope_bytes": "x"}, {"ejecutor.codigo.tope_bytes": "-5"},
+                                   {"ejecutor.codigo.tope_total_bytes": "0"}, {"ejecutor.codigo.tope_total_bytes": "y"}])
 def test_config_de_codigo_invalida_falla_cerrado(filas):
     with pytest.raises(ValueError):
         S.config_codigo_desde_filas(filas)

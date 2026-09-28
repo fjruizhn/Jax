@@ -564,7 +564,7 @@ def test_tamanos_de_la_rama_ve_un_blob_grande_de_un_commit_intermedio_ya_borrado
     _git("commit", "-q", "-m", "lo borro", cwd=c.ruta)
     _traer(c)
     assert asyncio.run(E.diff_en_el_espejo(c.espejo, mision_id=MID, rama_por_omision="main")) == ()
-    assert _tamanos_rango(c) == {"grande.bin": 5000}
+    assert _tamanos_rango(c).por_ruta == {"grande.bin": 5000} and _tamanos_rango(c).total > 5000
 
 
 def test_tamanos_de_la_rama_guarda_el_mayor_de_cada_ruta_y_no_mira_la_base(tmp_path, github):
@@ -574,7 +574,7 @@ def test_tamanos_de_la_rama_guarda_el_mayor_de_cada_ruta_y_no_mira_la_base(tmp_p
     _commit_bytes(c.ruta, "b", b"0" * 10, "chico")
     _traer(c)
     (c.ruta / "b").write_bytes(b"0")
-    assert _tamanos_rango(c) == {"b": 3000}
+    assert _tamanos_rango(c).por_ruta == {"b": 3000}
 
 
 def test_tamanos_de_la_rama_mide_un_enlace_como_enlace(tmp_path, github):
@@ -583,4 +583,4 @@ def test_tamanos_de_la_rama_mide_un_enlace_como_enlace(tmp_path, github):
     _git("add", "enlace", cwd=c.ruta)
     _git("commit", "-q", "-m", "x", cwd=c.ruta)
     _traer(c)
-    assert _tamanos_rango(c) == {"enlace": len("/etc/passwd")}
+    assert _tamanos_rango(c).por_ruta == {"enlace": len("/etc/passwd")}

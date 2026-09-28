@@ -243,7 +243,15 @@ async def _objetos_commit(espejo: Path, shas: list[str]) -> dict[str, str]:
     return crudos
 
 
-async def tamanos_de_la_rama(espejo: Path, *, mision_id: str, rama_por_omision: str) -> dict[str, int]:
+@dataclass(frozen=True)
+class Tamanos:
+    """`por_ruta`: el blob mayor de cada ruta. `total`: la suma de TODOS los objetos del rango (lo que
+    el empuje llevaría sin comprimir; MINOR-3 de la auditoría: tope total configurable)."""
+    por_ruta: dict[str, int]
+    total: int
+
+
+async def tamanos_de_la_rama(espejo: Path, *, mision_id: str, rama_por_omision: str) -> Tamanos:
     """Tamaño en bytes de TODO blob que el empuje de `axioma/<id>` llevaría a GitHub -- los de cada
     commit de `origin/<base>..axioma/<id>`, no solo los de la punta (ruling 4b de la Tarea 9: un
     archivo grande agregado y borrado dentro de la rama viaja igual en el historial). Medido EN EL
@@ -268,23 +276,45 @@ async def tamanos_de_la_rama(espejo: Path, *, mision_id: str, rama_por_omision: 
                     raise EntregaRechazada("tamano_ilegible")
                 rutas.setdefault(oid, ruta)
             if not rutas:
-                return {}
+                return Tamanos({}, 0)
             tipos = await correr_git(["-C", str(espejo), "--no-replace-objects", "cat-file",
                                       "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
                                      env=env, error="cat_file_fallo", entrada="".join(f"{o}\n" for o in rutas).encode())
         except GitFallo as exc:
             raise EntregaRechazada(str(exc)) from None
     tamanos: dict[str, int] = {}
+    total = 0
     for linea in tipos.decode().split("\n"):
         if not linea:
             continue
         partes = linea.split(" ")
         if len(partes) != 3 or partes[0] not in rutas or not partes[2].isdigit():
             raise EntregaRechazada("tamano_ilegible")  # incluye "<oid> missing"
+        total += int(partes[2])
         if partes[1] == "blob":
             ruta = rutas[partes[0]] or partes[0]
             tamanos[ruta] = max(tamanos.get(ruta, 0), int(partes[2]))
-    return tamanos
+    return Tamanos(tamanos, total)
+
+
+async def punta_de_la_rama(espejo: Path, *, mision_id: str) -> str:
+    """El oid de `axioma/<id>` EN EL ESPEJO: lo que el empuje manda (MAJOR-1: el resultado lo
+    declara si la rama quedó empujada sin PR)."""
+    rama = rama_de_la_mision(mision_id)
+    with hogar_temporal() as home:
+        try:
+            oid = (await correr_git(["-C", str(espejo), "rev-parse", "--verify", "--end-of-options",
+                                     f"refs/heads/{rama}^{{commit}}"], env=entorno_base(home),
+                                    error="rev_parse_fallo")).decode().strip()
+        except GitFallo as exc:
+            raise EntregaRechazada(str(exc)) from None
+    if not _OID.fullmatch(oid):
+        raise EntregaRechazada("punta_ilegible")
+    return oid
+
+
+async def hay_pr_abierto(cliente: httpx.AsyncClient, *, repo: str, rama: str) -> bool:
+    return bool(await _listar(cliente, validar_owner_repo(repo), rama, "open"))
 
 
 async def empujar(espejo: Path, *, mision_id: str, rama_por_omision: str, token: str) -> None:
@@ -379,6 +409,11 @@ async def abrir_o_actualizar_pr(cliente: httpx.AsyncClient, *, repo: str, rama: 
         r = await cliente.patch(f"/repos/{repo}/pulls/{n}", json={"title": titulo, "body": cuerpo, "draft": False})
         r.raise_for_status()
         pr = r.json()
-    et = await cliente.post(f"/repos/{repo}/issues/{pr['number']}/labels", json={"labels": [ETIQUETA]})
-    et.raise_for_status()
-    return PrEntregado(pr["html_url"], notas)
+    # Fuera del try de la etiqueta: una respuesta sin número o sin URL NO es un PR abierto (MAJOR-1).
+    url, numero = pr["html_url"], int(pr["number"])
+    try:
+        et = await cliente.post(f"/repos/{repo}/issues/{numero}/labels", json={"labels": [ETIQUETA]})
+        et.raise_for_status()
+    except Exception:  # fail-soft: el PR ya está abierto; la etiqueta que falta se declara (nota sin_etiqueta)
+        notas = (*notas, "sin_etiqueta")
+    return PrEntregado(url, notas)

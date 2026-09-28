@@ -45,6 +45,11 @@ def tamanos_excedidos(tamanos: Mapping[str, int], *, tope_bytes: int) -> tuple[V
                  for ruta, n in sorted(tamanos.items()) if n > tope_bytes)
 
 
+def total_excedido(total: int, *, tope_total_bytes: int) -> tuple[Violacion, ...]:
+    """MINOR-3: el tope de TODO lo que el empuje llevaría, además del tope por archivo."""
+    return (Violacion("tamano_total", "", f"{total} > {tope_total_bytes} bytes"),) if total > tope_total_bytes else ()
+
+
 def tapar_secretos(texto: str) -> str:
     """Para lo que sale hacia la bitácora (rutas y detalles de violaciones)."""
     return _SECRETOS.sub("***", texto)

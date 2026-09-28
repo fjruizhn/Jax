@@ -31,15 +31,21 @@ PIE = f"Hecho-por: Axioma (Ejecutor, misión {MID}, cerebro qwen)"
 
 # --- el orden, con dobles -------------------------------------------------------------------
 
+PUNTA = "c" * 40
+
+
 class Dobles:
-    def __init__(self, cambios=(), commits=None, tamanos=None, falla=None):
+    def __init__(self, cambios=(), commits=None, tamanos=None, total=0, falla=None, pausas=(), pr_previo=False):
         self.cambios = cambios
         self.historial = commits if commits is not None else (
             (E.Commit("a" * 40, AXIOMA, AXIOMA, cambios),) if cambios else ())
-        self.medidos = tamanos or {}
+        self.medidos = E.Tamanos(tamanos or {}, total)
         self.falla = falla or {}
         self.llamadas: list[str] = []
         self.pr_pedido: dict | None = None
+        self.pausas = list(pausas)  # lo que devuelve cada lectura de la pausa, en orden; después, False
+        self.lecturas_de_pausa = 0
+        self.pr_previo = pr_previo
 
     def _paso(self, nombre):
         self.llamadas.append(nombre)
@@ -62,6 +68,10 @@ class Dobles:
         self._paso("tamanos")
         return self.medidos
 
+    async def punta(self, espejo, *, mision_id):
+        self._paso("punta")
+        return PUNTA
+
     async def empujar(self, espejo, *, mision_id, rama_por_omision, token):
         assert token == TOKEN
         self._paso("empujar")
@@ -71,6 +81,17 @@ class Dobles:
         self.pr_pedido = kw
         return E.PrEntregado("https://gh/pr/1", ("pr_reabierto_nuevo",))
 
+    async def pausa(self):
+        self.lecturas_de_pausa += 1
+        valor = self.pausas.pop(0) if self.pausas else False
+        if isinstance(valor, Exception):
+            raise valor
+        return valor
+
+    async def pr_abierto(self, cliente, *, repo, rama):
+        self._paso("pr_abierto")
+        return self.pr_previo
+
 
 def _clon(tmp: Path = Path("/x")) -> P.Clon:
     return P.Clon(tmp / "repo", RAMA, "main", (), tmp / "espejo.git")
@@ -78,24 +99,34 @@ def _clon(tmp: Path = Path("/x")) -> P.Clon:
 
 def _entregar(d: Dobles, **kw) -> dict:
     base = dict(mision_id=MID, repo="o/r", revision_legible=True, informe="informe", token=TOKEN, cliente=None,
-                tope_bytes=10, modelo="qwen", autor=AUTOR, upload_pack="ssh-como-la-cuenta",
-                traer=d.traer, commits=d.commits, diff=d.diff, tamanos=d.tamanos, empujar=d.empujar,
-                abrir_pr=d.abrir_pr)
+                tope_bytes=10, tope_total_bytes=10**9, modelo="qwen", autor=AUTOR, upload_pack="ssh-como-la-cuenta",
+                pausa_puesta=d.pausa, traer=d.traer, commits=d.commits, diff=d.diff, tamanos=d.tamanos,
+                punta=d.punta, empujar=d.empujar, abrir_pr=d.abrir_pr, pr_abierto=d.pr_abierto)
     base.update(kw)
     return asyncio.run(MC.entregar(_clon(), **base))
 
 
 A_PY = Cambio("a.py", "M", None, ("x",), ())
+SIN_EMPUJE = {"rama_empujada": False, "sha": None}
 
 
 def test_sin_commits_nuevos_es_sin_cambios_y_no_empuja():
     d = Dobles()
     r = _entregar(d)
-    assert r == {"estado_entrega": "sin_cambios", "pr_url": None, "violaciones": [], "notas": []}
-    assert d.llamadas == ["traer", "commits"]
+    assert r == {"estado_entrega": "sin_cambios", "pr_url": None, "violaciones": [], "notas": [], **SIN_EMPUJE}
+    assert d.llamadas == ["traer", "commits", "pr_abierto"]
 
 
-def test_sin_informe_c5_no_empuja_ni_abre_pr():
+def test_sin_cambios_con_un_pr_previo_abierto_lo_declara():
+    """MINOR-5: un turno ≥ 2 que deja la rama sin commits propios mientras hay un PR abierto."""
+    assert _entregar(Dobles(pr_previo=True))["notas"] == ["pr_previo_sin_cambios_nuevos"]
+    falla = Dobles(falla={"pr_abierto": httpx.ConnectError("x")})
+    assert _entregar(falla)["notas"] == ["pr_previo_no_verificado"]
+
+
+def test_mision_codigo_por_si_sola_sin_informe_c5_no_empuja_ni_abre_pr():
+    """MINOR-6: prueba SOLO la defensa de `mision_codigo`. Desde `correr_turno` este estado no se
+    alcanza (un auditor ilegible frena antes y la entrega queda `sin_entregar`)."""
     d = Dobles((A_PY,))
     r = _entregar(d, revision_legible=False)
     assert r["estado_entrega"] == "sin_informe_c5" and "empujar" not in d.llamadas and "pr" not in d.llamadas
@@ -113,6 +144,14 @@ def test_tamano_medido_sobre_el_tope_rechaza():
     r = _entregar(d)
     assert r["estado_entrega"] == "rechazada_por_contrato"
     assert r["violaciones"] == [{"regla": "tamano", "ruta": "a.py", "detalle": "11 > 10 bytes"}]
+
+
+def test_tamano_total_del_rango_sobre_el_tope_rechaza():
+    """MINOR-3: cada archivo bajo el tope, el conjunto no."""
+    d = Dobles((A_PY,), tamanos={"a.py": 5, "b.py": 5}, total=1001)
+    r = _entregar(d, tope_total_bytes=1000)
+    assert r["estado_entrega"] == "rechazada_por_contrato" and "empujar" not in d.llamadas
+    assert r["violaciones"] == [{"regla": "tamano_total", "ruta": "", "detalle": "1001 > 1000 bytes"}]
 
 
 @pytest.mark.parametrize("autor, committer", [
@@ -154,27 +193,71 @@ def test_camino_feliz_empuja_abre_el_pr_con_el_pie_y_devuelve_las_notas():
     d = Dobles((A_PY,))
     r = _entregar(d)
     assert r == {"estado_entrega": "abierto", "pr_url": "https://gh/pr/1", "violaciones": [],
-                 "notas": ["pr_reabierto_nuevo"]}
-    assert d.llamadas == ["traer", "commits", "diff", "tamanos", "empujar", "pr"]
+                 "notas": ["pr_reabierto_nuevo"], "rama_empujada": True, "sha": PUNTA}
+    assert d.llamadas == ["traer", "commits", "diff", "tamanos", "punta", "empujar", "pr"]
+    assert d.lecturas_de_pausa == 2  # antes de empujar y antes del PR
     assert d.pr_pedido["repo"] == "o/r" and d.pr_pedido["rama"] == RAMA and d.pr_pedido["base"] == "main"
     assert d.pr_pedido["cuerpo"].startswith("informe") and d.pr_pedido["cuerpo"].endswith(PIE)
 
 
-@pytest.mark.parametrize("paso", ["traer", "commits", "diff", "tamanos", "empujar", "pr"])
-def test_un_paso_que_falla_es_fallo_entrega_con_el_motivo_saneado(paso):
+def test_un_informe_enorme_se_recorta_con_aviso_antes_de_empujar():
+    """MAJOR-1: el cuerpo tiene tope; el recorte es del informe, con aviso, y el pie queda."""
+    d = Dobles((A_PY,))
+    _entregar(d, informe="x" * 70_000)
+    cuerpo = d.pr_pedido["cuerpo"]
+    assert len(cuerpo) <= MC.TOPE_CUERPO and cuerpo.endswith(PIE)
+    assert "[informe recortado: se muestran" in cuerpo and "de 70000 caracteres]" in cuerpo
+
+
+def test_secreto_mas_alla_del_recorte_tambien_rechaza():
+    d = Dobles((A_PY,))
+    r = _entregar(d, informe="x" * 70_000 + SECRETO)
+    assert r["estado_entrega"] == "rechazada_por_contrato" and "empujar" not in d.llamadas
+
+
+@pytest.mark.parametrize("paso", ["traer", "commits", "diff", "tamanos", "punta", "empujar"])
+def test_un_paso_que_falla_antes_del_empuje_es_fallo_entrega_con_el_motivo_saneado(paso):
     d = Dobles((A_PY,), falla={paso: E.EntregaRechazada(f"git_fallo: https://x-access-token:{TOKEN}@github.com")})
     r = _entregar(d)
-    assert r["estado_entrega"] == "fallo_entrega" and r["pr_url"] is None
+    assert r["estado_entrega"] == "fallo_entrega" and r["pr_url"] is None and r["rama_empujada"] is False
     assert r["violaciones"][0]["regla"] == "entrega" and TOKEN not in json.dumps(r)
     assert d.llamadas[-1] == paso
 
 
-def test_un_error_de_la_api_de_github_es_fallo_entrega():
-    peticion = httpx.Request("POST", "https://api.github.com/repos/o/r/pulls")
-    error = httpx.HTTPStatusError("x", request=peticion, response=httpx.Response(403, request=peticion))
+@pytest.mark.parametrize("error, detalle", [
+    (httpx.HTTPStatusError("x", request=httpx.Request("POST", "https://api.github.com/repos/o/r/pulls"),
+                           response=httpx.Response(422)), "github_api: 422"),
+    (KeyError("number"), "github_api: KeyError"),
+    (ValueError(f"cuerpo raro {SECRETO}"), "github_api: ValueError"),
+    (E.EntregaRechazada("x"), "github_api: EntregaRechazada"),
+])
+def test_un_fallo_despues_del_empuje_es_empujado_sin_pr_con_el_sha_y_sin_el_mensaje(error, detalle):
+    """MAJOR-1: la rama ya está en GitHub; eso tiene estado propio y el SHA empujado."""
     d = Dobles((A_PY,), falla={"pr": error})
     r = _entregar(d)
-    assert r["estado_entrega"] == "fallo_entrega" and r["violaciones"][0]["detalle"] == "github_api: 403"
+    assert (r["estado_entrega"], r["rama_empujada"], r["sha"], r["pr_url"]) == ("empujado_sin_pr", True, PUNTA, None)
+    assert r["violaciones"] == [{"regla": "entrega", "ruta": "", "detalle": detalle}]
+    assert SECRETO not in json.dumps(r)
+
+
+def test_pausa_puesta_antes_del_empuje_no_empuja():
+    """MINOR-1: la pausa se vuelve a leer justo antes de empujar."""
+    d = Dobles((A_PY,), pausas=[True])
+    r = _entregar(d)
+    assert (r["estado_entrega"], r["motivo"], r["rama_empujada"]) == ("sin_entregar", "pausa_puesta", False)
+    assert "empujar" not in d.llamadas and "punta" not in d.llamadas
+
+
+def test_pausa_ilegible_cuenta_como_puesta():
+    d = Dobles((A_PY,), pausas=[OSError("no se lee")])
+    assert _entregar(d)["estado_entrega"] == "sin_entregar" and "empujar" not in d.llamadas
+
+
+def test_pausa_puesta_despues_del_empuje_no_abre_el_pr():
+    d = Dobles((A_PY,), pausas=[False, True])
+    r = _entregar(d)
+    assert (r["estado_entrega"], r["rama_empujada"], r["sha"]) == ("empujado_sin_pr", True, PUNTA)
+    assert r["notas"] == ["pausa_puesta"] and "pr" not in d.llamadas
 
 
 # --- los ataques, con git real ---------------------------------------------------------------
@@ -234,9 +317,14 @@ def _api(pedidos: list):
     return httpx.AsyncClient(transport=httpx.MockTransport(manejar), base_url="https://api.github.com")
 
 
+async def _sin_pausa():
+    return False
+
+
 def _entregar_real(c: P.Clon, pedidos: list, *, tope_bytes: int = 1_000_000, api=None, **extra) -> dict:
     base = dict(mision_id=MID, repo="o/r", revision_legible=True, informe="informe C5", token=TOKEN,
-                tope_bytes=tope_bytes, modelo="qwen", autor=AUTOR, upload_pack="git-upload-pack")
+                tope_bytes=tope_bytes, tope_total_bytes=10**9, modelo="qwen", autor=AUTOR,
+                upload_pack="git-upload-pack", pausa_puesta=_sin_pausa)
     base.update(extra)
 
     async def correr():
@@ -310,8 +398,10 @@ def test_real_camino_feliz_empuja_la_rama_y_abre_el_pr(tmp_path, github):
     _commit(c.ruta, "a", b"2", "cambio")
     pedidos: list = []
     r = _entregar_real(c, pedidos)
-    assert r == {"estado_entrega": "abierto", "pr_url": "https://gh/pr/1", "violaciones": [], "notas": []}
-    assert _refs(github)[f"refs/heads/{RAMA}"] == _git("rev-parse", "HEAD", cwd=c.ruta)
+    punta = _git("rev-parse", "HEAD", cwd=c.ruta)
+    assert r == {"estado_entrega": "abierto", "pr_url": "https://gh/pr/1", "violaciones": [], "notas": [],
+                 "rama_empujada": True, "sha": punta}
+    assert _refs(github)[f"refs/heads/{RAMA}"] == punta
     (cuerpo,) = [b["body"] for m, p, b in pedidos if m == "POST" and p == "/repos/o/r/pulls"]
     assert cuerpo.startswith("informe C5") and cuerpo.endswith(PIE)
 
@@ -343,11 +433,63 @@ def test_real_rutas_no_ascii_y_con_espacios_se_entregan(tmp_path, github):
     assert f"refs/heads/{RAMA}" in _refs(github)
 
 
+def _api_que_responde(pedidos: list, post_pr, post_etiqueta=None):
+    """La API de PRs con respuestas elegidas para el POST del PR y el de la etiqueta."""
+    def manejar(req: httpx.Request) -> httpx.Response:
+        pedidos.append((req.method, req.url.path, req.content))
+        if req.method == "GET":
+            return httpx.Response(200, json=[])
+        if req.url.path.endswith("/labels"):
+            return post_etiqueta or httpx.Response(200, json=[])
+        return post_pr
+    return httpx.AsyncClient(transport=httpx.MockTransport(manejar), base_url="https://api.github.com")
+
+
+@pytest.mark.parametrize("respuesta, detalle", [
+    (httpx.Response(201, json={"html_url": "https://gh/pr/1"}), "github_api: KeyError"),        # 201 sin number
+    (httpx.Response(201, text="<html>no es json</html>"), "github_api: JSONDecodeError"),       # cuerpo no JSON
+    (httpx.Response(422, json={"message": "Validation Failed", "errors": [{"message": f"no {SECRETO}"}]}),
+     "github_api: 422"),                                                                          # 422 tras el push
+])
+def test_real_fallo_de_la_api_despues_del_empuje_es_empujado_sin_pr(tmp_path, github, respuesta, detalle):
+    """MAJOR-1: la rama YA está en GitHub; el resultado lo dice, con el SHA, y sin el texto del error."""
+    c = _preparar(tmp_path)
+    _commit(c.ruta, "a", b"2", "cambio")
+    punta = _git("rev-parse", "HEAD", cwd=c.ruta)
+    pedidos: list = []
+    r = _entregar_real(c, pedidos, api=_api_que_responde(pedidos, respuesta))
+    assert (r["estado_entrega"], r["rama_empujada"], r["sha"], r["pr_url"]) == ("empujado_sin_pr", True, punta, None)
+    assert r["violaciones"] == [{"regla": "entrega", "ruta": "", "detalle": detalle}]
+    assert _refs(github)[f"refs/heads/{RAMA}"] == punta and SECRETO not in json.dumps(r)
+
+
+def test_real_pr_abierto_pero_sin_etiqueta_es_abierto_con_nota(tmp_path, github):
+    c = _preparar(tmp_path)
+    _commit(c.ruta, "a", b"2", "cambio")
+    pedidos: list = []
+    r = _entregar_real(c, pedidos, api=_api_que_responde(
+        pedidos, httpx.Response(201, json={"number": 7, "html_url": "https://gh/pr/7"}), httpx.Response(500)))
+    assert (r["estado_entrega"], r["pr_url"], r["notas"]) == ("abierto", "https://gh/pr/7", ["sin_etiqueta"])
+
+
+def test_real_tope_total_del_rango(tmp_path, github):
+    """MINOR-3 con git real: dos archivos de 600 B, cada uno bajo el tope por archivo; juntos no."""
+    c = _preparar(tmp_path)
+    _commit(c.ruta, "x", b"1" * 600, "x")
+    _commit(c.ruta, "y", b"2" * 600, "y")
+    pedidos: list = []
+    r = _entregar_real(c, pedidos, tope_bytes=1000, tope_total_bytes=1000)
+    assert r["estado_entrega"] == "rechazada_por_contrato", r
+    assert [v["regla"] for v in r["violaciones"]] == ["tamano_total"] and _nada_empujado(github, pedidos)
+
+
 def test_real_sin_commits_es_sin_cambios(tmp_path, github):
     c = _preparar(tmp_path)
     (c.ruta / "sin-commitear.txt").write_text("x")
     pedidos: list = []
-    assert _entregar_real(c, pedidos)["estado_entrega"] == "sin_cambios" and _nada_empujado(github, pedidos)
+    assert _entregar_real(c, pedidos)["estado_entrega"] == "sin_cambios"
+    assert f"refs/heads/{RAMA}" not in _refs(github)
+    assert [m for m, _, _ in pedidos] == ["GET"]  # solo mira si hay un PR previo (MINOR-5)
 
 
 def test_real_secreto_agregado_y_quitado_dentro_de_la_rama_se_rechaza(tmp_path, github):
