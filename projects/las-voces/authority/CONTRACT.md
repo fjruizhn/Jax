@@ -1,7 +1,7 @@
 # Ariadna authority contract — LV-003
 
-Ariadna (`ariadna-project-manager`) remains proposed and not active. This
-contract grants no runtime projection, capability, human authority, merge,
+Human Authority has approved Ariadna (`ariadna-project-manager`) as an active
+governed PM runtime. This grants no human authority, capability, merge,
 deploy, or production-mutation power. The deterministic evaluator returns only
 `ALLOW`, `DENY`, or `HUMAN_REQUIRED`; no LLM decides authorization. Merge,
 deploy, production mutation, capability grant, and runtime execution are always
@@ -82,8 +82,8 @@ protocol. `authority_context.handoff` must provide `owner`, `branch_worktree`,
 
 ariadna_runtime.py is a local, host-invoked run_once control loop, not an
 activation, service, daemon, network endpoint, or execution capability. Host
-readiness means only that its local lease is held; Ariadna remains
-PROPOSED_NOT_ACTIVE. It accepts data-only proposals, rebinds them to the
+readiness means only that its local lease is held; ACTIVE_GOVERNED is a
+canonical human-authorized lifecycle, not a production deployment claim. It accepts data-only proposals, rebinds them to the
 current project hash, and passes authorized transitions through this contract's
 locked expected-hash/CAS journal path. It cannot provide or replace verifiers,
 edit this contract, execute commands, or make runtime_execution ALLOW.

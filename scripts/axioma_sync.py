@@ -74,6 +74,11 @@ def _canonical(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any], dict[s
         missing = REQUIRED_DEFINITION_FIELDS - set(definition)
         if missing:
             raise SyncError(f"invalid canonical {name}; missing fields: {', '.join(sorted(missing))}")
+    ariadna = [item for item in project_json.get("agents", []) if item.get("name") == "Ariadna"]
+    if len(ariadna) != 1 or ariadna[0].get("lifecycle_status") != agent.get("lifecycle_status"):
+        raise SyncError("Ariadna lifecycle declarations disagree")
+    if agent.get("lifecycle_status") not in {"PROPOSED_NOT_ACTIVE", "ACTIVE_GOVERNED"}:
+        raise SyncError("invalid Ariadna lifecycle")
     required_envelope = {"message_id", "project_id", "task_id", "sender_agent", "recipient_agent", "intent", "evidence_refs", "authority_context", "correlation_id", "created_at", "status"}
     if set(envelope.get("required", [])) != required_envelope:
         raise SyncError("invalid MessageEnvelope contract")
@@ -100,10 +105,17 @@ def _notice() -> str:
 
 
 def _governance(agent: dict[str, Any], skill: dict[str, Any]) -> str:
+    lifecycle = agent.get("lifecycle_status")
+    if lifecycle == "ACTIVE_GOVERNED":
+        ariadna = "Ariadna is ACTIVE_GOVERNED as a hosted PM runtime; it has no human authority."
+    elif lifecycle == "PROPOSED_NOT_ACTIVE":
+        ariadna = "Ariadna is PROPOSED / NOT ACTIVE."
+    else:
+        raise SyncError("invalid Ariadna canonical lifecycle")
     return f"""Project source of truth: `projects/las-voces/`.
 
 Human Authority is Fernando. Task ownership follows `project.json`; do not take
-an unassigned task. Ariadna is PROPOSED / NOT ACTIVE. Qwen is the PRIMARY
+an unassigned task. {ariadna} Qwen is the PRIMARY
 BUILDER — LAS VOCES and works only in a worktree/sandbox.
 
 No merge, deployment, production mutation, capability grant, or frozen-contract

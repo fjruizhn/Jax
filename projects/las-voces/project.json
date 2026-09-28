@@ -13,7 +13,7 @@
     "sponsor": "Fernando Ruiz",
     "human_authority": "Fernando",
     "primary_builder": "Qwen local",
-    "project_manager_agent": "Ariadna (propuesta)",
+    "project_manager_agent": "Ariadna (ACTIVE_GOVERNED)",
     "principle": "Software libre primero. Memoria ≠ autoridad. Memoria ≠ evidencia."
   },
   "north_star": {
@@ -484,9 +484,9 @@
     },
     {
       "name": "Ariadna",
-      "role": "Project Manager Agent (propuesto)",
+      "role": "Project Manager Agent (ACTIVE_GOVERNED)",
       "authority": "plan, dependencies, status, risk, sync; no merge/deploy",
-      "lifecycle_status": "PROPOSED_NOT_ACTIVE"
+      "lifecycle_status": "ACTIVE_GOVERNED"
     },
     {
       "name": "Qwen",

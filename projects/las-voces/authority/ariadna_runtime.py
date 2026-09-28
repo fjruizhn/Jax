@@ -1,4 +1,4 @@
-"""Deterministic local host for the proposed Ariadna PM loop.
+"""Deterministic local host for the governed Ariadna PM loop.
 
 This module has no daemon, network endpoint, shell runner, or authority
 policy.  A host supplies data-only proposals; LV-003 remains the sole
@@ -160,6 +160,8 @@ class AriadnaRuntime:
         # The supplied LV-003 engine exposes the authoritative journal state.
         if self.engine.interrupted_transitions():
             self.lifecycle = Lifecycle.RECONCILIATION_REQUIRED
+        elif not self.engine.activation_approved():
+            self.control.release(); self.lifecycle = Lifecycle.STOPPED
         else: self.lifecycle = Lifecycle.READY
         return self.lifecycle
     def request_stop(self) -> None:
@@ -176,7 +178,7 @@ class AriadnaRuntime:
         return {"lifecycle": self.lifecycle.value, "instance_id": self.instance_id, "local_only": True, "stale_owner_detected": self.control.previous_stale}
     def acquire_task(self, lease: TaskLease) -> bool:
         with self._mutex:
-            if self.lifecycle is not Lifecycle.READY or self._stop.is_set() or lease.runtime_instance_id != self.instance_id: return False
+            if self.lifecycle is not Lifecycle.READY or self._stop.is_set() or not self.engine.activation_approved() or lease.runtime_instance_id != self.instance_id: return False
             try:
                 project = json.loads((self.root / "projects/las-voces/project.json").read_text())
                 if project.get("project", {}).get("id") != PROJECT_ID or not lease.owner or len([x for x in project.get("tasks", []) if x.get("id") == lease.task_id]) != 1: return False
@@ -196,7 +198,7 @@ class AriadnaRuntime:
             log.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"); log.flush(); os.fsync(log.fileno())
     def run_once(self, proposal: Proposal, *, lease_id: str | None = None) -> str:
       with self._mutex:
-        if self.lifecycle is not Lifecycle.READY or self._stop.is_set(): return "NOOP_NOT_READY"
+        if self.lifecycle is not Lifecycle.READY or self._stop.is_set() or not self.engine.activation_approved(): return "NOOP_NOT_READY"
         if self.engine.interrupted_transitions():
             self.lifecycle = Lifecycle.RECONCILIATION_REQUIRED
             return "NOOP_NOT_READY"

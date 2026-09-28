@@ -57,7 +57,7 @@ def test_forbidden_actions_are_deny(root, action): assert mod.evaluate(root, sen
 def test_unknown_action_is_human_required_and_nonactive_ariadna_cannot_run(root):
     assert mod.evaluate(root, sender_agent=mod.ARIADNA_ID, task_id="LV-003", action="invent_scope").verdict is mod.Verdict.HUMAN_REQUIRED
     assert mod.evaluate(root, sender_agent=mod.ARIADNA_ID, task_id="LV-003", action="runtime_execution").verdict is mod.Verdict.DENY
-    assert "proposed and not active" in json.loads((root / "projects/las-voces/agents/ariadna.json").read_text())["authority"].lower()
+    assert "no human authority" in json.loads((root / "projects/las-voces/agents/ariadna.json").read_text())["authority"].lower()
 
 def test_done_missing_evidence_classes_and_nonexistent_refs_deny(root):
     in_progress(root); tests, accepted = manifest(root), acceptance(root)
