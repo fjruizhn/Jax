@@ -202,6 +202,10 @@ class AriadnaRuntime:
             if owned is None or owned.task_id != lease.task_id or owned.runtime_instance_id != lease.runtime_instance_id: return False
             if self.leases.release(owned): self._owned_leases.pop(lease.lease_id, None); return True
             return False
+    def active_task_leases(self) -> tuple[TaskLease, ...]:
+        """Expose read-only lease state to the host-owned proposal source."""
+        with self._mutex:
+            return tuple(self.leases._active().values())
     def _audit(self, record: dict[str, Any]) -> None:
         key = record["idempotency_key"]
         if self.audit_path.exists() and any(json.loads(line).get("idempotency_key") == key for line in self.audit_path.read_text().splitlines() if line): return
@@ -229,7 +233,14 @@ class AriadnaRuntime:
                 evidence_binding[ref] = hashlib.sha256(path.read_bytes()).hexdigest()
         except (OSError, ValueError):
             return "NOOP_INVALID_EVIDENCE"
-        material = {"hash": observed_hash, "task": proposal.task_id, "action": proposal.action, "target": proposal.target_status, "evidence": evidence_binding, "handoff": proposal.handoff, "lease": lease_id}
+        # ``created_at`` is factual transport metadata, not proposal semantics.
+        # Excluding it keeps repeated unchanged host ticks idempotent while the
+        # canonical observation, action, recipient and handoff content remain
+        # bound to the audit/outbox key.
+        handoff_for_key = proposal.handoff
+        if isinstance(proposal.handoff, dict):
+            handoff_for_key = {key: value for key, value in proposal.handoff.items() if key != "created_at"}
+        material = {"hash": observed_hash, "task": proposal.task_id, "action": proposal.action, "target": proposal.target_status, "evidence": evidence_binding, "handoff": handoff_for_key, "lease": lease_id}
         key = hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode()).hexdigest()
         if self.audit_path.exists() and any(json.loads(line).get("idempotency_key") == key for line in self.audit_path.read_text().splitlines() if line): return "NOOP_IDEMPOTENT"
         decision = self.engine.evaluate(sender_agent=ARIADNA_ID, task_id=proposal.task_id, action=proposal.action, target_status=proposal.target_status, evidence_refs=list(proposal.evidence_refs), handoff=proposal.handoff)

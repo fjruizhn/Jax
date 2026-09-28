@@ -289,7 +289,7 @@ class AuthorityEngine:
             _task(project, task_id); return Decision(Verdict.ALLOW, "evidence-backed coordination"), None
         if action == "emit_handoff":
             if not isinstance(handoff, dict): return Decision(Verdict.DENY, "handoff payload is required"), None
-            validate_handoff(self.root, handoff); return Decision(Verdict.ALLOW, "validated structured handoff"), None
+            validate_handoff(self.root, handoff, expected_task_id=task_id); return Decision(Verdict.ALLOW, "validated structured handoff"), None
         if action != "transition_status": return Decision(Verdict.HUMAN_REQUIRED, "action is outside Ariadna deterministic contract"), None
         task = _task(project, task_id)
         if target_status not in TRANSITIONS.get(task.get("status"), set()): return Decision(Verdict.DENY, "invalid lifecycle transition"), None
@@ -421,12 +421,15 @@ def activation_approved(root: Path) -> bool:
         return False
 
 
-def validate_handoff(root: Path, envelope: dict[str, Any]) -> None:
+def validate_handoff(root: Path, envelope: dict[str, Any], *, expected_task_id: str | None = None) -> None:
     schema = _load(root / "projects/las-voces/sync/message-envelope.schema.json")
     errors = sorted(Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(envelope), key=lambda item: item.path)
     if errors: raise AuthorityError("malformed MessageEnvelope: " + errors[0].message)
-    project = _load(root / "projects/las-voces/project.json"); _task(project, envelope["task_id"])
+    project = _load(root / "projects/las-voces/project.json")
+    if expected_task_id is not None and envelope["task_id"] != expected_task_id: raise AuthorityError("handoff task does not match authority request")
+    task = _task(project, envelope["task_id"])
     if envelope["sender_agent"] != ARIADNA_ID: raise AuthorityError("unknown sender_agent")
     context = envelope["authority_context"]; handoff = context.get("handoff") if isinstance(context, dict) else None
     required = {"owner", "branch_worktree", "scope", "acceptance_criteria", "commit_pr", "test_evidence", "blockers", "next_action"}
     if not isinstance(handoff, dict) or set(handoff) != required or not all(isinstance(value, str) for value in handoff.values()) or not handoff["owner"] or not handoff["next_action"]: raise AuthorityError("malformed Ariadna handoff payload")
+    if envelope["recipient_agent"] != task.get("owner") or handoff["owner"] != task.get("owner"): raise AuthorityError("handoff owner is not canonical task owner")

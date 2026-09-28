@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import logging
 import signal
 import sys
 from pathlib import Path
@@ -26,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--health", action="store_true")
     parser.add_argument("--run-forever", action="store_true")
     args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     host_module = _load(args.root / "projects/las-voces/authority/ariadna_host.py")
     host = host_module.AriadnaHost(args.root, host_module.HostConfig.from_file(args.config))
     if args.health:
