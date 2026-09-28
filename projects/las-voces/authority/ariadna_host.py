@@ -24,6 +24,7 @@ from typing import Any, Callable, Protocol
 PROJECT_ID = "las-voces"
 _AUTHORITY_SOURCE = "projects/las-voces/authority/ariadna_authority.py"
 _RUNTIME_SOURCE = "projects/las-voces/authority/ariadna_runtime.py"
+_PLANNER_SOURCE = "projects/las-voces/authority/ariadna_planner.py"
 
 
 class HostLifecycle(str, Enum):
@@ -201,16 +202,19 @@ class AriadnaHost:
         self.root, self.config = root.resolve(), config
         authority = _load_module("ariadna_host_authority", self.root / _AUTHORITY_SOURCE)
         runtime = _load_module("ariadna_host_runtime", self.root / _RUNTIME_SOURCE)
+        planner = _load_module("ariadna_host_planner", self.root / _PLANNER_SOURCE)
         token = os.environ.get(config.github_token_env)
         self._ci_verifier = GitHubActionsVerifier(config.github_repository, token, fetcher=github_fetcher)
         self._human_verifier = CanonicalHumanAuthorityVerifier(self.root)
         self._engine = authority.AuthorityEngine(self.root, ci_verifier=self._ci_verifier, human_authority_verifier=self._human_verifier)
         self._runtime = runtime.AriadnaRuntime(self.root, self._engine)
         self._runtime_module = runtime
+        self._planner = planner.DeterministicTaskPlanner(self.root)
         self._state = HostLifecycle.NOT_STARTED
         self._stop = threading.Event()
         self._logger = logger or logging.getLogger("las_voces.ariadna_host")
         self._health_path = runtime._state_dir(self.root) / "host-health.json"
+        self._last_planner_observation: str | None = None
 
     @property
     def lifecycle(self) -> HostLifecycle:
@@ -224,6 +228,13 @@ class AriadnaHost:
 
     def _persist_health(self) -> None:
         self._health_path.write_text(json.dumps(self.health(), sort_keys=True), encoding="utf-8")
+
+    def _log_planner(self, **detail: Any) -> None:
+        """Log only a changed planning observation, never a 30-second storm."""
+        key = json.dumps(detail, sort_keys=True, default=str)
+        if key != self._last_planner_observation:
+            self._last_planner_observation = key
+            self._log("planner_cycle", **detail)
 
     def start(self) -> HostLifecycle:
         if self._state is not HostLifecycle.NOT_STARTED:
@@ -290,14 +301,75 @@ class AriadnaHost:
             return "NOOP_KILLED"
         if self._state is not HostLifecycle.READY or self._stop.is_set():
             return "NOOP_NOT_READY"
+        planned_lease: Any | None = None
+        planner_observation: dict[str, Any] | None = None
         if proposal is None:
-            return "NOOP_NO_PROPOSAL"
+            try:
+                plan = self._planner.plan(self._runtime.active_task_leases())
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                self._log_planner(result="NOOP_INVALID_CANONICAL", detail=str(exc))
+                return "NOOP_INVALID_CANONICAL"
+            if plan.handoff is None:
+                self._log_planner(
+                    project_hash=plan.project_hash,
+                    eligible_task_count=plan.eligible_count,
+                    selected_task_id=None,
+                    result="NOOP_" + plan.reason,
+                    next_retry_condition="canonical task/dependency/blocker/lease change",
+                )
+                return "NOOP_" + plan.reason
+            planned_lease = self._runtime_module.TaskLease(
+                plan.handoff.task_id, plan.handoff.owner, plan.handoff.worktree,
+                plan.handoff.writable_scope, plan.handoff.lease_id,
+                self._runtime.instance_id,
+            )
+            if not self.acquire_task(planned_lease):
+                self._log_planner(
+                    project_hash=plan.project_hash,
+                    eligible_task_count=plan.eligible_count,
+                    selected_task_id=plan.selected_task_id,
+                    result="NOOP_LEASE_CONFLICT",
+                    next_retry_condition="lease release or canonical change",
+                )
+                return "NOOP_LEASE_CONFLICT"
+            proposal = self._runtime_module.Proposal(
+                task_id=plan.handoff.task_id,
+                action="emit_handoff",
+                expected_project_hash=plan.handoff.expected_project_hash,
+                handoff=plan.handoff.envelope,
+            )
+            lease_id = plan.handoff.lease_id
+            decision = self._engine.evaluate(
+                sender_agent=self._runtime_module.ARIADNA_ID,
+                task_id=proposal.task_id,
+                action=proposal.action,
+                target_status=proposal.target_status,
+                evidence_refs=list(proposal.evidence_refs),
+                handoff=proposal.handoff,
+            )
+            planner_observation = {
+                "project_hash": plan.project_hash,
+                "eligible_task_count": plan.eligible_count,
+                "selected_task_id": plan.selected_task_id,
+                "action": proposal.action,
+                "authority_verdict": decision.verdict.value,
+                "next_retry_condition": "handoff acknowledgement, lease release, or canonical change",
+            }
         if self.config.mode is HostMode.DRY_RUN:
             decision = self._engine.evaluate(sender_agent=self._runtime_module.ARIADNA_ID, task_id=proposal.task_id, action=proposal.action, target_status=proposal.target_status, evidence_refs=list(proposal.evidence_refs), handoff=proposal.handoff)
             self._log("dry_run_cycle", task_id=proposal.task_id, action=proposal.action, verdict=decision.verdict.value)
-            return "DRY_RUN_" + decision.verdict.value
+            if planned_lease is not None:
+                self.release_task(planned_lease)
+            result = "DRY_RUN_" + decision.verdict.value
+            if planner_observation is not None:
+                self._log_planner(**planner_observation, result=result)
+            return result
         result = self._runtime.run_once(proposal, lease_id=lease_id)
         self._log("production_cycle", task_id=proposal.task_id, action=proposal.action, result=result)
+        if planned_lease is not None and not result.startswith("EFFECT_"):
+            self.release_task(planned_lease)
+        if planner_observation is not None:
+            self._log_planner(**planner_observation, result=result)
         return result
 
     def run_forever(self, proposal_supplier: Callable[[], Any | None] | None = None) -> HostLifecycle:
@@ -305,6 +377,8 @@ class AriadnaHost:
         if self._state is not HostLifecycle.READY:
             return self._state
         while self._state is HostLifecycle.READY and not self._stop.is_set():
+            # The optional supplier remains a test/integration seam.  The
+            # production default is the host-owned deterministic planner.
             self.run_once(proposal_supplier() if proposal_supplier is not None else None)
             if self._stop.wait(self.config.tick_seconds):
                 break

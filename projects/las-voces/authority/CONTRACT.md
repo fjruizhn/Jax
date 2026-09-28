@@ -113,3 +113,16 @@ not append duplicate handoffs, escalations, or cycle records. DENY and
 HUMAN_REQUIRED never execute; time/retry alone cannot change either verdict.
 An unresolved LV-003 transition intent places a new host in
 RECONCILIATION_REQUIRED, emits no automatic repair, and permits no work.
+
+The host-owned deterministic proposal source reads only canonical task bytes.
+It considers only `READY` tasks whose declared dependencies are all `DONE`,
+which have no blocker fact and no conflicting local ownership. It ranks parsed
+priority (`P0` before `P1`) and task id deterministically, then creates a
+MessageEnvelope handoff for the canonical owner. The planner cannot construct
+verifiers, mutate project state, run commands, or dispatch a builder; the
+durable handoff outbox is the current integration boundary. Until canonical
+writable-scope metadata exists, an assignment conservatively leases the whole
+repository boundary, so the host never guesses that concurrent writers are
+safe. Repeated unchanged observations reuse the semantic handoff key and do
+not append another assignment; a changed canonical project hash permits a new
+consideration.
