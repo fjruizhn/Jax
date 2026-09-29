@@ -367,7 +367,10 @@ class GovernedHandoffConsumer:
                 if self._runtime_key(row, observed) != key:
                     raise DispatchError("handoff content is not bound to Ariadna audit identity")
                 owner, builder, branch = self._canonical_builder(task_id, row["handoff"])
-                decision = self.authority.AuthorityEngine(self.canonical_root).evaluate(sender_agent=ARIADNA_ID, task_id=task_id, action="emit_handoff", handoff=row["handoff"])
+                engine = self.authority.AuthorityEngine(self.canonical_root)
+                if not engine.activation_approved():
+                    raise DispatchError("Ariadna is not canonically ACTIVE_GOVERNED")
+                decision = engine.evaluate(sender_agent=ARIADNA_ID, task_id=task_id, action="emit_handoff", handoff=row["handoff"])
                 if decision.verdict.value != "ALLOW":
                     raise DispatchError("current AuthorityEngine rejected handoff")
                 leases = self._active_leases(self.handoff_state_dir / "task-leases.ndjson")

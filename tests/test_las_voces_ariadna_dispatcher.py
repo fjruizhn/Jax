@@ -156,6 +156,13 @@ def test_dead_lease_pid_is_rejected(root, tmp_path):
     assert consumer(root, producer, tmp_path / "pid").consume(key).decision == "REJECTED"
 
 
+def test_deactivated_ariadna_cannot_dispatch_a_historical_allowed_handoff(root, tmp_path):
+    agent = root / "projects/las-voces/agents/ariadna.json"; value = json.loads(agent.read_text()); value["lifecycle_status"] = "PROPOSED_NOT_ACTIVE"; agent.write_text(json.dumps(value))
+    git(root, "add", "projects/las-voces/agents/ariadna.json"); git(root, "commit", "-qm", "deactivated fixture")
+    producer, key = setup_handoff(root, tmp_path)
+    assert consumer(root, producer, tmp_path).consume(key).decision == "REJECTED"
+
+
 def test_source_head_change_and_forged_accepted_ack_cannot_be_adopted(root, tmp_path):
     producer, key = setup_handoff(root, tmp_path); item = consumer(root, producer, tmp_path)
     (root / "unrelated.txt").write_text("different source revision")
