@@ -88,6 +88,8 @@ import collections
 import json
 import logging
 import os
+import socket
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -183,6 +185,9 @@ class Config:
     latido_max_s: float
     modelo: str
     max_salida_tokens: int
+    jaxqwen_socket: Path | None = None
+    jaxqwen_uid: int | None = None
+    jaxqwen_gid: int | None = None
 
 
 def config_desde_entorno(env=None) -> Config:
@@ -225,6 +230,21 @@ def config_desde_entorno(env=None) -> Config:
     latido_max_s = numero(pausa_c5.VARIABLE_LATIDO_MAX_S, float)
     if not latido_max_s > 0 or latido_max_s == float("inf"):
         raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", pausa_c5.VARIABLE_LATIDO_MAX_S),)))
+    jaxqwen_socket_raw = env.get("JAX_PROXY_CARRIL_JAXQWEN_SOCKET", "").strip()
+    uid_raw = env.get("JAX_PROXY_CARRIL_JAXQWEN_UID", "").strip()
+    gid_raw = env.get("JAX_PROXY_CARRIL_JAXQWEN_GID", "").strip()
+    if any((jaxqwen_socket_raw, uid_raw, gid_raw)) and not all((jaxqwen_socket_raw, uid_raw, gid_raw)):
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_*"),)))
+    jaxqwen_socket = Path(jaxqwen_socket_raw) if jaxqwen_socket_raw else None
+    if jaxqwen_socket is not None and (not jaxqwen_socket.is_absolute() or len(os.fsencode(jaxqwen_socket)) >= 104):
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_SOCKET"),)))
+    try:
+        jaxqwen_uid = int(uid_raw) if uid_raw else None
+        jaxqwen_gid = int(gid_raw) if gid_raw else None
+    except ValueError as exc:
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_UID/GID"),))) from exc
+    if jaxqwen_uid is not None and (jaxqwen_uid < 1 or jaxqwen_gid is None or jaxqwen_gid < 1):
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_UID/GID"),)))
     return Config(
         upstream=upstream.rstrip("/"),
         raiz=Path(obligatoria("JAX_PROXY_CARRIL_RAIZ")),
@@ -237,6 +257,7 @@ def config_desde_entorno(env=None) -> Config:
         latido_max_s=latido_max_s,
         modelo=obligatoria("JAX_PROXY_CARRIL_MODELO"),
         max_salida_tokens=positivo("JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS"),
+        jaxqwen_socket=jaxqwen_socket, jaxqwen_uid=jaxqwen_uid, jaxqwen_gid=jaxqwen_gid,
     )
 
 
@@ -319,6 +340,16 @@ class _Proxy:
         self.cliente = crear_cliente_http()
     async def cerrar(self) -> None:
         await self.cliente.aclose()
+
+    @staticmethod
+    def _peer_uid_permitido(sock, expected_uid: int) -> bool:
+        """Authenticate the dedicated local caller; uid/name fields in HTTP are ignored."""
+        try:
+            raw = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            _pid, uid, _gid = struct.unpack("3i", raw)
+            return uid == expected_uid
+        except (AttributeError, OSError, struct.error):
+            return False
 
     async def atender(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         conn = h11.Connection(h11.SERVER)
@@ -636,8 +667,11 @@ class Servidor:
     """El servidor escuchando y el cliente HTTP compartido, que vive lo que
     vive el servidor."""
 
-    def __init__(self, servidor: asyncio.Server, proxy: _Proxy) -> None:
+    def __init__(self, servidor: asyncio.Server, proxy: _Proxy, servidor_jaxqwen: asyncio.Server | None = None,
+                 socket_jaxqwen: Path | None = None) -> None:
         self._servidor = servidor
+        self._servidor_jaxqwen = servidor_jaxqwen
+        self._socket_jaxqwen = socket_jaxqwen
         self._proxy = proxy
 
     @property
@@ -646,9 +680,15 @@ class Servidor:
 
     def close(self) -> None:
         self._servidor.close()
+        if self._servidor_jaxqwen is not None:
+            self._servidor_jaxqwen.close()
 
     async def wait_closed(self) -> None:
         await self._servidor.wait_closed()
+        if self._servidor_jaxqwen is not None:
+            await self._servidor_jaxqwen.wait_closed()
+        if self._socket_jaxqwen is not None:
+            self._socket_jaxqwen.unlink(missing_ok=True)
         await self._proxy.cerrar()
         self._proxy.registro.cerrar()
 
@@ -662,16 +702,49 @@ class Servidor:
 
 async def arrancar(cfg: Config) -> Servidor:
     interruptor.ruta_del_interruptor()  # InterruptorSinConfigurar: sin saber dónde está el freno, no hay cerebro
+    if cfg.jaxqwen_socket is not None:
+        parent = cfg.jaxqwen_socket.parent
+        if parent.is_symlink() or not parent.is_dir() or parent.stat().st_mode & 0o022:
+            raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_SOCKET"),)))
+        if cfg.jaxqwen_socket.exists() or cfg.jaxqwen_socket.is_symlink():
+            raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_SOCKET"),)))
     # Un registro que no cuadra NO se abre (RegistroCorrupto): sin registro no hay cerebro.
     registro = await asyncio.to_thread(Registro, cfg.registro)
+    proxy = None
+    servidor = None
+    servidor_jaxqwen = None
     try:
         await asyncio.to_thread(registro.anotar, {"evento": "registro_abierto", "pid": os.getpid()})
         proxy = _Proxy(cfg, registro)
         servidor = await asyncio.start_server(proxy.atender, cfg.host, cfg.puerto)
+        if cfg.jaxqwen_socket is not None:
+            path = cfg.jaxqwen_socket
+            async def atender_jaxqwen(reader, writer):
+                sock = writer.get_extra_info("socket")
+                if not proxy._peer_uid_permitido(sock, cfg.jaxqwen_uid):
+                    log.warning("proxy_carril identidad_m2m_rechazada")
+                    await _cerrar(writer)
+                    return
+                await proxy.atender(reader, writer)
+
+            servidor_jaxqwen = await asyncio.start_unix_server(atender_jaxqwen, path=str(path))
+            os.chmod(path, 0o660, follow_symlinks=False)
+            os.chown(path, -1, cfg.jaxqwen_gid, follow_symlinks=False)
     except BaseException:
+        if servidor_jaxqwen is not None:
+            servidor_jaxqwen.close()
+            await servidor_jaxqwen.wait_closed()
+            if cfg.jaxqwen_socket is not None:
+                cfg.jaxqwen_socket.unlink(missing_ok=True)
+        if servidor is not None:
+            servidor.close()
+            await servidor.wait_closed()
+        if proxy is not None:
+            await proxy.cerrar()
         registro.cerrar()
         raise
-    return Servidor(servidor, proxy)
+    return Servidor(servidor, proxy, servidor_jaxqwen,
+                    cfg.jaxqwen_socket if servidor_jaxqwen is not None else None)
 
 
 async def _principal() -> None:
