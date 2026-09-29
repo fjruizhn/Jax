@@ -1561,8 +1561,11 @@ jobs:
           # typed B9 evidence and multi-source freshness regressions.
           # 137 -> 144 el 2026-09-28 (F2-B B9 final remediation): canonical
           # frozen B9 values and strict single-source binding regressions.
-          grep -qE "^144 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 144 tests CORRIDOS."; exit 1; }
+          # 144 -> 147 el 2026-09-28 (F2-B canonical source identity): NFC
+          # source-set uniqueness, canonical runtime matching, and
+          # deterministic source-set digest regressions.
+          grep -qE "^147 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 147 tests CORRIDOS."; exit 1; }
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en

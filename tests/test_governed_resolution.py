@@ -121,6 +121,33 @@ def test_f2ba04_exact_multisource_conflict_contract():
     assert r.resolve("CAPABILITY_AVAILABLE",ARGS,scope(),validation_time=NOW,server_input=conflict).status is ResolutionStatus.CONFLICT
     with pytest.raises(GovernanceContractError):PredicateAuthorityBinding("x","v","a","o","production",a,b_rule,1,ConflictPolicy.ALL_SOURCES_AGREE,"i","v",None,"b")
 
+def test_source_set_rejects_duplicates_after_f2a_nfc_normalization():
+    a,c=rules()
+    with pytest.raises(GovernanceContractError,match="duplicate canonical"):
+        PredicateAuthorityBinding("CAPABILITY_AVAILABLE","v1","source:\u00e9","owner","production",a,c,60,ConflictPolicy.ALL_SOURCES_AGREE,"adapter:capability","1",None,"b1",designated_source_identities=("source:\u00e9","source:e\u0301"))
+    with pytest.raises(GovernanceContractError,match="duplicate canonical"):
+        PredicateAuthorityBinding("CAPABILITY_AVAILABLE","v1","source:a","owner","production",a,c,60,ConflictPolicy.ALL_SOURCES_AGREE,"adapter:capability","1",None,"b1",designated_source_identities=("source:a","source:a"))
+
+def test_source_set_is_canonical_for_runtime_matching_and_snapshot_identity():
+    a,c=rules()
+    left="source:\u00e9";right="source:b"
+    b=PredicateAuthorityBinding("CAPABILITY_AVAILABLE","v1",left,"owner","production",a,c,60,ConflictPolicy.ALL_SOURCES_AGREE,"adapter:capability","1",None,"b1",designated_source_identities=(right,left))
+    equivalent=PredicateAuthorityBinding("CAPABILITY_AVAILABLE","v1","source:e\u0301","owner","production",a,c,60,ConflictPolicy.ALL_SOURCES_AGREE,"adapter:capability","1",None,"b1",designated_source_identities=("source:e\u0301",right))
+    assert b.designated_source_identities==(right,left)
+    assert b.digest==equivalent.digest
+    r=registry(RegistryEntry(b,TrustedAdapterRegistration(AdapterKind.CAPABILITY_AVAILABLE,"adapter:capability","1",left,None,{}),("name","mode")))
+    # An NFD spelling is one canonical participant, not a second source.
+    assert r.resolve("CAPABILITY_AVAILABLE",ARGS,scope(),validation_time=NOW,server_input=server_input((("source:e\u0301",obs(result={"v":1})),))).status is ResolutionStatus.UNAVAILABLE
+    assert r.resolve("CAPABILITY_AVAILABLE",ARGS,scope(),validation_time=NOW,server_input=server_input((("source:e\u0301",obs(result={"v":1})),(right,obs(result={"v":1}))))).status is ResolutionStatus.RESOLVED
+    assert r.resolve("CAPABILITY_AVAILABLE",ARGS,scope(),validation_time=NOW,server_input=server_input(((left,obs(result={"v":1})),(right,obs(result={"v":2}))))).status is ResolutionStatus.CONFLICT
+    with pytest.raises(GovernanceContractError,match="duplicate"):
+        server_input(((left,obs()),("source:e\u0301",obs())))
+
+def test_single_source_uses_canonical_source_identity_without_regression():
+    a,c=rules();b=PredicateAuthorityBinding("CAPABILITY_AVAILABLE","v1","source:\u00e9","owner","production",a,c,60,ConflictPolicy.SINGLE_SOURCE_REQUIRED,"adapter:capability","1",None,"b1",designated_source_identities=("source:e\u0301",))
+    r=registry(RegistryEntry(b,TrustedAdapterRegistration(AdapterKind.CAPABILITY_AVAILABLE,"adapter:capability","1","source:\u00e9",None,{}),("name","mode")))
+    assert r.resolve("CAPABILITY_AVAILABLE",ARGS,scope(),validation_time=NOW,server_input=server_input((("source:e\u0301",obs()),))).status is ResolutionStatus.RESOLVED
+
 def test_no_callable_accreditation_or_observation_self_attestation():
     with pytest.raises(GovernanceContractError):TrustedAdapterRegistration(lambda:None,"x","1","source")
     with pytest.raises(TypeError):ResolutionObservation(ResolutionStatus.RESOLVED,NOW,"x",{},actual_source_identity="source")

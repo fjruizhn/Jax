@@ -56,8 +56,13 @@ class PredicateAuthorityBinding:
         # empty tuple is an invalid accredited source set, never a silent
         # fallback to the primary identity.
         sources=(self.designated_source_identity,) if self.designated_source_identities is None else self.designated_source_identities
-        if not isinstance(sources,tuple) or not sources or len(set(sources))!=len(sources):raise GovernanceContractError("designated source set must be nonempty unique tuple")
+        if not isinstance(sources,tuple) or not sources:raise GovernanceContractError("designated source set must be nonempty tuple")
+        # Source identity is a canonical governance identifier, not an opaque
+        # caller spelling.  Validate uniqueness after the F2-A NFC policy so
+        # aliases cannot inflate an ALL_SOURCES_AGREE source set.
         sources=tuple(_text(x,"designated_source_identity") for x in sources)
+        if len(set(sources))!=len(sources):raise GovernanceContractError("designated source set contains duplicate canonical identities")
+        sources=tuple(sorted(sources))
         if self.designated_source_identity not in sources:raise GovernanceContractError("primary source absent from source set")
         if self.conflict_policy is ConflictPolicy.ALL_SOURCES_AGREE and len(sources)<2:raise GovernanceContractError("ALL_SOURCES_AGREE requires at least two sources")
         if self.conflict_policy is ConflictPolicy.PREFERRED_SOURCE_WITH_EXPLICIT_FALLBACK and len(sources)<2:raise GovernanceContractError("fallback policy requires named fallback")
@@ -167,11 +172,12 @@ class ServerAdapterInput:
         if t is not _ADAPTER_INPUT_TOKEN:raise GovernanceContractError("adapter input requires server pathway")
         if not isinstance(observations,tuple) or not observations:raise GovernanceContractError("observations must be nonempty tuple")
         seen=set()
+        canonical=[]
         for source,o in observations:
-            _text(source,"observation source")
+            source=_text(source,"observation source")
             if source in seen or not isinstance(o,ResolutionObservation):raise GovernanceContractError("duplicate or invalid observation")
-            seen.add(source)
-        x=object.__new__(cls);object.__setattr__(x,"observations",tuple(observations));return x
+            seen.add(source);canonical.append((source,o))
+        x=object.__new__(cls);object.__setattr__(x,"observations",tuple(canonical));return x
 
 
 @dataclass(frozen=True, init=False)
