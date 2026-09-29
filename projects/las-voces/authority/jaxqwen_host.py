@@ -50,13 +50,13 @@ def _pairs(pairs):
 
 class JaxQwenHost:
     """Dedicated local service. Construction binds every verifier/config value."""
-    def __init__(self, *, root: Path, handoff_state_dir: Path, source_worktree_root: Path, workspace_root: Path,
+    def __init__(self, *, root: Path, canonical_root: Path, handoff_state_dir: Path, source_worktree_root: Path, workspace_root: Path,
                  mission_state_dir: Path, trust_state_dir: Path, trust_key_file: Path,
                  dispatch_socket: Path, dispatcher_uid: int, dispatch_gid: int,
                  model_socket: Path, model_socket_uid: int, model_socket_gid: int,
                  model: str, max_output_tokens: int = 4096,
                  dispatch_enabled: bool = False, service_identity_verifier=None):
-        self.root, self.handoff_state_dir = root.resolve(), handoff_state_dir.resolve()
+        self.root, self.canonical_root, self.handoff_state_dir = root.resolve(), canonical_root.resolve(), handoff_state_dir.resolve()
         self.source_worktree_root, self.workspace_root, self.mission_state_dir = source_worktree_root, workspace_root, mission_state_dir
         self.dispatch_socket, self.dispatcher_uid, self.dispatch_gid = dispatch_socket, dispatcher_uid, dispatch_gid
         self.model_socket, self.model_socket_uid, self.model_socket_gid = model_socket, model_socket_uid, model_socket_gid
@@ -73,7 +73,9 @@ class JaxQwenHost:
             raise ValueError("host trust key must be a protected regular systemd credential")
         secret = trust_key_file.read_bytes()
         if len(secret) < 32: raise ValueError("host trust key is too short")
-        authority = self.root / "projects/las-voces/authority"
+        # Execute only the installed/read-only canonical host implementation;
+        # the dispatcher checkout is data and ACK state, never service code.
+        authority = self.canonical_root / "projects/las-voces/authority"
         self.capability = _load("jaxqwen_host_capability", authority / "jaxqwen_capability.py")
         self.trust = _load("jaxqwen_host_trust", authority / "jaxqwen_trust.py")
         self.transport_module = _load("jaxqwen_host_transport", authority / "jaxqwen_transport.py")
@@ -82,7 +84,7 @@ class JaxQwenHost:
                          current_state=lambda claims: self._holder["capability"]._broker_claims_current(claims))
         self._operator_token = object()
         self._holder["capability"] = self.capability.JaxQwenCapability(
-            self.root, self.handoff_state_dir, workspace_root, trust_broker=self._broker,
+            self.root, self.handoff_state_dir, workspace_root, canonical_root=self.canonical_root, trust_broker=self._broker,
             source_worktree_root=source_worktree_root, host_state_dir=mission_state_dir,
             operator_verifier=lambda proof: proof is self._operator_token)
         self._server = None

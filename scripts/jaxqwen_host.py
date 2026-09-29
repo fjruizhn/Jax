@@ -15,7 +15,7 @@ AUTHORITY = ROOT / "projects/las-voces/authority"
 if str(AUTHORITY) not in sys.path: sys.path.insert(0, str(AUTHORITY))
 from jaxqwen_host import JaxQwenHost
 
-_FIELDS = {"root", "handoff_state_dir", "source_worktree_root", "workspace_root", "mission_state_dir", "trust_state_dir",
+_FIELDS = {"root", "canonical_root", "handoff_state_dir", "source_worktree_root", "workspace_root", "mission_state_dir", "trust_state_dir",
            "dispatch_socket", "dispatcher_uid", "dispatch_gid", "model_socket", "model",
            "model_socket_uid", "model_socket_gid",
            "max_output_tokens", "dispatch_enabled"}
@@ -28,7 +28,7 @@ def _config(path: Path) -> dict:
         raise ValueError("unreadable jaxqwen host config") from exc
     if not isinstance(value, dict) or set(value) != _FIELDS:
         raise ValueError("jaxqwen host config schema mismatch")
-    paths = ("root", "handoff_state_dir", "source_worktree_root", "workspace_root", "mission_state_dir", "trust_state_dir", "dispatch_socket", "model_socket")
+    paths = ("root", "canonical_root", "handoff_state_dir", "source_worktree_root", "workspace_root", "mission_state_dir", "trust_state_dir", "dispatch_socket", "model_socket")
     for name in paths:
         if not isinstance(value[name], str) or not Path(value[name]).is_absolute(): raise ValueError("jaxqwen host paths must be absolute")
         value[name] = Path(value[name])

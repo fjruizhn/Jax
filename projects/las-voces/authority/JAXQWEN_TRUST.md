@@ -73,11 +73,16 @@ and `config/systemd/jaxqwen.service` are installation templates. Do not deploy
 them as part of this PR. A later explicitly authorized host rollout must:
 
 1. Install the sysusers and tmpfiles definitions; provision the dispatcher
-   worktree root at `/var/lib/jaxqwen-dispatch/worktrees` with read-only access
-   for group `jaxqwen-dispatch`; configure the governed dispatcher to create
-   its canonical task worktrees there. Configure host paths to the actual
-   canonical checkout, producer control directory, dispatcher state, and that
-   worktree root. The host rejects any ACK worktree outside that exact root.
+   checkout at `/var/lib/jaxqwen-dispatch/repo` and worktree root at
+   `/var/lib/jaxqwen-dispatch/worktrees`, readable but not writable by group
+   `jaxqwen-dispatch`; configure the governed dispatcher to create its
+   canonical task worktrees there. Set host `root` to that checkout,
+   `canonical_root` to `/srv/jax-prod/jax`, and `handoff_state_dir` to
+   `/srv/jax-prod/jax/.git/ariadna-pm-control`. The service code is loaded only
+   from the installed canonical checkout; the dispatcher checkout provides
+   ACK/Git data only. The host compares canonical and dispatcher project hash,
+   HEAD and repository on every operation, and rejects any ACK worktree outside
+   the configured root.
 2. Create `/etc/jax/secrets/jaxqwen-trust.key` with 32 random bytes, owner
    `root:root`, mode `0600`. Install `/etc/jax/jaxqwen.json` as root-owned,
    non-writable by the service, with exact schema from `scripts/jaxqwen_host.py`;
@@ -92,13 +97,15 @@ them as part of this PR. A later explicitly authorized host rollout must:
    `SupplementaryGroups=jaxqwen-proxy` to that proxy service. Store the
    environment file as `root:<proxy-service-group>` mode `0640`. All three
    values are required together; a partial configuration fails startup.
-4. Verify the dispatcher can read only its approved producer state and can
-   write its builder worktree and ACK state; verify `jaxqwen` has read-only
-   access to canonical source, producer state, ACK state and dispatcher source
-   worktrees, and write access only to `/var/lib/jaxqwen`. Grant read/search
-   access to the task-leases lock and ledger so the service can hold the shared
-   lock; grant no write access to that control state or Git metadata. Install
-   the unit,
+4. Use POSIX ACLs to grant group `jaxqwen-dispatch` read/search on the
+   dispatcher checkout and source worktrees, and read-only access to the
+   canonical checkout required for Git identity, cleanliness and project
+   revalidation. Grant read/search access to the task-leases lock and ledger so
+   the service can hold the shared lock. Grant no write ACL to `jaxqwen` on the
+   checkout, source worktrees, producer state, canonical project or any `.git`
+   path. Verify with
+   `namei -l`, `getfacl` and negative write checks that `jaxqwen` can write only
+   `/var/lib/jaxqwen`. Install the unit,
    inspect `systemd-analyze security`, then start (do not enable) proxy and
    host only under the separate human deploy gate. The service default remains
    `dispatch_enabled=false`.

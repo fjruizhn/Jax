@@ -129,8 +129,10 @@ class JaxQwenCapability:
     which is useful for adapters and tests but is not a replacement for OS or
     transport authentication.
     """
-    def __init__(self, root: Path, handoff_state_dir: Path, workspace_root: Path, *, source_worktree_root: Path | None = None, trust_broker: JaxQwenTrustBroker | None = None, host_state_dir: Path | None = None, operator_verifier: Callable[[object], bool] | None = None, identity_verifier: Callable[[], str] | None = None):
+    def __init__(self, root: Path, handoff_state_dir: Path, workspace_root: Path, *, canonical_root: Path | None = None, source_worktree_root: Path | None = None, trust_broker: JaxQwenTrustBroker | None = None, host_state_dir: Path | None = None, operator_verifier: Callable[[object], bool] | None = None, identity_verifier: Callable[[], str] | None = None):
         self.root, self.handoff_state_dir, self.workspace_root = root.resolve(), handoff_state_dir.resolve(), workspace_root.resolve()
+        if canonical_root is None: raise CapabilityError("explicit canonical read-only checkout is required")
+        self.canonical_root = Path(canonical_root).resolve()
         if source_worktree_root is None: raise CapabilityError("explicit dispatcher worktree root is required")
         self.source_worktree_root = Path(source_worktree_root).resolve()
         if not (self.root / "projects/las-voces/project.json").is_file():
@@ -140,6 +142,10 @@ class JaxQwenCapability:
         common = Path(_git(self.root, "rev-parse", "--git-common-dir"))
         common = (self.root / common).resolve() if not common.is_absolute() else common.resolve()
         self.dispatch_dir = common / "ariadna-builder-dispatch"
+        canonical_common = Path(_git(self.canonical_root, "rev-parse", "--git-common-dir"))
+        canonical_common = (self.canonical_root / canonical_common).resolve() if not canonical_common.is_absolute() else canonical_common.resolve()
+        if self.handoff_state_dir != canonical_common / "ariadna-pm-control":
+            raise CapabilityError("handoff state is not the canonical producer control plane")
         # Mission and credential state is host state, never shared Git metadata.
         if host_state_dir is None: raise CapabilityError("explicit host state directory is required")
         self.ledger_dir = Path(os.path.abspath(host_state_dir))
@@ -239,9 +245,53 @@ class JaxQwenCapability:
         if handoff.get("recipient_agent") != ack["canonical_owner"] or handoff.get("correlation_id") != ack["lease_id"] or handoff.get("message_id") != ack["lease_id"]: raise CapabilityError("handoff recipient/correlation is invalid")
         return row
 
+    def _handoff_audit(self, key: str, ack: dict[str, Any]) -> dict[str, Any]:
+        path = self.handoff_state_dir / "runtime-audit.ndjson"; _safe_regular(path)
+        try:
+            rows = [json.loads(raw) for raw in path.read_text(encoding="utf-8").splitlines() if raw]
+        except json.JSONDecodeError as exc: raise CapabilityError("malformed handoff audit") from exc
+        matches = [row for row in rows if isinstance(row, dict) and row.get("idempotency_key") == key]
+        if len(matches) != 1: raise CapabilityError("handoff audit is absent or ambiguous")
+        audit = matches[0]
+        expected = {"event_type": "ARIADNA_CYCLE", "task_id": ack["task_id"], "action": "emit_handoff",
+                    "verdict": "ALLOW", "result": "EFFECT_EMIT_HANDOFF", "lease_id": ack["lease_id"],
+                    "project_hash": ack["project_hash"]}
+        if any(audit.get(name) != value for name, value in expected.items()):
+            raise CapabilityError("handoff audit is not the current authoritative effect")
+        if not isinstance(audit.get("runtime_instance_id"), str) or not audit["runtime_instance_id"]:
+            raise CapabilityError("handoff audit lacks runtime identity")
+        return audit
+
+    def _runtime_control_is_live(self, lease: dict[str, Any]) -> bool:
+        path = self.handoff_state_dir / "control.lock"; _safe_regular(path)
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if (value.get("state") != "ACTIVE" or value.get("instance_id") != lease.get("runtime_instance_id")
+                    or value.get("pid") != lease.get("pid")):
+                return False
+            if type(lease.get("pid")) is not int or lease["pid"] <= 0: return False
+            try: os.kill(lease["pid"], 0)
+            except ProcessLookupError: return False
+            except PermissionError: pass  # fail-soft: permission denial proves the process exists
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                try: fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except BlockingIOError: return True
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                return False
+            finally: os.close(fd)
+        except (OSError, json.JSONDecodeError, TypeError):  # fail-soft: uncertain runtime ownership denies the mission
+            return False
+
     def _validate_current(self, ack: dict[str, Any], row: dict[str, Any]) -> None:
         if _project_hash(self.root) != ack["project_hash"]: raise CapabilityError("ACK is stale against canonical project")
         if _git(self.root, "rev-parse", "HEAD") != ack["base_commit"]: raise CapabilityError("ACK source revision is stale")
+        if (_project_hash(self.canonical_root) != ack["project_hash"]
+                or _git(self.canonical_root, "rev-parse", "HEAD") != ack["base_commit"]
+                or _repository_identity(self.canonical_root) != _repository_identity(self.root)
+                or _git(self.canonical_root, "status", "--porcelain")
+                or _git(self.root, "status", "--porcelain")):
+            raise CapabilityError("canonical source changed after dispatcher acknowledgement")
         if ack["branch"] != f"las-voces/{ack['task_id'].lower()}": raise CapabilityError("ACK branch is not task-bound")
         project = json.loads((self.root / "projects/las-voces/project.json").read_text(encoding="utf-8"))
         tasks = [x for x in project.get("tasks", []) if isinstance(x, dict) and x.get("id") == ack["task_id"]]
@@ -258,6 +308,11 @@ class JaxQwenCapability:
             else: raise CapabilityError("invalid task lease record")
         lease = active.get(ack["lease_id"])
         if not lease or lease.get("task_id") != ack["task_id"] or lease.get("owner") != ack["canonical_owner"]: raise CapabilityError("ACK lease is inactive or mismatched")
+        audit = self._handoff_audit(ack["idempotency_key"], ack)
+        if (lease.get("runtime_instance_id") != audit["runtime_instance_id"]
+                or not isinstance(lease.get("pid"), int) or lease["pid"] <= 0
+                or not self._runtime_control_is_live(lease)):
+            raise CapabilityError("ACK lease runtime is not live")
         expected_worktree = self.source_worktree_root / f"las-voces-{ack['task_id'].lower()}"
         observed_worktree = Path(ack.get("worktree", ""))
         if observed_worktree.is_symlink() or observed_worktree != expected_worktree or not observed_worktree.is_dir():

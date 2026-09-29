@@ -57,7 +57,7 @@ def make(fixture):
     root, producer, key, workspaces, source_worktree_root = fixture
     host = {}; operator_token = object()
     broker = capability.JaxQwenTrustBroker(b"t" * 32, workspaces.parent / "host-trust-state", current_state=lambda claims: host["item"]._broker_claims_current(claims))
-    host["item"] = capability.JaxQwenCapability(root, producer, workspaces, source_worktree_root=source_worktree_root, trust_broker=broker, host_state_dir=workspaces.parent / "host-mission-state", operator_verifier=lambda authorization: authorization is operator_token)
+    host["item"] = capability.JaxQwenCapability(root, producer, workspaces, canonical_root=root, source_worktree_root=source_worktree_root, trust_broker=broker, host_state_dir=workspaces.parent / "host-mission-state", operator_verifier=lambda authorization: authorization is operator_token)
     host["item"]._test_operator_token = operator_token
     return host["item"], key
 
@@ -116,7 +116,7 @@ def test_forged_ack_or_stale_binding_is_rejected(fixture, mutate):
 
 
 def test_identity_stale_lease_and_non_ready_task_fail_closed(fixture):
-    item, key = make(fixture); root, producer, _, workspaces, source_worktree_root = fixture; bad = capability.JaxQwenCapability(root, producer, workspaces, source_worktree_root=source_worktree_root, host_state_dir=workspaces.parent / "other-host-state"); assert bad.start(idempotency_key=key).decision == "REJECTED"
+    item, key = make(fixture); root, producer, _, workspaces, source_worktree_root = fixture; bad = capability.JaxQwenCapability(root, producer, workspaces, canonical_root=root, source_worktree_root=source_worktree_root, host_state_dir=workspaces.parent / "other-host-state"); assert bad.start(idempotency_key=key).decision == "REJECTED"
     with (item.handoff_state_dir / "task-leases.ndjson").open("a") as out: out.write(json.dumps({"event": "RELEASED", "lease_id": json.loads((item.dispatch_dir / "acks.ndjson").read_text().splitlines()[-1])["lease_id"]}) + "\n")
     assert item.start(idempotency_key=key).decision == "REJECTED"
 
@@ -127,6 +127,19 @@ def test_wrong_repository_identity_rejects_before_mission_start(fixture):
     assert item.start(idempotency_key=key).decision == "REJECTED"
 
 
+def test_stale_runtime_control_lock_rejects_unreleased_lease(fixture):
+    item, key = make(fixture)
+    control_fd = FDS[str(item.root)][-1]
+    fcntl.flock(control_fd, fcntl.LOCK_UN)
+    assert item.start(idempotency_key=key).decision == "REJECTED"
+
+
+def test_dirty_canonical_source_tree_rejects_host_code_state(fixture):
+    item, key = make(fixture)
+    (item.canonical_root / "uncommitted-host-source").write_text("changed", encoding="utf-8")
+    assert item.start(idempotency_key=key).decision == "REJECTED"
+
+
 def test_concurrent_start_is_single_winner_and_restart_is_idempotent(fixture):
     item, key = make(fixture); values = []
     threads = [threading.Thread(target=lambda: values.append(item.start(idempotency_key=key).decision)) for _ in range(2)]
@@ -134,7 +147,7 @@ def test_concurrent_start_is_single_winner_and_restart_is_idempotent(fixture):
     assert sorted(values) == ["ACCEPTED", "NOOP"]
     host = {}
     replay_broker = capability.JaxQwenTrustBroker(b"t" * 32, item.workspace_root.parent / "host-trust-state", current_state=lambda claims: host["item"]._broker_claims_current(claims))
-    replay = capability.JaxQwenCapability(item.root, item.handoff_state_dir, item.workspace_root, source_worktree_root=item.source_worktree_root, trust_broker=replay_broker, host_state_dir=item.workspace_root.parent / "host-mission-state", operator_verifier=lambda authorization: authorization is item._test_operator_token)
+    replay = capability.JaxQwenCapability(item.root, item.handoff_state_dir, item.workspace_root, canonical_root=item.canonical_root, source_worktree_root=item.source_worktree_root, trust_broker=replay_broker, host_state_dir=item.workspace_root.parent / "host-mission-state", operator_verifier=lambda authorization: authorization is item._test_operator_token)
     host["item"] = replay
     assert replay.start(idempotency_key=key).decision == "NOOP"
 

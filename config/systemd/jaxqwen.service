@@ -8,7 +8,7 @@ Type=simple
 User=jaxqwen
 Group=jaxqwen-dispatch
 SupplementaryGroups=jaxqwen jaxqwen-proxy
-WorkingDirectory=/srv/jax-prod/jax
+WorkingDirectory=/var/lib/jaxqwen-dispatch/repo
 RuntimeDirectory=jaxqwen
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=no
@@ -31,7 +31,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX
 ReadWritePaths=/var/lib/jaxqwen
-ReadOnlyPaths=/srv/jax-prod/jax /var/lib/jaxqwen-dispatch/worktrees
+ReadOnlyPaths=/srv/jax-prod/jax /var/lib/jaxqwen-dispatch/repo /var/lib/jaxqwen-dispatch/worktrees
 StandardOutput=journal
 StandardError=journal
 
