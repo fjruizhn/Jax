@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import html
 import json
 import re
@@ -22,6 +23,8 @@ from .response import (
     _seal_candidate_for_server, _text,
 )
 from .resolution import GovernedResolutionReceipt, ResolverRegistry
+from .governed_domain import (GOVERNED_DOMAIN_SPEC_VERSION, GOVERNED_ENVELOPE_SCHEMA_VERSIONS,
+    GOVERNED_RENDERER_API_VERSION, GovernedDomainSpecification)
 
 
 class GovernedRenderError(GovernanceContractError):
@@ -30,31 +33,21 @@ class GovernedRenderError(GovernanceContractError):
 
 @dataclass(frozen=True)
 class GovernedDomainRegistry:
-    """Deterministic exact phrases which narrative text may not assert.
-
-    This is intentionally a small grammar, not a semantic/NLP classifier.
-    A host composition registers phrases for the predicates it exposes.
-    """
+    """Compatibility wrapper around the canonical JAX domain specification."""
     phrases: Mapping[str, str] = field(default_factory=dict)
+    specification: GovernedDomainSpecification = field(default_factory=GovernedDomainSpecification)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.phrases, Mapping):
+        if not isinstance(self.phrases, Mapping) or not isinstance(self.specification, GovernedDomainSpecification):
             raise GovernanceContractError("governed phrases must be a mapping")
-        normalized: dict[str, str] = {}
-        for phrase, predicate in self.phrases.items():
-            phrase = _text(phrase, "governed phrase").casefold()
-            predicate = _text(predicate, "governed predicate")
-            if phrase in normalized and normalized[phrase] != predicate:
-                raise GovernanceContractError("governed phrase has conflicting predicate")
-            normalized[phrase] = predicate
-        object.__setattr__(self, "phrases", MappingProxyType(dict(sorted(normalized.items()))))
+        if self.phrases:
+            raise GovernanceContractError("legacy phrase registries are unsupported; supply canonical GovernedDomainSpecification")
+        object.__setattr__(self, "phrases", MappingProxyType({}))
 
     def hit(self, text: str) -> str | None:
-        normalized = unicodedata.normalize("NFC", text).casefold()
-        for phrase, predicate in self.phrases.items():
-            # Exact registered phrase, bounded so a substring cannot trigger.
-            if re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", normalized):
-                return predicate
+        hit = self.specification.registered_proposition(text)
+        if hit is not None:
+            return hit
         return None
 
 
@@ -67,6 +60,9 @@ class RenderedText:
     contract_state: ContractState
     claim_ids: tuple[str, ...] = ()
     chunks: tuple[str, ...] = ()
+    source_envelope_digest: str = ""
+    renderer_api_version: str = GOVERNED_RENDERER_API_VERSION
+    domain_spec_version: str = GOVERNED_DOMAIN_SPEC_VERSION
 
 
 @dataclass(frozen=True)
@@ -82,6 +78,10 @@ class RenderContext:
     # fails closed if no server validator is composed.
     reference_validator: Callable[[object, ResponseScope], bool] | None = None
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+    # Canonical immutable USER_ASSERTED text, fetched by trusted composition
+    # after reference access/revision validation.  Provider text is never it.
+    user_assertion_content: Mapping[str, str] = field(default_factory=dict)
+    renderer_api_version: str = GOVERNED_RENDERER_API_VERSION
 
     def __post_init__(self) -> None:
         if self.registry is not None and not isinstance(self.registry, ResolverRegistry):
@@ -93,11 +93,16 @@ class RenderContext:
                 raise GovernanceContractError(f"{name} must be string mapping")
         if not isinstance(self.domain_registry, GovernedDomainRegistry) or not callable(self.now):
             raise GovernanceContractError("invalid server render context")
+        if not isinstance(self.renderer_api_version, str):
+            raise GovernanceContractError("renderer API version must be string")
+        if not isinstance(self.user_assertion_content, Mapping) or not all(isinstance(k, str) and isinstance(v, str) for k, v in self.user_assertion_content.items()):
+            raise GovernanceContractError("user assertion content must be string mapping")
         if self.reference_validator is not None and not callable(self.reference_validator):
             raise GovernanceContractError("reference_validator must be server callable or None")
         object.__setattr__(self, "receipts", MappingProxyType(dict(self.receipts)))
         object.__setattr__(self, "templates", MappingProxyType(dict(self.templates)))
         object.__setattr__(self, "notices", MappingProxyType(dict(self.notices)))
+        object.__setattr__(self, "user_assertion_content", MappingProxyType(dict(self.user_assertion_content)))
 
 
 def _safe_payload(text: str) -> str:
@@ -139,6 +144,10 @@ class GovernedRenderer:
             raise GovernedRenderError("sealed envelope digest mismatch")
         if not isinstance(context, RenderContext):
             raise GovernedRenderError("renderer requires server RenderContext")
+        if (envelope.candidate.schema_version not in GOVERNED_ENVELOPE_SCHEMA_VERSIONS
+                or context.renderer_api_version != GOVERNED_RENDERER_API_VERSION
+                or context.domain_registry.specification.version != GOVERNED_DOMAIN_SPEC_VERSION):
+            return self._safe(envelope, self.unavailable_text)
         now = context.now()
         if not isinstance(now, datetime) or now.tzinfo is None:
             raise GovernedRenderError("server renderer clock must be timezone-aware")
@@ -169,7 +178,7 @@ class GovernedRenderer:
                     shown.append(claim_id)
             elif block.kind is ContentBlockKind.ATTRIBUTED_QUOTE:
                 claim = claims.get(block.claim_refs[0])
-                if claim is None or claim.epistemic_status is not EpistemicStatus.USER_ASSERTED:
+                if not self._validate_quote(claim, block, envelope.response_scope, context, {r.ref_id: r for r in envelope.references}):
                     return self._safe(envelope, self.unavailable_text)
                 fragments.append(f"{_safe_payload(block.speaker or '')} says: {_safe_payload(block.payload)}")
                 shown.append(claim.claim_id)
@@ -187,8 +196,21 @@ class GovernedRenderer:
             else:  # defensive for future enum additions
                 return self._safe(envelope, self.unavailable_text)
         text = "\n".join(fragments)
-        chunks = self._chunks(text, chunk_size)
-        return RenderedText(text, envelope.response_id, envelope.envelope_digest, envelope.contract_state, tuple(shown), chunks)
+        # Current observations must cross the display boundary atomically.  A
+        # second validation occurs immediately before returning the unit.
+        if any(claims[x].epistemic_status is EpistemicStatus.CURRENT_OBSERVATION for x in shown):
+            final_now = context.now()
+            try:
+                for claim_id in shown:
+                    claim = claims[claim_id]
+                    if claim.epistemic_status is EpistemicStatus.CURRENT_OBSERVATION:
+                        self._validate_claim(claim, envelope.response_scope, context, final_now, {r.ref_id: r for r in envelope.references})
+            except GovernedRenderError:
+                return self._safe(envelope, self.unavailable_text)
+            chunks = ()
+        else:
+            chunks = self._chunks(text, chunk_size)
+        return self._effective(text, envelope, envelope.contract_state, tuple(shown), chunks)
 
     def _validate_claim(self, claim, scope: ResponseScope, context: RenderContext, now: datetime, references: Mapping[str, object]) -> None:
         if claim.claim_scope.scope_digest != scope.scope_digest:
@@ -203,12 +225,13 @@ class GovernedRenderer:
                     raise GovernedRenderError("claim reference is not valid for rendering")
         if claim.epistemic_status is EpistemicStatus.CURRENT_OBSERVATION:
             receipt = context.receipts.get(claim.resolution_receipt_ref or "")
-            if context.registry is None or receipt is None or not context.registry.verify_receipt(receipt, scope, validation_time=now):
+            receipt_ref = references.get(claim.resolution_receipt_ref or "")
+            if context.registry is None or receipt is None or receipt_ref is None or not context.registry.verify_receipt_for_claim(receipt, claim, scope, receipt_ref=receipt_ref, validation_time=now):
                 raise GovernedRenderError("current claim receipt is invalid at render time")
         elif claim.epistemic_status in {EpistemicStatus.MEMORY_DERIVED, EpistemicStatus.MODEL_KNOWLEDGE, EpistemicStatus.INFERRED}:
             # These statuses can be rendered only from non-system typed claims.
             # A registered exact governed predicate is never narrative fallback.
-            if claim.predicate in context.domain_registry.phrases.values():
+            if claim.predicate in context.domain_registry.specification.predicates:
                 raise GovernedRenderError("non-current source cannot assert governed predicate")
 
     def _render_claim(self, claim, context: RenderContext) -> str:
@@ -221,8 +244,29 @@ class GovernedRenderer:
             raise GovernedRenderError("claim template is not server-owned")
         return _format(template, claim.typed_arguments)
 
+    def _validate_quote(self, claim, block, scope, context, references) -> bool:
+        if claim is None or claim.epistemic_status is not EpistemicStatus.USER_ASSERTED:
+            return False
+        ref = references.get(block.attribution_ref or "")
+        if ref is None or block.attribution_ref not in claim.basis_refs or ref.asserter_id != block.speaker:
+            return False
+        if context.reference_validator is None or not context.reference_validator(ref, scope):
+            return False
+        canonical = context.user_assertion_content.get(ref.ref_id)
+        if canonical is None:
+            return False
+        canonical = _text(canonical, "canonical assertion")
+        claimed = claim.typed_arguments.get("text")
+        return (isinstance(claimed, str)
+            and _text(claimed, "claimed assertion") == canonical
+            and canonical == _text(block.payload, "quote payload"))
+
+    def _effective(self, text: str, envelope: GovernedResponseEnvelope, state: ContractState, claim_ids=(), chunks=()) -> RenderedText:
+        digest = "sha256:" + hashlib.sha256((state.value + "\x00" + text).encode("utf-8")).hexdigest()
+        return RenderedText(text, envelope.response_id, digest, state, tuple(claim_ids), tuple(chunks), envelope.envelope_digest)
+
     def _safe(self, envelope: GovernedResponseEnvelope, text: str) -> RenderedText:
-        return RenderedText(text, envelope.response_id, envelope.envelope_digest, envelope.contract_state, (), ())
+        return self._effective(text, envelope, ContractState.UNAVAILABLE)
 
     @staticmethod
     def _chunks(text: str, chunk_size: int) -> tuple[str, ...]:

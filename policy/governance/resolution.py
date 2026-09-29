@@ -315,6 +315,43 @@ class ResolverRegistry:
         if r.receipt_id!=expected_id or r.status is not ResolutionStatus.RESOLVED or r.registry_snapshot_digest!=self.snapshot_digest:return False
         if (r.binding_version,r.resolver_id,r.resolver_version,r.actual_source_identity,r.source_configuration_digest)!=(b.binding_version,a.resolver_id,a.resolver_version,a.source_identity,a.source_configuration_digest):return False
         return r.observation_scope_digest==expected_scope.scope_digest and r.is_temporally_fresh_at(now)
+    def verify_receipt_for_claim(self, receipt, claim, expected_scope, *, receipt_ref, validation_time):
+        """Verify the exact F2-B receipt for the exact F2-C claim.
+
+        This is intentionally a semantic binding operation, not receipt
+        selection.  A valid receipt for any other predicate, arguments,
+        binding, source, resolver, snapshot or template cannot pass.
+        """
+        from .response import ClaimRecord, TemplateContract
+        if not isinstance(claim, ClaimRecord) or not isinstance(receipt_ref, ReferenceRef):
+            return False
+        if claim.claim_scope.scope_digest != expected_scope.scope_digest:
+            return False
+        if claim.resolution_receipt_ref != receipt_ref.ref_id or receipt_ref.ref_type is not ReferenceType.RESOLUTION_RECEIPT:
+            return False
+        if receipt_ref.scope_digest != expected_scope.scope_digest:
+            return False
+        if not self.verify_receipt(receipt, expected_scope, validation_time=validation_time):
+            return False
+        entry = self._entry(claim.predicate)
+        if entry is None or claim.template_contract is None:
+            return False
+        contract = claim.template_contract
+        contract_identity = f"{contract.template_id}@{contract.template_version}:{contract.locale}"
+        if entry.template_contract_ref != contract_identity:
+            return False
+        # The reference revision is server-issued receipt identity.  A loose
+        # reference id, source match, or predicate match is never sufficient.
+        if receipt_ref.revision_or_digest != receipt.receipt_id:
+            return False
+        return (receipt.predicate == claim.predicate
+            and receipt.arguments_digest == _digest(claim.typed_arguments)
+            and receipt.binding_version == entry.binding.binding_version
+            and receipt.registry_snapshot_digest == self.snapshot_digest
+            and receipt.actual_source_identity == entry.adapter.source_identity
+            and receipt.source_configuration_digest == entry.adapter.source_configuration_digest
+            and receipt.resolver_id == entry.adapter.resolver_id
+            and receipt.resolver_version == entry.adapter.resolver_version)
 
 _REGISTRY_TOKEN=object()
 def _build_approved_registry_for_server(entries,*,authenticator):return ResolverRegistry._from_approved_entries(_REGISTRY_TOKEN,entries,authenticator)
