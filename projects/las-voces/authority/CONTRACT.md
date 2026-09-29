@@ -100,15 +100,17 @@ rejected without deleting history or forcing a worktree.
 The producer's canonical checkout/control state and the builder checkout are
 explicit independent roots. Their canonical project bytes must match; ACKs
 remain under the builder checkout's Git common directory rather than the
-Ariadna producer control directory. There is currently no authenticated
-Ariadna-to-Qwen execution adapter. A later adapter must establish a service
-identity, repository allowlist, task/lease/hash binding, and mission
-idempotency; until then no dispatcher code may spawn Qwen or another builder.
-The one-shot consumer also requires a deliberately provisioned dispatcher
-identity that can read the producer control lock and write only the approved
-development worktree/ACK paths. It must not be run as root to bridge those
-ownership domains; absent that narrow host identity or an equivalent
-privilege-dropping broker, consumption fails closed.
+Ariadna producer control directory. `jaxqwen` uses a separate authenticated
+host transport described in `JAXQWEN_TRUST.md`: a dedicated dispatcher identity
+may request the fixed capability only after a durable `DISPATCHED` ACK. The
+host revalidates canonical task, ACK, lease, repository, branch and approved
+worktree root, then issues single-use mission credentials. No executor
+superadmin or LAS MANOS `plataforma`/`jacobs` admission is reused. The
+dispatcher consumer still requires a deliberately provisioned identity that
+can read producer control and write only approved development worktree/ACK
+paths. It must not run as root to bridge those ownership domains; absent that
+narrow host identity or an equivalent privilege-dropping broker, consumption
+fails closed.
 
 ## LV-004 hosted runtime
 

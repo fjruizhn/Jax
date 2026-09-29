@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import socketserver
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,53 @@ def test_current_lv001_handoff_creates_one_qwen_worktree_and_audit_bound_ack(roo
     assert [row["state"] for row in rows] == ["RECEIVED", "ACCEPTED", "DISPATCHED"]
     assert rows[-1]["canonical_owner"] == "Qwen/Infra" and rows[-1]["builder_identity"] == "Qwen"
     assert "builder execution intentionally not started" in rows[-1]["reason"]
+
+
+def test_jaxqwen_adapter_requires_durable_dispatched_ack(root, tmp_path):
+    producer, key = setup_handoff(root, tmp_path)
+    item = consumer(root, producer, tmp_path)
+    forged = dispatcher.DispatchResult("DISPATCHED", "caller assertion", key, "LV-001", "/tmp/fake")
+    configured = dispatcher.GovernedHandoffConsumer(
+        root, producer, tmp_path.parent / f"{tmp_path.name}-builder-worktrees",
+        jaxqwen_socket=tmp_path / "not-a-live-socket", jaxqwen_service_uid=10001,
+    )
+    with pytest.raises(dispatcher.DispatchError, match="durable DISPATCHED ACK"):
+        configured.dispatch_jaxqwen(forged)
+    with pytest.raises(dispatcher.DispatchError, match="not configured"):
+        item.dispatch_jaxqwen(forged)
+
+
+def test_governed_dispatcher_sends_only_persisted_ack_to_dedicated_socket(root, tmp_path):
+    producer, key = setup_handoff(root, tmp_path)
+    socket_path = tmp_path / "jaxqwen.sock"
+    received = []
+
+    class Handler(socketserver.StreamRequestHandler):
+        def handle(self):
+            received.append(json.loads(self.rfile.readline()))
+            self.wfile.write(b'{"decision":"HUMAN_REQUIRED"}\n')
+
+    class Server(socketserver.ThreadingUnixStreamServer):
+        daemon_threads = True
+        allow_reuse_address = False
+
+    server = Server(str(socket_path), Handler)
+    socket_path.chmod(0o660)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        item = dispatcher.GovernedHandoffConsumer(
+            root, producer, tmp_path.parent / f"{tmp_path.name}-builder-worktrees",
+            jaxqwen_socket=socket_path, jaxqwen_service_uid=__import__("os").getuid())
+        result = item.consume(key)
+        response = item.dispatch_jaxqwen(result)
+        assert response == {"decision": "HUMAN_REQUIRED"}
+        retry = item.consume(key)
+        assert retry.decision == "NOOP"
+        assert item.dispatch_jaxqwen(retry) == {"decision": "HUMAN_REQUIRED"}
+        assert received == [{"action": "dispatch", "idempotency_key": key}] * 2
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)
 
 
 def test_replay_and_concurrent_consumers_produce_one_worktree_and_one_terminal_ack(root, tmp_path):

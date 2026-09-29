@@ -120,11 +120,17 @@ class GovernedHandoffConsumer:
     plane (which can be a separately hosted Ariadna runtime checkout).  ACKs
     are written only below this dispatcher's Git common directory.
     """
-    def __init__(self, root: Path, handoff_state_dir: Path, worktree_root: Path, *, canonical_root: Path | None = None):
+    def __init__(self, root: Path, handoff_state_dir: Path, worktree_root: Path, *, canonical_root: Path | None = None,
+                 jaxqwen_socket: Path | None = None, jaxqwen_service_uid: int | None = None):
         self.root = root.resolve()
         self.canonical_root = (canonical_root or root).resolve()
         self.handoff_state_dir = handoff_state_dir.resolve()
         self.worktree_root = worktree_root.resolve()
+        if (jaxqwen_socket is None) != (jaxqwen_service_uid is None):
+            raise DispatchError("jaxqwen socket and service UID must be configured together")
+        if jaxqwen_socket is not None and (not jaxqwen_socket.is_absolute() or type(jaxqwen_service_uid) is not int or jaxqwen_service_uid < 1):
+            raise DispatchError("invalid dedicated jaxqwen transport configuration")
+        self.jaxqwen_socket, self.jaxqwen_service_uid = jaxqwen_socket, jaxqwen_service_uid
         if not (self.root / "projects/las-voces/project.json").is_file() or not (self.canonical_root / "projects/las-voces/project.json").is_file():
             raise DispatchError("invalid dispatcher or canonical source checkout")
         self._assert_safe_git_environment(self.root)
@@ -152,6 +158,31 @@ class GovernedHandoffConsumer:
         self.state_dir = ((self.root / common).resolve() if not Path(common).is_absolute() else Path(common)) / "ariadna-builder-dispatch"
         self.ack_path, self.lock_path = self.state_dir / "acks.ndjson", self.state_dir / "dispatch.lock"
         self.authority = _load_module("ariadna_dispatch_authority", self.canonical_root / "projects/las-voces/authority/ariadna_authority.py")
+
+    def dispatch_jaxqwen(self, result: "DispatchResult") -> dict[str, Any]:
+        """Request the fixed capability only for an exact governed DISPATCHED ACK.
+
+        This is deliberately a separate host-dispatcher action. ``consume``
+        remains WORKTREE_ONLY and never starts a builder as a side effect.
+        """
+        if self.jaxqwen_socket is None or self.jaxqwen_service_uid is None:
+            raise DispatchError("dedicated jaxqwen transport is not configured")
+        if not isinstance(result, DispatchResult) or result.decision not in {"DISPATCHED", "NOOP"} or not isinstance(result.idempotency_key, str):
+            raise DispatchError("jaxqwen requires a verified DISPATCHED acknowledgement")
+        rows = self._acks().get(result.idempotency_key, [])
+        dispatched = [row for row in rows if row.get("state") == "DISPATCHED"]
+        if (len(dispatched) != 1 or any(row.get("state") == "REJECTED" for row in rows)
+                or (result.task_id is not None and dispatched[0].get("task_id") != result.task_id)
+                or (result.worktree is not None and dispatched[0].get("worktree") != result.worktree)
+                or dispatched[0].get("builder_process_started") is not False):
+            raise DispatchError("durable DISPATCHED ACK does not match the result")
+        path = Path(__file__).with_name("jaxqwen_dispatch_client.py")
+        spec = importlib.util.spec_from_file_location("ariadna_jaxqwen_dispatch_client", path)
+        if not spec or not spec.loader: raise DispatchError("dedicated jaxqwen transport is unavailable")
+        module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module.request_jaxqwen(self.jaxqwen_socket, result.idempotency_key,
+                                     expected_service_uid=self.jaxqwen_service_uid)
 
     @staticmethod
     def action_allowed(action: str) -> bool:

@@ -1,0 +1,39 @@
+[Unit]
+Description=LAS VOCES dedicated jaxqwen structured capability host
+After=network.target jax-ejecutor-proxy.service
+Requires=jax-ejecutor-proxy.service
+
+[Service]
+Type=simple
+User=jaxqwen
+Group=jaxqwen-dispatch
+SupplementaryGroups=jaxqwen jaxqwen-proxy
+WorkingDirectory=/srv/jax-prod/jax
+RuntimeDirectory=jaxqwen
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=no
+LoadCredential=jaxqwen-trust.key:/etc/jax/secrets/jaxqwen-trust.key
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/srv/jax-prod/jax/.venv/bin/python /srv/jax-prod/jax/scripts/jaxqwen_host.py --config /etc/jax/jaxqwen.json
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/var/lib/jaxqwen
+ReadOnlyPaths=/srv/jax-prod/jax /var/lib/jaxqwen-dispatch/worktrees
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

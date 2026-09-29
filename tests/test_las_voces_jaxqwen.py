@@ -32,7 +32,7 @@ def git(root, *args): return subprocess.check_output(["git", "-C", str(root), *a
 @pytest.fixture()
 def fixture(tmp_path):
     root = tmp_path / "jax"; shutil.copytree(REPO / "projects/las-voces", root / "projects/las-voces", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    subprocess.run(["git", "init", "-q", str(root)], check=True); git(root, "config", "user.email", "test@example.invalid"); git(root, "config", "user.name", "test")
+    subprocess.run(["git", "init", "-q", str(root)], check=True); git(root, "config", "user.email", "test@example.invalid"); git(root, "config", "user.name", "test"); git(root, "remote", "add", "origin", "https://github.com/fjruizhn/Jax.git")
     git(root, "add", "projects"); git(root, "commit", "-qm", "fixture"); FDS[str(root)] = []
     producer = root / ".git/ariadna-pm-control"; producer.mkdir(parents=True)
     plan = planner.DeterministicTaskPlanner(root).plan(); assert plan.handoff
@@ -40,25 +40,31 @@ def fixture(tmp_path):
     key = dispatcher.GovernedHandoffConsumer._runtime_key(row, plan.handoff.expected_project_hash); row["idempotency_key"] = key
     audit = {"event_type": "ARIADNA_CYCLE", "idempotency_key": key, "project_hash": plan.handoff.expected_project_hash, "task_id": "LV-001", "action": "emit_handoff", "verdict": "ALLOW", "result": "EFFECT_EMIT_HANDOFF", "lease_id": plan.handoff.lease_id, "runtime_instance_id": "host"}
     lease = {"task_id": "LV-001", "owner": "Qwen/Infra", "worktree": "worktrees/las-voces-lv-001", "writable_scope": ".", "lease_id": plan.handoff.lease_id, "runtime_instance_id": "host", "pid": 1}
-    (producer / "handoffs.ndjson").write_text(json.dumps(row) + "\n"); (producer / "runtime-audit.ndjson").write_text(json.dumps(audit) + "\n"); (producer / "task-leases.ndjson").write_text(json.dumps({"event": "ACQUIRED", "lease": lease}) + "\n")
+    (producer / "handoffs.ndjson").write_text(json.dumps(row) + "\n"); (producer / "runtime-audit.ndjson").write_text(json.dumps(audit) + "\n"); (producer / "task-leases.ndjson").write_text(json.dumps({"event": "ACQUIRED", "lease": lease}) + "\n"); (producer / "task-leases.lock").touch(mode=0o600)
     control = producer / "control.lock"; control.write_text(json.dumps({"state": "ACTIVE", "instance_id": "host", "pid": 1})); fd = control.open("r+"); fcntl.flock(fd, fcntl.LOCK_EX); FDS[str(root)].append(fd)
     builder = tmp_path / "builder-worktrees/las-voces-lv-001"
     subprocess.run(["git", "clone", "-q", str(root), str(builder)], check=True)
+    git(builder, "remote", "set-url", "origin", "https://github.com/fjruizhn/Jax.git")
     git(builder, "checkout", "-qB", "las-voces/lv-001")
     dispatch = root / ".git/ariadna-builder-dispatch"; dispatch.mkdir()
     ack = {"event_type": "ARIADNA_HANDOFF_ACK", "state": "DISPATCHED", "idempotency_key": key, "task_id": "LV-001", "lease_id": plan.handoff.lease_id, "canonical_owner": "Qwen/Infra", "builder_identity": "Qwen", "branch": "las-voces/lv-001", "worktree": str(builder), "project_hash": plan.handoff.expected_project_hash, "base_commit": git(root, "rev-parse", "HEAD"), "builder_process_started": False}
     (dispatch / "acks.ndjson").write_text(json.dumps(ack) + "\n")
-    yield root, producer, key, tmp_path / "missions"
+    yield root, producer, key, tmp_path / "missions", tmp_path / "builder-worktrees"
     for fd in FDS.pop(str(root)): fd.close()
 
 
 def make(fixture):
-    root, producer, key, workspaces = fixture
-    broker = capability.JaxQwenTrustBroker(b"t" * 32, workspaces.parent / "host-trust-state")
-    return capability.JaxQwenCapability(root, producer, workspaces, trust_broker=broker, host_state_dir=workspaces.parent / "host-mission-state", operator_verifier=lambda identity: identity == "operator"), key
+    root, producer, key, workspaces, source_worktree_root = fixture
+    host = {}; operator_token = object()
+    broker = capability.JaxQwenTrustBroker(b"t" * 32, workspaces.parent / "host-trust-state", current_state=lambda claims: host["item"]._broker_claims_current(claims))
+    host["item"] = capability.JaxQwenCapability(root, producer, workspaces, source_worktree_root=source_worktree_root, trust_broker=broker, host_state_dir=workspaces.parent / "host-mission-state", operator_verifier=lambda authorization: authorization is operator_token)
+    host["item"]._test_operator_token = operator_token
+    return host["item"], key
 
 
 def credential(item, mission_id):
+    if not any(row.get("state") == "MISSION_STARTED" for row in item._history().get(mission_id, [])):
+        item._claim_execution(mission_id)
     return item.provision_credential(mission_id)
 
 
@@ -72,10 +78,36 @@ def test_current_lv001_ack_creates_one_independent_bounded_qwen_mission(fixture)
     assert item.start(idempotency_key=key).decision == "NOOP"
 
 
+def test_uid_or_actor_string_without_a_current_ack_cannot_start(fixture):
+    item, _key = make(fixture)
+    # The capability accepts no actor or UID argument at all; a transport peer
+    # must still present an existing idempotency key bound to current state.
+    assert item.start(idempotency_key="f" * 64).decision == "REJECTED"
+
+
+def test_current_lease_mutex_is_held_through_effect_and_release_invalidates_token(fixture):
+    item, key = make(fixture); mission_id = item.start(idempotency_key=key).mission_id; assert mission_id
+    token = credential(item, mission_id)
+    lock_path = item.handoff_state_dir / "task-leases.lock"
+    with item._lease_guard():
+        fd = lock_path.open("rb")
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            fd.close()
+    lease_id = item._mission(mission_id).lease_id
+    with (item.handoff_state_dir / "task-leases.ndjson").open("a") as out:
+        out.write(json.dumps({"event": "RELEASED", "lease_id": lease_id}) + "\n")
+    with pytest.raises(capability.CapabilityError):
+        item.tool(mission_id, "write_file", credential=token, path="late.txt", content="denied")
+
+
 @pytest.mark.parametrize("mutate", [
     lambda ack: ack.update({"canonical_owner": "attacker"}),
     lambda ack: ack.update({"branch": "evil"}),
     lambda ack: ack.update({"project_hash": "0" * 64}),
+    lambda ack: ack.update({"worktree": "/tmp/not-the-dispatcher-worktree"}),
 ])
 def test_forged_ack_or_stale_binding_is_rejected(fixture, mutate):
     item, key = make(fixture); path = item.dispatch_dir / "acks.ndjson"; rows = [json.loads(x) for x in path.read_text().splitlines()]
@@ -84,8 +116,14 @@ def test_forged_ack_or_stale_binding_is_rejected(fixture, mutate):
 
 
 def test_identity_stale_lease_and_non_ready_task_fail_closed(fixture):
-    item, key = make(fixture); root, producer, _, workspaces = fixture; bad = capability.JaxQwenCapability(root, producer, workspaces, host_state_dir=workspaces.parent / "other-host-state"); assert bad.start(idempotency_key=key).decision == "REJECTED"
+    item, key = make(fixture); root, producer, _, workspaces, source_worktree_root = fixture; bad = capability.JaxQwenCapability(root, producer, workspaces, source_worktree_root=source_worktree_root, host_state_dir=workspaces.parent / "other-host-state"); assert bad.start(idempotency_key=key).decision == "REJECTED"
     with (item.handoff_state_dir / "task-leases.ndjson").open("a") as out: out.write(json.dumps({"event": "RELEASED", "lease_id": json.loads((item.dispatch_dir / "acks.ndjson").read_text().splitlines()[-1])["lease_id"]}) + "\n")
+    assert item.start(idempotency_key=key).decision == "REJECTED"
+
+
+def test_wrong_repository_identity_rejects_before_mission_start(fixture):
+    item, key = make(fixture)
+    git(item.root, "remote", "set-url", "origin", "https://github.com/attacker/Other.git")
     assert item.start(idempotency_key=key).decision == "REJECTED"
 
 
@@ -94,8 +132,10 @@ def test_concurrent_start_is_single_winner_and_restart_is_idempotent(fixture):
     threads = [threading.Thread(target=lambda: values.append(item.start(idempotency_key=key).decision)) for _ in range(2)]
     [x.start() for x in threads]; [x.join() for x in threads]
     assert sorted(values) == ["ACCEPTED", "NOOP"]
-    replay_broker = capability.JaxQwenTrustBroker(b"t" * 32, item.workspace_root.parent / "host-trust-state")
-    replay = capability.JaxQwenCapability(item.root, item.handoff_state_dir, item.workspace_root, trust_broker=replay_broker, host_state_dir=item.workspace_root.parent / "host-mission-state", operator_verifier=lambda identity: identity == "operator")
+    host = {}
+    replay_broker = capability.JaxQwenTrustBroker(b"t" * 32, item.workspace_root.parent / "host-trust-state", current_state=lambda claims: host["item"]._broker_claims_current(claims))
+    replay = capability.JaxQwenCapability(item.root, item.handoff_state_dir, item.workspace_root, source_worktree_root=item.source_worktree_root, trust_broker=replay_broker, host_state_dir=item.workspace_root.parent / "host-mission-state", operator_verifier=lambda authorization: authorization is item._test_operator_token)
+    host["item"] = replay
     assert replay.start(idempotency_key=key).decision == "NOOP"
 
 
@@ -124,9 +164,15 @@ def test_symlink_escape_commit_scope_and_completion_do_not_mark_done(fixture):
 
 def test_operator_cancel_is_exact_and_machine_cannot_cancel(fixture):
     item, key = make(fixture); result = item.start(idempotency_key=key); assert result.mission_id
-    assert item.cancel(result.mission_id, operator_identity="jaxqwen").decision == "REJECTED"
-    assert item.cancel(result.mission_id, operator_identity="operator").decision == "CANCELLED"
-    assert item.cancel(result.mission_id, operator_identity="operator").decision == "NOOP"
+    assert item.cancel(result.mission_id, operator_authorization="operator").decision == "REJECTED"
+    assert item.cancel(result.mission_id, operator_authorization="jaxqwen").decision == "REJECTED"
+    assert item.cancel(result.mission_id, operator_authorization=item._test_operator_token).decision == "CANCELLED"
+    cancelled = item._history()[result.mission_id][-1]
+    assert {name: cancelled[name] for name in ("mission_id", "task_id", "ack_id", "lease_id", "project_hash")} == {
+        "mission_id": result.mission_id, "task_id": item._mission(result.mission_id).task_id,
+        "ack_id": item._mission(result.mission_id).ack_id, "lease_id": item._mission(result.mission_id).lease_id,
+        "project_hash": item._mission(result.mission_id).project_hash}
+    assert item.cancel(result.mission_id, operator_authorization=item._test_operator_token).decision == "NOOP"
 
 
 def test_capability_has_no_forbidden_actions_or_shell_true():
@@ -148,3 +194,18 @@ def test_bounded_model_loop_only_executes_structured_allowlisted_tools(fixture):
     class Escape:
         def request_tools(self, _mission, _history): return [{"name": "shell", "arguments": {"command": "id"}}]
     with pytest.raises(capability.CapabilityError): item.run_tool_loop(mission, Escape(), credential_provider=lambda active: credential(item, active.mission_id))
+
+
+def test_concurrent_mission_execution_has_one_durable_winner(fixture):
+    item, key = make(fixture); mission = item.start(idempotency_key=key).mission_id; assert mission
+    entered = threading.Event(); release = threading.Event(); seen = []; result = []
+    class Transport:
+        def request_tools(self, _mission, _history):
+            seen.append("called"); entered.set(); release.wait(2); return []
+    winner = threading.Thread(target=lambda: result.append(item.run_tool_loop(mission, Transport())))
+    winner.start(); assert entered.wait(1)
+    with pytest.raises(capability.CapabilityError, match="already claimed"):
+        item.run_tool_loop(mission, Transport())
+    release.set(); winner.join(2)
+    assert seen == ["called"] and result == [[]]
+    assert [row["state"] for row in item._history()[mission]].count("MISSION_STARTED") == 1

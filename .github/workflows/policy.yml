@@ -1723,6 +1723,10 @@ jobs:
           tests/test_las_voces_ariadna_planner.py
           tests/test_las_voces_ariadna_dispatcher.py
           tests/test_las_voces_jaxqwen.py
+          tests/test_las_voces_jaxqwen_trust.py
+          tests/test_las_voces_jaxqwen_transport.py
+          tests/test_las_voces_jaxqwen_host.py
+          tests/test_ejecutor_proxy_jaxqwen_uds.py
           tests/test_capability_unbound_schema.py tests/test_chunking.py
           tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py
           tests/test_vocativo_faceta.py tests/test_router_easter_egg.py
@@ -1944,6 +1948,11 @@ jobs:
             tests/test_ejecutor_prioridad.py \
             tests/test_ejecutor_transporte.py \
             tests/test_ejecutor_proxy_carril.py \
+            tests/test_ejecutor_proxy_jaxqwen_uds.py \
+            tests/test_las_voces_jaxqwen.py \
+            tests/test_las_voces_jaxqwen_trust.py \
+            tests/test_las_voces_jaxqwen_transport.py \
+            tests/test_las_voces_jaxqwen_host.py \
             tests/test_ejecutor_contratos_destinos.py \
             tests/test_ejecutor_contratos_politica.py \
             tests/test_ejecutor_contratos_gancho.py \
@@ -4669,8 +4678,11 @@ jobs:
           #   corridas. Los otros +74 son tests de este mismo PR que el runner ya venía contando
           #   y que este piso no reflejaba. Los 45 skipped no cambian. Manda el runner (número
           #   real del run citado, no remedido localmente aquí).
-          grep -qE "^3147 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3147 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 3147 -> 3189 (jaxqwen trust transport): +4 del listener UDS del proxy y
+          # +38 tests de capability, broker, host IPC y transporte Qwen autenticado.
+          # Medido localmente por archivo; el número del runner manda.
+          grep -qE "^3189 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3189 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
