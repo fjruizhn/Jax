@@ -31,6 +31,18 @@ def trusted_receipt_reference(ref_value):
         ref_value.revision_or_digest, ref_value.scope_digest,
         ref_value.temporal_class, ref_value.existence_state, True)
 
+def validates_trusted_receipt_reference(ref_value, scope_value, trusted):
+    record = trusted.get(ref_value.ref_id)
+    return bool(record and record.ref_id == ref_value.ref_id
+        and record.ref_type is ref_value.ref_type
+        and record.canonical_locator == ref_value.canonical_locator
+        and record.immutable_identity == ref_value.immutable_identity
+        and record.revision_or_digest == ref_value.revision_or_digest
+        and record.scope_digest == ref_value.scope_digest == scope_value.scope_digest
+        and record.temporal_class is ref_value.temporal_class
+        and record.existence_state is ExistenceState.PRESENT
+        and record.accessible)
+
 def registry_and_receipt(s):
     rule = ScopeRule(s.environment, s.tenant_id, s.project_id, s.subject_id, s.actor_id, s.audience, s.component_id)
     binding = PredicateAuthorityBinding("CAPABILITY_AVAILABLE", "v1", "catalog:capabilities", "authority:catalog", s.environment, rule, rule, 60, ConflictPolicy.SINGLE_SOURCE_REQUIRED, "adapter:capability", "1", "sha256:catalog", "b1")
@@ -48,7 +60,7 @@ def sealed_current(s=None, *, state=ContractState.VALID):
     candidate = GovernedResponseCandidate("f2-c.1", "response-1", s.request_id, s.trace_id, s, "web-chat", (), (ContentBlock(ContentBlockKind.CLAIM_REF_BLOCK, claim_refs=("claim-1",)),), (claim,), (receipt_ref,))
     env = response._seal_candidate_for_server(candidate, contract_state=state, governance_receipt=receipt())
     trusted = {receipt_ref.ref_id: trusted_receipt_reference(receipt_ref)}
-    context = RenderContext(registry, {"receipt-1": resolution_receipt}, {("capability", "1", "en"): "Capability {name} is available."}, {}, GovernedDomainRegistry(), lambda _ref, _scope: True, lambda: NOW, receipt_reference_resolver=lambda ref_value, _scope: trusted.get(ref_value.ref_id))
+    context = RenderContext(registry, {"receipt-1": resolution_receipt}, {("capability", "1", "en"): "Capability {name} is available."}, {}, GovernedDomainRegistry(), lambda ref_value, scope_value: validates_trusted_receipt_reference(ref_value, scope_value, trusted), lambda: NOW, receipt_reference_resolver=lambda ref_value, scope_value: trusted.get(ref_value.ref_id) if validates_trusted_receipt_reference(ref_value, scope_value, trusted) else None)
     return env, context
 
 def test_renderer_accepts_only_sealed_envelope_and_revalidates_current_receipt():
