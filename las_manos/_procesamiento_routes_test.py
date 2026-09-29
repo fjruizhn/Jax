@@ -840,7 +840,13 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             await sondeo
             await tarea
 
-        assert respuesta.estado == JobStatus.CANCELLING.value, respuesta
+        # Once the lock is released, the worker can finish and persist
+        # CANCELLED before this coroutine serializes its response. Both are
+        # valid snapshots; the monotone history below is the cancellation
+        # invariant this test is intended to protect.
+        assert respuesta.estado in (
+            JobStatus.CANCELLING.value, JobStatus.CANCELLED.value,
+        ), respuesta
         historial = self._historial_de_estados(job_id)
         assert historial == [
             JobStatus.PENDING.value, JobStatus.RUNNING.value,
