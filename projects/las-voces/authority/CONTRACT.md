@@ -78,6 +78,38 @@ protocol. `authority_context.handoff` must provide `owner`, `branch_worktree`,
 `scope`, `acceptance_criteria`, `commit_pr`, `test_evidence`, `blockers`, and
 `next_action`, alongside the MessageEnvelope fields.
 
+## Governed builder handoff consumer
+
+`ariadna_dispatcher.py` is a separate privileged composition boundary, not an
+Ariadna capability and not a builder runner. It accepts only an exact
+append-only outbox record that is structurally valid, has one matching
+runtime-built `ALLOW`/`EFFECT_EMIT_HANDOFF` audit row, validates against the
+current canonical task and a live matching lease, and is still allowed by a
+fresh AuthorityEngine evaluation. It derives the branch and worktree from the
+canonical task id; it never accepts a command, executable, branch, or
+filesystem path from a handoff as an execution instruction.
+
+The dispatcher serializes replay with a local flock and appends durable ACKs
+`RECEIVED`, `ACCEPTED`, `DISPATCHED`, or `REJECTED`. `ACCEPTED` precedes the
+only effect: fixed-argument, hook-disabled Git creation of a clean isolated
+development worktree. `DISPATCHED` means **WORKTREE_ONLY** and explicitly does
+not mean a builder process started. Replays of `DISPATCHED` or `REJECTED` are
+no-ops; a released, stale, malformed, conflicting, or ambiguous handoff is
+rejected without deleting history or forcing a worktree.
+
+The producer's canonical checkout/control state and the builder checkout are
+explicit independent roots. Their canonical project bytes must match; ACKs
+remain under the builder checkout's Git common directory rather than the
+Ariadna producer control directory. There is currently no authenticated
+Ariadna-to-Qwen execution adapter. A later adapter must establish a service
+identity, repository allowlist, task/lease/hash binding, and mission
+idempotency; until then no dispatcher code may spawn Qwen or another builder.
+The one-shot consumer also requires a deliberately provisioned dispatcher
+identity that can read the producer control lock and write only the approved
+development worktree/ACK paths. It must not be run as root to bridge those
+ownership domains; absent that narrow host identity or an equivalent
+privilege-dropping broker, consumption fails closed.
+
 ## LV-004 hosted runtime
 
 ariadna_runtime.py is a local, host-invoked run_once control loop, not an
