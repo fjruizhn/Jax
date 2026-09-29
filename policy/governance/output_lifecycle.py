@@ -20,7 +20,7 @@ from .governed_renderer import GovernedRenderError, GovernedRenderer, RenderCont
 from .response import ContractState, EpistemicStatus, GovernedResponseEnvelope, GovernanceContractError, _plain
 
 
-OUTPUT_LIFECYCLE_API_VERSION = "f2-d.lifecycle.1"
+OUTPUT_LIFECYCLE_API_VERSION = "f2-d.lifecycle.2"
 
 
 class OutputLifecycleError(GovernanceContractError):
