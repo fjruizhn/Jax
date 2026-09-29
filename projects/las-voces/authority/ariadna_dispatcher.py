@@ -57,7 +57,15 @@ def _load_module(name: str, source: Path) -> Any:
         raise DispatchError("cannot load governed authority contract")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
-    spec.loader.exec_module(module)
+    # Loading the authority contract is observational.  Writing a Python bytecode
+    # cache into the canonical checkout would make the subsequent clean-source
+    # check reject this very dispatch attempt.
+    old = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = old
     return module
 
 

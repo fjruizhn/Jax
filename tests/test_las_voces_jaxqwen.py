@@ -54,17 +54,17 @@ def fixture(tmp_path):
 
 def make(fixture):
     root, producer, key, workspaces = fixture
-    return capability.JaxQwenCapability(root, producer, workspaces), key
+    return capability.JaxQwenCapability(root, producer, workspaces, identity_verifier=lambda: "jaxqwen"), key
 
 
 def test_current_lv001_ack_creates_one_independent_bounded_qwen_mission(fixture):
-    item, key = make(fixture); result = item.start(machine_identity="jaxqwen", idempotency_key=key)
+    item, key = make(fixture); result = item.start(idempotency_key=key)
     assert result.decision == "ACCEPTED" and result.mission_id
     mission = item._mission(result.mission_id)
     assert mission.task_id == "LV-001" and mission.canonical_owner == "Qwen/Infra" and mission.branch == "las-voces/lv-001"
     assert Path(mission.workspace).is_relative_to(item.workspace_root)
     assert (Path(mission.workspace) / ".git").is_dir()
-    assert item.start(machine_identity="jaxqwen", idempotency_key=key).decision == "NOOP"
+    assert item.start(idempotency_key=key).decision == "NOOP"
 
 
 @pytest.mark.parametrize("mutate", [
@@ -75,26 +75,26 @@ def test_current_lv001_ack_creates_one_independent_bounded_qwen_mission(fixture)
 def test_forged_ack_or_stale_binding_is_rejected(fixture, mutate):
     item, key = make(fixture); path = item.dispatch_dir / "acks.ndjson"; rows = [json.loads(x) for x in path.read_text().splitlines()]
     mutate(rows[-1]); path.write_text("\n".join(json.dumps(x) for x in rows) + "\n")
-    assert item.start(machine_identity="jaxqwen", idempotency_key=key).decision == "REJECTED"
+    assert item.start(idempotency_key=key).decision == "REJECTED"
 
 
 def test_identity_stale_lease_and_non_ready_task_fail_closed(fixture):
-    item, key = make(fixture); assert item.start(machine_identity="ariadna-project-manager", idempotency_key=key).decision == "REJECTED"
+    item, key = make(fixture); root, producer, _, workspaces = fixture; bad = capability.JaxQwenCapability(root, producer, workspaces, identity_verifier=lambda: "ariadna-project-manager"); assert bad.start(idempotency_key=key).decision == "REJECTED"
     with (item.handoff_state_dir / "task-leases.ndjson").open("a") as out: out.write(json.dumps({"event": "RELEASED", "lease_id": json.loads((item.dispatch_dir / "acks.ndjson").read_text().splitlines()[-1])["lease_id"]}) + "\n")
-    assert item.start(machine_identity="jaxqwen", idempotency_key=key).decision == "REJECTED"
+    assert item.start(idempotency_key=key).decision == "REJECTED"
 
 
 def test_concurrent_start_is_single_winner_and_restart_is_idempotent(fixture):
     item, key = make(fixture); values = []
-    threads = [threading.Thread(target=lambda: values.append(item.start(machine_identity="jaxqwen", idempotency_key=key).decision)) for _ in range(2)]
+    threads = [threading.Thread(target=lambda: values.append(item.start(idempotency_key=key).decision)) for _ in range(2)]
     [x.start() for x in threads]; [x.join() for x in threads]
     assert sorted(values) == ["ACCEPTED", "NOOP"]
-    replay = capability.JaxQwenCapability(item.root, item.handoff_state_dir, item.workspace_root)
-    assert replay.start(machine_identity="jaxqwen", idempotency_key=key).decision == "NOOP"
+    replay = capability.JaxQwenCapability(item.root, item.handoff_state_dir, item.workspace_root, identity_verifier=lambda: "jaxqwen")
+    assert replay.start(idempotency_key=key).decision == "NOOP"
 
 
 def test_structured_tools_reject_path_shell_and_test_injection(fixture):
-    item, key = make(fixture); result = item.start(machine_identity="jaxqwen", idempotency_key=key); mission = result.mission_id; assert mission
+    item, key = make(fixture); result = item.start(idempotency_key=key); mission = result.mission_id; assert mission
     assert item.tool(mission, "write_file", path="notes.txt", content="safe")["written"] == "notes.txt"
     with pytest.raises(capability.CapabilityError): item.tool(mission, "write_file", path="../../escape", content="x")
     with pytest.raises(capability.CapabilityError): item.tool(mission, "write_file", path="projects/las-voces/authority/x.py", content="x")
@@ -103,7 +103,7 @@ def test_structured_tools_reject_path_shell_and_test_injection(fixture):
 
 
 def test_symlink_escape_commit_scope_and_completion_do_not_mark_done(fixture):
-    item, key = make(fixture); result = item.start(machine_identity="jaxqwen", idempotency_key=key); mission = item._mission(result.mission_id); workspace = Path(mission.workspace)
+    item, key = make(fixture); result = item.start(idempotency_key=key); mission = item._mission(result.mission_id); workspace = Path(mission.workspace)
     (workspace / "outside").symlink_to("/tmp")
     with pytest.raises(capability.CapabilityError): item.tool(mission.mission_id, "write_file", path="outside/no", content="x")
     (workspace / "outside").unlink()
@@ -115,7 +115,7 @@ def test_symlink_escape_commit_scope_and_completion_do_not_mark_done(fixture):
 
 
 def test_operator_cancel_is_exact_and_machine_cannot_cancel(fixture):
-    item, key = make(fixture); result = item.start(machine_identity="jaxqwen", idempotency_key=key); assert result.mission_id
+    item, key = make(fixture); result = item.start(idempotency_key=key); assert result.mission_id
     assert item.cancel(result.mission_id, operator_identity="jaxqwen").decision == "REJECTED"
     assert item.cancel(result.mission_id, operator_identity="operator").decision == "CANCELLED"
     assert item.cancel(result.mission_id, operator_identity="operator").decision == "NOOP"
@@ -127,3 +127,16 @@ def test_capability_has_no_forbidden_actions_or_shell_true():
         assert not capability.JaxQwenCapability.allowed_action(name)
     source = (REPO / "projects/las-voces/authority/jaxqwen_capability.py").read_text()
     assert "shell=True" not in source and "Popen(" not in source
+
+
+def test_bounded_model_loop_only_executes_structured_allowlisted_tools(fixture):
+    item, key = make(fixture); mission = item.start(idempotency_key=key).mission_id; assert mission
+    class Transport:
+        def __init__(self): self.calls = 0
+        def request_tools(self, _mission, _history):
+            self.calls += 1
+            return [{"name": "write_file", "arguments": {"path": "model.txt", "content": "bounded"}}] if self.calls == 1 else []
+    assert item.run_tool_loop(mission, Transport())[-1]["result"]["written"] == "model.txt"
+    class Escape:
+        def request_tools(self, _mission, _history): return [{"name": "shell", "arguments": {"command": "id"}}]
+    with pytest.raises(capability.CapabilityError): item.run_tool_loop(mission, Escape())

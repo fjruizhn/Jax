@@ -23,7 +23,7 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Protocol
 
 PROJECT_ID = "las-voces"
 CAPABILITY = "las_voces.builder.qwen.execute"
@@ -69,6 +69,11 @@ class MissionResult:
     workspace: str | None = None
 
 
+class ModelTransport(Protocol):
+    """Composition-owned local-model transport, never controlled by a mission."""
+    def request_tools(self, mission: Mission, messages: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]: ...
+
+
 def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -103,7 +108,7 @@ class JaxQwenCapability:
     which is useful for adapters and tests but is not a replacement for OS or
     transport authentication.
     """
-    def __init__(self, root: Path, handoff_state_dir: Path, workspace_root: Path):
+    def __init__(self, root: Path, handoff_state_dir: Path, workspace_root: Path, *, identity_verifier: Callable[[], str] | None = None):
         self.root, self.handoff_state_dir, self.workspace_root = root.resolve(), handoff_state_dir.resolve(), workspace_root.resolve()
         if not (self.root / "projects/las-voces/project.json").is_file():
             raise CapabilityError("invalid canonical checkout")
@@ -114,6 +119,12 @@ class JaxQwenCapability:
         self.dispatch_dir = common / "ariadna-builder-dispatch"
         self.ledger_dir = common / "jaxqwen-capability"
         self.ledger, self.lock_path = self.ledger_dir / "missions.ndjson", self.ledger_dir / "missions.lock"
+        self._identity_verifier = identity_verifier or self._os_identity
+
+    @staticmethod
+    def _os_identity() -> str:
+        import pwd
+        return pwd.getpwuid(os.geteuid()).pw_name
 
     @staticmethod
     def allowed_action(action: str) -> bool:
@@ -217,8 +228,10 @@ class JaxQwenCapability:
         if resolved != (target / ".git").resolve(): raise CapabilityError("mission clone shares Git metadata")
         return target
 
-    def start(self, *, machine_identity: str, idempotency_key: str) -> MissionResult:
-        if machine_identity != SERVICE_IDENTITY: return MissionResult("REJECTED", "unauthenticated machine identity")
+    def start(self, *, idempotency_key: str) -> MissionResult:
+        # Identity is derived at the privileged host boundary, never accepted
+        # from the request that names an ACK.
+        if self._identity_verifier() != SERVICE_IDENTITY: return MissionResult("REJECTED", "unauthenticated machine identity")
         if not isinstance(idempotency_key, str) or not _KEY.fullmatch(idempotency_key): return MissionResult("REJECTED", "invalid handoff key")
         with self._locked() as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -278,6 +291,30 @@ class JaxQwenCapability:
             return {"test": test, "returncode": done.returncode, "stdout": done.stdout[-4000:], "stderr": done.stderr[-4000:]}
         if name == "request_commit": return self.commit(mission_id, request.get("message"))
         raise CapabilityError("unreachable tool")
+
+    def run_tool_loop(self, mission_id: str, transport: ModelTransport, *, max_iterations: int = 8) -> list[dict[str, Any]]:
+        """Run a bounded, data-only model/tool exchange.
+
+        The host owns ``transport``; a mission cannot select an endpoint,
+        credentials, model, command, environment or tool catalog.  Model
+        output is merely a list of structured requests and each is checked by
+        :meth:`tool` before it can have an effect.
+        """
+        if not isinstance(max_iterations, int) or not 1 <= max_iterations <= 32:
+            raise CapabilityError("tool loop bound is invalid")
+        mission = self._mission(mission_id)
+        history: list[dict[str, Any]] = [{"role": "system", "content": "Use only declared structured tools for the assigned mission."}]
+        effects: list[dict[str, Any]] = []
+        for _ in range(max_iterations):
+            calls = transport.request_tools(mission, tuple(history))
+            if not isinstance(calls, list): raise CapabilityError("model transport returned an invalid tool request")
+            if not calls: return effects
+            for call in calls:
+                if not isinstance(call, dict) or set(call) != {"name", "arguments"} or not isinstance(call["name"], str) or not isinstance(call["arguments"], dict):
+                    raise CapabilityError("model tool request is malformed")
+                result = self.tool(mission_id, call["name"], **call["arguments"])
+                effect = {"name": call["name"], "result": result}; effects.append(effect); history.append({"role": "tool", "content": json.dumps(effect, sort_keys=True)})
+        raise CapabilityError("bounded tool loop exhausted")
 
     def commit(self, mission_id: str, message: Any) -> dict[str, Any]:
         mission = self._mission(mission_id)
