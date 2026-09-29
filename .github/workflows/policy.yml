@@ -1564,11 +1564,12 @@ jobs:
           # 144 -> 147 el 2026-09-28 (F2-B canonical source identity): NFC
           # source-set uniqueness, canonical runtime matching, and
           # deterministic source-set digest regressions.
-          # 147 -> 152 el 2026-09-29 (F2-C renderer core): sealed-only
-          # rendering, claim receipt revalidation, deterministic domain
-          # blocking, untrusted presentation, and buffered Web Chat adapter.
-          grep -qE "^152 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 152 tests CORRIDOS."; exit 1; }
+          # 147 -> 172 el 2026-09-29 (F2-C adversarial remediation): exact
+          # receipt/claim binding, canonical domain projection, quote content
+          # binding, effective fallback state, version rejection, and atomic
+          # current emission regressions.
+          grep -qE "^172 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 172 tests CORRIDOS."; exit 1; }
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en
