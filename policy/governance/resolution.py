@@ -315,16 +315,69 @@ class ResolverRegistry:
         if r.receipt_id!=expected_id or r.status is not ResolutionStatus.RESOLVED or r.registry_snapshot_digest!=self.snapshot_digest:return False
         if (r.binding_version,r.resolver_id,r.resolver_version,r.actual_source_identity,r.source_configuration_digest)!=(b.binding_version,a.resolver_id,a.resolver_version,a.source_identity,a.source_configuration_digest):return False
         return r.observation_scope_digest==expected_scope.scope_digest and r.is_temporally_fresh_at(now)
+    def verify_receipt_for_claim(self, receipt, claim, expected_scope, *, receipt_ref, reference_lookup, validation_time):
+        """Verify the exact F2-B receipt for the exact F2-C claim.
+
+        This is intentionally a semantic binding operation, not receipt
+        selection.  A valid receipt for any other predicate, arguments,
+        binding, source, resolver, snapshot or template cannot pass.
+        """
+        from .response import ClaimRecord, TemplateContract
+        if not isinstance(claim, ClaimRecord) or not isinstance(receipt_ref, ReferenceRef):
+            return False
+        if claim.claim_scope.scope_digest != expected_scope.scope_digest:
+            return False
+        if (claim.resolution_receipt_ref != receipt_ref.ref_id
+                or receipt_ref.ref_type is not ReferenceType.RESOLUTION_RECEIPT
+                or receipt_ref.temporal_class is not TemporalClass.CURRENT
+                or receipt_ref.asserter_id is not None
+                or not isinstance(reference_lookup, ReferenceLookupRecord)):
+            return False
+        if receipt_ref.scope_digest != expected_scope.scope_digest:
+            return False
+        if (reference_lookup.ref_id != receipt_ref.ref_id
+                or reference_lookup.ref_type is not receipt_ref.ref_type
+                or reference_lookup.canonical_locator != receipt_ref.canonical_locator
+                or reference_lookup.immutable_identity != receipt_ref.immutable_identity
+                or reference_lookup.revision_or_digest != receipt_ref.revision_or_digest
+                or reference_lookup.scope_digest != receipt_ref.scope_digest
+                or reference_lookup.temporal_class is not receipt_ref.temporal_class
+                or reference_lookup.scope_digest != expected_scope.scope_digest
+                or reference_lookup.existence_state is not ExistenceState.PRESENT
+                or not reference_lookup.accessible):
+            return False
+        if not self.verify_receipt(receipt, expected_scope, validation_time=validation_time):
+            return False
+        entry = self._entry(claim.predicate)
+        if entry is None or claim.template_contract is None:
+            return False
+        contract = claim.template_contract
+        contract_identity = f"{contract.template_id}@{contract.template_version}:{contract.locale}"
+        if entry.template_contract_ref != contract_identity:
+            return False
+        # The reference revision is server-issued receipt identity.  A loose
+        # reference id, source match, or predicate match is never sufficient.
+        if receipt_ref.revision_or_digest != receipt.receipt_id:
+            return False
+        return (receipt.predicate == claim.predicate
+            and receipt.arguments_digest == _digest(claim.typed_arguments)
+            and receipt.binding_version == entry.binding.binding_version
+            and receipt.registry_snapshot_digest == self.snapshot_digest
+            and receipt.actual_source_identity == entry.adapter.source_identity
+            and receipt.source_configuration_digest == entry.adapter.source_configuration_digest
+            and receipt.resolver_id == entry.adapter.resolver_id
+            and receipt.resolver_version == entry.adapter.resolver_version)
 
 _REGISTRY_TOKEN=object()
 def _build_approved_registry_for_server(entries,*,authenticator):return ResolverRegistry._from_approved_entries(_REGISTRY_TOKEN,entries,authenticator)
 
 @dataclass(frozen=True)
 class ReferenceLookupRecord:
-    ref_type:ReferenceType; immutable_identity:str; revision_or_digest:str; scope_digest:str; temporal_class:TemporalClass; existence_state:ExistenceState; accessible:bool
+    ref_id:str; ref_type:ReferenceType; canonical_locator:str; immutable_identity:str; revision_or_digest:str; scope_digest:str; temporal_class:TemporalClass; existence_state:ExistenceState; accessible:bool
     def __post_init__(self):
         _enum(self.ref_type,ReferenceType,"ref_type");_enum(self.temporal_class,TemporalClass,"temporal_class");_enum(self.existence_state,ExistenceState,"existence_state")
-        for n in ("immutable_identity","revision_or_digest","scope_digest"):object.__setattr__(self,n,_text(getattr(self,n),n))
+        for n in ("ref_id","canonical_locator","immutable_identity","revision_or_digest","scope_digest"):object.__setattr__(self,n,_text(getattr(self,n),n))
+        if not isinstance(self.accessible, bool):raise GovernanceContractError("accessible must be bool")
 def validate_reference(ref,scope,*,lookup,expected_type=None,expected_revision=None):
     if not isinstance(ref,ReferenceRef) or not isinstance(scope,ResponseScope):raise GovernanceContractError("typed reference and scope required")
     if lookup is None or lookup.existence_state is ExistenceState.UNKNOWN:return ReferenceValidationStatus.DANGLING
