@@ -21,9 +21,19 @@ import shutil
 import stat
 import subprocess
 import sys
+import secrets
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
+
+try:  # normal host composition imports this module as part of authority
+    from .jaxqwen_trust import JaxQwenTrustBroker, TrustError, ISSUER, VERSION, BOUND
+except ImportError:  # direct, file-based authority tests retain no package ambient state
+    import importlib.util
+    _trust_spec = importlib.util.spec_from_file_location("jaxqwen_trust", Path(__file__).with_name("jaxqwen_trust.py"))
+    assert _trust_spec and _trust_spec.loader
+    _trust = importlib.util.module_from_spec(_trust_spec); sys.modules.setdefault("jaxqwen_trust", _trust); _trust_spec.loader.exec_module(_trust)
+    JaxQwenTrustBroker, TrustError, ISSUER, VERSION, BOUND = _trust.JaxQwenTrustBroker, _trust.TrustError, _trust.ISSUER, _trust.VERSION, _trust.BOUND
 
 PROJECT_ID = "las-voces"
 CAPABILITY = "las_voces.builder.qwen.execute"
@@ -108,7 +118,7 @@ class JaxQwenCapability:
     which is useful for adapters and tests but is not a replacement for OS or
     transport authentication.
     """
-    def __init__(self, root: Path, handoff_state_dir: Path, workspace_root: Path, *, identity_verifier: Callable[[], str] | None = None):
+    def __init__(self, root: Path, handoff_state_dir: Path, workspace_root: Path, *, trust_broker: JaxQwenTrustBroker | None = None, host_state_dir: Path | None = None, operator_verifier: Callable[[str], bool] | None = None, identity_verifier: Callable[[], str] | None = None):
         self.root, self.handoff_state_dir, self.workspace_root = root.resolve(), handoff_state_dir.resolve(), workspace_root.resolve()
         if not (self.root / "projects/las-voces/project.json").is_file():
             raise CapabilityError("invalid canonical checkout")
@@ -117,9 +127,16 @@ class JaxQwenCapability:
         common = Path(_git(self.root, "rev-parse", "--git-common-dir"))
         common = (self.root / common).resolve() if not common.is_absolute() else common.resolve()
         self.dispatch_dir = common / "ariadna-builder-dispatch"
-        self.ledger_dir = common / "jaxqwen-capability"
+        # Mission and credential state is host state, never shared Git metadata.
+        self.ledger_dir = (host_state_dir or self.workspace_root.parent / ".jaxqwen-host-state").resolve()
+        for forbidden in (self.root, self.workspace_root, common):
+            try: self.ledger_dir.relative_to(forbidden); raise CapabilityError("host state cannot be inside checkout or workspace")
+            except ValueError: pass
         self.ledger, self.lock_path = self.ledger_dir / "missions.ndjson", self.ledger_dir / "missions.lock"
-        self._identity_verifier = identity_verifier or self._os_identity
+        self._trust_broker = trust_broker
+        self._operator_verifier = operator_verifier
+        # Retained only for constructor compatibility. UID/user name is never authority.
+        self._identity_verifier = identity_verifier
 
     @staticmethod
     def _os_identity() -> str:
@@ -229,9 +246,9 @@ class JaxQwenCapability:
         return target
 
     def start(self, *, idempotency_key: str) -> MissionResult:
-        # Identity is derived at the privileged host boundary, never accepted
-        # from the request that names an ACK.
-        if self._identity_verifier() != SERVICE_IDENTITY: return MissionResult("REJECTED", "unauthenticated machine identity")
+        # This is a dispatcher-side preparation operation; it does not start a
+        # model or execute tools. Transport authentication happens below.
+        if self._trust_broker is None: return MissionResult("REJECTED", "host trust broker is required")
         if not isinstance(idempotency_key, str) or not _KEY.fullmatch(idempotency_key): return MissionResult("REJECTED", "invalid handoff key")
         with self._locked() as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -252,6 +269,39 @@ class JaxQwenCapability:
         if not rows or not isinstance(rows[0].get("mission"), dict): raise CapabilityError("unknown mission")
         return Mission(**rows[0]["mission"])
 
+    def provision_credential(self, mission_id: str, *, ttl_seconds: int = 300) -> str:
+        """Host-composition only issuance interface.
+
+        The IPC adapter must restrict this method to the trusted dispatcher;
+        this library deliberately has no socket, HTTP listener, or caller
+        identity shortcut.  The returned opaque token is for one tool effect.
+        """
+        if self._trust_broker is None: raise CapabilityError("host trust broker is required")
+        mission = self._mission(mission_id); self._assert_current(mission)
+        claims = self._claims(mission); claims["nonce"] = secrets.token_hex(32)
+        return self._trust_broker.issue(claims, ttl_seconds=ttl_seconds)
+
+    def _claims(self, mission: Mission) -> dict[str, Any]:
+        return {"service_identity": SERVICE_IDENTITY, "capability_id": CAPABILITY, "mission_id": mission.mission_id, "project_id": mission.project_id, "task_id": mission.task_id, "dispatcher_ack_id": mission.ack_id, "correlation_id": mission.correlation_id, "lease_id": mission.lease_id, "project_hash": mission.project_hash, "repository": str(self.root), "branch": mission.branch, "worktree": mission.workspace, "allowed_tools": list(mission.allowed_tools), "expiry": 0, "nonce": "", "issuer": ISSUER, "issuer_version": VERSION}
+
+    def _assert_current(self, mission: Mission) -> None:
+        # Re-read authoritative handoff/ACK/lease and task state before every effect.
+        ack = self._ack(mission.ack_id); row = self._handoff(mission.ack_id, ack); self._validate_current(ack, row)
+        if any(x.get("state") in {"CANCELLED", "COMPLETED"} for x in self._history().get(mission.mission_id, [])):
+            raise CapabilityError("mission is terminal")
+
+    def _authorize(self, mission: Mission, credential: Any, tool: str) -> None:
+        if self._trust_broker is None: raise CapabilityError("host trust broker is required")
+        if tool not in mission.allowed_tools: raise CapabilityError("tool is not mission-bound")
+        expected = {key: value for key, value in self._claims(mission).items() if key in BOUND}
+        try:
+            self._trust_broker.verify_and_consume(credential, expected, current=lambda _body: self._current_for_auth(mission))
+        except TrustError as exc: raise CapabilityError(str(exc)) from exc
+
+    def _current_for_auth(self, mission: Mission) -> bool:
+        try: self._assert_current(mission); return True
+        except (CapabilityError, OSError, json.JSONDecodeError): return False
+
     @staticmethod
     def _path(mission: Mission, relative: str, *, write: bool = False) -> Path:
         if not isinstance(relative, str) or not relative or "\x00" in relative: raise CapabilityError("invalid tool path")
@@ -263,9 +313,11 @@ class JaxQwenCapability:
         if write and target.is_symlink(): raise CapabilityError("symlink write rejected")
         return target
 
-    def tool(self, mission_id: str, name: str, **request: Any) -> dict[str, Any]:
+    def tool(self, mission_id: str, name: str, *, credential: Any = None, **request: Any) -> dict[str, Any]:
         mission = self._mission(mission_id)
         if name not in _TOOLS: raise CapabilityError("tool is not allowlisted")
+        if name == "request_commit": return self.commit(mission_id, request.get("message"), credential=credential)
+        self._authorize(mission, credential, name)
         if name in {"read_file", "list_files", "search_text", "inspect_diff"}:
             if name == "inspect_diff": return {"diff": _git(Path(mission.workspace), "diff", "--no-ext-diff", "--")}
             path = self._path(mission, request.get("path", ""))
@@ -287,12 +339,12 @@ class JaxQwenCapability:
         if name == "run_named_test":
             test = request.get("test")
             if test not in mission.named_tests: raise CapabilityError("test is not allowlisted")
-            done = subprocess.run([sys.executable, "-m", "pytest", "-q", "tests"], cwd=mission.workspace, text=True, capture_output=True, env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}, timeout=120)
-            return {"test": test, "returncode": done.returncode, "stdout": done.stdout[-4000:], "stderr": done.stderr[-4000:]}
-        if name == "request_commit": return self.commit(mission_id, request.get("message"))
+            # Repo tests are arbitrary code.  A host-contained sandbox is not
+            # implemented here, so executing them in the broker process fails closed.
+            raise CapabilityError("named tests require a separate host sandbox")
         raise CapabilityError("unreachable tool")
 
-    def run_tool_loop(self, mission_id: str, transport: ModelTransport, *, max_iterations: int = 8) -> list[dict[str, Any]]:
+    def run_tool_loop(self, mission_id: str, transport: ModelTransport, *, credential_provider: Callable[[Mission], str] | None = None, max_iterations: int = 8) -> list[dict[str, Any]]:
         """Run a bounded, data-only model/tool exchange.
 
         The host owns ``transport``; a mission cannot select an endpoint,
@@ -312,12 +364,13 @@ class JaxQwenCapability:
             for call in calls:
                 if not isinstance(call, dict) or set(call) != {"name", "arguments"} or not isinstance(call["name"], str) or not isinstance(call["arguments"], dict):
                     raise CapabilityError("model tool request is malformed")
-                result = self.tool(mission_id, call["name"], **call["arguments"])
+                if credential_provider is None: raise CapabilityError("authenticated credential provider is required")
+                result = self.tool(mission_id, call["name"], credential=credential_provider(mission), **call["arguments"])
                 effect = {"name": call["name"], "result": result}; effects.append(effect); history.append({"role": "tool", "content": json.dumps(effect, sort_keys=True)})
         raise CapabilityError("bounded tool loop exhausted")
 
-    def commit(self, mission_id: str, message: Any) -> dict[str, Any]:
-        mission = self._mission(mission_id)
+    def commit(self, mission_id: str, message: Any, *, credential: Any = None) -> dict[str, Any]:
+        mission = self._mission(mission_id); self._authorize(mission, credential, "request_commit")
         if not isinstance(message, str) or not message or "\n" in message or len(message) > 200: raise CapabilityError("commit message is invalid")
         workspace = Path(mission.workspace)
         changed = _git(workspace, "diff", "--name-only", "--").splitlines()
@@ -334,9 +387,13 @@ class JaxQwenCapability:
         return {"commit": sha, "evidence_only": True}
 
     def cancel(self, mission_id: str, *, operator_identity: str) -> MissionResult:
-        if operator_identity not in {"operator", "host"}: return MissionResult("REJECTED", "operator authentication required", mission_id)
+        # A label is audit data only.  The host adapter must inject independent
+        # operator authentication; this does not reuse executor/superadmin auth.
+        if self._operator_verifier is None or not self._operator_verifier(operator_identity): return MissionResult("REJECTED", "operator authentication required", mission_id)
         with self._locked() as lock:
             fcntl.flock(lock, fcntl.LOCK_EX); mission = self._mission(mission_id)
             if any(x.get("state") in {"CANCELLED", "COMPLETED"} for x in self._history()[mission_id]): return MissionResult("NOOP", "mission already terminal", mission_id, mission.workspace)
+            if self._trust_broker is None: return MissionResult("REJECTED", "host trust broker is required", mission_id)
+            self._trust_broker.revoke_mission(mission_id)
             self._append({"event_type": "JAXQWEN_MISSION", "state": "CANCELLED", "mission_id": mission_id, "task_id": mission.task_id, "lease_id": mission.lease_id, "workspace": mission.workspace})
             return MissionResult("CANCELLED", "operator cancellation recorded", mission_id, mission.workspace)
