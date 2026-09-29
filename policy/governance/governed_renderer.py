@@ -77,6 +77,10 @@ class RenderContext:
     templates: Mapping[tuple[str, str, str], str] = field(default_factory=dict)
     notices: Mapping[str, str] = field(default_factory=dict)
     domain_registry: GovernedDomainRegistry = field(default_factory=GovernedDomainRegistry)
+    # The host supplies F2-B dereference/access validation.  It is optional
+    # only for envelopes without claims; a claim with basis/receipt references
+    # fails closed if no server validator is composed.
+    reference_validator: Callable[[object, ResponseScope], bool] | None = None
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
     def __post_init__(self) -> None:
@@ -89,6 +93,8 @@ class RenderContext:
                 raise GovernanceContractError(f"{name} must be string mapping")
         if not isinstance(self.domain_registry, GovernedDomainRegistry) or not callable(self.now):
             raise GovernanceContractError("invalid server render context")
+        if self.reference_validator is not None and not callable(self.reference_validator):
+            raise GovernanceContractError("reference_validator must be server callable or None")
         object.__setattr__(self, "receipts", MappingProxyType(dict(self.receipts)))
         object.__setattr__(self, "templates", MappingProxyType(dict(self.templates)))
         object.__setattr__(self, "notices", MappingProxyType(dict(self.notices)))
@@ -153,7 +159,7 @@ class GovernedRenderer:
                     if claim is None or claim.disposition is not ClaimDisposition.ASSERTABLE:
                         return self._safe(envelope, self.unavailable_text)
                     try:
-                        self._validate_claim(claim, envelope.response_scope, context, now)
+                        self._validate_claim(claim, envelope.response_scope, context, now, {r.ref_id: r for r in envelope.references})
                         fragments.append(self._render_claim(claim, context))
                     except GovernedRenderError:
                         # A structurally separable governed proposition is
@@ -184,9 +190,17 @@ class GovernedRenderer:
         chunks = self._chunks(text, chunk_size)
         return RenderedText(text, envelope.response_id, envelope.envelope_digest, envelope.contract_state, tuple(shown), chunks)
 
-    def _validate_claim(self, claim, scope: ResponseScope, context: RenderContext, now: datetime) -> None:
+    def _validate_claim(self, claim, scope: ResponseScope, context: RenderContext, now: datetime, references: Mapping[str, object]) -> None:
         if claim.claim_scope.scope_digest != scope.scope_digest:
             raise GovernedRenderError("claim scope mismatch")
+        required_refs = tuple(claim.basis_refs) + ((claim.resolution_receipt_ref,) if claim.resolution_receipt_ref else ())
+        if required_refs:
+            if context.reference_validator is None:
+                raise GovernedRenderError("claim references require server dereference validation")
+            for ref_id in required_refs:
+                ref = references.get(ref_id)
+                if ref is None or not context.reference_validator(ref, scope):
+                    raise GovernedRenderError("claim reference is not valid for rendering")
         if claim.epistemic_status is EpistemicStatus.CURRENT_OBSERVATION:
             receipt = context.receipts.get(claim.resolution_receipt_ref or "")
             if context.registry is None or receipt is None or not context.registry.verify_receipt(receipt, scope, validation_time=now):

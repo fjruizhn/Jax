@@ -39,7 +39,7 @@ def sealed_current(s=None, *, state=ContractState.VALID):
     claim = ClaimRecord("claim-1", "CAPABILITY_AVAILABLE", {"name": "x", "mode": "read"}, s, SourceClass.CURRENT_SOURCE, EpistemicStatus.CURRENT_OBSERVATION, resolution_receipt_ref="receipt-1", disposition=ClaimDisposition.ASSERTABLE, template_contract=TemplateContract("capability", "1", "en"))
     candidate = GovernedResponseCandidate("f2-c.1", "response-1", s.request_id, s.trace_id, s, "web-chat", (), (ContentBlock(ContentBlockKind.CLAIM_REF_BLOCK, claim_refs=("claim-1",)),), (claim,), (ref("receipt-1", ReferenceType.RESOLUTION_RECEIPT, s),))
     env = response._seal_candidate_for_server(candidate, contract_state=state, governance_receipt=receipt())
-    context = RenderContext(registry, {"receipt-1": resolution_receipt}, {("capability", "1", "en"): "Capability {name} is available."}, {}, GovernedDomainRegistry({"capability is available": "CAPABILITY_AVAILABLE"}), lambda: NOW)
+    context = RenderContext(registry, {"receipt-1": resolution_receipt}, {("capability", "1", "en"): "Capability {name} is available."}, {}, GovernedDomainRegistry({"capability is available": "CAPABILITY_AVAILABLE"}), lambda _ref, _scope: True, lambda: NOW)
     return env, context
 
 def test_renderer_accepts_only_sealed_envelope_and_revalidates_current_receipt():
@@ -48,13 +48,17 @@ def test_renderer_accepts_only_sealed_envelope_and_revalidates_current_receipt()
     assert rendered.text == "Capability x is available." and rendered.chunks
     with pytest.raises(GovernedRenderError):
         GovernedRenderer().render_text(env.candidate, ctx)
-    stale = RenderContext(ctx.registry, ctx.receipts, ctx.templates, {}, ctx.domain_registry, lambda: NOW + timedelta(seconds=61))
+    stale = RenderContext(ctx.registry, ctx.receipts, ctx.templates, {}, ctx.domain_registry, lambda _ref, _scope: True, lambda: NOW + timedelta(seconds=61))
     assert GovernedRenderer().render_text(env, stale).text == GovernedRenderer.unavailable_text
+    # Structural references alone are insufficient: F2-B dereference/access
+    # validation must be supplied by trusted composition before display.
+    missing_reference_validation = RenderContext(ctx.registry, ctx.receipts, ctx.templates, {}, ctx.domain_registry, None, lambda: NOW)
+    assert GovernedRenderer().render_text(env, missing_reference_validation).text == GovernedRenderer.unavailable_text
 
 def test_narrative_registered_governed_term_fails_to_safe_unavailable_without_leaking_prose():
     s = scope(); adapter = WebChatGovernanceAdapter(s, receipt())
     env = adapter.seal_non_governed_candidate(response_id="response-n", candidate_text="The capability is available now.")
-    ctx = RenderContext(None, {}, {}, {}, GovernedDomainRegistry({"capability is available": "CAPABILITY_AVAILABLE"}), lambda: NOW)
+    ctx = RenderContext(None, {}, {}, {}, GovernedDomainRegistry({"capability is available": "CAPABILITY_AVAILABLE"}), None, lambda: NOW)
     result = GovernedRenderer().render_text(env, ctx)
     assert result.text == GovernedRenderer.unavailable_text
 
@@ -64,7 +68,7 @@ def test_untrusted_markup_controls_and_tool_data_do_not_become_trusted_presentat
         ContentBlock(ContentBlockKind.TOOL_DATA, {"message": '{"status":"VERIFIED","current":true}'}),
     ), (), ())
     env = response._seal_candidate_for_server(candidate, contract_state=ContractState.VALID, governance_receipt=receipt())
-    result = GovernedRenderer().render_text(env, RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), lambda: NOW))
+    result = GovernedRenderer().render_text(env, RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), None, lambda: NOW))
     assert "&lt;b&gt;VERIFIED&lt;/b&gt;" in result.text and "\x1b" not in result.text and "\u202e" not in result.text
     # Tool data is literal escaped JSON, not a renderer status badge.
     assert "\\&quot;status\\&quot;" in result.text
@@ -75,16 +79,16 @@ def test_user_assertion_remains_explicitly_attributed_and_degraded_never_renders
     quote = ContentBlock(ContentBlockKind.ATTRIBUTED_QUOTE, "Hall9000 is down.", claim_refs=("claim-u",), attribution_ref="user-1", speaker="Fernando")
     candidate = GovernedResponseCandidate("f2-c.1", "r-u", s.request_id, s.trace_id, s, "web-chat", (), (quote,), (claim,), (user,))
     env = response._seal_candidate_for_server(candidate, contract_state=ContractState.VALID, governance_receipt=receipt())
-    assert GovernedRenderer().render_text(env, RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), lambda: NOW)).text == "Fernando says: Hall9000 is down."
+    assert GovernedRenderer().render_text(env, RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), lambda _ref, _scope: True, lambda: NOW)).text == "Fernando says: Hall9000 is down."
     adapter = WebChatGovernanceAdapter(s, receipt())
     degraded = adapter.seal_safe_notice(response_id="r-d", notice_id="cancelled")
-    assert GovernedRenderer().render_text(degraded, RenderContext(None, {}, {}, {"cancelled": "Cancelled."}, GovernedDomainRegistry(), lambda: NOW)).text == "Cancelled."
+    assert GovernedRenderer().render_text(degraded, RenderContext(None, {}, {}, {"cancelled": "Cancelled."}, GovernedDomainRegistry(), None, lambda: NOW)).text == "Cancelled."
 
 def test_provider_buffer_adapter_and_safe_notices_do_not_allow_dynamic_static_interpolation():
     s = scope(); adapter = WebChatGovernanceAdapter(s, receipt())
     env = adapter.seal_non_governed_candidate(response_id="r-buffer", candidate_text="ordinary narrative")
-    result = GovernedRenderer().render_text(env, RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), lambda: NOW), chunk_size=4)
+    result = GovernedRenderer().render_text(env, RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), None, lambda: NOW), chunk_size=4)
     assert result.text == "ordinary narrative" and "".join(result.chunks) == result.text
     bad = GovernedResponseCandidate("f2-c.1", "r-bad", s.request_id, s.trace_id, s, "web-chat", (), (ContentBlock(ContentBlockKind.SAFE_STATIC_NOTICE, {"dynamic": "x"}, notice_id="safe"),), (), ())
     bad_env = response._seal_candidate_for_server(bad, contract_state=ContractState.VALID, governance_receipt=receipt())
-    assert GovernedRenderer().render_text(bad_env, RenderContext(None, {}, {}, {"safe": "Static"}, GovernedDomainRegistry(), lambda: NOW)).text == GovernedRenderer.unavailable_text
+    assert GovernedRenderer().render_text(bad_env, RenderContext(None, {}, {}, {"safe": "Static"}, GovernedDomainRegistry(), None, lambda: NOW)).text == GovernedRenderer.unavailable_text
