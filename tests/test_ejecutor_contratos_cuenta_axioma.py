@@ -3,6 +3,7 @@
 llave del cerebro nunca en argv; el lanzamiento siempre dentro de la jaula
 superpuesta con los settings de solo lectura."""
 import asyncio
+import getpass
 import os
 import shlex
 import shutil
@@ -147,11 +148,140 @@ def test_ruta_projects_de_la_mision_rechaza_un_id_que_no_es_uuid(mision_id):
         CA.ruta_projects_de_la_mision(Path("/var/lib/jax-ejecutor-misiones"), mision_id)
 
 
-def test_preparar_directorio_projects_llama_a_sudo_install_con_el_dueno_correcto():
-    vistos = {}
+# --- directorio de la cuenta por ACL, sin sudo (2026-09-28, Task 0) ------------------
+#
+# `jaxsvc` no tiene sudo: la versión con `sudo install -o axioma` dejó al Ejecutor sin
+# arrancar desde el 2026-09-20 (`mision_servicio.py` llama esto antes de CADA turno). El
+# dueño pasa a ser el proceso (jaxsvc); `axioma` entra por ACL, también en lo que se cree
+# adentro (ACL por omisión).
+#
+# Fix round 1 (2026-09-28, hallazgos I-1/I-2 de la auditoría del escalón 3):
+# - I-1: `setfacl --set` (no `-m`) FIJA la ACL entera de la hoja -- si sólo se agrega,
+#   la hoja hereda `default:user:fruiz:rwx` de `/var/lib/jax-ejecutor-misiones`, y fruiz
+#   (o cualquier proceso con su UID) puede leer y ESCRIBIR la sesión que `--resume`
+#   reanuda: canal de inyección sobre un agente con SSH.
+# - I-2: `mkdir(exist_ok=True)` acepta un symlink a directorio (y `setfacl` seguiría el
+#   enlace) y también aceptaría un directorio YA EXISTENTE de otro dueño (m-1) sin que
+#   nadie se entere. `os.lstat` (no sigue symlinks) después del `mkdir` exige directorio
+#   real y dueño == `os.geteuid()`; cualquiera de las dos falla cerrado.
+
+def _cuenta(tmp_path):
+    return CA.Cuenta("axioma", 22, tmp_path / "k", tmp_path / "n", tmp_path / "l", tmp_path / "p", tmp_path / "h")
+
+
+def _acl_esperada(nombre):
+    return (f"u::rwx,g::---,o::---,m::rwx,u:{nombre}:rwx,"
+            f"d:u::rwx,d:g::---,d:o::---,d:m::rwx,d:u:{nombre}:rwx")
+
+
+def test_preparar_directorio_no_usa_sudo_y_pone_acl(tmp_path):
+    llamadas = []
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def correr(*argv, **kw):
+        llamadas.append(argv)
+        return _Proc()
+
+    ruta = tmp_path / "m" / "claude-projects"
+    asyncio.run(CA.preparar_directorio_de_la_cuenta(_cuenta(tmp_path), ruta, correr=correr))
+    assert ruta.is_dir()
+    assert all(a[0] != "sudo" for a in llamadas)
+    assert ("setfacl", "--set", _acl_esperada("axioma"), str(ruta)) in llamadas
+
+
+def test_preparar_directorio_falla_cerrado_si_setfacl_falla(tmp_path):
+    class _Proc:
+        returncode = 1
+
+        async def communicate(self):
+            return b"", b"setfacl: Operation not permitted"
+
+    async def correr(*argv, **kw):
+        return _Proc()
+
+    with pytest.raises(RuntimeError, match="preparar_directorio_fallo"):
+        asyncio.run(CA.preparar_directorio_de_la_cuenta(_cuenta(tmp_path), tmp_path / "x", correr=correr))
+
+
+def test_preparar_directorio_rechaza_un_symlink_en_vez_de_directorio_real(tmp_path):
+    """I-2: un symlink a directorio pasa `mkdir(exist_ok=True)` sin problema (Path.is_dir()
+    sigue el enlace) y `setfacl` seguiría el enlace también (con `-P` incluso da rc 0 sin
+    aplicar nada -- fallo abierto). `os.lstat` no sigue symlinks: lo detecta y falla
+    cerrado ANTES de llamar a `setfacl`."""
+    destino = tmp_path / "destino-real"
+    destino.mkdir()
+    ruta = tmp_path / "m" / "claude-projects"
+    ruta.parent.mkdir()
+    ruta.symlink_to(destino, target_is_directory=True)
+
+    async def correr(*argv, **kw):
+        raise AssertionError("no debe llegar a setfacl si la ruta es un symlink")
+
+    with pytest.raises(RuntimeError, match="preparar_directorio_fallo"):
+        asyncio.run(CA.preparar_directorio_de_la_cuenta(_cuenta(tmp_path), ruta, correr=correr))
+
+
+def test_preparar_directorio_rechaza_una_ruta_ocupada_por_otra_cosa(tmp_path):
+    """m-1 (vía I-2): un `claude-projects` previo de OTRO dueño no se puede fabricar sin
+    sudo dentro de un test -- se simula con un archivo regular en la misma ruta. El punto
+    es el mismo: lo que ya está ahí no es un directorio propio de este proceso, y el
+    código tiene que fallar cerrado en vez de dejar que `mkdir`/`setfacl` sigan de largo."""
+    ruta = tmp_path / "m" / "claude-projects"
+    ruta.parent.mkdir()
+    ruta.write_text("no soy un directorio")
+
+    async def correr(*argv, **kw):
+        raise AssertionError("no debe llegar a setfacl si la ruta no es un directorio propio")
+
+    with pytest.raises(RuntimeError, match="preparar_directorio_fallo"):
+        asyncio.run(CA.preparar_directorio_de_la_cuenta(_cuenta(tmp_path), ruta, correr=correr))
+
+
+requiere_acl = pytest.mark.skipif(shutil.which("setfacl") is None or shutil.which("getfacl") is None,
+                                  reason="setfacl/getfacl no están instalados en este runner")
+
+
+@requiere_acl
+def test_preparar_directorio_pone_la_acl_real_sin_heredar_del_padre(tmp_path):
+    """I-1 con `setfacl`/`getfacl` REALES (no mockeados). El padre lleva una ACL por
+    omisión ajena (UID 99999 -- no resuelve a ningún usuario del sistema, así `getfacl`
+    no puede disfrazarlo con un nombre real y esconder el chequeo) -- lo que I-1 dice
+    que la hoja NO debe heredar, porque el problema real era justo ese: heredar
+    `default:user:fruiz:rwx` del padre (`/var/lib/jax-ejecutor-misiones`). `setfacl
+    --set` tiene que reemplazar TODO, no sólo agregar."""
+    nombre = getpass.getuser()
+    padre = tmp_path / "padre"
+    padre.mkdir()
+    subprocess.run(["setfacl", "-d", "-m", "u:99999:rwx", str(padre)], check=True)
+    ruta = padre / "claude-projects"
+
+    c = CA.Cuenta(nombre, 22, tmp_path / "k", tmp_path / "n", tmp_path / "l", tmp_path / "p", tmp_path / "h")
+    asyncio.run(CA.preparar_directorio_de_la_cuenta(c, ruta))
+
+    salida = subprocess.run(["getfacl", "-p", str(ruta)], capture_output=True, text=True, check=True).stdout
+    lineas = {l.strip() for l in salida.splitlines() if l.strip() and not l.startswith("#")}
+    assert "user:99999:rwx" not in lineas and "default:user:99999:rwx" not in lineas
+    assert f"user:{nombre}:rwx" in lineas
+    assert f"default:user:{nombre}:rwx" in lineas
+    assert "mask::rwx" in lineas
+    assert "default:mask::rwx" in lineas
+
+
+def test_preparar_directorio_projects_llama_a_setfacl_con_el_dueno_correcto(tmp_path):
+    """Adaptado de `test_preparar_directorio_projects_llama_a_sudo_install_con_el_dueno_correcto`
+    (2026-09-28): `preparar_directorio_projects` pasa a ser un alias de
+    `preparar_directorio_de_la_cuenta` -- mismo contrato para los llamadores
+    (`mision_servicio.py`), sin `sudo`. La ruta ya no puede ser un literal fuera de
+    `tmp_path`: antes `sudo install` la creaba; ahora el propio proceso hace `mkdir`."""
+    llamadas = []
 
     async def correr_falso(*argv, **kw):
-        vistos["argv"] = argv
+        llamadas.append(argv)
 
         class ProcFalso:
             returncode = 0
@@ -161,12 +291,13 @@ def test_preparar_directorio_projects_llama_a_sudo_install_con_el_dueno_correcto
         return ProcFalso()
 
     c = CA.cuenta_desde_entorno(ENV)
-    ruta = Path("/var/lib/jax-ejecutor-misiones/m1/claude-projects")
+    ruta = tmp_path / "m1" / "claude-projects"
     asyncio.run(CA.preparar_directorio_projects(c, ruta, correr=correr_falso))
-    assert vistos["argv"] == ("sudo", "install", "-d", "-o", "axioma", "-g", "axioma", "-m", "0700", str(ruta))
+    assert ruta.is_dir()
+    assert ("setfacl", "--set", _acl_esperada("axioma"), str(ruta)) in llamadas
 
 
-def test_preparar_directorio_projects_propaga_el_fallo():
+def test_preparar_directorio_projects_propaga_el_fallo(tmp_path):
     async def correr_falso(*argv, **kw):
         class ProcFalso:
             returncode = 1
@@ -177,7 +308,7 @@ def test_preparar_directorio_projects_propaga_el_fallo():
 
     c = CA.cuenta_desde_entorno(ENV)
     with pytest.raises(RuntimeError):
-        asyncio.run(CA.preparar_directorio_projects(c, Path("/var/lib/jax-ejecutor-misiones/m1/claude-projects"),
+        asyncio.run(CA.preparar_directorio_projects(c, tmp_path / "m1" / "claude-projects",
                                                      correr=correr_falso))
 
 
@@ -227,6 +358,33 @@ def test_remoto_claude_rechaza_una_sesion_que_no_es_un_uuid_canonico(sesion):
     with pytest.raises(ValueError):
         CA.remoto_claude(CA.cuenta_desde_entorno(ENV), base_url="http://127.0.0.1:18436", modelo="m", prompt="x",
                          sesion=sesion)
+
+
+def test_remoto_claude_con_directorio_de_trabajo_entra_ahi_y_marca_el_clon_como_seguro():
+    """Misión de código (spec 2026-09-28 v1.3 §3.2): el cerebro trabaja EN el clon, no en `~`.
+    Medido 2026-09-28 con git 2.53 y los usuarios reales: sin `safe.directory`, `axioma` recibe
+    «dubious ownership» sobre un clon cuyo directorio es de `jaxsvc`. Va por GIT_CONFIG_* en el
+    entorno de la jaula (no en un archivo que la cuenta pueda reescribir)."""
+    c = CA.cuenta_desde_entorno(ENV)
+    remoto = CA.remoto_claude(c, base_url="http://127.0.0.1:1", modelo="m", prompt="p",
+                              directorio_trabajo=Path("/var/lib/x/con espacio/repo"))
+    assert remoto.startswith("read -r K; cd '/var/lib/x/con espacio/repo' && env ") and "cd ~" not in remoto
+    palabras = shlex.split(remoto.split(" && ", 1)[1].replace('"$K"', "K"))
+    entorno = palabras[1:palabras.index("bwrap")]
+    assert entorno[-3:] == ["GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory",
+                            "GIT_CONFIG_VALUE_0=/var/lib/x/con espacio/repo"]
+
+
+def test_remoto_claude_sin_directorio_de_trabajo_no_toca_git():
+    remoto = CA.remoto_claude(CA.cuenta_desde_entorno(ENV), base_url="http://127.0.0.1:1", modelo="m", prompt="p")
+    assert remoto.startswith("read -r K; cd ~ && env ")
+    assert "GIT_CONFIG" not in remoto and "safe.directory" not in remoto
+
+
+def test_remoto_claude_rechaza_un_directorio_de_trabajo_relativo():
+    with pytest.raises(ValueError, match="directorio_trabajo"):
+        CA.remoto_claude(CA.cuenta_desde_entorno(ENV), base_url="http://127.0.0.1:1", modelo="m", prompt="p",
+                         directorio_trabajo=Path("repo"))
 
 
 def test_reanudar_sin_sesion_no_vale():
@@ -344,3 +502,190 @@ def test_bwrap_real_sin_mision_projects_tampoco_sobrevive(tmp_path):
     salida = _correr_en_la_jaula(c, home_externo,
                                  'test -e "$HOME/.claude/projects/sesion-1.json" && echo SOBREVIVIO || echo limpio')
     assert salida.strip() == "limpio"
+
+
+# --- dar_acceso_recursivo: mismo patrón endurecido de Task 0, pero RECURSIVO --------
+#
+# (Ruling del controlador, plan "El Ejecutor programa", Tarea 6, 2026-09-28.) El clon de
+# la misión de código (`preparar.preparar`, Tarea 6) lo crea `git clone`/`git checkout` --
+# dueño el PROCESO (jaxsvc), no `axioma` -- y hay que dar acceso RECURSIVO a lo que ya
+# existe adentro (a diferencia de `preparar_directorio_de_la_cuenta`, que sólo prepara un
+# directorio vacío antes de que nada se escriba ahí). Mismo patrón: `setfacl` con `--set`
+# fijo (no `-m`, no hereda del padre), `os.lstat` ANTES para rechazar symlink/dueño ajeno.
+#
+# Se agrega, además de `u:<cuenta>:rwX` y su `default` correspondiente, un
+# `default:u:<usuario del proceso>:rwX` -- medido 2026-09-28 con los usuarios reales: sin
+# esa entrada por omisión, `jaxsvc` deja de poder leer lo que `axioma` cree DESPUÉS
+# (commits de Qwen) y la entrega (Tarea 5, corre como jaxsvc) no vería nada.
+
+def _acl_recursiva_esperada(nombre_cuenta, usuario_proceso):
+    return (f"u::rwX,g::---,o::---,m::rwX,u:{nombre_cuenta}:rwX,"
+           f"d:u::rwX,d:g::---,d:o::---,d:m::rwX,d:u:{nombre_cuenta}:rwX,d:u:{usuario_proceso}:rwX")
+
+
+def test_dar_acceso_recursivo_llama_setfacl_r_set_con_el_dueno_correcto(tmp_path):
+    llamadas = []
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def correr(*argv, **kw):
+        llamadas.append(argv)
+        return _Proc()
+
+    ruta = tmp_path / "m1" / "repo"
+    ruta.mkdir(parents=True)
+    c = _cuenta(tmp_path)
+    asyncio.run(CA.dar_acceso_recursivo(c, ruta, correr=correr))
+    usuario_proceso = getpass.getuser()
+    assert ("setfacl", "-P", "-R", "--set", _acl_recursiva_esperada("axioma", usuario_proceso), str(ruta)) in llamadas
+
+
+def test_dar_acceso_recursivo_rechaza_un_symlink(tmp_path):
+    destino = tmp_path / "destino-real"
+    destino.mkdir()
+    ruta = tmp_path / "m1" / "repo"
+    ruta.parent.mkdir()
+    ruta.symlink_to(destino, target_is_directory=True)
+
+    async def correr(*argv, **kw):
+        raise AssertionError("no debe llegar a setfacl si la ruta es un symlink")
+
+    with pytest.raises(RuntimeError, match="preparar_directorio_fallo"):
+        asyncio.run(CA.dar_acceso_recursivo(_cuenta(tmp_path), ruta, correr=correr))
+
+
+requiere_acl_recursiva = pytest.mark.skipif(shutil.which("setfacl") is None or shutil.which("getfacl") is None,
+                                            reason="setfacl/getfacl no están instalados en este runner")
+
+
+@requiere_acl_recursiva
+def test_dar_acceso_recursivo_pone_la_acl_real_recursiva_sin_heredar_del_padre(tmp_path):
+    """`setfacl`/`getfacl` REALES. El padre lleva una ACL por omisión ajena (UID 99999,
+    no resuelve a ningún usuario real) -- la hoja NO debe heredarla. Se crea un
+    subdirectorio y un archivo DENTRO de `ruta` ANTES de llamar (simula lo que `git
+    clone` deja) para comprobar que `-R` de verdad alcanza lo existente, y que la ACL
+    por omisión de `ruta` (no la del padre) es la que gobierna lo que se cree DESPUÉS
+    dentro del subdirectorio -- y que el usuario del PROCESO tiene su propia entrada por
+    omisión."""
+    nombre = getpass.getuser()
+    padre = tmp_path / "padre"
+    padre.mkdir()
+    subprocess.run(["setfacl", "-d", "-m", "u:99999:rwx", str(padre)], check=True)
+    ruta = padre / "repo"
+    ruta.mkdir()
+    (ruta / "archivo-ya-existente").write_text("de git clone")
+    sub = ruta / "sub"
+    sub.mkdir()
+
+    c = CA.Cuenta(nombre, 22, tmp_path / "k", tmp_path / "n", tmp_path / "l", tmp_path / "p", tmp_path / "h")
+    asyncio.run(CA.dar_acceso_recursivo(c, ruta))
+
+    salida_ruta = subprocess.run(["getfacl", "-p", str(ruta)], capture_output=True, text=True,
+                                 check=True).stdout
+    lineas_ruta = {l.strip() for l in salida_ruta.splitlines() if l.strip() and not l.startswith("#")}
+    assert "user:99999:rwx" not in lineas_ruta and "default:user:99999:rwx" not in lineas_ruta
+    assert f"user:{nombre}:rwx" in lineas_ruta
+    assert f"default:user:{nombre}:rwx" in lineas_ruta
+
+    salida_sub = subprocess.run(["getfacl", "-p", str(sub)], capture_output=True, text=True, check=True).stdout
+    lineas_sub = {l.strip() for l in salida_sub.splitlines() if l.strip() and not l.startswith("#")}
+    assert "user:99999:rwx" not in lineas_sub and "default:user:99999:rwx" not in lineas_sub
+    assert f"user:{nombre}:rwx" in lineas_sub, "la ACL -R no alcanzó lo que ya existía adentro"
+
+    (sub / "nuevo-dentro").write_text("creado por axioma, simulado")
+    salida_nuevo = subprocess.run(["getfacl", "-p", str(sub / "nuevo-dentro")], capture_output=True, text=True,
+                                  check=True).stdout
+    # El nuevo archivo hereda la entrada NAMED USER del default ACL de `sub/` verbatim
+    # (getfacl la muestra como "user:<nombre>:rwx", con un comentario aparte
+    # "#effective:rw-" cuando la máscara del propio archivo la recorta) -- se compara
+    # sólo la parte antes del tabulador, sin el comentario de efectivo.
+    lineas_nuevo = {l.split("\t", 1)[0].strip() for l in salida_nuevo.splitlines()
+                    if l.strip() and not l.startswith("#")}
+    assert f"user:{nombre}:rwx" in lineas_nuevo, (
+        "lo creado DESPUÉS dentro de sub/ no heredó la entrada del propio proceso "
+        f"({nombre}) del default ACL -- sin esto jaxsvc no podría leer lo que axioma escriba: "
+        f"{lineas_nuevo}"
+    )
+
+
+# --- Retrabajo por auditoría (espejo privado, 2026-09-28) -------------------------------
+#
+# `setfacl -P` (nunca sigue un enlace dentro del árbol: el clon lleva `.venv` y
+# `node_modules` enlazados a `deps/`), `permiso="r-X"` para `deps/` (la cuenta lee, no
+# escribe), y `dar_paso` para `<raiz>/<misión>`: la cuenta solo atraviesa, sin ACL por
+# omisión -- medido 2026-09-28: `setfacl --set` SIN entradas `d:` deja intacta la ACL por
+# omisión heredada del padre; hace falta `-k`.
+
+class _ProcOk:
+    returncode = 0
+
+    async def communicate(self):
+        return b"", b""
+
+
+def _correr_que_registra(llamadas):
+    async def correr(*argv, **kw):
+        llamadas.append(argv)
+        return _ProcOk()
+    return correr
+
+
+def test_dar_acceso_recursivo_de_solo_lectura(tmp_path):
+    llamadas = []
+    ruta = tmp_path / "deps"
+    ruta.mkdir()
+    asyncio.run(CA.dar_acceso_recursivo(_cuenta(tmp_path), ruta, permiso="r-X", correr=_correr_que_registra(llamadas)))
+    assert llamadas == [("setfacl", "-P", "-R", "--set",
+                         "u::rwX,g::---,o::---,m::rwX,u:axioma:r-X,d:u::rwX,d:g::---,d:o::---,d:m::rwX,d:u:axioma:r-X",
+                         str(ruta))]
+
+
+def test_dar_acceso_recursivo_rechaza_un_permiso_desconocido(tmp_path):
+    ruta = tmp_path / "x"
+    ruta.mkdir()
+    with pytest.raises(ValueError, match="permiso_invalido"):
+        asyncio.run(CA.dar_acceso_recursivo(_cuenta(tmp_path), ruta, permiso="rwx,u:root:rwx",
+                                            correr=_correr_que_registra([])))
+
+
+def test_dar_paso_solo_atravesar_y_sin_acl_por_omision(tmp_path):
+    llamadas = []
+    ruta = tmp_path / "mision"
+    ruta.mkdir()
+    asyncio.run(CA.dar_paso(_cuenta(tmp_path), ruta, correr=_correr_que_registra(llamadas)))
+    assert llamadas == [("setfacl", "-P", "-k", "--set", "u::rwx,g::---,o::---,m::--x,u:axioma:--x", str(ruta))]
+
+
+def test_dar_paso_rechaza_un_symlink(tmp_path):
+    destino = tmp_path / "destino"
+    destino.mkdir()
+    ruta = tmp_path / "mision"
+    ruta.symlink_to(destino, target_is_directory=True)
+
+    async def correr(*argv, **kw):
+        raise AssertionError("no debe llegar a setfacl si la ruta es un symlink")
+    with pytest.raises(RuntimeError, match="preparar_directorio_fallo"):
+        asyncio.run(CA.dar_paso(_cuenta(tmp_path), ruta, correr=correr))
+
+
+@requiere_acl_recursiva
+def test_dar_paso_real_quita_la_acl_por_omision_heredada(tmp_path):
+    nombre = getpass.getuser()
+    padre = tmp_path / "padre"
+    padre.mkdir()
+    subprocess.run(["setfacl", "-d", "-m", "u:99999:rwx", str(padre)], check=True)
+    ruta = padre / "mision"
+    ruta.mkdir()
+    c = CA.Cuenta(nombre, 22, tmp_path / "k", tmp_path / "n", tmp_path / "l", tmp_path / "p", tmp_path / "h")
+    asyncio.run(CA.dar_paso(c, ruta))
+    salida = subprocess.run(["getfacl", "-p", str(ruta)], capture_output=True, text=True, check=True).stdout
+    lineas = {l.split("\t", 1)[0].strip() for l in salida.splitlines() if l.strip() and not l.startswith("#")}
+    assert f"user:{nombre}:--x" in lineas and "other::---" in lineas
+    assert not any(l.startswith("default:") for l in lineas), lineas
+    (ruta / "nuevo").mkdir()
+    salida = subprocess.run(["getfacl", "-p", str(ruta / "nuevo")], capture_output=True, text=True, check=True).stdout
+    assert "99999" not in salida and "default:" not in salida

@@ -1760,6 +1760,7 @@ jobs:
           tests/test_ejecutor_contratos_cuenta_axioma.py
           tests/test_ejecutor_contratos_canario_upstream.py
           tests/test_ejecutor_contratos_canario_c1.py
+          tests/test_ejecutor_contratos_canario_codigo.py
           tests/test_ejecutor_contratos_registro.py
           tests/test_ejecutor_contratos_lectura.py
           tests/test_ejecutor_contratos_cerco.py
@@ -1788,6 +1789,14 @@ jobs:
           tests/test_ejecutor_vigia_servicio.py
           tests/test_ejecutor_fase0_retirada.py
           tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py
+          tests/test_ejecutor_codigo_diff.py
+          tests/test_ejecutor_codigo_reglas_diff.py
+          tests/test_ejecutor_codigo_barrido.py
+          tests/test_ejecutor_codigo_entrega.py
+          tests/test_ejecutor_codigo_preparar.py
+          tests/test_ejecutor_codigo_git_token.py
+          tests/test_ejecutor_codigo_sandbox.py
+          tests/test_ejecutor_codigo_mision.py
           tests/test_ejecutor_vigia_stderr.py
           tests/test_workers_background_log.py
           tests/test_loadtest_apps_protegidas.py
@@ -1932,6 +1941,7 @@ jobs:
             tests/test_ejecutor_contratos_cuenta_axioma.py \
             tests/test_ejecutor_contratos_canario_upstream.py \
             tests/test_ejecutor_contratos_canario_c1.py \
+            tests/test_ejecutor_contratos_canario_codigo.py \
             tests/test_ejecutor_contratos_registro.py \
             tests/test_ejecutor_contratos_lectura.py \
             tests/test_ejecutor_contratos_cerco.py \
@@ -1960,6 +1970,14 @@ jobs:
             tests/test_ejecutor_vigia_servicio.py \
             tests/test_ejecutor_fase0_retirada.py \
             tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py \
+            tests/test_ejecutor_codigo_diff.py \
+            tests/test_ejecutor_codigo_reglas_diff.py \
+            tests/test_ejecutor_codigo_barrido.py \
+            tests/test_ejecutor_codigo_entrega.py \
+            tests/test_ejecutor_codigo_preparar.py \
+            tests/test_ejecutor_codigo_git_token.py \
+            tests/test_ejecutor_codigo_sandbox.py \
+            tests/test_ejecutor_codigo_mision.py \
             tests/test_ejecutor_vigia_stderr.py \
             tests/test_workers_background_log.py \
             tests/test_loadtest_apps_protegidas.py \
@@ -4467,8 +4485,181 @@ jobs:
           # Chunking adds one regression preserving empty lines and trailing newline.
           # Measured on run 36224737964 / job 108356446789 (SHA 1a5197e):
           # 2812 passed, 45 skipped, 1 xfailed, 20 subtests; skips unchanged.
-          grep -qE "^2812 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2812 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 2812 -> 2814 el 2026-09-28 (plan ejecutor-codigo, Tarea 2): +2 puras en
+          #   tests/test_ejecutor_codigo_diff.py (parsear() sobre un diff de texto:
+          #   estados A/M/D/R y líneas agregadas/quitadas; diff vacío -> tupla vacía).
+          #   Delta medido en local corriendo la lista completa de este paso con y sin
+          #   el archivo nuevo (mismo entorno, misma corrida): 2856 -> 2858 passed, 3
+          #   skipped, 3 xfailed y 20 subtests sin cambio en las dos corridas (el 1
+          #   failed de test_arranque_las_manos_no_shadowea_policy.py es preexistente,
+          #   igual en ambas, no lo causa este archivo) -- el absoluto local no
+          #   coincide con el del runner (falta el aislamiento con
+          #   `sudo unshare --mount` de la nota de arriba), pero el delta de +2/+0 sí
+          #   es reproducible y es lo que se aplica aquí; manda el runner.
+          # 2814 -> 2824 el 2026-09-28 (plan ejecutor-codigo, Tareas 3 y 4): +10 puras en
+          #   tests/test_ejecutor_codigo_reglas_diff.py (+7 sobre C1 del diff: flujos_ci,
+          #   archivo_de_fernando, prueba_debilitada, ganchos, secretos) y
+          #   tests/test_ejecutor_codigo_barrido.py (+3 sobre barrido de secretos y tamaño).
+          # 2824 -> 2836 el 2026-09-28 (plan ejecutor-codigo, Tareas 5 y 6): +12 puras --
+          #   tests/test_ejecutor_codigo_entrega.py (+5: rama permitida/rechazada, empujar
+          #   solo axioma/<misión> con un remoto bare local, rechazo si HEAD no es la rama
+          #   de la misión, abrir/actualizar el PR con httpx.MockTransport y etiqueta
+          #   axioma, el token nunca en argv ni en .git/config -- espía sobre
+          #   asyncio.create_subprocess_exec); tests/test_ejecutor_codigo_preparar.py
+          #   (+4: clona la rama de la misión desde la rama por omisión y fija el autor,
+          #   el turno 2 reusa el clon con fetch, rama por omisión desde la API con
+          #   httpx.MockTransport, dar_acceso se llama con la ruta ya creada); y +3 en
+          #   tests/test_ejecutor_contratos_cuenta_axioma.py (dar_acceso_recursivo: mismo
+          #   patrón endurecido de preparar_directorio_de_la_cuenta pero con `setfacl -R
+          #   --set` -- argv exacto, rechazo de symlink antes de llamar a setfacl, y ACL
+          #   real con setfacl/getfacl que alcanza lo que ya existía adentro y lo que se
+          #   crea después, sin heredar del padre). Los 45 skipped no cambian (setfacl
+          #   está disponible en el runner: ningún test nuevo se saltea). Medido en local,
+          #   archivo por archivo: test_ejecutor_codigo_entrega.py 5 passed (0 -> 5, archivo
+          #   nuevo), test_ejecutor_codigo_preparar.py 4 passed (0 -> 4, archivo nuevo),
+          #   test_ejecutor_contratos_cuenta_axioma.py 46 passed (43 -> 46); manda el runner.
+          # 2836 -> 2876 el 2026-09-28 (retrabajo de las Tareas 5-6 por la auditoría de escalón 3:
+          #   espejo privado de jaxsvc + clon de trabajo de Qwen, spec v1.2): +40 puras --
+          #   tests/test_ejecutor_codigo_entrega.py 5 -> 20 (+15: clon malicioso con ganchos,
+          #   credential.helper, insteadOf, proxy, followTags, fsmonitor y packObjectsHook sin
+          #   efecto y sin el token en disco; dos entregas seguidas con el lease del espejo y el
+          #   mismo PR; empuje ajeno entre entregas -> lease rechazado; PR cerrado -> uno nuevo
+          #   declarado; 422 "already exists"; owner_repo inválido x10; upload-pack por ssh como
+          #   la cuenta), tests/test_ejecutor_codigo_preparar.py 4 -> 18 (+14: espejo 0700 y clon
+          #   --no-hardlinks, turno 2 sin reinstalar ni setfacl ni git en el clon, dependencias
+          #   con banderas y sin JAX_*, pip sin wheel declarado, validación antes de cualquier
+          #   comando x7, ACL reales de base/espejo/deps), tests/test_ejecutor_codigo_git_token.py
+          #   0 -> 6 (archivo nuevo: askpass solo para github.com, entorno en lista blanca,
+          #   blindaje de cada llamada, error saneado) y
+          #   tests/test_ejecutor_contratos_cuenta_axioma.py 46 -> 51 (+5: setfacl -P, permiso
+          #   r-X, dar_paso con -k). Ningún test nuevo se saltea (setfacl/getfacl en el runner):
+          #   los 45 skipped no cambian. Medido en local archivo por archivo; manda el runner.
+          # 2876 -> 2912 el 2026-09-28 (re-revision de escalon 3, BLOCK-1: instalaciones en bwrap
+          #   por lista blanca; MINOR-1/2/4): +36 puras -- tests/test_ejecutor_codigo_sandbox.py
+          #   0 -> 8 (archivo nuevo: argv por lista blanca sin rutas prohibidas y con --clearenv,
+          #   rechazo de montajes prohibidos x5, cwd fuera de deps, y bwrap REAL: el instalador no
+          #   lee un secreto ni el checkout, no ve HOME ni el espejo, no escribe fuera de deps ni su
+          #   copia, no ve JAX_*), tests/test_ejecutor_codigo_preparar.py 18 -> 39 (+21: opciones
+          #   de requirements rechazadas y declaradas x16, arrastre por -r, repo y rama de la API
+          #   validados x4) y tests/test_ejecutor_codigo_entrega.py 20 -> 27 (+7: objeto mal
+          #   formado falla cerrado sin mover la rama, ref temporal limpia, reintento con el empuje
+          #   ya hecho, rama remota borrada, reconciliacion con git inyectado x3). El test de bwrap
+          #   real NO se saltea en este job (instala bubblewrap y habilita user namespaces arriba):
+          #   los 45 skipped no cambian. Medido en local archivo por archivo; manda el runner.
+          # 2912 -> 2936 el 2026-09-28 (re-revision 3, BLOCK-A: ninguna instalacion ejecuta codigo
+          #   de terceros; MINOR-B/C): +24 puras -- tests/test_ejecutor_codigo_preparar.py 39 -> 58
+          #   (+19: package-lock con fuente ajena x9 -- git, github:, file:, link, resolved fuera del
+          #   registro, http, sin integrity --, v1 anidado, ilegible, limpio SI instala; composer con
+          #   repositories/dist/source ajenos x5, limpio SI instala; mkdir en deps sin seguir
+          #   enlaces) y tests/test_ejecutor_codigo_sandbox.py 8 -> 13 (+5: el prefijo de node que se
+          #   monta se valida x4, un origen que contiene una ruta prohibida). Los 45 skipped no
+          #   cambian. Medido en local archivo por archivo; manda el runner.
+          # 2936 -> 3013 el 2026-09-28 (Tarea 9: el turno de código en mision.py/mision_servicio.py,
+          #   mision_codigo.entregar en el espejo): +77 netas, es una RE-MEDICIÓN porque se borran 3 --
+          #   tests/test_ejecutor_codigo_barrido.py 3 -> 5 (se borran test_detecta_tokens_y_llaves,
+          #   test_tope_de_tamano y test_borrado_no_se_mide con la API `barrer()` que medía el tamaño
+          #   con stat en el CLON; entran 5 sobre las funciones puras lineas_con_secretos /
+          #   tamanos_excedidos / tapar_secretos), tests/test_ejecutor_codigo_entrega.py 27 -> 35
+          #   (+8: diff con --text ante un NUL, historial por commit con identidad, merge malvado,
+          #   NUL + secreto que ya no está en el diff neto, tamaños con cat-file -s en el espejo x2),
+          #   tests/test_ejecutor_codigo_mision.py 0 -> 26 (archivo nuevo: orden y estados con
+          #   dobles; con git real, secreto agregado y quitado dentro de la rama, NUL + secreto,
+          #   commit con otra identidad x2 y solo el author, archivo grande commiteado y chico en el
+          #   disco -- sin empujar nada), tests/test_ejecutor_mision.py 45 -> 69 (+24: Turno de
+          #   código legible/ilegible x13, instrucciones, orden preparar -> cerebro -> C5 -> entrega,
+          #   pausa del auditor, cerebro fallido, vigía sin latir, servidor no prepara ni entrega,
+          #   sin dependencias de código), tests/test_ejecutor_mision_servicio.py 16 -> 30 (+14:
+          #   token obligatorio, herramientas y directorio del clon, config de código x6, informe de
+          #   C5) y tests/test_ejecutor_contratos_cuenta_axioma.py 51 -> 54 (+3: remoto_claude con
+          #   directorio_trabajo y safe.directory). Ningún test nuevo se saltea: los 45 skipped no
+          #   cambian. Medido en local archivo por archivo contra 7bf39a0; manda el runner.
+          # 3013 -> 3048 el 2026-09-28 (Tarea 9, rulings del controlador): +35 netas, RE-MEDICIÓN porque
+          #   se borran 10 -- tests/test_ejecutor_codigo_diff.py 2 -> 21 (+19: solo "\n" parte líneas,
+          #   secreto tras \x1c/\r/u2028… x9, "++"/"--" dentro del hunk son contenido x2, rutas UTF-8 /
+          #   con espacios / " b/" adentro x4, TAB tras ruta con espacios, comillas con octal, borrado y
+          #   modo, renombre), tests/test_ejecutor_codigo_entrega.py 35 -> 38 (+5 -2: año.py y "dir con
+          #   espacio" con git real, quotePath=false fijado, tamanos_de_la_rama x3; se borran los 2 de
+          #   tamanos_en_el_espejo, que solo medía la punta y se retiró), tests/test_ejecutor_codigo_
+          #   git_token.py 6 -> 7 (+1: stdin de correr_git), tests/test_ejecutor_codigo_mision.py 26 -> 28
+          #   (+2: blob grande en un commit intermedio ya borrado, rutas raras entregadas) y
+          #   tests/test_ejecutor_mision.py 69 -> 79 (+18 -8: la entrega al final y solo si todo pasó x9
+          #   condiciones, estados de la entrega x3, orden, vigía sin latir no prepara, máquina local
+          #   para C5 x3; se reescriben 8 propias de la Tarea 9 que fijaban el orden anterior). Los 45
+          #   skipped no cambian. Medido archivo por archivo contra 093f8a2; manda el runner.
+          # 3048 -> 3090 el 2026-09-28 (Tarea 9, auditoría de escalón 3 RECHAZADO -> BLOCK-1, MAJOR-1..3,
+          #   MINOR-1..6): +42 netas, RE-MEDICIÓN porque se reescriben/borran 8 --
+          #   tests/test_ejecutor_codigo_mision.py 28 -> 48 (+20: secreto en mensaje, nombre, ruta anterior
+          #   y cuerpo del PR con git real; 201 sin number / cuerpo no JSON / 422 tras el push y etiqueta
+          #   caída con git real; pausa antes/después/ilegible; recorte del cuerpo; tope total; PR previo.
+          #   Se reemplazan test_un_paso_que_falla_es_fallo_entrega_con_el_motivo_saneado x6 -- ahora
+          #   "antes del empuje", con punta en lugar de pr -- y se borra test_un_error_de_la_api_de_github_
+          #   es_fallo_entrega: ese caso es empujado_sin_pr; test_sin_informe_c5 se renombra, MINOR-6),
+          #   tests/test_ejecutor_contratos_destinos.py 27 -> 38 (+11: ssh_no_literal x10 y el gancho sin
+          #   cambios), tests/test_ejecutor_mision.py 79 -> 84 (+5: prompt de código x2, preparar_fallo,
+          #   captura de máquina ajena, ssh no literal), tests/test_ejecutor_mision_servicio.py 30 -> 34
+          #   (+4: descartadas en el informe, pausa del contexto, config total x2), barrido 5 -> 6 y
+          #   entrega 38 -> 39. Los 45 skipped no cambian. Medido archivo por archivo contra 52600db.
+          # 3090 -> 3112 el 2026-09-28 (Tarea 9, ronda final de la auditoría: MAJOR-A/B, MINOR-A/B/C, tope de
+          #   correr_git): +22 netas, RE-MEDICIÓN porque se borra 1 -- tests/test_ejecutor_codigo_mision.py
+          #   48 -> 65 (+18 -1: empuje fallido x4 -- remoto con la punta, sin ella x2, ls-remote caído --,
+          #   PR previo con pausa y sin él, turno 2 con PATCH 502 y html_url inválida x5 con git real,
+          #   encoding no UTF-8 con git real y x5 de cabecera; sale el caso "empujar" de
+          #   test_un_paso_que_falla_antes_del_empuje: ahora lo cubren los de empuje fallido),
+          #   tests/test_ejecutor_codigo_git_token.py 7 -> 9 (tope vencido mata el grupo, tope por omisión),
+          #   tests/test_ejecutor_codigo_entrega.py 39 -> 41 (ls-remote real x2) y
+          #   tests/test_ejecutor_mision_servicio.py 34 -> 35 (descartadas antes y recorte de respaldadas).
+          #   Los 45 skipped no cambian. Medido archivo por archivo contra 705629f; manda el runner.
+          # 3112 -> 3128 el 2026-09-28 (Tarea 12 Step 2 + Tarea 13: contrato de arranque "codigo" y
+          #   sus canarios): +16 puras -- tests/test_ejecutor_contratos_arranque.py 73 -> 82 (+9:
+          #   verificar_token_github x3, codigo sin/con token vía exigir_contratos x2, codigo no
+          #   corre fuera de un turno de código, pruebas_reales cubre el orden con/sin "codigo" x1
+          #   modificado + 1 nuevo, pruebas_reales["codigo"] corre/no corre el canario según el
+          #   token x2) y tests/test_ejecutor_contratos_canario_codigo.py 0 -> 7 (archivo nuevo:
+          #   push bloqueado/no bloqueado/sin su regla, cerco deja o no salir a GitHub, ls-remote
+          #   corre como la cuenta y no por el gancho, diff no bloquea flujos_ci, todos los fallos
+          #   son del contrato "codigo"). Los 45 skipped no cambian. Medido archivo por archivo
+          #   local (checkout de este PR, 43e42da como base): manda el runner. NOTA: origin/master
+          #   avanzó 52 commits más allá del merge-base de esta rama (LV-004) mientras se escribía
+          #   esta ronda -- no se rebasó (fuera del alcance de esta tarea); si el runner mide otro
+          #   número sobre la rama rebasada, ese manda.
+          # 3128 -> 3137 el 2026-09-28 (ruling del coordinador, seguimiento Tareas 12/13: "un
+          #   contrato dormido en producción no es un contrato", Principio IX -- turno.tipo
+          #   llega de verdad a `arranque.contexto_desde_entorno` en los DOS lugares que arman
+          #   un Contexto para un turno real): +9 puras -- tests/test_ejecutor_mision_servicio.py
+          #   35 -> 40 (+5: tipo=None en el JSON del vigía existente, abrir_vigia incluye el tipo
+          #   recibido, deps.contexto()/deps.abrir_vigia() de verdad -- sin dobles de red ni DB --
+          #   traen "codigo" para un turno de código y "servidor" para uno de servidor) y
+          #   tests/test_ejecutor_vigia_servicio.py 50 -> 54 (+4: Mision.tipo parseado del JSON,
+          #   tipo ausente/no-string cae a None fail-safe, _principal pasa mision.tipo al
+          #   contexto real de verdad). Los 45 skipped no cambian. Medido archivo por archivo
+          #   local contra 51f30e4: manda el runner.
+          # 3137 -> 3142 el 2026-09-28 (ola final de arreglos, plan "El Ejecutor programa"): +5
+          #   puras -- tests/test_ejecutor_codigo_diff.py 21 -> 22 (+1: `diff --git` asimétrico
+          #   con el literal " b/" en la ruta vieja ya no pierde `.github/workflows/` de la
+          #   ruta nueva), tests/test_ejecutor_codigo_mision.py 65 -> 68 (+3: MAJOR-1 -- pausa
+          #   antes del empuje, fallo al leer la punta y empuje fallido sin rama, los tres con
+          #   un PR previo ya conocido, dan su `pr_url`; la extensión de
+          #   test_sin_cambios_con_un_pr_previo_abierto_lo_declara no suma función) y
+          #   tests/test_ejecutor_mision_servicio.py 40 -> 41 (+1: MINOR-5 -- el turno >= 2 usa
+          #   la `rama_por_omision` de `preparado.json`, no un GET fresco a GitHub). Los 45
+          #   skipped no cambian. Medido archivo por archivo local: manda el runner.
+          # 3142 -> 3147 el 2026-09-28 (PR #292, CORREGIDO por Hyde: el 3217 de la línea anterior era el total del paso `-v` del mismo job, no el del paso `-q` que este grep compara; run 36514251240, paso «Piso exacto»: "3147 passed, 45 skipped"). Historia del arreglo:
+          #   3216 passed, 45 skipped" antes de este cambio -- el piso de arriba ya estaba
+          #   corrido de largo, sin que se notara porque el job nunca llegaba a este grep: el
+          #   único rojo era `test_ningun_modulo_de_servicio_construye_su_propio_cliente`,
+          #   que aborta el step por pipefail antes de esta línea). Arreglo: `_cliente_github`
+          #   en jax/ejecutor/mision_servicio.py construía su propio httpx.AsyncClient para la
+          #   API de GitHub en vez de usar jax/core/cliente_http_compartido.py -- ahora pasa por
+          #   `obtener_cliente_http()` (un adaptador `_ClienteGithub` agrega la base absoluta,
+          #   el token por-pedido nunca guardado en el cliente compartido, y timeout=30 por
+          #   pedido); `preparar.py`/`entrega.py` no se tocaron, siguen recibiendo `cliente`
+          #   inyectable con rutas relativas (los tests siguen armando su propio MockTransport
+          #   con `base_url`). +1 pura: el test que ya vigilaba esto pasa a contar entre las
+          #   corridas. Los otros +74 son tests de este mismo PR que el runner ya venía contando
+          #   y que este piso no reflejaba. Los 45 skipped no cambian. Manda el runner (número
+          #   real del run citado, no remedido localmente aquí).
+          grep -qE "^3147 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3147 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del

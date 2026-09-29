@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from jax.ejecutor import cita, transporte
+from jax.ejecutor.codigo.entrega import validar_owner_repo
 from jax.ejecutor.contratos import auditor as A
 from jax.ejecutor.contratos import destinos
 from jax.ejecutor.contratos.arranque import ContratosNoVerificados
@@ -42,6 +43,9 @@ from jax.ejecutor.contratos.arranque import ContratosNoVerificados
 _TRUNCADO = re.compile(r"truncat", re.I)
 CAMPOS = ("maquina", "comando", "linea", "dato", "proposito")
 AUDITOR_ILEGIBLE = "auditor_ilegible"
+TIPOS = ("servidor", "codigo")
+#: Estados de `mision_codigo.entregar` que NO son un fallo del turno.
+ENTREGA_SIN_FALLO = ("abierto", "sin_cambios")
 
 
 class TurnoIlegible(ValueError):
@@ -56,6 +60,10 @@ class Turno:
     objetivo: str
     instruccion: str
     hosts: frozenset
+    # Misión de código (spec 2026-09-28 v1.3): `repo` = {"owner_repo", "comandos_prueba" (tupla)},
+    # ya validado por `turno_desde_json`. `None` en una misión de servidor.
+    tipo: str = "servidor"
+    repo: dict | None = None
 
     @property
     def reanudar(self) -> bool:
@@ -102,8 +110,30 @@ def turno_desde_json(datos: bytes) -> Turno:
         raise TurnoIlegible("turno_sin_instruccion")
     if not isinstance(hosts, list) or not hosts or not all(isinstance(h, str) and h.strip() for h in hosts):
         raise TurnoIlegible("turno_sin_maquinas")
+    tipo = doc.get("tipo", "servidor")
+    if tipo not in TIPOS:
+        raise TurnoIlegible("turno_tipo_invalido")
+    if tipo == "servidor" and doc.get("repo") is not None:
+        raise TurnoIlegible("turno_repo_invalido")
+    repo = _repo_del_turno(doc.get("repo")) if tipo == "codigo" else None
     return Turno(doc["mision_id"], n, doc["sesion"], objetivo.strip(), instruccion.strip(),
-                 frozenset(h.strip() for h in hosts))
+                 frozenset(h.strip() for h in hosts), tipo, repo)
+
+
+def _repo_del_turno(repo) -> dict:
+    """Fail-closed: exactamente `owner_repo` (dueño/repo validado; la URL la deriva la entrega,
+    nunca llega como campo) y `comandos_prueba` (lista de textos no vacíos). Una clave de más
+    -- p. ej. un `remoto_url` de la versión anterior del plan -- se rechaza, no se ignora."""
+    if not isinstance(repo, dict) or set(repo) != {"owner_repo", "comandos_prueba"}:
+        raise TurnoIlegible("turno_repo_invalido")
+    try:
+        owner_repo = validar_owner_repo(repo["owner_repo"])
+    except ValueError:
+        raise TurnoIlegible("turno_repo_invalido") from None
+    comandos = repo["comandos_prueba"]
+    if not isinstance(comandos, list) or not all(isinstance(c, str) and c.strip() for c in comandos):
+        raise TurnoIlegible("turno_repo_invalido")
+    return {"owner_repo": owner_repo, "comandos_prueba": tuple(c.strip() for c in comandos)}
 
 
 def prompt_del_turno(instruccion: str, hosts, de_la_mision: frozenset, reanudar: bool = False) -> str:
@@ -126,6 +156,37 @@ def prompt_del_turno(instruccion: str, hosts, de_la_mision: frozenset, reanudar:
         "El `dato` se busca entero dentro de la `linea`: no juntes dos valores, no calcules nada "
         "(ni porcentajes ni totales) y no agregues palabras tuyas. Si la misión pregunta dos cosas, "
         "manda una afirmación por cada una. Sin línea literal que lo respalde, un dato no se escribe."
+    )
+
+
+def instrucciones_de_codigo(repo: dict) -> str:
+    """Lo que se agrega al pedido en una misión de código (es prompt del modelo, no UI: no va
+    por i18n). La entrega al remoto y el PR los hace el sistema, fuera de la jaula."""
+    comandos = "\n".join(f"- `{c}`" for c in repo["comandos_prueba"]) or "- (el repo no declara comandos)"
+    return ("\n\nMISIÓN DE CÓDIGO. Trabajas en el directorio actual, un clon de "
+            f"{repo['owner_repo']} en la rama de la misión. Haz commits locales (git add/commit). "
+            "NO empujes: la entrega la hace el sistema. Pruebas del repo:\n" + comandos +
+            "\nCita la salida real de cada prueba que corras; lo que no corriste, dilo como no corrido.")
+
+
+def prompt_de_codigo(instruccion: str, repo: dict, maquina_local: str | None, reanudar: bool = False) -> str:
+    """El pedido de una misión de CÓDIGO (MAJOR-3 de la auditoría de escalón 3). Sin lista de ssh: medido
+    por el controlador con los usuarios reales, desde la jaula no hay salida (la llave de axioma no
+    entra a axioma@hall9000 y el cerco rechaza 127.0.0.1:58291). Todo corre en el directorio actual,
+    y la máquina de cada afirmación es la local -- la misma a la que `destinos` atribuye esas capturas."""
+    maquina = maquina_local or "local"
+    vigencia = ("Los datos de turnos anteriores ya no valen: todo comando que respalde una afirmación se corre "
+                "EN ESTE TURNO, aunque ya lo hayas corrido antes.\n" if reanudar else "")
+    return (
+        f"Misión: {instruccion}\n{vigencia}"
+        "Todos los comandos corren en ESTA máquina, en el directorio actual, con la herramienta Bash, uno por "
+        "llamada. No hay red ni otras máquinas: no intentes conectarte a ninguna."
+        + instrucciones_de_codigo(repo) + "\n"
+        "Al terminar responde SOLO un arreglo JSON, sin texto alrededor y sin bloque de código, con una "
+        f'afirmación por dato: {{"maquina": "{maquina}", "comando": <el comando COMPLETO tal como lo pasaste a '
+        'Bash, carácter por carácter>, "linea": <una línea COPIADA LITERAL de su salida>, "dato": <UN valor '
+        'copiado tal cual de esa línea>, "proposito": <la pregunta que responde>}. Sin línea literal que lo '
+        "respalde, un dato no se escribe."
     )
 
 
@@ -188,18 +249,20 @@ def sesion_anunciada(salida: bytes, sesion: str) -> bool:
     return any(ev.get("session_id") == sesion for ev in _eventos_del_stream(salida))
 
 
-def capturas(pedidas: dict, resultados: dict, hosts) -> tuple:
+def capturas(pedidas: dict, resultados: dict, hosts, permitidas: frozenset | None = None) -> tuple:
     """Una captura por comando con resultado. La máquina la decide `destinos` (lo que el gancho
-    ve), no el modelo; un comando que toca más de una máquina, o ninguna legible, no respalda."""
+    ve), no el modelo; un comando que toca más de una máquina, o ninguna legible, no respalda.
+    `permitidas` (MINOR-2 de la auditoría): una captura de una máquina fuera de ese conjunto -- las
+    máquinas de C5 del turno -- se descarta, de forma determinista, antes de la cita."""
     salida = []
     for tid, comando in pedidas.items():
-        if tid not in resultados or not isinstance(comando, str):
+        if tid not in resultados or not isinstance(comando, str) or destinos.ssh_no_literal(comando):
             continue
         try:
             tocadas = destinos.destinos(comando, hosts)
         except (destinos.HostDesconocido, destinos.ComandoIlegible):
             continue
-        if len(tocadas) != 1:
+        if len(tocadas) != 1 or (permitidas is not None and not tocadas <= permitidas):
             continue
         contenido, es_error = resultados[tid]
         texto = _texto_de_resultado(contenido)
@@ -255,6 +318,18 @@ def afirmaciones_del_texto(texto) -> tuple:
                  if isinstance(d, dict) and all(isinstance(d.get(c), str) for c in CAMPOS))
 
 
+def _maquinas_para_c5(turno: Turno, hosts) -> frozenset:
+    """Las máquinas que C5 recibe como «de la misión». En una misión de CÓDIGO (ruling 4a, Tarea 9)
+    el Bash del cerebro corre en la jaula, en la máquina local: `destinos` ya le atribuye esas
+    capturas a la ÚNICA máquina `es_local` del inventario, y C5 tiene que verla como de la misión o
+    una afirmación sobre las pruebas corridas le llega como ajena. Si no hay exactamente una local,
+    no se suma nada (`destinos` tampoco produce capturas locales en ese caso)."""
+    if turno.tipo != "codigo":
+        return turno.hosts
+    locales = [h.nombre for h in hosts if h.es_local]
+    return turno.hosts | frozenset(locales) if len(locales) == 1 else turno.hosts
+
+
 def sha_de_resultado(contenido) -> str:
     return hashlib.sha256(json.dumps(contenido, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode()).hexdigest()
@@ -297,10 +372,16 @@ class Dependencias:
     leer_pausa: Callable
     espera_latido_s: float
     paso_espera_s: float = 0.5
+    # Misión de código: `preparar_codigo(ctx) -> Clon` y
+    # `entregar_codigo(ctx, clon, entrega, auditor_legible) -> dict` (mision_codigo.entregar).
+    preparar_codigo: Callable | None = None
+    entregar_codigo: Callable | None = None
 
 
-def _resultado(estado, codigo, *, rechazo=(), entrega=None, verificacion=None, sesion_iniciada=False) -> dict:
-    return {
+def _resultado(estado, codigo, *, rechazo=(), entrega=None, verificacion=None, sesion_iniciada=False,
+               entrega_codigo=None) -> dict:
+    extra = {} if entrega_codigo is None else {"entrega_codigo": entrega_codigo}
+    return {**extra,
         "estado": estado, "codigo": codigo, "rechazo": list(rechazo), "sesion_iniciada": sesion_iniciada,
         "afirmaciones": [_afirmacion(a) for a in entrega.respaldadas] if entrega else [],
         "descartadas": [_descartada(d) for d in entrega.descartadas] if entrega else [],
@@ -316,6 +397,11 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
         emitir(evento(nombre, n, **datos))
 
     dice("turno_lanzado", reanudar=turno.reanudar, maquinas=sorted(turno.hosts))
+    es_codigo = turno.tipo == "codigo"
+    if es_codigo and (deps.preparar_codigo is None or deps.entregar_codigo is None):
+        # Fail-closed: un turno de código sin con qué preparar Y entregar no arranca nada.
+        dice("turno_fallido", codigo="codigo_sin_dependencias")
+        return _resultado("fallido", "codigo_sin_dependencias")
     ctx = await deps.contexto()
     try:
         await deps.exigir(ctx)
@@ -330,6 +416,7 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
     vigia = await deps.abrir_vigia(ctx, turno.id_vigia, turno.texto_de_mision, turno.hosts)
     entrega, codigo, sesion_iniciada = None, None, False
     registro_cuadra, auditor_pauso, auditor_legible = False, False, True
+    resultado_entrega, clon = None, None
     try:
         limite = time.monotonic() + deps.espera_latido_s
         while not await deps.latido_fresco(ctx):
@@ -345,11 +432,28 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                 dice("vigia_no_latio", vivo=vigia.vive(), espera_s=deps.espera_latido_s)
                 break
             await asyncio.sleep(deps.paso_espera_s)
+        maquinas_c5 = _maquinas_para_c5(turno, hosts)
         if codigo is None:
             dice("vigia_late")
+            if es_codigo:
+                # Antes del cerebro: espejo + clon + dependencias (turno 1) o fetch del espejo (≥ 2).
+                try:
+                    clon = await deps.preparar_codigo(ctx)
+                except Exception as exc:  # fail-closed: sin clon no hay cerebro ni entrega; a la bitácora solo el tipo
+                    codigo = "preparar_fallo"
+                    dice("preparar_fallo", tipo=type(exc).__name__)
+                else:
+                    dice("codigo_preparado", rama=clon.rama, base=clon.rama_por_omision,
+                         dependencias=list(clon.dependencias))
+        if codigo is None:
+            if es_codigo:
+                locales = [h.nombre for h in hosts if h.es_local]
+                prompt = prompt_de_codigo(turno.instruccion, turno.repo, locales[0] if len(locales) == 1 else None,
+                                          turno.reanudar)
+            else:
+                prompt = prompt_del_turno(turno.instruccion, hosts, turno.hosts, turno.reanudar)
             try:
-                rc, crudo = await deps.correr_cerebro(ctx, prompt_del_turno(turno.instruccion, hosts, turno.hosts, turno.reanudar),
-                                                      turno.sesion, turno.reanudar)
+                rc, crudo = await deps.correr_cerebro(ctx, prompt, turno.sesion, turno.reanudar)
             except asyncio.TimeoutError:
                 rc, crudo, codigo = None, b"", "cerebro_tope_vencido"
             sesion_iniciada = sesion_anunciada(crudo, turno.sesion)
@@ -365,9 +469,11 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                 cuadra = en_registro and (tid not in resultados or devueltos.get(tid) == sha_de_resultado(resultados[tid][0]))
                 registro_cuadra = registro_cuadra and cuadra
                 dice("paso", comando=comando, en_registro=en_registro, cuadra=cuadra)
-            entrega = transporte.entregar(afirmaciones_del_texto(final), capturas(pedidas, resultados, hosts))
+            entrega = transporte.entregar(afirmaciones_del_texto(final), capturas(pedidas, resultados, hosts,
+                                                                                     maquinas_c5))
             try:
-                revision = await deps.auditar(turno.texto_de_mision, entrega, A.maquinas_de(hosts, turno.hosts))
+                revision = await deps.auditar(turno.texto_de_mision, entrega,
+                                              A.maquinas_de(hosts, maquinas_c5))
                 auditor_pauso = revision.pausar
                 entrega = A.aplicar_revision(entrega, revision)
             except Exception as exc:  # fail-soft: el turno entrega las crudas; fail-CLOSED para las afirmaciones: con el auditor ilegible o caído no sale ninguna
@@ -426,8 +532,24 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
     # Un pausa o un auditor que pausó mandan sobre un fallo de latido o de cerebro: es lo que hay que leer.
     if puesta:
         codigo = "pausa_puesta"
+    if es_codigo:
+        # Ruling 3 (Tarea 9): la entrega va AL FINAL y SOLO si todo lo demás pasó -- vigía que latió
+        # y cerró, cerebro sin fallo, C3 (registro) que cuadra, cadena entera, C5 legible y sin
+        # pausa, C4 (pausa) libre y afirmaciones entregadas. Si algo falló, no se toca GitHub: queda
+        # `sin_entregar` con el código del turno como motivo.
+        if codigo is None and clon is not None:
+            resultado_entrega = await deps.entregar_codigo(ctx, clon, entrega, auditor_legible)
+            if resultado_entrega["estado_entrega"] not in ENTREGA_SIN_FALLO:
+                codigo = resultado_entrega["estado_entrega"]
+        else:
+            resultado_entrega = {"estado_entrega": "sin_entregar", "motivo": codigo or "codigo_sin_clon",
+                                 "pr_url": None, "violaciones": [], "notas": [], "rama_empujada": False,
+                                 "sha": None}
+            codigo = codigo or "codigo_sin_clon"
+        dice("entrega_codigo", **resultado_entrega)
     verificacion = {"registro_cuadra": registro_cuadra, "cadena_ok": cadena, "pausa_puesta": puesta,
                     "auditor_pauso": auditor_pauso, "auditor_legible": auditor_legible}
     estado = "completado" if codigo is None else "fallido"
     dice("turno_completado" if codigo is None else "turno_fallido", codigo=codigo)
-    return _resultado(estado, codigo, entrega=entrega, verificacion=verificacion, sesion_iniciada=sesion_iniciada)
+    return _resultado(estado, codigo, entrega=entrega, verificacion=verificacion, sesion_iniciada=sesion_iniciada,
+                      entrega_codigo=resultado_entrega)

@@ -57,8 +57,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import pwd
 import re
 import shlex
+import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +68,7 @@ from pathlib import Path
 from jax.ejecutor.contratos import contexto
 
 _NOMBRE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+_PERMISOS_RECURSIVOS = ("rwX", "r-X")
 
 
 class CuentaSinConfigurar(RuntimeError):
@@ -155,7 +158,7 @@ def _sesion_valida(sesion: str) -> bool:
 
 def remoto_claude(c: Cuenta, *, base_url: str, modelo: str, prompt: str, herramientas: str = "Bash,Read",
                   max_salida_tokens: int | None = None, sesion: str | None = None, reanudar: bool = False,
-                  directorio_projects: Path | None = None) -> str:
+                  directorio_projects: Path | None = None, directorio_trabajo: Path | None = None) -> str:
     """`max_salida_tokens`: el tope que el proxy exige (JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS) cuando
     `base_url` es un proxy con carril; sin él el arnés pide su propio `max_tokens` y el proxy da 403.
 
@@ -166,7 +169,13 @@ def remoto_claude(c: Cuenta, *, base_url: str, modelo: str, prompt: str, herrami
     `directorio_projects` (B-1/M-4, ronda 3): la carpeta que la jaula monta en lectura y
     escritura sobre "$HOME/.claude/projects" -- ver `ruta_projects_de_la_mision` y el
     docstring del módulo. `None` (canario, humo, sin misión): ni siquiera dentro de esta
-    corrida sobrevive nada ahí."""
+    corrida sobrevive nada ahí.
+
+    `directorio_trabajo` (misión de código, spec 2026-09-28 v1.3 §3.2): el clon de la misión.
+    El arnés arranca ahí (`cd <dir>` en vez de `cd ~`), y SOLO en ese caso el entorno de la
+    jaula lleva `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=<dir>`:
+    medido 2026-09-28 con git 2.53 y los usuarios reales, sin eso `axioma` recibe «dubious
+    ownership» sobre un clon cuyo directorio es de `jaxsvc`. Solo rutas absolutas."""
     if sesion is not None and not _sesion_valida(sesion):
         raise ValueError("sesion_invalida")
     if reanudar and sesion is None:
@@ -179,11 +188,17 @@ def remoto_claude(c: Cuenta, *, base_url: str, modelo: str, prompt: str, herrami
     ]
     if max_salida_tokens is not None:
         variables.append(f"CLAUDE_CODE_MAX_OUTPUT_TOKENS={int(max_salida_tokens)}")
+    if directorio_trabajo is not None:
+        if not Path(directorio_trabajo).is_absolute():
+            raise ValueError("directorio_trabajo_relativo")
+        variables += ["GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory",
+                      f"GIT_CONFIG_VALUE_0={q(str(directorio_trabajo))}"]
     entorno = " ".join(variables)
     claude = " ".join(q(a) for a in [str(c.node_bin / "claude"), "-p", prompt, "--output-format", "stream-json",
                                       "--verbose", "--model", modelo, "--allowedTools", herramientas]
                       + ([] if sesion is None else ["--resume" if reanudar else "--session-id", sesion]))
-    return f"read -r K; cd ~ && env {entorno} {_jaula(c, directorio_projects=directorio_projects)} {claude}"
+    ir = "cd ~" if directorio_trabajo is None else f"cd {q(str(directorio_trabajo))}"
+    return f"read -r K; {ir} && env {entorno} {_jaula(c, directorio_projects=directorio_projects)} {claude}"
 
 
 _MISION_ID_VALIDA = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -199,7 +214,8 @@ def ruta_projects_de_la_mision(misiones: Path, mision_id: str) -> Path:
     donde ya vive `<id_vigia>.json` (mision_servicio.py::abrir_vigia) -- éste va en un
     subdirectorio nuevo, `<mision_id>/claude-projects`, para no mezclarse con esos
     archivos. Sólo un UUID canónico en minúsculas: termina en una ruta de sistema de
-    archivos y en el argv de `sudo install` (`preparar_directorio_projects`).
+    archivos y en el argv de `setfacl` (`preparar_directorio_projects`,
+    `preparar_directorio_de_la_cuenta`).
 
     LÍMITE (MINOR, ronda 6, auditoría adversarial 2026-09-22) -- `claude-projects` de
     OTRA misión: hoy no hay misiones CONCURRENTES. C5 (`arranque.verificar_c5_estatico`,
@@ -219,18 +235,135 @@ def ruta_projects_de_la_mision(misiones: Path, mision_id: str) -> Path:
     return misiones / mision_id / "claude-projects"
 
 
-async def preparar_directorio_projects(c: Cuenta, ruta: Path, *, correr=None) -> None:
-    """Crea `ruta`, dueño `c.nombre` (axioma), 0700 -- root:root o jaxsvc:jaxsvc no
-    alcanza: `axioma` tiene que poder escribir ahí desde DENTRO de la jaula. Requiere
-    NOPASSWD sudo para `install` en el controlador (fruiz en hall9000, ya lo tiene para
-    el resto de `ops/ejecutor/instalar_*.sh`); si falla, se propaga (fail-closed: sin
-    directorio propio no hay `--resume` posible, y el llamador no debe seguir)."""
+async def preparar_directorio_de_la_cuenta(c: Cuenta, ruta: Path, *, correr=None) -> None:
+    """Crea `ruta` para que la cuenta escriba DESDE LA JAULA, sin sudo (2026-09-28: `jaxsvc`
+    no tiene sudo; la versión con `sudo install -o axioma` dejó al Ejecutor sin arrancar desde
+    el 2026-09-20). El dueño es el proceso (jaxsvc); `axioma` entra por ACL, también en lo que
+    se cree adentro (ACL por omisión). Falla cerrado: sin ACL no hay directorio utilizable.
+
+    Fix round 1 (2026-09-28, hallazgos I-1/I-2 de la auditoría del escalón 3 sobre esta misma
+    tarea):
+    - I-1: la ACL se FIJA con `setfacl --set` (no `-m`) -- si sólo se agrega, la hoja hereda
+      `default:user:fruiz:rwx` del padre (`/var/lib/jax-ejecutor-misiones`), y fruiz (o
+      cualquier proceso con su UID) puede leer y ESCRIBIR la sesión que `--resume` reanuda:
+      un canal de inyección sobre un agente con acceso SSH a máquinas remotas.
+    - I-2: `mkdir(exist_ok=True)` acepta un symlink a directorio (`Path.is_dir()` sigue el
+      enlace) y `setfacl` seguiría ese mismo enlace -- con `-P` incluso da rc 0 sin aplicar
+      nada, fallo abierto. También aceptaría, en silencio, un directorio YA EXISTENTE de
+      OTRO dueño (m-1). Por eso, después del `mkdir`, se hace `os.lstat` (que NO sigue
+      symlinks) y se exige: (a) que sea un directorio real, no un enlace; (b) que el dueño
+      sea este mismo proceso (`os.geteuid()`). Cualquiera de las dos falla cerrado, con el
+      tipo o el dueño encontrado en el mensaje.
+
+    Riesgo residual, declarado a propósito: `jaxsvc` (dueño del directorio) sí controla su
+    contenido -- eso no se puede evitar sin sudo. Se considera tolerable porque `jaxsvc` ya
+    escribe el prompt de cada turno (mismo nivel de confianza que hoy)."""
     correr = correr or asyncio.create_subprocess_exec
-    proc = await correr("sudo", "install", "-d", "-o", c.nombre, "-g", c.nombre, "-m", "0700", str(ruta),
+    try:
+        await asyncio.to_thread(ruta.mkdir, mode=0o700, parents=True, exist_ok=True)
+    except OSError as error:
+        raise RuntimeError(f"preparar_directorio_fallo: no_se_pudo_crear {ruta}: {error}") from error
+    info = await asyncio.to_thread(os.lstat, ruta)
+    if not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(
+            f"preparar_directorio_fallo: {ruta} no es un directorio real (¿symlink?), "
+            f"modo={oct(stat.S_IFMT(info.st_mode))}")
+    if info.st_uid != os.geteuid():
+        raise RuntimeError(
+            f"preparar_directorio_fallo: {ruta} pertenece a otro dueño (uid={info.st_uid}, "
+            f"esperado uid={os.geteuid()})")
+    acl = (f"u::rwx,g::---,o::---,m::rwx,u:{c.nombre}:rwx,"
+           f"d:u::rwx,d:g::---,d:o::---,d:m::rwx,d:u:{c.nombre}:rwx")
+    proc = await correr("setfacl", "--set", acl, str(ruta),
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     _, errores = await proc.communicate()
     if proc.returncode != 0:
-        raise RuntimeError(f"preparar_directorio_projects_fallo: {errores.decode(errors='replace')}")
+        raise RuntimeError(f"preparar_directorio_fallo: {errores.decode(errors='replace')}")
+
+
+async def dar_acceso_recursivo(c: Cuenta, ruta: Path, *, permiso: str = "rwX", correr=None) -> None:
+    """Mismo patrón endurecido de `preparar_directorio_de_la_cuenta` (Task 0, 757ca62),
+    pero RECURSIVO (`setfacl -R --set`): lo usa `preparar.preparar()` (Tarea 6, misiones
+    de código) para dar acceso al clon DESPUÉS de que `git clone`/`git checkout` lo
+    llenaron de archivos y directorios nuevos, propiedad del proceso (jaxsvc) -- a
+    diferencia de `preparar_directorio_de_la_cuenta`, que sólo prepara un directorio
+    VACÍO antes de que nada se escriba ahí, acá ya hay contenido que necesita la ACL
+    también, no sólo la ruta hoja.
+
+    `ruta` tiene que existir de antemano -- esta función NUNCA hace `mkdir` (el llamador
+    lo hace, ver `preparar.preparar`, ruling del controlador 2026-09-28: `dar_acceso`
+    exige la ruta ya creada porque `git clone` también la necesita como cwd existente
+    antes de correr).
+
+    Mismas dos comprobaciones que Task 0, con `os.lstat` (no sigue symlinks), ANTES de
+    llamar a `setfacl`: (a) que `ruta` sea un directorio real, no un enlace; (b) que el
+    dueño sea este mismo proceso (`os.geteuid()`). Cualquiera de las dos falla cerrado.
+
+    Además de `u:<cuenta>:rwX` y su `default` correspondiente, se agrega
+    `default:u:<usuario del proceso>:rwX` -- medido 2026-09-28 con los usuarios reales:
+    sin esa entrada por omisión, `jaxsvc` (el proceso) deja de poder LEER lo que
+    `axioma` cree DESPUÉS dentro de ese árbol (los commits de Qwen), y la entrega
+    (Tarea 5, corre como jaxsvc) no podría verlos.
+
+    Retrabajo por auditoría (espejo privado, spec v1.2, 2026-09-28):
+    - `setfacl -P`: recorrido físico, nunca sigue un enlace dentro del árbol (el clon lleva
+      `.venv`/`node_modules` enlazados a `deps/`, y Qwen puede crear enlaces a cualquier lado).
+    - `permiso="r-X"` para `<misión>/deps`: la cuenta lee y atraviesa, no escribe. Sin la
+      entrada por omisión del proceso: en `deps/` solo escribe el proceso, que ya es el dueño.
+      Cualquier otro valor se rechaza -- `permiso` termina dentro de la especificación de ACL."""
+    if permiso not in _PERMISOS_RECURSIVOS:
+        raise ValueError(f"permiso_invalido: {permiso!r}")
+    correr = correr or asyncio.create_subprocess_exec
+    info = await asyncio.to_thread(os.lstat, ruta)
+    if not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(
+            f"preparar_directorio_fallo: {ruta} no es un directorio real (¿symlink?), "
+            f"modo={oct(stat.S_IFMT(info.st_mode))}")
+    if info.st_uid != os.geteuid():
+        raise RuntimeError(
+            f"preparar_directorio_fallo: {ruta} pertenece a otro dueño (uid={info.st_uid}, "
+            f"esperado uid={os.geteuid()})")
+    acl = (f"u::rwX,g::---,o::---,m::rwX,u:{c.nombre}:{permiso},"
+           f"d:u::rwX,d:g::---,d:o::---,d:m::rwX,d:u:{c.nombre}:{permiso}")
+    if permiso == "rwX":
+        acl += f",d:u:{pwd.getpwuid(os.geteuid()).pw_name}:rwX"
+    proc = await correr("setfacl", "-P", "-R", "--set", acl, str(ruta),
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    _, errores = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"preparar_directorio_fallo: {errores.decode(errors='replace')}")
+
+
+async def dar_paso(c: Cuenta, ruta: Path, *, correr=None) -> None:
+    """`<raiz>/<misión>` de una misión de código (spec v1.2 §3.1): la cuenta solo ATRAVIESA
+    (`--x`) para llegar a `repo/` (escritura) y a `deps/` (lectura); no lista ni crea nada
+    ahí, y no ve `espejo.git` (0700, sin ACL para ella). Sin ACL por omisión (`-k`): lo que
+    el proceso cree adentro no hereda nada -- medido 2026-09-28, `setfacl --set` sin
+    entradas `d:` deja intacta la ACL por omisión heredada del padre (en producción,
+    `default:user:fruiz:rwx` de `/var/lib/jax-ejecutor-misiones`). Mismas comprobaciones
+    con `os.lstat` que `preparar_directorio_de_la_cuenta`, antes de llamar a `setfacl`."""
+    correr = correr or asyncio.create_subprocess_exec
+    info = await asyncio.to_thread(os.lstat, ruta)
+    if not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(
+            f"preparar_directorio_fallo: {ruta} no es un directorio real (¿symlink?), "
+            f"modo={oct(stat.S_IFMT(info.st_mode))}")
+    if info.st_uid != os.geteuid():
+        raise RuntimeError(
+            f"preparar_directorio_fallo: {ruta} pertenece a otro dueño (uid={info.st_uid}, "
+            f"esperado uid={os.geteuid()})")
+    acl = f"u::rwx,g::---,o::---,m::--x,u:{c.nombre}:--x"
+    proc = await correr("setfacl", "-P", "-k", "--set", acl, str(ruta),
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    _, errores = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"preparar_directorio_fallo: {errores.decode(errors='replace')}")
+
+
+async def preparar_directorio_projects(c: Cuenta, ruta: Path, *, correr=None) -> None:
+    """Alias de `preparar_directorio_de_la_cuenta` -- mismo contrato para los llamadores
+    (`mision_servicio.py`)."""
+    await preparar_directorio_de_la_cuenta(c, ruta, correr=correr)
 
 
 async def correr_en_la_cuenta(c: Cuenta, remoto: str, *, entrada: bytes = b"", tope_s: float):

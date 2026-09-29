@@ -522,3 +522,268 @@ def test_vigia_no_latio_dice_cuanto_espero_y_si_el_proceso_vivia():
     # `vivo` distingue el caso que importa: un vigia MUERTO es un fallo del vigia; uno
     # VIVO que no llego a latir es un presupuesto corto, que es otro problema.
     assert "vivo" in e["datos"]
+
+
+# --- misión de CÓDIGO (spec 2026-09-28 v1.3, Tarea 9) ------------------------------------------
+# Preparar (clon + espejo) antes del cerebro, el cerebro en el clon, entregar después de C5. Las
+# piezas reales (preparar, entregar) tienen sus propios tests; acá solo el orden y los códigos.
+
+REPO = {"owner_repo": "fjruizhn/jax-platform", "comandos_prueba": ["pytest -q", "npm test"]}
+
+
+def _turno_codigo(**cambios):
+    return _turno(tipo="codigo", repo=REPO, **cambios)
+
+
+def test_turno_de_codigo_legible():
+    t = M.turno_desde_json(_turno_codigo())
+    assert t.tipo == "codigo"
+    assert t.repo == {"owner_repo": "fjruizhn/jax-platform", "comandos_prueba": ("pytest -q", "npm test")}
+    s = M.turno_desde_json(_turno())
+    assert (s.tipo, s.repo) == ("servidor", None)
+    assert M.turno_desde_json(_turno(tipo="servidor")).tipo == "servidor"
+
+
+@pytest.mark.parametrize("datos, codigo", [
+    (_turno(tipo="otro"), "turno_tipo_invalido"),
+    (_turno(tipo=None), "turno_tipo_invalido"),
+    (_turno(tipo="codigo"), "turno_repo_invalido"),                      # código sin repo
+    (_turno(tipo="servidor", repo=REPO), "turno_repo_invalido"),         # servidor con repo
+    (_turno(tipo="codigo", repo=["o/r"]), "turno_repo_invalido"),
+    (_turno(tipo="codigo", repo={**REPO, "owner_repo": "o/r;rm"}), "turno_repo_invalido"),
+    (_turno(tipo="codigo", repo={**REPO, "owner_repo": "../.."}), "turno_repo_invalido"),
+    (_turno(tipo="codigo", repo={"comandos_prueba": []}), "turno_repo_invalido"),
+    (_turno(tipo="codigo", repo={**REPO, "remoto_url": "https://evil/o/r.git"}), "turno_repo_invalido"),
+    (_turno(tipo="codigo", repo={**REPO, "comandos_prueba": "pytest"}), "turno_repo_invalido"),
+    (_turno(tipo="codigo", repo={**REPO, "comandos_prueba": ["pytest", 3]}), "turno_repo_invalido"),
+    (_turno(tipo="codigo", repo={**REPO, "comandos_prueba": ["  "]}), "turno_repo_invalido"),
+])
+def test_turno_de_codigo_ilegible_con_codigo(datos, codigo):
+    with pytest.raises(M.TurnoIlegible) as exc:
+        M.turno_desde_json(datos)
+    assert exc.value.args[0] == codigo
+
+
+def test_instrucciones_de_codigo_nombran_el_repo_las_pruebas_y_prohiben_empujar():
+    texto = M.instrucciones_de_codigo(M.turno_desde_json(_turno_codigo()).repo)
+    assert "fjruizhn/jax-platform" in texto and "`pytest -q`" in texto and "`npm test`" in texto
+    assert "NO empujes" in texto
+    sin = M.instrucciones_de_codigo({"owner_repo": "o/r", "comandos_prueba": ()})
+    assert "no declara" in sin
+
+
+class _Clon:
+    ruta = "/m/repo"
+    rama = f"axioma/{MISION}"
+    rama_por_omision = "main"
+    dependencias = ("package-lock.json", "sin_lockfile:backend/package.json")
+
+
+class FalsasCodigo(Falsas):
+    def __init__(self):
+        super().__init__()
+        self.entrega = {"estado_entrega": "abierto", "pr_url": "https://gh/pr/1", "violaciones": [], "notas": []}
+        self.prompts = []
+
+    async def preparar_codigo(self, ctx):
+        self.llamadas.append("preparar_codigo")
+        return _Clon()
+
+    async def entregar_codigo(self, ctx, clon, entrega, auditor_legible):
+        self.llamadas.append(("entregar_codigo", clon.ruta, auditor_legible, len(entrega.respaldadas)))
+        return self.entrega
+
+    async def correr_cerebro(self, ctx, prompt, sesion, reanudar):
+        self.prompts.append(prompt)
+        return await super().correr_cerebro(ctx, prompt, sesion, reanudar)
+
+    def deps(self):
+        import dataclasses
+        return dataclasses.replace(super().deps(), preparar_codigo=self.preparar_codigo,
+                                   entregar_codigo=self.entregar_codigo)
+
+
+def _entrego(f) -> bool:
+    return any(isinstance(x, tuple) and x[0] == "entregar_codigo" for x in f.llamadas)
+
+
+def test_codigo_prepara_antes_del_cerebro_y_entrega_al_final():
+    """Ruling 3 (Tarea 9): la entrega va DESPUÉS del cierre del vigía, de la cadena y de la pausa."""
+    f = FalsasCodigo()
+    r, eventos = _correr(f, _turno_codigo())
+    assert r["estado"] == "completado" and r["codigo"] is None
+    assert r["entrega_codigo"] == f.entrega
+    codigos = _codigos(eventos)
+    assert codigos.index("vigia_late") < codigos.index("codigo_preparado") < codigos.index("cerebro_termino")
+    assert codigos.index("vigia_cerrado") < codigos.index("entrega_codigo") < codigos.index("turno_completado")
+    (preparado,) = [e for e in eventos if e["evento"] == "codigo_preparado"]
+    assert preparado["datos"] == {"rama": f"axioma/{MISION}", "base": "main",
+                                  "dependencias": ["package-lock.json", "sin_lockfile:backend/package.json"]}
+    (entregado,) = [e for e in eventos if e["evento"] == "entrega_codigo"]
+    assert entregado["datos"] == f.entrega
+    assert ("entregar_codigo", "/m/repo", True, 1) in f.llamadas
+    assert "NO empujes" in f.prompts[0] and "fjruizhn/jax-platform" in f.prompts[0]
+
+
+@pytest.mark.parametrize("estado", ["rechazada_por_contrato", "fallo_entrega", "empujado_sin_pr"])
+def test_codigo_con_la_entrega_rechazada_o_fallida_es_el_codigo_del_turno(estado):
+    f = FalsasCodigo()
+    f.entrega = {"estado_entrega": estado, "pr_url": None,
+                 "violaciones": [{"regla": "flujos_ci", "ruta": ".github/workflows/x.yml", "detalle": "x"}],
+                 "notas": []}
+    r, _ = _correr(f, _turno_codigo())
+    assert (r["estado"], r["codigo"]) == ("fallido", estado)
+
+
+def test_codigo_sin_cambios_no_es_un_fallo_de_la_entrega():
+    f = FalsasCodigo()
+    f.entrega = {"estado_entrega": "sin_cambios", "pr_url": None, "violaciones": [], "notas": []}
+    r, _ = _correr(f, _turno_codigo())
+    assert (r["estado"], r["codigo"]) == ("completado", None)
+
+
+def _pausa_puesta(f):
+    f.pausa_leida = {"puesta": True, "origen": "c4", "motivo": "freno", "paso": 1, "legible": True}
+
+
+def _sin_afirmaciones(f):
+    f.cerebro = (0, _crudo("[]"))
+
+
+@pytest.mark.parametrize("romper, codigo", [
+    (_pausa_puesta, "pausa_puesta"),                                                   # C4
+    (lambda f: setattr(f, "registro", []), "registro_no_cuadra"),                       # C3
+    (lambda f: setattr(f, "cadena", False), "cadena_rota"),
+    (lambda f: setattr(f, "vigia_cierre", (1, "arranco=true", "boom")), "vigia_no_cerro"),
+    (lambda f: setattr(f, "revision", Revision(True, "fuera_de_mision", 1, (), frozenset(), frozenset())),
+     "auditor_pauso"),
+    (lambda f: setattr(f, "auditor_revienta", True), "auditor_ilegible"),
+    (lambda f: setattr(f, "cerebro", (1, f.cerebro[1])), "cerebro_fallo"),
+    (lambda f: setattr(f, "latido", False), "vigia_no_latio"),
+    (_sin_afirmaciones, "sin_afirmaciones"),
+])
+def test_codigo_no_entrega_si_algo_mas_fallo_y_queda_sin_entregar_con_el_codigo_del_turno(romper, codigo):
+    """Ruling 3: la entrega SOLO si todo lo demás pasó. Si no, `estado_entrega = sin_entregar` y el
+    motivo es el código del turno."""
+    f = FalsasCodigo()
+    romper(f)
+    r, eventos = _correr(f, _turno_codigo())
+    assert not _entrego(f)
+    assert (r["estado"], r["codigo"]) == ("fallido", codigo)
+    esperado = {"estado_entrega": "sin_entregar", "motivo": codigo, "pr_url": None, "violaciones": [], "notas": [],
+                "rama_empujada": False, "sha": None}
+    assert r["entrega_codigo"] == esperado
+    (entregado,) = [e for e in eventos if e["evento"] == "entrega_codigo"]
+    assert entregado["datos"] == esperado
+
+
+AFIRMACION_LOCAL = {"maquina": "hall9000", "comando": "pytest -q", "linea": "3 passed in 0.10s", "dato": "3 passed",
+                    "proposito": "¿pasan las pruebas?"}
+
+
+def _cerebro_local(f):
+    f.cerebro = (0, _crudo(json.dumps([AFIRMACION_LOCAL]), comando="pytest -q", salida="3 passed in 0.10s\n"))
+    f.registro = [{"evento": "herramienta_pedida", "tool_use_id": "t1"},
+                  {"evento": "resultado_devuelto", "tool_use_id": "t1", "sha256": _sha("3 passed in 0.10s\n")}]
+
+
+def test_codigo_una_prueba_corrida_en_la_jaula_respalda_su_afirmacion_y_c5_ve_la_maquina_local():
+    """Ruling 4a: en una misión de código el Bash del cerebro corre en la máquina local (la jaula);
+    su salida es una captura citable de ESA máquina, y C5 la recibe como máquina de la misión --
+    si no, una afirmación sobre la máquina local le llega como fuera de la misión."""
+    f = FalsasCodigo()
+    _cerebro_local(f)
+    r, _ = _correr(f, _turno_codigo())
+    assert r["afirmaciones"] == [AFIRMACION_LOCAL] and r["codigo"] is None
+    assert {m.nombre for m in f.maquinas_auditadas} == {"ejecutor-prueba", "hall9000"}
+
+
+def test_servidor_no_suma_la_maquina_local_a_c5():
+    f = Falsas()
+    _correr(f)
+    assert {m.nombre for m in f.maquinas_auditadas} == {"ejecutor-prueba"}
+
+
+def test_codigo_lo_que_no_se_cita_de_la_jaula_sigue_descartado():
+    f = FalsasCodigo()
+    _cerebro_local(f)
+    otra = {**AFIRMACION_LOCAL, "linea": "5 passed in 0.10s", "dato": "5 passed"}
+    f.cerebro = (0, _crudo(json.dumps([otra]), comando="pytest -q", salida="3 passed in 0.10s\n"))
+    r, _ = _correr(f, _turno_codigo())
+    assert r["afirmaciones"] == [] and [d["dato"] for d in r["descartadas"]] == ["5 passed"]
+
+
+def test_prompt_de_codigo_trabaja_en_el_directorio_actual_sin_ssh():
+    """MAJOR-3 (medido por el controlador con los usuarios reales: la llave de axioma no entra a
+    axioma@hall9000 y el cerco rechaza axioma->127.0.0.1:58291): en código no hay salida de la jaula,
+    así que el pedido no nombra máquinas por ssh; los comandos corren en el directorio actual."""
+    repo = M.turno_desde_json(_turno_codigo()).repo
+    p = M.prompt_de_codigo("arregla el test", repo, "hall9000")
+    assert "ssh" not in p and "axioma@" not in p
+    assert "arregla el test" in p and "directorio actual" in p and "fjruizhn/jax-platform" in p
+    assert "`pytest -q`" in p and "NO empujes" in p and '"maquina": "hall9000"' in p
+    assert all(c in p for c in ('"comando"', '"linea"', '"dato"', '"proposito"'))
+    assert "turnos anteriores ya no valen" in M.prompt_de_codigo("x", repo, "hall9000", reanudar=True)
+
+
+def test_codigo_el_cerebro_recibe_el_prompt_de_codigo():
+    f = FalsasCodigo()
+    _correr(f, _turno_codigo())
+    assert "ssh" not in f.prompts[0] and '"maquina": "hall9000"' in f.prompts[0]
+
+
+def test_codigo_si_preparar_falla_no_corre_el_cerebro_y_queda_sin_entregar():
+    """MINOR-4: sin clon, nada; el evento dice el tipo, nunca el mensaje crudo."""
+    f = FalsasCodigo()
+
+    async def revienta(ctx):
+        raise RuntimeError(f"preparar_fallo: pip install con {SESION} en el mensaje")
+    f.preparar_codigo = revienta
+    r, eventos = _correr(f, _turno_codigo())
+    assert (r["estado"], r["codigo"]) == ("fallido", "preparar_fallo")
+    assert not any(isinstance(x, tuple) and x[0] == "cerebro" for x in f.llamadas) and not _entrego(f)
+    assert r["entrega_codigo"]["estado_entrega"] == "sin_entregar" and r["entrega_codigo"]["motivo"] == "preparar_fallo"
+    assert "cerrar_vigia" in f.llamadas and SESION not in json.dumps(eventos)
+    (e,) = [x for x in eventos if x["evento"] == "preparar_fallo"]
+    assert e["datos"] == {"tipo": "RuntimeError"}
+
+
+def test_servidor_descarta_una_captura_de_una_maquina_ajena_a_la_mision():
+    """MINOR-2: descarte determinista -- una captura cuya máquina no está entre las de C5 del turno no
+    respalda nada (en servidor, la local no es de la misión)."""
+    f = Falsas()
+    _cerebro_local(f)
+    r, _ = _correr(f)
+    assert r["afirmaciones"] == [] and [d["dato"] for d in r["descartadas"]] == ["3 passed"]
+
+
+def test_un_ssh_que_no_es_literal_no_respalda_nada():
+    """MINOR-2: `PATH=/tmp/x ssh …` puede ser un programa local que imprime lo que quiere; su salida no
+    se acredita a la máquina remota."""
+    f = Falsas()
+    falso = "PATH=/tmp/falso " + CMD
+    f.cerebro = (0, _crudo(json.dumps([{**AFIRMACION, "comando": falso}]), comando=falso))
+    r, _ = _correr(f)
+    assert r["afirmaciones"] == [] and r["crudas"] == []
+
+
+def test_codigo_con_el_vigia_sin_latir_no_prepara():
+    f = FalsasCodigo()
+    f.latido = False
+    _correr(f, _turno_codigo())
+    assert "preparar_codigo" not in f.llamadas
+
+
+def test_servidor_no_prepara_ni_entrega_codigo_aunque_tenga_con_que():
+    f = FalsasCodigo()
+    r, eventos = _correr(f)
+    assert "preparar_codigo" not in f.llamadas and not _entrego(f)
+    assert "codigo_preparado" not in _codigos(eventos) and "entrega_codigo" not in _codigos(eventos)
+    assert "entrega_codigo" not in r and "NO empujes" not in f.prompts[0]
+
+
+def test_codigo_sin_las_dependencias_de_codigo_no_arranca_nada():
+    f = Falsas()  # sin preparar_codigo ni entregar_codigo
+    r, eventos = _correr(f, _turno_codigo())
+    assert (r["estado"], r["codigo"]) == ("fallido", "codigo_sin_dependencias")
+    assert f.llamadas == [] and _codigos(eventos) == ["turno_lanzado", "turno_fallido"]

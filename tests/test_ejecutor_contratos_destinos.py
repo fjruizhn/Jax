@@ -77,3 +77,31 @@ def test_formato_neutro():
     assert formato.campos((("codigo", "prohibido"), ("hosts", ("bridge",)), ("regla", None), ("n", 3), ("ok", True))) \
         == 'codigo="prohibido" hosts=["bridge"] regla=null n=3 ok=true'
     assert formato.campos((("x", "ñ \"y\""),)) == 'x="\\u00f1 \\"y\\""'
+
+
+# --- MINOR-2 (auditoría Tarea 9): ¿el ssh es el de verdad? Solo para la cita ---------------------
+
+from jax.ejecutor.contratos.destinos import ssh_no_literal  # noqa: E402
+
+
+@pytest.mark.parametrize("comando, esperado", [
+    ("ssh -tt axioma@prod uptime", False),
+    ("sudo -u root ssh -tt axioma@prod uptime", False),
+    ("FOO=1 timeout 5 ssh -tt axioma@prod uptime", False),
+    ("uptime", False),
+    ("grep ssh /var/log/auth.log", False),
+    ("/usr/bin/ssh -tt axioma@prod uptime", True),
+    ("./ssh -tt axioma@prod uptime", True),
+    ("PATH=/tmp/falso ssh -tt axioma@prod uptime", True),
+    ("env PATH=/tmp/falso ssh -tt axioma@prod uptime", True),
+    ("uptime; PATH=/tmp/x:/usr/bin ssh axioma@prod df", True),
+])
+def test_ssh_no_literal(comando, esperado):
+    """Un `ssh` con ruta, o con PATH reasignado delante, puede ser cualquier programa local que
+    imprime lo que quiere: no se le acredita la salida a la máquina remota."""
+    assert ssh_no_literal(comando) is esperado
+
+
+def test_ssh_no_literal_no_cambia_lo_que_ve_el_gancho():
+    """C1/C2 siguen leyendo `/usr/bin/ssh` como remoto: aplicar esto al gancho es otra decisión."""
+    assert destinos("/usr/bin/ssh -tt axioma@prod uptime", HOSTS) == frozenset({"prod"})
