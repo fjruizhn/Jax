@@ -15,7 +15,7 @@ from typing import Mapping
 
 from .response import GovernanceContractError, _text
 
-GOVERNED_DOMAIN_SPEC_VERSION = "f2-c.domain.1"
+GOVERNED_DOMAIN_SPEC_VERSION = "f2-c.domain.2"
 GOVERNED_RENDERER_API_VERSION = "f2-c.renderer.2"
 GOVERNED_ENVELOPE_SCHEMA_VERSIONS = frozenset({"f2-c.1"})
 
@@ -29,6 +29,17 @@ _CANONICAL_LOCALE_ALIASES = MappingProxyType({
     "en": ("is", "are", "exists", "exist", "available", "healthy", "up", "down", "completed"),
     "es": ("es", "está", "esta", "son", "existe", "existen", "disponible", "saludable", "sano", "caído", "caido", "terminó", "termino"),
 })
+
+# Detection-only punctuation equivalence for the registered English
+# contraction grammar. This is deliberately a small, versioned set: it does
+# not transliterate arbitrary Unicode and never changes rendered payload.
+_GOVERNED_APOSTROPHE_TRANSLATION = str.maketrans({"\u2019": "'"})
+
+
+def _canonicalize_governed_detection_text(value: str) -> str:
+    """Apply frozen Unicode normalization and approved punctuation for match."""
+    normalized = unicodedata.normalize("NFC", value)
+    return normalized.translate(_GOVERNED_APOSTROPHE_TRANSLATION).casefold()
 
 
 def _canon(value: str, name: str) -> str:
@@ -99,7 +110,7 @@ class GovernedDomainSpecification:
 
     def registered_proposition(self, text: str) -> str | None:
         """Return owning predicate when explicit registered grammar occurs."""
-        text = unicodedata.normalize("NFC", text).casefold()
+        text = _canonicalize_governed_detection_text(text)
         # Remove markup delimiters while retaining words/paths/URLs, so the
         # same registered assertion cannot hide in headings, tables or links.
         plain = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)

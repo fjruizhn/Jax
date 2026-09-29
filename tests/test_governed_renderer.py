@@ -25,6 +25,12 @@ def receipt():
 def ref(ref_id, typ, s, *, temporal=None, asserter=None):
     return ReferenceRef(ref_id, typ, "axioma://" + ref_id, "immutable:" + ref_id, "sha256:" + ref_id, s.scope_digest, temporal or (TemporalClass.CURRENT if typ is ReferenceType.RESOLUTION_RECEIPT else TemporalClass.HISTORICAL), ExistenceState.PRESENT, asserter)
 
+def trusted_receipt_reference(ref_value):
+    return ReferenceLookupRecord(ref_value.ref_id, ref_value.ref_type,
+        ref_value.canonical_locator, ref_value.immutable_identity,
+        ref_value.revision_or_digest, ref_value.scope_digest,
+        ref_value.temporal_class, ref_value.existence_state, True)
+
 def registry_and_receipt(s):
     rule = ScopeRule(s.environment, s.tenant_id, s.project_id, s.subject_id, s.actor_id, s.audience, s.component_id)
     binding = PredicateAuthorityBinding("CAPABILITY_AVAILABLE", "v1", "catalog:capabilities", "authority:catalog", s.environment, rule, rule, 60, ConflictPolicy.SINGLE_SOURCE_REQUIRED, "adapter:capability", "1", "sha256:catalog", "b1")
@@ -41,7 +47,8 @@ def sealed_current(s=None, *, state=ContractState.VALID):
     receipt_ref = replace(ref("receipt-1", ReferenceType.RESOLUTION_RECEIPT, s), revision_or_digest=resolution_receipt.receipt_id)
     candidate = GovernedResponseCandidate("f2-c.1", "response-1", s.request_id, s.trace_id, s, "web-chat", (), (ContentBlock(ContentBlockKind.CLAIM_REF_BLOCK, claim_refs=("claim-1",)),), (claim,), (receipt_ref,))
     env = response._seal_candidate_for_server(candidate, contract_state=state, governance_receipt=receipt())
-    context = RenderContext(registry, {"receipt-1": resolution_receipt}, {("capability", "1", "en"): "Capability {name} is available."}, {}, GovernedDomainRegistry(), lambda _ref, _scope: True, lambda: NOW)
+    trusted = {receipt_ref.ref_id: trusted_receipt_reference(receipt_ref)}
+    context = RenderContext(registry, {"receipt-1": resolution_receipt}, {("capability", "1", "en"): "Capability {name} is available."}, {}, GovernedDomainRegistry(), lambda _ref, _scope: True, lambda: NOW, receipt_reference_resolver=lambda ref_value, _scope: trusted.get(ref_value.ref_id))
     return env, context
 
 def test_renderer_accepts_only_sealed_envelope_and_revalidates_current_receipt():
@@ -99,8 +106,12 @@ def test_provider_buffer_adapter_and_safe_notices_do_not_allow_dynamic_static_in
     "Hall9000 is healthy.", "Hall9000 is up.", "The file /etc/passwd exists.",
     "La faceta jekyll existe.", "El trabajo 42 terminó correctamente.",
     "Hall9000 is not healthy.", "Hall9000 no está saludable.", "The job 42 is completed.",
+    "Hall9000 isn't healthy.", "Hall9000 isn’t healthy.", "Hall9000 ISN’T HEALTHY.",
+    "Hall9000 no esta\u0301 saludable.",
     "The path /etc/passwd does not exist.", "La capacidad está disponible.",
     "# HALL9000 IS HEALTHY", "| Hall9000 | is healthy |", "[Hall9000](x) is healthy", "`Hall9000 is healthy`",
+    "## Hall9000 isn’t healthy", "[Hall9000 isn’t healthy](https://example.invalid)",
+    "| Hall9000 | isn’t healthy |", "`Hall9000 isn’t healthy`",
     "Hall9000 está cai\u0301do.",
 ))
 def test_f2ca01_registered_propositions_cannot_escape_through_narrative(prose):
@@ -118,17 +129,32 @@ def test_f2ca01_domain_spec_projects_core_vocabulary_and_extensions_cannot_remov
     assert "healthy" in spec.status_aliases and "es" in spec.locale_aliases
     assert spec.registered_proposition("Hall nine thousand IS HEALTHY") == "ENGINE_STATUS"
     assert spec.registered_proposition("The capability_available claim is blocked") == "CAPABILITY_AVAILABLE"
+    assert spec.registered_proposition("Hall9000 isn't healthy") == spec.registered_proposition("Hall9000 isn’t healthy")
+    assert spec.registered_proposition("Hall9000 ISN’T HEALTHY") == "ENGINE_STATUS"
+    assert spec.registered_proposition("Hall9000 no esta\u0301 saludable") == "ENGINE_STATUS"
+    assert spec.registered_proposition("A person’s ordinary prose is fine") is None
 
 def test_f2ca02_exact_receipt_claim_binding_rejects_predicate_arguments_reference_and_template_substitution():
     env, ctx = sealed_current(); receipt_value = ctx.receipts["receipt-1"]
     claim = env.claims[0]; receipt_ref = env.references[0]
-    assert ctx.registry.verify_receipt_for_claim(receipt_value, claim, env.response_scope, receipt_ref=receipt_ref, validation_time=NOW)
+    lookup = ctx.receipt_reference_resolver(receipt_ref, env.response_scope)
+    assert ctx.registry.verify_receipt_for_claim(receipt_value, claim, env.response_scope, receipt_ref=receipt_ref, reference_lookup=lookup, validation_time=NOW)
     for changed in (
         replace(claim, predicate="FILE_EXISTS"), replace(claim, typed_arguments={"name": "root_shell", "mode": "admin"}),
         replace(claim, template_contract=TemplateContract("other", "1", "en")),
     ):
-        assert not ctx.registry.verify_receipt_for_claim(receipt_value, changed, env.response_scope, receipt_ref=receipt_ref, validation_time=NOW)
-    assert not ctx.registry.verify_receipt_for_claim(receipt_value, claim, env.response_scope, receipt_ref=replace(receipt_ref, revision_or_digest="receipt:other"), validation_time=NOW)
+        assert not ctx.registry.verify_receipt_for_claim(receipt_value, changed, env.response_scope, receipt_ref=receipt_ref, reference_lookup=lookup, validation_time=NOW)
+    assert not ctx.registry.verify_receipt_for_claim(receipt_value, claim, env.response_scope, receipt_ref=replace(receipt_ref, revision_or_digest="receipt:other"), reference_lookup=lookup, validation_time=NOW)
+    for changed_ref in (
+        replace(receipt_ref, immutable_identity="immutable:substitute"),
+        replace(receipt_ref, canonical_locator="axioma://substitute"),
+        replace(receipt_ref, revision_or_digest="sha256:other"),
+        replace(receipt_ref, ref_type=ReferenceType.EVIDENCE),
+        replace(receipt_ref, scope_digest=scope(tenant_id="other").scope_digest),
+        replace(receipt_ref, ref_id="unknown-reference"),
+    ):
+        assert not ctx.registry.verify_receipt_for_claim(receipt_value, claim, env.response_scope,
+            receipt_ref=changed_ref, reference_lookup=lookup, validation_time=NOW)
 
 def test_f2ca05_quote_requires_canonical_assertion_content_and_valid_attribution():
     s = scope(); user = ref("user-1", ReferenceType.USER_ASSERTION, s, asserter="Fernando")

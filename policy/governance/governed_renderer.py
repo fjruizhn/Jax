@@ -22,7 +22,7 @@ from .response import (
     GovernanceReceipt, ResponseScope, ContentBlock, _freeze, _plain,
     _seal_candidate_for_server, _text,
 )
-from .resolution import GovernedResolutionReceipt, ResolverRegistry
+from .resolution import GovernedResolutionReceipt, ReferenceLookupRecord, ResolverRegistry
 from .governed_domain import (GOVERNED_DOMAIN_SPEC_VERSION, GOVERNED_ENVELOPE_SCHEMA_VERSIONS,
     GOVERNED_RENDERER_API_VERSION, GovernedDomainSpecification)
 
@@ -82,6 +82,7 @@ class RenderContext:
     # after reference access/revision validation.  Provider text is never it.
     user_assertion_content: Mapping[str, str] = field(default_factory=dict)
     renderer_api_version: str = GOVERNED_RENDERER_API_VERSION
+    receipt_reference_resolver: Callable[[object, ResponseScope], ReferenceLookupRecord | None] | None = None
 
     def __post_init__(self) -> None:
         if self.registry is not None and not isinstance(self.registry, ResolverRegistry):
@@ -99,6 +100,8 @@ class RenderContext:
             raise GovernanceContractError("user assertion content must be string mapping")
         if self.reference_validator is not None and not callable(self.reference_validator):
             raise GovernanceContractError("reference_validator must be server callable or None")
+        if self.receipt_reference_resolver is not None and not callable(self.receipt_reference_resolver):
+            raise GovernanceContractError("receipt_reference_resolver must be server callable or None")
         object.__setattr__(self, "receipts", MappingProxyType(dict(self.receipts)))
         object.__setattr__(self, "templates", MappingProxyType(dict(self.templates)))
         object.__setattr__(self, "notices", MappingProxyType(dict(self.notices)))
@@ -226,7 +229,11 @@ class GovernedRenderer:
         if claim.epistemic_status is EpistemicStatus.CURRENT_OBSERVATION:
             receipt = context.receipts.get(claim.resolution_receipt_ref or "")
             receipt_ref = references.get(claim.resolution_receipt_ref or "")
-            if context.registry is None or receipt is None or receipt_ref is None or not context.registry.verify_receipt_for_claim(receipt, claim, scope, receipt_ref=receipt_ref, validation_time=now):
+            trusted_reference = (context.receipt_reference_resolver(receipt_ref, scope)
+                if context.receipt_reference_resolver is not None and receipt_ref is not None else None)
+            if (context.registry is None or receipt is None or receipt_ref is None or trusted_reference is None
+                    or not context.registry.verify_receipt_for_claim(receipt, claim, scope,
+                        receipt_ref=receipt_ref, reference_lookup=trusted_reference, validation_time=now)):
                 raise GovernedRenderError("current claim receipt is invalid at render time")
         elif claim.epistemic_status in {EpistemicStatus.MEMORY_DERIVED, EpistemicStatus.MODEL_KNOWLEDGE, EpistemicStatus.INFERRED}:
             # These statuses can be rendered only from non-system typed claims.
