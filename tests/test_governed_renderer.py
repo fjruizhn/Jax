@@ -98,6 +98,8 @@ def test_provider_buffer_adapter_and_safe_notices_do_not_allow_dynamic_static_in
 @pytest.mark.parametrize("prose", (
     "Hall9000 is healthy.", "Hall9000 is up.", "The file /etc/passwd exists.",
     "La faceta jekyll existe.", "El trabajo 42 terminó correctamente.",
+    "Hall9000 is not healthy.", "Hall9000 no está saludable.", "The job 42 is completed.",
+    "The path /etc/passwd does not exist.", "La capacidad está disponible.",
     "# HALL9000 IS HEALTHY", "| Hall9000 | is healthy |", "[Hall9000](x) is healthy", "`Hall9000 is healthy`",
     "Hall9000 está cai\u0301do.",
 ))
@@ -143,6 +145,24 @@ def test_f2ca05_quote_requires_canonical_assertion_content_and_valid_attribution
     mismatch_candidate = replace(env.candidate, claims=(mismatch_claim,))
     mismatch_env = response._seal_candidate_for_server(mismatch_candidate, contract_state=ContractState.VALID, governance_receipt=receipt())
     assert GovernedRenderer().render_text(mismatch_env, context).contract_state is ContractState.UNAVAILABLE
+
+def test_f2ca05_quote_rejects_wrong_revision_tombstone_access_and_missing_ref():
+    s = scope(); user = ref("user-1", ReferenceType.USER_ASSERTION, s, asserter="Fernando")
+    claim = ClaimRecord("user", "USER_REPORT", {"text": "The weather is nice"}, s, SourceClass.USER_INPUT, EpistemicStatus.USER_ASSERTED, basis_refs=("user-1",))
+    quote = ContentBlock(ContentBlockKind.ATTRIBUTED_QUOTE, "The weather is nice", claim_refs=("user",), attribution_ref="user-1", speaker="Fernando")
+    env = response._seal_candidate_for_server(GovernedResponseCandidate("f2-c.1", "q2", s.request_id, s.trace_id, s, "web-chat", (), (quote,), (claim,), (user,)), contract_state=ContractState.VALID, governance_receipt=receipt())
+    content = {"user-1": "The weather is nice"}
+    # The server-owned lookup decides revision/access/existence; tombstones
+    # cannot appear as PRESENT envelope refs and therefore fail this lookup.
+    for lookup in (
+        lambda ref_, scope_: ref_.revision_or_digest == "sha256:live-revision" and ref_.scope_digest == scope_.scope_digest,
+        lambda ref_, scope_: False,  # tombstoned lookup
+        lambda ref_, scope_: ref_.scope_digest == scope_.scope_digest and ref_.asserter_id == "someone-else",
+    ):
+        ctx = RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), lookup, lambda: NOW, content)
+        assert GovernedRenderer().render_text(env, ctx).contract_state is ContractState.UNAVAILABLE
+    with pytest.raises(GovernanceContractError):
+        response._seal_candidate_for_server(GovernedResponseCandidate("f2-c.1", "q3", s.request_id, s.trace_id, s, "web-chat", (), (quote,), (replace(claim, basis_refs=("missing-user",)),), ()), contract_state=ContractState.VALID, governance_receipt=receipt())
 
 def test_f2ca08_unknown_schema_and_f2ca09_expiry_before_atomic_emission_fail_closed():
     env, ctx = sealed_current()

@@ -117,7 +117,7 @@ class GovernedDomainSpecification:
             ("ENGINE_STATUS", rf"\b(?:{subject})\b\s+{copula}\s+(?:{status})\b"),
             ("FILE_EXISTS", rf"\b(?:the\s+)?(?:file|archivo|path|ruta)\s+(?:{subject}|/[^\s]+)\s+{exists}\b|\b(?:{subject}|/[^\s]+)\s+{exists}\b"),
             ("FACET_EXISTS", rf"\b(?:facet|faceta)\s+(?:{subject})\s+{exists}\b"),
-            ("JOB_STATUS", rf"\b(?:job|trabajo)\s+[^\s]+\s+(?:(?:is|was|está|esta|fue|ha\s+)?(?:{status})|no\s+(?:{status}))\b"),
+            ("JOB_STATUS", rf"\b(?:job|trabajo)\s+[^\s]+\s+(?:(?:(?:is|was|está|esta|fue|ha)\s+)?(?:{status})|no\s+(?:{status}))\b"),
             ("CAPABILITY_AVAILABLE", rf"\b(?:capability|capacidad)\s+(?:{subject})\s+{copula}\s+(?:{status})\b"),
             ("CAPABILITY_AVAILABLE", rf"\b(?:the\s+)?(?:capability|capacidad)\s+{copula}\s+(?:{status})\b"),
             ("CONFIG_VALUE", r"\b(?:config(?:uration)?|configuración)\s+(?:value|valor)\b"),
