@@ -26,14 +26,15 @@ from test_governed_renderer import NOW, receipt, scope, sealed_current
 def unit_at(now=NOW):
     envelope, context = sealed_current()
     rendered = GovernedRenderer().render_text(envelope, context)
-    return mint_governed_transport_unit(
+    unit = mint_governed_transport_unit(
         envelope, rendered, context, transport_kind="web-chat-http",
         idempotency_key="request-a:response-1:attempt-1", now=now,
-    ), rendered
+    )
+    return unit, rendered, context
 
 
 def test_mint_binds_exact_effective_f2c_projection_and_scope():
-    unit, rendered = unit_at()
+    unit, rendered, context = unit_at()
     assert unit.response_id == rendered.response_id
     assert unit.original_envelope_digest == rendered.source_envelope_digest
     assert unit.durable_projection()["effective_contract_state"] == "VALID"
@@ -43,6 +44,8 @@ def test_mint_binds_exact_effective_f2c_projection_and_scope():
     assert unit.durable_projection()["schema_version"] == "f2-c.1"
     assert unit.durable_projection()["governance_reference_ids"] == ["receipt-1"]
     assert unit.contains_current_claim
+    assert unit.current_not_after == context.receipts["receipt-1"].not_after
+    assert unit.durable_projection()["current_not_after"] == unit.current_not_after.isoformat()
     assert revalidate_for_transport(unit, NOW) == rendered
 
 
@@ -60,7 +63,7 @@ def test_mint_rejects_foreign_or_mutated_projection():
 
 
 def test_current_claim_is_revalidated_at_preparation_and_transport():
-    unit, _ = unit_at()
+    unit, _, _ = unit_at()
     with pytest.raises(OutputLifecycleError):
         revalidate_for_transport(unit, NOW + timedelta(seconds=61))
     envelope, context = sealed_current()

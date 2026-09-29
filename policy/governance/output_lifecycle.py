@@ -152,6 +152,7 @@ class GovernedTransportUnit:
     schema_version: str
     governance_reference_ids: tuple[str, ...]
     contains_current_claim: bool
+    current_not_after: datetime | None
 
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         raise OutputLifecycleError("GovernedTransportUnit requires server minting")
@@ -189,6 +190,7 @@ class GovernedTransportUnit:
             "domain_spec_version": self.rendered.domain_spec_version,
             "claim_ids": list(self.rendered.claim_ids),
             "contains_current_claim": self.contains_current_claim,
+            "current_not_after": self.current_not_after.isoformat() if self.current_not_after else None,
         }
 
 
@@ -239,6 +241,15 @@ def mint_governed_transport_unit(
         for claim_id in rendered.claim_ids
         if claim_id in claims
     )
+    current_expiries = [
+        context.receipts[claims[claim_id].resolution_receipt_ref].not_after
+        for claim_id in rendered.claim_ids
+        if claim_id in claims
+        and claims[claim_id].epistemic_status is EpistemicStatus.CURRENT_OBSERVATION
+        and claims[claim_id].resolution_receipt_ref in context.receipts
+    ]
+    if contains_current and not current_expiries:
+        raise OutputLifecycleError("current claim has no authenticated receipt expiry")
     return GovernedTransportUnit._mint(
         _UNIT_TOKEN,
         envelope=envelope,
@@ -263,6 +274,7 @@ def mint_governed_transport_unit(
             *envelope.issuance_authority_refs,
         })),
         contains_current_claim=contains_current,
+        current_not_after=min(current_expiries) if current_expiries else None,
     )
 
 
