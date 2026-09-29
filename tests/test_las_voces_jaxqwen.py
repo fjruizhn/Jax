@@ -54,7 +54,12 @@ def fixture(tmp_path):
 
 def make(fixture):
     root, producer, key, workspaces = fixture
-    return capability.JaxQwenCapability(root, producer, workspaces, identity_verifier=lambda: "jaxqwen"), key
+    broker = capability.JaxQwenTrustBroker(b"t" * 32, workspaces.parent / "host-trust-state")
+    return capability.JaxQwenCapability(root, producer, workspaces, trust_broker=broker, host_state_dir=workspaces.parent / "host-mission-state", operator_verifier=lambda identity: identity == "operator"), key
+
+
+def credential(item, mission_id):
+    return item.provision_credential(mission_id)
 
 
 def test_current_lv001_ack_creates_one_independent_bounded_qwen_mission(fixture):
@@ -79,7 +84,7 @@ def test_forged_ack_or_stale_binding_is_rejected(fixture, mutate):
 
 
 def test_identity_stale_lease_and_non_ready_task_fail_closed(fixture):
-    item, key = make(fixture); root, producer, _, workspaces = fixture; bad = capability.JaxQwenCapability(root, producer, workspaces, identity_verifier=lambda: "ariadna-project-manager"); assert bad.start(idempotency_key=key).decision == "REJECTED"
+    item, key = make(fixture); root, producer, _, workspaces = fixture; bad = capability.JaxQwenCapability(root, producer, workspaces, host_state_dir=workspaces.parent / "other-host-state"); assert bad.start(idempotency_key=key).decision == "REJECTED"
     with (item.handoff_state_dir / "task-leases.ndjson").open("a") as out: out.write(json.dumps({"event": "RELEASED", "lease_id": json.loads((item.dispatch_dir / "acks.ndjson").read_text().splitlines()[-1])["lease_id"]}) + "\n")
     assert item.start(idempotency_key=key).decision == "REJECTED"
 
@@ -89,26 +94,29 @@ def test_concurrent_start_is_single_winner_and_restart_is_idempotent(fixture):
     threads = [threading.Thread(target=lambda: values.append(item.start(idempotency_key=key).decision)) for _ in range(2)]
     [x.start() for x in threads]; [x.join() for x in threads]
     assert sorted(values) == ["ACCEPTED", "NOOP"]
-    replay = capability.JaxQwenCapability(item.root, item.handoff_state_dir, item.workspace_root, identity_verifier=lambda: "jaxqwen")
+    replay_broker = capability.JaxQwenTrustBroker(b"t" * 32, item.workspace_root.parent / "host-trust-state")
+    replay = capability.JaxQwenCapability(item.root, item.handoff_state_dir, item.workspace_root, trust_broker=replay_broker, host_state_dir=item.workspace_root.parent / "host-mission-state", operator_verifier=lambda identity: identity == "operator")
     assert replay.start(idempotency_key=key).decision == "NOOP"
 
 
 def test_structured_tools_reject_path_shell_and_test_injection(fixture):
     item, key = make(fixture); result = item.start(idempotency_key=key); mission = result.mission_id; assert mission
-    assert item.tool(mission, "write_file", path="notes.txt", content="safe")["written"] == "notes.txt"
-    with pytest.raises(capability.CapabilityError): item.tool(mission, "write_file", path="../../escape", content="x")
-    with pytest.raises(capability.CapabilityError): item.tool(mission, "write_file", path="projects/las-voces/authority/x.py", content="x")
-    with pytest.raises(capability.CapabilityError): item.tool(mission, "shell", command="id")
-    with pytest.raises(capability.CapabilityError): item.tool(mission, "run_named_test", test="pytest; touch /tmp/x")
+    with pytest.raises(capability.CapabilityError, match="malformed credential"): item.tool(mission, "write_file", path="missing.txt", content="x")
+    assert item.tool(mission, "write_file", credential=credential(item, mission), path="notes.txt", content="safe")["written"] == "notes.txt"
+    with pytest.raises(capability.CapabilityError): item.tool(mission, "write_file", credential=credential(item, mission), path="../../escape", content="x")
+    with pytest.raises(capability.CapabilityError): item.tool(mission, "write_file", credential=credential(item, mission), path="projects/las-voces/authority/x.py", content="x")
+    with pytest.raises(capability.CapabilityError): item.tool(mission, "shell", credential=credential(item, mission), command="id")
+    with pytest.raises(capability.CapabilityError, match="sandbox"): item.tool(mission, "run_named_test", credential=credential(item, mission), test="pytest_las_voces")
+    with pytest.raises(capability.CapabilityError): item.tool(mission, "run_named_test", credential=credential(item, mission), test="pytest; touch /tmp/x")
 
 
 def test_symlink_escape_commit_scope_and_completion_do_not_mark_done(fixture):
     item, key = make(fixture); result = item.start(idempotency_key=key); mission = item._mission(result.mission_id); workspace = Path(mission.workspace)
     (workspace / "outside").symlink_to("/tmp")
-    with pytest.raises(capability.CapabilityError): item.tool(mission.mission_id, "write_file", path="outside/no", content="x")
+    with pytest.raises(capability.CapabilityError): item.tool(mission.mission_id, "write_file", credential=credential(item, mission.mission_id), path="outside/no", content="x")
     (workspace / "outside").unlink()
-    item.tool(mission.mission_id, "write_file", path="README.mission", content="evidence")
-    commit = item.tool(mission.mission_id, "request_commit", message="feat(las-voces): bounded evidence")
+    item.tool(mission.mission_id, "write_file", credential=credential(item, mission.mission_id), path="README.mission", content="evidence")
+    commit = item.tool(mission.mission_id, "request_commit", credential=credential(item, mission.mission_id), message="feat(las-voces): bounded evidence")
     assert commit["evidence_only"] and commit["commit"]
     project = json.loads((item.root / "projects/las-voces/project.json").read_text())
     assert next(x for x in project["tasks"] if x["id"] == "LV-001")["status"] == "READY"
@@ -136,7 +144,7 @@ def test_bounded_model_loop_only_executes_structured_allowlisted_tools(fixture):
         def request_tools(self, _mission, _history):
             self.calls += 1
             return [{"name": "write_file", "arguments": {"path": "model.txt", "content": "bounded"}}] if self.calls == 1 else []
-    assert item.run_tool_loop(mission, Transport())[-1]["result"]["written"] == "model.txt"
+    assert item.run_tool_loop(mission, Transport(), credential_provider=lambda active: credential(item, active.mission_id))[-1]["result"]["written"] == "model.txt"
     class Escape:
         def request_tools(self, _mission, _history): return [{"name": "shell", "arguments": {"command": "id"}}]
-    with pytest.raises(capability.CapabilityError): item.run_tool_loop(mission, Escape())
+    with pytest.raises(capability.CapabilityError): item.run_tool_loop(mission, Escape(), credential_provider=lambda active: credential(item, active.mission_id))
