@@ -90,12 +90,42 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _git_env() -> dict[str, str]:
-    return {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0"}
+def _git_env(*, safe_directories: tuple[Path, ...] = ()) -> dict[str, str]:
+    """Build hermetic Git config, with only explicitly validated exact roots.
+
+    These values come from the capability's host configuration or a dispatcher
+    worktree path that has already passed its ACK/task/path checks. Never pass
+    request fields here. Git's process-local config avoids changing any file.
+    """
+    env = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0"}
+    exact: list[str] = []
+    for candidate in safe_directories:
+        raw = str(candidate)
+        path = Path(raw)
+        if (not path.is_absolute() or ".." in path.parts or any("*" in part for part in path.parts)
+                or not path.is_dir() or path.is_symlink()):
+            raise CapabilityError("unsafe Git trust root")
+        try:
+            canonical = path.resolve(strict=True)
+        except OSError as exc:
+            raise CapabilityError("Git trust root is unavailable") from exc
+        if canonical != path:
+            raise CapabilityError("Git trust root is not canonical")
+        if raw not in exact:
+            exact.append(raw)
+    env["GIT_CONFIG_COUNT"] = str(len(exact))
+    for index, path in enumerate(exact):
+        env[f"GIT_CONFIG_KEY_{index}"] = "safe.directory"
+        env[f"GIT_CONFIG_VALUE_{index}"] = path
+    return env
 
 
 def _git(root: Path, *args: str) -> str:
-    done = subprocess.run([_GIT, "-C", str(root), *args], text=True, capture_output=True, env=_git_env())
+    # `root` is either a constructor-owned canonical/dispatcher root, a
+    # task-derived worktree validated against the ACK, or a host-created
+    # isolated mission clone. The per-process exception is exactly that root.
+    done = subprocess.run([_GIT, "-C", str(root), *args], text=True, capture_output=True,
+                          env=_git_env(safe_directories=(root,)))
     if done.returncode:
         raise CapabilityError("trusted git operation rejected")
     return done.stdout.strip()
@@ -343,7 +373,7 @@ class JaxQwenCapability:
         target.parent.mkdir(parents=True, exist_ok=True)
         # Clone from the *already validated* worktree only.  --no-local avoids a
         # shared object/reference shortcut; hooks are disabled on the clone.
-        done = subprocess.run([_GIT, "clone", "--no-local", "--no-checkout", str(source), str(target)], text=True, capture_output=True, env=_git_env())
+        done = subprocess.run([_GIT, "clone", "--no-local", "--no-checkout", str(source), str(target)], text=True, capture_output=True, env=_git_env(safe_directories=(source,)))
         if done.returncode: raise CapabilityError("isolated mission clone failed")
         _git(target, "config", "core.hooksPath", "/dev/null")
         _git(target, "checkout", "-B", ack["branch"], ack["base_commit"])
