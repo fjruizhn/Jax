@@ -252,7 +252,7 @@ def codigo(monkeypatch):
         return S.ConfigCodigo("Axioma Prueba <ax@prueba.io>", 1234, 5678)
 
     async def rama(cliente, repo):
-        vistos["rama"] = (repo, str(cliente.base_url), cliente.headers.get("authorization"))
+        vistos["rama"] = (repo, cliente.token)
         return "trunk"
 
     async def preparar(repo, **kw):
@@ -365,7 +365,7 @@ def test_deps_abrir_vigia_de_un_turno_de_servidor_escribe_tipo_servidor(tmp_path
 def test_codigo_prepara_con_la_rama_de_la_api_el_autor_de_la_config_y_los_accesos_de_la_cuenta(codigo):
     deps = S.dependencias_reales(ENV_CODIGO, _turno_codigo(), tope_s=1.0, espera_s=1.0)
     assert asyncio.run(deps.preparar_codigo(_CtxCodigo())) is CLON
-    assert codigo["rama"] == ("o/r", "https://api.github.com", f"Bearer {TOKEN}")
+    assert codigo["rama"] == ("o/r", TOKEN)
     repo, kw = codigo["preparar"]
     assert repo == P.Repo("o/r", ("pytest -q",))
     assert kw["mision_id"] == TURNO["mision_id"] and kw["raiz"] == Path("/var/lib/jax-ejecutor-misiones")
@@ -417,7 +417,7 @@ def test_codigo_entrega_con_token_tope_autor_y_upload_pack_de_la_cuenta(codigo):
     assert kw["modelo"] == "qwen-carril" and kw["revision_legible"] is True
     assert kw["upload_pack"].startswith("ssh ") and kw["upload_pack"].endswith("axioma@127.0.0.1 git-upload-pack")
     assert "'3 passed'" in kw["informe"] and "'ssh -tt m pytest'" in kw["informe"]
-    assert str(kw["cliente"].base_url) == "https://api.github.com"
+    assert kw["cliente"].token == TOKEN
     assert codigo["config_leida"] == 1
 
 

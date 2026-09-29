@@ -53,9 +53,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-import httpx
 import redaccion
 
+from jax.core.cliente_http_compartido import obtener_cliente_http
 from jax.ejecutor import cita
 from jax.ejecutor import mision as M
 from jax.ejecutor.codigo import entrega as E
@@ -252,9 +252,30 @@ async def leer_config_codigo() -> ConfigCodigo:
             return config_codigo_desde_filas(dict(await cur.fetchall()))
 
 
-def _cliente_github(token: str) -> httpx.AsyncClient:
-    return httpx.AsyncClient(base_url=API_GITHUB, timeout=30,
-                             headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
+@dataclass(frozen=True)
+class _ClienteGithub:
+    """Adaptador sobre el cliente HTTP COMPARTIDO (E-24, Política 2 de LAS CUATRO DEL
+    RENDIMIENTO): `preparar.py`/`entrega.py` reciben algo con `.get`/`.post`/`.patch` que
+    aceptan la ruta RELATIVA de la API (`/repos/...`) -- así los siguen probando con un
+    MockTransport propio, con `base_url` fijo, sin tocar esos módulos. Este adaptador no
+    construye un `httpx.AsyncClient`: le agrega a cada pedido la base, el token (nunca
+    guardado en el cliente compartido) y un timeout -- el cliente compartido en sí no
+    lleva ninguno de los dos."""
+    token: str
+
+    async def _pedir(self, metodo: str, ruta: str, **kwargs):
+        cabeceras = {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json"}
+        return await getattr(obtener_cliente_http(), metodo)(f"{API_GITHUB}{ruta}", headers=cabeceras,
+                                                             timeout=30, **kwargs)
+
+    async def get(self, ruta: str, **kwargs):
+        return await self._pedir("get", ruta, **kwargs)
+
+    async def post(self, ruta: str, **kwargs):
+        return await self._pedir("post", ruta, **kwargs)
+
+    async def patch(self, ruta: str, **kwargs):
+        return await self._pedir("patch", ruta, **kwargs)
 
 
 def informe_c5(entrega, faceta_auditor: str | None) -> str:
@@ -361,8 +382,7 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
         raiz = Path(env["JAX_EJECUTOR_MISIONES"])
         base = await P.rama_guardada(raiz, turno.mision_id)
         if base is None:  # turno 1: todavía no hay preparado.json con la base guardada
-            async with _cliente_github(token) as cliente:
-                base = await P.rama_por_omision(cliente, turno.repo["owner_repo"])
+            base = await P.rama_por_omision(_ClienteGithub(token), turno.repo["owner_repo"])
         clon = await P.preparar(P.Repo(turno.repo["owner_repo"], tuple(turno.repo["comandos_prueba"])),
                                 mision_id=turno.mision_id, raiz=raiz,
                                 rama_por_omision=base, token=token, autor=cfg.autor,
@@ -377,14 +397,13 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
             # MINOR-1: la entrega la vuelve a leer justo antes de empujar y antes del PR. `leer_pausa`
             # ya falla cerrado (ilegible = puesta).
             return bool((await asyncio.to_thread(leer_pausa, ctx.pausa))["puesta"])
-        async with _cliente_github(token) as cliente:
-            return await MC.entregar(clon, mision_id=turno.mision_id, repo=turno.repo["owner_repo"],
-                                     revision_legible=auditor_legible,
-                                     informe=informe_c5(entrega, estado.get("faceta_auditor")), token=token,
-                                     cliente=cliente, tope_bytes=cfg.tope_bytes,
-                                     tope_total_bytes=cfg.tope_total_bytes, pausa_puesta=pausa_ahora,
-                                     modelo=env["JAX_PROXY_CARRIL_MODELO"], autor=cfg.autor,
-                                     upload_pack=E.upload_pack_por_ssh(ctx.cuenta))
+        return await MC.entregar(clon, mision_id=turno.mision_id, repo=turno.repo["owner_repo"],
+                                 revision_legible=auditor_legible,
+                                 informe=informe_c5(entrega, estado.get("faceta_auditor")), token=token,
+                                 cliente=_ClienteGithub(token), tope_bytes=cfg.tope_bytes,
+                                 tope_total_bytes=cfg.tope_total_bytes, pausa_puesta=pausa_ahora,
+                                 modelo=env["JAX_PROXY_CARRIL_MODELO"], autor=cfg.autor,
+                                 upload_pack=E.upload_pack_por_ssh(ctx.cuenta))
 
     return M.Dependencias(contexto=contexto, hosts=hosts, exigir=arranque.exigir_contratos,
                           tamano_registro=tamano_registro, abrir_vigia=vigia, latido_fresco=latido,

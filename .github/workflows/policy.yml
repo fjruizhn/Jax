@@ -4643,8 +4643,23 @@ jobs:
           #   tests/test_ejecutor_mision_servicio.py 40 -> 41 (+1: MINOR-5 -- el turno >= 2 usa
           #   la `rama_por_omision` de `preparado.json`, no un GET fresco a GitHub). Los 45
           #   skipped no cambian. Medido archivo por archivo local: manda el runner.
-          grep -qE "^3142 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3142 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 3142 -> 3217 el 2026-09-28 (PR #292, run 36463348792 del propio runner: "1 failed,
+          #   3216 passed, 45 skipped" antes de este cambio -- el piso de arriba ya estaba
+          #   corrido de largo, sin que se notara porque el job nunca llegaba a este grep: el
+          #   único rojo era `test_ningun_modulo_de_servicio_construye_su_propio_cliente`,
+          #   que aborta el step por pipefail antes de esta línea). Arreglo: `_cliente_github`
+          #   en jax/ejecutor/mision_servicio.py construía su propio httpx.AsyncClient para la
+          #   API de GitHub en vez de usar jax/core/cliente_http_compartido.py -- ahora pasa por
+          #   `obtener_cliente_http()` (un adaptador `_ClienteGithub` agrega la base absoluta,
+          #   el token por-pedido nunca guardado en el cliente compartido, y timeout=30 por
+          #   pedido); `preparar.py`/`entrega.py` no se tocaron, siguen recibiendo `cliente`
+          #   inyectable con rutas relativas (los tests siguen armando su propio MockTransport
+          #   con `base_url`). +1 pura: el test que ya vigilaba esto pasa a contar entre las
+          #   corridas. Los otros +74 son tests de este mismo PR que el runner ya venía contando
+          #   y que este piso no reflejaba. Los 45 skipped no cambian. Manda el runner (número
+          #   real del run citado, no remedido localmente aquí).
+          grep -qE "^3217 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3217 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
