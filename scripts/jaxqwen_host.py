@@ -6,7 +6,6 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -45,9 +44,7 @@ def _config(path: Path) -> dict:
 
 async def _run(config: Path):
     value = _config(config)
-    credentials_dir = os.environ.get("CREDENTIALS_DIRECTORY")
-    if not credentials_dir or not Path(credentials_dir).is_absolute(): raise RuntimeError("systemd trust credential is unavailable")
-    host = JaxQwenHost(**value, trust_key_file=Path(credentials_dir) / "jaxqwen-trust.key")
+    host = JaxQwenHost(**value)
     path = await host.start()
     logging.getLogger(__name__).info("jaxqwen host ready socket=%s dispatch_enabled=%s", path, value["dispatch_enabled"])
     try:

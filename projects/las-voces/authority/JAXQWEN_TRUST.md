@@ -45,11 +45,23 @@ cannot supply either callback or verifier.
 
 The secret is provisioned by the host operator at
 `/etc/jax/secrets/jaxqwen-trust.key`, root-owned mode `0600`, and delivered to
-the service only with systemd `LoadCredential`. It is not committed, placed in
-the environment, included in model prompts, or logged. The host configuration
-and trust/replay ledgers are also outside Git. A missing or malformed replay
-ledger prevents startup or authentication; it is never recreated over prior
-state.
+the service only with systemd `LoadCredential`. The host reads only the fixed
+`jaxqwen-trust.key` entry under systemd's fixed
+`/run/credentials/jaxqwen.service` directory; neither host JSON nor a request
+can select another credential path. The delivered file is expected to be a
+regular, single-link `root:root` file with mode `0440`, as observed from the
+repository's systemd `LoadCredential` deployment. The service must be able to
+open and read it through systemd's credential plumbing. The root-owned
+credential directory and its parents must not be group- or world-writable;
+the file itself must not be writable by any group or other user. The host opens
+the fixed basename relative to the already-open directory without following
+symlinks, checks file identity and metadata before reading, and rejects
+missing, non-regular, insecurely permissioned, empty, short, or oversized
+credentials. Ownership by `jaxqwen` is neither required nor accepted. The
+secret is not committed, placed in an environment variable, included in model
+prompts, or logged. The host configuration and trust/replay ledgers are also
+outside Git. A missing or malformed replay ledger prevents startup or
+authentication; it is never recreated over prior state.
 
 To rotate the HMAC key, an operator stops the unit, atomically replaces the
 root-owned `0600` key with a newly generated 32-byte value, and starts the unit
