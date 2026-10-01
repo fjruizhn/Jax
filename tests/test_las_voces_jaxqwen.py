@@ -103,6 +103,42 @@ def test_current_lease_mutex_is_held_through_effect_and_release_invalidates_toke
         item.tool(mission_id, "write_file", credential=token, path="late.txt", content="denied")
 
 
+@pytest.mark.parametrize("substitution", [
+    "ack", "lease", "canonical_hash", "repository", "worktree", "canonical_head",
+])
+def test_post_issue_state_substitution_rejects_credential_before_effect(fixture, substitution):
+    """A token issued for a valid mission cannot outlive any authority binding."""
+    item, key = make(fixture)
+    mission_id = item.start(idempotency_key=key).mission_id
+    assert mission_id
+    token = credential(item, mission_id)
+
+    if substitution == "ack":
+        path = item.dispatch_dir / "acks.ndjson"
+        ack = json.loads(path.read_text().strip())
+        ack["canonical_owner"] = "attacker"
+        path.write_text(json.dumps(ack) + "\n")
+    elif substitution == "lease":
+        with (item.handoff_state_dir / "task-leases.ndjson").open("a") as out:
+            out.write(json.dumps({"event": "RELEASED", "lease_id": item._mission(mission_id).lease_id}) + "\n")
+    elif substitution == "canonical_hash":
+        project = item.canonical_root / "projects/las-voces/project.json"
+        project.write_text(project.read_text() + "\n", encoding="utf-8")
+    elif substitution == "repository":
+        git(item.root, "remote", "set-url", "origin", "https://github.com/attacker/Other.git")
+    elif substitution == "worktree":
+        path = item.dispatch_dir / "acks.ndjson"
+        ack = json.loads(path.read_text().strip())
+        ack["worktree"] = "/tmp/attacker-worktree"
+        path.write_text(json.dumps(ack) + "\n")
+    else:
+        git(item.canonical_root, "commit", "--allow-empty", "-qm", "stale canonical source")
+
+    with pytest.raises(capability.CapabilityError):
+        item.tool(mission_id, "write_file", credential=token, path="must-not-exist.txt", content="denied")
+    assert not (Path(item._mission(mission_id).workspace) / "must-not-exist.txt").exists()
+
+
 @pytest.mark.parametrize("mutate", [
     lambda ack: ack.update({"canonical_owner": "attacker"}),
     lambda ack: ack.update({"branch": "evil"}),

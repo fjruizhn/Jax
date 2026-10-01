@@ -25,7 +25,106 @@ from typing import Any
 
 
 _MAX_FRAME = 8192
+_SYSTEMD_CREDENTIALS_DIRECTORY = "/run/credentials/jaxqwen.service"
+_TRUST_CREDENTIAL_NAME = "jaxqwen-trust.key"
+_TRUST_CREDENTIAL_MODE_ROOT = 0o440
+_TRUST_CREDENTIAL_MODE_SERVICE = 0o400
+_MAX_TRUST_KEY_BYTES = 4096
 log = logging.getLogger("las_voces.jaxqwen_host")
+
+
+def _validate_credential_directory(st) -> None:
+    """Require a root-controlled systemd credential directory."""
+    if (not stat.S_ISDIR(st.st_mode) or st.st_uid != 0
+            or stat.S_IMODE(st.st_mode) & 0o022):
+        raise ValueError("untrusted systemd credential directory")
+
+
+def _validate_trust_credential(st, *, service_uid: int | None = None,
+                               credential_mount_read_only: bool = False) -> None:
+    """Accept only the observed root copy or systemd's per-service copy."""
+    mode = stat.S_IMODE(st.st_mode)
+    root_owned = (st.st_uid == 0 and st.st_gid == 0
+                  and mode == _TRUST_CREDENTIAL_MODE_ROOT)
+    service_owned = (credential_mount_read_only and service_uid is not None and st.st_uid == service_uid
+                     and mode == _TRUST_CREDENTIAL_MODE_SERVICE)
+    if not stat.S_ISREG(st.st_mode) or not (root_owned or service_owned) or st.st_nlink != 1:
+        raise ValueError("untrusted systemd trust credential")
+
+
+def _fstat_trust_credential(fd: int):
+    return os.fstat(fd)
+
+
+def _read_trust_credential(directory_fd: int) -> bytes:
+    """Read the fixed credential name relative to an already-open trusted dir."""
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    fd = os.open(_TRUST_CREDENTIAL_NAME, flags, dir_fd=directory_fd)
+    try:
+        before = _fstat_trust_credential(fd)
+        mount_flags = os.fstatvfs(fd).f_flag
+        credential_mount_read_only = bool(mount_flags & os.ST_RDONLY)
+        _validate_trust_credential(before, service_uid=os.geteuid(),
+                                   credential_mount_read_only=credential_mount_read_only)
+        if not 32 <= before.st_size <= _MAX_TRUST_KEY_BYTES:
+            raise ValueError("invalid systemd trust credential length")
+        chunks = []
+        remaining = _MAX_TRUST_KEY_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(remaining, 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        secret = b"".join(chunks)
+        after = _fstat_trust_credential(fd)
+        stable = ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_nlink", "st_size")
+        if any(getattr(before, key) != getattr(after, key) for key in stable):
+            raise ValueError("systemd trust credential changed while reading")
+        if len(secret) != before.st_size or not 32 <= len(secret) <= _MAX_TRUST_KEY_BYTES:
+            raise ValueError("invalid systemd trust credential length")
+        return secret
+    finally:
+        os.close(fd)
+
+
+def _open_systemd_credential_directory(root_fd: int) -> int:
+    """Walk the fixed system-unit path without following links or trusting parents."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    fd = os.dup(root_fd)
+    try:
+        _validate_credential_directory(os.fstat(fd))
+        for component in ("run", "credentials", "jaxqwen.service"):
+            child = os.open(component, directory_flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            _validate_credential_directory(os.fstat(fd))
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _systemd_trust_key() -> bytes:
+    """Read only the fixed LoadCredential entry for this systemd unit.
+
+    CREDENTIALS_DIRECTORY is systemd's credential locator, not a secret or a
+    caller-supplied file path. The fixed unit directory and fixed basename
+    prevent selecting an arbitrary readable file.
+    """
+    if os.environ.get("CREDENTIALS_DIRECTORY") != _SYSTEMD_CREDENTIALS_DIRECTORY:
+        raise ValueError("systemd trust credential directory is unavailable")
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    root_fd = os.open("/", directory_flags)
+    fd = None
+    try:
+        fd = _open_systemd_credential_directory(root_fd)
+        return _read_trust_credential(fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(root_fd)
 
 
 def _load(name: str, path: Path):
@@ -51,7 +150,7 @@ def _pairs(pairs):
 class JaxQwenHost:
     """Dedicated local service. Construction binds every verifier/config value."""
     def __init__(self, *, root: Path, canonical_root: Path, handoff_state_dir: Path, source_worktree_root: Path, workspace_root: Path,
-                 mission_state_dir: Path, trust_state_dir: Path, trust_key_file: Path,
+                 mission_state_dir: Path, trust_state_dir: Path,
                  dispatch_socket: Path, dispatcher_uid: int, dispatch_gid: int,
                  model_socket: Path, model_socket_uid: int, model_socket_gid: int,
                  model: str, max_output_tokens: int = 4096,
@@ -67,12 +166,7 @@ class JaxQwenHost:
         if dispatcher_uid in {0, os.geteuid()} or dispatch_gid < 1:
             raise ValueError("dispatcher must be a separate dedicated service identity")
         if not dispatch_socket.is_absolute() or not model_socket.is_absolute(): raise ValueError("socket paths must be absolute")
-        st = trust_key_file.lstat()
-        if (not stat.S_ISREG(st.st_mode) or trust_key_file.is_symlink()
-                or st.st_uid != os.geteuid() or st.st_mode & 0o077):
-            raise ValueError("host trust key must be a protected regular systemd credential")
-        secret = trust_key_file.read_bytes()
-        if len(secret) < 32: raise ValueError("host trust key is too short")
+        secret = _systemd_trust_key()
         # Execute only the installed/read-only canonical host implementation;
         # the dispatcher checkout is data and ACK state, never service code.
         authority = self.canonical_root / "projects/las-voces/authority"
