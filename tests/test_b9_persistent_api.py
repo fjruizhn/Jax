@@ -1,3 +1,6 @@
+import asyncio
+import os
+import uuid
 from dataclasses import replace
 
 import pytest
@@ -7,6 +10,106 @@ from jax.memory.b9 import (
     MutationAuthorizationContext, MutationAuthorizationRequest, ObjectKind, ScopeContext, ScopeDenied, Visibility, _derive_projection,
 )
 from jax.memory.b9_mariadb import MariaDBB9Store, MariaDBB9Reader, PersistentMemoryAPI
+
+
+async def _race_pool(*, dict_cursor=False):
+    """A real multi-connection pool for the M1 delete/adoption interleave.
+
+    Unlike `_b9_ci_test_pool`, this uses persistent tables in the disposable
+    suffixed CI database because TEMPORARY tables are connection-local and
+    cannot prove a race. It is never reachable without the explicit test DB
+    guard below.
+    """
+    import aiomysql
+    from base_de_test import exigir_base_de_test
+    if not os.getenv("JAX_DB_HOST"):
+        pytest.skip("requires the disposable memory-b9 MariaDB job")
+    database=exigir_base_de_test()
+    return await aiomysql.create_pool(
+        host=os.environ["JAX_DB_HOST"], port=int(os.getenv("JAX_DB_PORT", "3306")),
+        user=os.getenv("JAX_DB_USER", "root"), password=os.getenv("JAX_DB_PASSWORD", ""),
+        db=database, minsize=1, maxsize=4,
+        cursorclass=aiomysql.DictCursor if dict_cursor else aiomysql.Cursor,
+        autocommit=False, connect_timeout=5,
+    )
+
+
+async def _ensure_race_b9_tables(pool):
+    """Create only the persistent B9 tables `_write` needs if CI has not
+    already applied them. These names live solely in the disposable test DB."""
+    ddls=(
+        "CREATE TABLE IF NOT EXISTS memory_objects (memory_id CHAR(36) PRIMARY KEY, object_kind VARCHAR(32) NOT NULL, tenant_id VARCHAR(128) NOT NULL, created_at DATETIME(6) NOT NULL, legacy_source_type VARCHAR(64), legacy_source_namespace VARCHAR(255), legacy_source_key VARCHAR(255))",
+        "CREATE TABLE IF NOT EXISTS memory_revisions (revision_id CHAR(36) PRIMARY KEY, memory_id CHAR(36) NOT NULL, content_digest CHAR(71) NOT NULL, visibility VARCHAR(32) NOT NULL, user_id VARCHAR(128), project_id VARCHAR(128), lifecycle_state VARCHAR(32) NOT NULL, created_at DATETIME(6) NOT NULL, payload LONGBLOB, provenance_status VARCHAR(64) NOT NULL, prior_revision_id CHAR(36), tenant_id VARCHAR(128))",
+        "CREATE TABLE IF NOT EXISTS memory_revision_payloads (revision_id CHAR(36) PRIMARY KEY, payload LONGBLOB, purged_at DATETIME(6), purge_reason VARCHAR(255))",
+        "CREATE TABLE IF NOT EXISTS memory_provenance (provenance_id CHAR(36) PRIMARY KEY, revision_id CHAR(36) NOT NULL, source_revisions JSON, transformation_id VARCHAR(128) NOT NULL, transformation_version VARCHAR(64) NOT NULL, actor_principal VARCHAR(255) NOT NULL, actor_type VARCHAR(64) NOT NULL, subject_user_id VARCHAR(128), provider VARCHAR(128), model VARCHAR(255), created_at DATETIME(6) NOT NULL, limitations TEXT)",
+        "CREATE TABLE IF NOT EXISTS memory_events (event_id CHAR(36) PRIMARY KEY, memory_id CHAR(36) NOT NULL, revision_id CHAR(36), event_kind VARCHAR(32) NOT NULL, actor_principal VARCHAR(255) NOT NULL, subject_user_id VARCHAR(128), authority_source VARCHAR(255) NOT NULL, occurred_at DATETIME(6) NOT NULL, details JSON, compensates_event_id CHAR(36), actor_type VARCHAR(64), delegation VARCHAR(255), calling_component VARCHAR(255), request_id VARCHAR(255), trace_id VARCHAR(255))",
+        "CREATE TABLE IF NOT EXISTS memory_projections (memory_id CHAR(36) PRIMARY KEY, current_revision_id CHAR(36), current_lifecycle_state VARCHAR(32), current_verification_state BOOLEAN NOT NULL, canonical_history_digest CHAR(71) NOT NULL, reconciliation_required BOOLEAN NOT NULL DEFAULT FALSE)",
+        "CREATE TABLE IF NOT EXISTS memory_legacy_bindings (tenant_id VARCHAR(128) NOT NULL, legacy_source_type VARCHAR(64) NOT NULL, legacy_source_namespace VARCHAR(255) NOT NULL, legacy_source_key VARCHAR(255) NOT NULL, memory_id CHAR(36) NOT NULL, binding_state VARCHAR(32) NOT NULL, created_at DATETIME(6) NOT NULL, PRIMARY KEY (tenant_id, legacy_source_type, legacy_source_namespace, legacy_source_key))",
+    )
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            for ddl in ddls:
+                await cur.execute(ddl)
+        await conn.commit()
+
+
+async def _ensure_race_legacy_source_tables(pool):
+    """Bootstrap only the disposable test DB's legacy source prerequisites."""
+    ddls=(
+        "CREATE TABLE IF NOT EXISTS jax_tenants (tenant_id INT PRIMARY KEY, name VARCHAR(100) NOT NULL, plan VARCHAR(20), status VARCHAR(20), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS jax_users (user_id INT PRIMARY KEY, tenant_id INT NOT NULL, email VARCHAR(320) NOT NULL UNIQUE, password_hash VARCHAR(255) NOT NULL, role VARCHAR(20), status VARCHAR(20), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS facts (id BIGINT AUTO_INCREMENT PRIMARY KEY, fact_uuid CHAR(36) NOT NULL, fact_text TEXT NOT NULL, fact_type VARCHAR(64), confidence DOUBLE, is_verified BOOLEAN, user_id INT NOT NULL, project_id VARCHAR(128), source_message_id BIGINT, source_facet VARCHAR(128), source_fact_ids JSON, superseded_by BIGINT, superseded_at DATETIME, superseded_by_user INT, expires_at DATETIME, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+    )
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            for ddl in ddls:
+                await cur.execute(ddl)
+            await cur.execute("INSERT INTO jax_tenants (tenant_id,name,plan,status) VALUES (990330001,'F2-P race tenant','test','active') ON DUPLICATE KEY UPDATE tenant_id=tenant_id")
+            await cur.execute("INSERT INTO jax_users (user_id,tenant_id,email,password_hash,role,status) VALUES (990330001,990330001,'f2p-race@example.invalid','test','operator','ACTIVE') ON DUPLICATE KEY UPDATE tenant_id=VALUES(tenant_id),status='ACTIVE'")
+        await conn.commit()
+
+
+class _DeleteLockCursor:
+    """Signals only after the real delete cursor has locked its fact row."""
+    def __init__(self, cursor, locked, release):
+        self._cursor, self._locked, self._release = cursor, locked, release
+        self._fact_lock_select = False
+    async def __aenter__(self):
+        await self._cursor.__aenter__()
+        return self
+    async def __aexit__(self, *args):
+        return await self._cursor.__aexit__(*args)
+    async def execute(self, sql, args=()):
+        self._fact_lock_select = "FROM facts f JOIN jax_users" in sql and "FOR UPDATE" in sql
+        return await self._cursor.execute(sql, args)
+    async def fetchone(self):
+        row=await self._cursor.fetchone()
+        if self._fact_lock_select:
+            self._fact_lock_select=False
+            self._locked.set()
+            await self._release.wait()
+        return row
+    @property
+    def rowcount(self): return self._cursor.rowcount
+
+
+class _DeleteLockConn:
+    def __init__(self, conn, locked, release): self._conn, self._locked, self._release=conn, locked, release
+    async def begin(self): return await self._conn.begin()
+    async def commit(self): return await self._conn.commit()
+    async def rollback(self): return await self._conn.rollback()
+    def cursor(self): return _DeleteLockCursor(self._conn.cursor(), self._locked, self._release)
+
+
+class _DeleteLockAcquire:
+    def __init__(self, acquire, locked, release): self._acquire, self._locked, self._release=acquire, locked, release
+    async def __aenter__(self): return _DeleteLockConn(await self._acquire.__aenter__(), self._locked, self._release)
+    async def __aexit__(self, *args): return await self._acquire.__aexit__(*args)
+
+
+class _DeleteLockPool:
+    def __init__(self, pool, locked, release): self._pool, self._locked, self._release=pool, locked, release
+    def acquire(self): return _DeleteLockAcquire(self._pool.acquire(), self._locked, self._release)
 
 
 class Cursor:
@@ -407,6 +510,133 @@ async def _seed_project_membership(pool):
                 await cur.execute("INSERT INTO jax_project_membership VALUES (%s,%s,%s,%s,%s,'ACTIVE')",
                                   ("membership-"+project,project,"tenant-1","user-1",role))
         await conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_m1_real_mariadb_delete_and_adoption_serialise_on_legacy_fact():
+    """M1 race regression against two real transactions, never a mock.
+
+    The two orderings are forced at the same locks used in production:
+    `MemoryDB.delete_fact` pauses after its locked source read, while
+    `PersistentMemoryAPI.import_legacy_memory` pauses in `_write` after it
+    has locked the source. The final state can be delete-without-binding or
+    active-binding-with-source, never an orphaned ACTIVE binding.
+    """
+    from jax.memory.db import MemoryDB
+
+    raw_pool=await _race_pool()
+    api_pool=await _race_pool(dict_cursor=True)
+    created_memory_ids=[]
+    fact_ids=[]
+    try:
+        await _ensure_race_b9_tables(api_pool)
+        await _ensure_race_legacy_source_tables(api_pool)
+        async with api_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT user_id,tenant_id FROM jax_users WHERE user_id=990330001 AND status='ACTIVE'")
+                owner=await cur.fetchone()
+        if not owner:
+            pytest.skip("test database has no active authoritative legacy owner")
+        user_id, tenant_id=str(owner["user_id"]), str(owner["tenant_id"])
+
+        async def create_fact(label):
+            async with api_pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "INSERT INTO facts (fact_uuid,fact_text,fact_type,confidence,is_verified,user_id) VALUES (UUID(),%s,'technical',0.1,FALSE,%s)",
+                        (label, user_id),
+                    )
+                    fid=cur.lastrowid
+                await conn.commit()
+                fact_ids.append(fid)
+                return fid
+
+        def request():
+            scope=ScopeContext(f"user:{user_id}", "USER", user_id, tenant_id)
+            return MutationAuthorizationRequest(scope, "IMPORT_LEGACY", Visibility.SYSTEM_INTERNAL)
+
+        resolver=TxResolver(roles={"memory_admin"}, caps={"memory:admin"})
+        api=PersistentMemoryAPI(MariaDBB9Store(api_pool), resolver)
+        deleter=MemoryDB()
+
+        # Delete wins: the importer waits on the real source-row lock, then
+        # sees no source and cannot create a binding.
+        delete_label="M1 race delete first " + uuid.uuid4().hex
+        delete_first=await create_fact(delete_label)
+        delete_locked, release_delete=asyncio.Event(), asyncio.Event()
+        async def after_delete_lock():
+            delete_locked.set()
+            await release_delete.wait()
+        deleter.pool=_DeleteLockPool(raw_pool, delete_locked, release_delete)
+        delete_task=asyncio.create_task(deleter.delete_fact(delete_first))
+        await asyncio.wait_for(delete_locked.wait(), timeout=5)
+        import_task=asyncio.create_task(api.import_legacy_memory(
+            request(), "facts", "legacy", str(delete_first), ObjectKind.FACT,
+            delete_label,
+        ))
+        release_delete.set()
+        assert await asyncio.wait_for(delete_task, timeout=5) is True
+        with pytest.raises(ScopeDenied):
+            await asyncio.wait_for(import_task, timeout=5)
+        async with api_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT COUNT(*) AS n FROM memory_legacy_bindings "
+                    "WHERE tenant_id=%s AND legacy_source_type='facts' "
+                    "AND legacy_source_namespace='legacy' AND legacy_source_key=%s",
+                    (tenant_id, str(delete_first)),
+                )
+                assert (await cur.fetchone())["n"] == 0
+
+        # Adoption wins: `_write` is reached only while import still owns the
+        # locked source row. Delete therefore sees ACTIVE binding after import
+        # commits and fails closed.
+        adopt_first=await create_fact("M1 race adopt first " + uuid.uuid4().hex)
+        deleter.pool=raw_pool
+        async with api_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT fact_text FROM facts WHERE id=%s", (adopt_first,))
+                source=await cur.fetchone()
+        write_started, release_write=asyncio.Event(), asyncio.Event()
+        real_write=api._write
+        async def paused_write(*args, **kwargs):
+            write_started.set()
+            await release_write.wait()
+            return await real_write(*args, **kwargs)
+        api._write=paused_write
+        adopt_task=asyncio.create_task(api.import_legacy_memory(
+            request(), "facts", "legacy", str(adopt_first), ObjectKind.FACT, source["fact_text"],
+        ))
+        await asyncio.wait_for(write_started.wait(), timeout=5)
+        blocked_delete=asyncio.create_task(deleter.delete_fact(adopt_first))
+        release_write.set()
+        memory_id=await asyncio.wait_for(adopt_task, timeout=5)
+        created_memory_ids.append(memory_id)
+        assert await asyncio.wait_for(blocked_delete, timeout=5) is None
+        async with api_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT COUNT(*) AS n FROM facts WHERE id=%s", (adopt_first,))
+                assert (await cur.fetchone())["n"] == 1
+                await cur.execute("SELECT binding_state FROM memory_legacy_bindings WHERE tenant_id=%s AND legacy_source_type='facts' AND legacy_source_namespace='legacy' AND legacy_source_key=%s", (tenant_id, str(adopt_first)))
+                assert (await cur.fetchone())["binding_state"] == "ACTIVE"
+    finally:
+        async with api_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                for memory_id in created_memory_ids:
+                    await cur.execute("DELETE FROM memory_revision_payloads WHERE revision_id IN (SELECT revision_id FROM memory_revisions WHERE memory_id=%s)", (memory_id,))
+                    await cur.execute("DELETE FROM memory_provenance WHERE revision_id IN (SELECT revision_id FROM memory_revisions WHERE memory_id=%s)", (memory_id,))
+                    await cur.execute("DELETE FROM memory_events WHERE memory_id=%s", (memory_id,))
+                    await cur.execute("DELETE FROM memory_projections WHERE memory_id=%s", (memory_id,))
+                    await cur.execute("DELETE FROM memory_revisions WHERE memory_id=%s", (memory_id,))
+                    await cur.execute("DELETE FROM memory_legacy_bindings WHERE memory_id=%s", (memory_id,))
+                    await cur.execute("DELETE FROM memory_objects WHERE memory_id=%s", (memory_id,))
+                if fact_ids:
+                    await cur.execute("DELETE FROM facts WHERE id IN (" + ",".join(["%s"] * len(fact_ids)) + ")", fact_ids)
+                await cur.execute("DELETE FROM jax_users WHERE user_id=990330001")
+                await cur.execute("DELETE FROM jax_tenants WHERE tenant_id=990330001")
+            await conn.commit()
+        raw_pool.close(); api_pool.close()
+        await raw_pool.wait_closed(); await api_pool.wait_closed()
 
 
 @pytest.mark.asyncio

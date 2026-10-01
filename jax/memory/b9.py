@@ -617,7 +617,11 @@ class MemoryAPI:
                 self._canonical_for_mutation(memory_id)
                 obj=s.objects[memory_id]; revision=s.revisions[memory_id][-1]
                 self._assert_read_scope(scope,obj,revision)
-                if obj.kind not in SYNTHESIS_SOURCE_KINDS or revision.lifecycle not in {Lifecycle.ACTIVE,Lifecycle.VERIFIED} or revision.payload is None:
+                # Keep the reference contract identical to the durable
+                # adapter: derived material may only use a currently human
+                # verified source. ACTIVE is retrievable history, never a
+                # trusted synthesis input.
+                if obj.kind not in SYNTHESIS_SOURCE_KINDS or revision.lifecycle is not Lifecycle.VERIFIED or revision.payload is None:
                     raise ScopeDenied("source revision is ineligible for synthesis")
                 sources.append(revision)
             effective_scope={(r.visibility,r.user_id,r.project_id) for r in sources}
@@ -699,7 +703,7 @@ class MemoryAPI:
                 if source_memory is None:
                     raise ScopeDenied("synthesis source is unavailable")
                 source=self._store.revisions[source_memory][-1]
-                if source.revision_id != source_id or source.lifecycle not in {Lifecycle.ACTIVE,Lifecycle.VERIFIED} or source.payload is None:
+                if source.revision_id != source_id or source.lifecycle is not Lifecycle.VERIFIED or source.payload is None:
                     raise ScopeDenied("synthesis source is no longer eligible")
         return MemoryEnvelope(obj,rev,provenance,tuple(references),{})
 

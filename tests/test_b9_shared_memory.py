@@ -137,6 +137,7 @@ def test_projection_mismatch_requires_reconciliation():
 
 def test_synthesis_is_unverified_and_not_recursive():
     a=api(); first=a.create(scope(),ObjectKind.FACT,"x",Visibility.USER_PRIVATE,user_id="u1")
+    a.verify(scope(),first,method="human")
     derived=a.synthesize(scope(),[first],"summary",provider="p",model="m",transformation_version="1")
     assert a._store.objects[derived].kind is ObjectKind.SYNTHESIS
     assert a._store.revisions[derived][-1].lifecycle is Lifecycle.ACTIVE
@@ -166,6 +167,7 @@ def test_model_audit_status_is_orthogonal_to_lifecycle_and_authority():
 
 def test_derived_read_fails_closed_when_exact_source_revision_changes():
     a=api(); source=a.create(scope(),ObjectKind.FACT,"x",Visibility.USER_PRIVATE,user_id="u1")
+    a.verify(scope(),source,method="human")
     derived=a.synthesize(scope(),[source],"summary",provider="p",model="m",transformation_version="1")
     a.revise(scope(),source,"corrected",user_id="u1")
     assert derived not in {entry.identity.memory_id for entry in a.retrieve(scope())}
@@ -174,6 +176,7 @@ def test_derived_read_fails_closed_when_exact_source_revision_changes():
 
 def test_aud001_project_synthesis_stays_project_scoped():
     a=api(); source=a.create(scope(),ObjectKind.FACT,"p1",Visibility.PROJECT_SHARED,project_id="p1")
+    a.verify(scope(),source,method="human")
     derived=a.synthesize(scope(),[source],"summary",provider="p",model="m",transformation_version="1")
     assert derived in {e.identity.memory_id for e in a.retrieve(scope())}
     assert derived not in {e.identity.memory_id for e in a.retrieve(scope(project="p2"))}
@@ -183,6 +186,9 @@ def test_aud001_project_synthesis_stays_project_scoped():
 def test_aud006_synthesis_rejects_ineligible_or_mixed_scope_sources():
     a=api(); active=a.create(scope(),ObjectKind.FACT,"p1",Visibility.PROJECT_SHARED,project_id="p1")
     other=a.create(scope(),ObjectKind.FACT,"tenant",Visibility.TENANT_SHARED)
+    with pytest.raises(ScopeDenied): a.synthesize(scope(),[active],"unverified",provider="p",model="m",transformation_version="1")
+    a.verify(scope(),active,method="human")
+    a.verify(scope(),other,method="human")
     with pytest.raises(ScopeDenied): a.synthesize(scope(),[active,other],"mixed",provider="p",model="m",transformation_version="1")
     a.expire(scope(),active,reason="ttl")
     with pytest.raises(ScopeDenied): a.synthesize(scope(),[active],"expired",provider="p",model="m",transformation_version="1")

@@ -22,6 +22,39 @@ def test_extraction_rejects_invented_or_unlocked_source_turns():
     with pytest.raises(ValueError,match='outside locked input'):
         normalize_extraction(bad,max_items=2,max_text_chars=100,allowed_turns=allowed)
 
+
+@pytest.mark.parametrize("message_id", ["0123", " 123 ", "١٢٣", "-123", "999999999999999999999"])
+def test_extraction_source_ids_have_one_canonical_locked_representation(message_id):
+    """Only the decimal database identity may cite this locked turn."""
+    from jax.memory.extraction_jobs import normalize_extraction
+    allowed={("123", 7, "user")}
+    data={"facts":[{"text":"known", "source_turns":[{"message_id":message_id,"turn_number":7,"role":"user"}]}]}
+    with pytest.raises(ValueError, match="outside locked input"):
+        normalize_extraction(data, max_items=1, max_text_chars=100, allowed_turns=allowed)
+
+
+def test_extraction_accepts_integer_and_canonical_string_database_id_only():
+    from jax.memory.extraction_jobs import normalize_extraction
+    allowed={("123", 7, "user")}
+    for raw_id in (123, "123"):
+        data={"facts":[{"text":"known", "source_turns":[{"message_id":raw_id,"turn_number":7,"role":"user"}]}]}
+        item=normalize_extraction(data, max_items=1, max_text_chars=100, allowed_turns=allowed)[0]
+        assert item["source_turns"] == [{"message_id":"123", "turn_number":7, "role":"user"}]
+
+
+def test_extraction_rejects_role_spoof_and_valid_turn_outside_chunk_allowlist():
+    from jax.memory.extraction_jobs import normalize_extraction
+    first=("123", 7, "user")
+    other_chunk=("124", 8, "assistant")
+    allowed={first}
+    for turn in (
+        {"message_id":"123", "turn_number":7, "role":"assistant"},
+        {"message_id":"124", "turn_number":8, "role":"assistant"},
+    ):
+        data={"facts":[{"text":"known", "source_turns":[turn]}]}
+        with pytest.raises(ValueError, match="outside locked input"):
+            normalize_extraction(data, max_items=1, max_text_chars=100, allowed_turns=allowed)
+
 def test_extraction_requires_structured_turn_provenance():
     from jax.memory.extraction_jobs import normalize_extraction
     with pytest.raises(ValueError,match='source_turns'):

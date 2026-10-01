@@ -16,6 +16,10 @@ later learning stage require separate governed authorization.
 
 - Extracted items retain exact locked source message IDs, turn numbers and
   author roles in provenance. The extraction transformation is `b9-worker-v3`.
+  This proves source identity and attribution only: the extractor chooses its
+  cited turns, and a valid `source_turns` set does not deterministically prove
+  exhaustive semantic support, `Lifecycle.VERIFIED`, `SOURCE_AUDITED`, or
+  current truth.
 - Only an authenticated `USER`, with the existing resolved authorization, can
   create `Lifecycle.VERIFIED`. Models, agents and services cannot verify.
 - Deduplication, merge, extraction and synthesis never verify. Derived content
