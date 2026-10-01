@@ -48,19 +48,22 @@ The secret is provisioned by the host operator at
 the service only with systemd `LoadCredential`. The host reads only the fixed
 `jaxqwen-trust.key` entry under systemd's fixed
 `/run/credentials/jaxqwen.service` directory; neither host JSON nor a request
-can select another credential path. The delivered file is expected to be a
-regular, single-link `root:root` file with mode `0440`, as observed from the
-repository's systemd `LoadCredential` deployment. The service must be able to
-open and read it through systemd's credential plumbing. The root-owned
-credential directory and its parents must not be group- or world-writable;
-the file itself must not be writable by any group or other user. The host opens
-the fixed basename relative to the already-open directory without following
-symlinks, checks file identity and metadata before reading, and rejects
-missing, non-regular, insecurely permissioned, empty, short, or oversized
-credentials. Ownership by `jaxqwen` is neither required nor accepted. The
-secret is not committed, placed in an environment variable, included in model
-prompts, or logged. The host configuration and trust/replay ledgers are also
-outside Git. A missing or malformed replay ledger prevents startup or
+can select another credential path. The delivered file must match one of two
+strict metadata forms: the deployed root-owned `root:root` mode `0440` copy,
+or systemd's per-service mode `0400` copy owned by the service UID on a verified
+read-only credential mount. Both must be regular single-link files, and the
+service must successfully open and read the file through systemd's credential
+plumbing. A service-owned file is accepted only at the fixed systemd path with
+the exact service UID, mode `0400`, and a read-only filesystem; ownership alone
+never authenticates an arbitrary path. The root-owned credential
+directory and its parents must not be group- or world-writable; the file itself
+must not be writable by any group or other user. The host opens the fixed
+basename relative to the already-open directory without following symlinks,
+checks file identity and metadata before reading, and rejects missing,
+non-regular, insecurely permissioned, empty, short, or oversized credentials.
+The secret is not committed, placed in an environment variable, included in
+model prompts, or logged. The host configuration and trust/replay ledgers are
+also outside Git. A missing or malformed replay ledger prevents startup or
 authentication; it is never recreated over prior state.
 
 To rotate the HMAC key, an operator stops the unit, atomically replaces the

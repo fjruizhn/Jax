@@ -27,7 +27,8 @@ from typing import Any
 _MAX_FRAME = 8192
 _SYSTEMD_CREDENTIALS_DIRECTORY = "/run/credentials/jaxqwen.service"
 _TRUST_CREDENTIAL_NAME = "jaxqwen-trust.key"
-_TRUST_CREDENTIAL_MODE = 0o440
+_TRUST_CREDENTIAL_MODE_ROOT = 0o440
+_TRUST_CREDENTIAL_MODE_SERVICE = 0o400
 _MAX_TRUST_KEY_BYTES = 4096
 log = logging.getLogger("las_voces.jaxqwen_host")
 
@@ -39,11 +40,15 @@ def _validate_credential_directory(st) -> None:
         raise ValueError("untrusted systemd credential directory")
 
 
-def _validate_trust_credential(st) -> None:
-    """Match the root:root 0440 file produced by the deployed LoadCredential."""
-    if (not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_gid != 0
-            or stat.S_IMODE(st.st_mode) != _TRUST_CREDENTIAL_MODE
-            or st.st_nlink != 1):
+def _validate_trust_credential(st, *, service_uid: int | None = None,
+                               credential_mount_read_only: bool = False) -> None:
+    """Accept only the observed root copy or systemd's per-service copy."""
+    mode = stat.S_IMODE(st.st_mode)
+    root_owned = (st.st_uid == 0 and st.st_gid == 0
+                  and mode == _TRUST_CREDENTIAL_MODE_ROOT)
+    service_owned = (credential_mount_read_only and service_uid is not None and st.st_uid == service_uid
+                     and mode == _TRUST_CREDENTIAL_MODE_SERVICE)
+    if not stat.S_ISREG(st.st_mode) or not (root_owned or service_owned) or st.st_nlink != 1:
         raise ValueError("untrusted systemd trust credential")
 
 
@@ -57,7 +62,10 @@ def _read_trust_credential(directory_fd: int) -> bytes:
     fd = os.open(_TRUST_CREDENTIAL_NAME, flags, dir_fd=directory_fd)
     try:
         before = _fstat_trust_credential(fd)
-        _validate_trust_credential(before)
+        mount_flags = os.fstatvfs(fd).f_flag
+        credential_mount_read_only = bool(mount_flags & os.ST_RDONLY)
+        _validate_trust_credential(before, service_uid=os.geteuid(),
+                                   credential_mount_read_only=credential_mount_read_only)
         if not 32 <= before.st_size <= _MAX_TRUST_KEY_BYTES:
             raise ValueError("invalid systemd trust credential length")
         chunks = []
@@ -80,6 +88,23 @@ def _read_trust_credential(directory_fd: int) -> bytes:
         os.close(fd)
 
 
+def _open_systemd_credential_directory(root_fd: int) -> int:
+    """Walk the fixed system-unit path without following links or trusting parents."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    fd = os.dup(root_fd)
+    try:
+        _validate_credential_directory(os.fstat(fd))
+        for component in ("run", "credentials", "jaxqwen.service"):
+            child = os.open(component, directory_flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            _validate_credential_directory(os.fstat(fd))
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def _systemd_trust_key() -> bytes:
     """Read only the fixed LoadCredential entry for this systemd unit.
 
@@ -91,17 +116,15 @@ def _systemd_trust_key() -> bytes:
         raise ValueError("systemd trust credential directory is unavailable")
 
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
-    fd = os.open("/", directory_flags)
+    root_fd = os.open("/", directory_flags)
+    fd = None
     try:
-        _validate_credential_directory(os.fstat(fd))
-        for component in ("run", "credentials", "jaxqwen.service"):
-            child = os.open(component, directory_flags, dir_fd=fd)
-            os.close(fd)
-            fd = child
-            _validate_credential_directory(os.fstat(fd))
+        fd = _open_systemd_credential_directory(root_fd)
         return _read_trust_credential(fd)
     finally:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
+        os.close(root_fd)
 
 
 def _load(name: str, path: Path):
