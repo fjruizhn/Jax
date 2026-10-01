@@ -159,6 +159,11 @@ QUE NO es memorable (IGNORALO, no lo extraigas):
 
 """ + FORBIDDEN_CATEGORIES_BLOCK + """
 
+PROCEDENCIA OBLIGATORIA: cada item devuelto DEBE incluir `source_turns`, una
+lista no vacia de objetos exactamente con `message_id`, `turn_number` y
+`role`. Solo cita identificadores presentes en el fragmento recibido. No
+infieras ni inventes turnos; sin procedencia exacta, omite el item.
+
 EJEMPLOS:
 - MAL (NO extraer): "Fernando pregunto por el significado de una palabra rara."
 - MAL (NO extraer): "Fernando esta haciendo una prueba de memoria."
@@ -269,6 +274,47 @@ def _chunk_conversation(conv_text: str, max_chars: int = MAX_CHARS_PER_EXTRACTIO
             current = line
     if current is not None:
         chunks.append(current)
+    return chunks
+
+
+def _locked_turns(messages):
+    """Canonical message identity for extraction and its final DB recheck."""
+    turns=[]
+    for message in messages:
+        if not isinstance(message,dict) or not {'message_id','turn_number','role','content'} <= set(message):
+            raise ScopeDenied('extraction message lacks immutable turn identity')
+        if (not isinstance(message['message_id'],(str,int)) or isinstance(message['message_id'],bool)
+                or not isinstance(message['turn_number'],int) or isinstance(message['turn_number'],bool)
+                or not isinstance(message['role'],str)):
+            raise ScopeDenied('extraction message has invalid turn identity')
+        turns.append((str(message['message_id']),message['turn_number'],message['role']))
+    if len(set(turns)) != len(turns):
+        raise ScopeDenied('extraction messages have duplicate turn identity')
+    return set(turns)
+
+
+def _render_locked_conversation(messages):
+    _locked_turns(messages)
+    return '\n'.join('[message_id={message_id} turn_number={turn_number} role={role}] {content}'.format(**message)
+                     for message in messages)
+
+
+def _chunk_locked_messages(messages, max_chars):
+    """Chunk rendered turns while retaining the exact per-call allowlist."""
+    if max_chars <= 0:
+        raise ValueError('chunk size must be positive')
+    chunks=[]; lines=[]; identities=[]; size=0
+    for message in messages:
+        identity=(str(message['message_id']),message['turn_number'],message['role'])
+        line='[message_id={message_id} turn_number={turn_number} role={role}] {content}'.format(**message)
+        fragments=[line[index:index+max_chars] for index in range(0,len(line),max_chars)] or ['']
+        for fragment in fragments:
+            needed=len(fragment)+(1 if lines else 0)
+            if lines and size+needed>max_chars:
+                chunks.append(('\n'.join(lines),set(identities)))
+                lines=[]; identities=[]; size=0
+            lines.append(fragment); identities.append(identity); size+=len(fragment)+(1 if len(lines)>1 else 0)
+    if lines: chunks.append(('\n'.join(lines),set(identities)))
     return chunks
 
 
@@ -501,7 +547,8 @@ async def process_claimed(db, extractor, conv, writer, jobs, job, budget, deadli
         messages=await db.get_conversation_messages(conv_id)
         if messages is None: raise RuntimeError('conversation messages unavailable')
         if len(messages)>max_messages: raise ValueError('conversation message limit exceeded')
-        conv_text='\n'.join(f"{m['role']}: {m['content']}" for m in messages)
+        allowed_turns=_locked_turns(messages)
+        conv_text=_render_locked_conversation(messages)
         if len(conv_text)>max_chars: raise ValueError('conversation character limit exceeded')
         digest=source_digest(conv,messages)
         if job.get('frozen_output') is not None:
@@ -509,9 +556,9 @@ async def process_claimed(db, extractor, conv, writer, jobs, job, budget, deadli
             items=json.loads(job['frozen_output'])
         else:
             data={'facts':[],'decisions':[],'action_items':[]}
-            chunks=_chunk_conversation(conv_text,_positive_limit('JAX_MEMORY_CHUNK_CHARS',12000)) if messages else []
+            chunks=_chunk_locked_messages(messages,_positive_limit('JAX_MEMORY_CHUNK_CHARS',12000)) if messages else []
             if len(chunks)>_positive_limit('JAX_MEMORY_MAX_CHUNKS',8): raise ValueError('conversation chunk limit exceeded')
-            for chunk in chunks:
+            for chunk, chunk_turns in chunks:
                 if budget['calls']>=budget['max_calls']: raise RuntimeError('run call limit exceeded')
                 left=deadline-time.monotonic()
                 if left<=0: raise RuntimeError('run deadline exceeded')
@@ -521,10 +568,10 @@ async def process_claimed(db, extractor, conv, writer, jobs, job, budget, deadli
                     raise ValueError('extraction response limit exceeded')
                 parsed=_parse_json(raw)
                 # Validate full chunk before accumulating; never skip malformed entries.
-                normalize_extraction(parsed,max_items=max_items,max_text_chars=max_item_chars)
+                normalize_extraction(parsed,max_items=max_items,max_text_chars=max_item_chars,allowed_turns=chunk_turns)
                 for category in data: data[category].extend(parsed.get(category,[]))
-                normalize_extraction(data,max_items=max_items,max_text_chars=max_item_chars)
-            items=normalize_extraction(data,max_items=max_items,max_text_chars=max_item_chars)
+                normalize_extraction(data,max_items=max_items,max_text_chars=max_item_chars,allowed_turns=allowed_turns)
+            items=normalize_extraction(data,max_items=max_items,max_text_chars=max_item_chars,allowed_turns=allowed_turns)
             await jobs.freeze(conv_id,token,digest,items)
         committing=True
         await writer.persist_frozen(conv,job)

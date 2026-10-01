@@ -8,6 +8,80 @@ from jax.memory.embedding_worker import PersistentEmbeddingWriter
 from jax.memory.b9 import ScopeContext, Visibility, EmbeddingSpaceIdentity
 
 
+def test_legacy_delete_rejects_active_b9_binding_and_never_issues_delete():
+    """M1 locks fact/owner before testing its tenant-qualified B9 binding."""
+    from contextlib import asynccontextmanager
+    from jax.memory.db import MemoryDB
+    class Cursor:
+        def __init__(self): self.calls=[]; self.rows=[(7, 3), ('ACTIVE',)]; self.rowcount=0
+        async def execute(self, sql, args=()):
+            self.calls.append((sql,args)); self.rowcount=0
+            if sql.startswith('DELETE'): self.rowcount=1
+        async def fetchone(self): return self.rows.pop(0)
+        async def __aenter__(self): return self
+        async def __aexit__(self,*_): return False
+    class Conn:
+        def __init__(self): self.cursor_obj=Cursor(); self.commits=0; self.rollbacks=0
+        async def begin(self): pass
+        async def commit(self): self.commits+=1
+        async def rollback(self): self.rollbacks+=1
+        def cursor(self): return self.cursor_obj
+    class Pool:
+        def __init__(self): self.conn=Conn()
+        @asynccontextmanager
+        async def acquire(self): yield self.conn
+    async def run():
+        db=MemoryDB(); db.pool=Pool()
+        assert await db.delete_fact(7) is None  # decorator reports safe failure
+        calls=[sql for sql,_ in db.pool.conn.cursor_obj.calls]
+        assert calls[0].endswith('FOR UPDATE') and 'jax_users' in calls[0]
+        assert calls[1].endswith('FOR UPDATE') and 'memory_legacy_bindings' in calls[1]
+        assert not any(sql.startswith('DELETE FROM facts') for sql in calls)
+        assert db.pool.conn.rollbacks==1 and db.pool.conn.commits==0
+    asyncio.run(run())
+
+
+def test_legacy_delete_without_active_binding_commits_after_locked_checks():
+    from contextlib import asynccontextmanager
+    from jax.memory.db import MemoryDB
+    class Cursor:
+        def __init__(self): self.calls=[]; self.rows=[(7, 3), None]; self.rowcount=0
+        async def execute(self, sql, args=()):
+            self.calls.append((sql,args)); self.rowcount=1 if sql.startswith('DELETE') else 0
+        async def fetchone(self): return self.rows.pop(0)
+        async def __aenter__(self): return self
+        async def __aexit__(self,*_): return False
+    class Conn:
+        def __init__(self): self.cursor_obj=Cursor(); self.commits=0; self.rollbacks=0
+        async def begin(self): pass
+        async def commit(self): self.commits+=1
+        async def rollback(self): self.rollbacks+=1
+        def cursor(self): return self.cursor_obj
+    class Pool:
+        def __init__(self): self.conn=Conn()
+        @asynccontextmanager
+        async def acquire(self): yield self.conn
+    async def run():
+        db=MemoryDB(); db.pool=Pool()
+        assert await db.delete_fact(7) is True
+        calls=[sql for sql,_ in db.pool.conn.cursor_obj.calls]
+        assert calls[-1].startswith('DELETE FROM facts')
+        assert db.pool.conn.commits==1 and db.pool.conn.rollbacks==0
+    asyncio.run(run())
+
+
+def test_chunked_extraction_keeps_each_exact_turn_allowlist():
+    from jax.memory.worker import _chunk_locked_messages
+    messages=[{'message_id':11,'turn_number':1,'role':'user','content':'a'*80},
+              {'message_id':12,'turn_number':2,'role':'jax_local','content':'b'*80}]
+    chunks=_chunk_locked_messages(messages,50)
+    assert len(chunks)>2
+    first=('11',1,'user'); second=('12',2,'jax_local')
+    assert all(turns <= {first,second} for _,turns in chunks)
+    assert any(turns=={first} for _,turns in chunks)
+    assert any(turns=={second} for _,turns in chunks)
+
+
 def test_embedding_carries_revision_fence_to_api():
     async def run():
         api = SimpleNamespace(reembed_memory=AsyncMock(return_value="g1"))

@@ -92,7 +92,7 @@ class VerifyConAutoriaTest(unittest.IsolatedAsyncioTestCase):
         db = _db_falso()
         salida = await handle_fact_command(db, "/fact verify 7", {}, repl_uid=None)
         db.verify_fact.assert_not_awaited()
-        self.assertIn("JAX_REPL_USER_ID", salida)
+        self.assertIn("no tiene identidad", salida)
 
     async def test_repl_uid_cero_tampoco_llama_a_verify_fact(self):
         """0 no es un id de usuario valido en este sistema -- cuenta como
@@ -100,7 +100,7 @@ class VerifyConAutoriaTest(unittest.IsolatedAsyncioTestCase):
         db = _db_falso()
         salida = await handle_fact_command(db, "/fact verify 7", {}, repl_uid=0)
         db.verify_fact.assert_not_awaited()
-        self.assertIn("JAX_REPL_USER_ID", salida)
+        self.assertIn("no tiene identidad", salida)
 
     async def test_uso_invalido_sigue_sin_tocar_verify_fact(self):
         """Control: /fact verify sin id numerico sigue devolviendo el
@@ -128,35 +128,35 @@ class VerifyConAutoriaTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no responde", salida)
 
 
-class OtrasRamasSinCambiarTest(unittest.IsolatedAsyncioTestCase):
-    """Las ramas que el hallazgo NO senalo (list, delete, confirm, help)
-    siguen aceptando repl_uid (ahora obligatorio para TODA la funcion) sin
-    que su comportamiento propio cambie -- ninguna de las tres toca un
-    metodo cuya aridad se movio en esta ronda."""
+class MissingScopeFailsClosedTest(unittest.IsolatedAsyncioTestCase):
+    """No identity is never widened into an unscoped legacy-memory read."""
 
-    async def test_list_no_usa_repl_uid_para_nada(self):
+    async def test_list_missing_scope_does_not_read_memory(self):
         db = _db_falso()
         db.get_facts = mock.AsyncMock(return_value=[])
-        await handle_fact_command(db, "/fact list", {}, repl_uid=None)
-        db.get_facts.assert_awaited_once()
+        salida=await handle_fact_command(db, "/fact list", {}, repl_uid=None)
+        db.get_facts.assert_not_awaited()
+        self.assertIn("no tiene identidad", salida)
 
-    async def test_delete_no_usa_repl_uid_para_nada(self):
+    async def test_delete_missing_scope_does_not_read_memory(self):
         db = _db_falso()
         db.get_fact_text = mock.AsyncMock(return_value="un hecho cualquiera")
         salida = await handle_fact_command(db, "/fact delete 7", {}, repl_uid=None)
-        self.assertIn("Vas a borrar", salida)
+        db.get_fact_text.assert_not_awaited()
+        self.assertIn("no tiene identidad", salida)
 
-    async def test_confirm_no_usa_repl_uid_para_nada(self):
+    async def test_confirm_missing_scope_does_not_mutate_memory(self):
         db = _db_falso()
         db.delete_fact = mock.AsyncMock(return_value=True)
         salida = await handle_fact_command(
             db, "/fact confirm", {"id": 7, "text": "x"}, repl_uid=None)
-        self.assertIn("borrado", salida)
+        db.delete_fact.assert_not_awaited()
+        self.assertIn("no tiene identidad", salida)
 
-    async def test_ayuda_no_usa_repl_uid_para_nada(self):
+    async def test_help_missing_scope_reports_unavailable(self):
         db = _db_falso()
         salida = await handle_fact_command(db, "/fact", {}, repl_uid=None)
-        self.assertIn("Comandos de memoria", salida)
+        self.assertIn("no tiene identidad", salida)
 
 
 if __name__ == "__main__":

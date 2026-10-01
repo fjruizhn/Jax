@@ -103,6 +103,15 @@ async def test_persistent_create_builds_complete_atomic_bundle():
     for table in ("memory_objects", "memory_revisions", "memory_revision_payloads", "memory_provenance", "memory_events", "memory_projections"):
         assert table in text
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('actor_type', ['SERVICE','MODEL','AGENT'])
+async def test_persistent_nonhuman_actor_cannot_verify(actor_type):
+    conn,api=lifecycle_api(resolver=TxResolver(roles={'memory_admin'}))
+    request=MutationAuthorizationRequest(ScopeContext(f'{actor_type.lower()}:x',actor_type,'user-1','tenant-1'), 'VERIFY', Visibility.USER_PRIVATE)
+    with pytest.raises(AuthorizationDenied,match='human user'):
+        await api.verify_memory(request,'m1',method='forged')
+    assert conn.rolled and not conn.committed
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [2, 3, 4, 5, 6])
@@ -451,6 +460,44 @@ async def test_aud001_real_project_synthesis_is_invisible_to_project_b_and_tenan
         assert derived not in {item.identity.memory_id for item in project_b}
         assert derived not in {item.identity.memory_id for item in tenant_only}
         assert not project_b and not tenant_only
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_persistent_synthesis_is_hidden_after_exact_source_revision_is_corrected():
+    """K2: exercise read-time derivation invalidation through the MariaDB
+    adapter, not only the reference in-memory implementation."""
+    pool=await _b9_ci_test_pool(authority=True)
+    try:
+        resolver=TxResolver(roles={"memory_reviewer"})
+        api=PersistentMemoryAPI(MariaDBB9Store(pool),resolver)
+        reader=MariaDBB9Reader(pool)
+        source=await api.create_memory(auth("CREATE"),ObjectKind.FACT,"source one",
+                                       Visibility.USER_PRIVATE,user_id="user-1")
+        source2=await api.create_memory(auth("CREATE"),ObjectKind.FACT,"source two",
+                                        Visibility.USER_PRIVATE,user_id="user-1")
+        await api.verify_memory(auth("VERIFY"),source,method="human test")
+        await api.verify_memory(auth("VERIFY"),source2,method="human test")
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT current_revision_id FROM memory_projections WHERE memory_id IN (%s,%s)",
+                    (source,source2),
+                )
+                revision_ids=tuple(row["current_revision_id"] for row in await cur.fetchall())
+        derived=await api.synthesize_memory(
+            auth("SYNTHESIZE",Visibility.SYSTEM_INTERNAL),"derived summary",revision_ids,
+            provider="test",model="independent-test",transformation_version="f2p-k2-v1",
+        )
+        scope=auth("RETRIEVE").scope
+        before=await reader.retrieve(scope)
+        assert derived in {item.identity.memory_id for item in before}
+
+        await api.correct_memory(auth("CORRECT"),source,"corrected source one")
+
+        after=await reader.retrieve(scope)
+        assert derived not in {item.identity.memory_id for item in after}
     finally:
         pool.close(); await pool.wait_closed()
 

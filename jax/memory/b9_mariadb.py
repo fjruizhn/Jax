@@ -16,7 +16,7 @@ from .b9 import (
     EventKind, Lifecycle, MemoryEnvelope, MemoryEvent, MemoryObject, MemoryProjection,
     MemoryProvenance, MemoryRevision, MutationAuthorizationContext, MutationAuthorizationRequest, ObjectKind,
     PromptMemoryContext, ReconciliationRequired, ScopeContext, ScopeDenied, Visibility,
-    SYNTHESIS_SOURCE_KINDS, _derive_projection, _digest, _uuid7,
+    SYNTHESIS_SOURCE_KINDS, _derive_projection, _digest, _uuid7, worst_provenance_status,
 )
 
 
@@ -258,7 +258,7 @@ class PersistentMemoryAPI:
             if not isinstance(items,list) or len(items)>int(__import__('os').getenv('JAX_MEMORY_MAX_ITEMS','100')):
                 raise B9Error("invalid frozen extraction items")
             for item in items:
-                if (not isinstance(item,dict) or set(item)!={'kind','content'}
+                if (not isinstance(item,dict) or set(item)!={'kind','content','source_turns'}
                         or item['kind'] not in {'FACT','DECISION_MEMORY','ACTION_ITEM'}
                         or not isinstance(item['content'],str) or not item['content'].strip()
                         or len(item['content'])>int(__import__('os').getenv('JAX_MEMORY_MAX_ITEM_CHARS','12000'))):
@@ -292,9 +292,13 @@ class PersistentMemoryAPI:
                     'max_items':int(__import__('os').getenv('JAX_MEMORY_MAX_ITEMS','100'))}
             if not counts or counts['message_count']>limits['max_messages'] or counts['character_count']>limits['max_chars']:
                 raise ScopeDenied('extraction source exceeds input limits')
-            await cur.execute("SELECT role,content FROM messages WHERE conversation_id=%s ORDER BY turn_number ASC LIMIT %s FOR UPDATE", (conversation_id,limits['max_messages']+1))
+            await cur.execute("SELECT id AS message_id,turn_number,role,content FROM messages WHERE conversation_id=%s ORDER BY turn_number ASC LIMIT %s FOR UPDATE", (conversation_id,limits['max_messages']+1))
             messages=list(await cur.fetchall())
             if source_digest(conv,messages)!=job['input_digest']: raise ScopeDenied('extraction source changed')
+            from .extraction_jobs import _normalize_source_turns
+            allowed={(str(message['message_id']),int(message['turn_number']),message['role']) for message in messages}
+            for item in items:
+                item['source_turns']=_normalize_source_turns(item.get('source_turns'),allowed_turns=allowed)
             now=time.time(); memory_ids=[]
             for index,item in enumerate(items):
                 mid,rid=_uuid7(),_uuid7(); content=item['content']
@@ -305,8 +309,9 @@ class PersistentMemoryAPI:
                 self._assert_project_binding(scope,rev)
                 provenance_details=canonical({'conversation_id':conversation_id,'conversation_uuid':conv['uuid'],
                     'item_index':index,'run_id':job['run_id'],'input_digest':job['input_digest'],
-                    'output_digest':job['output_digest'],'limits':limits,'verification':'unverified extraction'})
-                prov=MemoryProvenance(_uuid7(),rid,(),'conversation-extraction','b9-worker-v2',
+                    'output_digest':job['output_digest'],'limits':limits,'source_turns':item['source_turns'],
+                    'verification':'unverified extraction','audit_status':'NOT_AUDITED'})
+                prov=MemoryProvenance(_uuid7(),rid,(),'conversation-extraction','b9-worker-v3',
                     scope.actor_principal,scope.actor_type,scope.subject_user_id,'deepseek','deepseek-v4-flash',now,provenance_details)
                 event=self._event(scope,resolved,mid,rid,EventKind.CREATE,now,json.loads(provenance_details))
                 await self._write(cur,obj,rev,prov,event,_derive_projection(mid,[rev],[event]))
@@ -478,6 +483,8 @@ class PersistentMemoryAPI:
             if obj.tenant_id != scope.tenant_id: raise ScopeDenied("tenant mismatch")
             self._assert_project_binding(scope, old, requested_project_id=project_id if project_id is not None else old.project_id)
             self._project_permissions(resolved, event_kind.value, old.visibility)
+            if event_kind is EventKind.VERIFY and resolved.scope.actor_type != 'USER':
+                raise AuthorizationDenied("only an authenticated human user may verify memory")
             if event_kind is EventKind.VERIFY and not (
                 resolved.resolved_roles.intersection({"memory_reviewer","memory_admin"})
                 or "memory:project:verify" in resolved.resolved_capabilities
@@ -585,7 +592,7 @@ class PersistentMemoryAPI:
             visibility=Visibility(visibility_value)
             self._project_permissions(resolved,"SYNTHESIZE",visibility)
             now=time.time(); mid,rid=_uuid7(),_uuid7(); obj=MemoryObject(mid,ObjectKind.SYNTHESIS,scope.tenant_id,now)
-            rev=MemoryRevision(rid,mid,_digest(content),visibility,user_id,project_id,Lifecycle.ACTIVE,now,content,"COMPLETE")
+            rev=MemoryRevision(rid,mid,_digest(content),visibility,user_id,project_id,Lifecycle.ACTIVE,now,content,worst_provenance_status(row.get('provenance_status','COMPLETE') for row in sources))
             self._assert_project_binding(scope, rev)
             prov=MemoryProvenance(_uuid7(),rid,source_revision_ids,"synthesis",transformation_version,scope.actor_principal,scope.actor_type,scope.subject_user_id,provider,model,now)
             event=self._event(scope,resolved,mid,rid,EventKind.SYNTHESIZE,now,{"derivation_depth":1})
@@ -779,6 +786,26 @@ class MariaDBB9Reader:
                                                          p["transformation_id"],p["transformation_version"],p["actor_principal"],
                                                          p["actor_type"],p["subject_user_id"],p["provider"],p["model"],
                                                          float(p["created_at"]),p["limitations"]))
+                        # A synthesis is readable only while every exact
+                        # source revision it names is still its object's
+                        # canonical, eligible revision.  This is a read-time
+                        # fail-closed boundary; it preserves immutable
+                        # lineage without silently cascading tombstones.
+                        if obj.kind is ObjectKind.SYNTHESIS:
+                            source_ids=tuple(source_id for provenance in prov for source_id in provenance.source_revisions)
+                            eligible=True
+                            for source_id in source_ids:
+                                await cur.execute(
+                                    "SELECT r.revision_id,r.lifecycle_state,p.payload,pr.current_revision_id "
+                                    "FROM memory_revisions r JOIN memory_projections pr ON pr.memory_id=r.memory_id "
+                                    "LEFT JOIN memory_revision_payloads p ON p.revision_id=r.revision_id "
+                                    "WHERE r.revision_id=%s AND pr.reconciliation_required=FALSE", (source_id,))
+                                source=await cur.fetchone()
+                                if (not isinstance(source,Mapping) or source['revision_id'] != source['current_revision_id']
+                                        or source['lifecycle_state'] not in {'ACTIVE','VERIFIED'} or source['payload'] is None):
+                                    eligible=False; break
+                            if not source_ids or not eligible:
+                                continue
                         if revision.payload is not None:
                             envelopes.append(MemoryEnvelope(obj,revision,tuple(prov),(),{"store":"B9_MARIADB"}))
                 # Explicitly end the read-only snapshot; no state can be
