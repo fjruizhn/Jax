@@ -1193,8 +1193,10 @@ jobs:
           #   dedicada (~/.config/jax/test-db.env, usuario jax_test), MISMO comando:
           #   185 passed. PR-J1 suma seis casos de autoridad en esta misma
           #   suite; GitHub Actions midió 191 en la primera corrida del PR.
-          grep -qE "^203 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 203 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 203 -> 204 al agregar el rechazo de current_verification_state=False
+          # en la prueba del adaptador persistente; medido en Actions para PR #305.
+          grep -qE "^204 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 204 tests CORRIDOS (no skipeados)."; exit 1; }
       - name: Publicar resumen de segunda corrida de memoria
         if: failure()
         run: |
