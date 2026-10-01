@@ -72,13 +72,14 @@ async def _ensure_race_legacy_source_tables(pool):
 class _DeleteLockCursor:
     """Signals only after the real delete cursor has locked its fact row."""
     def __init__(self, cursor, locked, release):
-        self._cursor, self._locked, self._release = cursor, locked, release
+        self._cursor_context, self._cursor = cursor, None
+        self._locked, self._release = locked, release
         self._fact_lock_select = False
     async def __aenter__(self):
-        await self._cursor.__aenter__()
+        self._cursor = await self._cursor_context.__aenter__()
         return self
     async def __aexit__(self, *args):
-        return await self._cursor.__aexit__(*args)
+        return await self._cursor_context.__aexit__(*args)
     async def execute(self, sql, args=()):
         self._fact_lock_select = "FROM facts f JOIN jax_users" in sql and "FOR UPDATE" in sql
         return await self._cursor.execute(sql, args)
