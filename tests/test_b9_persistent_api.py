@@ -25,6 +25,12 @@ async def _race_pool(*, dict_cursor=False):
     if not os.getenv("JAX_DB_HOST"):
         pytest.skip("requires the disposable memory-b9 MariaDB job")
     database=exigir_base_de_test()
+    # Persistent source schemas belong only to the dedicated isolated job.
+    # Other CI jobs also expose MariaDB but use their own fixtures/database
+    # layout; adding these minimal tables there would contaminate their tests.
+    if (database != "jax_memory_test_memb9_ci"
+            or os.getenv("JAX_TEST_DB_SUFIJO") != "memb9_ci"):
+        pytest.skip("requires the dedicated jax_memory_test_memb9_ci database")
     return await aiomysql.create_pool(
         host=os.environ["JAX_DB_HOST"], port=int(os.getenv("JAX_DB_PORT", "3306")),
         user=os.getenv("JAX_DB_USER", "root"), password=os.getenv("JAX_DB_PASSWORD", ""),
@@ -429,7 +435,8 @@ async def test_aud006_persistent_synthesis_rejects_missing_source_revision():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", [
     {"tenant_id":"tenant-2"}, {"current_revision_id":"newer"}, {"lifecycle_state":"EXPIRED"},
-    {"payload":None}, {"object_kind":"SYNTHESIS"}, {"object_kind":"CONVERSATION"},
+    {"payload":None}, {"current_verification_state":False},
+    {"object_kind":"SYNTHESIS"}, {"object_kind":"CONVERSATION"},
     {"project_id":"project-b"},
 ])
 async def test_aud006_persistent_synthesis_rejects_ineligible_source_revision(change):
