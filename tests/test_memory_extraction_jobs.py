@@ -131,11 +131,12 @@ async def real_extraction_fixture():
     jobs=ExtractionJobs(pool)
     conv={'id':1,'uuid':'source-uuid','tenant_id':1,'user_id':1,'project_id':None}
     job=await jobs.claim(1,run_id='test-run')
-    # Match the DB driver's source snapshot type (integer message id). The
-    # extractor-facing provenance is normalized to a string separately.
-    turn={'message_id':1,'turn_number':1,'role':'user'}
+    turn={'message_id':'1','turn_number':1,'role':'user'}
     items=[{'kind':'FACT','content':'one','source_turns':[turn]},{'kind':'FACT','content':'two','source_turns':[turn]}]
-    await jobs.freeze(1,job['claim_token'],source_digest(conv,[dict(turn,content='known')]),items)
+    # The locked DB snapshot retains its numeric id; provenance is canonicalized
+    # to a string before the model output is frozen.
+    db_turn={'message_id':1,'turn_number':1,'role':'user','content':'known'}
+    await jobs.freeze(1,job['claim_token'],source_digest(conv,[db_turn]),items)
     return pool,api,jobs,job,request
 
 async def real_counts(pool):
