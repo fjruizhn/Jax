@@ -108,6 +108,33 @@ los fusiona Fernando o una sesión con su ventana abierta (`bin/ventana estado`)
 - (Opcional) Mención de Kimi en `SESIONES EN PARALELO` de `common/CLAUDE.md.core` — ese
   archivo solo lo integra Fernando.
 
+## Router de modelos por tiers (Luna/Terra/Sol/Astra) — 2026-10-01
+
+Decisión de Fernando: «lo banal lo hace Luna, lo cotidiano Terra, lo importante Sol, y lo
+extremadamente importante Astra». Implementado en `~/.kimi-code/config.toml` como pool
+`[secondary_model]` (backup: `config.toml.bak-pre-router-20261001`). El pool le da a la
+herramienta `Agent` un parámetro **`model` por spawn**; la resolución es: model explícito
+en la llamada → `default_model`. Documentación oficial: configuración `secondary_model`.
+
+| Tier | Modelo del pool | Tipo de subagente | Qué va ahí |
+|---|---|---|---|
+| **Luna** (mecánico, read-only) | `kimi-for-coding-highspeed` | `explore` | Búsquedas, inventarios, logs, evidencia, resúmenes. Nunca decide arquitectura ni seguridad. |
+| **Terra** (cotidiano, escribe) | `kimi-for-coding` **[default]** | `coder` | Fixes acotados, scripts, tests, CI, config. El caballo de batalla del volumen. |
+| **Sol** (importante, read-only) | `k3` | `plan` | Arquitectura, seguridad, autoridad/contratos, auditoría adversarial, decisiones ambiguas de alto impacto. Su informe declara evidencia, supuestos, riesgos y recomendación. |
+| **Astra** (extremadamente importante, read-only, **solo apelación**) | `k3-256k` | `plan` | Requiere AMBOS: veredicto previo de Sol sobre el mismo artefacto (entregado como entrada) Y contradicción de hechos entre revisores o toque de autoridad/fail-closed — o pedido explícito de Fernando. Nunca es default ni sube por adjetivos. |
+
+Reglas espejo del router de Codex (`hosts/*/AGENTS.codex.md`):
+
+- **Sin subagente** cuando el trabajo directo es claramente más chico, seguro o rápido.
+- **Sin degradación silenciosa**: si el modelo elegido falla por capacidad/quota, caer a
+  `"primary"` (el modelo del llamador) y DECIRLO en el informe — nunca alterar la config
+  por capacidad temporal.
+- El agente principal (main agent) sigue siendo responsable de integrar los resultados y
+  de la respuesta final.
+- El modelo del **main agent** no lo cambia Kimi a sí mismo: se elige al lanzar
+  (`kimi -m …`, o `default_model` en config) y se cambia en TUI con `/model`. La sesión
+  actual toma el pool con `/reload` o en la siguiente sesión.
+
 ## Contexto guardado de la sesión del 2026-10-01
 
 - Fernando pidió: verificación de sync, agentes y plugins funcionando con Kimi,
