@@ -931,9 +931,13 @@ jobs:
       # Desde E-19 (2026-09-16) todo sale de requirements.txt.
       # B9 persistence/authority tests are async; use the same supported
       # plugin contract as the other async database jobs.
+      # The cross-transaction delete/adoption race belongs to the isolated
+      # memory-b9-regression database job; do not run it against this job's
+      # separate jax_memory_test schema.
       - run: pip install -r requirements.txt pytest pytest-asyncio
       - run: >-
           PYTHONPATH=. python -m pytest -v --junitxml=/tmp/b9-memory-first.xml
+          -k 'not test_m1_real_mariadb_delete_and_adoption_serialise_on_legacy_fact'
           tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py
           tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py
           tests/test_memoria_facts_comportamiento.py tests/test_memoria_retorno_no_ambiguo.py
@@ -968,6 +972,7 @@ jobs:
       # sin ella.
       - run: |
           PYTHONPATH=. python -m pytest -q \
+            -k 'not test_m1_real_mariadb_delete_and_adoption_serialise_on_legacy_fact' \
             tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py \
             tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py \
             tests/test_memoria_facts_comportamiento.py tests/test_memoria_retorno_no_ambiguo.py \
