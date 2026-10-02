@@ -63,7 +63,7 @@ root, cambiarlas exige reiniciar):
                               perfil; NO lo decide el llamador de run_cli)
   JAX_CLI_TIMEOUT_MAX_CHAT_S / JAX_CLI_TIMEOUT_MAX_JACOBS_S
                               tope del timeout por entry_point (default 180 / 600); un
-                              entry_point sin tope (canary, repl) se rechaza
+                              entry_point sin tope (canary) se rechaza
 
 CACHES (cada uno declara su invalidacion en el mismo commit que lo crea):
   - `_CACHE_SHA`: SHA256 del manifiesto del directorio de un binario, clave = ruta
@@ -511,8 +511,9 @@ def transporte_efectivo(facet_transport: Optional[str], provider_auth_type: Opti
 # --------------------------------------------------------------------------
 
 #: Puntos de entrada reconocidos. `canary` lo fija solo el codigo de la sonda,
-#: dentro del proceso; nunca viene de un request.
-ENTRY_POINTS = frozenset({"chat", "canary", "jacobs", "repl"})
+#: dentro del proceso; nunca viene de un request. `repl` se retiro (Fernando, T16: el REPL se
+#: retira): ya no es un entry_point valido.
+ENTRY_POINTS = frozenset({"chat", "canary", "jacobs"})
 
 TITULARES_ENV = "JAX_SUSCRIPCION_TITULARES"
 _RE_LISTA = re.compile(r"^\s*[0-9]+(\s*,\s*[0-9]+)*\s*$")
@@ -1404,8 +1405,8 @@ def _ranuras_de(p: Perfil) -> int:
 
 #: Tope del `timeout` de `run_cli` por punto de entrada: (variable de entorno, default
 #: en segundos). Un entry_point que no figura aqui NO tiene tope declarado y `run_cli`
-#: lo rechaza (falla cerrado). `canary` y `repl` son entry_points validos para
-#: `exigir_titular` pero no tienen tope: hay que declararselo antes de usarlos.
+#: lo rechaza (falla cerrado). `canary` es un entry_point valido para
+#: `exigir_titular` pero no tiene tope: hay que declararselo antes de usarlo.
 TIMEOUT_MAX_POR_ENTRY: dict[str, tuple[str, float]] = {
     "chat": ("JAX_CLI_TIMEOUT_MAX_CHAT_S", 180.0),
     "jacobs": ("JAX_CLI_TIMEOUT_MAX_JACOBS_S", 600.0),

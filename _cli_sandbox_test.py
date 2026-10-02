@@ -324,6 +324,14 @@ class TitularTest(_Entorno):
             with self.subTest(ep=ep), self.assertRaises(cli_sandbox.TitularNoAutorizado):
                 await cli_sandbox.exigir_titular(1, 1, ep)
 
+    async def test_el_repl_se_retiro_de_los_entry_points(self):
+        # Fernando decidio retirar el REPL (T16): `repl` ya no es un punto de entrada reconocido
+        self.assertEqual(cli_sandbox.ENTRY_POINTS, frozenset({"chat", "canary", "jacobs"}))
+        with self.assertRaises(cli_sandbox.TitularNoAutorizado) as c:
+            await cli_sandbox.exigir_titular(1, 1, "repl")
+        self.assertEqual(c.exception.codigo, "suscripcion_solo_titular")
+        self.assertIn("entry_point desconocido", c.exception.motivo)
+
     async def test_sin_cache_un_borrado_posterior_se_ve_en_la_siguiente_llamada(self):
         await self.titular()
         self.usuarios[1] = dict(tenant_id=1, status="active", deleted_at="2026-10-01")
@@ -1947,11 +1955,9 @@ class TimeoutValidadoTest(_Entorno):
         await self._sin_lanzar(181, "chat")
 
     async def test_un_entry_point_sin_tope_declarado_se_rechaza_y_no_lanza_nada(self):
-        # `canary` y `repl` son entry_points que exigir_titular conoce pero NO tienen tope
-        # declarado: run_cli falla cerrado (decision pendiente del arquitecto, ver informe)
-        for ep in ("canary", "repl"):
-            with self.subTest(ep=ep):
-                await self._sin_lanzar(5, ep)
+        # `canary` es un entry_point que exigir_titular conoce pero NO tiene tope declarado:
+        # run_cli falla cerrado (decision pendiente del arquitecto, ver informe)
+        await self._sin_lanzar(5, "canary")
         with patch.object(cli_sandbox, "ENTRY_POINTS", cli_sandbox.ENTRY_POINTS | {"otro"}):
             await self._sin_lanzar(5, "otro")
         for malo in ("", "CHAT", None, 5, "otro"):
