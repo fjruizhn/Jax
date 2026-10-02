@@ -74,8 +74,17 @@ def servidor_db():
 
 
 class BaseDePrueba:
-    def __init__(self, srv, base, usuario, clave_usuario):
+    def __init__(self, srv, base, usuario, clave_usuario, usuario_topes="", clave_topes=""):
         self.srv, self.base, self.usuario, self.clave_usuario = srv, base, usuario, clave_usuario
+        self.usuario_topes, self.clave_topes = usuario_topes, clave_topes     # el usuario de los topes (0.3b), distinto del de la bitacora
+
+    def config_topes(self) -> ConfigBitacoraDB:
+        return ConfigBitacoraDB(host=self.srv["host"], port=self.srv["puerto"], usuario=self.usuario_topes,
+                                clave=self.clave_topes, base=self.base)
+
+    def app_topes(self):
+        return pymysql.connect(host=self.srv["host"], port=self.srv["puerto"], user=self.usuario_topes,
+                               password=self.clave_topes, database=self.base, autocommit=True)
 
     def admin(self):
         return pymysql.connect(host=self.srv["host"], port=self.srv["puerto"], user=self.srv["usuario"],
@@ -104,26 +113,31 @@ def basedb(servidor_db):
     base = f"faro_t_{uuid.uuid4().hex[:12]}"
     usuario = f"u_{uuid.uuid4().hex[:10]}"
     clave = secrets.token_hex(8)
+    usuario_t = f"t_{uuid.uuid4().hex[:10]}"
+    clave_t = secrets.token_hex(8)
     adm = pymysql.connect(host=servidor_db["host"], port=servidor_db["puerto"], user=servidor_db["usuario"],
                           password=servidor_db["clave"], autocommit=True)
     try:
         with adm.cursor() as cur:
             cur.execute(f"CREATE DATABASE `{base}`")
             cur.execute(f"CREATE USER `{usuario}`@`%%` IDENTIFIED BY %s", (clave,))
+            cur.execute(f"CREATE USER `{usuario_t}`@`%%` IDENTIFIED BY %s", (clave_t,))
 
         async def migrar():
             con = await aiomysql.connect(host=servidor_db["host"], port=servidor_db["puerto"], user=servidor_db["usuario"],
                                          password=servidor_db["clave"], connect_timeout=10)
             try:
-                return await aplicar(con, MIGRACIONES, {"base": base, "usuario": usuario, "host_usuario": "%"})
+                return await aplicar(con, MIGRACIONES, {"base": base, "usuario": usuario, "usuario_topes": usuario_t,
+                                        "host_usuario": "%"})
             finally:
                 con.close()
         asyncio.run(migrar())
-        yield BaseDePrueba(servidor_db, base, usuario, clave)
+        yield BaseDePrueba(servidor_db, base, usuario, clave, usuario_t, clave_t)
     finally:
         with adm.cursor() as cur:
             cur.execute(f"DROP DATABASE IF EXISTS `{base}`")
             cur.execute(f"DROP USER IF EXISTS `{usuario}`@`%`")
+            cur.execute(f"DROP USER IF EXISTS `{usuario_t}`@`%`")
         adm.close()
 
 

@@ -113,3 +113,26 @@ class FalsoTelegram:
                 return True
             _time.sleep(0.01)
         return len(self.textos()) >= n
+
+
+# --------------------------------------------------------------------------- #
+# Un almacen de topes en memoria (para las pruebas de la POLITICA de topes;   #
+# la atomicidad del conteo se prueba contra MariaDB, no contra esto).         #
+# --------------------------------------------------------------------------- #
+class AlmacenMemoria:
+    """Imita `AlmacenMariaDB.sumar(clave, periodo, cantidad, tope) -> (aplicado, usado)`."""
+
+    def __init__(self, modo="ok"):
+        self.modo, self.usado, self.llamadas = modo, {}, []
+
+    async def sumar(self, clave, periodo, cantidad, tope):
+        self.llamadas.append((clave, periodo, cantidad, tope))
+        if self.modo == "colgar":
+            await asyncio.sleep(3600)
+        if self.modo == "fallar":
+            raise OSError("almacen de topes caido (falso)")
+        actual = self.usado.get((clave, periodo), 0)
+        if tope is not None and actual + cantidad > tope:
+            return False, actual
+        self.usado[(clave, periodo)] = actual + cantidad
+        return True, actual + cantidad
