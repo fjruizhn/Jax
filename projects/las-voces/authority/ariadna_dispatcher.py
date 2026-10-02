@@ -36,6 +36,7 @@ _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*$")
 _KEY = re.compile(r"^[0-9a-f]{64}$")
 _OUTBOX_KEYS = {"event_type", "idempotency_key", "task_id", "handoff", "lease_id"}
 _GIT = "/usr/bin/git"
+_GIT_ROOT_CONFIG = "safe.directory"
 
 
 class DispatchError(ValueError):
@@ -78,15 +79,41 @@ def _git_common_dir(root: Path) -> Path:
     return ((root / common).resolve() if not common.is_absolute() else common.resolve())
 
 
+def _trusted_git_root(root: Path) -> Path:
+    """Accept only an existing, absolute, non-aliased repository path.
+
+    Git interprets ``safe.directory`` values as patterns and supports special
+    ``%(prefix)`` expansion.  The dispatcher therefore derives this value only
+    from a strictly validated filesystem path, never from handoff data.
+    """
+    if not isinstance(root, Path) or not root.is_absolute() or ".." in root.parts:
+        raise DispatchError("invalid trusted Git root")
+    raw = str(root)
+    if any(char in raw for char in "*?[\n\r\x00") or "%(" in raw:
+        raise DispatchError("invalid trusted Git root")
+    try:
+        resolved = root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise DispatchError("invalid trusted Git root") from None
+    if resolved != root or not resolved.is_dir():
+        raise DispatchError("invalid trusted Git root")
+    return resolved
+
+
+def _git_command(root: Path, *args: str) -> list[str]:
+    trusted_root = _trusted_git_root(root)
+    return [_GIT, "-c", f"{_GIT_ROOT_CONFIG}={trusted_root}", "-C", str(trusted_root), *args]
+
+
 def _git(root: Path, *args: str) -> str:
-    result = subprocess.run([_GIT, "-C", str(root), *args], text=True, capture_output=True, env=_git_env())
+    result = subprocess.run(_git_command(root, *args), text=True, capture_output=True, env=_git_env())
     if result.returncode:
         raise DispatchError("git worktree operation rejected")
     return result.stdout.strip()
 
 
 def _git_optional(root: Path, *args: str) -> str | None:
-    result = subprocess.run([_GIT, "-C", str(root), *args], text=True, capture_output=True, env=_git_env())
+    result = subprocess.run(_git_command(root, *args), text=True, capture_output=True, env=_git_env())
     return result.stdout.strip() if not result.returncode else None
 
 
@@ -122,8 +149,8 @@ class GovernedHandoffConsumer:
     """
     def __init__(self, root: Path, handoff_state_dir: Path, worktree_root: Path, *, canonical_root: Path | None = None,
                  jaxqwen_socket: Path | None = None, jaxqwen_service_uid: int | None = None):
-        self.root = root.resolve()
-        self.canonical_root = (canonical_root or root).resolve()
+        self.root = _trusted_git_root(root)
+        self.canonical_root = _trusted_git_root(canonical_root or root)
         self.handoff_state_dir = handoff_state_dir.resolve()
         self.worktree_root = worktree_root.resolve()
         if (jaxqwen_socket is None) != (jaxqwen_service_uid is None):
@@ -192,7 +219,7 @@ class GovernedHandoffConsumer:
     @staticmethod
     def _assert_safe_git_environment(root: Path) -> None:
         """Reject Git configuration/attributes that can execute helper commands."""
-        unsafe = _git_optional(root, "config", "--local", "--get-regexp", r"^(filter\.|core\.fsmonitor$|diff\.external$)")
+        unsafe = _git_optional(root, "config", "--includes", "--get-regexp", r"^(filter\.|core\.fsmonitor$|diff\.external$)")
         if unsafe:
             raise DispatchError("builder repository has an external Git execution driver")
         tracked = _git(root, "ls-files", "-z").split("\0")
@@ -369,7 +396,8 @@ class GovernedHandoffConsumer:
         if _git(self.root, "branch", "--list", branch):
             raise DispatchError("conflicting builder branch already exists")
         self._assert_safe_git_environment(self.root)
-        result = subprocess.run([_GIT, "-C", str(self.root), "-c", "core.hooksPath=/dev/null", "worktree", "add", "-b", branch, str(path), self.base_commit], text=True, capture_output=True, env=_git_env())
+        command = _git_command(self.root, "-c", "core.hooksPath=/dev/null", "worktree", "add", "-b", branch, str(path), self.base_commit)
+        result = subprocess.run(command, text=True, capture_output=True, env=_git_env())
         if result.returncode or not self._worktree_valid(path, branch):
             raise DispatchError("isolated builder worktree creation failed")
 
