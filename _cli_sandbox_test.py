@@ -129,7 +129,8 @@ class _Entorno(unittest.IsolatedAsyncioTestCase):
             f = d / binario
             f.write_bytes(f"binario-falso-{nombre}\n".encode())
             f.chmod(0o755)
-            self.shas[nombre] = hashlib.sha256(f.read_bytes()).hexdigest()
+            # JAX_CLI_<PERFIL>_SHA256 es el SHA del MANIFIESTO del directorio (MAJOR-15)
+            self.shas[nombre] = cli_sandbox.sha_manifiesto(str(d), uid_esperado=os.getuid())
             (self.cred / nombre).mkdir()
         env = {
             "JAX_CLI_ROOT": str(self.root),
@@ -704,6 +705,277 @@ class IntegridadDelBinarioTest(_Entorno):
 
     async def test_run_cli_no_lanza_con_el_directorio_padre_abierto(self):
         os.chmod(self.root / "codex", 0o777)
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch("asyncio.create_subprocess_exec", fake):
+            with self.assertRaises(cli_sandbox.BinarioAlterado):
+                await cli_sandbox.run_cli(
+                    "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                    timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertEqual(cap["llamadas"], 0)
+
+
+@unittest.skipIf(os.getuid() == 0, "el caso 'dueno distinto del esperado' necesita un usuario sin privilegios")
+class ArbolDelBinarioTest(_Entorno):
+    """MAJOR-15 (auditoria 2026-10-02, ronda 2): bwrap monta y EJECUTA todo el
+    directorio del binario (`--ro-bind dir dir`), no solo el archivo. La integridad
+    cubre el arbol completo: dueno y permisos de cada entrada, symlinks que no salen
+    del arbol, un manifiesto (ruta, modo, sha256) cuyo SHA es el que se fija en
+    JAX_CLI_<PERFIL>_SHA256, y los ancestros de JAX_CLI_ROOT hasta `/`."""
+
+    def setUp(self):
+        super().setUp()
+        self.vdir = self.root / "codex" / "9.9.9"
+        self.uid = os.getuid()
+        cli_sandbox._CACHE_SHA.clear()
+
+    def _perfil(self):
+        return cli_sandbox.PERFILES["codex"]
+
+    def _resolver(self, **kw):
+        kw.setdefault("uid_esperado", self.uid)
+        return self.resolver_real(self._perfil(), **kw)
+
+    def _fijar(self):
+        """Fija en el entorno el SHA del manifiesto ACTUAL (lo que hace el paso 11)."""
+        sha = cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid)
+        p = patch.dict(os.environ, {"JAX_CLI_CODEX_SHA256": sha})
+        p.start()
+        self.addCleanup(p.stop)
+        cli_sandbox._CACHE_SHA.clear()
+        return sha
+
+    def _hermano(self, nombre="libcodex.so", contenido=b"lib-original\n", modo=0o755):
+        f = self.vdir / nombre
+        f.write_bytes(contenido)
+        f.chmod(modo)
+        return f
+
+    # ---- manifiesto
+    async def test_el_manifiesto_es_estable_y_no_depende_de_mtime_ni_de_inodes(self):
+        self._hermano()
+        m1 = cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid)
+        self.assertRegex(m1, r"^[0-9a-f]{64}$")
+        self.assertEqual(m1, cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid))
+        os.utime(self.vdir / "libcodex.so", (1, 1))
+        os.utime(self.vdir / "codex", (2, 2))
+        self.assertEqual(m1, cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid))
+
+    async def test_el_manifiesto_cambia_con_contenido_modo_nombre_y_archivos_nuevos(self):
+        f = self._hermano()
+        base = cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid)
+        vistos = {base}
+        f.write_bytes(b"lib-DISTINTA\n")
+        vistos.add(cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid))
+        f.chmod(0o700)
+        vistos.add(cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid))
+        f.rename(self.vdir / "otro.so")
+        vistos.add(cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid))
+        self._hermano("extra.bin")
+        vistos.add(cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid))
+        (self.vdir / "subdir").mkdir(mode=0o755)
+        vistos.add(cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid))
+        self.assertEqual(len(vistos), 6, "cada cambio da un manifiesto distinto")
+
+    async def test_el_manifiesto_no_depende_del_orden_de_creacion(self):
+        a = self._hermano("a.so", b"A")
+        b = self._hermano("b.so", b"B")
+        m1 = cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid)
+        a.unlink(); b.unlink()
+        self._hermano("b.so", b"B")
+        self._hermano("a.so", b"A")
+        self.assertEqual(m1, cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid))
+
+    async def test_sha_manifiesto_es_publica_con_dueno_esperado_keyword_y_root_por_defecto(self):
+        p = inspect.signature(cli_sandbox.sha_manifiesto).parameters
+        self.assertEqual(p["uid_esperado"].default, 0)
+        self.assertEqual(p["uid_esperado"].kind, inspect.Parameter.KEYWORD_ONLY)
+        with self.assertRaises(cli_sandbox.BinarioAlterado):
+            cli_sandbox.sha_manifiesto(str(self.vdir))  # los archivos de este test no son de root
+
+    async def test_el_sha_fijado_es_el_del_manifiesto_y_no_el_del_binario_suelto(self):
+        suelto = hashlib.sha256((self.vdir / "codex").read_bytes()).hexdigest()
+        with patch.dict(os.environ, {"JAX_CLI_CODEX_SHA256": suelto}):
+            with self.assertRaises(cli_sandbox.BinarioAlterado):
+                self._resolver()
+        self._resolver()  # con el SHA del manifiesto (setUp) pasa
+
+    # ---- el arbol
+    async def test_un_hermano_reescrito_se_rechaza(self):
+        f = self._hermano()
+        self._fijar()
+        self._resolver()  # sano, y queda en la cache
+        original = f.stat()
+        time.sleep(0.05)
+        f.write_bytes(b"lib-MALICIOSA\n")  # mismo tamano, mismo inode
+        os.utime(f, ns=(original.st_atime_ns, original.st_mtime_ns))
+        with self.assertRaises(cli_sandbox.BinarioAlterado):
+            self._resolver()
+
+    async def test_un_hermano_nuevo_se_rechaza(self):
+        self._fijar()
+        self._hermano("inyectado.so")
+        with self.assertRaises(cli_sandbox.BinarioAlterado):
+            self._resolver()
+
+    async def test_un_hermano_con_escritura_de_grupo_u_otros_se_rechaza(self):
+        f = self._hermano()
+        self._fijar()
+        for modo in (0o775, 0o757, 0o777, 0o722):
+            with self.subTest(modo=oct(modo)):
+                f.chmod(modo)
+                with self.assertRaises(cli_sandbox.BinarioAlterado) as c:
+                    self._resolver()
+                self.assertNotIn("SHA256", str(c.exception), "falla por el permiso, antes de hashear")
+        f.chmod(0o755)
+        self._resolver()
+
+    async def test_un_subdirectorio_con_escritura_de_grupo_o_un_archivo_anidado_se_rechazan(self):
+        sub = self.vdir / "lib"
+        sub.mkdir(mode=0o755)
+        anidado = sub / "x.so"
+        anidado.write_bytes(b"x")
+        anidado.chmod(0o755)
+        self._fijar()
+        self._resolver()
+        sub.chmod(0o775)
+        with self.assertRaises(cli_sandbox.BinarioAlterado):
+            self._resolver()
+        sub.chmod(0o755)
+        anidado.chmod(0o757)
+        with self.assertRaises(cli_sandbox.BinarioAlterado):
+            self._resolver()
+
+    async def test_un_symlink_que_escapa_del_arbol_se_rechaza(self):
+        for destino in ("/etc/passwd", "../../../../../../etc/passwd", "../codex", "/", ".."):
+            with self.subTest(destino=destino):
+                enlace = self.vdir / "escape"
+                os.symlink(destino, enlace)
+                try:
+                    with self.assertRaises(cli_sandbox.BinarioAlterado) as c:
+                        cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid)
+                    self.assertIn("symlink", str(c.exception))
+                    with self.assertRaises(cli_sandbox.BinarioAlterado):
+                        self._resolver()
+                finally:
+                    enlace.unlink()
+
+    async def test_un_symlink_que_se_queda_dentro_del_arbol_se_acepta_y_entra_al_manifiesto(self):
+        base = cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid)
+        os.symlink("codex", self.vdir / "alias")           # relativo, dentro
+        os.symlink(self.vdir / "codex", self.vdir / "abs")  # absoluto, dentro
+        con = cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid)
+        self.assertNotEqual(base, con)
+        os.unlink(self.vdir / "alias")
+        os.symlink("abs", self.vdir / "alias")  # otro destino: otro manifiesto
+        self.assertNotEqual(con, cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid))
+
+    async def test_un_symlink_cuyo_destino_sale_por_una_cadena_de_enlaces_se_rechaza(self):
+        os.symlink("..", self.vdir / "arriba")        # sale: apunta al directorio del perfil
+        os.symlink("arriba", self.vdir / "cadena")    # apunta a un enlace que sale
+        try:
+            with self.assertRaises(cli_sandbox.BinarioAlterado):
+                cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid)
+        finally:
+            (self.vdir / "cadena").unlink()
+            (self.vdir / "arriba").unlink()
+
+    async def test_un_fifo_en_el_arbol_se_rechaza(self):
+        os.mkfifo(self.vdir / "tuberia", 0o755)
+        with self.assertRaises(cli_sandbox.BinarioAlterado):
+            cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid)
+
+    async def test_una_entrada_de_otro_dueno_se_rechaza(self):
+        f = self._hermano()
+        real = os.stat
+
+        def stat_falso(ruta, *a, **k):
+            st = real(ruta, *a, **k)
+            if isinstance(ruta, str) and ruta == "libcodex.so":
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, self.uid + 1,
+                                       st.st_gid, st.st_size, int(st.st_atime), int(st.st_mtime),
+                                       int(st.st_ctime)))
+            return st
+
+        with patch.object(cli_sandbox.os, "stat", stat_falso):
+            with self.assertRaises(cli_sandbox.BinarioAlterado):
+                cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid)
+        self.assertTrue(f.exists())
+
+    async def test_un_subdirectorio_ilegible_falla_cerrado_y_no_se_ignora(self):
+        sub = self.vdir / "oculto"
+        sub.mkdir(mode=0o755)
+        (sub / "x").write_bytes(b"x")
+        sub.chmod(0o000)
+        try:
+            with self.assertRaises(cli_sandbox.BinarioAlterado):
+                cli_sandbox.sha_manifiesto(str(self.vdir), uid_esperado=self.uid)
+        finally:
+            sub.chmod(0o755)
+
+    async def test_la_cache_incluye_la_firma_del_arbol_completo(self):
+        f = self._hermano()
+        self._fijar()
+        self._resolver()
+        self.assertEqual(len(cli_sandbox._CACHE_SHA), 1)
+        # misma firma: no vuelve a hashear nada
+        with patch.object(cli_sandbox, "_sha256_archivo", side_effect=AssertionError("no debia re-hashear")):
+            self._resolver()
+        # cambia SOLO un hermano (el binario no se toca): la firma del arbol cambia y re-hashea
+        f.write_bytes(b"lib-MALICIOSA\n")
+        with self.assertRaises(cli_sandbox.BinarioAlterado):
+            self._resolver()
+
+    # ---- los ancestros de JAX_CLI_ROOT hasta /
+    async def test_un_ancestro_de_la_raiz_escribible_se_rechaza(self):
+        ancestro = self.root.parent  # el tmp del test: arriba de JAX_CLI_ROOT
+        for modo in (0o775, 0o757, 0o777):
+            with self.subTest(modo=oct(modo)):
+                ancestro.chmod(modo)
+                with self.assertRaises(cli_sandbox.BinarioAlterado) as c:
+                    self._resolver()
+                self.assertIn("ancestro", str(c.exception))
+        ancestro.chmod(0o700)
+        self._resolver()
+
+    async def test_el_bit_sticky_solo_se_tolera_en_tmp(self):
+        ancestro = self.root.parent
+        ancestro.chmod(0o1777)  # sticky y de escritura publica, pero NO es /tmp
+        try:
+            with self.assertRaises(cli_sandbox.BinarioAlterado):
+                self._resolver()
+        finally:
+            ancestro.chmod(0o700)
+        self.assertTrue(os.stat("/tmp").st_mode & stat.S_ISVTX, "precondicion: /tmp es sticky")
+        self._resolver()  # y /tmp mismo (de escritura publica y sticky) esta en la ruta y se acepta
+
+    async def test_un_ancestro_de_otro_dueno_que_no_es_root_se_rechaza(self):
+        ajeno = str(self.root.parent)
+        real = os.lstat
+
+        def lstat_falso(ruta, *a, **k):
+            st = real(ruta, *a, **k)
+            if os.fspath(ruta) == ajeno:
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, self.uid + 12345,
+                                       st.st_gid, st.st_size, int(st.st_atime), int(st.st_mtime),
+                                       int(st.st_ctime)))
+            return st
+
+        with patch.object(cli_sandbox.os, "lstat", lstat_falso):
+            with self.assertRaises(cli_sandbox.BinarioAlterado):
+                self._resolver()
+
+    async def test_un_ancestro_que_es_un_symlink_se_rechaza(self):
+        real_root = self.root
+        enlace = Path(self.tmp.name) / "enlace-a-root"
+        os.symlink(real_root, enlace)
+        with patch.dict(os.environ, {"JAX_CLI_ROOT": str(enlace)}):
+            with self.assertRaises(cli_sandbox.BinarioAlterado):
+                self._resolver()
+
+    async def test_run_cli_no_lanza_con_un_hermano_g_w(self):
+        f = self._hermano()
+        self._fijar()
+        f.chmod(0o775)
         cap, fake = self.capturar(_FakeProc(_CODEX_OK))
         with patch("asyncio.create_subprocess_exec", fake):
             with self.assertRaises(cli_sandbox.BinarioAlterado):

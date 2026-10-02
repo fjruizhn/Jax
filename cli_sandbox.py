@@ -40,11 +40,13 @@ root, cambiarlas exige reiniciar):
                               escribir cualquier superadmin por el PUT generico.
   JAX_CLI_ROOT                raiz de binarios fijados (default /opt/jax-cli)
   JAX_CLI_<CODEX|KIMI>_VERSION / _SHA256
-                              version fijada y su SHA256. El spec fija la
-                              version en el perfil, pero la que se instala se
-                              decide en la operacion (paso 11: la que se
-                              pruebe, no la 0.159); sin SHA configurado el
-                              perfil NO arranca (BinarioAlterado).
+                              version fijada y el SHA256 del MANIFIESTO de su
+                              directorio (`sha_manifiesto`: ruta, modo y sha256 de
+                              cada archivo del arbol, no solo el del binario: bwrap
+                              monta y ejecuta el directorio entero). La version que
+                              se instala se decide en la operacion (paso 11: la que
+                              se pruebe, no la 0.159); sin SHA configurado el perfil
+                              NO arranca (BinarioAlterado).
   JAX_CLI_CRED_ROOT           raiz de las credenciales de suscripcion
                               (default /srv/jax-data/cli-suscripcion)
   JAX_CLI_RUN_DIR             directorio por llamada (default /run/jax-cli)
@@ -61,11 +63,13 @@ root, cambiarlas exige reiniciar):
   JAX_CLI_TIMEOUT_MAX_S       tope del timeout de run_cli (default 600)
 
 CACHES (cada uno declara su invalidacion en el mismo commit que lo crea):
-  - `_CACHE_SHA`: SHA256 de un binario, clave = ruta, firma = (dev, inode,
-    mtime_ns, ctime_ns, size). Se invalida solo: si cualquiera cambia, se
-    re-hashea. Es la invalidacion que pide el spec §1. Ademas, en cada llamada,
-    el binario y sus directorios hasta JAX_CLI_ROOT deben ser de root y sin
-    escritura de grupo/otros.
+  - `_CACHE_SHA`: SHA256 del manifiesto del directorio de un binario, clave = ruta
+    del binario, firma = la de TODO el arbol (por entrada: dev, inode, mtime_ns,
+    ctime_ns, size, modo, uid). Se invalida solo: si cambia cualquier stat de
+    cualquier entrada, se re-hashea. Es la invalidacion que pide el spec §1. En cada
+    llamada, ademas, se recorre el arbol entero y se exige que cada entrada sea de
+    root y sin escritura de grupo/otros, que ningun symlink salga del arbol, y que los
+    ancestros de JAX_CLI_ROOT hasta `/` sean de root y no escribibles.
   - La lista de titulares y la verificacion en `jax_users` NO se cachean: se
     leen del entorno y de la base en cada llamada (el borrado de un usuario
     surte efecto en la siguiente llamada).
@@ -914,38 +918,163 @@ _RE_VERSION = re.compile(r"^[0-9][0-9A-Za-z._+-]{0,31}$")
 _RE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RE_MODELO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:-]{0,63}$")
 
-#: ruta -> (firma, sha256 observado). La firma es (dev, inode, mtime_ns, ctime_ns,
-#: size). Se invalida solo: si cualquiera cambia, se re-hashea. `ctime` lo fija el
-#: kernel en cada escritura y NO se puede restaurar con utime(): reescribir el
-#: binario y devolverle el mtime ya no engana a la cache (auditoria 2026-10-02,
-#: MAJOR-4). Lo que la cache no garantiza (un cambio dentro del mismo tick del
-#: reloj del kernel) lo cubre que el binario y sus directorios sean de root y no
-#: escribibles: quien podria reescribirlo no es un usuario comun.
-_CACHE_SHA: dict[str, tuple[tuple[int, ...], str]] = {}
+#: ruta del binario -> (firma del ARBOL, sha256 del manifiesto observado). La firma
+#: del arbol es el SHA256 de (ruta relativa, tipo, dev, inode, mtime_ns, ctime_ns,
+#: size, modo, uid) de TODAS las entradas del directorio del binario: bwrap monta y
+#: ejecuta el directorio entero, no solo el archivo (MAJOR-15). Se invalida sola: si
+#: cambia cualquier stat de cualquier entrada, se re-hashea. `ctime` lo fija el
+#: kernel en cada escritura y NO se puede restaurar con utime(): reescribir un
+#: archivo y devolverle el mtime no engana a la cache (MAJOR-4). Lo que la cache no
+#: garantiza (un cambio dentro del mismo tick del reloj del kernel) lo cubre que
+#: todo el arbol sea de root y no escribible: quien podria cambiarlo no es un usuario
+#: comun. El recorrido (lstat de cada entrada, dueno y permisos) corre en CADA
+#: llamada; lo que se cachea es el hash del contenido, que es lo caro.
+_CACHE_SHA: dict[str, tuple[str, str]] = {}
+
+_MANIFIESTO_VERSION = "jax-cli-manifiesto-v1"
 
 
 def _firma_archivo(st) -> tuple[int, ...]:
     return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
 
 
-def _sha256_archivo(ruta: str) -> str:
+def _sha256_archivo(ruta: str, *, esperado=None) -> str:
+    """SHA256 del archivo `ruta`, abierto SIN seguir symlinks. Si se pasa `esperado`
+    (el stat que vio el recorrido), el archivo abierto tiene que ser ese mismo
+    (dev, inode): si lo cambiaron entre el recorrido y el hash, BinarioAlterado."""
     import hashlib
     h = hashlib.sha256()
-    with open(ruta, "rb") as f:
+    try:
+        fd = os.open(ruta, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        raise BinarioAlterado(f"no se pudo abrir {ruta!r} para hashearlo ({exc.strerror or type(exc).__name__})") from None
+    with os.fdopen(fd, "rb") as f:
+        if esperado is not None:
+            st = os.fstat(f.fileno())
+            if (st.st_dev, st.st_ino) != (esperado.st_dev, esperado.st_ino):
+                raise BinarioAlterado(f"{ruta!r} cambio entre el recorrido y el hash")
         for bloque in iter(lambda: f.read(1 << 20), b""):
             h.update(bloque)
     return h.hexdigest()
 
 
-def _verificar_dueno_y_permisos(ruta: str, raiz: str, uid_esperado: int, perfil: str) -> os.stat_result:
-    """El binario es un archivo regular (no symlink), del `uid_esperado`, sin
-    escritura de grupo ni de otros; y cada directorio desde el suyo hasta `raiz`
-    inclusive es un directorio real con el mismo dueno y sin esa escritura. Si
-    no, BinarioAlterado: un binario que alguien mas puede reemplazar no esta
-    fijado por su SHA256, solo por suerte."""
+def _inspeccionar_arbol(directorio: str, uid_esperado: int, perfil: str) -> list:
+    """Recorre TODO el arbol de `directorio` con `os.fwalk(follow_symlinks=False)` y
+    exige, en cada entrada: dueno == `uid_esperado`, sin escritura de grupo ni de
+    otros, y tipo permitido (archivo regular, directorio o symlink). Un symlink solo
+    se acepta si, resuelto de verdad (`realpath`, cadenas incluidas), queda DENTRO del
+    arbol. Cualquier error al recorrer (un subdirectorio ilegible) es BinarioAlterado:
+    `fwalk` ignora esos errores por defecto, y un arbol que no se pudo leer entero no
+    esta verificado. Devuelve [(ruta relativa, tipo, stat, destino del symlink o None)]
+    en el orden del recorrido; la raiz es la entrada ".". No hashea nada."""
     def malo(que: str):
         raise BinarioAlterado(f"{perfil}: {que}")
 
+    def al_fallar(exc: OSError):
+        malo(f"no se pudo recorrer el arbol del binario ({exc.strerror or type(exc).__name__})")
+
+    try:
+        top = os.lstat(directorio)
+    except OSError:
+        malo("el directorio del binario no existe")
+    if not stat.S_ISDIR(top.st_mode):
+        malo("el directorio del binario no es un directorio real (¿symlink?)")
+    raiz_real = os.path.realpath(directorio)
+    entradas: list = []
+
+    def revisar(rel: str, st) -> str:
+        if st.st_uid != uid_esperado:
+            malo(f"{rel!r} no es del dueno esperado")
+        if stat.S_ISLNK(st.st_mode):
+            return "l"  # el modo de un symlink no significa nada; cuenta su destino
+        if st.st_mode & 0o022:
+            malo(f"{rel!r} admite escritura de grupo u otros")
+        if stat.S_ISREG(st.st_mode):
+            return "f"
+        if stat.S_ISDIR(st.st_mode):
+            return "d"
+        malo(f"{rel!r} es de un tipo no permitido (solo archivo, directorio o symlink)")
+
+    for dirpath, dirnames, filenames, dfd in os.fwalk(directorio, follow_symlinks=False, onerror=al_fallar):
+        if dirpath == directorio or not entradas:
+            sd = os.fstat(dfd)
+            entradas.append((".", revisar(".", sd), sd, None))
+        reldir = os.path.relpath(dirpath, directorio)
+        for nombre in sorted(dirnames + filenames):
+            rel = nombre if reldir == "." else os.path.join(reldir, nombre)
+            st = os.stat(nombre, dir_fd=dfd, follow_symlinks=False)
+            tipo = revisar(rel, st)
+            destino = None
+            if tipo == "l":
+                destino = os.readlink(nombre, dir_fd=dfd)
+                real = os.path.realpath(os.path.join(dirpath, nombre))
+                if real != raiz_real and not real.startswith(raiz_real + os.sep):
+                    malo(f"el symlink {rel!r} sale del arbol del binario")
+            entradas.append((rel, tipo, st, destino))
+    if not entradas:
+        malo("el arbol del binario no se pudo recorrer")
+    return entradas
+
+
+def _firma_arbol(entradas) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    for rel, tipo, st, destino in entradas:
+        h.update(repr((rel, tipo, _firma_archivo(st), st.st_mode, st.st_uid, destino)).encode("utf-8", "surrogateescape"))
+    return h.hexdigest()
+
+
+def _manifiesto(directorio: str, entradas) -> str:
+    """SHA256 del MANIFIESTO del arbol: el texto canonico (JSON compacto, ASCII) de
+    la lista ORDENADA por ruta de `[ruta relativa, tipo, modo en octal, sha256 de los
+    archivos regulares | destino de los symlinks | ""]`, precedido por la version del
+    formato. No incluye dueno, mtime, ctime ni inodes: no depende de quien corra la
+    verificacion ni de cuando se copio el arbol, solo del contenido, los nombres, los
+    modos y los symlinks."""
+    import hashlib
+    filas = []
+    for rel, tipo, st, destino in entradas:
+        if tipo == "f":
+            ruta = os.path.join(directorio, rel)
+            extra = _sha256_archivo(ruta, esperado=st)
+        elif tipo == "l":
+            extra = destino
+        else:
+            extra = ""
+        filas.append([rel, tipo, "%04o" % stat.S_IMODE(st.st_mode), extra])
+    filas.sort(key=lambda f: f[0])
+    texto = _MANIFIESTO_VERSION + "\n" + json.dumps(filas, separators=(",", ":"))
+    return hashlib.sha256(texto.encode("ascii")).hexdigest()
+
+
+def sha_manifiesto(directorio: str, *, uid_esperado: int = 0) -> str:
+    """El valor que va en `JAX_CLI_<PERFIL>_SHA256` (paso 11 del despliegue): el SHA256
+    del manifiesto del directorio del binario, p. ej.
+
+        python3 -c 'import cli_sandbox as c; print(c.sha_manifiesto("/opt/jax-cli/codex/0.160.0"))'
+
+    corrido DESPUES de instalar el arbol como root (todo de `uid_esperado`, 0 por
+    defecto, y sin escritura de grupo ni de otros: si no, BinarioAlterado). Es la misma
+    funcion que usa `run_cli` para verificar, asi que lo que se fija es lo que se
+    compara. Cualquier archivo, modo o symlink que cambie en el arbol cambia el SHA."""
+    return _manifiesto(directorio, _inspeccionar_arbol(directorio, uid_esperado, "manifiesto"))
+
+
+def _verificar_dueno_y_permisos(ruta: str, raiz: str, uid_esperado: int, perfil: str) -> os.stat_result:
+    """El binario es un archivo regular (no symlink), del `uid_esperado`, sin
+    escritura de grupo ni de otros; cada directorio desde el suyo hasta `raiz`
+    inclusive es un directorio real con el mismo dueno y sin esa escritura; y cada
+    ANCESTRO de `raiz` hasta `/` es un directorio real de root (o del propio
+    `uid_esperado`, que en produccion ES root) sin escritura de grupo ni de otros.
+    Unica excepcion: `/tmp`, de escritura publica pero con el bit sticky, si esta en
+    la ruta. Si no, BinarioAlterado: un binario (o la ruta que lleva a el) que alguien
+    mas puede reemplazar no esta fijado por su SHA256, solo por suerte. El recorrido
+    de TODO el directorio del binario lo hace `_inspeccionar_arbol`."""
+    def malo(que: str):
+        raise BinarioAlterado(f"{perfil}: {que}")
+
+    if not os.path.isabs(raiz):
+        malo("JAX_CLI_ROOT debe ser una ruta absoluta")
     try:
         st = os.lstat(ruta)
     except OSError:
@@ -969,15 +1098,29 @@ def _verificar_dueno_y_permisos(ruta: str, raiz: str, uid_esperado: int, perfil:
         if padre == d:  # llegamos a "/" sin pasar por la raiz: la ruta no esta bajo ella
             malo("el binario no esta bajo JAX_CLI_ROOT")
         d = padre
+    # ancestros de la raiz hasta "/"
+    while d != "/":
+        d = os.path.dirname(d)
+        try:
+            sd = os.lstat(d)
+        except OSError:
+            malo(f"ancestro {d!r} ilegible")
+        if not stat.S_ISDIR(sd.st_mode):
+            malo(f"el ancestro {d!r} no es un directorio real (¿symlink?)")
+        if sd.st_uid not in (0, uid_esperado):
+            malo(f"el ancestro {d!r} no es de root")
+        if sd.st_mode & 0o022 and not (d == "/tmp" and sd.st_uid == 0 and sd.st_mode & stat.S_ISVTX):
+            malo(f"el ancestro {d!r} admite escritura de grupo u otros (el bit sticky solo se tolera en /tmp)")
     return st
 
 
 def _resolver_binario(perfil: Perfil, *, uid_esperado: int = 0) -> tuple[str, str, str]:
     """(ruta del binario, directorio, version) fijados por la configuracion, ya
-    verificados contra su SHA256 y contra su dueno/permisos. Lanza BinarioAlterado
-    ante cualquier duda. `uid_esperado` (0 = root en produccion) es un parametro y
-    no un flag global para que los tests sin root lo inyecten sin apagar el
-    control; run_cli nunca lo recibe de un llamador."""
+    verificados contra el SHA256 del MANIFIESTO de su directorio y contra su dueno y
+    permisos (el arbol completo y los ancestros de JAX_CLI_ROOT). Lanza
+    BinarioAlterado ante cualquier duda. `uid_esperado` (0 = root en produccion) es un
+    parametro y no un flag global para que los tests sin root lo inyecten sin apagar
+    el control; run_cli nunca lo recibe de un llamador."""
     pref = f"JAX_CLI_{perfil.nombre.upper()}"
     version = os.environ.get(f"{pref}_VERSION", "")
     sha = os.environ.get(f"{pref}_SHA256", "").strip().lower()
@@ -988,16 +1131,17 @@ def _resolver_binario(perfil: Perfil, *, uid_esperado: int = 0) -> tuple[str, st
     raiz = os.environ.get("JAX_CLI_ROOT", "/opt/jax-cli")
     directorio = os.path.join(raiz, perfil.nombre, version)
     ruta = os.path.join(directorio, perfil.bin_nombre)
-    st = _verificar_dueno_y_permisos(ruta, raiz, uid_esperado, perfil.nombre)
-    firma = _firma_archivo(st)
+    _verificar_dueno_y_permisos(ruta, raiz, uid_esperado, perfil.nombre)
+    entradas = _inspeccionar_arbol(directorio, uid_esperado, perfil.nombre)
+    firma = _firma_arbol(entradas)
     cacheado = _CACHE_SHA.get(ruta)
     if cacheado and cacheado[0] == firma:
         observado = cacheado[1]
     else:
-        observado = _sha256_archivo(ruta)
+        observado = _manifiesto(directorio, entradas)
         _CACHE_SHA[ruta] = (firma, observado)
     if observado != sha:
-        raise BinarioAlterado(f"{perfil.nombre}: el SHA256 del binario no coincide con el fijado")
+        raise BinarioAlterado(f"{perfil.nombre}: el SHA256 del manifiesto del directorio no coincide con el fijado")
     return ruta, directorio, version
 
 
