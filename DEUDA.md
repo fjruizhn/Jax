@@ -4044,6 +4044,11 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 ## Anotado, no bloquea
 
+- **Anotado con fecha 2026-10-02 (Proyectos E1, auditoría de la rama `feat/proyectos-e1-jax`, m-4, parked) — el evento `RENAME_PROJECT` no guarda el nombre anterior.**
+  - **Qué falta:** `rename_project` (`jax/memory/project_authority.py`) escribe en `jax_project_membership_event` quién renombró y cuándo, pero la tabla solo tiene columnas de rol y estado (`old_project_role`/`new_project_role`/`old_status`/`new_status`): ni el nombre ni la descripción anteriores quedan registrados en ningún sitio. Tras un renombrado no hay forma de reconstruir cómo se llamaba el proyecto, ni de deshacerlo desde la auditoría.
+  - **Por qué no entra en E1:** guardarlo exige una columna nueva (o una tabla de cambios) en una tabla de eventos **append-only** protegida por triggers, o sea una migración 005 nueva con su `down` probado y una decisión de formato (¿nombre y descripción en JSON? ¿retención?). E1 no lo necesita para su contrato (alcance, membresía y ciclo de vida) y el nombre vigente sigue en `projects.name`. Meterlo ahora ampliaría el alcance de una rama ya auditada.
+  - **Para cerrarlo:** una migración aditiva (`old_value`/`new_value` JSON nulos en el evento, solo para `RENAME_PROJECT`), prueba de que el trigger append-only sigue impidiendo UPDATE/DELETE, y `rename_project` escribiéndolos. Dueño: quien retome Proyectos E2.
+
 - **Anotado con fecha 2026-09-22 (PR#261, ronda 1 de revisión, MINOR-1) — el `ENGINE=InnoDB` de `jacobs_pipelines`/`jacobs_steps`/`jacobs_events` en producción es una medición puntual, no una garantía continua.** `CREATE TABLE IF NOT EXISTS` nunca convierte una tabla que ya existe: el `ENGINE=InnoDB` explícito que agrega este PR a `jacobs/store.py` protege bases *nuevas* (dev, CI, un restore de desastre) contra el `default_storage_engine` del server, pero el hecho de que `jax_memory` en producción ya sea InnoDB hoy descansa en esta medición manual, de una sola vez:
   - **Evidencia (2026-09-22, `SHOW TABLE STATUS`, sólo lectura, puerto 3308, base `jax_memory`):**
     `jacobs_events`, `jacobs_pipelines`, `jacobs_steps`, `jacobs_subpipeline_tokens` y
