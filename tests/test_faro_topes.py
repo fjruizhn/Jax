@@ -215,3 +215,75 @@ def test_el_resultado_es_inmutable():
     r = ResultadoTope(True, 1, None, True, "")
     with pytest.raises(Exception):
         r.permitido = False
+
+
+# --------------------------------------------------------------------------- #
+# auditoria de 0.3bc                                                          #
+# --------------------------------------------------------------------------- #
+from jax.faro.topes import ResultadoDesconocido  # noqa: E402
+
+
+@pytest.mark.parametrize("recurso", ["agentes", "agente", "subagentes", "subagente", "agentes_concurrentes", "agentes-profundidad",
+                                     "enjambre.agentes", "enjambre", "swarm.agents", "agents", "subagents", "agente.hijos",
+                                     "conexiones", "conexion", "conexiones.puerto", "max_agentes", "tokens.por_agente"])
+def test_minor4_el_guardia_de_d4_es_semantico_cualquier_recurso_de_agentes_queda_sin_tope(recurso):
+    t, _ = _topes()
+    with pytest.raises(TopeProhibido):
+        _consumir(t, recurso=recurso, tope=5)
+    assert _consumir(t, recurso=recurso, tope=None).permitido
+
+
+@pytest.mark.parametrize("recurso", ["tokens", "gasto", "gasto.usd", "memoria.consultas", "paginas", "agencia", "tokens.entrada"])
+def test_minor4_lo_que_no_es_de_agentes_sigue_pudiendo_tener_tope(recurso):
+    t, _ = _topes()
+    assert _consumir(t, recurso=recurso, tope=5).permitido
+
+
+class _AlmacenDesconocido(AlmacenMemoria):
+    """Imita un UPDATE que pudo confirmarse en la base y cuya respuesta nunca llego."""
+    def __init__(self, confirmado):
+        super().__init__()
+        self.confirmado = confirmado
+
+    async def sumar(self, clave, periodo, cantidad, tope):
+        if self.confirmado:
+            self.usado[(clave, periodo)] = self.usado.get((clave, periodo), 0) + cantidad
+        raise ResultadoDesconocido("UPDATE enviado y sin respuesta")
+
+    async def leer(self, clave, periodo):
+        return self.usado.get((clave, periodo), 0)
+
+
+def test_minor6_un_resultado_desconocido_es_un_estado_propio_y_con_tope_se_niega():
+    t, registros = _topes(_AlmacenDesconocido(True))
+    r = _consumir(t, tope=10, cantidad=3)
+    assert not r.permitido and r.motivo == "resultado_desconocido" and not r.medido
+    ev = [x for x in registros if x["evento"] == "tope_resultado_desconocido"]
+    assert len(ev) == 1 and ev[0]["decision"] == "denegado" and ev[0]["cantidad"] == 3
+    assert t.inciertos == {("t1|tokens", "total"): 3}
+
+
+def test_minor6_sin_tope_un_resultado_desconocido_no_niega_pero_queda_incierto():
+    t, registros = _topes(_AlmacenDesconocido(False))
+    r = _consumir(t, tope=None, cantidad=2)
+    assert r.permitido and r.motivo == "resultado_desconocido" and not r.medido
+    assert t.inciertos == {("t1|tokens", "total"): 2}
+    assert [x["decision"] for x in registros if x["evento"] == "tope_resultado_desconocido"] == ["permitido"]
+
+
+@pytest.mark.parametrize("confirmado", [True, False])
+def test_minor6_reconciliar_lee_el_contador_real_anota_y_limpia_lo_incierto(confirmado):
+    t, registros = _topes(_AlmacenDesconocido(confirmado))
+    _consumir(t, tope=10, cantidad=3)
+    r = corre(t.reconciliar(tenant="t1", recurso="tokens"))
+    assert r == {"usado": 3 if confirmado else 0, "incierto": 3}
+    assert t.inciertos == {}
+    ev = [x for x in registros if x["evento"] == "tope_reconciliado"]
+    assert len(ev) == 1 and ev[0]["usado"] == r["usado"] and ev[0]["incierto"] == 3
+    assert corre(t.reconciliar(tenant="t1", recurso="tokens")) == {"usado": r["usado"], "incierto": 0}
+
+
+def test_minor6_un_fallo_normal_no_es_un_resultado_desconocido():
+    t, _ = _topes(AlmacenMemoria("fallar"))
+    r = _consumir(t, tope=5)
+    assert r.motivo == "almacen_no_disponible" and t.inciertos == {}

@@ -612,3 +612,154 @@ def test_si_la_sonda_falla_tampoco_queda_el_avisador_corriendo(entorno):
     with pytest.raises(OSError):
         corre(arrancar(entorno, crear_pool=_fabrica(pool), solo_pruebas_mismo_uid=True))
     assert pool.cerrado
+
+
+# --------------------------------------------------------------------------- #
+# auditoria de 0.3bc                                                          #
+# --------------------------------------------------------------------------- #
+from jax.faro.control import CUENTAS_CON_CODIGO_DE_MODELOS, cuentas_prohibidas, validar_directorio_control  # noqa: E402
+
+
+def _pwd(tabla):
+    def getpwnam(nombre):
+        if nombre not in tabla:
+            raise KeyError(nombre)
+        return type("P", (), {"pw_uid": tabla[nombre]})()
+    return getpwnam
+
+
+TABLA = {"jaxsvc": 994, "axioma": 1001, "fruiz": 1000, "orq-faro": 990, "otra": 995}
+
+
+def test_major1_la_lista_por_defecto_incluye_las_cuentas_que_ejecutan_codigo_de_modelos():
+    assert {"jaxsvc", "axioma", "fruiz"} <= set(CUENTAS_CON_CODIGO_DE_MODELOS)
+    assert cuentas_prohibidas({}, getpwnam=_pwd(TABLA)) == {994, 1001, 1000}
+
+
+@pytest.mark.parametrize("cuenta,uid", [("jaxsvc", 994), ("axioma", 1001), ("fruiz", 1000)])
+def test_major1_el_orquestador_no_puede_ser_una_cuenta_que_ejecuta_codigo_de_modelos(cuenta, uid):
+    with pytest.raises(ConfigFaroInvalida, match=cuenta):
+        ConfigControl.desde_entorno({**ENV, "JAX_FARO_ORQUESTADOR_UID": str(uid)}, getpwnam=_pwd(TABLA))
+
+
+def test_major1_una_cuenta_propia_del_orquestador_si_se_acepta():
+    assert ConfigControl.desde_entorno({**ENV, "JAX_FARO_ORQUESTADOR_UID": "990"}, getpwnam=_pwd(TABLA)).orquestador_uid == 990
+
+
+def test_major1_la_lista_se_extiende_por_configuracion_pero_no_se_puede_acortar():
+    e = {**ENV, "JAX_FARO_ORQUESTADOR_PROHIBIDOS": "otra, no-existe"}
+    assert cuentas_prohibidas(e, getpwnam=_pwd(TABLA)) == {994, 1001, 1000, 995}           # lo que no existe en el sistema se salta
+    with pytest.raises(ConfigFaroInvalida, match="otra"):
+        ConfigControl.desde_entorno({**e, "JAX_FARO_ORQUESTADOR_UID": "995"}, getpwnam=_pwd(TABLA))
+    sola = {**ENV, "JAX_FARO_ORQUESTADOR_PROHIBIDOS": "otra"}                                # poner solo «otra» no quita jaxsvc
+    with pytest.raises(ConfigFaroInvalida, match="jaxsvc"):
+        ConfigControl.desde_entorno({**sola, "JAX_FARO_ORQUESTADOR_UID": "994"}, getpwnam=_pwd(TABLA))
+
+
+def test_major1_un_nombre_de_cuenta_invalido_en_la_configuracion_falla_cerrado():
+    with pytest.raises(ConfigFaroInvalida):
+        cuentas_prohibidas({"JAX_FARO_ORQUESTADOR_PROHIBIDOS": "ok,con espacio;rm"}, getpwnam=_pwd(TABLA))
+
+
+def test_major1_el_rango_de_jaulas_tampoco_puede_incluir_esas_cuentas():
+    with pytest.raises(ConfigFaroInvalida, match="jaxsvc"):
+        ConfigControl.desde_entorno({**ENV, "JAX_FARO_JAULA_UID_MIN": "993", "JAX_FARO_JAULA_UID_MAX": "1100"}, getpwnam=_pwd(TABLA))
+
+
+def test_major1_en_el_sistema_real_las_cuentas_resueltas_son_las_de_pwd():
+    import pwd
+    esperadas = set()
+    for n in CUENTAS_CON_CODIGO_DE_MODELOS:
+        try:
+            esperadas.add(pwd.getpwnam(n).pw_uid)
+        except KeyError:
+            pass
+    assert cuentas_prohibidas({}) == esperadas
+
+
+def test_minor1_el_rechazo_por_fallo_de_la_bitacora_lleva_run_id_e_id_de_correlacion(mundo):
+    def emisor(registro):
+        if registro.get("evento") == "control_creado":
+            raise OSError("bitacora caida")
+        mundo.registros.append(registro)
+
+    async def caso():
+        async with control(mundo, bitacora=Bitacora(emisores=[emisor])) as srv:
+            return await pedir(srv.ruta_socket, PEDIDO)
+    r = corre(caso())
+    rech = _eventos(mundo.registros, "control_rechazado")
+    assert r["ok"] is False and len(rech) == 1
+    assert rech[0]["run_id"].startswith("r-") and len(rech[0]["id_correlacion"]) == 32 and rech[0]["uid_jaula"] == 50001
+    assert r["run_id"] == rech[0]["run_id"]                                                  # y el orquestador lo sabe
+
+
+def test_minor2_el_uid_no_se_libera_mientras_la_jaula_siga_viva(mundo):
+    viva = {50001}
+
+    async def caso():
+        async with control(mundo, jaula_viva=lambda uid: uid in viva) as srv:
+            a = await pedir(srv.ruta_socket, PEDIDO)
+            await pedir(srv.ruta_socket, {"op": "cerrar", "run_id": a["run_id"]})
+            b = await pedir(srv.ruta_socket, PEDIDO)                    # la jaula sigue viva: el uid sigue ocupado
+            viva.clear()
+            c = await pedir(srv.ruta_socket, PEDIDO)                    # ya murio: se libera
+            return a, b, c
+    a, b, c = corre(caso())
+    assert a["ok"] and b == {"ok": False, "error": "uid_jaula_en_uso"} and c["ok"]
+
+
+def test_minor2_sin_gancho_el_uid_se_libera_al_cerrar(mundo):
+    async def caso():
+        async with control(mundo) as srv:
+            a = await pedir(srv.ruta_socket, PEDIDO)
+            await pedir(srv.ruta_socket, {"op": "cerrar", "run_id": a["run_id"]})
+            return await pedir(srv.ruta_socket, PEDIDO)
+    assert corre(caso())["ok"]
+
+
+@pytest.mark.parametrize("tenant", ["con espacio", "a|b", "x" * 65, "ñandú", "t\nx", "a;b", "a/b"])
+def test_minor5_el_control_rechaza_un_tenant_que_los_topes_no_aceptarian(mundo, tenant):
+    async def caso():
+        async with control(mundo) as srv:
+            return await pedir(srv.ruta_socket, {**PEDIDO, "tenant": tenant}), srv.ejecuciones
+    r, e = corre(caso())
+    assert r == {"ok": False, "error": "campo_invalido:tenant"} and e == {}
+
+
+@pytest.mark.parametrize("tenant", ["t-real", "Tenant_1", "a.b:c@d", "x" * 64])
+def test_minor5_un_tenant_aceptado_por_el_control_nunca_rompe_consumir_sin_regla(mundo, tenant):
+    from jax.faro.topes import Topes
+    from tests._faro_falsos import AlmacenMemoria
+
+    async def caso():
+        async with control(mundo) as srv:
+            r = await pedir(srv.ruta_socket, {**PEDIDO, "tenant": tenant})
+            t = srv.ejecuciones[r["run_id"]].ejecucion.tenant
+        return await Topes(AlmacenMemoria(), Bitacora(emisores=[])).consumir(tenant=t, recurso="tokens", cantidad=1, tope=None)
+    assert corre(caso()).permitido
+
+
+@pytest.mark.parametrize("modo", [0o777, 0o755, 0o770, 0o705])
+def test_minor9_el_directorio_de_control_inseguro_impide_arrancar_el_servicio(entorno, modo):
+    Path(entorno["JAX_FARO_CONTROL_DIR"]).chmod(modo)
+    crear = _fabrica()
+    with pytest.raises(ConfigFaroInvalida, match="grupo|otros"):
+        corre(arrancar(entorno, crear_pool=crear, solo_pruebas_mismo_uid=True))
+    assert crear.llamadas == []
+
+
+def test_minor9_main_sale_con_2_si_el_directorio_de_control_es_0777(entorno, capsys):
+    from jax.faro.servicio import main
+    Path(entorno["JAX_FARO_CONTROL_DIR"]).chmod(0o777)
+    entorno["JAX_FARO_DUENIO_UID"] = "0"                    # main no lleva la bandera de pruebas: ni dueño ni orquestador pueden ser este uid
+    entorno["JAX_FARO_ORQUESTADOR_UID"] = "990"
+    assert main([], env=entorno) == 2 and "otros" in capsys.readouterr().err
+
+
+def test_minor9_la_validacion_se_puede_llamar_sola(tmp_path):
+    d = tmp_path / "c"
+    d.mkdir(mode=0o750)
+    validar_directorio_control(_cfg_control(tmp_path, control_dir=d))
+    d.chmod(0o777)
+    with pytest.raises(ConfigFaroInvalida):
+        validar_directorio_control(_cfg_control(tmp_path, control_dir=d))

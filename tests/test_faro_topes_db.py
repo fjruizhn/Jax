@@ -206,3 +206,88 @@ def test_el_update_del_conteo_usa_la_clave_primaria(basedb):
     finally:
         con.close()
     assert plan and plan[0]["key"] == "PRIMARY", plan
+
+
+# --------------------------------------------------------------------------- #
+# auditoria de 0.3bc, MINOR 6: el UPDATE que se confirma y cuya respuesta no llega #
+# --------------------------------------------------------------------------- #
+from jax.faro.topes import ResultadoDesconocido  # noqa: E402
+
+
+class _PoolQueRompeDespues:
+    """Envuelve un pool real: el UPDATE se ejecuta de verdad (se confirma) y luego la conexion 'se corta'."""
+    def __init__(self, pool, romper_en):
+        self._pool, self._romper_en = pool, romper_en
+
+    def acquire(self):
+        pool, romper_en = self._pool, self._romper_en
+
+        class _Ctx:
+            async def __aenter__(self_):
+                self_.inner = pool.acquire()
+                con = await self_.inner.__aenter__()
+                return _Con(con)
+
+            async def __aexit__(self_, *a):
+                return await self_.inner.__aexit__(*a)
+
+        class _Con:
+            def __init__(self_, con):
+                self_.con = con
+
+            def cursor(self_):
+                return _Cur(self_.con.cursor())
+
+        class _Cur:
+            def __init__(self_, cur):
+                self_.cur = cur
+
+            async def __aenter__(self_):
+                self_.c = await self_.cur.__aenter__()
+                return self_
+
+            async def __aexit__(self_, *a):
+                return await self_.cur.__aexit__(*a)
+
+            async def execute(self_, sql, params=None):
+                r = await self_.c.execute(sql, params)
+                if sql.lstrip().startswith(romper_en):
+                    raise ConnectionResetError("se corto despues de confirmar")
+                return r
+
+            def __getattr__(self_, nombre):
+                return getattr(self_.c, nombre)
+        return _Ctx()
+
+
+def _con_pool(basedb, romper_en):
+    async def caso(accion):
+        pool = await crear_pool(basedb.config_topes())
+        try:
+            return await accion(_PoolQueRompeDespues(pool, romper_en), pool)
+        finally:
+            pool.close()
+            await pool.wait_closed()
+    return lambda accion: asyncio.run(caso(accion))
+
+
+def test_minor6_un_update_confirmado_sin_respuesta_es_resultado_desconocido_y_se_reconcilia(basedb):
+    async def accion(pool_roto, pool_real):
+        t = Topes(AlmacenMariaDB(pool_roto), Bitacora(emisores=[]))
+        r = await t.consumir(tenant="t1", recurso="tokens", cantidad=3, tope=10)
+        rec = await Topes(AlmacenMariaDB(pool_real), Bitacora(emisores=[])).reconciliar(tenant="t1", recurso="tokens")
+        return r, t.inciertos, rec
+    r, inciertos, rec = _con_pool(basedb, "UPDATE")(accion)
+    assert not r.permitido and r.motivo == "resultado_desconocido"
+    assert inciertos == {("t1|tokens", "total"): 3}
+    assert _usado(basedb, "t1", "tokens") == 3                       # la base SI lo conto: lo desconocido era real
+    assert rec["usado"] == 3
+
+
+def test_minor6_un_corte_antes_del_update_es_un_fallo_normal_y_no_cuenta_nada(basedb):
+    async def accion(pool_roto, pool_real):
+        t = Topes(AlmacenMariaDB(pool_roto), Bitacora(emisores=[]))
+        return await t.consumir(tenant="t1", recurso="tokens", cantidad=3, tope=10), t.inciertos
+    r, inciertos = _con_pool(basedb, "INSERT")(accion)
+    assert r.motivo == "almacen_no_disponible" and inciertos == {}
+    assert _usado(basedb, "t1", "tokens") in (None, 0)

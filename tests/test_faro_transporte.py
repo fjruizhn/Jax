@@ -107,7 +107,7 @@ def test_el_token_es_aleatorio_largo_y_su_archivo_es_de_solo_lectura(cfgp, carga
         async with puerto(cfgp, cargado) as srv:
             token = srv.ruta_token.read_text().strip()
             assert len(token) >= 32 and token.isascii()
-            assert stat.S_IMODE(os.lstat(srv.ruta_token).st_mode) == 0o444
+            assert stat.S_IMODE(os.lstat(srv.ruta_token).st_mode) == 0o400
         assert not srv.ruta_token.exists()
     corre(caso())
 

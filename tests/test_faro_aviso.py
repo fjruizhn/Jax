@@ -474,3 +474,56 @@ def test_un_observador_que_lanza_no_rompe_la_bitacora_ni_a_los_demas():
     bit = Bitacora(emisores=[vistos.append], observadores=[malo, lambda r: vistos.append("otro")])
     r = corre(bit.registrar("evento", a=1))
     assert r["evento"] == "evento" and "otro" in vistos and any(isinstance(v, dict) for v in vistos)
+
+
+# --------------------------------------------------------------------------- #
+# auditoria de 0.3bc                                                          #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:9", "http://localhost:80", "http://[::1]:9", "http://127.5.5.5", "https://api.telegram.org",
+                                 "https://proxy.interno:8443"])
+def test_minor10_http_solo_hacia_loopback_y_https_hacia_cualquiera(tmp_path, url):
+    assert ConfigAviso(creds=tmp_path / "t.env", api_url=url).api_url == url
+
+
+@pytest.mark.parametrize("url", ["http://example.com", "http://api.telegram.org", "http://10.0.0.5:9", "http://localhost.evil.com",
+                                 "http://127.0.0.1.evil.com", "http://0.0.0.0:9", "http://[::]:9", "http://", "https://", "http:///x"])
+def test_minor10_http_hacia_un_destino_no_loopback_no_se_acepta(tmp_path, url):
+    with pytest.raises(ConfigFaroInvalida):
+        ConfigAviso(creds=tmp_path / "t.env", api_url=url)
+
+
+def test_minor3_un_aviso_fallido_se_mide_por_clase_y_run_id_y_se_registra_sin_secretos(tmp_path, caplog):
+    caplog.set_level(logging.WARNING)
+
+    def roto(texto):
+        raise OSError("canal caido")
+
+    async def caso():
+        async with _avisador(tmp_path, [], enviar=roto, rafaga=10) as av:
+            av(DENEGACION)
+            av(RECHAZO)
+            av({**RECHAZO, "run_id": "run-2"})
+            await asyncio.sleep(0.3)
+            return av
+    av = corre(caso())
+    assert av.fallidos == 3
+    assert av.fallidos_por_clase == {"llamada|freno": 1, "conexion_rechazada|uid_distinto_del_esperado": 2}
+    assert av.ultimo_fallo["clase"] == "conexion_rechazada|uid_distinto_del_esperado" and av.ultimo_fallo["run_id"] == "run-2"
+    assert av.ultimo_fallo["error"] == "OSError"
+    log = caplog.text
+    assert "llamada|freno" in log and "run-1" in log and "run-2" in log and TOKEN not in log
+
+
+def test_minor3_un_resumen_fallido_se_cuenta_como_clase_resumen(tmp_path):
+    def roto(texto):
+        raise OSError("x")
+
+    async def caso():
+        async with _avisador(tmp_path, [], enviar=roto, rafaga=1, intervalo_s=0.05) as av:
+            for _ in range(5):
+                av(RECHAZO)
+            await asyncio.sleep(0.5)
+            return av
+    av = corre(caso())
+    assert av.fallidos_por_clase.get("resumen", 0) >= 1

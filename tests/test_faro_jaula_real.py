@@ -13,11 +13,9 @@ Lo que ejercita de verdad:
 - con bwrap real (sin cambiar de uid): la jaula ve exactamente su socket, su token y el rele, no el directorio
   de sockets; un cliente MCP real habla con el Puerto a traves de la jaula; el token de otra ejecucion no entra.
 
-LO QUE NO EJERCITA (declarado en el plan): bwrap CORRIENDO COMO el uid de la jaula con las rutas de `/run/faro`.
-Un proceso con otro uid no puede atravesar el directorio 0700 de `faro` para abrir las fuentes de los binds, y
-sudo cierra los descriptores heredados (no se pueden pasar ya abiertos con `--bind-fd`); bwrap como root, a su vez,
-no puede cambiar de uid dentro (AppArmor). Abrir las fuentes antes de bajar de uid es trabajo del elevador
-(paso 0.6/0.10), no del argv.
+LO QUE ANTES ESTABA ABIERTO y ahora se ejercita: bwrap CORRIENDO COMO el uid de la jaula con las fuentes en el
+directorio 0700 de `faro`. Lo resuelve una ACL por ejecucion que pone `faro` sin root (directorio `--x`, socket
+`rw-`, token `r--`, solo para el uid de esa jaula): ver `test_faro_acl.py` y las pruebas `test_acl_*` de aqui.
 """
 from __future__ import annotations
 
@@ -38,7 +36,7 @@ from jax.faro.config import ConfigPuerto
 from jax.faro.control import ConfigControl, ServidorControl
 from jax.faro.jaula import ConfigJaula, LanzadorJaula, argv_montajes
 from jax.faro.transporte import ServidorPuerto
-from tests._faro_utils import corre, ejecucion, paquete_listo, puerto
+from tests._faro_utils import RAIZ, corre, ejecucion, paquete_listo, puerto
 
 NOBODY, DAEMON, JAULA = 65534, 1, 33        # uids que existen en cualquier Ubuntu: nobody, daemon y www-data (sudo exige una cuenta)
 GID = os.getgid()
@@ -106,6 +104,14 @@ async def como_uid(uid: int, codigo: str, *args: str, grupo: int | None = None, 
     return p.returncode, salida.decode(), error.decode()
 
 
+async def como_uid_argv(uid: int, argv: list[str], *, entrada: str = "", plazo: float = 30.0):
+    p = await asyncio.create_subprocess_exec(
+        "sudo", "-n", "/usr/bin/setpriv", f"--reuid={uid}", f"--regid={uid}", "--clear-groups", "--no-new-privs", "--", *argv,
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    salida, error = await asyncio.wait_for(p.communicate(entrada.encode()), plazo)
+    return p.returncode, salida.decode(), error.decode()
+
+
 INTENTOS = r"""
 import json, os, socket, sys
 d, sock, tok = sys.argv[1:4]
@@ -129,17 +135,78 @@ print(json.dumps(r))
 # el directorio de sockets, desde otro uid REAL                               #
 # --------------------------------------------------------------------------- #
 
-def test_el_directorio_de_sockets_no_es_listable_ni_alcanzable_desde_otro_uid(mundo, requiere_sudo):
+def _intentos(mundo, srv, otro=None):
+    otro = otro or srv
+    return (str(mundo.cfg_puerto.socket_dir), str(srv.ruta_socket), str(srv.ruta_token))
+
+
+def test_el_directorio_de_sockets_no_es_listable_ni_alcanzable_desde_un_uid_que_no_es_la_jaula(mundo, requiere_sudo):
     async def caso():
         bit = Bitacora(emisores=[])
         async with ServidorPuerto(mundo.cfg_puerto, ejecucion(uid_esperado=NOBODY), mundo.cargado, bit) as srv:
-            rc, salida, error = await como_uid(NOBODY, INTENTOS, str(mundo.cfg_puerto.socket_dir), str(srv.ruta_socket),
-                                               str(srv.ruta_token))
-            return rc, json.loads(salida), error
-    rc, r, error = corre(caso())
+            return await como_uid(DAEMON, INTENTOS, *_intentos(mundo, srv))
+    rc, salida, error = corre(caso())
     assert rc == 0, error
+    r = json.loads(salida)
     assert r["stat_dir"] == "ok"                                      # el camino hasta el directorio SI se recorre (existe, se ve)...
-    assert r["listdir"] == r["leer_token"] == r["stat_socket"] == r["conectar"] == "PermissionError", r    # ...y el 0700 lo corta
+    assert r["listdir"] == r["leer_token"] == r["stat_socket"] == r["conectar"] == "PermissionError", r    # ...y la ACL no es suya
+
+
+def test_acl_la_jaula_abre_lo_suyo_pero_no_lista_el_directorio_ni_toca_lo_de_otra_ejecucion(mundo, requiere_sudo):
+    async def caso():
+        bit = Bitacora(emisores=[])
+        async with ServidorPuerto(mundo.cfg_puerto, ejecucion(run_id="run-a", uid_esperado=NOBODY), mundo.cargado, bit) as a, \
+                ServidorPuerto(mundo.cfg_puerto, ejecucion(run_id="run-b", uid_esperado=JAULA), mundo.cargado, bit) as b:
+            d = str(mundo.cfg_puerto.socket_dir)
+            nobody_lo_suyo = await como_uid(NOBODY, INTENTOS, d, str(a.ruta_socket), str(a.ruta_token))
+            nobody_lo_de_b = await como_uid(NOBODY, INTENTOS, d, str(b.ruta_socket), str(b.ruta_token))
+            www_lo_suyo = await como_uid(JAULA, INTENTOS, d, str(b.ruta_socket), str(b.ruta_token))
+            www_lo_de_a = await como_uid(JAULA, INTENTOS, d, str(a.ruta_socket), str(a.ruta_token))
+            return [json.loads(x[1]) for x in (nobody_lo_suyo, nobody_lo_de_b, www_lo_suyo, www_lo_de_a)]
+    suyo, ajeno, www_suyo, www_ajeno = corre(caso())
+    # nobody: su socket (conecta) y su token (lee) si; el directorio, NO se lista (EACCES)
+    assert suyo["listdir"] == "PermissionError" and suyo["stat_socket"] == "ok" and suyo["conectar"] == "ok" and suyo["leer_token"] == "ok"
+    # ... y lo de run-b (otro uid) no: ni leer su token ni conectar a su socket
+    assert ajeno["leer_token"] == "PermissionError" and ajeno["conectar"] == "PermissionError" and ajeno["listdir"] == "PermissionError"
+    # www-data es la jaula de run-b: lo suyo si, lo de run-a no
+    assert www_suyo["leer_token"] == "ok" and www_suyo["conectar"] == "ok" and www_suyo["listdir"] == "PermissionError"
+    assert www_ajeno["leer_token"] == "PermissionError" and www_ajeno["conectar"] == "PermissionError"
+
+
+def test_acl_al_cerrar_la_ejecucion_el_uid_ya_no_pasa_por_el_directorio(mundo, requiere_sudo):
+    async def caso():
+        bit = Bitacora(emisores=[])
+        d = str(mundo.cfg_puerto.socket_dir)
+        async with ServidorPuerto(mundo.cfg_puerto, ejecucion(uid_esperado=NOBODY), mundo.cargado, bit) as srv:
+            dentro = json.loads((await como_uid(NOBODY, INTENTOS, d, str(srv.ruta_socket), str(srv.ruta_token)))[1])
+            ruta_s, ruta_t = str(srv.ruta_socket), str(srv.ruta_token)
+        fuera = json.loads((await como_uid(NOBODY, INTENTOS, d, ruta_s, ruta_t))[1])
+        return dentro, fuera
+    dentro, fuera = corre(caso())
+    assert dentro["stat_socket"] == "ok" and fuera["stat_socket"] == "PermissionError" and fuera["listdir"] == "PermissionError"
+
+
+def test_acl_bwrap_real_corriendo_como_el_uid_de_la_jaula_abre_sus_fuentes_y_habla_con_el_puerto(mundo, requiere_sudo, requiere_bwrap):
+    """Lo que antes estaba ABIERTO: bwrap con el kernel-uid de la jaula, fuentes en el directorio 0700 de `faro`."""
+    relay = mundo.base / "relay.py"
+    shutil.copy(RAIZ / "jax" / "faro" / "relay.py", relay)
+    relay.chmod(0o644)
+    inicializar = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}})
+
+    async def caso():
+        bit = Bitacora(emisores=[])
+        regs = []
+        bit = Bitacora(emisores=[regs.append])
+        async with ServidorPuerto(mundo.cfg_puerto, ejecucion(uid_esperado=NOBODY), mundo.cargado, bit) as srv:
+            args = [shutil.which("bwrap"), *argv_montajes(str(srv.ruta_socket), str(srv.ruta_token), relay=str(relay)), "--",
+                    "/usr/bin/python3", "-m", "jax.faro.relay", "--socket", "/faro/puerto.sock", "--token-file", "/faro/token"]
+            r = await como_uid_argv(NOBODY, args, entrada=inicializar + "\n")
+            return r, regs
+    (rc, salida, error), regs = corre(caso())
+    assert '"serverInfo"' in salida and '"faro"' in salida, (rc, salida, error)
+    assert not [x for x in regs if x.get("evento") == "conexion_rechazada"]
+    assert [x["peer_uid"] for x in regs if x.get("evento") == "llamada"][0] == NOBODY            # el kernel vio el uid de la jaula
 
 
 # --------------------------------------------------------------------------- #

@@ -472,7 +472,7 @@ def test_el_socket_es_del_run_id_se_borra_al_cerrar_y_su_directorio_es_0700(cfg_
             assert srv.ruta_socket == cfg_puerto.socket_dir / "abc-123.sock"
             assert stat.S_IMODE(os.lstat(cfg_puerto.socket_dir).st_mode) == 0o700
             st = os.lstat(srv.ruta_socket)
-            assert stat.S_ISSOCK(st.st_mode) and stat.S_IMODE(st.st_mode) == 0o666  # dentro de un directorio 0700: solo llega quien lo recibe por bind
+            assert stat.S_ISSOCK(st.st_mode) and stat.S_IMODE(st.st_mode) == 0o600  # 0600 de faro; a la jaula la deja pasar una ACL con nombre (test_faro_acl.py)
         assert not srv.ruta_socket.exists()
     corre(caso())
 

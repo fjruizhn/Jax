@@ -345,3 +345,179 @@ def test_lanzar_de_verdad_un_proceso_hijo_con_un_bwrap_falso(bwrap, tmp_path):
     entorno = dict(l.split("=", 1) for l in (tmp_path / "env.txt").read_text().splitlines() if "=" in l)
     assert set(entorno) <= {"PATH", "PWD", "SHLVL", "_", "OLDPWD"}                        # nada heredado del servicio
     assert os.environ.get("HOME") not in entorno.values()
+
+
+# --------------------------------------------------------------------------- #
+# auditoria de 0.3bc                                                          #
+# --------------------------------------------------------------------------- #
+from jax.faro.jaula import (ETC_MINIMO, perfil_motor, perfil_rele, ejemplo_sudoers)  # noqa: E402
+
+
+def test_major2_el_perfil_del_rele_es_la_jaula_minima_y_argv_montajes_es_ese_perfil():
+    assert perfil_rele(*_rutas()) == argv_montajes(*_rutas())
+    assert "--unshare-net" in perfil_rele(*_rutas())
+
+
+def _motor(**kw):
+    base = dict(workspace="/srv/trabajo/run-1", paquete="/srv/jax-prod/ecosistema/abc", red="aislada")
+    base.update(kw)
+    return perfil_motor(*_rutas(), **base)
+
+
+def test_major2_el_perfil_de_motor_trae_workspace_rw_home_tmpfs_paquete_ro_y_etc_minimo():
+    argv = _motor()
+    assert ("/srv/trabajo/run-1", "/work") in _pares(argv, "--bind")
+    assert ("/srv/jax-prod/ecosistema/abc", "/faro/paquete") in _pares(argv, "--ro-bind")
+    assert "/home/jaula" in argv[argv.index("--tmpfs") + 1:] and argv.count("--tmpfs") == 2        # /tmp y $HOME
+    asig = {argv[i + 1]: argv[i + 2] for i, a in enumerate(argv) if a == "--setenv"}
+    assert asig["HOME"] == "/home/jaula" and argv[argv.index("--chdir") + 1] == "/work"
+    ro = {o: d for o, d in _pares(argv, "--ro-bind")}
+    for ruta in ETC_MINIMO:
+        assert ro[ruta] == ruta
+    assert {"/etc/ssl", "/etc/resolv.conf", "/etc/passwd"} <= set(ETC_MINIMO) and "/etc" not in ro and "/etc/shadow" not in ro
+
+
+def test_major2_el_perfil_de_motor_sigue_sin_nombrar_el_directorio_de_sockets_y_solo_el_workspace_es_rw():
+    argv = _motor()
+    rw = _pares(argv, "--bind")
+    assert sorted(d for _, d in rw) == sorted([DESTINO_SOCKET, "/work"])
+    assert SOCKET_DIR not in argv and "/run" not in argv
+    assert DESTINO_TOKEN in [d for _, d in _pares(argv, "--ro-bind")]
+
+
+@pytest.mark.parametrize("workspace", ["/run/faro", "/run", "/run/faro/run-1.sock", "/", "relativo", "", "/a\x00b"])
+def test_major2_el_workspace_no_puede_ser_el_directorio_de_sockets_ni_contenerlo(workspace):
+    with pytest.raises(ConfigFaroInvalida):
+        _motor(workspace=workspace)
+
+
+@pytest.mark.parametrize("red", ["compartida", "filtrada", "", None, "host"])
+def test_major2_la_red_del_perfil_de_motor_es_una_decision_pendiente_y_no_se_improvisa(red):
+    with pytest.raises(ConfigFaroInvalida, match="0.5|0.6|pendiente"):
+        _motor(red=red)
+
+
+def test_major2_el_perfil_aislado_del_motor_deja_la_red_cerrada():
+    assert "--unshare-net" in _motor(red="aislada")
+
+
+def test_major2_el_lanzador_elige_el_perfil_y_por_defecto_es_el_del_rele(bwrap):
+    l = _lanzador(bwrap)
+    ej = ejecucion(uid_esperado=UID_JAULA)
+    por_defecto = l.argv(ej, *_rutas(), ["/usr/bin/true"])
+    assert por_defecto == l.argv(ej, *_rutas(), ["/usr/bin/true"], perfil="rele")
+    motor = l.argv(ej, *_rutas(), ["/usr/bin/true"], perfil="motor", workspace="/srv/t/r1", paquete="/srv/p/abc", red="aislada")
+    assert ("/srv/t/r1", "/work") in _pares(motor, "--bind") and motor[motor.index("--") + 1:] == ["/usr/bin/true"]
+    with pytest.raises(ConfigFaroInvalida):
+        l.argv(ej, *_rutas(), ["/usr/bin/true"], perfil="otro")
+    with pytest.raises(ConfigFaroInvalida):
+        l.argv(ej, *_rutas(), ["/usr/bin/true"], perfil="motor")           # sin workspace ni paquete
+
+
+def test_major2_la_prohibicion_de_compartir_red_aplica_solo_al_perfil_del_rele():
+    for prohibida in ("--share-net", "--unshare-all", "--unshare-user", "--uid", "--cap-add"):
+        assert prohibida not in perfil_rele(*_rutas()) and prohibida not in _motor()
+
+
+def test_major2_el_ejemplo_trae_los_dos_perfiles():
+    texto = ejemplo()
+    assert "PERFIL DEL RELE" in texto and "PERFIL DE MOTOR" in texto and "/work" in texto
+
+
+# -- MINOR 7: el codigo de salida ---------------------------------------------------------------
+
+class _Proc:
+    def __init__(self, rc, demora=0.0):
+        self.rc, self.returncode, self.demora = rc, None, demora
+
+    async def wait(self):
+        await asyncio.sleep(self.demora)
+        self.returncode = self.rc
+        return self.rc
+
+
+import asyncio  # noqa: E402
+
+
+def test_minor7_se_anota_cuando_la_jaula_termina_con_su_codigo_de_salida(bwrap):
+    registros = []
+
+    async def crear_proceso(*a, **k):
+        return _Proc(7, 0.05)
+
+    async def caso():
+        l = _lanzador(bwrap, registros, crear_proceso=crear_proceso)
+        await l.lanzar(_srv(), ["/usr/bin/true"])
+        await l.esperar_terminos()
+    corre(caso())
+    assert [r["evento"] for r in registros] == ["jaula_lanzada", "jaula_termino"]
+    assert registros[1]["rc"] == 7 and registros[1]["run_id"] == "run-1" and registros[1]["uid_jaula"] == UID_JAULA
+
+
+def test_minor7_si_no_se_puede_anotar_el_termino_no_se_cae_nada(bwrap):
+    def emisor(r):
+        if r["evento"] == "jaula_termino":
+            raise OSError("sin bitacora")
+
+    async def crear_proceso(*a, **k):
+        return _Proc(0)
+
+    async def caso():
+        l = LanzadorJaula(_cfg(bwrap), Bitacora(emisores=[emisor]), crear_proceso=crear_proceso)
+        await l.lanzar(_srv(), ["/usr/bin/true"])
+        await l.esperar_terminos()
+    corre(caso())
+
+
+def test_minor2_el_lanzador_sabe_si_la_jaula_de_un_uid_sigue_viva(bwrap):
+    procs = [_Proc(0, 0.2)]
+
+    async def crear_proceso(*a, **k):
+        return procs.pop()
+
+    async def caso():
+        l = _lanzador(bwrap, crear_proceso=crear_proceso)
+        assert not l.jaula_viva(UID_JAULA)
+        await l.lanzar(_srv(), ["/usr/bin/true"])
+        viva = l.jaula_viva(UID_JAULA), l.jaula_viva(UID_JAULA + 1)
+        await l.esperar_terminos()
+        return viva, l.jaula_viva(UID_JAULA)
+    assert corre(caso()) == ((True, False), False)
+
+
+# -- MINOR 8: rango y sudoers --------------------------------------------------------------------
+
+def test_minor8_el_lanzador_revalida_el_rango_de_uids_de_jaula(bwrap):
+    l = LanzadorJaula(_cfg(bwrap), Bitacora(emisores=[]), uid_min=50000, uid_max=50010, uids_prohibidos={50005})
+    l.argv(ejecucion(uid_esperado=50001), *_rutas(), ["/usr/bin/true"])
+    for uid in (49999, 50011, 1001, 50005):
+        with pytest.raises(ConfigFaroInvalida):
+            l.argv(ejecucion(uid_esperado=uid), *_rutas(), ["/usr/bin/true"])
+
+
+def test_minor8_el_rango_del_lanzador_sale_de_la_configuracion_del_control(bwrap):
+    from jax.faro.control import ConfigControl
+    cc = ConfigControl(control_dir=Path("/x"), orquestador_uid=990, jaula_uid_min=50000, jaula_uid_max=50010, solo_pruebas_mismo_uid=True)
+    l = LanzadorJaula.desde_control(_cfg(bwrap), Bitacora(emisores=[]), cc)
+    with pytest.raises(ConfigFaroInvalida):
+        l.argv(ejecucion(uid_esperado=990), *_rutas(), ["/usr/bin/true"])
+    with pytest.raises(ConfigFaroInvalida):
+        l.argv(ejecucion(uid_esperado=60000), *_rutas(), ["/usr/bin/true"])
+
+
+def test_minor8_el_sudoers_de_ejemplo_limita_el_runas_al_rango_y_el_comando_a_bwrap():
+    texto = ejemplo_sudoers("faro", "/usr/bin/bwrap", 50000, 50003)
+    assert "Runas_Alias" in texto and "#50000" in texto and "#50003" in texto and "#50004" not in texto and "#49999" not in texto
+    assert "faro ALL=(JAULAS) NOPASSWD: /usr/bin/bwrap" in texto and "ALL=(ALL)" not in texto and "root" not in texto.replace("sin root", "")
+    with pytest.raises(ConfigFaroInvalida):
+        ejemplo_sudoers("faro", "/usr/bin/bwrap", 0, 10)               # el rango no incluye root
+    with pytest.raises(ConfigFaroInvalida):
+        ejemplo_sudoers("faro", "bwrap", 50000, 50003)                 # comando absoluto
+    with pytest.raises(ConfigFaroInvalida):
+        ejemplo_sudoers("faro ALL", "/usr/bin/bwrap", 50000, 50003)    # usuario sin inyeccion
+    with pytest.raises(ConfigFaroInvalida):
+        ejemplo_sudoers("faro", "/usr/bin/bwrap", 50000, 90000)        # sudoers no tiene rangos: se enumera, y hay tope
+
+
+def test_minor8_el_sudoers_versionado_es_el_que_genera_el_codigo():
+    assert (RAIZ / "ops" / "faro" / "sudoers-jaula-ejemplo").read_text() == ejemplo_sudoers("faro", "/usr/bin/bwrap", 50000, 50007)
