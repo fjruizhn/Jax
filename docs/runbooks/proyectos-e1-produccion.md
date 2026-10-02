@@ -16,7 +16,7 @@ Llevar a `jax_memory` de producción: HAMURABI como proyecto 1 con alcance, el p
       exec .venv/bin/python "$@"' _ "$@"
   }
   ```
-  *A confirmar por quien lo corra la primera vez* (no se pudo leer `/etc/jax/.env` sin `sudo`): que defina `JAX_DB_HOST`, `JAX_DB_PORT` (3308; la 3306 está muerta), `JAX_DB_USER` y `JAX_DB_PASSWORD`. Por eso los guiones de este runbook llevan `--database jax_memory` explícito; solo `revisar_indice_vectorial.py` toma la base de `JAX_DB_NAME` y **imprime su nombre en la primera línea**: debe decir `jax_memory:`.
+  `/etc/jax/.env` define `JAX_DB_HOST`, `JAX_DB_PORT` (3308; la 3306 está muerta), `JAX_DB_USER`, `JAX_DB_PASSWORD` y `JAX_DB_NAME` (verificado el 2026-10-02 por la sesión principal, solo los nombres). Aun así los guiones de este runbook llevan `--database jax_memory` explícito; `revisar_indice_vectorial.py` toma la base de `JAX_DB_NAME` e **imprime su nombre en la primera línea**: debe decir `jax_memory:`.
 - Las consultas SQL de este documento se corren con el archivo de opciones `600` que crea el §0 de ese mismo runbook (nunca `-p"$JAX_DB_PASSWORD"`).
 ## Authority impact
 Escribe en producción: crea alcance y proyectos, reescribe `project_id` y crea FKs (DDL). Nada de esto se ejecuta sin ventana o GO. La migración de datos es idempotente y reversible con `--revertir`; el bootstrap de HAMURABI no se revierte (el alcance queda).
@@ -73,7 +73,7 @@ e1 scripts/proyectos_e1_migrar.py --aplicar --actor-user-id 1 --database jax_mem
   --salida-reversion $D/mapa-reversion.json --confirmo-produccion
 ```
 (`$D` lo expande tu shell antes de `sudo`; tiene que ser una ruta absoluta, p. ej. `D=~/respaldos-despliegue/AAAA-MM-DD-proyectos-e1` del §0.)
-- `--salida-reversion` es obligatorio con `--aplicar` y la ruta tiene que **no existir** (si existe, aborta antes de tocar la base). Escribe un mapa JSON 0600: `{"evaluacion_project_id": N, "filas": [{"tabla", "id", "project_id_anterior"}]}`. Guardarlo fuera del repo y con el respaldo (el archivo lo crea root: `sudo chown fruiz:fruiz` después).
+- `--salida-reversion` es obligatorio con `--aplicar` y la ruta tiene que **no existir** (si existe, aborta antes de tocar la base). Escribe un mapa JSON 0600: `{"evaluacion_project_id": N, "filas": [{"tabla", "id", "project_id_anterior"}]}`. Guardarlo fuera del repo y con el respaldo. **No se cambia su dueño**: lo crea quien corre la migración (con la función `e1`, root), queda 0600 y **`--revertir` lo rechaza (salida 2) si no es del usuario que lo corre o tiene permisos más abiertos que 0600**; por eso `--revertir` se corre también con `e1`, y el mapa se lee con `sudo` si hace falta. Un mapa que otro pudo escribir decide qué `UPDATE` corre la reversión.
 - Comparar: `despues.huerfanos_ids` vacío y `filas_movidas` igual a `antes.filas_por_tabla`.
 - Códigos de salida:
   - `0` hecho; repetirlo es seguro (idempotente).
@@ -136,7 +136,14 @@ Respaldo sin restauración probada, ventana cerrada, usuario 1 que no cumple el 
   ```bash
   e1 scripts/proyectos_e1_migrar.py --revertir <mapa.json> --database jax_memory --confirmo-produccion
   ```
-  Corre en una sola transacción un `UPDATE <tabla> SET project_id=<anterior> WHERE id=<id> AND project_id=<evaluación>` por entrada y **solo confirma si la suma de filas afectadas es igual a la del mapa** (si no: rollback y salida `6`, sin cambiar nada). Después repetir la consulta del paso 10 con `<evaluación>`: tiene que dar 0 en cada tabla.
+  El mapa **no se da por bueno**: antes de cualquier `UPDATE`, dentro de la transacción, se comprueba que `evaluacion_project_id` es el proyecto creado con la llave de la evaluación, y que cada `project_id_anterior` está en `RESERVED_PROJECT_ID_RANGE` y **no** existe en `projects`; si algo falla, salida `6` sin tocar nada. Luego corre un `UPDATE <tabla> SET project_id=<anterior> WHERE id=<id> AND project_id=<evaluación>` por entrada y **solo confirma si la suma de filas afectadas es igual a la del mapa** (si no: rollback, salida `6`, y el mensaje lista las entradas `(tabla, id)` que no cuadraron). Códigos de `--revertir`:
+  - `0` revertido; repetirlo da `6` (ya no hay filas con la evaluación).
+  - `2` argumentos o guarda: falta `--confirmo-produccion`, el mapa es ilegible o inválido (tabla fuera de las cinco), **no es del usuario que corre o tiene permisos más abiertos que 0600**. No se tocó nada.
+  - `3` el commit quedó incierto: pudo aplicarse. **No repetir a ciegas:** correr `--verificar` y contar con SQL las filas con `project_id = <evaluación>` por tabla (paso 10). Si son 0 en todas, se revirtió; si siguen las del mapa, no; decidir con esa cuenta antes de volver a correr.
+  - `5` error no previsto (p. ej. una FK sigue puesta): no reintentar sin revisar.
+  - `6` el mapa no cuadra con la base: rollback, nada cambió.
+
+  Después repetir la consulta del paso 10 con `<evaluación>`: tiene que dar 0 en cada tabla. **Antes de volver a poner FKs, medir el índice vectorial** (`e1 scripts/revisar_indice_vectorial.py | tee $D/hnsw-tras-revertir.txt`, solo lectura); si miente, parar y seguir `docs/runbooks/indice-vectorial-envenenado.md`.
 - **Bootstrap de HAMURABI y proyecto de evaluación:** no se revierten; el alcance de HAMURABI queda.
 - **Todo:** restaurar el respaldo del paso 2 es el último recurso y es decisión de Fernando.
 ## Prohibited actions
