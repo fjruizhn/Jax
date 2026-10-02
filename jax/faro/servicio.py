@@ -9,7 +9,12 @@
    esta caida, la tabla no existe o el usuario no puede insertar, no arranca.
 
 Devuelve un `Servicio`: su `bitacora` ya lleva el emisor de la tabla (primero) y el del log, y `crear_puerto`
-construye el `ServidorPuerto` de UNA ejecucion con esa bitacora. QUIEN pide crear una `Ejecucion` (canal de
+construye el `ServidorPuerto` de UNA ejecucion con esa bitacora y con el UNICO presupuesto de bytes del
+servicio (`Servicio.presupuesto`, compartido por todas las ejecuciones).
+
+ANCLA DE LA CADENA: cuando haya destino (lo fija 0.10), `arrancar` debe lanzar
+`publicar_anclas_periodicamente(emisor, publicar, intervalo_s)` y cancelarla en `cerrar`. Hasta entonces no
+se publica nada y la cola de la cadena puede truncarse sin que se note (ver el plan, 0.3a). QUIEN pide crear una `Ejecucion` (canal de
 control autenticado) y el lanzador de jaula con uid distinto de `faro` son el paso 0.3c del plan: este modulo
 no abre ningun canal por el que un motor pueda crear o alterar una ejecucion.
 """
@@ -28,7 +33,7 @@ from .config import ConfigFaro, ConfigFaroInvalida, ConfigPuerto
 from .identidad import Ejecucion
 from .logs import asegurar_logging
 from .paquete import PaqueteCargado, cargar_paquete
-from .transporte import ServidorPuerto
+from .transporte import PresupuestoBytes, ServidorPuerto
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +47,11 @@ class Servicio:
     pool: object
     emisor: EmisorTabla
     bitacora: Bitacora
+    presupuesto: PresupuestoBytes
     solo_pruebas_mismo_uid: bool = False
 
     def crear_puerto(self, ejecucion: Ejecucion) -> ServidorPuerto:
-        return ServidorPuerto(self.cfg_puerto, ejecucion, self.paquete, self.bitacora,
+        return ServidorPuerto(self.cfg_puerto, ejecucion, self.paquete, self.bitacora, presupuesto=self.presupuesto,
                               solo_pruebas_mismo_uid=self.solo_pruebas_mismo_uid)
 
     async def cerrar(self) -> None:
@@ -72,7 +78,8 @@ async def arrancar(env: Mapping[str, str], *, crear_pool: Callable = crear_pool,
         pool.close()
         await pool.wait_closed()
         raise
-    return Servicio(cfg_faro, cfg_puerto, cfg_db, paquete, pool, emisor, bitacora, solo_pruebas_mismo_uid)
+    return Servicio(cfg_faro, cfg_puerto, cfg_db, paquete, pool, emisor, bitacora, PresupuestoBytes(cfg_puerto.presupuesto_bytes),
+                    solo_pruebas_mismo_uid)
 
 
 def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) -> int:

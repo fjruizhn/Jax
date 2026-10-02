@@ -16,7 +16,9 @@ QUIEN PUEDE HABLAR (auditoria MAJOR-2/3)
   token. Cada rechazo queda en la bitacora.
 
 MEMORIA (auditoria MAJOR-4)
-- `PresupuestoBytes`: presupuesto GLOBAL de bytes en vuelo. Un mensaje a medio leer cobra sus bytes
+- `PresupuestoBytes`: presupuesto GLOBAL del SERVICIO de bytes en vuelo: UNO solo para todas las ejecuciones,
+  que el `Servicio` crea y le pasa a cada `ServidorPuerto` por el constructor (si no se le pasa, el puerto crea el
+  suyo, solo para uso aislado y pruebas: con uno por ejecucion el limite se multiplicaria por el numero de runs). Un mensaje a medio leer cobra sus bytes
   (x3: cadena, decodificacion y analisis) hasta que se entrega; una respuesta cobra sus bytes hasta
   que el par la lee; y CADA CONEXION cobra un costo fijo (`costo_conexion_bytes`, 256 KiB por defecto)
   desde que se acepta hasta que se cierra, porque tenerla viva (servidor MCP, tareas, buffers) ocupa
@@ -174,7 +176,8 @@ class _Salida:
 
 class ServidorPuerto:
     def __init__(self, cfg: ConfigPuerto, ejecucion: Ejecucion, paquete: PaqueteCargado, bitacora: Bitacora,
-                 *, freno: Callable[[], bool] | None = None, solo_pruebas_mismo_uid: bool = False):
+                 *, freno: Callable[[], bool] | None = None, solo_pruebas_mismo_uid: bool = False,
+                 presupuesto: "PresupuestoBytes | None" = None):
         """`solo_pruebas_mismo_uid`: SOLO PARA PRUEBAS. Sin ella, `uid_esperado` no puede ser el del propio
         servicio (otro proceso del usuario `faro` entraria como si fuera la jaula) ni root. Es un argumento del
         constructor: no se lee del entorno ni de la configuracion, de modo que el servicio real no la activa."""
@@ -190,7 +193,7 @@ class ServidorPuerto:
         self._freno = freno if freno is not None else _freno.puesto
         self.ruta_socket: Path = Path(cfg.socket_dir) / f"{ejecucion.run_id}.sock"
         self.ruta_token: Path = Path(cfg.socket_dir) / f"{ejecucion.run_id}.token"
-        self.presupuesto = PresupuestoBytes(cfg.presupuesto_bytes)
+        self.presupuesto = presupuesto if presupuesto is not None else PresupuestoBytes(cfg.presupuesto_bytes)
         self._token = b""
         self._servidor: asyncio.AbstractServer | None = None
         self._tareas: set[asyncio.Task] = set()
