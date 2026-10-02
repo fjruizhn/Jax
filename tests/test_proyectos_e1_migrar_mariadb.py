@@ -11,7 +11,7 @@ Esquema: `jax_tenants`/`jax_users` con la DDL exacta de jax-platform
 `test_project_authority_mariadb.py` mas la migracion REAL
 `apply_project_authority_migration`. Las cinco tablas de contenido
 (conversations, messages, facts, decisions, action_items) son TABLAS MINIMAS
-(`id`, `project_id INT NULL` y poco mas): el guion solo lee y reescribe
+(`id`, `project_id INT NULL`, `user_id`, y `tenant_id` en conversations): el guion solo lee y reescribe
 `project_id`, asi que el resto de las columnas reales no influye.
 
 La guarda de produccion se prueba sin base.
@@ -103,7 +103,8 @@ async def _crear_base_y_esquema(nombre: str) -> None:
             for t in _TABLAS:
                 await cur.execute(
                     f"CREATE TABLE `{t}` (id INT AUTO_INCREMENT PRIMARY KEY, project_id INT NULL, "
-                    f"tag VARCHAR(20) NULL, KEY (project_id)) ENGINE=InnoDB")
+                    f"user_id INT NULL, tag VARCHAR(20) NULL, KEY (project_id)) ENGINE=InnoDB")
+            await cur.execute("ALTER TABLE `conversations` ADD COLUMN tenant_id INT NULL")
     finally:
         conn.close()
 
@@ -464,3 +465,107 @@ async def test_huerfano_que_aparece_tras_el_commit_hace_fallar_aplicar(tmp_path,
         pool.close()
         await pool.wait_closed()
     assert "940002" in str(e.value) and "volver a correr" in str(e.value)
+
+
+# ---------------------------------------------------------------- M-1: alcance de los huerfanos
+
+async def _estado_global() -> tuple:
+    return (await _estado_filas(),
+            (await _sql("SELECT COUNT(*) c FROM jax_project_scope", fetch=True))[0]["c"],
+            (await _sql("SELECT COUNT(*) c FROM projects", fetch=True))[0]["c"])
+
+
+@requiere_servidor
+@asincrono
+async def test_id_huerfano_fuera_del_rango_reservado_aborta_sin_escribir(tmp_path):
+    actor = await _actor_unico()
+    await _limpiar_contenido()
+    await _sembrar_huerfanos([930001], tablas=("conversations",))      # en rango
+    await _sembrar_huerfanos([77], tablas=("messages",))               # fuera de rango
+    antes = await _estado_global()
+    ruta = tmp_path / "rev.json"
+    pool = await _pool()
+    try:
+        with pytest.raises(migrar.HuerfanosFueraDeAlcance) as e:
+            await migrar.aplicar(pool, actor_user_id=actor, salida_reversion=str(ruta))
+        m = await migrar.medir(pool)
+    finally:
+        pool.close()
+        await pool.wait_closed()
+    assert "77" in str(e.value)
+    assert await _estado_global() == antes                 # ni proyectos, ni alcance, ni filas
+    assert not ruta.exists()
+    assert m["fuera_de_alcance"]["ids_fuera_de_rango"] == [77]
+
+
+@requiere_servidor
+@asincrono
+@pytest.mark.parametrize("tabla", ["conversations", "messages", "facts", "decisions", "action_items"])
+async def test_fila_huerfana_de_usuario_de_otro_tenant_aborta_sin_escribir(tmp_path, tabla):
+    actor = await _actor_unico()
+    await _limpiar_contenido()
+    await _asegurar_tenant(2)
+    ajeno = await _crear_usuario(2, role="operator")
+    await _sembrar_huerfanos([930002], tablas=("conversations",))
+    fila = await _sql(f"INSERT INTO `{tabla}` (project_id,user_id,tag) VALUES (930002,%s,'ajena')", (ajeno,))
+    antes = await _estado_global()
+    ruta = tmp_path / "rev.json"
+    pool = await _pool()
+    try:
+        with pytest.raises(migrar.HuerfanosFueraDeAlcance) as e:
+            await migrar.aplicar(pool, actor_user_id=actor, salida_reversion=str(ruta))
+        m = await migrar.medir(pool)
+    finally:
+        pool.close()
+        await pool.wait_closed()
+    assert str(ajeno) in str(e.value) and tabla in str(e.value)
+    assert await _estado_global() == antes
+    assert not ruta.exists()
+    assert {"tabla": tabla, "id": fila, "user_id": ajeno} in m["fuera_de_alcance"]["filas_otro_tenant"]
+    assert m["fuera_de_alcance"]["ids_fuera_de_rango"] == []
+
+
+@requiere_servidor
+@asincrono
+async def test_conversacion_con_tenant_propio_ajeno_aborta(tmp_path):
+    actor = await _actor_unico()
+    await _limpiar_contenido()
+    await _sql("INSERT INTO conversations (project_id,user_id,tenant_id) VALUES (930003,NULL,2)")
+    pool = await _pool()
+    try:
+        with pytest.raises(migrar.HuerfanosFueraDeAlcance):
+            await migrar.aplicar(pool, actor_user_id=actor, salida_reversion=str(tmp_path / "r.json"))
+    finally:
+        pool.close()
+        await pool.wait_closed()
+
+
+@requiere_servidor
+@asincrono
+async def test_huerfanos_del_tenant_1_y_sin_usuario_siguen_migrando(tmp_path):
+    actor = await _actor_unico()
+    await _limpiar_contenido()
+    propio = await _crear_usuario(1, role="operator")
+    await _sql("INSERT INTO conversations (project_id,user_id,tenant_id) VALUES (930004,%s,1)", (propio,))
+    await _sql("INSERT INTO messages (project_id,user_id) VALUES (930004,NULL)")
+    pool = await _pool()
+    try:
+        r = await migrar.aplicar(pool, actor_user_id=actor, salida_reversion=str(tmp_path / "r.json"))
+    finally:
+        pool.close()
+        await pool.wait_closed()
+    assert r["despues"]["huerfanos_ids"] == []
+    assert r["despues"]["fuera_de_alcance"] == {"ids_fuera_de_rango": [], "filas_otro_tenant": [],
+                                                "total_filas_otro_tenant": 0}
+
+
+def test_main_sale_con_4_si_hay_huerfanos_fuera_de_alcance(tmp_path, capsys):
+    if not _HAY_SERVIDOR:
+        pytest.skip("necesita MariaDB real")
+    actor = asyncio.run(_actor_unico())
+    asyncio.run(_limpiar_contenido())
+    asyncio.run(_sembrar_huerfanos([78], tablas=("facts",)))
+    rc = migrar.main(["--aplicar", "--actor-user-id", str(actor), "--database", _DB,
+                      "--salida-reversion", str(tmp_path / "r.json")])
+    assert rc == 4
+    assert "78" in capsys.readouterr().err

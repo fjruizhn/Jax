@@ -13,6 +13,11 @@ La conexion sale de JAX_DB_HOST/PORT/USER/PASSWORD/NAME del entorno; este guion
 nunca abre /etc/jax/.env (el runbook carga el entorno). Nunca hace DELETE ni
 toca FKs (eso es la Tarea 4).
 
+Antes de escribir, `--aplicar` aborta con codigo 4 (HuerfanosFueraDeAlcance) si
+algun id huerfano esta fuera de RESERVED_PROJECT_ID_RANGE o si alguna fila
+huerfana es de un usuario (o, en conversations, tenant) que no es del tenant 1;
+`--verificar` los lista en `fuera_de_alcance`.
+
 La llave de idempotencia de la evaluacion es un UUID v5 derivado de un nombre
 fijo: `create_project` exige un UUID canonico de 36 caracteres.
 """
@@ -33,7 +38,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from jax.core.db_connect_config import db_connect_timeout_seconds  # noqa: E402
 from jax.memory.b9 import MutationAuthorizationRequest, ScopeContext, Visibility  # noqa: E402
 from jax.memory.b9_mariadb import MariaDBB9Store  # noqa: E402
-from jax.memory.project_authority import LEGACY_PROJECT_TENANT_ID, ProjectAuthorityAdmin  # noqa: E402
+from jax.memory.project_authority import (  # noqa: E402
+    LEGACY_PROJECT_TENANT_ID, RESERVED_PROJECT_ID_RANGE, ProjectAuthorityAdmin)
 from jax.memory.scope_authority import ProjectLifecycle  # noqa: E402
 
 HAMURABI_ID = 1
@@ -43,6 +49,12 @@ LLAVE_EVALUACION_NOMBRE = "e1-evaluacion-grounding-sp3-20260903"
 LLAVE_EVALUACION = str(uuid.uuid5(uuid.NAMESPACE_URL, LLAVE_EVALUACION_NOMBRE))
 BASE_PRODUCCION = "jax_memory"
 COMPONENTE = "proyectos-e1-migrar"
+
+
+class HuerfanosFueraDeAlcance(RuntimeError):
+    """Hay huerfanos que no son del legado de HAMURABI: fuera del rango
+    reservado de ids o de filas de un usuario/tenant que no es el 1. Se aborta
+    ANTES de escribir nada (codigo 4)."""
 
 
 class HuerfanosRestantes(RuntimeError):
@@ -79,19 +91,53 @@ async def _filas(cur, ids: list[int]) -> dict[str, int]:
     return out
 
 
+_MAX_FILAS_REPORTADAS = 50
+
+
+async def _fuera_de_alcance(cur, ids: list[int]) -> dict:
+    """Lo que NO se debe mover al proyecto de evaluacion (tenant 1, legado):
+    - ids huerfanos fuera de RESERVED_PROJECT_ID_RANGE;
+    - filas huerfanas cuyo `user_id` no es de un usuario del tenant 1 (sin fila
+      en jax_users cuenta como NO probado: se reporta), y, en `conversations`,
+      cuyo propio `tenant_id` no es el 1. `user_id`/`tenant_id` NULL es legado
+      sin dueno y se acepta. Las cinco tablas tienen `user_id` en el esquema
+      real (jax_memory_schema.sql); solo `conversations` tiene `tenant_id`."""
+    lo, hi = RESERVED_PROJECT_ID_RANGE
+    fuera_rango = [i for i in ids if not lo <= i <= hi]
+    filas: list[dict] = []
+    total = 0
+    if ids:
+        marcas = ",".join(["%s"] * len(ids))
+        for t in TABLAS:
+            extra = " OR (t.tenant_id IS NOT NULL AND t.tenant_id<>%s)" if t == "conversations" else ""
+            args: tuple = (*ids, LEGACY_PROJECT_TENANT_ID) + ((LEGACY_PROJECT_TENANT_ID,) if extra else ())
+            donde = (f"FROM `{t}` t LEFT JOIN jax_users u ON u.user_id=t.user_id "
+                     f"WHERE t.project_id IN ({marcas}) AND ((t.user_id IS NOT NULL AND "
+                     f"(u.user_id IS NULL OR u.tenant_id<>%s)){extra})")
+            await cur.execute(f"SELECT COUNT(*) AS c {donde}", args)
+            total += int((await cur.fetchone())["c"])
+            await cur.execute(f"SELECT t.id AS id, t.user_id AS user_id {donde} ORDER BY t.id LIMIT {_MAX_FILAS_REPORTADAS}",
+                              args)
+            filas.extend({"tabla": t, "id": int(r["id"]), "user_id": None if r["user_id"] is None else int(r["user_id"])}
+                         for r in await cur.fetchall())
+    return {"ids_fuera_de_rango": fuera_rango, "filas_otro_tenant": filas[:_MAX_FILAS_REPORTADAS],
+            "total_filas_otro_tenant": total}
+
+
 async def medir(pool) -> dict:
     """Solo lectura."""
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             ids = await _huerfanos(cur)
             filas = await _filas(cur, ids)
+            fuera = await _fuera_de_alcance(cur, ids)
             await cur.execute("SELECT 1 AS x FROM jax_project_scope WHERE project_id=%s", (HAMURABI_ID,))
             hamurabi = await cur.fetchone() is not None
             await cur.execute("SELECT project_id FROM jax_project_creation_request WHERE idempotency_key=%s",
                               (LLAVE_EVALUACION,))
             fila = await cur.fetchone()
     return {"huerfanos_ids": ids, "filas_por_tabla": filas, "hamurabi_con_alcance": hamurabi,
-            "evaluacion_project_id": int(fila["project_id"]) if fila else None}
+            "fuera_de_alcance": fuera, "evaluacion_project_id": int(fila["project_id"]) if fila else None}
 
 
 def _escribir_reversion(ruta: str, destino: int, filas: list[dict]) -> None:
@@ -180,6 +226,12 @@ async def aplicar(pool, *, actor_user_id: int, salida_reversion: str) -> dict:
     if os.path.lexists(salida_reversion):
         raise FileExistsError(f"el archivo de reversion ya existe: {salida_reversion}")
     antes = await medir(pool)
+    fuera = antes["fuera_de_alcance"]
+    if fuera["ids_fuera_de_rango"] or fuera["total_filas_otro_tenant"]:
+        raise HuerfanosFueraDeAlcance(
+            f"huerfanos fuera de alcance, no se escribio nada: ids fuera de {RESERVED_PROJECT_ID_RANGE} = "
+            f"{fuera['ids_fuera_de_rango']}; filas de usuario/tenant ajeno al tenant {LEGACY_PROJECT_TENANT_ID} = "
+            f"{fuera['total_filas_otro_tenant']} (primeras: {fuera['filas_otro_tenant']}). Revisarlos a mano.")
     admin = ProjectAuthorityAdmin(MariaDBB9Store(pool))
     await admin.bootstrap_existing_project(
         _req(actor_user_id, "BOOTSTRAP_PROJECT", HAMURABI_ID), HAMURABI_ID, owner_user_id=actor_user_id)
@@ -249,6 +301,9 @@ def main(argv: list[str] | None = None) -> int:
     except CommitIncierto as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 3
+    except HuerfanosFueraDeAlcance as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 4
     except (HuerfanosRestantes, ConteosNoCoinciden, FileExistsError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
