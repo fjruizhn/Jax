@@ -1436,6 +1436,9 @@ def _ranura_liberar(handle, perfil: Perfil, ranuras: int, cred_host: Optional[st
 # run_cli
 # --------------------------------------------------------------------------
 
+_RE_BLANCOS = re.compile(r"\s+")
+
+
 @dataclass(frozen=True)
 class ResultadoCLI:
     texto: str
@@ -1479,6 +1482,7 @@ async def run_cli(
     son excepciones tipadas (ErrorCLI y subclases), con `.clase` estable."""
     t0 = time.monotonic()
     clase = None
+    motivo = ""
     version = ""
     try:
         if (
@@ -1549,12 +1553,15 @@ async def run_cli(
         raise
     except BaseException as exc:  # noqa: BLE001 -- registra y RELANZA; nada se traga
         clase = getattr(exc, "clase", None) or type(exc).__name__
+        # el motivo distingue las causas de una misma clase (SandboxUnavailable tiene
+        # varias); sin saltos de linea, para que un mensaje no pueda fabricar otra linea
+        motivo = _RE_BLANCOS.sub(" ", str(exc))[:200]
         raise
     finally:
         logger.info(
             "run_cli correlation_id=%s entry_point=%s user_id=%s tenant_id=%s perfil=%s modelo=%s "
-            "version_cli=%s clase=%s latencia_ms=%d",
+            "version_cli=%s clase=%s latencia_ms=%d motivo=%s",
             correlation_id, entry_point, getattr(titular, "user_id", None),
             getattr(titular, "tenant_id", None), perfil, modelo, version, clase or "ok",
-            int((time.monotonic() - t0) * 1000),
+            int((time.monotonic() - t0) * 1000), motivo,
         )

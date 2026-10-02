@@ -1265,6 +1265,42 @@ class LogDeRunCliTest(_Entorno):
         self.assertIn("clase=ValueError", linea)
         self.assertNotIn("clase=ok", linea)
 
+    async def test_dos_causas_distintas_de_sandbox_unavailable_dan_lineas_distintas(self):
+        # MINOR-19: la clase sola no dice cual de las causas fue; el motivo si
+        with patch.object(cli_sandbox, "_BWRAP_BIN", "/no/existe/bwrap"):
+            sin_bwrap = await self._linea()
+        shutil.rmtree(self.cred / "codex")
+        sin_cred = await self._linea()
+        os.makedirs(self.cred / "codex")
+        with patch.dict(os.environ):
+            os.environ.pop("JAX_CLI_LOCK_DIR")
+            sin_locks = await self._linea()
+        lineas = (sin_bwrap, sin_cred, sin_locks)
+        for l in lineas:
+            self.assertIn("clase=SandboxUnavailable", l)
+            self.assertIn("motivo=", l)
+        motivos = [l.split("motivo=", 1)[1] for l in lineas]
+        self.assertEqual(len(set(motivos)), 3, motivos)
+        self.assertIn("bwrap", motivos[0])
+        self.assertIn("credencial", motivos[1])
+        self.assertIn("JAX_CLI_LOCK_DIR", motivos[2])
+
+    async def test_el_motivo_se_recorta_a_200_caracteres_y_no_parte_la_linea(self):
+        largo = "x" * 500 + "\nSEGUNDA-LINEA-FALSA clase=ok"
+        with patch.object(cli_sandbox, "_resolver_binario", side_effect=cli_sandbox.BinarioAlterado(largo)):
+            linea = await self._linea()
+        motivo = linea.split("motivo=", 1)[1]
+        self.assertLessEqual(len(motivo), 200)
+        self.assertNotIn("\n", linea)
+        self.assertNotIn("SEGUNDA-LINEA-FALSA", linea)
+
+    async def test_en_exito_y_al_cancelar_el_motivo_va_vacio(self):
+        with self.assertLogs("cli_sandbox", "INFO") as cm:
+            await self.correr("codex")
+        linea = [l for l in cm.output if "run_cli correlation_id" in l][0]
+        self.assertIn("clase=ok", linea)
+        self.assertRegex(linea, r"motivo=\s*$")
+
     async def test_un_error_inesperado_del_subproceso_no_sale_como_ok(self):
         async def revienta(*a, **k):
             raise RuntimeError("boom")
