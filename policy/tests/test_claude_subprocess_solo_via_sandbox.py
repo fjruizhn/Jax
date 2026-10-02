@@ -225,13 +225,27 @@ def _lanza_via_bwrap_directo(tree: ast.AST) -> bool:
 # aceptan, por ruta relativa al root de un repo escaneado y con su justificacion. NO es una
 # allowlist ciega: `_exento_por_mencion_partida` exige ademas que el archivo lance SOLO `git`,
 # que no lance ningun CLI de suscripcion (criterio c) ni escriba la ruta de sus binarios
-# (criterio d); si deja de cumplirlo, vuelve a ser violacion.
+# (criterio d); si deja de cumplirlo, vuelve a ser violacion. Y (MAJOR-30, auditoria del SHA
+# 174da8c) el conjunto de cadenas plegadas que contienen "claude" (sin distinguir mayusculas)
+# tiene que ser EXACTAMENTE el declarado en `_CADENAS_CLAUDE_EXENTAS`: sin esa condicion, un
+# `['git', '-c', 'alias.x=!claude ...', 'x']`, un `core.pager=claude ...` o un
+# `env={'GIT_SSH_COMMAND': 'claude -p x'}` dentro del archivo exento lanzaban claude via git y
+# la exencion los dejaba pasar.
 _EXENTOS_POR_MENCION_PARTIDA = {
     "scripts/axioma_sync.py":
         "lanza solo `git` (subprocess.run([\"git\", \"-C\", ...]) para leer el SHA de origen); el "
         "literal partido es \"CLAUDE.md\" dentro de una ruta de archivo, no el comando "
-        "(`_CLAUDE_FILE = \"C\" + \"LAUDE.md\"`)",
+        "(`_CLAUDE_FILE = \"C\" + \"LAUDE.md\"`); las unicas cadenas con \"claude\" que se "
+        "aceptan son tres, las que parte en sus lineas 27-29: \"CLAUDE.md\", \"claude-code\" "
+        "y \"Claude Code\" -- cualquier otra constante con \"claude\" (argumento de git, valor "
+        "de env) hace caer la exencion",
 }
+# El conjunto exacto de cadenas plegadas con "claude" que el archivo exento puede tener.
+_CADENAS_CLAUDE_EXENTAS = frozenset({"CLAUDE.md", "claude-code", "Claude Code"})
+
+
+def _cadenas_con_claude(tree: ast.AST) -> frozenset[str]:
+    return frozenset(t for t in _cadenas_plegadas(tree) if "claude" in t.lower())
 
 
 def _exento_por_mencion_partida(root: Path, path: Path, tree: ast.AST) -> bool:
@@ -241,6 +255,7 @@ def _exento_por_mencion_partida(root: Path, path: Path, tree: ast.AST) -> bool:
         return False
     return (
         rel in _EXENTOS_POR_MENCION_PARTIDA
+        and _cadenas_con_claude(tree) == _CADENAS_CLAUDE_EXENTAS
         and _lanza_solo_git(tree)
         and not _lanza_cli_de_suscripcion(tree)
         and not _menciona_ruta_de_cli(tree)
@@ -469,6 +484,19 @@ def _literales(tree: ast.AST):
                 yield plegada
 
 
+def _cadenas_plegadas(tree: ast.AST):
+    """Cada string literal del AST y cada cadena que resulta de plegar una concatenacion o un
+    `"".join([...])` de literales (el plegado del criterio (a), con `con_join=True`)."""
+    asignaciones = _asignaciones_a_listas(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            yield node.value
+        elif isinstance(node, (ast.BinOp, ast.Call)):
+            texto = _plegar(node, asignaciones, con_join=True)
+            if texto is not None:
+                yield texto
+
+
 def _references_claude_literal(tree: ast.Module) -> bool:
     """True si el archivo menciona "claude" en un STRING LITERAL del AST
     (incluidos docstrings), no en un comentario `#`.
@@ -492,19 +520,7 @@ def _references_claude_literal(tree: ast.Module) -> bool:
     referencia real, aunque inusual, podria esconderse ahi.
 
     Residuo conocido: f-strings, `%`/`.format` y un join con algo que no sea literal."""
-    asignaciones = _asignaciones_a_listas(tree)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            texto = node.value
-        elif isinstance(node, (ast.BinOp, ast.Call)):
-            texto = _plegar(node, asignaciones, con_join=True)
-            if texto is None:
-                continue
-        else:
-            continue
-        if "claude" in texto.lower():
-            return True
-    return False
+    return any("claude" in t.lower() for t in _cadenas_plegadas(tree))
 
 
 # CLIs de suscripcion que solo el nucleo cli_sandbox puede lanzar (spec §5).
@@ -1191,7 +1207,8 @@ def test_la_mencion_partida_no_inventa_violaciones() -> None:
 def test_axioma_sync_esta_en_la_lista_explicita_de_exenciones_con_su_justificacion() -> None:
     rel = "scripts/axioma_sync.py"
     assert rel in _EXENTOS_POR_MENCION_PARTIDA
-    assert "git" in _EXENTOS_POR_MENCION_PARTIDA[rel] and "CLAUDE.md" in _EXENTOS_POR_MENCION_PARTIDA[rel]
+    just = _EXENTOS_POR_MENCION_PARTIDA[rel]
+    assert "git" in just and all(c in just for c in _CADENAS_CLAUDE_EXENTAS), "la justificacion nombra las tres"
     # el archivo real: el detector lo marca (si no, la exencion seria letra muerta) y la
     # exencion lo demuestra (solo lanza `git`, y el nombre partido es "CLAUDE.md")
     arbol = ast.parse((_THIS_REPO_ROOT / rel).read_text(encoding="utf-8"))
@@ -1215,6 +1232,7 @@ def _plantar(tmp_path, archivos: dict[str, str]) -> set[str]:
 
 _SOLO_GIT_CON_CLAUDE_MD = (
     "import subprocess\nNOMBRE = 'C' + 'LAUDE.md'\n"
+    "HARNESS = 'cla' + 'ude-code'\nTITULO = 'Cla' + 'ude Code'\n"
     "subprocess.run(['git', 'rev-parse', 'HEAD'])\n"
 )
 
@@ -1244,6 +1262,31 @@ def test_la_exencion_vale_solo_para_la_ruta_declarada_y_solo_si_lanza_git(tmp_pa
         "scripts/axioma_sync.py": _SOLO_GIT_CON_CLAUDE_MD + f"RUTA = '{_OPT_CLI}/codex'\n",
     })
     assert encontrados == {"scripts/axioma_sync.py"}, "escribe la ruta de un CLI: la exencion cae"
+
+
+def test_la_exencion_exige_el_conjunto_exacto_de_cadenas_con_claude(tmp_path) -> None:
+    """MAJOR-30: en scripts/axioma_sync.py, cualquier cadena con "claude" fuera de las tres
+    declaradas (argumento de git, valor de env) hace caer la exencion; las tres solas, no."""
+    trampolines = {
+        "alias": "subprocess.run(['git', '-c', 'alias.x=!claude --dangerously-skip-permissions -p x', 'x'])\n",
+        "core.pager": "subprocess.run(['git', '-c', 'core.pager=claude -p hola', 'log'])\n",
+        "GIT_SSH_COMMAND": "subprocess.run(['git', 'fetch'], env={'GIT_SSH_COMMAND': 'claude -p x'})\n",
+        "plegado": "subprocess.run(['git', '-c', 'alias.x=!' + 'cla' + 'ude -p x', 'x'])\n",
+        "mayusculas": "subprocess.run(['git', '-c', 'core.pager=CLAUDE -p x', 'log'])\n",
+    }
+    for nombre, extra in trampolines.items():
+        encontrados = _plantar(tmp_path / nombre, {"scripts/axioma_sync.py": _SOLO_GIT_CON_CLAUDE_MD + extra})
+        assert encontrados == {"scripts/axioma_sync.py"}, f"trampolin {nombre}: la exencion no debe cubrirlo"
+    # falta una de las tres: tampoco es el archivo declarado
+    sin_titulo = _SOLO_GIT_CON_CLAUDE_MD.replace("TITULO = 'Cla' + 'ude Code'\n", "")
+    assert _plantar(tmp_path / "falta", {"scripts/axioma_sync.py": sin_titulo}) == {"scripts/axioma_sync.py"}
+    # las tres exactas: exento
+    assert _plantar(tmp_path / "ok", {"scripts/axioma_sync.py": _SOLO_GIT_CON_CLAUDE_MD}) == set()
+
+
+def test_el_archivo_real_axioma_sync_tiene_exactamente_las_tres_cadenas_con_claude() -> None:
+    arbol = ast.parse((_THIS_REPO_ROOT / "scripts/axioma_sync.py").read_text(encoding="utf-8"))
+    assert _cadenas_con_claude(arbol) == _CADENAS_CLAUDE_EXENTAS == {"CLAUDE.md", "claude-code", "Claude Code"}
 
 
 def test_un_archivo_con_el_nombre_partido_no_se_salta_el_prefiltro(tmp_path) -> None:
