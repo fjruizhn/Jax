@@ -170,7 +170,7 @@ class Topes:
             await self._anotar("tope_resultado_desconocido", **extra, **base,
                                decision="permitido" if tope is None else "denegado", motivo="resultado_desconocido")
             return ResultadoTope(tope is None, None, tope, False, "resultado_desconocido")
-        except Exception as exc:  # fail-closed con tope (no se sabe si cabe); sin tope no hay regla que niegue
+        except Exception as exc:  # fail-soft: con tope NIEGA (fail-closed); sin tope no hay regla que niegue (D-4), se registra y avisa
             logger.warning("almacen de topes no disponible (%s)", type(exc).__name__)
             if tope is None:
                 return ResultadoTope(True, None, None, False, "almacen_no_disponible")

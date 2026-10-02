@@ -366,8 +366,8 @@ class Avisador:
         self._cerrando = True
         try:
             self._cola.put_nowait(_FIN)
-        except asyncio.QueueFull:
-            pass       # fail-soft: el trabajador revisa `_cerrando` tras cada envio y termina al vaciar la cola
+        except asyncio.QueueFull:  # fail-soft: el trabajador revisa `_cerrando` tras cada envio y termina al vaciar la cola
+            pass
         hechas, _ = await asyncio.wait({tarea}, timeout=self._cfg.timeout_s + 1.0)
         if not hechas:
             tarea.cancel()

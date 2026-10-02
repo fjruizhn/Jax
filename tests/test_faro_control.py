@@ -281,8 +281,8 @@ def test_el_motor_no_puede_elegir_tenant_ni_usuario_por_los_argumentos_de_una_he
             for extra in ({"tenant": "OTRO"}, {"usuario": "OTRO"}, {"_meta": {"tenant": "OTRO"}}):
                 try:
                     await c.call_tool("skills.leer", {"nombre": "alfa", **extra})
-                except MCPError:
-                    pass                                                           # rechazarlo tambien vale
+                except MCPError:  # fail-soft: que el Puerto rechace el argumento extra tambien cumple la prueba
+                    pass
         return srv.registros
     llamadas = [r for r in corre(caso()) if r.get("metodo") == "tools/call"]
     assert llamadas and all(r["tenant"] == "t-real" and r["usuario"] == "u-real" for r in llamadas)
@@ -676,7 +676,7 @@ def test_major1_en_el_sistema_real_las_cuentas_resueltas_son_las_de_pwd():
     for n in CUENTAS_CON_CODIGO_DE_MODELOS:
         try:
             esperadas.add(pwd.getpwnam(n).pw_uid)
-        except KeyError:
+        except KeyError:  # fail-soft: una cuenta que no existe en esta maquina no entra en lo esperado
             pass
     assert cuentas_prohibidas({}) == esperadas
 

@@ -51,7 +51,7 @@ def _en_hilos(basedb, cantidades, tope, tenant="t1", recurso="tokens", periodo="
                 await pool.wait_closed()
         try:
             resultados[i] = asyncio.run(correr())
-        except Exception as exc:  # noqa: BLE001 (se reporta abajo)
+        except Exception as exc:  # noqa: BLE001  # fail-soft: el error del hilo se junta y la prueba lo afirma abajo
             errores.append(repr(exc))
 
     hilos = [threading.Thread(target=uno, args=(i, c)) for i, c in enumerate(cantidades)]
