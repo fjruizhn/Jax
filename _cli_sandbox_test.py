@@ -1039,6 +1039,85 @@ class ConversacionTest(unittest.TestCase):
             cli_sandbox.armar_conversacion([], "M" * 5000, 1000)
 
 
+class ConversacionLinealTest(unittest.TestCase):
+    """MINOR-10 (auditoria 2026-10-02): el recorte es O(n), no O(n^2), y da el
+    mismo resultado que el recorte ingenuo."""
+
+    @staticmethod
+    def _ingenuo(historial, mensaje, max_chars, nonce):
+        turnos = cli_sandbox._normalizar_historial(historial)
+
+        def render(ts):
+            if not ts:
+                return mensaje
+            cuerpo = "\n".join(f"{rol}: {texto}" for rol, texto in ts)
+            return (f"[Inicio del contexto {nonce}]\n{cuerpo}\n[Fin del contexto {nonce}]\n\n"
+                    f"Mensaje actual:\n{mensaje}")
+
+        while True:
+            out = render(turnos)
+            if len(out) <= max_chars:
+                return out
+            if not turnos:
+                raise cli_sandbox.MensajeDemasiadoLargo("x")
+            turnos = turnos[1:]
+
+    def test_mismo_resultado_que_el_recorte_ingenuo(self):
+        import random
+        rnd = random.Random(7)
+        for _ in range(300):
+            hist = [(rnd.choice(["user", "assistant"]), "t" * rnd.randint(0, 60)) for _ in range(rnd.randint(0, 25))]
+            msg = "m" * rnd.randint(0, 80)
+            tope = rnd.randint(10, 700)
+            try:
+                esperado = self._ingenuo(hist, msg, tope, "n" * 16)
+            except cli_sandbox.MensajeDemasiadoLargo:
+                with self.assertRaises(cli_sandbox.MensajeDemasiadoLargo):
+                    cli_sandbox.armar_conversacion(hist, msg, tope, nonce="n" * 16)
+                continue
+            self.assertEqual(cli_sandbox.armar_conversacion(hist, msg, tope, nonce="n" * 16), esperado)
+
+    def test_un_historial_enorme_se_recorta_en_tiempo_lineal(self):
+        hist = [("user", "x" * 200)] * 20_000  # ~4 MB; el ingenuo re-serializa todo en cada vuelta
+        t0 = time.monotonic()
+        out = cli_sandbox.armar_conversacion(hist, "MENSAJE", 5_000)
+        self.assertLess(time.monotonic() - t0, 1.5)
+        self.assertLessEqual(len(out), 5_000)
+        self.assertIn("MENSAJE", out)
+
+
+class EventLoopLibreTest(_Entorno):
+    """MINOR-10: el I/O de disco del rundir sale del event loop."""
+
+    async def test_mkdir_escritura_y_rmtree_pasan_por_to_thread(self):
+        llamadas = []
+        real = asyncio.to_thread
+
+        async def espia(fn, *a, **k):
+            llamadas.append(getattr(fn, "__name__", repr(fn)))
+            return await real(fn, *a, **k)
+
+        with patch.object(cli_sandbox.asyncio, "to_thread", espia):
+            await self.correr("codex")
+        for esperado in ("_preparar_rundir", "_borrar_rundir"):
+            self.assertIn(esperado, llamadas)
+        self.assertEqual(list(self.run_dir.iterdir()), [])
+
+    async def test_el_rundir_se_limpia_si_falla_la_preparacion(self):
+        def revienta(*a, **k):
+            raise OSError("disco lleno")
+
+        with patch.object(cli_sandbox, "_escribir_privado", revienta):
+            with self.assertRaises(OSError):
+                await self.correr("codex")
+        self.assertEqual(list(self.run_dir.iterdir()), [])
+
+    def test_run_cli_no_llama_mkdir_ni_rmtree_directo_en_la_corrutina(self):
+        fuente = inspect.getsource(cli_sandbox.run_cli)
+        for bloqueante in ("shutil.rmtree", "os.mkdir", ".mkdir(", "_escribir_privado("):
+            self.assertNotIn(bloqueante, fuente)
+
+
 # ----------------------------------------------------------------------- locks
 
 class LocksTest(_Entorno):

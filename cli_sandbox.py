@@ -943,24 +943,34 @@ def armar_conversacion(historial, mensaje: str, max_chars: int, nonce: Optional[
             if all(nonce not in t for _, t in turnos) and nonce not in mensaje:
                 break
 
-    def render(ts):
-        if not ts:
-            return mensaje
-        cuerpo = "\n".join(f"{rol}: {texto}" for rol, texto in ts)
-        return (
-            f"[Inicio del contexto {nonce}]\n{cuerpo}\n[Fin del contexto {nonce}]\n\n"
-            f"Mensaje actual:\n{mensaje}"
+    if len(mensaje) > max_chars:
+        raise MensajeDemasiadoLargo(
+            f"el mensaje actual ({len(mensaje)} caracteres) no cabe en el tope de {max_chars}"
         )
-
-    while True:
-        out = render(turnos)
-        if len(out) <= max_chars:
-            return out
-        if not turnos:
-            raise MensajeDemasiadoLargo(
-                f"el mensaje actual ({len(mensaje)} caracteres) no cabe en el tope de {max_chars}"
-            )
-        turnos = turnos[1:]
+    # Longitud EXACTA de la salida con k turnos: el prefijo y el sufijo fijos mas
+    # la suma de las lineas y sus k-1 saltos. Se acumula desde el turno mas nuevo
+    # y se corta en el primero que ya no cabe: O(n), sin re-serializar en cada
+    # vuelta (MINOR-10) y con el mismo resultado que quitar turnos desde el mas
+    # viejo hasta que quepa.
+    fijo = (
+        len(f"[Inicio del contexto {nonce}]\n")
+        + len(f"\n[Fin del contexto {nonce}]\n\nMensaje actual:\n") + len(mensaje)
+    )
+    lineas: list[str] = []
+    total = fijo - 1  # el primer turno no lleva salto previo
+    for rol, texto in reversed(turnos):
+        linea = f"{rol}: {texto}"
+        total += len(linea) + 1
+        if total > max_chars:
+            break
+        lineas.append(linea)
+    if not lineas:
+        return mensaje
+    cuerpo = "\n".join(reversed(lineas))
+    return (
+        f"[Inicio del contexto {nonce}]\n{cuerpo}\n[Fin del contexto {nonce}]\n\n"
+        f"Mensaje actual:\n{mensaje}"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1083,6 +1093,23 @@ def _escribir_privado(ruta: Path, contenido: str) -> None:
         f.write(contenido)
 
 
+def _preparar_rundir(base: Path, rundir: Path, archivo: str, contenido: str) -> None:
+    """BLOQUEANTE (to_thread): crea `base` (0700) y el directorio por llamada y
+    escribe el system prompt. Si algo falla, no deja el directorio a medias."""
+    base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.mkdir(rundir, 0o700)
+    try:
+        _escribir_privado(rundir / archivo, contenido)
+    except BaseException:
+        shutil.rmtree(rundir, ignore_errors=True)
+        raise
+
+
+def _borrar_rundir(rundir: Path) -> None:
+    """BLOQUEANTE (to_thread)."""
+    shutil.rmtree(rundir, ignore_errors=True)
+
+
 async def run_cli(
     perfil: str, system_prompt: str, historial, mensaje: str, modelo: str, timeout: float, *,
     titular: Titular, correlation_id: str, entry_point: str,
@@ -1125,11 +1152,11 @@ async def run_cli(
             raise SandboxUnavailable(f"{p.nombre}: falta el directorio de credencial dedicado")
 
         base = Path(os.environ.get("JAX_CLI_RUN_DIR", "/run/jax-cli"))
-        base.mkdir(parents=True, exist_ok=True, mode=0o700)
         rundir = base / uuid.uuid4().hex
-        os.mkdir(rundir, 0o700)
         try:
-            _escribir_privado(rundir / p.archivo_nombre, p.archivo_sistema(system_prompt))
+            await asyncio.to_thread(
+                _preparar_rundir, base, rundir, p.archivo_nombre, p.archivo_sistema(system_prompt),
+            )
             argv = argv_confinado_cli(
                 _BWRAP_BIN, work_host=str(rundir), home_sandbox=p.home_sandbox,
                 binds_rw=[(cred_host, p.cred_destino)], binds_ro=[(dir_bin, dir_bin)],
@@ -1148,7 +1175,7 @@ async def run_cli(
         except asyncio.TimeoutError:
             raise TimeoutCLI(f"{p.nombre}: sin respuesta en {timeout}s") from None
         finally:
-            shutil.rmtree(rundir, ignore_errors=True)
+            await asyncio.to_thread(_borrar_rundir, rundir)
         texto, tin, tout = p.parsear(stdout, proc.returncode)
         return ResultadoCLI(texto=texto, tokens_in=tin, tokens_out=tout, version_cli=version)
     except asyncio.CancelledError:
