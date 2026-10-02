@@ -178,11 +178,11 @@ class GovernedDomainSpecification:
             if isinstance(status, str):
                 status = _canonicalize_governed_detection_text(status).strip()
                 runtime_values = set(self.status_aliases.get("runtime", ()))
-                if keys == {"job_id", "status"} and status in runtime_values:
+                if {"job_id", "status"}.issubset(keys) and status in runtime_values:
                     return "JOB_STATUS"
-                if keys == {"pipeline_id", "status"} and status in runtime_values:
+                if {"pipeline_id", "status"}.issubset(keys) and status in runtime_values:
                     return "PIPELINE_STATUS"
-                if keys == {"name", "status"}:
+                if {"name", "status"}.issubset(keys):
                     name = value.get("name")
                     if isinstance(name, str):
                         name = _canonicalize_governed_detection_text(name).strip()
