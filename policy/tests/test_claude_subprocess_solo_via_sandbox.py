@@ -112,7 +112,14 @@ EXCLUDE_DIR_NAMES = {
 # test necesaria del modulo aprobado, misma categoria que el modulo mismo.
 # La exencion es de ESE nombre exacto en el root, no de "cualquier test":
 # un *_test.py generico que lance `claude` sigue siendo violacion.
-ALLOWED_FILENAMES = frozenset({"hyde_sandbox.py", "_hyde_sandbox_test.py"})
+#
+# cli_sandbox.py / _cli_sandbox_test.py (facetas-por-suscripcion, 2026-10-01): el
+# nucleo comun del confinamiento (bwrap + flock + env minimo) del que hyde_sandbox
+# pasa a depender, y su test dedicado. Es el UNICO otro lugar con un
+# create_subprocess_exec: lo lanza siempre dentro de bwrap, con `env=` explicito.
+ALLOWED_FILENAMES = frozenset({
+    "hyde_sandbox.py", "_hyde_sandbox_test.py", "cli_sandbox.py", "_cli_sandbox_test.py",
+})
 
 # AISLAMIENTO POR CUENTA DE USUARIO (2026-09-16). El sandbox de bwrap no es el
 # unico aislamiento valido: lo que la politica persigue es que ningun `claude`

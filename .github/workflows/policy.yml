@@ -340,6 +340,34 @@ jobs:
           grep -qE "^3 passed" /tmp/golden || {
             echo "PISO ROTO: se esperaban 3 tests CORRIDOS de la golden de Hyde."; exit 1; }
 
+  # cli_sandbox: nucleo comun del confinamiento de CLIs de suscripcion
+  # (facetas-por-suscripcion, 2026-10-01, paso 1). El archivo mezcla logica pura
+  # con CONTENCION REAL (ataques dentro de bwrap): sin bwrap la clase se
+  # auto-saltea y un skip se ve igual que verde, asi que se instala bwrap y se
+  # exige el numero exacto de tests CORRIDOS y cero skips. Medido 2026-10-01 en
+  # hall9000: 65 passed.
+  cli-sandbox-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - name: Instalar bubblewrap y habilitar user namespaces
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
+            echo "(sysctl ausente en este kernel -- no aplica)"
+          bwrap --version
+      - run: python -m pytest _cli_sandbox_test.py -v
+      - run: |
+          python -m pytest _cli_sandbox_test.py -q 2>&1 | tee /tmp/clisb
+          grep -qE "^65 passed" /tmp/clisb || {
+            echo "PISO ROTO: se esperaban 65 tests CORRIDOS de cli_sandbox."; exit 1; }
+          if grep -qE "skipped" /tmp/clisb; then
+            echo "HAY TESTS SALTADOS: la contencion real no se ejercito."; exit 1; fi
+
   # Task 6 del plan de alertas nacio con 11 tests y CERO jobs que los
   # corrieran -- tercera instancia del mismo hueco en el mes (ver la octava
   # leccion de metodo en CONTEXT.md). Este job es la correccion, y se
