@@ -9,7 +9,7 @@ jax-las-manos); SubprocessMuscle solo lo importa jax/core/main.py, el
 REPL -- un proceso de SO SEPARADO (confirmado por enumeracion real de
 imports, 2026-08-25). Un asyncio.Semaphore de modulo no cruza esa
 frontera -- se usa flock(2) en su lugar, visible por cualquier proceso
-que abra el mismo path. El archivo del lock vive en el /tmp del HOST
+que abra el mismo path. El archivo del lock vive en /run/jax-locks/hyde del HOST
 (derivado de workspace_dir por hash), NUNCA dentro de workspace_dir: ese
 directorio se bindea read-write dentro del sandbox y el `claude` confinado
 podia borrar el archivo, lo que dejaba al siguiente acquire crear un inodo
@@ -251,8 +251,8 @@ class ClaudeSubprocessLockPathOutsideSandboxTest(unittest.TestCase):
     limpieza del workspace) podia borrarlo; flock(2) es del inodo, asi que
     el siguiente open(path, "w") creaba un inodo NUEVO y tomaba su lock al
     instante -- dos claude en paralelo, sin error y sin log. El fix es
-    estructural: el lock vive en el /tmp del HOST, que el sandbox nunca ve
-    (recibe su propio --tmpfs /tmp privado). Si el path del lock no esta
+    estructural: el lock vive en /run/jax-locks/hyde del HOST, que el sandbox nunca
+    ve (no monta /run; recibe su propio --tmpfs /tmp privado). Si el path del lock no esta
     dentro de workspace_dir, el proceso confinado no puede tocarlo -- no
     hay nada que re-simular."""
 

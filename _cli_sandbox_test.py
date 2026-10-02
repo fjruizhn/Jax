@@ -1383,6 +1383,14 @@ class LocksSegurosTest(_Entorno):
             f"f {self.hyde_lock_dir}/{nombre} 0640 root {hyde_sandbox.HYDE_LOCK_GROUP} -", str(c.exception))
         self.assertEqual(list(self.hyde_lock_dir.iterdir()), [], "no se crea nada")
 
+    async def test_lo_viejo_del_lock_de_hyde_se_borro(self):
+        # JAX_HYDE_LOCK_DIR ya no es configuracion y el lock de un solo usuario
+        # (`flock_adquirir`, por euid) ya no lo usa nadie: no quedan como codigo muerto
+        for nombre in ("HYDE_LOCK_DIR_ENV", "_CLAUDE_SUBPROCESS_LOCK_DIR_NAME"):
+            self.assertFalse(hasattr(hyde_sandbox, nombre), nombre)
+        self.assertFalse(hasattr(cli_sandbox, "flock_adquirir"))
+        self.assertNotIn("JAX_HYDE_LOCK_DIR", inspect.getsource(hyde_sandbox))
+
     async def test_el_directorio_y_el_grupo_de_hyde_son_constantes_y_no_salen_del_entorno(self):
         self.assertEqual(_HYDE_LOCK_DIR_REAL, "/run/jax-locks/hyde")
         self.assertEqual(_HYDE_LOCK_GROUP_REAL, "jax-cli-lock")

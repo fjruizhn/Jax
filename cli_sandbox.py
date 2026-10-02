@@ -11,7 +11,7 @@ byte), D-5 (compuerta de titular).
 QUE HAY ACA
 
 1. NUCLEO COMUN, sin saber de ningun CLI en particular: `argv_base` (argv de
-   bwrap), `env_minimo`, `flock_adquirir`/`flock_liberar` y `ejecutar` (el
+   bwrap), `env_minimo`, `flock_compartido_adquirir`/`flock_liberar` y `ejecutar` (el
    unico `create_subprocess_exec` del modulo). `hyde_sandbox` lo usa tal cual.
 2. PERFILES en codigo (`PERFILES`): claude, codex, kimi. La base solo elegira
    una CLAVE de perfil; nunca una ruta de binario ni flags (la confianza sigue
@@ -275,21 +275,6 @@ def _abrir_lock(dir_fd: int, nombre: str):
         os.close(fd)
         raise SandboxUnavailable(f"el lock {nombre!r} no es un archivo regular del euid")
     return os.fdopen(fd, "r+")
-
-
-def flock_adquirir(lock_path: Path, timeout: float, descripcion: str, detalle: str = ""):
-    """BLOQUEANTE -- llamar SOLO via asyncio.to_thread. Sondea con LOCK_NB para
-    poder fallar cerrado con un timeout explicito en vez de colgar el thread.
-    Devuelve el file handle; el llamador lo pasa a `flock_liberar`. El archivo se
-    abre con `_abrir_lock` (sin symlinks, sin truncar) dentro de un directorio
-    verificado por `_preparar_dir_locks`."""
-    lock_path = Path(lock_path)
-    dfd = _preparar_dir_locks(lock_path.parent)
-    try:
-        fh = _abrir_lock(dfd, lock_path.name)
-    finally:
-        os.close(dfd)
-    return _esperar_flock(fh, timeout, descripcion, detalle, str(lock_path))
 
 
 def _esperar_flock(fh, timeout: float, descripcion: str, detalle: str, ruta: str):

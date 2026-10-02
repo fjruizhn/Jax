@@ -364,8 +364,6 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> tuple[list[str], di
 #   f /run/jax-locks/hyde/<digest>.lock 0640 root jax-cli-lock -   (uno por workspace)
 # y los dos usuarios son miembros de `jax-cli-lock`. `cli_sandbox.flock_compartido_adquirir`
 # verifica el directorio y el archivo antes de tomar el lock y NUNCA crea nada.
-_CLAUDE_SUBPROCESS_LOCK_DIR_NAME = "jax-claude-subprocess-locks"
-HYDE_LOCK_DIR_ENV = "JAX_HYDE_LOCK_DIR"
 HYDE_LOCK_DIR = "/run/jax-locks/hyde"
 HYDE_LOCK_GROUP = "jax-cli-lock"
 
