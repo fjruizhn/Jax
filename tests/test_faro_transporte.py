@@ -299,8 +299,10 @@ def test_muchas_conexiones_con_mensajes_grandes_no_agotan_la_memoria(tmp_path, c
                 s.close()
             return (pico - base) / 1024   # MiB
     crecimiento = corre(caso())
-    # sin presupuesto: ~120 * 0.9 MB * (copias) > 100 MiB; con presupuesto de 16 MiB queda muy por debajo
-    assert crecimiento < 45, f"el RSS crecio {crecimiento:.1f} MiB"
+    # Medido 2026-10-02 (Python 3.12): con el presupuesto de 16 MiB el RSS crece ~53 MiB (casi todo es lo que
+    # cuesta tener 120 conexiones vivas: un servidor MCP, tareas y buffers por conexion); sin presupuesto
+    # (mutacion: adquirir() no cobra) crece ~153 MiB. El umbral esta entre los dos.
+    assert crecimiento < 95, f"el RSS crecio {crecimiento:.1f} MiB"
 
 
 def test_no_hay_tope_de_conexiones_cientos_de_conexiones_ociosas_se_sirven(tmp_path, cargado):

@@ -72,6 +72,7 @@ def test_el_rele_no_importa_el_sdk_de_mcp_ni_nada_pesado():
 
 
 def test_el_rele_sin_socket_falla_rapido_y_no_ensucia_stdout(tmp_path):
+    (tmp_path / "t").write_text("token\n")
     r = subprocess.run([sys.executable, "-m", "jax.faro.relay", "--socket", str(tmp_path / "no-hay.sock"), "--token-file", str(tmp_path / "t")],
                        cwd=RAIZ, env={**os.environ, "PYTHONPATH": str(RAIZ)}, capture_output=True, timeout=20, input=b"")
     assert r.returncode != 0 and r.stdout == b"" and b"no-hay.sock" in r.stderr

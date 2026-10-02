@@ -11,10 +11,12 @@ espacio, la barra invertida y los caracteres de control, de modo que un valor no
 segunda linea ni un `clave=valor` dentro de la suya. No hacen falta comillas propias.
 
 FALLA CERRADO: si un emisor lanza, la excepcion SUBE. La llamada se responde con error y no
-se entrega el resultado: no hay accion sin bitacora.
+se entrega el resultado: no hay accion sin bitacora. (Una DENEGACION sigue denegando aunque no
+se pueda registrar: lo que no falla abierto es el acceso, no la anotacion.)
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 from collections.abc import Callable, Iterable
@@ -32,8 +34,12 @@ class Bitacora:
     def __init__(self, emisores: Iterable[Callable[[dict], None]] | None = None):
         self._emisores = (emisor_logger,) if emisores is None else tuple(emisores)
 
-    def registrar(self, evento: str, **campos) -> dict:
+    async def registrar(self, evento: str, **campos) -> dict:
+        """Entrega el registro a TODOS los emisores, en orden; un emisor puede ser sincrono o
+        `async` (el de la tabla encadenada lo es). Si uno lanza, la excepcion sube."""
         registro = {"evento": evento, "momento": round(time.time(), 6), **campos}
         for emisor in self._emisores:
-            emisor(registro)
+            resultado = emisor(registro)
+            if inspect.isawaitable(resultado):
+                await resultado
         return registro

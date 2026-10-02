@@ -33,6 +33,7 @@ import asyncio
 import hashlib
 import json
 import time
+import logging
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -42,11 +43,13 @@ from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
 from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 from mcp.shared.exceptions import MCPError
 
-from .bitacora import Bitacora
+from .bitacora import Bitacora, _campo_log
 from .identidad import Identidad
 from .paquete import NoExiste, PaqueteCargado
 
+logger = logging.getLogger(__name__)
 CODIGO_FRENO = 423          # el HTTP 423 Locked como codigo del error MCP
+CODIGO_BITACORA = -32603    # error interno JSON-RPC: la bitacora no esta disponible
 LIMITE_POR_DEFECTO = 20
 LIMITE_MAXIMO = 100
 LARGO_MAX_TEXTO = 200
@@ -75,43 +78,55 @@ class Guardia:
         self._sha_paquete = sha_paquete
         self._freno = freno
 
-    def _registrar(self, ctx: ServerRequestContext, id_llamada: str, hash_args: str, t0: float, **extra) -> None:
+    async def _registrar(self, ctx: ServerRequestContext, id_llamada: str, hash_args: str, argumentos: str, t0: float, **extra) -> None:
         params = ctx.params or {}
         objetivo = params.get("name") if ctx.method in ("tools/call", "prompts/get") else params.get("uri")
-        self._bitacora.registrar(
+        await self._bitacora.registrar(
             "llamada", id_llamada=id_llamada, **self._identidad.campos(), sha_paquete=self._sha_paquete,
             metodo=ctx.method, objetivo=str(objetivo)[:512] if objetivo is not None else "-",
-            hash_args=hash_args, duracion_ms=round((time.monotonic() - t0) * 1000, 3), **extra)
+            hash_args=hash_args, argumentos=argumentos, duracion_ms=round((time.monotonic() - t0) * 1000, 3), **extra)
+
+    async def _anotar(self, ctx, id_llamada, hash_args, argumentos, t0, **extra) -> None:
+        """Registra y, si NO se puede registrar, la llamada falla: no se entrega un resultado sin bitacora."""
+        try:
+            await self._registrar(ctx, id_llamada, hash_args, argumentos, t0, **extra)
+        except Exception as exc:
+            logger.exception("la bitacora no pudo registrar la llamada %s", id_llamada)
+            raise MCPError(CODIGO_BITACORA, "BITACORA_NO_DISPONIBLE: no se entrega ningun resultado sin registro") from exc
 
     async def __call__(self, ctx: ServerRequestContext[Any, Any], call_next: CallNext) -> HandlerResult:
         if ctx.request_id is None:      # una notificacion no ejecuta nada ni responde
             return await call_next(ctx)
         t0 = time.monotonic()
         id_llamada = uuid.uuid4().hex
-        argumentos = {k: v for k, v in (ctx.params or {}).items() if k != "_meta"}
-        hash_args = _sha(_json_canonico(argumentos))
+        cuerpo = {k: v for k, v in (ctx.params or {}).items() if k != "_meta"}   # `_meta` es ruido de transporte
+        hash_args = _sha(_json_canonico(cuerpo))
+        argumentos = _campo_log(_json_canonico(cuerpo), 200)    # saneado y acotado: para leer, no para decidir
         try:
             frenado = await asyncio.to_thread(self._freno)
         except Exception:  # fail-closed: sin poder mirar el freno, se da por puesto
             frenado = True
         if frenado:
-            self._registrar(ctx, id_llamada, hash_args, t0, decision="denegado", motivo="freno",
-                            resultado="no_ejecutado", hash_resultado="")
+            try:
+                await self._registrar(ctx, id_llamada, hash_args, argumentos, t0, decision="denegado", motivo="freno",
+                                      resultado="no_ejecutado", hash_resultado="")
+            except Exception:  # fail-closed: se deniega igual; solo la anotacion fallo y queda en el log
+                logger.exception("la bitacora no pudo registrar la denegacion %s", id_llamada)
             raise MCPError(CODIGO_FRENO, "FRENO_PUESTO: el interruptor global esta puesto; no se ejecuta nada",
                            data={"http": CODIGO_FRENO})
         try:
             resultado = await call_next(ctx)
         except MCPError as exc:
-            self._registrar(ctx, id_llamada, hash_args, t0, decision="permitido", motivo="", resultado="error",
-                            hash_resultado=_sha(_json_canonico({"codigo": exc.code, "mensaje": exc.message})))
+            await self._anotar(ctx, id_llamada, hash_args, argumentos, t0, decision="permitido", motivo="", resultado="error",
+                               hash_resultado=_sha(_json_canonico({"codigo": exc.code, "mensaje": exc.message})))
             raise
         except Exception as exc:
-            self._registrar(ctx, id_llamada, hash_args, t0, decision="permitido", motivo="", resultado="error",
-                            hash_resultado=_sha(_json_canonico({"excepcion": type(exc).__name__})))
+            await self._anotar(ctx, id_llamada, hash_args, argumentos, t0, decision="permitido", motivo="", resultado="error",
+                               hash_resultado=_sha(_json_canonico({"excepcion": type(exc).__name__})))
             raise
         con_error = bool(getattr(resultado, "is_error", False))
-        self._registrar(ctx, id_llamada, hash_args, t0, decision="permitido", motivo="",
-                        resultado="error" if con_error else "ok", hash_resultado=_hash_resultado(resultado))
+        await self._anotar(ctx, id_llamada, hash_args, argumentos, t0, decision="permitido", motivo="",
+                           resultado="error" if con_error else "ok", hash_resultado=_hash_resultado(resultado))
         return resultado
 
 

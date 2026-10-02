@@ -16,7 +16,8 @@ una variable ausente o vacia no tiene valor por defecto, es un error.
   JAX_FARO_SOCKET_DIR      directorio de los sockets del Puerto (`<dir>/<run_id>.sock`; en
                            produccion `/run/faro`). Absoluto, del usuario del servicio y sin
                            escritura de grupo/otros
-  JAX_FARO_MAX_MENSAJE     opcional, tope en bytes de UN mensaje MCP (default 16 MiB)
+  JAX_FARO_MAX_MENSAJE     opcional, tope en bytes de UN mensaje MCP (default 1 MiB)
+  JAX_FARO_PRESUPUESTO_BYTES, JAX_FARO_HANDSHAKE_S, JAX_FARO_MENSAJE_TIMEOUT_S   opcionales; ver ConfigPuerto
 """
 from __future__ import annotations
 
@@ -85,28 +86,59 @@ class ConfigFaro:
         )
 
 
-MAX_MENSAJE_POR_DEFECTO = 16 * 1024 * 1024
+MAX_MENSAJE_POR_DEFECTO = 1024 * 1024
+PRESUPUESTO_POR_DEFECTO = 256 * 1024 * 1024
+HANDSHAKE_S_POR_DEFECTO = 5.0
+MENSAJE_TIMEOUT_S_POR_DEFECTO = 30.0
 
 
 @dataclass(frozen=True)
 class ConfigPuerto:
+    """Configuracion del transporte del Puerto.
+
+    - `max_mensaje`: tope de UN mensaje MCP (default 1 MiB). Uno mas largo cierra la conexion.
+    - `presupuesto_bytes`: presupuesto GLOBAL de bytes en vuelo (mensajes a medio leer y respuestas
+      a medio escribir, de todas las conexiones juntas). No hay tope de CONEXIONES (D-4: el unico
+      limite son los recursos de la maquina); el presupuesto acota lo que el servicio retiene, no
+      cuantos hablan. Para la unidad de systemd: `MemoryMax` >= presupuesto + el paquete cargado
+      + ~200 MiB de base del interprete y del SDK.
+    - `handshake_s`: plazo para que llegue la linea del token. `mensaje_timeout_s`: plazo maximo
+      de un mensaje a medias (o de una escritura que el par no lee) antes de cortar y devolver
+      lo que retenia."""
     socket_dir: Path
     max_mensaje: int = MAX_MENSAJE_POR_DEFECTO
+    presupuesto_bytes: int = PRESUPUESTO_POR_DEFECTO
+    handshake_s: float = HANDSHAKE_S_POR_DEFECTO
+    mensaje_timeout_s: float = MENSAJE_TIMEOUT_S_POR_DEFECTO
 
     def __post_init__(self) -> None:
         if not Path(self.socket_dir).is_absolute():
             raise ConfigFaroInvalida(f"JAX_FARO_SOCKET_DIR tiene que ser una ruta absoluta, no {str(self.socket_dir)!r}")
         if not isinstance(self.max_mensaje, int) or self.max_mensaje < 1024:
             raise ConfigFaroInvalida("JAX_FARO_MAX_MENSAJE tiene que ser un entero de al menos 1024 bytes")
+        if not isinstance(self.presupuesto_bytes, int) or self.presupuesto_bytes < 4 * self.max_mensaje:
+            raise ConfigFaroInvalida("JAX_FARO_PRESUPUESTO_BYTES tiene que ser un entero de al menos 4 veces max_mensaje "
+                                     "(si no, no cabria ni un mensaje maximo con sus copias)")
+        if not self.handshake_s > 0 or not self.mensaje_timeout_s > 0:
+            raise ConfigFaroInvalida("los plazos del Puerto tienen que ser positivos")
 
     @classmethod
     def desde_entorno(cls, env: Mapping[str, str]) -> "ConfigPuerto":
         crudo = (env.get("JAX_FARO_SOCKET_DIR") or "").strip()
         if not crudo:
             raise ConfigFaroInvalida("JAX_FARO_SOCKET_DIR no esta definida: sin ella el Puerto no arranca")
-        tope = (env.get("JAX_FARO_MAX_MENSAJE") or "").strip()
-        try:
-            max_mensaje = int(tope) if tope else MAX_MENSAJE_POR_DEFECTO
-        except ValueError as exc:
-            raise ConfigFaroInvalida("JAX_FARO_MAX_MENSAJE no es un entero") from exc
-        return cls(socket_dir=Path(crudo), max_mensaje=max_mensaje)
+
+        def numero(nombre: str, tipo, defecto):
+            valor = (env.get(nombre) or "").strip()
+            try:
+                return tipo(valor) if valor else defecto
+            except ValueError as exc:
+                raise ConfigFaroInvalida(f"{nombre} no es un numero valido") from exc
+
+        return cls(
+            socket_dir=Path(crudo),
+            max_mensaje=numero("JAX_FARO_MAX_MENSAJE", int, MAX_MENSAJE_POR_DEFECTO),
+            presupuesto_bytes=numero("JAX_FARO_PRESUPUESTO_BYTES", int, PRESUPUESTO_POR_DEFECTO),
+            handshake_s=numero("JAX_FARO_HANDSHAKE_S", float, HANDSHAKE_S_POR_DEFECTO),
+            mensaje_timeout_s=numero("JAX_FARO_MENSAJE_TIMEOUT_S", float, MENSAJE_TIMEOUT_S_POR_DEFECTO),
+        )

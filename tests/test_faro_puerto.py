@@ -251,7 +251,7 @@ def test_una_identidad_en_el_cuerpo_del_pedido_se_ignora(cfg_puerto, cargado):
     for r in llamadas:
         assert (r["usuario"], r["tenant"], r["entry_point"], r["run_id"], r["faceta"], r["motor"], r["id_correlacion"]) == \
                ("u-real", "t-real", "repl", "run-1", "hyde", "codex", "corr-real")
-    assert "mallory" not in json.dumps([{k: v for k, v in r.items() if k not in ("hash_args",)} for r in registros])
+    assert "mallory" not in json.dumps([{k: v for k, v in r.items() if k not in ("hash_args", "argumentos")} for r in registros])
 
 
 def test_un_par_de_otro_uid_se_rechaza_sin_hablar_mcp(cfg_puerto, cargado, monkeypatch):
