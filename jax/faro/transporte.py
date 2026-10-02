@@ -18,9 +18,11 @@ QUIEN PUEDE HABLAR (auditoria MAJOR-2/3)
 MEMORIA (auditoria MAJOR-4)
 - `PresupuestoBytes`: presupuesto GLOBAL de bytes en vuelo. Un mensaje a medio leer cobra sus bytes
   (x3: cadena, decodificacion y analisis) hasta que se entrega; una respuesta cobra sus bytes hasta
-  que el par la lee. Una conexion ociosa no cobra nada: NO HAY TOPE DE CONEXIONES (D-4); lo que el
-  servicio retiene queda acotado por el presupuesto, no por cuantos hablan. Lo que no cabe espera
-  (el par queda frenado por el kernel); un mensaje a medias o una escritura que el par no lee se cortan
+  que el par la lee; y CADA CONEXION cobra un costo fijo (`costo_conexion_bytes`, 256 KiB por defecto)
+  desde que se acepta hasta que se cierra, porque tenerla viva (servidor MCP, tareas, buffers) ocupa
+  memoria aunque este ociosa. NO HAY TOPE DE CONEXIONES (D-4): la que no entra ESPERA (no se rechaza;
+  el par queda frenado por el kernel); el numero de simultaneas es `presupuesto / costo`, y lo que el
+  servicio retiene queda acotado por el presupuesto, no por cuantos hablan. Lo que no cabe espera; un mensaje a medias o una escritura que el par no lee se cortan
   tras `mensaje_timeout_s` devolviendo lo que retenian. Un mensaje de mas de `max_mensaje` cierra la
   conexion.
 - Las corrientes son `asyncio` puras (nada bloqueante) y se adaptan a lo que espera el helper
@@ -172,7 +174,15 @@ class _Salida:
 
 class ServidorPuerto:
     def __init__(self, cfg: ConfigPuerto, ejecucion: Ejecucion, paquete: PaqueteCargado, bitacora: Bitacora,
-                 *, freno: Callable[[], bool] | None = None):
+                 *, freno: Callable[[], bool] | None = None, solo_pruebas_mismo_uid: bool = False):
+        """`solo_pruebas_mismo_uid`: SOLO PARA PRUEBAS. Sin ella, `uid_esperado` no puede ser el del propio
+        servicio (otro proceso del usuario `faro` entraria como si fuera la jaula) ni root. Es un argumento del
+        constructor: no se lee del entorno ni de la configuracion, de modo que el servicio real no la activa."""
+        euid = os.geteuid()
+        if not solo_pruebas_mismo_uid and ejecucion.uid_esperado in (euid, 0):
+            raise ConfigFaroInvalida(
+                f"uid_esperado={ejecucion.uid_esperado} es el del servicio ({euid}) o root: la jaula corre con un uid propio, "
+                "distinto del usuario `faro`; si no, cualquier proceso de `faro` entraria como si fuera la jaula")
         self._cfg = cfg
         self.ejecucion = ejecucion
         self._paquete = paquete
@@ -266,7 +276,10 @@ class ServidorPuerto:
         self._tareas.add(tarea)
         id_conexion = uuid.uuid4().hex
         salida = None
+        costo = 0
         try:
+            # El costo fijo de la conexion se cobra desde el accept hasta el cierre; si no entra, espera.
+            costo = await self.presupuesto.adquirir(self._cfg.costo_conexion_bytes)
             cred = credenciales_del_par(escritor)
             e = self.ejecucion
             if cred is None or cred[1] != e.uid_esperado:
@@ -295,3 +308,6 @@ class ServidorPuerto:
                 await escritor.wait_closed()
             except OSError:  # fail-soft: el par ya cerro o reseteo la conexion; la conexion ya se da por terminada y no hay nada que recuperar
                 pass
+            finally:
+                if costo:
+                    await self.presupuesto.liberar(costo)

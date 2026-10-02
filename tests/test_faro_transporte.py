@@ -505,3 +505,24 @@ def test_un_socket_viejo_sin_token_no_se_pisa_en_silencio(cfgp, cargado):
                 pass
     corre(caso())
     assert ruta.exists()                         # y no lo borro
+
+
+def test_la_entrada_cobra_los_bytes_del_mensaje_a_medias_y_los_devuelve_al_entregarlo():
+    from jax.faro.transporte import _Lineas
+
+    async def caso():
+        p = PresupuestoBytes(100_000)
+        lector = asyncio.StreamReader()
+        lineas = _Lineas(lector, p, max_mensaje=50_000, plazo_s=5)
+        it = lineas.__aiter__()
+        tarea = asyncio.create_task(it.__anext__())
+        lector.feed_data(b"x" * 3000)                      # a medias: sin salto de linea
+        await asyncio.sleep(0.1)
+        assert p.libre == 100_000 - 3000 * 3               # cobrado (x3 copias) mientras el mensaje no esta completo
+        lector.feed_data(b"y\n")
+        linea = await asyncio.wait_for(tarea, 5)
+        assert linea == "x" * 3000 + "y\n"
+        await it.aclose()
+        await asyncio.sleep(0)
+        assert p.libre == 100_000                           # devuelto al entregarlo
+    asyncio.run(caso())

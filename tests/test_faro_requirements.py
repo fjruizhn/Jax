@@ -41,15 +41,20 @@ def test_mcp_esta_fijado_a_la_version_verificada():
     assert "mcp==2.2.0" in _bloques("requirements-faro.txt")
 
 
-def test_pytest_y_el_cliente_de_base_estan_fijados_en_el_archivo_de_ci():
-    fijados = _bloques("requirements-faro-ci.txt")
-    assert {n.split("==")[0] for n in fijados} >= {"pytest", "aiomysql", "pymysql", "pluggy", "iniconfig", "packaging"}
+def test_el_cliente_de_base_esta_fijado_con_hash_junto_a_mcp():
+    nombres = {n.split("==")[0] for n in _bloques("requirements-faro.txt")}
+    assert nombres >= {"mcp", "aiomysql", "pymysql"}
+
+
+def test_pytest_esta_fijado_en_el_archivo_de_ci():
+    nombres = {n.split("==")[0] for n in _bloques("requirements-faro-ci.txt")}
+    assert nombres >= {"pytest", "pluggy", "iniconfig", "packaging"}
 
 
 @pytest.mark.parametrize("archivo", ARCHIVOS)
 def test_todo_requisito_esta_fijado_con_version_exacta_y_con_hashes(archivo):
     fijados = _bloques(archivo)
-    assert len(fijados) >= 6
+    assert len(fijados) >= 4
     assert [n for n, hs in fijados.items() if not hs] == []
     assert all(re.fullmatch(r"[0-9a-f]{64}", h) for hs in fijados.values() for h in hs)
 

@@ -8,13 +8,23 @@ fila es `inicio_cadena`. `verificar_cadena` (lo corre un auditor con SELECT) det
 borrada (hueco), una reordenada o una cadena sin inicio. Un fallo al insertar es ambiguo (puede haberse
 confirmado) y SUBE: el Puerto no entrega resultados sin bitacora; el emisor se recupera abriendo una cadena nueva.
 
+ANCLA EXTERNA. Quien puede borrar la COLA de una cadena la deja valida por si sola. Por eso el emisor expone su
+ultima posicion (`ancla()`: cadena_id, seq, hash) y `publicar_anclas_periodicamente` la entrega a un publicador
+(un archivo fuera de la base, un aviso, otro host: lo elige quien opera) cada `intervalo_s` mientras cambie;
+`verificar_cadena(filas, anclas=...)` detecta `cola_truncada`, `ancla_no_coincide` y `cadena_ausente`.
+
+PLAZO. Cada insercion (y la espera del Lock) tiene un plazo (`plazo_s`): una base colgada no deja a todos detras
+del Lock; vence con `TimeoutError`, que SUBE (fallo cerrado), y la cadena sigue en otra nueva.
+
 Es un emisor `async` de `jax.faro.bitacora.Bitacora` (`Bitacora(emisores=[EmisorTabla(pool)])`).
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
+import logging
 import os
 import re
 import secrets
@@ -25,6 +35,7 @@ import aiomysql
 
 from .config import ConfigFaroInvalida
 
+logger = logging.getLogger(__name__)
 GENESIS = "0" * 64
 _RE_IDENT = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 TABLA = "faro_bitacora"
@@ -73,8 +84,9 @@ def calcular_hash(hash_previo: str, cadena_id: str, seq: int, registro: str) -> 
 class EmisorTabla:
     """Emisor async de la bitacora. Serializa (un `Lock`): el orden de la cadena es el orden de los INSERT."""
 
-    def __init__(self, pool: aiomysql.Pool):
+    def __init__(self, pool: aiomysql.Pool, *, plazo_s: float = 5.0):
         self._pool = pool
+        self._plazo_s = plazo_s
         self._lock = asyncio.Lock()
         self._cadena_id: str | None = None
         self._seq = 0
@@ -95,7 +107,20 @@ class EmisorTabla:
                  _corto(registro.get("decision"), 16), cuerpo, self._previo, h))
         self._previo, self._seq = h, self._seq + 1
 
+    def ancla(self) -> dict | None:
+        """La ultima posicion escrita de la cadena actual (o None si no hay): lo que se publica fuera."""
+        if self._cadena_id is None or self._seq == 0:
+            return None
+        return {"cadena_id": self._cadena_id, "seq": self._seq - 1, "hash": self._previo}
+
     async def __call__(self, registro: Mapping) -> None:
+        try:
+            await asyncio.wait_for(self._emitir(registro), self._plazo_s)
+        except TimeoutError:
+            self._cadena_id = None          # la insercion cancelada pudo haberse confirmado: cadena nueva
+            raise
+
+    async def _emitir(self, registro: Mapping) -> None:
         async with self._lock:
             try:
                 if self._cadena_id is None:
@@ -109,6 +134,24 @@ class EmisorTabla:
                 raise
 
 
+async def publicar_anclas_periodicamente(emisor: EmisorTabla, publicar, *, intervalo_s: float = 60.0) -> None:
+    """Cada `intervalo_s` entrega al `publicar` (sincrono o async) el ancla del emisor SI cambio desde la ultima
+    publicada. Un publicador que falla no mata el bucle: se reintenta en el intervalo siguiente."""
+    ultima = None
+    while True:
+        await asyncio.sleep(intervalo_s)
+        ancla = emisor.ancla()
+        if ancla is None or ancla == ultima:
+            continue
+        try:
+            r = publicar(ancla)
+            if inspect.isawaitable(r):
+                await r
+            ultima = ancla
+        except Exception:  # fail-soft: el destino de la ancla esta caido; se reintenta en el intervalo siguiente y no se cuenta como publicada
+            logger.exception("no se pudo publicar el ancla de la bitacora")
+
+
 def _corto(valor, tope: int):
     return None if valor is None else str(valor)[:tope]
 
@@ -120,9 +163,10 @@ class Problema:
     seq: int | None = None
 
 
-def verificar_cadena(filas: list[Mapping]) -> list[Problema]:
+def verificar_cadena(filas: list[Mapping], anclas: list[Mapping] | tuple = ()) -> list[Problema]:
     """Lista de problemas (vacia = integra). `filas` son las filas de la tabla (con `cadena_id`, `seq`,
-    `registro`, `hash_previo`, `hash`), en cualquier orden."""
+    `registro`, `hash_previo`, `hash`), en cualquier orden. `anclas` (publicadas fuera de la base) permiten
+    notar que se trunco la cola: `cola_truncada`, `ancla_no_coincide`, `cadena_ausente`."""
     problemas: list[Problema] = []
     por_cadena: dict[str, list[Mapping]] = {}
     for f in filas:
@@ -142,4 +186,12 @@ def verificar_cadena(filas: list[Mapping]) -> list[Problema]:
             if f["hash"] != calcular_hash(f["hash_previo"], cadena, f["seq"], f["registro"]):
                 problemas.append(Problema("hash_no_coincide", cadena, f["seq"]))
         del previo_esperado
+    for a in anclas:
+        rows = {f["seq"]: f for f in por_cadena.get(a["cadena_id"], [])}
+        if not rows:
+            problemas.append(Problema("cadena_ausente", a["cadena_id"], a["seq"]))
+        elif a["seq"] not in rows:
+            problemas.append(Problema("cola_truncada", a["cadena_id"], a["seq"]))
+        elif rows[a["seq"]]["hash"] != a["hash"]:
+            problemas.append(Problema("ancla_no_coincide", a["cadena_id"], a["seq"]))
     return problemas

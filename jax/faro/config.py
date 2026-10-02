@@ -17,10 +17,11 @@ una variable ausente o vacia no tiene valor por defecto, es un error.
                            produccion `/run/faro`). Absoluto, del usuario del servicio y sin
                            escritura de grupo/otros
   JAX_FARO_MAX_MENSAJE     opcional, tope en bytes de UN mensaje MCP (default 1 MiB)
-  JAX_FARO_PRESUPUESTO_BYTES, JAX_FARO_HANDSHAKE_S, JAX_FARO_MENSAJE_TIMEOUT_S   opcionales; ver ConfigPuerto
+  JAX_FARO_PRESUPUESTO_BYTES, JAX_FARO_HANDSHAKE_S, JAX_FARO_MENSAJE_TIMEOUT_S, JAX_FARO_COSTO_CONEXION_BYTES   opcionales; ver ConfigPuerto
 """
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -55,7 +56,7 @@ class ConfigFaro:
         return self.destino / self.sha
 
     @classmethod
-    def desde_entorno(cls, env: Mapping[str, str]) -> "ConfigFaro":
+    def desde_entorno(cls, env: Mapping[str, str], *, solo_pruebas_duenio_igual_servicio: bool = False) -> "ConfigFaro":
         def pedir(nombre: str) -> str:
             valor = (env.get(nombre) or "").strip()
             if not valor:
@@ -77,6 +78,10 @@ class ConfigFaro:
             uid_duenio = int(crudo_uid) if crudo_uid else 0
         except ValueError as exc:
             raise ConfigFaroInvalida("JAX_FARO_DUENIO_UID no es un entero") from exc
+        if uid_duenio == os.geteuid() and os.geteuid() != 0 and not solo_pruebas_duenio_igual_servicio:
+            raise ConfigFaroInvalida(
+                f"JAX_FARO_DUENIO_UID={uid_duenio} es el usuario del servicio: el dueño del paquete (root) no puede ser quien lo carga; "
+                "si el servicio fuera dueño del paquete podria reescribirlo")
         return cls(
             uid_duenio=uid_duenio,
             repo=ruta_absoluta("JAX_FARO_REPO"),
@@ -88,6 +93,7 @@ class ConfigFaro:
 
 MAX_MENSAJE_POR_DEFECTO = 1024 * 1024
 PRESUPUESTO_POR_DEFECTO = 256 * 1024 * 1024
+COSTO_CONEXION_POR_DEFECTO = 256 * 1024
 HANDSHAKE_S_POR_DEFECTO = 5.0
 MENSAJE_TIMEOUT_S_POR_DEFECTO = 30.0
 
@@ -102,6 +108,10 @@ class ConfigPuerto:
       limite son los recursos de la maquina); el presupuesto acota lo que el servicio retiene, no
       cuantos hablan. Para la unidad de systemd: `MemoryMax` >= presupuesto + el paquete cargado
       + ~200 MiB de base del interprete y del SDK.
+    - `costo_conexion_bytes`: costo FIJO que cada conexion cobra al presupuesto desde que se acepta hasta
+      que se cierra (default 256 KiB: lo que cuesta tenerla viva, un servidor MCP con sus tareas y
+      buffers). La que no entra ESPERA, no se rechaza (D-4): el numero de conexiones simultaneas queda
+      acotado por `presupuesto / costo` y por nada mas.
     - `handshake_s`: plazo para que llegue la linea del token. `mensaje_timeout_s`: plazo maximo
       de un mensaje a medias (o de una escritura que el par no lee) antes de cortar y devolver
       lo que retenia."""
@@ -110,6 +120,7 @@ class ConfigPuerto:
     presupuesto_bytes: int = PRESUPUESTO_POR_DEFECTO
     handshake_s: float = HANDSHAKE_S_POR_DEFECTO
     mensaje_timeout_s: float = MENSAJE_TIMEOUT_S_POR_DEFECTO
+    costo_conexion_bytes: int = COSTO_CONEXION_POR_DEFECTO
 
     def __post_init__(self) -> None:
         if not Path(self.socket_dir).is_absolute():
@@ -119,6 +130,8 @@ class ConfigPuerto:
         if not isinstance(self.presupuesto_bytes, int) or self.presupuesto_bytes < 4 * self.max_mensaje:
             raise ConfigFaroInvalida("JAX_FARO_PRESUPUESTO_BYTES tiene que ser un entero de al menos 4 veces max_mensaje "
                                      "(si no, no cabria ni un mensaje maximo con sus copias)")
+        if not isinstance(self.costo_conexion_bytes, int) or not 0 <= self.costo_conexion_bytes <= self.presupuesto_bytes:
+            raise ConfigFaroInvalida("JAX_FARO_COSTO_CONEXION_BYTES tiene que ser un entero entre 0 y el presupuesto")
         if not self.handshake_s > 0 or not self.mensaje_timeout_s > 0:
             raise ConfigFaroInvalida("los plazos del Puerto tienen que ser positivos")
 
@@ -141,4 +154,5 @@ class ConfigPuerto:
             presupuesto_bytes=numero("JAX_FARO_PRESUPUESTO_BYTES", int, PRESUPUESTO_POR_DEFECTO),
             handshake_s=numero("JAX_FARO_HANDSHAKE_S", float, HANDSHAKE_S_POR_DEFECTO),
             mensaje_timeout_s=numero("JAX_FARO_MENSAJE_TIMEOUT_S", float, MENSAJE_TIMEOUT_S_POR_DEFECTO),
+            costo_conexion_bytes=numero("JAX_FARO_COSTO_CONEXION_BYTES", int, COSTO_CONEXION_POR_DEFECTO),
         )

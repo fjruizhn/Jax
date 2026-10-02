@@ -1,17 +1,20 @@
 # El Faro (fase 0): dependencias del Puerto MCP, FIJADAS CON HASH.
 # Instalar con:  pip install --require-hashes -r requirements-faro.txt
 #
-# `mcp` 2.2.0 es la ultima estable de la rama 2.x (PyPI: "Development Status :: 5 -
+# `mcp` 2.2.0 (y el cliente de MariaDB `aiomysql`/`PyMySQL` de la bitacora durable) es la ultima estable de la rama 2.x (PyPI: "Development Status :: 5 -
 # Production/Stable"; verificado contra el paquete instalado el 2026-10-02). La rama 1.x
 # solo recibe parches criticos. Es un archivo APARTE de requirements.txt a proposito: el
 # servicio principal no depende del Puerto, y las versiones de las transitivas (starlette,
 # anyio, pydantic) son las que resuelve `mcp`, no las del servicio.
 #
 # Regenerar (no editar a mano):
-#   echo 'mcp==2.2.0' > faro.in
+#   printf 'mcp==2.2.0\naiomysql==0.3.2\nPyMySQL==1.2.0\n' > faro.in
 #   uv pip compile faro.in --generate-hashes --python-version 3.12 \
 #       --python-platform x86_64-unknown-linux-gnu --no-header -o requirements-faro.txt
 # Los hashes cubren TODAS las distribuciones publicadas de cada version, no solo la de esta maquina.
+aiomysql==0.3.2 \
+    --hash=sha256:72d15ef5cfc34c03468eb41e1b90adb9fd9347b0b589114bd23ead569a02ac1a \
+    --hash=sha256:c82c5ba04137d7afd5c693a258bea8ead2aad77101668044143a991e04632eb2
 annotated-types==0.8.0 \
     --hash=sha256:13b2beaad985e05e2d6407ee4c4f35590b11f8d693a258a561055cac8f64cab7 \
     --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
@@ -342,6 +345,9 @@ pydantic-core==2.46.5 \
 pyjwt==2.15.1 \
     --hash=sha256:42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193 \
     --hash=sha256:4f259e80cdfb6b3fc18a7de51fd1ef9ec79652f25019bae68975ca2468a34df8
+pymysql==1.2.0 \
+    --hash=sha256:62169ce6d5510f08e140c5e7990ee884a9764024e4a9a27b2cc11f1099322ae0 \
+    --hash=sha256:6c7b17ca686988104d7426c27895b455cdeea3e9d3ceb1270f0c3704fead8c33
 python-multipart==0.0.32 \
     --hash=sha256:be54b7f3fa167bb83e4fcd936b887b708f4e57fe75911c02aebf53efaf8d938e \
     --hash=sha256:ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23
