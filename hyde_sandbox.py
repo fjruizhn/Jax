@@ -114,6 +114,9 @@ import shutil
 import time
 from pathlib import Path
 
+import cli_sandbox
+from cli_sandbox import SandboxUnavailable  # misma clase: la define el nucleo comun
+
 logger = logging.getLogger("hyde_sandbox")
 
 REAL_JAX_REPO = "/home/fruiz/jax"
@@ -145,20 +148,11 @@ _TEMPLATE_DIR = Path("/home/fruiz/.hyde-sandbox-home-template")
 
 # /etc puntual para DNS + TLS + NSS -- NUNCA /etc entero (expondria
 # /etc/jax/.env, root:fruiz 0660, el grupo fruiz SI tiene lectura real).
-_ETC_RO_PATHS = (
-    "/etc/resolv.conf", "/etc/nsswitch.conf", "/etc/hosts",
-    "/etc/ssl", "/etc/passwd", "/etc/group",
-)
+_ETC_RO_PATHS = cli_sandbox.ETC_RO_PATHS
 
 _BWRAP_BIN = shutil.which("bwrap") or "/usr/bin/bwrap"
 
-_SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-
-class SandboxUnavailable(Exception):
-    """bwrap no disponible o no ejecutable en runtime. Fail-closed (P10):
-    el llamador NO debe atrapar esto para degradar a ejecución sin
-    sandbox -- Hyde simplemente no arranca."""
+_SAFE_PATH = cli_sandbox.SAFE_PATH
 
 
 class HydeCredentialUnavailable(Exception):
@@ -238,11 +232,7 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> tuple[list[str], di
     HydeCredentialUnavailable si no hay ninguna credencial de Anthropic
     usable (ni HYDE_OAUTH_TOKEN_ENV en el entorno, ni REAL_CREDENTIALS
     legible) -- mismo criterio fail-closed, ver esa excepción."""
-    if not (_BWRAP_BIN and os.path.isfile(_BWRAP_BIN) and os.access(_BWRAP_BIN, os.X_OK)):
-        raise SandboxUnavailable(
-            f"bwrap no encontrado o no ejecutable ({_BWRAP_BIN!r}) -- "
-            "Hyde no arranca sin confinamiento (fail-closed, P10)"
-        )
+    cli_sandbox.verificar_bwrap(_BWRAP_BIN, "Hyde")
 
     # Credencial de Anthropic -- se resuelve ACÁ (antes de tocar el
     # filesystem del sandbox) para no gastar el lock cross-proceso ni el
@@ -282,27 +272,10 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> tuple[list[str], di
     os.makedirs(workspace_dir, exist_ok=True)
     template_dir = _ensure_home_template(workspace_dir)
 
-    argv = [
-        _BWRAP_BIN,
-        "--unshare-all", "--share-net",  # red completa: es la unica forma de que bwrap deje llegar a la API de Anthropic
-        "--die-with-parent",
-        "--new-session",
-        # SIN --clearenv/--setenv (B-1, 2026-09-27): la frontera de entorno
-        # es el `env` que esta función devuelve, ver docstring de arriba.
-        "--proc", "/proc",
-        "--dev", "/dev",
-        "--tmpfs", "/tmp",
-        # base del SO -- necesaria para que corran node/git/python3/bash/etc.
-        "--ro-bind", "/usr", "/usr",
-        "--ro-bind", "/lib", "/lib",
-    ]
-    for optional_root in ("/lib64", "/bin", "/sbin"):
-        if os.path.isdir(optional_root) or os.path.islink(optional_root):
-            argv += ["--ro-bind", optional_root, optional_root]
-
-    for etc_path in _ETC_RO_PATHS:
-        if os.path.exists(etc_path):
-            argv += ["--ro-bind", etc_path, etc_path]
+    # Base comun (namespaces, /proc, /dev, /tmp, /usr, /lib*, /etc puntual):
+    # sale del nucleo cli_sandbox -- la golden _hyde_wrap_golden_test.py exige
+    # que el resultado sea identico byte a byte al de antes del refactor (D-4).
+    argv = cli_sandbox.argv_base(_BWRAP_BIN, _ETC_RO_PATHS)
 
     # node/claude.exe -- fuera de /usr, vive bajo ~/.nvm.
     if os.path.isdir(REAL_NVM_DIR):
@@ -344,13 +317,10 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> tuple[list[str], di
     # os.environ: eso es lo que impide que los secretos reales del proceso
     # que arma el sandbox (jaxsvc, con /etc/jax/.env cargado entero) lleguen
     # a bwrap o al `claude` de adentro.
-    env = {
-        "HOME": SANDBOX_HOME,
-        "PATH": _SAFE_PATH,
-        "LANG": "C.UTF-8",
-    }
-    if oauth_token:
-        env[HYDE_OAUTH_TOKEN_ENV] = oauth_token
+    env = cli_sandbox.env_minimo(
+        SANDBOX_HOME, {HYDE_OAUTH_TOKEN_ENV: oauth_token} if oauth_token else None,
+        path=_SAFE_PATH,
+    )
 
     return argv, env
 
@@ -414,31 +384,16 @@ def _acquire_cross_process_lock(workspace_dir: str, timeout: float):
     Devuelve el file handle abierto -- el llamador debe pasarlo a
     _release_cross_process_lock (tambien via to_thread) cuando termine,
     en un finally."""
-    lock_path = _lock_path_for_workspace(workspace_dir)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(lock_path, "w")
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return fh
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                fh.close()
-                raise TimeoutError(
-                    f"no se pudo adquirir el lock cross-proceso de subprocess "
-                    f"'claude' en {timeout}s ({lock_path}) -- otro proceso "
-                    "(REPL o las_manos) sigue teniendo un claude corriendo. "
-                    "Fail-closed: no se lanza sin exclusion mutua real."
-                )
-            time.sleep(_CLAUDE_SUBPROCESS_LOCK_POLL_S)
+    return cli_sandbox.flock_adquirir(
+        _lock_path_for_workspace(workspace_dir), timeout, "subprocess 'claude'",
+        "otro proceso (REPL o las_manos) sigue teniendo un claude corriendo.",
+    )
 
 
 def _release_cross_process_lock(fh) -> None:
     """BLOQUEANTE (aunque en la practica instantaneo) -- llamar via
     asyncio.to_thread por simetria con _acquire_cross_process_lock."""
-    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-    fh.close()
+    cli_sandbox.flock_liberar(fh)
 
 
 async def run_sandboxed_claude(
@@ -498,29 +453,11 @@ async def run_sandboxed_claude(
 
     # El presupuesto del lock es el del llamador, no una constante fija
     # (ver docstring) -- un step encolado espera lo que su step realmente
-    # dura, como hacia el semaforo viejo.
-    lock_fh = await asyncio.to_thread(
-        _acquire_cross_process_lock, workspace_dir, timeout,
+    # dura, como hacia el semaforo viejo. `adquirir`/`liberar` se resuelven por
+    # nombre de modulo EN CADA LLAMADA (los tests los parchean aca).
+    return await cli_sandbox.ejecutar(
+        sandboxed_cmd, sandbox_env, prompt.encode("utf-8"), timeout,
+        adquirir=lambda t: _acquire_cross_process_lock(workspace_dir, t),
+        liberar=lambda fh: _release_cross_process_lock(fh),
+        cwd=workspace_dir,
     )
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *sandboxed_cmd,
-            cwd=workspace_dir,
-            env=sandbox_env,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=prompt.encode("utf-8")),
-                timeout=timeout,
-            )
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            proc.kill()
-            await proc.wait()
-            raise
-    finally:
-        await asyncio.to_thread(_release_cross_process_lock, lock_fh)
-
-    return proc, stdout, stderr
