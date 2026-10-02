@@ -43,6 +43,10 @@ class Bitacora:
     def emisores(self) -> tuple:
         return self._emisores
 
+    @property
+    def observadores(self) -> tuple:
+        return self._observadores
+
     async def registrar(self, evento: str, **campos) -> dict:
         """Entrega el registro a TODOS los emisores, en orden; un emisor puede ser sincrono o
         `async` (el de la tabla encadenada lo es). Si uno lanza, la excepcion sube."""

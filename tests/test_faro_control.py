@@ -80,6 +80,8 @@ async def pedir(ruta, pedido=None, *, crudo=None, plazo=5.0):
         await escritor.drain()
         linea = await asyncio.wait_for(lector.readline(), plazo)
         return json.loads(linea) if linea else None
+    except (ConnectionResetError, BrokenPipeError):
+        return None         # el servidor cerro sin leer lo que se le mando (RST): para un extraño es lo esperado
     finally:
         escritor.close()
 
