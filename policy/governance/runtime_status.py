@@ -100,11 +100,14 @@ def platform_runtime_status_evidence(snapshot: PlatformRuntimeStatusSnapshot, ar
 
 class MotorJobStatusResolver:
     """Canonical Motor JSONL reader. Ownerless legacy jobs fail closed."""
-    def __init__(self, job_store):
+    def __init__(self):
+        # Select the singleton configured by LAS MANOS server composition.
+        # No API lets a request, model, or arbitrary caller choose a store/path.
+        from motor_registry import routes
         from motor_registry.job_store import JobStore
-        if type(job_store) is not JobStore:
-            raise GovernanceContractError("MotorJobStatusResolver requires canonical JobStore")
-        self._store = job_store
+        if type(routes._STORE) is not JobStore:
+            raise GovernanceContractError("canonical Motor Registry JobStore unavailable")
+        self._store = routes._STORE
     def evidence(self, arguments: Mapping[str, object], scope: ResponseScope) -> RuntimeStatusEvidence:
         if not isinstance(scope, ResponseScope) or scope.project_id is not None:
             raise GovernanceContractError("JOB_STATUS project scope unsupported")

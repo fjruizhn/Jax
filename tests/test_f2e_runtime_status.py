@@ -78,22 +78,35 @@ def test_job_status_rejects_project_scope_without_authoritative_mapping():
     assert receipt.status is ResolutionStatus.WRONG_SCOPE
 
 
-def test_motor_status_ownerless_legacy_job_fails_closed(tmp_path):
+def test_motor_status_ownerless_legacy_job_fails_closed(tmp_path, monkeypatch):
+    from motor_registry import routes
     store = JobStore(str(tmp_path / "jobs.jsonl"))
+    monkeypatch.setattr(routes, "_STORE", store)
     job_id = store.create(caller="jax", capability="x", motor="m", trace_id="t",
         prompt="p", recursion_depth=0)
-    evidence = MotorJobStatusResolver(store).evidence(
+    evidence = MotorJobStatusResolver().evidence(
         {"job_id": job_id, "status": "pending"}, _scope())
     assert evidence.observation.status is ResolutionStatus.UNAVAILABLE
 
 
-def test_motor_status_persists_governed_owner_and_uses_coherent_view(tmp_path):
+def test_motor_status_persists_governed_owner_and_uses_coherent_view(tmp_path, monkeypatch):
+    from motor_registry import routes
     store = JobStore(str(tmp_path / "jobs.jsonl"))
+    monkeypatch.setattr(routes, "_STORE", store)
     job_id = store.create(caller="jax", capability="x", motor="m", trace_id="t",
         prompt="p", recursion_depth=0, tenant_id="tenant-a", user_id="user-a", project_id=None)
-    evidence = MotorJobStatusResolver(store).evidence(
+    evidence = MotorJobStatusResolver().evidence(
         {"job_id": job_id, "status": "pending"}, _scope())
     assert evidence.observation.result == {"job_id": job_id, "status": "pending"}
+
+
+def test_motor_resolver_rejects_caller_selected_store():
+    try:
+        MotorJobStatusResolver(object())
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("resolver accepted caller-selected store")
 
 
 def test_runtime_registry_is_exactly_the_four_authorized_predicates():
