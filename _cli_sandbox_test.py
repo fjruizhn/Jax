@@ -2313,7 +2313,42 @@ class LocksCompartidosTest(unittest.TestCase):
         msg = str(c.exception)
         self.assertIn("/etc/tmpfiles.d/jax-locks.conf", msg)
         self.assertIn(f"f {self.d}/falta.lock 0640 root {self.grupo} -", msg)
+        self.assertNotIn("no pertenece al grupo", msg)  # MINOR-26: otra causa, otro mensaje
         self.assertFalse((self.d / "falta.lock").exists(), "sin O_CREAT: el nucleo no crea el lock")
+
+    @unittest.skipIf(os.geteuid() == 0, "root no recibe EACCES")
+    def test_sin_permiso_sobre_el_archivo_dice_que_el_euid_no_es_del_grupo_y_no_la_linea_de_tmpfiles(self):
+        # MINOR-26 (reauditoria 2026-10-02): PermissionError (existe, pero este euid no esta en
+        # el grupo) y FileNotFoundError (falta la linea de tmpfiles.d) tenian el MISMO
+        # mensaje, que mandaba a editar tmpfiles.d cuando lo que falta es la membresia al grupo
+        os.chmod(self.f, 0o000)
+        self.addCleanup(os.chmod, self.f, 0o640)
+        with self.assertRaises(cli_sandbox.SandboxUnavailable) as c:
+            self._adq()
+        msg = str(c.exception)
+        self.assertIn(f"el euid {os.geteuid()} no pertenece al grupo {self.grupo}", msg)
+        self.assertNotIn("falta la linea", msg)
+        self.assertNotIn("/etc/tmpfiles.d", msg)
+
+    @unittest.skipIf(os.geteuid() == 0, "root no recibe EACCES")
+    def test_sin_permiso_sobre_el_directorio_dice_que_el_euid_no_es_del_grupo(self):
+        os.chmod(self.d, 0o000)
+        self.addCleanup(os.chmod, self.d, 0o750)
+        with self.assertRaises(cli_sandbox.SandboxUnavailable) as c:
+            self._adq()
+        msg = str(c.exception)
+        self.assertIn(f"el euid {os.geteuid()} no pertenece al grupo {self.grupo}", msg)
+        self.assertNotIn("falta la linea", msg)
+
+    def test_directorio_inexistente_dice_que_falta_la_linea_d_y_no_habla_de_grupos(self):
+        with self.assertRaises(cli_sandbox.SandboxUnavailable) as c:
+            cli_sandbox.flock_compartido_adquirir(
+                str(Path(self.tmp.name) / "no-existe"), "ws.lock", self.grupo, 1, "x", uid_esperado=os.getuid())
+        msg = str(c.exception)
+        self.assertIn("falta la linea", msg)
+        self.assertIn("/etc/tmpfiles.d/jax-locks.conf", msg)
+        self.assertIn(f"d {self.tmp.name}/no-existe 0750 root {self.grupo} -", msg)
+        self.assertNotIn("no pertenece al grupo", msg)
 
     def test_grupo_inexistente_falla_cerrado_nombrando_la_linea_de_tmpfiles(self):
         with self.assertRaises(cli_sandbox.SandboxUnavailable) as c:

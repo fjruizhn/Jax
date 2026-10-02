@@ -342,8 +342,11 @@ def flock_compartido_adquirir(
         O_CREAT (un symlink o un archivo ausente fallan): archivo regular, mismo uid,
         mismo gid y sin escritura de grupo ni de otros. flock(LOCK_EX) funciona sobre
         un fd de solo lectura.
-    Cualquier otra cosa es SandboxUnavailable (falla cerrado) y, si falta el
-    archivo o el grupo, el mensaje nombra la linea de tmpfiles.d que hay que poner.
+    Cualquier otra cosa es SandboxUnavailable (falla cerrado). Dos causas que antes
+    compartian mensaje se distinguen (MINOR-26): si el archivo o el directorio NO EXISTE (o
+    el grupo no existe), el mensaje nombra la linea de tmpfiles.d que hay que poner; si
+    existe pero se niega el acceso (PermissionError), dice que el euid no pertenece al
+    grupo del lock.
 
     `uid_esperado` (0 en produccion) y `gid_esperado` (None = el del `grupo` real)
     se inyectan por keyword solo para los tests, que no corren como root; no hay
@@ -358,8 +361,22 @@ def flock_compartido_adquirir(
             raise SandboxUnavailable(
                 f"el grupo {grupo!r} del lock compartido no existe{falta} (y el grupo mismo)"
             ) from None
+    sin_grupo = (
+        f"el euid {os.geteuid()} no pertenece al grupo {grupo} (o el grupo no tiene lectura): "
+        f"agregar ese usuario a {grupo!r}"
+    )
     try:
         dfd = os.open(directorio, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except PermissionError:
+        # existe, pero este euid no puede entrar: falta la MEMBRESIA, no la linea de tmpfiles.d
+        raise SandboxUnavailable(
+            f"directorio de locks compartido {directorio!r} no accesible: {sin_grupo} -- falla cerrado"
+        ) from None
+    except FileNotFoundError:
+        raise SandboxUnavailable(
+            f"directorio de locks compartido {directorio!r} no existe"
+            f"{falta} (o su linea `d {directorio} 0750 root {grupo} -`)"
+        ) from None
     except OSError as exc:
         raise SandboxUnavailable(
             f"directorio de locks compartido {directorio!r} no usable ({exc.strerror or type(exc).__name__})"
@@ -375,6 +392,11 @@ def flock_compartido_adquirir(
             )
         try:
             fd = os.open(nombre, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+        except PermissionError:
+            raise SandboxUnavailable(
+                f"el lock compartido {nombre!r} existe en {directorio!r} pero no se puede abrir: "
+                f"{sin_grupo} -- falla cerrado"
+            ) from None
         except FileNotFoundError:
             raise SandboxUnavailable(
                 f"el lock compartido {nombre!r} no existe en {directorio!r}{falta}"
