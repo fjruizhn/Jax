@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import stat
 from pathlib import Path
 
@@ -19,7 +20,7 @@ import pytest
 from jax.faro import paquete
 from jax.faro.config import ConfigFaro, ConfigFaroInvalida
 
-from tests._faro_utils import _commit, _escribir, _git, repo_de_juguete
+from tests._faro_utils import _commit, _escribir, _git, _git_entrada, repo_de_juguete
 
 
 @pytest.fixture
@@ -28,7 +29,8 @@ def repo(tmp_path):
 
 
 def _cfg(repo: Path, sha: str, destino: Path) -> ConfigFaro:
-    return ConfigFaro(repo=repo, sha=sha, destino=destino)
+    # El duenio esperado se inyecta: en produccion es root (0); aqui, quien corre la prueba.
+    return ConfigFaro(repo=repo, sha=sha, destino=destino, uid_duenio=os.getuid())
 
 
 @pytest.fixture
@@ -342,3 +344,271 @@ def test_la_configuracion_sale_del_entorno_y_falla_cerrado_si_falta_algo(tmp_pat
             ConfigFaro.desde_entorno(sin)
     with pytest.raises(ConfigFaroInvalida):
         ConfigFaro.desde_entorno({**ok, "JAX_FARO_ECOSISTEMA_DIR": "relativa/ruta"})
+
+
+def test_la_configuracion_rechaza_los_plugins_hasta_que_se_lean_por_objetos_git(tmp_path):
+    ok = {"JAX_FARO_REPO": str(tmp_path), "JAX_FARO_SHA": "a" * 40, "JAX_FARO_ECOSISTEMA_DIR": str(tmp_path / "e")}
+    with pytest.raises(ConfigFaroInvalida, match="JAX_FARO_PLUGINS"):
+        ConfigFaro.desde_entorno({**ok, "JAX_FARO_PLUGINS": json.dumps([{"nombre": "p", "ruta": str(tmp_path)}])})
+    with pytest.raises(ConfigFaroInvalida, match="JAX_FARO_PLUGINS"):
+        ConfigFaro.desde_entorno({**ok, "JAX_FARO_PLUGINS": "[]"})
+
+
+def test_el_duenio_esperado_sale_del_entorno_y_por_defecto_es_root(tmp_path):
+    ok = {"JAX_FARO_REPO": str(tmp_path), "JAX_FARO_SHA": "a" * 40, "JAX_FARO_ECOSISTEMA_DIR": str(tmp_path / "e")}
+    assert ConfigFaro.desde_entorno(ok).uid_duenio == 0
+    assert ConfigFaro.desde_entorno({**ok, "JAX_FARO_DUENIO_UID": "1234"}).uid_duenio == 1234
+    with pytest.raises(ConfigFaroInvalida):
+        ConfigFaro.desde_entorno({**ok, "JAX_FARO_DUENIO_UID": "root"})
+
+
+# --------------------------------------------------------------------------- #
+# BLOCK-1: `git replace` no puede servir otro contenido bajo el mismo SHA     #
+# --------------------------------------------------------------------------- #
+
+def test_git_replace_de_un_blob_no_cambia_lo_que_se_empaqueta(repo, cfg, sha, tmp_path):
+    oid = _git(repo, "rev-parse", f"{sha}:common/skills/alfa/SKILL.md")
+    falso = tmp_path / "falso.md"
+    falso.write_text("CONTENIDO FALSO bajo el mismo SHA\n")
+    nuevo = _git(repo, "hash-object", "-w", str(falso))
+    _git(repo, "replace", oid, nuevo)
+    # sanidad: SIN la defensa, git si sirve lo falso
+    assert "FALSO" in _git(repo, "cat-file", "-p", oid)
+    raiz = paquete.construir_paquete(cfg)
+    assert "FALSO" not in (raiz / "skills/alfa/SKILL.md").read_text()
+    assert "cuerpo alfa" in (raiz / "skills/alfa/SKILL.md").read_text()
+
+
+def test_git_replace_de_un_commit_no_cambia_el_arbol_que_se_empaqueta(repo, cfg, sha, tmp_path):
+    _git(repo, "checkout", "-q", "-b", "otra")
+    _escribir(repo, "common/skills/alfa/SKILL.md", "ALFA DE OTRO ARBOL\n")
+    otro = _commit(repo)
+    _git(repo, "replace", "--force", sha, otro)  # `sha` pasa a mostrar el arbol de `otro`
+    raiz = paquete.construir_paquete(cfg)
+    assert "ALFA DE OTRO ARBOL" not in (raiz / "skills/alfa/SKILL.md").read_text()
+
+
+def test_el_entorno_git_heredado_no_desvia_la_lectura(cfg, monkeypatch, tmp_path):
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "no-existe.git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path))
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.hooksPath'='/tmp'")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.fsmonitor")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "/bin/true")
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(tmp_path / "vacio"))
+    raiz = paquete.construir_paquete(cfg)
+    assert (raiz / "skills/alfa/SKILL.md").is_file()
+
+
+# --------------------------------------------------------------------------- #
+# BLOCK-2: una entrada `..` del arbol no escribe fuera de la raiz             #
+# --------------------------------------------------------------------------- #
+
+def _arbol_con_traversal(repo: Path, nombre_malo: str = "..") -> str:
+    """Un commit cuyo arbol (hecho a mano con `git mktree`) trae entradas llamadas `..`."""
+    blob = _git_entrada(repo, "hash-object", "-w", "--stdin", entrada="contenido malicioso\n")
+    ok = _git_entrada(repo, "hash-object", "-w", "--stdin", entrada="---\nname: a\ndescription: d\n---\ncuerpo\n")
+    core = _git_entrada(repo, "hash-object", "-w", "--stdin", entrada="# nucleo\n")
+    interno = _git_entrada(repo, "mktree", entrada=f"100644 blob {blob}\tevil.txt\n")
+    medio = _git_entrada(repo, "mktree", entrada=f"040000 tree {interno}\t{nombre_malo}\n")
+    skills = _git_entrada(repo, "mktree", entrada=f"040000 tree {medio}\t{nombre_malo}\n"
+                                                  f"040000 tree {_git_entrada(repo, 'mktree', entrada=f'100644 blob {ok}\tSKILL.md\n')}\talfa\n")
+    common = _git_entrada(repo, "mktree", entrada=f"100644 blob {core}\tCLAUDE.md.core\n040000 tree {skills}\tskills\n")
+    raiz = _git_entrada(repo, "mktree", entrada=f"040000 tree {common}\tcommon\n")
+    commit = _git_entrada(repo, "commit-tree", raiz, "-m", "traversal")
+    _git(repo, "update-ref", "refs/remotes/origin/main", commit)
+    return commit
+
+
+def test_una_entrada_con_dos_puntos_en_el_arbol_se_rechaza_y_no_escribe_fuera(repo, tmp_path):
+    commit = _arbol_con_traversal(repo)
+    destino = tmp_path / "ecosistema"
+    with pytest.raises(paquete.FuenteInvalida, match="ruta"):
+        paquete.construir_paquete(_cfg(repo, commit, destino))
+    assert not (destino / "evil.txt").exists() and not (tmp_path / "evil.txt").exists()
+    assert not list(tmp_path.rglob("evil.txt"))
+    assert not destino.exists() or list(destino.iterdir()) == []
+
+
+@pytest.mark.parametrize("nombre", [".git", ".GIT", "con\\barra"])
+def test_nombres_peligrosos_en_el_arbol_se_rechazan(repo, tmp_path, nombre):
+    commit = _arbol_con_traversal(repo, nombre)
+    with pytest.raises(paquete.FuenteInvalida):
+        paquete.construir_paquete(_cfg(repo, commit, tmp_path / "e"))
+
+
+def test_los_padres_se_abren_sin_seguir_enlaces_y_confinados_a_la_raiz(tmp_path):
+    """Un directorio intermedio que es un enlace (plantado antes de escribir) no desvia la escritura."""
+    afuera = tmp_path / "afuera"
+    afuera.mkdir()
+    raiz = tmp_path / "raiz"
+    raiz.mkdir()
+    (raiz / "skills").symlink_to(afuera)
+    with pytest.raises((paquete.FuenteInvalida, OSError)):
+        paquete._escribir_archivos(raiz, {"skills/alfa/SKILL.md": (0o644, b"x")})
+    assert list(afuera.iterdir()) == []
+
+
+def test_un_archivo_destino_que_ya_es_un_enlace_no_se_sigue(tmp_path):
+    afuera = tmp_path / "afuera.txt"
+    raiz = tmp_path / "raiz"
+    (raiz / "skills").mkdir(parents=True)
+    (raiz / "skills/a.md").symlink_to(afuera)
+    with pytest.raises((paquete.FuenteInvalida, OSError)):
+        paquete._escribir_archivos(raiz, {"skills/a.md": (0o644, b"x")})
+    assert not afuera.exists()
+
+
+# --------------------------------------------------------------------------- #
+# MAJOR-1: el manifiesto se ata al SHA (oid git), no solo a si mismo; y el dueño #
+# --------------------------------------------------------------------------- #
+
+def _forjar_coherente(raiz: Path, rel: str, nuevo: bytes) -> None:
+    """Quien puede escribir el paquete cambia un archivo Y recalcula sha256 y el hash del manifiesto."""
+    import hashlib
+    (raiz / rel).write_bytes(nuevo)
+    m = json.loads((raiz / paquete.MANIFIESTO).read_text())
+    m["archivos"][rel]["sha256"] = hashlib.sha256(nuevo).hexdigest()
+    m["sha256_manifiesto"] = paquete.hash_del_manifiesto(m)
+    (raiz / paquete.MANIFIESTO).write_text(json.dumps(m))
+
+
+def test_el_manifiesto_lleva_el_oid_git_de_cada_archivo(repo, cfg, sha):
+    raiz = paquete.construir_paquete(cfg)
+    m = json.loads((raiz / paquete.MANIFIESTO).read_text())
+    assert m["archivos"]["skills/alfa/SKILL.md"]["oid_git"] == _git(repo, "rev-parse", f"{sha}:common/skills/alfa/SKILL.md")
+    # la constitucion lleva el oid del blob de origen (sin el sello que le antepone el constructor)
+    assert m["archivos"]["constitucion/CLAUDE.md"]["oid_git"] == _git(repo, "rev-parse", f"{sha}:common/CLAUDE.md.core")
+
+
+def test_un_manifiesto_forjado_pero_coherente_no_carga_contra_el_arbol_del_sha(cfg):
+    raiz = paquete.construir_paquete(cfg)
+    _forjar_coherente(raiz, "skills/alfa/SKILL.md", b"---\nname: alfa\n---\nINSTRUCCION FORJADA\n")
+    # solo con el manifiesto no hay como saberlo...
+    assert paquete.verificar_integridad(cfg) == ()
+    # ...pero al cargar se compara contra el arbol de git del SHA
+    with pytest.raises(paquete.PaqueteNoVerifica) as exc:
+        paquete.cargar_paquete(cfg)
+    assert "oid_distinto_del_arbol" in {f.codigo for f in exc.value.fallos}
+
+
+def test_la_constitucion_forjada_tampoco_carga(cfg, sha):
+    raiz = paquete.construir_paquete(cfg)
+    _forjar_coherente(raiz, "constitucion/CLAUDE.md", f"<!-- claude-skills: SHA {sha} -->\n# otra constitucion\n".encode())
+    with pytest.raises(paquete.PaqueteNoVerifica):
+        paquete.cargar_paquete(cfg)
+
+
+def test_un_archivo_agregado_al_paquete_y_al_manifiesto_no_carga(cfg):
+    import hashlib
+    raiz = paquete.construir_paquete(cfg)
+    (raiz / "skills/alfa/EXTRA.md").write_bytes(b"extra")
+    m = json.loads((raiz / paquete.MANIFIESTO).read_text())
+    m["archivos"]["skills/alfa/EXTRA.md"] = {"modo": "0644", "sha256": hashlib.sha256(b"extra").hexdigest(), "oid_git": "0" * 40}
+    m["sha256_manifiesto"] = paquete.hash_del_manifiesto(m)
+    (raiz / paquete.MANIFIESTO).write_text(json.dumps(m))
+    with pytest.raises(paquete.PaqueteNoVerifica) as exc:
+        paquete.cargar_paquete(cfg)
+    assert "archivo_fuera_del_arbol" in {f.codigo for f in exc.value.fallos}
+
+
+def test_un_archivo_del_arbol_quitado_del_paquete_y_del_manifiesto_no_carga(cfg):
+    raiz = paquete.construir_paquete(cfg)
+    (raiz / "skills/beta/SKILL.md").unlink()
+    (raiz / "skills/beta").rmdir()
+    m = json.loads((raiz / paquete.MANIFIESTO).read_text())
+    del m["archivos"]["skills/beta/SKILL.md"]
+    m["sha256_manifiesto"] = paquete.hash_del_manifiesto(m)
+    (raiz / paquete.MANIFIESTO).write_text(json.dumps(m))
+    with pytest.raises(paquete.PaqueteNoVerifica) as exc:
+        paquete.cargar_paquete(cfg)
+    assert "archivo_del_arbol_ausente" in {f.codigo for f in exc.value.fallos}
+
+
+def test_un_duenio_distinto_del_esperado_impide_arrancar(cfg):
+    paquete.construir_paquete(cfg)
+    otro = ConfigFaro(repo=cfg.repo, sha=cfg.sha, destino=cfg.destino, uid_duenio=os.getuid() + 1)
+    codigos = _codigos(paquete.verificar_integridad(otro))
+    assert "duenio_distinto" in codigos
+
+
+def test_escritura_de_grupo_u_otros_en_un_directorio_o_archivo_impide_arrancar(cfg):
+    raiz = paquete.construir_paquete(cfg)
+    (raiz / "skills").chmod(0o775)
+    assert ("escritura_ajena", "skills") in {(f.codigo, f.ruta) for f in paquete.verificar_integridad(cfg)}
+    (raiz / "skills").chmod(0o755)
+    (raiz / "skills/alfa/SKILL.md").chmod(0o646)
+    assert "escritura_ajena" in _codigos(paquete.verificar_integridad(cfg))
+    (raiz / "skills/alfa/SKILL.md").chmod(0o644)
+    raiz.chmod(0o757)
+    assert ("escritura_ajena", "") in {(f.codigo, f.ruta) for f in paquete.verificar_integridad(cfg)}
+
+
+def test_un_ancestro_con_escritura_ajena_sin_sticky_impide_arrancar(repo, sha, tmp_path):
+    destino = tmp_path / "a" / "eco"
+    cfg = _cfg(repo, sha, destino)
+    paquete.construir_paquete(cfg)
+    assert paquete.verificar_integridad(cfg) == ()
+    (tmp_path / "a").chmod(0o777)
+    assert "ancestro_inseguro" in _codigos(paquete.verificar_integridad(cfg))
+    (tmp_path / "a").chmod(0o1777)   # con sticky (como /tmp) un tercero no puede renombrar lo ajeno
+    assert paquete.verificar_integridad(cfg) == ()
+
+
+# --------------------------------------------------------------------------- #
+# MINORES de la carga y de la frescura                                        #
+# --------------------------------------------------------------------------- #
+
+def test_cargar_vuelve_a_comparar_lo_que_lee_tras_verificar(cfg, monkeypatch):
+    """Entre la verificacion y la lectura alguien cambia un archivo: lo que se carga se re-hashea."""
+    raiz = paquete.construir_paquete(cfg)
+    original = paquete._verificar_raiz
+
+    def verificar_y_luego_cambiar(*a, **k):
+        r = original(*a, **k)
+        (raiz / "skills/alfa/SKILL.md").write_bytes(b"cambiado entre la verificacion y la lectura")
+        return r
+
+    monkeypatch.setattr(paquete, "_verificar_raiz", verificar_y_luego_cambiar)
+    with pytest.raises(paquete.PaqueteNoVerifica):
+        paquete.cargar_paquete(cfg)
+
+
+def test_cargar_no_sigue_un_enlace_plantado_tras_verificar(cfg, monkeypatch, tmp_path):
+    raiz = paquete.construir_paquete(cfg)
+    original = paquete._verificar_raiz
+
+    def verificar_y_luego_enlazar(*a, **k):
+        r = original(*a, **k)
+        ruta = raiz / "skills/alfa/SKILL.md"
+        copia = tmp_path / "copia-identica.md"
+        copia.write_bytes(ruta.read_bytes())  # mismos bytes: solo el tipo cambia
+        ruta.unlink()
+        ruta.symlink_to(copia)
+        return r
+
+    monkeypatch.setattr(paquete, "_verificar_raiz", verificar_y_luego_enlazar)
+    with pytest.raises(paquete.PaqueteNoVerifica):
+        paquete.cargar_paquete(cfg)
+
+
+def test_cargar_usa_el_manifiesto_ya_verificado_sin_releerlo(cfg, monkeypatch):
+    paquete.construir_paquete(cfg)
+    lecturas = []
+    original = paquete._leer_manifiesto
+    monkeypatch.setattr(paquete, "_leer_manifiesto", lambda raiz: lecturas.append(1) or original(raiz))
+    paquete.cargar_paquete(cfg)
+    assert len(lecturas) == 1
+
+
+def test_la_frescura_distingue_un_sha_retirado_de_main(repo, cfg, sha, caplog):
+    paquete.construir_paquete(cfg)
+    _git(repo, "checkout", "-q", "--orphan", "reescrita")
+    _escribir(repo, "otra.txt", "historia reescrita\n")
+    nuevo = _commit(repo)
+    _git(repo, "update-ref", "refs/remotes/origin/main", nuevo)   # `sha` ya no es ancestro de main
+    with caplog.at_level(logging.WARNING, logger="jax.faro.paquete"):
+        f = paquete.frescura(cfg)
+        paquete.exigir_integridad(cfg)    # solo avisa
+    assert f.estado == "retirado" and f.sha_actual == nuevo
+    assert any("retirado" in r.getMessage() for r in caplog.records)

@@ -10,6 +10,7 @@ una variable ausente o vacia no tiene valor por defecto, es un error.
   JAX_FARO_SHA             SHA completo (40 hex) de `origin/main` que se fija
   JAX_FARO_ECOSISTEMA_DIR  destino de los paquetes (en produccion
                            `/srv/jax-prod/ecosistema`; el paquete queda en `<dir>/<SHA>/`)
+  JAX_FARO_DUENIO_UID      opcional, uid del dueño esperado del paquete (default 0 = root)
   JAX_FARO_REF_FRESCURA    opcional, la ref contra la que se mide la frescura
                            (default `origin/main`; es un nombre de ref, no un dato de entorno)
   JAX_FARO_SOCKET_DIR      directorio de los sockets del Puerto (`<dir>/<run_id>.sock`; en
@@ -42,6 +43,7 @@ class ConfigFaro:
     sha: str
     destino: Path
     ref_frescura: str = REF_FRESCURA_POR_DEFECTO
+    uid_duenio: int = 0   # dueño esperado del paquete: root en produccion; las pruebas lo inyectan
 
     def __post_init__(self) -> None:
         if not sha_valido(self.sha):
@@ -65,7 +67,17 @@ class ConfigFaro:
                 raise ConfigFaroInvalida(f"{nombre} tiene que ser una ruta absoluta, no {str(ruta)!r}")
             return ruta
 
+        if (env.get("JAX_FARO_PLUGINS") or "").strip() or "JAX_FARO_PLUGINS" in env:
+            raise ConfigFaroInvalida(
+                "JAX_FARO_PLUGINS no se acepta todavia: los plugins se leian del arbol de trabajo (mutable tras fijar el "
+                "SHA); solo entraran cuando se lean por objetos git de su SHA")
+        crudo_uid = (env.get("JAX_FARO_DUENIO_UID") or "").strip()
+        try:
+            uid_duenio = int(crudo_uid) if crudo_uid else 0
+        except ValueError as exc:
+            raise ConfigFaroInvalida("JAX_FARO_DUENIO_UID no es un entero") from exc
         return cls(
+            uid_duenio=uid_duenio,
             repo=ruta_absoluta("JAX_FARO_REPO"),
             sha=pedir("JAX_FARO_SHA"),
             destino=ruta_absoluta("JAX_FARO_ECOSISTEMA_DIR"),

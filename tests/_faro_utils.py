@@ -27,6 +27,12 @@ def _git(repo: Path, *args: str) -> str:
                           text=True, env=env).stdout.strip()
 
 
+def _git_entrada(repo: Path, *args: str, entrada: str = "") -> str:
+    env = {**os.environ, **_ENV_GIT}
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
+                          env=env, input=entrada).stdout.strip()
+
+
 def _escribir(repo: Path, rel: str, datos: str | bytes, modo: int = 0o644) -> None:
     ruta = repo / rel
     ruta.parent.mkdir(parents=True, exist_ok=True)
