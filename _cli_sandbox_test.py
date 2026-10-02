@@ -1326,12 +1326,41 @@ class LocksSegurosTest(_Entorno):
         finally:
             cli_sandbox.flock_liberar(fh)
 
-    async def test_el_default_del_directorio_es_propio_del_euid_y_no_se_crea_en_run(self):
+    async def test_sin_JAX_CLI_LOCK_DIR_falla_cerrado_y_no_hay_default_en_tmp(self):
+        # MAJOR-14: el default era un nombre fijo en /tmp. Sin la variable (la pone el
+        # paso de host, en /run/jax-locks/cli) no hay lock seguro: no se lanza.
+        for valor in (None, "", "   "):
+            with self.subTest(valor=valor), patch.dict(os.environ):
+                if valor is None:
+                    os.environ.pop("JAX_CLI_LOCK_DIR")
+                else:
+                    os.environ["JAX_CLI_LOCK_DIR"] = valor
+                with self.assertRaises(cli_sandbox.SandboxUnavailable) as c:
+                    cli_sandbox._lock_dir()
+                self.assertIn("JAX_CLI_LOCK_DIR", str(c.exception))
+                with self.assertRaises(cli_sandbox.SandboxUnavailable):
+                    cli_sandbox._ranura_adquirir("codex", 2, 1)
+        self.assertNotIn("/tmp/jax-cli-locks", inspect.getsource(cli_sandbox._lock_dir))
+
+    async def test_run_cli_sin_JAX_CLI_LOCK_DIR_no_lanza_nada(self):
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        titular = await self.titular()
         with patch.dict(os.environ):
             os.environ.pop("JAX_CLI_LOCK_DIR")
-            d = cli_sandbox._lock_dir()
-        self.assertEqual(str(d), f"/tmp/jax-cli-locks-{os.geteuid()}")
-        self.assertFalse(str(d).startswith("/run"))
+            with patch("asyncio.create_subprocess_exec", fake):
+                with self.assertRaises(cli_sandbox.SandboxUnavailable):
+                    await cli_sandbox.run_cli(
+                        "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                        timeout=5, titular=titular, correlation_id="c", entry_point="chat")
+        self.assertEqual(cap["llamadas"], 0)
+
+    async def test_la_documentacion_no_recomienda_RuntimeDirectory_sino_tmpfiles(self):
+        # MINOR-20: el directorio de locks se siembra con tmpfiles.d (un
+        # RuntimeDirectory= de la unidad de un servicio no lo veria el otro proceso)
+        fuente = inspect.getsource(cli_sandbox)
+        self.assertNotIn("RuntimeDirectory", fuente)
+        self.assertIn("tmpfiles.d", inspect.getdoc(cli_sandbox._preparar_dir_locks))
+        self.assertIn("tmpfiles.d", inspect.getdoc(cli_sandbox._lock_dir))
 
     async def test_la_purga_de_kimi_no_sigue_symlinks_de_las_otras_ranuras(self):
         self._preparar_dir()

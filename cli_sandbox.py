@@ -48,9 +48,13 @@ root, cambiarlas exige reiniciar):
   JAX_CLI_CRED_ROOT           raiz de las credenciales de suscripcion
                               (default /srv/jax-data/cli-suscripcion)
   JAX_CLI_RUN_DIR             directorio por llamada (default /run/jax-cli)
-  JAX_CLI_LOCK_DIR            locks por perfil (default /tmp/jax-cli-locks-<euid>).
-                              Debe ser del euid y sin escritura de grupo/otros, o
-                              el CLI no arranca (SandboxUnavailable)
+  JAX_CLI_LOCK_DIR            locks por perfil. SIN DEFAULT: ausente o vacia, el CLI no
+                              arranca (SandboxUnavailable, falla cerrado). El paso de
+                              host la pone en /run/jax-locks/cli y la siembra con
+                              tmpfiles.d (`d /run/jax-locks/cli 0700 <usuario> -`). Debe
+                              ser del euid y sin escritura de grupo/otros. Estos locks
+                              son por euid (un solo usuario por CLI); el de Hyde, que
+                              comparten dos usuarios, va por grupo en hyde_sandbox
   JAX_CLI_MAX_PROMPT_CHARS    tope del prompt (default 32000)
   JAX_CLI_<PERFIL>_RANURAS    llamadas concurrentes por perfil, 1..16 (default el del
                               perfil; NO lo decide el llamador de run_cli)
@@ -235,9 +239,9 @@ def _preparar_dir_locks(directorio: Path) -> int:
     escribir en el. Lo crea con 0700 si no existe. Cualquier otra cosa es
     SandboxUnavailable: un lock que otro usuario puede reemplazar o sembrar con
     symlinks no da exclusion mutua ni es seguro de abrir (auditoria 2026-10-02,
-    MAJOR-3). El llamador cierra el fd. NO crea nada en /run: el directorio por
-    defecto es el de `_lock_dir`, y un despliegue con RuntimeDirectory=jax-cli lo
-    apunta con JAX_CLI_LOCK_DIR."""
+    MAJOR-3). El llamador cierra el fd. En produccion el directorio lo siembra el
+    host con tmpfiles.d (JAX_CLI_LOCK_DIR=/run/jax-locks/cli); este modulo no
+    puede crear nada bajo /run, solo bajo un padre que ya sea del euid."""
     try:
         os.makedirs(directorio, mode=0o700, exist_ok=True)
         fd = os.open(directorio, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -1064,13 +1068,18 @@ def armar_conversacion(historial, mensaje: str, max_chars: int, nonce: Optional[
 # --------------------------------------------------------------------------
 
 def _lock_dir() -> Path:
-    """Directorio de los locks por perfil. Sale de JAX_CLI_LOCK_DIR (el paso 11
-    del despliegue lo apunta a un RuntimeDirectory=jax-cli de systemd). Sin
-    configurar, usa `/tmp/jax-cli-locks-<euid>`: el sufijo evita que otro usuario
-    del host ocupe el nombre antes que nosotros; si lo hace igual, el directorio
-    se rechaza por dueno (`_preparar_dir_locks`) y el CLI no arranca (falla
-    cerrado). Este modulo nunca crea nada en /run por su cuenta."""
-    return Path(os.environ.get("JAX_CLI_LOCK_DIR") or f"/tmp/jax-cli-locks-{os.geteuid()}")
+    """Directorio de los locks por perfil: `JAX_CLI_LOCK_DIR`, SIN default. Ausente
+    o vacio es SandboxUnavailable (falla cerrado): un nombre fijo en /tmp lo puede
+    ocupar otro usuario antes que nosotros (auditoria 2026-10-02, MAJOR-14). El paso
+    de host lo apunta a /run/jax-locks/cli, sembrado con tmpfiles.d; despues
+    `_preparar_dir_locks` verifica que sea del euid y sin escritura ajena."""
+    valor = os.environ.get("JAX_CLI_LOCK_DIR", "").strip()
+    if not valor:
+        raise SandboxUnavailable(
+            "JAX_CLI_LOCK_DIR no esta definida: sin un directorio de locks seguro no se lanza "
+            "(falla cerrado; el paso de host la fija en /run/jax-locks/cli con tmpfiles.d)"
+        )
+    return Path(valor)
 
 
 _RANURAS_MAX = 16
