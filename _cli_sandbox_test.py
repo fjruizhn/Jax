@@ -2323,6 +2323,32 @@ class LocksCompartidosTest(unittest.TestCase):
         self.assertIn("/etc/tmpfiles.d/jax-locks.conf", msg)
         self.assertIn(f"f {self.d}/ws.lock 0640 root grupo-que-no-existe-xyz -", msg)
 
+    def test_el_dueno_y_el_gid_del_DIRECTORIO_se_verifican_aparte_de_los_del_archivo(self):
+        # MINOR-25: con el dueno o el gid inyectados mal, el ARCHIVO tambien falla, asi que
+        # quitar la comprobacion del directorio sobrevivia a los tests. Aqui solo se falsea el
+        # stat del DIRECTORIO: el archivo es perfecto y lo unico que puede rechazar es esa guarda.
+        real = os.fstat
+
+        def solo_directorio(**campos):
+            def falso(fd):
+                st = real(fd)
+                if not stat.S_ISDIR(st.st_mode):
+                    return st
+                v = dict(uid=st.st_uid, gid=st.st_gid)
+                v.update(campos)
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, v["uid"], v["gid"],
+                                       st.st_size, int(st.st_atime), int(st.st_mtime), int(st.st_ctime)))
+            return falso
+
+        for campos in ({"gid": os.getgid() + 1}, {"uid": os.getuid() + 1}):
+            with self.subTest(campos=campos):
+                with patch.object(cli_sandbox.os, "fstat", side_effect=solo_directorio(**campos)):
+                    with self.assertRaises(cli_sandbox.SandboxUnavailable) as c:
+                        self._adq()
+                self.assertIn("directorio de locks compartido", str(c.exception))
+                self.assertIn("inseguro", str(c.exception))
+        cli_sandbox.flock_liberar(self._adq())  # sin falsear nada, el mismo directorio sirve
+
     def test_archivo_con_escritura_de_grupo_u_otros_se_rechaza(self):
         for modo in (0o660, 0o646, 0o666, 0o602, 0o620):
             with self.subTest(modo=oct(modo)):
@@ -2364,6 +2390,59 @@ class LocksCompartidosTest(unittest.TestCase):
         (self.d / "dir.lock").mkdir(mode=0o750)
         with self.assertRaises(cli_sandbox.SandboxUnavailable):
             self._adq("dir.lock")
+
+
+class Sha256ArchivoTest(unittest.TestCase):
+    """MINOR-25: `_sha256_archivo(esperado=...)` es la defensa contra el cambio de archivo
+    ENTRE el recorrido del arbol (que vio un stat) y el hash. Ningun test la ejercitaba: se
+    podia quitar la comparacion, comparar solo el inode o dejar de pasar `esperado` desde
+    `_manifiesto` y la suite seguia verde."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = Path(self.tmp.name) / "bin"
+        self.d.mkdir()
+        os.chmod(self.d, 0o755)
+        self.a = self.d / "a"
+        self.a.write_bytes(b"contenido-a\n")
+        self.a.chmod(0o755)
+        self.b = self.d / "b"
+        self.b.write_bytes(b"contenido-b\n")
+        self.b.chmod(0o755)
+
+    def test_sin_esperado_hashea_y_con_el_stat_correcto_tambien(self):
+        h = hashlib.sha256(b"contenido-a\n").hexdigest()
+        self.assertEqual(cli_sandbox._sha256_archivo(str(self.a)), h)
+        self.assertEqual(cli_sandbox._sha256_archivo(str(self.a), esperado=os.lstat(self.a)), h)
+
+    def test_un_archivo_distinto_del_que_vio_el_recorrido_es_binario_alterado(self):
+        with self.assertRaises(cli_sandbox.BinarioAlterado) as c:
+            cli_sandbox._sha256_archivo(str(self.b), esperado=os.lstat(self.a))
+        self.assertIn("cambio entre el recorrido y el hash", str(c.exception))
+
+    def test_dev_e_inode_cuentan_los_dos(self):
+        import types
+        st = os.lstat(self.a)
+        mismo_inode_otro_dev = types.SimpleNamespace(st_dev=st.st_dev + 1, st_ino=st.st_ino)
+        mismo_dev_otro_inode = types.SimpleNamespace(st_dev=st.st_dev, st_ino=st.st_ino + 1)
+        for nombre, falso in (("otro dev", mismo_inode_otro_dev), ("otro inode", mismo_dev_otro_inode)):
+            with self.subTest(nombre):
+                with self.assertRaises(cli_sandbox.BinarioAlterado):
+                    cli_sandbox._sha256_archivo(str(self.a), esperado=falso)
+
+    def test_el_manifiesto_pasa_el_stat_del_recorrido_y_detecta_el_reemplazo(self):
+        # TOCTOU de punta a punta: el recorrido vio `a`; antes de hashear, `a` se reemplaza por
+        # otro archivo (otro inode). `_manifiesto` tiene que negarse en vez de hashear el nuevo.
+        entradas = cli_sandbox._inspeccionar_arbol(str(self.d), os.getuid(), "t")
+        intruso = self.d / "intruso"
+        intruso.write_bytes(b"otro-contenido\n")
+        intruso.chmod(0o755)
+        os.replace(intruso, self.a)
+        with self.assertRaises(cli_sandbox.BinarioAlterado):
+            cli_sandbox._manifiesto(str(self.d), entradas)
+        # sin reemplazo, el mismo recorrido hashea bien
+        self.assertRegex(cli_sandbox.sha_manifiesto(str(self.d), uid_esperado=os.getuid()), r"^[0-9a-f]{64}$")
 
 
 class PurgaDeCodexTest(_Entorno):
