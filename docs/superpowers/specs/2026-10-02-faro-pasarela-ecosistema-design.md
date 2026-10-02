@@ -317,3 +317,13 @@ No ratifico nada: la decisión es de Fernando.
 | **D-4** | **Sin tope de agentes.** Ni concurrencia de agentes por ejecución ni profundidad de sub-agentes llevan tope de regla. El único límite son los recursos de la máquina (cgroup: `MemoryMax`/`CPUQuota`/`TasksMax` de la jaula). Los topes de tokens y gasto diario se miden en la fase 0 y se proponen como regla. *(Nota de Hyde: la detección de ciclos en la cadena de agentes se mantiene, porque no es un tope sino la defensa contra un bucle infinito.)* |
 | **D-5** | **Las dos ya.** Se adelanta T16 (retiro del REPL, que cierra F-1) y la fase 0 arranca con el experimento S-1 en paralelo. |
 | **D-6** | *(Recomendación adoptada.)* Ruflo queda fuera del Faro en las fases 0 y 1; se revisa después. |
+
+### Credenciales por motor (OK de Fernando, 2026-10-02, tras el experimento S-1)
+
+| Motor | Credencial de El Faro |
+|---|---|
+| Claude | **API key de Anthropic** propia, revocable y con tope. Anthropic prohíbe intermediar tokens de los planes Pro/Max (`code.claude.com/docs/en/legal-and-compliance`). |
+| Codex | **Login propio de El Faro**, en un `CODEX_HOME` que es de El Faro y no de Fernando, inyectado por el proxy. Solo uso personal de Fernando. |
+| Kimi | **API key de miembro** de la suscripción (la vía que Kimi documenta para terceros), inyectada por el proxy. |
+
+Requisitos del proxy, salidos de S-1: un socket Unix por ejecución con `SO_PEERCRED`, un uid distinto al del motor, quitar `set-cookie`, `supports_websockets=false` en Codex y bloquear la telemetría directa por el cerco. Prototipo: `/tmp/faro-s1/proxy.py`.
