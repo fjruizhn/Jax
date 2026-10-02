@@ -139,6 +139,21 @@ def test_construir_dos_veces_es_idempotente_si_el_paquete_esta_integro(cfg):
     assert a == b
 
 
+def test_lo_que_se_construye_se_verifica_antes_de_publicar(cfg, monkeypatch):
+    """Si el escritor corrompe algo (disco, bug), el paquete NO se publica."""
+    original = paquete._escribir_paquete
+
+    def corrupto(raiz, c, archivos):
+        original(raiz, c, archivos)
+        (raiz / "skills/alfa/SKILL.md").write_text("corrompido al escribir")
+
+    monkeypatch.setattr(paquete, "_escribir_paquete", corrupto)
+    with pytest.raises(paquete.PaqueteNoVerifica):
+        paquete.construir_paquete(cfg)
+    assert not cfg.raiz_paquete.exists()
+    assert [p.name for p in cfg.destino.iterdir()] == []
+
+
 def test_un_paquete_existente_alterado_no_se_pisa(cfg):
     raiz = paquete.construir_paquete(cfg)
     (raiz / "skills/alfa/SKILL.md").write_text("alterado")
