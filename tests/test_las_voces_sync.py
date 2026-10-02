@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -36,6 +37,60 @@ def test_canonical_projects_each_harness_and_is_deterministic(root: Path) -> Non
     first = (project / "sync/manifest.json").read_bytes()
     assert sync.generate(root) == 0
     assert (project / "sync/manifest.json").read_bytes() == first
+
+
+def _frontmatter(path: Path) -> tuple[dict, str]:
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    _, metadata, body = text.split("---\n", 2)
+    return yaml.safe_load(metadata), body
+
+
+def test_qwen_skill_projection_has_native_frontmatter_from_canonical_source(root: Path) -> None:
+    assert sync.generate(root) == 0
+    project = generated(root)
+    canonical = json.loads((project / "skills/las-voces-governance.json").read_text())
+    path = project / ".qwen/skills/las-voces-governance/SKILL.md"
+    metadata, body = _frontmatter(path)
+    assert metadata == {"name": canonical["id"], "description": canonical["purpose"]}
+    assert body.startswith("<!-- GENERATED FROM AXIOMA CANONICAL SOURCE. DO NOT EDIT DIRECTLY. -->\n")
+    assert "Human Authority is Fernando" in body
+    assert "CANONICAL → GENERATED PROJECTIONS" in body
+
+
+def test_qwen_primary_builder_projection_uses_qwen_canonical_identity(root: Path) -> None:
+    assert sync.generate(root) == 0
+    project = generated(root)
+    qwen = next(item for item in json.loads((project / "project.json").read_text())["agents"] if item["name"] == "Qwen")
+    path = project / ".qwen/agents/primary-builder.md"
+    metadata, body = _frontmatter(path)
+    assert metadata == {
+        "name": "primary-builder",
+        "description": f"{qwen['name']} — {qwen['role']}. Authority: {qwen['authority']}.",
+    }
+    assert body.startswith("<!-- GENERATED FROM AXIOMA CANONICAL SOURCE. DO NOT EDIT DIRECTLY. -->\n")
+    assert "Qwen is the PRIMARY BUILDER" in " ".join(body.split())
+    assert "may not merge, deploy" in body
+    assert "Canonical agent: ariadna-project-manager" not in body
+
+
+def test_missing_canonical_qwen_builder_identity_fails_closed(root: Path) -> None:
+    project = generated(root)
+    value = json.loads((project / "project.json").read_text())
+    next(item for item in value["agents"] if item["name"] == "Qwen").pop("authority")
+    (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(sync.SyncError, match="canonical Qwen builder identity"):
+        sync.check(root)
+
+
+def test_invalid_qwen_skill_name_fails_closed(root: Path) -> None:
+    project = generated(root)
+    path = project / "skills/las-voces-governance.json"
+    value = json.loads(path.read_text())
+    value["id"] = "las/voces"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(sync.SyncError, match="canonical skill name"):
+        sync.check(root)
 
 
 def test_source_change_requires_sync_and_check_does_not_mutate(root: Path) -> None:

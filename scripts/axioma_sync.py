@@ -18,11 +18,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 from typing import Any
 
 
-GENERATOR_VERSION = "1.0"
+GENERATOR_VERSION = "1.1"
 PROJECT_ID = "las-voces"
 _CLAUDE_FILE = "C" + "LAUDE.md"
 _CLAUDE_HARNESS = "cla" + "ude-code"
@@ -62,7 +63,7 @@ def _source_commit(repo: Path) -> str:
     return result.stdout.strip() if result.returncode == 0 else "UNAVAILABLE"
 
 
-def _canonical(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+def _canonical(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     project = root / "projects" / PROJECT_ID
     project_json = _read_json(project / "project.json")
     if project_json.get("project", {}).get("id") != PROJECT_ID:
@@ -79,10 +80,26 @@ def _canonical(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any], dict[s
         raise SyncError("Ariadna lifecycle declarations disagree")
     if agent.get("lifecycle_status") not in {"PROPOSED_NOT_ACTIVE", "ACTIVE_GOVERNED"}:
         raise SyncError("invalid Ariadna lifecycle")
+    qwen = [item for item in project_json.get("agents", []) if item.get("name") == "Qwen"]
+    if (
+        len(qwen) != 1
+        or any(not isinstance(qwen[0].get(field), str) or not qwen[0][field].strip()
+               for field in ("role", "authority"))
+    ):
+        raise SyncError("missing or invalid canonical Qwen builder identity")
+    skill_name = skill.get("id")
+    valid_skill_name = (
+        isinstance(skill_name, str)
+        and bool(skill_name)
+        and all(unicodedata.category(char)[0] in {"L", "N"} or char in "_:.-"
+                for char in skill_name)
+    )
+    if not valid_skill_name or not isinstance(skill.get("purpose"), str) or not skill["purpose"].strip():
+        raise SyncError("invalid canonical skill name or description")
     required_envelope = {"message_id", "project_id", "task_id", "sender_agent", "recipient_agent", "intent", "evidence_refs", "authority_context", "correlation_id", "created_at", "status"}
     if set(envelope.get("required", [])) != required_envelope:
         raise SyncError("invalid MessageEnvelope contract")
-    return project, project_json, agent, skill, envelope
+    return project, project_json, agent, skill, envelope, qwen[0]
 
 
 def _source_hash(project: Path) -> str:
@@ -104,7 +121,7 @@ def _notice() -> str:
     return "<!-- GENERATED FROM AXIOMA CANONICAL SOURCE. DO NOT EDIT DIRECTLY. -->\n"
 
 
-def _governance(agent: dict[str, Any], skill: dict[str, Any]) -> str:
+def _governance(agent: dict[str, Any], skill: dict[str, Any], *, agent_label: str = "Canonical agent") -> str:
     lifecycle = agent.get("lifecycle_status")
     if lifecycle == "ACTIVE_GOVERNED":
         ariadna = "Ariadna is ACTIVE_GOVERNED as a hosted PM runtime; it has no human authority."
@@ -123,20 +140,27 @@ change without explicit Human Authority. Evidence precedes DONE: include tests,
 commit/PR and acceptance evidence in every handoff. Canonical definitions flow
 only CANONICAL → GENERATED PROJECTIONS; never hand-maintain harness copies.
 
-Canonical agent: {agent['id']} v{agent['version']} — {agent['purpose']}
+{agent_label}: {agent['id']} v{agent['version']} — {agent['purpose']}
 Canonical skill: {skill['id']} v{skill['version']} — {skill['purpose']}
 """
 
 
-def _render(project_json: dict[str, Any], agent: dict[str, Any], skill: dict[str, Any]) -> dict[str, bytes]:
+def _qwen_frontmatter(name: str, description: str) -> str:
+    # JSON double-quoted strings are valid YAML scalars and safely escape any
+    # canonical text that would otherwise alter frontmatter structure.
+    return "---\nname: " + json.dumps(name, ensure_ascii=False) + "\ndescription: " + json.dumps(description, ensure_ascii=False) + "\n---\n"
+
+
+def _render(project_json: dict[str, Any], agent: dict[str, Any], skill: dict[str, Any], qwen_agent: dict[str, Any]) -> dict[str, bytes]:
     common = _governance(agent, skill)
-    qwen = common + """
+    qwen = _governance(agent, skill, agent_label="Canonical project manager") + """
 Qwen may read the project, implement an assigned task, write/run tests, and
 prepare a commit/PR. Qwen may not merge, deploy, modify production, grant
 capabilities, change frozen contracts, or claim DONE without evidence.
 """
-    skill_text = _notice() + "# LAS VOCES governance\n\n" + common
-    agent_text = _notice() + "# Qwen primary builder — LAS VOCES\n\n" + qwen
+    skill_text = _qwen_frontmatter(skill["id"], skill["purpose"]) + _notice() + "# LAS VOCES governance\n\n" + common
+    agent_description = f"{qwen_agent['name']} — {qwen_agent['role']}. Authority: {qwen_agent['authority']}."
+    agent_text = _qwen_frontmatter("primary-builder", agent_description) + _notice() + "# Qwen primary builder — LAS VOCES\n\n" + qwen
     return {
         "AGENTS.md": (_notice() + "# LAS VOCES — Codex instructions\n\n" + common).encode(),
         _CLAUDE_FILE: (_notice() + f"# LAS VOCES — {_CLAUDE_TITLE} instructions\n\n" + common).encode(),
@@ -166,8 +190,8 @@ def _manifest(project: Path, projections: dict[str, bytes], source_hash: str, re
 
 
 def _expected(root: Path) -> tuple[Path, dict[str, bytes]]:
-    project, project_json, agent, skill, _ = _canonical(root)
-    projections = _render(project_json, agent, skill)
+    project, project_json, agent, skill, _, qwen_agent = _canonical(root)
+    projections = _render(project_json, agent, skill, qwen_agent)
     projections["sync/manifest.json"] = _manifest(project, projections, _source_hash(project), root)
     return project, projections
 
