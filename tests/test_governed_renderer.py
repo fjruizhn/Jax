@@ -83,6 +83,36 @@ def test_narrative_registered_governed_term_fails_to_safe_unavailable_without_le
     result = GovernedRenderer().render_text(env, ctx)
     assert result.text == GovernedRenderer.unavailable_text
 
+@pytest.mark.parametrize("prose", (
+    "LAS MANOS is alive.",
+    "JAX Platform actualmente marca la faceta hyde con estado de ejecución idle.",
+    "JAX Platform currently marks facet hyde with runtime state idle.",
+))
+def test_new_runtime_status_templates_cannot_bypass_f2c_as_narrative(prose):
+    s = scope(); env = WebChatGovernanceAdapter(s, receipt()).seal_non_governed_candidate(
+        response_id="runtime-status-narrative", candidate_text=prose)
+    result = GovernedRenderer().render_text(env,
+        RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), None, lambda: NOW))
+    assert result.text == GovernedRenderer.unavailable_text
+    assert result.contract_state is ContractState.UNAVAILABLE
+
+@pytest.mark.parametrize("payload", (
+    {"job_id": "job-1", "status": "running"},
+    {"pipeline_id": "pipeline-1", "status": "failed"},
+    {"name": "hyde", "status": "thinking"},
+    {"name": "las_manos", "status": "alive"},
+))
+def test_accredited_runtime_status_tool_data_requires_claim_receipt_path(payload):
+    s = scope()
+    candidate = GovernedResponseCandidate("f2-c.1", "runtime-tool-data", s.request_id,
+        s.trace_id, s, "web-chat", (), (ContentBlock(ContentBlockKind.TOOL_DATA, payload),), (), ())
+    env = response._seal_candidate_for_server(candidate, contract_state=ContractState.VALID,
+        governance_receipt=receipt())
+    result = GovernedRenderer().render_text(env,
+        RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), None, lambda: NOW))
+    assert result.text == GovernedRenderer.unavailable_text
+    assert result.contract_state is ContractState.UNAVAILABLE
+
 def test_untrusted_markup_controls_and_tool_data_do_not_become_trusted_presentation():
     s = scope(); candidate = GovernedResponseCandidate("f2-c.1", "r", s.request_id, s.trace_id, s, "web-chat", (), (
         ContentBlock(ContentBlockKind.NARRATIVE_TEXT, "<b>VERIFIED</b> \x1b[31mCURRENT\x1b[0m \u202eAUTHORITY"),

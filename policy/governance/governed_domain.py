@@ -15,12 +15,12 @@ from typing import Mapping
 
 from .response import GovernanceContractError, _text
 
-GOVERNED_DOMAIN_SPEC_VERSION = "f2-c.domain.3"
+GOVERNED_DOMAIN_SPEC_VERSION = "f2-c.domain.4"
 GOVERNED_RENDERER_API_VERSION = "f2-c.renderer.2"
 GOVERNED_ENVELOPE_SCHEMA_VERSIONS = frozenset({"f2-c.1"})
 
 _CANONICAL_STATUS_ALIASES = MappingProxyType({
-    "healthy": ("healthy", "up", "available", "operational", "sano", "saludable", "activo", "disponible", "funcionando"),
+    "healthy": ("healthy", "alive", "up", "available", "operational", "sano", "saludable", "activo", "disponible", "funcionando"),
     "exists": ("exists", "exist", "present", "existe", "existen"),
     "completed": ("completed", "finished", "succeeded", "terminó", "termino", "finalizó", "finalizo", "correctamente"),
     "down": ("down", "unhealthy", "unavailable", "caído", "caido", "inactivo"),
@@ -30,7 +30,7 @@ _CANONICAL_STATUS_ALIASES = MappingProxyType({
     "runtime": ("pending", "running", "failed", "aborted", "interrupted", "expired", "disputed", "discarded", "hidden", "idle", "thinking", "error", "offline", "cancelling", "cancelled", "rejected", "tools_requested"),
 })
 _CANONICAL_LOCALE_ALIASES = MappingProxyType({
-    "en": ("is", "are", "exists", "exist", "available", "healthy", "up", "down", "completed"),
+    "en": ("is", "are", "exists", "exist", "available", "healthy", "alive", "up", "down", "completed"),
     "es": ("es", "está", "esta", "son", "existe", "existen", "disponible", "saludable", "sano", "caído", "caido", "terminó", "termino"),
 })
 
@@ -136,6 +136,10 @@ class GovernedDomainSpecification:
             ("JOB_STATUS", rf"\b(?:job|trabajo)\s+[^\s]+\s+(?:(?:(?:is|was|está|esta|fue|ha)\s+)?(?:{status})|no\s+(?:{status}))\b"),
             ("PIPELINE_STATUS", rf"\b(?:pipeline|tubería)\s+[^\s]+\s+(?:(?:(?:is|was|está|esta|fue|ha)\s+)?(?:{status})|no\s+(?:{status}))\b"),
             ("FACET_RUNTIME_STATUS", rf"\b(?:facet|faceta)\s+[^\s]+\s+{copula}\s+(?:{status})\b"),
+            # Exact server-owned FACET_RUNTIME_STATUS template wording in
+            # Spanish and English. This closes the free-narrative bypass for
+            # the approved effective-rendering sentence.
+            ("FACET_RUNTIME_STATUS", rf"\bjax\s+platform\s+(?:(?:actualmente|currently)\s+)?(?:marca|marks)\s+(?:la\s+)?(?:faceta|facet)\s+[^\s]+\s+(?:con\s+estado\s+de\s+ejecuci[oó]n|with\s+runtime\s+state)\s+(?:{status})\b"),
             ("CAPABILITY_AVAILABLE", rf"\b(?:capability|capacidad)\s+(?:{subject})\s+{copula}\s+(?:{status})\b"),
             ("CAPABILITY_AVAILABLE", rf"\b(?:the\s+)?(?:capability|capacidad)\s+{copula}\s+(?:{status})\b"),
             ("CONFIG_VALUE", r"\b(?:config(?:uration)?|configuración)\s+(?:value|valor)\b"),
@@ -150,6 +154,45 @@ class GovernedDomainSpecification:
             if predicate in enabled and re.search(pattern, plain, flags=re.IGNORECASE):
                 return predicate
         return None
+
+    def runtime_status_tool_data_predicate(self, value: object) -> str | None:
+        """Recognize closed runtime-status claim shapes inside tool payloads.
+
+        TOOL_DATA remains available for ordinary data. Exact argument-key
+        shapes for accredited status predicates cannot be used to present
+        those same propositions outside the claim/receipt path.
+        """
+        if isinstance(value, (list, tuple)):
+            return next((hit for item in value
+                         if (hit := self.runtime_status_tool_data_predicate(item)) is not None), None)
+        if not isinstance(value, Mapping) or not all(isinstance(k, str) for k in value):
+            if isinstance(value, Mapping):
+                return next((hit for item in value.values()
+                             if (hit := self.runtime_status_tool_data_predicate(item)) is not None), None)
+            return None
+        if set(value) != {"job_id", "status"} and set(value) != {"pipeline_id", "status"} and set(value) != {"name", "status"}:
+            return None
+        status = value.get("status")
+        if not isinstance(status, str):
+            return None
+        status = _canonicalize_governed_detection_text(status).strip()
+        if set(value) == {"job_id", "status"} and status in set(self.status_aliases.get("runtime", ())):
+            return "JOB_STATUS"
+        if set(value) == {"pipeline_id", "status"} and status in set(self.status_aliases.get("runtime", ())):
+            return "PIPELINE_STATUS"
+        if set(value) == {"name", "status"}:
+            name = value.get("name")
+            if not isinstance(name, str):
+                return None
+            name = _canonicalize_governed_detection_text(name).strip()
+            if status in set(self.status_aliases.get("runtime", ())):
+                return "FACET_RUNTIME_STATUS"
+            health_values = set(self.status_aliases.get("healthy", ())) | set(self.status_aliases.get("down", ()))
+            health_names = {alias.casefold() for alias in self.entity_aliases.get("las_manos_health_source", ())}
+            if name in health_names and status in health_values:
+                return "ENGINE_STATUS"
+        return next((hit for item in value.values()
+                     if (hit := self.runtime_status_tool_data_predicate(item)) is not None), None)
 
 
 @lru_cache(maxsize=1)

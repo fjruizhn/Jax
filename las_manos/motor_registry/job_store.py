@@ -111,8 +111,9 @@ class JobStore:
         with self._lock:
             if job_id not in self._index:
                 raise KeyError(f"job_id desconocido: {job_id}")
-            event = {**self._index[job_id], **kwargs, "job_id": job_id}
-            if "status" in kwargs:
+            prior = self._index[job_id]
+            event = {**prior, **kwargs, "job_id": job_id}
+            if "status" in kwargs and getattr(kwargs["status"], "value", kwargs["status"]) != prior.get("status"):
                 event["status_updated_at"] = time.time()
             self._append_locked(event)
 

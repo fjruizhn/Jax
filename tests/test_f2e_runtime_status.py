@@ -12,12 +12,29 @@ from policy.governance.resolution import (
     RuntimeStatusEvidence, _runtime_status_evidence_from_server,
 )
 from policy.governance.runtime_status import (JacobsPipelineStatusResolver,
-    MotorJobStatusResolver, build_runtime_status_registry)
+    MotorJobStatusResolver, build_runtime_status_registry,
+    runtime_status_source_configuration_digest)
 from policy.governance.governed_domain import GovernedDomainSpecification
 from motor_registry.job_store import JobStore
 
 
 NOW = datetime(2026, 10, 2, tzinfo=timezone.utc)
+_PLATFORM_SOURCE_CONFIGURATION = {
+    "FACET_RUNTIME_STATUS": {"state_contract": "JAXEngineState.FacetState", "status_field": "status",
+        "observed_at_field": "last_update", "allowed_statuses": ["idle", "thinking", "error", "offline"]},
+    "ENGINE_STATUS": {"endpoint_sha256": "sha256:" + "e" * 64, "method": "GET", "path": "/health",
+        "timeout_seconds": 5, "poll_interval_seconds": 30, "success_status_code": 200},
+}
+
+
+def _runtime_registry():
+    return build_runtime_status_registry(_scope(),
+        authenticator=ReceiptAuthenticator.for_testing(b"x" * 32),
+        platform_source_configuration=_PLATFORM_SOURCE_CONFIGURATION)
+
+
+def _platform_digest(predicate):
+    return runtime_status_source_configuration_digest(predicate, _PLATFORM_SOURCE_CONFIGURATION[predicate])
 
 
 def _scope(**changes):
@@ -91,6 +108,39 @@ def test_motor_status_ownerless_legacy_job_fails_closed(tmp_path, monkeypatch):
     assert evidence.observation.status is ResolutionStatus.UNAVAILABLE
 
 
+def test_unknown_job_and_wrong_user_never_resolve(tmp_path, monkeypatch):
+    from motor_registry import routes
+    store = JobStore(str(tmp_path / "jobs.jsonl"))
+    monkeypatch.setattr(routes, "_STORE", store)
+    store.create(caller="jax", capability="x", motor="m", trace_id="t", prompt="p",
+        recursion_depth=0, tenant_id="tenant-a", user_id="user-b", job_id="owned-by-user-b")
+    resolver = MotorJobStatusResolver()
+    assert resolver.evidence({"job_id": "unknown", "status": "pending"}, _scope()).observation.status is ResolutionStatus.UNAVAILABLE
+    assert resolver.evidence({"job_id": "owned-by-user-b", "status": "pending"}, _scope()).observation.status is ResolutionStatus.WRONG_SCOPE
+
+
+def test_equal_job_and_pipeline_ids_remain_distinct_sources(tmp_path, monkeypatch):
+    from motor_registry import routes
+    from jacobs import models, store as jacobs_store
+    store = JobStore(str(tmp_path / "jobs.jsonl"))
+    monkeypatch.setattr(routes, "_STORE", store)
+    identifier = "same-looking-id"
+    store.create(caller="jax", capability="x", motor="m", trace_id="t", prompt="p",
+        recursion_depth=0, tenant_id="tenant-a", user_id="user-a", job_id=identifier)
+    pipeline = models.Pipeline(pipeline_id=identifier, name="pipeline", invoked_by="web", mode="supervised",
+        status=models.PipelineStatus.failed, tenant_id="tenant-a", user_id="user-a", updated_at=NOW.timestamp())
+    async def pipeline_get(_pipeline_id):
+        return pipeline
+    monkeypatch.setattr(jacobs_store, "pipeline_get", pipeline_get)
+    job = MotorJobStatusResolver().evidence({"job_id": identifier, "status": "pending"}, _scope())
+    jacobs = asyncio.run(JacobsPipelineStatusResolver().evidence(
+        {"pipeline_id": identifier, "status": "failed"}, _scope()))
+    assert job.adapter_kind is AdapterKind.MOTOR_JOB_STATUS
+    assert job.observation.result == {"job_id": identifier, "status": "pending"}
+    assert jacobs.adapter_kind is AdapterKind.JACOBS_PIPELINE_STATUS
+    assert jacobs.observation.result == {"pipeline_id": identifier, "status": "failed"}
+
+
 def test_motor_status_persists_governed_owner_and_uses_coherent_view(tmp_path, monkeypatch):
     from motor_registry import routes
     store = JobStore(str(tmp_path / "jobs.jsonl"))
@@ -102,13 +152,26 @@ def test_motor_status_persists_governed_owner_and_uses_coherent_view(tmp_path, m
     assert evidence.observation.result == {"job_id": job_id, "status": "pending"}
 
 
+def test_repeating_same_motor_status_does_not_refresh_transition_time(tmp_path, monkeypatch):
+    import motor_registry.job_store as job_store_module
+    ticks = iter((100.0, 200.0, 300.0))
+    monkeypatch.setattr(job_store_module.time, "time", lambda: next(ticks))
+    store = JobStore(str(tmp_path / "jobs.jsonl"))
+    job_id = store.create(caller="hyde", capability="read", motor="test", trace_id="trace",
+        prompt="p", recursion_depth=0, tenant_id="tenant-a", user_id="user-a", job_id="job-1")
+    store.update(job_id, status="tools_requested")
+    transition_time = store.get(job_id).status_updated_at
+    store.update(job_id, status="tools_requested")
+    assert store.get(job_id).status_updated_at == transition_time == 200.0
+
+
 def test_motor_resolver_rejects_caller_selected_store():
     with pytest.raises(TypeError):
         MotorJobStatusResolver(object())
 
 
 def test_runtime_registry_is_exactly_the_four_authorized_predicates():
-    registry = build_runtime_status_registry(_scope(), authenticator=ReceiptAuthenticator.for_testing(b"x" * 32))
+    registry = _runtime_registry()
     assert {row["predicate"] for row in registry.status_table()} == {
         "JOB_STATUS", "PIPELINE_STATUS", "FACET_RUNTIME_STATUS", "ENGINE_STATUS"}
     assert all(row["freshness_sla_seconds"] in {15, 60} for row in registry.status_table())
@@ -116,19 +179,32 @@ def test_runtime_registry_is_exactly_the_four_authorized_predicates():
 
 
 def test_installation_global_evidence_cannot_replay_across_response_scope():
-    registry = build_runtime_status_registry(_scope(), authenticator=ReceiptAuthenticator.for_testing(b"x" * 32))
+    registry = _runtime_registry()
     observation = ResolutionObservation(ResolutionStatus.RESOLVED, NOW, "platform:health:x", {"name": "x", "status": "healthy"})
-    evidence = _runtime_status_evidence_from_server(AdapterKind.ENGINE_STATUS, observation, _scope())
+    evidence = _runtime_status_evidence_from_server(AdapterKind.ENGINE_STATUS, observation, _scope(),
+        _platform_digest("ENGINE_STATUS"))
     receipt = registry.resolve("ENGINE_STATUS", {"name": "x", "status": "healthy"},
         _scope(request_id="other"), validation_time=NOW, runtime_status_evidence=evidence)
     assert receipt.status is ResolutionStatus.WRONG_SCOPE
 
 
+def test_engine_receipt_requires_exact_probe_configuration_digest():
+    registry = _runtime_registry()
+    observation = ResolutionObservation(ResolutionStatus.RESOLVED, NOW, "platform:las-manos-health",
+        {"name": "las_manos", "status": "alive"})
+    changed_target = "sha256:" + "f" * 64
+    evidence = _runtime_status_evidence_from_server(AdapterKind.ENGINE_STATUS, observation, _scope(), changed_target)
+    receipt = registry.resolve("ENGINE_STATUS", {"name": "las_manos", "status": "alive"},
+        _scope(), validation_time=NOW, runtime_status_evidence=evidence)
+    assert receipt.status is ResolutionStatus.CONFIGURATION_MISMATCH
+
+
 def test_each_status_claim_is_bound_to_its_own_predicate_and_arguments():
-    registry = build_runtime_status_registry(_scope(), authenticator=ReceiptAuthenticator.for_testing(b"x" * 32))
+    registry = _runtime_registry()
     observation = ResolutionObservation(ResolutionStatus.RESOLVED, NOW, "platform:facet:hyde",
         {"name": "hyde", "status": "thinking"})
-    evidence = _runtime_status_evidence_from_server(AdapterKind.FACET_RUNTIME_STATUS, observation, _scope())
+    evidence = _runtime_status_evidence_from_server(AdapterKind.FACET_RUNTIME_STATUS, observation, _scope(),
+        _platform_digest("FACET_RUNTIME_STATUS"))
     wrong_kind = registry.resolve("ENGINE_STATUS", {"name": "hyde", "status": "thinking"},
         _scope(), validation_time=NOW, runtime_status_evidence=evidence)
     wrong_id = registry.resolve("FACET_RUNTIME_STATUS", {"name": "jekyll", "status": "thinking"},
@@ -141,12 +217,13 @@ def test_each_status_claim_is_bound_to_its_own_predicate_and_arguments():
 
 
 def test_runtime_observation_timestamp_is_source_owned_and_stale_or_future_fails():
-    registry = build_runtime_status_registry(_scope(), authenticator=ReceiptAuthenticator.for_testing(b"x" * 32))
+    registry = _runtime_registry()
     arguments = {"name": "hyde", "status": "idle"}
     stale = ResolutionObservation(ResolutionStatus.RESOLVED, NOW.replace(year=2020), "platform:facet:hyde", arguments)
     future = ResolutionObservation(ResolutionStatus.RESOLVED, NOW.replace(year=2030), "platform:facet:hyde", arguments)
     for observation in (stale, future):
-        evidence = _runtime_status_evidence_from_server(AdapterKind.FACET_RUNTIME_STATUS, observation, _scope())
+        evidence = _runtime_status_evidence_from_server(AdapterKind.FACET_RUNTIME_STATUS, observation, _scope(),
+            _platform_digest("FACET_RUNTIME_STATUS"))
         receipt = registry.resolve("FACET_RUNTIME_STATUS", arguments, _scope(), validation_time=NOW,
             runtime_status_evidence=evidence)
         assert receipt.status is ResolutionStatus.STALE

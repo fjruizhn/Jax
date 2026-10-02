@@ -9,7 +9,7 @@ when its stored status remains readable; terminal states receive no exception.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -38,7 +38,8 @@ _RUNTIME_SPECS = {
 
 
 def _source_configuration_digest(predicate: str, source: str, resolver: str,
-                                 source_scope: SourceScopeClass, sla: int) -> str:
+                                 source_scope: SourceScopeClass, sla: int,
+                                 source_configuration: Mapping[str, object] | None = None) -> str:
     """Hash the closed server composition that defines a status source."""
     body = json.dumps({
         "api_version": RUNTIME_STATUS_API_VERSION,
@@ -47,19 +48,50 @@ def _source_configuration_digest(predicate: str, source: str, resolver: str,
         "resolver": resolver,
         "source_scope_class": source_scope.value,
         "freshness_sla_seconds": sla,
+        "source_configuration": _plain(source_configuration or {}),
     }, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     return "sha256:" + hashlib.sha256(body).hexdigest()
 
-def build_runtime_status_registry(scope: ResponseScope, *, authenticator):
+def runtime_status_source_configuration_digest(predicate: str, source_configuration: Mapping[str, object]) -> str:
+    """Digest the server-owned Platform source configuration for its binding."""
+    if predicate not in {"FACET_RUNTIME_STATUS", "ENGINE_STATUS"} or not isinstance(source_configuration, Mapping):
+        raise GovernanceContractError("Platform runtime source configuration invalid")
+    if predicate == "FACET_RUNTIME_STATUS":
+        expected = {"state_contract": "JAXEngineState.FacetState", "status_field": "status",
+            "observed_at_field": "last_update", "allowed_statuses": ["idle", "thinking", "error", "offline"]}
+        if _plain(source_configuration) != expected:
+            raise GovernanceContractError("facet runtime source configuration mismatch")
+    else:
+        config = _plain(source_configuration)
+        if set(config) != {"endpoint_sha256", "method", "path", "timeout_seconds", "poll_interval_seconds", "success_status_code"}:
+            raise GovernanceContractError("engine health source configuration shape mismatch")
+        endpoint_digest = config["endpoint_sha256"]
+        if (not isinstance(endpoint_digest, str) or len(endpoint_digest) != 71
+                or not endpoint_digest.startswith("sha256:")
+                or any(ch not in "0123456789abcdef" for ch in endpoint_digest[7:])
+                or config["method"] != "GET" or config["path"] != "/health"
+                or config["timeout_seconds"] != 5 or config["poll_interval_seconds"] != 30
+                or config["success_status_code"] != 200):
+            raise GovernanceContractError("engine health source configuration mismatch")
+    _, source, _, sla, source_scope, resolver_name = _RUNTIME_SPECS[predicate]
+    return _source_configuration_digest(predicate, source, resolver_name, source_scope, sla, source_configuration)
+
+def build_runtime_status_registry(scope: ResponseScope, *, authenticator,
+                                  platform_source_configuration: Mapping[str, Mapping[str, object]]):
     """Build exactly the four human-authorized F2-E entries from fixed constants."""
     if not isinstance(scope, ResponseScope):
         raise GovernanceContractError("runtime registry requires ResponseScope")
+    if not isinstance(platform_source_configuration, Mapping) or set(platform_source_configuration) != {"FACET_RUNTIME_STATUS", "ENGINE_STATUS"}:
+        raise GovernanceContractError("Platform runtime source configuration required")
     rule = ScopeRule(scope.environment, scope.tenant_id, scope.project_id, scope.subject_id,
         scope.actor_id, scope.audience, scope.component_id)
     entries = []
     for predicate, (kind, source, owner, sla, source_scope, resolver_name) in _RUNTIME_SPECS.items():
         identity = f"policy.governance.runtime_status:{resolver_name}"
-        config_digest = _source_configuration_digest(predicate, source, resolver_name, source_scope, sla)
+        source_config = platform_source_configuration[predicate] if predicate in _PLATFORM_KINDS else {}
+        config_digest = (runtime_status_source_configuration_digest(predicate, source_config)
+            if predicate in _PLATFORM_KINDS else
+            _source_configuration_digest(predicate, source, resolver_name, source_scope, sla, source_config))
         binding = PredicateAuthorityBinding(predicate, _BINDING_VERSION, source, owner,
             scope.environment, rule, rule, sla, ConflictPolicy.SINGLE_SOURCE_REQUIRED,
             identity, _BINDING_VERSION, config_digest, _BINDING_VERSION,
@@ -77,6 +109,8 @@ class PlatformRuntimeStatusSnapshot:
     arguments: Mapping[str, object]
     observed_at: datetime
     provenance_ref: str
+    source_configuration: Mapping[str, object]
+    source_configuration_digest: str = field(init=False)
     def __post_init__(self):
         predicate = _text(self.predicate, "predicate")
         if predicate not in _PLATFORM_KINDS:
@@ -86,6 +120,12 @@ class PlatformRuntimeStatusSnapshot:
         object.__setattr__(self, "predicate", predicate)
         object.__setattr__(self, "arguments", _freeze(self.arguments, "platform runtime arguments"))
         _text(self.provenance_ref, "platform runtime provenance_ref")
+        if not isinstance(self.source_configuration, Mapping):
+            raise GovernanceContractError("Platform runtime source configuration invalid")
+        configuration = _freeze(self.source_configuration, "Platform runtime source configuration")
+        object.__setattr__(self, "source_configuration", configuration)
+        object.__setattr__(self, "source_configuration_digest",
+            runtime_status_source_configuration_digest(predicate, configuration))
 
 def platform_runtime_status_evidence(snapshot: PlatformRuntimeStatusSnapshot, arguments: Mapping[str, object], scope: ResponseScope) -> RuntimeStatusEvidence:
     """Narrow platform bridge. Predicate/source/kind are constants above."""
@@ -96,7 +136,10 @@ def platform_runtime_status_evidence(snapshot: PlatformRuntimeStatusSnapshot, ar
     kind, source = _PLATFORM_KINDS[snapshot.predicate]
     observation = ResolutionObservation(ResolutionStatus.RESOLVED, snapshot.observed_at,
         f"{source}:{snapshot.provenance_ref}", snapshot.arguments)
-    return _runtime_status_evidence_from_server(kind, observation, scope)
+    if snapshot.source_configuration_digest != runtime_status_source_configuration_digest(snapshot.predicate, snapshot.source_configuration):
+        raise GovernanceContractError("Platform source configuration digest mismatch")
+    return _runtime_status_evidence_from_server(kind, observation, scope,
+        snapshot.source_configuration_digest)
 
 class MotorJobStatusResolver:
     """Canonical Motor JSONL reader. Ownerless legacy jobs fail closed."""

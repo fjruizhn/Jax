@@ -17,6 +17,21 @@ status claims.
 | `FACET_RUNTIME_STATUS(name,status)` | JAX Platform server-owned `FacetState` | Only the transient state Platform records (`idle`, `thinking`, `error`, `offline`). It does not establish facet existence, model/provider health, availability, configuration, or external truth. No facet message or user-specific payload is part of the observation. | 15 seconds from `FacetState.last_update`. |
 | `ENGINE_STATUS(name,status)` | Fixed LAS MANOS health probe maintained by JAX Platform | Only the health-check result (`alive`, `down`). It does not establish configuration, model correctness, authorization, or capability availability. No arbitrary URL or engine is resolvable. | 60 seconds from the latest completed probe; probes run every 30 seconds. |
 
+The F2-B `ENGINE_STATUS` source-configuration digest binds the exact effective
+health endpoint identity (as a one-way SHA-256), method, path, timeout, poll
+interval, and success status code. The URL is not persisted in the binding or
+receipt. A source-configuration change therefore requires a matching registry
+binding; old evidence cannot be reused under the changed endpoint.
+
+F2-C governed-domain detection recognizes the exact authorized facet-runtime
+template wording in Spanish and English, and the `alive` health status. The
+renderer also rejects `TOOL_DATA` objects with the exact accredited status
+argument shapes (including nested payloads); unrelated tool data remains data.
+
+Motor `status_updated_at` changes only when the typed status actually changes.
+An idempotent rewrite of the same status does not renew the observation time or
+extend the `JOB_STATUS` freshness window.
+
 Motor and Jacobs sources are exact-response-scope sources. Platform facet and
 health observations are installation-global sources, but every receipt remains
 bound to the exact response scope and cannot be replayed to another request,
