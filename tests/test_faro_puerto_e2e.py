@@ -19,7 +19,7 @@ from jax.faro.config import ConfigFaro, ConfigPuerto
 from jax.faro.identidad import Ejecucion
 from jax.faro.paquete import cargar_paquete
 from jax.faro.transporte import ServidorPuerto
-from tests._faro_utils import RAIZ, _git, cliente_por_rele, repo_de_juguete
+from tests._faro_utils import RAIZ, _git, cliente_por_rele, repo_de_juguete, servidor
 
 
 @pytest.fixture
@@ -39,7 +39,7 @@ def test_un_cliente_mcp_real_lista_y_lee_una_skill_a_traves_del_rele(montaje, mo
     cfg, cfgp, ej = montaje
 
     async def caso():
-        async with ServidorPuerto(cfgp, ej, cargar_paquete(cfg), Bitacora(emisores=[])) as srv:
+        async with servidor(cfgp, ej, cargar_paquete(cfg), Bitacora(emisores=[])) as srv:
             async with cliente_por_rele(srv, mode=modo) as c:
                 recursos = await c.list_resources()
                 uris = {str(r.uri) for r in recursos.resources}
@@ -88,7 +88,7 @@ def test_el_rele_termina_cuando_el_puerto_cierra(montaje):
     cfg, cfgp, ej = montaje
 
     async def caso():
-        async with ServidorPuerto(cfgp, ej, cargar_paquete(cfg), Bitacora(emisores=[])) as srv:
+        async with servidor(cfgp, ej, cargar_paquete(cfg), Bitacora(emisores=[])) as srv:
             proc = await asyncio.create_subprocess_exec(
                 sys.executable, "-m", "jax.faro.relay", "--socket", str(srv.ruta_socket), "--token-file", str(srv.ruta_token), cwd=str(RAIZ),
                 env={**os.environ, "PYTHONPATH": str(RAIZ)}, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
@@ -124,7 +124,7 @@ def test_el_rele_con_half_close_deja_llegar_la_respuesta_antes_de_salir(montaje)
     cfg, cfgp, ej = montaje
 
     async def caso():
-        async with ServidorPuerto(cfgp, ej, cargar_paquete(cfg), Bitacora(emisores=[])) as srv:
+        async with servidor(cfgp, ej, cargar_paquete(cfg), Bitacora(emisores=[])) as srv:
             proc = await asyncio.create_subprocess_exec(
                 sys.executable, "-m", "jax.faro.relay", "--socket", str(srv.ruta_socket), "--token-file", str(srv.ruta_token),
                 cwd=str(RAIZ), env={**os.environ, "PYTHONPATH": str(RAIZ)},

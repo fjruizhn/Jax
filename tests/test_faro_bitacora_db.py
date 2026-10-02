@@ -31,7 +31,7 @@ from jax.faro.config import ConfigFaro, ConfigFaroInvalida, ConfigPuerto
 from jax.faro.migraciones import aplicar
 from jax.faro.paquete import cargar_paquete
 from jax.faro.transporte import ServidorPuerto
-from tests._faro_utils import _git, cliente_por_rele, ejecucion, repo_de_juguete
+from tests._faro_utils import _git, cliente_por_rele, ejecucion, repo_de_juguete, servidor
 
 MIGRACIONES = Path(__file__).resolve().parents[1] / "ops" / "faro" / "migrations"
 IMAGEN = os.environ.get("FARO_TEST_MARIADB_IMAGE", "mariadb:12.3.3")
@@ -310,7 +310,7 @@ def test_con_la_tabla_de_la_bitacora_caida_el_puerto_no_entrega_resultados(based
 
     async def caso(pool):
         bit = Bitacora(emisores=[EmisorTabla(pool)])
-        async with ServidorPuerto(ConfigPuerto(socket_dir=d), ejecucion(), cargar_paquete(cfg), bit) as srv:
+        async with servidor(ConfigPuerto(socket_dir=d), ejecucion(), cargar_paquete(cfg), bit) as srv:
             async with cliente_por_rele(srv) as c:
                 ok = await c.call_tool("skills.leer", {"nombre": "alfa"})
                 assert not ok.is_error                           # con la tabla, funciona y queda registrado
@@ -325,3 +325,72 @@ def test_con_la_tabla_de_la_bitacora_caida_el_puerto_no_entrega_resultados(based
     filas = basedb.filas()
     assert verificar_cadena(filas) == []
     assert sum(1 for f in filas if f["evento"] == "llamada") >= 3   # initialize + list + la llamada con tabla
+
+
+# --------------------------------------------------------------------------- #
+# reauditoria: ancla externa contra una base real y servicio arrancado         #
+# --------------------------------------------------------------------------- #
+
+def test_truncar_la_cola_en_la_tabla_real_se_detecta_con_el_ancla_publicada(basedb):
+    anclas = []
+
+    async def caso(pool):
+        emisor = EmisorTabla(pool)
+        for i in range(6):
+            await emisor(_reg(i))
+        anclas.append(emisor.ancla())
+    _correr(basedb, caso)
+    con = basedb.admin()
+    with con.cursor() as cur:
+        cur.execute("DELETE FROM faro_bitacora WHERE seq >= 4")           # quien puede borrar la cola
+    con.close()
+    filas = basedb.filas()
+    assert verificar_cadena(filas) == []                                  # sola, la cadena truncada "valida"
+    assert any(p.codigo == "cola_truncada" for p in verificar_cadena(filas, anclas=anclas))
+
+
+def test_el_servicio_arranca_contra_la_base_real_y_escribe_su_sonda(basedb, tmp_path):
+    from jax.faro.servicio import arrancar
+    repo = repo_de_juguete(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    paquete.construir_paquete(ConfigFaro(repo=repo, sha=sha, destino=tmp_path / "eco", uid_duenio=os.getuid()))
+    d = tmp_path / "run"
+    d.mkdir(mode=0o700)
+    env = {"JAX_FARO_REPO": str(repo), "JAX_FARO_SHA": sha, "JAX_FARO_ECOSISTEMA_DIR": str(tmp_path / "eco"),
+           "JAX_FARO_DUENIO_UID": str(os.getuid()), "JAX_FARO_SOCKET_DIR": str(d),
+           "JAX_FARO_BITACORA_DB_HOST": basedb.srv["host"], "JAX_FARO_BITACORA_DB_PORT": str(basedb.srv["puerto"]),
+           "JAX_FARO_BITACORA_DB_USER": basedb.usuario, "JAX_FARO_BITACORA_DB_PASSWORD": basedb.clave_usuario,
+           "JAX_FARO_BITACORA_DB_NAME": basedb.base}
+
+    async def caso():
+        s = await arrancar(env, solo_pruebas_mismo_uid=True)
+        try:
+            async with s.crear_puerto(ejecucion()) as srv, cliente_por_rele(srv) as c:
+                assert not (await c.call_tool("skills.leer", {"nombre": "alfa"})).is_error
+        finally:
+            await s.cerrar()
+    asyncio.run(caso())
+    filas = basedb.filas()
+    assert [f["evento"] for f in filas][:2] == ["inicio_cadena", "servicio_iniciado"] and verificar_cadena(filas) == []
+    assert sum(1 for f in filas if f["evento"] == "llamada") >= 3
+
+
+def test_sin_la_tabla_el_servicio_no_arranca(basedb, tmp_path):
+    """Con la tabla borrada (la base existe pero sin migrar) la sonda falla y el servicio no arranca."""
+    from jax.faro.servicio import arrancar
+    con = basedb.admin()
+    with con.cursor() as cur:
+        cur.execute("DROP TABLE faro_bitacora")
+    con.close()
+    repo = repo_de_juguete(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    paquete.construir_paquete(ConfigFaro(repo=repo, sha=sha, destino=tmp_path / "eco", uid_duenio=os.getuid()))
+    d = tmp_path / "run"
+    d.mkdir(mode=0o700)
+    env = {"JAX_FARO_REPO": str(repo), "JAX_FARO_SHA": sha, "JAX_FARO_ECOSISTEMA_DIR": str(tmp_path / "eco"),
+           "JAX_FARO_DUENIO_UID": str(os.getuid()), "JAX_FARO_SOCKET_DIR": str(d),
+           "JAX_FARO_BITACORA_DB_HOST": basedb.srv["host"], "JAX_FARO_BITACORA_DB_PORT": str(basedb.srv["puerto"]),
+           "JAX_FARO_BITACORA_DB_USER": basedb.usuario, "JAX_FARO_BITACORA_DB_PASSWORD": basedb.clave_usuario,
+           "JAX_FARO_BITACORA_DB_NAME": basedb.base}
+    with pytest.raises(Exception):
+        asyncio.run(arrancar(env, solo_pruebas_mismo_uid=True))

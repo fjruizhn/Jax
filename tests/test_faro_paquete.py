@@ -682,3 +682,51 @@ def test_el_constructor_contrasta_lo_que_escribio_con_el_arbol_antes_de_publicar
         paquete.construir_paquete(cfg)
     assert "oid_distinto_del_arbol" in {f.codigo for f in exc.value.fallos}
     assert not cfg.raiz_paquete.exists()
+
+
+# --------------------------------------------------------------------------- #
+# reauditoria: R2 (dueño == usuario del servicio), sello en la carga, ancestro g+w #
+# --------------------------------------------------------------------------- #
+
+_ENV_OK = {"JAX_FARO_REPO": "/r", "JAX_FARO_SHA": "a" * 40, "JAX_FARO_ECOSISTEMA_DIR": "/e"}
+
+
+def test_el_duenio_del_paquete_no_puede_ser_el_usuario_del_servicio(monkeypatch):
+    monkeypatch.setattr(os, "geteuid", lambda: 1234)
+    with pytest.raises(ConfigFaroInvalida, match="JAX_FARO_DUENIO_UID"):
+        ConfigFaro.desde_entorno({**_ENV_OK, "JAX_FARO_DUENIO_UID": "1234"})
+    assert ConfigFaro.desde_entorno({**_ENV_OK, "JAX_FARO_DUENIO_UID": "0"}).uid_duenio == 0
+    assert ConfigFaro.desde_entorno(_ENV_OK).uid_duenio == 0            # por defecto root
+
+
+def test_el_constructor_root_si_puede_tener_a_root_de_duenio(monkeypatch):
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    assert ConfigFaro.desde_entorno({**_ENV_OK, "JAX_FARO_DUENIO_UID": "0"}).uid_duenio == 0
+
+
+def test_la_bandera_de_pruebas_permite_el_duenio_igual_al_servicio(monkeypatch):
+    monkeypatch.setattr(os, "geteuid", lambda: 1234)
+    c = ConfigFaro.desde_entorno({**_ENV_OK, "JAX_FARO_DUENIO_UID": "1234"}, solo_pruebas_duenio_igual_servicio=True)
+    assert c.uid_duenio == 1234
+
+
+def test_cargar_exige_el_sello_de_sha_en_la_constitucion_aunque_todo_lo_demas_cuadre(cfg):
+    raiz = paquete.construir_paquete(cfg)
+    sin_sello = b"# otra constitucion sin sello\n"
+    _forjar_coherente(raiz, "constitucion/CLAUDE.md", sin_sello)
+    m = json.loads((raiz / paquete.MANIFIESTO).read_text())
+    m["archivos"]["constitucion/CLAUDE.md"]["oid_git"] = paquete._oid_de_bytes(sin_sello, 40)
+    m["sha256_manifiesto"] = paquete.hash_del_manifiesto(m)
+    (raiz / paquete.MANIFIESTO).write_text(json.dumps(m))
+    assert paquete.verificar_integridad(cfg) == ()
+    with pytest.raises(paquete.PaqueteNoVerifica) as exc:
+        paquete.cargar_paquete(cfg)
+    assert "sello_distinto" in {f.codigo for f in exc.value.fallos}
+
+
+@pytest.mark.parametrize("modo", [0o775, 0o770, 0o757, 0o772])
+def test_un_ancestro_con_escritura_de_grupo_u_otros_sin_sticky_impide_arrancar(repo, sha, tmp_path, modo):
+    cfg = _cfg(repo, sha, tmp_path / "a" / "eco")
+    paquete.construir_paquete(cfg)
+    (tmp_path / "a").chmod(modo)
+    assert "ancestro_inseguro" in _codigos(paquete.verificar_integridad(cfg))

@@ -80,12 +80,19 @@ def ejecucion(**kw) -> Ejecucion:
     return Ejecucion(**base)
 
 
+def servidor(*a, **kw) -> ServidorPuerto:
+    """Un `ServidorPuerto` con la bandera SOLO-PRUEBAS que permite uid_esperado == el del servicio (las pruebas
+    corren como un solo usuario). El servicio real no puede activarla: es un argumento del constructor, no
+    sale del entorno ni de la configuracion."""
+    return ServidorPuerto(*a, solo_pruebas_mismo_uid=True, **kw)
+
+
 @asynccontextmanager
 async def puerto(cfg_puerto, cargado, ej=None, registros=None, **kw):
     """Un Puerto REAL en un socket Unix temporal; `srv.registros` es la bitacora en memoria."""
     registros = registros if registros is not None else []
     bit = Bitacora(emisores=[registros.append])
-    async with ServidorPuerto(cfg_puerto, ej or ejecucion(), cargado, bit, **kw) as srv:
+    async with servidor(cfg_puerto, ej or ejecucion(), cargado, bit, **kw) as srv:
         srv.registros = registros
         yield srv
 

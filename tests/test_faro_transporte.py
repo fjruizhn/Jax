@@ -22,7 +22,7 @@ from jax.faro.bitacora import Bitacora
 from jax.faro.config import ConfigFaro, ConfigFaroInvalida, ConfigPuerto
 from jax.faro.paquete import cargar_paquete
 from jax.faro.transporte import PresupuestoBytes, ServidorPuerto
-from tests._faro_utils import _git, cliente_por_rele, corre, ejecucion, puerto, repo_de_juguete
+from tests._faro_utils import _git, cliente_por_rele, corre, ejecucion, puerto, repo_de_juguete, servidor
 
 
 @pytest.fixture
@@ -156,7 +156,7 @@ def test_el_token_nunca_aparece_en_la_bitacora_ni_en_el_log(cfgp, cargado, caplo
     token = {}
 
     async def caso():
-        async with ServidorPuerto(cfgp, ejecucion(), cargado, Bitacora()) as srv:
+        async with servidor(cfgp, ejecucion(), cargado, Bitacora()) as srv:
             token["t"] = srv.ruta_token.read_text().strip()
             async with cliente_por_rele(srv) as c:
                 await c.call_tool("skills.leer", {"nombre": "alfa"})
@@ -321,7 +321,7 @@ def test_muchas_conexiones_con_mensajes_grandes_no_agotan_la_memoria(tmp_path, c
 def test_no_hay_tope_de_conexiones_cientos_de_conexiones_ociosas_se_sirven(tmp_path, cargado):
     d = tmp_path / "r"
     d.mkdir(mode=0o700)
-    cfg = ConfigPuerto(socket_dir=d, presupuesto_bytes=8 * 1024 * 1024)   # presupuesto chico a proposito
+    cfg = ConfigPuerto(socket_dir=d, presupuesto_bytes=256 * 1024 * 1024)   # 200 x 256 KiB de costo fijo caben
 
     async def caso():
         async with puerto(cfg, cargado) as srv:
@@ -364,3 +364,144 @@ def test_las_respuestas_grandes_tambien_pasan_por_el_presupuesto(tmp_path):
                 assert not r.is_error
             assert srv.presupuesto.libre == 8 * 1024 * 1024
     corre(caso())
+
+
+# --------------------------------------------------------------------------- #
+# reauditoria R1: costo fijo por conexion                                      #
+# --------------------------------------------------------------------------- #
+
+def test_el_costo_fijo_por_conexion_es_configurable_y_valido(tmp_path):
+    c = ConfigPuerto(socket_dir=tmp_path)
+    assert c.costo_conexion_bytes == 256 * 1024 and c.presupuesto_bytes >= 100 * c.costo_conexion_bytes
+    assert ConfigPuerto.desde_entorno({"JAX_FARO_SOCKET_DIR": str(tmp_path), "JAX_FARO_COSTO_CONEXION_BYTES": "65536"}).costo_conexion_bytes == 65536
+    for malo in ("-1", "mucho", str(10**12)):
+        with pytest.raises(ConfigFaroInvalida):
+            ConfigPuerto.desde_entorno({"JAX_FARO_SOCKET_DIR": str(tmp_path), "JAX_FARO_COSTO_CONEXION_BYTES": malo})
+
+
+def test_cada_conexion_cobra_un_costo_fijo_y_la_que_no_entra_espera_sin_ser_rechazada(tmp_path, cargado):
+    """N conexiones ociosas con presupuesto para N-1: N-1 se sirven y la ultima ESPERA (D-4: no se rechaza)."""
+    d = tmp_path / "r"
+    d.mkdir(mode=0o700)
+    cfg = ConfigPuerto(socket_dir=d, max_mensaje=1024, presupuesto_bytes=4900, costo_conexion_bytes=1000)
+
+    async def respondida(lector, plazo):
+        try:
+            return bool(await asyncio.wait_for(lector.readline(), plazo))
+        except TimeoutError:
+            return False
+
+    async def caso():
+        async with puerto(cfg, cargado) as srv:
+            token = _handshake(srv.ruta_token.read_text().strip())
+            conexiones = [await _abrir(srv, token + PING) for _ in range(5)]
+            await asyncio.sleep(0.5)
+            estado = [await respondida(l, 1.0) for l, _ in conexiones]
+            assert sum(estado) == 4, estado                       # una espera
+            assert srv.presupuesto.libre < 1000
+            espera = estado.index(False)
+            # se libera una conexion servida: la que esperaba entra y responde
+            servida = estado.index(True)
+            conexiones[servida][1].close()
+            assert await respondida(conexiones[espera][0], 10)
+            for _, e in conexiones:
+                e.close()
+        return srv.registros
+    assert not [r for r in corre(caso()) if r.get("evento") == "conexion_rechazada"]    # esperar no es rechazar
+
+
+def test_el_costo_fijo_se_devuelve_al_cerrar_la_conexion(tmp_path, cargado):
+    d = tmp_path / "r"
+    d.mkdir(mode=0o700)
+    cfg = ConfigPuerto(socket_dir=d, max_mensaje=1024, presupuesto_bytes=4900, costo_conexion_bytes=1000)
+
+    async def caso():
+        async with puerto(cfg, cargado) as srv:
+            token = _handshake(srv.ruta_token.read_text().strip())
+            for _ in range(3):
+                lector, escritor = await _abrir(srv, token + PING)
+                await asyncio.wait_for(lector.readline(), 5)
+                escritor.close()
+            await asyncio.sleep(0.3)
+            assert srv.presupuesto.libre == 4900
+    corre(caso())
+
+
+# --------------------------------------------------------------------------- #
+# reauditoria R2: uid del servicio y de la jaula                              #
+# --------------------------------------------------------------------------- #
+
+def test_el_puerto_rechaza_un_uid_esperado_igual_al_del_servicio(cfgp, cargado):
+    from jax.faro.transporte import ServidorPuerto
+    with pytest.raises(ConfigFaroInvalida, match="uid"):
+        ServidorPuerto(cfgp, ejecucion(uid_esperado=os.geteuid()), cargado, Bitacora(emisores=[]))
+
+
+def test_el_puerto_rechaza_un_uid_esperado_root(cfgp, cargado):
+    from jax.faro.transporte import ServidorPuerto
+    with pytest.raises(ConfigFaroInvalida, match="uid"):
+        ServidorPuerto(cfgp, ejecucion(uid_esperado=0), cargado, Bitacora(emisores=[]))
+
+
+def test_un_uid_distinto_del_servicio_y_de_root_se_acepta_sin_bandera(cfgp, cargado):
+    from jax.faro.transporte import ServidorPuerto
+    ServidorPuerto(cfgp, ejecucion(uid_esperado=os.geteuid() + 1), cargado, Bitacora(emisores=[]))
+
+
+def test_la_bandera_de_pruebas_existe_pero_no_sale_del_entorno_ni_de_la_configuracion(cfgp, cargado, monkeypatch):
+    from jax.faro.transporte import ServidorPuerto
+    ServidorPuerto(cfgp, ejecucion(uid_esperado=os.geteuid()), cargado, Bitacora(emisores=[]), solo_pruebas_mismo_uid=True)
+    for nombre in ("JAX_FARO_SOLO_PRUEBAS_MISMO_UID", "JAX_FARO_SOLO_PRUEBAS", "FARO_SOLO_PRUEBAS_MISMO_UID"):
+        monkeypatch.setenv(nombre, "1")
+    with pytest.raises(ConfigFaroInvalida, match="uid"):
+        ServidorPuerto(cfgp, ejecucion(uid_esperado=os.geteuid()), cargado, Bitacora(emisores=[]))
+    import dataclasses
+    assert not [f for f in dataclasses.fields(ConfigPuerto) if "prueba" in f.name]
+    import inspect
+    from jax.faro import config
+    assert "SOLO_PRUEBAS" not in inspect.getsource(config).upper().replace("SOLO_PRUEBAS_", "")
+
+
+# --------------------------------------------------------------------------- #
+# reauditoria: minas (N14b salida, N25 guarda del socket)                      #
+# --------------------------------------------------------------------------- #
+
+def test_la_salida_cobra_sus_bytes_hasta_que_el_par_los_lee():
+    from jax.faro.transporte import _Salida
+
+    class Escritor:
+        def __init__(self): self.datos = b""; self.vaciado = asyncio.Event()
+        def write(self, d): self.datos += d
+        async def drain(self): await self.vaciado.wait()
+
+    async def caso():
+        p = PresupuestoBytes(10_000)
+        e = Escritor()
+        s = _Salida(e, p, plazo_s=5)
+        await s.write("x" * 3000)
+        assert p.libre == 7000                  # cobrado mientras el par no lee
+        t = asyncio.create_task(s.flush())
+        await asyncio.sleep(0.05)
+        assert p.libre == 7000 and not t.done()
+        e.vaciado.set()
+        await t
+        assert p.libre == 10_000                # devuelto al leerse
+    asyncio.run(caso())
+
+
+def test_un_socket_viejo_sin_token_no_se_pisa_en_silencio(cfgp, cargado):
+    """asyncio borra en silencio un socket viejo del mismo camino: la guarda del Puerto tiene que verlo antes
+    (el O_EXCL del token solo no alcanza si lo que sobra es el socket)."""
+    import socket as _s
+    ruta = cfgp.socket_dir / "run-1.sock"
+    viejo = _s.socket(_s.AF_UNIX)
+    viejo.bind(str(ruta))
+    viejo.close()                                # el archivo de socket queda, sin escuchar
+    assert ruta.exists() and not (cfgp.socket_dir / "run-1.token").exists()
+
+    async def caso():
+        with pytest.raises(FileExistsError):
+            async with puerto(cfgp, cargado):
+                pass
+    corre(caso())
+    assert ruta.exists()                         # y no lo borro

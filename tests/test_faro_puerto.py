@@ -30,7 +30,7 @@ from jax.faro.puerto import Guardia, construir_servidor
 from jax.faro.paquete import PaqueteCargado, cargar_paquete
 from jax.faro.transporte import ServidorPuerto
 from tests import _faro_utils as _u
-from tests._faro_utils import _commit, _escribir, _git, cliente_por_rele, repo_de_juguete
+from tests._faro_utils import _commit, _escribir, _git, cliente_por_rele, repo_de_juguete, servidor
 
 SECRETO = "SECRETO-FUERA-DEL-PAQUETE-0451"
 
@@ -70,7 +70,7 @@ def cfg_puerto(tmp_path):
 async def puerto(cfg_puerto, cargado, ejecucion=None, registros=None, **kw):
     registros = registros if registros is not None else []
     bit = Bitacora(emisores=[registros.append])
-    async with ServidorPuerto(cfg_puerto, ejecucion or _ejecucion(), cargado, bit, **kw) as srv:
+    async with servidor(cfg_puerto, ejecucion or _ejecucion(), cargado, bit, **kw) as srv:
         srv.registros = registros
         yield srv
 
@@ -406,7 +406,7 @@ def test_un_error_de_la_herramienta_tambien_queda_registrado(cfg_puerto, cargado
 
 async def _pedir_prompt_inexistente(cfg_puerto, cargado, nombre):
     """El nombre del prompt es lo que el cliente controla y queda como `objetivo` en la bitacora."""
-    async with ServidorPuerto(cfg_puerto, _ejecucion(), cargado, Bitacora()) as srv, cliente_por_rele(srv) as c:
+    async with servidor(cfg_puerto, _ejecucion(), cargado, Bitacora()) as srv, cliente_por_rele(srv) as c:
         with pytest.raises(MCPError):
             await c.get_prompt(nombre, {})
 
@@ -499,7 +499,7 @@ def test_el_directorio_de_sockets_tiene_que_ser_privado(tmp_path, cargado):
 
     async def caso():
         with pytest.raises(ConfigFaroInvalida):
-            async with ServidorPuerto(ConfigPuerto(socket_dir=d), _ejecucion(), cargado, Bitacora()):
+            async with servidor(ConfigPuerto(socket_dir=d), _ejecucion(), cargado, Bitacora()):
                 pass
     corre(caso())
 
@@ -565,7 +565,7 @@ def test_un_emisor_de_bitacora_que_falla_hace_fallar_la_llamada_y_no_entrega_el_
             raise OSError("la tabla de la bitacora no esta disponible")
 
     async def caso():
-        async with ServidorPuerto(cfg_puerto, _ejecucion(), cargado, Bitacora(emisores=[emisor])) as srv, cliente_por_rele(srv) as c:
+        async with servidor(cfg_puerto, _ejecucion(), cargado, Bitacora(emisores=[emisor])) as srv, cliente_por_rele(srv) as c:
             try:
                 r = await c.call_tool("skills.leer", {"nombre": "alfa"})
             except MCPError:
@@ -581,7 +581,7 @@ def test_si_la_bitacora_falla_la_denegacion_por_freno_sigue_denegando(cfg_puerto
             raise OSError("sin bitacora")
 
     async def caso():
-        async with ServidorPuerto(cfg_puerto, _ejecucion(), cargado, Bitacora(emisores=[siempre_falla])) as srv, cliente_por_rele(srv) as c:
+        async with servidor(cfg_puerto, _ejecucion(), cargado, Bitacora(emisores=[siempre_falla])) as srv, cliente_por_rele(srv) as c:
             freno_propio.write_text("pausa")
             with pytest.raises(MCPError) as exc:
                 await c.call_tool("skills.leer", {"nombre": "alfa"})
@@ -594,7 +594,7 @@ def test_un_rechazo_de_conexion_se_mantiene_aunque_la_bitacora_falle(cfg_puerto,
         raise OSError("sin bitacora")
 
     async def caso():
-        async with ServidorPuerto(cfg_puerto, _ejecucion(uid_esperado=os.getuid() + 1), cargado, Bitacora(emisores=[siempre_falla])) as srv:
+        async with servidor(cfg_puerto, _ejecucion(uid_esperado=os.getuid() + 1), cargado, Bitacora(emisores=[siempre_falla])) as srv:
             lector, escritor = await asyncio.open_unix_connection(str(srv.ruta_socket))
             assert await asyncio.wait_for(lector.read(), 5) == b""
             escritor.close()
