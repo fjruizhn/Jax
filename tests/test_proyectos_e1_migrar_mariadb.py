@@ -696,6 +696,7 @@ def test_mapa_con_tabla_no_valida_se_rechaza_antes_de_tocar_nada(tmp_path):
     ruta = tmp_path / "mal.json"
     ruta.write_text(json.dumps({"evaluacion_project_id": 5, "filas": [
         {"tabla": "jax_users; DROP TABLE x", "id": 1, "project_id_anterior": 2}]}))
+    os.chmod(ruta, 0o600)
     with pytest.raises(migrar.MapaInvalido):
         migrar.cargar_mapa(str(ruta))
     assert migrar.main(["--revertir", str(ruta), "--database", _DB]) == 2
@@ -706,6 +707,7 @@ def test_revertir_sobre_produccion_exige_confirmacion(tmp_path, capsys, monkeypa
         monkeypatch.delenv(k, raising=False)
     ruta = tmp_path / "ok.json"
     ruta.write_text(json.dumps({"evaluacion_project_id": 5, "filas": []}))
+    os.chmod(ruta, 0o600)
     assert migrar.main(["--revertir", str(ruta), "--database", "jax_memory"]) == 2
     assert "--confirmo-produccion" in capsys.readouterr().err
 
@@ -717,3 +719,80 @@ def test_main_revertir_por_cli_restaura_y_el_que_no_cuadra_sale_distinto_de_0(tm
     assert asyncio.run(_estado_filas()) == antes
     assert migrar.main(["--revertir", str(ruta), "--database", _DB]) == 6      # ya revertido: 0 filas != mapa
     assert "no cuadra" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- N-1/N-2: --revertir no confia en el mapa
+
+async def _mapa_modificado(tmp_path, ids, cambio):
+    antes, ruta, ev = await _aplicar_y_mapa(tmp_path, ids)
+    datos = json.loads(ruta.read_text())
+    await cambio(datos)
+    ruta.write_text(json.dumps(datos))
+    return await _estado_filas(), ruta
+
+
+async def _revertir_debe_dar_6(ruta, estado):
+    pool = await _pool()
+    try:
+        with pytest.raises(migrar.ReversionNoCuadra) as e:
+            await migrar.revertir(pool, str(ruta))
+    finally:
+        pool.close()
+        await pool.wait_closed()
+    assert await _estado_filas() == estado                  # ningun UPDATE
+    return str(e.value)
+
+
+@requiere_servidor
+@asincrono
+async def test_revertir_rechaza_evaluacion_que_no_es_la_de_la_llave(tmp_path):
+    ajeno = await _sql("INSERT INTO projects (project_uuid,name,status) VALUES (UUID(),'ajeno','active')")
+
+    async def cambio(d):
+        d["evaluacion_project_id"] = ajeno
+    estado, ruta = await _mapa_modificado(tmp_path, [970001], cambio)
+    msg = await _revertir_debe_dar_6(ruta, estado)
+    assert "evaluacion" in msg.lower()
+
+
+@requiere_servidor
+@asincrono
+async def test_revertir_rechaza_project_id_anterior_fuera_del_rango_reservado(tmp_path):
+    async def cambio(d):
+        d["filas"][0]["project_id_anterior"] = 77
+    estado, ruta = await _mapa_modificado(tmp_path, [970002], cambio)
+    assert "77" in await _revertir_debe_dar_6(ruta, estado)
+
+
+@requiere_servidor
+@asincrono
+async def test_revertir_rechaza_project_id_anterior_que_existe_en_projects(tmp_path):
+    await _sql("INSERT IGNORE INTO projects (id,project_uuid,name,status) VALUES (970100,UUID(),'real','active')")
+
+    async def cambio(d):
+        d["filas"][0]["project_id_anterior"] = 970100        # en rango, pero existe
+    estado, ruta = await _mapa_modificado(tmp_path, [970003], cambio)
+    assert "970100" in await _revertir_debe_dar_6(ruta, estado)
+
+
+@requiere_servidor
+@asincrono
+async def test_reversion_no_cuadra_lista_las_entradas_que_fallaron(tmp_path):
+    async def cambio(d):
+        d["filas"].append({"tabla": "facts", "id": 987654321, "project_id_anterior": 970004})
+    estado, ruta = await _mapa_modificado(tmp_path, [970004], cambio)
+    msg = await _revertir_debe_dar_6(ruta, estado)
+    assert "facts" in msg and "987654321" in msg
+
+
+def test_mapa_con_permisos_abiertos_o_ajeno_se_rechaza_con_2(tmp_path, capsys, monkeypatch):
+    ruta = tmp_path / "abierto.json"
+    ruta.write_text(json.dumps({"evaluacion_project_id": 5, "filas": []}))
+    os.chmod(ruta, 0o644)
+    monkeypatch.setenv("JAX_DB_NAME", "jax_memory_test")
+    assert migrar.main(["--revertir", str(ruta)]) == 2
+    assert "0600" in capsys.readouterr().err
+    os.chmod(ruta, 0o600)
+    monkeypatch.setattr(migrar.os, "geteuid", lambda: os.getuid() + 1)       # otro usuario
+    with pytest.raises(migrar.MapaInvalido, match="propiedad"):
+        migrar.cargar_mapa(str(ruta))

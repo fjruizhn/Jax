@@ -233,9 +233,18 @@ async def _reescribir_en_transaccion(pool, ids: list[int], destino: int, salida_
 
 
 def cargar_mapa(ruta: str) -> dict:
-    """Lee y valida el mapa de reversion; la tabla se valida contra las cinco."""
+    """Lee y valida el mapa de reversion; la tabla se valida contra las cinco.
+    El archivo tiene que ser del usuario que corre y no mas abierto que 0600:
+    un mapa que otro pudo escribir decide que UPDATEs corre `--revertir`."""
     try:
         with open(ruta, encoding="utf-8") as f:
+            st = os.fstat(f.fileno())
+            if st.st_uid != os.geteuid():
+                raise MapaInvalido(f"el mapa {ruta} no es propiedad del usuario que corre (uid {st.st_uid}); "
+                                   f"se rechaza")
+            if st.st_mode & 0o177:
+                raise MapaInvalido(f"el mapa {ruta} tiene permisos {oct(st.st_mode & 0o777)}; "
+                                   f"tiene que ser 0600 como lo crea --aplicar")
             datos = json.load(f)
     except (OSError, ValueError) as e:
         raise MapaInvalido(f"no se pudo leer el mapa {ruta}: {type(e).__name__}: {e}") from e
@@ -268,17 +277,42 @@ async def revertir(pool, ruta: str) -> dict:
         try:
             afectadas = 0
             por_tabla: dict[str, int] = {}
+            fallidas: list[tuple[str, int]] = []
             async with conn.cursor() as cur:
+                # El mapa NO es de fiar: antes de cualquier UPDATE se contrasta con la base.
+                await cur.execute("SELECT project_id FROM jax_project_creation_request WHERE idempotency_key=%s",
+                                  (LLAVE_EVALUACION,))
+                fila_ev = await cur.fetchone()
+                real = int(fila_ev["project_id"]) if fila_ev else None
+                if real is None or real != ev:
+                    raise ReversionNoCuadra(
+                        f"el evaluacion_project_id del mapa ({ev}) no es el proyecto creado con la llave de la "
+                        f"evaluacion ({real}); no se toco nada")
+                lo, hi = RESERVED_PROJECT_ID_RANGE
+                anteriores = sorted({f["project_id_anterior"] for f in filas})
+                fuera = [i for i in anteriores if not lo <= i <= hi]
+                if fuera:
+                    raise ReversionNoCuadra(f"project_id_anterior fuera de {RESERVED_PROJECT_ID_RANGE}: {fuera}; "
+                                            f"no se toco nada")
+                if anteriores:
+                    await cur.execute(f"SELECT id FROM projects WHERE id IN ({','.join(['%s'] * len(anteriores))})",
+                                      tuple(anteriores))
+                    existen = sorted(int(r["id"]) for r in await cur.fetchall())
+                    if existen:
+                        raise ReversionNoCuadra(f"project_id_anterior que SI existe en projects (no es huerfano): "
+                                                f"{existen}; no se toco nada")
                 for f in filas:
                     await cur.execute(f"UPDATE `{f['tabla']}` SET project_id=%s WHERE id=%s AND project_id=%s",
                                       (f["project_id_anterior"], f["id"], ev))
                     n = int(cur.rowcount)
                     afectadas += n
                     por_tabla[f["tabla"]] = por_tabla.get(f["tabla"], 0) + n
+                    if n != 1:
+                        fallidas.append((f["tabla"], f["id"]))
             if afectadas != len(filas):
                 raise ReversionNoCuadra(
                     f"el mapa no cuadra con la base: {afectadas} filas afectadas, {len(filas)} en el mapa; "
-                    f"se hizo ROLLBACK, no se cambio nada")
+                    f"entradas (tabla, id) que no cuadraron: {fallidas[:50]}; se hizo ROLLBACK, no se cambio nada")
         except BaseException:
             await conn.rollback()
             raise
