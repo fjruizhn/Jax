@@ -43,18 +43,68 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import atexit
+import grp
 import shutil
 
 import hyde_sandbox
 
-# El directorio de locks de Hyde se verifica (dueno y permisos, MAJOR-3): los
-# tests usan uno propio y efimero en vez del /tmp compartido del host, que puede
-# traer un directorio viejo con permisos de grupo de ejecuciones anteriores. Los
-# procesos hijos (ClaudeSubprocessLockRealCrossProcessTest) lo heredan.
-_LOCKS_DE_PRUEBA = tempfile.mkdtemp(prefix="hyde-locks-test-")
-os.environ[hyde_sandbox.HYDE_LOCK_DIR_ENV] = os.path.join(_LOCKS_DE_PRUEBA, "locks")
-atexit.register(shutil.rmtree, _LOCKS_DE_PRUEBA, ignore_errors=True)
+# El lock de Hyde es COMPARTIDO (MAJOR-14): directorio y grupo son constantes del
+# codigo y el directorio/archivo se verifican (dueno root, grupo del lock, sin
+# escritura ajena). Los tests no corren como root ni tienen el grupo real: se
+# parchean las constantes a un directorio efimero propio y al grupo del que corre,
+# y el dueno se inyecta por `uid_esperado`. Los procesos hijos
+# (ClaudeSubprocessLockRealCrossProcessTest) reciben ambos por argv.
+_LOCKS_DE_PRUEBA = None
+_PATCHES = []
+_GRUPO_DE_PRUEBA = grp.getgrgid(os.getgid()).gr_name
+
+
+def setUpModule():
+    global _LOCKS_DE_PRUEBA
+    _LOCKS_DE_PRUEBA = tempfile.mkdtemp(prefix="hyde-locks-test-")
+    d = os.path.join(_LOCKS_DE_PRUEBA, "locks")
+    os.mkdir(d, 0o750)
+    os.chmod(d, 0o750)
+    for p in (
+        patch.multiple(hyde_sandbox, HYDE_LOCK_DIR=d, HYDE_LOCK_GROUP=_GRUPO_DE_PRUEBA),
+        patch.object(hyde_sandbox, "_acquire_cross_process_lock", _adquirir_como_tmpfiles),
+    ):
+        p.start()
+        _PATCHES.append(p)
+
+
+def tearDownModule():
+    for p in _PATCHES:
+        p.stop()
+    _PATCHES.clear()
+    shutil.rmtree(_LOCKS_DE_PRUEBA, ignore_errors=True)
+
+
+def _sembrar_lock(workspace_dir: str) -> None:
+    """Lo que hace tmpfiles.d en el host: crea el archivo del lock del workspace."""
+    ruta = hyde_sandbox._lock_path_for_workspace(workspace_dir)
+    try:  # atomico y ya con el modo final: dos hilos sembrando a la vez no se ven a medias
+        os.close(os.open(ruta, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640))
+    except FileExistsError:
+        pass
+
+
+_ADQUIRIR_REAL = hyde_sandbox._acquire_cross_process_lock
+
+
+def _adquirir_como_tmpfiles(workspace_dir: str, timeout: float, **kw):
+    """Reemplaza a la funcion real DURANTE ESTE MODULO: hace de tmpfiles.d (siembra el
+    archivo del lock si falta) e inyecta el dueno del que corre el test; todo lo
+    demas -- directorio, grupo, modos, flock -- es la verificacion real. Asi tambien
+    `run_sandboxed_claude`, que no pasa esos parametros, corre contra el lock real."""
+    if not hyde_sandbox._lock_path_for_workspace(workspace_dir).exists():
+        _sembrar_lock(workspace_dir)
+    kw.setdefault("uid_esperado", os.getuid())
+    return _ADQUIRIR_REAL(workspace_dir, timeout, **kw)
+
+
+def _adquirir(workspace_dir: str, timeout: float):
+    return hyde_sandbox._acquire_cross_process_lock(workspace_dir, timeout)
 
 
 class _FakeProc:
@@ -182,7 +232,7 @@ class ClaudeSubprocessLockFailClosedTest(unittest.TestCase):
 
     def test_timeout_explicito_si_el_lock_ya_esta_tomado(self):
         with tempfile.TemporaryDirectory() as ws:
-            holder_fh = hyde_sandbox._acquire_cross_process_lock(ws, timeout=5)
+            holder_fh = _adquirir(ws, 5)
             try:
                 start = time.monotonic()
                 with self.assertRaises(TimeoutError) as ctx:
@@ -218,7 +268,7 @@ class ClaudeSubprocessLockPathOutsideSandboxTest(unittest.TestCase):
         # No solo el helper: el archivo REALMENTE abierto por
         # _acquire_cross_process_lock tiene que estar fuera del workspace.
         with tempfile.TemporaryDirectory() as ws:
-            fh = hyde_sandbox._acquire_cross_process_lock(ws, timeout=5)
+            fh = _adquirir(ws, 5)
             try:
                 real_path = Path(os.readlink(f"/proc/self/fd/{fh.fileno()}")).resolve()
                 self.assertFalse(
@@ -240,9 +290,9 @@ class ClaudeSubprocessLockPathOutsideSandboxTest(unittest.TestCase):
                 hyde_sandbox._lock_path_for_workspace(ws_b),
             )
             # Y el lock de uno no bloquea al otro.
-            fh_a = hyde_sandbox._acquire_cross_process_lock(ws_a, timeout=5)
+            fh_a = _adquirir(ws_a, 5)
             try:
-                fh_b = hyde_sandbox._acquire_cross_process_lock(ws_b, timeout=1)
+                fh_b = _adquirir(ws_b, 1)
                 hyde_sandbox._release_cross_process_lock(fh_b)
             finally:
                 hyde_sandbox._release_cross_process_lock(fh_a)
@@ -275,12 +325,15 @@ class ClaudeSubprocessLockTimeoutBudgetTest(unittest.IsolatedAsyncioTestCase):
 _CROSS_PROCESS_WORKER = """
 import asyncio, json, sys, time
 sys.path.insert(0, {repo_root!r})
+import os
 import hyde_sandbox
 
 async def main():
     workspace_dir, tag, hold_seconds = sys.argv[1], sys.argv[2], float(sys.argv[3])
+    hyde_sandbox.HYDE_LOCK_DIR, hyde_sandbox.HYDE_LOCK_GROUP = sys.argv[4], sys.argv[5]
     events = []
-    fh = await asyncio.to_thread(hyde_sandbox._acquire_cross_process_lock, workspace_dir, 10.0)
+    fh = await asyncio.to_thread(
+        lambda: hyde_sandbox._acquire_cross_process_lock(workspace_dir, 10.0, uid_esperado=os.getuid()))
     events.append(("start", tag, time.monotonic()))
     await asyncio.sleep(hold_seconds)
     events.append(("end", tag, time.monotonic()))
@@ -303,17 +356,18 @@ class ClaudeSubprocessLockRealCrossProcessTest(unittest.TestCase):
     def test_flock_serializa_entre_dos_procesos_de_so_reales(self):
         repo_root = str(Path(hyde_sandbox.__file__).resolve().parent)
         with tempfile.TemporaryDirectory() as ws:
+            _sembrar_lock(ws)
             with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as script_f:
                 script_f.write(_CROSS_PROCESS_WORKER.format(repo_root=repo_root))
                 script_path = script_f.name
 
             try:
                 p1 = subprocess.Popen(
-                    [sys.executable, script_path, ws, "A", "0.3"],
+                    [sys.executable, script_path, ws, "A", "0.3", hyde_sandbox.HYDE_LOCK_DIR, _GRUPO_DE_PRUEBA],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 )
                 p2 = subprocess.Popen(
-                    [sys.executable, script_path, ws, "B", "0.3"],
+                    [sys.executable, script_path, ws, "B", "0.3", hyde_sandbox.HYDE_LOCK_DIR, _GRUPO_DE_PRUEBA],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 )
                 out1, err1 = p1.communicate(timeout=15)

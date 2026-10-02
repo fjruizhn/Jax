@@ -41,6 +41,9 @@ from unittest.mock import patch
 import cli_sandbox
 import hyde_sandbox
 
+# constantes de Hyde tal como las define el modulo (setUp las parchea a un tmp)
+_HYDE_LOCK_DIR_REAL = hyde_sandbox.HYDE_LOCK_DIR
+_HYDE_LOCK_GROUP_REAL = hyde_sandbox.HYDE_LOCK_GROUP
 # originales, antes de que setUp parchee `_consultar_usuario` con un doble
 _CONSULTAR_REAL = cli_sandbox._consultar_usuario
 # el perfil de codex TAL COMO LO DEFINE EL MODULO (setUp lo reemplaza por una copia
@@ -133,7 +136,6 @@ class _Entorno(unittest.IsolatedAsyncioTestCase):
             "JAX_CLI_CRED_ROOT": str(self.cred),
             "JAX_CLI_RUN_DIR": str(self.run_dir),
             "JAX_CLI_LOCK_DIR": str(self.lock_dir),
-            "JAX_HYDE_LOCK_DIR": str(t / "hyde-locks-base"),
             "JAX_CLI_CODEX_VERSION": "9.9.9", "JAX_CLI_CODEX_SHA256": self.shas["codex"],
             "JAX_CLI_KIMI_VERSION": "9.9.9", "JAX_CLI_KIMI_SHA256": self.shas["kimi"],
             "JAX_SUSCRIPCION_TITULARES": "1,8",
@@ -145,6 +147,18 @@ class _Entorno(unittest.IsolatedAsyncioTestCase):
         p2 = patch.object(cli_sandbox, "_BWRAP_BIN", str(self.fake_bwrap))
         p2.start()
         self.addCleanup(p2.stop)
+        # El lock de Hyde es COMPARTIDO (MAJOR-14): directorio y grupo son constantes
+        # del codigo; los tests las parchean a un directorio propio y al grupo del
+        # que corre el test (sin root no hay dueno root: `uid_esperado` se inyecta).
+        self.hyde_lock_dir = t / "hyde-locks"
+        self.hyde_lock_dir.mkdir(mode=0o750)
+        os.chmod(self.hyde_lock_dir, 0o750)
+        p2b = patch.multiple(
+            hyde_sandbox, HYDE_LOCK_DIR=str(self.hyde_lock_dir),
+            HYDE_LOCK_GROUP=grp.getgrgid(os.getgid()).gr_name,
+        )
+        p2b.start()
+        self.addCleanup(p2b.stop)
         self.addCleanup(self.tmp.cleanup)
         self.usuarios = {1: dict(tenant_id=1, status="active", deleted_at=None),
                          8: dict(tenant_id=1, status="active", deleted_at=None),
@@ -176,6 +190,12 @@ class _Entorno(unittest.IsolatedAsyncioTestCase):
         })
         p5.start()
         self.addCleanup(p5.stop)
+
+    def sembrar_lock_hyde(self, ws):
+        """Hace lo que hace tmpfiles.d en el host: crea el archivo del lock de `ws`."""
+        ruta = hyde_sandbox._lock_path_for_workspace(ws)
+        os.close(os.open(ruta, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640))
+        return ruta
 
     async def titular(self, uid=1, tenant=1, ep="chat"):
         return await cli_sandbox.exigir_titular(uid, tenant, ep)
@@ -1123,7 +1143,8 @@ class EventLoopLibreTest(_Entorno):
 class LocksTest(_Entorno):
     async def test_el_lock_de_hyde_no_bloquea_a_los_perfiles(self):
         with tempfile.TemporaryDirectory() as ws:
-            fh = hyde_sandbox._acquire_cross_process_lock(ws, timeout=2)
+            self.sembrar_lock_hyde(ws)
+            fh = hyde_sandbox._acquire_cross_process_lock(ws, timeout=2, uid_esperado=os.getuid())
             try:
                 res, _, _ = await asyncio.wait_for(self.correr("codex"), 5)
                 self.assertEqual(res.texto, "hola desde codex")
@@ -1329,33 +1350,45 @@ class LocksSegurosTest(_Entorno):
         cli_sandbox.flock_liberar(fh)
 
     async def test_el_lock_de_hyde_tampoco_sigue_symlinks(self):
-        d = Path(self.tmp.name) / "hyde-locks"
-        d.mkdir(mode=0o700)
-        os.chmod(d, 0o700)
-        ruta = d / "ws.lock"
+        ruta = self.hyde_lock_dir / "ws.lock"
         os.symlink(self.victima, ruta)
         with patch.object(hyde_sandbox, "_lock_path_for_workspace", return_value=ruta):
             with self.assertRaises(cli_sandbox.SandboxUnavailable):
-                hyde_sandbox._acquire_cross_process_lock("/ws", timeout=1)
+                hyde_sandbox._acquire_cross_process_lock("/ws", timeout=1, uid_esperado=os.getuid())
         self.assertEqual(self.victima.read_text(), "NO-TRUNCAR")
 
     async def test_el_lock_de_hyde_rechaza_un_directorio_con_escritura_de_otros(self):
-        d = Path(self.tmp.name) / "hyde-locks2"
-        d.mkdir()
-        os.chmod(d, 0o777)
-        with patch.object(hyde_sandbox, "_lock_path_for_workspace", return_value=d / "ws.lock"):
+        os.chmod(self.hyde_lock_dir, 0o777)
+        with tempfile.TemporaryDirectory() as ws:
+            self.sembrar_lock_hyde(ws)
             with self.assertRaises(cli_sandbox.SandboxUnavailable):
-                hyde_sandbox._acquire_cross_process_lock("/ws", timeout=1)
+                hyde_sandbox._acquire_cross_process_lock(ws, timeout=1, uid_esperado=os.getuid())
 
     async def test_el_lock_de_hyde_sano_sigue_funcionando(self):
-        d = Path(self.tmp.name) / "hyde-locks3"
-        with patch.object(hyde_sandbox, "_lock_path_for_workspace", return_value=d / "ws.lock"):
-            fh = hyde_sandbox._acquire_cross_process_lock("/ws", timeout=1)
+        with tempfile.TemporaryDirectory() as ws:
+            self.sembrar_lock_hyde(ws)
+            fh = hyde_sandbox._acquire_cross_process_lock(ws, timeout=1, uid_esperado=os.getuid())
             try:
                 with self.assertRaises(TimeoutError):
-                    hyde_sandbox._acquire_cross_process_lock("/ws", timeout=0.2)
+                    hyde_sandbox._acquire_cross_process_lock(ws, timeout=0.2, uid_esperado=os.getuid())
             finally:
                 hyde_sandbox._release_cross_process_lock(fh)
+
+    async def test_el_lock_de_hyde_sin_sembrar_falla_cerrado_con_la_linea_de_tmpfiles(self):
+        with tempfile.TemporaryDirectory() as ws:
+            nombre = hyde_sandbox._lock_path_for_workspace(ws).name
+            with self.assertRaises(cli_sandbox.SandboxUnavailable) as c:
+                hyde_sandbox._acquire_cross_process_lock(ws, timeout=1, uid_esperado=os.getuid())
+        self.assertIn(
+            f"f {self.hyde_lock_dir}/{nombre} 0640 root {hyde_sandbox.HYDE_LOCK_GROUP} -", str(c.exception))
+        self.assertEqual(list(self.hyde_lock_dir.iterdir()), [], "no se crea nada")
+
+    async def test_el_directorio_y_el_grupo_de_hyde_son_constantes_y_no_salen_del_entorno(self):
+        self.assertEqual(_HYDE_LOCK_DIR_REAL, "/run/jax-locks/hyde")
+        self.assertEqual(_HYDE_LOCK_GROUP_REAL, "jax-cli-lock")
+        with patch.dict(os.environ, {"JAX_HYDE_LOCK_DIR": "/tmp/otro"}):
+            with tempfile.TemporaryDirectory() as ws:
+                self.assertEqual(hyde_sandbox._lock_path_for_workspace(ws).parent, self.hyde_lock_dir)
 
 
 class LocksCompartidosTest(unittest.TestCase):

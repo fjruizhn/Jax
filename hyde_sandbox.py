@@ -342,10 +342,9 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> tuple[list[str], di
 # del path: borrar el path NO libera al que ya tiene el lock, pero el
 # SIGUIENTE que llame open(path, "w") crea un inodo nuevo y toma su lock
 # al instante -- dos `claude` corriendo a la vez, sin error y sin log, la
-# garantia evaporada en silencio. Por eso el lock vive en el /tmp del
+# garantia evaporada en silencio. Por eso el lock vive en /run/jax-locks del
 # HOST, que NO esta bind-mounteado (el sandbox recibe su propio
-# `--tmpfs /tmp` privado, desconectado del host): fuera del alcance del
-# proceso confinado.
+# `--tmpfs /tmp` y no monta /run): fuera del alcance del proceso confinado.
 #
 # El nombre del archivo se deriva del workspace_dir resuelto (hash corto)
 # para que workspaces distintos tengan locks independientes -- no un unico
@@ -354,33 +353,37 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> tuple[list[str], di
 # jax-workspace-relocation-fix) -- el lock hereda esa misma fuente de
 # verdad sin leer la env var de nuevo aca.
 #
-# Directorio (auditoria 2026-10-02, MAJOR-3): sale de JAX_HYDE_LOCK_DIR; sin
-# configurar, el de siempre (/tmp/jax-claude-subprocess-locks, que mantiene a los
-# dos procesos de SO calculando el mismo path). `cli_sandbox.flock_adquirir` lo
-# verifica antes de abrir el lock: tiene que ser del euid y sin escritura de
-# grupo ni de otros (se crea con 0700), y el archivo se abre sin seguir symlinks
-# y sin truncar. Los DOS procesos que comparten este lock (las_manos y el REPL)
-# tienen que correr con el mismo usuario y con el mismo JAX_HYDE_LOCK_DIR.
+# MODO COMPARTIDO (auditoria 2026-10-02, MAJOR-3 y, en la ronda 2, MAJOR-14): el
+# lock lo toman procesos de USUARIOS DISTINTOS -- las_manos (jaxsvc) y el REPL
+# (fruiz) --, asi que no puede ser "del euid": el duenyo es root y el acceso es por
+# GRUPO. El directorio y el grupo son CONSTANTES DEL CODIGO (abajo), no
+# configuracion: el REPL no puede leer /etc/jax/.env, y un valor leido del entorno
+# haria que los dos procesos pudieran calcular directorios distintos. Los siembra
+# el host con tmpfiles.d, en /etc/tmpfiles.d/jax-locks.conf:
+#   d /run/jax-locks/hyde 0750 root jax-cli-lock -
+#   f /run/jax-locks/hyde/<digest>.lock 0640 root jax-cli-lock -   (uno por workspace)
+# y los dos usuarios son miembros de `jax-cli-lock`. `cli_sandbox.flock_compartido_adquirir`
+# verifica el directorio y el archivo antes de tomar el lock y NUNCA crea nada.
 _CLAUDE_SUBPROCESS_LOCK_DIR_NAME = "jax-claude-subprocess-locks"
 HYDE_LOCK_DIR_ENV = "JAX_HYDE_LOCK_DIR"
+HYDE_LOCK_DIR = "/run/jax-locks/hyde"
+HYDE_LOCK_GROUP = "jax-cli-lock"
 
 
 def _lock_path_for_workspace(workspace_dir: str) -> Path:
     """Path del archivo de lock para `workspace_dir`. SIEMPRE fuera de
-    workspace_dir (ver comentario de arriba) -- en /tmp del HOST (ruta fija,
-    no tempfile.gettempdir()), que el sandbox no ve. Usa una ruta absoluta
-    fija porque DOS procesos INDEPENDIENTES (las_manos systemd y REPL shell)
-    deben computar EXACTAMENTE EL MISMO path sin depender del estado de
-    entorno heredado (si TMPDIR/TEMP/TMP diferente, tomarian dos locks
-    distintos, la misma clase de falla que este todo intenta cerrar, solo
-    trasladada). El nombre es un hash corto del workspace resuelto:
-    workspaces distintos -> locks independientes."""
+    workspace_dir (ver comentario de arriba) y SIEMPRE el mismo para los dos
+    procesos: `HYDE_LOCK_DIR` es una constante absoluta, no depende de TMPDIR ni
+    del entorno heredado (si no, tomarian dos locks distintos, la misma clase de
+    falla que este todo intenta cerrar, solo trasladada). El nombre es un hash
+    corto del workspace resuelto: workspaces distintos -> locks independientes."""
     digest = hashlib.sha256(str(Path(workspace_dir).resolve()).encode("utf-8")).hexdigest()[:16]
-    base = os.environ.get(HYDE_LOCK_DIR_ENV) or str(Path("/tmp") / _CLAUDE_SUBPROCESS_LOCK_DIR_NAME)
-    return Path(base) / f"{digest}.lock"
+    return Path(HYDE_LOCK_DIR) / f"{digest}.lock"
 
 
-def _acquire_cross_process_lock(workspace_dir: str, timeout: float):
+def _acquire_cross_process_lock(
+    workspace_dir: str, timeout: float, *, uid_esperado: int = 0, gid_esperado: int | None = None,
+):
     """BLOQUEANTE -- llamar SOLO via asyncio.to_thread, nunca en el event
     loop (flock(2) no tiene equivalente async). Sondea con LOCK_NB en vez
     de bloquear en LOCK_EX puro para poder fail-closed con un timeout
@@ -388,12 +391,18 @@ def _acquire_cross_process_lock(workspace_dir: str, timeout: float):
     `timeout` segundos, lanza TimeoutError con mensaje explicito en vez de
     colgar el thread para siempre.
 
+    Modo compartido: ver el comentario de arriba. `uid_esperado` (root) y
+    `gid_esperado` (el de HYDE_LOCK_GROUP) se inyectan solo desde los tests;
+    `run_sandboxed_claude` no los pasa.
+
     Devuelve el file handle abierto -- el llamador debe pasarlo a
     _release_cross_process_lock (tambien via to_thread) cuando termine,
     en un finally."""
-    return cli_sandbox.flock_adquirir(
-        _lock_path_for_workspace(workspace_dir), timeout, "subprocess 'claude'",
+    ruta = _lock_path_for_workspace(workspace_dir)
+    return cli_sandbox.flock_compartido_adquirir(
+        str(ruta.parent), ruta.name, HYDE_LOCK_GROUP, timeout, "subprocess 'claude'",
         "otro proceso (REPL o las_manos) sigue teniendo un claude corriendo.",
+        uid_esperado=uid_esperado, gid_esperado=gid_esperado,
     )
 
 
