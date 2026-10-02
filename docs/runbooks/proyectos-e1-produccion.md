@@ -2,7 +2,7 @@
 ## Purpose
 Llevar a `jax_memory` de producción: HAMURABI como proyecto 1 con alcance, el proyecto archivado «Evaluación grounding SP3 · 2026-09-03» que recibe los `project_id` huérfanos, y las llaves foráneas `project_id -> projects(id)` de las cinco tablas de contenido.
 ## Scope
-`conversations`, `messages`, `facts`, `decisions`, `action_items` en `jax_memory` (MariaDB `127.0.0.1:3308`). Guiones: `scripts/proyectos_e1_migrar.py` y `scripts/proyectos_e1_fks.py`. No toca jax-platform salvo la verificación por efecto (paso 6).
+`conversations`, `messages`, `facts`, `decisions`, `action_items` en `jax_memory` (MariaDB `127.0.0.1:3308`). Guiones: `scripts/proyectos_e1_migrar.py` y `scripts/proyectos_e1_fks.py`. No toca jax-platform salvo la verificación por efecto (paso 8).
 ## Preconditions
 - Ventana abierta o GO de Fernando para producción (`bin/ventana estado` desde la sesión; si salió cerrada, parar).
 - Ensayo hecho sobre una copia (sección «Ensayo previo»). Lo hace la sesión principal con GO; sin sus números no se aplica nada.
@@ -14,22 +14,28 @@ Escribe en producción: crea alcance y proyectos, reescribe `project_id` y crea 
 1. Volcado de `jax_memory` con el procedimiento de respaldo de este runbook (paso 2) y restauración a `jax_memory_e1_ensayo` en el mismo MariaDB.
 2. En la copia: `python scripts/proyectos_e1_migrar.py --verificar --actor-user-id 1 --database jax_memory_e1_ensayo`, luego `--aplicar --actor-user-id 1 --salida-reversion <ruta nueva> --database jax_memory_e1_ensayo`.
 3. En la copia: `python scripts/proyectos_e1_fks.py --ensayar --database jax_memory_e1_ensayo`. Anotar por tabla `algoritmo`, `segundos` y, en `messages`, `hnsw_intacto`.
-4. Solo van a producción las tablas con `"algoritmo": "INPLACE"`, `"aplicada": true` y (messages) `"hnsw_intacto": true`. Las demás se registran en `DEUDA.md` con el motivo y la validación queda en la aplicación.
+4. Solo van a producción (en `--tablas`) las tablas con `"algoritmo": "INPLACE"`, `"aplicada": true` y (messages) `"hnsw_intacto": true`. Las demás se registran en `DEUDA.md` con el motivo y la validación queda en la aplicación.
 5. Borrar la copia al terminar (`DROP DATABASE jax_memory_e1_ensayo`, solo esa).
 ## Safe procedure
 ### 1. Ventana o GO
 `bin/ventana estado` abierta, o GO de Fernando. Repetir `bin/ventana estado` antes de cada paso que escribe.
 ### 2. Respaldo con restauración probada (antes de todo)
 Mismo procedimiento que `~/respaldos-despliegue/2026-10-02-suscripcion-fase1`: volcado de `jax_memory` comprimido, `ESTADO-ANTES.txt` con los SHAs desplegados y conteos, y **restauración probada** a una base de prueba comparando conteos (`messages`, `jax_users`, etc.) contra producción. Un volcado sin restauración probada no es respaldo (Principio VI). No se sigue sin el conteo igual.
-### 3. Desplegar jax con T1-T3 y comprobar el índice de la migración 005e
-La migración 005 de B9 **no** corre al arrancar el servicio ni al importar: se aplica con `apply_project_authority_migration` (`jax/memory/project_authority_migrations.py`, sin copia `.sql`; ver `jax/memory/b9_migrations/README.md`). Antes de desplegar la plataforma, en producción:
+### 3. Desplegar jax (T1-T3)
+Orden obligado: **jax primero**, luego jax-platform. Con GO, con el procedimiento de `docs/runbooks/despliegue.md` de jax-platform (sección jax).
+### 4. Desplegar jax-platform, UNA sola vez
+La migración 005 (`apply_project_authority_migration`) no la corre jax: la corre **jax-platform al arrancar**. `backend/main.py:159` llama a `run_migrations()` y esta llama a `_apply_jax_project_authority_migration` (`backend/db/migrations.py`, `origin/master`), que carga `jax/memory/project_authority_migrations.py` desde `JAX_REPO_PATH`. O sea que lee el código de jax ya desplegado; no hay otro comando que la aplique. (Verificado leyendo `origin/master` de jax-platform; la bajada es `scripts/b9_revertir_005.py` de jax.)
+
+El despliegue de jax-platform **se coordina con la otra sesión que lo tiene pendiente**: los PR #170-#174 de jax-platform no están desplegados y se despliega **una sola vez**, con todo junto, no uno por sesión. Los comandos son los de `docs/runbooks/despliegue.md` de jax-platform (con GO). No se avanza al paso 5 sin el despliegue hecho.
+### 5. Verificar el índice de la migración 005e
+En producción, ya arrancada jax-platform:
 
 ```sql
 SHOW INDEX FROM jax_project_membership WHERE Key_name = 'idx_jax_project_membership_user_list';
 ```
 
-Tiene que devolver filas. Si no devuelve nada, la migración de proyectos no está aplicada: **se aplica primero** (con GO, con el respaldo del paso 2 ya hecho) y se repite el `SHOW INDEX`. Su bajada es `scripts/b9_revertir_005.py` (simulacro por omisión). Después se despliega jax con T1-T3.
-### 4. Medir y migrar los datos
+Tiene que devolver filas. Si no, la migración no corrió: mirar el log de arranque de jax-platform (falla de `run_migrations`) y parar; no se aplica a mano.
+### 6. Medir y migrar los datos
 ```bash
 python scripts/proyectos_e1_migrar.py --verificar --actor-user-id 1
 ```
@@ -45,30 +51,32 @@ python scripts/proyectos_e1_migrar.py --aplicar --actor-user-id 1 \
   - `1` quedan huérfanos tras el commit (aparecieron después de medir), conteos que no coinciden (hizo rollback) o la ruta ya existía: **volver a correr con una ruta NUEVA**. El mapa anterior, si se escribió, se conserva.
   - `2` argumentos o guarda: falta la base, `--salida-reversion`, o `--confirmo-produccion` sobre `jax_memory`. No se tocó nada.
   - `3` el commit quedó incierto: pudo aplicarse. El mapa quedó en `<ruta>.incierto`. Correr `--verificar`: si no hay huérfanos, se aplicó (el mapa sirve para revertir); si siguen, no se aplicó y se vuelve a correr con ruta nueva. Decidir con esa medición, sin adivinar.
-### 5. FKs
+### 7. FKs (ensayo y después `--aplicar --tablas`)
+La lista de `--tablas` se arma **solo** con las tablas que en el ensayo dieron `"aplicada": true` y, si es `messages`, también `"hnsw_intacto": true`:
 ```bash
-python scripts/proyectos_e1_fks.py --aplicar --confirmo-produccion
+python scripts/proyectos_e1_fks.py --aplicar --confirmo-produccion --tablas <t1,t2,...>
 ```
-Una línea JSON por tabla: `tabla`, `filas`, `algoritmo`, `segundos`, `hnsw_intacto`, `aplicada` (y `ya_existia`, `error` o `motivo` si corresponde). Repetirlo es seguro: una FK existente no se toca.
-- El guion corre cada `ALTER` con `foreign_key_checks=0` **solo en esa sesión** (MariaDB no admite `INPLACE` de otro modo), y cuenta huérfanos antes y después de cada uno. Si aparece uno durante el ALTER, la tabla sale `aplicada: false` con el error: corregir los huérfanos o `DROP FOREIGN KEY` (paso 7).
+Sobre `jax_memory`, `--aplicar` sin `--tablas` sale con 2; un nombre fuera de las cinco, también. Una línea JSON por tabla: `tabla`, `filas`, `algoritmo`, `segundos`, `hnsw_intacto`, `aplicada` (y `ya_existia`, `error` o `motivo` si corresponde). **Repetirlo revalida, no da por bueno lo anterior:** con la FK ya creada no se vuelve a crear, pero se recuentan los huérfanos (si hay, la tabla sale con error y el código no es 0) y en `messages` se vuelve a correr el detector HNSW.
+- El `ALTER` usa `LOCK=SHARED` y espera el lock de metadatos 5 s (`lock_wait_timeout`): si hay una transacción abierta sobre la tabla sale `aplicada: false`, `motivo: lock_timeout`, y sigue con la siguiente. Reintentar cuando esa transacción termine; un ALTER encolado sin límite bloquearía el chat.
+- El guion corre cada `ALTER` con `foreign_key_checks=0` **solo en esa sesión** (MariaDB no admite `INPLACE` de otro modo), y cuenta huérfanos antes y después de cada uno. Si aparece uno durante el ALTER, la tabla sale `aplicada: false` con el error: corregir los huérfanos o `DROP FOREIGN KEY` (paso 9).
 - Una tabla con huérfanos aborta sola; las demás siguen.
 - `"algoritmo": "COPY"` = MariaDB rechazó INPLACE: no se aplicó; va a `DEUDA.md`.
 - En `messages`, `hnsw_intacto: false` = el índice vectorial miente. Seguir `docs/runbooks/indice-vectorial-envenenado.md` (`scripts/revisar_indice_vectorial.py`, que solo mira salvo `--reparar-de-verdad`).
 - Salida `1`: alguna tabla sin aplicar o con hnsw roto; `2`: argumentos o guarda.
-### 6. Verificación por efecto
+### 8. Verificación por efecto
 `/chat` con `project_id=1`: como Fernando da **200**; como otro usuario (sin membresía) da **403**. Un 200 para el otro usuario es un fallo cerrado roto: parar y escalar.
 ## Verification
-Pasos 4 a 6 con sus salidas anotadas. Además:
+Pasos 6 a 8 con sus salidas anotadas. Además:
 ```sql
 SELECT TABLE_NAME, CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
 WHERE TABLE_SCHEMA = 'jax_memory' AND COLUMN_NAME = 'project_id' AND REFERENCED_TABLE_NAME = 'projects';
 ```
 ## Fail-closed condition
-Respaldo sin restauración probada, ventana cerrada, `SHOW INDEX` vacío sin migración aplicada, ensayo sin números, un código de salida no previsto, o un 200 donde se espera 403: parar y reportar.
+Respaldo sin restauración probada, ventana cerrada, `SHOW INDEX` vacío tras el despliegue de jax-platform, ensayo sin números, un código de salida no previsto, o un 200 donde se espera 403: parar y reportar.
 ## Recovery / escalation
-### 7. Revertir cada paso
+### 9. Revertir cada paso
 - **FKs:** una por tabla, solo si hace falta: `ALTER TABLE <tabla> DROP FOREIGN KEY fk_<tabla>_project;`
-- **Huérfanos:** con el mapa del paso 4 (o `<ruta>.incierto`), un `UPDATE` por fila según `tabla`, `id` y `project_id_anterior`:
+- **Huérfanos:** con el mapa del paso 6 (o `<ruta>.incierto`), un `UPDATE` por fila según `tabla`, `id` y `project_id_anterior`:
   ```sql
   UPDATE `<tabla>` SET project_id = <project_id_anterior> WHERE id = <id>;
   ```

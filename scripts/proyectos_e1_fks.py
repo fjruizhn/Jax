@@ -4,25 +4,30 @@
 Por cada tabla de contenido (conversations, messages, facts, decisions,
 action_items) intenta
     ALTER TABLE <t> ADD CONSTRAINT fk_<t>_project FOREIGN KEY (project_id)
-        REFERENCES projects(id), ALGORITHM=INPLACE, LOCK=NONE
+        REFERENCES projects(id), ALGORITHM=INPLACE, LOCK=SHARED
 y escribe una linea JSON por tabla:
     {"tabla", "filas", "algoritmo", "segundos", "hnsw_intacto", "aplicada"}
 (mas "ya_existia" / "error" / "motivo" cuando corresponde).
 
 Uso:  python scripts/proyectos_e1_fks.py {--ensayar|--aplicar} [--database NOMBRE]
-          [--confirmo-produccion]
+          [--tablas t1,t2] [--confirmo-produccion]
 
 --ensayar  solo sobre una COPIA de jax_memory (se niega sobre jax_memory).
 --aplicar  sobre jax_memory exige --confirmo-produccion (codigo 2 si falta).
 
 Reglas por tabla:
-  - Si la FK ya existe (information_schema, por columna, no por nombre): no hace
-    nada, `ya_existia: true`. Repetir es seguro.
+  - Si la FK ya existe (information_schema, por columna, no por nombre): no
+    crea nada, `ya_existia: true`, pero REVALIDA: cuenta huerfanos (si hay, error)
+    y en messages corre el detector. Repetir es seguro, no da por bueno lo previo.
+  - `--tablas` limita lo que se toca; con --aplicar sobre jax_memory es obligatoria.
+  - El ALTER usa LOCK=SHARED y lock_wait_timeout=5: si el lock de metadatos esta
+    ocupado, la tabla sale `aplicada: false, motivo: lock_timeout` y sigue la
+    siguiente.
   - ANTES del ALTER cuenta huerfanos; si hay, aborta ESA tabla con un error
     claro y sigue con las demas.
   - El ALTER corre con foreign_key_checks=0 en la sesion (unico modo en que
     MariaDB acepta INPLACE); por eso los huerfanos se cuentan antes Y despues.
-  - Si MariaDB rechaza INPLACE/LOCK=NONE (error 1846) registra
+  - Si MariaDB rechaza INPLACE/LOCK=SHARED (error 1846) registra
     `"algoritmo": "COPY"` y NO aplica esa FK.
   - messages: tras el ALTER corre el detector de indices vectoriales
     (`jax.memory.indice_vectorial`, el mismo de
@@ -55,12 +60,16 @@ from jax.memory import indice_vectorial as iv  # noqa: E402
 
 TABLAS = ("conversations", "messages", "facts", "decisions", "action_items")
 BASE_PRODUCCION = "jax_memory"
-_ERRNO_NO_SOPORTADO = 1846          # "ALGORITHM=INPLACE / LOCK=NONE is not supported"
+_ERRNO_NO_SOPORTADO = 1846          # "ALGORITHM=INPLACE / LOCK=... is not supported"
+_ERRNO_LOCK_TIMEOUT = 1205          # "Lock wait timeout exceeded" (tambien el de metadatos)
+#: Segundos que el ALTER espera el lock de metadatos antes de rendirse: el ALTER
+#: encolado bloquea a todo el que llegue despues (incluido el chat).
+LOCK_WAIT_TIMEOUT = 5
 
 
 def _alter_sql(tabla: str) -> str:
     return (f"ALTER TABLE `{tabla}` ADD CONSTRAINT `fk_{tabla}_project` FOREIGN KEY (project_id) "
-            f"REFERENCES projects(id), ALGORITHM=INPLACE, LOCK=NONE")
+            f"REFERENCES projects(id), ALGORITHM=INPLACE, LOCK=SHARED")
 
 
 async def _alter(cur, tabla: str) -> None:
@@ -69,10 +78,12 @@ async def _alter(cur, tabla: str) -> None:
     apaga SOLO durante este ALTER y se restaura siempre. Sin validar, la
     garantia es el conteo de huerfanos de antes (en `_tabla`) y el de despues."""
     await cur.execute("SET SESSION foreign_key_checks=0")
+    await cur.execute(f"SET SESSION lock_wait_timeout={int(LOCK_WAIT_TIMEOUT)}")
     try:
         await cur.execute(_alter_sql(tabla))
     finally:
         await cur.execute("SET SESSION foreign_key_checks=1")
+        await cur.execute("SET SESSION lock_wait_timeout=DEFAULT")
 
 
 async def _fk_existe(cur, tabla: str) -> bool:
@@ -103,10 +114,18 @@ async def _tabla(cur, tabla: str) -> dict:
     await cur.execute(f"SELECT COUNT(*) FROM `{tabla}`")
     res: dict = {"tabla": tabla, "filas": int((await cur.fetchone())[0]), "algoritmo": None,
                  "segundos": 0.0, "hnsw_intacto": None, "aplicada": False}
-    if await _fk_existe(cur, tabla):
-        res.update(aplicada=True, ya_existia=True)
+    existia = await _fk_existe(cur, tabla)
+    huerfanos = await _huerfanos(cur, tabla)       # SIEMPRE: una FK creada sin validar no prueba nada
+    if existia:
+        res["ya_existia"] = True
+        if huerfanos:
+            res["error"] = (f"hay huerfanos en {tabla} bajo una FK que ya existia (primeros: {huerfanos}); "
+                            f"se creo sin validar o entraron con foreign_key_checks=0. Corregirlos.")
+            return res
+        res["aplicada"] = True
+        if tabla == "messages":
+            res["hnsw_intacto"] = await _hnsw(cur, tabla)
         return res
-    huerfanos = await _huerfanos(cur, tabla)
     if huerfanos:
         res["error"] = (f"quedan huerfanos en {tabla} (project_id sin fila en projects, primeros: "
                         f"{huerfanos}); correr proyectos_e1_migrar.py --aplicar antes. No se aplico la FK.")
@@ -116,7 +135,10 @@ async def _tabla(cur, tabla: str) -> dict:
         await _alter(cur, tabla)
     except (aiomysql.Error, ) as e:
         res["segundos"] = round(time.monotonic() - inicio, 3)
-        if e.args and e.args[0] == _ERRNO_NO_SOPORTADO:
+        if e.args and e.args[0] == _ERRNO_LOCK_TIMEOUT:
+            res.update(motivo="lock_timeout", error=f"lock de metadatos ocupado ({LOCK_WAIT_TIMEOUT} s): "
+                       f"hay una transaccion abierta sobre {tabla}; reintentar cuando termine")
+        elif e.args and e.args[0] == _ERRNO_NO_SOPORTADO:
             res.update(algoritmo="COPY", motivo=str(e.args[-1]))
         else:
             res["error"] = f"{type(e).__name__}: {e}"
@@ -135,11 +157,11 @@ async def _tabla(cur, tabla: str) -> dict:
     return res
 
 
-async def procesar(conn, emitir=None) -> list[dict]:
-    """Procesa las cinco tablas con una conexion abierta; `emitir(res)` se llama por tabla."""
+async def procesar(conn, emitir=None, tablas=TABLAS) -> list[dict]:
+    """Procesa `tablas` con una conexion abierta; `emitir(res)` se llama por tabla."""
     out = []
     async with conn.cursor() as cur:
-        for t in TABLAS:
+        for t in tablas:
             res = await _tabla(cur, t)
             out.append(res)
             if emitir:
@@ -157,18 +179,21 @@ def _parser() -> argparse.ArgumentParser:
     g.add_argument("--ensayar", action="store_true", help="sobre una copia de jax_memory")
     g.add_argument("--aplicar", action="store_true", help="aplica las FKs")
     p.add_argument("--database", default=None, help="pisa a JAX_DB_NAME")
+    p.add_argument("--tablas", default=None,
+                   help="lista separada por comas (subconjunto de las cinco); obligatoria con --aplicar "
+                        f"sobre {BASE_PRODUCCION}: solo las que el ensayo dio por buenas")
     p.add_argument("--confirmo-produccion", action="store_true",
                    help=f"obligatorio con --aplicar si la base es {BASE_PRODUCCION}")
     return p
 
 
-async def _correr(database: str) -> list[dict]:
+async def _correr(database: str, tablas) -> list[dict]:
     conn = await aiomysql.connect(
         host=os.environ.get("JAX_DB_HOST", ""), port=int(os.environ.get("JAX_DB_PORT", "3306")),
         user=os.environ.get("JAX_DB_USER", ""), password=os.environ.get("JAX_DB_PASSWORD", ""),
         db=database, autocommit=True, connect_timeout=db_connect_timeout_seconds())
     try:
-        return await procesar(conn, lambda r: print(json.dumps(r, ensure_ascii=False), flush=True))
+        return await procesar(conn, lambda r: print(json.dumps(r, ensure_ascii=False), flush=True), tablas)
     finally:
         conn.close()
 
@@ -179,13 +204,24 @@ def main(argv: list[str] | None = None) -> int:
     if not database:
         print("falta la base: use --database o JAX_DB_NAME", file=sys.stderr)
         return 2
+    tablas = TABLAS
+    if args.tablas is not None:
+        tablas = tuple(t.strip() for t in args.tablas.split(","))
+        malas = [t for t in tablas if t not in TABLAS]
+        if malas:
+            print(f"--tablas: nombre(s) no valido(s) {malas}; validos: {', '.join(TABLAS)}", file=sys.stderr)
+            return 2
     if args.ensayar and database == BASE_PRODUCCION:
         print(f"--ensayar es sobre una copia: se niega sobre {BASE_PRODUCCION}", file=sys.stderr)
         return 2
     if args.aplicar and database == BASE_PRODUCCION and not args.confirmo_produccion:
         print(f"--aplicar sobre {BASE_PRODUCCION} (produccion) exige --confirmo-produccion", file=sys.stderr)
         return 2
-    resultados = asyncio.run(_correr(database))
+    if args.aplicar and database == BASE_PRODUCCION and args.tablas is None:
+        print(f"--aplicar sobre {BASE_PRODUCCION} exige --tablas <las que el ensayo dio por buenas>",
+              file=sys.stderr)
+        return 2
+    resultados = asyncio.run(_correr(database, tablas))
     return 0 if all(_ok(r) for r in resultados) else 1
 
 

@@ -256,3 +256,87 @@ def test_huerfano_que_entra_durante_el_alter_se_reporta_como_error(base, monkeyp
     r = _por_tabla(asyncio.run(_correr(db)))
     assert r["facts"]["aplicada"] is False and "777" in r["facts"]["error"] and "DROP FOREIGN KEY" in r["facts"]["error"]
     assert r["decisions"]["aplicada"] is True
+
+
+# ---------------------------------------------------------------- ronda 1
+
+@requiere_servidor
+def test_segunda_corrida_revalida_huerfanos_bajo_una_fk_existente(base, capsys):
+    """C1: una FK ya creada no da por bueno lo que hay debajo."""
+    db = base()
+    asyncio.run(_sql(db, "INSERT INTO projects (id,name) VALUES (1,'h')"))
+    assert fks.main(["--aplicar", "--database", db]) == 0
+    capsys.readouterr()
+
+    async def colar():
+        conn = await aiomysql.connect(db=db, autocommit=True, **_conn_params())
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute("SET SESSION foreign_key_checks=0")
+                await cur.execute("INSERT INTO facts (project_id) VALUES (777)")
+        finally:
+            conn.close()
+    asyncio.run(colar())
+    assert fks.main(["--aplicar", "--database", db]) != 0
+    lineas = {json.loads(x)["tabla"]: json.loads(x) for x in capsys.readouterr().out.strip().splitlines()}
+    assert lineas["facts"]["aplicada"] is False and lineas["facts"]["ya_existia"] is True
+    assert "777" in lineas["facts"]["error"]
+    assert lineas["decisions"]["aplicada"] is True
+
+
+@requiere_servidor
+def test_segunda_corrida_revalida_hnsw_aunque_la_fk_exista(base, monkeypatch):
+    db = base(vector=True)
+    asyncio.run(_sql(db, "INSERT INTO projects (id,name) VALUES (1,'h')"))
+    asyncio.run(_sql(db, "INSERT INTO messages (project_id, emb) VALUES (1, VEC_FromText('[1,0.5,0.25]'))"))
+    assert _por_tabla(asyncio.run(_correr(db)))["messages"]["hnsw_intacto"] is True
+
+    async def roto(cur, tabla, indice, columna, muestra=iv.MUESTRA):
+        return iv.Informe(tabla, indice, columna, 10, 10, por_el_indice=1, por_scan=10)
+    monkeypatch.setattr(fks.iv, "revisar_uno", roto)
+    r = _por_tabla(asyncio.run(_correr(db)))["messages"]
+    assert r["ya_existia"] is True and r["hnsw_intacto"] is False
+    assert fks.main(["--aplicar", "--database", db]) == 1
+
+
+@requiere_servidor
+def test_tablas_limita_lo_que_se_toca(base, capsys):
+    db = base()
+    asyncio.run(_sql(db, "INSERT INTO projects (id,name) VALUES (1,'h')"))
+    assert fks.main(["--aplicar", "--database", db, "--tablas", "facts"]) == 0
+    assert [json.loads(x)["tabla"] for x in capsys.readouterr().out.strip().splitlines()] == ["facts"]
+    assert asyncio.run(_fks_existentes(db)) == {"facts"}
+
+
+def test_tablas_invalida_da_2_y_produccion_exige_tablas(capsys, monkeypatch):
+    monkeypatch.delenv("JAX_DB_NAME", raising=False)
+    assert fks.main(["--aplicar", "--database", "jax_memory_test", "--tablas", "facts,usuarios"]) == 2
+    assert "usuarios" in capsys.readouterr().err
+    assert fks.main(["--aplicar", "--database", "jax_memory_test", "--tablas", ""]) == 2
+    assert fks.main(["--aplicar", "--database", "jax_memory", "--confirmo-produccion"]) == 2
+    assert "--tablas" in capsys.readouterr().err
+
+
+@requiere_servidor
+def test_lock_de_metadatos_ajeno_da_lock_timeout_y_sigue(base, monkeypatch):
+    """I1: el ALTER no cuelga sin limite; reporta y sigue con la siguiente."""
+    import time
+    db = base()
+    asyncio.run(_sql(db, "INSERT INTO projects (id,name) VALUES (1,'h')"))
+    monkeypatch.setattr(fks, "LOCK_WAIT_TIMEOUT", 1)
+
+    async def con_transaccion_abierta():
+        conn = await aiomysql.connect(db=db, autocommit=False, **_conn_params())
+        cur = await conn.cursor()
+        await cur.execute("SELECT * FROM facts")           # MDL compartido hasta cerrar la transaccion
+        t0 = time.monotonic()
+        r = await _correr(db)
+        dt = time.monotonic() - t0
+        conn.close()
+        return r, dt
+    r, dt = asyncio.run(con_transaccion_abierta())
+    r = _por_tabla(r)
+    assert r["facts"]["aplicada"] is False and r["facts"]["motivo"] == "lock_timeout"
+    assert dt < 6
+    assert r["decisions"]["aplicada"] is True
+    assert "facts" not in asyncio.run(_fks_existentes(db))
