@@ -472,7 +472,7 @@ def test_el_socket_es_del_run_id_se_borra_al_cerrar_y_su_directorio_es_0700(cfg_
             assert srv.ruta_socket == cfg_puerto.socket_dir / "abc-123.sock"
             assert stat.S_IMODE(os.lstat(cfg_puerto.socket_dir).st_mode) == 0o700
             st = os.lstat(srv.ruta_socket)
-            assert stat.S_ISSOCK(st.st_mode) and stat.S_IMODE(st.st_mode) == 0o666  # dentro de un directorio 0700: solo llega quien lo recibe por bind
+            assert stat.S_ISSOCK(st.st_mode) and stat.S_IMODE(st.st_mode) == 0o600  # 0600 de faro; a la jaula la deja pasar una ACL con nombre (test_faro_acl.py)
         assert not srv.ruta_socket.exists()
     corre(caso())
 
@@ -613,3 +613,9 @@ def test_el_arranque_configura_el_logging_antes_del_primer_servidor_mcp(cfg_puer
     assert not any(type(h).__name__ == "RichHandler" for h in raiz.handlers), "lo configuro el SDK, no el servicio"
     from jax.faro.logs import FORMATO
     assert [h.formatter._fmt for h in raiz.handlers] == [FORMATO], "el formato es el del servicio, no el `%(message)s` del SDK"
+
+
+@pytest.mark.parametrize("tenant", ["con espacio", "a|b", "x" * 65, "t\nx", "ñ"])
+def test_una_ejecucion_no_puede_tener_un_tenant_que_los_topes_no_aceptarian(tenant):
+    with pytest.raises(ConfigFaroInvalida, match="tenant"):
+        _ejecucion(tenant=tenant)

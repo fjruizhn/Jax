@@ -4,9 +4,12 @@ from __future__ import annotations
 import importlib.util
 import fcntl
 import json
+import os
+import pwd
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import socketserver
 from pathlib import Path
@@ -226,6 +229,128 @@ def test_external_git_filter_is_rejected_without_checkout(root, tmp_path):
     with pytest.raises(dispatcher.DispatchError):
         consumer(root, producer, tmp_path)
     assert not Path("/tmp/should-not-run").exists()
+
+
+@pytest.mark.parametrize("setting", ["filter.reviewexec.smudge", "core.fsmonitor", "diff.external"])
+def test_all_external_git_execution_drivers_are_rejected_before_status(root, tmp_path, setting):
+    git(root, "config", "--local", setting, "/bin/true")
+    producer, _ = setup_handoff(root, tmp_path)
+    with pytest.raises(dispatcher.DispatchError, match="external Git execution driver"):
+        consumer(root, producer, tmp_path)
+    assert not (tmp_path.parent / f"{tmp_path.name}-builder-worktrees").exists()
+
+
+@pytest.mark.parametrize("configuration", ["include", "worktree"])
+def test_external_git_drivers_in_effective_repository_config_are_rejected(root, tmp_path, configuration):
+    if configuration == "include":
+        included = root / ".git" / "included-driver.conf"
+        included.write_text("[core]\n\tfsmonitor = /bin/true\n")
+        git(root, "config", "--local", "include.path", str(included))
+    else:
+        git(root, "config", "--local", "extensions.worktreeConfig", "true")
+        git(root, "config", "--worktree", "diff.external", "/bin/true")
+    producer, _ = setup_handoff(root, tmp_path)
+    with pytest.raises(dispatcher.DispatchError, match="external Git execution driver"):
+        consumer(root, producer, tmp_path)
+
+
+@pytest.mark.parametrize("root_factory", [
+    lambda base, repo: Path("relative-root"),
+    lambda base, repo: base / "missing",
+    lambda base, repo: base / "alias",
+    lambda base, repo: base / "nested" / ".." / repo.name,
+    lambda base, repo: Path(str(repo) + "/*"),
+    lambda base, repo: Path("/%(prefix)/dispatcher"),
+])
+def test_untrusted_or_noncanonical_git_roots_fail_before_subprocess(root_factory, tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(repo, target_is_directory=True)
+    nested = tmp_path / "nested"
+    nested.symlink_to(tmp_path, target_is_directory=True)
+    invalid = root_factory(tmp_path, repo)
+    monkeypatch.setattr(dispatcher.subprocess, "run", lambda *a, **kw: pytest.fail("Git must not run for an invalid trusted root"))
+    with pytest.raises(dispatcher.DispatchError, match="trusted Git root"):
+        dispatcher._git(invalid, "status", "--porcelain")
+
+
+def test_git_command_scopes_safe_directory_to_the_exact_resolved_root(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    command = dispatcher._git_command(repo, "status", "--porcelain")
+    assert command[:5] == [dispatcher._GIT, "-c", f"safe.directory={repo}", "-C", str(repo)]
+    assert "*" not in command[2]
+    assert dispatcher._git_env() == {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/nonexistent",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_OPTIONAL_LOCKS": "0",
+    }
+
+
+def test_safe_directory_allows_one_foreign_owned_checkout_but_not_its_sibling(tmp_path):
+    if os.name != "posix" or not shutil.which("sudo"):
+        pytest.skip("cross-UID Git regression requires POSIX and sudo")
+    try:
+        pwd.getpwnam("nobody")
+    except KeyError:
+        pytest.skip("cross-UID Git regression requires the nobody account")
+    can_sudo = subprocess.run(["sudo", "-n", "-u", "nobody", "--", "/usr/bin/true"], capture_output=True)
+    if can_sudo.returncode:
+        pytest.skip("cross-UID Git regression requires noninteractive sudo")
+
+    base = Path(tempfile.mkdtemp(prefix="jax-dispatch-git-trust-", dir="/tmp"))
+    os.chmod(base, 0o755)
+    try:
+        trusted, sibling = base / "trusted", base / "sibling"
+        for repo in (trusted, sibling):
+            subprocess.run(["/usr/bin/git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["/usr/bin/git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["/usr/bin/git", "-C", str(repo), "config", "user.name", "Dispatcher test"], check=True)
+            (repo / "fixture.txt").write_text("read only fixture\n")
+            subprocess.run(["/usr/bin/git", "-C", str(repo), "add", "fixture.txt"], check=True)
+            subprocess.run(["/usr/bin/git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+
+        env = dispatcher._git_env()
+        trusted_command = dispatcher._git_command(trusted, "status", "--porcelain")
+        as_nobody = ["sudo", "-n", "-u", "nobody", "--", "/usr/bin/env", "-i"]
+        as_nobody.extend(f"{name}={value}" for name, value in env.items())
+        accepted = subprocess.run([*as_nobody, *trusted_command], capture_output=True, text=True)
+        assert accepted.returncode == 0, accepted.stderr
+
+        sibling_command = [*trusted_command]
+        sibling_command[sibling_command.index("-C") + 1] = str(sibling)
+        rejected = subprocess.run([*as_nobody, *sibling_command], capture_output=True, text=True)
+        assert rejected.returncode != 0
+        assert "dubious ownership" in rejected.stderr
+    finally:
+        shutil.rmtree(base)
+
+
+def test_every_dispatch_git_call_uses_the_central_exact_trust_argument(root, tmp_path, monkeypatch):
+    producer, key = setup_handoff(root, tmp_path)
+    calls = []
+    original_run = dispatcher.subprocess.run
+
+    def record(command, *args, **kwargs):
+        if command and command[0] == dispatcher._GIT:
+            calls.append((command, kwargs.get("env")))
+        return original_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(dispatcher.subprocess, "run", record)
+    result = consumer(root, producer, tmp_path).consume(key)
+    assert result.decision == "DISPATCHED"
+    assert calls
+    assert any("worktree" in command and "add" in command for command, _ in calls)
+    for command, env in calls:
+        index = command.index("-C")
+        trusted_root = command[index + 1]
+        assert command[1:3] == ["-c", f"safe.directory={trusted_root}"]
+        assert Path(trusted_root).is_absolute()
+        assert "*" not in trusted_root
+        assert env == dispatcher._git_env()
 
 
 def test_recovery_after_worktree_created_before_dispatched_ack_is_idempotent(root, tmp_path):

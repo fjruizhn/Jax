@@ -14,9 +14,10 @@ servicio (`Servicio.presupuesto`, compartido por todas las ejecuciones).
 
 ANCLA DE LA CADENA: cuando haya destino (lo fija 0.10), `arrancar` debe lanzar
 `publicar_anclas_periodicamente(emisor, publicar, intervalo_s)` y cancelarla en `cerrar`. Hasta entonces no
-se publica nada y la cola de la cadena puede truncarse sin que se note (ver el plan, 0.3a). QUIEN pide crear una `Ejecucion` (canal de
-control autenticado) y el lanzador de jaula con uid distinto de `faro` son el paso 0.3c del plan: este modulo
-no abre ningun canal por el que un motor pueda crear o alterar una ejecucion.
+se publica nada y la cola de la cadena puede truncarse sin que se note (ver el plan, 0.3a). QUIEN pide crear una `Ejecucion` es el canal de control autenticado (`control.py`, 0.3c): `Servicio.control()`
+es la unica puerta, y solo el uid del orquestador configurado pasa. El aviso inmediato de cada denegacion
+(`aviso.py`, 0.3b) cuelga de la bitacora como observador. El `main` de este modulo solo VERIFICA el arranque
+(no sirve): el bucle del servicio y su unidad de systemd son el paso 0.10.
 """
 from __future__ import annotations
 
@@ -27,9 +28,11 @@ import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
+from .aviso import Avisador, ConfigAviso, leer_credenciales
 from .bitacora import Bitacora, emisor_logger
 from .bitacora_db import ConfigBitacoraDB, EmisorTabla, crear_pool
 from .config import ConfigFaro, ConfigFaroInvalida, ConfigPuerto
+from .control import ConfigControl, ServidorControl, validar_directorio_control
 from .identidad import Ejecucion
 from .logs import asegurar_logging
 from .paquete import PaqueteCargado, cargar_paquete
@@ -49,12 +52,22 @@ class Servicio:
     bitacora: Bitacora
     presupuesto: PresupuestoBytes
     solo_pruebas_mismo_uid: bool = False
+    cfg_aviso: ConfigAviso | None = None
+    cfg_control: ConfigControl | None = None
+    avisador: Avisador | None = None
+
+    def control(self, jaula_viva=None) -> ServidorControl:
+        """El canal de control autenticado (0.3c): el unico lugar donde nace una `Ejecucion`. Se usa con
+        `async with servicio.control() as c:`; sus ejecuciones comparten el UNICO presupuesto del servicio."""
+        return ServidorControl(self.cfg_control, self.crear_puerto, self.bitacora, jaula_viva=jaula_viva)
 
     def crear_puerto(self, ejecucion: Ejecucion) -> ServidorPuerto:
         return ServidorPuerto(self.cfg_puerto, ejecucion, self.paquete, self.bitacora, presupuesto=self.presupuesto,
                               solo_pruebas_mismo_uid=self.solo_pruebas_mismo_uid)
 
     async def cerrar(self) -> None:
+        if self.avisador is not None:
+            await self.avisador.cerrar()        # entrega lo pendiente (con plazo) y nunca lanza
         self.pool.close()
         await self.pool.wait_closed()
 
@@ -66,20 +79,28 @@ async def arrancar(env: Mapping[str, str], *, crear_pool: Callable = crear_pool,
     cfg_db = ConfigBitacoraDB.desde_entorno(env)             # lo primero: sin bitacora durable no hay servicio
     cfg_faro = ConfigFaro.desde_entorno(env, solo_pruebas_duenio_igual_servicio=solo_pruebas_mismo_uid)
     cfg_puerto = ConfigPuerto.desde_entorno(env)
+    cfg_aviso = ConfigAviso.desde_entorno(env)              # 0.3b: sin aviso de las denegaciones no hay servicio
+    cfg_control = ConfigControl.desde_entorno(env, solo_pruebas_mismo_uid=solo_pruebas_mismo_uid)    # 0.3c
     if os.geteuid() == 0:
         raise ConfigFaroInvalida("el servicio del Faro no corre como root: usa el usuario sin privilegios `faro`")
+    validar_directorio_control(cfg_control)                 # un 0777 no deja arrancar (antes de tocar la base)
+    credenciales = leer_credenciales(cfg_aviso.creds)       # falla cerrado: ausentes, incompletas o con escritura ajena
     paquete = await asyncio.to_thread(cargar_paquete, cfg_faro)
     pool = await crear_pool(cfg_db)
+    avisador = Avisador(cfg_aviso, credenciales)
     try:
         emisor = EmisorTabla(pool)
-        bitacora = Bitacora(emisores=[emisor, emisor_logger])
+        # El avisador es OBSERVADOR: ve cada registro antes que los emisores y aunque la tabla este caida.
+        bitacora = Bitacora(emisores=[emisor, emisor_logger], observadores=[avisador])
         await bitacora.registrar("servicio_iniciado", sha_paquete=paquete.sha, pid=os.getpid())   # la sonda
+        await avisador.iniciar()
     except BaseException:
+        await avisador.cerrar()
         pool.close()
         await pool.wait_closed()
         raise
     return Servicio(cfg_faro, cfg_puerto, cfg_db, paquete, pool, emisor, bitacora, PresupuestoBytes(cfg_puerto.presupuesto_bytes),
-                    solo_pruebas_mismo_uid)
+                    solo_pruebas_mismo_uid, cfg_aviso, cfg_control, avisador)
 
 
 def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) -> int:

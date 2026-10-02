@@ -87,11 +87,22 @@ def servidor(*a, **kw) -> ServidorPuerto:
     return ServidorPuerto(*a, solo_pruebas_mismo_uid=True, **kw)
 
 
+def paquete_listo(tmp_path: Path):
+    """(cfg, cargado): un paquete de juguete construido y cargado, para las pruebas que solo necesitan uno."""
+    from jax.faro.config import ConfigFaro
+    from jax.faro.paquete import cargar_paquete, construir_paquete
+    repo = repo_de_juguete(tmp_path)
+    cfg = ConfigFaro(repo=repo, sha=_git(repo, "rev-parse", "HEAD"), destino=tmp_path / "ecosistema", uid_duenio=os.getuid())
+    construir_paquete(cfg)
+    return cfg, cargar_paquete(cfg)
+
+
 @asynccontextmanager
-async def puerto(cfg_puerto, cargado, ej=None, registros=None, **kw):
-    """Un Puerto REAL en un socket Unix temporal; `srv.registros` es la bitacora en memoria."""
+async def puerto(cfg_puerto, cargado, ej=None, registros=None, bitacora=None, **kw):
+    """Un Puerto REAL en un socket Unix temporal; `srv.registros` es la bitacora en memoria.
+    `bitacora` permite pasar una propia (p. ej. con observadores); `registros` queda vacio entonces."""
     registros = registros if registros is not None else []
-    bit = Bitacora(emisores=[registros.append])
+    bit = bitacora if bitacora is not None else Bitacora(emisores=[registros.append])
     async with servidor(cfg_puerto, ej or ejecucion(), cargado, bit, **kw) as srv:
         srv.registros = registros
         yield srv

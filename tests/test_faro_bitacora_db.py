@@ -74,8 +74,17 @@ def servidor_db():
 
 
 class BaseDePrueba:
-    def __init__(self, srv, base, usuario, clave_usuario):
+    def __init__(self, srv, base, usuario, clave_usuario, usuario_topes="", clave_topes=""):
         self.srv, self.base, self.usuario, self.clave_usuario = srv, base, usuario, clave_usuario
+        self.usuario_topes, self.clave_topes = usuario_topes, clave_topes     # el usuario de los topes (0.3b), distinto del de la bitacora
+
+    def config_topes(self) -> ConfigBitacoraDB:
+        return ConfigBitacoraDB(host=self.srv["host"], port=self.srv["puerto"], usuario=self.usuario_topes,
+                                clave=self.clave_topes, base=self.base)
+
+    def app_topes(self):
+        return pymysql.connect(host=self.srv["host"], port=self.srv["puerto"], user=self.usuario_topes,
+                               password=self.clave_topes, database=self.base, autocommit=True)
 
     def admin(self):
         return pymysql.connect(host=self.srv["host"], port=self.srv["puerto"], user=self.srv["usuario"],
@@ -104,26 +113,31 @@ def basedb(servidor_db):
     base = f"faro_t_{uuid.uuid4().hex[:12]}"
     usuario = f"u_{uuid.uuid4().hex[:10]}"
     clave = secrets.token_hex(8)
+    usuario_t = f"t_{uuid.uuid4().hex[:10]}"
+    clave_t = secrets.token_hex(8)
     adm = pymysql.connect(host=servidor_db["host"], port=servidor_db["puerto"], user=servidor_db["usuario"],
                           password=servidor_db["clave"], autocommit=True)
     try:
         with adm.cursor() as cur:
             cur.execute(f"CREATE DATABASE `{base}`")
             cur.execute(f"CREATE USER `{usuario}`@`%%` IDENTIFIED BY %s", (clave,))
+            cur.execute(f"CREATE USER `{usuario_t}`@`%%` IDENTIFIED BY %s", (clave_t,))
 
         async def migrar():
             con = await aiomysql.connect(host=servidor_db["host"], port=servidor_db["puerto"], user=servidor_db["usuario"],
                                          password=servidor_db["clave"], connect_timeout=10)
             try:
-                return await aplicar(con, MIGRACIONES, {"base": base, "usuario": usuario, "host_usuario": "%"})
+                return await aplicar(con, MIGRACIONES, {"base": base, "usuario": usuario, "usuario_topes": usuario_t,
+                                        "host_usuario": "%"})
             finally:
                 con.close()
         asyncio.run(migrar())
-        yield BaseDePrueba(servidor_db, base, usuario, clave)
+        yield BaseDePrueba(servidor_db, base, usuario, clave, usuario_t, clave_t)
     finally:
         with adm.cursor() as cur:
             cur.execute(f"DROP DATABASE IF EXISTS `{base}`")
             cur.execute(f"DROP USER IF EXISTS `{usuario}`@`%`")
+            cur.execute(f"DROP USER IF EXISTS `{usuario_t}`@`%`")
         adm.close()
 
 
@@ -349,6 +363,17 @@ def test_truncar_la_cola_en_la_tabla_real_se_detecta_con_el_ancla_publicada(base
     assert any(p.codigo == "cola_truncada" for p in verificar_cadena(filas, anclas=anclas))
 
 
+def _env_aviso_y_control(tmp_path) -> dict:
+    """Las variables que `arrancar` exige desde 0.3b/0.3c (aviso de las denegaciones y canal de control)."""
+    creds = tmp_path / "telegram.env"
+    creds.write_text("export TELEGRAM_BOT_TOKEN=token-de-prueba\nexport TELEGRAM_CHAT_ID=1\n")
+    creds.chmod(0o600)
+    control = tmp_path / "control"
+    control.mkdir(mode=0o750)
+    return {"JAX_FARO_AVISO_CREDS": str(creds), "JAX_FARO_AVISO_API_URL": "http://127.0.0.1:9", "JAX_FARO_CONTROL_DIR": str(control),
+            "JAX_FARO_ORQUESTADOR_UID": str(os.getuid()), "JAX_FARO_JAULA_UID_MIN": "50000", "JAX_FARO_JAULA_UID_MAX": "50050"}
+
+
 def test_el_servicio_arranca_contra_la_base_real_y_escribe_su_sonda(basedb, tmp_path):
     from jax.faro.servicio import arrancar
     repo = repo_de_juguete(tmp_path)
@@ -360,7 +385,7 @@ def test_el_servicio_arranca_contra_la_base_real_y_escribe_su_sonda(basedb, tmp_
            "JAX_FARO_DUENIO_UID": str(os.getuid()), "JAX_FARO_SOCKET_DIR": str(d),
            "JAX_FARO_BITACORA_DB_HOST": basedb.srv["host"], "JAX_FARO_BITACORA_DB_PORT": str(basedb.srv["puerto"]),
            "JAX_FARO_BITACORA_DB_USER": basedb.usuario, "JAX_FARO_BITACORA_DB_PASSWORD": basedb.clave_usuario,
-           "JAX_FARO_BITACORA_DB_NAME": basedb.base}
+           "JAX_FARO_BITACORA_DB_NAME": basedb.base, **_env_aviso_y_control(tmp_path)}
 
     async def caso():
         s = await arrancar(env, solo_pruebas_mismo_uid=True)
@@ -391,6 +416,7 @@ def test_sin_la_tabla_el_servicio_no_arranca(basedb, tmp_path):
            "JAX_FARO_DUENIO_UID": str(os.getuid()), "JAX_FARO_SOCKET_DIR": str(d),
            "JAX_FARO_BITACORA_DB_HOST": basedb.srv["host"], "JAX_FARO_BITACORA_DB_PORT": str(basedb.srv["puerto"]),
            "JAX_FARO_BITACORA_DB_USER": basedb.usuario, "JAX_FARO_BITACORA_DB_PASSWORD": basedb.clave_usuario,
-           "JAX_FARO_BITACORA_DB_NAME": basedb.base}
-    with pytest.raises(Exception):
+           "JAX_FARO_BITACORA_DB_NAME": basedb.base, **_env_aviso_y_control(tmp_path)}
+    with pytest.raises(Exception) as exc:
         asyncio.run(arrancar(env, solo_pruebas_mismo_uid=True))
+    assert not isinstance(exc.value, ConfigFaroInvalida)       # falla por la tabla, no por una configuracion que falte
