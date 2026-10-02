@@ -205,7 +205,7 @@ def _escribir_archivos(raiz: Path, archivos: dict[str, tuple[int, bytes]]) -> No
                     try:
                         try:
                             os.mkdir(parte, 0o755, dir_fd=abiertos[previo])
-                        except FileExistsError:
+                        except FileExistsError:  # fail-soft: el directorio ya existe; justo despues se abre con O_NOFOLLOW|O_DIRECTORY, que rechaza un enlace
                             pass
                         fd = os.open(parte, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _O_BASE, dir_fd=abiertos[previo])
                     except OSError as exc:

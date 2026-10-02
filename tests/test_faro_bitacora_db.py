@@ -43,7 +43,7 @@ def _esperar(host, puerto, usuario, clave, intentos=90):
         try:
             pymysql.connect(host=host, port=puerto, user=usuario, password=clave).close()
             return
-        except Exception as exc:  # noqa: BLE001 - se reintenta
+        except Exception as exc:  # fail-soft: la base todavia arranca; se reintenta y, agotados los intentos, se levanta el ultimo error
             ultimo = exc
             time.sleep(1)
     raise RuntimeError(f"MariaDB de prueba no respondio: {ultimo}")
@@ -109,7 +109,7 @@ def basedb(servidor_db):
     try:
         with adm.cursor() as cur:
             cur.execute(f"CREATE DATABASE `{base}`")
-            cur.execute(f"CREATE USER `{usuario}`@`%` IDENTIFIED BY %s", (clave,))
+            cur.execute(f"CREATE USER `{usuario}`@`%%` IDENTIFIED BY %s", (clave,))
 
         async def migrar():
             con = await aiomysql.connect(host=servidor_db["host"], port=servidor_db["puerto"], user=servidor_db["usuario"],
