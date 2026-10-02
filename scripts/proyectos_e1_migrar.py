@@ -49,6 +49,10 @@ class HuerfanosRestantes(RuntimeError):
     """Tras el commit quedan huerfanos (aparecieron despues de medir)."""
 
 
+class CommitIncierto(RuntimeError):
+    """El commit fallo con resultado desconocido: el cambio pudo aplicarse."""
+
+
 class ConteosNoCoinciden(RuntimeError):
     """El UPDATE de una tabla no movio las filas contadas: se hizo ROLLBACK."""
 
@@ -111,9 +115,9 @@ async def _reescribir_en_transaccion(pool, ids: list[int], destino: int, salida_
     """Las cinco tablas en UNA conexion: begin ... commit. Antes de cada UPDATE
     lee (FOR UPDATE) las filas huerfanas para el archivo de reversion, que se
     escribe y sincroniza antes del commit. Si algun conteo no coincide o la
-    escritura falla: rollback (y el archivo creado se borra)."""
+    escritura falla: rollback (y el archivo creado se borra). Si falla el commit
+    mismo: CommitIncierto, el mapa se conserva como <ruta>.incierto."""
     marcas = ",".join(["%s"] * len(ids))
-    creado = False
     async with pool.acquire() as conn:
         await conn.begin()
         try:
@@ -137,17 +141,27 @@ async def _reescribir_en_transaccion(pool, ids: list[int], destino: int, salida_
                 if await _huerfanos(cur):
                     raise ConteosNoCoinciden("quedan project_id huerfanos tras la reescritura")
             _escribir_reversion(salida_reversion, destino, filas)
-            creado = True
-            await conn.commit()
-            return movido
         except BaseException:
+            # _escribir_reversion ya borra su propio archivo si falla a medias;
+            # aqui no se borra nada (podria ser uno ajeno que ya existia).
             await conn.rollback()
-            if creado:
-                try:
-                    os.unlink(salida_reversion)
-                except OSError:
-                    pass
             raise
+        try:
+            await conn.commit()
+        except BaseException as e:
+            # Resultado desconocido: el servidor pudo aplicarlo. Ni rollback a
+            # ciegas ni borrar el mapa; se cierra la conexion (si el commit no
+            # llego, el servidor revierte solo) y el mapa se conserva.
+            incierto = salida_reversion + ".incierto"
+            os.replace(salida_reversion, incierto)
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise CommitIncierto(
+                f"el resultado del commit es desconocido ({type(e).__name__}: {e}); el mapa de reversion "
+                f"quedo en {incierto}; correr --verificar para saber si se aplico") from e
+        return movido
 
 
 def _scope(actor: int, project_id: int | None) -> ScopeContext:
@@ -232,6 +246,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         resultado = asyncio.run(_correr(args, database))
+    except CommitIncierto as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 3
     except (HuerfanosRestantes, ConteosNoCoinciden, FileExistsError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

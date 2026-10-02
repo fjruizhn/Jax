@@ -383,6 +383,64 @@ async def test_archivo_existente_aborta_antes_de_tocar_la_base(tmp_path):
     assert (await _sql("SELECT COUNT(*) c FROM jax_project_scope", fetch=True))[0]["c"] == n_scope
 
 
+class _PoolCommitFalla:
+    """Pool cuya conexion falla en commit() y registra si se llamo a rollback()."""
+    def __init__(self, real):
+        self._real = real
+        self.rollbacks = 0
+
+    def acquire(self):
+        real_cm = self._real.acquire()
+        pool = self
+
+        class _Conn:
+            def __init__(c, real):
+                c._real = real
+
+            async def commit(c):
+                raise ConnectionResetError("conexion caida en el commit")
+
+            async def rollback(c):
+                pool.rollbacks += 1
+                return await c._real.rollback()
+
+            def __getattr__(c, n):
+                return getattr(c._real, n)
+
+        class _CM:
+            async def __aenter__(_s):
+                return _Conn(await real_cm.__aenter__())
+
+            async def __aexit__(_s, *e):
+                return await real_cm.__aexit__(*e)
+        return _CM()
+
+
+@requiere_servidor
+@asincrono
+async def test_commit_incierto_conserva_el_mapa_como_incierto(tmp_path):
+    await _limpiar_contenido()
+    await _sembrar_huerfanos([950001], tablas=("conversations", "messages"))
+    antes = {k: v for k, v in (await _estado_filas()).items()}
+    destino = await _sql("INSERT INTO projects (project_uuid,name,status) VALUES (UUID(),'destino','active')")
+    ruta = tmp_path / "rev.json"
+    pool = await _pool()
+    falso = _PoolCommitFalla(pool)
+    try:
+        with pytest.raises(migrar.CommitIncierto) as e:
+            await migrar._reescribir_en_transaccion(falso, [950001], destino, str(ruta))
+    finally:
+        pool.close()
+        await pool.wait_closed()
+    incierto = tmp_path / "rev.json.incierto"
+    assert not ruta.exists() and incierto.exists()
+    assert stat.S_IMODE(os.stat(incierto).st_mode) == 0o600
+    datos = json.loads(incierto.read_text())
+    assert {(f["tabla"], f["id"]): f["project_id_anterior"] for f in datos["filas"]} == antes
+    assert falso.rollbacks == 0                               # sin rollback a ciegas
+    assert str(incierto) in str(e.value) and "--verificar" in str(e.value) and "desconocido" in str(e.value)
+
+
 @requiere_servidor
 @asincrono
 async def test_huerfano_que_aparece_tras_el_commit_hace_fallar_aplicar(tmp_path, monkeypatch):
