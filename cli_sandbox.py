@@ -48,7 +48,9 @@ root, cambiarlas exige reiniciar):
   JAX_CLI_CRED_ROOT           raiz de las credenciales de suscripcion
                               (default /srv/jax-data/cli-suscripcion)
   JAX_CLI_RUN_DIR             directorio por llamada (default /run/jax-cli)
-  JAX_CLI_LOCK_DIR            locks por perfil (default /tmp/jax-cli-locks)
+  JAX_CLI_LOCK_DIR            locks por perfil (default /tmp/jax-cli-locks-<euid>).
+                              Debe ser del euid y sin escritura de grupo/otros, o
+                              el CLI no arranca (SandboxUnavailable)
   JAX_CLI_MAX_PROMPT_CHARS    tope del prompt (default 32000)
 
 CACHES (cada uno declara su invalidacion en el mismo commit que lo crea):
@@ -78,6 +80,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -214,12 +217,66 @@ def env_minimo(
     return env
 
 
+def _preparar_dir_locks(directorio: Path) -> int:
+    """Devuelve un fd del directorio de locks, ya verificado: es un directorio
+    REAL (no un symlink), es del euid del proceso y ni el grupo ni otros pueden
+    escribir en el. Lo crea con 0700 si no existe. Cualquier otra cosa es
+    SandboxUnavailable: un lock que otro usuario puede reemplazar o sembrar con
+    symlinks no da exclusion mutua ni es seguro de abrir (auditoria 2026-10-02,
+    MAJOR-3). El llamador cierra el fd. NO crea nada en /run: el directorio por
+    defecto es el de `_lock_dir`, y un despliegue con RuntimeDirectory=jax-cli lo
+    apunta con JAX_CLI_LOCK_DIR."""
+    try:
+        os.makedirs(directorio, mode=0o700, exist_ok=True)
+        fd = os.open(directorio, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        raise SandboxUnavailable(
+            f"directorio de locks {str(directorio)!r} no usable ({exc.strerror or type(exc).__name__}) "
+            "-- falla cerrado: sin exclusion mutua segura no se lanza"
+        ) from None
+    st = os.fstat(fd)
+    if st.st_uid != os.geteuid() or st.st_mode & 0o022:
+        os.close(fd)
+        raise SandboxUnavailable(
+            f"directorio de locks {str(directorio)!r} inseguro: debe ser del euid ({os.geteuid()}) "
+            f"y sin escritura de grupo ni de otros (dueno={st.st_uid}, modo={stat.S_IMODE(st.st_mode):o}); "
+            "corregirlo con chown/chmod -- falla cerrado"
+        )
+    return fd
+
+
+def _abrir_lock(dir_fd: int, nombre: str):
+    """Abre (o crea, 0600) el archivo de lock `nombre` DENTRO del directorio ya
+    verificado, sin seguir symlinks (O_NOFOLLOW) y SIN truncar: el lock no
+    necesita contenido, y un `open(..., "w")` truncaria el destino de un symlink
+    plantado. Exige archivo regular del euid; si no, SandboxUnavailable."""
+    try:
+        fd = os.open(
+            nombre, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dir_fd,
+        )
+    except OSError as exc:
+        raise SandboxUnavailable(
+            f"no se pudo abrir el lock {nombre!r} sin seguir symlinks ({exc.strerror or type(exc).__name__})"
+        ) from None
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
+        os.close(fd)
+        raise SandboxUnavailable(f"el lock {nombre!r} no es un archivo regular del euid")
+    return os.fdopen(fd, "r+")
+
+
 def flock_adquirir(lock_path: Path, timeout: float, descripcion: str, detalle: str = ""):
     """BLOQUEANTE -- llamar SOLO via asyncio.to_thread. Sondea con LOCK_NB para
     poder fallar cerrado con un timeout explicito en vez de colgar el thread.
-    Devuelve el file handle; el llamador lo pasa a `flock_liberar`."""
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(lock_path, "w")
+    Devuelve el file handle; el llamador lo pasa a `flock_liberar`. El archivo se
+    abre con `_abrir_lock` (sin symlinks, sin truncar) dentro de un directorio
+    verificado por `_preparar_dir_locks`."""
+    lock_path = Path(lock_path)
+    dfd = _preparar_dir_locks(lock_path.parent)
+    try:
+        fh = _abrir_lock(dfd, lock_path.name)
+    finally:
+        os.close(dfd)
     deadline = time.monotonic() + timeout
     while True:
         try:
@@ -787,50 +844,64 @@ def armar_conversacion(historial, mensaje: str, max_chars: int, nonce: Optional[
 # --------------------------------------------------------------------------
 
 def _lock_dir() -> Path:
-    return Path(os.environ.get("JAX_CLI_LOCK_DIR", "/tmp/jax-cli-locks"))
+    """Directorio de los locks por perfil. Sale de JAX_CLI_LOCK_DIR (el paso 11
+    del despliegue lo apunta a un RuntimeDirectory=jax-cli de systemd). Sin
+    configurar, usa `/tmp/jax-cli-locks-<euid>`: el sufijo evita que otro usuario
+    del host ocupe el nombre antes que nosotros; si lo hace igual, el directorio
+    se rechaza por dueno (`_preparar_dir_locks`) y el CLI no arranca (falla
+    cerrado). Este modulo nunca crea nada en /run por su cuenta."""
+    return Path(os.environ.get("JAX_CLI_LOCK_DIR") or f"/tmp/jax-cli-locks-{os.geteuid()}")
 
 
 def _ranura_adquirir(perfil: str, ranuras: int, espera: float):
     """BLOQUEANTE (to_thread). Primera ranura libre de `ranuras`; si no hay
-    ninguna en `espera` segundos, LockTimeout."""
-    d = _lock_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    deadline = time.monotonic() + espera
-    while True:
-        for i in range(ranuras):
-            fh = open(d / f"{perfil}.{i}.lock", "w")
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return (fh, i)
-            except BlockingIOError:
-                fh.close()
-        if time.monotonic() >= deadline:
-            raise LockTimeout(f"sin ranura libre para el perfil {perfil} en {espera}s")
-        time.sleep(_LOCK_POLL_S)
+    ninguna en `espera` segundos, LockTimeout. Un directorio o un lock inseguro
+    es SandboxUnavailable (no se salta a la ranura siguiente: algo esta mal)."""
+    dfd = _preparar_dir_locks(_lock_dir())
+    try:
+        deadline = time.monotonic() + espera
+        while True:
+            for i in range(ranuras):
+                fh = _abrir_lock(dfd, f"{perfil}.{i}.lock")
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return (fh, i)
+                except BlockingIOError:
+                    fh.close()
+            if time.monotonic() >= deadline:
+                raise LockTimeout(f"sin ranura libre para el perfil {perfil} en {espera}s")
+            time.sleep(_LOCK_POLL_S)
+    finally:
+        os.close(dfd)
 
 
 def _ranura_liberar(handle, perfil: Perfil, ranuras: int, cred_host: Optional[str]) -> None:
     """BLOQUEANTE (to_thread). Con la ranura todavia tomada, purga el estado
     que el CLI deja en su home dedicado (Kimi no tiene --ephemeral) -- pero solo
     si NINGUNA otra ranura esta en uso (si no, se borraria el estado de una
-    llamada en curso); si hay otra corriendo, la purga queda para la proxima."""
+    llamada en curso); si hay otra corriendo, la purga queda para la proxima.
+    Los locks de las otras ranuras se abren con la misma disciplina que al
+    adquirir (sin symlinks, sin truncar, directorio verificado)."""
     fh, idx = handle
     otras = []
     try:
         if perfil.purgar and cred_host:
-            d = _lock_dir()
-            libres = True
-            for j in range(ranuras):
-                if j == idx:
-                    continue
-                f2 = open(d / f"{perfil.nombre}.{j}.lock", "w")
-                try:
-                    fcntl.flock(f2.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    otras.append(f2)
-                except BlockingIOError:
-                    f2.close()
-                    libres = False
-                    break
+            dfd = _preparar_dir_locks(_lock_dir())
+            try:
+                libres = True
+                for j in range(ranuras):
+                    if j == idx:
+                        continue
+                    f2 = _abrir_lock(dfd, f"{perfil.nombre}.{j}.lock")
+                    try:
+                        fcntl.flock(f2.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        otras.append(f2)
+                    except BlockingIOError:
+                        f2.close()
+                        libres = False
+                        break
+            finally:
+                os.close(dfd)
             if libres:
                 for nombre in perfil.purgar:
                     shutil.rmtree(os.path.join(cred_host, nombre), ignore_errors=True)

@@ -353,7 +353,16 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> tuple[list[str], di
 # llamador (fuente unica en /etc/jax/.env, ver
 # jax-workspace-relocation-fix) -- el lock hereda esa misma fuente de
 # verdad sin leer la env var de nuevo aca.
+#
+# Directorio (auditoria 2026-10-02, MAJOR-3): sale de JAX_HYDE_LOCK_DIR; sin
+# configurar, el de siempre (/tmp/jax-claude-subprocess-locks, que mantiene a los
+# dos procesos de SO calculando el mismo path). `cli_sandbox.flock_adquirir` lo
+# verifica antes de abrir el lock: tiene que ser del euid y sin escritura de
+# grupo ni de otros (se crea con 0700), y el archivo se abre sin seguir symlinks
+# y sin truncar. Los DOS procesos que comparten este lock (las_manos y el REPL)
+# tienen que correr con el mismo usuario y con el mismo JAX_HYDE_LOCK_DIR.
 _CLAUDE_SUBPROCESS_LOCK_DIR_NAME = "jax-claude-subprocess-locks"
+HYDE_LOCK_DIR_ENV = "JAX_HYDE_LOCK_DIR"
 
 
 def _lock_path_for_workspace(workspace_dir: str) -> Path:
@@ -367,7 +376,8 @@ def _lock_path_for_workspace(workspace_dir: str) -> Path:
     trasladada). El nombre es un hash corto del workspace resuelto:
     workspaces distintos -> locks independientes."""
     digest = hashlib.sha256(str(Path(workspace_dir).resolve()).encode("utf-8")).hexdigest()[:16]
-    return Path("/tmp") / _CLAUDE_SUBPROCESS_LOCK_DIR_NAME / f"{digest}.lock"
+    base = os.environ.get(HYDE_LOCK_DIR_ENV) or str(Path("/tmp") / _CLAUDE_SUBPROCESS_LOCK_DIR_NAME)
+    return Path(base) / f"{digest}.lock"
 
 
 def _acquire_cross_process_lock(workspace_dir: str, timeout: float):

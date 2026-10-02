@@ -125,6 +125,7 @@ class _Entorno(unittest.IsolatedAsyncioTestCase):
             "JAX_CLI_CRED_ROOT": str(self.cred),
             "JAX_CLI_RUN_DIR": str(self.run_dir),
             "JAX_CLI_LOCK_DIR": str(self.lock_dir),
+            "JAX_HYDE_LOCK_DIR": str(t / "hyde-locks-base"),
             "JAX_CLI_CODEX_VERSION": "9.9.9", "JAX_CLI_CODEX_SHA256": self.shas["codex"],
             "JAX_CLI_KIMI_VERSION": "9.9.9", "JAX_CLI_KIMI_SHA256": self.shas["kimi"],
             "JAX_SUSCRIPCION_TITULARES": "1,8",
@@ -845,6 +846,151 @@ class LocksTest(_Entorno):
     async def test_las_ranuras_se_liberan_al_terminar(self):
         for _ in range(3):
             await self.correr("codex", ranuras=1, espera_lock_s=0.5)
+
+
+class LocksSegurosTest(_Entorno):
+    """MAJOR-3 (auditoria 2026-10-02): los locks no siguen symlinks, no truncan,
+    y el directorio tiene que ser del euid y sin escritura de grupo/otros."""
+
+    def setUp(self):
+        super().setUp()
+        self.victima = Path(self.tmp.name) / "victima.txt"
+        self.victima.write_text("NO-TRUNCAR")
+
+    def _preparar_dir(self, modo=0o700):
+        self.lock_dir.mkdir(mode=modo)
+        os.chmod(self.lock_dir, modo)
+
+    async def test_symlink_plantado_en_el_lock_no_trunca_el_destino_y_falla_cerrado(self):
+        self._preparar_dir()
+        os.symlink(self.victima, self.lock_dir / "codex.0.lock")
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch("asyncio.create_subprocess_exec", fake):
+            with self.assertRaises(cli_sandbox.SandboxUnavailable):
+                await cli_sandbox.run_cli(
+                    "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                    timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertEqual(self.victima.read_text(), "NO-TRUNCAR")
+        self.assertEqual(cap["llamadas"], 0)
+
+    async def test_symlink_en_la_ranura_siguiente_tampoco_se_sigue(self):
+        self._preparar_dir()
+        os.symlink(self.victima, self.lock_dir / "codex.1.lock")
+        # la ranura 0 queda tomada: hay que pasar a la 1, que es un symlink
+        fh0, _ = cli_sandbox._ranura_adquirir("codex", 2, 1)
+        try:
+            with self.assertRaises(cli_sandbox.SandboxUnavailable):
+                cli_sandbox._ranura_adquirir("codex", 2, 1)
+        finally:
+            cli_sandbox.flock_liberar(fh0)
+        self.assertEqual(self.victima.read_text(), "NO-TRUNCAR")
+
+    async def test_el_directorio_de_locks_como_symlink_se_rechaza(self):
+        real = Path(self.tmp.name) / "real-locks"
+        real.mkdir(mode=0o700)
+        os.symlink(real, self.lock_dir)
+        with self.assertRaises(cli_sandbox.SandboxUnavailable):
+            cli_sandbox._ranura_adquirir("codex", 2, 1)
+        self.assertEqual(list(real.iterdir()), [], "no se creo ningun lock tras el symlink")
+
+    async def test_directorio_con_escritura_de_grupo_u_otros_se_rechaza(self):
+        for modo in (0o770, 0o720, 0o707, 0o702, 0o777):
+            with self.subTest(modo=oct(modo)):
+                if self.lock_dir.exists():
+                    shutil.rmtree(self.lock_dir)
+                self._preparar_dir(modo)
+                with self.assertRaises(cli_sandbox.SandboxUnavailable):
+                    cli_sandbox._ranura_adquirir("codex", 2, 1)
+                self.assertEqual(list(self.lock_dir.iterdir()), [])
+
+    async def test_directorio_de_otro_dueno_se_rechaza(self):
+        self._preparar_dir()
+        with patch.object(cli_sandbox.os, "geteuid", return_value=os.geteuid() + 1):
+            with self.assertRaises(cli_sandbox.SandboxUnavailable):
+                cli_sandbox._ranura_adquirir("codex", 2, 1)
+
+    async def test_un_directorio_real_ajeno_y_publico_se_rechaza(self):
+        # /tmp es de root y de escritura publica: ni dueño ni permisos sirven.
+        with patch.dict(os.environ, {"JAX_CLI_LOCK_DIR": "/tmp"}):
+            with self.assertRaises(cli_sandbox.SandboxUnavailable):
+                cli_sandbox._ranura_adquirir("codex", 2, 1)
+
+    async def test_directorio_propio_0700_se_acepta_y_se_crea_con_ese_modo(self):
+        fh, i = cli_sandbox._ranura_adquirir("codex", 2, 1)
+        try:
+            self.assertEqual(i, 0)
+            self.assertEqual(stat.S_IMODE(os.stat(self.lock_dir).st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(os.fstat(fh.fileno()).st_mode), 0o600)
+        finally:
+            cli_sandbox.flock_liberar(fh)
+
+    async def test_el_lock_existente_no_se_trunca(self):
+        self._preparar_dir()
+        previo = self.lock_dir / "codex.0.lock"
+        previo.write_text("CONTENIDO-PREVIO")
+        os.chmod(previo, 0o600)
+        fh, _ = cli_sandbox._ranura_adquirir("codex", 2, 1)
+        cli_sandbox.flock_liberar(fh)
+        self.assertEqual(previo.read_text(), "CONTENIDO-PREVIO")
+
+    async def test_el_lock_se_abre_con_cloexec(self):
+        fh, _ = cli_sandbox._ranura_adquirir("codex", 2, 1)
+        try:
+            self.assertFalse(os.get_inheritable(fh.fileno()))
+        finally:
+            cli_sandbox.flock_liberar(fh)
+
+    async def test_el_default_del_directorio_es_propio_del_euid_y_no_se_crea_en_run(self):
+        with patch.dict(os.environ):
+            os.environ.pop("JAX_CLI_LOCK_DIR")
+            d = cli_sandbox._lock_dir()
+        self.assertEqual(str(d), f"/tmp/jax-cli-locks-{os.geteuid()}")
+        self.assertFalse(str(d).startswith("/run"))
+
+    async def test_la_purga_de_kimi_no_sigue_symlinks_de_las_otras_ranuras(self):
+        self._preparar_dir()
+        cred = Path(self.tmp.name) / "credkimi"
+        (cred / "sessions").mkdir(parents=True)
+        (cred / "sessions" / "s1").write_text("estado")
+        os.symlink(self.victima, self.lock_dir / "kimi.1.lock")
+        handle = cli_sandbox._ranura_adquirir("kimi", 2, 1)
+        with self.assertRaises(cli_sandbox.SandboxUnavailable):
+            cli_sandbox._ranura_liberar(handle, cli_sandbox.PERFILES["kimi"], 2, str(cred))
+        self.assertEqual(self.victima.read_text(), "NO-TRUNCAR")
+        self.assertTrue((cred / "sessions" / "s1").exists(), "falla cerrado: no se purgo a ciegas")
+        # y la ranura propia quedo liberada
+        os.unlink(self.lock_dir / "kimi.1.lock")
+        fh, _ = cli_sandbox._ranura_adquirir("kimi", 2, 1)
+        cli_sandbox.flock_liberar(fh)
+
+    async def test_el_lock_de_hyde_tampoco_sigue_symlinks(self):
+        d = Path(self.tmp.name) / "hyde-locks"
+        d.mkdir(mode=0o700)
+        os.chmod(d, 0o700)
+        ruta = d / "ws.lock"
+        os.symlink(self.victima, ruta)
+        with patch.object(hyde_sandbox, "_lock_path_for_workspace", return_value=ruta):
+            with self.assertRaises(cli_sandbox.SandboxUnavailable):
+                hyde_sandbox._acquire_cross_process_lock("/ws", timeout=1)
+        self.assertEqual(self.victima.read_text(), "NO-TRUNCAR")
+
+    async def test_el_lock_de_hyde_rechaza_un_directorio_con_escritura_de_otros(self):
+        d = Path(self.tmp.name) / "hyde-locks2"
+        d.mkdir()
+        os.chmod(d, 0o777)
+        with patch.object(hyde_sandbox, "_lock_path_for_workspace", return_value=d / "ws.lock"):
+            with self.assertRaises(cli_sandbox.SandboxUnavailable):
+                hyde_sandbox._acquire_cross_process_lock("/ws", timeout=1)
+
+    async def test_el_lock_de_hyde_sano_sigue_funcionando(self):
+        d = Path(self.tmp.name) / "hyde-locks3"
+        with patch.object(hyde_sandbox, "_lock_path_for_workspace", return_value=d / "ws.lock"):
+            fh = hyde_sandbox._acquire_cross_process_lock("/ws", timeout=1)
+            try:
+                with self.assertRaises(TimeoutError):
+                    hyde_sandbox._acquire_cross_process_lock("/ws", timeout=0.2)
+            finally:
+                hyde_sandbox._release_cross_process_lock(fh)
 
 
 # ------------------------------------------------------- contencion con bwrap

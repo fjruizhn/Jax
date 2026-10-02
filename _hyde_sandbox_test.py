@@ -43,7 +43,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import atexit
+import shutil
+
 import hyde_sandbox
+
+# El directorio de locks de Hyde se verifica (dueno y permisos, MAJOR-3): los
+# tests usan uno propio y efimero en vez del /tmp compartido del host, que puede
+# traer un directorio viejo con permisos de grupo de ejecuciones anteriores. Los
+# procesos hijos (ClaudeSubprocessLockRealCrossProcessTest) lo heredan.
+_LOCKS_DE_PRUEBA = tempfile.mkdtemp(prefix="hyde-locks-test-")
+os.environ[hyde_sandbox.HYDE_LOCK_DIR_ENV] = os.path.join(_LOCKS_DE_PRUEBA, "locks")
+atexit.register(shutil.rmtree, _LOCKS_DE_PRUEBA, ignore_errors=True)
 
 
 class _FakeProc:
