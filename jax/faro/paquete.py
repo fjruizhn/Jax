@@ -46,20 +46,16 @@ import re
 import secrets
 import shutil
 import stat
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from .config import ConfigFaro, PluginFuente, sha_valido
+from .git_objetos import FuenteInvalida, exigir_sha_ancestro_de, leer_blobs, listar, resolver_ref
 
 logger = logging.getLogger(__name__)
 
 MANIFIESTO = "MANIFIESTO.json"
 ESQUEMA = 1
-
-# Mismo modelo de amenaza que lib/assemble.py::GIT_SIN_HOOKS de claude-skills: ninguna
-# invocacion de git ejecuta hooks ni fsmonitor del repo que estamos leyendo.
-_GIT_SIN_HOOKS = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
 
 _FUENTE_CONSTITUCION = "common/CLAUDE.md.core"
 _FUENTE_SKILLS = "common/skills"
@@ -67,11 +63,6 @@ _FUENTE_AGENTES = "common/agents"
 
 _MODOS = {"0644": 0o644, "0755": 0o755}
 _RE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
-
-
-class FuenteInvalida(RuntimeError):
-    """Lo que se quiere empaquetar no se puede empaquetar con garantias (SHA que no es de
-    `origin/main`, symlink, plugin ausente...). La construccion no publica nada."""
 
 
 class PaqueteNoVerifica(RuntimeError):
@@ -97,74 +88,12 @@ class Frescura:
 
 
 # --------------------------------------------------------------------------- #
-# git (solo lectura de objetos)                                               #
-# --------------------------------------------------------------------------- #
-
-def _git(repo: Path, *args: str, entrada: bytes | None = None, aceptar: tuple[int, ...] = (0,)) -> subprocess.CompletedProcess:
-    try:
-        r = subprocess.run(["git", *_GIT_SIN_HOOKS, "-C", str(repo), *args], input=entrada,
-                           capture_output=True, timeout=120, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise FuenteInvalida(f"no se pudo ejecutar git sobre {repo}: {type(exc).__name__}") from exc
-    if r.returncode not in aceptar:
-        raise FuenteInvalida(f"git {args[0]} fallo (rc={r.returncode}): {r.stderr.decode(errors='replace')[:200].strip()}")
-    return r
-
-
-def _exigir_sha_de_origin_main(cfg: ConfigFaro) -> None:
-    r = _git(cfg.repo, "cat-file", "-e", f"{cfg.sha}^{{commit}}", aceptar=(0, 1, 128))
-    if r.returncode != 0:
-        raise FuenteInvalida(f"el commit {cfg.sha} no existe en {cfg.repo}")
-    r = _git(cfg.repo, "merge-base", "--is-ancestor", cfg.sha, cfg.ref_frescura, aceptar=(0, 1, 128))
-    if r.returncode != 0:
-        # 1 = no es ancestro; 128 = la ref no existe. En los dos casos no se puede afirmar
-        # que sea de origin/main: se niega (fallo cerrado).
-        raise FuenteInvalida(f"el commit {cfg.sha} no es ancestro de {cfg.ref_frescura}: solo se fija un SHA de origin/main")
-
-
-@dataclass(frozen=True)
-class _EntradaGit:
-    modo: str
-    oid: str
-    ruta: str
-
-
-def _listar(cfg: ConfigFaro, *rutas: str) -> list[_EntradaGit]:
-    r = _git(cfg.repo, "ls-tree", "-r", "-z", "--full-tree", cfg.sha, "--", *rutas)
-    entradas = []
-    for crudo in r.stdout.split(b"\0"):
-        if not crudo:
-            continue
-        meta, _, ruta = crudo.partition(b"\t")
-        modo, _tipo, oid = meta.decode().split(" ")
-        entradas.append(_EntradaGit(modo, oid, ruta.decode("utf-8")))
-    return entradas
-
-
-def _leer_blobs(cfg: ConfigFaro, oids: list[str]) -> dict[str, bytes]:
-    unicos = list(dict.fromkeys(oids))
-    if not unicos:
-        return {}
-    r = _git(cfg.repo, "cat-file", "--batch", entrada=("\n".join(unicos) + "\n").encode())
-    salida, i, blobs = r.stdout, 0, {}
-    for oid in unicos:
-        fin = salida.index(b"\n", i)
-        cabecera = salida[i:fin].decode().split(" ")
-        if len(cabecera) != 3 or cabecera[0] != oid or cabecera[1] != "blob":
-            raise FuenteInvalida(f"git cat-file devolvio algo inesperado para {oid}: {cabecera}")
-        tam = int(cabecera[2])
-        blobs[oid] = salida[fin + 1:fin + 1 + tam]
-        i = fin + 1 + tam + 1
-    return blobs
-
-
-# --------------------------------------------------------------------------- #
 # armado                                                                      #
 # --------------------------------------------------------------------------- #
 
 def _archivos_desde_git(cfg: ConfigFaro) -> dict[str, tuple[int, bytes]]:
     """{ruta en el paquete: (modo, bytes)} de lo que el spec pide, leido del SHA."""
-    entradas = _listar(cfg, _FUENTE_CONSTITUCION, _FUENTE_SKILLS, _FUENTE_AGENTES)
+    entradas = listar(cfg.repo, cfg.sha, _FUENTE_CONSTITUCION, _FUENTE_SKILLS, _FUENTE_AGENTES)
     for e in entradas:
         if e.modo == "120000":
             raise FuenteInvalida(f"{e.ruta} es un symlink en {cfg.sha[:12]}: no se sigue ni se copia")
@@ -182,7 +111,7 @@ def _archivos_desde_git(cfg: ConfigFaro) -> dict[str, tuple[int, bytes]]:
         raise FuenteInvalida(f"{_FUENTE_CONSTITUCION} no existe en {cfg.sha[:12]}")
     if not any(k.startswith("skills/") for k in elegidas):
         raise FuenteInvalida(f"{_FUENTE_SKILLS} esta vacio en {cfg.sha[:12]}")
-    blobs = _leer_blobs(cfg, [e.oid for e in elegidas.values()])
+    blobs = leer_blobs(cfg.repo, [e.oid for e in elegidas.values()])
     archivos = {}
     for destino, e in sorted(elegidas.items()):
         datos = blobs[e.oid]
@@ -272,7 +201,7 @@ def construir_paquete(cfg: ConfigFaro) -> Path:
         if fallos:
             raise PaqueteNoVerifica(fallos)
         return final
-    _exigir_sha_de_origin_main(cfg)
+    exigir_sha_ancestro_de(cfg.repo, cfg.sha, cfg.ref_frescura)
     archivos = _archivos_desde_git(cfg)
     for p in cfg.plugins:
         archivos.update(_archivos_de_plugin(p))
@@ -405,11 +334,7 @@ def frescura(cfg: ConfigFaro) -> Frescura:
     """¿Hay un SHA mas nuevo en `origin/main`? SOLO AVISA (log WARNING); jamas bloquea ni
     lanza. Lee la ref local: quien mantiene el checkout (`claude-skills-sync pull`, cron) es
     quien la mueve; esta funcion no hace red."""
-    try:
-        r = _git(cfg.repo, "rev-parse", "--verify", "-q", f"{cfg.ref_frescura}^{{commit}}", aceptar=(0, 1, 128))
-        actual = r.stdout.decode().strip() if r.returncode == 0 else ""
-    except FuenteInvalida:
-        actual = ""
+    actual = resolver_ref(cfg.repo, cfg.ref_frescura)
     if not sha_valido(actual):
         logger.warning("frescura del paquete %s: desconocida (no se pudo leer %s)", cfg.sha[:12], cfg.ref_frescura)
         return Frescura("desconocida", cfg.sha)
