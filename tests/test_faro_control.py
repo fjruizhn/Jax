@@ -30,7 +30,7 @@ from jax.faro.config import ConfigFaroInvalida, ConfigPuerto
 from jax.faro.control import ConfigControl, ServidorControl
 from jax.faro.servicio import arrancar
 from jax.faro.transporte import ServidorPuerto
-from tests._faro_falsos import FalsoPool
+from tests._faro_falsos import FalsoPool, FalsoTelegram
 from tests._faro_utils import cliente_por_rele, corre, ejecucion, paquete_listo, puerto
 from tests.test_faro_cadena import _fabrica, entorno  # noqa: F401 (fixture y fabrica de pool)
 
@@ -517,6 +517,17 @@ def test_d_un_rechazo_se_mantiene_aunque_la_bitacora_falle(mundo):
     assert r is None and ejecuciones == {}
 
 
+def test_d_un_rechazo_a_un_orquestador_se_le_responde_aunque_la_bitacora_falle(mundo):
+    def rota(registro):
+        raise OSError("sin bitacora")
+
+    async def caso():
+        async with control(mundo, bitacora=Bitacora(emisores=[rota])) as srv:
+            return await pedir(srv.ruta_socket, {**PEDIDO, "uid_jaula": 1}), srv.ejecuciones
+    r, ejecuciones = corre(caso())
+    assert r == {"ok": False, "error": "uid_jaula_invalido"} and ejecuciones == {}
+
+
 def test_un_puerto_que_no_se_puede_crear_rechaza_y_no_deja_reservado_el_uid(mundo):
     estado = {"romper": True}
 
@@ -576,6 +587,24 @@ def test_el_servicio_arranca_con_el_aviso_como_observador_y_el_control_sirve_eje
     filas = corre(caso())
     assert [f["evento"] for f in filas if f["evento"].startswith("control_")] == ["control_creado", "control_cerrado"]
     assert verificar_cadena(filas) == []
+
+
+def test_el_servicio_arrancado_avisa_de_verdad_por_http_un_rechazo_del_canal_de_control(entorno):
+    with FalsoTelegram() as tg:
+        entorno["JAX_FARO_AVISO_API_URL"] = tg.url
+
+        async def caso():
+            s = await arrancar(entorno, crear_pool=_fabrica(FalsoPool()), solo_pruebas_mismo_uid=True)
+            try:
+                async with s.control() as srv:
+                    r = await pedir(srv.ruta_socket, {**PEDIDO, "uid_jaula": 1})
+                    assert r["error"] == "uid_jaula_invalido"
+                    assert await asyncio.to_thread(tg.esperar, 1, 5.0)
+            finally:
+                await s.cerrar()
+        corre(caso())
+    assert "RECHAZADO" in tg.textos()[0] and "uid_jaula_invalido" in tg.textos()[0]
+    assert tg.recibidos[0]["chat_id"] == "1" and tg.recibidos[0]["ruta"] == "/bottoken-de-prueba/sendMessage"
 
 
 def test_si_la_sonda_falla_tampoco_queda_el_avisador_corriendo(entorno):
