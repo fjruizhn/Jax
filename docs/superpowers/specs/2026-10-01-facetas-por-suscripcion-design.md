@@ -2,7 +2,7 @@
 
 > Fecha: 2026-10-01 · Autor: arquitecto-adversarial (escalón 3, solo lectura), encargado por Hyde en hall9000.
 > Pedido de Fernando (2026-10-01): pasar Thot (OpenAI) y Kimi (Moonshot) de API a suscripción, como Hyde.
-> Estado: DISEÑO. D-1 a D-5 y D-7 CERRADAS por Fernando el 2026-10-01 (ver la adenda al final). D-6 en investigación (kimi acp). Nada implementado.
+> Estado: DISEÑO. D-1 a D-5 y D-7 CERRADAS por Fernando el 2026-10-01 (ver la adenda al final). D-6 CERRADA: (a)+(b). Fase 1 pasos 0-3 en feat/suscripcion-fase1.
 
 # Diseño: Thot y Kimi por suscripción (escalón 3, solo lectura)
 
@@ -458,3 +458,24 @@ No ratifico nada: el GO es de Fernando.
 | **D-5** | **Cortar ya.** La compuerta de titular se aplica a todo proveedor pago que no sea local. Quien no es titular (user 1 u 8) y no tiene llave propia recibe un error tipado (i18n) y nunca usa la credencial de la plataforma. Entra en la fase 1 (paso 6), no se difiere a la 1b. |
 | **D-6** | **Investigar primero la opción (c), `kimi acp`**: que Kimi pida las operaciones de archivos al cliente para que pasen por `tool_authority`. Solo si no sirve se decide entre (a) y (b). El paso 9 (worker) espera ese resultado; los pasos 0 a 8 no dependen de él. |
 | **D-7** | **Sí.** El servidor declara `ejecucion = {provider_id, model_id, task_class_aplicada, motivo_ruta, via}` en el contrato F2-D, atada en `_validate_projection`. Entra con el router, en la fase 2. |
+
+### D-6 cerrada (Fernando, 2026-10-02): (a) + (b)
+
+La investigación de escalón 3 descartó la opción (c), `kimi acp` con kimi 2.1.1, con experimento y lectura del binario:
+- `Grep`/`Glob` leen el disco local sin pasar por el cliente ni pedir permiso;
+- `Write` crea directorios aunque el cliente niegue la escritura;
+- Kimi lanza los servidores MCP de su `mcp.json` aunque `session/new` pida `mcpServers: []`.
+
+ACP es un canal de delegación opcional, no un confinamiento. Decisión:
+- **(a)** el motor `kimi` con herramientas (`has_tool_access=1`: implementation, refactor, code_swarm, bug_hunt, file_write) **sigue por API**;
+- **(b)** motor nuevo **`kimi_sub`**, por suscripción, con `has_tool_access=0`, para las capabilities sin herramientas (análisis, revisión, auditoría), con compuerta de titular. Paso 9 del plan.
+
+Se reconsidera si Kimi permite desactivar herramientas en modo ACP.
+
+### Paso de host de locks (hecho 2026-10-02, GO de Fernando)
+
+- grupo `jax-cli-lock` (jaxsvc, fruiz);
+- `/etc/tmpfiles.d/jax-locks.conf` (`/run/jax-locks/hyde` `0750 root:jax-cli-lock` con `3a8b11a89cad98b1.lock` `0640`, y `/run/jax-locks/cli` `0700 jaxsvc`);
+- drop-in `jax-las-manos.service.d/locks.conf` (`SupplementaryGroups=jax-cli-lock`), con `daemon-reload` sin reiniciar.
+
+Verificado: exclusión cruzada fruiz↔jaxsvc con `flock` sobre `O_RDONLY`, y `axioma` recibe EACCES. Pendiente: que fruiz vuelva a iniciar sesión, la integración y el reinicio de las_manos al desplegar.
