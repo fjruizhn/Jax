@@ -41,6 +41,9 @@ import hyde_sandbox
 
 # originales, antes de que setUp parchee `_consultar_usuario` con un doble
 _CONSULTAR_REAL = cli_sandbox._consultar_usuario
+# el perfil de codex TAL COMO LO DEFINE EL MODULO (setUp lo reemplaza por una copia
+# verificada solo durante cada test)
+_PERFIL_CODEX_REAL = cli_sandbox.PERFILES["codex"]
 
 _SENT_PROMPT = "CENTINELA-PROMPT-8f3a"
 _SENT_SISTEMA = "CENTINELA-SISTEMA-91bc"
@@ -163,6 +166,14 @@ class _Entorno(unittest.IsolatedAsyncioTestCase):
         p4.start()
         self.addCleanup(p4.stop)
         self.resolver_real = original
+        # El perfil real de codex queda con canal_prompt_verificado=False hasta la
+        # prueba manual del §5 (MAJOR-5); los tests de run_cli ejercitan el resto de
+        # la tuberia con una COPIA verificada, que reemplaza al perfil solo en el test.
+        p5 = patch.dict(cli_sandbox.PERFILES, {
+            "codex": dataclasses.replace(cli_sandbox.PERFILES["codex"], canal_prompt_verificado=True),
+        })
+        p5.start()
+        self.addCleanup(p5.stop)
 
     async def titular(self, uid=1, tenant=1, ep="chat"):
         return await cli_sandbox.exigir_titular(uid, tenant, ep)
@@ -444,6 +455,7 @@ _DISABLE_CODEX = [
     "shell_tool", "unified_exec", "apps", "browser_use", "browser_use_external",
     "browser_use_full_cdp_access", "computer_use", "image_generation", "plugins",
     "multi_agent", "memories", "hooks",
+    "unbounded_connection_retries", "daemon_auto_start",
 ]
 
 
@@ -677,6 +689,91 @@ class IntegridadDelBinarioTest(_Entorno):
                     "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
                     timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
         self.assertEqual(cap["llamadas"], 0)
+
+
+_SALIDA_FEATURES = """\
+apply_patch_freeform                     removed            false
+apps                                     stable             false
+fast_mode                                under development  false
+item_ids                                 removed            true
+mentions_v2                              stable             true
+shell_tool                               stable             false
+web_search_cached                        under development  false
+"""
+
+
+class CodexCanalYFeaturesTest(_Entorno):
+    """MAJOR-5 (auditoria 2026-10-02): codex no se lanza hasta verificar el canal
+    del system prompt, y las features que pueden quedar activadas son una lista
+    PERMITIDA (una feature nueva del CLI activada por defecto falla cerrado)."""
+
+    async def test_el_perfil_real_de_codex_no_esta_verificado_y_run_cli_lo_rechaza(self):
+        # el perfil REAL (sin la copia verificada que usan los demas tests)
+        self.assertFalse(_PERFIL_CODEX_REAL.canal_prompt_verificado)
+        with patch.dict(cli_sandbox.PERFILES, {"codex": _PERFIL_CODEX_REAL}):
+            cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+            with patch("asyncio.create_subprocess_exec", fake):
+                with self.assertRaises(cli_sandbox.ErrorProtocolo):
+                    await cli_sandbox.run_cli(
+                        "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                        timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertEqual(cap["llamadas"], 0)
+
+    def test_las_dos_features_nuevas_se_apagan_explicitamente(self):
+        self.assertIn("unbounded_connection_retries", cli_sandbox._CODEX_DISABLE)
+        self.assertIn("daemon_auto_start", cli_sandbox._CODEX_DISABLE)
+
+    def test_el_perfil_de_codex_declara_una_lista_permitida_sin_herramientas(self):
+        permitidas = set(cli_sandbox._CODEX_FEATURES_PERMITIDAS)
+        self.assertTrue(permitidas)
+        self.assertFalse(permitidas & set(cli_sandbox._CODEX_DISABLE),
+                         "una feature apagada a proposito no puede estar en la lista permitida")
+        self.assertEqual(_PERFIL_CODEX_REAL.features_permitidas, cli_sandbox._CODEX_FEATURES_PERMITIDAS)
+
+    def test_el_comando_para_listar_features_lleva_los_mismos_disable_del_perfil(self):
+        cmd = cli_sandbox.comando_features_codex("/opt/jax-cli/codex/9.9.9/codex")
+        self.assertEqual(cmd[:3], ["/opt/jax-cli/codex/9.9.9/codex", "features", "list"])
+        self.assertEqual([cmd[i + 1] for i, x in enumerate(cmd) if x == "--disable"], _DISABLE_CODEX)
+
+    def test_salida_conocida_pasa(self):
+        self.assertIsNone(cli_sandbox.verificar_features(_SALIDA_FEATURES))
+
+    def test_una_feature_nueva_activada_falla_cerrado(self):
+        salida = _SALIDA_FEATURES + "telepatia_tool                           stable             true\n"
+        with self.assertRaises(cli_sandbox.FeaturesNoPermitidas) as c:
+            cli_sandbox.verificar_features(salida)
+        self.assertIn("telepatia_tool", str(c.exception))
+        self.assertEqual(c.exception.clase, "FeaturesNoPermitidas")
+
+    def test_una_feature_de_las_apagadas_que_aparece_activada_falla(self):
+        for f in ("shell_tool", "unbounded_connection_retries", "daemon_auto_start"):
+            salida = _SALIDA_FEATURES.replace(f"{f}                           stable             false", "")
+            salida += f"{f}                     stable             true\n"
+            with self.subTest(f=f), self.assertRaises(cli_sandbox.FeaturesNoPermitidas):
+                cli_sandbox.verificar_features(salida)
+
+    def test_features_en_estado_en_desarrollo_activadas_tambien_cuentan(self):
+        salida = _SALIDA_FEATURES + "agent_message_board                      under development  true\n"
+        with self.assertRaises(cli_sandbox.FeaturesNoPermitidas):
+            cli_sandbox.verificar_features(salida)
+
+    def test_salida_vacia_o_ilegible_falla_cerrado(self):
+        for salida in ("", "\n\n", "esto no es una tabla\n", "apps stable quizas\n",
+                       _SALIDA_FEATURES + "linea rara sin estado\n"):
+            with self.subTest(salida=salida[:20]), self.assertRaises(cli_sandbox.FeaturesNoPermitidas):
+                cli_sandbox.verificar_features(salida)
+
+    def test_perfil_sin_lista_permitida_no_se_puede_verificar(self):
+        with self.assertRaises(cli_sandbox.PerfilNoSoportado):
+            cli_sandbox.verificar_features(_SALIDA_FEATURES, "kimi")
+
+    def test_la_salida_real_de_hoy_no_pasa_sin_decidir_cada_feature(self):
+        # Documenta el trabajo del paso 11: una feature activada que nadie
+        # clasifico no se acepta por omision.
+        salida = "".join(f"{n}  stable  true\n" for n in ("goals", "worktrees", "sleep_tool"))
+        with self.assertRaises(cli_sandbox.FeaturesNoPermitidas) as c:
+            cli_sandbox.verificar_features(salida)
+        self.assertIn("goals", str(c.exception))
 
 
 class KimiFallaCerradoTest(_Entorno):

@@ -66,8 +66,9 @@ CACHES (cada uno declara su invalidacion en el mismo commit que lo crea):
 LO QUE ESTE MODULO NO VERIFICO (§8 del spec): el esquema de eventos de
 `codex exec --json` en sus errores de cuota/sesion, el esquema de
 `kimi --output-format stream-json`, y si `kimi -p` lee el prompt de stdin. El
-perfil kimi queda con `canal_prompt_verificado=False` y `run_cli` lo rechaza
-(falla cerrado) hasta que se verifique; los parsers estan marcados.
+perfil kimi y el perfil codex quedan con `canal_prompt_verificado=False` y
+`run_cli` los rechaza (falla cerrado) hasta que se verifique el canal del system
+prompt (prueba manual del §5); los parsers estan marcados.
 
 En honor al Prof. Raul Jacobs.
 """
@@ -134,6 +135,10 @@ class LockTimeout(ErrorCLI, TimeoutError):
 
 class BinarioAlterado(ErrorCLI):
     clase = "BinarioAlterado"
+
+
+class FeaturesNoPermitidas(ErrorCLI):
+    clase = "FeaturesNoPermitidas"
 
 
 class PerfilNoSoportado(ErrorCLI):
@@ -542,6 +547,27 @@ _CODEX_DISABLE = (
     "shell_tool", "unified_exec", "apps", "browser_use", "browser_use_external",
     "browser_use_full_cdp_access", "computer_use", "image_generation", "plugins",
     "multi_agent", "memories", "hooks",
+    # Auditoria 2026-10-02 (MAJOR-5): ambas vienen activas por defecto en 0.160.
+    # `unbounded_connection_retries` reintenta sin tope (equivale al
+    # KIMI_CODE_INFINITE_RETRY que el perfil de Kimi NUNCA activa);
+    # `daemon_auto_start` levanta un proceso residente fuera del confinamiento por llamada.
+    "unbounded_connection_retries", "daemon_auto_start",
+)
+
+# Features que PUEDEN quedar activadas con los --disable de arriba puestos: lista
+# PERMITIDA, no prohibida. `codex features list` crece con cada version y las
+# nuevas vienen activadas por defecto; una herramienta nueva no puede colarse por
+# no estar en la lista prohibida. Solo hay features sin ninguna accion sobre
+# archivos, procesos ni red: las "removed" (el CLI ya no las ofrece, no hay nada
+# que apagar) y las de formato de protocolo/compactacion. Sacada de la salida real
+# de `codex features list --disable ...` de 0.160.0; se RE-VERIFICA al fijar la
+# version (paso 11) con `verificar_features`. Cualquier otra activada la decide un
+# humano: apagarla con --disable (y agregarla a _CODEX_DISABLE) o permitirla aqui.
+_CODEX_FEATURES_PERMITIDAS = (
+    "collaboration_modes", "item_ids", "resize_all_images", "sqlite", "steer",
+    "terminal_resize_reflow", "tool_search_always_defer_mcp_tools", "tui_app_server",
+    "unified_exec_zsh_fork",
+    "compaction_image_budget", "content_item_kinds", "enable_request_compression", "mentions_v2",
 )
 
 
@@ -558,6 +584,48 @@ def _comando_codex(binario: str, modelo: str) -> list[str]:
         "-m", modelo,
     ]
     return cmd
+
+
+def comando_features_codex(binario: str) -> list[str]:
+    """argv de `codex features list` con los MISMOS --disable que usa el perfil:
+    `verificar_features` se alimenta con la salida de este comando, que muestra el
+    estado EFECTIVO (las apagadas salen en false)."""
+    cmd = [binario, "features", "list"]
+    for f in _CODEX_DISABLE:
+        cmd += ["--disable", f]
+    return cmd
+
+
+def verificar_features(salida_de_features_list: str, perfil: str = "codex") -> None:
+    """Falla cerrado (FeaturesNoPermitidas) si la salida de `codex features list`
+    (con los --disable del perfil, ver `comando_features_codex`) trae CUALQUIER
+    feature activada que no este en la lista permitida del perfil, o una linea que
+    no se pueda interpretar, o ninguna. Formato (0.160): `nombre  etapa  true|false`,
+    la etapa puede llevar espacios ("under development"). Se usa en el paso 11, al
+    fijar la version del CLI. Devuelve None si todo esta en regla."""
+    p = PERFILES.get(perfil)
+    if p is None or p.features_permitidas is None:
+        raise PerfilNoSoportado(f"el perfil {perfil!r} no declara una lista de features permitidas")
+    permitidas = set(p.features_permitidas)
+    activadas_no_permitidas, ilegibles, vistas = [], [], 0
+    for linea in salida_de_features_list.splitlines():
+        if not linea.strip():
+            continue
+        partes = linea.split()
+        if len(partes) < 3 or partes[-1] not in ("true", "false"):
+            ilegibles.append(linea.strip()[:60])
+            continue
+        vistas += 1
+        if partes[-1] == "true" and partes[0] not in permitidas:
+            activadas_no_permitidas.append(partes[0])
+    if ilegibles:
+        raise FeaturesNoPermitidas(f"lineas de `features list` ilegibles: {ilegibles}")
+    if not vistas:
+        raise FeaturesNoPermitidas("la salida de `features list` esta vacia")
+    if activadas_no_permitidas:
+        raise FeaturesNoPermitidas(
+            "features activadas fuera de la lista permitida: " + ", ".join(sorted(set(activadas_no_permitidas)))
+        )
 
 
 def _comando_kimi(binario: str, modelo: str) -> list[str]:
@@ -684,6 +752,7 @@ class Perfil:
     purgar: tuple[str, ...] = ()
     archivo_nombre: str = ""
     canal_prompt_verificado: bool = True
+    features_permitidas: Optional[tuple[str, ...]] = None  # solo codex; ver verificar_features
     ranuras: int = 2
     espera_lock_s: float = 10.0  # espera corta del chat (spec §1); no es el timeout
     _armar_comando: Optional[Callable[[str, str], list[str]]] = None
@@ -719,6 +788,12 @@ PERFILES: dict[str, Perfil] = {
         bin_nombre="codex", cred_subdir="codex", cred_destino=f"{_HOME_CLI}/.codex",
         env_extra=(("CODEX_HOME", f"{_HOME_CLI}/.codex"), ("CODEX_SQLITE_HOME", "/tmp/codex-sqlite")),
         archivo_nombre="sistema.md",
+        # Igual que Kimi: `model_instructions_file` figura en el binario pero que
+        # se honre en ejecucion NO esta verificado (§8, prueba manual del §5). Sin
+        # eso, el system prompt (persona y memoria) podria no llegar al modelo: no
+        # se lanza hasta verificarlo.
+        canal_prompt_verificado=False,
+        features_permitidas=_CODEX_FEATURES_PERMITIDAS,
         _armar_comando=_comando_codex, _parsear=_parsear_codex,
     ),
     "kimi": Perfil(
