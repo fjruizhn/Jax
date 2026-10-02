@@ -445,6 +445,18 @@ class TitularInfalsificableTest(_Entorno):
             self.assertNotIn("ningun llamador", doc.lower())
         self.assertIn("no es una barrera", cli_sandbox.Titular.__doc__.lower())
 
+    def test_la_docstring_de_titular_dice_exactamente_que_frontera_existe(self):
+        # MINOR-16: ni mas ni menos que lo que hay -- lo que impide el codigo, lo que NO
+        # impide (los atajos concretos) y el control de CI que los hace visibles
+        doc = cli_sandbox.Titular.__doc__
+        for frase in ("TypeError", "caduc", "object.__new__", "_SELLO", "_EMITIENDO", "emitido_mono",
+                      "test_titular_solo_via_exigir_titular", "revision", "no ve"):
+            self.assertIn(frase.lower(), doc.lower(), frase)
+        self.assertTrue(
+            (Path(cli_sandbox.__file__).resolve().parent / "policy" / "tests"
+             / "test_titular_solo_via_exigir_titular.py").is_file(),
+            "la docstring cita un control que tiene que existir")
+
 
 # ------------------------------------------------------------------ transporte
 

@@ -502,16 +502,25 @@ _EMITIENDO: contextvars.ContextVar[bool] = contextvars.ContextVar("cli_sandbox_e
 @dataclass(frozen=True)
 class Titular:
     """Prueba de que `exigir_titular` autorizo a este usuario, en este tenant y
-    por este punto de entrada, hace menos de `TITULAR_TTL_S` segundos. Solo lo
-    construye `exigir_titular`: `Titular(...)`, `dataclasses.replace`, `copy`,
-    `deepcopy` y `pickle` terminan en TypeError, y `run_cli` rechaza uno
-    caducado. El sello y la marca de tiempo no son argumentos del constructor.
+    por este punto de entrada, hace menos de `TITULAR_TTL_S` segundos.
 
-    No es una barrera contra codigo hostil DENTRO del proceso (quien importe este
-    modulo puede leer `_SELLO`): es la disciplina que hace que saltarse la
-    compuerta exija un acto deliberado y visible en una revision, y no un
-    descuido. La frontera real contra un llamador malicioso es la revision del
-    codigo y el scanner de policy/tests, no esta clase."""
+    LA FRONTERA QUE EXISTE, exactamente:
+      1. En ejecucion, por las vias normales, solo `exigir_titular` lo construye:
+         `Titular(...)`, `dataclasses.replace`, `copy`, `deepcopy` y `pickle`
+         terminan en TypeError; el sello y la marca de tiempo no son argumentos del
+         constructor; y `run_cli` rechaza uno caducado o de otro entry_point.
+      2. NO es una barrera contra codigo que corre DENTRO del proceso: quien importe
+         este modulo puede leer `_SELLO`, entrar a `_EMITIENDO`, fijar `emitido_mono`
+         con `object.__setattr__` o llamar `object.__new__(Titular)` y obtener un
+         Titular valido. Ninguna de esas vias esta cerrada en ejecucion.
+      3. Lo que las hace VISIBLES es un control de revision, no de ejecucion:
+         policy/tests/test_titular_solo_via_exigir_titular.py falla el CI si, fuera de
+         este archivo y de su test, el AST nombra `_SELLO`, `_EMITIENDO` o
+         `emitido_mono`, declara una subclase de `Titular` o llama `object.__new__`
+         sobre ella. No ve codigo fuera de los repos escaneados (en CI solo jax) ni
+         formas que el AST no muestra (`exec`/`eval` de texto, nombres calculados).
+    Saltarse la compuerta exige, pues, un acto deliberado que una revision ve, y no un
+    descuido; contra un llamador malicioso la defensa es la revision del codigo."""
     user_id: int
     tenant_id: int
     entry_point: str

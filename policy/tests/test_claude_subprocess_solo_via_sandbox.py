@@ -46,8 +46,7 @@ las formas mas sutiles del patron fail-open.
 Imports con alias (ampliado 2026-10-02, MINOR-6): `import subprocess as sp`,
 `from subprocess import run [as r]`, `import os as o`, `from os import system` y
 sus equivalentes de pty/asyncio SE RESUELVEN (`_Alias`): un nombre solo cuenta si
-viene de esos modulos. Quedan como residuo conocido las formas dinamicas
-(`getattr(subprocess, "run")`, `importlib`, `__import__`).
+viene de esos modulos. Las formas dinamicas se cubren desde la ronda 2 (ver abajo).
 
 ALCANCE REAL EN CI (misma limitacion honesta que
 test_no_fail_open_except.py, ver tambien el header de
@@ -81,6 +80,17 @@ tambien a traves de `izq + der` (por la izquierda), `shutil.which("x")`, una
 asignacion anotada (`cmd: list[str] = [...]`), `env [VAR=valor] cmd` y
 `bash|sh -c "cmd ..."` (se toma el primer token de cmd, hasta 4 niveles); y los
 lanzadores suman os.posix_spawn*, os.spawn*, os.popen y pty.spawn.
+
+EXTENSION 2026-10-02 (ronda 2, MINOR-16): `getattr(subprocess, 'run')(...)` (y
+`ejecutar = getattr(subprocess, 'run')`), `importlib.import_module('subprocess')` /
+`__import__('subprocess')` (directo o asignado a un nombre) y la concatenacion de
+literales (`['co' + 'dex']`, `'/opt/' + 'jax-cli'`, tambien a traves de un nombre
+asignado) se resuelven. Se quito el pre-filtro de texto del recorrido: buscaba el nombre
+entero y `'co' + 'dex'` no lo contiene. El criterio (a), la mencion suelta de "claude"
+junto a un subproceso, NO pliega concatenaciones: scripts/axioma_sync.py parte
+"CLAUDE.md" en dos literales y solo lanza `git`; lo que LANZA con el nombre partido lo
+atrapa el criterio (c). Residuo conocido: `"".join(...)`, f-strings y cualquier nombre
+armado con algo mas que `+` de literales o de nombres asignados a literales.
 
 NO se busca la palabra "kimi" a secas: es el nombre de la faceta y del motor en
 todo el codigo, y worker.py usa subprocess.run (para git). Daria falsos
@@ -241,15 +251,17 @@ _SUBPROCESS_CALL_PREFIXES = ("exec", "spawn", "posix_spawn")
 _QUALIFIED_ONLY_NAMES = {"run", "call", "check_call", "check_output", "system", "popen", "spawn"}
 _SUBPROCESS_MODULES = {"subprocess", "os", "pty"}
 # Modulos cuyos alias (`import X as Y`, `from X import f [as g]`) se resuelven.
-_MODULOS_CON_ALIAS = _SUBPROCESS_MODULES | {"asyncio", "shutil"}
+_MODULOS_CON_ALIAS = _SUBPROCESS_MODULES | {"asyncio", "shutil", "importlib"}
 
 
 class _Alias:
     """Que nombres locales son, de verdad, los modulos subprocess/os/pty/asyncio/
-    shutil o funciones importadas de ellos. Resuelve `import subprocess as sp` y
-    `from subprocess import run [as r]` (el scanner anterior los daba por residuo
-    aceptado: auditoria 2026-10-02, MINOR-6). Un nombre que NO viene de esos
-    modulos no se toca: `from mimodulo import run` no es un lanzador."""
+    shutil/importlib o funciones importadas de ellos. Resuelve `import subprocess as
+    sp` y `from subprocess import run [as r]` (el scanner anterior los daba por residuo
+    aceptado: auditoria 2026-10-02, MINOR-6) y, desde la ronda 2 (MINOR-16), tambien
+    `sp = importlib.import_module('subprocess')`, `sp = __import__('subprocess')` y
+    `ejecutar = getattr(subprocess, 'run')`. Un nombre que NO viene de esos modulos no
+    se toca: `from mimodulo import run` no es un lanzador."""
 
     def __init__(self, tree: ast.AST | None = None) -> None:
         self.modulos: dict[str, str] = {}
@@ -264,6 +276,74 @@ class _Alias:
             elif isinstance(n, ast.ImportFrom) and n.module in _MODULOS_CON_ALIAS and not n.level:
                 for a in n.names:
                     self.funciones[a.asname or a.name] = (n.module, a.name)
+        # Asignaciones: en una segunda pasada, porque dependen de los imports de arriba.
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+                destino, valor = n.targets[0].id, n.value
+            elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.value is not None:
+                destino, valor = n.target.id, n.value
+            else:
+                continue
+            modulo = _modulo_de_expr(valor, self)
+            if modulo in _MODULOS_CON_ALIAS and isinstance(valor, ast.Call):
+                self.modulos[destino] = modulo
+                continue
+            if isinstance(valor, ast.Call):
+                par = _getattr_de_modulo(valor, self)
+                if par is not None:
+                    self.funciones[destino] = par
+
+
+def _plegar(nodo: ast.AST, asignaciones: dict[str, ast.AST] | None = None, _prof: int = 0) -> str | None:
+    """La cadena a la que se pliega una expresion hecha SOLO de literales unidos con
+    `+` (`'co' + 'dex'`), de nombres asignados a una (`A = 'co'; A + 'dex'`) o de
+    un literal; None si no se puede resolver entera."""
+    if _prof > 6:
+        return None
+    if isinstance(nodo, ast.Constant) and isinstance(nodo.value, str):
+        return nodo.value
+    if isinstance(nodo, ast.BinOp) and isinstance(nodo.op, ast.Add):
+        izq = _plegar(nodo.left, asignaciones, _prof + 1)
+        der = _plegar(nodo.right, asignaciones, _prof + 1) if izq is not None else None
+        return None if izq is None or der is None else izq + der
+    if isinstance(nodo, ast.Name) and asignaciones and nodo.id in asignaciones:
+        return _plegar(asignaciones[nodo.id], asignaciones, _prof + 1)
+    return None
+
+
+def _es_llamada_de_importacion(call: ast.Call, alias: "_Alias") -> bool:
+    """`importlib.import_module(...)`, `import_module(...)` (importado de importlib, con o
+    sin alias) o `__import__(...)`."""
+    f = call.func
+    if isinstance(f, ast.Name):
+        if f.id == "__import__":
+            return True
+        return alias.funciones.get(f.id) == ("importlib", "import_module")
+    if isinstance(f, ast.Attribute) and f.attr == "import_module" and isinstance(f.value, ast.Name):
+        return alias.modulos.get(f.value.id, f.value.id) == "importlib"
+    return False
+
+
+def _modulo_de_expr(expr: ast.AST, alias: "_Alias") -> str | None:
+    """El modulo que representa `expr`: un nombre (`sp` -> subprocess si es un alias) o
+    una importacion dinamica con nombre literal (`importlib.import_module('subprocess')`)."""
+    if isinstance(expr, ast.Name):
+        return alias.modulos.get(expr.id, expr.id)
+    if isinstance(expr, ast.Call) and _es_llamada_de_importacion(expr, alias) and expr.args:
+        return _plegar(expr.args[0])
+    return None
+
+
+def _getattr_de_modulo(call: ast.Call, alias: "_Alias") -> tuple[str, str] | None:
+    """`getattr(<modulo>, 'nombre')` -> (modulo, nombre); el nombre puede ser una
+    concatenacion de literales."""
+    if _call_name(call.func) != "getattr" or len(call.args) < 2:
+        return None
+    modulo = _modulo_de_expr(call.args[0], alias)
+    nombre = _plegar(call.args[1])
+    if modulo is None or nombre is None:
+        return None
+    return modulo, nombre
 
 
 _SIN_ALIAS = _Alias()
@@ -274,12 +354,17 @@ def _nombre_lanzador(node: ast.Call, alias: _Alias = _SIN_ALIAS) -> str | None:
     `system`, `spawnlp`...), o None si no lo es."""
     func = node.func
     modulo: str | None = None
-    if isinstance(func, ast.Name) and func.id in alias.funciones:
+    if isinstance(func, ast.Call):
+        par = _getattr_de_modulo(func, alias)  # getattr(subprocess, 'run')(...)
+        if par is None:
+            return None
+        modulo, name = par
+    elif isinstance(func, ast.Name) and func.id in alias.funciones:
         modulo, name = alias.funciones[func.id]
     else:
         name = _call_name(func)
-        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-            modulo = alias.modulos.get(func.value.id, func.value.id)
+        if isinstance(func, ast.Attribute):
+            modulo = _modulo_de_expr(func.value, alias)
     if name is None:
         return None
     if name not in _SUBPROCESS_CALL_NAMES and not name.startswith(_SUBPROCESS_CALL_PREFIXES):
@@ -324,9 +409,29 @@ def _calls_create_subprocess(tree: ast.Module) -> bool:
     return False
 
 
+def _literales(tree: ast.AST):
+    """Cada string literal del AST y, ademas, cada cadena que resulta de plegar una
+    concatenacion de literales (`'/opt/' + 'jax-cli'`, tambien a traves de un nombre
+    asignado): partir la ruta en dos literales no la esconde. Lo usa el criterio (d)."""
+    asignaciones = _asignaciones_a_listas(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            yield node.value
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            plegada = _plegar(node, asignaciones)
+            if plegada is not None:
+                yield plegada
+
+
 def _references_claude_literal(tree: ast.Module) -> bool:
     """True si el archivo menciona "claude" en un STRING LITERAL del AST
     (incluidos docstrings), no en un comentario `#`.
+
+    NO pliega concatenaciones (`'C' + 'LAUDE.md'`): este criterio (a) es el de la
+    MENCION suelta junto a un subproceso, y plegar marcaria a
+    scripts/axioma_sync.py, que parte "CLAUDE.md" en dos literales y solo lanza `git`.
+    Lo que si LANZA claude con el nombre partido (`['cla' + 'ude']`, `os.system('cla' +
+    'ude -p')`) lo atrapa el criterio (c), que pliega el argv.
 
     Los comentarios de Python se descartan antes de parsear y NUNCA forman
     parte del AST -- por eso este chequeo los excluye de raiz, que es
@@ -348,9 +453,12 @@ def _references_claude_literal(tree: ast.Module) -> bool:
 
 # CLIs de suscripcion que solo el nucleo cli_sandbox puede lanzar (spec §5).
 _CLIS_DE_SUSCRIPCION = ("claude", "codex", "kimi")
-_OPT_CLI = "/opt/" + "jax-cli"
-_HOME_KIMI = "." + "kimi-code"
-_PAQUETES_CODEX = "." + "codex/packages"
+# Armadas con "".join(...) y no con `+` a proposito: el criterio (d) pliega las
+# concatenaciones de literales, y estas rutas escritas enteras o con `+` marcarian a
+# este archivo. `.join` NO se pliega (residuo conocido, ver el header).
+_OPT_CLI = "".join(("/opt/", "jax-cli"))
+_HOME_KIMI = "".join((".", "kimi-code"))
+_PAQUETES_CODEX = "".join((".", "codex/packages"))
 _RUTAS_DE_CLI = (_OPT_CLI, _HOME_KIMI, _PAQUETES_CODEX)
 
 
@@ -402,9 +510,10 @@ def _tokens(nodo: ast.AST, asignaciones: dict[str, ast.AST], _prof: int = 0) -> 
             if isinstance(elt, ast.Starred):
                 sub = _tokens(elt.value, asignaciones, _prof + 1)
                 out += sub if sub is not None else [None]
-            elif isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                # el argv0 con espacios ("codex exec") cuenta por su primera palabra
-                out.append(elt.value.split()[0] if i == 0 and elt.value.split() else elt.value)
+            elif (plegada := _plegar(elt, asignaciones)) is not None and not isinstance(elt, ast.Name):
+                # el argv0 con espacios ("codex exec") cuenta por su primera palabra;
+                # una concatenacion de literales (`'co' + 'dex'`) cuenta como su resultado
+                out.append(plegada.split()[0] if i == 0 and plegada.split() else plegada)
             else:
                 # un nombre asignado a una cadena/`which(...)` o un `which(...)` directo
                 sub = _tokens(elt, asignaciones, _prof + 1) if isinstance(elt, (ast.Call, ast.Name)) else None
@@ -415,11 +524,12 @@ def _tokens(nodo: ast.AST, asignaciones: dict[str, ast.AST], _prof: int = 0) -> 
     if isinstance(nodo, ast.Name) and nodo.id in asignaciones:
         return _tokens(asignaciones[nodo.id], asignaciones, _prof + 1)
     if isinstance(nodo, ast.BinOp) and isinstance(nodo.op, ast.Add):
+        plegada = _plegar(nodo, asignaciones)
+        if plegada is not None:  # solo literales: `'co' + 'dex'` es "codex"
+            return _tokens_de_cadena(plegada)
         izq = _tokens(nodo.left, asignaciones, _prof + 1)
         if izq is None:
             return None
-        if isinstance(nodo.left, ast.Constant) and isinstance(nodo.right, ast.Constant):
-            return _tokens(ast.Constant(value=str(nodo.left.value) + str(nodo.right.value)), asignaciones, _prof + 1)
         return izq + [None]
     if isinstance(nodo, ast.Call) and _call_name(nodo.func) == "which" and nodo.args:
         arg = nodo.args[0]
@@ -505,13 +615,9 @@ def _lanza_cli_de_suscripcion(tree: ast.AST) -> bool:
 
 
 def _menciona_ruta_de_cli(tree: ast.AST) -> bool:
-    """Criterio (d): un literal con la ruta de los binarios fijados o de las
-    credenciales de un CLI de suscripcion."""
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if any(r in node.value for r in _RUTAS_DE_CLI):
-                return True
-    return False
+    """Criterio (d): un literal (o una concatenacion de literales) con la ruta de los
+    binarios fijados o de las credenciales de un CLI de suscripcion."""
+    return any(r in lit for lit in _literales(tree) for r in _RUTAS_DE_CLI)
 
 
 def _viola_la_politica(tree: ast.Module) -> bool:
@@ -544,13 +650,9 @@ def find_naked_claude_subprocess_files() -> list[str]:
             source = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        # Pre-filtro barato sobre el texto crudo: descarta rapido los
-        # archivos que NO pueden matchear, sin pagar el ast.parse. No
-        # alcanza por si solo -- ve comentarios, que el AST no (ver
-        # _references_claude_literal).
-        bajo = source.lower()
-        if not any(m in bajo for m in (*_CLIS_DE_SUSCRIPCION, *_RUTAS_DE_CLI)):
-            continue
+        # SIN pre-filtro de texto (ronda 2, MINOR-16): buscaba "codex"/"kimi"/"claude" en el
+        # texto crudo y `'co' + 'dex'` no lo contiene, asi que el archivo se saltaba
+        # entero. Parsear todo el arbol cuesta ~0,5 s (medido: 716 archivos).
         try:
             tree = ast.parse(source, filename=str(path))
         except SyntaxError:
@@ -913,6 +1015,93 @@ def test_los_otros_lanzadores_no_inventan_violaciones() -> None:
     assert not _detects("import os\nos.spawnlp(os.P_WAIT, 'git', 'git')\n")
     assert not _detects("sock.spawn(['codex'])\n")      # `spawn` de otro objeto
     assert not _detects("pool.popen('kimi')\n")         # `popen` de otro objeto
+
+
+# --- Formas dinamicas (auditoria 2026-10-02, ronda 2, MINOR-16) -------------
+# `getattr(subprocess, 'run')(...)`, `importlib.import_module('subprocess')` y la
+# concatenacion de literales (`'co' + 'dex'`) dejaron de ser residuo aceptado.
+
+def test_detecta_getattr_de_un_lanzador() -> None:
+    assert _detects("import subprocess\ngetattr(subprocess, 'run')(['codex', 'exec'])\n")
+    assert _detects("import subprocess as sp\ngetattr(sp, 'Popen')(['kimi', '-p'])\n")
+    assert _detects("import os\ngetattr(os, 'system')('codex exec -')\n")
+    assert _detects("import asyncio\ngetattr(asyncio, 'create_subprocess_exec')('codex', 'exec')\n")
+    assert _detects("import subprocess\ngetattr(subprocess, 'ru' + 'n')(['kimi'])\n")
+    assert _detects("import subprocess\ngetattr(subprocess, 'run')(['claude', '--print'])\n")
+    assert _detects("import subprocess\nejecutar = getattr(subprocess, 'run')\nejecutar(['codex'])\n")
+
+
+def test_getattr_no_inventa_violaciones() -> None:
+    assert not _detects("import subprocess\ngetattr(subprocess, 'run')(['git', 'status'])\n")
+    assert not _detects("getattr(obj, 'run')(['codex'])\n")                       # `obj` no es un modulo de procesos
+    assert not _detects("import subprocess\ngetattr(subprocess, 'PIPE')\n")      # no lo llama
+    assert not _detects("import subprocess\ngetattr(subprocess, 'list2cmdline')(['codex'])\n")
+
+
+def test_detecta_importlib_y_dunder_import() -> None:
+    assert _detects("import importlib\nsp = importlib.import_module('subprocess')\nsp.run(['codex', 'exec'])\n")
+    assert _detects("import importlib\nimportlib.import_module('subprocess').run(['kimi'])\n")
+    assert _detects("import importlib\nimportlib.import_module('os').system('codex exec -')\n")
+    assert _detects("from importlib import import_module\nimport_module('subprocess').Popen(['codex'])\n")
+    assert _detects("from importlib import import_module as im\nim('subprocess').run(['kimi'])\n")
+    assert _detects("__import__('subprocess').run(['codex'])\n")
+    assert _detects("sp = __import__('subprocess')\nsp.check_output(['kimi', '-p', 'x'])\n")
+    assert _detects("import importlib\nsp = importlib.import_module('subprocess')\ngetattr(sp, 'run')(['codex'])\n")
+    assert _detects("import importlib\nimportlib.import_module('subprocess').run(['claude'])\n")
+
+
+def test_importlib_no_inventa_violaciones() -> None:
+    assert not _detects("import importlib\nsp = importlib.import_module('subprocess')\nsp.run(['git', 'log'])\n")
+    assert not _detects("import importlib\nm = importlib.import_module('json')\nm.run(['codex'])\n")
+    assert not _detects("import importlib\nimportlib.import_module('mimodulo').run(['kimi'])\n")
+    assert not _detects("import importlib\nimportlib.import_module('subprocess')\n")  # lo importa, no lanza nada
+
+
+def test_detecta_la_concatenacion_de_literales() -> None:
+    assert _detects("import subprocess\nsubprocess.run(['co' + 'dex', 'exec'])\n")
+    assert _detects("import subprocess\nsubprocess.run(['/usr/local/bin/' + 'kimi', '-p'])\n")
+    assert _detects("import subprocess\nsubprocess.run(['c' + 'o' + 'de' + 'x'])\n")
+    assert _detects("import subprocess\nsubprocess.run('co' + 'dex')\n")
+    assert _detects("import os\nos.system('co' + 'dex exec -')\n")
+    assert _detects("import os\nos.system('co' + 'dex exec - ' + entrada)\n")
+    assert _detects("import subprocess\nBIN = 'ki' + 'mi'\nsubprocess.run([BIN, '-p'])\n")
+    assert _detects("import subprocess\nA = 'co'\nB = A + 'dex'\nsubprocess.run([B, 'exec'])\n")
+    assert _detects("import subprocess\nsubprocess.run(['cla' + 'ude', '--print'])\n")
+    assert _detects("import subprocess\nsubprocess.run(['bash', '-c', 'co' + 'dex exec -'])\n")
+
+
+def test_la_concatenacion_tambien_cubre_las_rutas_de_los_binarios() -> None:
+    assert _detects(f"RUTA = '/opt/' + '{_OPT_CLI.rsplit('/', 1)[-1]}' + '/codex'\n")
+    assert _detects("HOME = '/home/fruiz/.ki' + 'mi-code/credentials'\n")
+    assert _detects("P = '/home/fruiz/.co' + 'dex/packages/x'\n")
+
+
+def test_la_concatenacion_no_inventa_violaciones() -> None:
+    assert not _detects("import subprocess\nsubprocess.run(['gi' + 't', 'log'])\n")
+    assert not _detects("import subprocess\nsubprocess.run(['co' + 'dex-helper'])\n")
+    assert not _detects("import subprocess\nsubprocess.run(['x' + 'co' + 'dex'])\n")
+    assert not _detects("import subprocess\nsubprocess.run(['git', 'commit', '-m', 'co' + 'dex'])\n")
+    assert not _detects("MOTOR = 'co' + 'dex'\nprint(MOTOR)\n")                  # nombra, no lanza
+    assert not _detects("import subprocess\nsubprocess.run(['git'] + ['co' + 'dex'])\n")
+    # el caso real de scripts/axioma_sync.py: parte "CLAUDE.md" en dos literales y solo
+    # lanza `git`. La MENCION partida (criterio a) no se pliega; lanzar si (test de arriba).
+    assert not _detects("import subprocess\nNOMBRE = 'C' + 'LAUDE.md'\nsubprocess.run(['git', 'rev-parse', 'HEAD'])\n")
+
+
+def test_un_archivo_con_el_nombre_partido_no_se_salta_el_prefiltro(tmp_path) -> None:
+    """El pre-filtro del recorrido buscaba "codex" en el texto crudo: `'co' + 'dex'`
+    no lo contiene y el archivo se saltaba entero. Se prueba sobre el recorrido real."""
+    raiz = tmp_path / "repo"
+    (raiz / "tools").mkdir(parents=True)
+    (raiz / "tools" / "lanza.py").write_text("import subprocess\nsubprocess.run(['co' + 'dex', 'exec'])\n")
+    global REPO_ROOTS
+    anteriores = REPO_ROOTS
+    REPO_ROOTS = [raiz]
+    try:
+        encontrados = {Path(v).relative_to(raiz).as_posix() for v in find_naked_claude_subprocess_files()}
+    finally:
+        REPO_ROOTS = anteriores
+    assert encontrados == {"tools/lanza.py"}
 
 
 def test_no_naked_claude_subprocess() -> None:
