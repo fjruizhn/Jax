@@ -1669,8 +1669,11 @@ jobs:
           # 172 -> 180 el 2026-09-29 (F2-C final A01): ASCII/curly apostrophe,
           # case, NFC/NFD, Markdown heading/link/table/code, and unrelated
           # punctuation negative-control cases.
-          grep -qE "^180 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 180 tests CORRIDOS."; exit 1; }
+          # 180 -> 187 el 2026-10-02 (F2-E-SR-001): grammar escapes for
+          # ENGINE_STATUS(alive), approved FACET_RUNTIME_STATUS wording, and
+          # structured TOOL_DATA status bypasses.
+          grep -qE "^187 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 187 tests CORRIDOS."; exit 1; }
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en
