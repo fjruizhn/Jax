@@ -1,5 +1,5 @@
-# Los ocho predicados cerrados de REFORMAS-v3.md §3.1.3, trasladados tal
-# cual — la lista es cerrada y versionada; ampliarla requiere enmienda
+# Los ocho predicados cerrados de REFORMAS-v3.md §3.1.3 y dos adiciones
+# autorizadas de F2-E-SR-001 — la lista es cerrada y versionada; ampliarla requiere enmienda
 # (según el propio §3.1.3).
 #
 # Fuente: /opt/jax/docs/REFORMAS-v3.md §3.1.3, sha256
@@ -14,7 +14,7 @@ predicates:
     source_of_truth: "Configuración de facetas"
   - name: ENGINE_STATUS
     args: [name, status]
-    source_of_truth: "Health check"
+    source_of_truth: "Observación fija de salud de LAS MANOS"
   - name: CONFIG_VALUE
     args: [path, key, value]
     source_of_truth: "Archivo de configuración con hash"
@@ -26,7 +26,13 @@ predicates:
     source_of_truth: "Audit log"
   - name: JOB_STATUS
     args: [job_id, status]
-    source_of_truth: "Scheduler"
+    source_of_truth: "Motor Registry JobStore"
+  - name: PIPELINE_STATUS
+    args: [pipeline_id, status]
+    source_of_truth: "Jacobs canonical store"
+  - name: FACET_RUNTIME_STATUS
+    args: [name, status]
+    source_of_truth: "Platform FacetState"
   - name: MEMORY_ENTRY_EXISTS
     args: [memory_id, scope]
     source_of_truth: "MariaDB jax_memory"

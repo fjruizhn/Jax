@@ -15,7 +15,7 @@ from typing import Mapping
 
 from .response import GovernanceContractError, _text
 
-GOVERNED_DOMAIN_SPEC_VERSION = "f2-c.domain.2"
+GOVERNED_DOMAIN_SPEC_VERSION = "f2-c.domain.3"
 GOVERNED_RENDERER_API_VERSION = "f2-c.renderer.2"
 GOVERNED_ENVELOPE_SCHEMA_VERSIONS = frozenset({"f2-c.1"})
 
@@ -24,6 +24,10 @@ _CANONICAL_STATUS_ALIASES = MappingProxyType({
     "exists": ("exists", "exist", "present", "existe", "existen"),
     "completed": ("completed", "finished", "succeeded", "terminó", "termino", "finalizó", "finalizo", "correctamente"),
     "down": ("down", "unhealthy", "unavailable", "caído", "caido", "inactivo"),
+    # Closed runtime vocabularies. They are interpreted only by the explicit
+    # JOB_STATUS / PIPELINE_STATUS / FACET_RUNTIME_STATUS grammars below;
+    # ENGINE_STATUS keeps its narrower health-check vocabulary.
+    "runtime": ("pending", "running", "failed", "aborted", "interrupted", "expired", "disputed", "discarded", "hidden", "idle", "thinking", "error", "offline", "cancelling", "cancelled", "rejected", "tools_requested"),
 })
 _CANONICAL_LOCALE_ALIASES = MappingProxyType({
     "en": ("is", "are", "exists", "exist", "available", "healthy", "up", "down", "completed"),
@@ -120,15 +124,18 @@ class GovernedDomainSpecification:
         subjects = aliases + resources
         subject = "|".join(re.escape(x) for x in subjects) if subjects else r"[\w./:-]+"
         status = "|".join(re.escape(x) for values in self.status_aliases.values() for x in values)
+        engine_status = "|".join(re.escape(x) for key in ("healthy", "down") for x in self.status_aliases.get(key, ()))
         locale_words = {word for aliases in self.locale_aliases.values() for word in aliases}
         copula_words = sorted(locale_words & {"is", "are", "es", "está", "esta", "son"})
         copula = r"(?:" + "|".join(re.escape(x) for x in copula_words) + r"|was|were|isn't|isnt|is\s+not|are\s+not|no\s+está|no\s+esta|no\s+es)"
         exists = r"(?:exists|exist|does\s+not\s+exist|doesn't\s+exist|no\s+existe|no\s+existen|existe|existen)"
         patterns = (
-            ("ENGINE_STATUS", rf"\b(?:{subject})\b\s+{copula}\s+(?:{status})\b"),
+            ("ENGINE_STATUS", rf"\b(?:{subject})\b\s+{copula}\s+(?:{engine_status})\b"),
             ("FILE_EXISTS", rf"\b(?:the\s+)?(?:file|archivo|path|ruta)\s+(?:{subject}|/[^\s]+)\s+{exists}\b|\b(?:{subject}|/[^\s]+)\s+{exists}\b"),
             ("FACET_EXISTS", rf"\b(?:facet|faceta)\s+(?:{subject})\s+{exists}\b"),
             ("JOB_STATUS", rf"\b(?:job|trabajo)\s+[^\s]+\s+(?:(?:(?:is|was|está|esta|fue|ha)\s+)?(?:{status})|no\s+(?:{status}))\b"),
+            ("PIPELINE_STATUS", rf"\b(?:pipeline|tubería)\s+[^\s]+\s+(?:(?:(?:is|was|está|esta|fue|ha)\s+)?(?:{status})|no\s+(?:{status}))\b"),
+            ("FACET_RUNTIME_STATUS", rf"\b(?:facet|faceta)\s+[^\s]+\s+{copula}\s+(?:{status})\b"),
             ("CAPABILITY_AVAILABLE", rf"\b(?:capability|capacidad)\s+(?:{subject})\s+{copula}\s+(?:{status})\b"),
             ("CAPABILITY_AVAILABLE", rf"\b(?:the\s+)?(?:capability|capacidad)\s+{copula}\s+(?:{status})\b"),
             ("CONFIG_VALUE", r"\b(?:config(?:uration)?|configuración)\s+(?:value|valor)\b"),
@@ -159,6 +166,8 @@ def _canonical_vocabulary():
     # Hall9000 is a registered JAX governance entity. Explicit aliases remain
     # versioned here in core alongside policy-derived entities.
     entities["hall9000"] = ("Hall9000", "Hall 9000")
+    # This fixed health source is owned by the LAS MANOS server composition.
+    entities["las_manos_health_source"] = ("LAS MANOS", "LAS_MANOS")
     resources = {path: (path,) for path in vocabulary.config_paths}
     resources.update({path: (path,) for path in ("/etc/passwd", "policy/", "las_manos/")})
     return predicates, entities, resources

@@ -259,7 +259,8 @@ async def governed_dispatch(req: GovernedDispatchRequest) -> MotorDispatchRespon
 
     _STORE.create(caller=request.authenticated_caller_id, capability=request.capability,
         motor=request.motor, trace_id=req.trace_id, prompt=request.prompt,
-        recursion_depth=0, pipeline_id=None, job_id=job_id)
+        recursion_depth=0, pipeline_id=None, job_id=job_id, tenant_id=request.tenant_id,
+        user_id=request.user_id, project_id=None)
     task = asyncio.create_task(motor_worker.run(job_id=job_id, motor=request.motor,
         capability=request.capability, prompt=request.prompt, context=request.projection()["context"],
         store=_STORE, catalog=_CATALOG, kill_switch_path=str(route), user_id=request.user_id,

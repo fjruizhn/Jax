@@ -1,9 +1,9 @@
 # Plantillas de renderer por predicado — REFORMAS-v3.md §3.1.6.
 # Trasladadas tal cual las tres que el documento da como ejemplo. Las
-# cinco restantes (de los ocho predicados de vocabulary/predicates.yaml)
-# NO tienen plantilla en REFORMAS-v3.md — se marcan pendientes, no se
-# inventan (§3.1.6: "El renderer no puede emitir texto para un predicado
-# sin plantilla registrada").
+# las restantes no tenían plantilla en REFORMAS-v3.md. Las plantillas
+# runtime de JOB_STATUS / ENGINE_STATUS y las dos adiciones autorizadas
+# PIPELINE_STATUS / FACET_RUNTIME_STATUS quedan definidas por F2-E-SR-001.
+# Los predicados aún pendientes no pueden renderizarse.
 #
 # Fuente: /opt/jax/docs/REFORMAS-v3.md §3.1.6, sha256
 # 4099a08c39713c79836eb1ab58fc42e0a3a1357767590cfe281c04ea7ede8660
@@ -26,16 +26,24 @@ templates:
     template: null
 
   ENGINE_STATUS:
-    status: pendiente
-    template: null
+    status: definida
+    template: "La comprobación de salud registrada informa actualmente que {name} está {status}."
 
   CONFIG_VALUE:
     status: pendiente
     template: null
 
   JOB_STATUS:
-    status: pendiente
-    template: null
+    status: definida
+    template: "Motor Registry registra actualmente que el job {job_id} está {status}."
+
+  PIPELINE_STATUS:
+    status: definida
+    template: "Jacobs registra actualmente que el pipeline {pipeline_id} está {status}."
+
+  FACET_RUNTIME_STATUS:
+    status: definida
+    template: "JAX Platform actualmente marca la faceta {name} con estado de ejecución {status}."
 
   MEMORY_ENTRY_EXISTS:
     status: pendiente

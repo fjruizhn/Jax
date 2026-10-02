@@ -27,7 +27,7 @@ class JobStore:
     def __init__(self, path: str) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._index: dict[str, dict] = {}   # job_id → latest state dict
         self._load()
 
@@ -46,12 +46,11 @@ class JobStore:
                 except (json.JSONDecodeError, KeyError):  # fail-soft: linea de log JSONL corrupta se descarta; el peor caso es un job ausente del indice (falla cerrado: caller sigue esperando), no uno que aparente exito
                     pass  # línea corrupta — ignorar silenciosamente
 
-    def _append(self, event: dict) -> None:
-        with self._lock:
-            line = json.dumps(event, ensure_ascii=False) + "\n"
-            with open(self._path, "a", encoding="utf-8") as f:
-                f.write(line)
-            self._index[event["job_id"]] = event
+    def _append_locked(self, event: dict) -> None:
+        line = json.dumps(event, ensure_ascii=False) + "\n"
+        with open(self._path, "a", encoding="utf-8") as f:
+            f.write(line)
+        self._index[event["job_id"]] = event
 
     def create(
         self,
@@ -63,6 +62,9 @@ class JobStore:
         prompt: str,
         recursion_depth: int,
         pipeline_id: str | None = None,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        project_id: str | None = None,
         job_id: str | None = None,
     ) -> str:
         # Governed dispatch reserves its identifier before the B6/B7 atomic
@@ -70,8 +72,6 @@ class JobStore:
         # Motor job have one exact, durable binding.  Ordinary callers still
         # receive a store-generated identifier.
         job_id = job_id or str(uuid.uuid4())
-        if job_id in self._index:
-            raise KeyError(f"job_id ya existe: {job_id}")
         event: dict[str, Any] = {
             "job_id": job_id,
             "status": JobStatus.PENDING.value,
@@ -84,6 +84,7 @@ class JobStore:
             "created_at": time.time(),
             "started_at": None,
             "finished_at": None,
+            "status_updated_at": None,
             "error": None,
             "result_summary": None,
             # Task 7b (2026-09-18, historial-y-arreglos-de-pipeline): puesto
@@ -94,15 +95,26 @@ class JobStore:
             # valor sobrevive a cada escritura posterior sin que nadie tenga
             # que repetirlo.
             "pipeline_id": pipeline_id,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "project_id": project_id,
         }
-        self._append(event)
+        with self._lock:
+            if job_id in self._index:
+                raise KeyError(f"job_id ya existe: {job_id}")
+            self._append_locked(event)
         return job_id
 
     def update(self, job_id: str, **kwargs: Any) -> None:
-        if job_id not in self._index:
-            raise KeyError(f"job_id desconocido: {job_id}")
-        event = {**self._index[job_id], **kwargs, "job_id": job_id}
-        self._append(event)
+        if {"tenant_id", "user_id", "project_id"} & set(kwargs):
+            raise ValueError("ownership fields are immutable")
+        with self._lock:
+            if job_id not in self._index:
+                raise KeyError(f"job_id desconocido: {job_id}")
+            event = {**self._index[job_id], **kwargs, "job_id": job_id}
+            if "status" in kwargs:
+                event["status_updated_at"] = time.time()
+            self._append_locked(event)
 
     def write_result(self, job_id: str, content: str) -> str:
         """Guarda la salida completa del motor en un archivo propio, junto al
@@ -119,10 +131,12 @@ class JobStore:
         return str(path)
 
     def get(self, job_id: str) -> MotorJobView | None:
-        state = self._index.get(job_id)
-        if state is None:
-            return None
-        return MotorJobView(**{k: v for k, v in state.items() if k in _JOB_VIEW_FIELDS})
+        with self._lock:
+            state = self._index.get(job_id)
+            if state is None:
+                return None
+            snapshot = dict(state)
+        return MotorJobView(**{k: v for k, v in snapshot.items() if k in _JOB_VIEW_FIELDS})
 
     def ids_en_estado(self, *estados: str) -> list[str]:
         """job_id de todo lo que esté en alguno de `estados` ahora mismo,
@@ -132,4 +146,5 @@ class JobStore:
         "en vuelo" (`pending`/`running`) contra tareas realmente vivas --
         un consumidor que reinicia el proceso necesita poder preguntar
         "¿qué quedó a medias?" sin asomarse a `_index` directo."""
-        return [job_id for job_id, evento in self._index.items() if evento.get("status") in estados]
+        with self._lock:
+            return [job_id for job_id, evento in self._index.items() if evento.get("status") in estados]
