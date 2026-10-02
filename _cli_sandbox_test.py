@@ -21,6 +21,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
+import fcntl
+import grp
 import hashlib
 import inspect
 import json
@@ -1354,6 +1356,145 @@ class LocksSegurosTest(_Entorno):
                     hyde_sandbox._acquire_cross_process_lock("/ws", timeout=0.2)
             finally:
                 hyde_sandbox._release_cross_process_lock(fh)
+
+
+class LocksCompartidosTest(unittest.TestCase):
+    """MAJOR-14 (auditoria 2026-10-02, ronda 2): el lock de Hyde lo comparten
+    procesos de usuarios DISTINTOS (las_manos/jaxsvc y el REPL/fruiz), asi que el
+    dueno es root y el acceso es por GRUPO: el directorio y el archivo son de root,
+    del grupo del lock y sin escritura de grupo ni de otros; el archivo se abre
+    SOLO LECTURA, sin O_CREAT (lo siembra tmpfiles.d)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = Path(self.tmp.name) / "locks"
+        self.d.mkdir()
+        os.chmod(self.d, 0o750)
+        self.grupo = grp.getgrgid(os.getgid()).gr_name
+        self.victima = Path(self.tmp.name) / "victima.txt"
+        self.victima.write_text("NO-TRUNCAR")
+        self.f = self.d / "ws.lock"
+        self.f.write_text("")
+        os.chmod(self.f, 0o640)
+
+    def _adq(self, nombre="ws.lock", timeout=1, grupo=None, **kw):
+        kw.setdefault("uid_esperado", os.getuid())
+        return cli_sandbox.flock_compartido_adquirir(
+            str(self.d), nombre, grupo or self.grupo, timeout, "lock de prueba", **kw)
+
+    def test_un_lock_sano_se_adquiere_de_solo_lectura_y_con_cloexec(self):
+        fh = self._adq()
+        try:
+            flags = fcntl.fcntl(fh.fileno(), fcntl.F_GETFL)
+            self.assertEqual(flags & os.O_ACCMODE, os.O_RDONLY)
+            self.assertFalse(os.get_inheritable(fh.fileno()))
+        finally:
+            cli_sandbox.flock_liberar(fh)
+
+    def test_exclusion_real_entre_dos_fds_de_solo_lectura_del_mismo_archivo(self):
+        fh = self._adq()
+        try:
+            otro = os.open(self.f, os.O_RDONLY)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(otro, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(otro)
+            with self.assertRaises(TimeoutError):
+                self._adq(timeout=0.2)
+        finally:
+            cli_sandbox.flock_liberar(fh)
+        cli_sandbox.flock_liberar(self._adq())  # liberado: se vuelve a tomar
+
+    def test_el_dueno_esperado_y_el_gid_son_keyword_con_defaults_root_y_grupo_real(self):
+        p = inspect.signature(cli_sandbox.flock_compartido_adquirir).parameters
+        self.assertEqual(p["uid_esperado"].default, 0)
+        self.assertIsNone(p["gid_esperado"].default)
+        self.assertEqual(p["uid_esperado"].kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertEqual(p["gid_esperado"].kind, inspect.Parameter.KEYWORD_ONLY)
+        with self.assertRaises(cli_sandbox.SandboxUnavailable):  # sin inyectar: no es de root
+            cli_sandbox.flock_compartido_adquirir(str(self.d), "ws.lock", self.grupo, 1, "x")
+
+    def test_directorio_de_otro_dueno_o_de_otro_grupo_se_rechaza(self):
+        with self.assertRaises(cli_sandbox.SandboxUnavailable):
+            self._adq(uid_esperado=os.getuid() + 1)
+        with self.assertRaises(cli_sandbox.SandboxUnavailable):
+            self._adq(gid_esperado=os.getgid() + 1)
+
+    def test_directorio_con_escritura_de_grupo_u_otros_se_rechaza(self):
+        for modo in (0o770, 0o720, 0o707, 0o702, 0o777):
+            with self.subTest(modo=oct(modo)):
+                os.chmod(self.d, modo)
+                with self.assertRaises(cli_sandbox.SandboxUnavailable):
+                    self._adq()
+        os.chmod(self.d, 0o750)
+        cli_sandbox.flock_liberar(self._adq())
+
+    def test_directorio_que_es_un_symlink_se_rechaza(self):
+        enlace = Path(self.tmp.name) / "enlace"
+        os.symlink(self.d, enlace)
+        with self.assertRaises(cli_sandbox.SandboxUnavailable):
+            cli_sandbox.flock_compartido_adquirir(
+                str(enlace), "ws.lock", self.grupo, 1, "x", uid_esperado=os.getuid())
+
+    def test_archivo_inexistente_falla_cerrado_nombrando_la_linea_de_tmpfiles_y_no_lo_crea(self):
+        with self.assertRaises(cli_sandbox.SandboxUnavailable) as c:
+            self._adq("falta.lock")
+        msg = str(c.exception)
+        self.assertIn("/etc/tmpfiles.d/jax-locks.conf", msg)
+        self.assertIn(f"f {self.d}/falta.lock 0640 root {self.grupo} -", msg)
+        self.assertFalse((self.d / "falta.lock").exists(), "sin O_CREAT: el nucleo no crea el lock")
+
+    def test_grupo_inexistente_falla_cerrado_nombrando_la_linea_de_tmpfiles(self):
+        with self.assertRaises(cli_sandbox.SandboxUnavailable) as c:
+            self._adq(grupo="grupo-que-no-existe-xyz")
+        msg = str(c.exception)
+        self.assertIn("grupo-que-no-existe-xyz", msg)
+        self.assertIn("/etc/tmpfiles.d/jax-locks.conf", msg)
+        self.assertIn(f"f {self.d}/ws.lock 0640 root grupo-que-no-existe-xyz -", msg)
+
+    def test_archivo_con_escritura_de_grupo_u_otros_se_rechaza(self):
+        for modo in (0o660, 0o646, 0o666, 0o602, 0o620):
+            with self.subTest(modo=oct(modo)):
+                os.chmod(self.f, modo)
+                with self.assertRaises(cli_sandbox.SandboxUnavailable):
+                    self._adq()
+        os.chmod(self.f, 0o640)
+        cli_sandbox.flock_liberar(self._adq())
+
+    def test_archivo_de_otro_dueno_o_de_otro_grupo_se_rechaza(self):
+        # el directorio acepta el uid/gid inyectados; solo el ARCHIVO se falsea
+        real = os.fstat
+
+        def cambiar(**campos):
+            def falso(fd):
+                st = real(fd)
+                if not stat.S_ISREG(st.st_mode):
+                    return st
+                v = dict(uid=st.st_uid, gid=st.st_gid)
+                v.update(campos)
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, v["uid"], v["gid"],
+                                       st.st_size, int(st.st_atime), int(st.st_mtime), int(st.st_ctime)))
+            return falso
+
+        for campos in ({"uid": os.getuid() + 1}, {"gid": os.getgid() + 1}):
+            with self.subTest(campos=campos):
+                with patch.object(cli_sandbox.os, "fstat", side_effect=cambiar(**campos)):
+                    with self.assertRaises(cli_sandbox.SandboxUnavailable):
+                        self._adq()
+        cli_sandbox.flock_liberar(self._adq())
+
+    def test_symlink_en_el_lugar_del_lock_se_rechaza_sin_tocar_el_destino(self):
+        os.symlink(self.victima, self.d / "enlace.lock")
+        with self.assertRaises(cli_sandbox.SandboxUnavailable):
+            self._adq("enlace.lock")
+        self.assertEqual(self.victima.read_text(), "NO-TRUNCAR")
+
+    def test_algo_que_no_es_un_archivo_regular_se_rechaza(self):
+        (self.d / "dir.lock").mkdir(mode=0o750)
+        with self.assertRaises(cli_sandbox.SandboxUnavailable):
+            self._adq("dir.lock")
 
 
 class PurgaDeCodexTest(_Entorno):

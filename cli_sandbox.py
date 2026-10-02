@@ -80,6 +80,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import fcntl
+import grp
 import json
 import logging
 import math
@@ -288,6 +289,13 @@ def flock_adquirir(lock_path: Path, timeout: float, descripcion: str, detalle: s
         fh = _abrir_lock(dfd, lock_path.name)
     finally:
         os.close(dfd)
+    return _esperar_flock(fh, timeout, descripcion, detalle, str(lock_path))
+
+
+def _esperar_flock(fh, timeout: float, descripcion: str, detalle: str, ruta: str):
+    """BLOQUEANTE. Sondea `flock(LOCK_EX | LOCK_NB)` sobre `fh` hasta `timeout`;
+    agotado, cierra `fh` y lanza TimeoutError (falla cerrado: no se lanza sin
+    exclusion mutua real). flock(2) vale igual sobre un fd de solo lectura."""
     deadline = time.monotonic() + timeout
     while True:
         try:
@@ -298,10 +306,97 @@ def flock_adquirir(lock_path: Path, timeout: float, descripcion: str, detalle: s
                 fh.close()
                 raise TimeoutError(
                     f"no se pudo adquirir el lock cross-proceso de {descripcion} "
-                    f"en {timeout}s ({lock_path}) -- {detalle} "
+                    f"en {timeout}s ({ruta}) -- {detalle} "
                     "Fail-closed: no se lanza sin exclusion mutua real."
                 )
             time.sleep(_LOCK_POLL_S)
+
+
+TMPFILES_LOCKS = "/etc/tmpfiles.d/jax-locks.conf"
+
+
+def _linea_tmpfiles(directorio: str, nombre: str, grupo: str) -> str:
+    """La linea de `/etc/tmpfiles.d/jax-locks.conf` que siembra el lock `nombre`:
+    el modo compartido no crea nada, lo crea el host al arrancar."""
+    return f"f {directorio}/{nombre} 0640 root {grupo} -"
+
+
+def _sin_escritura_ajena(st) -> bool:
+    return not st.st_mode & 0o022
+
+
+def flock_compartido_adquirir(
+    directorio: str, nombre: str, grupo: str, timeout: float, descripcion: str, detalle: str = "", *,
+    uid_esperado: int = 0, gid_esperado: Optional[int] = None,
+):
+    """BLOQUEANTE -- solo via asyncio.to_thread. MODO COMPARTIDO del lock: lo usan
+    procesos de usuarios distintos (las_manos/jaxsvc y el REPL/fruiz), asi que el
+    duenyo no es el euid sino ROOT y el acceso es por GRUPO. Lo siembra
+    `tmpfiles.d` (`f <directorio>/<nombre> 0640 root <grupo> -`); este modulo NUNCA
+    crea nada (sin O_CREAT).
+
+    Verificaciones, todas sobre fds ya abiertos (fstat, sin carreras por ruta):
+      - el directorio se abre con O_RDONLY|O_DIRECTORY|O_NOFOLLOW: uid == uid_esperado,
+        gid == el del `grupo` y sin escritura de grupo ni de otros;
+      - el archivo se abre RELATIVO a ese fd, O_RDONLY|O_NOFOLLOW|O_CLOEXEC y sin
+        O_CREAT (un symlink o un archivo ausente fallan): archivo regular, mismo uid,
+        mismo gid y sin escritura de grupo ni de otros. flock(LOCK_EX) funciona sobre
+        un fd de solo lectura.
+    Cualquier otra cosa es SandboxUnavailable (falla cerrado) y, si falta el
+    archivo o el grupo, el mensaje nombra la linea de tmpfiles.d que hay que poner.
+
+    `uid_esperado` (0 en produccion) y `gid_esperado` (None = el del `grupo` real)
+    se inyectan por keyword solo para los tests, que no corren como root; no hay
+    ningun flag global, y quien llama desde produccion no los pasa."""
+    linea = _linea_tmpfiles(directorio, nombre, grupo)
+    falta = f"; falta la linea `{linea}` en {TMPFILES_LOCKS}"
+    gid = gid_esperado
+    if gid is None:
+        try:
+            gid = grp.getgrnam(grupo).gr_gid
+        except KeyError:
+            raise SandboxUnavailable(
+                f"el grupo {grupo!r} del lock compartido no existe{falta} (y el grupo mismo)"
+            ) from None
+    try:
+        dfd = os.open(directorio, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        raise SandboxUnavailable(
+            f"directorio de locks compartido {directorio!r} no usable ({exc.strerror or type(exc).__name__})"
+            f"{falta} (o su linea `d {directorio} 0750 root {grupo} -`)"
+        ) from None
+    try:
+        sd = os.fstat(dfd)
+        if sd.st_uid != uid_esperado or sd.st_gid != gid or not _sin_escritura_ajena(sd):
+            raise SandboxUnavailable(
+                f"directorio de locks compartido {directorio!r} inseguro: debe ser del uid {uid_esperado}, "
+                f"del gid {gid} ({grupo!r}) y sin escritura de grupo ni de otros "
+                f"(uid={sd.st_uid}, gid={sd.st_gid}, modo={stat.S_IMODE(sd.st_mode):o}) -- falla cerrado"
+            )
+        try:
+            fd = os.open(nombre, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+        except FileNotFoundError:
+            raise SandboxUnavailable(
+                f"el lock compartido {nombre!r} no existe en {directorio!r}{falta}"
+            ) from None
+        except OSError as exc:
+            raise SandboxUnavailable(
+                f"no se pudo abrir el lock compartido {nombre!r} sin seguir symlinks "
+                f"({exc.strerror or type(exc).__name__})"
+            ) from None
+    finally:
+        os.close(dfd)
+    st = os.fstat(fd)
+    if (
+        not stat.S_ISREG(st.st_mode) or st.st_uid != uid_esperado or st.st_gid != gid
+        or not _sin_escritura_ajena(st)
+    ):
+        os.close(fd)
+        raise SandboxUnavailable(
+            f"el lock compartido {nombre!r} debe ser un archivo regular del uid {uid_esperado}, del gid {gid} "
+            f"({grupo!r}) y sin escritura de grupo ni de otros (modo={stat.S_IMODE(st.st_mode):o}) -- falla cerrado"
+        )
+    return _esperar_flock(os.fdopen(fd, "r"), timeout, descripcion, detalle, f"{directorio}/{nombre}")
 
 
 def flock_liberar(fh) -> None:
