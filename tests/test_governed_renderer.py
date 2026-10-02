@@ -109,6 +109,8 @@ def test_new_runtime_status_templates_cannot_bypass_f2c_as_narrative(prose):
     {"job_id": "job-1", "status": "running", "attempt": 1},
     {"pipeline_id": "pipeline-1", "status": "failed", "updated_at": 123},
     {"name": "hyde", "status": "thinking", "message": "working"},
+    '{"name":"las_manos","status":"alive"}',
+    '{"result":{"pipeline_id":"pipeline-1","status":"failed"}}',
 ))
 def test_accredited_runtime_status_tool_data_requires_claim_receipt_path(payload):
     s = scope()

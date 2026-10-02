@@ -1669,11 +1669,11 @@ jobs:
           # 172 -> 180 el 2026-09-29 (F2-C final A01): ASCII/curly apostrophe,
           # case, NFC/NFD, Markdown heading/link/table/code, and unrelated
           # punctuation negative-control cases.
-          # 187 -> 195 el 2026-10-02 (F2-E-SR-001 targeted recheck): eight
-          # nested/wrapped and metadata-bearing TOOL_DATA runtime-status
-          # bypass regressions; all fail closed through GovernedRenderer.
-          grep -qE "^195 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 195 tests CORRIDOS."; exit 1; }
+          # 187 -> 197 el 2026-10-02 (F2-E-SR-001 targeted recheck): ten
+          # nested/wrapped, metadata-bearing and JSON-string TOOL_DATA
+          # runtime-status bypass regressions; all fail closed in renderer.
+          grep -qE "^197 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 197 tests CORRIDOS."; exit 1; }
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en

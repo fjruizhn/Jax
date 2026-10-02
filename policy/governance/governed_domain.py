@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import lru_cache
+import json
 import re
 import unicodedata
 from types import MappingProxyType
@@ -162,6 +163,30 @@ class GovernedDomainSpecification:
         shapes for accredited status predicates cannot be used to present
         those same propositions outside the claim/receipt path.
         """
+        if isinstance(value, str):
+            candidate = value.lstrip()
+            if not candidate.startswith(("{", "[")):
+                return None
+            if len(value) > 1_000_000:
+                return "OVERSIZED_STRUCTURED_TOOL_DATA"
+
+            def unique_object(pairs):
+                result = {}
+                for key, item in pairs:
+                    if key in result:
+                        raise ValueError("duplicate JSON object key")
+                    result[key] = item
+                return result
+
+            try:
+                decoded = json.loads(value, object_pairs_hook=unique_object)
+            except (ValueError, RecursionError):
+                # An ambiguous or malformed structured payload cannot be
+                # safely distinguished from an encoded status assertion.
+                return "AMBIGUOUS_STRUCTURED_TOOL_DATA"
+            if isinstance(decoded, (Mapping, list, tuple)):
+                return self.runtime_status_tool_data_predicate(decoded)
+            return None
         if isinstance(value, (list, tuple)):
             return next((hit for item in value
                          if (hit := self.runtime_status_tool_data_predicate(item)) is not None), None)
