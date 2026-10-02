@@ -308,7 +308,7 @@ def test_segunda_corrida_revalida_huerfanos_bajo_una_fk_existente(base, capsys):
     capsys.readouterr()
 
     async def colar():
-        conn = await aiomysql.connect(db=db, autocommit=True, **_conn_params())
+        conn = await aiomysql.connect(db=db, autocommit=True, connect_timeout=db_connect_timeout_seconds(), **_conn_params())
         try:
             async with conn.cursor() as cur:
                 await cur.execute("SET SESSION foreign_key_checks=0")
@@ -365,7 +365,7 @@ def test_lock_de_metadatos_ajeno_da_lock_timeout_y_sigue(base, monkeypatch):
     monkeypatch.setattr(fks, "LOCK_WAIT_TIMEOUT", 1)
 
     async def con_transaccion_abierta():
-        conn = await aiomysql.connect(db=db, autocommit=False, **_conn_params())
+        conn = await aiomysql.connect(db=db, autocommit=False, connect_timeout=db_connect_timeout_seconds(), **_conn_params())
         cur = await conn.cursor()
         await cur.execute("SELECT * FROM facts")           # MDL compartido hasta cerrar la transaccion
         t0 = time.monotonic()

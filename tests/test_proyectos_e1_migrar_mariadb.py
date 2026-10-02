@@ -194,7 +194,8 @@ async def _rol(pid: int, uid: int) -> str:
 
 async def _limpiar_contenido() -> None:
     for t in _TABLAS:
-        await _sql(f"DELETE FROM `{t}`")
+        # La base `_DB` (jax_memory_test_e1mig_<uuid>) la crea y la borra este modulo: nadie mas escribe ahi.
+        await _sql(f"DELETE FROM `{t}` WHERE id > 0")  # marcador-propio: `_DB` es exclusiva de este modulo (uuid)
 
 
 @requiere_servidor
