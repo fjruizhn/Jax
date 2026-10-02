@@ -52,6 +52,9 @@ root, cambiarlas exige reiniciar):
                               Debe ser del euid y sin escritura de grupo/otros, o
                               el CLI no arranca (SandboxUnavailable)
   JAX_CLI_MAX_PROMPT_CHARS    tope del prompt (default 32000)
+  JAX_CLI_<PERFIL>_RANURAS    llamadas concurrentes por perfil, 1..16 (default el del
+                              perfil; NO lo decide el llamador de run_cli)
+  JAX_CLI_TIMEOUT_MAX_S       tope del timeout de run_cli (default 600)
 
 CACHES (cada uno declara su invalidacion en el mismo commit que lo crea):
   - `_CACHE_SHA`: SHA256 de un binario, clave = ruta, firma = (dev, inode,
@@ -79,6 +82,7 @@ import contextvars
 import fcntl
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -974,6 +978,34 @@ def _lock_dir() -> Path:
     return Path(os.environ.get("JAX_CLI_LOCK_DIR") or f"/tmp/jax-cli-locks-{os.geteuid()}")
 
 
+_RANURAS_MAX = 16
+
+
+def _ranuras_de(p: Perfil) -> int:
+    """Numero de ranuras (llamadas concurrentes) del perfil. UNA sola fuente,
+    leida aqui: `JAX_CLI_<PERFIL>_RANURAS` si es un entero 1..16 y, si no, el
+    default del perfil. El llamador de `run_cli` no lo decide (auditoria
+    2026-10-02, MINOR-8): un valor invalido nunca afloja el tope, vuelve al
+    default."""
+    crudo = os.environ.get(f"JAX_CLI_{p.nombre.upper()}_RANURAS", "").strip()
+    if crudo.isdigit() and 1 <= int(crudo) <= _RANURAS_MAX:
+        return int(crudo)
+    return p.ranuras
+
+
+TIMEOUT_MAX_S_DEFAULT = 600.0
+
+
+def timeout_maximo() -> float:
+    """Tope del `timeout` de `run_cli`: `JAX_CLI_TIMEOUT_MAX_S` si es un numero
+    finito positivo y, si no, 600 s. Un valor roto vuelve al default, no lo afloja."""
+    try:
+        v = float(os.environ.get("JAX_CLI_TIMEOUT_MAX_S", ""))
+    except ValueError:
+        return TIMEOUT_MAX_S_DEFAULT
+    return v if math.isfinite(v) and v > 0 else TIMEOUT_MAX_S_DEFAULT
+
+
 def _ranura_adquirir(perfil: str, ranuras: int, espera: float):
     """BLOQUEANTE (to_thread). Primera ranura libre de `ranuras`; si no hay
     ninguna en `espera` segundos, LockTimeout. Un directorio o un lock inseguro
@@ -1054,8 +1086,7 @@ def _escribir_privado(ruta: Path, contenido: str) -> None:
 async def run_cli(
     perfil: str, system_prompt: str, historial, mensaje: str, modelo: str, timeout: float, *,
     titular: Titular, correlation_id: str, entry_point: str,
-    ranuras: Optional[int] = None, espera_lock_s: Optional[float] = None,
-    max_chars: Optional[int] = None,
+    espera_lock_s: Optional[float] = None, max_chars: Optional[int] = None,
 ) -> ResultadoCLI:
     """Lanza el CLI del perfil SIN herramientas dentro del sandbox y devuelve el
     mensaje final. Exige un `Titular` autorizado por `exigir_titular` para este
@@ -1078,6 +1109,11 @@ async def run_cli(
             raise PerfilNoSoportado(f"perfil {perfil!r} no se sirve por run_cli")
         if not isinstance(modelo, str) or not _RE_MODELO.match(modelo):
             raise ValueError("modelo con formato invalido")
+        if (
+            isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout) or not 0 < timeout <= timeout_maximo()
+        ):
+            raise ValueError(f"timeout invalido: se exige 0 < timeout <= {timeout_maximo()} (JAX_CLI_TIMEOUT_MAX_S)")
         if not p.canal_prompt_verificado:
             raise ErrorProtocolo(f"{p.nombre}: el canal del prompt no esta verificado (spec §8); no se lanza")
         tope = max_chars or int(os.environ.get("JAX_CLI_MAX_PROMPT_CHARS", MAX_PROMPT_CHARS))
@@ -1099,7 +1135,7 @@ async def run_cli(
                 binds_rw=[(cred_host, p.cred_destino)], binds_ro=[(dir_bin, dir_bin)],
                 cmd=p.comando(ruta_bin, modelo),
             )
-            n = ranuras or p.ranuras
+            n = _ranuras_de(p)
             espera = p.espera_lock_s if espera_lock_s is None else espera_lock_s
             proc, stdout, _stderr = await ejecutar(
                 argv, p.env_fijo(), conversacion.encode("utf-8"), timeout,

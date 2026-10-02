@@ -1061,7 +1061,7 @@ class LocksTest(_Entorno):
         titular = await self.titular()
 
         def uno(espera):
-            return self.correr("codex", proc=proc_lento, titular=titular, ranuras=2,
+            return self.correr("codex", proc=proc_lento, titular=titular,
                                espera_lock_s=espera, timeout=10)
 
         t1 = asyncio.ensure_future(uno(5))
@@ -1072,8 +1072,66 @@ class LocksTest(_Entorno):
         await asyncio.gather(t1, t2)
 
     async def test_las_ranuras_se_liberan_al_terminar(self):
-        for _ in range(3):
-            await self.correr("codex", ranuras=1, espera_lock_s=0.5)
+        with patch.dict(os.environ, {"JAX_CLI_CODEX_RANURAS": "1"}):
+            for _ in range(3):
+                await self.correr("codex", espera_lock_s=0.5)
+
+    async def test_run_cli_ya_no_recibe_las_ranuras_del_llamador(self):
+        self.assertNotIn("ranuras", inspect.signature(cli_sandbox.run_cli).parameters)
+        with self.assertRaises(TypeError):
+            await self.correr("codex", ranuras=99)
+
+    async def test_las_ranuras_salen_de_la_configuracion_del_perfil(self):
+        p = cli_sandbox.PERFILES["codex"]
+        self.assertEqual(cli_sandbox._ranuras_de(p), p.ranuras)
+        with patch.dict(os.environ, {"JAX_CLI_CODEX_RANURAS": "1"}):
+            self.assertEqual(cli_sandbox._ranuras_de(p), 1)
+        for malo in ("0", "-1", "x", "", "17", "2.5", "99999"):
+            with self.subTest(malo=malo), patch.dict(os.environ, {"JAX_CLI_CODEX_RANURAS": malo}):
+                self.assertEqual(cli_sandbox._ranuras_de(p), p.ranuras, "valor invalido: manda el default del perfil")
+
+    async def test_con_una_ranura_configurada_la_segunda_llamada_concurrente_da_locktimeout(self):
+        proc_lento = _FakeProc(_CODEX_OK, demora=1.0)
+        titular = await self.titular()
+        with patch.dict(os.environ, {"JAX_CLI_CODEX_RANURAS": "1"}):
+            t1 = asyncio.ensure_future(self.correr("codex", proc=proc_lento, titular=titular, timeout=10))
+            await asyncio.sleep(0.3)
+            with self.assertRaises(cli_sandbox.LockTimeout):
+                await self.correr("codex", titular=titular, espera_lock_s=0.2)
+            await t1
+
+
+class TimeoutValidadoTest(_Entorno):
+    """MINOR-9 (auditoria 2026-10-02): el timeout se valida contra un maximo
+    configurado; None, no finito o no positivo se rechazan antes de crear nada."""
+
+    async def _sin_lanzar(self, timeout):
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch("asyncio.create_subprocess_exec", fake):
+            with self.assertRaises(ValueError):
+                await cli_sandbox.run_cli(
+                    "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                    timeout=timeout, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertEqual(cap["llamadas"], 0)
+        self.assertEqual(list(self.run_dir.iterdir()), [])
+
+    async def test_valores_invalidos_se_rechazan(self):
+        for malo in (None, 0, -1, -0.5, float("nan"), float("inf"), True, False, "5", b"5", [5]):
+            with self.subTest(timeout=malo):
+                await self._sin_lanzar(malo)
+
+    async def test_por_encima_del_maximo_se_rechaza_y_el_maximo_exacto_pasa(self):
+        with patch.dict(os.environ, {"JAX_CLI_TIMEOUT_MAX_S": "10"}):
+            await self._sin_lanzar(10.5)
+            res, _, _ = await self.correr("codex", timeout=10)
+            self.assertEqual(res.texto, "hola desde codex")
+
+    async def test_el_maximo_por_defecto_es_600_y_un_valor_de_entorno_roto_no_lo_afloja(self):
+        self.assertEqual(cli_sandbox.timeout_maximo(), 600.0)
+        for malo in ("", "x", "-5", "0", "nan", "inf"):
+            with self.subTest(malo=malo), patch.dict(os.environ, {"JAX_CLI_TIMEOUT_MAX_S": malo}):
+                self.assertEqual(cli_sandbox.timeout_maximo(), 600.0)
+        await self._sin_lanzar(601)
 
 
 class LocksSegurosTest(_Entorno):
