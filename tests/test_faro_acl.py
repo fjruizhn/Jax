@@ -258,3 +258,21 @@ def test_si_no_se_puede_poner_la_acl_el_puerto_no_abre_y_no_deja_archivos(mundo,
                 pass
     corre(caso())
     assert list(cfg.socket_dir.iterdir()) == [] and _modo(cfg.socket_dir) == 0o700
+
+
+def test_el_grupo_propietario_con_permisos_dentro_de_una_acl_no_es_privado(d):
+    acl.conceder(d, JAULA, acl.X)
+    entradas = [(t, (acl.X if t == acl.TAG_GROUP_OBJ else p), i) for t, p, i in acl._leer_o_modo(d)]
+    acl._escribir(d, entradas)                                    # group::--x : cualquier proceso del grupo de faro pasaria
+    with pytest.raises(ConfigFaroInvalida, match="privado|ACL"):
+        acl.validar_privado(d, uids_permitidos={JAULA})
+
+
+def test_la_mascara_o_el_permiso_de_un_uid_vivo_por_encima_de_x_se_rechazan_por_separado(d):
+    acl.conceder(d, JAULA, acl.R | acl.X)
+    with pytest.raises(ConfigFaroInvalida, match="privado|ACL"):
+        acl.validar_privado(d, uids_permitidos={JAULA})
+    # solo la entrada (con una mascara que no la deja ver): el limite es de la entrada, no solo de la mascara
+    entradas = [(t, p, i) for t, p, i in acl._leer_o_modo(d) if t != acl.TAG_MASK]
+    acl._escribir(d, entradas)
+    assert acl.usuarios(d) == {JAULA: acl.R | acl.X}

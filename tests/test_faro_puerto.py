@@ -613,3 +613,9 @@ def test_el_arranque_configura_el_logging_antes_del_primer_servidor_mcp(cfg_puer
     assert not any(type(h).__name__ == "RichHandler" for h in raiz.handlers), "lo configuro el SDK, no el servicio"
     from jax.faro.logs import FORMATO
     assert [h.formatter._fmt for h in raiz.handlers] == [FORMATO], "el formato es el del servicio, no el `%(message)s` del SDK"
+
+
+@pytest.mark.parametrize("tenant", ["con espacio", "a|b", "x" * 65, "t\nx", "ñ"])
+def test_una_ejecucion_no_puede_tener_un_tenant_que_los_topes_no_aceptarian(tenant):
+    with pytest.raises(ConfigFaroInvalida, match="tenant"):
+        _ejecucion(tenant=tenant)

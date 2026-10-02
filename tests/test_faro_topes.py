@@ -287,3 +287,16 @@ def test_minor6_un_fallo_normal_no_es_un_resultado_desconocido():
     t, _ = _topes(AlmacenMemoria("fallar"))
     r = _consumir(t, tope=5)
     assert r.motivo == "almacen_no_disponible" and t.inciertos == {}
+
+
+def test_minor6_si_la_lectura_de_la_reconciliacion_falla_lo_incierto_se_conserva():
+    almacen = _AlmacenDesconocido(True)
+    t, _ = _topes(almacen)
+    _consumir(t, tope=10, cantidad=3)
+
+    async def leer_roto(clave, periodo):
+        raise OSError("sin lectura")
+    almacen.leer = leer_roto
+    with pytest.raises(OSError):
+        corre(t.reconciliar(tenant="t1", recurso="tokens"))
+    assert t.inciertos == {("t1|tokens", "total"): 3}
