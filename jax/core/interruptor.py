@@ -1,7 +1,7 @@
 """El interruptor de JAX (kill switch): dónde está el freno y si está puesto.
 
-FUENTE ÚNICA para los procesos que lo LEEN (LAS MANOS con Jacobs adentro, el
-REPL y `jax --task`) y para el único que lo ESCRIBE (jax-platform, que tiene
+FUENTE ÚNICA para los procesos que lo LEEN (LAS MANOS con Jacobs adentro;
+el REPL y `jax --task` se retiraron en T16) y para el único que lo ESCRIBE (jax-platform, que tiene
 una copia en `backend/interruptor.py`: familia `interruptor` de
 scripts/check_mirror_sync.py).
 

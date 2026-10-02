@@ -53,8 +53,8 @@ EXTRACTOR = "tesseract"
 
 # I-7 (final-hallazgos.md, ronda de cierre): mismo valor que
 # `motor_registry.tool_authority.WORKSPACE_ROOT`,
-# `jacobs/executor.py::HYDE_WORKSPACE_DIR` y
-# `jax/muscles/subprocess_muscle.py` -- los 4 call sites leen la MISMA env
+# `jacobs/executor.py::HYDE_WORKSPACE_DIR` (y, hasta T16,
+# `jax/muscles/subprocess_muscle.py`, retirado con el REPL) -- los call sites leen la MISMA env
 # var en vez de importarse el módulo pesado de `tool_authority` unos de
 # otros. El rasterizado de un PDF para OCR va acá, no al default de
 # `tempfile` (`/tmp`), que en hall9000 es tmpfs -- RAM, en un hipervisor
@@ -437,9 +437,8 @@ def extraer(origen: Path, idioma: str = "spa") -> Resultado:
             # va BAJO JAX_WORKSPACE_DIR, no al default de `tempfile`
             # (`/tmp`, que en hall9000 es tmpfs -- RAM -- en un
             # hipervisor con dos VMs). Se lee la env var directo (mismo
-            # patrón que los otros 3 call sites de esta variable:
-            # motor_registry/tool_authority.py, jacobs/executor.py,
-            # jax/muscles/subprocess_muscle.py) en vez de importar el
+            # patrón que los otros call sites de esta variable:
+            # motor_registry/tool_authority.py, jacobs/executor.py) en vez de importar el
             # módulo pesado de tool_authority sólo para esto -- es el
             # cambio de una línea que pide el ruling, no una migración de
             # dependencias. Diferido a fase 2, con su razón escrita:

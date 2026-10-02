@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
-"""hyde_sandbox.run_sandboxed_claude() -- unico punto de entrada aprobado
-para lanzar `claude` como subproceso sandboxeado. Antes de este modulo,
-jacobs/executor.py y jax/muscles/subprocess_muscle.py reimplementaban el
-lanzamiento cada uno por su lado -- uno con HYDE_SEMAPHORE (un
-asyncio.Semaphore, valido solo DENTRO de un proceso), el otro SIN NINGUN
-lock. Jacobs corre dentro del proceso de las_manos (systemd
-jax-las-manos); SubprocessMuscle solo lo importa jax/core/main.py, el
-REPL -- un proceso de SO SEPARADO (confirmado por enumeracion real de
-imports, 2026-08-25). Un asyncio.Semaphore de modulo no cruza esa
-frontera -- se usa flock(2) en su lugar, visible por cualquier proceso
-que abra el mismo path. El archivo del lock vive en /run/jax-locks/hyde del HOST
+"""hyde_sandbox: el lock cross-proceso del confinamiento de Hyde (flock(2)).
+Antes de este modulo, el lanzamiento de `claude` se reimplementaba por su lado
+-- uno con HYDE_SEMAPHORE (un asyncio.Semaphore, valido solo DENTRO de un
+proceso), el otro SIN NINGUN lock. Un asyncio.Semaphore de modulo no cruza la
+frontera entre procesos de SO -- se usa flock(2) en su lugar, visible por
+cualquier proceso que abra el mismo path. (T16, 2026-10-02: `run_sandboxed_claude`,
+que usaba este lock, y sus pruebas se retiraron junto con el REPL y la ruta directa
+de Jacobs; el lock y wrap_hyde_command siguen, los usa cli_sandbox.) El archivo del lock vive en /run/jax-locks/hyde del HOST
 (derivado de workspace_dir por hash), NUNCA dentro de workspace_dir: ese
 directorio se bindea read-write dentro del sandbox y el `claude` confinado
 podia borrar el archivo, lo que dejaba al siguiente acquire crear un inodo
 nuevo y correr en paralelo con el holder -- ver
 ClaudeSubprocessLockPathOutsideSandboxTest.
 
-La mayoria de estos tests mockean asyncio.create_subprocess_exec y
-wrap_hyde_command -- no requieren bwrap real. ClaudeSubprocessLockFailClosedTest
+No requieren bwrap real. ClaudeSubprocessLockFailClosedTest
 y ClaudeSubprocessLockRealCrossProcessTest usan flock(2) DE VERDAD (sin
 mock): dos corrutinas del mismo proceso pasarian igual con el
 asyncio.Semaphore viejo, asi que no prueban nada sobre el problema real --
@@ -98,7 +94,7 @@ def _adquirir_como_tmpfiles(workspace_dir: str, timeout: float, **kw):
     """Reemplaza a la funcion real DURANTE ESTE MODULO: hace de tmpfiles.d (siembra el
     archivo del lock si falta) e inyecta el dueno del que corre el test; todo lo
     demas -- directorio, grupo, modos, flock -- es la verificacion real. Asi tambien
-    `run_sandboxed_claude`, que no pasa esos parametros, corre contra el lock real."""
+    el codigo que no pasa esos parametros corre contra el lock real."""
     if not hyde_sandbox._lock_path_for_workspace(workspace_dir).exists():
         _sembrar_lock(workspace_dir)
     kw.setdefault("uid_esperado", os.getuid())
@@ -109,99 +105,11 @@ def _adquirir(workspace_dir: str, timeout: float):
     return hyde_sandbox._acquire_cross_process_lock(workspace_dir, timeout)
 
 
-class _FakeProc:
-    def __init__(self, communicate_coro, returncode: int = 0):
-        self._communicate_coro = communicate_coro
-        self.returncode = returncode
-        self.killed = False
-        self.waited = False
-
-    async def communicate(self, input=None):
-        return await self._communicate_coro()
-
-    def kill(self):
-        self.killed = True
-
-    async def wait(self):
-        self.waited = True
-        return self.returncode
-
-
-class RunSandboxedClaudeWrappingTest(unittest.IsolatedAsyncioTestCase):
-    async def test_aplica_wrap_hyde_command_antes_de_lanzar(self):
-        captured = {}
-
-        async def fake_communicate():
-            return b"hola", b""
-
-        async def fake_create_subprocess_exec(*argv, **kwargs):
-            captured["argv"] = argv
-            captured["kwargs"] = kwargs
-            return _FakeProc(fake_communicate)
-
-        # wrap_hyde_command devuelve (argv, env) desde B-1 (auditoría
-        # adversarial 2026-09-27, ver hyde_sandbox.py) -- ya no un argv
-        # pelado. El env de mentira es distinguible de {} para poder
-        # afirmar que ES el que se pasó, no un default cualquiera.
-        env_de_mentira = {"HOME": "/home/hyde-sandbox", "PATH": "/bin", "LANG": "C.UTF-8"}
-        with tempfile.TemporaryDirectory() as ws:
-            with patch.object(
-                hyde_sandbox, "wrap_hyde_command",
-                return_value=(["BWRAP_MARKER", "claude"], env_de_mentira),
-            ) as fake_wrap, \
-                 patch("asyncio.create_subprocess_exec", fake_create_subprocess_exec):
-                proc, stdout, stderr = await hyde_sandbox.run_sandboxed_claude(
-                    ["claude", "--print"], ws, "prompt", timeout=5,
-                )
-
-            fake_wrap.assert_called_once_with(["claude", "--print"], ws)
-            self.assertEqual(captured["argv"], ("BWRAP_MARKER", "claude"))
-            # B-1: el `env` que wrap_hyde_command devuelve viaja EXPLÍCITO y
-            # TAL CUAL a create_subprocess_exec -- nunca fusionado con
-            # os.environ (ver docstring de run_sandboxed_claude).
-            self.assertEqual(captured["kwargs"].get("env"), env_de_mentira)
-            self.assertEqual(stdout, b"hola")
-            self.assertEqual(proc.returncode, 0)
-
-
-class LlamadaAlLockCompartidoTest(unittest.IsolatedAsyncioTestCase):
+class LlamadaAlLockCompartidoTest(unittest.TestCase):
     """MINOR-25 (reauditoria 2026-10-02): el modulo entero parchea
     `_acquire_cross_process_lock` con un envoltorio que INYECTA el dueno del que corre el
-    test, asi que ningun test veia con que argumentos llega `run_sandboxed_claude` al
-    nucleo: un `uid_esperado` distinto de 0 (o un gid fijo) en produccion pasaba todos los
-    tests. Aqui se deshace ese parche y se espia `cli_sandbox.flock_compartido_adquirir`."""
-
-    async def _correr_espiando(self, ws):
-        fh = MagicMock(name="fh")
-
-        async def fake_exec(*argv, **kwargs):
-            async def comunicar():
-                return b"ok", b""
-            return _FakeProc(comunicar)
-
-        with patch.object(hyde_sandbox, "_acquire_cross_process_lock", _ADQUIRIR_REAL), \
-             patch.object(cli_sandbox, "flock_compartido_adquirir", return_value=fh) as adq, \
-             patch.object(cli_sandbox, "flock_liberar") as lib, \
-             patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, w: (cmd, {})), \
-             patch("asyncio.create_subprocess_exec", fake_exec):
-            await hyde_sandbox.run_sandboxed_claude(["claude"], ws, "p", timeout=7)
-        return adq, lib, fh
-
-    async def test_run_sandboxed_claude_llama_al_nucleo_con_dueno_root_y_el_grupo_real(self):
-        with tempfile.TemporaryDirectory() as ws:
-            adq, lib, fh = await self._correr_espiando(ws)
-            ruta = hyde_sandbox._lock_path_for_workspace(ws)
-        adq.assert_called_once()
-        args, kwargs = adq.call_args
-        self.assertEqual(
-            args,
-            (str(ruta.parent), ruta.name, hyde_sandbox.HYDE_LOCK_GROUP, 7, "subprocess 'claude'",
-             "otro proceso (REPL o las_manos) sigue teniendo un claude corriendo."),
-        )
-        # el dueno es ROOT (0) y el gid es el del grupo real (None = lo resuelve el nucleo): nada
-        # de uid/gid del que corre; solo los tests los inyectan
-        self.assertEqual(kwargs, {"uid_esperado": 0, "gid_esperado": None})
-        lib.assert_called_once_with(fh)
+    test, asi que un `uid_esperado` distinto de 0 (o un gid fijo) en produccion pasaba todos
+    los tests. Aqui se mira la firma de la funcion REAL: dueno root y grupo del sistema."""
 
     def test_los_defaults_de_la_funcion_real_son_root_y_grupo_real(self):
         p = inspect.signature(_ADQUIRIR_REAL).parameters
@@ -209,65 +117,6 @@ class LlamadaAlLockCompartidoTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(p["gid_esperado"].default)
         self.assertEqual(p["uid_esperado"].kind, inspect.Parameter.KEYWORD_ONLY)
         self.assertEqual(p["gid_esperado"].kind, inspect.Parameter.KEYWORD_ONLY)
-
-
-class RunSandboxedClaudeConcurrencyTest(unittest.IsolatedAsyncioTestCase):
-    async def test_serializa_dos_invocaciones_concurrentes_mismo_proceso(self):
-        # Prueba de humo del flujo mockeado -- NO es la prueba de la
-        # propiedad cross-proceso real (ver ClaudeSubprocessLockRealCrossProcessTest).
-        events = []
-
-        def make_communicate(tag):
-            async def _communicate():
-                events.append(("start", tag, time.monotonic()))
-                await asyncio.sleep(0.05)
-                events.append(("end", tag, time.monotonic()))
-                return b"out", b""
-            return _communicate
-
-        counter = iter([1, 2])
-
-        async def fake_create_subprocess_exec(*argv, **kwargs):
-            tag = next(counter)
-            return _FakeProc(make_communicate(tag))
-
-        with tempfile.TemporaryDirectory() as ws:
-            with patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, w: (cmd, {})), \
-                 patch("asyncio.create_subprocess_exec", fake_create_subprocess_exec):
-                await asyncio.gather(
-                    hyde_sandbox.run_sandboxed_claude(["claude"], ws, "p1", timeout=5),
-                    hyde_sandbox.run_sandboxed_claude(["claude"], ws, "p2", timeout=5),
-                )
-
-        # Serializado de verdad: el segundo "start" debe ocurrir DESPUES del
-        # primer "end" -- si corrieran en paralelo, ambos "start" saldrian
-        # antes que cualquier "end".
-        starts = [e for e in events if e[0] == "start"]
-        ends = [e for e in events if e[0] == "end"]
-        self.assertEqual(len(starts), 2)
-        self.assertEqual(len(ends), 2)
-        self.assertLess(ends[0][2], starts[1][2], f"no se serializó: {events}")
-
-
-class RunSandboxedClaudeTimeoutTest(unittest.IsolatedAsyncioTestCase):
-    async def test_timeout_mata_proceso_y_propaga_timeouterror_sin_envolver(self):
-        async def hangs_forever():
-            await asyncio.sleep(999)
-            return b"", b""
-
-        fake_proc = _FakeProc(hangs_forever)
-
-        async def fake_create_subprocess_exec(*argv, **kwargs):
-            return fake_proc
-
-        with tempfile.TemporaryDirectory() as ws:
-            with patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, w: (cmd, {})), \
-                 patch("asyncio.create_subprocess_exec", fake_create_subprocess_exec):
-                with self.assertRaises(asyncio.TimeoutError):
-                    await hyde_sandbox.run_sandboxed_claude(["claude"], ws, "p", timeout=0.01)
-
-            self.assertTrue(fake_proc.killed)
-            self.assertTrue(fake_proc.waited)
 
 
 class ClaudeSubprocessLockFailClosedTest(unittest.TestCase):
@@ -347,30 +196,6 @@ class ClaudeSubprocessLockPathOutsideSandboxTest(unittest.TestCase):
                 hyde_sandbox._release_cross_process_lock(fh_a)
 
 
-class ClaudeSubprocessLockTimeoutBudgetTest(unittest.IsolatedAsyncioTestCase):
-    """Regresion del segundo hallazgo CRITICO: la espera del lock usaba
-    una constante fija de 30s en vez del `timeout` del llamador (300s /
-    900s reales en Jacobs), matando steps encolados legitimos y
-    reportandolos como "Timeout (300s)" a los 30 segundos."""
-
-    async def test_usa_el_timeout_del_llamador_para_esperar_el_lock(self):
-        captured = {}
-
-        def fake_acquire(workspace_dir, timeout):
-            captured["timeout"] = timeout
-            raise TimeoutError("lock cross-proceso (fake)")
-
-        with tempfile.TemporaryDirectory() as ws:
-            with patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, w: (cmd, {})), \
-                 patch.object(hyde_sandbox, "_acquire_cross_process_lock", fake_acquire):
-                with self.assertRaises(TimeoutError):
-                    await hyde_sandbox.run_sandboxed_claude(
-                        ["claude"], ws, "p", timeout=900,
-                    )
-
-        self.assertEqual(captured["timeout"], 900)
-
-
 _CROSS_PROCESS_WORKER = """
 import asyncio, json, sys, time
 sys.path.insert(0, {repo_root!r})
@@ -397,8 +222,7 @@ class ClaudeSubprocessLockRealCrossProcessTest(unittest.TestCase):
     """Dos procesos de Python DE VERDAD (subprocess.Popen), no dos tasks
     de asyncio del mismo proceso -- eso es exactamente lo que un
     asyncio.Semaphore de modulo pasaria igual, sin probar nada sobre el
-    problema real (Jacobs en el proceso de las_manos vs SubprocessMuscle
-    en el proceso del REPL). time.monotonic() es CLOCK_MONOTONIC, un
+    problema real (dos procesos de SO distintos que toman el mismo lock). time.monotonic() es CLOCK_MONOTONIC, un
     reloj de todo el sistema (no por-proceso) en Linux -- comparable entre
     los dos procesos hijos."""
 

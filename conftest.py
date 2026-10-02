@@ -165,7 +165,7 @@ FRENO_EXISTIA_AL_INICIO = os.path.lexists(FRENO_DE_PRODUCCION)
 HEREDADA_EXISTIA_AL_INICIO = os.path.lexists(HEREDADA_DE_PRODUCCION)
 
 #: Los objetos módulo del interruptor. Son DOS distintos para el mismo archivo:
-#: `jax.core.interruptor` (REPL, `jax --task`) e `interruptor` pelado vía el
+#: `jax.core.interruptor` (el paquete jax; el REPL y `jax --task` se retiraron en T16) e `interruptor` pelado vía el
 #: symlink de las_manos (LAS MANOS, Jacobs). Cada uno tiene su RUTA_HEREDADA.
 MODULOS_DEL_INTERRUPTOR = ("jax.core.interruptor", "interruptor")
 

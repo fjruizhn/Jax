@@ -30,15 +30,6 @@ def test_el_paquete_de_la_voz_ya_no_esta_en_el_arbol():
     assert not (RAIZ / "jax" / "voice").exists()
 
 
-def test_el_arranque_del_repl_no_exige_la_variable_de_la_voz():
-    """La puerta era `_python_de_kokoro()` dentro de `main()`. `url_requerida
-    ("JAX_OLLAMA_URL")` se queda: esa variable sí está viva."""
-    fuente = (RAIZ / "jax" / "core" / "main.py").read_text(encoding="utf-8")
-    assert "JAX_KOKORO_PYTHON" not in fuente
-    assert "_python_de_kokoro" not in fuente
-    assert 'url_requerida("JAX_OLLAMA_URL")' in fuente
-
-
 def test_ningun_modulo_de_servicio_importa_la_voz():
     for arbol in ("jax", "jacobs", "las_manos", "policy"):
         for ruta in (RAIZ / arbol).rglob("*.py"):

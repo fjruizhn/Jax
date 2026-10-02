@@ -194,6 +194,6 @@ def test_las_manos_cierra_el_cliente_al_apagar():
     assert any("cerrar_cliente_http" in ast.unparse(f) for f in cierres)
 
 
-def test_el_repl_y_los_workers_cierran_el_cliente_al_salir():
-    for rel in ("jax/core/main.py", "jax/memory/worker.py", "jax/memory/synthesis_worker.py", "jax/memory/embedding_worker.py"):
+def test_los_workers_cierran_el_cliente_al_salir():
+    for rel in ("jax/memory/worker.py", "jax/memory/synthesis_worker.py", "jax/memory/embedding_worker.py"):
         assert "await cerrar_cliente_http()" in (RAIZ / rel).read_text(encoding="utf-8"), rel

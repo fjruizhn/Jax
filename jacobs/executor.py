@@ -11,9 +11,7 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import time
-import tomllib
 from pathlib import Path
 from facet_resolver import resolve_facet, ResolvedFacet
 from contrato_dispatch import limite_de_salida
@@ -38,7 +36,7 @@ from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 from jacobs.plan import CapabilityUnbound
 from jacobs.policy import check_kill_switch
 from jacobs.usage_writer import record_direct_usage
-from hyde_sandbox import run_sandboxed_claude
+from policy.execution_control.errors import DirectHydeGovernedExecutionForbiddenError
 from interruptor import correr_con_interruptor
 
 logger = logging.getLogger("jacobs.executor")
@@ -84,44 +82,7 @@ MAX_TOTAL_DEP_CONTEXT_CHARS = 180_000
 # plan.py). Un solo lugar define la partición, dos módulos la consumen.
 
 
-# ----------------------------------------------------------------
-#  Hyde (v0.3) — system prompt real desde el MISMO config.toml que usa el
-#  CLI viejo (jax/core/main.py → SubprocessMuscle). No se reinventa un prompt
-#  corto para Jacobs como con thot/ada/jekyll: la identidad de Hyde ya está
-#  afinada (Fernando + DeepSeek + Claude) y probada en producción. Fail-open:
-#  si config.toml no está o no tiene la sección, Hyde arranca con un prompt
-#  mínimo en vez de tumbar el step.
-# ----------------------------------------------------------------
-_PERSONALITIES_PATH = Path(__file__).resolve().parent.parent / "config" / "config.toml"
-try:
-    with open(_PERSONALITIES_PATH, "rb") as _pf:
-        _HYDE_CFG: dict = tomllib.load(_pf).get("personalities", {}).get("hyde", {})
-    _HYDE_SYSTEM_PROMPT = (_HYDE_CFG.get("system_prompt") or "").strip()
-    if not _HYDE_SYSTEM_PROMPT:
-        raise ValueError("system_prompt vacío o ausente en [personalities.hyde]")
-except Exception as _hyde_cfg_err:  # noqa: BLE001  # fail-soft: es la persona de Hyde (--append-system-prompt), no un control de autoridad -- el sandbox y la aprobación de steps siguen aplicando, el fallback conserva "nada destructivo sin confirmación" y _EVIDENCE_RULE se inyecta aparte en cada step
-    logger.warning(
-        "Jacobs no pudo leer [personalities.hyde] de %s: %s — Hyde arranca con "
-        "prompt mínimo", _PERSONALITIES_PATH, _hyde_cfg_err,
-    )
-    _HYDE_SYSTEM_PROMPT = (
-        "Sos Hyde, la faceta técnica de JAX. Sé directo, verificá antes de "
-        "afirmar, nada destructivo sin confirmación explícita."
-    )
-
-# jax-las-manos.service corre bajo systemd con PATH mínimo (sin el bin de
-# nvm) — "claude" a secas resuelve en shell interactivo pero NO en el
-# servicio real. shutil.which cubre el caso interactivo/dev; el fallback
-# absoluto (documentado como ruta canónica de Node en CLAUDE.md) cubre el
-# servicio. Verificado con evidencia: systemctl show jax-las-manos -p
-# Environment está vacío, y systemd sin PATH propio usa el default de
-# /etc/environment, que no incluye ~/.nvm.
-HYDE_CLI_PATH = (
-    shutil.which("claude")
-    or "/home/fruiz/.nvm/versions/node/v24.16.0/bin/claude"
-)
 HYDE_WORKSPACE_DIR   = os.getenv("JAX_WORKSPACE_DIR", "/home/fruiz/jax-workspace")
-HYDE_MAX_PROMPT_CHARS = 32000
 
 
 # ----------------------------------------------------------------
@@ -583,12 +544,11 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     solo no aparece en la lista de facetas que _llm_plan le sugiere al LLM
     para auto-generar steps — un pipeline con step facet="jax_local" armado
     a mano (_from_spec) si lo hubiera disparado.
-    OJO: GPU_SEMAPHORE (jax/muscles/ollama_muscle.py::GPU_SEMAPHORE -- por simbolo, no por linea: la referencia decia :37 y el simbolo ya se habia movido) es un
-    asyncio.Semaphore de PROCESO del REPL de JAX -- esta llamada corre en el
-    proceso de jax-las-manos y le pega a Ollama directo por httpx, sin pasar
-    por ese semáforo. No hay exclusión mutua real entre el REPL y Jacobs
-    para el acceso a la GPU (verificado 2026-08-19, sonda T0.a/T1 de
-    latencia de _llm_plan).
+    OJO: esta llamada corre en el proceso de jax-las-manos y le pega a Ollama
+    directo por httpx. No hay exclusión mutua en proceso para el acceso a la
+    GPU (el GPU_SEMAPHORE del REPL, jax/muscles/ollama_muscle.py, se retiró en
+    T16 junto con el REPL); la serialización la hace Ollama (verificado
+    2026-08-19, sonda T0.a/T1 de latencia de _llm_plan).
 
     MEDIDO 2026-08-28: esa falta de exclusion mutua no produce contencion
     hoy porque Ollama serializa (OLLAMA_NUM_PARALLEL=1) -- la generacion se
@@ -632,79 +592,16 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
 
 
 async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
-    """Claude Code CLI (binario `claude`) como subproceso headless — mismo
-    mecanismo de jax/muscles/subprocess_muscle.py, en producción hace meses
-    en el CLI viejo. Adaptado a la firma de Jacobs: sin serialización de
-    historial (Jacobs ya arma el contexto completo en `prompt` vía
-    _enrich_prompt, antes de llegar acá — igual que para las demás facetas)."""
-    # Block 6 closes the direct subprocess route for governed work.  Hyde
-    # cannot receive a capability through an unbound local process; it must
-    # be represented by a verified decision and governed Motor execution.
-    raise RuntimeError("DirectHydeGovernedExecutionForbiddenError: GOVERNED_EXECUTION_REQUIRED")
+    """Ruta directa de Hyde (Claude Code como subproceso): CERRADA.
 
-    model = f.model
-
-    safe_prompt = prompt
-    if len(safe_prompt) > HYDE_MAX_PROMPT_CHARS:
-        safe_prompt = safe_prompt[:HYDE_MAX_PROMPT_CHARS] + "\n[...truncado por Jacobs...]"
-
-    cmd = [
-        HYDE_CLI_PATH,
-        "--model", model,
-        "--append-system-prompt", _HYDE_SYSTEM_PROMPT,
-        "--print",
-        "--output-format", "text",
-        "--permission-mode", "acceptEdits",
-        # Bash SIN acotar por patron (2026-08-22, configuracion definitiva
-        # post-sandbox -- ver hyde_sandbox.py y jax-hyde-bash-sin-jail-p0 en
-        # memoria). El PR#18 (pwd/ls) fue andamio TEMPORAL mientras no habia
-        # confinamiento real: --allowedTools nunca fue una defensa de
-        # filesystem que sirviera (Bash pelado no tenia jail; "Bash(<cmd> *)"
-        # con parentesis solo cubria cat/redireccion, python3 -c
-        # "open(path).read()" y `git diff --no-index` lo esquivaban igual,
-        # confirmado). Ahora la defensa real es el namespace de montaje de
-        # bwrap (ver hyde_sandbox.py::run_sandboxed_claude, abajo): lo que no
-        # esta bind-mounteado no existe, sin importar el comando. Verificado
-        # en T5 (13 casos adversariales, incluidos estos dos bypasses) CON
-        # "Bash" pelado -- todo bloqueado por el sandbox, cero ayuda del
-        # allowlist. Restringir el allowlist ahora solo volveria a
-        # inutilizar a Hyde sin sumar seguridad real -- la capa que importa
-        # es la de abajo.
-        "--allowedTools", "Write,Edit,Read,Bash",
-        "--add-dir", HYDE_WORKSPACE_DIR,
-    ]
-
-    # Sandbox de bubblewrap + lock cross-proceso via flock(2) (ver
-    # hyde_sandbox.py::run_sandboxed_claude -- unico punto de entrada
-    # aprobado para lanzar `claude`, DEUDA.md "gobernanza de sub-agentes").
-    # SandboxUnavailable NO se atrapa acá -- fail-closed (P10): sin bwrap,
-    # el step falla con motivo explícito (_run_one_step ya lo hace vía su
-    # except Exception genérico), nunca corre Hyde sin confinamiento.
-    # TimeoutError/CancelledError tampoco se atrapan acá -- run_sandboxed_claude
-    # ya mató y cosechó el proceso, y necesitamos que la excepción de
-    # asyncio se propague SIN envolver (ver docstring de esa función).
-    proc, stdout, stderr = await run_sandboxed_claude(
-        cmd, HYDE_WORKSPACE_DIR, safe_prompt, timeout,
-    )
-    stdout_str = stdout.decode("utf-8", errors="replace")
-    stderr_str = stderr.decode("utf-8", errors="replace")
-
-    if proc.returncode != 0:
-        raise RuntimeError(f"[hyde] claude exit {proc.returncode}: {stderr_str[:200]}")
-    low = stderr_str.lower()
-    if any(t in low for t in ("error", "fatal", "exception", "failed")):
-        raise RuntimeError(f"[hyde] error en stderr: {stderr_str[:200]}")
-
-    # D1.2 (Bloque D) — deliberadamente SIN captura de resolved_version:
-    # --output-format text (arriba) no trae ningun campo de que version
-    # corrio de verdad. Ver CONTEXT.md ("decision previa al wiring de
-    # resolved_version en REPL/Jacobs").
-    return {
-        "success": True,
-        "facet":   "hyde",
-        "model":   model,
-        "result":  stdout_str.strip(),
-    }
+    Block 6 cierra la ruta de subproceso directo para trabajo gobernado: Hyde no
+    puede recibir una capacidad por un proceso local sin atar; tiene que
+    representarse con una decision verificada y ejecucion gobernada por el Motor.
+    T16 (2026-10-02) borro el cuerpo que quedaba inalcanzable debajo (armaba un
+    `claude` con --allowedTools Bash): el que lo resucitara con solo quitar este
+    `raise` lo habria hecho sin que nada lo notara.
+    Falla cerrado con la clase real; nunca llama al sandbox."""
+    raise DirectHydeGovernedExecutionForbiddenError("GOVERNED_EXECUTION_REQUIRED")
 
 
 async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: str | None = None) -> dict:

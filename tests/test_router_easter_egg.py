@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Easter egg IDE1990: el criterio de disparo del REPL (y de la Mesa web, que
-lo copia; lo vigila la familia `router_keywords` de check_mirror_sync).
+"""Easter egg IDE1990: el criterio de disparo de la Mesa web (que copia el de
+jax/core/router.py; lo vigila la familia `router_keywords` de check_mirror_sync).
 
 POR QUE EXISTE (2026-09-23, auditoría adversarial de jax-platform#152). El
 criterio viejo era una subcadena tras quitar TODOS los espacios: "el cliente
@@ -12,11 +12,9 @@ Suite pytest pura, sin DB ni red.
 """
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
-from jax.core.router import EASTER_EGG_TEXT, Router, es_easter_egg
+from jax.core.router import es_easter_egg
 
 
 @pytest.mark.parametrize("texto", [
@@ -40,13 +38,3 @@ def test_dispara(texto):
 ])
 def test_no_dispara(texto):
     assert not es_easter_egg(texto)
-
-
-def test_el_repl_usa_el_mismo_criterio():
-    router = Router()
-    decision = asyncio.run(router.route("IDE1990"))
-    assert decision.kind == "easter_egg"
-    assert decision.text == EASTER_EGG_TEXT
-
-    decision = asyncio.run(router.route("el cliente pide 1990 unidades"))
-    assert decision.kind != "easter_egg"

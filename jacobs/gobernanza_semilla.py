@@ -27,7 +27,7 @@ archivo. `el_juez`/`jax_local` entran en el mismo espejo (ver
 `FACETS_A_ESPEJAR` para el porqué).
 
 Por separado, `facet_binding.model_ref` (la FK real que usa
-`jax/core/facet_resolver.py::cargar_registro` y
+`jax/core/facet_resolver.py::load_facet_registry` y
 `test_contrato_dispatch_db.py`) puede desincronizarse de las columnas de
 TEXTO `provider_id`/`model_id` de la misma fila -- medido el 2026-09-21:
 `el_juez` y `jax_local` decían (texto) `ollama`/`qwen3-coder:30b` pero su

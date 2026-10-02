@@ -120,16 +120,6 @@ def test_la_memoria_pide_el_embedding_a_JAX_OLLAMA_URL(monkeypatch):
     assert urls == ["http://ollama.test:11434/api/embed"]
 
 
-def test_el_musculo_local_no_tiene_url_por_defecto_y_el_repl_la_toma_del_entorno(monkeypatch):
-    from jax.core.main import build_muscles
-    from jax.muscles.ollama_muscle import OllamaMuscle
-    assert inspect.signature(OllamaMuscle.__init__).parameters["api_url"].default is inspect.Parameter.empty
-    monkeypatch.setenv("JAX_OLLAMA_URL", "http://ollama.test:11434")
-    cfg = {"jax": {"timeout_seconds": 10}, "personalities": {"jax_local": {
-        "type": "ollama", "provider": "ollama", "model_default": "q", "models_allowed": ["q"], "system_prompt": "s"}}}
-    assert build_muscles(cfg)["jax_local"].api_url == "http://ollama.test:11434/api/chat"
-
-
 @pytest.mark.parametrize("proveedor, metodo", [
     ("deepseek", "_call_deepseek"), ("openai", "_call_openai"), ("gemini", "_call_gemini"),
 ])
@@ -151,7 +141,7 @@ def test_sin_url_del_catalogo_el_musculo_http_no_despacha(proveedor, metodo):
 
 
 _SIN_URLS_LITERALES = ("jacobs/executor.py", "jacobs/plan.py", "jax/memory/db.py",
-                       "jax/muscles/base.py", "jax/muscles/ollama_muscle.py")
+                       "jax/muscles/base.py")
 
 
 def _urls_literales(fuente: str) -> list[int]:

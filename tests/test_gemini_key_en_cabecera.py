@@ -226,17 +226,5 @@ class ReplGeminiCabeceraTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("p" * 192 + "***", msg)
 
 
-class HumanizarErrorRedactaTest(unittest.TestCase):
-    """El REPL imprime el error de la faceta con humanizar_error: tambien es
-    un punto donde una excepcion se vuelve texto."""
-
-    def test_un_error_no_reconocido_sale_redactado(self):
-        from jax.core.main import humanizar_error
-        err = RuntimeError(f"fallo raro en https://g.example/m?key={KEY}&x=1")
-        out = humanizar_error("Hipatia", err)
-        self.assertNotIn(KEY, out)
-        self.assertIn("key=***", out)
-
-
 if __name__ == "__main__":
     unittest.main(verbosity=2)
