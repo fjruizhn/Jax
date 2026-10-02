@@ -21,7 +21,7 @@ qué del spec sigue, qué cambia y qué entra en la **primera entrega (E1)**.
 | `/chat` valida `project_id` con `ProjectScopeAuthorityResolver` | `jax-platform/backend/api/chat.py:1168` (en `fff3006`) |
 | Autoridad B9 en jax: `create_project`, `bootstrap_existing_project`, `grant_member`, `change_project_role`, `revoke_member`, `set_project_lifecycle` | `jax/memory/project_authority.py:475,588,674,731,777,819` |
 | B9 ya impide quitar o rebajar al último OWNER | `project_authority.py:763,802` |
-| B9 impide cambiar la membresía de un admin activo del tenant | `project_authority.py:751-753` |
+| B9 impide cambiar la membresía de un admin activo del tenant | `project_authority.py:754,794` |
 | REVIEWER no es asignable como papel de proyecto | `project_authority.py:733-737` |
 | **No existe** renombrar un proyecto | sin `UPDATE projects SET name` en `project_authority.py` |
 | HAMURABI (id 1) existe en `projects`, pero `jax_project_scope` y `jax_project_membership` tienen **0 filas** → `/chat` con ese proyecto da 403 a todos | consulta de solo lectura a `jax_memory` (explorador, 2026-10-02) — NO re-medido por Hyde |
