@@ -59,6 +59,8 @@ root, cambiarlas exige reiniciar):
                               comparten dos usuarios, va por grupo en hyde_sandbox
   JAX_CLI_MAX_PROMPT_CHARS    tope del prompt (default 32000); `max_chars` del llamador solo
                               puede bajarlo (min)
+  JAX_CLI_FEATURES_REINTENTO_S  segundos entre reintentos de `features list` tras un timeout
+                              (default 60, minimo 1); los fallos deterministas no se reintentan
   JAX_CLI_<PERFIL>_RANURAS    llamadas concurrentes por perfil, 1..16 (default el del
                               perfil; NO lo decide el llamador de run_cli)
   JAX_CLI_TIMEOUT_MAX_CHAT_S / JAX_CLI_TIMEOUT_MAX_JACOBS_S / JAX_CLI_TIMEOUT_MAX_CANARY_S
@@ -75,7 +77,9 @@ CACHES (cada uno declara su invalidacion en el mismo commit que lo crea):
     ancestros de JAX_CLI_ROOT hasta `/` sean de root y no escribibles.
   - `_CACHE_FEATURES` / `_CACHE_FEATURES_FALLO`: el exito y el fallo de `verificar_features`,
     misma clave (ruta del binario) y misma firma del arbol que `_CACHE_SHA`; cambia el arbol,
-    se vuelve a verificar. `features list` corre bajo una ranura del perfil.
+    se vuelve a verificar. `features list` corre bajo una ranura del perfil. El fallo
+    determinista se cachea por firma; el timeout es transitorio y se reintenta como mucho cada
+    JAX_CLI_FEATURES_REINTENTO_S segundos (default 60). Un fallo servido de la cache lo dice.
   - La lista de titulares y la verificacion en `jax_users` NO se cachean: se
     leen del entorno y de la base en cada llamada (el borrado de un usuario
     surte efecto en la siguiente llamada).
@@ -106,7 +110,7 @@ import stat
 import time
 import uuid
 import weakref
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -159,6 +163,11 @@ class BinarioAlterado(ErrorCLI):
 
 class FeaturesNoPermitidas(ErrorCLI):
     clase = "FeaturesNoPermitidas"
+
+
+class FeaturesSinRespuesta(FeaturesNoPermitidas):
+    """`features list` no respondio a tiempo. Falla cerrado como cualquier FeaturesNoPermitidas
+    (misma `clase`, el contrato estable) pero es TRANSITORIO: la cache lo reintenta."""
 
 
 class PerfilNoSoportado(ErrorCLI):
@@ -1224,18 +1233,52 @@ def _resolver_binario(perfil: Perfil, *, uid_esperado: int = 0) -> tuple[str, st
 #: se re-hashea el manifiesto Y se vuelve a verificar.
 _CACHE_FEATURES: dict[str, str] = {}
 
-#: ruta del binario -> (firma del arbol, mensaje) del FALLO de `verificar_features` (feature
-#: no permitida, salida vacia o ilegible, exit code, timeout de `features list`). MISMA clave
-#: y firma que las dos de arriba, y la misma invalidacion: si cambia el arbol, se vuelve a
-#: verificar (un operador que reinstala un binario sano no queda atado al fallo viejo). El
-#: fallo se cachea igual que el exito (MINOR-23, reauditoria 2026-10-02): sin esto, cada
-#: llamada con un binario malo relanzaba `features list` -- un proceso de bwrap por chat -- y
-#: un binario roto era un amplificador. Se cachea el motivo, para que cada llamada falle con
-#: el mismo mensaje. NO se cachean las esperas de ranura (LockTimeout): no son un fallo del
-#: binario. Un fallo transitorio (p. ej. el timeout de `features list` con la maquina
-#: saturada) tambien queda hasta que cambie el arbol o se reinicie el proceso: es la
-#: contrapartida aceptada de fallar cerrado sin reintentar.
-_CACHE_FEATURES_FALLO: dict[str, tuple[str, str]] = {}
+#: ruta del binario -> `_FalloFeatures` del FALLO de `verificar_features` (feature no permitida,
+#: salida vacia o ilegible, exit code, timeout de `features list`). MISMA clave y firma que las
+#: dos de arriba, y la misma invalidacion: si cambia el arbol, se vuelve a verificar (un operador
+#: que reinstala un binario sano no queda atado al fallo viejo). El fallo se cachea igual que el
+#: exito (MINOR-23, reauditoria 2026-10-02): sin esto, cada llamada con un binario malo
+#: relanzaba `features list` -- un proceso de bwrap por chat -- y un binario roto era un
+#: amplificador. NO se cachean las esperas de ranura (LockTimeout): no son un fallo del binario.
+#:
+#: Dos clases de fallo (MINOR-33, auditoria del SHA 174da8c):
+#:  - DETERMINISTA (feature no permitida, salida vacia/ilegible, exit code != 0): el binario
+#:    dijo lo que dijo; se cachea por firma hasta que cambie el arbol o se reinicie el proceso.
+#:  - TRANSITORIO (timeout de `features list`, p. ej. con la maquina saturada): no prueba nada
+#:    del binario. Es un estado propio de la cache, con REINTENTO ACOTADO: como mucho un
+#:    `features list` cada `JAX_CLI_FEATURES_REINTENTO_S` segundos (default 60, minimo 1) por
+#:    binario; entre reintentos se sirve el fallo cacheado, asi que un binario colgado sigue sin
+#:    ser un amplificador. Un reintento que da verde limpia el fallo.
+#: Un fallo servido desde la cache lo dice en el mensaje y en el log (`cacheado desde <ts>,
+#: firma <x>`): quien lo lee no confunde un fallo viejo con uno recien medido.
+_CACHE_FEATURES_FALLO: dict[str, "_FalloFeatures"] = {}
+
+#: Reintento, en segundos, tras un timeout de `features list` (transitorio). Variable de entorno
+#: `JAX_CLI_FEATURES_REINTENTO_S`; un valor no numerico, no finito o menor que 1 vuelve al default.
+FEATURES_REINTENTO_S_DEFAULT = 60.0
+
+
+@dataclass(frozen=True)
+class _FalloFeatures:
+    firma: str
+    mensaje: str
+    desde_utc: str   # hora de pared en que se midio, para humanos (mensaje y log)
+    mono: float      # time.monotonic() en que se midio, para el reintento
+    transitorio: bool
+
+
+def _features_reintento_s() -> float:
+    try:
+        v = float(os.environ.get("JAX_CLI_FEATURES_REINTENTO_S", ""))
+    except ValueError:
+        return FEATURES_REINTENTO_S_DEFAULT
+    return v if math.isfinite(v) and v >= 1 else FEATURES_REINTENTO_S_DEFAULT
+
+
+def _mensaje_de_fallo_cacheado(fallo: _FalloFeatures) -> str:
+    extra = f"; transitorio, se reintenta cada {_features_reintento_s():g}s" if fallo.transitorio else ""
+    return f"{fallo.mensaje} (cacheado desde {fallo.desde_utc}, firma {fallo.firma[:12]}{extra})"
+
 
 #: Espera maxima de `codex features list` (arranca el binario una vez por firma).
 FEATURES_TIMEOUT_S = 30.0
@@ -1273,7 +1316,7 @@ async def _features_del_binario(
     except LockTimeout:
         raise  # LockTimeout tambien es TimeoutError: no convertirlo en "features list no respondio"
     except asyncio.TimeoutError:
-        raise FeaturesNoPermitidas(f"{p.nombre}: `features list` no respondio en {FEATURES_TIMEOUT_S}s") from None
+        raise FeaturesSinRespuesta(f"{p.nombre}: `features list` no respondio en {FEATURES_TIMEOUT_S}s") from None
     finally:
         await asyncio.to_thread(_borrar_rundir, rundir)
     if proc.returncode != 0:
@@ -1294,13 +1337,28 @@ async def _asegurar_features(
         if _CACHE_FEATURES.get(ruta_bin) == firma:
             return
         fallo = _CACHE_FEATURES_FALLO.get(ruta_bin)
-        if fallo and fallo[0] == firma:
-            raise FeaturesNoPermitidas(fallo[1])
+        if fallo and fallo.firma == firma and not (
+            fallo.transitorio and time.monotonic() - fallo.mono >= _features_reintento_s()
+        ):
+            mensaje = _mensaje_de_fallo_cacheado(fallo)
+            logger.warning(
+                "features: fallo servido desde la cache para %s (cacheado desde %s, firma %s)",
+                _campo_log(p.nombre), fallo.desde_utc, fallo.firma[:12],
+            )
+            raise (FeaturesSinRespuesta if fallo.transitorio else FeaturesNoPermitidas)(mensaje)
+        if fallo and fallo.firma == firma:
+            # toca el reintento: se reserva YA (las demas llamadas concurrentes siguen sirviendo
+            # el fallo cacheado) y asi hay a lo sumo un `features list` por ventana
+            _CACHE_FEATURES_FALLO[ruta_bin] = replace(fallo, mono=time.monotonic())
     try:
         verificar_features(await _features_del_binario(p, ruta_bin, dir_bin, espera_lock_s), p.nombre)
     except FeaturesNoPermitidas as exc:
         if firma:
-            _CACHE_FEATURES_FALLO[ruta_bin] = (firma, str(exc))
+            _CACHE_FEATURES_FALLO[ruta_bin] = _FalloFeatures(
+                firma=firma, mensaje=str(exc), mono=time.monotonic(),
+                desde_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                transitorio=isinstance(exc, FeaturesSinRespuesta),
+            )
         raise
     if firma:
         _CACHE_FEATURES[ruta_bin] = firma

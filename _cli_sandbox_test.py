@@ -1270,7 +1270,11 @@ class FeaturesAutomaticasTest(_Entorno):
                         mensajes.append(str(c.exception))
                 self.assertEqual(cap["features_llamadas"], 1)
                 self.assertEqual(cap["llamadas"], 0)
-                self.assertEqual(len(set(mensajes)), 1, "mismo motivo en cada llamada")
+                # mismo motivo en cada llamada; las servidas de la cache lo declaran (MINOR-33)
+                self.assertNotIn("cacheado desde", mensajes[0])
+                for m in mensajes[1:]:
+                    self.assertTrue(m.startswith(mensajes[0]), (mensajes[0], m))
+                    self.assertIn("(cacheado desde ", m)
                 self.salida_features, self.features_returncode = _SALIDA_FEATURES, 0
 
     async def test_el_timeout_de_features_tambien_se_cachea_como_fallo(self):
@@ -1283,6 +1287,121 @@ class FeaturesAutomaticasTest(_Entorno):
                         "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
                         timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
         self.assertEqual(cap["features_llamadas"], 1)
+
+    async def _llamar_features(self, fake, **kw):
+        with patch("asyncio.create_subprocess_exec", fake):
+            return await cli_sandbox.run_cli(
+                "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat", **kw)
+
+    def _envejecer_fallo(self, segundos: float) -> None:
+        for ruta, f in list(cli_sandbox._CACHE_FEATURES_FALLO.items()):
+            cli_sandbox._CACHE_FEATURES_FALLO[ruta] = dataclasses.replace(f, mono=f.mono - segundos)
+
+    async def test_un_fallo_servido_desde_la_cache_dice_desde_cuando_y_con_que_firma(self):
+        # MINOR-33: antes el mensaje cacheado era identico al de la medicion real
+        self.salida_features = _SALIDA_FEATURES + "telepatia_tool  stable  true\n"
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with self.assertRaises(cli_sandbox.FeaturesNoPermitidas) as primero:
+            await self._llamar_features(fake)
+        self.assertNotIn("cacheado", str(primero.exception))
+        firma = next(iter(cli_sandbox._CACHE_SHA.values()))[0]
+        with self.assertLogs("cli_sandbox", "WARNING") as cm:
+            with self.assertRaises(cli_sandbox.FeaturesNoPermitidas) as segundo:
+                await self._llamar_features(fake)
+        self.assertEqual(cap["features_llamadas"], 1)
+        m = str(segundo.exception)
+        self.assertTrue(m.startswith(str(primero.exception)))
+        self.assertRegex(m, r"\(cacheado desde \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ, firma " + firma[:12] + r"\)")
+        log = "\n".join(cm.output)
+        self.assertRegex(log, r"cacheado desde \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ, firma " + firma[:12])
+
+    async def test_el_timeout_de_features_es_transitorio_y_se_reintenta_acotado(self):
+        self.features_demora = 1.0
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch.object(cli_sandbox, "FEATURES_TIMEOUT_S", 0.1):
+            with self.assertRaises(cli_sandbox.FeaturesSinRespuesta) as c:
+                await self._llamar_features(fake)
+            self.assertEqual(c.exception.clase, "FeaturesNoPermitidas", "la clase estable no cambia")
+            self.assertTrue(next(iter(cli_sandbox._CACHE_FEATURES_FALLO.values())).transitorio)
+            # dentro de la ventana: se sirve el fallo cacheado, sin lanzar nada
+            for _ in range(3):
+                with self.assertRaises(cli_sandbox.FeaturesSinRespuesta) as c2:
+                    await self._llamar_features(fake)
+            self.assertEqual(cap["features_llamadas"], 1)
+            self.assertIn("cacheado desde", str(c2.exception))
+            self.assertIn("se reintenta cada 60s", str(c2.exception))
+            # pasada la ventana: UN reintento; si vuelve a fallar, otra ventana
+            self._envejecer_fallo(61)
+            with self.assertRaises(cli_sandbox.FeaturesSinRespuesta):
+                await self._llamar_features(fake)
+            self.assertEqual(cap["features_llamadas"], 2)
+            with self.assertRaises(cli_sandbox.FeaturesSinRespuesta):
+                await self._llamar_features(fake)
+            self.assertEqual(cap["features_llamadas"], 2, "el reintento abre otra ventana, no un bucle")
+            # la maquina se recupera: el siguiente reintento da verde y limpia el fallo
+            self.features_demora = 0.0
+            self._envejecer_fallo(61)
+            res = await self._llamar_features(fake)
+        self.assertEqual(res.texto, "hola desde codex")
+        self.assertEqual(cap["features_llamadas"], 3)
+        self.assertEqual(cli_sandbox._CACHE_FEATURES_FALLO, {})
+        await self._llamar_features(fake)
+        self.assertEqual(cap["features_llamadas"], 3, "ahora el exito esta cacheado")
+
+    async def test_los_reintentos_concurrentes_pasada_la_ventana_lanzan_un_solo_features_list(self):
+        self.features_demora = 1.0
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch.object(cli_sandbox, "FEATURES_TIMEOUT_S", 0.3):
+            with self.assertRaises(cli_sandbox.FeaturesSinRespuesta):
+                await self._llamar_features(fake)
+            self._envejecer_fallo(61)
+            resultados = await asyncio.gather(*(self._llamar_features(fake) for _ in range(5)), return_exceptions=True)
+        self.assertTrue(all(isinstance(r, cli_sandbox.FeaturesSinRespuesta) for r in resultados), resultados)
+        self.assertEqual(cap["features_llamadas"], 2, "el primer fallo + UN reintento")
+
+    async def test_los_fallos_deterministas_no_se_reintentan_nunca(self):
+        casos = (
+            ("feature activada", dict(salida_features=_SALIDA_FEATURES + "telepatia_tool  stable  true\n")),
+            ("exit code", dict(features_returncode=2)),
+            ("vacia", dict(salida_features="")),
+        )
+        for nombre, cambios in casos:
+            with self.subTest(caso=nombre):
+                cli_sandbox._CACHE_FEATURES_FALLO.clear()
+                for k, v in cambios.items():
+                    setattr(self, k, v)
+                cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+                with self.assertRaises(cli_sandbox.FeaturesNoPermitidas):
+                    await self._llamar_features(fake)
+                self.assertFalse(next(iter(cli_sandbox._CACHE_FEATURES_FALLO.values())).transitorio)
+                self._envejecer_fallo(1_000_000)
+                with self.assertRaises(cli_sandbox.FeaturesNoPermitidas) as c:
+                    await self._llamar_features(fake)
+                self.assertNotIsInstance(c.exception, cli_sandbox.FeaturesSinRespuesta)
+                self.assertEqual(cap["features_llamadas"], 1)
+                self.salida_features, self.features_returncode = _SALIDA_FEATURES, 0
+
+    async def test_el_reintento_es_configurable_y_un_valor_invalido_vuelve_al_default(self):
+        self.assertEqual(cli_sandbox._features_reintento_s(), 60.0)
+        for valor, esperado in (("5", 5.0), ("0.5", 60.0), ("0", 60.0), ("-3", 60.0), ("nan", 60.0),
+                                ("inf", 60.0), ("abc", 60.0), ("", 60.0)):
+            with self.subTest(valor=valor), patch.dict(os.environ, {"JAX_CLI_FEATURES_REINTENTO_S": valor}):
+                self.assertEqual(cli_sandbox._features_reintento_s(), esperado)
+        self.features_demora = 1.0
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch.object(cli_sandbox, "FEATURES_TIMEOUT_S", 0.1), \
+                patch.dict(os.environ, {"JAX_CLI_FEATURES_REINTENTO_S": "5"}):
+            with self.assertRaises(cli_sandbox.FeaturesSinRespuesta):
+                await self._llamar_features(fake)
+            self._envejecer_fallo(4)
+            with self.assertRaises(cli_sandbox.FeaturesSinRespuesta):
+                await self._llamar_features(fake)
+            self.assertEqual(cap["features_llamadas"], 1, "a los 4 s de 5 todavia no")
+            self._envejecer_fallo(2)
+            with self.assertRaises(cli_sandbox.FeaturesSinRespuesta):
+                await self._llamar_features(fake)
+            self.assertEqual(cap["features_llamadas"], 2, "a los 6 s de 5 si")
 
     async def test_el_fallo_cacheado_se_invalida_si_cambia_el_arbol(self):
         self.salida_features = _SALIDA_FEATURES + "telepatia_tool  stable  true\n"
