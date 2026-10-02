@@ -2675,6 +2675,66 @@ class PurgaSinSilencioTest(_Entorno):
         for frase in ("pasos 6", "9 (Jacobs)", "to_thread", "al arrancar"):
             self.assertIn(frase, doc)
 
+    # ---- el punto de arranque explicito (MINOR-27)
+    async def test_preparar_arranque_purga_todos_los_perfiles_que_sirve_run_cli(self):
+        # MINOR-27 (reauditoria 2026-10-02): `purgar_al_arranque` no tenia ningun llamador. El
+        # paso 6 todavia no existe, asi que hay un punto de arranque explicito y probado.
+        cdir, kdir = self.cred / "codex", self.cred / "kimi"
+        (cdir / "auth.json").write_text("TOKEN")
+        (cdir / "packages").mkdir()
+        (kdir / "credentials.json").write_text("K")
+        (kdir / "sessions").mkdir()
+        res = cli_sandbox.preparar_arranque()
+        self.assertEqual(res, {"codex": True, "kimi": True})
+        self.assertEqual(sorted(p.name for p in cdir.iterdir()), ["auth.json"])
+        self.assertEqual(sorted(p.name for p in kdir.iterdir()), ["credentials.json"])
+
+    async def test_preparar_arranque_cubre_exactamente_los_perfiles_habilitados(self):
+        habilitados = {n for n, p in cli_sandbox.PERFILES.items() if p.via_run_cli}
+        self.assertEqual(set(cli_sandbox.preparar_arranque()), habilitados)
+        self.assertNotIn("claude", cli_sandbox.preparar_arranque(), "Hyde no va por run_cli")
+        # y un perfil que se habilite mas adelante entra solo, sin tocar la funcion
+        nuevo = dataclasses.replace(cli_sandbox.PERFILES["kimi"], nombre="nuevo", cred_subdir="nuevo")
+        (self.cred / "nuevo").mkdir()
+        with patch.dict(cli_sandbox.PERFILES, {"nuevo": nuevo}):
+            self.assertIn("nuevo", cli_sandbox.preparar_arranque())
+
+    async def test_preparar_arranque_no_toca_un_perfil_con_una_llamada_en_curso_y_sigue_con_los_demas(self):
+        (self.cred / "codex" / "packages").mkdir()
+        (self.cred / "kimi" / "sessions").mkdir()
+        handle = cli_sandbox._ranura_adquirir("codex", cli_sandbox._ranuras_de(cli_sandbox.PERFILES["codex"]), 1)
+        try:
+            res = cli_sandbox.preparar_arranque()
+        finally:
+            cli_sandbox.flock_liberar(handle[0])
+        self.assertEqual(res, {"codex": False, "kimi": True})
+        self.assertTrue((self.cred / "codex" / "packages").exists())
+        self.assertFalse((self.cred / "kimi" / "sessions").exists())
+
+    async def test_preparar_arranque_con_un_directorio_de_credencial_ausente_no_frena_a_los_demas(self):
+        shutil.rmtree(self.cred / "kimi")
+        (self.cred / "codex" / "packages").mkdir()
+        with self.assertLogs("cli_sandbox", "WARNING"):
+            res = cli_sandbox.preparar_arranque()
+        self.assertEqual(res, {"codex": True, "kimi": False})
+
+    async def test_preparar_arranque_falla_cerrado_con_un_directorio_de_locks_inseguro(self):
+        os.makedirs(self.lock_dir, mode=0o700)
+        os.chmod(self.lock_dir, 0o777)
+        (self.cred / "codex" / "packages").mkdir()
+        with self.assertRaises(cli_sandbox.SandboxUnavailable):
+            cli_sandbox.preparar_arranque()
+        self.assertTrue((self.cred / "codex" / "packages").exists())
+
+    async def test_las_docstrings_dicen_que_el_arranque_debe_llamarla_y_que_hoy_no_la_llama_nadie(self):
+        doc = inspect.getdoc(cli_sandbox.preparar_arranque)
+        for frase in ("DEBE", "paso 6", "9", "to_thread"):
+            self.assertIn(frase, doc)
+        self.assertIn("hoy no la llama nadie", doc.lower())
+        doc2 = inspect.getdoc(cli_sandbox.purgar_al_arranque)
+        for frase in ("preparar_arranque", "hoy no la llama nadie", "9e39287"):
+            self.assertIn(frase, doc2)
+
 
 # ------------------------------------------------------- contencion con bwrap
 

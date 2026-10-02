@@ -1557,7 +1557,14 @@ def purgar_al_arranque(perfil: str) -> bool:
     True si purgo y False si no (ranura ocupada, perfil sin nada que purgar o directorio de
     credencial ausente, que se registra). Un directorio de locks inseguro es
     SandboxUnavailable (falla cerrado). Perfil desconocido o que no se sirve por run_cli:
-    PerfilNoSoportado."""
+    PerfilNoSoportado.
+
+    NOTA (MINOR-27, reauditoria 2026-10-02): hoy no la llama nadie (salvo `preparar_arranque`,
+    que a su vez tampoco tiene llamador). El mensaje del commit
+    9e39287 ("la invoca, via to_thread, el llamador de los pasos 6 y 9") describe el DISENO,
+    no el estado: ese llamador (el arranque del paso 6/9) todavia no existe. El punto de
+    arranque explicito es `preparar_arranque()`, que purga todos los perfiles habilitados;
+    el arranque de los pasos 6 y 9 DEBE llamarlo."""
     p = PERFILES.get(perfil) if isinstance(perfil, str) else None
     if p is None or not p.via_run_cli:
         raise PerfilNoSoportado(f"perfil {perfil!r} no se sirve por run_cli")
@@ -1566,6 +1573,25 @@ def purgar_al_arranque(perfil: str) -> bool:
         logger.warning("purga al arrancar: no existe el directorio de credencial de %s", p.nombre)
         return False
     return _purgar_si_libre(p, _ranuras_de(p), cred_host, None)
+
+
+def preparar_arranque() -> dict[str, bool]:
+    """BLOQUEANTE -- llamar via asyncio.to_thread. PUNTO DE ARRANQUE de los CLIs de
+    suscripcion: purga (`purgar_al_arranque`) el estado que dejo un proceso anterior en el
+    directorio de credencial de CADA perfil habilitado, o sea los que sirve `run_cli`
+    (`via_run_cli`; `claude`, que es Hyde, no). Devuelve {perfil: si purgo}: False es una
+    llamada en curso de otro proceso (la purga queda para la proxima) o un directorio de
+    credencial ausente (se registra); un perfil que no se pudo purgar no frena a los demas. Un
+    directorio de locks inseguro es SandboxUnavailable (falla cerrado) y nada mas se purga.
+
+    El arranque del paso 6 (Thot, chat) y del paso 9 (Jacobs) DEBE llamarla, una vez, antes de
+    servir la primera llamada. Hoy no la llama nadie: esos pasos todavia no existen, y este
+    modulo no la dispara solo (un import no puede borrar archivos). Cuando se escriba ese
+    arranque, hay que cablearla y agregar el test que lo exija."""
+    return {
+        nombre: purgar_al_arranque(nombre)
+        for nombre, p in PERFILES.items() if p.via_run_cli
+    }
 
 
 def _ranura_liberar(handle, perfil: Perfil, ranuras: int, cred_host: Optional[str]) -> None:
