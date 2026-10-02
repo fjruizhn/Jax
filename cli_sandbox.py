@@ -372,7 +372,8 @@ def flock_compartido_adquirir(
             ) from None
     sin_grupo = (
         f"el euid {os.geteuid()} no pertenece al grupo {grupo} (o el grupo no tiene lectura): "
-        f"agregar ese usuario a {grupo!r}"
+        f"agregar ese usuario a {grupo!r} o, si ya es miembro, reiniciar el proceso o la sesion "
+        f"para que tome el grupo"
     )
     try:
         dfd = os.open(directorio, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)

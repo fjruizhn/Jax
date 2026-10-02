@@ -2568,6 +2568,8 @@ class LocksCompartidosTest(unittest.TestCase):
             self._adq()
         msg = str(c.exception)
         self.assertIn(f"el euid {os.geteuid()} no pertenece al grupo {self.grupo}", msg)
+        # MINOR-36: un proceso o una sesion ya abiertos no ven un grupo agregado despues
+        self.assertIn("si ya es miembro, reiniciar el proceso o la sesion para que tome el grupo", msg)
         self.assertNotIn("falta la linea", msg)
         self.assertNotIn("/etc/tmpfiles.d", msg)
 
@@ -2579,6 +2581,8 @@ class LocksCompartidosTest(unittest.TestCase):
             self._adq()
         msg = str(c.exception)
         self.assertIn(f"el euid {os.geteuid()} no pertenece al grupo {self.grupo}", msg)
+        # MINOR-36: un proceso o una sesion ya abiertos no ven un grupo agregado despues
+        self.assertIn("si ya es miembro, reiniciar el proceso o la sesion para que tome el grupo", msg)
         self.assertNotIn("falta la linea", msg)
 
     def test_directorio_inexistente_dice_que_falta_la_linea_d_y_no_habla_de_grupos(self):
