@@ -486,15 +486,16 @@ def test_un_manifiesto_forjado_pero_coherente_no_carga_contra_el_arbol_del_sha(c
     _forjar_coherente(raiz, "skills/alfa/SKILL.md", b"---\nname: alfa\n---\nINSTRUCCION FORJADA\n")
     # solo con el manifiesto no hay como saberlo...
     assert paquete.verificar_integridad(cfg) == ()
-    # ...pero al cargar se compara contra el arbol de git del SHA
+    # ...pero el Puerto recalcula el oid git de los bytes y lo compara con el del manifiesto (sin git)
     with pytest.raises(paquete.PaqueteNoVerifica) as exc:
         paquete.cargar_paquete(cfg)
-    assert "oid_distinto_del_arbol" in {f.codigo for f in exc.value.fallos}
+    assert "oid_distinto_del_manifiesto" in {f.codigo for f in exc.value.fallos}
+    assert "oid_distinto_del_arbol" in _codigos(paquete.verificar_contra_arbol(cfg))
 
 
-def test_un_manifiesto_forjado_con_su_oid_y_todos_sus_hashes_recalculados_tampoco_carga(cfg):
-    """El atacante que ademas reescribe `oid_git` con el oid de SUS bytes: el manifiesto es coherente
-    consigo mismo y con los archivos, pero ya no coincide con el arbol de git del SHA."""
+def test_un_manifiesto_forjado_con_su_oid_y_todos_sus_hashes_lo_detecta_el_constructor_no_el_puerto(cfg):
+    """El atacante que reescribe tambien `oid_git`: el Puerto (sin git) ya no puede notarlo y por eso exige
+    dueño root; el CONSTRUCTOR, que contrasta con el arbol del SHA, si."""
     raiz = paquete.construir_paquete(cfg)
     nuevo = b"---\nname: alfa\n---\nINSTRUCCION FORJADA 2\n"
     _forjar_coherente(raiz, "skills/alfa/SKILL.md", nuevo)
@@ -503,14 +504,50 @@ def test_un_manifiesto_forjado_con_su_oid_y_todos_sus_hashes_recalculados_tampoc
     m["sha256_manifiesto"] = paquete.hash_del_manifiesto(m)
     (raiz / paquete.MANIFIESTO).write_text(json.dumps(m))
     assert paquete.verificar_integridad(cfg) == ()
-    with pytest.raises(paquete.PaqueteNoVerifica) as exc:
-        paquete.cargar_paquete(cfg)
-    assert "oid_distinto_del_arbol" in {f.codigo for f in exc.value.fallos}
+    assert "INSTRUCCION FORJADA 2" in paquete.cargar_paquete(cfg).leer("alfa")      # limite declarado del Puerto
+    assert "oid_distinto_del_arbol" in _codigos(paquete.verificar_contra_arbol(cfg))
+    with pytest.raises(paquete.PaqueteNoVerifica):
+        paquete.construir_paquete(cfg)                                              # el constructor no lo da por bueno
 
 
 def test_la_constitucion_forjada_tampoco_carga(cfg, sha):
     raiz = paquete.construir_paquete(cfg)
     _forjar_coherente(raiz, "constitucion/CLAUDE.md", f"<!-- claude-skills: SHA {sha} -->\n# otra constitucion\n".encode())
+    with pytest.raises(paquete.PaqueteNoVerifica):
+        paquete.cargar_paquete(cfg)
+
+
+def test_el_puerto_carga_sin_acceso_al_repo_ni_a_git(cfg, monkeypatch, tmp_path):
+    """El Puerto (usuario faro) no lee git: con el repo borrado y `git` imposible de lanzar, carga igual."""
+    paquete.construir_paquete(cfg)
+    import shutil
+    shutil.rmtree(cfg.repo)
+    from jax.faro import git_objetos
+
+    def sin_git(*a, **k):
+        raise AssertionError("cargar_paquete lanzo git")
+    monkeypatch.setattr(git_objetos, "git", sin_git)
+    monkeypatch.setattr(paquete, "listar", sin_git)
+    monkeypatch.setattr(paquete, "leer_blobs", sin_git)
+    cargado = paquete.cargar_paquete(cfg)
+    assert "cuerpo alfa" in cargado.leer("alfa") and cargado.sha == cfg.sha
+
+
+def test_un_archivo_de_otro_duenio_no_carga(cfg):
+    paquete.construir_paquete(cfg)
+    otro = ConfigFaro(repo=cfg.repo, sha=cfg.sha, destino=cfg.destino, uid_duenio=os.getuid() + 1)
+    with pytest.raises(paquete.PaqueteNoVerifica) as exc:
+        paquete.cargar_paquete(otro)
+    assert "duenio_distinto" in {f.codigo for f in exc.value.fallos}
+
+
+def test_un_archivo_cambiado_o_de_mas_no_carga(cfg):
+    raiz = paquete.construir_paquete(cfg)
+    (raiz / "skills/beta/SKILL.md").write_bytes(b"cambiado")
+    with pytest.raises(paquete.PaqueteNoVerifica):
+        paquete.cargar_paquete(cfg)
+    (raiz / "skills/beta/SKILL.md").unlink()
+    (raiz / "skills/beta/OTRO.md").write_bytes(b"de mas")
     with pytest.raises(paquete.PaqueteNoVerifica):
         paquete.cargar_paquete(cfg)
 
@@ -524,9 +561,9 @@ def test_un_archivo_agregado_al_paquete_y_al_manifiesto_no_carga(cfg):
     m["archivos"]["skills/alfa/EXTRA.md"] = {"modo": "0644", "sha256": hashlib.sha256(b"extra").hexdigest(), "oid_git": "0" * 40}
     m["sha256_manifiesto"] = paquete.hash_del_manifiesto(m)
     (raiz / paquete.MANIFIESTO).write_text(json.dumps(m))
-    with pytest.raises(paquete.PaqueteNoVerifica) as exc:
-        paquete.cargar_paquete(cfg)
-    assert "archivo_fuera_del_arbol" in {f.codigo for f in exc.value.fallos}
+    with pytest.raises(paquete.PaqueteNoVerifica):
+        paquete.cargar_paquete(cfg)                 # el oid de relleno no coincide con los bytes
+    assert "archivo_fuera_del_arbol" in _codigos(paquete.verificar_contra_arbol(cfg))
 
 
 def test_un_archivo_del_arbol_quitado_del_paquete_y_del_manifiesto_no_carga(cfg):
@@ -537,9 +574,8 @@ def test_un_archivo_del_arbol_quitado_del_paquete_y_del_manifiesto_no_carga(cfg)
     del m["archivos"]["skills/beta/SKILL.md"]
     m["sha256_manifiesto"] = paquete.hash_del_manifiesto(m)
     (raiz / paquete.MANIFIESTO).write_text(json.dumps(m))
-    with pytest.raises(paquete.PaqueteNoVerifica) as exc:
-        paquete.cargar_paquete(cfg)
-    assert "archivo_del_arbol_ausente" in {f.codigo for f in exc.value.fallos}
+    assert paquete.verificar_integridad(cfg) == ()
+    assert "archivo_del_arbol_ausente" in _codigos(paquete.verificar_contra_arbol(cfg))   # lo ve el constructor, no el Puerto
 
 
 def test_un_duenio_distinto_del_esperado_impide_arrancar(cfg):
@@ -629,3 +665,20 @@ def test_la_frescura_distingue_un_sha_retirado_de_main(repo, cfg, sha, caplog):
         paquete.exigir_integridad(cfg)    # solo avisa
     assert f.estado == "retirado" and f.sha_actual == nuevo
     assert any("retirado" in r.getMessage().lower() for r in caplog.records)
+
+
+def test_el_constructor_contrasta_lo_que_escribio_con_el_arbol_antes_de_publicar(cfg, monkeypatch):
+    """Si lo que se va a escribir ya no es lo que git da para el SHA (bug, disco, memoria), no se publica."""
+    original = paquete._archivos_desde_git
+
+    def con_bytes_cambiados(c):
+        archivos, oids = original(c)
+        modo, _ = archivos["skills/alfa/SKILL.md"]
+        archivos["skills/alfa/SKILL.md"] = (modo, b"bytes que git no dio para este SHA\n")
+        return archivos, oids
+
+    monkeypatch.setattr(paquete, "_archivos_desde_git", con_bytes_cambiados)
+    with pytest.raises(paquete.PaqueteNoVerifica) as exc:
+        paquete.construir_paquete(cfg)
+    assert "oid_distinto_del_arbol" in {f.codigo for f in exc.value.fallos}
+    assert not cfg.raiz_paquete.exists()

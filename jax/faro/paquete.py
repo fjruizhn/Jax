@@ -30,9 +30,9 @@ EL MANIFIESTO se firma con su propio hash (`sha256_manifiesto`, sobre su cuerpo 
 detecta un manifiesto editado a medias, NO es una firma de autoria. Quien puede reescribir
 el paquete entero y recalcular el hash no se detecta con eso. Dos defensas, que NO dependen
 del manifiesto:
-1. el manifiesto guarda el oid git de cada blob, y `cargar_paquete` lo compara contra
-   `git ls-tree <SHA>` (sin replace refs) y re-calcula el oid de los bytes leidos: el contenido
-   queda atado al SHA, no a si mismo;
+1. el manifiesto guarda el oid git de cada blob. El CONSTRUCTOR (root, sobre el espejo bare de root) lo
+   contrasta contra `git ls-tree <SHA>` (sin replace refs): el contenido queda atado al SHA, no a si
+   mismo. El PUERTO no lee git: `cargar_paquete` recalcula ese oid sobre los bytes, sin git;
 2. el dueño: `verificar_integridad` exige que la raiz, cada entrada y sus ancestros sean del
    dueño esperado (`ConfigFaro.uid_duenio`: root en produccion, inyectable en pruebas) y que
    nadie ajeno pueda escribirlos (modo sin g+w/o+w; un ancestro con escritura ajena solo
@@ -256,7 +256,7 @@ def construir_paquete(cfg: ConfigFaro) -> Path:
     cual; alterado -> `PaqueteNoVerifica` (no se pisa ni se repara en silencio)."""
     final = cfg.raiz_paquete
     if final.exists() or final.is_symlink():
-        fallos, _ = _verificar_raiz(final, cfg.sha, cfg.uid_duenio)
+        fallos = verificar_contra_arbol(cfg)
         if fallos:
             raise PaqueteNoVerifica(fallos)
         return final
@@ -266,7 +266,9 @@ def construir_paquete(cfg: ConfigFaro) -> Path:
     tmp = cfg.destino / f".construyendo-{cfg.sha[:12]}-{os.getpid()}-{secrets.token_hex(4)}"
     try:
         _escribir_paquete(tmp, cfg, archivos, oids)
-        fallos, _ = _verificar_raiz(tmp, cfg.sha, cfg.uid_duenio)
+        fallos, manifiesto = _verificar_raiz(tmp, cfg.sha, cfg.uid_duenio)
+        if not fallos:
+            fallos = contrastar_con_arbol(cfg, manifiesto, tmp)
         if fallos:
             raise PaqueteNoVerifica(fallos)
         try:
@@ -512,36 +514,61 @@ def _leer_sin_seguir_enlaces(ruta: Path) -> bytes:
         return f.read()
 
 
-def cargar_paquete(cfg: ConfigFaro) -> PaqueteCargado:
-    """Verifica el paquete y lo ATA AL SHA, y carga en memoria lo que el Puerto sirve.
+def contrastar_con_arbol(cfg: ConfigFaro, manifiesto: dict, raiz: Path | None = None) -> tuple[Fallo, ...]:
+    """Ata el manifiesto AL SHA: sus rutas, modos y oids tienen que ser EXACTAMENTE los del arbol de git
+    del SHA (`git --no-replace-objects ls-tree`). Es del CONSTRUCTOR (corre como root sobre el espejo bare
+    de root): el Puerto no lee git. Un manifiesto coherente pero forjado no pasa."""
+    esperados = manifiesto["archivos"]
+    arbol = _seleccionar(cfg)
+    fallos: list[Fallo] = []
+    for rel in sorted(set(arbol) | set(esperados)):
+        if rel not in arbol:
+            fallos.append(Fallo("archivo_fuera_del_arbol", rel))
+        elif rel not in esperados:
+            fallos.append(Fallo("archivo_del_arbol_ausente", rel))
+        else:
+            if esperados[rel]["oid_git"] != arbol[rel].oid:
+                fallos.append(Fallo("oid_distinto_del_arbol", rel))
+            if _MODOS[esperados[rel]["modo"]] != _modo_de(arbol[rel]):
+                fallos.append(Fallo("modo_distinto_del_arbol", rel))
+            # y los BYTES en disco, con el oid que git les daria, contra el oid del arbol
+            try:
+                datos = _leer_sin_seguir_enlaces((raiz or cfg.raiz_paquete) / rel)
+                origen = datos[len(_sello(cfg.sha)):] if rel == _CONSTITUCION_DEST else datos
+                if _oid_de_bytes(origen, len(arbol[rel].oid)) != arbol[rel].oid:
+                    fallos.append(Fallo("oid_distinto_del_arbol", rel))
+            except OSError:
+                fallos.append(Fallo("archivo_faltante", rel))
+    return tuple(fallos)
 
-    1. integridad contra el manifiesto y dueño (`_verificar_raiz`; devuelve el manifiesto ya
-       verificado, que no se vuelve a leer);
-    2. el conjunto de rutas, modos y oids del manifiesto tiene que ser EXACTAMENTE el del arbol
-       de git del SHA (`git --no-replace-objects ls-tree`): un manifiesto coherente pero forjado
-       no pasa. Esto necesita leer el repo (el espejo): si git no puede leerlo, no se carga;
-    3. cada archivo se lee SIN seguir enlaces y sus bytes se vuelven a comparar con sha256 y con el
-       oid git del arbol: lo que se sirve es exactamente lo verificado, sin ventana entre la
-       comprobacion y el uso."""
+
+def verificar_contra_arbol(cfg: ConfigFaro) -> tuple[Fallo, ...]:
+    """Integridad + contraste con el arbol de git (lo que hace el constructor/instalador). Nunca lanza."""
+    fallos, manifiesto = _verificar_raiz(cfg.raiz_paquete, cfg.sha, cfg.uid_duenio)
+    if fallos:
+        return fallos
+    try:
+        return contrastar_con_arbol(cfg, manifiesto)
+    except FuenteInvalida:
+        return (Fallo("arbol_ilegible"),)
+
+
+def cargar_paquete(cfg: ConfigFaro) -> PaqueteCargado:
+    """Verifica el paquete y carga en memoria lo que el Puerto sirve. **SIN git**: el Puerto corre como
+    usuario sin privilegios y no lee el espejo; el contraste con el arbol lo hizo el constructor.
+
+    1. integridad contra el manifiesto + dueño (`_verificar_raiz`; devuelve el manifiesto ya verificado,
+       que no se vuelve a leer): dueño esperado (root en produccion), sin escritura ajena en la raiz, las
+       entradas y los ancestros, sha256 de cada archivo, conjunto exacto;
+    2. cada archivo se lee SIN seguir enlaces y sus bytes se vuelven a comparar con el sha256 del manifiesto
+       y con el oid git que el manifiesto trae, RECALCULADO sobre los bytes (sin git): lo que se sirve es
+       exactamente lo verificado, sin ventana entre la comprobacion y el uso. Defensa extra: quien reescribe
+       el paquete tendria que cambiar tambien el oid, y el constructor lo contrasta con el arbol."""
     fallos, manifiesto = _verificar_raiz(cfg.raiz_paquete, cfg.sha, cfg.uid_duenio)
     if fallos:
         raise PaqueteNoVerifica(fallos)
     raiz = cfg.raiz_paquete
     esperados = manifiesto["archivos"]
-    arbol = _seleccionar(cfg)
-    fallos_arbol: list[Fallo] = []
-    for rel in sorted(set(arbol) | set(esperados)):
-        if rel not in arbol:
-            fallos_arbol.append(Fallo("archivo_fuera_del_arbol", rel))
-        elif rel not in esperados:
-            fallos_arbol.append(Fallo("archivo_del_arbol_ausente", rel))
-        else:
-            if esperados[rel]["oid_git"] != arbol[rel].oid:
-                fallos_arbol.append(Fallo("oid_distinto_del_arbol", rel))
-            if _MODOS[esperados[rel]["modo"]] != _modo_de(arbol[rel]):
-                fallos_arbol.append(Fallo("modo_distinto_del_arbol", rel))
-    if fallos_arbol:
-        raise PaqueteNoVerifica(tuple(fallos_arbol))
     memoria: dict[str, bytes] = {}
     for rel in sorted(esperados):
         try:
@@ -556,8 +583,9 @@ def cargar_paquete(cfg: ConfigFaro) -> PaqueteCargado:
             if not datos.startswith(sello):
                 raise PaqueteNoVerifica((Fallo("sello_distinto", rel),))
             origen = datos[len(sello):]
-        if _oid_de_bytes(origen, len(arbol[rel].oid)) != arbol[rel].oid:
-            raise PaqueteNoVerifica((Fallo("oid_distinto_del_arbol", rel),))
+        oid = esperados[rel]["oid_git"]
+        if _oid_de_bytes(origen, len(oid)) != oid:
+            raise PaqueteNoVerifica((Fallo("oid_distinto_del_manifiesto", rel),))
         memoria[rel] = datos
     skills: dict[str, dict[str, bytes]] = {}
     agentes: dict[str, bytes] = {}
