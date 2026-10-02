@@ -46,7 +46,7 @@ LAS_MANOS = RAIZ / "las_manos"
 #: archivo físico (symlink) -- no un shadow. Se verifica por inodo/ruta
 #: real en el test, esto sólo dice CUÁLES nombres tienen permiso de
 #: intentarlo.
-PERMITIDOS_POR_SYMLINK = frozenset({"hyde_sandbox", "jacobs"})
+PERMITIDOS_POR_SYMLINK = frozenset({"hyde_sandbox", "cli_sandbox", "jacobs"})
 
 
 def _rastreado_en_un_checkout_limpio(ruta: Path) -> bool:

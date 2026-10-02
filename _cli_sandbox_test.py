@@ -55,7 +55,7 @@ def _bwrap_usable() -> bool:
             capture_output=True, timeout=10,
         )
         return r.returncode == 0
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return False
 
 
