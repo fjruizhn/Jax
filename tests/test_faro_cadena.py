@@ -154,7 +154,14 @@ def entorno(tmp_path):
     paquete.construir_paquete(cfg)
     d = tmp_path / "run"
     d.mkdir(mode=0o700)
-    return {"JAX_FARO_REPO": str(repo), "JAX_FARO_SHA": sha, "JAX_FARO_ECOSISTEMA_DIR": str(tmp_path / "eco"),
+    creds = tmp_path / "telegram.env"                       # 0.3b: el aviso y 0.3c: el canal de control son obligatorios
+    creds.write_text("export TELEGRAM_BOT_TOKEN=token-de-prueba\nexport TELEGRAM_CHAT_ID=1\n")
+    creds.chmod(0o600)
+    control = tmp_path / "control"
+    control.mkdir(mode=0o750)
+    return {"JAX_FARO_AVISO_CREDS": str(creds), "JAX_FARO_AVISO_API_URL": "http://127.0.0.1:9", "JAX_FARO_CONTROL_DIR": str(control),
+            "JAX_FARO_ORQUESTADOR_UID": str(os.getuid()), "JAX_FARO_JAULA_UID_MIN": "50000", "JAX_FARO_JAULA_UID_MAX": "50050",
+            "JAX_FARO_REPO": str(repo), "JAX_FARO_SHA": sha, "JAX_FARO_ECOSISTEMA_DIR": str(tmp_path / "eco"),
             "JAX_FARO_DUENIO_UID": str(os.getuid()), "JAX_FARO_SOCKET_DIR": str(d),
             "JAX_FARO_BITACORA_DB_HOST": "127.0.0.1", "JAX_FARO_BITACORA_DB_PORT": "3306", "JAX_FARO_BITACORA_DB_USER": "u",
             "JAX_FARO_BITACORA_DB_PASSWORD": "p", "JAX_FARO_BITACORA_DB_NAME": "b"}
