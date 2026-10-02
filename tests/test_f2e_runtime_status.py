@@ -2,6 +2,8 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 
+import pytest
+
 from policy.governance.response import ResponseScope
 from policy.governance.resolution import (
     AdapterKind, ConflictPolicy, PredicateAuthorityBinding, ResolutionObservation,
@@ -101,12 +103,8 @@ def test_motor_status_persists_governed_owner_and_uses_coherent_view(tmp_path, m
 
 
 def test_motor_resolver_rejects_caller_selected_store():
-    try:
+    with pytest.raises(TypeError):
         MotorJobStatusResolver(object())
-    except TypeError:
-        pass
-    else:
-        raise AssertionError("resolver accepted caller-selected store")
 
 
 def test_runtime_registry_is_exactly_the_four_authorized_predicates():
@@ -157,12 +155,9 @@ def test_runtime_observation_timestamp_is_source_owned_and_stale_or_future_fails
 def test_status_evidence_cannot_be_constructed_from_serialized_request_fields():
     observation = ResolutionObservation(ResolutionStatus.RESOLVED, NOW, "platform:facet:hyde",
         {"name": "hyde", "status": "idle"})
-    try:
+    from policy.governance.response import GovernanceContractError
+    with pytest.raises(GovernanceContractError, match="server pathway"):
         RuntimeStatusEvidence(AdapterKind.FACET_RUNTIME_STATUS, observation, _scope())
-    except Exception as exc:
-        assert "server pathway" in str(exc)
-    else:
-        raise AssertionError("caller constructed trusted status evidence")
 
 
 def test_governed_domain_distinguishes_pipeline_facet_and_engine_status():
@@ -209,13 +204,10 @@ def test_unknown_jacobs_pipeline_never_resolves_and_ignores_caller_timestamps(mo
     monkeypatch.setattr(store, "pipeline_get", pipeline_get)
     resolver = JacobsPipelineStatusResolver()
     # There is intentionally no observed_at/source argument to this API.
-    try:
+    from policy.governance.response import GovernanceContractError
+    with pytest.raises(GovernanceContractError, match="arguments invalid"):
         asyncio.run(resolver.evidence(
             {"pipeline_id": "missing", "status": "running", "observed_at": NOW}, _scope()))
-    except Exception as exc:
-        assert "arguments invalid" in str(exc)
-    else:
-        raise AssertionError("caller timestamp/source fields were accepted")
     evidence = asyncio.run(resolver.evidence(
         {"pipeline_id": "missing", "status": "running"}, _scope()))
     assert evidence.observation.status is ResolutionStatus.UNAVAILABLE

@@ -118,7 +118,7 @@ class MotorJobStatusResolver:
             raise GovernanceContractError("JOB_STATUS arguments invalid")
         try:
             view = self._store.get(job_id)
-        except Exception:
+        except Exception:  # fail-soft: una lectura fallida queda UNAVAILABLE, nunca se acredita.
             view = None
         observed_at = _job_transition_time(view)
         if view is None or observed_at is None or view.tenant_id is None or view.user_id is None:
@@ -143,7 +143,7 @@ class JacobsPipelineStatusResolver:
         from jacobs import store as jacobs_store
         try:
             pipeline = await jacobs_store.pipeline_get(pipeline_id)
-        except Exception:
+        except Exception:  # fail-soft: Jacobs inaccesible queda UNAVAILABLE, nunca se acredita.
             pipeline = None
         observed_at = _timestamp(getattr(pipeline, "updated_at", None))
         if pipeline is None or observed_at is None or pipeline.tenant_id is None or pipeline.user_id is None:
