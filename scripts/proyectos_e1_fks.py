@@ -18,7 +18,7 @@ Uso:  python scripts/proyectos_e1_fks.py {--ensayar|--aplicar} [--database NOMBR
 Reglas por tabla:
   - Si la FK ya existe (information_schema, por columna, no por nombre): no
     crea nada, `ya_existia: true`, pero REVALIDA: cuenta huerfanos (si hay, error)
-    y en messages corre el detector. Repetir es seguro, no da por bueno lo previo.
+    y corre el detector HNSW. Repetir es seguro, no da por bueno lo previo.
   - `--tablas` limita lo que se toca; con --aplicar sobre jax_memory es obligatoria.
   - El ALTER usa LOCK=SHARED y lock_wait_timeout=5: si el lock de metadatos esta
     ocupado, la tabla sale `aplicada: false, motivo: lock_timeout` y sigue la
@@ -29,11 +29,11 @@ Reglas por tabla:
     MariaDB acepta INPLACE); por eso los huerfanos se cuentan antes Y despues.
   - Si MariaDB rechaza INPLACE/LOCK=SHARED (error 1846) registra
     `"algoritmo": "COPY"` y NO aplica esa FK.
-  - messages: tras el ALTER corre el detector de indices vectoriales
-    (`jax.memory.indice_vectorial`, el mismo de
-    `scripts/revisar_indice_vectorial.py`) sobre los indices de esa tabla.
-    `hnsw_intacto` es true/false; null si la tabla no tiene indice VECTOR (el
-    detector no aplica) o en las demas tablas. Solo mira, nunca repara.
+  - TODA tabla procesada (hoy messages y facts tienen indice VECTOR): tras el
+    ALTER corre el detector de indices vectoriales (`jax.memory.indice_vectorial`,
+    el mismo de `scripts/revisar_indice_vectorial.py`) sobre los indices de esa
+    tabla. `hnsw_intacto` es true/false; null si la tabla no tiene indice VECTOR
+    (el detector no aplica). Solo mira, nunca repara.
 
 Salida: 0 todas aplicadas (o ya existian) y hnsw sano; 1 alguna sin aplicar o
 con hnsw roto; 2 argumentos/guarda.
@@ -123,8 +123,7 @@ async def _tabla(cur, tabla: str) -> dict:
                             f"se creo sin validar o entraron con foreign_key_checks=0. Corregirlos.")
             return res
         res["aplicada"] = True
-        if tabla == "messages":
-            res["hnsw_intacto"] = await _hnsw(cur, tabla)
+        res["hnsw_intacto"] = await _hnsw(cur, tabla)
         return res
     if huerfanos:
         res["error"] = (f"quedan huerfanos en {tabla} (project_id sin fila en projects, primeros: "
@@ -152,8 +151,7 @@ async def _tabla(cur, tabla: str) -> dict:
                                           f"quedo creada SIN validar: corregirlos o `DROP FOREIGN KEY "
                                           f"fk_{tabla}_project` (ver runbook)"))
         return res
-    if tabla == "messages":
-        res["hnsw_intacto"] = await _hnsw(cur, tabla)
+    res["hnsw_intacto"] = await _hnsw(cur, tabla)
     return res
 
 

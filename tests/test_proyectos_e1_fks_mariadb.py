@@ -46,7 +46,14 @@ def _conn_params() -> dict:
                 user=os.getenv("JAX_DB_USER", ""), password=os.getenv("JAX_DB_PASSWORD", ""))
 
 
-async def _crear_base(nombre: str, *, vector: bool) -> None:
+def _tablas_vectoriales(vector) -> tuple:
+    """True = solo messages (compat); una tupla = esas tablas."""
+    if vector is True:
+        return ("messages",)
+    return tuple(vector) if vector else ()
+
+
+async def _crear_base(nombre: str, *, vector) -> None:
     assert es_base_de_test(nombre) and "_e1fks_" in nombre
     conn = await aiomysql.connect(autocommit=True, connect_timeout=db_connect_timeout_seconds(), **_conn_params())
     try:
@@ -62,7 +69,7 @@ async def _crear_base(nombre: str, *, vector: bool) -> None:
                               "ENGINE=InnoDB")
             for t in _TABLAS:
                 extra = ""
-                if t == "messages" and vector:
+                if t in _tablas_vectoriales(vector):
                     extra = ", emb VECTOR(3) NOT NULL, VECTOR KEY idx_msg_emb (emb) DISTANCE=cosine"
                 await cur.execute(f"CREATE TABLE `{t}` (id INT AUTO_INCREMENT PRIMARY KEY, project_id INT NULL"
                                   f"{extra}, KEY (project_id)) ENGINE=InnoDB")
@@ -82,10 +89,10 @@ async def _borrar_base(nombre: str) -> None:
 
 @pytest.fixture
 def base(request):
-    """Fabrica de bases desechables: `base(vector=False)` devuelve el nombre."""
+    """Fabrica de bases desechables: `base(vector=False)` devuelve el nombre; `vector=True` pone el indice en messages, una tupla en esas tablas."""
     creadas: list[str] = []
 
-    def _fabricar(*, vector: bool = False) -> str:
+    def _fabricar(*, vector=False) -> str:
         nombre = f"jax_memory_test_e1fks_{uuid.uuid4().hex[:8]}"
         creadas.append(nombre)               # se anota ANTES de crear: el DROP corre aunque falle a medias
         asyncio.run(_crear_base(nombre, vector=vector))
@@ -142,7 +149,7 @@ def test_aplica_las_cinco_y_la_segunda_corrida_no_hace_nada(base):
         assert r1[t]["aplicada"] is True, r1[t]
         assert r1[t]["algoritmo"] == "INPLACE", r1[t]
         assert isinstance(r1[t]["segundos"], float)
-        assert r1[t]["hnsw_intacto"] is None            # sin indice VECTOR en messages: el detector no aplica
+        assert r1[t]["hnsw_intacto"] is None            # sin indice VECTOR en ninguna tabla: el detector no aplica
     assert asyncio.run(_fks_existentes(db)) == set(_TABLAS)
     r2 = _por_tabla(asyncio.run(_correr(db)))
     for t in _TABLAS:
@@ -176,7 +183,39 @@ def test_messages_con_indice_vectorial_sano_da_hnsw_intacto_true(base):
     assert r["messages"]["hnsw_intacto"] is True
     for t in _TABLAS:
         if t != "messages":
-            assert r[t]["hnsw_intacto"] is None
+            assert r[t]["hnsw_intacto"] is None      # estas no tienen indice VECTOR en esta base
+
+
+@requiere_servidor
+def test_facts_con_indice_vectorial_tambien_se_revisa(base):
+    """B-1: el detector corre en TODA tabla con indice VECTOR (facts lo tiene en el esquema real)."""
+    db = base(vector=("messages", "facts"))
+    asyncio.run(_sql(db, "INSERT INTO projects (id,name) VALUES (1,'h')"))
+    for t in ("messages", "facts"):
+        for i in range(3):
+            asyncio.run(_sql(db, f"INSERT INTO `{t}` (project_id, emb) VALUES (1, VEC_FromText(%s))",
+                             (f"[{i + 1},0.5,0.25]",)))
+    r = _por_tabla(asyncio.run(_correr(db)))
+    assert r["facts"]["aplicada"] is True, r["facts"]
+    assert r["facts"]["hnsw_intacto"] is not None
+    assert r["facts"]["hnsw_intacto"] is True
+    assert r["messages"]["hnsw_intacto"] is True
+    for t in ("conversations", "decisions", "action_items"):
+        assert r[t]["hnsw_intacto"] is None
+
+
+@requiere_servidor
+def test_facts_con_indice_que_miente_hace_fallar_el_guion(base, monkeypatch):
+    db = base(vector=("facts",))
+    asyncio.run(_sql(db, "INSERT INTO projects (id,name) VALUES (1,'h')"))
+    asyncio.run(_sql(db, "INSERT INTO facts (project_id, emb) VALUES (1, VEC_FromText('[1,0.5,0.25]'))"))
+
+    async def roto(cur, tabla, indice, columna, muestra=iv.MUESTRA):
+        return iv.Informe(tabla, indice, columna, 10, 10, por_el_indice=1, por_scan=10)
+    monkeypatch.setattr(fks.iv, "revisar_uno", roto)
+    r = _por_tabla(asyncio.run(_correr(db)))
+    assert r["facts"]["hnsw_intacto"] is False
+    assert fks._ok(r["facts"]) is False
 
 
 @requiere_servidor
