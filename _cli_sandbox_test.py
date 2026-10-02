@@ -36,6 +36,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import cli_sandbox
@@ -1631,15 +1632,34 @@ class LogDeRunCliTest(_Entorno):
         self.assertNotIn("\n", linea)
         self.assertNotIn("SEGUNDA-LINEA-FALSA", linea)
 
-    async def test_ningun_campo_de_texto_del_log_puede_fabricar_otra_linea(self):
-        # MINOR-22 (reauditoria 2026-10-02): `motivo` se saneaba y los demas campos de texto
-        # (perfil, modelo, correlation_id, entry_point...) no: `perfil="x\nclase=ok ..."`
-        # fabricaba una SEGUNDA linea de log con una `clase=ok` falsa.
-        falso = "x\nclase=ok latencia_ms=1"
+    @staticmethod
+    def _claves(mensaje: str) -> list[str]:
+        """Lo que un parser `clave=valor` ingenuo extrae de la linea: las claves, en orden."""
+        return re.findall(r"(?:^|\s)([A-Za-z_]+)=", mensaje)
+
+    _CLAVES_REALES = [
+        "correlation_id", "entry_point", "user_id", "tenant_id", "perfil", "modelo",
+        "version_cli", "clase", "latencia_ms", "motivo",
+    ]
+    _FALSO = "x\nclase=ok latencia_ms=1 \x1b[31m motivo=ok \\"
+
+    def _verificar_linea_sin_falsificar(self, mensaje: str) -> None:
+        self.assertNotIn("\n", mensaje)
+        self.assertNotIn("\r", mensaje)
+        self.assertNotIn("\x1b", mensaje)
+        self.assertEqual(len(mensaje.splitlines()), 1)
+        # un parser clave=valor ve cada clave real UNA vez y ninguna falsa
+        self.assertEqual(self._claves(mensaje), self._CLAVES_REALES, mensaje)
+        self.assertNotIn("clase=ok", mensaje)
+
+    async def test_ningun_campo_de_texto_del_log_puede_fabricar_otra_linea_ni_otro_clave_valor(self):
+        # MINOR-22 y MINOR-32: colapsar los saltos de linea no impide fabricar `clave=valor`
+        # en la MISMA linea; `perfil="x clase=ok ..."` dejaba a un parser ver `clase=ok`.
+        # Los 8 campos de la linea mas el motivo, cada uno con un valor hostil.
+        falso = self._FALSO
         casos = {
             "perfil": dict(perfil=falso),
             "modelo": dict(modelo=falso),
-            "correlation_id": dict(correlation_id=falso),
             "entry_point": dict(entry_point=falso),
         }
         for campo, cambios in casos.items():
@@ -1654,21 +1674,97 @@ class LogDeRunCliTest(_Entorno):
                         await cli_sandbox.run_cli(**args)
                 registros = [r for r in cm.records if r.getMessage().startswith("run_cli ")]
                 self.assertEqual(len(registros), 1)
-                mensaje = registros[0].getMessage()
-                self.assertNotIn("\n", mensaje)
-                self.assertNotIn("\r", mensaje)
-                self.assertEqual(len(mensaje.splitlines()), 1)
-                self.assertIn("x clase=ok latencia_ms=1", mensaje)  # colapsado en la MISMA linea
+                self._verificar_linea_sin_falsificar(registros[0].getMessage())
+
+    async def _registrar(self, **kw) -> str:
+        with self.assertLogs("cli_sandbox", "INFO") as cm:
+            with self.assertRaises(Exception):
+                await cli_sandbox.run_cli(**kw)
+        registros = [r.getMessage() for r in cm.records if r.getMessage().startswith("run_cli ")]
+        self.assertEqual(len(registros), 1)
+        return registros[0]
+
+    def _args(self, titular, **cambios):
+        args = dict(
+            perfil="codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+            timeout=5, titular=titular, correlation_id="c", entry_point="chat",
+        )
+        args.update(cambios)
+        return args
+
+    async def test_user_id_y_tenant_id_de_un_titular_ajeno_no_falsifican_la_linea(self):
+        # MINOR-31: un objeto que NO es Titular se rechaza, pero sus campos van al log igual
+        for campo in ("user_id", "tenant_id"):
+            with self.subTest(campo=campo):
+                ajeno = SimpleNamespace(user_id=1, tenant_id=1, entry_point="chat")
+                setattr(ajeno, campo, self._FALSO)
+                self._verificar_linea_sin_falsificar(await self._registrar(**self._args(ajeno)))
+
+    async def test_la_clase_de_la_excepcion_no_falsifica_la_linea(self):
+        class Rara(Exception):
+            clase = "Rara\nclase=ok latencia_ms=1"
+
+        with patch.object(cli_sandbox, "_resolver_binario", side_effect=Rara("boom")):
+            mensaje = await self._registrar(**self._args(await self.titular()))
+        self._verificar_linea_sin_falsificar(mensaje)
+
+    async def test_la_version_del_binario_no_falsifica_la_linea(self):
+        with patch.object(cli_sandbox, "_resolver_binario", return_value=("/x/codex", "/x", self._FALSO)), \
+                patch.object(cli_sandbox, "_BWRAP_BIN", "/no/existe/bwrap"):
+            mensaje = await self._registrar(**self._args(await self.titular()))
+        self.assertIn("clase=SandboxUnavailable", mensaje)
+        self._verificar_linea_sin_falsificar(mensaje)
+
+    async def test_el_motivo_no_falsifica_la_linea(self):
+        with patch.object(cli_sandbox, "_resolver_binario", side_effect=cli_sandbox.BinarioAlterado(self._FALSO)):
+            mensaje = await self._registrar(**self._args(await self.titular()))
+        self._verificar_linea_sin_falsificar(mensaje)
+
+    async def test_los_ocho_campos_reales_aparecen_con_su_valor_normal(self):
+        # control positivo de lo anterior: el escape no rompe un valor legitimo
+        t = await self.titular(8, 1)
+        with patch.object(cli_sandbox, "_resolver_binario", return_value=("/x/codex", "/x", "codex-cli 1.2.3")), \
+                patch.object(cli_sandbox, "_BWRAP_BIN", "/no/existe/bwrap"):
+            mensaje = await self._registrar(**self._args(t, correlation_id="req-7:a.b_c"))
+        for esperado in (
+            "correlation_id=req-7:a.b_c", "entry_point=chat", "user_id=8", "tenant_id=1",
+            "perfil=codex", "modelo=gpt-6-sol", "clase=SandboxUnavailable",
+        ):
+            self.assertIn(esperado, mensaje)
+        self.assertIn("version_cli=codex-cli\\x201.2.3", mensaje)
+        self.assertEqual(self._claves(mensaje), self._CLAVES_REALES)
+
+    async def test_un_correlation_id_fuera_del_formato_se_rechaza_con_marcador_fijo(self):
+        invalidos = ["", "x clase=ok", "a\nb", "x" * 65, "a=b", "caf\u00e9", "\x1b[0m", None, 5]
+        for malo in invalidos:
+            with self.subTest(correlation_id=malo):
+                with self.assertLogs("cli_sandbox", "INFO") as cm:
+                    with self.assertRaises(ValueError) as ctx:
+                        await self.correr("codex", correlation_id=malo)
+                self.assertIn("correlation_id", str(ctx.exception))
+                mensaje = [r.getMessage() for r in cm.records if r.getMessage().startswith("run_cli ")][0]
+                self.assertIn("correlation_id=<invalido> ", mensaje)
+                self.assertIn("clase=ValueError", mensaje)
+                self.assertEqual(self._claves(mensaje), self._CLAVES_REALES)
+        # los validos pasan (y llegan al subproceso)
+        for bueno in ("c", "a" * 64, "req-7:a.b_c", "0"):
+            with self.subTest(correlation_id=bueno):
+                await self.correr("codex", correlation_id=bueno)
 
     async def test_los_campos_de_texto_del_log_se_recortan_igual_que_el_motivo(self):
         largo = "z" * 500
         with self.assertLogs("cli_sandbox", "INFO") as cm:
             with self.assertRaises(Exception):
                 await cli_sandbox.run_cli(
-                    "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
-                    timeout=5, titular=await self.titular(), correlation_id=largo, entry_point="chat")
+                    "codex", system_prompt="s", historial=[], mensaje="m", modelo=largo,
+                    timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
         mensaje = [r.getMessage() for r in cm.records if r.getMessage().startswith("run_cli ")][0]
         self.assertNotIn("z" * 201, mensaje)
+
+    def test_el_tope_cuenta_los_caracteres_ya_escapados(self):
+        self.assertLessEqual(len(cli_sandbox._campo_log("=" * 500)), 200)
+        self.assertLessEqual(len(cli_sandbox._campo_log("\x1b" * 500)), 200)
+        self.assertNotIn("\\x3", cli_sandbox._campo_log("a" * 198 + "="))  # no parte un escape a la mitad
 
     async def test_en_exito_y_al_cancelar_el_motivo_va_vacio(self):
         with self.assertLogs("cli_sandbox", "INFO") as cm:

@@ -1617,12 +1617,40 @@ def _ranura_liberar(handle, perfil: Perfil, ranuras: int, cred_host: Optional[st
 _RE_BLANCOS = re.compile(r"\s+")
 
 
-def _campo_log(valor, tope: int = 200) -> str:
-    """Un valor para la linea de log de `run_cli`: texto de UNA sola linea y de largo acotado.
-    Todo campo de texto de esa linea pasa por aqui (no solo `motivo`): un valor con saltos de
-    linea puede fabricar una segunda linea de log con una `clase=ok` falsa (MINOR-22). Los
-    espacios y saltos (\\n, \\r, tabs, separadores unicode) se colapsan en uno solo."""
-    return _RE_BLANCOS.sub(" ", str(valor))[:tope]
+_RE_CORRELATION_ID = re.compile(r"[A-Za-z0-9._:-]{1,64}")
+_CORRELATION_ID_INVALIDO = "<invalido>"
+
+
+def _campo_log(valor, tope: int = 200, *, espacios: bool = False) -> str:
+    """Un valor para la linea de log de `run_cli`: texto de UNA sola linea, de largo acotado
+    (`tope` caracteres YA escapados) y que no puede fabricar un `clave=valor`. Todo campo de
+    texto de esa linea pasa por aqui, no solo `motivo`: un valor con saltos de linea fabricaba
+    una segunda linea con una `clase=ok` falsa (MINOR-22), y colapsarlos no impide fabricarla
+    en la MISMA linea (`"x clase=ok latencia_ms=1"`, MINOR-32).
+
+    Los espacios y saltos (\\n, \\r, tabs, separadores unicode) se colapsan en uno solo; despues
+    se escapan `=` (`\\x3d`), la barra invertida, los caracteres no imprimibles y de control
+    (incluido ESC, `\\x1b`, que un terminal interpreta) y, salvo `espacios=True` (el `motivo`,
+    texto libre donde se quiere poder leer el mensaje), el espacio (`\\x20`). Sin `=` sin escapar,
+    un parser `clave=valor` no puede encontrar una clave falsa dentro de un valor."""
+    salida: list[str] = []
+    largo = 0
+    for ch in _RE_BLANCOS.sub(" ", str(valor)):
+        if ch == "\\":
+            e = "\\\\"
+        elif ch == "=":
+            e = "\\x3d"
+        elif ch == " ":
+            e = " " if espacios else "\\x20"
+        elif ch.isprintable():
+            e = ch
+        else:
+            e = ch.encode("unicode_escape").decode("ascii")
+        if largo + len(e) > tope:
+            break
+        salida.append(e)
+        largo += len(e)
+    return "".join(salida)
 
 
 @dataclass(frozen=True)
@@ -1651,7 +1679,7 @@ def _quitar_rundir(rundir: Path) -> None:
             return
         logger.warning(
             "rundir: no se pudo quitar %s (%s)",
-            _campo_log(ruta_fallida), getattr(exc, "strerror", None) or type(exc).__name__,
+            _campo_log(ruta_fallida, espacios=True), getattr(exc, "strerror", None) or type(exc).__name__,
         )
 
     shutil.rmtree(rundir, onexc=al_fallar)
@@ -1688,6 +1716,11 @@ async def run_cli(
     motivo = ""
     version = ""
     try:
+        # el correlation_id va a la linea de log como identificador: formato cerrado, o se
+        # rechaza la llamada (MINOR-32). La linea registra un marcador fijo, no el valor.
+        if not isinstance(correlation_id, str) or not _RE_CORRELATION_ID.fullmatch(correlation_id):
+            correlation_id = _CORRELATION_ID_INVALIDO
+            raise ValueError("correlation_id con formato invalido: se exige [A-Za-z0-9._:-]{1,64}")
         if (
             not isinstance(titular, Titular) or titular._sello is not _SELLO
             or titular.entry_point != entry_point
@@ -1761,7 +1794,7 @@ async def run_cli(
         clase = getattr(exc, "clase", None) or type(exc).__name__
         # el motivo distingue las causas de una misma clase (SandboxUnavailable tiene
         # varias); sin saltos de linea, para que un mensaje no pueda fabricar otra linea
-        motivo = _campo_log(exc)
+        motivo = _campo_log(exc, espacios=True)
         raise
     finally:
         logger.info(
