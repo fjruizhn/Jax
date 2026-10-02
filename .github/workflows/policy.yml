@@ -408,6 +408,34 @@ jobs:
           if grep -qE "skipped" /tmp/clisb; then
             echo "HAY TESTS SALTADOS: la contencion real no se ejercito."; exit 1; fi
 
+  # El Faro, fase 0 (spec 2026-10-02-faro-pasarela-ecosistema-design.md, plan
+  # 2026-10-02-faro-fase-0.md, pasos 0.1 y 0.2): el paquete fijado del ecosistema y el
+  # Puerto MCP de solo lectura. Las pruebas levantan un Puerto REAL en un socket Unix
+  # temporal y le hablan con un cliente MCP real del SDK oficial por el rele stdio
+  # (un subproceso `python -m jax.faro.relay`); y construyen paquetes reales desde un repo
+  # git efimero. Las dependencias del Puerto salen de requirements-faro.txt, FIJADAS CON
+  # HASH (`--require-hashes`). Piso exacto de tests CORRIDOS, cero saltados (un skip se ve
+  # igual que verde). Medido 2026-10-02 en hall9000 con Python 3.12: 138 passed
+  # (paquete 55 + puerto 74 + e2e 6 + requirements 3).
+  faro-fase0:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --require-hashes -r requirements-faro.txt
+      - run: pip install pytest
+      - run: python -m pytest tests/test_faro_paquete.py tests/test_faro_puerto.py tests/test_faro_puerto_e2e.py tests/test_faro_requirements.py -v
+      - run: |
+          python -m pytest tests/test_faro_paquete.py tests/test_faro_puerto.py tests/test_faro_puerto_e2e.py tests/test_faro_requirements.py -q 2>&1 | tee /tmp/faro
+          grep -qE "^138 passed" /tmp/faro || {
+            echo "PISO ROTO: se esperaban 138 tests CORRIDOS del Faro."; exit 1; }
+          if grep -qE "skipped" /tmp/faro; then
+            echo "HAY TESTS SALTADOS: el Faro se ejercita completo o no cuenta."; exit 1; fi
+
   # Task 6 del plan de alertas nacio con 11 tests y CERO jobs que los
   # corrieran -- tercera instancia del mismo hueco en el mes (ver la octava
   # leccion de metodo en CONTEXT.md). Este job es la correccion, y se

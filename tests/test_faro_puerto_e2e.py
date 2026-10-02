@@ -29,7 +29,7 @@ def montaje(tmp_path):
     paquete.construir_paquete(cfg)
     d = tmp_path / "run"
     d.mkdir(mode=0o700)
-    ej = Ejecucion(run_id="e2e-1", usuario="u", tenant="t", faceta="hyde", motor="claude", pipeline="p",
+    ej = Ejecucion(run_id="e2e-1", usuario="u", tenant="t", faceta="hyde", motor="qwen", pipeline="p",
                    entry_point="repl", id_correlacion="c", uid_esperado=os.getuid())
     return cfg, ConfigPuerto(socket_dir=d), ej
 

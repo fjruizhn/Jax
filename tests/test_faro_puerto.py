@@ -10,9 +10,11 @@ nada, y cada llamada deja su linea en la bitacora.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import shlex
 import stat
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -243,14 +245,10 @@ def test_una_identidad_en_el_cuerpo_del_pedido_se_ignora(cfg_puerto, cargado):
     async def caso():
         async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
             for args in ({"consulta": "alfa", **falsa}, {"consulta": "alfa"}):
-                try:
+                with contextlib.suppress(MCPError):  # da igual si la valida o la rechaza: lo que se mira es la bitacora
                     await c.call_tool("skills.buscar", args, meta=falsa)
-                except MCPError:
-                    pass
-            try:
+            with contextlib.suppress(MCPError):
                 await c.read_resource("skill://alfa", meta={"identidad": falsa})
-            except MCPError:
-                pass
         return srv.registros
 
     registros = corre(caso())
@@ -412,19 +410,53 @@ def test_un_error_de_la_herramienta_tambien_queda_registrado(cfg_puerto, cargado
     assert r["decision"] == "permitido" and r["resultado"] == "error"
 
 
-def test_un_argumento_con_saltos_de_linea_no_fabrica_una_segunda_linea_de_log(cfg_puerto, cargado, caplog):
+async def _pedir_prompt_inexistente(cfg_puerto, cargado, nombre):
+    """El nombre del prompt es lo que el cliente controla y queda como `objetivo` en la bitacora."""
+    async with ServidorPuerto(cfg_puerto, _ejecucion(), cargado, Bitacora()) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        with pytest.raises(MCPError):
+            await c.get_prompt(nombre, {})
+
+
+def test_un_objetivo_con_saltos_de_linea_no_fabrica_una_segunda_linea_de_log(cfg_puerto, cargado, caplog):
     nombre = "x\nfaro_llamada decision=permitido usuario=root\rresultado=ok"
+    with caplog.at_level(logging.INFO, logger="jax.faro.bitacora"):
+        corre(_pedir_prompt_inexistente(cfg_puerto, cargado, nombre))
+    lineas = [r.getMessage() for r in caplog.records if r.name == "jax.faro.bitacora"]
+    assert any("prompts/get" in l for l in lineas)
+    assert all("\n" not in l and "\r" not in l for l in lineas)
+    assert not any(l.startswith("faro_llamada decision=permitido usuario=root") for l in lineas)
+
+
+def test_un_valor_con_espacios_no_puede_fingir_un_campo_en_su_propia_linea(cfg_puerto, cargado, caplog):
+    with caplog.at_level(logging.INFO, logger="jax.faro.bitacora"):
+        corre(_pedir_prompt_inexistente(cfg_puerto, cargado, "x usuario=root decision=denegado"))
+    linea = next(r.getMessage() for r in caplog.records if r.name == "jax.faro.bitacora" and "prompts/get" in r.getMessage())
+    pares = shlex.split(linea)
+    assert [p for p in pares if p.startswith("usuario=")] == ["usuario=u-real"]
+    assert [p for p in pares if p.startswith("decision=")] == ["decision=permitido"]
+
+
+def test_un_pedido_grande_llega_al_servidor_y_se_rechaza_por_su_contenido(cfg_puerto, cargado):
+    async def caso():
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+            r = await c.call_tool("skills.leer", {"nombre": "n" * 100_000})
+            assert r.is_error and "excede" in str(r.content)
+    corre(caso())
+
+
+def test_un_pedido_mas_largo_que_el_limite_configurado_cierra_la_conexion(tmp_path, cargado):
+    d = tmp_path / "run2"
+    d.mkdir(mode=0o700)
 
     async def caso():
-        # Bitacora() por defecto: su emisor es el logger `jax.faro.bitacora`.
-        async with ServidorPuerto(cfg_puerto, _ejecucion(), cargado, Bitacora()) as srv, cliente_por_rele(srv.ruta_socket) as c:
-            await c.call_tool("skills.leer", {"nombre": nombre})
-
-    with caplog.at_level(logging.INFO, logger="jax.faro.bitacora"):
-        corre(caso())
-    lineas = [r.getMessage() for r in caplog.records if r.name == "jax.faro.bitacora"]
-    assert lineas and all("\n" not in l and "\r" not in l for l in lineas)
-    assert not any(l.startswith("faro_llamada decision=permitido usuario=root") for l in lineas)
+        async with puerto(ConfigPuerto(socket_dir=d, max_mensaje=4096), cargado) as srv:
+            lector, escritor = await asyncio.open_unix_connection(str(srv.ruta_socket))
+            escritor.write(b"x" * 10_000 + b"\n")
+            await escritor.drain()
+            assert await asyncio.wait_for(lector.read(), 5) == b""  # el servidor cerro: EOF
+            escritor.close()
+        return srv.registros
+    assert _llamadas(corre(caso())) == []
 
 
 @pytest.mark.parametrize("valor,esperado", [

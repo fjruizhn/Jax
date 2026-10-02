@@ -26,6 +26,9 @@ _DISTRIBUCION = {
 # Terceros que NO van en requirements.txt, cada uno con su motivo.
 _FUERA_DE_REQUIREMENTS = {
     "sentence_transformers": "reranker opcional de jax/memory/db.py::_get_reranker, import perezoso con fail-soft declarado",
+    "mcp": "SDK oficial de MCP del Puerto del Faro (jax/faro/): va FIJADO CON HASH en requirements-faro.txt "
+           "(tests/test_faro_requirements.py lo vigila), no en este requirements.txt, porque el servicio principal no "
+           "lo usa y sus transitivas (starlette, anyio, pydantic) las resuelve mcp",
 }
 
 

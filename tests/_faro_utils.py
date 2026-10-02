@@ -1,5 +1,5 @@
 """Ayudas compartidas por las pruebas del Faro (no es un archivo de test: no empieza con
-`test_` ni termina en `_test.py`). Un `claude-skills` de juguete con su `origin/main`, y el
+`test_` ni termina en `_test.py`). Un `repo-skills` de juguete con su `origin/main`, y el
 arnes del Puerto: servidor en el bucle de la prueba y cliente MCP REAL por el rele stdio."""
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from jax.faro import paquete
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 
@@ -40,11 +41,11 @@ def _commit(repo: Path, msg: str = "c") -> str:
 
 
 def repo_de_juguete(tmp_path: Path, extra: dict | None = None) -> Path:
-    """Un `claude-skills` de juguete con `origin/main` apuntando a su primer commit."""
-    r = tmp_path / "claude-skills"
+    """Un `repo-skills` de juguete con `origin/main` apuntando a su primer commit."""
+    r = tmp_path / "repo-skills"
     r.mkdir()
     _git(r, "init", "-q", "-b", "main")
-    _escribir(r, "common/CLAUDE.md.core", "# Nucleo comun\nregla uno\n")
+    _escribir(r, paquete._FUENTE_CONSTITUCION, "# Nucleo comun\nregla uno\n")
     _escribir(r, "common/skills/alfa/SKILL.md", "---\nname: alfa\ndescription: la alfa mide el rendimiento\n---\ncuerpo alfa\n")
     _escribir(r, "common/skills/alfa/scripts/correr.sh", "#!/bin/sh\necho hola\n", 0o755)
     _escribir(r, "common/skills/beta/SKILL.md", "---\nname: beta\ndescription: la beta endurece contra inyeccion\n---\ncuerpo beta\n")
