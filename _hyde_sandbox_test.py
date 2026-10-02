@@ -33,6 +33,7 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import subprocess
@@ -83,10 +84,9 @@ def tearDownModule():
 def _sembrar_lock(workspace_dir: str) -> None:
     """Lo que hace tmpfiles.d en el host: crea el archivo del lock del workspace."""
     ruta = hyde_sandbox._lock_path_for_workspace(workspace_dir)
-    try:  # atomico y ya con el modo final: dos hilos sembrando a la vez no se ven a medias
+    # atomico y ya con el modo final: dos hilos sembrando a la vez no se ven a medias
+    with contextlib.suppress(FileExistsError):
         os.close(os.open(ruta, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640))
-    except FileExistsError:
-        pass
 
 
 _ADQUIRIR_REAL = hyde_sandbox._acquire_cross_process_lock
