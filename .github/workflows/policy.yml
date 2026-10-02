@@ -306,7 +306,24 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pytest
-      - run: python -m pytest policy/tests/test_claude_subprocess_solo_via_sandbox.py policy/tests/test_ejecutor_lanza_solo_con_contratos.py -v
+      - run: python -m pytest policy/tests/test_claude_subprocess_solo_via_sandbox.py policy/tests/test_titular_solo_via_exigir_titular.py policy/tests/test_ejecutor_lanza_solo_con_contratos.py -v
+      - name: Piso exacto del scanner de subprocesos de CLIs de suscripcion
+        # 45 tests (28 + 9 autopruebas de las formas nuevas, auditoria 2026-10-02,
+        # MINOR-6/MINOR-7, + 8 de las formas dinamicas de la ronda 2, MINOR-16),
+        # medidos con JAX_PLATFORM_REPO_ROOT apuntando a un
+        # directorio que no existe: en el runner jax-platform tampoco existe y el
+        # escaneo real cubre solo este repo. Exacto: una autoprueba que desaparezca
+        # deja pasar en silencio la forma que cubria.
+        run: |
+          python -m pytest -q policy/tests/test_claude_subprocess_solo_via_sandbox.py 2>&1 | tee /tmp/scanner
+          grep -qE "^45 passed" /tmp/scanner || { echo "PISO ROTO: se esperaban 45 tests CORRIDOS del scanner."; exit 1; }
+      - name: Piso exacto del control "un Titular solo nace en exigir_titular"
+        # 9 tests (MINOR-16, ronda 2): 7 autopruebas del detector + el escaneo que ve el
+        # arbol y el real. Medido con JAX_PLATFORM_REPO_ROOT=/nonexistent. Exacto: una
+        # autoprueba que desaparezca deja pasar en silencio la forma que cubria.
+        run: |
+          python -m pytest -q policy/tests/test_titular_solo_via_exigir_titular.py 2>&1 | tee /tmp/titular
+          grep -qE "^9 passed" /tmp/titular || { echo "PISO ROTO: se esperaban 9 tests CORRIDOS del control de Titular."; exit 1; }
       - name: Piso exacto de la guardia del arranque del Ejecutor
         # 5 tests (Ejecutor SP1 plan 6, 2026-09-17): nadie usa remoto_claude ni vigilar sin
         # exigir_contratos. Exacto: uno que desaparezca deja pasar un lanzador sin contratos.
@@ -330,6 +347,45 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest
       - run: python -m pytest _hyde_sandbox_test.py -v
+      # Golden de wrap_hyde_command (D-4, facetas-por-suscripcion, 2026-10-01):
+      # el argv y el env de Hyde congelados ANTES de que pase al nucleo comun
+      # cli_sandbox. Piso exacto: 3 tests (coincide con la golden, la fixture no
+      # cambio, cubre los tres escenarios). Medido 2026-10-01: 3 passed.
+      - run: python -m pytest _hyde_wrap_golden_test.py -v
+      - run: |
+          python -m pytest _hyde_wrap_golden_test.py -q 2>&1 | tee /tmp/golden
+          grep -qE "^3 passed" /tmp/golden || {
+            echo "PISO ROTO: se esperaban 3 tests CORRIDOS de la golden de Hyde."; exit 1; }
+
+  # cli_sandbox: nucleo comun del confinamiento de CLIs de suscripcion
+  # (facetas-por-suscripcion, 2026-10-01, paso 1). El archivo mezcla logica pura
+  # con CONTENCION REAL (ataques dentro de bwrap): sin bwrap la clase se
+  # auto-saltea y un skip se ve igual que verde, asi que se instala bwrap y se
+  # exige el numero exacto de tests CORRIDOS y cero skips. Medido 2026-10-01 en
+  # hall9000: 65 passed. 2026-10-02 (auditoria del paso 1-3,
+  # MAJOR-1..5 y MINOR-8/9/10/13): 134 passed. 2026-10-02 (ronda 2: MAJOR-14/15 y
+  # MINOR-16..21, topes de timeout por entry_point, features automaticas): 206 passed.
+  cli-sandbox-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - name: Instalar bubblewrap y habilitar user namespaces
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
+            echo "(sysctl ausente en este kernel -- no aplica)"
+          bwrap --version
+      - run: python -m pytest _cli_sandbox_test.py -v
+      - run: |
+          python -m pytest _cli_sandbox_test.py -q 2>&1 | tee /tmp/clisb
+          grep -qE "^206 passed" /tmp/clisb || {
+            echo "PISO ROTO: se esperaban 206 tests CORRIDOS de cli_sandbox."; exit 1; }
+          if grep -qE "skipped" /tmp/clisb; then
+            echo "HAY TESTS SALTADOS: la contencion real no se ejercito."; exit 1; fi
 
   # Task 6 del plan de alertas nacio con 11 tests y CERO jobs que los
   # corrieran -- tercera instancia del mismo hueco en el mes (ver la octava
