@@ -16,7 +16,8 @@ Python del servicio y un argv de un binario externo seria otra dependencia). Ver
 sistema de archivos no admite ACL, FALLA CERRADO (`ConfigFaroInvalida`): sin ACL la jaula no llegaria a sus
 archivos, y la alternativa seria abrir el directorio.
 
-QUE ACEPTA EL PUERTO. `validar_privado`: ni un bit para «otros», grupo propietario sin permisos, ningun grupo con
+QUE ACEPTA EL PUERTO (reauditoria R-1: tampoco un directorio con ACL POR DEFECTO, `system.posix_acl_default`,
+cuya herencia daria entradas con nombre a los archivos nuevos). `validar_privado`: ni un bit para «otros», grupo propietario sin permisos, ningun grupo con
 nombre, y solo entradas de usuario con nombre de uids de jaulas VIVAS y con a lo sumo `--x`; la mascara en los bits
 de grupo se explica por esas entradas, no por un `chmod g+x` a secas.
 """
@@ -31,6 +32,7 @@ from collections.abc import Iterable
 from .config import ConfigFaroInvalida
 
 XATTR = "system.posix_acl_access"
+XATTR_DEFECTO = "system.posix_acl_default"
 X, W, R = 1, 2, 4
 TAG_USER_OBJ, TAG_USER, TAG_GROUP_OBJ, TAG_GROUP, TAG_MASK, TAG_OTHER = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20
 _VERSION = 2
@@ -105,12 +107,19 @@ def _uid(uid: object) -> int:
     return uid
 
 
-def conceder(path, uid: int, perm: int) -> None:
-    """`user:<uid>:<perm>` en `path` (sustituye la que hubiera para ese uid). `perm` es una mascara de R, W, X."""
+def conceder(path, uid: int, perm: int, *, exclusivo: bool = False) -> None:
+    """`user:<uid>:<perm>` en `path` (sustituye la que hubiera para ese uid). `perm` es una mascara de R, W, X.
+
+    `exclusivo=True` (el socket y el token, que son de UNA jaula): si el archivo ya trae entradas con nombre que no son
+    de ese uid (p. ej. heredadas de una ACL por defecto del directorio) FALLA CERRADO sin tocarlo: la mascara que se
+    recalcula es la union de todas las entradas con nombre y una heredada con efecto `---` pasaria a `rwx`."""
     uid = _uid(uid)
     if isinstance(perm, bool) or not isinstance(perm, int) or not 1 <= perm <= 7:
         raise ValueError("permiso invalido")
-    entradas = [e for e in _leer_o_modo(path) if not (e[0] == TAG_USER and e[2] == uid)]
+    actuales = _leer_o_modo(path)
+    if exclusivo and any(t == TAG_GROUP or (t == TAG_USER and i != uid) for t, _, i in actuales):
+        raise ConfigFaroInvalida(f"{path} ya trae entradas ACL con nombre ajenas al uid {uid} (herencia de una ACL por defecto?): no se toca")
+    entradas = [e for e in actuales if not (e[0] == TAG_USER and e[2] == uid)]
     entradas.append((TAG_USER, perm, uid))
     _escribir(path, entradas)
 
@@ -122,6 +131,16 @@ def retirar(path, uid: int) -> None:
     resto = [e for e in entradas if not (e[0] == TAG_USER and e[2] == uid)]
     if len(resto) != len(entradas):
         _escribir(path, resto)
+
+
+def _tiene_acl_por_defecto(path) -> bool:
+    try:
+        os.getxattr(path, XATTR_DEFECTO, follow_symlinks=False)
+        return True
+    except OSError as exc:
+        if exc.errno in (errno.ENODATA, *_SIN_SOPORTE):
+            return False
+        raise
 
 
 def usuarios(path) -> dict[int, int]:
@@ -143,6 +162,8 @@ def validar_privado(path, uids_permitidos: Iterable[int], *, perm_max: int = X) 
     privado = f"{path} tiene que ser privado (0700)"
     if st.st_mode & 0o007:
         raise ConfigFaroInvalida(f"{privado}: ningun permiso para otros (tiene {stat.S_IMODE(st.st_mode):04o})")
+    if _tiene_acl_por_defecto(path):
+        raise ConfigFaroInvalida(f"{privado}: tiene una ACL por defecto (herencia): los archivos nuevos heredarian entradas con nombre")
     entradas = _leer_o_modo(path)
     if all(t in (TAG_USER_OBJ, TAG_GROUP_OBJ, TAG_OTHER) for t, _, _ in entradas):
         if st.st_mode & 0o070:

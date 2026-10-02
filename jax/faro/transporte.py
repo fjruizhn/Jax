@@ -256,8 +256,8 @@ class ServidorPuerto:
         cuenta[uid] = cuenta.get(uid, 0) + 1
         self._acl_registrada = True
         _acl.conceder(d, uid, _acl.X)
-        _acl.conceder(self.ruta_token, uid, _acl.R)
-        _acl.conceder(self.ruta_socket, uid, _acl.R | _acl.W)
+        _acl.conceder(self.ruta_token, uid, _acl.R, exclusivo=True)
+        _acl.conceder(self.ruta_socket, uid, _acl.R | _acl.W, exclusivo=True)
 
     def _retirar_acl(self) -> None:
         if not self._acl_registrada:

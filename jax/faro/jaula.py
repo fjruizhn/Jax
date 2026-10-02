@@ -345,5 +345,12 @@ def ejemplo_sudoers(usuario: str, bwrap: str, uid_min: int, uid_max: int) -> str
         "# Va en /etc/sudoers.d/ (validar con `visudo -cf`). El servicio puede correr SOLO bwrap y SOLO como los uids\n"
         "# del rango de jaulas (JAX_FARO_JAULA_UID_MIN..MAX): nunca como el administrador ni como una cuenta real.\n"
         "# sudoers no tiene rangos numericos: se enumeran los uids.\n"
+        "#\n"
+        "# CUENTAS DE JAULA: sudo resuelve `-u '#<uid>'` contra la base de cuentas y rechaza un uid sin cuenta\n"
+        "# (`sudo: unknown user #<uid>`; medido con sudo 1.9.17). Hay que hacer UNA de dos cosas:\n"
+        "#   a) crear una cuenta de sistema por cada uid del rango (sin shell ni home), o\n"
+        "#   b) descomentar la linea siguiente: con `runas_allow_unknown_id` sudo acepta un uid sin cuenta, y lo que\n"
+        "#      limita a quien puede ser el servicio sigue siendo el Runas_Alias de abajo, no la existencia de la cuenta.\n"
+        f"# Defaults:{usuario} runas_allow_unknown_id\n"
         f"Runas_Alias JAULAS = {filas}\n"
         f"{usuario} ALL=(JAULAS) NOPASSWD: {bwrap}\n")

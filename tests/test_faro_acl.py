@@ -338,3 +338,18 @@ def test_r1_el_directorio_si_admite_las_entradas_de_otras_jaulas(d):
     acl.conceder(d, JAULA, acl.X)
     acl.conceder(d, OTRA, acl.X)                                # no exclusivo: es el directorio compartido
     assert acl.usuarios(d) == {JAULA: 1, OTRA: 1}
+
+
+def test_r1_si_la_herencia_aparece_despues_de_validar_el_puerto_cierra_sin_dar_paso(mundo, monkeypatch):
+    """Carrera: la ACL por defecto llega DESPUES de la validacion del directorio. El token nace con la entrada heredada
+    y `conceder(exclusivo=True)` falla cerrado: la jaula no recibe paso y no queda nada."""
+    cfg, cargado = mundo
+    _acl_por_defecto(cfg.socket_dir)
+    monkeypatch.setattr(ServidorPuerto, "_validar_entorno", lambda self: None)
+
+    async def caso():
+        with pytest.raises(ConfigFaroInvalida, match="ajenas"):
+            async with _puerto(cfg, cargado, uid_esperado=JAULA):
+                pass
+    corre(caso())
+    assert list(cfg.socket_dir.iterdir()) == [] and JAULA not in acl.usuarios(cfg.socket_dir)

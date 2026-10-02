@@ -521,3 +521,11 @@ def test_minor8_el_sudoers_de_ejemplo_limita_el_runas_al_rango_y_el_comando_a_bw
 
 def test_minor8_el_sudoers_versionado_es_el_que_genera_el_codigo():
     assert (RAIZ / "ops" / "faro" / "sudoers-jaula-ejemplo").read_text() == ejemplo_sudoers("faro", "/usr/bin/bwrap", 50000, 50007)
+
+
+def test_r3_el_sudoers_explica_que_sudo_rechaza_uids_sin_cuenta_y_las_dos_salidas():
+    texto = ejemplo_sudoers("faro", "/usr/bin/bwrap", 50000, 50003)
+    assert "unknown user" in texto and "runas_allow_unknown_id" in texto and "crear una cuenta" in texto
+    linea = [l for l in texto.splitlines() if "runas_allow_unknown_id" in l and l.startswith("# Defaults:")]
+    assert linea == ["# Defaults:faro runas_allow_unknown_id"]          # comentada: es una decision de quien instala
+    assert not [l for l in texto.splitlines() if l.startswith("Defaults")]
