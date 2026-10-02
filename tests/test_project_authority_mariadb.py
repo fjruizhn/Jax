@@ -2164,3 +2164,89 @@ async def test_backfill_sync_repara_scopes_preexistentes_para_un_admin_ya_activo
         assert not await _admins_sin_ownership(tenant_id)
     finally:
         pool.close(); await pool.wait_closed()
+
+
+async def _eventos_rename(project_id: int) -> int:
+    filas = await _sql(
+        "SELECT COUNT(*) AS n FROM jax_project_membership_event WHERE project_id=%s AND operation='RENAME_PROJECT'",
+        (project_id,), fetch=True)
+    return filas[0]["n"]
+
+
+@asincrono
+async def test_rename_project_cambia_nombre_y_deja_evento():
+    t = await _crear_tenant("ren")
+    u = await _crear_usuario(t)
+    p = await _crear_proyecto_activo(t, name="viejo")
+    await _crear_scope(p, t)
+    await _crear_membresia(p, t, u, role="OWNER")
+    pool = await _pool()
+    try:
+        cambio = await _admin(pool).rename_project(
+            _request(_scope(u, t, p), "RENAME_PROJECT"), p, name="  Nuevo  ", description="d")
+    finally:
+        pool.close(); await pool.wait_closed()
+    assert cambio is True
+    fila = await _sql("SELECT name, description FROM projects WHERE id=%s", (p,), fetch=True)
+    assert (fila[0]["name"], fila[0]["description"]) == ("Nuevo", "d")
+    assert await _eventos_rename(p) == 1
+
+
+@asincrono
+async def test_rename_project_igual_es_noop_sin_evento():
+    t = await _crear_tenant("ren2")
+    u = await _crear_usuario(t)
+    p = await _crear_proyecto_activo(t, name="mismo")
+    await _crear_scope(p, t)
+    await _crear_membresia(p, t, u, role="OWNER")
+    await _sql("UPDATE projects SET description=NULL WHERE id=%s", (p,))
+    pool = await _pool()
+    try:
+        cambio = await _admin(pool).rename_project(
+            _request(_scope(u, t, p), "RENAME_PROJECT"), p, name="mismo", description=None)
+    finally:
+        pool.close(); await pool.wait_closed()
+    assert cambio is False
+    assert await _eventos_rename(p) == 0
+
+
+@asincrono
+async def test_rename_project_exige_owner_y_activo():
+    t = await _crear_tenant("ren3")
+    owner = await _crear_usuario(t)
+    editor = await _crear_usuario(t)
+    p = await _crear_proyecto_activo(t, name="x")
+    await _crear_scope(p, t)
+    await _crear_membresia(p, t, owner, role="OWNER")
+    await _crear_membresia(p, t, editor, role="CONTRIBUTOR")
+    pool = await _pool()
+    try:
+        with pytest.raises(ProjectRoleInsufficient):
+            await _admin(pool).rename_project(_request(_scope(editor, t, p), "RENAME_PROJECT"), p,
+                                              name="y", description=None)
+        await _sql("UPDATE jax_project_scope SET status='ARCHIVED' WHERE project_id=%s", (p,))
+        with pytest.raises(ProjectStateConflict):
+            await _admin(pool).rename_project(_request(_scope(owner, t, p), "RENAME_PROJECT"), p,
+                                              name="y", description=None)
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+@asincrono
+async def test_rename_project_valida_nombre():
+    t = await _crear_tenant("ren4")
+    u = await _crear_usuario(t)
+    p = await _crear_proyecto_activo(t, name="x")
+    await _crear_scope(p, t)
+    await _crear_membresia(p, t, u, role="OWNER")
+    pool = await _pool()
+    try:
+        for malo in ("", "   ", "x" * 256):
+            with pytest.raises(AuthorizationDenied):
+                await _admin(pool).rename_project(_request(_scope(u, t, p), "RENAME_PROJECT"), p,
+                                                  name=malo, description=None)
+        with pytest.raises(AuthorizationDenied):
+            await _admin(pool).rename_project(_request(_scope(u, t, p), "RENAME_PROJECT"), p,
+                                              name="ok", description="d" * 2001)
+    finally:
+        pool.close(); await pool.wait_closed()
