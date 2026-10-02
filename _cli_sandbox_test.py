@@ -1554,6 +1554,12 @@ class TimeoutValidadoTest(_Entorno):
             with self.subTest(malo=malo), self.assertRaises(ValueError):
                 cli_sandbox.timeout_maximo_para(malo)
 
+    async def test_la_variable_global_vieja_ya_no_manda(self):
+        with patch.dict(os.environ, {"JAX_CLI_TIMEOUT_MAX_S": "1000"}):
+            await self._sin_lanzar(300, "chat")
+        self.assertFalse(hasattr(cli_sandbox, "timeout_maximo"))
+        self.assertFalse(hasattr(cli_sandbox, "TIMEOUT_MAX_S_DEFAULT"))
+
 
 class LimitesDelLlamadorTest(_Entorno):
     """MINOR-17 (auditoria 2026-10-02, ronda 2): lo que el llamador de `run_cli` puede

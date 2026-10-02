@@ -61,7 +61,6 @@ root, cambiarlas exige reiniciar):
                               puede bajarlo (min)
   JAX_CLI_<PERFIL>_RANURAS    llamadas concurrentes por perfil, 1..16 (default el del
                               perfil; NO lo decide el llamador de run_cli)
-  JAX_CLI_TIMEOUT_MAX_S       tope del timeout de run_cli (default 600)
   JAX_CLI_TIMEOUT_MAX_CHAT_S / JAX_CLI_TIMEOUT_MAX_JACOBS_S
                               tope del timeout por entry_point (default 180 / 600); un
                               entry_point sin tope (canary, repl) se rechaza
@@ -1252,19 +1251,6 @@ def _ranuras_de(p: Perfil) -> int:
     if crudo.isdigit() and 1 <= int(crudo) <= _RANURAS_MAX:
         return int(crudo)
     return p.ranuras
-
-
-TIMEOUT_MAX_S_DEFAULT = 600.0
-
-
-def timeout_maximo() -> float:
-    """Tope del `timeout` de `run_cli`: `JAX_CLI_TIMEOUT_MAX_S` si es un numero
-    finito positivo y, si no, 600 s. Un valor roto vuelve al default, no lo afloja."""
-    try:
-        v = float(os.environ.get("JAX_CLI_TIMEOUT_MAX_S", ""))
-    except ValueError:
-        return TIMEOUT_MAX_S_DEFAULT
-    return v if math.isfinite(v) and v > 0 else TIMEOUT_MAX_S_DEFAULT
 
 
 #: Tope del `timeout` de `run_cli` por punto de entrada: (variable de entorno, default
