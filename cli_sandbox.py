@@ -1319,12 +1319,40 @@ def _ranura_adquirir(perfil: str, ranuras: int, espera: float):
         os.close(dfd)
 
 
+def _cred_host(p: Perfil) -> str:
+    """Directorio de credencial dedicado del perfil en el host (UNA sola fuente: lo usan
+    `run_cli` y `purgar_al_arranque`)."""
+    return os.path.join(os.environ.get("JAX_CLI_CRED_ROOT", "/srv/jax-data/cli-suscripcion"), p.cred_subdir)
+
+
+def _quitar(ruta: str, perfil: Perfil) -> None:
+    """Quita `ruta` (directorio, archivo o symlink) sin seguir symlinks. Lo que no se
+    pueda quitar se REGISTRA con la ruta y el error y queda en disco para la proxima
+    purga: `rmtree(onexc=...)` en vez de `ignore_errors=True`, que lo tragaba."""
+    def al_fallar(_func, ruta_fallida, exc):
+        logger.warning(
+            "purga: no se pudo quitar %s de la credencial de %s (%s)",
+            ruta_fallida, perfil.nombre, getattr(exc, "strerror", None) or type(exc).__name__,
+        )
+
+    try:
+        if os.path.islink(ruta) or not os.path.isdir(ruta):
+            os.unlink(ruta)  # un enlace se desvincula; nunca se toca su destino
+        else:
+            shutil.rmtree(ruta, onexc=al_fallar)
+    except OSError as exc:
+        al_fallar(os.unlink, ruta, exc)
+
+
 def _purgar_credenciales(perfil: Perfil, cred_host: str) -> None:
     """BLOQUEANTE. Con TODAS las ranuras del perfil tomadas por quien llama: borra
     los directorios de `purgar` y todo lo que no este en `purgar_excepto`. No sigue
-    symlinks: un enlace se desvincula, nunca se borra su destino."""
+    symlinks: un enlace se desvincula, nunca se borra su destino. Lo que no se pueda
+    quitar se registra (warning con ruta y error), no se ignora."""
     for nombre in perfil.purgar:
-        shutil.rmtree(os.path.join(cred_host, nombre), ignore_errors=True)
+        ruta = os.path.join(cred_host, nombre)
+        if os.path.lexists(ruta):
+            _quitar(ruta, perfil)
     if perfil.purgar_excepto is None:
         return
     try:
@@ -1333,51 +1361,74 @@ def _purgar_credenciales(perfil: Perfil, cred_host: str) -> None:
         logger.warning("purga: no se pudo listar la credencial de %s (%s)", perfil.nombre, exc.strerror)
         return
     for e in entradas:
-        if e.name in perfil.purgar_excepto:
-            continue
-        try:
-            if e.is_dir(follow_symlinks=False):
-                shutil.rmtree(e.path, ignore_errors=True)
-            else:
-                os.unlink(e.path)
-        except OSError as exc:
-            # no se oculta: una entrada que no se pudo purgar queda en disco y
-            # se reintenta en la proxima llamada
-            logger.warning("purga: no se pudo quitar %s de la credencial de %s (%s)", e.name, perfil.nombre, exc.strerror)
+        if e.name not in perfil.purgar_excepto:
+            _quitar(e.path, perfil)
+
+
+def _purgar_si_libre(perfil: Perfil, ranuras: int, cred_host: str, propia: Optional[int]) -> bool:
+    """BLOQUEANTE. Toma, sin esperar, todas las ranuras del perfil salvo la `propia` (la
+    que ya tiene quien llama; None = ninguna) y, SOLO si las consiguio todas, purga. Si
+    otra esta en uso la purga queda para la proxima (se borraria el estado de una llamada
+    en curso). Los locks se abren con la misma disciplina que al adquirir (sin symlinks,
+    sin truncar, directorio verificado). Devuelve si purgo."""
+    if not (perfil.purgar or perfil.purgar_excepto is not None):
+        return False
+    otras = []
+    dfd = _preparar_dir_locks(_lock_dir())
+    try:
+        libres = True
+        for j in range(ranuras):
+            if j == propia:
+                continue
+            f2 = _abrir_lock(dfd, f"{perfil.nombre}.{j}.lock")
+            try:
+                fcntl.flock(f2.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                otras.append(f2)
+            except BlockingIOError:
+                f2.close()
+                libres = False
+                break
+        if libres:
+            _purgar_credenciales(perfil, cred_host)
+        return libres
+    finally:
+        os.close(dfd)
+        for f2 in otras:
+            flock_liberar(f2)
+
+
+def purgar_al_arranque(perfil: str) -> bool:
+    """BLOQUEANTE -- llamar via asyncio.to_thread. Purga el estado que el CLI del `perfil`
+    dejo en su directorio de credencial si el proceso anterior murio entre el CLI y la
+    purga de `_ranura_liberar` (kill -9, apagon, OOM): sin esto ese estado -- ejecutables,
+    hooks, config -- quedaria hasta la proxima llamada exitosa. Lo invoca, al arrancar el
+    proceso y antes de servir la primera llamada, el llamador de los pasos 6 (Thot, chat) y
+    9 (Jacobs); este modulo no lo dispara solo. Con la misma regla que la purga normal: solo
+    si NINGUNA ranura esta en uso (otro proceso puede estar sirviendo una llamada); devuelve
+    True si purgo y False si no (ranura ocupada, perfil sin nada que purgar o directorio de
+    credencial ausente, que se registra). Un directorio de locks inseguro es
+    SandboxUnavailable (falla cerrado). Perfil desconocido o que no se sirve por run_cli:
+    PerfilNoSoportado."""
+    p = PERFILES.get(perfil) if isinstance(perfil, str) else None
+    if p is None or not p.via_run_cli:
+        raise PerfilNoSoportado(f"perfil {perfil!r} no se sirve por run_cli")
+    cred_host = _cred_host(p)
+    if not os.path.isdir(cred_host):
+        logger.warning("purga al arrancar: no existe el directorio de credencial de %s", p.nombre)
+        return False
+    return _purgar_si_libre(p, _ranuras_de(p), cred_host, None)
 
 
 def _ranura_liberar(handle, perfil: Perfil, ranuras: int, cred_host: Optional[str]) -> None:
     """BLOQUEANTE (to_thread). Con la ranura todavia tomada, purga el estado
     que el CLI deja en su home dedicado (Kimi no tiene --ephemeral) -- pero solo
-    si NINGUNA otra ranura esta en uso (si no, se borraria el estado de una
-    llamada en curso); si hay otra corriendo, la purga queda para la proxima.
-    Los locks de las otras ranuras se abren con la misma disciplina que al
-    adquirir (sin symlinks, sin truncar, directorio verificado)."""
+    si NINGUNA otra ranura esta en uso (ver `_purgar_si_libre`); si hay otra
+    corriendo, la purga queda para la proxima."""
     fh, idx = handle
-    otras = []
     try:
-        if (perfil.purgar or perfil.purgar_excepto is not None) and cred_host:
-            dfd = _preparar_dir_locks(_lock_dir())
-            try:
-                libres = True
-                for j in range(ranuras):
-                    if j == idx:
-                        continue
-                    f2 = _abrir_lock(dfd, f"{perfil.nombre}.{j}.lock")
-                    try:
-                        fcntl.flock(f2.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        otras.append(f2)
-                    except BlockingIOError:
-                        f2.close()
-                        libres = False
-                        break
-            finally:
-                os.close(dfd)
-            if libres:
-                _purgar_credenciales(perfil, cred_host)
+        if cred_host:
+            _purgar_si_libre(perfil, ranuras, cred_host, idx)
     finally:
-        for f2 in otras:
-            flock_liberar(f2)
         flock_liberar(fh)
 
 
@@ -1462,7 +1513,7 @@ async def run_cli(
         conversacion = armar_conversacion(historial, mensaje, tope)
         ruta_bin, dir_bin, version = await asyncio.to_thread(_resolver_binario, p)
         verificar_bwrap(_BWRAP_BIN, p.nombre)
-        cred_host = os.path.join(os.environ.get("JAX_CLI_CRED_ROOT", "/srv/jax-data/cli-suscripcion"), p.cred_subdir)
+        cred_host = _cred_host(p)
         if not os.path.isdir(cred_host):
             raise SandboxUnavailable(f"{p.nombre}: falta el directorio de credencial dedicado")
 

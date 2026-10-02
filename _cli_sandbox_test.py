@@ -2027,6 +2027,137 @@ class PurgaDeCodexTest(_Entorno):
         self.assertEqual(sorted(p.name for p in cred.iterdir()), ["credentials.json", "otro"])
 
 
+class PurgaSinSilencioTest(_Entorno):
+    """MINOR-18 (auditoria 2026-10-02, ronda 2): una entrada que la purga no pudo quitar
+    se REGISTRA con su ruta y el error (nada de ignore_errors=True silencioso), y el
+    estado que un proceso muerto dejo atras se purga tambien AL ARRANCAR."""
+
+    def _con_subdir_0500(self, base: Path):
+        sub = base / "sessions" / "s1"
+        sub.mkdir(parents=True)
+        (sub / "estado").write_text("x")
+        os.chmod(sub, 0o500)  # sin escritura: no se puede quitar `estado` de adentro
+        self.addCleanup(lambda: os.path.exists(sub) and os.chmod(sub, 0o700))
+        return sub
+
+    @unittest.skipIf(os.getuid() == 0, "root ignora los permisos del directorio")
+    async def test_un_subdirectorio_0500_se_registra_con_su_ruta_y_no_se_traga(self):
+        cred = Path(self.tmp.name) / "credkimi-0500"
+        sub = self._con_subdir_0500(cred)
+        with self.assertLogs("cli_sandbox", "WARNING") as cm:
+            cli_sandbox._purgar_credenciales(cli_sandbox.PERFILES["kimi"], str(cred))
+        texto = "\n".join(cm.output)
+        self.assertIn(str(sub / "estado"), texto, "el warning lleva la ruta que fallo")
+        self.assertIn("kimi", texto)
+        self.assertRegex(texto, r"(Permission denied|Operation not permitted|PermissionError)")
+        self.assertTrue((sub / "estado").exists(), "no se pudo quitar: sigue ahi, y se dijo")
+
+    @unittest.skipIf(os.getuid() == 0, "root ignora los permisos del directorio")
+    async def test_codex_tambien_registra_lo_que_no_pudo_purgar(self):
+        cdir = self.cred / "codex"
+        (cdir / "auth.json").write_text("T")
+        sub = self._con_subdir_0500(cdir)
+        with self.assertLogs("cli_sandbox", "WARNING") as cm:
+            cli_sandbox._purgar_credenciales(cli_sandbox.PERFILES["codex"], str(cdir))
+        self.assertIn(str(sub / "estado"), "\n".join(cm.output))
+        self.assertEqual((cdir / "auth.json").read_text(), "T")
+
+    async def test_la_purga_ya_no_usa_ignore_errors_y_una_entrada_ausente_no_hace_ruido(self):
+        self.assertNotIn("ignore_errors", inspect.getsource(cli_sandbox._purgar_credenciales))
+        cred = Path(self.tmp.name) / "credkimi-limpio"
+        (cred / "sessions").mkdir(parents=True)
+        (cred / "sessions" / "a").write_text("x")  # `logs`, `telemetry`... no existen
+        with self.assertNoLogs("cli_sandbox", "WARNING"):
+            cli_sandbox._purgar_credenciales(cli_sandbox.PERFILES["kimi"], str(cred))
+        self.assertFalse((cred / "sessions").exists())
+
+    async def test_un_enlace_con_el_nombre_de_un_directorio_a_purgar_se_desvincula(self):
+        cred = Path(self.tmp.name) / "credkimi-enlace"
+        cred.mkdir()
+        fuera = Path(self.tmp.name) / "fuera-kimi"
+        fuera.mkdir()
+        (fuera / "intacto").write_text("NO-TOCAR")
+        os.symlink(fuera, cred / "sessions")
+        with self.assertNoLogs("cli_sandbox", "WARNING"):
+            cli_sandbox._purgar_credenciales(cli_sandbox.PERFILES["kimi"], str(cred))
+        self.assertFalse(os.path.lexists(cred / "sessions"))
+        self.assertEqual((fuera / "intacto").read_text(), "NO-TOCAR")
+
+    # ---- al arrancar el proceso
+    async def test_purgar_al_arranque_limpia_lo_que_dejo_un_proceso_muerto(self):
+        cdir = self.cred / "codex"
+        (cdir / "auth.json").write_text("TOKEN")
+        (cdir / "packages").mkdir()
+        (cdir / "config.toml").write_text("x")
+        self.assertTrue(cli_sandbox.purgar_al_arranque("codex"))
+        self.assertEqual(sorted(p.name for p in cdir.iterdir()), ["auth.json"])
+        kdir = self.cred / "kimi"
+        (kdir / "sessions").mkdir()
+        (kdir / "credentials.json").write_text("K")
+        self.assertTrue(cli_sandbox.purgar_al_arranque("kimi"))
+        self.assertEqual(sorted(p.name for p in kdir.iterdir()), ["credentials.json"])
+
+    async def test_purgar_al_arranque_no_toca_nada_si_otra_ranura_esta_en_uso(self):
+        cdir = self.cred / "codex"
+        (cdir / "packages").mkdir()
+        handle = cli_sandbox._ranura_adquirir("codex", cli_sandbox._ranuras_de(cli_sandbox.PERFILES["codex"]), 1)
+        try:
+            self.assertFalse(cli_sandbox.purgar_al_arranque("codex"))
+        finally:
+            cli_sandbox.flock_liberar(handle[0])
+        self.assertTrue((cdir / "packages").exists(), "una llamada en curso no pierde su estado")
+        self.assertTrue(cli_sandbox.purgar_al_arranque("codex"))
+        self.assertFalse((cdir / "packages").exists())
+
+    async def test_purgar_al_arranque_toma_todas_las_ranuras_mientras_purga(self):
+        n = cli_sandbox._ranuras_de(cli_sandbox.PERFILES["codex"])
+        (self.cred / "codex" / "packages").mkdir()
+        visto = {}
+        real = cli_sandbox._purgar_credenciales
+
+        def espiar(perfil, cred_host):
+            ocupadas = 0
+            for i in range(n):
+                fd = os.open(self.lock_dir / f"codex.{i}.lock", os.O_RDONLY)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except BlockingIOError:
+                    ocupadas += 1
+                finally:
+                    os.close(fd)
+            visto["ocupadas"] = ocupadas
+            return real(perfil, cred_host)
+
+        with patch.object(cli_sandbox, "_purgar_credenciales", espiar):
+            self.assertTrue(cli_sandbox.purgar_al_arranque("codex"))
+        self.assertEqual(visto["ocupadas"], n)
+        # y las suelta: la siguiente llamada toma su ranura sin esperar
+        fh, _ = cli_sandbox._ranura_adquirir("codex", n, 0.2)
+        cli_sandbox.flock_liberar(fh)
+
+    async def test_purgar_al_arranque_perfiles_que_no_se_sirven_y_directorio_ausente(self):
+        for malo in ("claude", "otro", "", None):
+            with self.subTest(perfil=malo), self.assertRaises(cli_sandbox.PerfilNoSoportado):
+                cli_sandbox.purgar_al_arranque(malo)
+        shutil.rmtree(self.cred / "kimi")
+        with self.assertLogs("cli_sandbox", "WARNING"):
+            self.assertFalse(cli_sandbox.purgar_al_arranque("kimi"))
+
+    async def test_purgar_al_arranque_falla_cerrado_con_un_directorio_de_locks_inseguro(self):
+        os.makedirs(self.lock_dir, mode=0o700)
+        os.chmod(self.lock_dir, 0o777)
+        (self.cred / "codex" / "packages").mkdir()
+        with self.assertRaises(cli_sandbox.SandboxUnavailable):
+            cli_sandbox.purgar_al_arranque("codex")
+        self.assertTrue((self.cred / "codex" / "packages").exists())
+
+    async def test_la_docstring_dice_quien_la_invoca(self):
+        doc = inspect.getdoc(cli_sandbox.purgar_al_arranque)
+        for frase in ("pasos 6", "9 (Jacobs)", "to_thread", "al arrancar"):
+            self.assertIn(frase, doc)
+
+
 # ------------------------------------------------------- contencion con bwrap
 
 @unittest.skipUnless(_bwrap_usable(), "bwrap no usable en este host (user namespaces)")
