@@ -19,12 +19,21 @@ memory reads/writes, H3/H4). It has its own transactional resolver,
 
 Every mutation here takes `jax_tenants(tenant_id) FOR UPDATE` as its first
 statement (a per-tenant mutex), then locks the ACTOR's own row, then (ronda 3,
-MAJOR M1) any DESTINO row this operation touches, all BEFORE the project
-scope/membership rows: `tenant -> actor -> destino -> projects -> scope ->
-membership -> events` (plan section 2.1). The chat's own resolver
+MAJOR M1) any DESTINO row this operation touches. After that the order is NOT
+the same for every operation:
+  - `bootstrap_existing_project` locks `projects` BEFORE the scope row:
+    `tenant -> actor -> destino -> projects -> scope -> membership -> events`
+    (plan section 2.1);
+  - `rename_project` and `set_project_lifecycle` lock the SCOPE first and
+    `projects` after it: `tenant -> actor -> scope -> membership -> projects ->
+    events` (rename only reaches `projects` once the actor is resolved, so a
+    cross-tenant actor is denied before asking for it).
+There is no cycle: every mutation takes the tenant mutex first, so two
+mutations of one tenant serialise there, and between tenants `rename` denies
+before requesting `projects`. The chat's own resolver
 (`scope_authority.py`'s `_tenant_user_cur` -> `_project_membership_cur`)
-locks a user row before the scope row for the SAME reason; the two now agree,
-so they cannot deadlock (MariaDB error 1213) over the same pair of rows --
+locks a user row before the scope row for the SAME reason as the destino rule;
+they cannot deadlock (MariaDB error 1213) over the same pair of rows --
 reproduced and fixed ronda 3, 2026-09-26, see
 `tests/test_project_authority_mariadb.py::test_orden_de_bloqueo_...`.
 
