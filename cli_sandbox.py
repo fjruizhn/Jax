@@ -105,6 +105,7 @@ import shutil
 import stat
 import time
 import uuid
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -510,7 +511,16 @@ TITULAR_TTL_S = 30.0
 _EMITIENDO: contextvars.ContextVar[bool] = contextvars.ContextVar("cli_sandbox_emitiendo", default=False)
 
 
-@dataclass(frozen=True)
+#: Lo que `exigir_titular` registro al emitir cada Titular: (user_id, tenant_id, entry_point),
+#: indexado por la IDENTIDAD del objeto (`Titular` no define `__eq__`/`__hash__` por campos) y
+#: con referencia debil: el registro no retiene titulares y la entrada muere con el objeto.
+#: `run_cli` compara lo que el objeto dice HOY contra esto: `object.__setattr__(t, "entry_point",
+#: ...)` sobre un titular ya emitido lo desacuerda (MINOR-24). Invalidacion: ninguna explicita,
+#: es el ciclo de vida del objeto.
+_EMITIDOS: "weakref.WeakKeyDictionary[Titular, tuple[int, int, str]]" = weakref.WeakKeyDictionary()
+
+
+@dataclass(frozen=True, eq=False)
 class Titular:
     """Prueba de que `exigir_titular` autorizo a este usuario, en este tenant y
     por este punto de entrada, hace menos de `TITULAR_TTL_S` segundos.
@@ -519,14 +529,19 @@ class Titular:
       1. En ejecucion, por las vias normales, solo `exigir_titular` lo construye:
          `Titular(...)`, `dataclasses.replace`, `copy`, `deepcopy` y `pickle`
          terminan en TypeError; el sello y la marca de tiempo no son argumentos del
-         constructor; y `run_cli` rechaza uno caducado o de otro entry_point.
+         constructor; y `run_cli` rechaza uno caducado o de otro entry_point. Ademas,
+         `exigir_titular` registra (user_id, tenant_id, entry_point) del objeto emitido
+         en `_EMITIDOS` (por identidad, referencia debil) y `run_cli` rechaza un titular
+         que no figura ahi o cuyos campos ya no coinciden con lo registrado: alterar
+         `entry_point`, `user_id` o `tenant_id` con `object.__setattr__` sobre un titular
+         ya emitido no sirve, y uno fabricado con `object.__new__` no esta registrado.
       2. NO es una barrera contra codigo que corre DENTRO del proceso: quien importe
          este modulo puede leer `_SELLO`, entrar a `_EMITIENDO`, fijar `emitido_mono`
-         con `object.__setattr__` o llamar `object.__new__(Titular)` y obtener un
-         Titular valido. Ninguna de esas vias esta cerrada en ejecucion.
+         con `object.__setattr__` o escribir en `_EMITIDOS` y obtener un Titular valido.
+         Esas vias (los nombres privados) no estan cerradas en ejecucion.
       3. Lo que las hace VISIBLES es un control de revision, no de ejecucion:
          policy/tests/test_titular_solo_via_exigir_titular.py falla el CI si, fuera de
-         este archivo y de su test, el AST nombra `_SELLO`, `_EMITIENDO` o
+         este archivo y de su test, el AST nombra `_SELLO`, `_EMITIENDO`, `_EMITIDOS` o
          `emitido_mono`, declara una subclase de `Titular` o llama `object.__new__`
          sobre ella. No ve codigo fuera de los repos escaneados (en CI solo jax) ni
          formas que el AST no muestra (`exec`/`eval` de texto, nombres calculados).
@@ -640,6 +655,7 @@ async def exigir_titular(user_id, tenant_id, entry_point) -> Titular:
         _EMITIENDO.reset(token)
     object.__setattr__(t, "_sello", _SELLO)
     object.__setattr__(t, "emitido_mono", time.monotonic())
+    _EMITIDOS[t] = (user_id, tenant_id, entry_point)
     return t
 
 
@@ -1607,6 +1623,8 @@ async def run_cli(
         if (
             not isinstance(titular, Titular) or titular._sello is not _SELLO
             or titular.entry_point != entry_point
+            # lo que el objeto dice hoy tiene que ser lo que se registro al emitirlo (MINOR-24)
+            or _EMITIDOS.get(titular) != (titular.user_id, titular.tenant_id, titular.entry_point)
         ):
             raise TitularNoAutorizado("suscripcion_solo_titular", "titular ausente, no autorizado o de otro entry_point")
         edad = time.monotonic() - titular.emitido_mono

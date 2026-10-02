@@ -4,13 +4,14 @@ ronda 2, MINOR-16).
 
 `cli_sandbox.Titular` es la prueba de que la compuerta de la suscripcion autorizo a
 un usuario. En tiempo de ejecucion NO es infalsificable: quien importe el modulo puede
-leer `_SELLO`, entrar a `_EMITIENDO`, escribir `emitido_mono` con `object.__setattr__`
-o llamar `object.__new__(Titular)` (la docstring de `Titular` lo dice). Lo que hace
+leer `_SELLO`, entrar a `_EMITIENDO`, escribir `emitido_mono` con `object.__setattr__`,
+escribir en el registro `_EMITIDOS` o llamar `object.__new__(Titular)` (la docstring de
+`Titular` lo dice). Lo que hace
 visible un atajo asi es ESTE control, de revision de codigo:
 
   fuera de `cli_sandbox.py` y de `_cli_sandbox_test.py` (en el ROOT de un repo
   escaneado; el symlink las_manos/cli_sandbox.py es el mismo archivo), el AST no puede
-  - nombrar `_SELLO`, `_EMITIENDO` ni `emitido_mono` (como nombre, atributo o cadena:
+  - nombrar `_SELLO`, `_EMITIENDO`, `_EMITIDOS` ni `emitido_mono` (como nombre, atributo o cadena:
     `object.__setattr__(t, "emitido_mono", x)` cuenta), ni con una concatenacion de
     literales (`"emitido" + "_mono"`);
   - declarar una subclase de `Titular` (`class X(Titular)`, `type("X", (Titular,), {})`);
@@ -58,7 +59,10 @@ ALLOWED_FILENAMES = frozenset({"cli_sandbox.py", "_cli_sandbox_test.py"})
 #: Internos de `Titular` que nadie fuera del modulo puede nombrar.
 # Armados con "".join y no escritos enteros: el escaneo pliega las concatenaciones de
 # literales y marcaria a este mismo archivo (que no es de los aprobados).
-_PROHIBIDOS = frozenset({"".join(("_SEL", "LO")), "".join(("_EMITIEN", "DO")), "".join(("emitido", "_mono"))})
+_PROHIBIDOS = frozenset({
+    "".join(("_SEL", "LO")), "".join(("_EMITIEN", "DO")), "".join(("_EMITI", "DOS")),
+    "".join(("emitido", "_mono")),
+})
 _CLASE = "Titular"
 
 
@@ -159,6 +163,10 @@ def test_detecta_los_internos_del_sello() -> None:
     assert _usos("import cli_sandbox\ncli_sandbox._EMITIENDO.set(True)\n")
     assert _usos("t = algo()\nt.emitido_mono = 0\n")
     assert _usos("print(titular.emitido_mono)\n")
+    # MINOR-24: el registro de titulares emitidos tampoco se toca desde fuera
+    assert _usos("import cli_sandbox\ncli_sandbox._EMITIDOS[t] = (1, 1, 'chat')\n")
+    assert _usos("from cli_sandbox import _EMITIDOS\n_EMITIDOS.clear()\n")
+    assert _usos("getattr(cli_sandbox, '_EMITI' + 'DOS')\n")
 
 
 def test_detecta_el_nombre_como_cadena_aunque_este_partido() -> None:

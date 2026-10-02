@@ -461,6 +461,62 @@ class TitularInfalsificableTest(_Entorno):
         with self.assertRaises(cli_sandbox.TitularNoAutorizado):
             await self._run(falso)
 
+    async def test_un_titular_alterado_despues_de_emitido_se_rechaza_y_no_lanza_nada(self):
+        # MINOR-24 (reauditoria 2026-10-02): `object.__setattr__(t, "entry_point", "jacobs")`
+        # convertia un titular de chat en uno de jacobs (mismo truco con user_id/tenant_id):
+        # el sello y el TTL seguian valiendo. `run_cli` valida lo que se registro al emitirlo.
+        casos = (
+            ("entry_point", "jacobs", "jacobs"),
+            ("user_id", 4, "chat"),
+            ("tenant_id", 2, "chat"),
+        )
+        for campo, valor, ep in casos:
+            with self.subTest(campo=campo):
+                t = await self.titular(1, 1, "chat")
+                object.__setattr__(t, campo, valor)
+                cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+                with patch("asyncio.create_subprocess_exec", fake):
+                    with self.assertRaises(cli_sandbox.TitularNoAutorizado) as c:
+                        await cli_sandbox.run_cli(
+                            "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                            timeout=5, titular=t, correlation_id="c", entry_point=ep)
+                self.assertEqual(c.exception.codigo, "suscripcion_solo_titular")
+                self.assertEqual(cap["llamadas"], 0)
+                self.assertEqual(cap.get("features_llamadas", 0), 0)
+                self.assertEqual(list(self.run_dir.iterdir()), [])
+
+    async def test_un_titular_fabricado_con_el_sello_pero_nunca_emitido_se_rechaza(self):
+        t = await self.titular()
+        falso = object.__new__(cli_sandbox.Titular)
+        for k in ("user_id", "tenant_id", "entry_point"):
+            object.__setattr__(falso, k, getattr(t, k))
+        object.__setattr__(falso, "_sello", cli_sandbox._SELLO)   # el sello correcto
+        object.__setattr__(falso, "emitido_mono", time.monotonic())
+        with self.assertRaises(cli_sandbox.TitularNoAutorizado):
+            await self._run(falso)
+
+    async def test_el_titular_intacto_sigue_pasando_y_se_indexa_por_identidad(self):
+        t1 = await self.titular(1, 1, "chat")
+        t2 = await self.titular(1, 1, "chat")   # mismos campos, otro objeto
+        self.assertIsNot(t1, t2)
+        self.assertNotEqual(t1, t2, "sin __eq__ por campos: la identidad del objeto es la clave")
+        self.assertEqual(hash(t1), hash(t1))
+        h = hash(t1)
+        object.__setattr__(t1, "user_id", 8)
+        self.assertEqual(hash(t1), h, "mutar un campo no cambia la clave del registro")
+        cap = await self._run(t2)
+        self.assertEqual(cap["llamadas"], 1)
+
+    async def test_el_registro_de_titulares_no_retiene_los_objetos(self):
+        import gc
+        t = await self.titular()
+        self.assertIn(t, cli_sandbox._EMITIDOS)
+        antes = len(cli_sandbox._EMITIDOS)
+        del t
+        gc.collect()
+        self.assertEqual(len(cli_sandbox._EMITIDOS), antes - 1)
+        self.assertIsInstance(cli_sandbox._EMITIDOS, __import__("weakref").WeakKeyDictionary)
+
     def test_la_documentacion_no_promete_lo_que_no_cumple(self):
         for doc in (cli_sandbox.Titular.__doc__, cli_sandbox.exigir_titular.__doc__):
             self.assertNotIn("ningun llamador", doc.lower())
