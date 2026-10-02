@@ -492,6 +492,22 @@ def test_un_manifiesto_forjado_pero_coherente_no_carga_contra_el_arbol_del_sha(c
     assert "oid_distinto_del_arbol" in {f.codigo for f in exc.value.fallos}
 
 
+def test_un_manifiesto_forjado_con_su_oid_y_todos_sus_hashes_recalculados_tampoco_carga(cfg):
+    """El atacante que ademas reescribe `oid_git` con el oid de SUS bytes: el manifiesto es coherente
+    consigo mismo y con los archivos, pero ya no coincide con el arbol de git del SHA."""
+    raiz = paquete.construir_paquete(cfg)
+    nuevo = b"---\nname: alfa\n---\nINSTRUCCION FORJADA 2\n"
+    _forjar_coherente(raiz, "skills/alfa/SKILL.md", nuevo)
+    m = json.loads((raiz / paquete.MANIFIESTO).read_text())
+    m["archivos"]["skills/alfa/SKILL.md"]["oid_git"] = paquete._oid_de_bytes(nuevo, 40)
+    m["sha256_manifiesto"] = paquete.hash_del_manifiesto(m)
+    (raiz / paquete.MANIFIESTO).write_text(json.dumps(m))
+    assert paquete.verificar_integridad(cfg) == ()
+    with pytest.raises(paquete.PaqueteNoVerifica) as exc:
+        paquete.cargar_paquete(cfg)
+    assert "oid_distinto_del_arbol" in {f.codigo for f in exc.value.fallos}
+
+
 def test_la_constitucion_forjada_tampoco_carga(cfg, sha):
     raiz = paquete.construir_paquete(cfg)
     _forjar_coherente(raiz, "constitucion/CLAUDE.md", f"<!-- claude-skills: SHA {sha} -->\n# otra constitucion\n".encode())

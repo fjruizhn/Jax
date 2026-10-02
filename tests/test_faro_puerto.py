@@ -611,3 +611,5 @@ def test_el_arranque_configura_el_logging_antes_del_primer_servidor_mcp(cfg_puer
     corre(caso())
     assert raiz.handlers, "el servicio no configuro el logging"
     assert not any(type(h).__name__ == "RichHandler" for h in raiz.handlers), "lo configuro el SDK, no el servicio"
+    from jax.faro.logs import FORMATO
+    assert [h.formatter._fmt for h in raiz.handlers] == [FORMATO], "el formato es el del servicio, no el `%(message)s` del SDK"

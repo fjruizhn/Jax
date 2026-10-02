@@ -181,6 +181,19 @@ def test_un_handshake_que_no_llega_se_corta_por_tiempo(tmp_path, cargado):
     assert [r["motivo"] for r in corre(caso()) if r.get("evento") == "conexion_rechazada"] == ["token_invalido"]
 
 
+def test_una_linea_de_handshake_enorme_se_corta_sin_acumular_memoria(tmp_path, cargado):
+    d = tmp_path / "r"
+    d.mkdir(mode=0o700)
+
+    async def caso():
+        async with puerto(ConfigPuerto(socket_dir=d, handshake_s=30), cargado) as srv:
+            lector, escritor = await _abrir(srv, b"A" * 200_000)       # sin salto de linea, antes de autenticarse
+            assert await asyncio.wait_for(lector.read(), 3) == b""     # cortada ya, sin esperar el plazo
+            escritor.close()
+        return srv.registros
+    assert [r["motivo"] for r in corre(caso()) if r.get("evento") == "conexion_rechazada"] == ["token_invalido"]
+
+
 def test_con_el_token_correcto_por_el_rele_todo_funciona(cfgp, cargado):
     async def caso():
         async with puerto(cfgp, cargado) as srv, cliente_por_rele(srv) as c:
