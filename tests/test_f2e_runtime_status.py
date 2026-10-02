@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -152,6 +153,39 @@ def test_motor_status_persists_governed_owner_and_uses_coherent_view(tmp_path, m
     assert evidence.observation.result == {"job_id": job_id, "status": "pending"}
 
 
+def test_motor_resolution_waits_for_concurrent_transition_and_reads_one_snapshot(tmp_path, monkeypatch):
+    from motor_registry import routes
+    store = JobStore(str(tmp_path / "jobs.jsonl"))
+    monkeypatch.setattr(routes, "_STORE", store)
+    job_id = store.create(caller="jax", capability="x", motor="m", trace_id="t",
+        prompt="p", recursion_depth=0, tenant_id="tenant-a", user_id="user-a")
+    original_get = store.get
+    reader_started = threading.Event()
+    result = {}
+    import motor_registry.job_store as job_store_module
+
+    def signalled_get(identifier):
+        reader_started.set()
+        return original_get(identifier)
+
+    monkeypatch.setattr(store, "get", signalled_get)
+    resolver = MotorJobStatusResolver()
+
+    with store._lock:
+        reader = threading.Thread(target=lambda: result.setdefault("evidence", resolver.evidence(
+            {"job_id": job_id, "status": "tools_requested"}, _scope())))
+        reader.start()
+        assert reader_started.wait(timeout=2)
+        monkeypatch.setattr(job_store_module.time, "time", lambda: NOW.timestamp())
+        store.update(job_id, status="tools_requested", status_updated_at=NOW.timestamp())
+
+    reader.join(timeout=2)
+    assert not reader.is_alive()
+    evidence = result["evidence"]
+    assert evidence.observation.result == {"job_id": job_id, "status": "tools_requested"}
+    assert evidence.observation.observed_at == NOW
+
+
 def test_repeating_same_motor_status_does_not_refresh_transition_time(tmp_path, monkeypatch):
     import motor_registry.job_store as job_store_module
     ticks = iter((100.0, 200.0, 300.0))
@@ -270,6 +304,29 @@ def test_jacobs_pipeline_resolver_uses_canonical_store_and_exact_owner(monkeypat
     wrong_tenant = asyncio.run(resolver.evidence(
         {"pipeline_id": "same-looking-id", "status": "running"}, other))
     assert wrong_tenant.observation.status is ResolutionStatus.WRONG_SCOPE
+
+
+def test_pipeline_status_uses_canonical_jacobs_state_not_platform_projection(monkeypatch):
+    from jacobs import models, store as jacobs_store
+    # Platform intentionally maps this canonical Jacobs state to a distinct UI
+    # label. The governed source must preserve the authoritative Jacobs enum.
+    platform_projection = "waiting_gate"
+    pipeline = models.Pipeline(pipeline_id="pipeline-projection", name="p", invoked_by="web",
+        mode="supervised", status=models.PipelineStatus.interrupted,
+        tenant_id="tenant-a", user_id="user-a", updated_at=NOW.timestamp())
+    called = []
+
+    async def canonical_pipeline_get(identifier):
+        called.append(identifier)
+        return pipeline
+
+    monkeypatch.setattr(jacobs_store, "pipeline_get", canonical_pipeline_get)
+    evidence = asyncio.run(JacobsPipelineStatusResolver().evidence(
+        {"pipeline_id": pipeline.pipeline_id, "status": "interrupted"}, _scope()))
+
+    assert called == [pipeline.pipeline_id]
+    assert platform_projection == "waiting_gate"
+    assert evidence.observation.result == {"pipeline_id": pipeline.pipeline_id, "status": "interrupted"}
 
 
 def test_unknown_jacobs_pipeline_never_resolves_and_ignores_caller_timestamps(monkeypatch):
