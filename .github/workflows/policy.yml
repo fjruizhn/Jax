@@ -1966,6 +1966,7 @@ jobs:
           tests/test_jacobs_interruptor.py
           tests/test_repl_interruptor.py
           tests/test_repl_retirado.py
+          tests/test_jacobs_hyde_directo_prohibido.py
           tests/test_interruptor_sin_rutas_fijas.py
           tests/test_interruptor_heredada.py
           tests/test_subpipeline_contrato_puro.py
@@ -2152,6 +2153,7 @@ jobs:
             tests/test_jacobs_interruptor.py \
             tests/test_repl_interruptor.py \
             tests/test_repl_retirado.py \
+            tests/test_jacobs_hyde_directo_prohibido.py \
             tests/test_interruptor_sin_rutas_fijas.py \
             tests/test_interruptor_heredada.py \
             tests/test_subpipeline_contrato_puro.py \
@@ -4811,8 +4813,12 @@ jobs:
           #   OllamaNumPredictTest -2, UrlRealPorCaminoTest -1), test_memoria_no_traga_fallos_de_escritura
           #   (-2, los de health_check), test_config_entorno (-1), test_errores_de_proveedor_redactados
           #   (-1), test_router_easter_egg (-1, el del Router).
-          grep -qE "^3156 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3156 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 3156 -> 3158 (mismo PR, MAJOR-1): +2 puros de tests/test_jacobs_hyde_directo_prohibido.py
+          #   (_invoke_hyde lanza DirectHydeGovernedExecutionForbiddenError y el sandbox, sustituido
+          #   por un falso, nunca se llama; las constantes del cuerpo muerto ya no existen). Vistos en
+          #   rojo contra 73b8468 (lanzaba RuntimeError con el nombre en texto).
+          grep -qE "^3158 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3158 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del

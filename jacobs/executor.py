@@ -36,6 +36,7 @@ from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 from jacobs.plan import CapabilityUnbound
 from jacobs.policy import check_kill_switch
 from jacobs.usage_writer import record_direct_usage
+from policy.execution_control.errors import DirectHydeGovernedExecutionForbiddenError
 from interruptor import correr_con_interruptor
 
 logger = logging.getLogger("jacobs.executor")
@@ -601,7 +602,7 @@ async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     `claude` con --allowedTools Bash): el que lo resucitara con solo quitar este
     `raise` lo habria hecho sin que nada lo notara.
     Falla cerrado con la clase real; nunca llama al sandbox."""
-    raise RuntimeError("DirectHydeGovernedExecutionForbiddenError: GOVERNED_EXECUTION_REQUIRED")
+    raise DirectHydeGovernedExecutionForbiddenError("GOVERNED_EXECUTION_REQUIRED")
 
 
 async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: str | None = None) -> dict:
