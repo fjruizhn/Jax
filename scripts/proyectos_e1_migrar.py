@@ -168,7 +168,7 @@ def _escribir_reversion(ruta: str, destino: int, filas: list[dict]) -> None:
     except BaseException:
         try:
             os.unlink(ruta)
-        except OSError:
+        except OSError:  # fail-soft: limpieza del archivo parcial; si falla, el `raise` de abajo relanza el error ORIGINAL (no se enmascara)
             pass
         raise
 
@@ -217,7 +217,7 @@ async def _reescribir_en_transaccion(pool, ids: list[int], destino: int, salida_
             incierto = salida_reversion + ".incierto"
             try:
                 conn.close()
-            except Exception:
+            except Exception:  # fail-soft: cierre de una conexion ya dudosa; el commit incierto se reporta abajo con CommitIncierto
                 pass
             try:
                 os.replace(salida_reversion, incierto)
@@ -321,7 +321,7 @@ async def revertir(pool, ruta: str) -> dict:
         except BaseException as e:
             try:
                 conn.close()
-            except Exception:
+            except Exception:  # fail-soft: cierre de una conexion ya dudosa; el commit incierto se reporta abajo con CommitIncierto
                 pass
             raise CommitIncierto(f"el resultado del commit de la reversion es desconocido "
                                  f"({type(e).__name__}: {e}); el mapa {ruta} no se toco; correr --verificar "
@@ -407,7 +407,22 @@ async def _correr(args, database: str) -> dict:
         await pool.wait_closed()
 
 
+class _CodigoDeSalida(Exception):
+    """Traduce un error no previsto a un codigo de salida distinto de cero, visible como `raise`."""
+
+    def __init__(self, codigo: int) -> None:
+        super().__init__(codigo)
+        self.codigo = codigo
+
+
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except _CodigoDeSalida as salida:
+        return salida.codigo
+
+
+def _main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     database = args.database or os.environ.get("JAX_DB_NAME", "")
     if not database:
@@ -446,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:                 # noqa: BLE001 - cualquier otra cosa NO es «volver a correr»
         print(f"ERROR no previsto ({type(e).__name__}: {e}); NO reintentar sin revisar: correr --verificar y "
               f"mirar el estado antes de cualquier otra accion", file=sys.stderr)
-        return 5
+        raise _CodigoDeSalida(5) from e
     print(json.dumps(resultado, ensure_ascii=False, indent=2))
     return 0
 
