@@ -854,8 +854,11 @@ class ProjectAuthorityAdmin:
                              name: str, description: str | None) -> bool:
         """Renombra un proyecto ACTIVE. Mínimo OWNER. Idempotente: si nombre y
         descripción ya son esos, no escribe ni deja evento (un reintento tras un
-        resultado DESCONOCIDO no duplica). El candado de `projects` se toma vía
-        `lock_target`, ANTES del alcance, como exige el orden del módulo."""
+        resultado DESCONOCIDO no duplica). Orden de candados: alcance (tenant, usuario,
+        `jax_project_scope`, membresía) -> `projects(id)`, igual que el espejo
+        `set_project_lifecycle`; `projects` se toma DESPUÉS de resolver el actor
+        (sin `lock_target`), de modo que un actor de otro tenant sea negado antes
+        de tocar el candado de una fila que no es de su tenant."""
         normalized_name = unicodedata.normalize("NFC", name or "").strip()
         if not (1 <= len(normalized_name) <= 255):
             raise AuthorizationDenied("project name must be 1-255 characters")
@@ -864,14 +867,11 @@ class ProjectAuthorityAdmin:
 
         async def op(cur: Any) -> bool:
             try:
-                async def _lock_project(cur: Any) -> Any:
-                    await cur.execute("SELECT name,description FROM projects WHERE id=%s FOR UPDATE", (project_id,))
-                    return await cur.fetchone()
-
-                actor, current = await self._resolve_project_actor_cur(
+                actor, _ = await self._resolve_project_actor_cur(
                     cur, request, project_id, expected_operation="RENAME_PROJECT",
-                    min_role=ProjectRole.OWNER, allowed_states=frozenset({ProjectLifecycle.ACTIVE}),
-                    lock_target=_lock_project)
+                    min_role=ProjectRole.OWNER, allowed_states=frozenset({ProjectLifecycle.ACTIVE}))
+                await cur.execute("SELECT name,description FROM projects WHERE id=%s FOR UPDATE", (project_id,))
+                current = await cur.fetchone()
                 if not current:
                     raise ProjectNotVisible("project does not exist")
                 if (self._value(current, "name", 0) == normalized_name

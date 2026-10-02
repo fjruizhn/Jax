@@ -2250,3 +2250,32 @@ async def test_rename_project_valida_nombre():
                                               name="ok", description="d" * 2001)
     finally:
         pool.close(); await pool.wait_closed()
+
+
+@asincrono
+async def test_rename_project_con_scope_de_otro_tenant_niega_sin_tocar_el_candado_de_projects():
+    """m-1: el orden es alcance -> projects (igual que set_project_lifecycle). Un actor de OTRO
+    tenant debe recibir ProjectNotVisible SIN esperar el candado de `projects(id)`; con el
+    candado tomado antes del alcance se queda esperando a quien lo tenga (riesgo de 1213)."""
+    t1 = await _crear_tenant("ren5a"); t2 = await _crear_tenant("ren5b")
+    owner = await _crear_usuario(t1)
+    ajeno = await _crear_usuario(t2)
+    p = await _crear_proyecto_activo(t1, name="ajeno")
+    await _crear_scope(p, t1)
+    await _crear_membresia(p, t1, owner, role="OWNER")
+    pool = await _pool()
+    retenedor = await aiomysql.connect(db=_DB, autocommit=False, connect_timeout=db_connect_timeout_seconds(),
+                                       **_conn_params())
+    try:
+        async with retenedor.cursor() as cur:
+            await cur.execute("SELECT id FROM projects WHERE id=%s FOR UPDATE", (p,))      # candado ajeno abierto
+        with pytest.raises(ProjectNotVisible):
+            await asyncio.wait_for(
+                _admin(pool).rename_project(_request(_scope(ajeno, t2, p), "RENAME_PROJECT"), p,
+                                            name="robado", description=None), timeout=4)
+    finally:
+        await retenedor.rollback()
+        retenedor.close()
+        pool.close(); await pool.wait_closed()
+    fila = await _sql("SELECT name FROM projects WHERE id=%s", (p,), fetch=True)
+    assert fila[0]["name"] == "ajeno"
