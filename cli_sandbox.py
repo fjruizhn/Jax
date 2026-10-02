@@ -439,6 +439,7 @@ async def ejecutar(
 def argv_confinado_cli(
     bwrap_bin: str, *, work_host: str, home_sandbox: str,
     binds_rw: list[tuple[str, str]], binds_ro: list[tuple[str, str]], cmd: list[str],
+    dirs: tuple[str, ...] | list[str] = (),
 ) -> list[str]:
     """Confinamiento comun de los perfiles de CLI (codex, kimi): el argv base,
     un $HOME tmpfs, los binds del perfil y /work (solo lectura) con --chdir.
@@ -451,6 +452,10 @@ def argv_confinado_cli(
     for host, dest in binds_rw:
         argv += ["--bind", host, dest]
     argv += ["--ro-bind", work_host, "/work"]
+    # Directorios vacios 0700 dentro del sandbox (bajo /tmp, que es un tmpfs propio): p. ej. el
+    # CODEX_HOME efimero de `features list`, que el CLI exige que EXISTA.
+    for d in dirs:
+        argv += ["--perms", "0700", "--dir", d]
     # La raiz que arma bwrap es un tmpfs ESCRIBIBLE (efimero, en RAM): sin esto
     # un `echo x > /etc/x` funciona dentro del sandbox. Se remonta solo lectura
     # DESPUES de crear todos los puntos de montaje; /tmp y el $HOME son tmpfs
@@ -1195,6 +1200,7 @@ async def _features_del_binario(p: Perfil, ruta_bin: str, dir_bin: str) -> str:
         argv = argv_confinado_cli(
             _BWRAP_BIN, work_host=str(rundir), home_sandbox=p.home_sandbox,
             binds_rw=[], binds_ro=[(dir_bin, dir_bin)], cmd=p._armar_features(ruta_bin),
+            dirs=[v for _k, v in p.env_features],
         )
         env = env_minimo(p.home_sandbox, dict(p.env_features))
         proc, stdout, _stderr = await ejecutar(

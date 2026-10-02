@@ -1148,6 +1148,7 @@ class FeaturesAutomaticasTest(_Entorno):
         self.assertEqual(set(env), {"HOME", "PATH", "LANG", "CODEX_HOME", "CODEX_SQLITE_HOME"})
         self.assertTrue(env["CODEX_HOME"].startswith("/tmp/"), "CODEX_HOME efimero (el /tmp privado del sandbox)")
         self.assertNotEqual(env["CODEX_HOME"], cli_sandbox.PERFILES["codex"].env_fijo()["CODEX_HOME"])
+        self.assertIn(env["CODEX_HOME"], argv[argv.index("--dir") + 1:], "el directorio se crea: codex exige que exista")
         self.assertNotIn("SECRETO_DEL_PADRE", json.dumps(env))
         self.assertEqual(cap["features_kwargs"]["stdin"], asyncio.subprocess.PIPE)
 
@@ -2405,3 +2406,57 @@ class ContencionRealTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(_bwrap_usable(), "bwrap no usable en este host (user namespaces)")
+class FeaturesEnBwrapRealTest(unittest.IsolatedAsyncioTestCase):
+    """MINOR-21, contra bwrap DE VERDAD: `codex features list` exige que CODEX_HOME exista
+    (medido con el codex 0.160.0 real: sin el directorio, `Error: failed to resolve
+    CODEX_HOME`, exit 1), asi que el sandbox lo crea en su /tmp privado. Un runner falso no
+    ve eso: el binario aqui es un script que se comporta igual."""
+
+    _SCRIPT = (
+        "#!/bin/sh\n"
+        '[ -d "$CODEX_HOME" ] || { echo "failed to resolve CODEX_HOME" >&2; exit 1; }\n'
+        'touch "$CODEX_HOME/ephemeral-marker" || exit 1\n'
+        "cat <<'EOF'\n" + _SALIDA_FEATURES + "EOF\n"
+    )
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        t = Path(self.tmp.name)
+        self.bindir = t / "bin"
+        self.bindir.mkdir()
+        self.codex = self.bindir / "codex"
+        self.codex.write_text(self._SCRIPT)
+        self.codex.chmod(0o755)
+        self.run_dir = t / "run"
+        self.run_dir.mkdir()
+        p = patch.dict(os.environ, {"JAX_CLI_RUN_DIR": str(self.run_dir)})
+        p.start()
+        self.addCleanup(p.stop)
+        p2 = patch.object(cli_sandbox, "_BWRAP_BIN", shutil.which("bwrap"))
+        p2.start()
+        self.addCleanup(p2.stop)
+
+    async def test_codex_home_efimero_existe_dentro_del_sandbox_y_la_salida_llega(self):
+        salida = await cli_sandbox._features_del_binario(
+            cli_sandbox.PERFILES["codex"], str(self.codex), str(self.bindir))
+        self.assertIn("mentions_v2", salida)
+        cli_sandbox.verificar_features(salida)
+        self.assertEqual(list(self.run_dir.iterdir()), [], "no queda el rundir")
+        self.assertEqual(list(self.bindir.iterdir()), [self.codex], "el binario es de solo lectura: nada se escribio en el host")
+
+    async def test_el_codex_home_no_es_el_de_la_credencial_ni_persiste(self):
+        env = cli_sandbox.PERFILES["codex"].env_features
+        homes = dict(env)
+        self.assertTrue(homes["CODEX_HOME"].startswith("/tmp/"))
+        self.assertNotEqual(homes["CODEX_HOME"], cli_sandbox.PERFILES["codex"].env_fijo()["CODEX_HOME"])
+        argv_dirs = []
+        argv = cli_sandbox.argv_confinado_cli(
+            "/bwrap", work_host="/w", home_sandbox="/h", binds_rw=[], binds_ro=[], cmd=["x"],
+            dirs=[homes["CODEX_HOME"]])
+        argv_dirs = [argv[i + 1] for i, a in enumerate(argv) if a == "--dir"]
+        self.assertEqual(argv_dirs, [homes["CODEX_HOME"]])
+        self.assertLess(argv.index("--dir"), argv.index("--remount-ro"))
