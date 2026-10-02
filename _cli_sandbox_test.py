@@ -1919,7 +1919,7 @@ class TimeoutValidadoTest(_Entorno):
                 await self._sin_lanzar(malo)
 
     async def test_el_tope_depende_del_entry_point_y_el_maximo_exacto_pasa(self):
-        for ep, tope in (("chat", 180), ("jacobs", 600)):
+        for ep, tope in (("chat", 180), ("jacobs", 600), ("canary", 60)):
             with self.subTest(ep=ep):
                 await self._sin_lanzar(tope + 0.5, ep)
                 await self._sin_lanzar(tope * 10, ep)
@@ -1944,20 +1944,40 @@ class TimeoutValidadoTest(_Entorno):
         with patch.dict(os.environ, {"JAX_CLI_TIMEOUT_MAX_CHAT_S": "400"}):
             self.assertEqual(cli_sandbox.timeout_maximo_para("chat"), 400.0)  # tambien se puede subir
 
-    async def test_los_defaults_son_180_y_600_y_un_valor_roto_no_los_afloja(self):
+    async def test_los_defaults_son_180_600_y_60_y_un_valor_roto_no_los_afloja(self):
         self.assertEqual(cli_sandbox.timeout_maximo_para("chat"), 180.0)
         self.assertEqual(cli_sandbox.timeout_maximo_para("jacobs"), 600.0)
+        self.assertEqual(cli_sandbox.timeout_maximo_para("canary"), 60.0)
         for var, ep, default in (("JAX_CLI_TIMEOUT_MAX_CHAT_S", "chat", 180.0),
-                                 ("JAX_CLI_TIMEOUT_MAX_JACOBS_S", "jacobs", 600.0)):
+                                 ("JAX_CLI_TIMEOUT_MAX_JACOBS_S", "jacobs", 600.0),
+                                 ("JAX_CLI_TIMEOUT_MAX_CANARY_S", "canary", 60.0)):
             for malo in ("", "x", "-5", "0", "nan", "inf", "-inf"):
                 with self.subTest(var=var, malo=malo), patch.dict(os.environ, {var: malo}):
                     self.assertEqual(cli_sandbox.timeout_maximo_para(ep), default)
         await self._sin_lanzar(181, "chat")
 
+    async def test_el_tope_de_canary_es_60s_y_configurable(self):
+        # la sonda: tope 60 s (default), JAX_CLI_TIMEOUT_MAX_CANARY_S lo cambia
+        await self._sin_lanzar(60.5, "canary")
+        await self._sin_lanzar(180, "canary")  # el tope de chat no vale para la sonda
+        res, _, _ = await self.correr("codex", timeout=60, titular=await self.titular(ep="canary"),
+                                      entry_point="canary")
+        self.assertEqual(res.texto, "hola desde codex")
+        with patch.dict(os.environ, {"JAX_CLI_TIMEOUT_MAX_CANARY_S": "5"}):
+            self.assertEqual(cli_sandbox.timeout_maximo_para("canary"), 5.0)
+            await self._sin_lanzar(5.5, "canary")
+            res, _, _ = await self.correr("codex", timeout=5, titular=await self.titular(ep="canary"),
+                                          entry_point="canary")
+            self.assertEqual(res.texto, "hola desde codex")
+        self.assertEqual(
+            cli_sandbox.TIMEOUT_MAX_POR_ENTRY["canary"], ("JAX_CLI_TIMEOUT_MAX_CANARY_S", 60.0))
+
+    async def test_todo_entry_point_reconocido_tiene_tope_declarado(self):
+        self.assertEqual(set(cli_sandbox.TIMEOUT_MAX_POR_ENTRY), set(cli_sandbox.ENTRY_POINTS))
+
     async def test_un_entry_point_sin_tope_declarado_se_rechaza_y_no_lanza_nada(self):
-        # `canary` es un entry_point que exigir_titular conoce pero NO tiene tope declarado:
-        # run_cli falla cerrado (decision pendiente del arquitecto, ver informe)
-        await self._sin_lanzar(5, "canary")
+        # un entry_point que exigir_titular conoce pero NO tiene tope declarado: run_cli falla
+        # cerrado (hoy ninguno de los reconocidos: se simula agregando uno)
         with patch.object(cli_sandbox, "ENTRY_POINTS", cli_sandbox.ENTRY_POINTS | {"otro"}):
             await self._sin_lanzar(5, "otro")
         for malo in ("", "CHAT", None, 5, "otro"):

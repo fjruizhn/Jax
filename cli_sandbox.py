@@ -61,9 +61,9 @@ root, cambiarlas exige reiniciar):
                               puede bajarlo (min)
   JAX_CLI_<PERFIL>_RANURAS    llamadas concurrentes por perfil, 1..16 (default el del
                               perfil; NO lo decide el llamador de run_cli)
-  JAX_CLI_TIMEOUT_MAX_CHAT_S / JAX_CLI_TIMEOUT_MAX_JACOBS_S
-                              tope del timeout por entry_point (default 180 / 600); un
-                              entry_point sin tope (canary) se rechaza
+  JAX_CLI_TIMEOUT_MAX_CHAT_S / JAX_CLI_TIMEOUT_MAX_JACOBS_S / JAX_CLI_TIMEOUT_MAX_CANARY_S
+                              tope del timeout por entry_point (default 180 / 600 / 60); un
+                              entry_point sin tope declarado se rechaza
 
 CACHES (cada uno declara su invalidacion en el mismo commit que lo crea):
   - `_CACHE_SHA`: SHA256 del manifiesto del directorio de un binario, clave = ruta
@@ -1405,19 +1405,21 @@ def _ranuras_de(p: Perfil) -> int:
 
 #: Tope del `timeout` de `run_cli` por punto de entrada: (variable de entorno, default
 #: en segundos). Un entry_point que no figura aqui NO tiene tope declarado y `run_cli`
-#: lo rechaza (falla cerrado). `canary` es un entry_point valido para
-#: `exigir_titular` pero no tiene tope: hay que declararselo antes de usarlo.
+#: lo rechaza (falla cerrado). Todo entry_point de `ENTRY_POINTS` tiene tope: `canary` (la
+#: sonda) 60 s por defecto, configurable con `JAX_CLI_TIMEOUT_MAX_CANARY_S`.
 TIMEOUT_MAX_POR_ENTRY: dict[str, tuple[str, float]] = {
     "chat": ("JAX_CLI_TIMEOUT_MAX_CHAT_S", 180.0),
     "jacobs": ("JAX_CLI_TIMEOUT_MAX_JACOBS_S", 600.0),
+    "canary": ("JAX_CLI_TIMEOUT_MAX_CANARY_S", 60.0),
 }
 
 
 def timeout_maximo_para(entry_point) -> float:
     """Tope del `timeout` de `run_cli` para `entry_point`: `JAX_CLI_TIMEOUT_MAX_CHAT_S`
-    (chat, default 180 s) o `JAX_CLI_TIMEOUT_MAX_JACOBS_S` (jacobs, default 600 s) si es
-    un numero finito positivo y, si no, el default: un valor roto vuelve al default, no
-    lo afloja. Un entry_point sin tope declarado es ValueError."""
+    (chat, default 180 s), `JAX_CLI_TIMEOUT_MAX_JACOBS_S` (jacobs, default 600 s) o
+    `JAX_CLI_TIMEOUT_MAX_CANARY_S` (canary, default 60 s) si es un numero finito positivo y,
+    si no, el default: un valor roto vuelve al default, no lo afloja. Un entry_point sin tope
+    declarado es ValueError."""
     if not isinstance(entry_point, str) or entry_point not in TIMEOUT_MAX_POR_ENTRY:
         raise ValueError(f"entry_point {entry_point!r} sin tope de timeout declarado")
     var, default = TIMEOUT_MAX_POR_ENTRY[entry_point]
