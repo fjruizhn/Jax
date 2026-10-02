@@ -88,16 +88,20 @@ logger = logging.getLogger("cli_sandbox")
 # Excepciones
 # --------------------------------------------------------------------------
 
-class SandboxUnavailable(Exception):
-    """bwrap no disponible o no ejecutable en runtime. Fail-closed (P10):
-    el llamador NO debe atrapar esto para degradar a ejecución sin
-    sandbox -- el CLI simplemente no arranca."""
-
-
 class ErrorCLI(Exception):
     """Base de los errores tipados de `run_cli` (spec §4). `clase` es el
     nombre estable que va a los logs y a la telemetria."""
     clase = "ErrorCLI"
+
+
+class SandboxUnavailable(ErrorCLI):
+    """bwrap no disponible o no ejecutable en runtime. Fail-closed (P10):
+    el llamador NO debe atrapar esto para degradar a ejecución sin
+    sandbox -- el CLI simplemente no arranca. Es un ErrorCLI para que el log
+    de `run_cli` lo registre con su `clase` (auditoria 2026-10-02, MAJOR-2);
+    Hyde importa esta misma clase y la atrapa igual que antes (sigue siendo
+    una Exception)."""
+    clase = "SandboxUnavailable"
 
 
 class CuotaAgotada(ErrorCLI):
@@ -872,15 +876,17 @@ async def run_cli(
             shutil.rmtree(rundir, ignore_errors=True)
         texto, tin, tout = p.parsear(stdout, proc.returncode)
         return ResultadoCLI(texto=texto, tokens_in=tin, tokens_out=tout, version_cli=version)
-    except ErrorCLI as exc:
-        clase = exc.clase
-        raise
     except asyncio.CancelledError:
         clase = "Cancelado"
         raise
+    except BaseException as exc:  # noqa: BLE001 -- registra y RELANZA; nada se traga
+        clase = getattr(exc, "clase", None) or type(exc).__name__
+        raise
     finally:
         logger.info(
-            "run_cli correlation_id=%s entry_point=%s perfil=%s modelo=%s version_cli=%s clase=%s latencia_ms=%d",
-            correlation_id, entry_point, perfil, modelo, version, clase or "ok",
+            "run_cli correlation_id=%s entry_point=%s user_id=%s tenant_id=%s perfil=%s modelo=%s "
+            "version_cli=%s clase=%s latencia_ms=%d",
+            correlation_id, entry_point, getattr(titular, "user_id", None),
+            getattr(titular, "tenant_id", None), perfil, modelo, version, clase or "ok",
             int((time.monotonic() - t0) * 1000),
         )

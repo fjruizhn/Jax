@@ -618,6 +618,73 @@ class SalidaYErroresTest(_Entorno):
         self.assertTrue(proc.killed)
 
 
+# --------------------------------------------------------- log de run_cli
+
+class LogDeRunCliTest(_Entorno):
+    """MAJOR-2 (auditoria 2026-10-02): todo fallo se registra con su clase real;
+    antes, lo que no era ErrorCLI salia como `clase=ok`."""
+
+    async def _linea(self, **kw):
+        with self.assertLogs("cli_sandbox", "INFO") as cm:
+            try:
+                await self.correr("codex", **kw)
+            except BaseException:  # noqa: BLE001 -- se inspecciona el log, no la excepcion
+                pass
+        lineas = [l for l in cm.output if "run_cli correlation_id" in l]
+        self.assertEqual(len(lineas), 1, cm.output)
+        return lineas[0]
+
+    async def test_sandbox_unavailable_se_registra_con_su_clase(self):
+        with patch.object(cli_sandbox, "_BWRAP_BIN", "/no/existe/bwrap"):
+            linea = await self._linea()
+        self.assertIn("clase=SandboxUnavailable", linea)
+        self.assertNotIn("clase=ok", linea)
+
+    async def test_value_error_se_registra_con_su_clase(self):
+        linea = await self._linea(modelo="--yolo")
+        self.assertIn("clase=ValueError", linea)
+        self.assertNotIn("clase=ok", linea)
+
+    async def test_un_error_inesperado_del_subproceso_no_sale_como_ok(self):
+        async def revienta(*a, **k):
+            raise RuntimeError("boom")
+
+        with patch("asyncio.create_subprocess_exec", revienta):
+            with self.assertLogs("cli_sandbox", "INFO") as cm:
+                with self.assertRaises(RuntimeError):
+                    await cli_sandbox.run_cli(
+                        "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                        timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertIn("clase=RuntimeError", "\n".join(cm.output))
+
+    async def test_la_excepcion_original_se_relanza_intacta(self):
+        with patch.object(cli_sandbox, "_BWRAP_BIN", "/no/existe/bwrap"):
+            with self.assertRaises(cli_sandbox.SandboxUnavailable):
+                await self.correr("codex")
+
+    async def test_el_log_lleva_user_id_y_tenant_id_del_titular(self):
+        t = await self.titular(8, 1)
+        with self.assertLogs("cli_sandbox", "INFO") as cm:
+            await self.correr("codex", titular=t)
+        linea = [l for l in cm.output if "run_cli correlation_id" in l][0]
+        self.assertIn("user_id=8", linea)
+        self.assertIn("tenant_id=1", linea)
+        self.assertIn("clase=ok", linea)
+
+    async def test_titular_invalido_no_rompe_el_log(self):
+        with self.assertLogs("cli_sandbox", "INFO") as cm:
+            with self.assertRaises(cli_sandbox.TitularNoAutorizado):
+                await cli_sandbox.run_cli(
+                    "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                    timeout=5, titular=None, correlation_id="c", entry_point="chat")
+        self.assertIn("clase=TitularNoAutorizado", "\n".join(cm.output))
+
+    def test_sandbox_unavailable_es_un_error_cli_y_hyde_comparte_la_clase(self):
+        self.assertTrue(issubclass(cli_sandbox.SandboxUnavailable, cli_sandbox.ErrorCLI))
+        self.assertIs(hyde_sandbox.SandboxUnavailable, cli_sandbox.SandboxUnavailable)
+        self.assertEqual(cli_sandbox.SandboxUnavailable.clase, "SandboxUnavailable")
+
+
 # ------------------------------------------------------------------- historial
 
 class ConversacionTest(unittest.TestCase):
