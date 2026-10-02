@@ -8,6 +8,8 @@
 
 Uso:  python scripts/proyectos_e1_migrar.py {--verificar|--aplicar} --actor-user-id N
           [--database NOMBRE] [--salida-reversion RUTA] [--confirmo-produccion]
+      python scripts/proyectos_e1_migrar.py --revertir MAPA.json [--database NOMBRE]
+          [--confirmo-produccion]
 
 La conexion sale de JAX_DB_HOST/PORT/USER/PASSWORD/NAME del entorno; este guion
 nunca abre /etc/jax/.env (el runbook carga el entorno). Nunca hace DELETE ni
@@ -22,7 +24,7 @@ Codigos de salida: 0 hecho; 1 quedan huerfanos / conteos distintos / la ruta ya
 existia (volver a correr con ruta nueva); 2 argumentos o guarda; 3 commit
 incierto (mapa en <ruta>.incierto, o en la ruta original si no se pudo
 renombrar); 4 huerfanos fuera de alcance; 5 error no previsto (no reintentar
-sin revisar).
+sin revisar); 6 (solo --revertir) el mapa no cuadra con la base: rollback.
 
 La llave de idempotencia de la evaluacion es un UUID v5 derivado de un nombre
 fijo: `create_project` exige un UUID canonico de 36 caracteres.
@@ -61,6 +63,14 @@ class HuerfanosFueraDeAlcance(RuntimeError):
     """Hay huerfanos que no son del legado de HAMURABI: fuera del rango
     reservado de ids o de filas de un usuario/tenant que no es el 1. Se aborta
     ANTES de escribir nada (codigo 4)."""
+
+
+class MapaInvalido(ValueError):
+    """El mapa de reversion no tiene la forma esperada (codigo 2, antes de conectar)."""
+
+
+class ReversionNoCuadra(RuntimeError):
+    """Las filas afectadas por --revertir no coinciden con las del mapa: ROLLBACK (codigo 6)."""
 
 
 class HuerfanosRestantes(RuntimeError):
@@ -222,6 +232,69 @@ async def _reescribir_en_transaccion(pool, ids: list[int], destino: int, salida_
         return movido
 
 
+def cargar_mapa(ruta: str) -> dict:
+    """Lee y valida el mapa de reversion; la tabla se valida contra las cinco."""
+    try:
+        with open(ruta, encoding="utf-8") as f:
+            datos = json.load(f)
+    except (OSError, ValueError) as e:
+        raise MapaInvalido(f"no se pudo leer el mapa {ruta}: {type(e).__name__}: {e}") from e
+    try:
+        ev = datos["evaluacion_project_id"]
+        filas = datos["filas"]
+        if not isinstance(ev, int) or isinstance(ev, bool) or not isinstance(filas, list):
+            raise TypeError("evaluacion_project_id debe ser entero y filas una lista")
+        for f in filas:
+            if f["tabla"] not in TABLAS:
+                raise ValueError(f"tabla no valida {f['tabla']!r}; validas: {', '.join(TABLAS)}")
+            for k in ("id", "project_id_anterior"):
+                if not isinstance(f[k], int) or isinstance(f[k], bool):
+                    raise TypeError(f"{k} debe ser entero en {f!r}")
+    except (KeyError, TypeError, ValueError) as e:
+        raise MapaInvalido(f"mapa de reversion invalido: {type(e).__name__}: {e}") from e
+    return datos
+
+
+async def revertir(pool, ruta: str) -> dict:
+    """Deshace `aplicar` con su mapa, en UNA transaccion: por cada fila,
+    `UPDATE <t> SET project_id=<anterior> WHERE id=<id> AND project_id=<evaluacion>`.
+    Si la suma de filas afectadas no es la del mapa: rollback y ReversionNoCuadra
+    (el `AND project_id=<evaluacion>` evita pisar una fila que ya cambio de
+    proyecto por otra via). Con FKs aplicadas hay que quitarlas antes (runbook)."""
+    mapa = cargar_mapa(ruta)
+    ev, filas = mapa["evaluacion_project_id"], mapa["filas"]
+    async with pool.acquire() as conn:
+        await conn.begin()
+        try:
+            afectadas = 0
+            por_tabla: dict[str, int] = {}
+            async with conn.cursor() as cur:
+                for f in filas:
+                    await cur.execute(f"UPDATE `{f['tabla']}` SET project_id=%s WHERE id=%s AND project_id=%s",
+                                      (f["project_id_anterior"], f["id"], ev))
+                    n = int(cur.rowcount)
+                    afectadas += n
+                    por_tabla[f["tabla"]] = por_tabla.get(f["tabla"], 0) + n
+            if afectadas != len(filas):
+                raise ReversionNoCuadra(
+                    f"el mapa no cuadra con la base: {afectadas} filas afectadas, {len(filas)} en el mapa; "
+                    f"se hizo ROLLBACK, no se cambio nada")
+        except BaseException:
+            await conn.rollback()
+            raise
+        try:
+            await conn.commit()
+        except BaseException as e:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise CommitIncierto(f"el resultado del commit de la reversion es desconocido "
+                                 f"({type(e).__name__}: {e}); el mapa {ruta} no se toco; correr --verificar "
+                                 f"y comparar antes de repetir") from e
+    return {"revertidas": afectadas, "por_tabla": por_tabla, "evaluacion_project_id": ev}
+
+
 def _scope(actor: int, project_id: int | None) -> ScopeContext:
     return ScopeContext(actor_principal=f"user:{actor}", actor_type="USER", subject_user_id=str(actor),
                         tenant_id=str(LEGACY_PROJECT_TENANT_ID),
@@ -271,12 +344,14 @@ def _parser() -> argparse.ArgumentParser:
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--verificar", action="store_true", help="solo lectura: imprime medir() como JSON")
     g.add_argument("--aplicar", action="store_true", help="escribe: imprime aplicar() como JSON")
-    p.add_argument("--actor-user-id", type=int, required=True)
+    g.add_argument("--revertir", metavar="MAPA.json", default=None,
+                   help="deshace --aplicar con su mapa de reversion, en una transaccion")
+    p.add_argument("--actor-user-id", type=int, default=None, help="obligatorio con --verificar y --aplicar")
     p.add_argument("--database", default=None, help="pisa a JAX_DB_NAME")
     p.add_argument("--salida-reversion", default=None,
                    help="ruta (nueva, 0600) del JSON con el project_id anterior de cada fila; obligatoria con --aplicar")
     p.add_argument("--confirmo-produccion", action="store_true",
-                   help=f"obligatorio con --aplicar si la base es {BASE_PRODUCCION}")
+                   help=f"obligatorio con --aplicar y --revertir si la base es {BASE_PRODUCCION}")
     return p
 
 
@@ -287,6 +362,8 @@ async def _correr(args, database: str) -> dict:
         db=database, autocommit=True, minsize=1, maxsize=4, cursorclass=aiomysql.DictCursor,
         connect_timeout=db_connect_timeout_seconds())
     try:
+        if args.revertir:
+            return await revertir(pool, args.revertir)
         if args.verificar:
             return await medir(pool)
         return await aplicar(pool, actor_user_id=args.actor_user_id,
@@ -302,9 +379,19 @@ def main(argv: list[str] | None = None) -> int:
     if not database:
         print("falta la base: use --database o JAX_DB_NAME", file=sys.stderr)
         return 2
-    if args.aplicar and database == BASE_PRODUCCION and not args.confirmo_produccion:
-        print(f"--aplicar sobre {BASE_PRODUCCION} (produccion) exige --confirmo-produccion", file=sys.stderr)
+    if (args.aplicar or args.revertir) and database == BASE_PRODUCCION and not args.confirmo_produccion:
+        modo = "--aplicar" if args.aplicar else "--revertir"
+        print(f"{modo} sobre {BASE_PRODUCCION} (produccion) exige --confirmo-produccion", file=sys.stderr)
         return 2
+    if not args.revertir and args.actor_user_id is None:
+        print("--verificar y --aplicar exigen --actor-user-id N", file=sys.stderr)
+        return 2
+    if args.revertir:
+        try:
+            cargar_mapa(args.revertir)          # valida antes de conectar
+        except MapaInvalido as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
     if args.aplicar and not args.salida_reversion:
         print("--aplicar exige --salida-reversion <ruta> (archivo nuevo)", file=sys.stderr)
         return 2
@@ -313,6 +400,9 @@ def main(argv: list[str] | None = None) -> int:
     except CommitIncierto as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 3
+    except ReversionNoCuadra as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 6
     except HuerfanosFueraDeAlcance as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 4

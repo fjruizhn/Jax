@@ -632,3 +632,88 @@ async def test_commit_incierto_con_os_replace_fallido_sigue_siendo_incierto(tmp_
         await pool.wait_closed()
     assert ruta.exists()
     assert str(ruta) in str(e.value) and "sigue en" in str(e.value)
+
+
+# ---------------------------------------------------------------- M-3: --revertir
+
+async def _aplicar_y_mapa(tmp_path, ids, tablas=("conversations", "messages", "facts")):
+    actor = await _actor_unico()
+    await _asegurar_proyecto_1()
+    await _limpiar_contenido()
+    await _sembrar_huerfanos(ids, tablas=tablas)
+    antes = await _estado_filas()
+    ruta = tmp_path / "rev.json"
+    pool = await _pool()
+    try:
+        r = await migrar.aplicar(pool, actor_user_id=actor, salida_reversion=str(ruta))
+    finally:
+        pool.close()
+        await pool.wait_closed()
+    assert await _estado_filas() != antes
+    return antes, ruta, r["evaluacion_project_id"]
+
+
+@requiere_servidor
+@asincrono
+async def test_aplicar_y_revertir_deja_los_project_id_originales(tmp_path):
+    antes, ruta, ev = await _aplicar_y_mapa(tmp_path, [960001, 960002])
+    pool = await _pool()
+    try:
+        r = await migrar.revertir(pool, str(ruta))
+    finally:
+        pool.close()
+        await pool.wait_closed()
+    assert await _estado_filas() == antes
+    assert r["revertidas"] == len(antes) == 10
+
+
+@requiere_servidor
+@asincrono
+@pytest.mark.parametrize("estropicio", ["id_inexistente", "ya_movida_a_otro_proyecto"])
+async def test_mapa_que_no_cuadra_hace_rollback_y_error(tmp_path, estropicio):
+    antes, ruta, ev = await _aplicar_y_mapa(tmp_path, [960003])
+    despues_de_aplicar = await _estado_filas()
+    datos = json.loads(ruta.read_text())
+    if estropicio == "id_inexistente":
+        datos["filas"].append({"tabla": "facts", "id": 987654321, "project_id_anterior": 960003})
+    else:
+        victima = datos["filas"][-1]
+        await _sql(f"UPDATE `{victima['tabla']}` SET project_id=424242 WHERE id=%s", (victima["id"],))
+        despues_de_aplicar = await _estado_filas()
+    ruta.write_text(json.dumps(datos))
+    pool = await _pool()
+    try:
+        with pytest.raises(migrar.ReversionNoCuadra):
+            await migrar.revertir(pool, str(ruta))
+    finally:
+        pool.close()
+        await pool.wait_closed()
+    assert await _estado_filas() == despues_de_aplicar        # nada a medias
+
+
+@requiere_servidor
+def test_mapa_con_tabla_no_valida_se_rechaza_antes_de_tocar_nada(tmp_path):
+    ruta = tmp_path / "mal.json"
+    ruta.write_text(json.dumps({"evaluacion_project_id": 5, "filas": [
+        {"tabla": "jax_users; DROP TABLE x", "id": 1, "project_id_anterior": 2}]}))
+    with pytest.raises(migrar.MapaInvalido):
+        migrar.cargar_mapa(str(ruta))
+    assert migrar.main(["--revertir", str(ruta), "--database", _DB]) == 2
+
+
+def test_revertir_sobre_produccion_exige_confirmacion(tmp_path, capsys, monkeypatch):
+    for k in ("JAX_DB_HOST", "JAX_DB_PORT", "JAX_DB_USER", "JAX_DB_PASSWORD", "JAX_DB_NAME"):
+        monkeypatch.delenv(k, raising=False)
+    ruta = tmp_path / "ok.json"
+    ruta.write_text(json.dumps({"evaluacion_project_id": 5, "filas": []}))
+    assert migrar.main(["--revertir", str(ruta), "--database", "jax_memory"]) == 2
+    assert "--confirmo-produccion" in capsys.readouterr().err
+
+
+@requiere_servidor
+def test_main_revertir_por_cli_restaura_y_el_que_no_cuadra_sale_distinto_de_0(tmp_path, capsys):
+    antes, ruta, ev = asyncio.run(_aplicar_y_mapa(tmp_path, [960004], tablas=("conversations", "decisions")))
+    assert migrar.main(["--revertir", str(ruta), "--database", _DB]) == 0
+    assert asyncio.run(_estado_filas()) == antes
+    assert migrar.main(["--revertir", str(ruta), "--database", _DB]) == 6      # ya revertido: 0 filas != mapa
+    assert "no cuadra" in capsys.readouterr().err
