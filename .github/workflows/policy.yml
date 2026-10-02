@@ -1840,6 +1840,7 @@ jobs:
           tests/test_identity_context.py tests/test_jacobs_director.py
           tests/test_memory_correction.py tests/test_memory_helpers.py
           tests/test_read_audit_log_unbound.py tests/test_template_hash.py
+          tests/test_f2e_runtime_status.py
           tests/test_validate_capability_typed.py
           tests/test_project_authority_input_validation.py
           tests/test_jacobs_timeout_by_capability.py tests/test_memory_schema_drift.py
