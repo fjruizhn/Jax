@@ -1115,6 +1115,11 @@ class FeaturesAutomaticasTest(_Entorno):
         super().setUp()
         cli_sandbox._CACHE_FEATURES.clear()
         self.addCleanup(cli_sandbox._CACHE_FEATURES.clear)
+        cli_sandbox._CACHE_SHA.clear()
+        self.addCleanup(cli_sandbox._CACHE_SHA.clear)
+        if hasattr(cli_sandbox, "_CACHE_FEATURES_FALLO"):
+            cli_sandbox._CACHE_FEATURES_FALLO.clear()
+            self.addCleanup(cli_sandbox._CACHE_FEATURES_FALLO.clear)
 
     async def _run(self, **kw):
         cap, fake = self.capturar(_FakeProc(_CODEX_OK))
@@ -1163,13 +1168,139 @@ class FeaturesAutomaticasTest(_Entorno):
         self.assertIn("telepatia_tool", str(c.exception))
         self.assertEqual(cap["llamadas"], 0, "la llamada real no se lanza")
         self.assertEqual(list(self.run_dir.iterdir()), [], "ni el rundir de la verificacion queda")
-        # un fallo no se cachea: la siguiente llamada vuelve a verificar (y vuelve a fallar)
+        # MINOR-23: el FALLO tambien se cachea por firma: la siguiente llamada vuelve a fallar
+        # con el mismo motivo SIN volver a lanzar `features list`
+        with patch("asyncio.create_subprocess_exec", fake):
+            with self.assertRaises(cli_sandbox.FeaturesNoPermitidas) as c2:
+                await cli_sandbox.run_cli(
+                    "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                    timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertEqual(cap["features_llamadas"], 1)
+        self.assertIn("telepatia_tool", str(c2.exception))
+
+    async def test_n_llamadas_seguidas_con_un_binario_que_falla_lanzan_un_solo_features_list(self):
+        # MINOR-23 (reauditoria 2026-10-02): el fallo no se cacheaba, asi que cada llamada
+        # relanzaba `features list` (un proceso de bwrap) y un chat con el binario malo
+        # era un amplificador de procesos
+        casos = (
+            ("feature activada", dict(salida_features=_SALIDA_FEATURES + "telepatia_tool  stable  true\n")),
+            ("vacia", dict(salida_features="")),
+            ("ilegible", dict(salida_features="esto no es una tabla\n")),
+            ("exit code", dict(features_returncode=2)),
+        )
+        for nombre, cambios in casos:
+            with self.subTest(caso=nombre):
+                cli_sandbox._CACHE_FEATURES.clear()
+                cli_sandbox._CACHE_FEATURES_FALLO.clear()
+                for k, v in cambios.items():
+                    setattr(self, k, v)
+                cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+                mensajes = []
+                with patch("asyncio.create_subprocess_exec", fake):
+                    for _ in range(5):
+                        with self.assertRaises(cli_sandbox.FeaturesNoPermitidas) as c:
+                            await cli_sandbox.run_cli(
+                                "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                                timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+                        mensajes.append(str(c.exception))
+                self.assertEqual(cap["features_llamadas"], 1)
+                self.assertEqual(cap["llamadas"], 0)
+                self.assertEqual(len(set(mensajes)), 1, "mismo motivo en cada llamada")
+                self.salida_features, self.features_returncode = _SALIDA_FEATURES, 0
+
+    async def test_el_timeout_de_features_tambien_se_cachea_como_fallo(self):
+        self.features_demora = 1.0
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch.object(cli_sandbox, "FEATURES_TIMEOUT_S", 0.1), patch("asyncio.create_subprocess_exec", fake):
+            for _ in range(3):
+                with self.assertRaises(cli_sandbox.FeaturesNoPermitidas):
+                    await cli_sandbox.run_cli(
+                        "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                        timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertEqual(cap["features_llamadas"], 1)
+
+    async def test_el_fallo_cacheado_se_invalida_si_cambia_el_arbol(self):
+        self.salida_features = _SALIDA_FEATURES + "telepatia_tool  stable  true\n"
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
         with patch("asyncio.create_subprocess_exec", fake):
             with self.assertRaises(cli_sandbox.FeaturesNoPermitidas):
                 await cli_sandbox.run_cli(
                     "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
                     timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+            # el operador reinstala un binario sano: arbol nuevo -> firma nueva -> se vuelve a verificar
+            self.salida_features = _SALIDA_FEATURES
+            extra = self.root / "codex" / "9.9.9" / "libcodex.so"
+            extra.write_bytes(b"lib\n")
+            extra.chmod(0o755)
+            sha = cli_sandbox.sha_manifiesto(str(extra.parent), uid_esperado=os.getuid())
+            with patch.dict(os.environ, {"JAX_CLI_CODEX_SHA256": sha}):
+                res = await cli_sandbox.run_cli(
+                    "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                    timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertEqual(res.texto, "hola desde codex")
         self.assertEqual(cap["features_llamadas"], 2)
+
+    async def test_features_list_corre_bajo_una_ranura_del_perfil(self):
+        # MINOR-23: `adquirir=lambda _t: None` lo dejaba fuera de la concurrencia del perfil.
+        # Mientras `features list` corre, una ranura del perfil esta tomada.
+        tomadas = []
+
+        async def fake_exec(*argv, **kwargs):
+            if "features" in argv:
+                for i in range(2):
+                    try:
+                        fd = os.open(self.lock_dir / f"codex.{i}.lock", os.O_RDWR)
+                    except FileNotFoundError:  # la ranura 1 ni siquiera se creo: libre
+                        tomadas.append(False)
+                        continue
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        tomadas.append(False)
+                    except BlockingIOError:
+                        tomadas.append(True)
+                    finally:
+                        os.close(fd)
+                return _FakeProc(self.salida_features.encode())
+            return _FakeProc(_CODEX_OK)
+
+        with patch("asyncio.create_subprocess_exec", fake_exec):
+            await cli_sandbox.run_cli(
+                "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertEqual(sorted(tomadas), [False, True], "exactamente una ranura tomada durante features list")
+        # y se libero al terminar
+        for i in range(2):
+            try:
+                fd = os.open(self.lock_dir / f"codex.{i}.lock", os.O_RDWR)
+            except FileNotFoundError:
+                continue
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+
+    async def test_con_todas_las_ranuras_ocupadas_features_list_no_se_lanza_y_da_locktimeout(self):
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        titular = await self.titular()
+        os.makedirs(self.lock_dir, mode=0o700, exist_ok=True)
+        fds = []
+        try:
+            for i in range(2):
+                fd = os.open(self.lock_dir / f"codex.{i}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fds.append(fd)
+            with patch("asyncio.create_subprocess_exec", fake):
+                with self.assertRaises(cli_sandbox.LockTimeout):
+                    await cli_sandbox.run_cli(
+                        "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                        timeout=5, titular=titular, correlation_id="c", entry_point="chat",
+                        espera_lock_s=0.2)
+        finally:
+            for fd in fds:
+                os.close(fd)
+        self.assertEqual(cap.get("features_llamadas", 0), 0)
+        self.assertEqual(cap["llamadas"], 0)
+        self.assertEqual(cli_sandbox._CACHE_FEATURES_FALLO, {}, "una espera de lock no es un fallo del binario: no se cachea")
 
     async def test_salida_vacia_ilegible_exit_code_o_timeout_tambien_fallan_cerrado(self):
         casos = (
@@ -2472,7 +2603,8 @@ class FeaturesEnBwrapRealTest(unittest.IsolatedAsyncioTestCase):
         self.codex.chmod(0o755)
         self.run_dir = t / "run"
         self.run_dir.mkdir()
-        p = patch.dict(os.environ, {"JAX_CLI_RUN_DIR": str(self.run_dir)})
+        # `features list` corre bajo una ranura del perfil (MINOR-23): hace falta el directorio de locks
+        p = patch.dict(os.environ, {"JAX_CLI_RUN_DIR": str(self.run_dir), "JAX_CLI_LOCK_DIR": str(t / "locks")})
         p.start()
         self.addCleanup(p.stop)
         p2 = patch.object(cli_sandbox, "_BWRAP_BIN", shutil.which("bwrap"))

@@ -73,6 +73,9 @@ CACHES (cada uno declara su invalidacion en el mismo commit que lo crea):
     llamada, ademas, se recorre el arbol entero y se exige que cada entrada sea de
     root y sin escritura de grupo/otros, que ningun symlink salga del arbol, y que los
     ancestros de JAX_CLI_ROOT hasta `/` sean de root y no escribibles.
+  - `_CACHE_FEATURES` / `_CACHE_FEATURES_FALLO`: el exito y el fallo de `verificar_features`,
+    misma clave (ruta del binario) y misma firma del arbol que `_CACHE_SHA`; cambia el arbol,
+    se vuelve a verificar. `features list` corre bajo una ranura del perfil.
   - La lista de titulares y la verificacion en `jax_users` NO se cachean: se
     leen del entorno y de la base en cada llamada (el borrado de un usuario
     surte efecto en la siguiente llamada).
@@ -1179,23 +1182,41 @@ def _resolver_binario(perfil: Perfil, *, uid_esperado: int = 0) -> tuple[str, st
 
 #: ruta del binario -> firma del arbol para la que `verificar_features` ya dio verde. MISMA
 #: clave y MISMA firma que `_CACHE_SHA`: si cambia cualquier stat del arbol, la firma cambia,
-#: se re-hashea el manifiesto Y se vuelve a verificar. Solo se cachea el exito: un fallo se
-#: vuelve a intentar (y a fallar) en cada llamada.
+#: se re-hashea el manifiesto Y se vuelve a verificar.
 _CACHE_FEATURES: dict[str, str] = {}
+
+#: ruta del binario -> (firma del arbol, mensaje) del FALLO de `verificar_features` (feature
+#: no permitida, salida vacia o ilegible, exit code, timeout de `features list`). MISMA clave
+#: y firma que las dos de arriba, y la misma invalidacion: si cambia el arbol, se vuelve a
+#: verificar (un operador que reinstala un binario sano no queda atado al fallo viejo). El
+#: fallo se cachea igual que el exito (MINOR-23, reauditoria 2026-10-02): sin esto, cada
+#: llamada con un binario malo relanzaba `features list` -- un proceso de bwrap por chat -- y
+#: un binario roto era un amplificador. Se cachea el motivo, para que cada llamada falle con
+#: el mismo mensaje. NO se cachean las esperas de ranura (LockTimeout): no son un fallo del
+#: binario. Un fallo transitorio (p. ej. el timeout de `features list` con la maquina
+#: saturada) tambien queda hasta que cambie el arbol o se reinicie el proceso: es la
+#: contrapartida aceptada de fallar cerrado sin reintentar.
+_CACHE_FEATURES_FALLO: dict[str, tuple[str, str]] = {}
 
 #: Espera maxima de `codex features list` (arranca el binario una vez por firma).
 FEATURES_TIMEOUT_S = 30.0
 
 
-async def _features_del_binario(p: Perfil, ruta_bin: str, dir_bin: str) -> str:
+async def _features_del_binario(
+    p: Perfil, ruta_bin: str, dir_bin: str, espera_lock_s: Optional[float] = None,
+) -> str:
     """Corre `<binario> features list --disable ...` DENTRO del sandbox, con el mismo
     `ejecutar` del nucleo (el unico create_subprocess_exec), sin credenciales (listar
     features no pide login ni cuota) y con un CODEX_HOME efimero: el /tmp privado del
-    sandbox, que desaparece con el proceso. Devuelve la salida; cualquier cosa que no sea
-    un exit code 0 con salida es FeaturesNoPermitidas (falla cerrado)."""
+    sandbox, que desaparece con el proceso. Corre BAJO UNA RANURA del perfil, como la llamada
+    real (MINOR-23): arrancar el binario cuenta para la concurrencia del perfil. Devuelve la
+    salida; cualquier cosa que no sea un exit code 0 con salida es FeaturesNoPermitidas (falla
+    cerrado); sin ranura libre es LockTimeout."""
     base = Path(os.environ.get("JAX_CLI_RUN_DIR", "/run/jax-cli"))
     rundir = base / f"features-{uuid.uuid4().hex}"
     await asyncio.to_thread(_preparar_rundir, base, rundir, p.archivo_nombre, "")
+    n = _ranuras_de(p)
+    espera = p.espera_lock_s if espera_lock_s is None else espera_lock_s
     try:
         argv = argv_confinado_cli(
             _BWRAP_BIN, work_host=str(rundir), home_sandbox=p.home_sandbox,
@@ -1205,8 +1226,13 @@ async def _features_del_binario(p: Perfil, ruta_bin: str, dir_bin: str) -> str:
         env = env_minimo(p.home_sandbox, dict(p.env_features))
         proc, stdout, _stderr = await ejecutar(
             argv, env, b"", FEATURES_TIMEOUT_S,
-            adquirir=lambda _t: None, liberar=lambda _h: None, cwd="/",
+            adquirir=lambda _t: _ranura_adquirir(p.nombre, n, espera),
+            # sin credencial montada no hay nada que purgar: solo se suelta la ranura
+            liberar=lambda h: flock_liberar(h[0]),
+            cwd="/",
         )
+    except LockTimeout:
+        raise  # LockTimeout tambien es TimeoutError: no convertirlo en "features list no respondio"
     except asyncio.TimeoutError:
         raise FeaturesNoPermitidas(f"{p.nombre}: `features list` no respondio en {FEATURES_TIMEOUT_S}s") from None
     finally:
@@ -1216,17 +1242,30 @@ async def _features_del_binario(p: Perfil, ruta_bin: str, dir_bin: str) -> str:
     return stdout.decode("utf-8", "replace")
 
 
-async def _asegurar_features(p: Perfil, ruta_bin: str, dir_bin: str) -> None:
+async def _asegurar_features(
+    p: Perfil, ruta_bin: str, dir_bin: str, espera_lock_s: Optional[float] = None,
+) -> None:
     """Verifica las features del binario (lista PERMITIDA, `verificar_features`) una vez por
-    firma del arbol. Los perfiles sin lista permitida (kimi) no pasan por aqui."""
+    firma del arbol, el exito Y el fallo (MINOR-23). Los perfiles sin lista permitida (kimi)
+    no pasan por aqui."""
     if p.features_permitidas is None or p._armar_features is None:
         return
     firma = _CACHE_SHA.get(ruta_bin, ("",))[0]
-    if firma and _CACHE_FEATURES.get(ruta_bin) == firma:
-        return
-    verificar_features(await _features_del_binario(p, ruta_bin, dir_bin), p.nombre)
+    if firma:
+        if _CACHE_FEATURES.get(ruta_bin) == firma:
+            return
+        fallo = _CACHE_FEATURES_FALLO.get(ruta_bin)
+        if fallo and fallo[0] == firma:
+            raise FeaturesNoPermitidas(fallo[1])
+    try:
+        verificar_features(await _features_del_binario(p, ruta_bin, dir_bin, espera_lock_s), p.nombre)
+    except FeaturesNoPermitidas as exc:
+        if firma:
+            _CACHE_FEATURES_FALLO[ruta_bin] = (firma, str(exc))
+        raise
     if firma:
         _CACHE_FEATURES[ruta_bin] = firma
+        _CACHE_FEATURES_FALLO.pop(ruta_bin, None)
 
 
 # --------------------------------------------------------------------------
@@ -1597,7 +1636,7 @@ async def run_cli(
         conversacion = armar_conversacion(historial, mensaje, tope)
         ruta_bin, dir_bin, version = await asyncio.to_thread(_resolver_binario, p)
         verificar_bwrap(_BWRAP_BIN, p.nombre)
-        await _asegurar_features(p, ruta_bin, dir_bin)
+        await _asegurar_features(p, ruta_bin, dir_bin, espera_lock_s)
         cred_host = _cred_host(p)
         if not os.path.isdir(cred_host):
             raise SandboxUnavailable(f"{p.nombre}: falta el directorio de credencial dedicado")
