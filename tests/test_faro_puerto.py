@@ -25,23 +25,17 @@ from mcp.shared.exceptions import MCPError
 from jax.faro import paquete
 from jax.faro.bitacora import Bitacora, _campo_log
 from jax.faro.config import ConfigFaro, ConfigFaroInvalida, ConfigPuerto
-from jax.faro.identidad import Ejecucion
+from jax.faro.identidad import Ejecucion, Identidad
+from jax.faro.puerto import Guardia, construir_servidor
 from jax.faro.paquete import PaqueteCargado, cargar_paquete
 from jax.faro.transporte import ServidorPuerto
+from tests import _faro_utils as _u
 from tests._faro_utils import _commit, _escribir, _git, cliente_por_rele, repo_de_juguete
 
 SECRETO = "SECRETO-FUERA-DEL-PAQUETE-0451"
 
 
-def corre(coro):
-    return asyncio.run(coro)
-
-
-def _ejecucion(**kw) -> Ejecucion:
-    base = dict(run_id="run-1", usuario="u-real", tenant="t-real", faceta="hyde", motor="codex",
-                pipeline="p-real", entry_point="repl", id_correlacion="corr-real", uid_esperado=os.getuid())
-    base.update(kw)
-    return Ejecucion(**base)
+corre, _ejecucion, puerto = _u.corre, _u.ejecucion, _u.puerto
 
 
 @pytest.fixture
@@ -91,7 +85,7 @@ def _llamadas(registros):
 
 def test_expone_la_constitucion_sellada_como_resource(cfg_puerto, cargado, cfg):
     async def caso():
-        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             r = await c.read_resource("ecosistema://constitucion")
             texto = r.contents[0].text
             assert texto.startswith(f"<!-- claude-skills: SHA {cfg.sha} -->")
@@ -101,7 +95,7 @@ def test_expone_la_constitucion_sellada_como_resource(cfg_puerto, cargado, cfg):
 
 def test_el_catalogo_es_solo_lectura_nada_lanza_agentes(cfg_puerto, cargado):
     async def caso():
-        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             nombres = {t.name for t in (await c.list_tools()).tools}
             assert nombres == {"skills.buscar", "skills.leer", "agentes.listar"}
             assert not any("lanzar" in n for n in nombres)
@@ -110,7 +104,7 @@ def test_el_catalogo_es_solo_lectura_nada_lanza_agentes(cfg_puerto, cargado):
 
 def test_agentes_listar_devuelve_solo_el_catalogo_sin_el_cuerpo(cfg_puerto, cargado):
     async def caso():
-        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             r = await c.call_tool("agentes.listar", {})
             assert not r.is_error
             texto = json.dumps(r.structured_content) + "".join(getattr(x, "text", "") for x in r.content)
@@ -121,7 +115,7 @@ def test_agentes_listar_devuelve_solo_el_catalogo_sin_el_cuerpo(cfg_puerto, carg
 
 def test_skills_buscar_encuentra_por_nombre_y_descripcion(cfg_puerto, cargado):
     async def caso():
-        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             r = await c.call_tool("skills.buscar", {"consulta": "inyeccion"})
             assert not r.is_error
             assert "beta" in json.dumps(r.structured_content) and "alfa" not in json.dumps(r.structured_content)
@@ -132,7 +126,7 @@ def test_skills_buscar_encuentra_por_nombre_y_descripcion(cfg_puerto, cargado):
 
 def test_skills_leer_devuelve_los_bytes_verificados_y_tambien_por_resource_y_prompt(cfg_puerto, cargado):
     async def caso():
-        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             r = await c.call_tool("skills.leer", {"nombre": "alfa"})
             assert not r.is_error and "cuerpo alfa" in json.dumps(r.structured_content) + str(r.content)
             r = await c.call_tool("skills.leer", {"nombre": "alfa", "archivo": "referencia.md"})
@@ -154,7 +148,7 @@ def test_skills_leer_devuelve_los_bytes_verificados_y_tambien_por_resource_y_pro
 ])
 def test_una_skill_que_no_esta_en_el_paquete_no_existe(cfg_puerto, cargado, nombre):
     async def caso():
-        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             try:
                 r = await c.call_tool("skills.leer", {"nombre": nombre})
             except MCPError:
@@ -170,7 +164,7 @@ def test_una_skill_que_no_esta_en_el_paquete_no_existe(cfg_puerto, cargado, nomb
 ])
 def test_un_archivo_fuera_de_la_skill_no_existe(cfg_puerto, cargado, archivo):
     async def caso():
-        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             try:
                 r = await c.call_tool("skills.leer", {"nombre": "alfa", "archivo": archivo})
             except MCPError:
@@ -185,7 +179,7 @@ def test_un_archivo_fuera_de_la_skill_no_existe(cfg_puerto, cargado, archivo):
 ])
 def test_un_resource_fuera_del_catalogo_no_existe(cfg_puerto, cargado, uri):
     async def caso():
-        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             with pytest.raises(MCPError):
                 await c.read_resource(uri)
     corre(caso())
@@ -200,7 +194,7 @@ def test_un_symlink_plantado_despues_de_cargar_no_se_sirve(cfg_puerto, cargado, 
     ruta.symlink_to(secreto)
 
     async def caso():
-        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             r = await c.call_tool("skills.leer", {"nombre": "alfa"})
             vista = json.dumps(r.structured_content) + str(r.content)
             assert SECRETO not in vista and "cuerpo alfa" in vista
@@ -243,7 +237,7 @@ def test_una_identidad_en_el_cuerpo_del_pedido_se_ignora(cfg_puerto, cargado):
              "run_id": "run-ajeno", "faceta": "jacobs", "motor": "kimi", "id_correlacion": "corr-falsa"}
 
     async def caso():
-        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             for args in ({"consulta": "alfa", **falsa}, {"consulta": "alfa"}):
                 with contextlib.suppress(MCPError):  # da igual si la valida o la rechaza: lo que se mira es la bitacora
                     await c.call_tool("skills.buscar", args, meta=falsa)
@@ -268,7 +262,7 @@ def test_un_par_de_otro_uid_se_rechaza_sin_hablar_mcp(cfg_puerto, cargado, monke
     async def caso():
         async with puerto(cfg_puerto, cargado, ejecucion=_ejecucion(uid_esperado=os.getuid() + 1)) as srv:
             with pytest.raises(Exception):
-                async with cliente_por_rele(srv.ruta_socket) as c:
+                async with cliente_por_rele(srv) as c:
                     await c.call_tool("skills.buscar", {"consulta": "alfa"})
             await asyncio.sleep(0.1)
         return srv.registros
@@ -283,7 +277,7 @@ def test_un_par_de_otro_uid_se_rechaza_sin_hablar_mcp(cfg_puerto, cargado, monke
 def test_cada_conexion_lleva_su_id_y_las_credenciales_del_par(cfg_puerto, cargado):
     async def caso():
         async with puerto(cfg_puerto, cargado) as srv:
-            async with cliente_por_rele(srv.ruta_socket) as a, cliente_por_rele(srv.ruta_socket) as b:
+            async with cliente_por_rele(srv) as a, cliente_por_rele(srv) as b:
                 await asyncio.gather(a.read_resource("skill://alfa"), b.read_resource("skill://beta"))
         return srv.registros
     llamadas = [r for r in _llamadas(corre(caso())) if r["metodo"] == "resources/read"]
@@ -301,7 +295,7 @@ def test_con_el_freno_puesto_nada_se_ejecuta(cfg_puerto, cargado, freno_propio, 
     monkeypatch.setattr(PaqueteCargado, "buscar", lambda self, *a, **k: ejecutadas.append(1) or original(self, *a, **k))
 
     async def caso():
-        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             assert not (await c.call_tool("skills.buscar", {"consulta": "alfa"})).is_error  # suelto: funciona
             assert len(ejecutadas) == 1
             freno_propio.write_text("pausa")
@@ -333,7 +327,7 @@ def test_con_el_freno_puesto_antes_de_conectar_ni_el_handshake_se_atiende(cfg_pu
     async def caso():
         async with puerto(cfg_puerto, cargado) as srv:
             with pytest.raises(Exception):
-                async with cliente_por_rele(srv.ruta_socket) as c:
+                async with cliente_por_rele(srv) as c:
                     await c.list_tools()
         return srv.registros
 
@@ -347,7 +341,7 @@ def test_sin_saber_donde_esta_el_freno_se_niega(cfg_puerto, cargado, monkeypatch
     async def caso():
         async with puerto(cfg_puerto, cargado) as srv:
             with pytest.raises(Exception):
-                async with cliente_por_rele(srv.ruta_socket) as c:
+                async with cliente_por_rele(srv) as c:
                     await c.list_tools()
         return srv.registros
 
@@ -362,7 +356,7 @@ def test_un_freno_inyectado_que_falla_tambien_niega(cfg_puerto, cargado):
     async def caso():
         async with puerto(cfg_puerto, cargado, freno=roto) as srv:
             with pytest.raises(Exception):
-                async with cliente_por_rele(srv.ruta_socket) as c:
+                async with cliente_por_rele(srv) as c:
                     await c.list_tools()
         return srv.registros
 
@@ -375,7 +369,7 @@ def test_un_freno_inyectado_que_falla_tambien_niega(cfg_puerto, cargado):
 
 def test_cada_llamada_deja_su_registro_completo(cfg_puerto, cargado, cfg):
     async def caso():
-        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             await c.call_tool("skills.leer", {"nombre": "alfa"})
         return srv.registros
 
@@ -391,7 +385,7 @@ def test_cada_llamada_deja_su_registro_completo(cfg_puerto, cargado, cfg):
 
 def test_el_mismo_pedido_da_el_mismo_hash_de_argumentos_y_otro_pedido_otro(cfg_puerto, cargado):
     async def caso():
-        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             await c.call_tool("skills.leer", {"nombre": "alfa"})
             await c.call_tool("skills.leer", {"nombre": "alfa"})
             await c.call_tool("skills.leer", {"nombre": "beta"})
@@ -402,7 +396,7 @@ def test_el_mismo_pedido_da_el_mismo_hash_de_argumentos_y_otro_pedido_otro(cfg_p
 
 def test_un_error_de_la_herramienta_tambien_queda_registrado(cfg_puerto, cargado):
     async def caso():
-        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             with pytest.raises(MCPError):
                 await c.read_resource("skill://no-existe")
         return srv.registros
@@ -412,7 +406,7 @@ def test_un_error_de_la_herramienta_tambien_queda_registrado(cfg_puerto, cargado
 
 async def _pedir_prompt_inexistente(cfg_puerto, cargado, nombre):
     """El nombre del prompt es lo que el cliente controla y queda como `objetivo` en la bitacora."""
-    async with ServidorPuerto(cfg_puerto, _ejecucion(), cargado, Bitacora()) as srv, cliente_por_rele(srv.ruta_socket) as c:
+    async with ServidorPuerto(cfg_puerto, _ejecucion(), cargado, Bitacora()) as srv, cliente_por_rele(srv) as c:
         with pytest.raises(MCPError):
             await c.get_prompt(nombre, {})
 
@@ -438,7 +432,7 @@ def test_un_valor_con_espacios_no_puede_fingir_un_campo_en_su_propia_linea(cfg_p
 
 def test_un_pedido_grande_llega_al_servidor_y_se_rechaza_por_su_contenido(cfg_puerto, cargado):
     async def caso():
-        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             r = await c.call_tool("skills.leer", {"nombre": "n" * 100_000})
             assert r.is_error and "excede" in str(r.content)
     corre(caso())
@@ -451,6 +445,7 @@ def test_un_pedido_mas_largo_que_el_limite_configurado_cierra_la_conexion(tmp_pa
     async def caso():
         async with puerto(ConfigPuerto(socket_dir=d, max_mensaje=4096), cargado) as srv:
             lector, escritor = await asyncio.open_unix_connection(str(srv.ruta_socket))
+            escritor.write(b"FARO-TOKEN " + srv.ruta_token.read_bytes().strip() + b"\n")
             escritor.write(b"x" * 10_000 + b"\n")
             await escritor.drain()
             assert await asyncio.wait_for(lector.read(), 5) == b""  # el servidor cerro: EOF
@@ -471,12 +466,13 @@ def test_campo_log_es_de_una_linea_y_acotado(valor, esperado):
 # el socket                                                                   #
 # --------------------------------------------------------------------------- #
 
-def test_el_socket_es_del_run_id_con_modo_0600_y_se_borra_al_cerrar(cfg_puerto, cargado):
+def test_el_socket_es_del_run_id_se_borra_al_cerrar_y_su_directorio_es_0700(cfg_puerto, cargado):
     async def caso():
         async with puerto(cfg_puerto, cargado, ejecucion=_ejecucion(run_id="abc-123")) as srv:
             assert srv.ruta_socket == cfg_puerto.socket_dir / "abc-123.sock"
+            assert stat.S_IMODE(os.lstat(cfg_puerto.socket_dir).st_mode) == 0o700
             st = os.lstat(srv.ruta_socket)
-            assert stat.S_ISSOCK(st.st_mode) and stat.S_IMODE(st.st_mode) == 0o600
+            assert stat.S_ISSOCK(st.st_mode) and stat.S_IMODE(st.st_mode) == 0o666  # dentro de un directorio 0700: solo llega quien lo recibe por bind
         assert not srv.ruta_socket.exists()
     corre(caso())
 
@@ -525,7 +521,93 @@ def test_un_mensaje_grande_cruza_el_rele(tmp_path):
     d.mkdir(mode=0o700)
 
     async def caso():
-        async with puerto(ConfigPuerto(socket_dir=d), cargar_paquete(cfg)) as srv, cliente_por_rele(srv.ruta_socket) as c:
+        async with puerto(ConfigPuerto(socket_dir=d), cargar_paquete(cfg)) as srv, cliente_por_rele(srv) as c:
             r = await c.call_tool("skills.leer", {"nombre": "alfa", "archivo": "grande.md"})
             assert not r.is_error and len(json.dumps(r.structured_content) + str(r.content)) > 300_000
     corre(caso())
+
+
+# --------------------------------------------------------------------------- #
+# auditoria: guardia, _meta, argumentos, bitacora que puede fallar, logging    #
+# --------------------------------------------------------------------------- #
+
+def test_la_guardia_esta_instalada_en_el_middleware_del_servidor(cargado):
+    ident = Identidad(_ejecucion(), "conn-1", peer_pid=1, peer_uid=os.getuid(), peer_gid=0)
+    mcp = construir_servidor(cargado, identidad=ident, bitacora=Bitacora(emisores=[]), freno=lambda: False)
+    assert any(isinstance(m, Guardia) for m in mcp.middleware)
+
+
+def test__meta_no_cambia_el_hash_de_los_argumentos(cfg_puerto, cargado):
+    async def caso():
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
+            await c.call_tool("skills.leer", {"nombre": "alfa"}, meta={"progressToken": "uno", "x": 1})
+            await c.call_tool("skills.leer", {"nombre": "alfa"}, meta={"progressToken": "dos", "y": [2]})
+        return srv.registros
+    h = [r["hash_args"] for r in _llamadas(corre(caso())) if r["metodo"] == "tools/call"]
+    assert len(h) == 2 and h[0] == h[1]
+
+
+def test_la_bitacora_registra_los_argumentos_saneados_y_acotados(cfg_puerto, cargado):
+    largo = "n\nombre=raro " + "z" * 500
+
+    async def caso():
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
+            await c.call_tool("skills.leer", {"nombre": largo})
+        return srv.registros
+    r = next(x for x in _llamadas(corre(caso())) if x["metodo"] == "tools/call")
+    assert "\n" not in r["argumentos"] and "=" not in r["argumentos"].replace("\\x3d", "") and len(r["argumentos"]) <= 200
+    assert "nombre" in r["argumentos"]
+
+
+def test_un_emisor_de_bitacora_que_falla_hace_fallar_la_llamada_y_no_entrega_el_resultado(cfg_puerto, cargado):
+    def emisor(registro):
+        if registro.get("metodo") == "tools/call":
+            raise OSError("la tabla de la bitacora no esta disponible")
+
+    async def caso():
+        async with ServidorPuerto(cfg_puerto, _ejecucion(), cargado, Bitacora(emisores=[emisor])) as srv, cliente_por_rele(srv) as c:
+            try:
+                r = await c.call_tool("skills.leer", {"nombre": "alfa"})
+            except MCPError:
+                return None
+            return r
+    r = corre(caso())
+    assert r is None or (r.is_error and "cuerpo alfa" not in str(r.content) + json.dumps(r.structured_content))
+
+
+def test_si_la_bitacora_falla_la_denegacion_por_freno_sigue_denegando(cfg_puerto, cargado, freno_propio):
+    def siempre_falla(registro):
+        if registro.get("metodo") == "tools/call":
+            raise OSError("sin bitacora")
+
+    async def caso():
+        async with ServidorPuerto(cfg_puerto, _ejecucion(), cargado, Bitacora(emisores=[siempre_falla])) as srv, cliente_por_rele(srv) as c:
+            freno_propio.write_text("pausa")
+            with pytest.raises(MCPError) as exc:
+                await c.call_tool("skills.leer", {"nombre": "alfa"})
+            assert exc.value.code == 423
+    corre(caso())
+
+
+def test_un_rechazo_de_conexion_se_mantiene_aunque_la_bitacora_falle(cfg_puerto, cargado):
+    def siempre_falla(registro):
+        raise OSError("sin bitacora")
+
+    async def caso():
+        async with ServidorPuerto(cfg_puerto, _ejecucion(uid_esperado=os.getuid() + 1), cargado, Bitacora(emisores=[siempre_falla])) as srv:
+            lector, escritor = await asyncio.open_unix_connection(str(srv.ruta_socket))
+            assert await asyncio.wait_for(lector.read(), 5) == b""
+            escritor.close()
+    corre(caso())
+
+
+def test_el_arranque_configura_el_logging_antes_del_primer_servidor_mcp(cfg_puerto, cargado, monkeypatch):
+    raiz = logging.getLogger()
+    monkeypatch.setattr(raiz, "handlers", [])      # un proceso de servicio recien arrancado: sin configurar
+
+    async def caso():
+        async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
+            await c.list_tools()
+    corre(caso())
+    assert raiz.handlers, "el servicio no configuro el logging"
+    assert not any(type(h).__name__ == "RichHandler" for h in raiz.handlers), "lo configuro el SDK, no el servicio"

@@ -3,6 +3,7 @@
 arnes del Puerto: servidor en el bucle de la prueba y cliente MCP REAL por el rele stdio."""
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -10,6 +11,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from jax.faro import paquete
+from jax.faro.bitacora import Bitacora
+from jax.faro.identidad import Ejecucion
+from jax.faro.transporte import ServidorPuerto
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 
@@ -65,12 +69,35 @@ def repo_de_juguete(tmp_path: Path, extra: dict | None = None) -> Path:
     return r
 
 
+def corre(coro):
+    return asyncio.run(coro)
+
+
+def ejecucion(**kw) -> Ejecucion:
+    base = dict(run_id="run-1", usuario="u-real", tenant="t-real", faceta="hyde", motor="codex",
+                pipeline="p-real", entry_point="repl", id_correlacion="corr-real", uid_esperado=os.getuid())
+    base.update(kw)
+    return Ejecucion(**base)
+
+
 @asynccontextmanager
-async def cliente_por_rele(ruta_socket: Path, **kw):
+async def puerto(cfg_puerto, cargado, ej=None, registros=None, **kw):
+    """Un Puerto REAL en un socket Unix temporal; `srv.registros` es la bitacora en memoria."""
+    registros = registros if registros is not None else []
+    bit = Bitacora(emisores=[registros.append])
+    async with ServidorPuerto(cfg_puerto, ej or ejecucion(), cargado, bit, **kw) as srv:
+        srv.registros = registros
+        yield srv
+
+
+@asynccontextmanager
+async def cliente_por_rele(srv, *, token_file: Path | None = None, **kw):
     """Un cliente MCP real (SDK oficial) hablando con el Puerto POR EL RELE: el rele es un
-    subproceso `python -m jax.faro.relay`, stdio de un lado y el socket Unix del otro."""
+    subproceso `python -m jax.faro.relay`, stdio de un lado y el socket Unix del otro. El token de
+    la ejecucion se le pasa por ARCHIVO (`--token-file`), nunca por argv ni por entorno."""
     params = StdioServerParameters(
-        command=sys.executable, args=["-m", "jax.faro.relay", "--socket", str(ruta_socket)],
+        command=sys.executable,
+        args=["-m", "jax.faro.relay", "--socket", str(srv.ruta_socket), "--token-file", str(token_file or srv.ruta_token)],
         env={"PYTHONPATH": str(RAIZ)}, cwd=str(RAIZ))
     async with Client(params, **kw) as c:
         yield c

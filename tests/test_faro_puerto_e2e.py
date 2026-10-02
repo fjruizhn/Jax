@@ -40,7 +40,7 @@ def test_un_cliente_mcp_real_lista_y_lee_una_skill_a_traves_del_rele(montaje, mo
 
     async def caso():
         async with ServidorPuerto(cfgp, ej, cargar_paquete(cfg), Bitacora(emisores=[])) as srv:
-            async with cliente_por_rele(srv.ruta_socket, mode=modo) as c:
+            async with cliente_por_rele(srv, mode=modo) as c:
                 recursos = await c.list_resources()
                 uris = {str(r.uri) for r in recursos.resources}
                 assert "ecosistema://constitucion" in uris
@@ -72,7 +72,7 @@ def test_el_rele_no_importa_el_sdk_de_mcp_ni_nada_pesado():
 
 
 def test_el_rele_sin_socket_falla_rapido_y_no_ensucia_stdout(tmp_path):
-    r = subprocess.run([sys.executable, "-m", "jax.faro.relay", "--socket", str(tmp_path / "no-hay.sock")],
+    r = subprocess.run([sys.executable, "-m", "jax.faro.relay", "--socket", str(tmp_path / "no-hay.sock"), "--token-file", str(tmp_path / "t")],
                        cwd=RAIZ, env={**os.environ, "PYTHONPATH": str(RAIZ)}, capture_output=True, timeout=20, input=b"")
     assert r.returncode != 0 and r.stdout == b"" and b"no-hay.sock" in r.stderr
 
@@ -89,7 +89,7 @@ def test_el_rele_termina_cuando_el_puerto_cierra(montaje):
     async def caso():
         async with ServidorPuerto(cfgp, ej, cargar_paquete(cfg), Bitacora(emisores=[])) as srv:
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "jax.faro.relay", "--socket", str(srv.ruta_socket), cwd=str(RAIZ),
+                sys.executable, "-m", "jax.faro.relay", "--socket", str(srv.ruta_socket), "--token-file", str(srv.ruta_token), cwd=str(RAIZ),
                 env={**os.environ, "PYTHONPATH": str(RAIZ)}, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
             proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode() + b"\n")
             await proc.stdin.drain()
@@ -97,4 +97,41 @@ def test_el_rele_termina_cuando_el_puerto_cierra(montaje):
             assert json.loads(linea)["id"] == 1
         # el Puerto cerro: el rele ve el cierre del socket y sale solo
         assert await asyncio.wait_for(proc.wait(), 15) == 0
+    asyncio.run(caso())
+
+
+def test_el_rele_exige_el_archivo_del_token_y_no_acepta_el_token_por_argv(montaje):
+    cfg, cfgp, ej = montaje
+    r = subprocess.run([sys.executable, "-m", "jax.faro.relay", "--socket", "/tmp/x.sock"], cwd=RAIZ,
+                       env={**os.environ, "PYTHONPATH": str(RAIZ)}, capture_output=True, timeout=20, input=b"")
+    assert r.returncode != 0 and r.stdout == b""
+    r = subprocess.run([sys.executable, "-m", "jax.faro.relay", "--socket", "/tmp/x.sock", "--token", "abc"], cwd=RAIZ,
+                       env={**os.environ, "PYTHONPATH": str(RAIZ)}, capture_output=True, timeout=20, input=b"")
+    assert r.returncode != 0 and b"--token" in r.stderr  # no existe la opcion: el token solo viaja por archivo
+
+
+def test_el_rele_con_un_archivo_de_token_ilegible_falla_sin_ensuciar_stdout(tmp_path):
+    r = subprocess.run([sys.executable, "-m", "jax.faro.relay", "--socket", str(tmp_path / "s.sock"),
+                        "--token-file", str(tmp_path / "no-existe")], cwd=RAIZ,
+                       env={**os.environ, "PYTHONPATH": str(RAIZ)}, capture_output=True, timeout=20, input=b"")
+    assert r.returncode == 2 and r.stdout == b"" and b"token" in r.stderr
+
+
+def test_el_rele_con_half_close_deja_llegar_la_respuesta_antes_de_salir(montaje):
+    """El cliente cierra su stdin tras enviar el pedido: el rele cierra solo el lado de escritura del socket
+    (write_eof) y sigue copiando hasta que el Puerto responde y cierra."""
+    cfg, cfgp, ej = montaje
+
+    async def caso():
+        async with ServidorPuerto(cfgp, ej, cargar_paquete(cfg), Bitacora(emisores=[])) as srv:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "jax.faro.relay", "--socket", str(srv.ruta_socket), "--token-file", str(srv.ruta_token),
+                cwd=str(RAIZ), env={**os.environ, "PYTHONPATH": str(RAIZ)},
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 7, "method": "ping"}).encode() + b"\n")
+            await proc.stdin.drain()
+            proc.stdin.close()
+            salida = await asyncio.wait_for(proc.stdout.read(), 20)
+            assert json.loads(salida.splitlines()[0])["id"] == 7
+            assert await asyncio.wait_for(proc.wait(), 20) == 0
     asyncio.run(caso())
