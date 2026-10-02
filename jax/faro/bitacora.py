@@ -31,8 +31,13 @@ def emisor_logger(registro: dict) -> None:
 
 
 class Bitacora:
-    def __init__(self, emisores: Iterable[Callable[[dict], None]] | None = None):
+    def __init__(self, emisores: Iterable[Callable[[dict], None]] | None = None, *,
+                 observadores: Iterable[Callable[[dict], None]] = ()):
+        """`observadores`: funciones SINCRONAS que ven cada registro ANTES que los emisores y aunque alguno
+        falle (el aviso de las denegaciones, 0.3b). No pueden hacer fallar la bitacora ni a los demas: lo que
+        lancen se descarta. No sustituyen a los emisores: la anotacion durable sigue siendo de ellos."""
         self._emisores = (emisor_logger,) if emisores is None else tuple(emisores)
+        self._observadores = tuple(observadores)
 
     @property
     def emisores(self) -> tuple:
@@ -42,6 +47,11 @@ class Bitacora:
         """Entrega el registro a TODOS los emisores, en orden; un emisor puede ser sincrono o
         `async` (el de la tabla encadenada lo es). Si uno lanza, la excepcion sube."""
         registro = {"evento": evento, "momento": round(time.time(), 6), **campos}
+        for observador in self._observadores:
+            try:
+                observador(registro)
+            except Exception:  # fail-soft: un observador (el aviso) no puede romper la anotacion ni a los demas
+                logger.exception("un observador de la bitacora fallo")
         for emisor in self._emisores:
             resultado = emisor(registro)
             if inspect.isawaitable(resultado):

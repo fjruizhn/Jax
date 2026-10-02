@@ -341,9 +341,11 @@ def test_una_denegacion_por_freno_produce_un_aviso_inmediato(tmp_path, mundo):
     with FalsoTelegram() as tg:
         async def caso():
             registros = []
+            freno = [False]
             async with Avisador(_cfg(tmp_path, tg.url), CRED, host="hall9000-prueba") as av:
                 bit = _bitacora_con_aviso(av, registros)
-                async with puerto(cfg_puerto, cargado, bitacora=bit, freno=lambda: True) as srv, cliente_por_rele(srv) as c:
+                async with puerto(cfg_puerto, cargado, bitacora=bit, freno=lambda: freno[0]) as srv, cliente_por_rele(srv) as c:
+                    freno[0] = True
                     t0 = time.monotonic()
                     with pytest.raises(MCPError) as exc:
                         await c.call_tool("skills.leer", {"nombre": "alfa"})
@@ -366,11 +368,13 @@ def test_un_aviso_que_falla_no_cambia_la_denegacion(tmp_path, mundo, modo):
     with FalsoTelegram(estado=500) as tg:
         async def caso():
             registros = []
+            freno = [False]
             url = "http://127.0.0.1:9" if modo == "inalcanzable" else tg.url
             enviar = roto if modo == "emisor_roto" else None
             async with Avisador(_cfg(tmp_path, url, timeout_s=0.3), CRED, enviar=enviar, host="h") as av:
                 bit = _bitacora_con_aviso(av, registros)
-                async with puerto(cfg_puerto, cargado, bitacora=bit, freno=lambda: True) as srv, cliente_por_rele(srv) as c:
+                async with puerto(cfg_puerto, cargado, bitacora=bit, freno=lambda: freno[0]) as srv, cliente_por_rele(srv) as c:
+                    freno[0] = True
                     for _ in range(3):
                         with pytest.raises(MCPError) as exc:
                             await c.call_tool("skills.leer", {"nombre": "alfa"})
@@ -379,21 +383,24 @@ def test_un_aviso_que_falla_no_cambia_la_denegacion(tmp_path, mundo, modo):
                 return av, registros
         av, registros = corre(caso())
     assert av.fallidos >= 1 and av.enviados == 0
-    assert [r["decision"] for r in registros if r.get("evento") == "llamada"] == ["denegado"] * 3
+    assert [r["decision"] for r in registros if r.get("metodo") == "tools/call"] == ["denegado"] * 3
 
 
 def test_aunque_la_bitacora_durable_falle_la_denegacion_se_avisa(tmp_path, mundo):
     cfg_puerto, cargado = mundo
 
     def sin_bitacora(registro):
-        raise OSError("tabla caida")
+        if registro.get("metodo") == "tools/call":      # el handshake pasa; la llamada denegada no se puede anotar
+            raise OSError("tabla caida")
 
     enviados = []
 
     async def caso():
+        freno = [False]
         async with Avisador(_cfg(tmp_path), CRED, enviar=enviados.append, host="h") as av:
             bit = Bitacora(emisores=[sin_bitacora], observadores=[av])
-            async with puerto(cfg_puerto, cargado, bitacora=bit, freno=lambda: True) as srv, cliente_por_rele(srv) as c:
+            async with puerto(cfg_puerto, cargado, bitacora=bit, freno=lambda: freno[0]) as srv, cliente_por_rele(srv) as c:
+                freno[0] = True
                 with pytest.raises(MCPError) as exc:
                     await c.call_tool("skills.leer", {"nombre": "alfa"})
                 assert exc.value.code == 423
