@@ -1486,16 +1486,18 @@ class LocksTest(_Entorno):
 
 
 class TimeoutValidadoTest(_Entorno):
-    """MINOR-9 (auditoria 2026-10-02): el timeout se valida contra un maximo
-    configurado; None, no finito o no positivo se rechazan antes de crear nada."""
+    """MINOR-9 (auditoria 2026-10-02): el timeout se valida contra un maximo; None,
+    no finito o no positivo se rechazan antes de crear nada. Ronda 2: el maximo
+    depende del `entry_point` (chat <= 180 s, jacobs <= 600 s, configurables) y un
+    entry_point sin tope declarado se rechaza."""
 
-    async def _sin_lanzar(self, timeout):
+    async def _sin_lanzar(self, timeout, ep="chat"):
         cap, fake = self.capturar(_FakeProc(_CODEX_OK))
         with patch("asyncio.create_subprocess_exec", fake):
             with self.assertRaises(ValueError):
                 await cli_sandbox.run_cli(
                     "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
-                    timeout=timeout, titular=await self.titular(), correlation_id="c", entry_point="chat")
+                    timeout=timeout, titular=await self.titular(ep=ep), correlation_id="c", entry_point=ep)
         self.assertEqual(cap["llamadas"], 0)
         self.assertEqual(list(self.run_dir.iterdir()), [])
 
@@ -1504,18 +1506,121 @@ class TimeoutValidadoTest(_Entorno):
             with self.subTest(timeout=malo):
                 await self._sin_lanzar(malo)
 
-    async def test_por_encima_del_maximo_se_rechaza_y_el_maximo_exacto_pasa(self):
-        with patch.dict(os.environ, {"JAX_CLI_TIMEOUT_MAX_S": "10"}):
-            await self._sin_lanzar(10.5)
+    async def test_el_tope_depende_del_entry_point_y_el_maximo_exacto_pasa(self):
+        for ep, tope in (("chat", 180), ("jacobs", 600)):
+            with self.subTest(ep=ep):
+                await self._sin_lanzar(tope + 0.5, ep)
+                await self._sin_lanzar(tope * 10, ep)
+                res, _, _ = await self.correr("codex", timeout=tope, titular=await self.titular(ep=ep),
+                                              entry_point=ep)
+                self.assertEqual(res.texto, "hola desde codex")
+
+    async def test_chat_no_puede_pedir_lo_que_jacobs_si(self):
+        await self._sin_lanzar(300, "chat")
+        res, _, _ = await self.correr("codex", timeout=300, titular=await self.titular(ep="jacobs"),
+                                      entry_point="jacobs")
+        self.assertEqual(res.texto, "hola desde codex")
+
+    async def test_los_topes_son_configurables_por_entry_point(self):
+        with patch.dict(os.environ, {"JAX_CLI_TIMEOUT_MAX_CHAT_S": "10", "JAX_CLI_TIMEOUT_MAX_JACOBS_S": "20"}):
+            self.assertEqual(cli_sandbox.timeout_maximo_para("chat"), 10.0)
+            self.assertEqual(cli_sandbox.timeout_maximo_para("jacobs"), 20.0)
+            await self._sin_lanzar(10.5, "chat")
+            await self._sin_lanzar(20.5, "jacobs")
             res, _, _ = await self.correr("codex", timeout=10)
             self.assertEqual(res.texto, "hola desde codex")
+        with patch.dict(os.environ, {"JAX_CLI_TIMEOUT_MAX_CHAT_S": "400"}):
+            self.assertEqual(cli_sandbox.timeout_maximo_para("chat"), 400.0)  # tambien se puede subir
 
-    async def test_el_maximo_por_defecto_es_600_y_un_valor_de_entorno_roto_no_lo_afloja(self):
-        self.assertEqual(cli_sandbox.timeout_maximo(), 600.0)
-        for malo in ("", "x", "-5", "0", "nan", "inf"):
-            with self.subTest(malo=malo), patch.dict(os.environ, {"JAX_CLI_TIMEOUT_MAX_S": malo}):
-                self.assertEqual(cli_sandbox.timeout_maximo(), 600.0)
-        await self._sin_lanzar(601)
+    async def test_los_defaults_son_180_y_600_y_un_valor_roto_no_los_afloja(self):
+        self.assertEqual(cli_sandbox.timeout_maximo_para("chat"), 180.0)
+        self.assertEqual(cli_sandbox.timeout_maximo_para("jacobs"), 600.0)
+        for var, ep, default in (("JAX_CLI_TIMEOUT_MAX_CHAT_S", "chat", 180.0),
+                                 ("JAX_CLI_TIMEOUT_MAX_JACOBS_S", "jacobs", 600.0)):
+            for malo in ("", "x", "-5", "0", "nan", "inf", "-inf"):
+                with self.subTest(var=var, malo=malo), patch.dict(os.environ, {var: malo}):
+                    self.assertEqual(cli_sandbox.timeout_maximo_para(ep), default)
+        await self._sin_lanzar(181, "chat")
+
+    async def test_un_entry_point_sin_tope_declarado_se_rechaza_y_no_lanza_nada(self):
+        # `canary` y `repl` son entry_points que exigir_titular conoce pero NO tienen tope
+        # declarado: run_cli falla cerrado (decision pendiente del arquitecto, ver informe)
+        for ep in ("canary", "repl"):
+            with self.subTest(ep=ep):
+                await self._sin_lanzar(5, ep)
+        with patch.object(cli_sandbox, "ENTRY_POINTS", cli_sandbox.ENTRY_POINTS | {"otro"}):
+            await self._sin_lanzar(5, "otro")
+        for malo in ("", "CHAT", None, 5, "otro"):
+            with self.subTest(malo=malo), self.assertRaises(ValueError):
+                cli_sandbox.timeout_maximo_para(malo)
+
+
+class LimitesDelLlamadorTest(_Entorno):
+    """MINOR-17 (auditoria 2026-10-02, ronda 2): lo que el llamador de `run_cli` puede
+    pedir esta acotado por la configuracion; nunca la afloja."""
+
+    async def _run(self, **kw):
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch("asyncio.create_subprocess_exec", fake):
+            await cli_sandbox.run_cli(
+                "codex", system_prompt="s", historial=[], mensaje=kw.pop("mensaje", "m"), modelo="gpt-6-sol",
+                timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat", **kw)
+        return cap
+
+    async def _rechazado(self, **kw):
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch("asyncio.create_subprocess_exec", fake):
+            with self.assertRaises(ValueError):
+                await cli_sandbox.run_cli(
+                    "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                    timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat", **kw)
+        self.assertEqual(cap["llamadas"], 0)
+        self.assertEqual(list(self.run_dir.iterdir()), [])
+
+    async def test_espera_lock_no_finita_o_fuera_de_rango_se_rechaza(self):
+        tope = cli_sandbox.PERFILES["codex"].espera_lock_s
+        for malo in (float("nan"), float("inf"), float("-inf"), 10 ** 9, tope + 0.5, -1, -0.001,
+                     True, "5", [1]):
+            with self.subTest(espera_lock_s=malo):
+                await self._rechazado(espera_lock_s=malo)
+
+    async def test_espera_lock_dentro_de_rango_pasa(self):
+        tope = cli_sandbox.PERFILES["codex"].espera_lock_s
+        for bueno in (0, 0.0, 0.2, 1, tope):
+            with self.subTest(espera_lock_s=bueno):
+                cap = await self._run(espera_lock_s=bueno)
+                self.assertEqual(cap["llamadas"], 1)
+
+    async def test_max_chars_no_valido_se_rechaza(self):
+        for malo in (float("nan"), float("inf"), 0, -5, 2.5, True, "100", [1]):
+            with self.subTest(max_chars=malo):
+                await self._rechazado(max_chars=malo)
+
+    async def test_max_chars_efectivo_es_el_minimo_con_el_tope_de_configuracion(self):
+        grande = "x" * 40_000  # mas que el tope por defecto (32000)
+        for pedido in (10 ** 9, 32_001, 39_999):
+            with self.subTest(max_chars=pedido):
+                cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+                with patch("asyncio.create_subprocess_exec", fake):
+                    with self.assertRaises(cli_sandbox.MensajeDemasiadoLargo):
+                        await cli_sandbox.run_cli(
+                            "codex", system_prompt="s", historial=[], mensaje=grande, modelo="gpt-6-sol",
+                            timeout=5, titular=await self.titular(), correlation_id="c",
+                            entry_point="chat", max_chars=pedido)
+                self.assertEqual(cap["llamadas"], 0)
+        # un valor MAS ESTRICTO que la configuracion si manda
+        with self.assertRaises(cli_sandbox.MensajeDemasiadoLargo):
+            await self._run(mensaje="y" * 200, max_chars=100)
+        cap = await self._run(mensaje="y" * 200, max_chars=300)
+        self.assertEqual(cap["llamadas"], 1)
+
+    async def test_el_tope_de_configuracion_manda_y_un_valor_roto_vuelve_al_default(self):
+        with patch.dict(os.environ, {"JAX_CLI_MAX_PROMPT_CHARS": "150"}):
+            with self.assertRaises(cli_sandbox.MensajeDemasiadoLargo):
+                await self._run(mensaje="y" * 200, max_chars=10 ** 9)
+        for malo in ("", "x", "-5", "0", "nan", "1e9", "2.5"):
+            with self.subTest(malo=malo), patch.dict(os.environ, {"JAX_CLI_MAX_PROMPT_CHARS": malo}):
+                self.assertEqual(cli_sandbox.tope_prompt_chars(), cli_sandbox.MAX_PROMPT_CHARS)
 
 
 class LocksSegurosTest(_Entorno):

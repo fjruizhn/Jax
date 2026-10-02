@@ -57,10 +57,14 @@ root, cambiarlas exige reiniciar):
                               ser del euid y sin escritura de grupo/otros. Estos locks
                               son por euid (un solo usuario por CLI); el de Hyde, que
                               comparten dos usuarios, va por grupo en hyde_sandbox
-  JAX_CLI_MAX_PROMPT_CHARS    tope del prompt (default 32000)
+  JAX_CLI_MAX_PROMPT_CHARS    tope del prompt (default 32000); `max_chars` del llamador solo
+                              puede bajarlo (min)
   JAX_CLI_<PERFIL>_RANURAS    llamadas concurrentes por perfil, 1..16 (default el del
                               perfil; NO lo decide el llamador de run_cli)
   JAX_CLI_TIMEOUT_MAX_S       tope del timeout de run_cli (default 600)
+  JAX_CLI_TIMEOUT_MAX_CHAT_S / JAX_CLI_TIMEOUT_MAX_JACOBS_S
+                              tope del timeout por entry_point (default 180 / 600); un
+                              entry_point sin tope (canary, repl) se rechaza
 
 CACHES (cada uno declara su invalidacion en el mismo commit que lo crea):
   - `_CACHE_SHA`: SHA256 del manifiesto del directorio de un binario, clave = ruta
@@ -1263,6 +1267,50 @@ def timeout_maximo() -> float:
     return v if math.isfinite(v) and v > 0 else TIMEOUT_MAX_S_DEFAULT
 
 
+#: Tope del `timeout` de `run_cli` por punto de entrada: (variable de entorno, default
+#: en segundos). Un entry_point que no figura aqui NO tiene tope declarado y `run_cli`
+#: lo rechaza (falla cerrado). `canary` y `repl` son entry_points validos para
+#: `exigir_titular` pero no tienen tope: hay que declararselo antes de usarlos.
+TIMEOUT_MAX_POR_ENTRY: dict[str, tuple[str, float]] = {
+    "chat": ("JAX_CLI_TIMEOUT_MAX_CHAT_S", 180.0),
+    "jacobs": ("JAX_CLI_TIMEOUT_MAX_JACOBS_S", 600.0),
+}
+
+
+def timeout_maximo_para(entry_point) -> float:
+    """Tope del `timeout` de `run_cli` para `entry_point`: `JAX_CLI_TIMEOUT_MAX_CHAT_S`
+    (chat, default 180 s) o `JAX_CLI_TIMEOUT_MAX_JACOBS_S` (jacobs, default 600 s) si es
+    un numero finito positivo y, si no, el default: un valor roto vuelve al default, no
+    lo afloja. Un entry_point sin tope declarado es ValueError."""
+    if not isinstance(entry_point, str) or entry_point not in TIMEOUT_MAX_POR_ENTRY:
+        raise ValueError(f"entry_point {entry_point!r} sin tope de timeout declarado")
+    var, default = TIMEOUT_MAX_POR_ENTRY[entry_point]
+    try:
+        v = float(os.environ.get(var, ""))
+    except ValueError:
+        return default
+    return v if math.isfinite(v) and v > 0 else default
+
+
+def tope_prompt_chars() -> int:
+    """Tope de configuracion del prompt: `JAX_CLI_MAX_PROMPT_CHARS` si es un entero
+    positivo y, si no, `MAX_PROMPT_CHARS`. Lo que pide el llamador de `run_cli` solo
+    puede BAJARLO (`min`), nunca subirlo."""
+    crudo = os.environ.get("JAX_CLI_MAX_PROMPT_CHARS", "").strip()
+    return int(crudo) if crudo.isascii() and crudo.isdigit() and int(crudo) > 0 else MAX_PROMPT_CHARS
+
+
+def _numero_finito(v) -> bool:
+    """int o float (no bool) finito. Un entero demasiado grande para un float no es
+    finito: se rechaza en vez de dejar escapar un OverflowError."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    try:
+        return math.isfinite(v)
+    except OverflowError:
+        return False
+
+
 def _ranura_adquirir(perfil: str, ranuras: int, espera: float):
     """BLOQUEANTE (to_thread). Primera ranura libre de `ranuras`; si no hay
     ninguna en `espera` segundos, LockTimeout. Un directorio o un lock inseguro
@@ -1409,14 +1457,22 @@ async def run_cli(
             raise PerfilNoSoportado(f"perfil {perfil!r} no se sirve por run_cli")
         if not isinstance(modelo, str) or not _RE_MODELO.match(modelo):
             raise ValueError("modelo con formato invalido")
-        if (
-            isinstance(timeout, bool) or not isinstance(timeout, (int, float))
-            or not math.isfinite(timeout) or not 0 < timeout <= timeout_maximo()
+        tope_timeout = timeout_maximo_para(entry_point)  # ValueError si el entry_point no tiene tope
+        if not _numero_finito(timeout) or not 0 < timeout <= tope_timeout:
+            raise ValueError(
+                f"timeout invalido: se exige 0 < timeout <= {tope_timeout} para el entry_point {entry_point!r}"
+            )
+        if espera_lock_s is not None and (
+            not _numero_finito(espera_lock_s) or not 0 <= espera_lock_s <= p.espera_lock_s
         ):
-            raise ValueError(f"timeout invalido: se exige 0 < timeout <= {timeout_maximo()} (JAX_CLI_TIMEOUT_MAX_S)")
+            raise ValueError(f"espera_lock_s invalida: se exige un numero finito en 0..{p.espera_lock_s}")
+        tope = tope_prompt_chars()
+        if max_chars is not None:
+            if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars <= 0:
+                raise ValueError("max_chars invalido: se exige un entero positivo")
+            tope = min(max_chars, tope)  # el llamador solo puede BAJAR el tope de configuracion
         if not p.canal_prompt_verificado:
             raise ErrorProtocolo(f"{p.nombre}: el canal del prompt no esta verificado (spec §8); no se lanza")
-        tope = max_chars or int(os.environ.get("JAX_CLI_MAX_PROMPT_CHARS", MAX_PROMPT_CHARS))
         conversacion = armar_conversacion(historial, mensaje, tope)
         ruta_bin, dir_bin, version = await asyncio.to_thread(_resolver_binario, p)
         verificar_bwrap(_BWRAP_BIN, p.nombre)
