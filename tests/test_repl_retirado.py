@@ -20,6 +20,12 @@ RETIRADOS = ("jax/core/main.py", "jax/muscles/subprocess_muscle.py")
 PROHIBIDOS = {"jax.core.main", "jax.muscles.subprocess_muscle"}
 FUERA = {".venv", "venv", ".git", "node_modules", "__pycache__"}
 _DINAMICOS = {"import_module", "__import__"}
+# Simbolos de jax.core.registro_facetas que se borraron con el REPL. Un archivo (de prueba o no)
+# que los importe revienta con ImportError: en la reauditoria de T16 (BLOCK-10) uno asi, un
+# test de DB, no lo vio nadie hasta el job con MariaDB.
+MODULO_REGISTRO = "jax.core.registro_facetas"
+SIMBOLOS_BORRADOS = {"cargar_registro", "aplicar_registro", "_camino_del_modelo",
+                     "ESTADOS_INVOCABLES", "TIPO_POR_TRANSPORTE", "CLAVE_HTTP_POR_PROVIDER"}
 
 
 def test_los_archivos_del_repl_ya_no_estan_en_el_arbol():
@@ -58,6 +64,40 @@ def _prohibidos_en(fuente: str, rel: str) -> list[str]:
             continue
         hallados += [n for n in nombres if n in PROHIBIDOS]
     return hallados
+
+
+def _simbolos_borrados_en(fuente: str) -> list[str]:
+    """Nombres borrados de registro_facetas que `fuente` importa (`from jax.core.registro_facetas
+    import x`, `from jax.core import registro_facetas` seguido de `registro_facetas.x`)."""
+    hallados: list[str] = []
+    arbol = ast.parse(fuente)
+    for nodo in ast.walk(arbol):
+        if isinstance(nodo, ast.ImportFrom) and not nodo.level:
+            if nodo.module == MODULO_REGISTRO:
+                hallados += [a.name for a in nodo.names if a.name in SIMBOLOS_BORRADOS]
+        elif isinstance(nodo, ast.Attribute) and nodo.attr in SIMBOLOS_BORRADOS:
+            v = nodo.value
+            if (isinstance(v, ast.Name) and v.id == "registro_facetas") or \
+               (isinstance(v, ast.Attribute) and v.attr == "registro_facetas"):
+                hallados.append(nodo.attr)
+    return hallados
+
+
+def test_nadie_importa_simbolos_borrados_de_registro_facetas():
+    hallazgos = []
+    for ruta in sorted(RAIZ.rglob("*.py")):
+        if FUERA & set(ruta.relative_to(RAIZ).parts) or ruta == Path(__file__).resolve():
+            continue
+        hallazgos += [f"{ruta.relative_to(RAIZ).as_posix()}: {s}"
+                      for s in _simbolos_borrados_en(ruta.read_text(encoding="utf-8"))]
+    assert hallazgos == []
+
+
+def test_el_detector_de_simbolos_borrados_ve_las_dos_formas():
+    assert _simbolos_borrados_en("from jax.core.registro_facetas import cargar_registro\n")
+    assert _simbolos_borrados_en("from jax.core import registro_facetas\nregistro_facetas.aplicar_registro(1)\n")
+    assert _simbolos_borrados_en("import jax.core.registro_facetas as r\njax.core.registro_facetas._camino_del_modelo\n")
+    assert not _simbolos_borrados_en("from jax.core.registro_facetas import url_del_proveedor\n")
 
 
 def test_nada_importa_el_repl_ni_el_musculo_de_subproceso():

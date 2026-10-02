@@ -4829,8 +4829,14 @@ jobs:
           #   literal; un archivo que no se parsea hace fallar la prueba). Mutaciones vistas en rojo:
           #   sin la rama de relativos, y un jax/core/zz.py con `from . import main`. Neto del PR:
           #   3223 -> 3160.
-          grep -qE "^3160 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3160 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 3160 -> 3163 (mismo PR, reauditoria BLOCK-10 y MINOR-11): +3 netos medidos por
+          #   identificador de prueba (pytest tests): test_repl_retirado +2 (simbolos borrados
+          #   de registro_facetas: el escaneo y su detector) y test_jacobs_hyde_directo_prohibido
+          #   +1 (2 tests en vez de 1: ya no hay run_sandboxed_claude que sustituir, se
+          #   sustituyen cli_sandbox.ejecutar y create_subprocess_exec y se prueba que la
+          #   funcion no existe). Neto del PR: 3223 -> 3163.
+          grep -qE "^3163 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3163 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
