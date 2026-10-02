@@ -415,6 +415,68 @@ jobs:
           if grep -qE "skipped" /tmp/clisb; then
             echo "HAY TESTS SALTADOS: la contencion real no se ejercito."; exit 1; fi
 
+  # El Faro, fase 0 (spec 2026-10-02-faro-pasarela-ecosistema-design.md, plan
+  # 2026-10-02-faro-fase-0.md, pasos 0.1 y 0.2 y la ronda de auditoria): el paquete fijado del
+  # ecosistema y el Puerto MCP de solo lectura. Las pruebas levantan un Puerto REAL en un socket
+  # Unix temporal y le hablan con un cliente MCP real del SDK oficial por el rele stdio (un
+  # subproceso `python -m jax.faro.relay`), y construyen paquetes reales desde un repo git efimero.
+  # TODO sale con HASH: mcp de requirements-faro.txt, pytest y el cliente de base de
+  # requirements-faro-ci.txt (`--require-hashes`, sin `pip install` suelto: lo vigila
+  # tests/test_faro_requirements.py). Piso exacto de tests CORRIDOS, cero saltados (un skip se ve igual
+  # que verde). Medido 2026-10-02 en hall9000 con Python 3.12: 238 passed
+  # (paquete 82 + puerto 82 + e2e 9 + transporte 37 + cadena 21 + requirements 7).
+  faro-fase0:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --require-hashes -r requirements-faro.txt
+      - run: pip install --require-hashes -r requirements-faro-ci.txt
+      - run: python -m pytest tests/test_faro_paquete.py tests/test_faro_puerto.py tests/test_faro_puerto_e2e.py tests/test_faro_transporte.py tests/test_faro_cadena.py tests/test_faro_requirements.py -v
+      - run: |
+          python -m pytest tests/test_faro_paquete.py tests/test_faro_puerto.py tests/test_faro_puerto_e2e.py tests/test_faro_transporte.py tests/test_faro_cadena.py tests/test_faro_requirements.py -q 2>&1 | tee /tmp/faro
+          grep -qE "^238 passed" /tmp/faro || {
+            echo "PISO ROTO: se esperaban 238 tests CORRIDOS del Faro."; exit 1; }
+          if grep -qE "skipped" /tmp/faro; then
+            echo "HAY TESTS SALTADOS: el Faro se ejercita completo o no cuenta."; exit 1; fi
+
+  # El Faro: la bitacora durable (auditoria MAJOR-5). Tabla encadenada con hash previo y un usuario de
+  # base que SOLO tiene INSERT, contra una MariaDB 12.3.3 EFIMERA (el service de este job, que muere con
+  # el). Piso exacto de 22 tests corridos, cero saltados: sin FARO_TEST_DB_ADMIN las pruebas se saltan, y
+  # un skip se ve igual que verde.
+  faro-bitacora-db:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:12.3.3
+        env:
+          MARIADB_ROOT_PASSWORD: ci
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      PYTHONPATH: .
+      FARO_TEST_DB_ADMIN: "127.0.0.1:3306:root:ci"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --require-hashes -r requirements-faro.txt
+      - run: pip install --require-hashes -r requirements-faro-ci.txt
+      - run: python -m pytest tests/test_faro_bitacora_db.py -v
+      - run: |
+          python -m pytest tests/test_faro_bitacora_db.py -q 2>&1 | tee /tmp/faro-db
+          grep -qE "^22 passed" /tmp/faro-db || {
+            echo "PISO ROTO: se esperaban 22 tests CORRIDOS de la bitacora del Faro."; exit 1; }
+          if grep -qE "skipped" /tmp/faro-db; then
+            echo "HAY TESTS SALTADOS: la bitacora se prueba contra una base real o no cuenta."; exit 1; fi
+
   # Task 6 del plan de alertas nacio con 11 tests y CERO jobs que los
   # corrieran -- tercera instancia del mismo hueco en el mes (ver la octava
   # leccion de metodo en CONTEXT.md). Este job es la correccion, y se
@@ -3484,7 +3546,7 @@ jobs:
           # job). Confirmado contra el run real de CI (run 35372766868): 16
           # tests de tests/test_ejecutor_reproduccion_u3.py (14 que acá salen
           # passed + 2 que acá salen xfailed) se saltean en el runner --
-          # 2206 - 14 = 2192 passed, 1 + 16 = 17 skipped. Ningún otro archivo
+          # 2206 - 14 = 2196 passed, 1 + 16 = 17 skipped. Ningún otro archivo
           # de los agregados hoy se saltea sin DB: corrido local con env -i y
           # sin JAX_DB_HOST, los otros 12 dan verde (passed/xfailed), cero
           # skips. Piso corregido con el número del RUNNER, no el de esta
