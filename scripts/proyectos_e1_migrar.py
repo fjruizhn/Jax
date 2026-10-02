@@ -7,7 +7,7 @@
    tablas de contenido hacia ese proyecto, con conteos verificados.
 
 Uso:  python scripts/proyectos_e1_migrar.py {--verificar|--aplicar} --actor-user-id N
-          [--database NOMBRE] [--confirmo-produccion]
+          [--database NOMBRE] [--salida-reversion RUTA] [--confirmo-produccion]
 
 La conexion sale de JAX_DB_HOST/PORT/USER/PASSWORD/NAME del entorno; este guion
 nunca abre /etc/jax/.env (el runbook carga el entorno). Nunca hace DELETE ni
@@ -43,6 +43,10 @@ LLAVE_EVALUACION_NOMBRE = "e1-evaluacion-grounding-sp3-20260903"
 LLAVE_EVALUACION = str(uuid.uuid5(uuid.NAMESPACE_URL, LLAVE_EVALUACION_NOMBRE))
 BASE_PRODUCCION = "jax_memory"
 COMPONENTE = "proyectos-e1-migrar"
+
+
+class HuerfanosRestantes(RuntimeError):
+    """Tras el commit quedan huerfanos (aparecieron despues de medir)."""
 
 
 class ConteosNoCoinciden(RuntimeError):
@@ -86,17 +90,44 @@ async def medir(pool) -> dict:
             "evaluacion_project_id": int(fila["project_id"]) if fila else None}
 
 
-async def _reescribir_en_transaccion(pool, ids: list[int], destino: int) -> dict[str, int]:
-    """Las cinco tablas en UNA conexion: begin ... commit. Si algun conteo no
-    coincide, rollback y ConteosNoCoinciden."""
+def _escribir_reversion(ruta: str, destino: int, filas: list[dict]) -> None:
+    """Crea el archivo (0600, O_EXCL: jamas pisa uno existente), escribe y
+    hace fsync. Se llama ANTES del commit."""
+    fd = os.open(ruta, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"evaluacion_project_id": destino, "filas": filas}, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        try:
+            os.unlink(ruta)
+        except OSError:
+            pass
+        raise
+
+
+async def _reescribir_en_transaccion(pool, ids: list[int], destino: int, salida_reversion: str) -> dict[str, int]:
+    """Las cinco tablas en UNA conexion: begin ... commit. Antes de cada UPDATE
+    lee (FOR UPDATE) las filas huerfanas para el archivo de reversion, que se
+    escribe y sincroniza antes del commit. Si algun conteo no coincide o la
+    escritura falla: rollback (y el archivo creado se borra)."""
     marcas = ",".join(["%s"] * len(ids))
+    creado = False
     async with pool.acquire() as conn:
         await conn.begin()
         try:
             async with conn.cursor() as cur:
-                esperado = await _filas(cur, ids)
-                movido = {}
+                filas: list[dict] = []
+                esperado: dict[str, int] = {}
+                movido: dict[str, int] = {}
                 for t in TABLAS:
+                    await cur.execute(f"SELECT id, project_id FROM `{t}` WHERE project_id IN ({marcas}) FOR UPDATE",
+                                      tuple(ids))
+                    previas = await cur.fetchall()
+                    esperado[t] = len(previas)
+                    filas.extend({"tabla": t, "id": int(r["id"]), "project_id_anterior": int(r["project_id"])}
+                                 for r in previas)
                     await cur.execute(f"UPDATE `{t}` SET project_id=%s WHERE project_id IN ({marcas})",
                                       (destino, *ids))
                     movido[t] = int(cur.rowcount)
@@ -105,10 +136,17 @@ async def _reescribir_en_transaccion(pool, ids: list[int], destino: int) -> dict
                     raise ConteosNoCoinciden(f"conteos distintos (esperado, movido) por tabla: {malas}")
                 if await _huerfanos(cur):
                     raise ConteosNoCoinciden("quedan project_id huerfanos tras la reescritura")
+            _escribir_reversion(salida_reversion, destino, filas)
+            creado = True
             await conn.commit()
             return movido
         except BaseException:
             await conn.rollback()
+            if creado:
+                try:
+                    os.unlink(salida_reversion)
+                except OSError:
+                    pass
             raise
 
 
@@ -123,8 +161,10 @@ def _req(actor: int, op: str, project_id: int | None) -> MutationAuthorizationRe
     return MutationAuthorizationRequest(_scope(actor, project_id), op, Visibility.PROJECT_SHARED)
 
 
-async def aplicar(pool, *, actor_user_id: int) -> dict:
+async def aplicar(pool, *, actor_user_id: int, salida_reversion: str) -> dict:
     """Idempotente: una segunda corrida no cambia nada y devuelve el mismo id."""
+    if os.path.lexists(salida_reversion):
+        raise FileExistsError(f"el archivo de reversion ya existe: {salida_reversion}")
     antes = await medir(pool)
     admin = ProjectAuthorityAdmin(MariaDBB9Store(pool))
     await admin.bootstrap_existing_project(
@@ -136,8 +176,15 @@ async def aplicar(pool, *, actor_user_id: int) -> dict:
     await admin.set_project_lifecycle(_req(actor_user_id, "SET_PROJECT_LIFECYCLE", ev), ev,
                                       ProjectLifecycle.ARCHIVED)
     ids = antes["huerfanos_ids"]
-    movido = await _reescribir_en_transaccion(pool, ids, ev) if ids else {t: 0 for t in TABLAS}
+    if ids:
+        movido = await _reescribir_en_transaccion(pool, ids, ev, salida_reversion)
+    else:
+        _escribir_reversion(salida_reversion, ev, [])
+        movido = {t: 0 for t in TABLAS}
     despues = await medir(pool)
+    if despues["huerfanos_ids"]:
+        raise HuerfanosRestantes(
+            f"quedan huerfanos tras el commit: {despues['huerfanos_ids']}; hay que volver a correr --aplicar")
     return {"antes": antes, "despues": despues, "evaluacion_project_id": ev, "filas_movidas": movido}
 
 
@@ -148,6 +195,8 @@ def _parser() -> argparse.ArgumentParser:
     g.add_argument("--aplicar", action="store_true", help="escribe: imprime aplicar() como JSON")
     p.add_argument("--actor-user-id", type=int, required=True)
     p.add_argument("--database", default=None, help="pisa a JAX_DB_NAME")
+    p.add_argument("--salida-reversion", default=None,
+                   help="ruta (nueva, 0600) del JSON con el project_id anterior de cada fila; obligatoria con --aplicar")
     p.add_argument("--confirmo-produccion", action="store_true",
                    help=f"obligatorio con --aplicar si la base es {BASE_PRODUCCION}")
     return p
@@ -162,7 +211,8 @@ async def _correr(args, database: str) -> dict:
     try:
         if args.verificar:
             return await medir(pool)
-        return await aplicar(pool, actor_user_id=args.actor_user_id)
+        return await aplicar(pool, actor_user_id=args.actor_user_id,
+                             salida_reversion=args.salida_reversion)
     finally:
         pool.close()
         await pool.wait_closed()
@@ -177,7 +227,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.aplicar and database == BASE_PRODUCCION and not args.confirmo_produccion:
         print(f"--aplicar sobre {BASE_PRODUCCION} (produccion) exige --confirmo-produccion", file=sys.stderr)
         return 2
-    print(json.dumps(asyncio.run(_correr(args, database)), ensure_ascii=False, indent=2))
+    if args.aplicar and not args.salida_reversion:
+        print("--aplicar exige --salida-reversion <ruta> (archivo nuevo)", file=sys.stderr)
+        return 2
+    try:
+        resultado = asyncio.run(_correr(args, database))
+    except (HuerfanosRestantes, ConteosNoCoinciden, FileExistsError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(resultado, ensure_ascii=False, indent=2))
     return 0
 
 

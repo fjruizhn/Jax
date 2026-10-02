@@ -21,7 +21,9 @@ from __future__ import annotations
 import asyncio
 import functools
 import importlib.util
+import json
 import os
+import stat
 import re
 import uuid
 from pathlib import Path
@@ -156,6 +158,14 @@ async def _crear_usuario(t: int, role: str = "superadmin") -> int:
                       (t, f"u{uuid.uuid4().hex[:20]}@test.invalid", role))
 
 
+async def _actor_unico() -> int:
+    """Un solo actor por base: el digest de create_project incluye al usuario."""
+    await _asegurar_tenant(1)
+    fila = await _sql("SELECT user_id FROM jax_users WHERE tenant_id=1 AND role='superadmin' ORDER BY user_id LIMIT 1",
+                      fetch=True)
+    return fila[0]["user_id"] if fila else await _crear_usuario(1)
+
+
 async def _asegurar_proyecto_1() -> None:
     await _sql("INSERT IGNORE INTO projects (id,project_uuid,name,status) VALUES (1,UUID(),'HAMURABI','active')")
 
@@ -188,7 +198,7 @@ async def _limpiar_contenido() -> None:
 
 @requiere_servidor
 @asincrono
-async def test_aplicar_mueve_huerfanos_con_conteos_iguales_y_es_idempotente():
+async def test_aplicar_mueve_huerfanos_con_conteos_iguales_y_es_idempotente(tmp_path):
     t = 1
     await _asegurar_tenant(t)
     actor = await _crear_usuario(t)
@@ -196,8 +206,8 @@ async def test_aplicar_mueve_huerfanos_con_conteos_iguales_y_es_idempotente():
     await _sembrar_huerfanos([900001, 900002, 1400055])
     pool = await _pool()
     try:
-        r1 = await migrar.aplicar(pool, actor_user_id=actor)
-        r2 = await migrar.aplicar(pool, actor_user_id=actor)
+        r1 = await migrar.aplicar(pool, actor_user_id=actor, salida_reversion=str(tmp_path / 'rev1.json'))
+        r2 = await migrar.aplicar(pool, actor_user_id=actor, salida_reversion=str(tmp_path / 'rev2.json'))
     finally:
         pool.close()
         await pool.wait_closed()
@@ -287,20 +297,21 @@ class _PoolSaboteado:
 
 @requiere_servidor
 @asincrono
-async def test_conteos_distintos_hacen_rollback_y_error():
+async def test_conteos_distintos_hacen_rollback_y_error(tmp_path):
     """Si el UPDATE de una tabla no mueve lo contado, nada queda a medias."""
     await _limpiar_contenido()
     await _sembrar_huerfanos([910001], tablas=("conversations", "messages", "facts"))
     pool = await _pool()
     try:
         with pytest.raises(migrar.ConteosNoCoinciden):
-            await migrar._reescribir_en_transaccion(_PoolSaboteado(pool), [910001], 999999)
+            await migrar._reescribir_en_transaccion(_PoolSaboteado(pool), [910001], 999999, str(tmp_path / 'rev.json'))
     finally:
         pool.close()
         await pool.wait_closed()
     assert await _contar("conversations", 910001) == 1      # revertido: sigue huerfana
     assert await _contar("messages", 910001) == 2
     assert await _contar("conversations", 999999) == 0
+    assert not (tmp_path / "rev.json").exists()              # sin commit, sin archivo
 
 
 def test_guarda_de_produccion_sin_base(capsys, monkeypatch):
@@ -310,4 +321,88 @@ def test_guarda_de_produccion_sin_base(capsys, monkeypatch):
     assert rc == 2
     assert "--confirmo-produccion" in capsys.readouterr().err
     monkeypatch.setenv("JAX_DB_NAME", "jax_memory")
+    assert migrar.main(["--aplicar", "--actor-user-id", "1", "--salida-reversion", "/tmp/x.json"]) == 2
+
+
+def test_aplicar_sin_salida_reversion_sale_con_2(capsys, monkeypatch):
+    monkeypatch.setenv("JAX_DB_NAME", "jax_memory_test")
     assert migrar.main(["--aplicar", "--actor-user-id", "1"]) == 2
+    assert "--salida-reversion" in capsys.readouterr().err
+
+
+async def _estado_filas() -> dict:
+    out = {}
+    for t in _TABLAS:
+        for r in await _sql(f"SELECT id, project_id FROM `{t}`", fetch=True):
+            out[(t, r["id"])] = r["project_id"]
+    return out
+
+
+@requiere_servidor
+@asincrono
+async def test_archivo_de_reversion_registra_cada_fila_con_su_id_anterior(tmp_path):
+    actor = await _actor_unico()
+    await _asegurar_proyecto_1()
+    await _limpiar_contenido()
+    await _sembrar_huerfanos([920001, 920002], tablas=("conversations", "messages", "decisions"))
+    antes = await _estado_filas()
+    ruta = tmp_path / "rev.json"
+    pool = await _pool()
+    try:
+        r = await migrar.aplicar(pool, actor_user_id=actor, salida_reversion=str(ruta))
+    finally:
+        pool.close()
+        await pool.wait_closed()
+    datos = json.loads(ruta.read_text())
+    assert datos["evaluacion_project_id"] == r["evaluacion_project_id"]
+    registradas = {(f["tabla"], f["id"]): f["project_id_anterior"] for f in datos["filas"]}
+    assert len(datos["filas"]) == len(registradas) == len(antes) == 10
+    assert registradas == antes
+    assert stat.S_IMODE(os.stat(ruta).st_mode) == 0o600
+
+
+@requiere_servidor
+@asincrono
+async def test_archivo_existente_aborta_antes_de_tocar_la_base(tmp_path):
+    actor = await _actor_unico()
+    await _limpiar_contenido()
+    await _sembrar_huerfanos([930001])
+    ruta = tmp_path / "ya.json"
+    ruta.write_text("previo")
+    estado = await _estado_filas()
+    n_scope = (await _sql("SELECT COUNT(*) c FROM jax_project_scope", fetch=True))[0]["c"]
+    pool = await _pool()
+    try:
+        with pytest.raises(FileExistsError):
+            await migrar.aplicar(pool, actor_user_id=actor, salida_reversion=str(ruta))
+    finally:
+        pool.close()
+        await pool.wait_closed()
+    assert ruta.read_text() == "previo"
+    assert await _estado_filas() == estado
+    assert (await _sql("SELECT COUNT(*) c FROM jax_project_scope", fetch=True))[0]["c"] == n_scope
+
+
+@requiere_servidor
+@asincrono
+async def test_huerfano_que_aparece_tras_el_commit_hace_fallar_aplicar(tmp_path, monkeypatch):
+    actor = await _actor_unico()
+    await _limpiar_contenido()
+    await _sembrar_huerfanos([940001])
+    real = migrar.medir
+    llamadas = []
+
+    async def medir_con_carrera(pool):
+        llamadas.append(1)
+        if len(llamadas) == 2:                       # la medicion posterior al commit
+            await _sembrar_huerfanos([940002], tablas=("facts",))
+        return await real(pool)
+    monkeypatch.setattr(migrar, "medir", medir_con_carrera)
+    pool = await _pool()
+    try:
+        with pytest.raises(migrar.HuerfanosRestantes) as e:
+            await migrar.aplicar(pool, actor_user_id=actor, salida_reversion=str(tmp_path / "r.json"))
+    finally:
+        pool.close()
+        await pool.wait_closed()
+    assert "940002" in str(e.value) and "volver a correr" in str(e.value)
