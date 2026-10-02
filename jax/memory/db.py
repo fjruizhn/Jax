@@ -9,7 +9,7 @@ Filosofia de diseno (contrato firmado por Claude + DeepSeek + Hipatia):
     es un "plus", nunca un punto de falla. Igual que el kill switch.
   - Pool pequeno (1-5 conexiones), autocommit.
   - Fire-and-forget al guardar: no agrega latencia a la respuesta de JAX.
-  - Alcance: start/save/end/health_check. La extraccion de hechos
+  - Alcance: start/save/end. La extraccion de hechos
     (worker batch) es una pieza aparte, no esta.
 
 En memoria de Jairo Urbina.
@@ -514,8 +514,9 @@ class MemoryDB:
 
     def __init__(self):
         # None = todavia no se intento conectar. True/False = resultado de la
-        # ultima migracion. Lo lee health_check(): un esquema a medias NO es
-        # una base sana, aunque responda al SELECT.
+        # ultima migracion. Un esquema a medias NO es una base sana, aunque
+        # responda al SELECT; lo leen las rutas de busqueda y el log de connect().
+        # (T16: health_check(), que lo leia, se retiro: no tenia consumidor.)
         self.schema_ok: Optional[bool] = None
         self.pool: Optional[aiomysql.Pool] = None
         self.config: dict = {}
@@ -621,7 +622,7 @@ class MemoryDB:
                     "MemoryDB: el esquema NO esta al dia y no se pudo completar la "
                     "migracion. La base responde, pero puede faltar una columna o un "
                     "backfill: la busqueda por scope (user_id/project_id) puede devolver "
-                    "MENOS de lo que hay, sin error. health_check() devuelve False "
+                    "MENOS de lo que hay, sin error. self.schema_ok queda en False "
                     "mientras dure. Revisar el error de la migracion, arriba."
                 )
             return True
@@ -712,30 +713,6 @@ class MemoryDB:
     @property
     def is_connected(self) -> bool:
         return self.pool is not None
-
-    # --------------------------------------------------------
-    # Health check (incluye verificacion de VECTOR)
-    # --------------------------------------------------------
-    @db_error_handler
-    async def health_check(self) -> Optional[bool]:
-        """Verifica que la base responde, que VECTOR funciona y que el esquema
-        esta al dia.
-
-        El esquema entra aca a proposito (2026-09-16): una base que responde
-        pero a la que le falta una columna o un backfill NO esta sana -- sirve
-        menos datos de los que tiene y no da error. Un flag que nadie consulta
-        es el mismo defecto que se acaba de arreglar en jacobs/reaper.py
-        (`error: True` escrito y jamas leido), asi que este se lee aqui.
-        """
-        if not self.pool:
-            return None
-        if self.schema_ok is False:
-            return False
-        async with self.pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute("SELECT VEC_ToText(VEC_FromText('[1,2,3]'))")
-                row = await cur.fetchone()
-                return row is not None
 
     # --------------------------------------------------------
     # Embeddings (vectorizacion via Ollama local)

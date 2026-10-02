@@ -19,4 +19,6 @@ RAIZ = Path(__file__).resolve().parents[1]
 
 def test_la_config_no_declara_la_ruta_del_freno():
     with open(RAIZ / "config" / "config.toml", "rb") as f:
-        assert "kill_switch_path" not in tomllib.load(f)["jax"]
+        cfg = tomllib.load(f)
+    # T16: la tabla [jax] ya no existe; se mira la config entera, no solo esa tabla.
+    assert "kill_switch_path" not in str(cfg)

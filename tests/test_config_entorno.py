@@ -120,13 +120,6 @@ def test_la_memoria_pide_el_embedding_a_JAX_OLLAMA_URL(monkeypatch):
     assert urls == ["http://ollama.test:11434/api/embed"]
 
 
-def test_el_musculo_local_no_tiene_url_por_defecto():
-    # T16 (2026-10-02): se fue la mitad que armaba el musculo desde el entorno con
-    # build_muscles (jax/core/main.py, el REPL). Queda que el constructor exige la URL.
-    from jax.muscles.ollama_muscle import OllamaMuscle
-    assert inspect.signature(OllamaMuscle.__init__).parameters["api_url"].default is inspect.Parameter.empty
-
-
 @pytest.mark.parametrize("proveedor, metodo", [
     ("deepseek", "_call_deepseek"), ("openai", "_call_openai"), ("gemini", "_call_gemini"),
 ])
@@ -148,7 +141,7 @@ def test_sin_url_del_catalogo_el_musculo_http_no_despacha(proveedor, metodo):
 
 
 _SIN_URLS_LITERALES = ("jacobs/executor.py", "jacobs/plan.py", "jax/memory/db.py",
-                       "jax/muscles/base.py", "jax/muscles/ollama_muscle.py")
+                       "jax/muscles/base.py")
 
 
 def _urls_literales(fuente: str) -> list[int]:

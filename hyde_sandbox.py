@@ -354,15 +354,16 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> tuple[list[str], di
 # verdad sin leer la env var de nuevo aca.
 #
 # MODO COMPARTIDO (auditoria 2026-10-02, MAJOR-3 y, en la ronda 2, MAJOR-14): el
-# lock lo toman procesos de USUARIOS DISTINTOS -- las_manos (jaxsvc) y el REPL
+# lock lo tomaban procesos de USUARIOS DISTINTOS -- las_manos (jaxsvc) y el REPL
 # (fruiz) --, asi que no puede ser "del euid": el duenyo es root y el acceso es por
-# GRUPO. El directorio y el grupo son CONSTANTES DEL CODIGO (abajo), no
-# configuracion: el REPL no puede leer /etc/jax/.env, y un valor leido del entorno
-# haria que los dos procesos pudieran calcular directorios distintos. Los siembra
+# GRUPO. (T16, 2026-10-02: el REPL se retiro; el diseño por grupo se conserva hasta
+# decidir si sigue haciendo falta con un solo usuario de servicio.) El directorio y
+# el grupo son CONSTANTES DEL CODIGO (abajo), no configuracion: un valor leido del
+# entorno haria que dos procesos pudieran calcular directorios distintos. Los siembra
 # el host con tmpfiles.d, en /etc/tmpfiles.d/jax-locks.conf:
 #   d /run/jax-locks/hyde 0750 root jax-cli-lock -
 #   f /run/jax-locks/hyde/<digest>.lock 0640 root jax-cli-lock -   (uno por workspace)
-# y los dos usuarios son miembros de `jax-cli-lock`. `cli_sandbox.flock_compartido_adquirir`
+# y los usuarios que lo toman son miembros de `jax-cli-lock`. `cli_sandbox.flock_compartido_adquirir`
 # verifica el directorio y el archivo antes de tomar el lock y NUNCA crea nada.
 HYDE_LOCK_DIR = "/run/jax-locks/hyde"
 HYDE_LOCK_GROUP = "jax-cli-lock"

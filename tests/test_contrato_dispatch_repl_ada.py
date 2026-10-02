@@ -429,29 +429,6 @@ class PlanSinModeloLiteralTest(unittest.TestCase):
 # Ronda 2
 # ---------------------------------------------------------------------------
 
-class OllamaNumPredictTest(_Base):
-    """M3: los caminos Ollama nativos mandan options.num_predict del contrato."""
-
-    async def test_ollama_muscle_manda_num_predict_de_la_fila(self):
-        from jax.muscles.ollama_muscle import OllamaMuscle
-        self.arrancar((None, 4096))
-        m = OllamaMuscle("jax_local", "qwen-x", ["qwen-x"], "s", 10, api_url="http://ollama.example/api/chat")
-        m.provider_id = "ollama"
-        await m.invoke("hola")
-        self.assertEqual(self.cap.bodies[0]["options"], {"num_predict": 4096})
-        self.leer.assert_awaited_once_with("ollama", "qwen-x")
-
-    async def test_ollama_muscle_sin_tope_no_despacha(self):
-        from jax.muscles.ollama_muscle import OllamaMuscle
-        self.arrancar((None, None))
-        m = OllamaMuscle("jax_local", "qwen-x", ["qwen-x"], "s", 10, api_url="http://ollama.example/api/chat")
-        m.provider_id = "ollama"
-        with self.assertRaises(base.DispatchConfigMuscleError) as ctx:
-            await m.invoke("hola")
-        self.assertIn("UPDATE model SET max_output_tokens", str(ctx.exception))
-        self.assertEqual(self.cap.bodies, [])
-
-
 class JacobsOllamaNumPredictTest(unittest.IsolatedAsyncioTestCase):
     def arrancar(self, fila):
         import contrato_dispatch as cd_jacobs
@@ -527,85 +504,6 @@ class TopeDeColumnaDePRLTest(_Base):
             await cd.limite_de_salida("http_openai_compat", "deepseek", "m")
         self.assertEqual(cd._MAX_OUTPUT_TOKENS_TOPE_COLUMNA, 2 ** 31 - 1)
 
-
-class ClasificadorDelRouterTest(unittest.IsolatedAsyncioTestCase):
-    """N2b: el clasificador del REPL nunca lanza, pero un contrato roto ya no
-    se traga en silencio: WARNING con el motivo."""
-
-    def _router(self, error):
-        from jax.core.router import Router
-        clasificador = AsyncMock()
-        clasificador.invoke = AsyncMock(side_effect=error)
-        return Router(classifier=clasificador)
-
-    async def test_contrato_roto_deja_warning_con_el_update(self):
-        err = base.DispatchConfigMuscleError(
-            "[jax_local] dispatch abortado: modelo 'q': UPDATE model SET max_output_tokens=<tope>")
-        with self.assertLogs("jax.router", level="WARNING") as logs:
-            self.assertIsNone(await self._router(err)._classify("hola"))
-        self.assertIn("UPDATE model SET max_output_tokens", "\n".join(logs.output))
-
-    async def test_otra_falla_tambien_deja_rastro_pero_con_freno(self):
-        """DECISION REVERTIDA el 2026-09-16 por Fernando, tras la auditoria P10.
-
-        Este test afirmaba lo contrario —— se llamaba
-        `test_otra_falla_sigue_cayendo_al_default_sin_ruido` y exigia
-        `assertNoLogs`—— y la intencion era buena: separar la senal accionable
-        (un contrato de dispatch roto, que trae el UPDATE que hay que correr)
-        del ruido de un fallo de red transitorio.
-
-        Lo que esa distincion no cubria: un fallo de red TRANSITORIO es ruido,
-        pero uno PERMANENTE —— Ollama caido, el clasificador roto—— degrada el
-        100 % del ruteo automatico a la faceta por defecto, indefinidamente y
-        sin una sola linea que lo diga. Nadie se entera de que el router dejo
-        de clasificar.
-
-        El freno resuelve las dos cosas a la vez: se avisa la primera vez y
-        despues cada _CLASIFICADOR_CADA_N, asi que un clasificador en bucle no
-        inunda el log —— un log inundado se deja de leer, que es otra forma de
-        callar—— pero la degradacion permanente si deja rastro, con el contador
-        de cuantas veces fallo. Lo fija test_no_inunda_el_log en
-        tests/test_degradaciones_declaradas.py.
-
-        El test no se borro: se reescribio en su contrario, que es como esta
-        casa cambia una decision fijada."""
-        with self.assertLogs("jax.router", level="WARNING") as logs:
-            self.assertIsNone(await self._router(RuntimeError("red caida"))._classify("hola"))
-        salida = "\n".join(logs.output)
-        self.assertIn("clasificador del router caido", salida)
-        self.assertIn("NO esta clasificando", salida)
-
-    async def test_el_contrato_roto_sigue_distinguiendose_de_una_falla_cualquiera(self):
-        """La distincion original NO se perdio: el contrato roto sigue trayendo
-        el UPDATE accionable, y una falla cualquiera no lo inventa."""
-        err = base.DispatchConfigMuscleError(
-            "[jax_local] dispatch abortado: modelo 'q': UPDATE model SET max_output_tokens=<tope>")
-        with self.assertLogs("jax.router", level="WARNING") as contrato:
-            await self._router(err)._classify("hola")
-        with self.assertLogs("jax.router", level="WARNING") as cualquiera:
-            await self._router(RuntimeError("red caida"))._classify("hola")
-        self.assertIn("UPDATE model SET", "\n".join(contrato.output))
-        self.assertNotIn("UPDATE model SET", "\n".join(cualquiera.output))
-
-
-class UrlRealPorCaminoTest(_Base):
-    """N4: con la provider.base_url de producción, cada camino llama al
-    endpoint que corresponde y el parámetro del límite sigue a ESE endpoint."""
-
-    def test_repl_http_arma_chat_completions_desde_la_base_url_real(self):
-        from jax.core.registro_facetas import aplicar_registro
-        for provider_id, clave in (("deepseek", "deepseek"), ("moonshot", "kimi"),
-                                   ("openai", "openai"), ("zhipu", "zhipu")):
-            with self.subTest(provider_id):
-                cfg = {"personalities": {"f": {"type": "http", "provider": "x", "model_default": "m",
-                                               "models_allowed": ["m"]}}}
-                aplicar_registro(cfg, {"f": {"model": "m", "models_allowed": ["m"],
-                                             "transport": "http_openai_compat",
-                                             "provider_modelo": provider_id,
-                                             "base_url_modelo": _BASE_URL_PROD[provider_id]}})
-                self.assertEqual(cfg["personalities"]["f"]["api_url"],
-                                 _BASE_URL_PROD[provider_id] + "/chat/completions")
-                self.assertEqual(cfg["personalities"]["f"]["provider"], clave)
 
 class UrlRealJacobsYMotorTest(unittest.IsolatedAsyncioTestCase):
     """N4 en los caminos de Jacobs y del Motor Registry. Reusa el arranque de

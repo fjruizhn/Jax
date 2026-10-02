@@ -21,8 +21,8 @@ es la forma callada de la certeza fabricada (Principios V y VIII).
 Y `MemoryDB.health_check()`, que no lo llamaba nadie, ahora lo llama el REPL.
 
 T16 (2026-10-02): el REPL y `jax --task` se retiraron; se fueron con ellos las
-comprobaciones sobre el codigo de jax/core/main.py (puntos 2 y 3 y el consumidor
-de health_check). Quedan el Router (4) y la memoria (1).
+comprobaciones sobre el codigo de jax/core/main.py (puntos 2 y 3) y las del Router
+(punto 4: la clase se retiro) y de health_check (sin consumidor). Queda la memoria (1).
 """
 from __future__ import annotations
 
@@ -37,41 +37,7 @@ from unittest import mock
 RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ))
 
-from jax.core.router import Router  # noqa: E402
 from jax.memory import db as dbmod  # noqa: E402
-
-
-class RouterTest(unittest.TestCase):
-    def _router_con_clasificador_roto(self) -> Router:
-        clasificador = mock.MagicMock()
-        clasificador.invoke = mock.AsyncMock(side_effect=OSError("ollama caido"))
-        return Router(classifier=clasificador)
-
-    def test_un_clasificador_caido_deja_rastro(self):
-        r = self._router_con_clasificador_roto()
-        with self.assertLogs("jax.router", level=logging.WARNING) as capturado:
-            self.assertIsNone(asyncio.run(r._classify("hola")))
-        self.assertIn("clasificador del router caido", "\n".join(capturado.output))
-
-    def test_se_cuentan_los_fallos(self):
-        r = self._router_con_clasificador_roto()
-        for _ in range(3):
-            asyncio.run(r._classify("hola"))
-        self.assertEqual(r._fallos_clasificador, 3)
-
-    def test_no_inunda_el_log(self):
-        """Un clasificador en bucle no puede llenar el log: un log inundado se
-        deja de leer, que es otra forma de callar."""
-        r = self._router_con_clasificador_roto()
-        with self.assertLogs("jax.router", level=logging.WARNING) as capturado:
-            for _ in range(10):
-                asyncio.run(r._classify("hola"))
-        self.assertEqual(len(capturado.output), 1, "aviso repetido en cada turno")
-
-    def test_el_router_sigue_sin_lanzar(self):
-        """El contrato de siempre no cambia: el router NUNCA lanza."""
-        r = self._router_con_clasificador_roto()
-        self.assertIsNone(asyncio.run(r._classify("hola")))
 
 
 class MemoriaTest(unittest.TestCase):

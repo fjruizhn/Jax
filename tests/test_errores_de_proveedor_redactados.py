@@ -162,13 +162,3 @@ class ReplTest(unittest.IsolatedAsyncioTestCase):
         mensaje = await self._error("openai", "_call_openai")
         self.assertIn("OpenAI HTTP 400", mensaje)
         self.assertNotIn(SECRETO[:8], mensaje)
-
-    async def test_ollama_local_redacta_antes_de_recortar(self):
-        from jax.muscles.base import MuscleInvocationError
-        from jax.muscles.ollama_muscle import OllamaMuscle
-        musculo = OllamaMuscle("jax_local", "q", ["q"], "s", 10, api_url="http://ollama.example/api/chat")
-        with _responder(500, CUERPO_CON_BEARER), \
-             patch("jax.muscles.ollama_muscle.limite_de_salida", AsyncMock(return_value={"options": {"num_predict": 5}})):
-            with self.assertRaises(MuscleInvocationError) as ctx:
-                await musculo._call("hola", "q")
-        self.assertNotIn("tok-FAKE", str(ctx.exception))

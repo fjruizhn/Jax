@@ -1842,7 +1842,7 @@ jobs:
           tests/test_invoke_motor_rechazo.py tests/test_motor_contexto_y_salida.py
           tests/test_hipatia_fuentes.py tests/test_motor_catalog_sello.py
           tests/test_repl_fuentes.py tests/test_memory_embedding_config.py
-          tests/test_fuentes_dedup.py tests/test_repl_modelos_permitidos.py
+          tests/test_fuentes_dedup.py
           tests/test_motor_catalog_mode.py
           tests/test_jacobs_invoked_by_rol.py
           tests/test_catalog_from_db_timeout.py
@@ -2022,7 +2022,7 @@ jobs:
             tests/test_invoke_motor_rechazo.py tests/test_motor_contexto_y_salida.py \
             tests/test_hipatia_fuentes.py tests/test_motor_catalog_sello.py \
             tests/test_repl_fuentes.py tests/test_memory_embedding_config.py \
-            tests/test_fuentes_dedup.py tests/test_repl_modelos_permitidos.py \
+            tests/test_fuentes_dedup.py \
             tests/test_motor_catalog_mode.py \
             tests/test_jacobs_invoked_by_rol.py \
             tests/test_catalog_from_db_timeout.py \
@@ -4802,8 +4802,17 @@ jobs:
           # 3185 -> 3187 (mismo PR): +2 puros de tests/test_repl_retirado.py (los archivos
           #   del REPL ya no estan y nada importa jax.core.main ni subprocess_muscle); vistos
           #   en rojo contra 11c189d (origin/master). Neto del PR: 3223 -> 3187.
-          grep -qE "^3187 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3187 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 3187 -> 3156 (mismo PR, auditoria de T16, MINOR-2/3/4): -31 al retirar lo que
+          #   solo servia al REPL: jax/muscles/ollama_muscle.py, cargar_registro/aplicar_registro
+          #   de registro_facetas, la clase Router, MemoryDB.health_check y [jax] de config.toml.
+          #   Medido por identificador de prueba (pytest tests):
+          #   test_repl_modelos_permitidos (-16, entero), test_degradaciones_declaradas.RouterTest
+          #   (-4), test_contrato_dispatch_repl_ada (ClasificadorDelRouterTest -3,
+          #   OllamaNumPredictTest -2, UrlRealPorCaminoTest -1), test_memoria_no_traga_fallos_de_escritura
+          #   (-2, los de health_check), test_config_entorno (-1), test_errores_de_proveedor_redactados
+          #   (-1), test_router_easter_egg (-1, el del Router).
+          grep -qE "^3156 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3156 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del

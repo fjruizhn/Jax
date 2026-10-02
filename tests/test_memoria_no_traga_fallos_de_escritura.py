@@ -54,21 +54,6 @@ def _pool_falso(last_insert_id: int = 42):
 
 
 class EsquemaTest(unittest.TestCase):
-    def test_una_migracion_fallida_deja_la_base_como_NO_sana(self):
-        m = dbmod.MemoryDB()
-        m.pool = _pool_falso()
-        m.schema_ok = False
-        self.assertIs(asyncio.run(m.health_check()), False,
-                      "una base con el esquema a medias se reporto como sana")
-
-    def test_sin_fallo_de_migracion_el_health_mira_la_base(self):
-        """Control del control: con el esquema al dia, health_check sigue
-        consultando la base como siempre."""
-        m = dbmod.MemoryDB()
-        m.pool = _pool_falso()
-        m.schema_ok = True
-        self.assertIs(asyncio.run(m.health_check()), True)
-
     def test_el_atributo_existe_antes_de_conectar(self):
         self.assertIsNone(dbmod.MemoryDB().schema_ok)
 
