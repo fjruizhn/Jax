@@ -1,7 +1,7 @@
 """El Faro, paso 0.3c (R3): la jaula y el canal de control con bwrap REAL y uids REALES del sistema.
 
-Necesita `bwrap` (bubblewrap) y `sudo -n` sin contrasena (para correr procesos de prueba como otro uid:
-`nobody` = 65534, `daemon` = 1). Si falta cualquiera de los dos las pruebas se SALTAN y el job de CI
+Necesita `bwrap` (bubblewrap) y `sudo -n` sin contrasena (para correr procesos de prueba como otro uid con
+`setpriv`: `nobody` = 65534, `daemon` = 1, `www-data` = 33). Si falta cualquiera de los dos las pruebas se SALTAN y el job de CI
 (`faro-jaula`) exige cero saltadas: un skip se ve igual que verde.
 
 Lo que ejercita de verdad:
@@ -15,8 +15,9 @@ Lo que ejercita de verdad:
 
 LO QUE NO EJERCITA (declarado en el plan): bwrap CORRIENDO COMO el uid de la jaula con las rutas de `/run/faro`.
 Un proceso con otro uid no puede atravesar el directorio 0700 de `faro` para abrir las fuentes de los binds, y
-bwrap como root pierde `setuid` bajo el perfil de AppArmor del host: abrir las fuentes antes de bajar de uid
-es trabajo del elevador (paso 0.6/0.10), no del argv.
+sudo cierra los descriptores heredados (no se pueden pasar ya abiertos con `--bind-fd`); bwrap como root, a su vez,
+no puede cambiar de uid dentro (AppArmor). Abrir las fuentes antes de bajar de uid es trabajo del elevador
+(paso 0.6/0.10), no del argv.
 """
 from __future__ import annotations
 
@@ -39,10 +40,10 @@ from jax.faro.jaula import ConfigJaula, LanzadorJaula, argv_montajes
 from jax.faro.transporte import ServidorPuerto
 from tests._faro_utils import corre, ejecucion, paquete_listo, puerto
 
-NOBODY, DAEMON = 65534, 1
+NOBODY, DAEMON, JAULA = 65534, 1, 33        # uids que existen en cualquier Ubuntu: nobody, daemon y www-data (sudo exige una cuenta)
 GID = os.getgid()
 PEDIDO = {"op": "crear", "usuario": "u-real", "tenant": "t-real", "faceta": "hyde", "motor": "codex",
-          "pipeline": "p-real", "entry_point": "repl", "uid_jaula": 50001}
+          "pipeline": "p-real", "entry_point": "repl", "uid_jaula": JAULA}
 
 
 def _sudo_ok() -> bool:
@@ -86,6 +87,7 @@ def base():
 @pytest.fixture
 def mundo(base):
     (base / "pkg").mkdir()
+    (base / "pkg").chmod(0o755)                    # el paquete exige ancestros sin escritura de grupo (la umask del host puede dar 0775)
     _cfg, cargado = paquete_listo(base / "pkg")
     d = base / "run"
     d.mkdir(mode=0o700)
@@ -93,20 +95,23 @@ def mundo(base):
 
 
 async def como_uid(uid: int, codigo: str, *args: str, grupo: int | None = None, plazo: float = 20.0):
-    """Corre `python3 -c codigo args...` como el uid dado (sudo) y devuelve (returncode, stdout, stderr)."""
-    g = ["-g", f"#{grupo}"] if grupo is not None else []
-    p = await asyncio.create_subprocess_exec("sudo", "-n", "-u", f"#{uid}", *g, "--", "/usr/bin/python3", "-c", codigo, *args,
-                                             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    """Corre `python3 -c codigo args...` con el uid (y el gid) dados y SIN grupos suplementarios, y devuelve
+    (returncode, stdout, stderr). Usa `sudo setpriv` en vez de `sudo -u/-g`: este ultimo exige reglas de grupo en
+    sudoers (`(ALL:ALL)`) que un runner no tiene siempre, y `-u` exige una cuenta en el sistema."""
+    gid = grupo if grupo is not None else uid
+    p = await asyncio.create_subprocess_exec(
+        "sudo", "-n", "/usr/bin/setpriv", f"--reuid={uid}", f"--regid={gid}", "--clear-groups", "--no-new-privs", "--",
+        "/usr/bin/python3", "-c", codigo, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     salida, error = await asyncio.wait_for(p.communicate(), plazo)
     return p.returncode, salida.decode(), error.decode()
 
 
 INTENTOS = r"""
 import json, os, socket, sys
-d, sock, tok, base = sys.argv[1:5]
+d, sock, tok = sys.argv[1:4]
 r = {}
 for nombre, f in (("listdir", lambda: os.listdir(d)), ("leer_token", lambda: open(tok).read()),
-                  ("stat_socket", lambda: os.stat(sock)), ("base", lambda: os.listdir(base))):
+                  ("stat_socket", lambda: os.stat(sock)), ("stat_dir", lambda: os.stat(d))):
     try:
         f(); r[nombre] = "ok"
     except Exception as e:
@@ -129,11 +134,11 @@ def test_el_directorio_de_sockets_no_es_listable_ni_alcanzable_desde_otro_uid(mu
         bit = Bitacora(emisores=[])
         async with ServidorPuerto(mundo.cfg_puerto, ejecucion(uid_esperado=NOBODY), mundo.cargado, bit) as srv:
             rc, salida, error = await como_uid(NOBODY, INTENTOS, str(mundo.cfg_puerto.socket_dir), str(srv.ruta_socket),
-                                               str(srv.ruta_token), str(mundo.base))
+                                               str(srv.ruta_token))
             return rc, json.loads(salida), error
     rc, r, error = corre(caso())
     assert rc == 0, error
-    assert r["base"] == "ok"                                          # el camino hasta el directorio SI se recorre...
+    assert r["stat_dir"] == "ok"                                      # el camino hasta el directorio SI se recorre (existe, se ve)...
     assert r["listdir"] == r["leer_token"] == r["stat_socket"] == r["conectar"] == "PermissionError", r    # ...y el 0700 lo corta
 
 
@@ -161,7 +166,7 @@ except (ConnectionResetError, BrokenPipeError):
 def _control(mundo, registros):
     d = mundo.base / "control"
     d.mkdir(mode=0o750)
-    cfg = ConfigControl(control_dir=d, orquestador_uid=NOBODY, jaula_uid_min=50000, jaula_uid_max=50050, plazo_s=5.0)
+    cfg = ConfigControl(control_dir=d, orquestador_uid=NOBODY, jaula_uid_min=20, jaula_uid_max=40, plazo_s=5.0)
     bit = Bitacora(emisores=[registros.append])
     return ServidorControl(cfg, lambda ej: ServidorPuerto(mundo.cfg_puerto, ej, mundo.cargado, bit), bit)
 
@@ -179,7 +184,7 @@ def test_el_canal_de_control_autentica_por_el_uid_real_del_kernel(mundo, requier
     sin_grupo, orquestador, tercero, ejecuciones = corre(caso())
     assert json.loads(sin_grupo[1]) == {"conexion": "PermissionError"}            # sin el grupo ni siquiera abre el socket
     r = json.loads(orquestador[1])["respuesta"]
-    assert r["ok"] and r["uid_jaula"] == 50001 and list(ejecuciones) == [r["run_id"]]
+    assert r["ok"] and r["uid_jaula"] == JAULA and list(ejecuciones) == [r["run_id"]]
     assert json.loads(tercero[1]) == {"respuesta": None}                           # llega al archivo y se le cierra por su uid
     rechazos = [x for x in registros if x["evento"] == "control_rechazado"]
     assert [(x["motivo"], x["peer_uid"]) for x in rechazos] == [("uid_no_autorizado", DAEMON)]
@@ -188,10 +193,10 @@ def test_el_canal_de_control_autentica_por_el_uid_real_del_kernel(mundo, requier
 
 
 def test_un_uid_de_jaula_real_no_abre_el_socket_de_control(mundo, requiere_sudo):
-    """El uid de una jaula (aqui 50001, sin cuenta en el sistema) no pertenece al grupo del directorio de control."""
+    """El uid de una jaula (aqui www-data, 33) no pertenece al grupo del directorio de control."""
     async def caso():
         async with _control(mundo, []) as srv:
-            return await como_uid(50001, CLIENTE_CONTROL, str(srv.ruta_socket), json.dumps(PEDIDO)), srv.ejecuciones
+            return await como_uid(JAULA, CLIENTE_CONTROL, str(srv.ruta_socket), json.dumps(PEDIDO)), srv.ejecuciones
     (rc, salida, _error), ejecuciones = corre(caso())
     assert json.loads(salida) == {"conexion": "PermissionError"} and ejecuciones == {}
 
@@ -208,12 +213,12 @@ def test_lanzar_arranca_el_proceso_con_el_kernel_uid_de_la_jaula(mundo, requiere
 
     async def caso():
         bit = Bitacora(emisores=[])
-        async with ServidorPuerto(mundo.cfg_puerto, ejecucion(uid_esperado=50001), mundo.cargado, bit) as srv:
+        async with ServidorPuerto(mundo.cfg_puerto, ejecucion(uid_esperado=JAULA), mundo.cargado, bit) as srv:
             p = await LanzadorJaula(cfg, bit).lanzar(srv, ["/usr/bin/true"])
             salida, _ = await asyncio.wait_for(p.communicate(), 20)
             return salida.decode().split()
     uid, _gid = corre(caso())
-    assert int(uid) == 50001 != os.getuid()
+    assert int(uid) == JAULA != os.getuid()
 
 
 # --------------------------------------------------------------------------- #
@@ -253,7 +258,7 @@ def test_la_jaula_ve_solo_su_socket_su_token_y_el_rele(mundo, requiere_bwrap):
     assert vista["token"] == token
     assert vista["socket_dir_existe"] is False and "run" not in vista["raiz"]       # el directorio de sockets NO esta en la jaula
     assert vista["escribir_token"] != "ok" and vista["escribir_usr"] != "ok" and vista["escribir_relay"] != "ok"
-    assert set(vista["env"]) - {"LC_CTYPE"} == {"HOME", "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONPATH"}    # entorno minimo (LC_CTYPE lo pone Python)
+    assert set(vista["env"]) - {"LC_CTYPE", "PWD"} == {"HOME", "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONPATH"}    # entorno minimo (LC_CTYPE lo pone Python, PWD bwrap)
 
 
 def _params_jaula(sock, tok):

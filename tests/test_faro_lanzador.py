@@ -2,6 +2,12 @@
 ARCHIVO solo SU socket y SU token (y el rele, de solo lectura); nunca el directorio de sockets. Corre con un uid
 propio, distinto del de `faro` y del de root.
 
+MODELO (medido en hall9000, bubblewrap 0.11.1): el uid de la jaula lo pone la ELEVACION (`JAX_FARO_JAULA_ELEVAR`,
+con `{uid}`), no el argv. Un bwrap corriendo como root NO puede cambiar de uid dentro: el perfil de AppArmor
+`bwrap//&unpriv_bwrap` confina a sus hijos y `setresuid` falla con EPERM (incluso con `--cap-add`); y bwrap
+sin privilegios ya corre con el uid de quien lo lanza (su namespace de usuario no cambia el uid que ve el
+kernel). Por eso el argv NO lleva `setpriv` ni `--cap-add`, y la configuracion exige `{uid}` en la elevacion.
+
 Aqui, sin bwrap ni uids reales: la forma exacta del argv, la validacion del uid, la configuracion que falla
 cerrado, el orden bitacora -> arranque y que el ejemplo versionado (`ops/faro/bwrap-ejemplo.txt`) no se desvie.
 Con bwrap real y uids reales (sudo): `test_faro_jaula_real.py`.
@@ -37,7 +43,10 @@ def bwrap(tmp_path):
     return ruta
 
 
-def _cfg(bwrap, elevar=("/usr/bin/sudo", "-n", "--")):
+ELEVAR = ("/usr/bin/sudo", "-n", "-u", "#{uid}", "--")
+
+
+def _cfg(bwrap, elevar=ELEVAR):
     return ConfigJaula(bwrap=bwrap, elevar=tuple(elevar))
 
 
@@ -61,20 +70,21 @@ def test_la_configuracion_sale_del_entorno(bwrap):
 
 @pytest.mark.parametrize("falta", ["JAX_FARO_BWRAP", "JAX_FARO_JAULA_ELEVAR"])
 def test_sin_bwrap_o_sin_elevacion_no_hay_lanzador(bwrap, falta):
-    env = {"JAX_FARO_BWRAP": str(bwrap), "JAX_FARO_JAULA_ELEVAR": "/usr/bin/sudo -n --"}
+    env = {"JAX_FARO_BWRAP": str(bwrap), "JAX_FARO_JAULA_ELEVAR": "/usr/bin/sudo -n -u #{uid} --"}
     env.pop(falta)
     with pytest.raises(ConfigFaroInvalida, match=falta):
         ConfigJaula.desde_entorno(env)
 
 
 @pytest.mark.parametrize("bwrap_ruta,elevar", [
-    ("relativa/bwrap", "/usr/bin/sudo -n --"),
-    ("/no/existe/bwrap", "/usr/bin/sudo -n --"),
-    ("__directorio__", "/usr/bin/sudo -n --"),
-    ("__no_ejecutable__", "/usr/bin/sudo -n --"),
-    ("__ok__", "sudo -n --"),                      # el primer elemento de la elevacion tiene que ser una ruta absoluta (PATH)
+    ("relativa/bwrap", "/usr/bin/sudo -n -u #{uid} --"),
+    ("/no/existe/bwrap", "/usr/bin/sudo -n -u #{uid} --"),
+    ("__directorio__", "/usr/bin/sudo -n -u #{uid} --"),
+    ("__no_ejecutable__", "/usr/bin/sudo -n -u #{uid} --"),
+    ("__ok__", "sudo -n -u #{uid} --"),            # el primer elemento de la elevacion tiene que ser una ruta absoluta (PATH)
     ("__ok__", "   "),
-    ("__ok__", "/usr/bin/sudo 'sin cerrar"),
+    ("__ok__", "/usr/bin/sudo 'sin cerrar {uid}"),
+    ("__ok__", "/usr/bin/sudo -n --"),             # sin {uid} la jaula correria con el uid de quien lanza: el de `faro`
 ])
 def test_una_configuracion_de_jaula_insegura_o_rota_no_arranca(bwrap, tmp_path, bwrap_ruta, elevar):
     if bwrap_ruta == "__ok__":
@@ -159,15 +169,11 @@ def test_el_aislamiento_de_la_jaula_esta_en_el_argv(bwrap):
         assert prohibida not in argv, prohibida
 
 
-def test_la_jaula_baja_al_uid_propio_y_pierde_privilegios_antes_de_ejecutar_el_comando(bwrap):
+def test_el_argv_no_baja_de_uid_por_dentro_el_uid_lo_pone_la_elevacion(bwrap):
     comando = ["/usr/bin/python3", "-m", "jax.faro.relay", "--socket", DESTINO_SOCKET]
     argv = _lanzador(bwrap).argv(ejecucion(uid_esperado=UID_JAULA), *_rutas(), comando)
-    i = argv.index("/usr/bin/setpriv")
-    assert argv[i - 1] == "--"
-    bajada = argv[i + 1:i + 8]
-    assert bajada == [f"--reuid={UID_JAULA}", f"--regid={UID_JAULA}", "--clear-groups", "--no-new-privs",
-                      "--inh-caps=-all", "--bounding-set=-all", "--"]
-    assert argv[i + 8:] == comando                                                  # y despues, el comando tal cual
+    assert argv[argv.index("--") + 1:] == comando                                    # tras el `--` va el comando tal cual, sin envoltorio
+    assert not any("setpriv" in a or a.startswith("--reuid") or a.startswith("--cap") for a in argv)
 
 
 def test_el_entorno_de_la_jaula_es_minimo_y_no_lleva_nada_secreto(bwrap, tmp_path):
@@ -194,16 +200,16 @@ def test_las_rutas_que_se_montan_son_absolutas_y_sin_nul(bwrap, sock, tok):
 
 
 def test_el_argv_completo_antepone_la_elevacion_y_el_bwrap_configurados(bwrap):
-    l = LanzadorJaula(ConfigJaula(bwrap=bwrap, elevar=("/usr/bin/sudo", "-n", "--")), Bitacora(emisores=[]))
+    l = LanzadorJaula(ConfigJaula(bwrap=bwrap, elevar=ELEVAR), Bitacora(emisores=[]))
     completo = l.argv_completo(ejecucion(uid_esperado=UID_JAULA), *_rutas(), ["/usr/bin/true"])
-    assert completo[:4] == ["/usr/bin/sudo", "-n", "--", str(bwrap)]
-    assert completo[4:] == l.argv(ejecucion(uid_esperado=UID_JAULA), *_rutas(), ["/usr/bin/true"])
+    assert completo[:6] == ["/usr/bin/sudo", "-n", "-u", f"#{UID_JAULA}", "--", str(bwrap)]
+    assert completo[6:] == l.argv(ejecucion(uid_esperado=UID_JAULA), *_rutas(), ["/usr/bin/true"])
 
 
-def test_la_elevacion_puede_llevar_el_uid_de_la_jaula(bwrap):
-    l = LanzadorJaula(ConfigJaula(bwrap=bwrap, elevar=("/usr/bin/sudo", "-n", "-u", "#{uid}", "--")), Bitacora(emisores=[]))
+def test_la_elevacion_lleva_el_uid_de_la_jaula_en_cada_aparicion_de_uid(bwrap):
+    l = LanzadorJaula(ConfigJaula(bwrap=bwrap, elevar=("/usr/bin/ayudante", "--uid={uid}", "--gid", "{uid}")), Bitacora(emisores=[]))
     completo = l.argv_completo(ejecucion(uid_esperado=UID_JAULA), *_rutas(), ["/usr/bin/true"])
-    assert completo[:5] == ["/usr/bin/sudo", "-n", "-u", f"#{UID_JAULA}", "--"]
+    assert completo[:4] == ["/usr/bin/ayudante", f"--uid={UID_JAULA}", "--gid", str(UID_JAULA)]
 
 
 def test_los_montajes_son_una_funcion_pura_de_las_dos_rutas():
@@ -248,7 +254,7 @@ def test_lanzar_anota_antes_de_arrancar_y_arranca_con_el_argv_completo_y_un_ento
     assert corre(caso()) == "proceso"
     assert orden == ["jaula_lanzada", "arranque"]
     argv, kw = llamadas[0]
-    assert list(argv[:4]) == ["/usr/bin/sudo", "-n", "--", str(bwrap)] and "/usr/bin/setpriv" in argv
+    assert list(argv[:6]) == ["/usr/bin/sudo", "-n", "-u", f"#{UID_JAULA}", "--", str(bwrap)] and "/usr/bin/setpriv" not in argv
     assert set(kw["env"]) == {"PATH"} and kw["start_new_session"] is True
     assert kw["stdin"] is not None and "shell" not in kw
 
@@ -325,16 +331,17 @@ def test_lanzar_de_verdad_un_proceso_hijo_con_un_bwrap_falso(bwrap, tmp_path):
     falso.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {salida}\nenv > {tmp_path}/env.txt\n")
     falso.chmod(0o755)
     elevador = tmp_path / "elevador"
-    elevador.write_text("#!/bin/sh\nshift 0\nexec \"$@\"\n")
+    elevador.write_text(f"#!/bin/sh\necho \"$1\" > {tmp_path}/uid-pedido.txt\nshift\nexec \"$@\"\n")
     elevador.chmod(0o755)
 
     async def caso():
-        l = LanzadorJaula(ConfigJaula(bwrap=falso, elevar=(str(elevador),)), Bitacora(emisores=[]))
+        l = LanzadorJaula(ConfigJaula(bwrap=falso, elevar=(str(elevador), "{uid}")), Bitacora(emisores=[]))
         p = await l.lanzar(_srv(), ["/usr/bin/true"])
         return await p.wait()
     assert corre(caso()) == 0
     args = salida.read_text().splitlines()
-    assert "--bind" in args and DESTINO_SOCKET in args and "/usr/bin/setpriv" in args
+    assert "--bind" in args and DESTINO_SOCKET in args and "/usr/bin/setpriv" not in args
+    assert (tmp_path / "uid-pedido.txt").read_text().strip() == str(UID_JAULA)           # la elevacion recibio el uid de la jaula
     entorno = dict(l.split("=", 1) for l in (tmp_path / "env.txt").read_text().splitlines() if "=" in l)
     assert set(entorno) <= {"PATH", "PWD", "SHLVL", "_", "OLDPWD"}                        # nada heredado del servicio
     assert os.environ.get("HOME") not in entorno.values()
