@@ -36,6 +36,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import cli_sandbox
@@ -324,6 +325,14 @@ class TitularTest(_Entorno):
             with self.subTest(ep=ep), self.assertRaises(cli_sandbox.TitularNoAutorizado):
                 await cli_sandbox.exigir_titular(1, 1, ep)
 
+    async def test_el_repl_se_retiro_de_los_entry_points(self):
+        # Fernando decidio retirar el REPL (T16): `repl` ya no es un punto de entrada reconocido
+        self.assertEqual(cli_sandbox.ENTRY_POINTS, frozenset({"chat", "canary", "jacobs"}))
+        with self.assertRaises(cli_sandbox.TitularNoAutorizado) as c:
+            await cli_sandbox.exigir_titular(1, 1, "repl")
+        self.assertEqual(c.exception.codigo, "suscripcion_solo_titular")
+        self.assertIn("entry_point desconocido", c.exception.motivo)
+
     async def test_sin_cache_un_borrado_posterior_se_ve_en_la_siguiente_llamada(self):
         await self.titular()
         self.usuarios[1] = dict(tenant_id=1, status="active", deleted_at="2026-10-01")
@@ -460,6 +469,62 @@ class TitularInfalsificableTest(_Entorno):
         object.__setattr__(falso, "emitido_mono", time.monotonic())
         with self.assertRaises(cli_sandbox.TitularNoAutorizado):
             await self._run(falso)
+
+    async def test_un_titular_alterado_despues_de_emitido_se_rechaza_y_no_lanza_nada(self):
+        # MINOR-24 (reauditoria 2026-10-02): `object.__setattr__(t, "entry_point", "jacobs")`
+        # convertia un titular de chat en uno de jacobs (mismo truco con user_id/tenant_id):
+        # el sello y el TTL seguian valiendo. `run_cli` valida lo que se registro al emitirlo.
+        casos = (
+            ("entry_point", "jacobs", "jacobs"),
+            ("user_id", 4, "chat"),
+            ("tenant_id", 2, "chat"),
+        )
+        for campo, valor, ep in casos:
+            with self.subTest(campo=campo):
+                t = await self.titular(1, 1, "chat")
+                object.__setattr__(t, campo, valor)
+                cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+                with patch("asyncio.create_subprocess_exec", fake):
+                    with self.assertRaises(cli_sandbox.TitularNoAutorizado) as c:
+                        await cli_sandbox.run_cli(
+                            "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                            timeout=5, titular=t, correlation_id="c", entry_point=ep)
+                self.assertEqual(c.exception.codigo, "suscripcion_solo_titular")
+                self.assertEqual(cap["llamadas"], 0)
+                self.assertEqual(cap.get("features_llamadas", 0), 0)
+                self.assertEqual(list(self.run_dir.iterdir()), [])
+
+    async def test_un_titular_fabricado_con_el_sello_pero_nunca_emitido_se_rechaza(self):
+        t = await self.titular()
+        falso = object.__new__(cli_sandbox.Titular)
+        for k in ("user_id", "tenant_id", "entry_point"):
+            object.__setattr__(falso, k, getattr(t, k))
+        object.__setattr__(falso, "_sello", cli_sandbox._SELLO)   # el sello correcto
+        object.__setattr__(falso, "emitido_mono", time.monotonic())
+        with self.assertRaises(cli_sandbox.TitularNoAutorizado):
+            await self._run(falso)
+
+    async def test_el_titular_intacto_sigue_pasando_y_se_indexa_por_identidad(self):
+        t1 = await self.titular(1, 1, "chat")
+        t2 = await self.titular(1, 1, "chat")   # mismos campos, otro objeto
+        self.assertIsNot(t1, t2)
+        self.assertNotEqual(t1, t2, "sin __eq__ por campos: la identidad del objeto es la clave")
+        self.assertEqual(hash(t1), hash(t1))
+        h = hash(t1)
+        object.__setattr__(t1, "user_id", 8)
+        self.assertEqual(hash(t1), h, "mutar un campo no cambia la clave del registro")
+        cap = await self._run(t2)
+        self.assertEqual(cap["llamadas"], 1)
+
+    async def test_el_registro_de_titulares_no_retiene_los_objetos(self):
+        import gc
+        t = await self.titular()
+        self.assertIn(t, cli_sandbox._EMITIDOS)
+        antes = len(cli_sandbox._EMITIDOS)
+        del t
+        gc.collect()
+        self.assertEqual(len(cli_sandbox._EMITIDOS), antes - 1)
+        self.assertIsInstance(cli_sandbox._EMITIDOS, __import__("weakref").WeakKeyDictionary)
 
     def test_la_documentacion_no_promete_lo_que_no_cumple(self):
         for doc in (cli_sandbox.Titular.__doc__, cli_sandbox.exigir_titular.__doc__):
@@ -1115,6 +1180,11 @@ class FeaturesAutomaticasTest(_Entorno):
         super().setUp()
         cli_sandbox._CACHE_FEATURES.clear()
         self.addCleanup(cli_sandbox._CACHE_FEATURES.clear)
+        cli_sandbox._CACHE_SHA.clear()
+        self.addCleanup(cli_sandbox._CACHE_SHA.clear)
+        if hasattr(cli_sandbox, "_CACHE_FEATURES_FALLO"):
+            cli_sandbox._CACHE_FEATURES_FALLO.clear()
+            self.addCleanup(cli_sandbox._CACHE_FEATURES_FALLO.clear)
 
     async def _run(self, **kw):
         cap, fake = self.capturar(_FakeProc(_CODEX_OK))
@@ -1163,13 +1233,258 @@ class FeaturesAutomaticasTest(_Entorno):
         self.assertIn("telepatia_tool", str(c.exception))
         self.assertEqual(cap["llamadas"], 0, "la llamada real no se lanza")
         self.assertEqual(list(self.run_dir.iterdir()), [], "ni el rundir de la verificacion queda")
-        # un fallo no se cachea: la siguiente llamada vuelve a verificar (y vuelve a fallar)
+        # MINOR-23: el FALLO tambien se cachea por firma: la siguiente llamada vuelve a fallar
+        # con el mismo motivo SIN volver a lanzar `features list`
+        with patch("asyncio.create_subprocess_exec", fake):
+            with self.assertRaises(cli_sandbox.FeaturesNoPermitidas) as c2:
+                await cli_sandbox.run_cli(
+                    "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                    timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertEqual(cap["features_llamadas"], 1)
+        self.assertIn("telepatia_tool", str(c2.exception))
+
+    async def test_n_llamadas_seguidas_con_un_binario_que_falla_lanzan_un_solo_features_list(self):
+        # MINOR-23 (reauditoria 2026-10-02): el fallo no se cacheaba, asi que cada llamada
+        # relanzaba `features list` (un proceso de bwrap) y un chat con el binario malo
+        # era un amplificador de procesos
+        casos = (
+            ("feature activada", dict(salida_features=_SALIDA_FEATURES + "telepatia_tool  stable  true\n")),
+            ("vacia", dict(salida_features="")),
+            ("ilegible", dict(salida_features="esto no es una tabla\n")),
+            ("exit code", dict(features_returncode=2)),
+        )
+        for nombre, cambios in casos:
+            with self.subTest(caso=nombre):
+                cli_sandbox._CACHE_FEATURES.clear()
+                cli_sandbox._CACHE_FEATURES_FALLO.clear()
+                for k, v in cambios.items():
+                    setattr(self, k, v)
+                cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+                mensajes = []
+                with patch("asyncio.create_subprocess_exec", fake):
+                    for _ in range(5):
+                        with self.assertRaises(cli_sandbox.FeaturesNoPermitidas) as c:
+                            await cli_sandbox.run_cli(
+                                "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                                timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+                        mensajes.append(str(c.exception))
+                self.assertEqual(cap["features_llamadas"], 1)
+                self.assertEqual(cap["llamadas"], 0)
+                # mismo motivo en cada llamada; las servidas de la cache lo declaran (MINOR-33)
+                self.assertNotIn("cacheado desde", mensajes[0])
+                for m in mensajes[1:]:
+                    self.assertTrue(m.startswith(mensajes[0]), (mensajes[0], m))
+                    self.assertIn("(cacheado desde ", m)
+                self.salida_features, self.features_returncode = _SALIDA_FEATURES, 0
+
+    async def test_el_timeout_de_features_tambien_se_cachea_como_fallo(self):
+        self.features_demora = 1.0
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch.object(cli_sandbox, "FEATURES_TIMEOUT_S", 0.1), patch("asyncio.create_subprocess_exec", fake):
+            for _ in range(3):
+                with self.assertRaises(cli_sandbox.FeaturesNoPermitidas):
+                    await cli_sandbox.run_cli(
+                        "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                        timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertEqual(cap["features_llamadas"], 1)
+
+    async def _llamar_features(self, fake, **kw):
+        with patch("asyncio.create_subprocess_exec", fake):
+            return await cli_sandbox.run_cli(
+                "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat", **kw)
+
+    def _envejecer_fallo(self, segundos: float) -> None:
+        for ruta, f in list(cli_sandbox._CACHE_FEATURES_FALLO.items()):
+            cli_sandbox._CACHE_FEATURES_FALLO[ruta] = dataclasses.replace(f, mono=f.mono - segundos)
+
+    async def test_un_fallo_servido_desde_la_cache_dice_desde_cuando_y_con_que_firma(self):
+        # MINOR-33: antes el mensaje cacheado era identico al de la medicion real
+        self.salida_features = _SALIDA_FEATURES + "telepatia_tool  stable  true\n"
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with self.assertRaises(cli_sandbox.FeaturesNoPermitidas) as primero:
+            await self._llamar_features(fake)
+        self.assertNotIn("cacheado", str(primero.exception))
+        firma = next(iter(cli_sandbox._CACHE_SHA.values()))[0]
+        with self.assertLogs("cli_sandbox", "WARNING") as cm:
+            with self.assertRaises(cli_sandbox.FeaturesNoPermitidas) as segundo:
+                await self._llamar_features(fake)
+        self.assertEqual(cap["features_llamadas"], 1)
+        m = str(segundo.exception)
+        self.assertTrue(m.startswith(str(primero.exception)))
+        self.assertRegex(m, r"\(cacheado desde \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ, firma " + firma[:12] + r"\)")
+        log = "\n".join(cm.output)
+        self.assertRegex(log, r"cacheado desde \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ, firma " + firma[:12])
+
+    async def test_el_timeout_de_features_es_transitorio_y_se_reintenta_acotado(self):
+        self.features_demora = 1.0
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch.object(cli_sandbox, "FEATURES_TIMEOUT_S", 0.1):
+            with self.assertRaises(cli_sandbox.FeaturesSinRespuesta) as c:
+                await self._llamar_features(fake)
+            self.assertEqual(c.exception.clase, "FeaturesNoPermitidas", "la clase estable no cambia")
+            self.assertTrue(next(iter(cli_sandbox._CACHE_FEATURES_FALLO.values())).transitorio)
+            # dentro de la ventana: se sirve el fallo cacheado, sin lanzar nada
+            for _ in range(3):
+                with self.assertRaises(cli_sandbox.FeaturesSinRespuesta) as c2:
+                    await self._llamar_features(fake)
+            self.assertEqual(cap["features_llamadas"], 1)
+            self.assertIn("cacheado desde", str(c2.exception))
+            self.assertIn("se reintenta cada 60s", str(c2.exception))
+            # pasada la ventana: UN reintento; si vuelve a fallar, otra ventana
+            self._envejecer_fallo(61)
+            with self.assertRaises(cli_sandbox.FeaturesSinRespuesta):
+                await self._llamar_features(fake)
+            self.assertEqual(cap["features_llamadas"], 2)
+            with self.assertRaises(cli_sandbox.FeaturesSinRespuesta):
+                await self._llamar_features(fake)
+            self.assertEqual(cap["features_llamadas"], 2, "el reintento abre otra ventana, no un bucle")
+            # la maquina se recupera: el siguiente reintento da verde y limpia el fallo
+            self.features_demora = 0.0
+            self._envejecer_fallo(61)
+            res = await self._llamar_features(fake)
+        self.assertEqual(res.texto, "hola desde codex")
+        self.assertEqual(cap["features_llamadas"], 3)
+        self.assertEqual(cli_sandbox._CACHE_FEATURES_FALLO, {})
+        await self._llamar_features(fake)
+        self.assertEqual(cap["features_llamadas"], 3, "ahora el exito esta cacheado")
+
+    async def test_los_reintentos_concurrentes_pasada_la_ventana_lanzan_un_solo_features_list(self):
+        self.features_demora = 1.0
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch.object(cli_sandbox, "FEATURES_TIMEOUT_S", 0.3):
+            with self.assertRaises(cli_sandbox.FeaturesSinRespuesta):
+                await self._llamar_features(fake)
+            self._envejecer_fallo(61)
+            resultados = await asyncio.gather(*(self._llamar_features(fake) for _ in range(5)), return_exceptions=True)
+        self.assertTrue(all(isinstance(r, cli_sandbox.FeaturesSinRespuesta) for r in resultados), resultados)
+        self.assertEqual(cap["features_llamadas"], 2, "el primer fallo + UN reintento")
+
+    async def test_los_fallos_deterministas_no_se_reintentan_nunca(self):
+        casos = (
+            ("feature activada", dict(salida_features=_SALIDA_FEATURES + "telepatia_tool  stable  true\n")),
+            ("exit code", dict(features_returncode=2)),
+            ("vacia", dict(salida_features="")),
+        )
+        for nombre, cambios in casos:
+            with self.subTest(caso=nombre):
+                cli_sandbox._CACHE_FEATURES_FALLO.clear()
+                for k, v in cambios.items():
+                    setattr(self, k, v)
+                cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+                with self.assertRaises(cli_sandbox.FeaturesNoPermitidas):
+                    await self._llamar_features(fake)
+                self.assertFalse(next(iter(cli_sandbox._CACHE_FEATURES_FALLO.values())).transitorio)
+                self._envejecer_fallo(1_000_000)
+                with self.assertRaises(cli_sandbox.FeaturesNoPermitidas) as c:
+                    await self._llamar_features(fake)
+                self.assertNotIsInstance(c.exception, cli_sandbox.FeaturesSinRespuesta)
+                self.assertEqual(cap["features_llamadas"], 1)
+                self.salida_features, self.features_returncode = _SALIDA_FEATURES, 0
+
+    async def test_el_reintento_es_configurable_y_un_valor_invalido_vuelve_al_default(self):
+        self.assertEqual(cli_sandbox._features_reintento_s(), 60.0)
+        for valor, esperado in (("5", 5.0), ("0.5", 60.0), ("0", 60.0), ("-3", 60.0), ("nan", 60.0),
+                                ("inf", 60.0), ("abc", 60.0), ("", 60.0)):
+            with self.subTest(valor=valor), patch.dict(os.environ, {"JAX_CLI_FEATURES_REINTENTO_S": valor}):
+                self.assertEqual(cli_sandbox._features_reintento_s(), esperado)
+        self.features_demora = 1.0
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch.object(cli_sandbox, "FEATURES_TIMEOUT_S", 0.1), \
+                patch.dict(os.environ, {"JAX_CLI_FEATURES_REINTENTO_S": "5"}):
+            with self.assertRaises(cli_sandbox.FeaturesSinRespuesta):
+                await self._llamar_features(fake)
+            self._envejecer_fallo(4)
+            with self.assertRaises(cli_sandbox.FeaturesSinRespuesta):
+                await self._llamar_features(fake)
+            self.assertEqual(cap["features_llamadas"], 1, "a los 4 s de 5 todavia no")
+            self._envejecer_fallo(2)
+            with self.assertRaises(cli_sandbox.FeaturesSinRespuesta):
+                await self._llamar_features(fake)
+            self.assertEqual(cap["features_llamadas"], 2, "a los 6 s de 5 si")
+
+    async def test_el_fallo_cacheado_se_invalida_si_cambia_el_arbol(self):
+        self.salida_features = _SALIDA_FEATURES + "telepatia_tool  stable  true\n"
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
         with patch("asyncio.create_subprocess_exec", fake):
             with self.assertRaises(cli_sandbox.FeaturesNoPermitidas):
                 await cli_sandbox.run_cli(
                     "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
                     timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+            # el operador reinstala un binario sano: arbol nuevo -> firma nueva -> se vuelve a verificar
+            self.salida_features = _SALIDA_FEATURES
+            extra = self.root / "codex" / "9.9.9" / "libcodex.so"
+            extra.write_bytes(b"lib\n")
+            extra.chmod(0o755)
+            sha = cli_sandbox.sha_manifiesto(str(extra.parent), uid_esperado=os.getuid())
+            with patch.dict(os.environ, {"JAX_CLI_CODEX_SHA256": sha}):
+                res = await cli_sandbox.run_cli(
+                    "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                    timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertEqual(res.texto, "hola desde codex")
         self.assertEqual(cap["features_llamadas"], 2)
+
+    async def test_features_list_corre_bajo_una_ranura_del_perfil(self):
+        # MINOR-23: `adquirir=lambda _t: None` lo dejaba fuera de la concurrencia del perfil.
+        # Mientras `features list` corre, una ranura del perfil esta tomada.
+        tomadas = []
+
+        async def fake_exec(*argv, **kwargs):
+            if "features" in argv:
+                for i in range(2):
+                    try:
+                        fd = os.open(self.lock_dir / f"codex.{i}.lock", os.O_RDWR)
+                    except FileNotFoundError:  # la ranura 1 ni siquiera se creo: libre
+                        tomadas.append(False)
+                        continue
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        tomadas.append(False)
+                    except BlockingIOError:
+                        tomadas.append(True)
+                    finally:
+                        os.close(fd)
+                return _FakeProc(self.salida_features.encode())
+            return _FakeProc(_CODEX_OK)
+
+        with patch("asyncio.create_subprocess_exec", fake_exec):
+            await cli_sandbox.run_cli(
+                "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertEqual(sorted(tomadas), [False, True], "exactamente una ranura tomada durante features list")
+        # y se libero al terminar
+        for i in range(2):
+            try:
+                fd = os.open(self.lock_dir / f"codex.{i}.lock", os.O_RDWR)
+            except FileNotFoundError:
+                continue
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+
+    async def test_con_todas_las_ranuras_ocupadas_features_list_no_se_lanza_y_da_locktimeout(self):
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        titular = await self.titular()
+        os.makedirs(self.lock_dir, mode=0o700, exist_ok=True)
+        fds = []
+        try:
+            for i in range(2):
+                fd = os.open(self.lock_dir / f"codex.{i}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fds.append(fd)
+            with patch("asyncio.create_subprocess_exec", fake):
+                with self.assertRaises(cli_sandbox.LockTimeout):
+                    await cli_sandbox.run_cli(
+                        "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                        timeout=5, titular=titular, correlation_id="c", entry_point="chat",
+                        espera_lock_s=0.2)
+        finally:
+            for fd in fds:
+                os.close(fd)
+        self.assertEqual(cap.get("features_llamadas", 0), 0)
+        self.assertEqual(cap["llamadas"], 0)
+        self.assertEqual(cli_sandbox._CACHE_FEATURES_FALLO, {}, "una espera de lock no es un fallo del binario: no se cachea")
 
     async def test_salida_vacia_ilegible_exit_code_o_timeout_tambien_fallan_cerrado(self):
         casos = (
@@ -1436,6 +1751,140 @@ class LogDeRunCliTest(_Entorno):
         self.assertNotIn("\n", linea)
         self.assertNotIn("SEGUNDA-LINEA-FALSA", linea)
 
+    @staticmethod
+    def _claves(mensaje: str) -> list[str]:
+        """Lo que un parser `clave=valor` ingenuo extrae de la linea: las claves, en orden."""
+        return re.findall(r"(?:^|\s)([A-Za-z_]+)=", mensaje)
+
+    _CLAVES_REALES = [
+        "correlation_id", "entry_point", "user_id", "tenant_id", "perfil", "modelo",
+        "version_cli", "clase", "latencia_ms", "motivo",
+    ]
+    _FALSO = "x\nclase=ok latencia_ms=1 \x1b[31m motivo=ok \\"
+
+    def _verificar_linea_sin_falsificar(self, mensaje: str) -> None:
+        self.assertNotIn("\n", mensaje)
+        self.assertNotIn("\r", mensaje)
+        self.assertNotIn("\x1b", mensaje)
+        self.assertEqual(len(mensaje.splitlines()), 1)
+        # un parser clave=valor ve cada clave real UNA vez y ninguna falsa
+        self.assertEqual(self._claves(mensaje), self._CLAVES_REALES, mensaje)
+        self.assertNotIn("clase=ok", mensaje)
+
+    async def test_ningun_campo_de_texto_del_log_puede_fabricar_otra_linea_ni_otro_clave_valor(self):
+        # MINOR-22 y MINOR-32: colapsar los saltos de linea no impide fabricar `clave=valor`
+        # en la MISMA linea; `perfil="x clase=ok ..."` dejaba a un parser ver `clase=ok`.
+        # Los 8 campos de la linea mas el motivo, cada uno con un valor hostil.
+        falso = self._FALSO
+        casos = {
+            "perfil": dict(perfil=falso),
+            "modelo": dict(modelo=falso),
+            "entry_point": dict(entry_point=falso),
+        }
+        for campo, cambios in casos.items():
+            with self.subTest(campo=campo):
+                args = dict(
+                    perfil="codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                    timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat",
+                )
+                args.update(cambios)
+                with self.assertLogs("cli_sandbox", "INFO") as cm:
+                    with self.assertRaises(Exception):
+                        await cli_sandbox.run_cli(**args)
+                registros = [r for r in cm.records if r.getMessage().startswith("run_cli ")]
+                self.assertEqual(len(registros), 1)
+                self._verificar_linea_sin_falsificar(registros[0].getMessage())
+
+    async def _registrar(self, **kw) -> str:
+        with self.assertLogs("cli_sandbox", "INFO") as cm:
+            with self.assertRaises(Exception):
+                await cli_sandbox.run_cli(**kw)
+        registros = [r.getMessage() for r in cm.records if r.getMessage().startswith("run_cli ")]
+        self.assertEqual(len(registros), 1)
+        return registros[0]
+
+    def _args(self, titular, **cambios):
+        args = dict(
+            perfil="codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+            timeout=5, titular=titular, correlation_id="c", entry_point="chat",
+        )
+        args.update(cambios)
+        return args
+
+    async def test_user_id_y_tenant_id_de_un_titular_ajeno_no_falsifican_la_linea(self):
+        # MINOR-31: un objeto que NO es Titular se rechaza, pero sus campos van al log igual
+        for campo in ("user_id", "tenant_id"):
+            with self.subTest(campo=campo):
+                ajeno = SimpleNamespace(user_id=1, tenant_id=1, entry_point="chat")
+                setattr(ajeno, campo, self._FALSO)
+                self._verificar_linea_sin_falsificar(await self._registrar(**self._args(ajeno)))
+
+    async def test_la_clase_de_la_excepcion_no_falsifica_la_linea(self):
+        class Rara(Exception):
+            clase = "Rara\nclase=ok latencia_ms=1"
+
+        with patch.object(cli_sandbox, "_resolver_binario", side_effect=Rara("boom")):
+            mensaje = await self._registrar(**self._args(await self.titular()))
+        self._verificar_linea_sin_falsificar(mensaje)
+
+    async def test_la_version_del_binario_no_falsifica_la_linea(self):
+        with patch.object(cli_sandbox, "_resolver_binario", return_value=("/x/codex", "/x", self._FALSO)), \
+                patch.object(cli_sandbox, "_BWRAP_BIN", "/no/existe/bwrap"):
+            mensaje = await self._registrar(**self._args(await self.titular()))
+        self.assertIn("clase=SandboxUnavailable", mensaje)
+        self._verificar_linea_sin_falsificar(mensaje)
+
+    async def test_el_motivo_no_falsifica_la_linea(self):
+        with patch.object(cli_sandbox, "_resolver_binario", side_effect=cli_sandbox.BinarioAlterado(self._FALSO)):
+            mensaje = await self._registrar(**self._args(await self.titular()))
+        self._verificar_linea_sin_falsificar(mensaje)
+
+    async def test_los_ocho_campos_reales_aparecen_con_su_valor_normal(self):
+        # control positivo de lo anterior: el escape no rompe un valor legitimo
+        t = await self.titular(8, 1)
+        with patch.object(cli_sandbox, "_resolver_binario", return_value=("/x/codex", "/x", "codex-cli 1.2.3")), \
+                patch.object(cli_sandbox, "_BWRAP_BIN", "/no/existe/bwrap"):
+            mensaje = await self._registrar(**self._args(t, correlation_id="req-7:a.b_c"))
+        for esperado in (
+            "correlation_id=req-7:a.b_c", "entry_point=chat", "user_id=8", "tenant_id=1",
+            "perfil=codex", "modelo=gpt-6-sol", "clase=SandboxUnavailable",
+        ):
+            self.assertIn(esperado, mensaje)
+        self.assertIn("version_cli=codex-cli\\x201.2.3", mensaje)
+        self.assertEqual(self._claves(mensaje), self._CLAVES_REALES)
+
+    async def test_un_correlation_id_fuera_del_formato_se_rechaza_con_marcador_fijo(self):
+        invalidos = ["", "x clase=ok", "a\nb", "x" * 65, "a=b", "caf\u00e9", "\x1b[0m", None, 5]
+        for malo in invalidos:
+            with self.subTest(correlation_id=malo):
+                with self.assertLogs("cli_sandbox", "INFO") as cm:
+                    with self.assertRaises(ValueError) as ctx:
+                        await self.correr("codex", correlation_id=malo)
+                self.assertIn("correlation_id", str(ctx.exception))
+                mensaje = [r.getMessage() for r in cm.records if r.getMessage().startswith("run_cli ")][0]
+                self.assertIn("correlation_id=<invalido> ", mensaje)
+                self.assertIn("clase=ValueError", mensaje)
+                self.assertEqual(self._claves(mensaje), self._CLAVES_REALES)
+        # los validos pasan (y llegan al subproceso)
+        for bueno in ("c", "a" * 64, "req-7:a.b_c", "0"):
+            with self.subTest(correlation_id=bueno):
+                await self.correr("codex", correlation_id=bueno)
+
+    async def test_los_campos_de_texto_del_log_se_recortan_igual_que_el_motivo(self):
+        largo = "z" * 500
+        with self.assertLogs("cli_sandbox", "INFO") as cm:
+            with self.assertRaises(Exception):
+                await cli_sandbox.run_cli(
+                    "codex", system_prompt="s", historial=[], mensaje="m", modelo=largo,
+                    timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        mensaje = [r.getMessage() for r in cm.records if r.getMessage().startswith("run_cli ")][0]
+        self.assertNotIn("z" * 201, mensaje)
+
+    def test_el_tope_cuenta_los_caracteres_ya_escapados(self):
+        self.assertLessEqual(len(cli_sandbox._campo_log("=" * 500)), 200)
+        self.assertLessEqual(len(cli_sandbox._campo_log("\x1b" * 500)), 200)
+        self.assertNotIn("\\x3", cli_sandbox._campo_log("a" * 198 + "="))  # no parte un escape a la mitad
+
     async def test_en_exito_y_al_cancelar_el_motivo_va_vacio(self):
         with self.assertLogs("cli_sandbox", "INFO") as cm:
             await self.correr("codex")
@@ -1685,7 +2134,7 @@ class TimeoutValidadoTest(_Entorno):
                 await self._sin_lanzar(malo)
 
     async def test_el_tope_depende_del_entry_point_y_el_maximo_exacto_pasa(self):
-        for ep, tope in (("chat", 180), ("jacobs", 600)):
+        for ep, tope in (("chat", 180), ("jacobs", 600), ("canary", 60)):
             with self.subTest(ep=ep):
                 await self._sin_lanzar(tope + 0.5, ep)
                 await self._sin_lanzar(tope * 10, ep)
@@ -1710,22 +2159,40 @@ class TimeoutValidadoTest(_Entorno):
         with patch.dict(os.environ, {"JAX_CLI_TIMEOUT_MAX_CHAT_S": "400"}):
             self.assertEqual(cli_sandbox.timeout_maximo_para("chat"), 400.0)  # tambien se puede subir
 
-    async def test_los_defaults_son_180_y_600_y_un_valor_roto_no_los_afloja(self):
+    async def test_los_defaults_son_180_600_y_60_y_un_valor_roto_no_los_afloja(self):
         self.assertEqual(cli_sandbox.timeout_maximo_para("chat"), 180.0)
         self.assertEqual(cli_sandbox.timeout_maximo_para("jacobs"), 600.0)
+        self.assertEqual(cli_sandbox.timeout_maximo_para("canary"), 60.0)
         for var, ep, default in (("JAX_CLI_TIMEOUT_MAX_CHAT_S", "chat", 180.0),
-                                 ("JAX_CLI_TIMEOUT_MAX_JACOBS_S", "jacobs", 600.0)):
+                                 ("JAX_CLI_TIMEOUT_MAX_JACOBS_S", "jacobs", 600.0),
+                                 ("JAX_CLI_TIMEOUT_MAX_CANARY_S", "canary", 60.0)):
             for malo in ("", "x", "-5", "0", "nan", "inf", "-inf"):
                 with self.subTest(var=var, malo=malo), patch.dict(os.environ, {var: malo}):
                     self.assertEqual(cli_sandbox.timeout_maximo_para(ep), default)
         await self._sin_lanzar(181, "chat")
 
+    async def test_el_tope_de_canary_es_60s_y_configurable(self):
+        # la sonda: tope 60 s (default), JAX_CLI_TIMEOUT_MAX_CANARY_S lo cambia
+        await self._sin_lanzar(60.5, "canary")
+        await self._sin_lanzar(180, "canary")  # el tope de chat no vale para la sonda
+        res, _, _ = await self.correr("codex", timeout=60, titular=await self.titular(ep="canary"),
+                                      entry_point="canary")
+        self.assertEqual(res.texto, "hola desde codex")
+        with patch.dict(os.environ, {"JAX_CLI_TIMEOUT_MAX_CANARY_S": "5"}):
+            self.assertEqual(cli_sandbox.timeout_maximo_para("canary"), 5.0)
+            await self._sin_lanzar(5.5, "canary")
+            res, _, _ = await self.correr("codex", timeout=5, titular=await self.titular(ep="canary"),
+                                          entry_point="canary")
+            self.assertEqual(res.texto, "hola desde codex")
+        self.assertEqual(
+            cli_sandbox.TIMEOUT_MAX_POR_ENTRY["canary"], ("JAX_CLI_TIMEOUT_MAX_CANARY_S", 60.0))
+
+    async def test_todo_entry_point_reconocido_tiene_tope_declarado(self):
+        self.assertEqual(set(cli_sandbox.TIMEOUT_MAX_POR_ENTRY), set(cli_sandbox.ENTRY_POINTS))
+
     async def test_un_entry_point_sin_tope_declarado_se_rechaza_y_no_lanza_nada(self):
-        # `canary` y `repl` son entry_points que exigir_titular conoce pero NO tienen tope
-        # declarado: run_cli falla cerrado (decision pendiente del arquitecto, ver informe)
-        for ep in ("canary", "repl"):
-            with self.subTest(ep=ep):
-                await self._sin_lanzar(5, ep)
+        # un entry_point que exigir_titular conoce pero NO tiene tope declarado: run_cli falla
+        # cerrado (hoy ninguno de los reconocidos: se simula agregando uno)
         with patch.object(cli_sandbox, "ENTRY_POINTS", cli_sandbox.ENTRY_POINTS | {"otro"}):
             await self._sin_lanzar(5, "otro")
         for malo in ("", "CHAT", None, 5, "otro"):
@@ -2087,7 +2554,46 @@ class LocksCompartidosTest(unittest.TestCase):
         msg = str(c.exception)
         self.assertIn("/etc/tmpfiles.d/jax-locks.conf", msg)
         self.assertIn(f"f {self.d}/falta.lock 0640 root {self.grupo} -", msg)
+        self.assertNotIn("no pertenece al grupo", msg)  # MINOR-26: otra causa, otro mensaje
         self.assertFalse((self.d / "falta.lock").exists(), "sin O_CREAT: el nucleo no crea el lock")
+
+    @unittest.skipIf(os.geteuid() == 0, "root no recibe EACCES")
+    def test_sin_permiso_sobre_el_archivo_dice_que_el_euid_no_es_del_grupo_y_no_la_linea_de_tmpfiles(self):
+        # MINOR-26 (reauditoria 2026-10-02): PermissionError (existe, pero este euid no esta en
+        # el grupo) y FileNotFoundError (falta la linea de tmpfiles.d) tenian el MISMO
+        # mensaje, que mandaba a editar tmpfiles.d cuando lo que falta es la membresia al grupo
+        os.chmod(self.f, 0o000)
+        self.addCleanup(os.chmod, self.f, 0o640)
+        with self.assertRaises(cli_sandbox.SandboxUnavailable) as c:
+            self._adq()
+        msg = str(c.exception)
+        self.assertIn(f"el euid {os.geteuid()} no pertenece al grupo {self.grupo}", msg)
+        # MINOR-36: un proceso o una sesion ya abiertos no ven un grupo agregado despues
+        self.assertIn("si ya es miembro, reiniciar el proceso o la sesion para que tome el grupo", msg)
+        self.assertNotIn("falta la linea", msg)
+        self.assertNotIn("/etc/tmpfiles.d", msg)
+
+    @unittest.skipIf(os.geteuid() == 0, "root no recibe EACCES")
+    def test_sin_permiso_sobre_el_directorio_dice_que_el_euid_no_es_del_grupo(self):
+        os.chmod(self.d, 0o000)
+        self.addCleanup(os.chmod, self.d, 0o750)
+        with self.assertRaises(cli_sandbox.SandboxUnavailable) as c:
+            self._adq()
+        msg = str(c.exception)
+        self.assertIn(f"el euid {os.geteuid()} no pertenece al grupo {self.grupo}", msg)
+        # MINOR-36: un proceso o una sesion ya abiertos no ven un grupo agregado despues
+        self.assertIn("si ya es miembro, reiniciar el proceso o la sesion para que tome el grupo", msg)
+        self.assertNotIn("falta la linea", msg)
+
+    def test_directorio_inexistente_dice_que_falta_la_linea_d_y_no_habla_de_grupos(self):
+        with self.assertRaises(cli_sandbox.SandboxUnavailable) as c:
+            cli_sandbox.flock_compartido_adquirir(
+                str(Path(self.tmp.name) / "no-existe"), "ws.lock", self.grupo, 1, "x", uid_esperado=os.getuid())
+        msg = str(c.exception)
+        self.assertIn("falta la linea", msg)
+        self.assertIn("/etc/tmpfiles.d/jax-locks.conf", msg)
+        self.assertIn(f"d {self.tmp.name}/no-existe 0750 root {self.grupo} -", msg)
+        self.assertNotIn("no pertenece al grupo", msg)
 
     def test_grupo_inexistente_falla_cerrado_nombrando_la_linea_de_tmpfiles(self):
         with self.assertRaises(cli_sandbox.SandboxUnavailable) as c:
@@ -2096,6 +2602,32 @@ class LocksCompartidosTest(unittest.TestCase):
         self.assertIn("grupo-que-no-existe-xyz", msg)
         self.assertIn("/etc/tmpfiles.d/jax-locks.conf", msg)
         self.assertIn(f"f {self.d}/ws.lock 0640 root grupo-que-no-existe-xyz -", msg)
+
+    def test_el_dueno_y_el_gid_del_DIRECTORIO_se_verifican_aparte_de_los_del_archivo(self):
+        # MINOR-25: con el dueno o el gid inyectados mal, el ARCHIVO tambien falla, asi que
+        # quitar la comprobacion del directorio sobrevivia a los tests. Aqui solo se falsea el
+        # stat del DIRECTORIO: el archivo es perfecto y lo unico que puede rechazar es esa guarda.
+        real = os.fstat
+
+        def solo_directorio(**campos):
+            def falso(fd):
+                st = real(fd)
+                if not stat.S_ISDIR(st.st_mode):
+                    return st
+                v = dict(uid=st.st_uid, gid=st.st_gid)
+                v.update(campos)
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, v["uid"], v["gid"],
+                                       st.st_size, int(st.st_atime), int(st.st_mtime), int(st.st_ctime)))
+            return falso
+
+        for campos in ({"gid": os.getgid() + 1}, {"uid": os.getuid() + 1}):
+            with self.subTest(campos=campos):
+                with patch.object(cli_sandbox.os, "fstat", side_effect=solo_directorio(**campos)):
+                    with self.assertRaises(cli_sandbox.SandboxUnavailable) as c:
+                        self._adq()
+                self.assertIn("directorio de locks compartido", str(c.exception))
+                self.assertIn("inseguro", str(c.exception))
+        cli_sandbox.flock_liberar(self._adq())  # sin falsear nada, el mismo directorio sirve
 
     def test_archivo_con_escritura_de_grupo_u_otros_se_rechaza(self):
         for modo in (0o660, 0o646, 0o666, 0o602, 0o620):
@@ -2138,6 +2670,118 @@ class LocksCompartidosTest(unittest.TestCase):
         (self.d / "dir.lock").mkdir(mode=0o750)
         with self.assertRaises(cli_sandbox.SandboxUnavailable):
             self._adq("dir.lock")
+
+
+class RundirSinSilencioTest(_Entorno):
+    """MINOR-29 (reauditoria 2026-10-02): `_preparar_rundir` y `_borrar_rundir` borraban con
+    `shutil.rmtree(ignore_errors=True)`: un rundir que no se pudo quitar (con el system prompt y
+    la memoria adentro) quedaba en disco sin que nadie se enterara. Igual que `_quitar`: `onexc`
+    con un warning que lleva la ruta y el error."""
+
+    def _rundir_con_subdirectorio_inborrable(self, nombre="rd"):
+        rundir = self.run_dir / nombre
+        (rundir / "sub").mkdir(parents=True)
+        (rundir / "sub" / "f").write_text("x")
+        os.chmod(rundir / "sub", 0o500)  # sin escritura: no se puede quitar `f`
+        self.addCleanup(lambda: os.path.exists(rundir / "sub") and os.chmod(rundir / "sub", 0o700))
+        return rundir
+
+    @unittest.skipIf(os.geteuid() == 0, "root puede borrar un directorio 0500")
+    async def test_borrar_rundir_registra_lo_que_no_pudo_quitar(self):
+        rundir = self._rundir_con_subdirectorio_inborrable()
+        with self.assertLogs("cli_sandbox", "WARNING") as cm:
+            cli_sandbox._borrar_rundir(rundir)  # no lanza
+        msg = "\n".join(cm.output)
+        self.assertIn(str(rundir / "sub"), msg)
+        self.assertIn("rundir", msg)
+        self.assertTrue((rundir / "sub" / "f").exists(), "queda en disco, pero ya no en silencio")
+
+    @unittest.skipIf(os.geteuid() == 0, "root puede borrar un directorio 0500")
+    async def test_preparar_rundir_registra_lo_que_no_pudo_quitar_y_relanza_el_error_original(self):
+        base, rundir = self.run_dir / "base", self.run_dir / "base" / "rd"
+
+        def escribir_y_fallar(ruta, contenido):
+            (rundir / "sub").mkdir()
+            (rundir / "sub" / "f").write_text("x")
+            os.chmod(rundir / "sub", 0o500)
+            self.addCleanup(lambda: os.path.exists(rundir / "sub") and os.chmod(rundir / "sub", 0o700))
+            raise OSError("disco lleno")
+
+        with patch.object(cli_sandbox, "_escribir_privado", escribir_y_fallar):
+            with self.assertLogs("cli_sandbox", "WARNING") as cm:
+                with self.assertRaises(OSError) as c:
+                    cli_sandbox._preparar_rundir(base, rundir, "sistema.md", "s")
+        self.assertIn("disco lleno", str(c.exception), "el error original se relanza intacto")
+        self.assertIn(str(rundir / "sub"), "\n".join(cm.output))
+
+    async def test_un_rundir_que_ya_no_existe_no_hace_ruido(self):
+        with self.assertNoLogs("cli_sandbox", "WARNING"):
+            cli_sandbox._borrar_rundir(self.run_dir / "no-existe")
+
+    async def test_un_rundir_sano_se_borra_sin_ruido(self):
+        rundir = self.run_dir / "sano"
+        (rundir / "a").mkdir(parents=True)
+        (rundir / "a" / "f").write_text("x")
+        with self.assertNoLogs("cli_sandbox", "WARNING"):
+            cli_sandbox._borrar_rundir(rundir)
+        self.assertFalse(rundir.exists())
+
+    async def test_ninguna_de_las_dos_usa_ignore_errors(self):
+        for f in (cli_sandbox._preparar_rundir, cli_sandbox._borrar_rundir):
+            self.assertNotIn("ignore_errors", inspect.getsource(f), f.__name__)
+
+
+class Sha256ArchivoTest(unittest.TestCase):
+    """MINOR-25: `_sha256_archivo(esperado=...)` es la defensa contra el cambio de archivo
+    ENTRE el recorrido del arbol (que vio un stat) y el hash. Ningun test la ejercitaba: se
+    podia quitar la comparacion, comparar solo el inode o dejar de pasar `esperado` desde
+    `_manifiesto` y la suite seguia verde."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = Path(self.tmp.name) / "bin"
+        self.d.mkdir()
+        os.chmod(self.d, 0o755)
+        self.a = self.d / "a"
+        self.a.write_bytes(b"contenido-a\n")
+        self.a.chmod(0o755)
+        self.b = self.d / "b"
+        self.b.write_bytes(b"contenido-b\n")
+        self.b.chmod(0o755)
+
+    def test_sin_esperado_hashea_y_con_el_stat_correcto_tambien(self):
+        h = hashlib.sha256(b"contenido-a\n").hexdigest()
+        self.assertEqual(cli_sandbox._sha256_archivo(str(self.a)), h)
+        self.assertEqual(cli_sandbox._sha256_archivo(str(self.a), esperado=os.lstat(self.a)), h)
+
+    def test_un_archivo_distinto_del_que_vio_el_recorrido_es_binario_alterado(self):
+        with self.assertRaises(cli_sandbox.BinarioAlterado) as c:
+            cli_sandbox._sha256_archivo(str(self.b), esperado=os.lstat(self.a))
+        self.assertIn("cambio entre el recorrido y el hash", str(c.exception))
+
+    def test_dev_e_inode_cuentan_los_dos(self):
+        import types
+        st = os.lstat(self.a)
+        mismo_inode_otro_dev = types.SimpleNamespace(st_dev=st.st_dev + 1, st_ino=st.st_ino)
+        mismo_dev_otro_inode = types.SimpleNamespace(st_dev=st.st_dev, st_ino=st.st_ino + 1)
+        for nombre, falso in (("otro dev", mismo_inode_otro_dev), ("otro inode", mismo_dev_otro_inode)):
+            with self.subTest(nombre):
+                with self.assertRaises(cli_sandbox.BinarioAlterado):
+                    cli_sandbox._sha256_archivo(str(self.a), esperado=falso)
+
+    def test_el_manifiesto_pasa_el_stat_del_recorrido_y_detecta_el_reemplazo(self):
+        # TOCTOU de punta a punta: el recorrido vio `a`; antes de hashear, `a` se reemplaza por
+        # otro archivo (otro inode). `_manifiesto` tiene que negarse en vez de hashear el nuevo.
+        entradas = cli_sandbox._inspeccionar_arbol(str(self.d), os.getuid(), "t")
+        intruso = self.d / "intruso"
+        intruso.write_bytes(b"otro-contenido\n")
+        intruso.chmod(0o755)
+        os.replace(intruso, self.a)
+        with self.assertRaises(cli_sandbox.BinarioAlterado):
+            cli_sandbox._manifiesto(str(self.d), entradas)
+        # sin reemplazo, el mismo recorrido hashea bien
+        self.assertRegex(cli_sandbox.sha_manifiesto(str(self.d), uid_esperado=os.getuid()), r"^[0-9a-f]{64}$")
 
 
 class PurgaDeCodexTest(_Entorno):
@@ -2335,6 +2979,66 @@ class PurgaSinSilencioTest(_Entorno):
         for frase in ("pasos 6", "9 (Jacobs)", "to_thread", "al arrancar"):
             self.assertIn(frase, doc)
 
+    # ---- el punto de arranque explicito (MINOR-27)
+    async def test_preparar_arranque_purga_todos_los_perfiles_que_sirve_run_cli(self):
+        # MINOR-27 (reauditoria 2026-10-02): `purgar_al_arranque` no tenia ningun llamador. El
+        # paso 6 todavia no existe, asi que hay un punto de arranque explicito y probado.
+        cdir, kdir = self.cred / "codex", self.cred / "kimi"
+        (cdir / "auth.json").write_text("TOKEN")
+        (cdir / "packages").mkdir()
+        (kdir / "credentials.json").write_text("K")
+        (kdir / "sessions").mkdir()
+        res = cli_sandbox.preparar_arranque()
+        self.assertEqual(res, {"codex": True, "kimi": True})
+        self.assertEqual(sorted(p.name for p in cdir.iterdir()), ["auth.json"])
+        self.assertEqual(sorted(p.name for p in kdir.iterdir()), ["credentials.json"])
+
+    async def test_preparar_arranque_cubre_exactamente_los_perfiles_habilitados(self):
+        habilitados = {n for n, p in cli_sandbox.PERFILES.items() if p.via_run_cli}
+        self.assertEqual(set(cli_sandbox.preparar_arranque()), habilitados)
+        self.assertNotIn("claude", cli_sandbox.preparar_arranque(), "Hyde no va por run_cli")
+        # y un perfil que se habilite mas adelante entra solo, sin tocar la funcion
+        nuevo = dataclasses.replace(cli_sandbox.PERFILES["kimi"], nombre="nuevo", cred_subdir="nuevo")
+        (self.cred / "nuevo").mkdir()
+        with patch.dict(cli_sandbox.PERFILES, {"nuevo": nuevo}):
+            self.assertIn("nuevo", cli_sandbox.preparar_arranque())
+
+    async def test_preparar_arranque_no_toca_un_perfil_con_una_llamada_en_curso_y_sigue_con_los_demas(self):
+        (self.cred / "codex" / "packages").mkdir()
+        (self.cred / "kimi" / "sessions").mkdir()
+        handle = cli_sandbox._ranura_adquirir("codex", cli_sandbox._ranuras_de(cli_sandbox.PERFILES["codex"]), 1)
+        try:
+            res = cli_sandbox.preparar_arranque()
+        finally:
+            cli_sandbox.flock_liberar(handle[0])
+        self.assertEqual(res, {"codex": False, "kimi": True})
+        self.assertTrue((self.cred / "codex" / "packages").exists())
+        self.assertFalse((self.cred / "kimi" / "sessions").exists())
+
+    async def test_preparar_arranque_con_un_directorio_de_credencial_ausente_no_frena_a_los_demas(self):
+        shutil.rmtree(self.cred / "kimi")
+        (self.cred / "codex" / "packages").mkdir()
+        with self.assertLogs("cli_sandbox", "WARNING"):
+            res = cli_sandbox.preparar_arranque()
+        self.assertEqual(res, {"codex": True, "kimi": False})
+
+    async def test_preparar_arranque_falla_cerrado_con_un_directorio_de_locks_inseguro(self):
+        os.makedirs(self.lock_dir, mode=0o700)
+        os.chmod(self.lock_dir, 0o777)
+        (self.cred / "codex" / "packages").mkdir()
+        with self.assertRaises(cli_sandbox.SandboxUnavailable):
+            cli_sandbox.preparar_arranque()
+        self.assertTrue((self.cred / "codex" / "packages").exists())
+
+    async def test_las_docstrings_dicen_que_el_arranque_debe_llamarla_y_que_hoy_no_la_llama_nadie(self):
+        doc = inspect.getdoc(cli_sandbox.preparar_arranque)
+        for frase in ("DEBE", "paso 6", "9", "to_thread"):
+            self.assertIn(frase, doc)
+        self.assertIn("hoy no la llama nadie", doc.lower())
+        doc2 = inspect.getdoc(cli_sandbox.purgar_al_arranque)
+        for frase in ("preparar_arranque", "hoy no la llama nadie", "9e39287"):
+            self.assertIn(frase, doc2)
+
 
 # ------------------------------------------------------- contencion con bwrap
 
@@ -2433,7 +3137,8 @@ class FeaturesEnBwrapRealTest(unittest.IsolatedAsyncioTestCase):
         self.codex.chmod(0o755)
         self.run_dir = t / "run"
         self.run_dir.mkdir()
-        p = patch.dict(os.environ, {"JAX_CLI_RUN_DIR": str(self.run_dir)})
+        # `features list` corre bajo una ranura del perfil (MINOR-23): hace falta el directorio de locks
+        p = patch.dict(os.environ, {"JAX_CLI_RUN_DIR": str(self.run_dir), "JAX_CLI_LOCK_DIR": str(t / "locks")})
         p.start()
         self.addCleanup(p.stop)
         p2 = patch.object(cli_sandbox, "_BWRAP_BIN", shutil.which("bwrap"))

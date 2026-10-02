@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import os
 import subprocess
@@ -42,11 +43,12 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import grp
 import shutil
 
+import cli_sandbox
 import hyde_sandbox
 
 # El lock de Hyde es COMPARTIDO (MAJOR-14): directorio y grupo son constantes del
@@ -160,6 +162,53 @@ class RunSandboxedClaudeWrappingTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(captured["kwargs"].get("env"), env_de_mentira)
             self.assertEqual(stdout, b"hola")
             self.assertEqual(proc.returncode, 0)
+
+
+class LlamadaAlLockCompartidoTest(unittest.IsolatedAsyncioTestCase):
+    """MINOR-25 (reauditoria 2026-10-02): el modulo entero parchea
+    `_acquire_cross_process_lock` con un envoltorio que INYECTA el dueno del que corre el
+    test, asi que ningun test veia con que argumentos llega `run_sandboxed_claude` al
+    nucleo: un `uid_esperado` distinto de 0 (o un gid fijo) en produccion pasaba todos los
+    tests. Aqui se deshace ese parche y se espia `cli_sandbox.flock_compartido_adquirir`."""
+
+    async def _correr_espiando(self, ws):
+        fh = MagicMock(name="fh")
+
+        async def fake_exec(*argv, **kwargs):
+            async def comunicar():
+                return b"ok", b""
+            return _FakeProc(comunicar)
+
+        with patch.object(hyde_sandbox, "_acquire_cross_process_lock", _ADQUIRIR_REAL), \
+             patch.object(cli_sandbox, "flock_compartido_adquirir", return_value=fh) as adq, \
+             patch.object(cli_sandbox, "flock_liberar") as lib, \
+             patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, w: (cmd, {})), \
+             patch("asyncio.create_subprocess_exec", fake_exec):
+            await hyde_sandbox.run_sandboxed_claude(["claude"], ws, "p", timeout=7)
+        return adq, lib, fh
+
+    async def test_run_sandboxed_claude_llama_al_nucleo_con_dueno_root_y_el_grupo_real(self):
+        with tempfile.TemporaryDirectory() as ws:
+            adq, lib, fh = await self._correr_espiando(ws)
+            ruta = hyde_sandbox._lock_path_for_workspace(ws)
+        adq.assert_called_once()
+        args, kwargs = adq.call_args
+        self.assertEqual(
+            args,
+            (str(ruta.parent), ruta.name, hyde_sandbox.HYDE_LOCK_GROUP, 7, "subprocess 'claude'",
+             "otro proceso (REPL o las_manos) sigue teniendo un claude corriendo."),
+        )
+        # el dueno es ROOT (0) y el gid es el del grupo real (None = lo resuelve el nucleo): nada
+        # de uid/gid del que corre; solo los tests los inyectan
+        self.assertEqual(kwargs, {"uid_esperado": 0, "gid_esperado": None})
+        lib.assert_called_once_with(fh)
+
+    def test_los_defaults_de_la_funcion_real_son_root_y_grupo_real(self):
+        p = inspect.signature(_ADQUIRIR_REAL).parameters
+        self.assertEqual(p["uid_esperado"].default, 0)
+        self.assertIsNone(p["gid_esperado"].default)
+        self.assertEqual(p["uid_esperado"].kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertEqual(p["gid_esperado"].kind, inspect.Parameter.KEYWORD_ONLY)
 
 
 class RunSandboxedClaudeConcurrencyTest(unittest.IsolatedAsyncioTestCase):

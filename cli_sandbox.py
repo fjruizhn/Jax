@@ -59,11 +59,13 @@ root, cambiarlas exige reiniciar):
                               comparten dos usuarios, va por grupo en hyde_sandbox
   JAX_CLI_MAX_PROMPT_CHARS    tope del prompt (default 32000); `max_chars` del llamador solo
                               puede bajarlo (min)
+  JAX_CLI_FEATURES_REINTENTO_S  segundos entre reintentos de `features list` tras un timeout
+                              (default 60, minimo 1); los fallos deterministas no se reintentan
   JAX_CLI_<PERFIL>_RANURAS    llamadas concurrentes por perfil, 1..16 (default el del
                               perfil; NO lo decide el llamador de run_cli)
-  JAX_CLI_TIMEOUT_MAX_CHAT_S / JAX_CLI_TIMEOUT_MAX_JACOBS_S
-                              tope del timeout por entry_point (default 180 / 600); un
-                              entry_point sin tope (canary, repl) se rechaza
+  JAX_CLI_TIMEOUT_MAX_CHAT_S / JAX_CLI_TIMEOUT_MAX_JACOBS_S / JAX_CLI_TIMEOUT_MAX_CANARY_S
+                              tope del timeout por entry_point (default 180 / 600 / 60); un
+                              entry_point sin tope declarado se rechaza
 
 CACHES (cada uno declara su invalidacion en el mismo commit que lo crea):
   - `_CACHE_SHA`: SHA256 del manifiesto del directorio de un binario, clave = ruta
@@ -73,6 +75,11 @@ CACHES (cada uno declara su invalidacion en el mismo commit que lo crea):
     llamada, ademas, se recorre el arbol entero y se exige que cada entrada sea de
     root y sin escritura de grupo/otros, que ningun symlink salga del arbol, y que los
     ancestros de JAX_CLI_ROOT hasta `/` sean de root y no escribibles.
+  - `_CACHE_FEATURES` / `_CACHE_FEATURES_FALLO`: el exito y el fallo de `verificar_features`,
+    misma clave (ruta del binario) y misma firma del arbol que `_CACHE_SHA`; cambia el arbol,
+    se vuelve a verificar. `features list` corre bajo una ranura del perfil. El fallo
+    determinista se cachea por firma; el timeout es transitorio y se reintenta como mucho cada
+    JAX_CLI_FEATURES_REINTENTO_S segundos (default 60). Un fallo servido de la cache lo dice.
   - La lista de titulares y la verificacion en `jax_users` NO se cachean: se
     leen del entorno y de la base en cada llamada (el borrado de un usuario
     surte efecto en la siguiente llamada).
@@ -102,7 +109,8 @@ import shutil
 import stat
 import time
 import uuid
-from dataclasses import dataclass, field
+import weakref
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -155,6 +163,11 @@ class BinarioAlterado(ErrorCLI):
 
 class FeaturesNoPermitidas(ErrorCLI):
     clase = "FeaturesNoPermitidas"
+
+
+class FeaturesSinRespuesta(FeaturesNoPermitidas):
+    """`features list` no respondio a tiempo. Falla cerrado como cualquier FeaturesNoPermitidas
+    (misma `clase`, el contrato estable) pero es TRANSITORIO: la cache lo reintenta."""
 
 
 class PerfilNoSoportado(ErrorCLI):
@@ -338,8 +351,11 @@ def flock_compartido_adquirir(
         O_CREAT (un symlink o un archivo ausente fallan): archivo regular, mismo uid,
         mismo gid y sin escritura de grupo ni de otros. flock(LOCK_EX) funciona sobre
         un fd de solo lectura.
-    Cualquier otra cosa es SandboxUnavailable (falla cerrado) y, si falta el
-    archivo o el grupo, el mensaje nombra la linea de tmpfiles.d que hay que poner.
+    Cualquier otra cosa es SandboxUnavailable (falla cerrado). Dos causas que antes
+    compartian mensaje se distinguen (MINOR-26): si el archivo o el directorio NO EXISTE (o
+    el grupo no existe), el mensaje nombra la linea de tmpfiles.d que hay que poner; si
+    existe pero se niega el acceso (PermissionError), dice que el euid no pertenece al
+    grupo del lock.
 
     `uid_esperado` (0 en produccion) y `gid_esperado` (None = el del `grupo` real)
     se inyectan por keyword solo para los tests, que no corren como root; no hay
@@ -354,8 +370,23 @@ def flock_compartido_adquirir(
             raise SandboxUnavailable(
                 f"el grupo {grupo!r} del lock compartido no existe{falta} (y el grupo mismo)"
             ) from None
+    sin_grupo = (
+        f"el euid {os.geteuid()} no pertenece al grupo {grupo} (o el grupo no tiene lectura): "
+        f"agregar ese usuario a {grupo!r} o, si ya es miembro, reiniciar el proceso o la sesion "
+        f"para que tome el grupo"
+    )
     try:
         dfd = os.open(directorio, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except PermissionError:
+        # existe, pero este euid no puede entrar: falta la MEMBRESIA, no la linea de tmpfiles.d
+        raise SandboxUnavailable(
+            f"directorio de locks compartido {directorio!r} no accesible: {sin_grupo} -- falla cerrado"
+        ) from None
+    except FileNotFoundError:
+        raise SandboxUnavailable(
+            f"directorio de locks compartido {directorio!r} no existe"
+            f"{falta} (o su linea `d {directorio} 0750 root {grupo} -`)"
+        ) from None
     except OSError as exc:
         raise SandboxUnavailable(
             f"directorio de locks compartido {directorio!r} no usable ({exc.strerror or type(exc).__name__})"
@@ -371,6 +402,11 @@ def flock_compartido_adquirir(
             )
         try:
             fd = os.open(nombre, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+        except PermissionError:
+            raise SandboxUnavailable(
+                f"el lock compartido {nombre!r} existe en {directorio!r} pero no se puede abrir: "
+                f"{sin_grupo} -- falla cerrado"
+            ) from None
         except FileNotFoundError:
             raise SandboxUnavailable(
                 f"el lock compartido {nombre!r} no existe en {directorio!r}{falta}"
@@ -485,8 +521,9 @@ def transporte_efectivo(facet_transport: Optional[str], provider_auth_type: Opti
 # --------------------------------------------------------------------------
 
 #: Puntos de entrada reconocidos. `canary` lo fija solo el codigo de la sonda,
-#: dentro del proceso; nunca viene de un request.
-ENTRY_POINTS = frozenset({"chat", "canary", "jacobs", "repl"})
+#: dentro del proceso; nunca viene de un request. `repl` se retiro (Fernando, T16: el REPL se
+#: retira): ya no es un entry_point valido.
+ENTRY_POINTS = frozenset({"chat", "canary", "jacobs"})
 
 TITULARES_ENV = "JAX_SUSCRIPCION_TITULARES"
 _RE_LISTA = re.compile(r"^\s*[0-9]+(\s*,\s*[0-9]+)*\s*$")
@@ -507,7 +544,16 @@ TITULAR_TTL_S = 30.0
 _EMITIENDO: contextvars.ContextVar[bool] = contextvars.ContextVar("cli_sandbox_emitiendo", default=False)
 
 
-@dataclass(frozen=True)
+#: Lo que `exigir_titular` registro al emitir cada Titular: (user_id, tenant_id, entry_point),
+#: indexado por la IDENTIDAD del objeto (`Titular` no define `__eq__`/`__hash__` por campos) y
+#: con referencia debil: el registro no retiene titulares y la entrada muere con el objeto.
+#: `run_cli` compara lo que el objeto dice HOY contra esto: `object.__setattr__(t, "entry_point",
+#: ...)` sobre un titular ya emitido lo desacuerda (MINOR-24). Invalidacion: ninguna explicita,
+#: es el ciclo de vida del objeto.
+_EMITIDOS: "weakref.WeakKeyDictionary[Titular, tuple[int, int, str]]" = weakref.WeakKeyDictionary()
+
+
+@dataclass(frozen=True, eq=False)
 class Titular:
     """Prueba de que `exigir_titular` autorizo a este usuario, en este tenant y
     por este punto de entrada, hace menos de `TITULAR_TTL_S` segundos.
@@ -516,14 +562,19 @@ class Titular:
       1. En ejecucion, por las vias normales, solo `exigir_titular` lo construye:
          `Titular(...)`, `dataclasses.replace`, `copy`, `deepcopy` y `pickle`
          terminan en TypeError; el sello y la marca de tiempo no son argumentos del
-         constructor; y `run_cli` rechaza uno caducado o de otro entry_point.
+         constructor; y `run_cli` rechaza uno caducado o de otro entry_point. Ademas,
+         `exigir_titular` registra (user_id, tenant_id, entry_point) del objeto emitido
+         en `_EMITIDOS` (por identidad, referencia debil) y `run_cli` rechaza un titular
+         que no figura ahi o cuyos campos ya no coinciden con lo registrado: alterar
+         `entry_point`, `user_id` o `tenant_id` con `object.__setattr__` sobre un titular
+         ya emitido no sirve, y uno fabricado con `object.__new__` no esta registrado.
       2. NO es una barrera contra codigo que corre DENTRO del proceso: quien importe
          este modulo puede leer `_SELLO`, entrar a `_EMITIENDO`, fijar `emitido_mono`
-         con `object.__setattr__` o llamar `object.__new__(Titular)` y obtener un
-         Titular valido. Ninguna de esas vias esta cerrada en ejecucion.
+         con `object.__setattr__` o escribir en `_EMITIDOS` y obtener un Titular valido.
+         Esas vias (los nombres privados) no estan cerradas en ejecucion.
       3. Lo que las hace VISIBLES es un control de revision, no de ejecucion:
          policy/tests/test_titular_solo_via_exigir_titular.py falla el CI si, fuera de
-         este archivo y de su test, el AST nombra `_SELLO`, `_EMITIENDO` o
+         este archivo y de su test, el AST nombra `_SELLO`, `_EMITIENDO`, `_EMITIDOS` o
          `emitido_mono`, declara una subclase de `Titular` o llama `object.__new__`
          sobre ella. No ve codigo fuera de los repos escaneados (en CI solo jax) ni
          formas que el AST no muestra (`exec`/`eval` de texto, nombres calculados).
@@ -637,6 +688,7 @@ async def exigir_titular(user_id, tenant_id, entry_point) -> Titular:
         _EMITIENDO.reset(token)
     object.__setattr__(t, "_sello", _SELLO)
     object.__setattr__(t, "emitido_mono", time.monotonic())
+    _EMITIDOS[t] = (user_id, tenant_id, entry_point)
     return t
 
 
@@ -1179,23 +1231,75 @@ def _resolver_binario(perfil: Perfil, *, uid_esperado: int = 0) -> tuple[str, st
 
 #: ruta del binario -> firma del arbol para la que `verificar_features` ya dio verde. MISMA
 #: clave y MISMA firma que `_CACHE_SHA`: si cambia cualquier stat del arbol, la firma cambia,
-#: se re-hashea el manifiesto Y se vuelve a verificar. Solo se cachea el exito: un fallo se
-#: vuelve a intentar (y a fallar) en cada llamada.
+#: se re-hashea el manifiesto Y se vuelve a verificar.
 _CACHE_FEATURES: dict[str, str] = {}
+
+#: ruta del binario -> `_FalloFeatures` del FALLO de `verificar_features` (feature no permitida,
+#: salida vacia o ilegible, exit code, timeout de `features list`). MISMA clave y firma que las
+#: dos de arriba, y la misma invalidacion: si cambia el arbol, se vuelve a verificar (un operador
+#: que reinstala un binario sano no queda atado al fallo viejo). El fallo se cachea igual que el
+#: exito (MINOR-23, reauditoria 2026-10-02): sin esto, cada llamada con un binario malo
+#: relanzaba `features list` -- un proceso de bwrap por chat -- y un binario roto era un
+#: amplificador. NO se cachean las esperas de ranura (LockTimeout): no son un fallo del binario.
+#:
+#: Dos clases de fallo (MINOR-33, auditoria del SHA 174da8c):
+#:  - DETERMINISTA (feature no permitida, salida vacia/ilegible, exit code != 0): el binario
+#:    dijo lo que dijo; se cachea por firma hasta que cambie el arbol o se reinicie el proceso.
+#:  - TRANSITORIO (timeout de `features list`, p. ej. con la maquina saturada): no prueba nada
+#:    del binario. Es un estado propio de la cache, con REINTENTO ACOTADO: como mucho un
+#:    `features list` cada `JAX_CLI_FEATURES_REINTENTO_S` segundos (default 60, minimo 1) por
+#:    binario; entre reintentos se sirve el fallo cacheado, asi que un binario colgado sigue sin
+#:    ser un amplificador. Un reintento que da verde limpia el fallo.
+#: Un fallo servido desde la cache lo dice en el mensaje y en el log (`cacheado desde <ts>,
+#: firma <x>`): quien lo lee no confunde un fallo viejo con uno recien medido.
+_CACHE_FEATURES_FALLO: dict[str, "_FalloFeatures"] = {}
+
+#: Reintento, en segundos, tras un timeout de `features list` (transitorio). Variable de entorno
+#: `JAX_CLI_FEATURES_REINTENTO_S`; un valor no numerico, no finito o menor que 1 vuelve al default.
+FEATURES_REINTENTO_S_DEFAULT = 60.0
+
+
+@dataclass(frozen=True)
+class _FalloFeatures:
+    firma: str
+    mensaje: str
+    desde_utc: str   # hora de pared en que se midio, para humanos (mensaje y log)
+    mono: float      # time.monotonic() en que se midio, para el reintento
+    transitorio: bool
+
+
+def _features_reintento_s() -> float:
+    try:
+        v = float(os.environ.get("JAX_CLI_FEATURES_REINTENTO_S", ""))
+    except ValueError:
+        return FEATURES_REINTENTO_S_DEFAULT
+    return v if math.isfinite(v) and v >= 1 else FEATURES_REINTENTO_S_DEFAULT
+
+
+def _mensaje_de_fallo_cacheado(fallo: _FalloFeatures) -> str:
+    extra = f"; transitorio, se reintenta cada {_features_reintento_s():g}s" if fallo.transitorio else ""
+    return f"{fallo.mensaje} (cacheado desde {fallo.desde_utc}, firma {fallo.firma[:12]}{extra})"
+
 
 #: Espera maxima de `codex features list` (arranca el binario una vez por firma).
 FEATURES_TIMEOUT_S = 30.0
 
 
-async def _features_del_binario(p: Perfil, ruta_bin: str, dir_bin: str) -> str:
+async def _features_del_binario(
+    p: Perfil, ruta_bin: str, dir_bin: str, espera_lock_s: Optional[float] = None,
+) -> str:
     """Corre `<binario> features list --disable ...` DENTRO del sandbox, con el mismo
     `ejecutar` del nucleo (el unico create_subprocess_exec), sin credenciales (listar
     features no pide login ni cuota) y con un CODEX_HOME efimero: el /tmp privado del
-    sandbox, que desaparece con el proceso. Devuelve la salida; cualquier cosa que no sea
-    un exit code 0 con salida es FeaturesNoPermitidas (falla cerrado)."""
+    sandbox, que desaparece con el proceso. Corre BAJO UNA RANURA del perfil, como la llamada
+    real (MINOR-23): arrancar el binario cuenta para la concurrencia del perfil. Devuelve la
+    salida; cualquier cosa que no sea un exit code 0 con salida es FeaturesNoPermitidas (falla
+    cerrado); sin ranura libre es LockTimeout."""
     base = Path(os.environ.get("JAX_CLI_RUN_DIR", "/run/jax-cli"))
     rundir = base / f"features-{uuid.uuid4().hex}"
     await asyncio.to_thread(_preparar_rundir, base, rundir, p.archivo_nombre, "")
+    n = _ranuras_de(p)
+    espera = p.espera_lock_s if espera_lock_s is None else espera_lock_s
     try:
         argv = argv_confinado_cli(
             _BWRAP_BIN, work_host=str(rundir), home_sandbox=p.home_sandbox,
@@ -1205,10 +1309,15 @@ async def _features_del_binario(p: Perfil, ruta_bin: str, dir_bin: str) -> str:
         env = env_minimo(p.home_sandbox, dict(p.env_features))
         proc, stdout, _stderr = await ejecutar(
             argv, env, b"", FEATURES_TIMEOUT_S,
-            adquirir=lambda _t: None, liberar=lambda _h: None, cwd="/",
+            adquirir=lambda _t: _ranura_adquirir(p.nombre, n, espera),
+            # sin credencial montada no hay nada que purgar: solo se suelta la ranura
+            liberar=lambda h: flock_liberar(h[0]),
+            cwd="/",
         )
+    except LockTimeout:
+        raise  # LockTimeout tambien es TimeoutError: no convertirlo en "features list no respondio"
     except asyncio.TimeoutError:
-        raise FeaturesNoPermitidas(f"{p.nombre}: `features list` no respondio en {FEATURES_TIMEOUT_S}s") from None
+        raise FeaturesSinRespuesta(f"{p.nombre}: `features list` no respondio en {FEATURES_TIMEOUT_S}s") from None
     finally:
         await asyncio.to_thread(_borrar_rundir, rundir)
     if proc.returncode != 0:
@@ -1216,17 +1325,45 @@ async def _features_del_binario(p: Perfil, ruta_bin: str, dir_bin: str) -> str:
     return stdout.decode("utf-8", "replace")
 
 
-async def _asegurar_features(p: Perfil, ruta_bin: str, dir_bin: str) -> None:
+async def _asegurar_features(
+    p: Perfil, ruta_bin: str, dir_bin: str, espera_lock_s: Optional[float] = None,
+) -> None:
     """Verifica las features del binario (lista PERMITIDA, `verificar_features`) una vez por
-    firma del arbol. Los perfiles sin lista permitida (kimi) no pasan por aqui."""
+    firma del arbol, el exito Y el fallo (MINOR-23). Los perfiles sin lista permitida (kimi)
+    no pasan por aqui."""
     if p.features_permitidas is None or p._armar_features is None:
         return
     firma = _CACHE_SHA.get(ruta_bin, ("",))[0]
-    if firma and _CACHE_FEATURES.get(ruta_bin) == firma:
-        return
-    verificar_features(await _features_del_binario(p, ruta_bin, dir_bin), p.nombre)
+    if firma:
+        if _CACHE_FEATURES.get(ruta_bin) == firma:
+            return
+        fallo = _CACHE_FEATURES_FALLO.get(ruta_bin)
+        if fallo and fallo.firma == firma and not (
+            fallo.transitorio and time.monotonic() - fallo.mono >= _features_reintento_s()
+        ):
+            mensaje = _mensaje_de_fallo_cacheado(fallo)
+            logger.warning(
+                "features: fallo servido desde la cache para %s (cacheado desde %s, firma %s)",
+                _campo_log(p.nombre), fallo.desde_utc, fallo.firma[:12],
+            )
+            raise (FeaturesSinRespuesta if fallo.transitorio else FeaturesNoPermitidas)(mensaje)
+        if fallo and fallo.firma == firma:
+            # toca el reintento: se reserva YA (las demas llamadas concurrentes siguen sirviendo
+            # el fallo cacheado) y asi hay a lo sumo un `features list` por ventana
+            _CACHE_FEATURES_FALLO[ruta_bin] = replace(fallo, mono=time.monotonic())
+    try:
+        verificar_features(await _features_del_binario(p, ruta_bin, dir_bin, espera_lock_s), p.nombre)
+    except FeaturesNoPermitidas as exc:
+        if firma:
+            _CACHE_FEATURES_FALLO[ruta_bin] = _FalloFeatures(
+                firma=firma, mensaje=str(exc), mono=time.monotonic(),
+                desde_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                transitorio=isinstance(exc, FeaturesSinRespuesta),
+            )
+        raise
     if firma:
         _CACHE_FEATURES[ruta_bin] = firma
+        _CACHE_FEATURES_FALLO.pop(ruta_bin, None)
 
 
 # --------------------------------------------------------------------------
@@ -1327,19 +1464,21 @@ def _ranuras_de(p: Perfil) -> int:
 
 #: Tope del `timeout` de `run_cli` por punto de entrada: (variable de entorno, default
 #: en segundos). Un entry_point que no figura aqui NO tiene tope declarado y `run_cli`
-#: lo rechaza (falla cerrado). `canary` y `repl` son entry_points validos para
-#: `exigir_titular` pero no tienen tope: hay que declararselo antes de usarlos.
+#: lo rechaza (falla cerrado). Todo entry_point de `ENTRY_POINTS` tiene tope: `canary` (la
+#: sonda) 60 s por defecto, configurable con `JAX_CLI_TIMEOUT_MAX_CANARY_S`.
 TIMEOUT_MAX_POR_ENTRY: dict[str, tuple[str, float]] = {
     "chat": ("JAX_CLI_TIMEOUT_MAX_CHAT_S", 180.0),
     "jacobs": ("JAX_CLI_TIMEOUT_MAX_JACOBS_S", 600.0),
+    "canary": ("JAX_CLI_TIMEOUT_MAX_CANARY_S", 60.0),
 }
 
 
 def timeout_maximo_para(entry_point) -> float:
     """Tope del `timeout` de `run_cli` para `entry_point`: `JAX_CLI_TIMEOUT_MAX_CHAT_S`
-    (chat, default 180 s) o `JAX_CLI_TIMEOUT_MAX_JACOBS_S` (jacobs, default 600 s) si es
-    un numero finito positivo y, si no, el default: un valor roto vuelve al default, no
-    lo afloja. Un entry_point sin tope declarado es ValueError."""
+    (chat, default 180 s), `JAX_CLI_TIMEOUT_MAX_JACOBS_S` (jacobs, default 600 s) o
+    `JAX_CLI_TIMEOUT_MAX_CANARY_S` (canary, default 60 s) si es un numero finito positivo y,
+    si no, el default: un valor roto vuelve al default, no lo afloja. Un entry_point sin tope
+    declarado es ValueError."""
     if not isinstance(entry_point, str) or entry_point not in TIMEOUT_MAX_POR_ENTRY:
         raise ValueError(f"entry_point {entry_point!r} sin tope de timeout declarado")
     var, default = TIMEOUT_MAX_POR_ENTRY[entry_point]
@@ -1480,7 +1619,14 @@ def purgar_al_arranque(perfil: str) -> bool:
     True si purgo y False si no (ranura ocupada, perfil sin nada que purgar o directorio de
     credencial ausente, que se registra). Un directorio de locks inseguro es
     SandboxUnavailable (falla cerrado). Perfil desconocido o que no se sirve por run_cli:
-    PerfilNoSoportado."""
+    PerfilNoSoportado.
+
+    NOTA (MINOR-27, reauditoria 2026-10-02): hoy no la llama nadie (salvo `preparar_arranque`,
+    que a su vez tampoco tiene llamador). El mensaje del commit
+    9e39287 ("la invoca, via to_thread, el llamador de los pasos 6 y 9") describe el DISENO,
+    no el estado: ese llamador (el arranque del paso 6/9) todavia no existe. El punto de
+    arranque explicito es `preparar_arranque()`, que purga todos los perfiles habilitados;
+    el arranque de los pasos 6 y 9 DEBE llamarlo."""
     p = PERFILES.get(perfil) if isinstance(perfil, str) else None
     if p is None or not p.via_run_cli:
         raise PerfilNoSoportado(f"perfil {perfil!r} no se sirve por run_cli")
@@ -1489,6 +1635,25 @@ def purgar_al_arranque(perfil: str) -> bool:
         logger.warning("purga al arrancar: no existe el directorio de credencial de %s", p.nombre)
         return False
     return _purgar_si_libre(p, _ranuras_de(p), cred_host, None)
+
+
+def preparar_arranque() -> dict[str, bool]:
+    """BLOQUEANTE -- llamar via asyncio.to_thread. PUNTO DE ARRANQUE de los CLIs de
+    suscripcion: purga (`purgar_al_arranque`) el estado que dejo un proceso anterior en el
+    directorio de credencial de CADA perfil habilitado, o sea los que sirve `run_cli`
+    (`via_run_cli`; `claude`, que es Hyde, no). Devuelve {perfil: si purgo}: False es una
+    llamada en curso de otro proceso (la purga queda para la proxima) o un directorio de
+    credencial ausente (se registra); un perfil que no se pudo purgar no frena a los demas. Un
+    directorio de locks inseguro es SandboxUnavailable (falla cerrado) y nada mas se purga.
+
+    El arranque del paso 6 (Thot, chat) y del paso 9 (Jacobs) DEBE llamarla, una vez, antes de
+    servir la primera llamada. Hoy no la llama nadie: esos pasos todavia no existen, y este
+    modulo no la dispara solo (un import no puede borrar archivos). Cuando se escriba ese
+    arranque, hay que cablearla y agregar el test que lo exija."""
+    return {
+        nombre: purgar_al_arranque(nombre)
+        for nombre, p in PERFILES.items() if p.via_run_cli
+    }
 
 
 def _ranura_liberar(handle, perfil: Perfil, ranuras: int, cred_host: Optional[str]) -> None:
@@ -1511,6 +1676,42 @@ def _ranura_liberar(handle, perfil: Perfil, ranuras: int, cred_host: Optional[st
 _RE_BLANCOS = re.compile(r"\s+")
 
 
+_RE_CORRELATION_ID = re.compile(r"[A-Za-z0-9._:-]{1,64}")
+_CORRELATION_ID_INVALIDO = "<invalido>"
+
+
+def _campo_log(valor, tope: int = 200, *, espacios: bool = False) -> str:
+    """Un valor para la linea de log de `run_cli`: texto de UNA sola linea, de largo acotado
+    (`tope` caracteres YA escapados) y que no puede fabricar un `clave=valor`. Todo campo de
+    texto de esa linea pasa por aqui, no solo `motivo`: un valor con saltos de linea fabricaba
+    una segunda linea con una `clase=ok` falsa (MINOR-22), y colapsarlos no impide fabricarla
+    en la MISMA linea (`"x clase=ok latencia_ms=1"`, MINOR-32).
+
+    Los espacios y saltos (\\n, \\r, tabs, separadores unicode) se colapsan en uno solo; despues
+    se escapan `=` (`\\x3d`), la barra invertida, los caracteres no imprimibles y de control
+    (incluido ESC, `\\x1b`, que un terminal interpreta) y, salvo `espacios=True` (el `motivo`,
+    texto libre donde se quiere poder leer el mensaje), el espacio (`\\x20`). Sin `=` sin escapar,
+    un parser `clave=valor` no puede encontrar una clave falsa dentro de un valor."""
+    salida: list[str] = []
+    largo = 0
+    for ch in _RE_BLANCOS.sub(" ", str(valor)):
+        if ch == "\\":
+            e = "\\\\"
+        elif ch == "=":
+            e = "\\x3d"
+        elif ch == " ":
+            e = " " if espacios else "\\x20"
+        elif ch.isprintable():
+            e = ch
+        else:
+            e = ch.encode("unicode_escape").decode("ascii")
+        if largo + len(e) > tope:
+            break
+        salida.append(e)
+        largo += len(e)
+    return "".join(salida)
+
+
 @dataclass(frozen=True)
 class ResultadoCLI:
     texto: str
@@ -1526,6 +1727,23 @@ def _escribir_privado(ruta: Path, contenido: str) -> None:
         f.write(contenido)
 
 
+def _quitar_rundir(rundir: Path) -> None:
+    """BLOQUEANTE. Quita el directorio por llamada con `rmtree(onexc=...)`: lo que no se pueda
+    quitar se REGISTRA (warning con la ruta y el error), igual que la purga de credenciales
+    (`_quitar`); `ignore_errors=True` lo tragaba y el rundir -- con el system prompt y la
+    memoria adentro -- quedaba en disco sin que nadie lo supiera (MINOR-29). Un rundir que ya
+    no existe no es un error: no hace ruido."""
+    def al_fallar(_func, ruta_fallida, exc):
+        if isinstance(exc, FileNotFoundError):
+            return
+        logger.warning(
+            "rundir: no se pudo quitar %s (%s)",
+            _campo_log(ruta_fallida, espacios=True), getattr(exc, "strerror", None) or type(exc).__name__,
+        )
+
+    shutil.rmtree(rundir, onexc=al_fallar)
+
+
 def _preparar_rundir(base: Path, rundir: Path, archivo: str, contenido: str) -> None:
     """BLOQUEANTE (to_thread): crea `base` (0700) y el directorio por llamada y
     escribe el system prompt. Si algo falla, no deja el directorio a medias."""
@@ -1534,13 +1752,13 @@ def _preparar_rundir(base: Path, rundir: Path, archivo: str, contenido: str) -> 
     try:
         _escribir_privado(rundir / archivo, contenido)
     except BaseException:
-        shutil.rmtree(rundir, ignore_errors=True)
+        _quitar_rundir(rundir)
         raise
 
 
 def _borrar_rundir(rundir: Path) -> None:
-    """BLOQUEANTE (to_thread)."""
-    shutil.rmtree(rundir, ignore_errors=True)
+    """BLOQUEANTE (to_thread). Ver `_quitar_rundir`: lo que no se pueda quitar se registra."""
+    _quitar_rundir(rundir)
 
 
 async def run_cli(
@@ -1557,9 +1775,16 @@ async def run_cli(
     motivo = ""
     version = ""
     try:
+        # el correlation_id va a la linea de log como identificador: formato cerrado, o se
+        # rechaza la llamada (MINOR-32). La linea registra un marcador fijo, no el valor.
+        if not isinstance(correlation_id, str) or not _RE_CORRELATION_ID.fullmatch(correlation_id):
+            correlation_id = _CORRELATION_ID_INVALIDO
+            raise ValueError("correlation_id con formato invalido: se exige [A-Za-z0-9._:-]{1,64}")
         if (
             not isinstance(titular, Titular) or titular._sello is not _SELLO
             or titular.entry_point != entry_point
+            # lo que el objeto dice hoy tiene que ser lo que se registro al emitirlo (MINOR-24)
+            or _EMITIDOS.get(titular) != (titular.user_id, titular.tenant_id, titular.entry_point)
         ):
             raise TitularNoAutorizado("suscripcion_solo_titular", "titular ausente, no autorizado o de otro entry_point")
         edad = time.monotonic() - titular.emitido_mono
@@ -1589,7 +1814,7 @@ async def run_cli(
         conversacion = armar_conversacion(historial, mensaje, tope)
         ruta_bin, dir_bin, version = await asyncio.to_thread(_resolver_binario, p)
         verificar_bwrap(_BWRAP_BIN, p.nombre)
-        await _asegurar_features(p, ruta_bin, dir_bin)
+        await _asegurar_features(p, ruta_bin, dir_bin, espera_lock_s)
         cred_host = _cred_host(p)
         if not os.path.isdir(cred_host):
             raise SandboxUnavailable(f"{p.nombre}: falta el directorio de credencial dedicado")
@@ -1628,13 +1853,14 @@ async def run_cli(
         clase = getattr(exc, "clase", None) or type(exc).__name__
         # el motivo distingue las causas de una misma clase (SandboxUnavailable tiene
         # varias); sin saltos de linea, para que un mensaje no pueda fabricar otra linea
-        motivo = _RE_BLANCOS.sub(" ", str(exc))[:200]
+        motivo = _campo_log(exc, espacios=True)
         raise
     finally:
         logger.info(
             "run_cli correlation_id=%s entry_point=%s user_id=%s tenant_id=%s perfil=%s modelo=%s "
             "version_cli=%s clase=%s latencia_ms=%d motivo=%s",
-            correlation_id, entry_point, getattr(titular, "user_id", None),
-            getattr(titular, "tenant_id", None), perfil, modelo, version, clase or "ok",
+            _campo_log(correlation_id), _campo_log(entry_point),
+            _campo_log(getattr(titular, "user_id", None)), _campo_log(getattr(titular, "tenant_id", None)),
+            _campo_log(perfil), _campo_log(modelo), _campo_log(version), _campo_log(clase or "ok"),
             int((time.monotonic() - t0) * 1000), motivo,
         )
