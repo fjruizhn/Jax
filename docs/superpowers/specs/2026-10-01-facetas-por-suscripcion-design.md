@@ -2,7 +2,7 @@
 
 > Fecha: 2026-10-01 · Autor: arquitecto-adversarial (escalón 3, solo lectura), encargado por Hyde en hall9000.
 > Pedido de Fernando (2026-10-01): pasar Thot (OpenAI) y Kimi (Moonshot) de API a suscripción, como Hyde.
-> Estado: DISEÑO. D-1 a D-4 CERRADAS por Fernando el 2026-10-01 (ver la adenda al final). Abiertas: D-5, D-6, D-7. Nada implementado.
+> Estado: DISEÑO. D-1 a D-5 y D-7 CERRADAS por Fernando el 2026-10-01 (ver la adenda al final). D-6 en investigación (kimi acp). Nada implementado.
 
 # Diseño: Thot y Kimi por suscripción (escalón 3, solo lectura)
 
@@ -450,3 +450,11 @@ Diferirla es seguro porque la compuerta falla cerrado.
 **Preguntas nuevas para Fernando:** D-5 (¿la compuerta corta también las llaves API de la plataforma para otros usuarios?), D-6 (¿qué hacer con las herramientas del motor kimi?) y D-7 (¿se cambia el contrato F2-D para mostrar el modelo?).
 
 No ratifico nada: el GO es de Fernando.
+
+### Decisiones D-5 a D-7 (Fernando, 2026-10-01)
+
+| | Decisión |
+|---|---|
+| **D-5** | **Cortar ya.** La compuerta de titular se aplica a todo proveedor pago que no sea local. Quien no es titular (user 1 u 8) y no tiene llave propia recibe un error tipado (i18n) y nunca usa la credencial de la plataforma. Entra en la fase 1 (paso 6), no se difiere a la 1b. |
+| **D-6** | **Investigar primero la opción (c), `kimi acp`**: que Kimi pida las operaciones de archivos al cliente para que pasen por `tool_authority`. Solo si no sirve se decide entre (a) y (b). El paso 9 (worker) espera ese resultado; los pasos 0 a 8 no dependen de él. |
+| **D-7** | **Sí.** El servidor declara `ejecucion = {provider_id, model_id, task_class_aplicada, motivo_ruta, via}` en el contrato F2-D, atada en `_validate_projection`. Entra con el router, en la fase 2. |
