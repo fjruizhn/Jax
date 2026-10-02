@@ -276,3 +276,65 @@ def test_la_mascara_o_el_permiso_de_un_uid_vivo_por_encima_de_x_se_rechazan_por_
     entradas = [(t, p, i) for t, p, i in acl._leer_o_modo(d) if t != acl.TAG_MASK]
     acl._escribir(d, entradas)
     assert acl.usuarios(d) == {JAULA: acl.R | acl.X}
+
+
+# --------------------------------------------------------------------------- #
+# reauditoria R-1: la ACL POR DEFECTO (herencia)                              #
+# --------------------------------------------------------------------------- #
+
+def _acl_por_defecto(d, uid=33, perm=7):
+    """`setfacl -d -m u:<uid>:<perm>`: lo que un archivo nuevo del directorio hereda."""
+    entradas = [(acl.TAG_USER_OBJ, 7, 0xFFFFFFFF), (acl.TAG_USER, perm, uid), (acl.TAG_GROUP_OBJ, 0, 0xFFFFFFFF),
+                (acl.TAG_MASK, perm, 0xFFFFFFFF), (acl.TAG_OTHER, 0, 0xFFFFFFFF)]
+    os.setxattr(d, "system.posix_acl_default", acl._codificar(entradas), follow_symlinks=False)
+
+
+def test_r1_un_directorio_con_acl_por_defecto_no_es_privado(d):
+    _acl_por_defecto(d)
+    with pytest.raises(ConfigFaroInvalida, match="defecto|herenc"):
+        acl.validar_privado(d, uids_permitidos={33})
+
+
+def test_r1_tampoco_lo_es_con_una_entrada_valida_mas_la_acl_por_defecto(d):
+    acl.conceder(d, JAULA, acl.X)
+    _acl_por_defecto(d, uid=33, perm=0)                         # incluso una heredada con efecto ---
+    with pytest.raises(ConfigFaroInvalida, match="defecto|herenc"):
+        acl.validar_privado(d, uids_permitidos={JAULA, 33})
+
+
+def test_r1_el_puerto_no_abre_en_un_directorio_con_acl_por_defecto(mundo):
+    cfg, cargado = mundo
+    _acl_por_defecto(cfg.socket_dir)
+
+    async def caso():
+        with pytest.raises(ConfigFaroInvalida, match="defecto|herenc"):
+            async with _puerto(cfg, cargado, uid_esperado=JAULA):
+                pass
+    corre(caso())
+    assert list(cfg.socket_dir.iterdir()) == []
+
+
+def test_r1_conceder_exclusivo_sobre_un_archivo_con_entradas_ajenas_falla_cerrado_y_no_lo_toca(d):
+    _acl_por_defecto(d, uid=33, perm=7)
+    token = d / "heredado.token"
+    token.write_text("t")                                       # hereda user:33:rwx del directorio
+    token.chmod(0o400)
+    antes = acl.usuarios(token)
+    assert 33 in antes                                          # la herencia es real en este sistema de archivos
+    with pytest.raises(ConfigFaroInvalida, match="ajena|nombre"):
+        acl.conceder(token, JAULA, acl.R, exclusivo=True)
+    assert acl.usuarios(token) == antes
+
+
+def test_r1_conceder_exclusivo_acepta_su_propia_entrada_y_ninguna_otra(f):
+    acl.conceder(f, JAULA, acl.R, exclusivo=True)
+    acl.conceder(f, JAULA, acl.R | acl.W, exclusivo=True)       # reemplazar la suya vale
+    assert acl.usuarios(f) == {JAULA: 6}
+    with pytest.raises(ConfigFaroInvalida):
+        acl.conceder(f, OTRA, acl.R, exclusivo=True)
+
+
+def test_r1_el_directorio_si_admite_las_entradas_de_otras_jaulas(d):
+    acl.conceder(d, JAULA, acl.X)
+    acl.conceder(d, OTRA, acl.X)                                # no exclusivo: es el directorio compartido
+    assert acl.usuarios(d) == {JAULA: 1, OTRA: 1}
