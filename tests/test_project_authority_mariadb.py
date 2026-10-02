@@ -371,7 +371,8 @@ async def test_migracion_apply_apply_revert_apply_y_falla_cerrado_con_fila_archi
                 async def _snapshot() -> dict:
                     snap = {}
                     for table in ("jax_project_scope", "jax_project_membership",
-                                 "jax_project_membership_event", "jax_project_creation_request", "projects"):
+                                 "jax_project_membership_event", "jax_project_creation_request", "projects",
+                                 "jax_users"):
                         await cur.execute(f"SHOW CREATE TABLE `{table}`")
                         row = await cur.fetchone()
                         snap[table] = row["Create Table"]
@@ -385,6 +386,8 @@ async def test_migracion_apply_apply_revert_apply_y_falla_cerrado_con_fila_archi
                 await revert_project_lifecycle_migration(cur)
                 await cur.execute("SHOW TABLES LIKE 'jax_project_creation_request'")
                 assert await cur.fetchone() is None
+                await cur.execute("SHOW INDEX FROM jax_users WHERE Key_name='idx_jax_users_tenant_email'")
+                assert await cur.fetchone() is None  # E1.1: la reversion simetrica lo quita
                 await cur.execute(
                     "SELECT COUNT(*) AS n FROM information_schema.CHECK_CONSTRAINTS "
                     "WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME='chk_jax_project_scope_status'")

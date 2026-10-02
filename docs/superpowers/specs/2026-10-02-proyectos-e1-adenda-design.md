@@ -80,6 +80,13 @@ jax-platform usa la autoridad de B9 **en proceso**, como ya hacen `backend/api/c
 | `DELETE /proyectos/{id}/miembros/{user_id}` | quitar | `revoke_member` |
 | `GET /proyectos/candidatos?q=` | usuarios activos del mismo tenant para invitar | tenant del usuario |
 
+> **E1.1 (2026-10-02, Fernando).** Candidatos: `q` es **opcional** (vacío o solo espacios = lista
+> sin filtrar; con 1 o más caracteres, prefijo de email); el tope de `limit` sube a **100**
+> (antes 1..20, y `q` de menos de 2 caracteres devolvía vacío). La pestaña Miembros pasa de
+> buscador obligatorio a una **lista con casillas** para marcar varios, más el **filtro por
+> email**. Índice nuevo `idx_jax_users_tenant_email (tenant_id, email)` en la migración 005i.
+> El texto de arriba es la historia de E1 y no se reescribe.
+
 **Errores (spec §4, se mantiene):** **404** si el proyecto no existe, está oculto o no eres
 miembro, sin revelar cuál; **403** si eres miembro y te falta el papel. Los errores de B9
 (`LastOwnerRequired`, `TenantAdminMembershipProtected`, `MemberNotFound`…) se traducen a

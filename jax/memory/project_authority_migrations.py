@@ -95,6 +95,13 @@ _IDX_MEMBERSHIP_USER_LIST = "idx_jax_project_membership_user_list"
 #: in jax-platform's own migrations because this module is the only reader
 #: that needs it, same reasoning as 005e for jax_project_membership.
 _IDX_USERS_TENANT_ROLE_STATUS = "idx_jax_users_tenant_role_status"
+#: E1.1 (2026-10-02, adenda §5.6.1): `list_invite_candidates` lists the tenant's
+#: users ordered by email (with or without an email-prefix filter). Without
+#: `(tenant_id, email)` MariaDB filesorts every tenant user on each call.
+#: Lives here although `jax_users` is platform-owned, for the same reason as
+#: `idx_jax_users_tenant_role_status`: this module is the only reader that
+#: needs it, and it is guarded so a re-run is a no-op.
+_IDX_USERS_TENANT_EMAIL = "idx_jax_users_tenant_email"
 
 _LEGACY_STATUS_ENUM = "ENUM('planning','active','paused','completed','archived')"
 _LIFECYCLE_STATUS_ENUM = ("ENUM('planning','active','paused','completed','archived','hidden','disabled') "
@@ -199,6 +206,10 @@ async def _apply_project_lifecycle_migration(cursor: Any) -> None:
     if not await _index_exists(cursor, "jax_users", _IDX_USERS_TENANT_ROLE_STATUS):
         await cursor.execute(
             "CREATE INDEX " + _IDX_USERS_TENANT_ROLE_STATUS + " ON jax_users (tenant_id, role, status)")
+    # 005i (E1.1): candidate list ordered by email, see _IDX_USERS_TENANT_EMAIL.
+    if not await _index_exists(cursor, "jax_users", _IDX_USERS_TENANT_EMAIL):
+        await cursor.execute(
+            "CREATE INDEX " + _IDX_USERS_TENANT_EMAIL + " ON jax_users (tenant_id, email)")
 
 
 async def revert_project_lifecycle_migration(cursor: Any) -> None:
@@ -234,6 +245,8 @@ async def revert_project_lifecycle_migration(cursor: Any) -> None:
         await cursor.execute("DROP INDEX " + _IDX_MEMBERSHIP_USER_LIST + " ON jax_project_membership")
     if await _index_exists(cursor, "jax_users", _IDX_USERS_TENANT_ROLE_STATUS):
         await cursor.execute("DROP INDEX " + _IDX_USERS_TENANT_ROLE_STATUS + " ON jax_users")
+    if await _index_exists(cursor, "jax_users", _IDX_USERS_TENANT_EMAIL):
+        await cursor.execute("DROP INDEX " + _IDX_USERS_TENANT_EMAIL + " ON jax_users")
     for name in (_CHK_MEMBERSHIP_ORIGIN, _CHK_MEMBERSHIP_PRE_ADMIN):
         if await _check_constraint_exists(cursor, name):
             await cursor.execute("ALTER TABLE jax_project_membership DROP CONSTRAINT " + name)

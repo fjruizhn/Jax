@@ -121,20 +121,34 @@ async def list_project_members(pool: Any, *, tenant_id: int, user_id: int, proje
 
 async def list_invite_candidates(pool: Any, *, tenant_id: int, user_id: int, project_id: int,
                                  query: str, limit: int) -> list[dict]:
+    """Usuarios del tenant que el OWNER de un proyecto ACTIVE puede invitar.
+
+    2026-10-02, decision de Fernando (Proyectos E1.1): la pestana Miembros muestra la
+    lista de usuarios con casillas para marcar varios, y el buscador por email la
+    filtra; ya no es una busqueda obligatoria. Por eso:
+      - `query` vacio o solo espacios -> lista sin filtrar (rama de SQL sin LIKE).
+      - `query` de 1 o mas caracteres -> filtro por prefijo de email (antes, menos de
+        2 caracteres devolvia []).
+      - `limit` se acota a 1..100 (antes 1..20).
+    Sin cambios: excluye miembros ACTIVE, admins del tenant, inactivos y otros
+    tenants; exige OWNER de un proyecto ACTIVE; escapa el LIKE; ordena por email.
+    """
     query = (query or "").strip()
-    limit = max(1, min(int(limit), 20))
+    limit = max(1, min(int(limit), 100))
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             fila = await _proyecto_visible(cur, tenant_id, user_id, project_id)
             if fila["role"] != "OWNER" or fila["status"] != "ACTIVE":
                 raise ProjectRoleInsufficient("inviting requires OWNER on an ACTIVE project")
-            if len(query) < 2:
-                return []
-            patron = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            await cur.execute(
+            base = (
                 "SELECT u.user_id, u.email FROM jax_users u "
                 "LEFT JOIN jax_project_membership m ON m.user_id=u.user_id AND m.project_id=%s AND m.status='ACTIVE' "
                 f"WHERE u.tenant_id=%s AND u.status='active' AND LOWER(u.role) NOT IN ({_ADMIN_PH}) "
-                "AND m.user_id IS NULL AND u.email LIKE %s ORDER BY u.email LIMIT %s",
-                (project_id, tenant_id, *_ADMIN_ROLES, patron, limit))
+                "AND m.user_id IS NULL ")
+            args: tuple = (project_id, tenant_id, *_ADMIN_ROLES)
+            if query:
+                patron = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+                await cur.execute(base + "AND u.email LIKE %s ORDER BY u.email LIMIT %s", (*args, patron, limit))
+            else:
+                await cur.execute(base + "ORDER BY u.email LIMIT %s", (*args, limit))
             return [{"user_id": int(_v(r, "user_id", 0)), "email": _v(r, "email", 1)} for r in await cur.fetchall()]
