@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import ipaddress
 import socket
 import stat
 import time
@@ -61,7 +62,7 @@ _HILOS_ENVIO = 4                    # un envio colgado no frena a los demas; el 
 EVENTOS_AVISABLES = frozenset({
     "conexion_rechazada",           # el Puerto rechazo una conexion (uid o token)
     "control_creado", "control_rechazado",      # canal de control (0.3c)
-    "tope_superado", "tope_no_verificable",     # topes (0.3b): al llegar falla cerrado
+    "tope_superado", "tope_no_verificable", "tope_resultado_desconocido",     # topes (0.3b): al llegar falla cerrado
     "tope_sin_regla",                           # consumo SIN regla de tope: se mide y se avisa, no niega
 })
 
@@ -71,6 +72,7 @@ _TITULOS = {
     "control_rechazado": "PEDIDO DE CONTROL RECHAZADO",
     "tope_superado": "TOPE ALCANZADO (denegado)",
     "tope_no_verificable": "TOPE NO VERIFICABLE (denegado)",
+    "tope_resultado_desconocido": "RESULTADO DESCONOCIDO DE UN CONTEO DE TOPE",
     "tope_sin_regla": "CONSUMO SIN REGLA DE TOPE (medido, no niega)",
 }
 _CAMPOS = ("motivo", "run_id", "usuario", "tenant", "faceta", "motor", "pipeline", "entry_point", "metodo", "objetivo",
@@ -84,6 +86,15 @@ class AvisoNoEntregado(Exception):
 # --------------------------------------------------------------------------- #
 # configuracion y credenciales                                                #
 # --------------------------------------------------------------------------- #
+
+def _es_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
 
 @dataclass(frozen=True)
 class ConfigAviso:
@@ -100,8 +111,11 @@ class ConfigAviso:
         if not Path(self.creds).is_absolute():
             raise ConfigFaroInvalida(f"JAX_FARO_AVISO_CREDS tiene que ser una ruta absoluta, no {str(self.creds)!r}")
         partes = urllib.parse.urlsplit(self.api_url)
-        if partes.scheme not in ("http", "https") or not partes.netloc:
+        if partes.scheme not in ("http", "https") or not partes.netloc or not partes.hostname:
             raise ConfigFaroInvalida("JAX_FARO_AVISO_API_URL tiene que ser una URL http(s)")
+        if partes.scheme == "http" and not _es_loopback(partes.hostname):
+            raise ConfigFaroInvalida(
+                "JAX_FARO_AVISO_API_URL: http:// solo hacia loopback (el token viaja en la URL); para cualquier otro destino, https://")
         if not isinstance(self.rafaga, int) or self.rafaga < 1:
             raise ConfigFaroInvalida("JAX_FARO_AVISO_RAFAGA tiene que ser un entero >= 1")
         if not self.intervalo_s > 0:
@@ -282,6 +296,8 @@ class Avisador:
         self._tarea: asyncio.Task | None = None
         self._cerrando = False
         self.enviados = self.fallidos = self.suprimidos = self.descartados = 0
+        self.fallidos_por_clase: dict[str, int] = {}     # medicion: que clase de aviso no llega
+        self.ultimo_fallo: dict | None = None            # {"clase", "run_id", "error"} del ultimo aviso que fallo
 
     # -- observador: sincrono, no espera la red, no lanza nunca ---------------------------------
     def __call__(self, registro: object) -> None:
@@ -290,16 +306,16 @@ class Avisador:
                 return
             clase = _clase(registro)
             if self._limite.admitir(clase):
-                self._encolar(redactar(registro, self._host))
+                self._encolar(redactar(registro, self._host), clase, _campo_log(registro.get("run_id", "-"), 64))
             else:
                 self.suprimidos += 1
                 self._pendientes[clase] = self._pendientes.get(clase, 0) + 1
         except Exception as exc:  # fail-soft: un aviso no puede cambiar la decision que lo origino; solo se anota el tipo
             logger.warning("el avisador no pudo procesar un registro (%s)", type(exc).__name__)
 
-    def _encolar(self, texto: str) -> None:
+    def _encolar(self, texto: str, clase: str, run_id: str = "-") -> None:
         try:
-            self._cola.put_nowait(texto)
+            self._cola.put_nowait((texto, clase, run_id))
         except asyncio.QueueFull:
             self.descartados += 1
 
@@ -307,28 +323,31 @@ class Avisador:
         for clase in list(self._pendientes):
             if self._limite.admitir(clase):
                 n = self._pendientes.pop(clase)
-                self._encolar(f"FARO · {n} avisos suprimidos por tasa · {_campo_log(self._host, 64)}\nclase={clase}")
+                self._encolar(f"FARO · {n} avisos suprimidos por tasa · {_campo_log(self._host, 64)}\nclase={clase}", "resumen")
 
     # -- trabajador ----------------------------------------------------------------------------
-    async def _entregar(self, texto: str) -> None:
+    async def _entregar(self, texto: str, clase: str, run_id: str) -> None:
         try:
             futuro = asyncio.get_running_loop().run_in_executor(self._ejecutor, self._enviar, texto)
             await asyncio.wait_for(futuro, self._cfg.timeout_s)
             self.enviados += 1
         except Exception as exc:  # fail-soft: el aviso no llego; se cuenta y se sigue (la denegacion ya se aplico)
             self.fallidos += 1
-            logger.warning("aviso no entregado (%s)", type(exc).__name__)
+            self.fallidos_por_clase[clase] = self.fallidos_por_clase.get(clase, 0) + 1
+            self.ultimo_fallo = {"clase": clase, "run_id": run_id, "error": type(exc).__name__}
+            logger.warning("aviso no entregado (%s) clase=%s run_id=%s fallidos_de_la_clase=%s", type(exc).__name__, clase, run_id,
+                           self.fallidos_por_clase[clase])
 
     async def _trabajar(self) -> None:
         while True:
             try:
-                texto = await asyncio.wait_for(self._cola.get(), self._cfg.intervalo_s)
+                item = await asyncio.wait_for(self._cola.get(), self._cfg.intervalo_s)
             except TimeoutError:
                 self._resumenes()
                 continue
-            if texto is _FIN:
+            if item is _FIN:
                 return
-            await self._entregar(texto)
+            await self._entregar(*item)
             self._resumenes()
             if self._cerrando and self._cola.empty():
                 return

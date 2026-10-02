@@ -18,7 +18,7 @@ import pytest
 
 from jax.faro.aviso import Avisador, ConfigAviso, Credenciales
 from jax.faro.bitacora import Bitacora
-from jax.faro.topes import RECURSOS_PREFIJO_SIN_TOPE, ResultadoTope, TopeProhibido, Topes
+from jax.faro.topes import PALABRAS_SIN_TOPE, ResultadoTope, TopeProhibido, Topes
 from tests._faro_falsos import AlmacenMemoria
 from tests._faro_utils import corre
 
@@ -127,8 +127,8 @@ def test_d4_no_se_puede_poner_tope_a_los_agentes_ni_a_las_conexiones(recurso):
     assert _consumir(t, recurso=recurso, tope=None).permitido            # medirlos si se puede
 
 
-def test_los_prefijos_sin_tope_son_los_de_la_decision_d4():
-    assert RECURSOS_PREFIJO_SIN_TOPE == frozenset({"agentes", "conexiones"})
+def test_las_palabras_sin_tope_son_las_de_la_decision_d4():
+    assert PALABRAS_SIN_TOPE == ("agent", "subagent", "enjambre", "swarm", "conexion")
 
 
 @pytest.mark.parametrize("kw", [
