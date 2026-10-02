@@ -105,13 +105,11 @@ En honor al Prof. Raúl Jacobs.
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import hashlib
 import json
 import logging
 import os
 import shutil
-import time
 from pathlib import Path
 
 import cli_sandbox
@@ -356,7 +354,6 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> tuple[list[str], di
 # jax-workspace-relocation-fix) -- el lock hereda esa misma fuente de
 # verdad sin leer la env var de nuevo aca.
 _CLAUDE_SUBPROCESS_LOCK_DIR_NAME = "jax-claude-subprocess-locks"
-_CLAUDE_SUBPROCESS_LOCK_POLL_S = 0.05
 
 
 def _lock_path_for_workspace(workspace_dir: str) -> Path:
