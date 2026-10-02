@@ -6,10 +6,12 @@
 # La jaula recibe por bind de archivo SOLO su socket, su token y el rele; el directorio /run/faro no se monta.
 # Dentro, el cliente MCP lanza:  python -m jax.faro.relay --socket /faro/puerto.sock --token-file /faro/token
 #
-# PENDIENTE DE DISENO (no resuelto en este paso): quien corre bwrap con otro uid no puede abrir /run/faro (0700 de
-# `faro`) para montar esas dos fuentes, y sudo cierra los descriptores heredados (no sirve --bind-fd). El elevador
-# (0.6/0.10) tiene que abrirlas antes de bajar de uid.
+# Quien corre bwrap con el uid de la jaula abre sus dos fuentes en /run/faro (0700 de `faro`) gracias a una ACL por
+# ejecucion que pone el Puerto (jax/faro/acl.py): directorio --x, socket rw-, token r--, solo para ese uid.
+# El perfil de motor deja la RED como decision pendiente de 0.5/0.6 (aqui, aislada: sin red).
+# La regla de sudoers que da la elevacion: ops/faro/sudoers-jaula-ejemplo.
 #
+# --- PERFIL DEL RELE (jaula minima: solo el rele contra su Puerto) ---
 /usr/bin/sudo -n -u '#<uid_jaula>' -- \
   /usr/bin/bwrap \
   --unshare-pid \
@@ -37,3 +39,42 @@
   --chdir /tmp \
   -- \
   /usr/bin/python3 -m jax.faro.relay --socket /faro/puerto.sock --token-file /faro/token
+
+# --- PERFIL DE MOTOR (workspace rw, $HOME tmpfs, paquete ro, /etc minimo; red AISLADA: decision pendiente de 0.5/0.6) ---
+/usr/bin/sudo -n -u '#<uid_jaula>' -- \
+  /usr/bin/bwrap \
+  --unshare-pid \
+  --unshare-ipc \
+  --unshare-uts \
+  --unshare-net \
+  --unshare-cgroup-try \
+  --die-with-parent \
+  --new-session \
+  --clearenv \
+  --proc /proc \
+  --dev /dev \
+  --tmpfs /tmp \
+  --tmpfs /home/jaula \
+  --ro-bind /usr /usr \
+  --symlink usr/bin /bin \
+  --symlink usr/lib /lib \
+  --symlink usr/lib64 /lib64 \
+  --ro-bind /etc/ssl /etc/ssl \
+  --ro-bind /etc/ca-certificates /etc/ca-certificates \
+  --ro-bind /etc/resolv.conf /etc/resolv.conf \
+  --ro-bind /etc/hosts /etc/hosts \
+  --ro-bind /etc/passwd /etc/passwd \
+  --ro-bind /etc/group /etc/group \
+  --ro-bind /etc/nsswitch.conf /etc/nsswitch.conf \
+  --bind '/run/faro/<run_id>.sock' /faro/puerto.sock \
+  --ro-bind '/run/faro/<run_id>.token' /faro/token \
+  --ro-bind '<ruta de jax/faro/relay.py>' /faro/relay/jax/faro/relay.py \
+  --bind '<workspace de la ejecucion>' /work \
+  --ro-bind '<paquete del ecosistema>' /faro/paquete \
+  --setenv PATH /usr/bin:/bin \
+  --setenv HOME /home/jaula \
+  --setenv PYTHONPATH /faro/relay \
+  --setenv PYTHONDONTWRITEBYTECODE 1 \
+  --chdir /work \
+  -- \
+  <el motor> <sus argumentos>

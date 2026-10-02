@@ -359,3 +359,8 @@ def test_el_token_de_otra_ejecucion_no_entra_ni_dentro_de_la_jaula(mundo, requie
     assert [x["motivo"] for x in registros if x.get("evento") == "conexion_rechazada"] == ["token_invalido"]
     assert not [x for x in registros if x.get("metodo") == "tools/call"]
 
+
+
+def test_minor8_visudo_acepta_el_sudoers_de_ejemplo(requiere_sudo):
+    r = subprocess.run(["sudo", "-n", "visudo", "-cf", str(RAIZ / "ops" / "faro" / "sudoers-jaula-ejemplo")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr

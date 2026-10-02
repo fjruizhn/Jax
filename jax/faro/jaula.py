@@ -17,11 +17,16 @@ ELEVACION (`JAX_FARO_JAULA_ELEVAR`, que lleva `{uid}`; p. ej. `/usr/bin/sudo -n 
 El uid sale de la `Ejecucion` (`uid_esperado`, fijado por el orquestador y validado por el canal de control) y
 aqui se vuelve a validar: no root, no el del servicio, no el del orquestador.
 
-LO QUE ESTE MODULO NO RESUELVE (declarado, no escondido): un bwrap que corre como el uid de la jaula tiene que
-abrir las FUENTES de los binds en `/run/faro`, que es 0700 de `faro`, y `sudo` cierra los descriptores heredados
-(no se pueden pasar ya abiertos con `--bind-fd`). Quien arranque con un uid distinto necesita abrir esas dos
-rutas por la jaula antes de bajar de uid: es el elevador del scope por ejecucion (0.6) o su ayudante (0.10),
-una decision de diseno que el plan no cierra. Ver «Desviaciones» del plan.
+COMO ABRE EL UID DE LA JAULA SUS FUENTES. El bwrap de la jaula corre con SU uid y tiene que abrir las dos fuentes de
+sus binds en `/run/faro` (0700 de `faro`) sin poder listarlo: lo permite una ACL por ejecucion que pone el Puerto
+(`acl.py`: directorio `--x`, socket `rw-`, token `r--`, solo para ese uid). `sudo` cierra los descriptores
+heredados, asi que no se pasan ya abiertos con `--bind-fd`. Probado con bwrap real corriendo como otro uid.
+
+PERFILES (auditoria de 0.3bc, MAJOR-2). Los montajes son un perfil componible: `perfil_rele` es la JAULA MINIMA DEL
+RELE (sin red, sin /etc, sin workspace ni home: solo corre el rele contra su Puerto); `perfil_motor` le suma el
+workspace en rw, `$HOME` en tmpfs, el paquete en ro y un /etc minimo. La RED de un motor es una decision pendiente
+de 0.5/0.6: hoy el perfil de motor solo existe con `red="aislada"`. El uid de la jaula, el rango y el orquestador se
+revalidan aqui (`desde_control`).
 
 BITACORA PRIMERO: `jaula_lanzada` se anota antes de arrancar (si no se puede anotar, no se lanza); un fallo de
 arranque queda como `jaula_fallo` y se propaga.
@@ -30,17 +35,20 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
+import re
 import shlex
 import stat
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import relay as _relay
 from .bitacora import Bitacora
 from .config import ConfigFaroInvalida
 
+logger = logging.getLogger(__name__)
 DESTINO_SOCKET = "/faro/puerto.sock"
 DESTINO_TOKEN = "/faro/token"
 DESTINO_RELAY_RAIZ = "/faro/relay"
@@ -91,10 +99,13 @@ class ConfigJaula:
         return cls(bwrap=Path(pedir("JAX_FARO_BWRAP")), elevar=elevar)
 
 
-def validar_uid_jaula(uid: object, *, prohibidos: Iterable[int] = ()) -> int:
-    """El uid de una jaula: un entero real, que no sea root, ni el del servicio, ni uno de `prohibidos`."""
+def validar_uid_jaula(uid: object, *, prohibidos: Iterable[int] = (), rango: tuple[int, int] | None = None) -> int:
+    """El uid de una jaula: un entero real, que no sea root, ni el del servicio, ni uno de `prohibidos`, y dentro de
+    `rango` (el de `JAX_FARO_JAULA_UID_MIN..MAX`) si se conoce."""
     if isinstance(uid, bool) or not isinstance(uid, int) or not 1 <= uid <= _UID_MAX:
         raise ConfigFaroInvalida("el uid de la jaula tiene que ser un entero entre 1 y 2**32-2")
+    if rango is not None and not rango[0] <= uid <= rango[1]:
+        raise ConfigFaroInvalida(f"el uid de la jaula ({uid}) esta fuera del rango configurado {rango[0]}..{rango[1]}")
     if uid == os.geteuid():
         raise ConfigFaroInvalida(f"el uid de la jaula ({uid}) es el del servicio: cualquier proceso de `faro` entraria como la jaula")
     if uid in set(prohibidos):
@@ -108,26 +119,71 @@ def _ruta(valor: object, nombre: str) -> str:
     return valor
 
 
-def _montajes(ruta_socket: str, ruta_token: str, relay: str) -> list[str]:
-    return [
+# /etc minimo del perfil de motor: certificados (ssl), resolucion de nombres, cuentas y nsswitch. Nunca /etc entero.
+ETC_MINIMO = ("/etc/ssl", "/etc/ca-certificates", "/etc/resolv.conf", "/etc/hosts", "/etc/passwd", "/etc/group", "/etc/nsswitch.conf")
+DESTINO_WORKSPACE = "/work"
+DESTINO_PAQUETE = "/faro/paquete"
+HOME_MOTOR = "/home/jaula"
+
+
+def _construir(ruta_socket: str, ruta_token: str, relay: str, motor: dict | None) -> list[str]:
+    """Los montajes comunes (aislamiento + los dos archivos de la ejecucion + el rele) y, si `motor` trae el
+    workspace y el paquete, lo del perfil de motor. La RED la decide quien llama: ambos perfiles hoy la cierran."""
+    home = HOME_MOTOR if motor else "/tmp"
+    argv = [
         "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net", "--unshare-cgroup-try",
         "--die-with-parent", "--new-session", "--clearenv",
         "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+        *(["--tmpfs", HOME_MOTOR] if motor else []),
         "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib",
         "--symlink", "usr/lib64", "/lib64",
+        *([x for ruta in ETC_MINIMO for x in ("--ro-bind", ruta, ruta)] if motor else []),
         "--bind", ruta_socket, DESTINO_SOCKET,
         "--ro-bind", ruta_token, DESTINO_TOKEN,
         "--ro-bind", relay, DESTINO_RELAY,
-        "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "HOME", "/tmp",
+        *(["--bind", motor["workspace"], DESTINO_WORKSPACE, "--ro-bind", motor["paquete"], DESTINO_PAQUETE] if motor else []),
+        "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "HOME", home,
         "--setenv", "PYTHONPATH", DESTINO_RELAY_RAIZ, "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
-        "--chdir", "/tmp",
+        "--chdir", DESTINO_WORKSPACE if motor else "/tmp",
     ]
+    return argv
 
 
-def argv_montajes(ruta_socket: str, ruta_token: str, *, relay: str | None = None) -> list[str]:
-    """Las opciones de bwrap (sin el `--` ni el comando): funcion pura de las DOS rutas de la ejecucion."""
-    return _montajes(_ruta(str(ruta_socket), "la ruta del socket"), _ruta(str(ruta_token), "la ruta del token"),
-                     _ruta(relay if relay is not None else RELAY_FUENTE, "la ruta del rele"))
+def perfil_rele(ruta_socket: str, ruta_token: str, *, relay: str | None = None) -> list[str]:
+    """LA JAULA MINIMA DEL RELE: lo justo para correr `python -m jax.faro.relay` contra SU Puerto. Sin red, sin /etc,
+    sin workspace ni home. No puede correr un motor (eso es el perfil de motor). Funcion pura de las dos rutas."""
+    return _construir(_ruta(str(ruta_socket), "la ruta del socket"), _ruta(str(ruta_token), "la ruta del token"),
+                      _ruta(relay if relay is not None else RELAY_FUENTE, "la ruta del rele"), None)
+
+
+argv_montajes = perfil_rele          # nombre anterior
+
+
+def _fuera_del_directorio_de_sockets(ruta: str, ruta_socket: str, nombre: str) -> str:
+    ruta = _ruta(ruta, nombre)
+    w, d = PurePosixPath(ruta), PurePosixPath(ruta_socket).parent
+    if w == d or d in w.parents or w in d.parents:
+        raise ConfigFaroInvalida(f"{nombre} ({ruta}) es el directorio de sockets, o esta dentro o lo contiene: la jaula no lo ve")
+    return ruta
+
+
+def perfil_motor(ruta_socket: str, ruta_token: str, *, workspace: str, paquete: str, red: str | None,
+                 relay: str | None = None) -> list[str]:
+    """EL PERFIL DE MOTOR: el del rele mas lo que un motor necesita (spec §2): el workspace de la ejecucion en
+    lectura y escritura (`/work`, tambien el directorio de trabajo), `$HOME` en un tmpfs propio, el paquete del
+    ecosistema de solo lectura (`/faro/paquete`) y un `/etc` minimo (ssl, resolv, hosts, passwd, group, nsswitch).
+
+    RED: DECISION PENDIENTE (0.5/0.6). Un motor necesita red; las dos salidas son `--unshare-net` con atajos por
+    socket Unix (lo que hace el Puerto) o red compartida filtrada por `skuid`. Hasta decidirlo, el unico valor es
+    `red="aislada"` (sin red) y cualquier otro se rechaza: no se improvisa una."""
+    if red != "aislada":
+        raise ConfigFaroInvalida(
+            f"la red del perfil de motor ({red!r}) es una decision pendiente de 0.5/0.6 (atajos por socket Unix o red "
+            "filtrada por skuid); hoy solo existe red='aislada' (sin red)")
+    sock = _ruta(str(ruta_socket), "la ruta del socket")
+    return _construir(sock, _ruta(str(ruta_token), "la ruta del token"), _ruta(relay if relay is not None else RELAY_FUENTE, "la ruta del rele"),
+                      {"workspace": _fuera_del_directorio_de_sockets(workspace, sock, "el workspace"),
+                       "paquete": _fuera_del_directorio_de_sockets(paquete, sock, "el paquete")})
 
 
 def _validar_comando(comando: object) -> list[str]:
@@ -140,31 +196,66 @@ def _validar_comando(comando: object) -> list[str]:
 
 class LanzadorJaula:
     def __init__(self, cfg: ConfigJaula, bitacora: Bitacora, *, uids_prohibidos: Iterable[int] = (),
-                 crear_proceso: Callable | None = None):
+                 crear_proceso: Callable | None = None, uid_min: int | None = None, uid_max: int | None = None):
         self._cfg = cfg
         self._bitacora = bitacora
         self._prohibidos = frozenset(uids_prohibidos)
+        self._rango = (uid_min, uid_max) if uid_min is not None and uid_max is not None else None
         self._crear_proceso = crear_proceso if crear_proceso is not None else asyncio.create_subprocess_exec
+        self._procesos: dict[int, list] = {}          # uid de jaula -> procesos lanzados (para `jaula_viva`)
+        self._vigias: set[asyncio.Task] = set()
 
-    def argv(self, ejecucion, ruta_socket: str, ruta_token: str, comando: Sequence[str]) -> list[str]:
-        """El argv de bwrap (sin la elevacion ni el binario) de ESA ejecucion."""
-        validar_uid_jaula(ejecucion.uid_esperado, prohibidos=self._prohibidos)
-        return [*argv_montajes(ruta_socket, ruta_token), "--", *_validar_comando(comando)]
+    @classmethod
+    def desde_control(cls, cfg: ConfigJaula, bitacora: Bitacora, control, **kw) -> "LanzadorJaula":
+        """Con el rango de uids de jaula y el uid del orquestador del canal de control: el lanzador los REVALIDA."""
+        return cls(cfg, bitacora, uids_prohibidos={control.orquestador_uid}, uid_min=control.jaula_uid_min,
+                   uid_max=control.jaula_uid_max, **kw)
 
-    def argv_completo(self, ejecucion, ruta_socket: str, ruta_token: str, comando: Sequence[str]) -> list[str]:
-        cuerpo = self.argv(ejecucion, ruta_socket, ruta_token, comando)
+    def argv(self, ejecucion, ruta_socket: str, ruta_token: str, comando: Sequence[str], *, perfil: str = "rele",
+             workspace: str | None = None, paquete: str | None = None, red: str | None = None) -> list[str]:
+        """El argv de bwrap (sin la elevacion ni el binario) de ESA ejecucion, con el perfil `rele` (por defecto) o `motor`."""
+        validar_uid_jaula(ejecucion.uid_esperado, prohibidos=self._prohibidos, rango=self._rango)
+        if perfil == "rele":
+            montajes = perfil_rele(ruta_socket, ruta_token)
+        elif perfil == "motor":
+            if not workspace or not paquete:
+                raise ConfigFaroInvalida("el perfil de motor necesita workspace y paquete")
+            montajes = perfil_motor(ruta_socket, ruta_token, workspace=workspace, paquete=paquete, red=red)
+        else:
+            raise ConfigFaroInvalida(f"perfil de jaula desconocido: {perfil!r}")
+        return [*montajes, "--", *_validar_comando(comando)]
+
+    def argv_completo(self, ejecucion, ruta_socket: str, ruta_token: str, comando: Sequence[str], **perfil) -> list[str]:
+        cuerpo = self.argv(ejecucion, ruta_socket, ruta_token, comando, **perfil)
         uid = str(ejecucion.uid_esperado)
         return [*(e.replace("{uid}", uid) for e in self._cfg.elevar), str(self._cfg.bwrap), *cuerpo]
 
-    async def lanzar(self, srv, comando: Sequence[str]):
-        """Anota `jaula_lanzada` y arranca el proceso (que se devuelve). `srv` es el `ServidorPuerto` de la ejecucion."""
+    def jaula_viva(self, uid: int) -> bool:
+        """¿Sigue vivo algun proceso lanzado con ese uid de jaula? (gancho del canal de control: no reasignar un uid vivo)"""
+        return any(getattr(p, "returncode", 0) is None for p in self._procesos.get(uid, ()))
+
+    async def esperar_terminos(self) -> None:
+        if self._vigias:
+            await asyncio.gather(*self._vigias, return_exceptions=True)
+
+    async def _vigilar(self, e, proceso) -> None:
+        rc = await proceso.wait()
+        try:
+            await self._bitacora.registrar("jaula_termino", run_id=e.run_id, id_correlacion=e.id_correlacion,
+                                           uid_jaula=e.uid_esperado, rc=rc)
+        except Exception:  # fail-closed: la jaula ya termino; solo la anotacion fallo y queda en el log
+            logger.exception("no se pudo registrar el termino de la jaula de %s", e.run_id)
+
+    async def lanzar(self, srv, comando: Sequence[str], **perfil):
+        """Anota `jaula_lanzada` y arranca el proceso (que se devuelve); cuando termina anota `jaula_termino` con su
+        codigo de salida. `srv` es el `ServidorPuerto` de la ejecucion."""
         e = srv.ejecucion
-        argv = self.argv_completo(e, str(srv.ruta_socket), str(srv.ruta_token), comando)    # valida ANTES de anotar o arrancar
+        argv = self.argv_completo(e, str(srv.ruta_socket), str(srv.ruta_token), comando, **perfil)    # valida ANTES de anotar o arrancar
         await self._bitacora.registrar(
             "jaula_lanzada", run_id=e.run_id, id_correlacion=e.id_correlacion, uid_jaula=e.uid_esperado, motor=e.motor,
             entry_point=e.entry_point, hash_argv=hashlib.sha256("\x00".join(argv).encode()).hexdigest())
         try:
-            return await self._crear_proceso(
+            proceso = await self._crear_proceso(
                 *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 env=dict(ENTORNO_LANZADOR), start_new_session=True)
         except Exception as exc:
@@ -174,6 +265,12 @@ class LanzadorJaula:
             except Exception:  # fail-closed: el error de arranque es el que sube; solo la anotacion fallo
                 pass
             raise
+        if hasattr(proceso, "wait"):
+            self._procesos.setdefault(e.uid_esperado, []).append(proceso)
+            tarea = asyncio.create_task(self._vigilar(e, proceso), name=f"faro-jaula-{e.run_id}")
+            self._vigias.add(tarea)
+            tarea.add_done_callback(self._vigias.discard)
+        return proceso
 
 
 # --------------------------------------------------------------------------- #
@@ -189,9 +286,10 @@ _ENCABEZADO = """\
 # La jaula recibe por bind de archivo SOLO su socket, su token y el rele; el directorio /run/faro no se monta.
 # Dentro, el cliente MCP lanza:  python -m jax.faro.relay --socket /faro/puerto.sock --token-file /faro/token
 #
-# PENDIENTE DE DISENO (no resuelto en este paso): quien corre bwrap con otro uid no puede abrir /run/faro (0700 de
-# `faro`) para montar esas dos fuentes, y sudo cierra los descriptores heredados (no sirve --bind-fd). El elevador
-# (0.6/0.10) tiene que abrirlas antes de bajar de uid.
+# Quien corre bwrap con el uid de la jaula abre sus dos fuentes en /run/faro (0700 de `faro`) gracias a una ACL por
+# ejecucion que pone el Puerto (jax/faro/acl.py): directorio --x, socket rw-, token r--, solo para ese uid.
+# El perfil de motor deja la RED como decision pendiente de 0.5/0.6 (aqui, aislada: sin red).
+# La regla de sudoers que da la elevacion: ops/faro/sudoers-jaula-ejemplo.
 #
 """
 
@@ -206,8 +304,46 @@ def _lineas(tokens: list[str]) -> list[str]:
     return [" ".join(shlex.quote(x) for x in g) for g in grupos]
 
 
+def _bloque(titulo: str, elevar: list[str], cuerpo: list[str], comando: tuple[str, ...]) -> str:
+    lineas = [" ".join(shlex.quote(x) for x in elevar), "/usr/bin/bwrap", *_lineas([*cuerpo, "--"])]
+    return f"# --- {titulo} ---\n" + " \\\n  ".join(lineas) + " \\\n  " + " ".join(comando) + "\n"
+
+
 def ejemplo() -> str:
+    """Los dos perfiles: la jaula minima del rele y la de un motor (red aislada: la decision de red es de 0.5/0.6)."""
     elevar = [e.replace("{uid}", "<uid_jaula>") for e in _ELEVAR_EJEMPLO]
-    cuerpo = [*_montajes("/run/faro/<run_id>.sock", "/run/faro/<run_id>.token", "<ruta de jax/faro/relay.py>"), "--"]
-    lineas = [" ".join(shlex.quote(x) for x in elevar), "/usr/bin/bwrap", *_lineas(cuerpo)]
-    return _ENCABEZADO + " \\\n  ".join(lineas) + " \\\n  " + " ".join(_COMANDO_EJEMPLO) + "\n"
+    sock, tok, rel = "/run/faro/<run_id>.sock", "/run/faro/<run_id>.token", "<ruta de jax/faro/relay.py>"
+    motor = {"workspace": "<workspace de la ejecucion>", "paquete": "<paquete del ecosistema>"}
+    return (_ENCABEZADO
+            + _bloque("PERFIL DEL RELE (jaula minima: solo el rele contra su Puerto)", elevar, _construir(sock, tok, rel, None), _COMANDO_EJEMPLO)
+            + "\n"
+            + _bloque("PERFIL DE MOTOR (workspace rw, $HOME tmpfs, paquete ro, /etc minimo; red AISLADA: decision pendiente de 0.5/0.6)",
+                      elevar, _construir(sock, tok, rel, motor), ("<el motor>", "<sus argumentos>")))
+
+
+_RE_USUARIO = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+_RE_RUTA_SUDOERS = re.compile(r"^/[A-Za-z0-9_./-]+$")
+MAX_UIDS_SUDOERS = 4096
+
+
+def ejemplo_sudoers(usuario: str, bwrap: str, uid_min: int, uid_max: int) -> str:
+    """La regla de sudoers de ejemplo: `usuario` puede correr SOLO `bwrap` y SOLO como los uids del rango de jaulas.
+    sudoers no tiene rangos numericos, asi que se enumeran (hasta `MAX_UIDS_SUDOERS`); mas alla, un grupo."""
+    if not _RE_USUARIO.fullmatch(usuario or ""):
+        raise ConfigFaroInvalida("usuario de sudoers invalido")
+    if not _RE_RUTA_SUDOERS.fullmatch(bwrap or ""):
+        raise ConfigFaroInvalida("el comando de sudoers tiene que ser una ruta absoluta sin comodines ni espacios")
+    if isinstance(uid_min, bool) or isinstance(uid_max, bool) or not (isinstance(uid_min, int) and isinstance(uid_max, int)) \
+            or not 1 <= uid_min <= uid_max <= _UID_MAX:
+        raise ConfigFaroInvalida("el rango de uids de jaula tiene que cumplir 1 <= MIN <= MAX (el rango no incluye al administrador)")
+    if uid_max - uid_min + 1 > MAX_UIDS_SUDOERS:
+        raise ConfigFaroInvalida(f"mas de {MAX_UIDS_SUDOERS} uids: sudoers no tiene rangos; usa un grupo de cuentas de jaula")
+    uids = [f"#{u}" for u in range(uid_min, uid_max + 1)]
+    filas = ", \\\n    ".join(", ".join(uids[i:i + 8]) for i in range(0, len(uids), 8))
+    return (
+        "# ops/faro/sudoers-jaula-ejemplo -- GENERADO por jax.faro.jaula.ejemplo_sudoers(); una prueba vigila que no se desvie.\n"
+        "# Va en /etc/sudoers.d/ (validar con `visudo -cf`). El servicio puede correr SOLO bwrap y SOLO como los uids\n"
+        "# del rango de jaulas (JAX_FARO_JAULA_UID_MIN..MAX): nunca como el administrador ni como una cuenta real.\n"
+        "# sudoers no tiene rangos numericos: se enumeran los uids.\n"
+        f"Runas_Alias JAULAS = {filas}\n"
+        f"{usuario} ALL=(JAULAS) NOPASSWD: {bwrap}\n")
