@@ -115,6 +115,9 @@ class _Entorno(unittest.IsolatedAsyncioTestCase):
         for nombre, binario in (("codex", "codex"), ("kimi", "kimi")):
             d = self.root / nombre / "9.9.9"
             d.mkdir(parents=True)
+            # umask-independiente: el nucleo exige que ni el grupo ni otros escriban
+            for tramo in (d, d.parent, self.root):
+                os.chmod(tramo, 0o755)
             f = d / binario
             f.write_bytes(f"binario-falso-{nombre}\n".encode())
             f.chmod(0o755)
@@ -149,6 +152,17 @@ class _Entorno(unittest.IsolatedAsyncioTestCase):
         p3 = patch.object(cli_sandbox, "_consultar_usuario", consultar)
         p3.start()
         self.addCleanup(p3.stop)
+        # Sin root, el dueno esperado de los binarios es el uid del que corre el
+        # test: se INYECTA por el parametro `uid_esperado` (en produccion es 0,
+        # su default); no hay ningun flag global que apague la verificacion.
+        original = cli_sandbox._resolver_binario
+        p4 = patch.object(
+            cli_sandbox, "_resolver_binario",
+            lambda perfil, **kw: original(perfil, **{"uid_esperado": os.getuid(), **kw}),
+        )
+        p4.start()
+        self.addCleanup(p4.stop)
+        self.resolver_real = original
 
     async def titular(self, uid=1, tenant=1, ep="chat"):
         return await cli_sandbox.exigir_titular(uid, tenant, ep)
@@ -546,6 +560,123 @@ class PerfilesTest(_Entorno):
         for m in ("", "-m x", "a b", "x;y", "--yolo", "a" * 200):
             with self.subTest(m=m), self.assertRaises(ValueError):
                 await self.correr("codex", modelo=m)
+
+
+@unittest.skipIf(os.getuid() == 0, "el caso 'dueno distinto del esperado' necesita un usuario sin privilegios")
+class IntegridadDelBinarioTest(_Entorno):
+    """MAJOR-4 (auditoria 2026-10-02): el binario fijado no se salta restaurando
+    el mtime, y su dueno y permisos (y los de sus directorios) se verifican."""
+
+    def _perfil(self):
+        return cli_sandbox.PERFILES["codex"]
+
+    def _resolver(self, **kw):
+        kw.setdefault("uid_esperado", os.getuid())
+        return self.resolver_real(self._perfil(), **kw)
+
+    async def test_reescritura_con_mtime_restaurado_se_vuelve_a_hashear_y_se_rechaza(self):
+        ruta = self.root / "codex" / "9.9.9" / "codex"
+        cli_sandbox._CACHE_SHA.clear()
+        self._resolver()  # cachea el SHA bueno
+        original = ruta.stat()
+        time.sleep(0.05)
+        malo = b"X" * original.st_size
+        with open(ruta, "r+b") as f:  # mismo inode, mismo tamano
+            f.write(malo)
+        os.utime(ruta, ns=(original.st_atime_ns, original.st_mtime_ns))
+        despues = ruta.stat()
+        self.assertEqual((despues.st_ino, despues.st_mtime_ns, despues.st_size),
+                         (original.st_ino, original.st_mtime_ns, original.st_size),
+                         "precondicion: inode, mtime y size quedaron identicos")
+        with self.assertRaises(cli_sandbox.BinarioAlterado):
+            self._resolver()
+
+    async def test_la_firma_de_la_cache_incluye_ctime_y_dev(self):
+        from types import SimpleNamespace as NS
+        base = dict(st_dev=1, st_ino=2, st_mtime_ns=3, st_ctime_ns=4, st_size=5)
+        f0 = cli_sandbox._firma_archivo(NS(**base))
+        self.assertNotEqual(f0, cli_sandbox._firma_archivo(NS(**{**base, "st_ctime_ns": 99})))
+        self.assertNotEqual(f0, cli_sandbox._firma_archivo(NS(**{**base, "st_dev": 99})))
+        self.assertNotEqual(f0, cli_sandbox._firma_archivo(NS(**{**base, "st_ino": 99})))
+        self.assertNotEqual(f0, cli_sandbox._firma_archivo(NS(**{**base, "st_mtime_ns": 99})))
+        self.assertNotEqual(f0, cli_sandbox._firma_archivo(NS(**{**base, "st_size": 99})))
+
+    async def test_el_default_del_dueno_esperado_es_root(self):
+        p = inspect.signature(self.resolver_real).parameters["uid_esperado"]
+        self.assertEqual(p.default, 0)
+        self.assertEqual(p.kind, inspect.Parameter.KEYWORD_ONLY)
+        with self.assertRaises(cli_sandbox.BinarioAlterado):
+            self.resolver_real(self._perfil())  # sin inyectar: un archivo de este usuario no es de root
+
+    async def test_binario_de_un_dueno_distinto_del_esperado_se_rechaza(self):
+        with self.assertRaises(cli_sandbox.BinarioAlterado):
+            self._resolver(uid_esperado=os.getuid() + 1)
+
+    async def test_binario_sano_se_acepta(self):
+        ruta, directorio, version = self._resolver()
+        self.assertEqual(version, "9.9.9")
+        self.assertEqual(ruta, str(self.root / "codex" / "9.9.9" / "codex"))
+
+    async def test_binario_con_escritura_de_grupo_u_otros_se_rechaza(self):
+        ruta = self.root / "codex" / "9.9.9" / "codex"
+        for modo in (0o775, 0o757, 0o777, 0o722):
+            with self.subTest(modo=oct(modo)):
+                os.chmod(ruta, modo)
+                with self.assertRaises(cli_sandbox.BinarioAlterado):
+                    self._resolver()
+        os.chmod(ruta, 0o755)
+        self._resolver()
+
+    async def test_cada_directorio_hasta_la_raiz_inclusive_se_verifica(self):
+        tramos = {
+            "directorio de la version": self.root / "codex" / "9.9.9",
+            "directorio del perfil": self.root / "codex",
+            "la raiz": self.root,
+        }
+        for nombre, d in tramos.items():
+            for modo in (0o775, 0o757, 0o777):
+                with self.subTest(tramo=nombre, modo=oct(modo)):
+                    os.chmod(d, modo)
+                    with self.assertRaises(cli_sandbox.BinarioAlterado):
+                        self._resolver()
+                    os.chmod(d, 0o755)
+        self._resolver()
+
+    async def test_directorio_del_binario_de_otro_dueno_se_rechaza_en_cada_tramo(self):
+        # con el uid esperado distinto, ya falla el binario; para aislar el tramo
+        # se simula que solo UN directorio tiene dueno ajeno.
+        ajeno = self.root / "codex"
+        real = os.lstat
+
+        def lstat_falso(ruta, *a, **k):
+            st = real(ruta, *a, **k)
+            if os.fspath(ruta) == str(ajeno):
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                                       os.getuid() + 1, st.st_gid, st.st_size,
+                                       int(st.st_atime), int(st.st_mtime), int(st.st_ctime)))
+            return st
+
+        with patch.object(cli_sandbox.os, "lstat", lstat_falso):
+            with self.assertRaises(cli_sandbox.BinarioAlterado):
+                self._resolver()
+
+    async def test_binario_que_es_un_symlink_se_rechaza(self):
+        ruta = self.root / "codex" / "9.9.9" / "codex"
+        real = self.root / "codex" / "9.9.9" / "codex-real"
+        ruta.rename(real)
+        os.symlink(real, ruta)
+        with self.assertRaises(cli_sandbox.BinarioAlterado):
+            self._resolver()
+
+    async def test_run_cli_no_lanza_con_el_directorio_padre_abierto(self):
+        os.chmod(self.root / "codex", 0o777)
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch("asyncio.create_subprocess_exec", fake):
+            with self.assertRaises(cli_sandbox.BinarioAlterado):
+                await cli_sandbox.run_cli(
+                    "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                    timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertEqual(cap["llamadas"], 0)
 
 
 class KimiFallaCerradoTest(_Entorno):

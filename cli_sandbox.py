@@ -54,9 +54,11 @@ root, cambiarlas exige reiniciar):
   JAX_CLI_MAX_PROMPT_CHARS    tope del prompt (default 32000)
 
 CACHES (cada uno declara su invalidacion en el mismo commit que lo crea):
-  - `_CACHE_SHA`: SHA256 de un binario, clave = ruta, firma = (inode, mtime_ns,
-    size). Se invalida solo: si cualquiera de los tres cambia, se re-hashea. Es
-    la invalidacion que pide el spec §1.
+  - `_CACHE_SHA`: SHA256 de un binario, clave = ruta, firma = (dev, inode,
+    mtime_ns, ctime_ns, size). Se invalida solo: si cualquiera cambia, se
+    re-hashea. Es la invalidacion que pide el spec §1. Ademas, en cada llamada,
+    el binario y sus directorios hasta JAX_CLI_ROOT deben ser de root y sin
+    escritura de grupo/otros.
   - La lista de titulares y la verificacion en `jax_users` NO se cachean: se
     leen del entorno y de la base en cada llamada (el borrado de un usuario
     surte efecto en la siguiente llamada).
@@ -744,9 +746,18 @@ _RE_VERSION = re.compile(r"^[0-9][0-9A-Za-z._+-]{0,31}$")
 _RE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RE_MODELO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:-]{0,63}$")
 
-#: ruta -> ((inode, mtime_ns, size), sha256 observado). Se invalida solo: si la
-#: firma cambia, se re-hashea.
-_CACHE_SHA: dict[str, tuple[tuple[int, int, int], str]] = {}
+#: ruta -> (firma, sha256 observado). La firma es (dev, inode, mtime_ns, ctime_ns,
+#: size). Se invalida solo: si cualquiera cambia, se re-hashea. `ctime` lo fija el
+#: kernel en cada escritura y NO se puede restaurar con utime(): reescribir el
+#: binario y devolverle el mtime ya no engana a la cache (auditoria 2026-10-02,
+#: MAJOR-4). Lo que la cache no garantiza (un cambio dentro del mismo tick del
+#: reloj del kernel) lo cubre que el binario y sus directorios sean de root y no
+#: escribibles: quien podria reescribirlo no es un usuario comun.
+_CACHE_SHA: dict[str, tuple[tuple[int, ...], str]] = {}
+
+
+def _firma_archivo(st) -> tuple[int, ...]:
+    return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
 
 
 def _sha256_archivo(ruta: str) -> str:
@@ -758,9 +769,47 @@ def _sha256_archivo(ruta: str) -> str:
     return h.hexdigest()
 
 
-def _resolver_binario(perfil: Perfil) -> tuple[str, str, str]:
+def _verificar_dueno_y_permisos(ruta: str, raiz: str, uid_esperado: int, perfil: str) -> os.stat_result:
+    """El binario es un archivo regular (no symlink), del `uid_esperado`, sin
+    escritura de grupo ni de otros; y cada directorio desde el suyo hasta `raiz`
+    inclusive es un directorio real con el mismo dueno y sin esa escritura. Si
+    no, BinarioAlterado: un binario que alguien mas puede reemplazar no esta
+    fijado por su SHA256, solo por suerte."""
+    def malo(que: str):
+        raise BinarioAlterado(f"{perfil}: {que}")
+
+    try:
+        st = os.lstat(ruta)
+    except OSError:
+        malo("binario fijado ausente")
+    if not stat.S_ISREG(st.st_mode):
+        malo("el binario fijado no es un archivo regular (¿symlink?)")
+    if st.st_uid != uid_esperado or st.st_mode & 0o022:
+        malo("el binario fijado no es del dueno esperado o admite escritura de grupo/otros")
+    raiz = os.path.normpath(raiz)
+    d = os.path.dirname(os.path.normpath(ruta))
+    while True:
+        try:
+            sd = os.lstat(d)
+        except OSError:
+            malo(f"directorio {d!r} ilegible")
+        if not stat.S_ISDIR(sd.st_mode) or sd.st_uid != uid_esperado or sd.st_mode & 0o022:
+            malo(f"el directorio {d!r} no es del dueno esperado o admite escritura de grupo/otros")
+        if d == raiz:
+            break
+        padre = os.path.dirname(d)
+        if padre == d:  # llegamos a "/" sin pasar por la raiz: la ruta no esta bajo ella
+            malo("el binario no esta bajo JAX_CLI_ROOT")
+        d = padre
+    return st
+
+
+def _resolver_binario(perfil: Perfil, *, uid_esperado: int = 0) -> tuple[str, str, str]:
     """(ruta del binario, directorio, version) fijados por la configuracion, ya
-    verificados contra su SHA256. Lanza BinarioAlterado ante cualquier duda."""
+    verificados contra su SHA256 y contra su dueno/permisos. Lanza BinarioAlterado
+    ante cualquier duda. `uid_esperado` (0 = root en produccion) es un parametro y
+    no un flag global para que los tests sin root lo inyecten sin apagar el
+    control; run_cli nunca lo recibe de un llamador."""
     pref = f"JAX_CLI_{perfil.nombre.upper()}"
     version = os.environ.get(f"{pref}_VERSION", "")
     sha = os.environ.get(f"{pref}_SHA256", "").strip().lower()
@@ -771,11 +820,8 @@ def _resolver_binario(perfil: Perfil) -> tuple[str, str, str]:
     raiz = os.environ.get("JAX_CLI_ROOT", "/opt/jax-cli")
     directorio = os.path.join(raiz, perfil.nombre, version)
     ruta = os.path.join(directorio, perfil.bin_nombre)
-    try:
-        st = os.stat(ruta)
-    except OSError:
-        raise BinarioAlterado(f"{perfil.nombre}: binario fijado ausente") from None
-    firma = (st.st_ino, st.st_mtime_ns, st.st_size)
+    st = _verificar_dueno_y_permisos(ruta, raiz, uid_esperado, perfil.nombre)
+    firma = _firma_archivo(st)
     cacheado = _CACHE_SHA.get(ruta)
     if cacheado and cacheado[0] == firma:
         observado = cacheado[1]
