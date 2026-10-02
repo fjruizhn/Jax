@@ -6435,8 +6435,14 @@ jobs:
           #   tests/test_contrato_dispatch_db.py -- probaba `cargar_registro`, borrada con el
           #   REPL; el import fallaba con ImportError en este job. Un test de DB: lo cuenta
           #   este job, no el sin DB. Los 168 son el declarado (169) menos ese.
-          grep -qE "^168 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 168 tests CORRIDOS."; exit 1; }
+          # 168 -> 170 el 2026-10-02 (X-3, C2 mide la edad por respaldado_at): +2 en
+          #   tests/test_ejecutor_politica_db.py -- un snapshot viejo re-verificado hoy NO es
+          #   vigente, y el control positivo (uno reciente si lo es). El del indice ya existia
+          #   y ahora exige idx_ejecutor_punto_host_respaldo. Medido local con las migraciones
+          #   de jax-platform master: ese archivo 3 -> 5 passed. Los dos vistos en rojo contra
+          #   el exportador viejo (a8de3fd: 2 failed / 3 passed).
+          grep -qE "^170 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 170 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira
