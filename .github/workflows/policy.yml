@@ -1272,8 +1272,13 @@ jobs:
           #   suite; GitHub Actions midió 191 en la primera corrida del PR.
           # 203 -> 204 al agregar el rechazo de current_verification_state=False
           # en la prueba del adaptador persistente; medido en Actions para PR #305.
-          grep -qE "^204 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 204 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 204 -> 203 el 2026-10-02 (T16, retiro del REPL): -1, el test
+          #   test_repl_legacy_adapter_requires_tenant_and_labels_memory de
+          #   tests/test_b9_shared_memory.py, que probaba `_render_legacy_repl_memory`
+          #   (jax/core/main.py, retirado). Puro: pasaba sin DB en la medicion local
+          #   (3864 -> 3825 passed sobre tests/ completo, mismo comando). Manda el runner.
+          grep -qE "^203 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 203 tests CORRIDOS (no skipeados)."; exit 1; }
       - name: Publicar resumen de segunda corrida de memoria
         if: failure()
         run: |
@@ -1907,14 +1912,12 @@ jobs:
           tests/test_ejecutor_codigo_sandbox.py
           tests/test_ejecutor_codigo_mision.py
           tests/test_ejecutor_vigia_stderr.py
-          tests/test_workers_background_log.py
           tests/test_loadtest_apps_protegidas.py
           tests/test_ejecutor_probar_c4_conteo_remoto.py
           tests/test_ejecutor_cuenta_de_servicio.py
           tests/test_env_se_lee_con_sudo.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
-          tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py tests/test_repl_fact_verify_autoria.py
-          tests/test_repl_pendientes_base_caida.py
+          tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
           tests/test_health_de_las_manos_puede_fallar.py
           tests/test_degradaciones_declaradas.py
@@ -2094,14 +2097,12 @@ jobs:
             tests/test_ejecutor_codigo_sandbox.py \
             tests/test_ejecutor_codigo_mision.py \
             tests/test_ejecutor_vigia_stderr.py \
-            tests/test_workers_background_log.py \
             tests/test_loadtest_apps_protegidas.py \
             tests/test_ejecutor_probar_c4_conteo_remoto.py \
             tests/test_ejecutor_cuenta_de_servicio.py \
             tests/test_env_se_lee_con_sudo.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
-            tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py tests/test_repl_fact_verify_autoria.py \
-            tests/test_repl_pendientes_base_caida.py \
+            tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
             tests/test_health_de_las_manos_puede_fallar.py \
             tests/test_degradaciones_declaradas.py \
@@ -4780,8 +4781,24 @@ jobs:
           # 3198 -> 3223 (jaxqwen LoadCredential): +25 casos medidos por el
           # runner para credencial systemd, ruta fija y revalidación post-issue.
           # Medido localmente por archivo; el número del runner manda.
-          grep -qE "^3223 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3223 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 3223 -> 3185 (2026-10-02, T16: retiro del REPL y de `jax --task`, decision de
+          #   Fernando D-5 del spec El Faro). -38 de los archivos de ESTE job, medidos por
+          #   identificador de prueba, antes y despues, mismo comando (`pytest tests`, 3864 ->
+          #   3825 passed, 157 -> 157 skipped; los 117 fallos/9 errores de esta maquina sin
+          #   DB son los mismos antes y despues): test_repl_fact_verify_autoria (-11),
+          #   test_repl_pendientes_base_caida (-3) y test_workers_background_log (-1)
+          #   enteros; test_contrato_dispatch_repl_ada (-9 netos: se van 10 -- ModoPesadoTest 4,
+          #   ReplProveedorDelModeloTest 2, dos de UrlRealPorCaminoTest, el del UPDATE entero
+          #   por humanizar_error y el de plan.py + main.py de PlanSinModeloLiteralTest -- y
+          #   vuelve 1: ese ultimo renombrado, que sigue vigilando jacobs/plan.py);
+          #   test_degradaciones_declaradas (-5, la clase _Tripwire sobre main.py);
+          #   test_repl_interruptor (-5 netos: 6 -> 1, queda el de la config);
+          #   test_errores_de_proveedor_redactados (-2); test_gemini_key_en_cabecera (-1);
+          #   test_retiro_de_la_voz (-1). test_cliente_http_compartido y test_config_entorno
+          #   quedan con el mismo numero (la mitad de main.py se quito de un test que sigue).
+          #   Los skips no se mueven (los 45 son otros).
+          grep -qE "^3185 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3185 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del

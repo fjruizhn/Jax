@@ -298,10 +298,3 @@ def test_expired_and_tombstoned_content_never_returns_from_retrieval():
     a=api(); mid=a.create(scope(),ObjectKind.FACT,"x",Visibility.USER_PRIVATE,user_id="u1")
     a.expire(scope(),mid,reason="ttl")
     assert not a.retrieve(scope())
-
-
-def test_repl_legacy_adapter_requires_tenant_and_labels_memory():
-    from jax.core.main import _render_legacy_repl_memory
-    assert _render_legacy_repl_memory(1, None, [("fact", "1", "current text")]) == ""
-    rendered = _render_legacy_repl_memory(1, 2, [("fact", "1", "current text")])
-    assert "HISTORICAL MEMORY" in rendered and "current text" in rendered

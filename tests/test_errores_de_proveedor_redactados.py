@@ -172,20 +172,3 @@ class ReplTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(MuscleInvocationError) as ctx:
                 await musculo._call("hola", "q")
         self.assertNotIn("tok-FAKE", str(ctx.exception))
-
-
-def test_el_error_de_una_tarea_se_escribe_redactado():
-    from jax.core import main
-    texto = main._texto_de_error_de_tarea(RuntimeError("fallo con api_key=sk-FAKE-tarea-0123456789"))
-    assert "sk-FAKE-tarea" not in texto
-    assert "api_key=***" in texto
-
-
-def test_run_task_escribe_el_error_con_el_texto_redactado():
-    arbol = ast.parse((RAIZ / "jax" / "core" / "main.py").read_text(encoding="utf-8"))
-    run_task = next(n for n in ast.walk(arbol) if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_task")
-    asignaciones = [n for n in ast.walk(run_task) if isinstance(n, ast.Assign)
-                    and any(isinstance(t, ast.Name) and t.id == "error_msg" for t in n.targets)]
-    assert asignaciones, "run_task ya no arma error_msg"
-    for a in asignaciones:
-        assert isinstance(a.value, ast.Call) and getattr(a.value.func, "id", None) == "_texto_de_error_de_tarea"

@@ -19,6 +19,10 @@ es la forma callada de la certeza fabricada (Principios V y VIII).
      silencio.
 
 Y `MemoryDB.health_check()`, que no lo llamaba nadie, ahora lo llama el REPL.
+
+T16 (2026-10-02): el REPL y `jax --task` se retiraron; se fueron con ellos las
+comprobaciones sobre el codigo de jax/core/main.py (puntos 2 y 3 y el consumidor
+de health_check). Quedan el Router (4) y la memoria (1).
 """
 from __future__ import annotations
 
@@ -80,51 +84,6 @@ class MemoriaTest(unittest.TestCase):
         self.assertIsNone(
             resultado,
             "un fallo de búsqueda se presentó como «no hay nada parecido»")
-
-
-class _Tripwire(unittest.TestCase):
-    """Comprobaciones sobre el código fuente de `jax/core/main.py`.
-
-    Es un módulo de arranque interactivo (voz, muscles, REPL) que no se puede
-    instanciar en un test sin montar medio JAX. Se verifica sobre el AST, que es
-    el mismo estilo que ya usan los tripwires de este repo: lo que se afirma es
-    una propiedad del código, y si alguien la revierte, esto se pone rojo.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.fuente = (RAIZ / "jax" / "core" / "main.py").read_text(encoding="utf-8")
-        cls.arbol = ast.parse(cls.fuente)
-
-    def test_run_task_declara_si_la_tarea_salio_bien(self):
-        fn = next((n for n in ast.walk(self.arbol)
-                   if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_task"), None)
-        self.assertIsNotNone(fn, "run_task desapareció")
-        self.assertIsNotNone(fn.returns, "run_task ya no declara tipo de retorno")
-        self.assertEqual(ast.unparse(fn.returns), "bool")
-        devoluciones = {ast.unparse(n.value) for n in ast.walk(fn)
-                        if isinstance(n, ast.Return) and n.value is not None}
-        self.assertIn("True", devoluciones)
-        self.assertIn("False", devoluciones, "run_task ya no señala el fallo")
-
-    def test_una_tarea_fallida_sale_con_codigo_distinto_de_cero(self):
-        self.assertIn("if not asyncio.run(run_task(", self.fuente)
-        self.assertIn("sys.exit(1)", self.fuente)
-
-    def test_el_aviso_de_degradacion_viaja_con_el_prompt(self):
-        """Un aviso solo al arranque se pierde en una sesión de horas."""
-        self.assertIn('_MARCA_DEGRADADO = ""', self.fuente)
-        self.assertIn('_MARCA_DEGRADADO = "[sin gobernanza] "', self.fuente)
-        self.assertIn('input(f"\\n{_MARCA_DEGRADADO}> ")', self.fuente)
-
-    def test_el_turno_declara_cuando_responde_sin_memoria(self):
-        self.assertIn("if similares is None:", self.fuente)
-        self.assertIn("memoria no disponible", self.fuente)
-
-    def test_health_check_tiene_consumidor(self):
-        """Existía y no lo llamaba nadie: un control sin consumidor."""
-        self.assertIn("await db.health_check()", self.fuente)
-        self.assertIn("MEMORIA DEGRADADA", self.fuente)
 
 
 if __name__ == "__main__":

@@ -171,14 +171,6 @@ class ReplFailClosedTest(_Base):
     async def test_fila_inexistente_falla(self):
         await self._falla(None, "no está en el catálogo")
 
-    async def test_el_repl_muestra_el_update_entero(self):
-        # humanizar_error recortaba a 160 caracteres: el UPDATE no se veía.
-        from jax.core.main import humanizar_error
-        err = await self._falla((None, 393216), "UPDATE model SET max_tokens_param")
-        visible = humanizar_error("Jekyll", err)
-        self.assertIn("UPDATE model SET max_tokens_param='max_tokens'", visible)
-        self.assertIn("WHERE model_id='deepseek-flash'", visible)
-
 
 class NoOpenAICompatTest(_Base):
     async def test_gemini_no_lleva_max_tokens_ni_lee_el_contrato(self):
@@ -419,11 +411,12 @@ class PlanSinModeloLiteralTest(unittest.TestCase):
                 if isinstance(n, ast.Constant) and isinstance(n.value, str)
                 and self.PATRON.search(n.value.lower())]
 
-    def test_plan_py_y_main_py_no_tienen_nombres_de_modelo_literales(self):
-        # Ronda 2 (M4): también jax/core/main.py (el modelo pesado era literal).
+    def test_plan_py_no_tiene_nombres_de_modelo_literales(self):
+        # Ronda 2 (M4) vigilaba tambien jax/core/main.py (el modelo pesado era
+        # literal); T16 (2026-10-02) lo retiro con el REPL.
         from pathlib import Path
         raiz = Path(__file__).resolve().parents[1]
-        for rel in ("jacobs/plan.py", "jax/core/main.py"):
+        for rel in ("jacobs/plan.py",):
             fuente = (raiz / rel).read_text(encoding="utf-8")
             self.assertEqual(self._literales(fuente), [], rel)
 
@@ -435,49 +428,6 @@ class PlanSinModeloLiteralTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Ronda 2
 # ---------------------------------------------------------------------------
-
-def _cfg_repl(personalidades):
-    return {"jax": {"timeout_seconds": 10}, "personalities": personalidades}
-
-
-class ReplProveedorDelModeloTest(_Base):
-    """I1: el REPL despacha al proveedor y la URL del MODELO del binding, nunca
-    a la URL del proveedor que dice config.toml."""
-
-    def _muscle(self, registro, personalidad):
-        from jax.core.main import build_muscles
-        from jax.core.registro_facetas import aplicar_registro
-        cfg = _cfg_repl({"jekyll": {"system_prompt": "s", **personalidad}})
-        aplicar_registro(cfg, registro)
-        return build_muscles(cfg)["jekyll"]
-
-    async def test_binding_de_otro_proveedor_despacha_a_la_url_del_modelo(self):
-        self.arrancar(("max_completion_tokens", 128000))
-        m = self._muscle(
-            {"jekyll": {"model": "gpt-x", "models_allowed": ["gpt-x"], "transport": "http_openai_compat",
-                        "provider_modelo": "openai", "base_url_modelo": "https://api.openai.example/v1"}},
-            {"type": "http", "provider": "deepseek", "model_default": "deepseek-flash",
-             "models_allowed": ["deepseek-flash"]},
-        )
-        await m.invoke("hola")
-        self.assertEqual(self.cap.urls, ["https://api.openai.example/v1/chat/completions"])
-        self.leer.assert_awaited_once_with("openai", "gpt-x")
-        self.assertEqual(self.cap.bodies[0]["max_completion_tokens"], 128000)
-
-    async def test_proveedor_no_configurado_da_error_visible_y_no_despacha(self):
-        self.arrancar(("max_tokens", 1))
-        m = self._muscle(
-            {"jekyll": {"model": "claude-x", "models_allowed": ["claude-x"], "transport": "subprocess",
-                        "provider_modelo": "anthropic", "base_url_modelo": None}},
-            {"type": "http", "provider": "deepseek", "model_default": "deepseek-flash",
-             "models_allowed": ["deepseek-flash"]},
-        )
-        with self.assertRaises(base.DispatchConfigMuscleError) as ctx:
-            await m.invoke("hola")
-        self.assertIn("subprocess", str(ctx.exception))
-        self.assertEqual(self.cap.bodies, [], "nunca a la URL del TOML")
-        self.leer.assert_not_awaited()
-
 
 class OllamaNumPredictTest(_Base):
     """M3: los caminos Ollama nativos mandan options.num_predict del contrato."""
@@ -549,37 +499,6 @@ class JacobsOllamaNumPredictTest(unittest.IsolatedAsyncioTestCase):
             with self.assertLogs("jacobs.plan", level="ERROR"), self.assertRaises(plan.CerebroNoDisponible):
                 await plan.PlanBuilder()._llm_plan("o", 3, facetas_activas=frozenset({"hipatia"}))
             self.assertEqual(self.cap.bodies, [])
-
-
-class ModoPesadoTest(unittest.TestCase):
-    """M4: el modelo pesado es configuración y tiene que estar en el catálogo."""
-
-    def _cfg(self, **modo):
-        return {"jax": {"modo_pesado": modo},
-                "personalities": {"jekyll": {"models_allowed": ["base-1", "pesado-1"]}}}
-
-    def test_sale_de_la_configuracion(self):
-        from jax.core.main import resolver_modo_pesado
-        self.assertEqual(resolver_modo_pesado(self._cfg(faceta="jekyll", modelo="pesado-1")),
-                         ("jekyll", "pesado-1", ""))
-
-    def test_modelo_fuera_del_catalogo_no_se_activa(self):
-        from jax.core.main import resolver_modo_pesado
-        faceta, modelo, motivo = resolver_modo_pesado(self._cfg(faceta="jekyll", modelo="otro"))
-        self.assertIsNone(faceta)
-        self.assertIn("no está entre los modelos permitidos", motivo)
-
-    def test_sin_configuracion_lo_dice(self):
-        from jax.core.main import resolver_modo_pesado
-        self.assertIn("no configurado", resolver_modo_pesado({"jax": {}, "personalities": {}})[2])
-
-    def test_config_toml_lo_declara(self):
-        import tomllib
-        from pathlib import Path
-        cfg = tomllib.loads((Path(__file__).resolve().parents[1] / "config" / "config.toml").read_text(encoding="utf-8"))
-        modo = cfg["jax"]["modo_pesado"]
-        self.assertIn(modo["faceta"], cfg["personalities"])
-        self.assertTrue(modo["modelo"])
 
 
 # ---------------------------------------------------------------------------
@@ -687,40 +606,6 @@ class UrlRealPorCaminoTest(_Base):
                 self.assertEqual(cfg["personalities"]["f"]["api_url"],
                                  _BASE_URL_PROD[provider_id] + "/chat/completions")
                 self.assertEqual(cfg["personalities"]["f"]["provider"], clave)
-
-    async def test_repl_gemini_arma_generate_content_desde_la_base_url_real(self):
-        from jax.core.main import build_muscles
-        from jax.core.registro_facetas import aplicar_registro
-        self.arrancar(("max_tokens", 1))
-        cfg = _cfg_repl({"hipatia": {"type": "http", "provider": "gemini", "model_default": "g",
-                                     "models_allowed": ["g"], "system_prompt": "s"}})
-        aplicar_registro(cfg, {"hipatia": {"model": "gemini-x", "models_allowed": ["gemini-x"],
-                                           "transport": "http_gemini", "provider_modelo": "gemini",
-                                           "base_url_modelo": _BASE_URL_PROD["gemini"]}})
-        await build_muscles(cfg)["hipatia"].invoke("hola")
-        # Ruling T6-6 (2026-09-15): la key va en la cabecera x-goog-api-key,
-        # nunca en la URL (httpx loguea la URL entera en INFO).
-        self.assertEqual(
-            self.cap.urls[0],
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-x:generateContent")
-        self.assertIn("x-goog-api-key", self.cap.headers[0] or {})
-        self.assertNotIn("max_tokens", self.cap.bodies[0])
-
-    async def test_repl_ollama_usa_el_endpoint_nativo_del_entorno_y_num_predict(self):
-        from jax.core.main import build_muscles
-        from jax.core.registro_facetas import aplicar_registro
-        self.arrancar((None, 262144))
-        nativo = "http://ollama.invalid:11434/api/chat"  # JAX_OLLAMA_URL del conftest + /api/chat
-        cfg = _cfg_repl({"jax_local": {"type": "ollama", "provider": "ollama", "model_default": "q",
-                                       "models_allowed": ["q"], "system_prompt": "s"}})
-        aplicar_registro(cfg, {"jax_local": {"model": "qwen-x", "models_allowed": ["qwen-x"],
-                                             "transport": "ollama", "provider_modelo": "ollama",
-                                             "base_url_modelo": _BASE_URL_PROD["ollama"]}})
-        await build_muscles(cfg)["jax_local"].invoke("hola")
-        self.assertEqual(self.cap.urls, [nativo])
-        self.assertEqual(self.cap.bodies[0]["options"], {"num_predict": 262144})
-        self.assertNotIn("max_tokens", self.cap.bodies[0])
-
 
 class UrlRealJacobsYMotorTest(unittest.IsolatedAsyncioTestCase):
     """N4 en los caminos de Jacobs y del Motor Registry. Reusa el arranque de
