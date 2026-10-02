@@ -1637,6 +1637,23 @@ def _escribir_privado(ruta: Path, contenido: str) -> None:
         f.write(contenido)
 
 
+def _quitar_rundir(rundir: Path) -> None:
+    """BLOQUEANTE. Quita el directorio por llamada con `rmtree(onexc=...)`: lo que no se pueda
+    quitar se REGISTRA (warning con la ruta y el error), igual que la purga de credenciales
+    (`_quitar`); `ignore_errors=True` lo tragaba y el rundir -- con el system prompt y la
+    memoria adentro -- quedaba en disco sin que nadie lo supiera (MINOR-29). Un rundir que ya
+    no existe no es un error: no hace ruido."""
+    def al_fallar(_func, ruta_fallida, exc):
+        if isinstance(exc, FileNotFoundError):
+            return
+        logger.warning(
+            "rundir: no se pudo quitar %s (%s)",
+            _campo_log(ruta_fallida), getattr(exc, "strerror", None) or type(exc).__name__,
+        )
+
+    shutil.rmtree(rundir, onexc=al_fallar)
+
+
 def _preparar_rundir(base: Path, rundir: Path, archivo: str, contenido: str) -> None:
     """BLOQUEANTE (to_thread): crea `base` (0700) y el directorio por llamada y
     escribe el system prompt. Si algo falla, no deja el directorio a medias."""
@@ -1645,13 +1662,13 @@ def _preparar_rundir(base: Path, rundir: Path, archivo: str, contenido: str) -> 
     try:
         _escribir_privado(rundir / archivo, contenido)
     except BaseException:
-        shutil.rmtree(rundir, ignore_errors=True)
+        _quitar_rundir(rundir)
         raise
 
 
 def _borrar_rundir(rundir: Path) -> None:
-    """BLOQUEANTE (to_thread)."""
-    shutil.rmtree(rundir, ignore_errors=True)
+    """BLOQUEANTE (to_thread). Ver `_quitar_rundir`: lo que no se pueda quitar se registra."""
+    _quitar_rundir(rundir)
 
 
 async def run_cli(

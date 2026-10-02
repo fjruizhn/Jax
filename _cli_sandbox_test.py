@@ -2427,6 +2427,65 @@ class LocksCompartidosTest(unittest.TestCase):
             self._adq("dir.lock")
 
 
+class RundirSinSilencioTest(_Entorno):
+    """MINOR-29 (reauditoria 2026-10-02): `_preparar_rundir` y `_borrar_rundir` borraban con
+    `shutil.rmtree(ignore_errors=True)`: un rundir que no se pudo quitar (con el system prompt y
+    la memoria adentro) quedaba en disco sin que nadie se enterara. Igual que `_quitar`: `onexc`
+    con un warning que lleva la ruta y el error."""
+
+    def _rundir_con_subdirectorio_inborrable(self, nombre="rd"):
+        rundir = self.run_dir / nombre
+        (rundir / "sub").mkdir(parents=True)
+        (rundir / "sub" / "f").write_text("x")
+        os.chmod(rundir / "sub", 0o500)  # sin escritura: no se puede quitar `f`
+        self.addCleanup(lambda: os.path.exists(rundir / "sub") and os.chmod(rundir / "sub", 0o700))
+        return rundir
+
+    @unittest.skipIf(os.geteuid() == 0, "root puede borrar un directorio 0500")
+    async def test_borrar_rundir_registra_lo_que_no_pudo_quitar(self):
+        rundir = self._rundir_con_subdirectorio_inborrable()
+        with self.assertLogs("cli_sandbox", "WARNING") as cm:
+            cli_sandbox._borrar_rundir(rundir)  # no lanza
+        msg = "\n".join(cm.output)
+        self.assertIn(str(rundir / "sub"), msg)
+        self.assertIn("rundir", msg)
+        self.assertTrue((rundir / "sub" / "f").exists(), "queda en disco, pero ya no en silencio")
+
+    @unittest.skipIf(os.geteuid() == 0, "root puede borrar un directorio 0500")
+    async def test_preparar_rundir_registra_lo_que_no_pudo_quitar_y_relanza_el_error_original(self):
+        base, rundir = self.run_dir / "base", self.run_dir / "base" / "rd"
+
+        def escribir_y_fallar(ruta, contenido):
+            (rundir / "sub").mkdir()
+            (rundir / "sub" / "f").write_text("x")
+            os.chmod(rundir / "sub", 0o500)
+            self.addCleanup(lambda: os.path.exists(rundir / "sub") and os.chmod(rundir / "sub", 0o700))
+            raise OSError("disco lleno")
+
+        with patch.object(cli_sandbox, "_escribir_privado", escribir_y_fallar):
+            with self.assertLogs("cli_sandbox", "WARNING") as cm:
+                with self.assertRaises(OSError) as c:
+                    cli_sandbox._preparar_rundir(base, rundir, "sistema.md", "s")
+        self.assertIn("disco lleno", str(c.exception), "el error original se relanza intacto")
+        self.assertIn(str(rundir / "sub"), "\n".join(cm.output))
+
+    async def test_un_rundir_que_ya_no_existe_no_hace_ruido(self):
+        with self.assertNoLogs("cli_sandbox", "WARNING"):
+            cli_sandbox._borrar_rundir(self.run_dir / "no-existe")
+
+    async def test_un_rundir_sano_se_borra_sin_ruido(self):
+        rundir = self.run_dir / "sano"
+        (rundir / "a").mkdir(parents=True)
+        (rundir / "a" / "f").write_text("x")
+        with self.assertNoLogs("cli_sandbox", "WARNING"):
+            cli_sandbox._borrar_rundir(rundir)
+        self.assertFalse(rundir.exists())
+
+    async def test_ninguna_de_las_dos_usa_ignore_errors(self):
+        for f in (cli_sandbox._preparar_rundir, cli_sandbox._borrar_rundir):
+            self.assertNotIn("ignore_errors", inspect.getsource(f), f.__name__)
+
+
 class Sha256ArchivoTest(unittest.TestCase):
     """MINOR-25: `_sha256_archivo(esperado=...)` es la defensa contra el cambio de archivo
     ENTRE el recorrido del arbol (que vio un stat) y el hash. Ningun test la ejercitaba: se
