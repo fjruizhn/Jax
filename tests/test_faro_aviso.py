@@ -276,6 +276,29 @@ def test_avisar_nunca_lanza_con_un_registro_raro(tmp_path, registro):
     corre(caso())
 
 
+def test_si_el_avisador_falla_por_dentro_no_lanza_y_sigue_funcionando(tmp_path, monkeypatch):
+    import jax.faro.aviso as modulo
+    original = modulo.redactar
+    fallos = []
+
+    def redactar_roto(registro, host):
+        if not fallos:
+            fallos.append(1)
+            raise RuntimeError("fallo interno del avisador")
+        return original(registro, host)
+    monkeypatch.setattr(modulo, "redactar", redactar_roto)
+
+    async def caso():
+        enviados = []
+        async with _avisador(tmp_path, enviados, rafaga=10) as av:
+            av(RECHAZO)                 # el primero falla por dentro: NO lanza
+            av(DENEGACION)              # el siguiente sale
+            await asyncio.sleep(0.2)
+        return enviados
+    enviados = corre(caso())
+    assert fallos == [1] and len(enviados) == 1 and "freno" in enviados[0]
+
+
 def test_al_cerrar_se_entrega_lo_pendiente(tmp_path):
     async def caso():
         enviados = []
