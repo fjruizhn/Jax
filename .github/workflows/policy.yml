@@ -1074,8 +1074,9 @@ jobs:
           #   este job puede). Medido local con la credencial de pruebas dedicada
           #   (~/.config/jax/test-db.env, usuario jax_test), MISMO comando: sin los
           #   tres archivos, 209 passed; con ellos, 270 passed, 0 skipped.
-          grep -qE "^270 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 270 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 270 -> 274 (2026-10-02, Proyectos E1.1, PR #321): +4 medidos en el runner — candidatos sin mínimo de letras (3) y autoridad con q vacío (1).
+          grep -qE "^274 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 274 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
