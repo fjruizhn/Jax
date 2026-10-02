@@ -63,6 +63,24 @@ jax-platform/backend/api/command.py -- menciona "claude") fue eso, manual;
 no es una garantia que este job sostenga corrida a corrida para
 jax-platform.
 
+EXTENSION 2026-10-01 (facetas Thot y Kimi por suscripcion, spec §5): el mismo
+control cubre ahora a `codex` y `kimi`, los otros dos CLIs que el nucleo
+cli_sandbox.py lanza dentro de bwrap. Antes un `subprocess.run(["codex","exec"])`
+o `["kimi","-p"]` pasaba limpio porque solo se buscaba "claude". Dos criterios
+nuevos, ademas del de arriba:
+  (c) un subproceso cuyo argv[0] es un LITERAL igual a claude|codex|kimi, o que
+      termina en /claude, /codex o /kimi. Se resuelve el argv[0] de una lista
+      literal, de una cadena (os.system), de `*lista` y de un nombre asignado a
+      una lista literal en el mismo archivo.
+  (d) cualquier string literal con la ruta de los binarios fijados o de las
+      credenciales de esos CLIs (`_RUTAS_DE_CLI`): esa ruta no se escribe fuera
+      del modulo aprobado, lance o no lance algo en ese archivo. Las rutas se
+      arman por partes en este archivo A PROPOSITO: escritas enteras, el
+      scanner se marcaria a si mismo.
+NO se busca la palabra "kimi" a secas: es el nombre de la faceta y del motor en
+todo el codigo, y worker.py usa subprocess.run (para git). Daria falsos
+positivos; el argv[0] y las rutas no.
+
 Corre con:
   python3 policy/tests/test_claude_subprocess_solo_via_sandbox.py
 
@@ -281,6 +299,84 @@ def _references_claude_literal(tree: ast.Module) -> bool:
     return False
 
 
+# CLIs de suscripcion que solo el nucleo cli_sandbox puede lanzar (spec §5).
+_CLIS_DE_SUSCRIPCION = ("claude", "codex", "kimi")
+_OPT_CLI = "/opt/" + "jax-cli"
+_HOME_KIMI = "." + "kimi-code"
+_PAQUETES_CODEX = "." + "codex/packages"
+_RUTAS_DE_CLI = (_OPT_CLI, _HOME_KIMI, _PAQUETES_CODEX)
+
+
+def _es_argv0_de_cli(valor: str) -> bool:
+    return any(valor == n or valor.endswith("/" + n) for n in _CLIS_DE_SUSCRIPCION)
+
+
+def _asignaciones_a_listas(tree: ast.AST) -> dict[str, ast.AST]:
+    """`cmd = ["kimi", "-p"]` -> {"cmd": <List>}. Solo asignaciones simples de un
+    nombre a una lista/tupla/cadena literal; si el nombre se reasigna, gana la
+    ultima (imprecision aceptada: el scanner es de nivel AST)."""
+    out: dict[str, ast.AST] = {}
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Assign) and len(n.targets) == 1
+                and isinstance(n.targets[0], ast.Name)
+                and isinstance(n.value, (ast.List, ast.Tuple, ast.Constant))):
+            out[n.targets[0].id] = n.value
+    return out
+
+
+def _primer_literal(nodo: ast.AST, asignaciones: dict[str, ast.AST], _prof: int = 0) -> str | None:
+    """argv[0] literal de lo que se le pasa a un lanzador de subprocesos."""
+    if _prof > 3:
+        return None
+    if isinstance(nodo, ast.Constant) and isinstance(nodo.value, str):
+        partes = nodo.value.split()
+        return partes[0] if partes else None
+    if isinstance(nodo, (ast.List, ast.Tuple)):
+        return _primer_literal(nodo.elts[0], asignaciones, _prof + 1) if nodo.elts else None
+    if isinstance(nodo, ast.Starred):
+        return _primer_literal(nodo.value, asignaciones, _prof + 1)
+    if isinstance(nodo, ast.Name) and nodo.id in asignaciones:
+        return _primer_literal(asignaciones[nodo.id], asignaciones, _prof + 1)
+    return None
+
+
+def _lanza_cli_de_suscripcion(tree: ast.AST) -> bool:
+    """Criterio (c): un lanzamiento de subproceso cuyo argv[0] es claude|codex|kimi
+    (o una ruta que termina en ellos). NO mira la palabra suelta."""
+    asignaciones = _asignaciones_a_listas(tree)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and _is_subprocess_launch(node)):
+            continue
+        candidatos = list(node.args)
+        candidatos += [k.value for k in node.keywords if k.arg == "args"]
+        if _call_name(node.func) == "subprocess_exec":
+            candidatos = candidatos[1:]  # loop.subprocess_exec(protocolo, argv0, ...)
+        if not candidatos:
+            continue
+        primero = _primer_literal(candidatos[0], asignaciones)
+        if primero is not None and _es_argv0_de_cli(primero):
+            return True
+    return False
+
+
+def _menciona_ruta_de_cli(tree: ast.AST) -> bool:
+    """Criterio (d): un literal con la ruta de los binarios fijados o de las
+    credenciales de un CLI de suscripcion."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if any(r in node.value for r in _RUTAS_DE_CLI):
+                return True
+    return False
+
+
+def _viola_la_politica(tree: ast.Module) -> bool:
+    return (
+        (_references_claude_literal(tree) and _calls_create_subprocess(tree))
+        or _lanza_cli_de_suscripcion(tree)
+        or _menciona_ruta_de_cli(tree)
+    )
+
+
 def _is_approved_sandbox_file(root: Path, path: Path) -> bool:
     """Los archivos aprobados son el hyde_sandbox.py del ROOT de un repo
     escaneado y su archivo de tests dedicado -- no cualquier archivo que se
@@ -307,13 +403,14 @@ def find_naked_claude_subprocess_files() -> list[str]:
         # archivos que NO pueden matchear, sin pagar el ast.parse. No
         # alcanza por si solo -- ve comentarios, que el AST no (ver
         # _references_claude_literal).
-        if "claude" not in source.lower():
+        bajo = source.lower()
+        if not any(m in bajo for m in (*_CLIS_DE_SUSCRIPCION, *_RUTAS_DE_CLI)):
             continue
         try:
             tree = ast.parse(source, filename=str(path))
         except SyntaxError:
             continue
-        if _references_claude_literal(tree) and _calls_create_subprocess(tree):
+        if _viola_la_politica(tree):
             if _declarado_aislado_por_cuenta(root, path, tree):
                 continue
             violations.append(str(path))
@@ -332,10 +429,9 @@ def find_naked_claude_subprocess_files() -> list[str]:
 # --------------------------------------------------------------------------
 
 def _detects(source: str) -> bool:
-    """Aplica los dos criterios del scanner a un snippet, igual que
+    """Aplica los criterios del scanner a un snippet, igual que
     find_naked_claude_subprocess_files() a un archivo real."""
-    tree = ast.parse(source)
-    return _references_claude_literal(tree) and _calls_create_subprocess(tree)
+    return _viola_la_politica(ast.parse(source))
 
 
 def test_detecta_subprocess_run_sincrono() -> None:
@@ -405,6 +501,9 @@ def test_exencion_es_solo_para_el_root_del_repo() -> None:
     root = _THIS_REPO_ROOT
     assert _is_approved_sandbox_file(root, root / "hyde_sandbox.py")
     assert _is_approved_sandbox_file(root, root / "_hyde_sandbox_test.py")
+    assert _is_approved_sandbox_file(root, root / "cli_sandbox.py")
+    assert _is_approved_sandbox_file(root, root / "_cli_sandbox_test.py")
+    assert not _is_approved_sandbox_file(root, root / "tools" / "cli_sandbox.py")
     assert not _is_approved_sandbox_file(root, root / "tools" / "hyde_sandbox.py")
     assert not _is_approved_sandbox_file(root, root / "tools" / "_hyde_sandbox_test.py")
 
@@ -415,6 +514,102 @@ def test_symlink_del_modulo_aprobado_sigue_exento() -> None:
     symlink = _THIS_REPO_ROOT / "las_manos" / "hyde_sandbox.py"
     assert symlink.is_symlink(), "symlink las_manos/hyde_sandbox.py debe existir"
     assert _is_approved_sandbox_file(_THIS_REPO_ROOT, symlink)
+
+
+def test_symlink_de_cli_sandbox_sigue_exento() -> None:
+    symlink = _THIS_REPO_ROOT / "las_manos" / "cli_sandbox.py"
+    assert symlink.is_symlink(), "symlink las_manos/cli_sandbox.py debe existir"
+    assert _is_approved_sandbox_file(_THIS_REPO_ROOT, symlink)
+
+
+# --- Extension codex/kimi (spec §5): autopruebas positivas y negativas -------
+# Cada autoprueba positiva es un snippet que el scanner VIEJO (solo "claude")
+# dejaba pasar; si el criterio nuevo se rompe, se pone rojo (Principio VII).
+
+def test_detecta_subprocess_run_de_codex_y_kimi() -> None:
+    assert _detects("import subprocess\nsubprocess.run(['codex', 'exec', '-'])\n")
+    assert _detects("import subprocess\nsubprocess.run(['kimi', '-p', 'hola'])\n")
+
+
+def test_detecta_popen_y_execvp_de_codex_y_kimi() -> None:
+    assert _detects("import subprocess\nsubprocess.Popen(['codex', 'exec'])\n")
+    assert _detects("import subprocess\nsubprocess.Popen(('kimi',))\n")
+    assert _detects("import os\nos.execvp('kimi', ['kimi', '-p', 'x'])\n")
+    assert _detects("import os\nos.system('codex exec - < in.txt')\n")
+
+
+def test_detecta_las_formas_async_de_codex_y_kimi() -> None:
+    assert _detects("import asyncio\nasyncio.create_subprocess_exec('codex', 'exec')\n")
+    assert _detects("import asyncio\nasyncio.create_subprocess_exec(*['kimi', '-p', 'x'])\n")
+    assert _detects("import asyncio\nasyncio.create_subprocess_shell('kimi -p x')\n")
+    assert _detects("loop.subprocess_exec(proto, 'codex', 'exec')\n")
+
+
+def test_detecta_el_binario_por_ruta_absoluta() -> None:
+    assert _detects(f"import subprocess\nsubprocess.run(['{_OPT_CLI}/codex/0.160.0/codex', 'exec'])\n")
+    assert _detects("import subprocess\nsubprocess.run(['/usr/local/bin/kimi', '-p', 'x'])\n")
+    assert _detects("import subprocess\nsubprocess.run(['/algun/lado/codex'])\n")
+
+
+def test_detecta_el_argv_asignado_a_una_variable_de_la_misma_lista() -> None:
+    assert _detects("import subprocess\ncmd = ['kimi', '-p', 'x']\nsubprocess.run(cmd)\n")
+    assert _detects(
+        "import asyncio\ncmd = ['codex', 'exec']\nasyncio.create_subprocess_exec(*cmd)\n")
+
+
+def test_detecta_una_constante_con_la_ruta_de_kimi_aunque_no_lance_nada() -> None:
+    assert _detects(f"KIMI = '{_OPT_CLI}/kimi/2.1.1/kimi'\n")
+    assert _detects(f"HOME_KIMI = '/home/fruiz/{_HOME_KIMI}/credentials'\n")
+    assert _detects(f"P = '/home/fruiz/{_PAQUETES_CODEX}/standalone/releases/x/codex'\n")
+
+
+def test_la_faceta_kimi_junto_a_un_subprocess_de_git_no_es_violacion() -> None:
+    """Autoprueba NEGATIVA del spec: `kimi` es el nombre de la faceta y del motor
+    en todo el codigo, y worker.py usa subprocess.run para git. Buscar la palabra
+    suelta daria un falso positivo en cada uno de esos archivos."""
+    assert not _detects(
+        "import subprocess\n"
+        "FACET = 'kimi'\n"
+        "subprocess.run(['git', 'log'])\n")
+    assert not _detects(
+        "import subprocess\n"
+        "FACETAS = ['kimi', 'thot', 'jekyll']\n"
+        "MOTOR = 'codex'\n"
+        "subprocess.run(['git', 'status'], capture_output=True)\n")
+    assert not _detects("import subprocess\nsubprocess.run(['git', 'commit', '-m', 'kimi codex'])\n")
+
+
+def test_codex_o_kimi_sin_lanzar_nada_no_es_violacion() -> None:
+    assert not _detects("FACET = 'kimi'\nprint(FACET)\n")
+    assert not _detects("MOTORES = ('kimi', 'ada', 'codex')\n")
+
+
+def test_run_generico_no_calificado_de_codex_o_kimi_no_cuenta() -> None:
+    assert not _detects("self.run(['codex', 'exec'])\n")
+    assert not _detects("runner.call('kimi')\n")
+
+
+def test_un_comando_que_apenas_termina_parecido_no_es_argv0_de_cli() -> None:
+    assert not _detects("import subprocess\nsubprocess.run(['/usr/bin/xcodex'])\n")
+    assert not _detects("import subprocess\nsubprocess.run(['kimi-helper'])\n")
+
+
+def test_un_archivo_que_no_es_el_aprobado_con_la_ruta_de_cli_sigue_siendo_violacion(tmp_path) -> None:
+    """Control del control sobre el recorrido de archivos real: un archivo plantado
+    en un root escaneado, que NO es uno de los aprobados, aparece en la lista."""
+    raiz = tmp_path / "repo"
+    (raiz / "tools").mkdir(parents=True)
+    plantado = f"RUTA = '{_OPT_CLI}/codex/x/codex'\n"
+    (raiz / "tools" / "cli_sandbox.py").write_text(plantado)
+    (raiz / "cli_sandbox.py").write_text(plantado)
+    global REPO_ROOTS
+    anteriores = REPO_ROOTS
+    REPO_ROOTS = [raiz]
+    try:
+        encontrados = {Path(v).relative_to(raiz).as_posix() for v in find_naked_claude_subprocess_files()}
+    finally:
+        REPO_ROOTS = anteriores
+    assert encontrados == {"tools/cli_sandbox.py"}
 
 
 def test_un_archivo_declarado_que_pierde_el_ssh_vuelve_a_ser_violacion(tmp_path) -> None:
@@ -488,9 +683,10 @@ def test_no_naked_claude_subprocess() -> None:
     violations = find_naked_claude_subprocess_files()
     assert not violations, (
         f"{len(violations)} archivo(s) lanzan un subproceso y "
-        "mencionan 'claude', fuera de hyde_sandbox.py::run_sandboxed_claude() "
-        "-- cualquier invocacion de `claude` como subproceso debe pasar por "
-        "ese wrapper (sandbox de bwrap + lock cross-proceso via flock):\n"
+        "mencionan 'claude', o lanzan `codex`/`kimi`, o escriben la ruta de sus binarios "
+        "o credenciales, fuera de hyde_sandbox.py::run_sandboxed_claude() / cli_sandbox.py "
+        "-- cualquier invocacion de esos CLIs como subproceso debe pasar por "
+        "esos modulos (sandbox de bwrap + lock cross-proceso via flock):\n"
         + "\n".join(violations)
     )
 
@@ -503,8 +699,8 @@ def main() -> int:
             print(f"  {v}")
         return 1
     print(
-        "OK — ningun subprocess de 'claude' fuera de hyde_sandbox.py "
-        "(+ su test dedicado _hyde_sandbox_test.py)"
+        "OK — ningun subprocess de claude/codex/kimi fuera de hyde_sandbox.py y "
+        "cli_sandbox.py (+ sus tests dedicados)"
     )
     return 0
 
