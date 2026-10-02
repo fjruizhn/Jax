@@ -5,6 +5,8 @@ entre tests) y su fixture de esquema.
 """
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from jax.memory.project_authority import ProjectNotVisible, ProjectRoleInsufficient
@@ -146,7 +148,69 @@ async def test_candidatos_excluyen_miembros_admins_y_otros_tenants():
         pool.close(); await pool.wait_closed()
     ids = {c["user_id"] for c in todos}
     assert libre in ids and not ids & {miembro, adm, ajeno, owner}
-    assert corto == []
+    assert not {c["user_id"] for c in corto} & {miembro, adm, ajeno, owner}
+
+
+@asincrono
+async def test_candidatos_con_un_caracter_filtran_por_prefijo_de_email():
+    t = await _crear_tenant("q5f")
+    owner = await _crear_usuario(t)
+    sufijo = uuid.uuid4().hex[:12]  # email es unico global y la base de pruebas persiste
+    con_a = await _crear_usuario(t, email=f"ana-{sufijo}@test.invalid")
+    con_b = await _crear_usuario(t, email=f"beto-{sufijo}@test.invalid")
+    p = await _crear_proyecto_activo(t, name="P"); await _crear_scope(p, t)
+    await _crear_membresia(p, t, owner, role="OWNER")
+    pool = await _pool()
+    try:
+        a = await list_invite_candidates(pool, tenant_id=t, user_id=owner, project_id=p, query="a", limit=20)
+        b = await list_invite_candidates(pool, tenant_id=t, user_id=owner, project_id=p, query=" B ", limit=20)
+    finally:
+        pool.close(); await pool.wait_closed()
+    assert [c["user_id"] for c in a] == [con_a]
+    assert [c["user_id"] for c in b] == [con_b]
+
+
+@asincrono
+async def test_candidatos_sin_query_listan_todos_los_elegibles_y_ningun_excluido():
+    t = await _crear_tenant("q5c"); t2 = await _crear_tenant("q5d")
+    owner = await _crear_usuario(t)
+    libres = [await _crear_usuario(t) for _ in range(3)]
+    miembro = await _crear_usuario(t)
+    adm = await _crear_usuario(t, role="superadmin")
+    inactivo = await _crear_usuario(t)
+    await _sql("UPDATE jax_users SET status='inactive' WHERE user_id=%s", (inactivo,))
+    ajeno = await _crear_usuario(t2)
+    p = await _crear_proyecto_activo(t, name="P"); await _crear_scope(p, t)
+    await _crear_membresia(p, t, owner, role="OWNER"); await _crear_membresia(p, t, miembro, role="VIEWER")
+    pool = await _pool()
+    try:
+        for q in ("", "   "):
+            lista = await list_invite_candidates(pool, tenant_id=t, user_id=owner, project_id=p, query=q, limit=100)
+            ids = [c["user_id"] for c in lista]
+            assert set(ids) == set(libres)
+            assert not set(ids) & {owner, miembro, adm, inactivo, ajeno}
+            emails = [c["email"] for c in lista]
+            assert emails == sorted(emails)
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+@asincrono
+async def test_candidatos_limit_se_acota_a_100():
+    t = await _crear_tenant("q5e")
+    owner = await _crear_usuario(t)
+    for _ in range(105):
+        await _crear_usuario(t)
+    p = await _crear_proyecto_activo(t, name="P"); await _crear_scope(p, t)
+    await _crear_membresia(p, t, owner, role="OWNER")
+    pool = await _pool()
+    try:
+        r100 = await list_invite_candidates(pool, tenant_id=t, user_id=owner, project_id=p, query="", limit=100)
+        r500 = await list_invite_candidates(pool, tenant_id=t, user_id=owner, project_id=p, query="", limit=500)
+        r30 = await list_invite_candidates(pool, tenant_id=t, user_id=owner, project_id=p, query="", limit=30)
+    finally:
+        pool.close(); await pool.wait_closed()
+    assert len(r100) == 100 and len(r500) == 100 and len(r30) == 30
 
 
 @asincrono
