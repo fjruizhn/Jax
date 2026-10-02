@@ -86,11 +86,15 @@ EXTENSION 2026-10-02 (ronda 2, MINOR-16): `getattr(subprocess, 'run')(...)` (y
 `__import__('subprocess')` (directo o asignado a un nombre) y la concatenacion de
 literales (`['co' + 'dex']`, `'/opt/' + 'jax-cli'`, tambien a traves de un nombre
 asignado) se resuelven. Se quito el pre-filtro de texto del recorrido: buscaba el nombre
-entero y `'co' + 'dex'` no lo contiene. El criterio (a), la mencion suelta de "claude"
-junto a un subproceso, NO pliega concatenaciones: scripts/axioma_sync.py parte
-"CLAUDE.md" en dos literales y solo lanza `git`; lo que LANZA con el nombre partido lo
-atrapa el criterio (c). Residuo conocido: `"".join(...)`, f-strings y cualquier nombre
-armado con algo mas que `+` de literales o de nombres asignados a literales.
+entero y `'co' + 'dex'` no lo contiene. Residuo conocido: f-strings y cualquier nombre armado con algo mas que `+` de literales
+o de nombres asignados a literales.
+
+EXTENSION 2026-10-02 (reauditoria, MINOR-28): el criterio (a) TAMBIEN pliega las
+concatenaciones de literales y `"".join([...])` de literales. scripts/axioma_sync.py, que
+parte "CLAUDE.md" en dos literales y solo lanza `git`, pasa a una LISTA EXPLICITA de
+exenciones (`_EXENTOS_POR_MENCION_PARTIDA`) con su justificacion, que ademas exige demostrar
+que el archivo lanza solo `git`. Los criterios (c) y (d) no pliegan `.join`: este archivo
+arma las rutas de los CLIs con `"".join(...)` a proposito (ver `_OPT_CLI`).
 
 NO se busca la palabra "kimi" a secas: es el nombre de la faceta y del motor en
 todo el codigo, y worker.py usa subprocess.run (para git). Daria falsos
@@ -215,6 +219,34 @@ def _lanza_via_bwrap_directo(tree: ast.AST) -> bool:
             and any("--tmpfs" in l for l in literales) and any("$HOME" in l for l in literales))
 
 
+# EXENCIONES POR MENCION PARTIDA (MINOR-28, reauditoria 2026-10-02). El criterio (a) pliega
+# las concatenaciones y los `"".join([...])` de literales, y por eso marca los archivos que
+# parten el nombre "claude" en pedazos junto a un subproceso. Estos son los unicos que se
+# aceptan, por ruta relativa al root de un repo escaneado y con su justificacion. NO es una
+# allowlist ciega: `_exento_por_mencion_partida` exige ademas que el archivo lance SOLO `git`,
+# que no lance ningun CLI de suscripcion (criterio c) ni escriba la ruta de sus binarios
+# (criterio d); si deja de cumplirlo, vuelve a ser violacion.
+_EXENTOS_POR_MENCION_PARTIDA = {
+    "scripts/axioma_sync.py":
+        "lanza solo `git` (subprocess.run([\"git\", \"-C\", ...]) para leer el SHA de origen); el "
+        "literal partido es \"CLAUDE.md\" dentro de una ruta de archivo, no el comando "
+        "(`_CLAUDE_FILE = \"C\" + \"LAUDE.md\"`)",
+}
+
+
+def _exento_por_mencion_partida(root: Path, path: Path, tree: ast.AST) -> bool:
+    try:
+        rel = path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return False
+    return (
+        rel in _EXENTOS_POR_MENCION_PARTIDA
+        and _lanza_solo_git(tree)
+        and not _lanza_cli_de_suscripcion(tree)
+        and not _menciona_ruta_de_cli(tree)
+    )
+
+
 def _declarado_aislado_por_cuenta(root: Path, path: Path, tree: ast.AST) -> bool:
     try:
         rel = path.resolve().relative_to(root.resolve()).as_posix()
@@ -294,20 +326,34 @@ class _Alias:
                     self.funciones[destino] = par
 
 
-def _plegar(nodo: ast.AST, asignaciones: dict[str, ast.AST] | None = None, _prof: int = 0) -> str | None:
+def _plegar(
+    nodo: ast.AST, asignaciones: dict[str, ast.AST] | None = None, _prof: int = 0, *, con_join: bool = False,
+) -> str | None:
     """La cadena a la que se pliega una expresion hecha SOLO de literales unidos con
     `+` (`'co' + 'dex'`), de nombres asignados a una (`A = 'co'; A + 'dex'`) o de
-    un literal; None si no se puede resolver entera."""
+    un literal; None si no se puede resolver entera. Con `con_join=True` (solo el criterio
+    (a), MINOR-28) tambien pliega `<literal>.join([literales])` / `.join((literales))`, cada
+    elemento plegado a su vez. Los criterios (c) y (d) NO lo piden: este mismo archivo arma
+    las rutas de los CLIs con `"".join(...)` a proposito, para no marcarse a si mismo."""
     if _prof > 6:
         return None
     if isinstance(nodo, ast.Constant) and isinstance(nodo.value, str):
         return nodo.value
     if isinstance(nodo, ast.BinOp) and isinstance(nodo.op, ast.Add):
-        izq = _plegar(nodo.left, asignaciones, _prof + 1)
-        der = _plegar(nodo.right, asignaciones, _prof + 1) if izq is not None else None
+        izq = _plegar(nodo.left, asignaciones, _prof + 1, con_join=con_join)
+        der = _plegar(nodo.right, asignaciones, _prof + 1, con_join=con_join) if izq is not None else None
         return None if izq is None or der is None else izq + der
     if isinstance(nodo, ast.Name) and asignaciones and nodo.id in asignaciones:
-        return _plegar(asignaciones[nodo.id], asignaciones, _prof + 1)
+        return _plegar(asignaciones[nodo.id], asignaciones, _prof + 1, con_join=con_join)
+    if (
+        con_join and isinstance(nodo, ast.Call) and not nodo.keywords and len(nodo.args) == 1
+        and isinstance(nodo.func, ast.Attribute) and nodo.func.attr == "join"
+        and isinstance(nodo.func.value, ast.Constant) and isinstance(nodo.func.value.value, str)
+        and isinstance(nodo.args[0], (ast.List, ast.Tuple))
+    ):
+        partes = [_plegar(e, asignaciones, _prof + 1, con_join=True) for e in nodo.args[0].elts]
+        if all(x is not None for x in partes):
+            return nodo.func.value.value.join(partes)
     return None
 
 
@@ -427,11 +473,11 @@ def _references_claude_literal(tree: ast.Module) -> bool:
     """True si el archivo menciona "claude" en un STRING LITERAL del AST
     (incluidos docstrings), no en un comentario `#`.
 
-    NO pliega concatenaciones (`'C' + 'LAUDE.md'`): este criterio (a) es el de la
-    MENCION suelta junto a un subproceso, y plegar marcaria a
-    scripts/axioma_sync.py, que parte "CLAUDE.md" en dos literales y solo lanza `git`.
-    Lo que si LANZA claude con el nombre partido (`['cla' + 'ude']`, `os.system('cla' +
-    'ude -p')`) lo atrapa el criterio (c), que pliega el argv.
+    PLIEGA las concatenaciones de literales (`'cla' + 'ude'`, tambien a traves de un nombre
+    asignado) y `"".join([...])` de literales (MINOR-28, reauditoria 2026-10-02): partir el
+    nombre en dos literales no lo esconde. Marca asi a scripts/axioma_sync.py, que parte
+    "CLAUDE.md" y solo lanza `git`: ese archivo esta en la lista explicita
+    `_EXENTOS_POR_MENCION_PARTIDA`, con su justificacion, y no por un hueco del detector.
 
     Los comentarios de Python se descartan antes de parsear y NUNCA forman
     parte del AST -- por eso este chequeo los excluye de raiz, que es
@@ -443,11 +489,21 @@ def _references_claude_literal(tree: ast.Module) -> bool:
     comentario que dice que Hyde corre claude FUERA de ese modulo. Hyde se
     discute por todo este codebase, asi que sin este fix el falso positivo
     se iba a repetir. Los docstrings SI cuentan (son ast.Constant): una
-    referencia real, aunque inusual, podria esconderse ahi."""
+    referencia real, aunque inusual, podria esconderse ahi.
+
+    Residuo conocido: f-strings, `%`/`.format` y un join con algo que no sea literal."""
+    asignaciones = _asignaciones_a_listas(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if "claude" in node.value.lower():
-                return True
+            texto = node.value
+        elif isinstance(node, (ast.BinOp, ast.Call)):
+            texto = _plegar(node, asignaciones, con_join=True)
+            if texto is None:
+                continue
+        else:
+            continue
+        if "claude" in texto.lower():
+            return True
     return False
 
 
@@ -586,11 +642,13 @@ def _primer_literal(nodo: ast.AST, asignaciones: dict[str, ast.AST], _prof: int 
     return _argv0_efectivo(_tokens(nodo, asignaciones, _prof))
 
 
-def _lanza_cli_de_suscripcion(tree: ast.AST) -> bool:
-    """Criterio (c): un lanzamiento de subproceso cuyo argv[0] es claude|codex|kimi
-    (o una ruta que termina en ellos). NO mira la palabra suelta."""
+def _argv0s_de_lanzamientos(tree: ast.AST) -> list[str | None]:
+    """El argv[0] efectivo (literal o None si no se resuelve) de CADA lanzamiento de
+    subproceso del arbol, en el orden del recorrido. Un lanzamiento sin argumentos resolubles
+    aporta None."""
     asignaciones = _asignaciones_a_listas(tree)
     alias = _Alias(tree)
+    out: list[str | None] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -604,14 +662,26 @@ def _lanza_cli_de_suscripcion(tree: ast.AST) -> bool:
         ):
             candidatos = candidatos[1:]  # loop.subprocess_exec(protocolo, argv0, ...) / os.spawn*(modo, ruta, ...)
         if not candidatos:
+            out.append(None)
             continue
         if nombre.startswith("spawn") and nombre != "spawn" and len(candidatos) > 1:
             # os.spawnl*(modo, ruta, arg0, ...): el programa es `ruta`
             candidatos = candidatos[:1]
-        primero = _primer_literal(candidatos[0], asignaciones)
-        if primero is not None and _es_argv0_de_cli(primero):
-            return True
-    return False
+        out.append(_primer_literal(candidatos[0], asignaciones))
+    return out
+
+
+def _lanza_cli_de_suscripcion(tree: ast.AST) -> bool:
+    """Criterio (c): un lanzamiento de subproceso cuyo argv[0] es claude|codex|kimi
+    (o una ruta que termina en ellos). NO mira la palabra suelta."""
+    return any(a is not None and _es_argv0_de_cli(a) for a in _argv0s_de_lanzamientos(tree))
+
+
+def _lanza_solo_git(tree: ast.AST) -> bool:
+    """Todos los lanzamientos del arbol son de `git` (argv[0] literal, resuelto), y hay al
+    menos uno. Un argv[0] que no se resuelve cuenta como NO git: la exencion exige demostrarlo."""
+    argv0s = _argv0s_de_lanzamientos(tree)
+    return bool(argv0s) and all(a is not None and a.rsplit("/", 1)[-1] == "git" for a in argv0s)
 
 
 def _menciona_ruta_de_cli(tree: ast.AST) -> bool:
@@ -659,6 +729,8 @@ def find_naked_claude_subprocess_files() -> list[str]:
             continue
         if _viola_la_politica(tree):
             if _declarado_aislado_por_cuenta(root, path, tree):
+                continue
+            if _exento_por_mencion_partida(root, path, tree):
                 continue
             violations.append(str(path))
     return violations
@@ -1083,9 +1155,95 @@ def test_la_concatenacion_no_inventa_violaciones() -> None:
     assert not _detects("import subprocess\nsubprocess.run(['git', 'commit', '-m', 'co' + 'dex'])\n")
     assert not _detects("MOTOR = 'co' + 'dex'\nprint(MOTOR)\n")                  # nombra, no lanza
     assert not _detects("import subprocess\nsubprocess.run(['git'] + ['co' + 'dex'])\n")
-    # el caso real de scripts/axioma_sync.py: parte "CLAUDE.md" en dos literales y solo
-    # lanza `git`. La MENCION partida (criterio a) no se pliega; lanzar si (test de arriba).
-    assert not _detects("import subprocess\nNOMBRE = 'C' + 'LAUDE.md'\nsubprocess.run(['git', 'rev-parse', 'HEAD'])\n")
+    # el caso real de scripts/axioma_sync.py parte "CLAUDE.md" en dos literales y solo lanza
+    # `git`: desde MINOR-28 el criterio (a) SI pliega la mencion partida, y ese archivo queda
+    # exento por la lista explicita `_EXENTOS_POR_MENCION_PARTIDA` (ver las autopruebas de abajo),
+    # no por un hueco del detector.
+
+
+def test_la_mencion_partida_de_claude_junto_a_un_subproceso_es_violacion() -> None:
+    """MINOR-28 (reauditoria 2026-10-02): el criterio (a) no plegaba, asi que un archivo que
+    lanzaba un subproceso y armaba "claude" a pedazos (`'cla' + 'ude'`, `"".join([...])`) para
+    pasarlo por una variable, un f-string o un shell quedaba limpio. Ahora la mencion partida
+    cuenta igual que la entera."""
+    # concatenacion
+    assert _detects("import subprocess\nN = 'cla' + 'ude'\nsubprocess.run(['sh', '-c', N])\n")
+    assert _detects("import subprocess\nsubprocess.run(['git', 'log'])\nNOMBRE = 'C' + 'LAUDE.md'\n")
+    assert _detects("import subprocess\nA = 'cla'\nB = A + 'ude'\nsubprocess.run(['sh', '-c', B])\n")
+    # "".join([...]) de literales, con lista, con tupla y con separador
+    assert _detects("import subprocess\nN = ''.join(['cla', 'ude'])\nsubprocess.run(['sh', '-c', N])\n")
+    assert _detects("import subprocess\nN = ''.join(('cla', 'ude'))\nsubprocess.run(['sh', '-c', N])\n")
+    assert _detects("import subprocess\nN = '-'.join(['x', 'cla' + 'ude'])\nsubprocess.run(['sh', '-c', N])\n")
+    assert _detects("import os\nos.system(''.join(['cl', 'au', 'de']) + ' --print')\n")
+
+
+def test_la_mencion_partida_no_inventa_violaciones() -> None:
+    # sin subproceso, o con un subproceso que no tiene nada que ver, no hay violacion
+    assert not _detects("N = ''.join(['cla', 'ude'])\nprint(N)\n")
+    assert not _detects("N = 'cla' + 'ude'\nprint(N)\n")
+    assert not _detects("import subprocess\nN = ''.join(['gi', 't'])\nsubprocess.run([N, 'log'])\n")
+    assert not _detects("import subprocess\nN = '-'.join(['a', 'b'])\nsubprocess.run(['git', N])\n")
+    # un join con algo que no es literal no se pliega (residuo conocido): no se inventa un nombre
+    assert not _detects("import subprocess\nN = ''.join([x, 'ude'])\nsubprocess.run(['sh', '-c', N])\n")
+    assert not _detects("import subprocess\nN = ''.join(partes)\nsubprocess.run(['git', N])\n")
+
+
+def test_axioma_sync_esta_en_la_lista_explicita_de_exenciones_con_su_justificacion() -> None:
+    rel = "scripts/axioma_sync.py"
+    assert rel in _EXENTOS_POR_MENCION_PARTIDA
+    assert "git" in _EXENTOS_POR_MENCION_PARTIDA[rel] and "CLAUDE.md" in _EXENTOS_POR_MENCION_PARTIDA[rel]
+    # el archivo real: el detector lo marca (si no, la exencion seria letra muerta) y la
+    # exencion lo demuestra (solo lanza `git`, y el nombre partido es "CLAUDE.md")
+    arbol = ast.parse((_THIS_REPO_ROOT / rel).read_text(encoding="utf-8"))
+    assert _viola_la_politica(arbol), "el detector ya no ve la mencion partida de axioma_sync.py"
+    assert _exento_por_mencion_partida(_THIS_REPO_ROOT, _THIS_REPO_ROOT / rel, arbol)
+
+
+def _plantar(tmp_path, archivos: dict[str, str]) -> set[str]:
+    raiz = tmp_path / "repo"
+    for rel, contenido in archivos.items():
+        (raiz / rel).parent.mkdir(parents=True, exist_ok=True)
+        (raiz / rel).write_text(contenido)
+    global REPO_ROOTS
+    anteriores = REPO_ROOTS
+    REPO_ROOTS = [raiz]
+    try:
+        return {Path(v).relative_to(raiz).as_posix() for v in find_naked_claude_subprocess_files()}
+    finally:
+        REPO_ROOTS = anteriores
+
+
+_SOLO_GIT_CON_CLAUDE_MD = (
+    "import subprocess\nNOMBRE = 'C' + 'LAUDE.md'\n"
+    "subprocess.run(['git', 'rev-parse', 'HEAD'])\n"
+)
+
+
+def test_la_exencion_vale_solo_para_la_ruta_declarada_y_solo_si_lanza_git(tmp_path) -> None:
+    """Negativa de la exencion: el contenido que pasa en scripts/axioma_sync.py se marca en
+    cualquier otro lado, y en esa misma ruta se marca en cuanto lanza algo que no es `git`."""
+    encontrados = _plantar(tmp_path, {
+        "scripts/axioma_sync.py": _SOLO_GIT_CON_CLAUDE_MD,                    # exento
+        "tools/axioma_sync.py": _SOLO_GIT_CON_CLAUDE_MD,                      # otra ruta, mismo nombre
+        "scripts/otro.py": _SOLO_GIT_CON_CLAUDE_MD,                           # otro nombre
+    })
+    assert encontrados == {"tools/axioma_sync.py", "scripts/otro.py"}
+    encontrados = _plantar(tmp_path / "b", {
+        "scripts/axioma_sync.py": _SOLO_GIT_CON_CLAUDE_MD + "subprocess.run(['ls'])\n",
+    })
+    assert encontrados == {"scripts/axioma_sync.py"}, "lanza algo que no es git: la exencion cae"
+    encontrados = _plantar(tmp_path / "c", {
+        "scripts/axioma_sync.py": _SOLO_GIT_CON_CLAUDE_MD + "subprocess.run(['co' + 'dex'])\n",
+    })
+    assert encontrados == {"scripts/axioma_sync.py"}, "lanza un CLI de suscripcion: la exencion cae"
+    encontrados = _plantar(tmp_path / "c2", {
+        "scripts/axioma_sync.py": _SOLO_GIT_CON_CLAUDE_MD + "subprocess.run([''.join(['gi', 't'])])\n",
+    })
+    assert encontrados == {"scripts/axioma_sync.py"}, "un argv[0] que no se resuelve no demuestra que sea git"
+    encontrados = _plantar(tmp_path / "d", {
+        "scripts/axioma_sync.py": _SOLO_GIT_CON_CLAUDE_MD + f"RUTA = '{_OPT_CLI}/codex'\n",
+    })
+    assert encontrados == {"scripts/axioma_sync.py"}, "escribe la ruta de un CLI: la exencion cae"
 
 
 def test_un_archivo_con_el_nombre_partido_no_se_salta_el_prefiltro(tmp_path) -> None:
