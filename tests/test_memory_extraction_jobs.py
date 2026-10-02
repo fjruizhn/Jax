@@ -8,9 +8,57 @@ def test_normalization_rejects_wrong_shape_and_never_silently_drops_items():
 
 def test_normalization_is_bounded_and_stable():
     from jax.memory.extraction_jobs import normalize_extraction
-    data={'facts':[{'text':'known'}], 'decisions':[], 'action_items':[]}
-    assert normalize_extraction(data, max_items=1, max_text_chars=100)==[{'kind':'FACT','content':'known'}]
+    turn={'message_id':'1','turn_number':1,'role':'user'}
+    data={'facts':[{'text':'known','source_turns':[turn]}], 'decisions':[], 'action_items':[]}
+    assert normalize_extraction(data, max_items=1, max_text_chars=100)==[{'kind':'FACT','content':'known','source_turns':[turn]}]
     with pytest.raises(ValueError): normalize_extraction(data, max_items=0, max_text_chars=100)
+
+def test_extraction_rejects_invented_or_unlocked_source_turns():
+    from jax.memory.extraction_jobs import normalize_extraction
+    allowed={('11', 2, 'user')}
+    good={'facts':[{'text':'known','source_turns':[{'message_id':'11','turn_number':2,'role':'user'}]}], 'decisions':[], 'action_items':[]}
+    assert normalize_extraction(good,max_items=2,max_text_chars=100,allowed_turns=allowed)[0]['source_turns'][0]['message_id']=='11'
+    bad={'facts':[{'text':'known','source_turns':[{'message_id':'12','turn_number':2,'role':'user'}]}], 'decisions':[], 'action_items':[]}
+    with pytest.raises(ValueError,match='outside locked input'):
+        normalize_extraction(bad,max_items=2,max_text_chars=100,allowed_turns=allowed)
+
+
+@pytest.mark.parametrize("message_id", ["0123", " 123 ", "١٢٣", "-123", "999999999999999999999"])
+def test_extraction_source_ids_have_one_canonical_locked_representation(message_id):
+    """Only the decimal database identity may cite this locked turn."""
+    from jax.memory.extraction_jobs import normalize_extraction
+    allowed={("123", 7, "user")}
+    data={"facts":[{"text":"known", "source_turns":[{"message_id":message_id,"turn_number":7,"role":"user"}]}]}
+    with pytest.raises(ValueError, match="outside locked input"):
+        normalize_extraction(data, max_items=1, max_text_chars=100, allowed_turns=allowed)
+
+
+def test_extraction_accepts_integer_and_canonical_string_database_id_only():
+    from jax.memory.extraction_jobs import normalize_extraction
+    allowed={("123", 7, "user")}
+    for raw_id in (123, "123"):
+        data={"facts":[{"text":"known", "source_turns":[{"message_id":raw_id,"turn_number":7,"role":"user"}]}]}
+        item=normalize_extraction(data, max_items=1, max_text_chars=100, allowed_turns=allowed)[0]
+        assert item["source_turns"] == [{"message_id":"123", "turn_number":7, "role":"user"}]
+
+
+def test_extraction_rejects_role_spoof_and_valid_turn_outside_chunk_allowlist():
+    from jax.memory.extraction_jobs import normalize_extraction
+    first=("123", 7, "user")
+    other_chunk=("124", 8, "assistant")
+    allowed={first}
+    for turn in (
+        {"message_id":"123", "turn_number":7, "role":"assistant"},
+        {"message_id":"124", "turn_number":8, "role":"assistant"},
+    ):
+        data={"facts":[{"text":"known", "source_turns":[turn]}]}
+        with pytest.raises(ValueError, match="outside locked input"):
+            normalize_extraction(data, max_items=1, max_text_chars=100, allowed_turns=allowed)
+
+def test_extraction_requires_structured_turn_provenance():
+    from jax.memory.extraction_jobs import normalize_extraction
+    with pytest.raises(ValueError,match='source_turns'):
+        normalize_extraction({'facts':[{'text':'known'}],'decisions':[],'action_items':[]},max_items=1,max_text_chars=100)
 
 @pytest.mark.asyncio
 async def test_reembed_cannot_attach_old_payload_vector_to_new_revision():
@@ -116,8 +164,12 @@ async def real_extraction_fixture():
     jobs=ExtractionJobs(pool)
     conv={'id':1,'uuid':'source-uuid','tenant_id':1,'user_id':1,'project_id':None}
     job=await jobs.claim(1,run_id='test-run')
-    items=[{'kind':'FACT','content':'one'},{'kind':'FACT','content':'two'}]
-    await jobs.freeze(1,job['claim_token'],source_digest(conv,[{'role':'user','content':'known'}]),items)
+    turn={'message_id':'1','turn_number':1,'role':'user'}
+    items=[{'kind':'FACT','content':'one','source_turns':[turn]},{'kind':'FACT','content':'two','source_turns':[turn]}]
+    # The locked DB snapshot retains its numeric id; provenance is canonicalized
+    # to a string before the model output is frozen.
+    db_turn={'message_id':1,'turn_number':1,'role':'user','content':'known'}
+    await jobs.freeze(1,job['claim_token'],source_digest(conv,[db_turn]),items)
     return pool,api,jobs,job,request
 
 async def real_counts(pool):

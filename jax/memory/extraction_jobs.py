@@ -17,7 +17,27 @@ def source_digest(conversation, messages):
     return _digest(canonical({'conversation':scope,'messages':messages}))
 
 
-def normalize_extraction(data, *, max_items, max_text_chars):
+def _normalize_source_turns(value, *, allowed_turns=None):
+    if not isinstance(value, list) or not value:
+        raise ValueError('extraction item requires source_turns')
+    normalized=[]
+    for turn in value:
+        if not isinstance(turn,dict) or set(turn)!={'message_id','turn_number','role'}:
+            raise ValueError('invalid extraction source turn')
+        if (not isinstance(turn['message_id'], (str,int)) or isinstance(turn['message_id'], bool)
+                or not isinstance(turn['turn_number'], int) or isinstance(turn['turn_number'], bool)
+                or not isinstance(turn['role'], str) or not turn['role']):
+            raise ValueError('invalid extraction source turn')
+        item={'message_id':str(turn['message_id']), 'turn_number':turn['turn_number'], 'role':turn['role']}
+        if allowed_turns is not None and (item['message_id'],item['turn_number'],item['role']) not in allowed_turns:
+            raise ValueError('extraction source turn is outside locked input')
+        normalized.append(item)
+    if len({(x['message_id'],x['turn_number'],x['role']) for x in normalized}) != len(normalized):
+        raise ValueError('duplicate extraction source turn')
+    return normalized
+
+
+def normalize_extraction(data, *, max_items, max_text_chars, allowed_turns=None):
     if not isinstance(data, dict) or set(data)-{'facts','decisions','action_items'}:
         raise ValueError('invalid extraction object')
     result=[]
@@ -35,7 +55,8 @@ def normalize_extraction(data, *, max_items, max_text_chars):
                 content=f"{text(item,'title')}\nChosen: {text(item,'chosen')}\nReasoning: {text(item,'reasoning',False)}"
             else: content=text(item, 'text' if category=='facts' else 'description')
             if len(content)>max_text_chars: raise ValueError('extraction content exceeds limit')
-            result.append({'kind':kind,'content':content})
+            result.append({'kind':kind,'content':content,
+                           'source_turns':_normalize_source_turns(item.get('source_turns'), allowed_turns=allowed_turns)})
             if len(result)>max_items: raise ValueError('extraction item limit exceeded')
     return result
 

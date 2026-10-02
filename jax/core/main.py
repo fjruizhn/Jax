@@ -224,6 +224,9 @@ async def handle_fact_command(db, line: str, pending_delete: dict, repl_uid) -> 
     parts = line.strip().split()
     sub = parts[1].lower() if len(parts) > 1 else "help"
     arg = parts[2] if len(parts) > 2 else ""
+    if not repl_uid:
+        return ("Memoria no disponible: esta sesión REPL no tiene identidad de usuario "
+                "configurada; no se consulta ni modifica memoria sin alcance.")
 
     # /fact list [--all] [--type X]   (atajo: ls)
     if sub in ("list", "ls"):
@@ -687,11 +690,12 @@ async def main() -> None:
                 "\n   log de la migracion.\n"
             )
 
-        conv_uuid = await db.start_conversation(
-            source="terminal", user_id=repl_uid, tenant_id=repl_tid, project_id=None)
+        if repl_uid and repl_tid:
+            conv_uuid = await db.start_conversation(
+                source="terminal", user_id=repl_uid, tenant_id=repl_tid, project_id=None)
 
         # Inyectar facts en los system_prompts de todas las facetas (scope individual).
-        facts = await db.get_facts(only_unverified=False, limit=20, user_id=repl_uid)
+        facts = await db.get_facts(only_unverified=False, limit=20, user_id=repl_uid) if repl_uid and repl_tid else []
         if facts:
             memoria_str = _render_legacy_repl_memory(
                 repl_uid, repl_tid,
@@ -781,7 +785,8 @@ async def main() -> None:
                 continue
 
             # Guardar lo que dijo Fernando en la base (fire-and-forget).
-            db.save_message(conv_uuid, "user", user_text)
+            if conv_uuid is not None:
+                db.save_message(conv_uuid, "user", user_text)
 
             decision = await router.route(user_text)
 
@@ -810,7 +815,7 @@ async def main() -> None:
                 # Busqueda semantica: contexto relevante de sesiones anteriores.
                 # Se agrega SOLO a este turno — no entra al historial permanente.
                 history_for_invocation = list(historial)
-                if db_ok:
+                if db_ok and repl_uid and repl_tid:
                     bloques_memoria = []
 
                     # Bypass de completeness (item #4): "que proyectos tenes

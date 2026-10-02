@@ -998,18 +998,24 @@ class MemoryDB:
     @db_error_handler
     async def get_conversation_messages(self, conv_id: int) -> Optional[list]:
         """Trae los mensajes de una conversacion, en orden.
-        Retorna lista de dicts {role, content} o None si fallo."""
+        Retorna identidad inmutable de turno, rol y contenido o None si fallo.
+
+        Los ids no son decorativos: la extracción B9 debe poder conservar y
+        revalidar la procedencia de cada item, incluso cuando se procesa por
+        fragmentos.
+        """
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT role, content FROM messages "
+                    "SELECT id, turn_number, role, content FROM messages "
                     "WHERE conversation_id = %s ORDER BY turn_number ASC",
                     (conv_id,),
                 )
                 rows = await cur.fetchall()
-                return [{"role": r[0], "content": r[1]} for r in rows]
+                return [{"message_id": r[0], "turn_number": r[1],
+                         "role": r[2], "content": r[3]} for r in rows]
 
     @db_error_handler
     async def get_last_session_messages(self, limit: int = 20) -> Optional[list]:
@@ -2056,15 +2062,32 @@ class MemoryDB:
 
     @db_error_handler
     async def delete_fact(self, fact_id: int) -> Optional[bool]:
-        """Borra un fact. Irreversible — el caller debe confirmar antes."""
+        """Borra un fact legado solo si no tiene una adopción B9 activa.
+
+        La fila ``facts`` no guarda tenant; se obtiene bajo bloqueo desde su
+        dueño antes de consultar el enlace B9. Así un borrado legado nunca
+        deja una memoria B9 semánticamente activa sin su origen.
+        """
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                affected = await cur.execute(
-                    "DELETE FROM facts WHERE id = %s", (fact_id,)
-                )
-                return affected > 0
+            await conn.begin()
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT f.id,u.tenant_id FROM facts f JOIN jax_users u ON u.user_id=f.user_id WHERE f.id=%s FOR UPDATE", (fact_id,))
+                    owner=await cur.fetchone()
+                    if not owner:
+                        await conn.rollback(); return False
+                    tenant_id=owner[1]
+                    await cur.execute("SELECT binding_state FROM memory_legacy_bindings WHERE tenant_id=%s AND legacy_source_type='facts' AND legacy_source_namespace='legacy' AND legacy_source_key=%s FOR UPDATE", (str(tenant_id),str(fact_id)))
+                    binding=await cur.fetchone()
+                    if binding and binding[0]=='ACTIVE':
+                        raise RuntimeError("legacy fact has active B9 binding")
+                    await cur.execute("DELETE FROM facts WHERE id=%s", (fact_id,))
+                    await conn.commit(); return cur.rowcount > 0
+            except BaseException:
+                await conn.rollback()
+                raise
 
     @db_error_handler
     async def get_fact_text(self, fact_id: int) -> Optional[str]:

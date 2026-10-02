@@ -137,14 +137,46 @@ def test_projection_mismatch_requires_reconciliation():
 
 def test_synthesis_is_unverified_and_not_recursive():
     a=api(); first=a.create(scope(),ObjectKind.FACT,"x",Visibility.USER_PRIVATE,user_id="u1")
+    a.verify(scope(),first,method="human")
     derived=a.synthesize(scope(),[first],"summary",provider="p",model="m",transformation_version="1")
     assert a._store.objects[derived].kind is ObjectKind.SYNTHESIS
     assert a._store.revisions[derived][-1].lifecycle is Lifecycle.ACTIVE
     with pytest.raises(Exception): a.synthesize(scope(),[derived],"again",provider="p",model="m",transformation_version="1")
 
+def test_service_cannot_create_human_verified_lifecycle():
+    a=api(); mid=a.create(scope(),ObjectKind.FACT,"x",Visibility.USER_PRIVATE,user_id="u1")
+    service=ScopeContext("service:test","SERVICE","u1","t1",project_authorization=None)
+    with pytest.raises(AuthorizationDenied): a.verify(service,mid,method="forged")
+
+@pytest.mark.parametrize('actor_type', ['SERVICE','MODEL','AGENT'])
+def test_nonhuman_actor_types_cannot_verify(actor_type):
+    a=api(); mid=a.create(scope(),ObjectKind.FACT,"x",Visibility.USER_PRIVATE,user_id="u1")
+    nonhuman=ScopeContext(f"{actor_type.lower()}:x",actor_type,"u1","t1")
+    with pytest.raises(AuthorizationDenied): a.verify(nonhuman,mid,method="forged")
+
+def test_authorized_user_can_verify():
+    a=api(); mid=a.create(scope(),ObjectKind.FACT,"x",Visibility.USER_PRIVATE,user_id="u1")
+    revision=a.verify(scope(),mid,method="human")
+    assert a._store.revisions[mid][-1].revision_id == revision
+    assert a._store.revisions[mid][-1].lifecycle is Lifecycle.VERIFIED
+
+def test_model_audit_status_is_orthogonal_to_lifecycle_and_authority():
+    from jax.memory.b9 import AuditStatus
+    assert AuditStatus.SOURCE_AUDITED.value != Lifecycle.VERIFIED.value
+    assert AuditStatus.MODEL_AUDITED.value not in {Lifecycle.ACTIVE.value, Lifecycle.VERIFIED.value}
+
+def test_derived_read_fails_closed_when_exact_source_revision_changes():
+    a=api(); source=a.create(scope(),ObjectKind.FACT,"x",Visibility.USER_PRIVATE,user_id="u1")
+    a.verify(scope(),source,method="human")
+    derived=a.synthesize(scope(),[source],"summary",provider="p",model="m",transformation_version="1")
+    a.revise(scope(),source,"corrected",user_id="u1")
+    assert derived not in {entry.identity.memory_id for entry in a.retrieve(scope())}
+    assert a._store.revisions[derived][-1].provenance_status == "COMPLETE"
+
 
 def test_aud001_project_synthesis_stays_project_scoped():
     a=api(); source=a.create(scope(),ObjectKind.FACT,"p1",Visibility.PROJECT_SHARED,project_id="p1")
+    a.verify(scope(),source,method="human")
     derived=a.synthesize(scope(),[source],"summary",provider="p",model="m",transformation_version="1")
     assert derived in {e.identity.memory_id for e in a.retrieve(scope())}
     assert derived not in {e.identity.memory_id for e in a.retrieve(scope(project="p2"))}
@@ -154,6 +186,9 @@ def test_aud001_project_synthesis_stays_project_scoped():
 def test_aud006_synthesis_rejects_ineligible_or_mixed_scope_sources():
     a=api(); active=a.create(scope(),ObjectKind.FACT,"p1",Visibility.PROJECT_SHARED,project_id="p1")
     other=a.create(scope(),ObjectKind.FACT,"tenant",Visibility.TENANT_SHARED)
+    with pytest.raises(ScopeDenied): a.synthesize(scope(),[active],"unverified",provider="p",model="m",transformation_version="1")
+    a.verify(scope(),active,method="human")
+    a.verify(scope(),other,method="human")
     with pytest.raises(ScopeDenied): a.synthesize(scope(),[active,other],"mixed",provider="p",model="m",transformation_version="1")
     a.expire(scope(),active,reason="ttl")
     with pytest.raises(ScopeDenied): a.synthesize(scope(),[active],"expired",provider="p",model="m",transformation_version="1")
