@@ -48,10 +48,13 @@ class ConfigBitacoraDB:
     usuario: str
     clave: str = field(repr=False)     # nunca se imprime
     base: str = ""
+    connect_timeout_s: float = 5.0     # plazo de conexion: una base que no contesta no cuelga el arranque
 
     def __post_init__(self) -> None:
         if not _RE_IDENT.fullmatch(self.base):
             raise ConfigFaroInvalida("JAX_FARO_BITACORA_DB_NAME no es un nombre de base valido")
+        if not (0 < self.connect_timeout_s <= 60):
+            raise ConfigFaroInvalida("JAX_FARO_BITACORA_DB_CONNECT_TIMEOUT_S fuera de rango (0, 60]")
 
     @classmethod
     def desde_entorno(cls, env: Mapping[str, str]) -> "ConfigBitacoraDB":
@@ -64,13 +67,19 @@ class ConfigBitacoraDB:
             puerto = int(pedir("JAX_FARO_BITACORA_DB_PORT"))
         except ValueError as exc:
             raise ConfigFaroInvalida("JAX_FARO_BITACORA_DB_PORT no es un entero") from exc
+        try:
+            plazo = float((env.get("JAX_FARO_BITACORA_DB_CONNECT_TIMEOUT_S") or "5").strip())
+        except ValueError as exc:
+            raise ConfigFaroInvalida("JAX_FARO_BITACORA_DB_CONNECT_TIMEOUT_S no es un numero") from exc
         return cls(host=pedir("JAX_FARO_BITACORA_DB_HOST"), port=puerto, usuario=pedir("JAX_FARO_BITACORA_DB_USER"),
-                   clave=pedir("JAX_FARO_BITACORA_DB_PASSWORD"), base=pedir("JAX_FARO_BITACORA_DB_NAME"))
+                   clave=pedir("JAX_FARO_BITACORA_DB_PASSWORD"), base=pedir("JAX_FARO_BITACORA_DB_NAME"),
+                   connect_timeout_s=plazo)
 
 
 async def crear_pool(cfg: ConfigBitacoraDB) -> aiomysql.Pool:
     return await aiomysql.create_pool(host=cfg.host, port=cfg.port, user=cfg.usuario, password=cfg.clave, db=cfg.base,
-                                      minsize=1, maxsize=2, autocommit=True, charset="utf8mb4")
+                                      minsize=1, maxsize=2, autocommit=True, charset="utf8mb4",
+                                      connect_timeout=cfg.connect_timeout_s)
 
 
 def _canonico(registro: Mapping) -> str:

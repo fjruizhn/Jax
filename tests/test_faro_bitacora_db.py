@@ -113,7 +113,7 @@ def basedb(servidor_db):
 
         async def migrar():
             con = await aiomysql.connect(host=servidor_db["host"], port=servidor_db["puerto"], user=servidor_db["usuario"],
-                                         password=servidor_db["clave"])
+                                         password=servidor_db["clave"], connect_timeout=10)
             try:
                 return await aplicar(con, MIGRACIONES, {"base": base, "usuario": usuario, "host_usuario": "%"})
             finally:
