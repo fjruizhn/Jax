@@ -165,3 +165,75 @@ async def test_explain_lista_usa_indice_de_membresia_por_usuario():
     extra = (tabla_m["Extra"] if isinstance(tabla_m, dict) else tabla_m[9]) or ""
     assert key == "idx_jax_project_membership_user_list"
     assert "filesort" not in extra.lower()
+
+
+# ---------------------------------------------------------------- M-2: la regla de lectura = resolve_project_read
+
+@asincrono
+async def test_membresia_revocada_no_ve_el_proyecto_ni_en_lista_ni_en_get():
+    t = await _crear_tenant("q7")
+    u = await _crear_usuario(t)
+    p = await _crear_proyecto_activo(t, name="R"); await _crear_scope(p, t)
+    await _crear_membresia(p, t, u, role="OWNER", status="REVOKED")
+    pool = await _pool()
+    try:
+        lista = await list_projects_for_user(pool, tenant_id=t, user_id=u, view=ProjectView.ACTIVOS, before_id=None, limit=50)
+        with pytest.raises(ProjectNotVisible):
+            await get_project_for_user(pool, tenant_id=t, user_id=u, project_id=p)
+    finally:
+        pool.close(); await pool.wait_closed()
+    assert lista == []
+
+
+@asincrono
+async def test_usuario_inactivo_lista_vacia_y_get_niega():
+    t = await _crear_tenant("q8")
+    u = await _crear_usuario(t, status="inactive")
+    p = await _crear_proyecto_activo(t, name="I"); await _crear_scope(p, t)
+    await _crear_membresia(p, t, u, role="OWNER")
+    pool = await _pool()
+    try:
+        lista = await list_projects_for_user(pool, tenant_id=t, user_id=u, view=ProjectView.ACTIVOS, before_id=None, limit=50)
+        with pytest.raises(ProjectNotVisible):
+            await get_project_for_user(pool, tenant_id=t, user_id=u, project_id=p)
+    finally:
+        pool.close(); await pool.wait_closed()
+    assert lista == []
+
+
+@asincrono
+async def test_admin_ve_hidden_con_get_pero_no_disabled_en_get_miembros_ni_candidatos():
+    """Espejo de `resolve_project_read` (scope_authority.py): HIDDEN solo para el
+    admin del tenant; DISABLED NUNCA, tampoco para el admin (D3)."""
+    t = await _crear_tenant("q9")
+    adm = await _crear_usuario(t, role="superadmin")
+    oculto = await _crear_proyecto_activo(t, name="H"); await _crear_scope(oculto, t, status="HIDDEN")
+    apagado = await _crear_proyecto_activo(t, name="D"); await _crear_scope(apagado, t, status="DISABLED")
+    await _crear_membresia(oculto, t, adm, role="OWNER")
+    await _crear_membresia(apagado, t, adm, role="OWNER")
+    pool = await _pool()
+    try:
+        fila = await get_project_for_user(pool, tenant_id=t, user_id=adm, project_id=oculto)
+        with pytest.raises(ProjectNotVisible):
+            await get_project_for_user(pool, tenant_id=t, user_id=adm, project_id=apagado)
+        with pytest.raises(ProjectNotVisible):
+            await list_project_members(pool, tenant_id=t, user_id=adm, project_id=apagado)
+        with pytest.raises(ProjectNotVisible):
+            await list_invite_candidates(pool, tenant_id=t, user_id=adm, project_id=apagado, query="ab", limit=5)
+    finally:
+        pool.close(); await pool.wait_closed()
+    assert fila["status"] == "HIDDEN"
+
+
+@asincrono
+async def test_candidatos_sobre_proyecto_archivado_exigen_proyecto_activo():
+    t = await _crear_tenant("q10")
+    owner = await _crear_usuario(t)
+    p = await _crear_proyecto_activo(t, name="A"); await _crear_scope(p, t, status="ARCHIVED")
+    await _crear_membresia(p, t, owner, role="OWNER")
+    pool = await _pool()
+    try:
+        with pytest.raises(ProjectRoleInsufficient):
+            await list_invite_candidates(pool, tenant_id=t, user_id=owner, project_id=p, query="ab", limit=5)
+    finally:
+        pool.close(); await pool.wait_closed()

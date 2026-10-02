@@ -20,6 +20,7 @@ class ProjectView(str, Enum):
     OCULTOS = "ocultos"
 
 
+#: DISABLED no tiene vista: no se lista para nadie (D3, igual que resolve_project_read).
 _VIEW_STATUS = {ProjectView.ACTIVOS: "ACTIVE", ProjectView.ARCHIVADOS: "ARCHIVED", ProjectView.OCULTOS: "HIDDEN"}
 _ADMIN_ROLES = tuple(sorted(TENANT_ADMIN_ROLES))
 _ADMIN_PH = ",".join(["%s"] * len(_ADMIN_ROLES))
@@ -87,7 +88,13 @@ async def _proyecto_visible(cur: Any, tenant_id: int, user_id: int, project_id: 
     if not row:
         raise ProjectNotVisible("project not visible")
     fila = _fila(row)
-    if fila["status"] in ("HIDDEN", "DISABLED") and not es_admin:
+    # Espejo, en SQL de solo lectura, de `ScopeAuthority.resolve_project_read`
+    # (scope_authority.py, D3): ACTIVE/ARCHIVED para el miembro activo, HIDDEN
+    # solo para el admin del tenant, DISABLED NUNCA (ni para el admin). No se
+    # delega en ese resolvedor: este modulo trabaja con un cursor de la pool y
+    # sin `ScopeContext`, y no debe cambiar firmas. Si la regla de allí cambia,
+    # cambia aquí (hay pruebas de las dos mitades en test_project_queries_mariadb).
+    if fila["status"] == "DISABLED" or (fila["status"] == "HIDDEN" and not es_admin):
         raise ProjectNotVisible("project not visible")
     return fila
 
