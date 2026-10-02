@@ -11,9 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import stat
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -21,47 +19,12 @@ import pytest
 from jax.faro import paquete
 from jax.faro.config import ConfigFaro, ConfigFaroInvalida, PluginFuente
 
-_ENV_GIT = {
-    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
-    "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
-}
-
-
-def _git(repo: Path, *args: str) -> str:
-    env = {**os.environ, **_ENV_GIT}
-    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
-                          text=True, env=env).stdout.strip()
-
-
-def _escribir(repo: Path, rel: str, datos: str | bytes, modo: int = 0o644) -> None:
-    ruta = repo / rel
-    ruta.parent.mkdir(parents=True, exist_ok=True)
-    ruta.write_bytes(datos if isinstance(datos, bytes) else datos.encode())
-    ruta.chmod(modo)
-
-
-def _commit(repo: Path, msg: str = "c") -> str:
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", msg)
-    return _git(repo, "rev-parse", "HEAD")
+from tests._faro_utils import _commit, _escribir, _git, repo_de_juguete
 
 
 @pytest.fixture
 def repo(tmp_path):
-    """Un `claude-skills` de juguete con `origin/main` apuntando a su primer commit."""
-    r = tmp_path / "claude-skills"
-    r.mkdir()
-    _git(r, "init", "-q", "-b", "main")
-    _escribir(r, "common/CLAUDE.md.core", "# Nucleo comun\nregla uno\n")
-    _escribir(r, "common/skills/alfa/SKILL.md", "---\nname: alfa\ndescription: la alfa\n---\ncuerpo alfa\n")
-    _escribir(r, "common/skills/alfa/scripts/correr.sh", "#!/bin/sh\necho hola\n", 0o755)
-    _escribir(r, "common/skills/beta/SKILL.md", "---\nname: beta\ndescription: la beta\n---\ncuerpo beta\n")
-    _escribir(r, "common/skills/PROCEDENCIA.md", "procedencia\n")
-    _escribir(r, "common/agents/explorador.md", "---\nname: explorador\nmodel: haiku\n---\nexplora\n")
-    _escribir(r, "common/commands/ignorado.md", "no entra al paquete\n")
-    sha = _commit(r)
-    _git(r, "update-ref", "refs/remotes/origin/main", sha)
-    return r
+    return repo_de_juguete(tmp_path)
 
 
 def _cfg(repo: Path, sha: str, destino: Path, plugins=()) -> ConfigFaro:
