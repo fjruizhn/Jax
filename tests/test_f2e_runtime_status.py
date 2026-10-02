@@ -22,7 +22,7 @@ from motor_registry.job_store import JobStore
 NOW = datetime(2026, 10, 2, tzinfo=timezone.utc)
 _PLATFORM_SOURCE_CONFIGURATION = {
     "FACET_RUNTIME_STATUS": {"state_contract": "JAXEngineState.FacetState", "status_field": "status",
-        "observed_at_field": "last_update", "allowed_statuses": ["idle", "thinking", "error", "offline"]},
+        "observed_at_field": "resolver_read_time", "allowed_statuses": ["idle", "thinking", "error", "offline"]},
     "ENGINE_STATUS": {"endpoint_sha256": "sha256:" + "e" * 64, "method": "GET", "path": "/health",
         "timeout_seconds": 5, "poll_interval_seconds": 30, "success_status_code": 200},
 }
@@ -44,19 +44,29 @@ def _scope(**changes):
     return replace(base, **changes)
 
 
+def _configure_jacobs_source(monkeypatch):
+    monkeypatch.setenv("JAX_DB_HOST", "mariadb.test")
+    monkeypatch.setenv("JAX_DB_PORT", "3308")
+    monkeypatch.setenv("JAX_DB_NAME", "jax_memory_test")
+
+
 def _entry():
     scope = _scope()
     rule = ScopeRule(scope.environment, scope.tenant_id, scope.project_id, scope.subject_id,
                      scope.actor_id, scope.audience, scope.component_id)
+    from policy.governance.runtime_status import runtime_status_source_configuration_digest
+    source_digest = runtime_status_source_configuration_digest("JOB_STATUS", {
+        "store_contract": "motor-job-store-v1", "source_id": "/test/jobs.jsonl",
+        "event_format": "motor-job-event-v1", "durability": "append-flush-fsync-v1"})
     binding = PredicateAuthorityBinding(
-        "JOB_STATUS", "f2-e.1", "motor:job-store", "authority:motor",
+        "JOB_STATUS", "f2-e.runtime-status.2", "motor:job-store", "authority:motor",
         "production", rule, rule, 60, ConflictPolicy.SINGLE_SOURCE_REQUIRED,
-        "policy.governance.runtime_status:MotorJobStatusResolver", "f2-e.1", None,
-        "f2-e.1", source_scope_class=SourceScopeClass.EXACT_RESPONSE_SCOPE,
+        "policy.governance.runtime_status:MotorJobStatusResolver", "f2-e.runtime-status-resolver.2", source_digest,
+        "f2-e.runtime-status.2", source_scope_class=SourceScopeClass.EXACT_RESPONSE_SCOPE,
     )
     adapter = TrustedAdapterRegistration(
         AdapterKind.MOTOR_JOB_STATUS, binding.resolver_implementation_identity,
-        binding.resolver_version, binding.designated_source_identity,
+        binding.resolver_version, binding.designated_source_identity, source_digest,
     )
     return RegistryEntry(binding, adapter, ("job_id", "status"))
 
@@ -78,7 +88,8 @@ def test_job_status_rejects_observation_for_different_canonical_arguments():
         ResolutionStatus.RESOLVED, NOW, "motor-job:job-1",
         {"job_id": "job-1", "status": "failed"},
     )
-    evidence = _runtime_status_evidence_from_server(AdapterKind.MOTOR_JOB_STATUS, observation, _scope())
+    evidence = _runtime_status_evidence_from_server(AdapterKind.MOTOR_JOB_STATUS, observation, _scope(),
+        entry.binding.source_configuration_digest)
     receipt = registry.resolve("JOB_STATUS", {"job_id": "job-1", "status": "completed"},
         _scope(), validation_time=NOW, runtime_status_evidence=evidence)
     assert receipt.status is ResolutionStatus.SOURCE_MISMATCH
@@ -92,7 +103,8 @@ def test_job_status_rejects_project_scope_without_authoritative_mapping():
         ResolutionStatus.RESOLVED, NOW, "motor-job:job-1",
         {"job_id": "job-1", "status": "completed"},
     )
-    evidence = _runtime_status_evidence_from_server(AdapterKind.MOTOR_JOB_STATUS, observation, _scope())
+    evidence = _runtime_status_evidence_from_server(AdapterKind.MOTOR_JOB_STATUS, observation, _scope(),
+        entry.binding.source_configuration_digest)
     receipt = registry.resolve("JOB_STATUS", {"job_id": "job-1", "status": "completed"},
         _scope(project_id="project-a"), validation_time=NOW, runtime_status_evidence=evidence)
     assert receipt.status is ResolutionStatus.WRONG_SCOPE
@@ -123,6 +135,7 @@ def test_unknown_job_and_wrong_user_never_resolve(tmp_path, monkeypatch):
 def test_equal_job_and_pipeline_ids_remain_distinct_sources(tmp_path, monkeypatch):
     from motor_registry import routes
     from jacobs import models, store as jacobs_store
+    _configure_jacobs_source(monkeypatch)
     store = JobStore(str(tmp_path / "jobs.jsonl"))
     monkeypatch.setattr(routes, "_STORE", store)
     identifier = "same-looking-id"
@@ -159,16 +172,16 @@ def test_motor_resolution_waits_for_concurrent_transition_and_reads_one_snapshot
     monkeypatch.setattr(routes, "_STORE", store)
     job_id = store.create(caller="jax", capability="x", motor="m", trace_id="t",
         prompt="p", recursion_depth=0, tenant_id="tenant-a", user_id="user-a")
-    original_get = store.get
+    original_snapshot = store.authoritative_snapshot
     reader_started = threading.Event()
     result = {}
     import motor_registry.job_store as job_store_module
 
-    def signalled_get(identifier):
+    def signalled_snapshot(identifier):
         reader_started.set()
-        return original_get(identifier)
+        return original_snapshot(identifier)
 
-    monkeypatch.setattr(store, "get", signalled_get)
+    monkeypatch.setattr(store, "authoritative_snapshot", signalled_snapshot)
     resolver = MotorJobStatusResolver()
 
     with store._lock:
@@ -183,7 +196,7 @@ def test_motor_resolution_waits_for_concurrent_transition_and_reads_one_snapshot
     assert not reader.is_alive()
     evidence = result["evidence"]
     assert evidence.observation.result == {"job_id": job_id, "status": "tools_requested"}
-    assert evidence.observation.observed_at == NOW
+    assert evidence.observation.observed_at >= NOW
 
 
 def test_repeating_same_motor_status_does_not_refresh_transition_time(tmp_path, monkeypatch):
@@ -281,6 +294,7 @@ def test_governed_domain_distinguishes_pipeline_facet_and_engine_status():
 
 def test_jacobs_pipeline_resolver_uses_canonical_store_and_exact_owner(monkeypatch):
     from jacobs import models, store
+    _configure_jacobs_source(monkeypatch)
 
     pipeline = models.Pipeline(
         pipeline_id="same-looking-id", name="test", invoked_by="plataforma", mode="supervised",
@@ -297,7 +311,7 @@ def test_jacobs_pipeline_resolver_uses_canonical_store_and_exact_owner(monkeypat
     evidence = asyncio.run(resolver.evidence(
         {"pipeline_id": "same-looking-id", "status": "running"}, _scope()))
     assert evidence.adapter_kind is AdapterKind.JACOBS_PIPELINE_STATUS
-    assert evidence.observation.observed_at == NOW
+    assert evidence.observation.observed_at >= NOW
     assert evidence.observation.result == {"pipeline_id": "same-looking-id", "status": "running"}
 
     other = replace(_scope(), tenant_id="tenant-b", request_id="request-b")
@@ -308,6 +322,7 @@ def test_jacobs_pipeline_resolver_uses_canonical_store_and_exact_owner(monkeypat
 
 def test_pipeline_status_uses_canonical_jacobs_state_not_platform_projection(monkeypatch):
     from jacobs import models, store as jacobs_store
+    _configure_jacobs_source(monkeypatch)
     # Platform intentionally maps this canonical Jacobs state to a distinct UI
     # label. The governed source must preserve the authoritative Jacobs enum.
     platform_projection = "waiting_gate"

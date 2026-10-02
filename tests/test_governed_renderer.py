@@ -111,6 +111,9 @@ def test_new_runtime_status_templates_cannot_bypass_f2c_as_narrative(prose):
     {"name": "hyde", "status": "thinking", "message": "working"},
     '{"name":"las_manos","status":"alive"}',
     '{"result":{"pipeline_id":"pipeline-1","status":"failed"}}',
+    '"{\\"name\\":\\"las_manos\\",\\"status\\":\\"alive\\"}"',
+    '{"result":"{\\"pipeline_id\\":\\"pipeline-1\\",\\"status\\":\\"failed\\"}"}',
+    '[{"value":"{\\"name\\":\\"hyde\\",\\"status\\":\\"offline\\"}"}]',
 ))
 def test_accredited_runtime_status_tool_data_requires_claim_receipt_path(payload):
     s = scope()
@@ -122,6 +125,61 @@ def test_accredited_runtime_status_tool_data_requires_claim_receipt_path(payload
         RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), None, lambda: NOW))
     assert result.text == GovernedRenderer.unavailable_text
     assert result.contract_state is ContractState.UNAVAILABLE
+
+
+@pytest.mark.parametrize("payload", (
+    '{"pipeline_id":"pipeline-1","status":"running"}',
+    '"{\\"name\\":\\"las_manos\\",\\"status\\":\\"alive\\"}"',
+))
+def test_entire_structured_runtime_status_narrative_requires_claim_receipt_path(payload):
+    s = scope()
+    env = WebChatGovernanceAdapter(s, receipt()).seal_non_governed_candidate(
+        response_id="structured-runtime-status-narrative", candidate_text=payload)
+    result = GovernedRenderer().render_text(env,
+        RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), None, lambda: NOW))
+    assert result.text == GovernedRenderer.unavailable_text
+    assert result.contract_state is ContractState.UNAVAILABLE
+
+
+def test_structured_status_detection_is_bounded_ambiguous_and_preserves_unrelated_json():
+    domain = GovernedDomainSpecification()
+    assert domain.runtime_status_tool_data_predicate(
+        {"job_id": "job-1", "pipeline_id": "pipeline-1", "status": "running"}
+    ) == "AMBIGUOUS_STRUCTURED_TOOL_DATA"
+    assert domain.runtime_status_tool_data_predicate(
+        {"theme": "dark", "status": "selected"}
+    ) is None
+    assert domain.runtime_status_tool_data_predicate("[" * 80 + "]" * 80) == "OVERSIZED_STRUCTURED_TOOL_DATA"
+    assert domain.runtime_status_tool_data_predicate("{" + '"x":"' + "x" * 1_000_001 + '"}') == "OVERSIZED_STRUCTURED_TOOL_DATA"
+
+
+@pytest.mark.parametrize("payload", (
+    '{"result": {"pipeline_id":"pipeline-1","status":"running"}, "theme":"dark"}',
+    '{"pipeline_id":',
+    "[" * 80 + "]" * 80,
+))
+def test_structural_runtime_status_failures_cannot_escape_through_tool_data(payload):
+    s = scope()
+    candidate = GovernedResponseCandidate("f2-c.1", "runtime-tool-data-bounded", s.request_id,
+        s.trace_id, s, "web-chat", (), (ContentBlock(ContentBlockKind.TOOL_DATA, payload),), (), ())
+    env = response._seal_candidate_for_server(candidate, contract_state=ContractState.VALID,
+        governance_receipt=receipt())
+    result = GovernedRenderer().render_text(env,
+        RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), None, lambda: NOW))
+    assert result.text == GovernedRenderer.unavailable_text
+
+
+def test_unrelated_structured_status_field_remains_tool_data():
+    s = scope()
+    candidate = GovernedResponseCandidate("f2-c.1", "unrelated-tool-data", s.request_id,
+        s.trace_id, s, "web-chat", (), (ContentBlock(ContentBlockKind.TOOL_DATA,
+            {"theme": "dark", "status": "selected"}),), (), ())
+    env = response._seal_candidate_for_server(candidate, contract_state=ContractState.VALID,
+        governance_receipt=receipt())
+    result = GovernedRenderer().render_text(env,
+        RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), None, lambda: NOW))
+    assert result.text != GovernedRenderer.unavailable_text
+    assert "selected" in result.text
 
 def test_untrusted_markup_controls_and_tool_data_do_not_become_trusted_presentation():
     s = scope(); candidate = GovernedResponseCandidate("f2-c.1", "r", s.request_id, s.trace_id, s, "web-chat", (), (

@@ -16,9 +16,18 @@ from typing import Mapping
 
 from .response import GovernanceContractError, _text
 
-GOVERNED_DOMAIN_SPEC_VERSION = "f2-c.domain.4"
-GOVERNED_RENDERER_API_VERSION = "f2-c.renderer.2"
+GOVERNED_DOMAIN_SPEC_VERSION = "f2-c.domain.5"
+GOVERNED_RENDERER_API_VERSION = "f2-c.renderer.3"
 GOVERNED_ENVELOPE_SCHEMA_VERSIONS = frozenset({"f2-c.1"})
+
+# Structured payload inspection is deliberately small and bounded. It exists
+# only to prevent the four registered runtime-status propositions from being
+# encoded into otherwise ungoverned content; it is not a general JSON parser
+# or natural-language classifier.
+_STRUCTURED_STATUS_MAX_STRING_CHARS = 65_536
+_STRUCTURED_STATUS_MAX_JSON_DECODE_LAYERS = 2
+_STRUCTURED_STATUS_MAX_NESTING_DEPTH = 32
+_STRUCTURED_STATUS_MAX_NODES = 1_024
 
 _CANONICAL_STATUS_ALIASES = MappingProxyType({
     "healthy": ("healthy", "alive", "up", "available", "operational", "sano", "saludable", "activo", "disponible", "funcionando"),
@@ -157,72 +166,128 @@ class GovernedDomainSpecification:
         return None
 
     def runtime_status_tool_data_predicate(self, value: object) -> str | None:
-        """Recognize closed runtime-status claim shapes inside tool payloads.
+        """Recognize governed runtime-status shapes inside TOOL_DATA.
 
-        TOOL_DATA remains available for ordinary data. Exact argument-key
-        shapes for accredited status predicates cannot be used to present
-        those same propositions outside the claim/receipt path.
+        The same bounded structural grammar is also used for an entire
+        NARRATIVE_TEXT payload. Keeping one implementation prevents JSON
+        encoding from creating a second status-egress path.
         """
-        if isinstance(value, str):
-            candidate = value.lstrip()
-            if not candidate.startswith(("{", "[")):
+        return self.structured_runtime_status_predicate(value)
+
+    def structured_runtime_status_predicate(self, value: object) -> str | None:
+        """Return a governed predicate or a fail-closed structural marker.
+
+        Only JSON objects/lists and up to two JSON-string decoding layers are
+        inspected. Ordinary prose and unrelated JSON keep their existing
+        treatment. Ambiguous, malformed, or over-limit structured content is
+        withheld instead of being guessed.
+        """
+        hits: set[str] = set()
+        node_count = 0
+
+        def unique_object(pairs):
+            result = {}
+            for key, item in pairs:
+                if key in result:
+                    raise ValueError("duplicate JSON object key")
+                result[key] = item
+            return result
+
+        def parse_json_string(raw: str) -> object | None:
+            candidate = raw.lstrip()
+            if not candidate.startswith(("{", "[", '"')):
                 return None
-            if len(value) > 1_000_000:
-                return "OVERSIZED_STRUCTURED_TOOL_DATA"
-
-            def unique_object(pairs):
-                result = {}
-                for key, item in pairs:
-                    if key in result:
-                        raise ValueError("duplicate JSON object key")
-                    result[key] = item
-                return result
-
+            if (len(raw) > _STRUCTURED_STATUS_MAX_STRING_CHARS
+                    or len(raw.encode("utf-8", errors="surrogatepass")) > _STRUCTURED_STATUS_MAX_STRING_CHARS):
+                raise OverflowError("structured status string exceeds limit")
+            # Bound nesting before handing data to the JSON decoder. Brackets
+            # occurring in a JSON string are data, not JSON structure.
+            nesting = 0
+            in_string = False
+            escaped = False
+            for character in raw:
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif character == "\\":
+                        escaped = True
+                    elif character == '"':
+                        in_string = False
+                    continue
+                if character == '"':
+                    in_string = True
+                elif character in "{[":
+                    nesting += 1
+                    if nesting > _STRUCTURED_STATUS_MAX_NESTING_DEPTH:
+                        raise OverflowError("structured status nesting exceeds limit")
+                elif character in "}]":
+                    nesting -= 1
             try:
-                decoded = json.loads(value, object_pairs_hook=unique_object)
-            except (ValueError, RecursionError):
-                # An ambiguous or malformed structured payload cannot be
-                # safely distinguished from an encoded status assertion.
-                return "AMBIGUOUS_STRUCTURED_TOOL_DATA"
-            if isinstance(decoded, (Mapping, list, tuple)):
-                return self.runtime_status_tool_data_predicate(decoded)
-            return None
-        if isinstance(value, (list, tuple)):
-            return next((hit for item in value
-                         if (hit := self.runtime_status_tool_data_predicate(item)) is not None), None)
-        if not isinstance(value, Mapping):
-            return None
+                return json.loads(raw, object_pairs_hook=unique_object)
+            except (ValueError, RecursionError) as exc:
+                raise ValueError("malformed structured status JSON") from exc
 
-        # Status-bearing tool objects can be nested under ordinary transport
-        # envelopes (for example result/data/status/metadata). Inspect every
-        # mapping node before descending; a non-matching wrapper must not stop
-        # the governed-status check.
-        if all(isinstance(k, str) for k in value):
-            keys = set(value)
-            status = value.get("status")
-            if isinstance(status, str):
-                status = _canonicalize_governed_detection_text(status).strip()
-                runtime_values = set(self.status_aliases.get("runtime", ()))
-                if {"job_id", "status"}.issubset(keys) and status in runtime_values:
-                    return "JOB_STATUS"
-                if {"pipeline_id", "status"}.issubset(keys) and status in runtime_values:
-                    return "PIPELINE_STATUS"
-                if {"name", "status"}.issubset(keys):
-                    name = value.get("name")
-                    if isinstance(name, str):
-                        name = _canonicalize_governed_detection_text(name).strip()
-                        if status in runtime_values:
-                            return "FACET_RUNTIME_STATUS"
-                        health_values = (set(self.status_aliases.get("healthy", ()))
-                                         | set(self.status_aliases.get("down", ()))
-                                         | {"alive"})
-                        health_names = {alias.casefold() for alias in
-                                        self.entity_aliases.get("las_manos_health_source", ())}
-                        if name in health_names and status in health_values:
-                            return "ENGINE_STATUS"
+        def object_hits(node: Mapping[object, object]) -> set[str]:
+            if not all(isinstance(key, str) for key in node):
+                return set()
+            keys = set(node)
+            status = node.get("status")
+            if not isinstance(status, str):
+                return set()
+            status = _canonicalize_governed_detection_text(status).strip()
+            runtime_values = set(self.status_aliases.get("runtime", ()))
+            found: set[str] = set()
+            if {"job_id", "status"}.issubset(keys) and status in runtime_values:
+                found.add("JOB_STATUS")
+            if {"pipeline_id", "status"}.issubset(keys) and status in runtime_values:
+                found.add("PIPELINE_STATUS")
+            if {"name", "status"}.issubset(keys):
+                name = node.get("name")
+                if isinstance(name, str):
+                    name = _canonicalize_governed_detection_text(name).strip()
+                    if status in runtime_values:
+                        found.add("FACET_RUNTIME_STATUS")
+                    health_values = (set(self.status_aliases.get("healthy", ()))
+                                     | set(self.status_aliases.get("down", ()))
+                                     | {"alive"})
+                    health_names = {alias.casefold() for alias in
+                                    self.entity_aliases.get("las_manos_health_source", ())}
+                    if name in health_names and status in health_values:
+                        found.add("ENGINE_STATUS")
+            return found
 
-        return next((hit for item in value.values()
-                     if (hit := self.runtime_status_tool_data_predicate(item)) is not None), None)
+        def visit(node: object, depth: int, decode_layers: int) -> None:
+            nonlocal node_count
+            if depth > _STRUCTURED_STATUS_MAX_NESTING_DEPTH:
+                raise OverflowError("structured status nesting exceeds limit")
+            node_count += 1
+            if node_count > _STRUCTURED_STATUS_MAX_NODES:
+                raise OverflowError("structured status node count exceeds limit")
+            if isinstance(node, str):
+                if decode_layers >= _STRUCTURED_STATUS_MAX_JSON_DECODE_LAYERS:
+                    return
+                decoded = parse_json_string(node)
+                if decoded is not None:
+                    visit(decoded, depth + 1, decode_layers + 1)
+                return
+            if isinstance(node, Mapping):
+                hits.update(object_hits(node))
+                for item in node.values():
+                    visit(item, depth + 1, decode_layers)
+                return
+            if isinstance(node, (list, tuple)):
+                for item in node:
+                    visit(item, depth + 1, decode_layers)
+
+        try:
+            visit(value, 0, 0)
+        except OverflowError:
+            return "OVERSIZED_STRUCTURED_TOOL_DATA"
+        except ValueError:
+            return "AMBIGUOUS_STRUCTURED_TOOL_DATA"
+        if len(hits) != 1:
+            return "AMBIGUOUS_STRUCTURED_TOOL_DATA" if hits else None
+        return next(iter(hits))
 
 
 @lru_cache(maxsize=1)

@@ -161,6 +161,11 @@ class GovernedRenderer:
         shown: list[str] = []
         for block in envelope.content_blocks:
             if block.kind is ContentBlockKind.NARRATIVE_TEXT:
+                # A whole JSON payload can encode an accredited runtime
+                # proposition without using the deterministic prose grammar.
+                # It must use the claim/receipt path just as TOOL_DATA does.
+                if context.domain_registry.specification.structured_runtime_status_predicate(block.payload) is not None:
+                    return self._safe(envelope, self.unavailable_text)
                 hit = context.domain_registry.hit(block.payload)
                 if hit is not None:
                     return self._safe(envelope, self.unavailable_text)

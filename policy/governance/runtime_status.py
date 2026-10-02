@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import sys
 from typing import Mapping
 
 from .response import GovernanceContractError, ResponseScope, _freeze, _plain, _text
@@ -27,8 +28,9 @@ _PLATFORM_KINDS = {
     "FACET_RUNTIME_STATUS": (AdapterKind.FACET_RUNTIME_STATUS, "platform:facet-state"),
     "ENGINE_STATUS": (AdapterKind.ENGINE_STATUS, "platform:las-manos-health"),
 }
-RUNTIME_STATUS_API_VERSION = "f2-e.runtime-status.1"
-_BINDING_VERSION = "f2-e.runtime-status.1"
+RUNTIME_STATUS_API_VERSION = "f2-e.runtime-status.2"
+_BINDING_VERSION = "f2-e.runtime-status.2"
+_RESOLVER_VERSION = "f2-e.runtime-status-resolver.2"
 _RUNTIME_SPECS = {
     "JOB_STATUS": (AdapterKind.MOTOR_JOB_STATUS, "motor:job-store", "authority:motor-registry", 60, SourceScopeClass.EXACT_RESPONSE_SCOPE, "MotorJobStatusResolver"),
     "PIPELINE_STATUS": (AdapterKind.JACOBS_PIPELINE_STATUS, "jacobs:canonical-store", "authority:jacobs", 60, SourceScopeClass.EXACT_RESPONSE_SCOPE, "JacobsPipelineStatusResolver"),
@@ -52,16 +54,52 @@ def _source_configuration_digest(predicate: str, source: str, resolver: str,
     }, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     return "sha256:" + hashlib.sha256(body).hexdigest()
 
+
+def _jacobs_source_configuration(*, require_config: bool = False) -> dict[str, object]:
+    """Read only non-secret identity from the fixed Jacobs DB composition."""
+    from jacobs.store import _db_cfg
+    try:
+        config = _db_cfg()
+    except Exception:
+        if require_config:
+            raise
+        # Keep unrelated predicates registrable in tests/minimal composition;
+        # this sentinel can never match a usable DB source observation.
+        config = {"host": "unconfigured", "port": 1, "db": "unconfigured"}
+    return {"database_engine": "mariadb", "host": config["host"],
+        "port": config["port"], "database": config["db"],
+        "store_contract": "jacobs-pipeline-store-v1", "table": "jacobs_pipelines"}
+
+
+def _job_store_source_configuration() -> dict[str, str]:
+    """Use the loaded server singleton, or its fixed source identity without importing routes."""
+    routes = sys.modules.get("motor_registry.routes")
+    store = getattr(routes, "_STORE", None) if routes is not None else None
+    source_config = getattr(store, "source_configuration", None)
+    if callable(source_config):
+        return source_config()
+    # The platform bridge imports this module without loading LAS MANOS routes.
+    # Reconstruct only the constant server composition path; never import a
+    # caller-selected store or the route module (which imports Motor workers).
+    from pathlib import Path
+    repository = Path(__file__).resolve().parents[2]
+    return {
+        "store_contract": "motor-job-store-v1",
+        "source_id": str((repository / "las_manos" / "logs" / "motor_jobs.jsonl").resolve()),
+        "event_format": "motor-job-event-v1",
+        "durability": "append-flush-fsync-v1",
+    }
+
 def runtime_status_source_configuration_digest(predicate: str, source_configuration: Mapping[str, object]) -> str:
-    """Digest the server-owned Platform source configuration for its binding."""
-    if predicate not in {"FACET_RUNTIME_STATUS", "ENGINE_STATUS"} or not isinstance(source_configuration, Mapping):
-        raise GovernanceContractError("Platform runtime source configuration invalid")
+    """Digest a closed, server-owned non-secret runtime source identity."""
+    if predicate not in _RUNTIME_SPECS or not isinstance(source_configuration, Mapping):
+        raise GovernanceContractError("runtime source configuration invalid")
     if predicate == "FACET_RUNTIME_STATUS":
         expected = {"state_contract": "JAXEngineState.FacetState", "status_field": "status",
-            "observed_at_field": "last_update", "allowed_statuses": ["idle", "thinking", "error", "offline"]}
+            "observed_at_field": "resolver_read_time", "allowed_statuses": ["idle", "thinking", "error", "offline"]}
         if _plain(source_configuration) != expected:
             raise GovernanceContractError("facet runtime source configuration mismatch")
-    else:
+    elif predicate == "ENGINE_STATUS":
         config = _plain(source_configuration)
         if set(config) != {"endpoint_sha256", "method", "path", "timeout_seconds", "poll_interval_seconds", "success_status_code"}:
             raise GovernanceContractError("engine health source configuration shape mismatch")
@@ -73,6 +111,25 @@ def runtime_status_source_configuration_digest(predicate: str, source_configurat
                 or config["timeout_seconds"] != 5 or config["poll_interval_seconds"] != 30
                 or config["success_status_code"] != 200):
             raise GovernanceContractError("engine health source configuration mismatch")
+    elif predicate == "JOB_STATUS":
+        config = _plain(source_configuration)
+        if (set(config) != {"store_contract", "source_id", "event_format", "durability"}
+                or config["store_contract"] != "motor-job-store-v1"
+                or not isinstance(config["source_id"], str) or not config["source_id"]
+                or config["event_format"] != "motor-job-event-v1"
+                or config["durability"] != "append-flush-fsync-v1"):
+            raise GovernanceContractError("Motor JobStore source configuration mismatch")
+    else:
+        config = _plain(source_configuration)
+        if (set(config) != {"database_engine", "host", "port", "database", "store_contract", "table"}
+                or config["database_engine"] != "mariadb"
+                or not isinstance(config["host"], str) or not config["host"]
+                or not isinstance(config["port"], int) or isinstance(config["port"], bool)
+                or not 1 <= config["port"] <= 65535
+                or not isinstance(config["database"], str) or not config["database"]
+                or config["store_contract"] != "jacobs-pipeline-store-v1"
+                or config["table"] != "jacobs_pipelines"):
+            raise GovernanceContractError("Jacobs persistence source configuration mismatch")
     _, source, _, sla, source_scope, resolver_name = _RUNTIME_SPECS[predicate]
     return _source_configuration_digest(predicate, source, resolver_name, source_scope, sla, source_configuration)
 
@@ -83,20 +140,21 @@ def build_runtime_status_registry(scope: ResponseScope, *, authenticator,
         raise GovernanceContractError("runtime registry requires ResponseScope")
     if not isinstance(platform_source_configuration, Mapping) or set(platform_source_configuration) != {"FACET_RUNTIME_STATUS", "ENGINE_STATUS"}:
         raise GovernanceContractError("Platform runtime source configuration required")
+    job_config = _job_store_source_configuration()
+    jacobs_config = _jacobs_source_configuration()
     rule = ScopeRule(scope.environment, scope.tenant_id, scope.project_id, scope.subject_id,
         scope.actor_id, scope.audience, scope.component_id)
     entries = []
     for predicate, (kind, source, owner, sla, source_scope, resolver_name) in _RUNTIME_SPECS.items():
         identity = f"policy.governance.runtime_status:{resolver_name}"
-        source_config = platform_source_configuration[predicate] if predicate in _PLATFORM_KINDS else {}
-        config_digest = (runtime_status_source_configuration_digest(predicate, source_config)
-            if predicate in _PLATFORM_KINDS else
-            _source_configuration_digest(predicate, source, resolver_name, source_scope, sla, source_config))
+        source_config = (platform_source_configuration[predicate] if predicate in _PLATFORM_KINDS
+            else job_config if predicate == "JOB_STATUS" else jacobs_config)
+        config_digest = runtime_status_source_configuration_digest(predicate, source_config)
         binding = PredicateAuthorityBinding(predicate, _BINDING_VERSION, source, owner,
             scope.environment, rule, rule, sla, ConflictPolicy.SINGLE_SOURCE_REQUIRED,
-            identity, _BINDING_VERSION, config_digest, _BINDING_VERSION,
+            identity, _RESOLVER_VERSION, config_digest, _BINDING_VERSION,
             source_scope_class=source_scope)
-        adapter = TrustedAdapterRegistration(kind, identity, _BINDING_VERSION, source,
+        adapter = TrustedAdapterRegistration(kind, identity, _RESOLVER_VERSION, source,
             config_digest)
         keys = ("job_id", "status") if predicate == "JOB_STATUS" else (("pipeline_id", "status") if predicate == "PIPELINE_STATUS" else ("name", "status"))
         entries.append(RegistryEntry(binding, adapter, keys, f"{predicate}@{_BINDING_VERSION}:es"))
@@ -160,10 +218,11 @@ class MotorJobStatusResolver:
         if not isinstance(job_id, str) or not isinstance(status, str):
             raise GovernanceContractError("JOB_STATUS arguments invalid")
         try:
-            view = self._store.get(job_id)
+            snapshot = self._store.authoritative_snapshot(job_id)
         except Exception:  # fail-soft: una lectura fallida queda UNAVAILABLE, nunca se acredita.
-            view = None
-        observed_at = _job_transition_time(view)
+            snapshot = None
+        view = snapshot.view if snapshot is not None else None
+        observed_at = snapshot.observed_at if snapshot is not None else None
         if view is None or observed_at is None or view.tenant_id is None or view.user_id is None:
             obs = ResolutionObservation(ResolutionStatus.UNAVAILABLE, datetime.now(timezone.utc), "motor-job:unavailable", {})
         elif (view.tenant_id, view.user_id) != (scope.tenant_id, scope.subject_id):
@@ -171,7 +230,8 @@ class MotorJobStatusResolver:
         else:
             obs = ResolutionObservation(ResolutionStatus.RESOLVED, observed_at, f"motor-job:{job_id}",
                 {"job_id": job_id, "status": view.status.value})
-        return _runtime_status_evidence_from_server(AdapterKind.MOTOR_JOB_STATUS, obs, scope)
+        return _runtime_status_evidence_from_server(AdapterKind.MOTOR_JOB_STATUS, obs, scope,
+            runtime_status_source_configuration_digest("JOB_STATUS", self._store.source_configuration()))
 
 class JacobsPipelineStatusResolver:
     """Canonical Jacobs store only; projections and caller stores are excluded."""
@@ -188,7 +248,7 @@ class JacobsPipelineStatusResolver:
             pipeline = await jacobs_store.pipeline_get(pipeline_id)
         except Exception:  # fail-soft: Jacobs inaccesible queda UNAVAILABLE, nunca se acredita.
             pipeline = None
-        observed_at = _timestamp(getattr(pipeline, "updated_at", None))
+        observed_at = datetime.now(timezone.utc) if pipeline is not None else None
         if pipeline is None or observed_at is None or pipeline.tenant_id is None or pipeline.user_id is None:
             obs = ResolutionObservation(ResolutionStatus.UNAVAILABLE, datetime.now(timezone.utc), "jacobs-pipeline:unavailable", {})
         elif (pipeline.tenant_id, pipeline.user_id) != (scope.tenant_id, scope.subject_id):
@@ -200,7 +260,14 @@ class JacobsPipelineStatusResolver:
             else:
                 obs = ResolutionObservation(ResolutionStatus.RESOLVED, observed_at,
                     f"jacobs-pipeline:{pipeline_id}", {"pipeline_id": pipeline_id, "status": status_value})
-        return _runtime_status_evidence_from_server(AdapterKind.JACOBS_PIPELINE_STATUS, obs, scope)
+        try:
+            source_config = _jacobs_source_configuration(require_config=True)
+        except Exception:  # fail-soft: missing Jacobs DB config must leave PIPELINE_STATUS unavailable.
+            source_config = _jacobs_source_configuration()
+            obs = ResolutionObservation(ResolutionStatus.UNAVAILABLE, datetime.now(timezone.utc),
+                "jacobs-pipeline:source-configuration-unavailable", {})
+        return _runtime_status_evidence_from_server(AdapterKind.JACOBS_PIPELINE_STATUS, obs, scope,
+            runtime_status_source_configuration_digest("PIPELINE_STATUS", source_config))
 
 def _timestamp(value):
     if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:

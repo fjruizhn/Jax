@@ -321,7 +321,7 @@ class ResolverRegistry:
             evidence=runtime_status_evidence
             if not isinstance(evidence,RuntimeStatusEvidence) or evidence.adapter_kind is not e.adapter.adapter_kind:return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,"server:missing-runtime-status-evidence",{})
             if evidence.source_identity!=b.designated_source_identity:return ResolutionStatus.SOURCE_MISMATCH,ResolutionObservation(ResolutionStatus.SOURCE_MISMATCH,now,"server:runtime-status-source",{})
-            if evidence.adapter_kind in {AdapterKind.FACET_RUNTIME_STATUS,AdapterKind.ENGINE_STATUS} and evidence.source_configuration_digest!=b.source_configuration_digest:return ResolutionStatus.CONFIGURATION_MISMATCH,ResolutionObservation(ResolutionStatus.CONFIGURATION_MISMATCH,now,"server:runtime-status-configuration",{})
+            if evidence.source_configuration_digest!=b.source_configuration_digest:return ResolutionStatus.CONFIGURATION_MISMATCH,ResolutionObservation(ResolutionStatus.CONFIGURATION_MISMATCH,now,"server:runtime-status-configuration",{})
             if evidence.observation_scope.scope_digest!=scope.scope_digest:return ResolutionStatus.WRONG_SCOPE,ResolutionObservation(ResolutionStatus.WRONG_SCOPE,now,"server:runtime-status-scope",{})
             o=evidence.observation
             if o.status is ResolutionStatus.RESOLVED and _plain(o.result)!=_plain(args):return ResolutionStatus.SOURCE_MISMATCH,ResolutionObservation(ResolutionStatus.SOURCE_MISMATCH,o.observed_at,o.provenance_ref,o.result,o.upstream_not_after)
