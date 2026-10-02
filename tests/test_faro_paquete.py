@@ -108,8 +108,8 @@ def test_lo_que_se_construye_se_verifica_antes_de_publicar(cfg, monkeypatch):
     """Si el escritor corrompe algo (disco, bug), el paquete NO se publica."""
     original = paquete._escribir_paquete
 
-    def corrupto(raiz, c, archivos):
-        original(raiz, c, archivos)
+    def corrupto(raiz, *a):
+        original(raiz, *a)
         (raiz / "skills/alfa/SKILL.md").write_text("corrompido al escribir")
 
     monkeypatch.setattr(paquete, "_escribir_paquete", corrupto)
@@ -503,6 +503,7 @@ def test_un_archivo_agregado_al_paquete_y_al_manifiesto_no_carga(cfg):
     import hashlib
     raiz = paquete.construir_paquete(cfg)
     (raiz / "skills/alfa/EXTRA.md").write_bytes(b"extra")
+    (raiz / "skills/alfa/EXTRA.md").chmod(0o644)
     m = json.loads((raiz / paquete.MANIFIESTO).read_text())
     m["archivos"]["skills/alfa/EXTRA.md"] = {"modo": "0644", "sha256": hashlib.sha256(b"extra").hexdigest(), "oid_git": "0" * 40}
     m["sha256_manifiesto"] = paquete.hash_del_manifiesto(m)
@@ -611,4 +612,4 @@ def test_la_frescura_distingue_un_sha_retirado_de_main(repo, cfg, sha, caplog):
         f = paquete.frescura(cfg)
         paquete.exigir_integridad(cfg)    # solo avisa
     assert f.estado == "retirado" and f.sha_actual == nuevo
-    assert any("retirado" in r.getMessage() for r in caplog.records)
+    assert any("retirado" in r.getMessage().lower() for r in caplog.records)

@@ -9,11 +9,31 @@ invocacion de git ejecuta hooks ni fsmonitor del repo que se esta leyendo.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 _GIT_SIN_HOOKS = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
+
+# `git replace` (refs/replace/) hace que un SHA muestre OTRO contenido sin cambiar el SHA: un
+# paquete «fijado por SHA» dejaria de serlo. Se apaga con la bandera Y con la variable.
+_SIN_REPLACE = ("--no-replace-objects",)
+
+
+def _entorno_limpio() -> dict[str, str]:
+    """El entorno de git es ESTE y no el heredado: ninguna `GIT_*` del proceso (GIT_DIR,
+    GIT_WORK_TREE, GIT_OBJECT_DIRECTORY, GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT...) puede
+    desviar la lectura. Solo `PATH` (para encontrar `git`); configuracion global y de sistema
+    apagadas; sin `safe.directory` (el repo tiene que ser del usuario que lo lee)."""
+    return {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
 
 
 class FuenteInvalida(RuntimeError):
@@ -23,8 +43,8 @@ class FuenteInvalida(RuntimeError):
 
 def git(repo: Path, *args: str, entrada: bytes | None = None, aceptar: tuple[int, ...] = (0,)) -> subprocess.CompletedProcess:
     try:
-        r = subprocess.run(["git", *_GIT_SIN_HOOKS, "-C", str(repo), *args], input=entrada,
-                           capture_output=True, timeout=120, check=False)
+        r = subprocess.run(["git", *_SIN_REPLACE, *_GIT_SIN_HOOKS, "-C", str(repo), *args], input=entrada,
+                           capture_output=True, timeout=120, check=False, env=_entorno_limpio())
     except (OSError, subprocess.SubprocessError) as exc:
         raise FuenteInvalida(f"no se pudo ejecutar git sobre {repo}: {type(exc).__name__}") from exc
     if r.returncode not in aceptar:
@@ -42,6 +62,15 @@ def exigir_sha_ancestro_de(repo: Path, sha: str, ref: str) -> None:
     if r.returncode != 0:
         # 1 = no es ancestro; 128 = la ref no existe.
         raise FuenteInvalida(f"el commit {sha} no es ancestro de {ref}: solo se fija un SHA de origin/main")
+
+
+def es_ancestro(repo: Path, sha: str, ref: str) -> bool | None:
+    """True/False si `sha` es o no ancestro de `ref`; None si no se puede afirmar. No lanza."""
+    try:
+        r = git(repo, "merge-base", "--is-ancestor", sha, ref, aceptar=(0, 1, 128))
+    except FuenteInvalida:
+        return None
+    return {0: True, 1: False}.get(r.returncode)
 
 
 def resolver_ref(repo: Path, ref: str) -> str:

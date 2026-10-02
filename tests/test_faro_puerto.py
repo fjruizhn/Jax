@@ -56,7 +56,7 @@ def freno_propio(tmp_path, monkeypatch):
 @pytest.fixture
 def cfg(tmp_path):
     repo = repo_de_juguete(tmp_path, {"common/skills/alfa/referencia.md": "referencia larga de alfa\n"})
-    return ConfigFaro(repo=repo, sha=_git(repo, "rev-parse", "HEAD"), destino=tmp_path / "ecosistema")
+    return ConfigFaro(repo=repo, sha=_git(repo, "rev-parse", "HEAD"), destino=tmp_path / "ecosistema", uid_duenio=os.getuid())
 
 
 @pytest.fixture
@@ -519,7 +519,7 @@ def test_un_mensaje_grande_cruza_el_rele(tmp_path):
     grande = "linea de relleno\n" * 20000  # ~340 KB en una sola linea JSON
     (tmp_path / "g").mkdir()
     repo = repo_de_juguete(tmp_path / "g", {"common/skills/alfa/grande.md": grande})
-    cfg = ConfigFaro(repo=repo, sha=_git(repo, "rev-parse", "HEAD"), destino=tmp_path / "eco")
+    cfg = ConfigFaro(repo=repo, sha=_git(repo, "rev-parse", "HEAD"), destino=tmp_path / "eco", uid_duenio=os.getuid())
     paquete.construir_paquete(cfg)
     d = tmp_path / "run"
     d.mkdir(mode=0o700)

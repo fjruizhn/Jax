@@ -25,7 +25,7 @@ from tests._faro_utils import RAIZ, _git, cliente_por_rele, repo_de_juguete
 @pytest.fixture
 def montaje(tmp_path):
     repo = repo_de_juguete(tmp_path)
-    cfg = ConfigFaro(repo=repo, sha=_git(repo, "rev-parse", "HEAD"), destino=tmp_path / "eco")
+    cfg = ConfigFaro(repo=repo, sha=_git(repo, "rev-parse", "HEAD"), destino=tmp_path / "eco", uid_duenio=os.getuid())
     paquete.construir_paquete(cfg)
     d = tmp_path / "run"
     d.mkdir(mode=0o700)
