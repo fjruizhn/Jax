@@ -1626,11 +1626,15 @@ jobs:
         run: python -m pytest tests/test_output_lifecycle.py tests/test_governed_renderer.py -q
       - name: F2-E-SR runtime-status source integrity regressions
         run: python -m pytest tests/test_f2e_runtime_status_remediation.py -v
+        env:
+          PYTHONPATH: .:las_manos
       - name: Piso exacto de F2-E-SR source integrity regressions
         run: |
           python -m pytest tests/test_f2e_runtime_status_remediation.py -q 2>&1 | tee /tmp/f2e-sr
           grep -qE "^18 passed" /tmp/f2e-sr || {
             echo "PISO ROTO: se esperaban 18 tests CORRIDOS de F2-E-SR source integrity."; exit 1; }
+        env:
+          PYTHONPATH: .:las_manos
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-03: 39 (SP1 + arreglo del test rojo) + 39
         # (tests/test_governance_grounding.py, SP3 + ola de fixes de la
