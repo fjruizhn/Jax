@@ -1965,6 +1965,7 @@ jobs:
           tests/test_interruptor_lectores.py
           tests/test_jacobs_interruptor.py
           tests/test_repl_interruptor.py
+          tests/test_repl_retirado.py
           tests/test_interruptor_sin_rutas_fijas.py
           tests/test_interruptor_heredada.py
           tests/test_subpipeline_contrato_puro.py
@@ -2150,6 +2151,7 @@ jobs:
             tests/test_interruptor_lectores.py \
             tests/test_jacobs_interruptor.py \
             tests/test_repl_interruptor.py \
+            tests/test_repl_retirado.py \
             tests/test_interruptor_sin_rutas_fijas.py \
             tests/test_interruptor_heredada.py \
             tests/test_subpipeline_contrato_puro.py \
@@ -4797,8 +4799,11 @@ jobs:
           #   test_retiro_de_la_voz (-1). test_cliente_http_compartido y test_config_entorno
           #   quedan con el mismo numero (la mitad de main.py se quito de un test que sigue).
           #   Los skips no se mueven (los 45 son otros).
-          grep -qE "^3185 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3185 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 3185 -> 3187 (mismo PR): +2 puros de tests/test_repl_retirado.py (los archivos
+          #   del REPL ya no estan y nada importa jax.core.main ni subprocess_muscle); vistos
+          #   en rojo contra 11c189d (origin/master). Neto del PR: 3223 -> 3187.
+          grep -qE "^3187 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3187 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
