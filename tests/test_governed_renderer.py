@@ -1,8 +1,11 @@
 """F2-C core renderer contracts; all dependencies are explicit test composition."""
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import json
 import pytest
 
+from jacobs.models import PipelineStatus
+from las_manos.motor_registry.models import JobStatus
 import policy.governance.response as response
 import policy.governance.resolution as resolution
 from policy.governance.governed_renderer import (
@@ -12,6 +15,7 @@ from policy.governance.governed_renderer import (
 from policy.governance.response import *
 from policy.governance.resolution import *
 from policy.governance.governed_domain import GovernedDomainSpecification
+from policy.governance import governed_domain
 
 NOW = datetime(2026, 9, 29, 12, tzinfo=timezone.utc)
 KEY = b"f2-c-test-secret-material-longer-than-thirty-two-bytes"
@@ -180,6 +184,93 @@ def test_unrelated_structured_status_field_remains_tool_data():
         RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), None, lambda: NOW))
     assert result.text != GovernedRenderer.unavailable_text
     assert "selected" in result.text
+
+
+@pytest.mark.parametrize(("payload", "predicate"), [
+    ({"job_id": "job-1", "status": status.value}, "JOB_STATUS")
+    for status in JobStatus
+] + [
+    ({"pipeline_id": "pipeline-1", "status": status.value}, "PIPELINE_STATUS")
+    for status in PipelineStatus
+] + [
+    ({"name": "hyde", "status": status}, "FACET_RUNTIME_STATUS")
+    for status in ("idle", "thinking", "error", "offline")
+] + [
+    ({"name": "las_manos", "status": status}, "ENGINE_STATUS")
+    for status in ("alive", "down")
+])
+def test_structured_runtime_status_uses_closed_machine_vocabularies(payload, predicate):
+    """Removing a canonical enum value must reopen the structural bypass."""
+    assert GovernedDomainSpecification().structured_runtime_status_predicate(payload) == predicate
+
+
+def test_structured_status_machine_vocabularies_track_authoritative_enums():
+    """A new Motor/Jacobs enum value must fail CI until governance classifies it."""
+    assert governed_domain._STRUCTURED_JOB_STATUS_VALUES == frozenset(status.value for status in JobStatus)
+    assert governed_domain._STRUCTURED_PIPELINE_STATUS_VALUES == frozenset(status.value for status in PipelineStatus)
+    assert governed_domain._STRUCTURED_FACET_RUNTIME_STATUS_VALUES == frozenset({"idle", "thinking", "error", "offline"})
+    assert governed_domain._STRUCTURED_ENGINE_STATUS_VALUES == frozenset({"alive", "down"})
+
+
+@pytest.mark.parametrize("payload", (
+    {"job_id": "job-1", "status": "completed"},
+    {"pipeline_id": "pipeline-1", "status": "completed"},
+    {"result": {"job_id": "job-1", "status": "completed"}},
+    {"result": {"pipeline_id": "pipeline-1", "status": "completed"}},
+    {"items": [{"pipeline_id": "pipeline-1", "status": "completed"}]},
+    {"items": [{"job_id": "job-1", "status": "completed"}]},
+    json.dumps({"job_id": "job-1", "status": "completed"}),
+    json.dumps({"pipeline_id": "pipeline-1", "status": "completed"}),
+    json.dumps(json.dumps({"job_id": "job-1", "status": "completed"})),
+    json.dumps(json.dumps({"pipeline_id": "pipeline-1", "status": "completed"})),
+))
+def test_completed_structured_tool_data_cannot_escape_claim_receipt_path(payload):
+    """The SR-03 completed status bypass must render only as unavailable."""
+    s = scope()
+    candidate = GovernedResponseCandidate("f2-c.1", "completed-tool-data", s.request_id,
+        s.trace_id, s, "web-chat", (), (ContentBlock(ContentBlockKind.TOOL_DATA, payload),), (), ())
+    env = response._seal_candidate_for_server(candidate, contract_state=ContractState.VALID,
+        governance_receipt=receipt())
+    result = GovernedRenderer().render_text(env,
+        RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), None, lambda: NOW))
+    assert result.text == GovernedRenderer.unavailable_text
+
+
+@pytest.mark.parametrize("payload", (
+    json.dumps({"job_id": "job-1", "status": "completed"}),
+    json.dumps({"pipeline_id": "pipeline-1", "status": "completed"}),
+    json.dumps(json.dumps({"job_id": "job-1", "status": "completed"})),
+    json.dumps(json.dumps({"pipeline_id": "pipeline-1", "status": "completed"})),
+))
+def test_completed_structured_narrative_cannot_escape_claim_receipt_path(payload):
+    """Whole JSON narrative uses the same structural runtime-status boundary."""
+    s = scope()
+    env = WebChatGovernanceAdapter(s, receipt()).seal_non_governed_candidate(
+        response_id="completed-structured-narrative", candidate_text=payload)
+    result = GovernedRenderer().render_text(env,
+        RenderContext(None, {}, {}, {}, GovernedDomainRegistry(), None, lambda: NOW))
+    assert result.text == GovernedRenderer.unavailable_text
+
+
+@pytest.mark.parametrize("payload", (
+    {"theme": "dark", "status": "selected"},
+    {"build": "completed"},
+    {"status": "completed"},
+    {"name": "something-unrelated", "status": "completed"},
+))
+def test_structured_machine_status_requires_its_domain_shape(payload):
+    assert GovernedDomainSpecification().structured_runtime_status_predicate(payload) is None
+
+
+@pytest.mark.parametrize("payload", (
+    {"job_id": "job-1", "status": "finished"},
+    {"pipeline_id": "pipeline-1", "status": "succeeded"},
+    {"name": "hyde", "status": "operational"},
+    {"name": "las_manos", "status": "healthy"},
+    {"job_id": "job-1", "status": "COMPLETED"},
+))
+def test_structured_machine_status_does_not_accept_narrative_aliases(payload):
+    assert GovernedDomainSpecification().structured_runtime_status_predicate(payload) is None
 
 def test_untrusted_markup_controls_and_tool_data_do_not_become_trusted_presentation():
     s = scope(); candidate = GovernedResponseCandidate("f2-c.1", "r", s.request_id, s.trace_id, s, "web-chat", (), (

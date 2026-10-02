@@ -1680,12 +1680,13 @@ jobs:
           # 172 -> 180 el 2026-09-29 (F2-C final A01): ASCII/curly apostrophe,
           # case, NFC/NFD, Markdown heading/link/table/code, and unrelated
           # punctuation negative-control cases.
-          # 197 -> 207 el 2026-10-02 (F2-E-SR-REM-001): ten bounded
-          # structured-status detection regressions cover encoded/nested
-          # TOOL_DATA and whole-JSON NARRATIVE_TEXT. Source-integrity cases
-          # run in their own exact-count step below.
-          grep -qE "^207 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 207 tests CORRIDOS."; exit 1; }
+          # 207 -> 255 el 2026-10-02 (F2-E-SR-REM-002): closed canonical
+          # machine-status values are tested against Motor/Jacobs enums,
+          # including completed through direct/nested/encoded TOOL_DATA and
+          # NARRATIVE_TEXT plus unrelated-data negative controls.
+          # Source-integrity cases run in their own exact-count step below.
+          grep -qE "^255 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 255 tests CORRIDOS."; exit 1; }
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en

@@ -29,6 +29,23 @@ _STRUCTURED_STATUS_MAX_JSON_DECODE_LAYERS = 2
 _STRUCTURED_STATUS_MAX_NESTING_DEPTH = 32
 _STRUCTURED_STATUS_MAX_NODES = 1_024
 
+# Structured payloads are machine-shaped data, not natural-language prose.
+# These closed values deliberately do not reuse ``_CANONICAL_STATUS_ALIASES``:
+# aliases such as "finished", "healthy", or "operational" belong only to
+# deterministic narrative grammar and cannot identify an authoritative source
+# payload. Tests tripwire the Motor/Jacobs values against their source enums.
+_STRUCTURED_JOB_STATUS_VALUES = frozenset({
+    "pending", "running", "completed", "failed", "cancelled", "cancelling",
+    "rejected", "tools_requested",
+})
+_STRUCTURED_PIPELINE_STATUS_VALUES = frozenset({
+    "pending", "running", "completed", "failed", "aborted", "interrupted",
+    "expired", "disputed", "discarded", "hidden",
+})
+_STRUCTURED_FACET_RUNTIME_STATUS_VALUES = frozenset({"idle", "thinking", "error", "offline"})
+_STRUCTURED_ENGINE_STATUS_VALUES = frozenset({"alive", "down"})
+_STRUCTURED_ENGINE_HEALTH_NAME = "las_manos"
+
 _CANONICAL_STATUS_ALIASES = MappingProxyType({
     "healthy": ("healthy", "alive", "up", "available", "operational", "sano", "saludable", "activo", "disponible", "funcionando"),
     "exists": ("exists", "exist", "present", "existe", "existen"),
@@ -234,25 +251,19 @@ class GovernedDomainSpecification:
             status = node.get("status")
             if not isinstance(status, str):
                 return set()
-            status = _canonicalize_governed_detection_text(status).strip()
-            runtime_values = set(self.status_aliases.get("runtime", ()))
+            # Machine payload status is exact by contract. In particular, do
+            # not accept narrative aliases or whitespace/case normalization.
             found: set[str] = set()
-            if {"job_id", "status"}.issubset(keys) and status in runtime_values:
+            if {"job_id", "status"}.issubset(keys) and status in _STRUCTURED_JOB_STATUS_VALUES:
                 found.add("JOB_STATUS")
-            if {"pipeline_id", "status"}.issubset(keys) and status in runtime_values:
+            if {"pipeline_id", "status"}.issubset(keys) and status in _STRUCTURED_PIPELINE_STATUS_VALUES:
                 found.add("PIPELINE_STATUS")
             if {"name", "status"}.issubset(keys):
                 name = node.get("name")
                 if isinstance(name, str):
-                    name = _canonicalize_governed_detection_text(name).strip()
-                    if status in runtime_values:
+                    if status in _STRUCTURED_FACET_RUNTIME_STATUS_VALUES:
                         found.add("FACET_RUNTIME_STATUS")
-                    health_values = (set(self.status_aliases.get("healthy", ()))
-                                     | set(self.status_aliases.get("down", ()))
-                                     | {"alive"})
-                    health_names = {alias.casefold() for alias in
-                                    self.entity_aliases.get("las_manos_health_source", ())}
-                    if name in health_names and status in health_values:
+                    if name == _STRUCTURED_ENGINE_HEALTH_NAME and status in _STRUCTURED_ENGINE_STATUS_VALUES:
                         found.add("ENGINE_STATUS")
             return found
 

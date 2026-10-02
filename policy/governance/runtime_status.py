@@ -3,9 +3,12 @@
 No request selects a source, callable, HTTP endpoint, SQL statement, or store.
 Platform may only pass its fixed typed snapshot to the two platform-owned kinds.
 
-Freshness is measured from the source transition/probe timestamp. A job or
-pipeline that remains unchanged longer than its 60-second SLA is stale even
-when its stored status remains readable; terminal states receive no exception.
+Freshness records when the designated authority was observed, separately from
+when its state changed. A trusted JobStore read, canonical Jacobs persistence
+read, or server-owned FacetState read may produce a fresh observation of an
+unchanged state without rewriting its transition/change timestamp. ENGINE_STATUS
+instead uses the completed health-probe timestamp because its resolver consumes
+that independent observation rather than performing the probe itself.
 """
 from __future__ import annotations
 
