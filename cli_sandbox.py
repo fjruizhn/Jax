@@ -1053,7 +1053,8 @@ def _purgar_credenciales(perfil: Perfil, cred_host: str) -> None:
         return
     try:
         entradas = list(os.scandir(cred_host))
-    except OSError:
+    except OSError as exc:
+        logger.warning("purga: no se pudo listar la credencial de %s (%s)", perfil.nombre, exc.strerror)
         return
     for e in entradas:
         if e.name in perfil.purgar_excepto:
@@ -1063,8 +1064,10 @@ def _purgar_credenciales(perfil: Perfil, cred_host: str) -> None:
                 shutil.rmtree(e.path, ignore_errors=True)
             else:
                 os.unlink(e.path)
-        except OSError:
-            pass
+        except OSError as exc:
+            # no se oculta: una entrada que no se pudo purgar queda en disco y
+            # se reintenta en la proxima llamada
+            logger.warning("purga: no se pudo quitar %s de la credencial de %s (%s)", e.name, perfil.nombre, exc.strerror)
 
 
 def _ranura_liberar(handle, perfil: Perfil, ranuras: int, cred_host: Optional[str]) -> None:

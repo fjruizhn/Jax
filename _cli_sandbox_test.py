@@ -942,10 +942,8 @@ class LogDeRunCliTest(_Entorno):
 
     async def _linea(self, **kw):
         with self.assertLogs("cli_sandbox", "INFO") as cm:
-            try:
+            with self.assertRaises(Exception):
                 await self.correr("codex", **kw)
-            except BaseException:  # noqa: BLE001 -- se inspecciona el log, no la excepcion
-                pass
         lineas = [l for l in cm.output if "run_cli correlation_id" in l]
         self.assertEqual(len(lineas), 1, cm.output)
         return lineas[0]
