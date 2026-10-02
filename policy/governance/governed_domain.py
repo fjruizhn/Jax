@@ -165,32 +165,37 @@ class GovernedDomainSpecification:
         if isinstance(value, (list, tuple)):
             return next((hit for item in value
                          if (hit := self.runtime_status_tool_data_predicate(item)) is not None), None)
-        if not isinstance(value, Mapping) or not all(isinstance(k, str) for k in value):
-            if isinstance(value, Mapping):
-                return next((hit for item in value.values()
-                             if (hit := self.runtime_status_tool_data_predicate(item)) is not None), None)
+        if not isinstance(value, Mapping):
             return None
-        if set(value) != {"job_id", "status"} and set(value) != {"pipeline_id", "status"} and set(value) != {"name", "status"}:
-            return None
-        status = value.get("status")
-        if not isinstance(status, str):
-            return None
-        status = _canonicalize_governed_detection_text(status).strip()
-        if set(value) == {"job_id", "status"} and status in set(self.status_aliases.get("runtime", ())):
-            return "JOB_STATUS"
-        if set(value) == {"pipeline_id", "status"} and status in set(self.status_aliases.get("runtime", ())):
-            return "PIPELINE_STATUS"
-        if set(value) == {"name", "status"}:
-            name = value.get("name")
-            if not isinstance(name, str):
-                return None
-            name = _canonicalize_governed_detection_text(name).strip()
-            if status in set(self.status_aliases.get("runtime", ())):
-                return "FACET_RUNTIME_STATUS"
-            health_values = set(self.status_aliases.get("healthy", ())) | set(self.status_aliases.get("down", ()))
-            health_names = {alias.casefold() for alias in self.entity_aliases.get("las_manos_health_source", ())}
-            if name in health_names and status in health_values:
-                return "ENGINE_STATUS"
+
+        # Status-bearing tool objects can be nested under ordinary transport
+        # envelopes (for example result/data/status/metadata). Inspect every
+        # mapping node before descending; a non-matching wrapper must not stop
+        # the governed-status check.
+        if all(isinstance(k, str) for k in value):
+            keys = set(value)
+            status = value.get("status")
+            if isinstance(status, str):
+                status = _canonicalize_governed_detection_text(status).strip()
+                runtime_values = set(self.status_aliases.get("runtime", ()))
+                if keys == {"job_id", "status"} and status in runtime_values:
+                    return "JOB_STATUS"
+                if keys == {"pipeline_id", "status"} and status in runtime_values:
+                    return "PIPELINE_STATUS"
+                if keys == {"name", "status"}:
+                    name = value.get("name")
+                    if isinstance(name, str):
+                        name = _canonicalize_governed_detection_text(name).strip()
+                        if status in runtime_values:
+                            return "FACET_RUNTIME_STATUS"
+                        health_values = (set(self.status_aliases.get("healthy", ()))
+                                         | set(self.status_aliases.get("down", ()))
+                                         | {"alive"})
+                        health_names = {alias.casefold() for alias in
+                                        self.entity_aliases.get("las_manos_health_source", ())}
+                        if name in health_names and status in health_values:
+                            return "ENGINE_STATUS"
+
         return next((hit for item in value.values()
                      if (hit := self.runtime_status_tool_data_predicate(item)) is not None), None)
 
