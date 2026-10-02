@@ -17,7 +17,9 @@ QUE HAY ACA
    una CLAVE de perfil; nunca una ruta de binario ni flags (la confianza sigue
    a quien escribio el valor).
 3. TITULAR (`exigir_titular` / `Titular`): la compuerta de la suscripcion. Un
-   Titular solo lo construye `exigir_titular`; `run_cli` lo exige.
+   Titular solo lo construye `exigir_titular`, caduca a los `TITULAR_TTL_S` y
+   `run_cli` lo exige. Es disciplina, no una barrera contra codigo hostil dentro
+   del proceso (ver la docstring de `Titular`).
 4. `run_cli`: arma el sandbox del perfil, lanza el CLI SIN herramientas, lee
    la salida estructurada y clasifica los errores por evento + exit code.
 5. `transporte_efectivo`: el transporte que se deriva del proveedor.
@@ -68,6 +70,7 @@ En honor al Prof. Raul Jacobs.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import fcntl
 import json
 import logging
@@ -326,20 +329,54 @@ _RE_LISTA = re.compile(r"^\s*[0-9]+(\s*,\s*[0-9]+)*\s*$")
 
 _SELLO = object()
 
+#: Vigencia de un Titular, en segundos monotonicos desde que `exigir_titular` lo
+#: emitio. `run_cli` rechaza uno mas viejo: la verificacion contra `jax_users` es
+#: de AHORA, y un titular guardado y reusado minutos o horas despues ya no la
+#: respalda (el usuario pudo ser dado de baja). Constante de codigo a proposito
+#: (no sale de la base ni de un request): 30 s cubre de sobra el camino
+#: `exigir_titular` -> `run_cli` de un mismo pedido de chat.
+TITULAR_TTL_S = 30.0
+
+#: Solo vale True dentro de `exigir_titular`, de forma sincrona, mientras
+#: construye el Titular. Es lo que hace que cualquier otra construccion
+#: (`Titular(...)`, `dataclasses.replace`) termine en TypeError.
+_EMITIENDO: contextvars.ContextVar[bool] = contextvars.ContextVar("cli_sandbox_emitiendo", default=False)
+
 
 @dataclass(frozen=True)
 class Titular:
     """Prueba de que `exigir_titular` autorizo a este usuario, en este tenant y
-    por este punto de entrada. NO se construye a mano: sin el sello privado
-    lanza TypeError. `run_cli` exige uno."""
+    por este punto de entrada, hace menos de `TITULAR_TTL_S` segundos. Solo lo
+    construye `exigir_titular`: `Titular(...)`, `dataclasses.replace`, `copy`,
+    `deepcopy` y `pickle` terminan en TypeError, y `run_cli` rechaza uno
+    caducado. El sello y la marca de tiempo no son argumentos del constructor.
+
+    No es una barrera contra codigo hostil DENTRO del proceso (quien importe este
+    modulo puede leer `_SELLO`): es la disciplina que hace que saltarse la
+    compuerta exija un acto deliberado y visible en una revision, y no un
+    descuido. La frontera real contra un llamador malicioso es la revision del
+    codigo y el scanner de policy/tests, no esta clase."""
     user_id: int
     tenant_id: int
     entry_point: str
-    _sello: object = field(default=None, repr=False, compare=False)
+    _sello: object = field(init=False, default=None, repr=False, compare=False)
+    emitido_mono: float = field(init=False, default=0.0, repr=False, compare=False)
 
     def __post_init__(self):
-        if self._sello is not _SELLO:
+        if not _EMITIENDO.get():
             raise TypeError("Titular solo lo construye cli_sandbox.exigir_titular")
+
+    def __copy__(self):
+        raise TypeError("un Titular no se copia: se vuelve a pedir con exigir_titular")
+
+    def __deepcopy__(self, memo):
+        raise TypeError("un Titular no se copia: se vuelve a pedir con exigir_titular")
+
+    def __reduce__(self):
+        raise TypeError("un Titular no se serializa: se vuelve a pedir con exigir_titular")
+
+    def __reduce_ex__(self, protocolo):
+        raise TypeError("un Titular no se serializa: se vuelve a pedir con exigir_titular")
 
 
 def _es_entero(v) -> bool:
@@ -420,7 +457,14 @@ async def exigir_titular(user_id, tenant_id, entry_point) -> Titular:
     ):
         logger.warning("titular negado: user_id=%s tenant_id=%s no activo o de otro tenant", user_id, tenant_id)
         raise TitularNoAutorizado("suscripcion_solo_titular", "cuenta no activa o de otro tenant")
-    return Titular(user_id=user_id, tenant_id=tenant_id, entry_point=entry_point, _sello=_SELLO)
+    token = _EMITIENDO.set(True)
+    try:
+        t = Titular(user_id=user_id, tenant_id=tenant_id, entry_point=entry_point)
+    finally:
+        _EMITIENDO.reset(token)
+    object.__setattr__(t, "_sello", _SELLO)
+    object.__setattr__(t, "emitido_mono", time.monotonic())
+    return t
 
 
 # --------------------------------------------------------------------------
@@ -834,6 +878,9 @@ async def run_cli(
             or titular.entry_point != entry_point
         ):
             raise TitularNoAutorizado("suscripcion_solo_titular", "titular ausente, no autorizado o de otro entry_point")
+        edad = time.monotonic() - titular.emitido_mono
+        if not 0 <= edad <= TITULAR_TTL_S:
+            raise TitularNoAutorizado("suscripcion_solo_titular", "titular caducado")
         p = PERFILES.get(perfil)
         if p is None or not p.via_run_cli:
             raise PerfilNoSoportado(f"perfil {perfil!r} no se sirve por run_cli")

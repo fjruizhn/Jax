@@ -19,10 +19,13 @@ Corre con:
 from __future__ import annotations
 
 import asyncio
+import copy
+import dataclasses
 import hashlib
 import inspect
 import json
 import os
+import pickle
 import re
 import shutil
 import stat
@@ -308,6 +311,90 @@ class SinTitularNoLanzaNadaTest(_Entorno):
         p = inspect.signature(cli_sandbox.run_cli).parameters["titular"]
         self.assertIs(p.default, inspect.Parameter.empty)
         self.assertEqual(p.kind, inspect.Parameter.KEYWORD_ONLY)
+
+
+class TitularInfalsificableTest(_Entorno):
+    """MAJOR-1 (auditoria 2026-10-02): un Titular no se fabrica ni se reutiliza
+    por las vias de la biblioteca estandar, y caduca."""
+
+    async def _run(self, titular, **kw):
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch("asyncio.create_subprocess_exec", fake):
+            await cli_sandbox.run_cli(
+                "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                timeout=5, titular=titular, correlation_id="c", entry_point=kw.get("ep", "chat"))
+        return cap
+
+    async def test_replace_no_fabrica_otro_titular(self):
+        t = await self.titular(1)
+        with self.assertRaises(TypeError):
+            dataclasses.replace(t, user_id=4)
+        with self.assertRaises((TypeError, ValueError)):
+            dataclasses.replace(t, _sello=cli_sandbox._SELLO)
+
+    async def test_el_sello_y_la_marca_de_tiempo_no_son_argumentos_del_constructor(self):
+        campos = {f.name: f for f in dataclasses.fields(cli_sandbox.Titular)}
+        self.assertFalse(campos["_sello"].init)
+        self.assertFalse(campos["emitido_mono"].init)
+        with self.assertRaises(TypeError):
+            cli_sandbox.Titular(user_id=4, tenant_id=1, entry_point="chat", _sello=cli_sandbox._SELLO)
+
+    async def test_copy_no_clona_el_titular(self):
+        t = await self.titular()
+        with self.assertRaises(TypeError):
+            copy.copy(t)
+
+    async def test_deepcopy_no_clona_el_titular(self):
+        t = await self.titular()
+        with self.assertRaises(TypeError):
+            copy.deepcopy(t)
+
+    async def test_pickle_no_serializa_el_titular(self):
+        t = await self.titular()
+        for proto in range(0, pickle.HIGHEST_PROTOCOL + 1):
+            with self.subTest(proto=proto), self.assertRaises(TypeError):
+                pickle.dumps(t, protocol=proto)
+
+    async def test_titular_caducado_se_rechaza_y_no_lanza_nada(self):
+        t = await self.titular()
+        with patch.object(cli_sandbox, "TITULAR_TTL_S", 0.05):
+            await asyncio.sleep(0.15)
+            cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+            with patch("asyncio.create_subprocess_exec", fake):
+                with self.assertRaises(cli_sandbox.TitularNoAutorizado) as c:
+                    await cli_sandbox.run_cli(
+                        "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                        timeout=5, titular=t, correlation_id="c", entry_point="chat")
+        self.assertEqual(c.exception.codigo, "suscripcion_solo_titular")
+        self.assertEqual(cap["llamadas"], 0)
+        self.assertEqual(list(self.run_dir.iterdir()), [])
+
+    async def test_titular_fresco_pasa_y_el_ttl_por_defecto_es_30s(self):
+        self.assertEqual(cli_sandbox.TITULAR_TTL_S, 30.0)
+        t = await self.titular()
+        cap = await self._run(t)
+        self.assertEqual(cap["llamadas"], 1)
+        self.assertLess(time.monotonic() - t.emitido_mono, 5)
+
+    async def test_titular_de_otro_entry_point_sigue_rechazado(self):
+        t = await self.titular(ep="canary")
+        with self.assertRaises(cli_sandbox.TitularNoAutorizado):
+            await self._run(t, ep="chat")
+
+    async def test_titular_con_sello_ajeno_o_sin_marca_de_tiempo_se_rechaza(self):
+        t = await self.titular()
+        falso = object.__new__(cli_sandbox.Titular)
+        for k in ("user_id", "tenant_id", "entry_point"):
+            object.__setattr__(falso, k, getattr(t, k))
+        object.__setattr__(falso, "_sello", object())
+        object.__setattr__(falso, "emitido_mono", time.monotonic())
+        with self.assertRaises(cli_sandbox.TitularNoAutorizado):
+            await self._run(falso)
+
+    def test_la_documentacion_no_promete_lo_que_no_cumple(self):
+        for doc in (cli_sandbox.Titular.__doc__, cli_sandbox.exigir_titular.__doc__):
+            self.assertNotIn("ningun llamador", doc.lower())
+        self.assertIn("no es una barrera", cli_sandbox.Titular.__doc__.lower())
 
 
 # ------------------------------------------------------------------ transporte
