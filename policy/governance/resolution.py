@@ -191,15 +191,21 @@ class ServerAdapterInput:
         x=object.__new__(cls);object.__setattr__(x,"observations",tuple(canonical));return x
 
 _STATUS_EVIDENCE_TOKEN=object()
+_RUNTIME_STATUS_SOURCE_IDENTITIES={
+    AdapterKind.MOTOR_JOB_STATUS:"motor:job-store",
+    AdapterKind.JACOBS_PIPELINE_STATUS:"jacobs:canonical-store",
+    AdapterKind.FACET_RUNTIME_STATUS:"platform:facet-state",
+    AdapterKind.ENGINE_STATUS:"platform:las-manos-health",
+}
 @dataclass(frozen=True,init=False)
 class RuntimeStatusEvidence:
     """Closed F2-E bridge from a fixed server resolver, never client data."""
-    adapter_kind:AdapterKind; observation:ResolutionObservation; observation_scope:ResponseScope
+    adapter_kind:AdapterKind; source_identity:str; observation:ResolutionObservation; observation_scope:ResponseScope
     def __init__(self,*a,**kw):raise GovernanceContractError("runtime status evidence requires server pathway")
     @classmethod
     def _mint(cls,t,adapter_kind,observation,observation_scope):
-        if t is not _STATUS_EVIDENCE_TOKEN or not isinstance(adapter_kind,AdapterKind) or not isinstance(observation,ResolutionObservation) or not isinstance(observation_scope,ResponseScope):raise GovernanceContractError("typed runtime status evidence required")
-        x=object.__new__(cls);object.__setattr__(x,"adapter_kind",adapter_kind);object.__setattr__(x,"observation",observation);object.__setattr__(x,"observation_scope",observation_scope);return x
+        if t is not _STATUS_EVIDENCE_TOKEN or not isinstance(adapter_kind,AdapterKind) or adapter_kind not in _RUNTIME_STATUS_SOURCE_IDENTITIES or not isinstance(observation,ResolutionObservation) or not isinstance(observation_scope,ResponseScope):raise GovernanceContractError("typed runtime status evidence required")
+        x=object.__new__(cls);object.__setattr__(x,"adapter_kind",adapter_kind);object.__setattr__(x,"source_identity",_RUNTIME_STATUS_SOURCE_IDENTITIES[adapter_kind]);object.__setattr__(x,"observation",observation);object.__setattr__(x,"observation_scope",observation_scope);return x
 
 def _runtime_status_evidence_from_server(adapter_kind, observation, observation_scope):
     return RuntimeStatusEvidence._mint(_STATUS_EVIDENCE_TOKEN,adapter_kind,observation,observation_scope)
@@ -313,6 +319,7 @@ class ResolverRegistry:
         if e.adapter.adapter_kind in status_kinds:
             evidence=runtime_status_evidence
             if not isinstance(evidence,RuntimeStatusEvidence) or evidence.adapter_kind is not e.adapter.adapter_kind:return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,"server:missing-runtime-status-evidence",{})
+            if evidence.source_identity!=b.designated_source_identity:return ResolutionStatus.SOURCE_MISMATCH,ResolutionObservation(ResolutionStatus.SOURCE_MISMATCH,now,"server:runtime-status-source",{})
             if evidence.observation_scope.scope_digest!=scope.scope_digest:return ResolutionStatus.WRONG_SCOPE,ResolutionObservation(ResolutionStatus.WRONG_SCOPE,now,"server:runtime-status-scope",{})
             o=evidence.observation
             if o.status is ResolutionStatus.RESOLVED and _plain(o.result)!=_plain(args):return ResolutionStatus.SOURCE_MISMATCH,ResolutionObservation(ResolutionStatus.SOURCE_MISMATCH,o.observed_at,o.provenance_ref,o.result,o.upstream_not_after)
