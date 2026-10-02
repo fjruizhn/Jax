@@ -1089,11 +1089,10 @@ class PlanBuilder:
         # generico (_call_openai_compat) — el endpoint nativo /api/chat que este
         # payload espera (respuesta en data["message"]["content"]) es siempre
         # local y fijo. Solo el modelo viene del facet, nunca la URL.
-        # OJO: GPU_SEMAPHORE (jax/muscles/ollama_muscle.py::GPU_SEMAPHORE -- por simbolo, no por linea: la referencia decia :37 y el simbolo ya se habia movido) es un
-        # asyncio.Semaphore de PROCESO del REPL de JAX -- esta llamada corre
-        # en el proceso de jax-las-manos (Jacobs) y le pega a Ollama directo
-        # por httpx, sin pasar por ese semáforo. No hay exclusión mutua real
-        # entre el REPL y Jacobs para el acceso a la GPU (verificado
+        # OJO: esta llamada corre en el proceso de jax-las-manos (Jacobs) y le
+        # pega a Ollama directo por httpx. No hay exclusión mutua en proceso
+        # para el acceso a la GPU (el GPU_SEMAPHORE del REPL se retiró en T16
+        # con el REPL); la serialización la hace Ollama (verificado
         # 2026-08-19, sonda T0.a/T1 de latencia de _llm_plan).
         #
         # MEDIDO 2026-08-28: esa falta de exclusion mutua no produce

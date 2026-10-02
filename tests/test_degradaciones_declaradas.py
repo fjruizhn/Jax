@@ -18,7 +18,7 @@ es la forma callada de la certeza fabricada (Principios V y VIII).
      el clasificador roto, el 100 % del ruteo degradaba para siempre en
      silencio.
 
-Y `MemoryDB.health_check()`, que no lo llamaba nadie, ahora lo llama el REPL.
+(Y `MemoryDB.health_check()`, que no lo llamaba nadie, se retiro en T16 con el REPL.)
 
 T16 (2026-10-02): el REPL y `jax --task` se retiraron; se fueron con ellos las
 comprobaciones sobre el codigo de jax/core/main.py (puntos 2 y 3) y las del Router

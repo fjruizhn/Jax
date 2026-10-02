@@ -544,12 +544,11 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     solo no aparece en la lista de facetas que _llm_plan le sugiere al LLM
     para auto-generar steps — un pipeline con step facet="jax_local" armado
     a mano (_from_spec) si lo hubiera disparado.
-    OJO: GPU_SEMAPHORE (jax/muscles/ollama_muscle.py::GPU_SEMAPHORE -- por simbolo, no por linea: la referencia decia :37 y el simbolo ya se habia movido) es un
-    asyncio.Semaphore de PROCESO del REPL de JAX -- esta llamada corre en el
-    proceso de jax-las-manos y le pega a Ollama directo por httpx, sin pasar
-    por ese semáforo. No hay exclusión mutua real entre el REPL y Jacobs
-    para el acceso a la GPU (verificado 2026-08-19, sonda T0.a/T1 de
-    latencia de _llm_plan).
+    OJO: esta llamada corre en el proceso de jax-las-manos y le pega a Ollama
+    directo por httpx. No hay exclusión mutua en proceso para el acceso a la
+    GPU (el GPU_SEMAPHORE del REPL, jax/muscles/ollama_muscle.py, se retiró en
+    T16 junto con el REPL); la serialización la hace Ollama (verificado
+    2026-08-19, sonda T0.a/T1 de latencia de _llm_plan).
 
     MEDIDO 2026-08-28: esa falta de exclusion mutua no produce contencion
     hoy porque Ollama serializa (OLLAMA_NUM_PARALLEL=1) -- la generacion se

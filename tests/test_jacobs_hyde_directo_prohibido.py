@@ -20,10 +20,8 @@ def test_invoke_hyde_lanza_la_clase_real_y_el_sandbox_nunca_se_llama():
     from policy.execution_control.errors import (
         DirectHydeGovernedExecutionForbiddenError, ExecutionControlError)
     falso = AsyncMock()
-    import hyde_sandbox
     from jacobs import executor
-    with patch.object(hyde_sandbox, "run_sandboxed_claude", falso), \
-         patch.object(executor, "run_sandboxed_claude", falso, create=True):
+    with patch.object(executor, "run_sandboxed_claude", falso, create=True):
         with pytest.raises(DirectHydeGovernedExecutionForbiddenError) as e:
             asyncio.run(executor._invoke_hyde(SimpleNamespace(model="m"), "prompt", 5))
     assert isinstance(e.value, ExecutionControlError)

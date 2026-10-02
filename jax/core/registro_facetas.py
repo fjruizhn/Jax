@@ -28,11 +28,11 @@ def _url_de_despacho(provider_id: str, base_url: str) -> str:
 async def url_del_proveedor(clave_http: str) -> str:
     """E-21 (2026-09-16): api_url de un HttpMuscle que NO es una faceta (el
     extractor y el sintetizador de la memoria), desde provider.base_url del
-    catálogo, la misma columna que usa aplicar_registro. Antes esos workers no
+    catálogo (tabla provider). Antes esos workers no
     pasaban api_url y despachaban a la URL fija de DeepSeek en base.py.
     Consulta por clave primaria (provider.id). Sin fila, sin base_url o con el
-    proveedor en status 'deprecated' (misma regla que ESTADOS_INVOCABLES aplica
-    a los modelos: deprecated no se invoca): MuscleInvocationError y la corrida
+    proveedor en status 'deprecated' (deprecated no se invoca, como
+    los modelos): MuscleInvocationError y la corrida
     falla visible; no hay URL de respaldo. Si la DB no responde, el error de
     conexión sube tal cual."""
     provider_id = _PROVIDER_ID_MAP.get(clave_http)

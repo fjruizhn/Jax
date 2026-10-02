@@ -8,12 +8,12 @@ empiricamente). Este modulo confina a nivel de NAMESPACE DE MONTAJE: lo
 que no esta bind-mounteado acá NO EXISTE dentro del sandbox, sin importar
 que comando corra adentro -- no hay heuristica que esquivar.
 
-Compartido entre jacobs/executor.py::_invoke_hyde (real, via el symlink
-las_manos/jacobs -> jax/jacobs) y jax/muscles/subprocess_muscle.py (REPL
-viejo). Vive en el repo root -- mismo patron que facet_resolver.py /
-credential_resolver.py (repo root real, symlinkeados en las_manos/): este
-archivo se symlinkea como las_manos/hyde_sandbox.py, y el REPL lo importa
-directo porque su PYTHONPATH es $HOME/jax (repo root).
+T16 (2026-10-02): `run_sandboxed_claude` (que lanzaba `claude` con este confinamiento y el
+token de la suscripcion en su entorno) y sus llamadores (jacobs/executor.py::_invoke_hyde y el
+REPL) se retiraron; no tenian llamadores. Quedan `wrap_hyde_command` y el lock compartido, que
+usan cli_sandbox y sus pruebas. Vive en el repo root -- mismo patron que facet_resolver.py /
+credential_resolver.py (repo root real, symlinkeados en las_manos/): este archivo se symlinkea
+como las_manos/hyde_sandbox.py.
 
 Alcance decidido por Fernando (opcion b, sesion sandbox 2026-08-22):
   - Lectura: los dos repos completos (~/jax, ~/jax-platform) -- Hyde puede
@@ -73,8 +73,7 @@ Alcance decidido por Fernando (opcion b, sesion sandbox 2026-08-22):
     entorno MÍNIMO y COMPLETO (HOME=SANDBOX_HOME, PATH segura, LANG, y
     CLAUDE_CODE_OAUTH_TOKEN si hay token) que el llamador debe pasar TAL
     CUAL -- nunca fusionado con `os.environ` -- como `env=` a
-    `create_subprocess_exec` (lo hace `run_sandboxed_claude`, el único
-    llamador aprobado). Como `env=` REEMPLAZA el entorno del proceso
+    `create_subprocess_exec`. Como `env=` REEMPLAZA el entorno del proceso
     exec-ado en vez de heredarlo, bwrap arranca viendo EXACTAMENTE ese
     diccionario -- nunca los 20+ secretos que jax-las-manos.service carga
     de /etc/jax/.env (DEEPSEEK_API_KEY, JAX_DB_PASSWORD, FERNET_KEY,
@@ -215,15 +214,10 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> tuple[list[str], di
     -- sin que `wrap_hyde_command` tenga forma de impedirlo: no controla
     el `env=` de nadie más que a través de lo que devuelve.
 
-    El ÚNICO llamador aprobado hoy es `run_sandboxed_claude` (más abajo en
-    este mismo módulo), que hace exactamente eso -- ver su docstring y
-    `_hyde_sandbox_test.py::RunSandboxedClaudeWrappingTest`, que falla si
-    el `env=` que llega a create_subprocess_exec no es el que esta función
-    devolvió. Cualquier código nuevo que llame a `wrap_hyde_command`
-    directo (sin pasar por `run_sandboxed_claude`) es responsable de
-    reproducir esa misma disciplina -- ver `_hyde_containment_test.py`,
-    cuyo `Caja.correr` lo hace a mano precisamente porque llama a esta
-    función directo, sin `run_sandboxed_claude` de por medio.
+    Hoy no hay llamador de produccion (T16 retiro `run_sandboxed_claude`).
+    Cualquier código nuevo que llame a `wrap_hyde_command` es responsable
+    de esa disciplina -- ver `_hyde_containment_test.py`, cuyo
+    `Caja.correr` la reproduce a mano.
 
     Lanza SandboxUnavailable si bwrap no esta disponible -- el llamador NO
     debe atrapar esta excepcion para caer a ejecucion sin sandbox. Lanza
@@ -234,7 +228,7 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> tuple[list[str], di
 
     # Credencial de Anthropic -- se resuelve ACÁ (antes de tocar el
     # filesystem del sandbox) para no gastar el lock cross-proceso ni el
-    # presupuesto de tiempo del llamador (ver run_sandboxed_claude) lanzando
+    # presupuesto de tiempo del llamador lanzando
     # `claude` sabiendo que no va a poder autenticar. Orden de precedencia:
     # 1) HYDE_OAUTH_TOKEN_ENV (cuenta Max de Fernando, `claude setup-token`,
     #    decisión de Fernando 2026-09-27: nunca una API key); 2) el archivo
@@ -386,13 +380,12 @@ def _acquire_cross_process_lock(
     """BLOQUEANTE -- llamar SOLO via asyncio.to_thread, nunca en el event
     loop (flock(2) no tiene equivalente async). Sondea con LOCK_NB en vez
     de bloquear en LOCK_EX puro para poder fail-closed con un timeout
-    explicito: si otro proceso (REPL o las_manos) tiene el lock mas de
+    explicito: si otro proceso tiene el lock mas de
     `timeout` segundos, lanza TimeoutError con mensaje explicito en vez de
     colgar el thread para siempre.
 
     Modo compartido: ver el comentario de arriba. `uid_esperado` (root) y
-    `gid_esperado` (el de HYDE_LOCK_GROUP) se inyectan solo desde los tests;
-    `run_sandboxed_claude` no los pasa.
+    `gid_esperado` (el de HYDE_LOCK_GROUP) se inyectan solo desde los tests.
 
     Devuelve el file handle abierto -- el llamador debe pasarlo a
     _release_cross_process_lock (tambien via to_thread) cuando termine,
@@ -400,7 +393,7 @@ def _acquire_cross_process_lock(
     ruta = _lock_path_for_workspace(workspace_dir)
     return cli_sandbox.flock_compartido_adquirir(
         str(ruta.parent), ruta.name, HYDE_LOCK_GROUP, timeout, "subprocess 'claude'",
-        "otro proceso (REPL o las_manos) sigue teniendo un claude corriendo.",
+        "otro proceso sigue teniendo un claude corriendo.",
         uid_esperado=uid_esperado, gid_esperado=gid_esperado,
     )
 
@@ -409,70 +402,3 @@ def _release_cross_process_lock(fh) -> None:
     """BLOQUEANTE (aunque en la practica instantaneo) -- llamar via
     asyncio.to_thread por simetria con _acquire_cross_process_lock."""
     cli_sandbox.flock_liberar(fh)
-
-
-async def run_sandboxed_claude(
-    cmd: list[str], workspace_dir: str, prompt: str, timeout: float,
-) -> tuple["asyncio.subprocess.Process", bytes, bytes]:
-    """Unico punto de entrada aprobado para lanzar `claude` como subproceso
-    -- ver policy/tests/test_claude_subprocess_solo_via_sandbox.py, que
-    falla el CI si aparece un create_subprocess_exec/create_subprocess_shell
-    de un comando que mencione "claude" fuera de este modulo.
-
-    Aplica wrap_hyde_command (sandbox de bwrap, fail-closed via
-    SandboxUnavailable si no hay bwrap -- NO se atrapa acá) y serializa
-    con un flock(2) cross-proceso derivado de workspace_dir (ver
-    _acquire_cross_process_lock / _lock_path_for_workspace) -- no un
-    asyncio.Semaphore, que no cruza la frontera real entre el proceso de
-    las_manos (Jacobs) y el proceso del REPL.
-
-    `timeout` se aplica INDEPENDIENTEMENTE a cada una de las dos esperas
-    (adquisicion del lock, luego subprocess communicate) -- el peor caso
-    combinado es hasta ~2×`timeout`, no un presupuesto compartido. Antes la espera del lock
-    tenia una constante fija de 30s, mucho mas corta que los presupuestos
-    reales (300s en la mayoria de los steps de Jacobs, 900s en
-    reconcile/design/reason -- ver jacobs/models.py y jacobs/plan.py). Eso
-    era una regresion funcional frente al asyncio.Semaphore que este lock
-    reemplazo: Jacobs puede programar dos steps `hyde` en la misma ola
-    paralela, y el segundo LEGITIMAMENTE esperaba a que terminara el
-    primero. Con 30s fijos ese segundo step moria sin haber lanzado nada,
-    y _run_one_step lo reportaba como "Timeout (300s)" a los 30 segundos
-    (asyncio.TimeoutError ES TimeoutError desde 3.11) -- una trampa de
-    depuracion. Sigue siendo fail-closed: agotado el presupuesto real,
-    lanza TimeoutError explicito en vez de colgarse para siempre.
-
-    Devuelve (proc, stdout, stderr) crudos -- la interpretacion de exit
-    code / contenido de stderr queda en el llamador, cada uno con su
-    propio contrato de excepciones (RuntimeError en Jacobs,
-    MuscleInvocationError en el REPL viejo -- no se unifican acá).
-
-    En timeout (de la corrida real O de la espera del lock) o
-    cancelacion: mata el proceso si llego a lanzarse, cosecha el zombie
-    con wait(), y RE-LANZA la excepcion SIN envolver -- CancelledError
-    debe seguir siendo CancelledError (Jacobs cancela _dispatch_step desde
-    afuera con su propio wait_for; envolverla rompe la propagacion real de
-    cancelacion de asyncio). TimeoutError del lock y TimeoutError del
-    wait_for son la misma clase (asyncio.TimeoutError es alias de
-    TimeoutError desde Python 3.11) -- ambos llamadores ya distinguen por
-    esa clase, no hace falta un tipo nuevo.
-
-    `env=sandbox_env` se pasa EXPLÍCITO y TAL CUAL a
-    create_subprocess_exec -- nunca fusionado con os.environ (B-1,
-    auditoría adversarial 2026-09-27): ese diccionario mínimo (ver
-    wrap_hyde_command) es la frontera real de aislamiento de entorno.
-    Pasarlo es obligatorio -- sin `env=`, asyncio.create_subprocess_exec
-    hereda el entorno completo de ESTE proceso (jax-las-manos, con los
-    20+ secretos de /etc/jax/.env), que es exactamente el vector que
-    wrap_hyde_command existe para cerrar."""
-    sandboxed_cmd, sandbox_env = wrap_hyde_command(cmd, workspace_dir)
-
-    # El presupuesto del lock es el del llamador, no una constante fija
-    # (ver docstring) -- un step encolado espera lo que su step realmente
-    # dura, como hacia el semaforo viejo. `adquirir`/`liberar` se resuelven por
-    # nombre de modulo EN CADA LLAMADA (los tests los parchean aca).
-    return await cli_sandbox.ejecutar(
-        sandboxed_cmd, sandbox_env, prompt.encode("utf-8"), timeout,
-        adquirir=lambda t: _acquire_cross_process_lock(workspace_dir, t),
-        liberar=lambda fh: _release_cross_process_lock(fh),
-        cwd=workspace_dir,
-    )

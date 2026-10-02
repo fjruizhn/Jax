@@ -363,8 +363,15 @@ jobs:
       # run_sandboxed_claude toma el lock compartido) dejaba el job en verde.
       - run: |
           python -m pytest _hyde_sandbox_test.py -q 2>&1 | tee /tmp/hydesb
-          grep -qE "^11 passed" /tmp/hydesb || {
-            echo "PISO ROTO: se esperaban 11 tests CORRIDOS de hyde_sandbox."; exit 1; }
+          # 11 -> 6 el 2026-10-02 (T16, reauditoria MINOR-11): -5 al retirar
+          #   hyde_sandbox.run_sandboxed_claude (sin llamadores desde que Jacobs perdio su
+          #   ruta directa): RunSandboxedClaudeWrappingTest, RunSandboxedClaudeConcurrencyTest,
+          #   RunSandboxedClaudeTimeoutTest, ClaudeSubprocessLockTimeoutBudgetTest y
+          #   LlamadaAlLockCompartidoTest.test_run_sandboxed_claude_llama_al_nucleo... .
+          #   Quedan los 6 del lock (defaults, fail-closed, ruta fuera del workspace x3,
+          #   cruce real entre dos procesos de SO). Medido: 6 passed.
+          grep -qE "^6 passed" /tmp/hydesb || {
+            echo "PISO ROTO: se esperaban 6 tests CORRIDOS de hyde_sandbox."; exit 1; }
       # Golden de wrap_hyde_command (D-4, facetas-por-suscripcion, 2026-10-01):
       # el argv y el env de Hyde congelados ANTES de que pase al nucleo comun
       # cli_sandbox. Piso exacto: 3 tests (coincide con la golden, la fixture no
@@ -6309,8 +6316,13 @@ jobs:
           #   por nombre) rechaza una fila EXPLAIN mala. Medido local, MISMO
           #   comando, base de sesión: master 160 -> rama 162 (+2; el local
           #   da 7 menos que el runner en las dos ramas por igual).
-          grep -qE "^169 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 169 tests CORRIDOS."; exit 1; }
+          # 169 -> 168 el 2026-10-02 (T16, reauditoria BLOCK-10): -1,
+          #   test_cargar_registro_trae_transporte_proveedor_y_url_del_modelo de
+          #   tests/test_contrato_dispatch_db.py -- probaba `cargar_registro`, borrada con el
+          #   REPL; el import fallaba con ImportError en este job. Un test de DB: lo cuenta
+          #   este job, no el sin DB. Los 168 son el declarado (169) menos ese.
+          grep -qE "^168 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 168 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira

@@ -515,8 +515,9 @@ class MemoryDB:
     def __init__(self):
         # None = todavia no se intento conectar. True/False = resultado de la
         # ultima migracion. Un esquema a medias NO es una base sana, aunque
-        # responda al SELECT; lo leen las rutas de busqueda y el log de connect().
-        # (T16: health_check(), que lo leia, se retiro: no tenia consumidor.)
+        # responda al SELECT. Hoy solo se LEE dentro de connect() (decide el log de
+        # esquema atrasado y el rechazo del modo worker); health_check(), que lo
+        # exponia, se retiro en T16 por no tener consumidor.
         self.schema_ok: Optional[bool] = None
         self.pool: Optional[aiomysql.Pool] = None
         self.config: dict = {}
