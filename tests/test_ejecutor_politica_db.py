@@ -108,4 +108,47 @@ def test_la_consulta_de_respaldos_usa_su_indice():
             return await cur.fetchall()
 
     filas = asyncio.run(_con_inventario(accion))
-    assert any("idx_ejecutor_punto_host_fecha" in str(f) for f in filas), filas
+    # X-3: la edad del respaldo se mide por respaldado_at (LEDGER:247), así que la consulta
+    # agrupa por ese índice, no por el de «cuándo se restauró y verificó».
+    assert any("idx_ejecutor_punto_host_respaldo" in str(f) for f in filas), filas
+
+
+COMANDO_DESTRUCTIVO = "ssh -tt -p 58291 axioma@atemai sudo systemctl stop nginx"
+
+
+async def _un_solo_punto(conn, host, respaldado_hace_min, verificado_hace_min):
+    """Deja UN punto de restauración (referencia `prueba-...`, que la limpieza borra) para `host`
+    y ninguno para los demás: lo que se mide es la edad, no el relleno del índice."""
+    async with conn.cursor() as cur:
+        await cur.execute("DELETE FROM ejecutor_punto_restauracion WHERE referencia LIKE %s", ("prueba-%",))
+        await cur.execute(
+            "INSERT INTO ejecutor_punto_restauracion (host_nombre, referencia, metodo, respaldado_at, "
+            "restaurado_y_verificado_at, verificado_por, evidencia) VALUES "
+            "(%s, 'prueba-edad', 'recreacion', UTC_TIMESTAMP() - INTERVAL %s MINUTE, "
+            "UTC_TIMESTAMP() - INTERVAL %s MINUTE, 'test', 'test')",
+            (host, respaldado_hace_min, verificado_hace_min))
+    await conn.commit()
+
+
+def _decision_con_punto(respaldado_hace_min, verificado_hace_min):
+    async def accion(conn):
+        await _un_solo_punto(conn, "atemai", respaldado_hace_min, verificado_hace_min)
+        filas = await exportar.leer(conn)
+        return exportar.documento(*filas, "2026-09-17T12:00:00+00:00")
+
+    p = politica.validar(asyncio.run(_con_inventario(accion)))
+    return politica.evaluar(p, "Bash", {"command": COMANDO_DESTRUCTIVO}, datetime.now(timezone.utc))
+
+
+def test_un_snapshot_viejo_reverificado_hoy_no_cuenta_como_vigente():
+    """X-3: C2 mide la edad por `respaldado_at` (la hora del SNAPSHOT), no por cuándo se lo
+    volvió a restaurar y verificar. Un snapshot de hace 3 días que el verificador probó hace
+    1 minuto es un respaldo de hace 3 días: la misión destructiva NO arranca."""
+    d = _decision_con_punto(respaldado_hace_min=3 * 24 * 60, verificado_hace_min=1)
+    assert (d.permitir, d.codigo) == (False, politica.DESTRUCTIVO_SIN_RESPALDO), d
+
+
+def test_un_snapshot_reciente_sigue_contando_como_vigente():
+    """Control positivo del anterior: sin él, «siempre deniega» pasaría el test de arriba."""
+    d = _decision_con_punto(respaldado_hace_min=60, verificado_hace_min=1)
+    assert d.permitir, d
