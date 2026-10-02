@@ -18,6 +18,12 @@ algun id huerfano esta fuera de RESERVED_PROJECT_ID_RANGE o si alguna fila
 huerfana es de un usuario (o, en conversations, tenant) que no es del tenant 1;
 `--verificar` los lista en `fuera_de_alcance`.
 
+Codigos de salida: 0 hecho; 1 quedan huerfanos / conteos distintos / la ruta ya
+existia (volver a correr con ruta nueva); 2 argumentos o guarda; 3 commit
+incierto (mapa en <ruta>.incierto, o en la ruta original si no se pudo
+renombrar); 4 huerfanos fuera de alcance; 5 error no previsto (no reintentar
+sin revisar).
+
 La llave de idempotencia de la evaluacion es un UUID v5 derivado de un nombre
 fijo: `create_project` exige un UUID canonico de 36 caracteres.
 """
@@ -199,14 +205,20 @@ async def _reescribir_en_transaccion(pool, ids: list[int], destino: int, salida_
             # ciegas ni borrar el mapa; se cierra la conexion (si el commit no
             # llego, el servidor revierte solo) y el mapa se conserva.
             incierto = salida_reversion + ".incierto"
-            os.replace(salida_reversion, incierto)
             try:
                 conn.close()
             except Exception:
                 pass
+            try:
+                os.replace(salida_reversion, incierto)
+                donde = f"el mapa de reversion quedo en {incierto}"
+            except OSError as e2:
+                # Aun asi es un commit incierto (codigo 3): el mapa NO se pierde.
+                donde = (f"no se pudo renombrar el mapa ({type(e2).__name__}: {e2}); el mapa de reversion "
+                         f"sigue en {salida_reversion}")
             raise CommitIncierto(
-                f"el resultado del commit es desconocido ({type(e).__name__}: {e}); el mapa de reversion "
-                f"quedo en {incierto}; correr --verificar para saber si se aplico") from e
+                f"el resultado del commit es desconocido ({type(e).__name__}: {e}); {donde}; "
+                f"correr --verificar para saber si se aplico") from e
         return movido
 
 
@@ -307,6 +319,10 @@ def main(argv: list[str] | None = None) -> int:
     except (HuerfanosRestantes, ConteosNoCoinciden, FileExistsError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
+    except Exception as e:                 # noqa: BLE001 - cualquier otra cosa NO es «volver a correr»
+        print(f"ERROR no previsto ({type(e).__name__}: {e}); NO reintentar sin revisar: correr --verificar y "
+              f"mirar el estado antes de cualquier otra accion", file=sys.stderr)
+        return 5
     print(json.dumps(resultado, ensure_ascii=False, indent=2))
     return 0
 

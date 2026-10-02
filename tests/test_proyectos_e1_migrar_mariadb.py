@@ -569,3 +569,66 @@ def test_main_sale_con_4_si_hay_huerfanos_fuera_de_alcance(tmp_path, capsys):
                       "--salida-reversion", str(tmp_path / "r.json")])
     assert rc == 4
     assert "78" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- m-2: codigos de salida de main
+
+def _main_con(monkeypatch, exc, tmp_path):
+    async def falla(pool, **kw):
+        raise exc
+    monkeypatch.setattr(migrar, "aplicar", falla)
+    return migrar.main(["--aplicar", "--actor-user-id", "1", "--database", _DB,
+                        "--salida-reversion", str(tmp_path / "r.json")])
+
+
+@requiere_servidor
+def test_main_sale_con_1_si_quedan_huerfanos(monkeypatch, tmp_path, capsys):
+    assert _main_con(monkeypatch, migrar.HuerfanosRestantes("quedan [1]; volver a correr"), tmp_path) == 1
+    assert "quedan [1]" in capsys.readouterr().err
+
+
+@requiere_servidor
+def test_main_sale_con_3_si_el_commit_es_incierto(monkeypatch, tmp_path, capsys):
+    assert _main_con(monkeypatch, migrar.CommitIncierto("desconocido; mapa en x.incierto"), tmp_path) == 3
+    assert "x.incierto" in capsys.readouterr().err
+
+
+@requiere_servidor
+def test_main_sale_con_5_ante_una_excepcion_no_prevista(monkeypatch, tmp_path, capsys):
+    rc = _main_con(monkeypatch, KeyError("inesperado"), tmp_path)
+    err = capsys.readouterr().err
+    assert rc == 5
+    assert "no previsto" in err and "KeyError" in err and "NO reintentar" in err
+
+
+@requiere_servidor
+def test_main_sale_con_5_si_ni_siquiera_conecta(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("JAX_DB_PORT", "1")              # nadie escucha: OperationalError, no prevista
+    rc = migrar.main(["--aplicar", "--actor-user-id", "1", "--database", _DB,
+                      "--salida-reversion", str(tmp_path / "r.json")])
+    assert rc == 5
+    assert "no previsto" in capsys.readouterr().err
+
+
+@requiere_servidor
+@asincrono
+async def test_commit_incierto_con_os_replace_fallido_sigue_siendo_incierto(tmp_path, monkeypatch):
+    """Si no se puede renombrar el mapa, igual sale CommitIncierto (codigo 3) y
+    dice que el mapa sigue en la ruta original."""
+    await _limpiar_contenido()
+    await _sembrar_huerfanos([950002], tablas=("conversations",))
+    destino = await _sql("INSERT INTO projects (project_uuid,name,status) VALUES (UUID(),'destino2','active')")
+    ruta = tmp_path / "rev.json"
+
+    def roto(a, b):
+        raise PermissionError("no se puede renombrar")
+    monkeypatch.setattr(migrar.os, "replace", roto)
+    pool = await _pool()
+    try:
+        with pytest.raises(migrar.CommitIncierto) as e:
+            await migrar._reescribir_en_transaccion(_PoolCommitFalla(pool), [950002], destino, str(ruta))
+    finally:
+        pool.close()
+        await pool.wait_closed()
+    assert ruta.exists()
+    assert str(ruta) in str(e.value) and "sigue en" in str(e.value)
