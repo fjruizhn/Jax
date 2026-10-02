@@ -46,8 +46,10 @@ import re
 import secrets
 import shutil
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 
 from .config import ConfigFaro, PluginFuente, sha_valido
 from .git_objetos import FuenteInvalida, exigir_sha_ancestro_de, leer_blobs, listar, resolver_ref
@@ -343,3 +345,123 @@ def frescura(cfg: ConfigFaro) -> Frescura:
                        cfg.sha, actual, cfg.ref_frescura)
         return Frescura("atrasado", cfg.sha, actual)
     return Frescura("al_dia", cfg.sha, actual)
+
+
+# --------------------------------------------------------------------------- #
+# carga en memoria: lo que el Puerto sirve                                    #
+# --------------------------------------------------------------------------- #
+
+class NoExiste(LookupError):
+    """Lo pedido no esta en el paquete. Nunca se distingue «no existe» de «no se puede»:
+    para el que pide, lo que no esta en el paquete no existe."""
+
+
+def _frontmatter(datos: bytes) -> dict[str, str]:
+    """Los pares `clave: valor` de una sola linea del frontmatter YAML de un `.md`. Es lo
+    minimo que el catalogo necesita (nombre, descripcion, modelo); no interpreta YAML (las
+    skills y agentes del ecosistema escriben escalares de una linea)."""
+    texto = datos.decode("utf-8", errors="replace")
+    if not texto.startswith("---\n"):
+        return {}
+    fin = texto.find("\n---", 4)
+    if fin == -1:
+        return {}
+    pares = {}
+    for linea in texto[4:fin].splitlines():
+        clave, sep, valor = linea.partition(":")
+        if sep and clave and not clave[0].isspace() and clave not in pares:
+            pares[clave.strip()] = valor.strip()
+    return pares
+
+
+@dataclass(frozen=True)
+class PaqueteCargado:
+    """El paquete VERIFICADO, en memoria. El Puerto sirve estos bytes y no vuelve a leer el
+    disco: un symlink o un archivo cambiado despues de la carga no se sirve, y la busqueda
+    de una skill es un `dict`, de modo que `../`, rutas absolutas o enlaces no tienen donde
+    engancharse (lo que no es una clave exacta no existe).
+
+    Cache e invalidacion (LAS CUATRO DEL RENDIMIENTO, 2): el paquete es INMUTABLE por SHA. No hay
+    TTL ni invalidacion parcial; cambiar de version es cargar otro `PaqueteCargado` (y otro
+    Puerto) con otro SHA, y el cambio atomico lo hace quien orquesta (spec §5)."""
+    sha: str
+    constitucion: str
+    skills: Mapping[str, Mapping[str, bytes]]     # nombre -> {ruta relativa dentro de la skill: bytes}
+    agentes: Mapping[str, bytes]                  # nombre -> .md completo (el cuerpo NO sale en el catalogo)
+
+    def descripcion_de(self, nombre: str) -> str:
+        return _frontmatter(self.skills[nombre]["SKILL.md"]).get("description", "")
+
+    def buscar(self, consulta: str, limite: int) -> list[dict]:
+        terminos = consulta.casefold().split()
+        encontradas = []
+        for nombre in sorted(self.skills):
+            descripcion = self.descripcion_de(nombre)
+            cuerpo = self.skills[nombre]["SKILL.md"].decode("utf-8", errors="replace")
+            pajar = f"{nombre}\n{descripcion}\n{cuerpo}".casefold()
+            if all(t in pajar for t in terminos):
+                en_nombre = all(t in nombre.casefold() for t in terminos) if terminos else False
+                encontradas.append((0 if en_nombre else 1, nombre, descripcion))
+        encontradas.sort()
+        return [{"nombre": n, "descripcion": d, "uri": f"skill://{n}"} for _, n, d in encontradas[:limite]]
+
+    def leer(self, nombre: str, archivo: str = "SKILL.md") -> str:
+        try:
+            datos = self.skills[nombre][archivo]
+        except KeyError:
+            raise NoExiste(f"la skill {nombre!r} (archivo {archivo!r}) no esta en el paquete") from None
+        try:
+            return datos.decode("utf-8")
+        except UnicodeDecodeError:
+            raise NoExiste(f"{nombre}/{archivo} no es texto UTF-8") from None
+
+    def catalogo_agentes(self) -> list[dict]:
+        salida = []
+        for nombre in sorted(self.agentes):
+            fm = _frontmatter(self.agentes[nombre])
+            salida.append({"nombre": nombre, "descripcion": fm.get("description", ""),
+                           "modelo": fm.get("model", ""), "herramientas": fm.get("tools", "")})
+        return salida
+
+
+def _leer_sin_seguir_enlaces(ruta: Path) -> bytes:
+    fd = os.open(ruta, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as f:
+        return f.read()
+
+
+def cargar_paquete(cfg: ConfigFaro) -> PaqueteCargado:
+    """Verifica la integridad (`exigir_integridad`: lanza `PaqueteNoVerifica`) y carga en
+    memoria lo que el Puerto sirve. Cada archivo se lee SIN seguir enlaces y se vuelve a
+    comparar con el manifiesto sobre los bytes que quedaron en memoria: lo que se sirve es
+    exactamente lo que se verifico, sin ventana entre la comprobacion y el uso."""
+    raiz = exigir_integridad(cfg)
+    esperados = _leer_manifiesto(raiz)["archivos"]
+    memoria: dict[str, bytes] = {}
+    for rel in sorted(esperados):
+        try:
+            datos = _leer_sin_seguir_enlaces(raiz / rel)
+        except OSError:
+            raise PaqueteNoVerifica((Fallo("archivo_faltante", rel),)) from None
+        if _sha256(datos) != esperados[rel]["sha256"]:
+            raise PaqueteNoVerifica((Fallo("archivo_alterado", rel),))
+        memoria[rel] = datos
+    skills: dict[str, dict[str, bytes]] = {}
+    agentes: dict[str, bytes] = {}
+    for rel, datos in memoria.items():
+        partes = rel.split("/")
+        prefijo = ""
+        if partes[0] == "plugins" and len(partes) > 3:
+            prefijo, partes = f"{partes[1]}:", partes[2:]
+        if partes[0] == "skills" and len(partes) >= 3:
+            skills.setdefault(prefijo + partes[1], {})["/".join(partes[2:])] = datos
+        elif partes[0] == "agentes" or (prefijo and partes[0] == "agents"):
+            if len(partes) == 2 and partes[1].endswith(".md"):
+                agentes[prefijo + partes[1][:-3]] = datos
+    skills = {n: archivos for n, archivos in skills.items() if "SKILL.md" in archivos}
+    return PaqueteCargado(
+        sha=cfg.sha,
+        constitucion=memoria["constitucion/CLAUDE.md"].decode("utf-8"),
+        skills=MappingProxyType({n: MappingProxyType(a) for n, a in skills.items()}),
+        agentes=MappingProxyType(agentes),
+    )

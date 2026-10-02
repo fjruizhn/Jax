@@ -13,6 +13,10 @@ una variable ausente o vacia no tiene valor por defecto, es un error.
   JAX_FARO_PLUGINS         opcional, JSON: [{"nombre","ruta","sha_declarado"}]
   JAX_FARO_REF_FRESCURA    opcional, la ref contra la que se mide la frescura
                            (default `origin/main`; es un nombre de ref, no un dato de entorno)
+  JAX_FARO_SOCKET_DIR      directorio de los sockets del Puerto (`<dir>/<run_id>.sock`; en
+                           produccion `/run/faro`). Absoluto, del usuario del servicio y sin
+                           escritura de grupo/otros
+  JAX_FARO_MAX_MENSAJE     opcional, tope en bytes de UN mensaje MCP (default 16 MiB)
 """
 from __future__ import annotations
 
@@ -97,3 +101,30 @@ class ConfigFaro:
             plugins=plugins,
             ref_frescura=(env.get("JAX_FARO_REF_FRESCURA") or "").strip() or REF_FRESCURA_POR_DEFECTO,
         )
+
+
+MAX_MENSAJE_POR_DEFECTO = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ConfigPuerto:
+    socket_dir: Path
+    max_mensaje: int = MAX_MENSAJE_POR_DEFECTO
+
+    def __post_init__(self) -> None:
+        if not Path(self.socket_dir).is_absolute():
+            raise ConfigFaroInvalida(f"JAX_FARO_SOCKET_DIR tiene que ser una ruta absoluta, no {str(self.socket_dir)!r}")
+        if not isinstance(self.max_mensaje, int) or self.max_mensaje < 1024:
+            raise ConfigFaroInvalida("JAX_FARO_MAX_MENSAJE tiene que ser un entero de al menos 1024 bytes")
+
+    @classmethod
+    def desde_entorno(cls, env: Mapping[str, str]) -> "ConfigPuerto":
+        crudo = (env.get("JAX_FARO_SOCKET_DIR") or "").strip()
+        if not crudo:
+            raise ConfigFaroInvalida("JAX_FARO_SOCKET_DIR no esta definida: sin ella el Puerto no arranca")
+        tope = (env.get("JAX_FARO_MAX_MENSAJE") or "").strip()
+        try:
+            max_mensaje = int(tope) if tope else MAX_MENSAJE_POR_DEFECTO
+        except ValueError as exc:
+            raise ConfigFaroInvalida("JAX_FARO_MAX_MENSAJE no es un entero") from exc
+        return cls(socket_dir=Path(crudo), max_mensaje=max_mensaje)
