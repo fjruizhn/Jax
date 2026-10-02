@@ -526,3 +526,38 @@ def test_la_entrada_cobra_los_bytes_del_mensaje_a_medias_y_los_devuelve_al_entre
         await asyncio.sleep(0)
         assert p.libre == 100_000                           # devuelto al entregarlo
     asyncio.run(caso())
+
+
+def test_dos_ejecuciones_comparten_el_presupuesto_si_se_les_pasa_el_mismo(tmp_path, cargado):
+    """El presupuesto es del SERVICIO, no de cada ejecucion: con presupuesto para 4 conexiones EN TOTAL, repartidas
+    en dos ejecuciones (3 + 2), la quinta espera."""
+    d = tmp_path / "r"
+    d.mkdir(mode=0o700)
+    cfg = ConfigPuerto(socket_dir=d, max_mensaje=1024, presupuesto_bytes=4900, costo_conexion_bytes=1000)
+    compartido = PresupuestoBytes(cfg.presupuesto_bytes)
+
+    async def respondida(lector, plazo):
+        try:
+            return bool(await asyncio.wait_for(lector.readline(), plazo))
+        except TimeoutError:
+            return False
+
+    async def caso():
+        async with puerto(cfg, cargado, ej=ejecucion(run_id="run-a"), presupuesto=compartido) as a, \
+                puerto(cfg, cargado, ej=ejecucion(run_id="run-b"), presupuesto=compartido) as b:
+            assert a.presupuesto is b.presupuesto is compartido
+            ta, tb = _handshake(a.ruta_token.read_text().strip()), _handshake(b.ruta_token.read_text().strip())
+            conexiones = [await _abrir(a, ta + PING) for _ in range(3)] + [await _abrir(b, tb + PING) for _ in range(2)]
+            await asyncio.sleep(0.5)
+            estado = [await respondida(l, 1.0) for l, _ in conexiones]
+            assert sum(estado) == 4, estado               # la N-esima (en total) espera
+            for _, e in conexiones:
+                e.close()
+    corre(caso())
+
+
+def test_sin_pasarle_presupuesto_cada_puerto_crea_el_suyo_por_compatibilidad(tmp_path, cargado):
+    cfg = ConfigPuerto(socket_dir=tmp_path)
+    a = ServidorPuerto(cfg, ejecucion(run_id="x1", uid_esperado=os.geteuid() + 1), cargado, Bitacora(emisores=[]))
+    b = ServidorPuerto(cfg, ejecucion(run_id="x2", uid_esperado=os.geteuid() + 1), cargado, Bitacora(emisores=[]))
+    assert a.presupuesto is not b.presupuesto

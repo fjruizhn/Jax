@@ -121,7 +121,8 @@ def test_un_insert_colgado_falla_con_plazo_y_no_deja_a_los_demas_detras_del_lock
         pool = FalsoPool(modo)
         e = EmisorTabla(pool, plazo_s=0.3)
         t0 = time.monotonic()
-        resultados = await asyncio.gather(*(e(_reg(i)) for i in range(5)), return_exceptions=True)
+        # Tope propio de la prueba (sin pytest-timeout): sin el plazo del emisor esto se cuelga y FALLA en rojo.
+        resultados = await asyncio.wait_for(asyncio.gather(*(e(_reg(i)) for i in range(5)), return_exceptions=True), 10)
         return time.monotonic() - t0, resultados, e, pool
     dt, resultados, e, pool = corre(caso())
     assert all(isinstance(r, TimeoutError) for r in resultados)
@@ -133,9 +134,9 @@ def test_tras_un_plazo_vencido_el_emisor_se_recupera_con_una_cadena_nueva():
         pool = FalsoPool("colgar")
         e = EmisorTabla(pool, plazo_s=0.2)
         with pytest.raises(TimeoutError):
-            await e(_reg(0))
+            await asyncio.wait_for(e(_reg(0)), 10)       # tope propio: sin el plazo del emisor tambien vence aqui, en rojo
         pool.modo = "ok"
-        await e(_reg(1))
+        await asyncio.wait_for(e(_reg(1)), 10)
         return pool.filas
     filas = corre(caso())
     assert verificar_cadena(filas) == []
@@ -226,6 +227,7 @@ def test_arrancado_el_servicio_su_bitacora_va_a_la_tabla_y_sus_puertos_la_usan(e
         assert isinstance(s.bitacora, Bitacora) and s.bitacora.emisores[0] is s.emisor
         assert [f["evento"] for f in pool.filas][:2] == ["inicio_cadena", "servicio_iniciado"]     # la sonda
         async with s.crear_puerto(ejecucion()) as srv, cliente_por_rele(srv) as c:
+            assert srv.presupuesto is s.presupuesto
             await c.call_tool("skills.leer", {"nombre": "alfa"})
         await s.cerrar()
         assert pool.cerrado
@@ -239,3 +241,14 @@ def test_main_sale_con_codigo_2_y_sin_traza_si_falta_la_bitacora(entorno, capsys
     assert main([], env=entorno) == 2
     err = capsys.readouterr().err
     assert "JAX_FARO_BITACORA_DB_HOST" in err and "Traceback" not in err
+
+
+def test_el_servicio_tiene_un_solo_presupuesto_para_todas_sus_ejecuciones(entorno):
+    async def caso():
+        s = await arrancar(entorno, crear_pool=_fabrica(), solo_pruebas_mismo_uid=True)
+        a = s.crear_puerto(ejecucion(run_id="run-a"))
+        b = s.crear_puerto(ejecucion(run_id="run-b"))
+        assert a.presupuesto is b.presupuesto is s.presupuesto
+        assert s.presupuesto.total == s.cfg_puerto.presupuesto_bytes
+        await s.cerrar()
+    corre(caso())
