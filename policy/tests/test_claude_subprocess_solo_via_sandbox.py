@@ -43,12 +43,11 @@ No detecta un lanzamiento de `claude` disfrazado (sin la palabra literal
 nombre) -- eso queda como residuo conocido, mismo criterio que P10 con
 las formas mas sutiles del patron fail-open.
 
-Tampoco detecta imports aliaseados o destructurados de subprocess/os: el
-check de calificacion requiere que la llamada se vea literalmente como
-`subprocess.run(...)` o `os.system(...)` (un ast.Attribute sobre ast.Name
-exacto). `from subprocess import run; run(["claude"])` o `import subprocess
-as sp; sp.run(["claude"])` o `from os import system; system("claude -p")`
-no se detectan hoy -- se consideran un residuo conocido aceptado.
+Imports con alias (ampliado 2026-10-02, MINOR-6): `import subprocess as sp`,
+`from subprocess import run [as r]`, `import os as o`, `from os import system` y
+sus equivalentes de pty/asyncio SE RESUELVEN (`_Alias`): un nombre solo cuenta si
+viene de esos modulos. Quedan como residuo conocido las formas dinamicas
+(`getattr(subprocess, "run")`, `importlib`, `__import__`).
 
 ALCANCE REAL EN CI (misma limitacion honesta que
 test_no_fail_open_except.py, ver tambien el header de
@@ -77,6 +76,12 @@ nuevos, ademas del de arriba:
       del modulo aprobado, lance o no lance algo en ese archivo. Las rutas se
       arman por partes en este archivo A PROPOSITO: escritas enteras, el
       scanner se marcaria a si mismo.
+EXTENSION 2026-10-02 (auditoria del paso 3, MINOR-6): el argv[0] se resuelve ahora
+tambien a traves de `izq + der` (por la izquierda), `shutil.which("x")`, una
+asignacion anotada (`cmd: list[str] = [...]`), `env [VAR=valor] cmd` y
+`bash|sh -c "cmd ..."` (se toma el primer token de cmd, hasta 4 niveles); y los
+lanzadores suman os.posix_spawn*, os.spawn*, os.popen y pty.spawn.
+
 NO se busca la palabra "kimi" a secas: es el nombre de la faceta y del motor en
 todo el codigo, y worker.py usa subprocess.run (para git). Daria falsos
 positivos; el argv[0] y las rutas no.
@@ -90,6 +95,7 @@ from __future__ import annotations
 
 import ast
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -221,16 +227,68 @@ _SUBPROCESS_CALL_NAMES = {
     "create_subprocess_exec", "create_subprocess_shell", "subprocess_exec",
     "run", "Popen", "call", "check_call", "check_output",
     "system",
+    # Ampliacion 2026-10-02 (MINOR-6): os.popen y pty.spawn.
+    "popen", "spawn",
 }
 
-_SUBPROCESS_CALL_PREFIXES = ("exec",)
+# os.exec*, os.spawn* (spawnl/spawnv/...) y os.posix_spawn* se matchean por prefijo.
+_SUBPROCESS_CALL_PREFIXES = ("exec", "spawn", "posix_spawn")
 
 # Nombres genericos que SOLO cuentan como lanzamiento de subproceso si se
-# llaman como atributo de `subprocess`/`os` (subprocess.run(...),
-# os.system(...)). Sin esto, cualquier `x.run(...)` o `self.call(...)` del
-# codebase daria un falso positivo masivo.
-_QUALIFIED_ONLY_NAMES = {"run", "call", "check_call", "check_output", "system"}
-_SUBPROCESS_MODULES = {"subprocess", "os"}
+# llaman como atributo de `subprocess`/`os`/`pty` (subprocess.run(...),
+# os.system(...), pty.spawn(...)). Sin esto, cualquier `x.run(...)`,
+# `self.call(...)` o `sock.spawn(...)` del codebase daria un falso positivo masivo.
+_QUALIFIED_ONLY_NAMES = {"run", "call", "check_call", "check_output", "system", "popen", "spawn"}
+_SUBPROCESS_MODULES = {"subprocess", "os", "pty"}
+# Modulos cuyos alias (`import X as Y`, `from X import f [as g]`) se resuelven.
+_MODULOS_CON_ALIAS = _SUBPROCESS_MODULES | {"asyncio", "shutil"}
+
+
+class _Alias:
+    """Que nombres locales son, de verdad, los modulos subprocess/os/pty/asyncio/
+    shutil o funciones importadas de ellos. Resuelve `import subprocess as sp` y
+    `from subprocess import run [as r]` (el scanner anterior los daba por residuo
+    aceptado: auditoria 2026-10-02, MINOR-6). Un nombre que NO viene de esos
+    modulos no se toca: `from mimodulo import run` no es un lanzador."""
+
+    def __init__(self, tree: ast.AST | None = None) -> None:
+        self.modulos: dict[str, str] = {}
+        self.funciones: dict[str, tuple[str, str]] = {}
+        if tree is None:
+            return
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Import):
+                for a in n.names:
+                    if a.name in _MODULOS_CON_ALIAS:
+                        self.modulos[a.asname or a.name] = a.name
+            elif isinstance(n, ast.ImportFrom) and n.module in _MODULOS_CON_ALIAS and not n.level:
+                for a in n.names:
+                    self.funciones[a.asname or a.name] = (n.module, a.name)
+
+
+_SIN_ALIAS = _Alias()
+
+
+def _nombre_lanzador(node: ast.Call, alias: _Alias = _SIN_ALIAS) -> str | None:
+    """Nombre canonico del lanzador de subprocesos que es `node` (`run`, `Popen`,
+    `system`, `spawnlp`...), o None si no lo es."""
+    func = node.func
+    modulo: str | None = None
+    if isinstance(func, ast.Name) and func.id in alias.funciones:
+        modulo, name = alias.funciones[func.id]
+    else:
+        name = _call_name(func)
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            modulo = alias.modulos.get(func.value.id, func.value.id)
+    if name is None:
+        return None
+    if name not in _SUBPROCESS_CALL_NAMES and not name.startswith(_SUBPROCESS_CALL_PREFIXES):
+        return None
+    if name in _QUALIFIED_ONLY_NAMES or name.startswith(_SUBPROCESS_CALL_PREFIXES):
+        # Solo cuenta como subprocess.run / os.system / os.execv / pty.spawn, etc.
+        if modulo not in _SUBPROCESS_MODULES:
+            return None
+    return name
 
 
 def _iter_python_files():
@@ -254,25 +312,14 @@ def _call_name(func: ast.expr) -> str | None:
     return None
 
 
-def _is_subprocess_launch(node: ast.Call) -> bool:
-    name = _call_name(node.func)
-    if name is None:
-        return False
-    if name not in _SUBPROCESS_CALL_NAMES and not name.startswith(_SUBPROCESS_CALL_PREFIXES):
-        return False
-    if name in _QUALIFIED_ONLY_NAMES or name.startswith(_SUBPROCESS_CALL_PREFIXES):
-        # Solo cuenta como subprocess.run / os.system / os.execv, etc.
-        func = node.func
-        if not isinstance(func, ast.Attribute) or not isinstance(func.value, ast.Name):
-            return False
-        if func.value.id not in _SUBPROCESS_MODULES:
-            return False
-    return True
+def _is_subprocess_launch(node: ast.Call, alias: _Alias = _SIN_ALIAS) -> bool:
+    return _nombre_lanzador(node, alias) is not None
 
 
 def _calls_create_subprocess(tree: ast.Module) -> bool:
+    alias = _Alias(tree)
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and _is_subprocess_launch(node):
+        if isinstance(node, ast.Call) and _is_subprocess_launch(node, alias):
             return True
     return False
 
@@ -311,48 +358,146 @@ def _es_argv0_de_cli(valor: str) -> bool:
     return any(valor == n or valor.endswith("/" + n) for n in _CLIS_DE_SUSCRIPCION)
 
 
+_TIPOS_ASIGNABLES = (ast.List, ast.Tuple, ast.Constant, ast.BinOp, ast.Call)
+
+
 def _asignaciones_a_listas(tree: ast.AST) -> dict[str, ast.AST]:
-    """`cmd = ["kimi", "-p"]` -> {"cmd": <List>}. Solo asignaciones simples de un
-    nombre a una lista/tupla/cadena literal; si el nombre se reasigna, gana la
-    ultima (imprecision aceptada: el scanner es de nivel AST)."""
+    """`cmd = ["kimi", "-p"]` o `cmd: list[str] = [...]` -> {"cmd": <List>}. Solo
+    asignaciones simples de un nombre a una lista/tupla/cadena literal, a una
+    concatenacion (`["kimi"] + x`) o a una llamada (`shutil.which("kimi")`); si el
+    nombre se reasigna, gana la ultima (imprecision aceptada: el scanner es de
+    nivel AST)."""
     out: dict[str, ast.AST] = {}
     for n in ast.walk(tree):
         if (isinstance(n, ast.Assign) and len(n.targets) == 1
                 and isinstance(n.targets[0], ast.Name)
-                and isinstance(n.value, (ast.List, ast.Tuple, ast.Constant))):
+                and isinstance(n.value, _TIPOS_ASIGNABLES)):
             out[n.targets[0].id] = n.value
+        elif (isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
+                and n.value is not None and isinstance(n.value, _TIPOS_ASIGNABLES)):
+            out[n.target.id] = n.value
     return out
 
 
-def _primer_literal(nodo: ast.AST, asignaciones: dict[str, ast.AST], _prof: int = 0) -> str | None:
-    """argv[0] literal de lo que se le pasa a un lanzador de subprocesos."""
-    if _prof > 3:
+def _tokens_de_cadena(valor: str) -> list[str | None]:
+    try:
+        return list(shlex.split(valor))
+    except ValueError:  # comillas sin cerrar: lo mejor que se puede hacer
+        return valor.split()
+
+
+def _tokens(nodo: ast.AST, asignaciones: dict[str, ast.AST], _prof: int = 0) -> list[str | None] | None:
+    """Los tokens del argv que se le pasa a un lanzador, en la medida en que son
+    literales (`None` = un elemento que no se puede resolver). Resuelve: cadena
+    literal (se parte como un shell), lista/tupla, `*lista`, un nombre asignado,
+    `izq + der` (por la izquierda: lo que haya a la derecha, si no es literal, queda
+    como `None`) y `shutil.which("x")` / `which("x")` (el binario que se busca)."""
+    if _prof > 4:
         return None
     if isinstance(nodo, ast.Constant) and isinstance(nodo.value, str):
-        partes = nodo.value.split()
-        return partes[0] if partes else None
+        return _tokens_de_cadena(nodo.value)
     if isinstance(nodo, (ast.List, ast.Tuple)):
-        return _primer_literal(nodo.elts[0], asignaciones, _prof + 1) if nodo.elts else None
+        out: list[str | None] = []
+        for i, elt in enumerate(nodo.elts):
+            if isinstance(elt, ast.Starred):
+                sub = _tokens(elt.value, asignaciones, _prof + 1)
+                out += sub if sub is not None else [None]
+            elif isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                # el argv0 con espacios ("codex exec") cuenta por su primera palabra
+                out.append(elt.value.split()[0] if i == 0 and elt.value.split() else elt.value)
+            else:
+                # un nombre asignado a una cadena/`which(...)` o un `which(...)` directo
+                sub = _tokens(elt, asignaciones, _prof + 1) if isinstance(elt, (ast.Call, ast.Name)) else None
+                out.append(sub[0] if sub and len(sub) == 1 else None)
+        return out
     if isinstance(nodo, ast.Starred):
-        return _primer_literal(nodo.value, asignaciones, _prof + 1)
+        return _tokens(nodo.value, asignaciones, _prof + 1)
     if isinstance(nodo, ast.Name) and nodo.id in asignaciones:
-        return _primer_literal(asignaciones[nodo.id], asignaciones, _prof + 1)
+        return _tokens(asignaciones[nodo.id], asignaciones, _prof + 1)
+    if isinstance(nodo, ast.BinOp) and isinstance(nodo.op, ast.Add):
+        izq = _tokens(nodo.left, asignaciones, _prof + 1)
+        if izq is None:
+            return None
+        if isinstance(nodo.left, ast.Constant) and isinstance(nodo.right, ast.Constant):
+            return _tokens(ast.Constant(value=str(nodo.left.value) + str(nodo.right.value)), asignaciones, _prof + 1)
+        return izq + [None]
+    if isinstance(nodo, ast.Call) and _call_name(nodo.func) == "which" and nodo.args:
+        arg = nodo.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            return [arg.value]
     return None
+
+
+def _es_shell_con_c(tokens: list[str | None], i: int) -> int | None:
+    """Indice de la opcion `-c` (o `-lc`, `-ec`...) de un shell, si hay."""
+    for j in range(i + 1, len(tokens)):
+        t = tokens[j]
+        if t is None:
+            return None
+        if t.startswith("-") and not t.startswith("--") and "c" in t[1:]:
+            return j
+        if not t.startswith("-"):
+            return None
+    return None
+
+
+_SHELLS = ("bash", "sh", "dash", "zsh")
+
+
+def _argv0_efectivo(tokens: list[str | None] | None) -> str | None:
+    """El programa que de verdad se ejecuta: salta `env` (y sus opciones y
+    `VAR=valor`) y entra en `bash -c '<cmd>'` / `sh -c '<cmd>'` tomando el primer
+    token de <cmd>. Hasta 4 niveles (`env bash -c 'env A=1 codex'`)."""
+    toks = tokens
+    for _ in range(4):
+        if not toks or toks[0] is None:
+            return None
+        a0 = toks[0]
+        base = a0.rsplit("/", 1)[-1]
+        if base == "env":
+            k = 1
+            while k < len(toks) and toks[k] is not None and (toks[k].startswith("-") or "=" in toks[k]):
+                k += 1
+            toks = toks[k:]
+            continue
+        if base in _SHELLS:
+            j = _es_shell_con_c(toks, 0)
+            if j is None or j + 1 >= len(toks) or toks[j + 1] is None:
+                return a0
+            toks = _tokens_de_cadena(toks[j + 1])
+            continue
+        return a0
+    return None
+
+
+def _primer_literal(nodo: ast.AST, asignaciones: dict[str, ast.AST], _prof: int = 0) -> str | None:
+    """argv[0] literal (efectivo: tras `env` y dentro de `bash -c`) de lo que se le
+    pasa a un lanzador de subprocesos."""
+    return _argv0_efectivo(_tokens(nodo, asignaciones, _prof))
 
 
 def _lanza_cli_de_suscripcion(tree: ast.AST) -> bool:
     """Criterio (c): un lanzamiento de subproceso cuyo argv[0] es claude|codex|kimi
     (o una ruta que termina en ellos). NO mira la palabra suelta."""
     asignaciones = _asignaciones_a_listas(tree)
+    alias = _Alias(tree)
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and _is_subprocess_launch(node)):
+        if not isinstance(node, ast.Call):
+            continue
+        nombre = _nombre_lanzador(node, alias)
+        if nombre is None:
             continue
         candidatos = list(node.args)
         candidatos += [k.value for k in node.keywords if k.arg == "args"]
-        if _call_name(node.func) == "subprocess_exec":
-            candidatos = candidatos[1:]  # loop.subprocess_exec(protocolo, argv0, ...)
+        if nombre == "subprocess_exec" or (
+            nombre.startswith("spawn") and nombre != "spawn"
+        ):
+            candidatos = candidatos[1:]  # loop.subprocess_exec(protocolo, argv0, ...) / os.spawn*(modo, ruta, ...)
         if not candidatos:
             continue
+        if nombre.startswith("spawn") and nombre != "spawn" and len(candidatos) > 1:
+            # os.spawnl*(modo, ruta, arg0, ...): el programa es `ruta`
+            candidatos = candidatos[:1]
         primero = _primer_literal(candidatos[0], asignaciones)
         if primero is not None and _es_argv0_de_cli(primero):
             return True
@@ -677,6 +822,97 @@ def test_el_archivo_de_test_declarado_por_bwrap_sigue_corriendo_bwrap_de_verdad(
                 f"{rel} esta declarado como aislado por bwrap directo pero ya no lo "
                 f"hace: o se le devuelve el bwrap con --tmpfs $HOME, o se quita de "
                 f"_AISLADO_POR_BWRAP_DIRECTO")
+
+
+# --- Formas que el scanner no veia (auditoria 2026-10-02, MINOR-6) ----------
+# Cada autoprueba positiva es un snippet que el scanner anterior dejaba pasar.
+
+def test_detecta_la_concatenacion_por_la_izquierda() -> None:
+    assert _detects("import subprocess\nsubprocess.run(['codex'] + extra)\n")
+    assert _detects("import subprocess\nsubprocess.run(['kimi', '-p'] + [x])\n")
+    assert _detects("import os\nos.system('codex exec - ' + entrada)\n")
+    assert _detects("import subprocess\ncmd = ['kimi'] + args\nsubprocess.run(cmd)\n")
+    assert _detects("import subprocess\nsubprocess.run(cmd)\ncmd = ['codex', 'exec'] + extra\n")
+    assert not _detects("import subprocess\nsubprocess.run(['git'] + ['codex'])\n")
+
+
+def test_detecta_shutil_which() -> None:
+    assert _detects("import subprocess, shutil\nsubprocess.run([shutil.which('codex'), 'exec'])\n")
+    assert _detects("import subprocess\nfrom shutil import which\nsubprocess.run([which('kimi')])\n")
+    assert _detects("import subprocess, shutil\nbinario = shutil.which('kimi')\nsubprocess.run([binario, '-p'])\n")
+    assert not _detects("import subprocess, shutil\nsubprocess.run([shutil.which('git'), 'log'])\n")
+
+
+def test_detecta_la_asignacion_anotada() -> None:
+    assert _detects("import subprocess\ncmd: list[str] = ['kimi', '-p', 'x']\nsubprocess.run(cmd)\n")
+    assert _detects("import asyncio\ncmd: tuple = ('codex', 'exec')\nasyncio.create_subprocess_exec(*cmd)\n")
+    assert not _detects("import subprocess\ncmd: list[str] = ['git', 'log']\nsubprocess.run(cmd)\n")
+
+
+def test_detecta_subprocess_con_alias_o_importado_directo() -> None:
+    assert _detects("import subprocess as sp\nsp.run(['codex', 'exec'])\n")
+    assert _detects("import subprocess as sp\nsp.Popen(['kimi'])\n")
+    assert _detects("from subprocess import run\nrun(['kimi', '-p', 'x'])\n")
+    assert _detects("from subprocess import run as correr\ncorrer(['codex'])\n")
+    assert _detects("from subprocess import check_output\ncheck_output(['codex', 'exec'])\n")
+    assert _detects("from os import system\nsystem('codex exec -')\n")
+    assert _detects("import os as sistema\nsistema.system('kimi -p x')\n")
+    assert _detects("from os import execvp\nexecvp('kimi', ['kimi'])\n")
+    assert _detects("from subprocess import run\nrun(['claude', '--print'])\n")
+    assert _detects("import subprocess as sp\nsp.run(['claude', '--print'])\n")
+
+
+def test_el_alias_no_inventa_violaciones() -> None:
+    assert not _detects("import subprocess as sp\nsp.run(['git', 'status'])\n")
+    assert not _detects("from subprocess import run\nrun(['git', 'log'])\n")
+    assert not _detects("def run(x): pass\nrun(['codex'])\n")          # `run` local, no es subprocess
+    assert not _detects("from mimodulo import run\nrun(['kimi'])\n")  # `run` de otro modulo
+    assert not _detects("import foo as sp\nsp.run(['codex'])\n")      # `sp` no es subprocess
+
+
+def test_detecta_el_comando_dentro_de_un_shell() -> None:
+    assert _detects("import subprocess\nsubprocess.run(['bash', '-c', 'codex exec - < in.txt'])\n")
+    assert _detects("import subprocess\nsubprocess.run(['sh', '-c', 'kimi -p x'])\n")
+    assert _detects("import subprocess\nsubprocess.run(['/bin/bash', '-c', 'codex'])\n")
+    assert _detects("import subprocess\nsubprocess.run(['/bin/sh', '-lc', 'kimi -p x'])\n")
+    assert _detects("import os\nos.system(\"bash -c 'kimi -p x'\")\n")
+    assert _detects("import subprocess\nsubprocess.run(['bash', '-c', 'env A=1 codex exec'])\n")
+    assert not _detects("import subprocess\nsubprocess.run(['bash', '-c', 'git status'])\n")
+    assert not _detects("import subprocess\nsubprocess.run(['bash', '-c', 'echo codex'])\n")
+    assert not _detects("import subprocess\nsubprocess.run(['bash', 'script-de-codex.sh'])\n")
+
+
+def test_detecta_el_comando_tras_env() -> None:
+    assert _detects("import subprocess\nsubprocess.run(['env', 'FOO=1', 'codex', 'exec'])\n")
+    assert _detects("import subprocess\nsubprocess.run(['/usr/bin/env', 'A=1', 'B=2', 'kimi'])\n")
+    assert _detects("import subprocess\nsubprocess.run(['env', '-i', 'A=1', 'kimi'])\n")
+    assert _detects("import os\nos.system('env FOO=1 codex exec -')\n")
+    assert _detects("import subprocess\nsubprocess.run(['env', 'bash', '-c', 'kimi -p x'])\n")
+    assert not _detects("import subprocess\nsubprocess.run(['env', 'FOO=1', 'git', 'log'])\n")
+    assert not _detects("import subprocess\nsubprocess.run(['env'])\n")
+
+
+def test_detecta_los_otros_lanzadores_de_procesos() -> None:
+    assert _detects("import os\nos.posix_spawn('/usr/local/bin/codex', ['codex'], {})\n")
+    assert _detects("import os\nos.posix_spawnp('kimi', ['kimi', '-p'], {})\n")
+    assert _detects("import os\nos.spawnlp(os.P_WAIT, 'codex', 'codex', 'exec')\n")
+    assert _detects("import os\nos.spawnv(os.P_NOWAIT, '/usr/local/bin/kimi', ['kimi'])\n")
+    assert _detects("import os\nos.spawnvp(os.P_WAIT, 'codex', ['codex'])\n")
+    assert _detects("import os\nos.popen('codex exec -')\n")
+    assert _detects("import os\nos.popen('kimi -p x').read()\n")
+    assert _detects("import pty\npty.spawn(['kimi', '-p', 'x'])\n")
+    assert _detects("import pty\npty.spawn('codex')\n")
+    assert _detects("import pty as terminal\nterminal.spawn(['codex'])\n")
+    assert _detects("import os\nos.popen('claude --print')\n")
+
+
+def test_los_otros_lanzadores_no_inventan_violaciones() -> None:
+    assert not _detects("import os\nos.popen('git log')\n")
+    assert not _detects("import os\nos.posix_spawn('/usr/bin/git', ['git'], {})\n")
+    assert not _detects("import pty\npty.spawn(['bash'])\n")
+    assert not _detects("import os\nos.spawnlp(os.P_WAIT, 'git', 'git')\n")
+    assert not _detects("sock.spawn(['codex'])\n")      # `spawn` de otro objeto
+    assert not _detects("pool.popen('kimi')\n")         # `popen` de otro objeto
 
 
 def test_no_naked_claude_subprocess() -> None:
