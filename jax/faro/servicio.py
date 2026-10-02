@@ -32,7 +32,7 @@ from .aviso import Avisador, ConfigAviso, leer_credenciales
 from .bitacora import Bitacora, emisor_logger
 from .bitacora_db import ConfigBitacoraDB, EmisorTabla, crear_pool
 from .config import ConfigFaro, ConfigFaroInvalida, ConfigPuerto
-from .control import ConfigControl, ServidorControl
+from .control import ConfigControl, ServidorControl, validar_directorio_control
 from .identidad import Ejecucion
 from .logs import asegurar_logging
 from .paquete import PaqueteCargado, cargar_paquete
@@ -56,10 +56,10 @@ class Servicio:
     cfg_control: ConfigControl | None = None
     avisador: Avisador | None = None
 
-    def control(self) -> ServidorControl:
+    def control(self, jaula_viva=None) -> ServidorControl:
         """El canal de control autenticado (0.3c): el unico lugar donde nace una `Ejecucion`. Se usa con
         `async with servicio.control() as c:`; sus ejecuciones comparten el UNICO presupuesto del servicio."""
-        return ServidorControl(self.cfg_control, self.crear_puerto, self.bitacora)
+        return ServidorControl(self.cfg_control, self.crear_puerto, self.bitacora, jaula_viva=jaula_viva)
 
     def crear_puerto(self, ejecucion: Ejecucion) -> ServidorPuerto:
         return ServidorPuerto(self.cfg_puerto, ejecucion, self.paquete, self.bitacora, presupuesto=self.presupuesto,
@@ -83,6 +83,7 @@ async def arrancar(env: Mapping[str, str], *, crear_pool: Callable = crear_pool,
     cfg_control = ConfigControl.desde_entorno(env, solo_pruebas_mismo_uid=solo_pruebas_mismo_uid)    # 0.3c
     if os.geteuid() == 0:
         raise ConfigFaroInvalida("el servicio del Faro no corre como root: usa el usuario sin privilegios `faro`")
+    validar_directorio_control(cfg_control)                 # un 0777 no deja arrancar (antes de tocar la base)
     credenciales = leer_credenciales(cfg_aviso.creds)       # falla cerrado: ausentes, incompletas o con escritura ajena
     paquete = await asyncio.to_thread(cargar_paquete, cfg_faro)
     pool = await crear_pool(cfg_db)

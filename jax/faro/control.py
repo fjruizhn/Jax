@@ -35,6 +35,8 @@ import asyncio
 import json
 import logging
 import os
+import pwd
+import re
 import socket
 import stat
 import uuid
@@ -44,7 +46,7 @@ from pathlib import Path
 
 from .bitacora import Bitacora
 from .config import ConfigFaroInvalida
-from .identidad import Ejecucion
+from .identidad import RE_TENANT, Ejecucion
 from .transporte import ServidorPuerto, credenciales_del_par
 
 logger = logging.getLogger(__name__)
@@ -56,6 +58,35 @@ MAX_PEDIDO_POR_DEFECTO = 64 * 1024
 CAMPOS_DE_IDENTIDAD = ("usuario", "tenant", "faceta", "motor", "pipeline", "entry_point")
 _MAX_CAMPO = 200
 _UID_MAX = 2 ** 32 - 2      # 2**32-1 es «sin uid» para el kernel
+
+
+# Cuentas que ejecutan codigo guiado por modelos: jax-platform y LAS MANOS (`jaxsvc`), el ecosistema Axioma
+# (`axioma`) y las sesiones de Fernando (`fruiz`). El orquestador que crea ejecuciones NO puede ser ninguna de
+# ellas: quien controla el codigo de un modelo controlaria quien pide las ejecuciones. Es una lista NEGATIVA
+# versionada; se resuelve por nombre con `pwd` (los uids cambian de una maquina a otra) y se puede EXTENDER con
+# `JAX_FARO_ORQUESTADOR_PROHIBIDOS` (nombres separados por comas), nunca acortar. El orquestador debe ser una
+# cuenta propia que no ejecute codigo de modelos (plan, 0.10).
+CUENTAS_CON_CODIGO_DE_MODELOS = ("jaxsvc", "axioma", "fruiz")
+_RE_CUENTA = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+
+
+def _resolver_cuentas(env: Mapping[str, str], getpwnam: Callable = pwd.getpwnam) -> dict[int, str]:
+    extra = [n.strip() for n in (env.get("JAX_FARO_ORQUESTADOR_PROHIBIDOS") or "").split(",") if n.strip()]
+    for n in extra:
+        if not _RE_CUENTA.fullmatch(n):
+            raise ConfigFaroInvalida(f"JAX_FARO_ORQUESTADOR_PROHIBIDOS: {n!r} no es un nombre de cuenta valido")
+    resueltas: dict[int, str] = {}
+    for nombre in (*CUENTAS_CON_CODIGO_DE_MODELOS, *extra):
+        try:
+            resueltas.setdefault(int(getpwnam(nombre).pw_uid), nombre)
+        except KeyError:
+            continue                    # una cuenta que no existe en esta maquina no puede ser el orquestador
+    return resueltas
+
+
+def cuentas_prohibidas(env: Mapping[str, str], getpwnam: Callable = pwd.getpwnam) -> set[int]:
+    """Los uids que no pueden ser orquestador ni estar en el rango de jaulas."""
+    return set(_resolver_cuentas(env, getpwnam))
 
 
 @dataclass(frozen=True)
@@ -70,6 +101,7 @@ class ConfigControl:
     plazo_s: float = PLAZO_S_POR_DEFECTO
     max_pedido: int = MAX_PEDIDO_POR_DEFECTO
     solo_pruebas_mismo_uid: bool = False
+    cuentas_con_codigo_de_modelos: tuple[tuple[int, str], ...] = ()      # (uid, nombre); lo llena desde_entorno
 
     def __post_init__(self) -> None:
         if not Path(self.control_dir).is_absolute():
@@ -85,11 +117,19 @@ class ConfigControl:
             raise ConfigFaroInvalida(
                 f"JAX_FARO_ORQUESTADOR_UID={self.orquestador_uid} es el usuario del servicio: cualquier proceso de `faro` "
                 "pasaria por el orquestador")
+        for uid, nombre in self.cuentas_con_codigo_de_modelos:
+            if self.orquestador_uid == uid:
+                raise ConfigFaroInvalida(
+                    f"JAX_FARO_ORQUESTADOR_UID={uid} es la cuenta `{nombre}`, que ejecuta codigo guiado por modelos: "
+                    "el orquestador tiene que ser una cuenta propia")
         if not 1 <= self.jaula_uid_min <= self.jaula_uid_max:
             raise ConfigFaroInvalida("el rango de uids de jaula (JAX_FARO_JAULA_UID_MIN..MAX) tiene que cumplir 1 <= MIN <= MAX")
         for nombre, v in (("root", 0), ("el usuario del servicio", euid), ("el orquestador", self.orquestador_uid)):
             if self.jaula_uid_min <= v <= self.jaula_uid_max:
                 raise ConfigFaroInvalida(f"el rango de uids de jaula incluye a {nombre} (uid {v}): una jaula no puede ser {nombre}")
+        for uid, nombre in self.cuentas_con_codigo_de_modelos:
+            if self.jaula_uid_min <= uid <= self.jaula_uid_max:
+                raise ConfigFaroInvalida(f"el rango de uids de jaula incluye a `{nombre}` (uid {uid}), que ejecuta codigo de modelos")
         if not self.plazo_s > 0:
             raise ConfigFaroInvalida("JAX_FARO_CONTROL_PLAZO_S tiene que ser positivo")
         if not isinstance(self.max_pedido, int) or self.max_pedido < 1024:
@@ -100,7 +140,8 @@ class ConfigControl:
         return Path(self.control_dir) / NOMBRE_SOCKET
 
     @classmethod
-    def desde_entorno(cls, env: Mapping[str, str], *, solo_pruebas_mismo_uid: bool = False) -> "ConfigControl":
+    def desde_entorno(cls, env: Mapping[str, str], *, solo_pruebas_mismo_uid: bool = False,
+                      getpwnam: Callable = pwd.getpwnam) -> "ConfigControl":
         def pedir(nombre: str) -> str:
             valor = (env.get(nombre) or "").strip()
             if not valor:
@@ -124,27 +165,53 @@ class ConfigControl:
                    jaula_uid_min=entero("JAX_FARO_JAULA_UID_MIN"), jaula_uid_max=entero("JAX_FARO_JAULA_UID_MAX"),
                    plazo_s=opcional("JAX_FARO_CONTROL_PLAZO_S", float, PLAZO_S_POR_DEFECTO),
                    max_pedido=opcional("JAX_FARO_CONTROL_MAX_PEDIDO", int, MAX_PEDIDO_POR_DEFECTO),
-                   solo_pruebas_mismo_uid=solo_pruebas_mismo_uid)
+                   solo_pruebas_mismo_uid=solo_pruebas_mismo_uid,
+                   # En las pruebas de un solo usuario el «orquestador» ES este proceso (fruiz): la lista no aplica.
+                   cuentas_con_codigo_de_modelos=() if solo_pruebas_mismo_uid else tuple(_resolver_cuentas(env, getpwnam).items()))
 
 
 class _Rechazo(Exception):
-    def __init__(self, motivo: str):
+    def __init__(self, motivo: str, **extra):
         super().__init__(motivo)
         self.motivo = motivo
+        self.extra = extra          # run_id, id_correlacion...: van a la bitacora y a la respuesta
 
 
 def _texto(pedido: Mapping, campo: str) -> str:
     v = pedido.get(campo)
     if not isinstance(v, str) or not v.strip() or len(v) > _MAX_CAMPO or any(ord(c) < 32 or ord(c) == 127 for c in v):
         raise _Rechazo(f"campo_invalido:{campo}")
-    return v.strip()
+    v = v.strip()
+    if campo == "tenant" and not RE_TENANT.fullmatch(v):
+        raise _Rechazo("campo_invalido:tenant")     # el mismo patron que las claves de los topes
+    return v
+
+
+def validar_directorio_control(cfg: ConfigControl) -> None:
+    """El directorio del socket de control: del usuario del servicio, sin escritura de grupo ni NADA para otros.
+    Lo llama `ServidorControl` al abrir y `servicio.arrancar` al arrancar (un 0777 no deja arrancar)."""
+    d = Path(cfg.control_dir)
+    try:
+        st = os.lstat(d)
+    except OSError as exc:
+        raise ConfigFaroInvalida(f"el directorio de control {d} no se puede leer: {type(exc).__name__}") from exc
+    if not stat.S_ISDIR(st.st_mode):
+        raise ConfigFaroInvalida(f"{d} no es un directorio")
+    if st.st_uid != os.geteuid():
+        raise ConfigFaroInvalida(f"{d} tiene que ser del usuario del servicio (uid {os.geteuid()})")
+    if st.st_mode & 0o027:
+        raise ConfigFaroInvalida(
+            f"{d} no admite escritura de grupo ni NINGUN permiso para otros (tiene {stat.S_IMODE(st.st_mode):04o}); "
+            "use 0750 o 0710 con el grupo del orquestador")
 
 
 class ServidorControl:
     """`crear_puerto(ejecucion) -> ServidorPuerto` es el del `Servicio` (con su bitacora y su UNICO presupuesto)."""
 
     def __init__(self, cfg: ConfigControl, crear_puerto: Callable[[Ejecucion], ServidorPuerto], bitacora: Bitacora,
-                 *, leer_credenciales: Callable = credenciales_del_par):
+                 *, leer_credenciales: Callable = credenciales_del_par, jaula_viva: Callable[[int], bool] | None = None):
+        """`jaula_viva(uid) -> bool` (gancho para el lanzador, y para el scope de 0.6): mientras devuelva True, el
+        uid de una ejecucion CERRADA no se reasigna (un proceso suyo podria seguir vivo con ese uid)."""
         self._cfg = cfg
         self._crear_puerto = crear_puerto
         self._bitacora = bitacora
@@ -153,6 +220,8 @@ class ServidorControl:
         self._tareas: set[asyncio.Task] = set()
         self._ejecuciones: dict[str, ServidorPuerto] = {}
         self._uids: dict[int, str] = {}                 # uid de jaula -> run_id de la ejecucion viva que lo usa
+        self._jaula_viva = jaula_viva
+        self._retenidos: set[int] = set()               # uids de ejecuciones cerradas cuya jaula sigue viva
 
     @property
     def ruta_socket(self) -> Path:
@@ -166,19 +235,7 @@ class ServidorControl:
     def _validar_entorno(self) -> None:
         if os.geteuid() == 0:
             raise ConfigFaroInvalida("el canal de control no corre como root: usa el usuario sin privilegios `faro`")
-        d = Path(self._cfg.control_dir)
-        try:
-            st = os.lstat(d)
-        except OSError as exc:
-            raise ConfigFaroInvalida(f"el directorio de control {d} no se puede leer: {type(exc).__name__}") from exc
-        if not stat.S_ISDIR(st.st_mode):
-            raise ConfigFaroInvalida(f"{d} no es un directorio")
-        if st.st_uid != os.geteuid():
-            raise ConfigFaroInvalida(f"{d} tiene que ser del usuario del servicio (uid {os.geteuid()})")
-        if st.st_mode & 0o027:
-            raise ConfigFaroInvalida(
-                f"{d} no admite escritura de grupo ni NINGUN permiso para otros (tiene {stat.S_IMODE(st.st_mode):04o}); "
-                "use 0750 o 0710 con el grupo del orquestador")
+        validar_directorio_control(self._cfg)
 
     async def __aenter__(self) -> "ServidorControl":
         self._validar_entorno()
@@ -216,7 +273,7 @@ class ServidorControl:
         except Exception:  # fail-closed: el rechazo se mantiene; solo la anotacion fallo y queda en el log
             logger.exception("no se pudo registrar el rechazo de control (%s)", motivo)
         if escritor is not None:
-            await self._responder(escritor, {"ok": False, "error": motivo})
+            await self._responder(escritor, {"ok": False, "error": motivo, **{k: v for k, v in extra.items() if k in ("run_id", "id_correlacion")}})
 
     async def _responder(self, escritor: asyncio.StreamWriter, cuerpo: dict) -> None:
         try:
@@ -259,7 +316,7 @@ class ServidorControl:
                 else:
                     raise _Rechazo("operacion_desconocida")
             except _Rechazo as r:
-                await self._rechazar(cred, r.motivo, escritor, operacion=_corto(op))
+                await self._rechazar(cred, r.motivo, escritor, operacion=_corto(op), **r.extra)
                 return
             await self._responder(escritor, respuesta)
         except asyncio.CancelledError:
@@ -283,7 +340,11 @@ class ServidorControl:
         if uid in (0, os.geteuid(), c.orquestador_uid):      # el rango ya los excluye; defensa en profundidad
             raise _Rechazo("uid_jaula_invalido")
         if uid in self._uids:
-            raise _Rechazo("uid_jaula_en_uso")
+            if uid in self._retenidos and self._jaula_viva is not None and not self._jaula_viva(uid):
+                self._retenidos.discard(uid)
+                self._uids.pop(uid, None)           # la jaula ya murio: el uid se libera
+            else:
+                raise _Rechazo("uid_jaula_en_uso")
         return uid
 
     async def _crear(self, cred, pedido: Mapping) -> dict:
@@ -311,16 +372,21 @@ class ServidorControl:
                     logger.exception("no se pudo deshacer el Puerto de %s", run_id)
             if isinstance(exc, asyncio.CancelledError):
                 raise
+            identificadores = {"run_id": run_id, "id_correlacion": id_correlacion, "uid_jaula": uid}
             if isinstance(exc, ConfigFaroInvalida):
-                raise _Rechazo("ejecucion_invalida") from None
+                raise _Rechazo("ejecucion_invalida", **identificadores) from None
             logger.error("no se pudo crear la ejecucion %s (%s)", run_id, type(exc).__name__)
-            raise _Rechazo("no_se_pudo_crear_o_anotar") from None
+            raise _Rechazo("no_se_pudo_crear_o_anotar", **identificadores) from None
         self._ejecuciones[run_id] = srv
         return {"ok": True, "run_id": run_id, "id_correlacion": id_correlacion, "uid_jaula": uid}
 
     async def _cerrar_ejecucion(self, run_id: str, srv: ServidorPuerto) -> None:
         self._ejecuciones.pop(run_id, None)
-        self._uids.pop(srv.ejecucion.uid_esperado, None)
+        uid = srv.ejecucion.uid_esperado
+        if self._jaula_viva is not None and self._jaula_viva(uid):
+            self._retenidos.add(uid)                # sigue ocupado hasta que su jaula muera
+        else:
+            self._uids.pop(uid, None)
         try:
             await srv.__aexit__(None, None, None)
         except Exception:  # fail-soft: el cierre sigue; el socket de esa ejecucion ya no se atiende

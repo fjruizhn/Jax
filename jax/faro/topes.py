@@ -29,13 +29,14 @@ from typing import Protocol
 
 from .bitacora import Bitacora
 from .config import ConfigFaroInvalida
+from .identidad import RE_TENANT
 
 logger = logging.getLogger(__name__)
 
 TABLA = "faro_topes"
 MAX_CANTIDAD = 2 ** 53                      # lo que un entero de JSON/float representa sin perdida
 RECURSOS_PREFIJO_SIN_TOPE = frozenset({"agentes", "conexiones"})        # D-4
-_RE_TENANT = re.compile(r"^[A-Za-z0-9_.:@-]{1,64}$")
+_RE_TENANT = RE_TENANT      # el mismo que valida el canal de control: un tenant aceptado alli nunca rompe aqui
 _RE_RECURSO = re.compile(r"^[a-z0-9_.-]{1,48}$")
 _RE_PERIODO = re.compile(r"^[A-Za-z0-9_.:-]{1,32}$")
 _RESERVADOS = frozenset({"evento", "momento", "decision", "motivo", "tenant", "recurso", "cantidad", "usado", "tope",

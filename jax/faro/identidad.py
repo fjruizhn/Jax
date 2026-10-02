@@ -22,6 +22,10 @@ from .config import ConfigFaroInvalida
 _RE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
+# El tenant entra en claves de topes y en rutas de bitacora: un patron estricto, UNO solo para el control y los topes.
+RE_TENANT = re.compile(r"^[A-Za-z0-9_.:@-]{1,64}$")
+
+
 @dataclass(frozen=True)
 class Ejecucion:
     run_id: str
@@ -41,6 +45,8 @@ class Ejecucion:
             valor = getattr(self, campo)
             if not isinstance(valor, str) or not valor.strip():
                 raise ConfigFaroInvalida(f"la ejecucion necesita {campo}: lo fija el servicio que la crea")
+        if not RE_TENANT.fullmatch(self.tenant):
+            raise ConfigFaroInvalida("el tenant solo admite letras, digitos y _ . : @ - (hasta 64): es la clave de sus topes")
         if not isinstance(self.uid_esperado, int) or isinstance(self.uid_esperado, bool) or self.uid_esperado < 0:
             raise ConfigFaroInvalida("uid_esperado tiene que ser un uid (entero >= 0)")
 

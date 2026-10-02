@@ -501,7 +501,7 @@ def test_d_si_la_bitacora_no_puede_anotar_la_creacion_esta_se_deshace(mundo):
             bien = await pedir(srv.ruta_socket, PEDIDO)           # el mismo uid de jaula vuelve a estar libre
         return mal, quedo, bien
     mal, quedo, bien = corre(caso())
-    assert mal == {"ok": False, "error": "no_se_pudo_crear_o_anotar"} and quedo == ({}, []) and bien["ok"]
+    assert (mal["ok"], mal["error"]) == (False, "no_se_pudo_crear_o_anotar") and quedo == ({}, []) and bien["ok"]
 
 
 def test_d_un_rechazo_se_mantiene_aunque_la_bitacora_falle(mundo):
@@ -544,7 +544,7 @@ def test_un_puerto_que_no_se_puede_crear_rechaza_y_no_deja_reservado_el_uid(mund
             bien = await pedir(srv.ruta_socket, PEDIDO)
         return mal, bien
     mal, bien = corre(caso())
-    assert mal == {"ok": False, "error": "ejecucion_invalida"} and bien["ok"]
+    assert (mal["ok"], mal["error"]) == (False, "ejecucion_invalida") and bien["ok"]
 
 
 # --------------------------------------------------------------------------- #
@@ -637,16 +637,19 @@ def test_major1_la_lista_por_defecto_incluye_las_cuentas_que_ejecutan_codigo_de_
 
 
 @pytest.mark.parametrize("cuenta,uid", [("jaxsvc", 994), ("axioma", 1001), ("fruiz", 1000)])
-def test_major1_el_orquestador_no_puede_ser_una_cuenta_que_ejecuta_codigo_de_modelos(cuenta, uid):
+def test_major1_el_orquestador_no_puede_ser_una_cuenta_que_ejecuta_codigo_de_modelos(cuenta, uid, monkeypatch):
+    monkeypatch.setattr(os, "geteuid", lambda: 5)            # que la causa sea la lista y no «es el usuario del servicio»
     with pytest.raises(ConfigFaroInvalida, match=cuenta):
         ConfigControl.desde_entorno({**ENV, "JAX_FARO_ORQUESTADOR_UID": str(uid)}, getpwnam=_pwd(TABLA))
 
 
-def test_major1_una_cuenta_propia_del_orquestador_si_se_acepta():
+def test_major1_una_cuenta_propia_del_orquestador_si_se_acepta(monkeypatch):
+    monkeypatch.setattr(os, "geteuid", lambda: 5)
     assert ConfigControl.desde_entorno({**ENV, "JAX_FARO_ORQUESTADOR_UID": "990"}, getpwnam=_pwd(TABLA)).orquestador_uid == 990
 
 
-def test_major1_la_lista_se_extiende_por_configuracion_pero_no_se_puede_acortar():
+def test_major1_la_lista_se_extiende_por_configuracion_pero_no_se_puede_acortar(monkeypatch):
+    monkeypatch.setattr(os, "geteuid", lambda: 5)
     e = {**ENV, "JAX_FARO_ORQUESTADOR_PROHIBIDOS": "otra, no-existe"}
     assert cuentas_prohibidas(e, getpwnam=_pwd(TABLA)) == {994, 1001, 1000, 995}           # lo que no existe en el sistema se salta
     with pytest.raises(ConfigFaroInvalida, match="otra"):
@@ -661,7 +664,8 @@ def test_major1_un_nombre_de_cuenta_invalido_en_la_configuracion_falla_cerrado()
         cuentas_prohibidas({"JAX_FARO_ORQUESTADOR_PROHIBIDOS": "ok,con espacio;rm"}, getpwnam=_pwd(TABLA))
 
 
-def test_major1_el_rango_de_jaulas_tampoco_puede_incluir_esas_cuentas():
+def test_major1_el_rango_de_jaulas_tampoco_puede_incluir_esas_cuentas(monkeypatch):
+    monkeypatch.setattr(os, "geteuid", lambda: 5)
     with pytest.raises(ConfigFaroInvalida, match="jaxsvc"):
         ConfigControl.desde_entorno({**ENV, "JAX_FARO_JAULA_UID_MIN": "993", "JAX_FARO_JAULA_UID_MAX": "1100"}, getpwnam=_pwd(TABLA))
 
