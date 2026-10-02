@@ -200,6 +200,7 @@ git commit -F /ruta/al/mensaje.txt   # "feat(proyectos): rename_project en la au
   - `async def get_project_for_user(pool, *, tenant_id: int, user_id: int, project_id: int) -> dict` — mismo dict; `ProjectNotVisible` si no es miembro activo, el alcance no es de ese tenant, o está HIDDEN/DISABLED y no es admin.
   - `async def list_project_members(pool, *, tenant_id: int, user_id: int, project_id: int) -> list[dict]` — exige lo mismo que `get_project_for_user`; cada dict: `{"user_id": int, "email": str, "role": str, "grant_origin": str}`, solo membresías ACTIVE, orden por email.
   - `async def list_invite_candidates(pool, *, tenant_id: int, user_id: int, project_id: int, query: str, limit: int) -> list[dict]` — exige OWNER del proyecto ACTIVE (`ProjectRoleInsufficient` si no); usuarios `active` del mismo tenant cuyo email empieza por `query` (≥ 2 caracteres, si no lista vacía), que no son miembros ACTIVE ni admins del tenant; `{"user_id", "email"}`, máximo `limit` (1..20).
+  - > **E1.1 (2026-10-02, Fernando).** `query` es opcional (vacío = lista sin filtrar; 1 o más caracteres = prefijo de email) y el tope de `limit` es 1..100; la UI de Miembros pasa a lista con casillas más filtro por email. Lo de arriba (≥ 2 caracteres, máximo 20) es la historia de E1: no se reescribe. Índice `idx_jax_users_tenant_email` en la migración 005i.
 
 - [ ] **Step 1: Escribir las pruebas que fallan**
 

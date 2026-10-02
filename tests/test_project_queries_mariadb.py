@@ -143,12 +143,35 @@ async def test_candidatos_excluyen_miembros_admins_y_otros_tenants():
                                                   query=emails[uid][:6], limit=20)
         with pytest.raises(ProjectRoleInsufficient):
             await list_invite_candidates(pool, tenant_id=t, user_id=miembro, project_id=p, query="ab", limit=20)
-        corto = await list_invite_candidates(pool, tenant_id=t, user_id=owner, project_id=p, query="a", limit=20)
+        corto = await list_invite_candidates(pool, tenant_id=t, user_id=owner, project_id=p, query=emails[libre][:1], limit=20)
     finally:
         pool.close(); await pool.wait_closed()
     ids = {c["user_id"] for c in todos}
     assert libre in ids and not ids & {miembro, adm, ajeno, owner}
-    assert not {c["user_id"] for c in corto} & {miembro, adm, ajeno, owner}
+    # E1.1: con UN caracter ya filtra (antes []): el elegible SI aparece y los excluidos no.
+    corto_ids = {c["user_id"] for c in corto}
+    assert libre in corto_ids and not corto_ids & {miembro, adm, ajeno, owner}
+
+
+@asincrono
+async def test_candidatos_sin_query_mantienen_la_autoridad_de_owner_y_proyecto_activo():
+    t = await _crear_tenant("q5g")
+    owner = await _crear_usuario(t); miembro = await _crear_usuario(t); fuera = await _crear_usuario(t)
+    p = await _crear_proyecto_activo(t, name="P"); await _crear_scope(p, t)
+    await _crear_membresia(p, t, owner, role="OWNER"); await _crear_membresia(p, t, miembro, role="VIEWER")
+    apagado = await _crear_proyecto_activo(t, name="X"); await _crear_scope(apagado, t, status="ARCHIVED")
+    await _crear_membresia(apagado, t, owner, role="OWNER")
+    pool = await _pool()
+    try:
+        for q in ("", "   ", "ab"):
+            with pytest.raises(ProjectRoleInsufficient):
+                await list_invite_candidates(pool, tenant_id=t, user_id=miembro, project_id=p, query=q, limit=20)
+            with pytest.raises(ProjectNotVisible):
+                await list_invite_candidates(pool, tenant_id=t, user_id=fuera, project_id=p, query=q, limit=20)
+            with pytest.raises(ProjectRoleInsufficient):
+                await list_invite_candidates(pool, tenant_id=t, user_id=owner, project_id=apagado, query=q, limit=20)
+    finally:
+        pool.close(); await pool.wait_closed()
 
 
 @asincrono
