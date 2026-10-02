@@ -3,15 +3,16 @@ identidad que sale DEL SOCKET (spec §3 «Transporte»).
 
 QUIEN PUEDE HABLAR (auditoria MAJOR-2/3)
 - El servicio corre como usuario `faro` SIN privilegios: con euid 0 no arranca. No hace `chown`.
-- El directorio de sockets es del usuario del servicio y esta en 0700 (cualquier permiso de grupo u
-  otros lo rechaza). A la jaula NO se le monta el directorio: se le entrega por BIND DE ARCHIVO solo su
-  `<run_id>.sock` y su `<run_id>.token`. Como el socket tiene que poder conectarlo el uid de la jaula
-  (que no es el del servicio), su modo es 0666; dentro de un directorio 0700 solo llega quien lo
-  recibio por bind. El uid de la jaula por ejecucion queda para la fase 1.
+- El directorio de sockets es del usuario del servicio y esta en 0700. A la jaula NO se le monta el directorio:
+  se le entrega por BIND DE ARCHIVO solo su `<run_id>.sock` y su `<run_id>.token`. Para que el bwrap de la jaula
+  (que corre con SU uid, no el de `faro`) pueda abrir esas dos fuentes, `faro` pone ACL con nombre SIN root
+  (`acl.py`): directorio `user:<uid>:--x` (atravesar, no listar), socket 0600 + `user:<uid>:rw-`, token 0400 +
+  `user:<uid>:r--`; se quitan al cerrar. El directorio solo se acepta si sus entradas con nombre son de uids de
+  jaulas VIVAS (`_VIVOS`). Con el uid del servicio (pruebas de un solo usuario) no se pone ninguna.
 - Defensa en profundidad para que otra ejecucion del MISMO uid no pueda suplantar a la dueña: un token
-  aleatorio por ejecucion (`secrets.token_urlsafe(32)`), en un archivo 0444 del mismo directorio (la
-  jaula dueña lo recibe por bind), que el rele manda como primera linea (`FARO-TOKEN <token>\\n`). Se
-  compara en tiempo constante; sin el, no se habla MCP. Nunca se registra.
+  aleatorio por ejecucion (`secrets.token_urlsafe(32)`), en un archivo 0400 del mismo directorio, que el rele
+  manda como primera linea (`FARO-TOKEN <token>\\n`). Se compara en tiempo constante; sin el, no se habla MCP.
+  Nunca se registra.
 - Orden de comprobaciones por conexion: credenciales del par (`SO_PEERCRED`, las pone el kernel) ->
   token. Cada rechazo queda en la bitacora.
 
@@ -46,6 +47,7 @@ from pathlib import Path
 
 from mcp.server.stdio import stdio_server
 
+from . import acl as _acl
 from . import freno as _freno
 from .bitacora import Bitacora
 from .config import ConfigFaroInvalida, ConfigPuerto
@@ -60,8 +62,17 @@ _PEERCRED = struct.Struct("3i")
 _TROZO = 16384            # lo que se lee de una vez: la memoria sin cobrar por conexion es de este orden
 _FACTOR_COPIAS = 3        # un mensaje en vuelo ocupa ~3 copias (bytes, texto, objeto analizado)
 _PREFIJO_HANDSHAKE = b"FARO-TOKEN "
-MODO_SOCKET = 0o666       # ver el docstring: dentro de un directorio 0700
-MODO_TOKEN = 0o444
+MODO_SOCKET = 0o600       # de `faro`; a la jaula la deja pasar una ACL con nombre (acl.py)
+MODO_TOKEN = 0o400
+
+
+# uid de jaula -> cuantas ejecuciones VIVAS lo usan, por directorio de sockets. Es lo que el Puerto acepta como
+# entradas ACL con nombre del directorio, y lo que decide cuando quitar la entrada (la ultima ejecucion que sale).
+_VIVOS: dict[str, dict[int, int]] = {}
+
+
+def _vivos(d) -> set[int]:
+    return set(_VIVOS.get(str(d), {}))
 
 
 class PresupuestoBytes:
@@ -195,6 +206,7 @@ class ServidorPuerto:
         self.ruta_token: Path = Path(cfg.socket_dir) / f"{ejecucion.run_id}.token"
         self.presupuesto = presupuesto if presupuesto is not None else PresupuestoBytes(cfg.presupuesto_bytes)
         self._token = b""
+        self._acl_registrada = False
         self._servidor: asyncio.AbstractServer | None = None
         self._tareas: set[asyncio.Task] = set()
 
@@ -210,9 +222,7 @@ class ServidorPuerto:
             raise ConfigFaroInvalida(f"{d} no es un directorio")
         if st.st_uid != os.geteuid():
             raise ConfigFaroInvalida(f"{d} tiene que ser del usuario del servicio (uid {os.geteuid()})")
-        if st.st_mode & 0o077:
-            raise ConfigFaroInvalida(
-                f"{d} tiene que ser privado (0700): ningun permiso de grupo ni de otros (tiene {stat.S_IMODE(st.st_mode):04o})")
+        _acl.validar_privado(d, uids_permitidos=_vivos(d))       # 0700, o 0700 + ACL con nombre solo de jaulas vivas
 
     def _escribir_token(self) -> None:
         self._token = secrets.token_urlsafe(32).encode()
@@ -231,10 +241,39 @@ class ServidorPuerto:
             self._servidor = await asyncio.start_unix_server(self._atender, path=str(self.ruta_socket), limit=_TROZO,
                                                              backlog=socket.SOMAXCONN)
             os.chmod(self.ruta_socket, MODO_SOCKET)
+            self._conceder_acl()
         except BaseException:
             await self.__aexit__(None, None, None)
             raise
         return self
+
+    def _conceder_acl(self) -> None:
+        """A la jaula (uid ≠ el del servicio) se le da paso a SUS dos archivos y al directorio solo para atravesarlo."""
+        uid, d = self.ejecucion.uid_esperado, str(self._cfg.socket_dir)
+        if uid == os.geteuid():
+            return                                   # las pruebas con un solo usuario: el dueño ya llega
+        cuenta = _VIVOS.setdefault(d, {})
+        cuenta[uid] = cuenta.get(uid, 0) + 1
+        self._acl_registrada = True
+        _acl.conceder(d, uid, _acl.X)
+        _acl.conceder(self.ruta_token, uid, _acl.R)
+        _acl.conceder(self.ruta_socket, uid, _acl.R | _acl.W)
+
+    def _retirar_acl(self) -> None:
+        if not self._acl_registrada:
+            return
+        self._acl_registrada = False
+        uid, d = self.ejecucion.uid_esperado, str(self._cfg.socket_dir)
+        cuenta = _VIVOS.get(d, {})
+        cuenta[uid] = cuenta.get(uid, 1) - 1
+        if cuenta[uid] <= 0:
+            cuenta.pop(uid, None)
+            if not cuenta:
+                _VIVOS.pop(d, None)
+            try:
+                _acl.retirar(d, uid)
+            except (ConfigFaroInvalida, OSError):  # fail-closed: no se pudo quitar el paso; queda en el log y el proximo Puerto lo vera como ACL ajena
+                logger.exception("no se pudo quitar la ACL del uid %s en %s", uid, d)
 
     async def __aexit__(self, *_exc) -> None:
         if self._servidor is not None:
@@ -254,6 +293,7 @@ class ServidorPuerto:
                 os.unlink(ruta)
             except FileNotFoundError:  # fail-soft: ya no esta (alguien lo borro antes); el objetivo del cierre es justamente que no exista
                 pass
+        self._retirar_acl()
         self._token = b""
 
     async def _rechazar(self, id_conexion: str, cred, motivo: str) -> None:
