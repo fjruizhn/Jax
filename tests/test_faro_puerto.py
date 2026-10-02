@@ -460,8 +460,8 @@ def test_un_pedido_mas_largo_que_el_limite_configurado_cierra_la_conexion(tmp_pa
 
 
 @pytest.mark.parametrize("valor,esperado", [
-    ("a\nb", "a b"), ("a\r\nb\tc", "a b c"), ("x" * 500, "x" * 200), (None, "None"), (12, "12"),
-    ("a b c", "a b c"),
+    ("a\nb", "a\\x20b"), ("a\r\nb\tc", "a\\x20b\\x20c"), ("x" * 500, "x" * 200), (None, "None"), (12, "12"),
+    ("a\u2028b\u00a0c", "a\\x20b\\x20c"), ("a=b", "a\\x3db"),
 ])
 def test_campo_log_es_de_una_linea_y_acotado(valor, esperado):
     assert _campo_log(valor) == esperado
