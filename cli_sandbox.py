@@ -1511,6 +1511,14 @@ def _ranura_liberar(handle, perfil: Perfil, ranuras: int, cred_host: Optional[st
 _RE_BLANCOS = re.compile(r"\s+")
 
 
+def _campo_log(valor, tope: int = 200) -> str:
+    """Un valor para la linea de log de `run_cli`: texto de UNA sola linea y de largo acotado.
+    Todo campo de texto de esa linea pasa por aqui (no solo `motivo`): un valor con saltos de
+    linea puede fabricar una segunda linea de log con una `clase=ok` falsa (MINOR-22). Los
+    espacios y saltos (\\n, \\r, tabs, separadores unicode) se colapsan en uno solo."""
+    return _RE_BLANCOS.sub(" ", str(valor))[:tope]
+
+
 @dataclass(frozen=True)
 class ResultadoCLI:
     texto: str
@@ -1628,13 +1636,14 @@ async def run_cli(
         clase = getattr(exc, "clase", None) or type(exc).__name__
         # el motivo distingue las causas de una misma clase (SandboxUnavailable tiene
         # varias); sin saltos de linea, para que un mensaje no pueda fabricar otra linea
-        motivo = _RE_BLANCOS.sub(" ", str(exc))[:200]
+        motivo = _campo_log(exc)
         raise
     finally:
         logger.info(
             "run_cli correlation_id=%s entry_point=%s user_id=%s tenant_id=%s perfil=%s modelo=%s "
             "version_cli=%s clase=%s latencia_ms=%d motivo=%s",
-            correlation_id, entry_point, getattr(titular, "user_id", None),
-            getattr(titular, "tenant_id", None), perfil, modelo, version, clase or "ok",
+            _campo_log(correlation_id), _campo_log(entry_point),
+            _campo_log(getattr(titular, "user_id", None)), _campo_log(getattr(titular, "tenant_id", None)),
+            _campo_log(perfil), _campo_log(modelo), _campo_log(version), _campo_log(clase or "ok"),
             int((time.monotonic() - t0) * 1000), motivo,
         )

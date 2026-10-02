@@ -1436,6 +1436,45 @@ class LogDeRunCliTest(_Entorno):
         self.assertNotIn("\n", linea)
         self.assertNotIn("SEGUNDA-LINEA-FALSA", linea)
 
+    async def test_ningun_campo_de_texto_del_log_puede_fabricar_otra_linea(self):
+        # MINOR-22 (reauditoria 2026-10-02): `motivo` se saneaba y los demas campos de texto
+        # (perfil, modelo, correlation_id, entry_point...) no: `perfil="x\nclase=ok ..."`
+        # fabricaba una SEGUNDA linea de log con una `clase=ok` falsa.
+        falso = "x\nclase=ok latencia_ms=1"
+        casos = {
+            "perfil": dict(perfil=falso),
+            "modelo": dict(modelo=falso),
+            "correlation_id": dict(correlation_id=falso),
+            "entry_point": dict(entry_point=falso),
+        }
+        for campo, cambios in casos.items():
+            with self.subTest(campo=campo):
+                args = dict(
+                    perfil="codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                    timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat",
+                )
+                args.update(cambios)
+                with self.assertLogs("cli_sandbox", "INFO") as cm:
+                    with self.assertRaises(Exception):
+                        await cli_sandbox.run_cli(**args)
+                registros = [r for r in cm.records if r.getMessage().startswith("run_cli ")]
+                self.assertEqual(len(registros), 1)
+                mensaje = registros[0].getMessage()
+                self.assertNotIn("\n", mensaje)
+                self.assertNotIn("\r", mensaje)
+                self.assertEqual(len(mensaje.splitlines()), 1)
+                self.assertIn("x clase=ok latencia_ms=1", mensaje)  # colapsado en la MISMA linea
+
+    async def test_los_campos_de_texto_del_log_se_recortan_igual_que_el_motivo(self):
+        largo = "z" * 500
+        with self.assertLogs("cli_sandbox", "INFO") as cm:
+            with self.assertRaises(Exception):
+                await cli_sandbox.run_cli(
+                    "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                    timeout=5, titular=await self.titular(), correlation_id=largo, entry_point="chat")
+        mensaje = [r.getMessage() for r in cm.records if r.getMessage().startswith("run_cli ")][0]
+        self.assertNotIn("z" * 201, mensaje)
+
     async def test_en_exito_y_al_cancelar_el_motivo_va_vacio(self):
         with self.assertLogs("cli_sandbox", "INFO") as cm:
             await self.correr("codex")
