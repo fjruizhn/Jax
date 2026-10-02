@@ -307,6 +307,15 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest
       - run: python -m pytest policy/tests/test_claude_subprocess_solo_via_sandbox.py policy/tests/test_ejecutor_lanza_solo_con_contratos.py -v
+      - name: Piso exacto del scanner de subprocesos de CLIs de suscripcion
+        # 37 tests (28 + 9 autopruebas de las formas nuevas, auditoria 2026-10-02,
+        # MINOR-6/MINOR-7), medidos con JAX_PLATFORM_REPO_ROOT apuntando a un
+        # directorio que no existe: en el runner jax-platform tampoco existe y el
+        # escaneo real cubre solo este repo. Exacto: una autoprueba que desaparezca
+        # deja pasar en silencio la forma que cubria.
+        run: |
+          python -m pytest -q policy/tests/test_claude_subprocess_solo_via_sandbox.py 2>&1 | tee /tmp/scanner
+          grep -qE "^37 passed" /tmp/scanner || { echo "PISO ROTO: se esperaban 37 tests CORRIDOS del scanner."; exit 1; }
       - name: Piso exacto de la guardia del arranque del Ejecutor
         # 5 tests (Ejecutor SP1 plan 6, 2026-09-17): nadie usa remoto_claude ni vigilar sin
         # exigir_contratos. Exacto: uno que desaparezca deja pasar un lanzador sin contratos.
@@ -345,7 +354,8 @@ jobs:
   # con CONTENCION REAL (ataques dentro de bwrap): sin bwrap la clase se
   # auto-saltea y un skip se ve igual que verde, asi que se instala bwrap y se
   # exige el numero exacto de tests CORRIDOS y cero skips. Medido 2026-10-01 en
-  # hall9000: 65 passed.
+  # hall9000: 65 passed. 2026-10-02 (auditoria del paso 1-3,
+  # MAJOR-1..5 y MINOR-8/9/10/13): 134 passed.
   cli-sandbox-unit:
     runs-on: ubuntu-latest
     steps:
@@ -363,8 +373,8 @@ jobs:
       - run: python -m pytest _cli_sandbox_test.py -v
       - run: |
           python -m pytest _cli_sandbox_test.py -q 2>&1 | tee /tmp/clisb
-          grep -qE "^65 passed" /tmp/clisb || {
-            echo "PISO ROTO: se esperaban 65 tests CORRIDOS de cli_sandbox."; exit 1; }
+          grep -qE "^134 passed" /tmp/clisb || {
+            echo "PISO ROTO: se esperaban 134 tests CORRIDOS de cli_sandbox."; exit 1; }
           if grep -qE "skipped" /tmp/clisb; then
             echo "HAY TESTS SALTADOS: la contencion real no se ejercito."; exit 1; fi
 
