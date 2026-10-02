@@ -104,6 +104,17 @@ _CODEX_OK = _jsonl(
 )
 
 
+_SALIDA_FEATURES = """\
+apply_patch_freeform                     removed            false
+apps                                     stable             false
+fast_mode                                under development  false
+item_ids                                 removed            true
+mentions_v2                              stable             true
+shell_tool                               stable             false
+web_search_cached                        under development  false
+"""
+
+
 class _Entorno(unittest.IsolatedAsyncioTestCase):
     """Entorno de prueba: binarios, credenciales, rundir y locks en un tmp."""
 
@@ -120,6 +131,9 @@ class _Entorno(unittest.IsolatedAsyncioTestCase):
         self.fake_bwrap.write_text("#!/bin/sh\n")
         self.fake_bwrap.chmod(0o755)
         self.shas = {}
+        self.salida_features = _SALIDA_FEATURES
+        self.features_returncode = 0
+        self.features_demora = 0.0
         for nombre, binario in (("codex", "codex"), ("kimi", "kimi")):
             d = self.root / nombre / "9.9.9"
             d.mkdir(parents=True)
@@ -205,6 +219,13 @@ class _Entorno(unittest.IsolatedAsyncioTestCase):
         cap = {"llamadas": 0}
 
         async def fake_exec(*argv, **kwargs):
+            if "features" in argv:
+                # MINOR-21: `codex features list` corre solo, una vez por firma, ANTES de la
+                # llamada; el runner falso lo atiende con la tabla de `self.salida_features`
+                cap["features_llamadas"] = cap.get("features_llamadas", 0) + 1
+                cap["features_argv"], cap["features_kwargs"] = argv, kwargs
+                return _FakeProc(self.salida_features.encode(), returncode=self.features_returncode,
+                                 demora=self.features_demora)
             cap["llamadas"] += 1
             cap["argv"], cap["kwargs"] = argv, kwargs
             # lo que hay en /work en este instante (el rundir del host)
@@ -997,15 +1018,6 @@ class ArbolDelBinarioTest(_Entorno):
         self.assertEqual(cap["llamadas"], 0)
 
 
-_SALIDA_FEATURES = """\
-apply_patch_freeform                     removed            false
-apps                                     stable             false
-fast_mode                                under development  false
-item_ids                                 removed            true
-mentions_v2                              stable             true
-shell_tool                               stable             false
-web_search_cached                        under development  false
-"""
 
 
 class CodexCanalYFeaturesTest(_Entorno):
@@ -1035,6 +1047,17 @@ class CodexCanalYFeaturesTest(_Entorno):
         self.assertFalse(permitidas & set(cli_sandbox._CODEX_DISABLE),
                          "una feature apagada a proposito no puede estar en la lista permitida")
         self.assertEqual(_PERFIL_CODEX_REAL.features_permitidas, cli_sandbox._CODEX_FEATURES_PERMITIDAS)
+
+    def test_unified_exec_no_se_puede_apagar_con_disable_y_no_esta_permitido(self):
+        # medido en 0.160.0: `--disable unified_exec` no lo apaga. No se agrega a la lista
+        # permitida; mientras siga activo, verificar_features falla cerrado.
+        self.assertNotIn("unified_exec", cli_sandbox._CODEX_FEATURES_PERMITIDAS)
+        salida = _SALIDA_FEATURES + "unified_exec                             stable             true\n"
+        with self.assertRaises(cli_sandbox.FeaturesNoPermitidas) as c:
+            cli_sandbox.verificar_features(salida)
+        self.assertIn("unified_exec", str(c.exception))
+        fuente = inspect.getsource(cli_sandbox)
+        self.assertIn("NO apaga `unified_exec`", fuente, "la evidencia esta documentada junto a la lista")
 
     def test_el_comando_para_listar_features_lleva_los_mismos_disable_del_perfil(self):
         cmd = cli_sandbox.comando_features_codex("/opt/jax-cli/codex/9.9.9/codex")
@@ -1080,6 +1103,123 @@ class CodexCanalYFeaturesTest(_Entorno):
         with self.assertRaises(cli_sandbox.FeaturesNoPermitidas) as c:
             cli_sandbox.verificar_features(salida)
         self.assertIn("goals", str(c.exception))
+
+
+class FeaturesAutomaticasTest(_Entorno):
+    """MINOR-21 (auditoria 2026-10-02, ronda 2): `verificar_features` ya no es un paso
+    manual del paso 11. Corre solo, junto a la verificacion del manifiesto del binario:
+    una vez por firma del arbol, cacheado con la misma clave, dentro del sandbox, con el
+    mismo `ejecutar` del nucleo y un CODEX_HOME efimero; y falla cerrado."""
+
+    def setUp(self):
+        super().setUp()
+        cli_sandbox._CACHE_FEATURES.clear()
+        self.addCleanup(cli_sandbox._CACHE_FEATURES.clear)
+
+    async def _run(self, **kw):
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch("asyncio.create_subprocess_exec", fake):
+            res = await cli_sandbox.run_cli(
+                "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat", **kw)
+        return res, cap
+
+    async def test_run_cli_verifica_las_features_antes_de_lanzar_y_una_sola_vez(self):
+        res, cap = await self._run()
+        self.assertEqual(res.texto, "hola desde codex")
+        self.assertEqual(cap["features_llamadas"], 1)
+        self.assertEqual(cap["llamadas"], 1)
+        _, cap2 = await self._run()  # misma firma: cacheado
+        self.assertEqual(cap2.get("features_llamadas", 0), 0)
+        self.assertEqual(cap2["llamadas"], 1)
+
+    async def test_la_verificacion_corre_confinada_con_los_mismos_disable_y_sin_credenciales(self):
+        _, cap = await self._run()
+        argv = list(cap["features_argv"])
+        ruta = str(self.root / "codex" / "9.9.9" / "codex")
+        self.assertEqual(argv[0], str(self.fake_bwrap), "dentro de bwrap, no el binario pelado")
+        cmd = argv[argv.index("--") + 1:]
+        self.assertEqual(cmd, cli_sandbox.comando_features_codex(ruta))
+        self.assertEqual([cmd[i + 1] for i, x in enumerate(cmd) if x == "--disable"], _DISABLE_CODEX)
+        texto = " ".join(argv)
+        self.assertNotIn(str(self.cred), texto, "sin credenciales de suscripcion: no hace falta login ni cuota")
+        self.assertIn(f"{self.root / 'codex' / '9.9.9'}", texto)  # el binario esta montado (ro)
+        env = cap["features_kwargs"]["env"]
+        self.assertEqual(set(env), {"HOME", "PATH", "LANG", "CODEX_HOME", "CODEX_SQLITE_HOME"})
+        self.assertTrue(env["CODEX_HOME"].startswith("/tmp/"), "CODEX_HOME efimero (el /tmp privado del sandbox)")
+        self.assertNotEqual(env["CODEX_HOME"], cli_sandbox.PERFILES["codex"].env_fijo()["CODEX_HOME"])
+        self.assertNotIn("SECRETO_DEL_PADRE", json.dumps(env))
+        self.assertEqual(cap["features_kwargs"]["stdin"], asyncio.subprocess.PIPE)
+
+    async def test_una_feature_nueva_activada_falla_cerrado_y_no_lanza_la_llamada(self):
+        self.salida_features = _SALIDA_FEATURES + "telepatia_tool                           stable             true\n"
+        cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+        with patch("asyncio.create_subprocess_exec", fake):
+            with self.assertRaises(cli_sandbox.FeaturesNoPermitidas) as c:
+                await cli_sandbox.run_cli(
+                    "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                    timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertIn("telepatia_tool", str(c.exception))
+        self.assertEqual(cap["llamadas"], 0, "la llamada real no se lanza")
+        self.assertEqual(list(self.run_dir.iterdir()), [], "ni el rundir de la verificacion queda")
+        # un fallo no se cachea: la siguiente llamada vuelve a verificar (y vuelve a fallar)
+        with patch("asyncio.create_subprocess_exec", fake):
+            with self.assertRaises(cli_sandbox.FeaturesNoPermitidas):
+                await cli_sandbox.run_cli(
+                    "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                    timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+        self.assertEqual(cap["features_llamadas"], 2)
+
+    async def test_salida_vacia_ilegible_exit_code_o_timeout_tambien_fallan_cerrado(self):
+        casos = (
+            ("vacia", dict(salida_features="")),
+            ("ilegible", dict(salida_features="esto no es una tabla\n")),
+            ("exit code", dict(features_returncode=2)),
+            ("timeout", dict(features_demora=1.0)),
+        )
+        for nombre, cambios in casos:
+            with self.subTest(caso=nombre):
+                cli_sandbox._CACHE_FEATURES.clear()
+                for k, v in cambios.items():
+                    setattr(self, k, v)
+                with patch.object(cli_sandbox, "FEATURES_TIMEOUT_S", 0.1):
+                    cap, fake = self.capturar(_FakeProc(_CODEX_OK))
+                    with patch("asyncio.create_subprocess_exec", fake):
+                        with self.assertRaises(cli_sandbox.FeaturesNoPermitidas):
+                            await cli_sandbox.run_cli(
+                                "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
+                                timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
+                self.assertEqual(cap["llamadas"], 0)
+                self.salida_features, self.features_returncode, self.features_demora = _SALIDA_FEATURES, 0, 0.0
+
+    async def test_si_cambia_el_arbol_se_vuelve_a_verificar(self):
+        _, cap = await self._run()
+        self.assertEqual(cap["features_llamadas"], 1)
+        extra = self.root / "codex" / "9.9.9" / "libcodex.so"
+        extra.write_bytes(b"lib\n")
+        extra.chmod(0o755)
+        sha = cli_sandbox.sha_manifiesto(str(extra.parent), uid_esperado=os.getuid())
+        with patch.dict(os.environ, {"JAX_CLI_CODEX_SHA256": sha}):
+            _, cap2 = await self._run()
+        self.assertEqual(cap2["features_llamadas"], 1, "firma nueva del arbol: se verifica de nuevo")
+
+    async def test_la_cache_de_features_usa_la_misma_clave_y_firma_que_la_del_manifiesto(self):
+        await self._run()
+        ruta = str(self.root / "codex" / "9.9.9" / "codex")
+        self.assertEqual(list(cli_sandbox._CACHE_FEATURES), list(cli_sandbox._CACHE_SHA))
+        self.assertEqual(cli_sandbox._CACHE_FEATURES[ruta], cli_sandbox._CACHE_SHA[ruta][0])
+
+    async def test_un_perfil_sin_lista_permitida_no_corre_features(self):
+        cap, fake = self.capturar(_FakeProc(b""))
+        with patch("asyncio.create_subprocess_exec", fake):
+            await cli_sandbox._asegurar_features(cli_sandbox.PERFILES["kimi"], "/x/kimi", "/x")
+        self.assertEqual(cap.get("features_llamadas", 0), 0)
+        self.assertEqual(cap["llamadas"], 0)
+
+    async def test_el_unico_create_subprocess_exec_sigue_siendo_el_de_ejecutar(self):
+        fuente = inspect.getsource(cli_sandbox)
+        self.assertEqual(fuente.count("asyncio.create_subprocess_exec("), 1)
+        self.assertIn("await ejecutar(", inspect.getsource(cli_sandbox._features_del_binario))
 
 
 class KimiFallaCerradoTest(_Entorno):
@@ -1161,13 +1301,14 @@ class ArgvYEnvTest(_Entorno):
         async def fake_exec(*argv, **kw):
             rd = [a for a in argv if str(a).startswith(str(self.run_dir))][0]
             modos.append(stat.S_IMODE(os.stat(rd).st_mode))
-            return _FakeProc(_CODEX_OK)
+            return _FakeProc(_SALIDA_FEATURES.encode() if "features" in argv else _CODEX_OK)
 
         with patch("asyncio.create_subprocess_exec", fake_exec):
             await cli_sandbox.run_cli(
                 "codex", system_prompt="s", historial=[], mensaje="m", modelo="gpt-6-sol",
                 timeout=5, titular=await self.titular(), correlation_id="c", entry_point="chat")
-        self.assertEqual(modos, [0o700])
+        # el rundir de `features list` (MINOR-21) y el de la llamada: los dos 0700
+        self.assertEqual(modos, [0o700, 0o700])
 
     async def test_sin_bwrap_falla_cerrado(self):
         with patch.object(cli_sandbox, "_BWRAP_BIN", "/no/existe/bwrap"):

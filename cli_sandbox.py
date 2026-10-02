@@ -643,6 +643,15 @@ _CODEX_FLAGS = (
     "exec", "-", "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config",
     "--ignore-rules", "-s", "read-only",
 )
+# EVIDENCIA 2026-10-02 (ronda 2, codex 0.160.0, CODEX_HOME efimero en /tmp, sin login ni
+# cuota): `--disable unified_exec` NO apaga `unified_exec`; `codex features list` lo sigue
+# mostrando en `true` con `--disable unified_exec`, con `-c features.unified_exec=false`
+# (antes o despues de `features list`), con `features --disable unified_exec list` y con
+# `features.unified_exec = false` escrito en el config.toml del CODEX_HOME (`codex features
+# disable unified_exec`). No se encontro una forma que lo apague; el flag queda en la lista
+# de abajo solo porque no hace dano, y `unified_exec` NO esta en la lista permitida: con el
+# binario real, `verificar_features` falla cerrado (junto con otras 26 features activas sin
+# clasificar, ver abajo) hasta que un humano decida. Sin esa decision codex no se lanza.
 # Herramientas apagadas (spec §1). Nombres tal cual los lista `codex features
 # list` de 0.160.0; el golden de _cli_sandbox_test.py los congela y se
 # re-verifica al fijar la version (paso 11). `web_search` no es una feature: se
@@ -861,6 +870,10 @@ class Perfil:
     archivo_nombre: str = ""
     canal_prompt_verificado: bool = True
     features_permitidas: Optional[tuple[str, ...]] = None  # solo codex; ver verificar_features
+    # `features list` del perfil (solo codex): como se arma el comando y el entorno EFIMERO en
+    # el que corre (sin la credencial: listar features no pide login ni cuota)
+    _armar_features: Optional[Callable[[str], list[str]]] = None
+    env_features: tuple[tuple[str, str], ...] = ()
     ranuras: int = 2
     espera_lock_s: float = 10.0  # espera corta del chat (spec §1); no es el timeout
     _armar_comando: Optional[Callable[[str, str], list[str]]] = None
@@ -903,6 +916,8 @@ PERFILES: dict[str, Perfil] = {
         # se lanza hasta verificarlo.
         canal_prompt_verificado=False,
         features_permitidas=_CODEX_FEATURES_PERMITIDAS,
+        _armar_features=comando_features_codex,
+        env_features=(("CODEX_HOME", "/tmp/codex-features-home"), ("CODEX_SQLITE_HOME", "/tmp/codex-features-sqlite")),
         _armar_comando=_comando_codex, _parsear=_parsear_codex,
     ),
     "kimi": Perfil(
@@ -1155,6 +1170,57 @@ def _resolver_binario(perfil: Perfil, *, uid_esperado: int = 0) -> tuple[str, st
     if observado != sha:
         raise BinarioAlterado(f"{perfil.nombre}: el SHA256 del manifiesto del directorio no coincide con el fijado")
     return ruta, directorio, version
+
+
+#: ruta del binario -> firma del arbol para la que `verificar_features` ya dio verde. MISMA
+#: clave y MISMA firma que `_CACHE_SHA`: si cambia cualquier stat del arbol, la firma cambia,
+#: se re-hashea el manifiesto Y se vuelve a verificar. Solo se cachea el exito: un fallo se
+#: vuelve a intentar (y a fallar) en cada llamada.
+_CACHE_FEATURES: dict[str, str] = {}
+
+#: Espera maxima de `codex features list` (arranca el binario una vez por firma).
+FEATURES_TIMEOUT_S = 30.0
+
+
+async def _features_del_binario(p: Perfil, ruta_bin: str, dir_bin: str) -> str:
+    """Corre `<binario> features list --disable ...` DENTRO del sandbox, con el mismo
+    `ejecutar` del nucleo (el unico create_subprocess_exec), sin credenciales (listar
+    features no pide login ni cuota) y con un CODEX_HOME efimero: el /tmp privado del
+    sandbox, que desaparece con el proceso. Devuelve la salida; cualquier cosa que no sea
+    un exit code 0 con salida es FeaturesNoPermitidas (falla cerrado)."""
+    base = Path(os.environ.get("JAX_CLI_RUN_DIR", "/run/jax-cli"))
+    rundir = base / f"features-{uuid.uuid4().hex}"
+    await asyncio.to_thread(_preparar_rundir, base, rundir, p.archivo_nombre, "")
+    try:
+        argv = argv_confinado_cli(
+            _BWRAP_BIN, work_host=str(rundir), home_sandbox=p.home_sandbox,
+            binds_rw=[], binds_ro=[(dir_bin, dir_bin)], cmd=p._armar_features(ruta_bin),
+        )
+        env = env_minimo(p.home_sandbox, dict(p.env_features))
+        proc, stdout, _stderr = await ejecutar(
+            argv, env, b"", FEATURES_TIMEOUT_S,
+            adquirir=lambda _t: None, liberar=lambda _h: None, cwd="/",
+        )
+    except asyncio.TimeoutError:
+        raise FeaturesNoPermitidas(f"{p.nombre}: `features list` no respondio en {FEATURES_TIMEOUT_S}s") from None
+    finally:
+        await asyncio.to_thread(_borrar_rundir, rundir)
+    if proc.returncode != 0:
+        raise FeaturesNoPermitidas(f"{p.nombre}: `features list` termino con exit code {proc.returncode}")
+    return stdout.decode("utf-8", "replace")
+
+
+async def _asegurar_features(p: Perfil, ruta_bin: str, dir_bin: str) -> None:
+    """Verifica las features del binario (lista PERMITIDA, `verificar_features`) una vez por
+    firma del arbol. Los perfiles sin lista permitida (kimi) no pasan por aqui."""
+    if p.features_permitidas is None or p._armar_features is None:
+        return
+    firma = _CACHE_SHA.get(ruta_bin, ("",))[0]
+    if firma and _CACHE_FEATURES.get(ruta_bin) == firma:
+        return
+    verificar_features(await _features_del_binario(p, ruta_bin, dir_bin), p.nombre)
+    if firma:
+        _CACHE_FEATURES[ruta_bin] = firma
 
 
 # --------------------------------------------------------------------------
@@ -1517,6 +1583,7 @@ async def run_cli(
         conversacion = armar_conversacion(historial, mensaje, tope)
         ruta_bin, dir_bin, version = await asyncio.to_thread(_resolver_binario, p)
         verificar_bwrap(_BWRAP_BIN, p.nombre)
+        await _asegurar_features(p, ruta_bin, dir_bin)
         cred_host = _cred_host(p)
         if not os.path.isdir(cred_host):
             raise SandboxUnavailable(f"{p.nombre}: falta el directorio de credencial dedicado")
