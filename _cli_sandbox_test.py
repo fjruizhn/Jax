@@ -1358,6 +1358,71 @@ class LocksSegurosTest(_Entorno):
                 hyde_sandbox._release_cross_process_lock(fh)
 
 
+class PurgaDeCodexTest(_Entorno):
+    """MINOR-13 (auditoria 2026-10-02): lo que codex deja en CODEX_HOME (que es
+    el directorio de credencial, montado RW) y no es `auth.json` se borra tras
+    cada llamada, con la ranura todavia tomada."""
+
+    def setUp(self):
+        super().setUp()
+        self.cdir = self.cred / "codex"
+        (self.cdir / "auth.json").write_text("TOKEN-DE-SUSCRIPCION")
+        os.chmod(self.cdir / "auth.json", 0o600)
+        (self.cdir / "packages" / "standalone").mkdir(parents=True)
+        ejecutable = self.cdir / "packages" / "standalone" / "codex"
+        ejecutable.write_text("#!/bin/sh\necho plantado\n")
+        os.chmod(ejecutable, 0o755)
+        (self.cdir / "config.toml").write_text("model='x'\n")
+        (self.cdir / "hooks").mkdir()
+        (self.cdir / "hooks" / "pre.sh").write_text("#!/bin/sh\n")
+        self.fuera = Path(self.tmp.name) / "fuera-del-cred"
+        self.fuera.mkdir()
+        (self.fuera / "intacto.txt").write_text("NO-TOCAR")
+        os.symlink(self.fuera, self.cdir / "enlace-a-fuera")
+        os.symlink(self.fuera / "intacto.txt", self.cdir / "enlace-a-archivo")
+
+    def _quedan(self):
+        return sorted(p.name for p in self.cdir.iterdir())
+
+    async def test_tras_una_llamada_solo_queda_auth_json(self):
+        await self.correr("codex")
+        self.assertEqual(self._quedan(), ["auth.json"])
+        self.assertEqual((self.cdir / "auth.json").read_text(), "TOKEN-DE-SUSCRIPCION")
+
+    async def test_la_purga_no_sigue_symlinks_hacia_fuera(self):
+        await self.correr("codex")
+        self.assertEqual((self.fuera / "intacto.txt").read_text(), "NO-TOCAR")
+        self.assertTrue(self.fuera.is_dir())
+
+    async def test_tambien_se_purga_si_la_llamada_falla(self):
+        with self.assertRaises(cli_sandbox.ErrorCLI):
+            await self.correr("codex", proc=_FakeProc(b"", b"x", returncode=3))
+        self.assertEqual(self._quedan(), ["auth.json"])
+
+    async def test_con_otra_ranura_en_uso_la_purga_queda_para_la_proxima(self):
+        proc_lento = _FakeProc(_CODEX_OK, demora=1.0)
+        titular = await self.titular()
+        t1 = asyncio.ensure_future(self.correr("codex", proc=proc_lento, titular=titular, timeout=10))
+        await asyncio.sleep(0.3)
+        await self.correr("codex", titular=titular)  # termina con la otra ranura todavia ocupada
+        self.assertIn("packages", self._quedan(), "no se purga el estado de una llamada en curso")
+        await t1
+        self.assertEqual(self._quedan(), ["auth.json"], "la que termina al final deja el directorio limpio")
+
+    async def test_el_perfil_declara_la_lista_permitida(self):
+        self.assertEqual(_PERFIL_CODEX_REAL.purgar_excepto, ("auth.json",))
+        self.assertIsNone(cli_sandbox.PERFILES["kimi"].purgar_excepto)
+
+    async def test_kimi_sigue_purgando_solo_sus_directorios_nombrados(self):
+        cred = Path(self.tmp.name) / "credkimi2"
+        for d in ("sessions", "otro"):
+            (cred / d).mkdir(parents=True)
+        (cred / "credentials.json").write_text("K")
+        handle = cli_sandbox._ranura_adquirir("kimi", 2, 1)
+        cli_sandbox._ranura_liberar(handle, cli_sandbox.PERFILES["kimi"], 2, str(cred))
+        self.assertEqual(sorted(p.name for p in cred.iterdir()), ["credentials.json", "otro"])
+
+
 # ------------------------------------------------------- contencion con bwrap
 
 @unittest.skipUnless(_bwrap_usable(), "bwrap no usable en este host (user namespaces)")

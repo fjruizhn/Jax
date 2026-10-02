@@ -754,6 +754,10 @@ class Perfil:
     cred_destino: str = ""
     env_extra: tuple[tuple[str, str], ...] = ()
     purgar: tuple[str, ...] = ()
+    # Lista PERMITIDA del directorio de credencial: tras cada llamada se borra TODO
+    # lo que no figure aqui (codex deja ejecutables, hooks y config en CODEX_HOME,
+    # que es ese mismo directorio montado RW). None = no se purga por exclusion.
+    purgar_excepto: Optional[tuple[str, ...]] = None
     archivo_nombre: str = ""
     canal_prompt_verificado: bool = True
     features_permitidas: Optional[tuple[str, ...]] = None  # solo codex; ver verificar_features
@@ -792,6 +796,7 @@ PERFILES: dict[str, Perfil] = {
         bin_nombre="codex", cred_subdir="codex", cred_destino=f"{_HOME_CLI}/.codex",
         env_extra=(("CODEX_HOME", f"{_HOME_CLI}/.codex"), ("CODEX_SQLITE_HOME", "/tmp/codex-sqlite")),
         archivo_nombre="sistema.md",
+        purgar_excepto=("auth.json",),
         # Igual que Kimi: `model_instructions_file` figura en el binario pero que
         # se honre en ejecucion NO esta verificado (§8, prueba manual del §5). Sin
         # eso, el system prompt (persona y memoria) podria no llegar al modelo: no
@@ -1038,6 +1043,30 @@ def _ranura_adquirir(perfil: str, ranuras: int, espera: float):
         os.close(dfd)
 
 
+def _purgar_credenciales(perfil: Perfil, cred_host: str) -> None:
+    """BLOQUEANTE. Con TODAS las ranuras del perfil tomadas por quien llama: borra
+    los directorios de `purgar` y todo lo que no este en `purgar_excepto`. No sigue
+    symlinks: un enlace se desvincula, nunca se borra su destino."""
+    for nombre in perfil.purgar:
+        shutil.rmtree(os.path.join(cred_host, nombre), ignore_errors=True)
+    if perfil.purgar_excepto is None:
+        return
+    try:
+        entradas = list(os.scandir(cred_host))
+    except OSError:
+        return
+    for e in entradas:
+        if e.name in perfil.purgar_excepto:
+            continue
+        try:
+            if e.is_dir(follow_symlinks=False):
+                shutil.rmtree(e.path, ignore_errors=True)
+            else:
+                os.unlink(e.path)
+        except OSError:
+            pass
+
+
 def _ranura_liberar(handle, perfil: Perfil, ranuras: int, cred_host: Optional[str]) -> None:
     """BLOQUEANTE (to_thread). Con la ranura todavia tomada, purga el estado
     que el CLI deja en su home dedicado (Kimi no tiene --ephemeral) -- pero solo
@@ -1048,7 +1077,7 @@ def _ranura_liberar(handle, perfil: Perfil, ranuras: int, cred_host: Optional[st
     fh, idx = handle
     otras = []
     try:
-        if perfil.purgar and cred_host:
+        if (perfil.purgar or perfil.purgar_excepto is not None) and cred_host:
             dfd = _preparar_dir_locks(_lock_dir())
             try:
                 libres = True
@@ -1066,8 +1095,7 @@ def _ranura_liberar(handle, perfil: Perfil, ranuras: int, cred_host: Optional[st
             finally:
                 os.close(dfd)
             if libres:
-                for nombre in perfil.purgar:
-                    shutil.rmtree(os.path.join(cred_host, nombre), ignore_errors=True)
+                _purgar_credenciales(perfil, cred_host)
     finally:
         for f2 in otras:
             flock_liberar(f2)
