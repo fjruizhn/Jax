@@ -7,13 +7,13 @@ Llevar a `jax_memory` de producción: HAMURABI como proyecto 1 con alcance, el p
 - Ventana abierta o GO de Fernando para producción (`bin/ventana estado` desde la sesión; si salió cerrada, parar).
 - Ensayo hecho sobre una copia restaurada (paso 7). Lo hace la sesión principal con GO; sin sus números no se aplica nada.
 - **El actor es siempre `--actor-user-id 1`.** El digest de idempotencia de `create_project` incluye al usuario: con otro actor, la segunda corrida da `IdempotencyKeyConflict`.
-- **Dónde y con qué se corre (exacto).** Directorio `/srv/jax-prod/jax`, intérprete `/srv/jax-prod/jax/.venv/bin/python` (`.venv` es un enlace a `/opt/jax/venv`, Python 3.14.4 con `aiomysql`; verificado el 2026-10-02 leyendo el directorio sin `sudo`). Los guiones nunca abren `/etc/jax/.env`: el entorno `JAX_DB_*` lo carga quien opera con el mismo procedimiento de `docs/runbooks/despliegue.md §0` de jax-platform (`sudo bash -c 'set -a; . /etc/jax/.env; set +a; …'`), de modo que **la contraseña nunca va en la línea de comandos**. Atajo para este runbook (una función de la shell, pegar una vez):
+- **Dónde y con qué se corre (exacto).** Directorio `/srv/jax-prod/jax`, intérprete `/srv/jax-prod/jax/.venv/bin/python` (`.venv` es un enlace a `/opt/jax/venv`, Python 3.14.4 con `aiomysql`; verificado el 2026-10-02 leyendo el directorio sin `sudo`). Los guiones nunca abren `/etc/jax/.env`: el entorno `JAX_DB_*` lo carga quien opera con el mismo procedimiento de `docs/runbooks/despliegue.md §0` de jax-platform (`set -a; . <(sudo -n cat /etc/jax/.env); set +a`), de modo que **la contraseña nunca va en la línea de comandos**. Atajo para este runbook (una función de la shell, pegar una vez):
 
   ```bash
   e1() {   # uso: e1 scripts/<guion>.py <argumentos>
-    sudo bash -c 'set -euo pipefail; set -a; . /etc/jax/.env; set +a
+    ( set -euo pipefail; set -a; . <(sudo -n cat /etc/jax/.env); set +a
       cd /srv/jax-prod/jax; export PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:las_manos
-      exec .venv/bin/python "$@"' _ "$@"
+      exec .venv/bin/python "$@" )
   }
   ```
   `/etc/jax/.env` define `JAX_DB_HOST`, `JAX_DB_PORT` (3308; la 3306 está muerta), `JAX_DB_USER`, `JAX_DB_PASSWORD` y `JAX_DB_NAME` (verificado el 2026-10-02 por la sesión principal, solo los nombres). Aun así los guiones de este runbook llevan `--database jax_memory` explícito; `revisar_indice_vectorial.py` toma la base de `JAX_DB_NAME` e **imprime su nombre en la primera línea**: debe decir `jax_memory:`.
@@ -72,8 +72,8 @@ Anotar `huerfanos_ids`, `filas_por_tabla` y `fuera_de_alcance`. **Si `fuera_de_a
 e1 scripts/proyectos_e1_migrar.py --aplicar --actor-user-id 1 --database jax_memory \
   --salida-reversion $D/mapa-reversion.json --confirmo-produccion
 ```
-(`$D` lo expande tu shell antes de `sudo`; tiene que ser una ruta absoluta, p. ej. `D=~/respaldos-despliegue/AAAA-MM-DD-proyectos-e1` del §0.)
-- `--salida-reversion` es obligatorio con `--aplicar` y la ruta tiene que **no existir** (si existe, aborta antes de tocar la base). Escribe un mapa JSON 0600: `{"evaluacion_project_id": N, "filas": [{"tabla", "id", "project_id_anterior"}]}`. Guardarlo fuera del repo y con el respaldo. **No se cambia su dueño**: lo crea quien corre la migración (con la función `e1`, root), queda 0600 y **`--revertir` lo rechaza (salida 2) si no es del usuario que lo corre o tiene permisos más abiertos que 0600**; por eso `--revertir` se corre también con `e1`, y el mapa se lee con `sudo` si hace falta. Un mapa que otro pudo escribir decide qué `UPDATE` corre la reversión.
+(`$D` lo expande tu shell; tiene que ser una ruta absoluta, p. ej. `D=~/respaldos-despliegue/AAAA-MM-DD-proyectos-e1` del §0.)
+- `--salida-reversion` es obligatorio con `--aplicar` y la ruta tiene que **no existir** (si existe, aborta antes de tocar la base). Escribe un mapa JSON 0600: `{"evaluacion_project_id": N, "filas": [{"tabla", "id", "project_id_anterior"}]}`. Guardarlo fuera del repo y con el respaldo. **No se cambia su dueño**: lo crea quien corre la migración (con la función `e1`, el propio operador: solo el `.env` se lee con `sudo -n cat`), queda 0600 y **`--revertir` lo rechaza (salida 2) si no es del usuario que lo corre o tiene permisos más abiertos que 0600**; por eso `--revertir` se corre también con `e1`, y el mapa lo lee el mismo operador que lo creó. Un mapa que otro pudo escribir decide qué `UPDATE` corre la reversión.
 - Comparar: `despues.huerfanos_ids` vacío y `filas_movidas` igual a `antes.filas_por_tabla`.
 - Códigos de salida:
   - `0` hecho; repetirlo es seguro (idempotente).
