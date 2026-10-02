@@ -330,6 +330,15 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest
       - run: python -m pytest _hyde_sandbox_test.py -v
+      # Golden de wrap_hyde_command (D-4, facetas-por-suscripcion, 2026-10-01):
+      # el argv y el env de Hyde congelados ANTES de que pase al nucleo comun
+      # cli_sandbox. Piso exacto: 3 tests (coincide con la golden, la fixture no
+      # cambio, cubre los tres escenarios). Medido 2026-10-01: 3 passed.
+      - run: python -m pytest _hyde_wrap_golden_test.py -v
+      - run: |
+          python -m pytest _hyde_wrap_golden_test.py -q 2>&1 | tee /tmp/golden
+          grep -qE "^3 passed" /tmp/golden || {
+            echo "PISO ROTO: se esperaban 3 tests CORRIDOS de la golden de Hyde."; exit 1; }
 
   # Task 6 del plan de alertas nacio con 11 tests y CERO jobs que los
   # corrieran -- tercera instancia del mismo hueco en el mes (ver la octava
