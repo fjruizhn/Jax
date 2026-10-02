@@ -1,6 +1,6 @@
 # El Faro: la pasarela del ecosistema (diseño de escalón 3, solo lectura)
 
-> Estado: DISEÑO de escalón 3 (arquitecto-adversarial), 2026-10-02, encargado por Hyde a pedido de Fernando. Nada implementado. Decisiones D-1..D-6 al final.
+> Estado: DISEÑO de escalón 3 (arquitecto-adversarial), 2026-10-02, encargado por Hyde a pedido de Fernando. Nada implementado. Decisiones de Fernando (2026-10-02) al final.
 
 
 > **Axioma es un orquestador con herramientas extra, no una camisa de fuerza que quita funciones y limita.** *(Fernando, 2026-10-02)*
@@ -305,3 +305,15 @@ En cada ejecución se comprueba la integridad contra el manifiesto. La frescura 
 - los términos de uso de cada suscripción.
 
 No ratifico nada: la decisión es de Fernando.
+---
+
+## Decisiones de Fernando (2026-10-02)
+
+| | Decisión |
+|---|---|
+| **D-1** | **Sí, con límites.** Enmienda constitucional: «una regla vigente, versionada e integrada por Fernando, es su autorización previa para los actos que cubre; sin regla, no se hace y se avisa». Toda regla de clase «obliga» declara objetivo, cantidad o monto, frecuencia y vigencia. Reemplaza el GO por acto de JERARQUÍA punto 1, de Block 6 (`human_approval`) y del spec SAR. |
+| **D-2** | **API key propia con tope.** Si S-1 falla para un motor, ese motor usa una llave de API propia, revocable y con tope cuando trabaja con herramientas nativas, y la suscripción solo para el chat. El token de la suscripción nunca entra a la jaula. |
+| **D-3** | *(Recomendación adoptada.)* Alcance completo dentro de la jaula; los efectos fuera de la jaula, solo con regla. |
+| **D-4** | **Sin tope de agentes.** Ni concurrencia de agentes por ejecución ni profundidad de sub-agentes llevan tope de regla. El único límite son los recursos de la máquina (cgroup: `MemoryMax`/`CPUQuota`/`TasksMax` de la jaula). Los topes de tokens y gasto diario se miden en la fase 0 y se proponen como regla. *(Nota de Hyde: la detección de ciclos en la cadena de agentes se mantiene, porque no es un tope sino la defensa contra un bucle infinito.)* |
+| **D-5** | **Las dos ya.** Se adelanta T16 (retiro del REPL, que cierra F-1) y la fase 0 arranca con el experimento S-1 en paralelo. |
+| **D-6** | *(Recomendación adoptada.)* Ruflo queda fuera del Faro en las fases 0 y 1; se revisa después. |
