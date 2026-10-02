@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from jax.faro import paquete
-from jax.faro.config import ConfigFaro, ConfigFaroInvalida, PluginFuente
+from jax.faro.config import ConfigFaro, ConfigFaroInvalida
 
 from tests._faro_utils import _commit, _escribir, _git, repo_de_juguete
 
@@ -27,8 +27,8 @@ def repo(tmp_path):
     return repo_de_juguete(tmp_path)
 
 
-def _cfg(repo: Path, sha: str, destino: Path, plugins=()) -> ConfigFaro:
-    return ConfigFaro(repo=repo, sha=sha, destino=destino, plugins=tuple(plugins))
+def _cfg(repo: Path, sha: str, destino: Path) -> ConfigFaro:
+    return ConfigFaro(repo=repo, sha=sha, destino=destino)
 
 
 @pytest.fixture
@@ -329,71 +329,16 @@ def test_la_frescura_con_un_repo_inexistente_no_lanza(cfg, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# plugins                                                                     #
-# --------------------------------------------------------------------------- #
-
-@pytest.fixture
-def plugin(tmp_path):
-    p = tmp_path / "cache" / "miplugin" / "1.0"
-    (p / "skills/util").mkdir(parents=True)
-    (p / "skills/util/SKILL.md").write_text("---\nname: util\n---\nutil del plugin\n")
-    (p / "agents").mkdir()
-    (p / "agents/revisor.md").write_text("---\nname: revisor\n---\nrevisa\n")
-    (p / "hooks").mkdir()
-    (p / "hooks/hook.sh").write_text("no se portan como codigo\n")
-    return PluginFuente(nombre="miplugin", ruta=p, sha_declarado="b" * 40)
-
-
-def test_los_skills_y_agentes_de_un_plugin_entran_y_sus_hooks_no(repo, sha, tmp_path, plugin):
-    cfg = _cfg(repo, sha, tmp_path / "e", [plugin])
-    raiz = paquete.construir_paquete(cfg)
-    assert (raiz / "plugins/miplugin/skills/util/SKILL.md").is_file()
-    assert (raiz / "plugins/miplugin/agents/revisor.md").is_file()
-    assert not (raiz / "plugins/miplugin/hooks").exists()
-    m = json.loads((raiz / paquete.MANIFIESTO).read_text())
-    assert m["plugins"] == [{"nombre": "miplugin", "sha_declarado": "b" * 40}]
-    assert paquete.verificar_integridad(cfg) == ()
-
-
-def test_un_archivo_de_mas_en_un_plugin_impide_arrancar(repo, sha, tmp_path, plugin):
-    cfg = _cfg(repo, sha, tmp_path / "e", [plugin])
-    raiz = paquete.construir_paquete(cfg)
-    (raiz / "plugins/miplugin/skills/util/EXTRA.md").write_text("x")
-    assert "archivo_extra" in _codigos(paquete.verificar_integridad(cfg))
-
-
-def test_un_symlink_en_un_plugin_se_rechaza(repo, sha, tmp_path, plugin):
-    (plugin.ruta / "skills/util/enlace").symlink_to("/etc/passwd")
-    with pytest.raises(paquete.FuenteInvalida, match="symlink"):
-        paquete.construir_paquete(_cfg(repo, sha, tmp_path / "e", [plugin]))
-
-
-@pytest.mark.parametrize("nombre", ["../x", "a/b", "", ".oculto", "con espacio"])
-def test_el_nombre_de_un_plugin_no_puede_escapar(repo, sha, tmp_path, plugin, nombre):
-    malo = PluginFuente(nombre=nombre, ruta=plugin.ruta, sha_declarado="b" * 40)
-    with pytest.raises(ConfigFaroInvalida):
-        paquete.construir_paquete(_cfg(repo, sha, tmp_path / "e", [malo]))
-
-
-# --------------------------------------------------------------------------- #
 # configuracion: fallo cerrado                                                #
 # --------------------------------------------------------------------------- #
 
 def test_la_configuracion_sale_del_entorno_y_falla_cerrado_si_falta_algo(tmp_path):
     ok = {"JAX_FARO_REPO": str(tmp_path), "JAX_FARO_SHA": "a" * 40, "JAX_FARO_ECOSISTEMA_DIR": str(tmp_path / "e")}
     c = ConfigFaro.desde_entorno(ok)
-    assert c.sha == "a" * 40 and c.destino == tmp_path / "e" and c.plugins == ()
+    assert c.sha == "a" * 40 and c.destino == tmp_path / "e"
     for falta in ok:
         sin = {k: v for k, v in ok.items() if k != falta}
         with pytest.raises(ConfigFaroInvalida, match=falta):
             ConfigFaro.desde_entorno(sin)
     with pytest.raises(ConfigFaroInvalida):
         ConfigFaro.desde_entorno({**ok, "JAX_FARO_ECOSISTEMA_DIR": "relativa/ruta"})
-
-
-def test_los_plugins_vienen_del_entorno_como_json(tmp_path):
-    ok = {"JAX_FARO_REPO": str(tmp_path), "JAX_FARO_SHA": "a" * 40, "JAX_FARO_ECOSISTEMA_DIR": str(tmp_path / "e"),
-          "JAX_FARO_PLUGINS": json.dumps([{"nombre": "p", "ruta": str(tmp_path), "sha_declarado": "c" * 40}])}
-    assert ConfigFaro.desde_entorno(ok).plugins == (PluginFuente("p", tmp_path, "c" * 40),)
-    with pytest.raises(ConfigFaroInvalida):
-        ConfigFaro.desde_entorno({**ok, "JAX_FARO_PLUGINS": "no es json"})

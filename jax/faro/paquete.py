@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
-from .config import ConfigFaro, PluginFuente, sha_valido
+from .config import ConfigFaro, sha_valido
 from .git_objetos import FuenteInvalida, exigir_sha_ancestro_de, leer_blobs, listar, resolver_ref
 
 logger = logging.getLogger(__name__)
@@ -123,38 +123,6 @@ def _archivos_desde_git(cfg: ConfigFaro) -> dict[str, tuple[int, bytes]]:
     return archivos
 
 
-def _archivos_de_plugin(p: PluginFuente) -> dict[str, tuple[int, bytes]]:
-    base = f"plugins/{p.nombre}"
-    if not p.ruta.is_dir() or p.ruta.is_symlink():
-        raise FuenteInvalida(f"el plugin {p.nombre!r} no esta en {p.ruta} (o es un symlink)")
-    archivos: dict[str, tuple[int, bytes]] = {}
-
-    def recorrer(dir_fuente: Path, prefijo: str, solo_md: bool) -> None:
-        for entrada in sorted(os.scandir(dir_fuente), key=lambda e: e.name):
-            st = entrada.stat(follow_symlinks=False)
-            rel = f"{prefijo}/{entrada.name}"
-            if stat.S_ISLNK(st.st_mode):
-                raise FuenteInvalida(f"{entrada.path} es un symlink: no se sigue ni se copia")
-            if stat.S_ISDIR(st.st_mode):
-                if not solo_md:
-                    recorrer(Path(entrada.path), rel, solo_md)
-            elif stat.S_ISREG(st.st_mode):
-                if solo_md and not entrada.name.endswith(".md"):
-                    continue
-                modo = 0o755 if st.st_mode & 0o111 else 0o644
-                archivos[rel] = (modo, Path(entrada.path).read_bytes())
-            else:
-                raise FuenteInvalida(f"{entrada.path} no es un archivo regular")
-
-    for sub, solo_md in (("skills", False), ("agents", True)):
-        d = p.ruta / sub
-        if d.is_symlink():
-            raise FuenteInvalida(f"{d} es un symlink: no se sigue ni se copia")
-        if d.is_dir():
-            recorrer(d, f"{base}/{sub}", solo_md)
-    return archivos
-
-
 def _sha256(datos: bytes) -> str:
     return hashlib.sha256(datos).hexdigest()
 
@@ -181,7 +149,7 @@ def _escribir_paquete(raiz: Path, cfg: ConfigFaro, archivos: dict[str, tuple[int
     manifiesto = {
         "esquema": ESQUEMA,
         "sha_origen": cfg.sha,
-        "plugins": [{"nombre": p.nombre, "sha_declarado": p.sha_declarado} for p in cfg.plugins],
+        "plugins": [],
         "archivos": {rel: {"modo": f"{modo:04o}", "sha256": _sha256(datos)} for rel, (modo, datos) in archivos.items()},
     }
     manifiesto["sha256_manifiesto"] = hash_del_manifiesto(manifiesto)
@@ -205,8 +173,6 @@ def construir_paquete(cfg: ConfigFaro) -> Path:
         return final
     exigir_sha_ancestro_de(cfg.repo, cfg.sha, cfg.ref_frescura)
     archivos = _archivos_desde_git(cfg)
-    for p in cfg.plugins:
-        archivos.update(_archivos_de_plugin(p))
     cfg.destino.mkdir(parents=True, exist_ok=True)
     tmp = cfg.destino / f".construyendo-{cfg.sha[:12]}-{os.getpid()}-{secrets.token_hex(4)}"
     try:
@@ -450,14 +416,10 @@ def cargar_paquete(cfg: ConfigFaro) -> PaqueteCargado:
     agentes: dict[str, bytes] = {}
     for rel, datos in memoria.items():
         partes = rel.split("/")
-        prefijo = ""
-        if partes[0] == "plugins" and len(partes) > 3:
-            prefijo, partes = f"{partes[1]}:", partes[2:]
         if partes[0] == "skills" and len(partes) >= 3:
-            skills.setdefault(prefijo + partes[1], {})["/".join(partes[2:])] = datos
-        elif partes[0] == "agentes" or (prefijo and partes[0] == "agents"):
-            if len(partes) == 2 and partes[1].endswith(".md"):
-                agentes[prefijo + partes[1][:-3]] = datos
+            skills.setdefault(partes[1], {})["/".join(partes[2:])] = datos
+        elif partes[0] == "agentes" and len(partes) == 2 and partes[1].endswith(".md"):
+            agentes[partes[1][:-3]] = datos
     skills = {n: archivos for n, archivos in skills.items() if "SKILL.md" in archivos}
     return PaqueteCargado(
         sha=cfg.sha,
