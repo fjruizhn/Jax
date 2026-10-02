@@ -24,6 +24,32 @@ funcione contigo y que sea automático». Si los hechos de aquí cambian, actual
    pull` en `~/claude-skills` (nunca `git pull` a secas ahí), leer `PENDIENTES.md` y los
    PRs abiertos. Lo que lleve marca de otra máquina u otro motor no se toca.
 
+5. **Retomar, no empezar de cero.** Si esta sesión viene de un corte (ventana de uso
+   agotada, `/clear`, máquina reiniciada): antes de cualquier otra cosa, leer el
+   `TRASPASO.md` de la rama en curso y `~/business-in-a-box/tablero/DECISIONES.md`, y los
+   planes y revisiones vigentes en `~/business-in-a-box/` (`plan-*`, `revision-*`).
+   Abrir Kimi con `kimi-auto -c` (continúa la sesión de la carpeta) siempre que se pueda.
+
+## Traspaso continuo — el trabajo vive fuera de la sesión (OBLIGATORIO)
+
+*(Fernando, 2026-10-02: Kimi se quedó dos veces sin ventana el mismo día; la segunda, el
+PR #9a de axioma-honduras quedó SIN commit, solo en el disco de binb-lab, y Hyde tuvo que
+rescatarlo como WIP 1081cf4.)* El corte por cuota no avisa y puede llegar a mitad de un
+paso. Por eso, en toda tarea de más de un paso:
+
+- **Commits chicos y EMPUJADOS a la rama en cada paso** (en binb-lab, vía el bundle a
+  hall9000 como ya se hace), no al final. Lo que solo vive en un disco no lo puede
+  continuar nadie.
+- **`TRASPASO.md` en la raíz de la rama, actualizado en CADA commit**: objetivo, hecho,
+  falta, decisiones tomadas (con quién las tomó) y el siguiente comando exacto. Se borra
+  al integrar (su lugar definitivo es la Biblioteca del proyecto).
+- **Gasto de la ventana**: no lanzar subagentes en esfuerzo `max` para tareas acotadas
+  (cada corrida de un Coder Agent en `max` gastó ~650-700k tokens el 2026-10-02); preferir
+  esfuerzo normal y PRs chicos.
+- Quien retome —Kimi tras el corte, otra sesión u otro motor (regla de relevo
+  `policy/faro/RL01`, PROPUESTA en Jax#317)— parte del último commit empujado y de
+  `TRASPASO.md`, no de la memoria de nadie.
+
 ## Skills — ya compartidas (sin paso extra)
 
 - `~/.agents/skills/` contiene 74 skills `axioma-*` en ruta neutra; Kimi ya las lista en
