@@ -1,0 +1,39 @@
+# ops/faro/bwrap-ejemplo.txt -- GENERADO por jax.faro.jaula.ejemplo(); tests/test_faro_lanzador.py vigila que no se
+# desvie del codigo (si cambia el argv, se regenera con:  python -c "from jax.faro.jaula import ejemplo; print(end=ejemplo())").
+#
+# El argv de bwrap de UNA ejecucion (plan 0.3c). <run_id> y <uid_jaula> los pone el lanzador; la elevacion
+# (JAX_FARO_JAULA_ELEVAR) es lo que da a la jaula su uid propio, distinto del de `faro` y del de root.
+# La jaula recibe por bind de archivo SOLO su socket, su token y el rele; el directorio /run/faro no se monta.
+# Dentro, el cliente MCP lanza:  python -m jax.faro.relay --socket /faro/puerto.sock --token-file /faro/token
+#
+# PENDIENTE DE DISENO (no resuelto en este paso): quien corre bwrap con otro uid no puede abrir /run/faro (0700 de
+# `faro`) para montar esas dos fuentes, y sudo cierra los descriptores heredados (no sirve --bind-fd). El elevador
+# (0.6/0.10) tiene que abrirlas antes de bajar de uid.
+#
+/usr/bin/sudo -n -u '#<uid_jaula>' -- \
+  /usr/bin/bwrap \
+  --unshare-pid \
+  --unshare-ipc \
+  --unshare-uts \
+  --unshare-net \
+  --unshare-cgroup-try \
+  --die-with-parent \
+  --new-session \
+  --clearenv \
+  --proc /proc \
+  --dev /dev \
+  --tmpfs /tmp \
+  --ro-bind /usr /usr \
+  --symlink usr/bin /bin \
+  --symlink usr/lib /lib \
+  --symlink usr/lib64 /lib64 \
+  --bind '/run/faro/<run_id>.sock' /faro/puerto.sock \
+  --ro-bind '/run/faro/<run_id>.token' /faro/token \
+  --ro-bind '<ruta de jax/faro/relay.py>' /faro/relay/jax/faro/relay.py \
+  --setenv PATH /usr/bin:/bin \
+  --setenv HOME /tmp \
+  --setenv PYTHONPATH /faro/relay \
+  --setenv PYTHONDONTWRITEBYTECODE 1 \
+  --chdir /tmp \
+  -- \
+  /usr/bin/python3 -m jax.faro.relay --socket /faro/puerto.sock --token-file /faro/token
