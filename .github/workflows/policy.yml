@@ -5419,8 +5419,12 @@ jobs:
           #   como antes (+2). Medido LOCAL en hall9000: 164 passed (las 2 reales de LACTOVI
           #   corren). Ninguna depende de la version de leptonica. El RUNNER no tiene esas 2: el
           #   piso es 162 passed + 2 skipped.
-          grep -qE "^162 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 162 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 164 -> 166 (Jax#338 ronda 10, cierre): +2 -- un TIFF multipagina con una pagina de
+          #   5000x5001 (el minimo sobre 25 Mpx) con transparencia real es imagen_demasiado_grande
+          #   sin llamar a tesseract, y su control opaco no lo toca el tope (+2). Medido LOCAL en
+          #   hall9000: 166 passed (las 2 reales corren). En el runner: 164 passed, 2 skipped.
+          grep -qE "^164 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 164 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,

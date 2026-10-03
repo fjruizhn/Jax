@@ -2561,3 +2561,36 @@ def test_n34_un_png_rgba_opaco_de_30_mpx_sigue_el_camino_de_antes(tmp_path, monk
     r = ocr.extraer(destino)
     assert r.detalle.get("codigo") != "imagen_demasiado_grande"
     assert recibidos and all(d == destino.read_bytes() for d in recibidos)
+
+
+def _tiff_con_pagina_grande(destino: Path, transparente: bool) -> Path:
+    """TIFF de 2 paginas: la PRIMERA es la grande (el minimo que supera el tope
+    de 25 Mpx: 5000x5001), para que el rechazo ocurra antes de leer ninguna."""
+    from PIL import Image
+
+    alfa = 0 if transparente else 255
+    grande = Image.new("RGBA", (5000, 5001), (0, 0, 0, alfa))
+    chica = Image.new("RGBA", (100, 60), (255, 255, 255, 255))
+    grande.save(destino, save_all=True, append_images=[chica], compression="tiff_adobe_deflate")
+    return destino
+
+
+def test_n34_un_tiff_multipagina_con_una_pagina_de_mas_de_25_mpx_transparente_es_demasiado_grande(
+    tmp_path: Path, monkeypatch
+):
+    destino = _tiff_con_pagina_grande(tmp_path / "grande_transparente.tif", transparente=True)
+    assert 5000 * 5001 > ocr.MAX_PIXELES_OTROS_MODOS
+    llamadas = _tesseract_llamado(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "imagen_demasiado_grande"
+    assert r.detalle["causa"] == "demasiados_pixeles"
+    assert llamadas == []
+
+
+def test_n34_control_la_misma_pagina_opaca_no_la_toca_el_tope_del_aplanado(tmp_path, monkeypatch):
+    destino = _tiff_con_pagina_grande(tmp_path / "grande_opaca.tif", transparente=False)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.detalle.get("codigo") != "imagen_demasiado_grande"
+    assert len(recibidos) >= 2          # se leyeron las dos paginas
