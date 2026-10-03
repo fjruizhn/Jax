@@ -3102,14 +3102,15 @@ def test_n40_un_homonimo_del_tsv_negro_en_otra_posicion_aparece_aunque_el_texto_
     assert r.detalle["palabras_totales"] == 6
 
 
-def test_n40_una_pasada_sin_filas_tsv_no_aporta_texto_aunque_su_texto_plano_tenga(
+def test_n40_una_pasada_sin_filas_tsv_y_con_texto_plano_lo_conserva_sin_verificar(
     tmp_path, monkeypatch
 ):
-    """La otra sonda de Sol (r13): TSV blanco VACIO con texto plano, y TSV negro
-    con 10 palabras de confianza 95. El texto de la union sale SOLO del TSV:
-    la pasada blanca no aporta nada (ni texto ni metricas), aporta una sola
-    pasada, y se aplica `_clasificar` normal -- 10 palabras confiables son
-    `ok`, con el texto del TSV negro y nada del texto plano de la blanca."""
+    """Ronda 15 (BLOCK de Sol r14; antes esta prueba fijaba el descarte): TSV
+    blanco VACIO con texto plano, y TSV negro con 10 palabras de confianza 95.
+    Una pasada sin renglones TSV y con texto plano aporta sus lineas tal cual
+    (sin deduplicar: no hay cajas), y el resultado es como mucho
+    parcial/imagen_texto_dudoso con su razon propia. Las metricas siguen
+    saliendo solo del TSV."""
     destino = tmp_path / "rotulo.png"
     _rotulo((0, 0, 0), "png", destino)
     palabras = [(95, f"palabra{i}") for i in range(10)]
@@ -3118,7 +3119,78 @@ def test_n40_una_pasada_sin_filas_tsv_no_aporta_texto_aunque_su_texto_plano_teng
         _NEGRO: ("lo que diga el texto plano no cuenta", [((20, 30, 600, 40), palabras)]),
     })
     r = ocr.extraer(destino)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    assert r.detalle["razon"] == ocr.RAZON_TEXTO_SIN_POSICION
+    texto = r.salidas["texto.txt"]
+    assert "Texto plano de la blanca sin filas" in texto
+    assert " ".join(p for _, p in palabras) in texto
+    assert "lo que diga el texto plano no cuenta" not in texto, "la negra tiene TSV: su plano no se usa"
+    assert r.detalle["palabras_totales"] == 10
+
+
+def test_n41_una_pasada_sin_filas_tsv_y_sin_texto_plano_no_aporta(tmp_path, monkeypatch):
+    """Control: con texto plano vacio y TSV vacio la pasada no aporta, igual
+    que en la ronda 14; aporta una sola pasada y se clasifica normal."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    palabras = [(95, f"palabra{i}") for i in range(10)]
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("", []),
+        _NEGRO: ("lo que diga el texto plano no cuenta", [((20, 30, 600, 40), palabras)]),
+    })
+    r = ocr.extraer(destino)
     assert r.estado == "ok"
     assert r.detalle.get("codigo") is None
     assert r.salidas["texto.txt"] == " ".join(p for _, p in palabras)
-    assert r.detalle["palabras_totales"] == 10
+
+
+def test_n41_texto_plano_sin_renglones_tsv_en_las_dos_pasadas_se_conserva(tmp_path, monkeypatch):
+    """La sonda de Sol (r14): «Saldo pendiente 1000» en el texto plano de las
+    dos pasadas y TSV sin palabras daba ok/imagen_sin_texto."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Saldo pendiente 1000", []),
+        _NEGRO: ("Saldo pendiente 1000", []),
+    })
+    r = ocr.extraer(destino)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    assert r.detalle["razon"] == ocr.RAZON_TEXTO_SIN_POSICION
+    assert "Saldo pendiente 1000" in r.salidas["texto.txt"]
+
+
+def test_n41_en_un_tiff_la_pagina_con_texto_plano_sin_tsv_aparece_con_su_marca(tmp_path, monkeypatch):
+    from io import BytesIO
+
+    from PIL import Image
+
+    destino = tmp_path / "dos.tif"
+    pagina1 = Image.new("RGBA", (700, 120), (0, 0, 0, 0))
+    pagina2 = Image.new("RGBA", (800, 150), (0, 0, 0, 0))
+    for im in (pagina1, pagina2):
+        ImageDraw.Draw(im).text((20, 30), "Total", fill=(0, 0, 0, 255), font=_fuente(36))
+    pagina1.save(destino, save_all=True, append_images=[pagina2])
+    palabras = [(95, f"palabra{i}") for i in range(10)]
+    real = ocr.subprocess.run
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        with Image.open(BytesIO(k["input"])) as im:
+            segunda = im.size[0] == 800
+        if segunda:                      # pagina 2: texto plano, TSV sin palabras
+            return _SalidaSimulada(_tsv_por_lineas([]).encode() if cmd[-1] == "tsv"
+                                   else b"Saldo pendiente 1000")
+        if cmd[-1] == "tsv":
+            return _SalidaSimulada(_tsv_por_lineas([((20, 30, 600, 40), palabras)]).encode())
+        return _SalidaSimulada(" ".join(p for _, p in palabras).encode())
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    r = ocr.extraer(destino)
+    texto = r.salidas["texto.txt"]
+    assert "<!-- página 1 -->" in texto
+    assert "<!-- página 2 -->\nSaldo pendiente 1000" in texto
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
