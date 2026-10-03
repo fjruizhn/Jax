@@ -92,6 +92,11 @@ RUTA_INSTALADA = Path(os.environ.get("JAX_PERMISOS_NUCLEO") or RUTA_NUCLEO_POR_D
 RUTA_PYTHON = Path("/usr/bin/python3")
 RUTA_RESPALDOS = Path("/var/backups/jax-permisos")
 RUTA_ENV = Path("/etc/jax/.env")
+# Dónde se inspeccionan los procesos. Solo las pruebas lo cambian (asignando el atributo del módulo): no hay variable
+# de entorno ni argumento que lo active, y la regla de sudoers fija los argumentos del núcleo.
+RUTA_PROC = Path("/proc")
+UNIDADES_JAXSVC = ("jax-las-manos, jax-platform, jax-ariadna-pm, jax-ejecutor-proxy, jax-catalogo-modelos "
+                   "y sus timers")
 
 # Cuentas con entrada ACL nombrada que --verificar/--aplicar reconocen ademas de jaxsvc y fruiz. Vacio en
 # produccion: cualquier otra entrada nombrada es NO CUMPLE y --aplicar falla cerrado. Solo --verificar acepta
@@ -693,6 +698,62 @@ def _mirar_oculta_hijos(dir_fd: int, ruta: str, hallazgos: list[str], huellas: d
             os.close(fd_path)
 
 
+def _procesos_de_usuario(uid: int) -> list[int]:
+    """Pids de los procesos cuyo uid REAL, EFECTIVO, GUARDADO o de FS (los cuatro campos de `Uid:` de
+    /proc/<pid>/status) es `uid`. Falla cerrado si /proc no se puede leer; un proceso que termina entre el listado y
+    la lectura simplemente ya no cuenta."""
+    try:
+        entradas = list(RUTA_PROC.iterdir())
+    except OSError as exc:
+        raise ErrorPermisosProyectos(f"no se pudo leer {RUTA_PROC} para buscar procesos de {USUARIO}: {exc}") from exc
+    pids = []
+    for d in entradas:
+        if not d.name.isdigit():
+            continue
+        try:
+            texto = (d / "status").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for linea in texto.splitlines():
+            if linea.startswith("Uid:"):
+                try:
+                    ids = {int(x) for x in linea.split()[1:5]}
+                except ValueError:
+                    break
+                if uid in ids:
+                    pids.append(int(d.name))
+                break
+    return sorted(pids)
+
+
+def _pids_de_jaxsvc() -> list[int]:
+    try:
+        uid = pwd.getpwnam(USUARIO).pw_uid
+    except KeyError as exc:
+        raise ErrorPermisosProyectos(f"no existe la cuenta {USUARIO}: falla cerrado, no se mutó nada") from exc
+    return _procesos_de_usuario(uid)
+
+
+def _exigir_sin_procesos_de_jaxsvc(accion: str, *, momento: str = "") -> None:
+    """Todas las carreras de renombre que se cerraron una a una parten de lo mismo: un proceso de jaxsvc VIVO (y
+    quizá comprometido) renombrando mientras root recorre el árbol. Sin ningún proceso con ese uid, nadie con permiso
+    de renombrar en el árbol corre en paralelo (salvo fruiz, dueño, y root). `--aplicar` y `--deshacer` fallan
+    cerrado, sin mutar nada, si hay alguno; `--verificar` es de solo lectura y no lo exige."""
+    pids = _pids_de_jaxsvc()
+    if pids:
+        raise ErrorPermisosProyectos(
+            f"hay procesos de {USUARIO} vivos (pids {', '.join(map(str, pids))}){momento}; detené las unidades "
+            f"{USUARIO} ({UNIDADES_JAXSVC}) antes de {accion}: falla cerrado, no se mutó nada")
+
+
+def _anotar_procesos_de_jaxsvc(resultado: Resultado, accion: str) -> None:
+    pids = _pids_de_jaxsvc()
+    if pids:
+        resultado.no_cumple.append(
+            f"aparecieron procesos de {USUARIO} (pids {', '.join(map(str, pids))}) durante --{accion}: "
+            "el resultado no es de fiar; detener las unidades y repetir")
+
+
 def _faltas_identidad_y_modo_de_la_raiz(st: os.stat_result, *, con_modo: bool) -> list[str]:
     """La raíz del workspace es `fruiz:jaxsvc` 770 (el 770 con setgid solo si ya lo tiene). Este guion NO cambia
     dueños ni grupos de la raíz: si no coinciden, `--aplicar` falla cerrado y `--verificar` lo marca."""
@@ -772,6 +833,8 @@ def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_d
     lectura) y FALLA CERRADO sin mutar nada si jaxsvc o fruiz quedarían sin paso por la raíz o hay entradas
     ACL nombradas ajenas: un cambio privilegiado sin esa comprobación puede dejar el sistema peor."""
     esperado = None   # (id de la raíz, id de proyectos/) que validó la pasada previa
+    if accion in ("aplicar", "deshacer"):
+        _exigir_sin_procesos_de_jaxsvc(accion)      # ANTES de la pasada previa
     if accion == "aplicar":
         previo = _recorrer(proyectos, accion="previo", hook_antes_de_raiz=hook_antes_de_raiz)
         if previo.no_cumple:
@@ -818,6 +881,7 @@ def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_d
             if esperado is not None:
                 _exigir_misma_identidad("proyectos/", st, esperado[1], _nombre_seguro(str(proyectos)))
             if accion in ("aplicar", "deshacer"):
+                _exigir_sin_procesos_de_jaxsvc(accion, momento=" (aparecieron justo antes de mutar)")
                 # validadas las dos identidades, desde aquí se cambia: un fallo ya es «a medio aplicar»
                 _PROGRESO["mutando"], _PROGRESO["ultima"] = True, None
             if accion in ("verificar", "aplicar", "previo"):
@@ -839,6 +903,7 @@ def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_d
         os.close(fd_raiz)
     if esperado is not None and accion in ("aplicar", "deshacer"):
         _comprobar_ocultas_sin_mutar(proyectos, accion, esperado[2], resultado)
+        _anotar_procesos_de_jaxsvc(resultado, accion)      # AL TERMINAR
     return resultado
 
 
@@ -1792,6 +1857,7 @@ def _cmd_nucleo_deshacer() -> int:
         resultado = _recorrer(proyectos, accion="deshacer")
         raiz_ok, raiz_detalle = _restaurar_raiz_desde_respaldo(proyectos, resultado.id_raiz)
         paso_faltas = _estado_del_paso_por_la_raiz(proyectos)
+        _anotar_procesos_de_jaxsvc(resultado, "deshacer")
     except BaseException as exc:   # incluye KeyboardInterrupt y SystemExit: a medio mutar hay que decirlo
         if _PROGRESO["mutando"]:
             return _imprimir_a_medio("deshacer", "deshecho", exc)
