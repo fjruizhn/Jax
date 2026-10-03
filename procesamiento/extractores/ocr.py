@@ -49,7 +49,6 @@ import subprocess
 import tempfile
 import time
 import warnings
-from collections import Counter
 from pathlib import Path
 
 from procesamiento.resultado import Resultado
@@ -891,7 +890,7 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
     de `_clasificar`, las mismas funciones que para una pasada. El ruido que
     entre por una pasada lo marca la regla B (palabras dudosas)."""
     sin_pareja = _renglones_tsv(blanca["tsv"])
-    propios_negros, duplicados = [], Counter()
+    propios_negros = []
     for renglon in _renglones_tsv(negra["tsv"]):
         pareja = next((
             blanco for blanco in sin_pareja
@@ -902,18 +901,7 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
             propios_negros.append(renglon)
         else:
             sin_pareja.remove(pareja)
-            duplicados[renglon["texto"]] += 1
-    # Del texto plano de la negra se quita UNA aparicion por cada renglon
-    # duplicado (el texto es identico, da igual cual). Si el texto plano no
-    # coincide con el del tsv, la linea se conserva: nunca se pierde texto.
-    lineas = []
-    for linea in negra["texto"].splitlines():
-        normalizada = _normalizar_linea(linea)
-        if normalizada and duplicados[normalizada] > 0:
-            duplicados[normalizada] -= 1
-            continue
-        lineas.append(linea)
-    texto = (blanca["texto"] + "\n" + "\n".join(lineas)).strip()
+    texto = (blanca["texto"] + "\n" + negra["texto"]).strip()
     filas_negras = [fila for renglon in propios_negros for fila in renglon["filas"]]
     analisis = _analizar_tsv("\n".join([blanca["tsv"], *filas_negras]))
     aportan_las_dos = bool(sin_pareja) and bool(propios_negros)
