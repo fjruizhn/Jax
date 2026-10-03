@@ -1494,3 +1494,234 @@ def test_un_jpeg_mpo_de_dos_fotogramas_se_procesa_como_una_foto(tmp_path: Path, 
     assert "Activos totales" in r.salidas["texto.txt"]
     assert "paginas" not in r.detalle
     assert entradas == [mpo.read_bytes()]
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 3: animaciones (N8), marcas de leptonica (N9), camino por
+# contenido (N10), PIL.Image en proceso limpio (N11), TIFF en streaming con
+# tope total y plazo (N13)
+# ---------------------------------------------------------------------------
+
+
+def _tesseract_llamado(monkeypatch) -> list:
+    """Espia: lista de las llamadas a tesseract que NO son `--version`."""
+    llamadas: list = []
+    real = ocr.subprocess.run
+
+    def espia(cmd, *a, **k):
+        if cmd and cmd[0] == "tesseract" and "--version" not in cmd:
+            llamadas.append(list(cmd))
+        return real(cmd, *a, **k)
+
+    monkeypatch.setattr(ocr.subprocess, "run", espia)
+    return llamadas
+
+
+def test_n8_un_gif_animado_con_un_fotograma_enorme_se_rechaza_sin_tesseract(
+    tmp_path: Path, monkeypatch
+):
+    """leptonica decodifica TODOS los fotogramas antes de rechazar la
+    animacion (8 de 15000x15000 llevaron a tesseract a 1,79 GB). Se rechaza
+    leyendo SOLO la estructura del GIF: ni Pillow decodifica ni tesseract
+    corre."""
+    import io
+    import time
+
+    from PIL import Image
+
+    chico = Image.new("P", (100, 100), 0)
+    enorme = Image.new("P", (10000, 10000), 1)
+    buf = io.BytesIO()
+    chico.save(buf, format="GIF", save_all=True, append_images=[enorme, enorme])
+    gif = tmp_path / "anim.gif"
+    gif.write_bytes(buf.getvalue())
+    llamadas = _tesseract_llamado(monkeypatch)
+
+    t0 = time.monotonic()
+    r = ocr.extraer(gif)
+
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["causa"] == "animacion_no_soportada"
+    assert llamadas == []
+    assert time.monotonic() - t0 < 5
+
+
+def test_n8_un_webp_animado_se_rechaza_sin_tesseract(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    cuadros = [Image.new("RGB", (120, 80), c) for c in ("red", "green", "blue")]
+    webp = tmp_path / "anim.webp"
+    cuadros[0].save(webp, save_all=True, append_images=cuadros[1:], duration=100)
+    assert getattr(Image.open(webp), "n_frames", 1) > 1
+    llamadas = _tesseract_llamado(monkeypatch)
+
+    r = ocr.extraer(webp)
+
+    assert r.estado == "error"
+    assert r.detalle["causa"] == "animacion_no_soportada"
+    assert llamadas == []
+
+
+@pytest.mark.parametrize("formato", ["gif", "webp"])
+def test_n8_un_gif_o_webp_de_un_solo_fotograma_sigue_como_hoy(tmp_path: Path, formato):
+    from PIL import Image
+
+    base = _imagen_multilinea(tmp_path / "b.png", [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    destino = tmp_path / f"quieta.{formato}"
+    Image.open(base).convert("RGB").save(destino)
+    r = ocr.extraer(destino)
+    assert r.estado in {"ok", "parcial"}
+    assert "Activos totales" in r.salidas["texto.txt"]
+
+
+def test_n9_leptonica_por_stdin_escribe_pixreadmem_y_se_reconoce(tmp_path: Path, monkeypatch):
+    """No existe un formato real que Pillow cargue y leptonica rechace con
+    returncode != 0 (probados 56 combinaciones modo x formato): la rama se
+    ejerce con un tesseract SIMULADO que imita su stderr real por stdin."""
+    class Falso:
+        returncode = 1
+        stdout = b""
+        stderr = (b"Error in pixReadMem: Unsupported image type\n"
+                  b"Error during processing.\n")
+
+    real = ocr.subprocess.run
+
+    def fake_run(cmd, **k):
+        return real(cmd, **k) if "--version" in cmd else Falso()
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake_run)
+    assert ocr._ocr_bytes(b"x", "spa") == {"clasificacion": "ilegible", "causa": "tesseract_no_lee"}
+    assert "pixReadMem" in ocr._MARCAS_ARCHIVO_ILEGIBLE
+
+    r = ocr.extraer(_imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD"))
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["causa"] == "tesseract_no_lee"
+
+
+def test_n9_la_marca_sola_basta_aunque_no_diga_pixreadstream(monkeypatch):
+    class Falso:
+        returncode = 1
+        stdout = b""
+        stderr = b"Error in pixReadMem: algo\n"
+
+    real = ocr.subprocess.run
+    monkeypatch.setattr(
+        ocr.subprocess, "run", lambda cmd, **k: real(cmd, **k) if "--version" in cmd else Falso()
+    )
+    assert ocr._ocr_bytes(b"x", "spa")["causa"] == "tesseract_no_lee"
+
+
+def test_n10_un_png_llamado_pdf_no_reusa_la_ficha_vieja_y_deja_su_camino(
+    tmp_path, monkeypatch
+):
+    """La version de la logica se decide por el CONTENIDO (como la compuerta),
+    no por la extension: un PNG llamado x.pdf es una imagen."""
+    import json
+
+    from motor_registry import tool_authority
+    from PIL import Image
+
+    from procesamiento import compuerta, ingesta
+
+    monkeypatch.setattr(tool_authority, "WORKSPACE_ROOT", tmp_path.resolve())
+    trabajo = tmp_path.resolve() / "trabajo"
+    png = _imagen_multilinea(tmp_path / "x.png", [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    falso_pdf = tmp_path / "x.pdf"
+    falso_pdf.write_bytes(png.read_bytes())
+
+    f = ingesta.ingerir(falso_pdf, trabajo)
+    assert f.estado == "ok"
+    assert f.detalle["_camino"] == "imagen"
+    assert f.detalle["_version_logica"] == ocr.VERSION_LOGICA_IMAGEN
+    ruta = ingesta.ruta_procesado(trabajo, f.sha256) / "ficha.json"
+    datos = json.loads(ruta.read_text(encoding="utf8"))
+    datos["detalle"].pop("_version_logica")
+    ruta.write_text(json.dumps(datos), encoding="utf8")
+
+    llamadas: list = []
+    original = compuerta.extraer
+    monkeypatch.setattr(
+        compuerta, "extraer", lambda *a, **k: llamadas.append(a) or original(*a, **k)
+    )
+    ingesta.ingerir(falso_pdf, trabajo)
+    assert len(llamadas) == 1
+
+
+def test_n10_un_pdf_escaneado_deja_camino_pdf(tmp_path: Path):
+    from PIL import Image
+
+    lineas = [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ]
+    pdf = _pdf_de_imagenes(
+        tmp_path / "e.pdf",
+        [Image.open(_imagen_multilinea(tmp_path / "pg.png", lineas)).convert("RGB")],
+    )
+    assert ocr.extraer(pdf).detalle["_camino"] == "pdf"
+    assert ocr.extraer(_imagen_multilinea(tmp_path / "i.png", lineas)).detalle["_camino"] == "imagen"
+
+
+def test_n13_la_suma_de_pixeles_de_un_tiff_pasa_el_tope_total_sin_decodificar(
+    tmp_path: Path, monkeypatch
+):
+    from PIL import Image
+
+    paginas = [Image.new("L", (100, 100), 255) for _ in range(5)]
+    tif = _tiff_multipagina(tmp_path / "cinco.tif", paginas)
+    monkeypatch.setattr(ocr, "MAX_PIXELES_TOTAL", 25_000)  # la pagina 3 (30 000) lo pasa
+    llamadas = _tesseract_llamado(monkeypatch)
+
+    r = ocr.extraer(tif)
+
+    assert r.estado == "error"
+    assert r.detalle["causa"] == "demasiados_pixeles"
+    assert llamadas == []  # ninguna pagina se decodifico ni se leyo
+
+
+def test_n13_los_topes_por_defecto():
+    assert ocr.MAX_PIXELES_TOTAL == 300_000_000
+    assert ocr.PLAZO_TOTAL_SEGUNDOS == 900
+
+
+def test_n13_el_plazo_total_corta_el_ocr_de_un_tiff_largo(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    paginas = [Image.new("L", (200, 100), 255) for _ in range(4)]
+    tif = _tiff_multipagina(tmp_path / "largo.tif", paginas)
+    ticks = iter([0.0, 10.0, 2000.0, 2000.0, 2000.0, 2000.0, 2000.0])
+    monkeypatch.setattr(ocr, "_reloj", lambda: next(ticks))
+    llamadas = _tesseract_llamado(monkeypatch)
+
+    r = ocr.extraer(tif)
+
+    assert r.estado == "error"
+    assert r.detalle["causa"] == "tiempo_excedido"
+    assert len(llamadas) <= 2  # una pagina (texto + tsv) y se corta
+
+
+def test_n13_un_tiff_valido_se_lee_pagina_a_pagina_y_no_guarda_los_png(tmp_path: Path):
+    """Sigue dando el texto completo de las dos paginas (streaming)."""
+    from PIL import Image
+
+    p1 = _imagen_multilinea(tmp_path / "p1.png", [
+        "Primera pagina del contrato", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    p2 = _imagen_multilinea(tmp_path / "p2.png", [
+        "Segunda pagina de anexos", "Garantia hipotecaria sobre inmueble",
+        "Avaluo comercial 5,000,000.00 USD", "Firmado ante notario publico",
+    ])
+    tif = _tiff_multipagina(
+        tmp_path / "dos.tif", [Image.open(p1).convert("RGB"), Image.open(p2).convert("RGB")]
+    )
+    r = ocr.extraer(tif)
+    assert "Primera pagina" in r.salidas["texto.txt"] and "Segunda pagina" in r.salidas["texto.txt"]

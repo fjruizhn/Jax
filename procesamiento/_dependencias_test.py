@@ -183,7 +183,7 @@ def test_pillow_esta_declarado_con_version_fijada_y_mapeado_a_las_imagenes():
     assert "pillow" in declaradas
     lineas = dependencias.REQUIREMENTS.read_text(encoding="utf-8").splitlines()
     assert any(l.strip().startswith("pillow==") for l in lineas)
-    assert dependencias.MODULO_POR_PAQUETE["pillow"] == "PIL._imaging"
+    assert dependencias.MODULO_POR_PAQUETE["pillow"] == "PIL.Image"
     assert dependencias.EXTENSIONES_POR_PAQUETE["pillow"] >= {".png", ".jpg", ".jpeg", ".tif", ".bmp", ".webp"}
 
 
@@ -192,11 +192,24 @@ def test_sin_pillow_se_frena_un_lote_de_imagenes_pero_no_uno_de_pdf():
     assert dependencias.lote_afectado(["pillow"], ["a.pdf", "b.docx"]) is False
 
 
-def test_con_pil_imaging_bloqueado_el_freno_marca_pillow_como_faltante(monkeypatch):
-    """`import PIL` no carga `_imaging` (el binario) y `import PIL.Image` no
-    falla sin el (Pillow lo difiere): el freno tiene que importar el binario."""
+def test_con_pil_imaging_bloqueado_el_freno_marca_pillow_como_faltante():
+    """En un proceso NUEVO, `import PIL.Image` falla sin el binario `_imaging`
+    (Image.py relanza el error; tambien detecta un binario de otra version).
+    Va en un SUBPROCESO limpio para no depender de lo que pytest ya importo
+    (donde `PIL.Image` ya cargado esconderia el fallo)."""
+    import subprocess
     import sys
+    from pathlib import Path
 
-    monkeypatch.delitem(sys.modules, "PIL.Image", raising=False)
-    monkeypatch.setitem(sys.modules, "PIL._imaging", None)
-    assert "pillow" in dependencias.estado()["faltan"]
+    raiz = Path(dependencias.__file__).resolve().parent.parent
+    codigo = (
+        "import sys; sys.modules['PIL._imaging'] = None\n"
+        "from procesamiento import dependencias\n"
+        "print(','.join(dependencias.estado()['faltan']))\n"
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", codigo], capture_output=True, text=True,
+        cwd=raiz, env={**__import__("os").environ, "PYTHONPATH": str(raiz)}, timeout=60,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "pillow" in r.stdout.strip().split(",")
