@@ -279,6 +279,13 @@ _FARO_RUN_ARGV_APROBADOS = frozenset({
     "[*git, 'rev-parse', REF_FRESCURA]",
 })
 
+# El publicador conserva un helper _run(argv) con argv libre. Congelar solo
+# sus llamadas directas no cubre `runner = _run; runner([programa])`. Este
+# digest del AST COMPLETO exige revisión explícita de cualquier nuevo alias,
+# llamada o flujo de datos dentro del publicador, además de los ocho argv
+# legibles de arriba. Comentarios/formato no cambian el digest.
+_FARO_PUBLICADOR_AST_SHA256 = "69f183f6a968c450c8bf3d3fd67dd35e6e43dad6813e359105d6ef02ca9aa94f"
+
 # El test llama a un script fixture vía subprocess; congelar SOLO la forma
 # `str(script)` no garantiza que `script` siga viniendo de la fixture. El hash
 # del AST completo exige revisión de cualquier nueva asignación, función o
@@ -318,6 +325,8 @@ def _exento_faro(root: Path, path: Path, tree: ast.AST) -> bool:
     alias = _Alias(tree)
     lanzamientos = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and _nombre_lanzador(n, alias)]
     if rel == "ops/las-voces/faro_paquete_permanente.py":
+        if hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest() != _FARO_PUBLICADOR_AST_SHA256:
+            return False
         # Un solo subprocess.run dentro de _run; todos sus call sites pasan
         # una lista escrita en este archivo, nunca `argv` que entre de fuera.
         if len(lanzamientos) != 1 or not isinstance(lanzamientos[0].func, ast.Attribute):
@@ -1327,6 +1336,7 @@ def test_exenciones_faro_niegan_argv_libre_nuevo() -> None:
         "_run([programa])",
         "_run([programa, '--print'])",
         "_run(['/usr/bin/git', *argv_externo])",
+        "runner = _run; runner([programa])",
     ):
         mutado = ast.parse(fuente + f"\n{llamada}\n")
         assert not _exento_faro(_THIS_REPO_ROOT, publicador, mutado), llamada
