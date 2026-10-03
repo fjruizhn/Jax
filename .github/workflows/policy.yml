@@ -5499,6 +5499,8 @@ jobs:
           #   «X»). Las pruebas que esperaban `ok` en imagenes transparentes se actualizan (no
           #   suman). Cuenta del runner: 197 recolectadas menos las 2 de LACTOVI que salta = 195
           #   passed, 2 skipped. Medido LOCAL en hall9000: 197 passed.
+          # Ronda 17: la prueba de la version de la logica pasa a exigir "4" (reescrita, no suma);
+          #   sigue en 197 recolectadas, 195 passed + 2 skipped en el runner.
           grep -qE "^195 passed, 2 skipped" /tmp/ocr_tests || {
             echo "PISO ROTO: se esperaban 195 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
@@ -5635,8 +5637,13 @@ jobs:
         run: |
           python -m pytest -q procesamiento/_compuerta_test.py 2>&1 | tee /tmp/compuerta_tests
           # 2026-10-03 (jax-14, ronda 1): +1 (pdfplumber roto no escapa crudo ni rutea a OCR). Medido en local, Python 3.14 con las 3 dependencias: 35 passed.
-          grep -qE "^35 passed" /tmp/compuerta_tests || {
-            echo "PISO ROTO: se esperaban 35 tests CORRIDOS de la compuerta."; exit 1; }
+          # 35 -> 41 (Jax#338 ronda 17): `IMAGENES` sale de procesamiento/tipos_imagen.py, la misma
+          #   lista que el freno de dependencias, y suma .apng .gif .jfif .jpe .mpo (+5 casos de la
+          #   prueba parametrizada por extension) y +1 que exige que cubra cada formato cuya firma el
+          #   OCR acepta (extensiones registradas en Pillow) y que sea igual a la del freno. Medido en
+          #   local, Python 3.14 con las 3 dependencias y Pillow: 41 passed.
+          grep -qE "^41 passed" /tmp/compuerta_tests || {
+            echo "PISO ROTO: se esperaban 41 tests CORRIDOS de la compuerta."; exit 1; }
 
       # Task 8 (2026-09-21, procesamiento-archivos-nucleo): la ingesta con
       # cache -- la tarea que produce el ahorro real. Indexa por sha256 del
@@ -6023,8 +6030,10 @@ jobs:
           # 29 -> 31 (Jax#338 ronda 1): +2 -- Pillow declarado con version fijada y mapeado a las
           #   extensiones de imagen; sin Pillow se frena un lote de imagenes y no uno de PDF.
           # 31 -> 32 (Jax#338 ronda 2): +1 -- con PIL._imaging bloqueado, pillow figura como faltante.
-          grep -qE "^32 passed" /tmp/dependencias_tests || {
-            echo "PISO ROTO: se esperaban 32 tests CORRIDOS (no skipeados) del freno de dependencias."; exit 1; }
+          # 32 -> 34 (Jax#338 ronda 17): +2 -- sin Pillow se frena `sello.gif`, y cada extension que
+          #   Pillow registra para un formato cuya firma el OCR acepta. Medido localmente: 34 passed.
+          grep -qE "^34 passed" /tmp/dependencias_tests || {
+            echo "PISO ROTO: se esperaban 34 tests CORRIDOS (no skipeados) del freno de dependencias."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
