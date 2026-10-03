@@ -21,13 +21,13 @@ Dos corridas secuenciales de 50 solicitudes por nivel, en bucle cerrado, una sal
 
 | Concurrencia | Antes req/s | Después req/s | Antes p95 ms | Después p95 ms | p95 > 500 ms |
 |---:|---:|---:|---:|---:|---|
-| 1 | 28,34 | 63,41 | 36,86 | 17,53 | no / no |
-| 5 | 29,45 | 68,69 | 173,92 | 82,45 | no / no |
-| 10 | 28,61 | 66,95 | 354,14 | 161,05 | no / no |
-| 25 | 28,71 | 69,42 | 879,30 | 363,45 | sí / no |
+| 1 | 28,34 | 59,30 | 36,86 | 19,61 | no / no |
+| 5 | 29,45 | 66,32 | 173,92 | 78,10 | no / no |
+| 10 | 28,61 | 61,94 | 354,14 | 189,87 | no / no |
+| 25 | 28,71 | 65,10 | 879,30 | 387,38 | sí / no |
 
 La frontera deja de escalar aproximadamente desde c=1 antes del cambio; después mantiene
-su rendimiento hasta c=25. El rendimiento mejora entre 2,2x y 2,4x en los cuatro niveles.
+su rendimiento hasta c=25. El rendimiento mejora entre 2,1x y 2,3x en los cuatro niveles.
 Con el criterio medido de p95 mayor que 500 ms, la degradación aparece en c=25 antes del
 cambio y no aparece hasta c=25 después. No se extrapola a más concurrencia ni a la aplicación
 completa.
@@ -39,9 +39,9 @@ la misma unidad de 16 KB, fuera del perfilador:
 
 | | Antes | Después |
 |---|---:|---:|
-| Mediana por llamada | 7,05 ms | 0,08 ms |
+| Mediana por llamada | 7,05 ms | 0,09 ms |
 | p95 por llamada | 11,16 ms | 0,09 ms |
-| Cinco revalidaciones por turno | ~35,2 ms | ~0,4 ms |
+| Cinco revalidaciones por turno | ~35,2 ms | ~0,5 ms |
 
 Las revalidaciones dejan de recorrer payload y gramáticas para renderizar otra vez. Cada una
 verifica el envelope y el digest de la proyección efectiva, y vuelve a validar scope,
