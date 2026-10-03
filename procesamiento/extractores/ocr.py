@@ -873,9 +873,9 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
     eleccion perdio texto real (TOTAL en una pasada y L500 en la otra daban
     ok/imagen_sin_texto).
 
-    UNA sola fuente, el `tsv` (Jax#338 ronda 14): el texto plano de tesseract
-    NO se usa en este camino (divergia del `tsv` y la deduplicacion de uno
-    borraba renglones reales del otro). De las filas de palabra de las dos
+    El `tsv` es la fuente principal (Jax#338 ronda 14): la deduplicacion es
+    solo entre renglones del `tsv` (el texto plano divergia y la deduplicacion
+    de uno borraba renglones reales del otro). De las filas de palabra de las dos
     pasadas salen, juntos, la deduplicacion, el texto y las metricas:
     - renglones = palabras agrupadas por (pagina, bloque, parrafo, renglon) en
       el orden del `tsv`, unidas por espacio (`_renglones_tsv`);
@@ -886,7 +886,9 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
       separados por salto de linea;
     - metricas: `_analizar_tsv` sobre esas mismas filas; clasificacion:
       `_clasificar`.
-    Una pasada sin renglones en el TSV no aporta nada."""
+    Ademas (ronda 16, invariante 2), al final se agrega toda linea del texto
+    plano de cualquiera de las dos pasadas que no este ya en el texto, para no
+    perder texto legible cuando el TSV es parcial; marca `sin_posicion`."""
     blancos = _renglones_tsv(blanca["tsv"])
     negros = _renglones_tsv(negra["tsv"])
     sin_pareja = list(blancos)
@@ -902,7 +904,21 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
         else:
             sin_pareja.remove(pareja)
     renglones = blancos + propios_negros
-    texto = "\n".join(renglon["texto"] for renglon in renglones)
+    lineas = [renglon["texto"] for renglon in renglones]
+    # Invariante 2 (ronda 16): ninguna linea legible se pierde aunque el TSV sea
+    # parcial. Toda linea del texto plano de CUALQUIERA de las dos pasadas cuyo
+    # texto normalizado no esta ya en el texto final se agrega al final (de
+    # esta pagina). Marca `sin_posicion`: ese texto no tiene caja ni metricas.
+    presentes = {_normalizar_linea(linea) for linea in lineas}
+    sin_posicion = False
+    for pasada in (blanca, negra):
+        for linea in pasada["texto"].splitlines():
+            normalizada = _normalizar_linea(linea)
+            if normalizada and normalizada not in presentes:
+                lineas.append(linea.strip())
+                presentes.add(normalizada)
+                sin_posicion = True
+    texto = "\n".join(lineas)
     # La fila de nivel 1 (pagina) solo da ancho y alto, no aporta palabras.
     paginas = [
         fila for salida in (blanca["tsv"], negra["tsv"]) for fila in salida.splitlines()[1:]
@@ -915,6 +931,7 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
         "texto": texto,
         "caracteres": len(texto),
         **analisis,
+        "sin_posicion": sin_posicion,
         "clasificacion": _clasificar(len(texto), analisis),
     }
 
