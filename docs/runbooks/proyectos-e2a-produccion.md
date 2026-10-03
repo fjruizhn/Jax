@@ -47,50 +47,27 @@ Hacerlo desde un checkout cuyo HEAD tenga el guion commiteado (el núcleo se com
 **Sin acceso para «otros» (spec madre §5: 2770 en directorios, 0660 en archivos).** `--aplicar` deja `other::---` en el modo y en la ACL de acceso y por defecto de todo `proyectos/`, y quita los bits de otros a la **raíz del workspace** (el padre de `proyectos/`, hoy `/srv/jax-data/jax-workspace`, `fruiz:jaxsvc` 770) sin cambiar su dueño ni su grupo. `--verificar` cuenta como NO CUMPLE: cualquier bit de otros en `proyectos/`, debajo y en esa raíz; que `jaxsvc` o `fruiz` no puedan atravesar la raíz; y **cualquier entrada ACL nombrada (usuario o grupo) que no sea de `jaxsvc` ni de `fruiz`**, en la raíz o en el árbol.
 **`--aplicar` falla cerrado, sin cambiar nada**, en dos casos, antes de tocar un solo objeto (pasada de solo lectura): (1) `jaxsvc` o `fruiz` no podrían atravesar la raíz sin el bit de otros. Hoy `fruiz` entra a la raíz **como dueño** y `jaxsvc` **por el grupo** `jaxsvc` (ninguno está en el grupo del otro): una raíz `fruiz:fruiz 0755`, que es lo que deja un `mkdir` con umask 022, dejaría fuera a `jaxsvc`, y `--deshacer` restaura el modo desde el respaldo pero no arregla un dueño o grupo equivocado. (2) Hay una entrada ACL nombrada ajena: `--aplicar` **no la borra** (ni la amplía con la máscara): la lista y una persona decide si se quita (`setfacl -x u:<nombre> <ruta>`) o si es legítima. En ambos casos el mensaje dice qué objeto y qué cuenta; se corrige y se repite.
 **Efecto a saber antes de aplicar:** los archivos pasan a `0660` y pierden cualquier bit de ejecución que tuvieran (medido por la auditoría: 290 de 292 archivos lo tenían, todos por la máscara `rwx` que dejaba el guion viejo y ninguno de dueño).
-**Prueba real tras aplicar** (la que importa; `--verificar` en 0 no la reemplaza). `nobody` no atraviesa la raíz (770), así que una lectura suya fallaría **aunque `proyectos/` siguiera abierto**: una prueba que no puede fallar no valida nada. Por eso se le da a `nobody` una entrada **temporal solo en la raíz**, con **limpieza garantizada** (`trap` en EXIT, INT y TERM, y verificación de que se quitó), y la prueba se hace en **dos bloques**, cada uno su propio `bash` (el `trap` vive y muere con él). Ningún bloque toca datos de clientes mientras `proyectos/` pueda estar abierto.
-**Bloque 1, ANTES de aplicar: control positivo sobre un archivo CENTINELA** (nunca un documento de cliente). Se crea un subdirectorio temporal en la raíz con ACL explícita para `nobody` y un archivo propio de la prueba; `nobody` tiene que poder leerlo. Eso demuestra que la entrada temporal en la raíz de verdad deja pasar y que `head` mira ACL. El `trap` borra también el centinela:
+**Verificación tras aplicar** (los tres puntos se hacen cumplir en el bloque; si algo no da, imprime `NO CUMPLE` y sale con código distinto de 0, y no se sigue): (a) `--verificar` da 0; (b) como root, `getfacl -R -p <raíz>/proyectos` mostrado solo para las líneas `other::` y `default:other::` tiene que dar **únicamente** `other::---` y `default:other::---`; (c) la raíz del workspace es `770 fruiz:jaxsvc`.
 ```bash
-bash <<'BLOQUE1'
-set -u
+bash <<'VERIFICACION'
+set -euo pipefail
 RAIZ=/srv/jax-data/jax-workspace          # la JAX_WORKSPACE_DIR real
-SENT="$RAIZ/.prueba-nobody-$$"
-limpiar() {
-  trap - EXIT INT TERM
-  sudo rm -rf "$SENT"
-  sudo setfacl -x u:nobody "$RAIZ" 2>/dev/null
-  N=$(getfacl -p "$RAIZ" 2>/dev/null | grep -c nobody)
-  [ "$N" = "0" ] && echo "limpieza OK: la raiz no tiene entradas de nobody" || echo "LIMPIEZA FALLO: quitar a mano  sudo setfacl -x u:nobody $RAIZ" >&2
-}
-trap limpiar EXIT INT TERM
-sudo setfacl -m u:nobody:x "$RAIZ"
-sudo mkdir "$SENT" && sudo setfacl -m u:nobody:rx "$SENT"
-echo centinela | sudo tee "$SENT/c.txt" >/dev/null && sudo setfacl -m u:nobody:r "$SENT/c.txt"
-sudo -u nobody head -c1 "$SENT/c.txt" >/dev/null && echo "control positivo: OK (nobody lee el centinela)" || { echo "control positivo FALLO: la prueba no mide nada; NO SE SIGUE" >&2; exit 1; }
-BLOQUE1
+python3 ops/permisos_proyectos.py --verificar || { echo "NO CUMPLE: --verificar no dio 0" >&2; exit 1; }
+OTROS=$(sudo getfacl -R -p "$RAIZ/proyectos" | grep -E '^(default:)?other::' | sort -u)
+ESPERADO=$(printf 'default:other::---\nother::---')
+if [ "$OTROS" != "$ESPERADO" ]; then
+  echo "NO CUMPLE: other en proyectos/ no es solo ---:" >&2; echo "$OTROS" >&2; exit 1
+fi
+RAIZ_ESTADO=$(stat -c '%a %U:%G' "$RAIZ")
+if [ "$RAIZ_ESTADO" != "770 fruiz:jaxsvc" ]; then
+  echo "NO CUMPLE: la raiz del workspace es '$RAIZ_ESTADO', se esperaba '770 fruiz:jaxsvc'" >&2; exit 1
+fi
+echo "OK: --verificar en 0, other cerrado en todo proyectos/ y raiz 770 fruiz:jaxsvc"
+VERIFICACION
 ```
-**Después se aplica** (secuencia de arriba). `--aplicar` falla cerrado si queda una entrada de `nobody`, que es una red de seguridad más, no la limpieza.
-**Bloque 2, DESPUÉS de aplicar: la medición sobre `proyectos/`** (que ya no tiene bits de otros), con la misma entrada temporal solo en la raíz y la misma limpieza garantizada. Se pasa como argumento un archivo cualquiera de `proyectos/`:
-```bash
-bash -s -- '/srv/jax-data/jax-workspace/proyectos/<uuid>/fuente/<archivo>' <<'BLOQUE2'
-set -u
-RAIZ=/srv/jax-data/jax-workspace
-ARCH="$1"
-limpiar() {
-  trap - EXIT INT TERM
-  sudo setfacl -x u:nobody "$RAIZ" 2>/dev/null
-  N=$(getfacl -p "$RAIZ" 2>/dev/null | grep -c nobody)
-  [ "$N" = "0" ] && echo "limpieza OK: la raiz no tiene entradas de nobody" || echo "LIMPIEZA FALLO: quitar a mano  sudo setfacl -x u:nobody $RAIZ" >&2
-}
-trap limpiar EXIT INT TERM
-sudo setfacl -m u:nobody:x "$RAIZ"
-sudo -u nobody head -c1 "$ARCH"            # tiene que decir: Permission denied
-sudo -u nobody ls "$(dirname "$ARCH")"     # idem
-BLOQUE2
-python3 ops/permisos_proyectos.py --verificar       # con la entrada ya quitada, tiene que dar 0
-```
-Se usa `head`/`ls` y **no** `test -r`: el `test` de uutils (hall9000) solo mira los bits del modo, no las ACL. Si algún `head`/`ls` del bloque 2 **funciona**, `proyectos/` sigue abierto: se detiene todo y se escala. Si la limpieza imprime `LIMPIEZA FALLO`, se quita a mano antes de seguir.
+Nota: **una lectura como `nobody` no se usa como prueba**. Mientras la raíz esté en 770, `nobody` no la atraviesa y esa lectura falla aunque `proyectos/` siguiera abierto: una prueba que no puede fallar no valida nada. Darle a `nobody` una entrada temporal para que sí pueda fallar abre los documentos de los clientes mientras dura la prueba, así que tampoco se hace: la verificación (b) mide directamente lo que importa, los bits de otros. (Y `test -r` no sirve como prueba de permisos en este host: el `test` de uutils mira solo los bits del modo, no las ACL.) Las carpetas ocultas de estado de herramientas (primer nivel de cada proyecto) las alcanza `getfacl -R` aunque `--aplicar` no las toca: si una tuviera bits de otros, el bloque lo diría y se decide a mano.
 **Después de cualquier traslado del workspace**, volver a medir la cadena completa con `namei -l <archivo de proyectos/>`: cada tramo, desde `/`, tiene que ser lo que se espera (sin bit de otros en la raíz del workspace ni abajo, y `fruiz` y `jaxsvc` con paso). El 2026-10-03 el traslado a `/srv/jax-data` quitó la barrera que daba `/home/fruiz` (750) y nadie lo notó.
-**`--deshacer` revierte dueños y ACL nombradas, pero NUNCA reabre a otros.** Devuelve `proyectos/` a `fruiz:fruiz` y quita las ACL nombradas de jaxsvc y fruiz (lo de antes de E2a), y deja **`other::---`**: modo `0770` en directorios y `0660` en archivos, y `default:other::---` en los directorios (lo que se cree después nace cerrado). De la raíz restaura solo dueño y grupo del modo que guardó el respaldo forense más reciente de confianza (`/var/backups/jax-permisos/`, que registra modo y ACL de la raíz); si ese modo tenía bits de otros **no los restaura y lo dice** («los bits de otros … no se restauran»). Si no hay respaldo válido lo dice («Raíz del workspace: NO restaurada») y no la toca. Un `--deshacer` es una reversión de propiedad y de ACL, nunca una reapertura: si de verdad hiciera falta que otros lean `proyectos/`, es una decisión de Fernando y se hace a mano, no con este guion. Después de un `--deshacer`, `jaxsvc` ya no es dueño ni tiene entrada: entra por el grupo si la raíz y los directorios se lo dan; para recuperar la operación normal se vuelve a correr `--aplicar`.
+**`--deshacer` devuelve el dueño a `fruiz:fruiz`, conserva a `jaxsvc` y NUNCA reabre a otros.** Deja `proyectos/` con dueño y grupo `fruiz:fruiz` (lo de antes de E2a), pero **conserva** `u:jaxsvc:rwx` (`rw-` en archivos) con su máscara, en la ACL de acceso y en la por defecto, y `other::---`: modo `0770` en directorios y `0660` en archivos, y `default:other::---` en los directorios (lo que se cree después nace cerrado). Así LAS MANOS (`jaxsvc` no es del grupo `fruiz`) sigue operando y nadie más entra; se quita solo la entrada nombrada de `fruiz`, que ya es dueño y grupo. De la raíz restaura solo dueño y grupo del modo que guardó el respaldo forense más reciente de confianza (`/var/backups/jax-permisos/`, que registra modo y ACL de la raíz); si ese modo tenía bits de otros **no los restaura y lo dice**. Si no hay respaldo válido lo dice («Raíz del workspace: NO restaurada») y no la toca. Un `--deshacer` es una reversión de propiedad, nunca una reapertura: si de verdad hiciera falta que otros lean `proyectos/`, es una decisión de Fernando y se hace a mano, no con este guion.
 **Hay que reinstalar el núcleo privilegiado.** Este cambio modifica `ops/permisos_proyectos.py`, que es el núcleo (`--nucleo-privilegiado` corre ese mismo archivo). El instalado en `/usr/local/sbin/jax-permisos-proyectos` queda desfasado respecto de HEAD: `--verificar` lo avisa y `--aplicar` se niega hasta reinstalar. Lo hace root, desde un checkout con el cambio ya integrado en `master`, con la orden de arriba (`sudo install -o root -g root -m 0755 ops/permisos_proyectos.py /usr/local/sbin/jax-permisos-proyectos`) y se comprueba con `sha256sum`. La regla de sudoers no cambia (mismas tres órdenes).
 > **Orden.** Si el despliegue de jax (paso 3) es el que trae el `fchmod`, se hace el paso 3 antes del `--aplicar` de este paso. Los demás pasos de este runbook no dependen de ello.
 ### 3. jax a producción (LAS MANOS con `project_uuid`)
