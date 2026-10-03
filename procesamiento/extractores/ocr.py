@@ -139,7 +139,7 @@ _FIRMA_PDF = b"%PDF"
 #       un problema)
 #   danada (firma invalida, no decodifica)  -> error   archivo_ilegible
 #   formato que no leemos (detectado ANTES de tesseract; `detalle.formato`:
-#   gif_animado, webp_animado, gris_16_bits, coma_flotante, entero_32_bits,
+#   gif_animado, webp_animado, png_animado, gris_16_bits, coma_flotante, entero_32_bits,
 #   bmp_16_bits)                           -> error   formato_no_soportado
 #   Pillow la decodifica y leptonica no     -> error   archivo_no_procesable
 #   demasiados pixeles / paginas             -> error   imagen_demasiado_grande
@@ -421,6 +421,13 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with Image.open(BytesIO(datos)) as img:
+                # Jax#338 ronda 18: un PNG/APNG de mas de un cuadro se rechaza
+                # como un GIF o WebP animado. Leido como una sola imagen,
+                # tesseract solo ve el cuadro por defecto (un primer cuadro en
+                # blanco daba ok/imagen_sin_texto con el texto en el segundo).
+                # Pillow cuenta los cuadros con el `acTL`, sin decodificarlos.
+                if img.format == "PNG" and getattr(img, "n_frames", 1) > 1:
+                    return _Rechazo("animacion_no_soportada", "png_animado")
                 # Solo un TIFF es multipagina PARA TESSERACT. Un MPO (fotos de
                 # iPhone: la foto + una vista previa) se lee por su primer
                 # fotograma: tratarlo como paginas re-codificaria la foto
@@ -1111,7 +1118,7 @@ def _detalle_comun(idioma: str, r: dict) -> dict:
 # - `archivo_ilegible` ("danado"): SOLO firma que no es de imagen o que Pillow no
 #   decodifica (incluye los truncados).
 # - `formato_no_soportado`: la deteccion (SIEMPRE antes de tesseract) nombra el
-#   formato en `detalle["formato"]` (gif_animado, webp_animado, gris_16_bits,
+#   formato en `detalle["formato"]` (gif_animado, webp_animado, png_animado, gris_16_bits,
 #   coma_flotante, entero_32_bits, bmp_16_bits) y la accion.
 # - `archivo_no_procesable` (`tesseract_no_lee`): Pillow lo decodifico y
 #   leptonica lo rechaza (JPEG con basura en los datos, PNG cortado antes de
