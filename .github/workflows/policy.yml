@@ -6621,7 +6621,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: sudo apt-get -qq update && sudo apt-get -qq install -y acl
-      - run: pip install pytest
+      - run: pip install -r requirements.txt pytest
       # Sin paso de "instalar el núcleo" (E2a, MAJOR-1 de la revisión de la Tarea 3): las pruebas
       # instalan su propia copia bajo el directorio temporal (JAX_PERMISOS_NUCLEO) y, solo si
       # /usr/local/sbin está libre, una temporal ahí que borran al terminar. Dejar el núcleo

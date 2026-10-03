@@ -66,6 +66,7 @@ import os
 import pwd
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -750,8 +751,11 @@ os.makedirs({str(fuente)!r})
     # El archivo se crea por el camino REAL de LAS MANOS (tool_authority._write_file: mkstemp +
     # fchmod + replace), no con os.open: sin el fchmod(0o660) el archivo queda con mascara ACL
     # --- y esta prueba se pone roja. Solo se sustituye el commit de git del workspace.
+    # sys.executable y no "python3": tiene que ser el interprete que corre pytest (el del
+    # venv/setup-python del runner, que tiene aiomysql via requirements.txt); el python3 del
+    # sistema del runner no lo tiene y jacobs.store lo importa.
     r_w = subprocess.run(
-        ["python3", "-c", f"""
+        [sys.executable, "-c", f"""
 import asyncio, sys
 from pathlib import Path
 sys.path[:0] = [{str(RAIZ_REPO / "las_manos")!r}, {str(RAIZ_REPO)!r}]
