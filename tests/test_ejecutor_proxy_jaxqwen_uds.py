@@ -142,6 +142,8 @@ def test_por_jaxqwen_tambien_se_rechaza_la_herramienta_de_servidor_y_lo_anidado_
     """MAJOR-A y la herramienta de servidor aplican a las DOS entradas (no solo a la del Ejecutor)."""
     servidor = (b'{"model":"modelo-permitido","max_tokens":1,"messages":[],'
                 b'"tools":[{"type":"web_search_20250305","name":"web_search"}]}')
+    bloque = (b'{"model":"modelo-permitido","max_tokens":1,"messages":[{"role":"assistant","content":['
+              b'{"type":"web_search_tool_result","tool_use_id":"s","content":[]}]}]}')
     anidado = (b'{"model":"modelo-permitido","max_tokens":1,"messages":['
                b'{"role":"user","content":[{"Type":"tool_result","tool_use_id":"t","content":"x"}]}]}')
 
@@ -163,10 +165,12 @@ def test_por_jaxqwen_tambien_se_rechaza_la_herramienta_de_servidor_y_lo_anidado_
                 async with httpx.AsyncClient(transport=transport, base_url="http://jaxqwen") as client:
                     a = await client.post("/v1/messages", content=servidor)
                     b = await client.post("/v1/messages", content=anidado)
+                    c = await client.post("/v1/messages", content=bloque)
                 return (a.status_code, a.json()["error"]["type"], b.status_code, b.json()["error"]["type"],
-                        len(upstream.recibidas))
+                        c.status_code, c.json()["error"]["type"], len(upstream.recibidas))
             finally:
                 server.close()
                 await server.wait_closed()
 
-    assert _correr(scenario()) == (403, "herramienta_de_servidor", 403, "pedido_ambiguo", 0)
+    assert _correr(scenario()) == (403, "herramienta_de_servidor", 403, "pedido_ambiguo",
+                                   403, "herramienta_de_servidor", 0)

@@ -67,7 +67,9 @@ Configuración (sin defaults para lo que decide a dónde va el tráfico):
                               objeto de `tools[]`; ver `lectura.cargar_pedido`. Go (Ollama)
                               empareja claves sin distinguir mayúsculas, C3 no. También en las
                               dos entradas: 403 `herramienta_de_servidor` si `tools` trae algo con
-                              `type` distinto de ausente o `custom` (búsqueda web de Ollama)
+                              `type` distinto de ausente o `custom` (búsqueda web de Ollama), o si algún bloque de
+                              `messages[].content[]` es de servidor (`server_tool_use`, `web_search*`,
+                              `web_fetch*`, `*_tool_result` que no sea `tool_result`)
 
 C3 (registro intocable, decisión D-SP1-2 del índice de SP1): cada `tool_use` que
 el cerebro pide se anota en el registro ANTES de reenviar el trozo que lo completa,
@@ -361,7 +363,7 @@ def _fuera_de_limites(cuerpo: bytes, cfg: Config) -> str | None:
     salida = pedido.get("max_tokens")
     if type(salida) is not int or not 0 < salida <= cfg.max_salida_tokens:
         return SALIDA_NO_PERMITIDA
-    if _con_herramienta_de_servidor(pedido.get("tools")):
+    if _con_herramienta_de_servidor(pedido.get("tools")) or lectura.bloque_de_servidor(pedido):
         return HERRAMIENTA_DE_SERVIDOR
     return None
 
