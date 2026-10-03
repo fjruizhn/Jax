@@ -29,7 +29,7 @@ from pathlib import Path
 
 from procesamiento.extractores import excel, ocr, pdf, word
 from procesamiento.resultado import Resultado
-from procesamiento.tipos_imagen import EXTENSIONES_IMAGEN
+from procesamiento.tipos_imagen import EXTENSIONES_IMAGEN, tipo_por_contenido
 
 # Jax#338 ronda 17: la MISMA fuente que el freno de dependencias (antes eran dos
 # copias a mano y a las dos les faltaba `.gif`).
@@ -49,11 +49,9 @@ def _tipo_por_contenido(origen: Path) -> str | None:
             cabecera = fh.read(1024)
     except OSError:
         return None
-    # Una sola fuente de verdad para pdf/imagen: `ocr.tipo_por_cabecera`
-    # (firma de imagen primero, despues %PDF en los primeros 1024 bytes).
-    if cabecera[:8] == _FIRMA_OLE2:
-        return "ole2"
-    return ocr.tipo_por_cabecera(cabecera, origen.suffix)
+    # Una sola fuente de verdad: `tipos_imagen.tipo_por_contenido` (OLE2, firma
+    # de imagen, despues %PDF), la MISMA que usa el freno de dependencias.
+    return tipo_por_contenido(cabecera, origen.suffix)
 
 
 def _con_extension_enganosa(r: Resultado, sufijo: str, contenido: str) -> Resultado:
