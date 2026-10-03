@@ -821,7 +821,7 @@ def test_deshacer_revierte_duenos_y_acl_nombradas_pero_nunca_reabre_a_otros(arbo
             "user::rwx", "group::rwx", "other::---",
             "default:user::rwx", "default:group::rwx", "default:other::---",
         ], (ruta_dir, _acl(ruta_dir))
-        assert not any(l.startswith(("user:", "group:", "default:user:", "default:group:")) and l.count(":") == 2
+        assert not any(l.startswith(("user:", "group:", "default:user:", "default:group:")) and l.split(":")[-2] != ""
                        and f":{_usuario_de_pruebas()}:" not in l for l in _acl(ruta_dir)), "quedó una ACL nombrada"
 
     archivo = proyectos / "un-proyecto" / "archivo.txt"

@@ -242,6 +242,17 @@ def _setfacl(fd_path: int, entrada: str, *, default: bool = False) -> None:
         raise ErrorPermisosProyectos(f"setfacl falló sobre el descriptor {fd_path}: {r.stderr}")
 
 
+def _setfacl_reemplazar(fd_path: int, acl_completa: str, *, default: bool = False) -> None:
+    """`setfacl --set`: REEMPLAZA la ACL entera (de acceso, o la por defecto con default=True), no la modifica.
+    Cualquier entrada que alguien haya agregado entre la pasada previa de --aplicar y esta mutación (jaxsvc es
+    dueño del árbol y puede) desaparece, y la máscara nunca vuelve efectiva una entrada ajena."""
+    os.set_inheritable(fd_path, True)
+    args = ["setfacl"] + (["-d"] if default else []) + ["--set", acl_completa, f"/proc/self/fd/{fd_path}"]
+    r = subprocess.run(args, pass_fds=(fd_path,), capture_output=True, text=True)
+    if r.returncode != 0:
+        raise ErrorPermisosProyectos(f"setfacl --set falló sobre el descriptor {fd_path}: {r.stderr}")
+
+
 def _limpiar_acl(fd_path: int, ruta: str) -> None:
     """--deshacer: quita la ACL de acceso Y por defecto por completo (verificado que
     `-b -k` no falla sobre un archivo, aunque -k no tenga nada que hacer ahí)."""
@@ -414,7 +425,7 @@ def _es_carpeta_oculta_excluida(entrada: os.DirEntry) -> bool:
 def _procesar_directorio(fd_path: int, ruta: str, st: os.stat_result, *, accion: str,
                           resultado: Resultado) -> None:
     if accion == "deshacer":
-        _deshacer_objeto(fd_path, ruta, resultado)
+        _deshacer_objeto(fd_path, ruta, resultado, es_directorio=True)
         return
     if accion == "previo":
         _revisar_previo_objeto(fd_path, ruta, resultado)
@@ -687,9 +698,11 @@ def _mutar_directorio(fd_path: int, ruta: str, resultado: Resultado) -> None:
     # encontrado en la ronda 3 (ver el docstring de _deshacer_objeto).
     # `o::---` en la de acceso Y en la por defecto (spec madre §5): lo que se cree después
     # hereda `other` cerrado. Las entradas de jaxsvc y fruiz no cambian.
-    entrada = f"u:{USUARIO}:rwX,g:{GRUPO}:rwX,g::rwX,m::rwx,o::---"
-    _setfacl(fd_path, entrada)
-    _setfacl(fd_path, entrada, default=True)
+    # ACL CANÓNICA completa, que REEMPLAZA a la que hubiera (`--set`, no `-m`): ninguna entrada ajena
+    # sobrevive ni queda efectiva por la máscara, aunque se haya agregado después de la pasada previa.
+    entrada = f"u::rwx,u:{USUARIO}:rwx,g::rwx,g:{GRUPO}:rwx,m::rwx,o::---"
+    _setfacl_reemplazar(fd_path, entrada)
+    _setfacl_reemplazar(fd_path, entrada, default=True)
 
     # El cambio de dueño va DESPUÉS de las ACL (MINOR-1): con `chown` primero, quien era dueño y solo
     # tenía los bits de dueño (un 0600 de fruiz) se quedaba sin acceso hasta que llegaba el setfacl; con las
@@ -767,7 +780,8 @@ def _mutar_archivo(fd_path: int, ruta: str, resultado: Resultado) -> None:
     # Antes del chown, que borra setuid/setgid (ver _mutar_directorio).
     tenia_especiales = bool(os.fstat(fd_path).st_mode & _ESPECIALES)
 
-    _setfacl(fd_path, f"u:{USUARIO}:rwX,g:{GRUPO}:rwX,g::rwX,m::rwx,o::---")
+    # ACL CANÓNICA completa que REEMPLAZA a la que hubiera (ver _mutar_directorio).
+    _setfacl_reemplazar(fd_path, f"u::rw-,u:{USUARIO}:rw-,g::rw-,g:{GRUPO}:rw-,m::rw-,o::---")
 
     # Dueño DESPUÉS de la ACL (MINOR-1): ver _mutar_directorio.
     fd_real = _reabrir_real(fd_path, os.O_RDONLY)
@@ -805,11 +819,12 @@ def _mutar_archivo(fd_path: int, ruta: str, resultado: Resultado) -> None:
 # 0775/0664, preserva lo que su dueño ya podía hacer.
 
 def _modo_deshecho(modo_actual: int) -> int:
+    """Grupo = dueño, y NUNCA bits de otros: --deshacer revierte dueños y ACL nombradas, no reabre el árbol."""
     propietario = (modo_actual >> 6) & 0o7
-    return (propietario << 6) | (propietario << 3) | (propietario & 0o5)
+    return (propietario << 6) | (propietario << 3)
 
 
-def _deshacer_objeto(fd_path: int, ruta: str, resultado: Resultado) -> None:
+def _deshacer_objeto(fd_path: int, ruta: str, resultado: Resultado, *, es_directorio: bool = False) -> None:
     """Orden verificado empíricamente (hall9000 y en un contenedor limpio, 2026-09-25):
     cuando hay ACL extendida, el bit de GRUPO que se ve por `stat` plano es la MÁSCARA,
     no la entrada `group::` real -- `_mutar_directorio`/`_mutar_archivo` sólo tocan la
@@ -838,6 +853,11 @@ def _deshacer_objeto(fd_path: int, ruta: str, resultado: Resultado) -> None:
             os.fchmod(fd_real, nuevo_modo)
     finally:
         os.close(fd_real)
+
+    if es_directorio:
+        # Los directorios que se creen después siguen naciendo cerrados: `default:other::---` (lo demás de la
+        # ACL por defecto es lo que ya daba el modo). No es una ACL nombrada ni abre a nadie.
+        _setfacl_reemplazar(fd_path, "u::rwx,g::rwx,o::---", default=True)
 
 
 # ============================================================================
@@ -1117,7 +1137,8 @@ def _restaurar_raiz_desde_respaldo(proyectos: Path) -> tuple[bool, str]:
                 continue
         except json.JSONDecodeError:
             continue
-        modo = int(m_modo.group(1), 8) & 0o777
+        modo_guardado = int(m_modo.group(1), 8) & 0o777
+        modo = modo_guardado & 0o770  # NUNCA se restauran bits de otros: --deshacer no reabre
         fd = _abrir_raiz_seguro(raiz)
         try:
             fd_real = _reabrir_real(fd, os.O_RDONLY)
@@ -1127,7 +1148,11 @@ def _restaurar_raiz_desde_respaldo(proyectos: Path) -> tuple[bool, str]:
                 os.close(fd_real)
         finally:
             os.close(fd)
-        return True, f"modo {modo:04o} restaurado desde {ruta}"
+        aviso = ""
+        if modo_guardado & 0o007:
+            aviso = (f"; los bits de otros que la raíz tenía ({modo_guardado & 0o007:03o}) no se restauran: "
+                     "--deshacer no reabre el workspace a otros")
+        return True, f"modo {modo:04o} restaurado desde {ruta}{aviso}"
     return False, f"ningún respaldo de {RUTA_RESPALDOS} es de confianza y registra la raíz {raiz}"
 
 
@@ -1353,8 +1378,8 @@ def _cmd_deshacer() -> int:
         print(f"Raíz del workspace: {raiz['detalle']}")
     else:
         print(f"Raíz del workspace: NO restaurada ({raiz.get('detalle', 'sin dato')}).")
-    print("AVISO: tras --deshacer, proyectos/ vuelve a tener o::r-x (0775/0664): el cierre depende otra vez de "
-          "la raíz del workspace. Reaplicar con --aplicar cuando se quiera cerrarlo.")
+    print("AVISO: --deshacer revierte dueños y ACL nombradas, pero NUNCA reabre a otros: proyectos/ queda con "
+          "other::--- (modo 0770/0660 y ACL por defecto cerrada).")
 
     if datos["hardlinks_rechazados"]:
         print("--deshacer encontró hardlinks -- no se tocaron, y el resultado es un fallo.", file=sys.stderr)
@@ -1425,14 +1450,12 @@ uso: permisos_proyectos.py [--verificar [RAIZ] | --aplicar | --deshacer]
                        Solo con --verificar: declara conocida una cuenta con ACL
                        nombrada (por defecto solo jaxsvc y fruiz; cualquier otra es
                        NO CUMPLE y --aplicar falla cerrado, sin borrarla).
-  --deshacer           DETERMINISTA, sin argumentos: lleva el árbol a
-                       {DUENO_ORIGINAL}:{GRUPO} 0775 (directorios) / 0664 (archivos),
-                       sin ninguna ACL -- el estado medido con `stat` real en
-                       producción el 2026-09-25. Esa tabla es una VERDAD
-                       OPERACIONAL, no una constante: sólo es exacta mientras el
-                       árbol siga homogéneo desde esa fecha -- volver a medir antes
-                       de usarlo si pasó tiempo (ver
-                       docs/runbooks/workspace-proyectos.md).
+  --deshacer           DETERMINISTA, sin argumentos: revierte dueños y ACL nombradas
+                       a lo de antes de E2a ({DUENO_ORIGINAL}:{GRUPO}, sin ACL nombradas)
+                       pero NUNCA vuelve a dar acceso a otros: 0770 (directorios) /
+                       0660 (archivos), other::--- también en la ACL por defecto de
+                       los directorios, y de la raíz restaura solo dueño y grupo de
+                       su modo guardado (nunca los bits de otros; avisa).
 
 Sin ningún flag, equivale a --verificar.
 """
