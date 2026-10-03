@@ -2238,6 +2238,7 @@ jobs:
           jacobs/_devolucion_ejecutor_test.py
           tests/test_jacobs_descarte.py
           tests/test_store_columna_descarte_acotada.py
+          tests/test_workspace_dir.py
       - name: Publicar fallos de tests puros
         if: failure()
         run: |
@@ -2425,6 +2426,7 @@ jobs:
             jacobs/_devolucion_ejecutor_test.py \
             tests/test_jacobs_descarte.py \
             tests/test_store_columna_descarte_acotada.py \
+            tests/test_workspace_dir.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -5153,8 +5155,28 @@ jobs:
           # mismo piso a 2821 por una causa completamente distinta (no relacionada) --
           # quien integre esa rama DESPUES de esta, o esta DESPUES de esa, tiene que
           # re-medir sobre master en vez de sumar los deltas a ciegas.
-          grep -qE "^3415 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3415 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 3415 -> 3438 (2026-10-03, JAX_WORKSPACE_DIR sin valor por defecto): +23 puros en
+          #   tests/test_workspace_dir.py (archivo nuevo, agregado a las dos listas de este job;
+          #   ronda 1 de arreglos de #337 lo llevo de 15 a 23: directorio existente, mensaje y
+          #   pruebas del barrido). Medido en hall9000 con la lista exacta del paso (sin el unshare
+          #   del runner): base origin/master 3454 passed + 1 failed preexistente (PermissionError
+          #   sobre /etc/jax/build/implementation-identity.json); con el cambio 3477 passed + la
+          #   misma falla: delta exacto +23. Los skipped no cambian. Si el runner da otro numero,
+          #   manda el runner.
+          # 3438 -> 3444 (2026-10-03, ronda 2 de #337, N-4): +6 en tests/test_workspace_dir.py
+          #   (23 -> 29: el barrido caza `environ.get(...) or "<literal>"` y `environ.setdefault(...)`,
+          #   5 casos que detecta + 1 que no marca el `or ""`). Re-medido sobre la mezcla con
+          #   origin/master 55c014d, con la lista exacta del paso y `sudo unshare --mount` tapando
+          #   ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform (Python 3.14.4 local): 3443 passed +
+          #   1 failed preexistente (PermissionError sobre /etc/jax/build/implementation-identity.json,
+          #   pasa en el runner) = 3444, 45 skipped, 1 xfailed. Sin las 29 de test_workspace_dir.py
+          #   daria 3415, el piso de master. Si el runner da otro numero, manda el runner.
+          # 3444 -> 3452 (2026-10-03, ronda 3 de #337, MINOR-2/3): +8 en tests/test_workspace_dir.py
+          #   (29 -> 37: el barrido marca CUALQUIER `or` tras la lectura; 9 casos parametrizados
+          #   reemplazan la prueba de `or ""`). Misma lista y metodo (unshare, Python 3.14.4):
+          #   3451 passed + 1 failed preexistente = 3452, 45 skipped, 1 xfailed.
+          grep -qE "^3452 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3452 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
