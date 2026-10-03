@@ -181,6 +181,14 @@ def version_logica(camino: str) -> str | None:
 # Fernando: dice SOLO que el OCR no encontro texto.
 AVISO_IMAGEN_SIN_TEXTO = "<!-- el OCR no encontró texto -->"
 NOTA_TEXTO_DUDOSO = "<!-- texto de baja confianza -->"
+RAZON_IMAGEN_TRANSPARENTE = (
+    "imagen con transparencia: texto combinado de dos lecturas (fondo blanco "
+    "y negro); revisar"
+)
+RAZON_MAYORIA_DUDOSA = (
+    "texto de baja confianza: mas de la mitad de las palabras reconocidas "
+    "tienen confianza baja (probable ruido o desenfoque) -- ver palabras_dudosas"
+)
 RAZON_TEXTO_SIN_POSICION = (
     "el OCR devolvió texto sin datos de posición; se conserva sin verificar"
 )
@@ -714,6 +722,21 @@ def _clasificar(caracteres: int, analisis: dict) -> str:
     return "ok"
 
 
+def _clasificar_imagen(caracteres: int, analisis: dict, transparente: bool) -> str:
+    """`_clasificar`, con la invariante 1 de Jax#338 ronda 16: una imagen con
+    transparencia REAL (el texto combina dos lecturas, sobre fondo blanco y
+    sobre fondo negro, que nadie verifico) NUNCA sale `ok`: lo que no es la
+    regla (A) -- menos de MINIMO_CARACTERES, que con tamano de pagina es la
+    (D) -- es `transparente` (parcial + imagen_texto_dudoso,
+    `_resolver_imagen`)."""
+    clasificacion = _clasificar(caracteres, analisis)
+    if not transparente:
+        return clasificacion
+    if clasificacion == "sin_texto" and caracteres < MINIMO_CARACTERES:
+        return clasificacion
+    return "transparente"
+
+
 class _Presupuesto:
     """Un solo presupuesto de tiempo para todo el OCR de una imagen: se
     descuenta en CADA llamada a tesseract, leyendo `_reloj` justo antes."""
@@ -932,7 +955,8 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
         "caracteres": len(texto),
         **analisis,
         "sin_posicion": sin_posicion,
-        "clasificacion": _clasificar(len(texto), analisis),
+        "transparente": True,
+        "clasificacion": _clasificar_imagen(len(texto), analisis, True),
     }
 
 
@@ -995,6 +1019,7 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
     caracteres = palabras = 0
     suma_conf = 0.0
     primero = None
+    transparente = sin_posicion = False   # alguna pagina con transparencia real / texto sin posicion
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
@@ -1018,6 +1043,8 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
                 if r["clasificacion"] == "ilegible":
                     return r
                 primero = primero or r
+                transparente = transparente or r.get("transparente", False)
+                sin_posicion = sin_posicion or r.get("sin_posicion", False)
                 if r["texto"] and len(dimensiones) == 1:
                     partes.append(r["texto"])   # un solo fotograma: sin marca de pagina
                 elif r["texto"]:
@@ -1036,7 +1063,8 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
         "texto": "\n\n".join(partes),
         "caracteres": caracteres,
         **analisis,
-        "clasificacion": _clasificar(caracteres, analisis),
+        "sin_posicion": sin_posicion,
+        "clasificacion": _clasificar_imagen(caracteres, analisis, transparente),
     }
 
 
@@ -1149,11 +1177,7 @@ def _resolver_imagen(
         # conservar.
         if r["caracteres"] >= MINIMO_CARACTERES:
             # (B) mayoria de palabras dudosas: el texto leido SE CONSERVA.
-            detalle["razon"] = (
-                "texto de baja confianza: mas de la mitad de las palabras "
-                "reconocidas tienen confianza baja (probable ruido o "
-                "desenfoque) -- ver palabras_dudosas"
-            )
+            detalle["razon"] = RAZON_MAYORIA_DUDOSA
             detalle["codigo"] = CODIGO_IMAGEN_TEXTO_DUDOSO
             return Resultado(
                 estado="parcial",
@@ -1187,6 +1211,24 @@ def _resolver_imagen(
         detalle["codigo"] = CODIGO_IMAGEN_SIN_TEXTO
         return Resultado(
             estado="ok", salidas={"texto.txt": AVISO_IMAGEN_SIN_TEXTO},
+            extractor=EXTRACTOR, version=_version() or "desconocida",
+            detalle=detalle,
+        )
+
+    if r["clasificacion"] == "transparente":
+        # Invariante 1 (Jax#338 ronda 16): imagen con transparencia real, como
+        # mucho parcial; se CONSERVA todo el texto.
+        razones = [RAZON_IMAGEN_TRANSPARENTE]
+        n, dudosas = r["n_palabras"], r["palabras_dudosas"]
+        if n and len(dudosas) / n > PROPORCION_MAXIMA_PALABRAS_DUDOSAS:
+            razones.append(RAZON_MAYORIA_DUDOSA)
+        if r.get("sin_posicion"):
+            razones.append(RAZON_TEXTO_SIN_POSICION)
+        detalle["razon"] = "; ".join(razones)
+        detalle["codigo"] = CODIGO_IMAGEN_TEXTO_DUDOSO
+        return Resultado(
+            estado="parcial",
+            salidas={"texto.txt": f"{NOTA_TEXTO_DUDOSO}\n{r['texto']}"},
             extractor=EXTRACTOR, version=_version() or "desconocida",
             detalle=detalle,
         )
