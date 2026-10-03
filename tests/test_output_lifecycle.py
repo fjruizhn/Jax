@@ -4,8 +4,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from policy.governance.governed_renderer import GovernedRenderer, RenderContext, WebChatGovernanceAdapter
-from policy.governance.response import ContractState
+from policy.governance.governed_renderer import (
+    GovernedDomainRegistry, GovernedRenderer, RenderContext, WebChatGovernanceAdapter,
+)
+from policy.governance.response import (
+    ClaimRecord, ContentBlock, ContentBlockKind, ContractState,
+    EpistemicStatus, SourceClass, ReferenceType,
+)
 from policy.governance.output_lifecycle import (
     OUTPUT_LIFECYCLE_API_VERSION,
     GovernedTransportUnit,
@@ -20,7 +25,7 @@ from policy.governance.output_lifecycle import (
 
 # Reuse the F2-C test-only, server-owned registry/receipt composition.  These
 # helpers construct a sealed current claim and a trusted reference resolver.
-from test_governed_renderer import NOW, receipt, scope, sealed_current
+from test_governed_renderer import NOW, receipt, ref, scope, sealed_current
 
 
 def unit_at(now=NOW):
@@ -72,6 +77,66 @@ def test_current_claim_is_revalidated_at_preparation_and_transport():
         mint_governed_transport_unit(
             envelope, rendered, context, transport_kind="web-chat-http", idempotency_key="late", now=NOW + timedelta(seconds=61)
         )
+
+
+def test_transport_revalidation_reuses_minted_projection_without_rerendering(monkeypatch):
+    unit, rendered, _ = unit_at()
+
+    def unexpected_render(*_args, **_kwargs):
+        pytest.fail("transport revalidation must reuse the minted projection")
+
+    monkeypatch.setattr(GovernedRenderer, "render_text", unexpected_render)
+    assert revalidate_for_transport(unit, NOW) == rendered
+
+
+def test_transport_reuse_still_revalidates_current_receipts(monkeypatch):
+    unit, rendered, context = unit_at()
+    original = type(context.registry).verify_receipt_for_claim
+    verifications = []
+
+    def counted_verification(registry, *args, **kwargs):
+        verifications.append(args[0])
+        return original(registry, *args, **kwargs)
+
+    def unexpected_render(*_args, **_kwargs):
+        pytest.fail("transport revalidation must reuse the minted projection")
+
+    monkeypatch.setattr(type(context.registry), "verify_receipt_for_claim", counted_verification)
+    monkeypatch.setattr(GovernedRenderer, "render_text", unexpected_render)
+
+    assert revalidate_for_transport(unit, NOW) == rendered
+    assert verifications == [context.receipts["receipt-1"]]
+    with pytest.raises(OutputLifecycleError):
+        revalidate_for_transport(unit, NOW + timedelta(seconds=61))
+    assert verifications == [context.receipts["receipt-1"], context.receipts["receipt-1"]]
+
+
+def test_transport_revalidation_preserves_attributed_user_quote_path():
+    from policy.governance import response
+
+    response_scope = scope()
+    assertion_ref = ref("user-assertion", ReferenceType.USER_ASSERTION,
+        response_scope, asserter="Fernando")
+    claim = ClaimRecord("user-claim", "USER_REPORT", {"text": "A quoted statement."},
+        response_scope, SourceClass.USER_INPUT, EpistemicStatus.USER_ASSERTED,
+        basis_refs=(assertion_ref.ref_id,))
+    quote = ContentBlock(ContentBlockKind.ATTRIBUTED_QUOTE, "A quoted statement.",
+        claim_refs=(claim.claim_id,), attribution_ref=assertion_ref.ref_id,
+        speaker="Fernando")
+    candidate = response.GovernedResponseCandidate("f2-c.1", "quoted-response",
+        response_scope.request_id, response_scope.trace_id, response_scope, "web-chat",
+        (), (quote,), (claim,), (assertion_ref,))
+    envelope = response._seal_candidate_for_server(candidate,
+        contract_state=ContractState.VALID, governance_receipt=receipt())
+    context = RenderContext(None, {}, {}, {}, domain_registry=GovernedDomainRegistry(),
+        reference_validator=lambda _reference, _scope: True,
+        now=lambda: NOW, user_assertion_content={assertion_ref.ref_id: "A quoted statement."})
+    rendered = GovernedRenderer().render_text(envelope, context)
+    assert rendered.text == "Fernando says: A quoted statement."
+    unit = mint_governed_transport_unit(envelope, rendered, context,
+        transport_kind="web-chat-http", idempotency_key="quoted-response", now=NOW)
+
+    assert revalidate_for_transport(unit, NOW) == rendered
 
 
 def test_non_current_narrative_can_still_use_the_lifecycle_contract():
