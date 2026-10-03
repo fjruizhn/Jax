@@ -559,6 +559,43 @@ def test_en_profundidad_2_se_excluye_toda_carpeta_oculta_y_solo_las_ocultas(arbo
     assert all(o.stat().st_uid != uid for o in ocultas)
 
 
+def test_un_symlink_con_nombre_oculto_en_profundidad_2_no_es_carpeta_excluida(arbol_temporal, _identidades):
+    """La exclusion es de CARPETAS reales: un symlink oculto no se excluye (no queda en
+    `excluidos`) y se reporta en `symlinks_saltados`, como cualquier otro symlink."""
+    proyecto = arbol_temporal / "proyectos" / "un-proyecto"
+    (proyecto / ".enlace-oculto").symlink_to(proyecto / "sub")
+
+    datos = _recorrer_directo(arbol_temporal / "proyectos", accion="aplicar")
+
+    assert not any(e.endswith("/.enlace-oculto") for e in datos["excluidos"]), datos["excluidos"]
+    assert any(e.endswith("/un-proyecto/.enlace-oculto") for e in datos["symlinks_saltados"]), datos["symlinks_saltados"]
+
+
+def test_la_cuenta_forense_incluye_la_carpeta_oculta_porque_getfacl_la_respalda(arbol_temporal, _identidades):
+    """`_contar_objetos_reales` NO aplica la exclusion de carpetas ocultas a proposito: se compara
+    contra `getfacl -R`, que respalda TODO el arbol, carpeta oculta incluida. Si la cuenta la
+    excluyera, no coincidiria con el respaldo y el respaldo fallaria siempre que exista una."""
+    proyecto = arbol_temporal / "proyectos" / "un-proyecto"
+    oculta = proyecto / ".estado-herramienta"
+    oculta.mkdir()
+    (oculta / "dato.txt").write_text("x")
+    _recorrer_directo(arbol_temporal / "proyectos", accion="aplicar")
+
+    r = subprocess.run(["sudo", "-n", "python3", "-c", f"""
+import sys, subprocess
+sys.path.insert(0, {str(RAIZ_REPO / "ops")!r})
+import permisos_proyectos as pp
+proyectos = pp.Path({str(arbol_temporal / "proyectos")!r})
+n_real, no_gobernados = pp._contar_objetos_reales(proyectos)
+out = subprocess.run(["getfacl", "-R", "-p", str(proyectos)], capture_output=True, text=True).stdout
+assert ".estado-herramienta/dato.txt" in out, "getfacl no respalda la carpeta oculta"
+assert n_real == len(pp._parsear_respaldo(out)), (n_real, len(pp._parsear_respaldo(out)))
+print("OK", n_real)
+"""], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "OK" in r.stdout
+
+
 # --- MAJOR-1 (ronda 3): validación forense del respaldo --------------------------------------
 
 def test_contar_objetos_reales_coincide_con_el_respaldo(arbol_temporal, _identidades):
@@ -775,23 +812,39 @@ os.makedirs({str(fuente)!r})
 
     # El archivo se crea por el camino REAL de LAS MANOS (tool_authority._write_file: mkstemp +
     # fchmod + replace), no con os.open: sin el fchmod(0o660) el archivo queda con mascara ACL
-    # --- y esta prueba se pone roja. Solo se sustituye el commit de git del workspace.
-    # sys.executable y no "python3": tiene que ser el interprete que corre pytest (el del
-    # venv/setup-python del runner, que tiene aiomysql via requirements.txt); el python3 del
-    # sistema del runner no lo tiene y jacobs.store lo importa.
+    # --- y esta prueba se pone roja. Solo se sustituyen el commit de git del workspace y el
+    # registro de eventos (necesita la base: aqui se prueba el modo y la ACL del archivo, no eso).
+    #
+    # Corre COMO fruiz (quien opera en produccion y esta en la ACL), no como el usuario que
+    # corre pytest (en el runner, `runner`, que no esta en la ACL). sys.executable y no
+    # "python3": el interprete de pytest (con aiomysql via requirements.txt). Fruiz tiene que
+    # poder leer el interprete, su prefijo y el checkout: si no, se dice claro en vez de un
+    # PermissionError opaco dentro del subproceso.
+    for que, ruta_a_leer in (("el interprete de pytest", sys.executable),
+                             ("el prefijo del interprete", sys.prefix),
+                             ("el checkout del repo", str(RAIZ_REPO))):
+        legible = subprocess.run(["sudo", "-n", "-u", "fruiz", "test", "-r", ruta_a_leer, "-a", "-x", ruta_a_leer],
+                                 capture_output=True)
+        if legible.returncode != 0:
+            pytest.fail(f"el usuario fruiz no puede leer {que} ({ruta_a_leer}): esta prueba corre el "
+                        "escritor real como fruiz; hay que dar lectura a fruiz o ejecutar pytest desde "
+                        "un interprete que fruiz pueda leer")
     r_w = subprocess.run(
-        [sys.executable, "-c", f"""
+        ["sudo", "-n", "-u", "fruiz", "env", f"JAX_WORKSPACE_DIR={arbol_temporal}", "PYTHONDONTWRITEBYTECODE=1",
+         sys.executable, "-c", f"""
 import asyncio, sys
 from pathlib import Path
 sys.path[:0] = [{str(RAIZ_REPO / "las_manos")!r}, {str(RAIZ_REPO)!r}]
 from motor_registry import tool_authority as ta
 ta._git_commit_write = lambda *a, **k: (True, "sha", None)
+async def _sin_registro(*a, **k):
+    return None
+ta.event_append = _sin_registro
 r = asyncio.run(ta._write_file(job_id="t", tool_name="write_file", caller="t",
     resolved=Path({str(lote / "a.pdf")!r}), content="x", tool_call_id="t"))
 assert r["decision"] == "executed", r
 """],
         capture_output=True, text=True, timeout=60,
-        env={**os.environ, "JAX_WORKSPACE_DIR": str(arbol_temporal)},
     )
     assert r_w.returncode == 0, r_w.stdout + r_w.stderr
 
