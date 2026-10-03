@@ -146,6 +146,8 @@ CREATE TABLE `decisions` (
   KEY `idx_dec_project` (`project_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- project_documents vive solo en la migracion 006a de jax/memory/project_authority_migrations.py
+-- (su FK a jax_users no se puede cargar aqui: este archivo corre antes de que exista jax_users).
 CREATE TABLE `projects` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `project_uuid` char(36) NOT NULL,

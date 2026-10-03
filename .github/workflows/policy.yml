@@ -830,7 +830,7 @@ jobs:
           asyncio.run(main())
           print("run_migrations OK")
           PY
-      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py tests/test_project_queries_mariadb.py tests/test_proyectos_e1_fks_mariadb.py tests/test_proyectos_e1_migrar_mariadb.py scripts/_b9_revertir_005_test.py
+      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py tests/test_project_queries_mariadb.py tests/test_proyectos_e1_fks_mariadb.py tests/test_proyectos_e1_migrar_mariadb.py tests/test_project_documents_schema_mariadb.py tests/test_proyecto_activo_mariadb.py tests/test_proyectos_e2a_lactovi_mariadb.py scripts/_b9_revertir_005_test.py
       - name: Piso exacto de tests CORRIDOS
         # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
         run: |
@@ -840,7 +840,8 @@ jobs:
             jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py \
             jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py \
             tests/test_project_queries_mariadb.py tests/test_proyectos_e1_fks_mariadb.py \
-            tests/test_proyectos_e1_migrar_mariadb.py scripts/_b9_revertir_005_test.py 2>&1 | tee /tmp/out
+            tests/test_proyectos_e1_migrar_mariadb.py tests/test_project_documents_schema_mariadb.py \
+            tests/test_proyecto_activo_mariadb.py tests/test_proyectos_e2a_lactovi_mariadb.py scripts/_b9_revertir_005_test.py 2>&1 | tee /tmp/out
           # 31 el 2026-09-16 (frente F): 20 contra la base (esquema 5, emision 7,
           #   consumo 8 con la carrera de 20, la carrera forzada, el EXPLAIN y el paso
           #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
@@ -1075,8 +1076,22 @@ jobs:
           #   (~/.config/jax/test-db.env, usuario jax_test), MISMO comando: sin los
           #   tres archivos, 209 passed; con ellos, 270 passed, 0 skipped.
           # 270 -> 274 (2026-10-02, Proyectos E1.1, PR #321): +4 medidos en el runner — candidatos sin mínimo de letras (3) y autoridad con q vacío (1).
-          grep -qE "^274 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 274 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 274 -> 278 (2026-10-03, Proyectos E2a T1, migracion 006a): +4 de
+          #   tests/test_project_documents_schema_mariadb.py. Numero LOCAL (el job
+          #   completo no corre aca): el controlador lo re-mide con el runner.
+          # 278 -> 281 (2026-10-03, Proyectos E2a T2, LAS MANOS por project_uuid): +3 de
+          #   tests/test_proyecto_activo_mariadb.py (ACTIVE, ARCHIVED, uuid inexistente).
+          #   Numero LOCAL: el controlador lo re-mide con el runner.
+          # 281 -> 288 (2026-10-03, Proyectos E2a T4, guion de LACTOVI): +7 de
+          #   tests/test_proyectos_e2a_lactovi_mariadb.py (crea y borra una base
+          #   `jax_memory_test_e2alac_*`). Numero LOCAL: el controlador lo re-mide con el runner.
+          # 288 -> 295 (2026-10-03, Proyectos E2a T4, ronda 1): +7 de
+          #   tests/test_proyectos_e2a_lactovi_mariadb.py (commit incierto + --completar,
+          #   --completar idempotente, --completar con sha distinto, --revertir con trabajos en
+          #   vuelo, --revertir reintentable, reaplicar tras corte, reaplicar con proyecto
+          #   archivado). Numero LOCAL: el controlador lo re-mide con el runner.
+          grep -qE "^295 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 295 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -1805,6 +1820,11 @@ jobs:
       # archivo es la fuente única; tests/test_requirements_completos.py falla si
       # un import de terceros no está fijado ahí o si este job deja de usarlo.
       - run: pip install -r requirements.txt pytest pytest-asyncio
+      # las_manos/_tool_authority_test.py::test_5c_... (BLOCK-1 de
+      # ops/permisos_proyectos.py, 2026-09-25) necesita setfacl/getfacl -- sin este paso
+      # el test se saltaría solo, y BLOCK-3b pedía que fuera determinista en vez de
+      # depender de lo que ya venga instalado en el runner.
+      - run: sudo apt-get -qq update && sudo apt-get -qq install -y acl
       # B-1/M-4 (ronda 3, auditoría adversarial 2026-09-22): las pruebas de bwrap REAL
       # de tests/test_ejecutor_contratos_cuenta_axioma.py (pedido explícito del
       # coordinador: "un test tiene que ejecutar bwrap de verdad") se saltan solas si
@@ -4943,8 +4963,39 @@ jobs:
           #   +1 (2 tests en vez de 1: ya no hay run_sandboxed_claude que sustituir, se
           #   sustituyen cli_sandbox.ejecutar y create_subprocess_exec y se prueba que la
           #   funcion no existe). Neto del PR: 3223 -> 3163.
-          grep -qE "^3163 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3163 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 3163 -> 3164 (2026-10-03, E2a Tarea 3, integra Jax#276): +1 puro,
+          #   las_manos/_tool_authority_test.py::test_5c_... (nota de la rama de #276, abajo; sus
+          #   cifras 2811/2812 son de entonces y ya no valen: el piso vigente es el de este grep).
+          #
+          # 2811 -> 2812 (2026-09-25, las_manos/_tool_authority_test.py::test_5c_write_file_
+          # queda_escribible_por_grupo_bajo_acl_por_defecto -- reproduce B1 de
+          # ops/permisos_proyectos.py contra el escritor real de LAS MANOS): +1 test puro,
+          # determinista porque este job ahora instala acl explícito (paso de arriba) --
+          # antes hubiera dependido de lo que trajera el runner. Medido en hall9000 con el
+          # MISMO método que ya usa este job (sudo unshare --mount tapando
+          # ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform): la corrida completa dio
+          # 2811 passed (con test_5c incluido) porque test_arranque_las_manos_no_shadowea_
+          # policy.py::test_arranque_real_no_colisiona_con_policy_de_la_raiz falló con
+          # PermissionError sobre /etc/jax/build/implementation-identity.json -- reproducido
+          # también CORRIENDO ESE ARCHIVO SOLO, sin nada de esta ronda cerca: es una
+          # limitación de correr esa prueba específica como fruiz en hall9000 fuera de un
+          # runner real (necesita ese archivo con permisos que sólo jaxsvc/root tienen
+          # ahí), NO algo que esta ronda rompió. Con esa única falla explicada aparte, el
+          # delta neto de esta ronda es +1 sobre el piso anterior (2811 -> 2812); los 45
+          # skipped no cambian. RE-MEDIDO 2026-09-25 (ronda 3, m5) sobre master actual
+          # (4192cc6, "Merge pull request #278") en un worktree aparte, con SOLO
+          # las_manos/motor_registry/tool_authority.py y las_manos/_tool_authority_test.py
+          # superpuestos encima (el resto de esta rama -- ops/permisos_proyectos.py,
+          # tests/test_permisos_proyectos.py -- no toca ningun archivo de este job):
+          # mismo resultado exacto, 2811 passed + 1 failed (la misma falla preexistente,
+          # no relacionada) + 45 skipped + 1 xfailed -- confirma que 4192cc6 no movio
+          # este piso por su cuenta. NOTA DE RE-MEDICION (regla 5, SESIONES EN PARALELO):
+          # la rama ops/versionar-drop-ins (PR #274, todavia sin integrar) sube este
+          # mismo piso a 2821 por una causa completamente distinta (no relacionada) --
+          # quien integre esa rama DESPUES de esta, o esta DESPUES de esa, tiene que
+          # re-medir sobre master en vez de sumar los deltas a ciegas.
+          grep -qE "^3164 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3164 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -5241,11 +5292,15 @@ jobs:
       # 22 -> 23 (ronda de cierre, final-hallazgos.md, C-2): sin
       # `pdfplumber`, un PDF nativo tiene que dar 'sin_extractor' -- NUNCA
       # rutear a OCR (que devolvía 'ok' con las cifras destruidas).
+      # 23 -> 34 (E2a, ronda final A, 2026-10-03): +11 casos parametrizados que atan
+      # `tiene_extractor(x) == (extraer(x).estado != "sin_extractor")` sobre una muestra de cada
+      # tipo (el guion de LACTOVI decide en_cola/sin_extractor con la primera). Local, sin
+      # pdfplumber: 32 passed + 2 skipped; en el runner, con sus dependencias, 23 + 11 = 34.
       - name: Compuerta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_compuerta_test.py 2>&1 | tee /tmp/compuerta_tests
-          grep -qE "^23 passed" /tmp/compuerta_tests || {
-            echo "PISO ROTO: se esperaban 23 tests CORRIDOS de la compuerta."; exit 1; }
+          grep -qE "^34 passed" /tmp/compuerta_tests || {
+            echo "PISO ROTO: se esperaban 34 tests CORRIDOS de la compuerta."; exit 1; }
 
       # Task 8 (2026-09-21, procesamiento-archivos-nucleo): la ingesta con
       # cache -- la tarea que produce el ahorro real. Indexa por sha256 del
@@ -5373,8 +5428,15 @@ jobs:
       - name: Ingesta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_ingesta_test.py 2>&1 | tee /tmp/ingesta_tests
-          grep -qE "^44 passed" /tmp/ingesta_tests || {
-            echo "PISO ROTO: se esperaban 44 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+          # 44 -> 47 (2026-10-03, Proyectos E2a T4, MAJOR-1): +3 -- un origen que ya
+          #   vive en fuente/ se procesa en el lugar (sin copia); un symlink dentro de
+          #   fuente/ sigue sin usarse; un origen de afuera con el mismo nombre no pisa.
+          #   Numero LOCAL: el controlador lo re-mide con el runner.
+          # 47 -> 48 (2026-10-03, Proyectos E2a T4, ronda 2, ROTURA-1): +1 -- un symlink de
+          #   directorio mas `..` ya no se procesa en el lugar (huella y extraccion del mismo
+          #   archivo). Numero LOCAL: el controlador lo re-mide con el runner.
+          grep -qE "^48 passed" /tmp/ingesta_tests || {
+            echo "PISO ROTO: se esperaban 48 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
       # Task 9 (2026-09-21, procesamiento-archivos-nucleo): mide si los
       # extractos SIRVEN -- el criterio §7.B corregido ese mismo dia (el
@@ -5429,11 +5491,15 @@ jobs:
       # (`main()`) llama a `procesar()` con lo que parseó de `sys.argv`.
       # Corre sobre archivos SINTETICOS (`.xlsx` armado con openpyxl, `.txt`
       # plano) -- ningún documento de cliente entra al repo.
+      # 6 -> 12 el 2026-10-03 (Proyectos E2a T2, `--project-uuid`): +5 del parametrizado
+      #   que rechaza un uuid no canónico, +1 de `main()` sin `--project-uuid`.
+      #   Local: 11 passed + 1 skipped (el `.xlsx` necesita openpyxl, que el runner
+      #   instala) = 12 en el runner. Número LOCAL: lo re-mide el runner.
       - name: Procesar archivos -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q scripts/_procesar_archivos_test.py 2>&1 | tee /tmp/procesar_archivos_tests
-          grep -qE "^6 passed" /tmp/procesar_archivos_tests || {
-            echo "PISO ROTO: se esperaban 6 tests CORRIDOS del guion de procesar_archivos. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+          grep -qE "^12 passed" /tmp/procesar_archivos_tests || {
+            echo "PISO ROTO: se esperaban 12 tests CORRIDOS del guion de procesar_archivos. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
       # Endpoint de Procesamiento de Archivos (2026-09-20): `procesamiento/`
       # (jax#252) estaba terminado pero nadie lo llamaba desde HTTP.
@@ -5566,11 +5632,21 @@ jobs:
       #       contra f1d4298, +1 del control huérfano si falla `create_task`.
       #   52 + 4 = 56. Docker python:3.12-slim sobre `git archive` del
       #   commit final. Si el runner da otro número, manda el runner.
+      # 56 -> 64 el 2026-10-03 (Proyectos E2a T2, LAS MANOS por `project_uuid`):
+      #   +8 en `ProjectUuidTest` (`proyecto` viejo, uuid no canónico x2, archivado
+      #   sin cupo, oculto/deshabilitado, inexistente, ACTIVE guarda el uuid,
+      #   carpeta = uuid). Ninguna prueba vieja se borró: las que mandaban
+      #   `proyecto` pasan a `project_uuid`. Número LOCAL: lo re-mide el runner.
+      # 64 -> 66 el 2026-10-03 (E2a, ronda final A): +2 en `ProjectUuidTest`
+      #   (`estado_del_proyecto` que lanza -> 503 `base_no_disponible` sin job ni cupo;
+      #   `_trabajo_de` rechaza lo que no es uuid canonico). Ademas `test_uuid_de_otro_largo_da_422`
+      #   comprueba el codigo. Las pruebas que pasaban `"p"`/`"proy"` como proyecto a
+      #   `_ejecutar_trabajo` pasan `UUID_PRUEBA` (ya no hay nombre libre). Local: 66 passed.
       - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
-          grep -qE "^56 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 56 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          grep -qE "^66 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 66 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
@@ -6513,3 +6589,90 @@ jobs:
           # dos archivos) y 107 passed -- el mismo "CI se queda rojo hasta que..." de
           # arriba, no una regresión de este cambio. Si el runner da otro número, manda
           # el runner.
+
+  # ops/permisos_proyectos.py (2026-09-25, spec
+  # docs/superpowers/specs/2026-09-22-proyectos-y-selector-design.md §5, corregido tras 3
+  # BLOCK de la auditoría de escalón 3 sobre la primera versión en shell -- ver el propio
+  # guion y tests/test_permisos_proyectos.py): proyectos/ del workspace queda dueño jaxsvc,
+  # grupo fruiz con escritura, setgid, ACL de acceso y por defecto. Job propio, sin DB: la
+  # parte (b) del test (sudo -u jaxsvc contra /home/fruiz/jax-workspace/proyectos real) se
+  # salta sola fuera del host de producción de jax -- medido en hall9000 con
+  # `sudo unshare --mount` tapando /home/fruiz/jax-workspace (tmpfs vacío encima, namespace
+  # de montaje propio -- mismo método que usa el job arranque-instalado-versionado para
+  # simular el runner real): 15 passed, 1 skipped.
+  # ops/permisos_proyectos.py -- segunda ronda de auditoría (2026-09-25, 3 BLOCK/3
+  # MAJOR/6 MINOR sobre la primera reescritura en Python, commit 4f117a7). El núcleo
+  # privilegiado ahora vive instalado (root:root 0755) para que el proceso re-ejecutado
+  # con sudo -n ... -I nunca importe nada del checkout -- este job instala esa misma
+  # copia ANTES de correr los tests, igual que hace un operador real (ver el runbook).
+  # Piso MEDIDO en un contenedor LIMPIO (no en hall9000, a propósito -- BLOCK-3a: el
+  # respaldo en el HOME de fruiz rompía en un runner sin ese directorio, y el propio
+  # usuario que corre los tests, que en GitHub Actions se llama "runner", no "fruiz",
+  # destapó una segunda categoría de fallos): `docker run ubuntu:24.04` con un usuario
+  # `runner` con NOPASSWD:ALL (mismo esquema que el runner real de GitHub Actions),
+  # `acl` instalado, sin ningún checkout previo -- 28 passed, 1 skipped (el que necesita
+  # /home/fruiz/jax-workspace/proyectos real, que ningún runner de GitHub Actions tiene).
+  # Si esto da "29 passed", este runner SÍ tiene ese árbol -- no es el runner esperado.
+  permisos-proyectos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get -qq update && sudo apt-get -qq install -y acl
+      - run: pip install -r requirements.txt pytest
+      - name: Dar a fruiz lo mínimo para correr el escritor de la prueba de herencia
+        # Solo en runners de GitHub (VM desechable): en uno persistente no se dejan ACLs ni cuentas; ahí la prueba falla con su mensaje claro.
+        if: runner.environment == 'github-hosted'
+        # La prueba test_entrada_y_fuente_creadas_despues_heredan_grupo_setgid_y_acl_por_defecto
+        # corre el escritor real COMO fruiz (quien opera en producción y está en la ACL), con el
+        # intérprete de pytest. En el runner, el checkout (/home/runner/work/...) y el intérprete
+        # (/opt/hostedtoolcache/...) solo los lee el usuario `runner`: sin esto la prueba falla con
+        # su mensaje «el usuario fruiz no puede leer ...». Se crea la cuenta aquí (idempotente, igual
+        # que la fixture de la prueba) y se le da `x` en cada directorio padre y `rX` en el checkout y
+        # en el prefijo del intérprete. El runner es una VM desechable: no hay riesgo en abrir esto.
+        run: |
+          getent passwd fruiz >/dev/null || sudo useradd --system --no-create-home fruiz
+          PREFIJO=$(python -c 'import sys; print(sys.prefix)')
+          for destino in "$GITHUB_WORKSPACE" "$PREFIJO"; do
+            d=$(dirname "$destino")
+            while [ "$d" != "/" ]; do
+              sudo setfacl -m u:fruiz:x "$d"
+              d=$(dirname "$d")
+            done
+            sudo setfacl -R -m u:fruiz:rX "$destino"
+          done
+          sudo -n -u fruiz test -r "$GITHUB_WORKSPACE" -a -x "$GITHUB_WORKSPACE"
+          sudo -n -u fruiz test -r "$(python -c 'import sys; print(sys.executable)')"
+      # Sin paso de "instalar el núcleo" (E2a, MAJOR-1 de la revisión de la Tarea 3): las pruebas
+      # instalan su propia copia bajo el directorio temporal (JAX_PERMISOS_NUCLEO) y, solo si
+      # /usr/local/sbin está libre, una temporal ahí que borran al terminar. Dejar el núcleo
+      # instalado en el runner haría saltarse esas pruebas y movería el piso.
+      - run: PYTHONPATH=. python -m pytest tests/test_permisos_proyectos.py -v
+      - name: Piso exacto de tests CORRIDOS (no skipeados)
+        # Medido 2026-09-25 (ronda 4, sobre 46223fd + los cambios de esta ronda) en un
+        # contenedor LIMPIO ubuntu:24.04 (usuario runner, NOPASSWD:ALL, sin
+        # /etc/jax/.env -- no en hall9000): 48 passed, 2 skipped. Sube de 39 a 48 (+9)
+        # por los tests nuevos de la ronda 4 (m1: respaldo con FIFO/control negativo sin
+        # FIFO; m2: bloque incompleto/marcador de fin faltante; m5: dos raices
+        # posicionales/sudo -n roto; m6: group:: igual a la entrada nombrada/lo detecta
+        # si diverge/unidad de _permiso_efectivo). Los dos skips siguen siendo
+        # estructurales fuera de un host de jax real:
+        # test_aplicar_rechaza_explicitamente_por_raiz_no_configurada_cuando_env_es_legible
+        # (no hay /etc/jax/.env aca) y el test (b) de lectura/escritura cruzada contra
+        # /home/fruiz/jax-workspace/proyectos real. Si esto da "50 passed", este runner
+        # SI tiene ambos -- no es el runner esperado.
+        # 48 -> 49 (2026-10-03, E2a Tarea 3): +1 test, entrada_y_fuente_creadas_despues_heredan_
+        # grupo_setgid_y_acl_por_defecto (herencia a proyectos/<uuid>/entrada/<lote>/ y fuente/).
+        # Delta medido en local (50 passed + 1 deseleccionado solo-host; sobre 48 + 2 del runner
+        # esto da 49 + 2); manda el runner, el controlador lo re-mide.
+        # 49 -> 50 (fix de revision, MAJOR-1): +1, test_las_pruebas_no_tocan_el_nucleo_de_sistema.
+        # 50 -> 51 (2026-10-03, E2a): +1, test_en_profundidad_2_se_excluye_toda_carpeta_oculta_y_solo_las_ocultas
+        # (la exclusion pasa de un nombre fijo a toda carpeta oculta de profundidad 2). Local: 52 passed + 1 solo-host.
+        # 51 -> 53 (ronda 4): +2, symlink oculto no es carpeta excluida / la cuenta forense incluye la
+        # carpeta oculta. Local: 54 passed + 1 solo-host (55 pruebas; el runner salta 2).
+        run: |
+          PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
+          grep -qE "^53 passed, 2 skipped" /tmp/permisos_proyectos || {
+            echo "PISO ROTO: se esperaban 53 tests CORRIDOS (no skipeados) y exactamente 2 skipped."; exit 1; }

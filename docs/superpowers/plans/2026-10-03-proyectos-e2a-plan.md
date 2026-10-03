@@ -18,6 +18,8 @@
 | El Ejecutor (E2b-3) queda **fuera** de E2. En E2a el selector de proyecto y el botón de documentos van en **Chat y Pipeline**, no en Ejecutor | Fernando, 2026-10-03 (§8.2) |
 | **Corrección a la adenda §3.3** (hecho del código, no decisión nueva): la plataforma NO escribe en `fuente/`. `procesamiento/ingesta.py::ingerir` copia el original a `fuente/` ella misma (`_asegurar_en_fuente`, con nombre libre y deduplicado por contenido); si la plataforma escribiera ahí, cada archivo quedaría dos veces. La plataforma escribe en `proyectos/<uuid>/entrada/<lote>/` y borra esa copia cuando el trabajo termina | Hyde, 2026-10-03, leyendo `procesamiento/ingesta.py:345-389,628-640` |
 | **Despachador de fondo** en jax-platform: LAS MANOS acepta como máximo `JAX_PROCESAMIENTO_MAX_RUTAS` = 50 rutas por trabajo y 4 trabajos concurrentes (429 si no hay cupo). Un lote de 250 son 5 trabajos y no siempre entran a la vez | Hyde, 2026-10-03, `las_manos/procesamiento_routes.py:160,628-660` |
+| LACTOVI **sin ficha** → `en_cola` con `ruta_entrada` **bajo `fuente/`** (`proyectos/<uuid>/fuente/<ruta>`); la ingesta lo procesa en el lugar, sin copiarlo. Esa ruta **nunca se borra** al terminar el trabajo | Hyde, 2026-10-03 |
+| `ruta_entrada` **reemplaza** a la `ruta_fuente` de la adenda §3.1. Tras procesar, la ubicación del original en `fuente/` la da la ficha (`ficha.origen`), no una columna (MINOR-6 del auditor) | Hyde, 2026-10-03 |
 
 ## Global Constraints
 
@@ -25,7 +27,7 @@
 - 404 si el proyecto no existe, está oculto o no eres miembro (sin revelar cuál); 403 si eres miembro y te falta el papel — mismo contrato que E1 (`backend/api/proyectos.py::_http`).
 - Solo se sube a un proyecto **ACTIVE**. Archivado → 409 `proyecto_no_activo`.
 - Topes (Fernando, 2026-09-25): **100 MB por archivo; 250 archivos o 1 GB por lote.** Viven en `axioma_config` (claves de la Tarea 5), nunca en el código.
-- Tipos aceptados: los que `procesamiento/` sabe extraer — `.pdf .xlsx .xls .docx .png .jpg .jpeg .tif .tiff .csv .txt .md`. Lo demás se ignora y el resumen lo dice. La lista vive en un solo módulo de la plataforma (Tarea 5) y la comparte el frontend vía `GET /api/proyectos/documentos/limites`.
+- Tipos aceptados: los que `procesamiento/` sabe extraer, y esa lista **sale de `procesamiento/compuerta.py:33-35`**: `.pdf .xlsx .xlsm .docx .png .jpg .jpeg .tif .tiff .bmp .webp` (en jax, un PDF o una imagen también se detectan por contenido; en la plataforma se decide solo por extensión). **No** entran `.xls .csv .txt .md`: no tienen extractor. Lo demás se ignora y el resumen lo dice. La lista vive en un solo módulo de la plataforma (Tarea 5, `backend/proyectos_documentos/tipos.py`), que la copia con una prueba que la compara contra `compuerta.py` por ruta (jax-platform ya carga jax por `JAX_REPO_PATH`), y la comparte el frontend vía `GET /api/proyectos/documentos/limites`.
 - `project_documents` es la única fuente del estado de un documento; el frontend nunca habla con LAS MANOS.
 - i18n en `frontend/src/i18n/es.js` y `en.js` (raíz `proyectos.documentos`); colores solo con tokens; claro y oscuro; controles ≥ 24 px; ningún `confirm(`, `alert(` ni `prompt(` (tampoco desnudos): toda confirmación en `components/Dialogo.jsx`.
 - MariaDB en **3308**. Las pruebas usan `jax_test` (`~/.config/jax/test-db.env`); **nunca** `/etc/jax/.env` ni `jax_memory`. Las pruebas de disco usan `tmp_path`, nunca `~/jax-workspace`.
@@ -311,7 +313,7 @@ Jax#276 (rama `ops/permisos-proyectos`, `c136399`, del 2026-09-25) ya trae `ops/
 **Files:** los del PR: `ops/permisos_proyectos.py`, `tests/test_permisos_proyectos.py`, `docs/runbooks/workspace-proyectos.md`, `las_manos/motor_registry/tool_authority.py`, `las_manos/_tool_authority_test.py`, `.github/workflows/policy.yml`.
 
 **Interfaces:**
-- Produces: tras `--aplicar` en el host, `proyectos/` y lo nuevo debajo con grupo `jaxsvc`, setgid y ACL por defecto `g:jaxsvc:rwx`: `jaxsvc` (jax-platform y LAS MANOS) puede crear `proyectos/<uuid>/entrada/...` y `fuente/`, y `fruiz` sigue pudiendo correr el guion a mano.
+- Produces: tras `--aplicar` en el host, `proyectos/` y lo nuevo debajo con el modelo de la spec madre §5 (`2026-09-22-proyectos-y-selector-design.md`): **dueño `jaxsvc`, grupo `fruiz`**, setgid en directorios y ACL `u:jaxsvc:rwX,g:fruiz:rwX` (de acceso y por defecto): `jaxsvc` (jax-platform y LAS MANOS) puede crear `proyectos/<uuid>/entrada/...` y `fuente/`, y `fruiz` sigue pudiendo correr el guion a mano.
 
 - [ ] **Step 1:** Traer la rama a este worktree: `git merge --no-ff origin/ops/permisos-proyectos` sobre `feat/proyectos-e2a-jax`, resolviendo los conflictos contra el `master` de hoy (en `tool_authority.py` y en `policy.yml` hubo cambios desde el 25-sep: conservar los dos lados, nunca descartar el de `master`).
 - [ ] **Step 2:** Leer el diff completo de #276 contra `master` y confirmar que **no** cambia ningún comportamiento de `tool_authority.py` más allá de lo que su descripción dice; si cambia algo más, anotarlo para el auditor de la Tarea 4.
@@ -370,7 +372,7 @@ Jax#276 (rama `ops/permisos-proyectos`, `c136399`, del 2026-09-25) ya trae `ops/
 **Interfaces:**
 - Produces:
   - Claves de `axioma_config` y su valor inicial: `proyectos.documentos.max_bytes_archivo` = `104857600` (rango 1 MiB..2 GiB), `proyectos.documentos.max_archivos_lote` = `250` (1..1000), `proyectos.documentos.max_bytes_lote` = `1073741824` (1 MiB..10 GiB), `proyectos.documentos.rutas_por_trabajo` = `50` (1..50; el techo es el de LAS MANOS).
-  - `tipos.py`: `EXTENSIONES_ACEPTADAS: frozenset[str]` = `{"pdf","xlsx","xls","docx","png","jpg","jpeg","tif","tiff","csv","txt","md"}`; `def tipo_de(nombre: str) -> str | None` (extensión en minúsculas si está aceptada, si no `None`).
+  - `tipos.py`: `EXTENSIONES_ACEPTADAS: frozenset[str]` = `{"pdf","xlsx","xlsm","docx","png","jpg","jpeg","tif","tiff","bmp","webp"}` (copia de `procesamiento/compuerta.py:33-35`; una prueba la compara contra `compuerta.py` por ruta); `def tipo_de(nombre: str) -> str | None` (extensión en minúsculas si está aceptada, si no `None`).
   - `repositorio.py` (todas reciben un pool aiomysql de la plataforma):
     - `async def insertar(pool, *, project_id: int, sha256: str, nombre_original: str, ruta_entrada: str, bytes_: int, tipo: str, subido_por: int) -> int | None` — id de la fila nueva, o `None` si chocó con `uq_project_documents_sha`.
     - `async def existente_por_sha(pool, *, project_id: int, sha256: str) -> dict | None` — `{"id", "oculto": bool}`.
@@ -533,12 +535,13 @@ def test_limites_publica_los_ajustes_y_las_extensiones(cli, contributor): ...
   - `def despachar_ahora() -> None` — programa un `ciclo` inmediato (sin esperar).
   - `async def start_despachador()` — bucle de fondo: `ciclo` cada `INTERVALO_SEGUNDOS = 10`; nunca muere por un fallo (mismo patrón y comentario que `start_limpieza_de_adjuntos`).
   - Mapeo de estados de LAS MANOS → `project_documents.estado`: `ok`→`listo`, `parcial`→`parcial`, `error`/`rechazado`→`error` (con `error`), `sin_extractor`→`sin_extractor`, `cancelado`→`cancelado`; trabajo `running` sin resultado del archivo → `procesando`.
-  - Cuando una fila llega a estado terminal, borra su archivo de `entrada/` (y la carpeta del lote si quedó vacía). El original ya está en `fuente/`.
+  - Cuando una fila llega a estado terminal, borra su archivo **solo si** `ruta_entrada` empieza por `proyectos/<uuid>/entrada/` (y la carpeta del lote si quedó vacía; el original ya está en `fuente/`). Una `ruta_entrada` bajo `fuente/` (documentos que trajo LACTOVI) **nunca** se borra: es el original.
 
 - [ ] **Step 1: Pruebas que fallan** (LAS MANOS falsa con `httpx.MockTransport`, base de test real):
   - `test_despacha_en_trozos_de_rutas_por_trabajo` (120 filas `en_cola`, `rutas_por_trabajo=50` → 3 POST con 50/50/20 rutas, cuerpos con `project_uuid` y `usuario` = email del que subió).
   - `test_429_deja_en_cola_y_reintenta` (primer POST 429 → filas siguen `en_cola`; siguiente `ciclo` con 202 → `pendiente` con `job_id`).
   - `test_las_manos_caida_no_pierde_filas` (`httpx.ConnectError` → `en_cola`, sin excepción hacia afuera).
+  - `test_no_borra_ruta_entrada_bajo_fuente` (una fila con `ruta_entrada` bajo `proyectos/<uuid>/fuente/` que llega a `listo` conserva su archivo; el conteo de `fuente/` no cambia).
   - `test_sincroniza_resultados_y_borra_entrada` (GET devuelve `completed` con un `ok` y un `error` → `listo` con `carpeta_procesado` y `error` con su causa; los dos archivos de `entrada/` ya no están).
   - `test_trabajo_perdido_pasa_a_error` (GET 404 → `error`, `trabajo_perdido`).
   - `test_dos_ciclos_simultaneos_no_despachan_dos_veces` (dos `ciclo` concurrentes → un solo POST por trozo, gracias a `GET_LOCK`).

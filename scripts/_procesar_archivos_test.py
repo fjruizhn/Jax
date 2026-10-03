@@ -1,4 +1,4 @@
-"""El camino de entrada más simple: `procesar(proyecto, rutas) -> dict` y su
+"""El camino de entrada más simple: `procesar(project_uuid, rutas) -> dict` y su
 línea de comandos. `procesamiento/` ya está terminado y auditado (jax#252) --
 esto es sólo lo que lo pone a trabajar contra un proyecto real.
 
@@ -13,9 +13,10 @@ Tres requisitos del encargo, uno a uno:
      `tool_authority.MAX_READ_BYTES`, tiempo total) ->
      test_resumen_reparto_por_estado_y_tope_de_lectura
 
-Más: el slug del proyecto arma la carpeta de trabajo esperada
-(`$JAX_WORKSPACE_DIR/proyectos/<slug>/`), y la CLI (`main()`) llama a
-`procesar()` con lo que parseó de `sys.argv`.
+Más (E2a): el `project_uuid` arma la carpeta de trabajo esperada
+(`$JAX_WORKSPACE_DIR/proyectos/<uuid>/`) y solo se acepta un UUID canónico,
+y la CLI (`main()`, `--project-uuid` obligatorio) llama a `procesar()` con lo
+que parseó de `sys.argv`.
 
 `openpyxl` es opcional acá (fixture `_libro`): la mayoría de los tests usan
 `.txt` plano, que no necesita ninguna dependencia -- la compuerta lo
@@ -39,6 +40,8 @@ from motor_registry import tool_authority
 
 from procesamiento.extractores import excel
 from scripts import procesar_archivos
+
+UUID = "0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a"
 
 
 @pytest.fixture(autouse=True)
@@ -66,9 +69,9 @@ def test_procesar_conserva_subcarpetas_y_arma_informe(tmp_path: Path):
     carpeta_legal.mkdir(parents=True)
     (carpeta_legal / "contrato.txt").write_text("hola mundo", encoding="utf8")
 
-    r = procesar_archivos.procesar("Proyecto Demo", [raiz])
+    r = procesar_archivos.procesar(UUID, [raiz])
 
-    trabajo = tmp_path / "proyectos" / "proyecto-demo"
+    trabajo = tmp_path / "proyectos" / UUID
     assert r["trabajo"] == str(trabajo)
     assert (trabajo / "fuente" / "estados-financieros" / "EEFF.xlsx").is_file()
     assert (trabajo / "fuente" / "documentacion-legal" / "contrato.txt").is_file()
@@ -93,14 +96,14 @@ def test_ignora_carpetas_que_empiezan_con_guion_bajo(tmp_path: Path):
     (raiz / "_extractos_ocr" / "vacio.txt").write_text("", encoding="utf8")
     (raiz / "real.txt").write_text("contenido real", encoding="utf8")
 
-    r = procesar_archivos.procesar("Ignora", [raiz])
+    r = procesar_archivos.procesar(UUID, [raiz])
 
     nombres = {d["archivo"] for d in r["documentos"]}
     assert nombres == {"real.txt"}, (
         f"se ingirieron archivos de una carpeta con guion bajo: {nombres}"
     )
 
-    trabajo = tmp_path / "proyectos" / "ignora"
+    trabajo = tmp_path / "proyectos" / UUID
     assert not (trabajo / "fuente" / "extractos").exists()
     assert not (trabajo / "fuente" / "extractos-ocr").exists()
 
@@ -112,7 +115,7 @@ def test_resumen_reparto_por_estado_y_tope_de_lectura(tmp_path: Path, monkeypatc
     (raiz / "a.txt").write_text("x", encoding="utf8")  # 1 byte -- cabe
     (raiz / "b.txt").write_text("contenido mas largo", encoding="utf8")  # no cabe
 
-    r = procesar_archivos.procesar("Tope", [raiz])
+    r = procesar_archivos.procesar(UUID, [raiz])
 
     por_nombre = {d["archivo"]: d for d in r["documentos"]}
     assert por_nombre["a.txt"]["cabe_en_tope"] is True
@@ -125,39 +128,56 @@ def test_resumen_reparto_por_estado_y_tope_de_lectura(tmp_path: Path, monkeypatc
     assert resumen["tiempo_total_s"] >= 0
 
 
-def test_slug_de_proyecto_crea_la_carpeta_esperada(tmp_path: Path):
+def test_uuid_del_proyecto_crea_la_carpeta_esperada(tmp_path: Path):
     raiz = tmp_path / "origen"
     raiz.mkdir()
     (raiz / "a.txt").write_text("x", encoding="utf8")
 
-    r = procesar_archivos.procesar("Lácteos Victoria & Cía (Grupo)", [raiz])
+    r = procesar_archivos.procesar(UUID, [raiz])
 
-    assert r["slug"] == "lacteos-victoria-cia-grupo"
-    assert (
-        tmp_path / "proyectos" / "lacteos-victoria-cia-grupo" / "fuente" / "a.txt"
-    ).is_file()
+    assert r["project_uuid"] == UUID
+    assert (tmp_path / "proyectos" / UUID / "fuente" / "a.txt").is_file()
+
+
+@pytest.mark.parametrize("malo", ["Lácteos Victoria", "../../etc", UUID.upper(), UUID[:-1], ""])
+def test_procesar_rechaza_un_project_uuid_que_no_es_canonico(tmp_path: Path, malo: str):
+    raiz = tmp_path / "origen"
+    raiz.mkdir()
+    (raiz / "a.txt").write_text("x", encoding="utf8")
+
+    with pytest.raises(ValueError, match="project_uuid"):
+        procesar_archivos.procesar(malo, [raiz])
+
+    assert not (tmp_path / "proyectos").exists()
 
 
 def test_procesar_un_solo_archivo_sin_carpeta_va_a_la_raiz_de_fuente(tmp_path: Path):
     origen = tmp_path / "suelto.txt"
     origen.write_text("solo", encoding="utf8")
 
-    r = procesar_archivos.procesar("Suelto", [origen])
+    r = procesar_archivos.procesar(UUID, [origen])
 
-    trabajo = tmp_path / "proyectos" / "suelto"
+    trabajo = tmp_path / "proyectos" / UUID
     assert (trabajo / "fuente" / "suelto.txt").is_file()
     assert r["documentos"][0]["archivo"] == "suelto.txt"
 
 
-def test_main_invoca_procesar_con_proyecto_y_rutas(tmp_path: Path, monkeypatch, capsys):
+def test_main_invoca_procesar_con_project_uuid_y_rutas(tmp_path: Path, monkeypatch, capsys):
     raiz = tmp_path / "origen"
     raiz.mkdir()
     (raiz / "a.txt").write_text("x", encoding="utf8")
 
-    monkeypatch.setattr(sys, "argv", ["procesar_archivos.py", "CLI Demo", str(raiz)])
+    monkeypatch.setattr(sys, "argv", ["procesar_archivos.py", "--project-uuid", UUID, str(raiz)])
     rc = procesar_archivos.main()
 
     assert rc == 0
     salida = capsys.readouterr().out
-    assert "cli-demo" in salida
-    assert (tmp_path / "proyectos" / "cli-demo" / "fuente" / "a.txt").is_file()
+    assert UUID in salida
+    assert (tmp_path / "proyectos" / UUID / "fuente" / "a.txt").is_file()
+
+
+def test_main_sin_project_uuid_falla(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["procesar_archivos.py", str(tmp_path)])
+    with pytest.raises(SystemExit) as e:
+        procesar_archivos.main()
+    assert e.value.code == 2
