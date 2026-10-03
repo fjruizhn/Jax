@@ -60,9 +60,14 @@ Configuración (sin defaults para lo que decide a dónde va el tráfico):
                               reescritura aplica SOLO a la entrada del Ejecutor; la del socket
                               jaxqwen (`atender_jaxqwen`) sigue byte a byte aunque diga
                               `apagado`. En las DOS entradas se rechaza (403) un pedido de
-                              mensajes con claves de primer nivel repetidas por casefold o con
-                              un campo conocido escrito con otra capitalización (Go, que es
-                              Ollama, empareja claves sin distinguir mayúsculas)
+                              mensajes con claves repetidas tras el plegado de Go, o con un campo
+                              conocido escrito con otra capitalización (403 `pedido_ambiguo`), en
+                              el primer nivel, en cada objeto de `messages[]`, en cada bloque de
+                              `content` (recursivo en el `content` de un tool_result) y en cada
+                              objeto de `tools[]`; ver `lectura.cargar_pedido`. Go (Ollama)
+                              empareja claves sin distinguir mayúsculas, C3 no. También en las
+                              dos entradas: 403 `herramienta_de_servidor` si `tools` trae algo con
+                              `type` distinto de ausente o `custom` (búsqueda web de Ollama)
 
 C3 (registro intocable, decisión D-SP1-2 del índice de SP1): cada `tool_use` que
 el cerebro pide se anota en el registro ANTES de reenviar el trozo que lo completa,
@@ -143,12 +148,20 @@ RUTA_NO_PERMITIDA = "ruta_no_permitida"
 EJECUTOR_PAUSADO = "ejecutor_pausado"
 VIGIA_SIN_LATIDO = "vigia_sin_latido"
 MODELO_NO_PERMITIDO = "modelo_no_permitido"
+#: Un objeto del pedido que Go (Ollama) leería distinto que Python/C3: claves repetidas tras el
+#: plegado, o un campo conocido con otra capitalización. Ver `lectura.cargar_pedido`.
+PEDIDO_AMBIGUO = "pedido_ambiguo"
+#: El pedido trae una herramienta DE SERVIDOR (`type` distinto de ausente o `custom`:
+#: `web_search_*`, `web_fetch_*`, ...). Ollama 0.34.3 las atiende del lado del servidor (búsqueda
+#: web) y el proxy es la jaula del Ejecutor: ningún dato de misión sale de hall9000. Se rechaza,
+#: no se quita en silencio.
+HERRAMIENTA_DE_SERVIDOR = "herramienta_de_servidor"
 SALIDA_NO_PERMITIDA = "salida_no_permitida"
 #: Fail-closed: con el pensamiento apagado, el cuerpo no se pudo reescribir; no se reenvía.
 REESCRITURA_FALLO = "reescritura_fallo"
 PENSAMIENTO_APAGADO = "apagado"
 PENSAMIENTO_LIBRE = "libre"
-_CLAVES_DE_PENSAMIENTO = frozenset({"thinking", "think", "reasoning_effort"})
+_CLAVES_DE_PENSAMIENTO_PLEGADAS = frozenset({lectura.plegar(c) for c in ("thinking", "think", "reasoning_effort")})
 _PENSAMIENTOS = frozenset({PENSAMIENTO_APAGADO, PENSAMIENTO_LIBRE})
 #: Fail-closed: el re-chequeo del freno AL TOMAR el carril (dentro de la sección crítica,
 #: un flock entre procesos) no pudo terminar a tiempo. Mismo criterio que
@@ -339,28 +352,48 @@ def _fuera_de_limites(cuerpo: bytes, cfg: Config) -> str | None:
     código, o None si está dentro. Lo que no se puede leer, no está dentro (fail-closed)."""
     try:
         pedido = lectura.cargar_pedido(cuerpo)
-    except (ValueError, UnicodeDecodeError):  # fail-soft: no se reenvía; un cuerpo ilegible o ambiguo (claves que Go leería distinto) se trata como modelo no permitido (403)
+    except lectura.PedidoAmbiguo:  # claves que Go leería distinto que C3: 403 con código propio
+        return PEDIDO_AMBIGUO
+    except (ValueError, UnicodeDecodeError):  # fail-soft: no se reenvía; un cuerpo ilegible se trata como modelo no permitido (403)
         return MODELO_NO_PERMITIDO
     if not isinstance(pedido, dict) or pedido.get("model") != cfg.modelo:
         return MODELO_NO_PERMITIDO
     salida = pedido.get("max_tokens")
     if type(salida) is not int or not 0 < salida <= cfg.max_salida_tokens:
         return SALIDA_NO_PERMITIDA
+    if _con_herramienta_de_servidor(pedido.get("tools")):
+        return HERRAMIENTA_DE_SERVIDOR
     return None
+
+
+def _con_herramienta_de_servidor(herramientas) -> bool:
+    """¿`tools` trae algo que no sea una herramienta de cliente normal (sin `type`, o `type` ==
+    "custom")? Cubre `web_search*` y `web_fetch*` y cualquier otro `type` de servidor. Lo que no
+    se puede leer como lista de objetos, no está dentro (fail-closed). Sin `tools`, no hay nada."""
+    if herramientas is None:
+        return False
+    if not isinstance(herramientas, list):
+        return True
+    for herramienta in herramientas:
+        if not isinstance(herramienta, dict):
+            return True
+        if "type" in herramienta and herramienta["type"] != "custom":
+            return True
+    return False
 
 
 def _con_pensamiento_apagado(cuerpo: bytes) -> bytes:
     """El cuerpo que se reenvía con el pensamiento apagado: el mismo pedido con `thinking`
     forzado a `disabled`, pisando el del cliente. Antes se borra de primer nivel toda clave que
     Ollama (Go: `encoding/json` empareja sin distinguir mayúsculas; su binario además lee
-    `think` y `reasoning_effort`) pudiera leer como pensamiento, por casefold. Se serializa con
+    `think` y `reasoning_effort`) pudiera leer como pensamiento, tras el plegado de Go (`lectura.plegar`). Se serializa con
     `ensure_ascii=True`: un surrogate suelto (escape ud83d sin su par) no se puede codificar en UTF-8 y
     reventaría la reescritura. Lanza si no es un objeto JSON legible (ya se validó antes; esto
     es el cinturón: lo que no se puede reescribir no se reenvía)."""
     pedido = json.loads(cuerpo)
     if not isinstance(pedido, dict):
         raise ValueError("el pedido no es un objeto")
-    for clave in [k for k in pedido if k.casefold() in _CLAVES_DE_PENSAMIENTO]:
+    for clave in [k for k in pedido if lectura.plegar(k) in _CLAVES_DE_PENSAMIENTO_PLEGADAS]:
         del pedido[clave]
     pedido["thinking"] = {"type": "disabled"}
     return json.dumps(pedido, ensure_ascii=True, separators=(",", ":")).encode("ascii")

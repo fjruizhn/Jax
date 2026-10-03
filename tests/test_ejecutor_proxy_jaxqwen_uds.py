@@ -136,3 +136,37 @@ def test_por_jaxqwen_con_apagado_el_thinking_llega_intacto_y_por_la_entrada_norm
     assert len(recibidas) == 2
     assert recibidas[0] == cuerpo, "por jaxqwen el cuerpo llega byte a byte"
     assert json.loads(recibidas[1])["thinking"] == {"type": "disabled"}, "por la entrada del Ejecutor se impone"
+
+
+def test_por_jaxqwen_tambien_se_rechaza_la_herramienta_de_servidor_y_lo_anidado_ambiguo(tmp_path):
+    """MAJOR-A y la herramienta de servidor aplican a las DOS entradas (no solo a la del Ejecutor)."""
+    servidor = (b'{"model":"modelo-permitido","max_tokens":1,"messages":[],'
+                b'"tools":[{"type":"web_search_20250305","name":"web_search"}]}')
+    anidado = (b'{"model":"modelo-permitido","max_tokens":1,"messages":['
+               b'{"role":"user","content":[{"Type":"tool_result","tool_use_id":"t","content":"x"}]}]}')
+
+    async def scenario():
+        async with Upstream(modo="error") as upstream:
+            parent = tmp_path / "run"
+            parent.mkdir(mode=0o700)
+            path = parent / "jaxqwen.sock"
+            cfg = Config(upstream=upstream.url, raiz=tmp_path / "locks", tope_s=2,
+                         host="127.0.0.1", puerto=0, registro=tmp_path / "registro.jsonl",
+                         pausa=tmp_path / "PAUSA", latido=tmp_path / "latido", latido_max_s=60,
+                         modelo=MODELO_PERMITIDO, max_salida_tokens=1024, pensamiento="libre",
+                         jaxqwen_socket=path, jaxqwen_uid=os.getuid(), jaxqwen_gid=os.getgid())
+            cfg.raiz.mkdir()
+            latir(cfg.latido)
+            server = await arrancar(cfg)
+            try:
+                transport = httpx.AsyncHTTPTransport(uds=str(path))
+                async with httpx.AsyncClient(transport=transport, base_url="http://jaxqwen") as client:
+                    a = await client.post("/v1/messages", content=servidor)
+                    b = await client.post("/v1/messages", content=anidado)
+                return (a.status_code, a.json()["error"]["type"], b.status_code, b.json()["error"]["type"],
+                        len(upstream.recibidas))
+            finally:
+                server.close()
+                await server.wait_closed()
+
+    assert _correr(scenario()) == (403, "herramienta_de_servidor", 403, "pedido_ambiguo", 0)

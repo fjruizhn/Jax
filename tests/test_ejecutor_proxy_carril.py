@@ -742,3 +742,136 @@ def test_c3_ve_lo_mismo_que_la_validacion_un_pedido_ambiguo_no_se_anota():
     assert lectura.resultados_de_peticion(ambiguo) is None
     with pytest.raises(lectura.PedidoAmbiguo):
         lectura.cargar_pedido(ambiguo)
+
+
+# --- Segunda auditoría: niveles anidados, plegado de Go, código propio, herramientas de servidor ---
+
+def _posteo_codigo(tmp_path, pensamiento, cuerpo):
+    """Como `_posteo`, pero devuelve (estado, código de error o None, cuántas llegaron al upstream)."""
+    async def escenario():
+        async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 2, pensamiento=pensamiento) as px, \
+                httpx.AsyncClient() as cli:
+            r = await cli.post(px.url + "/v1/messages", content=cuerpo)
+            codigo = r.json()["error"]["type"] if r.status_code >= 400 else None
+            return r.status_code, codigo, len(up.recibidas)
+
+    return _correr(escenario())
+
+
+def _pedido(**cambios):
+    base = {"model": MODELO_PERMITIDO, "max_tokens": MAX_SALIDA_TOKENS,
+            "messages": [{"role": "user", "content": "hola"}]}
+    base.update(cambios)
+    return json.dumps(base).encode()
+
+
+_RESULTADO = {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+
+_ANIDADOS_AMBIGUOS = {
+    "Type en el bloque": [{"role": "user", "content": [{"Type": "tool_result", "tool_use_id": "t1", "content": "x"}]}],
+    "Content en el mensaje": [{"role": "user", "Content": [_RESULTADO]}],
+    "type y Type en el bloque": [{"role": "user", "content": [{"type": "text", "Type": "tool_result",
+                                                              "tool_use_id": "t1", "content": "x"}]}],
+    "Role en el mensaje": [{"Role": "user", "content": "x"}],
+    "Tool_Use_Id en el resultado": [{"role": "user", "content": [{"type": "tool_result", "Tool_Use_Id": "t1"}]}],
+    "Type en el bloque de un tool_result": [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "Type": "tool_result"}]}]}],
+}
+
+
+@pytest.mark.parametrize("pensamiento", ["apagado", "libre"])
+@pytest.mark.parametrize("caso", sorted(_ANIDADOS_AMBIGUOS))
+def test_claves_ambiguas_en_mensajes_y_bloques_dan_403_y_no_llegan(tmp_path, pensamiento, caso):
+    cuerpo = _pedido(messages=_ANIDADOS_AMBIGUOS[caso])
+    assert _posteo_codigo(tmp_path, pensamiento, cuerpo) == (403, proxy_carril.PEDIDO_AMBIGUO, 0)
+
+
+@pytest.mark.parametrize("pensamiento", ["apagado", "libre"])
+def test_un_pedido_legitimo_de_claude_code_pasa(tmp_path, pensamiento):
+    mensajes = [
+        {"role": "user", "content": [{"type": "text", "text": "corre uptime"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "voy"},
+                                          {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "uptime"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                      "content": [{"type": "text", "text": "arriba"}], "is_error": False}]},
+    ]
+    herramientas = [{"name": "Bash", "description": "d", "input_schema": {"type": "object"}},
+                    {"type": "custom", "name": "Otra", "input_schema": {"type": "object"}}]
+    cuerpo = _pedido(messages=mensajes, tools=herramientas, system=[{"type": "text", "text": "s"}])
+    assert _posteo_codigo(tmp_path, pensamiento, cuerpo) == (200, None, 1)
+
+
+@pytest.mark.parametrize("original, esperado", [
+    ("thinking", "THINKING"), ("thınking", "THINKING"), ("THİNKİNG", "THINKING"),
+    ("thinKing", "THINKING"), ("thinking", "THINKING"), ("ſ", "S"),
+])
+def test_plegar_emula_el_plegado_de_go(original, esperado):
+    from jax.ejecutor.contratos import lectura
+    assert lectura.plegar(original) == lectura.plegar(esperado) == esperado.replace("ſ", "S")
+
+
+@pytest.mark.parametrize("pensamiento", ["apagado", "libre"])
+@pytest.mark.parametrize("clave", ["thınking", "THİNKING", "thinKing", "ſystem"])
+def test_formas_unicode_de_un_campo_conocido_dan_403(tmp_path, pensamiento, clave):
+    cuerpo = json.dumps({"model": MODELO_PERMITIDO, "max_tokens": 5, "messages": [],
+                         clave: {"type": "enabled"}}).encode()
+    assert _posteo_codigo(tmp_path, pensamiento, cuerpo) == (403, proxy_carril.PEDIDO_AMBIGUO, 0)
+
+
+@pytest.mark.parametrize("orden", [0, 1])
+def test_la_reescritura_sola_borra_la_forma_unicode_sin_depender_del_orden(orden):
+    pares = [("model", "m"), ("thınking", {"type": "enabled"}), ("max_tokens", 5)]
+    if orden:
+        pares.reverse()
+    sucio = json.dumps(dict(pares)).encode()
+    assert json.loads(proxy_carril._con_pensamiento_apagado(sucio)) == {
+        "model": "m", "max_tokens": 5, "thinking": _DESHABILITADO}
+
+
+def test_el_rechazo_por_ambiguedad_tiene_codigo_propio_en_respuesta_y_log(tmp_path, caplog):
+    assert proxy_carril.PEDIDO_AMBIGUO == "pedido_ambiguo"
+    with caplog.at_level(logging.WARNING, logger=proxy_carril.log.name):
+        resultado = _posteo_codigo(tmp_path, "libre", _pedido(Messages=[]))
+    assert resultado == (403, "pedido_ambiguo", 0)
+    assert "pedido_ambiguo" in caplog.text and "modelo_no_permitido" not in caplog.text
+
+
+@pytest.mark.parametrize("pensamiento", ["apagado", "libre"])
+@pytest.mark.parametrize("herramientas", [
+    [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+    [{"name": "Bash", "input_schema": {}}, {"type": "web_fetch_20250910", "name": "web_fetch"}],
+    [{"type": "WEB_SEARCH_20250305", "name": "web_search"}],
+    [{"type": "bash_20250124", "name": "bash"}],
+    [{"type": None, "name": "x"}],
+    [{"Type": "web_search_20250305", "name": "web_search"}],
+    "web_search", ["web_search"],
+])
+def test_herramienta_de_servidor_da_403_y_no_llega(tmp_path, pensamiento, herramientas):
+    cuerpo = _pedido(tools=herramientas)
+    estado, codigo, llegaron = _posteo_codigo(tmp_path, pensamiento, cuerpo)
+    assert estado == 403 and llegaron == 0
+    assert codigo in (proxy_carril.HERRAMIENTA_DE_SERVIDOR, proxy_carril.PEDIDO_AMBIGUO)
+
+
+@pytest.mark.parametrize("pensamiento", ["apagado", "libre"])
+@pytest.mark.parametrize("herramientas", [
+    [{"type": "web_search_20250305", "name": "web_search"}],
+    [{"name": "Bash"}, {"type": "web_fetch_20250910", "name": "f"}],
+])
+def test_herramienta_de_servidor_tiene_codigo_propio(tmp_path, pensamiento, herramientas):
+    assert _posteo_codigo(tmp_path, pensamiento, _pedido(tools=herramientas)) == (
+        403, "herramienta_de_servidor", 0)
+
+
+@pytest.mark.parametrize("herramientas", [None, [], [{"name": "Bash"}], [{"type": "custom", "name": "x"}]])
+def test_herramientas_de_cliente_o_sin_tools_pasan(tmp_path, herramientas):
+    extra = {} if herramientas is None else {"tools": herramientas}
+    assert _posteo_codigo(tmp_path, "apagado", _pedido(**extra)) == (200, None, 1)
+
+
+@pytest.mark.parametrize("pensamiento", ["apagado", "libre"])
+def test_clave_repetida_exacta_en_un_bloque_da_403(tmp_path, pensamiento):
+    # Un literal de dict de Python colapsa la repetida: se escribe el JSON a mano.
+    cuerpo = (b'{"model":"modelo-permitido","max_tokens":1024,"messages":[{"role":"user","content":'
+              b'[{"type":"text","type":"tool_result","tool_use_id":"t1","content":"x"}]}]}')
+    assert _posteo_codigo(tmp_path, pensamiento, cuerpo) == (403, proxy_carril.PEDIDO_AMBIGUO, 0)
