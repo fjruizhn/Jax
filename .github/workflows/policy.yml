@@ -1757,6 +1757,18 @@ jobs:
         run: python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py tests/test_governed_resolution.py tests/test_governed_renderer.py -v
       - name: F2-D lifecycle contract
         run: python -m pytest tests/test_output_lifecycle.py tests/test_governed_renderer.py -q
+      - name: F2-E governed external-output boundary
+        # Exercise the real F2-E composition from typed candidates through the
+        # server-owned channel registry, structured F2-C projection, and F2-D
+        # preparation.  The Platform exact-pair job exercises the paired
+        # consumer transports on this same frozen JAX revision.
+        run: >-
+          python -m pytest -q
+          tests/test_structured_output.py
+          tests/test_runtime_output_composition.py
+          tests/test_f2e_jax_external_output.py
+        env:
+          PYTHONPATH: .:las_manos
       - name: F2-E-SR runtime-status source integrity regressions
         run: python -m pytest tests/test_f2e_runtime_status_remediation.py -v
         env:

@@ -31,9 +31,9 @@ _PLATFORM_KINDS = {
     "FACET_RUNTIME_STATUS": (AdapterKind.FACET_RUNTIME_STATUS, "platform:facet-state"),
     "ENGINE_STATUS": (AdapterKind.ENGINE_STATUS, "platform:las-manos-health"),
 }
-RUNTIME_STATUS_API_VERSION = "f2-e.runtime-status.2"
-_BINDING_VERSION = "f2-e.runtime-status.2"
-_RESOLVER_VERSION = "f2-e.runtime-status-resolver.2"
+RUNTIME_STATUS_API_VERSION = "f2-e.runtime-status.3"
+_BINDING_VERSION = "f2-e.runtime-status.3"
+_RESOLVER_VERSION = "f2-e.runtime-status-resolver.3"
 _RUNTIME_SPECS = {
     "JOB_STATUS": (AdapterKind.MOTOR_JOB_STATUS, "motor:job-store", "authority:motor-registry", 60, SourceScopeClass.EXACT_RESPONSE_SCOPE, "MotorJobStatusResolver"),
     "PIPELINE_STATUS": (AdapterKind.JACOBS_PIPELINE_STATUS, "jacobs:canonical-store", "authority:jacobs", 60, SourceScopeClass.EXACT_RESPONSE_SCOPE, "JacobsPipelineStatusResolver"),
@@ -104,13 +104,15 @@ def runtime_status_source_configuration_digest(predicate: str, source_configurat
             raise GovernanceContractError("facet runtime source configuration mismatch")
     elif predicate == "ENGINE_STATUS":
         config = _plain(source_configuration)
-        if set(config) != {"endpoint_sha256", "method", "path", "timeout_seconds", "poll_interval_seconds", "success_status_code"}:
+        if set(config) != {"endpoint_sha256", "method", "path", "service_authentication_identity", "service_authentication_header", "timeout_seconds", "poll_interval_seconds", "success_status_code"}:
             raise GovernanceContractError("engine health source configuration shape mismatch")
         endpoint_digest = config["endpoint_sha256"]
         if (not isinstance(endpoint_digest, str) or len(endpoint_digest) != 71
                 or not endpoint_digest.startswith("sha256:")
                 or any(ch not in "0123456789abcdef" for ch in endpoint_digest[7:])
-                or config["method"] != "GET" or config["path"] != "/health"
+                or config["method"] != "GET" or config["path"] != "/internal/health"
+                or config["service_authentication_identity"] != "plataforma"
+                or config["service_authentication_header"] != "X-Jax-Credencial-Servicio"
                 or config["timeout_seconds"] != 5 or config["poll_interval_seconds"] != 30
                 or config["success_status_code"] != 200):
             raise GovernanceContractError("engine health source configuration mismatch")
@@ -143,12 +145,34 @@ def build_runtime_status_registry(scope: ResponseScope, *, authenticator,
         raise GovernanceContractError("runtime registry requires ResponseScope")
     if not isinstance(platform_source_configuration, Mapping) or set(platform_source_configuration) != {"FACET_RUNTIME_STATUS", "ENGINE_STATUS"}:
         raise GovernanceContractError("Platform runtime source configuration required")
-    job_config = _job_store_source_configuration()
-    jacobs_config = _jacobs_source_configuration()
+    return _build_runtime_status_registry(scope, authenticator=authenticator,
+        predicates=tuple(_RUNTIME_SPECS), platform_source_configuration=platform_source_configuration)
+
+
+def build_owned_runtime_status_registry(scope: ResponseScope, *, authenticator):
+    """JAX-owned subset for JOB/PIPELINE output composition.
+
+    It deliberately cannot register Platform-owned FACET/ENGINE sources and
+    therefore never needs to manufacture their source configuration identity.
+    """
+    return _build_runtime_status_registry(scope, authenticator=authenticator,
+        predicates=("JOB_STATUS", "PIPELINE_STATUS"), platform_source_configuration=None)
+
+
+def _build_runtime_status_registry(scope: ResponseScope, *, authenticator, predicates: tuple[str, ...],
+                                   platform_source_configuration: Mapping[str, Mapping[str, object]] | None):
+    if not isinstance(scope, ResponseScope) or not predicates or any(predicate not in _RUNTIME_SPECS for predicate in predicates):
+        raise GovernanceContractError("runtime registry requires approved predicate subset")
+    if any(predicate in _PLATFORM_KINDS for predicate in predicates):
+        if not isinstance(platform_source_configuration, Mapping) or set(platform_source_configuration) != {"FACET_RUNTIME_STATUS", "ENGINE_STATUS"}:
+            raise GovernanceContractError("Platform runtime source configuration required")
+    job_config = _job_store_source_configuration() if "JOB_STATUS" in predicates else None
+    jacobs_config = _jacobs_source_configuration() if "PIPELINE_STATUS" in predicates else None
     rule = ScopeRule(scope.environment, scope.tenant_id, scope.project_id, scope.subject_id,
         scope.actor_id, scope.audience, scope.component_id)
     entries = []
-    for predicate, (kind, source, owner, sla, source_scope, resolver_name) in _RUNTIME_SPECS.items():
+    for predicate in predicates:
+        kind, source, owner, sla, source_scope, resolver_name = _RUNTIME_SPECS[predicate]
         identity = f"policy.governance.runtime_status:{resolver_name}"
         source_config = (platform_source_configuration[predicate] if predicate in _PLATFORM_KINDS
             else job_config if predicate == "JOB_STATUS" else jacobs_config)

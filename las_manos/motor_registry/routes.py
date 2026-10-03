@@ -38,6 +38,7 @@ from motor_registry.policy import MotorPolicy
 import facet_resolver  # su sello (mtime de un archivo) invalida también el catálogo
 from motor_registry import job_tasks
 from motor_registry import worker as motor_worker
+from motor_registry.governed_output import governed_motor_job_response
 from interruptor import interruptor_activo, ruta_del_interruptor
 import human_gate
 
@@ -214,8 +215,8 @@ def _rechazado(req: MotorDispatchRequest, motor: str | None, razon: str) -> Moto
     )
 
 
-@router.post("/governed-dispatch", response_model=MotorDispatchResponse, status_code=202)
-async def governed_dispatch(req: GovernedDispatchRequest) -> MotorDispatchResponse:
+@router.post("/governed-dispatch", response_model=None, status_code=202)
+async def governed_dispatch(req: GovernedDispatchRequest):
     """Launch only a durably claimed, authoritative Block 6 execution."""
     if _GOVERNED_EXECUTION_STORE is None:
         raise HTTPException(status_code=503, detail="governed execution store no inicializado")
@@ -269,8 +270,12 @@ async def governed_dispatch(req: GovernedDispatchRequest) -> MotorDispatchRespon
     task.add_done_callback(lambda t: _ingest_governed_worker_completion(
         t, execution_id=record.execution_id, job_id=job_id))
     job_tasks.register(job_id, task)
-    return MotorDispatchResponse(job_id=job_id, status=JobStatus.PENDING, motor=request.motor,
-        capability=request.capability, trace_id=req.trace_id)
+    return await governed_motor_job_response(
+        store=_STORE,
+        value=MotorDispatchResponse(job_id=job_id, status=JobStatus.PENDING, motor=request.motor,
+            capability=request.capability, trace_id=req.trace_id),
+        status_code=202,
+    )
 
 
 @router.post("/dispatch", response_model=MotorDispatchResponse, status_code=202)
@@ -369,16 +374,16 @@ async def authorize_facet(req: FacetAuthorizeRequest) -> FacetAuthorizeResponse:
     return FacetAuthorizeResponse(allowed=allowed, reason=reason)
 
 
-@router.get("/job/{job_id}", response_model=MotorJobView)
-async def get_job(job_id: str) -> MotorJobView:
+@router.get("/job/{job_id}", response_model=None)
+async def get_job(job_id: str):
     view = _STORE.get(job_id)
     if view is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' no encontrado")
-    return view
+    return await governed_motor_job_response(store=_STORE, value=view)
 
 
-@router.post("/job/{job_id}/cancel", response_model=MotorJobView)
-async def cancel_job(job_id: str) -> MotorJobView:
+@router.post("/job/{job_id}/cancel", response_model=None)
+async def cancel_job(job_id: str):
     view = _STORE.get(job_id)
     if view is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' no encontrado")
@@ -394,4 +399,4 @@ async def cancel_job(job_id: str) -> MotorJobView:
     # La etiqueta sola no paraba nada: worker.run nunca la leía y el job
     # seguía llamando al modelo. Cortar la tarea es lo que corta el gasto.
     job_tasks.cancel(job_id)
-    return _STORE.get(job_id)
+    return await governed_motor_job_response(store=_STORE, value=_STORE.get(job_id))

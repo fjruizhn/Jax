@@ -34,6 +34,8 @@ import time
 import urllib.error
 import urllib.request
 
+from auth_servicio import ENCABEZADO, IDENTIDAD_PLATAFORMA, cargar_credenciales
+
 LAS_MANOS_DIR = "/home/fruiz/jax/las_manos"
 BASE_URL = "http://127.0.0.1:7777"
 ENV_FILE = "/etc/jax/.env"
@@ -61,8 +63,8 @@ def load_env(path: str) -> dict[str, str]:
     return env
 
 
-def http_get(path: str, timeout: int = 15) -> dict:
-    req = urllib.request.Request(BASE_URL + path)
+def http_get(path: str, timeout: int = 15, *, headers: dict[str, str] | None = None) -> dict:
+    req = urllib.request.Request(BASE_URL + path, headers=headers or {})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
@@ -88,6 +90,13 @@ if not kimi_key:
     print(f"{FAIL} KIMI_API_KEY no encontrada en {ENV_FILE}")
     sys.exit(1)
 print(f"KIMI_API_KEY: presente ({len(kimi_key)} chars)")
+try:
+    HEALTH_HEADERS = {
+        ENCABEZADO: cargar_credenciales(env_vars)[IDENTIDAD_PLATAFORMA].decode("ascii")
+    }
+except Exception as exc:
+    print(f"{FAIL} credencial de servicio de plataforma inválida: {exc}")
+    sys.exit(1)
 
 # ---------------------------------------------------------------------------
 # Iniciar servidor si no está corriendo
@@ -95,10 +104,10 @@ print(f"KIMI_API_KEY: presente ({len(kimi_key)} chars)")
 
 server_proc = None
 try:
-    h = http_get("/health", timeout=3)
+    h = http_get("/internal/health", timeout=3, headers=HEALTH_HEADERS)
     if h.get("status") == "alive":
         print(f"Servidor ya corriendo. kill_switch_active={h.get('kill_switch_active')}")
-except Exception:  # fail-soft: este GET /health NO mide nada, solo detecta si ya hay servidor; que falle ES la senal de 'no hay servidor' y el cuerpo arranca uno. Si tampoco levanta, el else del for imprime FAIL y sale con exit 1
+except Exception:  # fail-soft: este GET interno autenticado NO mide nada, solo detecta si ya hay servidor; que falle ES la senal de 'no hay servidor' y el cuerpo arranca uno. Si tampoco levanta, el else del for imprime FAIL y sale con exit 1
     print("Servidor no responde — arrancando...")
     proc_env = {**os.environ, **env_vars}
     log_fh = open(LOG_FILE, "a")
@@ -112,7 +121,7 @@ except Exception:  # fail-soft: este GET /health NO mide nada, solo detecta si y
     for _ in range(12):
         time.sleep(1)
         try:
-            h = http_get("/health", timeout=2)
+            h = http_get("/internal/health", timeout=2, headers=HEALTH_HEADERS)
             if h.get("status") == "alive":
                 print(f"Servidor levantó (pid={server_proc.pid}). kill_switch_active={h.get('kill_switch_active')}")
                 break

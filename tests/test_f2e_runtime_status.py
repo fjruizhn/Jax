@@ -23,7 +23,8 @@ NOW = datetime(2026, 10, 2, tzinfo=timezone.utc)
 _PLATFORM_SOURCE_CONFIGURATION = {
     "FACET_RUNTIME_STATUS": {"state_contract": "JAXEngineState.FacetState", "status_field": "status",
         "observed_at_field": "resolver_read_time", "allowed_statuses": ["idle", "thinking", "error", "offline"]},
-    "ENGINE_STATUS": {"endpoint_sha256": "sha256:" + "e" * 64, "method": "GET", "path": "/health",
+    "ENGINE_STATUS": {"endpoint_sha256": "sha256:" + "e" * 64, "method": "GET", "path": "/internal/health",
+        "service_authentication_identity": "plataforma", "service_authentication_header": "X-Jax-Credencial-Servicio",
         "timeout_seconds": 5, "poll_interval_seconds": 30, "success_status_code": 200},
 }
 
@@ -59,10 +60,10 @@ def _entry():
         "store_contract": "motor-job-store-v1", "source_id": "/test/jobs.jsonl",
         "event_format": "motor-job-event-v1", "durability": "append-flush-fsync-v1"})
     binding = PredicateAuthorityBinding(
-        "JOB_STATUS", "f2-e.runtime-status.2", "motor:job-store", "authority:motor",
+        "JOB_STATUS", "f2-e.runtime-status.3", "motor:job-store", "authority:motor",
         "production", rule, rule, 60, ConflictPolicy.SINGLE_SOURCE_REQUIRED,
-        "policy.governance.runtime_status:MotorJobStatusResolver", "f2-e.runtime-status-resolver.2", source_digest,
-        "f2-e.runtime-status.2", source_scope_class=SourceScopeClass.EXACT_RESPONSE_SCOPE,
+        "policy.governance.runtime_status:MotorJobStatusResolver", "f2-e.runtime-status-resolver.3", source_digest,
+        "f2-e.runtime-status.3", source_scope_class=SourceScopeClass.EXACT_RESPONSE_SCOPE,
     )
     adapter = TrustedAdapterRegistration(
         AdapterKind.MOTOR_JOB_STATUS, binding.resolver_implementation_identity,

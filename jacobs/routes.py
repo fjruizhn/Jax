@@ -19,6 +19,10 @@ from pydantic import BaseModel, Field, model_validator
 from redaccion import recortar_redactado
 
 from jacobs import cupo, descarte, store
+from jacobs.governed_output import (
+    governed_pipeline_detail_response,
+    governed_pipeline_status_response,
+)
 from jacobs import continuar as servicio_continuar
 from jacobs.artifacts import read_artifact
 from jacobs.executor import run_pipeline
@@ -736,16 +740,16 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
 # ----------------------------------------------------------------
 
 @router.get("/pipeline/{pipeline_id}")
-async def get_pipeline(pipeline_id: str) -> dict:
+async def get_pipeline(pipeline_id: str):
     pipeline = await store.pipeline_get(pipeline_id)
     if not pipeline:
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' no encontrado")
 
     steps = await store.steps_by_pipeline(pipeline_id)
-    return {
-        "pipeline": pipeline.model_dump(exclude={"plan"}),
-        "steps": [s.model_dump() for s in steps],
-    }
+    return await governed_pipeline_detail_response(payload={
+        "pipeline": pipeline.model_dump(mode="json", exclude={"plan"}),
+        "steps": [s.model_dump(mode="json") for s in steps],
+    })
 
 
 # ----------------------------------------------------------------
@@ -787,7 +791,8 @@ async def cancel_pipeline(pipeline_id: str) -> dict:
                    "terminó): volvé a consultarlo",
         )
     await store.event_append(pipeline_id, "PIPELINE_CANCELLED", {"by": "API request"})
-    return {"pipeline_id": pipeline_id, "status": "aborted"}
+    return await governed_pipeline_status_response(
+        payload={"pipeline_id": pipeline_id, "status": "aborted"})
 
 
 # ----------------------------------------------------------------

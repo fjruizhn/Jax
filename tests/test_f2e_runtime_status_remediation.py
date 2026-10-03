@@ -149,7 +149,8 @@ def test_jacobs_database_change_invalidates_previously_minted_receipt(monkeypatc
     platform_config = {
         "FACET_RUNTIME_STATUS": {"state_contract": "JAXEngineState.FacetState", "status_field": "status",
             "observed_at_field": "resolver_read_time", "allowed_statuses": ["idle", "thinking", "error", "offline"]},
-        "ENGINE_STATUS": {"endpoint_sha256": "sha256:" + "e" * 64, "method": "GET", "path": "/health",
+        "ENGINE_STATUS": {"endpoint_sha256": "sha256:" + "e" * 64, "method": "GET", "path": "/internal/health",
+            "service_authentication_identity": "plataforma", "service_authentication_header": "X-Jax-Credencial-Servicio",
             "timeout_seconds": 5, "poll_interval_seconds": 30, "success_status_code": 200},
     }
     auth = ReceiptAuthenticator.for_testing(b"j" * 32)
@@ -172,7 +173,8 @@ def test_old_engine_health_probe_remains_stale_without_new_probe():
     platform_config = {
         "FACET_RUNTIME_STATUS": {"state_contract": "JAXEngineState.FacetState", "status_field": "status",
             "observed_at_field": "resolver_read_time", "allowed_statuses": ["idle", "thinking", "error", "offline"]},
-        "ENGINE_STATUS": {"endpoint_sha256": "sha256:" + "e" * 64, "method": "GET", "path": "/health",
+        "ENGINE_STATUS": {"endpoint_sha256": "sha256:" + "e" * 64, "method": "GET", "path": "/internal/health",
+            "service_authentication_identity": "plataforma", "service_authentication_header": "X-Jax-Credencial-Servicio",
             "timeout_seconds": 5, "poll_interval_seconds": 30, "success_status_code": 200},
     }
     registry = build_runtime_status_registry(_scope(),
@@ -223,7 +225,8 @@ def test_job_source_change_invalidates_previously_minted_receipt(tmp_path, monke
     platform_config = {
         "FACET_RUNTIME_STATUS": {"state_contract": "JAXEngineState.FacetState", "status_field": "status",
             "observed_at_field": "resolver_read_time", "allowed_statuses": ["idle", "thinking", "error", "offline"]},
-        "ENGINE_STATUS": {"endpoint_sha256": "sha256:" + "e" * 64, "method": "GET", "path": "/health",
+        "ENGINE_STATUS": {"endpoint_sha256": "sha256:" + "e" * 64, "method": "GET", "path": "/internal/health",
+            "service_authentication_identity": "plataforma", "service_authentication_header": "X-Jax-Credencial-Servicio",
             "timeout_seconds": 5, "poll_interval_seconds": 30, "success_status_code": 200},
     }
     store_a = JobStore(str(tmp_path / "jobs-a.jsonl"))

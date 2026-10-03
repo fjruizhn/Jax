@@ -14,7 +14,8 @@ Lo que se prueba acá, contra los routers reales con la base sustituida:
   aprueba: 403 aunque declare `invoked_by=plataforma`;
 - la credencial `plataforma` sigue aprobando (el flujo real no se rompe);
 - deny by default: una ruta nueva sin proteger explícitamente queda cubierta;
-- `/health` sigue público;
+- `/internal/health` exige la identidad de servicio Platform mientras el
+  antiguo `/health` conserva su contrato de monitor durante la migración;
 - la identidad declarada en el cuerpo tiene que ser la de la credencial;
 - fail-closed al cargar las credenciales;
 - server.py instala la protección y Jacobs presenta su credencial;
@@ -65,6 +66,10 @@ def _app() -> FastAPI:
 
     @app.get("/health")
     async def _health() -> dict:
+        return {"status": "alive"}
+
+    @app.get("/internal/health")
+    async def _internal_health() -> dict:
         return {"status": "alive"}
 
     @app.get("/audit/tail")
@@ -171,9 +176,29 @@ def test_claves_duplicadas_no_esquivan_el_chequeo(paso_de_hyde_en_gate):
 #  Deny by default y rutas públicas
 # ---------------------------------------------------------------------------
 
-def test_health_sigue_publico():
+def test_public_health_keeps_the_legacy_monitor_contract_during_migration():
     with TestClient(_app()) as c:
-        assert c.get("/health").status_code == 200
+        response = c.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "alive"}
+
+
+def test_internal_health_requires_platform_service_identity():
+    with TestClient(_app()) as c:
+        assert c.get("/internal/health").status_code == 401
+        assert c.get("/internal/health", headers=_h(IDENTIDAD_JACOBS)).status_code == 403
+        response = c.get("/internal/health", headers=_h(IDENTIDAD_PLATAFORMA))
+    assert response.status_code == 200
+    assert response.json() == {"status": "alive"}
+
+
+def test_monitor_migration_keeps_legacy_and_internal_health_liveness_equivalent():
+    with TestClient(_app()) as c:
+        legacy = c.get("/health")
+        internal = c.get("/internal/health", headers=_h(IDENTIDAD_PLATAFORMA))
+    assert (legacy.status_code, legacy.json()) == (internal.status_code, internal.json()) == (
+        200, {"status": "alive"}
+    )
 
 
 @pytest.mark.parametrize("metodo,ruta", [
@@ -292,6 +317,16 @@ def test_server_instala_la_proteccion_al_importar():
                 and getattr(n.value.func, "id", None) == "proteger"
                 and [getattr(a, "id", None) for a in n.value.args] == ["app"]]
     assert len(llamadas) == 1, "server.py tiene que llamar proteger(app) a nivel de módulo"
+
+
+def test_server_expands_with_authenticated_internal_health_without_retiring_legacy_health():
+    fuente = (RAIZ / "las_manos" / "server.py").read_text(encoding="utf-8")
+    assert '@app.get("/internal/health")' in fuente
+    assert '@app.head("/internal/health")' in fuente
+    assert '@app.get("/health")' in fuente
+    assert 'async def health(response: Response)' in fuente
+    assert 'return await _health_payload(response)' in fuente
+    assert "health_publico_retirado" not in fuente
 
 
 def test_jacobs_presenta_su_credencial_en_cada_pedido_a_las_manos():

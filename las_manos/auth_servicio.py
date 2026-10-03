@@ -9,9 +9,11 @@ aprobaba los pasos de Hyde bloqueados en el gate.
 
 Contrato:
 
-- **Deny by default.** Toda ruta exige credencial salvo `PUBLICAS` (hoy sólo
-  `GET /health`, que miran monitores y k6). Una ruta nueva queda cubierta sin
-  que nadie se acuerde de protegerla.
+- **Deny by default.** Toda ruta exige credencial salvo `PUBLICAS` (hoy el
+  health legacy público, que conserva sus monitores mientras se migra). La
+  observación acreditada vive en `GET /internal/health` y exige identidad de
+  servicio. Una ruta nueva queda cubierta sin que nadie se acuerde de
+  protegerla.
 - **La identidad sale de la credencial**, no del cuerpo. Cada identidad tiene
   su secreto en /etc/jax/.env (`VARIABLES`), un conjunto de rutas permitidas y
   los valores de `invoked_by` / `caller` que puede declarar. Un cuerpo que
@@ -73,7 +75,10 @@ VARIABLES = {
 LARGO_MINIMO = 43
 _ALFABETO = re.compile(r"^[A-Za-z0-9_\-]+$")
 
-#: (método, path exacto) que no exigen credencial.
+#: (método, path exacto) que no exigen credencial.  ``/internal/health`` is
+#: deliberately absent: the Platform probe is a service-authenticated source.
+#: ``/health`` remains legacy-compatible until its separately deployed
+#: retirement after every known monitor has been verified on the new source.
 PUBLICAS = frozenset({("GET", "/health"), ("HEAD", "/health")})
 
 #: Campos del cuerpo que declaran identidad.
@@ -105,6 +110,10 @@ PERMISOS: dict[str, Permiso] = {
     # del chat.
     IDENTIDAD_PLATAFORMA: Permiso(
         rutas=(
+            # F2-E: the authoritative ENGINE_STATUS probe is server-owned by
+            # Platform and must cross a service-authenticated internal route.
+            ("GET", re.compile(r"/internal/health")),
+            ("HEAD", re.compile(r"/internal/health")),
             ("GET", re.compile(r"/jacobs/.+")),
             ("POST", re.compile(r"/jacobs/.+")),
             ("POST", re.compile(r"/motor/authorize-facet")),

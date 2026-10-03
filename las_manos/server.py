@@ -197,6 +197,53 @@ from auth_servicio import proteger  # noqa: E402
 proteger(app)
 
 
+_F2E_EXTERNAL_OUTPUT_CONFIGURED = False
+
+
+def _configure_f2e_external_output() -> None:
+    """Install the one LAS MANOS-owned F2-E composition at process startup.
+
+    The registry factory is closed to the existing canonical JobStore and
+    Jacobs persistence authorities.  Routes never receive a resolver, a
+    receipt, or a renderer selection.  The governance receipt is derived by
+    the shared composer from the loaded policy vocabulary and the exact
+    registry snapshot, rather than from server literals.
+    """
+    global _F2E_EXTERNAL_OUTPUT_CONFIGURED
+    if _F2E_EXTERNAL_OUTPUT_CONFIGURED:
+        return
+    from jax.external_output import (GovernedJaxHTTPAdapter, configure_jax_external_http_adapter,
+                                      runtime_status_templates)
+    from jacobs.governed_output import (
+        JACOBS_PIPELINE_DETAIL_NUMBER_BINDINGS,
+        JACOBS_RUNTIME_SLOT_CONTRACTS,
+        _PIPELINE_DETAIL_NUMBER_BINDING_CONTRACT_ID,
+    )
+    from motor_registry.governed_output import (
+        MOTOR_JOB_NUMBER_BINDINGS,
+        MOTOR_RUNTIME_SLOT_CONTRACTS,
+        _MOTOR_JOB_NUMBER_BINDING_CONTRACT_ID,
+    )
+    from policy.governance.runtime_output_composition import RuntimeOutputComposition
+    from policy.governance.runtime_status import build_owned_runtime_status_registry
+
+    slot_contracts = {**MOTOR_RUNTIME_SLOT_CONTRACTS, **JACOBS_RUNTIME_SLOT_CONTRACTS}
+    composition = RuntimeOutputComposition(
+        platform_source_configuration=None,
+        registry_factory=lambda scope, authenticator: build_owned_runtime_status_registry(
+            scope, authenticator=authenticator),
+        governance_receipt=None,
+        templates=runtime_status_templates(),
+        slot_contracts=slot_contracts,
+        number_binding_contracts={
+            _MOTOR_JOB_NUMBER_BINDING_CONTRACT_ID: MOTOR_JOB_NUMBER_BINDINGS,
+            _PIPELINE_DETAIL_NUMBER_BINDING_CONTRACT_ID: JACOBS_PIPELINE_DETAIL_NUMBER_BINDINGS,
+        },
+    )
+    configure_jax_external_http_adapter(GovernedJaxHTTPAdapter(composition))
+    _F2E_EXTERNAL_OUTPUT_CONFIGURED = True
+
+
 def _configure_b7_trusted_runtime() -> None:
     """Build the B7 recorder once, at the real server composition root.
 
@@ -245,6 +292,7 @@ def _configure_b7_trusted_runtime() -> None:
 @app.on_event("startup")
 async def _jacobs_init() -> None:
     _configure_b7_trusted_runtime()
+    _configure_f2e_external_output()
     _jlog = logging.getLogger("jacobs")
     _jlog.setLevel(logging.INFO)
     if not _jlog.handlers:
@@ -386,10 +434,11 @@ _salud = Salud({
 })
 
 
-@app.get("/health")
-async def health(response: Response) -> dict:
-    """Latido del servicio. Comprueba las dependencias que LAS MANOS necesita
-    para trabajar y devuelve 503 si alguna no responde.
+async def _health_payload(response: Response) -> dict:
+    """One shared dependency probe for legacy and authenticated health routes.
+
+    The Platform-owned ENGINE_STATUS source is `/internal/health`; the legacy
+    public route remains unchanged during the monitor-migration release.
 
     El kill switch se REPORTA pero no degrada: estar frenado a proposito es un
     estado deliberado, no una averia.
@@ -405,6 +454,25 @@ async def health(response: Response) -> dict:
         "comprobado_hace_s": _salud.comprobado_hace(),
         "cache_ttl_s": _salud._ttl,
     }
+
+
+@app.get("/health")
+async def health(response: Response) -> dict:
+    """Legacy monitor compatibility route; retirement is a later deployment."""
+    return await _health_payload(response)
+
+
+@app.get("/internal/health")
+async def internal_health(response: Response) -> dict:
+    """Service-authenticated source used by the Platform health probe."""
+    return await _health_payload(response)
+
+
+@app.head("/internal/health")
+async def health_head(response: Response) -> Response:
+    """Authenticated HEAD variant with the same completed health semantics."""
+    await _health_payload(response)
+    return Response(status_code=response.status_code)
 
 
 @app.get("/audit/tail")

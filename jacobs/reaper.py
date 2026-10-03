@@ -51,6 +51,8 @@ En honor al Prof. Raúl Jacobs.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+from policy.governance.operator_transport import revalidate_operator_wire
 import json
 import logging
 import os
@@ -99,9 +101,13 @@ async def send_telegram_alert(message: str) -> dict:
         logger.warning("Reaper: alerta suprimida, TELEGRAM_BOT_TOKEN/CHAT_ID no configurados")
         return {"ok": False, "message_id": None, "error": "TELEGRAM_BOT_TOKEN/CHAT_ID no configurados"}
     try:
+        from jax.governed_operator_output import operator_adapter
+        wire = await operator_adapter().telegram(message=message, chat_id=chat_id)
+        wire = revalidate_operator_wire(wire, datetime.now(timezone.utc))
         resp = await obtener_cliente_http().post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            data={"chat_id": chat_id, "text": message},
+            content=wire.wire_bytes,
+            headers={"content-type": "application/json"},
             timeout=10.0,
         )
         body = resp.json()
