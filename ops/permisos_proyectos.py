@@ -424,8 +424,10 @@ def _revisar_o_mutar_raiz(fd_raiz: int, ruta: str, *, mutar: bool, resultado: Re
         resultado.no_cumple.append(f"{ruta} (raíz del workspace): {'; '.join(faltas)}")
 
 
-def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None) -> Resultado:
+def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_de_raiz=None) -> Resultado:
     resultado = Resultado()
+    if hook_antes_de_raiz is not None:
+        hook_antes_de_raiz(str(proyectos.parent))  # solo pruebas: la ventana entre validar y abrir la raiz
     fd_raiz = os.open(str(proyectos.parent), os.O_RDONLY | os.O_DIRECTORY)
     try:
         if accion in ("verificar", "aplicar"):
