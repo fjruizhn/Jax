@@ -167,7 +167,9 @@ def test_import_compuerta_no_explota_sin_python_docx(tmp_path: Path, monkeypatch
     archivo = tmp_path / "informe.docx"
     archivo.write_bytes(b"PK\x03\x04 lo que sea")
     r = modulo.extraer(archivo)
-    assert r.estado == "sin_extractor"
+    # jax-14 (2026-10-03): python-docx esta declarado -> su falta es 'error', no 'sin_extractor'.
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "dependencia_no_instalada"
     assert r.salidas == {}
 
 
@@ -421,9 +423,9 @@ def test_webp_real_renombrado_va_por_ocr_y_marca_extension_enganosa(
     assert r.detalle["extension_enganosa"] == {"nombre": ".docx", "contenido": "imagen"}
 
 
-def test_pdf_nativo_sin_pdfplumber_da_sin_extractor_no_ocr(tmp_path: Path, monkeypatch):
+def test_pdf_nativo_sin_pdfplumber_da_error_no_ocr_ni_sin_extractor(tmp_path: Path, monkeypatch):
     """C-2 (final-hallazgos.md, ronda de cierre): sin `pdfplumber`
-    instalado, un PDF NATIVO tiene que salir `sin_extractor` -- NUNCA
+    instalado, un PDF NATIVO tiene que salir `error` (jax-14; antes `sin_extractor`) -- NUNCA
     rutear a OCR (que devolvería `estado='ok'` con las cifras DESTRUIDAS,
     medido: 0 de 8 cifras). Mismo tratamiento que un `.docx` sin
     `python-docx` (`test_import_compuerta_no_explota_sin_python_docx`)."""
@@ -443,7 +445,8 @@ def test_pdf_nativo_sin_pdfplumber_da_sin_extractor_no_ocr(tmp_path: Path, monke
     archivo = _pdf_nativo(tmp_path / "estado.pdf")
     r = compuerta.extraer(archivo)
 
-    assert r.estado == "sin_extractor"
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "dependencia_no_instalada"
     assert r.salidas == {}
 
 
@@ -522,3 +525,25 @@ def test_tiene_extractor_es_lo_mismo_que_extraer_no_dice_sin_extractor(
 
     assert compuerta.tiene_extractor(archivo) is esperado
     assert compuerta.tiene_extractor(archivo) == (compuerta.extraer(archivo).estado != "sin_extractor")
+
+
+def test_pdf_con_pdfplumber_roto_da_dependencia_rota_y_no_propaga(tmp_path: Path, monkeypatch):
+    """jax-14 MINOR-2: un ImportError que no es ModuleNotFoundError (pdfplumber
+    presente pero roto) tampoco puede escapar crudo de `compuerta.extraer`, ni
+    rutear a OCR: es `error` con `dependencia_rota`."""
+    import builtins
+    import sys
+
+    archivo = _pdf_nativo(tmp_path / "estado.pdf")
+    original = builtins.__import__
+
+    def roto(nombre, *a, **k):
+        if nombre == "pdfplumber":
+            raise ImportError("simbolo no definido (instalacion rota)")
+        return original(nombre, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", roto)
+    monkeypatch.delitem(sys.modules, "pdfplumber", raising=False)
+    r = compuerta.extraer(archivo)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "dependencia_rota"

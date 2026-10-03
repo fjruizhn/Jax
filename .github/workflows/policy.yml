@@ -1822,8 +1822,28 @@ jobs:
           # 127 -> 131 (2026-10-03, SR3 caller immutability): +4 source-store
           # derivation, update-rejection, and replay-contradiction cases.
           # Measured on Python 3.12 with this exact three-file command.
-          grep -qE "^131 passed" /tmp/f2e-sr3-source || {
-            echo "PISO ROTO: se esperaban 131 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
+          # 131 -> 136 (2026-10-03, jax-14, freno de extractores): +5 en
+          # las_manos/_procesamiento_routes_test.py (503 con la lista y sin
+          # trabajo, 503 sin cupo, 202 con todo instalado, /health informa,
+          # el arranque loguea error). Medido en local con este comando
+          # exacto: 136 passed, 7 warnings (antes del cambio: 131).
+          # 136 -> 146 (2026-10-03, jax-14 ronda 1, BLOCK-1): el job `governance` NO
+          # instala requirements-archivos.txt, asi que las pruebas de las_manos/
+          # _procesamiento_routes_test.py fijan `dependencias.estado` en "todo ok"
+          # con un fixture autouse (salvo las del freno, que fijan el suyo con un
+          # importador controlado). Medido con este comando exacto en DOS
+          # interpretes: con las tres dependencias, 146 passed; con pdfplumber,
+          # openpyxl y docx tapados en sys.modules (sitecustomize), 146 passed.
+          # 146 -> 155 (2026-10-03, jax-14 ronda 2): +9 (intervalos de aviso/log que
+          # nunca tumban el import: no numerico, cero, negativo, no finito, minimos,
+          # valor valido; y el texto REALMENTE enviado sin rutas del lote, +1 por
+          # separar el caso sin credenciales). Medido con este comando exacto con
+          # las tres dependencias y con ellas tapadas en sys.modules: 155 passed.
+          # 155 -> 156 (2026-10-03, jax-14 ronda 3, MINOR-N5): +1, un valor enorme (1e28)
+          # se baja al techo (86400 s aviso, 3600 s log) con warning. Medido con este
+          # comando exacto, con y sin las tres dependencias: 156 passed.
+          grep -qE "^156 passed" /tmp/f2e-sr3-source || {
+            echo "PISO ROTO: se esperaban 156 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
         env:
           PYTHONPATH: .:las_manos
       - name: Piso exacto de tests CORRIDOS
@@ -5175,8 +5195,9 @@ jobs:
       - name: Excel -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_excel_test.py 2>&1 | tee /tmp/excel_tests
-          grep -qE "^13 passed" /tmp/excel_tests || {
-            echo "PISO ROTO: se esperaban 13 tests CORRIDOS (no skipeados) del extractor de Excel. Si esto da '... skipped', openpyxl no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 2026-10-03 (jax-14, ronda 1): +1 (ImportError que no es ModuleNotFoundError -> dependencia_rota). Medido en local, Python 3.14 con las 3 dependencias: 14 passed.
+          grep -qE "^14 passed" /tmp/excel_tests || {
+            echo "PISO ROTO: se esperaban 14 tests CORRIDOS (no skipeados) del extractor de Excel. Si esto da '... skipped', openpyxl no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 4 (2026-09-20/21, procesamiento-archivos-nucleo): PDF nativo
       # -- pdftotext destruye las tablas, y en un expediente financiero la
@@ -5236,8 +5257,9 @@ jobs:
       - name: PDF -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_pdf_test.py 2>&1 | tee /tmp/pdf_tests
-          grep -qE "^22 passed" /tmp/pdf_tests || {
-            echo "PISO ROTO: se esperaban 22 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 2026-10-03 (jax-14, ronda 1): +1 (dependencia_rota). Medido en local, Python 3.14 con las 3 dependencias: 23 passed.
+          grep -qE "^23 passed" /tmp/pdf_tests || {
+            echo "PISO ROTO: se esperaban 23 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 5 (2026-09-21, procesamiento-archivos-nucleo): OCR -- PDF
       # escaneado e imagen. tesseract por subproceso, nunca por binding
@@ -5366,8 +5388,9 @@ jobs:
       - name: Word -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_word_test.py 2>&1 | tee /tmp/word_tests
-          grep -qE "^22 passed" /tmp/word_tests || {
-            echo "PISO ROTO: se esperaban 22 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 2026-10-03 (jax-14, ronda 1): +1 (dependencia_rota). Medido en local, Python 3.14 con las 3 dependencias: 23 passed.
+          grep -qE "^23 passed" /tmp/word_tests || {
+            echo "PISO ROTO: se esperaban 23 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 7 (2026-09-20/21, procesamiento-archivos-nucleo): la compuerta
       # -- elige extractor por tipo, y NUNCA paga el caro (OCR) si el barato
@@ -5442,8 +5465,9 @@ jobs:
       - name: Compuerta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_compuerta_test.py 2>&1 | tee /tmp/compuerta_tests
-          grep -qE "^34 passed" /tmp/compuerta_tests || {
-            echo "PISO ROTO: se esperaban 34 tests CORRIDOS de la compuerta."; exit 1; }
+          # 2026-10-03 (jax-14, ronda 1): +1 (pdfplumber roto no escapa crudo ni rutea a OCR). Medido en local, Python 3.14 con las 3 dependencias: 35 passed.
+          grep -qE "^35 passed" /tmp/compuerta_tests || {
+            echo "PISO ROTO: se esperaban 35 tests CORRIDOS de la compuerta."; exit 1; }
 
       # Task 8 (2026-09-21, procesamiento-archivos-nucleo): la ingesta con
       # cache -- la tarea que produce el ahorro real. Indexa por sha256 del
@@ -5795,11 +5819,38 @@ jobs:
       # 69 -> 70 el 2026-10-03 (B-6): +1 que conserva `user:<user_id>` del
       #   sobre autenticado como caller. Medido localmente en Python 3.12:
       #   70 passed, 7 warnings.
+      # 70 -> 75 el 2026-10-03 (jax-14, freno de extractores): +5 (503
+      #   `extractores_no_disponibles` con la lista y sin crear trabajo, 503 que
+      #   no toma cupo, 202 con todo instalado, /health informa `extractores`
+      #   sin dejar de dar 200, el arranque loguea error). Los 4 que simulan la
+      #   falta vistos en ROJO contra el codigo viejo. Medido localmente:
+      #   75 passed, 7 warnings.
+      # 75 -> 85 el 2026-10-03 (jax-14 ronda 1): freno por tipo, aviso, log
+      #   limitado, estado() que nunca lanza, codigo de la ficha en el resultado,
+      #   fixture autouse "todo ok". Medido con y sin las tres dependencias
+      #   (tapadas en sys.modules): 85 passed en ambos.
       - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
-          grep -qE "^70 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 70 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          # 85 -> 94 el 2026-10-03 (jax-14 ronda 2): ver F2-E-SR3; medido con y sin las
+          # tres dependencias: 94 passed en ambos.
+          # 94 -> 95 el 2026-10-03 (jax-14 ronda 3): ver F2-E-SR3; con y sin las tres
+          # dependencias: 95 passed.
+          grep -qE "^95 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 95 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+
+      # jax-14 (2026-10-03): freno de dependencias de extraccion. Piso exacto de
+      # procesamiento/_dependencias_test.py: 29 passed (10 de la ronda 0 + 19 de la
+      # ronda 1: estado() nunca lanza, lineas no reconocidas, marcadores, freno por
+      # tipo), medido localmente con
+      # pdfplumber, openpyxl y python-docx instalados. Si da "skipped", falta
+      # una dependencia declarada: no es un piso mas alto, es justo la falla
+      # que este modulo existe para atrapar.
+      - name: Freno de dependencias de extraccion -- piso exacto de tests CORRIDOS (no skipeados)
+        run: |
+          python -m pytest -q procesamiento/_dependencias_test.py 2>&1 | tee /tmp/dependencias_tests
+          grep -qE "^29 passed" /tmp/dependencias_tests || {
+            echo "PISO ROTO: se esperaban 29 tests CORRIDOS (no skipeados) del freno de dependencias."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
