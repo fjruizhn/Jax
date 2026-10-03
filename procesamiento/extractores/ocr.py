@@ -166,7 +166,10 @@ CODIGO_OCR_SIN_MEMORIA = "ocr_sin_memoria"   # recursos, no archivo danado
 # negro y el resultado es la UNION de las dos pasadas (con duplicado por texto
 # y caja, y el tope de texto dudoso); una ficha escrita con "2" (la seleccion,
 # que podia perder texto) no se reusa.
-VERSION_LOGICA_IMAGEN = "3"
+# "4": Jax#338 ronda 17 -- las invariantes de la ronda 16 (una imagen con
+# transparencia real nunca sale `ok`; ninguna linea del texto plano se pierde)
+# cambian la clasificacion de las fichas escritas con "3".
+VERSION_LOGICA_IMAGEN = "4"
 
 
 def version_logica(camino: str) -> str | None:
