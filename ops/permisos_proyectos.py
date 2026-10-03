@@ -473,7 +473,7 @@ def _procesar_archivo(fd_path: int, ruta: str, st: os.stat_result, *, accion: st
 
 
 def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado: Resultado,
-             hook_de_prueba=None, alterada: bool = False) -> None:
+             hook_de_prueba=None, alterada: bool = False, hook_tras_scandir=None) -> None:
     """`profundidad` es la profundidad de las ENTRADAS que se listan en esta llamada,
     relativa a `proyectos/` (sus hijos directos son profundidad 1). m4: la exclusión de
     la exclusión de carpetas ocultas sólo aplica en profundidad 2 -- proyectos/<proyecto>/<.oculta>,
@@ -483,6 +483,8 @@ def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado
 
     with os.scandir(dir_fd) as it:
         entradas = list(it)
+    if hook_tras_scandir is not None:
+        hook_tras_scandir(ruta)  # solo pruebas: la ventana entre enumerar las entradas y abrirlas
 
     for entrada in entradas:
         nombre = entrada.name
@@ -519,7 +521,8 @@ def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado
                     continue
                 try:
                     _caminar(fd_listable, ruta_hija, profundidad + 1, accion=accion,
-                             resultado=resultado, hook_de_prueba=hook_de_prueba, alterada=hija_alterada)
+                             resultado=resultado, hook_de_prueba=hook_de_prueba, alterada=hija_alterada,
+                             hook_tras_scandir=hook_tras_scandir)
                 finally:
                     os.close(fd_listable)
                 continue
@@ -739,7 +742,7 @@ def _exigir_misma_identidad(que: str, st: os.stat_result, esperado: tuple | None
 
 
 def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_de_raiz=None,
-              hook_entre_previo_y_mutacion=None) -> Resultado:
+              hook_entre_previo_y_mutacion=None, hook_tras_scandir=None) -> Resultado:
     """`accion`: verificar | aplicar | deshacer | previo. `aplicar` empieza por una pasada `previo` (solo
     lectura) y FALLA CERRADO sin mutar nada si jaxsvc o fruiz quedarían sin paso por la raíz o hay entradas
     ACL nombradas ajenas: un cambio privilegiado sin esa comprobación puede dejar el sistema peor."""
@@ -800,7 +803,8 @@ def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_d
             fd_listable = _reabrir_real(fd_proyectos, os.O_RDONLY | os.O_DIRECTORY)
             try:
                 _caminar(fd_listable, ruta_base, 1, accion=accion, resultado=resultado,
-                         hook_de_prueba=hook_de_prueba, alterada=ruta_base != str(proyectos))
+                         hook_de_prueba=hook_de_prueba, alterada=ruta_base != str(proyectos),
+                         hook_tras_scandir=hook_tras_scandir)
             finally:
                 os.close(fd_listable)
         finally:
