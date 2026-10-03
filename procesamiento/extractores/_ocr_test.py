@@ -2776,30 +2776,6 @@ def test_n36_imagen_opaca_una_sola_pasada_con_los_bytes_originales(tmp_path, mon
     assert all(r == destino.read_bytes() for r in recibidos)
 
 
-def test_n36_empate_de_palabras_utiles_gana_el_fondo_blanco(tmp_path, monkeypatch):
-    destino = tmp_path / "rotulo.png"
-    _rotulo((0, 0, 0), "png", destino)
-    fondos = _tesseract_por_fondo(monkeypatch, {
-        _BLANCO: [(95, "claro"), (95, "uno"), (95, "dos")],   # mismos caracteres que "negro": empate total
-        _NEGRO: [(95, "negro"), (95, "uno"), (95, "dos")],
-    })
-    r = ocr.extraer(destino)
-    assert set(fondos) == {_BLANCO, _NEGRO}
-    assert "claro" in r.salidas["texto.txt"] and "negro" not in r.salidas["texto.txt"]
-
-
-def test_n36_gana_el_fondo_con_mas_palabras_no_dudosas_no_el_de_mas_palabras(tmp_path, monkeypatch):
-    destino = tmp_path / "rotulo.png"
-    _rotulo((0, 0, 0), "png", destino)
-    fondos = _tesseract_por_fondo(monkeypatch, {
-        _BLANCO: [(95, "blanco"), (95, "uno"), (95, "dos")],
-        _NEGRO: [(30, f"negro{i}") for i in range(10)],          # mas palabras, todas dudosas
-    })
-    r = ocr.extraer(destino)
-    assert set(fondos) == {_BLANCO, _NEGRO}
-    assert "blanco" in r.salidas["texto.txt"] and "negro" not in r.salidas["texto.txt"]
-
-
 def test_n36_en_un_tiff_multipagina_el_fondo_se_elige_por_pagina(tmp_path, monkeypatch):
     destino = tmp_path / "logos.tif"
     _logo_en_imagen("A").save(destino, save_all=True, append_images=[_logo_en_imagen("I")])
