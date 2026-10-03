@@ -558,22 +558,13 @@ def _mascara_alfa(img):
     return mascara if mascara.getextrema()[0] < 255 else None
 
 
-def _aplanar(img, mascara):
-    """RGB sin alfa. Leptonica descarta el alfa de WebP, TIFF y GIF y el fondo
-    transparente queda NEGRO: el texto oscuro queda negro sobre negro
-    (ok/imagen_sin_texto en silencio). El fondo se elige por CONTRASTE, no es una
-    constante: si la luminancia media de los pixeles opacos (alfa >= 128, o los
-    que no son el color de `tRNS`) es > 127, la tinta es CLARA y el fondo es
-    NEGRO; si no, BLANCO. Nada de correr el OCR dos veces. Un unico lienzo RGB y
-    `paste` con mascara (sin RGBA intermedia)."""
-    from PIL import Image, ImageStat
+def _aplanar(img, mascara, fondo):
+    """RGB sin alfa, sobre `fondo`. Leptonica descarta el alfa de WebP, TIFF y
+    GIF y el fondo transparente queda NEGRO: el texto oscuro queda negro sobre
+    negro (ok/imagen_sin_texto en silencio). Un unico lienzo RGB y `paste` con
+    mascara (sin RGBA intermedia)."""
+    from PIL import Image
 
-    opaco = mascara.point(lambda v: 255 if v >= 128 else 0)
-    if opaco.getextrema()[1] == 0:
-        fondo = (255, 255, 255)                          # todo transparente: no hay tinta
-    else:
-        tinta_clara = ImageStat.Stat(img.convert("L"), opaco).mean[0] > 127
-        fondo = (0, 0, 0) if tinta_clara else (255, 255, 255)
     lienzo = Image.new("RGB", img.size, fondo)
     lienzo.paste(img, mask=mascara)
     return lienzo
@@ -581,13 +572,13 @@ def _aplanar(img, mascara):
 
 def _a_modo_legible(img):
     """Fotograma decodificado -> uno que se pueda guardar como PNG para
-    tesseract: con transparencia REAL, aplanado sobre un fondo de contraste
-    (`_aplanar`); un alfa opaco se descarta sin perder nada; los modos de
+    tesseract: con transparencia REAL, aplanado sobre blanco (`_aplanar`); un
+    alfa opaco se descarta sin perder nada; los modos de
     `_MODOS_PNG` tal cual; el resto (CMYK, YCbCr, LAB, HSV...) a `RGB`. (F, I e
     I;16* ya se rechazaron en la validacion.)"""
     mascara = _mascara_alfa(img)
     if mascara is not None:
-        return _aplanar(img, mascara)
+        return _aplanar(img, mascara, (255, 255, 255))
     if img.mode in ("RGBA", "PA", "RGBa"):
         return img.convert("RGB")
     if img.mode in ("LA", "La"):
