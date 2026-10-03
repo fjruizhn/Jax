@@ -668,7 +668,7 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
     # workspace la lleva, spec 2026-09-22 §5), eso deja el archivo final con la ACL de
     # grupo EFECTIVAMENTE en "---" aunque el TEXTO siga mostrando "rwx" (verificado
     # empíricamente en hall9000, no supuesto). Visto en rojo contra el código sin el
-    # os.fchmod(fd, 0o664) de _write_file: este test falla porque el grupo queda con
+    # os.fchmod(fd, 0o660) de _write_file: este test falla porque el grupo queda con
     # permiso efectivo 0, no con el texto pedido.
     async def test_5c_write_file_queda_escribible_por_grupo_bajo_acl_por_defecto(self):
         if shutil.which("setfacl") is None or shutil.which("getfacl") is None:

@@ -6598,8 +6598,10 @@ jobs:
           python-version: "3.12"
       - run: sudo apt-get -qq update && sudo apt-get -qq install -y acl
       - run: pip install pytest
-      - name: Instalar el núcleo privilegiado (root:root 0755) -- BLOCK-2
-        run: sudo install -o root -g root -m 0755 ops/permisos_proyectos.py /usr/local/sbin/jax-permisos-proyectos
+      # Sin paso de "instalar el núcleo" (E2a, MAJOR-1 de la revisión de la Tarea 3): las pruebas
+      # instalan su propia copia bajo el directorio temporal (JAX_PERMISOS_NUCLEO) y, solo si
+      # /usr/local/sbin está libre, una temporal ahí que borran al terminar. Dejar el núcleo
+      # instalado en el runner haría saltarse esas pruebas y movería el piso.
       - run: PYTHONPATH=. python -m pytest tests/test_permisos_proyectos.py -v
       - name: Piso exacto de tests CORRIDOS (no skipeados)
         # Medido 2026-09-25 (ronda 4, sobre 46223fd + los cambios de esta ronda) en un
@@ -6618,7 +6620,8 @@ jobs:
         # grupo_setgid_y_acl_por_defecto (herencia a proyectos/<uuid>/entrada/<lote>/ y fuente/).
         # Delta medido en local (50 passed + 1 deseleccionado solo-host; sobre 48 + 2 del runner
         # esto da 49 + 2); manda el runner, el controlador lo re-mide.
+        # 49 -> 50 (fix de revision, MAJOR-1): +1, test_las_pruebas_no_tocan_el_nucleo_de_sistema.
         run: |
           PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
-          grep -qE "^49 passed, 2 skipped" /tmp/permisos_proyectos || {
-            echo "PISO ROTO: se esperaban 49 tests CORRIDOS (no skipeados) y exactamente 2 skipped."; exit 1; }
+          grep -qE "^50 passed, 2 skipped" /tmp/permisos_proyectos || {
+            echo "PISO ROTO: se esperaban 50 tests CORRIDOS (no skipeados) y exactamente 2 skipped."; exit 1; }

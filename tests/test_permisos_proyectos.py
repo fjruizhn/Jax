@@ -75,7 +75,13 @@ import pytest
 
 RAIZ_REPO = Path(__file__).resolve().parents[1]
 SCRIPT = RAIZ_REPO / "ops" / "permisos_proyectos.py"
-RUTA_INSTALADA = Path("/usr/local/sbin/jax-permisos-proyectos")
+# MAJOR-1 (revision Tarea 3 E2a): las pruebas NUNCA instalan ni borran el nucleo de sistema real
+# (/usr/local/sbin/jax-permisos-proyectos): usan una ruta propia bajo el directorio temporal,
+# que el guion lee de JAX_PERMISOS_NUCLEO.
+_DIR_NUCLEO_PRUEBA = Path(tempfile.mkdtemp(prefix="permisos-nucleo-"))
+RUTA_INSTALADA = _DIR_NUCLEO_PRUEBA / "jax-permisos-proyectos"
+os.environ["JAX_PERMISOS_NUCLEO"] = str(RUTA_INSTALADA)
+RUTA_NUCLEO_SISTEMA = Path("/usr/local/sbin/jax-permisos-proyectos")
 
 RAIZ_PRODUCCION = Path("/home/fruiz/jax-workspace")
 PROYECTOS_PRODUCCION = RAIZ_PRODUCCION / "proyectos"
@@ -83,6 +89,34 @@ PROYECTOS_PRODUCCION = RAIZ_PRODUCCION / "proyectos"
 USUARIO_ESPERADO = "jaxsvc"
 GRUPO_ESPERADO = "fruiz"
 DUENO_ORIGINAL = "fruiz"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _limpiar_nucleo_de_prueba():
+    yield
+    subprocess.run(["sudo", "-n", "rm", "-f", str(RUTA_INSTALADA)], capture_output=True)
+    shutil.rmtree(_DIR_NUCLEO_PRUEBA, ignore_errors=True)
+
+
+def test_las_pruebas_no_tocan_el_nucleo_de_sistema():
+    """Falla si la ruta del nucleo que usan las pruebas (y el guion) cae fuera del directorio
+    temporal, o si el valor por defecto del guion dejo de ser la ruta de produccion."""
+    assert RUTA_INSTALADA != RUTA_NUCLEO_SISTEMA
+    assert not str(RUTA_INSTALADA).startswith("/usr/local/sbin")
+    assert Path(tempfile.gettempdir()) in RUTA_INSTALADA.parents
+    uso = subprocess.run(
+        ["python3", "-c", f"import sys; sys.path.insert(0, {str(RAIZ_REPO / 'ops')!r});"
+         "import permisos_proyectos as pp; print(pp.RUTA_INSTALADA)"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert uso == str(RUTA_INSTALADA)
+    sin_env = {k: v for k, v in os.environ.items() if k != "JAX_PERMISOS_NUCLEO"}
+    por_defecto = subprocess.run(
+        ["python3", "-c", f"import sys; sys.path.insert(0, {str(RAIZ_REPO / 'ops')!r});"
+         "import permisos_proyectos as pp; print(pp.RUTA_INSTALADA)"],
+        capture_output=True, text=True, check=True, env=sin_env,
+    ).stdout.strip()
+    assert por_defecto == str(RUTA_NUCLEO_SISTEMA)
 
 
 def test_el_guion_existe():
@@ -221,12 +255,12 @@ def test_aplicar_rechaza_una_raiz_que_no_es_la_configurada(arbol_temporal):
 
 
 def test_aplicar_rechaza_explicitamente_por_raiz_no_configurada_cuando_env_es_legible(
-        arbol_temporal, _repo_de_prueba_con_head):
+        arbol_temporal, _repo_de_prueba_con_nucleo_de_sistema):
     """La versión ESTRECHA del test de arriba: si /etc/jax/.env es legible (hall9000,
     cualquier host de jax real) Y el núcleo instalado es de confianza, el mensaje
     específico tiene que ser el de la RAIZ, no el de instalación -- confirma que el
     chequeo de cortesía realmente compara, no que sólo el núcleo termina rechazando por
-    otra causa. Invoca la copia de `_repo_de_prueba_con_head` (no el guion real vía
+    otra causa. Invoca la copia de `_repo_de_prueba_con_nucleo_de_sistema` (no el guion real vía
     `_correr`): ese chequeo de instalación compara contra el HEAD de SU PROPIO repo, y
     el repo real puede tener esta misma ronda sin commitear todavía -- lo que se prueba
     acá es el orden de los chequeos dentro de _cmd_aplicar, no el estado de git del
@@ -234,7 +268,7 @@ def test_aplicar_rechaza_explicitamente_por_raiz_no_configurada_cuando_env_es_le
     if not _raiz_por_defecto_legible():
         pytest.skip("/etc/jax/.env no es legible en este entorno (no es un host de jax real)")
     r = subprocess.run(
-        ["python3", str(_repo_de_prueba_con_head), "--aplicar", str(arbol_temporal)],
+        ["python3", str(_repo_de_prueba_con_nucleo_de_sistema), "--aplicar", str(arbol_temporal)],
         capture_output=True, text=True,
     )
     assert r.returncode != 0
@@ -351,19 +385,17 @@ def test_respaldo_no_depende_del_home_de_fruiz():
 
 # --- m2 (ronda 3): instalación -- sha256 contra HEAD commiteado, cadena por lstat ------------
 
-@pytest.fixture()
-def _repo_de_prueba_con_head(tmp_path, _identidades):
+def _crear_repo_con_head(tmp_path, destino: Path) -> Path:
     """Un checkout de git PROPIO del test, con ops/permisos_proyectos.py commiteado en
     HEAD -- así se puede probar el camino FELIZ de _verificar_instalacion() (sha256
     instalado == sha256 de HEAD) sin depender de que el trabajo de esta ronda ya esté
-    commiteado en el repo real (no lo está -- sigue en el índice)."""
+    commiteado en el repo real. Instala la copia (root:root 0755) en `destino`."""
     if not _sudo_n_disponible():
         pytest.skip("sudo -n no disponible")
     repo = tmp_path / "repo-de-prueba"
     (repo / "ops").mkdir(parents=True)
-    contenido = SCRIPT.read_bytes()
     copia = repo / "ops" / "permisos_proyectos.py"
-    copia.write_bytes(contenido)
+    copia.write_bytes(SCRIPT.read_bytes())
     copia.chmod(0o755)
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "add", "ops/permisos_proyectos.py"],
@@ -372,12 +404,32 @@ def _repo_de_prueba_con_head(tmp_path, _identidades):
                     cwd=repo, check=True)
     _abrir_travesia_hasta(repo, Path("/tmp"))
     r_instalar = subprocess.run(
-        ["sudo", "-n", "install", "-o", "root", "-g", "root", "-m", "0755", str(copia), str(RUTA_INSTALADA)],
+        ["sudo", "-n", "install", "-o", "root", "-g", "root", "-m", "0755", str(copia), str(destino)],
         capture_output=True, text=True,
     )
     assert r_instalar.returncode == 0, r_instalar.stderr
+    return copia
+
+
+@pytest.fixture()
+def _repo_de_prueba_con_head(tmp_path, _identidades):
+    """Nucleo instalado en la ruta de PRUEBA (bajo el directorio temporal, no en /usr/local/sbin)."""
+    copia = _crear_repo_con_head(tmp_path, RUTA_INSTALADA)
     yield copia
     subprocess.run(["sudo", "-n", "rm", "-f", str(RUTA_INSTALADA)], capture_output=True)
+
+
+@pytest.fixture()
+def _repo_de_prueba_con_nucleo_de_sistema(tmp_path, _identidades, monkeypatch):
+    """Para las pruebas que necesitan que la CADENA de la ruta sea de root (el directorio
+    temporal no lo es, y /tmp es escribible por otros). Usa la ruta de sistema SOLO si no hay ya
+    un nucleo que no puso esta prueba (en un host desplegado se salta); lo que instala, lo borra."""
+    if RUTA_NUCLEO_SISTEMA.exists() or RUTA_NUCLEO_SISTEMA.is_symlink():
+        pytest.skip(f"{RUTA_NUCLEO_SISTEMA} ya existe (nucleo real) -- esta prueba no lo toca")
+    monkeypatch.setenv("JAX_PERMISOS_NUCLEO", str(RUTA_NUCLEO_SISTEMA))
+    copia = _crear_repo_con_head(tmp_path, RUTA_NUCLEO_SISTEMA)
+    yield copia
+    subprocess.run(["sudo", "-n", "rm", "-f", str(RUTA_NUCLEO_SISTEMA)], capture_output=True)
 
 
 def test_sha256_del_head_committeado_coincide_con_lo_instalado(_repo_de_prueba_con_head):
@@ -682,12 +734,29 @@ import os
 os.umask(0o022)
 os.makedirs({str(lote)!r})
 os.makedirs({str(fuente)!r})
-fd = os.open({str(lote / "a.pdf")!r}, os.O_CREAT | os.O_WRONLY, 0o666)
-os.close(fd)
 """],
         capture_output=True, text=True, timeout=30,
     )
     assert r.returncode == 0, r.stdout + r.stderr
+
+    # El archivo se crea por el camino REAL de LAS MANOS (tool_authority._write_file: mkstemp +
+    # fchmod + replace), no con os.open: sin el fchmod(0o660) el archivo queda con mascara ACL
+    # --- y esta prueba se pone roja. Solo se sustituye el commit de git del workspace.
+    r_w = subprocess.run(
+        ["python3", "-c", f"""
+import asyncio, sys
+from pathlib import Path
+sys.path[:0] = [{str(RAIZ_REPO / "las_manos")!r}, {str(RAIZ_REPO)!r}]
+from motor_registry import tool_authority as ta
+ta._git_commit_write = lambda *a, **k: (True, "sha", None)
+r = asyncio.run(ta._write_file(job_id="t", tool_name="write_file", caller="t",
+    resolved=Path({str(lote / "a.pdf")!r}), content="x", tool_call_id="t"))
+assert r["decision"] == "executed", r
+"""],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "JAX_WORKSPACE_DIR": str(arbol_temporal)},
+    )
+    assert r_w.returncode == 0, r_w.stdout + r_w.stderr
 
     for directorio in (proyectos / uuid_proyecto, proyectos / uuid_proyecto / "entrada", lote, fuente):
         st = directorio.stat()
@@ -703,9 +772,14 @@ os.close(fd)
     acl_archivo = subprocess.run(["getfacl", "-p", str(archivo)], capture_output=True, text=True, check=True).stdout
     assert _grupo_efectivo(acl_archivo).startswith("rw"), acl_archivo
 
-    # fruiz (que corre el guion a mano) puede escribir en lo que creo jaxsvc.
+    # Ambas cuentas pueden escribir el archivo: fruiz (el guion a mano) y jaxsvc (el servicio).
     r2 = _como_fruiz(f"open({str(archivo)!r}, 'a').write('x')")
     assert r2.returncode == 0, r2.stdout + r2.stderr
+    r3 = subprocess.run(
+        ["sudo", "-n", "-u", "jaxsvc", "python3", "-c", f"open({str(archivo)!r}, 'a').write('y')"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert r3.returncode == 0, r3.stdout + r3.stderr
 
 
 def test_verificar_detecta_un_directorio_sin_acl_por_defecto(arbol_temporal, _identidades):
@@ -938,10 +1012,10 @@ def test_dos_raices_posicionales_se_rechazan(tmp_path):
 
 
 def test_aplicar_aborta_si_sudo_n_no_funciona_incluso_con_nucleo_instalado(
-        arbol_temporal, _repo_de_prueba_con_head):
+        arbol_temporal, _repo_de_prueba_con_nucleo_de_sistema):
     """Antes, si `sudo -n` fallaba, el chequeo de cortesía de RAIZ en --aplicar lo
     trataba igual que "la variable no está" -- lo salteaba en silencio y seguía. Ahora
-    aborta explícito. Usa `_repo_de_prueba_con_head` para que el núcleo instalado SÍ
+    aborta explícito. Usa `_repo_de_prueba_con_nucleo_de_sistema` para que el núcleo instalado SÍ
     coincida con HEAD (si no, el chequeo de instalación abortaría primero, antes de
     llegar al que este test quiere probar)."""
     sudo_falso_dir = arbol_temporal.parent / "bin-sudo-roto"
@@ -952,7 +1026,7 @@ def test_aplicar_aborta_si_sudo_n_no_funciona_incluso_con_nucleo_instalado(
     entorno["PATH"] = f"{sudo_falso_dir}:{entorno['PATH']}"
 
     r = subprocess.run(
-        ["python3", str(_repo_de_prueba_con_head), "--aplicar", str(arbol_temporal)],
+        ["python3", str(_repo_de_prueba_con_nucleo_de_sistema), "--aplicar", str(arbol_temporal)],
         capture_output=True, text=True, env=entorno,
     )
     assert r.returncode != 0

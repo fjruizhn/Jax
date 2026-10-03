@@ -72,7 +72,12 @@ DUENO_ORIGINAL = "fruiz"  # a quien --deshacer devuelve el dueño (mismo nombre 
 # más profundo -- ver _caminar, que sólo aplica esto cuando profundidad == 2.
 NOMBRES_EXCLUIDOS = frozenset({".claude-flow"})
 
-RUTA_INSTALADA = Path("/usr/local/sbin/jax-permisos-proyectos")
+RUTA_NUCLEO_POR_DEFECTO = "/usr/local/sbin/jax-permisos-proyectos"
+# Configurable SOLO para que las pruebas no toquen la ruta de sistema real (MAJOR-1, revision de
+# la Tarea 3 de E2a). Quien llama (sin privilegio) elige la ruta, pero la ejecuta `sudo -n`, y
+# sudoers decide si esa ruta se puede correr; ademas _verificar_instalacion exige cadena de root y
+# sha256 igual al HEAD. En produccion la variable no se define.
+RUTA_INSTALADA = Path(os.environ.get("JAX_PERMISOS_NUCLEO") or RUTA_NUCLEO_POR_DEFECTO)
 RUTA_PYTHON = Path("/usr/bin/python3")
 RUTA_RESPALDOS = Path("/var/backups/jax-permisos")
 RUTA_ENV = Path("/etc/jax/.env")
