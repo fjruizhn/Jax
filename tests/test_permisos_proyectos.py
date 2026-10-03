@@ -338,16 +338,17 @@ def base_propia(_identidades):
 
 @pytest.fixture(scope="module")
 def _identidades():
+    """jaxsvc y fruiz tienen que EXISTIR: las pruebas no crean cuentas del sistema. En CI las crea un paso del
+    workflow (job `permisos-proyectos`); en un host de jax ya existen. Si falta una, la prueba FALLA con un
+    mensaje claro -- no se salta en silencio."""
     if not _sudo_n_disponible():
         pytest.skip("sudo -n no disponible -- no se pueden garantizar las identidades jaxsvc/fruiz")
-    for usuario in ("jaxsvc", "fruiz"):
-        tiene = subprocess.run(["getent", "passwd", usuario], capture_output=True).returncode == 0
-        if not tiene:
-            creado = subprocess.run(
-                ["sudo", "-n", "useradd", "--system", "--no-create-home", usuario], capture_output=True
-            )
-            if creado.returncode != 0:
-                pytest.skip(f"no se pudo crear el usuario {usuario}: {creado.stderr.decode(errors='replace')}")
+    faltan = [u for u in ("jaxsvc", "fruiz")
+              if subprocess.run(["getent", "passwd", u], capture_output=True).returncode != 0]
+    if faltan:
+        pytest.fail(f"faltan las cuentas del sistema {faltan}: las pruebas no las crean. En CI las crea un paso del "
+                    "workflow (job permisos-proyectos de .github/workflows/policy.yml); en otra maquina, crearlas "
+                    "antes con el procedimiento del administrador.")
     return None
 
 
@@ -564,15 +565,22 @@ def _repo_de_prueba_con_head(tmp_path, _identidades):
 
 @pytest.fixture()
 def _repo_de_prueba_con_nucleo_de_sistema(tmp_path, _identidades, monkeypatch):
-    """Para las pruebas que necesitan que la CADENA de la ruta sea de root (el directorio
-    temporal no lo es, y /tmp es escribible por otros). Usa la ruta de sistema SOLO si no hay ya
-    un nucleo que no puso esta prueba (en un host desplegado se salta); lo que instala, lo borra."""
-    if RUTA_NUCLEO_SISTEMA.exists() or RUTA_NUCLEO_SISTEMA.is_symlink():
-        pytest.skip(f"{RUTA_NUCLEO_SISTEMA} ya existe (nucleo real) -- esta prueba no lo toca")
-    monkeypatch.setenv("JAX_PERMISOS_NUCLEO", str(RUTA_NUCLEO_SISTEMA))
-    copia = _crear_repo_con_head(tmp_path, RUTA_NUCLEO_SISTEMA)
-    yield copia
-    subprocess.run(["sudo", "-n", "rm", "-f", str(RUTA_NUCLEO_SISTEMA)], capture_output=True)
+    """Para las pruebas que necesitan que la CADENA de la ruta del nucleo sea de root (el directorio temporal no
+    lo es, y /tmp es escribible por otros): una copia en un directorio propio de root bajo /run (tmpfs, con nombre
+    unico) apuntada por JAX_PERMISOS_NUCLEO. NUNCA toca /usr/local/sbin. Se borra siempre al terminar; si la
+    prueba muere antes, queda un directorio con nombre unico en una tmpfs que se vacia al reiniciar."""
+    r = subprocess.run(["sudo", "-n", "mktemp", "-d", "/run/permisos-nucleo-XXXXXXXX"], capture_output=True, text=True)
+    if r.returncode != 0:
+        pytest.skip(f"no se pudo crear un directorio propio de root bajo /run: {r.stderr.strip()}")
+    directorio = Path(r.stdout.strip())
+    try:
+        subprocess.run(["sudo", "-n", "chmod", "755", str(directorio)], check=True)
+        destino = directorio / "jax-permisos-proyectos"
+        monkeypatch.setenv("JAX_PERMISOS_NUCLEO", str(destino))
+        copia = _crear_repo_con_head(tmp_path, destino)
+        yield copia
+    finally:
+        subprocess.run(["sudo", "-n", "rm", "-rf", str(directorio)], capture_output=True)
 
 
 def test_sha256_del_head_committeado_coincide_con_lo_instalado(_repo_de_prueba_con_head):
@@ -2133,16 +2141,22 @@ def test_las_pruebas_no_instalan_en_usr_local_sbin_ni_crean_cuentas():
     claro. Se mira el codigo (AST): ninguna llamada instala en la ruta de sistema ni ejecuta useradd."""
     import ast
     arbol = ast.parse(Path(__file__).read_text())
-    propios = {"test_las_pruebas_no_instalan_en_usr_local_sbin_ni_crean_cuentas"}
     for nodo in ast.walk(arbol):
-        if isinstance(nodo, ast.FunctionDef) and nodo.name in propios:
-            continue
         if isinstance(nodo, ast.Call) and getattr(nodo.func, "id", None) == "_crear_repo_con_head":
             for arg in nodo.args:
                 assert getattr(arg, "id", None) != "RUTA_NUCLEO_SISTEMA", "una prueba instala el nucleo en la ruta de sistema"
-    cuerpo = "\n".join(l for i, l in enumerate(Path(__file__).read_text().splitlines())
-                       if "useradd" in l and "assert" not in l and "propios" not in l and "# " not in l.split("useradd")[0])
-    assert "useradd" not in cuerpo, f"una prueba crea cuentas del sistema:\n{cuerpo}"
+    propia = next(n for n in ast.walk(arbol) if isinstance(n, ast.FunctionDef)
+                  and n.name == "test_las_pruebas_no_instalan_en_usr_local_sbin_ni_crean_cuentas")
+    docstrings = {id(x) for x in ast.walk(propia)}      # esta guarda nombra la orden: no se mira a si misma
+    docstrings |= {id(n.body[0].value) for n in ast.walk(arbol)
+                  if isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Module)) and n.body
+                  and isinstance(n.body[0], ast.Expr) and isinstance(getattr(n.body[0], "value", None), ast.Constant)}
+    literales = [n.value for n in ast.walk(arbol)
+                 if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docstrings
+                 and "useradd" in n.value and n.value != "useradd"]
+    llamadas = [n for n in ast.walk(arbol) if isinstance(n, ast.Constant) and n.value == "useradd"
+                and id(n) not in docstrings]
+    assert not llamadas and not literales, "una prueba crea cuentas del sistema (useradd)"
 
 
 # --- MAJOR-1: la raiz se abre por descriptor, sin seguir symlinks ------------------------------
