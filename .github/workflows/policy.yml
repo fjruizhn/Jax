@@ -47,6 +47,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  las-voces-faro-readonly:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pytest pyyaml mcp==2.2.0
+      - run: python -m pytest -q tests/test_las_voces_faro_readonly.py tests/test_las_voces_faro_mcp_client.py
+
   memory-b9-regression:
     runs-on: ubuntu-latest
     timeout-minutes: 15
