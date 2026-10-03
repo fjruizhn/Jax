@@ -37,8 +37,6 @@ IMAGENES = set(EXTENSIONES_IMAGEN)
 EXCEL = {".xlsx", ".xlsm"}
 WORD = {".docx"}
 
-_FIRMA_OLE2 = bytes.fromhex("D0CF11E0A1B11AE1")
-
 def _tipo_por_contenido(origen: Path) -> str | None:
     """'pdf' / 'ole2' / 'imagen' según los primeros bytes, o `None` si el
     contenido no da una señal decisiva (zip -- xlsx y docx son el mismo
