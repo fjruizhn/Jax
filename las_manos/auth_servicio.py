@@ -84,6 +84,10 @@ CODIGO_SIN_CREDENCIAL = "credencial_de_servicio_invalida"
 CODIGO_RUTA_NO_PERMITIDA = "ruta_no_permitida_para_la_identidad"
 CODIGO_IDENTIDAD_DECLARADA = "identidad_declarada_no_coincide"
 CODIGO_CUERPO_ILEGIBLE = "cuerpo_ilegible"
+# Ownership authentication is a retryable service-boundary failure for the
+# Processing dispatcher. It is intentionally distinct from malformed JSON,
+# which the existing dispatcher treats as a definitive document error.
+CODIGO_PROCESSING_OWNERSHIP_INVALID = "processing_ownership_invalid"
 
 
 @dataclass(frozen=True)
@@ -234,7 +238,7 @@ class CredencialDeServicio:
             try:
                 ownership = processing_ownership_from_headers(scope.get("headers", []))
             except ProcessingOwnershipError:
-                return await _responder(send, 400, CODIGO_CUERPO_ILEGIBLE)
+                return await _responder(send, 403, CODIGO_PROCESSING_OWNERSHIP_INVALID)
 
         cuerpo = await _leer_cuerpo(receive)
         if cuerpo.strip():

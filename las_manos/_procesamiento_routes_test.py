@@ -1091,6 +1091,39 @@ class TrabajoHTTPTest(unittest.TestCase):
         cuerpo.update(overrides)
         return c.post("/procesamiento/trabajos", json=cuerpo, headers=_h(IDENTIDAD_PLATAFORMA))
 
+    def test_processing_ownership_rejections_are_retryable_and_do_not_append(self):
+        body = {"project_uuid": UUID_PRUEBA, "rutas": [], "usuario": "legacy"}
+        invalid_headers = [
+            {ENCABEZADO: CRED[IDENTIDAD_PLATAFORMA]},
+            {**_h(IDENTIDAD_PLATAFORMA), "X-Jax-Processing-Tenant-Id": "03"},
+            {**_h(IDENTIDAD_PLATAFORMA), "X-Jax-Processing-Unknown": "x"},
+        ]
+        with TestClient(_app()) as client:
+            for headers in invalid_headers:
+                response = client.post("/procesamiento/trabajos", json=body, headers=headers)
+                assert response.status_code == 403, response.text
+                assert response.json()["detail"]["code"] == "processing_ownership_invalid"
+                assert self.store._index == {}
+
+            # Starlette preserves raw duplicate headers through the ASGI
+            # scope, so this proves the middleware rejects the ambiguous
+            # envelope before Pydantic or the store runs.
+            duplicate_headers = list(_h(IDENTIDAD_PLATAFORMA).items()) + [
+                ("X-Jax-Processing-Tenant-Id", OWNER.tenant_id),
+            ]
+            response = client.send(client.build_request(
+                "POST", "/procesamiento/trabajos", json=body, headers=duplicate_headers,
+            ))
+            assert response.status_code == 403, response.text
+            assert response.json()["detail"]["code"] == "processing_ownership_invalid"
+            assert self.store._index == {}
+
+    def test_body_usuario_with_valid_owner_is_extra_forbidden(self):
+        with TestClient(_app()) as client:
+            response = self._post(client, usuario="legacy")
+        assert response.status_code == 422, response.text
+        assert self.store._index == {}
+
     # -- N-1: el permiso siempre vuelve --------------------------------------
     def test_N1_falla_al_crear_el_job_no_deja_el_semaforo_agotado(self):
         """El `try/finally` de N-1 protege CUALQUIER falla en el tramo

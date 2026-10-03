@@ -531,3 +531,16 @@ real exact-pair chain. Do not merge, deploy, or alter the F2-E-SR load branch.
 The plan is authorized for automatic implementation, but it is not itself an
 implementation. Execute the three tasks in order; after Task 3, obtain a Sol
 audit on the exact frozen candidate SHA before any integration action.
+
+## Rollout Compatibility Note (2026-10-03)
+
+Deploy JAX SR3 before Platform SR3. An old Platform dispatcher sends the
+legacy body `usuario` field and no Processing owner headers; JAX SR3 rejects
+that missing or invalid authenticated ownership envelope with the static
+`403 processing_ownership_invalid` response before parsing the body or
+appending a job. The deployed E2a dispatcher classifies that code as
+`SIN_CULPA_DEL_DOCUMENTO` and retains the queue item for retry. It must not be
+changed to a 400 document error and must not infer ownership or accept legacy
+headers/body authority. After JAX SR3 is live, deploy Platform SR3, which emits
+the four canonical headers and removes `usuario`; do not deploy new Platform
+against old JAX because old JAX requires that legacy body field.

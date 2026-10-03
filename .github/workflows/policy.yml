@@ -1795,6 +1795,19 @@ jobs:
             echo "PISO ROTO: se esperaban 194 tests CORRIDOS de F2-E-SR3."; exit 1; }
         env:
           PYTHONPATH: .:las_manos
+      - name: F2-E-SR3 Processing source authentication and routing regressions
+        # The owner header gate and route persistence are a distinct boundary
+        # from status resolution. Keep their exact command visible in CI.
+        run: |
+          python -m pytest \
+            tests/test_processing_job_store.py \
+            tests/test_las_manos_auth_servicio.py \
+            las_manos/_procesamiento_routes_test.py \
+            -q 2>&1 | tee /tmp/f2e-sr3-source
+          grep -qE "^111 passed" /tmp/f2e-sr3-source || {
+            echo "PISO ROTO: se esperaban 111 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
+        env:
+          PYTHONPATH: .:las_manos
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-03: 39 (SP1 + arreglo del test rojo) + 39
         # (tests/test_governance_grounding.py, SP3 + ola de fixes de la
