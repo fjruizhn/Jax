@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import shutil
 from pathlib import Path
@@ -9,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from _las_voces_process import run_local
+import _las_voces_process as local_process
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -23,8 +24,8 @@ SPEC.loader.exec_module(sync)
 def root(tmp_path: Path) -> Path:
     project = tmp_path / "projects" / "las-voces"
     shutil.copytree(REPO / "projects" / "las-voces", project, ignore=shutil.ignore_patterns("AGENTS.md", "CLAUDE.md", "QWEN.md", ".qwen", "manifest.json"))
-    run_local(["git", "init", "-q", str(tmp_path)], check=True)
-    run_local(["git", "-C", str(tmp_path), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "fixture"], check=True)
+    local_process.git_init_fixture(tmp_path)
+    local_process.git_empty_commit(tmp_path)
     return tmp_path
 
 
@@ -155,10 +156,26 @@ def test_lone_surrogate_cli_exits_two_without_traceback(root: Path) -> None:
     script = root / "scripts/axioma_sync.py"
     script.parent.mkdir()
     shutil.copyfile(REPO / "scripts/axioma_sync.py", script)
-    result = run_local(["python3", str(script), "las-voces", "--check"], capture_output=True, text=True)
+    result = local_process.run_sync_check(script)
     assert result.returncode == 2
     assert result.stderr.startswith("SYNC FAILED CLOSED:")
     assert "Traceback" not in result.stderr
+
+
+def test_local_process_helper_exposes_only_fixed_purpose_calls() -> None:
+    expected = {
+        "git_init_fixture": ["path"],
+        "git_empty_commit": ["path"],
+        "run_sync_check": ["script"],
+    }
+    public = {
+        name: value for name, value in vars(local_process).items()
+        if inspect.isfunction(value) and value.__module__ == local_process.__name__
+        and not name.startswith("_")
+    }
+    assert set(public) == set(expected)
+    for name, function in public.items():
+        assert list(inspect.signature(function).parameters) == expected[name]
 
 
 def test_missing_canonical_qwen_builder_identity_fails_closed(root: Path) -> None:

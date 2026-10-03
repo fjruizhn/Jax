@@ -78,6 +78,15 @@ real de Qwen 0.24.7. Una edición manual de `approvalMode` a `yolo` produjo
 rc=1 y `DRIFT DETECTED` localmente. Las pruebas adversariales cubren
 separadores, controles, sustitutos sueltos y nombres de skill inseguros.
 
+**HISTORIA — Codex, 2026-10-03:** la primera CI del cierre detectó que un
+test nuevo combinaba `subprocess.run` y `CLAUDE.md`, y activó el escáner de
+CLIs. Un primer helper `run_local(argv, **kwargs)` pasó el escáner, pero
+jax-14 lo rechazó porque escondía futuros comandos arbitrarios. Se sustituyó
+por funciones de propósito fijo con argumentos cerrados; una prueba comprueba
+que la API del helper no vuelva a aceptar un argv libre. Lección: un verde por
+separar nombres de archivos no vale si abre una ruta genérica alrededor del
+freno.
+
 **Alternativa descartada — Codex:** enumerar nombres de herramientas del bundle
 congelaría el catálogo y omitiría herramientas MCP registradas después. El
 comodín explícito conserva el alcance completo decidido por Fernando.
