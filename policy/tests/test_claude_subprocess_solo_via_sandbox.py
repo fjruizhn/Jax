@@ -109,7 +109,6 @@ from __future__ import annotations
 
 import ast
 import os
-import re
 import shlex
 import sys
 from pathlib import Path
@@ -498,62 +497,6 @@ def _cadenas_plegadas(tree: ast.AST):
                 yield texto
 
 
-# `.claude-flow` es el directorio de Ruflo; ignorarlo es una decision de Fernando del 2026-10-03
-# (E2a, Jax#325). Coincidencia EXACTA y delimitada: con el punto inicial, sin una letra, cifra,
-# `_`, `.` o `-` pegada antes, y sin una letra, cifra, `_` o `-` pegada despues. Asi
-# `claude-flow` (sin punto), `.claude-flowx`, `.claude-flow-x` y `x.claude-flow` siguen contando.
-_TOKEN_RUFLO = ".claude-flow"
-_RE_TOKEN_RUFLO = re.compile(r"(?<![\w.\-])" + re.escape(_TOKEN_RUFLO) + r"(?![\w\-])")
-
-
-def _sin_token_ruflo(texto: str) -> str:
-    """`texto` sin las apariciones del token exacto `.claude-flow`. Se sustituye por un espacio
-    para que lo de los lados no se pegue y forme otra palabra."""
-    return _RE_TOKEN_RUFLO.sub(" ", texto)
-
-
-def _es_cadena_con_token(nodo: ast.AST, nombres: set[str]) -> bool:
-    """La expresion ES una cadena que lleva el token: un literal con `.claude-flow`, un nombre
-    asignado a una, o una suma (`+`) en la que alguno de los lados lo es. Un `Path(...) / "x"`
-    (otro operador) no es una cadena: sus metodos no son metodos de `str`."""
-    if isinstance(nodo, ast.Constant):
-        return isinstance(nodo.value, str) and _TOKEN_RUFLO in nodo.value
-    if isinstance(nodo, ast.Name):
-        return nodo.id in nombres
-    if isinstance(nodo, ast.BinOp) and isinstance(nodo.op, ast.Add):
-        return _es_cadena_con_token(nodo.left, nombres) or _es_cadena_con_token(nodo.right, nombres)
-    return False
-
-
-def _transforma_el_token(tree: ast.AST) -> bool:
-    """True si una cadena que lleva `.claude-flow` (o un nombre asignado a una) se corta con
-    `[...]` o se le llama un metodo (`.replace`, `.split`, `.strip`, `.partition`...): es el
-    unico camino de fabricar "claude" a partir del token sin escribir la palabra. Usarlo de
-    valor, de argumento o en una concatenacion NO es transformarlo (el plegado ya ve el
-    resultado). Residuo conocido: pasarlo por una funcion (`reversed`, `list`, `map`...) o un
-    bucle, igual que el resto del escaner no ve `chr()` ni f-strings."""
-    nombres: set[str] = set()
-    cambio = True
-    while cambio:                           # un nombre asignado a otro nombre ya tainted
-        cambio = False
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Assign):
-                valor, destinos = n.value, [t for t in n.targets if isinstance(t, ast.Name)]
-            elif isinstance(n, ast.AnnAssign) and n.value is not None and isinstance(n.target, ast.Name):
-                valor, destinos = n.value, [n.target]
-            else:
-                continue
-            if _es_cadena_con_token(valor, nombres):
-                for t in destinos:
-                    if t.id not in nombres:
-                        nombres.add(t.id)
-                        cambio = True
-    return any(
-        isinstance(n, (ast.Subscript, ast.Attribute)) and _es_cadena_con_token(n.value, nombres)
-        for n in ast.walk(tree)
-    )
-
-
 def _references_claude_literal(tree: ast.Module) -> bool:
     """True si el archivo menciona "claude" en un STRING LITERAL del AST
     (incluidos docstrings), no en un comentario `#`.
@@ -576,17 +519,8 @@ def _references_claude_literal(tree: ast.Module) -> bool:
     se iba a repetir. Los docstrings SI cuentan (son ast.Constant): una
     referencia real, aunque inusual, podria esconderse ahi.
 
-    EXCEPCION `.claude-flow`: antes de evaluar cada cadena se quitan las apariciones del
-    token exacto `.claude-flow` (ver `_sin_token_ruflo`). .claude-flow es el directorio de
-    Ruflo; ignorarlo es una decision de Fernando del 2026-10-03 (E2a, Jax#325). Solo ese
-    token: cualquier otra mencion de "claude" sigue contando igual que antes. Y si el
-    archivo corta, reemplaza o trocea una cadena que lleva el token (`_transforma_el_token`),
-    el token ya no se usa como un nombre de directorio y se cuenta como mencion.
-
     Residuo conocido: f-strings, `%`/`.format` y un join con algo que no sea literal."""
-    if _transforma_el_token(tree):
-        return True
-    return any("claude" in _sin_token_ruflo(t).lower() for t in _cadenas_plegadas(tree))
+    return any("claude" in t.lower() for t in _cadenas_plegadas(tree))
 
 
 # CLIs de suscripcion que solo el nucleo cli_sandbox puede lanzar (spec §5).
@@ -1369,68 +1303,6 @@ def test_un_archivo_con_el_nombre_partido_no_se_salta_el_prefiltro(tmp_path) -> 
     finally:
         REPO_ROOTS = anteriores
     assert encontrados == {"tools/lanza.py"}
-
-
-# --- `.claude-flow` (Ruflo): la unica mencion de "claude" que el criterio (a) ignora ---------
-# .claude-flow es el directorio de Ruflo; ignorarlo es una decision de Fernando del 2026-10-03
-# (E2a, Jax#325). Estas pruebas fijan los limites de esa decision.
-_LANZA_SUDO_Y_SETFACL = (
-    "import subprocess\n"
-    "subprocess.run(['sudo', '-n', 'true'])\n"
-    "subprocess.run(['setfacl', '-m', 'u:x:rwx', '/tmp/x'])\n"
-)
-
-
-def test_un_archivo_que_lanza_sudo_y_setfacl_y_solo_menciona_claude_flow_no_es_violacion() -> None:
-    """(a) el caso real de ops/permisos_proyectos.py y su prueba."""
-    assert not _detects(_LANZA_SUDO_Y_SETFACL + "NOMBRES_EXCLUIDOS = frozenset({'.claude-flow'})\n")
-    # en una ruta y en un docstring: sigue siendo solo el token
-    assert not _detects(_LANZA_SUDO_Y_SETFACL + "RUTA = '/proyectos/un-proyecto/.claude-flow'\n")
-    assert not _detects(_LANZA_SUDO_Y_SETFACL + '"""Excluye .claude-flow, nunca lo toca."""\n')
-
-
-def test_el_mismo_archivo_con_otra_mencion_de_claude_si_es_violacion() -> None:
-    """(b) cualquier otra mencion de "claude" sigue disparando, tambien junto al token."""
-    base = _LANZA_SUDO_Y_SETFACL + "NOMBRES_EXCLUIDOS = frozenset({'.claude-flow'})\n"
-    assert _detects(base + "OTRA = 'claude'\n")
-    assert _detects(base + "OTRA = 'CLAUDE.md'\n")
-    assert _detects(base + "OTRA = 'cla' + 'ude'\n")                      # MINOR-28 sigue plegando
-    assert _detects(base + "OTRA = ''.join(['cla', 'ude'])\n")
-    # la mencion extra va en la MISMA cadena que el token: se ignora el token, no la cadena
-    assert _detects(_LANZA_SUDO_Y_SETFACL + "X = 'usa claude y .claude-flow'\n")
-    assert _detects(_LANZA_SUDO_Y_SETFACL + "X = '.claude-flow --dangerously-skip-permissions claude'\n")
-
-
-def test_un_archivo_que_lanza_claude_y_menciona_claude_flow_es_violacion() -> None:
-    """(c) mencionar el token no exime a quien lanza el CLI."""
-    assert _detects("import subprocess\nsubprocess.run(['claude', '-p', 'x'])\nD = '.claude-flow'\n")
-    assert _detects("import subprocess\nN = 'cla' + 'ude'\nsubprocess.run(['sh', '-c', N])\nD = '.claude-flow'\n")
-
-
-def test_claude_flow_sin_punto_o_con_sufijo_sigue_contando_como_mencion() -> None:
-    """(d) el token es exacto y delimitado: `claude-flow`, `.claude-flowx`, `x.claude-flow`."""
-    for texto in ("claude-flow", ".claude-flowx", ".claude-flow-x", "x.claude-flow", "_.claude-flow", "..claude-flowx"):
-        assert _detects(_LANZA_SUDO_Y_SETFACL + f"N = {texto!r}\n"), texto
-    # y los delimitadores legitimos no lo cuentan
-    for texto in (".claude-flow", "/a/.claude-flow", "/a/.claude-flow/b", ".claude-flow.", "(.claude-flow)", " .claude-flow "):
-        assert not _detects(_LANZA_SUDO_Y_SETFACL + f"N = {texto!r}\n"), texto
-
-
-def test_el_token_no_sirve_para_fabricar_la_palabra_claude() -> None:
-    """Ignorar el token no puede abrir un truco: lo que se hace con la cadena del token
-    (cortarla, reemplazarla, trocearla, pasarla por una variable) cuenta como mencion,
-    porque ahi el token ya no se usa como el nombre de un directorio."""
-    pre = _LANZA_SUDO_Y_SETFACL
-    assert _detects(pre + "N = '.claude-flow'[1:7]\n")
-    assert _detects(pre + "N = '.claude-flow'.replace('.', '').split('-')[0]\n")
-    assert _detects(pre + "N = '.claude-flow'.strip('.')\n")
-    assert _detects(pre + "T = '.claude-flow'\nN = T[1:7]\n")
-    assert _detects(pre + "T = '.claude-flow'\nN = T.partition('-')[0]\n")
-    assert _detects(pre + "N = ('.claude' + '-flow')[1:7]\n")
-    assert _detects(pre + "N = ''.join(['x', '.claude-flow'[1:7]])\n")
-    # usarlo como valor, argumento o en una concatenacion con otra ruta no es transformarlo
-    assert not _detects(pre + "T = '.claude-flow'\nR = '/a/' + T\nsubprocess.run(['ls', T, R])\n")
-    assert not _detects(pre + "import os\nR = os.path.join('/a', '.claude-flow')\n")
 
 
 def test_no_naked_claude_subprocess() -> None:

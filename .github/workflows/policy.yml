@@ -317,12 +317,9 @@ jobs:
         # directorio que no existe: en el runner jax-platform tampoco existe y el
         # escaneo real cubre solo este repo. Exacto: una autoprueba que desaparezca
         # deja pasar en silencio la forma que cubria.
-        # 51 -> 56 (2026-10-03, E2a Jax#325, decision de Fernando): +5, la excepcion del token
-        # exacto `.claude-flow` (Ruflo): no es violacion / otra mencion si lo es / lanzar claude si
-        # lo es / sin punto o con sufijo cuenta / no se fabrica "claude" cortando el token.
         run: |
           python -m pytest -q policy/tests/test_claude_subprocess_solo_via_sandbox.py 2>&1 | tee /tmp/scanner
-          grep -qE "^56 passed" /tmp/scanner || { echo "PISO ROTO: se esperaban 56 tests CORRIDOS del scanner."; exit 1; }
+          grep -qE "^51 passed" /tmp/scanner || { echo "PISO ROTO: se esperaban 51 tests CORRIDOS del scanner."; exit 1; }
       - name: Piso exacto del control "un Titular solo nace en exigir_titular"
         # 9 tests (MINOR-16, ronda 2): 7 autopruebas del detector + el escaneo que ve el
         # arbol y el real. Medido con JAX_PLATFORM_REPO_ROOT=/nonexistent. Exacto: una
