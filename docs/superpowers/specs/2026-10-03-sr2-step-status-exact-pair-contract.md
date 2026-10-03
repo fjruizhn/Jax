@@ -73,7 +73,7 @@ Jacobs registra actualmente que el paso {step_id} está {status}.
 
 Its `TemplateContract` identifies predicate `STEP_STATUS`, runtime contract `f2-e.runtime-status.4`, and locale `es`. The step ID and status are receipt-bound slots; user/model/tool-controlled text is not inserted into this template.
 
-`policy/VERSION` keeps schema `0.1.0`; its `sha256` is the exact-byte hash of the ordered `policy/rules/*.yaml` corpus and `templates_sha256` is the exact-byte hash of `policy/templates/render_templates.yaml`. Recompute both from the final branch contents with the repository scripts. A later master policy change requires the integrating owner to recompute the relevant shared hash on that master; never add deltas to old hashes.
+`policy/VERSION` keeps schema `0.1.0`. SR2 changes no `policy/rules/*.yaml`, so it preserves the already-declared legacy `sha256` (`040f32…`) and its documented divergence from the current raw/generated corpus; resolving that separate legacy identity discrepancy is outside SR2. `templates_sha256` is recomputed as the exact-byte hash of `policy/templates/render_templates.yaml`. A later master template change requires the integrating owner to recompute that shared hash on the final master; never add deltas to old hashes.
 
 ## Exact-pair integration and deployment order
 

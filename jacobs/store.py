@@ -1897,13 +1897,14 @@ async def step_status_snapshot(step_id: str) -> StepStatusSnapshot | None:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(_STEP_STATUS_SNAPSHOT_SQL, (step_id,))
             row = await cur.fetchone()
+            observed_at = datetime.now(timezone.utc)
     if row is None:
         return None
     return StepStatusSnapshot(
         step_id=row["step_id"], status=row["status"], pipeline_id=row["pipeline_id"],
         tenant_id=row["tenant_id"], user_id=row["user_id"],
         owner_ack_at=row["owner_ack_at"], pipeline_status=row["pipeline_status"],
-        observed_at=datetime.now(timezone.utc),
+        observed_at=observed_at,
     )
 
 

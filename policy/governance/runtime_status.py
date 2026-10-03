@@ -21,6 +21,8 @@ import math
 import sys
 from typing import Mapping
 
+import aiomysql
+
 from .response import GovernanceContractError, ResponseScope, _freeze, _plain, _text
 from .resolution import (AdapterKind, ResolutionObservation, ResolutionStatus,
                          RuntimeStatusEvidence, _runtime_status_evidence_from_server,
@@ -429,14 +431,14 @@ class JacobsStepStatusResolver:
             datetime.now(timezone.utc), "jacobs-step:unavailable", {})
         try:
             source_config = _jacobs_step_source_configuration(require_config=True)
-        except Exception as exc:
+        except (RuntimeError, ValueError) as exc:
             logger.warning("Jacobs STEP_STATUS source configuration unavailable: %s", type(exc).__name__)
             source_config = _jacobs_step_source_configuration()
             observation = unavailable
         else:
             try:
                 snapshot = await jacobs_store.step_status_snapshot(step_id)
-            except Exception as exc:
+            except (aiomysql.Error, OSError, RuntimeError, ValueError) as exc:
                 logger.warning("Jacobs step authoritative snapshot unavailable: %s", type(exc).__name__)
                 snapshot = None
 

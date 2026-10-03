@@ -97,6 +97,7 @@ def test_step_snapshot_is_one_joined_read_and_returns_immutable_observation(monk
     query, params = cursor.calls[0]
     assert "FROM jacobs_steps" in query
     assert "JOIN jacobs_pipelines" in query
+    assert "ON p.pipeline_id = s.pipeline_id" in query
     assert "s.step_id = %s" in query
     assert params == ("step-1",)
     assert isinstance(snapshot, store.StepStatusSnapshot)
@@ -104,6 +105,52 @@ def test_step_snapshot_is_one_joined_read_and_returns_immutable_observation(monk
     assert snapshot.observed_at.tzinfo is not None
     with pytest.raises((AttributeError, TypeError)):
         snapshot.status = "failed"
+
+
+def test_step_snapshot_timestamps_the_read_before_async_resource_close(monkeypatch):
+    events = []
+
+    class Cursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            events.append("cursor_closed")
+            return False
+
+        async def execute(self, _query, _params):
+            return None
+
+        async def fetchone(self):
+            events.append("row_fetched")
+            return {"step_id": "step-1", "status": "completed", "pipeline_id": "pipe-1",
+                "tenant_id": "tenant-a", "user_id": "user-a", "owner_ack_at": 1.0,
+                "pipeline_status": "running"}
+
+    class Connection:
+        def cursor(self, *_args, **_kwargs):
+            return Cursor()
+
+    @asynccontextmanager
+    async def connection():
+        try:
+            yield Connection()
+        finally:
+            events.append("connection_closed")
+
+    class ObservationClock:
+        @staticmethod
+        def now(_tz):
+            events.append("observed_at")
+            return NOW
+
+    monkeypatch.setattr(store, "conexion_del_pool", connection)
+    monkeypatch.setattr(store, "datetime", ObservationClock)
+
+    snapshot = asyncio.run(store.step_status_snapshot("step-1"))
+
+    assert snapshot.observed_at == NOW
+    assert events == ["row_fetched", "observed_at", "cursor_closed", "connection_closed"]
 
 
 @pytest.mark.parametrize("canonical_status", [status.value for status in models.StepStatus])
@@ -137,6 +184,30 @@ def test_step_resolver_returns_wrong_scope_for_other_owner(monkeypatch):
         {"step_id": "step-1", "status": "blocked_human_gate"}, _scope()))
 
     assert evidence.observation.status is ResolutionStatus.WRONG_SCOPE
+
+
+def test_step_resolver_returns_wrong_scope_for_same_user_in_other_tenant(monkeypatch):
+    monkeypatch.setattr(store, "step_status_snapshot", AsyncMock(return_value=_snapshot(tenant_id="tenant-b")))
+    evidence = asyncio.run(JacobsStepStatusResolver().evidence(
+        {"step_id": "step-1", "status": "blocked_human_gate"}, _scope()))
+
+    assert evidence.observation.status is ResolutionStatus.WRONG_SCOPE
+
+
+def test_step_resolver_does_not_hide_programming_errors_as_unavailable(monkeypatch):
+    monkeypatch.setattr(store, "step_status_snapshot", AsyncMock(side_effect=AssertionError("bug")))
+
+    with pytest.raises(AssertionError, match="bug"):
+        asyncio.run(JacobsStepStatusResolver().evidence(
+            {"step_id": "step-1", "status": "blocked_human_gate"}, _scope()))
+
+
+def test_step_resolver_does_not_hide_source_configuration_programming_errors(monkeypatch):
+    monkeypatch.setattr(store, "_db_cfg", lambda: (_ for _ in ()).throw(AssertionError("bug")))
+
+    with pytest.raises(AssertionError, match="bug"):
+        asyncio.run(JacobsStepStatusResolver().evidence(
+            {"step_id": "step-1", "status": "blocked_human_gate"}, _scope()))
 
 
 def test_step_resolver_rejects_project_scope_and_noncanonical_arguments(monkeypatch):
