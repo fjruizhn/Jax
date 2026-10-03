@@ -104,16 +104,26 @@ def _effective_projection(rendered: RenderedText) -> Mapping[str, object]:
     return {
         "response_id": rendered.response_id,
         "text": rendered.text,
+        "chunks": list(rendered.chunks),
         "effective_output_digest": rendered.envelope_digest,
         "effective_contract_state": rendered.contract_state.value,
         "claim_ids": list(rendered.claim_ids),
-        # Chunk boundaries are an implementation detail of the F2-C
-        # post-seal generator.  The F2-D transport authorization binds the
-        # complete semantic text and metadata; current claims have no chunks.
         "original_envelope_digest": rendered.source_envelope_digest,
         "renderer_api_version": rendered.renderer_api_version,
         "domain_spec_version": rendered.domain_spec_version,
     }
+
+
+def _rendered_semantics(projection: Mapping[str, object]) -> dict[str, object]:
+    """Return renderer-owned semantic fields, excluding transport chunking."""
+    return {key: value for key, value in projection.items() if key != "chunks"}
+
+
+def _validate_chunks(rendered: RenderedText) -> None:
+    if not isinstance(rendered.chunks, tuple) or not all(isinstance(chunk, str) for chunk in rendered.chunks):
+        raise OutputLifecycleError("rendered chunks must be an immutable string tuple")
+    if rendered.chunks and "".join(rendered.chunks) != rendered.text:
+        raise OutputLifecycleError("rendered chunks do not reconstruct the governed text")
 
 
 def _digest(value: Mapping[str, object]) -> str:
@@ -234,10 +244,11 @@ def mint_governed_transport_unit(
     if not isinstance(idempotency_key, str) or not idempotency_key:
         raise OutputLifecycleError("idempotency key is required")
     _compatible(envelope, rendered, context)
+    _validate_chunks(rendered)
     validation_time = _time(now if now is not None else context.now())
     revalidation_context = replace(context, now=lambda: validation_time)
     actual = GovernedRenderer().render_text(envelope, revalidation_context)
-    if _effective_projection(actual) != _effective_projection(rendered):
+    if _rendered_semantics(_effective_projection(actual)) != _rendered_semantics(_effective_projection(rendered)):
         raise OutputLifecycleError("effective output changed or is not the trusted renderer projection")
     claims = {claim.claim_id: claim for claim in envelope.claims}
     contains_current = any(

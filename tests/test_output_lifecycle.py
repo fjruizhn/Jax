@@ -59,12 +59,33 @@ def test_mint_rejects_foreign_or_mutated_projection():
     rendered = GovernedRenderer().render_text(envelope, context)
     for changed in (
         replace(rendered, text="different text"),
+        replace(rendered, chunks=("UNBOUND BYTES",)),
         replace(rendered, contract_state=ContractState.UNAVAILABLE),
         replace(rendered, response_id="foreign-response"),
         replace(rendered, source_envelope_digest="sha256:" + "0" * 64),
     ):
         with pytest.raises(OutputLifecycleError):
             mint_governed_transport_unit(envelope, changed, context, transport_kind="web-chat-http", idempotency_key="key", now=NOW)
+
+
+def test_transport_digest_binds_exact_chunk_projection():
+    envelope, context = sealed_current()
+    rendered = GovernedRenderer().render_text(envelope, context)
+    forged = replace(rendered, chunks=("UNBOUND BYTES",))
+    with pytest.raises(OutputLifecycleError):
+        mint_governed_transport_unit(envelope, forged, context,
+            transport_kind="web-chat-http", idempotency_key="forged-chunks", now=NOW)
+
+    narrative = WebChatGovernanceAdapter(scope(), receipt()).seal_non_governed_candidate(
+        response_id="chunked", candidate_text="canonical output")
+    context = RenderContext(None, now=lambda: NOW)
+    chunked = GovernedRenderer().render_text(narrative, context, chunk_size=4)
+    unit = mint_governed_transport_unit(narrative, chunked, context,
+        transport_kind="web-chat-http", idempotency_key="chunked", now=NOW)
+    assert revalidate_for_transport(unit, NOW).chunks == chunked.chunks
+    object.__setattr__(unit.rendered, "chunks", ("UNBOUND BYTES",))
+    with pytest.raises(OutputLifecycleError):
+        revalidate_for_transport(unit, NOW)
 
 
 def test_current_claim_is_revalidated_at_preparation_and_transport():
@@ -137,6 +158,35 @@ def test_transport_revalidation_preserves_attributed_user_quote_path():
         transport_kind="web-chat-http", idempotency_key="quoted-response", now=NOW)
 
     assert revalidate_for_transport(unit, NOW) == rendered
+
+
+def test_transport_revalidation_rejects_revoked_user_quote_access():
+    from policy.governance import response
+
+    response_scope = scope()
+    assertion_ref = ref("revocable-user-assertion", ReferenceType.USER_ASSERTION,
+        response_scope, asserter="Fernando")
+    claim = ClaimRecord("revocable-user-claim", "USER_REPORT", {"text": "A quoted statement."},
+        response_scope, SourceClass.USER_INPUT, EpistemicStatus.USER_ASSERTED,
+        basis_refs=(assertion_ref.ref_id,))
+    quote = ContentBlock(ContentBlockKind.ATTRIBUTED_QUOTE, "A quoted statement.",
+        claim_refs=(claim.claim_id,), attribution_ref=assertion_ref.ref_id, speaker="Fernando")
+    candidate = response.GovernedResponseCandidate("f2-c.1", "revocable-response",
+        response_scope.request_id, response_scope.trace_id, response_scope, "web-chat",
+        (), (quote,), (claim,), (assertion_ref,))
+    envelope = response._seal_candidate_for_server(candidate,
+        contract_state=ContractState.VALID, governance_receipt=receipt())
+    access = {"allowed": True}
+    context = RenderContext(None, {}, {}, {}, domain_registry=GovernedDomainRegistry(),
+        reference_validator=lambda _reference, _scope: access["allowed"],
+        now=lambda: NOW,
+        user_assertion_content={assertion_ref.ref_id: "A quoted statement."})
+    rendered = GovernedRenderer().render_text(envelope, context)
+    unit = mint_governed_transport_unit(envelope, rendered, context,
+        transport_kind="web-chat-http", idempotency_key="revocable-response", now=NOW)
+    access["allowed"] = False
+    with pytest.raises(OutputLifecycleError):
+        revalidate_for_transport(unit, NOW)
 
 
 def test_non_current_narrative_can_still_use_the_lifecycle_contract():
