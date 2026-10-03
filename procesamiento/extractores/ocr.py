@@ -882,14 +882,25 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
     """UNION de las dos pasadas de un fotograma con transparencia real (Jax#338
     ronda 12): no se elige una y se descarta la otra, porque cada criterio de
     eleccion perdio texto real (TOTAL en una pasada y L500 en la otra daban
-    ok/imagen_sin_texto). Texto: el de la pasada blanca y despues el de la
-    negra sin sus renglones DUPLICADOS (mismo texto y cajas superpuestas, ver
-    `SUPERPOSICION_MINIMA_DUPLICADO`; cada renglon de la blanca empareja a lo
-    sumo uno de la negra). Las metricas salen de `_analizar_tsv` sobre la union
-    de los `tsv`, sin las filas de esos duplicados, y la clasificacion
-    de `_clasificar`, las mismas funciones que para una pasada. El ruido que
-    entre por una pasada lo marca la regla B (palabras dudosas)."""
-    sin_pareja = _renglones_tsv(blanca["tsv"])
+    ok/imagen_sin_texto).
+
+    UNA sola fuente, el `tsv` (Jax#338 ronda 14): el texto plano de tesseract
+    NO se usa en este camino (divergia del `tsv` y la deduplicacion de uno
+    borraba renglones reales del otro). De las filas de palabra de las dos
+    pasadas salen, juntos, la deduplicacion, el texto, las metricas y
+    `aportan_las_dos`:
+    - renglones = palabras agrupadas por (pagina, bloque, parrafo, renglon) en
+      el orden del `tsv`, unidas por espacio (`_renglones_tsv`);
+    - un renglon de la negra es DUPLICADO si tiene el mismo texto y su caja se
+      superpone con la de un renglon de la blanca (`SUPERPOSICION_MINIMA_DUPLICADO`;
+      cada renglon de la blanca empareja a lo sumo uno de la negra);
+    - texto: los renglones de la blanca y despues los propios de la negra,
+      separados por salto de linea;
+    - metricas: `_analizar_tsv` sobre esas mismas filas; clasificacion:
+      `_clasificar_imagen`.
+    Una pasada sin filas de palabra no aporta nada, ni texto ni metricas."""
+    blancos = _renglones_tsv(blanca["tsv"])
+    sin_pareja = list(blancos)
     propios_negros = []
     for renglon in _renglones_tsv(negra["tsv"]):
         pareja = next((
@@ -901,9 +912,16 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
             propios_negros.append(renglon)
         else:
             sin_pareja.remove(pareja)
-    texto = (blanca["texto"] + "\n" + negra["texto"]).strip()
-    filas_negras = [fila for renglon in propios_negros for fila in renglon["filas"]]
-    analisis = _analizar_tsv("\n".join([blanca["tsv"], *filas_negras]))
+    renglones = blancos + propios_negros
+    texto = "\n".join(renglon["texto"] for renglon in renglones)
+    # La fila de nivel 1 (pagina) solo da ancho y alto, no aporta palabras.
+    paginas = [
+        fila for salida in (blanca["tsv"], negra["tsv"]) for fila in salida.splitlines()[1:]
+        if fila.split("\t", 1)[0] == "1"
+    ][:1]
+    analisis = _analizar_tsv("\n".join(
+        ["encabezado", *paginas, *(fila for renglon in renglones for fila in renglon["filas"])]
+    ))
     aportan_las_dos = bool(sin_pareja) and bool(propios_negros)
     return {
         "texto": texto,
