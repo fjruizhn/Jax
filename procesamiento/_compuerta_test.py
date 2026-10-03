@@ -353,7 +353,7 @@ def test_imagen_real_renombrada_va_por_ocr_y_marca_extension_enganosa(
     """Misma idea que el PDF de I-3, ahora del lado de la imagen: una PNG
     real (firma `\\x89PNG` de verdad) con extensión `.docx` encima tiene
     que resolver igual por OCR (el contenido manda) y declarar el
-    engaño -- sin este caso, mutar la tupla `_FIRMAS_IMAGEN` (por ejemplo
+    engaño -- sin este caso, mutar la tupla `ocr._FIRMAS_IMAGEN` (por ejemplo
     sacando la firma de PNG) queda absorbido en silencio por el respaldo
     de extensión cuando la extensión SÍ es una de `IMAGENES` (como en
     `test_una_imagen_no_pasa_por_pdfplumber`, que usa `.png` real): acá la

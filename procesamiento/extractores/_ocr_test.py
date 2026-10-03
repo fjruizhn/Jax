@@ -994,14 +994,14 @@ def test_minor3_la_ficha_no_copia_stderr_ni_rutas(tmp_path: Path):
     assert str(tmp_path) not in volcado and "/etc/passwd" not in volcado
 
 
-def test_minor4_es_pdf_busca_la_firma_en_los_primeros_1024_bytes(tmp_path: Path):
+def test_minor4_el_tipo_por_cabecera_busca_la_firma_en_los_primeros_1024_bytes(tmp_path: Path):
     con_basura = tmp_path / "a.pdf"
     con_basura.write_bytes(b"\x00\xef\xbb\xbf  basura\n" + b"%PDF-1.4\n")
-    assert ocr._es_pdf(con_basura) is True
+    assert ocr.tipo_por_cabecera(con_basura.read_bytes()[:1024]) == "pdf"
     lejos = tmp_path / "b.pdf"
     lejos.write_bytes(b"x" * 2000 + b"%PDF-1.4")
-    assert ocr._es_pdf(lejos) is False
-    assert ocr._es_pdf(tmp_path / "no-existe.pdf") is False
+    assert ocr.tipo_por_cabecera(lejos.read_bytes()[:1024]) is None
+    assert ocr.camino_de(tmp_path / "no-existe.png") == "imagen"
 
 
 def test_minor6_foto_de_4032x3024_con_ruido_no_es_un_error(tmp_path: Path):
@@ -1357,7 +1357,7 @@ def test_n3_un_png_con_metadata_pdf_es_una_imagen(tmp_path: Path):
     Image.open(base).save(destino, pnginfo=meta)
     assert b"%PDF" in destino.read_bytes()[:1024]
 
-    assert ocr._es_pdf(destino) is False
+    assert ocr.tipo_por_cabecera(destino.read_bytes()[:1024]) == "imagen"
     r = ocr.extraer(destino)
     assert r.estado == "ok"
     assert "Activos totales" in r.salidas["texto.txt"]
@@ -1982,7 +1982,7 @@ def test_n17_la_firma_de_imagen_manda_y_un_zip_no_se_confunde_con_pdf():
 def test_n18_un_fotograma_numerico_tiene_un_tope_de_pixeles_mas_bajo(tmp_path, monkeypatch):
     from PIL import Image
 
-    assert ocr.MAX_PIXELES_NUMERICO == 25_000_000
+    assert ocr.MAX_PIXELES_NUMERICO == 16_000_000
     monkeypatch.setattr(ocr, "MAX_PIXELES_NUMERICO", 5_000)
     destino = tmp_path / "f.tif"
     Image.new("F", (100, 100), 1.0).save(destino)   # 10 000 px > 5 000

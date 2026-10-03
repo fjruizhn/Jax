@@ -191,10 +191,15 @@ _FIRMAS_IMAGEN = (
 # grande de LACTOVI mide 13630x3826 (52 M).
 MAX_PIXELES = 100_000_000
 
-# Tope POR FOTOGRAMA mas bajo para los modos numericos (F, I, I;16*): un
-# fotograma de 100 Mpx en modo F ocupa ~400 MB y el escalado lo multiplica
-# (medido: RSS ~1 GB).
-MAX_PIXELES_NUMERICO = 25_000_000
+# Tope POR FOTOGRAMA mas bajo para los modos numericos (F, I, I;16*): la
+# normalizacion mantiene varias copias en memoria (coma flotante, mascara,
+# imagen limpia, escalada). MEDIDO 2026-10-03 (ru_maxrss del proceso que corre
+# `extraer`, TIFF con texto y un nan, linea base 25 MB):
+#   5000x5000 (25 Mpx):  F 604 MB, I;16 603 MB  -> demasiado, en el limite del
+#                        objetivo (~600 MB) y con jax-las-manos sin MemoryMax
+#   4000x4000 (16 Mpx):  F 397 MB, I;16 398 MB  -> por debajo; el tope elegido
+# (el pico crece ~25 bytes por pixel; es lineal.)
+MAX_PIXELES_NUMERICO = 16_000_000
 
 # Solo un TIFF es multipagina PARA TESSERACT (procesa todas sus paginas). Un
 # GIF o WebP animado se RECHAZA (`animacion_no_soportada`: tesseract no lee
@@ -290,15 +295,6 @@ def camino_de(origen: Path, sufijo: str | None = None) -> str:
     except OSError:
         cabecera = b""
     return camino_de_tipo(tipo_por_cabecera(cabecera), sufijo if sufijo is not None else origen.suffix)
-
-
-def _es_pdf(origen: Path) -> bool:
-    """Solo por CONTENIDO (sin extension): `tipo_por_cabecera == "pdf"`."""
-    try:
-        with open(origen, "rb") as fh:
-            return tipo_por_cabecera(fh.read(1024)) == "pdf"
-    except OSError:
-        return False
 
 
 def _tiene_firma_de_imagen(cabecera: bytes) -> bool:
