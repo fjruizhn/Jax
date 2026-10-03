@@ -5478,8 +5478,16 @@ jobs:
           #   fotograma sin marca de pagina (1). Todas con tesseract SIMULADO. Cuenta del runner: 189
           #   recolectadas menos las 2 de LACTOVI que salta (skipif por archivo ausente) = 187
           #   passed, 2 skipped. Medido LOCAL en hall9000: 189 passed.
-          grep -qE "^187 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 187 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 189 -> 191 recolectadas (Jax#338 ronda 14): +2 -- en la union el texto se arma desde el
+          #   TSV (una sola fuente): un homonimo del TSV negro en otra posicion aparece aunque el
+          #   texto plano no lo repita, y una pasada sin filas TSV no aporta texto aunque tenga
+          #   texto plano. Ademas, 5 pruebas del PR que fijaban umbrales con tesseract real pasan al
+          #   SIMULADO con TSV fijo, y las demas del PR con tesseract real afirman solo propiedades
+          #   robustas (estado distinto de error, una palabra clave); no cambia el conteo. Cuenta del
+          #   runner: 191 recolectadas menos las 2 de LACTOVI que salta = 189 passed, 2 skipped.
+          #   Medido LOCAL en hall9000: 191 passed.
+          grep -qE "^189 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 189 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
