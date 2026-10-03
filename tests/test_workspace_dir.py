@@ -129,13 +129,26 @@ def test_import_a_nivel_de_modulo_sin_variable_no_arranca(modulo):
 
 _EXCLUIDOS = ("tests", "docs", ".git", "node_modules")
 _LLAMADA_CON_DEFAULT = re.compile(
-    r"""(?:getenv|environ\.get)\(\s*["']JAX_WORKSPACE_DIR["']\s*,""")
+    r"""(?:getenv|environ\.get)\(\s*["']JAX_WORKSPACE_DIR["']\s*,"""
+    r"""|(?:getenv|environ\.get)\(\s*["']JAX_WORKSPACE_DIR["']\s*\)[\s\\]*or[\s\\]*["'][^"']"""
+    r"""|environ\.setdefault\(\s*["']JAX_WORKSPACE_DIR["']""")
 
 
 def _violaciones(raiz: Path) -> list[str]:
     """.py bajo `raiz` (sin tests/, docs/, .git, policy/tests ni *_test.py)
     con el literal viejo o con un default en la lectura de la variable. Solo
-    stdlib: no depende de git ni de que el checkout tenga .git."""
+    stdlib: no depende de git ni de que el checkout tenga .git.
+
+    Detecta: `getenv/environ.get("JAX_WORKSPACE_DIR", <default>)` (tambien
+    partido en lineas), `... ) or "<literal no vacio>"`,
+    `environ.setdefault("JAX_WORKSPACE_DIR", ...)` y el literal viejo.
+
+    NO detecta (alcance declarado, es un barrido de regex y no un analisis):
+    `getenv(key="JAX_WORKSPACE_DIR", ...)`; una constante intermedia
+    (`V = "JAX_WORKSPACE_DIR"; getenv(V, "/x")`);
+    `Path("/home/fruiz") / "jax-workspace"` ni `"~/jax-workspace"` (el
+    literal viejo se busca entero); y nada que no sea .py (shell, units
+    systemd, YAML)."""
     malos = []
     for ruta in sorted(raiz.rglob("*.py")):
         rel = ruta.relative_to(raiz)
@@ -165,6 +178,23 @@ def test_el_barrido_detecta_el_literal_viejo(tmp_path):
 def test_el_barrido_detecta_cualquier_default(tmp_path, llamada):
     (tmp_path / "otro.py").write_text(f"import os\nX = {llamada}\n")
     assert _violaciones(tmp_path) == ["otro.py"]
+
+
+@pytest.mark.parametrize("llamada", [
+    'os.environ.get("JAX_WORKSPACE_DIR") or "/srv/jax-data/jax-workspace"',
+    "os.getenv('JAX_WORKSPACE_DIR') or '/srv/jax-data/jax-workspace'",
+    'os.environ.get("JAX_WORKSPACE_DIR")\\\n    or "/srv/jax-data/jax-workspace"',
+    'os.environ.setdefault("JAX_WORKSPACE_DIR", "/srv/jax-data/jax-workspace")',
+    "os.environ.setdefault( 'JAX_WORKSPACE_DIR' ,\n    '/x')",
+])
+def test_el_barrido_detecta_or_y_setdefault(tmp_path, llamada):
+    (tmp_path / "otro.py").write_text(f"import os\nX = {llamada}\n")
+    assert _violaciones(tmp_path) == ["otro.py"]
+
+
+def test_el_barrido_no_marca_or_con_literal_vacio(tmp_path):
+    (tmp_path / "ok.py").write_text('import os\nX = os.environ.get("JAX_WORKSPACE_DIR") or ""\n')
+    assert _violaciones(tmp_path) == []
 
 
 def test_el_barrido_no_marca_la_lectura_sin_default_ni_las_exclusiones(tmp_path):
