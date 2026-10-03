@@ -52,6 +52,11 @@ import warnings
 from pathlib import Path
 
 from procesamiento.resultado import Resultado
+# Jax#338 ronda 18: las firmas y el tipo por contenido viven en un modulo puro
+# (sin Pillow ni JAX_WORKSPACE_DIR) para que el freno de dependencias decida con
+# la MISMA funcion; los nombres de siempre siguen disponibles en `ocr`.
+from procesamiento.tipos_imagen import tiene_firma_de_imagen as _tiene_firma_de_imagen
+from procesamiento.tipos_imagen import tipo_por_cabecera
 
 try:
     # Bare primero, por consistencia con los otros symlinks de las_manos/ (via
@@ -123,8 +128,6 @@ TIMEOUT_SEGUNDOS = 300
 # para OCR de documentos escaneados (por debajo, tesseract pierde exactitud
 # en fuentes pequeñas de recibos/facturas).
 DPI_RASTERIZADO = 300
-
-_FIRMA_PDF = b"%PDF"
 
 # Decision de Fernando (2026-10-03, regla de Jax#338): una IMAGEN que el OCR
 # procesa sin texto confiable NO es un `error` -- `error` queda SOLO para un
@@ -212,12 +215,7 @@ _MARCAS_ARCHIVO_ILEGIBLE = (
 
 # S-1: tesseract interpreta una entrada que no es imagen como LISTA DE RUTAS.
 # Antes de llamarlo se exigen los bytes magicos de un formato de imagen
-# (compuerta rutea por contenido, asi que vale cualquiera de ellos, no solo el
-# de la extension), y la imagen viaja por STDIN, nunca por ruta.
-_FIRMAS_IMAGEN = (
-    b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"II*\x00", b"MM\x00*", b"BM",
-    b"GIF87a", b"GIF89a",
-)
+# (`tipos_imagen.FIRMAS_IMAGEN`), y la imagen viaja por STDIN, nunca por ruta.
 
 # Tope de pixeles POR FOTOGRAMA, comprobado ANTES de decodificar. (El default
 # de `Image.MAX_IMAGE_PIXELS` de Pillow es ~89 M y solo avisa; el error salta
@@ -295,25 +293,6 @@ def _como_texto(salida) -> str:
     return salida or ""
 
 
-def tipo_por_cabecera(cabecera: bytes, sufijo: str = "") -> str | None:
-    """UNICA fuente de verdad del tipo por CONTENIDO (la usan `ocr`,
-    `compuerta` e `ingesta`): `"imagen"` si hay una firma de imagen valida
-    (manda: un PNG con metadata `%PDF` es una imagen); `"pdf"` si el contenido
-    EMPIEZA con `%PDF`, o si `%PDF` aparece desplazado (hasta 1024 bytes: el
-    estandar tolera basura antes) Y la extension es `.pdf` -- un .txt, .csv o
-    .eml que solo menciona `%PDF` no es un PDF; `None` si el contenido no
-    decide. Un ZIP (`PK\\x03\\x04`: xlsx/docx) nunca es PDF."""
-    if _tiene_firma_de_imagen(cabecera[:16]):
-        return "imagen"
-    if cabecera.startswith(b"PK\x03\x04"):
-        return None
-    if cabecera.startswith(_FIRMA_PDF):
-        return "pdf"
-    if sufijo.lower() == ".pdf" and _FIRMA_PDF in cabecera[:1024]:
-        return "pdf"
-    return None
-
-
 def camino_de_tipo(tipo: str | None, sufijo: str) -> str:
     """`"pdf"` o `"imagen"` a partir del tipo por contenido; cuando el
     contenido no decide manda la EXTENSION (`.pdf` -> pdf), como la compuerta
@@ -335,12 +314,6 @@ def camino_de(origen: Path, sufijo: str | None = None) -> str:
         cabecera = b""
     sufijo = sufijo if sufijo is not None else origen.suffix
     return camino_de_tipo(tipo_por_cabecera(cabecera, sufijo), sufijo)
-
-
-def _tiene_firma_de_imagen(cabecera: bytes) -> bool:
-    return cabecera.startswith(_FIRMAS_IMAGEN) or (
-        cabecera[:4] == b"RIFF" and cabecera[8:12] == b"WEBP"
-    )
 
 
 def _gif_cuadros(datos: bytes, hasta: int = 2) -> int | None:

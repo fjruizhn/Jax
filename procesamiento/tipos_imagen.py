@@ -3,7 +3,7 @@ dependencias (Jax#338 ronda 17).
 
 Antes habia dos copias a mano -- `compuerta.IMAGENES` y el mapa de `pillow` en
 `dependencias` -- y las dos se olvidaron de `.gif`: el OCR acepta una imagen
-por su FIRMA (PNG, JPEG, TIFF, BMP, GIF, WebP, ver `ocr._FIRMAS_IMAGEN`), y
+por su FIRMA (PNG, JPEG, TIFF, BMP, GIF, WebP, ver `FIRMAS_IMAGEN`), y
 sin Pillow el freno dejaba entrar un lote con `sello.gif` que no se podia
 procesar.
 
