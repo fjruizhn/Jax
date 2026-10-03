@@ -17,6 +17,7 @@ import json
 import logging
 import multiprocessing as mp
 import time
+from pathlib import Path
 
 import h11
 import httpx
@@ -875,3 +876,58 @@ def test_clave_repetida_exacta_en_un_bloque_da_403(tmp_path, pensamiento):
     cuerpo = (b'{"model":"modelo-permitido","max_tokens":1024,"messages":[{"role":"user","content":'
               b'[{"type":"text","type":"tool_result","tool_use_id":"t1","content":"x"}]}]}')
     assert _posteo_codigo(tmp_path, pensamiento, cuerpo) == (403, proxy_carril.PEDIDO_AMBIGUO, 0)
+
+
+# --- Ronda 3: bloques de servidor en messages[] y output_config -------------------------------
+
+_BLOQUES_DE_SERVIDOR = [
+    {"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {"query": "x"}},
+    {"type": "web_search_tool_result", "tool_use_id": "s1", "content": []},
+    {"type": "web_fetch_tool_result", "tool_use_id": "s1", "content": []},
+    {"type": "web_search_result", "url": "u"},
+    {"type": "SERVER_TOOL_USE", "id": "s1", "name": "n", "input": {}},
+    {"type": "Web_Search_Tool_Result", "tool_use_id": "s1"},
+    {"type": "code_execution_tool_result", "tool_use_id": "s1"},
+]
+
+
+@pytest.mark.parametrize("pensamiento", ["apagado", "libre"])
+@pytest.mark.parametrize("bloque", _BLOQUES_DE_SERVIDOR, ids=lambda b: b["type"])
+def test_bloque_de_servidor_en_messages_da_403_y_no_llega(tmp_path, pensamiento, bloque):
+    cuerpo = _pedido(messages=[{"role": "assistant", "content": [{"type": "text", "text": "x"}, bloque]}])
+    assert _posteo_codigo(tmp_path, pensamiento, cuerpo) == (403, proxy_carril.HERRAMIENTA_DE_SERVIDOR, 0)
+
+
+@pytest.mark.parametrize("bloque", [
+    {"type": "text", "text": "x"}, {"type": "tool_use", "id": "t", "name": "Bash", "input": {}},
+    {"type": "tool_result", "tool_use_id": "t", "content": "ok"}, {"type": "thinking", "thinking": "t"},
+    {"type": "image", "source": {}}, {"type": 7}, {"text": "sin type"},
+])
+def test_bloques_normales_en_messages_pasan(tmp_path, bloque):
+    cuerpo = _pedido(messages=[{"role": "user", "content": [bloque]}])
+    assert _posteo_codigo(tmp_path, "apagado", cuerpo) == (200, None, 1)
+
+
+def test_bloque_de_servidor_por_el_socket_de_jaxqwen_tambien_da_403():
+    # La regla vive en `_fuera_de_limites`, que es la validación de las DOS entradas
+    # (la de jaxqwen se prueba entera en test_ejecutor_proxy_jaxqwen_uds.py).
+    cfg = Config(upstream="http://x", raiz=Path("/tmp"), tope_s=1, host="127.0.0.1", puerto=0,
+                 registro=Path("/tmp/r"), pausa=Path("/tmp/p"), latido=Path("/tmp/l"), latido_max_s=1,
+                 modelo=MODELO_PERMITIDO, max_salida_tokens=MAX_SALIDA_TOKENS, pensamiento="libre")
+    cuerpo = _pedido(messages=[{"role": "user", "content": [_BLOQUES_DE_SERVIDOR[1]]}])
+    assert proxy_carril._fuera_de_limites(cuerpo, cfg) == proxy_carril.HERRAMIENTA_DE_SERVIDOR
+
+
+@pytest.mark.parametrize("pensamiento", ["apagado", "libre"])
+def test_output_config_es_campo_conocido_y_su_variante_da_pedido_ambiguo(tmp_path, pensamiento):
+    assert _posteo_codigo(tmp_path, pensamiento, _pedido(Output_Config={"effort": "high"})) == (
+        403, proxy_carril.PEDIDO_AMBIGUO, 0)
+    assert _posteo_codigo(tmp_path, pensamiento, _pedido(output_config={"effort": "high"}))[0] == 200
+
+
+def test_campos_conocidos_cubren_el_messagesrequest_de_ollama_0_34_3():
+    from jax.ejecutor.contratos import lectura
+    # Etiquetas json de MessagesRequest (anthropic.go:68-83) + las que lee su binario.
+    go = {"model", "max_tokens", "messages", "system", "stream", "temperature", "top_p", "top_k",
+          "stop_sequences", "tools", "tool_choice", "thinking", "metadata", "output_config"}
+    assert go <= lectura.CAMPOS_CONOCIDOS

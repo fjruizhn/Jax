@@ -62,6 +62,7 @@ def plegar(nombre: str) -> str:
 CAMPOS_CONOCIDOS = frozenset({
     "model", "max_tokens", "messages", "system", "tools", "stream", "thinking", "think",
     "reasoning_effort", "metadata", "stop_sequences", "temperature", "top_p", "top_k", "tool_choice",
+    "output_config",  # MessagesRequest.OutputConfig de Ollama v0.34.3 (anthropic.go:82); Claude Code lo manda
 })
 CAMPOS_DE_MENSAJE = frozenset({"role", "content"})
 CAMPOS_DE_BLOQUE = frozenset({
@@ -93,8 +94,34 @@ def _revisar_bloques(contenido, pares_de: dict) -> None:
         if not isinstance(bloque, dict):
             continue
         _revisar(pares_de[id(bloque)], CAMPOS_DE_BLOQUE)
-        # El `content` de un tool_result puede ser una lista de bloques: recursivo.
+        # Recursivo en el `content` cuando es lista (los tool_result). Es CONSERVADOR, no
+        # necesario: Ollama decodifica ese `content` como any/map y `convertToolResultContent` lo
+        # lee distinguiendo mayúsculas; aquí se rechaza igual por simetría con el resto.
         _revisar_bloques(bloque.get("content"), pares_de)
+
+
+def bloque_de_servidor(doc) -> bool:
+    """¿Algún bloque de `messages[].content[]` es de herramienta de SERVIDOR? Ollama 0.34.3
+    (anthropic.go:525-541) convierte `web_search_tool_result` en un mensaje de rol tool y
+    `server_tool_use` en una llamada a herramienta; C3 solo cuenta `tool_result` y `tool_use`.
+    Esos bloques no tienen origen legítimo (las herramientas de servidor ya dan 403): `type`
+    plegado `server_tool_use`, o que empiece por `web_search` / `web_fetch`, o que termine en
+    `_tool_result` sin ser `tool_result`."""
+    if not isinstance(doc, dict) or not isinstance(doc.get("messages"), list):
+        return False
+    for mensaje in doc["messages"]:
+        contenido = mensaje.get("content") if isinstance(mensaje, dict) else None
+        if not isinstance(contenido, list):
+            continue
+        for bloque in contenido:
+            tipo = bloque.get("type") if isinstance(bloque, dict) else None
+            if not isinstance(tipo, str):
+                continue
+            t = plegar(tipo)
+            if (t == "SERVER_TOOL_USE" or t.startswith(("WEB_SEARCH", "WEB_FETCH"))
+                    or (t.endswith("_TOOL_RESULT") and t != "TOOL_RESULT")):
+                return True
+    return False
 
 
 def cargar_pedido(cuerpo: bytes):

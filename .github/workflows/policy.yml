@@ -5012,6 +5012,12 @@ jobs:
           #   de arriba (sudo unshare --mount, Python 3.14): 3295 passed + 1 failed preexistente
           #   (PermissionError en /etc/jax/build, pasa en el runner) = 3296; los 45 skipped no cambian.
           #   Si el runner da otro numero, manda el runner.
+          # 3296 -> 3321 (2026-10-03, pensamiento apagado, minors de la ronda 3): +25 puros en
+          #   tests/test_ejecutor_proxy_carril.py (+1 en test_ejecutor_proxy_jaxqwen_uds.py que
+          #   ya existia): bloques de servidor en messages[] (403 herramienta_de_servidor, 14 con los
+          #   dos modos + 7 normales + 1 de la validacion de jaxqwen), output_config como campo conocido
+          #   y su variante (2) y la cobertura del MessagesRequest de Ollama v0.34.3 (1). Medido con
+          #   el mismo metodo: 3320 passed + 1 failed preexistente = 3321; los 45 skipped no cambian.
           #
           # 2811 -> 2812 (2026-09-25, las_manos/_tool_authority_test.py::test_5c_write_file_
           # queda_escribible_por_grupo_bajo_acl_por_defecto -- reproduce B1 de
@@ -5040,8 +5046,8 @@ jobs:
           # mismo piso a 2821 por una causa completamente distinta (no relacionada) --
           # quien integre esa rama DESPUES de esta, o esta DESPUES de esa, tiene que
           # re-medir sobre master en vez de sumar los deltas a ciegas.
-          grep -qE "^3296 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3296 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          grep -qE "^3321 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3321 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
