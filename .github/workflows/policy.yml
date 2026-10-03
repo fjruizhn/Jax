@@ -5346,8 +5346,8 @@ jobs:
           #   A/B/D y D en TIFF multipagina, y un MPO de iPhone. Medido LOCAL en hall9000: 93
           #   passed (las 2 reales corren). En el runner: 91 passed, 2 skipped.
           # 93 -> 105 (Jax#338 ronda 3): +12 -- GIF y WebP animados rechazados sin tesseract
-          #   (y de un solo fotograma como hoy), marcas pixReadMem (con tesseract simulado: no
-          #   existe un caso real), `_camino` y la version de la logica por CONTENIDO (un PNG
+          #   (y de un solo fotograma como hoy), marcas pixReadMem (simulado, y con los casos
+          #   REALES de tesseract 5.5.0 en la ronda 5), `_camino` y la version de la logica por CONTENIDO (un PNG
           #   llamado .pdf), tope total de pixeles y plazo total de un TIFF, y TIFF en streaming.
           #   Medido LOCAL en hall9000: 105 passed (las 2 reales corren). En el runner:
           #   103 passed, 2 skipped.
@@ -5355,8 +5355,15 @@ jobs:
           #   (normalizacion a 8 bits) y rc=0 con una marca de lectura fallida en stderr es
           #   `tesseract_no_lee`. Medido LOCAL en hall9000: 110 passed (las 2 reales corren).
           #   En el runner: 108 passed, 2 skipped.
-          grep -qE "^108 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 108 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 110 -> 127 (Jax#338 ronda 5): +17 -- TIFF F con un pixel inf/-inf/nan/1e30 (percentiles
+          #   de los finitos) y todo nan (`sin_datos_finitos`), los 2 casos REALES de tesseract
+          #   (rc=0 con "is not uint", rc=1 con pixReadMem), presupuesto de tiempo unico por
+          #   llamada con codigos `ocr_tiempo_excedido` (reloj y tesseract simulados; reemplaza
+          #   1 prueba), camino pdf/imagen coherente en compuerta/ocr/ingesta, tope de pixeles
+          #   para modos numericos y MemoryError como `sin_memoria`. Medido LOCAL en hall9000:
+          #   127 passed (las 2 reales corren). En el runner: 125 passed, 2 skipped.
+          grep -qE "^125 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 125 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
