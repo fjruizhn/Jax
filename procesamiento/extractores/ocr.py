@@ -181,6 +181,9 @@ def version_logica(camino: str) -> str | None:
 # Fernando: dice SOLO que el OCR no encontro texto.
 AVISO_IMAGEN_SIN_TEXTO = "<!-- el OCR no encontró texto -->"
 NOTA_TEXTO_DUDOSO = "<!-- texto de baja confianza -->"
+RAZON_TEXTO_SIN_POSICION = (
+    "el OCR devolvió texto sin datos de posición; se conserva sin verificar"
+)
 NOTA_PAGINA_SIN_TEXTO = (
     "<!-- posible documento escaneado sin texto: revisar o reescanear -->"
 )
@@ -711,17 +714,25 @@ def _clasificar(caracteres: int, analisis: dict) -> str:
     return "ok"
 
 
-def _clasificar_imagen(caracteres: int, analisis: dict, aportan_las_dos: bool) -> str:
+def _clasificar_imagen(
+    caracteres: int, analisis: dict, aportan_las_dos: bool, sin_posicion: bool = False
+) -> str:
     """`_clasificar`, con un tope para la union de las dos pasadas de una imagen
     con transparencia real (Jax#338 ronda 13): si las DOS pasadas aportan
     renglones propios (no duplicados), uno de los dos lados puede ser ruido al
     que tesseract dio confianza alta, y los umbrales no lo distinguen. El
     resultado es como mucho `dos_lecturas` (parcial + imagen_texto_dudoso,
-    `_resolver_imagen`). La regla (A) de menos de MINIMO_CARACTERES y la (B) no
-    cambian: el tope solo baja un `ok` o un `con_dudas`."""
+    `_resolver_imagen`). `sin_posicion` (ronda 15): alguna pasada aporto texto
+    plano SIN renglones en el TSV, que nadie pudo verificar ni deduplicar; el
+    resultado es como mucho `sin_posicion` (parcial + imagen_texto_dudoso, con
+    su razon). La regla (A) de menos de MINIMO_CARACTERES y la (B) no cambian:
+    el tope solo baja un `ok` o un `con_dudas`."""
     clasificacion = _clasificar(caracteres, analisis)
-    if aportan_las_dos and clasificacion in ("ok", "con_dudas"):
-        return "dos_lecturas"
+    if clasificacion in ("ok", "con_dudas"):
+        if sin_posicion:
+            return "sin_posicion"
+        if aportan_las_dos:
+            return "dos_lecturas"
     return clasificacion
 
 
@@ -898,11 +909,15 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
       separados por salto de linea;
     - metricas: `_analizar_tsv` sobre esas mismas filas; clasificacion:
       `_clasificar_imagen`.
-    Una pasada sin filas de palabra no aporta nada, ni texto ni metricas."""
+    Una pasada sin renglones en el TSV y con texto plano no vacio (ronda 15)
+    aporta sus lineas de texto plano TAL CUAL, en su lugar (blanca primero),
+    sin deduplicar (no hay cajas) y sin metricas, y marca `sin_posicion`.
+    Sin renglones y sin texto plano, la pasada no aporta nada."""
     blancos = _renglones_tsv(blanca["tsv"])
+    negros = _renglones_tsv(negra["tsv"])
     sin_pareja = list(blancos)
     propios_negros = []
-    for renglon in _renglones_tsv(negra["tsv"]):
+    for renglon in negros:
         pareja = next((
             blanco for blanco in sin_pareja
             if blanco["texto"] == renglon["texto"]
@@ -913,7 +928,19 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
         else:
             sin_pareja.remove(pareja)
     renglones = blancos + propios_negros
-    texto = "\n".join(renglon["texto"] for renglon in renglones)
+
+    def _aporte(pasada: dict, de_tsv: list[dict], tiene_renglones: bool) -> list[str]:
+        if tiene_renglones:
+            return [renglon["texto"] for renglon in de_tsv]
+        return pasada["texto"].splitlines() if pasada["texto"].strip() else []
+
+    sin_posicion = any(
+        not tiene and pasada["texto"].strip()
+        for pasada, tiene in ((blanca, bool(blancos)), (negra, bool(negros)))
+    )
+    texto = "\n".join(
+        _aporte(blanca, blancos, bool(blancos)) + _aporte(negra, propios_negros, bool(negros))
+    ).strip()
     # La fila de nivel 1 (pagina) solo da ancho y alto, no aporta palabras.
     paginas = [
         fila for salida in (blanca["tsv"], negra["tsv"]) for fila in salida.splitlines()[1:]
@@ -928,7 +955,8 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
         "caracteres": len(texto),
         **analisis,
         "aportan_las_dos": aportan_las_dos,
-        "clasificacion": _clasificar_imagen(len(texto), analisis, aportan_las_dos),
+        "sin_posicion": sin_posicion,
+        "clasificacion": _clasificar_imagen(len(texto), analisis, aportan_las_dos, sin_posicion),
     }
 
 
@@ -992,6 +1020,7 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
     suma_conf = 0.0
     primero = None
     aportan_las_dos = False   # alguna pagina con las dos pasadas aportando renglones propios
+    sin_posicion = False      # alguna pagina con texto plano sin renglones TSV
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
@@ -1016,6 +1045,7 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
                     return r
                 primero = primero or r
                 aportan_las_dos = aportan_las_dos or r.get("aportan_las_dos", False)
+                sin_posicion = sin_posicion or r.get("sin_posicion", False)
                 if r["texto"] and len(dimensiones) == 1:
                     partes.append(r["texto"])   # un solo fotograma: sin marca de pagina
                 elif r["texto"]:
@@ -1034,7 +1064,7 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
         "texto": "\n\n".join(partes),
         "caracteres": caracteres,
         **analisis,
-        "clasificacion": _clasificar_imagen(caracteres, analisis, aportan_las_dos),
+        "clasificacion": _clasificar_imagen(caracteres, analisis, aportan_las_dos, sin_posicion),
     }
 
 
@@ -1185,6 +1215,18 @@ def _resolver_imagen(
         detalle["codigo"] = CODIGO_IMAGEN_SIN_TEXTO
         return Resultado(
             estado="ok", salidas={"texto.txt": AVISO_IMAGEN_SIN_TEXTO},
+            extractor=EXTRACTOR, version=_version() or "desconocida",
+            detalle=detalle,
+        )
+
+    if r["clasificacion"] == "sin_posicion":
+        # Tope de la union (Jax#338 ronda 15): una pasada devolvio texto plano
+        # sin renglones en el TSV; se CONSERVA sin verificar.
+        detalle["razon"] = RAZON_TEXTO_SIN_POSICION
+        detalle["codigo"] = CODIGO_IMAGEN_TEXTO_DUDOSO
+        return Resultado(
+            estado="parcial",
+            salidas={"texto.txt": f"{NOTA_TEXTO_DUDOSO}\n{r['texto']}"},
             extractor=EXTRACTOR, version=_version() or "desconocida",
             detalle=detalle,
         )
