@@ -515,7 +515,7 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
             try:
                 await deps.poner_pausa(ctx, "vigia_no_cerro")
                 dice("pausa_puesta_por_vigia_no_cerro")
-            except Exception as exc:  # fail-soft sobre la traza; la mision ya termina como fallo vigia_no_cerro
+            except Exception as exc:  # fail-soft: sobre la traza; la mision ya termina como fallo vigia_no_cerro
                 dice("pausa_no_puesta", tipo=type(exc).__name__)
     cadena = await deps.cadena_ok(ctx)
     pausa = await deps.leer_pausa(ctx)
