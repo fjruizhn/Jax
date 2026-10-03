@@ -714,28 +714,6 @@ def _clasificar(caracteres: int, analisis: dict) -> str:
     return "ok"
 
 
-def _clasificar_imagen(
-    caracteres: int, analisis: dict, aportan_las_dos: bool, sin_posicion: bool = False
-) -> str:
-    """`_clasificar`, con un tope para la union de las dos pasadas de una imagen
-    con transparencia real (Jax#338 ronda 13): si las DOS pasadas aportan
-    renglones propios (no duplicados), uno de los dos lados puede ser ruido al
-    que tesseract dio confianza alta, y los umbrales no lo distinguen. El
-    resultado es como mucho `dos_lecturas` (parcial + imagen_texto_dudoso,
-    `_resolver_imagen`). `sin_posicion` (ronda 15): alguna pasada aporto texto
-    plano SIN renglones en el TSV, que nadie pudo verificar ni deduplicar; el
-    resultado es como mucho `sin_posicion` (parcial + imagen_texto_dudoso, con
-    su razon). La regla (A) de menos de MINIMO_CARACTERES y la (B) no cambian:
-    el tope solo baja un `ok` o un `con_dudas`."""
-    clasificacion = _clasificar(caracteres, analisis)
-    if clasificacion in ("ok", "con_dudas"):
-        if sin_posicion:
-            return "sin_posicion"
-        if aportan_las_dos:
-            return "dos_lecturas"
-    return clasificacion
-
-
 class _Presupuesto:
     """Un solo presupuesto de tiempo para todo el OCR de una imagen: se
     descuenta en CADA llamada a tesseract, leyendo `_reloj` justo antes."""
@@ -898,8 +876,7 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
     UNA sola fuente, el `tsv` (Jax#338 ronda 14): el texto plano de tesseract
     NO se usa en este camino (divergia del `tsv` y la deduplicacion de uno
     borraba renglones reales del otro). De las filas de palabra de las dos
-    pasadas salen, juntos, la deduplicacion, el texto, las metricas y
-    `aportan_las_dos`:
+    pasadas salen, juntos, la deduplicacion, el texto y las metricas:
     - renglones = palabras agrupadas por (pagina, bloque, parrafo, renglon) en
       el orden del `tsv`, unidas por espacio (`_renglones_tsv`);
     - un renglon de la negra es DUPLICADO si tiene el mismo texto y su caja se
@@ -908,11 +885,8 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
     - texto: los renglones de la blanca y despues los propios de la negra,
       separados por salto de linea;
     - metricas: `_analizar_tsv` sobre esas mismas filas; clasificacion:
-      `_clasificar_imagen`.
-    Una pasada sin renglones en el TSV y con texto plano no vacio (ronda 15)
-    aporta sus lineas de texto plano TAL CUAL, en su lugar (blanca primero),
-    sin deduplicar (no hay cajas) y sin metricas, y marca `sin_posicion`.
-    Sin renglones y sin texto plano, la pasada no aporta nada."""
+      `_clasificar`.
+    Una pasada sin renglones en el TSV no aporta nada."""
     blancos = _renglones_tsv(blanca["tsv"])
     negros = _renglones_tsv(negra["tsv"])
     sin_pareja = list(blancos)
@@ -928,19 +902,7 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
         else:
             sin_pareja.remove(pareja)
     renglones = blancos + propios_negros
-
-    def _aporte(pasada: dict, de_tsv: list[dict], tiene_renglones: bool) -> list[str]:
-        if tiene_renglones:
-            return [renglon["texto"] for renglon in de_tsv]
-        return pasada["texto"].splitlines() if pasada["texto"].strip() else []
-
-    sin_posicion = any(
-        not tiene and pasada["texto"].strip()
-        for pasada, tiene in ((blanca, bool(blancos)), (negra, bool(negros)))
-    )
-    texto = "\n".join(
-        _aporte(blanca, blancos, bool(blancos)) + _aporte(negra, propios_negros, bool(negros))
-    ).strip()
+    texto = "\n".join(renglon["texto"] for renglon in renglones)
     # La fila de nivel 1 (pagina) solo da ancho y alto, no aporta palabras.
     paginas = [
         fila for salida in (blanca["tsv"], negra["tsv"]) for fila in salida.splitlines()[1:]
@@ -949,14 +911,11 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
     analisis = _analizar_tsv("\n".join(
         ["encabezado", *paginas, *(fila for renglon in renglones for fila in renglon["filas"])]
     ))
-    aportan_las_dos = bool(sin_pareja) and bool(propios_negros)
     return {
         "texto": texto,
         "caracteres": len(texto),
         **analisis,
-        "aportan_las_dos": aportan_las_dos,
-        "sin_posicion": sin_posicion,
-        "clasificacion": _clasificar_imagen(len(texto), analisis, aportan_las_dos, sin_posicion),
+        "clasificacion": _clasificar(len(texto), analisis),
     }
 
 
@@ -1019,8 +978,6 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
     caracteres = palabras = 0
     suma_conf = 0.0
     primero = None
-    aportan_las_dos = False   # alguna pagina con las dos pasadas aportando renglones propios
-    sin_posicion = False      # alguna pagina con texto plano sin renglones TSV
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
@@ -1044,8 +1001,6 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
                 if r["clasificacion"] == "ilegible":
                     return r
                 primero = primero or r
-                aportan_las_dos = aportan_las_dos or r.get("aportan_las_dos", False)
-                sin_posicion = sin_posicion or r.get("sin_posicion", False)
                 if r["texto"] and len(dimensiones) == 1:
                     partes.append(r["texto"])   # un solo fotograma: sin marca de pagina
                 elif r["texto"]:
@@ -1064,7 +1019,7 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
         "texto": "\n\n".join(partes),
         "caracteres": caracteres,
         **analisis,
-        "clasificacion": _clasificar_imagen(caracteres, analisis, aportan_las_dos, sin_posicion),
+        "clasificacion": _clasificar(caracteres, analisis),
     }
 
 
@@ -1215,33 +1170,6 @@ def _resolver_imagen(
         detalle["codigo"] = CODIGO_IMAGEN_SIN_TEXTO
         return Resultado(
             estado="ok", salidas={"texto.txt": AVISO_IMAGEN_SIN_TEXTO},
-            extractor=EXTRACTOR, version=_version() or "desconocida",
-            detalle=detalle,
-        )
-
-    if r["clasificacion"] == "sin_posicion":
-        # Tope de la union (Jax#338 ronda 15): una pasada devolvio texto plano
-        # sin renglones en el TSV; se CONSERVA sin verificar.
-        detalle["razon"] = RAZON_TEXTO_SIN_POSICION
-        detalle["codigo"] = CODIGO_IMAGEN_TEXTO_DUDOSO
-        return Resultado(
-            estado="parcial",
-            salidas={"texto.txt": f"{NOTA_TEXTO_DUDOSO}\n{r['texto']}"},
-            extractor=EXTRACTOR, version=_version() or "desconocida",
-            detalle=detalle,
-        )
-
-    if r["clasificacion"] == "dos_lecturas":
-        # Tope de la union (Jax#338 ronda 13): las dos pasadas (fondo blanco y
-        # fondo negro) aportan renglones distintos; se CONSERVA todo el texto.
-        detalle["razon"] = (
-            "las dos lecturas de la imagen transparente (sobre fondo blanco y "
-            "sobre fondo negro) aportan renglones distintos: puede haber ruido"
-        )
-        detalle["codigo"] = CODIGO_IMAGEN_TEXTO_DUDOSO
-        return Resultado(
-            estado="parcial",
-            salidas={"texto.txt": f"{NOTA_TEXTO_DUDOSO}\n{r['texto']}"},
             extractor=EXTRACTOR, version=_version() or "desconocida",
             detalle=detalle,
         )
