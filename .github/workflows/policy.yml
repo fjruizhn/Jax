@@ -5362,8 +5362,15 @@ jobs:
           #   1 prueba), camino pdf/imagen coherente en compuerta/ocr/ingesta, tope de pixeles
           #   para modos numericos y MemoryError como `sin_memoria`. Medido LOCAL en hall9000:
           #   127 passed (las 2 reales corren). En el runner: 125 passed, 2 skipped.
-          grep -qE "^125 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 125 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 127 -> 130 (Jax#338 ronda 6, simplificacion): -8 (se BORRAN las pruebas del escalado
+          #   por percentiles y de sin_datos_finitos: 5 de nan/inf/1e30/todo nan y 3 de modos
+          #   numericos F/I/I;16) y +11 (F e I -> modo_no_soportado sin tesseract: 2; TIFF
+          #   multipagina con una pagina F: 1; I;16 con texto en una y dos paginas: 2; tope de
+          #   otros modos y CMYK de dos paginas: 2; %PDF desplazado solo con .pdf: 1, y nota.txt/
+          #   datos.csv/correo.eml que lo mencionan siguen en sin_extractor: 3). Medido LOCAL en
+          #   hall9000: 130 passed (las 2 reales corren). En el runner: 128 passed, 2 skipped.
+          grep -qE "^128 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 128 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
