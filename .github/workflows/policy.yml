@@ -6869,7 +6869,15 @@ jobs:
         # (la exclusion pasa de un nombre fijo a toda carpeta oculta de profundidad 2). Local: 52 passed + 1 solo-host.
         # 51 -> 53 (ronda 4): +2, symlink oculto no es carpeta excluida / la cuenta forense incluye la
         # carpeta oculta. Local: 54 passed + 1 solo-host (55 pruebas; el runner salta 2).
+        # 53 -> 68 (2026-10-03, fix/permisos-sin-otros): +15, sin acceso para "otros" (spec madre §5) y la raíz
+        # del workspace: arbol con o::r-x da NO CUMPLE (1), --verificar marca otros en la raíz (2), --aplicar
+        # cierra la raíz sin tocar dueño/grupo (1), --aplicar deja 2770/0660 y other::--- en modo y ACL (1),
+        # --verificar cuenta cada bit de otros (6), lo creado por jaxsvc y por fruiz hereda other::--- (2),
+        # un usuario ajeno lee antes y no después (1) y el arnés deja entrar al usuario de pytest por su
+        # entrada nombrada (1). Medido en local (fruiz, con el núcleo real instalado): 66 passed + 3 skipped
+        # + 1 solo-host deseleccionado; las 2 diferencias con el runner son las pruebas que se saltan aquí por
+        # el núcleo real y que el runner SÍ corre: 66 + 2 = 68 passed, 2 skipped. Manda el runner.
         run: |
           PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
-          grep -qE "^53 passed, 2 skipped" /tmp/permisos_proyectos || {
-            echo "PISO ROTO: se esperaban 53 tests CORRIDOS (no skipeados) y exactamente 2 skipped."; exit 1; }
+          grep -qE "^68 passed, 2 skipped" /tmp/permisos_proyectos || {
+            echo "PISO ROTO: se esperaban 68 tests CORRIDOS (no skipeados) y exactamente 2 skipped."; exit 1; }
