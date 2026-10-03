@@ -36,10 +36,12 @@ MODULO_POR_PAQUETE: dict[str, str] = {
     "openpyxl": "openpyxl",
     "pdfplumber": "pdfplumber",
     "python-docx": "docx",
-    # `PIL._imaging` (el binario) y no `PIL` ni `PIL.Image`: medido con Pillow
-    # 12.3.0, `import PIL` no lo carga y `import PIL.Image` TAMPOCO falla sin
-    # el -- lo sustituye por un `DeferredError` que solo revienta al usarlo.
-    "pillow": "PIL._imaging",
+    # `PIL.Image` y no `PIL`: `import PIL` no carga el binario `_imaging`, pero
+    # en un proceso NUEVO `import PIL.Image` falla sin el (Image.py relanza el
+    # error) y tambien si el binario es de otra version. OJO: si `PIL.Image` ya
+    # estaba importado en el mismo proceso, un fallo posterior de `_imaging`
+    # queda como `DeferredError` y esta comprobacion no lo ve.
+    "pillow": "PIL.Image",
 }
 
 #: paquete -> extensiones que dejan de poder procesarse si falta (freno por tipo).
