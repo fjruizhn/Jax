@@ -83,7 +83,8 @@ def test_transport_digest_binds_exact_chunk_projection():
     unit = mint_governed_transport_unit(narrative, chunked, context,
         transport_kind="web-chat-http", idempotency_key="chunked", now=NOW)
     assert revalidate_for_transport(unit, NOW).chunks == chunked.chunks
-    object.__setattr__(unit.rendered, "chunks", ("UNBOUND BYTES",))
+    object.__setattr__(unit.rendered, "chunks", ("canonical ", "output"))
+    assert "".join(unit.rendered.chunks) == unit.rendered.text
     with pytest.raises(OutputLifecycleError):
         revalidate_for_transport(unit, NOW)
 
