@@ -19,12 +19,21 @@ memory reads/writes, H3/H4). It has its own transactional resolver,
 
 Every mutation here takes `jax_tenants(tenant_id) FOR UPDATE` as its first
 statement (a per-tenant mutex), then locks the ACTOR's own row, then (ronda 3,
-MAJOR M1) any DESTINO row this operation touches, all BEFORE the project
-scope/membership rows: `tenant -> actor -> destino -> projects -> scope ->
-membership -> events` (plan section 2.1). The chat's own resolver
+MAJOR M1) any DESTINO row this operation touches. After that the order is NOT
+the same for every operation:
+  - `bootstrap_existing_project` locks `projects` BEFORE the scope row:
+    `tenant -> actor -> destino -> projects -> scope -> membership -> events`
+    (plan section 2.1);
+  - `rename_project` and `set_project_lifecycle` lock the SCOPE first and
+    `projects` after it: `tenant -> actor -> scope -> membership -> projects ->
+    events` (rename only reaches `projects` once the actor is resolved, so a
+    cross-tenant actor is denied before asking for it).
+There is no cycle: every mutation takes the tenant mutex first, so two
+mutations of one tenant serialise there, and between tenants `rename` denies
+before requesting `projects`. The chat's own resolver
 (`scope_authority.py`'s `_tenant_user_cur` -> `_project_membership_cur`)
-locks a user row before the scope row for the SAME reason; the two now agree,
-so they cannot deadlock (MariaDB error 1213) over the same pair of rows --
+locks a user row before the scope row for the SAME reason as the destino rule;
+they cannot deadlock (MariaDB error 1213) over the same pair of rows --
 reproduced and fixed ronda 3, 2026-09-26, see
 `tests/test_project_authority_mariadb.py::test_orden_de_bloqueo_...`.
 
@@ -842,6 +851,45 @@ class ProjectAuthorityAdmin:
                 await self._mirror_status(cur, project_id, target)
                 await self._event(cur, scope, event_name, project_id, None, actor.tenant_id,
                                   None, None, current.value, target.value)
+                return True
+            except ProjectAuthorityError:
+                raise
+            except Exception as exc:
+                raise _wrap_unexpected_db_error(exc) from exc
+
+        return await self._store.mutation(op)
+
+    async def rename_project(self, request: MutationAuthorizationRequest, project_id: int, *,
+                             name: str, description: str | None) -> bool:
+        """Renombra un proyecto ACTIVE. Mínimo OWNER. Idempotente: si nombre y
+        descripción ya son esos, no escribe ni deja evento (un reintento tras un
+        resultado DESCONOCIDO no duplica). Orden de candados: alcance (tenant, usuario,
+        `jax_project_scope`, membresía) -> `projects(id)`, igual que el espejo
+        `set_project_lifecycle`; `projects` se toma DESPUÉS de resolver el actor
+        (sin `lock_target`), de modo que un actor de otro tenant sea negado antes
+        de tocar el candado de una fila que no es de su tenant."""
+        normalized_name = unicodedata.normalize("NFC", name or "").strip()
+        if not (1 <= len(normalized_name) <= 255):
+            raise AuthorizationDenied("project name must be 1-255 characters")
+        if description is not None and len(description) > 2000:
+            raise AuthorizationDenied("project description must be <= 2000 characters")
+
+        async def op(cur: Any) -> bool:
+            try:
+                actor, _ = await self._resolve_project_actor_cur(
+                    cur, request, project_id, expected_operation="RENAME_PROJECT",
+                    min_role=ProjectRole.OWNER, allowed_states=frozenset({ProjectLifecycle.ACTIVE}))
+                await cur.execute("SELECT name,description FROM projects WHERE id=%s FOR UPDATE", (project_id,))
+                current = await cur.fetchone()
+                if not current:
+                    raise ProjectNotVisible("project does not exist")
+                if (self._value(current, "name", 0) == normalized_name
+                        and self._value(current, "description", 1) == description):
+                    return False
+                await cur.execute("UPDATE projects SET name=%s,description=%s WHERE id=%s",
+                                  (normalized_name, description, project_id))
+                await self._event(cur, request.scope, "RENAME_PROJECT", project_id, None, actor.tenant_id,
+                                  None, None, "ACTIVE", "ACTIVE")
                 return True
             except ProjectAuthorityError:
                 raise

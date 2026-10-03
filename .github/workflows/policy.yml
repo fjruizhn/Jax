@@ -415,6 +415,102 @@ jobs:
           if grep -qE "skipped" /tmp/clisb; then
             echo "HAY TESTS SALTADOS: la contencion real no se ejercito."; exit 1; fi
 
+  # El Faro, fase 0 (spec 2026-10-02-faro-pasarela-ecosistema-design.md, plan
+  # 2026-10-02-faro-fase-0.md, pasos 0.1 y 0.2 y la ronda de auditoria): el paquete fijado del
+  # ecosistema y el Puerto MCP de solo lectura. Las pruebas levantan un Puerto REAL en un socket
+  # Unix temporal y le hablan con un cliente MCP real del SDK oficial por el rele stdio (un
+  # subproceso `python -m jax.faro.relay`), y construyen paquetes reales desde un repo git efimero.
+  # TODO sale con HASH: mcp de requirements-faro.txt, pytest y el cliente de base de
+  # requirements-faro-ci.txt (`--require-hashes`, sin `pip install` suelto: lo vigila
+  # tests/test_faro_requirements.py). Piso exacto de tests CORRIDOS, cero saltados (un skip se ve igual
+  # que verde). Medido 2026-10-02 en hall9000 con Python 3.12: 671 passed
+  # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 72 +
+  # control 168 + lanzador 77 + acl 43; desde aviso, los pasos 0.3b y 0.3c y su auditoria). Las pruebas con bwrap y uids
+  # reales estan en el job `faro-jaula`; las de la base real, en `faro-bitacora-db`.
+  faro-fase0:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --require-hashes -r requirements-faro.txt
+      - run: pip install --require-hashes -r requirements-faro-ci.txt
+      - run: python -m pytest tests/test_faro_paquete.py tests/test_faro_puerto.py tests/test_faro_puerto_e2e.py tests/test_faro_transporte.py tests/test_faro_cadena.py tests/test_faro_requirements.py tests/test_faro_aviso.py tests/test_faro_topes.py tests/test_faro_control.py tests/test_faro_lanzador.py tests/test_faro_acl.py -v
+      - run: |
+          python -m pytest tests/test_faro_paquete.py tests/test_faro_puerto.py tests/test_faro_puerto_e2e.py tests/test_faro_transporte.py tests/test_faro_cadena.py tests/test_faro_requirements.py tests/test_faro_aviso.py tests/test_faro_topes.py tests/test_faro_control.py tests/test_faro_lanzador.py tests/test_faro_acl.py -q 2>&1 | tee /tmp/faro
+          grep -qE "^671 passed" /tmp/faro || {
+            echo "PISO ROTO: se esperaban 671 tests CORRIDOS del Faro."; exit 1; }
+          if grep -qE "skipped" /tmp/faro; then
+            echo "HAY TESTS SALTADOS: el Faro se ejercita completo o no cuenta."; exit 1; fi
+
+  # El Faro: la bitacora durable (auditoria MAJOR-5). Tabla encadenada con hash previo y un usuario de
+  # base que SOLO tiene INSERT, contra una MariaDB 12.3.3 EFIMERA (el service de este job, que muere con
+  # el). Piso exacto de 40 tests corridos (bitacora 22 + topes 18: el conteo atomico, N hilos contra un tope
+  # de N-1), cero saltados: sin FARO_TEST_DB_ADMIN las pruebas se saltan, y un skip se ve igual que verde.
+  faro-bitacora-db:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:12.3.3
+        env:
+          MARIADB_ROOT_PASSWORD: ci
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      PYTHONPATH: .
+      FARO_TEST_DB_ADMIN: "127.0.0.1:3306:root:ci"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --require-hashes -r requirements-faro.txt
+      - run: pip install --require-hashes -r requirements-faro-ci.txt
+      - run: python -m pytest tests/test_faro_bitacora_db.py tests/test_faro_topes_db.py -v
+      - run: |
+          python -m pytest tests/test_faro_bitacora_db.py tests/test_faro_topes_db.py -q 2>&1 | tee /tmp/faro-db
+          grep -qE "^40 passed" /tmp/faro-db || {
+            echo "PISO ROTO: se esperaban 40 tests CORRIDOS de la bitacora y los topes del Faro."; exit 1; }
+          if grep -qE "skipped" /tmp/faro-db; then
+            echo "HAY TESTS SALTADOS: la bitacora se prueba contra una base real o no cuenta."; exit 1; fi
+
+  # El Faro, paso 0.3c: la jaula y el canal de control con bwrap REAL y uids REALES (nobody, daemon, www-data
+  # via `sudo setpriv`; el runner de GitHub trae sudo sin contrasena). Instala bubblewrap y suelta la
+  # restriccion de namespaces de usuario sin privilegios del kernel, igual que el job de cli_sandbox. Piso
+  # exacto de 11 tests corridos, cero saltados: sin bwrap o sin sudo las pruebas se saltan y un skip se ve igual
+  # que verde. Medido 2026-10-02 en hall9000 (bubblewrap 0.11.1, Python 3.12). Incluye bwrap CORRIENDO COMO el uid de
+  # la jaula (nobody) con sus fuentes en el directorio 0700 de faro, gracias a la ACL por ejecucion, y visudo -cf del
+  # sudoers de ejemplo.
+  faro-jaula:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar bubblewrap
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
+            echo "(sysctl ausente en este kernel -- no aplica)"
+          bwrap --version
+      - run: pip install --require-hashes -r requirements-faro.txt
+      - run: pip install --require-hashes -r requirements-faro-ci.txt
+      - run: python -m pytest tests/test_faro_jaula_real.py -v
+      - run: |
+          python -m pytest tests/test_faro_jaula_real.py -q 2>&1 | tee /tmp/faro-jaula
+          grep -qE "^11 passed" /tmp/faro-jaula || {
+            echo "PISO ROTO: se esperaban 11 tests CORRIDOS de la jaula del Faro."; exit 1; }
+          if grep -qE "skipped" /tmp/faro-jaula; then
+            echo "HAY TESTS SALTADOS: la jaula se ejercita con bwrap y uids reales o no cuenta."; exit 1; fi
+
   # Task 6 del plan de alertas nacio con 11 tests y CERO jobs que los
   # corrieran -- tercera instancia del mismo hueco en el mes (ver la octava
   # leccion de metodo en CONTEXT.md). Este job es la correccion, y se
@@ -734,7 +830,7 @@ jobs:
           asyncio.run(main())
           print("run_migrations OK")
           PY
-      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py scripts/_b9_revertir_005_test.py
+      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py tests/test_project_queries_mariadb.py tests/test_proyectos_e1_fks_mariadb.py tests/test_proyectos_e1_migrar_mariadb.py scripts/_b9_revertir_005_test.py
       - name: Piso exacto de tests CORRIDOS
         # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
         run: |
@@ -743,7 +839,8 @@ jobs:
             las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py \
             jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py \
             jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py \
-            scripts/_b9_revertir_005_test.py 2>&1 | tee /tmp/out
+            tests/test_project_queries_mariadb.py tests/test_proyectos_e1_fks_mariadb.py \
+            tests/test_proyectos_e1_migrar_mariadb.py scripts/_b9_revertir_005_test.py 2>&1 | tee /tmp/out
           # 31 el 2026-09-16 (frente F): 20 contra la base (esquema 5, emision 7,
           #   consumo 8 con la carrera de 20, la carrera forzada, el EXPLAIN y el paso
           #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
@@ -967,8 +1064,19 @@ jobs:
           #   conexiones reales y una barrera (mismas mitades del resolvedor que usa
           #   el auditor). Medido con la credencial de pruebas dedicada, MISMO
           #   comando, jax-platform clonado y run_migrations() real: 204 passed.
-          grep -qE "^204 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 204 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 204 -> 270 el 2026-10-02 (Proyectos E1, PR #315): +5 en
+          #   tests/test_project_authority_mariadb.py (209 en CI, run 37003999907:
+          #   el runner conto "209 passed" con este mismo comando) y +61 de tres
+          #   archivos que entran al job: tests/test_project_queries_mariadb.py,
+          #   tests/test_proyectos_e1_fks_mariadb.py y
+          #   tests/test_proyectos_e1_migrar_mariadb.py (estos dos ultimos crean y
+          #   borran bases `jax_memory_test_e1*`; el usuario root del servicio de
+          #   este job puede). Medido local con la credencial de pruebas dedicada
+          #   (~/.config/jax/test-db.env, usuario jax_test), MISMO comando: sin los
+          #   tres archivos, 209 passed; con ellos, 270 passed, 0 skipped.
+          # 270 -> 274 (2026-10-02, Proyectos E1.1, PR #321): +4 medidos en el runner — candidatos sin mínimo de letras (3) y autoridad con q vacío (1).
+          grep -qE "^274 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 274 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -3501,7 +3609,7 @@ jobs:
           # job). Confirmado contra el run real de CI (run 35372766868): 16
           # tests de tests/test_ejecutor_reproduccion_u3.py (14 que acá salen
           # passed + 2 que acá salen xfailed) se saltean en el runner --
-          # 2206 - 14 = 2192 passed, 1 + 16 = 17 skipped. Ningún otro archivo
+          # 2206 - 14 = 2196 passed, 1 + 16 = 17 skipped. Ningún otro archivo
           # de los agregados hoy se saltea sin DB: corrido local con env -i y
           # sin JAX_DB_HOST, los otros 12 dan verde (passed/xfailed), cero
           # skips. Piso corregido con el número del RUNNER, no el de esta
@@ -6344,8 +6452,14 @@ jobs:
           #   tests/test_contrato_dispatch_db.py -- probaba `cargar_registro`, borrada con el
           #   REPL; el import fallaba con ImportError en este job. Un test de DB: lo cuenta
           #   este job, no el sin DB. Los 168 son el declarado (169) menos ese.
-          grep -qE "^168 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 168 tests CORRIDOS."; exit 1; }
+          # 168 -> 170 el 2026-10-02 (X-3, C2 mide la edad por respaldado_at): +2 en
+          #   tests/test_ejecutor_politica_db.py -- un snapshot viejo re-verificado hoy NO es
+          #   vigente, y el control positivo (uno reciente si lo es). El del indice ya existia
+          #   y ahora exige idx_ejecutor_punto_host_respaldo. Medido local con las migraciones
+          #   de jax-platform master: ese archivo 3 -> 5 passed. Los dos vistos en rojo contra
+          #   el exportador viejo (a8de3fd: 2 failed / 3 passed).
+          grep -qE "^170 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 170 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira
