@@ -698,10 +698,26 @@ def _mirar_oculta_hijos(dir_fd: int, ruta: str, hallazgos: list[str], huellas: d
             os.close(fd_path)
 
 
+def _uids_de_status(ruta: Path) -> set | None:
+    """Los cuatro uid (real, efectivo, guardado, fs) de un `status`; None si no se pudo leer o no se entiende."""
+    try:
+        texto = ruta.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for linea in texto.splitlines():
+        if linea.startswith("Uid:"):
+            try:
+                return {int(x) for x in linea.split()[1:5]}
+            except ValueError:
+                return None
+    return None
+
+
 def _procesos_de_usuario(uid: int) -> list[int]:
-    """Pids de los procesos cuyo uid REAL, EFECTIVO, GUARDADO o de FS (los cuatro campos de `Uid:` de
-    /proc/<pid>/status) es `uid`. Falla cerrado si /proc no se puede leer; un proceso que termina entre el listado y
-    la lectura simplemente ya no cuenta."""
+    """Pids de los procesos con algún uid REAL, EFECTIVO, GUARDADO o de FS (los cuatro campos de `Uid:`) igual a
+    `uid`, mirando el proceso (/proc/<pid>/status) Y CADA HILO (/proc/<pid>/task/<tid>/status): un hilo puede cambiar
+    de uid (setuid por hilo) mientras el proceso sigue figurando con otro. Se informa el pid del proceso, una sola
+    vez. Falla cerrado si /proc no se puede leer; lo que termina entre el listado y la lectura ya no cuenta."""
     try:
         entradas = list(RUTA_PROC.iterdir())
     except OSError as exc:
@@ -710,18 +726,18 @@ def _procesos_de_usuario(uid: int) -> list[int]:
     for d in entradas:
         if not d.name.isdigit():
             continue
+        ids = _uids_de_status(d / "status")
+        if ids is not None and uid in ids:
+            pids.append(int(d.name))
+            continue
         try:
-            texto = (d / "status").read_text(encoding="utf-8", errors="replace")
+            hilos = list((d / "task").iterdir())
         except OSError:
             continue
-        for linea in texto.splitlines():
-            if linea.startswith("Uid:"):
-                try:
-                    ids = {int(x) for x in linea.split()[1:5]}
-                except ValueError:
-                    break
-                if uid in ids:
-                    pids.append(int(d.name))
+        for hilo in hilos:
+            ids_hilo = _uids_de_status(hilo / "status")
+            if ids_hilo is not None and uid in ids_hilo:
+                pids.append(int(d.name))
                 break
     return sorted(pids)
 
