@@ -1953,6 +1953,17 @@ def test_los_minimos_son_60_para_el_aviso_y_10_para_el_log(_aviso_restaurado):
     assert (mod.INTERVALO_AVISO_S, mod.INTERVALO_LOG_S) == (60.0, 10.0)
 
 
+def test_un_valor_enorme_se_baja_al_techo_con_warning(_aviso_restaurado, caplog):
+    """MINOR-N5: sin techo, 1e28 (o una confusion de unidades) apagaria el aviso del POST
+    mientras viva el proceso."""
+    with caplog.at_level("WARNING", logger="las_manos.aviso_extractores"):
+        mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S="1e28", JAX_PROCESAMIENTO_LOG_EXTRACTORES_S="1e28")
+    assert (mod.INTERVALO_AVISO_S, mod.INTERVALO_LOG_S) == (86400.0, 3600.0)
+    avisos = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S" in a for a in avisos), avisos
+    assert any("JAX_PROCESAMIENTO_LOG_EXTRACTORES_S" in a for a in avisos), avisos
+
+
 def test_un_valor_valido_por_encima_del_minimo_se_respeta(_aviso_restaurado):
     mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S="7200", JAX_PROCESAMIENTO_LOG_EXTRACTORES_S="30")
     assert (mod.INTERVALO_AVISO_S, mod.INTERVALO_LOG_S) == (7200.0, 30.0)

@@ -26,7 +26,7 @@ import time
 
 logger = logging.getLogger("las_manos.aviso_extractores")
 
-def _segundos(nombre: str, por_defecto: float, minimo: float) -> float:
+def _segundos(nombre: str, por_defecto: float, minimo: float, maximo: float) -> float:
     """Lee un intervalo del entorno SIN lanzar nunca (se evalua al importar y
     `server.py` importa este modulo: un `ValueError` tumbaria LAS MANOS entero).
     No numerico o no finito -> el default, con un warning. Menos que `minimo`
@@ -44,13 +44,19 @@ def _segundos(nombre: str, por_defecto: float, minimo: float) -> float:
     if valor < minimo:
         logger.warning("%s=%r es menor que el minimo; se usa %ss", nombre, crudo, minimo)
         return minimo
+    if valor > maximo:
+        # MINOR-N5: sin techo, 1e28 (o unidades confundidas) apagaria el aviso en
+        # silencio mientras viva el proceso.
+        logger.warning("%s=%r es mayor que el techo; se usa %ss", nombre, crudo, maximo)
+        return maximo
     return valor
 
 
 #: Sin hardcoding: ajustables por entorno, con los valores decididos por defecto
-#: y un piso (aviso 60 s, log 10 s) para que ningun valor mande un aviso por POST.
-INTERVALO_AVISO_S = _segundos("JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S", 3600.0, 60.0)
-INTERVALO_LOG_S = _segundos("JAX_PROCESAMIENTO_LOG_EXTRACTORES_S", 60.0, 10.0)
+#: un piso (aviso 60 s, log 10 s) para que ningun valor mande un aviso por POST,
+#: y un techo (aviso 24 h, log 1 h) para que ninguno lo apague en silencio.
+INTERVALO_AVISO_S = _segundos("JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S", 3600.0, 60.0, 86400.0)
+INTERVALO_LOG_S = _segundos("JAX_PROCESAMIENTO_LOG_EXTRACTORES_S", 60.0, 10.0, 3600.0)
 
 #: Referencia fuerte a las tareas en vuelo (anti-GC), con auto-limpieza.
 _TAREAS: set[asyncio.Task] = set()
