@@ -699,3 +699,40 @@ def test_alcance_sin_maquinas_que_cerrar_no_entra_a_la_cuenta(tmp_path):
         raise AssertionError("no tenía que entrar")
 
     assert asyncio.run(AR.verificar_alcance(_ctx(tmp_path), (), correr=correr)) == ()
+
+
+def test_el_canario_de_arranque_audita_con_el_plazo_de_axioma_config(tmp_path, monkeypatch):
+    """`ejecutor.c5_tope_s` (cfg.tope_s) llega a auditor_cliente.auditar desde el arranque (p_c5)."""
+    import jacobs.store as jstore
+    from jax.ejecutor.contratos import auditor_cliente, canario_c5
+
+    class _Conexion:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    async def leer_config(conn):
+        return AR.eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 333, False, False)
+
+    async def eleccion(conn, *, hosts_mision, cfg, resolve_facet):
+        return "faceta-fake", ()
+
+    vistas = {}
+
+    async def auditar_falso(lote, **kw):
+        vistas.update(kw)
+
+    async def verificar_c5_falso(auditar):
+        await auditar("lote")
+        return ()
+
+    monkeypatch.setattr(jstore, "conexion", lambda **kw: _Conexion())
+    monkeypatch.setattr(AR.eleccion_c5, "leer_config", leer_config)
+    monkeypatch.setattr(AR, "eleccion_del_auditor", eleccion)
+    monkeypatch.setattr(AR, "verificar_c5_estatico", lambda ctx: ())
+    monkeypatch.setattr(auditor_cliente, "auditar", auditar_falso)
+    monkeypatch.setattr(canario_c5, "verificar_c5", verificar_c5_falso)
+    assert asyncio.run(AR.pruebas_reales(_ctx(tmp_path))["c5"]()) == ()
+    assert vistas == {"faceta": "faceta-fake", "max_tokens": 100, "tope_s": 333}

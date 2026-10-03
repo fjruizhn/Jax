@@ -450,7 +450,7 @@ async def _principal(ruta_mision: Path) -> int:
     mision_id = mision_id_desde_ruta(ruta_mision)
 
     async def auditar(lote):
-        return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens)
+        return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens, tope_s=cfg.tope_s)
 
     async def _tomar_huella(nombre_host: str) -> huella.Huella:
         """`huella.argv_huella_servicio` -- una sola forma, apertura y cierre comparan

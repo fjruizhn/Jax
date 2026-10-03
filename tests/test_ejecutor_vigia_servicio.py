@@ -205,7 +205,7 @@ def test_principal_pasa_el_tipo_de_la_mision_al_contexto(tmp_path, monkeypatch):
     async def _leer_config_falso(conn):
         return eleccion_c5.ConfigC5(
             cerebro_faceta="x", auditor_faceta="y", auditor_faceta_local="z",
-            lote_max=5, intervalo_s=1.0, max_tokens=100,
+            lote_max=5, intervalo_s=1.0, max_tokens=100, tope_s=400,
             admite_datos_de_clientes=False, admite_mismo_proveedor=False)
 
     async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet):
@@ -995,7 +995,7 @@ def test_principal_pasa_la_ruta_extra_del_administrador_de_verdad_block_f(tmp_pa
     async def _leer_config_falso(conn):
         return eleccion_c5.ConfigC5(
             cerebro_faceta="x", auditor_faceta="y", auditor_faceta_local="z",
-            lote_max=5, intervalo_s=1.0, max_tokens=100,
+            lote_max=5, intervalo_s=1.0, max_tokens=100, tope_s=400,
             admite_datos_de_clientes=False, admite_mismo_proveedor=False)
 
     async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet):
@@ -1016,3 +1016,45 @@ def test_principal_pasa_la_ruta_extra_del_administrador_de_verdad_block_f(tmp_pa
 
     assert rc == 0
     assert llamadas["rutas_extra"] == (H.ruta_authorized_keys_admin(admin),)
+
+
+def test_el_vigia_audita_con_el_plazo_de_axioma_config(tmp_path, monkeypatch):
+    """`ejecutor.c5_tope_s` (cfg.tope_s) llega a auditor_cliente.auditar desde el vigia en vivo."""
+    import jacobs.store as jstore
+    from jax.ejecutor.contratos import eleccion_c5
+
+    for k, v in _entorno_principal(tmp_path).items():
+        monkeypatch.setenv(k, v)
+    ruta_mision = tmp_path / f"{MISION_ID}.json"
+    ruta_mision.write_text(json.dumps({"mision": "uptime de atemai", "hosts": ["atemai"]}))
+    monkeypatch.setattr(jstore, "conexion", lambda **kw: _ConexionFalsa())
+
+    async def _leer_config_falso(conn):
+        return eleccion_c5.ConfigC5(
+            cerebro_faceta="x", auditor_faceta="y", auditor_faceta_local="z",
+            lote_max=5, intervalo_s=1.0, max_tokens=100, tope_s=777,
+            admite_datos_de_clientes=False, admite_mismo_proveedor=False)
+
+    async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet):
+        return ("faceta-fake", None, None)
+
+    monkeypatch.setattr(eleccion_c5, "leer_config", _leer_config_falso)
+    monkeypatch.setattr(eleccion_c5, "elegir_y_resolver_auditor", _elegir_falso)
+    vistas = {}
+
+    async def _auditar_falso(lote, **kw):
+        vistas.update(kw)
+        return "revision"
+
+    from jax.ejecutor.contratos import auditor_cliente
+    monkeypatch.setattr(auditor_cliente, "auditar", _auditar_falso)
+    capturado = {}
+
+    async def _correr_mision_falso(ctx, mision, **kw):
+        capturado["auditar"] = kw["auditar"]
+        return ()
+
+    monkeypatch.setattr(S, "correr_mision", _correr_mision_falso)
+    assert asyncio.run(S._principal(ruta_mision)) == 0
+    assert asyncio.run(capturado["auditar"]("lote")) == "revision"
+    assert vistas == {"faceta": "faceta-fake", "max_tokens": 100, "tope_s": 777}

@@ -426,7 +426,7 @@ def pruebas_reales(ctx: Contexto) -> dict:
                 conn, hosts_mision=ctx.hosts_mision, cfg=cfg, resolve_facet=resolve_facet)
 
         async def auditar(lote):
-            return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens)
+            return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens, tope_s=cfg.tope_s)
 
         return tuple(estaticos) + tuple(eleccion) + await canario_c5.verificar_c5(auditar)
 
