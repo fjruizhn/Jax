@@ -23,7 +23,7 @@
 #   con `stat` real (dueño fruiz:fruiz, sin ninguna ACL, sin bits especiales; el modo se
 #   deriva del rwx que el DUEÑO ya tiene en cada objeto, que en el árbol ya aplicado da
 #   exactamente 0775/0664 -- los dos casos reales medidos en hall9000 el 2026-09-25,
-#   fuera de `.claude-flow`, que este guion nunca toca). El respaldo de `getfacl -R -p`
+#   fuera de la carpeta oculta de estado de herramientas, que este guion nunca toca). El respaldo de `getfacl -R -p`
 #   se conserva como REGISTRO FORENSE únicamente -- nunca se usa para reconstruir nada.
 #
 # BLOCK-2 (con --revertir eliminado, sus tres puntos de entrada al núcleo tenían un
@@ -45,9 +45,9 @@
 # reserva. m2: el sha256 del núcleo instalado se compara contra el CONTENIDO COMMITEADO
 # en HEAD (`git show HEAD:ops/permisos_proyectos.py`), no contra el working tree; la
 # cadena de directorios padre se revisa con `lstat` (nunca sigue un symlink). m4: la
-# exclusión de `NOMBRES_EXCLUIDOS` sólo aplica al primer nivel de cada proyecto
-# (`proyectos/<proyecto>/.claude-flow`), nunca en `proyectos/` mismo ni más profundo, y
-# se reporta.
+# exclusión de las carpetas ocultas de estado de herramientas (nombre que empieza por
+# punto) sólo aplica al primer nivel de cada proyecto (`proyectos/<proyecto>/<.oculta>`),
+# nunca en `proyectos/` mismo ni más profundo, y se reporta.
 from __future__ import annotations
 
 import grp
@@ -69,8 +69,11 @@ DUENO_ORIGINAL = "fruiz"  # a quien --deshacer devuelve el dueño (mismo nombre 
 # -- son dos roles distintos que hoy coinciden en la misma cuenta del sistema)
 
 # m4 (ronda 3): sólo en el primer nivel de cada proyecto, nunca en proyectos/ mismo ni
-# más profundo -- ver _caminar, que sólo aplica esto cuando profundidad == 2.
-NOMBRES_EXCLUIDOS = frozenset({".claude-flow"})
+# más profundo -- ver _caminar, que sólo aplica esto cuando profundidad == 2. Regla general
+# (no una lista de nombres): se excluye toda CARPETA cuyo nombre empiece por punto -- la
+# carpeta oculta de estado de herramientas que cada proyecto lleva en su primer nivel. Un
+# archivo oculto suelto o una carpeta no oculta NO se excluyen.
+PREFIJO_CARPETA_OCULTA = "."
 
 RUTA_NUCLEO_POR_DEFECTO = "/usr/local/sbin/jax-permisos-proyectos"
 # Configurable SOLO para que las pruebas no toquen la ruta de sistema real (MAJOR-1, revision de
@@ -281,7 +284,7 @@ def _permiso_efectivo(texto_acl: str, *, default: bool, tipo: str, calificador: 
 
 
 # ============================================================================
-# Resultado / exclusión por nombre
+# Resultado / exclusión de carpetas ocultas de estado de herramientas
 # ============================================================================
 
 class Resultado:
@@ -295,8 +298,9 @@ class Resultado:
         self.archivos_procesados = 0
 
 
-def _es_nombre_excluido(nombre: str) -> bool:
-    return nombre in NOMBRES_EXCLUIDOS
+def _es_carpeta_oculta_excluida(entrada: os.DirEntry) -> bool:
+    """Carpeta (no symlink) cuyo nombre empieza por punto: estado de herramientas."""
+    return entrada.name.startswith(PREFIJO_CARPETA_OCULTA) and entrada.is_dir(follow_symlinks=False)
 
 
 # ============================================================================
@@ -326,7 +330,7 @@ def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado
              hook_de_prueba=None) -> None:
     """`profundidad` es la profundidad de las ENTRADAS que se listan en esta llamada,
     relativa a `proyectos/` (sus hijos directos son profundidad 1). m4: la exclusión de
-    NOMBRES_EXCLUIDOS sólo aplica en profundidad 2 -- proyectos/<proyecto>/.claude-flow,
+    la exclusión de carpetas ocultas sólo aplica en profundidad 2 -- proyectos/<proyecto>/<.oculta>,
     nunca en proyectos/ mismo (profundidad 1) ni más abajo."""
     if hook_de_prueba is not None:
         hook_de_prueba(ruta)
@@ -338,7 +342,7 @@ def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado
         nombre = entrada.name
         ruta_hija = f"{ruta}/{nombre}"
 
-        if profundidad == 2 and _es_nombre_excluido(nombre):
+        if profundidad == 2 and _es_carpeta_oculta_excluida(entrada):
             resultado.excluidos.append(ruta_hija)
             continue
 
@@ -567,11 +571,11 @@ def _mutar_archivo(fd_path: int, ruta: str, resultado: Resultado) -> None:
 # --deshacer: vuelve al estado conocido de hoy (BLOCK-1, ronda 3)
 # ============================================================================
 #
-# Medido con `stat` real en hall9000 el 2026-09-25, fuera de `.claude-flow` (que este
+# Medido con `stat` real en hall9000 el 2026-09-25, fuera de la carpeta oculta de estado de herramientas (que este
 # guion nunca toca): TODO `proyectos/` es hoy fruiz:fruiz, sin ninguna ACL, sin ningún
 # bit especial -- 108 directorios en 0775, 249 archivos en 0664 (find ... -printf,
 # ver el runbook). Las únicas excepciones medidas (2 directorios en 0700, 1 archivo en
-# 0600) viven DENTRO de `.claude-flow`, que --deshacer -- igual que --verificar y
+# 0600) viven DENTRO de esa carpeta oculta, que --deshacer -- igual que --verificar y
 # --aplicar -- nunca alcanza. En vez de fijar 0775/0664 a fuego, el modo se DERIVA del
 # rwx que el dueño YA tiene en cada objeto (lo que en el árbol ya aplicado da
 # exactamente esos dos números) -- así, si algún día un objeto real dentro del alcance
@@ -766,7 +770,7 @@ def _parsear_respaldo(contenido: str) -> list[str]:
 
 
 def _contar_objetos_reales(proyectos: Path) -> tuple[int, list[str]]:
-    """Recorrido de sólo lectura, SIN aplicar NOMBRES_EXCLUIDOS (getfacl -R tampoco lo
+    """Recorrido de sólo lectura, SIN aplicar la exclusión de carpetas ocultas (getfacl -R tampoco lo
     sabe), que cuenta cada directorio y archivo regular real bajo proyectos/ (incluido
     proyectos/ mismo), symlinks excluidos. Devuelve `(cantidad, no_gobernados)` --
     `no_gobernados` son rutas que no son symlink, directorio, ni archivo regular (FIFO,
@@ -945,7 +949,7 @@ def _cmd_verificar(raiz: str) -> int:
     for r in resultado.symlinks_saltados:
         lineas.append(f"SYMLINK saltado (no se sigue, no se reporta como falta): {r}")
     for r in resultado.excluidos:
-        lineas.append(f"excluido por nombre (sin tocar): {r}")
+        lineas.append(f"carpeta oculta excluida (sin tocar): {r}")
     if lineas:
         print("\n".join(lineas))
 
@@ -1023,7 +1027,7 @@ def _cmd_aplicar(raiz: str) -> int:
     for ruta in datos["symlinks_saltados"]:
         print(f"SYMLINK saltado: {ruta}")
     for ruta in datos.get("excluidos", []):
-        print(f"excluido por nombre (sin tocar): {ruta}")
+        print(f"carpeta oculta excluida (sin tocar): {ruta}")
     print(f"Procesados: {datos['dirs_procesados']} directorios, {datos['archivos_procesados']} archivos.")
 
     if datos["hardlinks_rechazados"]:
@@ -1056,7 +1060,7 @@ def _cmd_deshacer() -> int:
     for ruta in datos["symlinks_saltados"]:
         print(f"SYMLINK saltado, NO deshecho: {ruta}")
     for ruta in datos.get("excluidos", []):
-        print(f"excluido por nombre (sin tocar): {ruta}")
+        print(f"carpeta oculta excluida (sin tocar): {ruta}")
     print(f"Deshechos: {datos['dirs_procesados']} directorios, {datos['archivos_procesados']} archivos.")
 
     if datos["hardlinks_rechazados"]:

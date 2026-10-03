@@ -19,9 +19,11 @@ Quien quiera el historial completo, está en el docstring de
 
 ## Scope
 `$JAX_WORKSPACE_DIR/proyectos` y todo lo que haya debajo, **salvo** los
-nombres en `NOMBRES_EXCLUIDOS` (hoy sólo `.claude-flow`) -- y SÓLO cuando
-aparecen en el PRIMER nivel de cada proyecto (`proyectos/<proyecto>/.claude-flow`):
-ni en `proyectos/` mismo, ni más profundo. Esas rutas no reciben nada y se
+carpetas ocultas de estado de herramientas -- toda CARPETA cuyo nombre empiece
+por punto (regla general, no una lista de nombres) -- y SÓLO cuando están en el
+PRIMER nivel de cada proyecto (`proyectos/<proyecto>/<carpeta oculta>`): ni en
+`proyectos/` mismo, ni más profundo. Un archivo oculto suelto o una carpeta sin
+punto sí se gobiernan. Esas rutas no reciben nada y se
 reportan como excluidas, nunca como incumplimiento. Nunca
 `$JAX_WORKSPACE_DIR` completo. `ops/permisos_proyectos.py` rechaza una RAIZ
 vacía, `/`, una ruta sin `proyectos/`, o cuyo `proyectos/` sea (o cuelgue de)
@@ -182,14 +184,14 @@ python3 ops/permisos_proyectos.py --deshacer
 Sin argumentos -- siempre actúa sobre la RAIZ configurada. DETERMINISTA: no
 lee ningún archivo de estado. Lleva cada directorio y archivo al único
 estado que hall9000 tiene medido HOY con `stat` real, fuera de
-`.claude-flow` (que este modo tampoco toca):
+la carpeta oculta de estado de herramientas (que este modo tampoco toca):
 
 | | dueño | grupo | modo | ACL |
 |---|---|---|---|---|
-| 107 directorios medidos (alcance real, sin `.claude-flow`) | fruiz | fruiz | 0775 | ninguna |
-| 248 archivos medidos (alcance real, sin `.claude-flow`) | fruiz | fruiz | 0664 | ninguna |
+| 107 directorios medidos (alcance real, sin la carpeta oculta de estado) | fruiz | fruiz | 0775 | ninguna |
+| 248 archivos medidos (alcance real, sin la carpeta oculta de estado) | fruiz | fruiz | 0664 | ninguna |
 
-(El árbol completo, incluido `.claude-flow`, tiene más objetos -- lo que
+(El árbol completo, incluida la carpeta oculta de estado, tiene más objetos -- lo que
 importa para `--deshacer` es sólo lo que está a su alcance, que es lo medido
 arriba. Confirmado el 2026-09-25: `--verificar` contra la producción real da
 `rc=1` con **355 NO CUMPLE** -- exactamente 107+248, el árbol entero sin
@@ -197,7 +199,7 @@ aplicar todavía.)
 
 **Esta tabla es una VERDAD OPERACIONAL, no una constante -- caduca.** Es
 exacta sólo porque el árbol medido el 2026-09-25 era homogéneo (TODO fuera de
-`.claude-flow` estaba ya en `fruiz:fruiz 0775`/`0664`, sin excepciones). Si
+la carpeta oculta de estado estaba ya en `fruiz:fruiz 0775`/`0664`, sin excepciones). Si
 pasó tiempo desde esa fecha, alguien pudo haber creado un archivo con un modo
 distinto a mano, o agregado un proyecto nuevo con otra convención -- antes de
 correr `--deshacer` en producción, volver a medir con el mismo comando que
@@ -213,7 +215,7 @@ escritura`). Así, si algún objeto real dentro del alcance de este guion
 resultara ser una excepción legítima algún día, `--deshacer` no lo fuerza a
 `0775`/`0664` -- preserva lo que su dueño ya podía hacer. **Las únicas
 excepciones medidas hoy** (2 directorios en `0700`, 1 archivo en `0600`)
-viven DENTRO de `.claude-flow`, y por lo tanto están fuera del alcance de
+viven DENTRO de esa carpeta oculta, y por lo tanto están fuera del alcance de
 `--verificar`/`--aplicar`/`--deshacer` los tres.
 
 Igual que `--aplicar`: recorrido `O_PATH|O_NOFOLLOW`, symlinks y hardlinks
@@ -274,8 +276,8 @@ Fernando antes de intentar nada más manual sobre `proyectos/`.
 - No mutar nada por ruta de texto "a mano".
 - No cambiar `USUARIO`/`GRUPO`/`DUENO_ORIGINAL` en el guion sin actualizar
   el spec aprobado primero.
-- No tocar nada fuera de `$RAIZ/proyectos`, ni las entradas en
-  `NOMBRES_EXCLUIDOS` en su primer nivel.
+- No tocar nada fuera de `$RAIZ/proyectos`, ni las carpetas
+  ocultas de estado de herramientas en su primer nivel.
 - Nunca invocar `--nucleo-privilegiado`/`--nucleo-respaldo`/`--nucleo-deshacer`
   a mano, ni con ningún argumento: son el mecanismo interno con el que
   `--aplicar`/`--deshacer` re-ejecutan el núcleo instalado como root.

@@ -26,8 +26,8 @@ MAJOR-1 (ronda 3): getfacl -R -p ... > archivo puede dar rc==0 aunque la escritu
 m1 (rondas 2/3): sin /etc/jax/.env legible, todo lo que necesita PROYECTOS falla cerrado.
 m2 (ronda 3): el sha256 del núcleo instalado se compara contra HEAD commiteado (no el
    working tree), y la cadena de directorios padre usa lstat (nunca sigue un symlink).
-m4 (ronda 3): NOMBRES_EXCLUIDOS sólo aplica en profundidad 2 (proyectos/<proyecto>/.claude-flow),
-   nunca en proyectos/ mismo ni más profundo.
+m4 (ronda 3): la exclusión de carpetas ocultas (nombre con punto inicial) sólo aplica en
+   profundidad 2 (proyectos/<proyecto>/<.oculta>), nunca en proyectos/ mismo ni más profundo.
 
 Ronda 4 (APROBADO CON CAMBIOS, sin BLOCK ni MAJOR) -- 6 MINOR:
 m1: una FIFO/socket en el árbol hacía que getfacl -R -p (que sí las enumera) y
@@ -510,28 +510,53 @@ def test_sin_sudo_la_raiz_por_defecto_falla_cerrado(tmp_path):
     assert "no se pudo resolver" in (r.stdout + r.stderr)
 
 
-# --- m4: exclusión sólo en profundidad 2 (proyectos/<p>/.claude-flow) -----------------------
+# --- m4: exclusión sólo en profundidad 2 (proyectos/<p>/<carpeta oculta>) ------------------
+
+OCULTA = ".estado-herramienta"
+
 
 def test_exclusion_solo_en_primer_nivel_de_cada_proyecto(arbol_temporal, _identidades):
     proyectos = arbol_temporal / "proyectos"
-    en_la_raiz = proyectos / ".claude-flow"
+    en_la_raiz = proyectos / OCULTA
     en_la_raiz.mkdir()
-    primer_nivel = proyectos / "un-proyecto" / ".claude-flow"
+    primer_nivel = proyectos / "un-proyecto" / OCULTA
     primer_nivel.mkdir()
-    mas_profundo = proyectos / "un-proyecto" / "sub" / ".claude-flow"
+    mas_profundo = proyectos / "un-proyecto" / "sub" / OCULTA
     mas_profundo.mkdir()
 
     datos = _recorrer_directo(proyectos, accion="aplicar")
 
-    assert any(e.endswith("/un-proyecto/.claude-flow") for e in datos["excluidos"]), datos["excluidos"]
-    assert not any(e.endswith("/proyectos/.claude-flow") and "un-proyecto" not in e for e in datos["excluidos"])
-    assert not any(e.endswith("/sub/.claude-flow") for e in datos["excluidos"])
+    assert any(e.endswith(f"/un-proyecto/{OCULTA}") for e in datos["excluidos"]), datos["excluidos"]
+    assert not any(e.endswith(f"/proyectos/{OCULTA}") and "un-proyecto" not in e for e in datos["excluidos"])
+    assert not any(e.endswith(f"/sub/{OCULTA}") for e in datos["excluidos"])
 
-    # Los que NO están en la lista de exclusión SÍ se mutaron (dueño jaxsvc).
+    # Los que NO están en profundidad 2 SÍ se mutaron (dueño jaxsvc).
     assert en_la_raiz.stat().st_uid == pwd.getpwnam(USUARIO_ESPERADO).pw_uid
     assert mas_profundo.stat().st_uid == pwd.getpwnam(USUARIO_ESPERADO).pw_uid
     # El del primer nivel de un proyecto, NO se tocó.
     assert primer_nivel.stat().st_uid != pwd.getpwnam(USUARIO_ESPERADO).pw_uid
+
+
+def test_en_profundidad_2_se_excluye_toda_carpeta_oculta_y_solo_las_ocultas(arbol_temporal, _identidades):
+    """Regla general, no una lista de nombres: cualquier CARPETA con punto inicial en
+    proyectos/<p>/ se excluye; una carpeta sin punto y un archivo oculto suelto, no."""
+    proyecto = arbol_temporal / "proyectos" / "un-proyecto"
+    ocultas = [proyecto / ".otra-herramienta", proyecto / ".x", proyecto / "..doble"]
+    for o in ocultas:
+        o.mkdir()
+    visible = proyecto / "estado-herramienta"          # sin punto: se gobierna
+    visible.mkdir()
+    archivo_oculto = proyecto / ".nota-suelta"          # archivo, no carpeta: se gobierna
+    archivo_oculto.write_text("x")
+
+    datos = _recorrer_directo(arbol_temporal / "proyectos", accion="aplicar")
+
+    excluidos = {Path(e).name for e in datos["excluidos"]}
+    assert {".otra-herramienta", ".x", "..doble"} <= excluidos, excluidos
+    assert "estado-herramienta" not in excluidos and ".nota-suelta" not in excluidos, excluidos
+    uid = pwd.getpwnam(USUARIO_ESPERADO).pw_uid
+    assert visible.stat().st_uid == uid and archivo_oculto.stat().st_uid == uid
+    assert all(o.stat().st_uid != uid for o in ocultas)
 
 
 # --- MAJOR-1 (ronda 3): validación forense del respaldo --------------------------------------
@@ -590,7 +615,7 @@ def test_desescapa_octales_y_preserva_espacio_final():
 
 def test_deshacer_vuelve_exactamente_al_estado_medido_en_produccion(arbol_temporal, _identidades):
     """Compara stat+getfacl del árbol deshecho contra el estado REAL medido en hall9000
-    el 2026-09-25 (fuera de .claude-flow): dirs fruiz:fruiz 0775 sin ACL, archivos
+    el 2026-09-25 (fuera de la carpeta oculta de estado): dirs fruiz:fruiz 0775 sin ACL, archivos
     fruiz:fruiz 0664 sin ACL."""
     proyectos = arbol_temporal / "proyectos"
     aplicado = _recorrer_directo(proyectos, accion="aplicar")
