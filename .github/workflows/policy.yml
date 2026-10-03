@@ -63,9 +63,9 @@ jobs:
             tests/test_las_voces_faro_mcp_client.py \
             tests/test_las_voces_faro_paquete.py \
             tests/test_las_voces_qwen_auto.py 2>&1 | tee /tmp/las-voces-faro-readonly
-          # Medido 2026-10-03 en venv limpio con mcp==2.2.0: 6 MCP + 17 paquete/lanzador, 0 skipped.
-          grep -qE "^23 passed in " /tmp/las-voces-faro-readonly || {
-            echo "PISO ROTO: se esperaban exactamente 23 tests CORRIDOS."; exit 1; }
+          # Medido 2026-10-03 en venv limpio con mcp==2.2.0: 6 MCP + 18 paquete/lanzador, 0 skipped.
+          grep -qE "^24 passed in " /tmp/las-voces-faro-readonly || {
+            echo "PISO ROTO: se esperaban exactamente 24 tests CORRIDOS."; exit 1; }
 
   memory-b9-regression:
     runs-on: ubuntu-latest

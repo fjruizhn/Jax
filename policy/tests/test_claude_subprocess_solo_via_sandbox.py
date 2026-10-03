@@ -108,6 +108,7 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import ast
+import hashlib
 import os
 import shlex
 import sys
@@ -278,6 +279,13 @@ _FARO_RUN_ARGV_APROBADOS = frozenset({
     "[*git, 'rev-parse', REF_FRESCURA]",
 })
 
+# El test llama a un script fixture vía subprocess; congelar SOLO la forma
+# `str(script)` no garantiza que `script` siga viniendo de la fixture. El hash
+# del AST completo exige revisión de cualquier nueva asignación, función o
+# llamada en ese archivo. Se calcula con ast.dump(include_attributes=False),
+# independiente de espacios/comentarios, y se actualiza solo tras auditoría.
+_FARO_TEST_AST_SHA256 = "c48582f1563172ba8cb50f0462d1c5994fa0e6caacc672ee0055100482b3f77e"
+
 
 def _cadenas_con_claude(tree: ast.AST) -> frozenset[str]:
     return frozenset(t for t in _cadenas_plegadas(tree) if "claude" in t.lower())
@@ -323,7 +331,9 @@ def _exento_faro(root: Path, path: Path, tree: ast.AST) -> bool:
                 and all(n.args and isinstance(n.args[0], ast.List) for n in llamadas)
                 and {ast.unparse(n.args[0]) for n in llamadas} == _FARO_RUN_ARGV_APROBADOS)
     # El test usa subprocess.run únicamente con el script fixture creado por
-    # _script_con_env_de_prueba; ninguna función acepta un argv de fuera.
+    # _script_con_env_de_prueba; el digest congela también su procedencia.
+    if hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest() != _FARO_TEST_AST_SHA256:
+        return False
     return bool(lanzamientos) and all(
         n.args and isinstance(n.args[0], ast.List)
         and len(n.args[0].elts) in (1, 2)
@@ -1324,6 +1334,8 @@ def test_exenciones_faro_niegan_argv_libre_nuevo() -> None:
     fuente_prueba = prueba.read_text(encoding="utf-8")
     mutado_prueba = ast.parse(fuente_prueba + "\nsubprocess.run(argv_externo)\n")
     assert not _exento_faro(_THIS_REPO_ROOT, prueba, mutado_prueba)
+    mutado_origen = ast.parse(fuente_prueba + "\nscript = Path(os.environ['BIN'])\n")
+    assert not _exento_faro(_THIS_REPO_ROOT, prueba, mutado_origen)
 
 
 def _plantar(tmp_path, archivos: dict[str, str]) -> set[str]:

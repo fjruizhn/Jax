@@ -49,7 +49,8 @@ verificar_contra_arbol = None
 
 
 def _run(argv: list[str], *, acepta_ausencia: bool = False) -> str:
-    entorno = {"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+    entorno = {"PATH": "/usr/bin:/bin", "HOME": "/root", "XDG_CONFIG_HOME": "/root/.config",
+               "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
                "GIT_TERMINAL_PROMPT": "0"}
     try:
         resultado = subprocess.run(argv, check=not acepta_ausencia, text=True, capture_output=True, env=entorno)

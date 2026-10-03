@@ -44,6 +44,22 @@ def test_official_oid_rejects_a_non_sha_response(monkeypatch):
         subject._oid_oficial()
 
 
+def test_command_environment_uses_root_home_not_cwd_or_inherited_git(monkeypatch):
+    subject = modulo()
+    monkeypatch.setenv("HOME", "/tmp/usuario")
+    monkeypatch.setenv("GIT_DIR", "/tmp/repo-hostil")
+    vistos = []
+    def fake_run(argv, **kwargs):
+        vistos.append(kwargs["env"])
+        return SimpleNamespace(stdout="main\n")
+    monkeypatch.setattr(subject.subprocess, "run", fake_run)
+    assert subject._run(["gh", "api", "repos/fjruizhn/claude-skills"]) == "main\n"
+    assert vistos[0]["HOME"] == "/root"
+    assert vistos[0]["XDG_CONFIG_HOME"] == "/root/.config"
+    assert vistos[0]["PATH"] == "/usr/bin:/bin"
+    assert "GIT_DIR" not in vistos[0]
+
+
 def test_no_replace_refs_or_unsafe_mirror_are_accepted(monkeypatch, tmp_path):
     subject = modulo()
     mirror = tmp_path / "claude-skills.git"
