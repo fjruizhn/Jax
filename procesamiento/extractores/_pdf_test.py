@@ -577,3 +577,26 @@ def test_tabla_a_bloque_no_promueve_ninguna_fila_a_encabezado():
     bloque = pdf._tabla_a_bloque([["Caja", "450"], ["Banco", "990"]])
     assert "---" not in bloque
     assert bloque == "```tabla\nCaja | 450\nBanco | 990\n```"
+
+
+import sys  # noqa: E402
+
+
+def test_un_importerror_que_no_es_modulenotfound_da_dependencia_rota(tmp_path: Path, monkeypatch):
+    """jax-14 MINOR-2: `dependencia_no_instalada` es SOLO para ModuleNotFoundError;
+    una dependencia presente pero rota (ImportError de otro tipo) es `dependencia_rota`."""
+    import builtins
+
+    archivo = _pdf_con_texto(tmp_path / "n.pdf")
+    original = builtins.__import__
+
+    def roto(nombre, *a, **k):
+        if nombre == "pdfplumber" or nombre.startswith("pdfplumber."):
+            raise ImportError("simbolo no definido (instalacion rota)")
+        return original(nombre, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", roto)
+    monkeypatch.delitem(sys.modules, "pdfplumber", raising=False)
+    r = pdf.extraer(archivo)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "dependencia_rota"

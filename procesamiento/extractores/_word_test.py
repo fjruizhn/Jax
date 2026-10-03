@@ -542,3 +542,26 @@ def test_excepcion_inesperada_leyendo_encabezado_o_pie_da_resultado_de_error(
     assert r.estado == "error"
     assert r.salidas == {}
     assert "RuntimeError" in r.detalle["razon"]
+
+
+import sys  # noqa: E402
+
+
+def test_un_importerror_que_no_es_modulenotfound_da_dependencia_rota(tmp_path: Path, monkeypatch):
+    """jax-14 MINOR-2: `dependencia_no_instalada` es SOLO para ModuleNotFoundError;
+    una dependencia presente pero rota (ImportError de otro tipo) es `dependencia_rota`."""
+    import builtins
+
+    archivo = _documento_brief(tmp_path / "d.docx")
+    original = builtins.__import__
+
+    def roto(nombre, *a, **k):
+        if nombre == "docx" or nombre.startswith("docx."):
+            raise ImportError("simbolo no definido (instalacion rota)")
+        return original(nombre, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", roto)
+    monkeypatch.delitem(sys.modules, "docx", raising=False)
+    r = word.extraer(archivo)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "dependencia_rota"

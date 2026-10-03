@@ -320,3 +320,26 @@ def test_version_no_revienta_si_openpyxl_no_esta_instalado(monkeypatch):
     monkeypatch.setitem(sys.modules, "openpyxl", None)
     version = excel._version()
     assert version is None
+
+
+import sys  # noqa: E402
+
+
+def test_un_importerror_que_no_es_modulenotfound_da_dependencia_rota(tmp_path: Path, monkeypatch):
+    """jax-14 MINOR-2: `dependencia_no_instalada` es SOLO para ModuleNotFoundError;
+    una dependencia presente pero rota (ImportError de otro tipo) es `dependencia_rota`."""
+    import builtins
+
+    archivo = _libro_de_seis_hojas(tmp_path / "eeff.xlsx")
+    original = builtins.__import__
+
+    def roto(nombre, *a, **k):
+        if nombre == "openpyxl" or nombre.startswith("openpyxl."):
+            raise ImportError("simbolo no definido (instalacion rota)")
+        return original(nombre, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", roto)
+    monkeypatch.delitem(sys.modules, "openpyxl", raising=False)
+    r = excel.extraer(archivo)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "dependencia_rota"

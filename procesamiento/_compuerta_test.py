@@ -525,3 +525,25 @@ def test_tiene_extractor_es_lo_mismo_que_extraer_no_dice_sin_extractor(
 
     assert compuerta.tiene_extractor(archivo) is esperado
     assert compuerta.tiene_extractor(archivo) == (compuerta.extraer(archivo).estado != "sin_extractor")
+
+
+def test_pdf_con_pdfplumber_roto_da_dependencia_rota_y_no_propaga(tmp_path: Path, monkeypatch):
+    """jax-14 MINOR-2: un ImportError que no es ModuleNotFoundError (pdfplumber
+    presente pero roto) tampoco puede escapar crudo de `compuerta.extraer`, ni
+    rutear a OCR: es `error` con `dependencia_rota`."""
+    import builtins
+    import sys
+
+    archivo = _pdf_nativo(tmp_path / "estado.pdf")
+    original = builtins.__import__
+
+    def roto(nombre, *a, **k):
+        if nombre == "pdfplumber":
+            raise ImportError("simbolo no definido (instalacion rota)")
+        return original(nombre, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", roto)
+    monkeypatch.delitem(sys.modules, "pdfplumber", raising=False)
+    r = compuerta.extraer(archivo)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "dependencia_rota"
