@@ -803,16 +803,19 @@ def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
 _FONDOS_DEL_APLANADO = ((255, 255, 255), (0, 0, 0))
 
 
-def _palabras_utiles(r: dict) -> int:
-    """Palabras reconocidas que NO son dudosas (confianza >= piso)."""
-    return r["n_palabras"] - len(r["palabras_dudosas"])
+def _calidad_de_pasada(r: dict) -> tuple[int, int, int]:
+    """Clave de eleccion entre las dos pasadas: (palabras NO dudosas, palabras
+    totales, caracteres). Si un fondo reconoce texto aunque sea dudoso, gana
+    a uno que no reconoce nada (la imagen sale parcial/imagen_texto_dudoso,
+    no ok/imagen_sin_texto)."""
+    return (r["n_palabras"] - len(r["palabras_dudosas"]), r["n_palabras"], r["caracteres"])
 
 
 def _ocr_cuadro(img, idioma: str, presupuesto: _Presupuesto) -> dict | None:
     """OCR de un fotograma ya decodificado. Sin transparencia real: una sola
     pasada (`_a_modo_legible` -> PNG). Con transparencia REAL (`_mascara_alfa`):
-    DOS pasadas, aplanado sobre blanco y sobre negro, y gana la que tiene mas
-    palabras utiles (`_palabras_utiles`); en el empate, el blanco. Ningun
+    DOS pasadas, aplanado sobre blanco y sobre negro, y gana la de mayor
+    `_calidad_de_pasada`; si todo empata, el blanco. Ningun
     numero sobre toda la imagen decide el fondo: la luminancia media la decide
     la figura mas grande (un logo con emblema claro y texto oscuro) y no el
     texto. Un lienzo a la vez: aplanar -> PNG -> OCR -> liberar, y repetir.
@@ -844,7 +847,7 @@ def _ocr_cuadro(img, idioma: str, presupuesto: _Presupuesto) -> dict | None:
         del png
         if r is None or r["clasificacion"] == "ilegible":
             return r
-        if elegido is None or _palabras_utiles(r) > _palabras_utiles(elegido):
+        if elegido is None or _calidad_de_pasada(r) > _calidad_de_pasada(elegido):
             elegido = r
     return elegido
 

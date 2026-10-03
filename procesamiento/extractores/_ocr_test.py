@@ -2780,12 +2780,12 @@ def test_n36_empate_de_palabras_utiles_gana_el_fondo_blanco(tmp_path, monkeypatc
     destino = tmp_path / "rotulo.png"
     _rotulo((0, 0, 0), "png", destino)
     fondos = _tesseract_por_fondo(monkeypatch, {
-        _BLANCO: [(95, "blanco"), (95, "uno"), (95, "dos")],
+        _BLANCO: [(95, "claro"), (95, "uno"), (95, "dos")],   # mismos caracteres que "negro": empate total
         _NEGRO: [(95, "negro"), (95, "uno"), (95, "dos")],
     })
     r = ocr.extraer(destino)
     assert set(fondos) == {_BLANCO, _NEGRO}
-    assert "blanco" in r.salidas["texto.txt"] and "negro" not in r.salidas["texto.txt"]
+    assert "claro" in r.salidas["texto.txt"] and "negro" not in r.salidas["texto.txt"]
 
 
 def test_n36_gana_el_fondo_con_mas_palabras_no_dudosas_no_el_de_mas_palabras(tmp_path, monkeypatch):
