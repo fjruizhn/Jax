@@ -49,7 +49,7 @@ Hacerlo desde un checkout cuyo HEAD tenga el guion commiteado (el núcleo se com
 **`--aplicar` falla cerrado, sin cambiar nada**, en dos casos, antes de tocar un solo objeto (pasada de solo lectura): (1) `jaxsvc` o `fruiz` no podrían atravesar la raíz sin el bit de otros. Hoy `fruiz` entra a la raíz **como dueño** y `jaxsvc` **por el grupo** `jaxsvc` (ninguno está en el grupo del otro): una raíz `fruiz:fruiz 0755`, que es lo que deja un `mkdir` con umask 022, dejaría fuera a `jaxsvc`, y `--deshacer` restaura el modo desde el respaldo pero no arregla un dueño o grupo equivocado. (2) Hay una entrada ACL nombrada ajena: `--aplicar` **no la borra** (ni la amplía con la máscara): la lista y una persona decide si se quita (`setfacl -x u:<nombre> <ruta>`) o si es legítima. En ambos casos el mensaje dice qué objeto y qué cuenta; se corrige y se repite.
 **Límite conocido (archivos 0600):** un archivo que su dueño crea con modo `0600` es una decisión de ese proceso, y la máscara heredada de la ACL por defecto lo respeta: el otro lado (`jaxsvc` o `fruiz`) no lo puede abrir, tanto después de `--aplicar` como después de `--deshacer`. No es un fallo del guion. Para corregir un caso se vuelve a correr `--aplicar` (deja `0660` con las dos cuentas en la ACL) o se hace `chmod 0660` sobre ese archivo. Las herramientas que escriben en `proyectos/` deben crear con `0660` (el escritor de LAS MANOS ya hace `fchmod 0660`).
 **Efecto a saber antes de aplicar:** los archivos pasan a `0660` y pierden cualquier bit de ejecución que tuvieran (medido por la auditoría: 290 de 292 archivos lo tenían, todos por la máscara `rwx` que dejaba el guion viejo y ninguno de dueño).
-**Verificación tras aplicar** (los tres puntos se hacen cumplir en el bloque; si algo no da, imprime `NO CUMPLE` y sale con código distinto de 0, y no se sigue): (a) `--verificar` da 0; (b) como root, `getfacl -R -p <raíz>/proyectos` mostrado solo para las líneas `other::` y `default:other::` tiene que dar **únicamente** `other::---` y `default:other::---`; (c) la raíz del workspace es `770 fruiz:jaxsvc`.
+**Verificación tras aplicar** (los dos puntos se hacen cumplir en el bloque; si algo no da, imprime `NO CUMPLE` y sale con código distinto de 0, y no se sigue): (a) `--verificar` da 0 (exige, entre otras cosas, la raíz `770 fruiz:jaxsvc`); (b) como root, `getfacl -R -p <raíz>/proyectos` mostrado solo para las líneas `other::` y `default:other::` tiene que dar **únicamente** `other::---` y `default:other::---`.
 ```bash
 bash <<'VERIFICACION'
 set -euo pipefail
@@ -60,11 +60,7 @@ ESPERADO=$(printf 'default:other::---\nother::---')
 if [ "$OTROS" != "$ESPERADO" ]; then
   echo "NO CUMPLE: other en proyectos/ no es solo ---:" >&2; echo "$OTROS" >&2; exit 1
 fi
-RAIZ_ESTADO=$(stat -c '%a %U:%G' "$RAIZ")
-if [ "$RAIZ_ESTADO" != "770 fruiz:jaxsvc" ]; then
-  echo "NO CUMPLE: la raiz del workspace es '$RAIZ_ESTADO', se esperaba '770 fruiz:jaxsvc'" >&2; exit 1
-fi
-echo "OK: --verificar en 0, other cerrado en todo proyectos/ y raiz 770 fruiz:jaxsvc"
+echo "OK: --verificar en 0 (incluida la raiz 770 fruiz:jaxsvc) y other cerrado en todo proyectos/"
 VERIFICACION
 ```
 Nota: **una lectura como `nobody` no se usa como prueba**. Mientras la raíz esté en 770, `nobody` no la atraviesa y esa lectura falla aunque `proyectos/` siguiera abierto: una prueba que no puede fallar no valida nada. Darle a `nobody` una entrada temporal para que sí pueda fallar abre los documentos de los clientes mientras dura la prueba, así que tampoco se hace: la verificación (b) mide directamente lo que importa, los bits de otros. (Y `test -r` no sirve como prueba de permisos en este host: el `test` de uutils mira solo los bits del modo, no las ACL.) **Carpetas ocultas** (`proyectos/<proyecto>/.<nombre>/`, estado de herramientas): **este guion NO las toca nunca**, ni a ellas ni a su contenido (ningún `chmod`, `chown` ni `setfacl` como root: un inode que `jaxsvc` pueda enlazar desde fuera sería una carrera). Solo las **mira**: si alguna tiene un bit de otros (modo, `other::` de acceso o, en directorios, por defecto) o un archivo con más de un enlace duro, `--verificar` la marca NO CUMPLE y **`--aplicar` y `--deshacer` fallan cerrado antes de mutar nada**, con cada ruta y la orden de corrección. **La corrección es manual: la ejecuta una persona**, con la oculta a la vista:
