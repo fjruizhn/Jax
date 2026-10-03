@@ -5076,6 +5076,11 @@ jobs:
           #   envelopes de owner faltante/no canónico/desconocido/duplicado no
           #   agregan un evento Processing JSONL. GitHub run 37133259910, job 111232503222
           #   measured 3165 passed, 45 skipped, 1 xfailed; the skip set stayed exact.
+          # 3326 -> 3327 (2026-10-03, SR3 rebase after Ejecutor proxy #333):
+          #   the same owner-envelope regression measured again against 40119f0
+          #   with the exact tests-puros command, Python 3.12, and the runner
+          #   isolation mounts. This is a fresh measurement, not arithmetic on
+          #   the proxy floor: 3327 passed, 45 skipped, 1 xfailed.
           #
           # 2811 -> 2812 (2026-09-25, las_manos/_tool_authority_test.py::test_5c_write_file_
           # queda_escribible_por_grupo_bajo_acl_por_defecto -- reproduce B1 de
@@ -5104,8 +5109,8 @@ jobs:
           # mismo piso a 2821 por una causa completamente distinta (no relacionada) --
           # quien integre esa rama DESPUES de esta, o esta DESPUES de esa, tiene que
           # re-medir sobre master en vez de sumar los deltas a ciegas.
-          grep -qE "^3326 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3326 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          grep -qE "^3327 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3327 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
