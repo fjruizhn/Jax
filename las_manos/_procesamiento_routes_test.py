@@ -1105,8 +1105,8 @@ class TrabajoHTTPTest(unittest.TestCase):
         agotado, pero no evitaba el registro huérfano). Ahora se rechaza
         EN LA ADMISIÓN, antes de tocar el semáforo siquiera: 422 limpio,
         ningún job creado."""
-        # E2a: el `project_uuid` con un surrogate (36 caracteres, pasa el largo
-        # de pydantic) lo rechaza la regex del UUID canónico, en la admisión.
+        # E2a: el `project_uuid` con un surrogate lo rechaza la regex del UUID
+        # canónico, en la admisión: 422 `project_uuid_invalido`, nunca 500.
         proyecto_malo = UUID_PRUEBA[:-1] + "\udcff"
         cuerpo_json = json.dumps(
             {"project_uuid": proyecto_malo, "rutas": [], "usuario": "ana@cliente.com"},
@@ -1117,12 +1117,8 @@ class TrabajoHTTPTest(unittest.TestCase):
                 "/procesamiento/trabajos", content=cuerpo_json,
                 headers={**_h(IDENTIDAD_PLATAFORMA), "content-type": "application/json"},
             )
-            # Con las restricciones de largo del modelo, esta versión de
-            # pydantic rechaza el surrogate ya al validar el cuerpo, y el
-            # manejador de FastAPI no sabe serializarlo (500, igual que ya
-            # pasa hoy con un `usuario` así). Lo que importa acá no cambia:
-            # nunca 202, ningún job, ningún cupo.
-            assert r.status_code in (422, 500), r.text
+            assert r.status_code == 422, r.text
+            assert r.json()["detail"]["code"] == "project_uuid_invalido", r.text
             assert not self._semaforo_test.locked(), (
                 "el semáforo se tocó aunque el proyecto se rechazó en la admisión"
             )

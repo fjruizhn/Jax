@@ -103,7 +103,6 @@ import os
 import re
 import threading
 import time
-import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -183,7 +182,10 @@ router = APIRouter(prefix="/procesamiento", tags=["procesamiento"])
 #  Modelos
 # ---------------------------------------------------------------------------
 class TrabajoRequest(BaseModel):
-    project_uuid: str = Field(min_length=36, max_length=36)
+    # Sin `Field` de largo a propósito: la regex `_UUID_CANONICO` ya lo impone, y
+    # un `Field` hace que pydantic rechace un surrogate solitario con un error
+    # que FastAPI no sabe serializar (500). Así llega a la regex y da 422.
+    project_uuid: str
     rutas: list[str]
     # B-6: principal obligatorio, no vacío, con tope -- jax-platform ya
     # tiene el JWT del usuario; que lo pase. No es autorización completa
@@ -217,19 +219,6 @@ class TrabajoEstadoResponse(BaseModel):
 # ---------------------------------------------------------------------------
 #  Lógica pura (sin store, sin red) -- fácil de probar y de razonar
 # ---------------------------------------------------------------------------
-def _slug(texto: str) -> str:
-    """Minúsculas, sin acentos, separado por guiones -- MISMA regla que
-    `scripts/procesar_archivos.py::_slug` (duplicada a propósito: `scripts/`
-    no es un paquete importable -- sin `__init__.py`, a diferencia de
-    `procesamiento/`, `las_manos/`, `jacobs/` -- importar desde ahí hubiera
-    invertido la dirección de dependencia; ver el Informe)."""
-    sin_acentos = (
-        unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode("ascii")
-    )
-    normalizado = re.sub(r"[^a-z0-9]+", "-", sin_acentos.lower()).strip("-")
-    return normalizado or "carpeta"
-
-
 def _tamano_extracto(carpeta: Path) -> int:
     if not carpeta.is_dir():
         return 0
