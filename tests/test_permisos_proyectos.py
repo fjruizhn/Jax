@@ -196,6 +196,24 @@ def _abrir_travesia_hasta(ruta: Path, tope: Path) -> None:
         actual = actual.parent
 
 
+def _conceder_acceso_al_usuario_de_pruebas(proyectos: Path, usuario: str | None = None) -> None:
+    """`--aplicar` deja `other::---`: el usuario que corre pytest en un runner (`runner`) ni es
+    jaxsvc ni es fruiz, y ya no entra por `other` a stat/leer/`--verificar` lo que las pruebas
+    miran DESPUES de aplicar. Se le da una entrada NOMBRADA (acceso y por defecto, que `--aplicar`
+    conserva porque usa `setfacl -m`): es del arnes, no de lo que se prueba. Con el usuario de
+    esta maquina (fruiz) es redundante e inofensivo. Como root no hace falta."""
+    usuario = usuario or pwd.getpwuid(os.getuid()).pw_name
+    if usuario == "root":
+        return
+    entrada = f"u:{usuario}:rwX"
+    # La raíz del workspace (padre de proyectos/) también pierde `otros` con --aplicar: quien
+    # entra a proyectos/ tiene que poder atravesarla por entrada nombrada (en producción, por grupo).
+    subprocess.run(["setfacl", "-m", f"u:{usuario}:x", str(proyectos.parent)], check=True, capture_output=True)
+    subprocess.run(["setfacl", "-R", "-m", entrada, str(proyectos)], check=True, capture_output=True)
+    subprocess.run(["find", str(proyectos), "-type", "d", "-exec", "setfacl", "-d", "-m", entrada, "{}", "+"],
+                   check=True, capture_output=True)
+
+
 @pytest.fixture(scope="module")
 def _identidades():
     if not _sudo_n_disponible():
@@ -223,6 +241,9 @@ def arbol_temporal(tmp_path, _identidades):
 
     _abrir_travesia_hasta(raiz, Path("/tmp"))
     os.chmod(raiz, 0o755)
+    _conceder_acceso_al_usuario_de_pruebas(proyectos)
+    for cuenta in ("jaxsvc", "fruiz"):  # las que atraviesan la raíz en producción (por grupo)
+        subprocess.run(["setfacl", "-m", f"u:{cuenta}:x", str(raiz)], check=True, capture_output=True)
     return raiz
 
 
@@ -1198,6 +1219,210 @@ print(path)
     assert r.returncode == 1, r.stdout
     assert ruta in r.stdout
     assert "ACL de acceso efectiva insuficiente" in r.stdout
+
+
+# --- Sin acceso para "otros" (spec madre §5: 2770 en directorios, 0660 en archivos) -----------
+#
+# El 2026-10-03 el workspace se trasladó a /srv/jax-data/jax-workspace; la barrera que daba
+# /home/fruiz (750) desapareció y `proyectos/` quedó con `other::r-x` y `default:other::r-x`:
+# cualquier usuario local leía los documentos de los clientes. --aplicar no tocaba `o::` y
+# --verificar no lo contaba. El árbol tiene que ser cerrado por sí mismo.
+
+def _acl(ruta: Path) -> list[str]:
+    salida = subprocess.run(["getfacl", "-p", str(ruta)], capture_output=True, text=True, check=True).stdout
+    return [l.split("\t")[0].strip() for l in salida.splitlines() if l.strip() and not l.startswith("#")]
+
+
+def _otros_en_nombres(ruta: Path) -> list[str]:
+    return [l for l in _acl(ruta) if l.startswith(("other::", "default:other::"))]
+
+
+def _lineas_no_cumple(salida: str, ruta: Path) -> list[str]:
+    return [l for l in salida.splitlines() if l.startswith(f"NO CUMPLE: {ruta}:")]
+
+
+def test_verificar_marca_otros_en_un_arbol_con_o_r_x(arbol_temporal):
+    """El árbol de partida es 0755/0644, o sea `other::r-x`/`other::r--`: cada objeto tiene que
+    salir con una falta que hable de "otros" (el dueño y el grupo también faltan, pero esa falta
+    no es la que se prueba acá)."""
+    proyectos = arbol_temporal / "proyectos"
+    r = _correr("--verificar", str(arbol_temporal))
+    assert r.returncode == 1, r.stdout
+    for ruta in (proyectos, proyectos / "un-proyecto", proyectos / "un-proyecto" / "sub",
+                 proyectos / "un-proyecto" / "archivo.txt"):
+        faltas = _lineas_no_cumple(r.stdout, ruta)
+        assert faltas and "para otros" in faltas[0], (ruta, r.stdout)
+    assert f"NO CUMPLE: {arbol_temporal} (raíz del workspace): permisos para otros" in r.stdout, r.stdout
+
+
+@pytest.mark.parametrize("que,orden", [
+    ("modo de la raíz (chmod o+x)", ["chmod", "o+x", "{raiz}"]),
+    ("ACL de acceso de la raíz", ["setfacl", "-m", "o::r-x", "{raiz}"]),
+])
+def test_verificar_marca_otros_en_la_raiz_del_workspace(arbol_temporal, _identidades, que, orden):
+    """Hoy el cierre depende de un solo bit, el de la raíz (padre de proyectos/): si alguien lo
+    reabre, --verificar tiene que decirlo aunque todo proyectos/ esté en regla."""
+    proyectos = arbol_temporal / "proyectos"
+    assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    assert _correr("--verificar", str(arbol_temporal)).returncode == 0
+    r_mod = subprocess.run(["sudo", "-n", *[a.format(raiz=arbol_temporal) for a in orden]],
+                           capture_output=True, text=True)
+    assert r_mod.returncode == 0, r_mod.stderr
+
+    r = _correr("--verificar", str(arbol_temporal))
+    assert r.returncode == 1, (que, r.stdout)
+    assert f"NO CUMPLE: {arbol_temporal} (raíz del workspace): permisos para otros" in r.stdout, r.stdout
+    assert not any(l.startswith(f"NO CUMPLE: {proyectos}") for l in r.stdout.splitlines()), r.stdout
+
+
+def test_aplicar_cierra_la_raiz_sin_tocar_su_dueno_ni_su_grupo(arbol_temporal, _identidades):
+    raiz = arbol_temporal
+    gid_otro = next(g.gr_gid for g in grp.getgrall() if g.gr_name == "jaxsvc") if any(
+        g.gr_name == "jaxsvc" for g in grp.getgrall()) else None
+    if gid_otro is not None:
+        subprocess.run(["sudo", "-n", "chown", f":{gid_otro}", str(raiz)], check=True)  # como fruiz:jaxsvc
+    subprocess.run(["sudo", "-n", "chmod", "o+rx", str(raiz)], check=True)
+    antes = raiz.stat()
+    assert antes.st_mode & 0o005
+
+    datos = _recorrer_directo(raiz / "proyectos", accion="aplicar")
+    assert not datos["no_cumple"], datos["no_cumple"]
+    despues = raiz.stat()
+    assert (despues.st_uid, despues.st_gid) == (antes.st_uid, antes.st_gid)
+    assert despues.st_mode & 0o007 == 0
+    assert despues.st_mode & 0o070 == antes.st_mode & 0o070 or "mask" in "".join(_acl(raiz))
+    assert "other::---" in _acl(raiz)
+
+
+def test_aplicar_quita_otros_en_modo_y_en_las_dos_acl_y_verificar_da_cero(arbol_temporal, _identidades):
+    proyectos = arbol_temporal / "proyectos"
+    datos = _recorrer_directo(proyectos, accion="aplicar")
+    assert not datos["no_cumple"], datos["no_cumple"]
+
+    directorios = [proyectos, proyectos / "un-proyecto", proyectos / "un-proyecto" / "sub"]
+    for d in directorios:
+        assert oct(d.stat().st_mode & 0o7777) == "0o2770", d
+        assert _otros_en_nombres(d) == ["other::---", "default:other::---"], (d, _acl(d))
+        acl = _acl(d)
+        # las entradas de jaxsvc y fruiz no se tocan, ni el setgid
+        assert f"user:{USUARIO_ESPERADO}:rwx" in acl and f"group:{GRUPO_ESPERADO}:rwx" in acl, acl
+        assert f"default:user:{USUARIO_ESPERADO}:rwx" in acl and f"default:group:{GRUPO_ESPERADO}:rwx" in acl, acl
+    archivo = proyectos / "un-proyecto" / "archivo.txt"
+    assert oct(archivo.stat().st_mode & 0o7777) == "0o660", archivo
+    assert _otros_en_nombres(archivo) == ["other::---"], (archivo, _acl(archivo))
+    assert f"user:{USUARIO_ESPERADO}:rw-" in _acl(archivo) and f"group:{GRUPO_ESPERADO}:rw-" in _acl(archivo)
+
+    r = _correr("--verificar", str(arbol_temporal))
+    assert r.returncode == 0, r.stdout
+    assert "NO CUMPLE" not in r.stdout
+
+
+@pytest.mark.parametrize("que,orden", [
+    ("ACL de acceso de un directorio", ["setfacl", "-m", "o::r-x", "{dir}"]),
+    ("ACL por defecto de un directorio", ["setfacl", "-d", "-m", "o::r-x", "{dir}"]),
+    ("ACL de acceso de un archivo", ["setfacl", "-m", "o::r--", "{archivo}"]),
+    ("modo de un archivo (chmod o+r)", ["chmod", "o+r", "{archivo}"]),
+    ("modo de un directorio (chmod o+x)", ["chmod", "o+x", "{dir}"]),
+    # `other` no depende de la máscara: con m::--- el permiso efectivo de otros no se recorta,
+    # y la falta de "otros" tiene que salir igual.
+    ("otros con la máscara en ---", ["setfacl", "-m", "m::---,o::r-x", "{dir}"]),
+])
+def test_verificar_cuenta_cualquier_bit_de_otros_tras_aplicar(arbol_temporal, _identidades, que, orden):
+    proyectos = arbol_temporal / "proyectos"
+    assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    directorio = proyectos / "un-proyecto" / "sub"
+    archivo = proyectos / "un-proyecto" / "archivo.txt"
+    objetivo = archivo if "archivo" in que else directorio
+    r_mod = subprocess.run(
+        ["sudo", "-n", *[a.format(dir=directorio, archivo=archivo) for a in orden]],
+        capture_output=True, text=True,
+    )
+    assert r_mod.returncode == 0, r_mod.stderr
+
+    try:
+        r = _correr("--verificar", str(arbol_temporal))
+    finally:  # una máscara en --- impediría a pytest borrar su propio tmp_path
+        subprocess.run(["sudo", "-n", "setfacl", "-m", "m::rwx", str(directorio)], capture_output=True)
+    assert r.returncode == 1, (que, r.stdout)
+    faltas = _lineas_no_cumple(r.stdout, objetivo)
+    assert faltas and "para otros" in faltas[0], (que, r.stdout)
+
+
+@pytest.mark.parametrize("usuario", ["jaxsvc", "fruiz"])
+def test_lo_creado_despues_de_aplicar_hereda_other_cerrado(arbol_temporal, _identidades, usuario):
+    proyectos = arbol_temporal / "proyectos"
+    assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    sub = proyectos / "un-proyecto" / "sub"
+    nuevo_archivo = sub / f"nuevo-de-{usuario}.txt"
+    nuevo_dir = sub / f"nuevo-dir-de-{usuario}"
+    r = subprocess.run(
+        ["sudo", "-n", "-u", usuario, "python3", "-c", f"""
+import os
+os.umask(0o022)
+os.close(os.open({str(nuevo_archivo)!r}, os.O_CREAT | os.O_WRONLY, 0o666))
+os.mkdir({str(nuevo_dir)!r}, 0o777)
+"""],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    assert _otros_en_nombres(nuevo_archivo) == ["other::---"], _acl(nuevo_archivo)
+    assert nuevo_archivo.stat().st_mode & 0o007 == 0
+    assert _otros_en_nombres(nuevo_dir) == ["other::---", "default:other::---"], _acl(nuevo_dir)
+    assert nuevo_dir.stat().st_mode & 0o007 == 0
+    assert nuevo_dir.stat().st_mode & 0o2000, "el directorio nuevo perdió el setgid"
+
+
+def _nobody_puede_leer(ruta: Path, *, directorio: bool = False) -> bool:
+    """Lectura REAL como `nobody` (open o listdir), no `test -r`: el `test` de uutils (el de
+    hall9000) mira solo los bits del modo y no las ACL, así que daría falso aun para quien entra
+    por una entrada nombrada."""
+    codigo = f"import os; os.listdir({str(ruta)!r})" if directorio else f"open({str(ruta)!r}, 'rb').close()"
+    return subprocess.run(["sudo", "-n", "-u", "nobody", "python3", "-c", codigo], capture_output=True).returncode == 0
+
+
+def test_un_usuario_ajeno_lee_antes_de_aplicar_y_no_despues(arbol_temporal, _identidades):
+    """El control del runbook: una lectura como `nobody` (`head -c1 <archivo>`) tiene que fallar tras aplicar.
+    El control positivo (antes sí lee) demuestra que la prueba mira lo que dice mirar."""
+    proyectos = arbol_temporal / "proyectos"
+    archivo = proyectos / "un-proyecto" / "archivo.txt"
+    if subprocess.run(["getent", "passwd", "nobody"], capture_output=True).returncode != 0:
+        pytest.skip("no existe el usuario nobody")
+    assert _nobody_puede_leer(archivo), "control positivo: antes de aplicar, otros SÍ lee"
+    assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    assert not _nobody_puede_leer(archivo)
+    assert not _nobody_puede_leer(proyectos / "un-proyecto", directorio=True)
+
+
+def test_el_arnes_deja_entrar_a_un_usuario_ajeno_solo_por_su_entrada_nombrada(tmp_path, _identidades):
+    """Valida el arnés mismo: en un runner el usuario de pytest no es jaxsvc ni fruiz, y tras
+    aplicar solo entra por la entrada nombrada que le da `_conceder_acceso_al_usuario_de_pruebas`.
+    Se simula con `nobody`; sin la entrada no entra (la barrera es real), con ella sí."""
+    if subprocess.run(["getent", "passwd", "nobody"], capture_output=True).returncode != 0:
+        pytest.skip("no existe el usuario nobody")
+    raiz = tmp_path / "raiz"
+    proyectos = raiz / "proyectos"
+    (proyectos / "p" / "sub").mkdir(parents=True)
+    archivo = proyectos / "p" / "archivo.txt"
+    archivo.write_text("x")
+    if not _acl_disponible_en(proyectos):
+        pytest.skip("el filesystem temporal no soporta ACL POSIX")
+    _abrir_travesia_hasta(raiz, Path("/tmp"))
+    os.chmod(raiz, 0o755)
+
+    _recorrer_directo(proyectos, accion="aplicar")
+    assert not _nobody_puede_leer(archivo), "sin entrada nombrada, nobody no tiene que entrar"
+    _recorrer_directo(proyectos, accion="deshacer")
+    _conceder_acceso_al_usuario_de_pruebas(proyectos, "nobody")
+    subprocess.run(["setfacl", "-m", "u:jaxsvc:x", str(raiz)], check=True, capture_output=True)
+    _recorrer_directo(proyectos, accion="aplicar")
+    assert _nobody_puede_leer(archivo), subprocess.run(["namei", "-l", str(archivo)], capture_output=True, text=True).stdout + "\n".join(str(_acl(d)) for d in (raiz, proyectos, proyectos / "p", archivo))
+    nuevo = proyectos / "p" / "sub" / "posterior.txt"
+    r = subprocess.run(["sudo", "-n", "-u", "jaxsvc", "python3", "-c", f"open({str(nuevo)!r}, 'w').write('y')"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert _nobody_puede_leer(nuevo), "la entrada por defecto del arnés tiene que llegar a lo creado después"
+    assert _otros_en_nombres(nuevo) == ["other::---"]
 
 
 def test_symlink_en_el_punto_de_partida_se_rechaza(tmp_path):
