@@ -83,7 +83,7 @@ como referencia para volver a aplicar (por ejemplo tras restaurar el árbol).
 pudo leer `proyectos/`. Ya se aplicó `chmod o-rwx /srv/jax-data/jax-workspace`
 (jax-14, verificado por la sesión principal): la raíz queda `drwxrwx---
 fruiz:jaxsvc`; `nobody` y `axioma` ya no leen y `jaxsvc` sí. Reversión:
-`chmod o+rx /srv/jax-data/jax-workspace`. `other::r-x` se conserva en
+`chmod o+rx /srv/jax-data/jax-workspace` (OJO: esa reversión REABRE la lectura de los documentos de clientes a cualquier usuario local; solo con GO de Fernando). Hoy ningún control vigila ese bit: `--verificar` no mira la raíz hasta el PR del guion de permisos. `other::r-x` se conserva en
 `proyectos/` y en su ACL por defecto (cambiarlo va en un PR aparte del guion de
 permisos, spec 2770/0660); el cierre de hoy lo da el 770 del directorio padre.
 

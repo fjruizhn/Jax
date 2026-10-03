@@ -145,15 +145,12 @@ def _violaciones(raiz: Path) -> list[str]:
     marcan todas, tambien las inocuas, por simplicidad),
     `environ.setdefault("JAX_WORKSPACE_DIR", ...)` y el literal viejo.
 
-    NO detecta (alcance declarado, es un barrido de regex y no un analisis):
-    `getenv(key="JAX_WORKSPACE_DIR", ...)`; una constante intermedia
-    (`V = "JAX_WORKSPACE_DIR"; getenv(V, "/x")`);
-    `x = os.environ.get("JAX_WORKSPACE_DIR")` seguido de un `or` en otra
-    sentencia (`x or "/srv/x"`); un `or` que no sea adyacente a la lectura
-    (`(a or b)` envolviendo otra expresion);
-    `Path("/home/fruiz") / "jax-workspace"` ni `"~/jax-workspace"` (el
-    literal viejo se busca entero); y nada que no sea .py (shell, units
-    systemd, YAML)."""
+    Detecta SOLO esas formas; cualquier otra no la ve. Es un barrido de
+    regex y no un analisis: ternarios, try/except, `environ.pop(X, ...)`,
+    walrus, `getenv(key=...)`, constantes intermedias, un comentario entre
+    la lectura y el `or`, rutas armadas por partes y todo lo que no sea .py
+    (shell, units systemd, YAML) quedan fuera. Los ejemplos son ilustrativos,
+    no una lista completa."""
     malos = []
     for ruta in sorted(raiz.rglob("*.py")):
         rel = ruta.relative_to(raiz)
