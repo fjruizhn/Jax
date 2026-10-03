@@ -1724,3 +1724,67 @@ def test_n13_un_tiff_valido_se_lee_pagina_a_pagina_y_no_guarda_los_png(tmp_path:
     )
     r = ocr.extraer(tif)
     assert "Primera pagina" in r.salidas["texto.txt"] and "Segunda pagina" in r.salidas["texto.txt"]
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 3 (cierre): TIFF de coma flotante / 16 bits y rc=0 con stderr
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("modo", ["F", "I", "I;16"])
+def test_un_tiff_de_modo_numerico_con_texto_se_lee_gracias_a_la_normalizacion(
+    tmp_path: Path, modo: str
+):
+    """Modo F/I/I;16: leptonica da rc=0 con `sample format = 3 is not uint` y
+    nada de texto -- un archivo que nadie leyo, reportado como valido. Se
+    normaliza a 8 bits (escalado al rango real + autocontraste) antes de
+    mandarlo a tesseract."""
+    from PIL import Image
+
+    base = _imagen_multilinea(tmp_path / "b.png", [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    gris = Image.open(base).convert("L")
+    if modo == "I;16":
+        numerico = gris.convert("I").point(lambda v: v * 200).convert("I;16")
+    elif modo == "I":
+        numerico = gris.convert("I").point(lambda v: v * 200)
+    else:
+        numerico = gris.convert("F")
+    destino = tmp_path / f"num-{modo.replace(';', '_')}.tif"
+    numerico.save(destino)
+    assert Image.open(destino).mode == modo
+
+    r = ocr.extraer(destino)
+
+    assert r.estado in {"ok", "parcial"}
+    assert "Activos totales" in r.salidas["texto.txt"]
+    assert "codigo" not in r.detalle or r.detalle["codigo"] != "imagen_sin_texto"
+
+
+def test_rc_cero_con_una_marca_de_lectura_fallida_en_stderr_es_tesseract_no_lee(
+    tmp_path: Path, monkeypatch
+):
+    class Falso:
+        returncode = 0
+        stdout = b""
+        stderr = b"Error in pixReadFromTiffStream: sample format = 3 is not uint\n"
+
+    real = ocr.subprocess.run
+    monkeypatch.setattr(
+        ocr.subprocess, "run", lambda cmd, **k: real(cmd, **k) if "--version" in cmd else Falso()
+    )
+    assert ocr._ocr_bytes(b"x", "spa") == {"clasificacion": "ilegible", "causa": "tesseract_no_lee"}
+
+    r = ocr.extraer(_imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD"))
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["causa"] == "tesseract_no_lee"
+    assert r.detalle.get("codigo") != "imagen_sin_texto"
+
+
+def test_rc_cero_con_stderr_normal_no_se_toma_por_fallo(tmp_path: Path):
+    """Control: 'Estimating resolution as N' en stderr es ruido normal."""
+    r = ocr.extraer(_imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD"))
+    assert r.estado in {"ok", "parcial"}
