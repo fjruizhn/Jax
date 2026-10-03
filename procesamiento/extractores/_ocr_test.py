@@ -997,7 +997,7 @@ def test_minor3_la_ficha_no_copia_stderr_ni_rutas(tmp_path: Path):
 def test_minor4_el_tipo_por_cabecera_busca_la_firma_en_los_primeros_1024_bytes(tmp_path: Path):
     con_basura = tmp_path / "a.pdf"
     con_basura.write_bytes(b"\x00\xef\xbb\xbf  basura\n" + b"%PDF-1.4\n")
-    assert ocr.tipo_por_cabecera(con_basura.read_bytes()[:1024]) == "pdf"
+    assert ocr.tipo_por_cabecera(con_basura.read_bytes()[:1024], ".pdf") == "pdf"
     lejos = tmp_path / "b.pdf"
     lejos.write_bytes(b"x" * 2000 + b"%PDF-1.4")
     assert ocr.tipo_por_cabecera(lejos.read_bytes()[:1024]) is None
@@ -1715,36 +1715,70 @@ def test_n13_un_tiff_valido_se_lee_pagina_a_pagina_y_no_guarda_los_png(tmp_path:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("modo", ["F", "I", "I;16"])
-def test_un_tiff_de_modo_numerico_con_texto_se_lee_gracias_a_la_normalizacion(
-    tmp_path: Path, modo: str
-):
-    """Modo F/I/I;16: leptonica da rc=0 con `sample format = 3 is not uint` y
-    nada de texto -- un archivo que nadie leyo, reportado como valido. Se
-    normaliza a 8 bits (escalado al rango real + autocontraste) antes de
-    mandarlo a tesseract."""
+def test_un_tiff_i16_con_texto_se_lee_sin_normalizar(tmp_path: Path):
+    """I;16: leptonica lo lee de forma NATIVA; va sin escalado."""
     from PIL import Image
 
     base = _imagen_multilinea(tmp_path / "b.png", [
         "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
         "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
     ])
-    gris = Image.open(base).convert("L")
-    if modo == "I;16":
-        numerico = gris.convert("I").point(lambda v: v * 200).convert("I;16")
-    elif modo == "I":
-        numerico = gris.convert("I").point(lambda v: v * 200)
-    else:
-        numerico = gris.convert("F")
-    destino = tmp_path / f"num-{modo.replace(';', '_')}.tif"
-    numerico.save(destino)
-    assert Image.open(destino).mode == modo
-
+    i16 = Image.open(base).convert("L").convert("I").point(lambda v: v * 200).convert("I;16")
+    destino = tmp_path / "i16.tif"
+    i16.save(destino)
+    assert Image.open(destino).mode == "I;16"
     r = ocr.extraer(destino)
-
     assert r.estado in {"ok", "parcial"}
     assert "Activos totales" in r.salidas["texto.txt"]
-    assert "codigo" not in r.detalle or r.detalle["codigo"] != "imagen_sin_texto"
+
+
+def test_un_tiff_i16_de_dos_paginas_se_lee_por_el_camino_de_paginas(tmp_path: Path):
+    """El camino multipagina re-codifica a PNG: I;16 se guarda como PNG de 16
+    bits (o, si no, `>> 8` a L) y tiene que leerse igual."""
+    from PIL import Image
+
+    def pagina(lineas, nombre):
+        base = _imagen_multilinea(tmp_path / nombre, lineas)
+        return Image.open(base).convert("L").convert("I").point(lambda v: v * 200).convert("I;16")
+
+    p1 = pagina(["Primera pagina del contrato", "Activos totales 1,234,567.89 USD",
+                 "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD"], "a.png")
+    p2 = pagina(["Segunda pagina de anexos", "Garantia hipotecaria sobre inmueble",
+                 "Avaluo comercial 5,000,000.00 USD", "Firmado ante notario publico"], "b.png")
+    tif = tmp_path / "dos16.tif"
+    p1.save(tif, save_all=True, append_images=[p2])
+    r = ocr.extraer(tif)
+    assert r.estado in {"ok", "parcial"}
+    assert "Primera pagina" in r.salidas["texto.txt"] and "Segunda pagina" in r.salidas["texto.txt"]
+
+
+@pytest.mark.parametrize("modo", ["F", "I"])
+def test_un_tiff_f_o_i_no_es_un_documento_y_no_llega_a_tesseract(
+    tmp_path: Path, modo: str, monkeypatch
+):
+    """Rasters de coma flotante o de 32 bits: `modo_no_soportado`, sin llamar
+    a tesseract (se borro todo el escalado por percentiles)."""
+    from PIL import Image
+
+    destino = tmp_path / f"{modo}.tif"
+    Image.new(modo, (200, 100), 3).save(destino)
+    llamadas = _tesseract_llamado(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["causa"] == "modo_no_soportado"
+    assert llamadas == []
+
+
+def test_un_tiff_multipagina_con_una_pagina_f_se_rechaza(tmp_path: Path):
+    from PIL import Image
+
+    destino = tmp_path / "mix.tif"
+    Image.new("L", (100, 100), 255).save(
+        destino, save_all=True, append_images=[Image.new("F", (100, 100), 1.0)]
+    )
+    r = ocr.extraer(destino)
+    assert r.detalle["causa"] == "modo_no_soportado"
 
 
 def test_rc_cero_con_una_marca_de_lectura_fallida_en_stderr_es_tesseract_no_lee(
@@ -1777,42 +1811,6 @@ def test_rc_cero_con_stderr_normal_no_se_toma_por_fallo(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # Jax#338 ronda 5
 # ---------------------------------------------------------------------------
-
-
-def _tiff_f_con_texto(destino: Path, tmp_path: Path, pixel=None):
-    from PIL import Image
-
-    base = _imagen_multilinea(tmp_path / "base-f.png", [
-        "Factura numero 12345 pagada", "Activos totales 1,234,567.89 USD",
-        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
-    ])
-    f = Image.open(base).convert("L").convert("F")
-    if pixel is not None:
-        f.putpixel((0, 0), pixel)
-    f.save(destino)
-    return destino
-
-
-@pytest.mark.parametrize("valor", [float("inf"), float("-inf"), float("nan"), 1e30])
-def test_n14_un_pixel_no_finito_o_gigante_no_aplasta_el_tiff_de_modo_f(tmp_path, valor):
-    """Un solo pixel inf/nan/1e30 hacia que el escalado por extremos dejara el
-    texto en 0 caracteres (ok/imagen_sin_texto). Percentiles sobre los valores
-    FINITOS; los no finitos son fondo."""
-    destino = _tiff_f_con_texto(tmp_path / "f.tif", tmp_path, pixel=valor)
-    r = ocr.extraer(destino)
-    assert r.estado in {"ok", "parcial"}
-    assert "Factura numero 12345 pagada" in r.salidas["texto.txt"]
-
-
-def test_n14_un_tiff_f_todo_no_finito_es_sin_datos_finitos(tmp_path: Path):
-    from PIL import Image
-
-    destino = tmp_path / "nan.tif"
-    Image.new("F", (200, 100), float("nan")).save(destino)
-    r = ocr.extraer(destino)
-    assert r.estado == "error"
-    assert r.detalle["codigo"] == "archivo_ilegible"
-    assert r.detalle["causa"] == "sin_datos_finitos"
 
 
 def test_n15_caso_real_tiff_f_directo_a_tesseract_da_rc0_con_is_not_uint():
@@ -1938,16 +1936,38 @@ def _pdf_escaneado(tmp_path: Path) -> Path:
     )
 
 
-def test_n17_pdf_con_4_bytes_de_basura_y_nombre_png_es_pdf_en_las_tres(tmp_path: Path):
+def test_n17_pdf_con_4_bytes_de_basura_llamado_pdf_es_pdf_en_las_tres(tmp_path: Path):
+    from procesamiento import compuerta, ingesta
+
+    f = tmp_path / "escaneo.pdf"
+    f.write_bytes(b"\x00\x01\x02\x03" + _pdf_escaneado(tmp_path).read_bytes())
+    assert ocr.camino_de(f) == "pdf"
+    assert ingesta._camino_de(f, ".pdf") == "pdf"
+    assert compuerta._tipo_por_contenido(f) == "pdf"
+    assert ocr.extraer(f).detalle["_camino"] == "pdf"
+    assert compuerta.extraer(f).detalle["_camino"] == "pdf"
+
+
+def test_n20_pdf_desplazado_con_otro_nombre_no_es_pdf_y_las_tres_coinciden(tmp_path: Path):
+    """`%PDF` desplazado solo vale con extension .pdf: con `.png` ni la
+    compuerta, ni ocr, ni la ingesta lo toman por PDF."""
     from procesamiento import compuerta, ingesta
 
     f = tmp_path / "escaneo.png"
     f.write_bytes(b"\x00\x01\x02\x03" + _pdf_escaneado(tmp_path).read_bytes())
-    assert ocr.camino_de(f) == "pdf"
-    assert ingesta._camino_de(f, ".png") == "pdf"
-    assert compuerta._tipo_por_contenido(f) == "pdf"
-    assert ocr.extraer(f).detalle["_camino"] == "pdf"
-    assert compuerta.extraer(f).detalle["_camino"] == "pdf"
+    assert compuerta._tipo_por_contenido(f) is None
+    assert ocr.camino_de(f) == "imagen"
+    assert ingesta._camino_de(f, ".png") == "imagen"
+
+
+@pytest.mark.parametrize("nombre", ["nota.txt", "datos.csv", "correo.eml"])
+def test_n20_un_archivo_que_menciona_pdf_sigue_en_sin_extractor(tmp_path: Path, nombre):
+    from procesamiento import compuerta
+
+    f = tmp_path / nombre
+    f.write_text("hola\nver el adjunto %PDF-1.7 en la siguiente pagina\n", encoding="utf8")
+    r = compuerta.extraer(f)
+    assert r.estado == "sin_extractor"
 
 
 def test_n17_pdf_con_2000_bytes_de_basura_la_misma_decision_en_las_tres(
@@ -1973,19 +1993,22 @@ def test_n17_pdf_con_2000_bytes_de_basura_la_misma_decision_en_las_tres(
 
 
 def test_n17_la_firma_de_imagen_manda_y_un_zip_no_se_confunde_con_pdf():
-    assert ocr.tipo_por_cabecera(b"\x89PNG\r\n\x1a\n" + b"x" * 50 + b"%PDF") == "imagen"
-    assert ocr.tipo_por_cabecera(b"\x00\x01\x02\x03%PDF-1.7") == "pdf"
-    assert ocr.tipo_por_cabecera(b"x" * 2000 + b"%PDF-1.7") is None
-    assert ocr.tipo_por_cabecera(b"PK\x03\x04" + b"x" * 30 + b"%PDF") is None
+    assert ocr.tipo_por_cabecera(b"\x89PNG\r\n\x1a\n" + b"x" * 50 + b"%PDF", ".pdf") == "imagen"
+    assert ocr.tipo_por_cabecera(b"%PDF-1.7 ...") == "pdf"                       # al inicio, sin extension
+    assert ocr.tipo_por_cabecera(b"\x00\x01\x02\x03%PDF-1.7", ".pdf") == "pdf"    # desplazado, con .pdf
+    assert ocr.tipo_por_cabecera(b"\x00\x01\x02\x03%PDF-1.7", ".txt") is None    # desplazado, sin .pdf
+    assert ocr.tipo_por_cabecera(b"\x00\x01\x02\x03%PDF-1.7") is None
+    assert ocr.tipo_por_cabecera(b"x" * 2000 + b"%PDF-1.7", ".pdf") is None
+    assert ocr.tipo_por_cabecera(b"PK\x03\x04" + b"x" * 30 + b"%PDF", ".pdf") is None
 
 
-def test_n18_un_fotograma_numerico_tiene_un_tope_de_pixeles_mas_bajo(tmp_path, monkeypatch):
+def test_n18_un_fotograma_de_16_bits_tiene_un_tope_de_pixeles_mas_bajo(tmp_path, monkeypatch):
     from PIL import Image
 
     assert ocr.MAX_PIXELES_NUMERICO == 16_000_000
     monkeypatch.setattr(ocr, "MAX_PIXELES_NUMERICO", 5_000)
-    destino = tmp_path / "f.tif"
-    Image.new("F", (100, 100), 1.0).save(destino)   # 10 000 px > 5 000
+    destino = tmp_path / "i16.tif"
+    Image.new("I;16", (100, 100), 1000).save(destino)   # 10 000 px > 5 000
     r = ocr.extraer(destino)
     assert r.detalle["causa"] == "demasiados_pixeles"
     # una imagen de 8 bits del mismo tamano NO se rechaza por ese tope
@@ -1994,13 +2017,42 @@ def test_n18_un_fotograma_numerico_tiene_un_tope_de_pixeles_mas_bajo(tmp_path, m
     assert ocr.extraer(gris).estado == "ok"
 
 
+def test_n21_los_modos_fuera_de_png_tienen_su_tope_por_fotograma(tmp_path, monkeypatch):
+    from PIL import Image
+
+    assert ocr.MAX_PIXELES_OTROS_MODOS == 25_000_000
+    monkeypatch.setattr(ocr, "MAX_PIXELES_OTROS_MODOS", 5_000)
+    destino = tmp_path / "cmyk.tif"
+    Image.new("CMYK", (100, 100)).save(destino)
+    r = ocr.extraer(destino)
+    assert r.detalle["causa"] == "demasiados_pixeles"
+    rgb = tmp_path / "rgb.png"
+    Image.new("RGB", (100, 100), "white").save(rgb)
+    assert ocr.extraer(rgb).estado == "ok"
+
+
+def test_cmyk_de_dos_paginas_sigue_leyendose_como_rgb(tmp_path: Path):
+    from PIL import Image
+
+    p1 = _imagen_multilinea(tmp_path / "a.png", [
+        "Primera pagina del contrato", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD"])
+    p2 = _imagen_multilinea(tmp_path / "b.png", [
+        "Segunda pagina de anexos", "Garantia hipotecaria sobre inmueble",
+        "Avaluo comercial 5,000,000.00 USD", "Firmado ante notario publico"])
+    tif = tmp_path / "cmyk2.tif"
+    Image.open(p1).convert("CMYK").save(
+        tif, save_all=True, append_images=[Image.open(p2).convert("CMYK")])
+    r = ocr.extraer(tif)
+    assert "Primera pagina" in r.salidas["texto.txt"] and "Segunda pagina" in r.salidas["texto.txt"]
+
+
 def test_n18_memory_error_no_es_archivo_danado(tmp_path: Path, monkeypatch):
     def sin_memoria(*a, **k):
         raise MemoryError
 
-    monkeypatch.setattr(ocr, "_normalizar_modo", sin_memoria)
-    destino = _tiff_f_con_texto(tmp_path / "f.tif", tmp_path)
-    r = ocr.extraer(destino)
+    monkeypatch.setattr(ocr, "_a_modo_legible", sin_memoria)
+    r = ocr.extraer(_tiff_de_dos_paginas(tmp_path))
     assert r.estado == "error"
     assert r.detalle["causa"] == "sin_memoria"
     assert r.detalle["codigo"] != "archivo_ilegible"
