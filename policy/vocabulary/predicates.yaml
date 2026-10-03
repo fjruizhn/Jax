@@ -27,6 +27,9 @@ predicates:
   - name: JOB_STATUS
     args: [job_id, status]
     source_of_truth: "Motor Registry JobStore"
+  - name: PROCESSING_JOB_STATUS
+    args: [processing_job_id, status]
+    source_of_truth: "LAS MANOS ProcessingJobStore"
   - name: PIPELINE_STATUS
     args: [pipeline_id, status]
     source_of_truth: "Jacobs canonical store"

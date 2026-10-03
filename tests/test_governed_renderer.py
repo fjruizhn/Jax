@@ -2,6 +2,10 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 import pytest
 
 from jacobs.models import PipelineStatus
@@ -16,6 +20,7 @@ from policy.governance.response import *
 from policy.governance.resolution import *
 from policy.governance.governed_domain import GovernedDomainSpecification
 from policy.governance import governed_domain
+from policy.governance.output_lifecycle import mint_governed_transport_unit, revalidate_for_transport
 
 NOW = datetime(2026, 9, 29, 12, tzinfo=timezone.utc)
 KEY = b"f2-c-test-secret-material-longer-than-thirty-two-bytes"
@@ -210,6 +215,96 @@ def test_structured_status_machine_vocabularies_track_authoritative_enums():
     assert governed_domain._STRUCTURED_PIPELINE_STATUS_VALUES == frozenset(status.value for status in PipelineStatus)
     assert governed_domain._STRUCTURED_FACET_RUNTIME_STATUS_VALUES == frozenset({"idle", "thinking", "error", "offline"})
     assert governed_domain._STRUCTURED_ENGINE_STATUS_VALUES == frozenset({"alive", "down"})
+    # The governed-domain literal is intentionally compared to the source
+    # enum in a subprocess with the LAS MANOS import root. Importing it in
+    # production would make added source statuses silently accepted instead
+    # of failing this tripwire.
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run([sys.executable, "-c", "from processing_job_store import ProcessingJobStatus; print(','.join(x.value for x in ProcessingJobStatus))"],
+        cwd=root, env={**os.environ, "PYTHONPATH": ".:las_manos"}, capture_output=True, text=True, check=True)
+    assert governed_domain._STRUCTURED_PROCESSING_JOB_STATUS_VALUES == frozenset(result.stdout.strip().split(","))
+
+
+def test_governed_domain_imports_with_only_the_jax_root_on_pythonpath():
+    root = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": str(root)}
+    result = subprocess.run([sys.executable, "-c", "import policy.governance.governed_domain"],
+        cwd=root, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_native_processing_shape_is_distinct_from_generic_motor_shape():
+    domain = GovernedDomainSpecification()
+    assert domain.structured_runtime_status_predicate({"job_id": "job-1", "estado": "completed"}) == "PROCESSING_JOB_STATUS"
+    assert domain.structured_runtime_status_predicate({"processing_job_id": "job-1", "status": "completed"}) == "PROCESSING_JOB_STATUS"
+    assert domain.structured_runtime_status_predicate({"job_id": "job-1", "status": "completed"}) == "JOB_STATUS"
+    # Project Documents DTOs are Spanish workflow objects but do not identify
+    # a Processing job; result references must not make them authoritative.
+    assert domain.structured_runtime_status_predicate({"estado": "completado", "resultado": {"id": "x"}}) is None
+
+
+@pytest.mark.parametrize("payload", (
+    {"result": {"processing_job_id": "job-1", "status": "running"}},
+    [{"job_id": "job-1", "estado": "failed"}],
+    json.dumps({"processing_job_id": "job-1", "status": "cancelled"}),
+    json.dumps(json.dumps({"job_id": "job-1", "estado": "completed"})),
+))
+def test_processing_structured_shapes_are_detected_through_existing_bounded_walk(payload):
+    assert GovernedDomainSpecification().structured_runtime_status_predicate(payload) == "PROCESSING_JOB_STATUS"
+
+
+def test_processing_status_narrative_uses_closed_registered_grammar():
+    domain = GovernedDomainSpecification()
+    assert domain.registered_proposition("Processing job job-1 is completed.") == "PROCESSING_JOB_STATUS"
+    assert domain.registered_proposition("Processing job job-1 is succeeded.") != "PROCESSING_JOB_STATUS"
+
+
+def test_processing_claim_flows_from_f2b_through_render_and_transport_revalidation():
+    s = scope()
+    rule = ScopeRule(s.environment, s.tenant_id, s.project_id, s.subject_id,
+        s.actor_id, s.audience, s.component_id)
+    binding = PredicateAuthorityBinding("PROCESSING_JOB_STATUS", "f2-e.runtime-status.3",
+        "las-manos:processing-job-store", "authority:las-manos", s.environment, rule, rule,
+        60, ConflictPolicy.SINGLE_SOURCE_REQUIRED,
+        "policy.governance.runtime_status:ProcessingJobStatusResolver",
+        "f2-e.runtime-status-resolver.3", "sha256:processing", "f2-e.runtime-status.3",
+        source_scope_class=SourceScopeClass.EXACT_RESPONSE_SCOPE)
+    entry = RegistryEntry(binding, TrustedAdapterRegistration(
+        AdapterKind.LAS_MANOS_PROCESSING_JOB_STATUS,
+        binding.resolver_implementation_identity, binding.resolver_version,
+        binding.designated_source_identity, binding.source_configuration_digest),
+        ("processing_job_id", "status"), "processing-status@1:en")
+    registry = resolution._build_approved_registry_for_server((entry,),
+        authenticator=ReceiptAuthenticator.for_testing(KEY))
+    args = {"processing_job_id": "job-1", "status": "completed"}
+    evidence = resolution._runtime_status_evidence_from_server(AdapterKind.LAS_MANOS_PROCESSING_JOB_STATUS,
+        ResolutionObservation(ResolutionStatus.RESOLVED, NOW,
+            "las-manos-processing-job:job-1", args), s, "sha256:processing")
+    resolution_receipt = registry.resolve("PROCESSING_JOB_STATUS", args, s,
+        validation_time=NOW, runtime_status_evidence=evidence)
+    assert resolution_receipt.status is ResolutionStatus.RESOLVED
+    receipt_ref = replace(ref("processing-receipt", ReferenceType.RESOLUTION_RECEIPT, s),
+        revision_or_digest=resolution_receipt.receipt_id)
+    claim = ClaimRecord("processing-claim", "PROCESSING_JOB_STATUS", args, s,
+        SourceClass.CURRENT_SOURCE, EpistemicStatus.CURRENT_OBSERVATION,
+        resolution_receipt_ref=receipt_ref.ref_id, disposition=ClaimDisposition.ASSERTABLE,
+        template_contract=TemplateContract("processing-status", "1", "en"))
+    candidate = GovernedResponseCandidate("f2-c.1", "processing-response", s.request_id,
+        s.trace_id, s, "web-chat", (),
+        (ContentBlock(ContentBlockKind.CLAIM_REF_BLOCK, claim_refs=(claim.claim_id,)),),
+        (claim,), (receipt_ref,))
+    envelope = response._seal_candidate_for_server(candidate, contract_state=ContractState.VALID,
+        governance_receipt=receipt())
+    trusted = {receipt_ref.ref_id: trusted_receipt_reference(receipt_ref)}
+    context = RenderContext(registry, {receipt_ref.ref_id: resolution_receipt},
+        {("processing-status", "1", "en"): "Processing job {processing_job_id} is {status}."}, {},
+        GovernedDomainRegistry(), lambda value, scope_value: validates_trusted_receipt_reference(value, scope_value, trusted),
+        lambda: NOW, receipt_reference_resolver=lambda value, scope_value: trusted.get(value.ref_id))
+    rendered = GovernedRenderer().render_text(envelope, context)
+    assert rendered.text == "Processing job job-1 is completed."
+    unit = mint_governed_transport_unit(envelope, rendered, context,
+        transport_kind="web-chat", idempotency_key="processing-unit", now=NOW)
+    assert revalidate_for_transport(unit, NOW).text == rendered.text
 
 
 @pytest.mark.parametrize("payload", (

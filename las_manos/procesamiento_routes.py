@@ -107,20 +107,21 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, ConfigDict
 
 from motor_registry import job_tasks, tool_authority
-from motor_registry.job_store import JobStore
 from motor_registry.models import JobStatus
 from procesamiento import ingesta
+from processing_job_store import ProcessingJobStore
+from processing_ownership import ProcessingOwnershipError, processing_ownership_from_scope
 
 import proyecto_activo
 
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
-_STORE = JobStore(str(BASE_DIR / "logs" / "procesamiento_jobs.jsonl"))
+_STORE = ProcessingJobStore(str(BASE_DIR / "logs" / "procesamiento_jobs.jsonl"))
 
 #: nombre del archivo de metadatos que NO cuenta como salida del extractor
 #: (mismo criterio que `scripts/procesar_archivos.py::_tamano_extracto`).
@@ -173,8 +174,6 @@ _UUID_CANONICO = re.compile(
 #: daban 202 los dos, y el de 2MB inflaba el JSONL en 4MB (se re-esparce
 #: el estado ENTERO en cada `update()`, así que un campo largo se duplica
 #: en cada línea).
-_MAX_USUARIO_LEN = 200
-
 router = APIRouter(prefix="/procesamiento", tags=["procesamiento"])
 
 
@@ -187,10 +186,6 @@ class TrabajoRequest(BaseModel):
     # que FastAPI no sabe serializar (500). Así llega a la regex y da 422.
     project_uuid: str
     rutas: list[str]
-    # B-6: principal obligatorio, no vacío, con tope -- jax-platform ya
-    # tiene el JWT del usuario; que lo pase. No es autorización completa
-    # (eso es otra ronda): es lo mínimo para que un IDOR sea investigable.
-    usuario: str = Field(min_length=1, max_length=_MAX_USUARIO_LEN)
     model_config = ConfigDict(extra="forbid")
 
 
@@ -596,7 +591,7 @@ async def _construir_respuesta_estado(job_id: str, view) -> TrabajoEstadoRespons
 #  Reconciliación al arrancar (B-3, cerrado en la ronda anterior -- sin
 #  cambios acá)
 # ---------------------------------------------------------------------------
-def reconciliar_trabajos_huerfanos(store: JobStore | None = None) -> int:
+def reconciliar_trabajos_huerfanos(store: ProcessingJobStore | None = None) -> int:
     """Al arrancar LAS MANOS: cualquier job `pending`/`running`/`cancelling`
     en el JSONL es, por definición, huérfano -- este proceso recién
     arrancó, así que ninguna tarea viva puede estar trabajando en él.
@@ -625,8 +620,26 @@ def reconciliar_trabajos_huerfanos(store: JobStore | None = None) -> int:
 # ---------------------------------------------------------------------------
 #  Rutas HTTP
 # ---------------------------------------------------------------------------
+def _processing_ownership(request: Request):
+    try:
+        return processing_ownership_from_scope(request.scope)
+    except ProcessingOwnershipError as exc:
+        raise HTTPException(status_code=403, detail={"code": "processing_ownership_unavailable"}) from exc
+
+
+def _snapshot_for_owner(job_id: str, request: Request):
+    owner = _processing_ownership(request)
+    if not _STORE.authoritative_history_intact:
+        raise HTTPException(status_code=503, detail={"code": "procesamiento_no_disponible"})
+    snapshot = _STORE.authoritative_snapshot(job_id)
+    if snapshot is None or snapshot.owner != owner:
+        raise HTTPException(status_code=404, detail=f"Trabajo '{job_id}' no encontrado")
+    return snapshot
+
+
 @router.post("/trabajos", response_model=TrabajoCreadoResponse, status_code=202)
-async def crear_trabajo(req: TrabajoRequest) -> TrabajoCreadoResponse:
+async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoResponse:
+    ownership = _processing_ownership(request)
     if len(req.rutas) > _MAX_RUTAS_POR_TRABAJO:
         raise HTTPException(
             status_code=422,
@@ -645,14 +658,14 @@ async def crear_trabajo(req: TrabajoRequest) -> TrabajoCreadoResponse:
     if not _UUID_CANONICO.fullmatch(req.project_uuid):
         raise HTTPException(status_code=422, detail={"code": "project_uuid_invalido"})
     try:
-        estado_proyecto = await proyecto_activo.estado_del_proyecto(req.project_uuid)
+        estado_proyecto = await proyecto_activo.identidad_activa_del_proyecto(req.project_uuid, ownership)
     except Exception as e:
         # Base caída o timeout: no se sabe si el proyecto está activo. Falla cerrado, con un
         # código estable que el despachador de la plataforma reintenta, y ANTES de crear
         # el job y de tomar cupo (nada que devolver).
         logger.warning("estado_del_proyecto falló (%s): %s", type(e).__name__, e)
         raise HTTPException(status_code=503, detail={"code": "base_no_disponible"}) from e
-    if estado_proyecto != "ACTIVE":
+    if not estado_proyecto:
         raise HTTPException(status_code=422, detail={"code": "proyecto_no_activo"})
     proyecto = req.project_uuid
     if _SEMAFORO_TRABAJOS.locked():
@@ -684,7 +697,8 @@ async def crear_trabajo(req: TrabajoRequest) -> TrabajoCreadoResponse:
         job_id = _STORE.create(
             # B-6: el principal REAL -- antes era la constante
             # "las_manos.procesamiento", que no identificaba a nadie.
-            caller=req.usuario,
+            ownership=ownership,
+            caller="jax-platform:proyectos-documentos",
             capability="ingesta_archivos",
             # `motor`/`prompt` son vocabulario de JobStore para motores LLM
             # -- este job no despacha ningún motor. Ver la limitación
@@ -733,15 +747,12 @@ async def crear_trabajo(req: TrabajoRequest) -> TrabajoCreadoResponse:
 
 
 @router.get("/trabajos/{job_id}", response_model=TrabajoEstadoResponse)
-async def estado_trabajo(job_id: str) -> TrabajoEstadoResponse:
-    view = _STORE.get(job_id)
-    if view is None:
-        raise HTTPException(status_code=404, detail=f"Trabajo '{job_id}' no encontrado")
-    return await _construir_respuesta_estado(job_id, view)
+async def estado_trabajo(job_id: str, request: Request) -> TrabajoEstadoResponse:
+    return await _construir_respuesta_estado(job_id, _snapshot_for_owner(job_id, request).view)
 
 
 @router.post("/trabajos/{job_id}/cancel", response_model=TrabajoEstadoResponse)
-async def cancelar_trabajo(job_id: str) -> TrabajoEstadoResponse:
+async def cancelar_trabajo(job_id: str, request: Request) -> TrabajoEstadoResponse:
     """N-3: cancelar es honesto sobre lo que Python puede hacer. NO mata
     ningún hilo -- marca `CANCELLING` y marca `control.cancelado`, que cada
     archivo AUTOCONSULTA justo antes de arrancar de verdad (ver
@@ -753,9 +764,7 @@ async def cancelar_trabajo(job_id: str) -> TrabajoEstadoResponse:
     job termina, `_ejecutar_trabajo` marca `CANCELLED` (terminal) y libera
     el permiso del semáforo -- nunca antes, o la admisión estaría
     mintiendo sobre cuánta capacidad real hay libre."""
-    view = _STORE.get(job_id)
-    if view is None:
-        raise HTTPException(status_code=404, detail=f"Trabajo '{job_id}' no encontrado")
+    view = _snapshot_for_owner(job_id, request).view
     if view.status in (
         JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.REJECTED,
     ):
@@ -783,4 +792,4 @@ async def cancelar_trabajo(job_id: str) -> TrabajoEstadoResponse:
             # tarea viva (un huérfano que la reconciliación del arranque
             # todavía no marcó).
             _STORE.update(job_id, status=JobStatus.CANCELLING.value)
-    return await _construir_respuesta_estado(job_id, _STORE.get(job_id))
+    return await _construir_respuesta_estado(job_id, _snapshot_for_owner(job_id, request).view)

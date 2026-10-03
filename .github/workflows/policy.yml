@@ -1779,6 +1779,22 @@ jobs:
             echo "PISO ROTO: se esperaban 18 tests CORRIDOS de F2-E-SR source integrity."; exit 1; }
         env:
           PYTHONPATH: .:las_manos
+      - name: F2-E-SR3 Processing ownership and governed-status regressions
+        # SR3 has its own source, scope, registry and renderer boundary. Keep
+        # this command explicit so a future general-suite refactor cannot
+        # silently remove those checks from CI.
+        run: |
+          python -m pytest \
+            tests/test_processing_job_store.py \
+            tests/test_f2e_runtime_status.py \
+            tests/test_f2e_runtime_status_remediation.py \
+            tests/test_governed_resolution.py \
+            tests/test_governed_renderer.py \
+            -q 2>&1 | tee /tmp/f2e-sr3
+          grep -qE "^194 passed" /tmp/f2e-sr3 || {
+            echo "PISO ROTO: se esperaban 194 tests CORRIDOS de F2-E-SR3."; exit 1; }
+        env:
+          PYTHONPATH: .:las_manos
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-03: 39 (SP1 + arreglo del test rojo) + 39
         # (tests/test_governance_grounding.py, SP3 + ola de fixes de la
@@ -1829,8 +1845,12 @@ jobs:
           # including completed through direct/nested/encoded TOOL_DATA and
           # NARRATIVE_TEXT plus unrelated-data negative controls.
           # Source-integrity cases run in their own exact-count step below.
-          grep -qE "^255 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 255 tests CORRIDOS."; exit 1; }
+          # 255 -> 263 el 2026-10-03 (F2-E-SR3): Processing canonical
+          # predicate vocabulary, root-only governed-domain import tripwire,
+          # native/canonical structured shapes, bounded encodings, and the
+          # F2-B -> F2-C -> F2-D receipt/render/revalidation path.
+          grep -qE "^263 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 263 tests CORRIDOS."; exit 1; }
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en

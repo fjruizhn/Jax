@@ -53,6 +53,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from processing_ownership import ProcessingOwnershipError, processing_ownership_from_headers
 
 from config_entorno import EntornoInvalido
 
@@ -226,6 +227,14 @@ class CredencialDeServicio:
         permiso = PERMISOS[identidad]
         if not permiso.admite_ruta(metodo, path):
             return await _responder(send, 403, CODIGO_RUTA_NO_PERMITIDA)
+        ownership = None
+        if path == "/procesamiento/trabajos" or path.startswith("/procesamiento/trabajos/"):
+            if identidad != IDENTIDAD_PLATAFORMA:
+                return await _responder(send, 403, CODIGO_RUTA_NO_PERMITIDA)
+            try:
+                ownership = processing_ownership_from_headers(scope.get("headers", []))
+            except ProcessingOwnershipError:
+                return await _responder(send, 400, CODIGO_CUERPO_ILEGIBLE)
 
         cuerpo = await _leer_cuerpo(receive)
         if cuerpo.strip():
@@ -239,6 +248,8 @@ class CredencialDeServicio:
                         return await _responder(send, 403, CODIGO_IDENTIDAD_DECLARADA)
 
         scope.setdefault("state", {})["identidad_servicio"] = identidad
+        if ownership is not None:
+            scope["state"]["processing_ownership"] = ownership
         return await self.app(scope, _reproducir(cuerpo, receive), send)
 
 

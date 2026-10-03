@@ -44,18 +44,28 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 import procesamiento_routes as rutas_mod
 from auth_servicio import ENCABEZADO, IDENTIDAD_JACOBS, IDENTIDAD_PLATAFORMA, proteger
 from motor_registry import tool_authority
 from motor_registry.job_store import JobStore
 from motor_registry.models import JobStatus
+from processing_job_store import ProcessingJobStore
+from processing_ownership import ProcessingOwnershipContext
 from procesamiento.ficha import Ficha
 from procesamiento_routes import router
 
 
 #: E2a: LAS MANOS trabaja por `project_uuid` (UUID canónico, 36 caracteres).
 UUID_PRUEBA = "0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a"
+OWNER = ProcessingOwnershipContext("processing-owner.1", "1", "2", "3")
+
+
+class _ProcessingJobStoreFixture(ProcessingJobStore):
+    """Legacy worker fixtures have no HTTP envelope; keep their test data owned."""
+    def create(self, **kwargs):
+        return super().create(ownership=kwargs.pop("ownership", OWNER), **kwargs)
 
 
 def _ficha(sha256: str, estado: str = "ok", extractor: str = "pdf") -> Ficha:
@@ -88,7 +98,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.workspace = Path(self._tmpdir.name) / "workspace"
         self.workspace.mkdir()
-        self.store = JobStore(str(Path(self._tmpdir.name) / "jobs.jsonl"))
+        self.store = _ProcessingJobStoreFixture(str(Path(self._tmpdir.name) / "jobs.jsonl"))
         self._parche_workspace = patch.object(
             tool_authority, "WORKSPACE_ROOT", self.workspace.resolve()
         )
@@ -839,7 +849,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             liberador = threading.Timer(0.3, seguir.set)  # suelta el lock en 0,3 s, desde otro hilo
             liberador.start()
             self.addCleanup(liberador.cancel)
-            respuesta = await rutas_mod.cancelar_trabajo(job_id)
+            respuesta = await rutas_mod.cancelar_trabajo(job_id, _owned_request())
             sondeando = False
             await sondeo
             await tarea
@@ -988,13 +998,13 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
              patch.object(rutas_mod, "_EXECUTOR_OCR", self.executor), \
              patch.object(rutas_mod, "_EXECUTOR_IO", self.executor_io), \
              patch.object(rutas_mod, "_SEMAFORO_TRABAJOS", asyncio.Semaphore(2)), \
-             patch.object(rutas_mod.proyecto_activo, "estado_del_proyecto", AsyncMock(return_value="ACTIVE")), \
+             patch.object(rutas_mod.proyecto_activo, "identidad_activa_del_proyecto", AsyncMock(return_value=True)), \
              patch.object(rutas_mod.ingesta, "ingerir", ingerir_mock):
             creado = await rutas_mod.crear_trabajo(
-                rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=["a.pdf"], usuario="ana@cliente.com")
+                rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=["a.pdf"]), _owned_request()
             )
             # SIN ceder el loop: el worker todavía no dio su primera vuelta.
-            respuesta = await rutas_mod.cancelar_trabajo(creado.job_id)
+            respuesta = await rutas_mod.cancelar_trabajo(creado.job_id, _owned_request())
             for _ in range(200):
                 if self.store.get(creado.job_id).status in (
                     JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.FAILED,
@@ -1034,14 +1044,26 @@ def _app(**kw) -> FastAPI:
 
 
 def _h(identidad: str | None) -> dict[str, str]:
-    return {ENCABEZADO: CRED[identidad]} if identidad else {}
+    headers = {ENCABEZADO: CRED[identidad]} if identidad else {}
+    if identidad == IDENTIDAD_PLATAFORMA:
+        headers.update({
+            "X-Jax-Processing-Owner-Version": OWNER.version,
+            "X-Jax-Processing-Tenant-Id": OWNER.tenant_id,
+            "X-Jax-Processing-User-Id": OWNER.user_id,
+            "X-Jax-Processing-Project-Id": OWNER.project_id,
+        })
+    return headers
+
+
+def _owned_request() -> Request:
+    return Request({"type": "http", "state": {"processing_ownership": OWNER}})
 
 
 class TrabajoHTTPTest(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmpdir.cleanup)
-        self.store = JobStore(str(Path(self._tmpdir.name) / "jobs.jsonl"))
+        self.store = _ProcessingJobStoreFixture(str(Path(self._tmpdir.name) / "jobs.jsonl"))
         self._parche_store = patch.object(rutas_mod, "_STORE", self.store)
         self._parche_store.start()
         self.addCleanup(self._parche_store.stop)
@@ -1060,12 +1082,12 @@ class TrabajoHTTPTest(unittest.TestCase):
 
         # E2a: el proyecto tiene que existir y estar ACTIVE (si no, 422).
         self._parche_activo = patch.object(
-            rutas_mod.proyecto_activo, "estado_del_proyecto", AsyncMock(return_value="ACTIVE"))
+            rutas_mod.proyecto_activo, "identidad_activa_del_proyecto", AsyncMock(return_value=True))
         self._parche_activo.start()
         self.addCleanup(self._parche_activo.stop)
 
     def _post(self, c, **overrides):
-        cuerpo = {"project_uuid": UUID_PRUEBA, "rutas": ["a.pdf"], "usuario": "ana@cliente.com"}
+        cuerpo = {"project_uuid": UUID_PRUEBA, "rutas": ["a.pdf"]}
         cuerpo.update(overrides)
         return c.post("/procesamiento/trabajos", json=cuerpo, headers=_h(IDENTIDAD_PLATAFORMA))
 
@@ -1082,17 +1104,17 @@ class TrabajoHTTPTest(unittest.TestCase):
         async def _correr():
             with patch.object(self.store, "create", side_effect=RuntimeError("boom -- create() reventó")):
                 for _ in range(2):  # tamaño real del semáforo de prueba
-                    req = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[], usuario="ana@cliente.com")
+                    req = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[])
                     with self.assertRaises(RuntimeError):
-                        await rutas_mod.crear_trabajo(req)
+                        await rutas_mod.crear_trabajo(req, _owned_request())
 
             assert not self._semaforo_test.locked(), (
                 "el semáforo quedó agotado tras dos pedidos rotos -- DoS de N requests"
             )
             # y un pedido LIMPIO subsiguiente se admite normalmente
-            req_limpio = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[], usuario="ana@cliente.com")
+            req_limpio = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[])
             with patch.object(rutas_mod, "_ejecutar_trabajo", AsyncMock()):
-                respuesta = await rutas_mod.crear_trabajo(req_limpio)
+                respuesta = await rutas_mod.crear_trabajo(req_limpio, _owned_request())
             assert respuesta.job_id
 
         asyncio.run(_correr())
@@ -1109,7 +1131,7 @@ class TrabajoHTTPTest(unittest.TestCase):
         # canónico, en la admisión: 422 `project_uuid_invalido`, nunca 500.
         proyecto_malo = UUID_PRUEBA[:-1] + "\udcff"
         cuerpo_json = json.dumps(
-            {"project_uuid": proyecto_malo, "rutas": [], "usuario": "ana@cliente.com"},
+            {"project_uuid": proyecto_malo, "rutas": []},
             ensure_ascii=True,
         ).encode("ascii")
         with TestClient(_app(), raise_server_exceptions=False) as c:
@@ -1172,33 +1194,32 @@ class TrabajoHTTPTest(unittest.TestCase):
         assert cuerpo["resultados"] == resultados
 
     # -- B-6: principal obligatorio, no vacío, con tope --------------------
-    def test_B6_usuario_obligatorio_falta_es_422(self):
+    def test_B6_usuario_no_es_requerido(self):
         with TestClient(_app()) as c:
             r = c.post(
                 "/procesamiento/trabajos", json={"project_uuid": UUID_PRUEBA, "rutas": []},
                 headers=_h(IDENTIDAD_PLATAFORMA),
             )
-        assert r.status_code == 422, r.text
+        assert r.status_code == 202, r.text
 
-    def test_B6_usuario_vacio_es_422(self):
+    def test_B6_usuario_vacio_es_extra_422(self):
         with TestClient(_app()) as c:
             r = self._post(c, usuario="")
         assert r.status_code == 422, r.text
 
-    def test_B6_usuario_muy_largo_es_422(self):
+    def test_B6_usuario_muy_largo_es_extra_422(self):
         with TestClient(_app()) as c:
             r = self._post(c, usuario="x" * 300)
         assert r.status_code == 422, r.text
 
-    def test_B6_usuario_se_registra_como_caller_del_job(self):
+    def test_B6_usuario_no_puede_elegir_caller(self):
         async def _noop(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None, control=None):
             return None
 
         with patch.object(rutas_mod, "_ejecutar_trabajo", _noop), TestClient(_app()) as c:
             r = self._post(c, usuario="carlos@cliente.com")
-            job_id = r.json()["job_id"]
 
-        assert self.store.get(job_id).caller == "carlos@cliente.com"
+        assert r.status_code == 422, r.text
 
     # -- B-2: admisión ------------------------------------------------------
     def test_B2_demasiadas_rutas_es_422_y_no_crea_job(self):
@@ -1241,9 +1262,9 @@ class TrabajoHTTPTest(unittest.TestCase):
         async def _correr():
             with patch.object(rutas_mod.job_tasks, "register", side_effect=RuntimeError("boom -- register() reventó")), \
                  patch.object(rutas_mod, "_ejecutar_trabajo", _worker_que_libera):
-                req = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[], usuario="ana@cliente.com")
+                req = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[])
                 with self.assertRaises(RuntimeError):
-                    await rutas_mod.crear_trabajo(req)
+                    await rutas_mod.crear_trabajo(req, _owned_request())
                 await asyncio.sleep(0.05)  # deja correr la tarea ya creada (que se libera sola)
 
         asyncio.run(_correr())
@@ -1261,10 +1282,10 @@ class TrabajoHTTPTest(unittest.TestCase):
             raise RuntimeError("boom -- create_task")
 
         async def _correr():
-            req = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[], usuario="ana@cliente.com")
+            req = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[])
             with patch.object(rutas_mod.asyncio, "create_task", side_effect=_create_task_que_falla):
                 with self.assertRaises(RuntimeError):
-                    await rutas_mod.crear_trabajo(req)
+                    await rutas_mod.crear_trabajo(req, _owned_request())
 
         asyncio.run(_correr())
         assert len(self.store._index) == 1, "el job tendría que haberse creado antes del fallo"
@@ -1501,7 +1522,7 @@ class ProjectUuidTest(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmpdir.cleanup)
-        self.store = JobStore(str(Path(self._tmpdir.name) / "jobs.jsonl"))
+        self.store = _ProcessingJobStoreFixture(str(Path(self._tmpdir.name) / "jobs.jsonl"))
         self.semaforo = asyncio.Semaphore(2)
         for parche in (
             patch.object(rutas_mod, "_STORE", self.store),
@@ -1513,36 +1534,36 @@ class ProjectUuidTest(unittest.TestCase):
         self.cabeceras_plataforma = _h(IDENTIDAD_PLATAFORMA)
 
     def _post(self, cuerpo, estado="ACTIVE"):
-        with patch.object(rutas_mod.proyecto_activo, "estado_del_proyecto", AsyncMock(return_value=estado)), \
+        with patch.object(rutas_mod.proyecto_activo, "identidad_activa_del_proyecto", AsyncMock(return_value=estado == "ACTIVE")), \
              patch.object(rutas_mod, "_ejecutar_trabajo", AsyncMock()), \
              TestClient(_app()) as c:
             return c.post("/procesamiento/trabajos", json=cuerpo, headers=self.cabeceras_plataforma)
 
     def test_proyecto_viejo_por_nombre_da_422(self):
-        r = self._post({"proyecto": "lacteos", "rutas": ["a.pdf"], "usuario": "u1"})
+        r = self._post({"proyecto": "lacteos", "rutas": ["a.pdf"]})
         self.assertEqual(r.status_code, 422)
 
     def test_uuid_no_canonico_da_422_con_codigo(self):
         # 36 caracteres, pasa el largo de pydantic, no es un UUID.
         for malo in ("../../etc" + "x" * 27, self.UUID.upper(), "z" * 36):
-            r = self._post({"project_uuid": malo, "rutas": ["a.pdf"], "usuario": "u1"})
+            r = self._post({"project_uuid": malo, "rutas": ["a.pdf"]})
             self.assertEqual(r.status_code, 422, malo)
             self.assertEqual(r.json()["detail"]["code"], "project_uuid_invalido", malo)
 
     def test_uuid_de_otro_largo_da_422(self):
-        r = self._post({"project_uuid": "../../etc", "rutas": ["a.pdf"], "usuario": "u1"})
+        r = self._post({"project_uuid": "../../etc", "rutas": ["a.pdf"]})
         self.assertEqual(r.status_code, 422)
         self.assertEqual(r.json()["detail"]["code"], "project_uuid_invalido")
 
     def test_base_caida_da_503_sin_job_ni_cupo(self):
         # Si `estado_del_proyecto` lanza (base caida, timeout) no es un 500 anonimo ni un
         # proyecto "no activo": es 503 con codigo estable, sin job creado y sin tomar cupo.
-        with patch.object(rutas_mod.proyecto_activo, "estado_del_proyecto",
+        with patch.object(rutas_mod.proyecto_activo, "identidad_activa_del_proyecto",
                           AsyncMock(side_effect=ConnectionError("base caida"))), \
              patch.object(rutas_mod, "_ejecutar_trabajo", AsyncMock()) as ejecutar, \
              TestClient(_app()) as c:
             r = c.post("/procesamiento/trabajos",
-                       json={"project_uuid": self.UUID, "rutas": ["a.pdf"], "usuario": "u1"},
+                       json={"project_uuid": self.UUID, "rutas": ["a.pdf"]},
                        headers=self.cabeceras_plataforma)
         self.assertEqual(r.status_code, 503, r.text)
         self.assertEqual(r.json()["detail"]["code"], "base_no_disponible")
@@ -1557,7 +1578,7 @@ class ProjectUuidTest(unittest.TestCase):
                 rutas_mod._trabajo_de(malo)
 
     def test_proyecto_archivado_da_422_y_no_toma_cupo(self):
-        r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"], "usuario": "u1"}, estado="ARCHIVED")
+        r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"]}, estado="ARCHIVED")
         self.assertEqual(r.status_code, 422)
         self.assertEqual(r.json()["detail"]["code"], "proyecto_no_activo")
         self.assertFalse(self.semaforo.locked())
@@ -1566,17 +1587,17 @@ class ProjectUuidTest(unittest.TestCase):
 
     def test_proyecto_oculto_o_deshabilitado_da_422(self):
         for estado in ("HIDDEN", "DISABLED"):
-            r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"], "usuario": "u1"}, estado=estado)
+            r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"]}, estado=estado)
             self.assertEqual(r.status_code, 422, estado)
             self.assertEqual(r.json()["detail"]["code"], "proyecto_no_activo", estado)
 
     def test_proyecto_inexistente_da_422(self):
-        r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"], "usuario": "u1"}, estado=None)
+        r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"]}, estado=None)
         self.assertEqual(r.status_code, 422)
         self.assertEqual(r.json()["detail"]["code"], "proyecto_no_activo")
 
     def test_proyecto_activo_admite_y_guarda_el_uuid(self):
-        r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"], "usuario": "u1"})
+        r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"]})
         self.assertEqual(r.status_code, 202, r.text)
         self.assertEqual(self.store._index[r.json()["job_id"]]["proyecto"], self.UUID)
 
