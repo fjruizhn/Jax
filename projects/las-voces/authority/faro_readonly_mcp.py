@@ -129,14 +129,18 @@ def serve(package: PaqueteCargado, stdin: TextIO = sys.stdin, stdout: TextIO = s
     return 0
 
 
+def serve_from_config(config: ConfigFaro, stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
+    """Load the verified package before making any MCP response available."""
+    return serve(cargar_paquete(config), stdin, stdout)
+
+
 def main() -> int:
     try:
         config = ConfigFaro.desde_entorno(os.environ)
-        package = cargar_paquete(config)
-    except Exception as exc:
+        return serve_from_config(config)
+    except Exception as exc:  # fail-closed: no verified package means no MCP server is opened
         print(f"faro-readonly: paquete no disponible o no verificado: {exc}", file=sys.stderr)
         return 2
-    return serve(package)
 
 
 if __name__ == "__main__":

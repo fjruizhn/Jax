@@ -9,6 +9,7 @@ on:
     paths:
       - "projects/las-voces/**"
       - "scripts/axioma_sync.py"
+      - "scripts/las_voces_qwen_smoke.py"
       - "tests/test_las_voces_sync.py"
       - "tests/_las_voces_process.py"
       - "tests/las_voces_qwen_parser.mjs"
@@ -22,6 +23,7 @@ on:
     paths:
       - "projects/las-voces/**"
       - "scripts/axioma_sync.py"
+      - "scripts/las_voces_qwen_smoke.py"
       - "tests/test_las_voces_sync.py"
       - "tests/_las_voces_process.py"
       - "tests/las_voces_qwen_parser.mjs"

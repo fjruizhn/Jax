@@ -9,7 +9,9 @@ const project = resolve('projects/las-voces');
 const { loadSettings } = await import(pathToFileURL(resolve(bundle, 'chunks/chunk-ADXVOLEU.js')));
 const { resolveCliGenerationConfig } = await import(pathToFileURL(resolve(bundle, 'chunks/chunk-VISH2Q33.js')));
 const settings = loadSettings(project).merged;
-const resolved = resolveCliGenerationConfig({ argv: {}, settings, selectedAuthType: 'openai' });
+const argv = process.env.LV001B_QWEN_MODEL ? { model: process.env.LV001B_QWEN_MODEL } : {};
+const resolved = resolveCliGenerationConfig({ argv, settings,
+  selectedAuthType: process.env.LV001B_QWEN_AUTH_TYPE || 'openai' });
 assert.equal(resolved.generationConfig.contextWindowSize, 131072,
   'Qwen effective context differs from the project contract');
 assert.equal(settings.mcpServers?.['faro-readonly']?.trust, false);
@@ -19,4 +21,4 @@ assert.deepEqual(settings.mcpServers?.['faro-readonly']?.includeTools,
   ['skills.buscar', 'skills.leer', 'agentes.listar']);
 console.log(JSON.stringify({ task: 'LV-001', qwen: '0.24.7',
   effectiveContextWindowSize: resolved.generationConfig.contextWindowSize,
-  mcpServer: 'faro-readonly', scope: settings.mcpServers['faro-readonly'].scope }));
+  model: resolved.model, mcpServer: 'faro-readonly', scope: settings.mcpServers['faro-readonly'].scope }));

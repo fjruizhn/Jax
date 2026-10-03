@@ -4,10 +4,14 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 from types import MappingProxyType
 
-from jax.faro.paquete import PaqueteCargado
+from jax.faro.config import ConfigFaro
+from jax.faro.paquete import PaqueteCargado, PaqueteNoVerifica, construir_paquete
+from tests._faro_utils import repo_de_juguete
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "projects/las-voces/authority/faro_readonly_mcp.py"
@@ -75,3 +79,18 @@ def test_oversized_or_unterminated_request_closes_without_response():
         out = io.StringIO()
         assert bridge.serve(package(), io.StringIO(data), out) == 2
         assert out.getvalue() == ""
+
+
+def test_loaded_package_mutation_fails_before_mcp_response(tmp_path):
+    repo = repo_de_juguete(tmp_path)
+    sha = (repo / ".git/refs/heads/main").read_text().strip()
+    cfg = ConfigFaro(repo=repo, sha=sha, destino=tmp_path / "ecosistema", uid_duenio=os.getuid())
+    construir_paquete(cfg)
+    good = io.StringIO()
+    assert bridge.serve_from_config(cfg, io.StringIO(json.dumps(req("tools/list")) + "\n"), good) == 0
+    assert [x["name"] for x in json.loads(good.getvalue())["result"]["tools"]] == list(bridge.READ_TOOLS)
+    (cfg.raiz_paquete / "skills/alfa/SKILL.md").write_text("mutado")
+    bad = io.StringIO()
+    with pytest.raises(PaqueteNoVerifica):
+        bridge.serve_from_config(cfg, io.StringIO(json.dumps(req("tools/list")) + "\n"), bad)
+    assert bad.getvalue() == ""

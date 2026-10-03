@@ -24,10 +24,10 @@ def test_real_client_lists_reads_and_cannot_mutate():
             found = await client.call_tool("skills.buscar", {"consulta": "mide"})
             assert "alfa" in str(found)
             read = await client.call_tool("skills.leer", {"nombre": "alfa"})
-            assert "lee" in str(read)
+            assert "cuerpo alfa" in str(read)
             agents = await client.call_tool("agentes.listar", {})
             assert "explorador" in str(agents)
-            assert "secret-body" not in str(agents)
+            assert "CUERPO SECRETO" not in str(agents)
             try:
                 await client.call_tool("faro.crear", {})
             except MCPError as exc:
