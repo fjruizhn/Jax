@@ -36,7 +36,10 @@ MODULO_POR_PAQUETE: dict[str, str] = {
     "openpyxl": "openpyxl",
     "pdfplumber": "pdfplumber",
     "python-docx": "docx",
-    "pillow": "PIL",
+    # `PIL._imaging` (el binario) y no `PIL` ni `PIL.Image`: medido con Pillow
+    # 12.3.0, `import PIL` no lo carga y `import PIL.Image` TAMPOCO falla sin
+    # el -- lo sustituye por un `DeferredError` que solo revienta al usarlo.
+    "pillow": "PIL._imaging",
 }
 
 #: paquete -> extensiones que dejan de poder procesarse si falta (freno por tipo).

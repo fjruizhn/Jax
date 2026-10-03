@@ -5339,8 +5339,14 @@ jobs:
           #   contra imagenes REALES de LACTOVI que se SALTAN si no existen. Medido LOCAL en
           #   hall9000 (con las 2 reales presentes): 78 passed. En el runner esas 2 NO existen:
           #   el piso exacto es "76 passed, 2 skipped" -- cualquier otro skip rompe el piso.
-          grep -qE "^76 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 76 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 78 -> 93 (Jax#338 ronda 2): +15 -- TIFF multipagina (pagina 2 truncada, bomba, demasiadas
+          #   paginas, 2 paginas con texto completo, PNG por stdin por pagina), una sola lectura,
+          #   PNG con metadata %PDF, version de la logica por camino (ficha vieja de PDF se reusa,
+          #   de imagen no), bomba de 200 Mpx sin monkeypatch, {exc} fuera de `razon`, decision
+          #   A/B/D y D en TIFF multipagina, y un MPO de iPhone. Medido LOCAL en hall9000: 93
+          #   passed (las 2 reales corren). En el runner: 91 passed, 2 skipped.
+          grep -qE "^91 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 91 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
@@ -5860,8 +5866,9 @@ jobs:
           python -m pytest -q procesamiento/_dependencias_test.py 2>&1 | tee /tmp/dependencias_tests
           # 29 -> 31 (Jax#338 ronda 1): +2 -- Pillow declarado con version fijada y mapeado a las
           #   extensiones de imagen; sin Pillow se frena un lote de imagenes y no uno de PDF.
-          grep -qE "^31 passed" /tmp/dependencias_tests || {
-            echo "PISO ROTO: se esperaban 31 tests CORRIDOS (no skipeados) del freno de dependencias."; exit 1; }
+          # 31 -> 32 (Jax#338 ronda 2): +1 -- con PIL._imaging bloqueado, pillow figura como faltante.
+          grep -qE "^32 passed" /tmp/dependencias_tests || {
+            echo "PISO ROTO: se esperaban 32 tests CORRIDOS (no skipeados) del freno de dependencias."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

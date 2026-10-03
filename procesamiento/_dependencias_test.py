@@ -183,7 +183,7 @@ def test_pillow_esta_declarado_con_version_fijada_y_mapeado_a_las_imagenes():
     assert "pillow" in declaradas
     lineas = dependencias.REQUIREMENTS.read_text(encoding="utf-8").splitlines()
     assert any(l.strip().startswith("pillow==") for l in lineas)
-    assert dependencias.MODULO_POR_PAQUETE["pillow"] == "PIL.Image"
+    assert dependencias.MODULO_POR_PAQUETE["pillow"] == "PIL._imaging"
     assert dependencias.EXTENSIONES_POR_PAQUETE["pillow"] >= {".png", ".jpg", ".jpeg", ".tif", ".bmp", ".webp"}
 
 
@@ -193,7 +193,8 @@ def test_sin_pillow_se_frena_un_lote_de_imagenes_pero_no_uno_de_pdf():
 
 
 def test_con_pil_imaging_bloqueado_el_freno_marca_pillow_como_faltante(monkeypatch):
-    """`import PIL` no carga `_imaging` (el binario); `PIL.Image` si."""
+    """`import PIL` no carga `_imaging` (el binario) y `import PIL.Image` no
+    falla sin el (Pillow lo difiere): el freno tiene que importar el binario."""
     import sys
 
     monkeypatch.delitem(sys.modules, "PIL.Image", raising=False)
