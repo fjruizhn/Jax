@@ -3264,3 +3264,61 @@ def test_n42_una_imagen_transparente_con_30_palabras_confiables_identicas_es_par
     assert r.detalle["razon"] == ocr.RAZON_IMAGEN_TRANSPARENTE
     assert r.detalle["palabras_totales"] == 30
     assert r.salidas["texto.txt"] == f"{ocr.NOTA_TEXTO_DUDOSO}\n{plano}"
+
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 18: un PNG/APNG de mas de un cuadro es `png_animado`, igual que
+# un GIF o WebP animado (formato_no_soportado, sin tesseract)
+# ---------------------------------------------------------------------------
+
+
+def _apng(destino: Path, cuadro_por_defecto_aparte: bool) -> Path:
+    """La sonda de Sol (r17): 2 cuadros, el primero en blanco y el segundo con
+    texto. Leido como una sola imagen, salia ok/imagen_sin_texto."""
+    from PIL import Image, ImageDraw
+
+    blanco = Image.new("RGB", (600, 120), "white")
+    texto = blanco.copy()
+    ImageDraw.Draw(texto).text((20, 30), "SALDO PENDIENTE 1000", fill="black", font=_fuente(36))
+    blanco.save(destino, save_all=True, append_images=[texto], default_image=cuadro_por_defecto_aparte)
+    with Image.open(destino) as im:
+        assert im.format == "PNG" and im.n_frames == 2
+    return destino
+
+
+@pytest.mark.parametrize("cuadro_por_defecto_aparte", [False, True])
+def test_n43_un_apng_de_dos_cuadros_es_png_animado_sin_tesseract(tmp_path, monkeypatch, cuadro_por_defecto_aparte):
+    destino = _apng(tmp_path / "animado.png", cuadro_por_defecto_aparte)
+    llamadas = _tesseract_llamado(monkeypatch)
+    r = ocr.extraer(destino)
+    _assert_formato_no_soportado(r, "png_animado", "animacion_no_soportada", llamadas)
+
+
+def test_n43_un_apng_de_un_solo_cuadro_sigue_como_un_png(tmp_path, monkeypatch):
+    """Control: un APNG con `acTL` de 1 cuadro (Pillow informa n_frames 1) va
+    por el camino de siempre: los bytes originales a tesseract."""
+    import struct
+    import zlib
+    from io import BytesIO
+
+    from PIL import Image
+
+    salida = BytesIO()
+    Image.new("RGB", (300, 80), "white").save(salida, "PNG")
+    png = salida.getvalue()
+
+    def trozo(tipo: bytes, datos: bytes) -> bytes:
+        return struct.pack(">I", len(datos)) + tipo + datos + struct.pack(">I", zlib.crc32(tipo + datos))
+
+    fin_ihdr = 8 + 8 + 13 + 4
+    apng = (png[:fin_ihdr] + trozo(b"acTL", struct.pack(">II", 1, 0))
+            + trozo(b"fcTL", struct.pack(">IIIIIHHBB", 0, 300, 80, 0, 0, 1, 10, 0, 0)) + png[fin_ihdr:])
+    destino = tmp_path / "un_cuadro.png"
+    destino.write_bytes(apng)
+    with Image.open(destino) as im:
+        assert im.n_frames == 1
+    recibidos = _tesseract_que_registra(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.detalle.get("codigo") != "formato_no_soportado"
+    assert recibidos and all(d == apng for d in recibidos)

@@ -1206,6 +1206,30 @@ class TrabajoHTTPTest(unittest.TestCase):
             response = self._post(client, rutas=["a.png", "b.pdf"])
         assert response.status_code == 503, response.text
 
+    def test_post_sin_pillow_una_imagen_con_firma_llamada_foto_da_503(self):
+        """Jax#338 ronda 18 (MAJOR de Sol r17): el freno decide como la compuerta,
+        por la FIRMA del contenido (leido a traves del jail); un PNG llamado
+        `foto` frena el lote igual que un `.png`."""
+        from io import BytesIO
+
+        from PIL import Image
+
+        salida = BytesIO()
+        Image.new("RGB", (8, 8), "white").save(salida, "PNG")
+        foto = Path(self._tmpdir.name) / "foto"
+        foto.write_bytes(salida.getvalue())
+
+        async def _noop(*args, **kwargs):
+            return None
+
+        with _estado_falta("pillow"), patch.object(rutas_mod, "_ejecutar_trabajo", _noop), \
+             patch.object(rutas_mod.tool_authority, "resolve_jailed_path", return_value=(foto, "")), \
+             TestClient(_app()) as client:
+            response = self._post(client, rutas=["foto"])
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"]["faltan"] == ["pillow"]
+        assert self.store._index == {}
+
     def test_post_paquete_faltante_sin_mapa_bloquea_todos_los_tipos(self):
         with _estado_falta("linea-no-reconocida:3"), TestClient(_app()) as client:
             response = self._post(client, rutas=["a.png"])
@@ -1387,6 +1411,12 @@ class TrabajoHTTPTest(unittest.TestCase):
         r = self._error_de_ficha({"codigo": "formato_no_soportado", "formato": "gif_animado"})
         assert r.estado == "error"
         assert r.error == "formato_no_soportado:gif_animado"
+
+    def test_png_animado_es_un_formato_estable_del_contrato(self):
+        """Jax#338 ronda 18: `png_animado` viaja como los otros formatos (pasa la
+        validacion `[a-z0-9_]{1,40}`)."""
+        r = self._error_de_ficha({"codigo": "formato_no_soportado", "formato": "png_animado"})
+        assert r.error == "formato_no_soportado:png_animado"
 
     def test_formato_no_soportado_sin_formato_viaja_solo_el_codigo(self):
         r = self._error_de_ficha({"codigo": "formato_no_soportado"})

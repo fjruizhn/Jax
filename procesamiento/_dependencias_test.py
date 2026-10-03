@@ -255,3 +255,40 @@ def test_sin_pillow_se_frena_cada_extension_de_imagen_que_el_ocr_acepta():
         if not dependencias.lote_afectado(["pillow"], [f"archivo{e}"])
     )
     assert no_frenadas == []
+
+
+
+# -- Jax#338 ronda 18: el freno decide como la compuerta, por CONTENIDO --------
+def _png_valido(destino):
+    from io import BytesIO
+
+    from PIL import Image
+
+    salida = BytesIO()
+    Image.new("RGB", (8, 8), "white").save(salida, "PNG")
+    destino.write_bytes(salida.getvalue())
+    return destino
+
+
+def test_sin_pillow_una_imagen_con_firma_valida_llamada_foto_frena_el_lote(tmp_path):
+    """Sol (r17): un PNG llamado `foto` (sin extension de imagen) pasaba el
+    freno por extension; la compuerta lo enruta por su firma al OCR."""
+    foto = _png_valido(tmp_path / "foto")
+    assert dependencias.lote_afectado(["pillow"], ["foto"], abrir=lambda r: tmp_path / r) is True
+
+
+def test_un_pdf_llamado_png_no_se_frena_por_pillow(tmp_path):
+    """La compuerta enruta por contenido: un PDF llamado `.png` va al camino
+    PDF, que no usa Pillow (y si se frena por pdfplumber)."""
+    (tmp_path / "x.png").write_bytes(b"%PDF-1.4\n%fin")
+    abrir = lambda r: tmp_path / r
+    assert dependencias.lote_afectado(["pillow"], ["x.png"], abrir=abrir) is False
+    assert dependencias.lote_afectado(["pdfplumber"], ["x.png"], abrir=abrir) is True
+
+
+def test_si_el_contenido_no_se_puede_leer_decide_la_extension(tmp_path):
+    """Respaldo: sin archivo legible (o sin `abrir`), la extension decide, como siempre."""
+    assert dependencias.lote_afectado(["pillow"], ["a.png"], abrir=lambda r: None) is True
+    assert dependencias.lote_afectado(["pillow"], ["a.png"], abrir=lambda r: tmp_path / "no-existe") is True
+    assert dependencias.lote_afectado(["pillow"], ["foto"], abrir=lambda r: None) is False
+    assert dependencias.lote_afectado(["pillow"], ["a.png"]) is True
