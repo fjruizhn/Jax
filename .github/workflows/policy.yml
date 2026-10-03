@@ -5306,14 +5306,14 @@ jobs:
       # `pytest.importorskip("PIL.Image")` en `_ocr_test.py` genera los
       # fixtures (imágenes con texto real) -- mismo patrón de riesgo que
       # openpyxl/pdfplumber: sin Pillow instalado, "1 skipped" y EXIT 0.
-      # Pillow NO va en requirements-archivos.txt (ese archivo es de
-      # dependencias del EXTRACTOR; Pillow sólo genera fixtures de test,
-      # tesseract no la usa) -- se instala acá, en el paso que la necesita.
+      # (Jax#338, 2026-10-03: Pillow YA va en requirements-archivos.txt,
+      # fijado, porque el extractor decodifica toda imagen con ella antes de
+      # llamar a tesseract; el freno de dependencias la vigila. Ya no hace
+      # falta un `pip install pillow` aparte.)
       # poppler-utils (pdftoppm) tampoco -- verificado 2026-09-21 que
       # NO viene preinstalado en la imagen base de este job (python:3.12-slim
       # equivalente): `which pdftoppm` da vacío sin este apt-get.
       - run: sudo apt-get install -y tesseract-ocr tesseract-ocr-spa poppler-utils
-      - run: pip install pillow
       # MAJOR 2 (final-hallazgos.md, adenda 2026-09-21, ruling de
       # Fernando): +2 tests -- el cuerpo de `extraer()` sale siempre como
       # `Resultado` (workspace no escribible, disparador real con permisos
@@ -5330,8 +5330,17 @@ jobs:
           #   texto corto pasan a exigir `ok` + `imagen_sin_texto` (reescritos, no sumados).
           #   Medido LOCAL (40 passed, tesseract 5.5.0, PYTHONPATH=.:las_manos para la cache);
           #   el controlador lo re-mide con el runner.
-          grep -qE "^40 passed" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 40 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 40 -> 78 (2026-10-03, Jax#338 ronda 1): +38 -- S-1 (la imagen va por stdin y los
+          #   bytes magicos se validan antes: un .png con la ruta de otra imagen NO se lee),
+          #   MAJOR-2 (TIFF/PNG/JPEG truncados o corruptos, tope de pixeles), MINOR-1 (la
+          #   version de la logica invalida la cache y el tope D-2), MINOR-3/4, fixtures reales
+          #   (4032x3024, documento fotografiado), la regla de Fernando A/B/D con 14 tamanos de
+          #   imagen (A4/carta a 300 y 150 DPI, bordes de proporcion y de DPI) y 2 pruebas
+          #   contra imagenes REALES de LACTOVI que se SALTAN si no existen. Medido LOCAL en
+          #   hall9000 (con las 2 reales presentes): 78 passed. En el runner esas 2 NO existen:
+          #   el piso exacto es "76 passed, 2 skipped" -- cualquier otro skip rompe el piso.
+          grep -qE "^76 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 76 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
@@ -5849,8 +5858,10 @@ jobs:
       - name: Freno de dependencias de extraccion -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_dependencias_test.py 2>&1 | tee /tmp/dependencias_tests
-          grep -qE "^29 passed" /tmp/dependencias_tests || {
-            echo "PISO ROTO: se esperaban 29 tests CORRIDOS (no skipeados) del freno de dependencias."; exit 1; }
+          # 29 -> 31 (Jax#338 ronda 1): +2 -- Pillow declarado con version fijada y mapeado a las
+          #   extensiones de imagen; sin Pillow se frena un lote de imagenes y no uno de PDF.
+          grep -qE "^31 passed" /tmp/dependencias_tests || {
+            echo "PISO ROTO: se esperaban 31 tests CORRIDOS (no skipeados) del freno de dependencias."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

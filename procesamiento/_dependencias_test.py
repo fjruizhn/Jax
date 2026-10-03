@@ -175,3 +175,18 @@ def test_tipos_de_junta_las_extensiones_de_los_paquetes_faltantes():
 
 def test_un_lote_vacio_no_se_frena():
     assert dependencias.lote_afectado(["pdfplumber"], []) is False
+
+
+# -- Jax#338: Pillow decodifica toda imagen antes del OCR ----------------------
+def test_pillow_esta_declarado_con_version_fijada_y_mapeado_a_las_imagenes():
+    declaradas = dependencias.paquetes_declarados()
+    assert "pillow" in declaradas
+    lineas = dependencias.REQUIREMENTS.read_text(encoding="utf-8").splitlines()
+    assert any(l.strip().startswith("pillow==") for l in lineas)
+    assert dependencias.MODULO_POR_PAQUETE["pillow"] == "PIL"
+    assert dependencias.EXTENSIONES_POR_PAQUETE["pillow"] >= {".png", ".jpg", ".jpeg", ".tif", ".bmp", ".webp"}
+
+
+def test_sin_pillow_se_frena_un_lote_de_imagenes_pero_no_uno_de_pdf():
+    assert dependencias.lote_afectado(["pillow"], ["a.JPG"]) is True
+    assert dependencias.lote_afectado(["pillow"], ["a.pdf", "b.docx"]) is False

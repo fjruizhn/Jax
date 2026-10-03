@@ -36,6 +36,7 @@ MODULO_POR_PAQUETE: dict[str, str] = {
     "openpyxl": "openpyxl",
     "pdfplumber": "pdfplumber",
     "python-docx": "docx",
+    "pillow": "PIL",
 }
 
 #: paquete -> extensiones que dejan de poder procesarse si falta (freno por tipo).
@@ -43,6 +44,8 @@ EXTENSIONES_POR_PAQUETE: dict[str, set[str]] = {
     "openpyxl": {".xlsx", ".xlsm"},
     "pdfplumber": {".pdf"},
     "python-docx": {".docx"},
+    # el OCR de imagenes decodifica con Pillow antes de llamar a tesseract
+    "pillow": {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"},
 }
 
 _NOMBRE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(?:$|[=<>!~;\s])")
