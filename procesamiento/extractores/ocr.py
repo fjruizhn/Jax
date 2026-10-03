@@ -798,26 +798,13 @@ def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
 
 
 # Fondos sobre los que se aplana un fotograma con transparencia REAL, en este
-# orden: el primero gana el empate (Jax#338 ronda 11, BLOCK-N36).
 _FONDOS_DEL_APLANADO = ((255, 255, 255), (0, 0, 0))
-
-
-def _calidad_de_pasada(r: dict) -> tuple[int, int, int]:
-    """Clave de eleccion entre las dos pasadas: (palabras NO dudosas, palabras
-    totales, caracteres). Si un fondo reconoce texto aunque sea dudoso, gana
-    a uno que no reconoce nada (la imagen sale parcial/imagen_texto_dudoso,
-    no ok/imagen_sin_texto)."""
-    return (r["n_palabras"] - len(r["palabras_dudosas"]), r["n_palabras"], r["caracteres"])
 
 
 def _ocr_cuadro(img, idioma: str, presupuesto: _Presupuesto) -> dict | None:
     """OCR de un fotograma ya decodificado. Sin transparencia real: una sola
     pasada (`_a_modo_legible` -> PNG). Con transparencia REAL (`_mascara_alfa`):
-    DOS pasadas, aplanado sobre blanco y sobre negro, y gana la de mayor
-    `_calidad_de_pasada`; si todo empata, el blanco. Ningun
-    numero sobre toda la imagen decide el fondo: la luminancia media la decide
-    la figura mas grande (un logo con emblema claro y texto oscuro) y no el
-    texto. Un lienzo a la vez: aplanar -> PNG -> OCR -> liberar, y repetir.
+ Un lienzo a la vez: aplanar -> PNG -> OCR -> liberar, y repetir.
     Un fallo de OCR (`None` o `ilegible`) en cualquiera de las dos pasadas es
     el resultado."""
     dpi = img.info.get("dpi")
@@ -834,7 +821,6 @@ def _ocr_cuadro(img, idioma: str, presupuesto: _Presupuesto) -> dict | None:
         # tope del aplanado; `_validar_imagen` ya lo comprobo en todas las
         # paginas antes del OCR (N37): esto es la defensa si se llega igual
         return _ilegible_dict("demasiados_pixeles")
-    elegido = None
     for fondo in _FONDOS_DEL_APLANADO:
         try:
             png = _a_png(_aplanar(img, mascara, fondo), dpi)   # el lienzo muere aca
@@ -846,9 +832,6 @@ def _ocr_cuadro(img, idioma: str, presupuesto: _Presupuesto) -> dict | None:
         del png
         if r is None or r["clasificacion"] == "ilegible":
             return r
-        if elegido is None or _calidad_de_pasada(r) > _calidad_de_pasada(elegido):
-            elegido = r
-    return elegido
 
 
 def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict | None:
