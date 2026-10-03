@@ -1834,8 +1834,13 @@ jobs:
           # importador controlado). Medido con este comando exacto en DOS
           # interpretes: con las tres dependencias, 146 passed; con pdfplumber,
           # openpyxl y docx tapados en sys.modules (sitecustomize), 146 passed.
-          grep -qE "^146 passed" /tmp/f2e-sr3-source || {
-            echo "PISO ROTO: se esperaban 146 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
+          # 146 -> 155 (2026-10-03, jax-14 ronda 2): +9 (intervalos de aviso/log que
+          # nunca tumban el import: no numerico, cero, negativo, no finito, minimos,
+          # valor valido; y el texto REALMENTE enviado sin rutas del lote, +1 por
+          # separar el caso sin credenciales). Medido con este comando exacto con
+          # las tres dependencias y con ellas tapadas en sys.modules: 155 passed.
+          grep -qE "^155 passed" /tmp/f2e-sr3-source || {
+            echo "PISO ROTO: se esperaban 155 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
         env:
           PYTHONPATH: .:las_manos
       - name: Piso exacto de tests CORRIDOS
@@ -5817,8 +5822,10 @@ jobs:
       - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
-          grep -qE "^85 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 85 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          # 85 -> 94 el 2026-10-03 (jax-14 ronda 2): ver F2-E-SR3; medido con y sin las
+          # tres dependencias: 94 passed en ambos.
+          grep -qE "^94 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 94 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # jax-14 (2026-10-03): freno de dependencias de extraccion. Piso exacto de
       # procesamiento/_dependencias_test.py: 29 passed (10 de la ronda 0 + 19 de la
