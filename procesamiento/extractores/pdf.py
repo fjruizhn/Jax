@@ -63,6 +63,7 @@ fallaron con el MISMO defecto, uno de ellos un avalúo de maquinaria):
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from procesamiento.resultado import Resultado
 
@@ -87,6 +88,16 @@ MINIMO_CARACTERES_PAGINA = 80
 # las páginas, se descuenta entero. Con menos de 2 páginas no hay
 # "mayoría" que comparar -- ver `_lineas_repetidas`.
 UMBRAL_TEXTO_REPETIDO = 0.6
+
+# El modo normal conserva el comportamiento orientado a expedientes
+# financieros: detecta tablas vectoriales y evita duplicarlas como prosa. Las
+# publicaciones de La Gaceta tienen dos columnas sin una grilla real, pero
+# pdfplumber puede confundir su maqueta con tablas. Por eso este modo es
+# explícito: nunca se activa desde la compuerta ni cambia una extracción
+# existente.
+MODO_NORMAL = "normal"
+MODO_DOS_COLUMNAS = "dos_columnas"
+ModoLectura = Literal["normal", "dos_columnas"]
 
 
 def _version() -> str | None:
@@ -210,7 +221,38 @@ def _tabla_a_bloque(tabla: list[list]) -> str:
     return "```tabla\n" + cuerpo + "\n```"
 
 
-def extraer(origen: Path) -> Resultado:
+def _extraer_dos_columnas(pagina) -> str:
+    """Lee una página de dos columnas en orden visual: izquierda, derecha.
+
+    No se usa ``find_tables()`` aquí. En La Gaceta, sus líneas de maqueta y
+    cajas de sumario hacen que pdfplumber devuelva tablas falsas; emitirlas
+    como tal pierde el orden de lectura. El corte geométrico a la mitad es
+    deliberadamente simple y por eso el resultado exige contraste visual
+    antes de declararse completo.
+    """
+    mitad = pagina.width / 2
+    izquierda = pagina.crop((0, 0, mitad, pagina.height)).extract_text() or ""
+    derecha = pagina.crop((mitad, 0, pagina.width, pagina.height)).extract_text() or ""
+    return "\n\n".join(texto.strip() for texto in (izquierda, derecha) if texto.strip())
+
+
+def extraer(
+    origen: Path, *, modo_lectura: ModoLectura = MODO_NORMAL
+) -> Resultado:
+    """Extrae un PDF nativo.
+
+    ``modo_lectura="dos_columnas"`` es una ruta opt-in para publicaciones
+    con columnas paralelas. Conserva las etiquetas de página, omite por
+    completo la detección de tablas y devuelve ``parcial``: requiere
+    contraste visual página por página antes de usarlo como texto completo.
+    """
+    if modo_lectura not in (MODO_NORMAL, MODO_DOS_COLUMNAS):
+        return Resultado(
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
+            detalle={"razon": f"modo_lectura no soportado: {modo_lectura!r}"},
+        )
+
     try:
         import pdfplumber
     except ModuleNotFoundError as exc:
@@ -227,6 +269,14 @@ def extraer(origen: Path) -> Resultado:
         tablas_fallidas: list[int] = []
         with pdfplumber.open(origen) as doc:
             for numero, pagina in enumerate(doc.pages, start=1):
+                if modo_lectura == MODO_DOS_COLUMNAS:
+                    texto_columnas = _extraer_dos_columnas(pagina)
+                    textos.append(texto_columnas)
+                    partes.append(f"<!-- página {numero} -->")
+                    if texto_columnas:
+                        partes.append(texto_columnas)
+                    continue
+
                 # texto COMPLETO de la página (con tablas incluidas) -- es
                 # lo que clasifica si la página "tiene texto" (duda 2 de la
                 # ronda anterior, confirmada por el coordinador: no separar
@@ -298,7 +348,7 @@ def extraer(origen: Path) -> Resultado:
     # de arriba. Las dos razones son independientes y pueden darse juntas
     # (un híbrido con además una tabla de bbox roto en su única página con
     # texto), así que se combinan en vez de que una tape a la otra.
-    if paginas_sin_texto or tablas_fallidas:
+    if paginas_sin_texto or tablas_fallidas or modo_lectura == MODO_DOS_COLUMNAS:
         razones = []
         detalle: dict = {"paginas": paginas, "tablas": tablas}
         if paginas_sin_texto:
@@ -316,6 +366,20 @@ def extraer(origen: Path) -> Resultado:
                 "una o mas tablas no se pudieron extraer (bbox fuera de la "
                 "pagina, defecto conocido de pdfplumber); el texto de esas "
                 "paginas se conserva igual, sin la tabla estructurada"
+            )
+        if modo_lectura == MODO_DOS_COLUMNAS:
+            detalle["modo_lectura"] = MODO_DOS_COLUMNAS
+            detalle["requiere_verificacion_visual"] = {
+                "paginas": list(range(1, paginas + 1)),
+                "razon": (
+                    "lectura geometrica izquierda-derecha sin deteccion de "
+                    "tablas; contrastar cada pagina contra el PDF antes de "
+                    "declarar el texto completo"
+                ),
+            }
+            razones.append(
+                "modo dos_columnas: salida parcial hasta contraste visual "
+                "pagina por pagina"
             )
         detalle["razon"] = " / ".join(razones)
         return Resultado(
