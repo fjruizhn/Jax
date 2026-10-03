@@ -393,6 +393,8 @@ def arbol_temporal(base_propia):
     os.chmod(raiz, 0o755)
     _conceder_acceso_al_usuario_de_pruebas(proyectos)
     _dar_paso_por_la_raiz(raiz)
+    # La raiz del workspace es fruiz:jaxsvc (el guion no cambia dueños de la raiz y --aplicar falla cerrado si no).
+    subprocess.run(["sudo", "-n", "chown", "fruiz:jaxsvc", str(raiz)], check=True)
     return raiz
 
 
@@ -1727,6 +1729,7 @@ def test_symlink_sustituido_a_mitad_de_la_corrida_no_contamina_el_objetivo(_iden
     _abrir_travesia_hasta(raiz, Path("/tmp"))
     os.chmod(raiz, 0o755)
     _dar_paso_por_la_raiz(raiz)
+    subprocess.run(["sudo", "-n", "chown", "fruiz:jaxsvc", str(raiz)], check=True)
 
     try:
         extra = f"""
@@ -2433,6 +2436,134 @@ pp._setfacl_reemplazar = falla_en_el_tercero
         assert datos["ultima_ruta"] in salida and "parcialmente" in salida, (accion, salida)
 
 
+# --- ronda 9: BaseException a medio aplicar, bit x en archivos, raiz 770 fruiz:jaxsvc, rutas sin inyectar lineas ---
+
+@pytest.mark.parametrize("excepcion", ["KeyboardInterrupt", "SystemExit(2)"])
+def test_una_interrupcion_a_medio_mutar_tambien_dice_a_medio_aplicar(arbol_temporal, _identidades, excepcion):
+    """KeyboardInterrupt (y SystemExit) escapaban de `except Exception`: el nucleo salia sin el JSON ni la ultima
+    ruta. Ahora desde que empieza a mutar se captura BaseException, se emite el JSON y se sale con 1."""
+    proyectos = arbol_temporal / "proyectos"
+    preparar = f"""
+_set = pp._setfacl_reemplazar
+vistos = []
+def interrumpe_en_el_tercero(fd, acl, **k):
+    ino = os.fstat(fd).st_ino
+    if ino not in vistos:
+        vistos.append(ino)
+    if len(vistos) == 3 and ino == vistos[2]:
+        raise {excepcion}
+    return _set(fd, acl, **k)
+pp._setfacl_reemplazar = interrumpe_en_el_tercero
+"""
+    for accion in ("aplicar", "deshacer"):
+        if accion == "deshacer":
+            assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+        out = _ciclo_nucleo_cliente(proyectos, arbol_temporal, accion, preparar)
+        datos = out["json"]
+        assert datos and datos.get("a_medio_aplicar") is True, (accion, out)
+        assert datos["ultima_ruta"].startswith(str(proyectos)), (accion, datos)
+        assert f"--{accion} es idempotente" in datos["instruccion"], datos
+        assert out["rc_nucleo"] == 1 and out["rc"] == 1, (accion, out)
+        assert datos["ultima_ruta"] in out["stdout"] + out["stderr"], (accion, out)
+
+
+@pytest.mark.parametrize("que,orden", [
+    ("chmod 0770", ["chmod", "770", "{archivo}"]),
+    ("chmod u+x", ["chmod", "u+x", "{archivo}"]),
+    ("ACL nombrada con x", ["setfacl", "-m", "u:jaxsvc:rwx", "{archivo}"]),
+    ("ACL de grupo con x", ["setfacl", "-m", "g:fruiz:rwx", "{archivo}"]),
+])
+def test_verificar_marca_cualquier_bit_de_ejecucion_en_un_archivo_gobernado(arbol_temporal, _identidades, que, orden):
+    """Un archivo gobernado es exactamente 0660: `--verificar` marca NO CUMPLE cualquier bit de ejecucion, en el modo
+    o en una entrada ACL (nombrada, de grupo) con permiso efectivo. Antes solo exigia lectura y escritura."""
+    proyectos = arbol_temporal / "proyectos"
+    assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    archivo = proyectos / "un-proyecto" / "archivo.txt"
+    assert _correr("--verificar", str(arbol_temporal)).returncode == 0
+    r_mod = subprocess.run(["sudo", "-n", *[a.format(archivo=archivo) for a in orden]], capture_output=True, text=True)
+    assert r_mod.returncode == 0, r_mod.stderr
+    r = _correr("--verificar", str(arbol_temporal))
+    assert r.returncode == 1, (que, r.stdout)
+    lineas = [l for l in r.stdout.splitlines() if l.startswith(f"NO CUMPLE: {archivo}:")]
+    assert lineas and "ejecución" in lineas[0], (que, r.stdout)
+
+
+def test_verificar_exige_exactamente_0660_en_un_archivo_gobernado(arbol_temporal, _identidades):
+    proyectos = arbol_temporal / "proyectos"
+    assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    archivo = proyectos / "un-proyecto" / "archivo.txt"
+    subprocess.run(["sudo", "-n", "chmod", "640", str(archivo)], check=True)   # group r--: tambien por la mascara
+    r = _correr("--verificar", str(arbol_temporal))
+    assert r.returncode == 1, r.stdout
+    assert any(l.startswith(f"NO CUMPLE: {archivo}:") and "0660" in l for l in r.stdout.splitlines()), r.stdout
+
+
+def test_raiz_0750_fruiz_jaxsvc_verificar_marca_y_aplicar_la_deja_en_0770(base_propia):
+    raiz = _arbol_como_produccion(base_propia, dueno="fruiz", grupo="jaxsvc", modo=0o750)
+    v = _verificar_como_root(raiz)
+    assert v.returncode == 1, v.stdout
+    assert any("(raíz del workspace)" in l and "770" in l for l in v.stdout.splitlines()), v.stdout
+
+    datos = _recorrer_directo(raiz / "proyectos", accion="aplicar", conceder_al_terminar=False)
+    assert not datos["no_cumple"], datos
+    assert _foto(raiz) == (pwd.getpwnam("fruiz").pw_uid, grp.getgrnam("jaxsvc").gr_gid, 0o770)
+    assert _verificar_como_root(raiz).returncode == 0
+
+
+@pytest.mark.parametrize("modo_antes,modo_despues", [(0o2750, 0o2770), (0o2775, 0o2770), (0o755, 0o770)])
+def test_aplicar_fija_la_raiz_en_0770_y_conserva_el_setgid_solo_si_lo_tiene(base_propia, modo_antes, modo_despues):
+    raiz = _arbol_como_produccion(base_propia, dueno="fruiz", grupo="jaxsvc", modo=modo_antes)
+    datos = _recorrer_directo(raiz / "proyectos", accion="aplicar", conceder_al_terminar=False)
+    assert not datos["no_cumple"], datos
+    assert _foto(raiz)[2] & 0o7777 == modo_despues, oct(_foto(raiz)[2])
+
+
+@pytest.mark.parametrize("dueno,grupo", [("fruiz", "fruiz"), ("jaxsvc", "jaxsvc"), ("jaxsvc", "fruiz")])
+def test_aplicar_falla_cerrado_si_el_dueno_o_el_grupo_de_la_raiz_no_son_fruiz_jaxsvc(base_propia, dueno, grupo):
+    """No cambia dueños de la raiz: si no coinciden, falla cerrado ANTES de mutar -- aunque las dos cuentas igual la
+    atraviesen (aqui por ACL nombrada), porque el modelo de acceso ya no es el esperado."""
+    raiz = _arbol_como_produccion(base_propia, dueno=dueno, grupo=grupo, modo=0o750)
+    _dar_paso_por_la_raiz(raiz)
+    proyectos = raiz / "proyectos"
+    objetos = [raiz, proyectos, proyectos / "p", proyectos / "p" / "archivo.txt"]
+    antes = {d: _foto(d) for d in objetos}
+    datos = _recorrer_directo(proyectos, accion="aplicar", puede_fallar=True, conceder_al_terminar=False)
+    assert "error" in datos and "fruiz:jaxsvc" in datos["error"] and "no cambia dueños" in datos["error"], datos
+    assert {d: _foto(d) for d in objetos} == antes, "se mutó algo pese a fallar cerrado"
+    v = _verificar_como_root(raiz)
+    assert v.returncode == 1 and any("(raíz del workspace)" in l and "fruiz:jaxsvc" in l for l in v.stdout.splitlines()), v.stdout
+
+
+def test_ninguna_ruta_inyecta_lineas_en_los_diagnosticos(arbol_temporal, _identidades):
+    """Un nombre de carpeta con un salto de linea puede fabricar una linea que parece una orden independiente
+    (`sudo ...`) para quien copia un aviso trabajando como root. Toda ruta que se imprime en cualquier mensaje
+    pasa por la misma funcion de presentacion (los caracteres de control se escapan): ninguna linea de la salida
+    empieza con `sudo`, en `--verificar` ni en el error de `--aplicar`."""
+    proyectos = arbol_temporal / "proyectos"
+    assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    nombre = ".estado\nsudo touch /tmp/marca-inyectada #"
+    oculta = proyectos / "un-proyecto" / nombre
+    r = subprocess.run(["sudo", "-n", "-u", "jaxsvc", "python3", "-c",
+                        f"import os; os.mkdir({str(oculta)!r}); os.chmod({str(oculta)!r}, 0o777)"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    gobernado = proyectos / "un-proyecto" / "sub" / "dato\nsudo touch /tmp/marca-inyectada2 #.txt"
+    r = subprocess.run(["sudo", "-n", "-u", "jaxsvc", "python3", "-c",
+                        f"open({str(gobernado)!r}, 'w').write('x'); import os; os.chmod({str(gobernado)!r}, 0o666)"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+    v = _correr("--verificar", str(arbol_temporal))
+    datos = _recorrer_directo(proyectos, accion="aplicar", puede_fallar=True, conceder_al_terminar=False)
+    assert "error" in datos, datos
+    for nombre_salida, texto in (("verificar", v.stdout + v.stderr), ("aplicar", datos["error"])):
+        assert texto.strip(), nombre_salida
+        for linea in texto.splitlines():
+            assert not linea.lstrip().startswith("sudo"), f"{nombre_salida}: una linea de la salida empieza con sudo: {linea!r}"
+        assert "\\n" in texto, f"{nombre_salida}: el salto de linea no se escapó: {texto!r}"
+    assert not Path("/tmp/marca-inyectada").exists() and not Path("/tmp/marca-inyectada2").exists()
+
+
 # --- MAJOR-1: la raiz se abre por descriptor, sin seguir symlinks ------------------------------
 
 def _modo_y_acl(ruta: Path) -> tuple[str, list[str]]:
@@ -2585,7 +2716,7 @@ print(json.dumps(salida))
 
 def test_el_respaldo_registra_la_raiz_y_deshacer_restaura_su_modo_sin_reabrir_a_otros(arbol_temporal, _identidades):
     proyectos = arbol_temporal / "proyectos"
-    os.chmod(arbol_temporal, 0o775)
+    subprocess.run(["sudo", "-n", "chmod", "775", str(arbol_temporal)], check=True)
     modo_antes = _foto(arbol_temporal)[2]
     out = _driver_respaldo(f"""
 proy = pp.Path({str(proyectos)!r})
@@ -2613,7 +2744,7 @@ salida["json"] = json.loads(buf.getvalue())
 
 def test_deshacer_no_confia_en_un_respaldo_forjado_ni_incompleto(arbol_temporal, _identidades):
     proyectos = arbol_temporal / "proyectos"
-    os.chmod(arbol_temporal, 0o775)
+    subprocess.run(["sudo", "-n", "chmod", "775", str(arbol_temporal)], check=True)
     out = _driver_respaldo(f"""
 proy = pp.Path({str(proyectos)!r})
 raiz = {str(arbol_temporal)!r}
