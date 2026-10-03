@@ -6841,18 +6841,21 @@ jobs:
           python-version: "3.12"
       - run: sudo apt-get -qq update && sudo apt-get -qq install -y acl
       - run: pip install -r requirements.txt pytest
-      - name: Dar a fruiz lo mínimo para correr el escritor de la prueba de herencia
+      - name: Crear jaxsvc y fruiz, y dar a fruiz lo mínimo para correr el escritor de la prueba de herencia
         # Solo en runners de GitHub (VM desechable): en uno persistente no se dejan ACLs ni cuentas; ahí la prueba falla con su mensaje claro.
         if: runner.environment == 'github-hosted'
         # La prueba test_entrada_y_fuente_creadas_despues_heredan_grupo_setgid_y_acl_por_defecto
         # corre el escritor real COMO fruiz (quien opera en producción y está en la ACL), con el
         # intérprete de pytest. En el runner, el checkout (/home/runner/work/...) y el intérprete
         # (/opt/hostedtoolcache/...) solo los lee el usuario `runner`: sin esto la prueba falla con
-        # su mensaje «el usuario fruiz no puede leer ...». Se crea la cuenta aquí (idempotente, igual
-        # que la fixture de la prueba) y se le da `x` en cada directorio padre y `rX` en el checkout y
+        # su mensaje «el usuario fruiz no puede leer ...». Las cuentas jaxsvc y fruiz se crean aquí (idempotente; las pruebas
+        # ya no crean cuentas y fallan con un mensaje claro si faltan) y a fruiz se le da `x` en cada directorio padre y `rX` en el checkout y
         # en el prefijo del intérprete. El runner es una VM desechable: no hay riesgo en abrir esto.
         run: |
-          getent passwd fruiz >/dev/null || sudo useradd --system --no-create-home fruiz
+          # Las cuentas las crea ESTE paso, no las pruebas (que fallan con un mensaje claro si faltan).
+          for cuenta in jaxsvc fruiz; do
+            getent passwd "$cuenta" >/dev/null || sudo useradd --system --no-create-home "$cuenta"
+          done
           PREFIJO=$(python -c 'import sys; print(sys.prefix)')
           for destino in "$GITHUB_WORKSPACE" "$PREFIJO"; do
             d=$(dirname "$destino")
@@ -6931,7 +6934,14 @@ jobs:
         # (1) y verifica de nuevo al terminar (1), y la prueba que EJECUTA el bloque de verificacion del runbook
         # contra un arbol temporal (1). Local: 98 passed + 3 skipped (2 de los 3 el runner los corre: 98 + 2 =
         # 100), 1 skipped en el runner. Ningun piso baja. Sin medir en el runner: manda el runner.
+        # 100 -> 103 (ronda 6 de #340): +3. Hardlinks en carpetas ocultas (no se tocan; --verificar los marca y
+        # --aplicar/--deshacer fallan cerrado antes de mutar: 1), el camino de fracaso de la verificacion final de
+        # --deshacer (1) y la guarda de que las pruebas no instalan en /usr/local/sbin ni crean cuentas (1). El
+        # fixture del nucleo pasa a una copia bajo /run y ya no se salta si existe el nucleo real, asi que local
+        # ahora da 104 passed + 0 skipped; el runner salta solo la del /etc/jax/.env (104 - 1 = 103). Las cuentas
+        # jaxsvc y fruiz las crea el paso del job (antes las creaba la prueba de jaxsvc). Ningun piso baja. Sin medir
+        # en el runner: manda el runner.
         run: |
           PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
-          grep -qE "^100 passed, 1 skipped" /tmp/permisos_proyectos || {
-            echo "PISO ROTO: se esperaban 100 tests CORRIDOS (no skipeados) y exactamente 1 skipped."; exit 1; }
+          grep -qE "^103 passed, 1 skipped" /tmp/permisos_proyectos || {
+            echo "PISO ROTO: se esperaban 103 tests CORRIDOS (no skipeados) y exactamente 1 skipped."; exit 1; }
