@@ -78,10 +78,14 @@ El estado aplicado ya existe en `/srv/jax-data/jax-workspace/proyectos`:
 como referencia para volver a aplicar (por ejemplo tras restaurar el árbol).
 `--aplicar` y `--deshacer` siguen necesitando el GO explícito de Fernando.
 
-**Pendiente de seguridad (al 2026-10-03):** `other` conserva `r-x`, también en la
-ACL por defecto. La barrera que daba `/home/fruiz` en 750 desapareció con el
-traslado a `/srv`: cualquier usuario local lee `proyectos/` hasta que se aplique
-`chmod o-rwx /srv/jax-data/jax-workspace`, que espera el GO de Fernando.
+**Exposición y cierre (2026-10-03):** el traslado a `/srv` quitó la barrera de
+`/home/fruiz` en 750, y desde entonces hasta el cierre cualquier usuario local
+pudo leer `proyectos/`. Ya se aplicó `chmod o-rwx /srv/jax-data/jax-workspace`
+(jax-14, verificado por la sesión principal): la raíz queda `drwxrwx---
+fruiz:jaxsvc`; `nobody` y `axioma` ya no leen y `jaxsvc` sí. Reversión:
+`chmod o+rx /srv/jax-data/jax-workspace`. `other::r-x` se conserva en
+`proyectos/` y en su ACL por defecto (cambiarlo va en un PR aparte del guion de
+permisos, spec 2770/0660); el cierre de hoy lo da el 770 del directorio padre.
 
 Contexto histórico del requisito previo: el fix de la ronda 2
 (`las_manos/motor_registry/tool_authority.py::_write_file`, `os.fchmod(fd,
