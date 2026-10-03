@@ -9,8 +9,10 @@ ella, `UMask=0022` medido con `systemctl show`) como por `fruiz` (corre
 `scripts/procesar_archivos.py` a mano), con herencia para todo lo que se cree
 después — spec `docs/superpowers/specs/2026-09-22-proyectos-y-selector-design.md`
 §5. El dueño tras `--aplicar` es `jaxsvc`, el grupo es `fruiz`. Medido el
-2026-09-25 antes de aplicar nada: `proyectos/` es `fruiz:fruiz 775` sin ACL y
-`sudo -u jaxsvc test -w proyectos` da NO.
+2026-09-25 antes de aplicar nada (medido sobre la ruta anterior al traslado del
+2026-10-03): `proyectos/` es `fruiz:fruiz 775` sin ACL y
+`sudo -u jaxsvc test -w proyectos` da NO. Estado actual: ya aplicado, ver la
+sección «Aplicación en producción».
 
 **Correr a mano sin `/etc/jax/.env` (2026-10-03).** `JAX_WORKSPACE_DIR` ya no tiene
 valor por defecto en el código: `workspace_dir()` falla si falta, está vacía, no es
@@ -69,22 +71,23 @@ autenticación ni autorización de ningún servicio. **`--aplicar` y
 de Fernando.** `--verificar` es siempre de solo lectura, corre sin privilegio,
 y no necesita GO.
 
-## Aplicación en producción: BLOQUEADA hasta desplegar el fchmod(0o660) de tool_authority.py
-**No correr `--aplicar` contra `/srv/jax-data/jax-workspace` real todavía --
-falta un requisito previo.** El fix de la ronda 2 (`las_manos/motor_registry/
-tool_authority.py::_write_file`, `os.fchmod(fd, 0o660)` antes de
-`os.replace`) sólo vive en este checkout/rama -- **no está desplegado en
-`/srv/jax-prod`, que es de donde corre LAS MANOS real** (requiere el proceso
-normal de despliegue de este repo, B9). Sin ese fix desplegado, un archivo
-que LAS MANOS (jaxsvc) escriba DESPUÉS de `--aplicar` -- con `mkstemp()`,
-0600 explícito -- queda con ACL efectiva `---` para el grupo pese a la ACL
-por defecto de `proyectos/` (el mismo defecto que motivó el fix, ver B1 en
-el docstring del guion), y `fruiz` no podría leerlo/escribirlo. Aplicar los
-permisos nuevos SIN el fix desplegado dejaría el árbol pareciendo correcto
-(`--verificar` daría `0`) mientras la escritura real de LAS MANOS lo sigue
-rompiendo por otro lado.
+## Aplicación en producción: YA APLICADA (2026-10-03)
+El estado aplicado ya existe en `/srv/jax-data/jax-workspace/proyectos`:
+`drwxrwsr-x+ jaxsvc:fruiz`, setgid, ACL por defecto, y `--verificar` dio `0` el
+2026-10-03. Esta sección ya no es un bloqueo: el procedimiento de abajo queda
+como referencia para volver a aplicar (por ejemplo tras restaurar el árbol).
+`--aplicar` y `--deshacer` siguen necesitando el GO explícito de Fernando.
 
-**Cuando el fix ya esté en `/srv/jax-prod` y Fernando dé el GO**, el
+Contexto histórico del requisito previo: el fix de la ronda 2
+(`las_manos/motor_registry/tool_authority.py::_write_file`, `os.fchmod(fd,
+0o660)` antes de `os.replace`) hace que un archivo que LAS MANOS (jaxsvc)
+escriba con `mkstemp()` (0600 explícito) no quede con ACL efectiva `---` para
+el grupo pese a la ACL por defecto de `proyectos/` (el mismo defecto que
+motivó el fix, ver B1 en el docstring del guion), y que `fruiz` pueda
+leerlo/escribirlo. Sin ese fix en `/srv/jax-prod`, `--verificar` daría `0`
+mientras la escritura real de LAS MANOS lo sigue rompiendo por otro lado.
+
+**Para volver a aplicar, con el fix en `/srv/jax-prod` y el GO de Fernando**, el
 procedimiento (7 pasos) es:
 
 1. **Instalar + sha256.** `sudo install -o root -g root -m 0755
@@ -180,7 +183,7 @@ nunca se muta, se reporta como fallo.
 ## Reversión — `--deshacer`, DETERMINISTA (reescrita en la ronda 3)
 **El respaldo de `getfacl` ya NO se usa para revertir nada.** La segunda
 ronda intentaba reconstruir el árbol leyendo ese respaldo, y tenía cuatro
-fallas de diseño reales: un directorio SIN ACL todavía (el estado de HOY) se
+fallas de diseño reales: un directorio SIN ACL todavía (el estado de HOY, 2026-09-25, medido sobre la ruta anterior al traslado del 2026-10-03) se
 leía como archivo porque el parser decidía "es directorio" mirando si había
 líneas `default:`; no restauraba setgid ni el resto de los bits; un espacio
 al final de un nombre se recortaba al desescapar; y `--nucleo-revertir
@@ -193,7 +196,7 @@ python3 ops/permisos_proyectos.py --deshacer
 ```
 Sin argumentos -- siempre actúa sobre la RAIZ configurada. DETERMINISTA: no
 lee ningún archivo de estado. Lleva cada directorio y archivo al único
-estado que hall9000 tiene medido HOY con `stat` real, fuera de
+estado que hall9000 tenía medido el 2026-09-25 con `stat` real (ruta anterior al traslado del 2026-10-03), fuera de
 la carpeta oculta de estado de herramientas (que este modo tampoco toca):
 
 | | dueño | grupo | modo | ACL |
@@ -203,7 +206,7 @@ la carpeta oculta de estado de herramientas (que este modo tampoco toca):
 
 (El árbol completo, incluida la carpeta oculta de estado, tiene más objetos -- lo que
 importa para `--deshacer` es sólo lo que está a su alcance, que es lo medido
-arriba. Confirmado el 2026-09-25: `--verificar` contra la producción real da
+arriba. Confirmado el 2026-09-25 (medido sobre la ruta anterior al traslado del 2026-10-03; hoy el árbol ya está aplicado y `--verificar` da `0`): `--verificar` contra la producción real daba
 `rc=1` con **355 NO CUMPLE** -- exactamente 107+248, el árbol entero sin
 aplicar todavía.)
 
@@ -224,7 +227,7 @@ partir del propietario -- `grupo = propietario`, `otros = propietario sin
 escritura`). Así, si algún objeto real dentro del alcance de este guion
 resultara ser una excepción legítima algún día, `--deshacer` no lo fuerza a
 `0775`/`0664` -- preserva lo que su dueño ya podía hacer. **Las únicas
-excepciones medidas hoy** (2 directorios en `0700`, 1 archivo en `0600`)
+excepciones medidas el 2026-09-25** (2 directorios en `0700`, 1 archivo en `0600`)
 viven DENTRO de esa carpeta oculta, y por lo tanto están fuera del alcance de
 `--verificar`/`--aplicar`/`--deshacer` los tres.
 
@@ -250,7 +253,7 @@ después) revelaría esa entrada vieja y pisaría el modo recién puesto.
 ```bash
 python3 ops/permisos_proyectos.py --verificar
 ```
-Piso de CI medido en un contenedor `ubuntu:24.04` limpio (usuario `runner`
+Piso de CI (medido sobre la ruta anterior al traslado del 2026-10-03) medido en un contenedor `ubuntu:24.04` limpio (usuario `runner`
 con sudo sin contraseña, sin `/etc/jax/.env` -- no en hall9000): **39
 passed, 2 skipped**. Los dos skips son estructurales fuera de un host de jax
 real (uno necesita `/etc/jax/.env` legible para probar el mensaje específico
