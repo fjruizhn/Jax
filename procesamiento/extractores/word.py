@@ -70,6 +70,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from procesamiento.dependencias import codigo_de_import
 from procesamiento.resultado import Resultado
 
 EXTRACTOR = "python-docx"
@@ -250,7 +251,7 @@ def extraer(origen: Path) -> Resultado:
         return Resultado(
             estado="error", salidas={}, extractor=EXTRACTOR,
             version="sin instalar",
-            detalle={"codigo": "dependencia_no_instalada",
+            detalle={"codigo": codigo_de_import(exc),
                      "razon": f"python-docx no esta instalado: {exc}"},
         )
 

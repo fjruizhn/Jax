@@ -65,6 +65,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
+from procesamiento.dependencias import codigo_de_import
 from procesamiento.resultado import Resultado
 
 EXTRACTOR = "pdfplumber"
@@ -187,7 +188,7 @@ def tiene_capa_de_texto(origen: Path) -> bool:
     "sin texto", que es correcto: ahí sí corresponde OCR."""
     try:
         textos = _textos_por_pagina(origen)
-    except ModuleNotFoundError:
+    except ImportError:
         raise
     except Exception:  # fail-soft: la deteccion barata de capa de texto puede fallar leyendo el PDF (corrupto, formato raro); se trata como "sin texto" y la compuerta rutea a OCR en vez de abortar
         return False
@@ -261,7 +262,7 @@ def extraer(
         return Resultado(
             estado="error", salidas={}, extractor=EXTRACTOR,
             version="sin instalar",
-            detalle={"codigo": "dependencia_no_instalada",
+            detalle={"codigo": codigo_de_import(exc),
                      "razon": f"pdfplumber no esta instalado: {exc}"},
         )
 
