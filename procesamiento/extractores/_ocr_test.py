@@ -2242,14 +2242,19 @@ def _assert_llego_sin_alfa_y_con_fondo_blanco(recibidos: list):
     from PIL import Image
 
     assert recibidos, "tesseract no recibio nada"
+    sobre_blanco = []
     for datos in recibidos:
         assert datos.startswith(b"\x89PNG"), "no se le pasan los bytes originales a leptonica"
         with Image.open(BytesIO(datos)) as im:
             assert im.mode not in _MODOS_CON_ALFA
             assert "transparency" not in im.info
             rgb = im.convert("RGB")
-            assert rgb.getpixel((2, 2)) == (255, 255, 255), "el fondo transparente tiene que ser blanco"
-            assert rgb.convert("L").getextrema()[0] < 100, "el texto oscuro tiene que seguir ahi"
+            # ronda 11 (N36): con transparencia real se aplana sobre blanco Y sobre negro
+            assert rgb.getpixel((2, 2)) in {(255, 255, 255), (0, 0, 0)}
+            if rgb.getpixel((2, 2)) == (255, 255, 255):
+                sobre_blanco.append(rgb.convert("L").getextrema()[0])
+    assert sobre_blanco, "el fondo transparente tiene que llegar sobre blanco"
+    assert all(minimo < 100 for minimo in sobre_blanco), "el texto oscuro tiene que seguir ahi"
 
 
 def _rotulo_transparente(modo: str = "RGBA"):
@@ -2431,6 +2436,22 @@ def _recibido(recibidos: list):
     return im
 
 
+def _recibido_con_fondo(recibidos: list, fondo: tuple):
+    """La imagen recibida por tesseract cuyo fondo (pixel (2,2)) es `fondo`."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    assert recibidos, "tesseract no recibio nada"
+    for datos in recibidos:
+        assert datos.startswith(b"\x89PNG")
+        im = Image.open(BytesIO(datos))
+        im.load()
+        if im.convert("RGB").getpixel((2, 2)) == fondo:
+            return im
+    raise AssertionError(f"ninguna imagen llego con fondo {fondo}")
+
+
 def _rotulo(color_tinta, formato: str, destino: Path, fondo=(0, 0, 0, 0)):
     """Texto de `color_tinta` sobre fondo TRANSPARENTE, en el formato dado."""
     from PIL import Image, ImageDraw
@@ -2459,8 +2480,7 @@ def test_n32_texto_claro_sobre_transparente_llega_con_fondo_negro_y_tinta_clara(
     _rotulo((255, 255, 255), formato, destino)
     recibidos = _tesseract_que_registra(monkeypatch)
     ocr.extraer(destino)
-    rgb = _recibido(recibidos).convert("RGB")
-    assert rgb.getpixel((2, 2)) == (0, 0, 0), "tinta clara: el fondo tiene que ser NEGRO"
+    rgb = _recibido_con_fondo(recibidos, (0, 0, 0)).convert("RGB")   # tinta clara: tiene que llegar sobre NEGRO
     assert rgb.convert("L").getextrema()[1] > 200, "la tinta clara tiene que conservarse"
 
 
@@ -2487,8 +2507,7 @@ def test_n32_png_rgb_con_trns_de_fondo_negro_y_texto_blanco_conserva_la_tinta(tm
     assert Image.open(destino).info["transparency"] == (0, 0, 0)
     recibidos = _tesseract_que_registra(monkeypatch)
     ocr.extraer(destino)
-    rgb = _recibido(recibidos).convert("RGB")
-    assert rgb.getpixel((2, 2)) == (0, 0, 0)
+    rgb = _recibido_con_fondo(recibidos, (0, 0, 0)).convert("RGB")
     assert rgb.convert("L").getextrema()[1] > 200
 
 
@@ -2594,3 +2613,221 @@ def test_n34_control_la_misma_pagina_opaca_no_la_toca_el_tope_del_aplanado(tmp_p
     r = ocr.extraer(destino)
     assert r.detalle.get("codigo") != "imagen_demasiado_grande"
     assert len(recibidos) >= 2          # se leyeron las dos paginas
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 11: N36 (doble pasada sobre blanco y negro para la transparencia
+# REAL, sin heuristica de luminancia) y N37 (tope del aplanado de un TIFF
+# multipagina comprobado ANTES del OCR de cualquier pagina)
+# ---------------------------------------------------------------------------
+
+_TEXTO_LOGO = ("Total a pagar: 1,500.00 Lempiras", "Fecha: 03/10/2026")
+_ZONA_TEXTO_LOGO = (640, 40, 1600, 280)     # donde va el texto en el lienzo de 1600x300
+_BLANCO, _NEGRO = (255, 255, 255), (0, 0, 0)
+
+
+class _SalidaSimulada:
+    returncode = 0
+    stderr = b""
+
+    def __init__(self, stdout: bytes):
+        self.stdout = stdout
+
+
+def _tesseract_que_lee(monkeypatch) -> list:
+    """Tesseract SIMULADO que LEE lo que recibe: decodifica la imagen y "ve" el
+    texto del logo solo si en su zona hay contraste (tinta distinta del fondo).
+    Devuelve la lista de fondos (pixel (2,2), siempre transparente en el
+    original) de cada imagen recibida. No depende de la version de leptonica."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    fondos: list = []
+    real = ocr.subprocess.run
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        with Image.open(BytesIO(k["input"])) as im:
+            fondos.append(im.convert("RGB").getpixel((2, 2)))
+            bajo, alto = im.convert("L").crop(_ZONA_TEXTO_LOGO).getextrema()
+        legible = alto - bajo > 100
+        if cmd[-1] == "tsv":
+            palabras = " ".join(_TEXTO_LOGO).split() if legible else []
+            return _SalidaSimulada(_tsv([(95, p) for p in palabras]).encode())
+        return _SalidaSimulada("\n".join(_TEXTO_LOGO).encode() if legible else b"")
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    return fondos
+
+
+def _tesseract_por_fondo(monkeypatch, por_fondo: dict) -> list:
+    """Tesseract SIMULADO que responde segun el fondo (pixel (2,2)) de lo que
+    recibe: `por_fondo[fondo] = [(confianza, palabra), ...]`."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    fondos: list = []
+    real = ocr.subprocess.run
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        with Image.open(BytesIO(k["input"])) as im:
+            fondo = im.convert("RGB").getpixel((2, 2))
+        fondos.append(fondo)
+        filas = por_fondo.get(fondo, [])
+        if cmd[-1] == "tsv":
+            return _SalidaSimulada(_tsv(filas).encode())
+        return _SalidaSimulada(" ".join(p for _, p in filas).encode())
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    return fondos
+
+
+def _logo_en_imagen(caso: str, gif: bool = False, con_texto: bool = True):
+    """Sonda del auditor (r10/lum.py), fondo TRANSPARENTE de 1600x300.
+    A: emblema CLARO grande + texto OSCURO (la media de lo opaco es clara).
+    I: bloque OSCURO grande + texto BLANCO (la media de lo opaco es oscura)."""
+    from PIL import Image, ImageDraw
+
+    figura, tinta = {"A": (_BLANCO, (10, 10, 10)), "I": ((20, 20, 20), _BLANCO)}[caso]
+    if gif:   # indice 0 transparente; 1 figura; 2 tinta (colores distintos: el GIF no los fusiona)
+        im = Image.new("P", (1600, 300), 0)
+        im.putpalette(list(_NEGRO) + list(figura) + list(tinta) + [0, 0, 0] * 253)
+        relleno_figura, relleno_tinta = 1, 2
+    else:
+        im = Image.new("RGBA", (1600, 300), (0, 0, 0, 0))
+        relleno_figura, relleno_tinta = figura + (255,), tinta + (255,)
+    d = ImageDraw.Draw(im)
+    if caso == "A":
+        d.ellipse((10, 10, 290, 290), fill=relleno_figura)
+        d.rectangle((300, 20, 620, 280), fill=relleno_figura)
+    else:
+        d.rectangle((10, 10, 620, 290), fill=relleno_figura)
+    if con_texto:
+        for i, linea in enumerate(_TEXTO_LOGO):
+            d.text((640, 60 + i * 100), linea, fill=relleno_tinta, font=_fuente(44))
+    return im
+
+
+def _logo(caso: str, formato: str, destino: Path, con_texto: bool = True) -> Path:
+    from PIL import Image
+
+    im = _logo_en_imagen(caso, gif=formato == "gif", con_texto=con_texto)
+    if formato == "gif":
+        im.save(destino, transparency=0)
+        assert "transparency" in Image.open(destino).info
+    elif formato == "webp":
+        im.save(destino, lossless=True)
+    else:
+        im.save(destino)
+    return destino
+
+
+@pytest.mark.parametrize("formato", ["png", "webp", "tif", "gif"])
+@pytest.mark.parametrize("caso", ["A", "I"])
+def test_n36_logo_con_figura_grande_prueba_los_dos_fondos_y_elige_el_que_tiene_texto(
+    tmp_path, monkeypatch, caso, formato
+):
+    destino = _logo(caso, formato, tmp_path / f"logo_{caso}.{formato}")
+    fondos = _tesseract_que_lee(monkeypatch)
+    r = ocr.extraer(destino)
+    assert {_BLANCO, _NEGRO} <= set(fondos), "con transparencia real se prueban los dos fondos"
+    assert r.detalle.get("codigo") != ocr.CODIGO_IMAGEN_SIN_TEXTO
+    assert _TEXTO_LOGO[0] in r.salidas["texto.txt"], "se elige el fondo con el que se lee el texto"
+
+
+@pytest.mark.parametrize("caso", ["A", "I"])
+def test_n36_logo_png_de_punta_a_punta_con_tesseract_real(tmp_path, caso):
+    """Tesseract REAL. A leptonica le llega un PNG RGB sin alfa armado por
+    Pillow, asi que no depende de como cada version de leptonica trata el alfa."""
+    destino = _logo(caso, "png", tmp_path / f"logo_{caso}.png")
+    r = ocr.extraer(destino)
+    assert r.estado in {"ok", "parcial"}
+    assert r.detalle.get("codigo") not in {
+        ocr.CODIGO_IMAGEN_SIN_TEXTO, ocr.CODIGO_IMAGEN_TEXTO_DUDOSO}
+    assert "Total a pagar" in r.salidas["texto.txt"]
+
+
+def test_n36_imagen_transparente_sin_texto_prueba_los_dos_fondos_y_es_imagen_sin_texto(
+    tmp_path, monkeypatch
+):
+    destino = _logo("A", "png", tmp_path / "emblema.png", con_texto=False)
+    fondos = _tesseract_que_lee(monkeypatch)
+    r = ocr.extraer(destino)
+    assert set(fondos) == {_BLANCO, _NEGRO}
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_SIN_TEXTO
+
+
+def test_n36_imagen_opaca_una_sola_pasada_con_los_bytes_originales(tmp_path, monkeypatch):
+    from PIL import Image
+
+    im = Image.new("RGBA", (1600, 300), (255, 255, 255, 255))
+    im.alpha_composite(_logo_en_imagen("A"))          # el mismo logo, sobre blanco OPACO
+    destino = tmp_path / "logo_opaco.png"
+    im.save(destino)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    assert len(recibidos) == 2, "una sola pasada: texto plano + tsv"
+    assert all(r == destino.read_bytes() for r in recibidos)
+
+
+def test_n36_empate_de_palabras_utiles_gana_el_fondo_blanco(tmp_path, monkeypatch):
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    fondos = _tesseract_por_fondo(monkeypatch, {
+        _BLANCO: [(95, "blanco"), (95, "uno"), (95, "dos")],
+        _NEGRO: [(95, "negro"), (95, "uno"), (95, "dos")],
+    })
+    r = ocr.extraer(destino)
+    assert set(fondos) == {_BLANCO, _NEGRO}
+    assert "blanco" in r.salidas["texto.txt"] and "negro" not in r.salidas["texto.txt"]
+
+
+def test_n36_gana_el_fondo_con_mas_palabras_no_dudosas_no_el_de_mas_palabras(tmp_path, monkeypatch):
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    fondos = _tesseract_por_fondo(monkeypatch, {
+        _BLANCO: [(95, "blanco"), (95, "uno"), (95, "dos")],
+        _NEGRO: [(30, f"negro{i}") for i in range(10)],          # mas palabras, todas dudosas
+    })
+    r = ocr.extraer(destino)
+    assert set(fondos) == {_BLANCO, _NEGRO}
+    assert "blanco" in r.salidas["texto.txt"] and "negro" not in r.salidas["texto.txt"]
+
+
+def test_n36_en_un_tiff_multipagina_el_fondo_se_elige_por_pagina(tmp_path, monkeypatch):
+    destino = tmp_path / "logos.tif"
+    _logo_en_imagen("A").save(destino, save_all=True, append_images=[_logo_en_imagen("I")])
+    fondos = _tesseract_que_lee(monkeypatch)
+    r = ocr.extraer(destino)
+    assert {_BLANCO, _NEGRO} <= set(fondos)
+    texto = r.salidas["texto.txt"]
+    assert f"<!-- página 1 -->\n{_TEXTO_LOGO[0]}" in texto, "pagina 1 (A) se lee sobre blanco"
+    assert f"<!-- página 2 -->\n{_TEXTO_LOGO[0]}" in texto, "pagina 2 (I) se lee sobre negro"
+
+
+def test_n37_tiff_con_la_pagina_1_opaca_y_la_2_transparente_de_mas_de_25_mpx_no_llama_a_tesseract(
+    tmp_path, monkeypatch
+):
+    from PIL import Image
+
+    destino = tmp_path / "opaca_y_grande.tif"
+    chica = Image.new("RGB", (900, 120), "white")
+    ImageDraw.Draw(chica).text((20, 40), "Activos totales 1,234 USD", fill="black", font=_fuente(34))
+    grande = Image.new("RGBA", (5000, 5001), (0, 0, 0, 0))      # el minimo sobre 25 Mpx
+    chica.save(destino, save_all=True, append_images=[grande], compression="tiff_adobe_deflate")
+    del grande
+    with Image.open(destino) as im:
+        im.seek(1)
+        assert im.mode == "RGBA" and im.size[0] * im.size[1] > ocr.MAX_PIXELES_OTROS_MODOS
+    llamadas = _tesseract_llamado(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "imagen_demasiado_grande"
+    assert r.detalle["causa"] == "demasiados_pixeles"
+    assert llamadas == [], "el tope se comprueba en TODAS las paginas antes del OCR de ninguna"
