@@ -110,7 +110,8 @@ from pydantic import BaseModel, ConfigDict
 
 from motor_registry import job_tasks, tool_authority
 from motor_registry.models import JobStatus
-from procesamiento import ingesta
+import aviso_extractores
+from procesamiento import dependencias, ingesta
 from processing_job_store import ProcessingJobStore
 from processing_ownership import ProcessingOwnershipError, processing_ownership_from_scope
 
@@ -273,6 +274,11 @@ def _resultado_no_codificable(ruta: str) -> ResultadoArchivo:
     )
 
 
+def _codigo_de_ficha(ficha) -> str | None:
+    codigo = ficha.detalle.get("codigo") if ficha.estado == "error" else None
+    return codigo if isinstance(codigo, str) else None
+
+
 def _procesar_una_ruta(trabajo: Path, ruta: str) -> ResultadoArchivo:
     """Nunca lanza: una ruta fuera del jail, ausente, o cuya ingesta falla
     queda REPORTADA, no propagada -- fallo cerrado por archivo, para que un
@@ -299,6 +305,9 @@ def _procesar_una_ruta(trabajo: Path, ruta: str) -> ResultadoArchivo:
         extractor=ficha.extractor,
         extracto_bytes=_tamano_extracto(carpeta),
         carpeta_procesado=str(carpeta.relative_to(tool_authority.WORKSPACE_ROOT)),
+        # jax-14: el codigo de la ficha (p. ej. `dependencia_no_instalada`) viaja a la
+        # plataforma para que quede en su log; solo el codigo, nunca el detalle crudo.
+        error=_codigo_de_ficha(ficha),
     )
 
 
@@ -634,6 +643,26 @@ def _snapshot_for_owner(job_id: str, request: Request):
 @router.post("/trabajos", response_model=TrabajoCreadoResponse, status_code=202)
 async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoResponse:
     ownership = _processing_ownership(request)
+    # jax-14 (2026-10-03): freno de dependencias. Sin pdfplumber/openpyxl/
+    # python-docx los PDF/DOCX/XLSX salian `sin_extractor` en silencio. 503 ANTES
+    # de crear el trabajo y de tomar cupo: el despachador de la plataforma
+    # trata 5xx como reintento y las filas siguen `en_cola` hasta que se arregle.
+    # El freno es POR TIPO: solo se frena un lote con alguna ruta cuya extension
+    # dependa de un paquete faltante (un lote de imagenes sigue). `estado()` hace
+    # E/S de modulos: va fuera del loop (asyncio.to_thread).
+    extractores = await asyncio.to_thread(dependencias.estado)
+    if not extractores["ok"] and dependencias.lote_afectado(extractores["faltan"], req.rutas):
+        if aviso_extractores.log_si_toca():
+            logger.error("POST /procesamiento/trabajos rechazado: faltan extractores %s", extractores["faltan"])
+        aviso_extractores.avisar_si_toca(extractores["faltan"])
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "extractores_no_disponibles",
+                "faltan": extractores["faltan"],
+                "tipos": dependencias.tipos_de(extractores["faltan"]),
+            },
+        )
     if len(req.rutas) > _MAX_RUTAS_POR_TRABAJO:
         raise HTTPException(
             status_code=422,

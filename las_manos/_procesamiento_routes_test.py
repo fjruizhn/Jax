@@ -34,6 +34,7 @@ import ast
 import asyncio
 import json
 import secrets
+import sys
 import tempfile
 import threading
 import time
@@ -1059,6 +1060,51 @@ def _owned_request() -> Request:
     return Request({"type": "http", "state": {"processing_ownership": OWNER}})
 
 
+import contextlib
+import importlib
+import os
+
+import pytest
+
+from procesamiento import dependencias
+import aviso_extractores
+
+_ESTADO_REAL = dependencias.estado
+
+
+@pytest.fixture(autouse=True)
+def _extractores_instalados_por_defecto(monkeypatch):
+    """jax-14: el job `governance` de CI NO instala requirements-archivos.txt, asi
+    que `dependencias.estado()` real daria 503 en TODO POST. Salvo las pruebas
+    del freno (que fijan su propio estado con `_estado_sin_modulos`/`_estado_falta`),
+    el estado es "todo ok" -- estas pruebas miden el endpoint, no el venv."""
+    monkeypatch.setattr(dependencias, "estado", lambda *a, **k: {"ok": True, "faltan": [], "motivos": {}})
+    aviso_extractores._reiniciar()
+    yield
+    aviso_extractores._reiniciar()
+
+
+@contextlib.contextmanager
+def _estado_sin_modulos(*modulos, error=ModuleNotFoundError):
+    """El `estado()` REAL, con un importador controlado: solo `modulos` fallan; el
+    resto "se importa". Asi las pruebas valen igual con o sin las dependencias
+    en el interprete (el job `governance` no las instala)."""
+    def importador(nombre):
+        if nombre in modulos:
+            raise error(f"simulado: {nombre}")
+        return object()
+
+    with patch.object(dependencias, "estado", lambda *a, **k: _ESTADO_REAL(importador=importador)):
+        yield
+
+
+@contextlib.contextmanager
+def _estado_falta(*paquetes):
+    estado = {"ok": False, "faltan": sorted(paquetes), "motivos": {p: "ModuleNotFoundError" for p in paquetes}}
+    with patch.object(dependencias, "estado", lambda *a, **k: estado):
+        yield
+
+
 class TrabajoHTTPTest(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -1123,6 +1169,208 @@ class TrabajoHTTPTest(unittest.TestCase):
             response = self._post(client, usuario="legacy")
         assert response.status_code == 422, response.text
         assert self.store._index == {}
+
+    # -- jax-14 (2026-10-03): freno de dependencias de extraccion ----------
+    # El fixture autouse del modulo fija `dependencias.estado` en "todo ok"; estas
+    # pruebas fijan el suyo: `_estado_sin_modulos(...)` es el estado REAL con un importador
+    # controlado (vale con o sin las dependencias en el interprete), `_estado_falta(...)` uno sintetico.
+    def test_post_con_pdf_y_pdfplumber_ausente_da_503_con_faltan_y_tipos_y_no_crea_trabajo(self):
+        with _estado_sin_modulos("pdfplumber"), TestClient(_app()) as client:
+            response = self._post(client, rutas=["a.pdf"])
+        assert response.status_code == 503, response.text
+        detail = response.json()["detail"]
+        assert detail["code"] == "extractores_no_disponibles"
+        assert detail["faltan"] == ["pdfplumber"]
+        assert detail["tipos"] == [".pdf"]
+        assert self.store._index == {}
+
+    def test_post_503_por_cada_tipo_afectado(self):
+        casos = {"docx": ("python-docx", "b.docx"), "openpyxl": ("openpyxl", "c.xlsx")}
+        for modulo, (paquete, ruta) in casos.items():
+            with _estado_sin_modulos(modulo), TestClient(_app()) as client:
+                response = self._post(client, rutas=[ruta])
+            assert response.status_code == 503, (modulo, response.text)
+            assert response.json()["detail"]["faltan"] == [paquete]
+
+    def test_post_lote_solo_de_imagenes_con_pdfplumber_ausente_sigue_admitiendo(self):
+        async def _noop(*args, **kwargs):
+            return None
+
+        with _estado_falta("pdfplumber"), patch.object(rutas_mod, "_ejecutar_trabajo", _noop), \
+             TestClient(_app()) as client:
+            response = self._post(client, rutas=["a.png", "b.jpg"])
+        assert response.status_code == 202, response.text
+
+    def test_post_lote_mixto_con_un_pdf_y_pdfplumber_ausente_da_503(self):
+        with _estado_falta("pdfplumber"), TestClient(_app()) as client:
+            response = self._post(client, rutas=["a.png", "b.pdf"])
+        assert response.status_code == 503, response.text
+
+    def test_post_paquete_faltante_sin_mapa_bloquea_todos_los_tipos(self):
+        with _estado_falta("linea-no-reconocida:3"), TestClient(_app()) as client:
+            response = self._post(client, rutas=["a.png"])
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"]["tipos"] == ["*"]
+
+    def test_post_503_por_extractores_ocurre_antes_del_acquire_del_semaforo(self):
+        """MINOR-4: un espia sobre el semaforo. Si el 503 se mueve DESPUES del
+        acquire, `acquire` se llama y esta prueba falla (cupo tomado y, segun
+        el camino, filtrado)."""
+        espia = Mock()
+        espia.locked = Mock(return_value=False)
+        espia.acquire = AsyncMock()
+        espia.release = Mock()
+        with _estado_falta("pdfplumber"), patch.object(rutas_mod, "_SEMAFORO_TRABAJOS", espia), \
+             TestClient(_app()) as client:
+            for _ in range(3):
+                assert self._post(client, rutas=["a.pdf"]).status_code == 503
+        espia.acquire.assert_not_called()
+
+    def test_post_con_todo_instalado_sigue_admitiendo(self):
+        async def _noop(*args, **kwargs):
+            return None
+
+        with patch.object(rutas_mod, "_ejecutar_trabajo", _noop), TestClient(_app()) as client:
+            response = self._post(client)
+        assert response.status_code == 202, response.text
+
+    def test_un_importador_que_lanza_attributeerror_da_503_y_health_200_y_el_arranque_no_cae(self):
+        import server
+
+        def importador(nombre, *a, **k):
+            if nombre == "pdfplumber":
+                raise AttributeError("a medio instalar")
+            return object()
+
+        with patch.object(dependencias, "estado", lambda *a, **k: _ESTADO_REAL(importador=importador)):
+            with TestClient(_app()) as client:
+                post = self._post(client, rutas=["a.pdf"])
+            with patch.object(server._salud, "estado", AsyncMock(return_value={"ok": True, "fallos": []})):
+                health = TestClient(server.app).get("/health")
+            with patch("jacobs.reaper.send_telegram_alert", AsyncMock(return_value={"ok": True})):
+                self._arrancar_servidor()  # no lanza: el servicio arranca igual
+        assert post.status_code == 503, post.text
+        assert post.json()["detail"]["code"] == "extractores_no_disponibles"
+        assert health.status_code == 200, health.text
+        ext = health.json()["extractores"]
+        assert ext["ok"] is False and ext["faltan"] == ["pdfplumber"]
+        assert ext["motivos"] == {"pdfplumber": "AttributeError"}
+
+    def test_health_informa_el_estado_de_los_extractores_sin_dejar_de_dar_200(self):
+        import server
+
+        with patch.object(server._salud, "estado", AsyncMock(return_value={"ok": True, "fallos": []})):
+            with _estado_sin_modulos("docx"):
+                # sin `with`: no corre el startup (necesita MariaDB real)
+                roto = TestClient(server.app).get("/health")
+            sano = TestClient(server.app).get("/health")
+        assert roto.status_code == 200, roto.text
+        assert roto.json()["extractores"]["ok"] is False
+        assert roto.json()["extractores"]["faltan"] == ["python-docx"]
+        assert sano.status_code == 200, sano.text
+        assert sano.json()["extractores"] == {"ok": True, "faltan": [], "motivos": {}}
+
+    def _arrancar_servidor(self):
+        import server
+
+        async def _arrancar():
+            for handler in server.app.router.on_startup:
+                await handler()
+            # deja correr la tarea fire-and-forget del aviso
+            await asyncio.sleep(0)
+            await asyncio.gather(*list(aviso_extractores._TAREAS))
+
+        with patch.object(server, "_configure_b7_trusted_runtime"), \
+             patch("jacobs.subpipelines.config_subpipelines"), \
+             patch.object(server.jacobs_store, "tamanio_pool"), \
+             patch.object(server.jacobs_store, "init_tables", AsyncMock()), \
+             patch("motor_registry.routes.init_motor_catalog", AsyncMock()), \
+             patch("jacobs.reaper.reap_orphaned_pipelines", AsyncMock()), \
+             patch("jacobs.reaper.start_reaper_loop", AsyncMock()), \
+             patch.object(rutas_mod, "reconciliar_trabajos_huerfanos", Mock(return_value=0)):
+            asyncio.run(_arrancar())
+
+    def test_el_arranque_loguea_error_y_avisa_si_faltan_extractores_y_no_se_cae(self):
+        enviar = AsyncMock(return_value={"ok": True, "message_id": 1, "error": None})
+        with _estado_falta("pdfplumber"), patch("jacobs.reaper.send_telegram_alert", enviar):
+            with self.assertLogs(level="ERROR") as capturado:
+                self._arrancar_servidor()
+        mensajes = [r.getMessage() for r in capturado.records]
+        assert any("pdfplumber" in m and "extractores" in m for m in mensajes), mensajes
+        enviar.assert_awaited_once()
+        assert "pdfplumber" in enviar.await_args.args[0]
+
+    def test_el_arranque_con_todo_ok_no_avisa(self):
+        enviar = AsyncMock()
+        with patch("jacobs.reaper.send_telegram_alert", enviar):
+            self._arrancar_servidor()
+        enviar.assert_not_awaited()
+
+    def test_el_aviso_desde_el_post_sale_una_vez_por_hora(self):
+        enviar = AsyncMock(return_value={"ok": True, "message_id": 1, "error": None})
+        reloj = [1000.0]
+        with _estado_falta("pdfplumber"), patch("jacobs.reaper.send_telegram_alert", enviar), \
+             patch.object(aviso_extractores, "_reloj", lambda: reloj[0]), TestClient(_app()) as client:
+            assert self._post(client, rutas=["a.pdf"]).status_code == 503
+            time.sleep(0.2)
+            reloj[0] += 1800
+            assert self._post(client, rutas=["a.pdf"]).status_code == 503
+            time.sleep(0.2)
+            primera = enviar.await_count
+            reloj[0] += 1801  # ya pasó más de una hora desde el primero
+            assert self._post(client, rutas=["a.pdf"]).status_code == 503
+            time.sleep(0.2)
+        assert primera == 1, "la segunda dentro de la hora NO avisa"
+        assert enviar.await_count == 2
+
+    def test_el_texto_realmente_enviado_no_lleva_las_rutas_del_lote(self):
+        """MINOR-N4: se afirma sobre lo que recibio `send_telegram_alert`, no sobre
+        un texto armado por la propia prueba. Si `mensaje()` metiera rutas, falla."""
+        enviar = AsyncMock(return_value={"ok": True, "message_id": 1, "error": None})
+        rutas = ["secreto-del-cliente.pdf", "carpeta/balance-confidencial.pdf"]
+        with _estado_falta("pdfplumber"), patch("jacobs.reaper.send_telegram_alert", enviar), \
+             TestClient(_app()) as client:
+            r = self._post(client, rutas=rutas)
+            time.sleep(0.2)
+        assert r.status_code == 503, r.text
+        enviar.assert_awaited_once()
+        enviado = enviar.await_args.args[0]
+        assert "pdfplumber" in enviado
+        for ruta in rutas:
+            assert ruta not in enviado and Path(ruta).stem not in enviado
+
+    def test_sin_credenciales_de_telegram_el_503_no_rompe(self):
+        with _estado_falta("pdfplumber"), \
+             patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""}), \
+             TestClient(_app()) as client:
+            r = self._post(client, rutas=["a.pdf"])
+            time.sleep(0.2)
+        assert r.status_code == 503, r.text
+
+    def test_el_log_del_503_sale_como_mucho_una_vez_por_minuto(self):
+        reloj = [9000.0]
+        with _estado_falta("pdfplumber"), patch("jacobs.reaper.send_telegram_alert", AsyncMock()), \
+             patch.object(aviso_extractores, "_reloj", lambda: reloj[0]), TestClient(_app()) as client:
+            with self.assertLogs(rutas_mod.logger, level="ERROR") as capturado:
+                for _ in range(5):
+                    self._post(client, rutas=["a.pdf"])
+                reloj[0] += 61
+                self._post(client, rutas=["a.pdf"])
+        rechazos = [r for r in capturado.records if "rechazado" in r.getMessage()]
+        assert len(rechazos) == 2
+
+    def test_el_error_con_codigo_de_la_ficha_llega_en_el_resultado_del_archivo(self):
+        ficha = Mock(estado="error", extractor="pdf", sha256="a" * 64, detalle={"codigo": "dependencia_no_instalada"})
+        with tempfile.TemporaryDirectory() as tmp:
+            archivo = Path(tmp) / "x.pdf"
+            archivo.write_bytes(b"%PDF-1.4")
+            with patch.object(rutas_mod.tool_authority, "resolve_jailed_path", return_value=(archivo, "")), \
+                 patch.object(rutas_mod.ingesta, "ingerir", return_value=ficha), \
+                 patch.object(rutas_mod.ingesta, "ruta_procesado", return_value=Path(tmp) / "nada"), \
+                 patch.object(rutas_mod.tool_authority, "WORKSPACE_ROOT", Path(tmp)):
+                r = rutas_mod._procesar_una_ruta(Path(tmp), "x.pdf")
+        assert r.estado == "error"
+        assert r.error == "dependencia_no_instalada"
 
     def test_b6_persists_authenticated_human_uploader_as_caller(self):
         async def _noop(*args, **kwargs):
@@ -1669,6 +1917,56 @@ class ProjectUuidTest(unittest.TestCase):
     def test_carpeta_del_trabajo_es_el_uuid(self):
         self.assertEqual(rutas_mod._trabajo_de(self.UUID),
                          tool_authority.WORKSPACE_ROOT / "proyectos" / self.UUID)
+
+
+# -- jax-14 ronda 2, MINOR-N2: las variables de intervalo nunca tumban el import ----------
+def _recargar_aviso(**entorno):
+    with patch.dict(os.environ, entorno):
+        return importlib.reload(aviso_extractores)
+
+
+@pytest.fixture
+def _aviso_restaurado():
+    yield
+    importlib.reload(aviso_extractores)  # entorno limpio: vuelven los valores por defecto
+
+
+def test_valor_no_numerico_usa_el_default_sin_lanzar_y_el_import_no_cae(_aviso_restaurado, caplog):
+    with caplog.at_level("WARNING", logger="las_manos.aviso_extractores"):
+        mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S="1h", JAX_PROCESAMIENTO_LOG_EXTRACTORES_S="abc")
+    assert mod.INTERVALO_AVISO_S == 3600.0
+    assert mod.INTERVALO_LOG_S == 60.0
+    avisos = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S" in a for a in avisos), avisos
+
+
+@pytest.mark.parametrize("valor", ["0", "-5", "nan", "inf", "-inf"])
+def test_cero_negativo_o_no_finito_se_acota_al_minimo_o_al_default(_aviso_restaurado, valor):
+    mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S=valor, JAX_PROCESAMIENTO_LOG_EXTRACTORES_S=valor)
+    assert mod.INTERVALO_AVISO_S >= 60.0
+    assert mod.INTERVALO_LOG_S >= 10.0
+    assert mod.INTERVALO_AVISO_S < float("inf") and mod.INTERVALO_LOG_S < float("inf")
+
+
+def test_los_minimos_son_60_para_el_aviso_y_10_para_el_log(_aviso_restaurado):
+    mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S="1", JAX_PROCESAMIENTO_LOG_EXTRACTORES_S="1")
+    assert (mod.INTERVALO_AVISO_S, mod.INTERVALO_LOG_S) == (60.0, 10.0)
+
+
+def test_un_valor_enorme_se_baja_al_techo_con_warning(_aviso_restaurado, caplog):
+    """MINOR-N5: sin techo, 1e28 (o una confusion de unidades) apagaria el aviso del POST
+    mientras viva el proceso."""
+    with caplog.at_level("WARNING", logger="las_manos.aviso_extractores"):
+        mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S="1e28", JAX_PROCESAMIENTO_LOG_EXTRACTORES_S="1e28")
+    assert (mod.INTERVALO_AVISO_S, mod.INTERVALO_LOG_S) == (86400.0, 3600.0)
+    avisos = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S" in a for a in avisos), avisos
+    assert any("JAX_PROCESAMIENTO_LOG_EXTRACTORES_S" in a for a in avisos), avisos
+
+
+def test_un_valor_valido_por_encima_del_minimo_se_respeta(_aviso_restaurado):
+    mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S="7200", JAX_PROCESAMIENTO_LOG_EXTRACTORES_S="30")
+    assert (mod.INTERVALO_AVISO_S, mod.INTERVALO_LOG_S) == (7200.0, 30.0)
 
 
 if __name__ == "__main__":
