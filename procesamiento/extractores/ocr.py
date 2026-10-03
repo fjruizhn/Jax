@@ -49,6 +49,7 @@ import subprocess
 import tempfile
 import time
 import warnings
+from collections import Counter
 from pathlib import Path
 
 from procesamiento.resultado import Resultado
@@ -809,17 +810,93 @@ def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
 _FONDOS_DEL_APLANADO = ((255, 255, 255), (0, 0, 0))
 
 
+# Un renglon de la pasada negra es DUPLICADO de uno de la blanca solo si tienen
+# el mismo texto (sin espacios de mas) Y sus cajas se superponen: interseccion
+# sobre la menor de las dos areas >= este valor (Jax#338 ronda 13). Dos `TOTAL`
+# en lugares distintos de la imagen son dos renglones.
+SUPERPOSICION_MINIMA_DUPLICADO = 0.5
+
+
+def _normalizar_linea(linea: str) -> str:
+    """Un renglon sin espacios de mas, para comparar renglones entre pasadas."""
+    return " ".join(linea.split())
+
+
+def _renglones_tsv(salida_tsv: str) -> list[dict]:
+    """Renglones (pagina, bloque, parrafo, linea) de las filas de palabra (nivel
+    5) de un `tsv`, en su orden y con texto: `{"texto": normalizado, "caja":
+    (x0, y0, x1, y1) o None, "filas": [...]}`. La caja del renglon es la que
+    encierra las de sus palabras (`left`, `top`, `width`, `height`); `None` si
+    alguna no es numerica, y entonces el renglon nunca es duplicado."""
+    grupos: dict[tuple, list[list[str]]] = {}
+    for fila in salida_tsv.splitlines()[1:]:
+        campos = fila.split("\t")
+        if len(campos) >= 12 and campos[0] == "5":
+            grupos.setdefault(tuple(campos[1:5]), []).append(campos)
+    renglones = []
+    for filas in grupos.values():
+        texto = _normalizar_linea(" ".join(c[11] for c in filas))
+        if not texto:
+            continue
+        try:
+            cajas = [(int(c[6]), int(c[7]), int(c[6]) + int(c[8]), int(c[7]) + int(c[9])) for c in filas]
+            caja = (min(c[0] for c in cajas), min(c[1] for c in cajas),
+                    max(c[2] for c in cajas), max(c[3] for c in cajas))
+        except ValueError:  # fail-soft: una caja no numerica deja el renglon sin caja, y un renglon sin caja nunca es duplicado (se conserva)
+            caja = None
+        renglones.append({"texto": texto, "caja": caja, "filas": ["\t".join(c) for c in filas]})
+    return renglones
+
+
+def _superposicion(a, b) -> float:
+    """Interseccion de dos cajas `(x0, y0, x1, y1)` sobre la menor de sus areas;
+    0 si alguna falta o tiene area nula."""
+    if a is None or b is None:
+        return 0.0
+    ancho = min(a[2], b[2]) - max(a[0], b[0])
+    alto = min(a[3], b[3]) - max(a[1], b[1])
+    menor = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+    if ancho <= 0 or alto <= 0 or menor <= 0:
+        return 0.0
+    return ancho * alto / menor
+
+
 def _unir_pasadas(blanca: dict, negra: dict) -> dict:
     """UNION de las dos pasadas de un fotograma con transparencia real (Jax#338
     ronda 12): no se elige una y se descarta la otra, porque cada criterio de
     eleccion perdio texto real (TOTAL en una pasada y L500 en la otra daban
     ok/imagen_sin_texto). Texto: el de la pasada blanca y despues el de la
-    negra. Las metricas salen de `_analizar_tsv` sobre la union de los `tsv` y
-    la clasificacion
+    negra sin sus renglones DUPLICADOS (mismo texto y cajas superpuestas, ver
+    `SUPERPOSICION_MINIMA_DUPLICADO`; cada renglon de la blanca empareja a lo
+    sumo uno de la negra). Las metricas salen de `_analizar_tsv` sobre la union
+    de los `tsv`, sin las filas de esos duplicados, y la clasificacion
     de `_clasificar`, las mismas funciones que para una pasada. El ruido que
     entre por una pasada lo marca la regla B (palabras dudosas)."""
-    texto = (blanca["texto"] + "\n" + negra["texto"]).strip()
-    filas_negras = negra["tsv"].splitlines()[1:]
+    sin_pareja = _renglones_tsv(blanca["tsv"])
+    propios_negros, duplicados = [], Counter()
+    for renglon in _renglones_tsv(negra["tsv"]):
+        pareja = next((
+            blanco for blanco in sin_pareja
+            if blanco["texto"] == renglon["texto"]
+            and _superposicion(blanco["caja"], renglon["caja"]) >= SUPERPOSICION_MINIMA_DUPLICADO
+        ), None)
+        if pareja is None:
+            propios_negros.append(renglon)
+        else:
+            sin_pareja.remove(pareja)
+            duplicados[renglon["texto"]] += 1
+    # Del texto plano de la negra se quita UNA aparicion por cada renglon
+    # duplicado (el texto es identico, da igual cual). Si el texto plano no
+    # coincide con el del tsv, la linea se conserva: nunca se pierde texto.
+    lineas = []
+    for linea in negra["texto"].splitlines():
+        normalizada = _normalizar_linea(linea)
+        if normalizada and duplicados[normalizada] > 0:
+            duplicados[normalizada] -= 1
+            continue
+        lineas.append(linea)
+    texto = (blanca["texto"] + "\n" + "\n".join(lineas)).strip()
+    filas_negras = [fila for renglon in propios_negros for fila in renglon["filas"]]
     analisis = _analizar_tsv("\n".join([blanca["tsv"], *filas_negras]))
     return {
         "texto": texto,
