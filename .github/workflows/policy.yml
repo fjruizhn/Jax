@@ -6919,7 +6919,13 @@ jobs:
         # --aplicar (la mutacion reemplaza la ACL entera con `setfacl --set`). La prueba de --deshacer cambia de
         # contenido (sin bits de otros) pero no suma. Local: 87 passed + 3 skipped (2 de los 3 el runner los corre:
         # 87 + 2 = 89), 1 skipped en el runner. Ningun piso baja. Sin medir en el runner: manda el runner.
+        # 89 -> 93 (ronda 4 de #340): +4. Tras --deshacer jaxsvc sigue operando y otros no tienen ningun bit (1), el
+        # control negativo de la prueba de etapas (1) y las dos del runbook (sin accesos temporales para terceros;
+        # bloques de shell validos con set -euo pipefail). La prueba de --deshacer cambia de contenido (conserva a
+        # jaxsvc) y las de la carrera y las etapas se endurecen, sin sumar. Local: 91 passed + 3 skipped (2 de los
+        # 3 el runner los corre: 91 + 2 = 93), 1 skipped en el runner. Ningun piso baja. Sin medir en el runner:
+        # manda el runner.
         run: |
           PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
-          grep -qE "^89 passed, 1 skipped" /tmp/permisos_proyectos || {
-            echo "PISO ROTO: se esperaban 89 tests CORRIDOS (no skipeados) y exactamente 1 skipped."; exit 1; }
+          grep -qE "^93 passed, 1 skipped" /tmp/permisos_proyectos || {
+            echo "PISO ROTO: se esperaban 93 tests CORRIDOS (no skipeados) y exactamente 1 skipped."; exit 1; }
