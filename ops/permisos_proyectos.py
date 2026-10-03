@@ -426,6 +426,10 @@ class Resultado:
         # (st_dev, st_ino) de la raíz y de proyectos/ que ESTA pasada abrió: la mutación compara contra ellos.
         self.id_raiz: tuple | None = None
         self.id_proyectos: tuple | None = None
+        # {(st_dev, st_ino): (ruta, uid, gid, acl)} de cada carpeta oculta y de TODO su contenido, tal como lo vieron
+        # las pasadas de solo lectura: la mutación no actúa sobre ninguno de esos inodes y, al final, se relee para
+        # comprobar que dueño y ACL siguen igual.
+        self.huellas_ocultas: dict = {}
 
 
 def _es_carpeta_oculta_excluida(entrada: os.DirEntry) -> bool:
@@ -473,7 +477,7 @@ def _procesar_archivo(fd_path: int, ruta: str, st: os.stat_result, *, accion: st
 
 
 def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado: Resultado,
-             hook_de_prueba=None, alterada: bool = False, hook_tras_scandir=None) -> None:
+             hook_de_prueba=None, alterada: bool = False, hook_tras_scandir=None, ocultos=None) -> None:
     """`profundidad` es la profundidad de las ENTRADAS que se listan en esta llamada,
     relativa a `proyectos/` (sus hijos directos son profundidad 1). m4: la exclusión de
     la exclusión de carpetas ocultas sólo aplica en profundidad 2 -- proyectos/<proyecto>/<.oculta>,
@@ -485,9 +489,12 @@ def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado
         entradas = list(it)
     if hook_tras_scandir is not None:
         hook_tras_scandir(ruta)  # solo pruebas: la ventana entre enumerar las entradas y abrirlas
+    mutando = accion in ("aplicar", "deshacer")
+    dev_padre = os.fstat(dir_fd).st_dev if mutando else None
 
     for entrada in entradas:
         nombre = entrada.name
+        ino_enumerado = entrada.inode() if mutando else None
         ruta_hija = f"{ruta}/{_nombre_seguro(nombre)}"
         hija_alterada = alterada or _nombre_seguro(nombre) != nombre
 
@@ -507,6 +514,19 @@ def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado
             except OSError as exc:
                 raise ErrorPermisosProyectos(f"fstat inesperado sobre {ruta_hija}: {exc}") from exc
 
+            if mutando:
+                # Quien pueda renombrar en este directorio puede intercambiar nombres entre el scandir y el open
+                # (p. ej. `visible/` por `.claude-flow/`): lo abierto tiene que ser EXACTAMENTE lo enumerado, y no
+                # puede ser un inode que las pasadas previas vieron dentro de una carpeta oculta.
+                if (st.st_dev, st.st_ino) != (dev_padre, ino_enumerado):
+                    resultado.no_cumple.append(f"la entrada cambió durante el recorrido: {ruta_hija}; no se muta ni se desciende")
+                    continue
+                if ocultos and _id_de(st) in ocultos:
+                    resultado.no_cumple.append(
+                        f"la entrada es (o era) una carpeta oculta o su contenido, vista en la pasada previa: "
+                        f"{ruta_hija}; no se muta ni se desciende")
+                    continue
+
             if stat.S_ISLNK(st.st_mode):
                 resultado.symlinks_saltados.append(ruta_hija)
                 continue
@@ -522,7 +542,7 @@ def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado
                 try:
                     _caminar(fd_listable, ruta_hija, profundidad + 1, accion=accion,
                              resultado=resultado, hook_de_prueba=hook_de_prueba, alterada=hija_alterada,
-                             hook_tras_scandir=hook_tras_scandir)
+                             hook_tras_scandir=hook_tras_scandir, ocultos=ocultos)
                 finally:
                     os.close(fd_listable)
                 continue
@@ -586,14 +606,14 @@ def _revisar_oculta(nombre: str, dir_fd: int, ruta: str, resultado: Resultado, *
         st = os.fstat(fd_path)
         if not stat.S_ISDIR(st.st_mode):  # cambió entre el listado y la apertura (p. ej. por un symlink)
             return
-        _mirar_oculta_objeto(fd_path, ruta, st, es_dir=True, hallazgos=hallazgos)
+        _mirar_oculta_objeto(fd_path, ruta, st, es_dir=True, hallazgos=hallazgos, huellas=resultado.huellas_ocultas)
         try:
             fd_listable = _reabrir_real(fd_path, os.O_RDONLY | os.O_DIRECTORY)
         except PermissionError:
             hallazgos.append(f"{ruta}: sin permiso para listar el contenido (EACCES)")
         else:
             try:
-                _mirar_oculta_hijos(fd_listable, ruta, hallazgos)
+                _mirar_oculta_hijos(fd_listable, ruta, hallazgos, resultado.huellas_ocultas)
             finally:
                 os.close(fd_listable)
     finally:
@@ -625,18 +645,21 @@ def _revisar_oculta(nombre: str, dir_fd: int, ruta: str, resultado: Resultado, *
                 + " ; ".join(ordenes))
 
 
-def _mirar_oculta_objeto(fd_path: int, ruta: str, st: os.stat_result, *, es_dir: bool, hallazgos: list[str]) -> None:
+def _mirar_oculta_objeto(fd_path: int, ruta: str, st: os.stat_result, *, es_dir: bool, hallazgos: list[str],
+                         huellas: dict) -> None:
     try:
         texto_acl = _getfacl(fd_path)
     except ErrorPermisosProyectos as exc:
+        huellas[_id_de(st)] = (ruta, st.st_uid, st.st_gid, "")
         hallazgos.append(f"{ruta}: no se pudo leer la ACL: {exc}")
         return
+    huellas[_id_de(st)] = (ruta, st.st_uid, st.st_gid, texto_acl)
     faltas = _faltas_de_otros(st, texto_acl, con_default=es_dir)
     if faltas:
         hallazgos.append(f"{ruta}: {'; '.join(faltas)}")
 
 
-def _mirar_oculta_hijos(dir_fd: int, ruta: str, hallazgos: list[str]) -> None:
+def _mirar_oculta_hijos(dir_fd: int, ruta: str, hallazgos: list[str], huellas: dict) -> None:
     with os.scandir(dir_fd) as it:
         entradas = list(it)
     for entrada in entradas:
@@ -647,23 +670,25 @@ def _mirar_oculta_hijos(dir_fd: int, ruta: str, hallazgos: list[str]) -> None:
         try:
             st = os.fstat(fd_path)
             if stat.S_ISLNK(st.st_mode):
+                huellas[_id_de(st)] = (ruta_hija, st.st_uid, st.st_gid, "")
                 continue  # un symlink no se sigue nunca
             if stat.S_ISDIR(st.st_mode):
-                _mirar_oculta_objeto(fd_path, ruta_hija, st, es_dir=True, hallazgos=hallazgos)
+                _mirar_oculta_objeto(fd_path, ruta_hija, st, es_dir=True, hallazgos=hallazgos, huellas=huellas)
                 try:
                     fd_listable = _reabrir_real(fd_path, os.O_RDONLY | os.O_DIRECTORY)
                 except PermissionError:
                     hallazgos.append(f"{ruta_hija}: sin permiso para listar el contenido (EACCES)")
                     continue
                 try:
-                    _mirar_oculta_hijos(fd_listable, ruta_hija, hallazgos)
+                    _mirar_oculta_hijos(fd_listable, ruta_hija, hallazgos, huellas)
                 finally:
                     os.close(fd_listable)
             elif stat.S_ISREG(st.st_mode):
                 if st.st_nlink > 1:
+                    huellas[_id_de(st)] = (ruta_hija, st.st_uid, st.st_gid, "")
                     hallazgos.append(f"hardlink en carpeta oculta: {ruta_hija} (nlink={st.st_nlink})")
                     continue
-                _mirar_oculta_objeto(fd_path, ruta_hija, st, es_dir=False, hallazgos=hallazgos)
+                _mirar_oculta_objeto(fd_path, ruta_hija, st, es_dir=False, hallazgos=hallazgos, huellas=huellas)
         finally:
             os.close(fd_path)
 
@@ -754,7 +779,7 @@ def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_d
                 "--aplicar falla cerrado y no cambió nada; una persona tiene que resolver esto antes:\n  "
                 + "\n  ".join(previo.no_cumple)
             )
-        esperado = (previo.id_raiz, previo.id_proyectos)
+        esperado = (previo.id_raiz, previo.id_proyectos, previo.huellas_ocultas)
     if accion == "deshacer":
         id_paso = _comprobar_paso_antes_de_deshacer(proyectos)
         previo_ocultas = _recorrer(proyectos, accion="previo-oculta", hook_antes_de_raiz=hook_antes_de_raiz)
@@ -766,7 +791,7 @@ def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_d
         if id_paso != previo_ocultas.id_raiz:
             raise ErrorPermisosProyectos(
                 "la raíz del workspace cambió entre dos pasadas previas de --deshacer: falla cerrado, no se mutó nada")
-        esperado = (previo_ocultas.id_raiz, previo_ocultas.id_proyectos)
+        esperado = (previo_ocultas.id_raiz, previo_ocultas.id_proyectos, previo_ocultas.huellas_ocultas)
     if accion in ("aplicar", "deshacer") and hook_entre_previo_y_mutacion is not None:
         hook_entre_previo_y_mutacion()  # solo pruebas: la ventana entre la pasada previa y la mutacion
     resultado = Resultado()
@@ -804,14 +829,30 @@ def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_d
             try:
                 _caminar(fd_listable, ruta_base, 1, accion=accion, resultado=resultado,
                          hook_de_prueba=hook_de_prueba, alterada=ruta_base != str(proyectos),
-                         hook_tras_scandir=hook_tras_scandir)
+                         hook_tras_scandir=hook_tras_scandir,
+                         ocultos=set(esperado[2]) if esperado is not None else None)
             finally:
                 os.close(fd_listable)
         finally:
             os.close(fd_proyectos)
     finally:
         os.close(fd_raiz)
+    if esperado is not None and accion in ("aplicar", "deshacer"):
+        _comprobar_ocultas_sin_mutar(proyectos, accion, esperado[2], resultado)
     return resultado
+
+
+def _comprobar_ocultas_sin_mutar(proyectos: Path, accion: str, antes: dict, resultado: Resultado) -> None:
+    """Verificación final de la mutación: se releen las carpetas ocultas y se compara el dueño, el grupo y la ACL de
+    cada objeto contra lo que guardó la pasada previa. Si algo cambió -- aunque los nombres se hayan restituido --
+    es NO CUMPLE: el verificador de «otros» por sí solo no lo vería."""
+    despues = _recorrer(proyectos, accion="previo-oculta")
+    for ident, (ruta, uid, gid, acl) in antes.items():
+        nuevo = despues.huellas_ocultas.get(ident)
+        if nuevo is not None and nuevo[1:] != (uid, gid, acl):
+            resultado.no_cumple.append(
+                f"carpeta oculta mutada durante --{accion}: {ruta} (su dueño, grupo o ACL cambiaron respecto de la pasada previa)")
+    resultado.no_cumple.extend(despues.no_cumple)
 
 
 # ============================================================================

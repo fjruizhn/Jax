@@ -2684,6 +2684,8 @@ def hook_scandir(ruta):
     estado["hecho"] = True
     a, b, t = {a!r}, {b!r}, {a!r} + ".tmp-intercambio"
     os.rename(a, t); os.rename(b, a); os.rename(t, b)      # RENAME_EXCHANGE con tres renames
+    # el rename mismo actualiza el ctime del inode movido: se anota el de DESPUES del intercambio
+    open({marca!r}, "w").write(str(os.stat(a).st_ctime_ns))
 """
 
 
@@ -2700,13 +2702,16 @@ def test_un_intercambio_de_nombres_entre_el_scandir_y_el_open_no_hace_que_root_m
     ino_oculta = oculta.stat().st_ino
     huella = _huella_de(oculta)
     huella_archivo = _huella_de(oculta / "estado.json")
-    extra = _INTERCAMBIO.format(a=str(visible), b=str(oculta))
+    marca = arbol_temporal.parent / "ctime-tras-el-intercambio"
+    extra = _INTERCAMBIO.format(a=str(visible), b=str(oculta), marca=str(marca))
     out = _ciclo_nucleo_cliente(proyectos, arbol_temporal, accion, extra.replace("hook_scandir", "_h").replace(
         "def _h(ruta):", "def _h(ruta):") + "\n_rec = pp._recorrer\ndef _con_hook(*a, **k):\n"
         "    if k.get('accion') in ('aplicar', 'deshacer'):\n        k.setdefault('hook_tras_scandir', _h)\n    return _rec(*a, **k)\npp._recorrer = _con_hook\n")
     # tras el intercambio, el inode de la oculta esta bajo el nombre `visible`
     assert visible.stat().st_ino == ino_oculta, "el gancho no intercambió los nombres: la prueba no probó nada"
-    assert _huella_de(visible) == huella, "root mutó la carpeta oculta (dueño, grupo, modo, ctime o ACL)"
+    h = _huella_de(visible)
+    assert h[:3] == huella[:3] and h[4] == huella[4], "root mutó la carpeta oculta (dueño, grupo, modo o ACL)"
+    assert h[3] == int(marca.read_text()), "root mutó la carpeta oculta (cambió su ctime tras el intercambio)"
     assert _huella_de(visible / "estado.json") == huella_archivo, "root mutó el contenido de la oculta"
     no_cumple = (out["json"] or {}).get("no_cumple", [])
     assert any("la entrada cambió durante el recorrido" in l and "visible" in l for l in no_cumple), out
