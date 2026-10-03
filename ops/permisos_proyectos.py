@@ -431,6 +431,8 @@ def _procesar_directorio(fd_path: int, ruta: str, st: os.stat_result, *, accion:
     if accion == "deshacer":
         _deshacer_objeto(fd_path, ruta, resultado, es_directorio=True)
         return
+    if accion == "previo-oculta":
+        return
     if accion == "previo":
         _revisar_previo_objeto(fd_path, ruta, resultado)
         return
@@ -439,11 +441,15 @@ def _procesar_directorio(fd_path: int, ruta: str, st: os.stat_result, *, accion:
 
 def _procesar_archivo(fd_path: int, ruta: str, st: os.stat_result, *, accion: str,
                        resultado: Resultado) -> None:
+    if accion == "previo-oculta":
+        return
     if st.st_nlink > 1:
         resultado.hardlinks_rechazados.append(f"{ruta} (nlink={st.st_nlink})")
         return
     if accion == "deshacer":
         _deshacer_objeto(fd_path, ruta, resultado)
+        return
+    if accion == "previo-oculta":
         return
     if accion == "previo":
         _revisar_previo_objeto(fd_path, ruta, resultado)
@@ -469,8 +475,7 @@ def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado
 
         if profundidad == 2 and _es_carpeta_oculta_excluida(entrada):
             resultado.excluidos.append(ruta_hija)
-            if accion != "previo":
-                _procesar_oculta(nombre, dir_fd, ruta_hija, accion=accion, resultado=resultado)
+            _procesar_oculta(nombre, dir_fd, ruta_hija, accion=accion, resultado=resultado)
             continue
 
         fd_path = _abrir_o_path(nombre, dir_fd)
@@ -553,6 +558,8 @@ def _solo_otros_objeto(fd_path: int, ruta: str, st: os.stat_result, *, es_dir: b
     marca NO CUMPLE cualquier bit de otros (modo, `other::` de acceso y, en directorios, por defecto);
     `aplicar` y `deshacer` los quitan -- el modo conserva los bits de grupo (la máscara) y `other::`; la ACL por
     defecto con `setfacl -d -m o::---`, que no toca el resto -- y NO cambian dueño, grupo ni ACL nombradas."""
+    if accion in ("previo", "previo-oculta"):
+        return  # las pasadas previas solo buscan hardlinks en las ocultas (ver _caminar_solo_otros)
     try:
         texto_acl = _getfacl(fd_path)
     except ErrorPermisosProyectos as exc:
@@ -622,8 +629,12 @@ def _caminar_solo_otros(dir_fd: int, ruta: str, *, accion: str, resultado: Resul
                 finally:
                     os.close(fd_listable)
             elif stat.S_ISREG(st.st_mode):
-                # Un hardlink también se cierra: quitar bits de otros solo APRIETA, no puede abrir nada
-                # fuera (a diferencia de chown/ACL, que sí se rechazan en el árbol gobernado).
+                if st.st_nlink > 1:
+                    # Mismo criterio que en el árbol gobernado: un hardlink es EL MISMO inode que otra ruta
+                    # (quizá fuera de proyectos/): un fchmod aquí también cambiaría esa ruta. Nunca se toca;
+                    # --verificar lo marca y --aplicar/--deshacer fallan cerrado en su pasada previa.
+                    resultado.no_cumple.append(f"hardlink en carpeta oculta: {ruta_hija} (nlink={st.st_nlink})")
+                    continue
                 _solo_otros_objeto(fd_path, ruta_hija, st, es_dir=False, accion=accion, resultado=resultado)
         finally:
             os.close(fd_path)
@@ -680,6 +691,12 @@ def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_d
         hook_entre_previo_y_mutacion()  # solo pruebas: la ventana entre la pasada previa y la mutacion
     if accion == "deshacer":
         _comprobar_paso_antes_de_deshacer(proyectos)
+        previo_ocultas = _recorrer(proyectos, accion="previo-oculta", hook_antes_de_raiz=hook_antes_de_raiz)
+        if previo_ocultas.no_cumple:
+            raise ErrorPermisosProyectos(
+                "--deshacer falla cerrado y no cambió nada; una persona tiene que resolver esto antes:\n  "
+                + "\n  ".join(previo_ocultas.no_cumple)
+            )
     resultado = Resultado()
     if hook_antes_de_raiz is not None:
         hook_antes_de_raiz(str(proyectos.parent))  # solo pruebas: la ventana entre validar y abrir la raiz
