@@ -565,7 +565,8 @@ def _revisar_o_mutar_raiz(fd_raiz: int, ruta: str, *, modo: str, resultado: Resu
         resultado.no_cumple.append(f"{etiqueta}: {'; '.join(faltas)}")
 
 
-def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_de_raiz=None) -> Resultado:
+def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_de_raiz=None,
+              hook_entre_previo_y_mutacion=None) -> Resultado:
     """`accion`: verificar | aplicar | deshacer | previo. `aplicar` empieza por una pasada `previo` (solo
     lectura) y FALLA CERRADO sin mutar nada si jaxsvc o fruiz quedarían sin paso por la raíz o hay entradas
     ACL nombradas ajenas: un cambio privilegiado sin esa comprobación puede dejar el sistema peor."""
@@ -576,6 +577,8 @@ def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_d
                 "--aplicar falla cerrado y no cambió nada; una persona tiene que resolver esto antes:\n  "
                 + "\n  ".join(previo.no_cumple)
             )
+    if accion == "aplicar" and hook_entre_previo_y_mutacion is not None:
+        hook_entre_previo_y_mutacion()  # solo pruebas: la ventana entre la pasada previa y la mutacion
     resultado = Resultado()
     if hook_antes_de_raiz is not None:
         hook_antes_de_raiz(str(proyectos.parent))  # solo pruebas: la ventana entre validar y abrir la raiz
