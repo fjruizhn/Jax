@@ -420,9 +420,15 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
                     dimensiones.append((ancho, alto))
                 if n == 1:
                     img.load()
-                    if _tiene_alfa(img) or _bmp_con_mascaras(datos) is not None:
-                        # no se le pasan los bytes originales a leptonica: va
-                        # por Pillow -> PNG (alfa aplanado sobre blanco)
+                    mascara = _mascara_alfa(img)
+                    transparente = mascara is not None
+                    del mascara
+                    if transparente and ancho * alto > MAX_PIXELES_OTROS_MODOS:
+                        return "demasiados_pixeles"   # el tope reducido de todo lo que se aplana
+                    if transparente or _bmp_con_mascaras(datos) is not None:
+                        # transparencia REAL (o un BMP con mascaras): no se le
+                        # pasan los bytes originales a leptonica; va por Pillow
+                        # -> PNG. Un RGBA opaco sigue con los bytes originales.
                         return "tiff", dimensiones
                     return "una", dimensiones
     except Image.DecompressionBombError:
@@ -510,41 +516,98 @@ def _bmp_16_bits_con_mascaras(datos: bytes) -> bool:
 _MODOS_CON_ALFA = frozenset({"RGBA", "LA", "PA", "RGBa", "La"})
 
 
-def _tiene_alfa(img) -> bool:
-    """Canal alfa propio (RGBA, LA, PA...) o transparencia en `info` (un indice
-    transparente en P/L/1, un color en RGB): lo que leptonica descarta."""
-    return img.mode in _MODOS_CON_ALFA or "transparency" in img.info
+def _tabla_alfa(transparencia, opaco_por_defecto: int = 255) -> bytes:
+    """Tabla de 256 entradas indice/gris -> alfa a partir de `info["transparency"]`:
+    un entero (ese indice es transparente) o bytes (alfa por indice, como el
+    `tRNS` de un PNG paletizado)."""
+    if isinstance(transparencia, int):
+        return bytes(0 if i == transparencia else opaco_por_defecto for i in range(256))
+    alfas = bytes(transparencia)
+    return bytes(alfas[i] if i < len(alfas) else opaco_por_defecto for i in range(256))
 
 
-def _aplanar_sobre_blanco(img):
-    """RGB sin alfa con el fondo transparente en BLANCO. Leptonica descarta el
-    alfa de WebP, TIFF y GIF y el fondo transparente queda NEGRO: el texto
-    oscuro queda negro sobre negro (ok/imagen_sin_texto en silencio)."""
-    from PIL import Image
+def _mascara_alfa(img):
+    """Mascara `L` (255 = opaco) si la imagen tiene transparencia REAL, o `None`.
+    Real = algun pixel con alfa < 255, o un `transparency` (indice, gris o color
+    de un `tRNS`) que de verdad coincide con algun pixel. Un RGBA con el alfa en
+    255 en toda la imagen NO es transparente: va por el camino de antes. Sin una
+    RGBA intermedia (menos copias que `convert("RGBA")`)."""
+    from PIL import Image, ImageChops
 
-    rgba = img.convert("RGBA")
-    fondo = Image.new("RGB", rgba.size, (255, 255, 255))
-    fondo.paste(rgba, mask=rgba.getchannel("A"))
-    return fondo
+    modo = img.mode
+    if modo in ("RGBA", "LA", "PA"):
+        mascara = img.getchannel("A")
+    elif modo in _MODOS_CON_ALFA:                      # RGBa / La, premultiplicados
+        mascara = img.convert("RGBA").getchannel("A")
+    elif "transparency" not in img.info:
+        return None
+    elif modo in ("P", "L"):
+        tabla = _tabla_alfa(img.info["transparency"])
+        mascara = Image.frombytes("L", img.size, img.tobytes().translate(tabla))
+    elif modo == "1":
+        tabla = _tabla_alfa(255 if img.info["transparency"] else 0)
+        mascara = Image.frombytes("L", img.size, img.convert("L").tobytes().translate(tabla))
+    elif modo == "RGB" and isinstance(img.info["transparency"], tuple):
+        coincide = None
+        for banda, valor in zip(img.split(), img.info["transparency"]):
+            igual = banda.point(lambda v, c=valor: 255 if v == c else 0)
+            coincide = igual if coincide is None else ImageChops.darker(coincide, igual)
+        mascara = ImageChops.invert(coincide)
+    else:
+        return None
+    return mascara if mascara.getextrema()[0] < 255 else None
+
+
+def _aplanar(img, mascara):
+    """RGB sin alfa. Leptonica descarta el alfa de WebP, TIFF y GIF y el fondo
+    transparente queda NEGRO: el texto oscuro queda negro sobre negro
+    (ok/imagen_sin_texto en silencio). El fondo se elige por CONTRASTE, no es una
+    constante: si la luminancia media de los pixeles opacos (alfa >= 128, o los
+    que no son el color de `tRNS`) es > 127, la tinta es CLARA y el fondo es
+    NEGRO; si no, BLANCO. Nada de correr el OCR dos veces. Un unico lienzo RGB y
+    `paste` con mascara (sin RGBA intermedia)."""
+    from PIL import Image, ImageStat
+
+    opaco = mascara.point(lambda v: 255 if v >= 128 else 0)
+    if opaco.getextrema()[1] == 0:
+        fondo = (255, 255, 255)                          # todo transparente: no hay tinta
+    else:
+        tinta_clara = ImageStat.Stat(img.convert("L"), opaco).mean[0] > 127
+        fondo = (0, 0, 0) if tinta_clara else (255, 255, 255)
+    lienzo = Image.new("RGB", img.size, fondo)
+    lienzo.paste(img, mask=mascara)
+    return lienzo
 
 
 def _a_modo_legible(img):
     """Fotograma decodificado -> uno que se pueda guardar como PNG para
-    tesseract: los modos de `_MODOS_PNG` tal cual; el resto (CMYK, YCbCr, LAB,
-    HSV...) a `RGB`; con transparencia, aplanado sobre BLANCO (sin alfa).
-    (F, I e I;16* ya se rechazaron en la validacion.)"""
-    if _tiene_alfa(img):
-        return _aplanar_sobre_blanco(img)
+    tesseract: con transparencia REAL, aplanado sobre un fondo de contraste
+    (`_aplanar`); un alfa opaco se descarta sin perder nada; los modos de
+    `_MODOS_PNG` tal cual; el resto (CMYK, YCbCr, LAB, HSV...) a `RGB`. (F, I e
+    I;16* ya se rechazaron en la validacion.)"""
+    mascara = _mascara_alfa(img)
+    if mascara is not None:
+        return _aplanar(img, mascara)
+    if img.mode in ("RGBA", "PA", "RGBa"):
+        return img.convert("RGB")
+    if img.mode in ("LA", "La"):
+        return img.convert("L")
     if img.mode in _MODOS_PNG:
         return img
     return img.convert("RGB")
 
 
-def _a_png(cuadro) -> bytes:
+def _a_png(cuadro, dpi=None) -> bytes:
+    """PNG en memoria. `dpi` (el `info["dpi"]` del original) se copia: sin el,
+    tesseract estima la resolucion y lee distinto (una captura de 190 dpi pasaba
+    de 1910 a 1852 caracteres)."""
     from io import BytesIO
 
     salida = BytesIO()
-    cuadro.save(salida, format="PNG")
+    if dpi:
+        cuadro.save(salida, format="PNG", dpi=dpi)
+    else:
+        cuadro.save(salida, format="PNG")
     return salida.getvalue()
 
 
@@ -753,8 +816,11 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
                 try:
                     img.seek(numero - 1)
                     img.load()
+                    if (img.size[0] * img.size[1] > MAX_PIXELES_OTROS_MODOS
+                            and _mascara_alfa(img) is not None):
+                        return _ilegible_dict("demasiados_pixeles")   # tope del aplanado
                     cuadro = _a_modo_legible(img)
-                    png = _a_png(cuadro)
+                    png = _a_png(cuadro, img.info.get("dpi"))
                 except MemoryError:
                     return _ilegible_dict("sin_memoria")   # recursos, no archivo danado
                 except Exception:  # fail-soft: pagina truncada o corrupta = archivo que no decodifica

@@ -5410,8 +5410,17 @@ jobs:
           #   siendo entero_32_bits (+1). Medido LOCAL en hall9000: 151 passed (las 2 reales de
           #   LACTOVI corren). Ninguna depende de la version de leptonica. El RUNNER no tiene
           #   esas 2: el piso es 149 passed + 2 skipped.
-          grep -qE "^149 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 149 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 151 -> 164 (Jax#338 ronda 10): -1 y +14 -- se BORRA la prueba de bmp_32_bits que no
+          #   podia fallar (-1); N32: texto claro sobre transparente en WebP/TIFF/PNG/GIF llega con
+          #   fondo NEGRO y tinta clara, texto oscuro sigue con fondo blanco (4+4) y un PNG RGB con
+          #   tRNS de fondo negro conserva la tinta (+1); N33: un RGBA con alfa 255 y un tRNS sin
+          #   efecto mandan los bytes originales (+2) y el aplanado conserva el dpi (+1); N34: 30 Mpx
+          #   con transparencia real es imagen_demasiado_grande sin tesseract y 30 Mpx opaco sigue
+          #   como antes (+2). Medido LOCAL en hall9000: 164 passed (las 2 reales de LACTOVI
+          #   corren). Ninguna depende de la version de leptonica. El RUNNER no tiene esas 2: el
+          #   piso es 162 passed + 2 skipped.
+          grep -qE "^162 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 162 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
