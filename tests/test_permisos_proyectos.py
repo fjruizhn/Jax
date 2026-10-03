@@ -2603,6 +2603,7 @@ def test_un_directorio_real_que_sustituye_a_la_raiz_o_a_proyectos_entre_pasadas_
     modo_ajeno = _foto(ajeno)[2]
     ino_ajeno = ajeno.stat().st_ino
     extra = f"""
+import os
 estado = {{"hecho": False}}
 def hook_entre():
     if estado["hecho"]:
