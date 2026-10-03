@@ -5470,8 +5470,16 @@ jobs:
           #   180): son esas 2 pruebas que dependian de la version. Cuenta: 182 recolectadas, menos
           #   las 2 de LACTOVI que el runner salta (skipif por archivo ausente) = 180 passed,
           #   2 skipped. Medido LOCAL en hall9000: 182 passed.
-          grep -qE "^180 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 180 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 182 -> 189 recolectadas (Jax#338 ronda 13): +7 -- un renglon es duplicado solo con el
+          #   mismo texto Y cajas superpuestas >= 0,5 de la menor (dos TOTAL en lugares distintos
+          #   salen los dos; misma caja, una vez; superposicion 0,4, dos veces: 3); si las dos
+          #   pasadas aportan renglones propios, como mucho parcial/imagen_texto_dudoso, y si aporta
+          #   una sola se clasifica como siempre (2); VERSION_LOGICA_IMAGEN "3" (1); un solo
+          #   fotograma sin marca de pagina (1). Todas con tesseract SIMULADO. Cuenta del runner: 189
+          #   recolectadas menos las 2 de LACTOVI que salta (skipif por archivo ausente) = 187
+          #   passed, 2 skipped. Medido LOCAL en hall9000: 189 passed.
+          grep -qE "^187 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 187 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
