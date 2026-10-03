@@ -6877,7 +6877,14 @@ jobs:
         # entrada nombrada (1). Medido en local (fruiz, con el núcleo real instalado): 66 passed + 3 skipped
         # + 1 solo-host deseleccionado; las 2 diferencias con el runner son las pruebas que se saltan aquí por
         # el núcleo real y que el runner SÍ corre: 66 + 2 = 68 passed, 2 skipped. Manda el runner.
+        # 68 -> 70 y skipped 2 -> 1 (misma rama): la prueba de lectura/escritura cruzada jaxsvc/fruiz ya no
+        # corre contra /home/fruiz/jax-workspace (en hall9000, un symlink a produccion /srv/jax-data: escribia
+        # y borraba ahi) sino sobre un arbol propio de tmp_path, asi que el runner la CORRE en vez de saltarla
+        # (+1 passed, -1 skipped), y +1 prueba guarda (ninguna ruta fija de las pruebas resuelve a /srv/jax-data
+        # ni /srv/jax-prod). El skip que queda es test_aplicar_rechaza_explicitamente_por_raiz_no_configurada_
+        # cuando_env_es_legible (no hay /etc/jax/.env en el runner). Local: 68 passed + 3 skipped (los 3 por
+        # el nucleo real; 2 de ellos el runner los corre: 68 + 2 = 70). Ningun piso baja. Manda el runner.
         run: |
           PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
-          grep -qE "^68 passed, 2 skipped" /tmp/permisos_proyectos || {
-            echo "PISO ROTO: se esperaban 68 tests CORRIDOS (no skipeados) y exactamente 2 skipped."; exit 1; }
+          grep -qE "^70 passed, 1 skipped" /tmp/permisos_proyectos || {
+            echo "PISO ROTO: se esperaban 70 tests CORRIDOS (no skipeados) y exactamente 1 skipped."; exit 1; }
