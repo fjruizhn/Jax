@@ -2070,3 +2070,73 @@ def test_n18_memory_error_al_decodificar_tampoco_es_archivo_danado(tmp_path, mon
     assert r.estado == "error"
     assert r.detalle["causa"] == "sin_memoria"
     assert r.detalle["codigo"] != "archivo_ilegible"
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 6 (cierre): I;16L / I;16N con TEXTO real
+# ---------------------------------------------------------------------------
+
+
+def _pagina_i16(tmp_path: Path, nombre: str, lineas: list):
+    from PIL import Image
+
+    base = _imagen_multilinea(tmp_path / nombre, lineas)
+    return Image.open(base).convert("L").convert("I").point(lambda v: v * 200).convert("I;16")
+
+
+def _como_modo_16(img, modo: str):
+    """La misma pagina vista en I;16L o I;16N (en memoria: Pillow solo las
+    entrega asi desde plugins, no desde TIFF/PNG). Los bytes de `I;16` son
+    little-endian, y `I;16N` es nativo (little-endian en este host)."""
+    import sys
+
+    from PIL import Image
+
+    datos = img.tobytes()
+    if modo == "I;16N" and sys.byteorder == "big":
+        datos = bytes(b for par in zip(datos[1::2], datos[0::2]) for b in par)
+    return Image.frombytes(modo, img.size, datos)
+
+
+@pytest.mark.parametrize("modo", ["I;16L", "I;16N"])
+def test_i16l_e_i16n_con_texto_real_se_leen_una_pagina(tmp_path: Path, modo: str):
+    """Con `>> 8` sobre el modo tal cual, I;16N daba una pagina NEGRA (Pillow
+    convierte mal I;16N a I) y terminaba en imagen_sin_texto en silencio."""
+    pagina = _pagina_i16(tmp_path, "p.png", [
+        "Factura numero 12345 pagada", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    x = _como_modo_16(pagina, modo)
+    assert x.mode == modo
+    r = ocr._ocr_bytes(ocr._a_png(ocr._a_modo_legible(x)), "spa")
+    assert r is not None and r["clasificacion"] in {"ok", "con_dudas"}
+    assert "Factura numero 12345 pagada" in r["texto"]
+
+
+@pytest.mark.parametrize("modo", ["I;16L", "I;16N"])
+def test_i16l_e_i16n_con_texto_real_se_leen_dos_paginas(tmp_path: Path, modo: str, monkeypatch):
+    p1 = _pagina_i16(tmp_path, "a.png", [
+        "Primera pagina del contrato", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD"])
+    p2 = _pagina_i16(tmp_path, "b.png", [
+        "Segunda pagina de anexos", "Garantia hipotecaria sobre inmueble",
+        "Avaluo comercial 5,000,000.00 USD", "Firmado ante notario publico"])
+    tif = tmp_path / "dos.tif"
+    p1.save(tif, save_all=True, append_images=[p2])
+    real = ocr._a_modo_legible
+    monkeypatch.setattr(ocr, "_a_modo_legible", lambda img: real(_como_modo_16(img, modo)))
+
+    r = ocr.extraer(tif)
+
+    assert r.estado in {"ok", "parcial"}
+    assert "Primera pagina" in r.salidas["texto.txt"]
+    assert "Segunda pagina" in r.salidas["texto.txt"]
+
+
+@pytest.mark.parametrize("modo", ["I;16L", "I;16N"])
+def test_i16l_e_i16n_de_una_pagina_realmente_uniforme_es_sin_texto_legitimo(tmp_path, modo):
+    from PIL import Image
+
+    x = Image.frombytes(modo, (300, 200), b"\x00\x10" * (300 * 200))
+    r = ocr._ocr_bytes(ocr._a_png(ocr._a_modo_legible(x)), "spa")
+    assert r is not None and r["clasificacion"] == "sin_texto"
