@@ -5,7 +5,9 @@
 # ACL POSIX de acceso y por defecto `u:jaxsvc:rwX,g:fruiz:rwX,m::rwx`, y SIN ningún bit para
 # `otros` (directorios 2770, archivos 0660, `o::---` en la ACL de acceso y por defecto); la raíz del
 # workspace (padre de proyectos/) tampoco puede tener bits de otros: --verificar lo exige y
-# --aplicar lo quita sin cambiar su dueño ni su grupo.
+# --aplicar lo quita sin cambiar su dueño ni su grupo, y ANTES de mutar nada comprueba (solo lectura) que
+# jaxsvc y fruiz sigan atravesando la raíz sin ese bit y que no haya ACL nombradas ajenas: si no, falla
+# cerrado. La raíz se abre por descriptor desde `/`, con O_NOFOLLOW (nunca sigue un symlink).
 #
 # TERCERA RONDA (2026-09-25) -- RECHAZADO de nuevo, esta vez con 2 BLOCK sobre el DISEÑO
 # de la reversión de la ronda 2 (json.py/-I y MAJOR-1/2/3 de esa ronda quedaron cerrados
@@ -299,6 +301,82 @@ def _faltas_de_otros(st: os.stat_result, texto_acl: str, *, con_default: bool) -
     return faltas
 
 
+def _iter_entradas(texto_acl: str):
+    """(es_default, tipo, calificador, permisos) de cada entrada de `getfacl -p`."""
+    for linea in texto_acl.splitlines():
+        m = _RE_ENTRADA.match(linea)
+        if m:
+            es_default, tipo, cal, perm = m.groups()
+            yield bool(es_default), tipo, (cal or ""), perm
+
+
+def _faltas_entradas_ajenas(texto_acl: str) -> list[str]:
+    """MINOR-2: toda entrada ACL NOMBRADA (usuario o grupo, de acceso o por defecto) que no sea de jaxsvc ni
+    de fruiz. Una persona decide qué hacer con ella: este guion ni la borra ni la deja ampliada por la
+    máscara -- `--aplicar` falla cerrado."""
+    permitidas = {USUARIO, GRUPO, DUENO_ORIGINAL} | set(ENTRADAS_EXTRA_PERMITIDAS)
+    return [
+        f"entrada ACL nombrada ajena ({'default:' if d else ''}{t}:{cal}:{perm})"
+        for d, t, cal, perm in _iter_entradas(texto_acl)
+        if t in ("user", "group") and cal and cal not in permitidas
+    ]
+
+
+def _identidad(nombre: str) -> tuple[int, dict[int, str]]:
+    """(uid, {gid: nombre}) de la cuenta, con TODOS sus grupos. KeyError si la cuenta no existe."""
+    pw = pwd.getpwnam(nombre)
+    grupos = {}
+    for gid in os.getgrouplist(nombre, pw.pw_gid):
+        try:
+            grupos[gid] = grp.getgrgid(gid).gr_name
+        except KeyError:
+            grupos[gid] = str(gid)
+    return pw.pw_uid, grupos
+
+
+def _puede_atravesar(modo: int, uid_dueno: int, gid_dueno: int, texto_acl: str, *, uid: int, nombre: str,
+                     grupos: dict[int, str], ignorar_otros: bool) -> bool:
+    """MAJOR-2: ¿tiene `x` la cuenta sobre un directorio? Algoritmo POSIX sobre el modo y la ACL de acceso:
+    dueño -> solo `user::`; usuario nombrado -> entrada & máscara; grupos (dueño y nombrados) -> basta con que
+    UN grupo que coincide conceda (entrada & máscara), y si coincide alguno y ninguno concede, no pasa;
+    si no coincide nada, `other` (que no depende de la máscara). `ignorar_otros` calcula el caso de
+    quitarle el bit de otros."""
+    if uid == uid_dueno:
+        return bool(((modo >> 6) & 7) & 1)
+    mascara = _bits(_permisos_de(texto_acl, False, "mask", None) or "rwx") if texto_acl else 7
+    for d, t, cal, perm in _iter_entradas(texto_acl):
+        if not d and t == "user" and cal in (nombre, str(uid)):
+            return bool(_bits(perm) & mascara & 1)
+    coincide = concede = False
+    if gid_dueno in grupos:
+        coincide = True
+        grupo_dueno = _permisos_de(texto_acl, False, "group", None)
+        bits = _bits(grupo_dueno) if grupo_dueno is not None else (modo >> 3) & 7
+        concede = concede or bool(bits & mascara & 1)
+    nombres = set(grupos.values()) | {str(g) for g in grupos}
+    for d, t, cal, perm in _iter_entradas(texto_acl):
+        if not d and t == "group" and cal and cal in nombres:
+            coincide = True
+            concede = concede or bool(_bits(perm) & mascara & 1)
+    if coincide:
+        return concede
+    return False if ignorar_otros else bool((modo & 7) & 1)
+
+
+def _faltas_paso_por_la_raiz(st: os.stat_result, texto_acl: str, *, ignorar_otros: bool) -> list[str]:
+    faltas = []
+    for cuenta in (USUARIO, DUENO_ORIGINAL):
+        try:
+            uid, grupos = _identidad(cuenta)
+        except KeyError:
+            faltas.append(f"no existe la cuenta {cuenta}")
+            continue
+        if not _puede_atravesar(st.st_mode, st.st_uid, st.st_gid, texto_acl, uid=uid, nombre=cuenta,
+                                grupos=grupos, ignorar_otros=ignorar_otros):
+            faltas.append(f"{cuenta} no puede atravesar la raíz" + (" sin el bit de otros" if ignorar_otros else ""))
+    return faltas
+
+
 def _permiso_efectivo(texto_acl: str, *, default: bool, tipo: str, calificador: str) -> int:
     entrada = _permisos_de(texto_acl, default, tipo, calificador)
     if entrada is None:
@@ -338,6 +416,9 @@ def _procesar_directorio(fd_path: int, ruta: str, st: os.stat_result, *, accion:
     if accion == "deshacer":
         _deshacer_objeto(fd_path, ruta, resultado)
         return
+    if accion == "previo":
+        _revisar_previo_objeto(fd_path, ruta, resultado)
+        return
     _revisar_o_mutar_directorio(fd_path, ruta, st, mutar=(accion == "aplicar"), resultado=resultado)
 
 
@@ -348,6 +429,9 @@ def _procesar_archivo(fd_path: int, ruta: str, st: os.stat_result, *, accion: st
         return
     if accion == "deshacer":
         _deshacer_objeto(fd_path, ruta, resultado)
+        return
+    if accion == "previo":
+        _revisar_previo_objeto(fd_path, ruta, resultado)
         return
     _revisar_o_mutar_archivo(fd_path, ruta, st, mutar=(accion == "aplicar"), resultado=resultado)
 
@@ -411,34 +495,94 @@ def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado
             os.close(fd_path)
 
 
-def _revisar_o_mutar_raiz(fd_raiz: int, ruta: str, *, mutar: bool, resultado: Resultado) -> None:
-    """La raíz del workspace (el padre de proyectos/) es la barrera de toda la cadena: si
-    tiene algún bit para otros, el cierre de proyectos/ depende de un solo bit que nadie
-    vigila. Solo se mira/quita `otros`: ni el dueño ni el grupo de la raíz se tocan (la
-    raíz no es de este guion), ni sus otras entradas ACL."""
+def _abrir_raiz_seguro(ruta_raiz: str) -> int:
+    """MAJOR-1: abre la raíz del workspace recorriendo cada componente DESDE `/` por descriptor, con
+    O_NOFOLLOW|O_DIRECTORY|O_PATH. Un symlink en cualquier tramo (la raíz o un padre) da error, nunca se
+    sigue: validar por nombre y abrir después deja una ventana en la que quien pueda renombrar en el
+    directorio padre (jaxsvc puede en /srv/jax-data) pone un symlink, y una mutación de root caería fuera
+    del árbol. Sobre el descriptor devuelto se hace TODO (fstat, getfacl, fchmod por /proc/self/fd)."""
+    partes = [p for p in os.path.abspath(ruta_raiz).split("/") if p]
+    fd = os.open("/", os.O_PATH | os.O_DIRECTORY)
+    try:
+        for parte in partes:
+            try:
+                siguiente = os.open(parte, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError as exc:
+                raise ErrorPermisosProyectos(
+                    f"{ruta_raiz}: no se pudo abrir {parte!r} sin seguir symlinks ({exc.strerror}) -- "
+                    "es (o cuelga de) un symlink, o cambió mientras se validaba; no se toca nada"
+                ) from exc
+            os.close(fd)
+            fd = siguiente
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _revisar_previo_objeto(fd_path: int, ruta: str, resultado: Resultado) -> None:
+    """Pasada de solo lectura previa a --aplicar: lo que obliga a fallar cerrado ANTES de mutar nada."""
+    try:
+        faltas = _faltas_entradas_ajenas(_getfacl(fd_path))
+    except ErrorPermisosProyectos as exc:
+        faltas = [f"no se pudo leer la ACL: {exc}"]
+    if faltas:
+        resultado.no_cumple.append(f"{ruta}: {'; '.join(faltas)}")
+
+
+def _revisar_o_mutar_raiz(fd_raiz: int, ruta: str, *, modo: str, resultado: Resultado) -> None:
+    """La raíz del workspace (el padre de proyectos/) es la barrera de toda la cadena: si tiene algún bit para
+    otros, el cierre de proyectos/ depende de un solo bit que nadie vigila -- y si jaxsvc o fruiz no pueden
+    atravesarla sin ese bit, quitarlo los deja fuera. Solo se quita `otros`: ni el dueño ni el grupo de la raíz
+    se tocan (la raíz no es de este guion), ni sus otras entradas ACL. `modo`: "verificar", "aplicar" o
+    "previo" (solo lectura, lo que --aplicar exige ANTES de mutar)."""
     st = os.fstat(fd_raiz)
-    if mutar and st.st_mode & stat.S_IRWXO:
-        os.fchmod(fd_raiz, stat.S_IMODE(st.st_mode) & ~stat.S_IRWXO)
-        st = os.fstat(fd_raiz)
+    etiqueta = f"{ruta} (raíz del workspace)"
     try:
         texto_acl = _getfacl(fd_raiz)
     except ErrorPermisosProyectos as exc:
-        resultado.no_cumple.append(f"{ruta} (raíz del workspace): no se pudo leer la ACL: {exc}")
+        resultado.no_cumple.append(f"{etiqueta}: no se pudo leer la ACL: {exc}")
         texto_acl = ""
-    faltas = _faltas_de_otros(st, texto_acl, con_default=False)
+
+    if modo == "previo":
+        faltas = _faltas_paso_por_la_raiz(st, texto_acl, ignorar_otros=True) + _faltas_entradas_ajenas(texto_acl)
+        if faltas:
+            resultado.no_cumple.append(f"{etiqueta}: {'; '.join(faltas)}")
+        return
+
+    if modo == "aplicar" and st.st_mode & stat.S_IRWXO:
+        fd_real = _reabrir_real(fd_raiz, os.O_RDONLY)
+        try:
+            os.fchmod(fd_real, stat.S_IMODE(st.st_mode) & ~stat.S_IRWXO)
+        finally:
+            os.close(fd_real)
+        st = os.fstat(fd_raiz)
+        texto_acl = _getfacl(fd_raiz)
+    faltas = (_faltas_de_otros(st, texto_acl, con_default=False)
+              + _faltas_paso_por_la_raiz(st, texto_acl, ignorar_otros=False)
+              + _faltas_entradas_ajenas(texto_acl))
     if faltas:
-        resultado.no_cumple.append(f"{ruta} (raíz del workspace): {'; '.join(faltas)}")
+        resultado.no_cumple.append(f"{etiqueta}: {'; '.join(faltas)}")
 
 
 def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_de_raiz=None) -> Resultado:
+    """`accion`: verificar | aplicar | deshacer | previo. `aplicar` empieza por una pasada `previo` (solo
+    lectura) y FALLA CERRADO sin mutar nada si jaxsvc o fruiz quedarían sin paso por la raíz o hay entradas
+    ACL nombradas ajenas: un cambio privilegiado sin esa comprobación puede dejar el sistema peor."""
+    if accion == "aplicar":
+        previo = _recorrer(proyectos, accion="previo", hook_antes_de_raiz=hook_antes_de_raiz)
+        if previo.no_cumple:
+            raise ErrorPermisosProyectos(
+                "--aplicar falla cerrado y no cambió nada; una persona tiene que resolver esto antes:\n  "
+                + "\n  ".join(previo.no_cumple)
+            )
     resultado = Resultado()
     if hook_antes_de_raiz is not None:
         hook_antes_de_raiz(str(proyectos.parent))  # solo pruebas: la ventana entre validar y abrir la raiz
-    fd_raiz = os.open(str(proyectos.parent), os.O_RDONLY | os.O_DIRECTORY)
+    fd_raiz = _abrir_raiz_seguro(str(proyectos.parent))
     try:
-        if accion in ("verificar", "aplicar"):
-            _revisar_o_mutar_raiz(fd_raiz, str(proyectos.parent), mutar=(accion == "aplicar"),
-                                  resultado=resultado)
+        if accion in ("verificar", "aplicar", "previo"):
+            _revisar_o_mutar_raiz(fd_raiz, str(proyectos.parent), modo=accion, resultado=resultado)
         fd_proyectos = _abrir_o_path(proyectos.name, fd_raiz)
         if fd_proyectos is None:
             raise ErrorPermisosProyectos(f"{proyectos} desapareció justo antes de abrirlo")
@@ -516,6 +660,7 @@ def _revisar_o_mutar_directorio(fd_path: int, ruta: str, st: os.stat_result, *, 
         if _permiso_efectivo(texto_acl, default=True, tipo="group", calificador="") & 0o7 != 0o7:
             faltas.append("ACL por defecto efectiva insuficiente para group:: (grupo dueño)")
         faltas.extend(_faltas_de_otros(st, texto_acl, con_default=True))
+        faltas.extend(_faltas_entradas_ajenas(texto_acl))
     elif st.st_mode & stat.S_IRWXO:
         faltas.extend(_faltas_de_otros(st, "", con_default=True))
 
@@ -526,11 +671,9 @@ def _revisar_o_mutar_directorio(fd_path: int, ruta: str, st: os.stat_result, *, 
 def _mutar_directorio(fd_path: int, ruta: str, resultado: Resultado) -> None:
     uid = pwd.getpwnam(USUARIO).pw_uid
     gid = grp.getgrnam(GRUPO).gr_gid
-    fd_real = _reabrir_real(fd_path, os.O_RDONLY)
-    try:
-        os.fchown(fd_real, uid, gid)
-    finally:
-        os.close(fd_real)
+    # Se mira ANTES del chown: el kernel borra setuid/setgid de lo que cambia de dueño y el reporte de
+    # "bits espurios quitados" no los vería.
+    tenia_espurios = bool(os.fstat(fd_path).st_mode & (stat.S_ISUID | stat.S_ISVTX))
 
     # m6 (ronda 4): g::rwX (la entrada de grupo DUEÑO, sin nombre) además de
     # g:{GRUPO}:rwX (la entrada NOMBRADA) -- antes sólo se tocaba la nombrada, y como
@@ -545,17 +688,25 @@ def _mutar_directorio(fd_path: int, ruta: str, resultado: Resultado) -> None:
     _setfacl(fd_path, entrada)
     _setfacl(fd_path, entrada, default=True)
 
+    # El cambio de dueño va DESPUÉS de las ACL (MINOR-1): con `chown` primero, quien era dueño y solo
+    # tenía los bits de dueño (un 0600 de fruiz) se quedaba sin acceso hasta que llegaba el setfacl; con las
+    # entradas nombradas ya puestas, ninguna cuenta pierde el paso en ningún instante.
+    fd_real = _reabrir_real(fd_path, os.O_RDONLY)
+    try:
+        os.fchown(fd_real, uid, gid)
+    finally:
+        os.close(fd_real)
+
     fd_real = _reabrir_real(fd_path, os.O_RDONLY)
     try:
         st_ahora = os.fstat(fd_real)
-        tenia_espurios = bool(st_ahora.st_mode & (stat.S_ISUID | stat.S_ISVTX))
         # 2770: setgid sí, setuid/sticky no, y ningún bit para otros (fchmod con ACL pone la
         # máscara en rwx, que es lo que ya tenía).
         nuevo_modo = stat.S_ISGID | 0o770
         if nuevo_modo != stat.S_IMODE(st_ahora.st_mode):
             os.fchmod(fd_real, nuevo_modo)
-            if tenia_espurios:
-                resultado.bits_espurios_quitados.append(ruta)
+        if tenia_espurios:
+            resultado.bits_espurios_quitados.append(ruta)
     finally:
         os.close(fd_real)
 
@@ -599,6 +750,7 @@ def _revisar_o_mutar_archivo(fd_path: int, ruta: str, st: os.stat_result, *, mut
         if _permiso_efectivo(texto_acl, default=False, tipo="group", calificador="") & 0o6 != 0o6:
             faltas.append("ACL de acceso efectiva insuficiente para group:: (grupo dueño)")
         faltas.extend(_faltas_de_otros(st, texto_acl, con_default=False))
+        faltas.extend(_faltas_entradas_ajenas(texto_acl))
     elif st.st_mode & stat.S_IRWXO:
         faltas.extend(_faltas_de_otros(st, "", con_default=False))
 
@@ -609,20 +761,24 @@ def _revisar_o_mutar_archivo(fd_path: int, ruta: str, st: os.stat_result, *, mut
 def _mutar_archivo(fd_path: int, ruta: str, resultado: Resultado) -> None:
     uid = pwd.getpwnam(USUARIO).pw_uid
     gid = grp.getgrnam(GRUPO).gr_gid
+    # Antes del chown, que borra setuid/setgid (ver _mutar_directorio).
+    tenia_especiales = bool(os.fstat(fd_path).st_mode & _ESPECIALES)
+
+    _setfacl(fd_path, f"u:{USUARIO}:rwX,g:{GRUPO}:rwX,g::rwX,m::rwx,o::---")
+
+    # Dueño DESPUÉS de la ACL (MINOR-1): ver _mutar_directorio.
     fd_real = _reabrir_real(fd_path, os.O_RDONLY)
     try:
         os.fchown(fd_real, uid, gid)
     finally:
         os.close(fd_real)
 
-    _setfacl(fd_path, f"u:{USUARIO}:rwX,g:{GRUPO}:rwX,g::rwX,m::rwx,o::---")
-
     fd_real = _reabrir_real(fd_path, os.O_RDONLY)
     try:
         st_ahora = os.fstat(fd_real)
         # 0660 (spec madre §5): sin bits especiales ni para otros; con ACL, fchmod deja la
         # máscara en rw-, que es lo que las entradas de jaxsvc y fruiz (rw) ya necesitan.
-        if st_ahora.st_mode & _ESPECIALES:
+        if tenia_especiales or st_ahora.st_mode & _ESPECIALES:
             resultado.bits_espurios_quitados.append(ruta)
         if stat.S_IMODE(st_ahora.st_mode) != 0o660:
             os.fchmod(fd_real, 0o660)
@@ -910,6 +1066,68 @@ def _hacer_respaldo() -> Path:
     return Path(ruta_texto)
 
 
+def _registro_de_la_raiz(proyectos: Path) -> bytes:
+    """MINOR-3: modo y ACL de la raíz del workspace, como comentarios `# raiz-...` al principio del respaldo
+    (antes del primer `# file:`, así que `_parsear_respaldo` los ignora). La ruta va como JSON: un nombre con
+    saltos de línea no puede fabricar líneas."""
+    fd = _abrir_raiz_seguro(str(proyectos.parent))
+    try:
+        st = os.fstat(fd)
+        acl = _getfacl(fd)
+    finally:
+        os.close(fd)
+    lineas = [f"# raiz-ruta: {json.dumps(str(proyectos.parent))}", f"# raiz-modo: {stat.S_IMODE(st.st_mode):04o}"]
+    lineas += [f"# raiz-acl: {l}" for l in acl.splitlines()]
+    return ("\n".join(lineas) + "\n\n").encode("utf-8")
+
+
+def _restaurar_raiz_desde_respaldo(proyectos: Path) -> tuple[bool, str]:
+    """MINOR-3: `--deshacer` devuelve a la raíz el MODO que guardó el respaldo forense más reciente que sea
+    de confianza: regular, de root (RUTA_RESPALDOS es root:root 0700), con el marcador de fin, con la ruta
+    de ESTA raíz y un modo de cuatro dígitos octales. Solo se restauran los bits de permiso (0777): ni dueño,
+    ni grupo, ni ACL, ni bits especiales. Un respaldo forjado, de otra ruta o incompleto no se obedece.
+    Devuelve (restaurada, detalle)."""
+    raiz = os.path.abspath(str(proyectos.parent))
+    try:
+        candidatos = sorted(
+            (c for c in RUTA_RESPALDOS.glob("proyectos-*.acl")),
+            key=lambda c: os.lstat(c).st_mtime, reverse=True,
+        )
+    except OSError as exc:
+        return False, f"no se pudo listar {RUTA_RESPALDOS}: {exc}"
+    for ruta in candidatos:
+        try:
+            st = os.lstat(ruta)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != 0:
+                continue
+            texto = ruta.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not texto.endswith(_MARCADOR_FIN_RESPALDO):
+            continue
+        m_ruta = re.search(r"^# raiz-ruta: (.*)$", texto, re.MULTILINE)
+        m_modo = re.search(r"^# raiz-modo: ([0-7]{4})$", texto, re.MULTILINE)
+        if not (m_ruta and m_modo):
+            continue
+        try:
+            if json.loads(m_ruta.group(1)) != raiz:
+                continue
+        except json.JSONDecodeError:
+            continue
+        modo = int(m_modo.group(1), 8) & 0o777
+        fd = _abrir_raiz_seguro(raiz)
+        try:
+            fd_real = _reabrir_real(fd, os.O_RDONLY)
+            try:
+                os.fchmod(fd_real, modo)
+            finally:
+                os.close(fd_real)
+        finally:
+            os.close(fd)
+        return True, f"modo {modo:04o} restaurado desde {ruta}"
+    return False, f"ningún respaldo de {RUTA_RESPALDOS} es de confianza y registra la raíz {raiz}"
+
+
 def _generar_respaldo_validado(proyectos: Path) -> Path:
     """El núcleo real de --nucleo-respaldo, separado de la fijación de RAIZ que hace
     _cmd_nucleo_respaldo() -- así los tests pueden ejercitar esta lógica (m1, m2, ronda
@@ -924,6 +1142,8 @@ def _generar_respaldo_validado(proyectos: Path) -> Path:
     ok = False
     try:
         with os.fdopen(fd, "wb") as f:
+            f.write(_registro_de_la_raiz(proyectos))
+            f.flush()
             r = subprocess.run(["getfacl", "-R", "-p", str(proyectos)], stdout=f, stderr=subprocess.PIPE)
             if r.returncode == 0:
                 # m2 (ronda 4): marcador de fin escrito por ESTE proceso, como paso
@@ -1125,6 +1345,13 @@ def _cmd_deshacer() -> int:
     for ruta in datos.get("excluidos", []):
         print(f"carpeta oculta excluida (sin tocar): {ruta}")
     print(f"Deshechos: {datos['dirs_procesados']} directorios, {datos['archivos_procesados']} archivos.")
+    raiz = datos.get("raiz", {})
+    if raiz.get("restaurada"):
+        print(f"Raíz del workspace: {raiz['detalle']}")
+    else:
+        print(f"Raíz del workspace: NO restaurada ({raiz.get('detalle', 'sin dato')}).")
+    print("AVISO: tras --deshacer, proyectos/ vuelve a tener o::r-x (0775/0664): el cierre depende otra vez de "
+          "la raíz del workspace. Reaplicar con --aplicar cuando se quiera cerrarlo.")
 
     if datos["hardlinks_rechazados"]:
         print("--deshacer encontró hardlinks -- no se tocaron, y el resultado es un fallo.", file=sys.stderr)
@@ -1166,12 +1393,14 @@ def _cmd_nucleo_deshacer() -> int:
         return 2
 
     resultado = _recorrer(proyectos, accion="deshacer")
+    raiz_ok, raiz_detalle = _restaurar_raiz_desde_respaldo(proyectos)
     print(json.dumps({
         "dirs_procesados": resultado.dirs_procesados,
         "archivos_procesados": resultado.archivos_procesados,
         "symlinks_saltados": resultado.symlinks_saltados,
         "hardlinks_rechazados": resultado.hardlinks_rechazados,
         "excluidos": resultado.excluidos,
+        "raiz": {"restaurada": raiz_ok, "detalle": raiz_detalle},
     }))
     return 0
 
@@ -1189,6 +1418,10 @@ uso: permisos_proyectos.py [--verificar [RAIZ] | --aplicar | --deshacer]
                        defecto, 2770/0660 y sin ningún bit para otros (también quita
                        los de la raíz del workspace, sin cambiar su dueño ni grupo). Sólo actúa sobre la RAIZ configurada (nunca acepta
                        una RAIZ distinta) -- necesita el GO de Fernando en producción.
+  --permitir-entrada=NOMBRE
+                       Solo con --verificar: declara conocida una cuenta con ACL
+                       nombrada (por defecto solo jaxsvc y fruiz; cualquier otra es
+                       NO CUMPLE y --aplicar falla cerrado, sin borrarla).
   --deshacer           DETERMINISTA, sin argumentos: lleva el árbol a
                        {DUENO_ORIGINAL}:{GRUPO} 0775 (directorios) / 0664 (archivos),
                        sin ninguna ACL -- el estado medido con `stat` real en
