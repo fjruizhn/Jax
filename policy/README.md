@@ -68,7 +68,7 @@ policy/
   rules/                una regla por archivo, {ID}-{slug}.yaml
   vocabulary/
     closed_vocabulary.yaml   vocabulario cerrado real (§3.1.5) — poblado desde el sistema
-    predicates.yaml          los ocho predicados cerrados (§3.1.3)
+    predicates.yaml          predicados cerrados (§3.1.3 + enmienda F2-E-SR-001)
   templates/
     render_templates.yaml    plantillas de renderer por predicado (§3.1.6)
   generated/

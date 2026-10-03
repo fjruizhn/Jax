@@ -161,6 +161,11 @@ class GovernedRenderer:
         shown: list[str] = []
         for block in envelope.content_blocks:
             if block.kind is ContentBlockKind.NARRATIVE_TEXT:
+                # A whole JSON payload can encode an accredited runtime
+                # proposition without using the deterministic prose grammar.
+                # It must use the claim/receipt path just as TOOL_DATA does.
+                if context.domain_registry.specification.structured_runtime_status_predicate(block.payload) is not None:
+                    return self._safe(envelope, self.unavailable_text)
                 hit = context.domain_registry.hit(block.payload)
                 if hit is not None:
                     return self._safe(envelope, self.unavailable_text)
@@ -186,7 +191,12 @@ class GovernedRenderer:
                 fragments.append(f"{_safe_payload(block.speaker or '')} says: {_safe_payload(block.payload)}")
                 shown.append(claim.claim_id)
             elif block.kind is ContentBlockKind.TOOL_DATA:
-                fragments.append(_safe_payload(json.dumps(_plain(block.payload), ensure_ascii=False, sort_keys=True)))
+                if context.domain_registry.specification.runtime_status_tool_data_predicate(_plain(block.payload)) is not None:
+                    return self._safe(envelope, self.unavailable_text)
+                serialized_tool_data = json.dumps(_plain(block.payload), ensure_ascii=False, sort_keys=True)
+                if context.domain_registry.hit(serialized_tool_data) is not None:
+                    return self._safe(envelope, self.unavailable_text)
+                fragments.append(_safe_payload(serialized_tool_data))
             elif block.kind in {ContentBlockKind.SAFE_STATIC_NOTICE, ContentBlockKind.ERROR_NOTICE}:
                 notice = context.notices.get(block.notice_id or "")
                 if notice is None:

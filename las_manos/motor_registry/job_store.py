@@ -12,46 +12,133 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import json
+import math
+import os
 import threading
 import time
 import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from pydantic import ValidationError
 
 from motor_registry.models import JobStatus, MotorJobView
 
 _JOB_VIEW_FIELDS = set(MotorJobView.model_fields.keys())
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+@dataclass(frozen=True)
+class AuthoritativeJobSnapshot:
+    view: MotorJobView
+    observed_at: datetime
+
+
 class JobStore:
     def __init__(self, path: str) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._index: dict[str, dict] = {}   # job_id → latest state dict
+        self._history_integrity = True
         self._load()
 
     def _load(self) -> None:
         """Reconstruye el índice desde el JSONL al arrancar."""
         if not self._path.exists():
             return
-        with open(self._path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
+        with open(self._path, "rb") as f:
+            for raw_line in f:
+                if not raw_line.strip():
+                    continue
+                if not raw_line.endswith(b"\n"):
+                    # Every store-owned append is newline-terminated. A
+                    # complete-looking final JSON object can still be a
+                    # partial write if its record terminator never landed.
+                    self._history_integrity = False
+                try:
+                    line = raw_line.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    self._history_integrity = False
+                    continue
                 if not line:
                     continue
                 try:
                     event = json.loads(line)
+                    if (not isinstance(event, dict) or not isinstance(event.get("job_id"), str)
+                            or not event["job_id"] or event.get("status") not in {s.value for s in JobStatus}):
+                        self._history_integrity = False
+                        continue
+                    try:
+                        MotorJobView(**{k: v for k, v in event.items() if k in _JOB_VIEW_FIELDS})
+                    except (ValidationError, TypeError, ValueError):
+                        self._history_integrity = False
+                        continue
+                    timestamps = ("created_at", "started_at", "finished_at", "status_updated_at")
+                    if any(event.get(name) is not None and (
+                            isinstance(event.get(name), bool)
+                            or not isinstance(event.get(name), (int, float))
+                            or not math.isfinite(event[name]) or event[name] < 0
+                    ) for name in timestamps):
+                        self._history_integrity = False
+                        continue
                     self._index[event["job_id"]] = event
-                except (json.JSONDecodeError, KeyError):  # fail-soft: linea de log JSONL corrupta se descarta; el peor caso es un job ausente del indice (falla cerrado: caller sigue esperando), no uno que aparente exito
-                    pass  # línea corrupta — ignorar silenciosamente
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    # Preserve best-effort operational polling, but never let
+                    # an incomplete history authorize current-truth evidence.
+                    self._history_integrity = False
 
-    def _append(self, event: dict) -> None:
+    def source_configuration(self) -> dict[str, str]:
+        """Non-secret identity of this fixed authoritative JSONL source."""
+        return {
+            "store_contract": "motor-job-store-v1",
+            "source_id": str(self._path.resolve()),
+            "event_format": "motor-job-event-v1",
+            "durability": "append-flush-fsync-v1",
+        }
+
+    @property
+    def authoritative_history_intact(self) -> bool:
         with self._lock:
-            line = json.dumps(event, ensure_ascii=False) + "\n"
+            return self._history_integrity
+
+    def authoritative_snapshot(self, job_id: str) -> AuthoritativeJobSnapshot | None:
+        """One locked, integrity-gated status/scope observation for F2-B."""
+        with self._lock:
+            if not self._history_integrity:
+                return None
+            state = self._index.get(job_id)
+            if state is None:
+                return None
+            snapshot = dict(state)
+            observed_at = _utc_now()
+        view = MotorJobView(**{k: v for k, v in snapshot.items() if k in _JOB_VIEW_FIELDS})
+        return AuthoritativeJobSnapshot(view=view, observed_at=observed_at)
+
+    def _append_locked(self, event: dict) -> None:
+        line = json.dumps(event, ensure_ascii=False) + "\n"
+        existed = self._path.exists()
+        try:
             with open(self._path, "a", encoding="utf-8") as f:
-                f.write(line)
-            self._index[event["job_id"]] = event
+                if f.write(line) != len(line):
+                    raise OSError("short append to Motor JobStore")
+                f.flush()
+                os.fsync(f.fileno())
+            if not existed:
+                directory_fd = os.open(self._path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        except OSError:
+            # A partial/uncertain append can no longer authorize a status read.
+            self._history_integrity = False
+            raise
+        self._index[event["job_id"]] = event
 
     def create(
         self,
@@ -63,6 +150,9 @@ class JobStore:
         prompt: str,
         recursion_depth: int,
         pipeline_id: str | None = None,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        project_id: str | None = None,
         job_id: str | None = None,
     ) -> str:
         # Governed dispatch reserves its identifier before the B6/B7 atomic
@@ -70,8 +160,6 @@ class JobStore:
         # Motor job have one exact, durable binding.  Ordinary callers still
         # receive a store-generated identifier.
         job_id = job_id or str(uuid.uuid4())
-        if job_id in self._index:
-            raise KeyError(f"job_id ya existe: {job_id}")
         event: dict[str, Any] = {
             "job_id": job_id,
             "status": JobStatus.PENDING.value,
@@ -84,6 +172,7 @@ class JobStore:
             "created_at": time.time(),
             "started_at": None,
             "finished_at": None,
+            "status_updated_at": None,
             "error": None,
             "result_summary": None,
             # Task 7b (2026-09-18, historial-y-arreglos-de-pipeline): puesto
@@ -94,15 +183,27 @@ class JobStore:
             # valor sobrevive a cada escritura posterior sin que nadie tenga
             # que repetirlo.
             "pipeline_id": pipeline_id,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "project_id": project_id,
         }
-        self._append(event)
+        with self._lock:
+            if job_id in self._index:
+                raise KeyError(f"job_id ya existe: {job_id}")
+            self._append_locked(event)
         return job_id
 
     def update(self, job_id: str, **kwargs: Any) -> None:
-        if job_id not in self._index:
-            raise KeyError(f"job_id desconocido: {job_id}")
-        event = {**self._index[job_id], **kwargs, "job_id": job_id}
-        self._append(event)
+        if {"tenant_id", "user_id", "project_id"} & set(kwargs):
+            raise ValueError("ownership fields are immutable")
+        with self._lock:
+            if job_id not in self._index:
+                raise KeyError(f"job_id desconocido: {job_id}")
+            prior = self._index[job_id]
+            event = {**prior, **kwargs, "job_id": job_id}
+            if "status" in kwargs and getattr(kwargs["status"], "value", kwargs["status"]) != prior.get("status"):
+                event["status_updated_at"] = time.time()
+            self._append_locked(event)
 
     def write_result(self, job_id: str, content: str) -> str:
         """Guarda la salida completa del motor en un archivo propio, junto al
@@ -119,10 +220,12 @@ class JobStore:
         return str(path)
 
     def get(self, job_id: str) -> MotorJobView | None:
-        state = self._index.get(job_id)
-        if state is None:
-            return None
-        return MotorJobView(**{k: v for k, v in state.items() if k in _JOB_VIEW_FIELDS})
+        with self._lock:
+            state = self._index.get(job_id)
+            if state is None:
+                return None
+            snapshot = dict(state)
+        return MotorJobView(**{k: v for k, v in snapshot.items() if k in _JOB_VIEW_FIELDS})
 
     def ids_en_estado(self, *estados: str) -> list[str]:
         """job_id de todo lo que esté en alguno de `estados` ahora mismo,
@@ -132,4 +235,5 @@ class JobStore:
         "en vuelo" (`pending`/`running`) contra tareas realmente vivas --
         un consumidor que reinicia el proceso necesita poder preguntar
         "¿qué quedó a medias?" sin asomarse a `_index` directo."""
-        return [job_id for job_id, evento in self._index.items() if evento.get("status") in estados]
+        with self._lock:
+            return [job_id for job_id, evento in self._index.items() if evento.get("status") in estados]

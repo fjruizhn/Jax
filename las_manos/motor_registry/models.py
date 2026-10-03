@@ -105,6 +105,7 @@ class MotorJobView(BaseModel):
     created_at: float
     started_at: float | None = None
     finished_at: float | None = None
+    status_updated_at: float | None = None
     error: str | None = None
     result_summary: str | None = None     # primeros 200 caracteres
     # Salida completa (2026-09-12): antes no se guardaba en ningún lado y los
@@ -126,6 +127,11 @@ class MotorJobView(BaseModel):
     # afuera) -- sin este campo, JobStore.get() lo filtraría en silencio
     # igual que filtraba `model` antes de la ronda de arreglo 1 de Task 1.
     pipeline_id: str | None = None
+    # F2-E: immutable trusted dispatch ownership.  Legacy JSONL events omit
+    # these fields and therefore cannot accredit a current status claim.
+    tenant_id: str | None = None
+    user_id: str | None = None
+    project_id: str | None = None
 
 
 class FacetAuthorizeRequest(BaseModel):

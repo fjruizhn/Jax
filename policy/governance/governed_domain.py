@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import lru_cache
+import json
 import re
 import unicodedata
 from types import MappingProxyType
@@ -15,18 +16,48 @@ from typing import Mapping
 
 from .response import GovernanceContractError, _text
 
-GOVERNED_DOMAIN_SPEC_VERSION = "f2-c.domain.2"
-GOVERNED_RENDERER_API_VERSION = "f2-c.renderer.2"
+GOVERNED_DOMAIN_SPEC_VERSION = "f2-c.domain.5"
+GOVERNED_RENDERER_API_VERSION = "f2-c.renderer.3"
 GOVERNED_ENVELOPE_SCHEMA_VERSIONS = frozenset({"f2-c.1"})
 
+# Structured payload inspection is deliberately small and bounded. It exists
+# only to prevent the four registered runtime-status propositions from being
+# encoded into otherwise ungoverned content; it is not a general JSON parser
+# or natural-language classifier.
+_STRUCTURED_STATUS_MAX_STRING_CHARS = 65_536
+_STRUCTURED_STATUS_MAX_JSON_DECODE_LAYERS = 2
+_STRUCTURED_STATUS_MAX_NESTING_DEPTH = 32
+_STRUCTURED_STATUS_MAX_NODES = 1_024
+
+# Structured payloads are machine-shaped data, not natural-language prose.
+# These closed values deliberately do not reuse ``_CANONICAL_STATUS_ALIASES``:
+# aliases such as "finished", "healthy", or "operational" belong only to
+# deterministic narrative grammar and cannot identify an authoritative source
+# payload. Tests tripwire the Motor/Jacobs values against their source enums.
+_STRUCTURED_JOB_STATUS_VALUES = frozenset({
+    "pending", "running", "completed", "failed", "cancelled", "cancelling",
+    "rejected", "tools_requested",
+})
+_STRUCTURED_PIPELINE_STATUS_VALUES = frozenset({
+    "pending", "running", "completed", "failed", "aborted", "interrupted",
+    "expired", "disputed", "discarded", "hidden",
+})
+_STRUCTURED_FACET_RUNTIME_STATUS_VALUES = frozenset({"idle", "thinking", "error", "offline"})
+_STRUCTURED_ENGINE_STATUS_VALUES = frozenset({"alive", "down"})
+_STRUCTURED_ENGINE_HEALTH_NAME = "las_manos"
+
 _CANONICAL_STATUS_ALIASES = MappingProxyType({
-    "healthy": ("healthy", "up", "available", "operational", "sano", "saludable", "activo", "disponible", "funcionando"),
+    "healthy": ("healthy", "alive", "up", "available", "operational", "sano", "saludable", "activo", "disponible", "funcionando"),
     "exists": ("exists", "exist", "present", "existe", "existen"),
     "completed": ("completed", "finished", "succeeded", "terminó", "termino", "finalizó", "finalizo", "correctamente"),
     "down": ("down", "unhealthy", "unavailable", "caído", "caido", "inactivo"),
+    # Closed runtime vocabularies. They are interpreted only by the explicit
+    # JOB_STATUS / PIPELINE_STATUS / FACET_RUNTIME_STATUS grammars below;
+    # ENGINE_STATUS keeps its narrower health-check vocabulary.
+    "runtime": ("pending", "running", "failed", "aborted", "interrupted", "expired", "disputed", "discarded", "hidden", "idle", "thinking", "error", "offline", "cancelling", "cancelled", "rejected", "tools_requested"),
 })
 _CANONICAL_LOCALE_ALIASES = MappingProxyType({
-    "en": ("is", "are", "exists", "exist", "available", "healthy", "up", "down", "completed"),
+    "en": ("is", "are", "exists", "exist", "available", "healthy", "alive", "up", "down", "completed"),
     "es": ("es", "está", "esta", "son", "existe", "existen", "disponible", "saludable", "sano", "caído", "caido", "terminó", "termino"),
 })
 
@@ -120,15 +151,22 @@ class GovernedDomainSpecification:
         subjects = aliases + resources
         subject = "|".join(re.escape(x) for x in subjects) if subjects else r"[\w./:-]+"
         status = "|".join(re.escape(x) for values in self.status_aliases.values() for x in values)
+        engine_status = "|".join(re.escape(x) for key in ("healthy", "down") for x in self.status_aliases.get(key, ()))
         locale_words = {word for aliases in self.locale_aliases.values() for word in aliases}
         copula_words = sorted(locale_words & {"is", "are", "es", "está", "esta", "son"})
         copula = r"(?:" + "|".join(re.escape(x) for x in copula_words) + r"|was|were|isn't|isnt|is\s+not|are\s+not|no\s+está|no\s+esta|no\s+es)"
         exists = r"(?:exists|exist|does\s+not\s+exist|doesn't\s+exist|no\s+existe|no\s+existen|existe|existen)"
         patterns = (
-            ("ENGINE_STATUS", rf"\b(?:{subject})\b\s+{copula}\s+(?:{status})\b"),
+            ("ENGINE_STATUS", rf"\b(?:{subject})\b\s+{copula}\s+(?:{engine_status})\b"),
             ("FILE_EXISTS", rf"\b(?:the\s+)?(?:file|archivo|path|ruta)\s+(?:{subject}|/[^\s]+)\s+{exists}\b|\b(?:{subject}|/[^\s]+)\s+{exists}\b"),
             ("FACET_EXISTS", rf"\b(?:facet|faceta)\s+(?:{subject})\s+{exists}\b"),
             ("JOB_STATUS", rf"\b(?:job|trabajo)\s+[^\s]+\s+(?:(?:(?:is|was|está|esta|fue|ha)\s+)?(?:{status})|no\s+(?:{status}))\b"),
+            ("PIPELINE_STATUS", rf"\b(?:pipeline|tubería)\s+[^\s]+\s+(?:(?:(?:is|was|está|esta|fue|ha)\s+)?(?:{status})|no\s+(?:{status}))\b"),
+            ("FACET_RUNTIME_STATUS", rf"\b(?:facet|faceta)\s+[^\s]+\s+{copula}\s+(?:{status})\b"),
+            # Exact server-owned FACET_RUNTIME_STATUS template wording in
+            # Spanish and English. This closes the free-narrative bypass for
+            # the approved effective-rendering sentence.
+            ("FACET_RUNTIME_STATUS", rf"\bjax\s+platform\s+(?:(?:actualmente|currently)\s+)?(?:marca|marks)\s+(?:la\s+)?(?:faceta|facet)\s+[^\s]+\s+(?:con\s+estado\s+de\s+ejecuci[oó]n|with\s+runtime\s+state)\s+(?:{status})\b"),
             ("CAPABILITY_AVAILABLE", rf"\b(?:capability|capacidad)\s+(?:{subject})\s+{copula}\s+(?:{status})\b"),
             ("CAPABILITY_AVAILABLE", rf"\b(?:the\s+)?(?:capability|capacidad)\s+{copula}\s+(?:{status})\b"),
             ("CONFIG_VALUE", r"\b(?:config(?:uration)?|configuración)\s+(?:value|valor)\b"),
@@ -143,6 +181,124 @@ class GovernedDomainSpecification:
             if predicate in enabled and re.search(pattern, plain, flags=re.IGNORECASE):
                 return predicate
         return None
+
+    def runtime_status_tool_data_predicate(self, value: object) -> str | None:
+        """Recognize governed runtime-status shapes inside TOOL_DATA.
+
+        The same bounded structural grammar is also used for an entire
+        NARRATIVE_TEXT payload. Keeping one implementation prevents JSON
+        encoding from creating a second status-egress path.
+        """
+        return self.structured_runtime_status_predicate(value)
+
+    def structured_runtime_status_predicate(self, value: object) -> str | None:
+        """Return a governed predicate or a fail-closed structural marker.
+
+        Only JSON objects/lists and up to two JSON-string decoding layers are
+        inspected. Ordinary prose and unrelated JSON keep their existing
+        treatment. Ambiguous, malformed, or over-limit structured content is
+        withheld instead of being guessed.
+        """
+        hits: set[str] = set()
+        node_count = 0
+
+        def unique_object(pairs):
+            result = {}
+            for key, item in pairs:
+                if key in result:
+                    raise ValueError("duplicate JSON object key")
+                result[key] = item
+            return result
+
+        def parse_json_string(raw: str) -> object | None:
+            candidate = raw.lstrip()
+            if not candidate.startswith(("{", "[", '"')):
+                return None
+            if (len(raw) > _STRUCTURED_STATUS_MAX_STRING_CHARS
+                    or len(raw.encode("utf-8", errors="surrogatepass")) > _STRUCTURED_STATUS_MAX_STRING_CHARS):
+                raise OverflowError("structured status string exceeds limit")
+            # Bound nesting before handing data to the JSON decoder. Brackets
+            # occurring in a JSON string are data, not JSON structure.
+            nesting = 0
+            in_string = False
+            escaped = False
+            for character in raw:
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif character == "\\":
+                        escaped = True
+                    elif character == '"':
+                        in_string = False
+                    continue
+                if character == '"':
+                    in_string = True
+                elif character in "{[":
+                    nesting += 1
+                    if nesting > _STRUCTURED_STATUS_MAX_NESTING_DEPTH:
+                        raise OverflowError("structured status nesting exceeds limit")
+                elif character in "}]":
+                    nesting -= 1
+            try:
+                return json.loads(raw, object_pairs_hook=unique_object)
+            except (ValueError, RecursionError) as exc:
+                raise ValueError("malformed structured status JSON") from exc
+
+        def object_hits(node: Mapping[object, object]) -> set[str]:
+            if not all(isinstance(key, str) for key in node):
+                return set()
+            keys = set(node)
+            status = node.get("status")
+            if not isinstance(status, str):
+                return set()
+            # Machine payload status is exact by contract. In particular, do
+            # not accept narrative aliases or whitespace/case normalization.
+            found: set[str] = set()
+            if {"job_id", "status"}.issubset(keys) and status in _STRUCTURED_JOB_STATUS_VALUES:
+                found.add("JOB_STATUS")
+            if {"pipeline_id", "status"}.issubset(keys) and status in _STRUCTURED_PIPELINE_STATUS_VALUES:
+                found.add("PIPELINE_STATUS")
+            if {"name", "status"}.issubset(keys):
+                name = node.get("name")
+                if isinstance(name, str):
+                    if status in _STRUCTURED_FACET_RUNTIME_STATUS_VALUES:
+                        found.add("FACET_RUNTIME_STATUS")
+                    if name == _STRUCTURED_ENGINE_HEALTH_NAME and status in _STRUCTURED_ENGINE_STATUS_VALUES:
+                        found.add("ENGINE_STATUS")
+            return found
+
+        def visit(node: object, depth: int, decode_layers: int) -> None:
+            nonlocal node_count
+            if depth > _STRUCTURED_STATUS_MAX_NESTING_DEPTH:
+                raise OverflowError("structured status nesting exceeds limit")
+            node_count += 1
+            if node_count > _STRUCTURED_STATUS_MAX_NODES:
+                raise OverflowError("structured status node count exceeds limit")
+            if isinstance(node, str):
+                if decode_layers >= _STRUCTURED_STATUS_MAX_JSON_DECODE_LAYERS:
+                    return
+                decoded = parse_json_string(node)
+                if decoded is not None:
+                    visit(decoded, depth + 1, decode_layers + 1)
+                return
+            if isinstance(node, Mapping):
+                hits.update(object_hits(node))
+                for item in node.values():
+                    visit(item, depth + 1, decode_layers)
+                return
+            if isinstance(node, (list, tuple)):
+                for item in node:
+                    visit(item, depth + 1, decode_layers)
+
+        try:
+            visit(value, 0, 0)
+        except OverflowError:
+            return "OVERSIZED_STRUCTURED_TOOL_DATA"
+        except ValueError:
+            return "AMBIGUOUS_STRUCTURED_TOOL_DATA"
+        if len(hits) != 1:
+            return "AMBIGUOUS_STRUCTURED_TOOL_DATA" if hits else None
+        return next(iter(hits))
 
 
 @lru_cache(maxsize=1)
@@ -159,6 +315,8 @@ def _canonical_vocabulary():
     # Hall9000 is a registered JAX governance entity. Explicit aliases remain
     # versioned here in core alongside policy-derived entities.
     entities["hall9000"] = ("Hall9000", "Hall 9000")
+    # This fixed health source is owned by the LAS MANOS server composition.
+    entities["las_manos_health_source"] = ("LAS MANOS", "LAS_MANOS")
     resources = {path: (path,) for path in vocabulary.config_paths}
     resources.update({path: (path,) for path in ("/etc/passwd", "policy/", "las_manos/")})
     return predicates, entities, resources

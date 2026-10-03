@@ -22,7 +22,9 @@ class ReferenceValidationStatus(str,Enum):
 class ConflictPolicy(str,Enum):
     SINGLE_SOURCE_REQUIRED="SINGLE_SOURCE_REQUIRED"; ALL_SOURCES_AGREE="ALL_SOURCES_AGREE"; PREFERRED_SOURCE_WITH_EXPLICIT_FALLBACK="PREFERRED_SOURCE_WITH_EXPLICIT_FALLBACK"
 class AdapterKind(str,Enum):
-    CAPABILITY_AVAILABLE="CAPABILITY_AVAILABLE"; FILE_EXISTS="FILE_EXISTS"; B9_DESIGNATED_CURRENT_SOURCE="B9_DESIGNATED_CURRENT_SOURCE"
+    CAPABILITY_AVAILABLE="CAPABILITY_AVAILABLE"; FILE_EXISTS="FILE_EXISTS"; B9_DESIGNATED_CURRENT_SOURCE="B9_DESIGNATED_CURRENT_SOURCE"; MOTOR_JOB_STATUS="MOTOR_JOB_STATUS"; JACOBS_PIPELINE_STATUS="JACOBS_PIPELINE_STATUS"; FACET_RUNTIME_STATUS="FACET_RUNTIME_STATUS"; ENGINE_STATUS="ENGINE_STATUS"
+class SourceScopeClass(str,Enum):
+    EXACT_RESPONSE_SCOPE="EXACT_RESPONSE_SCOPE"; INSTALLATION_GLOBAL="INSTALLATION_GLOBAL"
 def _digest(v:Any)->str:return "sha256:"+hashlib.sha256(json.dumps(_plain(_freeze(v)),sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
 def _time(v:datetime,n:str)->datetime:
     if not isinstance(v,datetime) or v.tzinfo is None:raise GovernanceContractError(f"{n} must be timezone-aware datetime")
@@ -44,10 +46,11 @@ class ScopeRule:
 
 @dataclass(frozen=True)
 class PredicateAuthorityBinding:
-    predicate:str; predicate_version:str; designated_source_identity:str; source_owner_authority_ref:str; environment:str; tenant_project_scope_rule:ScopeRule; subject_audience_scope_rule:ScopeRule; freshness_sla_seconds:int; conflict_policy:ConflictPolicy; resolver_implementation_identity:str; resolver_version:str; source_configuration_digest:str|None; binding_version:str; enabled:bool=True; designated_source_identities:tuple[str,...]|None=None
+    predicate:str; predicate_version:str; designated_source_identity:str; source_owner_authority_ref:str; environment:str; tenant_project_scope_rule:ScopeRule; subject_audience_scope_rule:ScopeRule; freshness_sla_seconds:int; conflict_policy:ConflictPolicy; resolver_implementation_identity:str; resolver_version:str; source_configuration_digest:str|None; binding_version:str; enabled:bool=True; designated_source_identities:tuple[str,...]|None=None; source_scope_class:SourceScopeClass|None=None
     def __post_init__(self):
         for n in ("predicate","predicate_version","designated_source_identity","source_owner_authority_ref","environment","resolver_implementation_identity","resolver_version","binding_version"):object.__setattr__(self,n,_text(getattr(self,n),n))
         _enum(self.conflict_policy,ConflictPolicy,"conflict_policy")
+        if self.source_scope_class is not None:_enum(self.source_scope_class,SourceScopeClass,"source_scope_class")
         if not isinstance(self.tenant_project_scope_rule,ScopeRule) or not isinstance(self.subject_audience_scope_rule,ScopeRule):raise GovernanceContractError("binding scope rules must be ScopeRule")
         if self.environment!=self.tenant_project_scope_rule.environment or self.environment!=self.subject_audience_scope_rule.environment:raise GovernanceContractError("binding environment must match scope rules")
         if not isinstance(self.freshness_sla_seconds,int) or self.freshness_sla_seconds<=0:raise GovernanceContractError("freshness_sla_seconds must be positive int")
@@ -67,7 +70,12 @@ class PredicateAuthorityBinding:
         if self.conflict_policy is ConflictPolicy.ALL_SOURCES_AGREE and len(sources)<2:raise GovernanceContractError("ALL_SOURCES_AGREE requires at least two sources")
         if self.conflict_policy is ConflictPolicy.PREFERRED_SOURCE_WITH_EXPLICIT_FALLBACK and len(sources)<2:raise GovernanceContractError("fallback policy requires named fallback")
         object.__setattr__(self,"designated_source_identities",sources)
-    def projection(self):return {"predicate":self.predicate,"predicate_version":self.predicate_version,"designated_source_identity":self.designated_source_identity,"designated_source_identities":list(self.designated_source_identities),"source_owner_authority_ref":self.source_owner_authority_ref,"environment":self.environment,"tenant_project_scope_rule":self.tenant_project_scope_rule.projection(),"subject_audience_scope_rule":self.subject_audience_scope_rule.projection(),"freshness_sla_seconds":self.freshness_sla_seconds,"conflict_policy":self.conflict_policy.value,"resolver_implementation_identity":self.resolver_implementation_identity,"resolver_version":self.resolver_version,"source_configuration_digest":self.source_configuration_digest,"binding_version":self.binding_version,"enabled":self.enabled}
+    def projection(self):
+        result={"predicate":self.predicate,"predicate_version":self.predicate_version,"designated_source_identity":self.designated_source_identity,"designated_source_identities":list(self.designated_source_identities),"source_owner_authority_ref":self.source_owner_authority_ref,"environment":self.environment,"tenant_project_scope_rule":self.tenant_project_scope_rule.projection(),"subject_audience_scope_rule":self.subject_audience_scope_rule.projection(),"freshness_sla_seconds":self.freshness_sla_seconds,"conflict_policy":self.conflict_policy.value,"resolver_implementation_identity":self.resolver_implementation_identity,"resolver_version":self.resolver_version,"source_configuration_digest":self.source_configuration_digest,"binding_version":self.binding_version,"enabled":self.enabled}
+        # Preserve the byte-for-byte snapshot contract of pre-F2-E bindings.
+        # Runtime status bindings carry the new source-scope classification.
+        if self.source_scope_class is not None:result["source_scope_class"]=self.source_scope_class.value
+        return result
     @property
     def digest(self):return _digest(self.projection())
 
@@ -104,8 +112,11 @@ class RegistryEntry:
         if self.template_contract_ref is not None:object.__setattr__(self,"template_contract_ref",_text(self.template_contract_ref,"template_contract_ref"))
         b,a=self.binding,self.adapter
         if (a.resolver_id,a.resolver_version,a.source_identity,a.source_configuration_digest)!=(b.resolver_implementation_identity,b.resolver_version,b.designated_source_identity,b.source_configuration_digest):raise GovernanceContractError("adapter must exactly match approved binding")
-        expected={AdapterKind.CAPABILITY_AVAILABLE:"CAPABILITY_AVAILABLE",AdapterKind.FILE_EXISTS:"FILE_EXISTS",AdapterKind.B9_DESIGNATED_CURRENT_SOURCE:"B9_DESIGNATED_CURRENT_SOURCE"}[a.adapter_kind]
+        expected={AdapterKind.CAPABILITY_AVAILABLE:"CAPABILITY_AVAILABLE",AdapterKind.FILE_EXISTS:"FILE_EXISTS",AdapterKind.B9_DESIGNATED_CURRENT_SOURCE:"B9_DESIGNATED_CURRENT_SOURCE",AdapterKind.MOTOR_JOB_STATUS:"JOB_STATUS",AdapterKind.JACOBS_PIPELINE_STATUS:"PIPELINE_STATUS",AdapterKind.FACET_RUNTIME_STATUS:"FACET_RUNTIME_STATUS",AdapterKind.ENGINE_STATUS:"ENGINE_STATUS"}[a.adapter_kind]
         if b.predicate!=expected:raise GovernanceContractError("adapter kind/predicate mismatch")
+        required_scope={AdapterKind.MOTOR_JOB_STATUS:SourceScopeClass.EXACT_RESPONSE_SCOPE,AdapterKind.JACOBS_PIPELINE_STATUS:SourceScopeClass.EXACT_RESPONSE_SCOPE,AdapterKind.FACET_RUNTIME_STATUS:SourceScopeClass.INSTALLATION_GLOBAL,AdapterKind.ENGINE_STATUS:SourceScopeClass.INSTALLATION_GLOBAL}.get(a.adapter_kind)
+        if required_scope is not None and b.source_scope_class is not required_scope:raise GovernanceContractError("runtime status adapter/source scope mismatch")
+        if required_scope is None and b.source_scope_class is not None:raise GovernanceContractError("existing adapter cannot declare a runtime status source scope")
         # B9's existing designated-current-source resolver has exactly one
         # upstream source.  It is not a multi-source reconciliation adapter;
         # accepting an agreement policy here would make its one-result
@@ -179,6 +190,27 @@ class ServerAdapterInput:
             seen.add(source);canonical.append((source,o))
         x=object.__new__(cls);object.__setattr__(x,"observations",tuple(canonical));return x
 
+_STATUS_EVIDENCE_TOKEN=object()
+_RUNTIME_STATUS_SOURCE_IDENTITIES={
+    AdapterKind.MOTOR_JOB_STATUS:"motor:job-store",
+    AdapterKind.JACOBS_PIPELINE_STATUS:"jacobs:canonical-store",
+    AdapterKind.FACET_RUNTIME_STATUS:"platform:facet-state",
+    AdapterKind.ENGINE_STATUS:"platform:las-manos-health",
+}
+@dataclass(frozen=True,init=False)
+class RuntimeStatusEvidence:
+    """Closed F2-E bridge from a fixed server resolver, never client data."""
+    adapter_kind:AdapterKind; source_identity:str; observation:ResolutionObservation; observation_scope:ResponseScope; source_configuration_digest:str|None
+    def __init__(self,*a,**kw):raise GovernanceContractError("runtime status evidence requires server pathway")
+    @classmethod
+    def _mint(cls,t,adapter_kind,observation,observation_scope,source_configuration_digest=None):
+        if t is not _STATUS_EVIDENCE_TOKEN or not isinstance(adapter_kind,AdapterKind) or adapter_kind not in _RUNTIME_STATUS_SOURCE_IDENTITIES or not isinstance(observation,ResolutionObservation) or not isinstance(observation_scope,ResponseScope):raise GovernanceContractError("typed runtime status evidence required")
+        if source_configuration_digest is not None:source_configuration_digest=_text(source_configuration_digest,"runtime source configuration digest")
+        x=object.__new__(cls);object.__setattr__(x,"adapter_kind",adapter_kind);object.__setattr__(x,"source_identity",_RUNTIME_STATUS_SOURCE_IDENTITIES[adapter_kind]);object.__setattr__(x,"observation",observation);object.__setattr__(x,"observation_scope",observation_scope);object.__setattr__(x,"source_configuration_digest",source_configuration_digest);return x
+
+def _runtime_status_evidence_from_server(adapter_kind, observation, observation_scope, source_configuration_digest=None):
+    return RuntimeStatusEvidence._mint(_STATUS_EVIDENCE_TOKEN,adapter_kind,observation,observation_scope,source_configuration_digest)
+
 
 @dataclass(frozen=True, init=False)
 class B9ResolutionEvidence:
@@ -240,7 +272,7 @@ class ResolverRegistry:
         if _digest(self._snapshot_projection)!=self._snapshot_digest:raise GovernanceContractError("registry snapshot integrity failure")
         return self._entries.get(p)
     def status_table(self):return tuple(MappingProxyType({"predicate":p,"enabled":e.binding.enabled,"source_owner":e.binding.source_owner_authority_ref,"freshness_sla_seconds":e.binding.freshness_sla_seconds,"human_decision_required":not e.binding.enabled}) for p,e in self._entries.items())
-    def resolve(self,predicate,args,scope,*,validation_time,server_input:ServerAdapterInput|None=None,b9_evidence:B9ResolutionEvidence|None=None):
+    def resolve(self,predicate,args,scope,*,validation_time,server_input:ServerAdapterInput|None=None,b9_evidence:B9ResolutionEvidence|None=None,runtime_status_evidence:RuntimeStatusEvidence|None=None):
         predicate=_text(predicate,"predicate");now=_time(validation_time,"validation_time")
         if not isinstance(args,Mapping) or not isinstance(scope,ResponseScope):raise GovernanceContractError("arguments and scope must be typed")
         e=self._entry(predicate)
@@ -250,7 +282,7 @@ class ResolverRegistry:
         if set(args)!=set(e.argument_keys):return self._failure(predicate,args,scope,now,ResolutionStatus.UNAVAILABLE,b,a)
         mismatch=b.tenant_project_scope_rule.matches(scope) or b.subject_audience_scope_rule.matches(scope)
         if mismatch:return self._failure(predicate,args,scope,now,mismatch,b,a)
-        status,o=self._dispatch(e,server_input,b9_evidence,scope,now)
+        status,o=self._dispatch(e,server_input,b9_evidence,runtime_status_evidence,args,scope,now)
         if status is ResolutionStatus.RESOLVED and (o.observed_at>now or now>o.observed_at+timedelta(seconds=b.freshness_sla_seconds) or(o.upstream_not_after and now>o.upstream_not_after)):status=ResolutionStatus.STALE
         not_after=min(o.upstream_not_after or o.observed_at+timedelta(seconds=b.freshness_sla_seconds),o.observed_at+timedelta(seconds=b.freshness_sla_seconds))
         return self._mint(predicate,args,scope,b,a,o,status,not_after)
@@ -258,7 +290,7 @@ class ResolverRegistry:
         if o.status is not ResolutionStatus.RESOLVED:return o.status
         if o.observed_at>now or now>o.observed_at+timedelta(seconds=b.freshness_sla_seconds) or (o.upstream_not_after and now>o.upstream_not_after):return ResolutionStatus.STALE
         return ResolutionStatus.RESOLVED
-    def _dispatch(self,e,inp,b9_evidence,scope,now):
+    def _dispatch(self,e,inp,b9_evidence,runtime_status_evidence,args,scope,now):
         b=e.binding
         if e.adapter.adapter_kind is AdapterKind.B9_DESIGNATED_CURRENT_SOURCE:
             # B9 is never adapted from generic observations.  Its evidence has
@@ -283,6 +315,16 @@ class ResolverRegistry:
                 return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,b9_evidence.provenance_ref,{})
             value=result.value
             o=ResolutionObservation(ResolutionStatus.RESOLVED,observed,b9_evidence.provenance_ref,value)
+            return self._fresh_observation(o,b,now),o
+        status_kinds={AdapterKind.MOTOR_JOB_STATUS,AdapterKind.JACOBS_PIPELINE_STATUS,AdapterKind.FACET_RUNTIME_STATUS,AdapterKind.ENGINE_STATUS}
+        if e.adapter.adapter_kind in status_kinds:
+            evidence=runtime_status_evidence
+            if not isinstance(evidence,RuntimeStatusEvidence) or evidence.adapter_kind is not e.adapter.adapter_kind:return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,"server:missing-runtime-status-evidence",{})
+            if evidence.source_identity!=b.designated_source_identity:return ResolutionStatus.SOURCE_MISMATCH,ResolutionObservation(ResolutionStatus.SOURCE_MISMATCH,now,"server:runtime-status-source",{})
+            if evidence.source_configuration_digest!=b.source_configuration_digest:return ResolutionStatus.CONFIGURATION_MISMATCH,ResolutionObservation(ResolutionStatus.CONFIGURATION_MISMATCH,now,"server:runtime-status-configuration",{})
+            if evidence.observation_scope.scope_digest!=scope.scope_digest:return ResolutionStatus.WRONG_SCOPE,ResolutionObservation(ResolutionStatus.WRONG_SCOPE,now,"server:runtime-status-scope",{})
+            o=evidence.observation
+            if o.status is ResolutionStatus.RESOLVED and _plain(o.result)!=_plain(args):return ResolutionStatus.SOURCE_MISMATCH,ResolutionObservation(ResolutionStatus.SOURCE_MISMATCH,o.observed_at,o.provenance_ref,o.result,o.upstream_not_after)
             return self._fresh_observation(o,b,now),o
         if not isinstance(inp,ServerAdapterInput):return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,"server:missing-input",{})
         got=dict(inp.observations)

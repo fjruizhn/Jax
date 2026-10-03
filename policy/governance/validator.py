@@ -229,11 +229,9 @@ _RESOLVERS: dict[str, Callable[["claims.Claim", ValidationContext], Verdict]] = 
 }
 _UNIMPLEMENTED_REASONS: dict[str, str] = {
     "ENGINE_STATUS": (
-        "ENGINE_STATUS: sin fuente de verdad en el dominio de jax. La "
-        "tabla 'model' de jax-platform tiene semántica distinta "
-        "(disponibilidad del provider, no salud del motor). Ver "
-        "REFORMAS-v3 §3.1.3 y el spec de gobernanza, sección 'Por qué "
-        "solo dos resolvers reales'."
+        "ENGINE_STATUS: el validador legado no acredita estado actual. "
+        "La única ruta acreditada es ResolverRegistry con el binding "
+        "explícito de fuente de salud del servidor."
     ),
     "FACET_EXISTS": (
         "FACET_EXISTS: sin fuente ni consumidor identificado esta "
@@ -251,8 +249,19 @@ _UNIMPLEMENTED_REASONS: dict[str, str] = {
         "explícitamente'."
     ),
     "JOB_STATUS": (
-        "JOB_STATUS: sin fuente ni consumidor identificado esta ronda. "
-        "Ver spec de gobernanza, 'Fuera de alcance, explícitamente'."
+        "JOB_STATUS: el validador legado no acredita estado actual. "
+        "La única ruta acreditada es ResolverRegistry con el binding "
+        "explícito de Motor Registry JobStore."
+    ),
+    "PIPELINE_STATUS": (
+        "PIPELINE_STATUS: el validador legado no acredita estado actual. "
+        "La única ruta acreditada es ResolverRegistry con el binding "
+        "explícito del almacén canónico de Jacobs."
+    ),
+    "FACET_RUNTIME_STATUS": (
+        "FACET_RUNTIME_STATUS: el validador legado no acredita estado actual. "
+        "La única ruta acreditada es ResolverRegistry con el binding "
+        "explícito del estado transitorio de JAX Platform."
     ),
     "MEMORY_ENTRY_EXISTS": (
         "MEMORY_ENTRY_EXISTS: sin fuente ni consumidor identificado "

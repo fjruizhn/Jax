@@ -1747,6 +1747,17 @@ jobs:
         run: python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py tests/test_governed_resolution.py tests/test_governed_renderer.py -v
       - name: F2-D lifecycle contract
         run: python -m pytest tests/test_output_lifecycle.py tests/test_governed_renderer.py -q
+      - name: F2-E-SR runtime-status source integrity regressions
+        run: python -m pytest tests/test_f2e_runtime_status_remediation.py -v
+        env:
+          PYTHONPATH: .:las_manos
+      - name: Piso exacto de F2-E-SR source integrity regressions
+        run: |
+          python -m pytest tests/test_f2e_runtime_status_remediation.py -q 2>&1 | tee /tmp/f2e-sr
+          grep -qE "^18 passed" /tmp/f2e-sr || {
+            echo "PISO ROTO: se esperaban 18 tests CORRIDOS de F2-E-SR source integrity."; exit 1; }
+        env:
+          PYTHONPATH: .:las_manos
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-03: 39 (SP1 + arreglo del test rojo) + 39
         # (tests/test_governance_grounding.py, SP3 + ola de fixes de la
@@ -1792,8 +1803,13 @@ jobs:
           # 172 -> 180 el 2026-09-29 (F2-C final A01): ASCII/curly apostrophe,
           # case, NFC/NFD, Markdown heading/link/table/code, and unrelated
           # punctuation negative-control cases.
-          grep -qE "^180 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 180 tests CORRIDOS."; exit 1; }
+          # 207 -> 255 el 2026-10-02 (F2-E-SR-REM-002): closed canonical
+          # machine-status values are tested against Motor/Jacobs enums,
+          # including completed through direct/nested/encoded TOOL_DATA and
+          # NARRATIVE_TEXT plus unrelated-data negative controls.
+          # Source-integrity cases run in their own exact-count step below.
+          grep -qE "^255 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 255 tests CORRIDOS."; exit 1; }
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en
@@ -1968,6 +1984,7 @@ jobs:
           tests/test_identity_context.py tests/test_jacobs_director.py
           tests/test_memory_correction.py tests/test_memory_helpers.py
           tests/test_read_audit_log_unbound.py tests/test_template_hash.py
+          tests/test_f2e_runtime_status.py
           tests/test_validate_capability_typed.py
           tests/test_project_authority_input_validation.py
           tests/test_jacobs_timeout_by_capability.py tests/test_memory_schema_drift.py
