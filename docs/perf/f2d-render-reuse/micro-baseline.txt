@@ -1,0 +1,3 @@
+chars=16000  project_provider_contract (1a vez, incluye import): 27.84 ms
+revalidate_for_transport x200: mediana 6.79 ms  p95 10.05 ms  min 6.47 ms
+=> 5 llamadas por turno ~ 34.0 ms de CPU por turno
