@@ -505,7 +505,10 @@
     {
       "name": "Qwen",
       "role": "Primary Builder — LAS VOCES",
-      "authority": "sandbox/worktree implementation, tests, PR"
+      "authority": "sandbox/worktree implementation, tests, PR",
+      "tools": ["*"],
+      "disallowedTools": [],
+      "approvalMode": "bubble"
     },
     {
       "name": "Hyde / Claude Code",

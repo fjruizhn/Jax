@@ -1,3 +1,7 @@
+---
+name: "las-voces-governance"
+description: "Apply LAS VOCES governance consistently across supported harness projections."
+---
 <!-- GENERATED FROM AXIOMA CANONICAL SOURCE. DO NOT EDIT DIRECTLY. -->
 # LAS VOCES governance
 

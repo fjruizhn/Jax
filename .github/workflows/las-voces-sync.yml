@@ -1,0 +1,47 @@
+name: LAS VOCES canonical projections
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "projects/las-voces/**"
+      - "scripts/axioma_sync.py"
+      - "tests/test_las_voces_sync.py"
+      - "tests/_las_voces_process.py"
+      - "tests/las_voces_qwen_parser.mjs"
+      - ".github/workflows/las-voces-sync.yml"
+  pull_request:
+    branches: ["**"]
+    paths:
+      - "projects/las-voces/**"
+      - "scripts/axioma_sync.py"
+      - "tests/test_las_voces_sync.py"
+      - "tests/_las_voces_process.py"
+      - "tests/las_voces_qwen_parser.mjs"
+      - ".github/workflows/las-voces-sync.yml"
+
+jobs:
+  canonical-projections:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install pytest pyyaml
+      - run: python3 -m pytest tests/test_las_voces_sync.py -q
+      - run: python3 scripts/axioma_sync.py las-voces --check
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm install --prefix "$RUNNER_TEMP/qwen-parser" --no-save --ignore-scripts @qwen-code/qwen-code@0.24.7
+      - name: Parse primary-builder with Qwen Code 0.24.7
+        env:
+          QWEN_BUNDLE_DIR: ${{ runner.temp }}/qwen-parser/node_modules/@qwen-code/qwen-code
+        run: node tests/las_voces_qwen_parser.mjs
