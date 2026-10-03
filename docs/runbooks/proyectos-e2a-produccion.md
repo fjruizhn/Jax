@@ -67,14 +67,30 @@ for ENV in /etc/restic/local.env /etc/restic/r2.env; do
   # EN SEGUNDO PLANO (&): la shell vuelve al instante; el log y el codigo de salida quedan en $D.
   nohup bash -c "set -uo pipefail; source '$ENV'; restic backup --tag e2a-lactovi-pre --host hall9000 --one-file-system '$ORIG'; echo \$? > '$D/restic-pre-$N.rc'" \
     > "$D/restic-pre-$N.log" 2>&1 &
-  echo "$N lanzado, pid $!"
+  echo $! > "$D/restic-pre-$N.pid"; echo "$N lanzado, pid $!"
 done
-# Esperar el fin de los dos: cada uno escribe su .rc al terminar (restic largo: no se espera en primer plano de una sola llamada).
-until [ "$(ls "$D"/restic-pre-*.rc 2>/dev/null | wc -l)" -ge "$(ls /etc/restic/local.env /etc/restic/r2.env 2>/dev/null | wc -l)" ]; do sleep 20; done
+# Esperar el fin de los dos: cada uno escribe su .rc al terminar. Con TOPE de tiempo (TOPE_S, 2 h por defecto)
+# y comprobando que el proceso sigue vivo: si muere sin dejar .rc, se sale con error claro en vez de colgarse.
+esperar_restics() {
+local TOPE_S=${TOPE_S:-7200} T0=$SECONDS PENDIENTE ENV N
+while :; do
+  PENDIENTE=0
+  for ENV in /etc/restic/local.env /etc/restic/r2.env; do
+    [ -f "$ENV" ] || continue; N=$(basename "$ENV" .env)
+    [ -f "$D/restic-pre-$N.rc" ] && continue
+    if kill -0 "$(cat "$D/restic-pre-$N.pid" 2>/dev/null)" 2>/dev/null; then PENDIENTE=1
+    else echo "ERROR: el respaldo $N murio SIN dejar .rc: mirar $D/restic-pre-$N.log; NO se sigue" >&2; return 1; fi
+  done
+  [ "$PENDIENTE" = 0 ] && break
+  [ $((SECONDS-T0)) -ge "$TOPE_S" ] && { echo "ERROR: pasaron ${TOPE_S}s sin que terminen los respaldos: mirar tail -f $D/restic-pre-*.log; NO se sigue" >&2; return 1; }
+  sleep 20
+done
+}
+esperar_restics || echo 'ESPERA FALLIDA: no se sigue'
 tail -n 3 "$D"/restic-pre-*.log      # el resumen de cada snapshot
 for f in "$D"/restic-pre-*.rc; do echo "$f -> $(cat "$f")"; done
 ```
-Los dos repos son obligatorios si existen los dos `.env`. Cada `.rc` tiene que ser `0` (con `3` hubo snapshot pero algún archivo no se leyó: no se sigue hasta saber cuál). Si el `until` pasa de lo razonable, mirar `tail -f "$D"/restic-pre-*.log` desde otra terminal; un `.rc` ausente es que sigue corriendo. Después, **por cada repo**, restaurar a una ruta aparte y comparar `sha256` contra el original:
+Los dos repos son obligatorios si existen los dos `.env`. Cada `.rc` tiene que ser `0` (con `3` hubo snapshot pero algún archivo no se leyó: no se sigue hasta saber cuál). El bucle sale con error si un proceso muere sin `.rc` o si pasa `TOPE_S` (se puede subir exportándolo antes); con cualquiera de los dos **no se sigue**: mirar `tail -f "$D"/restic-pre-*.log` desde otra terminal. Después, **por cada repo**, restaurar a una ruta aparte y comparar `sha256` contra el original:
 ```bash
 for ENV in /etc/restic/local.env /etc/restic/r2.env; do
   [ -f "$ENV" ] || continue; N=$(basename "$ENV" .env); T="$D/restauracion-pre-$N"; rm -rf "$T"
@@ -94,9 +110,9 @@ done
 e2a -m scripts.proyectos_e2a_lactovi --workspace /home/fruiz/jax-workspace --carpeta lacteos-victoria \
   --nombre "Lácteos Victoria" --dueno-user-id <ID> --tenant-id 1 --database jax_memory \
   --aplicar --confirmo-produccion | tee $D/lactovi-aplicar.json
-cp /home/fruiz/jax-workspace/proyectos/.e2a-lactovi-*.json $D/     # el mapa de reversión, a salvo
+mv /home/fruiz/jax-workspace/proyectos/.e2a-lactovi-*.json $D/     # el mapa de reversión, a salvo y FUERA de proyectos/
 ```
-Los archivos sin ficha que el extractor real acepta (`procesamiento.compuerta.tiene_extractor`: por extensión —`pdf xlsx xlsm docx png jpg jpeg tif tiff bmp webp`— o por contenido, un PDF o imagen con otro nombre) entran como `en_cola` con `ruta_entrada = proyectos/<uuid>/fuente/<ruta>`: el despachador de la plataforma los manda a procesar y la ingesta, al ver que el archivo **ya está dentro de `fuente/`**, lo procesa en el lugar sin copiarlo (arreglo `_origen_ya_en_fuente`, paso 3). Los de otro tipo entran como `sin_extractor`, sin `ruta_entrada`. **Comprobación tras el despacho:** `find /home/fruiz/jax-workspace/proyectos/<uuid>/fuente -type f | wc -l` sigue siendo el de antes (120): si crece, hay copias y se detiene el despachador.
+Los archivos sin ficha que el extractor real acepta (`procesamiento.compuerta.tiene_extractor`: por extensión —`pdf xlsx xlsm docx png jpg jpeg tif tiff bmp webp`— o por contenido, un PDF o imagen con otro nombre) entran como `en_cola` con `ruta_entrada = proyectos/<uuid>/fuente/<ruta>`: el despachador de la plataforma los manda a procesar y la ingesta, al ver que el archivo **ya está dentro de `fuente/`**, lo procesa en el lugar sin copiarlo (arreglo `_origen_ya_en_fuente`, paso 3). Los de otro tipo entran como `sin_extractor`, sin `ruta_entrada`. El mapa se **mueve** (`mv`, no `cp`) a `$D`: una copia dejaría un `.e2a-lactovi-*.json` dentro de `proyectos/`, que `ops/permisos_proyectos.py --verificar` no reconoce y hace fallar; `--revertir` y `--completar` usan el de `$D`. **Comprobación tras el despacho:** `find /home/fruiz/jax-workspace/proyectos/<uuid>/fuente -type f | wc -l` **tiene que ser igual al de antes (120), ni más ni menos**: más es que hay copias (se detiene el despachador); menos es que alguien borró un original (se detiene todo y se escala a Fernando: la regla es que nada borra bajo `fuente/`).
 Códigos de salida: `0` hecho; `1` el mapa o el destino ya existen, el proyecto no está ACTIVO, o falló el registro (se deshizo el rename, el proyecto queda creado y ACTIVO; se revisa antes de reintentar); `2` argumentos, guarda de producción o carpeta que no existe (p. ej. **ya se movió**: no crea otro proyecto); `3` los `sha256` no cuadran tras mover (se deshizo el rename); `4` el commit de las filas tiene desenlace desconocido (**el disco no se tocó**: verificar las filas y, si faltan, `--completar`); `5` error no previsto: **no reintentar sin revisar**; `6` (`--revertir`/`--completar`) el mapa no cuadra con la base; `7` (`--revertir`) hay trabajos `pendiente`/`procesando`.
 
 **Qué hacer en cada corte** (el disco y la base se miran antes de cualquier reintento):
@@ -111,7 +127,7 @@ Códigos de salida: `0` hecho; `1` el mapa o el destino ya existen, el proyecto 
 | `--revertir` cortado antes del commit | nada cambió o se deshizo solo | Repetir `--revertir` |
 | `--revertir` cortado en el archivado | carpeta devuelta, sin filas, proyecto ACTIVO | Repetir `--revertir`: detecta la carpeta ya devuelta y solo archiva |
 
-Tras un `--revertir` el proyecto queda ARCHIVADO: para volver a aplicar hay que restaurarlo (`RESTORE_PROJECT`, ARCHIVED → ACTIVE) desde la plataforma y renombrar el mapa viejo; `--aplicar` se niega con ese mensaje si no.
+Tras un `--revertir` el proyecto queda ARCHIVADO: para volver a aplicar hay que restaurarlo (`RESTORE_PROJECT`, ARCHIVED → ACTIVE) desde la plataforma; el mapa viejo ya está en `$D` (fuera de `proyectos/`), y si quedara uno en `proyectos/`, renombrarlo; `--aplicar` se niega con ese mensaje si no.
 **Verificación independiente** (no con la salida del guion):
 ```sql
 SELECT estado, COUNT(*) FROM project_documents WHERE project_id = <project_id> GROUP BY estado;
@@ -127,7 +143,7 @@ Y el último hash se compara con el mismo cálculo hecho en el paso de «antes»
 **Reversión** (solo antes de que la plataforma reciba subidas a LACTOVI; si no, los `sha256` no cuadran y sale `3` sin tocar nada). **Hay que detener los DOS servicios, en este orden, y por esta razón:** con un trabajo en vuelo, la ingesta recrea `proyectos/<uuid>/fuente/` (`mkdir(exist_ok=True)`) después de que el guion devolvió la carpeta, y la deja partida. *jax-platform* es quien **despacha** (pasa filas a `pendiente` y manda trabajos); *jax-las-manos* es quien **ejecuta**: un trabajo ya entregado a LAS MANOS sigue escribiendo aunque la plataforma esté parada y aunque la fila ya no diga `procesando`. Detener solo uno deja un escritor vivo. El guion se niega (código 7) si alguna fila está `pendiente` o `procesando`, pero esa comprobación no ve lo que LAS MANOS ya tiene en la mano: no sustituye detener los servicios.
 `CNF` es el archivo de opciones `600` del §0 de `despliegue.md` (nunca `-p"$JAX_DB_PASSWORD"`); `PID` es el `project_id` de `$D/lactovi-aplicar.json`.
 ```bash
-Q="SELECT COUNT(*) FROM project_documents WHERE project_id = $PID AND estado IN ('pendiente','procesando')"
+Q="SELECT COUNT(*) FROM project_documents WHERE project_id = $PID AND estado IN ('en_cola','pendiente','procesando')"
 # (1) Con la plataforma VIVA, esperar a que el proyecto tenga 0 filas en vuelo (sin pasos nuevos de subida).
 until [ "$(mariadb --defaults-extra-file="$CNF" -N -e "$Q")" = "0" ]; do sleep 10; done
 # (2) Detener la plataforma (el despachador).
@@ -148,7 +164,7 @@ Borra las filas de `project_documents`, devuelve la carpeta a `lacteos-victoria`
 ### 6. Restauración probada de `proyectos/` con la ruta nueva
 **Sin esto, la subida no se anuncia como disponible.** Esperar el snapshot de restic posterior al traslado (o lanzar uno con el procedimiento de respaldo vigente; un restic largo nunca en primer plano), restaurar solo `proyectos/<uuid>/` a una ruta aparte (`restic restore <snapshot> --target /tmp/e2a-restauracion --include /home/fruiz/jax-workspace/proyectos/<uuid>`), y comparar el `sha256` de cada archivo de `fuente/` contra el `sha256` de las fichas/`project_documents`. Cualquier diferencia o archivo ausente: la subida NO se anuncia y se escala a Fernando. Borrar la ruta de ensayo al terminar.
 ### 7. Prueba de humo
-Fernando sube 3 documentos a LACTOVI desde el Chat y los ve pasar a `listo`. Verificación: `SELECT nombre_original, estado FROM project_documents WHERE project_id = <project_id> ORDER BY id DESC LIMIT 3;` y cada archivo bajo `proyectos/<uuid>/entrada/` (o donde fije la plataforma) con dueño `jaxsvc:fruiz`.
+Fernando sube 3 documentos a LACTOVI desde el Chat y los ve pasar a `listo`. Verificación: `SELECT nombre_original, estado FROM project_documents WHERE project_id = <project_id> ORDER BY id DESC LIMIT 3;`. La ingesta copia cada original a **`proyectos/<uuid>/fuente/`** y la plataforma borra el de `entrada/` al terminar: comprobar que los 3 archivos están en `fuente/` con dueño `jaxsvc` y grupo `fruiz` (`stat -c '%U:%G %n' proyectos/<uuid>/fuente/*`), que el conteo de `fuente/` subió exactamente en 3 (de 120 a 123) y que la carpeta `proyectos/<uuid>/entrada/<lote>` **ya no existe**.
 ### 8. Biblioteca
 Escribir `docs/historia/2026-10-03-proyectos-e2a.md` (fecha, qué se hizo, por qué, lecciones, pendientes, alternativas descartadas, quién decidió) con los números de carga de la Tarea 5, `du -sh proyectos/` antes y después (costo de R2) y lo que queda para E2b.
 ## Verification
@@ -159,3 +175,14 @@ Cualquier verificación que no dé lo esperado detiene la secuencia: no se pasa 
 Paso 2: `--deshacer`. Paso 5: `--revertir` con el mapa guardado en `$D`. Pasos 3 y 4: `docs/runbooks/deployment-rollback.md` y el respaldo del paso 1; la migración 006a baja con `scripts/b9_revertir_005.py` solo si `project_documents` está vacía (con filas falla cerrado). Si el estado queda irreconocible, parar y escalar a Fernando antes de tocar a mano.
 ## Prohibited actions
 `migrate:fresh` ni nada equivalente; borrar `proyectos/<uuid>` o `lacteos-victoria` a mano; editar `project_documents` a mano; correr el guion de LACTOVI dos veces «para ver»; tocar `/etc/sudoers.d` desde una sesión; anunciar la subida disponible sin el paso 6.
+
+## Riesgos aceptados y notas
+*(Ronda final de la Parte A, 2026-10-03. Lo de aquí no se arregló a propósito; está escrito para que quien venga no lo redescubra.)*
+- La migración 006a usa `CREATE TABLE IF NOT EXISTS`: si la tabla ya existe con otra forma, no la toca. Un cambio futuro de `project_documents` tiene que ser una **006b con `ALTER`**, no una edición de la 006a.
+- Carrera conteo→`DROP` en la reversión de 006a (`scripts/b9_revertir_005.py`): entre contar las filas y borrar la tabla puede entrar una fila. La reversión es **manual y con la plataforma parada**.
+- Un proyecto **archivado a mitad de un trabajo de LAS MANOS**: el trabajo termina de escribir (aceptado); lo que ya está entregado no se frena.
+- `_UUID_CANONICO` está duplicada en `scripts/` (que no es paquete y no puede importar de `las_manos/`): si cambia en uno, se cambia en el otro.
+- El `fchmod 0660` de `write_file` aplica a **todo** el workspace. Hoy no abre lectura a nadie (el grupo `jaxsvc` no tiene miembros extra); sería un riesgo si apareciera un directorio con setgid y otro grupo.
+- En la prueba de herencia de `tests/test_permisos_proyectos.py`, la escritura de `fruiz` no prueba nada: `fruiz` es dueña del `tmp_path`.
+- `procesamiento/compuerta.py` repite la comprobación `tipo == "ole2"` (cosmético).
+- **Para que Fernando lo vea (decisión suya):** el modelo de propiedad (`jaxsvc` dueño del árbol) sigue la spec madre §5, y por eso un proceso corriendo como `jaxsvc` podría reescribir la ACL de `proyectos/`. Se repara con root. Si se quiere cerrar, el dueño tendría que ser otro usuario.
