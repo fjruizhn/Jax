@@ -274,9 +274,23 @@ def _resultado_no_codificable(ruta: str) -> ResultadoArchivo:
     )
 
 
+_FORMATO_ESTABLE = re.compile(r"^[a-z0-9_]{1,40}$")
+
+
 def _codigo_de_ficha(ficha) -> str | None:
+    """El codigo de error de la ficha. `formato_no_soportado` viaja como
+    `formato_no_soportado:<formato>` (p. ej. `formato_no_soportado:gif_animado`)
+    para que la plataforma nombre el formato y la accion; el formato solo se
+    agrega a ese codigo y solo si es un identificador estable (`[a-z0-9_]`), no
+    texto libre de una ficha cacheada."""
     codigo = ficha.detalle.get("codigo") if ficha.estado == "error" else None
-    return codigo if isinstance(codigo, str) else None
+    if not isinstance(codigo, str):
+        return None
+    formato = ficha.detalle.get("formato")
+    if (codigo == "formato_no_soportado" and isinstance(formato, str)
+            and _FORMATO_ESTABLE.match(formato)):
+        return f"{codigo}:{formato}"
+    return codigo
 
 
 def _procesar_una_ruta(trabajo: Path, ruta: str) -> ResultadoArchivo:

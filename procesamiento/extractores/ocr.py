@@ -43,11 +43,10 @@ nada), y cada una se muta por separado.
 """
 from __future__ import annotations
 
-import array
 import os
 import shutil
+import struct
 import subprocess
-import sys
 import tempfile
 import time
 import warnings
@@ -131,15 +130,18 @@ _FIRMA_PDF = b"%PDF"
 #       (posible escaneo guardado como imagen: un documento sin texto SI es
 #       un problema)
 #   danada (firma invalida, no decodifica)  -> error   archivo_ilegible
-#   sana pero no la leemos (modo F/I, GIF/WebP animado, leptonica la rechaza)
-#                                            -> error   formato_no_soportado
+#   formato que no leemos (detectado ANTES de tesseract; `detalle.formato`:
+#   gif_animado, webp_animado, gris_16_bits, coma_flotante, entero_32_bits,
+#   bmp_16_bits)                           -> error   formato_no_soportado
+#   Pillow la decodifica y leptonica no     -> error   archivo_no_procesable
 #   demasiados pixeles / paginas             -> error   imagen_demasiado_grande
 CODIGO_IMAGEN_SIN_TEXTO = "imagen_sin_texto"
 CODIGO_IMAGEN_TEXTO_DUDOSO = "imagen_texto_dudoso"
 CODIGO_IMAGEN_PAGINA_SIN_TEXTO = "imagen_pagina_sin_texto"
 CODIGO_ARCHIVO_ILEGIBLE = "archivo_ilegible"
 CODIGO_OCR_TIEMPO_EXCEDIDO = "ocr_tiempo_excedido"
-CODIGO_FORMATO_NO_SOPORTADO = "formato_no_soportado"   # sano, pero no lo leemos
+CODIGO_FORMATO_NO_SOPORTADO = "formato_no_soportado"   # detectado antes de tesseract; lleva `formato`
+CODIGO_ARCHIVO_NO_PROCESABLE = "archivo_no_procesable"   # Pillow lo decodifica y leptonica no
 CODIGO_IMAGEN_DEMASIADO_GRANDE = "imagen_demasiado_grande"
 CODIGO_OCR_SIN_MEMORIA = "ocr_sin_memoria"   # recursos, no archivo danado
 
@@ -198,18 +200,6 @@ _FIRMAS_IMAGEN = (
 # traduce a `demasiados_pixeles`, sin mutar el global.) La foto real mas
 # grande de LACTOVI mide 13630x3826 (52 M).
 MAX_PIXELES = 100_000_000
-
-# Tope POR FOTOGRAMA mas bajo para los modos de 16 bits (I;16*). MEDIDO
-# 2026-10-03 con el codigo ACTUAL (re-codificacion por rango real, sin
-# normalizar; ru_maxrss del proceso que corre `extraer`, linea base 26 MB), un
-# TIFF I;16 de 4000x4000 (16 Mpx) con texto:
-#   una pagina, rango completo (x200): 184 MB; una pagina, valores 0-255: 184 MB;
-#   dos paginas: 214 MB.
-# (Las cifras de 603 MB a 25 Mpx y 398 MB a 16 Mpx de una ronda anterior eran de
-# la normalizacion con percentiles, ya borrada: son una cota vieja y segura. El
-# tope se deja en 16 Mpx; con ~184 MB habria margen para subirlo, pero eso es
-# otra decision.)
-MAX_PIXELES_NUMERICO = 16_000_000
 
 # Tope por fotograma para los demas modos fuera de {1, L, LA, P, RGB, RGBA}
 # (CMYK, LAB, YCbCr...): dos paginas de 10000x10000 en CMYK llegaron a 800 MB.
@@ -390,9 +380,11 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
         if cuadros is None:
             return "no_decodifica"
         if cuadros > 1:
-            return "animacion_no_soportada"
+            return _Rechazo("animacion_no_soportada", "gif_animado")
     elif datos[:4] == b"RIFF" and _webp_animado(datos):
-        return "animacion_no_soportada"
+        return _Rechazo("animacion_no_soportada", "webp_animado")
+    elif _bmp_16_bits_con_mascaras(datos):
+        return _Rechazo("bmp_no_soportado", "bmp_16_bits")
     try:
         from io import BytesIO
 
@@ -417,11 +409,9 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
                     img.seek(i)
                     ancho, alto = img.size
                     total += ancho * alto
-                    if img.mode in _MODOS_NO_SOPORTADOS:
-                        return "modo_no_soportado"
-                    if img.mode in _MODOS_16_BITS:
-                        limite = MAX_PIXELES_NUMERICO
-                    elif img.mode not in _MODOS_PNG:
+                    if _formato_de_modo(img.mode):
+                        return _Rechazo("modo_no_soportado", _formato_de_modo(img.mode))
+                    if img.mode not in _MODOS_PNG:
                         limite = MAX_PIXELES_OTROS_MODOS
                     else:
                         limite = MAX_PIXELES
@@ -430,10 +420,6 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
                     dimensiones.append((ancho, alto))
                 if n == 1:
                     img.load()
-                    if img.mode in _MODOS_16_BITS:
-                        # leptonica toma el byte alto: se re-codifica segun el
-                        # rango real (`_a_modo_legible`), no van los originales
-                        return "tiff", dimensiones
                     return "una", dimensiones
     except Image.DecompressionBombError:
         return "demasiados_pixeles"
@@ -446,54 +432,55 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
 
 _MODOS_PNG = frozenset({"1", "L", "LA", "P", "RGB", "RGBA"})
 
-# Rasters de coma flotante (F) o de 32 bits (I): no son documentos de
-# expediente. `modo_no_soportado`, sin llamar a tesseract (leptonica sale con 0
-# y un error en stderr, y cualquier escalado a 8 bits es una apuesta: un pixel
-# nan o 1e30 o un poco de ruido lo aplastaba -- se borro).
-_MODOS_NO_SOPORTADOS = frozenset({"F", "I"})
+# Modos que NO se soportan, sin llamar a tesseract: F (coma flotante), I (32
+# bits) e I;16* (gris de 16 bits). Ninguna imagen real de LACTOVI lo es. Cada
+# intento de leerlos abrio un defecto nuevo (escalar F por extremos o
+# percentiles, el byte alto de un PNG de 16 bits que deja negra la pagina por
+# un solo valor >= 256): se rechazan, con un error VISIBLE que nombra el formato.
+_FORMATO_POR_MODO = {
+    "F": "coma_flotante",
+    "I": "entero_32_bits",
+    "I;16": "gris_16_bits", "I;16B": "gris_16_bits",
+    "I;16L": "gris_16_bits", "I;16N": "gris_16_bits",
+}
 
-# 16 bits: leptonica los lee de forma NATIVA (medido), asi que van sin
-# normalizar ni escalar; al re-codificar a PNG (camino multipagina) se guardan
-# como PNG de 16 bits. PNG solo admite I;16 e I;16B: I;16L e I;16N se llevan a
-# I;16B de forma EXPLICITA por sus bytes (`_a_modo_legible`). NO se convierten
-# con `convert("I")`: Pillow convierte mal I;16N (extremos 0-255 sobre datos de
-# 0-51000) y la pagina salia negra -> imagen_sin_texto en silencio.
-_MODOS_16_BITS = frozenset({"I;16", "I;16B", "I;16L", "I;16N"})
+
+def _formato_de_modo(modo: str) -> str | None:
+    """Valor estable de `detalle["formato"]` para un modo no soportado, o
+    `None` si el modo se soporta."""
+    return _FORMATO_POR_MODO.get(modo)
+
+
+class _Rechazo(str):
+    """Causa de rechazo de la validacion (un `str`: `modo_no_soportado`...)
+    con el `formato` estable cuando es `formato_no_soportado`."""
+
+    formato: str | None = None
+
+    def __new__(cls, causa: str, formato: str | None = None):
+        obj = super().__new__(cls, causa)
+        obj.formato = formato
+        return obj
+
+
+def _bmp_16_bits_con_mascaras(datos: bytes) -> bool:
+    """BMP de 16 bpp con mascaras de bits (RGB565, BI_BITFIELDS): Pillow lo
+    decodifica y leptonica no lo lee (`cannot read compressed BMP files`). Se
+    detecta por el header, ANTES de tesseract. Un 16 bpp sin compresion (555) no."""
+    if datos[:2] != b"BM" or len(datos) < 34:
+        return False
+    tamano_header, = struct.unpack_from("<I", datos, 14)
+    if tamano_header < 40:
+        return False
+    bpp, = struct.unpack_from("<H", datos, 28)
+    compresion, = struct.unpack_from("<I", datos, 30)
+    return bpp == 16 and compresion in (3, 6)
 
 
 def _a_modo_legible(img):
     """Fotograma decodificado -> uno que se pueda guardar como PNG para
     tesseract: los modos de `_MODOS_PNG` tal cual; el resto (CMYK, YCbCr, LAB,
-    HSV...) a `RGB`; y los de 16 bits segun su RANGO REAL, sin escalar:
-
-    - maximo <= 255 (lo que produce `convert("I").convert("I;16")` de una imagen
-      de 8 bits): leptonica toma el byte ALTO de un PNG de 16 bits y la pagina
-      sale NEGRA (ok/imagen_sin_texto en silencio). Se arma un `L` con los
-      bytes BAJOS: los valores ya estan en 0-255. NO se usa `convert("L")`
-      (Pillow escala y recorta) ni `>> 8` (tambien la dejaria negra).
-    - maximo > 255 (12 bits, rango completo...): PNG de 16 bits, el camino
-      nativo. I;16L e I;16N se llevan a I;16B por sus bytes (intercambio little
-      -> big endian; I;16N es nativo y solo se intercambia en un host
-      little-endian). NO se convierten con `convert("I")`: Pillow convierte
-      mal I;16N.
-    """
-    if img.mode in _MODOS_16_BITS:
-        from PIL import Image
-
-        fuente_little = img.mode in ("I;16", "I;16L") or (
-            img.mode == "I;16N" and sys.byteorder == "little")
-        valores = array.array("H", img.tobytes())          # nativo
-        if fuente_little != (sys.byteorder == "little"):
-            valores.byteswap()                              # ahora son valores nativos
-        if max(valores, default=0) <= 255:
-            crudo = valores.tobytes()
-            bajos = crudo[0::2] if sys.byteorder == "little" else crudo[1::2]
-            return Image.frombytes("L", img.size, bajos)
-        if img.mode in ("I;16", "I;16B"):
-            return img
-        if sys.byteorder == "little":
-            valores.byteswap()                              # a big-endian
-        return Image.frombytes("I;16B", img.size, valores.tobytes())
+    HSV...) a `RGB`. (F, I e I;16* ya se rechazaron en la validacion.)"""
     if img.mode in _MODOS_PNG:
         return img
     return img.convert("RGB")
@@ -781,31 +768,40 @@ def _detalle_comun(idioma: str, r: dict) -> dict:
     return detalle
 
 
-# Que codigo lleva cada causa. `archivo_ilegible` ("danado") SOLO si el archivo
-# esta roto: firma que no es de imagen o que Pillow no decodifica (incluye los
-# truncados). Un archivo SANO de un formato que no leemos es
-# `formato_no_soportado`; esto incluye `tesseract_no_lee`: Pillow ya lo
-# decodifico en la validacion, asi que si leptonica lo rechaza (BMP RGB565...)
-# el archivo no esta danado. Los topes de tamano son `imagen_demasiado_grande`.
-_DETALLE_FORMATO_NO_SOPORTADO = {
-    "modo_no_soportado": "modo de color F o I de 32 bits",
-    "animacion_no_soportada": "GIF o WebP animado",
-    "tesseract_no_lee": "leptonica no lo lee",
-}
+# Que codigo lleva cada causa:
+# - `archivo_ilegible` ("danado"): SOLO firma que no es de imagen o que Pillow no
+#   decodifica (incluye los truncados).
+# - `formato_no_soportado`: la deteccion (SIEMPRE antes de tesseract) nombra el
+#   formato en `detalle["formato"]` (gif_animado, webp_animado, gris_16_bits,
+#   coma_flotante, entero_32_bits, bmp_16_bits) y la accion.
+# - `archivo_no_procesable` (`tesseract_no_lee`): Pillow lo decodifico y
+#   leptonica lo rechaza (JPEG con basura en los datos, PNG cortado antes de
+#   IEND, BMP comprimido...): puede estar danado O ser un formato que no
+#   leemos, y no se afirma ninguna de las dos.
+# - `imagen_demasiado_grande`: los topes de pixeles y paginas.
 _DETALLE_DEMASIADO_GRANDE = {
     "demasiados_pixeles": "demasiados pixeles",
     "demasiadas_paginas": "demasiadas paginas",
 }
+_CAUSAS_FORMATO_NO_SOPORTADO = frozenset(
+    {"modo_no_soportado", "animacion_no_soportada", "bmp_no_soportado"})
+ACCION_FORMATO_NO_SOPORTADO = "conviértelo a JPEG o PNG y vuelve a subirlo"
 
 
-def _ilegible(causa: str, idioma: str) -> Resultado:
+def _ilegible(causa: str, idioma: str, formato: str | None = None) -> Resultado:
+    formato = formato or getattr(causa, "formato", None)
+    extra: dict = {}
     if causa in ("tiempo_excedido", "tiempo_por_llamada"):
         razon, codigo = "se excedio el tiempo de OCR de la imagen", CODIGO_OCR_TIEMPO_EXCEDIDO
     elif causa == "sin_memoria":
         razon, codigo = "memoria insuficiente para procesar la imagen", CODIGO_OCR_SIN_MEMORIA
-    elif causa in _DETALLE_FORMATO_NO_SOPORTADO:
-        razon = f"formato de imagen no soportado ({_DETALLE_FORMATO_NO_SOPORTADO[causa]})"
+    elif causa in _CAUSAS_FORMATO_NO_SOPORTADO and formato:
+        razon = f"formato de imagen no soportado ({formato}): {ACCION_FORMATO_NO_SOPORTADO}"
         codigo = CODIGO_FORMATO_NO_SOPORTADO
+        extra["formato"] = formato
+    elif causa == "tesseract_no_lee":
+        razon = "el OCR no pudo leer la imagen (dañada o en un formato no soportado)"
+        codigo = CODIGO_ARCHIVO_NO_PROCESABLE
     elif causa in _DETALLE_DEMASIADO_GRANDE:
         razon = f"imagen demasiado grande ({_DETALLE_DEMASIADO_GRANDE[causa]})"
         codigo = CODIGO_IMAGEN_DEMASIADO_GRANDE
@@ -818,8 +814,8 @@ def _ilegible(causa: str, idioma: str) -> Resultado:
         estado="error", salidas={}, extractor=EXTRACTOR,
         version=_version() or "desconocida",
         detalle={
-            "razon": razon, "codigo": codigo, "causa": causa, "idioma": idioma,
-            "_camino": "imagen",
+            "razon": razon, "codigo": codigo, "causa": str(causa), "idioma": idioma,
+            "_camino": "imagen", **extra,
         },
     )
 

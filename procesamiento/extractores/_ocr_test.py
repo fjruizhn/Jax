@@ -2005,8 +2005,8 @@ def test_formato_gif_animado_razon_y_accion(tmp_path: Path, monkeypatch):
     from PIL import Image
 
     buf = io.BytesIO()
-    a = Image.new("P", (50, 50), 0)
-    a.save(buf, format="GIF", save_all=True, append_images=[Image.new("P", (50, 50), 1)])
+    a = Image.new("RGB", (50, 50), "red")
+    a.save(buf, format="GIF", save_all=True, append_images=[Image.new("RGB", (50, 50), "blue")])
     gif = tmp_path / "a.gif"
     gif.write_bytes(buf.getvalue())
     llamadas = _tesseract_llamado(monkeypatch)
@@ -2109,12 +2109,12 @@ def test_un_bmp_de_16_bits_sin_compresion_no_se_marca_como_formato_no_soportado(
 # --- archivo_no_procesable: Pillow lo decodifica y leptonica lo rechaza -----
 
 
-def _imagen_de_ruido(tmp_path: Path):
+def _imagen_de_ruido(tmp_path: Path, rnd=None):
     import random
 
     from PIL import Image
 
-    rnd = random.Random(1)
+    rnd = rnd or random.Random(1)
     im = Image.new("L", (600, 400))
     im.putdata([rnd.randint(0, 255) for _ in range(240000)])
     return im
@@ -2145,10 +2145,10 @@ def test_n26_un_jpeg_con_basura_en_los_datos_es_archivo_no_procesable(tmp_path: 
 
     from PIL import Image
 
+    rnd = random.Random(1)      # el MISMO generador arma la imagen y la basura (reproducible)
     buf = io.BytesIO()
-    _imagen_de_ruido(tmp_path).save(buf, format="JPEG")
+    _imagen_de_ruido(tmp_path, rnd).save(buf, format="JPEG")
     datos = bytearray(buf.getvalue())
-    rnd = random.Random(1)
     for i in range(len(datos) // 2, len(datos) // 2 + 400):
         datos[i] = rnd.randint(0, 255)
     roto = tmp_path / "basura.jpg"
