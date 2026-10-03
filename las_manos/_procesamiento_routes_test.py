@@ -34,6 +34,7 @@ import ast
 import asyncio
 import json
 import secrets
+import sys
 import tempfile
 import threading
 import time
@@ -1123,6 +1124,66 @@ class TrabajoHTTPTest(unittest.TestCase):
             response = self._post(client, usuario="legacy")
         assert response.status_code == 422, response.text
         assert self.store._index == {}
+
+    # -- jax-14 (2026-10-03): freno de dependencias de extraccion ----------
+    def test_post_sin_dependencia_de_extraccion_da_503_con_la_lista_y_no_crea_trabajo(self):
+        with patch.dict(sys.modules, {"docx": None, "openpyxl": None}), TestClient(_app()) as client:
+            response = self._post(client)
+        assert response.status_code == 503, response.text
+        detail = response.json()["detail"]
+        assert detail["code"] == "extractores_no_disponibles"
+        assert detail["faltan"] == ["openpyxl", "python-docx"]
+        assert self.store._index == {}
+
+    def test_post_503_por_extractores_no_toma_cupo_del_semaforo(self):
+        with patch.dict(sys.modules, {"pdfplumber": None}), TestClient(_app()) as client:
+            for _ in range(5):
+                assert self._post(client).status_code == 503
+        assert not self._semaforo_test.locked()
+
+    def test_post_con_todo_instalado_sigue_admitiendo(self):
+        async def _noop(*args, **kwargs):
+            return None
+
+        with patch.object(rutas_mod, "_ejecutar_trabajo", _noop), TestClient(_app()) as client:
+            response = self._post(client)
+        assert response.status_code == 202, response.text
+
+    def test_health_informa_el_estado_de_los_extractores_sin_dejar_de_dar_200(self):
+        import server
+
+        with patch.object(server._salud, "estado", AsyncMock(return_value={"ok": True, "fallos": []})), \
+             patch.dict(sys.modules, {"docx": None}):
+            # sin `with`: no corre el startup (necesita MariaDB real)
+            roto = TestClient(server.app).get("/health")
+        with patch.object(server._salud, "estado", AsyncMock(return_value={"ok": True, "fallos": []})), \
+             patch.object(server, "_kill_switch_active", Mock(return_value=False)):
+            sano = TestClient(server.app).get("/health")
+        assert roto.status_code == 200, roto.text
+        assert roto.json()["extractores"] == {"ok": False, "faltan": ["python-docx"]}
+        assert sano.status_code == 200, sano.text
+        assert sano.json()["extractores"] == {"ok": True, "faltan": []}
+
+    def test_el_arranque_loguea_error_si_faltan_extractores_y_no_se_cae(self):
+        import server
+
+        async def _arrancar():
+            for handler in server.app.router.on_startup:
+                await handler()
+
+        with patch.object(server, "_configure_b7_trusted_runtime"), \
+             patch("jacobs.subpipelines.config_subpipelines"), \
+             patch.object(server.jacobs_store, "tamanio_pool"), \
+             patch.object(server.jacobs_store, "init_tables", AsyncMock()), \
+             patch("motor_registry.routes.init_motor_catalog", AsyncMock()), \
+             patch("jacobs.reaper.reap_orphaned_pipelines", AsyncMock()), \
+             patch("jacobs.reaper.start_reaper_loop", AsyncMock()), \
+             patch.object(rutas_mod, "reconciliar_trabajos_huerfanos", Mock(return_value=0)), \
+             patch.dict(sys.modules, {"pdfplumber": None}):
+            with self.assertLogs(level="ERROR") as capturado:
+                asyncio.run(_arrancar())
+        mensajes = [r.getMessage() for r in capturado.records]
+        assert any("pdfplumber" in m and "extractores" in m for m in mensajes), mensajes
 
     def test_b6_persists_authenticated_human_uploader_as_caller(self):
         async def _noop(*args, **kwargs):

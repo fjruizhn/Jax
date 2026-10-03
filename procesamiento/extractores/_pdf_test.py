@@ -481,14 +481,16 @@ def test_el_piso_por_pagina_solo_lo_mata_un_fixture_multipagina(tmp_path: Path):
     assert r.detalle["paginas"] == 3
 
 
-def test_extraer_sin_pdfplumber_instalado_da_sin_extractor(tmp_path: Path, monkeypatch):
-    """Menor 3: un `ModuleNotFoundError` crudo no es un resultado -- existe
-    el estado 'sin_extractor' justo para esto."""
+def test_extraer_sin_pdfplumber_instalado_da_error_no_sin_extractor(tmp_path: Path, monkeypatch):
+    """Menor 3: un `ModuleNotFoundError` crudo no es un resultado. jax-14
+    (2026-10-03): pdfplumber esta declarado en requirements-archivos.txt, su
+    falta es un despliegue roto -> 'error' con codigo, no 'sin_extractor'."""
     import sys
 
     monkeypatch.setitem(sys.modules, "pdfplumber", None)
     r = pdf.extraer(_pdf_con_texto(tmp_path / "n.pdf"))
-    assert r.estado == "sin_extractor"
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "dependencia_no_instalada"
     assert r.salidas == {}
 
 

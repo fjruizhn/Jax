@@ -116,13 +116,14 @@ def test_una_celda_con_salto_de_linea_no_parte_la_fila(tmp_path: Path):
     assert md.count("Cuentas por") == 1
 
 
-def test_extraer_sin_python_docx_instalado_da_sin_extractor(tmp_path: Path, monkeypatch):
+def test_extraer_sin_python_docx_instalado_da_error_no_sin_extractor(tmp_path: Path, monkeypatch):
     import sys
 
     origen = _documento_brief(tmp_path / "d.docx")
     monkeypatch.setitem(sys.modules, "docx", None)
     r = word.extraer(origen)
-    assert r.estado == "sin_extractor"
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "dependencia_no_instalada"
     assert r.salidas == {}
 
 
