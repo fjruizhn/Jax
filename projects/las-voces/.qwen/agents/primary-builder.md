@@ -1,6 +1,9 @@
 ---
 name: "primary-builder"
-description: "Qwen — Primary Builder — LAS VOCES. Authority: sandbox/worktree implementation, tests, PR."
+description: "Qwen \u2014 Primary Builder \u2014 LAS VOCES. Authority: sandbox/worktree implementation, tests, PR."
+tools: ["*"]
+disallowedTools: []
+approvalMode: "bubble"
 ---
 <!-- GENERATED FROM AXIOMA CANONICAL SOURCE. DO NOT EDIT DIRECTLY. -->
 # Qwen primary builder — LAS VOCES

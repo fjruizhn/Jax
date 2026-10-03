@@ -43,6 +43,49 @@ las-voces` is the explicit reconciliation mode; it stages all files, atomically
 replaces them, restores prior files if a replacement fails, writes
 `sync/manifest.json`, and verifies the result.
 
+## 2026-10-03 · revisión de la proyección Qwen (Jax#320)
+
+**DECISIÓN — Fernando, comentario del PR #320:** el constructor Qwen declara
+alcance completo de herramientas en `project.json` (`tools: ["*"]`,
+`disallowedTools: []`); el generador falla si faltan esos campos. El `*` es el
+comodín explícito que Qwen Code 0.24.7 expande al catálogo de herramientas
+disponible, incluidos los MCP registrados. La proyección usa `approvalMode:
+bubble`, que el parser de esa versión acepta.
+
+**HECHO — Codex, bundle instalado de Qwen Code 0.24.7:**
+`chunks/chunk-AN36BHDM.js:562` expande `tools: ["*"]`; `:949` acepta
+`bubble`; `:954` lee `tools`, `disallowedTools` y `approvalMode`; `:780`
+resuelve `bubble` según el modo de la sesión que invoca:
+
+| Padre | Subagente con `bubble` |
+| --- | --- |
+| `default` | `default` |
+| `auto-edit` | `auto_edit` |
+| `auto` | `auto` |
+| `yolo` | `yolo` |
+| `plan` | `default` |
+
+**DECISIÓN — Fernando, 2026-10-03, vía jax-14:** conservar `bubble` y declarar
+la única excepción, `plan → default`. El objetivo es evitar una escalada de
+autonomía sin humano; en `default`, cada edición requiere confirmación humana.
+La prueba con el parser y resolvedor reales de Qwen Code 0.24.7 fija esta
+tabla para detectar cualquier cambio de comportamiento tras actualizar Qwen.
+
+**HECHO — Codex:** `--check` enumera los archivos de `.qwen/agents/` y
+`.qwen/skills/`, compara el manifiesto completo y exige un SHA de commit real
+y ancestro. La CI ejecuta el check sobre el checkout versionado y usa el parser
+real de Qwen 0.24.7. Una edición manual de `approvalMode` a `yolo` produjo
+rc=1 y `DRIFT DETECTED` localmente. Las pruebas adversariales cubren
+separadores, controles, sustitutos sueltos y nombres de skill inseguros.
+
+**Alternativa descartada — Codex:** enumerar nombres de herramientas del bundle
+congelaría el catálogo y omitiría herramientas MCP registradas después. El
+comodín explícito conserva el alcance completo decidido por Fernando.
+
+**Alternativas descartadas — Fernando, 2026-10-03:** fijar `plan` dejaría al
+constructor sin poder construir; bloquear la invocación desde `plan` no es
+posible desde esta proyección.
+
 ## Agent Bus
 Toda conversación/handoff relevante entre agentes debe producir un envelope auditable:
 message_id, project_id, task_id, sender_agent, recipient_agent, intent, evidence_refs, authority_context, correlation_id, created_at, status.

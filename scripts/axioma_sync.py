@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 
-GENERATOR_VERSION = "1.1"
+GENERATOR_VERSION = "1.2"
 PROJECT_ID = "las-voces"
 _CLAUDE_FILE = "C" + "LAUDE.md"
 _CLAUDE_HARNESS = "cla" + "ude-code"
@@ -43,7 +44,20 @@ def _sha256(data: bytes) -> str:
 
 
 def _json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
+    return (json.dumps(value, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode()
+
+
+def _safe_text(value: Any) -> None:
+    if isinstance(value, str):
+        if any(unicodedata.category(char) in {"Cc", "Cs"} or char in "\u2028\u2029" for char in value):
+            raise SyncError("canonical text contains control, separator, or surrogate character")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _safe_text(key)
+            _safe_text(item)
+    elif isinstance(value, list):
+        for item in value:
+            _safe_text(item)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -53,6 +67,7 @@ def _read_json(path: Path) -> dict[str, Any]:
         raise SyncError(f"invalid canonical JSON: {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise SyncError(f"invalid canonical JSON object: {path}")
+    _safe_text(value)
     return value
 
 
@@ -60,7 +75,18 @@ def _source_commit(repo: Path) -> str:
     result = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True
     )
-    return result.stdout.strip() if result.returncode == 0 else "UNAVAILABLE"
+    commit = result.stdout.strip()
+    if result.returncode or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise SyncError("cannot determine a real source commit")
+    return commit
+
+
+def _real_source_commit(repo: Path, commit: Any) -> bool:
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return False
+    exists = subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{commit}^{{commit}}"], capture_output=True)
+    ancestor = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", commit, "HEAD"], capture_output=True)
+    return exists.returncode == 0 and ancestor.returncode == 0
 
 
 def _canonical(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -87,13 +113,14 @@ def _canonical(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any], dict[s
                for field in ("role", "authority"))
     ):
         raise SyncError("missing or invalid canonical Qwen builder identity")
+    tools = qwen[0].get("tools")
+    disallowed = qwen[0].get("disallowedTools")
+    if tools != ["*"] or disallowed != []:
+        raise SyncError("canonical Qwen tools must explicitly declare full scope and no disallowed tools")
+    if qwen[0].get("approvalMode") != "bubble":
+        raise SyncError("canonical Qwen approvalMode must explicitly be bubble")
     skill_name = skill.get("id")
-    valid_skill_name = (
-        isinstance(skill_name, str)
-        and bool(skill_name)
-        and all(unicodedata.category(char)[0] in {"L", "N"} or char in "_:.-"
-                for char in skill_name)
-    )
+    valid_skill_name = isinstance(skill_name, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]*", skill_name)
     if not valid_skill_name or not isinstance(skill.get("purpose"), str) or not skill["purpose"].strip():
         raise SyncError("invalid canonical skill name or description")
     required_envelope = {"message_id", "project_id", "task_id", "sender_agent", "recipient_agent", "intent", "evidence_refs", "authority_context", "correlation_id", "created_at", "status"}
@@ -145,10 +172,11 @@ Canonical skill: {skill['id']} v{skill['version']} — {skill['purpose']}
 """
 
 
-def _qwen_frontmatter(name: str, description: str) -> str:
+def _qwen_frontmatter(name: str, description: str, extra: dict[str, Any] | None = None) -> str:
     # JSON double-quoted strings are valid YAML scalars and safely escape any
     # canonical text that would otherwise alter frontmatter structure.
-    return "---\nname: " + json.dumps(name, ensure_ascii=False) + "\ndescription: " + json.dumps(description, ensure_ascii=False) + "\n---\n"
+    values = {"name": name, "description": description, **(extra or {})}
+    return "---\n" + "".join(f"{key}: {json.dumps(value, ensure_ascii=True)}\n" for key, value in values.items()) + "---\n"
 
 
 def _render(project_json: dict[str, Any], agent: dict[str, Any], skill: dict[str, Any], qwen_agent: dict[str, Any]) -> dict[str, bytes]:
@@ -160,12 +188,15 @@ capabilities, change frozen contracts, or claim DONE without evidence.
 """
     skill_text = _qwen_frontmatter(skill["id"], skill["purpose"]) + _notice() + "# LAS VOCES governance\n\n" + common
     agent_description = f"{qwen_agent['name']} — {qwen_agent['role']}. Authority: {qwen_agent['authority']}."
-    agent_text = _qwen_frontmatter("primary-builder", agent_description) + _notice() + "# Qwen primary builder — LAS VOCES\n\n" + qwen
+    agent_text = _qwen_frontmatter("primary-builder", agent_description, {
+        "tools": qwen_agent["tools"], "disallowedTools": qwen_agent["disallowedTools"],
+        "approvalMode": qwen_agent["approvalMode"],
+    }) + _notice() + "# Qwen primary builder — LAS VOCES\n\n" + qwen
     return {
         "AGENTS.md": (_notice() + "# LAS VOCES — Codex instructions\n\n" + common).encode(),
         _CLAUDE_FILE: (_notice() + f"# LAS VOCES — {_CLAUDE_TITLE} instructions\n\n" + common).encode(),
         "QWEN.md": (_notice() + "# LAS VOCES — Qwen Code instructions\n\n" + qwen).encode(),
-        ".qwen/skills/las-voces-governance/SKILL.md": skill_text.encode(),
+        f".qwen/skills/{skill['id']}/SKILL.md": skill_text.encode(),
         ".qwen/agents/primary-builder.md": agent_text.encode(),
     }
 
@@ -206,19 +237,22 @@ def check(root: Path) -> int:
             failures.append(f"SYNC REQUIRED: missing projection {relative}")
         elif target.read_bytes() != data:
             failures.append(f"DRIFT DETECTED: {relative}")
+    for directory in (project / ".qwen/agents", project / ".qwen/skills"):
+        if directory.exists():
+            for candidate in directory.rglob("*"):
+                if candidate.is_file() or candidate.is_symlink():
+                    relative = candidate.relative_to(project).as_posix()
+                    if relative not in expected:
+                        failures.append(f"UNLISTED PROJECTION: {relative}")
     manifest_path = project / "sync/manifest.json"
     try:
         manifest = _read_json(manifest_path)
-        rendered_hashes = {path: _sha256(data) for path, data in expected.items()}
-        entries = {entry.get("target_path"): entry for entry in manifest.get("projections", [])}
-        if (
-            manifest.get("project_id") != PROJECT_ID
-            or manifest.get("generator_version") != GENERATOR_VERSION
-            or manifest.get("source_hash") != _source_hash(project)
-            or set(entries) != set(rendered_hashes)
-            or any(entries[path].get("generated_hash") != digest for path, digest in rendered_hashes.items())
-            or not manifest.get("source_commit")
-        ):
+        source_commit = manifest.get("source_commit")
+        reference = json.loads(_manifest(project, expected, _source_hash(project), root))
+        reference["source_commit"] = source_commit
+        for entry in reference["projections"]:
+            entry["source_commit"] = source_commit
+        if not _real_source_commit(root, source_commit) or manifest != reference:
             failures.append("DRIFT DETECTED: sync/manifest.json")
     except SyncError:
         failures.append("DRIFT DETECTED: sync/manifest.json")

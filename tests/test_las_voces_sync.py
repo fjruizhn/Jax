@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,8 @@ SPEC.loader.exec_module(sync)
 def root(tmp_path: Path) -> Path:
     project = tmp_path / "projects" / "las-voces"
     shutil.copytree(REPO / "projects" / "las-voces", project, ignore=shutil.ignore_patterns("AGENTS.md", "CLAUDE.md", "QWEN.md", ".qwen", "manifest.json"))
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "fixture"], check=True)
     return tmp_path
 
 
@@ -67,11 +70,94 @@ def test_qwen_primary_builder_projection_uses_qwen_canonical_identity(root: Path
     assert metadata == {
         "name": "primary-builder",
         "description": f"{qwen['name']} — {qwen['role']}. Authority: {qwen['authority']}.",
+        "tools": ["*"],
+        "disallowedTools": [],
+        "approvalMode": qwen["approvalMode"],
     }
     assert body.startswith("<!-- GENERATED FROM AXIOMA CANONICAL SOURCE. DO NOT EDIT DIRECTLY. -->\n")
     assert "Qwen is the PRIMARY BUILDER" in " ".join(body.split())
     assert "may not merge, deploy" in body
     assert "Canonical agent: ariadna-project-manager" not in body
+
+
+@pytest.mark.parametrize("field", ["tools", "disallowedTools"])
+def test_missing_canonical_qwen_tools_fails_closed(root: Path, field: str) -> None:
+    path = generated(root) / "project.json"
+    value = json.loads(path.read_text())
+    next(item for item in value["agents"] if item["name"] == "Qwen").pop(field, None)
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(sync.SyncError, match="tools"):
+        sync.check(root)
+
+
+def test_missing_canonical_qwen_approval_mode_fails_closed(root: Path) -> None:
+    path = generated(root) / "project.json"
+    value = json.loads(path.read_text())
+    next(item for item in value["agents"] if item["name"] == "Qwen").pop("approvalMode", None)
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(sync.SyncError, match="approvalMode"):
+        sync.check(root)
+
+
+@pytest.mark.parametrize("relative", [".qwen/agents/rogue.md", ".qwen/skills/rogue/SKILL.md"])
+def test_unlisted_qwen_projection_fails_check(root: Path, relative: str, capsys) -> None:
+    assert sync.generate(root) == 0
+    rogue = generated(root) / relative
+    rogue.parent.mkdir(parents=True, exist_ok=True)
+    rogue.write_text("---\nname: rogue\ntools: [run_shell_command, write_file]\n---\n", encoding="utf-8")
+    assert sync.check(root) == 1
+    assert "UNLISTED PROJECTION" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("field,value", [
+    ("generator_template_version", "old"),
+    ("target_harness", "wrong"),
+    ("source_commit", "UNAVAILABLE"),
+])
+def test_manifest_entry_metadata_drift_fails_check(root: Path, field: str, value: str) -> None:
+    assert sync.generate(root) == 0
+    path = generated(root) / "sync/manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["projections"][0][field] = value
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert sync.check(root) == 1
+
+
+def test_skill_directory_follows_canonical_id(root: Path) -> None:
+    path = generated(root) / "skills/las-voces-governance.json"
+    value = json.loads(path.read_text())
+    value["id"] = "governance-renamed"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    assert sync.generate(root) == 0
+    assert (generated(root) / ".qwen/skills/governance-renamed/SKILL.md").is_file()
+
+
+@pytest.mark.parametrize("bad", ["\u2028", "\u2029", "\u0085", "\u007f", "\ud800"])
+def test_adversarial_frontmatter_text_is_safe_or_sync_error(root: Path, bad: str) -> None:
+    path = generated(root) / "skills/las-voces-governance.json"
+    value = json.loads(path.read_text())
+    value["purpose"] += bad
+    path.write_text(json.dumps(value), encoding="utf-8")
+    try:
+        assert sync.generate(root) == 0
+    except sync.SyncError:
+        return
+    frontmatter = (generated(root) / ".qwen/skills/las-voces-governance/SKILL.md").read_text().split("---\n", 2)[1]
+    assert bad not in frontmatter
+
+
+def test_lone_surrogate_cli_exits_two_without_traceback(root: Path) -> None:
+    path = generated(root) / "skills/las-voces-governance.json"
+    value = json.loads(path.read_text())
+    value["purpose"] += "\ud800"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    script = root / "scripts/axioma_sync.py"
+    script.parent.mkdir()
+    shutil.copyfile(REPO / "scripts/axioma_sync.py", script)
+    result = subprocess.run(["python3", str(script), "las-voces", "--check"], capture_output=True, text=True)
+    assert result.returncode == 2
+    assert result.stderr.startswith("SYNC FAILED CLOSED:")
+    assert "Traceback" not in result.stderr
 
 
 def test_missing_canonical_qwen_builder_identity_fails_closed(root: Path) -> None:
@@ -88,6 +174,16 @@ def test_invalid_qwen_skill_name_fails_closed(root: Path) -> None:
     path = project / "skills/las-voces-governance.json"
     value = json.loads(path.read_text())
     value["id"] = "las/voces"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(sync.SyncError, match="canonical skill name"):
+        sync.check(root)
+
+
+@pytest.mark.parametrize("name", [".", "..", ":hidden", "governance..old"])
+def test_qwen_skill_name_cannot_escape_or_hide_directory(root: Path, name: str) -> None:
+    path = generated(root) / "skills/las-voces-governance.json"
+    value = json.loads(path.read_text())
+    value["id"] = name
     path.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(sync.SyncError, match="canonical skill name"):
         sync.check(root)
