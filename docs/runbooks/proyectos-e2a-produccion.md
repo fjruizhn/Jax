@@ -13,6 +13,12 @@ Llevar a producción la subida de documentos a un proyecto (E2a): permisos de `p
   - `/usr/bin/python3 -I /usr/local/sbin/jax-permisos-proyectos --nucleo-deshacer`
   - `grep ^JAX_WORKSPACE_DIR= /etc/jax/.env` y `true` (comprobaciones previas del guion).
   Si falta alguna, **parar y pedirle a Fernando la regla**: no se amplía sudoers desde el runbook ni desde una sesión.
+  **La regla que quedó instalada** (Fernando, 2026-10-03; `/etc/sudoers.d/jax-permisos-proyectos`, `440 root:root`, validada con `visudo -cf`):
+  ```
+  fruiz ALL=(root) NOPASSWD: /usr/bin/python3 -I /usr/local/sbin/jax-permisos-proyectos --nucleo-privilegiado, /usr/bin/python3 -I /usr/local/sbin/jax-permisos-proyectos --nucleo-respaldo, /usr/bin/python3 -I /usr/local/sbin/jax-permisos-proyectos --nucleo-deshacer, /usr/bin/grep \^JAX_WORKSPACE_DIR= /etc/jax/.env, /usr/bin/true
+  ```
+  **El `^` va escapado (`\^`).** En sudo 1.9.17, un argumento que empieza con `^` se interpreta como expresión regular, y sin escapar `visudo` lo rechaza con «unterminated regular expression». Con `\^` coincide con el `^` literal que pasa el guion y rechaza otros argumentos (comprobado con una regla temporal). `sudo -l` lo muestra como `\^JAX_WORKSPACE_DIR\=`.
+  El núcleo lo instala root desde un checkout de jax master: `sudo install -o root -g root -m 0755 ops/permisos_proyectos.py /usr/local/sbin/jax-permisos-proyectos`. Se verifica con `sha256sum /usr/local/sbin/jax-permisos-proyectos`, que tiene que dar lo mismo que `git show origin/master:ops/permisos_proyectos.py | sha256sum`.
 - **Dónde y con qué se corre.** Igual que `proyectos-e1-produccion.md`: directorio `/srv/jax-prod/jax`, intérprete `/srv/jax-prod/jax/.venv/bin/python`; el guion nunca abre `/etc/jax/.env`, el entorno `JAX_DB_*` lo carga quien opera y **la contraseña nunca va en la línea de comandos**. Función de la shell (pegar una vez):
 
   ```bash
