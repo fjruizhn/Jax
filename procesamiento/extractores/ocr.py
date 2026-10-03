@@ -45,6 +45,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import warnings
 from pathlib import Path
 
 from procesamiento.resultado import Resultado
@@ -112,29 +113,76 @@ DPI_RASTERIZADO = 300
 
 _FIRMA_PDF = b"%PDF"
 
-# Decision de Fernando (2026-10-03): una IMAGEN sin texto util (foto de un
-# terreno, de una nave, pasto, gente) es un documento VALIDO. `error` queda
-# solo para un archivo danado o que no se puede abrir. Codigos estables en
-# `detalle["codigo"]`, para quien triagea sin parsear la `razon`.
+# Decision de Fernando (2026-10-03, regla de Jax#338): una IMAGEN que el OCR
+# procesa sin texto confiable NO es un `error` -- `error` queda SOLO para un
+# archivo danado o que no se puede abrir. Codigos estables en
+# `detalle["codigo"]`, para quien triagea sin parsear la `razon`:
+#
+#   (A) menos de MINIMO_CARACTERES           -> ok      imagen_sin_texto
+#   (B) mayoria de palabras dudosas          -> parcial imagen_texto_dudoso
+#       (se CONSERVA el texto leido; B tiene prioridad sobre D)
+#   (D) caso A con tamano de PAGINA          -> parcial imagen_pagina_sin_texto
+#       (posible escaneo guardado como imagen: un documento sin texto SI es
+#       un problema)
+#   danada / ilegible                        -> error   archivo_ilegible
 CODIGO_IMAGEN_SIN_TEXTO = "imagen_sin_texto"
+CODIGO_IMAGEN_TEXTO_DUDOSO = "imagen_texto_dudoso"
+CODIGO_IMAGEN_PAGINA_SIN_TEXTO = "imagen_pagina_sin_texto"
 CODIGO_ARCHIVO_ILEGIBLE = "archivo_ilegible"
 
+# Version de la LOGICA de clasificacion de este extractor. `extractor_version`
+# es la de tesseract y NO cambia cuando cambia una regla: esta cadena se guarda
+# en la ficha (`detalle["_version_logica"]`) y `ingesta` la compara -- una
+# ficha escrita con otra logica ni se reusa de cache ni cuenta como intento
+# previo del tope D-2. SUBIRLA cada vez que cambie la regla.
+# "2": regla de Fernando de la ronda 1 de Jax#338 (A/B/D, codigos nuevos).
+VERSION_LOGICA = "2"
+
 # `Resultado` exige al menos una salida con contenido para `ok`: la unica
-# salida de una imagen sin texto es este aviso explicito (nunca la basura que
-# devolvio el OCR, que haria inventar al modelo). La razon y las metricas
-# viven en `detalle`.
-AVISO_IMAGEN_SIN_TEXTO = (
-    "<!-- imagen sin texto: el OCR no encontro texto util en esta imagen "
-    "(foto, plano o dibujo). Es un documento valido; ver ficha.json -->"
+# salida del caso A es este aviso (nunca texto inventado). Regla (C) de
+# Fernando: dice SOLO que el OCR no encontro texto.
+AVISO_IMAGEN_SIN_TEXTO = "<!-- el OCR no encontró texto -->"
+NOTA_TEXTO_DUDOSO = "<!-- texto de baja confianza -->"
+NOTA_PAGINA_SIN_TEXTO = (
+    "<!-- posible documento escaneado sin texto: revisar o reescanear -->"
 )
 
-# Lo que tesseract/leptonica escriben en stderr cuando no pueden decodificar
-# el archivo (JPEG truncado, bytes que no son imagen). Un fallo por timeout o
-# I/O NO trae estas marcas y sigue siendo un `error` generico sin codigo.
+# Un fallo de tesseract (no de timeout/I-O) que huele a archivo que no se
+# pudo decodificar; solo se usa para el codigo, NUNCA se copia el stderr (trae
+# rutas y contenido del archivo: vector de prompt injection).
 _MARCAS_ARCHIVO_ILEGIBLE = (
     "pix not read", "pixReadStream", "findFileFormatStream",
     "Unsupported image type", "cannot be read", "image file not found",
 )
+
+# S-1: tesseract interpreta una entrada que no es imagen como LISTA DE RUTAS.
+# Antes de llamarlo se exigen los bytes magicos de un formato de imagen
+# (compuerta rutea por contenido, asi que vale cualquiera de ellos, no solo el
+# de la extension), y la imagen viaja por STDIN, nunca por ruta.
+_FIRMAS_IMAGEN = (
+    b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"II*\x00", b"MM\x00*", b"BM",
+    b"GIF87a", b"GIF89a",
+)
+
+# Tope de pixeles de una imagen (el default de Pillow: ~179 M). La foto real
+# mas grande de LACTOVI mide 13630x3826 (52 M).
+MAX_PIXELES = 178_956_970
+
+# (D) Tamano de pagina. NO se usa el metadato de DPI (el de un celular miente:
+# "300 DPI" en una foto). Se mira la proporcion lado largo / lado corto, a
+# +-TOLERANCIA_PROPORCION de A4 (297/210 = 1,4142) o carta (11/8,5 = 1,2941),
+# y el DPI IMPLICITO (lado largo en px / lado largo de la pagina en pulgadas)
+# entre DPI_MINIMO_PAGINA y DPI_MAXIMO_PAGINA. Oficio/legal (1,647) no se
+# incluye: mas falsos positivos que beneficio. Medido sobre LACTOVI: las fotos
+# de celular (1,333; a 0,039 de carta) y 5500x3830 (1,436; a 0,022 de A4 y
+# ~470 DPI implicitos) quedan fuera; 2480x3508 (A4 a 300) cae.
+PAGINAS_DE_REFERENCIA = (
+    ("A4", 297 / 210, 11.69),
+    ("carta", 11 / 8.5, 11.0),
+)
+TOLERANCIA_PROPORCION = 0.02
+DPI_MINIMO_PAGINA = 150
+DPI_MAXIMO_PAGINA = 400
 
 
 def _version() -> str | None:
@@ -157,12 +205,73 @@ def _version() -> str | None:
         return None
 
 
+def _como_texto(salida) -> str:
+    """La salida de tesseract viaja en bytes (la imagen entra por stdin sin
+    modo texto); se decodifica aqui, tolerando `str`/`None`."""
+    if isinstance(salida, bytes):
+        return salida.decode("utf8", errors="replace")
+    return salida or ""
+
+
 def _es_pdf(origen: Path) -> bool:
+    """MINOR-4: la firma `%PDF` puede venir tras unos bytes de basura (BOM,
+    saltos de linea); el estandar tolera 1024."""
     try:
         with open(origen, "rb") as fh:
-            return fh.read(len(_FIRMA_PDF)) == _FIRMA_PDF
+            return _FIRMA_PDF in fh.read(1024)
     except OSError:
         return False
+
+
+def _tiene_firma_de_imagen(cabecera: bytes) -> bool:
+    return cabecera.startswith(_FIRMAS_IMAGEN) or (
+        cabecera[:4] == b"RIFF" and cabecera[8:12] == b"WEBP"
+    )
+
+
+def _validar_imagen(origen: Path) -> tuple[int, int] | str:
+    """Antes de OCR: bytes magicos (S-1) y decodificacion ENTERA con Pillow
+    (MAJOR-2: un TIFF truncado da rc=0 y vacio en tesseract). Devuelve
+    `(ancho, alto)` o la CAUSA (`firma_invalida`, `no_decodifica`,
+    `demasiados_pixeles`, `sin_pillow`) -- un codigo, nunca texto de la
+    excepcion (puede traer rutas)."""
+    try:
+        with open(origen, "rb") as fh:
+            cabecera = fh.read(16)
+    except OSError:
+        return "no_decodifica"
+    if not _tiene_firma_de_imagen(cabecera):
+        return "firma_invalida"
+    try:
+        from PIL import Image
+    except ImportError:
+        return "sin_pillow"
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with Image.open(origen) as img:
+                ancho, alto = img.size
+                if ancho * alto > MAX_PIXELES:
+                    return "demasiados_pixeles"
+                img.load()
+    except Exception:  # fail-soft: Pillow lanza OSError/ValueError/SyntaxError/DecompressionBombError segun el formato roto; todas significan "no decodifica" y salen como Resultado(error, archivo_ilegible)
+        return "no_decodifica"
+    return ancho, alto
+
+
+def _implica_pagina(ancho: int, alto: int) -> str | None:
+    """Nombre de la pagina de referencia (A4/carta) si la imagen tiene
+    tamano de pagina por proporcion y DPI implicito; `None` si no. Pura."""
+    largo, corto = max(ancho, alto), min(ancho, alto)
+    if corto <= 0:
+        return None
+    proporcion = largo / corto
+    for nombre, referencia, pulgadas in PAGINAS_DE_REFERENCIA:
+        if abs(proporcion - referencia) <= TOLERANCIA_PROPORCION:
+            dpi = largo / pulgadas
+            if DPI_MINIMO_PAGINA <= dpi <= DPI_MAXIMO_PAGINA:
+                return nombre
+    return None
 
 
 def _analizar_tsv(salida_tsv: str) -> dict:
@@ -243,27 +352,31 @@ def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
     `clasificacion="ilegible"` en vez de `None`, para que `_resolver_imagen`
     pueda distinguirlo con `archivo_ilegible`."""
     try:
+        datos = Path(ruta).read_bytes()
+    except OSError:
+        return None
+    try:
         proceso = subprocess.run(
-            ["tesseract", str(ruta), "stdout", "-l", idioma],
-            capture_output=True, text=True, timeout=TIMEOUT_SEGUNDOS,
+            ["tesseract", "-", "stdout", "-l", idioma],
+            input=datos, capture_output=True, timeout=TIMEOUT_SEGUNDOS,
         )
     except Exception:  # fail-soft: el subproceso de tesseract (modo texto) puede fallar (timeout, I/O); se devuelve None y el llamador lo convierte en Resultado(estado="error")
         return None
     if proceso.returncode != 0:
-        stderr = proceso.stderr or ""
+        stderr = _como_texto(proceso.stderr)
         if any(marca in stderr for marca in _MARCAS_ARCHIVO_ILEGIBLE):
-            return {"clasificacion": "ilegible", "stderr": stderr.strip()[-300:]}
+            return {"clasificacion": "ilegible", "causa": "tesseract_no_lee"}
         return None
-    texto = (proceso.stdout or "").strip()
+    texto = _como_texto(proceso.stdout).strip()
 
     try:
         proceso_tsv = subprocess.run(
-            ["tesseract", str(ruta), "stdout", "-l", idioma, "tsv"],
-            capture_output=True, text=True, timeout=TIMEOUT_SEGUNDOS,
+            ["tesseract", "-", "stdout", "-l", idioma, "tsv"],
+            input=datos, capture_output=True, timeout=TIMEOUT_SEGUNDOS,
         )
     except Exception:  # fail-soft: el subproceso de tesseract (modo tsv, confianza por palabra) puede fallar igual que el de texto plano; se devuelve None y el llamador lo convierte en Resultado(estado="error")
         return None
-    analisis = _analizar_tsv(proceso_tsv.stdout or "")
+    analisis = _analizar_tsv(_como_texto(proceso_tsv.stdout))
 
     return {
         "texto": texto,
@@ -309,29 +422,58 @@ def _detalle_comun(idioma: str, r: dict) -> dict:
     return detalle
 
 
-def _resolver_imagen(r: dict, idioma: str) -> Resultado:
+def _ilegible(causa: str, idioma: str) -> Resultado:
+    return Resultado(
+        estado="error", salidas={}, extractor=EXTRACTOR,
+        version=_version() or "desconocida",
+        detalle={
+            "razon": "no se pudo abrir ni decodificar la imagen (archivo danado)",
+            "codigo": CODIGO_ARCHIVO_ILEGIBLE,
+            "causa": causa,
+            "idioma": idioma,
+        },
+    )
+
+
+def _resolver_imagen(r: dict, idioma: str, dimensiones: tuple[int, int] | None = None) -> Resultado:
     if r["clasificacion"] == "ilegible":
-        return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR,
-            version=_version() or "desconocida",
-            detalle={
-                "razon": "no se pudo abrir ni decodificar la imagen (archivo danado)",
-                "codigo": CODIGO_ARCHIVO_ILEGIBLE,
-                "idioma": idioma,
-                "stderr": r["stderr"],
-            },
-        )
+        return _ilegible(r["causa"], idioma)
 
     detalle = _detalle_comun(idioma, r)
+    if dimensiones:
+        detalle["ancho"], detalle["alto"] = dimensiones
 
     if r["clasificacion"] == "sin_texto":
-        if r["caracteres"] < MINIMO_CARACTERES:
-            detalle["razon"] = "el OCR no devolvio texto util"
-        else:
+        if r["caracteres"] >= MINIMO_CARACTERES:
+            # (B) mayoria de palabras dudosas: el texto leido SE CONSERVA.
             detalle["razon"] = (
-                "mas de la mitad de las palabras reconocidas tienen "
-                "confianza baja (probable ruido o desenfoque) -- ver "
-                "palabras_dudosas"
+                "texto de baja confianza: mas de la mitad de las palabras "
+                "reconocidas tienen confianza baja (probable ruido o "
+                "desenfoque) -- ver palabras_dudosas"
+            )
+            detalle["codigo"] = CODIGO_IMAGEN_TEXTO_DUDOSO
+            return Resultado(
+                estado="parcial",
+                salidas={"texto.txt": f"{NOTA_TEXTO_DUDOSO}\n{r['texto']}"},
+                extractor=EXTRACTOR, version=_version() or "desconocida",
+                detalle=detalle,
+            )
+        detalle["razon"] = "el OCR no devolvio texto util"
+        ancho, alto = detalle["ancho"], detalle["alto"]
+        pagina = _implica_pagina(ancho, alto)
+        if pagina is not None:
+            # (D) tamano de pagina y sin texto: posible escaneo guardado como
+            # imagen -- un documento sin texto SI es un problema.
+            detalle["codigo"] = CODIGO_IMAGEN_PAGINA_SIN_TEXTO
+            detalle["pagina_de_referencia"] = pagina
+            detalle["razon"] = (
+                "posible documento escaneado sin texto: revisar o reescanear"
+            )
+            return Resultado(
+                estado="parcial",
+                salidas={"texto.txt": f"{AVISO_IMAGEN_SIN_TEXTO}\n{NOTA_PAGINA_SIN_TEXTO}"},
+                extractor=EXTRACTOR, version=_version() or "desconocida",
+                detalle=detalle,
             )
         detalle["codigo"] = CODIGO_IMAGEN_SIN_TEXTO
         return Resultado(
@@ -502,6 +644,14 @@ def extraer(origen: Path, idioma: str = "spa") -> Resultado:
                 resultados = [_ocr_una_imagen(pagina, idioma) for pagina in paginas]
             return _resolver_pdf(resultados, idioma)
 
+        validacion = _validar_imagen(origen)
+        if validacion == "sin_pillow":
+            return Resultado(
+                estado="sin_extractor", salidas={}, extractor=EXTRACTOR, version="ausente",
+                detalle={"razon": "Pillow no esta instalado; no se puede validar la imagen"},
+            )
+        if isinstance(validacion, str):
+            return _ilegible(validacion, idioma)
         resultado_img = _ocr_una_imagen(origen, idioma)
         if resultado_img is None:
             return Resultado(
@@ -509,7 +659,7 @@ def extraer(origen: Path, idioma: str = "spa") -> Resultado:
                 version=_version() or "desconocida",
                 detalle={"razon": "no se pudo correr tesseract sobre la imagen"},
             )
-        return _resolver_imagen(resultado_img, idioma)
+        return _resolver_imagen(resultado_img, idioma, validacion)
     except Exception as exc:  # fail-soft: cualquier fallo inesperado (permisos, disco lleno, workspace remontado solo-lectura) sale como Resultado(estado="error"), nunca una excepcion cruda -- mismo tratamiento que D-1/I-5 en los hermanos
         return Resultado(
             estado="error", salidas={}, extractor=EXTRACTOR,

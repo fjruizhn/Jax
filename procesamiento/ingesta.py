@@ -261,6 +261,15 @@ def _version_vigente(nombre_extractor: str) -> str | None:
         return None
 
 
+def _version_logica_vigente(nombre_extractor: str) -> str | None:
+    """Version de la LOGICA de clasificacion del extractor (`VERSION_LOGICA`
+    del modulo), distinta de `extractor_version` (la de la herramienta, p. ej.
+    tesseract): un cambio de regla no mueve la de la herramienta. `None` si el
+    extractor no la declara -- y entonces una ficha sin la clave coincide."""
+    modulo = _MODULOS_POR_EXTRACTOR.get(nombre_extractor)
+    return getattr(modulo, "VERSION_LOGICA", None) if modulo is not None else None
+
+
 def _ahora() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
@@ -453,6 +462,9 @@ def _ficha_de_cache_valida(carpeta: Path, huella: str, extension_actual: str) ->
     if version_vigente is None or ficha.extractor_version != version_vigente:
         return None  # I-2
 
+    if ficha.detalle.get("_version_logica") != _version_logica_vigente(ficha.extractor):
+        return None  # la regla del extractor cambio: la ficha vieja no se reusa
+
     if ficha.detalle.get("_extension_ingesta") != extension_actual:
         return None  # I-3
 
@@ -515,6 +527,8 @@ def _estado_de_error_cacheado(
     version_vigente = _version_vigente(ficha.extractor)
     if version_vigente is not None and ficha.extractor_version != version_vigente:
         return None, 0  # I-2: el extractor cambió -- la cuenta arranca de cero
+    if ficha.detalle.get("_version_logica") != _version_logica_vigente(ficha.extractor):
+        return None, 0  # la regla cambio: el tope D-2 tambien arranca de cero
     # version_vigente is None: "no sé" -- se sigue de largo y se cuenta la
     # ficha como utilizable, con los intentos que ya tenía.
 
@@ -768,6 +782,9 @@ def ingerir(origen: Path, trabajo: Path, *, subruta: str | Path | None = None) -
             "_extension_ingesta": extension_actual,
             "_salidas_ingesta": salidas_ingesta,
         }
+        logica = _version_logica_vigente(resultado.extractor)
+        if logica is not None:
+            detalle["_version_logica"] = logica
         if resultado.estado in {"error", "sin_extractor"}:
             # D-2: registra CUÁNTOS intentos lleva este fallo -- es lo que
             # `_estado_de_error_cacheado` lee en la próxima ingesta para
