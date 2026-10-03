@@ -253,18 +253,6 @@ def _setfacl_reemplazar(fd_path: int, acl_completa: str, *, default: bool = Fals
         raise ErrorPermisosProyectos(f"setfacl --set falló sobre el descriptor {fd_path}: {r.stderr}")
 
 
-def _limpiar_acl(fd_path: int, ruta: str) -> None:
-    """--deshacer: quita la ACL de acceso Y por defecto por completo (verificado que
-    `-b -k` no falla sobre un archivo, aunque -k no tenga nada que hacer ahí)."""
-    os.set_inheritable(fd_path, True)
-    r = subprocess.run(
-        ["setfacl", "-b", "-k", f"/proc/self/fd/{fd_path}"],
-        pass_fds=(fd_path,), capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        raise ErrorPermisosProyectos(f"setfacl -b -k falló sobre {ruta}: {r.stderr}")
-
-
 # ============================================================================
 # ACL: parseo y permiso EFECTIVO
 # ============================================================================
@@ -804,25 +792,12 @@ def _mutar_archivo(fd_path: int, ruta: str, resultado: Resultado) -> None:
 
 
 # ============================================================================
-# --deshacer: vuelve al estado conocido de hoy (BLOCK-1, ronda 3)
+# --deshacer: dueño fruiz:fruiz, conserva a jaxsvc, nunca abre a otros (rondas 3 y 4 de #340)
 # ============================================================================
 #
-# Medido con `stat` real en hall9000 el 2026-09-25, fuera de la carpeta oculta de estado de herramientas (que este
-# guion nunca toca): TODO `proyectos/` es hoy fruiz:fruiz, sin ninguna ACL, sin ningún
-# bit especial -- 108 directorios en 0775, 249 archivos en 0664 (find ... -printf,
-# ver el runbook). Las únicas excepciones medidas (2 directorios en 0700, 1 archivo en
-# 0600) viven DENTRO de esa carpeta oculta, que --deshacer -- igual que --verificar y
-# --aplicar -- nunca alcanza. En vez de fijar 0775/0664 a fuego, el modo se DERIVA del
-# rwx que el dueño YA tiene en cada objeto (lo que en el árbol ya aplicado da
-# exactamente esos dos números) -- así, si algún día un objeto real dentro del alcance
-# de este guion resultara ser una excepción legítima, --deshacer no lo fuerza a
-# 0775/0664, preserva lo que su dueño ya podía hacer.
-
-def _modo_deshecho(modo_actual: int) -> int:
-    """Grupo = dueño, y NUNCA bits de otros: --deshacer revierte dueños y ACL nombradas, no reabre el árbol."""
-    propietario = (modo_actual >> 6) & 0o7
-    return (propietario << 6) | (propietario << 3)
-
+# Determinista: no lee ningún archivo de estado. Dueño y grupo vuelven a fruiz:fruiz (lo de antes de E2a); la
+# ACL se REEMPLAZA por la canónica con `u:jaxsvc` y `other::---`; modo 0770 en directorios y 0660 en archivos.
+# Las carpetas ocultas de estado de herramientas (primer nivel de cada proyecto) nunca se alcanzan.
 
 def _deshacer_objeto(fd_path: int, ruta: str, resultado: Resultado, *, es_directorio: bool = False) -> None:
     """Devuelve el objeto a dueño fruiz:fruiz (lo de antes de E2a) pero CONSERVA a jaxsvc, y nunca abre a otros.
