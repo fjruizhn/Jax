@@ -981,7 +981,7 @@ def test_major2_imagen_con_demasiados_pixeles_es_ilegible(tmp_path: Path, monkey
     monkeypatch.setattr(ocr, "MAX_PIXELES", 1000)
     r = ocr.extraer(_ruidosa(tmp_path / "grande.png", size=(100, 100)))
     assert r.estado == "error"
-    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["codigo"] == "imagen_demasiado_grande"
     assert r.detalle["causa"] == "demasiados_pixeles"
 
 
@@ -1248,7 +1248,7 @@ def test_n1_tiff_con_una_pagina_bomba_se_rechaza_sin_decodificarla(tmp_path: Pat
     r = ocr.extraer(origen)
 
     assert r.estado == "error"
-    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["codigo"] == "imagen_demasiado_grande"
     assert r.detalle["causa"] == "demasiados_pixeles"
 
 
@@ -1540,7 +1540,7 @@ def test_n8_un_gif_animado_con_un_fotograma_enorme_se_rechaza_sin_tesseract(
     r = ocr.extraer(gif)
 
     assert r.estado == "error"
-    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["codigo"] == "formato_no_soportado"
     assert r.detalle["causa"] == "animacion_no_soportada"
     assert llamadas == []
     assert time.monotonic() - t0 < 5
@@ -1598,7 +1598,7 @@ def test_n9_leptonica_por_stdin_escribe_pixreadmem_y_se_reconoce(tmp_path: Path,
 
     r = ocr.extraer(_imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD"))
     assert r.estado == "error"
-    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["codigo"] == "formato_no_soportado"
     assert r.detalle["causa"] == "tesseract_no_lee"
 
 
@@ -1734,7 +1734,7 @@ def test_un_tiff_i16_con_texto_se_lee_sin_normalizar(tmp_path: Path):
 
 def test_un_tiff_i16_de_dos_paginas_se_lee_por_el_camino_de_paginas(tmp_path: Path):
     """El camino multipagina re-codifica a PNG: I;16 se guarda como PNG de 16
-    bits (o, si no, `>> 8` a L) y tiene que leerse igual."""
+    bits (I;16 e I;16B) y tiene que leerse igual."""
     from PIL import Image
 
     def pagina(lineas, nombre):
@@ -1765,7 +1765,7 @@ def test_un_tiff_f_o_i_no_es_un_documento_y_no_llega_a_tesseract(
     llamadas = _tesseract_llamado(monkeypatch)
     r = ocr.extraer(destino)
     assert r.estado == "error"
-    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["codigo"] == "formato_no_soportado"
     assert r.detalle["causa"] == "modo_no_soportado"
     assert llamadas == []
 
@@ -1797,7 +1797,7 @@ def test_rc_cero_con_una_marca_de_lectura_fallida_en_stderr_es_tesseract_no_lee(
 
     r = ocr.extraer(_imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD"))
     assert r.estado == "error"
-    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["codigo"] == "formato_no_soportado"
     assert r.detalle["causa"] == "tesseract_no_lee"
     assert r.detalle.get("codigo") != "imagen_sin_texto"
 
@@ -2100,7 +2100,7 @@ def _como_modo_16(img, modo: str):
 
 @pytest.mark.parametrize("modo", ["I;16L", "I;16N"])
 def test_i16l_e_i16n_con_texto_real_se_leen_una_pagina(tmp_path: Path, modo: str):
-    """Con `>> 8` sobre el modo tal cual, I;16N daba una pagina NEGRA (Pillow
+    """Con una conversion de Pillow sobre el modo tal cual, I;16N daba una pagina NEGRA (Pillow
     convierte mal I;16N a I) y terminaba en imagen_sin_texto en silencio."""
     pagina = _pagina_i16(tmp_path, "p.png", [
         "Factura numero 12345 pagada", "Activos totales 1,234,567.89 USD",
@@ -2140,3 +2140,125 @@ def test_i16l_e_i16n_de_una_pagina_realmente_uniforme_es_sin_texto_legitimo(tmp_
     x = Image.frombytes(modo, (300, 200), b"\x00\x10" * (300 * 200))
     r = ocr._ocr_bytes(ocr._a_png(ocr._a_modo_legible(x)), "spa")
     assert r is not None and r["clasificacion"] == "sin_texto"
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 7: N22 (I;16 con valores 0-255) y N23 (codigo por causa)
+# ---------------------------------------------------------------------------
+
+_LINEAS_ACTIVOS = [
+    "Activos totales 1,234,567.89 USD", "Pasivos totales 987,654.32 USD",
+    "Patrimonio neto 246,913.57 USD", "Factura numero 12345 pagada",
+]
+
+
+def _pagina_16_con_factor(tmp_path: Path, nombre: str, lineas: list, factor: int):
+    """Pagina con texto real en I;16 con valores = gris x `factor`: 1 -> 0-255
+    (lo que produce `convert("I").convert("I;16")` de una imagen de 8 bits),
+    16 -> 12 bits (0-4080), 200 -> rango casi completo (0-51000)."""
+    from PIL import Image
+
+    base = _imagen_multilinea(tmp_path / nombre, lineas)
+    return Image.open(base).convert("L").convert("I").point(
+        lambda v: v * factor).convert("I;16")
+
+
+@pytest.mark.parametrize("factor", [1, 16, 200])
+def test_n22_una_pagina_i16_con_cualquier_rango_se_lee(tmp_path: Path, factor: int):
+    """I;16 con valores 0-255: leptonica toma el byte ALTO y salia negro
+    (ok/imagen_sin_texto). Se arma un L con los bytes bajos, sin escalar."""
+    destino = tmp_path / f"I16_f{factor}.png"
+    _pagina_16_con_factor(tmp_path, "b.png", _LINEAS_ACTIVOS, factor).save(destino)
+    r = ocr.extraer(destino)
+    assert r.estado in {"ok", "parcial"}
+    assert "Activos" in r.salidas["texto.txt"]
+
+
+@pytest.mark.parametrize("factor", [1, 16, 200])
+def test_n22_un_tiff_i16_de_dos_paginas_con_cualquier_rango_se_lee(tmp_path: Path, factor):
+    p1 = _pagina_16_con_factor(tmp_path, "a.png", [
+        "Primera pagina del contrato"] + _LINEAS_ACTIVOS[:3], factor)
+    p2 = _pagina_16_con_factor(tmp_path, "b.png", [
+        "Segunda pagina de anexos", "Garantia hipotecaria sobre inmueble",
+        "Avaluo comercial 5,000,000.00 USD", "Firmado ante notario publico"], factor)
+    tif = tmp_path / f"dos_f{factor}.tif"
+    p1.save(tif, save_all=True, append_images=[p2])
+    r = ocr.extraer(tif)
+    assert "Primera pagina" in r.salidas["texto.txt"]
+    assert "Segunda pagina" in r.salidas["texto.txt"]
+
+
+def test_n22_i16b_con_valores_0_255_tambien_se_lee(tmp_path: Path):
+    from PIL import Image
+
+    pagina = _pagina_16_con_factor(tmp_path, "b.png", _LINEAS_ACTIVOS, 1)
+    le = pagina.tobytes()
+    be = bytearray(le)
+    be[0::2], be[1::2] = le[1::2], le[0::2]
+    destino = tmp_path / "i16b.tif"
+    Image.frombytes("I;16B", pagina.size, bytes(be)).save(destino)
+    assert Image.open(destino).mode == "I;16B"
+    r = ocr.extraer(destino)
+    assert "Activos" in r.salidas["texto.txt"]
+
+
+@pytest.mark.parametrize("modo", ["I;16L", "I;16N"])
+def test_n22_i16l_e_i16n_con_valores_0_255_se_leen(tmp_path: Path, modo: str):
+    pagina = _pagina_16_con_factor(tmp_path, "b.png", _LINEAS_ACTIVOS, 1)
+    x = _como_modo_16(pagina, modo)
+    r = ocr._ocr_bytes(ocr._a_png(ocr._a_modo_legible(x)), "spa")
+    assert r is not None and "Activos" in r["texto"]
+
+
+def test_n22_el_l_se_arma_con_los_bytes_bajos_sin_escalar(tmp_path: Path):
+    pagina = _pagina_16_con_factor(tmp_path, "b.png", _LINEAS_ACTIVOS, 1)
+    legible = ocr._a_modo_legible(pagina)
+    assert legible.mode == "L"
+    assert legible.tobytes() == pagina.tobytes()[0::2]
+    ancho = _pagina_16_con_factor(tmp_path, "c.png", _LINEAS_ACTIVOS, 200)
+    assert ocr._a_modo_legible(ancho).mode.startswith("I;16")
+
+
+@pytest.mark.parametrize("causa,codigo", [
+    ("firma_invalida", "archivo_ilegible"),
+    ("no_decodifica", "archivo_ilegible"),
+    ("modo_no_soportado", "formato_no_soportado"),
+    ("animacion_no_soportada", "formato_no_soportado"),
+    ("tesseract_no_lee", "formato_no_soportado"),
+    ("demasiados_pixeles", "imagen_demasiado_grande"),
+    ("demasiadas_paginas", "imagen_demasiado_grande"),
+])
+def test_n23_cada_causa_tiene_su_codigo_y_su_razon(causa: str, codigo: str):
+    """`archivo_ilegible` (dañado) SOLO para firma invalida, no decodifica y
+    truncados. Un archivo SANO de un formato que no leemos es
+    `formato_no_soportado`; `tesseract_no_lee` tambien (Pillow ya lo decodifico:
+    si leptonica lo rechaza, no esta dañado). Los topes de tamano son
+    `imagen_demasiado_grande`."""
+    d = ocr._ilegible(causa, "spa").detalle
+    assert d["codigo"] == codigo and d["causa"] == causa
+    if codigo == "formato_no_soportado":
+        assert d["razon"].startswith("formato de imagen no soportado (")
+        assert "danado" not in d["razon"]
+    if codigo == "imagen_demasiado_grande":
+        assert "danado" not in d["razon"]
+    if codigo == "archivo_ilegible":
+        assert "danado" in d["razon"]
+
+
+def test_n23_un_bmp_rgb565_sano_es_formato_no_soportado_y_no_danado(tmp_path: Path):
+    """Pillow lo decodifica; leptonica no lee BMP comprimidos (rc=1 con
+    pixReadMemBmp)."""
+    import struct
+
+    ancho, alto = 64, 32
+    pix = struct.pack("<H", 0xFFFF) * (ancho * alto)
+    info = struct.pack("<IiiHHIIiiII", 40, ancho, alto, 1, 16, 3, len(pix), 2835, 2835, 0, 0)
+    masks = struct.pack("<III", 0xF800, 0x07E0, 0x001F)
+    desplazamiento = 14 + 40 + 12
+    bmp = b"BM" + struct.pack("<IHHI", desplazamiento + len(pix), 0, 0, desplazamiento) + info + masks + pix
+    destino = tmp_path / "565.bmp"
+    destino.write_bytes(bmp)
+    r = ocr.extraer(destino)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "formato_no_soportado"
+    assert r.detalle["causa"] == "tesseract_no_lee"
