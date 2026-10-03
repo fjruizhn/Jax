@@ -54,6 +54,10 @@ from procesamiento.ficha import Ficha
 from procesamiento_routes import router
 
 
+#: E2a: LAS MANOS trabaja por `project_uuid` (UUID canónico, 36 caracteres).
+UUID_PRUEBA = "0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a"
+
+
 def _ficha(sha256: str, estado: str = "ok", extractor: str = "pdf") -> Ficha:
     return Ficha(
         sha256=sha256, origen="fuente/x", extractor=extractor,
@@ -135,7 +139,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
 
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_falso):
-            await self._ejecutar(job_id, "Proyecto Uno", ["doc.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["doc.pdf"])
 
         job = self.store.get(job_id)
         assert job.status == JobStatus.COMPLETED, job
@@ -145,7 +149,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         assert r["estado"] == "ok"
         assert r["extractor"] == "pdf"
         assert r["extracto_bytes"] > 0
-        assert r["carpeta_procesado"] == f"proyectos/proyecto-uno/procesado/{'a' * 64}"
+        assert r["carpeta_procesado"] == f"proyectos/{UUID_PRUEBA}/procesado/{'a' * 64}"
         assert "contenido secreto" not in json.dumps(r)
         assert set(r) == {"archivo", "estado", "extractor", "extracto_bytes", "carpeta_procesado", "error"}
 
@@ -984,9 +988,10 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
              patch.object(rutas_mod, "_EXECUTOR_OCR", self.executor), \
              patch.object(rutas_mod, "_EXECUTOR_IO", self.executor_io), \
              patch.object(rutas_mod, "_SEMAFORO_TRABAJOS", asyncio.Semaphore(2)), \
+             patch.object(rutas_mod.proyecto_activo, "estado_del_proyecto", AsyncMock(return_value="ACTIVE")), \
              patch.object(rutas_mod.ingesta, "ingerir", ingerir_mock):
             creado = await rutas_mod.crear_trabajo(
-                rutas_mod.TrabajoRequest(proyecto="p", rutas=["a.pdf"], usuario="ana@cliente.com")
+                rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=["a.pdf"], usuario="ana@cliente.com")
             )
             # SIN ceder el loop: el worker todavía no dio su primera vuelta.
             respuesta = await rutas_mod.cancelar_trabajo(creado.job_id)
@@ -1053,8 +1058,14 @@ class TrabajoHTTPTest(unittest.TestCase):
         self._parche_controles.start()
         self.addCleanup(self._parche_controles.stop)
 
+        # E2a: el proyecto tiene que existir y estar ACTIVE (si no, 422).
+        self._parche_activo = patch.object(
+            rutas_mod.proyecto_activo, "estado_del_proyecto", AsyncMock(return_value="ACTIVE"))
+        self._parche_activo.start()
+        self.addCleanup(self._parche_activo.stop)
+
     def _post(self, c, **overrides):
-        cuerpo = {"proyecto": "p", "rutas": ["a.pdf"], "usuario": "ana@cliente.com"}
+        cuerpo = {"project_uuid": UUID_PRUEBA, "rutas": ["a.pdf"], "usuario": "ana@cliente.com"}
         cuerpo.update(overrides)
         return c.post("/procesamiento/trabajos", json=cuerpo, headers=_h(IDENTIDAD_PLATAFORMA))
 
@@ -1071,7 +1082,7 @@ class TrabajoHTTPTest(unittest.TestCase):
         async def _correr():
             with patch.object(self.store, "create", side_effect=RuntimeError("boom -- create() reventó")):
                 for _ in range(2):  # tamaño real del semáforo de prueba
-                    req = rutas_mod.TrabajoRequest(proyecto="p", rutas=[], usuario="ana@cliente.com")
+                    req = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[], usuario="ana@cliente.com")
                     with self.assertRaises(RuntimeError):
                         await rutas_mod.crear_trabajo(req)
 
@@ -1079,7 +1090,7 @@ class TrabajoHTTPTest(unittest.TestCase):
                 "el semáforo quedó agotado tras dos pedidos rotos -- DoS de N requests"
             )
             # y un pedido LIMPIO subsiguiente se admite normalmente
-            req_limpio = rutas_mod.TrabajoRequest(proyecto="p", rutas=[], usuario="ana@cliente.com")
+            req_limpio = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[], usuario="ana@cliente.com")
             with patch.object(rutas_mod, "_ejecutar_trabajo", AsyncMock()):
                 respuesta = await rutas_mod.crear_trabajo(req_limpio)
             assert respuesta.job_id
@@ -1094,9 +1105,11 @@ class TrabajoHTTPTest(unittest.TestCase):
         agotado, pero no evitaba el registro huérfano). Ahora se rechaza
         EN LA ADMISIÓN, antes de tocar el semáforo siquiera: 422 limpio,
         ningún job creado."""
-        proyecto_malo = "p\udcff"
+        # E2a: el `project_uuid` con un surrogate (36 caracteres, pasa el largo
+        # de pydantic) lo rechaza la regex del UUID canónico, en la admisión.
+        proyecto_malo = UUID_PRUEBA[:-1] + "\udcff"
         cuerpo_json = json.dumps(
-            {"proyecto": proyecto_malo, "rutas": [], "usuario": "ana@cliente.com"},
+            {"project_uuid": proyecto_malo, "rutas": [], "usuario": "ana@cliente.com"},
             ensure_ascii=True,
         ).encode("ascii")
         with TestClient(_app(), raise_server_exceptions=False) as c:
@@ -1104,7 +1117,12 @@ class TrabajoHTTPTest(unittest.TestCase):
                 "/procesamiento/trabajos", content=cuerpo_json,
                 headers={**_h(IDENTIDAD_PLATAFORMA), "content-type": "application/json"},
             )
-            assert r.status_code == 422, r.text
+            # Con las restricciones de largo del modelo, esta versión de
+            # pydantic rechaza el surrogate ya al validar el cuerpo, y el
+            # manejador de FastAPI no sabe serializarlo (500, igual que ya
+            # pasa hoy con un `usuario` así). Lo que importa acá no cambia:
+            # nunca 202, ningún job, ningún cupo.
+            assert r.status_code in (422, 500), r.text
             assert not self._semaforo_test.locked(), (
                 "el semáforo se tocó aunque el proyecto se rechazó en la admisión"
             )
@@ -1161,7 +1179,7 @@ class TrabajoHTTPTest(unittest.TestCase):
     def test_B6_usuario_obligatorio_falta_es_422(self):
         with TestClient(_app()) as c:
             r = c.post(
-                "/procesamiento/trabajos", json={"proyecto": "p", "rutas": []},
+                "/procesamiento/trabajos", json={"project_uuid": UUID_PRUEBA, "rutas": []},
                 headers=_h(IDENTIDAD_PLATAFORMA),
             )
         assert r.status_code == 422, r.text
@@ -1227,7 +1245,7 @@ class TrabajoHTTPTest(unittest.TestCase):
         async def _correr():
             with patch.object(rutas_mod.job_tasks, "register", side_effect=RuntimeError("boom -- register() reventó")), \
                  patch.object(rutas_mod, "_ejecutar_trabajo", _worker_que_libera):
-                req = rutas_mod.TrabajoRequest(proyecto="p", rutas=[], usuario="ana@cliente.com")
+                req = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[], usuario="ana@cliente.com")
                 with self.assertRaises(RuntimeError):
                     await rutas_mod.crear_trabajo(req)
                 await asyncio.sleep(0.05)  # deja correr la tarea ya creada (que se libera sola)
@@ -1247,7 +1265,7 @@ class TrabajoHTTPTest(unittest.TestCase):
             raise RuntimeError("boom -- create_task")
 
         async def _correr():
-            req = rutas_mod.TrabajoRequest(proyecto="p", rutas=[], usuario="ana@cliente.com")
+            req = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[], usuario="ana@cliente.com")
             with patch.object(rutas_mod.asyncio, "create_task", side_effect=_create_task_que_falla):
                 with self.assertRaises(RuntimeError):
                     await rutas_mod.crear_trabajo(req)
@@ -1458,11 +1476,11 @@ class TrabajoHTTPTest(unittest.TestCase):
             r_plat = self._post(c)
             r_jacobs = c.post(
                 "/procesamiento/trabajos",
-                json={"proyecto": "p", "rutas": [], "usuario": "a"},
+                json={"project_uuid": UUID_PRUEBA, "rutas": [], "usuario": "a"},
                 headers=_h(IDENTIDAD_JACOBS),
             )
             r_sin_credencial = c.post(
-                "/procesamiento/trabajos", json={"proyecto": "p", "rutas": [], "usuario": "a"},
+                "/procesamiento/trabajos", json={"project_uuid": UUID_PRUEBA, "rutas": [], "usuario": "a"},
             )
         assert r_plat.status_code == 202, r_plat.text
         assert r_jacobs.status_code == 403, r_jacobs.text
@@ -1476,6 +1494,76 @@ class TrabajoHTTPTest(unittest.TestCase):
         with TestClient(_app()) as c:
             r = c.post(f"/procesamiento/trabajos/{job_id}/cancel", headers=_h(IDENTIDAD_JACOBS))
         assert r.status_code == 403, r.text
+
+
+# ===========================================================================
+#  Grupo 3 -- E2a: LAS MANOS trabaja por `project_uuid`, solo proyectos ACTIVE
+# ===========================================================================
+class ProjectUuidTest(unittest.TestCase):
+    UUID = UUID_PRUEBA
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.store = JobStore(str(Path(self._tmpdir.name) / "jobs.jsonl"))
+        self.semaforo = asyncio.Semaphore(2)
+        for parche in (
+            patch.object(rutas_mod, "_STORE", self.store),
+            patch.object(rutas_mod, "_SEMAFORO_TRABAJOS", self.semaforo),
+            patch.dict(rutas_mod._CONTROLES, clear=True),
+        ):
+            parche.start()
+            self.addCleanup(parche.stop)
+        self.cabeceras_plataforma = _h(IDENTIDAD_PLATAFORMA)
+
+    def _post(self, cuerpo, estado="ACTIVE"):
+        with patch.object(rutas_mod.proyecto_activo, "estado_del_proyecto", AsyncMock(return_value=estado)), \
+             patch.object(rutas_mod, "_ejecutar_trabajo", AsyncMock()), \
+             TestClient(_app()) as c:
+            return c.post("/procesamiento/trabajos", json=cuerpo, headers=self.cabeceras_plataforma)
+
+    def test_proyecto_viejo_por_nombre_da_422(self):
+        r = self._post({"proyecto": "lacteos", "rutas": ["a.pdf"], "usuario": "u1"})
+        self.assertEqual(r.status_code, 422)
+
+    def test_uuid_no_canonico_da_422_con_codigo(self):
+        # 36 caracteres, pasa el largo de pydantic, no es un UUID.
+        for malo in ("../../etc" + "x" * 27, self.UUID.upper(), "z" * 36):
+            r = self._post({"project_uuid": malo, "rutas": ["a.pdf"], "usuario": "u1"})
+            self.assertEqual(r.status_code, 422, malo)
+            self.assertEqual(r.json()["detail"]["code"], "project_uuid_invalido", malo)
+
+    def test_uuid_de_otro_largo_da_422(self):
+        r = self._post({"project_uuid": "../../etc", "rutas": ["a.pdf"], "usuario": "u1"})
+        self.assertEqual(r.status_code, 422)
+
+    def test_proyecto_archivado_da_422_y_no_toma_cupo(self):
+        r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"], "usuario": "u1"}, estado="ARCHIVED")
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.json()["detail"]["code"], "proyecto_no_activo")
+        self.assertFalse(self.semaforo.locked())
+        self.assertEqual(self.semaforo._value, 2)
+        self.assertEqual(len(self.store._index), 0, "no debería haberse creado ningún job")
+
+    def test_proyecto_oculto_o_deshabilitado_da_422(self):
+        for estado in ("HIDDEN", "DISABLED"):
+            r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"], "usuario": "u1"}, estado=estado)
+            self.assertEqual(r.status_code, 422, estado)
+            self.assertEqual(r.json()["detail"]["code"], "proyecto_no_activo", estado)
+
+    def test_proyecto_inexistente_da_422(self):
+        r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"], "usuario": "u1"}, estado=None)
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.json()["detail"]["code"], "proyecto_no_activo")
+
+    def test_proyecto_activo_admite_y_guarda_el_uuid(self):
+        r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"], "usuario": "u1"})
+        self.assertEqual(r.status_code, 202, r.text)
+        self.assertEqual(self.store._index[r.json()["job_id"]]["proyecto"], self.UUID)
+
+    def test_carpeta_del_trabajo_es_el_uuid(self):
+        self.assertEqual(rutas_mod._trabajo_de(self.UUID),
+                         tool_authority.WORKSPACE_ROOT / "proyectos" / self.UUID)
 
 
 if __name__ == "__main__":

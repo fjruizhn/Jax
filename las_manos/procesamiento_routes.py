@@ -9,7 +9,7 @@ y `endpoint-hallazgos-r2.md`).
 un PDF escaneado de 30 páginas tarda ~80s (2,7s/página medidos), y una
 petición HTTP no puede quedarse esperando eso.
 
-    POST /procesamiento/trabajos             {proyecto, rutas[], usuario} -> {job_id} (202)
+    POST /procesamiento/trabajos             {project_uuid, rutas[], usuario} -> {job_id} (202)
     GET  /procesamiento/trabajos/{id}        -> estado + resultados por archivo
     POST /procesamiento/trabajos/{id}/cancel -> deja de programar archivos nuevos
 
@@ -116,6 +116,8 @@ from motor_registry.job_store import JobStore
 from motor_registry.models import JobStatus
 from procesamiento import ingesta
 
+import proyecto_activo
+
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -160,10 +162,13 @@ _SEMAFORO_TRABAJOS = asyncio.Semaphore(_MAX_WORKERS)
 # de B-2. El pedido puede partirse en varios `POST`.
 _MAX_RUTAS_POR_TRABAJO = int(os.getenv("JAX_PROCESAMIENTO_MAX_RUTAS", "50"))
 
-# MINOR-6: tope de longitud de `proyecto` -- sin esto, un `proyecto`
-# arbitrariamente largo infla el JSONL append-only sin límite (cada
-# `update()` re-esparce el estado ENTERO).
-_MAX_PROYECTO_LEN = 200
+#: E2a: el proyecto se identifica por `project_uuid`, un UUID canónico
+#: (minúsculas, 36 caracteres, ASCII). Tope de largo fijo por construcción:
+#: ya no hay un nombre libre que infle el JSONL (antes MINOR-6) ni que haya
+#: que validar como UTF-8 (antes MINOR-B).
+_UUID_CANONICO = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 
 #: B-6: `usuario` no vacío, tope de largo -- antes `""` y un string de 2MB
 #: daban 202 los dos, y el de 2MB inflaba el JSONL en 4MB (se re-esparce
@@ -178,7 +183,7 @@ router = APIRouter(prefix="/procesamiento", tags=["procesamiento"])
 #  Modelos
 # ---------------------------------------------------------------------------
 class TrabajoRequest(BaseModel):
-    proyecto: str
+    project_uuid: str = Field(min_length=36, max_length=36)
     rutas: list[str]
     # B-6: principal obligatorio, no vacío, con tope -- jax-platform ya
     # tiene el JWT del usuario; que lo pase. No es autorización completa
@@ -235,8 +240,10 @@ def _tamano_extracto(carpeta: Path) -> int:
     )
 
 
-def _trabajo_de(proyecto: str) -> Path:
-    return tool_authority.WORKSPACE_ROOT / "proyectos" / _slug(proyecto)
+def _trabajo_de(project_uuid: str) -> Path:
+    # El uuid ya pasó `_UUID_CANONICO` en la admisión: no hace falta slug, y
+    # renombrar el proyecto no mueve archivos.
+    return tool_authority.WORKSPACE_ROOT / "proyectos" / project_uuid
 
 
 def _codificable_utf8(s: str) -> bool:
@@ -636,20 +643,17 @@ async def crear_trabajo(req: TrabajoRequest) -> TrabajoCreadoResponse:
                 "partilo en más de un pedido"
             ),
         )
-    proyecto = req.proyecto[:_MAX_PROYECTO_LEN]  # MINOR-6
-    # MINOR-B: validado ANTES del `acquire()` -- `_STORE.create()` corre
-    # DESPUÉS de tomar el semáforo, y un `proyecto` no codificable a UTF-8
-    # lo hace reventar ahí (ver N-1: el `try/finally` de más abajo absorbe
-    # esa falla sin filtrar el permiso, pero un registro `pending` que
-    # nunca avanza -- `create()` YA escribió, `update(proyecto=...)` es
-    # quien revienta -- quedaba de todos modos). Rechazar acá cierra el
-    # vector en el origen: ni se toca el semáforo, ni queda un registro a
-    # medias.
-    if not _codificable_utf8(proyecto):
-        raise HTTPException(
-            status_code=422,
-            detail="el proyecto no se puede codificar a UTF-8 (caracteres inválidos)",
-        )
+    # E2a: validado ANTES del `acquire()` -- un proyecto inválido o no ACTIVE
+    # no toma cupo ni deja un registro `pending`. LAS MANOS no verifica
+    # membresía (solo la credencial de plataforma llega acá, y jax-platform ya
+    # verificó el papel): esto solo impide trabajar sobre un proyecto
+    # archivado, oculto o inexistente. El uuid es ASCII por la regex, así que
+    # tampoco hace falta chequear que se codifique a UTF-8.
+    if not _UUID_CANONICO.fullmatch(req.project_uuid):
+        raise HTTPException(status_code=422, detail={"code": "project_uuid_invalido"})
+    if await proyecto_activo.estado_del_proyecto(req.project_uuid) != "ACTIVE":
+        raise HTTPException(status_code=422, detail={"code": "proyecto_no_activo"})
+    proyecto = req.project_uuid
     if _SEMAFORO_TRABAJOS.locked():
         raise HTTPException(
             status_code=429,

@@ -830,7 +830,7 @@ jobs:
           asyncio.run(main())
           print("run_migrations OK")
           PY
-      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py tests/test_project_queries_mariadb.py tests/test_proyectos_e1_fks_mariadb.py tests/test_proyectos_e1_migrar_mariadb.py tests/test_project_documents_schema_mariadb.py scripts/_b9_revertir_005_test.py
+      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py tests/test_project_queries_mariadb.py tests/test_proyectos_e1_fks_mariadb.py tests/test_proyectos_e1_migrar_mariadb.py tests/test_project_documents_schema_mariadb.py tests/test_proyecto_activo_mariadb.py scripts/_b9_revertir_005_test.py
       - name: Piso exacto de tests CORRIDOS
         # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
         run: |
@@ -841,7 +841,7 @@ jobs:
             jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py \
             tests/test_project_queries_mariadb.py tests/test_proyectos_e1_fks_mariadb.py \
             tests/test_proyectos_e1_migrar_mariadb.py tests/test_project_documents_schema_mariadb.py \
-            scripts/_b9_revertir_005_test.py 2>&1 | tee /tmp/out
+            tests/test_proyecto_activo_mariadb.py scripts/_b9_revertir_005_test.py 2>&1 | tee /tmp/out
           # 31 el 2026-09-16 (frente F): 20 contra la base (esquema 5, emision 7,
           #   consumo 8 con la carrera de 20, la carrera forzada, el EXPLAIN y el paso
           #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
@@ -1079,8 +1079,11 @@ jobs:
           # 274 -> 278 (2026-10-03, Proyectos E2a T1, migracion 006a): +4 de
           #   tests/test_project_documents_schema_mariadb.py. Numero LOCAL (el job
           #   completo no corre aca): el controlador lo re-mide con el runner.
-          grep -qE "^278 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 278 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 278 -> 281 (2026-10-03, Proyectos E2a T2, LAS MANOS por project_uuid): +3 de
+          #   tests/test_proyecto_activo_mariadb.py (ACTIVE, ARCHIVED, uuid inexistente).
+          #   Numero LOCAL: el controlador lo re-mide con el runner.
+          grep -qE "^281 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 281 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -5433,11 +5436,15 @@ jobs:
       # (`main()`) llama a `procesar()` con lo que parseó de `sys.argv`.
       # Corre sobre archivos SINTETICOS (`.xlsx` armado con openpyxl, `.txt`
       # plano) -- ningún documento de cliente entra al repo.
+      # 6 -> 12 el 2026-10-03 (Proyectos E2a T2, `--project-uuid`): +5 del parametrizado
+      #   que rechaza un uuid no canónico, +1 de `main()` sin `--project-uuid`.
+      #   Local: 11 passed + 1 skipped (el `.xlsx` necesita openpyxl, que el runner
+      #   instala) = 12 en el runner. Número LOCAL: lo re-mide el runner.
       - name: Procesar archivos -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q scripts/_procesar_archivos_test.py 2>&1 | tee /tmp/procesar_archivos_tests
-          grep -qE "^6 passed" /tmp/procesar_archivos_tests || {
-            echo "PISO ROTO: se esperaban 6 tests CORRIDOS del guion de procesar_archivos. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+          grep -qE "^12 passed" /tmp/procesar_archivos_tests || {
+            echo "PISO ROTO: se esperaban 12 tests CORRIDOS del guion de procesar_archivos. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
       # Endpoint de Procesamiento de Archivos (2026-09-20): `procesamiento/`
       # (jax#252) estaba terminado pero nadie lo llamaba desde HTTP.
@@ -5570,11 +5577,16 @@ jobs:
       #       contra f1d4298, +1 del control huérfano si falla `create_task`.
       #   52 + 4 = 56. Docker python:3.12-slim sobre `git archive` del
       #   commit final. Si el runner da otro número, manda el runner.
+      # 56 -> 64 el 2026-10-03 (Proyectos E2a T2, LAS MANOS por `project_uuid`):
+      #   +8 en `ProjectUuidTest` (`proyecto` viejo, uuid no canónico x2, archivado
+      #   sin cupo, oculto/deshabilitado, inexistente, ACTIVE guarda el uuid,
+      #   carpeta = uuid). Ninguna prueba vieja se borró: las que mandaban
+      #   `proyecto` pasan a `project_uuid`. Número LOCAL: lo re-mide el runner.
       - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
-          grep -qE "^56 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 56 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          grep -qE "^64 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 64 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
