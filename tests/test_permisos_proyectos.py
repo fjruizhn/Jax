@@ -264,7 +264,7 @@ def _acl_disponible_en(directorio: Path) -> bool:
 
 
 def _recorrer_directo(proyectos: Path, *, accion: str, extra_codigo: str = "", puede_fallar: bool = False,
-                      conceder_al_terminar: bool = True) -> dict:
+                      conceder_al_terminar: bool = True, procesos_simulados: list | None = None) -> dict:
     """pp._recorrer() como root, bypaseando la fijación de RAIZ de la CLI pública. Con `puede_fallar`, un
     ErrorPermisosProyectos vuelve como {"error": texto} en vez de romper la prueba."""
     codigo = f"""
@@ -272,6 +272,8 @@ import sys, json
 sys.path.insert(0, {str(RAIZ_REPO / "ops")!r})
 import permisos_proyectos as pp
 pp.ENTRADAS_EXTRA_PERMITIDAS = {{{_usuario_de_pruebas()!r}}}
+# El arbol de pruebas no depende de los procesos reales del host (en hall9000 corren las unidades jaxsvc):
+pp._procesos_de_usuario = lambda uid: {list(procesos_simulados or [])!r}
 hook = None
 hook_raiz = None
 hook_entre = None
@@ -1821,6 +1823,7 @@ import sys, json, os, subprocess
 sys.path.insert(0, {str(RAIZ_REPO / "ops")!r})
 import permisos_proyectos as pp
 pp.ENTRADAS_EXTRA_PERMITIDAS = {{{_usuario_de_pruebas()!r}}}
+pp._procesos_de_usuario = lambda uid: []     # el arbol de pruebas no depende de los procesos reales del host
 objetivo_ino = os.stat({str(archivo)!r}).st_ino
 sondeos = []
 def _sondear(etapa, fd):
@@ -2772,6 +2775,165 @@ pp._recorrer = _con_hook
     assert out["rc"] == 1, out
 
 
+# --- ronda 12: sin procesos jaxsvc vivos no hay quien renombre mientras root recorre el arbol ----------------
+
+_UNIDADES = ("jax-las-manos", "jax-platform", "jax-ariadna-pm", "jax-ejecutor-proxy", "jax-catalogo-modelos")
+
+
+def _secuencia_de_procesos(secuencia: list) -> str:
+    """Codigo de prueba: `_procesos_de_usuario` devuelve cada elemento de `secuencia` en llamadas sucesivas (el
+    ultimo se repite). Llamadas de --aplicar: al empezar, justo antes de mutar y al terminar."""
+    return f"""
+_seq = {secuencia!r}
+_n = {{"i": 0}}
+def _procs(uid):
+    i = min(_n["i"], len(_seq) - 1)
+    _n["i"] += 1
+    return list(_seq[i])
+pp._procesos_de_usuario = _procs
+"""
+
+
+@pytest.mark.parametrize("accion", ["aplicar", "deshacer"])
+def test_con_procesos_de_jaxsvc_vivos_falla_cerrado_sin_mutar_nada(arbol_temporal, _identidades, accion):
+    """Todas las carreras de renombre parten de un proceso jaxsvc VIVO que renombra mientras root recorre el arbol.
+    Con cualquiera, `--aplicar` y `--deshacer` fallan cerrado ANTES de la pasada previa y no cambian nada; el mensaje
+    nombra los pids y las unidades que hay que detener."""
+    proyectos = arbol_temporal / "proyectos"
+    if accion == "deshacer":
+        assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    objetos = [arbol_temporal, proyectos, proyectos / "un-proyecto", proyectos / "un-proyecto" / "archivo.txt"]
+    antes = {d: _foto_completa(d) for d in objetos}
+    datos = _recorrer_directo(proyectos, accion=accion, procesos_simulados=[4242, 4243], puede_fallar=True,
+                              conceder_al_terminar=False)
+    assert "error" in datos, datos
+    assert "hay procesos de jaxsvc vivos (pids 4242, 4243)" in datos["error"], datos["error"]
+    for unidad in _UNIDADES:
+        assert unidad in datos["error"], (unidad, datos["error"])
+    assert "timers" in datos["error"] and f"antes de {'aplicar' if accion == 'aplicar' else 'deshacer'}" in datos["error"]
+    assert datos["a_medio"] is False
+    assert {d: _foto_completa(d) for d in objetos} == antes, "se mutó algo pese a los procesos de jaxsvc"
+
+
+@pytest.mark.parametrize("accion", ["aplicar", "deshacer"])
+def test_sin_procesos_de_jaxsvc_aplica_y_deshace(arbol_temporal, _identidades, accion):
+    proyectos = arbol_temporal / "proyectos"
+    if accion == "deshacer":
+        assert not _recorrer_directo(proyectos, accion="aplicar", procesos_simulados=[])["no_cumple"]
+    datos = _recorrer_directo(proyectos, accion=accion, procesos_simulados=[])
+    assert "error" not in datos and not datos["no_cumple"], datos
+    esperado = "jaxsvc" if accion == "aplicar" else "fruiz"
+    assert pwd.getpwuid((proyectos / "un-proyecto").stat().st_uid).pw_name == esperado
+
+
+@pytest.mark.parametrize("accion", ["aplicar", "deshacer"])
+def test_un_proceso_jaxsvc_que_aparece_justo_antes_de_mutar_falla_cerrado_sin_mutar(arbol_temporal, _identidades, accion):
+    proyectos = arbol_temporal / "proyectos"
+    if accion == "deshacer":
+        assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    objetos = [arbol_temporal, proyectos, proyectos / "un-proyecto", proyectos / "un-proyecto" / "archivo.txt"]
+    antes = {d: _foto_completa(d) for d in objetos}
+    datos = _recorrer_directo(proyectos, accion=accion, puede_fallar=True, conceder_al_terminar=False,
+                              extra_codigo=_secuencia_de_procesos([[], [777]]))
+    assert "error" in datos and "hay procesos de jaxsvc vivos (pids 777)" in datos["error"], datos
+    assert datos["a_medio"] is False, "no habia empezado a mutar"
+    assert {d: _foto_completa(d) for d in objetos} == antes, "se mutó algo pese al proceso de jaxsvc"
+
+
+@pytest.mark.parametrize("accion", ["aplicar", "deshacer"])
+def test_un_proceso_jaxsvc_que_aparece_durante_la_mutacion_se_anota_y_el_cliente_no_dice_ok(
+        arbol_temporal, _identidades, accion):
+    proyectos = arbol_temporal / "proyectos"
+    if accion == "deshacer":
+        assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    out = _ciclo_nucleo_cliente(proyectos, arbol_temporal, accion, _secuencia_de_procesos([[], [], [777]]))
+    no_cumple = (out["json"] or {}).get("no_cumple", [])
+    assert any("procesos de jaxsvc" in l and "777" in l and "durante" in l for l in no_cumple), out
+    assert out["rc"] == 1, out
+    assert "OK: deshecho" not in out["stdout"] and "aplicado y verificado" not in out["stdout"], out
+
+
+def test_verificar_no_exige_que_no_haya_procesos_de_jaxsvc(arbol_temporal, _identidades):
+    """`--verificar` es de solo lectura: no hay carrera que cerrar."""
+    datos = _recorrer_directo(arbol_temporal / "proyectos", accion="verificar", procesos_simulados=[999],
+                              puede_fallar=True, conceder_al_terminar=False)
+    assert "error" not in datos, datos
+
+
+def test_si_la_cuenta_jaxsvc_no_existe_falla_cerrado(arbol_temporal, _identidades):
+    proyectos = arbol_temporal / "proyectos"
+    datos = _recorrer_directo(proyectos, accion="aplicar", puede_fallar=True, conceder_al_terminar=False,
+                              extra_codigo='pp.USUARIO = "cuenta-que-no-existe-xyz"')
+    assert "error" in datos and "no existe la cuenta cuenta-que-no-existe-xyz" in datos["error"], datos
+    assert datos["a_medio"] is False
+
+
+def test_la_inspeccion_de_procesos_lee_los_cuatro_uid_de_proc_status(tmp_path):
+    """Real, uid, guardado y fs (los cuatro campos de `Uid:`); ignora lo que no es un pid y lo ilegible."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("permisos_proyectos", SCRIPT)
+    pp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pp)
+    casos = {"101": "Name:\tx\nUid:\t994\t0\t0\t0\n", "102": "Uid:\t0\t994\t0\t0\n", "103": "Uid:\t0\t0\t994\t0\n",
+             "104": "Uid:\t0\t0\t0\t994\n", "105": "Uid:\t0\t1000\t0\t0\n", "106": "Uid:\tbasura\n",
+             "self": "Uid:\t994\t994\t994\t994\n", "107": "sin linea uid\n"}
+    for pid, texto in casos.items():
+        (tmp_path / pid).mkdir()
+        (tmp_path / pid / "status").write_text(texto)
+    (tmp_path / "108").mkdir()   # sin status: el proceso termino entre el listado y la lectura
+    pp.RUTA_PROC = tmp_path
+    assert pp._procesos_de_usuario(994) == [101, 102, 103, 104]
+
+
+def test_la_inspeccion_real_de_proc_ve_un_proceso_jaxsvc_efimero(_identidades):
+    """Contra el /proc real: un `sleep` lanzado como jaxsvc aparece, y deja de aparecer al terminar."""
+    codigo = f"""
+import sys, json
+sys.path.insert(0, {str(RAIZ_REPO / "ops")!r})
+import permisos_proyectos as pp
+print(json.dumps(pp._procesos_de_usuario(pp.pwd.getpwnam("jaxsvc").pw_uid)))
+"""
+    def vivos() -> set:
+        r = subprocess.run(["sudo", "-n", "python3", "-c", codigo], capture_output=True, text=True, timeout=30)
+        assert r.returncode == 0, r.stdout + r.stderr
+        return set(json.loads(r.stdout.strip().splitlines()[-1]))
+    antes = vivos()
+    proc = subprocess.Popen(["sudo", "-n", "-u", "jaxsvc", "sleep", "30"])
+    try:
+        nuevos = set()
+        for _ in range(50):
+            nuevos = vivos() - antes
+            if nuevos:
+                break
+            time.sleep(0.1)
+        assert nuevos, "la inspeccion no vio el proceso de jaxsvc recien lanzado"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+    for _ in range(50):
+        if not (vivos() & nuevos):
+            break
+        time.sleep(0.1)
+    assert not (vivos() & nuevos), "el proceso terminó pero la inspeccion lo sigue viendo"
+
+
+def test_ninguna_prueba_corre_la_mutacion_sin_sustituir_la_inspeccion_de_procesos():
+    """En hall9000 hay procesos jaxsvc reales: toda prueba cuyo codigo llame a `pp._recorrer(` o a `_cmd_nucleo_*`
+    como root tiene que pasar por un constructor que sustituye `_procesos_de_usuario`."""
+    import ast
+    fuente = Path(__file__).read_text()
+    propia = "test_ninguna_prueba_corre_la_mutacion_sin_sustituir_la_inspeccion_de_procesos"
+    culpables = []
+    for nodo in ast.parse(fuente).body:
+        if isinstance(nodo, ast.FunctionDef) and nodo.name not in (propia, "_recorrer_directo", "_driver_respaldo"):
+            seg = ast.get_source_segment(fuente, nodo) or ""
+            usa = "pp._recorrer(" in seg or "pp._cmd_nucleo" in seg
+            if usa and not any(m in seg for m in ("_procesos_de_usuario", "_recorrer_directo(", "_driver_respaldo(",
+                                                  "_ciclo_nucleo_cliente(", "_sondear_etapas(")):
+                culpables.append(nodo.name)
+    assert not culpables, f"corren la mutacion sin sustituir la inspeccion de procesos: {culpables}"
+
+
 # --- MAJOR-1: la raiz se abre por descriptor, sin seguir symlinks ------------------------------
 
 def _modo_y_acl(ruta: Path) -> tuple[str, list[str]]:
@@ -2908,6 +3070,7 @@ import sys, json, tempfile, os
 sys.path.insert(0, {str(RAIZ_REPO / "ops")!r})
 import permisos_proyectos as pp
 pp.ENTRADAS_EXTRA_PERMITIDAS = {{{_usuario_de_pruebas()!r}}}
+pp._procesos_de_usuario = lambda uid: []     # el arbol de pruebas no depende de los procesos reales del host
 pp.RUTA_RESPALDOS = pp.Path(tempfile.mkdtemp(prefix="respaldos-prueba-"))
 salida = {{}}
 try:
