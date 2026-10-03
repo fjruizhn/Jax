@@ -64,6 +64,7 @@ import grp
 import json
 import os
 import pwd
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1990,7 +1991,7 @@ def test_una_oculta_con_bits_de_otros_hace_fallar_cerrado_y_root_no_la_toca(arbo
     assert "error" in datos, datos
     for ruta in (o["oculta"], o["dato"], o["sub"]):
         assert str(ruta) in datos["error"], (ruta, datos["error"])
-    assert f"chmod -R o-rwx '{o['oculta']}'" in datos["error"], datos["error"]
+    assert f"chmod -R o-rwx -- {shlex.quote(str(o['oculta']))}" in datos["error"], datos["error"]
     assert {d: _foto_completa(d) for d in objetos} == antes, f"--{accion} mutó algo (incluida la oculta) pese a fallar"
 
 
@@ -2163,7 +2164,7 @@ def test_hardlink_dentro_de_una_oculta_no_se_toca_nunca_y_se_falla_cerrado(arbol
     for accion in ("aplicar", "deshacer"):
         datos = _recorrer_directo(proyectos, accion=accion, puede_fallar=True, conceder_al_terminar=False)
         assert "error" in datos and f"hardlink en carpeta oculta: {enlace}" in datos["error"], (accion, datos)
-        assert f"chmod -R o-rwx '{oculta}'" in datos["error"], datos["error"]   # por `abierto.txt`
+        assert f"chmod -R o-rwx -- {shlex.quote(str(oculta))}" in datos["error"], datos["error"]   # por `abierto.txt`
         assert fuera.stat().st_mode & 0o7777 == 0o755, f"--{accion} tocó el modo de un archivo de fuera por un hardlink"
         assert abierto.stat().st_mode & 0o007 == 0o006, f"--{accion} mutó algo pese a fallar cerrado"
 
@@ -2353,7 +2354,6 @@ def test_un_hardlink_creado_entre_la_acl_y_el_chown_no_se_muta_y_se_anota(arbol_
     if accion == "deshacer":
         assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
     dueno_antes = archivo.stat().st_uid
-    modo_antes = archivo.stat().st_mode & 0o7777
     preparar = f"""
 _set = pp._setfacl_reemplazar
 estado = {{"hecho": False}}
@@ -2368,8 +2368,8 @@ pp._setfacl_reemplazar = con_enlace
     assert enlace.exists() and archivo.stat().st_nlink == 2, "el gancho no creó el enlace: la prueba no probó nada"
     assert any("hardlink" in l and str(archivo) in l for l in (out["json"] or {}).get("no_cumple", [])), out
     assert archivo.stat().st_uid == dueno_antes, "se hizo el fchown sobre un inode que ya tenia otro enlace"
-    if accion == "aplicar":
-        assert archivo.stat().st_mode & 0o7777 == modo_antes, "se hizo el fchmod pese al enlace"
+    # (el modo si cambio: la mutacion de la ACL -- anterior al enlace -- ya fija mascara y `other`; lo que no se
+    # hizo despues del enlace es el fchown y el fchmod.)
     assert out["rc"] == 1, out
     assert str(archivo) in out["stdout"] + out["stderr"]
     assert "OK: deshecho" not in out["stdout"] and "aplicado y verificado" not in out["stdout"], out

@@ -61,6 +61,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -103,6 +104,12 @@ _ESPECIALES = stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
 
 class ErrorPermisosProyectos(Exception):
     """Cualquier fallo que tiene que abortar sin aplicar nada más."""
+
+
+# Progreso de la mutación de ESTE proceso (el núcleo es de una sola corrida): `mutando` pasa a True cuando pasó la
+# pasada previa y empieza a cambiar cosas; `ultima` es la última ruta que se empezó a procesar. Si el núcleo falla
+# después, el cliente sabe que el árbol quedó a medias y hasta dónde llegó.
+_PROGRESO: dict = {"mutando": False, "ultima": None}
 
 
 # ============================================================================
@@ -420,6 +427,8 @@ def _es_carpeta_oculta_excluida(entrada: os.DirEntry) -> bool:
 
 def _procesar_directorio(fd_path: int, ruta: str, st: os.stat_result, *, accion: str,
                           resultado: Resultado) -> None:
+    if accion in ("aplicar", "deshacer"):
+        _PROGRESO["ultima"] = ruta
     if accion == "deshacer":
         _deshacer_objeto(fd_path, ruta, resultado, es_directorio=True)
         return
@@ -435,6 +444,8 @@ def _procesar_archivo(fd_path: int, ruta: str, st: os.stat_result, *, accion: st
                        resultado: Resultado) -> None:
     if accion == "previo-oculta":
         return
+    if accion in ("aplicar", "deshacer"):
+        _PROGRESO["ultima"] = ruta
     if st.st_nlink > 1:
         resultado.hardlinks_rechazados.append(f"{ruta} (nlink={st.st_nlink})")
         return
@@ -577,13 +588,14 @@ def _revisar_oculta(nombre: str, dir_fd: int, ruta: str, resultado: Resultado) -
         con_default = any("ACL por defecto" in h for h in hallazgos)
         con_hardlink = any("hardlink en carpeta oculta" in h for h in hallazgos)
         ordenes = []
+        q = shlex.quote(ruta)  # el nombre lo controla quien crea la carpeta: la orden la ejecuta una persona
         if con_otros:
-            ordenes.append(f"chmod -R o-rwx '{ruta}'")
+            ordenes.append(f"chmod -R o-rwx -- {q}")
         if con_default:
-            ordenes.append(f"find '{ruta}' -type d -exec setfacl -d -m o::--- {{}} +")
+            ordenes.append(f"find {q} -type d -exec setfacl -d -m o::--- {{}} +")
         if con_hardlink:
             ordenes.append("(un hardlink no se arregla con chmod: es el mismo inode que otra ruta; ver quién lo enlaza "
-                           f"con `find / -xdev -samefile <archivo>` y quitar el enlace de '{ruta}')")
+                           f"con find / -xdev -samefile <archivo> y quitar el enlace dentro de {q})")
         if ordenes:
             resultado.no_cumple.append(
                 f"{ruta}: corregir a mano -- lo ejecuta una persona, este guion no toca las carpetas ocultas: "
@@ -654,6 +666,7 @@ def _revisar_o_mutar_raiz(fd_raiz: int, ruta: str, *, modo: str, resultado: Resu
         return
 
     if modo == "aplicar" and st.st_mode & stat.S_IRWXO:
+        _PROGRESO["ultima"] = ruta
         fd_real = _reabrir_real(fd_raiz, os.O_RDONLY)
         try:
             os.fchmod(fd_real, stat.S_IMODE(st.st_mode) & ~stat.S_IRWXO)
@@ -690,6 +703,8 @@ def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_d
                 "--deshacer falla cerrado y no cambió nada; una persona tiene que resolver esto antes:\n  "
                 + "\n  ".join(previo_ocultas.no_cumple)
             )
+    if accion in ("aplicar", "deshacer"):
+        _PROGRESO["mutando"], _PROGRESO["ultima"] = True, None  # pasaron las pasadas previas: desde aquí se cambia
     resultado = Resultado()
     if hook_antes_de_raiz is not None:
         hook_antes_de_raiz(str(proyectos.parent))  # solo pruebas: la ventana entre validar y abrir la raiz
@@ -874,6 +889,18 @@ def _revisar_o_mutar_archivo(fd_path: int, ruta: str, st: os.stat_result, *, mut
         resultado.no_cumple.append(f"{ruta}: {'; '.join(faltas)}")
 
 
+def _sigue_sin_hardlink(fd_path: int, ruta: str, resultado: Resultado) -> bool:
+    """Se llama justo ANTES de cada mutación (setfacl, fchown, fchmod) sobre un archivo. Un enlace creado hacia
+    afuera DESPUÉS del fstat es otro nombre del MISMO inode que ya está en el árbol: root solo le aplica lo que ya
+    le iba a aplicar al archivo del árbol, no alcanza ningún archivo exterior distinto. Lo peligroso -- un inode
+    exterior enlazado hacia adentro -- se rechaza por nlink>1 sobre el descriptor. Aun así se vuelve a mirar."""
+    n = os.fstat(fd_path).st_nlink
+    if n > 1:
+        resultado.no_cumple.append(f"hardlink creado durante la mutación: {ruta} (nlink={n}); no se muta más")
+        return False
+    return True
+
+
 def _mutar_archivo(fd_path: int, ruta: str, resultado: Resultado) -> None:
     uid = pwd.getpwnam(USUARIO).pw_uid
     gid = grp.getgrnam(GRUPO).gr_gid
@@ -881,15 +908,21 @@ def _mutar_archivo(fd_path: int, ruta: str, resultado: Resultado) -> None:
     tenia_especiales = bool(os.fstat(fd_path).st_mode & _ESPECIALES)
 
     # ACL CANÓNICA completa que REEMPLAZA a la que hubiera (ver _mutar_directorio).
+    if not _sigue_sin_hardlink(fd_path, ruta, resultado):
+        return
     _setfacl_reemplazar(fd_path, f"u::rw-,u:{USUARIO}:rw-,g::rw-,g:{GRUPO}:rw-,m::rw-,o::---")
 
     # Dueño DESPUÉS de la ACL (MINOR-1): ver _mutar_directorio.
+    if not _sigue_sin_hardlink(fd_path, ruta, resultado):
+        return
     fd_real = _reabrir_real(fd_path, os.O_RDONLY)
     try:
         os.fchown(fd_real, uid, gid)
     finally:
         os.close(fd_real)
 
+    if not _sigue_sin_hardlink(fd_path, ruta, resultado):
+        return
     fd_real = _reabrir_real(fd_path, os.O_RDONLY)
     try:
         st_ahora = os.fstat(fd_real)
@@ -930,15 +963,21 @@ def _deshacer_objeto(fd_path: int, ruta: str, resultado: Resultado, *, es_direct
         _setfacl_reemplazar(fd_path, acl, default=True)
         modo = 0o770
     else:
+        if not _sigue_sin_hardlink(fd_path, ruta, resultado):
+            return
         _setfacl_reemplazar(fd_path, f"u::rw-,u:{USUARIO}:rw-,g::rw-,m::rw-,o::---")
         modo = 0o660
 
+    if not es_directorio and not _sigue_sin_hardlink(fd_path, ruta, resultado):
+        return
     fd_real = _reabrir_real(fd_path, os.O_RDONLY)
     try:
         os.fchown(fd_real, uid, gid)
     finally:
         os.close(fd_real)
 
+    if not es_directorio and not _sigue_sin_hardlink(fd_path, ruta, resultado):
+        return
     fd_real = _reabrir_real(fd_path, os.O_RDONLY)
     try:
         if stat.S_IMODE(os.fstat(fd_real).st_mode) != modo:
@@ -1235,6 +1274,7 @@ def _restaurar_raiz_desde_respaldo(proyectos: Path) -> tuple[bool, str]:
     if modo_guardado is None:
         return False, detalle
     modo = modo_guardado & 0o770  # NUNCA se restauran bits de otros: --deshacer no reabre
+    _PROGRESO["ultima"] = os.path.abspath(str(proyectos.parent))
     fd = _abrir_raiz_seguro(os.path.abspath(str(proyectos.parent)))
     try:
         fd_real = _reabrir_real(fd, os.O_RDONLY)
@@ -1454,6 +1494,8 @@ def _cmd_aplicar(raiz: str) -> int:
 
     r = _invocar_nucleo("--nucleo-privilegiado")
     if r.returncode != 0:
+        if _informar_a_medio(r.stdout):
+            return 1
         raise ErrorPermisosProyectos(
             f"el núcleo privilegiado falló rc={r.returncode}:\nstdout={r.stdout}\nstderr={r.stderr}"
         )
@@ -1495,6 +1537,8 @@ def _cmd_deshacer() -> int:
     BLOCK-2 de esta ronda)."""
     r = _invocar_nucleo("--nucleo-deshacer")
     if r.returncode != 0:
+        if _informar_a_medio(r.stdout):
+            return 1
         raise ErrorPermisosProyectos(
             f"el núcleo de deshacer falló rc={r.returncode}:\nstdout={r.stdout}\nstderr={r.stderr}"
         )
@@ -1535,6 +1579,31 @@ def _cmd_deshacer() -> int:
     return 0
 
 
+def _imprimir_a_medio(modo: str, participio: str, exc: Exception) -> int:
+    """El núcleo falló DESPUÉS de empezar a mutar: el JSON lo dice, con la última ruta y la instrucción."""
+    print(json.dumps({
+        "a_medio_aplicar": True,
+        "error": str(exc),
+        "ultima_ruta": _PROGRESO["ultima"],
+        "instruccion": f"el árbol quedó parcialmente {participio}; --{modo} es idempotente: corregí la causa y "
+                       "volvé a correrlo",
+    }))
+    return 1
+
+
+def _informar_a_medio(stdout: str) -> bool:
+    """Cliente: si el núcleo falló a medio mutar, lo imprime (última ruta, causa e instrucción) y devuelve True."""
+    try:
+        datos = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(datos, dict) or datos.get("a_medio_aplicar") is not True:
+        return False
+    print(f"ATENCIÓN: {datos.get('instruccion')}\n  última ruta procesada: {datos.get('ultima_ruta')}\n"
+          f"  causa: {datos.get('error')}", file=sys.stderr)
+    return True
+
+
 def _cmd_nucleo_privilegiado() -> int:
     if os.geteuid() != 0:
         print("el núcleo privilegiado tiene que correr como root (sudo -n)", file=sys.stderr)
@@ -1545,7 +1614,12 @@ def _cmd_nucleo_privilegiado() -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
-    resultado = _recorrer(proyectos, accion="aplicar")
+    try:
+        resultado = _recorrer(proyectos, accion="aplicar")
+    except Exception as exc:
+        if _PROGRESO["mutando"]:
+            return _imprimir_a_medio("aplicar", "aplicado", exc)
+        raise
     print(json.dumps({
         "dirs_procesados": resultado.dirs_procesados,
         "archivos_procesados": resultado.archivos_procesados,
@@ -1568,9 +1642,14 @@ def _cmd_nucleo_deshacer() -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
-    resultado = _recorrer(proyectos, accion="deshacer")
-    raiz_ok, raiz_detalle = _restaurar_raiz_desde_respaldo(proyectos)
-    paso_faltas = _estado_del_paso_por_la_raiz(proyectos)
+    try:
+        resultado = _recorrer(proyectos, accion="deshacer")
+        raiz_ok, raiz_detalle = _restaurar_raiz_desde_respaldo(proyectos)
+        paso_faltas = _estado_del_paso_por_la_raiz(proyectos)
+    except Exception as exc:
+        if _PROGRESO["mutando"]:
+            return _imprimir_a_medio("deshacer", "deshecho", exc)
+        raise
     print(json.dumps({
         "dirs_procesados": resultado.dirs_procesados,
         "archivos_procesados": resultado.archivos_procesados,
