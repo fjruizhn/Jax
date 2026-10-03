@@ -236,7 +236,8 @@ def _acl_disponible_en(directorio: Path) -> bool:
         prueba.unlink(missing_ok=True)
 
 
-def _recorrer_directo(proyectos: Path, *, accion: str, extra_codigo: str = "", puede_fallar: bool = False) -> dict:
+def _recorrer_directo(proyectos: Path, *, accion: str, extra_codigo: str = "", puede_fallar: bool = False,
+                      conceder_al_terminar: bool = True) -> dict:
     """pp._recorrer() como root, bypaseando la fijación de RAIZ de la CLI pública. Con `puede_fallar`, un
     ErrorPermisosProyectos vuelve como {"error": texto} en vez de romper la prueba."""
     codigo = f"""
@@ -246,9 +247,11 @@ import permisos_proyectos as pp
 pp.ENTRADAS_EXTRA_PERMITIDAS = {{{_usuario_de_pruebas()!r}}}
 hook = None
 hook_raiz = None
+hook_entre = None
 {extra_codigo}
 try:
-    r = pp._recorrer(pp.Path({str(proyectos)!r}), accion={accion!r}, hook_de_prueba=hook, hook_antes_de_raiz=hook_raiz)
+    r = pp._recorrer(pp.Path({str(proyectos)!r}), accion={accion!r}, hook_de_prueba=hook, hook_antes_de_raiz=hook_raiz,
+                    hook_entre_previo_y_mutacion=hook_entre)
 except pp.ErrorPermisosProyectos as exc:
     print(json.dumps({{"error": str(exc)}}))
     sys.exit(0)
@@ -263,6 +266,10 @@ print(json.dumps({{
     assert r.returncode == 0, r.stdout + r.stderr
     datos = json.loads(r.stdout.strip().splitlines()[-1])
     assert puede_fallar or "error" not in datos, datos
+    if conceder_al_terminar and "error" not in datos and accion in ("aplicar", "deshacer"):
+        # `--aplicar` REEMPLAZA la ACL entera (`setfacl --set`) y `--deshacer` la quita: la entrada del arnés
+        # para el usuario de pytest desaparece y se vuelve a dar, como haria quien arma el entorno.
+        _conceder_acceso_al_usuario_de_pruebas(proyectos)
     return datos
 
 
@@ -785,10 +792,17 @@ def test_desescapa_octales_y_preserva_espacio_final():
 
 # --- BLOCK-1 (ronda 3): --deshacer es determinista, nunca lee un respaldo -------------------
 
-def test_deshacer_vuelve_exactamente_al_estado_medido_en_produccion(arbol_temporal, _identidades):
-    """Compara stat+getfacl del árbol deshecho contra el estado REAL medido en hall9000
-    el 2026-09-25 (fuera de la carpeta oculta de estado): dirs fruiz:fruiz 0775 sin ACL, archivos
-    fruiz:fruiz 0664 sin ACL."""
+def _lineas_acl_sin_arnes(ruta: Path) -> list[str]:
+    """getfacl sin los comentarios y sin las entradas del arnés (el usuario de pytest), que se vuelven a dar
+    tras cada --aplicar/--deshacer."""
+    return [l for l in _acl(ruta) if f":{_usuario_de_pruebas()}:" not in l and not l.startswith(("mask::", "default:mask::"))]
+
+
+def test_deshacer_revierte_duenos_y_acl_nombradas_pero_nunca_reabre_a_otros(arbol_temporal, _identidades):
+    """`--deshacer` devuelve el dueño a fruiz:fruiz y quita las ACL nombradas (lo de antes de E2a), pero NUNCA
+    vuelve a dar acceso a otros: sin bits de otros en el modo, en la ACL de acceso y en la ACL por defecto
+    (los directorios nuevos siguen naciendo cerrados). Antes dejaba 0775/0664 con `other::r-x`: una reversion
+    del paso de seguridad que reabria los documentos de los clientes a cualquier usuario local."""
     proyectos = arbol_temporal / "proyectos"
     aplicado = _recorrer_directo(proyectos, accion="aplicar")
     assert not aplicado["no_cumple"]
@@ -801,19 +815,30 @@ def test_deshacer_vuelve_exactamente_al_estado_medido_en_produccion(arbol_tempor
         st = ruta_dir.stat()
         assert pwd.getpwuid(st.st_uid).pw_name == DUENO_ORIGINAL, ruta_dir
         assert grp.getgrgid(st.st_gid).gr_name == GRUPO_ESPERADO, ruta_dir
-        assert oct(st.st_mode & 0o7777) == "0o775", ruta_dir
-        acl = subprocess.run(["getfacl", "-p", str(ruta_dir)], capture_output=True, text=True, check=True).stdout
-        lineas = [l for l in acl.splitlines() if l.strip() and not l.startswith("#")]
-        assert lineas == ["user::rwx", "group::rwx", "other::r-x"], (ruta_dir, acl)
+        assert st.st_mode & 0o007 == 0, ruta_dir
+        assert oct(st.st_mode & 0o777) == "0o770", ruta_dir
+        assert _lineas_acl_sin_arnes(ruta_dir) == [
+            "user::rwx", "group::rwx", "other::---",
+            "default:user::rwx", "default:group::rwx", "default:other::---",
+        ], (ruta_dir, _acl(ruta_dir))
+        assert not any(l.startswith(("user:", "group:", "default:user:", "default:group:")) and l.count(":") == 2
+                       and f":{_usuario_de_pruebas()}:" not in l for l in _acl(ruta_dir)), "quedó una ACL nombrada"
 
     archivo = proyectos / "un-proyecto" / "archivo.txt"
     st = archivo.stat()
     assert pwd.getpwuid(st.st_uid).pw_name == DUENO_ORIGINAL
     assert grp.getgrgid(st.st_gid).gr_name == GRUPO_ESPERADO
-    assert oct(st.st_mode & 0o7777) == "0o664"
-    acl = subprocess.run(["getfacl", "-p", str(archivo)], capture_output=True, text=True, check=True).stdout
-    lineas = [l for l in acl.splitlines() if l.strip() and not l.startswith("#")]
-    assert lineas == ["user::rw-", "group::rw-", "other::r--"], (archivo, acl)
+    assert oct(st.st_mode & 0o777) == "0o660"
+    assert _lineas_acl_sin_arnes(archivo) == ["user::rw-", "group::rw-", "other::---"], (archivo, _acl(archivo))
+
+    # lo que se crea despues de deshacer hereda `other` cerrado
+    nuevo = proyectos / "un-proyecto" / "creado-tras-deshacer"
+    r = _como_fruiz(f"import os; os.umask(0o022); os.mkdir({str(nuevo)!r}, 0o777)")
+    assert r.returncode == 0, r.stderr
+    assert nuevo.stat().st_mode & 0o007 == 0 and _otros_en_nombres(nuevo) == ["other::---", "default:other::---"]
+    r = subprocess.run(["sudo", "-n", "python3", str(SCRIPT), "--verificar", str(arbol_temporal),
+                        f"--permitir-entrada={_usuario_de_pruebas()}"], capture_output=True, text=True)
+    assert not any("para otros" in l for l in r.stdout.splitlines()), r.stdout
 
 
 def test_deshacer_con_enlace_plantado_no_lo_toca_y_reporta(arbol_temporal, _identidades):
@@ -847,7 +872,7 @@ def test_deshacer_con_nombre_espacio_final_lo_deshace_bien(arbol_temporal, _iden
     assert con_espacio.exists()
     st = con_espacio.stat()
     assert pwd.getpwuid(st.st_uid).pw_name == DUENO_ORIGINAL
-    assert oct(st.st_mode & 0o7777) == "0o664"
+    assert oct(st.st_mode & 0o7777) == "0o660"
 
 
 def test_deshacer_con_uid_sin_nombre_no_crashea(arbol_temporal, _identidades):
@@ -1753,6 +1778,37 @@ print(json.dumps(sondeos))
     assert not sin_acceso, f"fruiz perdió el acceso a su archivo en: {sin_acceso} (todos: {sondeos})"
 
 
+def test_una_entrada_agregada_entre_la_pasada_previa_y_la_mutacion_no_sobrevive_a_aplicar(arbol_temporal, _identidades):
+    """Carrera: tras una primera aplicacion jaxsvc es dueño del arbol y puede agregar `u:nobody:rwx,m::---` a un
+    directorio DESPUES de la pasada previa. Con `setfacl -m` la entrada sobrevivia y la mascara `m::rwx` la
+    volvia efectiva. Ahora la mutacion REEMPLAZA la ACL entera (acceso y por defecto) por la canonica: la
+    entrada desaparece, y la mascara nunca vuelve efectiva a una ajena."""
+    if not _hay_nobody():
+        pytest.skip("no existe el usuario nobody")
+    proyectos = arbol_temporal / "proyectos"
+    assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    sub = proyectos / "un-proyecto" / "sub"
+    extra = f"""
+estado = {{"hecho": False}}
+def hook_entre():
+    import subprocess
+    estado["hecho"] = True
+    subprocess.run(["setfacl", "-m", "u:nobody:rwx,m::---", {str(sub)!r}], check=True)
+    subprocess.run(["setfacl", "-d", "-m", "u:nobody:rwx", {str(sub)!r}], check=True)
+"""
+    datos = _recorrer_directo(proyectos, accion="aplicar", extra_codigo=extra)
+    assert not datos["no_cumple"], datos
+    acl = _acl(sub)
+    assert not any("nobody" in l for l in acl), f"sobrevivió la entrada ajena: {acl}"
+    assert "mask::rwx" in acl and "other::---" in acl and "default:other::---" in acl, acl
+    # y nobody no tiene permiso efectivo: no hay entrada, y `other` esta cerrado
+    r = subprocess.run(["sudo", "-n", "setpriv", "--reuid=nobody", "--regid=nogroup", "--clear-groups",
+                        "python3", "-c", f"import os; print(os.access({str(sub)!r}, os.R_OK))"],
+                       capture_output=True, text=True)
+    assert "True" not in r.stdout, r.stdout + r.stderr
+    assert _correr("--verificar", str(arbol_temporal)).returncode == 0
+
+
 # --- MAJOR-1: la raiz se abre por descriptor, sin seguir symlinks ------------------------------
 
 def _modo_y_acl(ruta: Path) -> tuple[str, list[str]]:
@@ -1829,7 +1885,7 @@ def test_aplicar_con_la_raiz_de_produccion_acceso_por_grupo_aplica_sin_tocar_due
     proyectos = raiz / "proyectos"
     uid, gid, _ = _foto(raiz)
 
-    datos = _recorrer_directo(proyectos, accion="aplicar", puede_fallar=True)
+    datos = _recorrer_directo(proyectos, accion="aplicar", puede_fallar=True, conceder_al_terminar=False)
     assert "error" not in datos and not datos["no_cumple"], datos
     assert _foto(raiz) == (uid, gid, 0o770)
     assert _otros_en_nombres(raiz) == ["other::---"]
@@ -1843,7 +1899,7 @@ def test_aplicar_con_la_raiz_de_produccion_acceso_por_grupo_aplica_sin_tocar_due
 ])
 def test_verificar_marca_no_cumple_si_jaxsvc_o_fruiz_no_atraviesan_la_raiz(base_propia, dueno, grupo, sin_paso):
     raiz = _arbol_como_produccion(base_propia, dueno="fruiz", grupo="jaxsvc", modo=0o775)
-    assert not _recorrer_directo(raiz / "proyectos", accion="aplicar")["no_cumple"]
+    assert not _recorrer_directo(raiz / "proyectos", accion="aplicar", conceder_al_terminar=False)["no_cumple"]
     assert _verificar_como_root(raiz).returncode == 0
     subprocess.run(["sudo", "-n", "chown", f"{dueno}:{grupo}", str(raiz)], check=True)
 
@@ -1903,7 +1959,7 @@ print(json.dumps(salida))
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 
-def test_el_respaldo_registra_la_raiz_y_deshacer_restaura_su_modo(arbol_temporal, _identidades):
+def test_el_respaldo_registra_la_raiz_y_deshacer_restaura_su_modo_sin_reabrir_a_otros(arbol_temporal, _identidades):
     proyectos = arbol_temporal / "proyectos"
     os.chmod(arbol_temporal, 0o775)
     modo_antes = _foto(arbol_temporal)[2]
@@ -1924,8 +1980,11 @@ salida["json"] = json.loads(buf.getvalue())
     assert f"# raiz-modo: {modo_antes:04o}" in out["texto"]
     assert "# raiz-acl: " in out["texto"]
     assert out["modo_aplicado"] == "0o770"
+    # La raiz tenia bits de otros (0775): --deshacer restaura dueño y grupo del modo pero NO los de otros,
+    # y avisa. Nunca reabre.
     assert out["rc"] == 0 and out["json"]["raiz"]["restaurada"] is True, out["json"]
-    assert _foto(arbol_temporal)[2] == modo_antes, "--deshacer no devolvió el modo de la raíz"
+    assert "bits de otros" in out["json"]["raiz"]["detalle"] and "no se restauran" in out["json"]["raiz"]["detalle"]
+    assert _foto(arbol_temporal)[2] == modo_antes & ~0o007 == 0o770, "--deshacer reabrió la raíz a otros"
 
 
 def test_deshacer_no_confia_en_un_respaldo_forjado_ni_incompleto(arbol_temporal, _identidades):
