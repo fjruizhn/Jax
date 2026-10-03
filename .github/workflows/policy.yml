@@ -5456,8 +5456,12 @@ jobs:
           #   en un TIFF (1); N37, TIFF con la pagina 2 transparente de mas de 25 Mpx sin tesseract
           #   (1). Las n28/n32 se reescriben, no se suman. Medido LOCAL en hall9000: 182 passed (las
           #   2 reales de LACTOVI corren). El RUNNER no tiene esas 2: el piso es 180 passed + 2 skipped.
-          grep -qE "^180 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 180 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 182 -> 183 (Jax#338 ronda 11, desempate): +1 -- la eleccion compara (palabras no
+          #   dudosas, palabras totales, caracteres): blanco con 0 palabras y negro con 5 dudosas
+          #   elige el negro y sale parcial/imagen_texto_dudoso. Medido LOCAL en hall9000: 183
+          #   passed (las 2 reales corren). En el runner: 181 passed, 2 skipped.
+          grep -qE "^181 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 181 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
