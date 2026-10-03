@@ -36,7 +36,7 @@ def test_un_pdf_sin_capa_de_texto_cae_en_ocr_y_no_en_pdfplumber(
         llamadas.append("deteccion")
         return False
 
-    def falso_ocr(origen, idioma="spa"):
+    def falso_ocr(origen, idioma="spa", camino=None):
         llamadas.append("ocr")
         return Resultado(
             estado="ok", salidas={"texto.txt": "leido por ocr"},
@@ -71,7 +71,7 @@ def test_un_pdf_con_texto_no_paga_ocr(tmp_path: Path, monkeypatch):
         ),
     )
 
-    def no_debe_llamarse(origen, idioma="spa"):
+    def no_debe_llamarse(origen, idioma="spa", camino=None):
         raise AssertionError("no se paga OCR si el PDF ya tenia texto")
 
     monkeypatch.setattr(ocr, "extraer", no_debe_llamarse)
@@ -96,7 +96,7 @@ def test_un_xlsx_no_paga_ocr(tmp_path: Path, monkeypatch):
         ),
     )
 
-    def no_debe_llamarse(origen, idioma="spa"):
+    def no_debe_llamarse(origen, idioma="spa", camino=None):
         raise AssertionError("un xlsx no debe pasar por OCR")
 
     monkeypatch.setattr(ocr, "extraer", no_debe_llamarse)
@@ -181,7 +181,7 @@ def test_una_imagen_no_pasa_por_pdfplumber(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(
         ocr, "extraer",
-        lambda origen, idioma="spa": Resultado(
+        lambda origen, idioma="spa", camino=None: Resultado(
             estado="ok", salidas={"texto.txt": "leido"}, detalle={},
             extractor="tesseract", version="5.5.0",
         ),
@@ -220,7 +220,7 @@ def test_cada_extension_de_imagenes_rutea_a_ocr(tmp_path: Path, monkeypatch, ext
 
     monkeypatch.setattr(
         ocr, "extraer",
-        lambda origen, idioma="spa": Resultado(
+        lambda origen, idioma="spa", camino=None: Resultado(
             estado="ok", salidas={"texto.txt": "leido"}, detalle={},
             extractor="tesseract", version="5.5.0",
         ),
@@ -308,7 +308,7 @@ def test_pdf_nativo_renombrado_png_va_por_el_camino_del_pdf(tmp_path: Path, monk
 
     monkeypatch.setattr(pdf, "tiene_capa_de_texto", contada)
 
-    def no_debe_llamarse(origen, idioma="spa"):
+    def no_debe_llamarse(origen, idioma="spa", camino=None):
         raise AssertionError("un PDF nativo con texto no debe pagar OCR")
 
     monkeypatch.setattr(ocr, "extraer", no_debe_llamarse)
@@ -364,7 +364,7 @@ def test_imagen_real_renombrada_va_por_ocr_y_marca_extension_enganosa(
 
     monkeypatch.setattr(
         ocr, "extraer",
-        lambda origen, idioma="spa": Resultado(
+        lambda origen, idioma="spa", camino=None: Resultado(
             estado="ok", salidas={"texto.txt": "leido"}, detalle={},
             extractor="tesseract", version="5.5.0",
         ),
@@ -402,7 +402,7 @@ def test_webp_real_renombrado_va_por_ocr_y_marca_extension_enganosa(
 
     monkeypatch.setattr(
         ocr, "extraer",
-        lambda origen, idioma="spa": Resultado(
+        lambda origen, idioma="spa", camino=None: Resultado(
             estado="ok", salidas={"texto.txt": "leido"}, detalle={},
             extractor="tesseract", version="5.5.0",
         ),
@@ -433,7 +433,7 @@ def test_pdf_nativo_sin_pdfplumber_da_error_no_ocr_ni_sin_extractor(tmp_path: Pa
 
     from procesamiento.extractores import ocr
 
-    def no_debe_llamarse(origen, idioma="spa"):
+    def no_debe_llamarse(origen, idioma="spa", camino=None):
         raise AssertionError(
             "sin pdfplumber, un PDF nativo NO debe pagar OCR -- OCR produce "
             "'ok' con las cifras destruidas, no una alternativa honesta"
@@ -475,7 +475,7 @@ def test_pdf_con_extension_pero_contenido_no_decisivo_usa_respaldo_por_extension
         ),
     )
 
-    def no_debe_llamarse(origen, idioma="spa"):
+    def no_debe_llamarse(origen, idioma="spa", camino=None):
         raise AssertionError("con tiene_capa_de_texto=True no se paga OCR")
 
     monkeypatch.setattr(ocr, "extraer", no_debe_llamarse)

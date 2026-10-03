@@ -273,14 +273,11 @@ def _version_logica_vigente(nombre_extractor: str, camino: str = "") -> str | No
     return funcion(camino) if callable(funcion) else None
 
 
-def _camino_de(destino: Path, extension: str) -> str:
-    """`"pdf"` o `"imagen"` -- el camino que tomara el OCR, decidido por el
-    MISMO criterio que la compuerta: el CONTENIDO manda cuando es decisivo y la
-    extension solo cuando no (un PNG llamado x.pdf es una imagen)."""
-    tipo = compuerta._tipo_por_contenido(destino)
-    if tipo == "pdf" or (tipo is None and extension == ".pdf"):
-        return "pdf"
-    return "imagen"
+def _camino_de(destino: Path, extension: str = "") -> str:
+    """`"pdf"` o `"imagen"`: el camino del OCR, decidido por la MISMA funcion
+    que usan `ocr.extraer` y la compuerta (`ocr.camino_de`: el CONTENIDO manda
+    cuando decide, la extension cuando no)."""
+    return ocr.camino_de(destino, extension or None)
 
 
 def _ahora() -> str:

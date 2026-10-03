@@ -49,18 +49,14 @@ def _tipo_por_contenido(origen: Path) -> str | None:
     decide sola, como siempre."""
     try:
         with open(origen, "rb") as fh:
-            cabecera = fh.read(16)
+            cabecera = fh.read(1024)
     except OSError:
         return None
-    if cabecera.startswith(b"%PDF"):
-        return "pdf"
+    # Una sola fuente de verdad para pdf/imagen: `ocr.tipo_por_cabecera`
+    # (firma de imagen primero, despues %PDF en los primeros 1024 bytes).
     if cabecera[:8] == _FIRMA_OLE2:
         return "ole2"
-    if cabecera.startswith(_FIRMAS_IMAGEN) or (
-        cabecera[:4] == b"RIFF" and cabecera[8:12] == b"WEBP"
-    ):
-        return "imagen"
-    return None
+    return ocr.tipo_por_cabecera(cabecera)
 
 
 def _con_extension_enganosa(r: Resultado, sufijo: str, contenido: str) -> Resultado:
@@ -94,7 +90,7 @@ def _pdf_o_ocr(origen: Path) -> Resultado:
         tiene_texto = pdf.tiene_capa_de_texto(origen)
     except ImportError:  # jax-14: tambien una pdfplumber presente pero rota; pdf.extraer la clasifica
         return pdf.extraer(origen)
-    return pdf.extraer(origen) if tiene_texto else ocr.extraer(origen)
+    return pdf.extraer(origen) if tiene_texto else ocr.extraer(origen, camino="pdf")
 
 
 def tiene_extractor(origen: Path) -> bool:
@@ -132,7 +128,7 @@ def extraer(origen: Path) -> Resultado:
         return r if sufijo == ".pdf" else _con_extension_enganosa(r, sufijo, "pdf")
 
     if tipo == "imagen":
-        r = ocr.extraer(origen)
+        r = ocr.extraer(origen, camino="imagen")
         return r if sufijo in IMAGENES else _con_extension_enganosa(r, sufijo, "imagen")
 
     # Contenido no decisivo (zip ambiguo entre xlsx/docx, o formato no
@@ -142,7 +138,7 @@ def extraer(origen: Path) -> Resultado:
     if sufijo in WORD:
         return word.extraer(origen)
     if sufijo in IMAGENES:
-        return ocr.extraer(origen)
+        return ocr.extraer(origen, camino="imagen")
     if sufijo == ".pdf":
         return _pdf_o_ocr(origen)
 

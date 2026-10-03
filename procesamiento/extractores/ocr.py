@@ -43,6 +43,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import array
+import math
 import subprocess
 import tempfile
 import time
@@ -131,13 +133,14 @@ CODIGO_IMAGEN_TEXTO_DUDOSO = "imagen_texto_dudoso"
 CODIGO_IMAGEN_PAGINA_SIN_TEXTO = "imagen_pagina_sin_texto"
 CODIGO_ARCHIVO_ILEGIBLE = "archivo_ilegible"
 CODIGO_OCR_TIEMPO_EXCEDIDO = "ocr_tiempo_excedido"
+CODIGO_OCR_SIN_MEMORIA = "ocr_sin_memoria"   # recursos, no archivo danado
 
 # Version de la LOGICA de clasificacion de este extractor. `extractor_version`
 # es la de tesseract y NO cambia cuando cambia una regla: esta cadena se guarda
 # en la ficha (`detalle["_version_logica"]`) y `ingesta` la compara -- una
 # ficha escrita con otra logica ni se reusa de cache ni cuenta como intento
 # previo del tope D-2. SUBIRLA cada vez que cambie la regla.
-# La version DEPENDE DEL CAMINO (`version_logica(extension)`): solo cambio la
+# La version DEPENDE DEL CAMINO (`version_logica(camino)`): solo cambio la
 # regla de las IMAGENES (A/B/D, codigos nuevos, TIFF multipagina) -- la del PDF
 # escaneado no, asi que su cache sigue valiendo (no se re-OCR-ean los PDF).
 # "2": regla de Fernando de la ronda 1 de Jax#338.
@@ -187,6 +190,11 @@ _FIRMAS_IMAGEN = (
 # traduce a `demasiados_pixeles`, sin mutar el global.) La foto real mas
 # grande de LACTOVI mide 13630x3826 (52 M).
 MAX_PIXELES = 100_000_000
+
+# Tope POR FOTOGRAMA mas bajo para los modos numericos (F, I, I;16*): un
+# fotograma de 100 Mpx en modo F ocupa ~400 MB y el escalado lo multiplica
+# (medido: RSS ~1 GB).
+MAX_PIXELES_NUMERICO = 25_000_000
 
 # Solo un TIFF es multipagina PARA TESSERACT (procesa todas sus paginas). Un
 # GIF o WebP animado se RECHAZA (`animacion_no_soportada`: tesseract no lee
@@ -249,18 +257,48 @@ def _como_texto(salida) -> str:
     return salida or ""
 
 
-def _es_pdf(origen: Path) -> bool:
-    """MINOR-4: la firma `%PDF` puede venir tras unos bytes de basura (BOM,
-    saltos de linea); se busca en los primeros 1024. MINOR-N3: pero UNA FIRMA
-    DE IMAGEN VALIDA MANDA -- un PNG con metadata `%PDF` es una imagen."""
+def tipo_por_cabecera(cabecera: bytes) -> str | None:
+    """UNICA fuente de verdad del tipo por CONTENIDO (la usan `ocr`,
+    `compuerta` e `ingesta`): `"imagen"` si hay una firma de imagen valida
+    (manda: un PNG con metadata `%PDF` es una imagen), `"pdf"` si `%PDF` esta en
+    los primeros 1024 bytes (el estandar tolera basura antes), `None` si el
+    contenido no decide. Un ZIP (`PK\\x03\\x04`: xlsx/docx) nunca es PDF."""
+    if _tiene_firma_de_imagen(cabecera[:16]):
+        return "imagen"
+    if cabecera.startswith(b"PK\x03\x04"):
+        return None
+    return "pdf" if _FIRMA_PDF in cabecera[:1024] else None
+
+
+def camino_de_tipo(tipo: str | None, sufijo: str) -> str:
+    """`"pdf"` o `"imagen"` a partir del tipo por contenido; cuando el
+    contenido no decide manda la EXTENSION (`.pdf` -> pdf), como la compuerta
+    siempre hizo. DECISION DOCUMENTADA: un `Escanear 1.pdf` con 2000 bytes de
+    basura antes de `%PDF` va por el camino pdf en las tres piezas."""
+    if tipo == "pdf" or (tipo is None and sufijo.lower() == ".pdf"):
+        return "pdf"
+    return "imagen"
+
+
+def camino_de(origen: Path, sufijo: str | None = None) -> str:
+    """El camino (`"pdf"`/`"imagen"`) que toma el OCR para este archivo: la
+    MISMA decision para `ocr.extraer`, la compuerta y la ingesta."""
+    origen = Path(origen)
     try:
         with open(origen, "rb") as fh:
             cabecera = fh.read(1024)
     except OSError:
+        cabecera = b""
+    return camino_de_tipo(tipo_por_cabecera(cabecera), sufijo if sufijo is not None else origen.suffix)
+
+
+def _es_pdf(origen: Path) -> bool:
+    """Solo por CONTENIDO (sin extension): `tipo_por_cabecera == "pdf"`."""
+    try:
+        with open(origen, "rb") as fh:
+            return tipo_por_cabecera(fh.read(1024)) == "pdf"
+    except OSError:
         return False
-    if _tiene_firma_de_imagen(cabecera[:16]):
-        return False
-    return _FIRMA_PDF in cabecera
 
 
 def _tiene_firma_de_imagen(cabecera: bytes) -> bool:
@@ -359,7 +397,8 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
                     img.seek(i)
                     ancho, alto = img.size
                     total += ancho * alto
-                    if ancho * alto > MAX_PIXELES or total > MAX_PIXELES_TOTAL:
+                    limite = MAX_PIXELES_NUMERICO if img.mode in _MODOS_NUMERICOS else MAX_PIXELES
+                    if ancho * alto > limite or total > MAX_PIXELES_TOTAL:
                         return "demasiados_pixeles"
                     dimensiones.append((ancho, alto))
                 if n == 1:
@@ -371,6 +410,8 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
                     return "una", dimensiones
     except Image.DecompressionBombError:
         return "demasiados_pixeles"
+    except MemoryError:
+        return "sin_memoria"   # recursos, no archivo danado
     except Exception:  # fail-soft: Pillow lanza OSError/ValueError/SyntaxError/EOFError segun el formato roto; todas significan "no decodifica" y salen como Resultado(error, archivo_ilegible)
         return "no_decodifica"
     return "tiff", dimensiones
@@ -383,23 +424,56 @@ _MODOS_PNG = frozenset({"1", "L", "LA", "P", "RGB", "RGBA"})
 _MODOS_NUMERICOS = frozenset({"F", "I", "I;16", "I;16B", "I;16L", "I;16N"})
 
 
+class _SinDatosFinitos(Exception):
+    """Un fotograma numerico sin ningun valor finito (todo nan/inf)."""
+
+
+_MAXIMO_FLOAT32 = 3.4e38
+_MUESTRA_PIXELES = 250_000
+
+
 def _normalizar_modo(img):
     """Imagen decodificada -> una que leptonica sabe leer, con conversion
-    EXPLICITA: modos numericos (F, I, I;16...) -> `L` escalando el rango real
-    de la imagen a 0-255 y con autocontraste; el resto fuera de `_MODOS_PNG`
-    (CMYK, YCbCr, LAB...) -> `RGB`."""
-    from PIL import ImageOps
+    EXPLICITA: modos numericos (F, I, I;16...) -> `L`; el resto fuera de
+    `_MODOS_PNG` (CMYK, YCbCr, LAB...) -> `RGB`.
+
+    Modos numericos (sin numpy, solo Pillow): (a) los pixeles NO FINITOS (nan,
+    inf) se detectan en toda la imagen con `ImageMath` y se tratan como FONDO
+    (la mediana de los finitos); si TODOS lo son, `_SinDatosFinitos`. (b) La
+    escala sale de los PERCENTILES p1 y p99 de los valores finitos de una
+    miniatura (no del extremo: un pixel 1e30 aplastaba el texto) y lo de afuera
+    se recorta; despues `autocontrast`."""
+    from PIL import Image, ImageMath, ImageOps
 
     if img.mode in _MODOS_PNG:
         return img
-    if img.mode in _MODOS_NUMERICOS:
-        base = img if img.mode in ("F", "I") else img.convert("I")
-        bajo, alto = base.getextrema()
-        escala = 255.0 / (alto - bajo) if alto > bajo else 0.0
-        reescalada = base.point(lambda v: (v - bajo) * escala)
-        return ImageOps.autocontrast(reescalada.convert("L"))
-    return img.convert("RGB")
-
+    if img.mode not in _MODOS_NUMERICOS:
+        return img.convert("RGB")
+    base = img if img.mode == "F" else img.convert("I").convert("F")
+    finitos = ImageMath.lambda_eval(
+        lambda a: (a["a"] == a["a"]) * (abs(a["a"]) < _MAXIMO_FLOAT32), a=base
+    )
+    if finitos.getextrema()[1] == 0:
+        raise _SinDatosFinitos
+    ancho, alto = base.size
+    paso = max(1, int(math.sqrt(ancho * alto / _MUESTRA_PIXELES)))
+    muestra = base.resize((max(1, ancho // paso), max(1, alto // paso)), Image.NEAREST)
+    valores = sorted(
+        v for v in array.array("f", muestra.tobytes()) if math.isfinite(v) and abs(v) < _MAXIMO_FLOAT32
+    )
+    fondo = valores[len(valores) // 2] if valores else 0.0
+    limpia = Image.new("F", base.size, fondo)
+    limpia.paste(base, mask=finitos.point(lambda v: v * 255).convert("L"))
+    if not valores:                       # la miniatura cayo solo en no finitos
+        valores = sorted(limpia.getextrema())
+    bajo = valores[int(0.01 * (len(valores) - 1))]
+    alto_p = valores[int(0.99 * (len(valores) - 1))]
+    if alto_p <= bajo:
+        bajo, alto_p = valores[0], valores[-1]
+    if alto_p <= bajo:                    # imagen constante
+        return Image.new("L", base.size, 0)
+    escala = 255.0 / (alto_p - bajo)
+    return ImageOps.autocontrast(limpia.point(lambda v: (v - bajo) * escala).convert("L"))
 
 
 def _implica_pagina(ancho: int, alto: int) -> str | None:
@@ -484,41 +558,76 @@ def _clasificar(caracteres: int, analisis: dict) -> str:
     return "ok"
 
 
-def _ocr_bytes(datos: bytes, idioma: str, timeout: float | None = None) -> dict | None:
+class _Presupuesto:
+    """Un solo presupuesto de tiempo para todo el OCR de una imagen: se
+    descuenta en CADA llamada a tesseract, leyendo `_reloj` justo antes."""
+
+    def __init__(self, total: float):
+        self.total = total
+        self.inicio = _reloj()
+
+    def restante(self) -> float:
+        return self.total - (_reloj() - self.inicio)
+
+
+def _ilegible_dict(causa: str) -> dict:
+    return {"clasificacion": "ilegible", "causa": causa}
+
+
+def _correr_tesseract(cmd: list, datos: bytes, presupuesto: _Presupuesto | None):
+    """Una llamada a tesseract. Devuelve el proceso, o `None` si no pudo correr,
+    o un dict `ilegible` si se agoto el tiempo: `tiempo_excedido` (el
+    presupuesto total ya se consumio) o `tiempo_por_llamada` (el timeout de la
+    llamada salto con presupuesto todavia disponible). Sin presupuesto (paginas
+    de PDF) el timeout por llamada de siempre y `None` si falla."""
+    if presupuesto is None:
+        timeout = TIMEOUT_SEGUNDOS
+    else:
+        restante = presupuesto.restante()
+        if restante <= 0:
+            return _ilegible_dict("tiempo_excedido")
+        timeout = min(TIMEOUT_SEGUNDOS, restante)
+    try:
+        return subprocess.run(cmd, input=datos, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if presupuesto is None:
+            return None
+        return _ilegible_dict(
+            "tiempo_excedido" if presupuesto.restante() <= 0 else "tiempo_por_llamada"
+        )
+    except Exception:  # fail-soft: el subproceso de tesseract puede fallar (I/O); se devuelve None y el llamador lo convierte en Resultado(estado="error")
+        return None
+
+
+def _ocr_bytes(datos: bytes, idioma: str, presupuesto: _Presupuesto | None = None) -> dict | None:
     """Corre tesseract DOS veces sobre la MISMA imagen -- texto plano (para
     el extracto exacto, tildes y guion largo incluidos) y `tsv` (para la
     confianza por palabra, que el modo texto plano no expone). `None` si el
     propio subproceso de tesseract no pudo correr sobre esta imagen
-    (timeout, I/O, `returncode` distinto de cero) -- fallo cerrado del
-    llamador, nunca una excepción escapando de acá. Si tesseract no pudo
-    DECODIFICAR el archivo (imagen danada), devuelve un dict con
-    `clasificacion="ilegible"` en vez de `None`, para que `_resolver_imagen`
-    pueda distinguirlo con `archivo_ilegible`."""
-    try:
-        proceso = subprocess.run(
-            ["tesseract", "-", "stdout", "-l", idioma],
-            input=datos, capture_output=True, timeout=timeout or TIMEOUT_SEGUNDOS,
-        )
-    except Exception:  # fail-soft: el subproceso de tesseract (modo texto) puede fallar (timeout, I/O); se devuelve None y el llamador lo convierte en Resultado(estado="error")
-        return None
+    (I/O, `returncode` distinto de cero) -- fallo cerrado del llamador, nunca
+    una excepción escapando de acá. Si tesseract no pudo DECODIFICAR el
+    archivo (imagen danada) o se agoto el tiempo, devuelve un dict con
+    `clasificacion="ilegible"` y su `causa` en vez de `None`, para que
+    `_resolver_imagen` pueda distinguirlo con su codigo."""
+    proceso = _correr_tesseract(["tesseract", "-", "stdout", "-l", idioma], datos, presupuesto)
+    if proceso is None or isinstance(proceso, dict):
+        return proceso
     if proceso.returncode != 0:
         stderr = _como_texto(proceso.stderr)
         if any(marca in stderr for marca in _MARCAS_ARCHIVO_ILEGIBLE):
-            return {"clasificacion": "ilegible", "causa": "tesseract_no_lee"}
+            return _ilegible_dict("tesseract_no_lee")
         return None
     # rc=0 NO basta: con un TIFF de coma flotante leptonica escribe el error en
     # stderr, sale con 0 y no entrega texto -- un archivo que nadie leyo.
     if any(marca in _como_texto(proceso.stderr) for marca in _MARCAS_ARCHIVO_ILEGIBLE):
-        return {"clasificacion": "ilegible", "causa": "tesseract_no_lee"}
+        return _ilegible_dict("tesseract_no_lee")
     texto = _como_texto(proceso.stdout).strip()
 
-    try:
-        proceso_tsv = subprocess.run(
-            ["tesseract", "-", "stdout", "-l", idioma, "tsv"],
-            input=datos, capture_output=True, timeout=timeout or TIMEOUT_SEGUNDOS,
-        )
-    except Exception:  # fail-soft: el subproceso de tesseract (modo tsv, confianza por palabra) puede fallar igual que el de texto plano; se devuelve None y el llamador lo convierte en Resultado(estado="error")
-        return None
+    proceso_tsv = _correr_tesseract(
+        ["tesseract", "-", "stdout", "-l", idioma, "tsv"], datos, presupuesto
+    )
+    if proceso_tsv is None or isinstance(proceso_tsv, dict):
+        return proceso_tsv
     analisis = _analizar_tsv(_como_texto(proceso_tsv.stdout))
 
     return {
@@ -545,14 +654,14 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
     nunca se guarda la lista de PNG), con el plazo total `PLAZO_TOTAL_SEGUNDOS`
     y las metricas de la regla A/B sobre el TOTAL (caracteres y palabras
     sumados, confianza ponderada por palabras)."""
+    presupuesto = _Presupuesto(PLAZO_TOTAL_SEGUNDOS)
     if tipo == "una":
-        return _ocr_bytes(datos, idioma)
+        return _ocr_bytes(datos, idioma, presupuesto)
 
     from io import BytesIO
 
     from PIL import Image
 
-    inicio = _reloj()
     partes, dudosas = [], []
     caracteres = palabras = 0
     suma_conf = 0.0
@@ -565,9 +674,8 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
             return {"clasificacion": "ilegible", "causa": "no_decodifica"}
         with img:
             for numero in range(1, len(dimensiones) + 1):
-                restante = PLAZO_TOTAL_SEGUNDOS - (_reloj() - inicio)
-                if restante <= 0:
-                    return {"clasificacion": "ilegible", "causa": "tiempo_excedido"}
+                if presupuesto.restante() <= 0:
+                    return _ilegible_dict("tiempo_excedido")
                 try:
                     img.seek(numero - 1)
                     img.load()
@@ -575,9 +683,13 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
                     salida = BytesIO()
                     cuadro.save(salida, format="PNG")
                     png = salida.getvalue()
+                except _SinDatosFinitos:
+                    return _ilegible_dict("sin_datos_finitos")
+                except MemoryError:
+                    return _ilegible_dict("sin_memoria")   # recursos, no archivo danado
                 except Exception:  # fail-soft: pagina truncada o corrupta = archivo que no decodifica
-                    return {"clasificacion": "ilegible", "causa": "no_decodifica"}
-                r = _ocr_bytes(png, idioma, timeout=min(TIMEOUT_SEGUNDOS, restante))
+                    return _ilegible_dict("no_decodifica")
+                r = _ocr_bytes(png, idioma, presupuesto)
                 del png, salida, cuadro
                 if r is None:
                     return None
@@ -641,8 +753,10 @@ def _detalle_comun(idioma: str, r: dict) -> dict:
 
 
 def _ilegible(causa: str, idioma: str) -> Resultado:
-    if causa == "tiempo_excedido":
-        razon, codigo = "se excedio el plazo total de OCR de la imagen", CODIGO_OCR_TIEMPO_EXCEDIDO
+    if causa in ("tiempo_excedido", "tiempo_por_llamada"):
+        razon, codigo = "se excedio el tiempo de OCR de la imagen", CODIGO_OCR_TIEMPO_EXCEDIDO
+    elif causa == "sin_memoria":
+        razon, codigo = "memoria insuficiente para procesar la imagen", CODIGO_OCR_SIN_MEMORIA
     else:
         razon, codigo = (
             "no se pudo abrir ni decodificar la imagen (archivo danado)",
@@ -812,7 +926,7 @@ def _resolver_pdf(resultados: list[dict | None], idioma: str) -> Resultado:
     )
 
 
-def extraer(origen: Path, idioma: str = "spa") -> Resultado:
+def extraer(origen: Path, idioma: str = "spa", camino: str | None = None) -> Resultado:
     if shutil.which("tesseract") is None:
         # I-8 (final-hallazgos.md, ronda de cierre): antes era 'error',
         # indistinguible de "este documento es ilegible" -- el spec §8
@@ -848,7 +962,10 @@ def extraer(origen: Path, idioma: str = "spa") -> Resultado:
                 detalle={"razon": f"no existe el archivo: {origen}"},
             )
 
-        if _es_pdf(origen):
+        # El camino lo decide UNA funcion (`camino_de`); la compuerta pasa el suyo.
+        if camino is None:
+            camino = camino_de(origen)
+        if camino == "pdf":
             if shutil.which("pdftoppm") is None:
                 return Resultado(
                     estado="error", salidas={}, extractor=EXTRACTOR,
@@ -904,6 +1021,8 @@ def extraer(origen: Path, idioma: str = "spa") -> Resultado:
                 detalle={"razon": "no se pudo correr tesseract sobre la imagen"},
             )
         return _resolver_imagen(resultado_img, idioma, dimensiones)
+    except MemoryError:
+        return _ilegible("sin_memoria", idioma)   # recursos, no archivo danado
     except Exception as exc:  # fail-soft: cualquier fallo inesperado (permisos, disco lleno, workspace remontado solo-lectura) sale como Resultado(estado="error"), nunca una excepcion cruda -- mismo tratamiento que D-1/I-5 en los hermanos
         return Resultado(
             estado="error", salidas={}, extractor=EXTRACTOR,
