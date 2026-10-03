@@ -263,6 +263,21 @@ _EXENTOS_FARO = {
     }),
 }
 
+# Congela los OCHO argv que llegan a `_run` en el publicador root. `ast.unparse`
+# normaliza formato pero conserva estructura; un nuevo call site, incluso
+# `_run([programa])` sin literal "claude", deja de estar exento. Cambiar esta
+# lista exige revisión explícita de la operación root y de este escáner.
+_FARO_RUN_ARGV_APROBADOS = frozenset({
+    "['gh', 'api', f'repos/{REPO_OFICIAL}', '--jq', '.default_branch']",
+    "['gh', 'api', f'repos/{REPO_OFICIAL}/git/ref/heads/{rama}', '--jq', '.object.sha']",
+    "['/usr/bin/git', '--no-replace-objects', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', 'clone', '--mirror', '--config', 'core.sshCommand=ssh -oBatchMode=yes', 'git@github.com:fjruizhn/claude-skills.git', str(MIRROR)]",
+    "[*git, 'rev-parse', '--is-bare-repository']",
+    "[*git, 'replace', '-l']",
+    "[*git, 'config', '--local', '--get-all', 'safe.directory']",
+    "[*git, '-c', 'core.sshCommand=ssh -oBatchMode=yes', 'fetch', '--prune', 'git@github.com:fjruizhn/claude-skills.git', '+refs/heads/*:refs/heads/*']",
+    "[*git, 'rev-parse', REF_FRESCURA]",
+})
+
 
 def _cadenas_con_claude(tree: ast.AST) -> frozenset[str]:
     return frozenset(t for t in _cadenas_plegadas(tree) if "claude" in t.lower())
@@ -304,7 +319,9 @@ def _exento_faro(root: Path, path: Path, tree: ast.AST) -> bool:
             return False
         llamadas = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                     and isinstance(n.func, ast.Name) and n.func.id == "_run"]
-        return bool(llamadas) and all(n.args and isinstance(n.args[0], ast.List) for n in llamadas)
+        return (len(llamadas) == len(_FARO_RUN_ARGV_APROBADOS)
+                and all(n.args and isinstance(n.args[0], ast.List) for n in llamadas)
+                and {ast.unparse(n.args[0]) for n in llamadas} == _FARO_RUN_ARGV_APROBADOS)
     # El test usa subprocess.run únicamente con el script fixture creado por
     # _script_con_env_de_prueba; ninguna función acepta un argv de fuera.
     return bool(lanzamientos) and all(
@@ -1295,8 +1312,14 @@ def test_exenciones_faro_exigen_literales_y_lanzamientos_exactos() -> None:
 def test_exenciones_faro_niegan_argv_libre_nuevo() -> None:
     publicador = _THIS_REPO_ROOT / "ops/las-voces/faro_paquete_permanente.py"
     fuente = publicador.read_text(encoding="utf-8")
-    mutado = ast.parse(fuente + "\n_run(argv_externo)\n")
-    assert not _exento_faro(_THIS_REPO_ROOT, publicador, mutado)
+    for llamada in (
+        "_run(argv_externo)",
+        "_run([programa])",
+        "_run([programa, '--print'])",
+        "_run(['/usr/bin/git', *argv_externo])",
+    ):
+        mutado = ast.parse(fuente + f"\n{llamada}\n")
+        assert not _exento_faro(_THIS_REPO_ROOT, publicador, mutado), llamada
     prueba = _THIS_REPO_ROOT / "tests/test_las_voces_qwen_auto.py"
     fuente_prueba = prueba.read_text(encoding="utf-8")
     mutado_prueba = ast.parse(fuente_prueba + "\nsubprocess.run(argv_externo)\n")
