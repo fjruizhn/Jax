@@ -362,7 +362,8 @@ def _puede_atravesar(modo: int, uid_dueno: int, gid_dueno: int, texto_acl: str, 
     return False if ignorar_otros else bool((modo & 7) & 1)
 
 
-def _faltas_paso_por_la_raiz(st: os.stat_result, texto_acl: str, *, ignorar_otros: bool) -> list[str]:
+def _faltas_paso(modo: int, uid_dueno: int, gid_dueno: int, texto_acl: str, *, ignorar_otros: bool) -> list[str]:
+    """Qué cuentas (jaxsvc, fruiz) NO atraviesan un directorio con ese modo, dueño, grupo y ACL."""
     faltas = []
     for cuenta in (USUARIO, DUENO_ORIGINAL):
         try:
@@ -370,10 +371,25 @@ def _faltas_paso_por_la_raiz(st: os.stat_result, texto_acl: str, *, ignorar_otro
         except KeyError:
             faltas.append(f"no existe la cuenta {cuenta}")
             continue
-        if not _puede_atravesar(st.st_mode, st.st_uid, st.st_gid, texto_acl, uid=uid, nombre=cuenta,
+        if not _puede_atravesar(modo, uid_dueno, gid_dueno, texto_acl, uid=uid, nombre=cuenta,
                                 grupos=grupos, ignorar_otros=ignorar_otros):
             faltas.append(f"{cuenta} no puede atravesar la raíz" + (" sin el bit de otros" if ignorar_otros else ""))
     return faltas
+
+
+def _faltas_paso_por_la_raiz(st: os.stat_result, texto_acl: str, *, ignorar_otros: bool) -> list[str]:
+    return _faltas_paso(st.st_mode, st.st_uid, st.st_gid, texto_acl, ignorar_otros=ignorar_otros)
+
+
+def _acl_con_mascara_del_modo(texto_acl: str, modo: int) -> str:
+    """Lo que `fchmod(modo)` hace a la ACL: `user::` y `other::` pasan a los bits de dueño y de otros del modo, y
+    los de GRUPO van a la máscara si la ACL es extendida (hay `mask::`) o a `group::` si no lo es."""
+    def rwx(bits: int) -> str:
+        return ("r" if bits & 4 else "-") + ("w" if bits & 2 else "-") + ("x" if bits & 1 else "-")
+    texto = re.sub(r"^(user::)[rwx-]{3}", lambda m: m.group(1) + rwx((modo >> 6) & 7), texto_acl, flags=re.MULTILINE)
+    texto = re.sub(r"^(other::)[rwx-]{3}", lambda m: m.group(1) + rwx(modo & 7), texto, flags=re.MULTILINE)
+    clave = "mask::" if re.search(r"^mask::", texto, re.MULTILINE) else "group::"
+    return re.sub(rf"^({clave})[rwx-]{{3}}", lambda m: m.group(1) + rwx((modo >> 3) & 7), texto, flags=re.MULTILINE)
 
 
 def _permiso_efectivo(texto_acl: str, *, default: bool, tipo: str, calificador: str) -> int:
@@ -453,6 +469,8 @@ def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado
 
         if profundidad == 2 and _es_carpeta_oculta_excluida(entrada):
             resultado.excluidos.append(ruta_hija)
+            if accion != "previo":
+                _procesar_oculta(nombre, dir_fd, ruta_hija, accion=accion, resultado=resultado)
             continue
 
         fd_path = _abrir_o_path(nombre, dir_fd)
@@ -529,6 +547,88 @@ def _revisar_previo_objeto(fd_path: int, ruta: str, resultado: Resultado) -> Non
         resultado.no_cumple.append(f"{ruta}: {'; '.join(faltas)}")
 
 
+def _solo_otros_objeto(fd_path: int, ruta: str, st: os.stat_result, *, es_dir: bool, accion: str,
+                       resultado: Resultado) -> None:
+    """Carpetas ocultas de proyectos/<proyecto>/ (estado de herramientas): SOLO se trata `otros`. `verificar`
+    marca NO CUMPLE cualquier bit de otros (modo, `other::` de acceso y, en directorios, por defecto);
+    `aplicar` y `deshacer` los quitan -- el modo conserva los bits de grupo (la máscara) y `other::`; la ACL por
+    defecto con `setfacl -d -m o::---`, que no toca el resto -- y NO cambian dueño, grupo ni ACL nombradas."""
+    try:
+        texto_acl = _getfacl(fd_path)
+    except ErrorPermisosProyectos as exc:
+        resultado.no_cumple.append(f"{ruta}: no se pudo leer la ACL: {exc}")
+        return
+    if accion == "verificar":
+        faltas = _faltas_de_otros(st, texto_acl, con_default=es_dir)
+        if faltas:
+            resultado.no_cumple.append(f"{ruta}: {'; '.join(faltas)}")
+        return
+    if st.st_mode & stat.S_IRWXO:
+        fd_real = _reabrir_real(fd_path, os.O_RDONLY)
+        try:
+            os.fchmod(fd_real, stat.S_IMODE(st.st_mode) & ~stat.S_IRWXO)
+        finally:
+            os.close(fd_real)
+    if es_dir:
+        por_defecto = _permisos_de(texto_acl, True, "other", None)
+        if por_defecto is not None and _bits(por_defecto):
+            _setfacl(fd_path, "o::---", default=True)
+
+
+def _procesar_oculta(nombre: str, dir_fd: int, ruta: str, *, accion: str, resultado: Resultado) -> None:
+    fd_path = _abrir_o_path(nombre, dir_fd)
+    if fd_path is None:
+        return
+    try:
+        st = os.fstat(fd_path)
+        if not stat.S_ISDIR(st.st_mode):  # cambió entre el listado y la apertura (p. ej. por un symlink)
+            return
+        _solo_otros_objeto(fd_path, ruta, st, es_dir=True, accion=accion, resultado=resultado)
+        try:
+            fd_listable = _reabrir_real(fd_path, os.O_RDONLY | os.O_DIRECTORY)
+        except PermissionError:
+            resultado.no_cumple.append(f"{ruta}: sin permiso para listar el contenido (EACCES)")
+            return
+        try:
+            _caminar_solo_otros(fd_listable, ruta, accion=accion, resultado=resultado)
+        finally:
+            os.close(fd_listable)
+    finally:
+        os.close(fd_path)
+
+
+def _caminar_solo_otros(dir_fd: int, ruta: str, *, accion: str, resultado: Resultado) -> None:
+    with os.scandir(dir_fd) as it:
+        entradas = list(it)
+    for entrada in entradas:
+        ruta_hija = f"{ruta}/{entrada.name}"
+        fd_path = _abrir_o_path(entrada.name, dir_fd)
+        if fd_path is None:
+            continue
+        try:
+            st = os.fstat(fd_path)
+            if stat.S_ISLNK(st.st_mode):
+                resultado.symlinks_saltados.append(ruta_hija)
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                _solo_otros_objeto(fd_path, ruta_hija, st, es_dir=True, accion=accion, resultado=resultado)
+                try:
+                    fd_listable = _reabrir_real(fd_path, os.O_RDONLY | os.O_DIRECTORY)
+                except PermissionError:
+                    resultado.no_cumple.append(f"{ruta_hija}: sin permiso para listar el contenido (EACCES)")
+                    continue
+                try:
+                    _caminar_solo_otros(fd_listable, ruta_hija, accion=accion, resultado=resultado)
+                finally:
+                    os.close(fd_listable)
+            elif stat.S_ISREG(st.st_mode):
+                # Un hardlink también se cierra: quitar bits de otros solo APRIETA, no puede abrir nada
+                # fuera (a diferencia de chown/ACL, que sí se rechazan en el árbol gobernado).
+                _solo_otros_objeto(fd_path, ruta_hija, st, es_dir=False, accion=accion, resultado=resultado)
+        finally:
+            os.close(fd_path)
+
+
 def _revisar_o_mutar_raiz(fd_raiz: int, ruta: str, *, modo: str, resultado: Resultado) -> None:
     """La raíz del workspace (el padre de proyectos/) es la barrera de toda la cadena: si tiene algún bit para
     otros, el cierre de proyectos/ depende de un solo bit que nadie vigila -- y si jaxsvc o fruiz no pueden
@@ -578,6 +678,8 @@ def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_d
             )
     if accion == "aplicar" and hook_entre_previo_y_mutacion is not None:
         hook_entre_previo_y_mutacion()  # solo pruebas: la ventana entre la pasada previa y la mutacion
+    if accion == "deshacer":
+        _comprobar_paso_antes_de_deshacer(proyectos)
     resultado = Resultado()
     if hook_antes_de_raiz is not None:
         hook_antes_de_raiz(str(proyectos.parent))  # solo pruebas: la ventana entre validar y abrir la raiz
@@ -1079,12 +1181,11 @@ def _registro_de_la_raiz(proyectos: Path) -> bytes:
     return ("\n".join(lineas) + "\n\n").encode("utf-8")
 
 
-def _restaurar_raiz_desde_respaldo(proyectos: Path) -> tuple[bool, str]:
-    """MINOR-3: `--deshacer` devuelve a la raíz el MODO que guardó el respaldo forense más reciente que sea
-    de confianza: regular, de root (RUTA_RESPALDOS es root:root 0700), con el marcador de fin, con la ruta
-    de ESTA raíz y un modo de cuatro dígitos octales. Solo se restauran los bits de permiso (0777): ni dueño,
-    ni grupo, ni ACL, ni bits especiales. Un respaldo forjado, de otra ruta o incompleto no se obedece.
-    Devuelve (restaurada, detalle)."""
+def _buscar_modo_de_la_raiz_en_respaldo(proyectos: Path) -> tuple[int | None, Path | None, str]:
+    """MINOR-3: el MODO que guardó el respaldo forense más reciente que sea de confianza: regular, de root
+    (RUTA_RESPALDOS es root:root 0700), con el marcador de fin, con la ruta de ESTA raíz y un modo de cuatro
+    dígitos octales. Un respaldo forjado, de otra ruta o incompleto no se obedece. Solo lee.
+    Devuelve (modo_guardado | None, ruta del respaldo | None, detalle si no hay)."""
     raiz = os.path.abspath(str(proyectos.parent))
     try:
         candidatos = sorted(
@@ -1092,7 +1193,7 @@ def _restaurar_raiz_desde_respaldo(proyectos: Path) -> tuple[bool, str]:
             key=lambda c: os.lstat(c).st_mtime, reverse=True,
         )
     except OSError as exc:
-        return False, f"no se pudo listar {RUTA_RESPALDOS}: {exc}"
+        return None, None, f"no se pudo listar {RUTA_RESPALDOS}: {exc}"
     for ruta in candidatos:
         try:
             st = os.lstat(ruta)
@@ -1112,23 +1213,68 @@ def _restaurar_raiz_desde_respaldo(proyectos: Path) -> tuple[bool, str]:
                 continue
         except json.JSONDecodeError:
             continue
-        modo_guardado = int(m_modo.group(1), 8) & 0o777
-        modo = modo_guardado & 0o770  # NUNCA se restauran bits de otros: --deshacer no reabre
-        fd = _abrir_raiz_seguro(raiz)
+        return int(m_modo.group(1), 8) & 0o777, ruta, ""
+    return None, None, f"ningún respaldo de {RUTA_RESPALDOS} es de confianza y registra la raíz {raiz}"
+
+
+def _restaurar_raiz_desde_respaldo(proyectos: Path) -> tuple[bool, str]:
+    """`--deshacer` devuelve a la raíz el MODO del respaldo (ver `_buscar_modo_de_la_raiz_en_respaldo`), solo
+    los bits de permiso 0770: ni dueño, ni grupo, ni ACL, ni bits especiales, y NUNCA los de otros.
+    Devuelve (restaurada, detalle)."""
+    modo_guardado, ruta, detalle = _buscar_modo_de_la_raiz_en_respaldo(proyectos)
+    if modo_guardado is None:
+        return False, detalle
+    modo = modo_guardado & 0o770  # NUNCA se restauran bits de otros: --deshacer no reabre
+    fd = _abrir_raiz_seguro(os.path.abspath(str(proyectos.parent)))
+    try:
+        fd_real = _reabrir_real(fd, os.O_RDONLY)
         try:
-            fd_real = _reabrir_real(fd, os.O_RDONLY)
-            try:
-                os.fchmod(fd_real, modo)
-            finally:
-                os.close(fd_real)
+            os.fchmod(fd_real, modo)
         finally:
-            os.close(fd)
-        aviso = ""
-        if modo_guardado & 0o007:
-            aviso = (f"; los bits de otros que la raíz tenía ({modo_guardado & 0o007:03o}) no se restauran: "
-                     "--deshacer no reabre el workspace a otros")
-        return True, f"modo {modo:04o} restaurado desde {ruta}{aviso}"
-    return False, f"ningún respaldo de {RUTA_RESPALDOS} es de confianza y registra la raíz {raiz}"
+            os.close(fd_real)
+    finally:
+        os.close(fd)
+    aviso = ""
+    if modo_guardado & 0o007:
+        aviso = (f"; los bits de otros que la raíz tenía ({modo_guardado & 0o007:03o}) no se restauran: "
+                 "--deshacer no reabre el workspace a otros")
+    return True, f"modo {modo:04o} restaurado desde {ruta}{aviso}"
+
+
+def _comprobar_paso_antes_de_deshacer(proyectos: Path) -> None:
+    """Falla cerrado, sin haber tocado nada, si con el modo que `--deshacer` va a restaurar (o el actual, si no
+    hay respaldo de confianza y la raíz no se toca) y el dueño y grupo ACTUALES de la raíz, jaxsvc o fruiz no la
+    atravesarían: dejaría al servicio (o a quien opera) sin llegar a ningún objeto del árbol."""
+    fd = _abrir_raiz_seguro(os.path.abspath(str(proyectos.parent)))
+    try:
+        st = os.fstat(fd)
+        acl = _getfacl(fd)
+    finally:
+        os.close(fd)
+    modo_guardado, _, _ = _buscar_modo_de_la_raiz_en_respaldo(proyectos)
+    if modo_guardado is None:
+        modo, ignorar_otros = stat.S_IMODE(st.st_mode), False
+    else:
+        modo, ignorar_otros = modo_guardado & 0o770, True
+        acl = _acl_con_mascara_del_modo(acl, modo)
+    faltas = _faltas_paso(modo, st.st_uid, st.st_gid, acl, ignorar_otros=ignorar_otros)
+    if faltas:
+        raise ErrorPermisosProyectos(
+            f"--deshacer falla cerrado y no cambió nada: con el modo {modo:04o} que va a restaurar y el dueño "
+            f"{st.st_uid} y grupo {st.st_gid} actuales de la raíz del workspace, "
+            + "; ".join(faltas)
+            + " -- corregir la raíz (dueño, grupo o ACL) antes de deshacer."
+        )
+
+
+def _estado_del_paso_por_la_raiz(proyectos: Path) -> list[str]:
+    """Las faltas de paso por la raíz EN ESTE MOMENTO (vacío = jaxsvc y fruiz la atraviesan)."""
+    fd = _abrir_raiz_seguro(os.path.abspath(str(proyectos.parent)))
+    try:
+        st = os.fstat(fd)
+        return _faltas_paso_por_la_raiz(st, _getfacl(fd), ignorar_otros=False)
+    finally:
+        os.close(fd)
 
 
 def _generar_respaldo_validado(proyectos: Path) -> Path:
@@ -1235,7 +1381,7 @@ def _cmd_verificar(raiz: str) -> int:
     for r in resultado.symlinks_saltados:
         lineas.append(f"SYMLINK saltado (no se sigue, no se reporta como falta): {r}")
     for r in resultado.excluidos:
-        lineas.append(f"carpeta oculta excluida (sin tocar): {r}")
+        lineas.append(f"carpeta oculta (solo se revisa `otros`): {r}")
     if lineas:
         print("\n".join(lineas))
 
@@ -1313,7 +1459,7 @@ def _cmd_aplicar(raiz: str) -> int:
     for ruta in datos["symlinks_saltados"]:
         print(f"SYMLINK saltado: {ruta}")
     for ruta in datos.get("excluidos", []):
-        print(f"carpeta oculta excluida (sin tocar): {ruta}")
+        print(f"carpeta oculta (solo se cierra `otros`; dueño, grupo y ACL nombradas sin tocar): {ruta}")
     print(f"Procesados: {datos['dirs_procesados']} directorios, {datos['archivos_procesados']} archivos.")
 
     if datos["hardlinks_rechazados"]:
@@ -1346,7 +1492,7 @@ def _cmd_deshacer() -> int:
     for ruta in datos["symlinks_saltados"]:
         print(f"SYMLINK saltado, NO deshecho: {ruta}")
     for ruta in datos.get("excluidos", []):
-        print(f"carpeta oculta excluida (sin tocar): {ruta}")
+        print(f"carpeta oculta (solo se cierra `otros`; dueño, grupo y ACL nombradas sin tocar): {ruta}")
     print(f"Deshechos: {datos['dirs_procesados']} directorios, {datos['archivos_procesados']} archivos.")
     raiz = datos.get("raiz", {})
     if raiz.get("restaurada"):
@@ -1356,10 +1502,14 @@ def _cmd_deshacer() -> int:
     print("AVISO: --deshacer devuelve el dueño a fruiz:fruiz pero conserva a jaxsvc (LAS MANOS sigue operando) y "
           "NUNCA reabre a otros: proyectos/ queda con other::--- (0770/0660 y ACL por defecto cerrada).")
 
+    if raiz.get("paso_ok") is not True:
+        print("NO OK: tras --deshacer, " + "; ".join(raiz.get("paso_faltas") or ["no se pudo comprobar el paso por la raíz"])
+              + " -- el servicio quedó sin llegar al árbol: corregir la raíz.", file=sys.stderr)
+        return 1
     if datos["hardlinks_rechazados"]:
         print("--deshacer encontró hardlinks -- no se tocaron, y el resultado es un fallo.", file=sys.stderr)
         return 1
-    print("OK: deshecho.")
+    print("OK: deshecho (y jaxsvc y fruiz atraviesan la raíz).")
     return 0
 
 
@@ -1397,13 +1547,15 @@ def _cmd_nucleo_deshacer() -> int:
 
     resultado = _recorrer(proyectos, accion="deshacer")
     raiz_ok, raiz_detalle = _restaurar_raiz_desde_respaldo(proyectos)
+    paso_faltas = _estado_del_paso_por_la_raiz(proyectos)
     print(json.dumps({
         "dirs_procesados": resultado.dirs_procesados,
         "archivos_procesados": resultado.archivos_procesados,
         "symlinks_saltados": resultado.symlinks_saltados,
         "hardlinks_rechazados": resultado.hardlinks_rechazados,
         "excluidos": resultado.excluidos,
-        "raiz": {"restaurada": raiz_ok, "detalle": raiz_detalle},
+        "raiz": {"restaurada": raiz_ok, "detalle": raiz_detalle,
+                 "paso_ok": not paso_faltas, "paso_faltas": paso_faltas},
     }))
     return 0
 
