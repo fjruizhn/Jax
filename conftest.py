@@ -114,6 +114,15 @@ os.environ["JAX_FACET_SEAL_PATH"] = os.path.join(
 os.environ["JAX_KILL_SWITCH_PATH"] = os.path.join(
     tempfile.mkdtemp(prefix="jax-test-interruptor-"), "PAUSE")
 
+#: 2026-10-03: JAX_WORKSPACE_DIR no tiene valor por defecto (falla cerrado:
+#: jax/core/workspace_dir.py). tool_authority.py y jacobs/executor.py la leen al
+#: importarse y NO arrancan sin ella, asi que se fija aca, antes de cualquier
+#: import, en un temporal -- nunca el workspace real. Asignacion directa y no
+#: `setdefault`, como las demas: un .env de produccion sourceado antes de pytest
+#: no puede apuntar la suite al workspace vivo. Un test que necesite otra raiz
+#: sigue usando `monkeypatch.setenv`. tests/test_workspace_dir.py lo vigila.
+os.environ["JAX_WORKSPACE_DIR"] = tempfile.mkdtemp(prefix="jax-test-workspace-")
+
 #: La base de tests de ESTA sesión (decisión de Fernando, 2026-09-17).
 #: Tres sesiones de Claude compartían `jax_memory_test` y se pisaban de
 #: verdad: filas con `mode` en NULL, un arnés expirando pipelines ajenos, una

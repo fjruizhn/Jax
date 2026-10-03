@@ -28,6 +28,8 @@ from grounding_sources import build_sources, render_sources_block, resolve_redir
 from redaccion import recortar_redactado, redactar_secretos
 # E-21: jax/core/config_entorno.py por symlink en las_manos/, como arriba.
 from config_entorno import ruta_absoluta_requerida, url_requerida
+# JAX_WORKSPACE_DIR sin default: jax/core/workspace_dir.py por symlink en las_manos/.
+from workspace_dir import workspace_dir
 from cliente_http_compartido import obtener_cliente_http
 from auth_servicio import IDENTIDAD_JACOBS, encabezado_propio
 from jacobs.models import HTTP_FACETS as _HTTP_FACETS
@@ -82,7 +84,9 @@ MAX_TOTAL_DEP_CONTEXT_CHARS = 180_000
 # plan.py). Un solo lugar define la partición, dos módulos la consumen.
 
 
-HYDE_WORKSPACE_DIR   = os.getenv("JAX_WORKSPACE_DIR", "/home/fruiz/jax-workspace")
+# Sin valor por defecto (2026-10-03): si JAX_WORKSPACE_DIR falta, el proceso no
+# arranca -- un default escribiria en silencio en otro lugar y partiria los datos.
+HYDE_WORKSPACE_DIR   = str(workspace_dir())
 
 
 # ----------------------------------------------------------------

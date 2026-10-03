@@ -49,6 +49,15 @@ from pathlib import Path
 
 from procesamiento.resultado import Resultado
 
+try:
+    # Bare primero, por consistencia con los otros symlinks de las_manos/ (via
+    # las_manos/workspace_dir.py). En produccion jax.core TAMBIEN es importable
+    # (drop-in z-pythonpath.conf, PYTHONPATH=/srv/jax-prod/jax); el calificado
+    # cubre el REPL/CI con solo la raiz del repo en sys.path.
+    from workspace_dir import workspace_dir
+except ImportError:
+    from jax.core.workspace_dir import workspace_dir
+
 EXTRACTOR = "tesseract"
 
 # I-7 (final-hallazgos.md, ronda de cierre): mismo valor que
@@ -73,7 +82,7 @@ def _resolver_workspace_dir() -> Path:
     """Separada de la constante de módulo para poder probar la resolución
     de symlinks sin recargar el módulo entero ni tocar el `_WORKSPACE_DIR`
     real que usa `extraer()`."""
-    return Path(os.getenv("JAX_WORKSPACE_DIR", "/home/fruiz/jax-workspace")).resolve()
+    return workspace_dir()
 
 
 _WORKSPACE_DIR = _resolver_workspace_dir()
