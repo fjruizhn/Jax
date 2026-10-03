@@ -2,7 +2,10 @@
 # ops/permisos_proyectos.py [--verificar [RAIZ] | --aplicar | --deshacer] — spec
 # docs/superpowers/specs/2026-09-22-proyectos-y-selector-design.md §5: RAIZ/proyectos/ y
 # todo lo de abajo queda DUEÑO jaxsvc, GRUPO fruiz con escritura, setgid en directorios,
-# ACL POSIX de acceso y por defecto `u:jaxsvc:rwX,g:fruiz:rwX,m::rwx`.
+# ACL POSIX de acceso y por defecto `u:jaxsvc:rwX,g:fruiz:rwX,m::rwx`, y SIN ningún bit para
+# `otros` (directorios 2770, archivos 0660, `o::---` en la ACL de acceso y por defecto); la raíz del
+# workspace (padre de proyectos/) tampoco puede tener bits de otros: --verificar lo exige y
+# --aplicar lo quita sin cambiar su dueño ni su grupo.
 #
 # TERCERA RONDA (2026-09-25) -- RECHAZADO de nuevo, esta vez con 2 BLOCK sobre el DISEÑO
 # de la reversión de la ronda 2 (json.py/-I y MAJOR-1/2/3 de esa ronda quedaron cerrados
@@ -273,6 +276,23 @@ def _bits(perm: str) -> int:
     return v
 
 
+def _faltas_de_otros(st: os.stat_result, texto_acl: str, *, con_default: bool) -> list[str]:
+    """Spec madre §5: sin ningún bit para `otros`. `other` NO depende de la máscara, así que
+    se cuenta el valor crudo -- en el modo, en la ACL de acceso y (directorios) en la ACL por
+    defecto. Una ACL por defecto ausente no se reporta acá: eso ya lo cuentan las otras reglas."""
+    faltas = []
+    if st.st_mode & stat.S_IRWXO:
+        faltas.append(f"permisos para otros en el modo ({stat.filemode(st.st_mode)[-3:]})")
+    acceso = _permisos_de(texto_acl, False, "other", None)
+    if acceso is not None and _bits(acceso):
+        faltas.append(f"permisos para otros en la ACL de acceso (other::{acceso})")
+    if con_default:
+        por_defecto = _permisos_de(texto_acl, True, "other", None)
+        if por_defecto is not None and _bits(por_defecto):
+            faltas.append(f"permisos para otros en la ACL por defecto (default:other::{por_defecto})")
+    return faltas
+
+
 def _permiso_efectivo(texto_acl: str, *, default: bool, tipo: str, calificador: str) -> int:
     entrada = _permisos_de(texto_acl, default, tipo, calificador)
     if entrada is None:
@@ -385,10 +405,32 @@ def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado
             os.close(fd_path)
 
 
+def _revisar_o_mutar_raiz(fd_raiz: int, ruta: str, *, mutar: bool, resultado: Resultado) -> None:
+    """La raíz del workspace (el padre de proyectos/) es la barrera de toda la cadena: si
+    tiene algún bit para otros, el cierre de proyectos/ depende de un solo bit que nadie
+    vigila. Solo se mira/quita `otros`: ni el dueño ni el grupo de la raíz se tocan (la
+    raíz no es de este guion), ni sus otras entradas ACL."""
+    st = os.fstat(fd_raiz)
+    if mutar and st.st_mode & stat.S_IRWXO:
+        os.fchmod(fd_raiz, stat.S_IMODE(st.st_mode) & ~stat.S_IRWXO)
+        st = os.fstat(fd_raiz)
+    try:
+        texto_acl = _getfacl(fd_raiz)
+    except ErrorPermisosProyectos as exc:
+        resultado.no_cumple.append(f"{ruta} (raíz del workspace): no se pudo leer la ACL: {exc}")
+        texto_acl = ""
+    faltas = _faltas_de_otros(st, texto_acl, con_default=False)
+    if faltas:
+        resultado.no_cumple.append(f"{ruta} (raíz del workspace): {'; '.join(faltas)}")
+
+
 def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None) -> Resultado:
     resultado = Resultado()
     fd_raiz = os.open(str(proyectos.parent), os.O_RDONLY | os.O_DIRECTORY)
     try:
+        if accion in ("verificar", "aplicar"):
+            _revisar_o_mutar_raiz(fd_raiz, str(proyectos.parent), mutar=(accion == "aplicar"),
+                                  resultado=resultado)
         fd_proyectos = _abrir_o_path(proyectos.name, fd_raiz)
         if fd_proyectos is None:
             raise ErrorPermisosProyectos(f"{proyectos} desapareció justo antes de abrirlo")
@@ -465,6 +507,9 @@ def _revisar_o_mutar_directorio(fd_path: int, ruta: str, st: os.stat_result, *, 
             faltas.append(f"ACL por defecto efectiva insuficiente para g:{GRUPO}")
         if _permiso_efectivo(texto_acl, default=True, tipo="group", calificador="") & 0o7 != 0o7:
             faltas.append("ACL por defecto efectiva insuficiente para group:: (grupo dueño)")
+        faltas.extend(_faltas_de_otros(st, texto_acl, con_default=True))
+    elif st.st_mode & stat.S_IRWXO:
+        faltas.extend(_faltas_de_otros(st, "", con_default=True))
 
     if faltas:
         resultado.no_cumple.append(f"{ruta}: {'; '.join(faltas)}")
@@ -486,7 +531,9 @@ def _mutar_directorio(fd_path: int, ruta: str, resultado: Resultado) -> None:
     # correcta, la dueño con lo que tuviera de antes de --aplicar) -- confuso para
     # cualquiera que lea la ACL, y root-cause real del defecto de --deshacer
     # encontrado en la ronda 3 (ver el docstring de _deshacer_objeto).
-    entrada = f"u:{USUARIO}:rwX,g:{GRUPO}:rwX,g::rwX,m::rwx"
+    # `o::---` en la de acceso Y en la por defecto (spec madre §5): lo que se cree después
+    # hereda `other` cerrado. Las entradas de jaxsvc y fruiz no cambian.
+    entrada = f"u:{USUARIO}:rwX,g:{GRUPO}:rwX,g::rwX,m::rwx,o::---"
     _setfacl(fd_path, entrada)
     _setfacl(fd_path, entrada, default=True)
 
@@ -494,9 +541,11 @@ def _mutar_directorio(fd_path: int, ruta: str, resultado: Resultado) -> None:
     try:
         st_ahora = os.fstat(fd_real)
         tenia_espurios = bool(st_ahora.st_mode & (stat.S_ISUID | stat.S_ISVTX))
-        nuevo_modo = (st_ahora.st_mode & ~(stat.S_ISUID | stat.S_ISVTX)) | stat.S_ISGID
-        if nuevo_modo != st_ahora.st_mode:
-            os.fchmod(fd_real, stat.S_IMODE(nuevo_modo))
+        # 2770: setgid sí, setuid/sticky no, y ningún bit para otros (fchmod con ACL pone la
+        # máscara en rwx, que es lo que ya tenía).
+        nuevo_modo = stat.S_ISGID | 0o770
+        if nuevo_modo != stat.S_IMODE(st_ahora.st_mode):
+            os.fchmod(fd_real, nuevo_modo)
             if tenia_espurios:
                 resultado.bits_espurios_quitados.append(ruta)
     finally:
@@ -541,6 +590,9 @@ def _revisar_o_mutar_archivo(fd_path: int, ruta: str, st: os.stat_result, *, mut
         # m6 (ronda 4): ver la nota equivalente en _revisar_o_mutar_directorio.
         if _permiso_efectivo(texto_acl, default=False, tipo="group", calificador="") & 0o6 != 0o6:
             faltas.append("ACL de acceso efectiva insuficiente para group:: (grupo dueño)")
+        faltas.extend(_faltas_de_otros(st, texto_acl, con_default=False))
+    elif st.st_mode & stat.S_IRWXO:
+        faltas.extend(_faltas_de_otros(st, "", con_default=False))
 
     if faltas:
         resultado.no_cumple.append(f"{ruta}: {'; '.join(faltas)}")
@@ -555,14 +607,17 @@ def _mutar_archivo(fd_path: int, ruta: str, resultado: Resultado) -> None:
     finally:
         os.close(fd_real)
 
-    _setfacl(fd_path, f"u:{USUARIO}:rwX,g:{GRUPO}:rwX,g::rwX,m::rwx")
+    _setfacl(fd_path, f"u:{USUARIO}:rwX,g:{GRUPO}:rwX,g::rwX,m::rwx,o::---")
 
     fd_real = _reabrir_real(fd_path, os.O_RDONLY)
     try:
         st_ahora = os.fstat(fd_real)
+        # 0660 (spec madre §5): sin bits especiales ni para otros; con ACL, fchmod deja la
+        # máscara en rw-, que es lo que las entradas de jaxsvc y fruiz (rw) ya necesitan.
         if st_ahora.st_mode & _ESPECIALES:
-            os.fchmod(fd_real, stat.S_IMODE(st_ahora.st_mode & ~_ESPECIALES))
             resultado.bits_espurios_quitados.append(ruta)
+        if stat.S_IMODE(st_ahora.st_mode) != 0o660:
+            os.fchmod(fd_real, 0o660)
     finally:
         os.close(fd_real)
 
@@ -960,7 +1015,7 @@ def _cmd_verificar(raiz: str) -> int:
     ok = not resultado.no_cumple and not resultado.hardlinks_rechazados
     if ok:
         print(f"OK: {proyectos} cumple (dueño {USUARIO}, grupo {GRUPO}, setgid, sin bits "
-              f"espurios, ACL de acceso y por defecto efectivas, sin hardlinks).")
+              f"espurios, sin acceso para otros (proyectos/ ni la raíz), ACL de acceso y por defecto efectivas, sin hardlinks).")
         return 0
     return 1
 
@@ -1123,7 +1178,8 @@ uso: permisos_proyectos.py [--verificar [RAIZ] | --aplicar | --deshacer]
   --verificar [RAIZ]  Solo lectura. Sin RAIZ, usa la configurada en {RUTA_ENV}.
                        Es el modo por defecto si no se da ningún flag.
   --aplicar            Dueño {USUARIO}, grupo {GRUPO}, setgid, ACL de acceso y por
-                       defecto. Sólo actúa sobre la RAIZ configurada (nunca acepta
+                       defecto, 2770/0660 y sin ningún bit para otros (también quita
+                       los de la raíz del workspace, sin cambiar su dueño ni grupo). Sólo actúa sobre la RAIZ configurada (nunca acepta
                        una RAIZ distinta) -- necesita el GO de Fernando en producción.
   --deshacer           DETERMINISTA, sin argumentos: lleva el árbol a
                        {DUENO_ORIGINAL}:{GRUPO} 0775 (directorios) / 0664 (archivos),
