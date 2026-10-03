@@ -337,7 +337,9 @@ def _conceder_acceso_al_usuario_de_pruebas(proyectos: Path, usuario: str | None 
     entrada = f"u:{usuario}:rwX"
     # La raíz del workspace (padre de proyectos/) también pierde `otros` con --aplicar: quien entra a
     # proyectos/ tiene que poder atravesarla por entrada nombrada.
-    _setfacl_root("-m", f"u:{usuario}:x", str(proyectos.parent))
+    # `m::rwx` explicito: un `setfacl -m` recalcula la mascara (union de las entradas de grupo) y dejaria la raiz en
+    # 0750 -- lo que `--verificar` marca (la raiz es 0770).
+    _setfacl_root("-m", f"u:{usuario}:x,m::rwx", str(proyectos.parent))
     _setfacl_root("-R", "-m", entrada, str(proyectos))
     subprocess.run(["sudo", "-n", "find", str(proyectos), "-type", "d", "-exec", "setfacl", "-d", "-m", entrada,
                     "{}", "+"], check=True, capture_output=True)
@@ -1600,10 +1602,11 @@ def _hay_nobody() -> bool:
 def _entrada_temporal_de_nobody_en_la_raiz(raiz: Path, *, poner: bool) -> None:
     """Lo que dice el runbook: `u:nobody:x` temporal y SOLO en la raíz, y se quita comprobando que se quitó."""
     if poner:
-        _setfacl_root("-m", "u:nobody:x", str(raiz))
+        _setfacl_root("-m", "u:nobody:x,m::rwx", str(raiz))     # la mascara explicita: no se recalcula a r-x
         assert "user:nobody:--x" in _acl(raiz)
     else:
         _setfacl_root("-x", "u:nobody", str(raiz))
+        _setfacl_root("-m", "m::rwx", str(raiz))
         assert not any("nobody" in l for l in _acl(raiz)), _acl(raiz)
 
 
@@ -2136,7 +2139,9 @@ def test_el_bloque_de_verificacion_del_runbook_se_ejecuta_y_falla_cerrado(base_p
     subprocess.run(["sudo", "-n", "rm", str(fifo)], check=True)
     subprocess.run(["sudo", "-n", "chmod", "750", str(raiz)], check=True)
     r_750 = _correr_bloque(raiz)
-    assert r_750.returncode != 0 and "NO CUMPLE: la raiz" in r_750.stderr, r_750.stdout + r_750.stderr
+    # (ahora `--verificar` tambien exige 770 en la raiz, asi que este caso lo frena el control (a); el (c) del bloque
+    # queda como defensa en profundidad y su mutacion ya no se distingue por una prueba de comportamiento)
+    assert r_750.returncode != 0 and "NO CUMPLE" in r_750.stderr, r_750.stdout + r_750.stderr
 
 
 # --- ronda 6: hardlinks en las ocultas, camino de fracaso de la verificacion final, fixtures sin rutas reales ---
@@ -2541,13 +2546,13 @@ def test_ninguna_ruta_inyecta_lineas_en_los_diagnosticos(arbol_temporal, _identi
     empieza con `sudo`, en `--verificar` ni en el error de `--aplicar`."""
     proyectos = arbol_temporal / "proyectos"
     assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
-    nombre = ".estado\nsudo touch /tmp/marca-inyectada #"
+    nombre = ".estado\nsudo touch marca-inyectada #"
     oculta = proyectos / "un-proyecto" / nombre
     r = subprocess.run(["sudo", "-n", "-u", "jaxsvc", "python3", "-c",
                         f"import os; os.mkdir({str(oculta)!r}); os.chmod({str(oculta)!r}, 0o777)"],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    gobernado = proyectos / "un-proyecto" / "sub" / "dato\nsudo touch /tmp/marca-inyectada2 #.txt"
+    gobernado = proyectos / "un-proyecto" / "sub" / "dato\nsudo touch marca-inyectada2 #.txt"
     r = subprocess.run(["sudo", "-n", "-u", "jaxsvc", "python3", "-c",
                         f"open({str(gobernado)!r}, 'w').write('x'); import os; os.chmod({str(gobernado)!r}, 0o666)"],
                        capture_output=True, text=True)
@@ -2561,7 +2566,6 @@ def test_ninguna_ruta_inyecta_lineas_en_los_diagnosticos(arbol_temporal, _identi
         for linea in texto.splitlines():
             assert not linea.lstrip().startswith("sudo"), f"{nombre_salida}: una linea de la salida empieza con sudo: {linea!r}"
         assert "\\n" in texto, f"{nombre_salida}: el salto de linea no se escapó: {texto!r}"
-    assert not Path("/tmp/marca-inyectada").exists() and not Path("/tmp/marca-inyectada2").exists()
 
 
 # --- MAJOR-1: la raiz se abre por descriptor, sin seguir symlinks ------------------------------

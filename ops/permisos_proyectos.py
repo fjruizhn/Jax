@@ -102,6 +102,15 @@ ENTRADAS_EXTRA_PERMITIDAS: set[str] = set()
 _ESPECIALES = stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
 
 
+def _nombre_seguro(texto: str) -> str:
+    """UNA función de presentación para toda ruta o nombre que se imprime en un mensaje: los caracteres de control
+    y no imprimibles (saltos de línea, NUL, bytes inválidos como surrogates) se escapan (`\\n`, `\\udcff`), así que un
+    nombre de carpeta no puede fabricar una línea que parezca una orden (`sudo ...`) para quien copia el aviso.
+    Lo imprimible pasa tal cual. Se aplica al CONSTRUIR cada ruta de mensaje; las operaciones sobre el sistema de
+    archivos usan siempre el nombre real."""
+    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode("ascii") for c in texto)
+
+
 class ErrorPermisosProyectos(Exception):
     """Cualquier fallo que tiene que abortar sin aplicar nada más."""
 
@@ -142,9 +151,9 @@ def _raiz_configurada_privilegiada() -> Path:
     proyectos_str = os.path.join(workspace, "proyectos")
     absoluta = os.path.abspath(proyectos_str)
     if os.path.islink(absoluta) or os.path.realpath(absoluta) != absoluta:
-        raise ErrorPermisosProyectos(f"{absoluta} es (o cuelga de) un symlink -- no se sigue nunca")
+        raise ErrorPermisosProyectos(f"{_nombre_seguro(absoluta)} es (o cuelga de) un symlink -- no se sigue nunca")
     if not os.path.isdir(absoluta):
-        raise ErrorPermisosProyectos(f"{absoluta} no existe")
+        raise ErrorPermisosProyectos(f"{_nombre_seguro(absoluta)} no existe")
     return Path(absoluta)
 
 
@@ -192,13 +201,13 @@ def _validar_y_obtener_proyectos(raiz: str) -> Path:
 
     proyectos = Path(raiz) / "proyectos"
     if not proyectos.is_dir():
-        raise ErrorPermisosProyectos(f"RAIZ inválida: no existe {proyectos} (una ruta sin proyectos/)")
+        raise ErrorPermisosProyectos(f"RAIZ inválida: no existe {_nombre_seguro(str(proyectos))} (una ruta sin proyectos/)")
 
     absoluta = os.path.abspath(str(proyectos))
     real = os.path.realpath(absoluta)
     if real != absoluta or os.path.islink(absoluta):
         raise ErrorPermisosProyectos(
-            f"RAIZ inválida: {proyectos} es (o cuelga de) un symlink -- no se sigue nunca"
+            f"RAIZ inválida: {_nombre_seguro(str(proyectos))} es (o cuelga de) un symlink -- no se sigue nunca"
         )
 
     return proyectos
@@ -461,7 +470,7 @@ def _procesar_archivo(fd_path: int, ruta: str, st: os.stat_result, *, accion: st
 
 
 def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado: Resultado,
-             hook_de_prueba=None) -> None:
+             hook_de_prueba=None, alterada: bool = False) -> None:
     """`profundidad` es la profundidad de las ENTRADAS que se listan en esta llamada,
     relativa a `proyectos/` (sus hijos directos son profundidad 1). m4: la exclusión de
     la exclusión de carpetas ocultas sólo aplica en profundidad 2 -- proyectos/<proyecto>/<.oculta>,
@@ -474,12 +483,13 @@ def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado
 
     for entrada in entradas:
         nombre = entrada.name
-        ruta_hija = f"{ruta}/{nombre}"
+        ruta_hija = f"{ruta}/{_nombre_seguro(nombre)}"
+        hija_alterada = alterada or _nombre_seguro(nombre) != nombre
 
         if profundidad == 2 and _es_carpeta_oculta_excluida(entrada):
             resultado.excluidos.append(ruta_hija)
             if accion in ("verificar", "previo", "previo-oculta"):
-                _revisar_oculta(nombre, dir_fd, ruta_hija, resultado)
+                _revisar_oculta(nombre, dir_fd, ruta_hija, resultado, alterada=hija_alterada)
             continue
 
         fd_path = _abrir_o_path(nombre, dir_fd)
@@ -506,7 +516,7 @@ def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado
                     continue
                 try:
                     _caminar(fd_listable, ruta_hija, profundidad + 1, accion=accion,
-                             resultado=resultado, hook_de_prueba=hook_de_prueba)
+                             resultado=resultado, hook_de_prueba=hook_de_prueba, alterada=hija_alterada)
                 finally:
                     os.close(fd_listable)
                 continue
@@ -535,7 +545,7 @@ def _abrir_raiz_seguro(ruta_raiz: str) -> int:
                 siguiente = os.open(parte, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             except OSError as exc:
                 raise ErrorPermisosProyectos(
-                    f"{ruta_raiz}: no se pudo abrir {parte!r} sin seguir symlinks ({exc.strerror}) -- "
+                    f"{_nombre_seguro(ruta_raiz)}: no se pudo abrir {parte!r} sin seguir symlinks ({exc.strerror}) -- "
                     "es (o cuelga de) un symlink, o cambió mientras se validaba; no se toca nada"
                 ) from exc
             os.close(fd)
@@ -556,7 +566,7 @@ def _revisar_previo_objeto(fd_path: int, ruta: str, resultado: Resultado) -> Non
         resultado.no_cumple.append(f"{ruta}: {'; '.join(faltas)}")
 
 
-def _revisar_oculta(nombre: str, dir_fd: int, ruta: str, resultado: Resultado) -> None:
+def _revisar_oculta(nombre: str, dir_fd: int, ruta: str, resultado: Resultado, *, alterada: bool = False) -> None:
     """Carpetas ocultas de proyectos/<proyecto>/ (estado de herramientas): ROOT NO LAS MUTA NUNCA -- ni fchmod, ni
     fchown, ni setfacl -- y por eso no hay carrera posible con un hardlink que `jaxsvc` enlace desde fuera. Solo se
     MIRAN, por descriptor y sin seguir symlinks. Cualquier bit de otros (modo, `other::` de acceso o, en
@@ -589,6 +599,13 @@ def _revisar_oculta(nombre: str, dir_fd: int, ruta: str, resultado: Resultado) -
         con_hardlink = any("hardlink en carpeta oculta" in h for h in hallazgos)
         ordenes = []
         q = shlex.quote(ruta)  # el nombre lo controla quien crea la carpeta: la orden la ejecuta una persona
+        if alterada:
+            # La ruta mostrada tiene caracteres de control ESCAPADOS: una orden con ella apuntaría a otra cosa, y
+            # una con la ruta real tendría un salto de línea. No se imprime ninguna orden copiable.
+            resultado.no_cumple.append(
+                f"{ruta}: el nombre tiene caracteres de control (mostrados escapados): no se imprime una orden "
+                "copiable; una persona renombra la carpeta con un nombre normal y repite --verificar")
+            return
         if con_otros:
             ordenes.append(f"chmod -R o-rwx -- {q}")
         if con_default:
@@ -617,7 +634,7 @@ def _mirar_oculta_hijos(dir_fd: int, ruta: str, hallazgos: list[str]) -> None:
     with os.scandir(dir_fd) as it:
         entradas = list(it)
     for entrada in entradas:
-        ruta_hija = f"{ruta}/{entrada.name}"
+        ruta_hija = f"{ruta}/{_nombre_seguro(entrada.name)}"
         fd_path = _abrir_o_path(entrada.name, dir_fd)
         if fd_path is None:
             continue
@@ -645,6 +662,26 @@ def _mirar_oculta_hijos(dir_fd: int, ruta: str, hallazgos: list[str]) -> None:
             os.close(fd_path)
 
 
+def _faltas_identidad_y_modo_de_la_raiz(st: os.stat_result, *, con_modo: bool) -> list[str]:
+    """La raíz del workspace es `fruiz:jaxsvc` 770 (el 770 con setgid solo si ya lo tiene). Este guion NO cambia
+    dueños ni grupos de la raíz: si no coinciden, `--aplicar` falla cerrado y `--verificar` lo marca."""
+    faltas = []
+    try:
+        dueno = pwd.getpwuid(st.st_uid).pw_name
+    except KeyError:
+        dueno = str(st.st_uid)
+    try:
+        grupo = grp.getgrgid(st.st_gid).gr_name
+    except KeyError:
+        grupo = str(st.st_gid)
+    if (dueno, grupo) != (DUENO_ORIGINAL, USUARIO):
+        faltas.append(f"la raíz es {_nombre_seguro(dueno)}:{_nombre_seguro(grupo)}, se esperaba "
+                      f"{DUENO_ORIGINAL}:{USUARIO}; este guion no cambia dueños ni grupo de la raíz")
+    if con_modo and stat.S_IMODE(st.st_mode) & 0o777 != 0o770:
+        faltas.append(f"modo {stat.S_IMODE(st.st_mode) & 0o777:04o} de la raíz, se esperaba 0770 (770)")
+    return faltas
+
+
 def _revisar_o_mutar_raiz(fd_raiz: int, ruta: str, *, modo: str, resultado: Resultado) -> None:
     """La raíz del workspace (el padre de proyectos/) es la barrera de toda la cadena: si tiene algún bit para
     otros, el cierre de proyectos/ depende de un solo bit que nadie vigila -- y si jaxsvc o fruiz no pueden
@@ -660,23 +697,26 @@ def _revisar_o_mutar_raiz(fd_raiz: int, ruta: str, *, modo: str, resultado: Resu
         texto_acl = ""
 
     if modo == "previo":
-        faltas = _faltas_paso_por_la_raiz(st, texto_acl, ignorar_otros=True) + _faltas_entradas_ajenas(texto_acl)
+        faltas = (_faltas_identidad_y_modo_de_la_raiz(st, con_modo=False)
+                  + _faltas_paso_por_la_raiz(st, texto_acl, ignorar_otros=True) + _faltas_entradas_ajenas(texto_acl))
         if faltas:
             resultado.no_cumple.append(f"{etiqueta}: {'; '.join(faltas)}")
         return
 
-    if modo == "aplicar" and st.st_mode & stat.S_IRWXO:
+    objetivo = 0o770 | (st.st_mode & stat.S_ISGID)   # 770; el setgid solo si hoy lo tiene
+    if modo == "aplicar" and stat.S_IMODE(st.st_mode) != objetivo:
         _PROGRESO["ultima"] = ruta
         fd_real = _reabrir_real(fd_raiz, os.O_RDONLY)
         try:
-            os.fchmod(fd_real, stat.S_IMODE(st.st_mode) & ~stat.S_IRWXO)
+            os.fchmod(fd_real, objetivo)
         finally:
             os.close(fd_real)
         st = os.fstat(fd_raiz)
         texto_acl = _getfacl(fd_raiz)
     faltas = (_faltas_de_otros(st, texto_acl, con_default=False)
               + _faltas_paso_por_la_raiz(st, texto_acl, ignorar_otros=False)
-              + _faltas_entradas_ajenas(texto_acl))
+              + _faltas_entradas_ajenas(texto_acl)
+              + _faltas_identidad_y_modo_de_la_raiz(st, con_modo=True))
     if faltas:
         resultado.no_cumple.append(f"{etiqueta}: {'; '.join(faltas)}")
 
@@ -711,20 +751,21 @@ def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_d
     fd_raiz = _abrir_raiz_seguro(str(proyectos.parent))
     try:
         if accion in ("verificar", "aplicar", "previo"):
-            _revisar_o_mutar_raiz(fd_raiz, str(proyectos.parent), modo=accion, resultado=resultado)
+            _revisar_o_mutar_raiz(fd_raiz, _nombre_seguro(str(proyectos.parent)), modo=accion, resultado=resultado)
         fd_proyectos = _abrir_o_path(proyectos.name, fd_raiz)
         if fd_proyectos is None:
-            raise ErrorPermisosProyectos(f"{proyectos} desapareció justo antes de abrirlo")
+            raise ErrorPermisosProyectos(f"{_nombre_seguro(str(proyectos))} desapareció justo antes de abrirlo")
         try:
             st = os.fstat(fd_proyectos)
             if stat.S_ISLNK(st.st_mode):
-                raise ErrorPermisosProyectos(f"{proyectos} se volvió un symlink justo antes de abrirlo")
-            _procesar_directorio(fd_proyectos, str(proyectos), st, accion=accion, resultado=resultado)
+                raise ErrorPermisosProyectos(f"{_nombre_seguro(str(proyectos))} se volvió un symlink justo antes de abrirlo")
+            ruta_base = _nombre_seguro(str(proyectos))
+            _procesar_directorio(fd_proyectos, ruta_base, st, accion=accion, resultado=resultado)
             resultado.dirs_procesados += 1
             fd_listable = _reabrir_real(fd_proyectos, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                _caminar(fd_listable, str(proyectos), 1, accion=accion, resultado=resultado,
-                         hook_de_prueba=hook_de_prueba)
+                _caminar(fd_listable, ruta_base, 1, accion=accion, resultado=resultado,
+                         hook_de_prueba=hook_de_prueba, alterada=ruta_base != str(proyectos))
             finally:
                 os.close(fd_listable)
         finally:
@@ -842,6 +883,23 @@ def _mutar_directorio(fd_path: int, ruta: str, resultado: Resultado) -> None:
         os.close(fd_real)
 
 
+def _faltas_ejecucion_en_archivo(st: os.stat_result, texto_acl: str) -> list[str]:
+    """Un archivo gobernado es EXACTAMENTE 0660: ni un bit de ejecución, en el modo ni en una entrada ACL (de
+    grupo o nombrada) con permiso efectivo (entrada & máscara)."""
+    faltas = []
+    if st.st_mode & 0o111:
+        faltas.append(f"bit de ejecución en el modo ({stat.filemode(st.st_mode)})")
+    if stat.S_IMODE(st.st_mode) & 0o777 != 0o660:
+        faltas.append(f"modo {stat.S_IMODE(st.st_mode) & 0o777:04o} distinto de 0660")
+    mascara = _bits(_permisos_de(texto_acl, False, "mask", None) or "rwx")
+    for es_default, tipo, cal, perm in _iter_entradas(texto_acl):
+        if es_default or tipo not in ("user", "group") or (tipo == "user" and not cal):
+            continue  # el dueño (user::) ya lo cubre el modo
+        if _bits(perm) & mascara & 1:
+            faltas.append(f"ACL de acceso con ejecución efectiva ({tipo}:{_nombre_seguro(cal)}:{perm})")
+    return faltas
+
+
 def _revisar_o_mutar_archivo(fd_path: int, ruta: str, st: os.stat_result, *, mutar: bool,
                               resultado: Resultado) -> None:
     if mutar:
@@ -884,6 +942,7 @@ def _revisar_o_mutar_archivo(fd_path: int, ruta: str, st: os.stat_result, *, mut
         faltas.extend(_faltas_entradas_ajenas(texto_acl))
     elif st.st_mode & stat.S_IRWXO:
         faltas.extend(_faltas_de_otros(st, "", con_default=False))
+    faltas.extend(_faltas_ejecucion_en_archivo(st, texto_acl))
 
     if faltas:
         resultado.no_cumple.append(f"{ruta}: {'; '.join(faltas)}")
@@ -1157,7 +1216,7 @@ def _contar_objetos_reales(proyectos: Path) -> tuple[int, list[str]]:
         with os.scandir(dir_fd) as it:
             entradas = list(it)
         for entrada in entradas:
-            ruta_hija = f"{ruta}/{entrada.name}"
+            ruta_hija = f"{ruta}/{_nombre_seguro(entrada.name)}"
             fd_path = _abrir_o_path(entrada.name, dir_fd)
             if fd_path is None:
                 continue
@@ -1441,7 +1500,7 @@ def _cmd_verificar(raiz: str) -> int:
 
     ok = not resultado.no_cumple and not resultado.hardlinks_rechazados
     if ok:
-        print(f"OK: {proyectos} cumple (dueño {USUARIO}, grupo {GRUPO}, setgid, sin bits "
+        print(f"OK: {_nombre_seguro(str(proyectos))} cumple (dueño {USUARIO}, grupo {GRUPO}, setgid, sin bits "
               f"espurios, sin acceso para otros (proyectos/ ni la raíz), ACL de acceso y por defecto efectivas, sin hardlinks).")
         return 0
     return 1
@@ -1528,7 +1587,7 @@ def _cmd_aplicar(raiz: str) -> int:
     if codigo != 0:
         print("--aplicar terminó pero --verificar final encontró fallos (ver arriba).", file=sys.stderr)
     else:
-        print(f"OK: {proyectos} aplicado y verificado.")
+        print(f"OK: {_nombre_seguro(str(proyectos))} aplicado y verificado.")
     return codigo
 
 
@@ -1583,7 +1642,7 @@ def _imprimir_a_medio(modo: str, participio: str, exc: Exception) -> int:
     """El núcleo falló DESPUÉS de empezar a mutar: el JSON lo dice, con la última ruta y la instrucción."""
     print(json.dumps({
         "a_medio_aplicar": True,
-        "error": str(exc),
+        "error": _nombre_seguro(str(exc) or type(exc).__name__),
         "ultima_ruta": _PROGRESO["ultima"],
         "instruccion": f"el árbol quedó parcialmente {participio}; --{modo} es idempotente: corregí la causa y "
                        "volvé a correrlo",
@@ -1616,7 +1675,7 @@ def _cmd_nucleo_privilegiado() -> int:
 
     try:
         resultado = _recorrer(proyectos, accion="aplicar")
-    except Exception as exc:
+    except BaseException as exc:   # incluye KeyboardInterrupt y SystemExit: a medio mutar hay que decirlo
         if _PROGRESO["mutando"]:
             return _imprimir_a_medio("aplicar", "aplicado", exc)
         raise
@@ -1646,7 +1705,7 @@ def _cmd_nucleo_deshacer() -> int:
         resultado = _recorrer(proyectos, accion="deshacer")
         raiz_ok, raiz_detalle = _restaurar_raiz_desde_respaldo(proyectos)
         paso_faltas = _estado_del_paso_por_la_raiz(proyectos)
-    except Exception as exc:
+    except BaseException as exc:   # incluye KeyboardInterrupt y SystemExit: a medio mutar hay que decirlo
         if _PROGRESO["mutando"]:
             return _imprimir_a_medio("deshacer", "deshecho", exc)
         raise
