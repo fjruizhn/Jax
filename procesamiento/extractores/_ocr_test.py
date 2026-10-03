@@ -1078,7 +1078,7 @@ def test_minor1_cambiar_la_logica_invalida_la_cache(tmp_path, monkeypatch):
     from procesamiento import compuerta
 
     ingesta, origen, trabajo, _ = _ingerir_imagen_sin_texto(tmp_path, monkeypatch)
-    monkeypatch.setattr(ocr, "VERSION_LOGICA", "otra-regla")
+    monkeypatch.setattr(ocr, "VERSION_LOGICA_IMAGEN", "otra-regla")
     llamadas = []
     original = compuerta.extraer
     monkeypatch.setattr(
@@ -1170,7 +1170,7 @@ def test_b_tiene_prioridad_sobre_d_aunque_la_imagen_sea_una_pagina():
         "confianza_promedio": 30.0, "palabras_dudosas": [{"palabra": "x", "confianza": 10.0}],
         "ancho": 0, "alto": 0, "clasificacion": "sin_texto",
     }
-    res = ocr._resolver_imagen(r, "spa", (2480, 3508))
+    res = ocr._resolver_imagen(r, "spa", [(2480, 3508)])
     assert res.estado == "parcial"
     assert res.detalle["codigo"] == "imagen_texto_dudoso"
     assert "algo leido con baja confianza" in res.salidas["texto.txt"]
@@ -1199,3 +1199,268 @@ def test_real_img_2353_organigrama_es_parcial_y_legible():
     assert r.estado == "parcial"
     assert r.detalle["codigo"] == "imagen_texto_dudoso"
     assert len(r.salidas["texto.txt"]) > 200
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 2: TIFF multipagina (N1), una sola lectura (N2), firma de
+# imagen antes de %PDF (N3), Pillow (N4), logica por camino (N5), tope (N6)
+# ---------------------------------------------------------------------------
+
+
+def _tiff_multipagina(destino: Path, paginas: list) -> Path:
+    paginas[0].save(destino, save_all=True, append_images=paginas[1:])
+    return destino
+
+
+def test_n1_tiff_con_la_segunda_pagina_truncada_es_archivo_ilegible(tmp_path: Path):
+    import random
+
+    from PIL import Image
+
+    rnd = random.Random(3)
+    paginas = []
+    for _ in range(2):
+        im = Image.new("L", (300, 200))
+        im.putdata([rnd.randint(0, 255) for _ in range(300 * 200)])
+        paginas.append(im)
+    completo = _tiff_multipagina(tmp_path / "ok.tif", paginas)
+    datos = completo.read_bytes()
+    roto = tmp_path / "multi_trunc_cut.tif"
+    roto.write_bytes(datos[: int(len(datos) * 0.75)])
+
+    r = ocr.extraer(roto)
+
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["causa"] == "no_decodifica"
+
+
+def test_n1_tiff_con_una_pagina_bomba_se_rechaza_sin_decodificarla(tmp_path: Path):
+    """Pagina 2 de 20000x10000 (200 Mpx): antes pasaba la validacion porque
+    solo se miraba el fotograma 0. Sin monkeypatch del tope."""
+    from PIL import Image
+
+    pequena = Image.new("1", (300, 200), 1)
+    bomba = Image.new("1", (20000, 10000), 1)
+    origen = tmp_path / "bomba.tif"
+    pequena.save(origen, save_all=True, append_images=[bomba], compression="group4")
+
+    r = ocr.extraer(origen)
+
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["causa"] == "demasiados_pixeles"
+
+
+def test_n1_tiff_con_demasiadas_paginas_se_rechaza(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    monkeypatch.setattr(ocr, "MAX_PAGINAS", 3)
+    paginas = [Image.new("L", (50, 50), 255) for _ in range(4)]
+    origen = _tiff_multipagina(tmp_path / "largo.tif", paginas)
+    r = ocr.extraer(origen)
+    assert r.estado == "error"
+    assert r.detalle["causa"] == "demasiadas_paginas"
+
+
+def test_n1_tiff_de_dos_paginas_con_texto_en_las_dos_sale_completo(tmp_path: Path):
+    from PIL import Image
+
+    p1 = _imagen_multilinea(tmp_path / "p1.png", [
+        "Primera pagina del contrato", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    p2 = _imagen_multilinea(tmp_path / "p2.png", [
+        "Segunda pagina de anexos", "Garantia hipotecaria sobre inmueble",
+        "Avaluo comercial 5,000,000.00 USD", "Firmado ante notario publico",
+    ])
+    tif = _tiff_multipagina(
+        tmp_path / "dos.tif", [Image.open(p1).convert("RGB"), Image.open(p2).convert("RGB")]
+    )
+
+    r = ocr.extraer(tif)
+
+    assert r.estado in {"ok", "parcial"}
+    texto = r.salidas["texto.txt"]
+    assert "Primera pagina del contrato" in texto
+    assert "Segunda pagina de anexos" in texto
+    assert "Avaluo comercial" in texto
+    assert r.detalle["paginas"] == 2
+
+
+def test_n1_cada_pagina_va_por_stdin_como_png_no_el_tiff_original(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    p1 = _imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD")
+    tif = _tiff_multipagina(
+        tmp_path / "dos.tif",
+        [Image.open(p1).convert("RGB"), Image.open(p1).convert("RGB")],
+    )
+    entradas: list = []
+    real = ocr.subprocess.run
+
+    def espia(cmd, *a, **k):
+        if cmd and cmd[0] == "tesseract" and "--version" not in cmd and "tsv" not in cmd:
+            entradas.append(k.get("input"))
+        return real(cmd, *a, **k)
+
+    monkeypatch.setattr(ocr.subprocess, "run", espia)
+    ocr.extraer(tif)
+    assert len(entradas) == 2
+    assert all(e.startswith(b"\x89PNG") for e in entradas)
+
+
+def test_n2_los_bytes_se_leen_una_vez_y_son_los_que_van_a_tesseract(
+    tmp_path: Path, monkeypatch
+):
+    """Carrera validar/leer: si el archivo cambia DESPUES de validarlo, lo que
+    se procesa sigue siendo lo validado."""
+    origen = _imagen_multilinea(tmp_path / "doc.png", [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    original = origen.read_bytes()
+    real_validar = ocr._validar_imagen
+
+    def validar_y_cambiar(datos, *a, **k):
+        resultado = real_validar(datos, *a, **k)
+        origen.write_text("/etc/hostname\n")  # el archivo cambia tras validar
+        return resultado
+
+    monkeypatch.setattr(ocr, "_validar_imagen", validar_y_cambiar)
+    entradas: list = []
+    real = ocr.subprocess.run
+
+    def espia(cmd, *a, **k):
+        if cmd and cmd[0] == "tesseract" and "--version" not in cmd:
+            entradas.append(k.get("input"))
+        return real(cmd, *a, **k)
+
+    monkeypatch.setattr(ocr.subprocess, "run", espia)
+    r = ocr.extraer(origen)
+    assert r.estado == "ok"
+    assert "Activos totales" in r.salidas["texto.txt"]
+    assert entradas and all(e == original for e in entradas)
+
+
+def test_n3_un_png_con_metadata_pdf_es_una_imagen(tmp_path: Path):
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+
+    base = _imagen_multilinea(tmp_path / "b.png", [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    meta = PngInfo()
+    meta.add_text("Software", "exportado de %PDF-1.7")
+    destino = tmp_path / "con-meta.png"
+    Image.open(base).save(destino, pnginfo=meta)
+    assert b"%PDF" in destino.read_bytes()[:1024]
+
+    assert ocr._es_pdf(destino) is False
+    r = ocr.extraer(destino)
+    assert r.estado == "ok"
+    assert "Activos totales" in r.salidas["texto.txt"]
+
+
+def test_n5_la_version_de_la_logica_depende_del_camino():
+    assert ocr.version_logica(".png") == ocr.VERSION_LOGICA_IMAGEN
+    assert ocr.version_logica(".JPEG") == ocr.VERSION_LOGICA_IMAGEN
+    assert ocr.version_logica(".pdf") is None
+
+
+def test_n5_una_ficha_vieja_de_pdf_escaneado_se_reusa_y_una_de_imagen_no(
+    tmp_path, monkeypatch
+):
+    import json
+
+    from motor_registry import tool_authority
+    from PIL import Image
+
+    from procesamiento import compuerta, ingesta
+
+    monkeypatch.setattr(tool_authority, "WORKSPACE_ROOT", tmp_path.resolve())
+    trabajo = tmp_path.resolve() / "trabajo"
+    lineas = [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ]
+    pdf = _pdf_de_imagenes(
+        tmp_path / "escaneo.pdf",
+        [Image.open(_imagen_multilinea(tmp_path / "pg.png", lineas)).convert("RGB")],
+    )
+    img = _imagen_multilinea(tmp_path / "foto.png", lineas)
+
+    fichas = {}
+    for origen in (pdf, img):
+        f = ingesta.ingerir(origen, trabajo)
+        assert f.estado == "ok"
+        ruta = ingesta.ruta_procesado(trabajo, f.sha256) / "ficha.json"
+        datos = json.loads(ruta.read_text(encoding="utf8"))
+        datos["detalle"].pop("_version_logica", None)  # ficha escrita ANTES
+        ruta.write_text(json.dumps(datos), encoding="utf8")
+        fichas[origen.name] = f
+
+    llamadas: list = []
+    original = compuerta.extraer
+    monkeypatch.setattr(
+        compuerta, "extraer", lambda *a, **k: llamadas.append(a) or original(*a, **k)
+    )
+    ingesta.ingerir(pdf, trabajo)
+    assert llamadas == []          # el PDF NO cambio de logica: su cache sigue valiendo
+    ingesta.ingerir(img, trabajo)
+    assert len(llamadas) == 1      # la imagen SI: se reextrae
+
+
+def test_n6_una_imagen_de_200_millones_de_pixeles_es_demasiados_pixeles(tmp_path: Path):
+    from PIL import Image
+
+    origen = tmp_path / "enorme.tif"
+    Image.new("1", (20000, 10000), 1).save(origen, compression="group4")
+    r = ocr.extraer(origen)
+    assert r.estado == "error"
+    assert r.detalle["causa"] == "demasiados_pixeles"
+
+
+def test_n6_el_tope_de_pixeles_deja_pasar_la_foto_real_mas_grande():
+    assert ocr.MAX_PIXELES == 100_000_000
+    assert 13630 * 3826 < ocr.MAX_PIXELES
+
+
+def test_minor3_un_fallo_inesperado_no_copia_el_mensaje_de_la_excepcion(
+    tmp_path: Path, monkeypatch
+):
+    def revienta(*a, **k):
+        raise RuntimeError("/ruta/secreta/con/contenido")
+
+    monkeypatch.setattr(ocr, "_validar_imagen", revienta)
+    r = ocr.extraer(_imagen_una_linea(tmp_path / "x.png", "Activos totales 1,234 USD"))
+    assert r.estado == "error"
+    assert "RuntimeError" in r.detalle["razon"]
+    assert "secreta" not in json.dumps(dict(r.detalle))
+
+
+def test_decision_a_y_b_coinciden_se_aplica_a_b_exige_ocho_caracteres():
+    """Decision del controlador (Fernando puede cambiarla): menos de 8
+    caracteres CON mayoria de palabras dudosas es A (o D si es pagina), no B:
+    con una o dos palabras no hay texto que conservar."""
+    r = {
+        "texto": "ab c", "caracteres": 4, "n_palabras": 2, "confianza_promedio": 20.0,
+        "palabras_dudosas": [{"palabra": "ab", "confianza": 10.0}, {"palabra": "c", "confianza": 9.0}],
+        "ancho": 0, "alto": 0, "clasificacion": "sin_texto",
+    }
+    a = ocr._resolver_imagen(r, "spa", [(4032, 3024)])
+    assert a.estado == "ok" and a.detalle["codigo"] == "imagen_sin_texto"
+    d = ocr._resolver_imagen(r, "spa", [(2480, 3508)])
+    assert d.estado == "parcial" and d.detalle["codigo"] == "imagen_pagina_sin_texto"
+
+
+def test_d_en_un_tiff_multipagina_exige_que_todas_las_paginas_sean_de_pagina():
+    r = {
+        "texto": "", "caracteres": 0, "n_palabras": 0, "confianza_promedio": 0.0,
+        "palabras_dudosas": [], "ancho": 0, "alto": 0, "clasificacion": "sin_texto",
+    }
+    todas = ocr._resolver_imagen(r, "spa", [(2480, 3508), (2480, 3508)])
+    assert todas.detalle["codigo"] == "imagen_pagina_sin_texto"
+    mezcla = ocr._resolver_imagen(r, "spa", [(2480, 3508), (4032, 3024)])
+    assert mezcla.detalle["codigo"] == "imagen_sin_texto"
