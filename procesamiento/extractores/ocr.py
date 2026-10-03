@@ -1010,7 +1010,9 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
                     return r
                 primero = primero or r
                 aportan_las_dos = aportan_las_dos or r.get("aportan_las_dos", False)
-                if r["texto"]:
+                if r["texto"] and len(dimensiones) == 1:
+                    partes.append(r["texto"])   # un solo fotograma: sin marca de pagina
+                elif r["texto"]:
                     partes.append(f"<!-- página {numero} -->\n{r['texto']}")
                 caracteres += r["caracteres"]
                 palabras += r["n_palabras"]
