@@ -708,6 +708,20 @@ def _clasificar(caracteres: int, analisis: dict) -> str:
     return "ok"
 
 
+def _clasificar_imagen(caracteres: int, analisis: dict, aportan_las_dos: bool) -> str:
+    """`_clasificar`, con un tope para la union de las dos pasadas de una imagen
+    con transparencia real (Jax#338 ronda 13): si las DOS pasadas aportan
+    renglones propios (no duplicados), uno de los dos lados puede ser ruido al
+    que tesseract dio confianza alta, y los umbrales no lo distinguen. El
+    resultado es como mucho `dos_lecturas` (parcial + imagen_texto_dudoso,
+    `_resolver_imagen`). La regla (A) de menos de MINIMO_CARACTERES y la (B) no
+    cambian: el tope solo baja un `ok` o un `con_dudas`."""
+    clasificacion = _clasificar(caracteres, analisis)
+    if aportan_las_dos and clasificacion in ("ok", "con_dudas"):
+        return "dos_lecturas"
+    return clasificacion
+
+
 class _Presupuesto:
     """Un solo presupuesto de tiempo para todo el OCR de una imagen: se
     descuenta en CADA llamada a tesseract, leyendo `_reloj` justo antes."""
@@ -898,11 +912,13 @@ def _unir_pasadas(blanca: dict, negra: dict) -> dict:
     texto = (blanca["texto"] + "\n" + "\n".join(lineas)).strip()
     filas_negras = [fila for renglon in propios_negros for fila in renglon["filas"]]
     analisis = _analizar_tsv("\n".join([blanca["tsv"], *filas_negras]))
+    aportan_las_dos = bool(sin_pareja) and bool(propios_negros)
     return {
         "texto": texto,
         "caracteres": len(texto),
         **analisis,
-        "clasificacion": _clasificar(len(texto), analisis),
+        "aportan_las_dos": aportan_las_dos,
+        "clasificacion": _clasificar_imagen(len(texto), analisis, aportan_las_dos),
     }
 
 
@@ -965,6 +981,7 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
     caracteres = palabras = 0
     suma_conf = 0.0
     primero = None
+    aportan_las_dos = False   # alguna pagina con las dos pasadas aportando renglones propios
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
@@ -988,6 +1005,7 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
                 if r["clasificacion"] == "ilegible":
                     return r
                 primero = primero or r
+                aportan_las_dos = aportan_las_dos or r.get("aportan_las_dos", False)
                 if r["texto"]:
                     partes.append(f"<!-- página {numero} -->\n{r['texto']}")
                 caracteres += r["caracteres"]
@@ -1004,7 +1022,7 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
         "texto": "\n\n".join(partes),
         "caracteres": caracteres,
         **analisis,
-        "clasificacion": _clasificar(caracteres, analisis),
+        "clasificacion": _clasificar_imagen(caracteres, analisis, aportan_las_dos),
     }
 
 
@@ -1155,6 +1173,21 @@ def _resolver_imagen(
         detalle["codigo"] = CODIGO_IMAGEN_SIN_TEXTO
         return Resultado(
             estado="ok", salidas={"texto.txt": AVISO_IMAGEN_SIN_TEXTO},
+            extractor=EXTRACTOR, version=_version() or "desconocida",
+            detalle=detalle,
+        )
+
+    if r["clasificacion"] == "dos_lecturas":
+        # Tope de la union (Jax#338 ronda 13): las dos pasadas (fondo blanco y
+        # fondo negro) aportan renglones distintos; se CONSERVA todo el texto.
+        detalle["razon"] = (
+            "las dos lecturas de la imagen transparente (sobre fondo blanco y "
+            "sobre fondo negro) aportan renglones distintos: puede haber ruido"
+        )
+        detalle["codigo"] = CODIGO_IMAGEN_TEXTO_DUDOSO
+        return Resultado(
+            estado="parcial",
+            salidas={"texto.txt": f"{NOTA_TEXTO_DUDOSO}\n{r['texto']}"},
             extractor=EXTRACTOR, version=_version() or "desconocida",
             detalle=detalle,
         )
