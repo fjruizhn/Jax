@@ -2040,6 +2040,21 @@ def test_el_bloque_de_verificacion_del_runbook_se_ejecuta_y_falla_cerrado(base_p
     subprocess.run(["sudo", "-n", "chown", "fruiz:fruiz", str(raiz)], check=True)
     raiz_mal = _correr_bloque(raiz)
     assert raiz_mal.returncode != 0 and "NO CUMPLE" in raiz_mal.stderr, raiz_mal.stdout + raiz_mal.stderr
+    subprocess.run(["sudo", "-n", "chown", "fruiz:jaxsvc", str(raiz)], check=True)
+    assert _correr_bloque(raiz).returncode == 0
+
+    # Los controles (b) y (c) del bloque, cada uno donde `--verificar` NO ve el problema: un FIFO 0666 (no
+    # gobernado, pero `getfacl -R` lo enumera con other::rw-) y una raiz 750 (jaxsvc y fruiz pasan igual, pero
+    # no es 770). Sin esto, sustituir esos controles por un `echo OK` dejaria la prueba en verde.
+    fifo = proyectos / "p" / "canal"
+    subprocess.run(["sudo", "-n", "mkfifo", str(fifo)], check=True)
+    subprocess.run(["sudo", "-n", "chmod", "666", str(fifo)], check=True)   # con la ACL por defecto, mkfifo -m no basta
+    r_fifo = _correr_bloque(raiz)
+    assert r_fifo.returncode != 0 and "NO CUMPLE: other" in r_fifo.stderr, r_fifo.stdout + r_fifo.stderr
+    subprocess.run(["sudo", "-n", "rm", str(fifo)], check=True)
+    subprocess.run(["sudo", "-n", "chmod", "750", str(raiz)], check=True)
+    r_750 = _correr_bloque(raiz)
+    assert r_750.returncode != 0 and "NO CUMPLE: la raiz" in r_750.stderr, r_750.stdout + r_750.stderr
 
 
 # --- MAJOR-1: la raiz se abre por descriptor, sin seguir symlinks ------------------------------
