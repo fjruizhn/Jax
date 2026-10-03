@@ -431,6 +431,22 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
                         # -> PNG. Un RGBA opaco sigue con los bytes originales.
                         return "tiff", dimensiones
                     return "una", dimensiones
+                # N37 (Jax#338 ronda 11): el tope del aplanado se comprueba en
+                # TODAS las paginas de un TIFF ANTES del OCR de ninguna (si no,
+                # se gasta el OCR de las primeras y el archivo falla entero en
+                # una posterior). Solo hace falta decodificar una pagina que
+                # supera el tope Y tiene un modo con alfa o un `transparency`:
+                # sin eso no puede haber transparencia real. De a una pagina, y
+                # la mascara se libera antes de pasar a la siguiente.
+                for indice, (ancho, alto) in enumerate(dimensiones):
+                    if ancho * alto <= MAX_PIXELES_OTROS_MODOS:
+                        continue
+                    img.seek(indice)
+                    if img.mode not in _MODOS_CON_ALFA and "transparency" not in img.info:
+                        continue
+                    img.load()
+                    if _mascara_alfa(img) is not None:
+                        return "demasiados_pixeles"
     except Image.DecompressionBombError:
         return "demasiados_pixeles"
     except MemoryError:
@@ -804,7 +820,9 @@ def _ocr_cuadro(img, idioma: str, presupuesto: _Presupuesto) -> dict | None:
     if mascara is None:
         return _ocr_bytes(png, idioma, presupuesto)
     if img.size[0] * img.size[1] > MAX_PIXELES_OTROS_MODOS:
-        return _ilegible_dict("demasiados_pixeles")   # tope del aplanado
+        # tope del aplanado; `_validar_imagen` ya lo comprobo en todas las
+        # paginas antes del OCR (N37): esto es la defensa si se llega igual
+        return _ilegible_dict("demasiados_pixeles")
     elegido = None
     for fondo in _FONDOS_DEL_APLANADO:
         try:
