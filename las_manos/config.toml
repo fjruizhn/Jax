@@ -13,7 +13,10 @@
 host = "127.0.0.1"
 port = 7777
 require_mtls = false          # fase 1: token simple. mTLS en fase 2.
-audit_log = "/home/fruiz/jax/las_manos/logs/audit.jsonl"
+# audit_log NO vive acá desde el 2026-09-25 (ops/rutas-de-produccion): la ruta
+# real sale SIEMPRE de JAX_AUDIT_LOG_PATH (/etc/jax/.env); server.py falla
+# visible (EntornoInvalido) si falta, en vez de caer a un default de este
+# archivo. Ver las_manos/server.py y las_manos/_server_audit_log_entorno_test.py.
 
 # ------------------------------------------------------------
 #  AMBIENTES — separación estricta staging vs producción
