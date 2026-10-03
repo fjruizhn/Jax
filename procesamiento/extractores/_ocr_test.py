@@ -2831,3 +2831,21 @@ def test_n37_tiff_con_la_pagina_1_opaca_y_la_2_transparente_de_mas_de_25_mpx_no_
     assert r.detalle["codigo"] == "imagen_demasiado_grande"
     assert r.detalle["causa"] == "demasiados_pixeles"
     assert llamadas == [], "el tope se comprueba en TODAS las paginas antes del OCR de ninguna"
+
+
+def test_n36_si_un_fondo_reconoce_texto_aunque_sea_dudoso_gana_y_es_texto_dudoso(tmp_path, monkeypatch):
+    """Desempate (decision de la ronda 11): se compara (palabras no dudosas,
+    palabras totales, caracteres); con 0 utiles en los dos, gana el que
+    reconocio algo, y la imagen sale parcial/imagen_texto_dudoso, no
+    ok/imagen_sin_texto."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((255, 255, 255), "png", destino)
+    fondos = _tesseract_por_fondo(monkeypatch, {
+        _BLANCO: [],
+        _NEGRO: [(30, f"negro{i}") for i in range(5)],          # 5 palabras, todas dudosas
+    })
+    r = ocr.extraer(destino)
+    assert set(fondos) == {_BLANCO, _NEGRO}
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    assert "negro0" in r.salidas["texto.txt"]
