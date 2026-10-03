@@ -2820,16 +2820,22 @@ def test_n36_si_un_fondo_reconoce_texto_aunque_sea_dudoso_es_texto_dudoso(tmp_pa
 # ---------------------------------------------------------------------------
 
 
-def _tsv_por_lineas(lineas: list[list[tuple]], ancho: int = 700, alto: int = 120) -> str:
+def _tsv_por_lineas(lineas: list, ancho: int = 700, alto: int = 120) -> str:
     """`tsv` sintetico con una fila de palabra por `(confianza, palabra)`, cada
-    renglon de `lineas` con su propio `line_num`."""
+    renglon de `lineas` con su propio `line_num`. Un renglon es una lista de
+    palabras (caja (0, 0, 10, 10)) o `((left, top, width, height), palabras)`:
+    todas sus palabras llevan esa caja."""
     filas = [
         "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
         f"1\t1\t0\t0\t0\t0\t0\t0\t{ancho}\t{alto}\t-1\t",
     ]
     for n_linea, linea in enumerate(lineas, start=1):
-        for n_palabra, (conf, palabra) in enumerate(linea, start=1):
-            filas.append(f"5\t1\t1\t1\t{n_linea}\t{n_palabra}\t0\t0\t10\t10\t{conf}\t{palabra}")
+        caja, palabras = linea if isinstance(linea, tuple) else ((0, 0, 10, 10), linea)
+        izq, arriba, ancho_caja, alto_caja = caja
+        for n_palabra, (conf, palabra) in enumerate(palabras, start=1):
+            filas.append(
+                f"5\t1\t1\t1\t{n_linea}\t{n_palabra}\t{izq}\t{arriba}\t{ancho_caja}\t{alto_caja}"
+                f"\t{conf}\t{palabra}")
     return "\n".join(filas)
 
 
@@ -2906,3 +2912,110 @@ def test_n38_una_linea_que_aparece_en_las_dos_pasadas_va_una_sola_vez(tmp_path, 
     assert texto.count("Total") == 1, "la linea repetida (normalizada) va una sola vez"
     assert "Fecha 03/10" in texto and "Otra linea" in texto
     assert r.detalle["palabras_totales"] == 8, "las palabras de la linea repetida tampoco se cuentan dos veces"
+
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 13: duplicado = mismo texto Y cajas superpuestas; si las dos
+# pasadas aportan renglones propios, como mucho parcial/imagen_texto_dudoso;
+# version de la logica "3"; sin marca de pagina en un solo fotograma
+# ---------------------------------------------------------------------------
+
+
+def test_n39_dos_total_en_posiciones_distintas_uno_por_pasada_aparecen_los_dos(tmp_path, monkeypatch):
+    """La sonda de Sol (r12): con la deduplicacion solo por texto, el TOTAL de la
+    negra se descartaba como duplicado del de la blanca y salia
+    ok/imagen_sin_texto con una sola palabra."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("TOTAL", [((10, 10, 100, 30), [(95, "TOTAL")])]),
+        _NEGRO: ("TOTAL", [((500, 80, 100, 30), [(95, "TOTAL")])]),
+    })
+    r = ocr.extraer(destino)
+    assert r.salidas["texto.txt"].count("TOTAL") == 2
+    assert r.detalle["palabras_totales"] == 2
+    assert r.detalle.get("codigo") != ocr.CODIGO_IMAGEN_SIN_TEXTO
+
+
+def test_n39_el_mismo_renglon_en_la_misma_caja_aparece_una_sola_vez(tmp_path, monkeypatch):
+    """Control: cajas superpuestas en 0,8 de la menor (>= 0,5) son el mismo renglon."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    total = [(95, "Total"), (95, "a"), (95, "pagar"), (95, "5000")]
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Total a pagar 5000", [((20, 30, 500, 40), total)]),
+        _NEGRO: ("Total  a pagar 5000", [((120, 30, 500, 40), total)]),
+    })
+    r = ocr.extraer(destino)
+    assert r.salidas["texto.txt"].count("Total") == 1
+    assert r.detalle["palabras_totales"] == 4
+
+
+def test_n39_el_mismo_texto_con_cajas_superpuestas_menos_de_la_mitad_aparece_dos_veces(tmp_path, monkeypatch):
+    """Interseccion de 0,4 de la menor de las dos areas (< 0,5): son dos renglones."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    total = [(95, "Total"), (95, "a"), (95, "pagar"), (95, "5000")]
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Total a pagar 5000", [((0, 0, 500, 40), total)]),
+        _NEGRO: ("Total a pagar 5000", [((300, 0, 500, 40), total)]),
+    })
+    r = ocr.extraer(destino)
+    assert r.salidas["texto.txt"].count("Total") == 2
+    assert r.detalle["palabras_totales"] == 8
+
+
+def test_n39_si_las_dos_pasadas_aportan_renglones_propios_es_como_mucho_texto_dudoso(tmp_path, monkeypatch):
+    """La sonda de Sol (r12): 5 palabras reales en la blanca y 5 espurias en la
+    negra, todas con confianza 95, daban `ok` sin codigo."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    reales = [(95, p) for p in ("Total", "a", "pagar", "1,500.00", "Lempiras")]
+    espurias = [(95, p) for p in ("qwe", "rty", "uio", "asd", "fgh")]
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Total a pagar 1,500.00 Lempiras", [((20, 30, 600, 40), reales)]),
+        _NEGRO: ("qwe rty uio asd fgh", [((20, 80, 300, 30), espurias)]),
+    })
+    r = ocr.extraer(destino)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    texto = r.salidas["texto.txt"]
+    assert "Total a pagar 1,500.00 Lempiras" in texto and "qwe rty uio asd fgh" in texto
+
+
+def test_n39_si_solo_una_pasada_aporta_se_clasifica_como_siempre(tmp_path, monkeypatch):
+    """Control: con una sola pasada que aporta (la otra repite su renglon en la
+    misma caja), 10 palabras confiables siguen siendo `ok`."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    palabras = [(95, f"palabra{i}") for i in range(10)]
+    plano = " ".join(p for _, p in palabras)
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: (plano, [((20, 30, 600, 40), palabras)]),
+        _NEGRO: (plano, [((20, 30, 600, 40), palabras)]),
+    })
+    r = ocr.extraer(destino)
+    assert r.estado == "ok"
+    assert r.detalle.get("codigo") is None
+    assert r.salidas["texto.txt"] == plano
+
+
+def test_n39_la_version_de_la_logica_de_imagen_es_3():
+    """La union de las dos pasadas cambia la regla: una ficha de imagen escrita
+    con la logica "2" (la seleccion) no se reusa."""
+    assert ocr.VERSION_LOGICA_IMAGEN == "3"
+    assert ocr.version_logica("imagen") == "3"
+
+
+def test_n39_una_imagen_de_un_solo_fotograma_con_transparencia_no_lleva_marca_de_pagina(
+    tmp_path, monkeypatch
+):
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Total a pagar 5000", [((20, 30, 500, 40), [(95, "Total"), (95, "a"), (95, "pagar"), (95, "5000")])]),
+    })
+    r = ocr.extraer(destino)
+    assert "<!-- página" not in r.salidas["texto.txt"]
+    assert r.salidas["texto.txt"] == "Total a pagar 5000"
