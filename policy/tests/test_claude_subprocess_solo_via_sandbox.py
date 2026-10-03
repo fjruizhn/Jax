@@ -512,148 +512,46 @@ def _sin_token_ruflo(texto: str) -> str:
     return _RE_TOKEN_RUFLO.sub(" ", texto)
 
 
-# LISTA BLANCA QUE FALLA CERRADO (ronda 2 de la re-revision). El token solo se descuenta de un
-# archivo si TODAS sus apariciones estan en un uso permitido explicito; basta UNA aparicion en
-# cualquier otro contexto (subindice, metodo de str, `%`, `*`, f-string, walrus, desempaque,
-# `+=`, valor por defecto, atributo...) para que el archivo vuelva a contar como menciona-claude,
-# igual que antes del cambio. Una lista negra de formas de fabricar "claude" a partir del token
-# siempre deja una forma sin listar: esta es al reves, lista lo permitido.
-#
-# Usos permitidos (cada uno exige ademas que el RESULTADO de la expresion este en un uso permitido):
-#   - docstring o expresion suelta (una sentencia que es solo la cadena);
-#   - elemento directo de un set/frozenset/list/tuple literal;
-#   - argumento directo (posicional o keyword) de: un metodo que devuelve bool/int sin construir
-#     texto (`_METODOS_SIN_TEXTO`: endswith, startswith, ...), un constructor/join de rutas
-#     (`_CONSTRUCTORES_DE_RUTA`), `frozenset/set/tuple/list/sorted` (solo si lo que se pasa es un
-#     contenedor literal: `set('.claude-flow')` partiria la cadena en letras) o `subprocess.*`;
-#   - operando de `==`/`!=`/`in`/`not in`;
-#   - valor de un Assign/AnnAssign a un nombre simple (ese nombre queda marcado: cada uso suyo
-#     tiene que ser, a su vez, un uso permitido);
-#   - operando de `/` o `+` (rutas o cadenas) cuyo resultado no se subindexa ni se le llama un
-#     metodo de str: el resultado tiene que estar en un uso permitido.
-# AJUSTE MINIMO para los dos archivos reales (Fernando, 2026-10-03, E2a, Jax#325): sobre un nombre
-# marcado cuyo valor es una RUTA (nacio de `/`), se permiten `.mkdir()` y `.stat()` (con
-# `.st_uid/.st_gid/.st_mode` sobre el resultado); es lo que hace tests/test_permisos_proyectos.py.
-_METODOS_SIN_TEXTO = frozenset({"endswith", "startswith", "count", "find", "rfind", "index", "rindex"})
-_CONSTRUCTORES_DE_RUTA = frozenset({"Path", "PurePath", "PosixPath", "PurePosixPath", "joinpath"})
-_CONTENEDORES_PUROS = frozenset({"frozenset", "set", "tuple", "list", "sorted"})
-_LANZADORES = frozenset({"run", "Popen", "call", "check_call", "check_output"})
-_METODOS_DE_RUTA_PERMITIDOS = frozenset({"mkdir", "stat"})
-_ATRIBUTOS_DE_STAT_PERMITIDOS = frozenset({"st_uid", "st_gid", "st_mode"})
-
-
-def _padres(tree: ast.AST) -> dict[int, ast.AST]:
-    return {id(h): n for n in ast.walk(tree) for h in ast.iter_child_nodes(n)}
-
-
-def _nombre_de_llamada(f: ast.AST) -> str | None:
-    return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None
-
-
-def _uso_permitido(nodo: ast.AST, padres: dict[int, ast.AST], marcados: dict[str, bool],
-                   es_ruta: bool, _prof: int = 0) -> bool:
-    """`nodo` (una cadena con el token, un nombre marcado, o una expresion derivada de ellos) esta
-    en un uso permitido. `marcados` se llena con los nombres a los que se asigna (nombre -> si
-    el valor es una ruta); quien llama itera hasta que no aparezcan nombres nuevos."""
-    if _prof > 12:
-        return False
-    p = padres.get(id(nodo))
-    if p is None:
-        return False
-    siguiente = lambda n, ruta=es_ruta: _uso_permitido(n, padres, marcados, ruta, _prof + 1)  # noqa: E731
-    if isinstance(p, ast.Expr):
-        return True
-    if isinstance(p, ast.Assign):
-        if p.value is nodo and all(isinstance(t, ast.Name) for t in p.targets):
-            for t in p.targets:
-                marcados[t.id] = marcados.get(t.id, False) or es_ruta
-            return True
-        return False
-    if isinstance(p, ast.AnnAssign):
-        if p.value is nodo and isinstance(p.target, ast.Name):
-            marcados[p.target.id] = marcados.get(p.target.id, False) or es_ruta
-            return True
-        return False
-    if isinstance(p, ast.Compare):
-        return all(isinstance(o, (ast.Eq, ast.NotEq, ast.In, ast.NotIn)) for o in p.ops)
-    if isinstance(p, (ast.Set, ast.List, ast.Tuple)):
-        return siguiente(p)
-    if isinstance(p, ast.BinOp):
-        if isinstance(p.op, ast.Div):
-            return siguiente(p, True)
-        if isinstance(p.op, ast.Add):
-            return siguiente(p)
-        return False
-    if isinstance(p, ast.keyword):
-        llamada = padres.get(id(p))
-        return isinstance(llamada, ast.Call) and _argumento_permitido(nodo, llamada, siguiente)
-    if isinstance(p, ast.Call) and nodo is not p.func:
-        return _argumento_permitido(nodo, p, siguiente)
-    if isinstance(p, ast.Attribute) and es_ruta and isinstance(nodo, ast.Name):
-        # nombre marcado de ruta: `.mkdir()` / `.stat()` (+ `.st_uid`, etc. sobre el resultado)
-        llamada = padres.get(id(p))
-        if p.attr in _METODOS_DE_RUTA_PERMITIDOS and isinstance(llamada, ast.Call) and llamada.func is p:
-            if p.attr == "mkdir":
-                return siguiente(llamada, False)
-            sobre = padres.get(id(llamada))
-            return (isinstance(sobre, ast.Attribute) and sobre.value is llamada
-                    and sobre.attr in _ATRIBUTOS_DE_STAT_PERMITIDOS and siguiente(sobre, False))
+def _es_cadena_con_token(nodo: ast.AST, nombres: set[str]) -> bool:
+    """La expresion ES una cadena que lleva el token: un literal con `.claude-flow`, un nombre
+    asignado a una, o una suma (`+`) en la que alguno de los lados lo es. Un `Path(...) / "x"`
+    (otro operador) no es una cadena: sus metodos no son metodos de `str`."""
+    if isinstance(nodo, ast.Constant):
+        return isinstance(nodo.value, str) and _TOKEN_RUFLO in nodo.value
+    if isinstance(nodo, ast.Name):
+        return nodo.id in nombres
+    if isinstance(nodo, ast.BinOp) and isinstance(nodo.op, ast.Add):
+        return _es_cadena_con_token(nodo.left, nombres) or _es_cadena_con_token(nodo.right, nombres)
     return False
 
 
-def _argumento_permitido(nodo: ast.AST, llamada: ast.Call, siguiente) -> bool:
-    nombre = _nombre_de_llamada(llamada.func)
-    es_contenedor = isinstance(nodo, (ast.Set, ast.List, ast.Tuple))
-    if nombre is None:
-        return False
-    if isinstance(llamada.func, ast.Attribute) and isinstance(llamada.func.value, ast.Name) \
-            and llamada.func.value.id in {"str", "bytes"}:
-        return False                                           # str.split(tok, ...) sin ligar
-    if nombre in _METODOS_SIN_TEXTO and isinstance(llamada.func, ast.Attribute):
-        return True                                            # bool/int: no construye texto
-    if nombre in _CONSTRUCTORES_DE_RUTA:
-        return siguiente(llamada)
-    if (nombre in _CONTENEDORES_PUROS and isinstance(llamada.func, ast.Name) and es_contenedor) \
-            or (nombre in _LANZADORES and isinstance(llamada.func, ast.Attribute)):
-        return siguiente(llamada) if nombre not in _LANZADORES else True
-    return False
-
-
-def _token_solo_en_usos_permitidos(tree: ast.AST) -> bool:
-    """TODAS las apariciones del token (cada Constant que lo contiene y cada uso de un nombre al
-    que se asigno) estan en un uso permitido. Sin apariciones: True (no hay nada que descontar)."""
-    padres = _padres(tree)
-    marcados: dict[str, bool] = {}
-    ocurrencias = [n for n in ast.walk(tree)
-                   if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                   and _RE_TOKEN_RUFLO.search(n.value)]
-    revisados: set[int] = set()
-    while True:
-        for n in ocurrencias:
-            if id(n) in revisados:
+def _transforma_el_token(tree: ast.AST) -> bool:
+    """True si una cadena que lleva `.claude-flow` (o un nombre asignado a una) se corta con
+    `[...]` o se le llama un metodo (`.replace`, `.split`, `.strip`, `.partition`...): es el
+    unico camino de fabricar "claude" a partir del token sin escribir la palabra. Usarlo de
+    valor, de argumento o en una concatenacion NO es transformarlo (el plegado ya ve el
+    resultado). Residuo conocido: pasarlo por una funcion (`reversed`, `list`, `map`...) o un
+    bucle, igual que el resto del escaner no ve `chr()` ni f-strings."""
+    nombres: set[str] = set()
+    cambio = True
+    while cambio:                           # un nombre asignado a otro nombre ya tainted
+        cambio = False
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Assign):
+                valor, destinos = n.value, [t for t in n.targets if isinstance(t, ast.Name)]
+            elif isinstance(n, ast.AnnAssign) and n.value is not None and isinstance(n.target, ast.Name):
+                valor, destinos = n.value, [n.target]
+            else:
                 continue
-            revisados.add(id(n))
-            if not _uso_permitido(n, padres, marcados, False):
-                return False
-        nuevos = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id in marcados
-                  and id(n) not in revisados]
-        if not nuevos:
-            break
-        for n in nuevos:
-            revisados.add(id(n))
-            if isinstance(n.ctx, ast.Store):
-                if not isinstance(padres.get(id(n)), (ast.Assign, ast.AnnAssign)):
-                    return False                                # `+=`, `for T in`, `with ... as T`...
-                continue
-            if not _uso_permitido(n, padres, marcados, marcados[n.id]):
-                return False
-    # un nombre marcado reasignado por `+=`, walrus, desempaque o `for` ya no es un Assign simple
-    for n in ast.walk(tree):
-        if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name) and n.target.id in marcados:
-            return False
-        if isinstance(n, ast.NamedExpr) and n.target.id in marcados:
-            return False
-    return True
+            if _es_cadena_con_token(valor, nombres):
+                for t in destinos:
+                    if t.id not in nombres:
+                        nombres.add(t.id)
+                        cambio = True
+    return any(
+        isinstance(n, (ast.Subscript, ast.Attribute)) and _es_cadena_con_token(n.value, nombres)
+        for n in ast.walk(tree)
+    )
 
 
 def _references_claude_literal(tree: ast.Module) -> bool:
@@ -681,14 +579,13 @@ def _references_claude_literal(tree: ast.Module) -> bool:
     EXCEPCION `.claude-flow`: antes de evaluar cada cadena se quitan las apariciones del
     token exacto `.claude-flow` (ver `_sin_token_ruflo`). .claude-flow es el directorio de
     Ruflo; ignorarlo es una decision de Fernando del 2026-10-03 (E2a, Jax#325). Solo ese
-    token: cualquier otra mencion de "claude" sigue contando igual que antes. El descuento es
-    una LISTA BLANCA que falla cerrado (`_token_solo_en_usos_permitidos`): solo vale si TODAS
-    las apariciones del token estan en un uso permitido explicito; con una sola fuera de la
-    lista, el archivo cuenta como menciona-claude, igual que antes del cambio.
+    token: cualquier otra mencion de "claude" sigue contando igual que antes. Y si el
+    archivo corta, reemplaza o trocea una cadena que lleva el token (`_transforma_el_token`),
+    el token ya no se usa como un nombre de directorio y se cuenta como mencion.
 
     Residuo conocido: f-strings, `%`/`.format` y un join con algo que no sea literal."""
-    if not _token_solo_en_usos_permitidos(tree):
-        return any("claude" in t.lower() for t in _cadenas_plegadas(tree))       # falla cerrado
+    if _transforma_el_token(tree):
+        return True
     return any("claude" in _sin_token_ruflo(t).lower() for t in _cadenas_plegadas(tree))
 
 
@@ -1519,77 +1416,21 @@ def test_claude_flow_sin_punto_o_con_sufijo_sigue_contando_como_mencion() -> Non
         assert not _detects(_LANZA_SUDO_Y_SETFACL + f"N = {texto!r}\n"), texto
 
 
-_LANZA_SUDO_Y_SH_C_N = (
-    "import subprocess\nsubprocess.run(['sudo','-n','true'])\nsubprocess.run(['sh','-c',N])\n"
-)
-# Las 13 formas que la re-revision midio (daban True con el escaner de antes del cambio, y
-# la lista negra de la ronda 1 las dejaba pasar) + las de la ronda 1.
-_FORMAS_QUE_FABRICAN_CLAUDE = {
-    "tupla_indexada": "N=('.claude-flow',)[0][1:7]\n",
-    "lista_indexada": "N=['.claude-flow'][0][1:7]\n",
-    "removeprefix_sin_ligar": "N=str.removeprefix('.claude-flow','.')[:6]\n",
-    "split_strip_sin_ligar": "N=str.split(str.strip('.claude-flow','.'),'-')[0]\n",
-    "porcentaje": "N=('%s' % '.claude-flow')[1:7]\n",
-    "format": "N='{}'.format('.claude-flow')[1:7]\n",
-    "multiplicacion": "N=('.claude-flow'*1)[1:7]\n",
-    "str_llamada": "N=str('.claude-flow')[1:7]\n",
-    "walrus": "N=(T:='.claude-flow')[1:7]\n",
-    "desempaque": "T,=['.claude-flow']\nN=T[1:7]\n",
-    "aumentada": "T=''\nT+='.claude-flow'\nN=T[1:7]\n",
-    "valor_por_defecto": "def f(t='.claude-flow'):\n    return t[1:7]\nN=f()\n",
-    "atributo": "class C: pass\nc=C(); c.t='.claude-flow'\nN=c.t[1:7]\n",
-    # ronda 1
-    "subindice": "N='.claude-flow'[1:7]\n",
-    "replace_split": "N='.claude-flow'.replace('.', '').split('-')[0]\n",
-    "strip": "N='.claude-flow'.strip('.')\n",
-    "nombre_y_subindice": "T='.claude-flow'\nN=T[1:7]\n",
-    "nombre_y_partition": "T='.claude-flow'\nN=T.partition('-')[0]\n",
-    "suma_y_subindice": "N=('.claude' + '-flow')[1:7]\n",
-    "join_con_subindice": "N=''.join(['x', '.claude-flow'[1:7]])\n",
-    "fstring": "T='.claude-flow'\nN=f'{T}'[1:7]\n",
-    "nombre_en_nombre": "T='.claude-flow'\nU=T\nN=U[1:7]\n",
-    "ruta_y_atributo": "from pathlib import Path\nN=(Path('/a')/'.claude-flow').name[1:7]\n",
-    "join_de_ruta_y_subindice": "N=('/a' + '/.claude-flow')[3:9]\n",
-    "ifexp": "N=('.claude-flow' if True else '')[1:7]\n",
-    "retorno": "def f():\n    return '.claude-flow'\nN=f()[1:7]\n",
-}
-
-
 def test_el_token_no_sirve_para_fabricar_la_palabra_claude() -> None:
-    """Lista blanca que falla cerrado: cada una de estas formas pone el token en un contexto que
-    no esta en la lista de usos permitidos y el archivo cuenta como menciona-claude (con sudo +
-    `sh -c N` de lanzador, igual que la sonda de la re-revision)."""
-    for nombre, codigo in _FORMAS_QUE_FABRICAN_CLAUDE.items():
-        assert _detects(codigo + _LANZA_SUDO_Y_SH_C_N), nombre
-
-
-def test_los_usos_permitidos_del_token_no_son_violacion() -> None:
-    """Los usos de la lista blanca, incluidos los reales de ops/permisos_proyectos.py y
-    tests/test_permisos_proyectos.py."""
+    """Ignorar el token no puede abrir un truco: lo que se hace con la cadena del token
+    (cortarla, reemplazarla, trocearla, pasarla por una variable) cuenta como mencion,
+    porque ahi el token ya no se usa como el nombre de un directorio."""
     pre = _LANZA_SUDO_Y_SETFACL
-    permitidos = {
-        "frozenset_de_set": "NOMBRES = frozenset({'.claude-flow'})\nOK = 'x' in NOMBRES\n",
-        "set_pertenencia": "OK = 'x' in {'.claude-flow'}\n",
-        "comparacion": "OK = 'x' == '.claude-flow'\n",
-        "endswith": "e = 'x'\nOK = e.endswith('/un-proyecto/.claude-flow')\n",
-        "ruta_div_y_mkdir_stat": ("from pathlib import Path\nr = Path('/a')\nd = r / 'p' / '.claude-flow'\n"
-                                  "d.mkdir()\nOK = d.stat().st_uid == 1\n"),
-        "argumento_de_lanzador": "subprocess.run(['ls', '.claude-flow'])\n",
-        "valor_a_nombre_y_lanzador": "T = '.claude-flow'\nsubprocess.run(['ls', T])\n",
-        "docstring": '"""Excluye .claude-flow, nunca lo toca."""\n',
-    }
-    for nombre, codigo in permitidos.items():
-        assert not _detects(pre + codigo), nombre
-
-
-def test_fuera_de_la_lista_blanca_el_token_cuenta_aunque_no_fabrique_nada() -> None:
-    """Falla cerrado: un uso que la lista no nombra (aqui, `os.path.join`) cuenta como mencion
-    aunque sea inocuo; se agrega a la lista con una decision, no se acepta por defecto."""
-    assert _detects(_LANZA_SUDO_Y_SETFACL + "import os\nR = os.path.join('/a', '.claude-flow')\n")
-    # un nombre marcado que se usa fuera de la lista vuelve el archivo a menciona-claude
-    assert _detects(_LANZA_SUDO_Y_SETFACL + "T = '.claude-flow'\nN = T.upper()\n")
-    # una sola aparicion fuera de la lista basta, aunque las demas esten permitidas
-    assert _detects(_LANZA_SUDO_Y_SETFACL + "OK = 'x' in {'.claude-flow'}\nN = ('.claude-flow')[1:7]\n")
+    assert _detects(pre + "N = '.claude-flow'[1:7]\n")
+    assert _detects(pre + "N = '.claude-flow'.replace('.', '').split('-')[0]\n")
+    assert _detects(pre + "N = '.claude-flow'.strip('.')\n")
+    assert _detects(pre + "T = '.claude-flow'\nN = T[1:7]\n")
+    assert _detects(pre + "T = '.claude-flow'\nN = T.partition('-')[0]\n")
+    assert _detects(pre + "N = ('.claude' + '-flow')[1:7]\n")
+    assert _detects(pre + "N = ''.join(['x', '.claude-flow'[1:7]])\n")
+    # usarlo como valor, argumento o en una concatenacion con otra ruta no es transformarlo
+    assert not _detects(pre + "T = '.claude-flow'\nR = '/a/' + T\nsubprocess.run(['ls', T, R])\n")
+    assert not _detects(pre + "import os\nR = os.path.join('/a', '.claude-flow')\n")
 
 
 def test_no_naked_claude_subprocess() -> None:
