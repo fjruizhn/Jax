@@ -6957,7 +6957,13 @@ jobs:
         # la exige y --aplicar la fija: 1 + 3 por el setgid, y falla cerrado con dueño o grupo distintos: 3) y las
         # rutas con caracteres de control sin lineas inyectadas (1). Local: 128 passed + 0 skipped; el runner salta solo
         # la del /etc/jax/.env (128 - 1 = 127). Ningun piso baja. Sin medir en el runner: manda el runner.
+        # 127 -> 133 (ronda 10 de #340): +6. La mutacion compara (st_dev, st_ino) de la raiz y de proyectos/ contra lo que
+        # validó la pasada previa, y dueño y grupo, antes de cualquier fchmod: un directorio real que los sustituye entre
+        # pasadas conserva su modo (raiz y proyectos/ x aplicar y deshacer: 4) y el restaurador de la raiz de --deshacer
+        # tambien compara (1); y una prueba verifica que el bloque del runbook ya no repite el control (c) (1). La prueba
+        # del 750 en el bloque se quita (lo cubre --verificar). Local: 134 passed + 0 skipped; el runner salta solo la del
+        # /etc/jax/.env (134 - 1 = 133). Ningun piso baja. Sin medir en el runner: manda el runner.
         run: |
           PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
-          grep -qE "^127 passed, 1 skipped" /tmp/permisos_proyectos || {
-            echo "PISO ROTO: se esperaban 127 tests CORRIDOS (no skipeados) y exactamente 1 skipped."; exit 1; }
+          grep -qE "^133 passed, 1 skipped" /tmp/permisos_proyectos || {
+            echo "PISO ROTO: se esperaban 133 tests CORRIDOS (no skipeados) y exactamente 1 skipped."; exit 1; }
