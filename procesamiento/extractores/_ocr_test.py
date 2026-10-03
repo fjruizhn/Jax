@@ -141,18 +141,111 @@ def test_lee_texto_en_espanol_con_tildes_y_guion_largo(tmp_path: Path):
     assert "palabras_dudosas" not in r.detalle
 
 
-def test_una_imagen_en_blanco_no_se_declara_ok(tmp_path: Path):
-    """Fallo cerrado: si el OCR no leyó nada, NO hay extracto."""
+def test_una_imagen_en_blanco_es_un_documento_valido_sin_texto(tmp_path: Path):
+    """Decision de Fernando (2026-10-03): una IMAGEN sin texto util (foto,
+    plano, pasto) es un documento valido, no un error. `ok` con el codigo
+    estable `imagen_sin_texto`, y la unica salida es un aviso explicito --
+    nunca texto inventado ni la basura del OCR."""
     from PIL import Image
 
     blanco = tmp_path / "blanco.png"
     Image.new("RGB", (400, 200), "white").save(blanco)
     r = ocr.extraer(blanco)
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == "imagen_sin_texto"
+    assert r.detalle["razon"] == "el OCR no devolvio texto util"
+    assert "imagen sin texto" in r.salidas["texto.txt"]
+
+
+def test_una_imagen_con_texto_claro_no_lleva_codigo_imagen_sin_texto(tmp_path: Path):
+    r = ocr.extraer(_imagen_multilinea(tmp_path / "claro.png", [
+        "Estado de Situación Financiera — año 2026",
+        "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD",
+        "Patrimonio neto 246,913.57 USD",
+    ]))
+    assert r.estado == "ok"
+    assert "codigo" not in r.detalle
+    assert "imagen sin texto" not in r.salidas["texto.txt"]
+
+
+def test_un_jpeg_truncado_es_archivo_ilegible_y_error(tmp_path: Path):
+    """`error` queda SOLO para un archivo danado o que no se puede abrir."""
+    import random
+
+    from PIL import Image
+
+    random.seed(1)
+    img = Image.new("L", (600, 400))
+    img.putdata([random.randint(0, 255) for _ in range(600 * 400)])
+    completo = tmp_path / "completo.jpg"
+    img.save(completo, quality=90)
+    datos = completo.read_bytes()
+    roto = tmp_path / "roto.jpg"
+    roto.write_bytes(datos[: len(datos) // 3])
+
+    r = ocr.extraer(roto)
+
     assert r.estado == "error"
     assert r.salidas == {}
+    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["razon"]
 
 
-def test_ruido_con_mayoria_de_palabras_dudosas_da_error(tmp_path: Path):
+def test_bytes_que_no_son_una_imagen_son_archivo_ilegible(tmp_path: Path):
+    falso = tmp_path / "falso.png"
+    falso.write_bytes(b"esto no es un png")
+    r = ocr.extraer(falso)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_ilegible"
+
+
+def test_un_pdf_escaneado_sin_texto_sigue_en_error_sin_codigo_de_imagen(tmp_path: Path):
+    """La regla de `imagen_sin_texto` es SOLO de imagenes: un PDF sin texto
+    es un problema y conserva su `error` y su razon."""
+    from PIL import Image
+
+    origen = _pdf_de_imagenes(
+        tmp_path / "vacio.pdf", [Image.new("RGB", (800, 400), "white")]
+    )
+    r = ocr.extraer(origen)
+    assert r.estado == "error"
+    assert r.salidas == {}
+    assert r.detalle["razon"] == "ninguna pagina del PDF dio texto util via OCR"
+    assert "codigo" not in r.detalle
+
+
+def test_la_cache_reusa_una_imagen_sin_texto(tmp_path: Path, monkeypatch):
+    """Una imagen sin texto es un resultado VALIDO (`ok`), asi que la
+    ingesta lo cachea: la segunda pasada no vuelve a llamar al extractor."""
+    from motor_registry import tool_authority
+
+    from procesamiento import compuerta, ingesta
+
+    raiz = tmp_path.resolve()
+    monkeypatch.setattr(tool_authority, "WORKSPACE_ROOT", raiz)
+    from PIL import Image
+
+    origen = tmp_path / "foto.png"
+    Image.new("RGB", (400, 200), "white").save(origen)
+    trabajo = raiz / "trabajo"
+
+    f1 = ingesta.ingerir(origen, trabajo)
+    assert f1.estado == "ok"
+    assert f1.detalle["codigo"] == "imagen_sin_texto"
+
+    llamadas = []
+    original = compuerta.extraer
+    monkeypatch.setattr(
+        compuerta, "extraer", lambda *a, **k: llamadas.append(a) or original(*a, **k)
+    )
+    f2 = ingesta.ingerir(origen, trabajo)
+    assert llamadas == []
+    assert f2.estado == "ok"
+    assert f2.detalle["codigo"] == "imagen_sin_texto"
+
+
+def test_ruido_con_mayoria_de_palabras_dudosas_es_imagen_sin_texto(tmp_path: Path):
     """30 glifos sueltos al azar (no palabras): más de la mitad de las
     palabras que tesseract "reconoce" caen por debajo de
     CONFIANZA_MINIMA_PALABRA -- eso es 'sin texto útil' aunque el texto
@@ -175,8 +268,10 @@ def test_ruido_con_mayoria_de_palabras_dudosas_da_error(tmp_path: Path):
     img.save(origen)
 
     r = ocr.extraer(origen)
-    assert r.estado == "error"
-    assert r.salidas == {}
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == "imagen_sin_texto"
+    assert "imagen sin texto" in r.salidas["texto.txt"]
+    # la basura del OCR NO se entrega como extracto, pero queda en detalle
     assert "palabras_dudosas" in r.detalle
     assert "confianza baja" in r.detalle["razon"]
 
@@ -241,7 +336,8 @@ def test_texto_corto_registra_confianza_promedio_igual(tmp_path: Path):
     los umbrales. La confianza tiene que registrarse pase o no pase."""
     origen = _imagen_una_linea(tmp_path / "balance.png", "BALANCE")
     r = ocr.extraer(origen)
-    assert r.estado == "error"
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == "imagen_sin_texto"
     assert "confianza_promedio" in r.detalle
     assert r.detalle["confianza_promedio"] > 0
 
@@ -249,11 +345,12 @@ def test_texto_corto_registra_confianza_promedio_igual(tmp_path: Path):
 def test_texto_por_debajo_del_minimo_de_caracteres_no_se_declara_ok(tmp_path: Path):
     """Pin de MINIMO_CARACTERES por el lado bajo: "Vencido" son 7
     caracteres (por debajo de 8) con alta confianza y NO forma mayoría
-    dudosa -- si esto no fuera 'error', la única explicación sería que
+    dudosa -- si esto no fuera `imagen_sin_texto`, la única explicación sería que
     MINIMO_CARACTERES bajó."""
     origen = _imagen_una_linea(tmp_path / "vencido.png", "Vencido")
     r = ocr.extraer(origen)
-    assert r.estado == "error"
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == "imagen_sin_texto"
     assert r.detalle["caracteres"] == 7
 
 
