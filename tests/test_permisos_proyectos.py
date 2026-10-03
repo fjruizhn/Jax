@@ -96,6 +96,32 @@ def _limpiar_nucleo_de_prueba():
     shutil.rmtree(_DIR_NUCLEO_PRUEBA, ignore_errors=True)
 
 
+_RESPALDOS_TEMPORALES = (
+    "import tempfile, shutil, atexit\n"
+    "pp.RUTA_RESPALDOS = pp.Path(tempfile.mkdtemp(prefix='respaldos-prueba-'))\n"
+    "atexit.register(shutil.rmtree, pp.RUTA_RESPALDOS, ignore_errors=True)\n"
+)
+"""Se inserta tras `import permisos_proyectos as pp` en todo codigo de prueba que corre como root y llama a
+`_generar_respaldo_validado`: sin esto escribe en /var/backups/jax-permisos y le hace chmod 0700."""
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _ninguna_prueba_escribe_en_var_backups():
+    """Red de seguridad: el contenido de /var/backups/jax-permisos (existencia, listado con fechas) es el mismo
+    antes y despues de TODO el modulo. Complementa a la guarda por codigo."""
+    def foto() -> str:
+        r = subprocess.run(["sudo", "-n", "ls", "-la", "--time-style=full-iso", "/var/backups/jax-permisos"],
+                           capture_output=True, text=True)
+        return f"rc={r.returncode}\n{r.stdout}"
+    if not _sudo_n_disponible():
+        yield
+        return
+    antes = foto()
+    yield
+    despues = foto()
+    assert despues == antes, f"alguna prueba escribio en /var/backups/jax-permisos:\n--antes--\n{antes}\n--despues--\n{despues}"
+
+
 def test_las_pruebas_no_tocan_el_nucleo_de_sistema():
     """Falla si la ruta del nucleo que usan las pruebas (y el guion) cae fuera del directorio
     temporal, o si el valor por defecto del guion dejo de ser la ruta de produccion."""
@@ -1177,14 +1203,22 @@ def test_fifo_no_cuelga_el_nucleo(arbol_temporal, _identidades):
         subprocess.run(["sudo", "-n", "rm", "-f", str(fifo)], capture_output=True)
 
 
-def test_verificar_con_fifo_no_cuelga_ni_crashea(arbol_temporal):
-    fifo = arbol_temporal / "proyectos" / "un-proyecto" / "unfifo2"
+def test_verificar_con_fifo_no_cuelga_ni_crashea(arbol_temporal, _identidades):
+    """Con un FIFO en el arbol YA aplicado, `--verificar` termina (no cuelga), con rc 0 y el mensaje exacto de
+    exito del recorrido completo -- no con un `RAIZ inválida` o un rc=2 que tambien esquivaria el Traceback. El
+    FIFO no se reporta (no gobernado)."""
+    proyectos = arbol_temporal / "proyectos"
+    fifo = proyectos / "un-proyecto" / "unfifo2"
     os.mkfifo(fifo)
     try:
+        assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
         r = _correr("--verificar", str(arbol_temporal))
-        assert "Traceback" not in (r.stdout + r.stderr)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert f"OK: {proyectos} cumple (dueño jaxsvc, grupo fruiz, setgid, sin bits espurios" in r.stdout, r.stdout
+        assert "NO CUMPLE" not in r.stdout and "Traceback" not in (r.stdout + r.stderr)
+        assert str(fifo) not in r.stdout
     finally:
-        fifo.unlink(missing_ok=True)
+        subprocess.run(["sudo", "-n", "rm", "-f", str(fifo)], capture_output=True)
 
 
 # --- m1 (ronda 4): FIFO por el camino del RESPALDO, no sólo _recorrer_directo ------------
@@ -1203,6 +1237,7 @@ def test_respaldo_con_fifo_aborta_nombrando_la_ruta(arbol_temporal, _identidades
 import sys
 sys.path.insert(0, {str(RAIZ_REPO / "ops")!r})
 import permisos_proyectos as pp
+{_RESPALDOS_TEMPORALES}
 try:
     pp._generar_respaldo_validado(pp.Path({str(proyectos)!r}))
     print("NO_ABORTO")
@@ -1227,13 +1262,14 @@ def test_respaldo_sin_objetos_no_gobernados_funciona_normal(arbol_temporal, _ide
 import sys
 sys.path.insert(0, {str(RAIZ_REPO / "ops")!r})
 import permisos_proyectos as pp
+{_RESPALDOS_TEMPORALES}
 ruta = pp._generar_respaldo_validado(pp.Path({str(proyectos)!r}))
 print(str(ruta))
 ruta.unlink()
 """
     r = subprocess.run(["sudo", "-n", "python3", "-c", codigo], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert r.stdout.strip().startswith("/var/backups/jax-permisos/")
+    assert r.stdout.strip().startswith("/tmp/respaldos-prueba-"), r.stdout
 
 
 # --- m2 (ronda 4): respaldo cortado ---------------------------------------------------------
@@ -1263,6 +1299,7 @@ def test_respaldo_con_marcador_de_fin_faltante_se_rechaza(arbol_temporal, _ident
 import sys
 sys.path.insert(0, {str(RAIZ_REPO / "ops")!r})
 import permisos_proyectos as pp
+{_RESPALDOS_TEMPORALES}
 ruta = pp._generar_respaldo_validado(pp.Path({str(proyectos)!r}))
 contenido = ruta.read_text()
 assert contenido.endswith(pp._MARCADOR_FIN_RESPALDO)
@@ -1918,31 +1955,50 @@ def test_verificar_marca_otros_en_una_carpeta_oculta_y_en_su_contenido(arbol_tem
     assert not any("/enlace" in l and l.startswith("NO CUMPLE") for l in r.stdout.splitlines()), "se siguió un symlink"
 
 
+def _foto_completa(ruta: Path) -> tuple:
+    st = ruta.stat()
+    return (st.st_uid, st.st_gid, st.st_mode, st.st_mtime_ns, st.st_ctime_ns, tuple(_acl(ruta)))
+
+
 @pytest.mark.parametrize("accion", ["aplicar", "deshacer"])
-def test_aplicar_y_deshacer_cierran_otros_en_las_ocultas_sin_tocar_nada_mas(arbol_temporal, _identidades, accion):
-    """Las carpetas ocultas de `proyectos/<proyecto>/` son estado de herramientas: no se les cambia dueño, grupo ni
-    ACL nombradas, pero NO pueden conservar bits de otros (modo, `other::` de acceso y por defecto). Por
-    descriptor y sin seguir symlinks: el directorio de fuera al que apunta un enlace queda como estaba."""
+def test_una_oculta_con_bits_de_otros_hace_fallar_cerrado_y_root_no_la_toca(arbol_temporal, _identidades, accion):
+    """Root NO muta las carpetas ocultas (estado de herramientas, y un inode que jaxsvc puede enlazar desde fuera
+    seria una carrera): si alguna tiene un bit de otros, `--aplicar` y `--deshacer` fallan cerrado en su pasada
+    previa, ANTES de mutar nada; el mensaje nombra cada ruta y da la orden manual que ejecuta una persona."""
     proyectos = arbol_temporal / "proyectos"
     assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
     o = _crear_oculta_abierta(proyectos)
-    antes = {k: (v.stat().st_uid, v.stat().st_gid) for k, v in o.items() if k != "fuera"}
-    nombrada_antes = [l for l in _acl(o["dato"]) if "nobody" in l] if _hay_nobody() else []
-    modo_fuera = o["fuera"].stat().st_mode & 0o7777
+    objetos = [proyectos, proyectos / "un-proyecto", proyectos / "un-proyecto" / "sub",
+               proyectos / "un-proyecto" / "archivo.txt", o["oculta"], o["dato"], o["sub"]]
+    antes = {d: _foto_completa(d) for d in objetos}
 
-    datos = _recorrer_directo(proyectos, accion=accion)
-    assert not datos["hardlinks_rechazados"], datos
+    datos = _recorrer_directo(proyectos, accion=accion, puede_fallar=True, conceder_al_terminar=False)
+    assert "error" in datos, datos
+    for ruta in (o["oculta"], o["dato"], o["sub"]):
+        assert str(ruta) in datos["error"], (ruta, datos["error"])
+    assert f"chmod -R o-rwx '{o['oculta']}'" in datos["error"], datos["error"]
+    assert {d: _foto_completa(d) for d in objetos} == antes, f"--{accion} mutó algo (incluida la oculta) pese a fallar"
 
-    for k in ("oculta", "dato", "sub"):
-        assert o[k].stat().st_mode & 0o007 == 0, (k, oct(o[k].stat().st_mode))
-        assert not [l for l in _otros_de(o[k]) if not l.endswith("---")], (k, _acl(o[k]))
-    assert not [l for l in _otros_de(o["oculta"]) if not l.endswith("---")]
-    assert {k: (v.stat().st_uid, v.stat().st_gid) for k, v in o.items() if k != "fuera"} == antes, "cambió dueño o grupo"
-    if nombrada_antes:
-        assert [l for l in _acl(o["dato"]) if "nobody" in l] == nombrada_antes, "se tocó una ACL nombrada de la oculta"
-    assert o["fuera"].stat().st_mode & 0o7777 == modo_fuera, "se siguió el symlink y se mutó fuera del árbol"
-    if accion == "aplicar":
-        assert _correr("--verificar", str(arbol_temporal)).returncode == 0
+
+@pytest.mark.parametrize("accion", ["aplicar", "deshacer"])
+def test_una_oculta_limpia_no_detiene_a_aplicar_ni_a_deshacer_y_queda_intacta(arbol_temporal, _identidades, accion):
+    proyectos = arbol_temporal / "proyectos"
+    assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    oculta = proyectos / "un-proyecto" / ".estado-limpio"
+    r = subprocess.run(["sudo", "-n", "-u", "jaxsvc", "python3", "-c", f"""
+import os
+os.mkdir({str(oculta)!r}, 0o700)
+open({str(oculta / "dato.txt")!r}, "w").write("x"); os.chmod({str(oculta / "dato.txt")!r}, 0o600)
+"""], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    _setfacl_root("-m", "u:nobody:r-x", str(oculta)) if _hay_nobody() else None
+    objetos = [oculta, oculta / "dato.txt"]
+    antes = {d: _foto_completa(d) for d in objetos}
+    time.sleep(0.05)
+
+    datos = _recorrer_directo(proyectos, accion=accion, puede_fallar=True, conceder_al_terminar=False)
+    assert "error" not in datos, datos
+    assert {d: _foto_completa(d) for d in objetos} == antes, "root tocó una oculta limpia (modo, dueño, ACL o mtime)"
 
 
 def test_deshacer_falla_cerrado_si_jaxsvc_no_atraviesa_la_raiz_y_no_toca_nada(base_propia):
@@ -2093,6 +2149,7 @@ def test_hardlink_dentro_de_una_oculta_no_se_toca_nunca_y_se_falla_cerrado(arbol
     for accion in ("aplicar", "deshacer"):
         datos = _recorrer_directo(proyectos, accion=accion, puede_fallar=True, conceder_al_terminar=False)
         assert "error" in datos and f"hardlink en carpeta oculta: {enlace}" in datos["error"], (accion, datos)
+        assert f"chmod -R o-rwx '{oculta}'" in datos["error"], datos["error"]   # por `abierto.txt`
         assert fuera.stat().st_mode & 0o7777 == 0o755, f"--{accion} tocó el modo de un archivo de fuera por un hardlink"
         assert abierto.stat().st_mode & 0o007 == 0o006, f"--{accion} mutó algo pese a fallar cerrado"
 
@@ -2157,6 +2214,73 @@ def test_las_pruebas_no_instalan_en_usr_local_sbin_ni_crean_cuentas():
     llamadas = [n for n in ast.walk(arbol) if isinstance(n, ast.Constant) and n.value == "useradd"
                 and id(n) not in docstrings]
     assert not llamadas and not literales, "una prueba crea cuentas del sistema (useradd)"
+
+
+def test_ninguna_prueba_llama_a_generar_respaldo_sin_sustituir_RUTA_RESPALDOS():
+    """`_generar_respaldo_validado` crea archivos en RUTA_RESPALDOS (/var/backups/jax-permisos) y le hace chmod
+    0700 al directorio. Toda prueba cuyo codigo (incluido el que corre como root en un subproceso) la llame tiene
+    que sustituir RUTA_RESPALDOS: por `_RESPALDOS_TEMPORALES`, por `_driver_respaldo(...)` o a mano."""
+    import ast
+    fuente = Path(__file__).read_text()
+    culpables = []
+    for nodo in ast.parse(fuente).body:
+        if isinstance(nodo, ast.FunctionDef) and nodo.name != "test_ninguna_prueba_llama_a_generar_respaldo_sin_sustituir_RUTA_RESPALDOS":
+            seg = ast.get_source_segment(fuente, nodo) or ""
+            if "_generar_respaldo_validado" in seg and not any(
+                    m in seg for m in ("_RESPALDOS_TEMPORALES", "_driver_respaldo(", "RUTA_RESPALDOS =")):
+                culpables.append(nodo.name)
+    assert not culpables, f"llaman a _generar_respaldo_validado sin sustituir RUTA_RESPALDOS: {culpables}"
+
+
+# --- no_cumple que surge DURANTE la mutacion tiene que llegar al cliente ------------------------
+
+def test_un_no_cumple_durante_la_mutacion_llega_al_json_y_el_cliente_no_dice_ok(arbol_temporal, _identidades):
+    """`--aplicar` y `--deshacer` pueden anotar `no_cumple` mientras mutan (p. ej. un directorio que no se puede
+    listar). Antes no salia en el JSON del nucleo y el cliente podia imprimir OK con un objeto sin procesar. Se
+    inyecta uno sintetico DESPUES del recorrido y se exige: va en el JSON, el cliente lo imprime y no dice OK."""
+    proyectos = arbol_temporal / "proyectos"
+    out = _driver_respaldo(f"""
+proy = pp.Path({str(proyectos)!r})
+raiz = {str(arbol_temporal)!r}
+pp._generar_respaldo_validado(proy)
+pp._raiz_configurada_privilegiada = lambda: proy
+import io, contextlib, subprocess
+_recorrer = pp._recorrer
+def recorrer_con_falta(*a, **k):
+    r = _recorrer(*a, **k)
+    if k.get("accion") in ("aplicar", "deshacer"):
+        r.no_cumple.append(proy.as_posix() + "/falta-sintetica: surgio durante la mutacion")
+    return r
+pp._recorrer = recorrer_con_falta
+resultados = {{}}
+for accion in ("aplicar", "deshacer"):
+    nucleo = pp._cmd_nucleo_privilegiado if accion == "aplicar" else pp._cmd_nucleo_deshacer
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        nucleo()
+    datos = json.loads(buf.getvalue())
+    if accion == "aplicar":
+        pp._verificar_instalacion = lambda: None
+        pp._sudo_n_funciona = lambda: True
+        pp._raiz_por_defecto = lambda: raiz
+        pp._hacer_respaldo = lambda: pp.Path("/dev/null")
+        pp._validar_y_obtener_proyectos = lambda r: proy
+        pp._cmd_verificar = lambda r: 0
+        cliente = lambda: pp._cmd_aplicar(raiz)
+    else:
+        cliente = pp._cmd_deshacer
+    pp._invocar_nucleo = lambda *a, _j=buf.getvalue(): subprocess.CompletedProcess(a, 0, stdout=_j, stderr="")
+    sal, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(sal), contextlib.redirect_stderr(err):
+        rc = cliente()
+    resultados[accion] = {{"no_cumple": datos.get("no_cumple"), "rc": rc, "stdout": sal.getvalue(), "stderr": err.getvalue()}}
+salida["resultados"] = resultados
+""")
+    for accion, r in out["resultados"].items():
+        assert r["no_cumple"] and "falta-sintetica" in r["no_cumple"][0], (accion, r)
+        assert r["rc"] == 1, (accion, r)
+        assert "falta-sintetica" in r["stdout"] + r["stderr"], (accion, r)
+        assert "OK: deshecho" not in r["stdout"] and "aplicado y verificado" not in r["stdout"], (accion, r)
 
 
 # --- MAJOR-1: la raiz se abre por descriptor, sin seguir symlinks ------------------------------
