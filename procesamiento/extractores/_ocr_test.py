@@ -1578,9 +1578,9 @@ def test_n8_un_gif_o_webp_de_un_solo_fotograma_sigue_como_hoy(tmp_path: Path, fo
 
 
 def test_n9_leptonica_por_stdin_escribe_pixreadmem_y_se_reconoce(tmp_path: Path, monkeypatch):
-    """No existe un formato real que Pillow cargue y leptonica rechace con
-    returncode != 0 (probados 56 combinaciones modo x formato): la rama se
-    ejerce con un tesseract SIMULADO que imita su stderr real por stdin."""
+    """Con un tesseract SIMULADO que imita su stderr real por stdin. Los casos
+    REALES (rc=1 con `pixReadMem` y rc=0 con `is not uint`) estan en
+    `test_n15_*`."""
     class Falso:
         returncode = 1
         stdout = b""
@@ -1691,22 +1691,6 @@ def test_n13_los_topes_por_defecto():
     assert ocr.PLAZO_TOTAL_SEGUNDOS == 900
 
 
-def test_n13_el_plazo_total_corta_el_ocr_de_un_tiff_largo(tmp_path: Path, monkeypatch):
-    from PIL import Image
-
-    paginas = [Image.new("L", (200, 100), 255) for _ in range(4)]
-    tif = _tiff_multipagina(tmp_path / "largo.tif", paginas)
-    ticks = iter([0.0, 10.0, 2000.0, 2000.0, 2000.0, 2000.0, 2000.0])
-    monkeypatch.setattr(ocr, "_reloj", lambda: next(ticks))
-    llamadas = _tesseract_llamado(monkeypatch)
-
-    r = ocr.extraer(tif)
-
-    assert r.estado == "error"
-    assert r.detalle["causa"] == "tiempo_excedido"
-    assert len(llamadas) <= 2  # una pagina (texto + tsv) y se corta
-
-
 def test_n13_un_tiff_valido_se_lee_pagina_a_pagina_y_no_guarda_los_png(tmp_path: Path):
     """Sigue dando el texto completo de las dos paginas (streaming)."""
     from PIL import Image
@@ -1788,3 +1772,249 @@ def test_rc_cero_con_stderr_normal_no_se_toma_por_fallo(tmp_path: Path):
     """Control: 'Estimating resolution as N' en stderr es ruido normal."""
     r = ocr.extraer(_imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD"))
     assert r.estado in {"ok", "parcial"}
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 5
+# ---------------------------------------------------------------------------
+
+
+def _tiff_f_con_texto(destino: Path, tmp_path: Path, pixel=None):
+    from PIL import Image
+
+    base = _imagen_multilinea(tmp_path / "base-f.png", [
+        "Factura numero 12345 pagada", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    f = Image.open(base).convert("L").convert("F")
+    if pixel is not None:
+        f.putpixel((0, 0), pixel)
+    f.save(destino)
+    return destino
+
+
+@pytest.mark.parametrize("valor", [float("inf"), float("-inf"), float("nan"), 1e30])
+def test_n14_un_pixel_no_finito_o_gigante_no_aplasta_el_tiff_de_modo_f(tmp_path, valor):
+    """Un solo pixel inf/nan/1e30 hacia que el escalado por extremos dejara el
+    texto en 0 caracteres (ok/imagen_sin_texto). Percentiles sobre los valores
+    FINITOS; los no finitos son fondo."""
+    destino = _tiff_f_con_texto(tmp_path / "f.tif", tmp_path, pixel=valor)
+    r = ocr.extraer(destino)
+    assert r.estado in {"ok", "parcial"}
+    assert "Factura numero 12345 pagada" in r.salidas["texto.txt"]
+
+
+def test_n14_un_tiff_f_todo_no_finito_es_sin_datos_finitos(tmp_path: Path):
+    from PIL import Image
+
+    destino = tmp_path / "nan.tif"
+    Image.new("F", (200, 100), float("nan")).save(destino)
+    r = ocr.extraer(destino)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["causa"] == "sin_datos_finitos"
+
+
+def test_n15_caso_real_tiff_f_directo_a_tesseract_da_rc0_con_is_not_uint():
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("F", (50, 50), 3.0).save(buf, format="TIFF")
+    assert ocr._ocr_bytes(buf.getvalue(), "spa") == {
+        "clasificacion": "ilegible", "causa": "tesseract_no_lee"}
+
+
+def test_n15_caso_real_gif_animado_directo_a_tesseract_da_rc1_con_pixreadmem():
+    import io
+
+    from PIL import Image
+
+    chico = Image.new("P", (100, 100), 0)
+    otro = Image.new("P", (800, 800), 1)
+    buf = io.BytesIO()
+    chico.save(buf, format="GIF", save_all=True, append_images=[otro, otro])
+    assert ocr._ocr_bytes(buf.getvalue(), "spa") == {
+        "clasificacion": "ilegible", "causa": "tesseract_no_lee"}
+
+
+class _Reloj:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+def _tesseract_con_reloj(monkeypatch, reloj, avance, modo="ok"):
+    """Tesseract simulado: cada llamada consume `avance` segundos del reloj
+    simulado; `modo="timeout"` lanza TimeoutExpired tras consumirlos."""
+    import subprocess
+
+    llamadas: list = []
+    real = ocr.subprocess.run
+
+    class Salida:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        llamadas.append(k.get("timeout"))
+        reloj.t += avance
+        if modo == "timeout":
+            raise subprocess.TimeoutExpired(cmd, k.get("timeout"))
+        return Salida()
+
+    monkeypatch.setattr(ocr, "_reloj", reloj)
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    return llamadas
+
+
+def _tiff_de_dos_paginas(tmp_path: Path) -> Path:
+    from PIL import Image
+
+    return _tiff_multipagina(
+        tmp_path / "dos.tif", [Image.new("L", (200, 100), 255) for _ in range(2)]
+    )
+
+
+def test_n16_un_solo_presupuesto_se_descuenta_en_cada_llamada(tmp_path, monkeypatch):
+    reloj = _Reloj()
+    timeouts = _tesseract_con_reloj(monkeypatch, reloj, avance=250)
+    ocr.extraer(_tiff_de_dos_paginas(tmp_path))
+    # 2 paginas x (texto + tsv): restante 900, 650, 400, 150, cada una tope 300
+    assert timeouts == [300, 300, 300, 150]
+
+
+def test_n16_con_el_presupuesto_agotado_no_se_llama_a_otra_pagina(tmp_path, monkeypatch):
+    reloj = _Reloj()
+    timeouts = _tesseract_con_reloj(monkeypatch, reloj, avance=500)
+    r = ocr.extraer(_tiff_de_dos_paginas(tmp_path))
+    assert len(timeouts) == 2          # pagina 1 (texto+tsv) y se corta
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "ocr_tiempo_excedido"
+    assert r.detalle["causa"] == "tiempo_excedido"
+
+
+def test_n16_timeout_con_el_presupuesto_consumido_es_tiempo_excedido(tmp_path, monkeypatch):
+    reloj = _Reloj()
+    _tesseract_con_reloj(monkeypatch, reloj, avance=1000, modo="timeout")
+    r = ocr.extraer(_tiff_de_dos_paginas(tmp_path))
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "ocr_tiempo_excedido"
+    assert r.detalle["causa"] == "tiempo_excedido"
+
+
+def test_n16_timeout_por_llamada_con_presupuesto_restante_tiene_su_causa(tmp_path, monkeypatch):
+    reloj = _Reloj()
+    _tesseract_con_reloj(monkeypatch, reloj, avance=300, modo="timeout")
+    r = ocr.extraer(_tiff_de_dos_paginas(tmp_path))
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "ocr_tiempo_excedido"
+    assert r.detalle["causa"] == "tiempo_por_llamada"
+
+
+def test_n16_una_imagen_suelta_tambien_usa_el_presupuesto_y_el_codigo(tmp_path, monkeypatch):
+    reloj = _Reloj()
+    _tesseract_con_reloj(monkeypatch, reloj, avance=300, modo="timeout")
+    r = ocr.extraer(_imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD"))
+    assert r.detalle["codigo"] == "ocr_tiempo_excedido"
+
+
+def _pdf_escaneado(tmp_path: Path) -> Path:
+    from PIL import Image
+
+    lineas = [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ]
+    return _pdf_de_imagenes(
+        tmp_path / "e.pdf",
+        [Image.open(_imagen_multilinea(tmp_path / "pg.png", lineas)).convert("RGB")],
+    )
+
+
+def test_n17_pdf_con_4_bytes_de_basura_y_nombre_png_es_pdf_en_las_tres(tmp_path: Path):
+    from procesamiento import compuerta, ingesta
+
+    f = tmp_path / "escaneo.png"
+    f.write_bytes(b"\x00\x01\x02\x03" + _pdf_escaneado(tmp_path).read_bytes())
+    assert ocr.camino_de(f) == "pdf"
+    assert ingesta._camino_de(f, ".png") == "pdf"
+    assert compuerta._tipo_por_contenido(f) == "pdf"
+    assert ocr.extraer(f).detalle["_camino"] == "pdf"
+    assert compuerta.extraer(f).detalle["_camino"] == "pdf"
+
+
+def test_n17_pdf_con_2000_bytes_de_basura_la_misma_decision_en_las_tres(
+    tmp_path: Path, monkeypatch
+):
+    """Decision documentada: sin %PDF en los primeros 1024 bytes el CONTENIDO
+    no decide y manda la EXTENSION (.pdf -> camino pdf), igual que la
+    compuerta siempre hizo. La compuerta le pasa ese camino a `ocr.extraer`."""
+    from procesamiento import compuerta, ingesta
+
+    f = tmp_path / "Escanear 1.pdf"
+    f.write_bytes(b"\x00" * 2000 + _pdf_escaneado(tmp_path).read_bytes())
+    assert ocr.camino_de(f) == "pdf"
+    assert ingesta._camino_de(f, ".pdf") == "pdf"
+    pasados: list = []
+    real = compuerta.ocr.extraer
+    monkeypatch.setattr(
+        compuerta.ocr, "extraer",
+        lambda *a, **k: pasados.append(k.get("camino")) or real(*a, **k),
+    )
+    compuerta.extraer(f)
+    assert pasados == ["pdf"]
+
+
+def test_n17_la_firma_de_imagen_manda_y_un_zip_no_se_confunde_con_pdf():
+    assert ocr.tipo_por_cabecera(b"\x89PNG\r\n\x1a\n" + b"x" * 50 + b"%PDF") == "imagen"
+    assert ocr.tipo_por_cabecera(b"\x00\x01\x02\x03%PDF-1.7") == "pdf"
+    assert ocr.tipo_por_cabecera(b"x" * 2000 + b"%PDF-1.7") is None
+    assert ocr.tipo_por_cabecera(b"PK\x03\x04" + b"x" * 30 + b"%PDF") is None
+
+
+def test_n18_un_fotograma_numerico_tiene_un_tope_de_pixeles_mas_bajo(tmp_path, monkeypatch):
+    from PIL import Image
+
+    assert ocr.MAX_PIXELES_NUMERICO == 25_000_000
+    monkeypatch.setattr(ocr, "MAX_PIXELES_NUMERICO", 5_000)
+    destino = tmp_path / "f.tif"
+    Image.new("F", (100, 100), 1.0).save(destino)   # 10 000 px > 5 000
+    r = ocr.extraer(destino)
+    assert r.detalle["causa"] == "demasiados_pixeles"
+    # una imagen de 8 bits del mismo tamano NO se rechaza por ese tope
+    gris = tmp_path / "g.png"
+    Image.new("L", (100, 100), 255).save(gris)
+    assert ocr.extraer(gris).estado == "ok"
+
+
+def test_n18_memory_error_no_es_archivo_danado(tmp_path: Path, monkeypatch):
+    def sin_memoria(*a, **k):
+        raise MemoryError
+
+    monkeypatch.setattr(ocr, "_normalizar_modo", sin_memoria)
+    destino = _tiff_f_con_texto(tmp_path / "f.tif", tmp_path)
+    r = ocr.extraer(destino)
+    assert r.estado == "error"
+    assert r.detalle["causa"] == "sin_memoria"
+    assert r.detalle["codigo"] != "archivo_ilegible"
+
+
+def test_n18_memory_error_al_decodificar_tampoco_es_archivo_danado(tmp_path, monkeypatch):
+    from PIL import Image
+
+    def sin_memoria(self, *a, **k):
+        raise MemoryError
+
+    origen = _imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD")
+    monkeypatch.setattr(Image.Image, "load", sin_memoria)
+    r = ocr.extraer(origen)
+    assert r.estado == "error"
+    assert r.detalle["causa"] == "sin_memoria"
+    assert r.detalle["codigo"] != "archivo_ilegible"
