@@ -5738,11 +5738,15 @@ jobs:
       #   `_trabajo_de` rechaza lo que no es uuid canonico). Ademas `test_uuid_de_otro_largo_da_422`
       #   comprueba el codigo. Las pruebas que pasaban `"p"`/`"proy"` como proyecto a
       #   `_ejecutar_trabajo` pasan `UUID_PRUEBA` (ya no hay nombre libre). Local: 66 passed.
+      # 66 -> 68 el 2026-10-03 (SR3 owner protocol): +2 pruebas de ruta para
+      #   rechazos retryable sin append de owner faltante/no canónico/desconocido/
+      #   duplicado y para `usuario` legado como extra prohibido aun con owner válido.
+      #   Confirmado por GitHub run 37133813911: 68 passed, 7 warnings.
       - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
-          grep -qE "^66 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 66 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          grep -qE "^68 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 68 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
