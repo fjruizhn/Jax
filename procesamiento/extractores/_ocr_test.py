@@ -334,7 +334,7 @@ def test_membrete_con_pocas_palabras_da_parcial_con_dimensiones(tmp_path: Path):
 
 def test_texto_corto_registra_confianza_promedio_igual(tmp_path: Path):
     """I-1: `BALANCE` (7 caracteres) cae por MINIMO_CARACTERES y sale
-    'error' -- pero tesseract SÍ corrió y SÍ midió una confianza (~96 %), y
+    `ok`/`imagen_sin_texto` -- pero tesseract SÍ corrió y SÍ midió una confianza (~96 %), y
     esa franja de "texto corto" es justo la que hace falta para calibrar
     los umbrales. La confianza tiene que registrarse pase o no pase."""
     origen = _imagen_una_linea(tmp_path / "balance.png", "BALANCE")

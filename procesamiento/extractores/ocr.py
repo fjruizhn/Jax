@@ -21,9 +21,11 @@ ponga rojo:
   confianza) mientras los rótulos van al 96 % -- el promedio tapa justo lo
   que importa. La defensa real es un piso POR PALABRA
   (`CONFIANZA_MINIMA_PALABRA`): las palabras por debajo se cuentan y se
-  NOMBRAN en `detalle["palabras_dudosas"]` (nunca se borran del texto), con
-  más de la mitad de las palabras dudosas el resultado es `error`
-  (`PROPORCION_MAXIMA_PALABRAS_DUDOSAS`), con alguna pero no la mayoría es
+  NOMBRAN en `detalle["palabras_dudosas"]` (nunca se borran del texto). Con
+  más de la mitad de las palabras dudosas (`PROPORCION_MAXIMA_PALABRAS_DUDOSAS`)
+  una IMAGEN sale `parcial` con `imagen_texto_dudoso`, CONSERVANDO el texto
+  leído (Jax#338, decisión de Fernando; antes era `error`), y esa página de un
+  PDF cuenta en `paginas_sin_texto`; con alguna pero no la mayoría es
   `parcial`. El promedio se sigue registrando SIEMPRE, como señal
   secundaria (I-1: antes desaparecía de `detalle` en el camino de "texto
   corto", justo la franja que hacía falta para calibrar el umbral).
@@ -43,8 +45,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import array
-import math
 import subprocess
 import tempfile
 import time
@@ -101,10 +101,11 @@ CONFIANZA_MINIMA_PALABRA = 60.0
 MINIMO_PALABRAS = 10
 
 # Proporción de palabras dudosas (confianza < CONFIANZA_MINIMA_PALABRA) que,
-# superada, hace que la página entera se trate como "sin texto útil"
-# (`error`, o esa página cuenta en `paginas_sin_texto` de un PDF) en vez de
-# `parcial`: más de la mitad de las palabras en duda es, en la práctica, la
-# misma situación que no haber leído nada -- no se puede confiar en el resto.
+# superada, hace que la página entera se trate como de "baja confianza": una
+# IMAGEN sale `parcial` con `imagen_texto_dudoso` (conserva el texto leído; con
+# menos de MINIMO_CARACTERES es `imagen_sin_texto`, o `imagen_pagina_sin_texto`
+# si es del tamaño de una página), y esa página de un PDF cuenta en
+# `paginas_sin_texto` (si todas lo son, el PDF es `error`).
 PROPORCION_MAXIMA_PALABRAS_DUDOSAS = 0.5
 
 TIMEOUT_SEGUNDOS = 300
@@ -191,15 +192,19 @@ _FIRMAS_IMAGEN = (
 # grande de LACTOVI mide 13630x3826 (52 M).
 MAX_PIXELES = 100_000_000
 
-# Tope POR FOTOGRAMA mas bajo para los modos numericos (F, I, I;16*): la
-# normalizacion mantiene varias copias en memoria (coma flotante, mascara,
-# imagen limpia, escalada). MEDIDO 2026-10-03 (ru_maxrss del proceso que corre
-# `extraer`, TIFF con texto y un nan, linea base 25 MB):
-#   5000x5000 (25 Mpx):  F 604 MB, I;16 603 MB  -> demasiado, en el limite del
-#                        objetivo (~600 MB) y con jax-las-manos sin MemoryMax
-#   4000x4000 (16 Mpx):  F 397 MB, I;16 398 MB  -> por debajo; el tope elegido
-# (el pico crece ~25 bytes por pixel; es lineal.)
+# Tope POR FOTOGRAMA mas bajo para los modos de 16 bits (I;16*). MEDIDO
+# 2026-10-03 (ru_maxrss del proceso que corre `extraer`, linea base 25 MB):
+#   5000x5000 (25 Mpx): 603 MB -> en el limite del objetivo (~600 MB)
+#   4000x4000 (16 Mpx): 398 MB -> por debajo; el tope elegido
+# (el pico crece ~25 bytes por pixel; es lineal).
 MAX_PIXELES_NUMERICO = 16_000_000
+
+# Tope por fotograma para los demas modos fuera de {1, L, LA, P, RGB, RGBA}
+# (CMYK, LAB, YCbCr...): dos paginas de 10000x10000 en CMYK llegaron a 800 MB.
+# MEDIDO 2026-10-03 (ru_maxrss, linea base 26 MB), con texto: CMYK de 25 Mpx
+# (5000x5000) una pagina 222 MB, dos paginas (camino que convierte a RGB) 414 MB
+# -> por debajo de ~600 MB, el tope queda en 25 Mpx.
+MAX_PIXELES_OTROS_MODOS = 25_000_000
 
 # Solo un TIFF es multipagina PARA TESSERACT (procesa todas sus paginas). Un
 # GIF o WebP animado se RECHAZA (`animacion_no_soportada`: tesseract no lee
@@ -262,17 +267,23 @@ def _como_texto(salida) -> str:
     return salida or ""
 
 
-def tipo_por_cabecera(cabecera: bytes) -> str | None:
+def tipo_por_cabecera(cabecera: bytes, sufijo: str = "") -> str | None:
     """UNICA fuente de verdad del tipo por CONTENIDO (la usan `ocr`,
     `compuerta` e `ingesta`): `"imagen"` si hay una firma de imagen valida
-    (manda: un PNG con metadata `%PDF` es una imagen), `"pdf"` si `%PDF` esta en
-    los primeros 1024 bytes (el estandar tolera basura antes), `None` si el
-    contenido no decide. Un ZIP (`PK\\x03\\x04`: xlsx/docx) nunca es PDF."""
+    (manda: un PNG con metadata `%PDF` es una imagen); `"pdf"` si el contenido
+    EMPIEZA con `%PDF`, o si `%PDF` aparece desplazado (hasta 1024 bytes: el
+    estandar tolera basura antes) Y la extension es `.pdf` -- un .txt, .csv o
+    .eml que solo menciona `%PDF` no es un PDF; `None` si el contenido no
+    decide. Un ZIP (`PK\\x03\\x04`: xlsx/docx) nunca es PDF."""
     if _tiene_firma_de_imagen(cabecera[:16]):
         return "imagen"
     if cabecera.startswith(b"PK\x03\x04"):
         return None
-    return "pdf" if _FIRMA_PDF in cabecera[:1024] else None
+    if cabecera.startswith(_FIRMA_PDF):
+        return "pdf"
+    if sufijo.lower() == ".pdf" and _FIRMA_PDF in cabecera[:1024]:
+        return "pdf"
+    return None
 
 
 def camino_de_tipo(tipo: str | None, sufijo: str) -> str:
@@ -294,7 +305,8 @@ def camino_de(origen: Path, sufijo: str | None = None) -> str:
             cabecera = fh.read(1024)
     except OSError:
         cabecera = b""
-    return camino_de_tipo(tipo_por_cabecera(cabecera), sufijo if sufijo is not None else origen.suffix)
+    sufijo = sufijo if sufijo is not None else origen.suffix
+    return camino_de_tipo(tipo_por_cabecera(cabecera, sufijo), sufijo)
 
 
 def _tiene_firma_de_imagen(cabecera: bytes) -> bool:
@@ -393,16 +405,19 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
                     img.seek(i)
                     ancho, alto = img.size
                     total += ancho * alto
-                    limite = MAX_PIXELES_NUMERICO if img.mode in _MODOS_NUMERICOS else MAX_PIXELES
+                    if img.mode in _MODOS_NO_SOPORTADOS:
+                        return "modo_no_soportado"
+                    if img.mode in _MODOS_16_BITS:
+                        limite = MAX_PIXELES_NUMERICO
+                    elif img.mode not in _MODOS_PNG:
+                        limite = MAX_PIXELES_OTROS_MODOS
+                    else:
+                        limite = MAX_PIXELES
                     if ancho * alto > limite or total > MAX_PIXELES_TOTAL:
                         return "demasiados_pixeles"
                     dimensiones.append((ancho, alto))
                 if n == 1:
                     img.load()
-                    if img.mode in _MODOS_NUMERICOS:
-                        # un solo fotograma, pero de un modo que leptonica no
-                        # lee: va por el camino que lo normaliza y re-codifica
-                        return "tiff", dimensiones
                     return "una", dimensiones
     except Image.DecompressionBombError:
         return "demasiados_pixeles"
@@ -415,61 +430,38 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
 
 _MODOS_PNG = frozenset({"1", "L", "LA", "P", "RGB", "RGBA"})
 
-# Modos numericos que leptonica no lee bien (coma flotante: rc=0 con error en
-# stderr y sin texto). Se normalizan a 8 bits antes de ir a tesseract.
-_MODOS_NUMERICOS = frozenset({"F", "I", "I;16", "I;16B", "I;16L", "I;16N"})
+# Rasters de coma flotante (F) o de 32 bits (I): no son documentos de
+# expediente. `modo_no_soportado`, sin llamar a tesseract (leptonica sale con 0
+# y un error en stderr, y cualquier escalado a 8 bits es una apuesta: un pixel
+# nan o 1e30 o un poco de ruido lo aplastaba -- se borro).
+_MODOS_NO_SOPORTADOS = frozenset({"F", "I"})
+
+# 16 bits: leptonica los lee de forma NATIVA (medido), asi que van sin
+# normalizar; al re-codificar a PNG (camino multipagina) se guardan como PNG de
+# 16 bits o, si PNG no admite el modo, con un desplazamiento lineal `>> 8` a L.
+_MODOS_16_BITS = frozenset({"I;16", "I;16B", "I;16L", "I;16N"})
 
 
-class _SinDatosFinitos(Exception):
-    """Un fotograma numerico sin ningun valor finito (todo nan/inf)."""
-
-
-_MAXIMO_FLOAT32 = 3.4e38
-_MUESTRA_PIXELES = 250_000
-
-
-def _normalizar_modo(img):
-    """Imagen decodificada -> una que leptonica sabe leer, con conversion
-    EXPLICITA: modos numericos (F, I, I;16...) -> `L`; el resto fuera de
-    `_MODOS_PNG` (CMYK, YCbCr, LAB...) -> `RGB`.
-
-    Modos numericos (sin numpy, solo Pillow): (a) los pixeles NO FINITOS (nan,
-    inf) se detectan en toda la imagen con `ImageMath` y se tratan como FONDO
-    (la mediana de los finitos); si TODOS lo son, `_SinDatosFinitos`. (b) La
-    escala sale de los PERCENTILES p1 y p99 de los valores finitos de una
-    miniatura (no del extremo: un pixel 1e30 aplastaba el texto) y lo de afuera
-    se recorta; despues `autocontrast`."""
-    from PIL import Image, ImageMath, ImageOps
-
-    if img.mode in _MODOS_PNG:
+def _a_modo_legible(img):
+    """Fotograma decodificado -> uno que se pueda guardar como PNG para
+    tesseract: los modos de `_MODOS_PNG` y los de 16 bits tal cual; el resto
+    (CMYK, YCbCr, LAB, HSV...) a `RGB`."""
+    if img.mode in _MODOS_PNG or img.mode in _MODOS_16_BITS:
         return img
-    if img.mode not in _MODOS_NUMERICOS:
-        return img.convert("RGB")
-    base = img if img.mode == "F" else img.convert("I").convert("F")
-    finitos = ImageMath.lambda_eval(
-        lambda a: (a["a"] == a["a"]) * (abs(a["a"]) < _MAXIMO_FLOAT32), a=base
-    )
-    if finitos.getextrema()[1] == 0:
-        raise _SinDatosFinitos
-    ancho, alto = base.size
-    paso = max(1, int(math.sqrt(ancho * alto / _MUESTRA_PIXELES)))
-    muestra = base.resize((max(1, ancho // paso), max(1, alto // paso)), Image.NEAREST)
-    valores = sorted(
-        v for v in array.array("f", muestra.tobytes()) if math.isfinite(v) and abs(v) < _MAXIMO_FLOAT32
-    )
-    fondo = valores[len(valores) // 2] if valores else 0.0
-    limpia = Image.new("F", base.size, fondo)
-    limpia.paste(base, mask=finitos.point(lambda v: v * 255).convert("L"))
-    if not valores:                       # la miniatura cayo solo en no finitos
-        valores = sorted(limpia.getextrema())
-    bajo = valores[int(0.01 * (len(valores) - 1))]
-    alto_p = valores[int(0.99 * (len(valores) - 1))]
-    if alto_p <= bajo:
-        bajo, alto_p = valores[0], valores[-1]
-    if alto_p <= bajo:                    # imagen constante
-        return Image.new("L", base.size, 0)
-    escala = 255.0 / (alto_p - bajo)
-    return ImageOps.autocontrast(limpia.point(lambda v: (v - bajo) * escala).convert("L"))
+    return img.convert("RGB")
+
+
+def _a_png(cuadro) -> bytes:
+    from io import BytesIO
+
+    salida = BytesIO()
+    try:
+        cuadro.save(salida, format="PNG")
+    except OSError:  # PNG no admite I;16L / I;16N: `>> 8` lineal a L, sin percentiles
+        cuadro = cuadro.convert("I").point(lambda v: v * (1 / 256)).convert("L")
+        salida = BytesIO()
+        cuadro.save(salida, format="PNG")
+    return salida.getvalue()
 
 
 def _implica_pagina(ancho: int, alto: int) -> str | None:
@@ -542,7 +534,9 @@ def _analizar_tsv(salida_tsv: str) -> dict:
 def _clasificar(caracteres: int, analisis: dict) -> str:
     """Una de 'sin_texto' / 'con_dudas' / 'ok' -- la MISMA función para una
     imagen suelta y para cada página de un PDF rasterizado (evita repetir
-    la regla en dos lugares que puedan divergir)."""
+    la regla en dos lugares que puedan divergir). 'sin_texto' cubre menos de
+    MINIMO_CARACTERES Y mayoria de palabras dudosas; `_resolver_imagen` las
+    separa (A / D / B) y el PDF cuenta ambas como pagina sin texto."""
     if caracteres < MINIMO_CARACTERES:
         return "sin_texto"
     n = analisis["n_palabras"]
@@ -675,18 +669,14 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
                 try:
                     img.seek(numero - 1)
                     img.load()
-                    cuadro = _normalizar_modo(img)
-                    salida = BytesIO()
-                    cuadro.save(salida, format="PNG")
-                    png = salida.getvalue()
-                except _SinDatosFinitos:
-                    return _ilegible_dict("sin_datos_finitos")
+                    cuadro = _a_modo_legible(img)
+                    png = _a_png(cuadro)
                 except MemoryError:
                     return _ilegible_dict("sin_memoria")   # recursos, no archivo danado
                 except Exception:  # fail-soft: pagina truncada o corrupta = archivo que no decodifica
                     return _ilegible_dict("no_decodifica")
                 r = _ocr_bytes(png, idioma, presupuesto)
-                del png, salida, cuadro
+                del png, cuadro
                 if r is None:
                     return None
                 if r["clasificacion"] == "ilegible":

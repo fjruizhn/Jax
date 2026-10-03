@@ -50,7 +50,7 @@ def _tipo_por_contenido(origen: Path) -> str | None:
     # (firma de imagen primero, despues %PDF en los primeros 1024 bytes).
     if cabecera[:8] == _FIRMA_OLE2:
         return "ole2"
-    return ocr.tipo_por_cabecera(cabecera)
+    return ocr.tipo_por_cabecera(cabecera, origen.suffix)
 
 
 def _con_extension_enganosa(r: Resultado, sufijo: str, contenido: str) -> Resultado:
