@@ -6623,6 +6623,8 @@ jobs:
       - run: sudo apt-get -qq update && sudo apt-get -qq install -y acl
       - run: pip install -r requirements.txt pytest
       - name: Dar a fruiz lo mínimo para correr el escritor de la prueba de herencia
+        # Solo en runners de GitHub (VM desechable): en uno persistente no se dejan ACLs ni cuentas; ahí la prueba falla con su mensaje claro.
+        if: runner.environment == 'github-hosted'
         # La prueba test_entrada_y_fuente_creadas_despues_heredan_grupo_setgid_y_acl_por_defecto
         # corre el escritor real COMO fruiz (quien opera en producción y está en la ACL), con el
         # intérprete de pytest. En el runner, el checkout (/home/runner/work/...) y el intérprete
