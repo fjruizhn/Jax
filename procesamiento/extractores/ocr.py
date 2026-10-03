@@ -112,6 +112,30 @@ DPI_RASTERIZADO = 300
 
 _FIRMA_PDF = b"%PDF"
 
+# Decision de Fernando (2026-10-03): una IMAGEN sin texto util (foto de un
+# terreno, de una nave, pasto, gente) es un documento VALIDO. `error` queda
+# solo para un archivo danado o que no se puede abrir. Codigos estables en
+# `detalle["codigo"]`, para quien triagea sin parsear la `razon`.
+CODIGO_IMAGEN_SIN_TEXTO = "imagen_sin_texto"
+CODIGO_ARCHIVO_ILEGIBLE = "archivo_ilegible"
+
+# `Resultado` exige al menos una salida con contenido para `ok`: la unica
+# salida de una imagen sin texto es este aviso explicito (nunca la basura que
+# devolvio el OCR, que haria inventar al modelo). La razon y las metricas
+# viven en `detalle`.
+AVISO_IMAGEN_SIN_TEXTO = (
+    "<!-- imagen sin texto: el OCR no encontro texto util en esta imagen "
+    "(foto, plano o dibujo). Es un documento valido; ver ficha.json -->"
+)
+
+# Lo que tesseract/leptonica escriben en stderr cuando no pueden decodificar
+# el archivo (JPEG truncado, bytes que no son imagen). Un fallo por timeout o
+# I/O NO trae estas marcas y sigue siendo un `error` generico sin codigo.
+_MARCAS_ARCHIVO_ILEGIBLE = (
+    "pix not read", "pixReadStream", "findFileFormatStream",
+    "Unsupported image type", "cannot be read", "image file not found",
+)
+
 
 def _version() -> str | None:
     """`None` cuando no se pudo determinar la versión -- NUNCA la cadena
@@ -214,7 +238,10 @@ def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
     confianza por palabra, que el modo texto plano no expone). `None` si el
     propio subproceso de tesseract no pudo correr sobre esta imagen
     (timeout, I/O, `returncode` distinto de cero) -- fallo cerrado del
-    llamador, nunca una excepción escapando de acá."""
+    llamador, nunca una excepción escapando de acá. Si tesseract no pudo
+    DECODIFICAR el archivo (imagen danada), devuelve un dict con
+    `clasificacion="ilegible"` en vez de `None`, para que `_resolver_imagen`
+    pueda distinguirlo con `archivo_ilegible`."""
     try:
         proceso = subprocess.run(
             ["tesseract", str(ruta), "stdout", "-l", idioma],
@@ -223,6 +250,9 @@ def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
     except Exception:  # fail-soft: el subproceso de tesseract (modo texto) puede fallar (timeout, I/O); se devuelve None y el llamador lo convierte en Resultado(estado="error")
         return None
     if proceso.returncode != 0:
+        stderr = proceso.stderr or ""
+        if any(marca in stderr for marca in _MARCAS_ARCHIVO_ILEGIBLE):
+            return {"clasificacion": "ilegible", "stderr": stderr.strip()[-300:]}
         return None
     texto = (proceso.stdout or "").strip()
 
@@ -280,6 +310,18 @@ def _detalle_comun(idioma: str, r: dict) -> dict:
 
 
 def _resolver_imagen(r: dict, idioma: str) -> Resultado:
+    if r["clasificacion"] == "ilegible":
+        return Resultado(
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
+            detalle={
+                "razon": "no se pudo abrir ni decodificar la imagen (archivo danado)",
+                "codigo": CODIGO_ARCHIVO_ILEGIBLE,
+                "idioma": idioma,
+                "stderr": r["stderr"],
+            },
+        )
+
     detalle = _detalle_comun(idioma, r)
 
     if r["clasificacion"] == "sin_texto":
@@ -291,9 +333,10 @@ def _resolver_imagen(r: dict, idioma: str) -> Resultado:
                 "confianza baja (probable ruido o desenfoque) -- ver "
                 "palabras_dudosas"
             )
+        detalle["codigo"] = CODIGO_IMAGEN_SIN_TEXTO
         return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR,
-            version=_version() or "desconocida",
+            estado="ok", salidas={"texto.txt": AVISO_IMAGEN_SIN_TEXTO},
+            extractor=EXTRACTOR, version=_version() or "desconocida",
             detalle=detalle,
         )
 
@@ -340,7 +383,7 @@ def _resolver_pdf(resultados: list[dict | None], idioma: str) -> Resultado:
     palabras_totales = 0
 
     for numero, r in enumerate(resultados, start=1):
-        if r is None or r["clasificacion"] == "sin_texto":
+        if r is None or r["clasificacion"] in {"sin_texto", "ilegible"}:
             paginas_sin_texto.append(numero)
             continue
         partes_texto.append(f"<!-- página {numero} -->\n{r['texto']}")
