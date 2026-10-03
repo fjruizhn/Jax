@@ -46,6 +46,8 @@ When a canonical skill id changes, reconciliation removes the old skill file
 only if the previous manifest identifies it and its bytes still match the
 recorded generated hash. An unlisted or manually edited skill is preserved and
 the command fails closed; replacement and removal share one rollback path.
+Before staging and immediately before each replacement/removal, the generator
+rejects symlink components along every output path, including expected files.
 
 ## 2026-10-03 · revisión de la proyección Qwen (Jax#320)
 
@@ -96,6 +98,16 @@ renombre cambiaba el id antes de generar por primera vez. El auditor reprodujo
 el caso real, con una proyección anterior ya presente: quedaban dos skills
 cargables. Se corrigió la transición y se añadieron pruebas para el renombre,
 un archivo ajeno, modificaciones manuales, symlinks y fallo de eliminación.
+
+**HISTORIA — auditoría independiente, 2026-10-03:** el primer cerco de
+symlinks protegía solo el archivo obsoleto. El auditor demostró que un
+directorio esperado con symlink podía sobrescribir un archivo externo antes de
+que `--check` fallara. Se añadió un rechazo previo de todos los componentes
+de cada destino esperado y una segunda comprobación justo antes de reemplazar.
+Una sustitución concurrente del directorio entre esa comprobación y la llamada
+al sistema sigue siendo un riesgo de carreras entre procesos del mismo usuario;
+la marca de propiedad del worktree coordina las escrituras normales, pero no es
+un bloqueo del sistema de archivos.
 
 **Alternativa descartada — Codex:** enumerar nombres de herramientas del bundle
 congelaría el catálogo y omitiría herramientas MCP registradas después. El

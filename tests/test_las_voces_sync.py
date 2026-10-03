@@ -180,6 +180,21 @@ def test_skill_rename_refuses_symlinked_old_directory(root: Path) -> None:
     assert (external_directory / "SKILL.md").is_file()
 
 
+def test_generate_refuses_symlinked_expected_directory_without_external_write(root: Path) -> None:
+    project = generated(root)
+    outside = root / "outside-skill"
+    outside.mkdir()
+    victim = outside / "SKILL.md"
+    victim.write_bytes(b"DO NOT OVERWRITE")
+    skills = project / ".qwen/skills"
+    skills.mkdir(parents=True)
+    (skills / "las-voces-governance").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(sync.SyncError, match="symlink"):
+        sync.generate(root)
+    assert victim.read_bytes() == b"DO NOT OVERWRITE"
+    assert not (project / "sync/manifest.json").exists()
+
+
 def test_skill_rename_rolls_back_if_old_projection_cannot_be_removed(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert sync.generate(root) == 0
     project = generated(root)

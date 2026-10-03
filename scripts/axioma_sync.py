@@ -89,8 +89,25 @@ def _real_source_commit(repo: Path, commit: Any) -> bool:
     return exists.returncode == 0 and ancestor.returncode == 0
 
 
+def _reject_symlink_components(root: Path, target: Path) -> None:
+    try:
+        relative = target.absolute().relative_to(root.absolute())
+    except ValueError as exc:
+        raise SyncError(f"projection path is outside repository: {target}") from exc
+    cursor = root.absolute()
+    if cursor.is_symlink():
+        raise SyncError(f"projection path crosses a symlink: {cursor}")
+    for part in relative.parts:
+        if part in {".", ".."}:
+            raise SyncError(f"unsafe projection path: {target}")
+        cursor /= part
+        if cursor.is_symlink():
+            raise SyncError(f"projection path crosses a symlink: {cursor}")
+
+
 def _canonical(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     project = root / "projects" / PROJECT_ID
+    _reject_symlink_components(root, project)
     project_json = _read_json(project / "project.json")
     if project_json.get("project", {}).get("id") != PROJECT_ID:
         raise SyncError("missing or invalid LAS VOCES project identity")
@@ -252,11 +269,7 @@ def _obsolete_skill_projection(project: Path, expected: dict[str, bytes], repo: 
                 or entry.get("target_harness") != "qwen-code"):
             raise SyncError("unsafe obsolete skill projection in manifest")
         target = project / relative
-        cursor = target
-        while cursor != project:
-            if cursor.is_symlink():
-                raise SyncError(f"obsolete skill projection crosses a symlink: {relative}")
-            cursor = cursor.parent
+        _reject_symlink_components(repo, target)
         if not target.is_file():
             raise SyncError(f"obsolete skill projection is not a regular file: {relative}")
         data = target.read_bytes()
@@ -305,7 +318,11 @@ def check(root: Path) -> int:
     return 0
 
 
-def _atomic_batch(project: Path, expected: dict[str, bytes], obsolete: list[Path]) -> None:
+def _atomic_batch(root: Path, project: Path, expected: dict[str, bytes], obsolete: list[Path]) -> None:
+    for relative in expected:
+        _reject_symlink_components(root, project / relative)
+    for target in obsolete:
+        _reject_symlink_components(root, target)
     temp_dir = Path(tempfile.mkdtemp(prefix=".axioma-sync-", dir=project))
     backups: dict[Path, bytes | None] = {}
     try:
@@ -316,10 +333,12 @@ def _atomic_batch(project: Path, expected: dict[str, bytes], obsolete: list[Path
             staged_path.write_bytes(data)
             staged[project / relative] = staged_path
         for target, staged_path in staged.items():
+            _reject_symlink_components(root, target)
             backups[target] = target.read_bytes() if target.exists() else None
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staged_path, target)
         for target in obsolete:
+            _reject_symlink_components(root, target)
             backups[target] = target.read_bytes()
             target.unlink()
     except Exception:
@@ -338,7 +357,7 @@ def _atomic_batch(project: Path, expected: dict[str, bytes], obsolete: list[Path
 def generate(root: Path) -> int:
     project, expected = _expected(root)
     obsolete = _obsolete_skill_projection(project, expected, root)
-    _atomic_batch(project, expected, obsolete)
+    _atomic_batch(root, project, expected, obsolete)
     return check(root)
 
 
