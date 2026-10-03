@@ -5301,8 +5301,15 @@ jobs:
       - name: OCR -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_ocr_test.py 2>&1 | tee /tmp/ocr_tests
-          grep -qE "^35 passed" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 35 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 35 -> 40 (2026-10-03, feat/imagen-sin-texto, decision de Fernando): +5 -- una imagen
+          #   con texto claro no lleva codigo; un JPEG truncado y bytes que no son imagen dan
+          #   `error` + `archivo_ilegible`; un PDF escaneado sin texto sigue en `error`; la cache
+          #   reusa una imagen sin texto. Los 4 tests que antes exigian `error` para blanco/ruido/
+          #   texto corto pasan a exigir `ok` + `imagen_sin_texto` (reescritos, no sumados).
+          #   Medido LOCAL (40 passed, tesseract 5.5.0, PYTHONPATH=.:las_manos para la cache);
+          #   el controlador lo re-mide con el runner.
+          grep -qE "^40 passed" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 40 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
