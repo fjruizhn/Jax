@@ -1945,7 +1945,7 @@ def test_deshacer_falla_cerrado_si_jaxsvc_no_atraviesa_la_raiz_y_no_toca_nada(ba
     proyectos = raiz / "proyectos"
     assert not _recorrer_directo(proyectos, accion="aplicar", conceder_al_terminar=False)["no_cumple"]
     subprocess.run(["sudo", "-n", "chown", "fruiz:fruiz", str(raiz)], check=True)
-    objetos = [proyectos, proyectos / "p", proyectos / "p" / "sub", proyectos / "p" / "a.txt", raiz]
+    objetos = [proyectos, proyectos / "p", proyectos / "p" / "sub", proyectos / "p" / "archivo.txt", raiz]
     antes = {d: _foto(d) for d in objetos}
     acl_antes = {d: _acl(d) for d in objetos}
 
