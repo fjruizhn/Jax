@@ -71,7 +71,10 @@ def test_los_tres_usos_fallan_cerrado_sin_variable(monkeypatch):
     finally:
         sys.path.remove(str(RAIZ / "las_manos"))
     monkeypatch.delenv("JAX_WORKSPACE_DIR", raising=False)
-    with pytest.raises(WorkspaceNoConfigurado):
+    # RuntimeError y no la clase: ocr importa la funcion por el symlink bare
+    # (`workspace_dir`) y aca se importa por `jax.core.workspace_dir`; son dos
+    # modulos distintos con dos clases homonimas.
+    with pytest.raises(RuntimeError, match="JAX_WORKSPACE_DIR no está configurada"):
         ocr._resolver_workspace_dir()
 
 
@@ -79,8 +82,8 @@ def test_los_tres_usos_fallan_cerrado_sin_variable(monkeypatch):
 def test_import_a_nivel_de_modulo_sin_variable_no_arranca(modulo):
     codigo = (
         "import os, sys; os.environ.pop('JAX_WORKSPACE_DIR', None); "
-        f"sys.path[:0] = [{str(RAIZ)!r}, {str(RAIZ / 'las_manos')!r}, "
-        f"{str(RAIZ / 'las_manos' / 'motor_registry')!r}]; import {modulo}"
+        f"sys.path[:0] = [{str(RAIZ)!r}, {str(RAIZ / 'las_manos')!r}]; "
+        f"import {modulo}"
     )
     # Sin conftest: proceso limpio. Las otras env obligatorias se fijan por si
     # el import falla antes por otra causa -- se exige la nuestra.
@@ -90,6 +93,7 @@ def test_import_a_nivel_de_modulo_sin_variable_no_arranca(modulo):
         "JAX_OLLAMA_URL": "http://y.invalid:1",
         "JAX_LAS_MANOS_CREDENCIAL_JACOBS": "x",
         "JAX_LAS_MANOS_CREDENCIAL_PLATAFORMA": "x",
+        "JAX_REPO_BASE": "/tmp",
     }
     p = subprocess.run(["python3", "-c", codigo], env=env, capture_output=True, text=True)
     assert p.returncode != 0

@@ -79,8 +79,9 @@ GATE_CFG = CONFIG["human_gate"]
 
 #: `config.toml` trae `audit_log` como ruta absoluta del home de producción
 #: (`/home/fruiz/jax/las_manos/logs/audit.jsonl`) -- mismo criterio que
-#: `JAX_WORKSPACE_DIR`/`WORKSPACE_ROOT` en tool_authority.py: un default de
-#: producción, pero SIEMPRE overrideable, nunca el único camino. Sin esto,
+#: `JAX_AUDIT_LOG_PATH`: un default de producción, pero SIEMPRE overrideable,
+#: nunca el único camino. (`JAX_WORKSPACE_DIR`/`WORKSPACE_ROOT` en
+#: tool_authority.py ya NO tiene default desde 2026-10-03: falla cerrado.) Sin esto,
 #: cualquier test que importe `server` (aunque sea indirecto, vía
 #: `from server import app`) dispara `AuditLog.__init__` -> `mkdir` sobre ESA
 #: ruta literal, que en cualquier runner de CI o checkout que no sea

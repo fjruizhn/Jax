@@ -1,7 +1,7 @@
 """Raiz del workspace de JAX, SIN valor por defecto (falla cerrado).
 
 `JAX_WORKSPACE_DIR` (/etc/jax/.env) es la unica fuente de verdad. El
-2026-10-03 el workspace de produccion se movio de `/home/fruiz/jax-workspace`
+2026-10-03 el workspace de produccion se movio de la ruta vieja bajo el home
 a `/srv/jax-data/jax-workspace`; mientras la ruta vieja era el default en tres
 sitios, un proceso que arrancara sin el `.env` escribia en silencio en otro
 lugar y partia los datos. Ahora falta la variable => excepcion con el motivo.
