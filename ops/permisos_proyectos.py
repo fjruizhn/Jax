@@ -825,39 +825,39 @@ def _modo_deshecho(modo_actual: int) -> int:
 
 
 def _deshacer_objeto(fd_path: int, ruta: str, resultado: Resultado, *, es_directorio: bool = False) -> None:
-    """Orden verificado empíricamente (hall9000 y en un contenedor limpio, 2026-09-25):
-    cuando hay ACL extendida, el bit de GRUPO que se ve por `stat` plano es la MÁSCARA,
-    no la entrada `group::` real -- `_mutar_directorio`/`_mutar_archivo` sólo tocan la
-    entrada NOMBRADA `g:fruiz:`, nunca `group::` (la entrada "grupo dueño" tradicional),
-    así que ésta puede seguir teniendo el valor que tenía al crearse el archivo (0644 si
-    quien lo creó tenía umask 022, como jaxsvc en producción). Si se calcula/aplica el
-    modo ANTES de quitar la ACL, `setfacl -b` (que corre después) revela esa entrada
-    `group::` vieja y pisa el modo recién puesto. Por eso acá la ACL se quita PRIMERO, y
-    el modo se calcula y aplica DESPUÉS, como paso final -- el chmod explícito manda
-    sobre lo que hubiera antes, sin nadie corriendo después que lo pueda revertir."""
+    """Devuelve el objeto a dueño fruiz:fruiz (lo de antes de E2a) pero CONSERVA a jaxsvc, y nunca abre a otros.
+
+    ACL canónica que REEMPLAZA a la que hubiera (`--set`): `u:jaxsvc:rwx` (`rw-` en archivos) con su máscara y
+    `other::---`, en la de acceso y, en directorios, en la por defecto. Sin la entrada de jaxsvc, LAS MANOS
+    (jaxsvc no es del grupo fruiz) quedaba sin acceso al árbol; sin `other::---`, `proyectos/` quedaba abierto
+    a cualquier usuario local. Se quita la entrada nombrada de fruiz porque fruiz ya es dueño y grupo.
+
+    Orden: primero la ACL, DESPUÉS el cambio de dueño -- así jaxsvc y fruiz conservan el acceso en todo instante
+    (ver _mutar_directorio) -- y el modo explícito al final, que manda sobre lo que hubiera antes (también quita
+    los bits especiales)."""
     uid = pwd.getpwnam(DUENO_ORIGINAL).pw_uid
     gid = grp.getgrnam(GRUPO).gr_gid
+    if es_directorio:
+        acl = f"u::rwx,u:{USUARIO}:rwx,g::rwx,m::rwx,o::---"
+        _setfacl_reemplazar(fd_path, acl)
+        _setfacl_reemplazar(fd_path, acl, default=True)
+        modo = 0o770
+    else:
+        _setfacl_reemplazar(fd_path, f"u::rw-,u:{USUARIO}:rw-,g::rw-,m::rw-,o::---")
+        modo = 0o660
+
     fd_real = _reabrir_real(fd_path, os.O_RDONLY)
     try:
         os.fchown(fd_real, uid, gid)
     finally:
         os.close(fd_real)
 
-    _limpiar_acl(fd_path, ruta)
-
     fd_real = _reabrir_real(fd_path, os.O_RDONLY)
     try:
-        st_ahora = os.fstat(fd_real)
-        nuevo_modo = _modo_deshecho(st_ahora.st_mode)
-        if nuevo_modo != stat.S_IMODE(st_ahora.st_mode):
-            os.fchmod(fd_real, nuevo_modo)
+        if stat.S_IMODE(os.fstat(fd_real).st_mode) != modo:
+            os.fchmod(fd_real, modo)
     finally:
         os.close(fd_real)
-
-    if es_directorio:
-        # Los directorios que se creen después siguen naciendo cerrados: `default:other::---` (lo demás de la
-        # ACL por defecto es lo que ya daba el modo). No es una ACL nombrada ni abre a nadie.
-        _setfacl_reemplazar(fd_path, "u::rwx,g::rwx,o::---", default=True)
 
 
 # ============================================================================
@@ -1378,8 +1378,8 @@ def _cmd_deshacer() -> int:
         print(f"Raíz del workspace: {raiz['detalle']}")
     else:
         print(f"Raíz del workspace: NO restaurada ({raiz.get('detalle', 'sin dato')}).")
-    print("AVISO: --deshacer revierte dueños y ACL nombradas, pero NUNCA reabre a otros: proyectos/ queda con "
-          "other::--- (modo 0770/0660 y ACL por defecto cerrada).")
+    print("AVISO: --deshacer devuelve el dueño a fruiz:fruiz pero conserva a jaxsvc (LAS MANOS sigue operando) y "
+          "NUNCA reabre a otros: proyectos/ queda con other::--- (0770/0660 y ACL por defecto cerrada).")
 
     if datos["hardlinks_rechazados"]:
         print("--deshacer encontró hardlinks -- no se tocaron, y el resultado es un fallo.", file=sys.stderr)
@@ -1450,12 +1450,14 @@ uso: permisos_proyectos.py [--verificar [RAIZ] | --aplicar | --deshacer]
                        Solo con --verificar: declara conocida una cuenta con ACL
                        nombrada (por defecto solo jaxsvc y fruiz; cualquier otra es
                        NO CUMPLE y --aplicar falla cerrado, sin borrarla).
-  --deshacer           DETERMINISTA, sin argumentos: revierte dueños y ACL nombradas
-                       a lo de antes de E2a ({DUENO_ORIGINAL}:{GRUPO}, sin ACL nombradas)
-                       pero NUNCA vuelve a dar acceso a otros: 0770 (directorios) /
-                       0660 (archivos), other::--- también en la ACL por defecto de
-                       los directorios, y de la raíz restaura solo dueño y grupo de
-                       su modo guardado (nunca los bits de otros; avisa).
+  --deshacer           DETERMINISTA, sin argumentos: devuelve el dueño a
+                       {DUENO_ORIGINAL}:{GRUPO} (lo de antes de E2a) pero CONSERVA a
+                       {USUARIO} (u:{USUARIO}:rwx, rw- en archivos, con su máscara,
+                       en la ACL de acceso y en la por defecto) para que LAS MANOS
+                       siga operando, y NUNCA vuelve a dar acceso a otros:
+                       0770 (directorios) / 0660 (archivos), other::--- también
+                       en la ACL por defecto. De la raíz restaura solo dueño y
+                       grupo de su modo guardado (nunca los bits de otros; avisa).
 
 Sin ningún flag, equivale a --verificar.
 """
