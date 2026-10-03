@@ -90,6 +90,12 @@ RUTA_PYTHON = Path("/usr/bin/python3")
 RUTA_RESPALDOS = Path("/var/backups/jax-permisos")
 RUTA_ENV = Path("/etc/jax/.env")
 
+# Cuentas con entrada ACL nombrada que --verificar/--aplicar reconocen ademas de jaxsvc y fruiz. Vacio en
+# produccion: cualquier otra entrada nombrada es NO CUMPLE y --aplicar falla cerrado. Solo --verificar acepta
+# declarar extras (`--permitir-entrada=NOMBRE`, de solo lectura) y las pruebas lo fijan directo: el nucleo
+# privilegiado no tiene ninguna via para ampliarlo.
+ENTRADAS_EXTRA_PERMITIDAS: set[str] = set()
+
 _ESPECIALES = stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
 
 
@@ -1206,8 +1212,11 @@ def main(argv: list[str]) -> int:
     modos_vistos = 0
     raices_vistas = 0
 
+    extras_permitidas: list[str] = []
     for a in argv:
-        if a in _MODOS:
+        if a.startswith("--permitir-entrada="):
+            extras_permitidas.append(a.split("=", 1)[1])
+        elif a in _MODOS:
             modo = a
             modos_vistos += 1
         elif a.startswith("--"):
@@ -1227,6 +1236,10 @@ def main(argv: list[str]) -> int:
         return 2
     if modo is None:
         modo = "--verificar"
+    if extras_permitidas and modo != "--verificar":
+        print("--permitir-entrada solo existe con --verificar (solo lectura)", file=sys.stderr)
+        return 2
+    ENTRADAS_EXTRA_PERMITIDAS.update(n for n in extras_permitidas if n)
 
     # BLOCK-2 (ronda 3): --deshacer y las tres entradas del núcleo NO aceptan ningún
     # argumento de ruta -- siempre actúan sobre la RAIZ configurada.
