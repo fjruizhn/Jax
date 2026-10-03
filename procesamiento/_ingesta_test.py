@@ -1382,3 +1382,57 @@ def test_subruta_mismo_contenido_en_dos_subcarpetas_no_reextrae(tmp_path: Path, 
 
     assert ficha2.estado == "ok"
     assert (trabajo / "fuente" / "estados-financieros" / "EEFF.xlsx").is_file()
+
+
+# ---------------------------------------------------------------------------
+# E2a T4 (MAJOR-1 de la revision): un origen que YA vive dentro de
+# `<trabajo>/fuente/` se procesa en el lugar. Antes se copiaba a la raiz de
+# `fuente/` (duplicaba datos del cliente y cambiaba los sha de LACTOVI).
+# ---------------------------------------------------------------------------
+def test_origen_dentro_de_fuente_se_procesa_en_el_lugar_sin_copia(tmp_path: Path):
+    trabajo = tmp_path / "trabajo"
+    sub = trabajo / "fuente" / "sub"
+    sub.mkdir(parents=True)
+    origen = _libro(sub / "x.xlsx")
+    antes = sorted(p.relative_to(trabajo / "fuente") for p in (trabajo / "fuente").rglob("*"))
+
+    ficha = ingesta.ingerir(origen, trabajo)
+
+    assert ficha.estado == "ok"
+    assert Path(ficha.origen) == Path("fuente/sub/x.xlsx")
+    assert not (trabajo / "fuente" / "x.xlsx").exists()
+    despues = sorted(p.relative_to(trabajo / "fuente") for p in (trabajo / "fuente").rglob("*"))
+    assert despues == antes                                     # ni una copia, ni un temporal
+    assert (trabajo / "procesado" / ficha.sha256 / "ficha.json").is_file()
+
+
+def test_symlink_dentro_de_fuente_que_apunta_afuera_no_se_usa_en_el_lugar(tmp_path: Path, tmp_path_factory):
+    afuera = tmp_path_factory.mktemp("afuera-del-workspace")
+    real = _libro(afuera / "real.xlsx")
+    trabajo = tmp_path / "trabajo"
+    (trabajo / "fuente").mkdir(parents=True)
+    enlace = trabajo / "fuente" / "enlace.xlsx"
+    enlace.symlink_to(real)
+
+    ficha = ingesta.ingerir(enlace, trabajo)
+
+    # Igual que antes del cambio: el enlace queda intacto y el contenido entra como archivo regular propio.
+    assert enlace.is_symlink() and enlace.resolve() == real.resolve()
+    destino = trabajo / ficha.origen
+    assert destino.is_file() and not destino.is_symlink() and destino.name != "enlace.xlsx"
+
+
+def test_origen_fuera_de_fuente_con_nombre_igual_a_uno_de_adentro_no_pisa(tmp_path: Path):
+    trabajo = tmp_path / "trabajo"
+    sub = trabajo / "fuente" / "sub"
+    sub.mkdir(parents=True)
+    dentro = _libro(sub / "x.xlsx", valor=1)
+    contenido_dentro = dentro.read_bytes()
+    fuera = _libro(tmp_path / "x.xlsx", valor=2)
+
+    ficha = ingesta.ingerir(fuera, trabajo)
+
+    assert dentro.read_bytes() == contenido_dentro               # no se pisa (C-3)
+    assert ficha.sha256 == sha256_de(fuera)
+    assert (trabajo / ficha.origen).read_bytes() == fuera.read_bytes()
+    assert Path(ficha.origen) != Path("fuente/sub/x.xlsx")

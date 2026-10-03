@@ -5419,8 +5419,12 @@ jobs:
       - name: Ingesta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_ingesta_test.py 2>&1 | tee /tmp/ingesta_tests
-          grep -qE "^44 passed" /tmp/ingesta_tests || {
-            echo "PISO ROTO: se esperaban 44 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+          # 44 -> 47 (2026-10-03, Proyectos E2a T4, MAJOR-1): +3 -- un origen que ya
+          #   vive en fuente/ se procesa en el lugar (sin copia); un symlink dentro de
+          #   fuente/ sigue sin usarse; un origen de afuera con el mismo nombre no pisa.
+          #   Numero LOCAL: el controlador lo re-mide con el runner.
+          grep -qE "^47 passed" /tmp/ingesta_tests || {
+            echo "PISO ROTO: se esperaban 47 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
       # Task 9 (2026-09-21, procesamiento-archivos-nucleo): mide si los
       # extractos SIRVEN -- el criterio §7.B corregido ese mismo dia (el
