@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT / "projects/las-voces"
 EXPECTED = ("skills_buscar", "skills_leer", "agentes_listar")
+BARE_BUILTINS = ("read_file", "notebook_edit", "run_shell_command", "get_goal", "update_goal", "edit")
 
 
 def _local_url(raw: str) -> str:
@@ -84,10 +85,12 @@ def main() -> int:
                   "skills.buscar con consulta mide, skills.leer con nombre alfa, agentes.listar. "
                   "Da los nombres obtenidos. No ejecutes herramientas fuera de ese servidor.")
         run = subprocess.run([
-            args.qwen, "--mcp-config", str(config), "--allowed-mcp-server-names", "faro-readonly",
+            args.qwen, "--bare", "--mcp-config", str(config),
+            "--allowed-mcp-server-names", "faro-readonly",
             "--auth-type", "openai", "--openai-base-url", args.base_url,
             "--openai-api-key", "ollama", "--model", args.model, "--approval-mode", "auto",
-            "--output-format", "stream-json", "--max-wall-time", "120s", "--max-tool-calls", "6", prompt,
+            *(part for name in BARE_BUILTINS for part in ("--exclude-tools", name)),
+            "--output-format", "stream-json", "--max-wall-time", "120s", "--max-tool-calls", "3", prompt,
         ], cwd=PROJECT, capture_output=True, text=True, timeout=135)
     if run.returncode:
         raise RuntimeError(f"Qwen smoke rc={run.returncode}: {run.stderr[-600:]}")
@@ -95,6 +98,11 @@ def main() -> int:
     if not any(x.get("name") == "faro-readonly" and x.get("status") == "connected"
                for x in init.get("mcp_servers", [])):
         raise RuntimeError("Qwen did not connect to faro-readonly")
+    exposed = init.get("tools", [])
+    if len(exposed) != 3 or any(not re.fullmatch(
+            r"mcp__faro-readonly__(skills_buscar|skills_leer|agentes_listar)_[a-z0-9]+", name)
+            for name in exposed):
+        raise RuntimeError(f"smoke session exposes non-Faro tools: {exposed}")
     observed = []
     for call_id, name in calls:
         match = re.fullmatch(r"mcp__faro-readonly__(skills_buscar|skills_leer|agentes_listar)_[a-z0-9]+", name)
@@ -109,7 +117,8 @@ def main() -> int:
     sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
                          capture_output=True, text=True).stdout.strip()
     print(json.dumps({"task": "LV-001", "sha": sha, "qwen": version, "model": args.model,
-                      "effectiveContextWindowSize": context_record["effectiveContextWindowSize"],
+                      "projectEffectiveContextWindowSize": context_record["effectiveContextWindowSize"],
+                      "smokeMode": "bare with only Faro read tools exposed",
                       "mcpServer": "faro-readonly", "calls": observed, "results": "success",
                       "package": "toy git repo built and verified by Faro"}))
     return 0
