@@ -798,11 +798,11 @@ def _lineas_acl_sin_arnes(ruta: Path) -> list[str]:
     return [l for l in _acl(ruta) if f":{_usuario_de_pruebas()}:" not in l and not l.startswith(("mask::", "default:mask::"))]
 
 
-def test_deshacer_revierte_duenos_y_acl_nombradas_pero_nunca_reabre_a_otros(arbol_temporal, _identidades):
-    """`--deshacer` devuelve el dueño a fruiz:fruiz y quita las ACL nombradas (lo de antes de E2a), pero NUNCA
-    vuelve a dar acceso a otros: sin bits de otros en el modo, en la ACL de acceso y en la ACL por defecto
-    (los directorios nuevos siguen naciendo cerrados). Antes dejaba 0775/0664 con `other::r-x`: una reversion
-    del paso de seguridad que reabria los documentos de los clientes a cualquier usuario local."""
+def test_deshacer_revierte_el_dueno_conserva_a_jaxsvc_y_nunca_reabre_a_otros(arbol_temporal, _identidades):
+    """`--deshacer` devuelve el dueño a fruiz:fruiz (lo de antes de E2a) pero CONSERVA `u:jaxsvc:rwx` (`rw-` en
+    archivos) en la ACL de acceso y por defecto, con su mascara, y deja `other::---`: LAS MANOS (jaxsvc, que no
+    es del grupo fruiz) sigue operando y nadie mas entra. Antes quitaba a jaxsvc (el servicio quedaba sin
+    acceso) y antes de eso dejaba `other::r-x` (reabria los documentos a cualquier usuario local)."""
     proyectos = arbol_temporal / "proyectos"
     aplicado = _recorrer_directo(proyectos, accion="aplicar")
     assert not aplicado["no_cumple"]
@@ -818,27 +818,45 @@ def test_deshacer_revierte_duenos_y_acl_nombradas_pero_nunca_reabre_a_otros(arbo
         assert st.st_mode & 0o007 == 0, ruta_dir
         assert oct(st.st_mode & 0o777) == "0o770", ruta_dir
         assert _lineas_acl_sin_arnes(ruta_dir) == [
-            "user::rwx", "group::rwx", "other::---",
-            "default:user::rwx", "default:group::rwx", "default:other::---",
+            "user::rwx", f"user:{USUARIO_ESPERADO}:rwx", "group::rwx", "other::---",
+            "default:user::rwx", f"default:user:{USUARIO_ESPERADO}:rwx", "default:group::rwx", "default:other::---",
         ], (ruta_dir, _acl(ruta_dir))
-        assert not any(l.startswith(("user:", "group:", "default:user:", "default:group:")) and l.split(":")[-2] != ""
-                       and f":{_usuario_de_pruebas()}:" not in l for l in _acl(ruta_dir)), "quedó una ACL nombrada"
 
     archivo = proyectos / "un-proyecto" / "archivo.txt"
     st = archivo.stat()
     assert pwd.getpwuid(st.st_uid).pw_name == DUENO_ORIGINAL
     assert grp.getgrgid(st.st_gid).gr_name == GRUPO_ESPERADO
     assert oct(st.st_mode & 0o777) == "0o660"
-    assert _lineas_acl_sin_arnes(archivo) == ["user::rw-", "group::rw-", "other::---"], (archivo, _acl(archivo))
+    assert _lineas_acl_sin_arnes(archivo) == [
+        "user::rw-", f"user:{USUARIO_ESPERADO}:rw-", "group::rw-", "other::---"], (archivo, _acl(archivo))
 
-    # lo que se crea despues de deshacer hereda `other` cerrado
-    nuevo = proyectos / "un-proyecto" / "creado-tras-deshacer"
-    r = _como_fruiz(f"import os; os.umask(0o022); os.mkdir({str(nuevo)!r}, 0o777)")
-    assert r.returncode == 0, r.stderr
-    assert nuevo.stat().st_mode & 0o007 == 0 and _otros_en_nombres(nuevo) == ["other::---", "default:other::---"]
-    r = subprocess.run(["sudo", "-n", "python3", str(SCRIPT), "--verificar", str(arbol_temporal),
-                        f"--permitir-entrada={_usuario_de_pruebas()}"], capture_output=True, text=True)
-    assert not any("para otros" in l for l in r.stdout.splitlines()), r.stdout
+
+def test_tras_deshacer_jaxsvc_sigue_operando_y_otros_no_tienen_ningun_bit(arbol_temporal, _identidades):
+    proyectos = arbol_temporal / "proyectos"
+    assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    _recorrer_directo(proyectos, accion="deshacer")
+    sub = proyectos / "un-proyecto"
+    archivo = sub / "archivo.txt"
+    nuevo = sub / "creado-por-jaxsvc-tras-deshacer.txt"
+    nuevo_dir = sub / "dir-creado-por-jaxsvc-tras-deshacer"
+
+    r = subprocess.run(["sudo", "-n", "-u", "jaxsvc", "python3", "-c", f"""
+import os
+os.umask(0o022)
+assert open({str(archivo)!r}).read() == "contenido\\n"
+open({str(archivo)!r}, "a").write("jaxsvc\\n")
+open({str(nuevo)!r}, "w").write("nuevo\\n")
+os.mkdir({str(nuevo_dir)!r})
+"""], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, "jaxsvc (LAS MANOS) no puede operar tras --deshacer: " + r.stdout + r.stderr
+    assert subprocess.run(["sudo", "-n", "cat", str(archivo)], capture_output=True, text=True).stdout == "contenido\njaxsvc\n"
+    for creado in (nuevo, nuevo_dir):
+        assert creado.stat().st_mode & 0o007 == 0, creado
+        assert _otros_en_nombres(creado)[0] == "other::---", _acl(creado)
+    # otros (ni nombrados ajenos) no tienen ningun bit en el arbol
+    r = subprocess.run(["sudo", "-n", "getfacl", "-R", "-p", str(proyectos)], capture_output=True, text=True)
+    otros = sorted({l.split("\t")[0] for l in r.stdout.splitlines() if l.startswith(("other::", "default:other::"))})
+    assert otros == ["default:other::---", "other::---"], otros
 
 
 def test_deshacer_con_enlace_plantado_no_lo_toca_y_reporta(arbol_temporal, _identidades):
@@ -1731,18 +1749,18 @@ print(i)
     assert contenido == [f"linea-{i}" for i in range(total_escrito)]
 
 
-def test_ninguna_cuenta_pierde_acceso_entre_el_chown_y_el_setfacl(arbol_temporal, _identidades):
-    """La version DETERMINISTA de la ventana: se sondea el acceso de fruiz a su propio archivo 0600 justo
-    despues de cada operacion privilegiada (fchown, setfacl, fchmod) sobre ese archivo. Con el orden
-    chown -> setfacl, fruiz deja de ser dueño y no tiene todavia entrada: el sondeo falla. Con setfacl primero
-    (las entradas nombradas ya valen cuando cambia el dueño) no hay instante sin acceso."""
-    proyectos = arbol_temporal / "proyectos"
+def _sondear_etapas(arbol: Path, parchear: str) -> list:
+    """Corre --aplicar sobre un archivo 0600 de fruiz parcheando la funcion `parchear` de pp (y os.fchown/
+    os.fchmod) para sondear, tras cada una, si fruiz sigue pudiendo abrir su archivo. Devuelve [[etapa, rc]]."""
+    proyectos = arbol / "proyectos"
     archivo = proyectos / "un-proyecto" / "actividad.log"
     r_crear = _como_fruiz(f"import os; os.close(os.open({str(archivo)!r}, os.O_CREAT | os.O_WRONLY, 0o600))")
     assert r_crear.returncode == 0, r_crear.stdout + r_crear.stderr
-
-    extra = f"""
-import os, subprocess
+    codigo = f"""
+import sys, json, os, subprocess
+sys.path.insert(0, {str(RAIZ_REPO / "ops")!r})
+import permisos_proyectos as pp
+pp.ENTRADAS_EXTRA_PERMITIDAS = {{{_usuario_de_pruebas()!r}}}
 objetivo_ino = os.stat({str(archivo)!r}).st_ino
 sondeos = []
 def _sondear(etapa, fd):
@@ -1751,31 +1769,45 @@ def _sondear(etapa, fd):
     rc = subprocess.run(["sudo", "-n", "-u", "fruiz", "python3", "-c",
                          "open(%r, 'ab').close()" % {str(archivo)!r}], capture_output=True).returncode
     sondeos.append([etapa, rc])
-_fchown, _fchmod, _setfacl = os.fchown, os.fchmod, pp._setfacl
+_fchown, _fchmod = os.fchown, os.fchmod
+_acl = getattr(pp, {parchear!r})
 def fchown(fd, uid, gid):
     _fchown(fd, uid, gid); _sondear("tras fchown", fd)
 def fchmod(fd, modo):
     _fchmod(fd, modo); _sondear("tras fchmod", fd)
-def setfacl(fd, entrada, default=False):
-    _setfacl(fd, entrada, default=default); _sondear("tras setfacl", fd)
-os.fchown, os.fchmod, pp._setfacl = fchown, fchmod, setfacl
-hook = None
-"""
-    codigo = f"""
-import sys, json
-sys.path.insert(0, {str(RAIZ_REPO / "ops")!r})
-import permisos_proyectos as pp
-pp.ENTRADAS_EXTRA_PERMITIDAS = {{{_usuario_de_pruebas()!r}}}
-{extra}
+def acl(fd, entrada, *a, **k):
+    _acl(fd, entrada, *a, **k); _sondear("tras setfacl", fd)
+os.fchown, os.fchmod = fchown, fchmod
+setattr(pp, {parchear!r}, acl)
 pp._recorrer(pp.Path({str(proyectos)!r}), accion="aplicar")
 print(json.dumps(sondeos))
 """
     r = subprocess.run(["sudo", "-n", "python3", "-c", codigo], capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stdout + r.stderr
-    sondeos = json.loads(r.stdout.strip().splitlines()[-1])
-    assert sondeos, "no se sondeó nada: la prueba no midió lo que dice medir"
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+def test_ninguna_cuenta_pierde_acceso_entre_el_chown_y_el_setfacl(arbol_temporal, _identidades):
+    """La version DETERMINISTA de la ventana: se sondea el acceso de fruiz a su propio archivo 0600 justo
+    despues de cada operacion privilegiada sobre ese archivo (fchown, la ACL, fchmod). Con el orden
+    chown -> ACL, fruiz deja de ser dueño y no tiene todavia entrada: el sondeo falla. Con la ACL primero
+    (las entradas nombradas ya valen cuando cambia el dueño) no hay instante sin acceso. Parchea la funcion
+    que la mutacion llama DE VERDAD (`_setfacl_reemplazar`) y exige haber visto las tres etapas."""
+    sondeos = _sondear_etapas(arbol_temporal, "_setfacl_reemplazar")
+    etapas = [e for e, _ in sondeos]
+    # (el fchmod 0660 ya no se llama si la ACL --set dejo el modo en 0660: sin esa etapa no hay nada que sondear)
+    assert {"tras setfacl", "tras fchown"} <= set(etapas), f"no se sondeo cada etapa: {etapas}"
+    assert etapas.index("tras setfacl") < etapas.index("tras fchown"), f"la ACL tiene que ir ANTES del chown: {etapas}"
     sin_acceso = [e for e, rc in sondeos if rc != 0]
     assert not sin_acceso, f"fruiz perdió el acceso a su archivo en: {sin_acceso} (todos: {sondeos})"
+
+
+def test_el_sondeo_de_etapas_falla_si_se_parchea_la_funcion_equivocada(arbol_temporal, _identidades):
+    """Control negativo: parchear `_setfacl` (que la mutacion ya no llama) no sondea la etapa de la ACL, y la
+    comprobacion de la prueba anterior lo detecta. Sin esto, un parche mal puesto pasaria en verde."""
+    etapas = [e for e, _ in _sondear_etapas(arbol_temporal, "_setfacl")]
+    assert "tras setfacl" not in etapas, etapas
+    assert {"tras setfacl", "tras fchown"} - set(etapas) == {"tras setfacl"}, etapas
 
 
 def test_una_entrada_agregada_entre_la_pasada_previa_y_la_mutacion_no_sobrevive_a_aplicar(arbol_temporal, _identidades):
@@ -1788,15 +1820,16 @@ def test_una_entrada_agregada_entre_la_pasada_previa_y_la_mutacion_no_sobrevive_
     proyectos = arbol_temporal / "proyectos"
     assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
     sub = proyectos / "un-proyecto" / "sub"
+    marca = arbol_temporal.parent / "hook-entre-corrio"
     extra = f"""
-estado = {{"hecho": False}}
 def hook_entre():
     import subprocess
-    estado["hecho"] = True
     subprocess.run(["setfacl", "-m", "u:nobody:rwx,m::---", {str(sub)!r}], check=True)
     subprocess.run(["setfacl", "-d", "-m", "u:nobody:rwx", {str(sub)!r}], check=True)
+    open({str(marca)!r}, "w").write("corrio")
 """
     datos = _recorrer_directo(proyectos, accion="aplicar", extra_codigo=extra)
+    assert marca.read_text() == "corrio", "el gancho de la ventana NO corrió: la prueba no probó nada"
     assert not datos["no_cumple"], datos
     acl = _acl(sub)
     assert not any("nobody" in l for l in acl), f"sobrevivió la entrada ajena: {acl}"
@@ -1805,8 +1838,37 @@ def hook_entre():
     r = subprocess.run(["sudo", "-n", "setpriv", "--reuid=nobody", "--regid=nogroup", "--clear-groups",
                         "python3", "-c", f"import os; print(os.access({str(sub)!r}, os.R_OK))"],
                        capture_output=True, text=True)
-    assert "True" not in r.stdout, r.stdout + r.stderr
+    assert r.returncode == 0 and r.stdout.strip() == "False", \
+        f"el sondeo de nobody no corrió o dio acceso: rc={r.returncode} {r.stdout!r} {r.stderr!r}"
     assert _correr("--verificar", str(arbol_temporal)).returncode == 0
+
+
+# --- el runbook: bloques de shell validos y sin accesos temporales para terceros ----------------
+
+RUNBOOK_E2A = RAIZ_REPO / "docs" / "runbooks" / "proyectos-e2a-produccion.md"
+
+
+def _bloques_bash(texto: str) -> list[str]:
+    import re
+    return re.findall(r"```bash\n(.*?)```", texto, re.S)
+
+
+def test_el_runbook_no_da_acceso_temporal_a_nadie_ni_usa_test_como_prueba_de_permisos():
+    texto = RUNBOOK_E2A.read_text()
+    assert "u:nobody" not in texto and "centinela" not in texto.lower() and "trap " not in texto
+    assert "sudo -u nobody" not in texto
+
+
+def test_los_bloques_del_runbook_de_permisos_son_validos_y_fallan_cerrado():
+    texto = RUNBOOK_E2A.read_text()
+    inicio = texto.index("### 2. Permisos de `proyectos/`")
+    fin = texto.index("### 3. jax a producción")
+    bloques = [b for b in _bloques_bash(texto[inicio:fin]) if "<<'" in b or "stat -c" in b]
+    assert bloques, "no hay bloques de verificación en el paso 2"
+    for b in bloques:
+        assert "set -euo pipefail" in b, f"bloque sin set -euo pipefail:\n{b}"
+        r = subprocess.run(["bash", "-n"], input=b, capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
 
 
 # --- MAJOR-1: la raiz se abre por descriptor, sin seguir symlinks ------------------------------
