@@ -13,7 +13,7 @@ import pytest
 
 from jax.ejecutor import mision as M
 from jax.ejecutor.contratos.arranque import ContratosNoVerificados
-from jax.ejecutor.contratos.auditor import Revision
+from jax.ejecutor.contratos.auditor import AuditorIlegible, Revision
 from jax.ejecutor.contratos.destinos import Host
 from jax.ejecutor.contratos.fallo import Fallo
 
@@ -117,6 +117,9 @@ class Falsas:
         self.registro = None  # por defecto: todo anotado y con sha que cuadra
         self.revision = None
         self.auditor_revienta = False
+        self.pausas_puestas = []
+        self.poner_pausa_revienta = False
+        self.auditor_ilegible = None  # codigo de AuditorIlegible a lanzar
         self.cadena = True
         self.pausa_leida = None
         self.llamadas = []
@@ -163,6 +166,8 @@ class Falsas:
 
     async def auditar(self, texto, entrega, maquinas):
         self.maquinas_auditadas = maquinas
+        if self.auditor_ilegible:
+            raise AuditorIlegible(self.auditor_ilegible)
         if self.auditor_revienta:
             raise ValueError("json_invalido")
         if self.revision is not None:
@@ -170,10 +175,19 @@ class Falsas:
         ids = frozenset(f"a{i + 1}" for i in range(len(entrega.respaldadas)))
         return Revision(False, None, None, (), ids, frozenset())
 
+    async def poner_pausa(self, ctx, motivo):
+        if self.poner_pausa_revienta:
+            raise OSError("sin permiso")
+        self.pausas_puestas.append(motivo)
+
     async def cadena_ok(self, ctx):
         return self.cadena
 
     async def leer_pausa(self, ctx):
+        # Como en produccion: lo que la mision escribio con `poner_pausa` es lo que `leer_pausa` ve despues.
+        if self.pausa_leida is None and self.pausas_puestas:
+            return {"puesta": True, "legible": True, "origen": "mision", "motivo": self.pausas_puestas[-1],
+                    "paso": None}
         return self.pausa_leida
 
     def deps(self):
@@ -181,7 +195,8 @@ class Falsas:
                               tamano_registro=self.tamano_registro, abrir_vigia=self.abrir_vigia,
                               latido_fresco=self.latido_fresco, correr_cerebro=self.correr_cerebro,
                               eventos_desde=self.eventos_desde, auditar=self.auditar, cadena_ok=self.cadena_ok,
-                              leer_pausa=self.leer_pausa, espera_latido_s=0.2, paso_espera_s=0.01)
+                              leer_pausa=self.leer_pausa, espera_latido_s=0.2, paso_espera_s=0.01,
+                              poner_pausa=self.poner_pausa)
 
 
 def _correr(falsas, datos=None):
@@ -309,6 +324,7 @@ def test_cadena_rota_y_vigia_que_no_cierra_son_fallos():
     assert _correr(f)[0]["codigo"] == "cadena_rota"
     f = Falsas()
     f.vigia_cierre = (1, "arranco=false", "Traceback: el vigia reventó")
+    f.poner_pausa_revienta = True   # sin pausa visible, el codigo propio del fallo es el que sale
     assert _correr(f)[0]["codigo"] == "vigia_no_cerro"
 
 
@@ -319,6 +335,100 @@ def test_auditor_ilegible_retiene_todo_fail_closed():
     assert (r["estado"], r["codigo"]) == ("fallido", "auditor_ilegible")
     assert r["afirmaciones"] == [] and r["descartadas"][0]["estado"] == "retenida_por_auditor"
     assert r["descartadas"][0]["codigo"] == "auditor_ilegible" and r["crudas"]
+
+
+@pytest.mark.parametrize("codigo", ["proveedor_fallo", "json_invalido"])
+def test_el_motivo_del_auditor_ilegible_queda_en_la_bitacora(codigo):
+    """Antes el evento solo decia el TIPO de la excepcion: no se podia distinguir un proveedor
+    caido (o un plazo vencido) de un modelo que escribio mal. Viaja el codigo, que es constante."""
+    f = Falsas()
+    f.auditor_ilegible = codigo
+    r, eventos = _correr(f)
+    assert r["codigo"] == "auditor_ilegible"
+    (e,) = [x for x in eventos if x["evento"] == "auditor_ilegible"]
+    assert e["datos"] == {"tipo": "AuditorIlegible", "motivo": codigo}
+
+
+def test_un_fallo_cualquiera_del_auditor_no_vuelca_su_mensaje_a_la_bitacora():
+    """Solo el codigo constante de AuditorIlegible viaja; el texto de cualquier otra excepcion
+    (puede traer una llave o un cuerpo HTTP) no."""
+    f = Falsas()
+    f.auditor_revienta = True
+    _, eventos = _correr(f)
+    (e,) = [x for x in eventos if x["evento"] == "auditor_ilegible"]
+    assert e["datos"] == {"tipo": "ValueError"}
+
+
+def test_un_vigia_que_latio_y_no_cierra_pone_la_pausa_y_la_mision_la_ve():
+    """Visto en la auditoria del 2026-10-03: un vigia matado a SIGKILL por el plazo de cierre dejaba el
+    ultimo lote sin auditar y SIN pausa. Si latio y no cerro, la mision frena -- y en produccion
+    `leer_pausa` ve esa pausa, asi que el codigo final es `pausa_puesta` (la pausa manda, como siempre)."""
+    f = Falsas()
+    f.vigia_cierre = (-9, "", "")
+    r, eventos = _correr(f)
+    assert f.pausas_puestas == ["vigia_no_cerro"]
+    assert "pausa_puesta_por_vigia_no_cerro" in _codigos(eventos)
+    (p,) = [e for e in eventos if e["evento"] == "pausa_detectada"]
+    assert (p["datos"]["origen"], p["datos"]["motivo"]) == ("mision", "vigia_no_cerro")
+    assert (r["estado"], r["codigo"]) == ("fallido", "pausa_puesta")
+    (c,) = [e for e in eventos if e["evento"] == "vigia_cerrado"]
+    assert c["datos"]["cerrada"] is False
+
+
+def test_un_vigia_que_nunca_latio_no_pone_pausa_global_y_el_codigo_es_vigia_no_latio():
+    """MAJOR-A: arranque fallido del vigia (rc 1, arranco=false): el proxy no sirvio ni un paso, no hay nada
+    sin auditar. Una pausa global frenaria todo en falso y taparia `vigia_no_latio`."""
+    f = Falsas()
+    f.latido, f.vigia_vive = False, False
+    f.vigia_cierre = (1, "arranco=false", "")
+    r, eventos = _correr(f)
+    assert f.pausas_puestas == []
+    assert (r["estado"], r["codigo"]) == ("fallido", "vigia_no_latio")
+    assert "pausa_puesta_por_vigia_no_cerro" not in _codigos(eventos) and "pausa_detectada" not in _codigos(eventos)
+
+
+def test_un_vigia_vivo_que_no_late_y_se_mata_al_cerrar_tampoco_pone_pausa():
+    f = Falsas()
+    f.latido = False   # sigue vivo pero la espera se agota
+    f.vigia_cierre = (-9, "", "")
+    r, _ = _correr(f)
+    assert r["codigo"] == "vigia_no_latio" and f.pausas_puestas == []
+
+
+def test_un_vigia_que_cierra_bien_no_pone_pausa():
+    f = Falsas()
+    _correr(f)
+    assert f.pausas_puestas == []
+
+
+def test_si_no_se_puede_poner_la_pausa_queda_el_evento_y_el_turno_falla_cerrado():
+    f = Falsas()
+    f.vigia_cierre = (1, "arranco=false", "Traceback")
+    f.poner_pausa_revienta = True
+    r, eventos = _correr(f)
+    assert (r["estado"], r["codigo"]) == ("fallido", "vigia_no_cerro")
+    (e,) = [x for x in eventos if x["evento"] == "pausa_no_puesta"]
+    assert e["datos"] == {"tipo": "OSError"}
+    assert "pausa_puesta_por_vigia_no_cerro" not in _codigos(eventos)
+
+
+def test_un_detalle_de_pausa_desconocido_se_registra_como_invalido_sin_copiarlo():
+    f = Falsas()
+    f.pausa_leida = {"puesta": True, "legible": True, "origen": "c5", "motivo": "auditor_ilegible", "paso": None,
+                     "detalle": "sk-llave-secreta"}
+    _, eventos = _correr(f)
+    (p,) = [e for e in eventos if e["evento"] == "pausa_detectada"]
+    assert p["datos"]["detalle"] == "detalle_invalido" and "llave" not in json.dumps(eventos)
+
+
+def test_la_pausa_con_detalle_lo_lleva_a_la_bitacora():
+    f = Falsas()
+    f.pausa_leida = {"puesta": True, "legible": True, "origen": "c5", "motivo": "auditor_ilegible", "paso": None,
+                     "detalle": "proveedor_fallo"}
+    _, eventos = _correr(f)
+    (p,) = [e for e in eventos if e["evento"] == "pausa_detectada"]
+    assert p["datos"] == {"origen": "c5", "motivo": "auditor_ilegible", "paso": None, "legible": True,
+                          "detalle": "proveedor_fallo"}
 
 
 def test_afirmacion_retenida_por_el_auditor_no_sale():
@@ -654,7 +764,8 @@ def _sin_afirmaciones(f):
     (_pausa_puesta, "pausa_puesta"),                                                   # C4
     (lambda f: setattr(f, "registro", []), "registro_no_cuadra"),                       # C3
     (lambda f: setattr(f, "cadena", False), "cadena_rota"),
-    (lambda f: setattr(f, "vigia_cierre", (1, "arranco=true", "boom")), "vigia_no_cerro"),
+    (lambda f: (setattr(f, "vigia_cierre", (1, "arranco=true", "boom")), setattr(f, "poner_pausa_revienta", True)),
+     "vigia_no_cerro"),       # sin poder poner la pausa; con pausa visible el codigo seria pausa_puesta
     (lambda f: setattr(f, "revision", Revision(True, "fuera_de_mision", 1, (), frozenset(), frozenset())),
      "auditor_pauso"),
     (lambda f: setattr(f, "auditor_revienta", True), "auditor_ilegible"),
@@ -787,3 +898,15 @@ def test_codigo_sin_las_dependencias_de_codigo_no_arranca_nada():
     r, eventos = _correr(f, _turno_codigo())
     assert (r["estado"], r["codigo"]) == ("fallido", "codigo_sin_dependencias")
     assert f.llamadas == [] and _codigos(eventos) == ["turno_lanzado", "turno_fallido"]
+
+
+@pytest.mark.parametrize("origen", ["huella", "mision", None, "otro"])
+def test_el_detalle_de_una_pausa_que_no_es_de_c5_no_se_copia(origen):
+    """MINOR-D: solo c5 tiene un vocabulario conocido. El detalle de la huella (un diff en una lista, etc.)
+    es contenido crudo: se registra el rotulo neutro, nunca el valor."""
+    f = Falsas()
+    f.pausa_leida = {"puesta": True, "legible": True, "origen": origen, "motivo": "huella_cambio", "paso": None,
+                     "detalle": "proveedor_fallo"}
+    _, eventos = _correr(f)
+    (p,) = [e for e in eventos if e["evento"] == "pausa_detectada"]
+    assert p["datos"]["detalle"] == "detalle_no_copiado" and "proveedor_fallo" not in json.dumps(p["datos"])

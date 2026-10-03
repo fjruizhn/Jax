@@ -103,6 +103,14 @@ def test_leer_pausa_fail_closed(tmp_path):
                                   "momento": None}
 
 
+def test_leer_pausa_trae_el_detalle_solo_si_es_texto(tmp_path):
+    ruta = tmp_path / "pausa"
+    ruta.write_text(json.dumps({"origen": "c5", "motivo": "auditor_ilegible", "detalle": "proveedor_plazo"}))
+    assert S.leer_pausa(ruta)["detalle"] == "proveedor_plazo"
+    ruta.write_text(json.dumps({"origen": "c5", "motivo": "auditor_ilegible", "detalle": {"x": 1}}))
+    assert S.leer_pausa(ruta)["detalle"] == "detalle_invalido"
+
+
 # --- ronda 5, auditoría adversarial 2026-09-22: SIN unidad systemd -----------------------
 #
 # `ejecutor-vigia@.service` se retiró: código muerto, nunca arrancó en producción (verificado
@@ -128,7 +136,7 @@ def test_abrir_vigia_por_defecto_lanza_el_modulo_como_subproceso_directo(tmp_pat
         return await original(sys.executable, str(falso), **kwargs)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", espia)
-    asyncio.run(S.abrir_vigia(tmp_path, "m-t9", "texto", frozenset({"a"})))
+    asyncio.run(S.abrir_vigia(tmp_path, "m-t9", "texto", frozenset({"a"}), cierre_s=5))
     argv = vistos["argv"]
     assert argv[0] == sys.executable
     assert argv[1:3] == ("-m", "jax.ejecutor.contratos.vigia_servicio")
@@ -146,7 +154,7 @@ def test_el_vigia_se_abre_con_el_archivo_de_mision_y_se_cierra_con_sigterm(tmp_p
                      "time.sleep(30)\n")
 
     async def probar():
-        v = await S.abrir_vigia(tmp_path, "m-t1", "texto", frozenset({"b", "a"}),
+        v = await S.abrir_vigia(tmp_path, "m-t1", "texto", frozenset({"b", "a"}), cierre_s=5,
                                 argv=[sys.executable, str(falso)])
         await asyncio.sleep(0.3)
         assert v.vive()
@@ -168,7 +176,7 @@ def test_abrir_vigia_incluye_el_tipo_recibido_en_el_archivo_de_mision(tmp_path, 
     import sys
     falso = tmp_path / "no_arranca_de_verdad.py"
     falso.write_text("import sys; sys.exit(0)\n")
-    asyncio.run(S.abrir_vigia(tmp_path, "m-t2", "texto", frozenset({"a"}),
+    asyncio.run(S.abrir_vigia(tmp_path, "m-t2", "texto", frozenset({"a"}), cierre_s=5,
                               argv=[sys.executable, str(falso)], tipo="codigo"))
     assert json.loads((tmp_path / "m-t2.json").read_text())["tipo"] == "codigo"
 
@@ -343,6 +351,22 @@ def _sin_arrancar_de_verdad(tmp_path, monkeypatch):
         return await original(sys.executable, str(falso), **kwargs)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", espia)
+    # `vigia` lee cfg.tope_s de axioma_config para derivar el cierre: aca, sin base, una config falsa.
+    import jacobs.store as jstore
+    from jax.ejecutor.contratos import eleccion_c5
+
+    class _Conexion:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    async def leer_config(conn):
+        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 400, False, False)
+
+    monkeypatch.setattr(jstore, "conexion", lambda **kw: _Conexion())
+    monkeypatch.setattr(eleccion_c5, "leer_config", leer_config)
 
 
 def test_deps_abrir_vigia_de_un_turno_de_codigo_escribe_tipo_codigo(tmp_path, monkeypatch):
@@ -500,3 +524,180 @@ def test_config_de_codigo_con_y_sin_filas(filas, esperado):
 def test_config_de_codigo_invalida_falla_cerrado(filas):
     with pytest.raises(ValueError):
         S.config_codigo_desde_filas(filas)
+
+
+def test_el_turno_audita_con_el_plazo_de_axioma_config(monkeypatch):
+    """`ejecutor.c5_tope_s` (cfg.tope_s) llega a auditor_cliente.auditar desde el turno del cerebro."""
+    import jacobs.store as jstore
+    from jax.ejecutor.contratos import auditor_cliente, eleccion_c5
+
+    class _Conexion:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    async def leer_config(conn):
+        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 555, False, False)
+
+    async def elegir(conn, *, cfg, hosts_mision, resolve_facet):
+        return ("faceta-fake", None, None)
+
+    vistas = {}
+
+    async def auditar_falso(lote, **kw):
+        vistas.update(kw)
+        return "revision"
+
+    monkeypatch.setattr(jstore, "conexion", lambda **kw: _Conexion())
+    monkeypatch.setattr(eleccion_c5, "leer_config", leer_config)
+    monkeypatch.setattr(eleccion_c5, "elegir_y_resolver_auditor", elegir)
+    monkeypatch.setattr(auditor_cliente, "auditar", auditar_falso)
+    monkeypatch.setattr(S.A, "afirmaciones_auditables", lambda entrega: ())
+    turno = M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])})
+    deps = S.dependencias_reales({}, turno, tope_s=1.0, espera_s=1.0)
+    assert asyncio.run(deps.auditar("texto", object(), (S.A.Maquina("m", "192.0.2.9", 58291),))) == "revision"
+    assert vistas == {"faceta": "faceta-fake", "max_tokens": 100, "tope_s": 555}
+
+
+@pytest.mark.parametrize("valor", ["sk-llave-secreta", "x" * 5000, "", "Proveedor_Fallo", 7, None, ["proveedor_fallo"]])
+def test_un_detalle_que_no_es_un_codigo_conocido_no_se_copia(tmp_path, valor):
+    ruta = tmp_path / "pausa"
+    ruta.write_text(json.dumps({"origen": "c5", "motivo": "auditor_ilegible", "detalle": valor}))
+    leida = S.leer_pausa(ruta)
+    assert leida["detalle"] == "detalle_invalido" and "llave" not in json.dumps(leida) and len(json.dumps(leida)) < 400
+
+
+# --- BLOCK-1: el cierre del vigia se deriva de cfg.tope_s ---------------------------------------
+
+def test_el_presupuesto_de_cierre_cubre_el_plazo_del_auditor_mas_la_huella_por_maquina():
+    assert S.presupuesto_cierre_s(400, 1) == 2 * 400 + S.HUELLA_CIERRE_S + S.MARGEN_CIERRE_S
+    assert S.presupuesto_cierre_s(400, 3) == 2 * 400 + 3 * S.HUELLA_CIERRE_S + S.MARGEN_CIERRE_S
+    # monotono en el plazo y en las maquinas; con el techo (600) y 4 maquinas sigue cubriendo todo
+    assert S.presupuesto_cierre_s(401, 1) > S.presupuesto_cierre_s(400, 1)
+    assert S.presupuesto_cierre_s(120, 2) > S.presupuesto_cierre_s(120, 1)
+    assert S.presupuesto_cierre_s(600, 4) >= 2 * 600 + 4 * 30
+
+
+def test_el_presupuesto_viejo_de_200_s_no_alcanzaba_con_un_plazo_de_400():
+    assert S.presupuesto_cierre_s(400, 1) > 200 and not hasattr(S, "_CIERRE_VIGIA_S")
+
+
+@pytest.mark.parametrize("tope, n", [(0, 1), (-1, 1), (float("nan"), 1), (float("inf"), 1), ("x", 1), (400, 0)])
+def test_sin_plazo_valido_o_sin_maquinas_no_hay_presupuesto(tope, n):
+    with pytest.raises(ValueError):
+        S.presupuesto_cierre_s(tope, n)
+
+
+def test_el_vigia_que_esta_auditando_durante_el_cierre_no_se_mata_dentro_del_presupuesto(tmp_path):
+    """SIGTERM con una llamada de auditor en curso que dura casi `tope_s`: con el presupuesto derivado el
+    vigia termina limpio (rc=0, cerrada=true); con uno menor que esa llamada, se le mata."""
+    import sys
+    tope = 2.0   # el "tope_s" de la prueba, en segundos reales
+    falso = tmp_path / "vigia_auditando.py"
+    falso.write_text(
+        "import signal, sys, time\n"
+        "def al_term(*a):\n"
+        f"    time.sleep({tope} * 0.9)   # el ultimo lote: una llamada de casi tope_s\n"
+        "    print('arranco=true cerrada=true', flush=True)\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, al_term)\n"
+        "print('listo', flush=True)\n"
+        "time.sleep(60)\n")
+
+    async def cerrar_con(cierre_s):
+        v = await S.abrir_vigia(tmp_path, "m-b1", "t", frozenset({"a"}), cierre_s=cierre_s,
+                                argv=[sys.executable, str(falso)])
+        await asyncio.sleep(0.5)
+        return await v.cerrar()
+
+    rc, salida, _ = asyncio.run(cerrar_con(S.presupuesto_cierre_s(tope, 1)))
+    assert rc == 0 and "cerrada=true" in salida
+    rc, salida, _ = asyncio.run(cerrar_con(tope * 0.3))   # un presupuesto menor que la llamada
+    assert rc != 0 and "cerrada=true" not in salida
+
+
+def test_dependencias_reales_deriva_el_cierre_de_cfg_tope_s(monkeypatch):
+    """El camino real: `vigia` lee cfg (axioma_config) y pasa presupuesto_cierre_s(cfg.tope_s, n maquinas)."""
+    import jacobs.store as jstore
+    from jax.ejecutor.contratos import eleccion_c5
+
+    class _Conexion:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    async def leer_config(conn):
+        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 450, False, False)
+
+    vistos = {}
+
+    async def abrir_falso(directorio, id_vigia, texto, hosts, **kw):
+        vistos.update(kw)
+        return "vigia"
+
+    monkeypatch.setattr(jstore, "conexion", lambda **kw: _Conexion())
+    monkeypatch.setattr(eleccion_c5, "leer_config", leer_config)
+    monkeypatch.setattr(S, "abrir_vigia", abrir_falso)
+    turno = M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])})
+    deps = S.dependencias_reales({"JAX_EJECUTOR_MISIONES": "/x"}, turno, tope_s=1.0, espera_s=1.0)
+    assert asyncio.run(deps.abrir_vigia(object(), "id", "texto", frozenset({"a", "b"}))) == "vigia"
+    assert vistos["cierre_s"] == 2 * 450 + 2 * S.HUELLA_CIERRE_S + S.MARGEN_CIERRE_S
+
+
+def test_dependencias_reales_pone_la_pausa_de_la_mision(tmp_path):
+    turno = M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])})
+    deps = S.dependencias_reales({}, turno, tope_s=1.0, espera_s=1.0)
+
+    class _Ctx:
+        pausa = tmp_path / "PAUSA"
+    asyncio.run(deps.poner_pausa(_Ctx(), "vigia_no_cerro"))
+    doc = json.loads((tmp_path / "PAUSA").read_text())
+    assert (doc["origen"], doc["motivo"]) == ("mision", "vigia_no_cerro")
+
+
+def test_el_peor_caso_del_cierre_son_dos_lotes_en_serie(tmp_path, monkeypatch):
+    """MINOR-B: al llegar el SIGTERM hay un lote en vuelo y despues se audita el ultimo pendiente: dos
+    llamadas de casi `tope_s`. Con la formula vieja (tope_s + huella + margen) esto FALLA: se mata al vigia
+    en el segundo lote. Las constantes se ponen en 0 para que el resultado dependa solo del factor de tope_s."""
+    import sys
+    monkeypatch.setattr(S, "HUELLA_CIERRE_S", 0)
+    monkeypatch.setattr(S, "MARGEN_CIERRE_S", 0)
+    tope = 1.0
+    falso = tmp_path / "vigia_dos_lotes.py"
+    falso.write_text(
+        "import signal, sys, time\n"
+        "def al_term(*a):\n"
+        f"    time.sleep({tope} * 0.8)   # lote en vuelo\n"
+        f"    time.sleep({tope} * 0.8)   # ultimo lote pendiente\n"
+        "    print('arranco=true cerrada=true', flush=True)\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, al_term)\n"
+        "print('listo', flush=True)\n"
+        "time.sleep(60)\n")
+
+    async def cerrar_con(cierre_s):
+        v = await S.abrir_vigia(tmp_path, "m-b2", "t", frozenset({"a"}), cierre_s=cierre_s,
+                                argv=[sys.executable, str(falso)])
+        await asyncio.sleep(0.5)
+        return await v.cerrar()
+
+    rc, salida, _ = asyncio.run(cerrar_con(S.presupuesto_cierre_s(tope, 1)))
+    assert rc == 0 and "cerrada=true" in salida
+    viejo = tope + S.HUELLA_CIERRE_S + S.MARGEN_CIERRE_S   # la formula anterior
+    rc, salida, _ = asyncio.run(cerrar_con(viejo))
+    assert rc != 0 and "cerrada=true" not in salida
+
+
+@pytest.mark.parametrize("origen", ["huella", "mision", None])
+def test_leer_pausa_no_copia_el_detalle_de_un_origen_que_no_es_c5(tmp_path, origen):
+    ruta = tmp_path / "pausa"
+    doc = {"motivo": "huella_cambio", "detalle": ["secreto", "diff"]}
+    if origen:
+        doc["origen"] = origen
+    ruta.write_text(json.dumps(doc))
+    leida = S.leer_pausa(ruta)
+    assert leida["detalle"] == "detalle_no_copiado" and "secreto" not in json.dumps(leida)
