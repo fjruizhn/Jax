@@ -2885,6 +2885,37 @@ def test_la_inspeccion_de_procesos_lee_los_cuatro_uid_de_proc_status(tmp_path):
     assert pp._procesos_de_usuario(994) == [101, 102, 103, 104]
 
 
+def test_la_inspeccion_de_procesos_tambien_mira_los_hilos_task_tid_status(tmp_path):
+    """Un hilo puede cambiar de uid con setuid por hilo: el proceso (/proc/<pid>/status) sigue figurando con otro uid.
+    Se recorre tambien /proc/<pid>/task/<tid>/status con los cuatro uid de cada hilo, y se informa el pid del proceso
+    (una sola vez aunque varios hilos coincidan)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("permisos_proyectos", SCRIPT)
+    pp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pp)
+
+    def proceso(pid: str, uid_proceso: str, hilos: dict) -> None:
+        (tmp_path / pid).mkdir()
+        (tmp_path / pid / "status").write_text(f"Name:\tp\nUid:\t{uid_proceso}\n")
+        for tid, texto in hilos.items():
+            (tmp_path / pid / "task" / tid).mkdir(parents=True)
+            (tmp_path / pid / "task" / tid / "status").write_text(f"Uid:\t{texto}\n")
+
+    # el proceso es de root pero UN hilo tiene uid fs (setfsuid por hilo) de jaxsvc: tiene que aparecer
+    proceso("201", "0\t0\t0\t0", {"201": "0\t0\t0\t0", "202": "0\t0\t0\t994"})
+    # uid efectivo de un hilo
+    proceso("203", "0\t0\t0\t0", {"203": "0\t0\t0\t0", "204": "0\t994\t0\t0"})
+    # varios hilos de jaxsvc en un mismo proceso: el pid sale una sola vez
+    proceso("205", "1000\t1000\t1000\t1000", {"205": "994\t994\t994\t994", "206": "994\t994\t994\t994"})
+    # ningun hilo de jaxsvc
+    proceso("207", "0\t0\t0\t0", {"207": "0\t0\t0\t0", "208": "1000\t1000\t1000\t1000"})
+    # un hilo cuyo status es ilegible o termino entre el listado y la lectura: no rompe ni cuenta
+    proceso("209", "0\t0\t0\t0", {"209": "0\t0\t0\t0"})
+    (tmp_path / "209" / "task" / "210").mkdir()
+    pp.RUTA_PROC = tmp_path
+    assert pp._procesos_de_usuario(994) == [201, 203, 205]
+
+
 def test_la_inspeccion_real_de_proc_ve_un_proceso_jaxsvc_efimero(_identidades):
     """Contra el /proc real: un `sleep` lanzado como jaxsvc aparece, y deja de aparecer al terminar."""
     codigo = f"""
