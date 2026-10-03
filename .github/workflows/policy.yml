@@ -830,7 +830,7 @@ jobs:
           asyncio.run(main())
           print("run_migrations OK")
           PY
-      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py tests/test_project_queries_mariadb.py tests/test_proyectos_e1_fks_mariadb.py tests/test_proyectos_e1_migrar_mariadb.py tests/test_project_documents_schema_mariadb.py tests/test_proyecto_activo_mariadb.py scripts/_b9_revertir_005_test.py
+      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py tests/test_project_queries_mariadb.py tests/test_proyectos_e1_fks_mariadb.py tests/test_proyectos_e1_migrar_mariadb.py tests/test_project_documents_schema_mariadb.py tests/test_proyecto_activo_mariadb.py tests/test_proyectos_e2a_lactovi_mariadb.py scripts/_b9_revertir_005_test.py
       - name: Piso exacto de tests CORRIDOS
         # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
         run: |
@@ -841,7 +841,7 @@ jobs:
             jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py \
             tests/test_project_queries_mariadb.py tests/test_proyectos_e1_fks_mariadb.py \
             tests/test_proyectos_e1_migrar_mariadb.py tests/test_project_documents_schema_mariadb.py \
-            tests/test_proyecto_activo_mariadb.py scripts/_b9_revertir_005_test.py 2>&1 | tee /tmp/out
+            tests/test_proyecto_activo_mariadb.py tests/test_proyectos_e2a_lactovi_mariadb.py scripts/_b9_revertir_005_test.py 2>&1 | tee /tmp/out
           # 31 el 2026-09-16 (frente F): 20 contra la base (esquema 5, emision 7,
           #   consumo 8 con la carrera de 20, la carrera forzada, el EXPLAIN y el paso
           #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
@@ -1082,8 +1082,11 @@ jobs:
           # 278 -> 281 (2026-10-03, Proyectos E2a T2, LAS MANOS por project_uuid): +3 de
           #   tests/test_proyecto_activo_mariadb.py (ACTIVE, ARCHIVED, uuid inexistente).
           #   Numero LOCAL: el controlador lo re-mide con el runner.
-          grep -qE "^281 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 281 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 281 -> 288 (2026-10-03, Proyectos E2a T4, guion de LACTOVI): +7 de
+          #   tests/test_proyectos_e2a_lactovi_mariadb.py (crea y borra una base
+          #   `jax_memory_test_e2alac_*`). Numero LOCAL: el controlador lo re-mide con el runner.
+          grep -qE "^288 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 288 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
