@@ -480,3 +480,45 @@ def test_pdf_con_extension_pero_contenido_no_decisivo_usa_respaldo_por_extension
     archivo = tmp_path / "cabecera-rota.pdf"
     archivo.write_bytes(b"contenido generico sin firma reconocida")
     assert compuerta.extraer(archivo).estado == "ok"
+
+
+# (nombre, contenido, tiene extractor): una muestra de cada tipo, incluidos los casos en que
+# el contenido manda sobre la extension y el OLE2 antiguo.
+_MUESTRAS_TIENE_EXTRACTOR = [
+    ("a.pdf", b"%PDF-1.4 x", True),
+    ("pdf-con-otro-nombre.dat", b"%PDF-1.4 x", True),
+    ("a.png", b"\x89PNG\r\n\x1a\n", True),
+    ("imagen-con-otro-nombre.bin", b"\xff\xd8\xff\xe0 jpeg", True),
+    ("a.webp", b"RIFF\x00\x00\x00\x00WEBPVP8 ", True),
+    ("a.xlsx", b"PK\x03\x04 zip ambiguo", True),
+    ("a.docx", b"PK\x03\x04 zip ambiguo", True),
+    ("viejo.xls", bytes.fromhex("D0CF11E0A1B11AE1") + b"\x00" * 8, False),
+    ("a.xyz", b"contenido cualquiera", False),
+    ("sin-extension", b"texto plano", False),
+    ("a.csv", b"a,b\n1,2\n", False),
+]
+
+
+@pytest.mark.parametrize("nombre,contenido,esperado", _MUESTRAS_TIENE_EXTRACTOR)
+def test_tiene_extractor_es_lo_mismo_que_extraer_no_dice_sin_extractor(
+    tmp_path: Path, monkeypatch, nombre, contenido, esperado
+):
+    """`tiene_extractor` es una copia de la decision de `extraer` (la usa el guion de LACTOVI
+    para elegir `en_cola` o `sin_extractor`): si divergen, una fila queda en cola para siempre o
+    se descarta un archivo procesable. Los extractores reales se reemplazan por un `ok` para
+    comparar solo el ENRUTADO, sin OCR ni dependencias pesadas."""
+    from procesamiento.extractores import excel, ocr, pdf, word
+    from procesamiento.resultado import Resultado
+
+    def falso(*_a, **_k):
+        return Resultado(estado="ok", salidas={"texto.txt": "x"}, detalle={}, extractor="falso", version="0")
+
+    for modulo in (excel, ocr, pdf, word):
+        monkeypatch.setattr(modulo, "extraer", falso)
+    monkeypatch.setattr(pdf, "tiene_capa_de_texto", lambda _o: True)
+
+    archivo = tmp_path / nombre
+    archivo.write_bytes(contenido)
+
+    assert compuerta.tiene_extractor(archivo) is esperado
+    assert compuerta.tiene_extractor(archivo) == (compuerta.extraer(archivo).estado != "sin_extractor")

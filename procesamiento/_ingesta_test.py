@@ -34,6 +34,7 @@ sólo un mapa hallazgo -> test:
   I-7 (trabajo sin jail) -> test_I7_trabajo_fuera_del_workspace_se_rechaza
 """
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -1382,3 +1383,80 @@ def test_subruta_mismo_contenido_en_dos_subcarpetas_no_reextrae(tmp_path: Path, 
 
     assert ficha2.estado == "ok"
     assert (trabajo / "fuente" / "estados-financieros" / "EEFF.xlsx").is_file()
+
+
+# ---------------------------------------------------------------------------
+# E2a T4 (MAJOR-1 de la revision): un origen que YA vive dentro de
+# `<trabajo>/fuente/` se procesa en el lugar. Antes se copiaba a la raiz de
+# `fuente/` (duplicaba datos del cliente y cambiaba los sha de LACTOVI).
+# ---------------------------------------------------------------------------
+def test_origen_dentro_de_fuente_se_procesa_en_el_lugar_sin_copia(tmp_path: Path):
+    trabajo = tmp_path / "trabajo"
+    sub = trabajo / "fuente" / "sub"
+    sub.mkdir(parents=True)
+    origen = _libro(sub / "x.xlsx")
+    antes = sorted(p.relative_to(trabajo / "fuente") for p in (trabajo / "fuente").rglob("*"))
+
+    ficha = ingesta.ingerir(origen, trabajo)
+
+    assert ficha.estado == "ok"
+    assert Path(ficha.origen) == Path("fuente/sub/x.xlsx")
+    assert not (trabajo / "fuente" / "x.xlsx").exists()
+    despues = sorted(p.relative_to(trabajo / "fuente") for p in (trabajo / "fuente").rglob("*"))
+    assert despues == antes                                     # ni una copia, ni un temporal
+    assert (trabajo / "procesado" / ficha.sha256 / "ficha.json").is_file()
+
+
+def test_symlink_dentro_de_fuente_que_apunta_afuera_no_se_usa_en_el_lugar(tmp_path: Path, tmp_path_factory):
+    afuera = tmp_path_factory.mktemp("afuera-del-workspace")
+    real = _libro(afuera / "real.xlsx")
+    trabajo = tmp_path / "trabajo"
+    (trabajo / "fuente").mkdir(parents=True)
+    enlace = trabajo / "fuente" / "enlace.xlsx"
+    enlace.symlink_to(real)
+
+    ficha = ingesta.ingerir(enlace, trabajo)
+
+    # Igual que antes del cambio: el enlace queda intacto y el contenido entra como archivo regular propio.
+    assert enlace.is_symlink() and enlace.resolve() == real.resolve()
+    destino = trabajo / ficha.origen
+    assert destino.is_file() and not destino.is_symlink() and destino.name != "enlace.xlsx"
+
+
+def test_origen_fuera_de_fuente_con_nombre_igual_a_uno_de_adentro_no_pisa(tmp_path: Path):
+    trabajo = tmp_path / "trabajo"
+    sub = trabajo / "fuente" / "sub"
+    sub.mkdir(parents=True)
+    dentro = _libro(sub / "x.xlsx", valor=1)
+    contenido_dentro = dentro.read_bytes()
+    fuera = _libro(tmp_path / "x.xlsx", valor=2)
+
+    ficha = ingesta.ingerir(fuera, trabajo)
+
+    assert dentro.read_bytes() == contenido_dentro               # no se pisa (C-3)
+    assert ficha.sha256 == sha256_de(fuera)
+    assert (trabajo / ficha.origen).read_bytes() == fuera.read_bytes()
+    assert Path(ficha.origen) != Path("fuente/sub/x.xlsx")
+
+
+def test_symlink_de_directorio_mas_punto_punto_no_envenena_el_cache(tmp_path: Path):
+    """ROTURA-1 (ronda 2 de E2a T4): `fuente/lnk/../x.xlsx` con `lnk` -> `OTRO/fuente/d`.
+    El kernel resuelve `lnk/..` a `OTRO/fuente`; una normalizacion lexica lo vera como
+    `fuente/x.xlsx`. La huella y lo extraido tienen que ser del MISMO archivo."""
+    trabajo = tmp_path / "trabajo"
+    otro = tmp_path / "otro"
+    (trabajo / "fuente").mkdir(parents=True)
+    (otro / "fuente" / "d").mkdir(parents=True)
+    propio = _libro(trabajo / "fuente" / "x.xlsx", valor=1)
+    ajeno = _libro(otro / "fuente" / "x.xlsx", valor=2)
+    assert sha256_de(propio) != sha256_de(ajeno)
+    (trabajo / "fuente" / "lnk").symlink_to(otro / "fuente" / "d")
+    origen = trabajo / "fuente" / "lnk" / ".." / "x.xlsx"
+    assert os.path.samefile(origen, ajeno)                      # el kernel resuelve a OTRO
+
+    ficha = ingesta.ingerir(origen, trabajo)
+
+    assert sha256_de(trabajo / ficha.origen) == ficha.sha256     # ficha coherente con lo que apunta
+    assert ficha.sha256 == sha256_de(ajeno)                      # se ingirio lo que el kernel abrio
+    assert (trabajo / "fuente" / "x.xlsx").read_bytes() == propio.read_bytes()   # el propio, intacto
+    assert Path(ficha.origen) != Path("fuente/x.xlsx")

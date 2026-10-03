@@ -625,6 +625,38 @@ def _encabezado_parcial(huella: str, detalle: dict) -> str:
     )
 
 
+def _origen_ya_en_fuente(origen: Path, trabajo: Path, fuente_raiz: Path) -> Path | None:
+    """E2a T4 (MAJOR-1): si `origen` ya es un archivo REGULAR dentro de
+    `<trabajo>/fuente/`, devuelve su ruta para procesarlo en el lugar -- copiarlo
+    a un nombre libre de la raiz duplicaria datos del cliente y cambiaria los
+    sha de `fuente/`. La comparacion es LEXICA (no resuelve symlinks) y exige que
+    ni el archivo ni ningun directorio del tramo `fuente/ -> origen` sea un
+    symlink; el jail (`_resolver_bajo_jail`) se aplica igual. Cualquier otra cosa
+    (symlink, fuera de `fuente/`) devuelve None: sigue el camino de siempre."""
+    if ".." in Path(origen).parts:
+        # ROTURA-1 (ronda 2): `os.path.abspath` colapsa `..` sin seguir symlinks, pero
+        # el kernel SI resuelve `lnk/..` al abrir: la huella saldria de un archivo y la
+        # extraccion de otro. Un `..` nunca se procesa en el lugar.
+        return None
+    abs_origen = Path(os.path.abspath(origen))
+    for base in (fuente_raiz, Path(os.path.abspath(trabajo)) / "fuente"):
+        if base not in abs_origen.parents:
+            continue
+        tramo = abs_origen
+        while tramo != base:
+            if tramo.is_symlink():
+                return None
+            tramo = tramo.parent
+        if not abs_origen.is_file():
+            return None
+        _resolver_bajo_jail(abs_origen)
+        destino = fuente_raiz / abs_origen.relative_to(base)
+        if not os.path.samefile(origen, destino):
+            return None            # defensa en profundidad: lo que se hashea es lo que se extrae
+        return destino
+    return None
+
+
 def ingerir(origen: Path, trabajo: Path, *, subruta: str | Path | None = None) -> Ficha:
     """`subruta` (opcional): subcarpeta de `fuente/` donde se conserva la
     subcarpeta de origen -- ej. `"estados-financieros"` para un archivo que
@@ -637,11 +669,17 @@ def ingerir(origen: Path, trabajo: Path, *, subruta: str | Path | None = None) -
     trabajo_abs = _resolver_bajo_jail(Path(trabajo))  # C-1/I-7
     fuente_raiz = trabajo_abs / "fuente"
     fuente_abs = _resolver_subruta_de_fuente(fuente_raiz, subruta)
-    fuente_abs.mkdir(parents=True, exist_ok=True)
+    en_el_lugar = _origen_ya_en_fuente(origen, Path(trabajo), fuente_raiz)
+    if en_el_lugar is None:
+        fuente_abs.mkdir(parents=True, exist_ok=True)
 
-    huella = sha256_de(origen)
     extension_actual = origen.suffix.lower()
-    destino = _asegurar_en_fuente(origen, fuente_abs, huella)  # C-1/C-3
+    if en_el_lugar is not None:
+        destino = en_el_lugar            # E2a T4: ya esta en fuente/, no se copia
+        huella = sha256_de(destino)      # la huella sale del MISMO archivo que se extrae
+    else:
+        huella = sha256_de(origen)
+        destino = _asegurar_en_fuente(origen, fuente_abs, huella)  # C-1/C-3
 
     carpeta = ruta_procesado(trabajo_abs, huella)
     ficha_cacheada = _ficha_de_cache_valida(carpeta, huella, extension_actual)

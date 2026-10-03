@@ -107,6 +107,38 @@ _LEGACY_STATUS_ENUM = "ENUM('planning','active','paused','completed','archived')
 _LIFECYCLE_STATUS_ENUM = ("ENUM('planning','active','paused','completed','archived','hidden','disabled') "
                           "DEFAULT 'planning'")
 
+#: E2a (2026-10-03, adenda E2 §3.1): un documento subido a un proyecto. Vive acá,
+#: aunque la escribe jax-platform, por la misma razón que 005h/005i: este hook es el
+#: que jax-platform corre en cada arranque (`db/migrations.py:124-142`), y la lee
+#: también LAS MANOS en E2b. CREATE ... IF NOT EXISTS: re-correrlo no hace nada.
+_DDL_PROJECT_DOCUMENTS = """
+CREATE TABLE IF NOT EXISTS project_documents (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  project_id INT(11) NOT NULL,
+  sha256 CHAR(64) NOT NULL,
+  nombre_original VARCHAR(1024) NOT NULL,
+  ruta_entrada VARCHAR(1024) NULL,
+  carpeta_procesado VARCHAR(255) NULL,
+  bytes BIGINT UNSIGNED NOT NULL,
+  tipo VARCHAR(16) NOT NULL,
+  estado ENUM('en_cola','pendiente','procesando','listo','parcial','error','sin_extractor','cancelado')
+    NOT NULL DEFAULT 'en_cola',
+  error VARCHAR(1000) NULL,
+  job_id VARCHAR(64) NULL,
+  subido_por INT(11) NOT NULL,
+  oculto_at DATETIME(6) NULL,
+  oculto_por INT(11) NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  UNIQUE KEY uq_project_documents_sha (project_id, sha256),
+  KEY idx_project_documents_lista (project_id, oculto_at, id),
+  KEY idx_project_documents_despacho (estado, job_id, id),
+  CONSTRAINT fk_project_documents_project FOREIGN KEY (project_id) REFERENCES projects (id),
+  CONSTRAINT fk_project_documents_subido_por FOREIGN KEY (subido_por) REFERENCES jax_users (user_id),
+  CONSTRAINT fk_project_documents_oculto_por FOREIGN KEY (oculto_por) REFERENCES jax_users (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
 
 def _scalar(row: Any) -> int:
     if row is None:
@@ -210,6 +242,8 @@ async def _apply_project_lifecycle_migration(cursor: Any) -> None:
     if not await _index_exists(cursor, "jax_users", _IDX_USERS_TENANT_EMAIL):
         await cursor.execute(
             "CREATE INDEX " + _IDX_USERS_TENANT_EMAIL + " ON jax_users (tenant_id, email)")
+    # 006a (E2a): documentos del proyecto, ver _DDL_PROJECT_DOCUMENTS.
+    await cursor.execute(_DDL_PROJECT_DOCUMENTS)
 
 
 async def revert_project_lifecycle_migration(cursor: Any) -> None:
@@ -233,6 +267,15 @@ async def revert_project_lifecycle_migration(cursor: Any) -> None:
         raise RuntimeError(
             "cannot revert migration 005: projects has hidden/disabled rows "
             "that the old status ENUM does not have")
+    # 006a (E2a): la tabla mas nueva, referencia a `projects` y a `jax_users`.
+    # Vacia se baja; con filas, fallo cerrado ANTES de tocar nada de 005.
+    await cursor.execute("SHOW TABLES LIKE 'project_documents'")
+    if await cursor.fetchone() is not None:
+        await cursor.execute("SELECT COUNT(*) AS n FROM project_documents")
+        if _scalar(await cursor.fetchone()) > 0:
+            raise RuntimeError(
+                "cannot revert migration 006a: project_documents has rows "
+                "(uploaded project documents would be lost)")
 
     if not await _check_constraint_exists(cursor, _CHK_SCOPE_STATUS_V1):
         await cursor.execute(
@@ -240,6 +283,7 @@ async def revert_project_lifecycle_migration(cursor: Any) -> None:
             "CHECK (status IN ('ACTIVE','DISABLED'))")
     if await _check_constraint_exists(cursor, _CHK_SCOPE_STATUS_V2):
         await cursor.execute("ALTER TABLE jax_project_scope DROP CONSTRAINT " + _CHK_SCOPE_STATUS_V2)
+    await cursor.execute("DROP TABLE IF EXISTS project_documents")
     await cursor.execute("DROP TABLE IF EXISTS jax_project_creation_request")
     if await _index_exists(cursor, "jax_project_membership", _IDX_MEMBERSHIP_USER_LIST):
         await cursor.execute("DROP INDEX " + _IDX_MEMBERSHIP_USER_LIST + " ON jax_project_membership")
