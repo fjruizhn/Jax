@@ -92,7 +92,7 @@ def _pdf_o_ocr(origen: Path) -> Resultado:
     fallo de despliegue produciendo cifras falsas etiquetadas 'ok'."""
     try:
         tiene_texto = pdf.tiene_capa_de_texto(origen)
-    except ModuleNotFoundError:
+    except ImportError:  # jax-14: tambien una pdfplumber presente pero rota; pdf.extraer la clasifica
         return pdf.extraer(origen)
     return pdf.extraer(origen) if tiene_texto else ocr.extraer(origen)
 

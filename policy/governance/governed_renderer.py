@@ -225,6 +225,51 @@ class GovernedRenderer:
             chunks = self._chunks(text, chunk_size)
         return self._effective(text, envelope, envelope.contract_state, tuple(shown), chunks)
 
+    def revalidate_claims_for_transport(
+        self,
+        envelope: GovernedResponseEnvelope,
+        rendered: RenderedText,
+        context: RenderContext,
+        validation_time: datetime,
+    ) -> None:
+        """Recheck dynamic claim authority without rerendering sealed content.
+
+        The full renderer already validated the immutable envelope before the
+        F2-D transport unit was minted.  At transport time only claim/reference
+        validity can change; literal payload and server templates are bound by
+        the sealed envelope and the unit's effective-projection digest.
+        """
+        if not isinstance(envelope, GovernedResponseEnvelope) or not isinstance(rendered, RenderedText):
+            raise GovernedRenderError("transport revalidation requires sealed rendered output")
+        if envelope.compute_digest() != envelope.envelope_digest:
+            raise GovernedRenderError("sealed envelope digest mismatch")
+        if rendered.response_id != envelope.response_id or rendered.source_envelope_digest != envelope.envelope_digest:
+            raise GovernedRenderError("rendered output is not bound to sealed envelope")
+        if not isinstance(context, RenderContext):
+            raise GovernedRenderError("renderer requires server RenderContext")
+        if not isinstance(validation_time, datetime) or validation_time.tzinfo is None:
+            raise GovernedRenderError("server renderer clock must be timezone-aware")
+
+        claims = {claim.claim_id: claim for claim in envelope.claims}
+        references = {reference.ref_id: reference for reference in envelope.references}
+        visible_claim_ids = []
+        for block in envelope.content_blocks:
+            if block.kind is ContentBlockKind.CLAIM_REF_BLOCK:
+                for claim_id in block.claim_refs:
+                    claim = claims.get(claim_id)
+                    if claim is None or claim.disposition is not ClaimDisposition.ASSERTABLE:
+                        raise GovernedRenderError("transport claim is absent or not assertable")
+                    self._validate_claim(claim, envelope.response_scope, context, validation_time, references)
+                    visible_claim_ids.append(claim_id)
+            elif block.kind is ContentBlockKind.ATTRIBUTED_QUOTE:
+                claim_id = block.claim_refs[0]
+                claim = claims.get(claim_id)
+                if not self._validate_quote(claim, block, envelope.response_scope, context, references):
+                    raise GovernedRenderError("transport quote attribution is no longer valid")
+                visible_claim_ids.append(claim_id)
+        if tuple(visible_claim_ids) != rendered.claim_ids:
+            raise GovernedRenderError("rendered claim set differs from sealed content blocks")
+
     def _validate_claim(self, claim, scope: ResponseScope, context: RenderContext, now: datetime, references: Mapping[str, object]) -> None:
         if claim.claim_scope.scope_digest != scope.scope_digest:
             raise GovernedRenderError("claim scope mismatch")
