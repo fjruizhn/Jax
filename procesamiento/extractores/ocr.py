@@ -135,8 +135,21 @@ CODIGO_ARCHIVO_ILEGIBLE = "archivo_ilegible"
 # en la ficha (`detalle["_version_logica"]`) y `ingesta` la compara -- una
 # ficha escrita con otra logica ni se reusa de cache ni cuenta como intento
 # previo del tope D-2. SUBIRLA cada vez que cambie la regla.
-# "2": regla de Fernando de la ronda 1 de Jax#338 (A/B/D, codigos nuevos).
-VERSION_LOGICA = "2"
+# La version DEPENDE DEL CAMINO (`version_logica(extension)`): solo cambio la
+# regla de las IMAGENES (A/B/D, codigos nuevos, TIFF multipagina) -- la del PDF
+# escaneado no, asi que su cache sigue valiendo (no se re-OCR-ean los PDF).
+# "2": regla de Fernando de la ronda 1 de Jax#338.
+VERSION_LOGICA_IMAGEN = "2"
+EXTENSIONES_IMAGEN = frozenset(
+    {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif"}
+)
+
+
+def version_logica(extension: str) -> str | None:
+    """Version de la logica para una ficha ingerida con esa extension; `None`
+    (sin marca) para el camino PDF."""
+    return VERSION_LOGICA_IMAGEN if extension.lower() in EXTENSIONES_IMAGEN else None
+
 
 # `Resultado` exige al menos una salida con contenido para `ok`: la unica
 # salida del caso A es este aviso (nunca texto inventado). Regla (C) de
@@ -164,9 +177,17 @@ _FIRMAS_IMAGEN = (
     b"GIF87a", b"GIF89a",
 )
 
-# Tope de pixeles de una imagen (el default de Pillow: ~179 M). La foto real
-# mas grande de LACTOVI mide 13630x3826 (52 M).
-MAX_PIXELES = 178_956_970
+# Tope de pixeles POR FOTOGRAMA, comprobado ANTES de decodificar. (El default
+# de `Image.MAX_IMAGE_PIXELS` de Pillow es ~89 M y solo avisa; el error salta
+# al doble, ~179 M: un tope propio mas bajo es el que realmente se alcanza.
+# Pillow se deja con su default y su `DecompressionBombError` tambien se
+# traduce a `demasiados_pixeles`, sin mutar el global.) La foto real mas
+# grande de LACTOVI mide 13630x3826 (52 M).
+MAX_PIXELES = 100_000_000
+
+# Tope de fotogramas de un TIFF/GIF/WebP multipagina (tesseract procesa
+# TODOS; cada uno se decodifica y se mide antes).
+MAX_PAGINAS = 50
 
 # (D) Tamano de pagina. NO se usa el metadato de DPI (el de un celular miente:
 # "300 DPI" en una foto). Se mira la proporcion lado largo / lado corto, a
@@ -215,12 +236,16 @@ def _como_texto(salida) -> str:
 
 def _es_pdf(origen: Path) -> bool:
     """MINOR-4: la firma `%PDF` puede venir tras unos bytes de basura (BOM,
-    saltos de linea); el estandar tolera 1024."""
+    saltos de linea); se busca en los primeros 1024. MINOR-N3: pero UNA FIRMA
+    DE IMAGEN VALIDA MANDA -- un PNG con metadata `%PDF` es una imagen."""
     try:
         with open(origen, "rb") as fh:
-            return _FIRMA_PDF in fh.read(1024)
+            cabecera = fh.read(1024)
     except OSError:
         return False
+    if _tiene_firma_de_imagen(cabecera[:16]):
+        return False
+    return _FIRMA_PDF in cabecera
 
 
 def _tiene_firma_de_imagen(cabecera: bytes) -> bool:
@@ -229,34 +254,61 @@ def _tiene_firma_de_imagen(cabecera: bytes) -> bool:
     )
 
 
-def _validar_imagen(origen: Path) -> tuple[int, int] | str:
-    """Antes de OCR: bytes magicos (S-1) y decodificacion ENTERA con Pillow
-    (MAJOR-2: un TIFF truncado da rc=0 y vacio en tesseract). Devuelve
-    `(ancho, alto)` o la CAUSA (`firma_invalida`, `no_decodifica`,
-    `demasiados_pixeles`, `sin_pillow`) -- un codigo, nunca texto de la
+def _validar_imagen(datos: bytes) -> tuple[list[bytes], list[tuple[int, int]]] | str:
+    """Antes de OCR, sobre los BYTES (se leen una sola vez, MINOR-N2: nunca se
+    relee la ruta, asi lo validado es lo que se procesa): firma magica (S-1) y
+    decodificacion ENTERA de TODOS los fotogramas con Pillow (MAJOR-2/N1: un
+    TIFF truncado da rc=0 y vacio en tesseract, y `load()`/`size` solo miran
+    el fotograma 0). Devuelve `(paginas, dimensiones)` -- `paginas` son los
+    bytes que iran por stdin: los originales si hay UN fotograma, un PNG
+    re-codificado por fotograma ya decodificado si hay varios -- o la CAUSA
+    (`firma_invalida`, `no_decodifica`, `demasiados_pixeles`,
+    `demasiadas_paginas`, `sin_pillow`): un codigo, nunca texto de la
     excepcion (puede traer rutas)."""
-    try:
-        with open(origen, "rb") as fh:
-            cabecera = fh.read(16)
-    except OSError:
-        return "no_decodifica"
-    if not _tiene_firma_de_imagen(cabecera):
+    if not _tiene_firma_de_imagen(datos[:16]):
         return "firma_invalida"
     try:
+        from io import BytesIO
+
         from PIL import Image
     except ImportError:
         return "sin_pillow"
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            with Image.open(origen) as img:
-                ancho, alto = img.size
-                if ancho * alto > MAX_PIXELES:
-                    return "demasiados_pixeles"
-                img.load()
-    except Exception:  # fail-soft: Pillow lanza OSError/ValueError/SyntaxError/DecompressionBombError segun el formato roto; todas significan "no decodifica" y salen como Resultado(error, archivo_ilegible)
+            with Image.open(BytesIO(datos)) as img:
+                # Solo un TIFF es multipagina PARA TESSERACT. Un MPO (fotos de
+                # iPhone: la foto + una vista previa) o un GIF/WebP animado se
+                # leen por su primer fotograma: tratarlos como paginas
+                # re-codificaria la foto (medido en IMG_2353: otro resultado)
+                # y sumaria una vista previa que tesseract nunca lee.
+                n = getattr(img, "n_frames", 1) if img.format == "TIFF" else 1
+                if n > MAX_PAGINAS:
+                    return "demasiadas_paginas"
+                paginas: list[bytes] = []
+                dimensiones: list[tuple[int, int]] = []
+                for i in range(n):
+                    img.seek(i)
+                    ancho, alto = img.size
+                    if ancho * alto > MAX_PIXELES:
+                        return "demasiados_pixeles"
+                    img.load()
+                    dimensiones.append((ancho, alto))
+                    if n > 1:
+                        cuadro = img if img.mode in _MODOS_PNG else img.convert("RGB")
+                        salida = BytesIO()
+                        cuadro.save(salida, format="PNG")
+                        paginas.append(salida.getvalue())
+                if n == 1:
+                    paginas = [datos]
+    except Image.DecompressionBombError:
+        return "demasiados_pixeles"
+    except Exception:  # fail-soft: Pillow lanza OSError/ValueError/SyntaxError/EOFError segun el formato roto; todas significan "no decodifica" y salen como Resultado(error, archivo_ilegible)
         return "no_decodifica"
-    return ancho, alto
+    return paginas, dimensiones
+
+
+_MODOS_PNG = frozenset({"1", "L", "LA", "P", "RGB", "RGBA", "I;16"})
 
 
 def _implica_pagina(ancho: int, alto: int) -> str | None:
@@ -341,7 +393,7 @@ def _clasificar(caracteres: int, analisis: dict) -> str:
     return "ok"
 
 
-def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
+def _ocr_bytes(datos: bytes, idioma: str) -> dict | None:
     """Corre tesseract DOS veces sobre la MISMA imagen -- texto plano (para
     el extracto exacto, tildes y guion largo incluidos) y `tsv` (para la
     confianza por palabra, que el modo texto plano no expone). `None` si el
@@ -351,10 +403,6 @@ def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
     DECODIFICAR el archivo (imagen danada), devuelve un dict con
     `clasificacion="ilegible"` en vez de `None`, para que `_resolver_imagen`
     pueda distinguirlo con `archivo_ilegible`."""
-    try:
-        datos = Path(ruta).read_bytes()
-    except OSError:
-        return None
     try:
         proceso = subprocess.run(
             ["tesseract", "-", "stdout", "-l", idioma],
@@ -383,6 +431,53 @@ def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
         "caracteres": len(texto),
         **analisis,
         "clasificacion": _clasificar(len(texto), analisis),
+    }
+
+
+def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
+    """Camino de las paginas rasterizadas de un PDF (PNG propios, en un
+    directorio temporal nuestro): lee el archivo y lo manda por stdin."""
+    try:
+        datos = Path(ruta).read_bytes()
+    except OSError:
+        return None
+    return _ocr_bytes(datos, idioma)
+
+
+def _ocr_paginas(paginas: list[bytes], idioma: str) -> dict | None:
+    """OCR de una imagen de UNO o varios fotogramas. Con varios, una llamada
+    a tesseract por pagina y el texto se junta con un separador de pagina; las
+    metricas de la regla A/B se calculan sobre el TOTAL (caracteres y palabras
+    sumados, confianza ponderada por palabras)."""
+    resultados = [_ocr_bytes(p, idioma) for p in paginas]
+    if any(r is None for r in resultados):
+        return None
+    for r in resultados:
+        if r["clasificacion"] == "ilegible":
+            return r
+    if len(resultados) == 1:
+        return resultados[0]
+    partes, dudosas = [], []
+    caracteres = palabras = 0
+    suma_conf = 0.0
+    for numero, r in enumerate(resultados, start=1):
+        if r["texto"]:
+            partes.append(f"<!-- página {numero} -->\n{r['texto']}")
+        caracteres += r["caracteres"]
+        palabras += r["n_palabras"]
+        suma_conf += r["confianza_promedio"] * r["n_palabras"]
+        dudosas += [{"pagina": numero, **d} for d in r["palabras_dudosas"]]
+    analisis = {
+        "n_palabras": palabras,
+        "confianza_promedio": round(suma_conf / palabras, 2) if palabras else 0.0,
+        "palabras_dudosas": dudosas,
+        "ancho": resultados[0]["ancho"], "alto": resultados[0]["alto"],
+    }
+    return {
+        "texto": "\n\n".join(partes),
+        "caracteres": caracteres,
+        **analisis,
+        "clasificacion": _clasificar(caracteres, analisis),
     }
 
 
@@ -435,15 +530,24 @@ def _ilegible(causa: str, idioma: str) -> Resultado:
     )
 
 
-def _resolver_imagen(r: dict, idioma: str, dimensiones: tuple[int, int] | None = None) -> Resultado:
+def _resolver_imagen(
+    r: dict, idioma: str, paginas: list[tuple[int, int]] | None = None
+) -> Resultado:
     if r["clasificacion"] == "ilegible":
         return _ilegible(r["causa"], idioma)
 
     detalle = _detalle_comun(idioma, r)
-    if dimensiones:
-        detalle["ancho"], detalle["alto"] = dimensiones
+    if paginas:
+        detalle["ancho"], detalle["alto"] = paginas[0]
+        if len(paginas) > 1:
+            detalle["paginas"] = len(paginas)
 
     if r["clasificacion"] == "sin_texto":
+        # DECISION DEL CONTROLADOR (Jax#338 ronda 2; Fernando puede cambiarla):
+        # cuando A y B coinciden (menos de MINIMO_CARACTERES con mayoria de
+        # palabras dudosas) se aplica A -- o D si es una pagina --. B exige al
+        # menos MINIMO_CARACTERES: con una o dos palabras no hay texto que
+        # conservar.
         if r["caracteres"] >= MINIMO_CARACTERES:
             # (B) mayoria de palabras dudosas: el texto leido SE CONSERVA.
             detalle["razon"] = (
@@ -459,8 +563,14 @@ def _resolver_imagen(r: dict, idioma: str, dimensiones: tuple[int, int] | None =
                 detalle=detalle,
             )
         detalle["razon"] = "el OCR no devolvio texto util"
-        ancho, alto = detalle["ancho"], detalle["alto"]
-        pagina = _implica_pagina(ancho, alto)
+        # D usa las dimensiones del fotograma 0 y solo aplica si TODOS los
+        # fotogramas tienen tamano de pagina (un TIFF con una foto dentro no
+        # es un escaneo).
+        pagina = None
+        if paginas:
+            nombres = [_implica_pagina(ancho, alto) for ancho, alto in paginas]
+            if all(nombres):
+                pagina = nombres[0]
         if pagina is not None:
             # (D) tamano de pagina y sin texto: posible escaneo guardado como
             # imagen -- un documento sin texto SI es un problema.
@@ -644,7 +754,9 @@ def extraer(origen: Path, idioma: str = "spa") -> Resultado:
                 resultados = [_ocr_una_imagen(pagina, idioma) for pagina in paginas]
             return _resolver_pdf(resultados, idioma)
 
-        validacion = _validar_imagen(origen)
+        # MINOR-N2: UNA sola lectura; lo validado es lo que se procesa.
+        datos = origen.read_bytes()
+        validacion = _validar_imagen(datos)
         if validacion == "sin_pillow":
             return Resultado(
                 estado="sin_extractor", salidas={}, extractor=EXTRACTOR, version="ausente",
@@ -652,17 +764,18 @@ def extraer(origen: Path, idioma: str = "spa") -> Resultado:
             )
         if isinstance(validacion, str):
             return _ilegible(validacion, idioma)
-        resultado_img = _ocr_una_imagen(origen, idioma)
+        paginas_bytes, dimensiones = validacion
+        resultado_img = _ocr_paginas(paginas_bytes, idioma)
         if resultado_img is None:
             return Resultado(
                 estado="error", salidas={}, extractor=EXTRACTOR,
                 version=_version() or "desconocida",
                 detalle={"razon": "no se pudo correr tesseract sobre la imagen"},
             )
-        return _resolver_imagen(resultado_img, idioma, validacion)
+        return _resolver_imagen(resultado_img, idioma, dimensiones)
     except Exception as exc:  # fail-soft: cualquier fallo inesperado (permisos, disco lleno, workspace remontado solo-lectura) sale como Resultado(estado="error"), nunca una excepcion cruda -- mismo tratamiento que D-1/I-5 en los hermanos
         return Resultado(
             estado="error", salidas={}, extractor=EXTRACTOR,
             version=_version() or "desconocida",
-            detalle={"razon": f"fallo inesperado en OCR: {type(exc).__name__}: {exc}"},
+            detalle={"razon": f"fallo inesperado en OCR: {type(exc).__name__}"},
         )

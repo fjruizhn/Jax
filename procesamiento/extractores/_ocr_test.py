@@ -1071,7 +1071,7 @@ def _ingerir_imagen_sin_texto(tmp_path, monkeypatch):
 
 def test_minor1_la_ficha_lleva_la_version_de_la_logica_del_ocr(tmp_path, monkeypatch):
     _, _, _, ficha = _ingerir_imagen_sin_texto(tmp_path, monkeypatch)
-    assert ficha.detalle["_version_logica"] == ocr.VERSION_LOGICA
+    assert ficha.detalle["_version_logica"] == ocr.VERSION_LOGICA_IMAGEN
 
 
 def test_minor1_cambiar_la_logica_invalida_la_cache(tmp_path, monkeypatch):
@@ -1464,3 +1464,33 @@ def test_d_en_un_tiff_multipagina_exige_que_todas_las_paginas_sean_de_pagina():
     assert todas.detalle["codigo"] == "imagen_pagina_sin_texto"
     mezcla = ocr._resolver_imagen(r, "spa", [(2480, 3508), (4032, 3024)])
     assert mezcla.detalle["codigo"] == "imagen_sin_texto"
+
+
+def test_un_jpeg_mpo_de_dos_fotogramas_se_procesa_como_una_foto(tmp_path: Path, monkeypatch):
+    """Fotos de iPhone (MPO, 2 fotogramas: la foto y una vista previa): 30 de
+    las 33 imagenes reales de LACTOVI. Tesseract lee UN fotograma de un JPEG;
+    solo un TIFF es multipagina para el. No se re-codifica ni se suman."""
+    from PIL import Image
+
+    base = _imagen_multilinea(tmp_path / "b.png", [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    grande = Image.open(base).convert("RGB")
+    mpo = tmp_path / "foto.jpeg"
+    grande.save(mpo, format="MPO", save_all=True, append_images=[grande.resize((550, 225))])
+    assert getattr(Image.open(mpo), "n_frames", 1) == 2
+    entradas: list = []
+    real = ocr.subprocess.run
+
+    def espia(cmd, *a, **k):
+        if cmd and cmd[0] == "tesseract" and "--version" not in cmd and "tsv" not in cmd:
+            entradas.append(k.get("input"))
+        return real(cmd, *a, **k)
+
+    monkeypatch.setattr(ocr.subprocess, "run", espia)
+    r = ocr.extraer(mpo)
+    assert r.estado == "ok"
+    assert "Activos totales" in r.salidas["texto.txt"]
+    assert "paginas" not in r.detalle
+    assert entradas == [mpo.read_bytes()]
