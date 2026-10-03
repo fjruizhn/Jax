@@ -5124,11 +5124,15 @@ jobs:
       # 'parcial'"), de 19 a 20. Medido en este entorno (Python 3.14 y, via
       # Docker, Python 3.12 -- mismo runtime que usa este job): 20 passed
       # en las dos.
+      # Ronda dos columnas (2026-10-03, PR #329): +2 tests del modo
+      # opt-in para conservar el orden de lectura de La Gaceta. Medido
+      # con `python3 -m pytest -q procesamiento/extractores/_pdf_test.py`
+      # sobre este SHA: 22 passed, 0 skipped.
       - name: PDF -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_pdf_test.py 2>&1 | tee /tmp/pdf_tests
-          grep -qE "^20 passed" /tmp/pdf_tests || {
-            echo "PISO ROTO: se esperaban 20 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          grep -qE "^22 passed" /tmp/pdf_tests || {
+            echo "PISO ROTO: se esperaban 22 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 5 (2026-09-21, procesamiento-archivos-nucleo): OCR -- PDF
       # escaneado e imagen. tesseract por subproceso, nunca por binding
