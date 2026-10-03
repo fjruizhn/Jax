@@ -110,7 +110,7 @@ from pydantic import BaseModel, ConfigDict
 
 from motor_registry import job_tasks, tool_authority
 from motor_registry.models import JobStatus
-from procesamiento import ingesta
+from procesamiento import dependencias, ingesta
 from processing_job_store import ProcessingJobStore
 from processing_ownership import ProcessingOwnershipError, processing_ownership_from_scope
 
@@ -634,6 +634,17 @@ def _snapshot_for_owner(job_id: str, request: Request):
 @router.post("/trabajos", response_model=TrabajoCreadoResponse, status_code=202)
 async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoResponse:
     ownership = _processing_ownership(request)
+    # jax-14 (2026-10-03): freno de dependencias. Sin pdfplumber/openpyxl/
+    # python-docx los PDF/DOCX/XLSX salian `sin_extractor` en silencio. 503 ANTES
+    # de crear el trabajo y de tomar cupo: el despachador de la plataforma
+    # trata 5xx como reintento y las filas siguen `en_cola` hasta que se arregle.
+    extractores = dependencias.estado()
+    if not extractores["ok"]:
+        logger.error("POST /procesamiento/trabajos rechazado: faltan extractores %s", extractores["faltan"])
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "extractores_no_disponibles", "faltan": extractores["faltan"]},
+        )
     if len(req.rutas) > _MAX_RUTAS_POR_TRABAJO:
         raise HTTPException(
             status_code=422,

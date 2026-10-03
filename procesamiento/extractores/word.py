@@ -244,11 +244,14 @@ def extraer(origen: Path) -> Resultado:
     try:
         from docx import Document
         from docx.oxml.ns import qn
-    except ModuleNotFoundError as exc:
+    except ImportError as exc:
+        # jax-14: python-docx esta DECLARADO en requirements-archivos.txt; su falta
+        # es un despliegue roto, no "tipo sin extractor" -> error con codigo.
         return Resultado(
-            estado="sin_extractor", salidas={}, extractor=EXTRACTOR,
+            estado="error", salidas={}, extractor=EXTRACTOR,
             version="sin instalar",
-            detalle={"razon": f"python-docx no esta instalado: {exc}"},
+            detalle={"codigo": "dependencia_no_instalada",
+                     "razon": f"python-docx no esta instalado: {exc}"},
         )
 
     origen = Path(origen)

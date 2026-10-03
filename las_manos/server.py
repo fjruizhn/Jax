@@ -296,6 +296,17 @@ async def _jacobs_init() -> None:
     from procesamiento_routes import reconciliar_trabajos_huerfanos
     reconciliar_trabajos_huerfanos()
 
+    # jax-14 (2026-10-03): si faltan las dependencias de extraccion, avisar fuerte
+    # en el arranque. El servicio NO se cae (tiene otras capacidades): el POST de
+    # procesamiento responde 503 y /health lo informa.
+    _extractores = _dependencias.estado()
+    if not _extractores["ok"]:
+        logging.getLogger("las_manos.procesamiento").error(
+            "extractores de archivos NO disponibles, faltan %s: el procesamiento de "
+            "PDF/DOCX/XLSX responde 503 hasta instalar requirements-archivos.txt",
+            _extractores["faltan"],
+        )
+
     # El chequeo de consistencia codigo-vs-DB de timeouts se ELIMINO el
     # 2026-09-01 al deduplicar: existia para comparar `_CAPABILITY_TIMEOUT_SECONDS`
     # (jacobs/plan.py) contra `capability.max_execution_minutes` (DB). El dict
@@ -379,6 +390,7 @@ async def envelope_structural_rejection(request: Request, exc: RequestValidation
 # SALTABAN en silencio. El test que demuestra que /health puede ponerse rojo no
 # corria justo donde importa.
 from salud import Salud, comprobar_audit, comprobar_base  # noqa: E402
+from procesamiento import dependencias as _dependencias  # noqa: E402
 
 _salud = Salud({
     "base de datos": lambda: comprobar_base(jacobs_store.conexion),
@@ -402,6 +414,8 @@ async def health(response: Response) -> dict:
         "status": "alive" if estado["ok"] else "degraded",
         "kill_switch_active": _kill_switch_active(),
         "problemas": estado["fallos"],
+        # jax-14: informa, NO degrada -- LAS MANOS tiene otras capacidades.
+        "extractores": _dependencias.estado(),
         "comprobado_hace_s": _salud.comprobado_hace(),
         "cache_ttl_s": _salud._ttl,
     }

@@ -255,11 +255,14 @@ def extraer(
 
     try:
         import pdfplumber
-    except ModuleNotFoundError as exc:
+    except ImportError as exc:
+        # jax-14: pdfplumber esta DECLARADO en requirements-archivos.txt; su falta
+        # es un despliegue roto, no "tipo sin extractor" -> error con codigo.
         return Resultado(
-            estado="sin_extractor", salidas={}, extractor=EXTRACTOR,
+            estado="error", salidas={}, extractor=EXTRACTOR,
             version="sin instalar",
-            detalle={"razon": f"pdfplumber no esta instalado: {exc}"},
+            detalle={"codigo": "dependencia_no_instalada",
+                     "razon": f"pdfplumber no esta instalado: {exc}"},
         )
 
     try:
