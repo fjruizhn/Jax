@@ -5423,8 +5423,19 @@ jobs:
           #   5000x5001 (el minimo sobre 25 Mpx) con transparencia real es imagen_demasiado_grande
           #   sin llamar a tesseract, y su control opaco no lo toca el tope (+2). Medido LOCAL en
           #   hall9000: 166 passed (las 2 reales corren). En el runner: 164 passed, 2 skipped.
-          grep -qE "^164 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 164 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 166 -> 182 (Jax#338 ronda 11, BLOCK-N36 y MINOR-N37): +16 -- se borra la heuristica de
+          #   luminancia y la transparencia real se aplana sobre blanco Y sobre negro (gana la pasada
+          #   con mas palabras no dudosas; empate, blanco). Logos A (figura clara y texto oscuro) e I
+          #   (bloque oscuro y texto blanco) en png/webp/tif/gif con un tesseract simulado que lee la
+          #   imagen que recibe (8); A e I en PNG con tesseract REAL (2: a leptonica le llega un PNG
+          #   RGB sin alfa armado por Pillow, no depende de como cada leptonica trata el alfa);
+          #   transparente sin texto sigue imagen_sin_texto (1); opaca en una sola pasada con los
+          #   bytes originales (1); empate y metrica de palabras no dudosas (2); eleccion por pagina
+          #   en un TIFF (1); N37, TIFF con la pagina 2 transparente de mas de 25 Mpx sin tesseract
+          #   (1). Las n28/n32 se reescriben, no se suman. Medido LOCAL en hall9000: 182 passed (las
+          #   2 reales de LACTOVI corren). El RUNNER no tiene esas 2: el piso es 180 passed + 2 skipped.
+          grep -qE "^180 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 180 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
