@@ -1822,8 +1822,13 @@ jobs:
           # 127 -> 131 (2026-10-03, SR3 caller immutability): +4 source-store
           # derivation, update-rejection, and replay-contradiction cases.
           # Measured on Python 3.12 with this exact three-file command.
-          grep -qE "^131 passed" /tmp/f2e-sr3-source || {
-            echo "PISO ROTO: se esperaban 131 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
+          # 131 -> 136 (2026-10-03, jax-14, freno de extractores): +5 en
+          # las_manos/_procesamiento_routes_test.py (503 con la lista y sin
+          # trabajo, 503 sin cupo, 202 con todo instalado, /health informa,
+          # el arranque loguea error). Medido en local con este comando
+          # exacto: 136 passed, 7 warnings (antes del cambio: 131).
+          grep -qE "^136 passed" /tmp/f2e-sr3-source || {
+            echo "PISO ROTO: se esperaban 136 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
         env:
           PYTHONPATH: .:las_manos
       - name: Piso exacto de tests CORRIDOS
@@ -5788,11 +5793,28 @@ jobs:
       # 69 -> 70 el 2026-10-03 (B-6): +1 que conserva `user:<user_id>` del
       #   sobre autenticado como caller. Medido localmente en Python 3.12:
       #   70 passed, 7 warnings.
+      # 70 -> 75 el 2026-10-03 (jax-14, freno de extractores): +5 (503
+      #   `extractores_no_disponibles` con la lista y sin crear trabajo, 503 que
+      #   no toma cupo, 202 con todo instalado, /health informa `extractores`
+      #   sin dejar de dar 200, el arranque loguea error). Los 4 que simulan la
+      #   falta vistos en ROJO contra el codigo viejo. Medido localmente:
+      #   75 passed, 7 warnings.
       - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
-          grep -qE "^70 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 70 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          grep -qE "^75 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 75 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+
+      # jax-14 (2026-10-03): freno de dependencias de extraccion. Piso exacto de
+      # procesamiento/_dependencias_test.py: 10 passed, medido localmente con
+      # pdfplumber, openpyxl y python-docx instalados. Si da "skipped", falta
+      # una dependencia declarada: no es un piso mas alto, es justo la falla
+      # que este modulo existe para atrapar.
+      - name: Freno de dependencias de extraccion -- piso exacto de tests CORRIDOS (no skipeados)
+        run: |
+          python -m pytest -q procesamiento/_dependencias_test.py 2>&1 | tee /tmp/dependencias_tests
+          grep -qE "^10 passed" /tmp/dependencias_tests || {
+            echo "PISO ROTO: se esperaban 10 tests CORRIDOS (no skipeados) del freno de dependencias."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
