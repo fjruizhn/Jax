@@ -27,6 +27,9 @@ falla, rollback y se deshace el rename).
     `proyectos/<uuid>/fuente/<ruta>` (relativa al workspace) para que el despachador de la
     plataforma la procese; la ingesta ve que el archivo ya esta en fuente/ y lo procesa en
     el lugar, sin copiarlo;
+    REGLA: esa `ruta_entrada` bajo `fuente/` es el ORIGINAL que trajo LACTOVI. Nadie la borra
+    nunca (ni el despachador al terminar el trabajo): solo se borran las de
+    `proyectos/<uuid>/entrada/`;
   - sin ficha y sin extractor: `sin_extractor` (ruta_entrada NULL).
 Todo lo que cuelga de la carpeta fuera de `fuente/` y `procesado/` (p. ej.
 `.claude-flow/`) se ignora para el registro (viaja con el rename) y se menciona.

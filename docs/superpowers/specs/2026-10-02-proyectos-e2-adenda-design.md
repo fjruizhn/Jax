@@ -88,6 +88,11 @@ Tabla nueva **`project_documents`** en `jax_memory` (esquema en el repo jax):
 ### 3.5 Antes de habilitar la subida (Principio IX, spec §8)
 1. Jax#276 aplicado: `proyectos/` con grupo `jaxsvc`, setgid y ACL por defecto; su prueba
    corriendo como `jaxsvc` pasa en el host.
+   > **Corrección (2026-10-03, Hyde):** «grupo `jaxsvc`» es inexacto. El modelo real, el de la
+   > spec madre §5 (`2026-09-22-proyectos-y-selector-design.md`) y el que implementa
+   > `ops/permisos_proyectos.py`, es **dueño `jaxsvc`, grupo `fruiz`**, setgid en directorios y
+   > ACL `u:jaxsvc:rwX,g:fruiz:rwX` (de acceso y por defecto). El texto de arriba se deja como
+   > estaba; vale esta nota.
 2. **LACTOVI** se crea como proyecto (dueño: Fernando) y `proyectos/lacteos-victoria/` se
    **mueve** a `proyectos/<uuid>/`; `sha256` de `fuente/` iguales antes y después; sus 88
    extractos quedan registrados en `project_documents`.
