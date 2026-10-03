@@ -48,6 +48,8 @@ recorded generated hash. An unlisted or manually edited skill is preserved and
 the command fails closed; replacement and removal share one rollback path.
 Before staging and immediately before each replacement/removal, the generator
 rejects symlink components along every output path, including expected files.
+The check also rejects symlink components in every canonical input, expected
+output and manifest, even when the linked file has identical bytes.
 
 ## 2026-10-03 · revisión de la proyección Qwen (Jax#320)
 
@@ -108,6 +110,13 @@ Una sustitución concurrente del directorio entre esa comprobación y la llamada
 al sistema sigue siendo un riesgo de carreras entre procesos del mismo usuario;
 la marca de propiedad del worktree coordina las escrituras normales, pero no es
 un bloqueo del sistema de archivos.
+
+**HISTORIA — auditoría independiente, 2026-10-03:** el auditor mostró que
+`--check` aún aceptaba un archivo generado o canónico enlazado a otro lugar
+con bytes idénticos. Eso permitía que el filtro de rutas de CI no viera una
+edición posterior del destino real. El check ahora rechaza cualquier componente
+symlink de las entradas canónicas, proyecciones esperadas y manifiesto; las
+pruebas fijan los tres casos.
 
 **Alternativa descartada — Codex:** enumerar nombres de herramientas del bundle
 congelaría el catálogo y omitiría herramientas MCP registradas después. El

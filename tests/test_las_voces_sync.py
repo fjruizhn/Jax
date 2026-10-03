@@ -195,6 +195,35 @@ def test_generate_refuses_symlinked_expected_directory_without_external_write(ro
     assert not (project / "sync/manifest.json").exists()
 
 
+@pytest.mark.parametrize("relative", [
+    ".qwen/agents/primary-builder.md",
+    ".qwen/skills/las-voces-governance/SKILL.md",
+    "sync/manifest.json",
+])
+def test_check_rejects_symlinked_projection_even_with_identical_bytes(root: Path, relative: str) -> None:
+    assert sync.generate(root) == 0
+    target = generated(root) / relative
+    alternate = root / "alternate-projection"
+    target.rename(alternate)
+    target.symlink_to(alternate)
+    assert sync.check(root) == 1
+
+
+@pytest.mark.parametrize("relative", [
+    "project.json", "PROJECT_CHARTER.md", "SYNC_CONTRACT.md",
+    "agents/ariadna.json", "skills/las-voces-governance.json",
+    "sync/message-envelope.schema.json",
+])
+def test_check_rejects_symlinked_canonical_source_even_with_identical_bytes(root: Path, relative: str) -> None:
+    assert sync.generate(root) == 0
+    target = generated(root) / relative
+    alternate = root / "alternate-source"
+    target.rename(alternate)
+    target.symlink_to(alternate)
+    with pytest.raises(sync.SyncError, match="symlink"):
+        sync.check(root)
+
+
 def test_skill_rename_rolls_back_if_old_projection_cannot_be_removed(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert sync.generate(root) == 0
     project = generated(root)

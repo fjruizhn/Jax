@@ -105,9 +105,18 @@ def _reject_symlink_components(root: Path, target: Path) -> None:
             raise SyncError(f"projection path crosses a symlink: {cursor}")
 
 
+def _canonical_file(root: Path, path: Path) -> None:
+    _reject_symlink_components(root, path)
+    if not path.is_file():
+        raise SyncError(f"missing canonical source: {path}")
+
+
 def _canonical(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     project = root / "projects" / PROJECT_ID
     _reject_symlink_components(root, project)
+    for relative in ("project.json", "agents/ariadna.json", "skills/las-voces-governance.json",
+                     "sync/message-envelope.schema.json"):
+        _canonical_file(root, project / relative)
     project_json = _read_json(project / "project.json")
     if project_json.get("project", {}).get("id") != PROJECT_ID:
         raise SyncError("missing or invalid LAS VOCES project identity")
@@ -154,8 +163,7 @@ def _source_hash(project: Path) -> str:
     ]
     digest = hashlib.sha256()
     for path in files:
-        if not path.is_file():
-            raise SyncError(f"missing canonical source: {path}")
+        _canonical_file(project.parents[1], path)
         digest.update(path.relative_to(project).as_posix().encode() + b"\0")
         digest.update(path.read_bytes())
     return digest.hexdigest()
@@ -288,6 +296,11 @@ def check(root: Path) -> int:
     expected.pop("sync/manifest.json")
     for relative, data in expected.items():
         target = project / relative
+        try:
+            _reject_symlink_components(root, target)
+        except SyncError:
+            failures.append(f"DRIFT DETECTED: symlinked projection {relative}")
+            continue
         if not target.is_file():
             failures.append(f"SYNC REQUIRED: missing projection {relative}")
         elif target.read_bytes() != data:
@@ -301,6 +314,7 @@ def check(root: Path) -> int:
                         failures.append(f"UNLISTED PROJECTION: {relative}")
     manifest_path = project / "sync/manifest.json"
     try:
+        _reject_symlink_components(root, manifest_path)
         manifest = _read_json(manifest_path)
         source_commit = manifest.get("source_commit")
         reference = json.loads(_manifest(project, expected, _source_hash(project), root))
