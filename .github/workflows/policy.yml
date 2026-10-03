@@ -55,7 +55,17 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install pytest pyyaml mcp==2.2.0
-      - run: python -m pytest -q tests/test_las_voces_faro_readonly.py tests/test_las_voces_faro_mcp_client.py
+      - name: Paquete Faro permanente y frontera MCP read-only
+        run: |
+          set -o pipefail
+          python -m pytest -q \
+            tests/test_las_voces_faro_readonly.py \
+            tests/test_las_voces_faro_mcp_client.py \
+            tests/test_las_voces_faro_paquete.py \
+            tests/test_las_voces_qwen_auto.py 2>&1 | tee /tmp/las-voces-faro-readonly
+          # Medido 2026-10-03 en venv limpio con mcp==2.2.0: 6 MCP + 18 paquete/lanzador, 0 skipped.
+          grep -qE "^24 passed in " /tmp/las-voces-faro-readonly || {
+            echo "PISO ROTO: se esperaban exactamente 24 tests CORRIDOS."; exit 1; }
 
   memory-b9-regression:
     runs-on: ubuntu-latest
@@ -322,14 +332,15 @@ jobs:
         # MINOR-6/MINOR-7, + 8 de las formas dinamicas de la ronda 2, MINOR-16, + 4 de la
         # reauditoria, MINOR-28: la mencion partida y la exencion explicita de axioma_sync.py,
         # + 2 de MAJOR-30, auditoria del SHA 174da8c: la exencion exige el conjunto exacto de
-        # cadenas con "claude" y el archivo real lo cumple),
+        # cadenas con "claude" y el archivo real lo cumple), + 3 de LV-001
+        # (exenciones Faro por ruta/fuente exacta, y sin argv libre nuevo),
         # medidos con JAX_PLATFORM_REPO_ROOT apuntando a un
         # directorio que no existe: en el runner jax-platform tampoco existe y el
         # escaneo real cubre solo este repo. Exacto: una autoprueba que desaparezca
         # deja pasar en silencio la forma que cubria.
         run: |
           python -m pytest -q policy/tests/test_claude_subprocess_solo_via_sandbox.py 2>&1 | tee /tmp/scanner
-          grep -qE "^51 passed" /tmp/scanner || { echo "PISO ROTO: se esperaban 51 tests CORRIDOS del scanner."; exit 1; }
+          grep -qE "^54 passed" /tmp/scanner || { echo "PISO ROTO: se esperaban 54 tests CORRIDOS del scanner."; exit 1; }
       - name: Piso exacto del control "un Titular solo nace en exigir_titular"
         # 9 tests (MINOR-16, ronda 2): 7 autopruebas del detector + el escaneo que ve el
         # arbol y el real. Medido con JAX_PLATFORM_REPO_ROOT=/nonexistent. Exacto: una
