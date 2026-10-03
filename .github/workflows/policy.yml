@@ -5393,9 +5393,9 @@ jobs:
           #   formato (gif_animado, webp_animado, coma_flotante, entero_32_bits, gris_16_bits x3 +
           #   multipagina, bmp_16_bits y su control 555) con un espia que verifica que tesseract
           #   NO se llama, `_formato_de_modo`, el PNG sin IEND y el JPEG con basura (reales,
-          #   archivo_no_procesable) y la tabla de causas (5). Ninguna depende de la version de
-          #   leptonica para la DETECCION (los dos archivos N26 si dependen de que libpng/libjpeg
-          #   rechacen esos datos). Medido LOCAL en hall9000: 140 passed (las 2 reales de LACTOVI
+          #   archivo_no_procesable: archivos reales, pero el rechazo de leptonica se SIMULA con
+          #   tesseract rc=1 + pixReadMem) y la tabla de causas (5). NINGUNA prueba depende de la
+          #   version de libpng, libjpeg ni leptonica del runner. Medido LOCAL en hall9000: 140 passed (las 2 reales de LACTOVI
           #   corren). El RUNNER no tiene esas 2: el piso es 138 passed + 2 skipped. (Sobre e0158c2
           #   el runner dio "1 failed, 151 passed, 2 skipped" = 154: el unico rojo era el GIF.)
           grep -qE "^138 passed, 2 skipped" /tmp/ocr_tests || {

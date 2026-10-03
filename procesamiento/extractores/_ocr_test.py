@@ -2120,7 +2120,40 @@ def _imagen_de_ruido(tmp_path: Path, rnd=None):
     return im
 
 
-def test_n26_un_png_cortado_antes_de_iend_es_archivo_no_procesable(tmp_path: Path):
+def _tesseract_simulado_rc1_pixreadmem(monkeypatch) -> list:
+    """Tesseract SIMULADO: rc=1 con la marca `pixReadMem`. La prueba no depende
+    de la version de libpng, libjpeg ni leptonica del runner: los archivos son
+    reales (Pillow los decodifica) pero el rechazo de leptonica se simula."""
+    llamadas: list = []
+    real = ocr.subprocess.run
+
+    class Rechazo:
+        returncode = 1
+        stdout = b""
+        stderr = b"Error in pixReadMem: png: no pix returned\nError during processing.\n"
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        llamadas.append(list(cmd))
+        return Rechazo()
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    return llamadas
+
+
+def _assert_no_procesable(r, llamadas):
+    assert r.estado == "error"
+    assert r.salidas == {}
+    assert r.detalle["codigo"] == "archivo_no_procesable"
+    assert r.detalle["causa"] == "tesseract_no_lee"
+    assert r.detalle["razon"] == (
+        "el OCR no pudo leer la imagen (dañada o en un formato no soportado)")
+    assert "formato" not in r.detalle
+    assert llamadas, "tesseract (simulado) tenia que haberse llamado: Pillow si lo decodifica"
+
+
+def test_n26_un_png_cortado_antes_de_iend_es_archivo_no_procesable(tmp_path: Path, monkeypatch):
     import io
 
     from PIL import Image
@@ -2129,17 +2162,12 @@ def test_n26_un_png_cortado_antes_de_iend_es_archivo_no_procesable(tmp_path: Pat
     _imagen_de_ruido(tmp_path).save(buf, format="PNG")
     cortado = tmp_path / "sin-iend.png"
     cortado.write_bytes(buf.getvalue()[:-12])
-    Image.open(cortado).load()                     # Pillow SI lo decodifica
-    r = ocr.extraer(cortado)
-    assert r.estado == "error"
-    assert r.detalle["codigo"] == "archivo_no_procesable"
-    assert r.detalle["causa"] == "tesseract_no_lee"
-    assert r.detalle["razon"] == (
-        "el OCR no pudo leer la imagen (dañada o en un formato no soportado)")
-    assert "formato" not in r.detalle
+    Image.open(cortado).load()                     # el archivo es real y Pillow lo decodifica
+    llamadas = _tesseract_simulado_rc1_pixreadmem(monkeypatch)
+    _assert_no_procesable(ocr.extraer(cortado), llamadas)
 
 
-def test_n26_un_jpeg_con_basura_en_los_datos_es_archivo_no_procesable(tmp_path: Path):
+def test_n26_un_jpeg_con_basura_en_los_datos_es_archivo_no_procesable(tmp_path: Path, monkeypatch):
     import io
     import random
 
@@ -2153,11 +2181,9 @@ def test_n26_un_jpeg_con_basura_en_los_datos_es_archivo_no_procesable(tmp_path: 
         datos[i] = rnd.randint(0, 255)
     roto = tmp_path / "basura.jpg"
     roto.write_bytes(bytes(datos))
-    Image.open(roto).load()                        # Pillow SI lo decodifica
-    r = ocr.extraer(roto)
-    assert r.estado == "error"
-    assert r.detalle["codigo"] == "archivo_no_procesable"
-    assert r.detalle["causa"] == "tesseract_no_lee"
+    Image.open(roto).load()                        # el archivo es real y Pillow lo decodifica
+    llamadas = _tesseract_simulado_rc1_pixreadmem(monkeypatch)
+    _assert_no_procesable(ocr.extraer(roto), llamadas)
 
 
 @pytest.mark.parametrize("causa,codigo", [
