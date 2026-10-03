@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import struct
@@ -94,3 +95,44 @@ def test_unix_listener_refuses_preexisting_socket_path(tmp_path):
         with pytest.raises(ConfigInvalida): await arrancar(cfg)
         assert path.read_text(encoding="utf-8") == "attacker replacement"
     _correr(scenario())
+
+
+def test_por_jaxqwen_con_apagado_el_thinking_llega_intacto_y_por_la_entrada_normal_no(tmp_path):
+    """La reescritura de `apagado` es SOLO de la entrada del Ejecutor (decisión de jax-14,
+    2026-10-03); el socket de jaxqwen sigue byte a byte. La validación de claves ambiguas
+    (MAJOR-5) sí aplica a las dos entradas."""
+    cuerpo = (b'{"model":"modelo-permitido","max_tokens":1024,"thinking":{"type":"enabled","budget_tokens":2048},'
+              b'"messages":[{"role":"user","content":"x"}]}')
+    ambiguo = b'{"model":"modelo-permitido","Max_Tokens":999999,"max_tokens":1,"messages":[]}'
+
+    async def scenario():
+        async with Upstream(modo="error") as upstream:
+            parent = tmp_path / "run"
+            parent.mkdir(mode=0o700)
+            path = parent / "jaxqwen.sock"
+            cfg = Config(upstream=upstream.url, raiz=tmp_path / "locks", tope_s=2,
+                         host="127.0.0.1", puerto=0, registro=tmp_path / "registro.jsonl",
+                         pausa=tmp_path / "PAUSA", latido=tmp_path / "latido", latido_max_s=60,
+                         modelo=MODELO_PERMITIDO, max_salida_tokens=1024, pensamiento="apagado",
+                         jaxqwen_socket=path, jaxqwen_uid=os.getuid(), jaxqwen_gid=os.getgid())
+            cfg.raiz.mkdir()
+            latir(cfg.latido)
+            server = await arrancar(cfg)
+            try:
+                transport = httpx.AsyncHTTPTransport(uds=str(path))
+                async with httpx.AsyncClient(transport=transport, base_url="http://jaxqwen") as client:
+                    await client.post("/v1/messages", content=cuerpo)
+                    rechazado = await client.post("/v1/messages", content=ambiguo)
+                por_tcp = server.sockets[0].getsockname()[1]
+                async with httpx.AsyncClient() as client:
+                    await client.post(f"http://127.0.0.1:{por_tcp}/v1/messages", content=cuerpo)
+                return rechazado.status_code, [r[3] for r in upstream.recibidas]
+            finally:
+                server.close()
+                await server.wait_closed()
+
+    rechazado, recibidas = _correr(scenario())
+    assert rechazado == 403
+    assert len(recibidas) == 2
+    assert recibidas[0] == cuerpo, "por jaxqwen el cuerpo llega byte a byte"
+    assert json.loads(recibidas[1])["thinking"] == {"type": "disabled"}, "por la entrada del Ejecutor se impone"

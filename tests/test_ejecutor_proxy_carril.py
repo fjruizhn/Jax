@@ -598,3 +598,147 @@ def test_config_con_valor_invalido_falla_cerrado(valor):
 def test_el_config_no_tiene_valor_por_omision():
     campo = {f.name: f for f in dataclasses.fields(proxy_carril.Config)}["pensamiento"]
     assert campo.default is dataclasses.MISSING
+
+
+# --- Ronda de la auditoría de escalón 3 sobre el pensamiento apagado (2026-10-03) ---------------
+
+def _posteo(tmp_path, pensamiento, cuerpo, preparar=None):
+    """Un POST /v1/messages por el proxy; devuelve (estado, cabeceras de respuesta, recibidas)."""
+    async def escenario():
+        async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 2, pensamiento=pensamiento) as px, \
+                httpx.AsyncClient() as cli:
+            if preparar:
+                preparar(px)
+            r = await cli.post(px.url + "/v1/messages", content=cuerpo)
+            return r.status_code, r.headers, list(up.recibidas)
+
+    return _correr(escenario())
+
+
+_CLAVES_DE_PENSAMIENTO_VARIANTES = ["Thinking", "THINKING", "thinKing", "THINK", "Reasoning_Effort"]
+
+
+@pytest.mark.parametrize("clave", _CLAVES_DE_PENSAMIENTO_VARIANTES + ["thinking", "think", "reasoning_effort"])
+def test_la_reescritura_borra_toda_clave_de_pensamiento_por_casefold(clave):
+    sucio = json.dumps({"model": "m", "max_tokens": 5, clave: "high"}).encode()
+    assert json.loads(proxy_carril._con_pensamiento_apagado(sucio)) == {
+        "model": "m", "max_tokens": 5, "thinking": _DESHABILITADO}
+
+
+@pytest.mark.parametrize("extra", [{"think": True}, {"reasoning_effort": "high"},
+                                   {"think": True, "reasoning_effort": "high",
+                                    "thinking": {"type": "enabled", "budget_tokens": 9}}])
+def test_apagado_think_y_reasoning_effort_no_llegan_al_upstream(tmp_path, extra):
+    estado, _, recibidas = _posteo(tmp_path, "apagado", _mensaje_p(**extra))
+    assert estado == 200
+    enviado = json.loads(recibidas[0][3])
+    assert enviado["thinking"] == _DESHABILITADO and "think" not in enviado and "reasoning_effort" not in enviado
+
+
+@pytest.mark.parametrize("pensamiento", ["apagado", "libre"])
+@pytest.mark.parametrize("clave", _CLAVES_DE_PENSAMIENTO_VARIANTES)
+def test_variante_de_capitalizacion_de_pensamiento_es_ambigua_y_no_llega(tmp_path, pensamiento, clave):
+    estado, _, recibidas = _posteo(tmp_path, pensamiento, _mensaje_p(**{clave: "high"}))
+    assert estado == 403 and recibidas == []
+
+
+@pytest.mark.parametrize("pensamiento", ["apagado", "libre"])
+@pytest.mark.parametrize("cuerpo", [
+    b'{"model":"modelo-permitido","Model":"otro","max_tokens":1024,"messages":[]}',
+    b'{"Model":"otro","max_tokens":1024,"messages":[]}',
+    b'{"model":"modelo-permitido","Max_Tokens":999999,"messages":[]}',
+    b'{"model":"modelo-permitido","max_tokens":1024,"Messages":[{"role":"user","content":"x"}]}',
+    b'{"model":"modelo-permitido","max_tokens":1024,"max_tokens":1024,"messages":[]}',
+    b'{"model":"modelo-permitido","max_tokens":1024,"SYSTEM":"x","messages":[]}',
+    b'{"model":"modelo-permitido","max_tokens":1024,"Foo":1,"foo":2,"messages":[]}',
+])
+def test_claves_que_go_leeria_distinto_dan_403_y_no_llegan(tmp_path, pensamiento, cuerpo):
+    estado, _, recibidas = _posteo(tmp_path, pensamiento, cuerpo)
+    assert estado == 403 and recibidas == []
+
+
+def test_claves_ajenas_en_otra_capitalizacion_sin_choque_si_pasan(tmp_path):
+    cuerpo = b'{"model":"modelo-permitido","max_tokens":1024,"messages":[],"Extra":1}'
+    estado, _, recibidas = _posteo(tmp_path, "libre", cuerpo)
+    assert estado == 200 and recibidas[0][3] == cuerpo
+
+
+def test_surrogate_suelto_con_apagado_se_reenvia_y_no_da_502(tmp_path):
+    cuerpo = (b'{"model":"modelo-permitido","max_tokens":1024,"messages":[{"role":"user","content":'
+              b'[{"type":"tool_result","tool_use_id":"t1","content":"\\ud83d"}]}]}')
+    estado, _, recibidas = _posteo(tmp_path, "apagado", cuerpo)
+    assert estado == 200 and len(recibidas) == 1
+    enviado = json.loads(recibidas[0][3])
+    assert enviado["thinking"] == _DESHABILITADO
+    assert enviado["messages"][0]["content"][0]["content"] == "\ud83d"
+
+
+def test_502_de_reescritura_lleva_x_should_retry_false(tmp_path, monkeypatch):
+    def roto(cuerpo):
+        raise ValueError("no")
+
+    monkeypatch.setattr(proxy_carril, "_con_pensamiento_apagado", roto)
+    estado, cabeceras, recibidas = _posteo(tmp_path, "apagado", _mensaje_p())
+    assert (estado, cabeceras.get("x-should-retry"), recibidas) == (502, "false", [])
+
+
+def test_apagado_con_la_pausa_puesta_423_sin_reenviar(tmp_path):
+    from jax.ejecutor.contratos import pausa as P
+    estado, cabeceras, recibidas = _posteo(
+        tmp_path, "apagado", _mensaje_p(),
+        preparar=lambda px: P.poner_pausa(px.cfg.pausa, {"origen": "c5", "motivo": "x", "paso": 1}))
+    assert (estado, cabeceras.get("x-should-retry"), recibidas) == (423, "false", [])
+
+
+def test_apagado_sin_latido_del_vigia_423_sin_reenviar(tmp_path):
+    estado, _, recibidas = _posteo(tmp_path, "apagado", _mensaje_p(),
+                                   preparar=lambda px: px.cfg.latido.unlink())
+    assert (estado, recibidas) == (423, [])
+
+
+def _con_resultado(tool_use_id="toolu_1"):
+    return json.dumps({"model": MODELO_PERMITIDO, "max_tokens": MAX_SALIDA_TOKENS, "messages": [
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": "ok"}]}]}).encode()
+
+
+def _eventos(tmp_path):
+    return [json.loads(l)["evento"] for l in (tmp_path / "registro.jsonl").read_text().splitlines()]
+
+
+def test_c3_con_apagado_anota_el_resultado_una_sola_vez(tmp_path):
+    async def escenario():
+        async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 2, pensamiento="apagado") as px, \
+                httpx.AsyncClient() as cli:
+            return [(await cli.post(px.url + "/v1/messages", content=_con_resultado())).status_code for _ in range(2)]
+
+    assert _correr(escenario()) == [200, 200]
+    assert _eventos(tmp_path).count("resultado_devuelto") == 1
+
+
+def test_c3_un_502_de_reescritura_no_duplica_la_anotacion_al_reintentar(tmp_path, monkeypatch):
+    original = proxy_carril._con_pensamiento_apagado
+    llamadas = []
+
+    def falla_la_primera(cuerpo):
+        llamadas.append(1)
+        if len(llamadas) == 1:
+            raise ValueError("falla una vez")
+        return original(cuerpo)
+
+    monkeypatch.setattr(proxy_carril, "_con_pensamiento_apagado", falla_la_primera)
+
+    async def escenario():
+        async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 2, pensamiento="apagado") as px, \
+                httpx.AsyncClient() as cli:
+            return [(await cli.post(px.url + "/v1/messages", content=_con_resultado())).status_code for _ in range(2)]
+
+    assert _correr(escenario()) == [502, 200]
+    assert _eventos(tmp_path).count("resultado_devuelto") == 1
+
+
+def test_c3_ve_lo_mismo_que_la_validacion_un_pedido_ambiguo_no_se_anota():
+    from jax.ejecutor.contratos import lectura
+    ambiguo = b'{"messages":[],"Messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"x"}]}]}'
+    assert lectura.resultados_de_peticion(ambiguo) is None
+    with pytest.raises(lectura.PedidoAmbiguo):
+        lectura.cargar_pedido(ambiguo)

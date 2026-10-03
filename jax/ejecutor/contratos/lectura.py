@@ -36,8 +36,46 @@ class ResultadoDevuelto:
     sha256: str
 
 
+#: Campos de primer nivel de la API de mensajes que el proxy o Ollama interpretan. Ollama (Go,
+#: `encoding/json`) empareja las claves SIN distinguir mayúsculas: `"Model"` o `"Max_Tokens"` se
+#: leerían como `model` / `max_tokens` allá y no acá. Un pedido que escribe uno de estos campos
+#: con otra capitalización, o repite una clave por casefold, es ambiguo y no pasa (MAJOR-5).
+CAMPOS_CONOCIDOS = frozenset({
+    "model", "max_tokens", "messages", "system", "tools", "stream", "thinking", "think",
+    "reasoning_effort", "metadata", "stop_sequences", "temperature", "top_p", "top_k", "tool_choice",
+})
+
+
+class PedidoAmbiguo(ValueError):
+    """Dos claves de primer nivel iguales por casefold, o un campo conocido escrito distinto."""
+
+
+def cargar_pedido(cuerpo: bytes):
+    """`json.loads` del pedido, rechazando lo que Go leería distinto que Python.
+    Lanza `PedidoAmbiguo` (un `ValueError`) si el primer nivel repite una clave por casefold o
+    escribe un campo conocido con otra capitalización. La validación del proxy y la lectura de C3
+    usan ESTA función: ven lo mismo que verá Ollama."""
+    ultimo: list = []
+
+    def gancho(pares):
+        ultimo[:] = [pares]  # el objeto que termina de leerse al final es el de primer nivel
+        return dict(pares)
+
+    doc = json.loads(cuerpo, object_pairs_hook=gancho)
+    if isinstance(doc, dict) and ultimo:
+        plegadas = [k.casefold() for k, _ in ultimo[0]]
+        if len(set(plegadas)) != len(plegadas):
+            raise PedidoAmbiguo("clave repetida por casefold")
+        for k in doc:
+            if k.casefold() in CAMPOS_CONOCIDOS and k not in CAMPOS_CONOCIDOS:
+                raise PedidoAmbiguo("campo conocido con otra capitalización")
+    return doc
+
+
 def _canonico(valor) -> bytes:
-    return json.dumps(valor, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    # surrogatepass: idéntico para todo texto válido; un surrogate suelto (JSON con escape ud83d)
+    # no tumba la lectura de C3.
+    return json.dumps(valor, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8", "surrogatepass")
 
 
 def _pedida(bloque: dict, parciales: list[str]) -> HerramientaPedida:
@@ -109,7 +147,7 @@ def herramientas_de_mensaje(cuerpo: bytes) -> list[HerramientaPedida] | None:
 
 def resultados_de_peticion(cuerpo: bytes) -> list[ResultadoDevuelto] | None:
     try:
-        doc = json.loads(cuerpo)
+        doc = cargar_pedido(cuerpo)
     except ValueError:
         return None
     if not isinstance(doc, dict):

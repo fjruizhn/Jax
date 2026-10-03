@@ -56,7 +56,13 @@ Configuración (sin defaults para lo que decide a dónde va el tráfico):
                               2026-10-03. Con `libre` el cuerpo pasa byte a byte. La validación
                               (modelo, salida, freno, resultados) corre SIEMPRE sobre el cuerpo
                               original; la reescritura es lo último antes de reenviar, y si
-                              falla no se reenvía (502 `reescritura_fallo`)
+                              falla no se reenvía (502 `reescritura_fallo`, con `x-should-retry: false`). La
+                              reescritura aplica SOLO a la entrada del Ejecutor; la del socket
+                              jaxqwen (`atender_jaxqwen`) sigue byte a byte aunque diga
+                              `apagado`. En las DOS entradas se rechaza (403) un pedido de
+                              mensajes con claves de primer nivel repetidas por casefold o con
+                              un campo conocido escrito con otra capitalización (Go, que es
+                              Ollama, empareja claves sin distinguir mayúsculas)
 
 C3 (registro intocable, decisión D-SP1-2 del índice de SP1): cada `tool_use` que
 el cerebro pide se anota en el registro ANTES de reenviar el trozo que lo completa,
@@ -142,6 +148,7 @@ SALIDA_NO_PERMITIDA = "salida_no_permitida"
 REESCRITURA_FALLO = "reescritura_fallo"
 PENSAMIENTO_APAGADO = "apagado"
 PENSAMIENTO_LIBRE = "libre"
+_CLAVES_DE_PENSAMIENTO = frozenset({"thinking", "think", "reasoning_effort"})
 _PENSAMIENTOS = frozenset({PENSAMIENTO_APAGADO, PENSAMIENTO_LIBRE})
 #: Fail-closed: el re-chequeo del freno AL TOMAR el carril (dentro de la sección crítica,
 #: un flock entre procesos) no pudo terminar a tiempo. Mismo criterio que
@@ -331,8 +338,8 @@ def _fuera_de_limites(cuerpo: bytes, cfg: Config) -> str | None:
     """¿La petición de mensajes pide otro modelo o más salida que el tope? Devuelve el
     código, o None si está dentro. Lo que no se puede leer, no está dentro (fail-closed)."""
     try:
-        pedido = json.loads(cuerpo)
-    except (ValueError, UnicodeDecodeError):  # fail-soft: no se reenvía; un cuerpo ilegible se trata como modelo no permitido (403)
+        pedido = lectura.cargar_pedido(cuerpo)
+    except (ValueError, UnicodeDecodeError):  # fail-soft: no se reenvía; un cuerpo ilegible o ambiguo (claves que Go leería distinto) se trata como modelo no permitido (403)
         return MODELO_NO_PERMITIDO
     if not isinstance(pedido, dict) or pedido.get("model") != cfg.modelo:
         return MODELO_NO_PERMITIDO
@@ -344,13 +351,19 @@ def _fuera_de_limites(cuerpo: bytes, cfg: Config) -> str | None:
 
 def _con_pensamiento_apagado(cuerpo: bytes) -> bytes:
     """El cuerpo que se reenvía con el pensamiento apagado: el mismo pedido con `thinking`
-    forzado a `disabled`, pisando el del cliente. Lanza si no es un objeto JSON legible (ya
-    se validó antes; esto es el cinturón: lo que no se puede reescribir no se reenvía)."""
+    forzado a `disabled`, pisando el del cliente. Antes se borra de primer nivel toda clave que
+    Ollama (Go: `encoding/json` empareja sin distinguir mayúsculas; su binario además lee
+    `think` y `reasoning_effort`) pudiera leer como pensamiento, por casefold. Se serializa con
+    `ensure_ascii=True`: un surrogate suelto (escape ud83d sin su par) no se puede codificar en UTF-8 y
+    reventaría la reescritura. Lanza si no es un objeto JSON legible (ya se validó antes; esto
+    es el cinturón: lo que no se puede reescribir no se reenvía)."""
     pedido = json.loads(cuerpo)
     if not isinstance(pedido, dict):
         raise ValueError("el pedido no es un objeto")
+    for clave in [k for k in pedido if k.casefold() in _CLAVES_DE_PENSAMIENTO]:
+        del pedido[clave]
     pedido["thinking"] = {"type": "disabled"}
-    return json.dumps(pedido, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return json.dumps(pedido, ensure_ascii=True, separators=(",", ":")).encode("ascii")
 
 
 def _ruta_sin_query(destino: bytes) -> str:
@@ -383,7 +396,12 @@ class _Proxy:
         except (AttributeError, OSError, struct.error):
             return False
 
-    async def atender(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def atender(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                      imponer_pensamiento: bool = True) -> None:
+        """`imponer_pensamiento=False` es la entrada de jaxqwen (socket Unix): ahí el cuerpo sigue
+        byte a byte aunque la config diga `apagado` (decisión de jax-14, 2026-10-03: el
+        pensamiento apagado es del cerebro del Ejecutor, no de Qwen/jaxqwen). La validación
+        —incluida la de claves ambiguas— corre igual en las dos entradas."""
         conn = h11.Connection(h11.SERVER)
         try:
             try:
@@ -394,7 +412,8 @@ class _Proxy:
             if peticion is None:
                 return
             en_vuelo = asyncio.Event()
-            trabajo = asyncio.create_task(self._reenviar(conn, writer, peticion, cuerpo, en_vuelo))
+            trabajo = asyncio.create_task(self._reenviar(conn, writer, peticion, cuerpo, en_vuelo,
+                                                         imponer_pensamiento))
             vigia = asyncio.create_task(_esperar_cierre(reader))
             # C4: el freno vigila sólo lo que ya está en vuelo. Antes, `_reenviar` mira el
             # freno él mismo DESPUÉS de anotar los resultados: lo que ya corrió no se pierde.
@@ -477,7 +496,7 @@ class _Proxy:
                 self._resultados_anotados.popitem(last=False)
 
     async def _reenviar(self, conn, writer, peticion: h11.Request, cuerpo: bytes,
-                        en_vuelo: asyncio.Event | None = None) -> None:
+                        en_vuelo: asyncio.Event | None = None, imponer_pensamiento: bool = True) -> None:
         metodo = peticion.method.decode("latin-1")
         ruta = _ruta_sin_query(peticion.target)
         de_mensajes = metodo == "POST" and ruta in _RUTAS_DE_MENSAJES
@@ -564,13 +583,14 @@ class _Proxy:
                 # (hechas sobre el cuerpo original del cliente). Content-Length y Transfer-Encoding
                 # ya están en `_NO_REENVIAR`: httpx fija el Content-Length del cuerpo nuevo.
                 a_enviar, nota = cuerpo, None
-                if de_mensajes and self.cfg.pensamiento == PENSAMIENTO_APAGADO:
+                if de_mensajes and imponer_pensamiento and self.cfg.pensamiento == PENSAMIENTO_APAGADO:
                     try:
                         a_enviar = _con_pensamiento_apagado(cuerpo)
-                    except (ValueError, TypeError, RecursionError) as exc:
+                    except (ValueError, TypeError, RecursionError, UnicodeError) as exc:
                         log.error("proxy_carril %s metodo=%s ruta=%s tipo=%s",
                                   REESCRITURA_FALLO, metodo, ruta, type(exc).__name__)
-                        await _responder_error(conn, writer, 502, Motivo(REESCRITURA_FALLO), metodo=metodo)
+                        await _responder_error(conn, writer, 502, Motivo(REESCRITURA_FALLO),
+                                               extra=((b"x-should-retry", b"false"),), metodo=metodo)
                         return
                     nota = f"pensamiento={PENSAMIENTO_APAGADO}"
                 cabeceras = [(k, v) for k, v in peticion.headers if k.lower() not in _NO_REENVIAR]
@@ -773,7 +793,7 @@ async def arrancar(cfg: Config) -> Servidor:
                     log.warning("proxy_carril identidad_m2m_rechazada")
                     await _cerrar(writer)
                     return
-                await proxy.atender(reader, writer)
+                await proxy.atender(reader, writer, imponer_pensamiento=False)
 
             servidor_jaxqwen = await asyncio.start_unix_server(atender_jaxqwen, path=str(path))
             os.chmod(path, 0o660, follow_symlinks=False)
