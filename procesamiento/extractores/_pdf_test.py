@@ -107,6 +107,30 @@ def _pdf_multi_pagina(destino: Path, textos: list[str]) -> Path:
     return destino
 
 
+def _pdf_dos_columnas(destino: Path) -> Path:
+    """Página sintética de dos columnas sin líneas vectoriales.
+
+    La orden de los operadores alterna las columnas para reproducir el
+    problema que el extractor no puede resolver leyendo la página completa:
+    el modo dedicado debe regresar todos los renglones izquierdos antes de
+    cualquiera de los derechos, por geometría.
+    """
+    izquierda = [
+        "IZQUIERDA UNO con contenido legal suficiente para superar el minimo",
+        "IZQUIERDA DOS conserva el orden visual completo de la pagina",
+    ]
+    derecha = [
+        "DERECHA UNO no debe intercalarse con la columna izquierda legal",
+        "DERECHA DOS se emite solo despues de terminar la columna izquierda",
+    ]
+    comandos: list[bytes] = []
+    for i, (izq, der) in enumerate(zip(izquierda, derecha)):
+        y = 180 - i * 30
+        comandos.append(f"BT /F1 9 Tf 30 {y} Td ({izq}) Tj ET\n".encode())
+        comandos.append(f"BT /F1 9 Tf 330 {y} Td ({der}) Tj ET\n".encode())
+    return _pdf_una_pagina(destino, b"".join(comandos), mediabox="0 0 600 220")
+
+
 def _pdf_con_texto(destino: Path) -> Path:
     """PDF con capa de texto REAL, escrito a mano (sin dependencias): un
     párrafo, no cuatro palabras -- el umbral es la defensa contra un PDF
@@ -300,6 +324,33 @@ def test_extrae_el_texto_del_pdf_nativo(tmp_path: Path):
     assert r.estado == "ok"
     assert "ACTIVOS TOTALES 1234" in r.salidas["texto.md"]
     assert r.detalle["paginas"] == 1
+
+
+def test_modo_dos_columnas_emite_izquierda_antes_de_derecha_y_exige_contraste(
+    tmp_path: Path,
+):
+    r = pdf.extraer(
+        _pdf_dos_columnas(tmp_path / "dos-columnas.pdf"),
+        modo_lectura="dos_columnas",
+    )
+
+    assert r.estado == "parcial"
+    md = r.salidas["texto.md"]
+    assert "<!-- página 1 -->" in md
+    assert md.index("IZQUIERDA UNO") < md.index("IZQUIERDA DOS")
+    assert md.index("IZQUIERDA DOS") < md.index("DERECHA UNO")
+    assert md.index("DERECHA UNO") < md.index("DERECHA DOS")
+    assert "```tabla" not in md
+    assert r.detalle["tablas"] == 0
+    assert r.detalle["modo_lectura"] == "dos_columnas"
+    assert r.detalle["requiere_verificacion_visual"]["paginas"] == [1]
+
+
+def test_modo_lectura_invalido_falla_cerrado(tmp_path: Path):
+    r = pdf.extraer(_pdf_con_texto(tmp_path / "n.pdf"), modo_lectura="tres_columnas")
+    assert r.estado == "error"
+    assert r.salidas == {}
+    assert "modo_lectura no soportado" in r.detalle["razon"]
 
 
 def test_un_pdf_roto_da_error_sin_extracto(tmp_path: Path):
