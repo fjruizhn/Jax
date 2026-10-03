@@ -1859,7 +1859,7 @@ def test_el_runbook_no_da_acceso_temporal_a_nadie_ni_usa_test_como_prueba_de_per
     assert "sudo -u nobody" not in texto
 
 
-def test_los_bloques_del_runbook_de_permisos_son_validos_y_fallan_cerrado():
+def test_los_bloques_del_runbook_de_permisos_son_sintacticamente_validos_con_set_euo_pipefail():
     texto = RUNBOOK_E2A.read_text()
     inicio = texto.index("### 2. Permisos de `proyectos/`")
     fin = texto.index("### 3. jax a producción")
@@ -1869,6 +1869,177 @@ def test_los_bloques_del_runbook_de_permisos_son_validos_y_fallan_cerrado():
         assert "set -euo pipefail" in b, f"bloque sin set -euo pipefail:\n{b}"
         r = subprocess.run(["bash", "-n"], input=b, capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
+
+
+# --- ronda 5: carpetas ocultas (solo `otros`), raiz en --deshacer, el bloque del runbook -----------
+
+def _crear_oculta_abierta(proyectos: Path) -> dict:
+    """Como jaxsvc, DESPUES de aplicar: `.estado` 0777 con un archivo 0666, un subdirectorio 0777, un symlink a un
+    directorio de fuera (que no se debe tocar) y, en la oculta, una ACL por defecto con other abierto."""
+    base = proyectos / "un-proyecto"
+    oculta = base / ".estado"
+    fuera = proyectos.parent.parent / "fuera-del-arbol"
+    fuera.mkdir()
+    os.chmod(fuera, 0o755)
+    r = subprocess.run(["sudo", "-n", "-u", "jaxsvc", "python3", "-c", f"""
+import os
+os.mkdir({str(oculta)!r}); os.chmod({str(oculta)!r}, 0o777)
+open({str(oculta / "dato.txt")!r}, "w").write("x"); os.chmod({str(oculta / "dato.txt")!r}, 0o666)
+os.mkdir({str(oculta / "sub")!r}); os.chmod({str(oculta / "sub")!r}, 0o777)
+os.symlink({str(fuera)!r}, {str(oculta / "enlace")!r})
+"""], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    _setfacl_root("-d", "-m", "o::r-x", str(oculta))
+    _setfacl_root("-m", "u:nobody:r-x", str(oculta / "dato.txt")) if _hay_nobody() else None
+    return {"oculta": oculta, "dato": oculta / "dato.txt", "sub": oculta / "sub", "fuera": fuera}
+
+
+def _otros_de(ruta: Path) -> list[str]:
+    return [l for l in _acl(ruta) if l.startswith(("other::", "default:other::"))]
+
+
+def test_verificar_marca_otros_en_una_carpeta_oculta_y_en_su_contenido(arbol_temporal, _identidades):
+    proyectos = arbol_temporal / "proyectos"
+    assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    o = _crear_oculta_abierta(proyectos)
+    r = _correr("--verificar", str(arbol_temporal))
+    assert r.returncode == 1, r.stdout
+    for ruta in (o["oculta"], o["dato"], o["sub"]):
+        lineas = [l for l in r.stdout.splitlines() if l.startswith(f"NO CUMPLE: {ruta}:")]
+        assert lineas and "para otros" in lineas[0], (ruta, r.stdout)
+    assert not any("/enlace" in l and l.startswith("NO CUMPLE") for l in r.stdout.splitlines()), "se siguió un symlink"
+
+
+@pytest.mark.parametrize("accion", ["aplicar", "deshacer"])
+def test_aplicar_y_deshacer_cierran_otros_en_las_ocultas_sin_tocar_nada_mas(arbol_temporal, _identidades, accion):
+    """Las carpetas ocultas de `proyectos/<proyecto>/` son estado de herramientas: no se les cambia dueño, grupo ni
+    ACL nombradas, pero NO pueden conservar bits de otros (modo, `other::` de acceso y por defecto). Por
+    descriptor y sin seguir symlinks: el directorio de fuera al que apunta un enlace queda como estaba."""
+    proyectos = arbol_temporal / "proyectos"
+    assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    o = _crear_oculta_abierta(proyectos)
+    antes = {k: (v.stat().st_uid, v.stat().st_gid) for k, v in o.items() if k != "fuera"}
+    nombrada_antes = [l for l in _acl(o["dato"]) if "nobody" in l] if _hay_nobody() else []
+    modo_fuera = o["fuera"].stat().st_mode & 0o7777
+
+    datos = _recorrer_directo(proyectos, accion=accion)
+    assert not datos["hardlinks_rechazados"], datos
+
+    for k in ("oculta", "dato", "sub"):
+        assert o[k].stat().st_mode & 0o007 == 0, (k, oct(o[k].stat().st_mode))
+        assert not [l for l in _otros_de(o[k]) if not l.endswith("---")], (k, _acl(o[k]))
+    assert not [l for l in _otros_de(o["oculta"]) if not l.endswith("---")]
+    assert {k: (v.stat().st_uid, v.stat().st_gid) for k, v in o.items() if k != "fuera"} == antes, "cambió dueño o grupo"
+    if nombrada_antes:
+        assert [l for l in _acl(o["dato"]) if "nobody" in l] == nombrada_antes, "se tocó una ACL nombrada de la oculta"
+    assert o["fuera"].stat().st_mode & 0o7777 == modo_fuera, "se siguió el symlink y se mutó fuera del árbol"
+    if accion == "aplicar":
+        assert _correr("--verificar", str(arbol_temporal)).returncode == 0
+
+
+def test_deshacer_falla_cerrado_si_jaxsvc_no_atraviesa_la_raiz_y_no_toca_nada(base_propia):
+    """Escenario del auditor: tras --aplicar la raiz pasa de fruiz:jaxsvc a fruiz:fruiz sin ACL de jaxsvc.
+    --deshacer cambiaria los objetos a fruiz:fruiz y restauraria un modo que dejaria a jaxsvc sin llegar a nada:
+    se calcula ANTES con `_puede_atravesar` y, si no atraviesa, falla cerrado sin tocar un solo objeto."""
+    raiz = _arbol_como_produccion(base_propia, dueno="fruiz", grupo="jaxsvc", modo=0o775)
+    proyectos = raiz / "proyectos"
+    assert not _recorrer_directo(proyectos, accion="aplicar", conceder_al_terminar=False)["no_cumple"]
+    subprocess.run(["sudo", "-n", "chown", "fruiz:fruiz", str(raiz)], check=True)
+    objetos = [proyectos, proyectos / "p", proyectos / "p" / "sub", proyectos / "p" / "a.txt", raiz]
+    antes = {d: _foto(d) for d in objetos}
+    acl_antes = {d: _acl(d) for d in objetos}
+
+    datos = _recorrer_directo(proyectos, accion="deshacer", puede_fallar=True, conceder_al_terminar=False)
+    assert "error" in datos and "jaxsvc" in datos["error"] and "atravesar" in datos["error"], datos
+    assert {d: _foto(d) for d in objetos} == antes, "se mutó algo pese a fallar cerrado"
+    assert {d: _acl(d) for d in objetos} == acl_antes
+
+
+def test_deshacer_con_un_modo_guardado_que_dejaria_a_jaxsvc_fuera_falla_cerrado(arbol_temporal, _identidades):
+    """Lo mismo pero por el MODO que va a restaurar: un respaldo (de confianza) con la raiz en 0700, con la raiz
+    fruiz:jaxsvc sin ACL, dejaria a jaxsvc sin paso (solo entra por grupo)."""
+    proyectos = arbol_temporal / "proyectos"
+    out = _driver_respaldo(f"""
+proy = pp.Path({str(proyectos)!r})
+raiz = {str(arbol_temporal)!r}
+import subprocess
+subprocess.run(["setfacl", "-b", raiz], check=True)
+subprocess.run(["chown", "fruiz:jaxsvc", raiz], check=True)
+os.chmod(raiz, 0o770)
+(pp.RUTA_RESPALDOS / "proyectos-forjado-de-prueba.acl").write_text(
+    '# raiz-ruta: ' + json.dumps(raiz) + '\\n# raiz-modo: 0700\\n\\n' + pp._MARCADOR_FIN_RESPALDO)
+os.chown(pp.RUTA_RESPALDOS / "proyectos-forjado-de-prueba.acl", 0, 0)
+pp._recorrer(proy, accion="aplicar")
+antes = os.stat(proy).st_uid, oct(os.stat(raiz).st_mode & 0o7777)
+pp._raiz_configurada_privilegiada = lambda: proy
+import io, contextlib
+buf = io.StringIO()
+try:
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        salida["rc"] = pp._cmd_nucleo_deshacer()
+except pp.ErrorPermisosProyectos as exc:
+    salida["error"] = str(exc)
+salida["salida"] = buf.getvalue()
+salida["despues"] = os.stat(proy).st_uid, oct(os.stat(raiz).st_mode & 0o7777)
+salida["antes"] = antes
+""")
+    texto = out.get("error", "") + out["salida"]
+    assert out.get("rc", 2) != 0 and "jaxsvc" in texto and "atravesar" in texto, out
+    assert out["despues"] == out["antes"], "se mutó algo pese a fallar cerrado"
+    assert "OK: deshecho" not in texto
+
+
+def test_deshacer_verifica_de_nuevo_la_raiz_y_solo_dice_ok_si_los_dos_atraviesan(arbol_temporal, _identidades):
+    proyectos = arbol_temporal / "proyectos"
+    out = _driver_respaldo(f"""
+proy = pp.Path({str(proyectos)!r})
+pp._generar_respaldo_validado(proy)
+pp._recorrer(proy, accion="aplicar")
+pp._raiz_configurada_privilegiada = lambda: proy
+import io, contextlib
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    salida["rc"] = pp._cmd_nucleo_deshacer()
+salida["json"] = json.loads(buf.getvalue())
+""")
+    assert out["rc"] == 0 and out["json"]["raiz"]["paso_ok"] is True and out["json"]["raiz"]["paso_faltas"] == [], out
+
+
+def _bloque_de_verificacion_del_runbook() -> str:
+    import re
+    texto = RUNBOOK_E2A.read_text()
+    m = re.search(r"<<'VERIFICACION'\n(.*?)\nVERIFICACION", texto, re.S)
+    assert m, "el runbook ya no tiene el bloque de verificacion posterior a --aplicar"
+    return m.group(1)
+
+
+def _correr_bloque(raiz: Path) -> subprocess.CompletedProcess:
+    """EJECUTA el bloque del runbook tal cual, con la raiz sustituida por variable (nunca /srv), como root."""
+    return subprocess.run(["sudo", "-n", "env", f"RAIZ={raiz}", "bash", "-s"], input=_bloque_de_verificacion_del_runbook(),
+                          capture_output=True, text=True, cwd=str(RAIZ_REPO), timeout=120)
+
+
+def test_el_bloque_de_verificacion_del_runbook_se_ejecuta_y_falla_cerrado(base_propia):
+    assert "${RAIZ:-/srv/jax-data/jax-workspace}" in _bloque_de_verificacion_del_runbook(), \
+        "la raiz del bloque tiene que ser una variable con la de produccion por defecto"
+    raiz = _arbol_como_produccion(base_propia, dueno="fruiz", grupo="jaxsvc", modo=0o775)
+    proyectos = raiz / "proyectos"
+
+    antes = _correr_bloque(raiz)
+    assert antes.returncode != 0 and "NO CUMPLE" in antes.stderr, antes.stdout + antes.stderr
+
+    assert not _recorrer_directo(proyectos, accion="aplicar", conceder_al_terminar=False)["no_cumple"]
+    despues = _correr_bloque(raiz)
+    assert despues.returncode == 0 and "OK:" in despues.stdout, despues.stdout + despues.stderr
+
+    _setfacl_root("-m", "o::r-x", str(proyectos / "p" / "sub"))
+    reabierto = _correr_bloque(raiz)
+    assert reabierto.returncode != 0 and "NO CUMPLE" in reabierto.stderr, reabierto.stdout + reabierto.stderr
+    _setfacl_root("-m", "o::---", str(proyectos / "p" / "sub"))
+
+    subprocess.run(["sudo", "-n", "chown", "fruiz:fruiz", str(raiz)], check=True)
+    raiz_mal = _correr_bloque(raiz)
+    assert raiz_mal.returncode != 0 and "NO CUMPLE" in raiz_mal.stderr, raiz_mal.stdout + raiz_mal.stderr
 
 
 # --- MAJOR-1: la raiz se abre por descriptor, sin seguir symlinks ------------------------------
