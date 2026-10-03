@@ -261,16 +261,26 @@ def _version_vigente(nombre_extractor: str) -> str | None:
         return None
 
 
-def _version_logica_vigente(nombre_extractor: str, extension: str = "") -> str | None:
+def _version_logica_vigente(nombre_extractor: str, camino: str = "") -> str | None:
     """Version de la LOGICA de clasificacion del extractor (`VERSION_LOGICA`
     del modulo), distinta de `extractor_version` (la de la herramienta, p. ej.
     tesseract): un cambio de regla no mueve la de la herramienta. `None` si el
     extractor no la declara -- y entonces una ficha sin la clave coincide.
-    Puede depender del camino (`version_logica(extension)` del modulo): el OCR
+    Puede depender del camino (`version_logica(camino)` del modulo): el OCR
     versiona la logica de las imagenes y no la del PDF escaneado."""
     modulo = _MODULOS_POR_EXTRACTOR.get(nombre_extractor)
     funcion = getattr(modulo, "version_logica", None)
-    return funcion(extension) if callable(funcion) else None
+    return funcion(camino) if callable(funcion) else None
+
+
+def _camino_de(destino: Path, extension: str) -> str:
+    """`"pdf"` o `"imagen"` -- el camino que tomara el OCR, decidido por el
+    MISMO criterio que la compuerta: el CONTENIDO manda cuando es decisivo y la
+    extension solo cuando no (un PNG llamado x.pdf es una imagen)."""
+    tipo = compuerta._tipo_por_contenido(destino)
+    if tipo == "pdf" or (tipo is None and extension == ".pdf"):
+        return "pdf"
+    return "imagen"
 
 
 def _ahora() -> str:
@@ -440,7 +450,9 @@ def _asegurar_en_fuente(origen: Path, fuente_abs: Path, huella: str) -> Path:
         temporal.unlink(missing_ok=True)
 
 
-def _ficha_de_cache_valida(carpeta: Path, huella: str, extension_actual: str) -> Ficha | None:
+def _ficha_de_cache_valida(
+    carpeta: Path, huella: str, extension_actual: str, camino_actual: str = ""
+) -> Ficha | None:
     """Lee la ficha cacheada en `carpeta` y decide si es un acierto de
     caché VÁLIDO. `None` si hay que reextraer -- ficha ilegible (I-4),
     estado no reconstruible (I-1), extractor/versión desactualizados
@@ -466,7 +478,7 @@ def _ficha_de_cache_valida(carpeta: Path, huella: str, extension_actual: str) ->
         return None  # I-2
 
     if ficha.detalle.get("_version_logica") != _version_logica_vigente(
-        ficha.extractor, extension_actual
+        ficha.extractor, camino_actual
     ):
         return None  # la regla del extractor cambio: la ficha vieja no se reusa
 
@@ -484,7 +496,7 @@ def _ficha_de_cache_valida(carpeta: Path, huella: str, extension_actual: str) ->
 
 
 def _estado_de_error_cacheado(
-    carpeta: Path, huella: str, extension_actual: str
+    carpeta: Path, huella: str, extension_actual: str, camino_actual: str = ""
 ) -> tuple[Ficha | None, int]:
     """D-2: lee la ficha cacheada en `carpeta`, si la hay, y la interpreta
     como un intento previo FALLIDO (`error` o `sin_extractor` -- el ruling
@@ -533,7 +545,7 @@ def _estado_de_error_cacheado(
     if version_vigente is not None and ficha.extractor_version != version_vigente:
         return None, 0  # I-2: el extractor cambió -- la cuenta arranca de cero
     if ficha.detalle.get("_version_logica") != _version_logica_vigente(
-        ficha.extractor, extension_actual
+        ficha.extractor, camino_actual
     ):
         return None, 0  # la regla cambio: el tope D-2 tambien arranca de cero
     # version_vigente is None: "no sé" -- se sigue de largo y se cuenta la
@@ -703,7 +715,10 @@ def ingerir(origen: Path, trabajo: Path, *, subruta: str | Path | None = None) -
         destino = _asegurar_en_fuente(origen, fuente_abs, huella)  # C-1/C-3
 
     carpeta = ruta_procesado(trabajo_abs, huella)
-    ficha_cacheada = _ficha_de_cache_valida(carpeta, huella, extension_actual)
+    camino_actual = _camino_de(destino, extension_actual)
+    ficha_cacheada = _ficha_de_cache_valida(
+        carpeta, huella, extension_actual, camino_actual
+    )
     if ficha_cacheada is not None:
         # Cache vivo y VERIFICADO -- cero trabajo.
         return ficha_cacheada
@@ -715,7 +730,7 @@ def ingerir(origen: Path, trabajo: Path, *, subruta: str | Path | None = None) -
     # llamada con un PDF patológico), porque I-1 nunca cachea un `error` a
     # propósito -- un fallo transitorio tiene que poder curarse.
     ficha_error_previa, intentos_previos = _estado_de_error_cacheado(
-        carpeta, huella, extension_actual
+        carpeta, huella, extension_actual, camino_actual
     )
     if ficha_error_previa is not None and intentos_previos >= _MAX_INTENTOS_ERROR:
         return ficha_error_previa
@@ -789,7 +804,7 @@ def ingerir(origen: Path, trabajo: Path, *, subruta: str | Path | None = None) -
             "_extension_ingesta": extension_actual,
             "_salidas_ingesta": salidas_ingesta,
         }
-        logica = _version_logica_vigente(resultado.extractor, extension_actual)
+        logica = _version_logica_vigente(resultado.extractor, camino_actual)
         if logica is not None:
             detalle["_version_logica"] = logica
         if resultado.estado in {"error", "sin_extractor"}:

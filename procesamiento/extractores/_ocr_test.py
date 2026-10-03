@@ -1364,9 +1364,8 @@ def test_n3_un_png_con_metadata_pdf_es_una_imagen(tmp_path: Path):
 
 
 def test_n5_la_version_de_la_logica_depende_del_camino():
-    assert ocr.version_logica(".png") == ocr.VERSION_LOGICA_IMAGEN
-    assert ocr.version_logica(".JPEG") == ocr.VERSION_LOGICA_IMAGEN
-    assert ocr.version_logica(".pdf") is None
+    assert ocr.version_logica("imagen") == ocr.VERSION_LOGICA_IMAGEN
+    assert ocr.version_logica("pdf") is None
 
 
 def test_n5_una_ficha_vieja_de_pdf_escaneado_se_reusa_y_una_de_imagen_no(

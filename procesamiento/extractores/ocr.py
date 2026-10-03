@@ -45,6 +45,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import warnings
 from pathlib import Path
 
@@ -129,6 +130,7 @@ CODIGO_IMAGEN_SIN_TEXTO = "imagen_sin_texto"
 CODIGO_IMAGEN_TEXTO_DUDOSO = "imagen_texto_dudoso"
 CODIGO_IMAGEN_PAGINA_SIN_TEXTO = "imagen_pagina_sin_texto"
 CODIGO_ARCHIVO_ILEGIBLE = "archivo_ilegible"
+CODIGO_OCR_TIEMPO_EXCEDIDO = "ocr_tiempo_excedido"
 
 # Version de la LOGICA de clasificacion de este extractor. `extractor_version`
 # es la de tesseract y NO cambia cuando cambia una regla: esta cadena se guarda
@@ -140,15 +142,13 @@ CODIGO_ARCHIVO_ILEGIBLE = "archivo_ilegible"
 # escaneado no, asi que su cache sigue valiendo (no se re-OCR-ean los PDF).
 # "2": regla de Fernando de la ronda 1 de Jax#338.
 VERSION_LOGICA_IMAGEN = "2"
-EXTENSIONES_IMAGEN = frozenset(
-    {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif"}
-)
 
 
-def version_logica(extension: str) -> str | None:
-    """Version de la logica para una ficha ingerida con esa extension; `None`
-    (sin marca) para el camino PDF."""
-    return VERSION_LOGICA_IMAGEN if extension.lower() in EXTENSIONES_IMAGEN else None
+def version_logica(camino: str) -> str | None:
+    """Version de la logica para un camino (`"imagen"` o `"pdf"`, el que decide
+    el CONTENIDO del archivo, no su extension); `None` (sin marca) para el
+    PDF."""
+    return VERSION_LOGICA_IMAGEN if camino == "imagen" else None
 
 
 # `Resultado` exige al menos una salida con contenido para `ok`: la unica
@@ -166,6 +166,7 @@ NOTA_PAGINA_SIN_TEXTO = (
 _MARCAS_ARCHIVO_ILEGIBLE = (
     "pix not read", "pixReadStream", "findFileFormatStream",
     "Unsupported image type", "cannot be read", "image file not found",
+    "pixReadMem",   # por stdin leptonica escribe `pixReadMem…`, no `pixReadStream`
 )
 
 # S-1: tesseract interpreta una entrada que no es imagen como LISTA DE RUTAS.
@@ -185,9 +186,21 @@ _FIRMAS_IMAGEN = (
 # grande de LACTOVI mide 13630x3826 (52 M).
 MAX_PIXELES = 100_000_000
 
-# Tope de fotogramas de un TIFF/GIF/WebP multipagina (tesseract procesa
-# TODOS; cada uno se decodifica y se mide antes).
+# Solo un TIFF es multipagina PARA TESSERACT (procesa todas sus paginas). Un
+# GIF o WebP animado se RECHAZA (`animacion_no_soportada`: tesseract no lee
+# animaciones, y leptonica decodifica todos los fotogramas antes de
+# rechazarlas -- 8 de 15000x15000 llevaron a tesseract a 1,79 GB); un MPO
+# (fotos de iPhone) se lee por su primer fotograma. Tope de paginas de un TIFF:
 MAX_PAGINAS = 50
+
+# Tope de pixeles de un TIFF sumando TODAS sus paginas, comprobado por el
+# tamano de cada pagina ANTES de decodificar ninguna.
+MAX_PIXELES_TOTAL = 300_000_000
+
+# Plazo TOTAL del OCR de todas las paginas de un TIFF (ademas del timeout por
+# llamada, que se acorta al tiempo que queda). `_reloj` se puede sustituir.
+PLAZO_TOTAL_SEGUNDOS = 900
+_reloj = time.monotonic
 
 # (D) Tamano de pagina. NO se usa el metadato de DPI (el de un celular miente:
 # "300 DPI" en una foto). Se mira la proporcion lado largo / lado corto, a
@@ -254,19 +267,72 @@ def _tiene_firma_de_imagen(cabecera: bytes) -> bool:
     )
 
 
-def _validar_imagen(datos: bytes) -> tuple[list[bytes], list[tuple[int, int]]] | str:
+def _gif_cuadros(datos: bytes, hasta: int = 2) -> int | None:
+    """Cuenta los fotogramas de un GIF leyendo SOLO su estructura de bloques
+    (sin decodificar nada: Pillow decodifica los fotogramas al contarlos y un
+    GIF de 376 bytes llevo a 1,3 GB). Se detiene al llegar a `hasta`. `None`
+    si la estructura esta rota."""
+    n = len(datos)
+    if n < 13:
+        return None
+    i = 13
+    flags = datos[10]
+    if flags & 0x80:
+        i += 3 * (2 << (flags & 7))
+    cuadros = 0
+    while i < n:
+        bloque = datos[i]
+        i += 1
+        if bloque == 0x3B:      # trailer
+            return cuadros
+        if bloque == 0x21:      # extension: etiqueta + sub-bloques
+            i += 1
+        elif bloque == 0x2C:    # descriptor de imagen
+            if i + 9 > n:
+                return None
+            flags_img = datos[i + 8]
+            i += 9
+            if flags_img & 0x80:
+                i += 3 * (2 << (flags_img & 7))
+            i += 1              # tamano minimo de codigo LZW
+            cuadros += 1
+            if cuadros >= hasta:
+                return cuadros
+        else:
+            return None
+        while i < n and datos[i] != 0:      # sub-bloques hasta el terminador
+            i += datos[i] + 1
+        i += 1
+    return None
+
+
+def _webp_animado(datos: bytes) -> bool:
+    """Bandera de animacion del chunk VP8X (bit 1 del byte de flags)."""
+    return datos[12:16] == b"VP8X" and len(datos) > 20 and bool(datos[20] & 0x02)
+
+
+def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
     """Antes de OCR, sobre los BYTES (se leen una sola vez, MINOR-N2: nunca se
-    relee la ruta, asi lo validado es lo que se procesa): firma magica (S-1) y
-    decodificacion ENTERA de TODOS los fotogramas con Pillow (MAJOR-2/N1: un
-    TIFF truncado da rc=0 y vacio en tesseract, y `load()`/`size` solo miran
-    el fotograma 0). Devuelve `(paginas, dimensiones)` -- `paginas` son los
-    bytes que iran por stdin: los originales si hay UN fotograma, un PNG
-    re-codificado por fotograma ya decodificado si hay varios -- o la CAUSA
-    (`firma_invalida`, `no_decodifica`, `demasiados_pixeles`,
-    `demasiadas_paginas`, `sin_pillow`): un codigo, nunca texto de la
+    relee la ruta, asi lo validado es lo que se procesa): firma magica (S-1),
+    animaciones rechazadas leyendo solo su estructura (N8), y tamano de cada
+    fotograma de un TIFF antes de decodificar ninguno (N13). Devuelve
+    `(tipo, dimensiones)`: `"una"` (un fotograma, ya decodificado entero con
+    Pillow -- MAJOR-2: un TIFF truncado da rc=0 y vacio en tesseract -- y los
+    bytes originales son los que iran a tesseract) o `"tiff"` (varias paginas:
+    se decodifican de a una en `_ocr_tiff`). O la CAUSA (`firma_invalida`,
+    `no_decodifica`, `demasiados_pixeles`, `demasiadas_paginas`,
+    `animacion_no_soportada`, `sin_pillow`): un codigo, nunca texto de la
     excepcion (puede traer rutas)."""
     if not _tiene_firma_de_imagen(datos[:16]):
         return "firma_invalida"
+    if datos[:6] in (b"GIF87a", b"GIF89a"):
+        cuadros = _gif_cuadros(datos)
+        if cuadros is None:
+            return "no_decodifica"
+        if cuadros > 1:
+            return "animacion_no_soportada"
+    elif datos[:4] == b"RIFF" and _webp_animado(datos):
+        return "animacion_no_soportada"
     try:
         from io import BytesIO
 
@@ -278,34 +344,30 @@ def _validar_imagen(datos: bytes) -> tuple[list[bytes], list[tuple[int, int]]] |
             warnings.simplefilter("ignore")
             with Image.open(BytesIO(datos)) as img:
                 # Solo un TIFF es multipagina PARA TESSERACT. Un MPO (fotos de
-                # iPhone: la foto + una vista previa) o un GIF/WebP animado se
-                # leen por su primer fotograma: tratarlos como paginas
-                # re-codificaria la foto (medido en IMG_2353: otro resultado)
-                # y sumaria una vista previa que tesseract nunca lee.
+                # iPhone: la foto + una vista previa) se lee por su primer
+                # fotograma: tratarlo como paginas re-codificaria la foto
+                # (medido en IMG_2353: otro resultado) y sumaria una vista
+                # previa que tesseract nunca lee.
                 n = getattr(img, "n_frames", 1) if img.format == "TIFF" else 1
                 if n > MAX_PAGINAS:
                     return "demasiadas_paginas"
-                paginas: list[bytes] = []
                 dimensiones: list[tuple[int, int]] = []
+                total = 0
                 for i in range(n):
                     img.seek(i)
                     ancho, alto = img.size
-                    if ancho * alto > MAX_PIXELES:
+                    total += ancho * alto
+                    if ancho * alto > MAX_PIXELES or total > MAX_PIXELES_TOTAL:
                         return "demasiados_pixeles"
-                    img.load()
                     dimensiones.append((ancho, alto))
-                    if n > 1:
-                        cuadro = img if img.mode in _MODOS_PNG else img.convert("RGB")
-                        salida = BytesIO()
-                        cuadro.save(salida, format="PNG")
-                        paginas.append(salida.getvalue())
                 if n == 1:
-                    paginas = [datos]
+                    img.load()
+                    return "una", dimensiones
     except Image.DecompressionBombError:
         return "demasiados_pixeles"
     except Exception:  # fail-soft: Pillow lanza OSError/ValueError/SyntaxError/EOFError segun el formato roto; todas significan "no decodifica" y salen como Resultado(error, archivo_ilegible)
         return "no_decodifica"
-    return paginas, dimensiones
+    return "tiff", dimensiones
 
 
 _MODOS_PNG = frozenset({"1", "L", "LA", "P", "RGB", "RGBA", "I;16"})
@@ -393,7 +455,7 @@ def _clasificar(caracteres: int, analisis: dict) -> str:
     return "ok"
 
 
-def _ocr_bytes(datos: bytes, idioma: str) -> dict | None:
+def _ocr_bytes(datos: bytes, idioma: str, timeout: float | None = None) -> dict | None:
     """Corre tesseract DOS veces sobre la MISMA imagen -- texto plano (para
     el extracto exacto, tildes y guion largo incluidos) y `tsv` (para la
     confianza por palabra, que el modo texto plano no expone). `None` si el
@@ -406,7 +468,7 @@ def _ocr_bytes(datos: bytes, idioma: str) -> dict | None:
     try:
         proceso = subprocess.run(
             ["tesseract", "-", "stdout", "-l", idioma],
-            input=datos, capture_output=True, timeout=TIMEOUT_SEGUNDOS,
+            input=datos, capture_output=True, timeout=timeout or TIMEOUT_SEGUNDOS,
         )
     except Exception:  # fail-soft: el subproceso de tesseract (modo texto) puede fallar (timeout, I/O); se devuelve None y el llamador lo convierte en Resultado(estado="error")
         return None
@@ -420,7 +482,7 @@ def _ocr_bytes(datos: bytes, idioma: str) -> dict | None:
     try:
         proceso_tsv = subprocess.run(
             ["tesseract", "-", "stdout", "-l", idioma, "tsv"],
-            input=datos, capture_output=True, timeout=TIMEOUT_SEGUNDOS,
+            input=datos, capture_output=True, timeout=timeout or TIMEOUT_SEGUNDOS,
         )
     except Exception:  # fail-soft: el subproceso de tesseract (modo tsv, confianza por palabra) puede fallar igual que el de texto plano; se devuelve None y el llamador lo convierte en Resultado(estado="error")
         return None
@@ -444,34 +506,62 @@ def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
     return _ocr_bytes(datos, idioma)
 
 
-def _ocr_paginas(paginas: list[bytes], idioma: str) -> dict | None:
-    """OCR de una imagen de UNO o varios fotogramas. Con varios, una llamada
-    a tesseract por pagina y el texto se junta con un separador de pagina; las
-    metricas de la regla A/B se calculan sobre el TOTAL (caracteres y palabras
+def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict | None:
+    """OCR de una imagen ya validada. `"una"`: los bytes originales por stdin.
+    `"tiff"`: pagina por pagina (decodificar -> PNG -> tesseract -> descartar:
+    nunca se guarda la lista de PNG), con el plazo total `PLAZO_TOTAL_SEGUNDOS`
+    y las metricas de la regla A/B sobre el TOTAL (caracteres y palabras
     sumados, confianza ponderada por palabras)."""
-    resultados = [_ocr_bytes(p, idioma) for p in paginas]
-    if any(r is None for r in resultados):
-        return None
-    for r in resultados:
-        if r["clasificacion"] == "ilegible":
-            return r
-    if len(resultados) == 1:
-        return resultados[0]
+    if tipo == "una":
+        return _ocr_bytes(datos, idioma)
+
+    from io import BytesIO
+
+    from PIL import Image
+
+    inicio = _reloj()
     partes, dudosas = [], []
     caracteres = palabras = 0
     suma_conf = 0.0
-    for numero, r in enumerate(resultados, start=1):
-        if r["texto"]:
-            partes.append(f"<!-- página {numero} -->\n{r['texto']}")
-        caracteres += r["caracteres"]
-        palabras += r["n_palabras"]
-        suma_conf += r["confianza_promedio"] * r["n_palabras"]
-        dudosas += [{"pagina": numero, **d} for d in r["palabras_dudosas"]]
+    primero = None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            img = Image.open(BytesIO(datos))
+        except Exception:  # fail-soft: ya se abrio una vez en la validacion; si ahora falla, no decodifica
+            return {"clasificacion": "ilegible", "causa": "no_decodifica"}
+        with img:
+            for numero in range(1, len(dimensiones) + 1):
+                restante = PLAZO_TOTAL_SEGUNDOS - (_reloj() - inicio)
+                if restante <= 0:
+                    return {"clasificacion": "ilegible", "causa": "tiempo_excedido"}
+                try:
+                    img.seek(numero - 1)
+                    img.load()
+                    cuadro = img if img.mode in _MODOS_PNG else img.convert("RGB")
+                    salida = BytesIO()
+                    cuadro.save(salida, format="PNG")
+                    png = salida.getvalue()
+                except Exception:  # fail-soft: pagina truncada o corrupta = archivo que no decodifica
+                    return {"clasificacion": "ilegible", "causa": "no_decodifica"}
+                r = _ocr_bytes(png, idioma, timeout=min(TIMEOUT_SEGUNDOS, restante))
+                del png, salida, cuadro
+                if r is None:
+                    return None
+                if r["clasificacion"] == "ilegible":
+                    return r
+                primero = primero or r
+                if r["texto"]:
+                    partes.append(f"<!-- página {numero} -->\n{r['texto']}")
+                caracteres += r["caracteres"]
+                palabras += r["n_palabras"]
+                suma_conf += r["confianza_promedio"] * r["n_palabras"]
+                dudosas += [{"pagina": numero, **d} for d in r["palabras_dudosas"]]
     analisis = {
         "n_palabras": palabras,
         "confianza_promedio": round(suma_conf / palabras, 2) if palabras else 0.0,
         "palabras_dudosas": dudosas,
-        "ancho": resultados[0]["ancho"], "alto": resultados[0]["alto"],
+        "ancho": primero["ancho"], "alto": primero["alto"],
     }
     return {
         "texto": "\n\n".join(partes),
@@ -518,14 +608,19 @@ def _detalle_comun(idioma: str, r: dict) -> dict:
 
 
 def _ilegible(causa: str, idioma: str) -> Resultado:
+    if causa == "tiempo_excedido":
+        razon, codigo = "se excedio el plazo total de OCR de la imagen", CODIGO_OCR_TIEMPO_EXCEDIDO
+    else:
+        razon, codigo = (
+            "no se pudo abrir ni decodificar la imagen (archivo danado)",
+            CODIGO_ARCHIVO_ILEGIBLE,
+        )
     return Resultado(
         estado="error", salidas={}, extractor=EXTRACTOR,
         version=_version() or "desconocida",
         detalle={
-            "razon": "no se pudo abrir ni decodificar la imagen (archivo danado)",
-            "codigo": CODIGO_ARCHIVO_ILEGIBLE,
-            "causa": causa,
-            "idioma": idioma,
+            "razon": razon, "codigo": codigo, "causa": causa, "idioma": idioma,
+            "_camino": "imagen",
         },
     )
 
@@ -537,6 +632,7 @@ def _resolver_imagen(
         return _ilegible(r["causa"], idioma)
 
     detalle = _detalle_comun(idioma, r)
+    detalle["_camino"] = "imagen"
     if paginas:
         detalle["ancho"], detalle["alto"] = paginas[0]
         if len(paginas) > 1:
@@ -655,6 +751,7 @@ def _resolver_pdf(resultados: list[dict | None], idioma: str) -> Resultado:
                 "razon": "ninguna pagina del PDF dio texto util via OCR",
                 "idioma": idioma,
                 "paginas": total,
+                "_camino": "pdf",
             },
         )
 
@@ -664,6 +761,7 @@ def _resolver_pdf(resultados: list[dict | None], idioma: str) -> Resultado:
     )
     detalle = {
         "idioma": idioma, "paginas": total, "confianza_promedio": confianza_promedio,
+        "_camino": "pdf",
     }
     if confianza_por_pagina:
         detalle["confianza_por_pagina"] = confianza_por_pagina
@@ -764,8 +862,8 @@ def extraer(origen: Path, idioma: str = "spa") -> Resultado:
             )
         if isinstance(validacion, str):
             return _ilegible(validacion, idioma)
-        paginas_bytes, dimensiones = validacion
-        resultado_img = _ocr_paginas(paginas_bytes, idioma)
+        tipo, dimensiones = validacion
+        resultado_img = _ocr_imagen(datos, tipo, dimensiones, idioma)
         if resultado_img is None:
             return Resultado(
                 estado="error", salidas={}, extractor=EXTRACTOR,
