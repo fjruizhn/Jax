@@ -71,7 +71,7 @@ BLOQUE1
 **Después se aplica** (secuencia de arriba). `--aplicar` falla cerrado si queda una entrada de `nobody`, que es una red de seguridad más, no la limpieza.
 **Bloque 2, DESPUÉS de aplicar: la medición sobre `proyectos/`** (que ya no tiene bits de otros), con la misma entrada temporal solo en la raíz y la misma limpieza garantizada. Se pasa como argumento un archivo cualquiera de `proyectos/`:
 ```bash
-bash -s -- /srv/jax-data/jax-workspace/proyectos/<uuid>/fuente/<archivo> <<'BLOQUE2'
+bash -s -- '/srv/jax-data/jax-workspace/proyectos/<uuid>/fuente/<archivo>' <<'BLOQUE2'
 set -u
 RAIZ=/srv/jax-data/jax-workspace
 ARCH="$1"
