@@ -5486,8 +5486,14 @@ jobs:
           #   robustas (estado distinto de error, una palabra clave); no cambia el conteo. Cuenta del
           #   runner: 191 recolectadas menos las 2 de LACTOVI que salta = 189 passed, 2 skipped.
           #   Medido LOCAL en hall9000: 191 passed.
-          grep -qE "^189 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 189 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 191 -> 194 recolectadas (Jax#338 ronda 15): +3 -- una pasada con texto plano y sin
+          #   renglones TSV aporta su texto sin verificar y deja parcial/imagen_texto_dudoso (las dos
+          #   pasadas con «Saldo pendiente 1000» sin TSV; la pagina 2 de un TIFF aparece con su marca;
+          #   control: sin texto plano ni TSV la pasada no aporta). La prueba de la ronda 14 que
+          #   fijaba el descarte se reescribe (no suma). Cuenta del runner: 194 recolectadas menos las
+          #   2 de LACTOVI que salta = 192 passed, 2 skipped. Medido LOCAL en hall9000: 194 passed.
+          grep -qE "^192 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 192 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
