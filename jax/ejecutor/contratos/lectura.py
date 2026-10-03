@@ -36,8 +36,106 @@ class ResultadoDevuelto:
     sha256: str
 
 
+def plegar(nombre: str) -> str:
+    """Plegado de nombres de clave como el de `encoding/json` de Go (≥1.21, `appendFoldedName`):
+    ASCII a mayúsculas y, por cada rune no ASCII, `ToUpper(ToLower(r))` con mapeos SIMPLES (un
+    rune a un rune; `str.lower()`/`str.upper()` de Python a veces devuelven varios y se dejan
+    como están). Así `K` (Kelvin, U+212A), `ſ` (U+017F), `ı` (U+0131) e `İ` (U+0130) se pliegan
+    como en Go. Es una emulación CONSERVADORA: puede unir de más (rechaza), nunca de menos."""
+    def minuscula(c: str) -> str:
+        if c == "\u0130":  # Go: ToLower(İ) = 'i'; Python daría 'i' + U+0307
+            return "i"
+        m = c.lower()
+        return m if len(m) == 1 else c
+
+    def mayuscula(c: str) -> str:
+        m = c.upper()
+        return m if len(m) == 1 else c
+
+    return "".join(mayuscula(minuscula(c)) for c in nombre)
+
+
+#: Campos conocidos por nivel. Ollama (Go, `encoding/json`) empareja las claves SIN distinguir
+#: mayúsculas: `"Model"`, `"Max_Tokens"`, `{"Type":"tool_result"}` o un `"Content"` a nivel de
+#: mensaje se leerían allá como el campo conocido y no acá (ni en C3). Un objeto que escribe uno
+#: de sus campos conocidos con otra forma, o que repite una clave tras el plegado, es ambiguo.
+CAMPOS_CONOCIDOS = frozenset({
+    "model", "max_tokens", "messages", "system", "tools", "stream", "thinking", "think",
+    "reasoning_effort", "metadata", "stop_sequences", "temperature", "top_p", "top_k", "tool_choice",
+})
+CAMPOS_DE_MENSAJE = frozenset({"role", "content"})
+CAMPOS_DE_BLOQUE = frozenset({
+    "type", "text", "id", "name", "input", "tool_use_id", "content", "is_error", "source",
+    "thinking", "signature", "cache_control", "citations",
+})
+CAMPOS_DE_HERRAMIENTA = frozenset({"type", "name", "description", "input_schema", "cache_control"})
+
+
+class PedidoAmbiguo(ValueError):
+    """Un objeto del pedido repite una clave tras el plegado de Go, o escribe un campo conocido
+    con otra capitalización."""
+
+
+def _revisar(pares: list, conocidos: frozenset) -> None:
+    plegadas = [plegar(k) for k, _ in pares]
+    if len(set(plegadas)) != len(plegadas):
+        raise PedidoAmbiguo("clave repetida tras el plegado")
+    conocidas_plegadas = {plegar(c) for c in conocidos}
+    for k, _ in pares:
+        if plegar(k) in conocidas_plegadas and k not in conocidos:
+            raise PedidoAmbiguo("campo conocido con otra forma")
+
+
+def _revisar_bloques(contenido, pares_de: dict) -> None:
+    if not isinstance(contenido, list):
+        return
+    for bloque in contenido:
+        if not isinstance(bloque, dict):
+            continue
+        _revisar(pares_de[id(bloque)], CAMPOS_DE_BLOQUE)
+        # El `content` de un tool_result puede ser una lista de bloques: recursivo.
+        _revisar_bloques(bloque.get("content"), pares_de)
+
+
+def cargar_pedido(cuerpo: bytes):
+    """`json.loads` del pedido, rechazando lo que Go leería distinto que Python.
+    Lanza `PedidoAmbiguo` (un `ValueError`) si repite una clave tras el plegado de Go o escribe
+    un campo conocido con otra capitalización, en CUALQUIERA de estos objetos:
+      - el primer nivel (`CAMPOS_CONOCIDOS`);
+      - cada objeto de `messages[]` (`CAMPOS_DE_MENSAJE`);
+      - cada bloque de `content` cuando es una lista (`CAMPOS_DE_BLOQUE`), y, recursivamente, el
+        `content` de un bloque cuando también es una lista (los tool_result);
+      - cada objeto de `tools[]` (`CAMPOS_DE_HERRAMIENTA`), porque el proxy decide por su `type`.
+    NO mira `system`, `metadata` ni lo que hay dentro de `input`/`source`/`cache_control`/
+    `input_schema`: C3 y el proxy no leen nada ahí. La validación del proxy y la lectura de C3 usan ESTA función."""
+    pares_de: dict = {}
+
+    def gancho(pares):
+        objeto = dict(pares)
+        pares_de[id(objeto)] = pares  # los pares crudos: dict() esconde los repetidos
+        return objeto
+
+    doc = json.loads(cuerpo, object_pairs_hook=gancho)
+    if isinstance(doc, dict):
+        _revisar(pares_de[id(doc)], CAMPOS_CONOCIDOS)
+        mensajes = doc.get("messages")
+        if isinstance(mensajes, list):
+            for mensaje in mensajes:
+                if isinstance(mensaje, dict):
+                    _revisar(pares_de[id(mensaje)], CAMPOS_DE_MENSAJE)
+                    _revisar_bloques(mensaje.get("content"), pares_de)
+        herramientas = doc.get("tools")
+        if isinstance(herramientas, list):
+            for herramienta in herramientas:
+                if isinstance(herramienta, dict):
+                    _revisar(pares_de[id(herramienta)], CAMPOS_DE_HERRAMIENTA)
+    return doc
+
+
 def _canonico(valor) -> bytes:
-    return json.dumps(valor, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    # surrogatepass: idéntico para todo texto válido; un surrogate suelto (JSON con escape ud83d)
+    # no tumba la lectura de C3.
+    return json.dumps(valor, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8", "surrogatepass")
 
 
 def _pedida(bloque: dict, parciales: list[str]) -> HerramientaPedida:
@@ -109,7 +207,7 @@ def herramientas_de_mensaje(cuerpo: bytes) -> list[HerramientaPedida] | None:
 
 def resultados_de_peticion(cuerpo: bytes) -> list[ResultadoDevuelto] | None:
     try:
-        doc = json.loads(cuerpo)
+        doc = cargar_pedido(cuerpo)
     except ValueError:
         return None
     if not isinstance(doc, dict):
