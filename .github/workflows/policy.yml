@@ -1085,8 +1085,13 @@ jobs:
           # 281 -> 288 (2026-10-03, Proyectos E2a T4, guion de LACTOVI): +7 de
           #   tests/test_proyectos_e2a_lactovi_mariadb.py (crea y borra una base
           #   `jax_memory_test_e2alac_*`). Numero LOCAL: el controlador lo re-mide con el runner.
-          grep -qE "^288 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 288 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 288 -> 295 (2026-10-03, Proyectos E2a T4, ronda 1): +7 de
+          #   tests/test_proyectos_e2a_lactovi_mariadb.py (commit incierto + --completar,
+          #   --completar idempotente, --completar con sha distinto, --revertir con trabajos en
+          #   vuelo, --revertir reintentable, reaplicar tras corte, reaplicar con proyecto
+          #   archivado). Numero LOCAL: el controlador lo re-mide con el runner.
+          grep -qE "^295 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 295 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE

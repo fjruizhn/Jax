@@ -115,7 +115,8 @@ def _ficha(sha: str, origen: str, estado: str) -> str:
 
 
 def _armar(ws: Path, *, duplicado: bool = False) -> dict[str, str]:
-    """Proyecto suelto con 3 archivos (ok, parcial, sin ficha) y `.claude-flow/`.
+    """Proyecto suelto con 5 archivos regulares (ok, parcial, y tres sin ficha: uno aceptado, uno oculto,
+    uno de tipo no aceptado), un symlink en una subcarpeta y `.claude-flow/`.
     Devuelve {ruta relativa en fuente/: sha}."""
     base = ws / "proyectos" / _CARPETA
     (base / "fuente" / "02-modelo").mkdir(parents=True)
@@ -123,13 +124,16 @@ def _armar(ws: Path, *, duplicado: bool = False) -> dict[str, str]:
     (base / ".claude-flow").mkdir()
     (base / ".claude-flow" / "estado.json").write_text("{}")
     contenidos = {"Escanear.pdf": b"pdf-ok", "02-modelo/modelo.XLSX": b"xlsx-parcial",
-                  "avaluos/Avalúo 1.png": b"png-sin-ficha"}
+                  "avaluos/Avalúo 1.png": b"png-sin-ficha",
+                  "avaluos/.oculto.txt": b"oculto",          # archivo oculto, tipo aceptado -> en_cola
+                  "avaluos/datos.xyz": b"tipo-no-aceptado"}  # sin ficha y sin extractor -> sin_extractor
     if duplicado:
         contenidos["avaluos/copia.png"] = b"png-sin-ficha"
     shas = {}
     for rel, data in contenidos.items():
         (base / "fuente" / rel).write_bytes(data)
         shas[rel] = _sha(data)
+    (base / "fuente" / "02-modelo" / "enlace.pdf").symlink_to("../Escanear.pdf")   # symlink NO en el nivel superior
     for rel, estado in (("Escanear.pdf", "ok"), ("02-modelo/modelo.XLSX", "parcial")):
         d = base / "procesado" / shas[rel]
         d.mkdir(parents=True)
@@ -177,8 +181,10 @@ async def test_ensayo_no_escribe_nada(tmp_path, capsys):
             await _conteo("jax_project_scope")) == antes_db
     r = _salida(capsys)
     assert r["ensayo"] is True
-    assert r["archivos_fuente"] == 3 and r["fichas"] == 2 and r["filas_a_insertar"] == 3
+    assert r["archivos_fuente"] == 5 and r["fichas"] == 2 and r["filas_a_insertar"] == 5
     assert ".claude-flow" in r["ignorado"]
+    assert r["ignorados"] == ["02-modelo/enlace.pdf"]            # MINOR-8: symlink de un nivel profundo
+    assert r["estados"] == {"en_cola": 2, "listo": 1, "parcial": 1, "sin_extractor": 1}
 
 
 @requiere_servidor
@@ -204,6 +210,9 @@ async def test_aplicar_mueve_registra_y_conserva_sha(tmp_path, capsys):
     assert filas["Escanear.pdf"]["estado"] == "listo"
     assert filas["02-modelo/modelo.XLSX"]["estado"] == "parcial"
     assert filas["avaluos/Avalúo 1.png"]["estado"] == "en_cola"
+    assert filas["avaluos/.oculto.txt"]["estado"] == "en_cola"
+    assert filas["avaluos/datos.xyz"]["estado"] == "sin_extractor"   # MINOR-4
+    assert filas["avaluos/datos.xyz"]["ruta_entrada"] is None and filas["avaluos/datos.xyz"]["tipo"] == "xyz"
     for rel, f in filas.items():
         assert f["sha256"] == shas[rel] and f["subido_por"] == dueno and f["job_id"] is None
         assert f["bytes"] == len((nueva / "fuente" / rel).read_bytes())
@@ -214,7 +223,8 @@ async def test_aplicar_mueve_registra_y_conserva_sha(tmp_path, capsys):
     assert filas["avaluos/Avalúo 1.png"]["ruta_entrada"] == f"proyectos/{uid}/fuente/avaluos/Avalúo 1.png"
     assert filas["avaluos/Avalúo 1.png"]["carpeta_procesado"] is None
     # conteos y mapa
-    assert (r["archivos_fuente"], r["fichas"], r["filas_insertadas"]) == (3, 2, 3)
+    assert (r["archivos_fuente"], r["fichas"], r["filas_insertadas"]) == (5, 2, 5)
+    assert r["ignorados"] == ["02-modelo/enlace.pdf"]
     mapa = Path(r["mapa"])
     assert mapa.parent == proyectos and mapa.name.startswith(".e2a-lactovi-")
     assert stat.S_IMODE(mapa.stat().st_mode) == 0o600
@@ -294,11 +304,177 @@ async def test_mismo_sha_en_dos_archivos_es_una_sola_fila(tmp_path, capsys):
     _armar(tmp_path, duplicado=True)
     assert await asyncio.to_thread(_correr, tmp_path, dueno, "--aplicar") == 0
     r = _salida(capsys)
-    assert r["archivos_fuente"] == 4 and r["filas_insertadas"] == 3 and r["duplicados_sha"] == 1
-    assert len(await _filas(r["project_id"])) == 3
+    assert r["archivos_fuente"] == 6 and r["filas_insertadas"] == 5 and r["duplicados_sha"] == 1
+    assert len(await _filas(r["project_id"])) == 5
 
 
 def test_aplicar_contra_produccion_exige_confirmacion(tmp_path, capsys):
     rc = lactovi.main(["--workspace", str(tmp_path), "--carpeta", _CARPETA, "--nombre", "X",
                        "--dueno-user-id", "1", "--database", "jax_memory", "--aplicar"])
     assert rc == 2 and "--confirmo-produccion" in capsys.readouterr().err
+
+
+def _mapa_de(ws: Path) -> Path:
+    (m,) = sorted((ws / "proyectos").glob(".e2a-lactovi-*.json"))
+    return m
+
+
+def _revertir(ws: Path, mapa: Path) -> int:
+    return lactovi.main(["--revertir", str(mapa), "--database", _DB])
+
+
+def _completar(mapa: Path) -> int:
+    return lactovi.main(["--completar", str(mapa), "--database", _DB])
+
+
+async def _estado_proyecto(pid: int) -> str:
+    return (await _sql("SELECT status FROM jax_project_scope WHERE project_id=%s", (pid,), fetch=True))[0]["status"]
+
+
+@requiere_servidor
+@asincrono
+async def test_commit_incierto_no_toca_el_disco_y_completar_termina(tmp_path, capsys, monkeypatch):
+    """MINOR-5 y MINOR-6: si commit() lanza, el rename NO se deshace (codigo 4); despues
+    --completar registra las filas que faltan."""
+    dueno = await _dueno()
+    shas = _armar(tmp_path)
+    real = lactovi._insertar
+
+    async def insertar_y_romper_commit(conn, pid, filas):
+        n = await real(conn, pid, filas)
+
+        async def malo():
+            raise RuntimeError("corte en el commit")
+        conn.commit = malo
+        return n
+
+    monkeypatch.setattr(lactovi, "_insertar", insertar_y_romper_commit)
+    rc = await asyncio.to_thread(_correr, tmp_path, dueno, "--aplicar")
+    assert rc == 4
+    assert "verifica las filas" in capsys.readouterr().err
+    proyectos = tmp_path / "proyectos"
+    mapa = _mapa_de(tmp_path)
+    datos = json.loads(mapa.read_text())
+    assert (proyectos / datos["project_uuid"] / "fuente" / "Escanear.pdf").exists()      # el disco NO se toco
+    assert not (proyectos / _CARPETA).exists()
+    assert len(await _filas(datos["project_id"])) == 0                                   # la conexion cerrada revierte
+    monkeypatch.setattr(lactovi, "_insertar", real)
+    assert await asyncio.to_thread(_completar, mapa) == 0
+    r = _salida(capsys)
+    assert r["filas_insertadas_ahora"] == 5
+    assert {f["nombre_original"] for f in await _filas(datos["project_id"])} == set(shas)
+
+
+@requiere_servidor
+@asincrono
+async def test_completar_registra_las_filas_que_faltan_y_es_idempotente(tmp_path, capsys):
+    dueno = await _dueno()
+    _armar(tmp_path)
+    assert await asyncio.to_thread(_correr, tmp_path, dueno, "--aplicar") == 0
+    r = _salida(capsys)
+    pid = r["project_id"]
+    await _sql("DELETE FROM project_documents WHERE project_id=%s AND tipo IN ('pdf','xyz')",  # marcador-propio: base propia del modulo (uuid)
+               (pid,))
+    assert len(await _filas(pid)) == 3
+    mapa = Path(r["mapa"])
+    assert await asyncio.to_thread(_completar, mapa) == 0
+    assert _salida(capsys)["filas_insertadas_ahora"] == 2
+    assert len(await _filas(pid)) == 5
+    assert await asyncio.to_thread(_completar, mapa) == 0                # segunda vez: nada nuevo
+    assert _salida(capsys)["filas_insertadas_ahora"] == 0
+
+
+@requiere_servidor
+@asincrono
+async def test_completar_con_sha_distinto_no_registra(tmp_path, capsys):
+    dueno = await _dueno()
+    _armar(tmp_path)
+    assert await asyncio.to_thread(_correr, tmp_path, dueno, "--aplicar") == 0
+    r = _salida(capsys)
+    (tmp_path / "proyectos" / r["project_uuid"] / "fuente" / "Escanear.pdf").write_bytes(b"cambiado")
+    await _sql("DELETE FROM project_documents WHERE project_id=%s",  # marcador-propio: base propia del modulo (uuid)
+               (r["project_id"],))
+    assert await asyncio.to_thread(_completar, Path(r["mapa"])) == 3
+    assert len(await _filas(r["project_id"])) == 0
+
+
+@requiere_servidor
+@asincrono
+async def test_revertir_se_niega_con_trabajos_en_vuelo(tmp_path, capsys):
+    """MAJOR-2."""
+    dueno = await _dueno()
+    _armar(tmp_path)
+    assert await asyncio.to_thread(_correr, tmp_path, dueno, "--aplicar") == 0
+    r = _salida(capsys)
+    pid = r["project_id"]
+    await _sql("UPDATE project_documents SET estado='procesando' WHERE project_id=%s AND tipo='png'", (pid,))
+    antes = len(await _filas(pid))
+    assert await asyncio.to_thread(_revertir, tmp_path, Path(r["mapa"])) == 7
+    assert "jax-platform" in capsys.readouterr().err
+    assert (tmp_path / "proyectos" / r["project_uuid"]).is_dir()
+    assert not (tmp_path / "proyectos" / _CARPETA).exists()
+    assert len(await _filas(pid)) == antes
+    assert await _estado_proyecto(pid) == "ACTIVE"
+
+
+@requiere_servidor
+@asincrono
+async def test_revertir_reintentable_si_falla_el_archivado(tmp_path, capsys, monkeypatch):
+    """MINOR-7: la carpeta ya volvio y las filas ya no estan, pero el archivado fallo."""
+    dueno = await _dueno()
+    _armar(tmp_path)
+    assert await asyncio.to_thread(_correr, tmp_path, dueno, "--aplicar") == 0
+    r = _salida(capsys)
+    pid = r["project_id"]
+
+    async def falla(self, *a, **k):
+        raise RuntimeError("corte en el archivado")
+    real = lactovi.ProjectAuthorityAdmin.set_project_lifecycle
+    monkeypatch.setattr(lactovi.ProjectAuthorityAdmin, "set_project_lifecycle", falla)
+    assert await asyncio.to_thread(_revertir, tmp_path, Path(r["mapa"])) == 5
+    capsys.readouterr()
+    assert (tmp_path / "proyectos" / _CARPETA).is_dir() and len(await _filas(pid)) == 0
+    assert await _estado_proyecto(pid) == "ACTIVE"
+    monkeypatch.setattr(lactovi.ProjectAuthorityAdmin, "set_project_lifecycle", real)
+    assert await asyncio.to_thread(_revertir, tmp_path, Path(r["mapa"])) == 0
+    assert _salida(capsys)["reintento"] is True
+    assert await _estado_proyecto(pid) == "ARCHIVED"
+
+
+@requiere_servidor
+@asincrono
+async def test_reaplicar_tras_corte_despues_de_create_project_funciona(tmp_path, capsys, monkeypatch):
+    """MINOR-9: mismo proyecto (misma llave), ACTIVE, carpeta sin mover."""
+    dueno = await _dueno()
+    _armar(tmp_path)
+
+    def corte(*a, **k):
+        raise OSError("corte antes del mapa")
+    real = lactovi._escribir_mapa
+    monkeypatch.setattr(lactovi, "_escribir_mapa", corte)
+    assert await asyncio.to_thread(_correr, tmp_path, dueno, "--aplicar") == 5
+    capsys.readouterr()
+    assert (tmp_path / "proyectos" / _CARPETA).is_dir()
+    n = await _conteo("projects")
+    monkeypatch.setattr(lactovi, "_escribir_mapa", real)
+    assert await asyncio.to_thread(_correr, tmp_path, dueno, "--aplicar") == 0
+    r = _salida(capsys)
+    assert await _conteo("projects") == n                               # no creo otro proyecto
+    assert len(await _filas(r["project_id"])) == 5
+
+
+@requiere_servidor
+@asincrono
+async def test_reaplicar_con_proyecto_archivado_se_niega_y_dice_que_hacer(tmp_path, capsys):
+    dueno = await _dueno()
+    _armar(tmp_path)
+    assert await asyncio.to_thread(_correr, tmp_path, dueno, "--aplicar") == 0
+    r = _salida(capsys)
+    assert await asyncio.to_thread(_revertir, tmp_path, Path(r["mapa"])) == 0
+    capsys.readouterr()
+    Path(r["mapa"]).rename(tmp_path / "proyectos" / "mapa-anterior.json")
+    n = await _conteo("projects")
+    assert await asyncio.to_thread(_correr, tmp_path, dueno, "--aplicar") == 1
+    err = capsys.readouterr().err
+    assert "ARCHIVED" in err and "RESTORE_PROJECT" in err
+    assert (tmp_path / "proyectos" / _CARPETA).is_dir() and await _conteo("projects") == n
