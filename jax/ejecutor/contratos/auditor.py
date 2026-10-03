@@ -119,6 +119,7 @@ CODIGOS_ILEGIBLE = frozenset({
     "proveedor_fallo", "proveedor_plazo", "json_invalido", "forma_invalida", "tipo_desconocido",
     "cita_paso_inexistente", "cita_afirmacion_inexistente", "veredicto_desconocido", "veredicto_duplicado"})
 DETALLE_INVALIDO = "detalle_invalido"
+DETALLE_NO_COPIADO = "detalle_no_copiado"
 
 
 def detalle_conocido(valor) -> str:
@@ -128,6 +129,15 @@ def detalle_conocido(valor) -> str:
     if isinstance(valor, str) and valor in CODIGOS_ILEGIBLE:
         return valor
     return DETALLE_INVALIDO
+
+
+def detalle_de_pausa(origen, valor) -> str:
+    """Lo que se registra del `detalle` de una pausa segun quien la puso. SOLO `origen == "c5"` tiene un
+    vocabulario conocido (`detalle_conocido`); el `detalle` de cualquier otro origen (la huella, con su diff en
+    una lista, etc.) puede traer contenido crudo y no se copia: se registra el rotulo neutro `detalle_no_copiado`."""
+    if origen == "c5":
+        return detalle_conocido(valor)
+    return DETALLE_NO_COPIADO
 
 
 def id_de(posicion: int) -> str:

@@ -572,12 +572,12 @@ def test_un_detalle_que_no_es_un_codigo_conocido_no_se_copia(tmp_path, valor):
 # --- BLOCK-1: el cierre del vigia se deriva de cfg.tope_s ---------------------------------------
 
 def test_el_presupuesto_de_cierre_cubre_el_plazo_del_auditor_mas_la_huella_por_maquina():
-    assert S.presupuesto_cierre_s(400, 1) == 400 + S.HUELLA_CIERRE_S + S.MARGEN_CIERRE_S
-    assert S.presupuesto_cierre_s(400, 3) == 400 + 3 * S.HUELLA_CIERRE_S + S.MARGEN_CIERRE_S
+    assert S.presupuesto_cierre_s(400, 1) == 2 * 400 + S.HUELLA_CIERRE_S + S.MARGEN_CIERRE_S
+    assert S.presupuesto_cierre_s(400, 3) == 2 * 400 + 3 * S.HUELLA_CIERRE_S + S.MARGEN_CIERRE_S
     # monotono en el plazo y en las maquinas; con el techo (600) y 4 maquinas sigue cubriendo todo
     assert S.presupuesto_cierre_s(401, 1) > S.presupuesto_cierre_s(400, 1)
     assert S.presupuesto_cierre_s(120, 2) > S.presupuesto_cierre_s(120, 1)
-    assert S.presupuesto_cierre_s(600, 4) >= 600 + 4 * 30
+    assert S.presupuesto_cierre_s(600, 4) >= 2 * 600 + 4 * 30
 
 
 def test_el_presupuesto_viejo_de_200_s_no_alcanzaba_con_un_plazo_de_400():
@@ -612,7 +612,7 @@ def test_el_vigia_que_esta_auditando_durante_el_cierre_no_se_mata_dentro_del_pre
         await asyncio.sleep(0.5)
         return await v.cerrar()
 
-    rc, salida, _ = asyncio.run(cerrar_con(tope + S.HUELLA_CIERRE_S + S.MARGEN_CIERRE_S))
+    rc, salida, _ = asyncio.run(cerrar_con(S.presupuesto_cierre_s(tope, 1)))
     assert rc == 0 and "cerrada=true" in salida
     rc, salida, _ = asyncio.run(cerrar_con(tope * 0.3))   # un presupuesto menor que la llamada
     assert rc != 0 and "cerrada=true" not in salida
@@ -645,7 +645,7 @@ def test_dependencias_reales_deriva_el_cierre_de_cfg_tope_s(monkeypatch):
     turno = M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])})
     deps = S.dependencias_reales({"JAX_EJECUTOR_MISIONES": "/x"}, turno, tope_s=1.0, espera_s=1.0)
     assert asyncio.run(deps.abrir_vigia(object(), "id", "texto", frozenset({"a", "b"}))) == "vigia"
-    assert vistos["cierre_s"] == 450 + 2 * S.HUELLA_CIERRE_S + S.MARGEN_CIERRE_S
+    assert vistos["cierre_s"] == 2 * 450 + 2 * S.HUELLA_CIERRE_S + S.MARGEN_CIERRE_S
 
 
 def test_dependencias_reales_pone_la_pausa_de_la_mision(tmp_path):
@@ -657,3 +657,47 @@ def test_dependencias_reales_pone_la_pausa_de_la_mision(tmp_path):
     asyncio.run(deps.poner_pausa(_Ctx(), "vigia_no_cerro"))
     doc = json.loads((tmp_path / "PAUSA").read_text())
     assert (doc["origen"], doc["motivo"]) == ("mision", "vigia_no_cerro")
+
+
+def test_el_peor_caso_del_cierre_son_dos_lotes_en_serie(tmp_path, monkeypatch):
+    """MINOR-B: al llegar el SIGTERM hay un lote en vuelo y despues se audita el ultimo pendiente: dos
+    llamadas de casi `tope_s`. Con la formula vieja (tope_s + huella + margen) esto FALLA: se mata al vigia
+    en el segundo lote. Las constantes se ponen en 0 para que el resultado dependa solo del factor de tope_s."""
+    import sys
+    monkeypatch.setattr(S, "HUELLA_CIERRE_S", 0)
+    monkeypatch.setattr(S, "MARGEN_CIERRE_S", 0)
+    tope = 1.0
+    falso = tmp_path / "vigia_dos_lotes.py"
+    falso.write_text(
+        "import signal, sys, time\n"
+        "def al_term(*a):\n"
+        f"    time.sleep({tope} * 0.8)   # lote en vuelo\n"
+        f"    time.sleep({tope} * 0.8)   # ultimo lote pendiente\n"
+        "    print('arranco=true cerrada=true', flush=True)\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, al_term)\n"
+        "print('listo', flush=True)\n"
+        "time.sleep(60)\n")
+
+    async def cerrar_con(cierre_s):
+        v = await S.abrir_vigia(tmp_path, "m-b2", "t", frozenset({"a"}), cierre_s=cierre_s,
+                                argv=[sys.executable, str(falso)])
+        await asyncio.sleep(0.5)
+        return await v.cerrar()
+
+    rc, salida, _ = asyncio.run(cerrar_con(S.presupuesto_cierre_s(tope, 1)))
+    assert rc == 0 and "cerrada=true" in salida
+    viejo = tope + S.HUELLA_CIERRE_S + S.MARGEN_CIERRE_S   # la formula anterior
+    rc, salida, _ = asyncio.run(cerrar_con(viejo))
+    assert rc != 0 and "cerrada=true" not in salida
+
+
+@pytest.mark.parametrize("origen", ["huella", "mision", None])
+def test_leer_pausa_no_copia_el_detalle_de_un_origen_que_no_es_c5(tmp_path, origen):
+    ruta = tmp_path / "pausa"
+    doc = {"motivo": "huella_cambio", "detalle": ["secreto", "diff"]}
+    if origen:
+        doc["origen"] = origen
+    ruta.write_text(json.dumps(doc))
+    leida = S.leer_pausa(ruta)
+    assert leida["detalle"] == "detalle_no_copiado" and "secreto" not in json.dumps(leida)

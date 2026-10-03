@@ -420,6 +420,7 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
     entrega, codigo, sesion_iniciada = None, None, False
     registro_cuadra, auditor_pauso, auditor_legible = False, False, True
     resultado_entrega, clon = None, None
+    vigia_latio = False
     try:
         limite = time.monotonic() + deps.espera_latido_s
         while not await deps.latido_fresco(ctx):
@@ -435,6 +436,7 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                 dice("vigia_no_latio", vivo=vigia.vive(), espera_s=deps.espera_latido_s)
                 break
             await asyncio.sleep(deps.paso_espera_s)
+        vigia_latio = codigo != "vigia_no_latio"
         maquinas_c5 = _maquinas_para_c5(turno, hosts)
         if codigo is None:
             dice("vigia_late")
@@ -504,9 +506,12 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
         # habia una sola linea para investigar.
         dice("vigia_cerrado", rc=rc_vigia, cerrada=cerro,
              **({} if cerro else {"stderr": err_vigia[-2000:]}))
-        if not cerro and deps.poner_pausa is not None:
-            # Fail-closed: un vigia que no cerro (muerto a SIGKILL por el plazo de cierre, rc != 0, sin la
-            # linea cerrada=true) pudo dejar el ultimo lote sin auditar y SIN pausa propia. Se frena.
+        if not cerro and vigia_latio and deps.poner_pausa is not None:
+            # Fail-closed: un vigia que LATIO y no cerro (muerto a SIGKILL por el plazo de cierre, rc != 0,
+            # sin la linea cerrada=true) pudo dejar el ultimo lote sin auditar y SIN pausa propia. Se frena.
+            # Si NUNCA latio (canario pasajero, configuracion_invalida, vigia_error_en_arranque, la espera
+            # agotada) el proxy no sirvio ni un paso: no hay nada sin auditar, y una pausa global seria un
+            # freno en falso que ademas taparia `vigia_no_latio` (mas abajo `puesta` reescribe el codigo).
             try:
                 await deps.poner_pausa(ctx, "vigia_no_cerro")
                 dice("pausa_puesta_por_vigia_no_cerro")
@@ -517,7 +522,7 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
     puesta = bool(pausa and pausa.get("puesta"))
     if puesta:
         dice("pausa_detectada", origen=pausa.get("origen"), motivo=pausa.get("motivo"), paso=pausa.get("paso"),
-             legible=pausa.get("legible"), **({"detalle": A.detalle_conocido(pausa["detalle"])} if "detalle" in pausa else {}))
+             legible=pausa.get("legible"), **({"detalle": A.detalle_de_pausa(pausa.get("origen"), pausa["detalle"])} if "detalle" in pausa else {}))
     for condicion, cod in ((auditor_pauso, "auditor_pauso"),
                            (not registro_cuadra, "registro_no_cuadra"), (not cadena, "cadena_rota"),
                            (not cerro, "vigia_no_cerro"), (not auditor_legible, AUDITOR_ILEGIBLE),

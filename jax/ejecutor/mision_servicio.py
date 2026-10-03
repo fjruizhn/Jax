@@ -69,8 +69,8 @@ VARIABLE_TOPE = "JAX_EJECUTOR_TURNO_TOPE_S"
 VARIABLE_ESPERA = "JAX_EJECUTOR_VIGIA_ESPERA_S"
 #: Cierre del vigia (MINOR ronda 6: ya no hay unidad systemd de la que citar un TimeoutStopSec). El
 #: presupuesto se DERIVA del plazo del auditor (`ejecutor.c5_tope_s`, `ConfigC5.tope_s`), no es una
-#: constante: al recibir SIGTERM el vigia audita el ultimo lote pendiente -- una llamada que puede
-#: durar casi `tope_s` -- y luego toma la huella de cierre de cada maquina. Una constante de 200 s,
+#: constante: al recibir SIGTERM el vigia termina el lote en vuelo y audita el ultimo pendiente -- dos
+#: llamadas que pueden durar casi `tope_s` cada una -- y luego toma la huella de cierre de cada maquina. Una constante de 200 s,
 #: calculada para el viejo plazo de 120 s, mataba al vigia DENTRO de esa llamada (BLOCK-1 de la
 #: auditoria del 2026-10-03): el ultimo lote quedaba sin auditar y sin pausa.
 HUELLA_CIERRE_S = 30   # = vigia_servicio._TOPE_HUELLA_S, por maquina de la mision
@@ -78,12 +78,14 @@ MARGEN_CIERRE_S = 60   # borrar el latido, escribir la pausa si toca, salir del 
 
 
 def presupuesto_cierre_s(tope_s: float, n_maquinas: int) -> float:
-    """Cuanto se espera al vigia tras el SIGTERM antes de matarlo: el peor lote pendiente (`tope_s`) +
-    la huella de cierre de cada maquina + un margen. Sin maquinas o con un plazo no positivo no hay
-    presupuesto que derivar: ValueError (falla cerrado, la mision no abre el vigia)."""
+    """Cuanto se espera al vigia tras el SIGTERM antes de matarlo. Peor caso: al llegar el SIGTERM hay un lote
+    EN VUELO (hasta `tope_s`) y, al terminar, el vigia audita ademas el ULTIMO lote pendiente (otro `tope_s`):
+    dos llamadas en serie, 2 * tope_s; despues la huella de cierre de cada maquina (30 s * n) y un margen.
+    Sin maquinas o con un plazo no positivo no hay presupuesto que derivar: ValueError (falla cerrado, la
+    mision no abre el vigia)."""
     if not (isinstance(tope_s, (int, float)) and math.isfinite(tope_s) and tope_s > 0) or n_maquinas < 1:
         raise ValueError("presupuesto_cierre_invalido")
-    return tope_s + HUELLA_CIERRE_S * n_maquinas + MARGEN_CIERRE_S
+    return 2 * tope_s + HUELLA_CIERRE_S * n_maquinas + MARGEN_CIERRE_S
 
 
 class SinConfigurar(RuntimeError):
@@ -116,8 +118,9 @@ def leer_pausa(ruta) -> dict:
     paso = doc.get("paso") if isinstance(doc.get("paso"), int) and not isinstance(doc.get("paso"), bool) else None
     # `detalle` (codigo constante, p. ej. el motivo de un auditor_ilegible) solo si el vigia lo puso:
     # sin la clave, el dict sigue siendo el de siempre.
-    # Solo un codigo conocido de AuditorIlegible se copia; cualquier otra cosa es `detalle_invalido`.
-    detalle = {"detalle": A.detalle_conocido(doc["detalle"])} if "detalle" in doc else {}
+    # Solo el detalle de una pausa de C5 con un codigo conocido de AuditorIlegible se copia (si no es conocido:
+    # `detalle_invalido`); el de cualquier otro origen es `detalle_no_copiado`.
+    detalle = {"detalle": A.detalle_de_pausa(texto["origen"], doc["detalle"])} if "detalle" in doc else {}
     return {"puesta": True, "legible": True, **texto, "paso": paso, **detalle}
 
 
