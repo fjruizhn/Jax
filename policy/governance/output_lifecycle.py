@@ -104,16 +104,26 @@ def _effective_projection(rendered: RenderedText) -> Mapping[str, object]:
     return {
         "response_id": rendered.response_id,
         "text": rendered.text,
+        "chunks": list(rendered.chunks),
         "effective_output_digest": rendered.envelope_digest,
         "effective_contract_state": rendered.contract_state.value,
         "claim_ids": list(rendered.claim_ids),
-        # Chunk boundaries are an implementation detail of the F2-C
-        # post-seal generator.  The F2-D transport authorization binds the
-        # complete semantic text and metadata; current claims have no chunks.
         "original_envelope_digest": rendered.source_envelope_digest,
         "renderer_api_version": rendered.renderer_api_version,
         "domain_spec_version": rendered.domain_spec_version,
     }
+
+
+def _rendered_semantics(projection: Mapping[str, object]) -> dict[str, object]:
+    """Return renderer-owned semantic fields, excluding transport chunking."""
+    return {key: value for key, value in projection.items() if key != "chunks"}
+
+
+def _validate_chunks(rendered: RenderedText) -> None:
+    if not isinstance(rendered.chunks, tuple) or not all(isinstance(chunk, str) for chunk in rendered.chunks):
+        raise OutputLifecycleError("rendered chunks must be an immutable string tuple")
+    if rendered.chunks and "".join(rendered.chunks) != rendered.text:
+        raise OutputLifecycleError("rendered chunks do not reconstruct the governed text")
 
 
 def _digest(value: Mapping[str, object]) -> str:
@@ -131,7 +141,11 @@ class GovernedTransportUnit:
     It is not serializable request input and its constructor is unavailable to
     callers.  Durable outbox storage persists the explicit projection/digests,
     while this object gives the server composition the trusted context needed
-    to revalidate current claims at the next boundary.
+    to revalidate current claims at the next boundary. Its immutable rendered
+    projection is reusable only for this unit's lifetime; each transport
+    revalidation checks the envelope and projection digests and rechecks every
+    rendered claim/reference. Dropping the unit ends reuse, and no cache
+    survives the request or process.
     """
     envelope: GovernedResponseEnvelope
     rendered: RenderedText
@@ -230,10 +244,11 @@ def mint_governed_transport_unit(
     if not isinstance(idempotency_key, str) or not idempotency_key:
         raise OutputLifecycleError("idempotency key is required")
     _compatible(envelope, rendered, context)
+    _validate_chunks(rendered)
     validation_time = _time(now if now is not None else context.now())
     revalidation_context = replace(context, now=lambda: validation_time)
     actual = GovernedRenderer().render_text(envelope, revalidation_context)
-    if _effective_projection(actual) != _effective_projection(rendered):
+    if _rendered_semantics(_effective_projection(actual)) != _rendered_semantics(_effective_projection(rendered)):
         raise OutputLifecycleError("effective output changed or is not the trusted renderer projection")
     claims = {claim.claim_id: claim for claim in envelope.claims}
     contains_current = any(
@@ -279,19 +294,27 @@ def mint_governed_transport_unit(
 
 
 def revalidate_for_transport(unit: GovernedTransportUnit, now: datetime) -> RenderedText:
-    """Re-render at commit time and return the exact authorized projection.
+    """Revalidate dynamic authority and return the exact minted projection.
 
-    Current observations are rechecked through the F2-C/F2-B renderer.  Any
-    stale receipt or semantic change fails closed; a platform must prepare a
-    new governed unavailable/re-resolved response rather than mutate this one.
+    F2-C fully renders and seals the projection before F2-D mints the opaque
+    unit. Transport retries reuse those exact immutable bytes, while F2-B
+    receipts and reference access are rechecked at each commit boundary. The
+    reuse is invalidated when the request-scoped unit is discarded; tampering
+    with its envelope or effective projection fails the digest checks below.
+    A stale receipt fails closed; a platform must prepare a new governed
+    unavailable/re-resolved response rather than mutate this one.
     """
     if not isinstance(unit, GovernedTransportUnit):
         raise OutputLifecycleError("transport authorization requires GovernedTransportUnit")
     validate_lifecycle_version(unit.lifecycle_version)
     validation_time = _time(now)
     _compatible(unit.envelope, unit.rendered, unit.context)
-    actual = GovernedRenderer().render_text(unit.envelope, replace(unit.context, now=lambda: validation_time))
-    if (_effective_projection(actual) != _effective_projection(unit.rendered)
-            or _digest(_effective_projection(actual)) != unit.effective_projection_digest):
+    if _digest(_effective_projection(unit.rendered)) != unit.effective_projection_digest:
         raise OutputLifecycleError("prepared output is stale or differs at transport commitment")
-    return actual
+    try:
+        GovernedRenderer().revalidate_claims_for_transport(
+            unit.envelope, unit.rendered, unit.context, validation_time,
+        )
+    except GovernedRenderError as exc:
+        raise OutputLifecycleError("prepared output claims are stale or invalid at transport commitment") from exc
+    return unit.rendered
