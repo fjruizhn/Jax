@@ -1842,8 +1842,12 @@ jobs:
           # 155 -> 156 (2026-10-03, jax-14 ronda 3, MINOR-N5): +1, un valor enorme (1e28)
           # se baja al techo (86400 s aviso, 3600 s log) con warning. Medido con este
           # comando exacto, con y sin las tres dependencias: 156 passed.
-          grep -qE "^156 passed" /tmp/f2e-sr3-source || {
-            echo "PISO ROTO: se esperaban 156 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
+          # 156 -> 159 (2026-10-03, Jax#338 ronda 8): +3 en _procesamiento_routes_test.py (el
+          # error de un archivo con formato no soportado viaja como
+          # `formato_no_soportado:<formato>`; sin formato viaja solo el codigo; el formato solo
+          # se agrega a ese codigo y se valida). Medido con este comando exacto: 159 passed.
+          grep -qE "^159 passed" /tmp/f2e-sr3-source || {
+            echo "PISO ROTO: se esperaban 159 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
         env:
           PYTHONPATH: .:las_manos
       - name: Piso exacto de tests CORRIDOS
@@ -5380,8 +5384,22 @@ jobs:
           #   N23: un codigo por causa -- archivo_ilegible, formato_no_soportado (incluido un BMP
           #   RGB565 sano) e imagen_demasiado_grande (8). Medido LOCAL en hall9000: 154 passed
           #   (las 2 reales corren). En el runner: 152 passed, 2 skipped.
-          grep -qE "^152 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 152 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 154 -> 140 (Jax#338 ronda 8): -32 y +18. SE BORRAN (-32) el camino de 16 bits
+          #   (armado del L con los bytes bajos, intercambio L/N a B, PNG nativo, tope): 1+1+1+6+10;
+          #   las 2 pruebas "reales" de tesseract que dependian de la version de leptonica (el GIF
+          #   animado rc=1 con pixReadMem, que fallo en el runner con tesseract 5.3.4 / leptonica
+          #   1.82 -- rc=0 sin marca --, y el TIFF F rc=0 con "is not uint"); y 8+2+1 pruebas de
+          #   codigos/F/I/multipagina que se REESCRIBEN abajo. SE AGREGAN (+18): una prueba por
+          #   formato (gif_animado, webp_animado, coma_flotante, entero_32_bits, gris_16_bits x3 +
+          #   multipagina, bmp_16_bits y su control 555) con un espia que verifica que tesseract
+          #   NO se llama, `_formato_de_modo`, el PNG sin IEND y el JPEG con basura (reales,
+          #   archivo_no_procesable) y la tabla de causas (5). Ninguna depende de la version de
+          #   leptonica para la DETECCION (los dos archivos N26 si dependen de que libpng/libjpeg
+          #   rechacen esos datos). Medido LOCAL en hall9000: 140 passed (las 2 reales de LACTOVI
+          #   corren). El RUNNER no tiene esas 2: el piso es 138 passed + 2 skipped. (Sobre e0158c2
+          #   el runner dio "1 failed, 151 passed, 2 skipped" = 154: el unico rojo era el GIF.)
+          grep -qE "^138 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 138 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
@@ -5886,8 +5904,9 @@ jobs:
           # tres dependencias: 94 passed en ambos.
           # 94 -> 95 el 2026-10-03 (jax-14 ronda 3): ver F2-E-SR3; con y sin las tres
           # dependencias: 95 passed.
-          grep -qE "^95 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 95 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          # 95 -> 98 (Jax#338 ronda 8): ver F2-E-SR3 (+3); medido: 98 passed.
+          grep -qE "^98 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 98 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # jax-14 (2026-10-03): freno de dependencias de extraccion. Piso exacto de
       # procesamiento/_dependencias_test.py: 29 passed (10 de la ronda 0 + 19 de la
