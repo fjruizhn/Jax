@@ -748,7 +748,9 @@ def _correr_tesseract(cmd: list, datos: bytes, presupuesto: _Presupuesto | None)
         return None
 
 
-def _ocr_bytes(datos: bytes, idioma: str, presupuesto: _Presupuesto | None = None) -> dict | None:
+def _ocr_bytes(
+    datos: bytes, idioma: str, presupuesto: _Presupuesto | None = None, con_tsv: bool = False
+) -> dict | None:
     """Corre tesseract DOS veces sobre la MISMA imagen -- texto plano (para
     el extracto exacto, tildes y guion largo incluidos) y `tsv` (para la
     confianza por palabra, que el modo texto plano no expone). `None` si el
@@ -757,7 +759,8 @@ def _ocr_bytes(datos: bytes, idioma: str, presupuesto: _Presupuesto | None = Non
     una excepción escapando de acá. Si tesseract no pudo DECODIFICAR el
     archivo (imagen danada) o se agoto el tiempo, devuelve un dict con
     `clasificacion="ilegible"` y su `causa` en vez de `None`, para que
-    `_resolver_imagen` pueda distinguirlo con su codigo."""
+    `_resolver_imagen` pueda distinguirlo con su codigo. `con_tsv`: el dict
+    lleva ademas la salida `tsv` cruda (`"tsv"`), para `_unir_pasadas`."""
     proceso = _correr_tesseract(["tesseract", "-", "stdout", "-l", idioma], datos, presupuesto)
     if proceso is None or isinstance(proceso, dict):
         return proceso
@@ -777,14 +780,18 @@ def _ocr_bytes(datos: bytes, idioma: str, presupuesto: _Presupuesto | None = Non
     )
     if proceso_tsv is None or isinstance(proceso_tsv, dict):
         return proceso_tsv
-    analisis = _analizar_tsv(_como_texto(proceso_tsv.stdout))
+    salida_tsv = _como_texto(proceso_tsv.stdout)
+    analisis = _analizar_tsv(salida_tsv)
 
-    return {
+    resultado = {
         "texto": texto,
         "caracteres": len(texto),
         **analisis,
         "clasificacion": _clasificar(len(texto), analisis),
     }
+    if con_tsv:
+        resultado["tsv"] = salida_tsv
+    return resultado
 
 
 def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
@@ -798,13 +805,67 @@ def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
 
 
 # Fondos sobre los que se aplana un fotograma con transparencia REAL, en este
+# orden: el texto de la pasada blanca va primero en la union (Jax#338 ronda 12).
 _FONDOS_DEL_APLANADO = ((255, 255, 255), (0, 0, 0))
+
+
+def _normalizar_linea(linea: str) -> str:
+    """Un renglon sin espacios de mas, para comparar renglones entre pasadas."""
+    return " ".join(linea.split())
+
+
+def _renglones_tsv(salida_tsv: str) -> list[tuple[str, list[str]]]:
+    """Filas de palabra (nivel 5) de un `tsv`, agrupadas por renglon (pagina,
+    bloque, parrafo, linea) y en su orden: `(renglon normalizado, filas)`."""
+    renglones: dict[tuple, list[str]] = {}
+    for fila in salida_tsv.splitlines()[1:]:
+        campos = fila.split("\t")
+        if len(campos) >= 12 and campos[0] == "5":
+            renglones.setdefault(tuple(campos[1:5]), []).append(fila)
+    return [
+        (_normalizar_linea(" ".join(f.split("\t")[11] for f in filas)), filas)
+        for filas in renglones.values()
+    ]
+
+
+def _unir_pasadas(blanca: dict, negra: dict) -> dict:
+    """UNION de las dos pasadas de un fotograma con transparencia real (Jax#338
+    ronda 12): no se elige una y se descarta la otra, porque cada criterio de
+    eleccion perdio texto real (TOTAL en una pasada y L500 en la otra daban
+    ok/imagen_sin_texto). Texto: el de la pasada blanca y despues los renglones
+    de la negra que no estan en la blanca (comparados sin espacios de mas). Las
+    metricas salen de `_analizar_tsv` sobre la union de los `tsv` (un renglon
+    de la negra que esta en la blanca no se cuenta dos veces) y la clasificacion
+    de `_clasificar`, las mismas funciones que para una pasada. El ruido que
+    entre por una pasada lo marca la regla B (palabras dudosas)."""
+    vistos = {_normalizar_linea(linea) for linea in blanca["texto"].splitlines()} - {""}
+    nuevos = [
+        linea for linea in negra["texto"].splitlines()
+        if not linea.strip() or _normalizar_linea(linea) not in vistos
+    ]
+    texto = (blanca["texto"] + "\n" + "\n".join(nuevos)).strip()
+    renglones_blancos = {renglon for renglon, _ in _renglones_tsv(blanca["tsv"])} - {""}
+    filas_negras = [
+        fila for renglon, filas in _renglones_tsv(negra["tsv"])
+        if renglon not in renglones_blancos for fila in filas
+    ]
+    analisis = _analizar_tsv("\n".join([blanca["tsv"], *filas_negras]))
+    return {
+        "texto": texto,
+        "caracteres": len(texto),
+        **analisis,
+        "clasificacion": _clasificar(len(texto), analisis),
+    }
 
 
 def _ocr_cuadro(img, idioma: str, presupuesto: _Presupuesto) -> dict | None:
     """OCR de un fotograma ya decodificado. Sin transparencia real: una sola
     pasada (`_a_modo_legible` -> PNG). Con transparencia REAL (`_mascara_alfa`):
- Un lienzo a la vez: aplanar -> PNG -> OCR -> liberar, y repetir.
+    DOS pasadas, aplanado sobre blanco y sobre negro, y el resultado es su
+    UNION (`_unir_pasadas`). Ningun numero sobre toda la imagen decide el
+    fondo: la luminancia media la decide la figura mas grande (un logo con
+    emblema claro y texto oscuro) y no el texto. Un lienzo a la vez: aplanar
+    -> PNG -> OCR -> liberar, y repetir.
     Un fallo de OCR (`None` o `ilegible`) en cualquiera de las dos pasadas es
     el resultado."""
     dpi = img.info.get("dpi")
@@ -821,6 +882,7 @@ def _ocr_cuadro(img, idioma: str, presupuesto: _Presupuesto) -> dict | None:
         # tope del aplanado; `_validar_imagen` ya lo comprobo en todas las
         # paginas antes del OCR (N37): esto es la defensa si se llega igual
         return _ilegible_dict("demasiados_pixeles")
+    pasadas = []
     for fondo in _FONDOS_DEL_APLANADO:
         try:
             png = _a_png(_aplanar(img, mascara, fondo), dpi)   # el lienzo muere aca
@@ -828,17 +890,19 @@ def _ocr_cuadro(img, idioma: str, presupuesto: _Presupuesto) -> dict | None:
             return _ilegible_dict("sin_memoria")
         except Exception:  # fail-soft: igual que arriba, un fotograma que no se puede convertir no decodifica
             return _ilegible_dict("no_decodifica")
-        r = _ocr_bytes(png, idioma, presupuesto)
+        r = _ocr_bytes(png, idioma, presupuesto, con_tsv=True)
         del png
         if r is None or r["clasificacion"] == "ilegible":
             return r
+        pasadas.append(r)
+    return _unir_pasadas(*pasadas)
 
 
 def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict | None:
     """OCR de una imagen ya validada. `"una"`: los bytes originales por stdin.
     `"tiff"`: pagina por pagina (decodificar -> `_ocr_cuadro` -> descartar:
-    nunca se guarda la lista de PNG; con transparencia real, el fondo se elige
-    POR PAGINA), con el plazo total `PLAZO_TOTAL_SEGUNDOS`
+    nunca se guarda la lista de PNG; con transparencia real, la union de las
+    dos pasadas es POR PAGINA), con el plazo total `PLAZO_TOTAL_SEGUNDOS`
     y las metricas de la regla A/B sobre el TOTAL (caracteres y palabras
     sumados, confianza ponderada por palabras)."""
     presupuesto = _Presupuesto(PLAZO_TOTAL_SEGUNDOS)

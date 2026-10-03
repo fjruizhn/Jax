@@ -2729,7 +2729,7 @@ def _logo(caso: str, formato: str, destino: Path, con_texto: bool = True) -> Pat
 
 @pytest.mark.parametrize("formato", ["png", "webp", "tif", "gif"])
 @pytest.mark.parametrize("caso", ["A", "I"])
-def test_n36_logo_con_figura_grande_prueba_los_dos_fondos_y_elige_el_que_tiene_texto(
+def test_n36_logo_con_figura_grande_prueba_los_dos_fondos_y_conserva_el_texto(
     tmp_path, monkeypatch, caso, formato
 ):
     destino = _logo(caso, formato, tmp_path / f"logo_{caso}.{formato}")
@@ -2737,7 +2737,7 @@ def test_n36_logo_con_figura_grande_prueba_los_dos_fondos_y_elige_el_que_tiene_t
     r = ocr.extraer(destino)
     assert {_BLANCO, _NEGRO} <= set(fondos), "con transparencia real se prueban los dos fondos"
     assert r.detalle.get("codigo") != ocr.CODIGO_IMAGEN_SIN_TEXTO
-    assert _TEXTO_LOGO[0] in r.salidas["texto.txt"], "se elige el fondo con el que se lee el texto"
+    assert _TEXTO_LOGO[0] in r.salidas["texto.txt"], "el texto que lee alguno de los dos fondos se conserva"
 
 
 @pytest.mark.parametrize("caso", ["A", "I"])
@@ -2776,7 +2776,7 @@ def test_n36_imagen_opaca_una_sola_pasada_con_los_bytes_originales(tmp_path, mon
     assert all(r == destino.read_bytes() for r in recibidos)
 
 
-def test_n36_en_un_tiff_multipagina_el_fondo_se_elige_por_pagina(tmp_path, monkeypatch):
+def test_n36_en_un_tiff_multipagina_las_dos_pasadas_son_por_pagina(tmp_path, monkeypatch):
     destino = tmp_path / "logos.tif"
     _logo_en_imagen("A").save(destino, save_all=True, append_images=[_logo_en_imagen("I")])
     fondos = _tesseract_que_lee(monkeypatch)
@@ -2809,11 +2809,10 @@ def test_n37_tiff_con_la_pagina_1_opaca_y_la_2_transparente_de_mas_de_25_mpx_no_
     assert llamadas == [], "el tope se comprueba en TODAS las paginas antes del OCR de ninguna"
 
 
-def test_n36_si_un_fondo_reconoce_texto_aunque_sea_dudoso_gana_y_es_texto_dudoso(tmp_path, monkeypatch):
-    """Desempate (decision de la ronda 11): se compara (palabras no dudosas,
-    palabras totales, caracteres); con 0 utiles en los dos, gana el que
-    reconocio algo, y la imagen sale parcial/imagen_texto_dudoso, no
-    ok/imagen_sin_texto."""
+def test_n36_si_un_fondo_reconoce_texto_aunque_sea_dudoso_es_texto_dudoso(tmp_path, monkeypatch):
+    """Con la union de las dos pasadas (ronda 12), lo que reconoce un solo fondo,
+    aunque sea dudoso, entra en el resultado: la imagen sale
+    parcial/imagen_texto_dudoso, no ok/imagen_sin_texto."""
     destino = tmp_path / "rotulo.png"
     _rotulo((255, 255, 255), "png", destino)
     fondos = _tesseract_por_fondo(monkeypatch, {
