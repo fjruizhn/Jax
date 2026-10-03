@@ -22,11 +22,12 @@ una fila por sha256 en `project_documents` (INSERT IGNORE, en UNA transaccion; s
 falla, rollback y se deshace el rename).
   - con ficha: estado de la ficha (ok->listo, parcial, error, sin_extractor),
     `carpeta_procesado`, `ruta_entrada` NULL;
-  - sin ficha y de un tipo que procesamiento/ sabe extraer: `en_cola` con `ruta_entrada` =
+  - sin ficha y que `procesamiento.compuerta.tiene_extractor` acepta (por extension o por
+    contenido, la misma decision que `extraer`): `en_cola` con `ruta_entrada` =
     `proyectos/<uuid>/fuente/<ruta>` (relativa al workspace) para que el despachador de la
     plataforma la procese; la ingesta ve que el archivo ya esta en fuente/ y lo procesa en
     el lugar, sin copiarlo;
-  - sin ficha y de un tipo que NO se extrae: `sin_extractor` (ruta_entrada NULL).
+  - sin ficha y sin extractor: `sin_extractor` (ruta_entrada NULL).
 Todo lo que cuelga de la carpeta fuera de `fuente/` y `procesado/` (p. ej.
 `.claude-flow/`) se ignora para el registro (viaja con el rename) y se menciona.
 
@@ -71,15 +72,12 @@ from jax.memory.b9 import MutationAuthorizationRequest, ScopeContext, Visibility
 from jax.memory.b9_mariadb import MariaDBB9Store  # noqa: E402
 from jax.memory.project_authority import ProjectAuthorityAdmin  # noqa: E402
 from jax.memory.scope_authority import ProjectLifecycle  # noqa: E402
+from procesamiento.compuerta import tiene_extractor  # noqa: E402
 from procesamiento.ficha import Ficha, sha256_de  # noqa: E402
 
 BASE_PRODUCCION = "jax_memory"
 COMPONENTE = "proyectos-e2a-lactovi"
 ESTADO_DE_FICHA = {"ok": "listo", "parcial": "parcial", "error": "error", "sin_extractor": "sin_extractor"}
-# Tipos que procesamiento/ sabe extraer (lista del encargo E2a). Un archivo sin ficha de otro
-# tipo no se manda a procesar: se registra `sin_extractor`.
-TIPOS_EXTRAIBLES = frozenset({"pdf", "xlsx", "xls", "docx", "png", "jpg", "jpeg", "tif", "tiff",
-                              "csv", "txt", "md"})
 _LARGO_NOMBRE = 1024   # project_documents.nombre_original VARCHAR(1024)
 _LARGO_TIPO = 16       # project_documents.tipo VARCHAR(16)
 
@@ -173,6 +171,8 @@ def _planear(base: Path) -> dict:
         "duplicados_sha": len(hashes) - len(primero),
         "fichas_sin_archivo": sorted(set(fichas) - set(primero)),
         "bytes": {sha: (fuente / rel).stat().st_size for sha, rel in primero.items()},
+        # La misma decision que el extractor real (extension Y contenido), no una lista copiada.
+        "extraible": {sha: tiene_extractor(fuente / rel) for sha, rel in primero.items()},
     }
 
 
@@ -186,7 +186,7 @@ def _filas(plan: dict, project_uuid: str, dueno: int) -> list[dict]:
         if ficha is not None:
             fila.update(estado=ESTADO_DE_FICHA[ficha.estado], ruta_entrada=None,
                         carpeta_procesado=f"proyectos/{project_uuid}/procesado/{sha}")
-        elif ext in TIPOS_EXTRAIBLES:
+        elif plan["extraible"][sha]:
             fila.update(estado="en_cola", carpeta_procesado=None,
                         ruta_entrada=f"proyectos/{project_uuid}/fuente/{rel}")
         else:

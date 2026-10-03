@@ -5428,8 +5428,11 @@ jobs:
           #   vive en fuente/ se procesa en el lugar (sin copia); un symlink dentro de
           #   fuente/ sigue sin usarse; un origen de afuera con el mismo nombre no pisa.
           #   Numero LOCAL: el controlador lo re-mide con el runner.
-          grep -qE "^47 passed" /tmp/ingesta_tests || {
-            echo "PISO ROTO: se esperaban 47 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+          # 47 -> 48 (2026-10-03, Proyectos E2a T4, ronda 2, ROTURA-1): +1 -- un symlink de
+          #   directorio mas `..` ya no se procesa en el lugar (huella y extraccion del mismo
+          #   archivo). Numero LOCAL: el controlador lo re-mide con el runner.
+          grep -qE "^48 passed" /tmp/ingesta_tests || {
+            echo "PISO ROTO: se esperaban 48 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
       # Task 9 (2026-09-21, procesamiento-archivos-nucleo): mide si los
       # extractos SIRVEN -- el criterio §7.B corregido ese mismo dia (el

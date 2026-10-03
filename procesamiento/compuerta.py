@@ -97,6 +97,21 @@ def _pdf_o_ocr(origen: Path) -> Resultado:
     return pdf.extraer(origen) if tiene_texto else ocr.extraer(origen)
 
 
+def tiene_extractor(origen: Path) -> bool:
+    """True si `extraer(origen)` intentaria un extractor real (no `sin_extractor`
+    por tipo). Misma decision que `extraer`: el contenido manda cuando es decisivo
+    (PDF, imagen; el OLE2 antiguo no tiene extractor) y si no, la extension. Solo
+    lee la cabecera; no cambia el comportamiento de `extraer`. Lo usa
+    `scripts/proyectos_e2a_lactovi.py` para decidir `en_cola` o `sin_extractor`."""
+    origen = Path(origen)
+    tipo = _tipo_por_contenido(origen)
+    if tipo in ("pdf", "imagen"):
+        return True
+    if tipo == "ole2":
+        return False
+    return origen.suffix.lower() in (EXCEL | WORD | IMAGENES | {".pdf"})
+
+
 def extraer(origen: Path) -> Resultado:
     origen = Path(origen)
     sufijo = origen.suffix.lower()

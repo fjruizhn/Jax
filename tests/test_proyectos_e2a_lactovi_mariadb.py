@@ -115,8 +115,8 @@ def _ficha(sha: str, origen: str, estado: str) -> str:
 
 
 def _armar(ws: Path, *, duplicado: bool = False) -> dict[str, str]:
-    """Proyecto suelto con 5 archivos regulares (ok, parcial, y tres sin ficha: uno aceptado, uno oculto,
-    uno de tipo no aceptado), un symlink en una subcarpeta y `.claude-flow/`.
+    """Proyecto suelto con 8 archivos regulares (ok, parcial, y seis sin ficha: aceptados, ocultos,
+    por contenido y de tipo sin extractor), un symlink en una subcarpeta y `.claude-flow/`.
     Devuelve {ruta relativa en fuente/: sha}."""
     base = ws / "proyectos" / _CARPETA
     (base / "fuente" / "02-modelo").mkdir(parents=True)
@@ -125,7 +125,10 @@ def _armar(ws: Path, *, duplicado: bool = False) -> dict[str, str]:
     (base / ".claude-flow" / "estado.json").write_text("{}")
     contenidos = {"Escanear.pdf": b"pdf-ok", "02-modelo/modelo.XLSX": b"xlsx-parcial",
                   "avaluos/Avalúo 1.png": b"png-sin-ficha",
-                  "avaluos/.oculto.txt": b"oculto",          # archivo oculto, tipo aceptado -> en_cola
+                  "avaluos/.oculto.pdf": b"oculto",          # archivo oculto, tipo aceptado -> en_cola
+                  "avaluos/macro.xlsm": b"xlsm-sin-ficha",   # el extractor real lo acepta (ROTURA-2) -> en_cola
+                  "avaluos/sin-extension": b"%PDF-1.4 sin ficha",   # PDF por contenido (ROTURA-2) -> en_cola
+                  "avaluos/notas.txt": b"texto",             # el extractor real NO lo extrae -> sin_extractor
                   "avaluos/datos.xyz": b"tipo-no-aceptado"}  # sin ficha y sin extractor -> sin_extractor
     if duplicado:
         contenidos["avaluos/copia.png"] = b"png-sin-ficha"
@@ -181,10 +184,10 @@ async def test_ensayo_no_escribe_nada(tmp_path, capsys):
             await _conteo("jax_project_scope")) == antes_db
     r = _salida(capsys)
     assert r["ensayo"] is True
-    assert r["archivos_fuente"] == 5 and r["fichas"] == 2 and r["filas_a_insertar"] == 5
+    assert r["archivos_fuente"] == 8 and r["fichas"] == 2 and r["filas_a_insertar"] == 8
     assert ".claude-flow" in r["ignorado"]
     assert r["ignorados"] == ["02-modelo/enlace.pdf"]            # MINOR-8: symlink de un nivel profundo
-    assert r["estados"] == {"en_cola": 2, "listo": 1, "parcial": 1, "sin_extractor": 1}
+    assert r["estados"] == {"en_cola": 4, "listo": 1, "parcial": 1, "sin_extractor": 2}
 
 
 @requiere_servidor
@@ -210,7 +213,10 @@ async def test_aplicar_mueve_registra_y_conserva_sha(tmp_path, capsys):
     assert filas["Escanear.pdf"]["estado"] == "listo"
     assert filas["02-modelo/modelo.XLSX"]["estado"] == "parcial"
     assert filas["avaluos/Avalúo 1.png"]["estado"] == "en_cola"
-    assert filas["avaluos/.oculto.txt"]["estado"] == "en_cola"
+    assert filas["avaluos/.oculto.pdf"]["estado"] == "en_cola"
+    assert filas["avaluos/macro.xlsm"]["estado"] == "en_cola"            # ROTURA-2: la lista sale de compuerta
+    assert filas["avaluos/sin-extension"]["estado"] == "en_cola"         # PDF detectado por contenido
+    assert filas["avaluos/notas.txt"]["estado"] == "sin_extractor"
     assert filas["avaluos/datos.xyz"]["estado"] == "sin_extractor"   # MINOR-4
     assert filas["avaluos/datos.xyz"]["ruta_entrada"] is None and filas["avaluos/datos.xyz"]["tipo"] == "xyz"
     for rel, f in filas.items():
@@ -223,7 +229,7 @@ async def test_aplicar_mueve_registra_y_conserva_sha(tmp_path, capsys):
     assert filas["avaluos/Avalúo 1.png"]["ruta_entrada"] == f"proyectos/{uid}/fuente/avaluos/Avalúo 1.png"
     assert filas["avaluos/Avalúo 1.png"]["carpeta_procesado"] is None
     # conteos y mapa
-    assert (r["archivos_fuente"], r["fichas"], r["filas_insertadas"]) == (5, 2, 5)
+    assert (r["archivos_fuente"], r["fichas"], r["filas_insertadas"]) == (8, 2, 8)
     assert r["ignorados"] == ["02-modelo/enlace.pdf"]
     mapa = Path(r["mapa"])
     assert mapa.parent == proyectos and mapa.name.startswith(".e2a-lactovi-")
@@ -304,8 +310,8 @@ async def test_mismo_sha_en_dos_archivos_es_una_sola_fila(tmp_path, capsys):
     _armar(tmp_path, duplicado=True)
     assert await asyncio.to_thread(_correr, tmp_path, dueno, "--aplicar") == 0
     r = _salida(capsys)
-    assert r["archivos_fuente"] == 6 and r["filas_insertadas"] == 5 and r["duplicados_sha"] == 1
-    assert len(await _filas(r["project_id"])) == 5
+    assert r["archivos_fuente"] == 9 and r["filas_insertadas"] == 8 and r["duplicados_sha"] == 1
+    assert len(await _filas(r["project_id"])) == 8
 
 
 def test_aplicar_contra_produccion_exige_confirmacion(tmp_path, capsys):
@@ -361,7 +367,7 @@ async def test_commit_incierto_no_toca_el_disco_y_completar_termina(tmp_path, ca
     monkeypatch.setattr(lactovi, "_insertar", real)
     assert await asyncio.to_thread(_completar, mapa) == 0
     r = _salida(capsys)
-    assert r["filas_insertadas_ahora"] == 5
+    assert r["filas_insertadas_ahora"] == 8
     assert {f["nombre_original"] for f in await _filas(datos["project_id"])} == set(shas)
 
 
@@ -375,11 +381,11 @@ async def test_completar_registra_las_filas_que_faltan_y_es_idempotente(tmp_path
     pid = r["project_id"]
     await _sql("DELETE FROM project_documents WHERE project_id=%s AND tipo IN ('pdf','xyz')",  # marcador-propio: base propia del modulo (uuid)
                (pid,))
-    assert len(await _filas(pid)) == 3
+    assert len(await _filas(pid)) == 5
     mapa = Path(r["mapa"])
     assert await asyncio.to_thread(_completar, mapa) == 0
-    assert _salida(capsys)["filas_insertadas_ahora"] == 2
-    assert len(await _filas(pid)) == 5
+    assert _salida(capsys)["filas_insertadas_ahora"] == 3
+    assert len(await _filas(pid)) == 8
     assert await asyncio.to_thread(_completar, mapa) == 0                # segunda vez: nada nuevo
     assert _salida(capsys)["filas_insertadas_ahora"] == 0
 
@@ -460,7 +466,7 @@ async def test_reaplicar_tras_corte_despues_de_create_project_funciona(tmp_path,
     assert await asyncio.to_thread(_correr, tmp_path, dueno, "--aplicar") == 0
     r = _salida(capsys)
     assert await _conteo("projects") == n                               # no creo otro proyecto
-    assert len(await _filas(r["project_id"])) == 5
+    assert len(await _filas(r["project_id"])) == 8
 
 
 @requiere_servidor

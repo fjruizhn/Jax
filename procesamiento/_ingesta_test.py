@@ -34,6 +34,7 @@ sólo un mapa hallazgo -> test:
   I-7 (trabajo sin jail) -> test_I7_trabajo_fuera_del_workspace_se_rechaza
 """
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -1436,3 +1437,26 @@ def test_origen_fuera_de_fuente_con_nombre_igual_a_uno_de_adentro_no_pisa(tmp_pa
     assert ficha.sha256 == sha256_de(fuera)
     assert (trabajo / ficha.origen).read_bytes() == fuera.read_bytes()
     assert Path(ficha.origen) != Path("fuente/sub/x.xlsx")
+
+
+def test_symlink_de_directorio_mas_punto_punto_no_envenena_el_cache(tmp_path: Path):
+    """ROTURA-1 (ronda 2 de E2a T4): `fuente/lnk/../x.xlsx` con `lnk` -> `OTRO/fuente/d`.
+    El kernel resuelve `lnk/..` a `OTRO/fuente`; una normalizacion lexica lo vera como
+    `fuente/x.xlsx`. La huella y lo extraido tienen que ser del MISMO archivo."""
+    trabajo = tmp_path / "trabajo"
+    otro = tmp_path / "otro"
+    (trabajo / "fuente").mkdir(parents=True)
+    (otro / "fuente" / "d").mkdir(parents=True)
+    propio = _libro(trabajo / "fuente" / "x.xlsx", valor=1)
+    ajeno = _libro(otro / "fuente" / "x.xlsx", valor=2)
+    assert sha256_de(propio) != sha256_de(ajeno)
+    (trabajo / "fuente" / "lnk").symlink_to(otro / "fuente" / "d")
+    origen = trabajo / "fuente" / "lnk" / ".." / "x.xlsx"
+    assert os.path.samefile(origen, ajeno)                      # el kernel resuelve a OTRO
+
+    ficha = ingesta.ingerir(origen, trabajo)
+
+    assert sha256_de(trabajo / ficha.origen) == ficha.sha256     # ficha coherente con lo que apunta
+    assert ficha.sha256 == sha256_de(ajeno)                      # se ingirio lo que el kernel abrio
+    assert (trabajo / "fuente" / "x.xlsx").read_bytes() == propio.read_bytes()   # el propio, intacto
+    assert Path(ficha.origen) != Path("fuente/x.xlsx")
