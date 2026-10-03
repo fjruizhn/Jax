@@ -11,7 +11,7 @@ GPU, servicios externos, MariaDB ni credenciales productivas.
 | Ejecución | JAX | Platform |
 |---|---|---|
 | Base | `7024529e1ede4b3a3de92eefe4f60e3d2f567f01` | `1e2888c32d7a6221a4b4395d2d2018845e31468f` |
-| Optimizada | ver SHA del commit que incorpora este artefacto | `1e2888c32d7a6221a4b4395d2d2018845e31468f` |
+| Optimizada | `41d9e192df73f28333e6bea9f970476cb97c60ce` | `1e2888c32d7a6221a4b4395d2d2018845e31468f` |
 
 Python 3.14.4, Hall9000. Se hicieron dos corridas secuenciales de 50 peticiones por
 nivel, en concurrencias 1, 5, 10 y 25. La tabla muestra la mediana de cada métrica entre
