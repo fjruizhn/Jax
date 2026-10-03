@@ -8,18 +8,22 @@ comprueba la cadena de archivos Python que se importó.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
+import pwd
 import re
 import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 REPO_OFICIAL = "fjruizhn/claude-skills"
 MIRROR = Path("/srv/faro/claude-skills.git")
 DESTINO = Path("/srv/faro/ecosistema")
 ENV_FILE = Path("/etc/jax/las-voces-faro.env")
+LOCK_FILE = Path("/srv/faro/las-voces-paquete.lock")
 REF_FRESCURA = "refs/heads/main"
 _RE_SHA = re.compile(r"^[0-9a-f]{40}$")
 _NOMBRES_ENV = (
@@ -32,6 +36,10 @@ _NOMBRES_ENV = (
 
 class PublicacionRechazada(RuntimeError):
     """La precondición de confianza falló; no se publica ni se reemplaza nada."""
+
+
+class PublicacionIndeterminada(PublicacionRechazada):
+    """El rename ya ocurrió; el operador debe comprobar el env antes de reintentar."""
 
 
 ConfigFaro = None
@@ -141,8 +149,50 @@ def _oid_oficial() -> str:
 def _crear_directorio_root(ruta: Path) -> None:
     padre = ruta.parent
     _ruta_root_segura(padre, directorio=True)
-    ruta.mkdir(mode=0o755, exist_ok=True)
+    if ruta.exists() or ruta.is_symlink():
+        _ruta_root_segura(ruta, directorio=True)
+    else:
+        ruta.mkdir(mode=0o755)
+        os.chmod(ruta, 0o755)  # umask 077 no debe dejar el paquete inaccesible para fruiz
     _ruta_root_segura(ruta, directorio=True)
+    if stat.S_IMODE(os.lstat(ruta).st_mode) != 0o755:
+        raise PublicacionRechazada(f"el directorio debe ser 0755: {ruta}")
+
+
+@contextmanager
+def _bloqueo_publicacion():
+    """Serializa todo el ciclo OID→fetch→contraste→promoción entre operadores."""
+    _crear_directorio_root(LOCK_FILE.parent)
+    fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        datos = os.fstat(fd)
+        if not stat.S_ISREG(datos.st_mode) or datos.st_uid != 0 or datos.st_gid != 0 or stat.S_IMODE(datos.st_mode) != 0o600:
+            raise PublicacionRechazada("lock Faro no es root:root 0600 regular")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise PublicacionRechazada("otra publicación Faro está en curso") from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def _cargar_como_fruiz(cfg) -> None:
+    """Prueba la lectura efectiva del paquete con la identidad de Qwen."""
+    usuario = pwd.getpwnam("fruiz")
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setgroups([])
+            os.setgid(usuario.pw_gid)
+            os.setuid(usuario.pw_uid)
+            cargar_paquete(cfg)
+        except BaseException:  # fail-soft: el hijo comunica fallo sin publicar; el padre falla cerrado
+            os._exit(2)
+        os._exit(0)
+    _, estado = os.waitpid(pid, 0)
+    if not os.WIFEXITED(estado) or os.WEXITSTATUS(estado) != 0:
+        raise PublicacionRechazada("fruiz no puede cargar el paquete verificado")
 
 
 def _validar_mirror() -> None:
@@ -195,6 +245,7 @@ def _publicar_env(sha: str) -> None:
     _crear_directorio_root(ENV_FILE.parent)
     fd, nombre = tempfile.mkstemp(prefix=f".{ENV_FILE.name}.", dir=ENV_FILE.parent)
     temporal = Path(nombre)
+    reemplazado = False
     try:
         os.fchmod(fd, 0o644)
         os.fchown(fd, 0, 0)
@@ -203,21 +254,27 @@ def _publicar_env(sha: str) -> None:
             archivo.flush()
             os.fsync(archivo.fileno())
         os.replace(temporal, ENV_FILE)
+        reemplazado = True  # punto de publicación: desde aquí no se promete rollback
         descriptor_dir = os.open(ENV_FILE.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(descriptor_dir)
         finally:
             os.close(descriptor_dir)
-    except BaseException:
+    except BaseException as exc:  # fail-soft: quitar solo el temporal; conservar el error o declarar estado incierto
         try:
             os.close(fd)
-        except OSError:
+        except OSError:  # fail-soft: fdopen pudo cerrarlo; seguir limpieza y relanzar el error original
             pass
         temporal.unlink(missing_ok=True)
+        if reemplazado:
+            raise PublicacionIndeterminada("el env fue reemplazado, pero falló la confirmación; comprobar --check") from exc
         raise
-    _ruta_root_segura(ENV_FILE, directorio=False)
-    if stat.S_IMODE(ENV_FILE.stat().st_mode) != 0o644:
-        raise PublicacionRechazada("modo final del env no es 0644")
+    try:
+        _ruta_root_segura(ENV_FILE, directorio=False)
+        if stat.S_IMODE(ENV_FILE.stat().st_mode) != 0o644:
+            raise PublicacionRechazada("modo final del env no es 0644")
+    except Exception as exc:
+        raise PublicacionIndeterminada("el env fue reemplazado, pero falló la comprobación final; comprobar --check") from exc
 
 
 def _leer_env_exacta() -> dict[str, str]:
@@ -253,18 +310,26 @@ def comprobar_publicacion() -> None:
 
 def publicar() -> str:
     _exigir_root_y_codigo()
-    oid = _oid_oficial()
-    _preparar_mirror(oid)
-    cfg = ConfigFaro(repo=MIRROR, sha=oid, destino=DESTINO,
-                     ref_frescura=REF_FRESCURA, uid_duenio=0)
-    construir_paquete(cfg)
-    fallos = verificar_contra_arbol(cfg)
-    if fallos:
-        raise PublicacionRechazada("verificar_contra_arbol falló: " + ", ".join(x.codigo for x in fallos))
-    cargar_paquete(cfg)
-    _publicar_env(oid)
-    comprobar_publicacion()
-    return oid
+    # git_objetos._entorno_limpio hereda PATH de este proceso. Se fija antes
+    # de construir/contrastar para no ejecutar un git de una ruta controlada.
+    os.environ["PATH"] = "/usr/bin:/bin"
+    with _bloqueo_publicacion():
+        oid = _oid_oficial()
+        _preparar_mirror(oid)
+        cfg = ConfigFaro(repo=MIRROR, sha=oid, destino=DESTINO,
+                         ref_frescura=REF_FRESCURA, uid_duenio=0)
+        construir_paquete(cfg)
+        fallos = verificar_contra_arbol(cfg)
+        if fallos:
+            raise PublicacionRechazada("verificar_contra_arbol falló: " + ", ".join(x.codigo for x in fallos))
+        cargar_paquete(cfg)
+        _cargar_como_fruiz(cfg)
+        _publicar_env(oid)
+        try:
+            comprobar_publicacion()
+        except Exception as exc:
+            raise PublicacionIndeterminada("el env fue reemplazado, pero falló la comprobación del paquete; comprobar --check") from exc
+        return oid
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -278,6 +343,9 @@ def main(argv: list[str] | None = None) -> int:
             print("paquete Faro permanente verificado")
         else:
             print(publicar())
+    except PublicacionIndeterminada as exc:
+        print(f"estado indeterminado tras el rename: {exc}", file=sys.stderr)
+        return 3
     except PublicacionRechazada as exc:
         print(f"falla cerrada: {exc}", file=sys.stderr)
         return 2

@@ -243,6 +243,26 @@ _EXENTOS_POR_MENCION_PARTIDA = {
 # El conjunto exacto de cadenas plegadas con "claude" que el archivo exento puede tener.
 _CADENAS_CLAUDE_EXENTAS = frozenset({"CLAUDE.md", "claude-code", "Claude Code"})
 
+# LV-001, 2026-10-03: dos excepciones POR RUTA para el paquete Faro permanente.
+# El publicador root invoca exclusivamente Git y gh para fijar el SHA oficial;
+# su _run(argv) tiene argv libre por la composición de opciones/refspec de Git.
+# La lista exacta de literales y la forma de TODOS sus call sites de _run se
+# comprueban abajo: si alguien añade un CLI de suscripción, una credencial,
+# otro literal "claude" o un argv libre procedente de fuera, vuelve a rojo.
+# El test del lanzador crea un qwen-auto temporal y SOLO ejecuta esa ruta fija;
+# jamás lanza el binario real de Qwen/Claude. No son excepciones generales del
+# scanner ni autorizan lanzar `claude` fuera de cli_sandbox.
+_EXENTOS_FARO = {
+    "ops/las-voces/faro_paquete_permanente.py": frozenset({
+        "/srv/faro/claude-skills.git", "fjruizhn/claude-skills",
+        "git@github.com:fjruizhn/claude-skills.git",
+    }),
+    "tests/test_las_voces_qwen_auto.py": frozenset({
+        "JAX_FARO_REPO=/srv/faro/claude-skills.git\n",
+        "JAX_FARO_REPO=/srv/faro/claude-skills.git\nJAX_FARO_SHA=",
+    }),
+}
+
 
 def _cadenas_con_claude(tree: ast.AST) -> frozenset[str]:
     return frozenset(t for t in _cadenas_plegadas(tree) if "claude" in t.lower())
@@ -259,6 +279,47 @@ def _exento_por_mencion_partida(root: Path, path: Path, tree: ast.AST) -> bool:
         and _lanza_solo_git(tree)
         and not _lanza_cli_de_suscripcion(tree)
         and not _menciona_ruta_de_cli(tree)
+    )
+
+
+def _exento_faro(root: Path, path: Path, tree: ast.AST) -> bool:
+    """Exención acotada al publicador Git/gh y al test de su lanzador temporal."""
+    try:
+        rel = path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return False
+    if rel not in _EXENTOS_FARO or _cadenas_con_claude(tree) != _EXENTOS_FARO[rel]:
+        return False
+    if _lanza_cli_de_suscripcion(tree) or _menciona_ruta_de_cli(tree):
+        return False
+    alias = _Alias(tree)
+    lanzamientos = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and _nombre_lanzador(n, alias)]
+    if rel == "ops/las-voces/faro_paquete_permanente.py":
+        # Un solo subprocess.run dentro de _run; todos sus call sites pasan
+        # una lista escrita en este archivo, nunca `argv` que entre de fuera.
+        if len(lanzamientos) != 1 or not isinstance(lanzamientos[0].func, ast.Attribute):
+            return False
+        if not (isinstance(lanzamientos[0].args[0], ast.Name)
+                and lanzamientos[0].args[0].id == "argv"):
+            return False
+        llamadas = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Name) and n.func.id == "_run"]
+        return bool(llamadas) and all(n.args and isinstance(n.args[0], ast.List) for n in llamadas)
+    # El test usa subprocess.run únicamente con el script fixture creado por
+    # _script_con_env_de_prueba; ninguna función acepta un argv de fuera.
+    return bool(lanzamientos) and all(
+        n.args and isinstance(n.args[0], ast.List)
+        and len(n.args[0].elts) in (1, 2)
+        and isinstance(n.args[0].elts[0], ast.Call)
+        and isinstance(n.args[0].elts[0].func, ast.Name)
+        and n.args[0].elts[0].func.id == "str"
+        and len(n.args[0].elts[0].args) == 1
+        and isinstance(n.args[0].elts[0].args[0], ast.Name)
+        and n.args[0].elts[0].args[0].id in {"script", "unsafe"}
+        and (len(n.args[0].elts) == 1 or (
+            isinstance(n.args[0].elts[1], ast.Constant)
+            and n.args[0].elts[1].value == "--help"))
+        for n in lanzamientos
     )
 
 
@@ -748,6 +809,8 @@ def find_naked_claude_subprocess_files() -> list[str]:
                 continue
             if _exento_por_mencion_partida(root, path, tree):
                 continue
+            if _exento_faro(root, path, tree):
+                continue
             violations.append(str(path))
     return violations
 
@@ -1214,6 +1277,30 @@ def test_axioma_sync_esta_en_la_lista_explicita_de_exenciones_con_su_justificaci
     arbol = ast.parse((_THIS_REPO_ROOT / rel).read_text(encoding="utf-8"))
     assert _viola_la_politica(arbol), "el detector ya no ve la mencion partida de axioma_sync.py"
     assert _exento_por_mencion_partida(_THIS_REPO_ROOT, _THIS_REPO_ROOT / rel, arbol)
+
+
+def test_exenciones_faro_exigen_literales_y_lanzamientos_exactos() -> None:
+    for rel in _EXENTOS_FARO:
+        ruta = _THIS_REPO_ROOT / rel
+        fuente = ruta.read_text(encoding="utf-8")
+        arbol = ast.parse(fuente)
+        assert _viola_la_politica(arbol), f"exención muerta: {rel}"
+        assert _exento_faro(_THIS_REPO_ROOT, ruta, arbol), rel
+        # Una mención nueva del CLI en un argumento Git o fixture no se
+        # convierte en permiso por estar en un archivo exento.
+        mutado = ast.parse(fuente + "\nMARCA = 'claude --danger'\n")
+        assert not _exento_faro(_THIS_REPO_ROOT, ruta, mutado), rel
+
+
+def test_exenciones_faro_niegan_argv_libre_nuevo() -> None:
+    publicador = _THIS_REPO_ROOT / "ops/las-voces/faro_paquete_permanente.py"
+    fuente = publicador.read_text(encoding="utf-8")
+    mutado = ast.parse(fuente + "\n_run(argv_externo)\n")
+    assert not _exento_faro(_THIS_REPO_ROOT, publicador, mutado)
+    prueba = _THIS_REPO_ROOT / "tests/test_las_voces_qwen_auto.py"
+    fuente_prueba = prueba.read_text(encoding="utf-8")
+    mutado_prueba = ast.parse(fuente_prueba + "\nsubprocess.run(argv_externo)\n")
+    assert not _exento_faro(_THIS_REPO_ROOT, prueba, mutado_prueba)
 
 
 def _plantar(tmp_path, archivos: dict[str, str]) -> set[str]:
