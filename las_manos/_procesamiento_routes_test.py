@@ -1061,6 +1061,7 @@ def _owned_request() -> Request:
 
 
 import contextlib
+import importlib
 import os
 
 import pytest
@@ -1322,14 +1323,29 @@ class TrabajoHTTPTest(unittest.TestCase):
         assert primera == 1, "la segunda dentro de la hora NO avisa"
         assert enviar.await_count == 2
 
-    def test_el_aviso_no_lleva_contenido_de_clientes_y_sin_credenciales_no_rompe(self):
-        reloj = [5000.0]
+    def test_el_texto_realmente_enviado_no_lleva_las_rutas_del_lote(self):
+        """MINOR-N4: se afirma sobre lo que recibio `send_telegram_alert`, no sobre
+        un texto armado por la propia prueba. Si `mensaje()` metiera rutas, falla."""
+        enviar = AsyncMock(return_value={"ok": True, "message_id": 1, "error": None})
+        rutas = ["secreto-del-cliente.pdf", "carpeta/balance-confidencial.pdf"]
+        with _estado_falta("pdfplumber"), patch("jacobs.reaper.send_telegram_alert", enviar), \
+             TestClient(_app()) as client:
+            r = self._post(client, rutas=rutas)
+            time.sleep(0.2)
+        assert r.status_code == 503, r.text
+        enviar.assert_awaited_once()
+        enviado = enviar.await_args.args[0]
+        assert "pdfplumber" in enviado
+        for ruta in rutas:
+            assert ruta not in enviado and Path(ruta).stem not in enviado
+
+    def test_sin_credenciales_de_telegram_el_503_no_rompe(self):
         with _estado_falta("pdfplumber"), \
              patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""}), \
-             patch.object(aviso_extractores, "_reloj", lambda: reloj[0]), TestClient(_app()) as client:
-            r = self._post(client, rutas=["secreto-del-cliente.pdf"])
+             TestClient(_app()) as client:
+            r = self._post(client, rutas=["a.pdf"])
+            time.sleep(0.2)
         assert r.status_code == 503, r.text
-        assert "secreto-del-cliente" not in aviso_extractores.mensaje(["pdfplumber"])
 
     def test_el_log_del_503_sale_como_mucho_una_vez_por_minuto(self):
         reloj = [9000.0]
@@ -1901,6 +1917,45 @@ class ProjectUuidTest(unittest.TestCase):
     def test_carpeta_del_trabajo_es_el_uuid(self):
         self.assertEqual(rutas_mod._trabajo_de(self.UUID),
                          tool_authority.WORKSPACE_ROOT / "proyectos" / self.UUID)
+
+
+# -- jax-14 ronda 2, MINOR-N2: las variables de intervalo nunca tumban el import ----------
+def _recargar_aviso(**entorno):
+    with patch.dict(os.environ, entorno):
+        return importlib.reload(aviso_extractores)
+
+
+@pytest.fixture
+def _aviso_restaurado():
+    yield
+    importlib.reload(aviso_extractores)  # entorno limpio: vuelven los valores por defecto
+
+
+def test_valor_no_numerico_usa_el_default_sin_lanzar_y_el_import_no_cae(_aviso_restaurado, caplog):
+    with caplog.at_level("WARNING", logger="las_manos.aviso_extractores"):
+        mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S="1h", JAX_PROCESAMIENTO_LOG_EXTRACTORES_S="abc")
+    assert mod.INTERVALO_AVISO_S == 3600.0
+    assert mod.INTERVALO_LOG_S == 60.0
+    avisos = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S" in a for a in avisos), avisos
+
+
+@pytest.mark.parametrize("valor", ["0", "-5", "nan", "inf", "-inf"])
+def test_cero_negativo_o_no_finito_se_acota_al_minimo_o_al_default(_aviso_restaurado, valor):
+    mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S=valor, JAX_PROCESAMIENTO_LOG_EXTRACTORES_S=valor)
+    assert mod.INTERVALO_AVISO_S >= 60.0
+    assert mod.INTERVALO_LOG_S >= 10.0
+    assert mod.INTERVALO_AVISO_S < float("inf") and mod.INTERVALO_LOG_S < float("inf")
+
+
+def test_los_minimos_son_60_para_el_aviso_y_10_para_el_log(_aviso_restaurado):
+    mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S="1", JAX_PROCESAMIENTO_LOG_EXTRACTORES_S="1")
+    assert (mod.INTERVALO_AVISO_S, mod.INTERVALO_LOG_S) == (60.0, 10.0)
+
+
+def test_un_valor_valido_por_encima_del_minimo_se_respeta(_aviso_restaurado):
+    mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S="7200", JAX_PROCESAMIENTO_LOG_EXTRACTORES_S="30")
+    assert (mod.INTERVALO_AVISO_S, mod.INTERVALO_LOG_S) == (7200.0, 30.0)
 
 
 if __name__ == "__main__":

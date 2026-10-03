@@ -20,14 +20,37 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 
 logger = logging.getLogger("las_manos.aviso_extractores")
 
-#: Sin hardcoding: ajustables por entorno, con los valores decididos por defecto.
-INTERVALO_AVISO_S = float(os.getenv("JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S", "3600"))
-INTERVALO_LOG_S = float(os.getenv("JAX_PROCESAMIENTO_LOG_EXTRACTORES_S", "60"))
+def _segundos(nombre: str, por_defecto: float, minimo: float) -> float:
+    """Lee un intervalo del entorno SIN lanzar nunca (se evalua al importar y
+    `server.py` importa este modulo: un `ValueError` tumbaria LAS MANOS entero).
+    No numerico o no finito -> el default, con un warning. Menos que `minimo`
+    (cero y negativos incluidos) -> `minimo`: un 0 mandaria un Telegram por POST."""
+    crudo = os.getenv(nombre)
+    if crudo is None or not crudo.strip():
+        return por_defecto
+    try:
+        valor = float(crudo)
+    except ValueError:
+        valor = float("nan")
+    if not math.isfinite(valor):
+        logger.warning("%s=%r no es un numero finito; se usa el valor por defecto (%ss)", nombre, crudo, por_defecto)
+        return por_defecto
+    if valor < minimo:
+        logger.warning("%s=%r es menor que el minimo; se usa %ss", nombre, crudo, minimo)
+        return minimo
+    return valor
+
+
+#: Sin hardcoding: ajustables por entorno, con los valores decididos por defecto
+#: y un piso (aviso 60 s, log 10 s) para que ningun valor mande un aviso por POST.
+INTERVALO_AVISO_S = _segundos("JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S", 3600.0, 60.0)
+INTERVALO_LOG_S = _segundos("JAX_PROCESAMIENTO_LOG_EXTRACTORES_S", 60.0, 10.0)
 
 #: Referencia fuerte a las tareas en vuelo (anti-GC), con auto-limpieza.
 _TAREAS: set[asyncio.Task] = set()
@@ -79,6 +102,10 @@ def _lanzar(texto: str) -> bool:
 
 def avisar_al_arrancar(faltan: list[str]) -> bool:
     global _ultimo_aviso
+    # DECISION (re-auditoria MINOR-N3): la marca se fija ANTES de saber si el envio
+    # llego. Si Telegram esta caido, el aviso queda silenciado hasta que pase el
+    # intervalo. Se acepta: reintentar en cada POST convertiria una caida de
+    # Telegram en una tormenta de envios, y el fallo no es mudo (queda en el log).
     _ultimo_aviso = _reloj()
     return _lanzar(mensaje(faltan))
 
@@ -89,6 +116,8 @@ def avisar_si_toca(faltan: list[str]) -> bool:
     ahora = _reloj()
     if _ultimo_aviso is not None and (ahora - _ultimo_aviso) < INTERVALO_AVISO_S:
         return False
+    # Misma decision que en `avisar_al_arrancar` (MINOR-N3): marca antes de saber si
+    # el envio llego; un Telegram caido silencia el aviso hasta el proximo intervalo.
     _ultimo_aviso = ahora
     return _lanzar(mensaje(faltan))
 
