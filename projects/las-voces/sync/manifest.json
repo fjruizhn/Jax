@@ -8,8 +8,8 @@
       "generated_hash": "2085be7242393f271f640153a452a868618c72b288c950c7e1743d71a8caf83b",
       "generation_timestamp": "content-addressed",
       "generator_template_version": "1.2",
-      "source_commit": "352082196ee8d8579e398d0fcbbcff113fd25a5f",
-      "source_hash": "00c8a52730c743087fe6af578bce935709b021d9f298e7ddf1c0bb92d35386da",
+      "source_commit": "135def7e38500097bf04335023188b2f6d23e7b8",
+      "source_hash": "0c9154625708066a6b9da857471f193cf0664dd1023700db487147f89ef78f04",
       "target_harness": "qwen-code",
       "target_path": ".qwen/agents/primary-builder.md"
     },
@@ -18,8 +18,8 @@
       "generated_hash": "af2cbb7bf13fb06fac943d5b1f2ec5e1b5698684de3e5c43cb85ffc40d04c37a",
       "generation_timestamp": "content-addressed",
       "generator_template_version": "1.2",
-      "source_commit": "352082196ee8d8579e398d0fcbbcff113fd25a5f",
-      "source_hash": "00c8a52730c743087fe6af578bce935709b021d9f298e7ddf1c0bb92d35386da",
+      "source_commit": "135def7e38500097bf04335023188b2f6d23e7b8",
+      "source_hash": "0c9154625708066a6b9da857471f193cf0664dd1023700db487147f89ef78f04",
       "target_harness": "qwen-code",
       "target_path": ".qwen/skills/las-voces-governance/SKILL.md"
     },
@@ -28,8 +28,8 @@
       "generated_hash": "b4f9d92d583a9c136b81b5ede1505384ae3caa157b46fbbca474473c980694f4",
       "generation_timestamp": "content-addressed",
       "generator_template_version": "1.2",
-      "source_commit": "352082196ee8d8579e398d0fcbbcff113fd25a5f",
-      "source_hash": "00c8a52730c743087fe6af578bce935709b021d9f298e7ddf1c0bb92d35386da",
+      "source_commit": "135def7e38500097bf04335023188b2f6d23e7b8",
+      "source_hash": "0c9154625708066a6b9da857471f193cf0664dd1023700db487147f89ef78f04",
       "target_harness": "codex",
       "target_path": "AGENTS.md"
     },
@@ -38,8 +38,8 @@
       "generated_hash": "e73b612f8b5636a11d3fc754327f062be7f53f342e45a5f24407638c83ede987",
       "generation_timestamp": "content-addressed",
       "generator_template_version": "1.2",
-      "source_commit": "352082196ee8d8579e398d0fcbbcff113fd25a5f",
-      "source_hash": "00c8a52730c743087fe6af578bce935709b021d9f298e7ddf1c0bb92d35386da",
+      "source_commit": "135def7e38500097bf04335023188b2f6d23e7b8",
+      "source_hash": "0c9154625708066a6b9da857471f193cf0664dd1023700db487147f89ef78f04",
       "target_harness": "claude-code",
       "target_path": "CLAUDE.md"
     },
@@ -48,13 +48,13 @@
       "generated_hash": "a270623a0c3ada13214f8547e67ffe3c9faf699cd90d5b03b87fabb40eb38ee0",
       "generation_timestamp": "content-addressed",
       "generator_template_version": "1.2",
-      "source_commit": "352082196ee8d8579e398d0fcbbcff113fd25a5f",
-      "source_hash": "00c8a52730c743087fe6af578bce935709b021d9f298e7ddf1c0bb92d35386da",
+      "source_commit": "135def7e38500097bf04335023188b2f6d23e7b8",
+      "source_hash": "0c9154625708066a6b9da857471f193cf0664dd1023700db487147f89ef78f04",
       "target_harness": "qwen-code",
       "target_path": "QWEN.md"
     }
   ],
   "schema_version": "1.0",
-  "source_commit": "352082196ee8d8579e398d0fcbbcff113fd25a5f",
-  "source_hash": "00c8a52730c743087fe6af578bce935709b021d9f298e7ddf1c0bb92d35386da"
+  "source_commit": "135def7e38500097bf04335023188b2f6d23e7b8",
+  "source_hash": "0c9154625708066a6b9da857471f193cf0664dd1023700db487147f89ef78f04"
 }

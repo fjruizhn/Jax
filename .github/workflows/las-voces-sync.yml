@@ -12,6 +12,10 @@ on:
       - "tests/test_las_voces_sync.py"
       - "tests/_las_voces_process.py"
       - "tests/las_voces_qwen_parser.mjs"
+      - "tests/las_voces_qwen_context.mjs"
+      - "tests/test_las_voces_faro_readonly.py"
+      - "tests/test_las_voces_faro_mcp_client.py"
+      - "tests/_las_voces_readonly_fixture.py"
       - ".github/workflows/las-voces-sync.yml"
   pull_request:
     branches: ["**"]
@@ -21,6 +25,10 @@ on:
       - "tests/test_las_voces_sync.py"
       - "tests/_las_voces_process.py"
       - "tests/las_voces_qwen_parser.mjs"
+      - "tests/las_voces_qwen_context.mjs"
+      - "tests/test_las_voces_faro_readonly.py"
+      - "tests/test_las_voces_faro_mcp_client.py"
+      - "tests/_las_voces_readonly_fixture.py"
       - ".github/workflows/las-voces-sync.yml"
 
 jobs:
@@ -34,8 +42,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python3 -m pip install pytest pyyaml
+      - run: python3 -m pip install pytest pyyaml mcp==2.2.0
       - run: python3 -m pytest tests/test_las_voces_sync.py -q
+      - run: python3 -m pytest tests/test_las_voces_faro_readonly.py -q
+      - run: python3 -m pytest tests/test_las_voces_faro_mcp_client.py -q
       - run: python3 scripts/axioma_sync.py las-voces --check
       - uses: actions/setup-node@v4
         with:
@@ -45,3 +55,7 @@ jobs:
         env:
           QWEN_BUNDLE_DIR: ${{ runner.temp }}/qwen-parser/node_modules/@qwen-code/qwen-code
         run: node tests/las_voces_qwen_parser.mjs
+      - name: Resolve LV-001 context with Qwen Code 0.24.7
+        env:
+          QWEN_BUNDLE_DIR: ${{ runner.temp }}/qwen-parser/node_modules/@qwen-code/qwen-code
+        run: node tests/las_voces_qwen_context.mjs

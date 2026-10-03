@@ -32,6 +32,9 @@ Qwen Code:
 - `projects/las-voces/QWEN.md`
 - `projects/las-voces/.qwen/skills/`
 - `projects/las-voces/.qwen/agents/`
+- `projects/las-voces/.qwen/settings.json` es configuración nativa del proyecto,
+  versionada; fija contexto 131072 y registra el MCP de lectura de LV-001B.
+  No es una proyección generada por `axioma_sync.py`.
 
 ## Regla
 Canonical first. Las copias específicas de harness son generadas. `axioma sync las-voces` debe detectar drift por hash y negarse a sobrescribir silenciosamente modificaciones manuales.

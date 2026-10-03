@@ -206,6 +206,17 @@
       "owner": "Qwen/Infra",
       "status": "READY",
       "priority": "P0",
+      "decision": "Fernando 2026-10-03: LV-001B es reconocimiento y compatibilidad de lectura con El Faro; la primera mision Qwen gobernada por Faro es otro hito.",
+      "acceptance_criteria": [
+        "Qwen Code local instalado y operativo; version y sesion de prueba registradas.",
+        "Proyecciones canonicas de Qwen cargables y axioma_sync.py las-voces --check en verde.",
+        "Contexto efectivo 131072 fijado por configuracion del proyecto o sesion de prueba y medido por el resolvedor de Qwen.",
+        "Qwen descubre y lee constitucion, skills y catalogo de agentes desde paquete Faro verificado por MCP local aislado.",
+        "La interfaz MCP solo publica skills.buscar, skills.leer y agentes.listar y recursos de lectura; crear, lanzar y mutar fallan cerrados.",
+        "Smoke test aislado sin servicio ni estado de produccion y prueba negativa de la frontera read-only.",
+        "Evidencia vinculada a LV-001, SHA exacto y cada criterio; aceptacion humana verificada conforme a LV-003.",
+        "jaxqwen permanece intacto; sin merge, despliegue ni mision Faro en LV-001B."
+      ],
       "depends": [
         "LV-000"
       ]
