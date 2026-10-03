@@ -60,6 +60,13 @@ async def test_006a_mismo_contenido_dos_veces_en_un_proyecto_choca():
     await _sql(ins, (p, "a" * 64, u))
     with pytest.raises(Exception, match="1062"):
         await _sql(ins, (p, "a" * 64, u))
+    # La unicidad es POR proyecto: el mismo contenido en OTRO proyecto entra (la biblioteca de
+    # cada proyecto es suya; un sha256 global dejaria a un proyecto sin poder subir lo que otro ya tiene).
+    p2 = await _crear_proyecto_activo(t, name="D2")
+    await _sql(ins, (p2, "a" * 64, u))
+    filas = await _sql("SELECT COUNT(*) AS n FROM project_documents WHERE sha256=%s AND project_id IN (%s, %s)",
+        ("a" * 64, p, p2), fetch=True)
+    assert filas[0]["n"] == 2
 
 
 @asincrono

@@ -49,6 +49,9 @@ from motor_registry import tool_authority  # noqa: E402
 from motor_registry.job_store import JobStore  # noqa: E402
 from motor_registry.models import JobStatus  # noqa: E402
 
+# `_trabajo_de` exige un uuid canónico: la medición usa uno fijo de prueba (no es de ningún proyecto real).
+UUID_MEDICION = "00000000-0000-4000-8000-000000000001"
+
 
 #: Por encima de esto, el `to_thread` ajeno esperó detrás del trabajo real:
 #: el pool de Procesamiento NO está aislado y el script sale con 1.
@@ -110,7 +113,7 @@ async def _medir_trabajo_real(n_archivos: int, n_lineas: int) -> tuple[float, st
             # módulo (`_EXECUTOR_OCR`/`_EXECUTOR_IO`) -- es la parte que la
             # versión anterior de este script no hacía.
             await rutas_mod._ejecutar_trabajo(
-                job_id, "medicion-carga", rutas, store=store,
+                job_id, UUID_MEDICION, rutas, store=store,
             )
             dt = time.perf_counter() - t0
         estado = store.get(job_id).status.value
@@ -162,7 +165,7 @@ async def _medir_aislamiento(n_archivos: int, n_lineas: int) -> tuple[float, flo
 
             t0 = time.perf_counter()
             trabajo_task = asyncio.create_task(
-                rutas_mod._ejecutar_trabajo(job_id, "medicion-aislamiento", rutas, store=store)
+                rutas_mod._ejecutar_trabajo(job_id, UUID_MEDICION, rutas, store=store)
             )
             await asyncio.sleep(0.05)  # deja que el trabajo real arranque de verdad
             ajeno_dt = await _ajeno()

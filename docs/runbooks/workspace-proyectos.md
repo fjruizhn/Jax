@@ -32,6 +32,11 @@ un symlink.
 - `sudo -n` disponible: **todo** el trabajo mutante (aplicar, respaldar,
   deshacer) corre como root, invocando el núcleo **instalado** -- nunca el
   checkout del repo directamente.
+- **Regla de sudoers para `--aplicar`/`--deshacer`.** El repo NO la fija: la pone
+  Fernando en el host, y `sudo -n` falla cerrado si falta. Las órdenes exactas que el
+  guion ejecuta y su verificación con `sudo -l` están en las Preconditions de
+  `docs/runbooks/proyectos-e2a-produccion.md` (una sola lista, para que no diverja
+  de esta). Si falta alguna, parar y pedírsela a Fernando.
 - **El núcleo privilegiado instalado** en `/usr/local/sbin/jax-permisos-proyectos`
   (root:root, 0755, con toda la cadena de directorios padre también de root,
   sin escritura de grupo/otros, y sin ningún symlink en la cadena -- se

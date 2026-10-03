@@ -5292,11 +5292,15 @@ jobs:
       # 22 -> 23 (ronda de cierre, final-hallazgos.md, C-2): sin
       # `pdfplumber`, un PDF nativo tiene que dar 'sin_extractor' -- NUNCA
       # rutear a OCR (que devolvía 'ok' con las cifras destruidas).
+      # 23 -> 34 (E2a, ronda final A, 2026-10-03): +11 casos parametrizados que atan
+      # `tiene_extractor(x) == (extraer(x).estado != "sin_extractor")` sobre una muestra de cada
+      # tipo (el guion de LACTOVI decide en_cola/sin_extractor con la primera). Local, sin
+      # pdfplumber: 32 passed + 2 skipped; en el runner, con sus dependencias, 23 + 11 = 34.
       - name: Compuerta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_compuerta_test.py 2>&1 | tee /tmp/compuerta_tests
-          grep -qE "^23 passed" /tmp/compuerta_tests || {
-            echo "PISO ROTO: se esperaban 23 tests CORRIDOS de la compuerta."; exit 1; }
+          grep -qE "^34 passed" /tmp/compuerta_tests || {
+            echo "PISO ROTO: se esperaban 34 tests CORRIDOS de la compuerta."; exit 1; }
 
       # Task 8 (2026-09-21, procesamiento-archivos-nucleo): la ingesta con
       # cache -- la tarea que produce el ahorro real. Indexa por sha256 del
@@ -5633,11 +5637,16 @@ jobs:
       #   sin cupo, oculto/deshabilitado, inexistente, ACTIVE guarda el uuid,
       #   carpeta = uuid). Ninguna prueba vieja se borró: las que mandaban
       #   `proyecto` pasan a `project_uuid`. Número LOCAL: lo re-mide el runner.
+      # 64 -> 66 el 2026-10-03 (E2a, ronda final A): +2 en `ProjectUuidTest`
+      #   (`estado_del_proyecto` que lanza -> 503 `base_no_disponible` sin job ni cupo;
+      #   `_trabajo_de` rechaza lo que no es uuid canonico). Ademas `test_uuid_de_otro_largo_da_422`
+      #   comprueba el codigo. Las pruebas que pasaban `"p"`/`"proy"` como proyecto a
+      #   `_ejecutar_trabajo` pasan `UUID_PRUEBA` (ya no hay nombre libre). Local: 66 passed.
       - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
-          grep -qE "^64 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 64 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          grep -qE "^66 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 66 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

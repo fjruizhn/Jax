@@ -75,8 +75,10 @@ NOMBRES_EXCLUIDOS = frozenset({".claude-flow"})
 RUTA_NUCLEO_POR_DEFECTO = "/usr/local/sbin/jax-permisos-proyectos"
 # Configurable SOLO para que las pruebas no toquen la ruta de sistema real (MAJOR-1, revision de
 # la Tarea 3 de E2a). Quien llama (sin privilegio) elige la ruta, pero la ejecuta `sudo -n`, y
-# sudoers decide si esa ruta se puede correr; ademas _verificar_instalacion exige cadena de root y
-# sha256 igual al HEAD. En produccion la variable no se define.
+# sudoers decide si esa ruta se puede correr -- la regla de sudoers NO la fija este repo: la
+# pone Fernando en el host (docs/runbooks/proyectos-e2a-produccion.md, Preconditions, la verifica
+# con `sudo -l`); ademas _verificar_instalacion exige cadena de root y sha256 igual al HEAD.
+# En produccion la variable no se define.
 RUTA_INSTALADA = Path(os.environ.get("JAX_PERMISOS_NUCLEO") or RUTA_NUCLEO_POR_DEFECTO)
 RUTA_PYTHON = Path("/usr/bin/python3")
 RUTA_RESPALDOS = Path("/var/backups/jax-permisos")

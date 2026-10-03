@@ -449,12 +449,20 @@ print(sha)
     assert r.stdout.strip() == esperado
 
 
-def test_verificar_instalacion_pasa_con_head_coincidente(_repo_de_prueba_con_head):
+def test_verificar_instalacion_pasa_con_head_coincidente(arbol_temporal, _repo_de_prueba_con_nucleo_de_sistema):
+    """Camino FELIZ de verdad: nucleo instalado con cadena de root y sha256 == HEAD, sobre una RAIZ
+    valida (con `proyectos/`). Antes corria `--verificar /tmp`, que sale con rc=2 por RAIZ invalida
+    ANTES de mirar la instalacion, y el `not in` pasaba vacio. Usa el nucleo de sistema (la cadena
+    de /tmp no es de root); se salta, con su razon, si ya hay un nucleo real en el host."""
     r = subprocess.run(
-        ["python3", str(_repo_de_prueba_con_head), "--verificar", "/tmp"],
+        ["python3", str(_repo_de_prueba_con_nucleo_de_sistema), "--verificar", str(arbol_temporal)],
         capture_output=True, text=True,
     )
-    assert "núcleo privilegiado NO instalado" not in r.stdout
+    salida = r.stdout + r.stderr
+    assert r.returncode in (0, 1), salida          # 2 = RAIZ invalida / error: no llego a la instalacion
+    assert "RAIZ inválida" not in salida, salida
+    assert "núcleo privilegiado NO instalado" not in salida, salida
+    assert "NO CUMPLE" in r.stdout, salida          # el arbol de prueba no esta aplicado: SI se recorrio
 
 
 def test_cadena_de_instalacion_rechaza_un_ancestro_symlink(tmp_path, _identidades):

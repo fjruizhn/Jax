@@ -230,8 +230,12 @@ def _tamano_extracto(carpeta: Path) -> int:
 
 
 def _trabajo_de(project_uuid: str) -> Path:
-    # El uuid ya pasó `_UUID_CANONICO` en la admisión: no hace falta slug, y
-    # renombrar el proyecto no mueve archivos.
+    # El uuid pasa `_UUID_CANONICO` en la admisión, y se vuelve a comprobar ACÁ:
+    # esta función arma una ruta de disco, y un llamador que no pase por la
+    # admisión (el guion de medición, una prueba) no puede colar `..` ni un
+    # nombre libre. No hace falta slug, y renombrar el proyecto no mueve archivos.
+    if not _UUID_CANONICO.fullmatch(project_uuid):
+        raise ValueError(f"project_uuid no canónico: {project_uuid!r}")
     return tool_authority.WORKSPACE_ROOT / "proyectos" / project_uuid
 
 
@@ -640,7 +644,15 @@ async def crear_trabajo(req: TrabajoRequest) -> TrabajoCreadoResponse:
     # tampoco hace falta chequear que se codifique a UTF-8.
     if not _UUID_CANONICO.fullmatch(req.project_uuid):
         raise HTTPException(status_code=422, detail={"code": "project_uuid_invalido"})
-    if await proyecto_activo.estado_del_proyecto(req.project_uuid) != "ACTIVE":
+    try:
+        estado_proyecto = await proyecto_activo.estado_del_proyecto(req.project_uuid)
+    except Exception as e:
+        # Base caída o timeout: no se sabe si el proyecto está activo. Falla cerrado, con un
+        # código estable que el despachador de la plataforma reintenta, y ANTES de crear
+        # el job y de tomar cupo (nada que devolver).
+        logger.warning("estado_del_proyecto falló (%s): %s", type(e).__name__, e)
+        raise HTTPException(status_code=503, detail={"code": "base_no_disponible"}) from e
+    if estado_proyecto != "ACTIVE":
         raise HTTPException(status_code=422, detail={"code": "proyecto_no_activo"})
     proyecto = req.project_uuid
     if _SEMAFORO_TRABAJOS.locked():

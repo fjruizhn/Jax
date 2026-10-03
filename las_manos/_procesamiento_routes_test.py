@@ -158,7 +158,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", ingerir_mock):
             await self._ejecutar(
-                job_id, "proy", ["/etc/passwd", "../fuera-del-workspace.txt"],
+                job_id, UUID_PRUEBA, ["/etc/passwd", "../fuera-del-workspace.txt"],
             )
         job = self.store.get(job_id)
         assert job.status == JobStatus.COMPLETED, job
@@ -183,7 +183,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_falso):
             await self._ejecutar(
-                job_id, "proy", ["sano1.pdf", "archivo\x00malo.pdf", "sano2.pdf"],
+                job_id, UUID_PRUEBA, ["sano1.pdf", "archivo\x00malo.pdf", "sano2.pdf"],
             )
 
         job = self.store.get(job_id)
@@ -213,7 +213,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
 
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_falso):
-            await self._ejecutar(job_id, "proy", ["uno.pdf", "dos.pdf", "tres.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["uno.pdf", "dos.pdf", "tres.pdf"])
 
         job = self.store.get(job_id)
         assert job.status == JobStatus.COMPLETED, f"un archivo roto tumbó el lote entero: {job}"
@@ -246,7 +246,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
 
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_falso) as ingerir_mock:
-            await self._ejecutar(job_id, "proy", ["sano1.pdf", ruta_mala, "sano2.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["sano1.pdf", ruta_mala, "sano2.pdf"])
 
         job = self.store.get(job_id)
         assert job.status == JobStatus.COMPLETED, (
@@ -350,7 +350,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             await semaforo.acquire()
             tarea = asyncio.create_task(
                 rutas_mod._ejecutar_trabajo(
-                    job_id, "p", ["a.pdf"], store=self.store,
+                    job_id, UUID_PRUEBA, ["a.pdf"], store=self.store,
                     executor=executor_1_hilo, executor_io=self.executor_io, semaforo=semaforo,
                 )
             )
@@ -377,14 +377,14 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.store, "update", side_effect=_update_espiado), \
              patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("f" * 64)):
             self._archivo_en_workspace("a.pdf")
-            await self._ejecutar(job_id, "p", ["a.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["a.pdf"])
 
         assert vistos == [JobStatus.RUNNING.value, JobStatus.COMPLETED.value], vistos
 
     async def test_ruta_ausente_dentro_del_jail_se_rechaza_no_revienta(self):
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir") as ingerir_mock:
-            await self._ejecutar(job_id, "proy", ["no-existe.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["no-existe.pdf"])
         job = self.store.get(job_id)
         assert job.status == JobStatus.COMPLETED
         resultados = json.loads(Path(job.result_path).read_text())
@@ -417,7 +417,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             # (falso negativo, confirmado a mano en la ronda anterior).
             sondeo = asyncio.create_task(_sondear_loop())
             await asyncio.sleep(0.02)
-            await self._ejecutar(job_id, "p", ["lento.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["lento.pdf"])
             await sondeo
 
         peor = max(retrasos)
@@ -438,7 +438,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_lento):
             t0 = time.perf_counter()
-            await self._ejecutar(job_id, "p", ["p1.pdf", "p2.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["p1.pdf", "p2.pdf"])
             dt = time.perf_counter() - t0
 
         assert dt < 0.5, f"tardó {dt:.2f}s -- no se repartió entre los dos hilos disponibles"
@@ -449,7 +449,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("9" * 64)), \
              patch.object(self.store, "write_result", side_effect=RuntimeError("disco lleno")):
-            await self._ejecutar(job_id, "p", ["a.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["a.pdf"])
 
         job = self.store.get(job_id)
         assert job.status == JobStatus.FAILED, job
@@ -462,7 +462,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("1" * 64)), \
              patch.object(self.store, "write_result", side_effect=RuntimeError("boom")):
-            await self._ejecutar(job_id, "p", ["a.pdf"], semaforo=semaforo)
+            await self._ejecutar(job_id, UUID_PRUEBA, ["a.pdf"], semaforo=semaforo)
 
         assert not semaforo.locked(), "el semáforo quedó tomado tras un trabajo que falló"
 
@@ -471,7 +471,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         self._archivo_en_workspace("a.pdf")
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("2" * 64)):
-            await self._ejecutar(job_id, "p", ["a.pdf"], semaforo=semaforo)
+            await self._ejecutar(job_id, UUID_PRUEBA, ["a.pdf"], semaforo=semaforo)
 
         assert not semaforo.locked()
 
@@ -483,7 +483,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("3" * 64)):
             self._archivo_en_workspace("a.pdf")
-            await self._ejecutar(job_id, "p", ["a.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["a.pdf"])
         assert self.store.get(job_id).caller == "ana@cliente.com"
 
     # -- B-3: reconciliación al arrancar (ronda anterior, sin cambios) -----
@@ -588,7 +588,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         self._archivo_en_workspace("a.pdf")
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("7" * 64)):
-            await self._ejecutar(job_id, "p", ["a.pdf"], executor=espia)
+            await self._ejecutar(job_id, UUID_PRUEBA, ["a.pdf"], executor=espia)
         assert espia.llamado, (
             "el trabajo no pasó por el executor de OCR dedicado -- "
             "¿se cambió run_in_executor(executor, …) por run_in_executor(None, …)?"
@@ -600,7 +600,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         self._archivo_en_workspace("a.pdf")
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("8" * 64)):
-            await self._ejecutar(job_id, "p", ["a.pdf"], executor_io=espia)
+            await self._ejecutar(job_id, UUID_PRUEBA, ["a.pdf"], executor_io=espia)
         assert espia.llamado, (
             "escribir el resultado no pasó por el executor de E/S dedicado"
         )
@@ -696,7 +696,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             await semaforo.acquire()
             tarea = asyncio.create_task(
                 rutas_mod._ejecutar_trabajo(
-                    job_id, "p", ["primero.pdf", "segundo.pdf"], store=self.store,
+                    job_id, UUID_PRUEBA, ["primero.pdf", "segundo.pdf"], store=self.store,
                     executor=executor_1_hilo, executor_io=self.executor_io, semaforo=semaforo,
                 )
             )
@@ -746,7 +746,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             await semaforo.acquire()
             tarea = asyncio.create_task(
                 rutas_mod._ejecutar_trabajo(
-                    job_id, "p", ["nunca.pdf"], store=self.store,
+                    job_id, UUID_PRUEBA, ["nunca.pdf"], store=self.store,
                     executor=executor_1_hilo, executor_io=self.executor_io, semaforo=semaforo,
                 )
             )
@@ -826,7 +826,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             await semaforo.acquire()
             tarea = asyncio.create_task(
                 rutas_mod._ejecutar_trabajo(
-                    job_id, "p", ["a.pdf"], store=self.store,
+                    job_id, UUID_PRUEBA, ["a.pdf"], store=self.store,
                     executor=executor_1_hilo, executor_io=self.executor_io, semaforo=semaforo,
                 )
             )
@@ -883,7 +883,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             await semaforo.acquire()
             tarea = asyncio.create_task(
                 rutas_mod._ejecutar_trabajo(
-                    job_id, "p", ["en-cola.pdf"], store=self.store,
+                    job_id, UUID_PRUEBA, ["en-cola.pdf"], store=self.store,
                     executor=executor_1_hilo, executor_io=self.executor_io, semaforo=semaforo,
                 )
             )
@@ -957,7 +957,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         self._archivo_en_workspace("sano.pdf")
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("8" * 64)) as ingerir_mock:
-            await self._ejecutar(job_id, "proy", ["sano.pdf", "Crédito\udcff.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["sano.pdf", "Crédito\udcff.pdf"])
 
         job = self.store.get(job_id)
         assert job.status == JobStatus.COMPLETED, f"tilde + surrogate tumbó el lote: {job}"
@@ -1532,6 +1532,29 @@ class ProjectUuidTest(unittest.TestCase):
     def test_uuid_de_otro_largo_da_422(self):
         r = self._post({"project_uuid": "../../etc", "rutas": ["a.pdf"], "usuario": "u1"})
         self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.json()["detail"]["code"], "project_uuid_invalido")
+
+    def test_base_caida_da_503_sin_job_ni_cupo(self):
+        # Si `estado_del_proyecto` lanza (base caida, timeout) no es un 500 anonimo ni un
+        # proyecto "no activo": es 503 con codigo estable, sin job creado y sin tomar cupo.
+        with patch.object(rutas_mod.proyecto_activo, "estado_del_proyecto",
+                          AsyncMock(side_effect=ConnectionError("base caida"))), \
+             patch.object(rutas_mod, "_ejecutar_trabajo", AsyncMock()) as ejecutar, \
+             TestClient(_app()) as c:
+            r = c.post("/procesamiento/trabajos",
+                       json={"project_uuid": self.UUID, "rutas": ["a.pdf"], "usuario": "u1"},
+                       headers=self.cabeceras_plataforma)
+        self.assertEqual(r.status_code, 503, r.text)
+        self.assertEqual(r.json()["detail"]["code"], "base_no_disponible")
+        self.assertFalse(self.semaforo.locked())
+        self.assertEqual(self.semaforo._value, 2)      # no tomo ningun permiso
+        self.assertEqual(self.store._index, {})        # no creo job
+        ejecutar.assert_not_called()
+
+    def test_trabajo_de_rechaza_lo_que_no_es_uuid_canonico(self):
+        for malo in ("p", "../../etc", self.UUID.upper(), "medicion-aislamiento", ""):
+            with self.assertRaises(ValueError, msg=malo):
+                rutas_mod._trabajo_de(malo)
 
     def test_proyecto_archivado_da_422_y_no_toma_cupo(self):
         r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"], "usuario": "u1"}, estado="ARCHIVED")
