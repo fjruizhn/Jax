@@ -1372,6 +1372,33 @@ class TrabajoHTTPTest(unittest.TestCase):
         assert r.estado == "error"
         assert r.error == "dependencia_no_instalada"
 
+    def _error_de_ficha(self, detalle):
+        ficha = Mock(estado="error", extractor="tesseract", sha256="a" * 64, detalle=detalle)
+        with tempfile.TemporaryDirectory() as tmp:
+            archivo = Path(tmp) / "x.gif"
+            archivo.write_bytes(b"GIF89a")
+            with patch.object(rutas_mod.tool_authority, "resolve_jailed_path", return_value=(archivo, "")), \
+                 patch.object(rutas_mod.ingesta, "ingerir", return_value=ficha), \
+                 patch.object(rutas_mod.ingesta, "ruta_procesado", return_value=Path(tmp) / "nada"), \
+                 patch.object(rutas_mod.tool_authority, "WORKSPACE_ROOT", Path(tmp)):
+                return rutas_mod._procesar_una_ruta(Path(tmp), "x.gif")
+
+    def test_formato_no_soportado_viaja_con_su_formato_en_el_error(self):
+        r = self._error_de_ficha({"codigo": "formato_no_soportado", "formato": "gif_animado"})
+        assert r.estado == "error"
+        assert r.error == "formato_no_soportado:gif_animado"
+
+    def test_formato_no_soportado_sin_formato_viaja_solo_el_codigo(self):
+        r = self._error_de_ficha({"codigo": "formato_no_soportado"})
+        assert r.error == "formato_no_soportado"
+
+    def test_el_formato_solo_se_agrega_a_formato_no_soportado_y_se_valida(self):
+        assert self._error_de_ficha({"codigo": "archivo_ilegible", "formato": "gif_animado"}).error == "archivo_ilegible"
+        # una ficha cacheada con un `formato` raro no mete texto libre en el error
+        assert self._error_de_ficha(
+            {"codigo": "formato_no_soportado", "formato": "x; DROP\nTABLE"}
+        ).error == "formato_no_soportado"
+
     def test_b6_persists_authenticated_human_uploader_as_caller(self):
         async def _noop(*args, **kwargs):
             return None

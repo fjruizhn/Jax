@@ -1542,6 +1542,7 @@ def test_n8_un_gif_animado_con_un_fotograma_enorme_se_rechaza_sin_tesseract(
     assert r.estado == "error"
     assert r.detalle["codigo"] == "formato_no_soportado"
     assert r.detalle["causa"] == "animacion_no_soportada"
+    assert r.detalle["formato"] == "gif_animado"
     assert llamadas == []
     assert time.monotonic() - t0 < 5
 
@@ -1558,7 +1559,9 @@ def test_n8_un_webp_animado_se_rechaza_sin_tesseract(tmp_path: Path, monkeypatch
     r = ocr.extraer(webp)
 
     assert r.estado == "error"
+    assert r.detalle["codigo"] == "formato_no_soportado"
     assert r.detalle["causa"] == "animacion_no_soportada"
+    assert r.detalle["formato"] == "webp_animado"
     assert llamadas == []
 
 
@@ -1598,7 +1601,7 @@ def test_n9_leptonica_por_stdin_escribe_pixreadmem_y_se_reconoce(tmp_path: Path,
 
     r = ocr.extraer(_imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD"))
     assert r.estado == "error"
-    assert r.detalle["codigo"] == "formato_no_soportado"
+    assert r.detalle["codigo"] == "archivo_no_procesable"
     assert r.detalle["causa"] == "tesseract_no_lee"
 
 
@@ -1715,72 +1718,6 @@ def test_n13_un_tiff_valido_se_lee_pagina_a_pagina_y_no_guarda_los_png(tmp_path:
 # ---------------------------------------------------------------------------
 
 
-def test_un_tiff_i16_con_texto_se_lee_sin_normalizar(tmp_path: Path):
-    """I;16: leptonica lo lee de forma NATIVA; va sin escalado."""
-    from PIL import Image
-
-    base = _imagen_multilinea(tmp_path / "b.png", [
-        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
-        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
-    ])
-    i16 = Image.open(base).convert("L").convert("I").point(lambda v: v * 200).convert("I;16")
-    destino = tmp_path / "i16.tif"
-    i16.save(destino)
-    assert Image.open(destino).mode == "I;16"
-    r = ocr.extraer(destino)
-    assert r.estado in {"ok", "parcial"}
-    assert "Activos totales" in r.salidas["texto.txt"]
-
-
-def test_un_tiff_i16_de_dos_paginas_se_lee_por_el_camino_de_paginas(tmp_path: Path):
-    """El camino multipagina re-codifica a PNG: I;16 se guarda como PNG de 16
-    bits (I;16 e I;16B) y tiene que leerse igual."""
-    from PIL import Image
-
-    def pagina(lineas, nombre):
-        base = _imagen_multilinea(tmp_path / nombre, lineas)
-        return Image.open(base).convert("L").convert("I").point(lambda v: v * 200).convert("I;16")
-
-    p1 = pagina(["Primera pagina del contrato", "Activos totales 1,234,567.89 USD",
-                 "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD"], "a.png")
-    p2 = pagina(["Segunda pagina de anexos", "Garantia hipotecaria sobre inmueble",
-                 "Avaluo comercial 5,000,000.00 USD", "Firmado ante notario publico"], "b.png")
-    tif = tmp_path / "dos16.tif"
-    p1.save(tif, save_all=True, append_images=[p2])
-    r = ocr.extraer(tif)
-    assert r.estado in {"ok", "parcial"}
-    assert "Primera pagina" in r.salidas["texto.txt"] and "Segunda pagina" in r.salidas["texto.txt"]
-
-
-@pytest.mark.parametrize("modo", ["F", "I"])
-def test_un_tiff_f_o_i_no_es_un_documento_y_no_llega_a_tesseract(
-    tmp_path: Path, modo: str, monkeypatch
-):
-    """Rasters de coma flotante o de 32 bits: `modo_no_soportado`, sin llamar
-    a tesseract (se borro todo el escalado por percentiles)."""
-    from PIL import Image
-
-    destino = tmp_path / f"{modo}.tif"
-    Image.new(modo, (200, 100), 3).save(destino)
-    llamadas = _tesseract_llamado(monkeypatch)
-    r = ocr.extraer(destino)
-    assert r.estado == "error"
-    assert r.detalle["codigo"] == "formato_no_soportado"
-    assert r.detalle["causa"] == "modo_no_soportado"
-    assert llamadas == []
-
-
-def test_un_tiff_multipagina_con_una_pagina_f_se_rechaza(tmp_path: Path):
-    from PIL import Image
-
-    destino = tmp_path / "mix.tif"
-    Image.new("L", (100, 100), 255).save(
-        destino, save_all=True, append_images=[Image.new("F", (100, 100), 1.0)]
-    )
-    r = ocr.extraer(destino)
-    assert r.detalle["causa"] == "modo_no_soportado"
-
-
 def test_rc_cero_con_una_marca_de_lectura_fallida_en_stderr_es_tesseract_no_lee(
     tmp_path: Path, monkeypatch
 ):
@@ -1797,7 +1734,7 @@ def test_rc_cero_con_una_marca_de_lectura_fallida_en_stderr_es_tesseract_no_lee(
 
     r = ocr.extraer(_imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD"))
     assert r.estado == "error"
-    assert r.detalle["codigo"] == "formato_no_soportado"
+    assert r.detalle["codigo"] == "archivo_no_procesable"
     assert r.detalle["causa"] == "tesseract_no_lee"
     assert r.detalle.get("codigo") != "imagen_sin_texto"
 
@@ -1811,30 +1748,6 @@ def test_rc_cero_con_stderr_normal_no_se_toma_por_fallo(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # Jax#338 ronda 5
 # ---------------------------------------------------------------------------
-
-
-def test_n15_caso_real_tiff_f_directo_a_tesseract_da_rc0_con_is_not_uint():
-    import io
-
-    from PIL import Image
-
-    buf = io.BytesIO()
-    Image.new("F", (50, 50), 3.0).save(buf, format="TIFF")
-    assert ocr._ocr_bytes(buf.getvalue(), "spa") == {
-        "clasificacion": "ilegible", "causa": "tesseract_no_lee"}
-
-
-def test_n15_caso_real_gif_animado_directo_a_tesseract_da_rc1_con_pixreadmem():
-    import io
-
-    from PIL import Image
-
-    chico = Image.new("P", (100, 100), 0)
-    otro = Image.new("P", (800, 800), 1)
-    buf = io.BytesIO()
-    chico.save(buf, format="GIF", save_all=True, append_images=[otro, otro])
-    assert ocr._ocr_bytes(buf.getvalue(), "spa") == {
-        "clasificacion": "ilegible", "causa": "tesseract_no_lee"}
 
 
 class _Reloj:
@@ -2002,21 +1915,6 @@ def test_n17_la_firma_de_imagen_manda_y_un_zip_no_se_confunde_con_pdf():
     assert ocr.tipo_por_cabecera(b"PK\x03\x04" + b"x" * 30 + b"%PDF", ".pdf") is None
 
 
-def test_n18_un_fotograma_de_16_bits_tiene_un_tope_de_pixeles_mas_bajo(tmp_path, monkeypatch):
-    from PIL import Image
-
-    assert ocr.MAX_PIXELES_NUMERICO == 16_000_000
-    monkeypatch.setattr(ocr, "MAX_PIXELES_NUMERICO", 5_000)
-    destino = tmp_path / "i16.tif"
-    Image.new("I;16", (100, 100), 1000).save(destino)   # 10 000 px > 5 000
-    r = ocr.extraer(destino)
-    assert r.detalle["causa"] == "demasiados_pixeles"
-    # una imagen de 8 bits del mismo tamano NO se rechaza por ese tope
-    gris = tmp_path / "g.png"
-    Image.new("L", (100, 100), 255).save(gris)
-    assert ocr.extraer(gris).estado == "ok"
-
-
 def test_n21_los_modos_fuera_de_png_tienen_su_tope_por_fotograma(tmp_path, monkeypatch):
     from PIL import Image
 
@@ -2077,188 +1975,208 @@ def test_n18_memory_error_al_decodificar_tampoco_es_archivo_danado(tmp_path, mon
 # ---------------------------------------------------------------------------
 
 
-def _pagina_i16(tmp_path: Path, nombre: str, lineas: list):
-    from PIL import Image
-
-    base = _imagen_multilinea(tmp_path / nombre, lineas)
-    return Image.open(base).convert("L").convert("I").point(lambda v: v * 200).convert("I;16")
-
-
-def _como_modo_16(img, modo: str):
-    """La misma pagina vista en I;16L o I;16N (en memoria: Pillow solo las
-    entrega asi desde plugins, no desde TIFF/PNG). Los bytes de `I;16` son
-    little-endian, y `I;16N` es nativo (little-endian en este host)."""
-    import sys
-
-    from PIL import Image
-
-    datos = img.tobytes()
-    if modo == "I;16N" and sys.byteorder == "big":
-        datos = bytes(b for par in zip(datos[1::2], datos[0::2]) for b in par)
-    return Image.frombytes(modo, img.size, datos)
-
-
-@pytest.mark.parametrize("modo", ["I;16L", "I;16N"])
-def test_i16l_e_i16n_con_texto_real_se_leen_una_pagina(tmp_path: Path, modo: str):
-    """Con una conversion de Pillow sobre el modo tal cual, I;16N daba una pagina NEGRA (Pillow
-    convierte mal I;16N a I) y terminaba en imagen_sin_texto en silencio."""
-    pagina = _pagina_i16(tmp_path, "p.png", [
-        "Factura numero 12345 pagada", "Activos totales 1,234,567.89 USD",
-        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
-    ])
-    x = _como_modo_16(pagina, modo)
-    assert x.mode == modo
-    r = ocr._ocr_bytes(ocr._a_png(ocr._a_modo_legible(x)), "spa")
-    assert r is not None and r["clasificacion"] in {"ok", "con_dudas"}
-    assert "Factura numero 12345 pagada" in r["texto"]
-
-
-@pytest.mark.parametrize("modo", ["I;16L", "I;16N"])
-def test_i16l_e_i16n_con_texto_real_se_leen_dos_paginas(tmp_path: Path, modo: str, monkeypatch):
-    p1 = _pagina_i16(tmp_path, "a.png", [
-        "Primera pagina del contrato", "Activos totales 1,234,567.89 USD",
-        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD"])
-    p2 = _pagina_i16(tmp_path, "b.png", [
-        "Segunda pagina de anexos", "Garantia hipotecaria sobre inmueble",
-        "Avaluo comercial 5,000,000.00 USD", "Firmado ante notario publico"])
-    tif = tmp_path / "dos.tif"
-    p1.save(tif, save_all=True, append_images=[p2])
-    real = ocr._a_modo_legible
-    monkeypatch.setattr(ocr, "_a_modo_legible", lambda img: real(_como_modo_16(img, modo)))
-
-    r = ocr.extraer(tif)
-
-    assert r.estado in {"ok", "parcial"}
-    assert "Primera pagina" in r.salidas["texto.txt"]
-    assert "Segunda pagina" in r.salidas["texto.txt"]
-
-
-@pytest.mark.parametrize("modo", ["I;16L", "I;16N"])
-def test_i16l_e_i16n_de_una_pagina_realmente_uniforme_es_sin_texto_legitimo(tmp_path, modo):
-    from PIL import Image
-
-    x = Image.frombytes(modo, (300, 200), b"\x00\x10" * (300 * 200))
-    r = ocr._ocr_bytes(ocr._a_png(ocr._a_modo_legible(x)), "spa")
-    assert r is not None and r["clasificacion"] == "sin_texto"
-
-
 # ---------------------------------------------------------------------------
 # Jax#338 ronda 7: N22 (I;16 con valores 0-255) y N23 (codigo por causa)
 # ---------------------------------------------------------------------------
 
-_LINEAS_ACTIVOS = [
-    "Activos totales 1,234,567.89 USD", "Pasivos totales 987,654.32 USD",
-    "Patrimonio neto 246,913.57 USD", "Factura numero 12345 pagada",
-]
 
 
-def _pagina_16_con_factor(tmp_path: Path, nombre: str, lineas: list, factor: int):
-    """Pagina con texto real en I;16 con valores = gris x `factor`: 1 -> 0-255
-    (lo que produce `convert("I").convert("I;16")` de una imagen de 8 bits),
-    16 -> 12 bits (0-4080), 200 -> rango casi completo (0-51000)."""
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 8: formato no soportado = error VISIBLE que nombra el formato y
+# la accion; la deteccion es SIEMPRE antes de llamar a tesseract
+# ---------------------------------------------------------------------------
+
+_ACCION = "conviértelo a JPEG o PNG y vuelve a subirlo"
+
+
+def _assert_formato_no_soportado(r, formato: str, causa: str, llamadas: list):
+    assert r.estado == "error"
+    assert r.salidas == {}
+    assert r.detalle["codigo"] == "formato_no_soportado"
+    assert r.detalle["causa"] == causa
+    assert r.detalle["formato"] == formato
+    assert r.detalle["razon"] == f"formato de imagen no soportado ({formato}): {_ACCION}"
+    assert llamadas == [], "se llamo a tesseract: la deteccion tiene que ser previa"
+
+
+def test_formato_gif_animado_razon_y_accion(tmp_path: Path, monkeypatch):
+    import io
+
     from PIL import Image
 
-    base = _imagen_multilinea(tmp_path / nombre, lineas)
-    return Image.open(base).convert("L").convert("I").point(
-        lambda v: v * factor).convert("I;16")
+    buf = io.BytesIO()
+    a = Image.new("P", (50, 50), 0)
+    a.save(buf, format="GIF", save_all=True, append_images=[Image.new("P", (50, 50), 1)])
+    gif = tmp_path / "a.gif"
+    gif.write_bytes(buf.getvalue())
+    llamadas = _tesseract_llamado(monkeypatch)
+    _assert_formato_no_soportado(ocr.extraer(gif), "gif_animado", "animacion_no_soportada", llamadas)
 
 
-@pytest.mark.parametrize("factor", [1, 16, 200])
-def test_n22_una_pagina_i16_con_cualquier_rango_se_lee(tmp_path: Path, factor: int):
-    """I;16 con valores 0-255: leptonica toma el byte ALTO y salia negro
-    (ok/imagen_sin_texto). Se arma un L con los bytes bajos, sin escalar."""
-    destino = tmp_path / f"I16_f{factor}.png"
-    _pagina_16_con_factor(tmp_path, "b.png", _LINEAS_ACTIVOS, factor).save(destino)
-    r = ocr.extraer(destino)
-    assert r.estado in {"ok", "parcial"}
-    assert "Activos" in r.salidas["texto.txt"]
-
-
-@pytest.mark.parametrize("factor", [1, 16, 200])
-def test_n22_un_tiff_i16_de_dos_paginas_con_cualquier_rango_se_lee(tmp_path: Path, factor):
-    p1 = _pagina_16_con_factor(tmp_path, "a.png", [
-        "Primera pagina del contrato"] + _LINEAS_ACTIVOS[:3], factor)
-    p2 = _pagina_16_con_factor(tmp_path, "b.png", [
-        "Segunda pagina de anexos", "Garantia hipotecaria sobre inmueble",
-        "Avaluo comercial 5,000,000.00 USD", "Firmado ante notario publico"], factor)
-    tif = tmp_path / f"dos_f{factor}.tif"
-    p1.save(tif, save_all=True, append_images=[p2])
-    r = ocr.extraer(tif)
-    assert "Primera pagina" in r.salidas["texto.txt"]
-    assert "Segunda pagina" in r.salidas["texto.txt"]
-
-
-def test_n22_i16b_con_valores_0_255_tambien_se_lee(tmp_path: Path):
+def test_formato_webp_animado_razon_y_accion(tmp_path: Path, monkeypatch):
     from PIL import Image
 
-    pagina = _pagina_16_con_factor(tmp_path, "b.png", _LINEAS_ACTIVOS, 1)
-    le = pagina.tobytes()
-    be = bytearray(le)
-    be[0::2], be[1::2] = le[1::2], le[0::2]
-    destino = tmp_path / "i16b.tif"
-    Image.frombytes("I;16B", pagina.size, bytes(be)).save(destino)
-    assert Image.open(destino).mode == "I;16B"
+    cuadros = [Image.new("RGB", (60, 40), c) for c in ("red", "green")]
+    webp = tmp_path / "a.webp"
+    cuadros[0].save(webp, save_all=True, append_images=cuadros[1:], duration=100)
+    llamadas = _tesseract_llamado(monkeypatch)
+    _assert_formato_no_soportado(ocr.extraer(webp), "webp_animado", "animacion_no_soportada", llamadas)
+
+
+def test_formato_coma_flotante_es_f_en_tiff(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    destino = tmp_path / "f.tif"
+    Image.new("F", (200, 100), 3.0).save(destino)
+    llamadas = _tesseract_llamado(monkeypatch)
+    _assert_formato_no_soportado(ocr.extraer(destino), "coma_flotante", "modo_no_soportado", llamadas)
+
+
+def test_formato_entero_32_bits_es_i_en_tiff(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    destino = tmp_path / "i.tif"
+    Image.new("I", (200, 100), 3).save(destino)
+    llamadas = _tesseract_llamado(monkeypatch)
+    _assert_formato_no_soportado(ocr.extraer(destino), "entero_32_bits", "modo_no_soportado", llamadas)
+
+
+@pytest.mark.parametrize("como", ["tiff_i16", "png_i16", "tiff_i16b"])
+def test_formato_gris_16_bits_en_una_pagina(tmp_path: Path, monkeypatch, como: str):
+    """TODO I;16* es no soportado, con cualquier rango de valores (incluso con
+    texto): un solo pixel >= 256 dejaba la pagina negra en leptonica."""
+    from PIL import Image
+
+    base = _imagen_multilinea(tmp_path / "b.png", [
+        "Activos totales 1,234,567.89 USD", "Pasivos totales 987,654.32 USD",
+        "Patrimonio neto 246,913.57 USD", "Factura numero 12345 pagada"])
+    pagina = Image.open(base).convert("L").convert("I").convert("I;16")      # valores 0-255
+    if como == "tiff_i16":
+        destino = tmp_path / "x.tif"; pagina.save(destino)
+    elif como == "png_i16":
+        destino = tmp_path / "x.png"; pagina.save(destino)
+    else:
+        le = pagina.tobytes(); be = bytearray(le); be[0::2], be[1::2] = le[1::2], le[0::2]
+        destino = tmp_path / "x.tif"; Image.frombytes("I;16B", pagina.size, bytes(be)).save(destino)
+    llamadas = _tesseract_llamado(monkeypatch)
+    _assert_formato_no_soportado(ocr.extraer(destino), "gris_16_bits", "modo_no_soportado", llamadas)
+
+
+def test_formato_gris_16_bits_con_una_pagina_de_16_bits_en_un_tiff_multipagina(tmp_path, monkeypatch):
+    from PIL import Image
+
+    destino = tmp_path / "mixto.tif"
+    Image.new("L", (100, 100), 255).save(
+        destino, save_all=True, append_images=[Image.new("I;16", (100, 100), 1000)])
+    llamadas = _tesseract_llamado(monkeypatch)
+    _assert_formato_no_soportado(ocr.extraer(destino), "gris_16_bits", "modo_no_soportado", llamadas)
+
+
+def test_el_formato_de_cada_modo_de_16_bits_f_e_i():
+    for modo in ("I;16", "I;16B", "I;16L", "I;16N"):
+        assert ocr._formato_de_modo(modo) == "gris_16_bits"
+    assert ocr._formato_de_modo("F") == "coma_flotante"
+    assert ocr._formato_de_modo("I") == "entero_32_bits"
+    assert ocr._formato_de_modo("RGB") is None and ocr._formato_de_modo("CMYK") is None
+
+
+def _bmp(ancho: int, alto: int, bpp: int, compresion: int) -> bytes:
+    import struct
+
+    pix = struct.pack("<H", 0xFFFF) * (ancho * alto)
+    info = struct.pack("<IiiHHIIiiII", 40, ancho, alto, 1, bpp, compresion, len(pix), 2835, 2835, 0, 0)
+    masks = struct.pack("<III", 0xF800, 0x07E0, 0x001F) if compresion == 3 else b""
+    off = 14 + 40 + len(masks)
+    return b"BM" + struct.pack("<IHHI", off + len(pix), 0, 0, off) + info + masks + pix
+
+
+def test_formato_bmp_16_bits_rgb565_se_detecta_por_el_header_antes_de_tesseract(tmp_path, monkeypatch):
+    destino = tmp_path / "565.bmp"
+    destino.write_bytes(_bmp(64, 32, 16, 3))
+    llamadas = _tesseract_llamado(monkeypatch)
+    _assert_formato_no_soportado(ocr.extraer(destino), "bmp_16_bits", "bmp_no_soportado", llamadas)
+
+
+def test_un_bmp_de_16_bits_sin_compresion_no_se_marca_como_formato_no_soportado(tmp_path):
+    """Control: la deteccion es por header (16 bpp con mascaras de bits), no por
+    cualquier BMP de 16 bpp."""
+    destino = tmp_path / "555.bmp"
+    destino.write_bytes(_bmp(64, 32, 16, 0))
     r = ocr.extraer(destino)
-    assert "Activos" in r.salidas["texto.txt"]
+    assert r.detalle.get("codigo") != "formato_no_soportado"
 
 
-@pytest.mark.parametrize("modo", ["I;16L", "I;16N"])
-def test_n22_i16l_e_i16n_con_valores_0_255_se_leen(tmp_path: Path, modo: str):
-    pagina = _pagina_16_con_factor(tmp_path, "b.png", _LINEAS_ACTIVOS, 1)
-    x = _como_modo_16(pagina, modo)
-    r = ocr._ocr_bytes(ocr._a_png(ocr._a_modo_legible(x)), "spa")
-    assert r is not None and "Activos" in r["texto"]
+# --- archivo_no_procesable: Pillow lo decodifica y leptonica lo rechaza -----
 
 
-def test_n22_el_l_se_arma_con_los_bytes_bajos_sin_escalar(tmp_path: Path):
-    pagina = _pagina_16_con_factor(tmp_path, "b.png", _LINEAS_ACTIVOS, 1)
-    legible = ocr._a_modo_legible(pagina)
-    assert legible.mode == "L"
-    assert legible.tobytes() == pagina.tobytes()[0::2]
-    ancho = _pagina_16_con_factor(tmp_path, "c.png", _LINEAS_ACTIVOS, 200)
-    assert ocr._a_modo_legible(ancho).mode.startswith("I;16")
+def _imagen_de_ruido(tmp_path: Path):
+    import random
+
+    from PIL import Image
+
+    rnd = random.Random(1)
+    im = Image.new("L", (600, 400))
+    im.putdata([rnd.randint(0, 255) for _ in range(240000)])
+    return im
+
+
+def test_n26_un_png_cortado_antes_de_iend_es_archivo_no_procesable(tmp_path: Path):
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    _imagen_de_ruido(tmp_path).save(buf, format="PNG")
+    cortado = tmp_path / "sin-iend.png"
+    cortado.write_bytes(buf.getvalue()[:-12])
+    Image.open(cortado).load()                     # Pillow SI lo decodifica
+    r = ocr.extraer(cortado)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_no_procesable"
+    assert r.detalle["causa"] == "tesseract_no_lee"
+    assert r.detalle["razon"] == (
+        "el OCR no pudo leer la imagen (dañada o en un formato no soportado)")
+    assert "formato" not in r.detalle
+
+
+def test_n26_un_jpeg_con_basura_en_los_datos_es_archivo_no_procesable(tmp_path: Path):
+    import io
+    import random
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    _imagen_de_ruido(tmp_path).save(buf, format="JPEG")
+    datos = bytearray(buf.getvalue())
+    rnd = random.Random(1)
+    for i in range(len(datos) // 2, len(datos) // 2 + 400):
+        datos[i] = rnd.randint(0, 255)
+    roto = tmp_path / "basura.jpg"
+    roto.write_bytes(bytes(datos))
+    Image.open(roto).load()                        # Pillow SI lo decodifica
+    r = ocr.extraer(roto)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_no_procesable"
+    assert r.detalle["causa"] == "tesseract_no_lee"
 
 
 @pytest.mark.parametrize("causa,codigo", [
     ("firma_invalida", "archivo_ilegible"),
     ("no_decodifica", "archivo_ilegible"),
-    ("modo_no_soportado", "formato_no_soportado"),
-    ("animacion_no_soportada", "formato_no_soportado"),
-    ("tesseract_no_lee", "formato_no_soportado"),
+    ("tesseract_no_lee", "archivo_no_procesable"),
     ("demasiados_pixeles", "imagen_demasiado_grande"),
     ("demasiadas_paginas", "imagen_demasiado_grande"),
 ])
-def test_n23_cada_causa_tiene_su_codigo_y_su_razon(causa: str, codigo: str):
-    """`archivo_ilegible` (dañado) SOLO para firma invalida, no decodifica y
-    truncados. Un archivo SANO de un formato que no leemos es
-    `formato_no_soportado`; `tesseract_no_lee` tambien (Pillow ya lo decodifico:
-    si leptonica lo rechaza, no esta dañado). Los topes de tamano son
-    `imagen_demasiado_grande`."""
+def test_cada_causa_tiene_su_codigo_y_su_razon(causa: str, codigo: str):
+    """`archivo_ilegible` (danado) SOLO firma invalida y no decodifica;
+    `archivo_no_procesable` cuando Pillow lo decodifico y leptonica no (puede
+    estar danado O ser un formato que no leemos: no se afirma ninguna de las dos);
+    `formato_no_soportado` solo con `formato` (ver las pruebas por formato);
+    los topes de tamano son `imagen_demasiado_grande`."""
     d = ocr._ilegible(causa, "spa").detalle
     assert d["codigo"] == codigo and d["causa"] == causa
-    if codigo == "formato_no_soportado":
-        assert d["razon"].startswith("formato de imagen no soportado (")
-        assert "danado" not in d["razon"]
-    if codigo == "imagen_demasiado_grande":
-        assert "danado" not in d["razon"]
+    assert "formato" not in d
     if codigo == "archivo_ilegible":
         assert "danado" in d["razon"]
-
-
-def test_n23_un_bmp_rgb565_sano_es_formato_no_soportado_y_no_danado(tmp_path: Path):
-    """Pillow lo decodifica; leptonica no lee BMP comprimidos (rc=1 con
-    pixReadMemBmp)."""
-    import struct
-
-    ancho, alto = 64, 32
-    pix = struct.pack("<H", 0xFFFF) * (ancho * alto)
-    info = struct.pack("<IiiHHIIiiII", 40, ancho, alto, 1, 16, 3, len(pix), 2835, 2835, 0, 0)
-    masks = struct.pack("<III", 0xF800, 0x07E0, 0x001F)
-    desplazamiento = 14 + 40 + 12
-    bmp = b"BM" + struct.pack("<IHHI", desplazamiento + len(pix), 0, 0, desplazamiento) + info + masks + pix
-    destino = tmp_path / "565.bmp"
-    destino.write_bytes(bmp)
-    r = ocr.extraer(destino)
-    assert r.estado == "error"
-    assert r.detalle["codigo"] == "formato_no_soportado"
-    assert r.detalle["causa"] == "tesseract_no_lee"
+    if codigo == "archivo_no_procesable":
+        assert "dañada o en un formato no soportado" in d["razon"]
