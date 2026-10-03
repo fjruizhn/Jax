@@ -2057,6 +2057,94 @@ def test_el_bloque_de_verificacion_del_runbook_se_ejecuta_y_falla_cerrado(base_p
     assert r_750.returncode != 0 and "NO CUMPLE: la raiz" in r_750.stderr, r_750.stdout + r_750.stderr
 
 
+# --- ronda 6: hardlinks en las ocultas, camino de fracaso de la verificacion final, fixtures sin rutas reales ---
+
+def test_hardlink_dentro_de_una_oculta_no_se_toca_nunca_y_se_falla_cerrado(arbol_temporal, _identidades):
+    """Mismo criterio que en el arbol gobernado: un archivo con st_nlink > 1 dentro de una carpeta oculta NO se toca
+    (un hardlink es EL MISMO inode: un fchmod alcanzaria tambien a la ruta de fuera de proyectos/). `--verificar`
+    lo marca NO CUMPLE; `--aplicar` y `--deshacer` lo reportan y fallan cerrado ANTES de mutar nada."""
+    proyectos = arbol_temporal / "proyectos"
+    assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    fuera = arbol_temporal.parent / "ejecutable-de-fuera"
+    fuera.write_text("#!/bin/sh\n")
+    os.chmod(fuera, 0o755)
+    oculta = proyectos / "un-proyecto" / ".estado"
+    r = subprocess.run(["sudo", "-n", "-u", "jaxsvc", "mkdir", str(oculta)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    enlace = oculta / "enlace-duro"
+    subprocess.run(["sudo", "-n", "ln", str(fuera), str(enlace)], check=True)
+    # y algo abierto en la misma oculta, que tampoco se cierra si falla cerrado (no se muta NADA)
+    abierto = oculta / "abierto.txt"
+    subprocess.run(["sudo", "-n", "-u", "jaxsvc", "sh", "-c", f"echo x > {abierto} && chmod 666 {abierto}"], check=True)
+    assert fuera.stat().st_nlink == 2 and fuera.stat().st_mode & 0o7777 == 0o755
+
+    v = _correr("--verificar", str(arbol_temporal))
+    assert v.returncode == 1, v.stdout
+    assert f"hardlink en carpeta oculta: {enlace}" in v.stdout, v.stdout
+
+    for accion in ("aplicar", "deshacer"):
+        datos = _recorrer_directo(proyectos, accion=accion, puede_fallar=True, conceder_al_terminar=False)
+        assert "error" in datos and f"hardlink en carpeta oculta: {enlace}" in datos["error"], (accion, datos)
+        assert fuera.stat().st_mode & 0o7777 == 0o755, f"--{accion} tocó el modo de un archivo de fuera por un hardlink"
+        assert abierto.stat().st_mode & 0o007 == 0o006, f"--{accion} mutó algo pese a fallar cerrado"
+
+
+def test_deshacer_dice_no_ok_y_sale_con_1_si_jaxsvc_pierde_el_paso_a_mitad(arbol_temporal, _identidades):
+    """El camino de FRACASO de la verificacion final: tras la mutacion, la raiz pasa a fruiz:fruiz sin ACL (jaxsvc
+    pierde el paso). --deshacer tiene que imprimir NO OK y salir con rc 1, no `OK`. Si la verificacion final
+    devolviera siempre «sin faltas», esta prueba falla."""
+    proyectos = arbol_temporal / "proyectos"
+    out = _driver_respaldo(f"""
+proy = pp.Path({str(proyectos)!r})
+raiz = {str(arbol_temporal)!r}
+pp._generar_respaldo_validado(proy)
+pp._recorrer(proy, accion="aplicar")
+pp._raiz_configurada_privilegiada = lambda: proy
+import io, contextlib, subprocess
+_restaurar = pp._restaurar_raiz_desde_respaldo
+def restaurar_y_romper(p):
+    r = _restaurar(p)
+    subprocess.run(["setfacl", "-b", raiz], check=True)       # jaxsvc pierde su entrada de paso...
+    subprocess.run(["chown", "fruiz:fruiz", raiz], check=True)  # ...y el grupo
+    return r
+pp._restaurar_raiz_desde_respaldo = restaurar_y_romper
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc_nucleo = pp._cmd_nucleo_deshacer()
+json_nucleo = buf.getvalue()
+def falso_nucleo(*a):
+    return subprocess.CompletedProcess(a, 0, stdout=json_nucleo, stderr="")
+pp._invocar_nucleo = falso_nucleo
+sal, err = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(sal), contextlib.redirect_stderr(err):
+    salida["rc"] = pp._cmd_deshacer()
+salida["stdout"], salida["stderr"] = sal.getvalue(), err.getvalue()
+salida["json"] = json.loads(json_nucleo)
+""")
+    assert out["json"]["raiz"]["paso_ok"] is False and out["json"]["raiz"]["paso_faltas"], out["json"]
+    assert out["rc"] == 1, out
+    assert "NO OK" in out["stderr"] and "jaxsvc" in out["stderr"], out["stderr"]
+    assert "OK: deshecho" not in out["stdout"], out["stdout"]
+
+
+def test_las_pruebas_no_instalan_en_usr_local_sbin_ni_crean_cuentas():
+    """Las pruebas usan SIEMPRE una copia del nucleo en un directorio propio (JAX_PERMISOS_NUCLEO) y nunca crean
+    cuentas del sistema: si jaxsvc o fruiz faltan, un paso del workflow las crea y la prueba falla con un mensaje
+    claro. Se mira el codigo (AST): ninguna llamada instala en la ruta de sistema ni ejecuta useradd."""
+    import ast
+    arbol = ast.parse(Path(__file__).read_text())
+    propios = {"test_las_pruebas_no_instalan_en_usr_local_sbin_ni_crean_cuentas"}
+    for nodo in ast.walk(arbol):
+        if isinstance(nodo, ast.FunctionDef) and nodo.name in propios:
+            continue
+        if isinstance(nodo, ast.Call) and getattr(nodo.func, "id", None) == "_crear_repo_con_head":
+            for arg in nodo.args:
+                assert getattr(arg, "id", None) != "RUTA_NUCLEO_SISTEMA", "una prueba instala el nucleo en la ruta de sistema"
+    cuerpo = "\n".join(l for i, l in enumerate(Path(__file__).read_text().splitlines())
+                       if "useradd" in l and "assert" not in l and "propios" not in l and "# " not in l.split("useradd")[0])
+    assert "useradd" not in cuerpo, f"una prueba crea cuentas del sistema:\n{cuerpo}"
+
+
 # --- MAJOR-1: la raiz se abre por descriptor, sin seguir symlinks ------------------------------
 
 def _modo_y_acl(ruta: Path) -> tuple[str, list[str]]:
