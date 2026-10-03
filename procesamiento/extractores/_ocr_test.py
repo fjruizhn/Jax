@@ -2206,3 +2206,214 @@ def test_cada_causa_tiene_su_codigo_y_su_razon(causa: str, codigo: str):
         assert "danado" in d["razon"]
     if codigo == "archivo_no_procesable":
         assert "dañada o en un formato no soportado" in d["razon"]
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 9: N28 (alfa), N30 (BMP con mascaras de 32 bpp), N31 (TIFF con signo)
+# ---------------------------------------------------------------------------
+
+_MODOS_CON_ALFA = {"RGBA", "LA", "PA", "RGBa", "La"}
+
+
+def _tesseract_que_registra(monkeypatch) -> list:
+    """Tesseract SIMULADO que registra los bytes que RECIBE (por stdin) y
+    responde bien: la prueba no depende de la version de leptonica."""
+    recibidos: list = []
+    real = ocr.subprocess.run
+
+    class Salida:
+        returncode = 0
+        stdout = b"texto"
+        stderr = b""
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        recibidos.append(k.get("input"))
+        return Salida()
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    return recibidos
+
+
+def _assert_llego_sin_alfa_y_con_fondo_blanco(recibidos: list):
+    from io import BytesIO
+
+    from PIL import Image
+
+    assert recibidos, "tesseract no recibio nada"
+    for datos in recibidos:
+        assert datos.startswith(b"\x89PNG"), "no se le pasan los bytes originales a leptonica"
+        with Image.open(BytesIO(datos)) as im:
+            assert im.mode not in _MODOS_CON_ALFA
+            assert "transparency" not in im.info
+            rgb = im.convert("RGB")
+            assert rgb.getpixel((2, 2)) == (255, 255, 255), "el fondo transparente tiene que ser blanco"
+            assert rgb.convert("L").getextrema()[0] < 100, "el texto oscuro tiene que seguir ahi"
+
+
+def _rotulo_transparente(modo: str = "RGBA"):
+    """Fondo TRANSPARENTE con texto oscuro (la imagen de un logo o sello)."""
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGBA", (700, 120), (0, 0, 0, 0))
+    ImageDraw.Draw(im).text((20, 30), "Total a pagar: 1,500.00 Lempiras", fill=(0, 0, 0, 255), font=_fuente(36))
+    return im if modo == "RGBA" else im.convert(modo)
+
+
+def test_n28_webp_lossless_con_fondo_transparente_llega_sin_alfa_y_con_fondo_blanco(tmp_path, monkeypatch):
+    destino = tmp_path / "rotulo.webp"
+    _rotulo_transparente().save(destino, lossless=True)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    _assert_llego_sin_alfa_y_con_fondo_blanco(recibidos)
+
+
+def test_n28_tiff_rgba_con_fondo_transparente_llega_sin_alfa_y_con_fondo_blanco(tmp_path, monkeypatch):
+    destino = tmp_path / "rotulo.tif"
+    _rotulo_transparente().save(destino)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    _assert_llego_sin_alfa_y_con_fondo_blanco(recibidos)
+
+
+def test_n28_gif_con_indice_transparente_llega_sin_alfa_y_con_fondo_blanco(tmp_path, monkeypatch):
+    from PIL import Image, ImageDraw
+
+    im = Image.new("P", (700, 120), 0)
+    im.putpalette([0, 0, 0, 20, 20, 20] + [0, 0, 0] * 254)   # indice 0 = fondo (transparente, negro)
+    ImageDraw.Draw(im).text((20, 30), "Total a pagar: 1,500.00 Lempiras", fill=1, font=_fuente(36))
+    destino = tmp_path / "rotulo.gif"
+    im.save(destino, transparency=0)
+    assert "transparency" in Image.open(destino).info
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    _assert_llego_sin_alfa_y_con_fondo_blanco(recibidos)
+
+
+def test_n28_png_la_con_fondo_transparente_llega_sin_alfa_y_con_fondo_blanco(tmp_path, monkeypatch):
+    destino = tmp_path / "rotulo_la.png"
+    _rotulo_transparente("LA").save(destino)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    _assert_llego_sin_alfa_y_con_fondo_blanco(recibidos)
+
+
+def test_n28_png_p_con_transparencia_en_info_llega_sin_alfa_y_con_fondo_blanco(tmp_path, monkeypatch):
+    from PIL import Image, ImageDraw
+
+    im = Image.new("P", (700, 120), 0)
+    im.putpalette([0, 0, 0, 20, 20, 20] + [0, 0, 0] * 254)
+    ImageDraw.Draw(im).text((20, 30), "Total a pagar: 1,500.00 Lempiras", fill=1, font=_fuente(36))
+    destino = tmp_path / "rotulo_p.png"
+    im.save(destino, transparency=0)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    _assert_llego_sin_alfa_y_con_fondo_blanco(recibidos)
+
+
+def test_n28_una_imagen_sin_alfa_sigue_mandando_los_bytes_originales(tmp_path, monkeypatch):
+    destino = tmp_path / "plano.jpg"
+    _imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD")
+    from PIL import Image
+
+    Image.open(tmp_path / "a.png").convert("RGB").save(destino)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    assert recibidos and all(r == destino.read_bytes() for r in recibidos)
+
+
+def _bmp_32(ancho: int, alto: int, cabecera: int, compresion: int = 3) -> bytes:
+    import struct
+
+    from PIL import Image, ImageDraw
+
+    gris = Image.new("L", (ancho, alto), 255)
+    ImageDraw.Draw(gris).text((10, 10), "Activos totales 1,234 USD", fill=0, font=_fuente(28))
+    datos = gris.tobytes()
+    filas = []
+    for y in range(alto - 1, -1, -1):                        # BMP: de abajo hacia arriba
+        fila = datos[y * ancho:(y + 1) * ancho]
+        filas.append(b"".join(struct.pack("<I", 0xFF000000 | g << 16 | g << 8 | g) for g in fila))
+    pix = b"".join(filas)
+    info = struct.pack("<IiiHHIIiiII", cabecera, ancho, alto, 1, 32, compresion, len(pix), 2835, 2835, 0, 0)
+    mascaras = struct.pack("<III", 0xFF0000, 0xFF00, 0xFF)
+    if cabecera == 40:
+        info += mascaras
+    else:                                                    # V5: las mascaras van dentro del header
+        info += (mascaras + struct.pack("<I", 0xFF000000)).ljust(cabecera - 40, b"\0")
+    desplazamiento = 14 + len(info)
+    return b"BM" + struct.pack("<IHHI", desplazamiento + len(pix), 0, 0, desplazamiento) + info + pix
+
+
+@pytest.mark.parametrize("cabecera", [40, 124])
+def test_n30_un_bmp_de_32_bpp_con_mascaras_llega_a_tesseract_como_png(tmp_path, monkeypatch, cabecera):
+    from io import BytesIO
+
+    from PIL import Image
+
+    destino = tmp_path / f"b{cabecera}.bmp"
+    destino.write_bytes(_bmp_32(400, 60, cabecera))
+    with Image.open(destino) as im:                          # Pillow SI lo decodifica
+        im.load()
+    recibidos = _tesseract_que_registra(monkeypatch)
+    r = ocr.extraer(destino)
+    assert recibidos and all(d.startswith(b"\x89PNG") for d in recibidos)
+    assert r.detalle.get("codigo") != "formato_no_soportado"
+    with Image.open(BytesIO(recibidos[0])) as png:
+        assert png.mode not in _MODOS_CON_ALFA
+
+
+def test_n30_el_bmp_de_32_bpp_con_mascaras_no_es_un_formato_nuevo_del_contrato(tmp_path):
+    destino = tmp_path / "c.bmp"
+    destino.write_bytes(_bmp_32(400, 60, 40))
+    assert "bmp_32_bits" not in str(ocr._FORMATO_POR_MODO.values())
+
+
+def _tiff_gris_16_con_signo(destino: Path, ancho: int = 64, alto: int = 32) -> Path:
+    """TIFF de un canal de 16 bits con SampleFormat=2 (entero CON SIGNO): Pillow
+    lo informa como modo `I`."""
+    import struct
+
+    datos = struct.pack("<h", 100) * (ancho * alto)
+    etiquetas = sorted([
+        (256, 3, 1, ancho), (257, 3, 1, alto), (258, 3, 1, 16), (259, 3, 1, 1),
+        (262, 3, 1, 1), (273, 4, 1, None), (277, 3, 1, 1), (278, 3, 1, alto),
+        (279, 4, 1, len(datos)), (339, 3, 1, 2),
+    ])
+    n = len(etiquetas)
+    inicio_datos = 8 + 2 + n * 12 + 4
+    salida = b"II*\x00" + struct.pack("<I", 8) + struct.pack("<H", n)
+    for etiqueta, tipo, cuenta, valor in etiquetas:
+        if etiqueta == 273:
+            salida += struct.pack("<HHII", etiqueta, tipo, cuenta, inicio_datos)
+        elif tipo == 4:
+            salida += struct.pack("<HHII", etiqueta, tipo, cuenta, valor)
+        else:
+            salida += struct.pack("<HHIHH", etiqueta, tipo, cuenta, valor, 0)
+    destino.write_bytes(salida + struct.pack("<I", 0) + datos)
+    return destino
+
+
+def test_n31_un_tiff_de_16_bits_con_signo_es_gris_16_bits_y_no_entero_32_bits(tmp_path, monkeypatch):
+    from PIL import Image
+
+    destino = _tiff_gris_16_con_signo(tmp_path / "s16.tif")
+    assert Image.open(destino).mode == "I"
+    llamadas = _tesseract_llamado(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "formato_no_soportado"
+    assert r.detalle["formato"] == "gris_16_bits"
+    assert llamadas == []
+
+
+def test_n31_un_tiff_de_32_bits_sigue_siendo_entero_32_bits(tmp_path, monkeypatch):
+    from PIL import Image
+
+    destino = tmp_path / "i32.tif"
+    Image.new("I", (64, 32), 5).save(destino)
+    llamadas = _tesseract_llamado(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.detalle["formato"] == "entero_32_bits"
+    assert llamadas == []

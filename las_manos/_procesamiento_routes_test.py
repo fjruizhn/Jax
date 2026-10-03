@@ -1399,6 +1399,14 @@ class TrabajoHTTPTest(unittest.TestCase):
             {"codigo": "formato_no_soportado", "formato": "x; DROP\nTABLE"}
         ).error == "formato_no_soportado"
 
+    def test_n29_un_salto_de_linea_al_final_del_formato_no_se_acepta(self):
+        """`$` coincide antes de un `\\n` final: con `fullmatch` no."""
+        for valor in ("gif_animado\n", "gif_animado\r\n", "\ngif_animado", "gif animado"):
+            r = self._error_de_ficha({"codigo": "formato_no_soportado", "formato": valor})
+            assert r.error == "formato_no_soportado", repr(valor)
+        assert self._error_de_ficha(
+            {"codigo": "formato_no_soportado", "formato": "gif_animado"}).error == "formato_no_soportado:gif_animado"
+
     def test_b6_persists_authenticated_human_uploader_as_caller(self):
         async def _noop(*args, **kwargs):
             return None
