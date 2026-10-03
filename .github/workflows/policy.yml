@@ -1791,8 +1791,17 @@ jobs:
             tests/test_governed_resolution.py \
             tests/test_governed_renderer.py \
             -q 2>&1 | tee /tmp/f2e-sr3
-          grep -qE "^194 passed" /tmp/f2e-sr3 || {
-            echo "PISO ROTO: se esperaban 194 tests CORRIDOS de F2-E-SR3."; exit 1; }
+          # 194 -> 206 (2026-10-03, SR3 replay ownership coherence): +12
+          # parametrized ProcessingJobStore replay tests. Measured on Python
+          # 3.12 with this exact five-file command.
+          # 206 -> 208 (2026-10-03, SR3 truncated JSONL tails): +2 final
+          # record integrity cases. Measured on Python 3.12 with this exact
+          # five-file command.
+          # 208 -> 212 (2026-10-03, SR3 caller immutability): +4 store
+          # derivation, update-rejection, and replay-contradiction cases.
+          # Measured on Python 3.12 with this exact five-file command.
+          grep -qE "^212 passed" /tmp/f2e-sr3 || {
+            echo "PISO ROTO: se esperaban 212 tests CORRIDOS de F2-E-SR3."; exit 1; }
         env:
           PYTHONPATH: .:las_manos
       - name: F2-E-SR3 Processing source authentication and routing regressions
@@ -1804,8 +1813,17 @@ jobs:
             tests/test_las_manos_auth_servicio.py \
             las_manos/_procesamiento_routes_test.py \
             -q 2>&1 | tee /tmp/f2e-sr3-source
-          grep -qE "^111 passed" /tmp/f2e-sr3-source || {
-            echo "PISO ROTO: se esperaban 111 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
+          # 111 -> 124 (2026-10-03, SR3 flat/nested owner coherence): +12
+          # ProcessingJobStore replay cases and +1 endpoint owner-dimension case.
+          # Measured on Python 3.12 with this exact three-file command.
+          # 124 -> 127 (2026-10-03): +2 truncated JSONL-tail cases and +1
+          # authenticated-caller regression. Measured on Python 3.12 with
+          # this exact three-file command.
+          # 127 -> 131 (2026-10-03, SR3 caller immutability): +4 source-store
+          # derivation, update-rejection, and replay-contradiction cases.
+          # Measured on Python 3.12 with this exact three-file command.
+          grep -qE "^131 passed" /tmp/f2e-sr3-source || {
+            echo "PISO ROTO: se esperaban 131 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
         env:
           PYTHONPATH: .:las_manos
       - name: Piso exacto de tests CORRIDOS
@@ -5742,11 +5760,17 @@ jobs:
       #   rechazos retryable sin append de owner faltante/no canónico/desconocido/
       #   duplicado y para `usuario` legado como extra prohibido aun con owner válido.
       #   Confirmado por GitHub run 37133813911: 68 passed, 7 warnings.
+      # 68 -> 69 el 2026-10-03 (SR3 owner coherence): +1 que exige cada
+      #   dimensión exacta de owner para GET y cancel sin mutar JSONL. Medido
+      #   localmente en Python 3.12: 69 passed, 7 warnings.
+      # 69 -> 70 el 2026-10-03 (B-6): +1 que conserva `user:<user_id>` del
+      #   sobre autenticado como caller. Medido localmente en Python 3.12:
+      #   70 passed, 7 warnings.
       - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
-          grep -qE "^68 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 68 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          grep -qE "^70 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 70 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

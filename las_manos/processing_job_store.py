@@ -70,6 +70,14 @@ class ProcessingJobStore(JobStore):
                         self._quarantined.add(job_id)
                         continue
                     owner = self._owner_from_event(event)
+                    flat_owner_fields = ("tenant_id", "user_id", "project_id")
+                    if (any(field not in event for field in flat_owner_fields)
+                            or tuple(event[field] for field in flat_owner_fields) != (
+                        owner.tenant_id, owner.user_id, owner.project_id,
+                    )):
+                        raise ProcessingOwnershipError("processing flat ownership contradicts nested owner")
+                    if event.get("caller") != f"user:{owner.user_id}":
+                        raise ProcessingOwnershipError("processing caller contradicts nested owner")
                     if job_id in self._quarantined:
                         continue
                     prior = self._owners.get(job_id)
@@ -102,7 +110,7 @@ class ProcessingJobStore(JobStore):
         identifier = job_id or str(uuid.uuid4())
         event = {
             "job_id": identifier, "status": ProcessingJobStatus.PENDING.value, "motor": motor,
-            "capability": capability, "caller": caller, "trace_id": trace_id, "prompt": prompt,
+            "capability": capability, "caller": f"user:{ownership.user_id}", "trace_id": trace_id, "prompt": prompt,
             "recursion_depth": recursion_depth, "pipeline_id": pipeline_id, "created_at": time.time(),
             # Keep the inherited view's scope fields coherent with the one
             # immutable nested owner record; updates reject these fields.
@@ -121,7 +129,7 @@ class ProcessingJobStore(JobStore):
         return identifier
 
     def update(self, job_id: str, **kwargs: Any) -> None:
-        if "processing_ownership" in kwargs or {"tenant_id", "user_id", "project_id"} & set(kwargs):
+        if "caller" in kwargs or "processing_ownership" in kwargs or {"tenant_id", "user_id", "project_id"} & set(kwargs):
             raise ValueError("processing ownership is immutable")
         with self._lock:
             prior = self._index.get(job_id)

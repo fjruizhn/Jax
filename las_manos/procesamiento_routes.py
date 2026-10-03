@@ -9,7 +9,7 @@ y `endpoint-hallazgos-r2.md`).
 un PDF escaneado de 30 páginas tarda ~80s (2,7s/página medidos), y una
 petición HTTP no puede quedarse esperando eso.
 
-    POST /procesamiento/trabajos             {project_uuid, rutas[], usuario} -> {job_id} (202)
+    POST /procesamiento/trabajos             {project_uuid, rutas[]} -> {job_id} (202)
     GET  /procesamiento/trabajos/{id}        -> estado + resultados por archivo
     POST /procesamiento/trabajos/{id}/cancel -> deja de programar archivos nuevos
 
@@ -25,7 +25,7 @@ señalado por el ruling del coordinador:
 Siete arreglos, en el orden del ruling:
 
 - **N-1 (bloqueante):** el semáforo se adquiría ANTES de `_STORE.create()`
-  -- si `create()` lanzaba (ej. un `usuario` con un surrogate solitario,
+  -- si `create()` lanzaba (por ejemplo, una falla de disco,
   JSON válido que pydantic acepta pero que `json.dumps`+escritura UTF-8 no
   puede codificar), nadie lo liberaba. Cuatro pedidos así agotaban el
   semáforo PARA SIEMPRE (DoS con cuatro requests). Ahora todo el tramo
@@ -65,10 +65,8 @@ Siete arreglos, en el orden del ruling:
   retraso del loop no la detecta (con `None` el trabajo SIGUE fuera del
   loop, sólo que en el pool equivocado). El test de esta ronda espía el
   objeto executor real y confirma que es a ÉL a quien le llega el trabajo.
-- **B-6:** `usuario` no puede venir vacío ni arbitrariamente largo
-  (`pydantic.Field(min_length=1, max_length=...)`) -- antes `""` y un
-  string de 2 MB daban 202 los dos, y el de 2 MB inflaba el JSONL en 4 MB
-  (se re-esparce el estado ENTERO en cada `update()`).
+- **B-6:** el principal se deriva exclusivamente del `user_id` autenticado
+  en el sobre de propiedad; el cuerpo no puede elegirlo.
 - **N-6:** test dedicado que confirma que el startup hook de `server.py`
   llama a `reconciliar_trabajos_huerfanos()`.
 
@@ -170,10 +168,6 @@ _UUID_CANONICO = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
 
-#: B-6: `usuario` no vacío, tope de largo -- antes `""` y un string de 2MB
-#: daban 202 los dos, y el de 2MB inflaba el JSONL en 4MB (se re-esparce
-#: el estado ENTERO en cada `update()`, así que un campo largo se duplica
-#: en cada línea).
 router = APIRouter(prefix="/procesamiento", tags=["procesamiento"])
 
 
@@ -689,16 +683,16 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
     # reiniciar el proceso -- un DoS de cuatro requests. `proyecto` ya no
     # puede ser la causa (validado arriba), pero el `try/finally` se queda
     # como defensa general: cualquier otra falla en este tramo (ej. el
-    # propio `usuario`, si algún día pierde su `Field`) tiene que seguir
+    # cuerpo adicional, si algún día cambia el modelo) tiene que seguir
     # liberando el permiso.
     permiso_transferido = False
     job_id: str | None = None
     try:
         job_id = _STORE.create(
-            # B-6: el principal REAL -- antes era la constante
-            # "las_manos.procesamiento", que no identificaba a nadie.
+            # B-6: the human uploader is derived from the authenticated,
+            # immutable ownership envelope; the request body never chooses it.
             ownership=ownership,
-            caller="jax-platform:proyectos-documentos",
+            caller=f"user:{ownership.user_id}",
             capability="ingesta_archivos",
             # `motor`/`prompt` son vocabulario de JobStore para motores LLM
             # -- este job no despacha ningún motor. Ver la limitación

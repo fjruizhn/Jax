@@ -21,7 +21,7 @@ GOVERNED_RENDERER_API_VERSION = "f2-c.renderer.3"
 GOVERNED_ENVELOPE_SCHEMA_VERSIONS = frozenset({"f2-c.1"})
 
 # Structured payload inspection is deliberately small and bounded. It exists
-# only to prevent the four registered runtime-status propositions from being
+# only to prevent the five registered runtime-status propositions from being
 # encoded into otherwise ungoverned content; it is not a general JSON parser
 # or natural-language classifier.
 _STRUCTURED_STATUS_MAX_STRING_CHARS = 65_536

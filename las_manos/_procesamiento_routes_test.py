@@ -486,7 +486,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         assert not semaforo.locked()
 
     # -- B-6: el principal se registra ------------------------------------
-    async def test_B6_usuario_llega_al_job_como_caller(self):
+    async def test_B6_owner_user_is_the_immutable_job_caller(self):
         job_id = self.store.create(
             caller="ana@cliente.com", capability="ingesta_archivos",
             motor="n/a", trace_id="t", prompt="n/a", recursion_depth=0,
@@ -494,7 +494,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("3" * 64)):
             self._archivo_en_workspace("a.pdf")
             await self._ejecutar(job_id, UUID_PRUEBA, ["a.pdf"])
-        assert self.store.get(job_id).caller == "ana@cliente.com"
+        assert self.store.get(job_id).caller == "user:2"
 
     # -- B-3: reconciliación al arrancar (ronda anterior, sin cambios) -----
     def test_B3_reconciliar_marca_failed_lo_que_quedo_pending_running_o_cancelling(self):
@@ -1123,6 +1123,38 @@ class TrabajoHTTPTest(unittest.TestCase):
             response = self._post(client, usuario="legacy")
         assert response.status_code == 422, response.text
         assert self.store._index == {}
+
+    def test_b6_persists_authenticated_human_uploader_as_caller(self):
+        async def _noop(*args, **kwargs):
+            return None
+
+        with patch.object(rutas_mod, "_ejecutar_trabajo", _noop), TestClient(_app()) as client:
+            response = self._post(client)
+        assert response.status_code == 202, response.text
+        assert self.store.get(response.json()["job_id"]).caller == "user:2"
+
+    def test_get_and_cancel_require_each_exact_owner_dimension_without_mutation(self):
+        job_id = self.store.create(
+            caller="x", capability="x", motor="n/a", trace_id="t", prompt="", recursion_depth=0,
+        )
+        with TestClient(_app()) as client:
+            # The exact authenticated owner retains normal read access.
+            control = client.get(f"/procesamiento/trabajos/{job_id}", headers=_h(IDENTIDAD_PLATAFORMA))
+            assert control.status_code == 200, control.text
+
+            for header, wrong_value in (
+                ("X-Jax-Processing-Tenant-Id", "9"),
+                ("X-Jax-Processing-User-Id", "9"),
+                ("X-Jax-Processing-Project-Id", "9"),
+            ):
+                wrong_owner = {**_h(IDENTIDAD_PLATAFORMA), header: wrong_value}
+                before = len(Path(self.store._path).read_text().splitlines())
+                get_response = client.get(f"/procesamiento/trabajos/{job_id}", headers=wrong_owner)
+                cancel_response = client.post(f"/procesamiento/trabajos/{job_id}/cancel", headers=wrong_owner)
+                assert get_response.status_code == 404, get_response.text
+                assert cancel_response.status_code == 404, cancel_response.text
+                assert len(Path(self.store._path).read_text().splitlines()) == before
+                assert self.store.get(job_id).status == JobStatus.PENDING
 
     # -- N-1: el permiso siempre vuelve --------------------------------------
     def test_N1_falla_al_crear_el_job_no_deja_el_semaforo_agotado(self):
