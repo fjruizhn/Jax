@@ -5351,8 +5351,12 @@ jobs:
           #   llamado .pdf), tope total de pixeles y plazo total de un TIFF, y TIFF en streaming.
           #   Medido LOCAL en hall9000: 105 passed (las 2 reales corren). En el runner:
           #   103 passed, 2 skipped.
-          grep -qE "^103 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 103 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 105 -> 110 (Jax#338 ronda 3, cierre): +5 -- TIFF de modo F/I/I;16 con texto se lee
+          #   (normalizacion a 8 bits) y rc=0 con una marca de lectura fallida en stderr es
+          #   `tesseract_no_lee`. Medido LOCAL en hall9000: 110 passed (las 2 reales corren).
+          #   En el runner: 108 passed, 2 skipped.
+          grep -qE "^108 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 108 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,

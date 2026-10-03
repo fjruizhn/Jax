@@ -167,6 +167,8 @@ _MARCAS_ARCHIVO_ILEGIBLE = (
     "pix not read", "pixReadStream", "findFileFormatStream",
     "Unsupported image type", "cannot be read", "image file not found",
     "pixReadMem",   # por stdin leptonica escribe `pixReadMem…`, no `pixReadStream`
+    "pixRead",      # cualquier `pixRead…`, p. ej. `pixReadFromTiffStream`
+    "is not uint",  # TIFF de coma flotante: `sample format = 3 is not uint`
 )
 
 # S-1: tesseract interpreta una entrada que no es imagen como LISTA DE RUTAS.
@@ -362,6 +364,10 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
                     dimensiones.append((ancho, alto))
                 if n == 1:
                     img.load()
+                    if img.mode in _MODOS_NUMERICOS:
+                        # un solo fotograma, pero de un modo que leptonica no
+                        # lee: va por el camino que lo normaliza y re-codifica
+                        return "tiff", dimensiones
                     return "una", dimensiones
     except Image.DecompressionBombError:
         return "demasiados_pixeles"
@@ -370,7 +376,30 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
     return "tiff", dimensiones
 
 
-_MODOS_PNG = frozenset({"1", "L", "LA", "P", "RGB", "RGBA", "I;16"})
+_MODOS_PNG = frozenset({"1", "L", "LA", "P", "RGB", "RGBA"})
+
+# Modos numericos que leptonica no lee bien (coma flotante: rc=0 con error en
+# stderr y sin texto). Se normalizan a 8 bits antes de ir a tesseract.
+_MODOS_NUMERICOS = frozenset({"F", "I", "I;16", "I;16B", "I;16L", "I;16N"})
+
+
+def _normalizar_modo(img):
+    """Imagen decodificada -> una que leptonica sabe leer, con conversion
+    EXPLICITA: modos numericos (F, I, I;16...) -> `L` escalando el rango real
+    de la imagen a 0-255 y con autocontraste; el resto fuera de `_MODOS_PNG`
+    (CMYK, YCbCr, LAB...) -> `RGB`."""
+    from PIL import ImageOps
+
+    if img.mode in _MODOS_PNG:
+        return img
+    if img.mode in _MODOS_NUMERICOS:
+        base = img if img.mode in ("F", "I") else img.convert("I")
+        bajo, alto = base.getextrema()
+        escala = 255.0 / (alto - bajo) if alto > bajo else 0.0
+        reescalada = base.point(lambda v: (v - bajo) * escala)
+        return ImageOps.autocontrast(reescalada.convert("L"))
+    return img.convert("RGB")
+
 
 
 def _implica_pagina(ancho: int, alto: int) -> str | None:
@@ -477,6 +506,10 @@ def _ocr_bytes(datos: bytes, idioma: str, timeout: float | None = None) -> dict 
         if any(marca in stderr for marca in _MARCAS_ARCHIVO_ILEGIBLE):
             return {"clasificacion": "ilegible", "causa": "tesseract_no_lee"}
         return None
+    # rc=0 NO basta: con un TIFF de coma flotante leptonica escribe el error en
+    # stderr, sale con 0 y no entrega texto -- un archivo que nadie leyo.
+    if any(marca in _como_texto(proceso.stderr) for marca in _MARCAS_ARCHIVO_ILEGIBLE):
+        return {"clasificacion": "ilegible", "causa": "tesseract_no_lee"}
     texto = _como_texto(proceso.stdout).strip()
 
     try:
@@ -538,7 +571,7 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
                 try:
                     img.seek(numero - 1)
                     img.load()
-                    cuadro = img if img.mode in _MODOS_PNG else img.convert("RGB")
+                    cuadro = _normalizar_modo(img)
                     salida = BytesIO()
                     cuadro.save(salida, format="PNG")
                     png = salida.getvalue()
