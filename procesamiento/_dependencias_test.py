@@ -213,3 +213,45 @@ def test_con_pil_imaging_bloqueado_el_freno_marca_pillow_como_faltante():
     )
     assert r.returncode == 0, r.stderr
     assert "pillow" in r.stdout.strip().split(",")
+
+
+def _extensiones_de_imagen_que_el_ocr_acepta() -> set[str]:
+    """Las extensiones (registradas en Pillow) de cada formato cuyo contenido el
+    OCR acepta como imagen por su firma: se guarda una imagen chica en cada
+    formato que Pillow sabe escribir y se le pregunta a `ocr.tipo_por_cabecera`.
+    Sale de los datos, no de una lista escrita a mano (Jax#338 ronda 17)."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    from procesamiento.extractores import ocr
+
+    Image.init()
+    por_formato: dict[str, set[str]] = {}
+    for extension, formato in Image.registered_extensions().items():
+        por_formato.setdefault(formato, set()).add(extension)
+    extensiones: set[str] = set()
+    for formato in sorted(Image.SAVE):
+        salida = BytesIO()
+        try:
+            Image.new("RGB", (16, 16), "white").save(salida, format=formato)
+        except Exception:  # fail-soft: formatos que Pillow no puede escribir aca (EPS sin ghostscript, modos no admitidos); no son imagenes que se puedan probar
+            continue
+        if ocr.tipo_por_cabecera(salida.getvalue()[:1024]) == "imagen":
+            extensiones |= por_formato.get(formato, set())
+    assert {".png", ".jpg", ".gif", ".webp", ".tif", ".bmp"} <= extensiones, extensiones
+    return extensiones
+
+
+def test_sin_pillow_un_gif_frena_el_lote():
+    """Sol (r16): la firma GIF se clasifica como imagen y su OCR necesita
+    Pillow, pero `.gif` no estaba en las extensiones frenadas."""
+    assert dependencias.lote_afectado(["pillow"], ["sello.gif"]) is True
+
+
+def test_sin_pillow_se_frena_cada_extension_de_imagen_que_el_ocr_acepta():
+    no_frenadas = sorted(
+        e for e in _extensiones_de_imagen_que_el_ocr_acepta()
+        if not dependencias.lote_afectado(["pillow"], [f"archivo{e}"])
+    )
+    assert no_frenadas == []

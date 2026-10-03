@@ -547,3 +547,42 @@ def test_pdf_con_pdfplumber_roto_da_dependencia_rota_y_no_propaga(tmp_path: Path
     r = compuerta.extraer(archivo)
     assert r.estado == "error"
     assert r.detalle["codigo"] == "dependencia_rota"
+
+
+def _extensiones_de_imagen_que_el_ocr_acepta() -> set[str]:
+    """Las extensiones (registradas en Pillow) de cada formato cuyo contenido el
+    OCR acepta como imagen por su firma: se guarda una imagen chica en cada
+    formato que Pillow sabe escribir y se le pregunta a `ocr.tipo_por_cabecera`.
+    Sale de los datos, no de una lista escrita a mano (Jax#338 ronda 17)."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    from procesamiento.extractores import ocr
+
+    Image.init()
+    por_formato: dict[str, set[str]] = {}
+    for extension, formato in Image.registered_extensions().items():
+        por_formato.setdefault(formato, set()).add(extension)
+    extensiones: set[str] = set()
+    for formato in sorted(Image.SAVE):
+        salida = BytesIO()
+        try:
+            Image.new("RGB", (16, 16), "white").save(salida, format=formato)
+        except Exception:  # fail-soft: formatos que Pillow no puede escribir aca (EPS sin ghostscript, modos no admitidos); no son imagenes que se puedan probar
+            continue
+        if ocr.tipo_por_cabecera(salida.getvalue()[:1024]) == "imagen":
+            extensiones |= por_formato.get(formato, set())
+    assert {".png", ".jpg", ".gif", ".webp", ".tif", ".bmp"} <= extensiones, extensiones
+    return extensiones
+
+
+def test_la_compuerta_reconoce_por_extension_cada_imagen_que_el_ocr_acepta():
+    """La lista de extensiones de imagen de la compuerta y la del freno de
+    dependencias salen de la MISMA fuente (`procesamiento.tipos_imagen`), y
+    cubren todo formato cuya firma el OCR acepta (ronda 17)."""
+    from procesamiento import dependencias
+
+    faltan = sorted(_extensiones_de_imagen_que_el_ocr_acepta() - set(compuerta.IMAGENES))
+    assert faltan == []
+    assert set(compuerta.IMAGENES) == set(dependencias.EXTENSIONES_POR_PAQUETE["pillow"])

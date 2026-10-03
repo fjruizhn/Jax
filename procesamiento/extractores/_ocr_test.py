@@ -3058,11 +3058,13 @@ def test_n39_si_solo_una_pasada_aporta_tambien_es_como_mucho_parcial(tmp_path, m
     assert r.salidas["texto.txt"] == f"{ocr.NOTA_TEXTO_DUDOSO}\n{plano}"
 
 
-def test_n39_la_version_de_la_logica_de_imagen_es_3():
+def test_n39_la_version_de_la_logica_de_imagen_es_4():
     """La union de las dos pasadas cambia la regla: una ficha de imagen escrita
-    con la logica "2" (la seleccion) no se reusa."""
-    assert ocr.VERSION_LOGICA_IMAGEN == "3"
-    assert ocr.version_logica("imagen") == "3"
+    con la logica "2" (la seleccion) no se reusa. Ronda 17: "4", porque las
+    invariantes de la ronda 16 (transparencia nunca ok, ninguna linea del texto
+    plano se pierde) cambian la clasificacion de las fichas escritas con "3"."""
+    assert ocr.VERSION_LOGICA_IMAGEN == "4"
+    assert ocr.version_logica("imagen") == "4"
 
 
 def test_n39_una_imagen_de_un_solo_fotograma_con_transparencia_no_lleva_marca_de_pagina(
