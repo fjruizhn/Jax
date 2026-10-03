@@ -5460,8 +5460,18 @@ jobs:
           #   dudosas, palabras totales, caracteres): blanco con 0 palabras y negro con 5 dudosas
           #   elige el negro y sale parcial/imagen_texto_dudoso. Medido LOCAL en hall9000: 183
           #   passed (las 2 reales corren). En el runner: 181 passed, 2 skipped.
-          grep -qE "^181 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 181 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 183 -> 182 recolectadas (Jax#338 ronda 12): +3 -2 -2. Con transparencia real el
+          #   resultado es la UNION de las dos pasadas (sin eleccion): TOTAL en la blanca y L500 en
+          #   la negra salen los dos, el texto real no se pierde ante 20 palabras de ruido, y una
+          #   linea repetida va una sola vez (+3). Se BORRAN las 2 pruebas de eleccion (empate y
+          #   metrica, -2) y las 2 de los logos A/I con tesseract REAL (-2): fijaban el
+          #   reconocimiento literal, que cambia entre tesseract 5.5.0/leptonica 1.86 y 5.3.4/1.82;
+          #   las cubren las 8 del tesseract simulado. BAJA JUSTIFICADA del piso del runner (181 ->
+          #   180): son esas 2 pruebas que dependian de la version. Cuenta: 182 recolectadas, menos
+          #   las 2 de LACTOVI que el runner salta (skipif por archivo ausente) = 180 passed,
+          #   2 skipped. Medido LOCAL en hall9000: 182 passed.
+          grep -qE "^180 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 180 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
