@@ -275,10 +275,11 @@ pp.ENTRADAS_EXTRA_PERMITIDAS = {{{_usuario_de_pruebas()!r}}}
 hook = None
 hook_raiz = None
 hook_entre = None
+hook_scandir = None
 {extra_codigo}
 try:
     r = pp._recorrer(pp.Path({str(proyectos)!r}), accion={accion!r}, hook_de_prueba=hook, hook_antes_de_raiz=hook_raiz,
-                    hook_entre_previo_y_mutacion=hook_entre)
+                    hook_entre_previo_y_mutacion=hook_entre, hook_tras_scandir=hook_scandir)
 except pp.ErrorPermisosProyectos as exc:
     print(json.dumps({{"error": str(exc), "a_medio": pp._PROGRESO["mutando"]}}))
     sys.exit(0)
@@ -2652,6 +2653,118 @@ salida["modo_final"] = os.stat(raiz).st_mode & 0o7777
 """)
     assert out["json"].get("a_medio_aplicar") is True and "cambió" in out["json"]["error"], out
     assert out["modo_final"] == modo_ajeno, "se hizo fchmod sobre la raiz sustituta"
+
+
+# --- ronda 11: cada entrada abierta se compara por inode con la que enumero scandir -------------------
+
+def _huella_de(ruta: Path) -> tuple:
+    st = ruta.stat()
+    return (st.st_uid, st.st_gid, st.st_mode, st.st_ctime_ns, tuple(_acl(ruta)))
+
+
+def _arbol_con_oculta_y_hermana(arbol: Path) -> tuple:
+    """proyectos/un-proyecto/{visible/, .claude-flow/ (limpia, de quien corre pytest, con un archivo)}."""
+    proyectos = arbol / "proyectos"
+    proyecto = proyectos / "un-proyecto"
+    visible = proyecto / "visible"
+    visible.mkdir()
+    oculta = proyecto / ".claude-flow"
+    _mkdir_oculta_limpia(oculta)
+    (oculta / "estado.json").write_text("{}")
+    os.chmod(oculta / "estado.json", 0o600)
+    return proyectos, proyecto, visible, oculta
+
+
+_INTERCAMBIO = """
+import os
+estado = {{"hecho": False}}
+def hook_scandir(ruta):
+    if estado["hecho"] or not ruta.endswith("/un-proyecto"):
+        return
+    estado["hecho"] = True
+    a, b, t = {a!r}, {b!r}, {a!r} + ".tmp-intercambio"
+    os.rename(a, t); os.rename(b, a); os.rename(t, b)      # RENAME_EXCHANGE con tres renames
+"""
+
+
+@pytest.mark.parametrize("accion", ["aplicar", "deshacer"])
+def test_un_intercambio_de_nombres_entre_el_scandir_y_el_open_no_hace_que_root_mute_la_oculta(
+        arbol_temporal, _identidades, accion):
+    """Despues de que scandir enumera `visible`, un proceso intercambia los nombres de `visible/` y `.claude-flow/`.
+    Root abriria `visible` -- ahora el inode de la oculta -- y le cambiaria ACL, dueño y modo. Se compara
+    (st_dev, st_ino) del descriptor abierto con lo enumerado: si no coincide, no se muta, no se desciende y se anota."""
+    proyectos, proyecto, visible, oculta = _arbol_con_oculta_y_hermana(arbol_temporal)
+    if accion == "deshacer":
+        # el arbol se aplica primero (con la oculta ya creada: es de quien corre pytest y no se toca)
+        assert not _recorrer_directo(proyectos, accion="aplicar", conceder_al_terminar=False)["no_cumple"]
+    ino_oculta = oculta.stat().st_ino
+    huella = _huella_de(oculta)
+    huella_archivo = _huella_de(oculta / "estado.json")
+    extra = _INTERCAMBIO.format(a=str(visible), b=str(oculta))
+    out = _ciclo_nucleo_cliente(proyectos, arbol_temporal, accion, extra.replace("hook_scandir", "_h").replace(
+        "def _h(ruta):", "def _h(ruta):") + "\n_rec = pp._recorrer\ndef _con_hook(*a, **k):\n"
+        "    if k.get('accion') in ('aplicar', 'deshacer'):\n        k.setdefault('hook_tras_scandir', _h)\n    return _rec(*a, **k)\npp._recorrer = _con_hook\n")
+    # tras el intercambio, el inode de la oculta esta bajo el nombre `visible`
+    assert visible.stat().st_ino == ino_oculta, "el gancho no intercambió los nombres: la prueba no probó nada"
+    assert _huella_de(visible) == huella, "root mutó la carpeta oculta (dueño, grupo, modo, ctime o ACL)"
+    assert _huella_de(visible / "estado.json") == huella_archivo, "root mutó el contenido de la oculta"
+    no_cumple = (out["json"] or {}).get("no_cumple", [])
+    assert any("la entrada cambió durante el recorrido" in l and "visible" in l for l in no_cumple), out
+    assert out["rc"] == 1, out
+    assert "la entrada cambió durante el recorrido" in out["stdout"] + out["stderr"]
+
+
+def test_un_inode_de_una_oculta_vista_en_la_pasada_previa_no_se_muta_aunque_cambie_de_nombre(
+        arbol_temporal, _identidades):
+    """Conjunto de inodes de las ocultas y su contenido, guardado en la pasada previa: si la mutacion abre un inode
+    del conjunto (aqui la oculta, movida a un lugar gobernado entre las dos pasadas, con un nombre sin punto), no lo
+    muta y lo anota, aunque scandir lo enumere con ese inode."""
+    proyectos, proyecto, visible, oculta = _arbol_con_oculta_y_hermana(arbol_temporal)
+    movida = proyecto / "sub" / "movida"
+    huella = [_huella_de(oculta)[i] for i in (0, 1, 2, 4)]     # sin ctime: el rename lo cambia
+    extra = f"""
+import os
+def hook_entre():
+    os.rename({str(oculta)!r}, {str(movida)!r})
+"""
+    out = _ciclo_nucleo_cliente(proyectos, arbol_temporal, "aplicar", extra + """
+_rec = pp._recorrer
+def _con_hook(*a, **k):
+    if k.get('accion') in ('aplicar', 'deshacer'):   # solo la pasada de mutacion, no las previas internas
+        k.setdefault('hook_entre_previo_y_mutacion', hook_entre)
+    return _rec(*a, **k)
+pp._recorrer = _con_hook
+""")
+    assert movida.exists() and not oculta.exists()
+    assert [_huella_de(movida)[i] for i in (0, 1, 2, 4)] == huella, "root mutó una carpeta que era oculta"
+    no_cumple = (out["json"] or {}).get("no_cumple", [])
+    assert any("carpeta oculta" in l and "movida" in l for l in no_cumple), out
+    assert out["rc"] == 1, out
+
+
+@pytest.mark.parametrize("como", ["chown", "setfacl"])
+def test_la_verificacion_final_detecta_una_oculta_mutada(arbol_temporal, _identidades, como):
+    """Despues de mutar, el nucleo relee las ocultas y compara dueño y ACL contra lo que guardo la pasada previa: si
+    cambiaron -- aunque se restituyan los nombres, aunque un rename los esconda -- es NO CUMPLE."""
+    proyectos, proyecto, visible, oculta = _arbol_con_oculta_y_hermana(arbol_temporal)
+    cambio = ('os.chown(%r, pwd.getpwnam("jaxsvc").pw_uid, -1)' % str(oculta) if como == "chown"
+              else 'subprocess.run(["setfacl", "-m", "u:nobody:r-x", %r], check=True)' % str(oculta))
+    extra = f"""
+import os, pwd, subprocess
+def hook_entre():
+    {cambio}
+"""
+    out = _ciclo_nucleo_cliente(proyectos, arbol_temporal, "aplicar", extra + """
+_rec = pp._recorrer
+def _con_hook(*a, **k):
+    if k.get('accion') in ('aplicar', 'deshacer'):   # solo la pasada de mutacion, no las previas internas
+        k.setdefault('hook_entre_previo_y_mutacion', hook_entre)
+    return _rec(*a, **k)
+pp._recorrer = _con_hook
+""")
+    no_cumple = (out["json"] or {}).get("no_cumple", [])
+    assert any("carpeta oculta mutada" in l and ".claude-flow" in l for l in no_cumple), out
+    assert out["rc"] == 1, out
 
 
 # --- MAJOR-1: la raiz se abre por descriptor, sin seguir symlinks ------------------------------
