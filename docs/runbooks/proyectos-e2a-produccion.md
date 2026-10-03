@@ -47,7 +47,19 @@ Una sola vez, con los comandos de `despliegue.md`. Al arrancar, `run_migrations(
 SHOW CREATE TABLE project_documents;                    -- existe, con uq_project_documents_sha y las 3 FKs
 SELECT config_key, config_value FROM axioma_config WHERE config_key LIKE 'proyectos.documentos.%';   -- las 4 claves
 ```
-Si la tabla no está, mirar el log de arranque (falla de `run_migrations`) y parar: no se crea a mano. Publicar el sitio (frontend) según `despliegue.md` y comprobar que sirve el bundle nuevo.
+Si la tabla no está, mirar el log de arranque (falla de `run_migrations`) y parar: no se crea a mano.
+**Precondiciones de la subida (solo verificar; cambiar nginx es de la Parte C, con GO):** `POST /api/proyectos/*/documentos` recibe lotes de hasta `proyectos.documentos.max_bytes_lote` (1 GiB por defecto).
+```bash
+sudo nginx -T 2>/dev/null | grep -n "client_max_body_size"    # en el server/location que sirve /api: >= max_bytes_lote + margen (p. ej. 1100m); si falta, nginx corta en 1m con 413
+```
+```sql
+SELECT config_value FROM axioma_config WHERE config_key = 'proyectos.documentos.max_bytes_lote';   -- el tope a cubrir
+```
+```bash
+systemctl show jax-platform -p Environment -p PrivateTmp      # buscar TMPDIR; sin TMPDIR, Starlette usa /tmp (con PrivateTmp=yes, el /tmp propio del servicio)
+df -h /tmp                                                    # o el TMPDIR hallado: espacio libre >= max_bytes_lote
+```
+Starlette vuelca el multipart a disco **antes** de que la plataforma cuente bytes, así que un lote grande ocupa ese TMPDIR aunque luego se rechace con 413. Si `client_max_body_size` no cubre el tope o el TMPDIR no tiene espacio, no se abre la subida a usuarios: se anota para la Parte C. Publicar el sitio (frontend) según `despliegue.md` y comprobar que sirve el bundle nuevo.
 ### 5. LACTOVI: de carpeta suelta a proyecto
 Rutas reales: workspace `/home/fruiz/jax-workspace`, carpeta `lacteos-victoria`. Antes: `find .../proyectos/lacteos-victoria/fuente -type f | wc -l` (en el ensayo del 2026-10-03: 120) y `ls .../procesado | wc -l` (88), y se anota. **Mismo sistema de archivos**: `os.rename` entre `proyectos/lacteos-victoria` y `proyectos/<uuid>` es dentro del mismo directorio.
 ```bash
@@ -79,6 +91,8 @@ while :; do
     [ -f "$ENV" ] || continue; N=$(basename "$ENV" .env)
     [ -f "$D/restic-pre-$N.rc" ] && continue
     if kill -0 "$(cat "$D/restic-pre-$N.pid" 2>/dev/null)" 2>/dev/null; then PENDIENTE=1
+    # Carrera: el proceso pudo terminar y escribir su .rc ENTRE el test de arriba y este kill -0. Se vuelve a mirar el .rc antes de declararlo muerto.
+    elif [ -f "$D/restic-pre-$N.rc" ]; then :
     else echo "ERROR: el respaldo $N murio SIN dejar .rc: mirar $D/restic-pre-$N.log; NO se sigue" >&2; return 1; fi
   done
   [ "$PENDIENTE" = 0 ] && break
@@ -86,10 +100,15 @@ while :; do
   sleep 20
 done
 }
-esperar_restics || echo 'ESPERA FALLIDA: no se sigue'
-tail -n 3 "$D"/restic-pre-*.log      # el resumen de cada snapshot
-for f in "$D"/restic-pre-*.rc; do echo "$f -> $(cat "$f")"; done
+# Lo que sigue va DENTRO del if: si la espera falla, el resumen no corre y el bloque pegado termina ahi.
+if esperar_restics; then
+  tail -n 3 "$D"/restic-pre-*.log      # el resumen de cada snapshot
+  for f in "$D"/restic-pre-*.rc; do echo "$f -> $(cat "$f")"; done
+else
+  echo 'ESPERA FALLIDA: NO SE SIGUE. No pegues nada de lo que viene despues de este bloque hasta revisar los logs.' >&2
+fi
 ```
+**Si salio `ESPERA FALLIDA`, el procedimiento se detiene aqui** (no se restaura ni se pasa al paso siguiente): un `|| echo` solo no corta lo que se pegue despues, por eso el resumen va dentro del `if`.
 Los dos repos son obligatorios si existen los dos `.env`. Cada `.rc` tiene que ser `0` (con `3` hubo snapshot pero algún archivo no se leyó: no se sigue hasta saber cuál). El bucle sale con error si un proceso muere sin `.rc` o si pasa `TOPE_S` (se puede subir exportándolo antes); con cualquiera de los dos **no se sigue**: mirar `tail -f "$D"/restic-pre-*.log` desde otra terminal. Después, **por cada repo**, restaurar a una ruta aparte y comparar `sha256` contra el original:
 ```bash
 for ENV in /etc/restic/local.env /etc/restic/r2.env; do
@@ -120,10 +139,10 @@ Códigos de salida: `0` hecho; `1` el mapa o el destino ya existen, el proyecto 
 | Dónde se cortó | Estado que queda | Qué hacer |
 |---|---|---|
 | Tras `create_project`, antes del mapa | proyecto ACTIVO, carpeta sin mover, sin mapa | Volver a correr `--aplicar` (misma llave: reutiliza el proyecto) |
-| Mapa escrito, `rename` falló o no ocurrió | mapa existe, carpeta en su sitio | Renombrar el mapa (`mv .e2a-lactovi-<fecha>.json mapa-corte.json`; nunca se pisa) y volver a `--aplicar` |
+| Mapa escrito, `rename` falló o no ocurrió | mapa existe, carpeta en su sitio | Mover el mapa FUERA de `proyectos/`, igual que en el caso de éxito (`mv /home/fruiz/jax-workspace/proyectos/.e2a-lactovi-*.json $D/`; el guion no pisa uno existente y uno dentro de `proyectos/` hace fallar `--verificar`) y volver a `--aplicar` |
 | Tras el `rename`, antes de las filas (corte del proceso) | carpeta en `<uuid>`, sin filas | `--completar <mapa>` (verifica `sha256` contra el mapa y registra lo que falte) |
 | Commit de las filas incierto (código 4) | carpeta en `<uuid>`, filas quizá | Contar filas (`SELECT COUNT(*)`); si faltan, `--completar` (idempotente) |
-| Fallo al registrar con error previo al commit (código 1) | el guion devolvió la carpeta | Renombrar el mapa y volver a `--aplicar` |
+| Fallo al registrar con error previo al commit (código 1) | el guion devolvió la carpeta | Mover el mapa a `$D` (fuera de `proyectos/`) y volver a `--aplicar` |
 | `--revertir` cortado antes del commit | nada cambió o se deshizo solo | Repetir `--revertir` |
 | `--revertir` cortado en el archivado | carpeta devuelta, sin filas, proyecto ACTIVO | Repetir `--revertir`: detecta la carpeta ya devuelta y solo archiva |
 
@@ -182,7 +201,7 @@ Paso 2: `--deshacer`. Paso 5: `--revertir` con el mapa guardado en `$D`. Pasos 3
 - Carrera conteo→`DROP` en la reversión de 006a (`scripts/b9_revertir_005.py`): entre contar las filas y borrar la tabla puede entrar una fila. La reversión es **manual y con la plataforma parada**.
 - Un proyecto **archivado a mitad de un trabajo de LAS MANOS**: el trabajo termina de escribir (aceptado); lo que ya está entregado no se frena.
 - `_UUID_CANONICO` está duplicada en `scripts/` (que no es paquete y no puede importar de `las_manos/`): si cambia en uno, se cambia en el otro.
-- El `fchmod 0660` de `write_file` aplica a **todo** el workspace. Hoy no abre lectura a nadie (el grupo `jaxsvc` no tiene miembros extra); sería un riesgo si apareciera un directorio con setgid y otro grupo.
+- El `fchmod 0660` de `write_file` aplica a **todo** el workspace. Fuera de `proyectos/` el grupo del archivo es `jaxsvc` (sin miembros extra), así que no abre lectura a nadie. Dentro de `proyectos/`, con setgid el grupo es `fruiz` y el 0660 da lectura y escritura a `fruiz`: es lo buscado, no una apertura. Sería un riesgo si apareciera un directorio con setgid y otro grupo.
 - En la prueba de herencia de `tests/test_permisos_proyectos.py`, la escritura de `fruiz` no prueba nada: `fruiz` es dueña del `tmp_path`.
 - `procesamiento/compuerta.py` repite la comprobación `tipo == "ole2"` (cosmético).
 - **Para que Fernando lo vea (decisión suya):** el modelo de propiedad (`jaxsvc` dueño del árbol) sigue la spec madre §5, y por eso un proceso corriendo como `jaxsvc` podría reescribir la ACL de `proyectos/`. Se repara con root. Si se quiere cerrar, el dueño tendría que ser otro usuario.
