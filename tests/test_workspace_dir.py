@@ -7,7 +7,9 @@ abandonada y partia los datos en dos. Ahora hay UNA funcion y no hay default.
 """
 from __future__ import annotations
 
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,28 @@ def test_vacia_o_solo_espacios_lanza(monkeypatch, valor):
         workspace_dir()
 
 
+def test_absoluta_inexistente_lanza(monkeypatch, tmp_path):
+    monkeypatch.setenv("JAX_WORKSPACE_DIR", str(tmp_path / "no-existe"))
+    with pytest.raises(WorkspaceNoConfigurado) as exc:
+        workspace_dir()
+    assert "no existe o no es un directorio" in str(exc.value)
+
+
+def test_archivo_regular_lanza(monkeypatch, tmp_path):
+    archivo = tmp_path / "archivo"
+    archivo.write_text("x")
+    monkeypatch.setenv("JAX_WORKSPACE_DIR", str(archivo))
+    with pytest.raises(WorkspaceNoConfigurado):
+        workspace_dir()
+
+
+def test_el_mensaje_trae_la_orden_para_correr_a_mano(monkeypatch):
+    monkeypatch.delenv("JAX_WORKSPACE_DIR", raising=False)
+    with pytest.raises(WorkspaceNoConfigurado) as exc:
+        workspace_dir()
+    assert "sudo -n grep '^JAX_WORKSPACE_DIR=' /etc/jax/.env | cut -d= -f2-" in str(exc.value)
+
+
 @pytest.mark.parametrize("valor", ["jax-workspace", "./ws", "../ws", "~/ws"])
 def test_relativa_lanza_con_motivo(monkeypatch, valor):
     monkeypatch.setenv("JAX_WORKSPACE_DIR", valor)
@@ -42,6 +66,8 @@ def test_relativa_lanza_con_motivo(monkeypatch, valor):
 
 
 def test_absoluta_devuelve_path_resuelto(monkeypatch, tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "ws").mkdir()
     monkeypatch.setenv("JAX_WORKSPACE_DIR", str(tmp_path / "a" / ".." / "ws"))
     r = workspace_dir()
     assert isinstance(r, Path)
@@ -63,8 +89,9 @@ def test_valor_con_espacios_alrededor_se_recorta(monkeypatch, tmp_path):
 
 
 def test_los_tres_usos_fallan_cerrado_sin_variable(monkeypatch):
-    """ocr falla al llamarla; los otros dos al importarse (a proposito)."""
-    import sys
+    """Los tres fallan al IMPORTAR (a proposito): ocr tiene `_WORKSPACE_DIR` a
+    nivel de modulo (ocr.py), y con el van la compuerta y la ingesta. Aca se
+    ejercita la funcion de resolucion de ocr, que es la que lanza."""
     sys.path.insert(0, str(RAIZ / "las_manos"))
     try:
         from procesamiento.extractores import ocr
@@ -95,18 +122,58 @@ def test_import_a_nivel_de_modulo_sin_variable_no_arranca(modulo):
         "JAX_LAS_MANOS_CREDENCIAL_PLATAFORMA": "x",
         "JAX_REPO_BASE": "/tmp",
     }
-    p = subprocess.run(["python3", "-c", codigo], env=env, capture_output=True, text=True)
+    p = subprocess.run([sys.executable, "-c", codigo], env=env, capture_output=True, text=True)
     assert p.returncode != 0
     assert "JAX_WORKSPACE_DIR no está configurada" in p.stderr, p.stderr[-800:]
 
 
-def test_literal_viejo_no_vuelve_a_codigo_python():
-    """Barrido: el literal del workspace viejo no puede reaparecer en .py
-    fuera de tests/ y docs/ (ni en los *_test.py junto al codigo, que son
-    pruebas: se excluyen por nombre)."""
-    salida = subprocess.run(
-        ["git", "grep", "-l", "-F", LITERAL_VIEJO, "--", "*.py",
-         ":!tests", ":!docs", ":!*_test.py", ":!policy/tests"],
-        cwd=RAIZ, capture_output=True, text=True,
-    )
-    assert salida.stdout.strip() == "", f"literal viejo reaparecio en: {salida.stdout}"
+_EXCLUIDOS = ("tests", "docs", ".git", "node_modules")
+_LLAMADA_CON_DEFAULT = re.compile(
+    r"""(?:getenv|environ\.get)\(\s*["']JAX_WORKSPACE_DIR["']\s*,""")
+
+
+def _violaciones(raiz: Path) -> list[str]:
+    """.py bajo `raiz` (sin tests/, docs/, .git, policy/tests ni *_test.py)
+    con el literal viejo o con un default en la lectura de la variable. Solo
+    stdlib: no depende de git ni de que el checkout tenga .git."""
+    malos = []
+    for ruta in sorted(raiz.rglob("*.py")):
+        rel = ruta.relative_to(raiz)
+        partes = rel.parts
+        if partes[0] in _EXCLUIDOS or partes[:2] == ("policy", "tests"):
+            continue
+        if ruta.name.endswith("_test.py") or any(p in (".git", "__pycache__", ".venv", "venv") for p in partes):
+            continue
+        texto = ruta.read_text(encoding="utf-8", errors="replace")
+        # Con comentarios incluidos a proposito: un default que solo vive
+        # en una linea comentada igual avisa de que alguien lo estaba pensando.
+        if LITERAL_VIEJO in texto or _LLAMADA_CON_DEFAULT.search(texto):
+            malos.append(str(rel))
+    return malos
+
+
+def test_el_barrido_detecta_el_literal_viejo(tmp_path):
+    (tmp_path / "mod.py").write_text(f'RUTA = "{LITERAL_VIEJO}"\n')
+    assert _violaciones(tmp_path) == ["mod.py"]
+
+
+@pytest.mark.parametrize("llamada", [
+    'os.getenv("JAX_WORKSPACE_DIR", "/srv/jax-data/jax-workspace")',
+    "os.environ.get('JAX_WORKSPACE_DIR', '/srv/jax-data/jax-workspace')",
+    'getenv( "JAX_WORKSPACE_DIR" ,None)',
+])
+def test_el_barrido_detecta_cualquier_default(tmp_path, llamada):
+    (tmp_path / "otro.py").write_text(f"import os\nX = {llamada}\n")
+    assert _violaciones(tmp_path) == ["otro.py"]
+
+
+def test_el_barrido_no_marca_la_lectura_sin_default_ni_las_exclusiones(tmp_path):
+    (tmp_path / "ok.py").write_text('import os\nX = os.environ.get("JAX_WORKSPACE_DIR")\n')
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t.py").write_text(f'X = "{LITERAL_VIEJO}"\n')
+    (tmp_path / "a_test.py").write_text(f'X = "{LITERAL_VIEJO}"\n')
+    assert _violaciones(tmp_path) == []
+
+
+def test_literal_viejo_ni_defaults_vuelven_a_codigo_python():
+    assert _violaciones(RAIZ) == []

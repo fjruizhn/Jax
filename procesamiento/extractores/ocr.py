@@ -50,8 +50,10 @@ from pathlib import Path
 from procesamiento.resultado import Resultado
 
 try:
-    # LAS MANOS produccion (cwd=las_manos): bare, via el symlink
-    # las_manos/workspace_dir.py; jax.core no es importable ahi.
+    # Bare primero, por consistencia con los otros symlinks de las_manos/ (via
+    # las_manos/workspace_dir.py). En produccion jax.core TAMBIEN es importable
+    # (drop-in z-pythonpath.conf, PYTHONPATH=/srv/jax-prod/jax); el calificado
+    # cubre el REPL/CI con solo la raiz del repo en sys.path.
     from workspace_dir import workspace_dir
 except ImportError:
     from jax.core.workspace_dir import workspace_dir

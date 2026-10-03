@@ -156,6 +156,7 @@ def _correr_arranque_real(tmp_path: Path, *, omitir: frozenset[str] = frozenset(
     """
     credencial_plataforma = secrets.token_urlsafe(32)
     credencial_jacobs = secrets.token_urlsafe(32)
+    (tmp_path / "workspace").mkdir(exist_ok=True)  # workspace_dir() exige que exista
     entorno = {
         "HOME": os.environ.get("HOME", str(tmp_path)),
         "PATH": "/usr/bin:/bin",

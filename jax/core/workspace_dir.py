@@ -17,7 +17,11 @@ import os
 from pathlib import Path
 
 VARIABLE = "JAX_WORKSPACE_DIR"
-_PREFIJO = f"{VARIABLE} no está configurada: agrégala a /etc/jax/.env (sin valor por defecto)"
+_PREFIJO = (
+    f"{VARIABLE} no está configurada (falta, está vacía, no es absoluta o no existe): "
+    "agrégala a /etc/jax/.env; si corres a mano sin leer ese archivo, pásala en el "
+    f"entorno con `{VARIABLE}=$(sudo -n grep '^{VARIABLE}=' /etc/jax/.env | cut -d= -f2-)`"
+)
 
 
 class WorkspaceNoConfigurado(RuntimeError):
@@ -25,7 +29,8 @@ class WorkspaceNoConfigurado(RuntimeError):
 
 
 def workspace_dir() -> Path:
-    """Devuelve `Path(JAX_WORKSPACE_DIR).resolve()` o lanza WorkspaceNoConfigurado."""
+    """Devuelve `Path(JAX_WORKSPACE_DIR).resolve()` (debe existir y ser directorio)
+    o lanza WorkspaceNoConfigurado."""
     bruto = os.environ.get(VARIABLE)
     valor = (bruto or "").strip()
     if not valor:
@@ -34,4 +39,11 @@ def workspace_dir() -> Path:
         raise WorkspaceNoConfigurado(
             f"{_PREFIJO}: el valor debe ser una ruta absoluta, no {valor!r}"
         )
-    return Path(valor).resolve()
+    ruta = Path(valor).resolve()
+    # Mismo contrato que almacen.py de jax-platform: una ruta mal escrita en
+    # .env falla en vez de crear un arbol nuevo en otro lugar.
+    if not ruta.is_dir():
+        raise WorkspaceNoConfigurado(
+            f"{_PREFIJO} -- motivo: {str(ruta)!r} no existe o no es un directorio"
+        )
+    return ruta

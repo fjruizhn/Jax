@@ -10,6 +10,14 @@ después — spec `docs/superpowers/specs/2026-09-22-proyectos-y-selector-design
 2026-09-25 antes de aplicar nada: `proyectos/` es `fruiz:fruiz 775` sin ACL y
 `sudo -u jaxsvc test -w proyectos` da NO.
 
+**Correr a mano sin `/etc/jax/.env` (2026-10-03).** `JAX_WORKSPACE_DIR` ya no tiene
+valor por defecto en el código: `workspace_dir()` falla si falta, está vacía, no es
+absoluta o la ruta no existe. Un script lanzado a mano (por ejemplo
+`scripts/procesar_archivos.py`) no lee `/etc/jax/.env` solo; se la pasas en el entorno:
+
+    JAX_WORKSPACE_DIR=$(sudo -n grep '^JAX_WORKSPACE_DIR=' /etc/jax/.env | cut -d= -f2-) \
+      python3 scripts/procesar_archivos.py ...
+
 **Tercera ronda de auditoría (2026-09-25).** Las dos primeras reescrituras
 (commits 4f117a7 y e1354b2) recibieron 3+3 BLOCK, 3+0 MAJOR y 6+0 MINOR. Esta
 tercera ronda rechazó el DISEÑO de la reversión de la segunda ronda (2 BLOCK
