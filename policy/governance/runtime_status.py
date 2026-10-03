@@ -34,12 +34,13 @@ _PLATFORM_KINDS = {
     "FACET_RUNTIME_STATUS": (AdapterKind.FACET_RUNTIME_STATUS, "platform:facet-state"),
     "ENGINE_STATUS": (AdapterKind.ENGINE_STATUS, "platform:las-manos-health"),
 }
-RUNTIME_STATUS_API_VERSION = "f2-e.runtime-status.3"
-_BINDING_VERSION = "f2-e.runtime-status.3"
-_RESOLVER_VERSION = "f2-e.runtime-status-resolver.3"
+RUNTIME_STATUS_API_VERSION = "f2-e.runtime-status.4"
+_BINDING_VERSION = "f2-e.runtime-status.4"
+_RESOLVER_VERSION = "f2-e.runtime-status-resolver.4"
 _RUNTIME_SPECS = {
     "JOB_STATUS": (AdapterKind.MOTOR_JOB_STATUS, "motor:job-store", "authority:motor-registry", 60, SourceScopeClass.EXACT_RESPONSE_SCOPE, "MotorJobStatusResolver"),
     "PIPELINE_STATUS": (AdapterKind.JACOBS_PIPELINE_STATUS, "jacobs:canonical-store", "authority:jacobs", 60, SourceScopeClass.EXACT_RESPONSE_SCOPE, "JacobsPipelineStatusResolver"),
+    "STEP_STATUS": (AdapterKind.JACOBS_STEP_STATUS, "jacobs:canonical-step-store", "authority:jacobs", 60, SourceScopeClass.EXACT_RESPONSE_SCOPE, "JacobsStepStatusResolver"),
     "FACET_RUNTIME_STATUS": (AdapterKind.FACET_RUNTIME_STATUS, "platform:facet-state", "authority:jax-platform", 15, SourceScopeClass.INSTALLATION_GLOBAL, "PlatformFacetRuntimeStatusResolver"),
     "ENGINE_STATUS": (AdapterKind.ENGINE_STATUS, "platform:las-manos-health", "authority:jax-platform", 60, SourceScopeClass.INSTALLATION_GLOBAL, "PlatformEngineStatusResolver"),
     "PROCESSING_JOB_STATUS": (AdapterKind.LAS_MANOS_PROCESSING_JOB_STATUS, "las-manos:processing-job-store", "authority:las-manos", 60, SourceScopeClass.EXACT_RESPONSE_SCOPE, "ProcessingJobStatusResolver"),
@@ -76,6 +77,26 @@ def _jacobs_source_configuration(*, require_config: bool = False) -> dict[str, o
     return {"database_engine": "mariadb", "host": config["host"],
         "port": config["port"], "database": config["db"],
         "store_contract": "jacobs-pipeline-store-v1", "table": "jacobs_pipelines"}
+
+
+def _jacobs_step_source_configuration(*, require_config: bool = False) -> dict[str, object]:
+    """Bind STEP_STATUS to the joined step+owner source contract."""
+    from jacobs.store import _db_cfg
+    try:
+        config = _db_cfg()
+    except Exception:
+        if require_config:
+            raise
+        config = {"host": "unconfigured", "port": 1, "db": "unconfigured"}
+    from jacobs.models import StepStatus
+    return {
+        "database_engine": "mariadb", "host": config["host"], "port": config["port"],
+        "database": config["db"], "store_contract": "jacobs-step-owner-snapshot-v1",
+        "step_table": "jacobs_steps", "pipeline_table": "jacobs_pipelines",
+        "owner_contract": "pipeline-tenant-user-owner-ack-v1",
+        "visibility_contract": "jacobs-pipeline-visible-v1",
+        "allowed_statuses": sorted(status.value for status in StepStatus),
+    }
 
 
 def _job_store_source_configuration() -> dict[str, str]:
@@ -157,6 +178,24 @@ def runtime_status_source_configuration_digest(predicate: str, source_configurat
                 or config["source_role"] != "las-manos-processing-jobs"
                 or config["allowed_statuses"] != ["pending", "running", "cancelling", "completed", "failed", "cancelled"]):
             raise GovernanceContractError("Processing JobStore source configuration mismatch")
+    elif predicate == "STEP_STATUS":
+        from jacobs.models import StepStatus
+        config = _plain(source_configuration)
+        if (set(config) != {"database_engine", "host", "port", "database", "store_contract",
+                            "step_table", "pipeline_table", "owner_contract", "visibility_contract",
+                            "allowed_statuses"}
+                or config["database_engine"] != "mariadb"
+                or not isinstance(config["host"], str) or not config["host"]
+                or not isinstance(config["port"], int) or isinstance(config["port"], bool)
+                or not 1 <= config["port"] <= 65535
+                or not isinstance(config["database"], str) or not config["database"]
+                or config["store_contract"] != "jacobs-step-owner-snapshot-v1"
+                or config["step_table"] != "jacobs_steps"
+                or config["pipeline_table"] != "jacobs_pipelines"
+                or config["owner_contract"] != "pipeline-tenant-user-owner-ack-v1"
+                or config["visibility_contract"] != "jacobs-pipeline-visible-v1"
+                or config["allowed_statuses"] != sorted(status.value for status in StepStatus)):
+            raise GovernanceContractError("Jacobs STEP_STATUS source configuration mismatch")
     else:
         config = _plain(source_configuration)
         if (set(config) != {"database_engine", "host", "port", "database", "store_contract", "table"}
@@ -173,7 +212,7 @@ def runtime_status_source_configuration_digest(predicate: str, source_configurat
 
 def build_runtime_status_registry(scope: ResponseScope, *, authenticator,
                                   platform_source_configuration: Mapping[str, Mapping[str, object]]):
-    """Build exactly the five human-authorized F2-E entries from fixed constants."""
+    """Build exactly the six human-authorized F2-E status entries from fixed constants."""
     if not isinstance(scope, ResponseScope):
         raise GovernanceContractError("runtime registry requires ResponseScope")
     if not isinstance(platform_source_configuration, Mapping) or set(platform_source_configuration) != {"FACET_RUNTIME_STATUS", "ENGINE_STATUS"}:
@@ -181,6 +220,7 @@ def build_runtime_status_registry(scope: ResponseScope, *, authenticator,
     job_config = _job_store_source_configuration()
     processing_job_config = _processing_job_store_source_configuration()
     jacobs_config = _jacobs_source_configuration()
+    jacobs_step_config = _jacobs_step_source_configuration()
     rule = ScopeRule(scope.environment, scope.tenant_id, scope.project_id, scope.subject_id,
         scope.actor_id, scope.audience, scope.component_id)
     entries = []
@@ -188,7 +228,8 @@ def build_runtime_status_registry(scope: ResponseScope, *, authenticator,
         identity = f"policy.governance.runtime_status:{resolver_name}"
         source_config = (platform_source_configuration[predicate] if predicate in _PLATFORM_KINDS
             else job_config if predicate == "JOB_STATUS"
-            else processing_job_config if predicate == "PROCESSING_JOB_STATUS" else jacobs_config)
+            else processing_job_config if predicate == "PROCESSING_JOB_STATUS"
+            else jacobs_step_config if predicate == "STEP_STATUS" else jacobs_config)
         config_digest = runtime_status_source_configuration_digest(predicate, source_config)
         binding = PredicateAuthorityBinding(predicate, _BINDING_VERSION, source, owner,
             scope.environment, rule, rule, sla, ConflictPolicy.SINGLE_SOURCE_REQUIRED,
@@ -198,6 +239,7 @@ def build_runtime_status_registry(scope: ResponseScope, *, authenticator,
             config_digest)
         keys = (("job_id", "status") if predicate == "JOB_STATUS"
             else ("processing_job_id", "status") if predicate == "PROCESSING_JOB_STATUS"
+            else ("step_id", "status") if predicate == "STEP_STATUS"
             else ("pipeline_id", "status") if predicate == "PIPELINE_STATUS" else ("name", "status"))
         entries.append(RegistryEntry(binding, adapter, keys, f"{predicate}@{_BINDING_VERSION}:es"))
     return _build_approved_registry_for_server(tuple(entries), authenticator=authenticator)
@@ -360,6 +402,72 @@ class JacobsPipelineStatusResolver:
                 "jacobs-pipeline:source-configuration-unavailable", {})
         return _runtime_status_evidence_from_server(AdapterKind.JACOBS_PIPELINE_STATUS, obs, scope,
             runtime_status_source_configuration_digest("PIPELINE_STATUS", source_config))
+
+
+class JacobsStepStatusResolver:
+    """Resolve STEP_STATUS from one canonical step+pipeline-owner snapshot."""
+
+    async def evidence(self, arguments: Mapping[str, object], scope: ResponseScope) -> RuntimeStatusEvidence:
+        if (not isinstance(scope, ResponseScope) or scope.project_id is not None
+                or scope.subject_id is None):
+            raise GovernanceContractError("STEP_STATUS exact user scope unsupported")
+        if not isinstance(arguments, Mapping) or set(arguments) != {"step_id", "status"}:
+            raise GovernanceContractError("STEP_STATUS arguments invalid")
+        step_id, requested_status = arguments["step_id"], arguments["status"]
+        if (not isinstance(step_id, str) or not step_id
+                or not isinstance(requested_status, str)):
+            raise GovernanceContractError("STEP_STATUS arguments invalid")
+
+        from jacobs.models import PipelineStatus, StepStatus
+        try:
+            StepStatus(requested_status)
+        except ValueError:
+            raise GovernanceContractError("STEP_STATUS status is not canonical") from None
+
+        from jacobs import store as jacobs_store
+        unavailable = ResolutionObservation(ResolutionStatus.UNAVAILABLE,
+            datetime.now(timezone.utc), "jacobs-step:unavailable", {})
+        try:
+            source_config = _jacobs_step_source_configuration(require_config=True)
+        except Exception as exc:
+            logger.warning("Jacobs STEP_STATUS source configuration unavailable: %s", type(exc).__name__)
+            source_config = _jacobs_step_source_configuration()
+            observation = unavailable
+        else:
+            try:
+                snapshot = await jacobs_store.step_status_snapshot(step_id)
+            except Exception as exc:
+                logger.warning("Jacobs step authoritative snapshot unavailable: %s", type(exc).__name__)
+                snapshot = None
+
+            if snapshot is None:
+                observation = unavailable
+            else:
+                try:
+                    actual_status = StepStatus(snapshot.status).value
+                    pipeline_status = PipelineStatus(snapshot.pipeline_status)
+                    owner_is_valid = (
+                        snapshot.step_id == step_id
+                        and isinstance(snapshot.pipeline_id, str) and bool(snapshot.pipeline_id)
+                        and isinstance(snapshot.tenant_id, str) and bool(snapshot.tenant_id)
+                        and isinstance(snapshot.user_id, str) and bool(snapshot.user_id)
+                        and snapshot.owner_ack_at is not None
+                    )
+                    if (not owner_is_valid or pipeline_status in {
+                            PipelineStatus.hidden, PipelineStatus.discarded}):
+                        observation = unavailable
+                    elif (snapshot.tenant_id, snapshot.user_id) != (scope.tenant_id, scope.subject_id):
+                        observation = ResolutionObservation(ResolutionStatus.WRONG_SCOPE,
+                            snapshot.observed_at, f"jacobs-step:{step_id}", {})
+                    else:
+                        observation = ResolutionObservation(ResolutionStatus.RESOLVED,
+                            snapshot.observed_at, f"jacobs-step:{step_id}",
+                            {"step_id": step_id, "status": actual_status})
+                except (TypeError, ValueError, AttributeError):
+                    observation = unavailable
+
+        return _runtime_status_evidence_from_server(AdapterKind.JACOBS_STEP_STATUS,
+            observation, scope, runtime_status_source_configuration_digest("STEP_STATUS", source_config))
 
 def _timestamp(value):
     if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:

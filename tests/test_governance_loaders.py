@@ -50,10 +50,11 @@ def test_load_templates_happy_path_returns_real_specs():
     assert templates["FACET_EXISTS"].template is None
 
 
-def test_load_predicates_returns_original_eight_plus_three_authorized_f2e_additions():
+def test_load_predicates_returns_original_eight_plus_four_authorized_f2e_additions():
     predicates = loaders.load_predicates()
-    assert len(predicates) == 11
-    assert {"PIPELINE_STATUS", "FACET_RUNTIME_STATUS"} <= set(predicates)
+    assert len(predicates) == 12
+    assert {"PIPELINE_STATUS", "FACET_RUNTIME_STATUS", "STEP_STATUS"} <= set(predicates)
+    assert predicates["STEP_STATUS"].args == ("step_id", "status")
     assert predicates["CAPABILITY_AVAILABLE"].args == ("name", "mode")
     assert predicates["FILE_EXISTS"].args == ("path", "hash")
     assert predicates["MEMORY_ENTRY_EXISTS"].source_of_truth == "MariaDB jax_memory"

@@ -258,6 +258,11 @@ _UNIMPLEMENTED_REASONS: dict[str, str] = {
         "La única ruta acreditada es ResolverRegistry con el binding "
         "explícito del almacén canónico de Jacobs."
     ),
+    "STEP_STATUS": (
+        "STEP_STATUS: el validador legado no acredita estado actual. "
+        "La única ruta acreditada es ResolverRegistry con el binding "
+        "explícito de persistencia canónica de pasos Jacobs."
+    ),
     "FACET_RUNTIME_STATUS": (
         "FACET_RUNTIME_STATUS: el validador legado no acredita estado actual. "
         "La única ruta acreditada es ResolverRegistry con el binding "
@@ -269,6 +274,11 @@ _UNIMPLEMENTED_REASONS: dict[str, str] = {
         "explícitamente'."
     ),
 }
+
+# STEP_STATUS solo se acredita mediante el contrato F2-B ResolverRegistry.
+# El validator legado debe vetarlo incluso si alguien registra aquí por error
+# un resolver local en _RESOLVERS.
+_RESOLVER_REGISTRY_ONLY = frozenset({"STEP_STATUS"})
 
 
 def verdict_sin_grounding(
@@ -351,6 +361,13 @@ def validate(
                 f"Args esperados {sorted(spec.args)}, "
                 f"recibidos {sorted(claim.args.keys())}."
             ),
+        )
+
+    if claim.predicate in _RESOLVER_REGISTRY_ONLY:
+        return Verdict(
+            status="RESOLVER_NOT_IMPLEMENTED",
+            predicate=claim.predicate,
+            detail=_UNIMPLEMENTED_REASONS[claim.predicate],
         )
 
     resolver = _RESOLVERS.get(claim.predicate)

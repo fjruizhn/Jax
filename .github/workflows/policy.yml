@@ -1766,6 +1766,13 @@ jobs:
       - run: pip install -r requirements.txt pytest
       - name: Suite de gobernanza
         run: python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py tests/test_governed_resolution.py tests/test_governed_renderer.py -v
+      - name: F2-E-SR2 canonical STEP_STATUS source and enum drift tripwire
+        run: |
+          python -m pytest tests/test_f2e_step_status.py -q 2>&1 | tee /tmp/f2e-sr2-step
+          grep -qE "^22 passed" /tmp/f2e-sr2-step || {
+            echo "PISO ROTO: se esperaban exactamente 22 regresiones STEP_STATUS ejecutadas."; exit 1; }
+        env:
+          PYTHONPATH: .:las_manos:jax/core
       - name: F2-D lifecycle contract
         run: python -m pytest tests/test_output_lifecycle.py tests/test_governed_renderer.py -q
       - name: F2-E-SR runtime-status source integrity regressions
