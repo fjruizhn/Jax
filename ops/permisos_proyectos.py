@@ -234,14 +234,6 @@ def _getfacl(fd_path: int) -> str:
     return r.stdout
 
 
-def _setfacl(fd_path: int, entrada: str, *, default: bool = False) -> None:
-    os.set_inheritable(fd_path, True)
-    args = ["setfacl"] + (["-d"] if default else []) + ["-m", entrada, f"/proc/self/fd/{fd_path}"]
-    r = subprocess.run(args, pass_fds=(fd_path,), capture_output=True, text=True)
-    if r.returncode != 0:
-        raise ErrorPermisosProyectos(f"setfacl falló sobre el descriptor {fd_path}: {r.stderr}")
-
-
 def _setfacl_reemplazar(fd_path: int, acl_completa: str, *, default: bool = False) -> None:
     """`setfacl --set`: REEMPLAZA la ACL entera (de acceso, o la por defecto con default=True), no la modifica.
     Cualquier entrada que alguien haya agregado entre la pasada previa de --aplicar y esta mutación (jaxsvc es
@@ -551,94 +543,6 @@ def _revisar_previo_objeto(fd_path: int, ruta: str, resultado: Resultado) -> Non
         faltas = [f"no se pudo leer la ACL: {exc}"]
     if faltas:
         resultado.no_cumple.append(f"{ruta}: {'; '.join(faltas)}")
-
-
-def _solo_otros_objeto(fd_path: int, ruta: str, st: os.stat_result, *, es_dir: bool, accion: str,
-                       resultado: Resultado) -> None:
-    """Carpetas ocultas de proyectos/<proyecto>/ (estado de herramientas): SOLO se trata `otros`. `verificar`
-    marca NO CUMPLE cualquier bit de otros (modo, `other::` de acceso y, en directorios, por defecto);
-    `aplicar` y `deshacer` los quitan -- el modo conserva los bits de grupo (la máscara) y `other::`; la ACL por
-    defecto con `setfacl -d -m o::---`, que no toca el resto -- y NO cambian dueño, grupo ni ACL nombradas."""
-    if accion in ("previo", "previo-oculta"):
-        return  # las pasadas previas solo buscan hardlinks en las ocultas (ver _caminar_solo_otros)
-    try:
-        texto_acl = _getfacl(fd_path)
-    except ErrorPermisosProyectos as exc:
-        resultado.no_cumple.append(f"{ruta}: no se pudo leer la ACL: {exc}")
-        return
-    if accion == "verificar":
-        faltas = _faltas_de_otros(st, texto_acl, con_default=es_dir)
-        if faltas:
-            resultado.no_cumple.append(f"{ruta}: {'; '.join(faltas)}")
-        return
-    if st.st_mode & stat.S_IRWXO:
-        fd_real = _reabrir_real(fd_path, os.O_RDONLY)
-        try:
-            os.fchmod(fd_real, stat.S_IMODE(st.st_mode) & ~stat.S_IRWXO)
-        finally:
-            os.close(fd_real)
-    if es_dir:
-        por_defecto = _permisos_de(texto_acl, True, "other", None)
-        if por_defecto is not None and _bits(por_defecto):
-            _setfacl(fd_path, "o::---", default=True)
-
-
-def _procesar_oculta(nombre: str, dir_fd: int, ruta: str, *, accion: str, resultado: Resultado) -> None:
-    fd_path = _abrir_o_path(nombre, dir_fd)
-    if fd_path is None:
-        return
-    try:
-        st = os.fstat(fd_path)
-        if not stat.S_ISDIR(st.st_mode):  # cambió entre el listado y la apertura (p. ej. por un symlink)
-            return
-        _solo_otros_objeto(fd_path, ruta, st, es_dir=True, accion=accion, resultado=resultado)
-        try:
-            fd_listable = _reabrir_real(fd_path, os.O_RDONLY | os.O_DIRECTORY)
-        except PermissionError:
-            resultado.no_cumple.append(f"{ruta}: sin permiso para listar el contenido (EACCES)")
-            return
-        try:
-            _caminar_solo_otros(fd_listable, ruta, accion=accion, resultado=resultado)
-        finally:
-            os.close(fd_listable)
-    finally:
-        os.close(fd_path)
-
-
-def _caminar_solo_otros(dir_fd: int, ruta: str, *, accion: str, resultado: Resultado) -> None:
-    with os.scandir(dir_fd) as it:
-        entradas = list(it)
-    for entrada in entradas:
-        ruta_hija = f"{ruta}/{entrada.name}"
-        fd_path = _abrir_o_path(entrada.name, dir_fd)
-        if fd_path is None:
-            continue
-        try:
-            st = os.fstat(fd_path)
-            if stat.S_ISLNK(st.st_mode):
-                resultado.symlinks_saltados.append(ruta_hija)
-                continue
-            if stat.S_ISDIR(st.st_mode):
-                _solo_otros_objeto(fd_path, ruta_hija, st, es_dir=True, accion=accion, resultado=resultado)
-                try:
-                    fd_listable = _reabrir_real(fd_path, os.O_RDONLY | os.O_DIRECTORY)
-                except PermissionError:
-                    resultado.no_cumple.append(f"{ruta_hija}: sin permiso para listar el contenido (EACCES)")
-                    continue
-                try:
-                    _caminar_solo_otros(fd_listable, ruta_hija, accion=accion, resultado=resultado)
-                finally:
-                    os.close(fd_listable)
-            elif stat.S_ISREG(st.st_mode):
-                if st.st_nlink > 1:
-                    # Mismo criterio que en el árbol gobernado: un hardlink es EL MISMO inode que otra ruta
-                    # (quizá fuera de proyectos/): un fchmod aquí también cambiaría esa ruta. Nunca se toca;
-                    # --verificar lo marca y --aplicar/--deshacer fallan cerrado en su pasada previa.
-                    resultado.no_cumple.append(f"hardlink en carpeta oculta: {ruta_hija} (nlink={st.st_nlink})")
-                    continue
-                _solo_otros_objeto(fd_path, ruta_hija, st, es_dir=False, accion=accion, resultado=resultado)
-        finally:
-            os.close(fd_path)
 
 
 def _revisar_oculta(nombre: str, dir_fd: int, ruta: str, resultado: Resultado) -> None:

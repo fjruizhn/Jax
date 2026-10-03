@@ -1855,9 +1855,9 @@ def test_ninguna_cuenta_pierde_acceso_entre_el_chown_y_el_setfacl(arbol_temporal
 
 
 def test_el_sondeo_de_etapas_falla_si_se_parchea_la_funcion_equivocada(arbol_temporal, _identidades):
-    """Control negativo: parchear `_setfacl` (que la mutacion ya no llama) no sondea la etapa de la ACL, y la
+    """Control negativo: parchear `_sudo_n_funciona` (que la mutacion no llama) no sondea la etapa de la ACL, y la
     comprobacion de la prueba anterior lo detecta. Sin esto, un parche mal puesto pasaria en verde."""
-    etapas = [e for e, _ in _sondear_etapas(arbol_temporal, "_setfacl")]
+    etapas = [e for e, _ in _sondear_etapas(arbol_temporal, "_sudo_n_funciona")]
     assert "tras setfacl" not in etapas, etapas
     assert {"tras setfacl", "tras fchown"} - set(etapas) == {"tras setfacl"}, etapas
 
