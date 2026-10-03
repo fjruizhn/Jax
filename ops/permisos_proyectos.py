@@ -55,6 +55,7 @@
 # nunca en `proyectos/` mismo ni más profundo, y se reporta.
 from __future__ import annotations
 
+import errno
 import grp
 import hashlib
 import json
@@ -698,12 +699,21 @@ def _mirar_oculta_hijos(dir_fd: int, ruta: str, hallazgos: list[str], huellas: d
             os.close(fd_path)
 
 
-def _uids_de_status(ruta: Path) -> set | None:
-    """Los cuatro uid (real, efectivo, guardado, fs) de un `status`; None si no se pudo leer o no se entiende."""
+def _es_proceso_ya_terminado(exc: OSError) -> bool:
+    """ENOENT / ESRCH: el proceso (o el hilo) terminó entre el listado y la lectura: no hay nada que inspeccionar."""
+    return isinstance(exc, (FileNotFoundError, ProcessLookupError)) or exc.errno in (errno.ENOENT, errno.ESRCH)
+
+
+def _uids_de_status(ruta: Path, pid: str) -> set | None:
+    """Los cuatro uid (real, efectivo, guardado, fs) de un `status`. None si el proceso ya terminó (ENOENT/ESRCH) o
+    si el archivo no trae una línea `Uid:` que se entienda. CUALQUIER otro error al leerlo (PermissionError por un
+    `hidepid`, EIO...) falla cerrado: un proceso listado cuyo estado no se puede leer no se cuenta como ausente."""
     try:
         texto = ruta.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
+    except OSError as exc:
+        if _es_proceso_ya_terminado(exc):
+            return None
+        raise ErrorPermisosProyectos(f"no se pudo inspeccionar el proceso {pid}: {exc}") from exc
     for linea in texto.splitlines():
         if linea.startswith("Uid:"):
             try:
@@ -717,7 +727,8 @@ def _procesos_de_usuario(uid: int) -> list[int]:
     """Pids de los procesos con algún uid REAL, EFECTIVO, GUARDADO o de FS (los cuatro campos de `Uid:`) igual a
     `uid`, mirando el proceso (/proc/<pid>/status) Y CADA HILO (/proc/<pid>/task/<tid>/status): un hilo puede cambiar
     de uid (setuid por hilo) mientras el proceso sigue figurando con otro. Se informa el pid del proceso, una sola
-    vez. Falla cerrado si /proc no se puede leer; lo que termina entre el listado y la lectura ya no cuenta."""
+    vez. Falla cerrado si /proc no se puede listar o si el estado de un pid listado no se puede leer (salvo que el
+    proceso ya haya terminado: ENOENT/ESRCH)."""
     try:
         entradas = list(RUTA_PROC.iterdir())
     except OSError as exc:
@@ -726,16 +737,18 @@ def _procesos_de_usuario(uid: int) -> list[int]:
     for d in entradas:
         if not d.name.isdigit():
             continue
-        ids = _uids_de_status(d / "status")
+        ids = _uids_de_status(d / "status", d.name)
         if ids is not None and uid in ids:
             pids.append(int(d.name))
             continue
         try:
             hilos = list((d / "task").iterdir())
-        except OSError:
-            continue
+        except OSError as exc:
+            if _es_proceso_ya_terminado(exc):
+                continue
+            raise ErrorPermisosProyectos(f"no se pudo inspeccionar el proceso {d.name}: {exc}") from exc
         for hilo in hilos:
-            ids_hilo = _uids_de_status(hilo / "status")
+            ids_hilo = _uids_de_status(hilo / "status", d.name)
             if ids_hilo is not None and uid in ids_hilo:
                 pids.append(int(d.name))
                 break
