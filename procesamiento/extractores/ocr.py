@@ -130,12 +130,17 @@ _FIRMA_PDF = b"%PDF"
 #   (D) caso A con tamano de PAGINA          -> parcial imagen_pagina_sin_texto
 #       (posible escaneo guardado como imagen: un documento sin texto SI es
 #       un problema)
-#   danada / ilegible                        -> error   archivo_ilegible
+#   danada (firma invalida, no decodifica)  -> error   archivo_ilegible
+#   sana pero no la leemos (modo F/I, GIF/WebP animado, leptonica la rechaza)
+#                                            -> error   formato_no_soportado
+#   demasiados pixeles / paginas             -> error   imagen_demasiado_grande
 CODIGO_IMAGEN_SIN_TEXTO = "imagen_sin_texto"
 CODIGO_IMAGEN_TEXTO_DUDOSO = "imagen_texto_dudoso"
 CODIGO_IMAGEN_PAGINA_SIN_TEXTO = "imagen_pagina_sin_texto"
 CODIGO_ARCHIVO_ILEGIBLE = "archivo_ilegible"
 CODIGO_OCR_TIEMPO_EXCEDIDO = "ocr_tiempo_excedido"
+CODIGO_FORMATO_NO_SOPORTADO = "formato_no_soportado"   # sano, pero no lo leemos
+CODIGO_IMAGEN_DEMASIADO_GRANDE = "imagen_demasiado_grande"
 CODIGO_OCR_SIN_MEMORIA = "ocr_sin_memoria"   # recursos, no archivo danado
 
 # Version de la LOGICA de clasificacion de este extractor. `extractor_version`
@@ -195,10 +200,15 @@ _FIRMAS_IMAGEN = (
 MAX_PIXELES = 100_000_000
 
 # Tope POR FOTOGRAMA mas bajo para los modos de 16 bits (I;16*). MEDIDO
-# 2026-10-03 (ru_maxrss del proceso que corre `extraer`, linea base 25 MB):
-#   5000x5000 (25 Mpx): 603 MB -> en el limite del objetivo (~600 MB)
-#   4000x4000 (16 Mpx): 398 MB -> por debajo; el tope elegido
-# (el pico crece ~25 bytes por pixel; es lineal).
+# 2026-10-03 con el codigo ACTUAL (re-codificacion por rango real, sin
+# normalizar; ru_maxrss del proceso que corre `extraer`, linea base 26 MB), un
+# TIFF I;16 de 4000x4000 (16 Mpx) con texto:
+#   una pagina, rango completo (x200): 184 MB; una pagina, valores 0-255: 184 MB;
+#   dos paginas: 214 MB.
+# (Las cifras de 603 MB a 25 Mpx y 398 MB a 16 Mpx de una ronda anterior eran de
+# la normalizacion con percentiles, ya borrada: son una cota vieja y segura. El
+# tope se deja en 16 Mpx; con ~184 MB habria margen para subirlo, pero eso es
+# otra decision.)
 MAX_PIXELES_NUMERICO = 16_000_000
 
 # Tope por fotograma para los demas modos fuera de {1, L, LA, P, RGB, RGBA}
@@ -420,6 +430,10 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
                     dimensiones.append((ancho, alto))
                 if n == 1:
                     img.load()
+                    if img.mode in _MODOS_16_BITS:
+                        # leptonica toma el byte alto: se re-codifica segun el
+                        # rango real (`_a_modo_legible`), no van los originales
+                        return "tiff", dimensiones
                     return "una", dimensiones
     except Image.DecompressionBombError:
         return "demasiados_pixeles"
@@ -449,20 +463,38 @@ _MODOS_16_BITS = frozenset({"I;16", "I;16B", "I;16L", "I;16N"})
 
 def _a_modo_legible(img):
     """Fotograma decodificado -> uno que se pueda guardar como PNG para
-    tesseract: los modos de `_MODOS_PNG`, I;16 e I;16B tal cual; I;16L e I;16N
-    a I;16B por sus bytes (intercambio little -> big endian; I;16N es nativo y
-    solo se intercambia en un host little-endian); el resto (CMYK, YCbCr, LAB,
-    HSV...) a `RGB`."""
-    if img.mode in ("I;16L", "I;16N"):
+    tesseract: los modos de `_MODOS_PNG` tal cual; el resto (CMYK, YCbCr, LAB,
+    HSV...) a `RGB`; y los de 16 bits segun su RANGO REAL, sin escalar:
+
+    - maximo <= 255 (lo que produce `convert("I").convert("I;16")` de una imagen
+      de 8 bits): leptonica toma el byte ALTO de un PNG de 16 bits y la pagina
+      sale NEGRA (ok/imagen_sin_texto en silencio). Se arma un `L` con los
+      bytes BAJOS: los valores ya estan en 0-255. NO se usa `convert("L")`
+      (Pillow escala y recorta) ni `>> 8` (tambien la dejaria negra).
+    - maximo > 255 (12 bits, rango completo...): PNG de 16 bits, el camino
+      nativo. I;16L e I;16N se llevan a I;16B por sus bytes (intercambio little
+      -> big endian; I;16N es nativo y solo se intercambia en un host
+      little-endian). NO se convierten con `convert("I")`: Pillow convierte
+      mal I;16N.
+    """
+    if img.mode in _MODOS_16_BITS:
         from PIL import Image
 
-        datos = img.tobytes()
-        if img.mode == "I;16L" or sys.byteorder == "little":
-            pares = array.array("H", datos)
-            pares.byteswap()
-            datos = pares.tobytes()
-        return Image.frombytes("I;16B", img.size, datos)
-    if img.mode in _MODOS_PNG or img.mode in _MODOS_16_BITS:
+        fuente_little = img.mode in ("I;16", "I;16L") or (
+            img.mode == "I;16N" and sys.byteorder == "little")
+        valores = array.array("H", img.tobytes())          # nativo
+        if fuente_little != (sys.byteorder == "little"):
+            valores.byteswap()                              # ahora son valores nativos
+        if max(valores, default=0) <= 255:
+            crudo = valores.tobytes()
+            bajos = crudo[0::2] if sys.byteorder == "little" else crudo[1::2]
+            return Image.frombytes("L", img.size, bajos)
+        if img.mode in ("I;16", "I;16B"):
+            return img
+        if sys.byteorder == "little":
+            valores.byteswap()                              # a big-endian
+        return Image.frombytes("I;16B", img.size, valores.tobytes())
+    if img.mode in _MODOS_PNG:
         return img
     return img.convert("RGB")
 
@@ -749,11 +781,34 @@ def _detalle_comun(idioma: str, r: dict) -> dict:
     return detalle
 
 
+# Que codigo lleva cada causa. `archivo_ilegible` ("danado") SOLO si el archivo
+# esta roto: firma que no es de imagen o que Pillow no decodifica (incluye los
+# truncados). Un archivo SANO de un formato que no leemos es
+# `formato_no_soportado`; esto incluye `tesseract_no_lee`: Pillow ya lo
+# decodifico en la validacion, asi que si leptonica lo rechaza (BMP RGB565...)
+# el archivo no esta danado. Los topes de tamano son `imagen_demasiado_grande`.
+_DETALLE_FORMATO_NO_SOPORTADO = {
+    "modo_no_soportado": "modo de color F o I de 32 bits",
+    "animacion_no_soportada": "GIF o WebP animado",
+    "tesseract_no_lee": "leptonica no lo lee",
+}
+_DETALLE_DEMASIADO_GRANDE = {
+    "demasiados_pixeles": "demasiados pixeles",
+    "demasiadas_paginas": "demasiadas paginas",
+}
+
+
 def _ilegible(causa: str, idioma: str) -> Resultado:
     if causa in ("tiempo_excedido", "tiempo_por_llamada"):
         razon, codigo = "se excedio el tiempo de OCR de la imagen", CODIGO_OCR_TIEMPO_EXCEDIDO
     elif causa == "sin_memoria":
         razon, codigo = "memoria insuficiente para procesar la imagen", CODIGO_OCR_SIN_MEMORIA
+    elif causa in _DETALLE_FORMATO_NO_SOPORTADO:
+        razon = f"formato de imagen no soportado ({_DETALLE_FORMATO_NO_SOPORTADO[causa]})"
+        codigo = CODIGO_FORMATO_NO_SOPORTADO
+    elif causa in _DETALLE_DEMASIADO_GRANDE:
+        razon = f"imagen demasiado grande ({_DETALLE_DEMASIADO_GRANDE[causa]})"
+        codigo = CODIGO_IMAGEN_DEMASIADO_GRANDE
     else:
         razon, codigo = (
             "no se pudo abrir ni decodificar la imagen (archivo danado)",

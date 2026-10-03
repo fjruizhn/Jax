@@ -5374,8 +5374,14 @@ jobs:
           #   negra por la conversion de Pillow; ahora I;16L/I;16N pasan a I;16B por sus bytes.
           #   Medido LOCAL en hall9000: 136 passed (las 2 reales corren). En el runner:
           #   134 passed, 2 skipped.
-          grep -qE "^134 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 134 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 136 -> 154 (Jax#338 ronda 7): +18 -- N22: I;16 con valores 0-255 (lo que produce
+          #   convert("I").convert("I;16")) se arma como L con los bytes bajos y se lee, en una y
+          #   dos paginas, en I;16/I;16B/I;16L/I;16N, con los factores 16 y 200 de control (10);
+          #   N23: un codigo por causa -- archivo_ilegible, formato_no_soportado (incluido un BMP
+          #   RGB565 sano) e imagen_demasiado_grande (8). Medido LOCAL en hall9000: 154 passed
+          #   (las 2 reales corren). En el runner: 152 passed, 2 skipped.
+          grep -qE "^152 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 152 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
