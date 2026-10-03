@@ -3019,3 +3019,51 @@ def test_n39_una_imagen_de_un_solo_fotograma_con_transparencia_no_lleva_marca_de
     r = ocr.extraer(destino)
     assert "<!-- página" not in r.salidas["texto.txt"]
     assert r.salidas["texto.txt"] == "Total a pagar 5000"
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 14: en la union, el texto se arma desde el TSV (una sola
+# fuente para el texto, la deduplicacion, las metricas y `aportan_las_dos`)
+# ---------------------------------------------------------------------------
+
+
+def test_n40_un_homonimo_del_tsv_negro_en_otra_posicion_aparece_aunque_el_texto_plano_no_lo_repita(
+    tmp_path, monkeypatch
+):
+    """La sonda de Sol (r13): el TSV negro trae dos renglones `Total a pagar`,
+    uno en la misma caja que el de la blanca y otro en otra posicion; su texto
+    plano trae una sola linea. Con el texto plano, la deduplicacion por
+    contenido borraba el renglon de la otra posicion."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    total = [(95, "Total"), (95, "a"), (95, "pagar")]
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Total a pagar", [((20, 20, 300, 40), total)]),
+        _NEGRO: ("Total a pagar", [((20, 20, 300, 40), total), ((20, 200, 300, 40), total)]),
+    })
+    r = ocr.extraer(destino)
+    texto = r.salidas["texto.txt"]
+    assert texto.count("Total a pagar") == 2, "el renglon de la otra posicion se conserva"
+    assert r.detalle["palabras_totales"] == 6
+
+
+def test_n40_una_pasada_sin_filas_tsv_no_aporta_texto_aunque_su_texto_plano_tenga(
+    tmp_path, monkeypatch
+):
+    """La otra sonda de Sol (r13): TSV blanco VACIO con texto plano, y TSV negro
+    con 10 palabras de confianza 95. El texto de la union sale SOLO del TSV:
+    la pasada blanca no aporta nada (ni texto ni metricas), aporta una sola
+    pasada, y se aplica `_clasificar` normal -- 10 palabras confiables son
+    `ok`, con el texto del TSV negro y nada del texto plano de la blanca."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    palabras = [(95, f"palabra{i}") for i in range(10)]
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Texto plano de la blanca sin filas", []),
+        _NEGRO: ("lo que diga el texto plano no cuenta", [((20, 30, 600, 40), palabras)]),
+    })
+    r = ocr.extraer(destino)
+    assert r.estado == "ok"
+    assert r.detalle.get("codigo") is None
+    assert r.salidas["texto.txt"] == " ".join(p for _, p in palabras)
+    assert r.detalle["palabras_totales"] == 10
