@@ -475,7 +475,8 @@ def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado
 
         if profundidad == 2 and _es_carpeta_oculta_excluida(entrada):
             resultado.excluidos.append(ruta_hija)
-            _procesar_oculta(nombre, dir_fd, ruta_hija, accion=accion, resultado=resultado)
+            if accion in ("verificar", "previo", "previo-oculta"):
+                _revisar_oculta(nombre, dir_fd, ruta_hija, resultado)
             continue
 
         fd_path = _abrir_o_path(nombre, dir_fd)
@@ -636,6 +637,94 @@ def _caminar_solo_otros(dir_fd: int, ruta: str, *, accion: str, resultado: Resul
                     resultado.no_cumple.append(f"hardlink en carpeta oculta: {ruta_hija} (nlink={st.st_nlink})")
                     continue
                 _solo_otros_objeto(fd_path, ruta_hija, st, es_dir=False, accion=accion, resultado=resultado)
+        finally:
+            os.close(fd_path)
+
+
+def _revisar_oculta(nombre: str, dir_fd: int, ruta: str, resultado: Resultado) -> None:
+    """Carpetas ocultas de proyectos/<proyecto>/ (estado de herramientas): ROOT NO LAS MUTA NUNCA -- ni fchmod, ni
+    fchown, ni setfacl -- y por eso no hay carrera posible con un hardlink que `jaxsvc` enlace desde fuera. Solo se
+    MIRAN, por descriptor y sin seguir symlinks. Cualquier bit de otros (modo, `other::` de acceso o, en
+    directorios, por defecto) o hardlink es NO CUMPLE: `--verificar` lo marca y `--aplicar`/`--deshacer` fallan
+    cerrado en su pasada previa, con la orden manual que ejecuta una PERSONA."""
+    fd_path = _abrir_o_path(nombre, dir_fd)
+    if fd_path is None:
+        return
+    hallazgos: list[str] = []
+    try:
+        st = os.fstat(fd_path)
+        if not stat.S_ISDIR(st.st_mode):  # cambió entre el listado y la apertura (p. ej. por un symlink)
+            return
+        _mirar_oculta_objeto(fd_path, ruta, st, es_dir=True, hallazgos=hallazgos)
+        try:
+            fd_listable = _reabrir_real(fd_path, os.O_RDONLY | os.O_DIRECTORY)
+        except PermissionError:
+            hallazgos.append(f"{ruta}: sin permiso para listar el contenido (EACCES)")
+        else:
+            try:
+                _mirar_oculta_hijos(fd_listable, ruta, hallazgos)
+            finally:
+                os.close(fd_listable)
+    finally:
+        os.close(fd_path)
+    if hallazgos:
+        resultado.no_cumple.extend(hallazgos)
+        con_otros = any("para otros" in h for h in hallazgos)
+        con_default = any("ACL por defecto" in h for h in hallazgos)
+        con_hardlink = any("hardlink en carpeta oculta" in h for h in hallazgos)
+        ordenes = []
+        if con_otros:
+            ordenes.append(f"chmod -R o-rwx '{ruta}'")
+        if con_default:
+            ordenes.append(f"find '{ruta}' -type d -exec setfacl -d -m o::--- {{}} +")
+        if con_hardlink:
+            ordenes.append("(un hardlink no se arregla con chmod: es el mismo inode que otra ruta; ver quién lo enlaza "
+                           f"con `find / -xdev -samefile <archivo>` y quitar el enlace de '{ruta}')")
+        if ordenes:
+            resultado.no_cumple.append(
+                f"{ruta}: corregir a mano -- lo ejecuta una persona, este guion no toca las carpetas ocultas: "
+                + " ; ".join(ordenes))
+
+
+def _mirar_oculta_objeto(fd_path: int, ruta: str, st: os.stat_result, *, es_dir: bool, hallazgos: list[str]) -> None:
+    try:
+        texto_acl = _getfacl(fd_path)
+    except ErrorPermisosProyectos as exc:
+        hallazgos.append(f"{ruta}: no se pudo leer la ACL: {exc}")
+        return
+    faltas = _faltas_de_otros(st, texto_acl, con_default=es_dir)
+    if faltas:
+        hallazgos.append(f"{ruta}: {'; '.join(faltas)}")
+
+
+def _mirar_oculta_hijos(dir_fd: int, ruta: str, hallazgos: list[str]) -> None:
+    with os.scandir(dir_fd) as it:
+        entradas = list(it)
+    for entrada in entradas:
+        ruta_hija = f"{ruta}/{entrada.name}"
+        fd_path = _abrir_o_path(entrada.name, dir_fd)
+        if fd_path is None:
+            continue
+        try:
+            st = os.fstat(fd_path)
+            if stat.S_ISLNK(st.st_mode):
+                continue  # un symlink no se sigue nunca
+            if stat.S_ISDIR(st.st_mode):
+                _mirar_oculta_objeto(fd_path, ruta_hija, st, es_dir=True, hallazgos=hallazgos)
+                try:
+                    fd_listable = _reabrir_real(fd_path, os.O_RDONLY | os.O_DIRECTORY)
+                except PermissionError:
+                    hallazgos.append(f"{ruta_hija}: sin permiso para listar el contenido (EACCES)")
+                    continue
+                try:
+                    _mirar_oculta_hijos(fd_listable, ruta_hija, hallazgos)
+                finally:
+                    os.close(fd_listable)
+            elif stat.S_ISREG(st.st_mode):
+                if st.st_nlink > 1:
+                    hallazgos.append(f"hardlink en carpeta oculta: {ruta_hija} (nlink={st.st_nlink})")
+                    continue
+                _mirar_oculta_objeto(fd_path, ruta_hija, st, es_dir=False, hallazgos=hallazgos)
         finally:
             os.close(fd_path)
 
@@ -1398,7 +1487,7 @@ def _cmd_verificar(raiz: str) -> int:
     for r in resultado.symlinks_saltados:
         lineas.append(f"SYMLINK saltado (no se sigue, no se reporta como falta): {r}")
     for r in resultado.excluidos:
-        lineas.append(f"carpeta oculta (solo se revisa `otros`): {r}")
+        lineas.append(f"carpeta oculta (solo se mira `otros` y hardlinks, no se toca): {r}")
     if lineas:
         print("\n".join(lineas))
 
@@ -1476,11 +1565,17 @@ def _cmd_aplicar(raiz: str) -> int:
     for ruta in datos["symlinks_saltados"]:
         print(f"SYMLINK saltado: {ruta}")
     for ruta in datos.get("excluidos", []):
-        print(f"carpeta oculta (solo se cierra `otros`; dueño, grupo y ACL nombradas sin tocar): {ruta}")
+        print(f"carpeta oculta (este guion no la toca; solo se mira que no tenga bits de otros): {ruta}")
     print(f"Procesados: {datos['dirs_procesados']} directorios, {datos['archivos_procesados']} archivos.")
 
     if datos["hardlinks_rechazados"]:
         print("--aplicar encontró hardlinks -- no se mutaron, y el resultado es un fallo.", file=sys.stderr)
+        return 1
+    if datos.get("no_cumple"):
+        for r in datos["no_cumple"]:
+            print(f"NO CUMPLE: {r}")
+        print("--aplicar terminó con incumplimientos surgidos durante la mutación (ver arriba): no es OK.",
+              file=sys.stderr)
         return 1
 
     codigo = _cmd_verificar(str(proyectos.parent))
@@ -1509,7 +1604,7 @@ def _cmd_deshacer() -> int:
     for ruta in datos["symlinks_saltados"]:
         print(f"SYMLINK saltado, NO deshecho: {ruta}")
     for ruta in datos.get("excluidos", []):
-        print(f"carpeta oculta (solo se cierra `otros`; dueño, grupo y ACL nombradas sin tocar): {ruta}")
+        print(f"carpeta oculta (este guion no la toca; solo se mira que no tenga bits de otros): {ruta}")
     print(f"Deshechos: {datos['dirs_procesados']} directorios, {datos['archivos_procesados']} archivos.")
     raiz = datos.get("raiz", {})
     if raiz.get("restaurada"):
@@ -1519,6 +1614,12 @@ def _cmd_deshacer() -> int:
     print("AVISO: --deshacer devuelve el dueño a fruiz:fruiz pero conserva a jaxsvc (LAS MANOS sigue operando) y "
           "NUNCA reabre a otros: proyectos/ queda con other::--- (0770/0660 y ACL por defecto cerrada).")
 
+    if datos.get("no_cumple"):
+        for r in datos["no_cumple"]:
+            print(f"NO CUMPLE: {r}")
+        print("NO OK: --deshacer terminó con incumplimientos surgidos durante la mutación (ver arriba).",
+              file=sys.stderr)
+        return 1
     if raiz.get("paso_ok") is not True:
         print("NO OK: tras --deshacer, " + "; ".join(raiz.get("paso_faltas") or ["no se pudo comprobar el paso por la raíz"])
               + " -- el servicio quedó sin llegar al árbol: corregir la raíz.", file=sys.stderr)
@@ -1548,6 +1649,7 @@ def _cmd_nucleo_privilegiado() -> int:
         "hardlinks_rechazados": resultado.hardlinks_rechazados,
         "bits_espurios_quitados": resultado.bits_espurios_quitados,
         "excluidos": resultado.excluidos,
+        "no_cumple": resultado.no_cumple,
     }))
     return 0
 
@@ -1571,6 +1673,7 @@ def _cmd_nucleo_deshacer() -> int:
         "symlinks_saltados": resultado.symlinks_saltados,
         "hardlinks_rechazados": resultado.hardlinks_rechazados,
         "excluidos": resultado.excluidos,
+        "no_cumple": resultado.no_cumple,
         "raiz": {"restaurada": raiz_ok, "detalle": raiz_detalle,
                  "paso_ok": not paso_faltas, "paso_faltas": paso_faltas},
     }))

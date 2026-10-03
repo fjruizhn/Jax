@@ -691,12 +691,18 @@ def test_sin_sudo_la_raiz_por_defecto_falla_cerrado(tmp_path):
 OCULTA = ".estado-herramienta"
 
 
+def _mkdir_oculta_limpia(ruta: Path) -> None:
+    """Una carpeta oculta SIN bits de otros: 0700 y sin la ACL por defecto que hereda del arnes (`default:other::r-x`)."""
+    ruta.mkdir(mode=0o700)
+    subprocess.run(["setfacl", "-k", str(ruta)], check=True)
+
+
 def test_exclusion_solo_en_primer_nivel_de_cada_proyecto(arbol_temporal, _identidades):
     proyectos = arbol_temporal / "proyectos"
     en_la_raiz = proyectos / OCULTA
     en_la_raiz.mkdir()
     primer_nivel = proyectos / "un-proyecto" / OCULTA
-    primer_nivel.mkdir()
+    _mkdir_oculta_limpia(primer_nivel)   # limpia: las ocultas con bits de otros detienen a --aplicar (ver sus pruebas)
     mas_profundo = proyectos / "un-proyecto" / "sub" / OCULTA
     mas_profundo.mkdir()
 
@@ -719,7 +725,7 @@ def test_en_profundidad_2_se_excluye_toda_carpeta_oculta_y_solo_las_ocultas(arbo
     proyecto = arbol_temporal / "proyectos" / "un-proyecto"
     ocultas = [proyecto / ".otra-herramienta", proyecto / ".x", proyecto / "..doble"]
     for o in ocultas:
-        o.mkdir()
+        _mkdir_oculta_limpia(o)
     visible = proyecto / "estado-herramienta"          # sin punto: se gobierna
     visible.mkdir()
     archivo_oculto = proyecto / ".nota-suelta"          # archivo, no carpeta: se gobierna
@@ -753,8 +759,9 @@ def test_la_cuenta_forense_incluye_la_carpeta_oculta_porque_getfacl_la_respalda(
     excluyera, no coincidiria con el respaldo y el respaldo fallaria siempre que exista una."""
     proyecto = arbol_temporal / "proyectos" / "un-proyecto"
     oculta = proyecto / ".estado-herramienta"
-    oculta.mkdir()
+    _mkdir_oculta_limpia(oculta)
     (oculta / "dato.txt").write_text("x")
+    os.chmod(oculta / "dato.txt", 0o600)
     _recorrer_directo(arbol_temporal / "proyectos", accion="aplicar")
 
     r = subprocess.run(["sudo", "-n", "python3", "-c", f"""
