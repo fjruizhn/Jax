@@ -3039,9 +3039,10 @@ def test_n39_si_las_dos_pasadas_aportan_renglones_propios_es_como_mucho_texto_du
     assert "Total a pagar 1,500.00 Lempiras" in texto and "qwe rty uio asd fgh" in texto
 
 
-def test_n39_si_solo_una_pasada_aporta_se_clasifica_como_siempre(tmp_path, monkeypatch):
-    """Control: con una sola pasada que aporta (la otra repite su renglon en la
-    misma caja), 10 palabras confiables siguen siendo `ok`."""
+def test_n39_si_solo_una_pasada_aporta_tambien_es_como_mucho_parcial(tmp_path, monkeypatch):
+    """Ronda 16 (invariante 1): una imagen con transparencia real NUNCA sale
+    `ok`, aunque solo aporte una pasada (la otra repite su renglon en la misma
+    caja) con 10 palabras confiables. Antes de la ronda 16 esto era `ok`."""
     destino = tmp_path / "rotulo.png"
     _rotulo((0, 0, 0), "png", destino)
     palabras = [(95, f"palabra{i}") for i in range(10)]
@@ -3051,9 +3052,10 @@ def test_n39_si_solo_una_pasada_aporta_se_clasifica_como_siempre(tmp_path, monke
         _NEGRO: (plano, [((20, 30, 600, 40), palabras)]),
     })
     r = ocr.extraer(destino)
-    assert r.estado == "ok"
-    assert r.detalle.get("codigo") is None
-    assert r.salidas["texto.txt"] == plano
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    assert r.detalle["razon"] == ocr.RAZON_IMAGEN_TRANSPARENTE
+    assert r.salidas["texto.txt"] == f"{ocr.NOTA_TEXTO_DUDOSO}\n{plano}"
 
 
 def test_n39_la_version_de_la_logica_de_imagen_es_3():
@@ -3073,7 +3075,7 @@ def test_n39_una_imagen_de_un_solo_fotograma_con_transparencia_no_lleva_marca_de
     })
     r = ocr.extraer(destino)
     assert "<!-- página" not in r.salidas["texto.txt"]
-    assert r.salidas["texto.txt"] == "Total a pagar 5000"
+    assert r.salidas["texto.txt"] == f"{ocr.NOTA_TEXTO_DUDOSO}\nTotal a pagar 5000"   # parcial (ronda 16)
 
 
 # ---------------------------------------------------------------------------
@@ -3110,7 +3112,8 @@ def test_n40_una_pasada_sin_filas_tsv_y_con_texto_plano_lo_conserva_sin_verifica
     Una pasada sin renglones TSV y con texto plano aporta sus lineas tal cual
     (sin deduplicar: no hay cajas), y el resultado es como mucho
     parcial/imagen_texto_dudoso con su razon propia. Las metricas siguen
-    saliendo solo del TSV."""
+    saliendo solo del TSV. Ronda 16 (invariante 2): la linea del texto plano de
+    la NEGRA, que no esta en el texto final, tambien se agrega."""
     destino = tmp_path / "rotulo.png"
     _rotulo((0, 0, 0), "png", destino)
     palabras = [(95, f"palabra{i}") for i in range(10)]
@@ -3121,28 +3124,31 @@ def test_n40_una_pasada_sin_filas_tsv_y_con_texto_plano_lo_conserva_sin_verifica
     r = ocr.extraer(destino)
     assert r.estado == "parcial"
     assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
-    assert r.detalle["razon"] == ocr.RAZON_TEXTO_SIN_POSICION
+    assert ocr.RAZON_IMAGEN_TRANSPARENTE in r.detalle["razon"]
+    assert ocr.RAZON_TEXTO_SIN_POSICION in r.detalle["razon"]
     texto = r.salidas["texto.txt"]
     assert "Texto plano de la blanca sin filas" in texto
     assert " ".join(p for _, p in palabras) in texto
-    assert "lo que diga el texto plano no cuenta" not in texto, "la negra tiene TSV: su plano no se usa"
+    assert "lo que diga el texto plano no cuenta" in texto, "ninguna linea del texto plano se pierde"
     assert r.detalle["palabras_totales"] == 10
 
 
 def test_n41_una_pasada_sin_filas_tsv_y_sin_texto_plano_no_aporta(tmp_path, monkeypatch):
     """Control: con texto plano vacio y TSV vacio la pasada no aporta, igual
-    que en la ronda 14; aporta una sola pasada y se clasifica normal."""
+    que en la ronda 14. Ronda 16: la imagen es transparente, asi que el estado
+    es parcial, sin el motivo de "sin posicion"."""
     destino = tmp_path / "rotulo.png"
     _rotulo((0, 0, 0), "png", destino)
     palabras = [(95, f"palabra{i}") for i in range(10)]
+    plano = " ".join(p for _, p in palabras)
     _tesseract_por_fondo_con_lineas(monkeypatch, {
         _BLANCO: ("", []),
-        _NEGRO: ("lo que diga el texto plano no cuenta", [((20, 30, 600, 40), palabras)]),
+        _NEGRO: (plano, [((20, 30, 600, 40), palabras)]),
     })
     r = ocr.extraer(destino)
-    assert r.estado == "ok"
-    assert r.detalle.get("codigo") is None
-    assert r.salidas["texto.txt"] == " ".join(p for _, p in palabras)
+    assert r.estado == "parcial"
+    assert r.detalle["razon"] == ocr.RAZON_IMAGEN_TRANSPARENTE
+    assert r.salidas["texto.txt"] == f"{ocr.NOTA_TEXTO_DUDOSO}\n{plano}"
 
 
 def test_n41_texto_plano_sin_renglones_tsv_en_las_dos_pasadas_se_conserva(tmp_path, monkeypatch):
@@ -3157,7 +3163,7 @@ def test_n41_texto_plano_sin_renglones_tsv_en_las_dos_pasadas_se_conserva(tmp_pa
     r = ocr.extraer(destino)
     assert r.estado == "parcial"
     assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
-    assert r.detalle["razon"] == ocr.RAZON_TEXTO_SIN_POSICION
+    assert ocr.RAZON_TEXTO_SIN_POSICION in r.detalle["razon"]
     assert "Saldo pendiente 1000" in r.salidas["texto.txt"]
 
 
@@ -3194,3 +3200,65 @@ def test_n41_en_un_tiff_la_pagina_con_texto_plano_sin_tsv_aparece_con_su_marca(t
     assert "<!-- página 2 -->\nSaldo pendiente 1000" in texto
     assert r.estado == "parcial"
     assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 16: invariante 1 (una imagen con transparencia real NUNCA sale
+# `ok`; (A) y (D) siguen) e invariante 2 (ninguna linea del texto plano de
+# ninguna pasada se pierde)
+# ---------------------------------------------------------------------------
+
+
+def test_n42_texto_plano_con_un_tsv_insuficiente_en_las_dos_pasadas_se_conserva(tmp_path, monkeypatch):
+    """La sonda de Sol (r15): «Saldo pendiente 1000» en el texto plano y un TSV
+    con solo «X» en las dos pasadas daba ok/imagen_sin_texto: el plano se
+    descartaba porque el TSV tenia alguna fila."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Saldo pendiente 1000", [((20, 30, 40, 40), [(95, "X")])]),
+        _NEGRO: ("Saldo pendiente 1000", [((20, 30, 40, 40), [(95, "X")])]),
+    })
+    r = ocr.extraer(destino)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    assert "Saldo pendiente 1000" in r.salidas["texto.txt"]
+    assert ocr.RAZON_TEXTO_SIN_POSICION in r.detalle["razon"]
+
+
+def test_n42_ruido_que_agrega_solo_la_segunda_pasada_no_llega_a_ok(tmp_path, monkeypatch):
+    """La otra sonda de Sol (r15): 10 palabras confiables en la blanca; la
+    negra repite esas 10 en la misma caja y agrega «xyz» en otra. Daba `ok`."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    palabras = [(95, f"palabra{i}") for i in range(10)]
+    plano = " ".join(p for _, p in palabras)
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: (plano, [((20, 30, 600, 40), palabras)]),
+        _NEGRO: (plano + "\nxyz", [((20, 30, 600, 40), palabras), ((20, 200, 60, 30), [(95, "xyz")])]),
+    })
+    r = ocr.extraer(destino)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    assert "xyz" in r.salidas["texto.txt"]
+
+
+def test_n42_una_imagen_transparente_con_30_palabras_confiables_identicas_es_parcial(tmp_path, monkeypatch):
+    """Invariante 1, en general: con transparencia real el estado es como mucho
+    parcial + imagen_texto_dudoso, con la razon de la transparencia, aunque las
+    dos pasadas lean exactamente lo mismo con confianza alta."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    renglones = [((20, 20 + 50 * i, 600, 40), [(95, f"p{i}x{j}") for j in range(10)]) for i in range(3)]
+    plano = "\n".join(" ".join(p for _, p in palabras) for _, palabras in renglones)
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: (plano, renglones),
+        _NEGRO: (plano, renglones),
+    })
+    r = ocr.extraer(destino)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    assert r.detalle["razon"] == ocr.RAZON_IMAGEN_TRANSPARENTE
+    assert r.detalle["palabras_totales"] == 30
+    assert r.salidas["texto.txt"] == f"{ocr.NOTA_TEXTO_DUDOSO}\n{plano}"
