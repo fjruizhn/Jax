@@ -1891,7 +1891,11 @@ import permisos_proyectos as pp
 pp.ENTRADAS_EXTRA_PERMITIDAS = {{{_usuario_de_pruebas()!r}}}
 pp.RUTA_RESPALDOS = pp.Path(tempfile.mkdtemp(prefix="respaldos-prueba-"))
 salida = {{}}
-{codigo_extra}
+try:
+{chr(10).join("    " + l for l in codigo_extra.splitlines())}
+finally:
+    import shutil
+    shutil.rmtree(pp.RUTA_RESPALDOS, ignore_errors=True)
 print(json.dumps(salida))
 """
     r = subprocess.run(["sudo", "-n", "python3", "-c", codigo], capture_output=True, text=True, timeout=120)
@@ -1933,9 +1937,9 @@ raiz = {str(arbol_temporal)!r}
 d = pp.RUTA_RESPALDOS
 marcador = pp._MARCADOR_FIN_RESPALDO
 casos = {{
-  "otra-ruta": '# raiz-ruta: "/etc"\n# raiz-modo: 0777\n\n' + marcador,
-  "modo-invalido": '# raiz-ruta: ' + json.dumps(raiz) + '\n# raiz-modo: 9999\n\n' + marcador,
-  "sin-marcador": '# raiz-ruta: ' + json.dumps(raiz) + '\n# raiz-modo: 0777\n\n',
+  "otra-ruta": '# raiz-ruta: "/etc"\\n# raiz-modo: 0777\\n\\n' + marcador,
+  "modo-invalido": '# raiz-ruta: ' + json.dumps(raiz) + '\\n# raiz-modo: 9999\\n\\n' + marcador,
+  "sin-marcador": '# raiz-ruta: ' + json.dumps(raiz) + '\\n# raiz-modo: 0777\\n\\n',
 }}
 for nombre, texto in casos.items():
     (d / f"proyectos-{{nombre}}.acl").write_text(texto)
