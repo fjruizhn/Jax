@@ -7,8 +7,9 @@ MISMO body de OpenAI-compat por HTTP -- 'ollama' es sólo la etiqueta que usa el
 local sin credencial gestionada (mismo motivo que la faceta 'jax_local': facet_resolver
 exime de `credential` a los transportes 'ollama'/'subprocess'; pedirle una llave a un
 Ollama que no la usa sería inventar un secreto de mentira). Otro transporte →
-AuditorNoSoportado, y el arranque se niega. Error del proveedor, red caída, tope vencido
-o forma inesperada → AuditorIlegible("proveedor_fallo"): quien llama frena. La excepción
+AuditorNoSoportado, y el arranque se niega. Error del proveedor, red caída
+o forma inesperada → AuditorIlegible("proveedor_fallo"), y el plazo vencido →
+AuditorIlegible("proveedor_plazo"): quien llama frena en los dos casos. La excepción
 de origen NO se encadena: un error HTTP puede traer la llave o el cuerpo. Cliente HTTP
 compartido (E-24).
 
@@ -55,6 +56,10 @@ async def auditar(lote: A.Lote, *, faceta, max_tokens: int, tope_s: float, clien
                                headers=cabeceras, timeout=tope_s)
         r.raise_for_status()
         texto = r.json()["choices"][0]["message"]["content"]
+    except httpx.TimeoutException:
+        # Plazo vencido: distinto de "el proveedor fallo" (la cola detras del cerebro en la unica
+        # ranura de la GPU es la causa conocida). Para quien llama es lo mismo: falla cerrado.
+        raise A.AuditorIlegible("proveedor_plazo") from None
     except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
         raise A.AuditorIlegible("proveedor_fallo") from None
     return A.interpretar(lote, texto)

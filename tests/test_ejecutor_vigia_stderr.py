@@ -30,7 +30,7 @@ def _correr(guion, tmp_path, tope_s=30):
     Separarlas en dos `asyncio.run` da `Future attached to a different loop` -- que es
     un defecto del arnes, no del codigo."""
     async def escenario():
-        v = await S.abrir_vigia(str(tmp_path), "m", "mision", ["bridge"],
+        v = await S.abrir_vigia(str(tmp_path), "m", "mision", ["bridge"], cierre_s=30,
                                 argv=["python3", "-c", guion])
         # Se deja terminar al proceso ANTES de cerrar, como en produccion: el vigia
         # corre durante todo el turno y `cerrar()` llega despues. Sin esto, el SIGTERM

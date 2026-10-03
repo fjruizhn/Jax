@@ -67,11 +67,23 @@ from jax.ejecutor.contratos.registro import verificar_cadena
 
 VARIABLE_TOPE = "JAX_EJECUTOR_TURNO_TOPE_S"
 VARIABLE_ESPERA = "JAX_EJECUTOR_VIGIA_ESPERA_S"
-_CIERRE_VIGIA_S = 200  # MINOR (ronda 6): ya no hay unidad systemd de la que citar un TimeoutStopSec
-# (ejecutor-vigia@.service se retiró, ronda 5) -- el número sale de lo que el vigía hace de
-# verdad al recibir SIGTERM: audita el último lote pendiente, y auditor_cliente.auditar()
-# tiene un tope de 120 s por lote. 200 = 120 + margen para el resto del cierre (borrar el
-# latido, etc.), no un valor heredado de una unidad que nunca arrancó en producción.
+#: Cierre del vigia (MINOR ronda 6: ya no hay unidad systemd de la que citar un TimeoutStopSec). El
+#: presupuesto se DERIVA del plazo del auditor (`ejecutor.c5_tope_s`, `ConfigC5.tope_s`), no es una
+#: constante: al recibir SIGTERM el vigia audita el ultimo lote pendiente -- una llamada que puede
+#: durar casi `tope_s` -- y luego toma la huella de cierre de cada maquina. Una constante de 200 s,
+#: calculada para el viejo plazo de 120 s, mataba al vigia DENTRO de esa llamada (BLOCK-1 de la
+#: auditoria del 2026-10-03): el ultimo lote quedaba sin auditar y sin pausa.
+HUELLA_CIERRE_S = 30   # = vigia_servicio._TOPE_HUELLA_S, por maquina de la mision
+MARGEN_CIERRE_S = 60   # borrar el latido, escribir la pausa si toca, salir del proceso
+
+
+def presupuesto_cierre_s(tope_s: float, n_maquinas: int) -> float:
+    """Cuanto se espera al vigia tras el SIGTERM antes de matarlo: el peor lote pendiente (`tope_s`) +
+    la huella de cierre de cada maquina + un margen. Sin maquinas o con un plazo no positivo no hay
+    presupuesto que derivar: ValueError (falla cerrado, la mision no abre el vigia)."""
+    if not (isinstance(tope_s, (int, float)) and math.isfinite(tope_s) and tope_s > 0) or n_maquinas < 1:
+        raise ValueError("presupuesto_cierre_invalido")
+    return tope_s + HUELLA_CIERRE_S * n_maquinas + MARGEN_CIERRE_S
 
 
 class SinConfigurar(RuntimeError):
@@ -104,7 +116,8 @@ def leer_pausa(ruta) -> dict:
     paso = doc.get("paso") if isinstance(doc.get("paso"), int) and not isinstance(doc.get("paso"), bool) else None
     # `detalle` (codigo constante, p. ej. el motivo de un auditor_ilegible) solo si el vigia lo puso:
     # sin la clave, el dict sigue siendo el de siempre.
-    detalle = {"detalle": doc["detalle"]} if isinstance(doc.get("detalle"), str) else {}
+    # Solo un codigo conocido de AuditorIlegible se copia; cualquier otra cosa es `detalle_invalido`.
+    detalle = {"detalle": A.detalle_conocido(doc["detalle"])} if "detalle" in doc else {}
     return {"puesta": True, "legible": True, **texto, "paso": paso, **detalle}
 
 
@@ -137,8 +150,8 @@ async def _drenar(flujo, tope: int) -> bytes:
 
 
 class Vigia:
-    def __init__(self, proc, ruta: Path, salida=None, error=None):
-        self._proc, self._ruta = proc, ruta
+    def __init__(self, proc, ruta: Path, salida=None, error=None, *, cierre_s: float):
+        self._proc, self._ruta, self._cierre_s = proc, ruta, cierre_s
         self._salida, self._error = salida, error
 
     def vive(self) -> bool:
@@ -157,7 +170,7 @@ class Vigia:
             if self._proc.returncode is None:
                 self._proc.send_signal(signal.SIGTERM)
             try:
-                await asyncio.wait_for(self._proc.wait(), _CIERRE_VIGIA_S)
+                await asyncio.wait_for(self._proc.wait(), self._cierre_s)
             except asyncio.TimeoutError:
                 self._proc.kill()
                 await self._proc.wait()
@@ -166,7 +179,7 @@ class Vigia:
                 if tarea is None:
                     continue
                 try:
-                    trozo = await asyncio.wait_for(tarea, _CIERRE_VIGIA_S)
+                    trozo = await asyncio.wait_for(tarea, self._cierre_s)
                 except (asyncio.TimeoutError, asyncio.CancelledError):  # fail-soft: sin un flujo se sigue; el rc manda
                     tarea.cancel()
                     trozo = b""
@@ -180,7 +193,7 @@ class Vigia:
             self._ruta.unlink(missing_ok=True)
 
 
-async def abrir_vigia(directorio, id_vigia: str, texto: str, hosts, *, argv=None, tipo=None) -> Vigia:
+async def abrir_vigia(directorio, id_vigia: str, texto: str, hosts, *, cierre_s: float, argv=None, tipo=None) -> Vigia:
     # `tipo` (Tarea 12/13, ruling del coordinador): el vigía es un PROCESO APARTE
     # (`vigia_servicio._principal`) que exige los contratos antes de que el proxy sirva -- sin
     # el tipo del turno en este archivo, "codigo" queda dormido ahí aunque `arranque.py` ya lo
@@ -195,7 +208,7 @@ async def abrir_vigia(directorio, id_vigia: str, texto: str, hosts, *, argv=None
     # drenar bloquea igual sea stdout o stderr.
     return Vigia(proc, ruta,
                  asyncio.create_task(_drenar(proc.stdout, TOPE_STDOUT_VIGIA)),
-                 asyncio.create_task(_drenar(proc.stderr, TOPE_STDERR_VIGIA)))
+                 asyncio.create_task(_drenar(proc.stderr, TOPE_STDERR_VIGIA)), cierre_s=cierre_s)
 
 
 def _eventos_desde(registro: Path, desde: int) -> list:
@@ -327,7 +340,18 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
         return (await asyncio.to_thread(os.stat, ctx.registro)).st_size
 
     async def vigia(ctx, id_vigia, texto, maquinas):
-        return await abrir_vigia(env["JAX_EJECUTOR_MISIONES"], id_vigia, texto, maquinas, tipo=turno.tipo)
+        from jacobs.store import conexion
+        from jax.ejecutor.contratos import eleccion_c5
+        # El presupuesto de cierre sale del MISMO plazo que usa el auditor (cfg.tope_s): si no se
+        # puede leer, no se abre el vigia (falla cerrado).
+        async with conexion(desechable=True) as conn:
+            cfg = await eleccion_c5.leer_config(conn)
+        return await abrir_vigia(env["JAX_EJECUTOR_MISIONES"], id_vigia, texto, maquinas, tipo=turno.tipo,
+                                 cierre_s=presupuesto_cierre_s(cfg.tope_s, len(maquinas)))
+
+    async def poner_pausa(ctx, motivo):
+        # El vigia no cerro: el ultimo lote pudo quedar sin auditar. Lo estricto es frenar.
+        await asyncio.to_thread(pausa.poner_pausa, ctx.pausa, {"origen": "mision", "motivo": motivo, "paso": None})
 
     async def latido(ctx):
         return await asyncio.to_thread(pausa.latido_fresco, ctx.latido, ctx.latido_max_s)
@@ -412,7 +436,7 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
     return M.Dependencias(contexto=contexto, hosts=hosts, exigir=arranque.exigir_contratos,
                           tamano_registro=tamano_registro, abrir_vigia=vigia, latido_fresco=latido,
                           correr_cerebro=cerebro, eventos_desde=eventos, auditar=auditar, cadena_ok=cadena,
-                          leer_pausa=pausa_leida, espera_latido_s=espera_s,
+                          leer_pausa=pausa_leida, espera_latido_s=espera_s, poner_pausa=poner_pausa,
                           preparar_codigo=preparar_codigo if es_codigo else None,
                           entregar_codigo=entregar_codigo if es_codigo else None)
 

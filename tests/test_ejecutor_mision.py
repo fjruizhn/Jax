@@ -117,6 +117,8 @@ class Falsas:
         self.registro = None  # por defecto: todo anotado y con sha que cuadra
         self.revision = None
         self.auditor_revienta = False
+        self.pausas_puestas = []
+        self.poner_pausa_revienta = False
         self.auditor_ilegible = None  # codigo de AuditorIlegible a lanzar
         self.cadena = True
         self.pausa_leida = None
@@ -173,6 +175,11 @@ class Falsas:
         ids = frozenset(f"a{i + 1}" for i in range(len(entrega.respaldadas)))
         return Revision(False, None, None, (), ids, frozenset())
 
+    async def poner_pausa(self, ctx, motivo):
+        if self.poner_pausa_revienta:
+            raise OSError("sin permiso")
+        self.pausas_puestas.append(motivo)
+
     async def cadena_ok(self, ctx):
         return self.cadena
 
@@ -184,7 +191,8 @@ class Falsas:
                               tamano_registro=self.tamano_registro, abrir_vigia=self.abrir_vigia,
                               latido_fresco=self.latido_fresco, correr_cerebro=self.correr_cerebro,
                               eventos_desde=self.eventos_desde, auditar=self.auditar, cadena_ok=self.cadena_ok,
-                              leer_pausa=self.leer_pausa, espera_latido_s=0.2, paso_espera_s=0.01)
+                              leer_pausa=self.leer_pausa, espera_latido_s=0.2, paso_espera_s=0.01,
+                              poner_pausa=self.poner_pausa)
 
 
 def _correr(falsas, datos=None):
@@ -344,6 +352,41 @@ def test_un_fallo_cualquiera_del_auditor_no_vuelca_su_mensaje_a_la_bitacora():
     _, eventos = _correr(f)
     (e,) = [x for x in eventos if x["evento"] == "auditor_ilegible"]
     assert e["datos"] == {"tipo": "ValueError"}
+
+
+def test_un_vigia_que_no_cierra_pone_la_pausa_fail_closed():
+    """Visto en la auditoria del 2026-10-03: un vigia matado a SIGKILL por el plazo de cierre dejaba el
+    ultimo lote sin auditar y SIN pausa. Si no cerro, la mision frena."""
+    f = Falsas()
+    f.vigia_cierre = (-9, "", "")
+    r, eventos = _correr(f)
+    assert r["codigo"] == "vigia_no_cerro" and f.pausas_puestas == ["vigia_no_cerro"]
+    assert "pausa_puesta_por_vigia_no_cerro" in _codigos(eventos)
+
+
+def test_un_vigia_que_cierra_bien_no_pone_pausa():
+    f = Falsas()
+    _correr(f)
+    assert f.pausas_puestas == []
+
+
+def test_si_no_se_puede_poner_la_pausa_se_dice_y_el_fallo_sigue_siendo_vigia_no_cerro():
+    f = Falsas()
+    f.vigia_cierre = (1, "arranco=false", "Traceback")
+    f.poner_pausa_revienta = True
+    r, eventos = _correr(f)
+    assert r["codigo"] == "vigia_no_cerro"
+    (e,) = [x for x in eventos if x["evento"] == "pausa_no_puesta"]
+    assert e["datos"] == {"tipo": "OSError"}
+
+
+def test_un_detalle_de_pausa_desconocido_se_registra_como_invalido_sin_copiarlo():
+    f = Falsas()
+    f.pausa_leida = {"puesta": True, "legible": True, "origen": "c5", "motivo": "auditor_ilegible", "paso": None,
+                     "detalle": "sk-llave-secreta"}
+    _, eventos = _correr(f)
+    (p,) = [e for e in eventos if e["evento"] == "pausa_detectada"]
+    assert p["datos"]["detalle"] == "detalle_invalido" and "llave" not in json.dumps(eventos)
 
 
 def test_la_pausa_con_detalle_lo_lleva_a_la_bitacora():

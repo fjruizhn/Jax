@@ -25,7 +25,8 @@ def test_config_desde_filas():
                                           ("ejecutor.c5_max_tokens", "-1"),
                                           ("ejecutor.c5_tope_s", "0"), ("ejecutor.c5_tope_s", "-5"),
                                           ("ejecutor.c5_tope_s", "x"), ("ejecutor.c5_tope_s", "nan"),
-                                          ("ejecutor.c5_tope_s", "1.5"), ("ejecutor.c5_tope_s", ""),
+                                          ("ejecutor.c5_tope_s", "1.5"), ("ejecutor.c5_tope_s", "601"),
+                                          ("ejecutor.c5_tope_s", "100000"), ("ejecutor.c5_tope_s", ""),
                                           ("ejecutor.c5_auditor_admite_datos_de_clientes", "si"),
                                           ("ejecutor.c5_auditor_admite_datos_de_clientes", "True"),
                                           ("ejecutor.auditor_faceta", ""),
@@ -46,6 +47,14 @@ def test_config_sin_tope_s_es_incompleta():
     with pytest.raises(ValueError) as e:
         E.config_desde_filas({k: v for k, v in FILAS.items() if k != "ejecutor.c5_tope_s"})
     assert e.value.args == ("config_c5_incompleta", ["ejecutor.c5_tope_s"])
+
+
+def test_tope_s_acepta_el_techo_y_rechaza_uno_mas():
+    assert E.config_desde_filas({**FILAS, "ejecutor.c5_tope_s": "600"}).tope_s == 600
+    assert E.config_desde_filas({**FILAS, "ejecutor.c5_tope_s": "1"}).tope_s == 1
+    with pytest.raises(ValueError) as e:
+        E.config_desde_filas({**FILAS, "ejecutor.c5_tope_s": str(E.TOPE_S_MAX + 1)})
+    assert e.value.args[0] == "config_c5_invalida" and E.TOPE_S_MAX == 600
 
 
 def test_tope_s_esta_en_CLAVES():

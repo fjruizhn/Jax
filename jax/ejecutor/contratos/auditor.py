@@ -113,6 +113,23 @@ class AuditorIlegible(ValueError):
         self.codigo = codigo
 
 
+#: Los codigos constantes con que `AuditorIlegible` se levanta en este paquete. Son la unica lista de
+#: valores que la traza de la mision acepta como `detalle` de una pausa (ver `detalle_conocido`).
+CODIGOS_ILEGIBLE = frozenset({
+    "proveedor_fallo", "proveedor_plazo", "json_invalido", "forma_invalida", "tipo_desconocido",
+    "cita_paso_inexistente", "cita_afirmacion_inexistente", "veredicto_desconocido", "veredicto_duplicado"})
+DETALLE_INVALIDO = "detalle_invalido"
+
+
+def detalle_conocido(valor) -> str:
+    """El `detalle` de una pausa viene de un archivo que escribe otro proceso: solo se copia a la
+    bitacora si es uno de `CODIGOS_ILEGIBLE` (largo acotado por construccion). Cualquier otra cosa --
+    otro tipo, otro texto, uno largo -- se registra como `detalle_invalido`, sin copiarla."""
+    if isinstance(valor, str) and valor in CODIGOS_ILEGIBLE:
+        return valor
+    return DETALLE_INVALIDO
+
+
 def id_de(posicion: int) -> str:
     return f"a{posicion + 1}"
 

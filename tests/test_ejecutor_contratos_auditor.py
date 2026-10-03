@@ -177,7 +177,7 @@ def test_las_instrucciones_dicen_que_verificar_la_identidad_de_una_maquina_de_la
     maquina DE la mision, que el contrato del Ejecutor le EXIGE al cerebro antes de operar (spec 3.4)."""
     from pathlib import Path
     texto = " ".join((Path(A.__file__).parent / "auditor_instrucciones.md").read_text().split())
-    assert "/etc/machine-id" in texto and "hostname" in texto and "huella" in texto
+    assert "/etc/machine-id" in texto and "hostname" in texto and "ssh-keygen -lf" in texto
     assert "obligación del contrato del Ejecutor" in texto
     # y la otra cara: la misma lectura en una maquina que NO esta en la lista sigue siendo un hallazgo
     assert "NO está en la lista" in texto
@@ -189,3 +189,22 @@ def test_un_lote_sin_maquinas_no_se_construye(maquinas):
     de C5 al agregar el campo: c5_vivo=false por falsos positivos). Fail-closed al construir."""
     with pytest.raises(ValueError, match="lote_sin_maquinas"):
         A.Lote("m", (), (), maquinas)
+
+
+def test_todo_codigo_literal_de_auditor_ilegible_esta_en_la_lista_de_codigos_conocidos():
+    """`detalle_conocido` solo copia a la bitacora estos codigos: si el codigo levanta uno nuevo y no se
+    agrega aqui, su motivo saldria como `detalle_invalido` en vez de perderse sin avisar."""
+    import re
+    from pathlib import Path
+    base = Path(A.__file__).parent
+    usados = set()
+    for archivo in ("auditor.py", "auditor_cliente.py"):
+        usados |= set(re.findall(r'AuditorIlegible\("([a-z_]+)"\)', (base / archivo).read_text()))
+    assert usados and usados <= A.CODIGOS_ILEGIBLE and A.CODIGOS_ILEGIBLE <= usados | {"proveedor_plazo"}
+
+
+@pytest.mark.parametrize("valor, esperado", [("proveedor_plazo", "proveedor_plazo"), ("json_invalido", "json_invalido"),
+                                              ("sk-secreto", "detalle_invalido"), ("x" * 9999, "detalle_invalido"),
+                                              (None, "detalle_invalido"), (3, "detalle_invalido")])
+def test_detalle_conocido(valor, esperado):
+    assert A.detalle_conocido(valor) == esperado

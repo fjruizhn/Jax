@@ -207,3 +207,28 @@ def test_el_plazo_es_obligatorio_sin_valor_por_omision():
     """Un consumidor que olvide pasarlo no hereda un 120 s escrito en codigo: no corre."""
     with pytest.raises(TypeError):
         asyncio.run(AC.auditar(LOTE, faceta=FACETA, max_tokens=10))
+
+
+@pytest.mark.parametrize("error", [httpx.ReadTimeout("lento"), httpx.ConnectTimeout("lento"),
+                                   httpx.PoolTimeout("lento")])
+def test_el_plazo_vencido_es_proveedor_plazo_y_no_proveedor_fallo(error):
+    def manejar(req):
+        raise error
+
+    async def escenario():
+        async with _cliente(manejar) as cli:
+            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, cliente=cli, tope_s=1)
+    with pytest.raises(A.AuditorIlegible) as e:
+        asyncio.run(escenario())
+    assert e.value.codigo == "proveedor_plazo" and e.value.__cause__ is None
+    assert "proveedor_plazo" in A.CODIGOS_ILEGIBLE and "proveedor_fallo" in A.CODIGOS_ILEGIBLE
+
+
+def test_el_canario_trata_el_plazo_como_cualquier_ilegible_con_su_motivo():
+    import asyncio as _a
+    from jax.ejecutor.contratos import canario_c5 as C
+
+    async def auditar(lote):
+        raise A.AuditorIlegible("proveedor_plazo")
+    fallos = _a.run(C.verificar_c5(auditar, elegir=lambda o: o[0]))
+    assert fallos and all(f.codigo == "auditor_ilegible" and ("motivo", "proveedor_plazo") in f.datos for f in fallos)

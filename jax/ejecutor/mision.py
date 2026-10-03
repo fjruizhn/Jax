@@ -372,6 +372,9 @@ class Dependencias:
     leer_pausa: Callable
     espera_latido_s: float
     paso_espera_s: float = 0.5
+    #: `poner_pausa(ctx, motivo)`: si el vigia no cierra, la mision frena (el ultimo lote pudo quedar
+    #: sin auditar). Las dependencias reales siempre lo traen; None solo en pruebas de otras cosas.
+    poner_pausa: Callable | None = None
     # Misión de código: `preparar_codigo(ctx) -> Clon` y
     # `entregar_codigo(ctx, clon, entrega, auditor_legible) -> dict` (mision_codigo.entregar).
     preparar_codigo: Callable | None = None
@@ -501,12 +504,20 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
         # habia una sola linea para investigar.
         dice("vigia_cerrado", rc=rc_vigia, cerrada=cerro,
              **({} if cerro else {"stderr": err_vigia[-2000:]}))
+        if not cerro and deps.poner_pausa is not None:
+            # Fail-closed: un vigia que no cerro (muerto a SIGKILL por el plazo de cierre, rc != 0, sin la
+            # linea cerrada=true) pudo dejar el ultimo lote sin auditar y SIN pausa propia. Se frena.
+            try:
+                await deps.poner_pausa(ctx, "vigia_no_cerro")
+                dice("pausa_puesta_por_vigia_no_cerro")
+            except Exception as exc:  # fail-soft sobre la traza; la mision ya termina como fallo vigia_no_cerro
+                dice("pausa_no_puesta", tipo=type(exc).__name__)
     cadena = await deps.cadena_ok(ctx)
     pausa = await deps.leer_pausa(ctx)
     puesta = bool(pausa and pausa.get("puesta"))
     if puesta:
         dice("pausa_detectada", origen=pausa.get("origen"), motivo=pausa.get("motivo"), paso=pausa.get("paso"),
-             legible=pausa.get("legible"), **({"detalle": pausa["detalle"]} if pausa.get("detalle") else {}))
+             legible=pausa.get("legible"), **({"detalle": A.detalle_conocido(pausa["detalle"])} if "detalle" in pausa else {}))
     for condicion, cod in ((auditor_pauso, "auditor_pauso"),
                            (not registro_cuadra, "registro_no_cuadra"), (not cadena, "cadena_rota"),
                            (not cerro, "vigia_no_cerro"), (not auditor_legible, AUDITOR_ILEGIBLE),
