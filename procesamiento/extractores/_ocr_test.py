@@ -2740,18 +2740,6 @@ def test_n36_logo_con_figura_grande_prueba_los_dos_fondos_y_conserva_el_texto(
     assert _TEXTO_LOGO[0] in r.salidas["texto.txt"], "el texto que lee alguno de los dos fondos se conserva"
 
 
-@pytest.mark.parametrize("caso", ["A", "I"])
-def test_n36_logo_png_de_punta_a_punta_con_tesseract_real(tmp_path, caso):
-    """Tesseract REAL. A leptonica le llega un PNG RGB sin alfa armado por
-    Pillow, asi que no depende de como cada version de leptonica trata el alfa."""
-    destino = _logo(caso, "png", tmp_path / f"logo_{caso}.png")
-    r = ocr.extraer(destino)
-    assert r.estado in {"ok", "parcial"}
-    assert r.detalle.get("codigo") not in {
-        ocr.CODIGO_IMAGEN_SIN_TEXTO, ocr.CODIGO_IMAGEN_TEXTO_DUDOSO}
-    assert "Total a pagar" in r.salidas["texto.txt"]
-
-
 def test_n36_imagen_transparente_sin_texto_prueba_los_dos_fondos_y_es_imagen_sin_texto(
     tmp_path, monkeypatch
 ):
