@@ -247,9 +247,9 @@ _CADENAS_CLAUDE_EXENTAS = frozenset({"CLAUDE.md", "claude-code", "Claude Code"})
 # LV-001, 2026-10-03: dos excepciones POR RUTA para el paquete Faro permanente.
 # El publicador root invoca exclusivamente Git y gh para fijar el SHA oficial;
 # su _run(argv) tiene argv libre por la composición de opciones/refspec de Git.
-# La lista exacta de literales y la forma de TODOS sus call sites de _run se
-# comprueban abajo: si alguien añade un CLI de suscripción, una credencial,
-# otro literal "claude" o un argv libre procedente de fuera, vuelve a rojo.
+# El SHA256 de los bytes de cada archivo se comprueba abajo: cualquier cambio
+# de código, alias, argv o procedencia de la fixture vuelve a rojo hasta que
+# se revise y actualice la excepción explícita en el mismo PR.
 # El test del lanzador crea un qwen-auto temporal y SOLO ejecuta esa ruta fija;
 # jamás lanza el binario real de Qwen/Claude. No son excepciones generales del
 # scanner ni autorizan lanzar `claude` fuera de cli_sandbox.
@@ -264,34 +264,12 @@ _EXENTOS_FARO = {
     }),
 }
 
-# Congela los OCHO argv que llegan a `_run` en el publicador root. `ast.unparse`
-# normaliza formato pero conserva estructura; un nuevo call site, incluso
-# `_run([programa])` sin literal "claude", deja de estar exento. Cambiar esta
-# lista exige revisión explícita de la operación root y de este escáner.
-_FARO_RUN_ARGV_APROBADOS = frozenset({
-    "['gh', 'api', f'repos/{REPO_OFICIAL}', '--jq', '.default_branch']",
-    "['gh', 'api', f'repos/{REPO_OFICIAL}/git/ref/heads/{rama}', '--jq', '.object.sha']",
-    "['/usr/bin/git', '--no-replace-objects', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', 'clone', '--mirror', '--config', 'core.sshCommand=ssh -oBatchMode=yes', 'git@github.com:fjruizhn/claude-skills.git', str(MIRROR)]",
-    "[*git, 'rev-parse', '--is-bare-repository']",
-    "[*git, 'replace', '-l']",
-    "[*git, 'config', '--local', '--get-all', 'safe.directory']",
-    "[*git, '-c', 'core.sshCommand=ssh -oBatchMode=yes', 'fetch', '--prune', 'git@github.com:fjruizhn/claude-skills.git', '+refs/heads/*:refs/heads/*']",
-    "[*git, 'rev-parse', REF_FRESCURA]",
-})
-
-# El publicador conserva un helper _run(argv) con argv libre. Congelar solo
-# sus llamadas directas no cubre `runner = _run; runner([programa])`. Este
-# digest del AST COMPLETO exige revisión explícita de cualquier nuevo alias,
-# llamada o flujo de datos dentro del publicador, además de los ocho argv
-# legibles de arriba. Comentarios/formato no cambian el digest.
-_FARO_PUBLICADOR_AST_SHA256 = "69f183f6a968c450c8bf3d3fd67dd35e6e43dad6813e359105d6ef02ca9aa94f"
-
-# El test llama a un script fixture vía subprocess; congelar SOLO la forma
-# `str(script)` no garantiza que `script` siga viniendo de la fixture. El hash
-# del AST completo exige revisión de cualquier nueva asignación, función o
-# llamada en ese archivo. Se calcula con ast.dump(include_attributes=False),
-# independiente de espacios/comentarios, y se actualiza solo tras auditoría.
-_FARO_TEST_AST_SHA256 = "c48582f1563172ba8cb50f0462d1c5994fa0e6caacc672ee0055100482b3f77e"
+# Hash de FUENTE, no de ast.dump/ast.unparse: Python 3.12 y 3.14 serializan
+# distinto ciertos nodos AST. Estos bytes son invariantes entre runtimes.
+_FARO_SOURCE_SHA256 = {
+    "ops/las-voces/faro_paquete_permanente.py": "b1b30b10d829dda0d44a68b71c16ae4d6b30fa9cc8bf541455d59ea3682472f0",
+    "tests/test_las_voces_qwen_auto.py": "9daabcac807b5fa57edec6390c9d6d34fe7c2e4b2baf1f0f28edddefe3657a5c",
+}
 
 
 def _cadenas_con_claude(tree: ast.AST) -> frozenset[str]:
@@ -320,15 +298,22 @@ def _exento_faro(root: Path, path: Path, tree: ast.AST) -> bool:
         return False
     if rel not in _EXENTOS_FARO or _cadenas_con_claude(tree) != _EXENTOS_FARO[rel]:
         return False
+    try:
+        fuente = path.read_bytes()
+        if hashlib.sha256(fuente).hexdigest() != _FARO_SOURCE_SHA256[rel]:
+            return False
+        # Las autopruebas pasan árboles mutados contra la ruta real; la
+        # excepción debe negarlos aunque el archivo en disco siga intacto.
+        if ast.dump(tree) != ast.dump(ast.parse(fuente, filename=str(path))):
+            return False
+    except (OSError, SyntaxError, UnicodeError):
+        return False
     if _lanza_cli_de_suscripcion(tree) or _menciona_ruta_de_cli(tree):
         return False
     alias = _Alias(tree)
     lanzamientos = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and _nombre_lanzador(n, alias)]
     if rel == "ops/las-voces/faro_paquete_permanente.py":
-        if hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest() != _FARO_PUBLICADOR_AST_SHA256:
-            return False
-        # Un solo subprocess.run dentro de _run; todos sus call sites pasan
-        # una lista escrita en este archivo, nunca `argv` que entre de fuera.
+        # El hash de FUENTE congela TODOS los ocho call sites y los alias.
         if len(lanzamientos) != 1 or not isinstance(lanzamientos[0].func, ast.Attribute):
             return False
         if not (isinstance(lanzamientos[0].args[0], ast.Name)
@@ -336,13 +321,9 @@ def _exento_faro(root: Path, path: Path, tree: ast.AST) -> bool:
             return False
         llamadas = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                     and isinstance(n.func, ast.Name) and n.func.id == "_run"]
-        return (len(llamadas) == len(_FARO_RUN_ARGV_APROBADOS)
-                and all(n.args and isinstance(n.args[0], ast.List) for n in llamadas)
-                and {ast.unparse(n.args[0]) for n in llamadas} == _FARO_RUN_ARGV_APROBADOS)
+        return len(llamadas) == 8 and all(n.args and isinstance(n.args[0], ast.List) for n in llamadas)
     # El test usa subprocess.run únicamente con el script fixture creado por
-    # _script_con_env_de_prueba; el digest congela también su procedencia.
-    if hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest() != _FARO_TEST_AST_SHA256:
-        return False
+    # _script_con_env_de_prueba; el hash de fuente congela su procedencia.
     return bool(lanzamientos) and all(
         n.args and isinstance(n.args[0], ast.List)
         and len(n.args[0].elts) in (1, 2)
@@ -1326,6 +1307,17 @@ def test_exenciones_faro_exigen_literales_y_lanzamientos_exactos() -> None:
         # convierte en permiso por estar en un archivo exento.
         mutado = ast.parse(fuente + "\nMARCA = 'claude --danger'\n")
         assert not _exento_faro(_THIS_REPO_ROOT, ruta, mutado), rel
+
+
+def test_exenciones_faro_niegan_fuente_modificada_en_disco(tmp_path) -> None:
+    for rel in _EXENTOS_FARO:
+        original = (_THIS_REPO_ROOT / rel).read_bytes()
+        ruta = tmp_path / rel
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        ruta.write_bytes(original + b"\n# cambio futuro que exige nueva revision\n")
+        arbol = ast.parse(ruta.read_text(encoding="utf-8"))
+        assert _viola_la_politica(arbol)
+        assert not _exento_faro(tmp_path, ruta, arbol), rel
 
 
 def test_exenciones_faro_niegan_argv_libre_nuevo() -> None:
