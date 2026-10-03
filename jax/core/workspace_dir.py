@@ -7,9 +7,12 @@ sitios, un proceso que arrancara sin el `.env` escribia en silencio en otro
 lugar y partia los datos. Ahora falta la variable => excepcion con el motivo.
 
 Modulo liviano a proposito: solo stdlib, sin imports del repo, para que lo
-puedan usar LAS MANOS (que no ve el paquete `jax`; se importa por el symlink
-`las_manos/workspace_dir.py`, mismo patron que `db_connect_config.py`), los
-jacobs y el procesamiento sin arrastrar dependencias.
+puedan usar LAS MANOS, los jacobs y el procesamiento sin arrastrar
+dependencias. LAS MANOS lo importa primero por el symlink
+`las_manos/workspace_dir.py` (mismo patron que `db_connect_config.py`); en
+produccion tambien ve el paquete `jax` (el drop-in fija
+`PYTHONPATH=/srv/jax-prod/jax`), y el REPL/CI con solo la raiz del repo usa
+la ruta calificada `jax.core.workspace_dir`.
 """
 from __future__ import annotations
 
@@ -25,7 +28,8 @@ _PREFIJO = (
 
 
 class WorkspaceNoConfigurado(RuntimeError):
-    """JAX_WORKSPACE_DIR falta, esta vacia o no es una ruta absoluta."""
+    """JAX_WORKSPACE_DIR falta, esta vacia, no es una ruta absoluta, o no
+    existe / no es un directorio."""
 
 
 def workspace_dir() -> Path:
