@@ -40,7 +40,7 @@ python3 ops/permisos_proyectos.py --verificar      # tiene que dar 0
 Hacerlo desde un checkout cuyo HEAD tenga el guion commiteado (el núcleo se compara contra `git show HEAD:ops/permisos_proyectos.py`). **Requisito de `workspace-proyectos.md`:** el `fchmod(0o660)` de `tool_authority.py` tiene que estar ya en `/srv/jax-prod` (paso 3 de esta secuencia lo despliega; si no está, `--aplicar` NO se corre: ver «Aplicación en producción: BLOQUEADA» en ese runbook). Verificación: `--verificar` sale `0`; luego la **prueba real como `jaxsvc`** de ese runbook (paso 6: escritura cruzada `jaxsvc`/`fruiz` en un subdirectorio propio) en verde. Reversión: `python3 ops/permisos_proyectos.py --deshacer`.
 > **Orden.** Si el despliegue de jax (paso 3) es el que trae el `fchmod`, se hace el paso 3 antes del `--aplicar` de este paso. Los demás pasos de este runbook no dependen de ello.
 ### 3. jax a producción (LAS MANOS con `project_uuid`)
-Con el procedimiento de `docs/runbooks/despliegue.md` de jax-platform (sección jax). Reiniciar `jax-las-manos`. Verificación: un `POST /procesamiento/trabajos` con un `project_uuid` inexistente responde **422** con `proyecto_no_activo`; `systemctl is-active jax-las-manos` da `active`; `/proc/<pid>/cwd` del servicio apunta a `/srv/jax-prod/jax` (un servicio sirve desde un checkout: se verifica, no se supone).
+Con el procedimiento de `docs/runbooks/despliegue.md` de jax-platform (sección jax). Reiniciar `jax-las-manos`. Verificación: un `POST /procesamiento/trabajos` con un `project_uuid` inexistente responde **422** con `proyecto_no_activo`; `systemctl is-active jax-las-manos` da `active`; **el arreglo de la ingesta tiene que estar desplegado** (`grep -c _origen_ya_en_fuente /srv/jax-prod/jax/procesamiento/ingesta.py` da `1` o más): sin él, procesar un archivo de LACTOVI que ya vive en `fuente/sub/` lo **copiaría** a la raíz de `fuente/` (duplica datos del cliente, cambia los sha y cierra la reversión), y el paso 5 no se corre; `/proc/<pid>/cwd` del servicio apunta a `/srv/jax-prod/jax` (un servicio sirve desde un checkout: se verifica, no se supone).
 ### 4. jax-platform a producción
 Una sola vez, con los comandos de `despliegue.md`. Al arrancar, `run_migrations()` aplica la 006a y siembra las cuatro claves de `axioma_config` de la Tarea 5. Verificación (consulta propia):
 ```sql
@@ -55,7 +55,33 @@ Rutas reales: workspace `/home/fruiz/jax-workspace`, carpeta `lacteos-victoria`.
 e2a -m scripts.proyectos_e2a_lactovi --workspace /home/fruiz/jax-workspace --carpeta lacteos-victoria \
   --nombre "Lácteos Victoria" --dueno-user-id <ID> --tenant-id 1 --database jax_memory | tee $D/lactovi-ensayo.json
 ```
-Revisar: `archivos_fuente` (120), `fichas` (88), `filas_a_insertar` (una por sha256 distinto: ≤ 120; la diferencia son `duplicados_sha`), `ignorado` (debe listar `.claude-flow`, que viaja con el rename y no se registra), `fichas_sin_archivo` (idealmente vacío), `mapa_previsto`. Si algo no es lo esperado, parar.
+Revisar: `archivos_fuente` (120), `fichas` (88), `filas_a_insertar` (una por sha256 distinto: ≤ 120; la diferencia son `duplicados_sha`), `estados` (cuántas filas `listo`/`parcial`/`error`/`sin_extractor`/`en_cola`), `ignorado` (debe listar `.claude-flow`, que viaja con el rename y no se registra), `ignorados` (symlinks y no-regulares de **cualquier** nivel de `fuente/`: no se hashean ni se registran; cada uno se revisa a mano), `fichas_sin_archivo` (idealmente vacío), `mapa_previsto`. Si algo no es lo esperado, parar.
+### 5a2. Respaldo de la carpeta ANTES de moverla (sin esto no se aplica)
+El respaldo del paso 1 es de la base. La carpeta `lacteos-victoria` (datos del cliente) necesita el suyo, con restauración probada, antes del `rename`. Se usa el mismo mecanismo que `backup-hall9000.sh` (Step 5b: `restic backup --host hall9000 --one-file-system` contra `/etc/restic/local.env` y `/etc/restic/r2.env`, **como `fruiz`, nunca como root**: dejaría packs de root que el prune de `fruiz` no puede borrar), con una etiqueta propia. Un restic largo **no va en primer plano**: se lanza con `nohup` y se espera su `rc`.
+```bash
+ORIG=/home/fruiz/jax-workspace/proyectos/lacteos-victoria
+for ENV in /etc/restic/local.env /etc/restic/r2.env; do
+  [ -f "$ENV" ] || { echo "FALTA $ENV: no se aplica"; continue; }
+  N=$(basename "$ENV" .env)
+  nohup bash -c "set -euo pipefail; source '$ENV'; restic backup --tag e2a-lactovi-pre --host hall9000 --one-file-system '$ORIG'" \
+    > "$D/restic-pre-$N.log" 2>&1 ; echo "$N rc=$?" | tee -a "$D/restic-pre.rc"
+done
+```
+Los dos repos son obligatorios si existen los dos `.env`. Cada `rc` tiene que ser `0` (con `3` hubo snapshot pero algún archivo no se leyó: no se sigue hasta saber cuál). Después, **por cada repo**, restaurar a una ruta aparte y comparar `sha256` contra el original:
+```bash
+for ENV in /etc/restic/local.env /etc/restic/r2.env; do
+  [ -f "$ENV" ] || continue; N=$(basename "$ENV" .env); T="$D/restauracion-pre-$N"; rm -rf "$T"
+  ( set -euo pipefail; source "$ENV"
+    ID=$(restic snapshots --json --tag e2a-lactovi-pre --host hall9000 --latest 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)[-1]["short_id"])')
+    echo "$N snapshot $ID"
+    restic restore "$ID" --target "$T" --include "$ORIG" )
+  R="$T$ORIG"
+  diff <(cd "$ORIG" && find . -type f -print0 | sort -z | xargs -0 sha256sum) \
+       <(cd "$R"    && find . -type f -print0 | sort -z | xargs -0 sha256sum) && echo "$N: sha256 IGUALES"
+  diff <(cd "$ORIG" && find . -type l -printf '%p -> %l\n' | sort) <(cd "$R" && find . -type l -printf '%p -> %l\n' | sort) && echo "$N: symlinks IGUALES"
+done
+```
+**Verificación:** los dos `diff` salen vacíos (`sha256 IGUALES` y `symlinks IGUALES`) para cada repo. Cualquier diferencia: **no se corre 5b**; se escala a Fernando. Borrar las rutas `restauracion-pre-*` al terminar (solo esas). El hash de `fuente/` de «antes» que pide la verificación de 5b se anota aquí.
 ```bash
 # 5b. Aplicar (con ventana abierta: bin/ventana estado)
 e2a -m scripts.proyectos_e2a_lactovi --workspace /home/fruiz/jax-workspace --carpeta lacteos-victoria \
@@ -63,8 +89,22 @@ e2a -m scripts.proyectos_e2a_lactovi --workspace /home/fruiz/jax-workspace --car
   --aplicar --confirmo-produccion | tee $D/lactovi-aplicar.json
 cp /home/fruiz/jax-workspace/proyectos/.e2a-lactovi-*.json $D/     # el mapa de reversión, a salvo
 ```
-Los archivos sin ficha entran como `en_cola` con `ruta_entrada = proyectos/<uuid>/fuente/<ruta>`: el despachador de la plataforma los manda a procesar y la ingesta reconoce el mismo contenido ya presente en `fuente/`, sin duplicarlo.
-Códigos de salida: `0` hecho; `1` el mapa o el destino ya existen, el proyecto no está ACTIVO, o falló el registro (se deshizo el rename, el proyecto queda creado y ACTIVO; se revisa antes de reintentar); `2` argumentos, guarda de producción o carpeta que no existe (p. ej. **ya se movió**: no crea otro proyecto); `3` los `sha256` no cuadran tras mover (se deshizo el rename); `5` error no previsto: **no reintentar sin revisar**; `6` (solo `--revertir`) el mapa no cuadra con la base.
+Los archivos sin ficha de un tipo que se extrae (`pdf xlsx xls docx png jpg jpeg tif tiff csv txt md`) entran como `en_cola` con `ruta_entrada = proyectos/<uuid>/fuente/<ruta>`: el despachador de la plataforma los manda a procesar y la ingesta, al ver que el archivo **ya está dentro de `fuente/`**, lo procesa en el lugar sin copiarlo (arreglo `_origen_ya_en_fuente`, paso 3). Los de otro tipo entran como `sin_extractor`, sin `ruta_entrada`. **Comprobación tras el despacho:** `find /home/fruiz/jax-workspace/proyectos/<uuid>/fuente -type f | wc -l` sigue siendo el de antes (120): si crece, hay copias y se detiene el despachador.
+Códigos de salida: `0` hecho; `1` el mapa o el destino ya existen, el proyecto no está ACTIVO, o falló el registro (se deshizo el rename, el proyecto queda creado y ACTIVO; se revisa antes de reintentar); `2` argumentos, guarda de producción o carpeta que no existe (p. ej. **ya se movió**: no crea otro proyecto); `3` los `sha256` no cuadran tras mover (se deshizo el rename); `4` el commit de las filas tiene desenlace desconocido (**el disco no se tocó**: verificar las filas y, si faltan, `--completar`); `5` error no previsto: **no reintentar sin revisar**; `6` (`--revertir`/`--completar`) el mapa no cuadra con la base; `7` (`--revertir`) hay trabajos `pendiente`/`procesando`.
+
+**Qué hacer en cada corte** (el disco y la base se miran antes de cualquier reintento):
+
+| Dónde se cortó | Estado que queda | Qué hacer |
+|---|---|---|
+| Tras `create_project`, antes del mapa | proyecto ACTIVO, carpeta sin mover, sin mapa | Volver a correr `--aplicar` (misma llave: reutiliza el proyecto) |
+| Mapa escrito, `rename` falló o no ocurrió | mapa existe, carpeta en su sitio | Renombrar el mapa (`mv .e2a-lactovi-<fecha>.json mapa-corte.json`; nunca se pisa) y volver a `--aplicar` |
+| Tras el `rename`, antes de las filas (corte del proceso) | carpeta en `<uuid>`, sin filas | `--completar <mapa>` (verifica `sha256` contra el mapa y registra lo que falte) |
+| Commit de las filas incierto (código 4) | carpeta en `<uuid>`, filas quizá | Contar filas (`SELECT COUNT(*)`); si faltan, `--completar` (idempotente) |
+| Fallo al registrar con error previo al commit (código 1) | el guion devolvió la carpeta | Renombrar el mapa y volver a `--aplicar` |
+| `--revertir` cortado antes del commit | nada cambió o se deshizo solo | Repetir `--revertir` |
+| `--revertir` cortado en el archivado | carpeta devuelta, sin filas, proyecto ACTIVO | Repetir `--revertir`: detecta la carpeta ya devuelta y solo archiva |
+
+Tras un `--revertir` el proyecto queda ARCHIVADO: para volver a aplicar hay que restaurarlo (`RESTORE_PROJECT`, ARCHIVED → ACTIVE) desde la plataforma y renombrar el mapa viejo; `--aplicar` se niega con ese mensaje si no.
 **Verificación independiente** (no con la salida del guion):
 ```sql
 SELECT estado, COUNT(*) FROM project_documents WHERE project_id = <project_id> GROUP BY estado;
@@ -77,11 +117,15 @@ ls -d /home/fruiz/jax-workspace/proyectos/lacteos-victoria 2>&1   # ya no existe
 cd /home/fruiz/jax-workspace/proyectos/<uuid>/fuente && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum
 ```
 Y el último hash se compara con el mismo cálculo hecho en el paso de «antes» sobre la carpeta vieja (anotarlo antes de 5b). La pestaña Documentos de LACTOVI en la plataforma tiene que listar los documentos.
-**Reversión** (solo antes de que la plataforma reciba subidas a LACTOVI; si no, los `sha256` no cuadran y sale `3` sin tocar nada):
+**Reversión** (solo antes de que la plataforma reciba subidas a LACTOVI; si no, los `sha256` no cuadran y sale `3` sin tocar nada). **Primero se detiene el despachador** (vive en jax-platform): con trabajos en vuelo, la ingesta recrearía `proyectos/<uuid>/fuente/` después de devolver la carpeta y la dejaría partida. El guion se niega (código 7) si alguna fila está `pendiente` o `procesando`, pero eso no sustituye detener el servicio:
 ```bash
+sudo systemctl stop jax-platform
+systemctl is-active jax-platform          # tiene que decir inactive
+# consulta propia: tiene que dar 0
+SELECT COUNT(*) FROM project_documents WHERE project_id = <project_id> AND estado IN ('pendiente','procesando');
 e2a -m scripts.proyectos_e2a_lactovi --revertir $D/.e2a-lactovi-<fecha>.json --database jax_memory --confirmo-produccion
 ```
-Borra las filas de `project_documents`, devuelve la carpeta a `lacteos-victoria` verificando `sha256`, y deja el proyecto **ARCHIVADO** (no se borra: Destruir no existe).
+Borra las filas de `project_documents`, devuelve la carpeta a `lacteos-victoria` verificando `sha256`, y deja el proyecto **ARCHIVADO** (no se borra: Destruir no existe). Verificar: la carpeta vieja existe y `<uuid>` no; 0 filas; alcance ARCHIVED. Es reintentable. Después, `sudo systemctl start jax-platform`.
 ### 6. Restauración probada de `proyectos/` con la ruta nueva
 **Sin esto, la subida no se anuncia como disponible.** Esperar el snapshot de restic posterior al traslado (o lanzar uno con el procedimiento de respaldo vigente; un restic largo nunca en primer plano), restaurar solo `proyectos/<uuid>/` a una ruta aparte (`restic restore <snapshot> --target /tmp/e2a-restauracion --include /home/fruiz/jax-workspace/proyectos/<uuid>`), y comparar el `sha256` de cada archivo de `fuente/` contra el `sha256` de las fichas/`project_documents`. Cualquier diferencia o archivo ausente: la subida NO se anuncia y se escala a Fernando. Borrar la ruta de ensayo al terminar.
 ### 7. Prueba de humo
