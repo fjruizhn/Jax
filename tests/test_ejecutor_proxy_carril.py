@@ -902,6 +902,13 @@ def test_bloque_de_servidor_en_messages_da_403_y_no_llega(tmp_path, pensamiento,
     {"type": "text", "text": "x"}, {"type": "tool_use", "id": "t", "name": "Bash", "input": {}},
     {"type": "tool_result", "tool_use_id": "t", "content": "ok"}, {"type": "thinking", "thinking": "t"},
     {"type": "image", "source": {}}, {"type": 7}, {"text": "sin type"},
+    # Bloques que Claude Code puede mandar de verdad y NO son de servidor (no deben dar 403).
+    {"type": "redacted_thinking", "data": "EuYBCkQYAiJA"},
+    {"type": "document", "title": "d", "source": {"type": "text", "media_type": "text/plain", "data": "x"}},
+    {"type": "search_result", "source": "https://x.invalid/a", "title": "t",
+     "content": [{"type": "text", "text": "x"}]},
+    {"type": "tool_reference", "tool_name": "Bash"},
+    {"type": "compaction", "content": "resumen de la conversacion"},
 ])
 def test_bloques_normales_en_messages_pasan(tmp_path, bloque):
     cuerpo = _pedido(messages=[{"role": "user", "content": [bloque]}])
@@ -927,7 +934,8 @@ def test_output_config_es_campo_conocido_y_su_variante_da_pedido_ambiguo(tmp_pat
 
 def test_campos_conocidos_cubren_el_messagesrequest_de_ollama_0_34_3():
     from jax.ejecutor.contratos import lectura
-    # Etiquetas json de MessagesRequest (anthropic.go:68-83) + las que lee su binario.
+    # Las 14 etiquetas json del struct MessagesRequest de Ollama v0.34.3 (anthropic.go:68-83),
+    # escritas a mano: este test NO detecta un campo nuevo de una versión futura.
     go = {"model", "max_tokens", "messages", "system", "stream", "temperature", "top_p", "top_k",
           "stop_sequences", "tools", "tool_choice", "thinking", "metadata", "output_config"}
     assert go <= lectura.CAMPOS_CONOCIDOS
