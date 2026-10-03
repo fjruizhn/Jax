@@ -1905,6 +1905,13 @@ def _bloques_bash(texto: str) -> list[str]:
     return re.findall(r"```bash\n(.*?)```", texto, re.S)
 
 
+def test_la_receta_manual_de_las_ocultas_usa_una_variable_y_no_se_pega_la_ruta():
+    texto = RUNBOOK_E2A.read_text()
+    assert 'OCULTA="${OCULTA:?' in texto and 'chmod -R o-rwx -- "$OCULTA"' in texto
+    assert "no se retipea" in texto.lower() or "no la retipees" in texto.lower() or "no retipear" in texto.lower()
+    assert 'chmod -R o-rwx "<ruta' not in texto
+
+
 def test_el_runbook_no_da_acceso_temporal_a_nadie_ni_usa_test_como_prueba_de_permisos():
     texto = RUNBOOK_E2A.read_text()
     assert "u:nobody" not in texto and "centinela" not in texto.lower() and "trap " not in texto
@@ -1915,7 +1922,7 @@ def test_los_bloques_del_runbook_de_permisos_son_sintacticamente_validos_con_set
     texto = RUNBOOK_E2A.read_text()
     inicio = texto.index("### 2. Permisos de `proyectos/`")
     fin = texto.index("### 3. jax a producción")
-    bloques = [b for b in _bloques_bash(texto[inicio:fin]) if "<<'" in b or "stat -c" in b]
+    bloques = [b for b in _bloques_bash(texto[inicio:fin]) if "<<'" in b or "stat -c" in b or "OCULTA" in b]
     assert bloques, "no hay bloques de verificación en el paso 2"
     for b in bloques:
         assert "set -euo pipefail" in b, f"bloque sin set -euo pipefail:\n{b}"
@@ -2288,6 +2295,142 @@ salida["resultados"] = resultados
         assert r["rc"] == 1, (accion, r)
         assert "falta-sintetica" in r["stdout"] + r["stderr"], (accion, r)
         assert "OK: deshecho" not in r["stdout"] and "aplicado y verificado" not in r["stdout"], (accion, r)
+
+
+# --- ronda 8: nlink antes de cada mutacion, comillas de las ordenes manuales, arbol a medio aplicar -----------
+
+def _ciclo_nucleo_cliente(proyectos: Path, raiz: Path, accion: str, preparar: str) -> dict:
+    """Corre el NUCLEO (`_cmd_nucleo_privilegiado` o `_cmd_nucleo_deshacer`) como root con `preparar` ya aplicado
+    (monkeypatches de `pp`), y despues el CLIENTE (`_cmd_aplicar` o `_cmd_deshacer`) con un `_invocar_nucleo` falso
+    que devuelve lo que el nucleo dijo (rc y stdout). Devuelve el JSON del nucleo y rc/stdout/stderr del cliente."""
+    cliente_aplicar = f"""
+pp._verificar_instalacion = lambda: None
+pp._sudo_n_funciona = lambda: True
+pp._raiz_por_defecto = lambda: {str(raiz)!r}
+pp._hacer_respaldo = lambda: pp.Path("/dev/null")
+pp._validar_y_obtener_proyectos = lambda r: proy
+pp._cmd_verificar = lambda r: 0
+cliente = lambda: pp._cmd_aplicar({str(raiz)!r})
+""" if accion == "aplicar" else "cliente = pp._cmd_deshacer\n"
+    nucleo = "pp._cmd_nucleo_privilegiado" if accion == "aplicar" else "pp._cmd_nucleo_deshacer"
+    return _driver_respaldo(f"""
+proy = pp.Path({str(proyectos)!r})
+pp._generar_respaldo_validado(proy)
+pp._raiz_configurada_privilegiada = lambda: proy
+import io, contextlib, subprocess
+{preparar}
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc_nucleo = {nucleo}()
+texto = buf.getvalue()
+{cliente_aplicar}
+pp._invocar_nucleo = lambda *a: subprocess.CompletedProcess(a, rc_nucleo, stdout=texto, stderr="")
+sal, err = io.StringIO(), io.StringIO()
+try:
+    with contextlib.redirect_stdout(sal), contextlib.redirect_stderr(err):
+        rc = cliente()
+except pp.ErrorPermisosProyectos as exc:
+    rc = "error:" + str(exc)
+salida["rc_nucleo"] = rc_nucleo
+try:
+    salida["json"] = json.loads(texto)
+except ValueError:
+    salida["json"] = None
+salida["texto"] = texto
+salida["rc"] = rc
+salida["stdout"], salida["stderr"] = sal.getvalue(), err.getvalue()
+""")
+
+
+@pytest.mark.parametrize("accion", ["aplicar", "deshacer"])
+def test_un_hardlink_creado_entre_la_acl_y_el_chown_no_se_muta_y_se_anota(arbol_temporal, _identidades, accion):
+    """Justo antes de CADA mutacion sobre un archivo (setfacl, fchown, fchmod) se vuelve a mirar st_nlink sobre el
+    descriptor. Con un gancho que crea el enlace ENTRE la mutacion de la ACL y el fchown, el objeto queda anotado en
+    no_cumple (no se hace el chown ni el chmod) y el cliente sale con 1 sin decir OK."""
+    proyectos = arbol_temporal / "proyectos"
+    archivo = proyectos / "un-proyecto" / "archivo.txt"
+    enlace = arbol_temporal.parent / "enlace-hacia-fuera"
+    if accion == "deshacer":
+        assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    dueno_antes = archivo.stat().st_uid
+    modo_antes = archivo.stat().st_mode & 0o7777
+    preparar = f"""
+_set = pp._setfacl_reemplazar
+estado = {{"hecho": False}}
+def con_enlace(fd, acl, **k):
+    _set(fd, acl, **k)
+    if not estado["hecho"] and os.fstat(fd).st_ino == {archivo.stat().st_ino}:
+        estado["hecho"] = True
+        os.link({str(archivo)!r}, {str(enlace)!r})
+pp._setfacl_reemplazar = con_enlace
+"""
+    out = _ciclo_nucleo_cliente(proyectos, arbol_temporal, accion, preparar)
+    assert enlace.exists() and archivo.stat().st_nlink == 2, "el gancho no creó el enlace: la prueba no probó nada"
+    assert any("hardlink" in l and str(archivo) in l for l in (out["json"] or {}).get("no_cumple", [])), out
+    assert archivo.stat().st_uid == dueno_antes, "se hizo el fchown sobre un inode que ya tenia otro enlace"
+    if accion == "aplicar":
+        assert archivo.stat().st_mode & 0o7777 == modo_antes, "se hizo el fchmod pese al enlace"
+    assert out["rc"] == 1, out
+    assert str(archivo) in out["stdout"] + out["stderr"]
+    assert "OK: deshecho" not in out["stdout"] and "aplicado y verificado" not in out["stdout"], out
+
+
+def test_las_ordenes_manuales_citan_la_ruta_con_shlex_quote(arbol_temporal, _identidades):
+    """La orden manual que el guion imprime la copia y ejecuta una persona (quiza como root): el nombre de una oculta
+    lo controla quien la crea. Con `'` y `$(...)` en el nombre, la orden impresa pasada por shlex.split da la ruta
+    exacta como UN solo argumento."""
+    import shlex
+    proyectos = arbol_temporal / "proyectos"
+    assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+    nombre = ".es'tado$(touch pwned)`id`; rm -rf x"
+    oculta = proyectos / "un-proyecto" / nombre
+    r = subprocess.run(["sudo", "-n", "-u", "jaxsvc", "python3", "-c",
+                        f"import os; os.mkdir({str(oculta)!r}); os.chmod({str(oculta)!r}, 0o777)"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    _setfacl_root("-d", "-m", "o::r-x", str(oculta))
+
+    datos = _recorrer_directo(proyectos, accion="aplicar", puede_fallar=True, conceder_al_terminar=False)
+    assert "error" in datos, datos
+    linea = next(l for l in datos["error"].splitlines() if "corregir a mano" in l)
+    tokens = shlex.split(linea.split("este guion no toca las carpetas ocultas:", 1)[1])
+    i = tokens.index("chmod")
+    assert tokens[i:i + 5] == ["chmod", "-R", "o-rwx", "--", str(oculta)], tokens
+    j = tokens.index("find")
+    assert tokens[j + 1] == str(oculta), tokens
+    assert not (oculta.parent / "pwned").exists()
+
+
+def test_el_nucleo_que_falla_a_medio_aplicar_lo_dice_y_el_cliente_sale_con_1(arbol_temporal, _identidades):
+    """Si el nucleo falla DESPUES de empezar a mutar (aqui: setfacl en el tercer objeto), el JSON lleva
+    `a_medio_aplicar: true`, la ultima ruta y la instruccion; el cliente la imprime y sale con 1. Lo mismo para
+    --deshacer. Antes: un rc de error generico sin decir que parte del arbol ya habia cambiado."""
+    proyectos = arbol_temporal / "proyectos"
+    preparar = """
+_set = pp._setfacl_reemplazar
+vistos = []
+def falla_en_el_tercero(fd, acl, **k):
+    ino = os.fstat(fd).st_ino
+    if ino not in vistos:
+        vistos.append(ino)
+    if len(vistos) == 3 and ino == vistos[2]:
+        raise pp.ErrorPermisosProyectos("setfacl falló (simulado en el tercer objeto)")
+    return _set(fd, acl, **k)
+pp._setfacl_reemplazar = falla_en_el_tercero
+"""
+    for accion in ("aplicar", "deshacer"):
+        if accion == "deshacer":
+            # el arbol tiene que estar aplicado para que --deshacer tenga que mutar algo
+            assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
+        out = _ciclo_nucleo_cliente(proyectos, arbol_temporal, accion, preparar)
+        datos = out["json"]
+        assert datos and datos.get("a_medio_aplicar") is True, (accion, out)
+        assert datos["ultima_ruta"].startswith(str(proyectos)), (accion, datos)
+        assert "parcialmente" in datos["instruccion"] and f"--{accion} es idempotente" in datos["instruccion"], datos
+        assert "corregí la causa y volvé a correrlo" in datos["instruccion"], datos
+        assert out["rc"] == 1, (accion, out)
+        salida = out["stdout"] + out["stderr"]
+        assert datos["ultima_ruta"] in salida and "parcialmente" in salida, (accion, salida)
 
 
 # --- MAJOR-1: la raiz se abre por descriptor, sin seguir symlinks ------------------------------
