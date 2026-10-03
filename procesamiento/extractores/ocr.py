@@ -43,9 +43,11 @@ nada), y cada una se muta por separado.
 """
 from __future__ import annotations
 
+import array
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import warnings
@@ -437,15 +439,29 @@ _MODOS_PNG = frozenset({"1", "L", "LA", "P", "RGB", "RGBA"})
 _MODOS_NO_SOPORTADOS = frozenset({"F", "I"})
 
 # 16 bits: leptonica los lee de forma NATIVA (medido), asi que van sin
-# normalizar; al re-codificar a PNG (camino multipagina) se guardan como PNG de
-# 16 bits o, si PNG no admite el modo, con un desplazamiento lineal `>> 8` a L.
+# normalizar ni escalar; al re-codificar a PNG (camino multipagina) se guardan
+# como PNG de 16 bits. PNG solo admite I;16 e I;16B: I;16L e I;16N se llevan a
+# I;16B de forma EXPLICITA por sus bytes (`_a_modo_legible`). NO se convierten
+# con `convert("I")`: Pillow convierte mal I;16N (extremos 0-255 sobre datos de
+# 0-51000) y la pagina salia negra -> imagen_sin_texto en silencio.
 _MODOS_16_BITS = frozenset({"I;16", "I;16B", "I;16L", "I;16N"})
 
 
 def _a_modo_legible(img):
     """Fotograma decodificado -> uno que se pueda guardar como PNG para
-    tesseract: los modos de `_MODOS_PNG` y los de 16 bits tal cual; el resto
-    (CMYK, YCbCr, LAB, HSV...) a `RGB`."""
+    tesseract: los modos de `_MODOS_PNG`, I;16 e I;16B tal cual; I;16L e I;16N
+    a I;16B por sus bytes (intercambio little -> big endian; I;16N es nativo y
+    solo se intercambia en un host little-endian); el resto (CMYK, YCbCr, LAB,
+    HSV...) a `RGB`."""
+    if img.mode in ("I;16L", "I;16N"):
+        from PIL import Image
+
+        datos = img.tobytes()
+        if img.mode == "I;16L" or sys.byteorder == "little":
+            pares = array.array("H", datos)
+            pares.byteswap()
+            datos = pares.tobytes()
+        return Image.frombytes("I;16B", img.size, datos)
     if img.mode in _MODOS_PNG or img.mode in _MODOS_16_BITS:
         return img
     return img.convert("RGB")
@@ -455,12 +471,7 @@ def _a_png(cuadro) -> bytes:
     from io import BytesIO
 
     salida = BytesIO()
-    try:
-        cuadro.save(salida, format="PNG")
-    except OSError:  # PNG no admite I;16L / I;16N: `>> 8` lineal a L, sin percentiles
-        cuadro = cuadro.convert("I").point(lambda v: v * (1 / 256)).convert("L")
-        salida = BytesIO()
-        cuadro.save(salida, format="PNG")
+    cuadro.save(salida, format="PNG")
     return salida.getvalue()
 
 

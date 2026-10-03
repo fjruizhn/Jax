@@ -5369,8 +5369,13 @@ jobs:
           #   otros modos y CMYK de dos paginas: 2; %PDF desplazado solo con .pdf: 1, y nota.txt/
           #   datos.csv/correo.eml que lo mencionan siguen en sin_extractor: 3). Medido LOCAL en
           #   hall9000: 130 passed (las 2 reales corren). En el runner: 128 passed, 2 skipped.
-          grep -qE "^128 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 128 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 130 -> 136 (Jax#338 ronda 6, cierre): +6 -- I;16L e I;16N con TEXTO real (una pagina,
+          #   dos paginas) y de una pagina uniforme (sin_texto legitimo). I;16N daba una pagina
+          #   negra por la conversion de Pillow; ahora I;16L/I;16N pasan a I;16B por sus bytes.
+          #   Medido LOCAL en hall9000: 136 passed (las 2 reales corren). En el runner:
+          #   134 passed, 2 skipped.
+          grep -qE "^134 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 134 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
