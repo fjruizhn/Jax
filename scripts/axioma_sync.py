@@ -227,6 +227,48 @@ def _expected(root: Path) -> tuple[Path, dict[str, bytes]]:
     return project, projections
 
 
+def _obsolete_skill_projection(project: Path, expected: dict[str, bytes], repo: Path) -> list[Path]:
+    manifest_path = project / "sync/manifest.json"
+    if not manifest_path.is_file():
+        return []
+    try:
+        manifest = _read_json(manifest_path)
+    except SyncError:
+        return []
+    if manifest.get("project_id") != PROJECT_ID or not _real_source_commit(repo, manifest.get("source_commit")):
+        return []
+    obsolete = []
+    entries = manifest.get("projections", [])
+    if not isinstance(entries, list):
+        return []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        relative = entry.get("target_path")
+        if not isinstance(relative, str) or relative in expected or not relative.startswith(".qwen/skills/"):
+            continue
+        if (not re.fullmatch(r"\.qwen/skills/[a-z0-9][a-z0-9_-]*/SKILL\.md", relative)
+                or entry.get("canonical_source") != "projects/las-voces"
+                or entry.get("target_harness") != "qwen-code"):
+            raise SyncError("unsafe obsolete skill projection in manifest")
+        target = project / relative
+        cursor = target
+        while cursor != project:
+            if cursor.is_symlink():
+                raise SyncError(f"obsolete skill projection crosses a symlink: {relative}")
+            cursor = cursor.parent
+        if not target.is_file():
+            raise SyncError(f"obsolete skill projection is not a regular file: {relative}")
+        data = target.read_bytes()
+        if (_sha256(data) != entry.get("generated_hash")
+                or b"GENERATED FROM AXIOMA CANONICAL SOURCE" not in data):
+            raise SyncError(f"obsolete skill projection has manual edits: {relative}")
+        obsolete.append(target)
+    if len(obsolete) > 1:
+        raise SyncError("multiple obsolete skill projections in manifest")
+    return obsolete
+
+
 def check(root: Path) -> int:
     project, expected = _expected(root)
     failures = []
@@ -263,7 +305,7 @@ def check(root: Path) -> int:
     return 0
 
 
-def _atomic_batch(project: Path, expected: dict[str, bytes]) -> None:
+def _atomic_batch(project: Path, expected: dict[str, bytes], obsolete: list[Path]) -> None:
     temp_dir = Path(tempfile.mkdtemp(prefix=".axioma-sync-", dir=project))
     backups: dict[Path, bytes | None] = {}
     try:
@@ -277,6 +319,9 @@ def _atomic_batch(project: Path, expected: dict[str, bytes]) -> None:
             backups[target] = target.read_bytes() if target.exists() else None
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staged_path, target)
+        for target in obsolete:
+            backups[target] = target.read_bytes()
+            target.unlink()
     except Exception:
         for target, old in backups.items():
             if old is None:
@@ -292,7 +337,8 @@ def _atomic_batch(project: Path, expected: dict[str, bytes]) -> None:
 
 def generate(root: Path) -> int:
     project, expected = _expected(root)
-    _atomic_batch(project, expected)
+    obsolete = _obsolete_skill_projection(project, expected, root)
+    _atomic_batch(project, expected, obsolete)
     return check(root)
 
 

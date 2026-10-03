@@ -126,12 +126,83 @@ def test_manifest_entry_metadata_drift_fails_check(root: Path, field: str, value
 
 
 def test_skill_directory_follows_canonical_id(root: Path) -> None:
+    assert sync.generate(root) == 0
+    old = generated(root) / ".qwen/skills/las-voces-governance/SKILL.md"
+    assert old.is_file()
     path = generated(root) / "skills/las-voces-governance.json"
     value = json.loads(path.read_text())
     value["id"] = "governance-renamed"
     path.write_text(json.dumps(value), encoding="utf-8")
     assert sync.generate(root) == 0
     assert (generated(root) / ".qwen/skills/governance-renamed/SKILL.md").is_file()
+    assert not old.exists()
+
+
+def test_skill_rename_keeps_unlisted_file_and_fails_closed(root: Path) -> None:
+    assert sync.generate(root) == 0
+    rogue = generated(root) / ".qwen/skills/rogue/SKILL.md"
+    rogue.parent.mkdir(parents=True)
+    rogue.write_text("manually added", encoding="utf-8")
+    path = generated(root) / "skills/las-voces-governance.json"
+    value = json.loads(path.read_text())
+    value["id"] = "governance-renamed"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    assert sync.generate(root) == 1
+    assert rogue.read_text() == "manually added"
+
+
+def test_skill_rename_refuses_manual_edits_to_old_projection(root: Path) -> None:
+    assert sync.generate(root) == 0
+    old = generated(root) / ".qwen/skills/las-voces-governance/SKILL.md"
+    old.write_text("manual change", encoding="utf-8")
+    path = generated(root) / "skills/las-voces-governance.json"
+    value = json.loads(path.read_text())
+    value["id"] = "governance-renamed"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(sync.SyncError, match="manual edits"):
+        sync.generate(root)
+    assert old.read_text(encoding="utf-8") == "manual change"
+
+
+def test_skill_rename_refuses_symlinked_old_directory(root: Path) -> None:
+    assert sync.generate(root) == 0
+    project = generated(root)
+    old_directory = project / ".qwen/skills/las-voces-governance"
+    external_directory = root / "external-skill"
+    old_directory.rename(external_directory)
+    old_directory.symlink_to(external_directory, target_is_directory=True)
+    path = project / "skills/las-voces-governance.json"
+    value = json.loads(path.read_text())
+    value["id"] = "governance-renamed"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(sync.SyncError, match="symlink"):
+        sync.generate(root)
+    assert (external_directory / "SKILL.md").is_file()
+
+
+def test_skill_rename_rolls_back_if_old_projection_cannot_be_removed(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert sync.generate(root) == 0
+    project = generated(root)
+    old = project / ".qwen/skills/las-voces-governance/SKILL.md"
+    manifest = project / "sync/manifest.json"
+    before_old, before_manifest = old.read_bytes(), manifest.read_bytes()
+    path = project / "skills/las-voces-governance.json"
+    value = json.loads(path.read_text())
+    value["id"] = "governance-renamed"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    real_unlink = Path.unlink
+
+    def fail_old_unlink(self: Path, *args, **kwargs) -> None:
+        if self == old:
+            raise OSError("simulated old projection removal failure")
+        real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_old_unlink)
+    with pytest.raises(OSError, match="removal failure"):
+        sync.generate(root)
+    assert old.read_bytes() == before_old
+    assert manifest.read_bytes() == before_manifest
+    assert not (project / ".qwen/skills/governance-renamed/SKILL.md").exists()
 
 
 @pytest.mark.parametrize("bad", ["\u2028", "\u2029", "\u0085", "\u007f", "\ud800"])

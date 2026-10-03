@@ -42,6 +42,10 @@ closed on stale or manually edited projections. `python3 scripts/axioma_sync.py
 las-voces` is the explicit reconciliation mode; it stages all files, atomically
 replaces them, restores prior files if a replacement fails, writes
 `sync/manifest.json`, and verifies the result.
+When a canonical skill id changes, reconciliation removes the old skill file
+only if the previous manifest identifies it and its bytes still match the
+recorded generated hash. An unlisted or manually edited skill is preserved and
+the command fails closed; replacement and removal share one rollback path.
 
 ## 2026-10-03 · revisión de la proyección Qwen (Jax#320)
 
@@ -86,6 +90,12 @@ por funciones de propósito fijo con argumentos cerrados; una prueba comprueba
 que la API del helper no vuelva a aceptar un argv libre. Lección: un verde por
 separar nombres de archivos no vale si abre una ruta genérica alrededor del
 freno.
+
+**HISTORIA — auditoría independiente, 2026-10-03:** la primera prueba de
+renombre cambiaba el id antes de generar por primera vez. El auditor reprodujo
+el caso real, con una proyección anterior ya presente: quedaban dos skills
+cargables. Se corrigió la transición y se añadieron pruebas para el renombre,
+un archivo ajeno, modificaciones manuales, symlinks y fallo de eliminación.
 
 **Alternativa descartada — Codex:** enumerar nombres de herramientas del bundle
 congelaría el catálogo y omitiría herramientas MCP registradas después. El
