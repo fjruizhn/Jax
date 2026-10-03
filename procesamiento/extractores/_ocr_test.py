@@ -2849,3 +2849,97 @@ def test_n36_si_un_fondo_reconoce_texto_aunque_sea_dudoso_gana_y_es_texto_dudoso
     assert r.estado == "parcial"
     assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
     assert "negro0" in r.salidas["texto.txt"]
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 12: con transparencia real, el resultado es la UNION de las dos
+# pasadas (blanca, luego negra); no se elige una y se descarta la otra
+# ---------------------------------------------------------------------------
+
+
+def _tsv_por_lineas(lineas: list[list[tuple]], ancho: int = 700, alto: int = 120) -> str:
+    """`tsv` sintetico con una fila de palabra por `(confianza, palabra)`, cada
+    renglon de `lineas` con su propio `line_num`."""
+    filas = [
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
+        f"1\t1\t0\t0\t0\t0\t0\t0\t{ancho}\t{alto}\t-1\t",
+    ]
+    for n_linea, linea in enumerate(lineas, start=1):
+        for n_palabra, (conf, palabra) in enumerate(linea, start=1):
+            filas.append(f"5\t1\t1\t1\t{n_linea}\t{n_palabra}\t0\t0\t10\t10\t{conf}\t{palabra}")
+    return "\n".join(filas)
+
+
+def _tesseract_por_fondo_con_lineas(monkeypatch, por_fondo: dict) -> list:
+    """Tesseract SIMULADO segun el fondo (pixel (2,2)) de lo que recibe:
+    `por_fondo[fondo] = (texto_plano, [[(confianza, palabra), ...], ...])`."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    fondos: list = []
+    real = ocr.subprocess.run
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        with Image.open(BytesIO(k["input"])) as im:
+            fondo = im.convert("RGB").getpixel((2, 2))
+        fondos.append(fondo)
+        plano, lineas = por_fondo.get(fondo, ("", []))
+        if cmd[-1] == "tsv":
+            return _SalidaSimulada(_tsv_por_lineas(lineas).encode())
+        return _SalidaSimulada(plano.encode())
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    return fondos
+
+
+def test_n38_total_en_la_pasada_blanca_y_l500_en_la_negra_salen_los_dos(tmp_path, monkeypatch):
+    """La sonda de Sol (r11): con la eleccion, la pasada blanca leyo `TOTAL` y la
+    negra `L500`, se descarto una y el resultado fue ok/imagen_sin_texto."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    fondos = _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("TOTAL", [[(95, "TOTAL")]]),
+        _NEGRO: ("L500", [[(95, "L500")]]),
+    })
+    r = ocr.extraer(destino)
+    assert set(fondos) == {_BLANCO, _NEGRO}
+    assert r.detalle.get("codigo") != ocr.CODIGO_IMAGEN_SIN_TEXTO
+    texto = r.salidas["texto.txt"]
+    assert "TOTAL" in texto and "L500" in texto
+    assert texto.index("TOTAL") < texto.index("L500"), "primero la pasada blanca, luego la negra"
+    assert r.detalle["palabras_totales"] == 2 and r.detalle["caracteres"] == len("TOTAL\nL500")
+
+
+def test_n38_el_texto_real_no_se_pierde_ante_veinte_palabras_de_ruido(tmp_path, monkeypatch):
+    """La otra sonda de Sol (r11): la pasada blanca lee `Total a pagar 5000` y la
+    negra 20 palabras espurias, tambien confiables; el texto real se conserva."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    ruido = [(95, f"zx{i}") for i in range(20)]
+    fondos = _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Total a pagar 5000", [[(95, "Total"), (95, "a"), (95, "pagar"), (95, "5000")]]),
+        _NEGRO: (" ".join(p for _, p in ruido), [ruido]),
+    })
+    r = ocr.extraer(destino)
+    assert set(fondos) == {_BLANCO, _NEGRO}
+    assert "Total a pagar 5000" in r.salidas["texto.txt"]
+    assert r.detalle["palabras_totales"] == 24
+
+
+def test_n38_una_linea_que_aparece_en_las_dos_pasadas_va_una_sola_vez(tmp_path, monkeypatch):
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    total = [(95, "Total"), (95, "a"), (95, "pagar"), (95, "5000")]
+    fondos = _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Total a pagar 5000\nFecha 03/10", [total, [(95, "Fecha"), (95, "03/10")]]),
+        _NEGRO: ("  Total   a pagar  5000 \nOtra linea", [total, [(95, "Otra"), (95, "linea")]]),
+    })
+    r = ocr.extraer(destino)
+    assert set(fondos) == {_BLANCO, _NEGRO}
+    texto = r.salidas["texto.txt"]
+    assert texto.count("Total") == 1, "la linea repetida (normalizada) va una sola vez"
+    assert "Fecha 03/10" in texto and "Otra linea" in texto
+    assert r.detalle["palabras_totales"] == 8, "las palabras de la linea repetida tampoco se cuentan dos veces"
