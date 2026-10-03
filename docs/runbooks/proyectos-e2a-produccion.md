@@ -63,11 +63,18 @@ ORIG=/home/fruiz/jax-workspace/proyectos/lacteos-victoria
 for ENV in /etc/restic/local.env /etc/restic/r2.env; do
   [ -f "$ENV" ] || { echo "FALTA $ENV: no se aplica"; continue; }
   N=$(basename "$ENV" .env)
-  nohup bash -c "set -euo pipefail; source '$ENV'; restic backup --tag e2a-lactovi-pre --host hall9000 --one-file-system '$ORIG'" \
-    > "$D/restic-pre-$N.log" 2>&1 ; echo "$N rc=$?" | tee -a "$D/restic-pre.rc"
+  rm -f "$D/restic-pre-$N.rc"
+  # EN SEGUNDO PLANO (&): la shell vuelve al instante; el log y el codigo de salida quedan en $D.
+  nohup bash -c "set -uo pipefail; source '$ENV'; restic backup --tag e2a-lactovi-pre --host hall9000 --one-file-system '$ORIG'; echo \$? > '$D/restic-pre-$N.rc'" \
+    > "$D/restic-pre-$N.log" 2>&1 &
+  echo "$N lanzado, pid $!"
 done
+# Esperar el fin de los dos: cada uno escribe su .rc al terminar (restic largo: no se espera en primer plano de una sola llamada).
+until [ "$(ls "$D"/restic-pre-*.rc 2>/dev/null | wc -l)" -ge "$(ls /etc/restic/local.env /etc/restic/r2.env 2>/dev/null | wc -l)" ]; do sleep 20; done
+tail -n 3 "$D"/restic-pre-*.log      # el resumen de cada snapshot
+for f in "$D"/restic-pre-*.rc; do echo "$f -> $(cat "$f")"; done
 ```
-Los dos repos son obligatorios si existen los dos `.env`. Cada `rc` tiene que ser `0` (con `3` hubo snapshot pero algún archivo no se leyó: no se sigue hasta saber cuál). Después, **por cada repo**, restaurar a una ruta aparte y comparar `sha256` contra el original:
+Los dos repos son obligatorios si existen los dos `.env`. Cada `.rc` tiene que ser `0` (con `3` hubo snapshot pero algún archivo no se leyó: no se sigue hasta saber cuál). Si el `until` pasa de lo razonable, mirar `tail -f "$D"/restic-pre-*.log` desde otra terminal; un `.rc` ausente es que sigue corriendo. Después, **por cada repo**, restaurar a una ruta aparte y comparar `sha256` contra el original:
 ```bash
 for ENV in /etc/restic/local.env /etc/restic/r2.env; do
   [ -f "$ENV" ] || continue; N=$(basename "$ENV" .env); T="$D/restauracion-pre-$N"; rm -rf "$T"
@@ -89,7 +96,7 @@ e2a -m scripts.proyectos_e2a_lactovi --workspace /home/fruiz/jax-workspace --car
   --aplicar --confirmo-produccion | tee $D/lactovi-aplicar.json
 cp /home/fruiz/jax-workspace/proyectos/.e2a-lactovi-*.json $D/     # el mapa de reversión, a salvo
 ```
-Los archivos sin ficha de un tipo que se extrae (`pdf xlsx xls docx png jpg jpeg tif tiff csv txt md`) entran como `en_cola` con `ruta_entrada = proyectos/<uuid>/fuente/<ruta>`: el despachador de la plataforma los manda a procesar y la ingesta, al ver que el archivo **ya está dentro de `fuente/`**, lo procesa en el lugar sin copiarlo (arreglo `_origen_ya_en_fuente`, paso 3). Los de otro tipo entran como `sin_extractor`, sin `ruta_entrada`. **Comprobación tras el despacho:** `find /home/fruiz/jax-workspace/proyectos/<uuid>/fuente -type f | wc -l` sigue siendo el de antes (120): si crece, hay copias y se detiene el despachador.
+Los archivos sin ficha que el extractor real acepta (`procesamiento.compuerta.tiene_extractor`: por extensión —`pdf xlsx xlsm docx png jpg jpeg tif tiff bmp webp`— o por contenido, un PDF o imagen con otro nombre) entran como `en_cola` con `ruta_entrada = proyectos/<uuid>/fuente/<ruta>`: el despachador de la plataforma los manda a procesar y la ingesta, al ver que el archivo **ya está dentro de `fuente/`**, lo procesa en el lugar sin copiarlo (arreglo `_origen_ya_en_fuente`, paso 3). Los de otro tipo entran como `sin_extractor`, sin `ruta_entrada`. **Comprobación tras el despacho:** `find /home/fruiz/jax-workspace/proyectos/<uuid>/fuente -type f | wc -l` sigue siendo el de antes (120): si crece, hay copias y se detiene el despachador.
 Códigos de salida: `0` hecho; `1` el mapa o el destino ya existen, el proyecto no está ACTIVO, o falló el registro (se deshizo el rename, el proyecto queda creado y ACTIVO; se revisa antes de reintentar); `2` argumentos, guarda de producción o carpeta que no existe (p. ej. **ya se movió**: no crea otro proyecto); `3` los `sha256` no cuadran tras mover (se deshizo el rename); `4` el commit de las filas tiene desenlace desconocido (**el disco no se tocó**: verificar las filas y, si faltan, `--completar`); `5` error no previsto: **no reintentar sin revisar**; `6` (`--revertir`/`--completar`) el mapa no cuadra con la base; `7` (`--revertir`) hay trabajos `pendiente`/`procesando`.
 
 **Qué hacer en cada corte** (el disco y la base se miran antes de cualquier reintento):
@@ -117,15 +124,27 @@ ls -d /home/fruiz/jax-workspace/proyectos/lacteos-victoria 2>&1   # ya no existe
 cd /home/fruiz/jax-workspace/proyectos/<uuid>/fuente && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum
 ```
 Y el último hash se compara con el mismo cálculo hecho en el paso de «antes» sobre la carpeta vieja (anotarlo antes de 5b). La pestaña Documentos de LACTOVI en la plataforma tiene que listar los documentos.
-**Reversión** (solo antes de que la plataforma reciba subidas a LACTOVI; si no, los `sha256` no cuadran y sale `3` sin tocar nada). **Primero se detiene el despachador** (vive en jax-platform): con trabajos en vuelo, la ingesta recrearía `proyectos/<uuid>/fuente/` después de devolver la carpeta y la dejaría partida. El guion se niega (código 7) si alguna fila está `pendiente` o `procesando`, pero eso no sustituye detener el servicio:
+**Reversión** (solo antes de que la plataforma reciba subidas a LACTOVI; si no, los `sha256` no cuadran y sale `3` sin tocar nada). **Hay que detener los DOS servicios, en este orden, y por esta razón:** con un trabajo en vuelo, la ingesta recrea `proyectos/<uuid>/fuente/` (`mkdir(exist_ok=True)`) después de que el guion devolvió la carpeta, y la deja partida. *jax-platform* es quien **despacha** (pasa filas a `pendiente` y manda trabajos); *jax-las-manos* es quien **ejecuta**: un trabajo ya entregado a LAS MANOS sigue escribiendo aunque la plataforma esté parada y aunque la fila ya no diga `procesando`. Detener solo uno deja un escritor vivo. El guion se niega (código 7) si alguna fila está `pendiente` o `procesando`, pero esa comprobación no ve lo que LAS MANOS ya tiene en la mano: no sustituye detener los servicios.
+`CNF` es el archivo de opciones `600` del §0 de `despliegue.md` (nunca `-p"$JAX_DB_PASSWORD"`); `PID` es el `project_id` de `$D/lactovi-aplicar.json`.
 ```bash
+Q="SELECT COUNT(*) FROM project_documents WHERE project_id = $PID AND estado IN ('pendiente','procesando')"
+# (1) Con la plataforma VIVA, esperar a que el proyecto tenga 0 filas en vuelo (sin pasos nuevos de subida).
+until [ "$(mariadb --defaults-extra-file="$CNF" -N -e "$Q")" = "0" ]; do sleep 10; done
+# (2) Detener la plataforma (el despachador).
 sudo systemctl stop jax-platform
-systemctl is-active jax-platform          # tiene que decir inactive
-# consulta propia: tiene que dar 0
-SELECT COUNT(*) FROM project_documents WHERE project_id = <project_id> AND estado IN ('pendiente','procesando');
+systemctl is-active jax-platform                  # tiene que decir: inactive
+# (3) Detener LAS MANOS (ningun trabajo ya entregado puede quedar escribiendo).
+sudo systemctl stop jax-las-manos
+systemctl is-active jax-las-manos                 # tiene que decir: inactive
+# (4) Volver a contar, ya con los dos parados: tiene que dar 0.
+mariadb --defaults-extra-file="$CNF" -N -e "$Q"
+# (5) Revertir.
 e2a -m scripts.proyectos_e2a_lactovi --revertir $D/.e2a-lactovi-<fecha>.json --database jax_memory --confirmo-produccion
+# (6) Arrancar los dos servicios y verificar.
+sudo systemctl start jax-las-manos jax-platform
+systemctl is-active jax-las-manos jax-platform    # active, active
 ```
-Borra las filas de `project_documents`, devuelve la carpeta a `lacteos-victoria` verificando `sha256`, y deja el proyecto **ARCHIVADO** (no se borra: Destruir no existe). Verificar: la carpeta vieja existe y `<uuid>` no; 0 filas; alcance ARCHIVED. Es reintentable. Después, `sudo systemctl start jax-platform`.
+Borra las filas de `project_documents`, devuelve la carpeta a `lacteos-victoria` verificando `sha256`, y deja el proyecto **ARCHIVADO** (no se borra: Destruir no existe). Verificar: la carpeta vieja existe y `<uuid>` no; 0 filas; alcance ARCHIVED. Es reintentable (con los servicios aún parados). **Verificación del paso 6:** `systemctl is-active jax-las-manos jax-platform` da `active` las dos veces; el chequeo de salud vigente de `despliegue.md` responde, y `ls -d /home/fruiz/jax-workspace/proyectos/lacteos-victoria/fuente` existe sin que haya aparecido `proyectos/<uuid>/`. Si el guion salió con 7, no se tocó nada: arrancar los servicios, esperar y repetir desde (1).
 ### 6. Restauración probada de `proyectos/` con la ruta nueva
 **Sin esto, la subida no se anuncia como disponible.** Esperar el snapshot de restic posterior al traslado (o lanzar uno con el procedimiento de respaldo vigente; un restic largo nunca en primer plano), restaurar solo `proyectos/<uuid>/` a una ruta aparte (`restic restore <snapshot> --target /tmp/e2a-restauracion --include /home/fruiz/jax-workspace/proyectos/<uuid>`), y comparar el `sha256` de cada archivo de `fuente/` contra el `sha256` de las fichas/`project_documents`. Cualquier diferencia o archivo ausente: la subida NO se anuncia y se escala a Fernando. Borrar la ruta de ensayo al terminar.
 ### 7. Prueba de humo
