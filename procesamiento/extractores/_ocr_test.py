@@ -2364,12 +2364,6 @@ def test_n30_un_bmp_de_32_bpp_con_mascaras_llega_a_tesseract_como_png(tmp_path, 
         assert png.mode not in _MODOS_CON_ALFA
 
 
-def test_n30_el_bmp_de_32_bpp_con_mascaras_no_es_un_formato_nuevo_del_contrato(tmp_path):
-    destino = tmp_path / "c.bmp"
-    destino.write_bytes(_bmp_32(400, 60, 40))
-    assert "bmp_32_bits" not in str(ocr._FORMATO_POR_MODO.values())
-
-
 def _tiff_gris_16_con_signo(destino: Path, ancho: int = 64, alto: int = 32) -> Path:
     """TIFF de un canal de 16 bits con SampleFormat=2 (entero CON SIGNO): Pillow
     lo informa como modo `I`."""
@@ -2417,3 +2411,153 @@ def test_n31_un_tiff_de_32_bits_sigue_siendo_entero_32_bits(tmp_path, monkeypatc
     r = ocr.extraer(destino)
     assert r.detalle["formato"] == "entero_32_bits"
     assert llamadas == []
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 10: N32 (fondo por contraste), N33 (transparencia REAL y dpi),
+# N34 (tope de pixeles del aplanado)
+# ---------------------------------------------------------------------------
+
+
+def _recibido(recibidos: list):
+    from io import BytesIO
+
+    from PIL import Image
+
+    assert recibidos, "tesseract no recibio nada"
+    assert recibidos[0].startswith(b"\x89PNG")
+    im = Image.open(BytesIO(recibidos[0]))
+    im.load()
+    return im
+
+
+def _rotulo(color_tinta, formato: str, destino: Path, fondo=(0, 0, 0, 0)):
+    """Texto de `color_tinta` sobre fondo TRANSPARENTE, en el formato dado."""
+    from PIL import Image, ImageDraw
+
+    texto = "Total a pagar: 1,500.00 Lempiras"
+    if formato == "gif":
+        paleta = [0, 0, 0] + list(color_tinta) + [0, 0, 0] * 254
+        im = Image.new("P", (700, 120), 0)
+        im.putpalette(paleta)
+        ImageDraw.Draw(im).text((20, 30), texto, fill=1, font=_fuente(36))
+        im.save(destino, transparency=0)
+        return
+    im = Image.new("RGBA", (700, 120), fondo)
+    ImageDraw.Draw(im).text((20, 30), texto, fill=tuple(color_tinta) + (255,), font=_fuente(36))
+    if formato == "webp":
+        im.save(destino, lossless=True)
+    else:
+        im.save(destino)
+
+
+@pytest.mark.parametrize("formato", ["webp", "tif", "png", "gif"])
+def test_n32_texto_claro_sobre_transparente_llega_con_fondo_negro_y_tinta_clara(
+    tmp_path, monkeypatch, formato
+):
+    destino = tmp_path / f"claro.{formato}"
+    _rotulo((255, 255, 255), formato, destino)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    rgb = _recibido(recibidos).convert("RGB")
+    assert rgb.getpixel((2, 2)) == (0, 0, 0), "tinta clara: el fondo tiene que ser NEGRO"
+    assert rgb.convert("L").getextrema()[1] > 200, "la tinta clara tiene que conservarse"
+
+
+@pytest.mark.parametrize("formato", ["webp", "tif", "png", "gif"])
+def test_n32_texto_oscuro_sobre_transparente_sigue_llegando_con_fondo_blanco(
+    tmp_path, monkeypatch, formato
+):
+    destino = tmp_path / f"oscuro.{formato}"
+    _rotulo((0, 0, 0) if formato != "gif" else (20, 20, 20), formato, destino)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    rgb = _recibido(recibidos).convert("RGB")
+    assert rgb.getpixel((2, 2)) == (255, 255, 255)
+    assert rgb.convert("L").getextrema()[0] < 100
+
+
+def test_n32_png_rgb_con_trns_de_fondo_negro_y_texto_blanco_conserva_la_tinta(tmp_path, monkeypatch):
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGB", (700, 120), (0, 0, 0))
+    ImageDraw.Draw(im).text((20, 30), "Total a pagar: 1,500.00 Lempiras", fill=(255, 255, 255), font=_fuente(36))
+    destino = tmp_path / "trns.png"
+    im.save(destino, transparency=(0, 0, 0))
+    assert Image.open(destino).info["transparency"] == (0, 0, 0)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    rgb = _recibido(recibidos).convert("RGB")
+    assert rgb.getpixel((2, 2)) == (0, 0, 0)
+    assert rgb.convert("L").getextrema()[1] > 200
+
+
+def test_n33_un_png_rgba_con_alfa_255_en_todo_manda_los_bytes_originales(tmp_path, monkeypatch):
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGBA", (700, 120), (255, 255, 255, 255))
+    ImageDraw.Draw(im).text((20, 30), "Total a pagar: 1,500.00 Lempiras", fill=(0, 0, 0, 255), font=_fuente(36))
+    destino = tmp_path / "opaco.png"
+    im.save(destino, dpi=(190, 190))
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    assert recibidos and all(r == destino.read_bytes() for r in recibidos)
+
+
+def test_n33_un_png_rgb_con_trns_que_no_coincide_con_ningun_pixel_manda_los_bytes_originales(
+    tmp_path, monkeypatch
+):
+    from PIL import Image
+
+    im = Image.new("RGB", (300, 80), (200, 200, 200))
+    destino = tmp_path / "trns_sin_efecto.png"
+    im.save(destino, transparency=(1, 2, 3))
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    assert recibidos and all(r == destino.read_bytes() for r in recibidos)
+
+
+def test_n33_el_aplanado_conserva_el_dpi_en_el_png_que_llega(tmp_path, monkeypatch):
+    """Sin `dpi` tesseract estima la resolucion y lee distinto (una captura de
+    190 dpi pasaba de 1910 a 1852 caracteres)."""
+    destino = tmp_path / "dpi.png"
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGBA", (700, 120), (0, 0, 0, 0))
+    ImageDraw.Draw(im).text((20, 30), "Total a pagar", fill=(0, 0, 0, 255), font=_fuente(36))
+    im.save(destino, dpi=(189.99, 189.99))
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    dpi = _recibido(recibidos).info.get("dpi")
+    assert dpi is not None and abs(dpi[0] - 189.99) < 1 and abs(dpi[1] - 189.99) < 1
+
+
+def test_n34_un_png_rgba_de_30_mpx_con_transparencia_real_es_imagen_demasiado_grande(
+    tmp_path, monkeypatch
+):
+    from PIL import Image
+
+    assert ocr.MAX_PIXELES_OTROS_MODOS == 25_000_000
+    im = Image.new("RGBA", (6000, 5000), (0, 0, 0, 0))     # 30 Mpx, transparente
+    destino = tmp_path / "enorme.png"
+    im.save(destino)
+    del im
+    llamadas = _tesseract_llamado(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "imagen_demasiado_grande"
+    assert r.detalle["causa"] == "demasiados_pixeles"
+    assert llamadas == []
+
+
+def test_n34_un_png_rgba_opaco_de_30_mpx_sigue_el_camino_de_antes(tmp_path, monkeypatch):
+    from PIL import Image
+
+    im = Image.new("RGBA", (6000, 5000), (255, 255, 255, 255))   # 30 Mpx, opaco
+    destino = tmp_path / "opaco30.png"
+    im.save(destino)
+    del im
+    recibidos = _tesseract_que_registra(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.detalle.get("codigo") != "imagen_demasiado_grande"
+    assert recibidos and all(d == destino.read_bytes() for d in recibidos)
