@@ -59,7 +59,7 @@ async def _corrida(c, dir_prueba: Path, puerto: int, marca: str, romper: bool) -
         cfg = proxy_carril.Config(upstream=f"http://127.0.0.1:{up.puerto}", raiz=dir_prueba / "locks", tope_s=60,
                                   host="127.0.0.1", puerto=puerto, registro=registro, pausa=dir_prueba / "PAUSA",
                                   latido=latido, latido_max_s=_TOPE_S * 2, modelo="canario",
-                                  max_salida_tokens=max_salida)
+                                  max_salida_tokens=max_salida, pensamiento="libre")
         servidor = await proxy_carril.arrancar(cfg)
         try:
             if romper and await _sudo("chattr", "+i", str(registro)) != 0:

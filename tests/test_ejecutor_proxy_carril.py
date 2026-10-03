@@ -12,6 +12,8 @@ test_ejecutor_prioridad.py): el carril coordina procesos, no tareas.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import json
 import logging
 import multiprocessing as mp
 import time
@@ -134,13 +136,14 @@ MAX_SALIDA_TOKENS = 1024
 
 
 class Proxy:
-    def __init__(self, upstream_url, raiz, tope_s):
+    def __init__(self, upstream_url, raiz, tope_s, pensamiento="libre"):
         # C5: sin pausa del Ejecutor y con un vigía que acaba de latir (lo prueban
         # test_ejecutor_proxy_pausa.py); estos tests miran el carril y el registro.
         self.cfg = Config(upstream=upstream_url, raiz=raiz, tope_s=tope_s,
                           host="127.0.0.1", puerto=0, registro=raiz / "registro.jsonl",
                           pausa=raiz / "PAUSA", latido=raiz / "latido", latido_max_s=3600,
-                          modelo=MODELO_PERMITIDO, max_salida_tokens=MAX_SALIDA_TOKENS)
+                          modelo=MODELO_PERMITIDO, max_salida_tokens=MAX_SALIDA_TOKENS,
+                          pensamiento=pensamiento)
         latir(self.cfg.latido)
 
     async def __aenter__(self):
@@ -406,6 +409,7 @@ _ENTORNO = {
     "JAX_EJECUTOR_VIGIA_LATIDO_MAX_S": "30",
     "JAX_PROXY_CARRIL_MODELO": "modelo-de-prueba-carril",
     "JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS": "1024",
+    "JAX_PROXY_CARRIL_PENSAMIENTO": "apagado",
 }
 
 
@@ -471,3 +475,126 @@ def test_la_cola_del_carril_se_ve_y_vuelve_a_cero(tmp_path):
             return en_cola
 
     assert _correr(escenario()) == 1
+
+
+# --------------------------------------------------------------------------
+# Pensamiento del cerebro impuesto por el proxy (decisión de Fernando, 2026-10-03)
+# --------------------------------------------------------------------------
+# Con `JAX_PROXY_CARRIL_PENSAMIENTO=apagado` el proxy SOBRESCRIBE `thinking` en lo que reenvía;
+# con `libre` el cuerpo pasa byte a byte. Se valida siempre sobre el cuerpo original: una
+# petición rechazada nunca llega al upstream. (Vive acá y no en un archivo aparte para que corra
+# en el job de CI que ya lista este archivo.)
+
+VARIABLE_PENSAMIENTO = "JAX_PROXY_CARRIL_PENSAMIENTO"
+_DESHABILITADO = {"type": "disabled"}
+
+
+def _mensaje_p(**extra):
+    base = {"model": MODELO_PERMITIDO, "max_tokens": MAX_SALIDA_TOKENS,
+            "messages": [{"role": "user", "content": "hola ñandú"}]}
+    base.update(extra)
+    return json.dumps(base).encode()
+
+
+def _enviar_p(tmp_path, pensamiento, cuerpo, ruta="/v1/messages"):
+    async def escenario():
+        async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 2, pensamiento=pensamiento) as px, \
+                httpx.AsyncClient() as cli:
+            r = await cli.post(px.url + ruta, content=cuerpo)
+            return r.status_code, list(up.recibidas)
+
+    return _correr(escenario())
+
+
+@pytest.mark.parametrize("del_cliente", [
+    {}, {"thinking": {"type": "enabled", "budget_tokens": 2048}},
+    {"thinking": {"type": "disabled"}}, {"thinking": None}, {"thinking": "raro"},
+])
+def test_apagado_el_upstream_recibe_disabled_y_content_length_coincide(tmp_path, del_cliente):
+    estado, recibidas = _enviar_p(tmp_path, "apagado", _mensaje_p(**del_cliente))
+    assert estado == 200 and len(recibidas) == 1
+    _, _, cabeceras, cuerpo = recibidas[0]
+    pedido = json.loads(cuerpo)
+    assert pedido["thinking"] == _DESHABILITADO
+    assert pedido["model"] == MODELO_PERMITIDO and pedido["messages"][0]["content"] == "hola ñandú"
+    assert int(cabeceras[b"content-length"]) == len(cuerpo)
+    assert b"transfer-encoding" not in cabeceras
+
+
+def test_apagado_conserva_el_resto_del_pedido(tmp_path):
+    original = json.loads(_mensaje_p(stream=True, temperature=0.2, system="s"))
+    _, recibidas = _enviar_p(tmp_path, "apagado", json.dumps(original).encode())
+    enviado = json.loads(recibidas[0][3])
+    assert enviado == {**original, "thinking": _DESHABILITADO}
+
+
+def test_libre_el_cuerpo_llega_identico(tmp_path):
+    # Espacios y orden a propósito raros: si se re-serializara, ya no serían idénticos.
+    cuerpo = (b'{ "messages": [{"role":"user","content":"hola"}],  "max_tokens": 1024, '
+              b'"model": "modelo-permitido", "thinking": {"type":"enabled","budget_tokens":2048} }')
+    estado, recibidas = _enviar_p(tmp_path, "libre", cuerpo)
+    assert estado == 200 and recibidas[0][3] == cuerpo
+    assert int(recibidas[0][2][b"content-length"]) == len(cuerpo)
+
+
+@pytest.mark.parametrize("pensamiento", ["apagado", "libre"])
+@pytest.mark.parametrize("cuerpo, ruta", [
+    (_mensaje_p(model="otro-modelo"), "/v1/messages"),
+    (_mensaje_p(max_tokens=MAX_SALIDA_TOKENS + 1), "/v1/messages"),
+    (b"{", "/v1/messages"),
+    (_mensaje_p(), "/api/show"),
+])
+def test_una_peticion_rechazada_nunca_llega_al_upstream(tmp_path, pensamiento, cuerpo, ruta):
+    estado, recibidas = _enviar_p(tmp_path, pensamiento, cuerpo, ruta)
+    assert estado == 403 and recibidas == []
+
+
+def test_la_reescritura_que_falla_no_reenvia(tmp_path, monkeypatch):
+    def roto(cuerpo):
+        raise ValueError("no se puede")
+
+    monkeypatch.setattr(proxy_carril, "_con_pensamiento_apagado", roto)
+
+    async def escenario():
+        async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 2, pensamiento="apagado") as px, \
+                httpx.AsyncClient() as cli:
+            r = await cli.post(px.url + "/v1/messages", content=_mensaje_p())
+            return r.status_code, r.json()["error"]["type"], len(up.recibidas)
+
+    assert _correr(escenario()) == (502, proxy_carril.REESCRITURA_FALLO, 0)
+
+
+def test_apagado_queda_anotado_sin_volcar_el_cuerpo(tmp_path, caplog):
+    with caplog.at_level(logging.INFO, logger=proxy_carril.log.name):
+        _enviar_p(tmp_path, "apagado", _mensaje_p())
+    assert "pensamiento=apagado" in caplog.text
+    assert "hola ñandú" not in caplog.text
+
+
+def test_libre_no_anota_pensamiento_apagado(tmp_path, caplog):
+    with caplog.at_level(logging.INFO, logger=proxy_carril.log.name):
+        _enviar_p(tmp_path, "libre", _mensaje_p())
+    assert "pensamiento=apagado" not in caplog.text
+
+
+@pytest.mark.parametrize("valor", ["apagado", "libre"])
+def test_config_acepta_solo_los_dos_valores(valor):
+    assert config_desde_entorno({**_ENTORNO, VARIABLE_PENSAMIENTO: valor}).pensamiento == valor
+
+
+def test_config_sin_la_variable_falla_cerrado():
+    with pytest.raises(ConfigInvalida) as err:
+        config_desde_entorno({k: v for k, v in _ENTORNO.items() if k != VARIABLE_PENSAMIENTO})
+    assert err.value.args == (Motivo(CONFIG_FALTA, (("variable", VARIABLE_PENSAMIENTO),)),)
+
+
+@pytest.mark.parametrize("valor", ["Apagado", "APAGADO", "off", "encendido", "true", "libre;", "apagado,libre"])
+def test_config_con_valor_invalido_falla_cerrado(valor):
+    with pytest.raises(ConfigInvalida) as err:
+        config_desde_entorno({**_ENTORNO, VARIABLE_PENSAMIENTO: valor})
+    assert err.value.args == (Motivo(CONFIG_INVALIDA, (("variable", VARIABLE_PENSAMIENTO),)),)
+
+
+def test_el_config_no_tiene_valor_por_omision():
+    campo = {f.name: f for f in dataclasses.fields(proxy_carril.Config)}["pensamiento"]
+    assert campo.default is dataclasses.MISSING

@@ -33,7 +33,7 @@ def test_qwen_socket_config_is_all_or_nothing_and_absolute():
         "JAX_PROXY_CARRIL_RAIZ": "/tmp/locks", "JAX_PROXY_CARRIL_TOPE_S": "5",
         "JAX_PROXY_CARRIL_PUERTO": "0", "JAX_EJECUTOR_REGISTRO": "/tmp/log",
         "JAX_EJECUTOR_PAUSA": "/tmp/pause", "JAX_EJECUTOR_VIGIA_LATIDO": "/tmp/beat",
-        "JAX_EJECUTOR_VIGIA_LATIDO_MAX_S": "30", "JAX_PROXY_CARRIL_MODELO": "qwen-fixed",
+        "JAX_EJECUTOR_VIGIA_LATIDO_MAX_S": "30", "JAX_PROXY_CARRIL_MODELO": "qwen-fixed", "JAX_PROXY_CARRIL_PENSAMIENTO": "libre",
         "JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS": "1024",
     }
     assert config_desde_entorno(base).jaxqwen_socket is None
@@ -57,7 +57,7 @@ def test_unix_transport_authenticates_uid_and_preserves_fixed_proxy_gates(tmp_pa
             cfg = Config(upstream=upstream.url, raiz=tmp_path / "locks", tope_s=2,
                          host="127.0.0.1", puerto=0, registro=tmp_path / "registro.jsonl",
                          pausa=tmp_path / "PAUSA", latido=tmp_path / "latido", latido_max_s=60,
-                         modelo=MODELO_PERMITIDO, max_salida_tokens=1024,
+                         modelo=MODELO_PERMITIDO, max_salida_tokens=1024, pensamiento="libre",
                          jaxqwen_socket=path, jaxqwen_uid=os.getuid(), jaxqwen_gid=os.getgid())
             cfg.raiz.mkdir()
             latir(cfg.latido)
@@ -88,7 +88,7 @@ def test_unix_listener_refuses_preexisting_socket_path(tmp_path):
         cfg = Config(upstream="http://127.0.0.1:9", raiz=tmp_path / "locks", tope_s=1,
                      host="127.0.0.1", puerto=0, registro=tmp_path / "registro.jsonl",
                      pausa=tmp_path / "PAUSA", latido=tmp_path / "latido", latido_max_s=60,
-                     modelo=MODELO_PERMITIDO, max_salida_tokens=1024,
+                     modelo=MODELO_PERMITIDO, max_salida_tokens=1024, pensamiento="libre",
                      jaxqwen_socket=path, jaxqwen_uid=os.getuid(), jaxqwen_gid=os.getgid())
         cfg.raiz.mkdir()
         with pytest.raises(ConfigInvalida): await arrancar(cfg)

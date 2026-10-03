@@ -46,6 +46,17 @@ Configuración (sin defaults para lo que decide a dónde va el tráfico):
                               desalojaría el de la Mesa (SP3, 2026-09-17)
   JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS  tope de `max_tokens` por petición (obligatoria,
                               entero > 0). Más → 403. La cuenta: §6.3 del spec de Fase 2
+  JAX_PROXY_CARRIL_PENSAMIENTO  `apagado` o `libre`, exactamente (obligatoria; otro valor o
+                              ausencia → no arranca). Con `apagado`, lo que se reenvía de un
+                              POST /v1/messages ya validado lleva `"thinking": {"type":
+                              "disabled"}`, SOBRESCRIBIENDO el del cliente: Claude Code no
+                              manda `disabled`, y qwen3.8 con el pensamiento libre gasta todo
+                              `max_tokens` pensando (medido 2026-10-03, Ollama 0.34.3: 227
+                              tokens y 8 s contra 13 tokens y 0,6 s). Decisión de Fernando
+                              2026-10-03. Con `libre` el cuerpo pasa byte a byte. La validación
+                              (modelo, salida, freno, resultados) corre SIEMPRE sobre el cuerpo
+                              original; la reescritura es lo último antes de reenviar, y si
+                              falla no se reenvía (502 `reescritura_fallo`)
 
 C3 (registro intocable, decisión D-SP1-2 del índice de SP1): cada `tool_use` que
 el cerebro pide se anota en el registro ANTES de reenviar el trozo que lo completa,
@@ -127,6 +138,11 @@ EJECUTOR_PAUSADO = "ejecutor_pausado"
 VIGIA_SIN_LATIDO = "vigia_sin_latido"
 MODELO_NO_PERMITIDO = "modelo_no_permitido"
 SALIDA_NO_PERMITIDA = "salida_no_permitida"
+#: Fail-closed: con el pensamiento apagado, el cuerpo no se pudo reescribir; no se reenvía.
+REESCRITURA_FALLO = "reescritura_fallo"
+PENSAMIENTO_APAGADO = "apagado"
+PENSAMIENTO_LIBRE = "libre"
+_PENSAMIENTOS = frozenset({PENSAMIENTO_APAGADO, PENSAMIENTO_LIBRE})
 #: Fail-closed: el re-chequeo del freno AL TOMAR el carril (dentro de la sección crítica,
 #: un flock entre procesos) no pudo terminar a tiempo. Mismo criterio que
 #: `InterruptorSinConfigurar` en `_freno_puesto_ahora`: no saber si el freno está puesto
@@ -185,6 +201,7 @@ class Config:
     latido_max_s: float
     modelo: str
     max_salida_tokens: int
+    pensamiento: str  # PENSAMIENTO_APAGADO | PENSAMIENTO_LIBRE; sin valor por omisión a propósito
     jaxqwen_socket: Path | None = None
     jaxqwen_uid: int | None = None
     jaxqwen_gid: int | None = None
@@ -245,6 +262,9 @@ def config_desde_entorno(env=None) -> Config:
         raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_UID/GID"),))) from exc
     if jaxqwen_uid is not None and (jaxqwen_uid < 1 or jaxqwen_gid is None or jaxqwen_gid < 1):
         raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_UID/GID"),)))
+    pensamiento = obligatoria("JAX_PROXY_CARRIL_PENSAMIENTO")
+    if pensamiento not in _PENSAMIENTOS:
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_PENSAMIENTO"),)))
     return Config(
         upstream=upstream.rstrip("/"),
         raiz=Path(obligatoria("JAX_PROXY_CARRIL_RAIZ")),
@@ -257,6 +277,7 @@ def config_desde_entorno(env=None) -> Config:
         latido_max_s=latido_max_s,
         modelo=obligatoria("JAX_PROXY_CARRIL_MODELO"),
         max_salida_tokens=positivo("JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS"),
+        pensamiento=pensamiento,
         jaxqwen_socket=jaxqwen_socket, jaxqwen_uid=jaxqwen_uid, jaxqwen_gid=jaxqwen_gid,
     )
 
@@ -319,6 +340,17 @@ def _fuera_de_limites(cuerpo: bytes, cfg: Config) -> str | None:
     if type(salida) is not int or not 0 < salida <= cfg.max_salida_tokens:
         return SALIDA_NO_PERMITIDA
     return None
+
+
+def _con_pensamiento_apagado(cuerpo: bytes) -> bytes:
+    """El cuerpo que se reenvía con el pensamiento apagado: el mismo pedido con `thinking`
+    forzado a `disabled`, pisando el del cliente. Lanza si no es un objeto JSON legible (ya
+    se validó antes; esto es el cinturón: lo que no se puede reescribir no se reenvía)."""
+    pedido = json.loads(cuerpo)
+    if not isinstance(pedido, dict):
+        raise ValueError("el pedido no es un objeto")
+    pedido["thinking"] = {"type": "disabled"}
+    return json.dumps(pedido, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 def _ruta_sin_query(destino: bytes) -> str:
@@ -528,11 +560,24 @@ class _Proxy:
                     await _responder_error(conn, writer, 423, Motivo(frenado),
                                            extra=((b"x-should-retry", b"false"),), metodo=metodo)
                     return
+                # Pensamiento apagado: lo ÚLTIMO antes de reenviar, tras todas las validaciones
+                # (hechas sobre el cuerpo original del cliente). Content-Length y Transfer-Encoding
+                # ya están en `_NO_REENVIAR`: httpx fija el Content-Length del cuerpo nuevo.
+                a_enviar, nota = cuerpo, None
+                if de_mensajes and self.cfg.pensamiento == PENSAMIENTO_APAGADO:
+                    try:
+                        a_enviar = _con_pensamiento_apagado(cuerpo)
+                    except (ValueError, TypeError, RecursionError) as exc:
+                        log.error("proxy_carril %s metodo=%s ruta=%s tipo=%s",
+                                  REESCRITURA_FALLO, metodo, ruta, type(exc).__name__)
+                        await _responder_error(conn, writer, 502, Motivo(REESCRITURA_FALLO), metodo=metodo)
+                        return
+                    nota = f"pensamiento={PENSAMIENTO_APAGADO}"
                 cabeceras = [(k, v) for k, v in peticion.headers if k.lower() not in _NO_REENVIAR]
                 cabeceras.append((b"accept-encoding", b"identity"))
                 solicitud = self.cliente.build_request(
                     metodo, self.cfg.upstream + peticion.target.decode("latin-1"),
-                    headers=cabeceras, content=cuerpo,
+                    headers=cabeceras, content=a_enviar,
                     # Sin tope de lectura: el primer byte puede tardar lo que
                     # tarde la cola de Ollama; el corte lo decide el cliente, y
                     # el proxy lo ve. Por petición: el default del cliente es 5 s.
@@ -545,7 +590,7 @@ class _Proxy:
                     await _responder_error(conn, writer, 502, Motivo(UPSTREAM_INALCANZABLE), metodo=metodo)
                     return
                 try:
-                    await self._devolver(conn, writer, respuesta, metodo, ruta, de_mensajes)
+                    await self._devolver(conn, writer, respuesta, metodo, ruta, de_mensajes, nota)
                 finally:
                     await respuesta.aclose()
         except EsperaAgotada as exc:
@@ -559,7 +604,8 @@ class _Proxy:
             if not tomado:  # se fue por el tope, o lo cancelaron esperando: la cola baja igual
                 _ESPERANDO_CARRIL -= 1
 
-    async def _devolver(self, conn, writer, respuesta, metodo: str, ruta: str, de_mensajes: bool) -> None:
+    async def _devolver(self, conn, writer, respuesta, metodo: str, ruta: str, de_mensajes: bool,
+                        nota: str | None = None) -> None:
         codificacion = respuesta.headers.get("content-encoding", "identity").strip().lower()
         if codificacion not in ("", "identity"):
             log.error("proxy_carril %s metodo=%s ruta=%s codificacion=%s", REGISTRO_ILEGIBLE, metodo, ruta, codificacion)
@@ -600,12 +646,14 @@ class _Proxy:
                                            extra=((b"x-should-retry", b"false"),), metodo=metodo)
                     return
             await _enviar(conn, writer, inicio)
-            log.info("proxy_carril peticion metodo=%s ruta=%s estado=%d", metodo, ruta, respuesta.status_code)
+            log.info("proxy_carril peticion metodo=%s ruta=%s estado=%d%s", metodo, ruta, respuesta.status_code,
+                 f" {nota}" if nota else "")
             await _enviar(conn, writer, h11.Data(data=crudo))
             await _enviar(conn, writer, h11.EndOfMessage())
             return
         await _enviar(conn, writer, inicio)
-        log.info("proxy_carril peticion metodo=%s ruta=%s estado=%d", metodo, ruta, respuesta.status_code)
+        log.info("proxy_carril peticion metodo=%s ruta=%s estado=%d%s", metodo, ruta, respuesta.status_code,
+                 f" {nota}" if nota else "")
         lector = lectura.LectorSSE()
         try:
             async for trozo in respuesta.aiter_raw():
