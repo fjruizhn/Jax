@@ -2192,8 +2192,8 @@ pp._recorrer(proy, accion="aplicar")
 pp._raiz_configurada_privilegiada = lambda: proy
 import io, contextlib, subprocess
 _restaurar = pp._restaurar_raiz_desde_respaldo
-def restaurar_y_romper(p):
-    r = _restaurar(p)
+def restaurar_y_romper(p, *a):
+    r = _restaurar(p, *a)
     subprocess.run(["setfacl", "-b", raiz], check=True)       # jaxsvc pierde su entrada de paso...
     subprocess.run(["chown", "fruiz:fruiz", raiz], check=True)  # ...y el grupo
     return r

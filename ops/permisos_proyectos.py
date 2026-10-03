@@ -423,6 +423,9 @@ class Resultado:
         self.excluidos: list[str] = []
         self.dirs_procesados = 0
         self.archivos_procesados = 0
+        # (st_dev, st_ino) de la raíz y de proyectos/ que ESTA pasada abrió: la mutación compara contra ellos.
+        self.id_raiz: tuple | None = None
+        self.id_proyectos: tuple | None = None
 
 
 def _es_carpeta_oculta_excluida(entrada: os.DirEntry) -> bool:
@@ -721,11 +724,26 @@ def _revisar_o_mutar_raiz(fd_raiz: int, ruta: str, *, modo: str, resultado: Resu
         resultado.no_cumple.append(f"{etiqueta}: {'; '.join(faltas)}")
 
 
+def _id_de(st: os.stat_result) -> tuple:
+    return (st.st_dev, st.st_ino)
+
+
+def _exigir_misma_identidad(que: str, st: os.stat_result, esperado: tuple | None, ruta: str) -> None:
+    """La mutación solo actúa sobre EL MISMO directorio que la pasada previa validó. Otro directorio real puesto
+    en su lugar (rename, sin symlink) por quien pueda renombrar en el padre tendría dueño, grupo y modo propios y
+    un fchmod lo cambiaría: se falla cerrado ANTES de mutar nada (no es «a medio aplicar»: no empezó)."""
+    if esperado is not None and _id_de(st) != esperado:
+        raise ErrorPermisosProyectos(
+            f"{que} {ruta} cambió entre la pasada previa y la mutación (otro directorio ocupa su lugar): "
+            "falla cerrado, no se mutó nada")
+
+
 def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_de_raiz=None,
               hook_entre_previo_y_mutacion=None) -> Resultado:
     """`accion`: verificar | aplicar | deshacer | previo. `aplicar` empieza por una pasada `previo` (solo
     lectura) y FALLA CERRADO sin mutar nada si jaxsvc o fruiz quedarían sin paso por la raíz o hay entradas
     ACL nombradas ajenas: un cambio privilegiado sin esa comprobación puede dejar el sistema peor."""
+    esperado = None   # (id de la raíz, id de proyectos/) que validó la pasada previa
     if accion == "aplicar":
         previo = _recorrer(proyectos, accion="previo", hook_antes_de_raiz=hook_antes_de_raiz)
         if previo.no_cumple:
@@ -733,25 +751,34 @@ def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_d
                 "--aplicar falla cerrado y no cambió nada; una persona tiene que resolver esto antes:\n  "
                 + "\n  ".join(previo.no_cumple)
             )
-    if accion == "aplicar" and hook_entre_previo_y_mutacion is not None:
-        hook_entre_previo_y_mutacion()  # solo pruebas: la ventana entre la pasada previa y la mutacion
+        esperado = (previo.id_raiz, previo.id_proyectos)
     if accion == "deshacer":
-        _comprobar_paso_antes_de_deshacer(proyectos)
+        id_paso = _comprobar_paso_antes_de_deshacer(proyectos)
         previo_ocultas = _recorrer(proyectos, accion="previo-oculta", hook_antes_de_raiz=hook_antes_de_raiz)
         if previo_ocultas.no_cumple:
             raise ErrorPermisosProyectos(
                 "--deshacer falla cerrado y no cambió nada; una persona tiene que resolver esto antes:\n  "
                 + "\n  ".join(previo_ocultas.no_cumple)
             )
-    if accion in ("aplicar", "deshacer"):
-        _PROGRESO["mutando"], _PROGRESO["ultima"] = True, None  # pasaron las pasadas previas: desde aquí se cambia
+        if id_paso != previo_ocultas.id_raiz:
+            raise ErrorPermisosProyectos(
+                "la raíz del workspace cambió entre dos pasadas previas de --deshacer: falla cerrado, no se mutó nada")
+        esperado = (previo_ocultas.id_raiz, previo_ocultas.id_proyectos)
+    if accion in ("aplicar", "deshacer") and hook_entre_previo_y_mutacion is not None:
+        hook_entre_previo_y_mutacion()  # solo pruebas: la ventana entre la pasada previa y la mutacion
     resultado = Resultado()
     if hook_antes_de_raiz is not None:
         hook_antes_de_raiz(str(proyectos.parent))  # solo pruebas: la ventana entre validar y abrir la raiz
     fd_raiz = _abrir_raiz_seguro(str(proyectos.parent))
     try:
-        if accion in ("verificar", "aplicar", "previo"):
-            _revisar_o_mutar_raiz(fd_raiz, _nombre_seguro(str(proyectos.parent)), modo=accion, resultado=resultado)
+        st_raiz = os.fstat(fd_raiz)
+        resultado.id_raiz = _id_de(st_raiz)
+        if esperado is not None:
+            _exigir_misma_identidad("la raíz del workspace", st_raiz, esperado[0], _nombre_seguro(str(proyectos.parent)))
+            # dueño y grupo del descriptor NUEVO, antes de cualquier fchmod (la raíz no cambia de dueño)
+            faltas_id = _faltas_identidad_y_modo_de_la_raiz(st_raiz, con_modo=False)
+            if faltas_id:
+                raise ErrorPermisosProyectos("; ".join(faltas_id) + ": falla cerrado, no se mutó nada")
         fd_proyectos = _abrir_o_path(proyectos.name, fd_raiz)
         if fd_proyectos is None:
             raise ErrorPermisosProyectos(f"{_nombre_seguro(str(proyectos))} desapareció justo antes de abrirlo")
@@ -759,6 +786,14 @@ def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None, hook_antes_d
             st = os.fstat(fd_proyectos)
             if stat.S_ISLNK(st.st_mode):
                 raise ErrorPermisosProyectos(f"{_nombre_seguro(str(proyectos))} se volvió un symlink justo antes de abrirlo")
+            resultado.id_proyectos = _id_de(st)
+            if esperado is not None:
+                _exigir_misma_identidad("proyectos/", st, esperado[1], _nombre_seguro(str(proyectos)))
+            if accion in ("aplicar", "deshacer"):
+                # validadas las dos identidades, desde aquí se cambia: un fallo ya es «a medio aplicar»
+                _PROGRESO["mutando"], _PROGRESO["ultima"] = True, None
+            if accion in ("verificar", "aplicar", "previo"):
+                _revisar_o_mutar_raiz(fd_raiz, _nombre_seguro(str(proyectos.parent)), modo=accion, resultado=resultado)
             ruta_base = _nombre_seguro(str(proyectos))
             _procesar_directorio(fd_proyectos, ruta_base, st, accion=accion, resultado=resultado)
             resultado.dirs_procesados += 1
@@ -1325,7 +1360,7 @@ def _buscar_modo_de_la_raiz_en_respaldo(proyectos: Path) -> tuple[int | None, Pa
     return None, None, f"ningún respaldo de {RUTA_RESPALDOS} es de confianza y registra la raíz {raiz}"
 
 
-def _restaurar_raiz_desde_respaldo(proyectos: Path) -> tuple[bool, str]:
+def _restaurar_raiz_desde_respaldo(proyectos: Path, esperado: tuple | None = None) -> tuple[bool, str]:
     """`--deshacer` devuelve a la raíz el MODO del respaldo (ver `_buscar_modo_de_la_raiz_en_respaldo`), solo
     los bits de permiso 0770: ni dueño, ni grupo, ni ACL, ni bits especiales, y NUNCA los de otros.
     Devuelve (restaurada, detalle)."""
@@ -1336,6 +1371,12 @@ def _restaurar_raiz_desde_respaldo(proyectos: Path) -> tuple[bool, str]:
     _PROGRESO["ultima"] = os.path.abspath(str(proyectos.parent))
     fd = _abrir_raiz_seguro(os.path.abspath(str(proyectos.parent)))
     try:
+        st_nueva = os.fstat(fd)
+        _exigir_misma_identidad("la raíz del workspace", st_nueva, esperado,
+                                _nombre_seguro(os.path.abspath(str(proyectos.parent))))
+        faltas_id = _faltas_identidad_y_modo_de_la_raiz(st_nueva, con_modo=False)
+        if faltas_id:
+            raise ErrorPermisosProyectos("; ".join(faltas_id) + ": no se restaura el modo")
         fd_real = _reabrir_real(fd, os.O_RDONLY)
         try:
             os.fchmod(fd_real, modo)
@@ -1350,7 +1391,7 @@ def _restaurar_raiz_desde_respaldo(proyectos: Path) -> tuple[bool, str]:
     return True, f"modo {modo:04o} restaurado desde {ruta}{aviso}"
 
 
-def _comprobar_paso_antes_de_deshacer(proyectos: Path) -> None:
+def _comprobar_paso_antes_de_deshacer(proyectos: Path) -> tuple:
     """Falla cerrado, sin haber tocado nada, si con el modo que `--deshacer` va a restaurar (o el actual, si no
     hay respaldo de confianza y la raíz no se toca) y el dueño y grupo ACTUALES de la raíz, jaxsvc o fruiz no la
     atravesarían: dejaría al servicio (o a quien opera) sin llegar a ningún objeto del árbol."""
@@ -1374,6 +1415,7 @@ def _comprobar_paso_antes_de_deshacer(proyectos: Path) -> None:
             + "; ".join(faltas)
             + " -- corregir la raíz (dueño, grupo o ACL) antes de deshacer."
         )
+    return _id_de(st)
 
 
 def _estado_del_paso_por_la_raiz(proyectos: Path) -> list[str]:
@@ -1703,7 +1745,7 @@ def _cmd_nucleo_deshacer() -> int:
 
     try:
         resultado = _recorrer(proyectos, accion="deshacer")
-        raiz_ok, raiz_detalle = _restaurar_raiz_desde_respaldo(proyectos)
+        raiz_ok, raiz_detalle = _restaurar_raiz_desde_respaldo(proyectos, resultado.id_raiz)
         paso_faltas = _estado_del_paso_por_la_raiz(proyectos)
     except BaseException as exc:   # incluye KeyboardInterrupt y SystemExit: a medio mutar hay que decirlo
         if _PROGRESO["mutando"]:
