@@ -5053,6 +5053,11 @@ jobs:
           #   output_config como campo conocido y su variante (2) y la cobertura de las 14 etiquetas de
           #   MessagesRequest de Ollama v0.34.3 (1). Medido con el mismo metodo: 3325 passed + 1 failed
           #   preexistente = 3326; los 45 skipped no cambian. Si el runner da otro numero, manda el runner.
+          # 3164 -> 3165 (2026-10-03, SR3 owner protocol): +1 puro en
+          #   las_manos/_procesamiento_routes_test.py, que verifica que los
+          #   envelopes de owner faltante/no canónico/desconocido/duplicado no
+          #   agregan un evento Processing JSONL. GitHub run 37133259910, job 111232503222
+          #   measured 3165 passed, 45 skipped, 1 xfailed; the skip set stayed exact.
           #
           # 2811 -> 2812 (2026-09-25, las_manos/_tool_authority_test.py::test_5c_write_file_
           # queda_escribible_por_grupo_bajo_acl_por_defecto -- reproduce B1 de
