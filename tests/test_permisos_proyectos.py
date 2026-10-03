@@ -280,7 +280,7 @@ try:
     r = pp._recorrer(pp.Path({str(proyectos)!r}), accion={accion!r}, hook_de_prueba=hook, hook_antes_de_raiz=hook_raiz,
                     hook_entre_previo_y_mutacion=hook_entre)
 except pp.ErrorPermisosProyectos as exc:
-    print(json.dumps({{"error": str(exc)}}))
+    print(json.dumps({{"error": str(exc), "a_medio": pp._PROGRESO["mutando"]}}))
     sys.exit(0)
 print(json.dumps({{
     "no_cumple": r.no_cumple, "symlinks_saltados": r.symlinks_saltados,
@@ -2104,6 +2104,12 @@ def _correr_bloque(raiz: Path) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, cwd=str(RAIZ_REPO), timeout=120)
 
 
+def test_el_bloque_de_verificacion_no_repite_el_control_de_la_raiz_que_ya_hace_verificar():
+    bloque = _bloque_de_verificacion_del_runbook()
+    assert "stat -c" not in bloque and "RAIZ_ESTADO" not in bloque, "el control (c) ya lo cubre --verificar"
+    assert "--verificar" in bloque and "getfacl" in bloque
+
+
 def test_el_bloque_de_verificacion_del_runbook_se_ejecuta_y_falla_cerrado(base_propia):
     assert "${RAIZ:-/srv/jax-data/jax-workspace}" in _bloque_de_verificacion_del_runbook(), \
         "la raiz del bloque tiene que ser una variable con la de produccion por defecto"
@@ -2128,20 +2134,16 @@ def test_el_bloque_de_verificacion_del_runbook_se_ejecuta_y_falla_cerrado(base_p
     subprocess.run(["sudo", "-n", "chown", "fruiz:jaxsvc", str(raiz)], check=True)
     assert _correr_bloque(raiz).returncode == 0
 
-    # Los controles (b) y (c) del bloque, cada uno donde `--verificar` NO ve el problema: un FIFO 0666 (no
-    # gobernado, pero `getfacl -R` lo enumera con other::rw-) y una raiz 750 (jaxsvc y fruiz pasan igual, pero
-    # no es 770). Sin esto, sustituir esos controles por un `echo OK` dejaria la prueba en verde.
+    # El control (b) del bloque, donde `--verificar` NO ve el problema: un FIFO 0666 (no gobernado, pero
+    # `getfacl -R` lo enumera con other::rw-). Sin esto, sustituir el control por un `echo OK` dejaria la prueba
+    # en verde. (La raiz 770 fruiz:jaxsvc ya no es un control del bloque: la exige `--verificar`, control (a).)
     fifo = proyectos / "p" / "canal"
     subprocess.run(["sudo", "-n", "mkfifo", str(fifo)], check=True)
     subprocess.run(["sudo", "-n", "chmod", "666", str(fifo)], check=True)   # con la ACL por defecto, mkfifo -m no basta
     r_fifo = _correr_bloque(raiz)
     assert r_fifo.returncode != 0 and "NO CUMPLE: other" in r_fifo.stderr, r_fifo.stdout + r_fifo.stderr
     subprocess.run(["sudo", "-n", "rm", str(fifo)], check=True)
-    subprocess.run(["sudo", "-n", "chmod", "750", str(raiz)], check=True)
-    r_750 = _correr_bloque(raiz)
-    # (ahora `--verificar` tambien exige 770 en la raiz, asi que este caso lo frena el control (a); el (c) del bloque
-    # queda como defensa en profundidad y su mutacion ya no se distingue por una prueba de comportamiento)
-    assert r_750.returncode != 0 and "NO CUMPLE" in r_750.stderr, r_750.stdout + r_750.stderr
+    assert _correr_bloque(raiz).returncode == 0
 
 
 # --- ronda 6: hardlinks en las ocultas, camino de fracaso de la verificacion final, fixtures sin rutas reales ---
@@ -2566,6 +2568,89 @@ def test_ninguna_ruta_inyecta_lineas_en_los_diagnosticos(arbol_temporal, _identi
         for linea in texto.splitlines():
             assert not linea.lstrip().startswith("sudo"), f"{nombre_salida}: una linea de la salida empieza con sudo: {linea!r}"
         assert "\\n" in texto, f"{nombre_salida}: el salto de linea no se escapó: {texto!r}"
+
+
+# --- ronda 10: la identidad de la raiz y de proyectos/ no cambia entre la pasada previa y la mutacion ----------
+
+def _directorio_ajeno(base: Path, nombre: str, *, con_proyectos: bool) -> Path:
+    """Un directorio REAL (no un symlink) fruiz:jaxsvc 0755 que ocupara el lugar de la raiz o de proyectos/."""
+    d = base / nombre
+    (d / "proyectos" / "p" if con_proyectos else d / "p").mkdir(parents=True)
+    subprocess.run(["sudo", "-n", "chown", "-R", "fruiz:jaxsvc", str(d)], check=True)
+    subprocess.run(["sudo", "-n", "chmod", "-R", "755", str(d)], check=True)
+    return d
+
+
+@pytest.mark.parametrize("accion", ["aplicar", "deshacer"])
+@pytest.mark.parametrize("que", ["la raiz", "proyectos"])
+def test_un_directorio_real_que_sustituye_a_la_raiz_o_a_proyectos_entre_pasadas_no_se_muta(base_propia, accion, que):
+    """La pasada previa guarda (st_dev, st_ino) de la raiz y de proyectos/; la mutacion vuelve a abrirlas y compara,
+    junto con dueño y grupo, ANTES de cualquier fchmod. Un directorio REAL (rename, sin symlink) con dueño y grupo
+    correctos que ocupe su lugar entre las dos pasadas conserva su modo, y el comando falla cerrado sin
+    `a_medio_aplicar`: no habia empezado a mutar."""
+    raiz = _arbol_como_produccion(base_propia, dueno="fruiz", grupo="jaxsvc", modo=0o775)
+    proyectos = raiz / "proyectos"
+    if accion == "deshacer":
+        assert not _recorrer_directo(proyectos, accion="aplicar", conceder_al_terminar=False)["no_cumple"]
+    if que == "la raiz":
+        ajeno = _directorio_ajeno(base_propia, "ajeno", con_proyectos=True)
+        sustituto = raiz                       # el ajeno pasara a ocupar este nombre
+        original, desplazado = raiz, Path(str(raiz) + ".orig")
+    else:
+        ajeno = _directorio_ajeno(base_propia, "ajeno-proyectos", con_proyectos=False)
+        sustituto = proyectos
+        original, desplazado = proyectos, Path(str(proyectos) + ".orig")
+    modo_ajeno = _foto(ajeno)[2]
+    ino_ajeno = ajeno.stat().st_ino
+    extra = f"""
+estado = {{"hecho": False}}
+def hook_entre():
+    if estado["hecho"]:
+        return
+    estado["hecho"] = True
+    os.rename({str(original)!r}, {str(desplazado)!r})
+    os.rename({str(ajeno)!r}, {str(original)!r})
+"""
+    datos = _recorrer_directo(proyectos, accion=accion, extra_codigo=extra, puede_fallar=True,
+                              conceder_al_terminar=False)
+    assert "error" in datos, datos
+    assert sustituto.stat().st_ino == ino_ajeno, "el gancho no sustituyó el directorio: la prueba no probó nada"
+    assert datos["a_medio"] is False, f"no habia empezado a mutar: no es a_medio_aplicar ({datos})"
+    assert "cambió" in datos["error"], datos["error"]
+    assert _foto(sustituto)[2] == modo_ajeno, "se hizo fchmod sobre el directorio sustituto"
+
+
+def test_deshacer_no_restaura_el_modo_en_una_raiz_sustituida_antes_del_fchmod_final(arbol_temporal, _identidades):
+    """El restaurador de la raiz (tercera apertura de `--deshacer`) tambien compara identidad antes del fchmod."""
+    proyectos = arbol_temporal / "proyectos"
+    base = arbol_temporal.parent
+    ajeno = _directorio_ajeno(base, "ajeno-final", con_proyectos=True)
+    modo_ajeno = _foto(ajeno)[2]
+    out = _driver_respaldo(f"""
+proy = pp.Path({str(proyectos)!r})
+raiz = {str(arbol_temporal)!r}
+pp._generar_respaldo_validado(proy)
+pp._recorrer(proy, accion="aplicar")
+pp._raiz_configurada_privilegiada = lambda: proy
+import io, contextlib
+orig = pp._recorrer
+estado = {{"hecho": False}}
+def recorrer(*a, **k):
+    r = orig(*a, **k)
+    if k.get("accion") == "deshacer" and not estado["hecho"]:
+        estado["hecho"] = True
+        os.rename(raiz, raiz + ".orig")
+        os.rename({str(ajeno)!r}, raiz)
+    return r
+pp._recorrer = recorrer
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    salida["rc"] = pp._cmd_nucleo_deshacer()
+salida["json"] = json.loads(buf.getvalue())
+salida["modo_final"] = os.stat(raiz).st_mode & 0o7777
+""")
+    assert out["json"].get("a_medio_aplicar") is True and "cambió" in out["json"]["error"], out
+    assert out["modo_final"] == modo_ajeno, "se hizo fchmod sobre la raiz sustituta"
 
 
 # --- MAJOR-1: la raiz se abre por descriptor, sin seguir symlinks ------------------------------
