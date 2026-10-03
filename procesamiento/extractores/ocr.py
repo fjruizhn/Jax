@@ -571,14 +571,11 @@ def _aplanar(img, mascara, fondo):
 
 
 def _a_modo_legible(img):
-    """Fotograma decodificado -> uno que se pueda guardar como PNG para
-    tesseract: con transparencia REAL, aplanado sobre blanco (`_aplanar`); un
-    alfa opaco se descarta sin perder nada; los modos de
-    `_MODOS_PNG` tal cual; el resto (CMYK, YCbCr, LAB, HSV...) a `RGB`. (F, I e
-    I;16* ya se rechazaron en la validacion.)"""
-    mascara = _mascara_alfa(img)
-    if mascara is not None:
-        return _aplanar(img, mascara, (255, 255, 255))
+    """Fotograma decodificado SIN transparencia real (`_mascara_alfa` dio
+    `None`) -> uno que se pueda guardar como PNG para tesseract: un alfa opaco
+    se descarta sin perder nada; los modos de `_MODOS_PNG` tal cual; el resto
+    (CMYK, YCbCr, LAB, HSV...) a `RGB`. (F, I e I;16* ya se rechazaron en la
+    validacion; la transparencia real la aplana `_ocr_cuadro`.)"""
     if img.mode in ("RGBA", "PA", "RGBa"):
         return img.convert("RGB")
     if img.mode in ("LA", "La"):
@@ -776,10 +773,60 @@ def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
     return _ocr_bytes(datos, idioma)
 
 
+# Fondos sobre los que se aplana un fotograma con transparencia REAL, en este
+# orden: el primero gana el empate (Jax#338 ronda 11, BLOCK-N36).
+_FONDOS_DEL_APLANADO = ((255, 255, 255), (0, 0, 0))
+
+
+def _palabras_utiles(r: dict) -> int:
+    """Palabras reconocidas que NO son dudosas (confianza >= piso)."""
+    return r["n_palabras"] - len(r["palabras_dudosas"])
+
+
+def _ocr_cuadro(img, idioma: str, presupuesto: _Presupuesto) -> dict | None:
+    """OCR de un fotograma ya decodificado. Sin transparencia real: una sola
+    pasada (`_a_modo_legible` -> PNG). Con transparencia REAL (`_mascara_alfa`):
+    DOS pasadas, aplanado sobre blanco y sobre negro, y gana la que tiene mas
+    palabras utiles (`_palabras_utiles`); en el empate, el blanco. Ningun
+    numero sobre toda la imagen decide el fondo: la luminancia media la decide
+    la figura mas grande (un logo con emblema claro y texto oscuro) y no el
+    texto. Un lienzo a la vez: aplanar -> PNG -> OCR -> liberar, y repetir.
+    Un fallo de OCR (`None` o `ilegible`) en cualquiera de las dos pasadas es
+    el resultado."""
+    dpi = img.info.get("dpi")
+    try:
+        mascara = _mascara_alfa(img)
+        png = _a_png(_a_modo_legible(img), dpi) if mascara is None else None
+    except MemoryError:
+        return _ilegible_dict("sin_memoria")   # recursos, no archivo danado
+    except Exception:  # fail-soft: pagina truncada o corrupta = archivo que no decodifica
+        return _ilegible_dict("no_decodifica")
+    if mascara is None:
+        return _ocr_bytes(png, idioma, presupuesto)
+    if img.size[0] * img.size[1] > MAX_PIXELES_OTROS_MODOS:
+        return _ilegible_dict("demasiados_pixeles")   # tope del aplanado
+    elegido = None
+    for fondo in _FONDOS_DEL_APLANADO:
+        try:
+            png = _a_png(_aplanar(img, mascara, fondo), dpi)   # el lienzo muere aca
+        except MemoryError:
+            return _ilegible_dict("sin_memoria")
+        except Exception:  # fail-soft: igual que arriba, un fotograma que no se puede convertir no decodifica
+            return _ilegible_dict("no_decodifica")
+        r = _ocr_bytes(png, idioma, presupuesto)
+        del png
+        if r is None or r["clasificacion"] == "ilegible":
+            return r
+        if elegido is None or _palabras_utiles(r) > _palabras_utiles(elegido):
+            elegido = r
+    return elegido
+
+
 def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict | None:
     """OCR de una imagen ya validada. `"una"`: los bytes originales por stdin.
-    `"tiff"`: pagina por pagina (decodificar -> PNG -> tesseract -> descartar:
-    nunca se guarda la lista de PNG), con el plazo total `PLAZO_TOTAL_SEGUNDOS`
+    `"tiff"`: pagina por pagina (decodificar -> `_ocr_cuadro` -> descartar:
+    nunca se guarda la lista de PNG; con transparencia real, el fondo se elige
+    POR PAGINA), con el plazo total `PLAZO_TOTAL_SEGUNDOS`
     y las metricas de la regla A/B sobre el TOTAL (caracteres y palabras
     sumados, confianza ponderada por palabras)."""
     presupuesto = _Presupuesto(PLAZO_TOTAL_SEGUNDOS)
@@ -807,17 +854,11 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
                 try:
                     img.seek(numero - 1)
                     img.load()
-                    if (img.size[0] * img.size[1] > MAX_PIXELES_OTROS_MODOS
-                            and _mascara_alfa(img) is not None):
-                        return _ilegible_dict("demasiados_pixeles")   # tope del aplanado
-                    cuadro = _a_modo_legible(img)
-                    png = _a_png(cuadro, img.info.get("dpi"))
                 except MemoryError:
                     return _ilegible_dict("sin_memoria")   # recursos, no archivo danado
                 except Exception:  # fail-soft: pagina truncada o corrupta = archivo que no decodifica
                     return _ilegible_dict("no_decodifica")
-                r = _ocr_bytes(png, idioma, presupuesto)
-                del png, cuadro
+                r = _ocr_cuadro(img, idioma, presupuesto)
                 if r is None:
                     return None
                 if r["clasificacion"] == "ilegible":
