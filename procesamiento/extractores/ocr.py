@@ -809,46 +809,17 @@ def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
 _FONDOS_DEL_APLANADO = ((255, 255, 255), (0, 0, 0))
 
 
-def _normalizar_linea(linea: str) -> str:
-    """Un renglon sin espacios de mas, para comparar renglones entre pasadas."""
-    return " ".join(linea.split())
-
-
-def _renglones_tsv(salida_tsv: str) -> list[tuple[str, list[str]]]:
-    """Filas de palabra (nivel 5) de un `tsv`, agrupadas por renglon (pagina,
-    bloque, parrafo, linea) y en su orden: `(renglon normalizado, filas)`."""
-    renglones: dict[tuple, list[str]] = {}
-    for fila in salida_tsv.splitlines()[1:]:
-        campos = fila.split("\t")
-        if len(campos) >= 12 and campos[0] == "5":
-            renglones.setdefault(tuple(campos[1:5]), []).append(fila)
-    return [
-        (_normalizar_linea(" ".join(f.split("\t")[11] for f in filas)), filas)
-        for filas in renglones.values()
-    ]
-
-
 def _unir_pasadas(blanca: dict, negra: dict) -> dict:
     """UNION de las dos pasadas de un fotograma con transparencia real (Jax#338
     ronda 12): no se elige una y se descarta la otra, porque cada criterio de
     eleccion perdio texto real (TOTAL en una pasada y L500 en la otra daban
-    ok/imagen_sin_texto). Texto: el de la pasada blanca y despues los renglones
-    de la negra que no estan en la blanca (comparados sin espacios de mas). Las
-    metricas salen de `_analizar_tsv` sobre la union de los `tsv` (un renglon
-    de la negra que esta en la blanca no se cuenta dos veces) y la clasificacion
+    ok/imagen_sin_texto). Texto: el de la pasada blanca y despues el de la
+    negra. Las metricas salen de `_analizar_tsv` sobre la union de los `tsv` y
+    la clasificacion
     de `_clasificar`, las mismas funciones que para una pasada. El ruido que
     entre por una pasada lo marca la regla B (palabras dudosas)."""
-    vistos = {_normalizar_linea(linea) for linea in blanca["texto"].splitlines()} - {""}
-    nuevos = [
-        linea for linea in negra["texto"].splitlines()
-        if not linea.strip() or _normalizar_linea(linea) not in vistos
-    ]
-    texto = (blanca["texto"] + "\n" + "\n".join(nuevos)).strip()
-    renglones_blancos = {renglon for renglon, _ in _renglones_tsv(blanca["tsv"])} - {""}
-    filas_negras = [
-        fila for renglon, filas in _renglones_tsv(negra["tsv"])
-        if renglon not in renglones_blancos for fila in filas
-    ]
+    texto = (blanca["texto"] + "\n" + negra["texto"]).strip()
+    filas_negras = negra["tsv"].splitlines()[1:]
     analisis = _analizar_tsv("\n".join([blanca["tsv"], *filas_negras]))
     return {
         "texto": texto,
