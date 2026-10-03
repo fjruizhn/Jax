@@ -2916,6 +2916,207 @@ def test_la_inspeccion_de_procesos_tambien_mira_los_hilos_task_tid_status(tmp_pa
     assert pp._procesos_de_usuario(994) == [201, 203, 205]
 
 
+def test_un_status_ilegible_hace_fallar_cerrado_y_un_pid_que_desaparece_se_ignora(tmp_path, monkeypatch):
+    """Solo ENOENT/ESRCH (el proceso ya termino) se ignoran: cualquier otro error al leer el `status` de un pid
+    listado (PermissionError, EIO...) es «no se pudo inspeccionar el proceso» y se falla cerrado -- no se cuenta como
+    ausencia. Vale tambien para el `status` de cada hilo."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("permisos_proyectos", SCRIPT)
+    pp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pp)
+    for pid in ("301", "302", "303"):
+        (tmp_path / pid / "task" / pid).mkdir(parents=True)
+        (tmp_path / pid / "status").write_text("Uid:\t0\t0\t0\t0\n")
+        (tmp_path / pid / "task" / pid / "status").write_text("Uid:\t0\t0\t0\t0\n")
+    pp.RUTA_PROC = tmp_path
+    original = pp.Path.read_text
+
+    def con_error(excepcion, fragmento):
+        def leer(self, *a, **k):
+            if fragmento in str(self):
+                raise excepcion
+            return original(self, *a, **k)
+        return leer
+
+    # PermissionError en el status del proceso 301: falla cerrado
+    monkeypatch.setattr(pp.Path, "read_text", con_error(PermissionError(13, "Permission denied"), "/301/status"))
+    with pytest.raises(pp.ErrorPermisosProyectos, match="no se pudo inspeccionar el proceso 301"):
+        pp._procesos_de_usuario(994)
+    # PermissionError en el status de un HILO: tambien
+    monkeypatch.setattr(pp.Path, "read_text", con_error(PermissionError(13, "Permission denied"), "/302/task/302/status"))
+    with pytest.raises(pp.ErrorPermisosProyectos, match="no se pudo inspeccionar el proceso 302"):
+        pp._procesos_de_usuario(994)
+    # EIO: tambien
+    monkeypatch.setattr(pp.Path, "read_text", con_error(OSError(5, "Input/output error"), "/303/status"))
+    with pytest.raises(pp.ErrorPermisosProyectos, match="no se pudo inspeccionar el proceso 303"):
+        pp._procesos_de_usuario(994)
+    # el proceso termino entre el listado y la lectura (ENOENT, ESRCH): se ignora
+    monkeypatch.setattr(pp.Path, "read_text", con_error(FileNotFoundError(2, "No such file"), "/301/status"))
+    assert pp._procesos_de_usuario(994) == []
+    monkeypatch.setattr(pp.Path, "read_text", con_error(ProcessLookupError(3, "No such process"), "/302/task/302/status"))
+    assert pp._procesos_de_usuario(994) == []
+
+
+# --- el runbook: UN bloque ejecutable para --aplicar y otro para --deshacer, con stubs ----------------------
+
+_STUB_SYSTEMCTL = """#!/bin/sh
+D="$STUB_DIR"
+echo "systemctl $*" >> "$D/log"
+cmd="$1"; shift
+case "$cmd" in
+  list-units) cat "$D/list-units" ;;
+  list-timers) cat "$D/list-timers" ;;
+  show) grep "^$4 $2 " "$D/props" | sed "s/^[^ ]* [^ ]* //" ;;
+  stop) for u in "$@"; do case " $NO_SE_DETIENE " in *" $u "*) ;; *) sed -i "/^$u\\$/d" "$D/activas" ;; esac; done ;;
+  start) for u in "$@"; do grep -qx "$u" "$D/activas" || echo "$u" >> "$D/activas"; done ;;
+  is-active) grep -qx "$2" "$D/activas" ;;
+  mask|unmask) ;;
+esac
+exit 0
+"""
+
+
+def _entorno_del_bloque(tmp_path: Path, uid_jaxsvc: int, *, extra: dict | None = None) -> dict:
+    """Un PATH con stubs de `sudo`, `systemctl`, `ps`, `find` y `crontab`, y un /proc de mentira, para ejecutar el
+    bloque del runbook contra un arbol temporal sin tocar el host."""
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    datos = tmp_path / "datos"
+    datos.mkdir()
+    (datos / "log").write_text("")
+    (datos / "activas").write_text("jax-las-manos.service\njax-platform.service\njax-catalogo-modelos.timer\n")
+    (datos / "list-units").write_text(
+        "jax-las-manos.service loaded active running LAS MANOS\n"
+        "jax-platform.service loaded active running plataforma\n"
+        "jax-otra.service loaded active running de root\n")
+    (datos / "list-timers").write_text(
+        "Sat 2026-10-03 20:00:00 CST 1h left n/a n/a jax-catalogo-modelos.timer jax-catalogo-modelos.service\n")
+    (datos / "props").write_text(
+        "jax-las-manos.service User jaxsvc\njax-platform.service User jaxsvc\njax-otra.service User root\n"
+        "jax-catalogo-modelos.service User jaxsvc\njax-catalogo-modelos.timer Triggers jax-catalogo-modelos.service\n")
+    (datos / "ps").write_text("")
+    (datos / "permisos.sh").write_text('#!/bin/sh\necho "permisos $*" >> "$STUB_DIR/log"\nexit 0\n')
+    os.chmod(datos / "permisos.sh", 0o755)
+    scripts = {
+        "sudo": '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do case "$1" in -n) shift;; -u) shift 2;; *) break;; esac; done\nexec "$@"\n',
+        "systemctl": _STUB_SYSTEMCTL,
+        "ps": '#!/bin/sh\ncat "$STUB_DIR/ps"\n',
+        "find": '#!/bin/sh\n[ -n "$STUB_SETUID" ] && echo "$STUB_SETUID"\nexit 0\n',
+        "crontab": '#!/bin/sh\nif [ -n "$STUB_CRON" ]; then echo "$STUB_CRON"; exit 0; fi\necho "no crontab for jaxsvc" >&2\nexit 1\n',
+    }
+    for nombre, texto in scripts.items():
+        (stubs / nombre).write_text(texto)
+        os.chmod(stubs / nombre, 0o755)
+    proc = tmp_path / "proc"
+    (proc / "1" / "task" / "1").mkdir(parents=True)
+    (proc / "1" / "status").write_text("Uid:\t0\t0\t0\t0\n")
+    (proc / "1" / "task" / "1" / "status").write_text("Uid:\t0\t0\t0\t0\n")
+    entorno = dict(os.environ)
+    entorno.update({"PATH": f"{stubs}:{os.environ['PATH']}", "STUB_DIR": str(datos), "PERMISOS": str(datos / "permisos.sh"),
+                    "PROC": str(proc), "RAIZ": str(tmp_path / "raiz"), "NO_SE_DETIENE": ""})
+    entorno.update(extra or {})
+    return entorno
+
+
+def _bloque_del_runbook(marca: str) -> str:
+    import re
+    m = re.search(r"```bash\n(# " + marca + r"\n.*?)```", RUNBOOK_E2A.read_text(), re.S)
+    assert m, f"el runbook no tiene el bloque {marca}"
+    return m.group(1)
+
+
+def _correr_el_bloque(marca: str, tmp_path: Path, uid: int, **extra):
+    entorno = _entorno_del_bloque(tmp_path, uid, extra=extra.get("env"))
+    r = subprocess.run(["bash", "-s"], input=_bloque_del_runbook(marca), env=entorno, capture_output=True, text=True,
+                       timeout=60, cwd=str(RAIZ_REPO))
+    log = (tmp_path / "datos" / "log").read_text().splitlines()
+    return r, log
+
+
+def _indice(log: list, fragmento: str, desde: int = 0) -> int:
+    for i in range(desde, len(log)):
+        if fragmento in log[i]:
+            return i
+    raise AssertionError(f"{fragmento!r} no está en el log: {log}")
+
+
+@pytest.mark.parametrize("marca,modo", [("BLOQUE-APLICAR", "--aplicar"), ("BLOQUE-DESHACER", "--deshacer")])
+def test_el_bloque_del_runbook_con_todo_bien_para_restaura_y_arranca_en_orden(tmp_path, _identidades, marca, modo):
+    bloque = _bloque_del_runbook(marca)
+    assert "set -euo pipefail" in bloque and "trap " in bloque and modo in bloque
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid)
+    assert r.returncode == 0, r.stdout + r.stderr
+    # solo las unidades de jaxsvc (la de root no se toca) y el timer cuyo servicio es de jaxsvc
+    detenidas = [l.split()[-1] for l in log if l.startswith("systemctl stop")]
+    assert sorted(detenidas) == ["jax-catalogo-modelos.service", "jax-catalogo-modelos.timer", "jax-las-manos.service",
+                                 "jax-platform.service"], detenidas
+    assert "jax-otra.service" not in " ".join(log)
+    assert detenidas.index("jax-catalogo-modelos.timer") < detenidas.index("jax-las-manos.service"), "los timers primero"
+    i_modo = _indice(log, f"permisos {modo}")
+    for u in detenidas:
+        i_stop = _indice(log, f"systemctl stop {u}")
+        i_mask = _indice(log, f"systemctl mask --runtime {u}")
+        assert i_stop < i_mask < i_modo, (u, log)
+    assert _indice(log, "systemctl is-active") < i_modo, "se comprueba que no estén activas ANTES de mutar"
+    ultimo_stop = max(_indice(log, f"systemctl stop {u}") for u in detenidas)
+    assert ultimo_stop < i_modo
+    if modo == "--aplicar":
+        i_verif = _indice(log, "permisos --verificar", i_modo)
+        assert i_modo < i_verif
+    else:
+        assert not any("permisos --verificar" in l for l in log), "tras --deshacer el arbol ya no es el aplicado"
+        i_verif = i_modo
+    # el trap: unmask de lo que se enmascaro y start de lo que estaba activo, en orden INVERSO, despues de lo anterior
+    unmask = [l.split()[-1] for l in log if l.startswith("systemctl unmask --runtime")]
+    start = [l.split()[-1] for l in log if l.startswith("systemctl start")]
+    mascaras = [l.split()[-1] for l in log if l.startswith("systemctl mask --runtime")]
+    assert unmask == mascaras[::-1], (unmask, mascaras)
+    assert start == detenidas[::-1], (start, detenidas)
+    assert min(_indice(log, f"systemctl unmask --runtime {u}") for u in unmask) > i_verif
+    assert max(_indice(log, f"systemctl unmask --runtime {u}") for u in unmask) < min(
+        _indice(log, f"systemctl start {u}") for u in start)
+
+
+@pytest.mark.parametrize("marca,modo", [("BLOQUE-APLICAR", "--aplicar"), ("BLOQUE-DESHACER", "--deshacer")])
+def test_el_bloque_del_runbook_con_un_servicio_que_no_se_detiene_falla_antes_de_mutar_y_restaura(
+        tmp_path, _identidades, marca, modo):
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid,
+                               env={"NO_SE_DETIENE": "jax-platform.service"})
+    assert r.returncode != 0 and "jax-platform.service" in r.stderr, r.stdout + r.stderr
+    assert not any(modo in l for l in log if l.startswith("permisos")), "se mutó pese a que un servicio no se detuvo"
+    assert any(l.startswith("systemctl stop") for l in log)
+    # el trap restaura: desenmascara todo lo enmascarado y arranca lo que estaba activo
+    mascaras = [l.split()[-1] for l in log if l.startswith("systemctl mask --runtime")]
+    unmask = [l.split()[-1] for l in log if l.startswith("systemctl unmask --runtime")]
+    assert mascaras and unmask == mascaras[::-1], (mascaras, unmask)
+    assert any(l.startswith("systemctl start") for l in log)
+
+
+@pytest.mark.parametrize("que,env,fragmento", [
+    ("un setuid de jaxsvc", {"STUB_SETUID": "/usr/local/bin/escalar"}, "setuid"),
+    ("un crontab de jaxsvc", {"STUB_CRON": "* * * * * /bin/algo"}, "crontab"),
+])
+def test_el_bloque_del_runbook_falla_si_no_se_cumplen_las_premisas(tmp_path, _identidades, que, env, fragmento):
+    r, log = _correr_el_bloque("BLOQUE-APLICAR", tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=env)
+    assert r.returncode != 0 and fragmento in (r.stdout + r.stderr).lower(), (que, r.stdout + r.stderr)
+    assert not any(l.startswith("systemctl stop") for l in log), "paró unidades antes de comprobar las premisas"
+    assert not any(l.startswith("permisos") for l in log)
+
+
+def test_el_bloque_del_runbook_falla_si_proc_muestra_un_hilo_de_jaxsvc(tmp_path, _identidades):
+    uid = pwd.getpwnam("jaxsvc").pw_uid
+    entorno = _entorno_del_bloque(tmp_path, uid)
+    (Path(entorno["PROC"]) / "5" / "task" / "6").mkdir(parents=True)
+    (Path(entorno["PROC"]) / "5" / "status").write_text("Uid:\t0\t0\t0\t0\n")
+    (Path(entorno["PROC"]) / "5" / "task" / "6" / "status").write_text(f"Uid:\t0\t0\t0\t{uid}\n")
+    r = subprocess.run(["bash", "-s"], input=_bloque_del_runbook("BLOQUE-APLICAR"), env=entorno, capture_output=True,
+                       text=True, timeout=60, cwd=str(RAIZ_REPO))
+    log = (tmp_path / "datos" / "log").read_text().splitlines()
+    assert r.returncode != 0 and "/proc" in (r.stdout + r.stderr), r.stdout + r.stderr
+    assert not any(l.startswith("permisos") for l in log)
+    assert any(l.startswith("systemctl unmask") for l in log), "el trap no restauró"
+
+
 def test_la_inspeccion_real_de_proc_ve_un_proceso_jaxsvc_efimero(_identidades):
     """Contra el /proc real: un `sleep` lanzado como jaxsvc aparece, y deja de aparecer al terminar."""
     codigo = f"""
