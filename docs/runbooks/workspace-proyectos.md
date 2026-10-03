@@ -1,5 +1,5 @@
 # Workspace proyectos/ — permisos compartidos jaxsvc/fruiz
-> **Ruta (2026-10-03):** el workspace se movió de `/home/fruiz/jax-workspace` (disco raíz, sin espacio para la subida de E2a) a `/srv/jax-data/jax-workspace`. `JAX_WORKSPACE_DIR` en `/etc/jax/.env` apunta ahí. La ruta vieja quedó como symlink de compatibilidad hasta desplegar el fallo cerrado sin default. Historia: `docs/historia/2026-10-03-proyectos-e2a.md`.
+> **Ruta (2026-10-03):** el workspace se movió de `/home/fruiz/jax-workspace` (disco raíz, sin espacio para la subida de E2a) a `/srv/jax-data/jax-workspace`. `JAX_WORKSPACE_DIR` en `/etc/jax/.env` apunta ahí. La ruta vieja quedó como symlink de compatibilidad hasta desplegar el fallo cerrado sin default. Registro del despliegue: `~/respaldos-despliegue/2026-10-03-e2a/CHECKLIST.md` en hall9000.
 
 ## Purpose
 `proyectos/` del workspace de JAX (`$JAX_WORKSPACE_DIR/proyectos`, hoy
