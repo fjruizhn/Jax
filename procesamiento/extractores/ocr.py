@@ -163,7 +163,11 @@ CODIGO_OCR_SIN_MEMORIA = "ocr_sin_memoria"   # recursos, no archivo danado
 # regla de las IMAGENES (A/B/D, codigos nuevos, TIFF multipagina) -- la del PDF
 # escaneado no, asi que su cache sigue valiendo (no se re-OCR-ean los PDF).
 # "2": regla de Fernando de la ronda 1 de Jax#338.
-VERSION_LOGICA_IMAGEN = "2"
+# "3": Jax#338 ronda 13 -- la transparencia real se aplana sobre blanco Y sobre
+# negro y el resultado es la UNION de las dos pasadas (con duplicado por texto
+# y caja, y el tope de texto dudoso); una ficha escrita con "2" (la seleccion,
+# que podia perder texto) no se reusa.
+VERSION_LOGICA_IMAGEN = "3"
 
 
 def version_logica(camino: str) -> str | None:
