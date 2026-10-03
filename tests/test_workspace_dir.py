@@ -130,7 +130,7 @@ def test_import_a_nivel_de_modulo_sin_variable_no_arranca(modulo):
 _EXCLUIDOS = ("tests", "docs", ".git", "node_modules")
 _LLAMADA_CON_DEFAULT = re.compile(
     r"""(?:getenv|environ\.get)\(\s*["']JAX_WORKSPACE_DIR["']\s*,"""
-    r"""|(?:getenv|environ\.get)\(\s*["']JAX_WORKSPACE_DIR["']\s*\)[\s\\]*or[\s\\]*["'][^"']"""
+    r"""|(?:getenv|environ\.get)\(\s*["']JAX_WORKSPACE_DIR["']\s*\)[\s\\]*or\b"""
     r"""|environ\.setdefault\(\s*["']JAX_WORKSPACE_DIR["']""")
 
 
@@ -140,12 +140,17 @@ def _violaciones(raiz: Path) -> list[str]:
     stdlib: no depende de git ni de que el checkout tenga .git.
 
     Detecta: `getenv/environ.get("JAX_WORKSPACE_DIR", <default>)` (tambien
-    partido en lineas), `... ) or "<literal no vacio>"`,
+    partido en lineas), CUALQUIER `or` que siga a la lectura (literal, `""`,
+    constante, f-string, raw, Path(...), Path.home(), `None`, `raise_()`: se
+    marcan todas, tambien las inocuas, por simplicidad),
     `environ.setdefault("JAX_WORKSPACE_DIR", ...)` y el literal viejo.
 
     NO detecta (alcance declarado, es un barrido de regex y no un analisis):
     `getenv(key="JAX_WORKSPACE_DIR", ...)`; una constante intermedia
     (`V = "JAX_WORKSPACE_DIR"; getenv(V, "/x")`);
+    `x = os.environ.get("JAX_WORKSPACE_DIR")` seguido de un `or` en otra
+    sentencia (`x or "/srv/x"`); un `or` que no sea adyacente a la lectura
+    (`(a or b)` envolviendo otra expresion);
     `Path("/home/fruiz") / "jax-workspace"` ni `"~/jax-workspace"` (el
     literal viejo se busca entero); y nada que no sea .py (shell, units
     systemd, YAML)."""
@@ -192,9 +197,22 @@ def test_el_barrido_detecta_or_y_setdefault(tmp_path, llamada):
     assert _violaciones(tmp_path) == ["otro.py"]
 
 
-def test_el_barrido_no_marca_or_con_literal_vacio(tmp_path):
-    (tmp_path / "ok.py").write_text('import os\nX = os.environ.get("JAX_WORKSPACE_DIR") or ""\n')
-    assert _violaciones(tmp_path) == []
+@pytest.mark.parametrize("resto", [
+    '""',
+    "DEFAULT_WS",
+    'Path.home() / "w"',
+    'f"{H}/x"',
+    'r"/x"',
+    '"""/x"""',
+    'Path("/x")',
+    "None",
+    "raise_()",
+])
+def test_el_barrido_marca_cualquier_or_tras_la_lectura(tmp_path, resto):
+    # `or ""` tambien: Path("") es el directorio actual, un default silencioso.
+    (tmp_path / "otro.py").write_text(
+        f'import os\nX = os.environ.get("JAX_WORKSPACE_DIR") or {resto}\n')
+    assert _violaciones(tmp_path) == ["otro.py"]
 
 
 def test_el_barrido_no_marca_la_lectura_sin_default_ni_las_exclusiones(tmp_path):
