@@ -10,6 +10,7 @@ on:
       - "projects/las-voces/**"
       - "scripts/axioma_sync.py"
       - "tests/test_las_voces_sync.py"
+      - "tests/_las_voces_process.py"
       - "tests/las_voces_qwen_parser.mjs"
       - ".github/workflows/las-voces-sync.yml"
   pull_request:
@@ -18,6 +19,7 @@ on:
       - "projects/las-voces/**"
       - "scripts/axioma_sync.py"
       - "tests/test_las_voces_sync.py"
+      - "tests/_las_voces_process.py"
       - "tests/las_voces_qwen_parser.mjs"
       - ".github/workflows/las-voces-sync.yml"
 

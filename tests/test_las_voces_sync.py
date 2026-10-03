@@ -4,11 +4,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
+
+from _las_voces_process import run_local
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -22,8 +23,8 @@ SPEC.loader.exec_module(sync)
 def root(tmp_path: Path) -> Path:
     project = tmp_path / "projects" / "las-voces"
     shutil.copytree(REPO / "projects" / "las-voces", project, ignore=shutil.ignore_patterns("AGENTS.md", "CLAUDE.md", "QWEN.md", ".qwen", "manifest.json"))
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "fixture"], check=True)
+    run_local(["git", "init", "-q", str(tmp_path)], check=True)
+    run_local(["git", "-C", str(tmp_path), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "fixture"], check=True)
     return tmp_path
 
 
@@ -154,7 +155,7 @@ def test_lone_surrogate_cli_exits_two_without_traceback(root: Path) -> None:
     script = root / "scripts/axioma_sync.py"
     script.parent.mkdir()
     shutil.copyfile(REPO / "scripts/axioma_sync.py", script)
-    result = subprocess.run(["python3", str(script), "las-voces", "--check"], capture_output=True, text=True)
+    result = run_local(["python3", str(script), "las-voces", "--check"], capture_output=True, text=True)
     assert result.returncode == 2
     assert result.stderr.startswith("SYNC FAILED CLOSED:")
     assert "Traceback" not in result.stderr
