@@ -1779,6 +1779,53 @@ jobs:
             echo "PISO ROTO: se esperaban 18 tests CORRIDOS de F2-E-SR source integrity."; exit 1; }
         env:
           PYTHONPATH: .:las_manos
+      - name: F2-E-SR3 Processing ownership and governed-status regressions
+        # SR3 has its own source, scope, registry and renderer boundary. Keep
+        # this command explicit so a future general-suite refactor cannot
+        # silently remove those checks from CI.
+        run: |
+          python -m pytest \
+            tests/test_processing_job_store.py \
+            tests/test_f2e_runtime_status.py \
+            tests/test_f2e_runtime_status_remediation.py \
+            tests/test_governed_resolution.py \
+            tests/test_governed_renderer.py \
+            -q 2>&1 | tee /tmp/f2e-sr3
+          # 194 -> 206 (2026-10-03, SR3 replay ownership coherence): +12
+          # parametrized ProcessingJobStore replay tests. Measured on Python
+          # 3.12 with this exact five-file command.
+          # 206 -> 208 (2026-10-03, SR3 truncated JSONL tails): +2 final
+          # record integrity cases. Measured on Python 3.12 with this exact
+          # five-file command.
+          # 208 -> 212 (2026-10-03, SR3 caller immutability): +4 store
+          # derivation, update-rejection, and replay-contradiction cases.
+          # Measured on Python 3.12 with this exact five-file command.
+          grep -qE "^212 passed" /tmp/f2e-sr3 || {
+            echo "PISO ROTO: se esperaban 212 tests CORRIDOS de F2-E-SR3."; exit 1; }
+        env:
+          PYTHONPATH: .:las_manos
+      - name: F2-E-SR3 Processing source authentication and routing regressions
+        # The owner header gate and route persistence are a distinct boundary
+        # from status resolution. Keep their exact command visible in CI.
+        run: |
+          python -m pytest \
+            tests/test_processing_job_store.py \
+            tests/test_las_manos_auth_servicio.py \
+            las_manos/_procesamiento_routes_test.py \
+            -q 2>&1 | tee /tmp/f2e-sr3-source
+          # 111 -> 124 (2026-10-03, SR3 flat/nested owner coherence): +12
+          # ProcessingJobStore replay cases and +1 endpoint owner-dimension case.
+          # Measured on Python 3.12 with this exact three-file command.
+          # 124 -> 127 (2026-10-03): +2 truncated JSONL-tail cases and +1
+          # authenticated-caller regression. Measured on Python 3.12 with
+          # this exact three-file command.
+          # 127 -> 131 (2026-10-03, SR3 caller immutability): +4 source-store
+          # derivation, update-rejection, and replay-contradiction cases.
+          # Measured on Python 3.12 with this exact three-file command.
+          grep -qE "^131 passed" /tmp/f2e-sr3-source || {
+            echo "PISO ROTO: se esperaban 131 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
+        env:
+          PYTHONPATH: .:las_manos
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-03: 39 (SP1 + arreglo del test rojo) + 39
         # (tests/test_governance_grounding.py, SP3 + ola de fixes de la
@@ -1829,8 +1876,12 @@ jobs:
           # including completed through direct/nested/encoded TOOL_DATA and
           # NARRATIVE_TEXT plus unrelated-data negative controls.
           # Source-integrity cases run in their own exact-count step below.
-          grep -qE "^255 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 255 tests CORRIDOS."; exit 1; }
+          # 255 -> 263 el 2026-10-03 (F2-E-SR3): Processing canonical
+          # predicate vocabulary, root-only governed-domain import tripwire,
+          # native/canonical structured shapes, bounded encodings, and the
+          # F2-B -> F2-C -> F2-D receipt/render/revalidation path.
+          grep -qE "^263 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 263 tests CORRIDOS."; exit 1; }
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en
@@ -5020,6 +5071,16 @@ jobs:
           #   output_config como campo conocido y su variante (2) y la cobertura de las 14 etiquetas de
           #   MessagesRequest de Ollama v0.34.3 (1). Medido con el mismo metodo: 3325 passed + 1 failed
           #   preexistente = 3326; los 45 skipped no cambian. Si el runner da otro numero, manda el runner.
+          # 3164 -> 3165 (2026-10-03, SR3 owner protocol): +1 puro en
+          #   las_manos/_procesamiento_routes_test.py, que verifica que los
+          #   envelopes de owner faltante/no canónico/desconocido/duplicado no
+          #   agregan un evento Processing JSONL. GitHub run 37133259910, job 111232503222
+          #   measured 3165 passed, 45 skipped, 1 xfailed; the skip set stayed exact.
+          # 3326 -> 3327 (2026-10-03, SR3 rebase after Ejecutor proxy #333):
+          #   the same owner-envelope regression measured again against 40119f0
+          #   with the exact tests-puros command, Python 3.12, and the runner
+          #   isolation mounts. This is a fresh measurement, not arithmetic on
+          #   the proxy floor: 3327 passed, 45 skipped, 1 xfailed.
           #
           # 2811 -> 2812 (2026-09-25, las_manos/_tool_authority_test.py::test_5c_write_file_
           # queda_escribible_por_grupo_bajo_acl_por_defecto -- reproduce B1 de
@@ -5048,8 +5109,8 @@ jobs:
           # mismo piso a 2821 por una causa completamente distinta (no relacionada) --
           # quien integre esa rama DESPUES de esta, o esta DESPUES de esa, tiene que
           # re-medir sobre master en vez de sumar los deltas a ciegas.
-          grep -qE "^3326 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3326 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          grep -qE "^3327 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 3327 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -5700,11 +5761,21 @@ jobs:
       #   `_trabajo_de` rechaza lo que no es uuid canonico). Ademas `test_uuid_de_otro_largo_da_422`
       #   comprueba el codigo. Las pruebas que pasaban `"p"`/`"proy"` como proyecto a
       #   `_ejecutar_trabajo` pasan `UUID_PRUEBA` (ya no hay nombre libre). Local: 66 passed.
+      # 66 -> 68 el 2026-10-03 (SR3 owner protocol): +2 pruebas de ruta para
+      #   rechazos retryable sin append de owner faltante/no canónico/desconocido/
+      #   duplicado y para `usuario` legado como extra prohibido aun con owner válido.
+      #   Confirmado por GitHub run 37133813911: 68 passed, 7 warnings.
+      # 68 -> 69 el 2026-10-03 (SR3 owner coherence): +1 que exige cada
+      #   dimensión exacta de owner para GET y cancel sin mutar JSONL. Medido
+      #   localmente en Python 3.12: 69 passed, 7 warnings.
+      # 69 -> 70 el 2026-10-03 (B-6): +1 que conserva `user:<user_id>` del
+      #   sobre autenticado como caller. Medido localmente en Python 3.12:
+      #   70 passed, 7 warnings.
       - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
-          grep -qE "^66 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 66 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          grep -qE "^70 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 70 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

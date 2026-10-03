@@ -1,5 +1,5 @@
-# Los ocho predicados cerrados de REFORMAS-v3.md §3.1.3 y dos adiciones
-# autorizadas de F2-E-SR-001 — la lista es cerrada y versionada; ampliarla requiere enmienda
+# Los ocho predicados cerrados de REFORMAS-v3.md §3.1.3 y tres adiciones
+# autorizadas (dos de F2-E-SR-001 y una de Fernando para SR3) — la lista es cerrada y versionada; ampliarla requiere enmienda
 # (según el propio §3.1.3).
 #
 # Fuente: /opt/jax/docs/REFORMAS-v3.md §3.1.3, sha256
@@ -27,6 +27,9 @@ predicates:
   - name: JOB_STATUS
     args: [job_id, status]
     source_of_truth: "Motor Registry JobStore"
+  - name: PROCESSING_JOB_STATUS
+    args: [processing_job_id, status]
+    source_of_truth: "LAS MANOS ProcessingJobStore"
   - name: PIPELINE_STATUS
     args: [pipeline_id, status]
     source_of_truth: "Jacobs canonical store"

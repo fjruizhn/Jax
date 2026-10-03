@@ -13,7 +13,7 @@ from policy.governance.resolution import (
     RuntimeStatusEvidence, _runtime_status_evidence_from_server,
 )
 from policy.governance.runtime_status import (JacobsPipelineStatusResolver,
-    MotorJobStatusResolver, build_runtime_status_registry,
+    MotorJobStatusResolver, ProcessingJobStatusResolver, build_runtime_status_registry,
     runtime_status_source_configuration_digest)
 from policy.governance.governed_domain import GovernedDomainSpecification
 from motor_registry.job_store import JobStore
@@ -217,12 +217,86 @@ def test_motor_resolver_rejects_caller_selected_store():
         MotorJobStatusResolver(object())
 
 
-def test_runtime_registry_is_exactly_the_four_authorized_predicates():
+def test_runtime_registry_is_exactly_the_five_authorized_predicates():
     registry = _runtime_registry()
     assert {row["predicate"] for row in registry.status_table()} == {
-        "JOB_STATUS", "PIPELINE_STATUS", "FACET_RUNTIME_STATUS", "ENGINE_STATUS"}
+        "JOB_STATUS", "PROCESSING_JOB_STATUS", "PIPELINE_STATUS", "FACET_RUNTIME_STATUS", "ENGINE_STATUS"}
     assert all(row["freshness_sla_seconds"] in {15, 60} for row in registry.status_table())
     assert all(row["source_owner"] for row in registry.status_table())
+
+
+def test_processing_resolver_uses_only_canonical_owner_bound_singleton(tmp_path, monkeypatch):
+    import procesamiento_routes
+    from processing_job_store import ProcessingJobStore
+    from processing_ownership import ProcessingOwnershipContext
+
+    store = ProcessingJobStore(str(tmp_path / "procesamiento_jobs.jsonl"))
+    monkeypatch.setattr(procesamiento_routes, "_STORE", store)
+    owner = ProcessingOwnershipContext("processing-owner.1", "1", "2", "3")
+    job_id = store.create(ownership=owner, caller="plataforma", capability="processing",
+        motor="n/a", trace_id="trace", prompt="", recursion_depth=0)
+    scoped = _scope(tenant_id="1", subject_id="2", project_id="3")
+    evidence = ProcessingJobStatusResolver().evidence(
+        {"processing_job_id": job_id, "status": "pending"}, scoped)
+    assert evidence.adapter_kind is AdapterKind.LAS_MANOS_PROCESSING_JOB_STATUS
+    assert evidence.observation.status is ResolutionStatus.RESOLVED
+    assert evidence.observation.result == {"processing_job_id": job_id, "status": "pending"}
+    assert ProcessingJobStatusResolver().evidence(
+        {"processing_job_id": job_id, "status": "pending"},
+        _scope(tenant_id="1", subject_id="2", project_id="other")).observation.status is ResolutionStatus.WRONG_SCOPE
+
+
+def test_processing_resolver_rejects_legacy_unknown_and_wrong_arguments(tmp_path, monkeypatch):
+    import procesamiento_routes
+    from processing_job_store import ProcessingJobStore
+    from processing_ownership import ProcessingOwnershipContext
+
+    store = ProcessingJobStore(str(tmp_path / "procesamiento_jobs.jsonl"))
+    monkeypatch.setattr(procesamiento_routes, "_STORE", store)
+    job_id = store.create(ownership=ProcessingOwnershipContext("processing-owner.1", "1", "2", "3"),
+        caller="plataforma", capability="processing", motor="n/a", trace_id="trace", prompt="", recursion_depth=0)
+    resolver = ProcessingJobStatusResolver()
+    with pytest.raises(Exception):
+        resolver.evidence({"job_id": job_id, "status": "pending"}, _scope(tenant_id="1", subject_id="2", project_id="3"))
+    assert resolver.evidence({"processing_job_id": job_id, "status": "not-a-status"},
+        _scope(tenant_id="1", subject_id="2", project_id="3")).observation.status is ResolutionStatus.UNAVAILABLE
+
+
+def test_processing_resolver_logs_sanitized_expected_source_read_failure(tmp_path, monkeypatch, caplog):
+    import procesamiento_routes
+    from processing_job_store import ProcessingJobStore
+    from processing_ownership import ProcessingOwnershipContext
+
+    store = ProcessingJobStore(str(tmp_path / "procesamiento_jobs.jsonl"))
+    monkeypatch.setattr(procesamiento_routes, "_STORE", store)
+    job_id = store.create(ownership=ProcessingOwnershipContext("processing-owner.1", "1", "2", "3"),
+        caller="plataforma", capability="processing", motor="n/a", trace_id="trace", prompt="", recursion_depth=0)
+    monkeypatch.setattr(store, "authoritative_snapshot", lambda _job_id: (_ for _ in ()).throw(OSError("do not log source details")))
+    evidence = ProcessingJobStatusResolver().evidence(
+        {"processing_job_id": job_id, "status": "pending"},
+        _scope(tenant_id="1", subject_id="2", project_id="3"))
+    assert evidence.observation.status is ResolutionStatus.UNAVAILABLE
+    assert "OSError" in caplog.text and "source details" not in caplog.text
+
+
+def test_processing_registry_rejects_requested_status_that_differs_from_fresh_source(tmp_path, monkeypatch):
+    import procesamiento_routes
+    from processing_job_store import ProcessingJobStore
+    from processing_ownership import ProcessingOwnershipContext
+
+    store = ProcessingJobStore(str(tmp_path / "procesamiento_jobs.jsonl"))
+    monkeypatch.setattr(procesamiento_routes, "_STORE", store)
+    job_id = store.create(ownership=ProcessingOwnershipContext("processing-owner.1", "1", "2", "3"),
+        caller="plataforma", capability="processing", motor="n/a", trace_id="trace", prompt="", recursion_depth=0)
+    claim_scope = _scope(tenant_id="1", subject_id="2", project_id="3")
+    registry = build_runtime_status_registry(claim_scope,
+        authenticator=ReceiptAuthenticator.for_testing(b"x" * 32),
+        platform_source_configuration=_PLATFORM_SOURCE_CONFIGURATION)
+    evidence = ProcessingJobStatusResolver().evidence(
+        {"processing_job_id": job_id, "status": "failed"}, claim_scope)
+    receipt = registry.resolve("PROCESSING_JOB_STATUS", {"processing_job_id": job_id, "status": "failed"},
+        claim_scope, validation_time=datetime.now(timezone.utc), runtime_status_evidence=evidence)
+    assert receipt.status is ResolutionStatus.SOURCE_MISMATCH
 
 
 def test_installation_global_evidence_cannot_replay_across_response_scope():

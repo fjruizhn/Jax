@@ -37,6 +37,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import auth_servicio
+from processing_ownership import ProcessingOwnershipError, processing_ownership_from_headers
 from auth_servicio import (
     ENCABEZADO, IDENTIDAD_JACOBS, IDENTIDAD_PLATAFORMA, VARIABLES,
     cargar_credenciales, proteger,
@@ -55,6 +56,19 @@ CRED = {
 
 def _credenciales() -> dict[str, bytes]:
     return {k: v.encode("ascii") for k, v in CRED.items()}
+
+
+def test_processing_owner_headers_are_closed_and_canonical():
+    headers = [(b"x-jax-processing-owner-version", b"processing-owner.1"),
+               (b"x-jax-processing-tenant-id", b"1"), (b"x-jax-processing-user-id", b"2"),
+               (b"x-jax-processing-project-id", b"3")]
+    assert processing_ownership_from_headers(headers).project_id == "3"
+    with pytest.raises(ProcessingOwnershipError):
+        processing_ownership_from_headers(headers + [(b"x-jax-processing-tenant-id", b"1")])
+    with pytest.raises(ProcessingOwnershipError):
+        processing_ownership_from_headers(headers[:-1])
+    with pytest.raises(ProcessingOwnershipError):
+        processing_ownership_from_headers(headers[:-1] + [(b"x-jax-processing-project-id", b"03")])
 
 
 def _app() -> FastAPI:

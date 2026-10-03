@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import math
 import sys
 from typing import Mapping
@@ -27,18 +28,21 @@ from .resolution import (AdapterKind, ResolutionObservation, ResolutionStatus,
                          TrustedAdapterRegistration, RegistryEntry,
                          _build_approved_registry_for_server, SourceScopeClass)
 
+logger = logging.getLogger(__name__)
+
 _PLATFORM_KINDS = {
     "FACET_RUNTIME_STATUS": (AdapterKind.FACET_RUNTIME_STATUS, "platform:facet-state"),
     "ENGINE_STATUS": (AdapterKind.ENGINE_STATUS, "platform:las-manos-health"),
 }
-RUNTIME_STATUS_API_VERSION = "f2-e.runtime-status.2"
-_BINDING_VERSION = "f2-e.runtime-status.2"
-_RESOLVER_VERSION = "f2-e.runtime-status-resolver.2"
+RUNTIME_STATUS_API_VERSION = "f2-e.runtime-status.3"
+_BINDING_VERSION = "f2-e.runtime-status.3"
+_RESOLVER_VERSION = "f2-e.runtime-status-resolver.3"
 _RUNTIME_SPECS = {
     "JOB_STATUS": (AdapterKind.MOTOR_JOB_STATUS, "motor:job-store", "authority:motor-registry", 60, SourceScopeClass.EXACT_RESPONSE_SCOPE, "MotorJobStatusResolver"),
     "PIPELINE_STATUS": (AdapterKind.JACOBS_PIPELINE_STATUS, "jacobs:canonical-store", "authority:jacobs", 60, SourceScopeClass.EXACT_RESPONSE_SCOPE, "JacobsPipelineStatusResolver"),
     "FACET_RUNTIME_STATUS": (AdapterKind.FACET_RUNTIME_STATUS, "platform:facet-state", "authority:jax-platform", 15, SourceScopeClass.INSTALLATION_GLOBAL, "PlatformFacetRuntimeStatusResolver"),
     "ENGINE_STATUS": (AdapterKind.ENGINE_STATUS, "platform:las-manos-health", "authority:jax-platform", 60, SourceScopeClass.INSTALLATION_GLOBAL, "PlatformEngineStatusResolver"),
+    "PROCESSING_JOB_STATUS": (AdapterKind.LAS_MANOS_PROCESSING_JOB_STATUS, "las-manos:processing-job-store", "authority:las-manos", 60, SourceScopeClass.EXACT_RESPONSE_SCOPE, "ProcessingJobStatusResolver"),
 }
 
 
@@ -93,6 +97,26 @@ def _job_store_source_configuration() -> dict[str, str]:
         "durability": "append-flush-fsync-v1",
     }
 
+
+def _processing_job_store_source_configuration() -> dict[str, object]:
+    """Read only the fixed LAS MANOS Processing source identity."""
+    routes = sys.modules.get("procesamiento_routes")
+    store = getattr(routes, "_STORE", None) if routes is not None else None
+    source_config = getattr(store, "source_configuration", None)
+    if callable(source_config):
+        return source_config()
+    from pathlib import Path
+    repository = Path(__file__).resolve().parents[2]
+    return {
+        "store_contract": "processing-job-store-v1",
+        "source_id": str((repository / "las_manos" / "logs" / "procesamiento_jobs.jsonl").resolve()),
+        "event_format": "processing-job-event-v1",
+        "durability": "append-flush-fsync-v1",
+        "ownership_contract": "platform-authenticated-processing-owner.1",
+        "source_role": "las-manos-processing-jobs",
+        "allowed_statuses": ["pending", "running", "cancelling", "completed", "failed", "cancelled"],
+    }
+
 def runtime_status_source_configuration_digest(predicate: str, source_configuration: Mapping[str, object]) -> str:
     """Digest a closed, server-owned non-secret runtime source identity."""
     if predicate not in _RUNTIME_SPECS or not isinstance(source_configuration, Mapping):
@@ -122,6 +146,17 @@ def runtime_status_source_configuration_digest(predicate: str, source_configurat
                 or config["event_format"] != "motor-job-event-v1"
                 or config["durability"] != "append-flush-fsync-v1"):
             raise GovernanceContractError("Motor JobStore source configuration mismatch")
+    elif predicate == "PROCESSING_JOB_STATUS":
+        config = _plain(source_configuration)
+        if (set(config) != {"store_contract", "source_id", "event_format", "durability", "ownership_contract", "source_role", "allowed_statuses"}
+                or config["store_contract"] != "processing-job-store-v1"
+                or not isinstance(config["source_id"], str) or not config["source_id"]
+                or config["event_format"] != "processing-job-event-v1"
+                or config["durability"] != "append-flush-fsync-v1"
+                or config["ownership_contract"] != "platform-authenticated-processing-owner.1"
+                or config["source_role"] != "las-manos-processing-jobs"
+                or config["allowed_statuses"] != ["pending", "running", "cancelling", "completed", "failed", "cancelled"]):
+            raise GovernanceContractError("Processing JobStore source configuration mismatch")
     else:
         config = _plain(source_configuration)
         if (set(config) != {"database_engine", "host", "port", "database", "store_contract", "table"}
@@ -138,12 +173,13 @@ def runtime_status_source_configuration_digest(predicate: str, source_configurat
 
 def build_runtime_status_registry(scope: ResponseScope, *, authenticator,
                                   platform_source_configuration: Mapping[str, Mapping[str, object]]):
-    """Build exactly the four human-authorized F2-E entries from fixed constants."""
+    """Build exactly the five human-authorized F2-E entries from fixed constants."""
     if not isinstance(scope, ResponseScope):
         raise GovernanceContractError("runtime registry requires ResponseScope")
     if not isinstance(platform_source_configuration, Mapping) or set(platform_source_configuration) != {"FACET_RUNTIME_STATUS", "ENGINE_STATUS"}:
         raise GovernanceContractError("Platform runtime source configuration required")
     job_config = _job_store_source_configuration()
+    processing_job_config = _processing_job_store_source_configuration()
     jacobs_config = _jacobs_source_configuration()
     rule = ScopeRule(scope.environment, scope.tenant_id, scope.project_id, scope.subject_id,
         scope.actor_id, scope.audience, scope.component_id)
@@ -151,7 +187,8 @@ def build_runtime_status_registry(scope: ResponseScope, *, authenticator,
     for predicate, (kind, source, owner, sla, source_scope, resolver_name) in _RUNTIME_SPECS.items():
         identity = f"policy.governance.runtime_status:{resolver_name}"
         source_config = (platform_source_configuration[predicate] if predicate in _PLATFORM_KINDS
-            else job_config if predicate == "JOB_STATUS" else jacobs_config)
+            else job_config if predicate == "JOB_STATUS"
+            else processing_job_config if predicate == "PROCESSING_JOB_STATUS" else jacobs_config)
         config_digest = runtime_status_source_configuration_digest(predicate, source_config)
         binding = PredicateAuthorityBinding(predicate, _BINDING_VERSION, source, owner,
             scope.environment, rule, rule, sla, ConflictPolicy.SINGLE_SOURCE_REQUIRED,
@@ -159,7 +196,9 @@ def build_runtime_status_registry(scope: ResponseScope, *, authenticator,
             source_scope_class=source_scope)
         adapter = TrustedAdapterRegistration(kind, identity, _RESOLVER_VERSION, source,
             config_digest)
-        keys = ("job_id", "status") if predicate == "JOB_STATUS" else (("pipeline_id", "status") if predicate == "PIPELINE_STATUS" else ("name", "status"))
+        keys = (("job_id", "status") if predicate == "JOB_STATUS"
+            else ("processing_job_id", "status") if predicate == "PROCESSING_JOB_STATUS"
+            else ("pipeline_id", "status") if predicate == "PIPELINE_STATUS" else ("name", "status"))
         entries.append(RegistryEntry(binding, adapter, keys, f"{predicate}@{_BINDING_VERSION}:es"))
     return _build_approved_registry_for_server(tuple(entries), authenticator=authenticator)
 
@@ -235,6 +274,56 @@ class MotorJobStatusResolver:
                 {"job_id": job_id, "status": view.status.value})
         return _runtime_status_evidence_from_server(AdapterKind.MOTOR_JOB_STATUS, obs, scope,
             runtime_status_source_configuration_digest("JOB_STATUS", self._store.source_configuration()))
+
+
+class ProcessingJobStatusResolver:
+    """Resolve only from the server singleton and immutable Processing owner."""
+    def __init__(self):
+        import procesamiento_routes
+        from processing_job_store import ProcessingJobStore
+        if type(procesamiento_routes._STORE) is not ProcessingJobStore:
+            raise GovernanceContractError("canonical ProcessingJobStore unavailable")
+        self._store = procesamiento_routes._STORE
+
+    def evidence(self, arguments: Mapping[str, object], scope: ResponseScope) -> RuntimeStatusEvidence:
+        if (not isinstance(scope, ResponseScope) or scope.project_id is None
+                or scope.subject_id is None or scope.actor_id is None):
+            raise GovernanceContractError("PROCESSING_JOB_STATUS exact scope required")
+        if not isinstance(arguments, Mapping) or set(arguments) != {"processing_job_id", "status"}:
+            raise GovernanceContractError("PROCESSING_JOB_STATUS arguments invalid")
+        job_id, requested_status = arguments["processing_job_id"], arguments["status"]
+        if not isinstance(job_id, str) or not isinstance(requested_status, str):
+            raise GovernanceContractError("PROCESSING_JOB_STATUS arguments invalid")
+        from processing_job_store import ProcessingJobStatus
+        try:
+            ProcessingJobStatus(requested_status)
+        except ValueError:
+            snapshot = None
+        else:
+            try:
+                snapshot = self._store.authoritative_snapshot(job_id)
+            except (OSError, TypeError, ValueError) as exc:  # fail-soft: expected authoritative-store read failure is UNAVAILABLE.
+                logger.warning("Processing authoritative source read unavailable: %s", type(exc).__name__)
+                snapshot = None
+        if snapshot is None:
+            observation = ResolutionObservation(ResolutionStatus.UNAVAILABLE, datetime.now(timezone.utc),
+                "las-manos-processing-job:unavailable", {})
+        elif (snapshot.owner.tenant_id, snapshot.owner.user_id, snapshot.owner.project_id) != (
+                scope.tenant_id, scope.subject_id, scope.project_id):
+            observation = ResolutionObservation(ResolutionStatus.WRONG_SCOPE, snapshot.observed_at,
+                f"las-manos-processing-job:{job_id}", {})
+        else:
+            actual_status = snapshot.view.status.value
+            if actual_status not in {item.value for item in ProcessingJobStatus}:
+                observation = ResolutionObservation(ResolutionStatus.UNAVAILABLE, datetime.now(timezone.utc),
+                    "las-manos-processing-job:unavailable", {})
+            else:
+                observation = ResolutionObservation(ResolutionStatus.RESOLVED, snapshot.observed_at,
+                    f"las-manos-processing-job:{job_id}",
+                    {"processing_job_id": job_id, "status": actual_status})
+        return _runtime_status_evidence_from_server(AdapterKind.LAS_MANOS_PROCESSING_JOB_STATUS,
+            observation, scope, runtime_status_source_configuration_digest(
+                "PROCESSING_JOB_STATUS", self._store.source_configuration()))
 
 class JacobsPipelineStatusResolver:
     """Canonical Jacobs store only; projections and caller stores are excluded."""

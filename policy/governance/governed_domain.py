@@ -16,12 +16,12 @@ from typing import Mapping
 
 from .response import GovernanceContractError, _text
 
-GOVERNED_DOMAIN_SPEC_VERSION = "f2-c.domain.5"
+GOVERNED_DOMAIN_SPEC_VERSION = "f2-c.domain.6"
 GOVERNED_RENDERER_API_VERSION = "f2-c.renderer.3"
 GOVERNED_ENVELOPE_SCHEMA_VERSIONS = frozenset({"f2-c.1"})
 
 # Structured payload inspection is deliberately small and bounded. It exists
-# only to prevent the four registered runtime-status propositions from being
+# only to prevent the five registered runtime-status propositions from being
 # encoded into otherwise ungoverned content; it is not a general JSON parser
 # or natural-language classifier.
 _STRUCTURED_STATUS_MAX_STRING_CHARS = 65_536
@@ -37,6 +37,9 @@ _STRUCTURED_STATUS_MAX_NODES = 1_024
 _STRUCTURED_JOB_STATUS_VALUES = frozenset({
     "pending", "running", "completed", "failed", "cancelled", "cancelling",
     "rejected", "tools_requested",
+})
+_STRUCTURED_PROCESSING_JOB_STATUS_VALUES = frozenset({
+    "pending", "running", "cancelling", "completed", "failed", "cancelled",
 })
 _STRUCTURED_PIPELINE_STATUS_VALUES = frozenset({
     "pending", "running", "completed", "failed", "aborted", "interrupted",
@@ -160,6 +163,7 @@ class GovernedDomainSpecification:
             ("ENGINE_STATUS", rf"\b(?:{subject})\b\s+{copula}\s+(?:{engine_status})\b"),
             ("FILE_EXISTS", rf"\b(?:the\s+)?(?:file|archivo|path|ruta)\s+(?:{subject}|/[^\s]+)\s+{exists}\b|\b(?:{subject}|/[^\s]+)\s+{exists}\b"),
             ("FACET_EXISTS", rf"\b(?:facet|faceta)\s+(?:{subject})\s+{exists}\b"),
+            ("PROCESSING_JOB_STATUS", r"\b(?:processing\s+job|trabajo\s+de\s+procesamiento)\s+[^\s]+\s+(?:(?:(?:is|was|está|esta|fue|ha)\s+)?(?:pending|running|cancelling|completed|failed|cancelled)|no\s+(?:pending|running|cancelling|completed|failed|cancelled))\b"),
             ("JOB_STATUS", rf"\b(?:job|trabajo)\s+[^\s]+\s+(?:(?:(?:is|was|está|esta|fue|ha)\s+)?(?:{status})|no\s+(?:{status}))\b"),
             ("PIPELINE_STATUS", rf"\b(?:pipeline|tubería)\s+[^\s]+\s+(?:(?:(?:is|was|está|esta|fue|ha)\s+)?(?:{status})|no\s+(?:{status}))\b"),
             ("FACET_RUNTIME_STATUS", rf"\b(?:facet|faceta)\s+[^\s]+\s+{copula}\s+(?:{status})\b"),
@@ -249,13 +253,19 @@ class GovernedDomainSpecification:
                 return set()
             keys = set(node)
             status = node.get("status")
-            if not isinstance(status, str):
-                return set()
             # Machine payload status is exact by contract. In particular, do
             # not accept narrative aliases or whitespace/case normalization.
             found: set[str] = set()
+            if ({"job_id", "estado"}.issubset(keys)
+                    and node.get("estado") in _STRUCTURED_PROCESSING_JOB_STATUS_VALUES):
+                found.add("PROCESSING_JOB_STATUS")
+            if not isinstance(status, str):
+                return found
             if {"job_id", "status"}.issubset(keys) and status in _STRUCTURED_JOB_STATUS_VALUES:
                 found.add("JOB_STATUS")
+            if ({"processing_job_id", "status"}.issubset(keys)
+                    and status in _STRUCTURED_PROCESSING_JOB_STATUS_VALUES):
+                found.add("PROCESSING_JOB_STATUS")
             if {"pipeline_id", "status"}.issubset(keys) and status in _STRUCTURED_PIPELINE_STATUS_VALUES:
                 found.add("PIPELINE_STATUS")
             if {"name", "status"}.issubset(keys):
