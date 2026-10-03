@@ -1925,7 +1925,7 @@ def test_la_receta_manual_de_las_ocultas_usa_una_variable_y_no_se_pega_la_ruta()
 
 def test_el_runbook_no_da_acceso_temporal_a_nadie_ni_usa_test_como_prueba_de_permisos():
     texto = RUNBOOK_E2A.read_text()
-    assert "u:nobody" not in texto and "centinela" not in texto.lower() and "trap " not in texto
+    assert "u:nobody" not in texto and "centinela" not in texto.lower()
     assert "sudo -u nobody" not in texto
 
 
@@ -1933,7 +1933,7 @@ def test_los_bloques_del_runbook_de_permisos_son_sintacticamente_validos_con_set
     texto = RUNBOOK_E2A.read_text()
     inicio = texto.index("### 2. Permisos de `proyectos/`")
     fin = texto.index("### 3. jax a producción")
-    bloques = [b for b in _bloques_bash(texto[inicio:fin]) if "<<'" in b or "stat -c" in b or "OCULTA" in b]
+    bloques = [b for b in _bloques_bash(texto[inicio:fin]) if "<<'" in b or "stat -c" in b or "OCULTA" in b or "BLOQUE-" in b]
     assert bloques, "no hay bloques de verificación en el paso 2"
     for b in bloques:
         assert "set -euo pipefail" in b, f"bloque sin set -euo pipefail:\n{b}"
@@ -2969,10 +2969,10 @@ case "$cmd" in
   show) grep "^$4 $2 " "$D/props" | sed "s/^[^ ]* [^ ]* //" ;;
   stop) for u in "$@"; do case " $NO_SE_DETIENE " in *" $u "*) ;; *) sed -i "/^$u\\$/d" "$D/activas" ;; esac; done ;;
   start) for u in "$@"; do grep -qx "$u" "$D/activas" || echo "$u" >> "$D/activas"; done ;;
-  is-active) grep -qx "$2" "$D/activas" ;;
+  is-active) grep -qx "$2" "$D/activas" || rc=1 ;;
   mask|unmask) ;;
 esac
-exit 0
+exit "${rc:-0}"
 """
 
 
@@ -2984,10 +2984,11 @@ def _entorno_del_bloque(tmp_path: Path, uid_jaxsvc: int, *, extra: dict | None =
     datos = tmp_path / "datos"
     datos.mkdir()
     (datos / "log").write_text("")
-    (datos / "activas").write_text("jax-las-manos.service\njax-platform.service\njax-catalogo-modelos.timer\n")
+    (datos / "activas").write_text("jax-las-manos.service\njax-platform.service\njax-catalogo-modelos.service\njax-catalogo-modelos.timer\n")
     (datos / "list-units").write_text(
         "jax-las-manos.service loaded active running LAS MANOS\n"
         "jax-platform.service loaded active running plataforma\n"
+        "jax-catalogo-modelos.service loaded active running catalogo\n"
         "jax-otra.service loaded active running de root\n")
     (datos / "list-timers").write_text(
         "Sat 2026-10-03 20:00:00 CST 1h left n/a n/a jax-catalogo-modelos.timer jax-catalogo-modelos.service\n")
@@ -3050,7 +3051,8 @@ def test_el_bloque_del_runbook_con_todo_bien_para_restaura_y_arranca_en_orden(tm
     detenidas = [l.split()[-1] for l in log if l.startswith("systemctl stop")]
     assert sorted(detenidas) == ["jax-catalogo-modelos.service", "jax-catalogo-modelos.timer", "jax-las-manos.service",
                                  "jax-platform.service"], detenidas
-    assert "jax-otra.service" not in " ".join(log)
+    assert not any("jax-otra.service" in l and l.split()[1] in ("stop", "mask", "unmask", "start", "is-active")
+                   for l in log), "se tocó una unidad que no es de jaxsvc"
     assert detenidas.index("jax-catalogo-modelos.timer") < detenidas.index("jax-las-manos.service"), "los timers primero"
     i_modo = _indice(log, f"permisos {modo}")
     for u in detenidas:
