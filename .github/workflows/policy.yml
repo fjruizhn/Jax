@@ -1846,8 +1846,11 @@ jobs:
           # error de un archivo con formato no soportado viaja como
           # `formato_no_soportado:<formato>`; sin formato viaja solo el codigo; el formato solo
           # se agrega a ese codigo y se valida). Medido con este comando exacto: 159 passed.
-          grep -qE "^159 passed" /tmp/f2e-sr3-source || {
-            echo "PISO ROTO: se esperaban 159 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
+          # 159 -> 160 (2026-10-03, Jax#338 ronda 9, N29): +1 en _procesamiento_routes_test.py (un
+          # salto de linea al final del formato no se acepta: `fullmatch`). Medido con este comando
+          # exacto: 160 passed.
+          grep -qE "^160 passed" /tmp/f2e-sr3-source || {
+            echo "PISO ROTO: se esperaban 160 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
         env:
           PYTHONPATH: .:las_manos
       - name: Piso exacto de tests CORRIDOS
@@ -5398,8 +5401,17 @@ jobs:
           #   version de libpng, libjpeg ni leptonica del runner. Medido LOCAL en hall9000: 140 passed (las 2 reales de LACTOVI
           #   corren). El RUNNER no tiene esas 2: el piso es 138 passed + 2 skipped. (Sobre e0158c2
           #   el runner dio "1 failed, 151 passed, 2 skipped" = 154: el unico rojo era el GIF.)
-          grep -qE "^138 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 138 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 140 -> 151 (Jax#338 ronda 9): +11 -- N28: WebP lossless, TIFF RGBA, GIF con indice
+          #   transparente, PNG LA y PNG P con transparencia llegan a tesseract SIN alfa y con
+          #   fondo BLANCO (tesseract simulado que registra lo que recibe; +5) y una imagen sin alfa
+          #   sigue mandando los bytes originales (+1); N30: un BMP de 32 bpp con BI_BITFIELDS
+          #   (cabeceras de 40 y 124) llega como PNG (+2) y no es un formato nuevo del contrato
+          #   (+1); N31: un TIFF de 16 bits con signo es gris_16_bits (+1) y uno de 32 bits sigue
+          #   siendo entero_32_bits (+1). Medido LOCAL en hall9000: 151 passed (las 2 reales de
+          #   LACTOVI corren). Ninguna depende de la version de leptonica. El RUNNER no tiene
+          #   esas 2: el piso es 149 passed + 2 skipped.
+          grep -qE "^149 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 149 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
@@ -5905,8 +5917,9 @@ jobs:
           # 94 -> 95 el 2026-10-03 (jax-14 ronda 3): ver F2-E-SR3; con y sin las tres
           # dependencias: 95 passed.
           # 95 -> 98 (Jax#338 ronda 8): ver F2-E-SR3 (+3); medido: 98 passed.
-          grep -qE "^98 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 98 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          # 98 -> 99 (Jax#338 ronda 9, N29): ver F2-E-SR3 (+1); medido: 99 passed.
+          grep -qE "^99 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 99 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # jax-14 (2026-10-03): freno de dependencias de extraccion. Piso exacto de
       # procesamiento/_dependencias_test.py: 29 passed (10 de la ronda 0 + 19 de la

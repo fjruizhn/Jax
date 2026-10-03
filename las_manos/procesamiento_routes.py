@@ -274,7 +274,7 @@ def _resultado_no_codificable(ruta: str) -> ResultadoArchivo:
     )
 
 
-_FORMATO_ESTABLE = re.compile(r"^[a-z0-9_]{1,40}$")
+_FORMATO_ESTABLE = re.compile(r"[a-z0-9_]{1,40}")   # con `fullmatch`: `$` aceptaria un "\n" final
 
 
 def _codigo_de_ficha(ficha) -> str | None:
@@ -288,7 +288,7 @@ def _codigo_de_ficha(ficha) -> str | None:
         return None
     formato = ficha.detalle.get("formato")
     if (codigo == "formato_no_soportado" and isinstance(formato, str)
-            and _FORMATO_ESTABLE.match(formato)):
+            and _FORMATO_ESTABLE.fullmatch(formato)):
         return f"{codigo}:{formato}"
     return codigo
 

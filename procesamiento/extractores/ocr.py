@@ -409,8 +409,8 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
                     img.seek(i)
                     ancho, alto = img.size
                     total += ancho * alto
-                    if _formato_de_modo(img.mode):
-                        return _Rechazo("modo_no_soportado", _formato_de_modo(img.mode))
+                    if _formato_de_imagen(img):
+                        return _Rechazo("modo_no_soportado", _formato_de_imagen(img))
                     if img.mode not in _MODOS_PNG:
                         limite = MAX_PIXELES_OTROS_MODOS
                     else:
@@ -420,6 +420,10 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
                     dimensiones.append((ancho, alto))
                 if n == 1:
                     img.load()
+                    if _tiene_alfa(img) or _bmp_con_mascaras(datos) is not None:
+                        # no se le pasan los bytes originales a leptonica: va
+                        # por Pillow -> PNG (alfa aplanado sobre blanco)
+                        return "tiff", dimensiones
                     return "una", dimensiones
     except Image.DecompressionBombError:
         return "demasiados_pixeles"
@@ -448,7 +452,24 @@ _FORMATO_POR_MODO = {
 def _formato_de_modo(modo: str) -> str | None:
     """Valor estable de `detalle["formato"]` para un modo no soportado, o
     `None` si el modo se soporta."""
+    # (Un PNG de 16 bits en COLOR o con alfa, con valores 0-255, lo informa
+    # Pillow como RGB/RGBA y no como I;16: no se cambia, porque la lectura
+    # estandar es fiel al archivo.)
     return _FORMATO_POR_MODO.get(modo)
+
+
+def _formato_de_imagen(img) -> str | None:
+    """Como `_formato_de_modo`, pero un TIFF de UN canal de 16 bits CON SIGNO
+    (BitsPerSample=16, SampleFormat=2) que Pillow informa como `I` es
+    `gris_16_bits`, no `entero_32_bits`."""
+    if img.mode == "I" and getattr(img, "format", None) == "TIFF":
+        try:
+            bits = img.tag_v2.get(258)
+        except Exception:  # fail-soft: sin tag_v2 legible se cae al mapa por modo (entero_32_bits), que tambien rechaza
+            bits = None
+        if bits in (16, (16,)):
+            return "gris_16_bits"
+    return _formato_de_modo(img.mode)
 
 
 class _Rechazo(str):
@@ -463,24 +484,57 @@ class _Rechazo(str):
         return obj
 
 
-def _bmp_16_bits_con_mascaras(datos: bytes) -> bool:
-    """BMP de 16 bpp con mascaras de bits (RGB565, BI_BITFIELDS): Pillow lo
-    decodifica y leptonica no lo lee (`cannot read compressed BMP files`). Se
-    detecta por el header, ANTES de tesseract. Un 16 bpp sin compresion (555) no."""
+def _bmp_con_mascaras(datos: bytes) -> int | None:
+    """Los bpp de un BMP con mascaras de bits (compresion BI_BITFIELDS o
+    BI_ALPHABITFIELDS, 3 o 6), o `None` si no lo es. Leptonica no lee ningun BMP
+    comprimido (`cannot read compressed BMP files`); Pillow si."""
     if datos[:2] != b"BM" or len(datos) < 34:
-        return False
+        return None
     tamano_header, = struct.unpack_from("<I", datos, 14)
     if tamano_header < 40:
-        return False
+        return None
     bpp, = struct.unpack_from("<H", datos, 28)
     compresion, = struct.unpack_from("<I", datos, 30)
-    return bpp == 16 and compresion in (3, 6)
+    return bpp if compresion in (3, 6) else None
+
+
+def _bmp_16_bits_con_mascaras(datos: bytes) -> bool:
+    """BMP de 16 bpp con mascaras (RGB565): formato NO soportado
+    (`bmp_16_bits`), detectado por el header ANTES de tesseract. Un 16 bpp sin
+    compresion (555) no. Los demas BMP con mascaras (p. ej. 32 bpp, como los
+    exportan GIMP y Photoshop con alfa) NO se rechazan: pasan por Pillow y se
+    mandan como PNG (`_a_modo_legible` / camino `tiff`)."""
+    return _bmp_con_mascaras(datos) == 16
+
+
+_MODOS_CON_ALFA = frozenset({"RGBA", "LA", "PA", "RGBa", "La"})
+
+
+def _tiene_alfa(img) -> bool:
+    """Canal alfa propio (RGBA, LA, PA...) o transparencia en `info` (un indice
+    transparente en P/L/1, un color en RGB): lo que leptonica descarta."""
+    return img.mode in _MODOS_CON_ALFA or "transparency" in img.info
+
+
+def _aplanar_sobre_blanco(img):
+    """RGB sin alfa con el fondo transparente en BLANCO. Leptonica descarta el
+    alfa de WebP, TIFF y GIF y el fondo transparente queda NEGRO: el texto
+    oscuro queda negro sobre negro (ok/imagen_sin_texto en silencio)."""
+    from PIL import Image
+
+    rgba = img.convert("RGBA")
+    fondo = Image.new("RGB", rgba.size, (255, 255, 255))
+    fondo.paste(rgba, mask=rgba.getchannel("A"))
+    return fondo
 
 
 def _a_modo_legible(img):
     """Fotograma decodificado -> uno que se pueda guardar como PNG para
     tesseract: los modos de `_MODOS_PNG` tal cual; el resto (CMYK, YCbCr, LAB,
-    HSV...) a `RGB`. (F, I e I;16* ya se rechazaron en la validacion.)"""
+    HSV...) a `RGB`; con transparencia, aplanado sobre BLANCO (sin alfa).
+    (F, I e I;16* ya se rechazaron en la validacion.)"""
+    if _tiene_alfa(img):
+        return _aplanar_sobre_blanco(img)
     if img.mode in _MODOS_PNG:
         return img
     return img.convert("RGB")
