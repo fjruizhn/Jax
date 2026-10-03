@@ -1,7 +1,9 @@
 # Workspace proyectos/ — permisos compartidos jaxsvc/fruiz
+> **Ruta (2026-10-03):** el workspace se movió de `/home/fruiz/jax-workspace` (disco raíz, sin espacio para la subida de E2a) a `/srv/jax-data/jax-workspace`. `JAX_WORKSPACE_DIR` en `/etc/jax/.env` apunta ahí. La ruta vieja quedó como symlink de compatibilidad hasta desplegar el fallo cerrado sin default. Historia: `docs/historia/2026-10-03-proyectos-e2a.md`.
+
 ## Purpose
 `proyectos/` del workspace de JAX (`$JAX_WORKSPACE_DIR/proyectos`, hoy
-`/home/fruiz/jax-workspace/proyectos` en hall9000) tiene que ser escribible
+`/srv/jax-data/jax-workspace/proyectos` en hall9000) tiene que ser escribible
 tanto por la cuenta de servicio `jaxsvc` (LAS MANOS y jax-platform corren como
 ella, `UMask=0022` medido con `systemctl show`) como por `fruiz` (corre
 `scripts/procesar_archivos.py` a mano), con herencia para todo lo que se cree
@@ -68,7 +70,7 @@ de Fernando.** `--verificar` es siempre de solo lectura, corre sin privilegio,
 y no necesita GO.
 
 ## Aplicación en producción: BLOQUEADA hasta desplegar el fchmod(0o660) de tool_authority.py
-**No correr `--aplicar` contra `/home/fruiz/jax-workspace` real todavía --
+**No correr `--aplicar` contra `/srv/jax-data/jax-workspace` real todavía --
 falta un requisito previo.** El fix de la ronda 2 (`las_manos/motor_registry/
 tool_authority.py::_write_file`, `os.fchmod(fd, 0o660)` antes de
 `os.replace`) sólo vive en este checkout/rama -- **no está desplegado en
@@ -89,12 +91,12 @@ procedimiento (7 pasos) es:
    ops/permisos_proyectos.py /usr/local/sbin/jax-permisos-proyectos` desde el
    checkout que tenga el commit aprobado, y confirmar con `--verificar` (la
    línea "núcleo privilegiado NO instalado..." no debe aparecer).
-2. **Línea base.** `find /home/fruiz/jax-workspace/proyectos \( -type d -o
+2. **Línea base.** `find /srv/jax-data/jax-workspace/proyectos \( -type d -o
    -type f \) -printf '%y %m %U:%G\n' | sort | uniq -c` -- guardar la salida.
    Es lo que permite confirmar más tarde que "Verificar primero" y la tabla
    de `--deshacer` siguen describiendo el árbol real (ver la nota de VERDAD
    OPERACIONAL en "Reversión" más abajo).
-3. **Chequeo previo de FIFO y hardlinks.** `find /home/fruiz/jax-workspace/proyectos
+3. **Chequeo previo de FIFO y hardlinks.** `find /srv/jax-data/jax-workspace/proyectos
    -type p -o -type s` (FIFO/socket -- tienen que dar vacío, si no `--aplicar`
    fallará en el respaldo, ver m1) y `find ... -type f -links +1` (hardlinks
    -- tienen que dar vacío, si no `--aplicar` los reporta y no los muta,
@@ -253,7 +255,7 @@ con sudo sin contraseña, sin `/etc/jax/.env` -- no en hall9000): **39
 passed, 2 skipped**. Los dos skips son estructurales fuera de un host de jax
 real (uno necesita `/etc/jax/.env` legible para probar el mensaje específico
 de RAIZ-no-configurada; el otro es la prueba de lectura/escritura cruzada
-contra `/home/fruiz/jax-workspace/proyectos` real).
+contra `/srv/jax-data/jax-workspace/proyectos` real).
 
 ## Fail-closed condition
 Si `--verificar` da `1`, `proyectos/` sigue sin estar en el estado correcto.
