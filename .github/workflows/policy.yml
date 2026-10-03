@@ -6622,6 +6622,27 @@ jobs:
           python-version: "3.12"
       - run: sudo apt-get -qq update && sudo apt-get -qq install -y acl
       - run: pip install -r requirements.txt pytest
+      - name: Dar a fruiz lo mínimo para correr el escritor de la prueba de herencia
+        # La prueba test_entrada_y_fuente_creadas_despues_heredan_grupo_setgid_y_acl_por_defecto
+        # corre el escritor real COMO fruiz (quien opera en producción y está en la ACL), con el
+        # intérprete de pytest. En el runner, el checkout (/home/runner/work/...) y el intérprete
+        # (/opt/hostedtoolcache/...) solo los lee el usuario `runner`: sin esto la prueba falla con
+        # su mensaje «el usuario fruiz no puede leer ...». Se crea la cuenta aquí (idempotente, igual
+        # que la fixture de la prueba) y se le da `x` en cada directorio padre y `rX` en el checkout y
+        # en el prefijo del intérprete. El runner es una VM desechable: no hay riesgo en abrir esto.
+        run: |
+          getent passwd fruiz >/dev/null || sudo useradd --system --no-create-home fruiz
+          PREFIJO=$(python -c 'import sys; print(sys.prefix)')
+          for destino in "$GITHUB_WORKSPACE" "$PREFIJO"; do
+            d=$(dirname "$destino")
+            while [ "$d" != "/" ]; do
+              sudo setfacl -m u:fruiz:x "$d"
+              d=$(dirname "$d")
+            done
+            sudo setfacl -R -m u:fruiz:rX "$destino"
+          done
+          sudo -n -u fruiz test -r "$GITHUB_WORKSPACE" -a -x "$GITHUB_WORKSPACE"
+          sudo -n -u fruiz test -r "$(python -c 'import sys; print(sys.executable)')"
       # Sin paso de "instalar el núcleo" (E2a, MAJOR-1 de la revisión de la Tarea 3): las pruebas
       # instalan su propia copia bajo el directorio temporal (JAX_PERMISOS_NUCLEO) y, solo si
       # /usr/local/sbin está libre, una temporal ahí que borran al terminar. Dejar el núcleo
