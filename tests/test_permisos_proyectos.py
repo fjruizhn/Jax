@@ -84,9 +84,6 @@ RUTA_INSTALADA = _DIR_NUCLEO_PRUEBA / "jax-permisos-proyectos"
 os.environ["JAX_PERMISOS_NUCLEO"] = str(RUTA_INSTALADA)
 RUTA_NUCLEO_SISTEMA = Path("/usr/local/sbin/jax-permisos-proyectos")
 
-RAIZ_PRODUCCION = Path("/home/fruiz/jax-workspace")
-PROYECTOS_PRODUCCION = RAIZ_PRODUCCION / "proyectos"
-
 USUARIO_ESPERADO = "jaxsvc"
 GRUPO_ESPERADO = "fruiz"
 DUENO_ORIGINAL = "fruiz"
@@ -118,6 +115,20 @@ def test_las_pruebas_no_tocan_el_nucleo_de_sistema():
         capture_output=True, text=True, check=True, env=sin_env,
     ).stdout.strip()
     assert por_defecto == str(RUTA_NUCLEO_SISTEMA)
+
+
+def test_ninguna_ruta_de_las_pruebas_resuelve_a_un_arbol_de_produccion():
+    """Ninguna prueba puede tocar un arbol de produccion. En hall9000 `/home/fruiz/jax-workspace` es un
+    symlink a `/srv/jax-data/jax-workspace`: una constante con esa ruta hacia que la prueba de
+    lectura/escritura cruzada escribiera y borrara en produccion. Se mira el realpath de toda ruta
+    fija del modulo, no el texto, para que un symlink no la disfrace."""
+    prohibidos = (Path("/srv/jax-data"), Path("/srv/jax-prod"))
+    for nombre, valor in sorted(globals().items()):
+        if isinstance(valor, Path) and nombre != "RAIZ_REPO":
+            real = Path(os.path.realpath(valor))
+            assert not any(real == p or p in real.parents for p in prohibidos), (
+                f"{nombre}={valor} resuelve a {real}, un arbol de produccion"
+            )
 
 
 def test_el_guion_existe():
@@ -1538,47 +1549,38 @@ print(i)
     assert contenido == esperado
 
 
-# --- (b) sólo en el host de producción real, con subdirectorio propio y limpieza ------------
+# --- (b) lectura/escritura cruzada jaxsvc <-> fruiz, sobre un arbol de prueba PROPIO ---------
 
-def _motivo_de_skip_fuera_de_produccion() -> str | None:
-    if not PROYECTOS_PRODUCCION.is_dir():
-        return f"esta máquina no tiene {PROYECTOS_PRODUCCION} -- no es el host de producción de jax"
-    if subprocess.run(["sudo", "-n", "-u", "jaxsvc", "true"], capture_output=True).returncode != 0:
-        return "sudo -n -u jaxsvc no funciona en esta máquina"
-    return None
+def test_jaxsvc_y_fruiz_leen_y_escriben_cruzado_en_un_subdirectorio_propio(arbol_temporal, _identidades):
+    """Antes corria contra `/home/fruiz/jax-workspace/proyectos` -- en hall9000 un symlink a
+    produccion (`/srv/jax-data`) -- y escribia y borraba ahi. Ahora el arbol es de prueba (tmp_path),
+    armado y aplicado como el resto, y se corre en cualquier maquina con las dos cuentas."""
+    proyectos = arbol_temporal / "proyectos"
+    assert Path(os.path.realpath(proyectos)).is_relative_to(Path(os.path.realpath(tempfile.gettempdir())))
+    assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
 
+    sub = proyectos / "un-proyecto" / "cruzado"
+    r = subprocess.run(["sudo", "-n", "-u", "jaxsvc", "mkdir", str(sub)], capture_output=True, text=True)
+    assert r.returncode == 0, f"jaxsvc no pudo crear {sub}: {r.stderr}"
 
-def test_jaxsvc_y_fruiz_leen_y_escriben_cruzado_en_un_subdirectorio_propio():
-    motivo = _motivo_de_skip_fuera_de_produccion()
-    if motivo:
-        pytest.skip(motivo)
+    desde_jaxsvc = sub / "desde-jaxsvc.txt"
+    r = subprocess.run(["sudo", "-n", "-u", "jaxsvc", "sh", "-c", f"echo hola > {desde_jaxsvc}"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, f"jaxsvc no pudo escribir: {r.stderr}"
+    # fruiz lee y agrega a lo de jaxsvc
+    r = subprocess.run(["sudo", "-n", "-u", "fruiz", "sh", "-c", f"cat {desde_jaxsvc} && echo agregado >> {desde_jaxsvc}"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, f"fruiz no pudo leer/escribir lo de jaxsvc: {r.stderr}"
+    assert "hola" in r.stdout
 
-    quien_corre = pwd.getpwuid(os.getuid()).pw_name
-    sub = PROYECTOS_PRODUCCION / f".permisos-proyectos-selftest-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    try:
-        creado_dir = subprocess.run(["sudo", "-n", "-u", "jaxsvc", "mkdir", str(sub)], capture_output=True, text=True)
-        assert creado_dir.returncode == 0, f"jaxsvc no pudo crear {sub}: {creado_dir.stderr}"
-
-        desde_jaxsvc = sub / "desde-jaxsvc.txt"
-        r = subprocess.run(
-            ["sudo", "-n", "-u", "jaxsvc", "sh", "-c", f"echo hola > {desde_jaxsvc}"], capture_output=True, text=True,
-        )
-        assert r.returncode == 0, f"jaxsvc no pudo escribir: {r.stderr}"
-
-        assert desde_jaxsvc.read_text() == "hola\n"
-        with open(desde_jaxsvc, "a") as f:
-            f.write("agregado por " + quien_corre + "\n")
-
-        desde_fruiz = sub / "desde-fruiz.txt"
-        desde_fruiz.write_text("original\n")
-        r2 = subprocess.run(
-            ["sudo", "-n", "-u", "jaxsvc", "sh", "-c", f"cat {desde_fruiz} && echo mas >> {desde_fruiz}"],
-            capture_output=True, text=True,
-        )
-        assert r2.returncode == 0, f"jaxsvc no pudo leer/escribir lo de {quien_corre}: {r2.stderr}"
-        assert "original" in r2.stdout
-        assert "mas" in desde_fruiz.read_text()
-    finally:
-        subprocess.run(["sudo", "-n", "-u", "jaxsvc", "rm", "-rf", str(sub)], capture_output=True)
-        if sub.exists():
-            subprocess.run(["sudo", "-n", "rm", "-rf", str(sub)], capture_output=True)
+    # fruiz crea y jaxsvc lee y agrega
+    desde_fruiz = sub / "desde-fruiz.txt"
+    r = subprocess.run(["sudo", "-n", "-u", "fruiz", "sh", "-c", f"echo original > {desde_fruiz}"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, f"fruiz no pudo crear: {r.stderr}"
+    r = subprocess.run(["sudo", "-n", "-u", "jaxsvc", "sh", "-c", f"cat {desde_fruiz} && echo mas >> {desde_fruiz}"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, f"jaxsvc no pudo leer/escribir lo de fruiz: {r.stderr}"
+    assert "original" in r.stdout
+    assert subprocess.run(["sudo", "-n", "cat", str(desde_fruiz)], capture_output=True, text=True).stdout == "original\nmas\n"
+    assert subprocess.run(["sudo", "-n", "cat", str(desde_jaxsvc)], capture_output=True, text=True).stdout == "hola\nagregado\n"
