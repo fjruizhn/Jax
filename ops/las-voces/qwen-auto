@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Lanzador versionado de Qwen Code para LAS VOCES. Se instala tras el merge.
+set -Eeuo pipefail
+
+if [[ "$EUID" -eq 0 ]]; then
+  echo 'Abre este lanzador con tu usuario normal, sin sudo.' >&2
+  exit 1
+fi
+
+FARO_ENV_FILE="/etc/jax/las-voces-faro.env"
+readonly FARO_ENV_FILE
+
+fallar() { printf '%s\n' "qwen-auto: $*" >&2; exit 2; }
+
+validar_ruta_root() {
+  local ruta="$1" tipo="$2" actual modo uid gid
+  [ ! -L "$ruta" ] || fallar "enlace no permitido: $ruta"
+  [ "$tipo" != "d" ] || [ -d "$ruta" ] || fallar "no es directorio: $ruta"
+  [ "$tipo" != "f" ] || [ -f "$ruta" ] || fallar "no es archivo regular: $ruta"
+  actual="$ruta"
+  while :; do
+    [ ! -L "$actual" ] || fallar "enlace no permitido: $actual"
+    IFS=: read -r uid gid modo < <(/usr/bin/stat -c '%u:%g:%a' -- "$actual")
+    [ "$uid" = 0 ] && [ "$gid" = 0 ] || fallar "no es root:root: $actual"
+    [ "$((8#$modo & 8#022))" -eq 0 ] || fallar "es escribible por grupo/otros: $actual"
+    [ "$actual" = / ] && break
+    actual="$(dirname -- "$actual")"
+  done
+}
+
+leer_entorno_faro() {
+  validar_ruta_root "$FARO_ENV_FILE" f
+  [ "$(/usr/bin/stat -c '%a' -- "$FARO_ENV_FILE")" = 644 ] || fallar "el env Faro debe ser 0644"
+  local linea nombre valor
+  declare -A vistos=()
+  while IFS= read -r linea || [ -n "$linea" ]; do
+    nombre="${linea%%=*}"; valor="${linea#*=}"
+    [ "$nombre" != "$linea" ] && [ -n "$valor" ] || fallar "línea Faro inválida"
+    case "$nombre" in
+      JAX_FARO_REPO|JAX_FARO_SHA|JAX_FARO_ECOSISTEMA_DIR|JAX_FARO_REF_FRESCURA) ;;
+      *) fallar "variable Faro no permitida" ;;
+    esac
+    [ -z "${vistos[$nombre]+x}" ] || fallar "variable Faro duplicada"
+    vistos[$nombre]=1
+    case "$nombre" in
+      JAX_FARO_REPO) JAX_FARO_REPO="$valor" ;;
+      JAX_FARO_SHA) JAX_FARO_SHA="$valor" ;;
+      JAX_FARO_ECOSISTEMA_DIR) JAX_FARO_ECOSISTEMA_DIR="$valor" ;;
+      JAX_FARO_REF_FRESCURA) JAX_FARO_REF_FRESCURA="$valor" ;;
+    esac
+  done < "$FARO_ENV_FILE"
+  [ "${#vistos[@]}" = 4 ] || fallar "faltan variables Faro"
+  [ "$JAX_FARO_REPO" = /srv/faro/claude-skills.git ] || fallar "repo Faro fuera del contrato"
+  [ "$JAX_FARO_ECOSISTEMA_DIR" = /srv/faro/ecosistema ] || fallar "destino Faro fuera del contrato"
+  [ "$JAX_FARO_REF_FRESCURA" = refs/heads/main ] || fallar "ref Faro fuera del contrato"
+  [[ "$JAX_FARO_SHA" =~ ^[0-9a-f]{40}$ ]] || fallar "SHA Faro inválido"
+}
+
+leer_entorno_faro
+unset JAX_FARO_DUENIO_UID
+
+qwen_bin="$(command -v qwen || true)"
+[ -n "$qwen_bin" ] || fallar 'Qwen Code no está instalado o no se encuentra en PATH.'
+command -v tmux >/dev/null || fallar 'tmux no está instalado.'
+url="${QWEN_AUTO_URL:-http://127.0.0.1:11434}"
+model="${QWEN_AUTO_MODEL:-qwen3.8-mesa-131k}"
+if ! curl -fsS --max-time 3 "$url/api/tags" >/dev/null; then
+  fallar "Ollama no responde en $url."
+fi
+if [[ "$PWD" == / ]]; then
+  cd -- "$HOME"
+fi
+
+last=$(tmux list-sessions -F '#S' 2>/dev/null | grep -E '^q[0-9]+$' | sed 's/^q//' | sort -n | tail -1 || true)
+sesion="q$(( ${last:-0} + 1 ))"
+cmd="$(printf '%q ' env -u JAX_FARO_DUENIO_UID \
+  "JAX_FARO_REPO=$JAX_FARO_REPO" "JAX_FARO_SHA=$JAX_FARO_SHA" \
+  "JAX_FARO_ECOSISTEMA_DIR=$JAX_FARO_ECOSISTEMA_DIR" "JAX_FARO_REF_FRESCURA=$JAX_FARO_REF_FRESCURA" \
+  OPENAI_API_KEY=ollama "OPENAI_BASE_URL=$url/v1" "OPENAI_MODEL=$model" \
+  "$qwen_bin" --approval-mode yolo "$@")"
+echo "Abriendo tmux: $sesion"
+if [[ -n "${TMUX:-}" ]]; then
+  tmux new-session -d -s "$sesion" -c "$PWD" "$cmd"
+  exec tmux switch-client -t "$sesion"
+fi
+exec tmux new-session -s "$sesion" -c "$PWD" "$cmd"

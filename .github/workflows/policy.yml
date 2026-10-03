@@ -55,7 +55,17 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install pytest pyyaml mcp==2.2.0
-      - run: python -m pytest -q tests/test_las_voces_faro_readonly.py tests/test_las_voces_faro_mcp_client.py
+      - name: Paquete Faro permanente y frontera MCP read-only
+        run: |
+          set -o pipefail
+          python -m pytest -q \
+            tests/test_las_voces_faro_readonly.py \
+            tests/test_las_voces_faro_mcp_client.py \
+            tests/test_las_voces_faro_paquete.py \
+            tests/test_las_voces_qwen_auto.py 2>&1 | tee /tmp/las-voces-faro-readonly
+          # Medido 2026-10-03 en venv limpio con mcp==2.2.0: 6 MCP + 13 paquete/lanzador, 0 skipped.
+          grep -qE "^19 passed in " /tmp/las-voces-faro-readonly || {
+            echo "PISO ROTO: se esperaban exactamente 19 tests CORRIDOS."; exit 1; }
 
   memory-b9-regression:
     runs-on: ubuntu-latest
