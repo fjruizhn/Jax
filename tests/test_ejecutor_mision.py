@@ -13,7 +13,7 @@ import pytest
 
 from jax.ejecutor import mision as M
 from jax.ejecutor.contratos.arranque import ContratosNoVerificados
-from jax.ejecutor.contratos.auditor import Revision
+from jax.ejecutor.contratos.auditor import AuditorIlegible, Revision
 from jax.ejecutor.contratos.destinos import Host
 from jax.ejecutor.contratos.fallo import Fallo
 
@@ -117,6 +117,7 @@ class Falsas:
         self.registro = None  # por defecto: todo anotado y con sha que cuadra
         self.revision = None
         self.auditor_revienta = False
+        self.auditor_ilegible = None  # codigo de AuditorIlegible a lanzar
         self.cadena = True
         self.pausa_leida = None
         self.llamadas = []
@@ -163,6 +164,8 @@ class Falsas:
 
     async def auditar(self, texto, entrega, maquinas):
         self.maquinas_auditadas = maquinas
+        if self.auditor_ilegible:
+            raise AuditorIlegible(self.auditor_ilegible)
         if self.auditor_revienta:
             raise ValueError("json_invalido")
         if self.revision is not None:
@@ -319,6 +322,38 @@ def test_auditor_ilegible_retiene_todo_fail_closed():
     assert (r["estado"], r["codigo"]) == ("fallido", "auditor_ilegible")
     assert r["afirmaciones"] == [] and r["descartadas"][0]["estado"] == "retenida_por_auditor"
     assert r["descartadas"][0]["codigo"] == "auditor_ilegible" and r["crudas"]
+
+
+@pytest.mark.parametrize("codigo", ["proveedor_fallo", "json_invalido"])
+def test_el_motivo_del_auditor_ilegible_queda_en_la_bitacora(codigo):
+    """Antes el evento solo decia el TIPO de la excepcion: no se podia distinguir un proveedor
+    caido (o un plazo vencido) de un modelo que escribio mal. Viaja el codigo, que es constante."""
+    f = Falsas()
+    f.auditor_ilegible = codigo
+    r, eventos = _correr(f)
+    assert r["codigo"] == "auditor_ilegible"
+    (e,) = [x for x in eventos if x["evento"] == "auditor_ilegible"]
+    assert e["datos"] == {"tipo": "AuditorIlegible", "motivo": codigo}
+
+
+def test_un_fallo_cualquiera_del_auditor_no_vuelca_su_mensaje_a_la_bitacora():
+    """Solo el codigo constante de AuditorIlegible viaja; el texto de cualquier otra excepcion
+    (puede traer una llave o un cuerpo HTTP) no."""
+    f = Falsas()
+    f.auditor_revienta = True
+    _, eventos = _correr(f)
+    (e,) = [x for x in eventos if x["evento"] == "auditor_ilegible"]
+    assert e["datos"] == {"tipo": "ValueError"}
+
+
+def test_la_pausa_con_detalle_lo_lleva_a_la_bitacora():
+    f = Falsas()
+    f.pausa_leida = {"puesta": True, "legible": True, "origen": "c5", "motivo": "auditor_ilegible", "paso": None,
+                     "detalle": "proveedor_fallo"}
+    _, eventos = _correr(f)
+    (p,) = [e for e in eventos if e["evento"] == "pausa_detectada"]
+    assert p["datos"] == {"origen": "c5", "motivo": "auditor_ilegible", "paso": None, "legible": True,
+                          "detalle": "proveedor_fallo"}
 
 
 def test_afirmacion_retenida_por_el_auditor_no_sale():

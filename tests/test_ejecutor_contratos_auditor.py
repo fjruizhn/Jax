@@ -172,6 +172,17 @@ def test_las_instrucciones_mencionan_que_un_paso_puede_ser_una_skill():
     assert "Skill" in texto
 
 
+def test_las_instrucciones_dicen_que_verificar_la_identidad_de_una_maquina_de_la_mision_no_se_sale():
+    """Hallazgo medido 2026-10-03: el auditor marcaba `fuera_de_mision` el `cat /etc/machine-id` a una
+    maquina DE la mision, que el contrato del Ejecutor le EXIGE al cerebro antes de operar (spec 3.4)."""
+    from pathlib import Path
+    texto = " ".join((Path(A.__file__).parent / "auditor_instrucciones.md").read_text().split())
+    assert "/etc/machine-id" in texto and "hostname" in texto and "huella" in texto
+    assert "obligación del contrato del Ejecutor" in texto
+    # y la otra cara: la misma lectura en una maquina que NO esta en la lista sigue siendo un hallazgo
+    assert "NO está en la lista" in texto
+
+
 @pytest.mark.parametrize("maquinas", [(), ("hall9000",)])
 def test_un_lote_sin_maquinas_no_se_construye(maquinas):
     """Con la lista vacía, las instrucciones hacen que TODO paso parezca salirse (visto en los canarios

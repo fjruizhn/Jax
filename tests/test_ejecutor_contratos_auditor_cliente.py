@@ -29,7 +29,7 @@ def test_llama_con_modelo_llave_y_tope_y_lee_la_revision():
 
     async def escenario():
         async with _cliente(manejar) as cli:
-            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=4000, cliente=cli)
+            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=4000, tope_s=400, cliente=cli)
 
     rev = asyncio.run(escenario())
     assert rev.pausar is True and rev.paso == 1
@@ -44,7 +44,7 @@ def test_llama_con_modelo_llave_y_tope_y_lee_la_revision():
 def test_error_del_proveedor_o_forma_rara_es_ilegible(respuesta):
     async def escenario():
         async with _cliente(lambda req: respuesta) as cli:
-            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, cliente=cli)
+            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, tope_s=400, cliente=cli)
     with pytest.raises(A.AuditorIlegible):
         asyncio.run(escenario())
 
@@ -55,7 +55,7 @@ def test_red_caida_es_ilegible():
 
     async def escenario():
         async with _cliente(manejar) as cli:
-            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, cliente=cli)
+            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, tope_s=400, cliente=cli)
     with pytest.raises(A.AuditorIlegible) as e:
         asyncio.run(escenario())
     assert e.value.codigo == "proveedor_fallo"
@@ -63,7 +63,7 @@ def test_red_caida_es_ilegible():
 
 def test_transporte_no_soportado():
     with pytest.raises(AC.AuditorNoSoportado):
-        asyncio.run(AC.auditar(LOTE, faceta=SimpleNamespace(**{**vars(FACETA), "transport": "http_gemini"}), max_tokens=10))
+        asyncio.run(AC.auditar(LOTE, faceta=SimpleNamespace(**{**vars(FACETA), "transport": "http_gemini"}), max_tokens=10, tope_s=400))
 
 
 def test_transporte_ollama_del_auditor_local_es_soportado():
@@ -82,7 +82,7 @@ def test_transporte_ollama_del_auditor_local_es_soportado():
 
     async def escenario():
         async with _cliente(manejar) as cli:
-            return await AC.auditar(LOTE, faceta=faceta_local, max_tokens=10, cliente=cli)
+            return await AC.auditar(LOTE, faceta=faceta_local, max_tokens=10, tope_s=400, cliente=cli)
     rev = asyncio.run(escenario())
     assert rev.pausar is False
     assert vistas["url"] == "http://127.0.0.1:11435/v1/chat/completions"
@@ -98,7 +98,7 @@ def test_la_llave_no_sale_en_el_error():
 
     async def escenario():
         async with _cliente(manejar) as cli:
-            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, cliente=cli)
+            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, tope_s=400, cliente=cli)
     with pytest.raises(A.AuditorIlegible) as e:
         asyncio.run(escenario())
     assert "llave-XYZ" not in repr(e.value) and e.value.__cause__ is None
@@ -136,7 +136,7 @@ def test_sin_credencial_no_se_emite_la_cabecera_authorization():
 
     async def escenario():
         async with _cliente(manejar) as cli:
-            return await AC.auditar(LOTE, faceta=faceta_local, max_tokens=10, cliente=cli)
+            return await AC.auditar(LOTE, faceta=faceta_local, max_tokens=10, tope_s=400, cliente=cli)
 
     asyncio.run(escenario())
     assert vistas["tiene_auth"] is False, f"se emitio authorization={vistas['auth']!r}"
@@ -175,7 +175,7 @@ def test_auditor_local_sin_credencial_contra_un_servidor_http_real():
 
         async def escenario():
             async with httpx.AsyncClient() as cli:
-                return await AC.auditar(LOTE, faceta=faceta_local, max_tokens=10, cliente=cli)
+                return await AC.auditar(LOTE, faceta=faceta_local, max_tokens=10, tope_s=400, cliente=cli)
 
         rev = asyncio.run(escenario())
     finally:
@@ -185,3 +185,25 @@ def test_auditor_local_sin_credencial_contra_un_servidor_http_real():
     assert rev.pausar is False
     assert len(recibidas) == 1, "el servidor no recibio la peticion: murio antes del socket"
     assert "authorization" not in {k.lower() for k in recibidas[0]}
+
+
+def test_el_plazo_de_la_llamada_es_el_que_se_pasa():
+    """`tope_s` sale de axioma_config (ejecutor.c5_tope_s) y llega intacto al timeout de httpx."""
+    vistos = {}
+
+    def manejar(req):
+        vistos["timeout"] = req.extensions["timeout"]
+        contenido = json.dumps({"hallazgos": [], "afirmaciones": []})
+        return httpx.Response(200, json={"choices": [{"message": {"content": contenido}}]})
+
+    async def escenario():
+        async with _cliente(manejar) as cli:
+            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, cliente=cli, tope_s=400)
+    asyncio.run(escenario())
+    assert vistos["timeout"] == {"connect": 400, "read": 400, "write": 400, "pool": 400}
+
+
+def test_el_plazo_es_obligatorio_sin_valor_por_omision():
+    """Un consumidor que olvide pasarlo no hereda un 120 s escrito en codigo: no corre."""
+    with pytest.raises(TypeError):
+        asyncio.run(AC.auditar(LOTE, faceta=FACETA, max_tokens=10))

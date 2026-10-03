@@ -103,6 +103,14 @@ def test_leer_pausa_fail_closed(tmp_path):
                                   "momento": None}
 
 
+def test_leer_pausa_trae_el_detalle_solo_si_es_texto(tmp_path):
+    ruta = tmp_path / "pausa"
+    ruta.write_text(json.dumps({"origen": "c5", "motivo": "auditor_ilegible", "detalle": "proveedor_fallo"}))
+    assert S.leer_pausa(ruta)["detalle"] == "proveedor_fallo"
+    ruta.write_text(json.dumps({"origen": "c5", "motivo": "auditor_ilegible", "detalle": {"x": 1}}))
+    assert "detalle" not in S.leer_pausa(ruta)
+
+
 # --- ronda 5, auditoría adversarial 2026-09-22: SIN unidad systemd -----------------------
 #
 # `ejecutor-vigia@.service` se retiró: código muerto, nunca arrancó en producción (verificado
@@ -500,3 +508,38 @@ def test_config_de_codigo_con_y_sin_filas(filas, esperado):
 def test_config_de_codigo_invalida_falla_cerrado(filas):
     with pytest.raises(ValueError):
         S.config_codigo_desde_filas(filas)
+
+
+def test_el_turno_audita_con_el_plazo_de_axioma_config(monkeypatch):
+    """`ejecutor.c5_tope_s` (cfg.tope_s) llega a auditor_cliente.auditar desde el turno del cerebro."""
+    import jacobs.store as jstore
+    from jax.ejecutor.contratos import auditor_cliente, eleccion_c5
+
+    class _Conexion:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    async def leer_config(conn):
+        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 555, False, False)
+
+    async def elegir(conn, *, cfg, hosts_mision, resolve_facet):
+        return ("faceta-fake", None, None)
+
+    vistas = {}
+
+    async def auditar_falso(lote, **kw):
+        vistas.update(kw)
+        return "revision"
+
+    monkeypatch.setattr(jstore, "conexion", lambda **kw: _Conexion())
+    monkeypatch.setattr(eleccion_c5, "leer_config", leer_config)
+    monkeypatch.setattr(eleccion_c5, "elegir_y_resolver_auditor", elegir)
+    monkeypatch.setattr(auditor_cliente, "auditar", auditar_falso)
+    monkeypatch.setattr(S.A, "afirmaciones_auditables", lambda entrega: ())
+    turno = M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])})
+    deps = S.dependencias_reales({}, turno, tope_s=1.0, espera_s=1.0)
+    assert asyncio.run(deps.auditar("texto", object(), (S.A.Maquina("m", "192.0.2.9", 58291),))) == "revision"
+    assert vistas == {"faceta": "faceta-fake", "max_tokens": 100, "tope_s": 555}

@@ -478,7 +478,11 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                 entrega = A.aplicar_revision(entrega, revision)
             except Exception as exc:  # fail-soft: el turno entrega las crudas; fail-CLOSED para las afirmaciones: con el auditor ilegible o caído no sale ninguna
                 auditor_legible = False
-                dice(AUDITOR_ILEGIBLE, tipo=type(exc).__name__)
+                # `motivo` SOLO para AuditorIlegible: su codigo es una constante (proveedor_fallo,
+                # json_invalido...). El texto de cualquier otra excepcion puede traer una llave
+                # o un cuerpo HTTP y no viaja.
+                dice(AUDITOR_ILEGIBLE, tipo=type(exc).__name__,
+                     **({"motivo": exc.codigo} if isinstance(exc, A.AuditorIlegible) else {}))
                 entrega = _retener_todo(entrega)
             if auditor_pauso:
                 dice("auditor_pauso", motivo=revision.motivo, paso=revision.paso)
@@ -502,7 +506,7 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
     puesta = bool(pausa and pausa.get("puesta"))
     if puesta:
         dice("pausa_detectada", origen=pausa.get("origen"), motivo=pausa.get("motivo"), paso=pausa.get("paso"),
-             legible=pausa.get("legible"))
+             legible=pausa.get("legible"), **({"detalle": pausa["detalle"]} if pausa.get("detalle") else {}))
     for condicion, cod in ((auditor_pauso, "auditor_pauso"),
                            (not registro_cuadra, "registro_no_cuadra"), (not cadena, "cadena_rota"),
                            (not cerro, "vigia_no_cerro"), (not auditor_legible, AUDITOR_ILEGIBLE),

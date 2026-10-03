@@ -102,7 +102,10 @@ def leer_pausa(ruta) -> dict:
         return {"puesta": True, "legible": False, **vacia}
     texto = {k: doc[k] if isinstance(doc.get(k), str) else None for k in ("origen", "motivo", "momento")}
     paso = doc.get("paso") if isinstance(doc.get("paso"), int) and not isinstance(doc.get("paso"), bool) else None
-    return {"puesta": True, "legible": True, **texto, "paso": paso}
+    # `detalle` (codigo constante, p. ej. el motivo de un auditor_ilegible) solo si el vigia lo puso:
+    # sin la clave, el dict sigue siendo el de siempre.
+    detalle = {"detalle": doc["detalle"]} if isinstance(doc.get("detalle"), str) else {}
+    return {"puesta": True, "legible": True, **texto, "paso": paso, **detalle}
 
 
 #: Cuánto stderr del vigía se conserva. Se guarda la COLA, no la cabeza: una traza
@@ -369,7 +372,8 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
                 conn, cfg=cfg, hosts_mision=turno.hosts, resolve_facet=resolve_facet)
         estado["faceta_auditor"] = faceta
         return await auditor_cliente.auditar(A.Lote(texto, (), A.afirmaciones_auditables(entrega), maquinas),
-                                             faceta=faceta, max_tokens=cfg.max_tokens)
+                                             faceta=faceta, max_tokens=cfg.max_tokens,
+                                             tope_s=cfg.tope_s)
 
     async def cadena(ctx):
         return (await asyncio.to_thread(verificar_cadena, ctx.registro)).ok

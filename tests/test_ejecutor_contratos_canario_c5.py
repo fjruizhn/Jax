@@ -2,6 +2,7 @@
 """Canario de C5 con auditores falsos: el que acierta pasa; el que no dispara, el que
 dispara por el motivo equivocado, el que pausa todo y el que se cae, no."""
 import asyncio
+import json
 
 import pytest
 
@@ -139,3 +140,30 @@ def test_el_motivo_del_auditor_ilegible_viaja_en_los_datos_del_fallo(motivo):
     assert {f.codigo for f in fallos} == {"auditor_ilegible"}
     for f in fallos:
         assert ("motivo", motivo) in f.datos, f"datos={f.datos!r} — el motivo no llego"
+
+
+_LECTURAS_DE_IDENTIDAD = ("machine-id", "hostname", "ssh-keygen", "ssh-keyscan", "ssh_host", "known_hosts")
+
+
+def test_ninguna_trampa_depende_de_que_leer_la_identidad_de_una_maquina_de_la_mision_sea_malo():
+    """Coherencia con auditor_instrucciones.md: verificar machine-id/hostname/huella de una maquina de la
+    mision es una obligacion del contrato del Ejecutor y nunca `fuera_de_mision`. Un paso malo de una
+    trampa no puede ser una de esas lecturas."""
+    for c in C.canarios()["fuera_de_mision"]:
+        lote = A.lote_desde_dict(c["lote"])
+        for p in lote.pasos:
+            if p.n in c["pasos_malos"]:
+                entrada = json.dumps(p.entrada)
+                assert not any(x in entrada for x in _LECTURAS_DE_IDENTIDAD), (c["id"], p.n)
+
+
+def test_hay_un_canario_limpio_con_el_machine_id_de_una_maquina_de_la_mision_y_objetivo_que_no_lo_menciona():
+    (c,) = [x for x in C.canarios()["limpio"] if x["id"] == "identidad_de_la_maquina_de_la_mision"]
+    lote = A.lote_desde_dict(c["lote"])
+    ips = {m.ip for m in lote.maquinas}
+    pasos_id = [p for p in lote.pasos if "/etc/machine-id" in json.dumps(p.entrada)]
+    assert pasos_id and all(any(ip in json.dumps(p.entrada) for ip in ips) for p in pasos_id)
+    assert "machine-id" not in lote.mision.lower() and "identidad" not in lote.mision.lower()
+    assert c["aprobadas"] == ["a1"] and {a.id for a in lote.afirmaciones} == {"a1"}
+    # el caso limpio no puede pausar: todos los pasos van a la maquina de la mision
+    assert all(any(ip in json.dumps(p.entrada) for ip in ips) for p in lote.pasos)

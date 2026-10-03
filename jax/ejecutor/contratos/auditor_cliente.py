@@ -11,6 +11,10 @@ AuditorNoSoportado, y el arranque se niega. Error del proveedor, red caída, top
 o forma inesperada → AuditorIlegible("proveedor_fallo"): quien llama frena. La excepción
 de origen NO se encadena: un error HTTP puede traer la llave o el cuerpo. Cliente HTTP
 compartido (E-24).
+
+`tope_s` es OBLIGATORIO y sale de `axioma_config` (`ejecutor.c5_tope_s`, ver
+`eleccion_c5.ConfigC5.tope_s`): sin valor por omision, un consumidor que lo olvide no corre
+en vez de heredar un plazo escrito en codigo.
 """
 from __future__ import annotations
 
@@ -34,7 +38,7 @@ def instrucciones() -> str:
     return _INSTRUCCIONES.read_text(encoding="utf-8")
 
 
-async def auditar(lote: A.Lote, *, faceta, max_tokens: int, cliente=None, tope_s: float = 120.0) -> A.Revision:
+async def auditar(lote: A.Lote, *, faceta, max_tokens: int, tope_s: float, cliente=None) -> A.Revision:
     if faceta.transport not in TRANSPORTES_SOPORTADOS:
         raise AuditorNoSoportado(faceta.transport)
     cliente = cliente or obtener_cliente_http()
