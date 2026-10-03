@@ -29,6 +29,8 @@ import re
 from pathlib import Path
 from typing import Callable
 
+from procesamiento.tipos_imagen import EXTENSIONES_IMAGEN
+
 REQUIREMENTS = Path(__file__).resolve().parent.parent / "requirements-archivos.txt"
 
 #: paquete (nombre en requirements, normalizado) -> modulo que se importa.
@@ -49,8 +51,9 @@ EXTENSIONES_POR_PAQUETE: dict[str, set[str]] = {
     "openpyxl": {".xlsx", ".xlsm"},
     "pdfplumber": {".pdf"},
     "python-docx": {".docx"},
-    # el OCR de imagenes decodifica con Pillow antes de llamar a tesseract
-    "pillow": {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"},
+    # el OCR de imagenes decodifica con Pillow antes de llamar a tesseract. La
+    # MISMA lista que la compuerta (Jax#338 ronda 17: faltaba `.gif`).
+    "pillow": set(EXTENSIONES_IMAGEN),
 }
 
 _NOMBRE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(?:$|[=<>!~;\s])")

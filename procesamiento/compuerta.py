@@ -29,8 +29,11 @@ from pathlib import Path
 
 from procesamiento.extractores import excel, ocr, pdf, word
 from procesamiento.resultado import Resultado
+from procesamiento.tipos_imagen import EXTENSIONES_IMAGEN
 
-IMAGENES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
+# Jax#338 ronda 17: la MISMA fuente que el freno de dependencias (antes eran dos
+# copias a mano y a las dos les faltaba `.gif`).
+IMAGENES = set(EXTENSIONES_IMAGEN)
 EXCEL = {".xlsx", ".xlsm"}
 WORD = {".docx"}
 
