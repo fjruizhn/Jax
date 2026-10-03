@@ -6925,7 +6925,13 @@ jobs:
         # jaxsvc) y las de la carrera y las etapas se endurecen, sin sumar. Local: 91 passed + 3 skipped (2 de los
         # 3 el runner los corre: 91 + 2 = 93), 1 skipped en el runner. Ningun piso baja. Sin medir en el runner:
         # manda el runner.
+        # 93 -> 100 (ronda 5 de #340): +7. Carpetas ocultas solo en cuanto a otros (--verificar la marca; --aplicar y
+        # --deshacer la cierran sin tocar dueño, grupo ni ACL nombradas ni seguir un symlink: 3), --deshacer falla
+        # cerrado si jaxsvc no atraviesa la raiz por el dueño/grupo actuales (1) o por el modo que va a restaurar
+        # (1) y verifica de nuevo al terminar (1), y la prueba que EJECUTA el bloque de verificacion del runbook
+        # contra un arbol temporal (1). Local: 98 passed + 3 skipped (2 de los 3 el runner los corre: 98 + 2 =
+        # 100), 1 skipped en el runner. Ningun piso baja. Sin medir en el runner: manda el runner.
         run: |
           PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
-          grep -qE "^93 passed, 1 skipped" /tmp/permisos_proyectos || {
-            echo "PISO ROTO: se esperaban 93 tests CORRIDOS (no skipeados) y exactamente 1 skipped."; exit 1; }
+          grep -qE "^100 passed, 1 skipped" /tmp/permisos_proyectos || {
+            echo "PISO ROTO: se esperaban 100 tests CORRIDOS (no skipeados) y exactamente 1 skipped."; exit 1; }
