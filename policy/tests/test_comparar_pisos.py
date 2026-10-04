@@ -114,7 +114,6 @@ def test_rojo_m_sube():
     "^5 passed|^1 passed",     # alternativas
     "^(5|6) passed",
     "^5 passed in ",           # otra forma conocida: no es solo subir N
-    "^5 passed, 0 skipped",
     "^5 passed.*",
 ])
 def test_rojo_el_patron_cambia_de_forma(patron):
@@ -354,6 +353,37 @@ def test_bajar_m_es_la_unica_excepcion_a_solo_subir_n_y_esta_documentada():
     assert cp.comparar(BASE, h) == []
     assert "única excepción" in (RAIZ / "docs" / "ci" / "pisos.md").read_text(encoding="utf-8").lower()
     assert "única excepción" in cp.__doc__.lower()
+
+
+# --- la excepción de endurecimiento: `^N passed` -> `^N' passed, M skipped` con N' >= N ---
+
+def _de_a(antes, despues):
+    b = estado({"j/x": piso(antes)})
+    h = estado({"j/x": piso(despues)})
+    return cp.comparar(b, h)
+
+
+@pytest.mark.parametrize("antes,despues", [
+    ("^35 passed", "^35 passed, 2 skipped"),
+    ("^35 passed", "^40 passed, 0 skipped"),
+])
+def test_verde_de_passed_a_passed_con_skipped_si_n_no_baja(antes, despues):
+    assert _de_a(antes, despues) == []
+
+
+def test_rojo_de_passed_a_passed_con_skipped_si_n_baja():
+    errores = _de_a("^35 passed", "^34 passed, 2 skipped")
+    assert errores and any("N baja" in e for e in errores), errores
+
+
+def test_rojo_de_passed_con_skipped_a_passed_a_secas_afloja():
+    errores = _de_a("^35 passed, 2 skipped", "^35 passed")
+    assert errores and any("cambia de forma" in e for e in errores), errores
+
+
+def test_la_excepcion_de_endurecimiento_esta_documentada():
+    assert "^N passed, M skipped" in cp.__doc__
+    assert "^N passed, M skipped" in (RAIZ / "docs" / "ci" / "pisos.md").read_text(encoding="utf-8")
 
 
 def test_el_head_borra_pisos_json_y_la_base_lo_tiene_es_rojo(repo):

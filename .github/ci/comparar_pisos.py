@@ -15,12 +15,17 @@ conftest.py o un sitecustomize podrían reescribir .git/config o las refs). Solo
 Reglas, para cada clave de la base:
   * la clave tiene que seguir en el head;
   * el archivo temporal que lee no cambia;
-  * el patrón conserva EXACTAMENTE su forma y solo puede cambiar N (passed) hacia arriba;
+  * el patrón conserva EXACTAMENTE su forma (salvo la excepción de más abajo) y solo puede
+    cambiar N (passed) hacia arriba;
     en la forma `^N passed, M skipped`, M no puede subir;
   * un mínimo numérico no baja ni deja de ser un entero.
 Subir N y agregar claves nuevas está permitido. El mensaje puede cambiar.
 Única excepción a «solo un N mayor»: bajar M (skipped) se permite a propósito, porque menos
 saltadas endurece el piso (hay menos pruebas que pueden dejar de correr sin que nadie lo vea).
+Única excepción a «la forma no cambia»: pasar de `^N passed` a `^N' passed, M skipped` con
+N' >= N. Es un endurecimiento, porque agrega una exigencia sobre las saltadas (hasta entonces
+cualquier número de saltadas pasaba). Al revés, de `^N passed, M skipped` a `^N passed`, sigue
+prohibido: afloja, porque vuelve a aceptar cualquier número de saltadas.
 Una clave repetida en `ci/pisos.json` es un error (falla cerrado), aunque hoy no rebaje nada.
 Un patrón con una forma que este parser no reconoce, base o head, es un error: no se adivina.
 
@@ -151,7 +156,9 @@ def comparar(base: dict, head: dict) -> list[str]:
             errores.append(f"{clave}: cambia el archivo de salida ({b['archivo']!r} -> {h['archivo']!r})")
         fb, nb, mb = parsear_patron(b["patron"])
         fh, nh, mh = parsear_patron(h["patron"])
-        if fb != fh:
+        if fb == "passed" and fh == "passed-skipped":
+            pass  # endurecimiento permitido: solo se exige además que N no baje (abajo)
+        elif fb != fh:
             errores.append(f"{clave}: el patrón cambia de forma ({b['patron']!r} -> {h['patron']!r})")
             continue
         if nh < nb:
