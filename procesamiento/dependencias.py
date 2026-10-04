@@ -29,7 +29,7 @@ import re
 from pathlib import Path
 from typing import Callable
 
-from procesamiento.tipos_imagen import EXTENSIONES_IMAGEN
+from procesamiento.tipos_imagen import EXTENSIONES_IMAGEN, tipo_por_contenido
 
 REQUIREMENTS = Path(__file__).resolve().parent.parent / "requirements-archivos.txt"
 
@@ -54,6 +54,14 @@ EXTENSIONES_POR_PAQUETE: dict[str, set[str]] = {
     # el OCR de imagenes decodifica con Pillow antes de llamar a tesseract. La
     # MISMA lista que la compuerta (Jax#338 ronda 17: faltaba `.gif`).
     "pillow": set(EXTENSIONES_IMAGEN),
+}
+
+#: paquete -> tipo por CONTENIDO (`tipos_imagen.tipo_por_contenido`) que deja de
+#: poder procesarse si falta. Jax#338 ronda 18: la compuerta enruta por la firma
+#: (un PNG llamado `foto` va al OCR) y el freno decide igual.
+CONTENIDO_POR_PAQUETE: dict[str, str] = {
+    "pdfplumber": "pdf",
+    "pillow": "imagen",
 }
 
 _NOMBRE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(?:$|[=<>!~;\s])")
@@ -146,15 +154,46 @@ def tipos_de(faltan: list[str]) -> list[str]:
     return sorted(tipos)
 
 
-def lote_afectado(faltan: list[str], rutas: list[str]) -> bool:
+def _tipo_de_contenido(ruta, abrir: Callable[[str], Path | None] | None) -> str | None:
+    """El tipo por contenido de `ruta` (como la compuerta), o None si no se
+    puede leer (sin `abrir`, ruta fuera del jail, archivo ausente) o si el
+    contenido no decide."""
+    if abrir is None:
+        return None
+    try:
+        destino = abrir(ruta)
+        if destino is None:
+            return None
+        with open(destino, "rb") as fh:
+            cabecera = fh.read(1024)
+    except Exception:  # fail-soft: una ruta que no se puede abrir no da tipo por contenido y decide la extension (el respaldo de siempre); el freno nunca se cae por una ruta rota
+        return None
+    return tipo_por_contenido(cabecera, Path(str(ruta)).suffix)
+
+
+def lote_afectado(faltan: list[str], rutas: list[str],
+                  abrir: Callable[[str], Path | None] | None = None) -> bool:
     """True si el lote trae algo que dependa de un paquete faltante. Un faltante
-    sin mapa afecta a todo lote no vacio (falla cerrado)."""
+    sin mapa afecta a todo lote no vacio (falla cerrado).
+
+    Jax#338 ronda 18: decide como la compuerta. Con `abrir` (ruta -> archivo
+    legible, o None), lee la cabecera: si el contenido es decisivo (`pdf`,
+    `imagen`, `ole2`) manda el contenido; si no, o si no se puede leer, la
+    extension, como siempre."""
     if not faltan or not rutas:
         return False
     tipos = tipos_de(faltan)
     if tipos == ["*"]:
         return True
-    return any(Path(str(r)).suffix.lower() in tipos for r in rutas)
+    contenidos = {CONTENIDO_POR_PAQUETE[p] for p in faltan if p in CONTENIDO_POR_PAQUETE}
+    for ruta in rutas:
+        tipo = _tipo_de_contenido(ruta, abrir)
+        if tipo is not None:
+            if tipo in contenidos:
+                return True
+        elif Path(str(ruta)).suffix.lower() in tipos:
+            return True
+    return False
 
 
 def codigo_de_import(exc: BaseException) -> str:

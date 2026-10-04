@@ -293,6 +293,13 @@ def _codigo_de_ficha(ficha) -> str | None:
     return codigo
 
 
+def _ruta_del_jail(ruta: str) -> Path | None:
+    """La ruta resuelta por el jail (la misma resolucion que el procesamiento),
+    o None si queda fuera: el freno de dependencias lee su cabecera."""
+    resuelta, _ = tool_authority.resolve_jailed_path(ruta, [])
+    return resuelta
+
+
 def _procesar_una_ruta(trabajo: Path, ruta: str) -> ResultadoArchivo:
     """Nunca lanza: una ruta fuera del jail, ausente, o cuya ingesta falla
     queda REPORTADA, no propagada -- fallo cerrado por archivo, para que un
@@ -664,8 +671,13 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
     # El freno es POR TIPO: solo se frena un lote con alguna ruta cuya extension
     # dependa de un paquete faltante (un lote de imagenes sigue). `estado()` hace
     # E/S de modulos: va fuera del loop (asyncio.to_thread).
+    # Jax#338 ronda 18: el freno decide como la compuerta, por la FIRMA del
+    # contenido (leido a traves del jail, solo la cabecera y solo si falta algo)
+    # y por la extension como respaldo: un PNG llamado `foto` tambien frena.
     extractores = await asyncio.to_thread(dependencias.estado)
-    if not extractores["ok"] and dependencias.lote_afectado(extractores["faltan"], req.rutas):
+    if not extractores["ok"] and await asyncio.to_thread(
+        dependencias.lote_afectado, extractores["faltan"], req.rutas, _ruta_del_jail,
+    ):
         if aviso_extractores.log_si_toca():
             logger.error("POST /procesamiento/trabajos rechazado: faltan extractores %s", extractores["faltan"])
         aviso_extractores.avisar_si_toca(extractores["faltan"])
