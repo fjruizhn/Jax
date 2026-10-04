@@ -72,6 +72,7 @@ from pathlib import Path
 
 from procesamiento.dependencias import codigo_de_import
 from procesamiento.resultado import Resultado
+from procesamiento.tipos_imagen import FIRMA_OLE2
 
 EXTRACTOR = "python-docx"
 
@@ -105,7 +106,7 @@ def _version() -> str | None:
 def _es_binario_ole2(origen: Path) -> bool:
     try:
         with open(origen, "rb") as fh:
-            return fh.read(len(_FIRMA_OLE2)) == _FIRMA_OLE2
+            return fh.read(len(FIRMA_OLE2)) == FIRMA_OLE2
     except OSError:
         return False
 
