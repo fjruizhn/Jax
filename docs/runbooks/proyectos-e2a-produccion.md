@@ -42,7 +42,7 @@ sudo -l                                            # confirmar la regla de sudoe
 sudo install -o root -g root -m 0755 ops/permisos_proyectos.py /usr/local/sbin/jax-permisos-proyectos
 # --aplicar y el --verificar posterior van en el bloque de abajo, con las unidades de jaxsvc detenidas
 ```
-**`--aplicar` y `--deshacer` se corren SOLO con TODAS las unidades de `jaxsvc` detenidas, en UN bloque, y se restauran al salir.** El guion falla cerrado, sin mutar nada, si hay cualquier proceso o hilo con el uid de `jaxsvc` (lo lee de `/proc`; si no puede leer el estado de un pid listado, también falla; `--verificar` no lo exige). Por qué, en dos líneas: un proceso `jaxsvc` vivo puede renombrar carpetas mientras root recorre el árbol, y todas las carreras de renombre (symlinks, hardlinks, intercambio de nombres, ocultas que cambian de proyecto) parten de eso; sin procesos `jaxsvc`, nadie con permiso de renombrar corre en paralelo (queda `fruiz`, dueño, y root, que es confiable por premisa). Las unidades solo se **detienen**: no se enmascaran, porque viven en `/etc/systemd/system` y un `mask --runtime` no las tapa; con los timers parados no se disparan. El bloque, en este orden: (a) premisas (sin archivos setuid/setgid de `jaxsvc` y sin crontab de `jaxsvc`); (b) la lista de unidades y timers de `jaxsvc` (`list-units` y `list-timers` con `'jax*'`, filtradas por `User=`), con **cada consulta capturada: si una falla, o la lista sale vacía, o falta una de la lista mínima esperada, se corta**; el estado textual (`active`, `inactive`, `failed`, `activating`) de cada una, guardado ANTES de detener nada; (c) el `trap` de restauración; (d) `stop` de cada una; (e) comprobar por su salida textual que quedaron detenidas, `ps -u jaxsvc` vacío y `/proc/*/status` y `/proc/*/task/*/status` sin los cuatro uid; (f) el guion; (g) `--verificar`; (h) el trap **arranca en orden inverso solo las que estaban `active`, verifica con `is-active` que vuelvan y, si alguna no vuelve, dice cuáles y cómo arrancarla a mano y sale con código distinto de 0 aunque el guion haya ido bien** (conserva el código del fallo original si lo hubo).
+**`--aplicar` y `--deshacer` se corren SOLO con TODAS las unidades de `jaxsvc` detenidas, en UN bloque, y se restauran al salir.** El guion falla cerrado, sin mutar nada, si hay cualquier proceso o hilo con el uid de `jaxsvc` (lo lee de `/proc`; si no puede leer el estado de un pid listado, también falla; `--verificar` no lo exige). Por qué, en dos líneas: un proceso `jaxsvc` vivo puede renombrar carpetas mientras root recorre el árbol, y todas las carreras de renombre (symlinks, hardlinks, intercambio de nombres, ocultas que cambian de proyecto) parten de eso; sin procesos `jaxsvc`, nadie con permiso de renombrar corre en paralelo (queda `fruiz`, dueño, y root, que es confiable por premisa). Las unidades solo se **detienen**: no se enmascaran, porque viven en `/etc/systemd/system` y un `mask --runtime` no las tapa; con los timers parados no se disparan. El bloque, en este orden: (a) premisas (sin archivos setuid/setgid de `jaxsvc` y sin crontab de `jaxsvc`); (b) la lista de unidades y timers de `jaxsvc` (`list-units` y `list-timers` con `'jax*'`, filtradas por `User=`), con **cada consulta capturada: si una falla, o la lista sale vacía, o falta una de la lista mínima esperada, se corta**; el estado textual (`active`, `inactive`, `failed`, `activating`) de cada una, guardado ANTES de detener nada; (c) el `trap` de restauración; (d) `stop` de cada una; (e) comprobar por su salida textual que quedaron detenidas, `ps -u jaxsvc` vacío y `/proc/*/status` y `/proc/*/task/*/status` sin los cuatro uid; (f) el guion; (g) `--verificar`; (h) el trap **arranca en orden inverso las que estaban `active` o `activating` (una unidad que estaba arrancando se restaura igual), verifica con `is-active` que vuelvan y, si alguna no vuelve, dice cuáles y cómo arrancarla a mano y sale con código distinto de 0 aunque el guion haya ido bien** (conserva el código del fallo original si lo hubo; una señal INT, TERM o HUP a mitad del bloque también restaura, y sale con 130, 143 o 129).
 
 **Bloque de `--aplicar`:**
 ```bash
@@ -110,11 +110,11 @@ restaurar() {
   trap - EXIT
   set +e
   for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
-    [ "${ESTADOS[i]}" = active ] || continue
+    [ "${ESTADOS[i]}" = active ] || [ "${ESTADOS[i]}" = activating ] || continue
     sudo systemctl start "${LISTA[i]}" || echo "AVISO: systemctl start ${LISTA[i]} falló" >&2
   done
   for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
-    [ "${ESTADOS[i]}" = active ] || continue
+    [ "${ESTADOS[i]}" = active ] || [ "${ESTADOS[i]}" = activating ] || continue
     u="${LISTA[i]}"
     for ((intento = 0; intento < REINTENTOS; intento++)); do
       [ "$(sudo systemctl is-active "$u")" = active ] && break
@@ -130,6 +130,11 @@ restaurar() {
   exit "$rc"
 }
 trap restaurar EXIT
+# Una señal a mitad del bloque (Ctrl-C, kill) NO debe saltarse la restauración: se convierte en un `exit` con su código
+# (130, 143, 129) y el trap EXIT restaura y verifica. Sin esto, bash puede morir por la señal sin ejecutarlo.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # (d) PARAR cada timer y unidad (sin mask: las unidades viven en /etc/systemd/system y un mask --runtime no las tapa;
 #     con los timers parados no se disparan, y arrancarlos solo puede hacerlo root, que es confiable por premisa).
@@ -225,11 +230,11 @@ restaurar() {
   trap - EXIT
   set +e
   for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
-    [ "${ESTADOS[i]}" = active ] || continue
+    [ "${ESTADOS[i]}" = active ] || [ "${ESTADOS[i]}" = activating ] || continue
     sudo systemctl start "${LISTA[i]}" || echo "AVISO: systemctl start ${LISTA[i]} falló" >&2
   done
   for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
-    [ "${ESTADOS[i]}" = active ] || continue
+    [ "${ESTADOS[i]}" = active ] || [ "${ESTADOS[i]}" = activating ] || continue
     u="${LISTA[i]}"
     for ((intento = 0; intento < REINTENTOS; intento++)); do
       [ "$(sudo systemctl is-active "$u")" = active ] && break
@@ -245,6 +250,11 @@ restaurar() {
   exit "$rc"
 }
 trap restaurar EXIT
+# Una señal a mitad del bloque (Ctrl-C, kill) NO debe saltarse la restauración: se convierte en un `exit` con su código
+# (130, 143, 129) y el trap EXIT restaura y verifica. Sin esto, bash puede morir por la señal sin ejecutarlo.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # (d) PARAR cada timer y unidad (sin mask: las unidades viven en /etc/systemd/system y un mask --runtime no las tapa;
 #     con los timers parados no se disparan, y arrancarlos solo puede hacerlo root, que es confiable por premisa).
