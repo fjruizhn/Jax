@@ -4338,9 +4338,9 @@ tiempo. Si el runner da otro número, manda el runner.
 
 ## `permisos-proyectos/permisos_proyectos`
 
-Patrón vigente (2026-10-04): `^282 passed, 1 skipped`. Antes `^240 passed, 1 skipped`, `^216 passed, 1 skipped` y `^198 passed, 1 skipped` (Jax#340; antes `^53 passed, 2 skipped`, master 364ded9).
+Patrón vigente (2026-10-04): `^298 passed, 1 skipped`. Antes `^282 passed, 1 skipped`, `^240 passed, 1 skipped`, `^216 passed, 1 skipped` y `^198 passed, 1 skipped` (Jax#340; antes `^53 passed, 2 skipped`, master 364ded9).
 
-198 -> 216 -> 240 -> 282 (2026-10-04, fix/runbook-bloque-fuse-y-estable, Jax#345): +9 pruebas x 2 bloques del runbook (premisa `find` con montaje FUSE y unidad restaurada «active y estable»), y en la ronda 2 +24 (FUSE crudo/nosuid, ESTABLE >= 1, OK del trap, caída final); en la ronda 3 la premisa del setuid pasa a ir por montaje (+42, con la excepción acotada del EACCES del punto de montaje de un FUSE nosuid); 283 recolectadas, el runner salta la misma 1 que necesita `/etc/jax/.env`: 282 passed. Medido: 283 passed en hall9000 como fruiz; el skip se deduce de la condición de la línea que lee `/etc/jax/.env`, no se midió en el runner.
+198 -> 216 -> 240 -> 282 -> 298 (2026-10-04, fix/runbook-bloque-fuse-y-estable, Jax#345): +9 pruebas x 2 bloques del runbook (premisa `find` con montaje FUSE y unidad restaurada «active y estable»), y en la ronda 2 +24 (FUSE crudo/nosuid, ESTABLE >= 1, OK del trap, caída final); en la ronda 3 la premisa del setuid pasa a ir por montaje (+42, con la excepción acotada del EACCES del punto de montaje de un FUSE nosuid); en la ronda 4 (+16) el disparo de los autofs antes de la lista definitiva y el diagnóstico de find leído entero; 299 recolectadas, el runner salta la misma 1 que necesita `/etc/jax/.env`: 298 passed. Medido: 299 passed en hall9000 como fruiz; el skip se deduce de la condición de la línea que lee `/etc/jax/.env`, no se midió en el runner.
 
 Historia: Jax#340 (permisos de proyectos sin acceso para otros; el runbook con bloques ejecutables; pruebas con stubs y
 lecturas como root) pasa la suite de 55 a 199 pruebas recolectadas; el runner salta solo la que necesita `/etc/jax/.env`:
