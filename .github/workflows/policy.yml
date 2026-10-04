@@ -5511,8 +5511,13 @@ jobs:
           #   defecto dentro y fuera de la animacion) es formato_no_soportado:png_animado sin tesseract,
           #   y un APNG de un cuadro sigue como PNG. Cuenta del runner: 200 recolectadas menos las 2 de
           #   LACTOVI que salta = 198 passed, 2 skipped. Medido LOCAL en hall9000: 200 passed.
-          grep -qE "^198 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 198 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 200 -> 202 recolectadas (Jax#338 ronda 19): +2 -- un MPO de varios cuadros se lee cuadro
+          #   por cuadro (el texto del cuadro 2 se conserva, un OCR por cuadro con su JPEG original) y
+          #   un MPO de un cuadro sigue con los bytes originales. La prueba del MPO de iPhone y la de
+          #   la version ("6") se reescriben (no suman). Cuenta del runner: 202 recolectadas menos las
+          #   2 de LACTOVI que salta = 200 passed, 2 skipped. Medido LOCAL en hall9000: 202 passed.
+          grep -qE "^200 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 200 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
@@ -5652,8 +5657,10 @@ jobs:
           #   prueba parametrizada por extension) y +1 que exige que cubra cada formato cuya firma el
           #   OCR acepta (extensiones registradas en Pillow) y que sea igual a la del freno. Medido en
           #   local, Python 3.14 con las 3 dependencias y Pillow: 41 passed.
-          grep -qE "^41 passed" /tmp/compuerta_tests || {
-            echo "PISO ROTO: se esperaban 41 tests CORRIDOS de la compuerta."; exit 1; }
+          # 41 -> 42 (Jax#338 ronda 19): +1 -- la compuerta no se cuelga leyendo la cabecera de un
+          #   FIFO. Medido en local: 42 passed.
+          grep -qE "^42 passed" /tmp/compuerta_tests || {
+            echo "PISO ROTO: se esperaban 42 tests CORRIDOS de la compuerta."; exit 1; }
 
       # Task 8 (2026-09-21, procesamiento-archivos-nucleo): la ingesta con
       # cache -- la tarea que produce el ahorro real. Indexa por sha256 del
@@ -6047,8 +6054,10 @@ jobs:
           # 34 -> 37 (Jax#338 ronda 18): +3 -- el freno decide por CONTENIDO como la compuerta: un PNG
           #   llamado `foto` frena sin Pillow; un PDF llamado `.png` no se frena por Pillow y si por
           #   pdfplumber; sin contenido legible decide la extension. Medido localmente: 37 passed.
-          grep -qE "^37 passed" /tmp/dependencias_tests || {
-            echo "PISO ROTO: se esperaban 37 tests CORRIDOS (no skipeados) del freno de dependencias."; exit 1; }
+          # 37 -> 38 (Jax#338 ronda 19): +1 -- con un FIFO real el freno no se cuelga y decide por la
+          #   extension. Medido localmente: 38 passed.
+          grep -qE "^38 passed" /tmp/dependencias_tests || {
+            echo "PISO ROTO: se esperaban 38 tests CORRIDOS (no skipeados) del freno de dependencias."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
