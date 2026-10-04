@@ -102,7 +102,7 @@ async def arrancar(env: Mapping[str, str], *, crear_pool: Callable = crear_pool,
         try:
             pool_memoria, lector_memoria = await crear_pool_memoria_prueba(cfg_memoria)
             adaptador_memoria = AdaptadorMemoria(lector_memoria)
-        except Exception:
+        except Exception:  # fail-soft: memoria es opcional; la herramienta queda cerrada y el Puerto sigue seguro
             # El servicio puede seguir atendiendo el resto del Puerto, pero la
             # herramienta falla cerrado con «memoria no disponible».
             logger.exception("memoria no disponible: no se abrió la base de prueba")
