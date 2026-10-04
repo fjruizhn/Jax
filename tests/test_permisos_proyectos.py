@@ -3125,6 +3125,8 @@ def _entorno_del_bloque(tmp_path: Path, uid_jaxsvc: int, *, extra: dict | None =
         "find": _STUB_FIND,
         "findmnt": _STUB_FINDMNT,
         "ls": _STUB_LS,
+        # `timeout` falso: registra sus argumentos y delega en el real (el log prueba CON QUE flags se dispara)
+        "timeout": '#!/bin/sh\necho "timeout $*" >> "$STUB_DIR/log"\nexec /usr/bin/timeout "$@"\n',
         "crontab": '#!/bin/sh\nif [ -n "$STUB_CRON" ]; then echo "$STUB_CRON"; exit 0; fi\necho "no crontab for jaxsvc" >&2\nexit 1\n',
     }
     for nombre, texto in scripts.items():
@@ -3541,7 +3543,8 @@ def test_un_error_de_find_que_no_cumple_las_cinco_condiciones_corta(tmp_path, _i
 
 # --- ronda 4: un autofs se DISPARA antes de la lista definitiva; el diagnostico de find se lee entero -----------------
 
-_AUTOFS = ["1 / ext4 rw", "2 /srv/auto autofs rw,direct"]
+_AUTOFS = ["1 / ext4 rw", "2 /srv/auto autofs rw,relatime,direct"]
+_AUTOFS_DIRECTO = _AUTOFS
 
 
 @pytest.mark.parametrize("marca,modo", _BLOQUES)
@@ -3588,6 +3591,27 @@ def test_un_disparo_de_autofs_que_falla_o_excede_el_tiempo_corta_y_nombra_el_pun
     assert r.returncode != 0 and "NO CUMPLE" in r.stderr and "autofs" in r.stderr and "/srv/auto" in r.stderr, (que, r.stdout + r.stderr)
     assert not _llamadas(log, "stop"), f"{que}: detuvo algo antes de cortar"
     assert not any(l.startswith("permisos") for l in log)
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+@pytest.mark.parametrize("opciones", ["rw,relatime,indirect", "rw,relatime", "rw,relatime,directx"])
+def test_un_autofs_indirecto_corta_antes_de_detener_nada(tmp_path, _identidades, marca, modo, opciones):
+    """Un autofs indirecto monta por LLAVE (`/net/servidor`): `ls -d /net/.` solo toca la raiz y las llaves no se pueden
+    disparar ni revisar. `direct` tiene que ser una opcion completa."""
+    env = _env_montajes(["1 / ext4 rw", f"2 /srv/auto autofs {opciones}"],
+                        STUB_AUTOFS_MAP="/srv/auto|monta|9 /srv/auto/llave nfs4 rw,relatime")
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=env)
+    assert r.returncode != 0 and "NO CUMPLE" in r.stderr, r.stdout + r.stderr
+    assert "autofs indirecto" in r.stderr and "/srv/auto" in r.stderr, r.stderr
+    assert not _llamadas(log, "stop") and not any(l.startswith("permisos") for l in log)
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_el_disparo_de_un_autofs_lleva_kill_after_ademas_del_tope(tmp_path, _identidades, marca, modo):
+    env = _env_montajes(_AUTOFS_DIRECTO)
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "timeout --kill-after=5 15 ls -d -- /srv/auto/." in log, [l for l in log if l.startswith("timeout")]
 
 
 @pytest.mark.parametrize("marca,modo", _BLOQUES)
