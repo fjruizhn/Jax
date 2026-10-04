@@ -2970,6 +2970,7 @@ case "$cmd" in
   show) if [ -n "$FALLA_SHOW" ]; then echo "Failed to get properties" >&2; exit 1; fi
         grep "^$4 $2 " "$D/props" | sed "s/^[^ ]* [^ ]* //" ;;
   stop) for u in "$@"; do
+          if [ -n "$MARCAR_STOP" ]; then echo "STUB-STOP $u" >&2; fi
           if [ "$COLGAR_STOP" = "$u" ]; then sleep "${COLGAR_STOP_S:-1}"; fi
           case " $NO_SE_DETIENE " in *" $u "*) ;; *) sed -i "/^$u\\$/d" "$D/activas"; sed -i "/^$u\\$/d" "$D/activating" ;; esac
         done ;;
@@ -3243,14 +3244,21 @@ def test_con_señales_el_rc_es_el_del_guion_si_el_guion_fallo(tmp_path, _identid
 
 @pytest.mark.parametrize("marca,modo", _BLOQUES)
 def test_la_linea_de_aviso_se_imprime_antes_de_detener_nada(tmp_path, _identidades, marca, modo):
-    entorno = _entorno_del_bloque(tmp_path, pwd.getpwnam("jaxsvc").pw_uid)
-    entorno["PATH"] = entorno["PATH"]
-    r = subprocess.run(["bash", "-s"], input=_bloque_del_runbook(marca), env=entorno, capture_output=True, text=True,
-                       timeout=60, cwd=str(RAIZ_REPO))
-    assert r.returncode == 0, r.stderr
-    texto = r.stdout + r.stderr
-    assert (f"{_AVISO_DE_VENTANA}; si hace falta cortarlo, kill -9 y después: sudo systemctl start "
-            + " ".join(_ACTIVAS_ANTES[::-1])) in texto, texto
+    """El aviso trae el texto exacto y la lista de unidades, y aparece ANTES del primer `stop`: la salida del bloque y
+    la marca que deja el `systemctl stop` falso van por el MISMO flujo (stderr redirigido a stdout), asi que su
+    posicion relativa es el orden real."""
+    entorno = _entorno_del_bloque(tmp_path, pwd.getpwnam("jaxsvc").pw_uid, extra={"MARCAR_STOP": "1"})
+    r = subprocess.run(["bash", "-s"], input=_bloque_del_runbook(marca), env=entorno, stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True, timeout=60, cwd=str(RAIZ_REPO))
+    assert r.returncode == 0, r.stdout
+    texto = r.stdout
+    aviso = (f"{_AVISO_DE_VENTANA}; si hace falta cortarlo, kill -9 y después: sudo systemctl start "
+             + " ".join(_ACTIVAS_ANTES[::-1]))
+    assert aviso in texto, texto
+    assert "STUB-STOP" in texto, "el stub de stop no dejó su marca: la prueba no mide el orden"
+    assert texto.index(aviso) < texto.index("STUB-STOP"), "el aviso salió DESPUÉS del primer stop"
+    # y antes del guion (que corre despues de todos los stop)
+    assert texto.count(_AVISO_DE_VENTANA) == 1
 
 
 @pytest.mark.parametrize("marca,modo", _BLOQUES)
