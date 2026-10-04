@@ -238,19 +238,20 @@ def test_bytes_que_no_son_una_imagen_son_archivo_ilegible(tmp_path: Path):
     assert r.detalle["codigo"] == "archivo_ilegible"
 
 
-def test_un_pdf_escaneado_sin_texto_sigue_en_error_sin_codigo_de_imagen(tmp_path: Path):
-    """La regla de `imagen_sin_texto` es SOLO de imagenes: un PDF sin texto
-    es un problema y conserva su `error` y su razon."""
+def test_un_pdf_escaneado_sin_texto_se_trata_como_una_imagen(tmp_path: Path):
+    """Decision de Fernando (2026-10-04): un PDF escaneado sin texto util ya no
+    es `error` -- se trata IGUAL que una imagen (regla D: `parcial` +
+    `imagen_pagina_sin_texto`, con el aviso y nunca texto inventado)."""
     from PIL import Image
 
     origen = _pdf_de_imagenes(
         tmp_path / "vacio.pdf", [Image.new("RGB", (800, 400), "white")]
     )
     r = ocr.extraer(origen)
-    assert r.estado == "error"
-    assert r.salidas == {}
-    assert r.detalle["razon"] == "ninguna pagina del PDF dio texto util via OCR"
-    assert "codigo" not in r.detalle
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
+    assert r.detalle["razon"] == "posible documento escaneado sin texto: revisar o reescanear"
+    assert r.salidas["texto.txt"].startswith(ocr.AVISO_IMAGEN_SIN_TEXTO)
 
 
 def test_la_cache_reusa_una_imagen_sin_texto(tmp_path: Path, monkeypatch):
@@ -632,9 +633,10 @@ def test_pdf_pagina_con_membrete_corto_es_parcial_con_paginas_con_dudas(tmp_path
     assert "Estado de Situación Financiera" in r.salidas["texto.txt"]
 
 
-def test_pdf_donde_ninguna_pagina_da_texto_es_error(tmp_path: Path):
-    """C-3: escaneo puro imagen, sin ninguna página legible -- 'error', no
-    'ok' con un extracto vacío."""
+def test_pdf_donde_ninguna_pagina_da_texto_es_parcial_sin_texto(tmp_path: Path):
+    """Escaneo puro imagen, sin ninguna pagina legible: ya no es `error` (decision
+    de Fernando 2026-10-04) sino `parcial` + `imagen_pagina_sin_texto`; las
+    paginas vacias se nombran."""
     from PIL import Image
 
     b1 = Image.new("RGB", (1100, 450), "white")
@@ -643,9 +645,140 @@ def test_pdf_donde_ninguna_pagina_da_texto_es_error(tmp_path: Path):
 
     r = ocr.extraer(origen)
 
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
+    assert r.detalle["paginas"] == 2
+    assert r.detalle["paginas_sin_texto"] == [1, 2]
+    assert r.detalle["_camino"] == "pdf"
+    assert ocr.AVISO_IMAGEN_SIN_TEXTO in r.salidas["texto.txt"]
+
+
+# ---------------------------------------------------------------------------
+# PDF sin texto util = imagen (decision de Fernando, 2026-10-04)
+# ---------------------------------------------------------------------------
+
+
+def _pagina_ocr(clasificacion: str, texto: str = "", dudosas: int = 0, palabras: int = 0) -> dict:
+    """Resultado de `_ocr_una_imagen` para una pagina, a mano (sin tesseract)."""
+    return {
+        "texto": texto, "caracteres": len(texto), "n_palabras": palabras,
+        "confianza_promedio": 30.0 if dudosas else 0.0,
+        "palabras_dudosas": [{"palabra": f"w{i}", "confianza": 20.0} for i in range(dudosas)],
+        "ancho": 2480, "alto": 3508, "clasificacion": clasificacion,
+    }
+
+
+_A = lambda: _pagina_ocr("sin_texto")                                  # regla A: < MINIMO_CARACTERES
+_B = lambda: _pagina_ocr("sin_texto", "Gerente 95 area operaciones planta", 4, 5)   # regla B
+_ILEGIBLE = lambda: {"clasificacion": "ilegible", "causa": "tesseract_no_lee"}
+
+
+@pytest.mark.parametrize("paginas", [1, 2])
+def test_pdf_de_paginas_todas_regla_a_es_parcial_pagina_sin_texto(paginas):
+    r = ocr._resolver_pdf([_A() for _ in range(paginas)], "spa")
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
+    assert r.detalle["razon"] == "posible documento escaneado sin texto: revisar o reescanear"
+    assert r.detalle["paginas"] == paginas
+    assert r.detalle["paginas_sin_texto"] == list(range(1, paginas + 1))
+    assert r.detalle["_camino"] == "pdf"
+    assert r.salidas == {
+        "texto.txt": f"{ocr.AVISO_IMAGEN_SIN_TEXTO}\n{ocr.NOTA_PAGINA_SIN_TEXTO}"
+    }
+
+
+def test_pdf_con_una_pagina_b_y_otra_a_conserva_el_texto_dudoso():
+    """B tiene prioridad sobre D, como en las imagenes; el texto de B se conserva."""
+    r = ocr._resolver_pdf([_A(), _B()], "spa")
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_texto_dudoso"
+    assert r.detalle["razon"] == ocr.RAZON_MAYORIA_DUDOSA
+    assert r.salidas["texto.txt"].startswith(ocr.NOTA_TEXTO_DUDOSO)
+    assert "Gerente 95 area operaciones planta" in r.salidas["texto.txt"]
+    assert r.detalle["paginas"] == 2
+    assert r.detalle["_camino"] == "pdf"
+
+
+def test_pdf_con_a_e_ilegibles_se_resuelve_por_las_paginas_legibles():
+    r = ocr._resolver_pdf([_ILEGIBLE(), _A(), None], "spa")
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
+    r = ocr._resolver_pdf([_ILEGIBLE(), _B(), None], "spa")
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_texto_dudoso"
+    assert "Gerente" in r.salidas["texto.txt"]
+
+
+def test_pdf_con_todas_las_paginas_none_sigue_en_error_con_su_razon():
+    r = ocr._resolver_pdf([None, None], "spa")
     assert r.estado == "error"
     assert r.salidas == {}
+    assert r.detalle["razon"] == "ninguna pagina del PDF dio texto util via OCR"
     assert r.detalle["paginas"] == 2
+    assert "codigo" not in r.detalle
+
+
+def test_pdf_con_todas_las_paginas_ilegibles_es_error_con_el_codigo_que_corresponde():
+    r = ocr._resolver_pdf([_ILEGIBLE(), None], "spa")
+    assert r.estado == "error"
+    assert r.salidas == {}
+    assert r.detalle["codigo"] == "archivo_no_procesable"
+    assert r.detalle["_camino"] == "pdf"
+    assert r.detalle["paginas"] == 2
+
+
+def test_pdf_con_una_pagina_buena_y_otra_sin_texto_sigue_como_antes():
+    buena = _pagina_ocr("ok", "Estado de Situacion Financiera", 0, 12)
+    buena["confianza_promedio"] = 95.0
+    r = ocr._resolver_pdf([buena, _A()], "spa")
+    assert r.estado == "parcial"
+    assert "codigo" not in r.detalle
+    assert r.detalle["paginas_sin_texto"] == [2]
+    assert "Estado de Situacion Financiera" in r.salidas["texto.txt"]
+
+
+def test_pdf_extraer_con_todas_las_paginas_ilegibles_es_error(tmp_path: Path, monkeypatch):
+    """Por el camino real de `extraer`: rasterizado de verdad, tesseract falla."""
+    from PIL import Image
+
+    monkeypatch.setattr(ocr, "_ocr_una_imagen", lambda ruta, idioma: None)
+    origen = _pdf_de_imagenes(
+        tmp_path / "x.pdf", [Image.new("RGB", (800, 400), "white") for _ in range(2)]
+    )
+    r = ocr.extraer(origen)
+    assert r.estado == "error"
+    assert r.salidas == {}
+
+
+def _pdf_tipo_word_con_fotos(destino: Path) -> Path:
+    """Fixture SINTETICO del caso «DUI RMR.pdf»: un PDF como el que genera Word,
+    una pagina carta con dos fotos de baja resolucion (80 ppi) incrustadas y sin
+    capa de texto. Degradado con ruido y desenfoque, sin ningun texto."""
+    from PIL import Image, ImageFilter
+
+    def foto(ancho: int, alto: int):
+        degradado = Image.linear_gradient("L").resize((ancho, alto)).convert("RGB")
+        ruido = Image.effect_noise((ancho, alto), 12).convert("RGB")
+        return Image.blend(degradado, ruido, 0.25).filter(ImageFilter.GaussianBlur(2))
+
+    pagina = Image.new("RGB", (663, 878), "white")
+    pagina.paste(foto(560, 300), (50, 60))
+    pagina.paste(foto(560, 300), (50, 460))
+    pagina.save(destino, resolution=80)
+    return destino
+
+
+def test_pdf_tipo_word_con_fotos_de_baja_resolucion_es_parcial_pagina_sin_texto(tmp_path: Path):
+    """El caso «DUI RMR.pdf» por el camino REAL (pdftoppm + tesseract): antes
+    `error` / `ocr_sin_texto`; ahora `parcial` + `imagen_pagina_sin_texto`."""
+    if shutil.which("pdftoppm") is None:
+        pytest.skip("pdftoppm no instalado")
+    origen = _pdf_tipo_word_con_fotos(tmp_path / "dui-sintetico.pdf")
+    r = ocr.extraer(origen)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
+    assert r.detalle["_camino"] == "pdf"
+    assert ocr.AVISO_IMAGEN_SIN_TEXTO in r.salidas["texto.txt"]
 
 
 def test_rasterizado_usa_workspace_dir_no_tmp(tmp_path: Path, monkeypatch):
@@ -1416,14 +1549,16 @@ def test_n3_un_png_con_metadata_pdf_es_una_imagen(tmp_path: Path):
 
 def test_n5_la_version_de_la_logica_depende_del_camino():
     assert ocr.version_logica("imagen") == ocr.VERSION_LOGICA_IMAGEN
-    assert ocr.version_logica("pdf") is None
+    assert ocr.version_logica("pdf") == ocr.VERSION_LOGICA_PDF == "1"
 
 
-def test_n5_una_ficha_vieja_de_pdf_escaneado_se_reusa_y_una_de_imagen_no(
+def test_n5_una_ficha_vieja_de_pdf_escaneado_sin_marca_ya_no_se_reusa(
     tmp_path, monkeypatch
 ):
-    """`ok` exacto en las dos fichas: tesseract SIMULADO con TSV fijo (ronda 14);
-    pdftoppm corre de verdad."""
+    """Decision de Fernando 2026-10-04: un PDF sin texto util cambio de `error`
+    a `parcial`, asi que una ficha de PDF escrita SIN la marca de la logica (o
+    con otra) no se reusa -- igual que una de imagen. `ok` exacto en las dos
+    fichas: tesseract SIMULADO con TSV fijo; pdftoppm corre de verdad."""
     import json
 
     from motor_registry import tool_authority
@@ -1444,15 +1579,15 @@ def test_n5_una_ficha_vieja_de_pdf_escaneado_se_reusa_y_una_de_imagen_no(
     img = _imagen_multilinea(tmp_path / "foto.png", lineas)
     _tesseract_con_tsv_fijo(monkeypatch, _LINEAS_CONFIABLES)
 
-    fichas = {}
     for origen in (pdf, img):
         f = ingesta.ingerir(origen, trabajo)
         assert f.estado == "ok"
+        if origen is pdf:
+            assert f.detalle["_version_logica"] == ocr.VERSION_LOGICA_PDF
         ruta = ingesta.ruta_procesado(trabajo, f.sha256) / "ficha.json"
         datos = json.loads(ruta.read_text(encoding="utf8"))
         datos["detalle"].pop("_version_logica", None)  # ficha escrita ANTES
         ruta.write_text(json.dumps(datos), encoding="utf8")
-        fichas[origen.name] = f
 
     llamadas: list = []
     original = compuerta.extraer
@@ -1460,9 +1595,48 @@ def test_n5_una_ficha_vieja_de_pdf_escaneado_se_reusa_y_una_de_imagen_no(
         compuerta, "extraer", lambda *a, **k: llamadas.append(a) or original(*a, **k)
     )
     ingesta.ingerir(pdf, trabajo)
-    assert llamadas == []          # el PDF NO cambio de logica: su cache sigue valiendo
+    assert len(llamadas) == 1      # el PDF cambio de logica: se reextrae
     ingesta.ingerir(img, trabajo)
-    assert len(llamadas) == 1      # la imagen SI: se reextrae
+    assert len(llamadas) == 2      # la imagen tambien
+
+
+def test_n5_un_error_viejo_de_pdf_sin_marca_no_cuenta_como_intento_previo(
+    tmp_path, monkeypatch
+):
+    """El `error` de un PDF escrito antes de la marca (3 intentos = tope D-2) se
+    reintenta y ya no cuenta para el tope: ahora ese PDF da `parcial`."""
+    from motor_registry import tool_authority
+    from PIL import Image
+
+    from procesamiento import compuerta, ingesta
+    from procesamiento.ficha import Ficha
+
+    monkeypatch.setattr(tool_authority, "WORKSPACE_ROOT", tmp_path.resolve())
+    trabajo = tmp_path.resolve() / "trabajo"
+    pdf = _pdf_de_imagenes(
+        tmp_path / "vacio.pdf", [Image.new("RGB", (1100, 450), "white")]
+    )
+    ficha = ingesta.ingerir(pdf, trabajo)
+    assert ficha.estado == "parcial"
+    carpeta = ingesta.ruta_procesado(trabajo, ficha.sha256)
+    viejo = Ficha(
+        sha256=ficha.sha256, origen=ficha.origen, extractor=ficha.extractor,
+        extractor_version=ficha.extractor_version, fecha=ficha.fecha, estado="error",
+        detalle={
+            "razon": "ninguna pagina del PDF dio texto util via OCR",
+            "_extension_ingesta": ".pdf", "_intentos": 3,
+        },
+    )
+    (carpeta / "ficha.json").write_text(viejo.a_json(), encoding="utf8")
+    llamadas: list = []
+    original = compuerta.extraer
+    monkeypatch.setattr(
+        compuerta, "extraer", lambda *a, **k: llamadas.append(a) or original(*a, **k)
+    )
+    f2 = ingesta.ingerir(pdf, trabajo)
+    assert len(llamadas) == 1
+    assert f2.estado == "parcial"
+    assert f2.detalle["codigo"] == "imagen_pagina_sin_texto"
 
 
 def test_n6_una_imagen_de_200_millones_de_pixeles_es_demasiados_pixeles(tmp_path: Path):
