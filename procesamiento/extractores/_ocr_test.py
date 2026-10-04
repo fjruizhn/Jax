@@ -689,7 +689,6 @@ def _pagina_ocr(
 _DIM_A4 = (2480, 3508)
 _DIM_CHICA = (3333, 1667)                                              # 800x400 pt: NO es de pagina
 _A = lambda: _pagina_ocr("sin_texto")                                  # regla A
-_A_CHICA = _A
 _B = lambda: _pagina_ocr("sin_texto", "Gerente 95 area operaciones planta", 4, 5)   # regla B
 _ILEGIBLE = lambda: {"clasificacion": "ilegible", "causa": "tesseract_no_lee"}
 
@@ -725,12 +724,6 @@ def test_pdf_con_alguna_pagina_a_de_tamano_de_pagina_es_d_con_sus_dimensiones():
     assert r.detalle["pagina_de_referencia"] == "A4"
     assert (r.detalle["ancho"], r.detalle["alto"]) == (2480, 3508)
     assert r.detalle["razon"] == "posible documento escaneado sin texto: revisar o reescanear"
-
-
-def test_pdf_a_chica_con_una_ilegible_sigue_siendo_ok_imagen_sin_texto():
-    r = ocr._resolver_pdf([_ILEGIBLE(), _A()], "spa", [_DIM_CHICA, _DIM_CHICA])
-    assert r.estado == "ok"
-    assert r.detalle["codigo"] == "imagen_sin_texto"
 
 
 def test_pdf_con_una_pagina_b_y_otra_a_conserva_el_texto_dudoso():

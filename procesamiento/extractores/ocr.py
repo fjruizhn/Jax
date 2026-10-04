@@ -29,8 +29,9 @@ ponga rojo:
   `parcial`. Si TODAS las páginas de un PDF quedan sin texto útil, el PDF se
   trata igual que una imagen (decisión de Fernando, 2026-10-04; antes era
   `error`): `parcial` con `imagen_texto_dudoso` (conserva el texto de las
-  páginas B) o con `imagen_pagina_sin_texto` (todas A); `error` queda solo
-  para lo ilegible (todas las páginas `None` o `ilegible`). El promedio se sigue registrando SIEMPRE, como señal
+  páginas B), con `imagen_pagina_sin_texto` (todas A, de tamaño de página) o
+  `ok` + `imagen_sin_texto` (todas A, sin él); `error` si alguna página es
+  ilegible (`None`, `ilegible` o un PNG que no se puede medir). El promedio se sigue registrando SIEMPRE, como señal
   secundaria (I-1: antes desaparecía de `detalle` en el camino de "texto
   corto", justo la franja que hacía falta para calibrar el umbral).
 - C-2: una página casi en blanco con sólo un membrete legible (pocas
@@ -1272,29 +1273,55 @@ def _resolver_imagen(
     )
 
 
-def _resolver_pdf_sin_texto(resultados: list[dict | None], idioma: str) -> Resultado:
+def _dimensiones_de_png(ruta: Path) -> tuple[int, int] | None:
+    """Ancho y alto del PNG RASTERIZADO de una pagina, leidos del archivo (no del
+    TSV, que puede no traer la fila de pagina); `None` si no se pueden leer."""
+    try:
+        from PIL import Image
+
+        with Image.open(ruta) as imagen:
+            ancho, alto = imagen.size
+        return (ancho, alto) if ancho > 0 and alto > 0 else None
+    except Exception:  # fail-soft: sin Pillow o con un PNG que no abre, la pagina cuenta como ilegible
+        return None
+
+
+def _resolver_pdf_sin_texto(
+    resultados: list[dict | None], idioma: str,
+    dimensiones: list[tuple[int, int] | None] | None = None,
+) -> Resultado:
     """Ninguna pagina del PDF dio texto util. Decision de Fernando (2026-10-04):
-    se trata IGUAL que una imagen (`_resolver_imagen`), por las paginas LEGIBLES:
+    se trata IGUAL que una imagen (`_resolver_imagen`), pero SOLO si todas las
+    paginas son legibles:
+    - alguna pagina `None`, `ilegible` o cuyo PNG rasterizado no se pudo medir:
+      `error` (nada de parcial: una pagina que nadie leyo no se esconde), con
+      `paginas_ilegibles` y el codigo de la causa si la hay;
     - alguna con mayoria de palabras dudosas (B, con al menos MINIMO_CARACTERES):
       `parcial` + `imagen_texto_dudoso`, CONSERVANDO su texto (B antes que D);
     - si no, todas son A (menos de MINIMO_CARACTERES), como la imagen: con alguna
-      pagina rasterizada de tamano de pagina (`_implica_pagina`) -> `parcial` +
-      `imagen_pagina_sin_texto` (D); si ninguna lo es -> `ok` +
-      `imagen_sin_texto` (A). Siempre el aviso, nunca texto inventado.
-    `error` queda SOLO para lo ilegible: todas las paginas `None` o `ilegible`."""
+      pagina de tamano de pagina (`_implica_pagina` sobre las dimensiones del PNG
+      RASTERIZADO) -> `parcial` + `imagen_pagina_sin_texto` (D); si ninguna lo
+      es -> `ok` + `imagen_sin_texto` (A). Siempre el aviso, nunca texto
+      inventado."""
     total = len(resultados)
-    legibles = [
-        (numero, r) for numero, r in enumerate(resultados, start=1)
-        if r is not None and r["clasificacion"] != "ilegible"
+    dimensiones = list(dimensiones) if dimensiones is not None else [None] * total
+    ilegibles = [
+        numero for numero, r in enumerate(resultados, start=1)
+        if r is None or r["clasificacion"] == "ilegible" or dimensiones[numero - 1] is None
     ]
-    if not legibles:
+    if ilegibles:
         detalle = {
             "razon": "ninguna pagina del PDF dio texto util via OCR",
             "idioma": idioma,
             "paginas": total,
+            "paginas_ilegibles": ilegibles,
             "_camino": "pdf",
         }
-        causas = [r["causa"] for r in resultados if r is not None]
+        causas = [r["causa"] for r in resultados if r is not None and r["clasificacion"] == "ilegible"]
+        if not causas and any(
+            r is not None and dimensiones[n - 1] is None for n, r in enumerate(resultados, start=1)
+        ):
+            causas = ["pagina_sin_dimensiones"]   # cae en archivo_ilegible
         if causas:
             # el codigo que ya corresponde a esa causa en las imagenes
             detalle["codigo"] = _ilegible(causas[0], idioma).detalle["codigo"]
@@ -1304,21 +1331,22 @@ def _resolver_pdf_sin_texto(resultados: list[dict | None], idioma: str) -> Resul
             version=_version() or "desconocida", detalle=detalle,
         )
 
+    n_palabras = sum(r["n_palabras"] for r in resultados)
     detalle = {
         "idioma": idioma, "paginas": total, "_camino": "pdf",
         "paginas_sin_texto": list(range(1, total + 1)),
+        "confianza_promedio": (
+            round(sum(r["confianza_promedio"] * r["n_palabras"] for r in resultados) / n_palabras, 2)
+            if n_palabras else 0.0
+        ),
     }
-    dudosas = [(numero, r) for numero, r in legibles if r["caracteres"] >= MINIMO_CARACTERES]
+    dudosas = [(numero, r) for numero, r in enumerate(resultados, start=1)
+               if r["caracteres"] >= MINIMO_CARACTERES]
     if dudosas:
         # (B) el texto leido SE CONSERVA, igual que en una imagen.
         palabras = [
             {"pagina": numero, **palabra} for numero, r in dudosas for palabra in r["palabras_dudosas"]
         ]
-        n_palabras = sum(r["n_palabras"] for _, r in dudosas)
-        detalle["confianza_promedio"] = (
-            round(sum(r["confianza_promedio"] * r["n_palabras"] for _, r in dudosas) / n_palabras, 2)
-            if n_palabras else 0.0
-        )
         detalle["paginas_texto_dudoso"] = [numero for numero, _ in dudosas]
         if palabras:
             detalle["palabras_dudosas"] = palabras
@@ -1329,13 +1357,11 @@ def _resolver_pdf_sin_texto(resultados: list[dict | None], idioma: str) -> Resul
             estado="parcial", salidas={"texto.txt": f"{NOTA_TEXTO_DUDOSO}\n{cuerpo}"},
             extractor=EXTRACTOR, version=_version() or "desconocida", detalle=detalle,
         )
-    # Todas las paginas legibles son A. Como en una imagen: con tamano de
-    # PAGINA (`_implica_pagina` sobre las dimensiones RASTERIZADAS) es la (D); si
-    # no, la (A).
-    for numero, r in legibles:
-        pagina = _implica_pagina(r["ancho"], r["alto"])
+    # Todas A: con tamano de PAGINA es la (D); si no, la (A).
+    for ancho, alto in dimensiones:
+        pagina = _implica_pagina(ancho, alto)
         if pagina is not None:
-            detalle["ancho"], detalle["alto"] = r["ancho"], r["alto"]
+            detalle["ancho"], detalle["alto"] = ancho, alto
             detalle["pagina_de_referencia"] = pagina
             detalle["razon"] = "posible documento escaneado sin texto: revisar o reescanear"
             detalle["codigo"] = CODIGO_IMAGEN_PAGINA_SIN_TEXTO
@@ -1352,7 +1378,10 @@ def _resolver_pdf_sin_texto(resultados: list[dict | None], idioma: str) -> Resul
     )
 
 
-def _resolver_pdf(resultados: list[dict | None], idioma: str) -> Resultado:
+def _resolver_pdf(
+    resultados: list[dict | None], idioma: str,
+    dimensiones: list[tuple[int, int] | None] | None = None,
+) -> Resultado:
     total = len(resultados)
     paginas_sin_texto: list[int] = []
     paginas_con_dudas: list[int] = []
@@ -1390,7 +1419,7 @@ def _resolver_pdf(resultados: list[dict | None], idioma: str) -> Resultado:
         palabras_totales += r["n_palabras"]
 
     if len(paginas_sin_texto) == total:
-        return _resolver_pdf_sin_texto(resultados, idioma)
+        return _resolver_pdf_sin_texto(resultados, idioma, dimensiones)
 
     contenido = "\n\n".join(partes_texto).strip()
     confianza_promedio = (
@@ -1490,7 +1519,8 @@ def extraer(origen: Path, idioma: str = "spa", camino: str | None = None) -> Res
                         detalle={"razon": "no se pudo rasterizar el PDF con pdftoppm"},
                     )
                 resultados = [_ocr_una_imagen(pagina, idioma) for pagina in paginas]
-            return _resolver_pdf(resultados, idioma)
+                dimensiones = [_dimensiones_de_png(pagina) for pagina in paginas]
+            return _resolver_pdf(resultados, idioma, dimensiones)
 
         # MINOR-N2: UNA sola lectura; lo validado es lo que se procesa.
         datos = origen.read_bytes()
