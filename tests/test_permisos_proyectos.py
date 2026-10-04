@@ -2969,13 +2969,18 @@ case "$cmd" in
   list-timers) if [ -n "$FALLA_LIST_TIMERS" ]; then echo "Failed to connect to bus" >&2; exit 1; fi; cat "$D/list-timers" ;;
   show) if [ -n "$FALLA_SHOW" ]; then echo "Failed to get properties" >&2; exit 1; fi
         grep "^$4 $2 " "$D/props" | sed "s/^[^ ]* [^ ]* //" ;;
-  stop) for u in "$@"; do case " $NO_SE_DETIENE " in *" $u "*) ;; *) sed -i "/^$u\\$/d" "$D/activas" ;; esac; done ;;
+  stop) for u in "$@"; do
+          if [ "$COLGAR_STOP" = "$u" ]; then sleep 30; fi
+          case " $NO_SE_DETIENE " in *" $u "*) ;; *) sed -i "/^$u\\$/d" "$D/activas"; sed -i "/^$u\\$/d" "$D/activating" ;; esac
+        done ;;
   start) for u in "$@"; do
            if [ "$FALLA_START" = "$u" ]; then echo "Failed to start $u" >&2; rc=1
-           else grep -qx "$u" "$D/activas" || echo "$u" >> "$D/activas"; fi
+           else sed -i "/^$u\\$/d" "$D/activating"; grep -qx "$u" "$D/activas" || echo "$u" >> "$D/activas"; fi
          done ;;
   is-active) if [ "$1" = "$IS_ACTIVE_RARO" ]; then echo "desconocido"; exit 4; fi
-             if grep -qx "$1" "$D/activas"; then echo active; else echo inactive; rc=3; fi ;;
+             if grep -qx "$1" "$D/activas"; then echo active
+             elif grep -qx "$1" "$D/activating"; then echo activating; rc=3
+             else echo inactive; rc=3; fi ;;
 esac
 exit "$rc"
 """
@@ -3008,8 +3013,10 @@ def _entorno_del_bloque(tmp_path: Path, uid_jaxsvc: int, *, extra: dict | None =
         "jax-catalogo-modelos.service User jaxsvc\njax-limpiar-bases-de-test.service User jaxsvc\n"
         "jax-catalogo-modelos.timer Triggers jax-catalogo-modelos.service\n")
     (datos / "ps").write_text("")
+    (datos / "activating").write_text("")
     (datos / "permisos.sh").write_text(
-        '#!/bin/sh\necho "permisos $*" >> "$STUB_DIR/log"\ncase "$1" in --verificar) exit 0;; *) exit "${PERMISOS_RC:-0}";; esac\n')
+        '#!/bin/sh\necho "permisos $*" >> "$STUB_DIR/log"\n[ -n "$COLGAR_EN_GUION" ] && [ "$1" != --verificar ] && sleep 30\n'
+        'case "$1" in --verificar) exit 0;; *) exit "${PERMISOS_RC:-0}";; esac\n')
     os.chmod(datos / "permisos.sh", 0o755)
     scripts = {
         "sudo": '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do case "$1" in -n) shift;; -u) shift 2;; *) break;; esac; done\nexec "$@"\n',
@@ -3106,6 +3113,89 @@ def test_una_unidad_que_estaba_inactiva_no_se_arranca_al_restaurar(tmp_path, _id
     assert any(l == "systemctl stop jax-limpiar-bases-de-test.service" for l in log)
     assert not any(l.startswith("systemctl start jax-limpiar-bases-de-test") for l in log), \
         "se arrancó una unidad que estaba inactiva antes"
+
+
+def _poner_activating(tmp_path: Path, unidad: str) -> None:
+    datos = tmp_path / "datos"
+    activas = [l for l in (datos / "activas").read_text().splitlines() if l != unidad]
+    (datos / "activas").write_text("\n".join(activas) + "\n")
+    (datos / "activating").write_text(unidad + "\n")
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_una_unidad_que_estaba_activating_se_arranca_y_se_verifica_al_restaurar(tmp_path, _identidades, marca, modo):
+    """`activating` (arrancando cuando se guardo el estado) se restaura IGUAL que `active`: el trap la arranca y
+    comprueba que llegue a `active`. Antes solo se arrancaban las `active` y una `activating` quedaba apagada con
+    el bloque en exito."""
+    entorno = _entorno_del_bloque(tmp_path, pwd.getpwnam("jaxsvc").pw_uid)
+    _poner_activating(tmp_path, "jax-platform.service")
+    r = subprocess.run(["bash", "-s"], input=_bloque_del_runbook(marca), env=entorno, capture_output=True, text=True,
+                       timeout=60, cwd=str(RAIZ_REPO))
+    log = (tmp_path / "datos" / "log").read_text().splitlines()
+    assert r.returncode == 0, r.stdout + r.stderr
+    iniciadas = [l.split()[-1] for l in _llamadas(log, "start")]
+    assert "jax-platform.service" in iniciadas, f"no se arrancó la unidad que estaba activating: {iniciadas}"
+    ultimo_start = max(i for i, l in enumerate(log) if l == "systemctl start jax-platform.service")
+    assert any(l == "systemctl is-active jax-platform.service" for l in log[ultimo_start:]), "no verificó que llegara a active"
+    assert "jax-limpiar-bases-de-test.service" not in iniciadas, "la inactiva sigue sin arrancarse"
+    assert "jax-platform.service" in (tmp_path / "datos" / "activas").read_text().split()
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_si_una_unidad_activating_no_vuelve_a_active_el_rc_final_no_es_cero(tmp_path, _identidades, marca, modo):
+    entorno = _entorno_del_bloque(tmp_path, pwd.getpwnam("jaxsvc").pw_uid, extra={"FALLA_START": "jax-platform.service"})
+    _poner_activating(tmp_path, "jax-platform.service")
+    r = subprocess.run(["bash", "-s"], input=_bloque_del_runbook(marca), env=entorno, capture_output=True, text=True,
+                       timeout=60, cwd=str(RAIZ_REPO))
+    log = (tmp_path / "datos" / "log").read_text().splitlines()
+    assert any(l == f"permisos {modo}" for l in log), "el guion tenía que haber corrido bien"
+    assert r.returncode != 0, "salió con 0 dejando apagada una unidad que estaba arrancando"
+    assert "jax-platform.service" in r.stderr and "no volvieron" in r.stderr
+    assert "sudo systemctl start jax-platform.service" in r.stderr
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+@pytest.mark.parametrize("senal", ["INT", "TERM"])
+@pytest.mark.parametrize("donde,env,espera", [
+    ("el guion colgado", {"COLGAR_EN_GUION": "1"}, "permisos {modo}"),
+    ("el segundo stop colgado", {"COLGAR_STOP": "jax-las-manos.service"}, "systemctl stop jax-las-manos.service"),
+])
+def test_una_senal_en_medio_del_bloque_restaura_y_sale_con_error(tmp_path, _identidades, marca, modo, senal, donde,
+                                                                 env, espera):
+    """INT (Ctrl-C) o TERM mandados al grupo del bloque DESPUES del primer stop: el trap restaura (arranca y verifica
+    lo que estaba activo, en orden inverso) y el rc es distinto de 0 (130 / 143); nunca llega a exito."""
+    import signal
+    import time as _t
+    entorno = _entorno_del_bloque(tmp_path, pwd.getpwnam("jaxsvc").pw_uid, extra=env)
+    espera = espera.format(modo=modo)
+    proc = subprocess.Popen(["bash", "-s"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=entorno, text=True, cwd=str(RAIZ_REPO), start_new_session=True)
+    proc.stdin.write(_bloque_del_runbook(marca))
+    proc.stdin.close()
+    log_path = tmp_path / "datos" / "log"
+    try:
+        for _ in range(200):
+            lineas = log_path.read_text().splitlines()
+            if any(l == espera for l in lineas) and any(l.startswith("systemctl stop") for l in lineas):
+                break
+            _t.sleep(0.05)
+        else:
+            raise AssertionError(f"el bloque no llegó a {espera!r}: {lineas}")
+        os.killpg(os.getpgid(proc.pid), getattr(signal, f"SIG{senal}"))
+        salida, error = proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    log = log_path.read_text().splitlines()
+    assert proc.returncode in (130, 143), (proc.returncode, error)
+    assert proc.returncode == (130 if senal == "INT" else 143), (proc.returncode, error)
+    iniciadas = [l.split()[-1] for l in _llamadas(log, "start")]
+    assert iniciadas and "jax-las-manos.service" in iniciadas and "jax-platform.service" in iniciadas, (iniciadas, error)
+    ultimo_start = max(i for i, l in enumerate(log) if l.startswith("systemctl start"))
+    assert any(l.startswith("systemctl is-active") for l in log[ultimo_start:]), "no verificó que volvieran"
+    assert "OK:" not in salida, "llegó a imprimir éxito pese a la señal"
+    if donde == "el segundo stop colgado":
+        assert not any(l.startswith("permisos") for l in log), "mutó pese a la señal durante la detención"
 
 
 @pytest.mark.parametrize("marca,modo", _BLOQUES)
