@@ -6,7 +6,9 @@ never falls back to partial autocommit writes.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import math
 import time
 from dataclasses import replace
 from typing import Any, Mapping
@@ -669,12 +671,15 @@ class MariaDBB9Reader:
     adds a server-side BLOB byte cap for bounded consumers such as the Faro; the
     default `None` preserves full payloads for existing non-Faro callers.
     """
-    def __init__(self, pool: Any, authorization_resolver: Any | None=None, *, max_payload_bytes: int | None = None):
+    def __init__(self, pool: Any, authorization_resolver: Any | None=None, *, max_payload_bytes: int | None = None, rollback_timeout_s: float = 5.0):
         if max_payload_bytes is not None and (not isinstance(max_payload_bytes, int) or isinstance(max_payload_bytes, bool) or max_payload_bytes < 1):
             raise ValueError("max_payload_bytes must be a positive integer")
+        if not isinstance(rollback_timeout_s, (int, float)) or isinstance(rollback_timeout_s, bool) or not math.isfinite(rollback_timeout_s) or rollback_timeout_s <= 0:
+            raise ValueError("rollback_timeout_s must be positive and finite")
         self._pool = pool
         self._authorization_resolver = authorization_resolver
         self._max_payload_bytes = max_payload_bytes
+        self._rollback_timeout_s = float(rollback_timeout_s)
 
     async def retrieve_authorized(self, request: MutationAuthorizationRequest, *, limit: int=20) -> tuple[MemoryEnvelope, ...]:
         """Resolve project access from current DB state before retrieval.
@@ -698,7 +703,7 @@ class MariaDBB9Reader:
                         raise AuthorizationDenied("invalid read authority decision")
                 await conn.commit()
             except BaseException:
-                await conn.rollback()
+                await _rollback_bounded(conn, self._rollback_timeout_s)
                 raise
         return await self._retrieve_scoped(decision.scope, limit=limit)
 
@@ -811,13 +816,13 @@ class MariaDBB9Reader:
                             eligible=True
                             for source_id in source_ids:
                                 await cur.execute(
-                                    "SELECT r.revision_id,r.lifecycle_state,p.payload,pr.current_revision_id "
+                                    "SELECT r.revision_id,r.lifecycle_state,(p.payload IS NOT NULL) AS has_payload,pr.current_revision_id "
                                     "FROM memory_revisions r JOIN memory_projections pr ON pr.memory_id=r.memory_id "
                                     "LEFT JOIN memory_revision_payloads p ON p.revision_id=r.revision_id "
                                     "WHERE r.revision_id=%s AND pr.reconciliation_required=FALSE", (source_id,))
                                 source=await cur.fetchone()
                                 if (not isinstance(source,Mapping) or source['revision_id'] != source['current_revision_id']
-                                        or source['lifecycle_state'] not in {'ACTIVE','VERIFIED'} or source['payload'] is None):
+                                        or source['lifecycle_state'] not in {'ACTIVE','VERIFIED'} or not source['has_payload']):
                                     eligible=False; break
                             if not source_ids or not eligible:
                                 continue
@@ -825,11 +830,45 @@ class MariaDBB9Reader:
                             envelopes.append(MemoryEnvelope(obj,revision,tuple(prov),(),{"store":"B9_MARIADB"}))
                 # Explicitly end the read-only snapshot; no state can be
                 # committed by this read boundary.
-                await conn.rollback()
+                await _rollback_bounded(conn, self._rollback_timeout_s)
                 return tuple(envelopes)
             except BaseException:
-                await conn.rollback()
+                await _rollback_bounded(conn, self._rollback_timeout_s)
                 raise
 
     async def prompt_context(self, scope: ScopeContext, *, limit: int = 20) -> PromptMemoryContext:
         return PromptMemoryContext(await self.retrieve(scope, limit=limit))
+
+
+async def _rollback_bounded(conn: Any, timeout_s: float) -> None:
+    """Rollback within a deadline; discard connections whose cleanup stalls.
+
+    ``asyncio.wait_for`` waits for a cancelled coroutine to finish cancelling,
+    so it is not a hard bound when a driver hangs during rollback. ``wait``
+    leaves the task detached on timeout; closing the connection first causes
+    the pool to discard it instead of returning it to another borrower.
+    """
+    task = asyncio.create_task(conn.rollback())
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout_s)
+    except BaseException:
+        _discard_connection(conn, task)
+        raise
+    if task in done:
+        task.result()
+        return
+    _discard_connection(conn, task)
+    raise TimeoutError("MariaDB rollback exceeded its deadline; connection discarded")
+
+
+def _discard_connection(conn: Any, task: asyncio.Task) -> None:
+    try:
+        conn.close()
+    finally:
+        task.cancel()
+        task.add_done_callback(_consume_task_exception)
+
+
+def _consume_task_exception(task: asyncio.Task) -> None:
+    if not task.cancelled():
+        task.exception()

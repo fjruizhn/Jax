@@ -110,7 +110,7 @@ jobs:
         # tables; jax_test has grants only on this job's suffixed test DB, never production.
         # The root conftest's governance bootstrap reads host configuration;
         # this explicit boundary does not load it or migrate any shared schema.
-        # 102 prior DB cases plus the Faro read-only probe = 103 minimum; each addition is a testcase.
+        # 102 prior DB cases plus the Faro read-only probe and four pool/rollback/payload boundary cases = 107 minimum; each addition is a testcase.
         run: |
           set -euo pipefail
           python -m pytest --confcutdir=tests \

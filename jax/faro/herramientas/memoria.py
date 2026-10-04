@@ -100,4 +100,5 @@ async def crear_pool_memoria_prueba(cfg):
         minsize=1, maxsize=4, cursorclass=aiomysql.DictCursor, autocommit=True,
         connect_timeout=db_connect_timeout_seconds(),
     )
-    return pool, MariaDBB9Reader(pool, max_payload_bytes=MAX_BYTES_PAYLOAD_MEMORIA)
+    return pool, MariaDBB9Reader(pool, max_payload_bytes=MAX_BYTES_PAYLOAD_MEMORIA,
+                                rollback_timeout_s=cfg.timeout_s)
