@@ -26,7 +26,12 @@ ponga rojo:
   una IMAGEN sale `parcial` con `imagen_texto_dudoso`, CONSERVANDO el texto
   leído (Jax#338, decisión de Fernando; antes era `error`), y esa página de un
   PDF cuenta en `paginas_sin_texto`; con alguna pero no la mayoría es
-  `parcial`. El promedio se sigue registrando SIEMPRE, como señal
+  `parcial`. Si TODAS las páginas de un PDF quedan sin texto útil, el PDF se
+  trata igual que una imagen (decisión de Fernando, 2026-10-04; antes era
+  `error`): `parcial` con `imagen_texto_dudoso` (conserva el texto de las
+  páginas B), con `imagen_pagina_sin_texto` (todas A, de tamaño de página) o
+  `ok` + `imagen_sin_texto` (todas A, sin él); `error` si alguna página es
+  ilegible (`None`, `ilegible` o un PNG que no se puede medir). El promedio se sigue registrando SIEMPRE, como señal
   secundaria (I-1: antes desaparecía de `detalle` en el camino de "texto
   corto", justo la franja que hacía falta para calibrar el umbral).
 - C-2: una página casi en blanco con sólo un membrete legible (pocas
@@ -119,7 +124,8 @@ MINIMO_PALABRAS = 10
 # IMAGEN sale `parcial` con `imagen_texto_dudoso` (conserva el texto leído; con
 # menos de MINIMO_CARACTERES es `imagen_sin_texto`, o `imagen_pagina_sin_texto`
 # si es del tamaño de una página), y esa página de un PDF cuenta en
-# `paginas_sin_texto` (si todas lo son, el PDF es `error`).
+# `paginas_sin_texto` (si todas lo son, el PDF se trata como una imagen: `parcial`
+# con `imagen_texto_dudoso` o `imagen_pagina_sin_texto`, ver `_resolver_pdf`).
 PROPORCION_MAXIMA_PALABRAS_DUDOSAS = 0.5
 
 TIMEOUT_SEGUNDOS = 300
@@ -161,9 +167,10 @@ CODIGO_OCR_SIN_MEMORIA = "ocr_sin_memoria"   # recursos, no archivo danado
 # en la ficha (`detalle["_version_logica"]`) y `ingesta` la compara -- una
 # ficha escrita con otra logica ni se reusa de cache ni cuenta como intento
 # previo del tope D-2. SUBIRLA cada vez que cambie la regla.
-# La version DEPENDE DEL CAMINO (`version_logica(camino)`): solo cambio la
-# regla de las IMAGENES (A/B/D, codigos nuevos, TIFF multipagina) -- la del PDF
-# escaneado no, asi que su cache sigue valiendo (no se re-OCR-ean los PDF).
+# La version DEPENDE DEL CAMINO (`version_logica(camino)`): la de las IMAGENES
+# (A/B/D, codigos nuevos, TIFF multipagina) y la del PDF escaneado, que desde
+# 2026-10-04 (VERSION_LOGICA_PDF "1") trata un PDF sin texto util como una imagen
+# -- una ficha de PDF escrita antes (sin marca) ni se reusa ni cuenta para D-2.
 # "2": regla de Fernando de la ronda 1 de Jax#338.
 # "3": Jax#338 ronda 13 -- la transparencia real se aplana sobre blanco Y sobre
 # negro y el resultado es la UNION de las dos pasadas (con duplicado por texto
@@ -177,13 +184,16 @@ CODIGO_OCR_SIN_MEMORIA = "ocr_sin_memoria"   # recursos, no archivo danado
 # "6": Jax#338 ronda 19 -- un MPO de varios cuadros se lee cuadro por cuadro
 # (una ficha "5" solo tenia el texto del primer cuadro).
 VERSION_LOGICA_IMAGEN = "6"
+# "1": decision de Fernando 2026-10-04 -- un PDF escaneado sin texto util deja de
+# ser `error` y pasa a `parcial` (imagen_texto_dudoso / imagen_pagina_sin_texto).
+# Una ficha de PDF sin marca (None != "1") es la logica vieja.
+VERSION_LOGICA_PDF = "1"
 
 
 def version_logica(camino: str) -> str | None:
     """Version de la logica para un camino (`"imagen"` o `"pdf"`, el que decide
-    el CONTENIDO del archivo, no su extension); `None` (sin marca) para el
-    PDF."""
-    return VERSION_LOGICA_IMAGEN if camino == "imagen" else None
+    el CONTENIDO del archivo, no su extension)."""
+    return VERSION_LOGICA_IMAGEN if camino == "imagen" else VERSION_LOGICA_PDF
 
 
 # `Resultado` exige al menos una salida con contenido para `ok`: la unica
@@ -1263,7 +1273,115 @@ def _resolver_imagen(
     )
 
 
-def _resolver_pdf(resultados: list[dict | None], idioma: str) -> Resultado:
+def _dimensiones_de_png(ruta: Path) -> tuple[int, int] | None:
+    """Ancho y alto del PNG RASTERIZADO de una pagina, leidos del archivo (no del
+    TSV, que puede no traer la fila de pagina); `None` si no se pueden leer."""
+    from PIL import Image   # su ausencia NO es una pagina ilegible: `extraer` la avisa antes de rasterizar
+
+    try:
+        with Image.open(ruta) as imagen:
+            ancho, alto = imagen.size
+    except Exception:  # fail-soft: un PNG que no decodifica cuenta como pagina ilegible
+        return None
+    return (ancho, alto) if ancho > 0 and alto > 0 else None
+
+
+def _resolver_pdf_sin_texto(
+    resultados: list[dict | None], idioma: str,
+    dimensiones: list[tuple[int, int] | None] | None = None,
+) -> Resultado:
+    """Ninguna pagina del PDF dio texto util. Decision de Fernando (2026-10-04):
+    se trata IGUAL que una imagen (`_resolver_imagen`), pero SOLO si todas las
+    paginas son legibles:
+    - alguna pagina `None`, `ilegible` o cuyo PNG rasterizado no se pudo medir:
+      `error` (nada de parcial: una pagina que nadie leyo no se esconde), con
+      `paginas_ilegibles` y el codigo de la causa si la hay;
+    - alguna con mayoria de palabras dudosas (B, con al menos MINIMO_CARACTERES):
+      `parcial` + `imagen_texto_dudoso`, CONSERVANDO su texto (B antes que D);
+    - si no, todas son A (menos de MINIMO_CARACTERES), como la imagen: con alguna
+      pagina de tamano de pagina (`_implica_pagina` sobre las dimensiones del PNG
+      RASTERIZADO) -> `parcial` + `imagen_pagina_sin_texto` (D); si ninguna lo
+      es -> `ok` + `imagen_sin_texto` (A). Siempre el aviso, nunca texto
+      inventado."""
+    total = len(resultados)
+    dimensiones = list(dimensiones) if dimensiones is not None else [None] * total
+    ilegibles = [
+        numero for numero, r in enumerate(resultados, start=1)
+        if r is None or r["clasificacion"] == "ilegible" or dimensiones[numero - 1] is None
+    ]
+    if ilegibles:
+        detalle = {
+            "razon": "ninguna pagina del PDF dio texto util via OCR",
+            "idioma": idioma,
+            "paginas": total,
+            "paginas_ilegibles": ilegibles,
+            "_camino": "pdf",
+        }
+        causas = [r["causa"] for r in resultados if r is not None and r["clasificacion"] == "ilegible"]
+        if not causas and any(
+            r is not None and dimensiones[n - 1] is None for n, r in enumerate(resultados, start=1)
+        ):
+            causas = ["pagina_sin_dimensiones"]   # cae en archivo_ilegible
+        if causas:
+            # el codigo que ya corresponde a esa causa en las imagenes
+            detalle["codigo"] = _ilegible(causas[0], idioma).detalle["codigo"]
+            detalle["causa"] = str(causas[0])
+        return Resultado(
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida", detalle=detalle,
+        )
+
+    n_palabras = sum(r["n_palabras"] for r in resultados)
+    detalle = {
+        "idioma": idioma, "paginas": total, "_camino": "pdf",
+        "paginas_sin_texto": list(range(1, total + 1)),
+        "confianza_promedio": (
+            round(sum(r["confianza_promedio"] * r["n_palabras"] for r in resultados) / n_palabras, 2)
+            if n_palabras else 0.0
+        ),
+    }
+    dudosas = [(numero, r) for numero, r in enumerate(resultados, start=1)
+               if r["caracteres"] >= MINIMO_CARACTERES]
+    if dudosas:
+        # (B) el texto leido SE CONSERVA, igual que en una imagen.
+        palabras = [
+            {"pagina": numero, **palabra} for numero, r in dudosas for palabra in r["palabras_dudosas"]
+        ]
+        detalle["paginas_texto_dudoso"] = [numero for numero, _ in dudosas]
+        if palabras:
+            detalle["palabras_dudosas"] = palabras
+        detalle["razon"] = RAZON_MAYORIA_DUDOSA
+        detalle["codigo"] = CODIGO_IMAGEN_TEXTO_DUDOSO
+        cuerpo = "\n\n".join(f"<!-- página {numero} -->\n{r['texto']}" for numero, r in dudosas)
+        return Resultado(
+            estado="parcial", salidas={"texto.txt": f"{NOTA_TEXTO_DUDOSO}\n{cuerpo}"},
+            extractor=EXTRACTOR, version=_version() or "desconocida", detalle=detalle,
+        )
+    # Todas A: con tamano de PAGINA es la (D); si no, la (A).
+    for ancho, alto in dimensiones:
+        pagina = _implica_pagina(ancho, alto)
+        if pagina is not None:
+            detalle["ancho"], detalle["alto"] = ancho, alto
+            detalle["pagina_de_referencia"] = pagina
+            detalle["razon"] = "posible documento escaneado sin texto: revisar o reescanear"
+            detalle["codigo"] = CODIGO_IMAGEN_PAGINA_SIN_TEXTO
+            return Resultado(
+                estado="parcial",
+                salidas={"texto.txt": f"{AVISO_IMAGEN_SIN_TEXTO}\n{NOTA_PAGINA_SIN_TEXTO}"},
+                extractor=EXTRACTOR, version=_version() or "desconocida", detalle=detalle,
+            )
+    detalle["razon"] = "el OCR no devolvio texto util"
+    detalle["codigo"] = CODIGO_IMAGEN_SIN_TEXTO
+    return Resultado(
+        estado="ok", salidas={"texto.txt": AVISO_IMAGEN_SIN_TEXTO},
+        extractor=EXTRACTOR, version=_version() or "desconocida", detalle=detalle,
+    )
+
+
+def _resolver_pdf(
+    resultados: list[dict | None], idioma: str,
+    dimensiones: list[tuple[int, int] | None] | None = None,
+) -> Resultado:
     total = len(resultados)
     paginas_sin_texto: list[int] = []
     paginas_con_dudas: list[int] = []
@@ -1301,16 +1419,7 @@ def _resolver_pdf(resultados: list[dict | None], idioma: str) -> Resultado:
         palabras_totales += r["n_palabras"]
 
     if len(paginas_sin_texto) == total:
-        return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR,
-            version=_version() or "desconocida",
-            detalle={
-                "razon": "ninguna pagina del PDF dio texto util via OCR",
-                "idioma": idioma,
-                "paginas": total,
-                "_camino": "pdf",
-            },
-        )
+        return _resolver_pdf_sin_texto(resultados, idioma, dimensiones)
 
     contenido = "\n\n".join(partes_texto).strip()
     confianza_promedio = (
@@ -1385,6 +1494,16 @@ def extraer(origen: Path, idioma: str = "spa", camino: str | None = None) -> Res
                         "no se puede rasterizar el PDF para OCR",
                     },
                 )
+            try:
+                import PIL.Image  # noqa: F401  (D mide el PNG rasterizado con Pillow)
+            except ImportError:
+                return Resultado(
+                    estado="error", salidas={}, extractor=EXTRACTOR,
+                    version=_version() or "desconocida",
+                    detalle={
+                        "razon": "Pillow no esta instalado; no se puede medir la pagina rasterizada",
+                    },
+                )
             # I-7 (final-hallazgos.md, ronda de cierre) -- "ahora" de la
             # reserva a medias a propósito: el directorio del rasterizado
             # va BAJO JAX_WORKSPACE_DIR, no al default de `tempfile`
@@ -1410,7 +1529,8 @@ def extraer(origen: Path, idioma: str = "spa", camino: str | None = None) -> Res
                         detalle={"razon": "no se pudo rasterizar el PDF con pdftoppm"},
                     )
                 resultados = [_ocr_una_imagen(pagina, idioma) for pagina in paginas]
-            return _resolver_pdf(resultados, idioma)
+                dimensiones = [_dimensiones_de_png(pagina) for pagina in paginas]
+            return _resolver_pdf(resultados, idioma, dimensiones)
 
         # MINOR-N2: UNA sola lectura; lo validado es lo que se procesa.
         datos = origen.read_bytes()
