@@ -403,12 +403,15 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
                 # Pillow cuenta los cuadros con el `acTL`, sin decodificarlos.
                 if img.format == "PNG" and getattr(img, "n_frames", 1) > 1:
                     return _Rechazo("animacion_no_soportada", "png_animado")
-                # Solo un TIFF es multipagina PARA TESSERACT. Un MPO (fotos de
-                # iPhone: la foto + una vista previa) se lee por su primer
-                # fotograma: tratarlo como paginas re-codificaria la foto
-                # (medido en IMG_2353: otro resultado) y sumaria una vista
-                # previa que tesseract nunca lee.
-                n = getattr(img, "n_frames", 1) if img.format == "TIFF" else 1
+                # Multicuadro PARA TESSERACT: un TIFF (sus paginas) y un MPO
+                # (fotos de telefono: la foto y otros cuadros). Jax#338 ronda 19:
+                # un MPO de varios cuadros ya no se lee por su primer cuadro solo
+                # (un cuadro 1 en blanco perdia el texto del cuadro 2): cada cuadro
+                # va con SUS bytes JPEG originales (`"mpo"`, sin re-codificar; el
+                # primero es el comienzo del archivo y se lee igual que antes).
+                # GIF, WebP y PNG de varios cuadros son animaciones y ya se
+                # rechazaron arriba.
+                n = getattr(img, "n_frames", 1) if img.format in ("TIFF", "MPO") else 1
                 if n > MAX_PAGINAS:
                     return "demasiadas_paginas"
                 dimensiones: list[tuple[int, int]] = []
@@ -439,6 +442,8 @@ def _validar_imagen(datos: bytes) -> tuple[str, list[tuple[int, int]]] | str:
                         # -> PNG. Un RGBA opaco sigue con los bytes originales.
                         return "tiff", dimensiones
                     return "una", dimensiones
+                if img.format == "MPO":
+                    return "mpo", dimensiones   # JPEG: sin alfa, no aplica N37
                 # N37 (Jax#338 ronda 11): el tope del aplanado se comprueba en
                 # TODAS las paginas de un TIFF ANTES del OCR de ninguna (si no,
                 # se gasta el OCR de las primeras y el archivo falla entero en
@@ -985,8 +990,24 @@ def _ocr_cuadro(img, idioma: str, presupuesto: _Presupuesto) -> dict | None:
     return _unir_pasadas(*pasadas)
 
 
+def _bytes_del_cuadro_mpo(img, datos: bytes, indice: int) -> bytes:
+    """Los bytes JPEG ORIGINALES del cuadro `indice` de un MPO (ya posicionado
+    con `img.seek(indice)`): desde `img.offset` (donde Pillow ubica el cuadro)
+    y del tamano que declara su entrada MP. Un cuadro que no empieza con SOI o
+    que queda cortado lanza `ValueError` (archivo que no decodifica)."""
+    inicio = img.offset
+    tamano = img.mpinfo[0xB002][indice]["Size"]
+    trozo = datos[inicio:inicio + tamano]
+    if len(trozo) != tamano or not trozo.startswith(b"\xff\xd8"):
+        raise ValueError("cuadro MPO fuera del archivo")
+    return trozo
+
+
 def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict | None:
     """OCR de una imagen ya validada. `"una"`: los bytes originales por stdin.
+    `"mpo"` (ronda 19): cuadro por cuadro, cada uno decodificado con Pillow para
+    validarlo y enviado con sus bytes JPEG originales, con la marca
+    `<!-- cuadro N -->`.
     `"tiff"`: pagina por pagina (decodificar -> `_ocr_cuadro` -> descartar:
     nunca se guarda la lista de PNG; con transparencia real, la union de las
     dos pasadas es POR PAGINA), con el plazo total `PLAZO_TOTAL_SEGUNDOS`
@@ -1017,12 +1038,17 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
                     return _ilegible_dict("tiempo_excedido")
                 try:
                     img.seek(numero - 1)
+                    cuadro_mpo = _bytes_del_cuadro_mpo(img, datos, numero - 1) if tipo == "mpo" else None
                     img.load()
                 except MemoryError:
                     return _ilegible_dict("sin_memoria")   # recursos, no archivo danado
                 except Exception:  # fail-soft: pagina truncada o corrupta = archivo que no decodifica
                     return _ilegible_dict("no_decodifica")
-                r = _ocr_cuadro(img, idioma, presupuesto)
+                if cuadro_mpo is not None:
+                    r = _ocr_bytes(cuadro_mpo, idioma, presupuesto)
+                    del cuadro_mpo
+                else:
+                    r = _ocr_cuadro(img, idioma, presupuesto)
                 if r is None:
                     return None
                 if r["clasificacion"] == "ilegible":
@@ -1033,7 +1059,8 @@ def _ocr_imagen(datos: bytes, tipo: str, dimensiones: list, idioma: str) -> dict
                 if r["texto"] and len(dimensiones) == 1:
                     partes.append(r["texto"])   # un solo fotograma: sin marca de pagina
                 elif r["texto"]:
-                    partes.append(f"<!-- página {numero} -->\n{r['texto']}")
+                    marca = "cuadro" if tipo == "mpo" else "página"
+                    partes.append(f"<!-- {marca} {numero} -->\n{r['texto']}")
                 caracteres += r["caracteres"]
                 palabras += r["n_palabras"]
                 suma_conf += r["confianza_promedio"] * r["n_palabras"]
