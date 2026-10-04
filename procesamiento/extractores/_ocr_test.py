@@ -239,18 +239,32 @@ def test_bytes_que_no_son_una_imagen_son_archivo_ilegible(tmp_path: Path):
 
 
 def test_un_pdf_escaneado_sin_texto_se_trata_como_una_imagen(tmp_path: Path):
-    """Decision de Fernando (2026-10-04): un PDF escaneado sin texto util ya no
-    es `error` -- se trata IGUAL que una imagen (regla D: `parcial` +
-    `imagen_pagina_sin_texto`, con el aviso y nunca texto inventado)."""
+    """Decision de Fernando (2026-10-04): un PDF sin texto util se trata IGUAL
+    que una imagen. Una pagina que NO tiene tamano de pagina (800x400) es la
+    regla A: `ok` + `imagen_sin_texto` + el aviso, como la imagen de 800x400."""
     from PIL import Image
 
     origen = _pdf_de_imagenes(
         tmp_path / "vacio.pdf", [Image.new("RGB", (800, 400), "white")]
     )
     r = ocr.extraer(origen)
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == "imagen_sin_texto"
+    assert r.salidas == {"texto.txt": ocr.AVISO_IMAGEN_SIN_TEXTO}
+
+
+def test_un_pdf_escaneado_tamano_carta_sin_texto_es_parcial_pagina_sin_texto(tmp_path: Path):
+    """La regla D de la imagen, para la pagina rasterizada: carta a 300 ppi."""
+    from PIL import Image
+
+    origen = tmp_path / "carta.pdf"
+    Image.new("RGB", (2550, 3300), "white").save(origen, resolution=300)
+    r = ocr.extraer(origen)
     assert r.estado == "parcial"
     assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
     assert r.detalle["razon"] == "posible documento escaneado sin texto: revisar o reescanear"
+    assert r.detalle["pagina_de_referencia"] == ocr._implica_pagina(r.detalle["ancho"], r.detalle["alto"])
+    assert r.detalle["pagina_de_referencia"] is not None
     assert r.salidas["texto.txt"].startswith(ocr.AVISO_IMAGEN_SIN_TEXTO)
 
 
@@ -633,10 +647,9 @@ def test_pdf_pagina_con_membrete_corto_es_parcial_con_paginas_con_dudas(tmp_path
     assert "Estado de Situación Financiera" in r.salidas["texto.txt"]
 
 
-def test_pdf_donde_ninguna_pagina_da_texto_es_parcial_sin_texto(tmp_path: Path):
-    """Escaneo puro imagen, sin ninguna pagina legible: ya no es `error` (decision
-    de Fernando 2026-10-04) sino `parcial` + `imagen_pagina_sin_texto`; las
-    paginas vacias se nombran."""
+def test_pdf_donde_ninguna_pagina_da_texto_ni_es_de_pagina_es_ok_sin_texto(tmp_path: Path):
+    """Dos paginas en blanco que no tienen tamano de pagina: regla A (`ok` +
+    `imagen_sin_texto`), igual que la imagen; las paginas vacias se nombran."""
     from PIL import Image
 
     b1 = Image.new("RGB", (1100, 450), "white")
@@ -645,12 +658,12 @@ def test_pdf_donde_ninguna_pagina_da_texto_es_parcial_sin_texto(tmp_path: Path):
 
     r = ocr.extraer(origen)
 
-    assert r.estado == "parcial"
-    assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == "imagen_sin_texto"
     assert r.detalle["paginas"] == 2
     assert r.detalle["paginas_sin_texto"] == [1, 2]
     assert r.detalle["_camino"] == "pdf"
-    assert ocr.AVISO_IMAGEN_SIN_TEXTO in r.salidas["texto.txt"]
+    assert r.salidas == {"texto.txt": ocr.AVISO_IMAGEN_SIN_TEXTO}
 
 
 # ---------------------------------------------------------------------------
@@ -658,17 +671,21 @@ def test_pdf_donde_ninguna_pagina_da_texto_es_parcial_sin_texto(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def _pagina_ocr(clasificacion: str, texto: str = "", dudosas: int = 0, palabras: int = 0) -> dict:
+def _pagina_ocr(
+    clasificacion: str, texto: str = "", dudosas: int = 0, palabras: int = 0,
+    ancho: int = 2480, alto: int = 3508,
+) -> dict:
     """Resultado de `_ocr_una_imagen` para una pagina, a mano (sin tesseract)."""
     return {
         "texto": texto, "caracteres": len(texto), "n_palabras": palabras,
         "confianza_promedio": 30.0 if dudosas else 0.0,
         "palabras_dudosas": [{"palabra": f"w{i}", "confianza": 20.0} for i in range(dudosas)],
-        "ancho": 2480, "alto": 3508, "clasificacion": clasificacion,
+        "ancho": ancho, "alto": alto, "clasificacion": clasificacion,
     }
 
 
-_A = lambda: _pagina_ocr("sin_texto")                                  # regla A: < MINIMO_CARACTERES
+_A = lambda: _pagina_ocr("sin_texto")                                  # regla A, tamano A4 a 300 (de pagina)
+_A_CHICA = lambda: _pagina_ocr("sin_texto", ancho=3333, alto=1667)    # regla A, 800x400 pt: NO es de pagina
 _B = lambda: _pagina_ocr("sin_texto", "Gerente 95 area operaciones planta", 4, 5)   # regla B
 _ILEGIBLE = lambda: {"clasificacion": "ilegible", "causa": "tesseract_no_lee"}
 
@@ -687,6 +704,31 @@ def test_pdf_de_paginas_todas_regla_a_es_parcial_pagina_sin_texto(paginas):
     }
 
 
+def test_pdf_a_sin_tamano_de_pagina_es_ok_imagen_sin_texto():
+    r = ocr._resolver_pdf([_A_CHICA(), _A_CHICA()], "spa")
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == "imagen_sin_texto"
+    assert r.detalle["paginas"] == 2
+    assert r.detalle["paginas_sin_texto"] == [1, 2]
+    assert "pagina_de_referencia" not in r.detalle
+    assert r.salidas == {"texto.txt": ocr.AVISO_IMAGEN_SIN_TEXTO}
+
+
+def test_pdf_con_alguna_pagina_a_de_tamano_de_pagina_es_d_con_sus_dimensiones():
+    r = ocr._resolver_pdf([_A_CHICA(), _A()], "spa")
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
+    assert r.detalle["pagina_de_referencia"] == "A4"
+    assert (r.detalle["ancho"], r.detalle["alto"]) == (2480, 3508)
+    assert r.detalle["razon"] == "posible documento escaneado sin texto: revisar o reescanear"
+
+
+def test_pdf_a_chica_con_una_ilegible_sigue_siendo_ok_imagen_sin_texto():
+    r = ocr._resolver_pdf([_ILEGIBLE(), _A_CHICA()], "spa")
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == "imagen_sin_texto"
+
+
 def test_pdf_con_una_pagina_b_y_otra_a_conserva_el_texto_dudoso():
     """B tiene prioridad sobre D, como en las imagenes; el texto de B se conserva."""
     r = ocr._resolver_pdf([_A(), _B()], "spa")
@@ -696,6 +738,7 @@ def test_pdf_con_una_pagina_b_y_otra_a_conserva_el_texto_dudoso():
     assert r.salidas["texto.txt"].startswith(ocr.NOTA_TEXTO_DUDOSO)
     assert "Gerente 95 area operaciones planta" in r.salidas["texto.txt"]
     assert r.detalle["paginas"] == 2
+    assert r.detalle["paginas_texto_dudoso"] == [2]
     assert r.detalle["_camino"] == "pdf"
 
 
@@ -1604,7 +1647,7 @@ def test_n5_un_error_viejo_de_pdf_sin_marca_no_cuenta_como_intento_previo(
     tmp_path, monkeypatch
 ):
     """El `error` de un PDF escrito antes de la marca (3 intentos = tope D-2) se
-    reintenta y ya no cuenta para el tope: ahora ese PDF da `parcial`."""
+    reintenta y ya no cuenta para el tope: ahora ese PDF da `ok` (imagen_sin_texto)."""
     from motor_registry import tool_authority
     from PIL import Image
 
@@ -1617,7 +1660,7 @@ def test_n5_un_error_viejo_de_pdf_sin_marca_no_cuenta_como_intento_previo(
         tmp_path / "vacio.pdf", [Image.new("RGB", (1100, 450), "white")]
     )
     ficha = ingesta.ingerir(pdf, trabajo)
-    assert ficha.estado == "parcial"
+    assert ficha.estado == "ok"
     carpeta = ingesta.ruta_procesado(trabajo, ficha.sha256)
     viejo = Ficha(
         sha256=ficha.sha256, origen=ficha.origen, extractor=ficha.extractor,
@@ -1635,8 +1678,8 @@ def test_n5_un_error_viejo_de_pdf_sin_marca_no_cuenta_como_intento_previo(
     )
     f2 = ingesta.ingerir(pdf, trabajo)
     assert len(llamadas) == 1
-    assert f2.estado == "parcial"
-    assert f2.detalle["codigo"] == "imagen_pagina_sin_texto"
+    assert f2.estado == "ok"
+    assert f2.detalle["codigo"] == "imagen_sin_texto"
 
 
 def test_n6_una_imagen_de_200_millones_de_pixeles_es_demasiados_pixeles(tmp_path: Path):
