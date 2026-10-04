@@ -29,6 +29,9 @@ viven en `.github/`, reservado a Fernando. El job `pisos-no-bajan` (nuevo, aisla
 el mínimo del B9, o si `ci/pisos.json` repite una clave. Subir N y agregar claves está permitido.
 **Única excepción a «solo un N mayor»: bajar M (skipped) se permite a propósito**, porque menos
 saltadas endurece el piso.
+**Única excepción a «la forma no cambia»: pasar de `^N passed` a `^N' passed, M skipped` con N' >= N**,
+porque agrega una exigencia sobre las saltadas (antes pasaba cualquier número de ellas). Al revés,
+de `^N passed, M skipped` a `^N passed`, sigue prohibido: afloja.
 
 El job solo hace checkout (`persist-credentials: false`), `git fetch` de la base desde la URL fija del
 repositorio (`github.server_url`/`github.repository`) a `refs/pisos-base/master`, y
@@ -3655,6 +3658,8 @@ Patrón vigente al migrar (2026-10-03, master 364ded9): `^35 passed`
 
 Jax#338 (2026-10-04): `^35 passed` → `^201 passed`, imagen sin texto, union de dos pasadas con transparencia, APNG/MPO, TIFF por pagina, FIFO; 203 recolectadas − 2 LACTOVI (skipif por archivo ausente) = 201 passed, 2 skipped en el runner; medido local hall9000 (203 passed).
 
+2026-10-04 (esta rama): `^201 passed` → `^201 passed, 2 skipped`. La línea `grep -qE "^201 passed, 2 skipped"` entró con 2127bb3 (Jax#338, antes de que Jax#343 pasara los pisos a `ci/pisos.json`) y la migración la dejó sin las saltadas; se vuelven a fijar (las 2 imágenes reales de LACTOVI no están en el runner). Lo permite la excepción de endurecimiento del comparador.
+
 Sin historia anotada en el workflow.
 
 ## `tests-puros/word_tests`
@@ -4337,6 +4342,8 @@ tiempo. Si el runner da otro número, manda el runner.
 ```
 
 ## `permisos-proyectos/permisos_proyectos`
+
+Historia del piso en el workflow, trasladada desde su comentario (ya no lleva números): 48 -> 49 (E2a Tarea 3, herencia de grupo setgid y ACL por defecto a `proyectos/<uuid>/entrada/<lote>/` y `fuente/`), 49 -> 50 (MAJOR-1, `test_las_pruebas_no_tocan_el_nucleo_de_sistema`), 50 -> 51 (la exclusión pasa de un nombre fijo a toda carpeta oculta de profundidad 2), 51 -> 53 (ronda 4: un symlink oculto no es carpeta excluida / la cuenta forense incluye la carpeta oculta; local 54 passed + 1 solo-host, el runner salta 2). Después de Jax#340 vale lo de abajo.
 
 Patrón vigente (2026-10-04): `^306 passed, 1 skipped`. Antes `^298 passed, 1 skipped`, `^282 passed, 1 skipped`, `^240 passed, 1 skipped`, `^216 passed, 1 skipped` y `^198 passed, 1 skipped` (Jax#340; antes `^53 passed, 2 skipped`, master 364ded9).
 
