@@ -292,3 +292,35 @@ def test_si_el_contenido_no_se_puede_leer_decide_la_extension(tmp_path):
     assert dependencias.lote_afectado(["pillow"], ["a.png"], abrir=lambda r: tmp_path / "no-existe") is True
     assert dependencias.lote_afectado(["pillow"], ["foto"], abrir=lambda r: None) is False
     assert dependencias.lote_afectado(["pillow"], ["a.png"]) is True
+
+
+
+def _en_hilo_con_plazo(funcion, fifo, plazo=5.0):
+    """Corre `funcion()` en un hilo con plazo. Si se cuelga (un `open()`
+    bloqueante en el FIFO espera un escritor), abre el extremo de escritura
+    para liberarlo y falla."""
+    import os
+    import threading
+
+    resultado: list = []
+    hilo = threading.Thread(target=lambda: resultado.append(funcion()), daemon=True)
+    hilo.start()
+    hilo.join(plazo)
+    if hilo.is_alive():
+        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(fd)
+        hilo.join(plazo)
+        raise AssertionError("se colgo leyendo un FIFO")
+    return resultado[0]
+
+
+def test_el_freno_no_se_cuelga_con_un_fifo_y_decide_por_la_extension(tmp_path):
+    """Sol (r18): `open()` de un FIFO espera un escritor; el freno abre con
+    O_NONBLOCK|O_NOFOLLOW, y si no es un archivo regular decide por la extension."""
+    import os
+
+    fifo = tmp_path / "tuberia"
+    os.mkfifo(fifo)
+    abrir = lambda r: fifo
+    assert _en_hilo_con_plazo(lambda: dependencias.lote_afectado(["pillow"], ["x.png"], abrir=abrir), fifo) is True
+    assert _en_hilo_con_plazo(lambda: dependencias.lote_afectado(["pillow"], ["tuberia"], abrir=abrir), fifo) is False

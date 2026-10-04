@@ -586,3 +586,33 @@ def test_la_compuerta_reconoce_por_extension_cada_imagen_que_el_ocr_acepta():
     faltan = sorted(_extensiones_de_imagen_que_el_ocr_acepta() - set(compuerta.IMAGENES))
     assert faltan == []
     assert set(compuerta.IMAGENES) == set(dependencias.EXTENSIONES_POR_PAQUETE["pillow"])
+
+
+
+def _en_hilo_con_plazo(funcion, fifo, plazo=5.0):
+    """Corre `funcion()` en un hilo con plazo. Si se cuelga (un `open()`
+    bloqueante en el FIFO espera un escritor), abre el extremo de escritura
+    para liberarlo y falla."""
+    import os
+    import threading
+
+    resultado: list = []
+    hilo = threading.Thread(target=lambda: resultado.append(funcion()), daemon=True)
+    hilo.start()
+    hilo.join(plazo)
+    if hilo.is_alive():
+        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(fd)
+        hilo.join(plazo)
+        raise AssertionError("se colgo leyendo un FIFO")
+    return resultado[0]
+
+
+def test_la_compuerta_no_se_cuelga_leyendo_la_cabecera_de_un_fifo(tmp_path):
+    """Ronda 19: la compuerta lee la cabecera sin bloquear; un FIFO no es un
+    archivo regular y el contenido no decide (decide la extension)."""
+    import os
+
+    fifo = tmp_path / "tuberia.png"
+    os.mkfifo(fifo)
+    assert _en_hilo_con_plazo(lambda: compuerta._tipo_por_contenido(fifo), fifo) is None

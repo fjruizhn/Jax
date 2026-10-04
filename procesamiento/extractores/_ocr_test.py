@@ -1519,10 +1519,12 @@ def test_d_en_un_tiff_multipagina_exige_que_todas_las_paginas_sean_de_pagina():
     assert mezcla.detalle["codigo"] == "imagen_sin_texto"
 
 
-def test_un_jpeg_mpo_de_dos_fotogramas_se_procesa_como_una_foto(tmp_path: Path, monkeypatch):
+def test_un_jpeg_mpo_de_dos_fotogramas_se_lee_cuadro_por_cuadro(tmp_path: Path, monkeypatch):
     """Fotos de iPhone (MPO, 2 fotogramas: la foto y una vista previa): 30 de
-    las 33 imagenes reales de LACTOVI. Tesseract lee UN fotograma de un JPEG;
-    solo un TIFF es multipagina para el. No se re-codifica ni se suman."""
+    las 33 imagenes reales de LACTOVI. Ronda 19 (BLOCK de Sol r18): cada cuadro
+    va a tesseract con SUS bytes JPEG originales (sin re-codificar), como las
+    paginas de un TIFF; el primero es exactamente el comienzo del archivo, asi
+    que la foto se lee igual que antes. Antes se leia solo el primer cuadro."""
     from PIL import Image
 
     base = _imagen_multilinea(tmp_path / "b.png", [
@@ -1545,8 +1547,11 @@ def test_un_jpeg_mpo_de_dos_fotogramas_se_procesa_como_una_foto(tmp_path: Path, 
     r = ocr.extraer(mpo)
     assert r.estado != "error"          # tesseract REAL: solo lo robusto (ronda 14)
     assert "Activos" in r.salidas["texto.txt"]
-    assert "paginas" not in r.detalle
-    assert entradas == [mpo.read_bytes()]
+    assert r.detalle["paginas"] == 2
+    datos = mpo.read_bytes()
+    assert len(entradas) == 2
+    assert datos.startswith(entradas[0]) and entradas[0].startswith(b"\xff\xd8")
+    assert entradas[1].startswith(b"\xff\xd8") and entradas[1] in datos
 
 
 # ---------------------------------------------------------------------------
@@ -3058,15 +3063,16 @@ def test_n39_si_solo_una_pasada_aporta_tambien_es_como_mucho_parcial(tmp_path, m
     assert r.salidas["texto.txt"] == f"{ocr.NOTA_TEXTO_DUDOSO}\n{plano}"
 
 
-def test_n39_la_version_de_la_logica_de_imagen_es_5():
+def test_n39_la_version_de_la_logica_de_imagen_es_6():
     """La union de las dos pasadas cambia la regla: una ficha de imagen escrita
     con la logica "2" (la seleccion) no se reusa. Ronda 17: "4", porque las
     invariantes de la ronda 16 (transparencia nunca ok, ninguna linea del texto
     plano se pierde) cambian la clasificacion de las fichas escritas con "3".
     Ronda 18: "5", porque un APNG de mas de un cuadro pasa a ser
-    formato_no_soportado:png_animado (una ficha "4" lo daba ok/imagen_sin_texto)."""
-    assert ocr.VERSION_LOGICA_IMAGEN == "5"
-    assert ocr.version_logica("imagen") == "5"
+    formato_no_soportado:png_animado (una ficha "4" lo daba ok/imagen_sin_texto).
+    Ronda 19: "6", porque un MPO de varios cuadros se lee cuadro por cuadro."""
+    assert ocr.VERSION_LOGICA_IMAGEN == "6"
+    assert ocr.version_logica("imagen") == "6"
 
 
 def test_n39_una_imagen_de_un_solo_fotograma_con_transparencia_no_lleva_marca_de_pagina(
@@ -3324,3 +3330,71 @@ def test_n43_un_apng_de_un_solo_cuadro_sigue_como_un_png(tmp_path, monkeypatch):
     r = ocr.extraer(destino)
     assert r.detalle.get("codigo") != "formato_no_soportado"
     assert recibidos and all(d == apng for d in recibidos)
+
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 19: un MPO de varios cuadros se lee cuadro por cuadro (no se
+# rechaza: los telefonos generan MPO)
+# ---------------------------------------------------------------------------
+
+
+def _tesseract_que_ve_tinta(monkeypatch) -> list:
+    """Tesseract SIMULADO que LEE lo que recibe: si la imagen tiene tinta
+    oscura devuelve «SALDO PENDIENTE 1000», si no, nada. Devuelve las entradas
+    de texto plano (una por cuadro)."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    entradas: list = []
+    real = ocr.subprocess.run
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        with Image.open(BytesIO(k["input"])) as im:
+            tinta = im.convert("L").getextrema()[0] < 100
+        palabras = ["SALDO", "PENDIENTE", "1000"] if tinta else []
+        if cmd[-1] == "tsv":
+            return _SalidaSimulada(_tsv([(95, p) for p in palabras]).encode())
+        entradas.append(k["input"])
+        return _SalidaSimulada(" ".join(palabras).encode())
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    return entradas
+
+
+def test_n44_un_mpo_con_el_texto_en_el_segundo_cuadro_lo_conserva(tmp_path, monkeypatch):
+    """La sonda de Sol (r18): cuadro 1 en blanco y cuadro 2 con texto; leido
+    como una sola imagen, el texto se perdia."""
+    from PIL import Image, ImageDraw
+
+    blanco = Image.new("RGB", (600, 120), "white")
+    texto = blanco.copy()
+    ImageDraw.Draw(texto).text((20, 30), "SALDO PENDIENTE 1000", fill="black", font=_fuente(36))
+    destino = tmp_path / "foto.jpg"
+    blanco.save(destino, format="MPO", save_all=True, append_images=[texto])
+    with Image.open(destino) as im:
+        assert im.format == "MPO" and im.n_frames == 2
+    entradas = _tesseract_que_ve_tinta(monkeypatch)
+    r = ocr.extraer(destino)
+    assert len(entradas) == 2, "un OCR por cuadro"
+    assert all(e.startswith(b"\xff\xd8") for e in entradas), "cada cuadro va como su JPEG original"
+    assert "<!-- cuadro 2 -->\nSALDO PENDIENTE 1000" in r.salidas["texto.txt"]
+    assert r.detalle.get("codigo") != ocr.CODIGO_IMAGEN_SIN_TEXTO
+
+
+def test_n44_un_mpo_de_un_solo_cuadro_sigue_con_los_bytes_originales(tmp_path, monkeypatch):
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGB", (600, 120), "white")
+    ImageDraw.Draw(im).text((20, 30), "SALDO PENDIENTE 1000", fill="black", font=_fuente(36))
+    destino = tmp_path / "una.jpg"
+    im.save(destino, format="MPO", save_all=True, append_images=[])
+    with Image.open(destino) as abierto:
+        assert getattr(abierto, "n_frames", 1) == 1
+    entradas = _tesseract_que_ve_tinta(monkeypatch)
+    r = ocr.extraer(destino)
+    assert entradas == [destino.read_bytes()]
+    assert "<!-- cuadro" not in r.salidas["texto.txt"]
