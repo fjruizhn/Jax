@@ -54,3 +54,33 @@ Todo medido en hall9000 con un proceso uvicorn y cliente, backend y MariaDB en e
 - **Hallazgos ajenos a E1, para Fernando:**
   - `frontend/src/api/websocket.js`, en dev con host local, fija el WebSocket a `:8080` (la plataforma de producción en hall9000).
   - El `conftest.py` de jax intenta conectarse a `jax_memory` cuando no corre con `CI=true`.
+
+## Despliegue — 2026-10-02 (GO de Fernando en sesión, hall9000)
+HISTORIA, verificada en el momento. Salidas en `~/respaldos-despliegue/2026-10-02-proyectos-e1/`.
+
+1. **Respaldo** de `jax_memory` (11 MB). Restauración probada: conversations, messages, facts, decisions, action_items, projects y jax_users dieron los mismos conteos de filas que producción (el registro `restauracion-probada.txt` guarda solo conteos por tabla, no hashes ni comparación de contenido). Antes del despliegue, producción estaba en jax `152cb23`, jax-platform `9d91f1b` y bundle `index-DaBnCBjU.js`.
+2. **jax** `152cb23` → `fb1b228`.
+   - Trae El Faro fase 0. Se verificó que no se ejecuta en producción: nada importa `jax.faro` y no hay unidad systemd.
+   - Trae también #310 (LAS VOCES), #315 y #314.
+   - `jax-las-manos` reiniciado; `/health` da 200. Los archivos de root dentro del checkout quedaron en 0.
+3. **jax-platform** `9d91f1b` → `f9ff765` (#176).
+   - `/api/health` da 200 y `/api/proyectos` sin token da 401.
+   - Frontend interno reiniciado.
+   - Sitio público publicado con `index-BGJ3Q2Uz.js` (respaldo del anterior en atem-ai: `~/respaldos-sitio/axioma-20261002-083720`).
+4. **Precondiciones medidas:** el índice `idx_jax_project_membership_user_list` existe; el usuario 1 es superadmin activo del tenant 1; el único administrador del tenant 1 es el usuario 1, así que HAMURABI queda con un solo OWNER; hay un solo tenant.
+5. **Ensayo** sobre la copia `jax_memory_test_e1ensayo`, borrada al terminar.
+   - Aplicar, revertir y volver a aplicar dio resultados exactos: 866 filas.
+   - Las 5 FKs entraron con INPLACE (7–8 ms cada una) y `hnsw_intacto` true en messages y facts.
+6. **Índice vectorial, primera medición, antes de migrar:** sano en facts y messages.
+7. **Migración en producción.**
+   - 241 huérfanos (900001–1400055), ninguno fuera de alcance. Se movieron 241 conversaciones, 609 mensajes, 10 hechos, 0 decisiones y 6 tareas al proyecto **2 «Evaluación grounding SP3 · 2026-09-03» (ARCHIVED)**.
+   - HAMURABI quedó con alcance ACTIVE y Fernando como OWNER.
+   - El mapa de reversión tiene 866 filas, con permisos 0600.
+   - La verificación independiente con SQL coincide tabla por tabla.
+8. **Índice vectorial, segunda medición, tras migrar:** sano.
+9. **FKs en producción.** `fk_{conversations,messages,facts,decisions,action_items}_project` entraron con INPLACE (8–18 ms) y `hnsw_intacto` true. Confirmadas en `information_schema`.
+10. **Índice vectorial, tercera medición, tras las FKs:** sano.
+11. **Verificación por efecto**, con la misma autoridad que `/chat` (`ProjectScopeAuthorityResolver.resolve_scope`):
+    - usuario 1 → HAMURABI: PERMITIDO;
+    - usuario 4, que no es admin → HAMURABI: DENEGADO;
+    - usuario 1 → proyecto 2 (archivado): DENEGADO al chat, como corresponde.
