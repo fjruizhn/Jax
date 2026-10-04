@@ -2995,7 +2995,14 @@ case "$cmd" in
   list-units) if [ -n "$FALLA_LIST_UNITS" ]; then echo "Failed to connect to bus" >&2; exit 1; fi; cat "$D/list-units" ;;
   list-timers) if [ -n "$FALLA_LIST_TIMERS" ]; then echo "Failed to connect to bus" >&2; exit 1; fi; cat "$D/list-timers" ;;
   show) if [ -n "$FALLA_SHOW" ]; then echo "Failed to get properties" >&2; exit 1; fi
-        grep "^$4 $2 " "$D/props" | sed "s/^[^ ]* [^ ]* //" ;;
+        if [ "$2" = NRestarts ]; then
+          # un .service informa un contador (0 si no se lo toca); un .timer no tiene la propiedad y sale vacio
+          case "$4" in
+            *.service) n=$(cat "$D/nr.$4" 2>/dev/null || echo 0)
+                       if [ "$NRESTARTS_SUBE" = "$4" ]; then n=$((n + 1)); echo "$n" > "$D/nr.$4"; fi
+                       echo "$n" ;;
+          esac
+        else grep "^$4 $2 " "$D/props" | sed "s/^[^ ]* [^ ]* //"; fi ;;
   stop) for u in "$@"; do
           if [ -n "$MARCAR_STOP" ]; then echo "STUB-STOP $u" >&2; fi
           if [ "$COLGAR_STOP" = "$u" ]; then sleep "${COLGAR_STOP_S:-1}"; fi
@@ -3004,14 +3011,30 @@ case "$cmd" in
   start) for u in "$@"; do
            sleep "${DEMORA_START:-0}"
            if [ "$FALLA_START" = "$u" ]; then echo "Failed to start $u" >&2; rc=1
-           else sed -i "/^$u\\$/d" "$D/activating"; grep -qx "$u" "$D/activas" || echo "$u" >> "$D/activas"; fi
+           else sed -i "/^$u\\$/d" "$D/activating"; grep -qx "$u" "$D/activas" || echo "$u" >> "$D/activas"; touch "$D/arr.$u"; fi
          done ;;
   is-active) if [ "$1" = "$IS_ACTIVE_RARO" ]; then echo "desconocido"; exit 4; fi
-             if grep -qx "$1" "$D/activas"; then echo active
+             if [ "$ALTERNA" = "$1" ] && [ -f "$D/arr.$1" ]; then
+               # tras `start` la unidad parece sana en las dos primeras consultas y despues alterna (bucle de reinicios):
+               # a la tercera `activating`, a la cuarta `active`, y asi
+               n=$(cat "$D/alt.$1" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$D/alt.$1"
+               if [ "$n" -le 2 ] || [ $((n % 2)) -eq 0 ]; then echo active; else echo activating; rc=3; fi
+             elif grep -qx "$1" "$D/activas"; then echo active
              elif grep -qx "$1" "$D/activating"; then echo activating; rc=3
              else echo inactive; rc=3; fi ;;
 esac
 exit "$rc"
+"""
+
+# `find` falso: con STUB_FIND_ERR emite por stderr `find: '<ruta>': <error>` y sale con STUB_FIND_RC. Igual que el real,
+# el mensaje depende del idioma: con LC_ALL=C usa comillas ASCII y si no, las tipograficas (que el bloque no parsea).
+_STUB_FIND = """#!/bin/sh
+[ -n "$STUB_SETUID" ] && echo "$STUB_SETUID"
+if [ -n "$STUB_FIND_ERR" ]; then
+  if [ "$LC_ALL" = C ]; then q1="'"; q2="'"; else q1='\u2018'; q2='\u2019'; fi
+  echo "find: ${q1}${STUB_FIND_RUTA}${q2}: ${STUB_FIND_ERR}" >&2
+fi
+exit "${STUB_FIND_RC:-0}"
 """
 
 _UNIDADES_ESPERADAS_DE_PRUEBA = ("jax-las-manos.service jax-platform.service jax-catalogo-modelos.service "
@@ -3019,7 +3042,7 @@ _UNIDADES_ESPERADAS_DE_PRUEBA = ("jax-las-manos.service jax-platform.service jax
 
 
 def _entorno_del_bloque(tmp_path: Path, uid_jaxsvc: int, *, extra: dict | None = None) -> dict:
-    """Un PATH con stubs de `sudo`, `systemctl`, `ps`, `find` y `crontab`, y un /proc de mentira, para ejecutar el
+    """Un PATH con stubs de `sudo`, `systemctl`, `ps`, `find`, `findmnt` y `crontab`, y un /proc de mentira, para ejecutar el
     bloque del runbook contra un arbol temporal sin tocar el host. `jax-limpiar-bases-de-test.service` arranca
     INACTIVA (como en hall9000: es un oneshot de un timer)."""
     stubs = tmp_path / "stubs"
@@ -3051,7 +3074,8 @@ def _entorno_del_bloque(tmp_path: Path, uid_jaxsvc: int, *, extra: dict | None =
         "sudo": '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do case "$1" in -n) shift;; -u) shift 2;; *) break;; esac; done\nexec "$@"\n',
         "systemctl": _STUB_SYSTEMCTL,
         "ps": '#!/bin/sh\nif [ -s "$STUB_DIR/ps" ]; then cat "$STUB_DIR/ps"; exit 0; fi\nexit 1\n',
-        "find": '#!/bin/sh\n[ -n "$STUB_SETUID" ] && echo "$STUB_SETUID"\nexit 0\n',
+        "find": _STUB_FIND,
+        "findmnt": '#!/bin/sh\nprintf "%s\\n" "${STUB_FINDMNT-/ ext4}"\n',
         "crontab": '#!/bin/sh\nif [ -n "$STUB_CRON" ]; then echo "$STUB_CRON"; exit 0; fi\necho "no crontab for jaxsvc" >&2\nexit 1\n',
     }
     for nombre, texto in scripts.items():
@@ -3064,7 +3088,8 @@ def _entorno_del_bloque(tmp_path: Path, uid_jaxsvc: int, *, extra: dict | None =
     entorno = dict(os.environ)
     entorno.update({"PATH": f"{stubs}:{os.environ['PATH']}", "STUB_DIR": str(datos), "PERMISOS": str(datos / "permisos.sh"),
                     "PROC": str(proc), "RAIZ": str(tmp_path / "raiz"), "NO_SE_DETIENE": "",
-                    "ESPERADAS": _UNIDADES_ESPERADAS_DE_PRUEBA, "REINTENTOS": "2", "ESPERA": "0"})
+                    "ESPERADAS": _UNIDADES_ESPERADAS_DE_PRUEBA, "REINTENTOS": "2", "ESPERA": "0",
+                    "ESTABLE": "0"})
     entorno.update(extra or {})
     return entorno
 
@@ -3347,6 +3372,88 @@ def test_el_trap_conserva_el_codigo_de_salida_del_fallo_original(tmp_path, _iden
     r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env={"PERMISOS_RC": "7"})
     assert r.returncode == 7, (r.returncode, r.stderr)
     assert _llamadas(log, "start"), "no restauró tras el fallo del guion"
+
+
+# --- defecto 1: un montaje FUSE ilegible no debe cortar la premisa del setuid, y nada mas que eso -----------------
+
+_MONTAJE = "/home/x/montaje"
+_FINDMNT_CON_FUSE = f"/ ext4\n/boot ext4\n{_MONTAJE} fuse.sshfs\n"
+
+
+def _env_find(ruta: str, error: str, *, fstype: str, rc: str = "1") -> dict:
+    return {"STUB_FIND_ERR": error, "STUB_FIND_RUTA": ruta, "STUB_FIND_RC": rc,
+            "STUB_FINDMNT": f"/ ext4\n/boot ext4\n{_MONTAJE} {fstype}"}
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_un_permission_denied_en_un_punto_de_montaje_fuse_no_corta_el_bloque(tmp_path, _identidades, marca, modo):
+    """hall9000 tiene un sshfs que da EACCES hasta a root: find sale 1. Con `LC_ALL=C` el mensaje lleva comillas ASCII
+    y el path coincide EXACTO con un punto de montaje `fuse*` de findmnt: se tolera y el bloque sigue."""
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid,
+                               env=_env_find(_MONTAJE, "Permission denied", fstype="fuse.sshfs"))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert any(l == f"permisos {modo}" for l in log), "el guion no corrio"
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+@pytest.mark.parametrize("que,env,fragmento", [
+    ("Permission denied en un path que NO es un montaje FUSE",
+     _env_find(_MONTAJE, "Permission denied", fstype="ext4"), f"{_MONTAJE}': Permission denied"),
+    ("Permission denied en un subdirectorio de un montaje FUSE (no es el punto exacto)",
+     _env_find(_MONTAJE + "/sub", "Permission denied", fstype="fuse.sshfs"), f"{_MONTAJE}/sub': Permission denied"),
+    ("otro error (EIO) en un punto de montaje FUSE",
+     _env_find(_MONTAJE, "Input/output error", fstype="fuse.sshfs"), f"{_MONTAJE}': Input/output error"),
+    ("find sale 1 sin ningun mensaje", {"STUB_FIND_RC": "1"}, "sin mensaje"),
+])
+def test_cualquier_otro_error_de_find_corta_antes_de_detener_nada(tmp_path, _identidades, marca, modo, que, env, fragmento):
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=env)
+    assert r.returncode != 0 and "NO CUMPLE" in r.stderr, (que, r.stdout + r.stderr)
+    assert fragmento in r.stderr, f"{que}: el mensaje no dice que fallo: {r.stderr}"
+    assert not _llamadas(log, "stop"), f"{que}: detuvo algo antes de cortar"
+    assert not any(l.startswith("permisos") for l in log), f"{que}: llego al guion"
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_un_error_fuse_tolerado_no_oculta_un_setuid_hallado(tmp_path, _identidades, marca, modo):
+    """Tolerar el montaje no relaja la premisa: si find tambien lista un setuid de jaxsvc, se corta."""
+    env = _env_find(_MONTAJE, "Permission denied", fstype="fuse.sshfs")
+    env["STUB_SETUID"] = "/usr/local/bin/escalar"
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=env)
+    assert r.returncode != 0 and "setuid" in r.stderr.lower() and "/usr/local/bin/escalar" in r.stderr, r.stderr
+    assert not _llamadas(log, "stop")
+
+
+# --- defecto 2: una unidad solo cuenta como restaurada si esta `active` y ESTABLE -----------------------------------
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_una_unidad_active_cuyo_nrestarts_sube_no_cuenta_como_restaurada(tmp_path, _identidades, marca, modo):
+    """jax-ejecutor-proxy en bucle de reinicios: se ve `active` un instante pero `NRestarts` sube. Antes el bloque
+    decia OK. Ahora la nombra entre las que no volvieron y el rc es distinto de 0, aunque el guion haya ido bien."""
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid,
+                               env={"NRESTARTS_SUBE": "jax-platform.service", "ESTABLE": "1"})
+    assert any(l == f"permisos {modo}" for l in log), "el guion tenia que haber corrido bien"
+    assert r.returncode != 0, "salio con 0 dejando una unidad en bucle de reinicios"
+    assert "no volvieron" in r.stderr and "jax-platform.service" in r.stderr, r.stderr
+    assert "sudo systemctl start jax-platform.service" in r.stderr, "falta la orden manual"
+    assert "jax-las-manos.service" not in r.stderr.split("no volvieron")[1], "nombro una unidad estable"
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_una_unidad_que_alterna_activating_y_active_no_cuenta_como_restaurada(tmp_path, _identidades, marca, modo):
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid,
+                               env={"ALTERNA": "jax-las-manos.service", "ESTABLE": "2"})
+    assert any(l == f"permisos {modo}" for l in log), "el guion tenia que haber corrido bien"
+    assert r.returncode != 0, "salio con 0 dejando una unidad que alterna activating/active"
+    assert "no volvieron" in r.stderr and "jax-las-manos.service" in r.stderr, r.stderr
+    assert "sudo systemctl start jax-las-manos.service" in r.stderr
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_una_unidad_active_y_estable_se_da_por_restaurada_y_se_miro_nrestarts(tmp_path, _identidades, marca, modo):
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env={"ESTABLE": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    consultas = [l for l in log if l.startswith("systemctl show -p NRestarts")]
+    assert any(l.endswith("jax-platform.service") for l in consultas), f"no leyo NRestarts: {log}"
 
 
 @pytest.mark.parametrize("que,env,fragmento", [
