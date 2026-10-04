@@ -1,351 +1,648 @@
 {
-  "commit": "364ded9ab66dd82e28d3c3ea7dc3efeb96b15a87",
-  "jobs": {
-    "las-voces-faro-readonly": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        "Paquete Faro permanente y frontera MCP read-only"
-      ]
-    },
-    "memory-b9-regression": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        "Regresiones B9 con MariaDB efímera y usuario limitado"
-      ]
-    },
-    "governed-execution-mariadb": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null
-      ]
-    },
-    "enforcement-evidence": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        "Generador de identidad de implementación (jax#260)",
-        "Siembra de definiciones de control (jax#266)",
-        "Ejecutar controles B7 y capturar salida",
-        "Emitir manifiesto B7 controlado",
-        null
-      ]
-    },
-    "no-fail-open-except": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        "CORPUS.md coincide con policy/rules",
-        null,
-        null
-      ]
-    },
-    "auditor-local-gpu-off": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null
-      ]
-    },
-    "archivos-de-test-en-ci": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null,
-        "Piso exacto de tests CORRIDOS"
-      ]
-    },
-    "ci-usa-la-mariadb-de-produccion": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null
-      ]
-    },
-    "no-naked-claude-subprocess": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null,
-        "Piso exacto del scanner de subprocesos de CLIs de suscripcion",
-        "Piso exacto del control \"un Titular solo nace en exigir_titular\"",
-        "Piso exacto del control \"quien llama a run_cli cablea preparar_arranque\"",
-        "Piso exacto de la guardia del arranque del Ejecutor"
-      ]
-    },
-    "hyde-sandbox-unit": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null
-      ]
-    },
-    "cli-sandbox-unit": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        "Instalar bubblewrap y habilitar user namespaces",
-        null,
-        null
-      ]
-    },
-    "faro-fase0": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null,
-        null,
-        null
-      ]
-    },
-    "faro-bitacora-db": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null,
-        null,
-        null
-      ]
-    },
-    "faro-jaula": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        "Instalar bubblewrap",
-        null,
-        null,
-        null,
-        null
-      ]
-    },
-    "facet-health-unit": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null
-      ]
-    },
-    "facet-health-io": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null,
-        null
-      ]
-    },
-    "pipeline-results-historial-db": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null,
-        null
-      ]
-    },
-    "subpipeline-contrato-db": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        "Clonar jax-platform (sus migraciones crean la gobernanza)",
-        null,
-        "Esquema de MEMORIA de jax (projects -- FK de la migracion 003)",
-        "Esquema de gobernanza con SUS migraciones",
-        null,
-        "Piso exacto de tests CORRIDOS"
-      ]
-    },
-    "memory-vector-zero-io": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null,
-        "Publicar fallos de memoria B9",
-        null,
-        "Publicar resumen de segunda corrida de memoria"
-      ]
-    },
-    "output-validator-regression": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null
-      ]
-    },
-    "hyde-containment": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        "Instalar bubblewrap y habilitar user namespaces",
-        null,
-        null
-      ]
-    },
-    "facet-resolver-seal": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null,
-        null
-      ]
-    },
-    "plan-timeout-ceiling": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null,
-        null
-      ]
-    },
-    "mirror-sync": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        "Traer el checkout de jax-platform",
-        "Comparar las familias de espejos",
-        null,
-        null,
-        null,
-        "La copia de cola_uso.py es identica a la de jax-platform",
-        "Piso exacto de tests CORRIDOS (0 skipped, con el checkout presente)",
-        "El freno que escribe la plataforma mata el motor en vuelo"
-      ]
-    },
-    "ollama-num-parallel": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        "El tripwire se pone rojo cuando debe",
-        "Piso exacto de tests CORRIDOS",
-        "El tripwire es rojo cuando NO puede medir (fail-closed)"
-      ]
-    },
-    "governance": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        "Suite de gobernanza",
-        "F2-D lifecycle contract",
-        "F2-E-SR runtime-status source integrity regressions",
-        "Piso exacto de F2-E-SR source integrity regressions",
-        "F2-E-SR3 Processing ownership and governed-status regressions",
-        "F2-E-SR3 Processing source authentication and routing regressions",
-        "Piso exacto de tests CORRIDOS"
-      ]
-    },
-    "tests-puros": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null,
-        "Instalar bubblewrap y un exch mínimo para este runner (Ubuntu 24.04 no trae exch real)",
-        null,
-        "Publicar fallos de tests puros",
-        "Piso exacto de tests CORRIDOS",
-        "Ficha -- piso exacto de tests CORRIDOS (no skipeados)",
-        "Resultado -- piso exacto de tests CORRIDOS (no skipeados)",
-        null,
-        "Excel -- piso exacto de tests CORRIDOS (no skipeados)",
-        "PDF -- piso exacto de tests CORRIDOS (no skipeados)",
-        null,
-        null,
-        "OCR -- piso exacto de tests CORRIDOS (no skipeados)",
-        "Word -- piso exacto de tests CORRIDOS (no skipeados)",
-        "Compuerta -- piso exacto de tests CORRIDOS (no skipeados)",
-        "Ingesta -- piso exacto de tests CORRIDOS (no skipeados)",
-        "Medidor de utilidad de extractos -- piso exacto de tests CORRIDOS (no skipeados)",
-        "Procesar archivos -- piso exacto de tests CORRIDOS (no skipeados)",
-        "Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)",
-        "Freno de dependencias de extraccion -- piso exacto de tests CORRIDOS (no skipeados)",
-        null,
-        null,
-        "Identity Foundation Shadow (sin DB)"
-      ]
-    },
-    "jacobs-gobernanza-db": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        "Sello de facet_resolver fuera de /srv",
-        "Clonar jax-platform (sus migraciones crean la gobernanza)",
-        null,
-        null,
-        "Esquema de MEMORIA de jax (projects -- FK de la migracion 003)",
-        "Esquema de gobernanza con SUS migraciones",
-        null,
-        "Piso exacto de tests CORRIDOS"
-      ]
-    },
-    "permisos-proyectos": {
-      "name": null,
-      "pasos": [
-        null,
-        null,
-        null,
-        null,
-        "Dar a fruiz lo mínimo para correr el escritor de la prueba de herencia",
-        null,
-        "Piso exacto de tests CORRIDOS (no skipeados)"
-      ]
-    }
+ "commit": "364ded9ab66dd82e28d3c3ea7dc3efeb96b15a87",
+ "jobs": {
+  "las-voces-faro-readonly": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    "Paquete Faro permanente y frontera MCP read-only"
+   ]
+  },
+  "memory-b9-regression": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    "Regresiones B9 con MariaDB efímera y usuario limitado"
+   ]
+  },
+  "governed-execution-mariadb": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null
+   ]
+  },
+  "enforcement-evidence": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    "Generador de identidad de implementación (jax#260)",
+    "Siembra de definiciones de control (jax#266)",
+    "Ejecutar controles B7 y capturar salida",
+    "Emitir manifiesto B7 controlado",
+    null
+   ]
+  },
+  "no-fail-open-except": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    "CORPUS.md coincide con policy/rules",
+    null,
+    null
+   ]
+  },
+  "auditor-local-gpu-off": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null
+   ]
+  },
+  "archivos-de-test-en-ci": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null,
+    "Piso exacto de tests CORRIDOS"
+   ]
+  },
+  "ci-usa-la-mariadb-de-produccion": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null
+   ]
+  },
+  "no-naked-claude-subprocess": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null,
+    "Piso exacto del scanner de subprocesos de CLIs de suscripcion",
+    "Piso exacto del control \"un Titular solo nace en exigir_titular\"",
+    "Piso exacto del control \"quien llama a run_cli cablea preparar_arranque\"",
+    "Piso exacto de la guardia del arranque del Ejecutor"
+   ]
+  },
+  "hyde-sandbox-unit": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+   ]
+  },
+  "cli-sandbox-unit": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    "Instalar bubblewrap y habilitar user namespaces",
+    null,
+    null
+   ]
+  },
+  "faro-fase0": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+   ]
+  },
+  "faro-bitacora-db": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+   ]
+  },
+  "faro-jaula": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    "Instalar bubblewrap",
+    null,
+    null,
+    null,
+    null
+   ]
+  },
+  "facet-health-unit": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null
+   ]
+  },
+  "facet-health-io": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null,
+    null
+   ]
+  },
+  "pipeline-results-historial-db": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null,
+    null
+   ]
+  },
+  "subpipeline-contrato-db": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    "Clonar jax-platform (sus migraciones crean la gobernanza)",
+    null,
+    "Esquema de MEMORIA de jax (projects -- FK de la migracion 003)",
+    "Esquema de gobernanza con SUS migraciones",
+    null,
+    "Piso exacto de tests CORRIDOS"
+   ]
+  },
+  "memory-vector-zero-io": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null,
+    "Publicar fallos de memoria B9",
+    null,
+    "Publicar resumen de segunda corrida de memoria"
+   ]
+  },
+  "output-validator-regression": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null
+   ]
+  },
+  "hyde-containment": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    "Instalar bubblewrap y habilitar user namespaces",
+    null,
+    null
+   ]
+  },
+  "facet-resolver-seal": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null,
+    null
+   ]
+  },
+  "plan-timeout-ceiling": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null,
+    null
+   ]
+  },
+  "mirror-sync": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    "Traer el checkout de jax-platform",
+    "Comparar las familias de espejos",
+    null,
+    null,
+    null,
+    "La copia de cola_uso.py es identica a la de jax-platform",
+    "Piso exacto de tests CORRIDOS (0 skipped, con el checkout presente)",
+    "El freno que escribe la plataforma mata el motor en vuelo"
+   ]
+  },
+  "ollama-num-parallel": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    "El tripwire se pone rojo cuando debe",
+    "Piso exacto de tests CORRIDOS",
+    "El tripwire es rojo cuando NO puede medir (fail-closed)"
+   ]
+  },
+  "governance": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    "Suite de gobernanza",
+    "F2-D lifecycle contract",
+    "F2-E-SR runtime-status source integrity regressions",
+    "Piso exacto de F2-E-SR source integrity regressions",
+    "F2-E-SR3 Processing ownership and governed-status regressions",
+    "F2-E-SR3 Processing source authentication and routing regressions",
+    "Piso exacto de tests CORRIDOS"
+   ]
+  },
+  "tests-puros": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null,
+    "Instalar bubblewrap y un exch mínimo para este runner (Ubuntu 24.04 no trae exch real)",
+    null,
+    "Publicar fallos de tests puros",
+    "Piso exacto de tests CORRIDOS",
+    "Ficha -- piso exacto de tests CORRIDOS (no skipeados)",
+    "Resultado -- piso exacto de tests CORRIDOS (no skipeados)",
+    null,
+    "Excel -- piso exacto de tests CORRIDOS (no skipeados)",
+    "PDF -- piso exacto de tests CORRIDOS (no skipeados)",
+    null,
+    null,
+    "OCR -- piso exacto de tests CORRIDOS (no skipeados)",
+    "Word -- piso exacto de tests CORRIDOS (no skipeados)",
+    "Compuerta -- piso exacto de tests CORRIDOS (no skipeados)",
+    "Ingesta -- piso exacto de tests CORRIDOS (no skipeados)",
+    "Medidor de utilidad de extractos -- piso exacto de tests CORRIDOS (no skipeados)",
+    "Procesar archivos -- piso exacto de tests CORRIDOS (no skipeados)",
+    "Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)",
+    "Freno de dependencias de extraccion -- piso exacto de tests CORRIDOS (no skipeados)",
+    null,
+    null,
+    "Identity Foundation Shadow (sin DB)"
+   ]
+  },
+  "jacobs-gobernanza-db": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    "Sello de facet_resolver fuera de /srv",
+    "Clonar jax-platform (sus migraciones crean la gobernanza)",
+    null,
+    null,
+    "Esquema de MEMORIA de jax (projects -- FK de la migracion 003)",
+    "Esquema de gobernanza con SUS migraciones",
+    null,
+    "Piso exacto de tests CORRIDOS"
+   ]
+  },
+  "permisos-proyectos": {
+   "name": null,
+   "pasos": [
+    null,
+    null,
+    null,
+    null,
+    "Dar a fruiz lo mínimo para correr el escritor de la prueba de herencia",
+    null,
+    "Piso exacto de tests CORRIDOS (no skipeados)"
+   ]
   }
+ },
+ "pisos": [
+  {
+   "job": "las-voces-faro-readonly",
+   "paso": 3,
+   "patron": "^24 passed in ",
+   "archivo": "/tmp/las-voces-faro-readonly",
+   "mensaje": "PISO ROTO: se esperaban exactamente 24 tests CORRIDOS."
+  },
+  {
+   "job": "archivos-de-test-en-ci",
+   "paso": 4,
+   "patron": "^7 passed",
+   "archivo": "/tmp/wireados",
+   "mensaje": "PISO ROTO: se esperaban 7 tests CORRIDOS."
+  },
+  {
+   "job": "no-naked-claude-subprocess",
+   "paso": 4,
+   "patron": "^54 passed",
+   "archivo": "/tmp/scanner",
+   "mensaje": "PISO ROTO: se esperaban 54 tests CORRIDOS del scanner."
+  },
+  {
+   "job": "no-naked-claude-subprocess",
+   "paso": 5,
+   "patron": "^9 passed",
+   "archivo": "/tmp/titular",
+   "mensaje": "PISO ROTO: se esperaban 9 tests CORRIDOS del control de Titular."
+  },
+  {
+   "job": "no-naked-claude-subprocess",
+   "paso": 6,
+   "patron": "^7 passed",
+   "archivo": "/tmp/arranque",
+   "mensaje": "PISO ROTO: se esperaban 7 tests CORRIDOS del control de preparar_arranque."
+  },
+  {
+   "job": "no-naked-claude-subprocess",
+   "paso": 7,
+   "patron": "^5 passed",
+   "archivo": "/tmp/lanza",
+   "mensaje": "PISO ROTO: se esperaban 5 tests CORRIDOS."
+  },
+  {
+   "job": "hyde-sandbox-unit",
+   "paso": 4,
+   "patron": "^6 passed",
+   "archivo": "/tmp/hydesb",
+   "mensaje": "PISO ROTO: se esperaban 6 tests CORRIDOS de hyde_sandbox."
+  },
+  {
+   "job": "hyde-sandbox-unit",
+   "paso": 6,
+   "patron": "^3 passed",
+   "archivo": "/tmp/golden",
+   "mensaje": "PISO ROTO: se esperaban 3 tests CORRIDOS de la golden de Hyde."
+  },
+  {
+   "job": "cli-sandbox-unit",
+   "paso": 5,
+   "patron": "^251 passed",
+   "archivo": "/tmp/clisb",
+   "mensaje": "PISO ROTO: se esperaban 251 tests CORRIDOS de cli_sandbox."
+  },
+  {
+   "job": "faro-fase0",
+   "paso": 5,
+   "patron": "^671 passed",
+   "archivo": "/tmp/faro",
+   "mensaje": "PISO ROTO: se esperaban 671 tests CORRIDOS del Faro."
+  },
+  {
+   "job": "faro-bitacora-db",
+   "paso": 5,
+   "patron": "^40 passed",
+   "archivo": "/tmp/faro-db",
+   "mensaje": "PISO ROTO: se esperaban 40 tests CORRIDOS de la bitacora y los topes del Faro."
+  },
+  {
+   "job": "faro-jaula",
+   "paso": 6,
+   "patron": "^11 passed",
+   "archivo": "/tmp/faro-jaula",
+   "mensaje": "PISO ROTO: se esperaban 11 tests CORRIDOS de la jaula del Faro."
+  },
+  {
+   "job": "facet-health-io",
+   "paso": 4,
+   "patron": "^27 passed",
+   "archivo": "/tmp/out",
+   "mensaje": "PISO ROTO: se esperaban 27 tests CORRIDOS (no skipeados)."
+  },
+  {
+   "job": "pipeline-results-historial-db",
+   "paso": 4,
+   "patron": "^2 passed",
+   "archivo": "/tmp/out",
+   "mensaje": "PISO ROTO: se esperaban 2 tests CORRIDOS (no skipeados)."
+  },
+  {
+   "job": "subpipeline-contrato-db",
+   "paso": 8,
+   "patron": "^295 passed",
+   "archivo": "/tmp/out",
+   "mensaje": "PISO ROTO: se esperaban 295 tests CORRIDOS (no skipeados)."
+  },
+  {
+   "job": "memory-vector-zero-io",
+   "paso": 5,
+   "patron": "^203 passed",
+   "archivo": "/tmp/out",
+   "mensaje": "PISO ROTO: se esperaban 203 tests CORRIDOS (no skipeados)."
+  },
+  {
+   "job": "hyde-containment",
+   "paso": 5,
+   "patron": "^21 passed",
+   "archivo": "/tmp/hyde",
+   "mensaje": "PISO ROTO: se esperaban 21 tests CORRIDOS (no skipeados)."
+  },
+  {
+   "job": "facet-resolver-seal",
+   "paso": 4,
+   "patron": "^13 passed",
+   "archivo": "/tmp/seal",
+   "mensaje": "PISO ROTO: se esperaban 13 tests CORRIDOS (no skipeados)."
+  },
+  {
+   "job": "plan-timeout-ceiling",
+   "paso": 4,
+   "patron": "^16 passed",
+   "archivo": "/tmp/ptc",
+   "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS."
+  },
+  {
+   "job": "mirror-sync",
+   "paso": 6,
+   "patron": "^14 passed",
+   "archivo": "/tmp/ms",
+   "mensaje": "PISO ROTO: se esperaban 14 tests CORRIDOS."
+  },
+  {
+   "job": "mirror-sync",
+   "paso": 9,
+   "patron": "^22 passed",
+   "archivo": "/tmp/cu",
+   "mensaje": "PISO ROTO: se esperaban 22 tests CORRIDOS y 0 skipped."
+  },
+  {
+   "job": "mirror-sync",
+   "paso": 10,
+   "patron": "^2 passed in",
+   "archivo": "/tmp/ks",
+   "mensaje": "PISO ROTO: se esperaban 2 tests CORRIDOS y 0 skipped."
+  },
+  {
+   "job": "ollama-num-parallel",
+   "paso": 4,
+   "patron": "^33 passed",
+   "archivo": "/tmp/onp",
+   "mensaje": "PISO ROTO: se esperaban 33 tests CORRIDOS."
+  },
+  {
+   "job": "governance",
+   "paso": 6,
+   "patron": "^18 passed",
+   "archivo": "/tmp/f2e-sr",
+   "mensaje": "PISO ROTO: se esperaban 18 tests CORRIDOS de F2-E-SR source integrity."
+  },
+  {
+   "job": "governance",
+   "paso": 7,
+   "patron": "^212 passed",
+   "archivo": "/tmp/f2e-sr3",
+   "mensaje": "PISO ROTO: se esperaban 212 tests CORRIDOS de F2-E-SR3."
+  },
+  {
+   "job": "governance",
+   "paso": 8,
+   "patron": "^156 passed",
+   "archivo": "/tmp/f2e-sr3-source",
+   "mensaje": "PISO ROTO: se esperaban 156 tests CORRIDOS de F2-E-SR3 source/auth/routing."
+  },
+  {
+   "job": "governance",
+   "paso": 9,
+   "patron": "^263 passed",
+   "archivo": "/tmp/gov",
+   "mensaje": "PISO ROTO: se esperaban 263 tests CORRIDOS."
+  },
+  {
+   "job": "tests-puros",
+   "paso": 7,
+   "patron": "^3452 passed, 45 skipped",
+   "archivo": "/tmp/out",
+   "mensaje": "PISO ROTO: se esperaban 3452 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."
+  },
+  {
+   "job": "tests-puros",
+   "paso": 8,
+   "patron": "^16 passed",
+   "archivo": "/tmp/ficha_tests",
+   "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS de procesamiento/_ficha_test.py -- el tipo que fija el fallo cerrado de toda la ronda."
+  },
+  {
+   "job": "tests-puros",
+   "paso": 9,
+   "patron": "^16 passed",
+   "archivo": "/tmp/resultado_tests",
+   "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS de procesamiento/_resultado_test.py -- el tipo que fija el fallo cerrado de toda la ronda."
+  },
+  {
+   "job": "tests-puros",
+   "paso": 11,
+   "patron": "^14 passed",
+   "archivo": "/tmp/excel_tests",
+   "mensaje": "PISO ROTO: se esperaban 14 tests CORRIDOS (no skipeados) del extractor de Excel. Si esto da '... skipped', openpyxl no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."
+  },
+  {
+   "job": "tests-puros",
+   "paso": 12,
+   "patron": "^23 passed",
+   "archivo": "/tmp/pdf_tests",
+   "mensaje": "PISO ROTO: se esperaban 23 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."
+  },
+  {
+   "job": "tests-puros",
+   "paso": 15,
+   "patron": "^35 passed",
+   "archivo": "/tmp/ocr_tests",
+   "mensaje": "PISO ROTO: se esperaban 35 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."
+  },
+  {
+   "job": "tests-puros",
+   "paso": 16,
+   "patron": "^23 passed",
+   "archivo": "/tmp/word_tests",
+   "mensaje": "PISO ROTO: se esperaban 23 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."
+  },
+  {
+   "job": "tests-puros",
+   "paso": 17,
+   "patron": "^35 passed",
+   "archivo": "/tmp/compuerta_tests",
+   "mensaje": "PISO ROTO: se esperaban 35 tests CORRIDOS de la compuerta."
+  },
+  {
+   "job": "tests-puros",
+   "paso": 18,
+   "patron": "^48 passed",
+   "archivo": "/tmp/ingesta_tests",
+   "mensaje": "PISO ROTO: se esperaban 48 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."
+  },
+  {
+   "job": "tests-puros",
+   "paso": 19,
+   "patron": "^11 passed",
+   "archivo": "/tmp/medir_utilidad_tests",
+   "mensaje": "PISO ROTO: se esperaban 11 tests CORRIDOS del medidor de utilidad. Si esto da '... skipped', openpyxl no se instalo."
+  },
+  {
+   "job": "tests-puros",
+   "paso": 20,
+   "patron": "^12 passed",
+   "archivo": "/tmp/procesar_archivos_tests",
+   "mensaje": "PISO ROTO: se esperaban 12 tests CORRIDOS del guion de procesar_archivos. Si esto da '... skipped', openpyxl no se instalo."
+  },
+  {
+   "job": "tests-puros",
+   "paso": 21,
+   "patron": "^95 passed",
+   "archivo": "/tmp/procesamiento_routes_tests",
+   "mensaje": "PISO ROTO: se esperaban 95 tests CORRIDOS del endpoint de Procesamiento."
+  },
+  {
+   "job": "tests-puros",
+   "paso": 22,
+   "patron": "^29 passed",
+   "archivo": "/tmp/dependencias_tests",
+   "mensaje": "PISO ROTO: se esperaban 29 tests CORRIDOS (no skipeados) del freno de dependencias."
+  },
+  {
+   "job": "jacobs-gobernanza-db",
+   "paso": 9,
+   "patron": "^170 passed",
+   "archivo": "/tmp/out",
+   "mensaje": "PISO ROTO: se esperaban 170 tests CORRIDOS."
+  },
+  {
+   "job": "permisos-proyectos",
+   "paso": 6,
+   "patron": "^53 passed, 2 skipped",
+   "archivo": "/tmp/permisos_proyectos",
+   "mensaje": "PISO ROTO: se esperaban 53 tests CORRIDOS (no skipeados) y exactamente 2 skipped."
+  }
+ ],
+ "minimo_b9": 102
 }
