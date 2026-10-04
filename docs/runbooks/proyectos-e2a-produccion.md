@@ -42,7 +42,7 @@ sudo -l                                            # confirmar la regla de sudoe
 sudo install -o root -g root -m 0755 ops/permisos_proyectos.py /usr/local/sbin/jax-permisos-proyectos
 # --aplicar y el --verificar posterior van en el bloque de abajo, con las unidades de jaxsvc detenidas
 ```
-**`--aplicar` y `--deshacer` se corren SOLO con TODAS las unidades de `jaxsvc` detenidas y enmascaradas, en UN bloque, y se restauran al salir.** El guion falla cerrado, sin mutar nada, si hay cualquier proceso o hilo con el uid de `jaxsvc` (lo lee de `/proc`; si no puede leer el estado de un pid listado, también falla; `--verificar` no lo exige). Por qué, en dos líneas: un proceso `jaxsvc` vivo puede renombrar carpetas mientras root recorre el árbol, y todas las carreras de renombre (symlinks, hardlinks, intercambio de nombres, ocultas que cambian de proyecto) parten de eso; sin procesos `jaxsvc`, nadie con permiso de renombrar corre en paralelo (queda `fruiz`, dueño, y root). Y detener no basta: hay que enmascarar (nada reactiva una unidad) y comprobar que no queda nada. El bloque, en este orden: (a) premisas (sin archivos setuid/setgid de `jaxsvc` y sin crontab de `jaxsvc`: si no, falla); (b) la lista de unidades y timers de `jaxsvc`; (c) el `trap` que restaura al salir; (d) `stop` y `mask --runtime` de cada una; (e) `is-active`, `ps -u jaxsvc` y `/proc/*/status` por los cuatro uid (procesos e hilos) tienen que salir limpios; (f) el guion; (g) `--verificar`; (h) el trap restaura: `unmask` y `start` en orden inverso, y avisa si algo no arranca.
+**`--aplicar` y `--deshacer` se corren SOLO con TODAS las unidades de `jaxsvc` detenidas, en UN bloque, y se restauran al salir.** El guion falla cerrado, sin mutar nada, si hay cualquier proceso o hilo con el uid de `jaxsvc` (lo lee de `/proc`; si no puede leer el estado de un pid listado, también falla; `--verificar` no lo exige). Por qué, en dos líneas: un proceso `jaxsvc` vivo puede renombrar carpetas mientras root recorre el árbol, y todas las carreras de renombre (symlinks, hardlinks, intercambio de nombres, ocultas que cambian de proyecto) parten de eso; sin procesos `jaxsvc`, nadie con permiso de renombrar corre en paralelo (queda `fruiz`, dueño, y root, que es confiable por premisa). Las unidades solo se **detienen**: no se enmascaran, porque viven en `/etc/systemd/system` y un `mask --runtime` no las tapa; con los timers parados no se disparan. El bloque, en este orden: (a) premisas (sin archivos setuid/setgid de `jaxsvc` y sin crontab de `jaxsvc`); (b) la lista de unidades y timers de `jaxsvc` (`list-units` y `list-timers` con `'jax*'`, filtradas por `User=`), con **cada consulta capturada: si una falla, o la lista sale vacía, o falta una de la lista mínima esperada, se corta**; el estado textual (`active`, `inactive`, `failed`, `activating`) de cada una, guardado ANTES de detener nada; (c) el `trap` de restauración; (d) `stop` de cada una; (e) comprobar por su salida textual que quedaron detenidas, `ps -u jaxsvc` vacío y `/proc/*/status` y `/proc/*/task/*/status` sin los cuatro uid; (f) el guion; (g) `--verificar`; (h) el trap **arranca en orden inverso solo las que estaban `active`, verifica con `is-active` que vuelvan y, si alguna no vuelve, dice cuáles y cómo arrancarla a mano y sale con código distinto de 0 aunque el guion haya ido bien** (conserva el código del fallo original si lo hubo).
 
 **Bloque de `--aplicar`:**
 ```bash
@@ -51,72 +51,111 @@ set -euo pipefail
 PERMISOS="${PERMISOS:-python3 ops/permisos_proyectos.py}"   # (las pruebas lo sustituyen)
 RAIZ="${RAIZ:-/srv/jax-data/jax-workspace}"
 PROC="${PROC:-/proc}"
+# Lista mínima que TIENE que aparecer (hoy en hall9000): si alguna falta, el descubrimiento está incompleto y se corta.
+ESPERADAS="${ESPERADAS:-jax-las-manos.service jax-platform.service jax-ariadna-pm.service jax-ejecutor-proxy.service jax-catalogo-modelos.service jax-limpiar-bases-de-test.service jax-catalogo-modelos.timer jax-limpiar-bases-de-test.timer}"
+REINTENTOS="${REINTENTOS:-5}"; ESPERA="${ESPERA:-1}"
+falla() { echo "NO CUMPLE: $*" >&2; exit 1; }
 
 # (a) PREMISAS: si no se cumplen, el bloque falla antes de tocar nada.
-SETUID="$(sudo find / "$RAIZ" -xdev \( -path /proc -o -path /sys \) -prune -o -type f -user jaxsvc -perm /6000 -print)"
-if [ -n "$SETUID" ]; then echo "NO LISTO: hay archivos setuid/setgid de jaxsvc (podrían volver a darle uid):" >&2; echo "$SETUID" >&2; exit 1; fi
+SETUID="$(sudo find / "$RAIZ" -xdev \( -path /proc -o -path /sys \) -prune -o -type f -user jaxsvc -perm /6000 -print)" \
+  || falla "no se pudo buscar archivos setuid/setgid de jaxsvc"
+[ -z "$SETUID" ] || falla "hay archivos setuid/setgid de jaxsvc (podrían volver a darle uid): $SETUID"
 CRON="$(sudo crontab -u jaxsvc -l 2>&1 || true)"
-case "$CRON" in *"no crontab"*) ;; *) echo "NO LISTO: jaxsvc tiene crontab (podría arrancar procesos):" >&2; echo "$CRON" >&2; exit 1 ;; esac
+case "$CRON" in *"no crontab"*) ;; *) falla "jaxsvc tiene crontab (podría arrancar procesos): $CRON" ;; esac
 
-# (b) LISTA de unidades y timers de jaxsvc: las de `list-units` y `list-timers` ('jax*') cuyo User= es jaxsvc
-#     (un timer, socket o path, por la unidad que dispara: Triggers=). Se paran primero los timers.
-mapfile -t CANDIDATAS < <({ sudo systemctl list-units --all --plain --no-legend 'jax*' | awk '{print $1}'; \
-  sudo systemctl list-timers --all --plain --no-legend 'jax*' | awk '{for (i = 1; i <= NF; i++) if ($i ~ /\.timer$/) print $i}'; } | sort -u)
-es_de_jaxsvc() {
-  local u="$1" t
-  [ "$(sudo systemctl show -p User --value "$u")" = jaxsvc ] && return 0
-  for t in $(sudo systemctl show -p Triggers --value "$u"); do
-    [ "$(sudo systemctl show -p User --value "$t")" = jaxsvc ] && return 0
-  done
-  return 1
-}
+# (b) LISTA de unidades y timers de jaxsvc. NINGUNA consulta puede fallar en silencio: cada salida se captura y, si la
+#     consulta falla, se corta. Un timer, socket o path cuenta por la unidad que dispara (Triggers=).
+UNIDADES="$(sudo systemctl list-units --all --plain --no-legend 'jax*')" || falla "falló systemctl list-units"
+TEMPORIZADORES="$(sudo systemctl list-timers --all --plain --no-legend 'jax*')" || falla "falló systemctl list-timers"
+CANDIDATAS="$({ printf '%s\n' "$UNIDADES" | awk 'NF {print $1}'; \
+  printf '%s\n' "$TEMPORIZADORES" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /\.timer$/) print $i}'; } | sort -u)" \
+  || falla "no se pudo armar la lista de unidades"
+[ -n "$CANDIDATAS" ] || falla "la lista de unidades 'jax*' está vacía (en hall9000 hay al menos las de ESPERADAS)"
 TIMERS=(); ACTIVADORES=(); SERVICIOS=()
-for u in "${CANDIDATAS[@]}"; do
-  es_de_jaxsvc "$u" || continue
+while read -r u; do
+  de_jaxsvc=no
+  usuario="$(sudo systemctl show -p User --value "$u")" || falla "falló systemctl show -p User $u"
+  [ "$usuario" = jaxsvc ] && de_jaxsvc=si
+  if [ "$de_jaxsvc" = no ]; then
+    disparadas="$(sudo systemctl show -p Triggers --value "$u")" || falla "falló systemctl show -p Triggers $u"
+    for t in $disparadas; do
+      usuario_t="$(sudo systemctl show -p User --value "$t")" || falla "falló systemctl show -p User $t"
+      [ "$usuario_t" = jaxsvc ] && de_jaxsvc=si
+    done
+  fi
+  [ "$de_jaxsvc" = si ] || continue
   case "$u" in *.timer) TIMERS+=("$u") ;; *.service) SERVICIOS+=("$u") ;; *) ACTIVADORES+=("$u") ;; esac
+done <<< "$CANDIDATAS"
+LISTA=("${TIMERS[@]}" "${ACTIVADORES[@]}" "${SERVICIOS[@]}")   # los timers se paran primero
+[ "${#LISTA[@]}" -gt 0 ] || falla "ninguna unidad de jaxsvc en la lista: el descubrimiento falló"
+for esperada in $ESPERADAS; do
+  encontrada=no
+  for u in "${LISTA[@]}"; do [ "$u" = "$esperada" ] && encontrada=si; done
+  [ "$encontrada" = si ] || falla "falta la unidad esperada de jaxsvc $esperada: el descubrimiento está incompleto"
 done
-LISTA=("${TIMERS[@]}" "${ACTIVADORES[@]}" "${SERVICIOS[@]}")
 
-# (c) TRAP de restauración (EXIT): desenmascara lo enmascarado y arranca lo que estaba activo, en orden INVERSO, y avisa
-#     si algo no arranca. Corre también si el bloque falla a la mitad.
-MASCARADAS=(); ACTIVAS=()
+# ESTADO de CADA unidad ANTES de detener nada, por su salida textual (no solo por el código de salida).
+ESTADOS=()
+for u in "${LISTA[@]}"; do
+  estado="$(sudo systemctl is-active "$u" || true)"
+  case "$estado" in active|inactive|failed|activating) ;; *) falla "estado inesperado de $u: '$estado'" ;; esac
+  ESTADOS+=("$estado")
+done
+
+# (c) TRAP de restauración (EXIT): arranca en orden INVERSO solo las que estaban 'active', verifica con is-active que
+#     vuelvan (con unos pocos reintentos) y, si alguna no vuelve, lo dice, explica cómo arrancarla y sale con código
+#     distinto de 0 AUNQUE la aplicación haya ido bien. Conserva el código del fallo original si lo hubo.
 restaurar() {
-  local rc=$? i
+  local rc=$? i u intento fallidas=()
   trap - EXIT
   set +e
-  for ((i = ${#MASCARADAS[@]} - 1; i >= 0; i--)); do
-    sudo systemctl unmask --runtime "${MASCARADAS[i]}" || echo "AVISO: no se pudo desenmascarar ${MASCARADAS[i]}" >&2
+  for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
+    [ "${ESTADOS[i]}" = active ] || continue
+    sudo systemctl start "${LISTA[i]}" || echo "AVISO: systemctl start ${LISTA[i]} falló" >&2
   done
-  for ((i = ${#ACTIVAS[@]} - 1; i >= 0; i--)); do
-    sudo systemctl start "${ACTIVAS[i]}" || echo "AVISO: ${ACTIVAS[i]} no arrancó: arrancarla a mano" >&2
+  for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
+    [ "${ESTADOS[i]}" = active ] || continue
+    u="${LISTA[i]}"
+    for ((intento = 0; intento < REINTENTOS; intento++)); do
+      [ "$(sudo systemctl is-active "$u")" = active ] && break
+      sleep "$ESPERA"
+    done
+    [ "$(sudo systemctl is-active "$u")" = active ] || fallidas+=("$u")
   done
+  if [ "${#fallidas[@]}" -gt 0 ]; then
+    echo "ERROR: no volvieron a 'active': ${fallidas[*]}" >&2
+    for u in "${fallidas[@]}"; do echo "  arrancarla a mano: sudo systemctl start $u" >&2; done
+    [ "$rc" -ne 0 ] || rc=1
+  fi
   exit "$rc"
 }
 trap restaurar EXIT
 
-# (d) PARAR y ENMASCARAR (--runtime: nada la reactiva hasta el próximo arranque o el unmask) cada timer y unidad.
-for u in "${LISTA[@]}"; do
-  if sudo systemctl is-active --quiet "$u"; then ACTIVAS+=("$u"); fi
-  sudo systemctl stop "$u"
-  MASCARADAS+=("$u")
-  sudo systemctl mask --runtime "$u"
-done
+# (d) PARAR cada timer y unidad (sin mask: las unidades viven en /etc/systemd/system y un mask --runtime no las tapa;
+#     con los timers parados no se disparan, y arrancarlos solo puede hacerlo root, que es confiable por premisa).
+for u in "${LISTA[@]}"; do sudo systemctl stop "$u" || falla "no se pudo detener $u"; done
 
-# (e) COMPROBAR: ninguna activa, `ps -u jaxsvc` vacío y /proc sin los cuatro uid de jaxsvc (procesos e hilos).
+# (e) COMPROBAR: ninguna activa (por su salida textual), `ps -u jaxsvc` vacío y /proc sin los cuatro uid de jaxsvc.
 for u in "${LISTA[@]}"; do
-  if sudo systemctl is-active --quiet "$u"; then echo "NO LISTO: $u sigue activa (no se detiene o se reactiva)" >&2; exit 1; fi
+  estado="$(sudo systemctl is-active "$u" || true)"
+  case "$estado" in inactive|failed) ;; *) falla "$u no quedó detenida (estado: '$estado')" ;; esac
 done
-if [ -n "$(ps -u jaxsvc -o pid=)" ]; then echo "NO LISTO: quedan procesos de jaxsvc (ps -u jaxsvc)" >&2; exit 1; fi
-UID_JAXSVC="$(id -u jaxsvc)"
-HALLADOS="$(awk -v u="$UID_JAXSVC" '/^Uid:/ { for (i = 2; i <= 5; i++) if ($i == u) print FILENAME }' \
-  "$PROC"/[0-9]*/status "$PROC"/[0-9]*/task/*/status 2>/dev/null | sort -u || true)"
-if [ -n "$HALLADOS" ]; then echo "NO LISTO: /proc muestra procesos o hilos de jaxsvc (alguno de los cuatro uid):" >&2; echo "$HALLADOS" >&2; exit 1; fi
+PS_SALIDA="$(ps -u jaxsvc -o pid= 2>&1)" || { rc_ps=$?; [ "$rc_ps" -eq 1 ] || falla "ps -u jaxsvc falló (rc $rc_ps)"; }
+[ -z "$PS_SALIDA" ] || falla "quedan procesos de jaxsvc (ps -u jaxsvc): $PS_SALIDA"
+command -v awk >/dev/null || falla "no hay awk para recorrer $PROC"
+UID_JAXSVC="$(id -u jaxsvc)" || falla "no existe la cuenta jaxsvc"
+shopt -s nullglob
+ARCHIVOS_PROC=("$PROC"/[0-9]*/status "$PROC"/[0-9]*/task/*/status)
+[ "${#ARCHIVOS_PROC[@]}" -gt 0 ] || falla "no se pudo leer $PROC: ningún status de proceso"
+# (un proceso que termina mientras se lee puede hacer que awk avise de un archivo que ya no está: se tolera)
+HALLADOS="$(awk -v u="$UID_JAXSVC" '/^Uid:/ { for (i = 2; i <= 5; i++) if ($i == u) print FILENAME }' "${ARCHIVOS_PROC[@]}" 2>/dev/null | sort -u || true)"
+[ -z "$HALLADOS" ] || falla "/proc muestra procesos o hilos de jaxsvc (alguno de los cuatro uid): $HALLADOS"
 
 # (f) APLICAR
 $PERMISOS --aplicar
 # (g) VERIFICAR
 $PERMISOS --verificar
-# (h) al salir, el trap restaura (unmask y start en orden inverso).
+# (h) al salir, el trap restaura (start en orden inverso, verificado con is-active).
 echo "OK: --aplicar terminó con jaxsvc detenido; el trap restaura las unidades al salir"
 ```
 
@@ -127,71 +166,110 @@ set -euo pipefail
 PERMISOS="${PERMISOS:-python3 ops/permisos_proyectos.py}"   # (las pruebas lo sustituyen)
 RAIZ="${RAIZ:-/srv/jax-data/jax-workspace}"
 PROC="${PROC:-/proc}"
+# Lista mínima que TIENE que aparecer (hoy en hall9000): si alguna falta, el descubrimiento está incompleto y se corta.
+ESPERADAS="${ESPERADAS:-jax-las-manos.service jax-platform.service jax-ariadna-pm.service jax-ejecutor-proxy.service jax-catalogo-modelos.service jax-limpiar-bases-de-test.service jax-catalogo-modelos.timer jax-limpiar-bases-de-test.timer}"
+REINTENTOS="${REINTENTOS:-5}"; ESPERA="${ESPERA:-1}"
+falla() { echo "NO CUMPLE: $*" >&2; exit 1; }
 
 # (a) PREMISAS: si no se cumplen, el bloque falla antes de tocar nada.
-SETUID="$(sudo find / "$RAIZ" -xdev \( -path /proc -o -path /sys \) -prune -o -type f -user jaxsvc -perm /6000 -print)"
-if [ -n "$SETUID" ]; then echo "NO LISTO: hay archivos setuid/setgid de jaxsvc (podrían volver a darle uid):" >&2; echo "$SETUID" >&2; exit 1; fi
+SETUID="$(sudo find / "$RAIZ" -xdev \( -path /proc -o -path /sys \) -prune -o -type f -user jaxsvc -perm /6000 -print)" \
+  || falla "no se pudo buscar archivos setuid/setgid de jaxsvc"
+[ -z "$SETUID" ] || falla "hay archivos setuid/setgid de jaxsvc (podrían volver a darle uid): $SETUID"
 CRON="$(sudo crontab -u jaxsvc -l 2>&1 || true)"
-case "$CRON" in *"no crontab"*) ;; *) echo "NO LISTO: jaxsvc tiene crontab (podría arrancar procesos):" >&2; echo "$CRON" >&2; exit 1 ;; esac
+case "$CRON" in *"no crontab"*) ;; *) falla "jaxsvc tiene crontab (podría arrancar procesos): $CRON" ;; esac
 
-# (b) LISTA de unidades y timers de jaxsvc: las de `list-units` y `list-timers` ('jax*') cuyo User= es jaxsvc
-#     (un timer, socket o path, por la unidad que dispara: Triggers=). Se paran primero los timers.
-mapfile -t CANDIDATAS < <({ sudo systemctl list-units --all --plain --no-legend 'jax*' | awk '{print $1}'; \
-  sudo systemctl list-timers --all --plain --no-legend 'jax*' | awk '{for (i = 1; i <= NF; i++) if ($i ~ /\.timer$/) print $i}'; } | sort -u)
-es_de_jaxsvc() {
-  local u="$1" t
-  [ "$(sudo systemctl show -p User --value "$u")" = jaxsvc ] && return 0
-  for t in $(sudo systemctl show -p Triggers --value "$u"); do
-    [ "$(sudo systemctl show -p User --value "$t")" = jaxsvc ] && return 0
-  done
-  return 1
-}
+# (b) LISTA de unidades y timers de jaxsvc. NINGUNA consulta puede fallar en silencio: cada salida se captura y, si la
+#     consulta falla, se corta. Un timer, socket o path cuenta por la unidad que dispara (Triggers=).
+UNIDADES="$(sudo systemctl list-units --all --plain --no-legend 'jax*')" || falla "falló systemctl list-units"
+TEMPORIZADORES="$(sudo systemctl list-timers --all --plain --no-legend 'jax*')" || falla "falló systemctl list-timers"
+CANDIDATAS="$({ printf '%s\n' "$UNIDADES" | awk 'NF {print $1}'; \
+  printf '%s\n' "$TEMPORIZADORES" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /\.timer$/) print $i}'; } | sort -u)" \
+  || falla "no se pudo armar la lista de unidades"
+[ -n "$CANDIDATAS" ] || falla "la lista de unidades 'jax*' está vacía (en hall9000 hay al menos las de ESPERADAS)"
 TIMERS=(); ACTIVADORES=(); SERVICIOS=()
-for u in "${CANDIDATAS[@]}"; do
-  es_de_jaxsvc "$u" || continue
+while read -r u; do
+  de_jaxsvc=no
+  usuario="$(sudo systemctl show -p User --value "$u")" || falla "falló systemctl show -p User $u"
+  [ "$usuario" = jaxsvc ] && de_jaxsvc=si
+  if [ "$de_jaxsvc" = no ]; then
+    disparadas="$(sudo systemctl show -p Triggers --value "$u")" || falla "falló systemctl show -p Triggers $u"
+    for t in $disparadas; do
+      usuario_t="$(sudo systemctl show -p User --value "$t")" || falla "falló systemctl show -p User $t"
+      [ "$usuario_t" = jaxsvc ] && de_jaxsvc=si
+    done
+  fi
+  [ "$de_jaxsvc" = si ] || continue
   case "$u" in *.timer) TIMERS+=("$u") ;; *.service) SERVICIOS+=("$u") ;; *) ACTIVADORES+=("$u") ;; esac
+done <<< "$CANDIDATAS"
+LISTA=("${TIMERS[@]}" "${ACTIVADORES[@]}" "${SERVICIOS[@]}")   # los timers se paran primero
+[ "${#LISTA[@]}" -gt 0 ] || falla "ninguna unidad de jaxsvc en la lista: el descubrimiento falló"
+for esperada in $ESPERADAS; do
+  encontrada=no
+  for u in "${LISTA[@]}"; do [ "$u" = "$esperada" ] && encontrada=si; done
+  [ "$encontrada" = si ] || falla "falta la unidad esperada de jaxsvc $esperada: el descubrimiento está incompleto"
 done
-LISTA=("${TIMERS[@]}" "${ACTIVADORES[@]}" "${SERVICIOS[@]}")
 
-# (c) TRAP de restauración (EXIT): desenmascara lo enmascarado y arranca lo que estaba activo, en orden INVERSO, y avisa
-#     si algo no arranca. Corre también si el bloque falla a la mitad.
-MASCARADAS=(); ACTIVAS=()
+# ESTADO de CADA unidad ANTES de detener nada, por su salida textual (no solo por el código de salida).
+ESTADOS=()
+for u in "${LISTA[@]}"; do
+  estado="$(sudo systemctl is-active "$u" || true)"
+  case "$estado" in active|inactive|failed|activating) ;; *) falla "estado inesperado de $u: '$estado'" ;; esac
+  ESTADOS+=("$estado")
+done
+
+# (c) TRAP de restauración (EXIT): arranca en orden INVERSO solo las que estaban 'active', verifica con is-active que
+#     vuelvan (con unos pocos reintentos) y, si alguna no vuelve, lo dice, explica cómo arrancarla y sale con código
+#     distinto de 0 AUNQUE la aplicación haya ido bien. Conserva el código del fallo original si lo hubo.
 restaurar() {
-  local rc=$? i
+  local rc=$? i u intento fallidas=()
   trap - EXIT
   set +e
-  for ((i = ${#MASCARADAS[@]} - 1; i >= 0; i--)); do
-    sudo systemctl unmask --runtime "${MASCARADAS[i]}" || echo "AVISO: no se pudo desenmascarar ${MASCARADAS[i]}" >&2
+  for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
+    [ "${ESTADOS[i]}" = active ] || continue
+    sudo systemctl start "${LISTA[i]}" || echo "AVISO: systemctl start ${LISTA[i]} falló" >&2
   done
-  for ((i = ${#ACTIVAS[@]} - 1; i >= 0; i--)); do
-    sudo systemctl start "${ACTIVAS[i]}" || echo "AVISO: ${ACTIVAS[i]} no arrancó: arrancarla a mano" >&2
+  for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
+    [ "${ESTADOS[i]}" = active ] || continue
+    u="${LISTA[i]}"
+    for ((intento = 0; intento < REINTENTOS; intento++)); do
+      [ "$(sudo systemctl is-active "$u")" = active ] && break
+      sleep "$ESPERA"
+    done
+    [ "$(sudo systemctl is-active "$u")" = active ] || fallidas+=("$u")
   done
+  if [ "${#fallidas[@]}" -gt 0 ]; then
+    echo "ERROR: no volvieron a 'active': ${fallidas[*]}" >&2
+    for u in "${fallidas[@]}"; do echo "  arrancarla a mano: sudo systemctl start $u" >&2; done
+    [ "$rc" -ne 0 ] || rc=1
+  fi
   exit "$rc"
 }
 trap restaurar EXIT
 
-# (d) PARAR y ENMASCARAR (--runtime: nada la reactiva hasta el próximo arranque o el unmask) cada timer y unidad.
-for u in "${LISTA[@]}"; do
-  if sudo systemctl is-active --quiet "$u"; then ACTIVAS+=("$u"); fi
-  sudo systemctl stop "$u"
-  MASCARADAS+=("$u")
-  sudo systemctl mask --runtime "$u"
-done
+# (d) PARAR cada timer y unidad (sin mask: las unidades viven en /etc/systemd/system y un mask --runtime no las tapa;
+#     con los timers parados no se disparan, y arrancarlos solo puede hacerlo root, que es confiable por premisa).
+for u in "${LISTA[@]}"; do sudo systemctl stop "$u" || falla "no se pudo detener $u"; done
 
-# (e) COMPROBAR: ninguna activa, `ps -u jaxsvc` vacío y /proc sin los cuatro uid de jaxsvc (procesos e hilos).
+# (e) COMPROBAR: ninguna activa (por su salida textual), `ps -u jaxsvc` vacío y /proc sin los cuatro uid de jaxsvc.
 for u in "${LISTA[@]}"; do
-  if sudo systemctl is-active --quiet "$u"; then echo "NO LISTO: $u sigue activa (no se detiene o se reactiva)" >&2; exit 1; fi
+  estado="$(sudo systemctl is-active "$u" || true)"
+  case "$estado" in inactive|failed) ;; *) falla "$u no quedó detenida (estado: '$estado')" ;; esac
 done
-if [ -n "$(ps -u jaxsvc -o pid=)" ]; then echo "NO LISTO: quedan procesos de jaxsvc (ps -u jaxsvc)" >&2; exit 1; fi
-UID_JAXSVC="$(id -u jaxsvc)"
-HALLADOS="$(awk -v u="$UID_JAXSVC" '/^Uid:/ { for (i = 2; i <= 5; i++) if ($i == u) print FILENAME }' \
-  "$PROC"/[0-9]*/status "$PROC"/[0-9]*/task/*/status 2>/dev/null | sort -u || true)"
-if [ -n "$HALLADOS" ]; then echo "NO LISTO: /proc muestra procesos o hilos de jaxsvc (alguno de los cuatro uid):" >&2; echo "$HALLADOS" >&2; exit 1; fi
+PS_SALIDA="$(ps -u jaxsvc -o pid= 2>&1)" || { rc_ps=$?; [ "$rc_ps" -eq 1 ] || falla "ps -u jaxsvc falló (rc $rc_ps)"; }
+[ -z "$PS_SALIDA" ] || falla "quedan procesos de jaxsvc (ps -u jaxsvc): $PS_SALIDA"
+command -v awk >/dev/null || falla "no hay awk para recorrer $PROC"
+UID_JAXSVC="$(id -u jaxsvc)" || falla "no existe la cuenta jaxsvc"
+shopt -s nullglob
+ARCHIVOS_PROC=("$PROC"/[0-9]*/status "$PROC"/[0-9]*/task/*/status)
+[ "${#ARCHIVOS_PROC[@]}" -gt 0 ] || falla "no se pudo leer $PROC: ningún status de proceso"
+# (un proceso que termina mientras se lee puede hacer que awk avise de un archivo que ya no está: se tolera)
+HALLADOS="$(awk -v u="$UID_JAXSVC" '/^Uid:/ { for (i = 2; i <= 5; i++) if ($i == u) print FILENAME }' "${ARCHIVOS_PROC[@]}" 2>/dev/null | sort -u || true)"
+[ -z "$HALLADOS" ] || falla "/proc muestra procesos o hilos de jaxsvc (alguno de los cuatro uid): $HALLADOS"
 
 # (f) DESHACER
 $PERMISOS --deshacer
 # (g) no hay --verificar tras --deshacer: el árbol ya no es el aplicado (dueño fruiz:fruiz, sin la ACL de fruiz)
-# (h) al salir, el trap restaura (unmask y start en orden inverso).
+# (h) al salir, el trap restaura (start en orden inverso, verificado con is-active).
 echo "OK: --deshacer terminó con jaxsvc detenido; el trap restaura las unidades al salir"
 ```
 

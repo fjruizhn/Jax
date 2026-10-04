@@ -3066,7 +3066,9 @@ _BLOQUES = [("BLOQUE-APLICAR", "--aplicar"), ("BLOQUE-DESHACER", "--deshacer")]
 def test_el_bloque_del_runbook_con_todo_bien_para_comprueba_y_restaura_en_orden(tmp_path, _identidades, marca, modo):
     bloque = _bloque_del_runbook(marca)
     assert "set -euo pipefail" in bloque and "trap " in bloque and modo in bloque
-    assert "mask" not in bloque, "las unidades viven en /etc/systemd/system: un mask --runtime no las tapa"
+    import re
+    assert not re.search(r"systemctl\s+(un)?mask", bloque), \
+        "las unidades viven en /etc/systemd/system: un mask --runtime no las tapa"
     r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid)
     assert r.returncode == 0, r.stdout + r.stderr
     detenidas = [l.split()[-1] for l in _llamadas(log, "stop")]
