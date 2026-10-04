@@ -82,7 +82,10 @@ def test_piso_de_master_existe_con_su_forma_y_no_bajo(piso):
     entrada = DATOS["pisos"][clave]
     forma_antes, n_antes, m_antes = _partes(piso["patron"])
     forma_ahora, n_ahora, m_ahora = _partes(entrada["patron"])
-    assert forma_ahora == forma_antes, f"cambió la forma del patrón: {piso['patron']!r} -> {entrada['patron']!r}"
+    # Única excepción a «la forma no cambia», la misma que acepta el comparador: `^N passed` -> `^N' passed, M skipped`.
+    endurece = forma_antes == "^<N> passed" and forma_ahora == "^<N> passed, <M> skipped"
+    assert endurece or forma_ahora == forma_antes, \
+        f"cambió la forma del patrón: {piso['patron']!r} -> {entrada['patron']!r}"
     assert n_ahora >= n_antes, f"N (passed) bajó de {n_antes} a {n_ahora}"
     if m_antes is not None:
         assert m_ahora is not None and m_ahora <= m_antes, f"M (skipped) subió de {m_antes} a {m_ahora}"
