@@ -166,8 +166,8 @@
       "mensaje": "PISO ROTO: se esperaban 170 tests CORRIDOS."
     },
     "permisos-proyectos/permisos_proyectos": {
-      "patron": "^298 passed, 1 skipped",
-      "mensaje": "PISO ROTO: se esperaban 298 tests CORRIDOS (no skipeados) y exactamente 1 skipped."
+      "patron": "^306 passed, 1 skipped",
+      "mensaje": "PISO ROTO: se esperaban 306 tests CORRIDOS (no skipeados) y exactamente 1 skipped."
     },
     "archivos-de-test-en-ci/pisos": {
       "patron": "^223 passed",
