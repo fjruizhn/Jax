@@ -347,6 +347,15 @@ def test_base_con_datos_head_que_baja_un_piso_es_rojo(repo):
     assert r.returncode == 1 and "N baja" in r.stdout
 
 
+def test_bajar_m_es_la_unica_excepcion_a_solo_subir_n_y_esta_documentada():
+    """Menos saltadas endurece el piso: se permite a propósito (ver docs/ci/pisos.md)."""
+    h = copy.deepcopy(BASE)
+    h["pisos"]["j/salta"]["patron"] = "^53 passed, 0 skipped"
+    assert cp.comparar(BASE, h) == []
+    assert "única excepción" in (RAIZ / "docs" / "ci" / "pisos.md").read_text(encoding="utf-8")
+    assert "única excepción" in cp.__doc__
+
+
 def test_el_head_borra_pisos_json_y_la_base_lo_tiene_es_rojo(repo):
     _base(repo, WORKFLOW_BASE_NUEVO, DATOS_NUEVOS)
     _head(repo, WORKFLOW_BASE_NUEVO, None)
@@ -438,6 +447,34 @@ def test_base_sin_el_workflow_falla_cerrado(repo):
     _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
     _escribir(repo, ".github/workflows/policy.yml", WORKFLOW_BASE_NUEVO)
     assert _correr(repo).returncode == 2
+
+
+DUP_HEAD = ('{"version": 1, "minimos": {}, "pisos": {"j/pasa": {"patron": "^1 passed", "mensaje": "m"},'
+            ' "j/pasa": {"patron": "^5 passed", "mensaje": "m"}}}')
+
+
+def test_json_con_clave_duplicada_falla_cerrado_aunque_el_ultimo_valor_no_rebaje():
+    with pytest.raises(cp.PisosError, match="duplicada"):
+        cp.armar_nuevo(DUP_HEAD, WORKFLOW_NUEVO, "head")
+    with pytest.raises(cp.PisosError, match="duplicada"):
+        cp.armar_nuevo('{"pisos": {}, "minimos": {"j/casos": 1, "j/casos": 102}}', WORKFLOW_NUEVO, "head")
+
+
+def test_head_con_clave_duplicada_falla_cerrado_de_punta_a_punta(repo):
+    _base(repo, WORKFLOW_BASE_NUEVO, DATOS_NUEVOS)
+    _head(repo, WORKFLOW_BASE_NUEVO, DUP_HEAD)
+    r = _correr(repo)
+    assert r.returncode == 2 and "duplicada" in r.stderr
+
+
+def test_base_con_clave_duplicada_falla_cerrado_de_punta_a_punta(repo):
+    _base(repo, WORKFLOW_BASE_NUEVO, DUP_HEAD)
+    r = _correr(repo)
+    assert r.returncode == 2 and "duplicada" in r.stderr
+
+
+def test_ref_base_por_defecto_es_la_ref_propia_del_job():
+    assert cp.REF_BASE == "refs/pisos-base/master"
 
 
 def test_argumentos_de_mas_fallan(repo):

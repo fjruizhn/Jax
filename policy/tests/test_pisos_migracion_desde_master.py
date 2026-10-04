@@ -30,8 +30,11 @@ DATOS = json.loads((RAIZ / "ci" / "pisos.json").read_text(encoding="utf-8"))
 LLAMADA = re.compile(r"python3 \.github/ci/piso\.py verificar (\S+) (\S+)")
 
 
-def test_los_jobs_son_los_mismos():
-    assert sorted(ACTUAL["jobs"]) == sorted(FOTO["jobs"])
+JOBS_NUEVOS = ["pisos-no-bajan"]  # el comparador de pisos: único job agregado, sin tocar los existentes
+
+
+def test_los_jobs_son_los_mismos_mas_el_comparador():
+    assert sorted(ACTUAL["jobs"]) == sorted([*FOTO["jobs"], *JOBS_NUEVOS])
 
 
 @pytest.mark.parametrize("jid", sorted(FOTO["jobs"]))

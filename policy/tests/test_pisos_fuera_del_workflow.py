@@ -226,10 +226,62 @@ def test_ninguna_llamada_del_workflow_usa_un_lector_fuera_de_github():
     assert llamadas and set(llamadas) == {".github/ci/piso.py"}
 
 
-def test_el_workflow_corre_el_comparador_contra_la_punta_de_master():
-    pasos = [r for _, r in _pasos_run() if "python3 .github/ci/comparar_pisos.py" in r]
-    assert len(pasos) == 1
-    run = pasos[0]
-    assert "git fetch" in run and "refs/heads/master:refs/remotes/origin/master" in run
-    assert "python3 .github/ci/comparar_pisos.py origin/master || exit $?" in run
-    assert (RAIZ / ".github" / "ci" / "comparar_pisos.py").is_file()
+JOB_COMPARADOR = "pisos-no-bajan"
+FETCH = ('git fetch --no-tags --depth=1 "${{ github.server_url }}/${{ github.repository }}" '
+         "+refs/heads/master:refs/pisos-base/master || exit $?")
+COMPARAR = "python3 -I .github/ci/comparar_pisos.py refs/pisos-base/master || exit $?"
+
+
+def _job_comparador():
+    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"][JOB_COMPARADOR]
+
+
+def test_el_comparador_corre_en_un_job_aislado_con_tres_pasos_exactos():
+    """El código del PR (conftest.py, sitecustomize, un test) corre en los otros jobs y puede
+    reescribir .git/config o las refs. Este job no ejecuta nada del repo: checkout, fetch, comparar."""
+    job = _job_comparador()
+    assert set(job) == {"runs-on", "steps"}, "sin if:, needs, env, container, services ni continue-on-error"
+    pasos = job["steps"]
+    assert len(pasos) == 3
+    assert set(pasos[0]) == {"uses", "with"} and pasos[0]["uses"].startswith("actions/checkout@")
+    assert pasos[0]["with"] == {"persist-credentials": False}
+    assert set(pasos[1]) == {"name", "run"} and pasos[1]["run"].strip() == FETCH
+    assert set(pasos[2]) == {"name", "run"} and pasos[2]["run"].strip() == COMPARAR
+
+
+def test_el_job_comparador_no_instala_ni_ejecuta_codigo_del_pr():
+    texto = yaml.safe_dump(_job_comparador())
+    for prohibido in ("pip", "pytest", "setup-python", "npm", "import ", "conftest", "continue-on-error", "if:"):
+        assert prohibido not in texto, prohibido
+
+
+def test_la_base_se_trae_de_la_url_fija_a_una_ref_propia_no_del_origin_configurado():
+    run = _job_comparador()["steps"][1]["run"]
+    assert "github.server_url" in run and "github.repository" in run
+    assert "refs/pisos-base/master" in run
+    assert "origin" not in run
+
+
+def test_el_paso_comparador_ya_no_esta_en_el_job_de_las_pruebas():
+    for jid, run in _pasos_run():
+        if jid != JOB_COMPARADOR:
+            assert "comparar_pisos.py" not in run, jid
+
+
+def test_el_comparador_usa_solo_la_biblioteca_estandar():
+    import ast
+    arbol = ast.parse((RAIZ / ".github" / "ci" / "comparar_pisos.py").read_text(encoding="utf-8"))
+    mods = {a.name.split(".")[0] for n in ast.walk(arbol) if isinstance(n, ast.Import) for a in n.names}
+    mods |= {n.module.split(".")[0] for n in ast.walk(arbol) if isinstance(n, ast.ImportFrom) and n.module}
+    assert mods and mods <= set(sys.stdlib_module_names), mods - set(sys.stdlib_module_names)
+
+
+def test_piso_py_rechaza_claves_duplicadas_en_pisos_json(tmp_path, salida):
+    dup = ('{"version": 1, "minimos": {}, "pisos": {"j/x": {"patron": "^1 passed", "mensaje": "m"},'
+           ' "j/x": {"patron": "^5 passed", "mensaje": "m"}}}')
+    _escribir(tmp_path, dup)
+    r = _correr(tmp_path, "verificar", "j/x", str(salida))
+    assert r.returncode == 2 and "duplicada" in r.stderr
+    dup_min = '{"version": 1, "pisos": {}, "minimos": {"j/m": 1, "j/m": 7}}'
+    _escribir(tmp_path, dup_min)
+    assert _correr(tmp_path, "minimo", "j/m").returncode == 2
