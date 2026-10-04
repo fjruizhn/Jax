@@ -114,7 +114,7 @@ Sin historia anotada en el workflow.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^671 passed`
 
-Sin historia anotada en el workflow.
+Piso actualizado 2026-10-04: `^683 passed`. La suite medida suma las 11 pruebas de `memoria.buscar` y una prueba de la compuerta del servicio apagada por defecto; 0 skips.
 
 ## `faro-bitacora-db/faro-db`
 
@@ -127,6 +127,10 @@ Sin historia anotada en el workflow.
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^11 passed`
 
 Sin historia anotada en el workflow.
+
+## `memory-b9-regression/casos`
+
+Mínimo actualizado 2026-10-04: `103` casos. Base previa `102` (10 módulos, cero skips/errores) + una prueba MariaDB del reader de `memoria.buscar`. La prueba nueva usa `jax_test` en una base `jax_memory_test*` aislada, crea tablas de sesión temporales y comprueba que el reader solo emite lecturas. En Hall9000 se midió sobre `jax_memory_test` vía `127.0.0.1:3308`.
 
 ## `facet-health-io/out`
 
