@@ -2963,45 +2963,58 @@ _STUB_SYSTEMCTL = """#!/bin/sh
 D="$STUB_DIR"
 echo "systemctl $*" >> "$D/log"
 cmd="$1"; shift
+rc=0
 case "$cmd" in
-  list-units) cat "$D/list-units" ;;
-  list-timers) cat "$D/list-timers" ;;
-  show) grep "^$4 $2 " "$D/props" | sed "s/^[^ ]* [^ ]* //" ;;
+  list-units) if [ -n "$FALLA_LIST_UNITS" ]; then echo "Failed to connect to bus" >&2; exit 1; fi; cat "$D/list-units" ;;
+  list-timers) if [ -n "$FALLA_LIST_TIMERS" ]; then echo "Failed to connect to bus" >&2; exit 1; fi; cat "$D/list-timers" ;;
+  show) if [ -n "$FALLA_SHOW" ]; then echo "Failed to get properties" >&2; exit 1; fi
+        grep "^$4 $2 " "$D/props" | sed "s/^[^ ]* [^ ]* //" ;;
   stop) for u in "$@"; do case " $NO_SE_DETIENE " in *" $u "*) ;; *) sed -i "/^$u\\$/d" "$D/activas" ;; esac; done ;;
-  start) for u in "$@"; do grep -qx "$u" "$D/activas" || echo "$u" >> "$D/activas"; done ;;
-  is-active) grep -qx "$2" "$D/activas" || rc=1 ;;
-  mask|unmask) ;;
+  start) for u in "$@"; do
+           if [ "$FALLA_START" = "$u" ]; then echo "Failed to start $u" >&2; rc=1
+           else grep -qx "$u" "$D/activas" || echo "$u" >> "$D/activas"; fi
+         done ;;
+  is-active) if [ "$1" = "$IS_ACTIVE_RARO" ]; then echo "desconocido"; exit 4; fi
+             if grep -qx "$1" "$D/activas"; then echo active; else echo inactive; rc=3; fi ;;
 esac
-exit "${rc:-0}"
+exit "$rc"
 """
+
+_UNIDADES_ESPERADAS_DE_PRUEBA = ("jax-las-manos.service jax-platform.service jax-catalogo-modelos.service "
+                                 "jax-limpiar-bases-de-test.service jax-catalogo-modelos.timer")
 
 
 def _entorno_del_bloque(tmp_path: Path, uid_jaxsvc: int, *, extra: dict | None = None) -> dict:
     """Un PATH con stubs de `sudo`, `systemctl`, `ps`, `find` y `crontab`, y un /proc de mentira, para ejecutar el
-    bloque del runbook contra un arbol temporal sin tocar el host."""
+    bloque del runbook contra un arbol temporal sin tocar el host. `jax-limpiar-bases-de-test.service` arranca
+    INACTIVA (como en hall9000: es un oneshot de un timer)."""
     stubs = tmp_path / "stubs"
     stubs.mkdir()
     datos = tmp_path / "datos"
     datos.mkdir()
     (datos / "log").write_text("")
-    (datos / "activas").write_text("jax-las-manos.service\njax-platform.service\njax-catalogo-modelos.service\njax-catalogo-modelos.timer\n")
+    (datos / "activas").write_text("jax-las-manos.service\njax-platform.service\njax-catalogo-modelos.service\n"
+                                   "jax-catalogo-modelos.timer\n")
     (datos / "list-units").write_text(
         "jax-las-manos.service loaded active running LAS MANOS\n"
         "jax-platform.service loaded active running plataforma\n"
         "jax-catalogo-modelos.service loaded active running catalogo\n"
+        "jax-limpiar-bases-de-test.service loaded inactive dead limpieza\n"
         "jax-otra.service loaded active running de root\n")
     (datos / "list-timers").write_text(
         "Sat 2026-10-03 20:00:00 CST 1h left n/a n/a jax-catalogo-modelos.timer jax-catalogo-modelos.service\n")
     (datos / "props").write_text(
         "jax-las-manos.service User jaxsvc\njax-platform.service User jaxsvc\njax-otra.service User root\n"
-        "jax-catalogo-modelos.service User jaxsvc\njax-catalogo-modelos.timer Triggers jax-catalogo-modelos.service\n")
+        "jax-catalogo-modelos.service User jaxsvc\njax-limpiar-bases-de-test.service User jaxsvc\n"
+        "jax-catalogo-modelos.timer Triggers jax-catalogo-modelos.service\n")
     (datos / "ps").write_text("")
-    (datos / "permisos.sh").write_text('#!/bin/sh\necho "permisos $*" >> "$STUB_DIR/log"\nexit 0\n')
+    (datos / "permisos.sh").write_text(
+        '#!/bin/sh\necho "permisos $*" >> "$STUB_DIR/log"\ncase "$1" in --verificar) exit 0;; *) exit "${PERMISOS_RC:-0}";; esac\n')
     os.chmod(datos / "permisos.sh", 0o755)
     scripts = {
         "sudo": '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do case "$1" in -n) shift;; -u) shift 2;; *) break;; esac; done\nexec "$@"\n',
         "systemctl": _STUB_SYSTEMCTL,
-        "ps": '#!/bin/sh\ncat "$STUB_DIR/ps"\n',
+        "ps": '#!/bin/sh\nif [ -s "$STUB_DIR/ps" ]; then cat "$STUB_DIR/ps"; exit 0; fi\nexit 1\n',
         "find": '#!/bin/sh\n[ -n "$STUB_SETUID" ] && echo "$STUB_SETUID"\nexit 0\n',
         "crontab": '#!/bin/sh\nif [ -n "$STUB_CRON" ]; then echo "$STUB_CRON"; exit 0; fi\necho "no crontab for jaxsvc" >&2\nexit 1\n',
     }
@@ -3014,7 +3027,8 @@ def _entorno_del_bloque(tmp_path: Path, uid_jaxsvc: int, *, extra: dict | None =
     (proc / "1" / "task" / "1" / "status").write_text("Uid:\t0\t0\t0\t0\n")
     entorno = dict(os.environ)
     entorno.update({"PATH": f"{stubs}:{os.environ['PATH']}", "STUB_DIR": str(datos), "PERMISOS": str(datos / "permisos.sh"),
-                    "PROC": str(proc), "RAIZ": str(tmp_path / "raiz"), "NO_SE_DETIENE": ""})
+                    "PROC": str(proc), "RAIZ": str(tmp_path / "raiz"), "NO_SE_DETIENE": "",
+                    "ESPERADAS": _UNIDADES_ESPERADAS_DE_PRUEBA, "REINTENTOS": "2", "ESPERA": "0"})
     entorno.update(extra or {})
     return entorno
 
@@ -3041,57 +3055,115 @@ def _indice(log: list, fragmento: str, desde: int = 0) -> int:
     raise AssertionError(f"{fragmento!r} no está en el log: {log}")
 
 
-@pytest.mark.parametrize("marca,modo", [("BLOQUE-APLICAR", "--aplicar"), ("BLOQUE-DESHACER", "--deshacer")])
-def test_el_bloque_del_runbook_con_todo_bien_para_restaura_y_arranca_en_orden(tmp_path, _identidades, marca, modo):
+def _llamadas(log: list, orden: str) -> list:
+    return [l for l in log if l.startswith(f"systemctl {orden}")]
+
+
+_BLOQUES = [("BLOQUE-APLICAR", "--aplicar"), ("BLOQUE-DESHACER", "--deshacer")]
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_el_bloque_del_runbook_con_todo_bien_para_comprueba_y_restaura_en_orden(tmp_path, _identidades, marca, modo):
     bloque = _bloque_del_runbook(marca)
     assert "set -euo pipefail" in bloque and "trap " in bloque and modo in bloque
+    assert "mask" not in bloque, "las unidades viven en /etc/systemd/system: un mask --runtime no las tapa"
     r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid)
     assert r.returncode == 0, r.stdout + r.stderr
-    # solo las unidades de jaxsvc (la de root no se toca) y el timer cuyo servicio es de jaxsvc
-    detenidas = [l.split()[-1] for l in log if l.startswith("systemctl stop")]
+    detenidas = [l.split()[-1] for l in _llamadas(log, "stop")]
     assert sorted(detenidas) == ["jax-catalogo-modelos.service", "jax-catalogo-modelos.timer", "jax-las-manos.service",
-                                 "jax-platform.service"], detenidas
-    assert not any("jax-otra.service" in l and l.split()[1] in ("stop", "mask", "unmask", "start", "is-active")
-                   for l in log), "se tocó una unidad que no es de jaxsvc"
+                                 "jax-limpiar-bases-de-test.service", "jax-platform.service"], detenidas
+    assert not any("jax-otra.service" in l and l.split()[1] in ("stop", "start", "is-active") for l in log)
     assert detenidas.index("jax-catalogo-modelos.timer") < detenidas.index("jax-las-manos.service"), "los timers primero"
+    assert not any(l.split()[1] in ("mask", "unmask") for l in log if l.startswith("systemctl")), log
     i_modo = _indice(log, f"permisos {modo}")
-    for u in detenidas:
-        i_stop = _indice(log, f"systemctl stop {u}")
-        i_mask = _indice(log, f"systemctl mask --runtime {u}")
-        assert i_stop < i_mask < i_modo, (u, log)
-    assert _indice(log, "systemctl is-active") < i_modo, "se comprueba que no estén activas ANTES de mutar"
-    ultimo_stop = max(_indice(log, f"systemctl stop {u}") for u in detenidas)
-    assert ultimo_stop < i_modo
+    # el estado de TODAS se consulta ANTES de detener la primera
+    primer_stop = _indice(log, "systemctl stop")
+    consultas_antes = [i for i, l in enumerate(log[:primer_stop]) if l.startswith("systemctl is-active")]
+    assert len(consultas_antes) == len(detenidas), (consultas_antes, log)
+    assert max(_indice(log, f"systemctl stop {u}") for u in detenidas) < i_modo
     if modo == "--aplicar":
         i_verif = _indice(log, "permisos --verificar", i_modo)
         assert i_modo < i_verif
     else:
         assert not any("permisos --verificar" in l for l in log), "tras --deshacer el arbol ya no es el aplicado"
         i_verif = i_modo
-    # el trap: unmask de lo que se enmascaro y start de lo que estaba activo, en orden INVERSO, despues de lo anterior
-    unmask = [l.split()[-1] for l in log if l.startswith("systemctl unmask --runtime")]
-    start = [l.split()[-1] for l in log if l.startswith("systemctl start")]
-    mascaras = [l.split()[-1] for l in log if l.startswith("systemctl mask --runtime")]
-    assert unmask == mascaras[::-1], (unmask, mascaras)
-    assert start == detenidas[::-1], (start, detenidas)
-    assert min(_indice(log, f"systemctl unmask --runtime {u}") for u in unmask) > i_verif
-    assert max(_indice(log, f"systemctl unmask --runtime {u}") for u in unmask) < min(
-        _indice(log, f"systemctl start {u}") for u in start)
+    # el trap arranca en orden inverso SOLO las que estaban activas (la inactiva no), y verifica con is-active
+    iniciadas = [l.split()[-1] for l in _llamadas(log, "start")]
+    activas_antes = [u for u in detenidas if u != "jax-limpiar-bases-de-test.service"]
+    assert iniciadas == activas_antes[::-1], (iniciadas, activas_antes)
+    assert "jax-limpiar-bases-de-test.service" not in iniciadas
+    assert min(_indice(log, f"systemctl start {u}") for u in iniciadas) > i_verif
+    ultimo_start = max(_indice(log, f"systemctl start {u}") for u in iniciadas)
+    assert any(l.startswith("systemctl is-active") for l in log[ultimo_start:]), "no verificó que volvieran"
 
 
-@pytest.mark.parametrize("marca,modo", [("BLOQUE-APLICAR", "--aplicar"), ("BLOQUE-DESHACER", "--deshacer")])
-def test_el_bloque_del_runbook_con_un_servicio_que_no_se_detiene_falla_antes_de_mutar_y_restaura(
-        tmp_path, _identidades, marca, modo):
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_una_unidad_que_estaba_inactiva_no_se_arranca_al_restaurar(tmp_path, _identidades, marca, modo):
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert any(l == "systemctl stop jax-limpiar-bases-de-test.service" for l in log)
+    assert not any(l.startswith("systemctl start jax-limpiar-bases-de-test") for l in log), \
+        "se arrancó una unidad que estaba inactiva antes"
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_con_un_servicio_que_no_se_detiene_falla_antes_de_mutar_y_restaura(tmp_path, _identidades, marca, modo):
     r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid,
                                env={"NO_SE_DETIENE": "jax-platform.service"})
     assert r.returncode != 0 and "jax-platform.service" in r.stderr, r.stdout + r.stderr
-    assert not any(modo in l for l in log if l.startswith("permisos")), "se mutó pese a que un servicio no se detuvo"
-    assert any(l.startswith("systemctl stop") for l in log)
-    # el trap restaura: desenmascara todo lo enmascarado y arranca lo que estaba activo
-    mascaras = [l.split()[-1] for l in log if l.startswith("systemctl mask --runtime")]
-    unmask = [l.split()[-1] for l in log if l.startswith("systemctl unmask --runtime")]
-    assert mascaras and unmask == mascaras[::-1], (mascaras, unmask)
-    assert any(l.startswith("systemctl start") for l in log)
+    assert not any(l.startswith("permisos") for l in log), "se mutó pese a que un servicio no se detuvo"
+    assert _llamadas(log, "stop")
+    iniciadas = [l.split()[-1] for l in _llamadas(log, "start")]
+    assert "jax-las-manos.service" in iniciadas and "jax-platform.service" in iniciadas, iniciadas
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+@pytest.mark.parametrize("que,env,fragmento", [
+    ("list-units falla", {"FALLA_LIST_UNITS": "1"}, "list-units"),
+    ("list-timers falla", {"FALLA_LIST_TIMERS": "1"}, "list-timers"),
+    ("show falla", {"FALLA_SHOW": "1"}, "show"),
+    ("falta una unidad esperada", {"ESPERADAS": _UNIDADES_ESPERADAS_DE_PRUEBA + " jax-ariadna-pm.service"},
+     "jax-ariadna-pm.service"),
+    ("is-active con una salida inesperada", {"IS_ACTIVE_RARO": "jax-platform.service"}, "desconocido"),
+])
+def test_una_consulta_que_falla_o_una_lista_incompleta_corta_el_bloque_antes_de_detener_nada(
+        tmp_path, _identidades, marca, modo, que, env, fragmento):
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=env)
+    assert r.returncode != 0 and "NO CUMPLE" in r.stderr and fragmento in r.stderr, (que, r.stdout + r.stderr)
+    assert not _llamadas(log, "stop"), f"{que}: detuvo algo antes de cortar"
+    assert not any(l.startswith("permisos") for l in log), f"{que}: llegó al guion"
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_una_lista_vacia_es_un_error(tmp_path, _identidades, marca, modo):
+    entorno = _entorno_del_bloque(tmp_path, pwd.getpwnam("jaxsvc").pw_uid)
+    (tmp_path / "datos" / "list-units").write_text("")
+    (tmp_path / "datos" / "list-timers").write_text("")
+    r = subprocess.run(["bash", "-s"], input=_bloque_del_runbook(marca), env=entorno, capture_output=True, text=True,
+                       timeout=60, cwd=str(RAIZ_REPO))
+    log = (tmp_path / "datos" / "log").read_text().splitlines()
+    assert r.returncode != 0 and "vacía" in r.stderr, r.stdout + r.stderr
+    assert not _llamadas(log, "stop") and not any(l.startswith("permisos") for l in log)
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_si_start_falla_al_restaurar_el_bloque_sale_con_error_aunque_el_guion_haya_ido_bien(
+        tmp_path, _identidades, marca, modo):
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid,
+                               env={"FALLA_START": "jax-las-manos.service"})
+    assert any(l == f"permisos {modo}" for l in log), "el guion tenía que haber corrido bien"
+    assert r.returncode != 0, "salió con 0 dejando un servicio apagado"
+    assert "jax-las-manos.service" in r.stderr and "no volvieron" in r.stderr, r.stderr
+    assert "sudo systemctl start jax-las-manos.service" in r.stderr, "falta decir cómo arrancarla a mano"
+    # las demas SI se arrancaron y volvieron a active
+    assert any(l == "systemctl start jax-platform.service" for l in log)
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_el_trap_conserva_el_codigo_de_salida_del_fallo_original(tmp_path, _identidades, marca, modo):
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env={"PERMISOS_RC": "7"})
+    assert r.returncode == 7, (r.returncode, r.stderr)
+    assert _llamadas(log, "start"), "no restauró tras el fallo del guion"
 
 
 @pytest.mark.parametrize("que,env,fragmento", [
@@ -3101,7 +3173,7 @@ def test_el_bloque_del_runbook_con_un_servicio_que_no_se_detiene_falla_antes_de_
 def test_el_bloque_del_runbook_falla_si_no_se_cumplen_las_premisas(tmp_path, _identidades, que, env, fragmento):
     r, log = _correr_el_bloque("BLOQUE-APLICAR", tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=env)
     assert r.returncode != 0 and fragmento in (r.stdout + r.stderr).lower(), (que, r.stdout + r.stderr)
-    assert not any(l.startswith("systemctl stop") for l in log), "paró unidades antes de comprobar las premisas"
+    assert not _llamadas(log, "stop"), "paró unidades antes de comprobar las premisas"
     assert not any(l.startswith("permisos") for l in log)
 
 
@@ -3116,7 +3188,7 @@ def test_el_bloque_del_runbook_falla_si_proc_muestra_un_hilo_de_jaxsvc(tmp_path,
     log = (tmp_path / "datos" / "log").read_text().splitlines()
     assert r.returncode != 0 and "/proc" in (r.stdout + r.stderr), r.stdout + r.stderr
     assert not any(l.startswith("permisos") for l in log)
-    assert any(l.startswith("systemctl unmask") for l in log), "el trap no restauró"
+    assert _llamadas(log, "start"), "el trap no restauró"
 
 
 def test_la_inspeccion_real_de_proc_ve_un_proceso_jaxsvc_efimero(_identidades):
