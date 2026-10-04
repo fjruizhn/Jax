@@ -47,6 +47,47 @@ def _composicion_estatica_de_prueba(monkeypatch, texto="Aviso gobernado de prueb
     monkeypatch.setattr(governed_aviso, "compose_pipeline_notice", compose)
 
 
+def test_el_aviso_no_interpola_nombre_ni_estado_del_llamador(monkeypatch):
+    _composicion_estatica_de_prueba(monkeypatch, "Aviso gobernado.")
+    telegram = AsyncMock(return_value={"ok": True, "message_id": 7})
+    monkeypatch.setattr("jacobs.reaper.send_telegram_alert", telegram)
+
+    async def escenario():
+        await avisar_fin_pipeline(
+            pipeline_id="abc-123", nombre="SECRETO DEL CLIENTE", estado="completed")
+
+    asyncio.run(escenario())
+    telegram.assert_awaited_once_with("Aviso gobernado.")
+
+
+def test_configuracion_de_enlace_no_muta_el_texto_renderizado(monkeypatch):
+    monkeypatch.setenv("JAX_FRONTEND_ORIGIN", "https://malicioso.invalid")
+    monkeypatch.setenv("JAX_PIPELINE_DETAIL_PATH", "/x/{pipeline_id}")
+    _composicion_estatica_de_prueba(monkeypatch, "Texto F2-C fijo.")
+    telegram = AsyncMock(return_value={"ok": True, "message_id": 7})
+    monkeypatch.setattr("jacobs.reaper.send_telegram_alert", telegram)
+
+    async def escenario():
+        await avisar_fin_pipeline(pipeline_id="abc-123", nombre="ERP", estado="completed")
+
+    asyncio.run(escenario())
+    telegram.assert_awaited_once_with("Texto F2-C fijo.")
+
+
+def test_sin_variables_de_entorno_el_aviso_sigue_siendo_salida_gobernada(monkeypatch):
+    monkeypatch.delenv("JAX_FRONTEND_ORIGIN", raising=False)
+    monkeypatch.delenv("JAX_PIPELINE_DETAIL_PATH", raising=False)
+    _composicion_estatica_de_prueba(monkeypatch, "Salida gobernada sin URL.")
+    telegram = AsyncMock(return_value={"ok": True, "message_id": 7})
+    monkeypatch.setattr("jacobs.reaper.send_telegram_alert", telegram)
+
+    async def escenario():
+        await avisar_fin_pipeline(pipeline_id="abc-123", nombre="ERP", estado="completed")
+
+    asyncio.run(escenario())
+    telegram.assert_awaited_once_with("Salida gobernada sin URL.")
+
+
 def test_avisar_fin_pipeline_no_espera_la_respuesta_de_telegram(monkeypatch):
     """El POST real de send_telegram_alert tiene timeout=10.0 (reaper.py:105).
     Agendar el aviso no puede costarle esos 10s a quien llama -- es

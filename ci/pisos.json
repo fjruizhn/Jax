@@ -106,8 +106,8 @@
       "mensaje": "PISO ROTO: se esperaban 156 tests CORRIDOS de F2-E-SR3 source/auth/routing."
     },
     "governance/gov": {
-      "patron": "^263 passed",
-      "mensaje": "PISO ROTO: se esperaban 263 tests CORRIDOS."
+      "patron": "^273 passed",
+      "mensaje": "PISO ROTO: se esperaban 273 tests CORRIDOS de gobernanza y salida externa Jacobs."
     },
     "tests-puros/out": {
       "patron": "^3452 passed, 45 skipped",

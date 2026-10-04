@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from types import MappingProxyType
 from typing import Mapping
@@ -121,9 +121,6 @@ class GovernedExternalOutputAdapter:
         self,
         envelope: GovernedResponseEnvelope,
         context: RenderContext,
-        *,
-        idempotency_key: str,
-        now: datetime | None = None,
     ) -> PreparedExternalOutput:
         if not isinstance(envelope, GovernedResponseEnvelope) or not isinstance(context, RenderContext):
             raise ExternalOutputError("preparation requires a sealed envelope and trusted render context")
@@ -134,8 +131,7 @@ class GovernedExternalOutputAdapter:
                 rendered,
                 context,
                 transport_kind=self.channel.transport_kind,
-                idempotency_key=idempotency_key,
-                now=now,
+                idempotency_key=f"{self.channel.channel_id.value}:{envelope.response_id}",
             )
         except (GovernedRenderError, OutputLifecycleError, GovernanceContractError, TypeError, ValueError) as exc:
             raise ExternalOutputError("governed output preparation failed closed") from exc
@@ -149,13 +145,15 @@ class GovernedExternalOutputAdapter:
     async def commit(
         self,
         prepared: PreparedExternalOutput,
-        *,
-        now: datetime,
     ) -> ExternalOutputCommit:
         """Commit the exact prepared text to the channel's fixed Telegram sender."""
         if not isinstance(prepared, PreparedExternalOutput) or prepared.channel_id is not self.channel.channel_id:
             raise ExternalOutputError("prepared output does not belong to this channel")
-        revalidated = revalidate_for_transport(prepared.transport_unit, now)
+        if prepared.origin is not self.channel.origin:
+            raise ExternalOutputError("prepared output origin differs from the channel contract")
+        if prepared.transport_unit.transport_kind != self.channel.transport_kind:
+            raise ExternalOutputError("prepared output transport differs from the channel contract")
+        revalidated = revalidate_for_transport(prepared.transport_unit, datetime.now(timezone.utc))
         revalidated_bytes = revalidated.text.encode("utf-8")
         if prepared.canonical_bytes != revalidated_bytes:
             raise ExternalOutputError("prepared bytes differ from the F2-D revalidated rendering")

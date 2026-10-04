@@ -78,11 +78,8 @@ async def _avisar(pipeline_id: str, nombre: str, estado: str) -> None:
         adapter = GovernedExternalOutputAdapter.for_channel(
             ExternalOutputChannelId.JACOBS_PIPELINE_NOTICE_TEXT_V1,
         )
-        prepared = adapter.prepare_text(
-            envelope, context,
-            idempotency_key=f"jacobs-pipeline-notice:{pipeline_id}:{estado}",
-        )
-        committed = await adapter.commit(prepared, now=context.now())
+        prepared = adapter.prepare_text(envelope, context)
+        committed = await adapter.commit(prepared)
     except asyncio.CancelledError:
         # MENOR (revisión final 2026-09-18): `except Exception` de abajo NO
         # atrapa esto -- desde Python 3.8 CancelledError hereda de

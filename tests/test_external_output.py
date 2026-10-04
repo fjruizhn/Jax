@@ -16,9 +16,6 @@ from policy.governance.output_lifecycle import OutputLifecycleError, OutputLifec
 from policy.governance.response import GovernanceReceipt, ResponseScope
 
 
-NOW = datetime(2026, 10, 4, tzinfo=timezone.utc)
-
-
 def _scope():
     return ResponseScope(
         "test", "tenant-a", None, "operator-a", "jacobs", "operator",
@@ -27,7 +24,7 @@ def _scope():
 
 
 def _context():
-    return RenderContext(None, now=lambda: NOW)
+    return RenderContext(None, now=lambda: datetime.now(timezone.utc))
 
 
 def _envelope(text="Aviso estático del servidor."):
@@ -42,9 +39,7 @@ def _prepared():
     adapter = GovernedExternalOutputAdapter.for_channel(
         ExternalOutputChannelId.JACOBS_PIPELINE_NOTICE_TEXT_V1,
     )
-    prepared = adapter.prepare_text(
-        _envelope(), _context(), idempotency_key="pipeline:p-7:completed", now=NOW,
-    )
+    prepared = adapter.prepare_text(_envelope(), _context())
     return adapter, prepared
 
 
@@ -65,11 +60,7 @@ def test_prepare_binds_immutable_governed_text_and_origin_to_f2d_transport_unit(
     adapter = GovernedExternalOutputAdapter.for_channel(
         ExternalOutputChannelId.JACOBS_PIPELINE_NOTICE_TEXT_V1,
     )
-    prepared = adapter.prepare_text(
-        _envelope("Aviso estático del servidor."), _context(),
-        idempotency_key="pipeline:p-7:completed",
-        now=NOW,
-    )
+    prepared = adapter.prepare_text(_envelope("Aviso estático del servidor."), _context())
     assert prepared.text == "Aviso estático del servidor."
     assert prepared.canonical_bytes == "Aviso estático del servidor.".encode("utf-8")
     assert prepared.origin is OutputOrigin.SYSTEM
@@ -84,10 +75,7 @@ def test_commit_records_f2d_commit_but_acknowledgement_fails_closed(monkeypatch)
     adapter = GovernedExternalOutputAdapter.for_channel(
         ExternalOutputChannelId.JACOBS_PIPELINE_NOTICE_TEXT_V1,
     )
-    prepared = adapter.prepare_text(
-        _envelope(), _context(),
-        idempotency_key="pipeline:p-7:completed", now=NOW,
-    )
+    prepared = adapter.prepare_text(_envelope(), _context())
     sent = []
 
     async def telegram_send(message):
@@ -95,7 +83,7 @@ def test_commit_records_f2d_commit_but_acknowledgement_fails_closed(monkeypatch)
         return {"ok": True, "message_id": 17}
 
     monkeypatch.setattr("jacobs.reaper.send_telegram_alert", AsyncMock(side_effect=telegram_send))
-    result = asyncio.run(adapter.commit(prepared, now=NOW))
+    result = asyncio.run(adapter.commit(prepared))
     assert sent == [prepared.text]
     assert result.state is OutputLifecycleState.OUTPUT_COMMITTED_TO_TRANSPORT
     with pytest.raises(OutputLifecycleError, match="acknowledgement"):
@@ -109,7 +97,7 @@ def test_commit_rejects_bytes_changed_after_f2d_preparation(monkeypatch):
     monkeypatch.setattr("jacobs.reaper.send_telegram_alert", telegram)
 
     with pytest.raises(ExternalOutputError, match="bytes differ"):
-        asyncio.run(adapter.commit(changed, now=NOW))
+        asyncio.run(adapter.commit(changed))
     telegram.assert_not_awaited()
 
 
@@ -121,8 +109,7 @@ def test_renderer_failure_never_sends_raw_candidate(monkeypatch):
     from policy.governance.governed_renderer import GovernedRenderer, GovernedRenderError
     monkeypatch.setattr(GovernedRenderer, "render_text", lambda *_a, **_k: (_ for _ in ()).throw(GovernedRenderError("render broke")))
     with pytest.raises(ExternalOutputError):
-        adapter.prepare_text(envelope, _context(),
-                             idempotency_key="p-7", now=NOW)
+        adapter.prepare_text(envelope, _context())
 
 
 def test_canonical_pipeline_status_in_raw_narrative_is_only_safe_unavailable():
@@ -131,8 +118,6 @@ def test_canonical_pipeline_status_in_raw_narrative_is_only_safe_unavailable():
     )
     prepared = adapter.prepare_text(
         _envelope("Pipeline p-7 is completed."), _context(),
-        idempotency_key="pipeline:p-7:completed",
-        now=NOW,
     )
     assert prepared.text == "I could not verify the current state."
     assert "p-7" not in prepared.text and "completed" not in prepared.text

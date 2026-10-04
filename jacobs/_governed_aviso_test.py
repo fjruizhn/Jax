@@ -1,6 +1,4 @@
 import asyncio
-from datetime import datetime, timezone
-
 import pytest
 
 from jacobs import models, store
@@ -41,11 +39,7 @@ def test_pipeline_notice_resolves_canonical_status_renders_claim_then_commits_ex
         pipeline_id="pipeline-f2e-1", requested_status="completed"))
     adapter = GovernedExternalOutputAdapter.for_channel(
         ExternalOutputChannelId.JACOBS_PIPELINE_NOTICE_TEXT_V1)
-    validation_time = datetime.now(timezone.utc)
-    prepared = adapter.prepare_text(
-        envelope, context,
-        idempotency_key="jacobs-pipeline-notice:pipeline-f2e-1:completed", now=validation_time,
-    )
+    prepared = adapter.prepare_text(envelope, context)
     assert prepared.text == "Jacobs registra actualmente que el pipeline pipeline-f2e-1 está completed."
     assert prepared.origin is OutputOrigin.SYSTEM
     assert prepared.transport_unit.rendered.claim_ids == ("pipeline-status:" + envelope.response_id,)
@@ -59,7 +53,7 @@ def test_pipeline_notice_resolves_canonical_status_renders_claim_then_commits_ex
 
     from unittest.mock import AsyncMock
     monkeypatch.setattr("jacobs.reaper.send_telegram_alert", AsyncMock(side_effect=telegram))
-    committed = asyncio.run(adapter.commit(prepared, now=datetime.now(timezone.utc)))
+    committed = asyncio.run(adapter.commit(prepared))
     assert sent == [prepared.text]
     assert committed.state is OutputLifecycleState.OUTPUT_COMMITTED_TO_TRANSPORT
 
@@ -92,11 +86,7 @@ def test_pipeline_notice_ignores_caller_status_that_disagrees_with_canonical_sou
         pipeline_id="pipeline-f2e-1", requested_status="running"))
     adapter = GovernedExternalOutputAdapter.for_channel(
         ExternalOutputChannelId.JACOBS_PIPELINE_NOTICE_TEXT_V1)
-    validation_time = datetime.now(timezone.utc)
-    prepared = adapter.prepare_text(
-        envelope, context,
-        idempotency_key="jacobs-pipeline-notice:pipeline-f2e-1:running", now=validation_time,
-    )
+    prepared = adapter.prepare_text(envelope, context)
     assert prepared.text == "I could not verify the current state."
     assert "running" not in prepared.text
 

@@ -1220,7 +1220,9 @@ jobs:
       # Desde E-19 (2026-09-16) todo sale de requirements.txt.
       - run: pip install -r requirements.txt pytest
       - name: Suite de gobernanza
-        run: python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py tests/test_governed_resolution.py tests/test_governed_renderer.py -v
+        run: python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py tests/test_governed_resolution.py tests/test_governed_renderer.py tests/test_external_output.py jacobs/_governed_aviso_test.py -v
+        env:
+          PYTHONPATH: .:las_manos
       - name: F2-D lifecycle contract
         run: python -m pytest tests/test_output_lifecycle.py tests/test_governed_renderer.py -q
       - name: F2-E-SR runtime-status source integrity regressions
@@ -1285,8 +1287,10 @@ jobs:
         # secciones, citación VALID + su CONTROL, render, P10). Rojos vistos; los
         # 2 que pasan antes son declarados y validados por mutación.
         run: |
-          python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py tests/test_governed_resolution.py tests/test_governed_renderer.py -q 2>&1 | tee /tmp/gov
+          python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py tests/test_governed_resolution.py tests/test_governed_renderer.py tests/test_external_output.py jacobs/_governed_aviso_test.py -q 2>&1 | tee /tmp/gov
           python3 .github/ci/piso.py verificar governance/gov /tmp/gov || exit $?
+        env:
+          PYTHONPATH: .:las_manos
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en

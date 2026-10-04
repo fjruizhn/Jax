@@ -846,6 +846,11 @@ Source-integrity cases run in their own exact-count step below.
 predicate vocabulary, root-only governed-domain import tripwire,
 native/canonical structured shapes, bounded encodings, and the
 F2-B -> F2-C -> F2-D receipt/render/revalidation path.
+263 -> 273 el 2026-10-04 (F2-E Tramo 1): six shared external-output
+adapter regressions and four Jacobs notice integration regressions. The
+integration suite exercises canonical PIPELINE_STATUS resolution, the
+current F2-C template/renderer, F2-D transport-unit revalidation, and the
+fixed Telegram transport boundary.
 ```
 
 ## `tests-puros/out`
