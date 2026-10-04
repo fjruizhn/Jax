@@ -175,3 +175,152 @@ def test_tipos_de_junta_las_extensiones_de_los_paquetes_faltantes():
 
 def test_un_lote_vacio_no_se_frena():
     assert dependencias.lote_afectado(["pdfplumber"], []) is False
+
+
+# -- Jax#338: Pillow decodifica toda imagen antes del OCR ----------------------
+def test_pillow_esta_declarado_con_version_fijada_y_mapeado_a_las_imagenes():
+    declaradas = dependencias.paquetes_declarados()
+    assert "pillow" in declaradas
+    lineas = dependencias.REQUIREMENTS.read_text(encoding="utf-8").splitlines()
+    assert any(l.strip().startswith("pillow==") for l in lineas)
+    assert dependencias.MODULO_POR_PAQUETE["pillow"] == "PIL.Image"
+    assert dependencias.EXTENSIONES_POR_PAQUETE["pillow"] >= {".png", ".jpg", ".jpeg", ".tif", ".bmp", ".webp"}
+
+
+def test_sin_pillow_se_frena_un_lote_de_imagenes_pero_no_uno_de_pdf():
+    assert dependencias.lote_afectado(["pillow"], ["a.JPG"]) is True
+    assert dependencias.lote_afectado(["pillow"], ["a.pdf", "b.docx"]) is False
+
+
+def test_con_pil_imaging_bloqueado_el_freno_marca_pillow_como_faltante():
+    """En un proceso NUEVO, `import PIL.Image` falla sin el binario `_imaging`
+    (Image.py relanza el error; tambien detecta un binario de otra version).
+    Va en un SUBPROCESO limpio para no depender de lo que pytest ya importo
+    (donde `PIL.Image` ya cargado esconderia el fallo)."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    raiz = Path(dependencias.__file__).resolve().parent.parent
+    codigo = (
+        "import sys; sys.modules['PIL._imaging'] = None\n"
+        "from procesamiento import dependencias\n"
+        "print(','.join(dependencias.estado()['faltan']))\n"
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", codigo], capture_output=True, text=True,
+        cwd=raiz, env={**__import__("os").environ, "PYTHONPATH": str(raiz)}, timeout=60,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "pillow" in r.stdout.strip().split(",")
+
+
+def _extensiones_de_imagen_que_el_ocr_acepta() -> set[str]:
+    """Las extensiones (registradas en Pillow) de cada formato cuyo contenido el
+    OCR acepta como imagen por su firma: se guarda una imagen chica en cada
+    formato que Pillow sabe escribir y se le pregunta a `ocr.tipo_por_cabecera`.
+    Sale de los datos, no de una lista escrita a mano (Jax#338 ronda 17)."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    from procesamiento.extractores import ocr
+
+    Image.init()
+    por_formato: dict[str, set[str]] = {}
+    for extension, formato in Image.registered_extensions().items():
+        por_formato.setdefault(formato, set()).add(extension)
+    extensiones: set[str] = set()
+    for formato in sorted(Image.SAVE):
+        salida = BytesIO()
+        try:
+            Image.new("RGB", (16, 16), "white").save(salida, format=formato)
+        except Exception:  # fail-soft: formatos que Pillow no puede escribir aca (EPS sin ghostscript, modos no admitidos); no son imagenes que se puedan probar
+            continue
+        if ocr.tipo_por_cabecera(salida.getvalue()[:1024]) == "imagen":
+            extensiones |= por_formato.get(formato, set())
+    assert {".png", ".jpg", ".gif", ".webp", ".tif", ".bmp"} <= extensiones, extensiones
+    return extensiones
+
+
+def test_sin_pillow_un_gif_frena_el_lote():
+    """Sol (r16): la firma GIF se clasifica como imagen y su OCR necesita
+    Pillow, pero `.gif` no estaba en las extensiones frenadas."""
+    assert dependencias.lote_afectado(["pillow"], ["sello.gif"]) is True
+
+
+def test_sin_pillow_se_frena_cada_extension_de_imagen_que_el_ocr_acepta():
+    no_frenadas = sorted(
+        e for e in _extensiones_de_imagen_que_el_ocr_acepta()
+        if not dependencias.lote_afectado(["pillow"], [f"archivo{e}"])
+    )
+    assert no_frenadas == []
+
+
+
+# -- Jax#338 ronda 18: el freno decide como la compuerta, por CONTENIDO --------
+def _png_valido(destino):
+    from io import BytesIO
+
+    from PIL import Image
+
+    salida = BytesIO()
+    Image.new("RGB", (8, 8), "white").save(salida, "PNG")
+    destino.write_bytes(salida.getvalue())
+    return destino
+
+
+def test_sin_pillow_una_imagen_con_firma_valida_llamada_foto_frena_el_lote(tmp_path):
+    """Sol (r17): un PNG llamado `foto` (sin extension de imagen) pasaba el
+    freno por extension; la compuerta lo enruta por su firma al OCR."""
+    foto = _png_valido(tmp_path / "foto")
+    assert dependencias.lote_afectado(["pillow"], ["foto"], abrir=lambda r: tmp_path / r) is True
+
+
+def test_un_pdf_llamado_png_no_se_frena_por_pillow(tmp_path):
+    """La compuerta enruta por contenido: un PDF llamado `.png` va al camino
+    PDF, que no usa Pillow (y si se frena por pdfplumber)."""
+    (tmp_path / "x.png").write_bytes(b"%PDF-1.4\n%fin")
+    abrir = lambda r: tmp_path / r
+    assert dependencias.lote_afectado(["pillow"], ["x.png"], abrir=abrir) is False
+    assert dependencias.lote_afectado(["pdfplumber"], ["x.png"], abrir=abrir) is True
+
+
+def test_si_el_contenido_no_se_puede_leer_decide_la_extension(tmp_path):
+    """Respaldo: sin archivo legible (o sin `abrir`), la extension decide, como siempre."""
+    assert dependencias.lote_afectado(["pillow"], ["a.png"], abrir=lambda r: None) is True
+    assert dependencias.lote_afectado(["pillow"], ["a.png"], abrir=lambda r: tmp_path / "no-existe") is True
+    assert dependencias.lote_afectado(["pillow"], ["foto"], abrir=lambda r: None) is False
+    assert dependencias.lote_afectado(["pillow"], ["a.png"]) is True
+
+
+
+def _en_hilo_con_plazo(funcion, fifo, plazo=5.0):
+    """Corre `funcion()` en un hilo con plazo. Si se cuelga (un `open()`
+    bloqueante en el FIFO espera un escritor), abre el extremo de escritura
+    para liberarlo y falla."""
+    import os
+    import threading
+
+    resultado: list = []
+    hilo = threading.Thread(target=lambda: resultado.append(funcion()), daemon=True)
+    hilo.start()
+    hilo.join(plazo)
+    if hilo.is_alive():
+        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(fd)
+        hilo.join(plazo)
+        raise AssertionError("se colgo leyendo un FIFO")
+    return resultado[0]
+
+
+def test_el_freno_no_se_cuelga_con_un_fifo_y_decide_por_la_extension(tmp_path):
+    """Sol (r18): `open()` de un FIFO espera un escritor; el freno abre con
+    O_NONBLOCK|O_NOFOLLOW, y si no es un archivo regular decide por la extension."""
+    import os
+
+    fifo = tmp_path / "tuberia"
+    os.mkfifo(fifo)
+    abrir = lambda r: fifo
+    assert _en_hilo_con_plazo(lambda: dependencias.lote_afectado(["pillow"], ["x.png"], abrir=abrir), fifo) is True
+    assert _en_hilo_con_plazo(lambda: dependencias.lote_afectado(["pillow"], ["tuberia"], abrir=abrir), fifo) is False

@@ -29,38 +29,27 @@ from pathlib import Path
 
 from procesamiento.extractores import excel, ocr, pdf, word
 from procesamiento.resultado import Resultado
+from procesamiento.tipos_imagen import EXTENSIONES_IMAGEN, leer_cabecera, tipo_por_contenido
 
-IMAGENES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
+# Jax#338 ronda 17: la MISMA fuente que el freno de dependencias (antes eran dos
+# copias a mano y a las dos les faltaba `.gif`).
+IMAGENES = set(EXTENSIONES_IMAGEN)
 EXCEL = {".xlsx", ".xlsm"}
 WORD = {".docx"}
-
-_FIRMA_OLE2 = bytes.fromhex("D0CF11E0A1B11AE1")
-
-# Firma -> tipo decisivo. PK\x03\x04 (zip) NO entra acá a propósito: es el
-# contenedor de .xlsx Y .docx por igual, así que por sí solo no decide nada
-# -- la extensión sigue siendo quien distingue cuál de los dos es.
-_FIRMAS_IMAGEN = (b"\x89PNG", b"\xff\xd8\xff", b"II*\x00", b"MM\x00*", b"BM")
-
 
 def _tipo_por_contenido(origen: Path) -> str | None:
     """'pdf' / 'ole2' / 'imagen' según los primeros bytes, o `None` si el
     contenido no da una señal decisiva (zip -- xlsx y docx son el mismo
     contenedor -- o un formato no reconocido): en ese caso la extensión
     decide sola, como siempre."""
-    try:
-        with open(origen, "rb") as fh:
-            cabecera = fh.read(16)
-    except OSError:
+    # Jax#338 ronda 19: sin bloquear (un `open()` de un FIFO espera un
+    # escritor); lo que no es un archivo regular no da tipo por contenido.
+    cabecera = leer_cabecera(origen)
+    if cabecera is None:
         return None
-    if cabecera.startswith(b"%PDF"):
-        return "pdf"
-    if cabecera[:8] == _FIRMA_OLE2:
-        return "ole2"
-    if cabecera.startswith(_FIRMAS_IMAGEN) or (
-        cabecera[:4] == b"RIFF" and cabecera[8:12] == b"WEBP"
-    ):
-        return "imagen"
-    return None
+    # Una sola fuente de verdad: `tipos_imagen.tipo_por_contenido` (OLE2, firma
+    # de imagen, despues %PDF), la MISMA que usa el freno de dependencias.
+    return tipo_por_contenido(cabecera, origen.suffix)
 
 
 def _con_extension_enganosa(r: Resultado, sufijo: str, contenido: str) -> Resultado:
@@ -94,7 +83,7 @@ def _pdf_o_ocr(origen: Path) -> Resultado:
         tiene_texto = pdf.tiene_capa_de_texto(origen)
     except ImportError:  # jax-14: tambien una pdfplumber presente pero rota; pdf.extraer la clasifica
         return pdf.extraer(origen)
-    return pdf.extraer(origen) if tiene_texto else ocr.extraer(origen)
+    return pdf.extraer(origen) if tiene_texto else ocr.extraer(origen, camino="pdf")
 
 
 def tiene_extractor(origen: Path) -> bool:
@@ -132,7 +121,7 @@ def extraer(origen: Path) -> Resultado:
         return r if sufijo == ".pdf" else _con_extension_enganosa(r, sufijo, "pdf")
 
     if tipo == "imagen":
-        r = ocr.extraer(origen)
+        r = ocr.extraer(origen, camino="imagen")
         return r if sufijo in IMAGENES else _con_extension_enganosa(r, sufijo, "imagen")
 
     # Contenido no decisivo (zip ambiguo entre xlsx/docx, o formato no
@@ -142,7 +131,7 @@ def extraer(origen: Path) -> Resultado:
     if sufijo in WORD:
         return word.extraer(origen)
     if sufijo in IMAGENES:
-        return ocr.extraer(origen)
+        return ocr.extraer(origen, camino="imagen")
     if sufijo == ".pdf":
         return _pdf_o_ocr(origen)
 

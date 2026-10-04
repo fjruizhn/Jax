@@ -1206,6 +1206,55 @@ class TrabajoHTTPTest(unittest.TestCase):
             response = self._post(client, rutas=["a.png", "b.pdf"])
         assert response.status_code == 503, response.text
 
+    def test_post_sin_pillow_una_imagen_con_firma_llamada_foto_da_503(self):
+        """Jax#338 ronda 18 (MAJOR de Sol r17): el freno decide como la compuerta,
+        por la FIRMA del contenido (leido a traves del jail); un PNG llamado
+        `foto` frena el lote igual que un `.png`. Sin Pillow en la prueba: el job
+        `governance` no la instala, y el freno solo lee la firma."""
+        foto = Path(self._tmpdir.name) / "foto"
+        foto.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+
+        async def _noop(*args, **kwargs):
+            return None
+
+        with _estado_falta("pillow"), patch.object(rutas_mod, "_ejecutar_trabajo", _noop), \
+             patch.object(rutas_mod.tool_authority, "resolve_jailed_path", return_value=(foto, "")), \
+             TestClient(_app()) as client:
+            response = self._post(client, rutas=["foto"])
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"]["faltan"] == ["pillow"]
+        assert self.store._index == {}
+
+    def test_post_lote_sobre_el_maximo_con_dependencia_faltante_da_422_sin_leer_cabeceras(self):
+        """Jax#338 ronda 18: las validaciones baratas (cantidad maxima de rutas,
+        formato del project_uuid) van ANTES de que el freno lea cabeceras."""
+        leidas: list = []
+
+        def abrir_espia(ruta):
+            leidas.append(ruta)
+            return None
+
+        with _estado_falta("pillow"), patch.object(rutas_mod, "_ruta_del_jail", abrir_espia), \
+             patch.object(rutas_mod, "_MAX_RUTAS_POR_TRABAJO", 2), TestClient(_app()) as client:
+            response = self._post(client, rutas=["a.png", "b.png", "c.png"])
+        assert response.status_code == 422, response.text
+        assert leidas == [], "el freno leyo cabeceras de un lote que se rechaza por tamano"
+        assert self.store._index == {}
+
+    def test_post_project_uuid_invalido_con_dependencia_faltante_da_422_sin_leer_cabeceras(self):
+        leidas: list = []
+
+        def abrir_espia(ruta):
+            leidas.append(ruta)
+            return None
+
+        with _estado_falta("pillow"), patch.object(rutas_mod, "_ruta_del_jail", abrir_espia), \
+             TestClient(_app()) as client:
+            response = self._post(client, project_uuid="no-es-un-uuid", rutas=["a.png"])
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"]["code"] == "project_uuid_invalido"
+        assert leidas == []
+
     def test_post_paquete_faltante_sin_mapa_bloquea_todos_los_tipos(self):
         with _estado_falta("linea-no-reconocida:3"), TestClient(_app()) as client:
             response = self._post(client, rutas=["a.png"])
@@ -1371,6 +1420,47 @@ class TrabajoHTTPTest(unittest.TestCase):
                 r = rutas_mod._procesar_una_ruta(Path(tmp), "x.pdf")
         assert r.estado == "error"
         assert r.error == "dependencia_no_instalada"
+
+    def _error_de_ficha(self, detalle):
+        ficha = Mock(estado="error", extractor="tesseract", sha256="a" * 64, detalle=detalle)
+        with tempfile.TemporaryDirectory() as tmp:
+            archivo = Path(tmp) / "x.gif"
+            archivo.write_bytes(b"GIF89a")
+            with patch.object(rutas_mod.tool_authority, "resolve_jailed_path", return_value=(archivo, "")), \
+                 patch.object(rutas_mod.ingesta, "ingerir", return_value=ficha), \
+                 patch.object(rutas_mod.ingesta, "ruta_procesado", return_value=Path(tmp) / "nada"), \
+                 patch.object(rutas_mod.tool_authority, "WORKSPACE_ROOT", Path(tmp)):
+                return rutas_mod._procesar_una_ruta(Path(tmp), "x.gif")
+
+    def test_formato_no_soportado_viaja_con_su_formato_en_el_error(self):
+        r = self._error_de_ficha({"codigo": "formato_no_soportado", "formato": "gif_animado"})
+        assert r.estado == "error"
+        assert r.error == "formato_no_soportado:gif_animado"
+
+    def test_png_animado_es_un_formato_estable_del_contrato(self):
+        """Jax#338 ronda 18: `png_animado` viaja como los otros formatos (pasa la
+        validacion `[a-z0-9_]{1,40}`)."""
+        r = self._error_de_ficha({"codigo": "formato_no_soportado", "formato": "png_animado"})
+        assert r.error == "formato_no_soportado:png_animado"
+
+    def test_formato_no_soportado_sin_formato_viaja_solo_el_codigo(self):
+        r = self._error_de_ficha({"codigo": "formato_no_soportado"})
+        assert r.error == "formato_no_soportado"
+
+    def test_el_formato_solo_se_agrega_a_formato_no_soportado_y_se_valida(self):
+        assert self._error_de_ficha({"codigo": "archivo_ilegible", "formato": "gif_animado"}).error == "archivo_ilegible"
+        # una ficha cacheada con un `formato` raro no mete texto libre en el error
+        assert self._error_de_ficha(
+            {"codigo": "formato_no_soportado", "formato": "x; DROP\nTABLE"}
+        ).error == "formato_no_soportado"
+
+    def test_n29_un_salto_de_linea_al_final_del_formato_no_se_acepta(self):
+        """`$` coincide antes de un `\\n` final: con `fullmatch` no."""
+        for valor in ("gif_animado\n", "gif_animado\r\n", "\ngif_animado", "gif animado"):
+            r = self._error_de_ficha({"codigo": "formato_no_soportado", "formato": valor})
+            assert r.error == "formato_no_soportado", repr(valor)
+        assert self._error_de_ficha(
+            {"codigo": "formato_no_soportado", "formato": "gif_animado"}).error == "formato_no_soportado:gif_animado"
 
     def test_b6_persists_authenticated_human_uploader_as_caller(self):
         async def _noop(*args, **kwargs):

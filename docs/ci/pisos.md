@@ -777,6 +777,8 @@ Measured on Python 3.12 with this exact five-file command.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^156 passed`
 
+Jax#338 (2026-10-04): `^156 passed` → `^164 passed`, +8 en las_manos/_procesamiento_routes_test.py (formato_no_soportado con formato, freno por contenido, 422 antes del freno); medido local hall9000.
+
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 ```text
@@ -3640,6 +3642,8 @@ Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^35 passed`
 
+Jax#338 (2026-10-04): `^35 passed` → `^201 passed`, imagen sin texto, union de dos pasadas con transparencia, APNG/MPO, TIFF por pagina, FIFO; 203 recolectadas − 2 LACTOVI (skipif por archivo ausente) = 201 passed, 2 skipped en el runner; medido local hall9000 (203 passed).
+
 Sin historia anotada en el workflow.
 
 ## `tests-puros/word_tests`
@@ -3656,6 +3660,8 @@ Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^35 passed`
 
+Jax#338 (2026-10-04): `^35 passed` → `^42 passed`, lista unica de extensiones de imagen (+5 casos, +1 contra Pillow) y FIFO (+1); medido local hall9000.
+
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 ```text
@@ -3665,6 +3671,8 @@ Historia (comentarios que estaban sobre el piso en `policy.yml`):
 ## `tests-puros/ingesta_tests`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^48 passed`
+
+Jax#338 (2026-10-04): `^48 passed` → `^51 passed`, ningun FIFO cuelga la ingesta y la huella sale del mismo descriptor que la copia (+3); medido local hall9000.
 
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
@@ -3694,6 +3702,8 @@ Sin historia anotada en el workflow.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^95 passed`
 
+Jax#338 (2026-10-04): `^95 passed` → `^103 passed`, ver F2-E-SR3 (+8); medido local hall9000.
+
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 ```text
@@ -3706,6 +3716,8 @@ dependencias: 95 passed.
 ## `tests-puros/dependencias_tests`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^29 passed`
+
+Jax#338 (2026-10-04): `^29 passed` → `^38 passed`, Pillow declarado, .gif y toda imagen que el OCR acepta, freno por contenido, FIFO (+9); medido local hall9000.
 
 Sin historia anotada en el workflow.
 

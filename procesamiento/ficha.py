@@ -20,8 +20,11 @@ Ronda de arreglo 1 (2026-09-20, auditoría task-1-hallazgos.md):
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
+import stat
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from types import MappingProxyType
@@ -31,9 +34,27 @@ ESTADOS = frozenset({"ok", "parcial", "error", "sin_extractor"})
 _CAMPOS_NO_VACIOS = ("sha256", "origen", "extractor", "extractor_version", "fecha")
 
 
+def abrir_archivo_regular(path: Path):
+    """`path` abierto para leer, SOLO si es un archivo regular (Jax#338 ronda
+    19): se abre con O_RDONLY | O_NONBLOCK (un `open()` de un FIFO espera un
+    escritor para siempre), se comprueba con fstat -- sobre lo que el kernel
+    abrio, asi que un symlink a un archivo regular sigue valiendo -- y recien
+    entonces se le quita O_NONBLOCK. Lo que no es regular (FIFO, socket,
+    dispositivo, directorio) es `ValueError`, sin leer nada."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"'{Path(path).name}' no es un archivo regular; no se lee")
+        fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def sha256_de(path: Path) -> str:
     h = hashlib.sha256()
-    with open(path, "rb") as fh:
+    with abrir_archivo_regular(path) as fh:
         for bloque in iter(lambda: fh.read(1024 * 1024), b""):
             h.update(bloque)
     return h.hexdigest()

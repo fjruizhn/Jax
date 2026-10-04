@@ -102,8 +102,8 @@
       "mensaje": "PISO ROTO: se esperaban 212 tests CORRIDOS de F2-E-SR3."
     },
     "governance/f2e-sr3-source": {
-      "patron": "^156 passed",
-      "mensaje": "PISO ROTO: se esperaban 156 tests CORRIDOS de F2-E-SR3 source/auth/routing."
+      "patron": "^164 passed",
+      "mensaje": "PISO ROTO: se esperaban 164 tests CORRIDOS de F2-E-SR3 source/auth/routing."
     },
     "governance/gov": {
       "patron": "^263 passed",
@@ -130,20 +130,20 @@
       "mensaje": "PISO ROTO: se esperaban 23 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."
     },
     "tests-puros/ocr_tests": {
-      "patron": "^35 passed",
-      "mensaje": "PISO ROTO: se esperaban 35 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."
+      "patron": "^201 passed",
+      "mensaje": "PISO ROTO: se esperaban 201 tests CORRIDOS del extractor de OCR (en el runner, mas 2 skipped: las 2 imagenes reales de LACTOVI, solo en hall9000). Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."
     },
     "tests-puros/word_tests": {
       "patron": "^23 passed",
       "mensaje": "PISO ROTO: se esperaban 23 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."
     },
     "tests-puros/compuerta_tests": {
-      "patron": "^35 passed",
-      "mensaje": "PISO ROTO: se esperaban 35 tests CORRIDOS de la compuerta."
+      "patron": "^42 passed",
+      "mensaje": "PISO ROTO: se esperaban 42 tests CORRIDOS de la compuerta."
     },
     "tests-puros/ingesta_tests": {
-      "patron": "^48 passed",
-      "mensaje": "PISO ROTO: se esperaban 48 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."
+      "patron": "^51 passed",
+      "mensaje": "PISO ROTO: se esperaban 51 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."
     },
     "tests-puros/medir_utilidad_tests": {
       "patron": "^11 passed",
@@ -154,12 +154,12 @@
       "mensaje": "PISO ROTO: se esperaban 12 tests CORRIDOS del guion de procesar_archivos. Si esto da '... skipped', openpyxl no se instalo."
     },
     "tests-puros/procesamiento_routes_tests": {
-      "patron": "^95 passed",
-      "mensaje": "PISO ROTO: se esperaban 95 tests CORRIDOS del endpoint de Procesamiento."
+      "patron": "^103 passed",
+      "mensaje": "PISO ROTO: se esperaban 103 tests CORRIDOS del endpoint de Procesamiento."
     },
     "tests-puros/dependencias_tests": {
-      "patron": "^29 passed",
-      "mensaje": "PISO ROTO: se esperaban 29 tests CORRIDOS (no skipeados) del freno de dependencias."
+      "patron": "^38 passed",
+      "mensaje": "PISO ROTO: se esperaban 38 tests CORRIDOS (no skipeados) del freno de dependencias."
     },
     "jacobs-gobernanza-db/out": {
       "patron": "^170 passed",
