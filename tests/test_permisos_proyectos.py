@@ -3643,7 +3643,7 @@ def test_con_un_target_repetido_vale_el_montaje_visible_que_es_el_ultimo(tmp_pat
 def test_los_sistemas_virtuales_sin_archivos_de_usuario_no_se_recorren(tmp_path, _identidades, marca, modo):
     """Sin nosuid pero sin archivos de usuario (o con un autofs que montaria algo al recorrerlo): se saltan aunque
     recorrerlos diera EACCES."""
-    filas = ["1 / ext4 rw,relatime"] + [f"{10 + n} /v/{t} {t} rw" for n, t in enumerate(_TIPOS_VIRTUALES)]
+    filas = ["1 / ext4 rw,relatime"] + [f"{10 + n} /v/{t} {t} rw,direct" for n, t in enumerate(_TIPOS_VIRTUALES)]
     mapa = [f"/v/{t}|eacces|" for t in _TIPOS_VIRTUALES]
     r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=_env_montajes(filas, mapa))
     assert r.returncode == 0, r.stdout + r.stderr

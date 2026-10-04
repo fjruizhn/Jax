@@ -42,7 +42,7 @@ sudo -l                                            # confirmar la regla de sudoe
 sudo install -o root -g root -m 0755 ops/permisos_proyectos.py /usr/local/sbin/jax-permisos-proyectos
 # --aplicar y el --verificar posterior van en el bloque de abajo, con las unidades de jaxsvc detenidas
 ```
-**`--aplicar` y `--deshacer` se corren SOLO con TODAS las unidades de `jaxsvc` detenidas, en UN bloque, y se restauran al salir.** El guion falla cerrado, sin mutar nada, si hay cualquier proceso o hilo con el uid de `jaxsvc` (lo lee de `/proc`; si no puede leer el estado de un pid listado, también falla; `--verificar` no lo exige). Por qué, en dos líneas: un proceso `jaxsvc` vivo puede renombrar carpetas mientras root recorre el árbol, y todas las carreras de renombre (symlinks, hardlinks, intercambio de nombres, ocultas que cambian de proyecto) parten de eso; sin procesos `jaxsvc`, nadie con permiso de renombrar corre en paralelo (queda `fruiz`, dueño, y root, que es confiable por premisa). Las unidades solo se **detienen**: no se enmascaran, porque viven en `/etc/systemd/system` y un `mask --runtime` no las tapa; con los timers parados no se disparan. El bloque, en este orden: (a) premisas (sin archivos setuid/setgid de `jaxsvc` y sin crontab de `jaxsvc`; la premisa del setuid va **por montaje**: se leen los montajes visibles con `findmnt -rn --kernel` (con un TARGET repetido vale el último, el visible), se saltan los que traen `nosuid` como opción completa y los sistemas virtuales sin archivos de usuario (la lista, con su motivo, está comentada en el bloque; `autofs` también, porque recorrerlo dispara montajes), un montaje FUSE sin `nosuid` corta, y cada uno de los demás se recorre con `find <TARGET> -xdev …`, donde cualquier error corta salvo una excepción acotada (el `Permission denied` del punto de montaje de un FUSE `nosuid` visible, que cuelga directamente del montaje recorrido: cinco condiciones, escritas en el bloque); el mismo dispositivo en varios TARGET se recorre en cada uno); (b) la lista de unidades y timers de `jaxsvc` (`list-units` y `list-timers` con `'jax*'`, filtradas por `User=`), con **cada consulta capturada: si una falla, o la lista sale vacía, o falta una de la lista mínima esperada, se corta**; el estado textual (`active`, `inactive`, `failed`, `activating`) de cada una, guardado ANTES de detener nada; (c) el `trap` de restauración; (d) `stop` de cada una; (e) comprobar por su salida textual que quedaron detenidas, `ps -u jaxsvc` vacío y `/proc/*/status` y `/proc/*/task/*/status` sin los cuatro uid; (f) el guion; (g) `--verificar`; (h) el trap **arranca en orden inverso las que estaban `active` o `activating` (una unidad que estaba arrancando se restaura igual), exige que vuelvan a `active` **y estables** (siguen `active` durante `ESTABLE` segundos —entero ≥ 1, por defecto 5; con 0 o no numérico el bloque corta antes de detener nada—, y al cierre `NRestarts` —`systemctl show -p NRestarts --value`— no sube en ese intervalo: una unidad en bucle de reinicios se ve `active` o `activating` un instante y no cuenta) y, si alguna no vuelve, dice cuáles y cómo arrancarla a mano y sale con código distinto de 0 aunque el guion haya ido bien** (conserva el código del fallo original si lo hubo). **Desde justo antes del primer `stop` el bloque ignora INT, TERM y HUP** (los procesos hijos, el guion incluido, heredan el ignorar) y antes de detener nada imprime el aviso con la orden para arrancar a mano. Por qué, en dos líneas: cortar a mitad de la aplicación no es seguro (el árbol queda a medias y el trap tendría que restaurar mientras otra señal lo interrumpe), y `--aplicar` es idempotente, así que lo correcto es dejar que termine y repetirlo si hace falta. Si de verdad hay que cortarlo, `kill -9` y después `sudo systemctl start <las unidades activas>` (el aviso las lista).
+**`--aplicar` y `--deshacer` se corren SOLO con TODAS las unidades de `jaxsvc` detenidas, en UN bloque, y se restauran al salir.** El guion falla cerrado, sin mutar nada, si hay cualquier proceso o hilo con el uid de `jaxsvc` (lo lee de `/proc`; si no puede leer el estado de un pid listado, también falla; `--verificar` no lo exige). Por qué, en dos líneas: un proceso `jaxsvc` vivo puede renombrar carpetas mientras root recorre el árbol, y todas las carreras de renombre (symlinks, hardlinks, intercambio de nombres, ocultas que cambian de proyecto) parten de eso; sin procesos `jaxsvc`, nadie con permiso de renombrar corre en paralelo (queda `fruiz`, dueño, y root, que es confiable por premisa). Las unidades solo se **detienen**: no se enmascaran, porque viven en `/etc/systemd/system` y un `mask --runtime` no las tapa; con los timers parados no se disparan. El bloque, en este orden: (a) premisas (sin archivos setuid/setgid de `jaxsvc` y sin crontab de `jaxsvc`; la premisa del setuid va **por montaje**: se leen los montajes visibles con `findmnt -rn --kernel` (con un TARGET repetido vale el último, el visible), se saltan los que traen `nosuid` como opción completa y los sistemas virtuales sin archivos de usuario (la lista, con su motivo, está comentada en el bloque; `autofs` también, porque recorrerlo dispara montajes), un montaje FUSE sin `nosuid` corta, y cada uno de los demás se recorre con `find <TARGET> -xdev …`, donde cualquier error corta salvo una excepción acotada (el `Permission denied` del punto de montaje de un FUSE `nosuid` visible, que cuelga directamente del montaje recorrido: cinco condiciones, escritas en el bloque); el mismo dispositivo en varios TARGET se recorre en cada uno; antes de la lista definitiva se **disparan** los autofs visibles —solo los `direct`; uno indirecto corta antes de detener nada— con `timeout --kill-after=5 $TOPE_AUTOFS` (15 s por defecto) y se relee la lista; límite real: un bloqueo ininterrumpible del kernel puede colgar el disparo aunque haya `timeout`, pero ocurre ANTES de detener las unidades, así que no deja nada detenido: se corta con Ctrl-C y se resuelve el montaje a mano); (b) la lista de unidades y timers de `jaxsvc` (`list-units` y `list-timers` con `'jax*'`, filtradas por `User=`), con **cada consulta capturada: si una falla, o la lista sale vacía, o falta una de la lista mínima esperada, se corta**; el estado textual (`active`, `inactive`, `failed`, `activating`) de cada una, guardado ANTES de detener nada; (c) el `trap` de restauración; (d) `stop` de cada una; (e) comprobar por su salida textual que quedaron detenidas, `ps -u jaxsvc` vacío y `/proc/*/status` y `/proc/*/task/*/status` sin los cuatro uid; (f) el guion; (g) `--verificar`; (h) el trap **arranca en orden inverso las que estaban `active` o `activating` (una unidad que estaba arrancando se restaura igual), exige que vuelvan a `active` **y estables** (siguen `active` durante `ESTABLE` segundos —entero ≥ 1, por defecto 5; con 0 o no numérico el bloque corta antes de detener nada—, y al cierre `NRestarts` —`systemctl show -p NRestarts --value`— no sube en ese intervalo: una unidad en bucle de reinicios se ve `active` o `activating` un instante y no cuenta) y, si alguna no vuelve, dice cuáles y cómo arrancarla a mano y sale con código distinto de 0 aunque el guion haya ido bien** (conserva el código del fallo original si lo hubo). **Desde justo antes del primer `stop` el bloque ignora INT, TERM y HUP** (los procesos hijos, el guion incluido, heredan el ignorar) y antes de detener nada imprime el aviso con la orden para arrancar a mano. Por qué, en dos líneas: cortar a mitad de la aplicación no es seguro (el árbol queda a medias y el trap tendría que restaurar mientras otra señal lo interrumpe), y `--aplicar` es idempotente, así que lo correcto es dejar que termine y repetirlo si hace falta. Si de verdad hay que cortarlo, `kill -9` y después `sudo systemctl start <las unidades activas>` (el aviso las lista).
 
 **Bloque de `--aplicar`:**
 ```bash
@@ -98,11 +98,17 @@ ESTABLE=$((10#$ESTABLE))
 #       rpc_pipefs                  tuberías RPC de NFS: sin archivos de usuario
 #       autofs                      no aloja archivos propios, y recorrerlo con find DISPARARÍA el montaje bajo demanda
 #                                   (quizá NFS) a mitad del recorrido. Por eso se DISPARA ANTES, a propósito y con tope de
-#                                   tiempo (`sudo timeout $TOPE_AUTOFS ls -d -- <TARGET>/.`), y DESPUÉS se vuelve a tomar la
+#                                   tiempo (`sudo timeout --kill-after=5 $TOPE_AUTOFS ls -d -- <TARGET>/.`), y DESPUÉS se vuelve a tomar la
 #                                   lista de findmnt: lo que se haya montado se evalúa con las reglas normales (nosuid se
 #                                   salta, sin nosuid se recorre, FUSE sin nosuid corta). Si un disparo falla o excede el
 #                                   tiempo, se corta nombrando el punto. Saltar un autofs sin dispararlo dejaría sin
-#                                   revisar un NFS sin nosuid que se monta después de tomar la lista.
+#                                   revisar un NFS sin nosuid que se monta después de tomar la lista. Solo se disparan
+#                                   los autofs DIRECTOS (`direct` como opción completa en OPTIONS): uno INDIRECTO monta
+#                                   por llave (`/net/servidor`), sus llaves no se pueden disparar ni revisar y el bloque
+#                                   corta ANTES de detener nada. Límite real del tope: `timeout` manda TERM y, a los 5 s,
+#                                   KILL, pero un bloqueo ininterrumpible del kernel puede colgar el disparo igual; eso
+#                                   ocurre ANTES de detener las unidades, así que no deja nada detenido: se corta con
+#                                   Ctrl-C (todavía no se ignoran señales) y se resuelve el montaje a mano.
 #     Se recorren con find -xdev, aunque sean de solo lectura: squashfs (snaps: una imagen podría traer un setuid),
 #     overlay, vfat, ext4, xfs, tmpfs y el resto.
 TIPOS_SIN_ARCHIVOS="proc sysfs cgroup cgroup2 debugfs tracefs securityfs selinuxfs pstore efivarfs bpf configfs binderfs fusectl mqueue hugetlbfs devpts binfmt_misc nsfs rpc_pipefs autofs"
@@ -124,12 +130,13 @@ VISIBLES="$(listar_visibles)" || exit 1
 # DISPARAR cada autofs visible (como root, con tope de tiempo) y VOLVER a tomar la lista: lo que montó el disparo entra
 # en la lista definitiva. Un disparo que falla o excede el tiempo corta, nombrando el punto (se resuelve a mano).
 ANTES="$VISIBLES"
-while read -r _id destino tipo _opciones; do
+while read -r _id destino tipo opciones; do
   [ "$tipo" = autofs ] || continue
+  case ",$opciones," in *,direct,*) ;; *) falla "autofs indirecto $destino: sus claves no se pueden disparar ni revisar; desmontarlo o resolverlo a mano" ;; esac
   ruta="${destino//\\x20/ }"
   case "$ruta" in *\\*) falla "el nombre del autofs $destino tiene un escape de findmnt que no se interpreta (solo \\x20)" ;; esac
-  sudo timeout "$TOPE_AUTOFS" ls -d -- "$ruta/." >/dev/null 2>"$ERRF" \
-    || falla "no se pudo disparar el autofs $ruta (código $?; 124 = pasó de ${TOPE_AUTOFS} s): $(cat "$ERRF"); resolverlo a mano y repetir"
+  sudo timeout --kill-after=5 "$TOPE_AUTOFS" ls -d -- "$ruta/." >/dev/null 2>"$ERRF" \
+    || falla "no se pudo disparar el autofs $ruta (código $?; 124 o 137 = pasó del tope de ${TOPE_AUTOFS} s): $(cat "$ERRF"); resolverlo a mano y repetir"
   echo "premisa (a): disparé el autofs $ruta"
 done <<< "$ANTES"
 VISIBLES="$(listar_visibles)" || exit 1
@@ -371,11 +378,17 @@ ESTABLE=$((10#$ESTABLE))
 #       rpc_pipefs                  tuberías RPC de NFS: sin archivos de usuario
 #       autofs                      no aloja archivos propios, y recorrerlo con find DISPARARÍA el montaje bajo demanda
 #                                   (quizá NFS) a mitad del recorrido. Por eso se DISPARA ANTES, a propósito y con tope de
-#                                   tiempo (`sudo timeout $TOPE_AUTOFS ls -d -- <TARGET>/.`), y DESPUÉS se vuelve a tomar la
+#                                   tiempo (`sudo timeout --kill-after=5 $TOPE_AUTOFS ls -d -- <TARGET>/.`), y DESPUÉS se vuelve a tomar la
 #                                   lista de findmnt: lo que se haya montado se evalúa con las reglas normales (nosuid se
 #                                   salta, sin nosuid se recorre, FUSE sin nosuid corta). Si un disparo falla o excede el
 #                                   tiempo, se corta nombrando el punto. Saltar un autofs sin dispararlo dejaría sin
-#                                   revisar un NFS sin nosuid que se monta después de tomar la lista.
+#                                   revisar un NFS sin nosuid que se monta después de tomar la lista. Solo se disparan
+#                                   los autofs DIRECTOS (`direct` como opción completa en OPTIONS): uno INDIRECTO monta
+#                                   por llave (`/net/servidor`), sus llaves no se pueden disparar ni revisar y el bloque
+#                                   corta ANTES de detener nada. Límite real del tope: `timeout` manda TERM y, a los 5 s,
+#                                   KILL, pero un bloqueo ininterrumpible del kernel puede colgar el disparo igual; eso
+#                                   ocurre ANTES de detener las unidades, así que no deja nada detenido: se corta con
+#                                   Ctrl-C (todavía no se ignoran señales) y se resuelve el montaje a mano.
 #     Se recorren con find -xdev, aunque sean de solo lectura: squashfs (snaps: una imagen podría traer un setuid),
 #     overlay, vfat, ext4, xfs, tmpfs y el resto.
 TIPOS_SIN_ARCHIVOS="proc sysfs cgroup cgroup2 debugfs tracefs securityfs selinuxfs pstore efivarfs bpf configfs binderfs fusectl mqueue hugetlbfs devpts binfmt_misc nsfs rpc_pipefs autofs"
@@ -397,12 +410,13 @@ VISIBLES="$(listar_visibles)" || exit 1
 # DISPARAR cada autofs visible (como root, con tope de tiempo) y VOLVER a tomar la lista: lo que montó el disparo entra
 # en la lista definitiva. Un disparo que falla o excede el tiempo corta, nombrando el punto (se resuelve a mano).
 ANTES="$VISIBLES"
-while read -r _id destino tipo _opciones; do
+while read -r _id destino tipo opciones; do
   [ "$tipo" = autofs ] || continue
+  case ",$opciones," in *,direct,*) ;; *) falla "autofs indirecto $destino: sus claves no se pueden disparar ni revisar; desmontarlo o resolverlo a mano" ;; esac
   ruta="${destino//\\x20/ }"
   case "$ruta" in *\\*) falla "el nombre del autofs $destino tiene un escape de findmnt que no se interpreta (solo \\x20)" ;; esac
-  sudo timeout "$TOPE_AUTOFS" ls -d -- "$ruta/." >/dev/null 2>"$ERRF" \
-    || falla "no se pudo disparar el autofs $ruta (código $?; 124 = pasó de ${TOPE_AUTOFS} s): $(cat "$ERRF"); resolverlo a mano y repetir"
+  sudo timeout --kill-after=5 "$TOPE_AUTOFS" ls -d -- "$ruta/." >/dev/null 2>"$ERRF" \
+    || falla "no se pudo disparar el autofs $ruta (código $?; 124 o 137 = pasó del tope de ${TOPE_AUTOFS} s): $(cat "$ERRF"); resolverlo a mano y repetir"
   echo "premisa (a): disparé el autofs $ruta"
 done <<< "$ANTES"
 VISIBLES="$(listar_visibles)" || exit 1
