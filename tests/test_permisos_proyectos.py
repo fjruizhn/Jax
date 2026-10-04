@@ -2974,6 +2974,7 @@ case "$cmd" in
           case " $NO_SE_DETIENE " in *" $u "*) ;; *) sed -i "/^$u\\$/d" "$D/activas"; sed -i "/^$u\\$/d" "$D/activating" ;; esac
         done ;;
   start) for u in "$@"; do
+           sleep "${DEMORA_START:-0}"
            if [ "$FALLA_START" = "$u" ]; then echo "Failed to start $u" >&2; rc=1
            else sed -i "/^$u\\$/d" "$D/activating"; grep -qx "$u" "$D/activas" || echo "$u" >> "$D/activas"; fi
          done ;;
@@ -3196,6 +3197,61 @@ def test_una_senal_en_medio_del_bloque_restaura_y_sale_con_error(tmp_path, _iden
     assert "OK:" not in salida, "llegó a imprimir éxito pese a la señal"
     if donde == "el segundo stop colgado":
         assert not any(l.startswith("permisos") for l in log), "mutó pese a la señal durante la detención"
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+@pytest.mark.parametrize("primera,rc_esperado,despues", [
+    ("TERM", 143, ("HUP", "INT")),
+    ("INT", 130, ("TERM", "HUP")),
+])
+def test_una_segunda_senal_mientras_restaura_no_corta_la_restauracion(
+        tmp_path, _identidades, marca, modo, primera, rc_esperado, despues):
+    """`restaurar` ignora INT, TERM y HUP desde su primera linea: una segunda (y tercera) señal mientras el trap
+    arranca las unidades no la interrumpe. TERM con el guion colgado y, MIENTRAS restaura (un `start` que se
+    demora), HUP e INT: la restauracion termina completa -- todas las que estaban activas arrancadas y verificadas --
+    y el rc es el de la PRIMERA señal (143)."""
+    import signal
+    import time as _t
+    entorno = _entorno_del_bloque(tmp_path, pwd.getpwnam("jaxsvc").pw_uid,
+                                  extra={"COLGAR_EN_GUION": "1", "DEMORA_START": "0.4", "REINTENTOS": "3"})
+    proc = subprocess.Popen(["bash", "-s"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=entorno, text=True, cwd=str(RAIZ_REPO), start_new_session=True)
+    proc.stdin.write(_bloque_del_runbook(marca))
+    proc.stdin.close()
+    log_path = tmp_path / "datos" / "log"
+    pgid = os.getpgid(proc.pid)
+    try:
+        for _ in range(200):
+            if any(l == f"permisos {modo}" for l in log_path.read_text().splitlines()):
+                break
+            _t.sleep(0.05)
+        else:
+            raise AssertionError("el bloque no llegó al guion")
+        os.killpg(pgid, getattr(signal, f"SIG{primera}"))
+        for _ in range(200):          # esperar a que EMPIECE a restaurar (primer start), y entonces mandar las otras
+            if any(l.startswith("systemctl start") for l in log_path.read_text().splitlines()):
+                break
+            _t.sleep(0.02)
+        else:
+            raise AssertionError("no empezó a restaurar")
+        for otra in despues:
+            os.killpg(pgid, getattr(signal, f"SIG{otra}"))
+            _t.sleep(0.1)
+        salida, error = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            os.killpg(pgid, signal.SIGKILL)
+    log = log_path.read_text().splitlines()
+    activas_antes = ["jax-las-manos.service", "jax-platform.service", "jax-catalogo-modelos.service",
+                     "jax-catalogo-modelos.timer"]
+    iniciadas = [l.split()[-1] for l in _llamadas(log, "start")]
+    assert sorted(iniciadas) == sorted(activas_antes), f"la restauración quedó incompleta: {iniciadas}\n{error}"
+    assert sorted((tmp_path / "datos" / "activas").read_text().split()) == sorted(activas_antes)
+    ultimo_start = max(i for i, l in enumerate(log) if l.startswith("systemctl start"))
+    verificadas = {l.split()[-1] for l in log[ultimo_start - 3:] if l.startswith("systemctl is-active")}
+    assert any(l.startswith("systemctl is-active") for l in log[ultimo_start:]), "no verificó que volvieran"
+    assert proc.returncode == rc_esperado, (proc.returncode, error)
+    assert "OK:" not in salida
 
 
 @pytest.mark.parametrize("marca,modo", _BLOQUES)
