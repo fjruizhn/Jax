@@ -130,8 +130,8 @@
       "mensaje": "PISO ROTO: se esperaban 23 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."
     },
     "tests-puros/ocr_tests": {
-      "patron": "^215 passed, 2 skipped",
-      "mensaje": "PISO ROTO: se esperaban 215 tests CORRIDOS del extractor de OCR (en el runner, mas 2 skipped: las 2 imagenes reales de LACTOVI, solo en hall9000). Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."
+      "patron": "^217 passed, 2 skipped",
+      "mensaje": "PISO ROTO: se esperaban 217 tests CORRIDOS del extractor de OCR (en el runner, mas 2 skipped: las 2 imagenes reales de LACTOVI, solo en hall9000). Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."
     },
     "tests-puros/word_tests": {
       "patron": "^23 passed",
