@@ -3031,15 +3031,34 @@ esac
 exit "$rc"
 """
 
-# `find` falso: con STUB_FIND_ERR emite por stderr `find: '<ruta>': <error>` y sale con STUB_FIND_RC. Igual que el real,
-# el mensaje depende del idioma: con LC_ALL=C usa comillas ASCII y si no, las tipograficas (que el bloque no parsea).
+# `find` falso POR MONTAJE: cada invocacion recorre solo el montaje que recibe como primer argumento (como -xdev: lo
+# que hay en otro montaje no se ve desde este). Exige los argumentos que el bloque promete (-xdev, -type f, -user
+# jaxsvc, -perm /6000) y LC_ALL=C. El comportamiento de cada montaje sale de STUB_FIND_MAP, lineas `TARGET|accion|arg`:
+# `setuid|<ruta>` imprime esa ruta, `eacces` / `eio` / `silencio` fallan con rc 1 (los dos primeros con su mensaje de
+# find en comillas ASCII). Un montaje que no esta en el mapa no tiene nada (salvo STUB_SETUID, que se imprime).
 _STUB_FIND = """#!/bin/sh
-[ -n "$STUB_SETUID" ] && echo "$STUB_SETUID"
-if [ -n "$STUB_FIND_ERR" ]; then
-  if [ "$LC_ALL" = C ]; then q1="'"; q2="'"; else q1='\u2018'; q2='\u2019'; fi
-  echo "find: ${q1}${STUB_FIND_RUTA}${q2}: ${STUB_FIND_ERR}" >&2
-fi
-exit "${STUB_FIND_RC:-0}"
+echo "find $*" >> "$STUB_DIR/log"
+case " $* " in *" -xdev "*" -type f "*" -user jaxsvc "*" -perm /6000 "*) ;; *)
+  echo "find: argumentos inesperados: $*" >&2; exit 2 ;; esac
+[ "$LC_ALL" = C ] || { echo "find: falta LC_ALL=C" >&2; exit 2; }
+acc=$(printf '%s\n' "$STUB_FIND_MAP" | awk -F'|' -v t="$1" '$1 == t { a = $2; r = $3 } END { print a "|" r }')
+accion="${acc%%|*}"; arg="${acc#*|}"
+case "$accion" in
+  setuid) echo "$arg" ;;
+  eacces) echo "find: '$1': Permission denied" >&2; exit 1 ;;
+  eio) echo "find: '$1': Input/output error" >&2; exit 1 ;;
+  silencio) exit 1 ;;
+  *) [ -z "$STUB_SETUID" ] || echo "$STUB_SETUID" ;;
+esac
+exit 0
+"""
+
+# `findmnt` falso: exige la forma exacta que usa el bloque y devuelve STUB_FINDMNT (filas `ID TARGET FSTYPE OPTIONS`
+# crudas, como `findmnt -r`: el TARGET sale escapado). STUB_FINDMNT_RC hace que falle.
+_STUB_FINDMNT = """#!/bin/sh
+[ "$*" = "-rn --kernel -o ID,TARGET,FSTYPE,OPTIONS" ] || { echo "findmnt: argumentos inesperados: $*" >&2; exit 2; }
+[ -z "$STUB_FINDMNT_RC" ] || { echo "findmnt: fallo simulado" >&2; exit "$STUB_FINDMNT_RC"; }
+printf '%s\n' "${STUB_FINDMNT-1 / ext4 rw,relatime}"
 """
 
 _UNIDADES_ESPERADAS_DE_PRUEBA = ("jax-las-manos.service jax-platform.service jax-catalogo-modelos.service "
@@ -3080,7 +3099,7 @@ def _entorno_del_bloque(tmp_path: Path, uid_jaxsvc: int, *, extra: dict | None =
         "systemctl": _STUB_SYSTEMCTL,
         "ps": '#!/bin/sh\nif [ -s "$STUB_DIR/ps" ]; then cat "$STUB_DIR/ps"; exit 0; fi\nexit 1\n',
         "find": _STUB_FIND,
-        "findmnt": '#!/bin/sh\nprintf "%s\\n" "${STUB_FINDMNT-/ ext4 rw,relatime}"\n',
+        "findmnt": _STUB_FINDMNT,
         "crontab": '#!/bin/sh\nif [ -n "$STUB_CRON" ]; then echo "$STUB_CRON"; exit 0; fi\necho "no crontab for jaxsvc" >&2\nexit 1\n',
     }
     for nombre, texto in scripts.items():
@@ -3379,52 +3398,53 @@ def test_el_trap_conserva_el_codigo_de_salida_del_fallo_original(tmp_path, _iden
     assert _llamadas(log, "start"), "no restauró tras el fallo del guion"
 
 
-# --- defecto 1: un montaje FUSE ilegible no debe cortar la premisa del setuid, y nada mas que eso -----------------
+# --- defecto 1 (rediseno, ronda 3): la premisa del setuid se comprueba POR MONTAJE --------------------------------
+# Un setuid solo da uid en un sistema de archivos montado SIN nosuid. El bloque lista los montajes visibles
+# (`findmnt --kernel`, vale el ultimo de un TARGET repetido), salta los nosuid y los virtuales sin archivos, corta en
+# un FUSE sin nosuid, y recorre cada uno de los demas con `find <TARGET> -xdev`: cualquier error de find corta.
 
-_MONTAJE = "/home/x/montaje"
-_FINDMNT_CON_FUSE = f"/ ext4\n/boot ext4\n{_MONTAJE} fuse.sshfs\n"
-
-
-def _env_find(ruta: str, error: str, *, fstype: str, rc: str = "1", opciones: str = "rw,nosuid,nodev",
-              target: str = _MONTAJE) -> dict:
-    """`findmnt -rn -o TARGET,FSTYPE,OPTIONS` crudo: el TARGET sale escapado (\\x20, \\x0a), no decodificado."""
-    return {"STUB_FIND_ERR": error, "STUB_FIND_RUTA": ruta, "STUB_FIND_RC": rc,
-            "STUB_FINDMNT": f"/ ext4 rw\n/boot ext4 rw\n{target} {fstype} {opciones}"}
+_TIPOS_VIRTUALES = ["proc", "sysfs", "cgroup", "cgroup2", "debugfs", "tracefs", "securityfs", "pstore", "bpf",
+                    "configfs", "efivarfs", "fusectl", "autofs", "mqueue", "hugetlbfs", "devpts", "binfmt_misc",
+                    "nsfs", "rpc_pipefs", "selinuxfs", "binderfs"]
 
 
-@pytest.mark.parametrize("marca,modo", _BLOQUES)
-def test_un_permission_denied_en_un_punto_de_montaje_fuse_no_corta_el_bloque(tmp_path, _identidades, marca, modo):
-    """hall9000 tiene un sshfs que da EACCES hasta a root: find sale 1. Con `LC_ALL=C` el mensaje lleva comillas ASCII
-    y el path coincide EXACTO con un punto de montaje `fuse*` de findmnt: se tolera y el bloque sigue."""
-    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid,
-                               env=_env_find(_MONTAJE, "Permission denied", fstype="fuse.sshfs"))
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert any(l == f"permisos {modo}" for l in log), "el guion no corrio"
+def _env_montajes(filas: list, mapa: list | None = None, **extra) -> dict:
+    env = {"STUB_FINDMNT": "\n".join(filas), "STUB_FIND_MAP": "\n".join(mapa or [])}
+    env.update(extra)
+    return env
+
+
+def _finds(log: list) -> list:
+    return [l for l in log if l.startswith("find ")]
 
 
 @pytest.mark.parametrize("marca,modo", _BLOQUES)
 @pytest.mark.parametrize("que,env,fragmento", [
-    ("Permission denied en un path que NO es un montaje FUSE",
-     _env_find(_MONTAJE, "Permission denied", fstype="ext4"), f"{_MONTAJE}': Permission denied"),
-    ("Permission denied en un subdirectorio de un montaje FUSE (no es el punto exacto)",
-     _env_find(_MONTAJE + "/sub", "Permission denied", fstype="fuse.sshfs"), f"{_MONTAJE}/sub': Permission denied"),
-    ("otro error (EIO) en un punto de montaje FUSE",
-     _env_find(_MONTAJE, "Input/output error", fstype="fuse.sshfs"), f"{_MONTAJE}': Input/output error"),
-    ("find sale 1 sin ningun mensaje", {"STUB_FIND_RC": "1"}, "sin mensaje"),
-    ("punto de montaje FUSE SIN nosuid (un setuid de jaxsvc ahi dentro seria operante)",
-     _env_find(_MONTAJE, "Permission denied", fstype="fuse.sshfs", opciones="rw,nodev,relatime"),
-     f"{_MONTAJE}': Permission denied"),
-    ("un TARGET FUSE con un salto de linea escapado (\\x0a) no habilita el path de despues del salto",
-     _env_find("/secret", "Permission denied", fstype="fuse.sshfs", target="/tmp/evil\\x0a/secret"),
-     "/secret': Permission denied"),
-    ("el path del mensaje trae una barra invertida (nunca se tolera, aunque 'coincida' con un TARGET escapado)",
-     _env_find("/tmp/evil\\x0a/secret", "Permission denied", fstype="fuse.sshfs", target="/tmp/evil\\x0a/secret"),
-     "evil"),
-    ("el path del mensaje trae un caracter de control",
-     _env_find("/tmp/ev\til", "Permission denied", fstype="fuse.sshfs", target="/tmp/ev\\x09il"),
-     "ev"),
+    ("un montaje con suid DENTRO de RAIZ, con un setuid de jaxsvc (un find -xdev desde / no entra)",
+     _env_montajes(["1 / ext4 rw,relatime", "2 /srv/raiz/montaje xfs rw,relatime"],
+                   ["/srv/raiz/montaje|setuid|/srv/raiz/montaje/escalar"]), "/srv/raiz/montaje/escalar"),
+    ("dos filas con el mismo TARGET: la primera nosuid y la visible (la ultima) suid, con un setuid",
+     _env_montajes(["1 / ext4 rw,relatime", "5 /mnt/x ext4 rw,nosuid", "9 /mnt/x ext4 rw,relatime"],
+                   ["/mnt/x|setuid|/mnt/x/escalar"]), "/mnt/x/escalar"),
+    ("un setuid hallado en el montaje raiz", {"STUB_SETUID": "/usr/local/bin/escalar"}, "/usr/local/bin/escalar"),
+    ("un FUSE sin nosuid", _env_montajes(["1 / ext4 rw", "7 /mnt/f fuse.sshfs rw,nodev"]), "FUSE sin nosuid"),
+    ("un fuse desnudo sin nosuid", _env_montajes(["1 / ext4 rw", "7 /mnt/f fuse rw"]), "FUSE sin nosuid"),
+    ("fuseblk sin nosuid", _env_montajes(["1 / ext4 rw", "7 /mnt/f fuseblk rw"]), "FUSE sin nosuid"),
+    ("findmnt falla", {"STUB_FINDMNT_RC": "1"}, "findmnt"),
+    ("findmnt devuelve una fila con menos de cuatro campos", _env_montajes(["1 / ext4"]), "findmnt"),
+    ("findmnt no lista nada", _env_montajes([""]), "ningún montaje"),
+    ("un montaje normal sin nosuid con EACCES",
+     _env_montajes(["1 / ext4 rw", "2 /mnt/n ext4 rw"], ["/mnt/n|eacces|"]), "Permission denied"),
+    ("un montaje normal sin nosuid con EIO",
+     _env_montajes(["1 / ext4 rw", "2 /mnt/n ext4 rw"], ["/mnt/n|eio|"]), "Input/output error"),
+    ("find sale 1 sin ningun mensaje",
+     _env_montajes(["1 / ext4 rw", "2 /mnt/n ext4 rw"], ["/mnt/n|silencio|"]), "falló"),
+    ("un TARGET con un escape distinto de \\x20 (un salto de linea) no se interpreta",
+     _env_montajes(["1 / ext4 rw", "2 /mnt/a\\x0ab ext4 rw"]), "escape"),
+    ("nosuid tiene que ser una opcion COMPLETA (nosuidx no vale)",
+     _env_montajes(["1 / ext4 rw", "4 /mnt/s ext4 rw,nosuidx"], ["/mnt/s|setuid|/mnt/s/escalar"]), "/mnt/s/escalar"),
 ])
-def test_cualquier_otro_error_de_find_corta_antes_de_detener_nada(tmp_path, _identidades, marca, modo, que, env, fragmento):
+def test_la_premisa_del_setuid_corta_antes_de_detener_nada(tmp_path, _identidades, marca, modo, que, env, fragmento):
     r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=env)
     assert r.returncode != 0 and "NO CUMPLE" in r.stderr, (que, r.stdout + r.stderr)
     assert fragmento in r.stderr, f"{que}: el mensaje no dice que fallo: {r.stderr}"
@@ -3433,13 +3453,51 @@ def test_cualquier_otro_error_de_find_corta_antes_de_detener_nada(tmp_path, _ide
 
 
 @pytest.mark.parametrize("marca,modo", _BLOQUES)
-def test_un_error_fuse_tolerado_no_oculta_un_setuid_hallado(tmp_path, _identidades, marca, modo):
-    """Tolerar el montaje no relaja la premisa: si find tambien lista un setuid de jaxsvc, se corta."""
-    env = _env_find(_MONTAJE, "Permission denied", fstype="fuse.sshfs")
-    env["STUB_SETUID"] = "/usr/local/bin/escalar"
-    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=env)
-    assert r.returncode != 0 and "setuid" in r.stderr.lower() and "/usr/local/bin/escalar" in r.stderr, r.stderr
-    assert not _llamadas(log, "stop")
+def test_un_fuse_nosuid_ilegible_no_corta_y_ni_se_recorre(tmp_path, _identidades, marca, modo):
+    """hall9000: el sshfs da EACCES hasta a root. Con nosuid un setuid ahi no da uid: se salta, no se lo recorre."""
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid,
+                               env=_env_montajes(["1 / ext4 rw,relatime", "2 /home/x/montaje fuse.sshfs rw,nosuid,nodev"],
+                                                 ["/home/x/montaje|eacces|"]))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert any(l == f"permisos {modo}" for l in log), "el guion no corrio"
+    assert not any("/home/x/montaje" in l for l in _finds(log)), "recorrio un montaje nosuid"
+    assert "salto /home/x/montaje" in r.stdout
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_con_un_target_repetido_vale_el_montaje_visible_que_es_el_ultimo(tmp_path, _identidades, marca, modo):
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid,
+                               env=_env_montajes(["1 / ext4 rw,relatime", "5 /mnt/x ext4 rw,relatime", "9 /mnt/x ext4 rw,nosuid"],
+                                                 ["/mnt/x|setuid|/mnt/x/escalar"]))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not any("/mnt/x" in l for l in _finds(log)), "recorrio un TARGET cuyo montaje visible es nosuid"
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_los_sistemas_virtuales_sin_archivos_de_usuario_no_se_recorren(tmp_path, _identidades, marca, modo):
+    """Sin nosuid pero sin archivos de usuario (o con un autofs que montaria algo al recorrerlo): se saltan aunque
+    recorrerlos diera EACCES."""
+    filas = ["1 / ext4 rw,relatime"] + [f"{10 + n} /v/{t} {t} rw" for n, t in enumerate(_TIPOS_VIRTUALES)]
+    mapa = [f"/v/{t}|eacces|" for t in _TIPOS_VIRTUALES]
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=_env_montajes(filas, mapa))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert [l for l in _finds(log) if "/v/" in l] == [], "recorrio un sistema virtual"
+    assert all(f"salto /v/{t} " in r.stdout for t in _TIPOS_VIRTUALES)
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_cada_montaje_sin_nosuid_se_recorre_con_su_find_xdev_sin_deduplicar_y_los_nosuid_se_saltan(tmp_path, _identidades, marca, modo):
+    filas = ["1 / ext4 rw,relatime", "2 /mnt/mi\\x20montaje xfs rw,relatime", "3 /mnt/uno ext4 rw,relatime",
+             "4 /mnt/dos ext4 rw,relatime",   # el mismo dispositivo en dos TARGET: se recorren los dos
+             "5 /snap/y squashfs ro,relatime", "6 /var/o overlay rw", "7 /boot/efi vfat rw",
+             "8 /snap/x squashfs ro,nosuid,nodev"]
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=_env_montajes(filas))
+    assert r.returncode == 0, r.stdout + r.stderr
+    recorridos = _finds(log)
+    for destino in ["/", "/mnt/mi montaje", "/mnt/uno", "/mnt/dos", "/snap/y", "/var/o", "/boot/efi"]:
+        assert f"find {destino} -xdev -type f -user jaxsvc -perm /6000 -print" in recorridos, (destino, recorridos)
+    assert len(recorridos) == 7, recorridos
+    assert "salto /snap/x" in r.stdout
 
 
 # --- defecto 2: una unidad solo cuenta como restaurada si esta `active` y ESTABLE -----------------------------------
@@ -3473,15 +3531,6 @@ def test_una_unidad_active_y_estable_se_da_por_restaurada_y_se_miro_nrestarts(tm
     assert r.returncode == 0, r.stdout + r.stderr
     consultas = [l for l in log if l.startswith("systemctl show -p NRestarts")]
     assert any(l.endswith("jax-platform.service") for l in consultas), f"no leyo NRestarts: {log}"
-
-
-@pytest.mark.parametrize("marca,modo", _BLOQUES)
-def test_un_montaje_fuse_con_un_espacio_en_el_nombre_se_tolera_comparando_la_forma_escapada(tmp_path, _identidades, marca, modo):
-    """El unico escape que se desanda es el espacio: find imprime `/a b`, findmnt -r imprime `/a\\x20b`."""
-    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid,
-                               env=_env_find("/mnt/mi montaje", "Permission denied", fstype="fuse.sshfs",
-                                             target="/mnt/mi\\x20montaje"))
-    assert r.returncode == 0, r.stdout + r.stderr
 
 
 # --- ronda 2: ESTABLE >= 1, sin OK prematuro, y la caida final --------------------------------------------------
