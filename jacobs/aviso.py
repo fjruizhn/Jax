@@ -1,5 +1,5 @@
 """
-Jacobs — Aviso por Telegram cuando un pipeline termina.
+Jacobs — Aviso gobernado por Telegram cuando un pipeline termina.
 
 Dónde encaja (Task 6, plan 2026-09-18-historial-y-arreglos-de-pipeline): el
 correo lo manda jax-platform (Task 8, `backend/aviso_pipeline.py`) -- Telegram
@@ -8,12 +8,10 @@ lo manda este repo, porque es el único que tiene ese canal
 las_manos/motor_registry/worker.py). Este módulo NO escribe un segundo
 cliente de Telegram: arma el texto y reusa `send_telegram_alert` tal cual.
 
-Ruling 4 (progress.md de esta ronda, 2026-09-18) — por qué el mensaje no
-lleva contenido del pipeline: TELEGRAM_CHAT_ID es UNO SOLO para todo el
-sistema (reaper.py:96-97). Con más de un usuario, el aviso de cualquiera
-llegaría al mismo chat -- por eso `mensaje_de_fin` sólo arma nombre, estado y
-enlace, nunca la salida real del pipeline. Queda como límite conocido y
-documentado, no escondido; el día que haya un chat por usuario es otra ronda.
+La superficie se conecta a la frontera de salida gobernada: F2-B acredita
+PIPELINE_STATUS desde la persistencia canónica de Jacobs, F2-C renderiza el
+texto y F2-D valida la unidad de transporte antes de Telegram. El destino del
+bot sigue siendo el chat de operador configurado por `send_telegram_alert`.
 
 Por qué es fire-and-forget: `send_telegram_alert` hace su POST con
 timeout=10.0 (reaper.py:105). `_correr_pipeline` llama a
@@ -50,74 +48,41 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 
 logger = logging.getLogger("jacobs.aviso")
-
-# Estados terminales que `_correr_pipeline` puede escribir de verdad hoy
-# (jacobs/models.py: PipelineStatus). "failed" está en el enum pero ningún
-# camino de _correr_pipeline lo asigna todavía -- se traduce igual, por si
-# algún día se usa, sin que el mensaje se vea con el valor crudo.
-_ESTADOS_LEGIBLES = {
-    "completed": "completado",
-    "aborted": "abortado",
-    "failed": "fallido",
-    "expired": "expirado",
-    # Ronda de arreglo 2 (2026-09-18-arbitro-devuelve, spec §3.3): "que el
-    # aviso lo diga" -- un pipeline `disputed` NO es "completado", es una
-    # objeción del árbitro sin resolver que espera una decisión humana.
-    "disputed": "con objeción del árbitro sin resolver -- requiere tu decisión",
-}
 
 #: Fire-and-forget: referencia fuerte a las tareas en vuelo para que el GC no
 #: se las lleve antes de que terminen -- mismo gotcha y mismo remedio que
 #: `MemoryDB._pending_tasks` en jax/memory/db.py.
 _AVISO_TASKS: set[asyncio.Task] = set()
 
-#: Sin hardcoding del enlace: sale del entorno. Variables PROPIAS de este
-#: repo (Ruling de esta ronda, progress.md fila "6 ↔ 8": cada repo arma el
-#: enlace desde su propia variable, sin fuente compartida con jax-platform,
-#: aunque el valor real termine siendo el mismo dominio en producción).
-_ENV_FRONTEND_ORIGIN = "JAX_FRONTEND_ORIGIN"
-_ENV_DETAIL_PATH = "JAX_PIPELINE_DETAIL_PATH"
-_DEFAULT_FRONTEND_ORIGIN = "https://axioma-ia.io"
-_DEFAULT_DETAIL_PATH = "/historial/{pipeline_id}"
-
-
-def _enlace_detalle(pipeline_id: str) -> str:
-    origen = os.getenv(_ENV_FRONTEND_ORIGIN, _DEFAULT_FRONTEND_ORIGIN).rstrip("/")
-    ruta = os.getenv(_ENV_DETAIL_PATH, _DEFAULT_DETAIL_PATH)
-    return origen + ruta.format(pipeline_id=pipeline_id)
-
-
-def mensaje_de_fin(*, pipeline_id: str, nombre: str, estado: str, salida: str | None = None) -> str:
-    """Arma el texto del aviso. `salida` se acepta para que el llamador no
-    tenga que filtrarla él mismo -- el filtro vive ACÁ, en un solo lugar, y
-    deliberadamente se ignora (ver Ruling 4 en el docstring del módulo):
-    nunca entra al texto, sin importar qué le pase el caller."""
-    del salida
-    estado_legible = _ESTADOS_LEGIBLES.get(estado, estado)
-    return (
-        f"Pipeline '{nombre}' ({pipeline_id}) -- {estado_legible}.\n"
-        f"{_enlace_detalle(pipeline_id)}"
-    )
-
-
 async def _avisar(pipeline_id: str, nombre: str, estado: str) -> None:
     """El envío real, en background. Nunca lanza -- fail-soft CON rastro:
     cualquier fallo (excepción de red/timeout, o un `ok=False` de Telegram
     ya degradado por `send_telegram_alert`) queda en el log, nunca sube al
     caller ni se descarta en silencio."""
-    # Import perezoso: mismo patrón que las_manos/motor_registry/worker.py
-    # (T5, GAP2 Fase4) -- evita cualquier ciclo de import entre jacobs.aviso
-    # y jacobs.reaper, y permite que los tests parcheen
-    # `jacobs.reaper.send_telegram_alert` sin pelearse con el momento del
-    # import de este módulo.
-    from jacobs.reaper import send_telegram_alert
-
-    mensaje = mensaje_de_fin(pipeline_id=pipeline_id, nombre=nombre, estado=estado)
+    # Telegram recibe únicamente el texto ya renderizado y revalidado por la
+    # frontera compartida F2-C/F2-D. `nombre` y el estado del llamador no se
+    # interpolan: PIPELINE_STATUS se vuelve a resolver desde Jacobs canónico.
+    del nombre
     try:
-        resultado = await send_telegram_alert(mensaje)
+        from policy.governance.external_output import (
+            ExternalOutputChannelId,
+            GovernedExternalOutputAdapter,
+        )
+        from jacobs.governed_aviso import compose_pipeline_notice
+
+        envelope, context = await compose_pipeline_notice(
+            pipeline_id=pipeline_id, requested_status=estado,
+        )
+        adapter = GovernedExternalOutputAdapter.for_channel(
+            ExternalOutputChannelId.JACOBS_PIPELINE_NOTICE_TEXT_V1,
+        )
+        prepared = adapter.prepare_text(
+            envelope, context,
+            idempotency_key=f"jacobs-pipeline-notice:{pipeline_id}:{estado}",
+        )
+        committed = await adapter.commit(prepared, now=context.now())
     except asyncio.CancelledError:
         # MENOR (revisión final 2026-09-18): `except Exception` de abajo NO
         # atrapa esto -- desde Python 3.8 CancelledError hereda de
@@ -139,10 +104,10 @@ async def _avisar(pipeline_id: str, nombre: str, estado: str) -> None:
             pipeline_id, exc_info=True,
         )
         return
-    if not resultado["ok"]:
+    if committed.state.value != "OUTPUT_COMMITTED_TO_TRANSPORT":
         logger.error(
-            "Aviso Telegram de fin de pipeline %s no se pudo entregar: %s",
-            pipeline_id, resultado["error"],
+            "Aviso Telegram gobernado de fin de pipeline %s: estado de transporte %s",
+            pipeline_id, committed.state.value,
         )
 
 
