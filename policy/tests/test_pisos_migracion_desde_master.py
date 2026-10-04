@@ -49,6 +49,13 @@ def test_los_pasos_de_master_siguen_con_su_nombre_y_orden(jid):
     assert ahora[:len(antes)] == antes
 
 
+# Pisos que SUBIERON a propósito después de la migración (clave -> el piso de la fotografía). Para ellos ya no
+# se exige la igualdad byte a byte (se subió), sino que conserven la forma `^N passed, M skipped`, que N no baje y
+# que M no suba: lo mismo que exige el job `pisos-no-bajan` contra master. Se anota aquí y en docs/ci/pisos.md.
+PISOS_SUBIDOS = {"permisos-proyectos/permisos_proyectos"}  # Jax#340: 53 -> 198 passed, 2 -> 1 skipped
+FORMA = re.compile(r"^\^(\d+) passed, (\d+) skipped$")
+
+
 @pytest.mark.parametrize("piso", FOTO["pisos"], ids=lambda p: f"{p['job']}#{p['paso']}")
 def test_piso_de_master_copiado_byte_a_byte(piso):
     paso = ACTUAL["jobs"][piso["job"]]["steps"][piso["paso"]]
@@ -57,6 +64,13 @@ def test_piso_de_master_copiado_byte_a_byte(piso):
     clave, archivo = llamadas[0]
     assert archivo == piso["archivo"]
     entrada = DATOS["pisos"][clave]
+    if clave in PISOS_SUBIDOS:
+        antes, ahora = FORMA.match(piso["patron"]), FORMA.match(entrada["patron"])
+        assert antes and ahora, "un piso subido conserva la forma `^N passed, M skipped`"
+        assert int(ahora.group(1)) >= int(antes.group(1)), "N (passed) no puede bajar"
+        assert int(ahora.group(2)) <= int(antes.group(2)), "M (skipped) no puede subir"
+        assert f"{ahora.group(1)} tests CORRIDOS" in entrada["mensaje"]
+        return
     assert entrada["patron"] == piso["patron"]
     assert entrada["mensaje"] == piso["mensaje"]
 
