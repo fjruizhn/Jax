@@ -1852,8 +1852,11 @@ jobs:
           # 160 -> 162 (2026-10-03, Jax#338 ronda 18): +2 en _procesamiento_routes_test.py (sin Pillow,
           # un PNG con firma llamado `foto` da 503: el freno decide por contenido; `png_animado` viaja
           # como formato estable del contrato). Medido con este comando exacto: 162 passed.
-          grep -qE "^162 passed" /tmp/f2e-sr3-source || {
-            echo "PISO ROTO: se esperaban 162 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
+          # 162 -> 164 (2026-10-03, Jax#338 ronda 18, ajuste 2): +2 en _procesamiento_routes_test.py (un
+          # lote sobre el maximo de rutas y un project_uuid invalido dan 422 sin que el freno lea
+          # cabeceras). Medido con este comando exacto: 164 passed.
+          grep -qE "^164 passed" /tmp/f2e-sr3-source || {
+            echo "PISO ROTO: se esperaban 164 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
         env:
           PYTHONPATH: .:las_manos
       - name: Piso exacto de tests CORRIDOS
@@ -6022,8 +6025,9 @@ jobs:
           # 95 -> 98 (Jax#338 ronda 8): ver F2-E-SR3 (+3); medido: 98 passed.
           # 98 -> 99 (Jax#338 ronda 9, N29): ver F2-E-SR3 (+1); medido: 99 passed.
           # 99 -> 101 (Jax#338 ronda 18): ver F2-E-SR3 (+2); medido: 101 passed.
-          grep -qE "^101 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 101 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          # 101 -> 103 (Jax#338 ronda 18, ajuste 2): ver F2-E-SR3 (+2); medido: 103 passed.
+          grep -qE "^103 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 103 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # jax-14 (2026-10-03): freno de dependencias de extraccion. Piso exacto de
       # procesamiento/_dependencias_test.py: 29 passed (10 de la ronda 0 + 19 de la
