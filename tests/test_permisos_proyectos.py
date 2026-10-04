@@ -3156,8 +3156,10 @@ def test_si_una_unidad_activating_no_vuelve_a_active_el_rc_final_no_es_cero(tmp_
 
 
 _AVISO_DE_VENTANA = "durante la ventana el bloque no se interrumpe con Ctrl-C"
-_ACTIVAS_ANTES = ["jax-las-manos.service", "jax-platform.service", "jax-catalogo-modelos.service",
-                  "jax-catalogo-modelos.timer"]
+# en el orden de la LISTA del bloque (timers primero, luego los servicios por orden alfabetico): se detienen asi y se
+# arrancan al reves
+_ACTIVAS_ANTES = ["jax-catalogo-modelos.timer", "jax-catalogo-modelos.service", "jax-las-manos.service",
+                  "jax-platform.service"]
 
 
 def _correr_con_señales(marca: str, modo: str, tmp_path: Path, momento: str, señales: list, *, env_extra=None):
@@ -3248,7 +3250,7 @@ def test_la_linea_de_aviso_se_imprime_antes_de_detener_nada(tmp_path, _identidad
     assert r.returncode == 0, r.stderr
     texto = r.stdout + r.stderr
     assert (f"{_AVISO_DE_VENTANA}; si hace falta cortarlo, kill -9 y después: sudo systemctl start "
-            "jax-catalogo-modelos.timer jax-catalogo-modelos.service jax-platform.service jax-las-manos.service") in texto, texto
+            + " ".join(_ACTIVAS_ANTES[::-1])) in texto, texto
 
 
 @pytest.mark.parametrize("marca,modo", _BLOQUES)
