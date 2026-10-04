@@ -323,8 +323,8 @@ def test_con_una_conexion_colgada_sale_con_cero_tras_el_tope_y_corta_al_cliente(
         colgada.settimeout(2)
         try:
             assert colgada.recv(1) == b"", "el cliente colgado debía ver el cierre"
-        except ConnectionResetError:
-            pass  # abort() = RST: también es un corte
+        except ConnectionResetError:  # fail-soft: abort() cierra con RST; un reset ES el corte que la prueba espera
+            pass
     finally:
         colgada.close()
         _matar(proc)
@@ -499,7 +499,7 @@ def test_apagar_deja_de_escuchar_de_inmediato_y_aborta_lo_colgado_al_agotar_el_t
         await tarea
         try:
             assert await asyncio.wait_for(lector.read(), 2) == b""
-        except ConnectionResetError:
+        except ConnectionResetError:  # fail-soft: abort() cierra con RST; un reset ES el corte que la prueba espera
             pass
         escritor.close()
         with pytest.raises(OSError, match="registro_cerrado"):
