@@ -10,19 +10,25 @@ workflow cuyo archivo supera unos 512 000 bytes («workflow file issue»): se mi
 
 1. Medir el número nuevo (en el entorno del runner, no en el local).
 2. Editar la entrada de la clave en `ci/pisos.json`: `patron` (la expresión que busca
-   `ci/piso.py` al inicio de una línea de la salida de pytest) y `mensaje` (lo que dice el job al fallar).
+   `.github/ci/piso.py` al inicio de una línea de la salida de pytest) y `mensaje` (lo que dice el job al fallar).
 3. Anotar aquí, bajo la clave, la línea de historia con fecha y motivo.
 
 No hace falta tocar `.github/workflows/`. Un piso nunca tiene valor por defecto: si
 `ci/pisos.json` falta, no parsea o no trae la clave, el paso falla cerrado
-(`ci/piso.py` sale con código 2).
+(`.github/ci/piso.py` sale con código 2).
 
-Cada paso del workflow llama `python3 ci/piso.py verificar <clave> <archivo-de-salida>`.
+Cada paso del workflow llama `python3 .github/ci/piso.py verificar <clave> <archivo-de-salida>`.
 La clave es `<job>/<archivo temporal que lee>`. El único mínimo numérico que no es un
 `patron` es `memory-b9-regression/casos`, en la sección `minimos`.
 
 Como `ci/pisos.json` es un dato y no lógica del workflow, un PR que solo sube un piso
-no toca `.github/workflows/` (archivos que integra Fernando).
+no toca `.github/workflows/`. Para que eso no sea una forma de rebajar un piso sin pasar por
+Fernando, el lector (`.github/ci/piso.py`) y el comparador (`.github/ci/comparar_pisos.py`)
+viven en `.github/`, reservado a Fernando. El paso «Los pisos no bajan respecto de la punta de
+master» de `archivos-de-test-en-ci` falla si, respecto de `origin/master`, baja un N (passed),
+sube un M (skipped), cambia la forma o el archivo de un patrón, desaparece una clave o baja el
+mínimo del B9. Subir N y agregar claves está permitido. Si la punta aún no tiene `ci/pisos.json`
+(el PR que lo introdujo), los pisos de la base se derivan del `policy.yml` de esa misma punta.
 
 ---
 
@@ -4308,9 +4314,10 @@ Sin historia anotada en el workflow.
 
 ## `archivos-de-test-en-ci/pisos`
 
-Patrón vigente (2026-10-03): `^140 passed`
+Patrón vigente (2026-10-04): `^213 passed`
 
-Piso nuevo de esta migración: `policy/tests/test_pisos_fuera_del_workflow.py` (permanente) más
-`policy/tests/test_pisos_migracion_desde_master.py` (de migración: compara con la fotografía de
-master 364ded9). Medido 2026-10-03 en Python 3.14.4: 140 passed. Exacto: una prueba que
-desaparezca deja pasar en silencio la forma que cubría.
+Piso nuevo de la migración: `policy/tests/test_pisos_fuera_del_workflow.py` (permanente),
+`policy/tests/test_pisos_migracion_desde_master.py` (de migración, compara con la fotografía de
+master 364ded9) y `policy/tests/test_comparar_pisos.py` (el comparador). 140 -> 213 el
+2026-10-04 al agregar el comparador y sus 70 casos más 3 pruebas de gobernanza. Medido en
+Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.

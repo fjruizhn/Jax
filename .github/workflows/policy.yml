@@ -63,7 +63,7 @@ jobs:
             tests/test_las_voces_faro_mcp_client.py \
             tests/test_las_voces_faro_paquete.py \
             tests/test_las_voces_qwen_auto.py 2>&1 | tee /tmp/las-voces-faro-readonly
-          python3 ci/piso.py verificar las-voces-faro-readonly/las-voces-faro-readonly /tmp/las-voces-faro-readonly || exit $?
+          python3 .github/ci/piso.py verificar las-voces-faro-readonly/las-voces-faro-readonly /tmp/las-voces-faro-readonly || exit $?
 
   memory-b9-regression:
     runs-on: ubuntu-latest
@@ -125,7 +125,7 @@ jobs:
             tests/test_url_proveedor_workers_memoria.py \
             tests/test_legacy_adoption.py \
             -q --junitxml="$RUNNER_TEMP/memory-b9.xml"
-          MINIMO_CASOS=$(python3 ci/piso.py minimo memory-b9-regression/casos) || exit $?
+          MINIMO_CASOS=$(python3 .github/ci/piso.py minimo memory-b9-regression/casos) || exit $?
           export MINIMO_CASOS
           python - <<'PY'
           import os
@@ -305,11 +305,15 @@ jobs:
         # Medido 2026-09-18 en venv limpio: 7 passed.
         run: |
           python -m pytest -q policy/tests/test_archivos_de_test_wireados_en_ci.py 2>&1 | tee /tmp/wireados
-          python3 ci/piso.py verificar archivos-de-test-en-ci/wireados /tmp/wireados || exit $?
+          python3 .github/ci/piso.py verificar archivos-de-test-en-ci/wireados /tmp/wireados || exit $?
       - name: Piso exacto de tests CORRIDOS de los pisos fuera del workflow
         run: |
-          python -m pytest -q policy/tests/test_pisos_fuera_del_workflow.py policy/tests/test_pisos_migracion_desde_master.py 2>&1 | tee /tmp/pisos
-          python3 ci/piso.py verificar archivos-de-test-en-ci/pisos /tmp/pisos || exit $?
+          python -m pytest -q policy/tests/test_pisos_fuera_del_workflow.py policy/tests/test_pisos_migracion_desde_master.py policy/tests/test_comparar_pisos.py 2>&1 | tee /tmp/pisos
+          python3 .github/ci/piso.py verificar archivos-de-test-en-ci/pisos /tmp/pisos || exit $?
+      - name: Los pisos no bajan respecto de la punta de master
+        run: |
+          git fetch --no-tags --depth=1 origin +refs/heads/master:refs/remotes/origin/master || exit $?
+          python3 .github/ci/comparar_pisos.py origin/master || exit $?
 
   ci-usa-la-mariadb-de-produccion:
     runs-on: ubuntu-latest
@@ -344,14 +348,14 @@ jobs:
         # deja pasar en silencio la forma que cubria.
         run: |
           python -m pytest -q policy/tests/test_claude_subprocess_solo_via_sandbox.py 2>&1 | tee /tmp/scanner
-          python3 ci/piso.py verificar no-naked-claude-subprocess/scanner /tmp/scanner || exit $?
+          python3 .github/ci/piso.py verificar no-naked-claude-subprocess/scanner /tmp/scanner || exit $?
       - name: Piso exacto del control "un Titular solo nace en exigir_titular"
         # 9 tests (MINOR-16, ronda 2): 7 autopruebas del detector + el escaneo que ve el
         # arbol y el real. Medido con JAX_PLATFORM_REPO_ROOT=/nonexistent. Exacto: una
         # autoprueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           python -m pytest -q policy/tests/test_titular_solo_via_exigir_titular.py 2>&1 | tee /tmp/titular
-          python3 ci/piso.py verificar no-naked-claude-subprocess/titular /tmp/titular || exit $?
+          python3 .github/ci/piso.py verificar no-naked-claude-subprocess/titular /tmp/titular || exit $?
       - name: Piso exacto del control "quien llama a run_cli cablea preparar_arranque"
         # 7 tests (MINOR-35, auditoria del SHA 174da8c): el escaneo del arbol real (hoy sin
         # llamadores, pasa vacio a proposito) + 6 autopruebas sobre snippets. Medido con
@@ -359,13 +363,13 @@ jobs:
         # pasar un llamador sin arranque cuando los pasos 6 y 9 lo agreguen.
         run: |
           python -m pytest -q policy/tests/test_run_cli_solo_con_preparar_arranque.py 2>&1 | tee /tmp/arranque
-          python3 ci/piso.py verificar no-naked-claude-subprocess/arranque /tmp/arranque || exit $?
+          python3 .github/ci/piso.py verificar no-naked-claude-subprocess/arranque /tmp/arranque || exit $?
       - name: Piso exacto de la guardia del arranque del Ejecutor
         # 5 tests (Ejecutor SP1 plan 6, 2026-09-17): nadie usa remoto_claude ni vigilar sin
         # exigir_contratos. Exacto: uno que desaparezca deja pasar un lanzador sin contratos.
         run: |
           python -m pytest -q policy/tests/test_ejecutor_lanza_solo_con_contratos.py 2>&1 | tee /tmp/lanza
-          python3 ci/piso.py verificar no-naked-claude-subprocess/lanza /tmp/lanza || exit $?
+          python3 .github/ci/piso.py verificar no-naked-claude-subprocess/lanza /tmp/lanza || exit $?
 
   # El scanner de arriba (no-naked-claude-subprocess) protege que nadie
   # lance `claude` fuera de hyde_sandbox.py -- pero hasta 2026-08-25 la
@@ -388,7 +392,7 @@ jobs:
       # run_sandboxed_claude toma el lock compartido) dejaba el job en verde.
       - run: |
           python -m pytest _hyde_sandbox_test.py -q 2>&1 | tee /tmp/hydesb
-          python3 ci/piso.py verificar hyde-sandbox-unit/hydesb /tmp/hydesb || exit $?
+          python3 .github/ci/piso.py verificar hyde-sandbox-unit/hydesb /tmp/hydesb || exit $?
       # Golden de wrap_hyde_command (D-4, facetas-por-suscripcion, 2026-10-01):
       # el argv y el env de Hyde congelados ANTES de que pase al nucleo comun
       # cli_sandbox. Piso exacto: 3 tests (coincide con la golden, la fixture no
@@ -396,7 +400,7 @@ jobs:
       - run: python -m pytest _hyde_wrap_golden_test.py -v
       - run: |
           python -m pytest _hyde_wrap_golden_test.py -q 2>&1 | tee /tmp/golden
-          python3 ci/piso.py verificar hyde-sandbox-unit/golden /tmp/golden || exit $?
+          python3 .github/ci/piso.py verificar hyde-sandbox-unit/golden /tmp/golden || exit $?
 
   # cli_sandbox: nucleo comun del confinamiento de CLIs de suscripcion
   # (facetas-por-suscripcion, 2026-10-01, paso 1). El archivo mezcla logica pura
@@ -426,7 +430,7 @@ jobs:
       - run: python -m pytest _cli_sandbox_test.py -v
       - run: |
           python -m pytest _cli_sandbox_test.py -q 2>&1 | tee /tmp/clisb
-          python3 ci/piso.py verificar cli-sandbox-unit/clisb /tmp/clisb || exit $?
+          python3 .github/ci/piso.py verificar cli-sandbox-unit/clisb /tmp/clisb || exit $?
           if grep -qE "skipped" /tmp/clisb; then
             echo "HAY TESTS SALTADOS: la contencion real no se ejercito."; exit 1; fi
 
@@ -456,7 +460,7 @@ jobs:
       - run: python -m pytest tests/test_faro_paquete.py tests/test_faro_puerto.py tests/test_faro_puerto_e2e.py tests/test_faro_transporte.py tests/test_faro_cadena.py tests/test_faro_requirements.py tests/test_faro_aviso.py tests/test_faro_topes.py tests/test_faro_control.py tests/test_faro_lanzador.py tests/test_faro_acl.py -v
       - run: |
           python -m pytest tests/test_faro_paquete.py tests/test_faro_puerto.py tests/test_faro_puerto_e2e.py tests/test_faro_transporte.py tests/test_faro_cadena.py tests/test_faro_requirements.py tests/test_faro_aviso.py tests/test_faro_topes.py tests/test_faro_control.py tests/test_faro_lanzador.py tests/test_faro_acl.py -q 2>&1 | tee /tmp/faro
-          python3 ci/piso.py verificar faro-fase0/faro /tmp/faro || exit $?
+          python3 .github/ci/piso.py verificar faro-fase0/faro /tmp/faro || exit $?
           if grep -qE "skipped" /tmp/faro; then
             echo "HAY TESTS SALTADOS: el Faro se ejercita completo o no cuenta."; exit 1; fi
 
@@ -488,7 +492,7 @@ jobs:
       - run: python -m pytest tests/test_faro_bitacora_db.py tests/test_faro_topes_db.py -v
       - run: |
           python -m pytest tests/test_faro_bitacora_db.py tests/test_faro_topes_db.py -q 2>&1 | tee /tmp/faro-db
-          python3 ci/piso.py verificar faro-bitacora-db/faro-db /tmp/faro-db || exit $?
+          python3 .github/ci/piso.py verificar faro-bitacora-db/faro-db /tmp/faro-db || exit $?
           if grep -qE "skipped" /tmp/faro-db; then
             echo "HAY TESTS SALTADOS: la bitacora se prueba contra una base real o no cuenta."; exit 1; fi
 
@@ -519,7 +523,7 @@ jobs:
       - run: python -m pytest tests/test_faro_jaula_real.py -v
       - run: |
           python -m pytest tests/test_faro_jaula_real.py -q 2>&1 | tee /tmp/faro-jaula
-          python3 ci/piso.py verificar faro-jaula/faro-jaula /tmp/faro-jaula || exit $?
+          python3 .github/ci/piso.py verificar faro-jaula/faro-jaula /tmp/faro-jaula || exit $?
           if grep -qE "skipped" /tmp/faro-jaula; then
             echo "HAY TESTS SALTADOS: la jaula se ejercita con bwrap y uids reales o no cuenta."; exit 1; fi
 
@@ -614,7 +618,7 @@ jobs:
       - run: |
           python -m pytest jacobs/_facet_health_io_test.py jacobs/_store_indexes_test.py \
             -q 2>&1 | tee /tmp/out
-          python3 ci/piso.py verificar facet-health-io/out /tmp/out || exit $?
+          python3 .github/ci/piso.py verificar facet-health-io/out /tmp/out || exit $?
 
   # Task 9 (2026-09-18, historial-y-arreglos-de-pipeline): el historial de la
   # Mesa necesita prompt/modelo_real/depends_on por paso en
@@ -650,7 +654,7 @@ jobs:
       - run: python -m pytest jacobs/_pipeline_results_historial_test.py -v
       - run: |
           python -m pytest jacobs/_pipeline_results_historial_test.py -q 2>&1 | tee /tmp/out
-          python3 ci/piso.py verificar pipeline-results-historial-db/out /tmp/out || exit $?
+          python3 .github/ci/piso.py verificar pipeline-results-historial-db/out /tmp/out || exit $?
 
   # Frente F (2026-09-16): contrato de sub-pipelines contra una MariaDB REAL.
   # Las tablas de Jacobs (jacobs_pipelines/steps/events y la nueva
@@ -782,7 +786,7 @@ jobs:
             tests/test_project_queries_mariadb.py tests/test_proyectos_e1_fks_mariadb.py \
             tests/test_proyectos_e1_migrar_mariadb.py tests/test_project_documents_schema_mariadb.py \
             tests/test_proyecto_activo_mariadb.py tests/test_proyectos_e2a_lactovi_mariadb.py scripts/_b9_revertir_005_test.py 2>&1 | tee /tmp/out
-          python3 ci/piso.py verificar subpipeline-contrato-db/out /tmp/out || exit $?
+          python3 .github/ci/piso.py verificar subpipeline-contrato-db/out /tmp/out || exit $?
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -881,7 +885,7 @@ jobs:
             tests/test_b9_persistent_api.py tests/test_b9_embedding_mapping_e2e.py tests/test_b9_scope_authority.py \
             tests/test_b9_shared_memory.py tests/test_b9_systemd_ownership.py \
             tests/test_b9_worker_composition.py tests/test_project_scope_authority.py 2>&1 | tee /tmp/out
-          python3 ci/piso.py verificar memory-vector-zero-io/out /tmp/out || exit $?
+          python3 .github/ci/piso.py verificar memory-vector-zero-io/out /tmp/out || exit $?
       - name: Publicar resumen de segunda corrida de memoria
         if: failure()
         run: |
@@ -990,7 +994,7 @@ jobs:
       # medido dos veces contra el arbol real, sin DB de por medio.
       - run: |
           python -m pytest _hyde_containment_test.py -q 2>&1 | tee /tmp/hyde
-          python3 ci/piso.py verificar hyde-containment/hyde /tmp/hyde || exit $?
+          python3 .github/ci/piso.py verificar hyde-containment/hyde /tmp/hyde || exit $?
 
   facet-resolver-seal:
     runs-on: ubuntu-latest
@@ -1009,7 +1013,7 @@ jobs:
       # exige el numero.
       - run: |
           PYTHONPATH=las_manos python -m pytest las_manos/_facet_resolver_seal_test.py -q 2>&1 | tee /tmp/seal
-          python3 ci/piso.py verificar facet-resolver-seal/seal /tmp/seal || exit $?
+          python3 .github/ci/piso.py verificar facet-resolver-seal/seal /tmp/seal || exit $?
 
   # Renombrado de `facet-resolver-sync` el 2026-09-01: el checker se generalizo
   # a FAMILIAS de espejos y ahora cubre tambien credential_resolver.
@@ -1052,7 +1056,7 @@ jobs:
       - run: PYTHONPATH=las_manos python -m pytest jacobs/_plan_timeout_ceiling_test.py -v
       - run: |
           PYTHONPATH=las_manos python -m pytest jacobs/_plan_timeout_ceiling_test.py -q 2>&1 | tee /tmp/ptc
-          python3 ci/piso.py verificar plan-timeout-ceiling/ptc /tmp/ptc || exit $?
+          python3 .github/ci/piso.py verificar plan-timeout-ceiling/ptc /tmp/ptc || exit $?
 
   mirror-sync:
     runs-on: ubuntu-latest
@@ -1077,7 +1081,7 @@ jobs:
       - run: python -m pytest scripts/_check_mirror_sync_test.py -v
       - run: |
           python -m pytest scripts/_check_mirror_sync_test.py -q 2>&1 | tee /tmp/ms
-          python3 ci/piso.py verificar mirror-sync/ms /tmp/ms || exit $?
+          python3 .github/ci/piso.py verificar mirror-sync/ms /tmp/ms || exit $?
       # La comparacion por AST de la familia `cola_uso` contra la copia REAL de
       # jax-platform (Task 7, 2026-09-15). Corre ACA y no en tests-puros porque
       # este es el unico job con el checkout de jax-platform: alla el mismo test
@@ -1127,7 +1131,7 @@ jobs:
         # del mismo checkout de jax-platform@master con Task 7b adentro.
         run: |
           python -m pytest tests/test_cola_uso_escritores.py -q 2>&1 | tee /tmp/cu
-          python3 ci/piso.py verificar mirror-sync/cu /tmp/cu || exit $?
+          python3 .github/ci/piso.py verificar mirror-sync/cu /tmp/cu || exit $?
       - name: El freno que escribe la plataforma mata el motor en vuelo
         env:
           JAX_PLATFORM_REPO_ROOT: /tmp/jax-platform
@@ -1135,7 +1139,7 @@ jobs:
         run: |
           pip install -r requirements.txt pytest-asyncio
           python -m pytest tests/test_interruptor_escritor_de_la_plataforma.py -q -rs 2>&1 | tee /tmp/ks
-          python3 ci/piso.py verificar mirror-sync/ks /tmp/ks || exit $?
+          python3 .github/ci/piso.py verificar mirror-sync/ks /tmp/ks || exit $?
 
   ollama-num-parallel:
     # Tripwire del invariante del que cuelga ENTERA la decision de
@@ -1164,7 +1168,7 @@ jobs:
         # silencio, que es como el scanner P10 estuvo meses verde sobre cero.
         run: |
           python -m pytest scripts/_check_ollama_num_parallel_test.py -q 2>&1 | tee /tmp/onp
-          python3 ci/piso.py verificar ollama-num-parallel/onp /tmp/onp || exit $?
+          python3 .github/ci/piso.py verificar ollama-num-parallel/onp /tmp/onp || exit $?
       - name: El tripwire es rojo cuando NO puede medir (fail-closed)
         # Sin proceso `ollama serve` no hay nada que medir, y eso es rojo --
         # no "no aplica". En este runner no hay Ollama, asi que el caso se
@@ -1212,7 +1216,7 @@ jobs:
       - name: Piso exacto de F2-E-SR source integrity regressions
         run: |
           python -m pytest tests/test_f2e_runtime_status_remediation.py -q 2>&1 | tee /tmp/f2e-sr
-          python3 ci/piso.py verificar governance/f2e-sr /tmp/f2e-sr || exit $?
+          python3 .github/ci/piso.py verificar governance/f2e-sr /tmp/f2e-sr || exit $?
         env:
           PYTHONPATH: .:las_manos
       - name: F2-E-SR3 Processing ownership and governed-status regressions
@@ -1227,7 +1231,7 @@ jobs:
             tests/test_governed_resolution.py \
             tests/test_governed_renderer.py \
             -q 2>&1 | tee /tmp/f2e-sr3
-          python3 ci/piso.py verificar governance/f2e-sr3 /tmp/f2e-sr3 || exit $?
+          python3 .github/ci/piso.py verificar governance/f2e-sr3 /tmp/f2e-sr3 || exit $?
         env:
           PYTHONPATH: .:las_manos
       - name: F2-E-SR3 Processing source authentication and routing regressions
@@ -1239,7 +1243,7 @@ jobs:
             tests/test_las_manos_auth_servicio.py \
             las_manos/_procesamiento_routes_test.py \
             -q 2>&1 | tee /tmp/f2e-sr3-source
-          python3 ci/piso.py verificar governance/f2e-sr3-source /tmp/f2e-sr3-source || exit $?
+          python3 .github/ci/piso.py verificar governance/f2e-sr3-source /tmp/f2e-sr3-source || exit $?
         env:
           PYTHONPATH: .:las_manos
       - name: Piso exacto de tests CORRIDOS
@@ -1268,7 +1272,7 @@ jobs:
         # 2 que pasan antes son declarados y validados por mutación.
         run: |
           python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py tests/test_governed_resolution.py tests/test_governed_renderer.py -q 2>&1 | tee /tmp/gov
-          python3 ci/piso.py verificar governance/gov /tmp/gov || exit $?
+          python3 .github/ci/piso.py verificar governance/gov /tmp/gov || exit $?
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en
@@ -1788,7 +1792,7 @@ jobs:
             tests/test_store_columna_descarte_acotada.py \
             tests/test_workspace_dir.py \
             2>&1 | tee /tmp/out
-          python3 ci/piso.py verificar tests-puros/out /tmp/out || exit $?
+          python3 .github/ci/piso.py verificar tests-puros/out /tmp/out || exit $?
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -1805,11 +1809,11 @@ jobs:
       - name: Ficha -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_ficha_test.py 2>&1 | tee /tmp/ficha_tests
-          python3 ci/piso.py verificar tests-puros/ficha_tests /tmp/ficha_tests || exit $?
+          python3 .github/ci/piso.py verificar tests-puros/ficha_tests /tmp/ficha_tests || exit $?
       - name: Resultado -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_resultado_test.py 2>&1 | tee /tmp/resultado_tests
-          python3 ci/piso.py verificar tests-puros/resultado_tests /tmp/resultado_tests || exit $?
+          python3 .github/ci/piso.py verificar tests-puros/resultado_tests /tmp/resultado_tests || exit $?
       # Task 3 (2026-09-20, procesamiento-archivos-nucleo): extractor de Excel
       # -- TODAS las hojas, no la que LibreOffice se digna a convertir (medido
       # 2026-09-20: 1 de 6, sin error y sin aviso). requirements-archivos.txt
@@ -1834,7 +1838,7 @@ jobs:
       - name: Excel -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_excel_test.py 2>&1 | tee /tmp/excel_tests
-          python3 ci/piso.py verificar tests-puros/excel_tests /tmp/excel_tests || exit $?
+          python3 .github/ci/piso.py verificar tests-puros/excel_tests /tmp/excel_tests || exit $?
 
       # Task 4 (2026-09-20/21, procesamiento-archivos-nucleo): PDF nativo
       # -- pdftotext destruye las tablas, y en un expediente financiero la
@@ -1894,7 +1898,7 @@ jobs:
       - name: PDF -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_pdf_test.py 2>&1 | tee /tmp/pdf_tests
-          python3 ci/piso.py verificar tests-puros/pdf_tests /tmp/pdf_tests || exit $?
+          python3 .github/ci/piso.py verificar tests-puros/pdf_tests /tmp/pdf_tests || exit $?
 
       # Task 5 (2026-09-21, procesamiento-archivos-nucleo): OCR -- PDF
       # escaneado e imagen. tesseract por subproceso, nunca por binding
@@ -1958,7 +1962,7 @@ jobs:
       - name: OCR -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_ocr_test.py 2>&1 | tee /tmp/ocr_tests
-          python3 ci/piso.py verificar tests-puros/ocr_tests /tmp/ocr_tests || exit $?
+          python3 .github/ci/piso.py verificar tests-puros/ocr_tests /tmp/ocr_tests || exit $?
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
@@ -2015,7 +2019,7 @@ jobs:
       - name: Word -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_word_test.py 2>&1 | tee /tmp/word_tests
-          python3 ci/piso.py verificar tests-puros/word_tests /tmp/word_tests || exit $?
+          python3 .github/ci/piso.py verificar tests-puros/word_tests /tmp/word_tests || exit $?
 
       # Task 7 (2026-09-20/21, procesamiento-archivos-nucleo): la compuerta
       # -- elige extractor por tipo, y NUNCA paga el caro (OCR) si el barato
@@ -2090,7 +2094,7 @@ jobs:
       - name: Compuerta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_compuerta_test.py 2>&1 | tee /tmp/compuerta_tests
-          python3 ci/piso.py verificar tests-puros/compuerta_tests /tmp/compuerta_tests || exit $?
+          python3 .github/ci/piso.py verificar tests-puros/compuerta_tests /tmp/compuerta_tests || exit $?
 
       # Task 8 (2026-09-21, procesamiento-archivos-nucleo): la ingesta con
       # cache -- la tarea que produce el ahorro real. Indexa por sha256 del
@@ -2218,7 +2222,7 @@ jobs:
       - name: Ingesta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_ingesta_test.py 2>&1 | tee /tmp/ingesta_tests
-          python3 ci/piso.py verificar tests-puros/ingesta_tests /tmp/ingesta_tests || exit $?
+          python3 .github/ci/piso.py verificar tests-puros/ingesta_tests /tmp/ingesta_tests || exit $?
 
       # Task 9 (2026-09-21, procesamiento-archivos-nucleo): mide si los
       # extractos SIRVEN -- el criterio §7.B corregido ese mismo dia (el
@@ -2252,7 +2256,7 @@ jobs:
       - name: Medidor de utilidad de extractos -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q scripts/_medir_utilidad_extractos_test.py 2>&1 | tee /tmp/medir_utilidad_tests
-          python3 ci/piso.py verificar tests-puros/medir_utilidad_tests /tmp/medir_utilidad_tests || exit $?
+          python3 .github/ci/piso.py verificar tests-puros/medir_utilidad_tests /tmp/medir_utilidad_tests || exit $?
 
       # Camino de entrada más simple (2026-09-21, procesamiento-archivos-
       # nucleo): `scripts/procesar_archivos.py` -- `procesar(proyecto,
@@ -2279,7 +2283,7 @@ jobs:
       - name: Procesar archivos -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q scripts/_procesar_archivos_test.py 2>&1 | tee /tmp/procesar_archivos_tests
-          python3 ci/piso.py verificar tests-puros/procesar_archivos_tests /tmp/procesar_archivos_tests || exit $?
+          python3 .github/ci/piso.py verificar tests-puros/procesar_archivos_tests /tmp/procesar_archivos_tests || exit $?
 
       # Endpoint de Procesamiento de Archivos (2026-09-20): `procesamiento/`
       # (jax#252) estaba terminado pero nadie lo llamaba desde HTTP.
@@ -2445,7 +2449,7 @@ jobs:
       - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
-          python3 ci/piso.py verificar tests-puros/procesamiento_routes_tests /tmp/procesamiento_routes_tests || exit $?
+          python3 .github/ci/piso.py verificar tests-puros/procesamiento_routes_tests /tmp/procesamiento_routes_tests || exit $?
 
       # jax-14 (2026-10-03): freno de dependencias de extraccion. Piso exacto de
       # procesamiento/_dependencias_test.py: 29 passed (10 de la ronda 0 + 19 de la
@@ -2457,7 +2461,7 @@ jobs:
       - name: Freno de dependencias de extraccion -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_dependencias_test.py 2>&1 | tee /tmp/dependencias_tests
-          python3 ci/piso.py verificar tests-puros/dependencias_tests /tmp/dependencias_tests || exit $?
+          python3 .github/ci/piso.py verificar tests-puros/dependencias_tests /tmp/dependencias_tests || exit $?
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
@@ -2733,7 +2737,7 @@ jobs:
             tests/test_base_por_sesion.py::test_copiar_filas_excluye_columnas_generadas_y_no_revienta_con_1906 \
             tests/test_base_por_sesion.py::test_columnas_copiables_excluye_solo_las_generadas \
             2>&1 | tee /tmp/out
-          python3 ci/piso.py verificar jacobs-gobernanza-db/out /tmp/out || exit $?
+          python3 .github/ci/piso.py verificar jacobs-gobernanza-db/out /tmp/out || exit $?
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira
@@ -2889,4 +2893,4 @@ jobs:
         # carpeta oculta. Local: 54 passed + 1 solo-host (55 pruebas; el runner salta 2).
         run: |
           PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
-          python3 ci/piso.py verificar permisos-proyectos/permisos_proyectos /tmp/permisos_proyectos || exit $?
+          python3 .github/ci/piso.py verificar permisos-proyectos/permisos_proyectos /tmp/permisos_proyectos || exit $?

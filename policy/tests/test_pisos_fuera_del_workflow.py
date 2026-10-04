@@ -217,7 +217,7 @@ def test_el_archivo_real_de_pisos_es_valido():
 def test_el_lector_vive_en_github_y_no_queda_copia_fuera_de_la_reserva():
     assert PISO_PY.is_file()
     assert not (RAIZ / "ci" / "piso.py").exists(), "una copia en ci/ queda fuera de la reserva de Fernando"
-    assert [p.name for p in (RAIZ / "ci").iterdir()] == ["pisos.json"], "ci/ solo guarda datos, nunca lógica"
+    assert [p.name for p in (RAIZ / "ci").iterdir() if p.name != "__pycache__"] == ["pisos.json"], "ci/ solo guarda datos, nunca lógica"
 
 
 def test_ninguna_llamada_del_workflow_usa_un_lector_fuera_de_github():
@@ -227,7 +227,7 @@ def test_ninguna_llamada_del_workflow_usa_un_lector_fuera_de_github():
 
 
 def test_el_workflow_corre_el_comparador_contra_la_punta_de_master():
-    pasos = [r for _, r in _pasos_run() if "comparar_pisos.py" in r]
+    pasos = [r for _, r in _pasos_run() if "python3 .github/ci/comparar_pisos.py" in r]
     assert len(pasos) == 1
     run = pasos[0]
     assert "git fetch" in run and "refs/heads/master:refs/remotes/origin/master" in run
