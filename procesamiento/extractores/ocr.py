@@ -172,7 +172,9 @@ CODIGO_OCR_SIN_MEMORIA = "ocr_sin_memoria"   # recursos, no archivo danado
 # "4": Jax#338 ronda 17 -- las invariantes de la ronda 16 (una imagen con
 # transparencia real nunca sale `ok`; ninguna linea del texto plano se pierde)
 # cambian la clasificacion de las fichas escritas con "3".
-VERSION_LOGICA_IMAGEN = "4"
+# "5": Jax#338 ronda 18 -- un PNG/APNG de mas de un cuadro es
+# formato_no_soportado:png_animado (una ficha "4" lo daba ok/imagen_sin_texto).
+VERSION_LOGICA_IMAGEN = "5"
 
 
 def version_logica(camino: str) -> str | None:
