@@ -114,7 +114,7 @@ Sin historia anotada en el workflow.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^671 passed`
 
-Piso actualizado 2026-10-04: `^683 passed`. La suite medida suma las 11 pruebas de `memoria.buscar` y una prueba de la compuerta del servicio apagada por defecto; 0 skips.
+Piso actualizado 2026-10-04: `^688 passed`. Sobre el piso 683, se suman pruebas de payload hostil, timeout con cancelación, truncamiento explícito, cableado del perfil de prueba y concurrencia en peor caso; 0 skips.
 
 ## `faro-bitacora-db/faro-db`
 
@@ -130,7 +130,7 @@ Sin historia anotada en el workflow.
 
 ## `memory-b9-regression/casos`
 
-Mínimo actualizado 2026-10-04: `103` casos. Base previa `102` (10 módulos, cero skips/errores) + una prueba MariaDB del reader de `memoria.buscar`. La prueba nueva usa `jax_test` en una base `jax_memory_test*` aislada, crea tablas de sesión temporales y comprueba que el reader solo emite lecturas. En Hall9000 se midió sobre `jax_memory_test` vía `127.0.0.1:3308`.
+Mínimo actualizado 2026-10-04: `105` casos. Base previa `103` (10 módulos, cero skips/errores) + dos pruebas de frontera del pool de `memoria.buscar`: rechazo de configuración forzada hacia producción y apertura solo del perfil permitido con límite SQL de payload. La prueba MariaDB real mantiene tablas de sesión temporales y comprueba que el reader solo emite lecturas.
 
 ## `facet-health-io/out`
 

@@ -665,11 +665,16 @@ class MariaDBB9Reader:
 
     It returns envelopes only.  It deliberately has no API returning raw B9
     content rows to model-facing callers.  The caller must already possess a
-    ScopeContext constructed by its authenticated JAX boundary.
+    ScopeContext constructed by its authenticated JAX boundary. `max_payload_bytes`
+    adds a server-side BLOB byte cap for bounded consumers such as the Faro; the
+    default `None` preserves full payloads for existing non-Faro callers.
     """
-    def __init__(self, pool: Any, authorization_resolver: Any | None=None):
+    def __init__(self, pool: Any, authorization_resolver: Any | None=None, *, max_payload_bytes: int | None = None):
+        if max_payload_bytes is not None and (not isinstance(max_payload_bytes, int) or isinstance(max_payload_bytes, bool) or max_payload_bytes < 1):
+            raise ValueError("max_payload_bytes must be a positive integer")
         self._pool = pool
         self._authorization_resolver = authorization_resolver
+        self._max_payload_bytes = max_payload_bytes
 
     async def retrieve_authorized(self, request: MutationAuthorizationRequest, *, limit: int=20) -> tuple[MemoryEnvelope, ...]:
         """Resolve project access from current DB state before retrieval.
@@ -726,20 +731,28 @@ class MariaDBB9Reader:
                     projects=[None] if scope.project_id is None else [None,scope.project_id]
                     for visibility in (Visibility.USER_PRIVATE,Visibility.TENANT_SHARED,Visibility.PROJECT_SHARED):
                         for project in projects:
+                            if self._max_payload_bytes is None:
+                                payload_select = "p.payload,FALSE AS payload_truncated "
+                                payload_args = []
+                            else:
+                                # LEFT sobre BLOB limita bytes en MariaDB antes
+                                # de enviar/crear objetos Python con el payload.
+                                payload_select = "LEFT(p.payload,%s) AS payload,(OCTET_LENGTH(p.payload)>%s) AS payload_truncated "
+                                payload_args = [self._max_payload_bytes, self._max_payload_bytes]
                             sql=(
                                 # Measured optimizer chose object-first plus temp/filesort.
                                 # Fix only join order so each equality branch drives the
                                 # ordered revision index; retain optimizer's index choice.
                                 "SELECT STRAIGHT_JOIN o.memory_id,o.object_kind,o.tenant_id,UNIX_TIMESTAMP(o.created_at) AS object_created_at,"
                                 "r.revision_id,r.content_digest,r.visibility,r.user_id,r.project_id,r.lifecycle_state,"
-                                "UNIX_TIMESTAMP(r.created_at) AS revision_created_at,p.payload,r.provenance_status,r.prior_revision_id "
+                                "UNIX_TIMESTAMP(r.created_at) AS revision_created_at,"+payload_select+",r.provenance_status,r.prior_revision_id "
                                 "FROM memory_revisions r "
                                 "JOIN memory_objects o ON o.memory_id=r.memory_id AND o.tenant_id=r.tenant_id "
                                 "JOIN memory_projections pr ON pr.memory_id=r.memory_id AND pr.current_revision_id=r.revision_id "
                                 "LEFT JOIN memory_revision_payloads p ON p.revision_id=r.revision_id "
                                 "WHERE r.tenant_id=%s AND r.visibility=%s AND pr.reconciliation_required=FALSE "
                                 "AND r.lifecycle_state NOT IN ('TOMBSTONED','PURGED','EXPIRED') ")
-                            args=[scope.tenant_id,visibility.value]
+                            args=payload_args+[scope.tenant_id,visibility.value]
                             if visibility is Visibility.USER_PRIVATE:
                                 sql+="AND r.user_id=%s "
                                 args.append(scope.subject_user_id)
@@ -772,6 +785,8 @@ class MariaDBB9Reader:
                         obj=MemoryObject(row["memory_id"],ObjectKind(row["object_kind"]),row["tenant_id"],float(row["object_created_at"]))
                         payload=row["payload"]
                         if isinstance(payload, bytes): payload=payload.decode("utf-8", "replace")
+                        if row.get("payload_truncated"):
+                            payload = (payload or "") + "\n[contenido truncado por límite de memoria]"
                         revision=MemoryRevision(row["revision_id"],row["memory_id"],row["content_digest"],
                                                 Visibility(row["visibility"]),row["user_id"],row["project_id"],
                                                 Lifecycle(row["lifecycle_state"]),float(row["revision_created_at"]),payload,

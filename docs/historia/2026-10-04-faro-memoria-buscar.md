@@ -10,19 +10,20 @@ Fernando confirmó que B9 **no está en producción** y que la reactivación sig
 
 - `memoria.buscar` se registra en el servidor MCP por conexión. Pasa por la Guardia existente, que consulta el freno y registra identidad, argumentos saneados y hash del resultado; fallo de bitácora sigue fallando cerrado.
 - El esquema MCP acepta `consulta` y `limite`; tenant y usuario se derivan exclusivamente de `Identidad` del socket. Sin identidad devuelve vacío. El B9 reader recibe un `ScopeContext` de usuario/tenant sin project scope.
-- El adaptador consulta hasta las 100 revisiones recientes del scope y filtra texto en `payload`; cada resultado devuelve ID de memoria/revisión, contenido y `trust=untrusted_source`. Es búsqueda lexical acotada para la fase 0.4, no autoridad, evidencia de verdad actual ni un índice global.
+- El adaptador consulta hasta las 100 revisiones recientes del scope y filtra texto en `payload`; el contenido devuelto se envuelve con `<untrusted_source>` y sus sentinelas de cierre/tokens de control se neutralizan con el patrón endurecido de LAS MANOS. Es búsqueda lexical acotada para la fase 0.4, no autoridad, evidencia de verdad actual ni un índice global.
+- La lectura tiene un plazo configurable `JAX_FARO_MEMORIA_TIMEOUT_S` (default 5 s); al vencer cancela el reader y responde `memoria no disponible`. El reader recibe `LEFT(payload, 8192)` desde MariaDB, informa truncamiento explícito y el adaptador impone el mismo tope antes de envolver. La configuración y el propio helper de conexión revalidan el perfil exacto `jax_test@127.0.0.1:3308/jax_memory_test`.
 - Si el adaptador no está conectado o el reader falla, el Puerto devuelve `memoria no disponible`. Las consultas vacías, sobredimensionadas y límites inválidos se rechazan.
 - El pool asíncrono es único por servicio y reutilizado. Solo el `MariaDBB9Reader` existente ejecuta su transacción de lectura repetible; no hay mutaciones B9 en el adaptador.
 
 ## Verificación
 
-- TDD: la prueba nueva primero falló al colectarse porque `ConfigMemoria` y el adaptador aún no existían.
-- Mutaciones verificadas en rojo: scope cambiado de la identidad, eliminación de `trust=untrusted_source`, y memoria activada por defecto.
-- Suite exacta `faro-fase0`: 683 passed, 0 skipped (Python 3.14.4 local), incluyendo 11 pruebas nuevas del adaptador/MCP y una prueba de servicio apagado por defecto.
-- Reader B9 en MariaDB real de prueba: smoke sin escrituras persistentes, 0 resultados para tenant aleatorio, `jax_memory_test@127.0.0.1:3308`, usuario `jax_test`.
-- Prueba DB wireada al job aislado `memory-b9-regression`: usa tablas `TEMPORARY`, lee scope aleatorio y verifica que el reader solo ejecuta `SELECT` / configuración de transacción. 1 passed local.
-- CI/policy: prueba de inventario de tests, comparador y migración de pisos: 189 passed. Pisos medidos: `faro-fase0/faro` 671→683 y `memory-b9-regression/casos` 102→103.
+- TDD de la corrección: contra el árbol previo fallaron las nuevas pruebas de neutralización de sentinelas, plazo/cancelación, tamaño del payload, construcción directa de configuración de producción y revalidación del helper antes de abrir conexión; tras la implementación pasaron.
+- Auditoría Tier 3 inicial del SHA `4f7339cedca787071f07995e9050d4ceee022db7`: RECHAZADO (1 BLOCK, 3 MAJOR): envoltura hostil incompleta, reader sin timeout, payload sin cota en SQL y allowlist no impuesta en el helper. Las regresiones ahora cubren esos cuatro puntos.
+- La regresión de arranque fail-soft detectó que el `except` opcional no estaba marcado: `policy/tests/test_no_fail_open_except.py`, 21 passed tras anotarlo.
+- Suite exacta `faro-fase0`: 688 passed, 0 skipped (Python 3.14.4 local), incluyendo 4 lectores concurrentes con 100 payloads cada uno en el tope por fila. La medición local MariaDB final falló antes de ejecutar el reader porque la cuenta `jax_test` no fue aceptada desde este entorno de red; CI usa un contenedor MariaDB efímero y ejecuta la prueba DB.
+- La prueba DB del reader usa tablas `TEMPORARY`, comprueba scope y solo SELECT/SET TRANSACTION, y comprueba la cota SQL `LEFT(payload, 8192)`. Dos pruebas adicionales cubren la revalidación del perfil de conexión y que solo abre el endpoint local permitido.
+- Pisos medidos/ajustados: `faro-fase0/faro` 683→688 y mínimo `memory-b9-regression/casos` 103→105.
 
 ## Pendientes
 
-Esperar CI remota y revisión de escalón 3 del SHA exacto del PR. No desplegar ni conectar a B9 de producción desde este cambio. El cable productivo requiere reactivación de B9 y un contrato aprobado.
+Esperar CI remota y nueva revisión de escalón 3 del SHA exacto del PR. No desplegar ni conectar a B9 de producción desde este cambio. El cable productivo requiere reactivación de B9 y un contrato aprobado.

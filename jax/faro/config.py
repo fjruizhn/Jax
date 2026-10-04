@@ -18,6 +18,7 @@ una variable ausente o vacia no tiene valor por defecto, es un error.
                            escritura de grupo/otros
   JAX_FARO_MAX_MENSAJE     opcional, tope en bytes de UN mensaje MCP (default 1 MiB)
   JAX_FARO_PRESUPUESTO_BYTES, JAX_FARO_HANDSHAKE_S, JAX_FARO_MENSAJE_TIMEOUT_S, JAX_FARO_COSTO_CONEXION_BYTES   opcionales; ver ConfigPuerto
+  JAX_FARO_MEMORIA_TIMEOUT_S   opcional; plazo maximo de lectura B9 de prueba (default 5 s)
 """
 from __future__ import annotations
 
@@ -49,6 +50,18 @@ class ConfigMemoria:
     usuario: str = "jax_test"
     clave: str = field(default="", repr=False)
     base: str = "jax_memory_test"
+    timeout_s: float = 5.0
+
+    def __post_init__(self) -> None:
+        if self.habilitada and (self.host, self.port, self.usuario, self.base) != (
+                "127.0.0.1", 3308, "jax_test", "jax_memory_test"):
+            raise ConfigFaroInvalida(
+                "memoria no disponible: este adaptador solo permite la base de prueba "
+                "jax_memory_test en 127.0.0.1:3308 con jax_test")
+        if self.habilitada and not self.clave:
+            raise ConfigFaroInvalida("memoria no disponible: falta la credencial de la base de prueba")
+        if not isinstance(self.timeout_s, (int, float)) or isinstance(self.timeout_s, bool) or not 0 < self.timeout_s <= 30:
+            raise ConfigFaroInvalida("JAX_FARO_MEMORIA_TIMEOUT_S debe estar entre 0 y 30 segundos")
 
     @classmethod
     def desde_entorno(cls, env: Mapping[str, str]) -> "ConfigMemoria":
@@ -62,6 +75,11 @@ class ConfigMemoria:
         user = (env.get("JAX_FARO_MEMORIA_TEST_DB_USER") or "").strip()
         database = (env.get("JAX_FARO_MEMORIA_TEST_DB_NAME") or "").strip()
         password = env.get("JAX_FARO_MEMORIA_TEST_DB_PASSWORD") or ""
+        timeout_raw = (env.get("JAX_FARO_MEMORIA_TIMEOUT_S") or "5").strip()
+        try:
+            timeout_s = float(timeout_raw)
+        except ValueError as exc:
+            raise ConfigFaroInvalida("JAX_FARO_MEMORIA_TIMEOUT_S debe estar entre 0 y 30 segundos") from exc
         try:
             port = int(port_raw)
         except ValueError as exc:
@@ -72,7 +90,7 @@ class ConfigMemoria:
                 "jax_memory_test en 127.0.0.1:3308 con jax_test")
         if not password:
             raise ConfigFaroInvalida("memoria no disponible: falta la credencial de la base de prueba")
-        return cls(True, host, port, user, password, database)
+        return cls(True, host, port, user, password, database, timeout_s)
 
 
 def sha_valido(sha: object) -> bool:

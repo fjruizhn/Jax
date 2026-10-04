@@ -10,7 +10,8 @@ import aiomysql
 import pytest
 
 from base_de_test import es_base_de_test
-from jax.faro.herramientas.memoria import AdaptadorMemoria
+from jax.faro.config import ConfigFaroInvalida, ConfigMemoria
+from jax.faro.herramientas.memoria import AdaptadorMemoria, crear_pool_memoria_prueba
 from jax.faro.identidad import Ejecucion, Identidad
 from jax.memory.b9_mariadb import MariaDBB9Reader
 
@@ -96,7 +97,7 @@ def test_reader_mariadb_solo_lee_scope_del_socket_en_base_de_prueba():
                 async with conn.cursor() as cur:
                     for ddl in ddls:
                         await cur.execute(ddl)
-            reader = MariaDBB9Reader(PoolObservado(pool, statements))
+            reader = MariaDBB9Reader(PoolObservado(pool, statements), max_payload_bytes=8192)
             execution = Ejecucion("run-db", "user-db", "tenant-db", "hyde", "codex", "p", "repl", "corr-db", 1)
             result = await AdaptadorMemoria(reader).buscar(Identidad(execution, "conn", 1, 1, 1), "no existe", 5)
             assert result == []
@@ -105,8 +106,55 @@ def test_reader_mariadb_solo_lee_scope_del_socket_en_base_de_prueba():
             queries = [(sql, args) for sql, args in statements if sql.startswith("SELECT")]
             assert all("WHERE R.TENANT_ID=%S" in sql and "tenant-db" in args for sql, args in queries)
             assert any("user-db" in args for _, args in queries)
+            payload_queries = [(sql, args) for sql, args in queries if "LEFT(P.PAYLOAD,%S) AS PAYLOAD" in sql]
+            assert payload_queries
+            assert all(args[:2] == (8192, 8192) for _, args in payload_queries)
         finally:
             pool.close()
             await pool.wait_closed()
+
+    asyncio.run(caso())
+
+
+def test_pool_memoria_revalida_perfil_incluso_si_se_elude_el_dataclass(monkeypatch):
+    async def caso():
+        calls = []
+
+        async def create_pool(**kwargs):
+            calls.append(kwargs)
+            raise AssertionError("no debe abrirse una conexión fuera de la allowlist")
+
+        monkeypatch.setattr(aiomysql, "create_pool", create_pool)
+        cfg = object.__new__(ConfigMemoria)
+        for key, value in {
+            "habilitada": True, "host": "10.0.0.9", "port": 3306,
+            "usuario": "root", "clave": "secret", "base": "jax_memory", "timeout_s": 5.0,
+        }.items():
+            object.__setattr__(cfg, key, value)
+        with pytest.raises(ConfigFaroInvalida, match="solo permite el perfil local de prueba"):
+            await crear_pool_memoria_prueba(cfg)
+        assert calls == []
+
+    asyncio.run(caso())
+
+
+def test_pool_memoria_abre_solo_perfil_local_aprobado_y_limita_payload(monkeypatch):
+    async def caso():
+        pool_falso = object()
+        calls = []
+
+        async def create_pool(**kwargs):
+            calls.append(kwargs)
+            return pool_falso
+
+        monkeypatch.setattr(aiomysql, "create_pool", create_pool)
+        cfg = ConfigMemoria(True, "127.0.0.1", 3308, "jax_test", "test-password", "jax_memory_test")
+        pool, reader = await crear_pool_memoria_prueba(cfg)
+        assert pool is pool_falso
+        assert reader._max_payload_bytes == 8192
+        assert len(calls) == 1
+        assert calls[0]["maxsize"] == 4
+        assert {key: calls[0][key] for key in ("host", "port", "user", "db")} == {
+            "host": "127.0.0.1", "port": 3308, "user": "jax_test", "db": "jax_memory_test"}
 
     asyncio.run(caso())

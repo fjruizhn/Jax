@@ -38,8 +38,8 @@
       "mensaje": "PISO ROTO: se esperaban 251 tests CORRIDOS de cli_sandbox."
     },
     "faro-fase0/faro": {
-      "patron": "^683 passed",
-      "mensaje": "PISO ROTO: se esperaban 683 tests CORRIDOS del Faro."
+      "patron": "^688 passed",
+      "mensaje": "PISO ROTO: se esperaban 688 tests CORRIDOS del Faro."
     },
     "faro-bitacora-db/faro-db": {
       "patron": "^40 passed",
@@ -175,6 +175,6 @@
     }
   },
   "minimos": {
-    "memory-b9-regression/casos": 103
+    "memory-b9-regression/casos": 105
   }
 }
