@@ -781,6 +781,39 @@ def test_pdf_d_usa_las_dimensiones_del_png_no_las_del_tsv(tmp_path: Path, monkey
     assert (r.detalle["ancho"], r.detalle["alto"]) == (2550, 3300)
 
 
+def test_pdf_sin_pillow_es_error_por_la_dependencia_no_archivo_ilegible(tmp_path: Path, monkeypatch):
+    """Un PDF legible y sin texto, con Pillow AUSENTE: la causa es la dependencia
+    (como con pdftoppm), no un archivo ilegible. Se avisa ANTES de rasterizar."""
+    import sys
+
+    origen = _pdf_de_imagenes(tmp_path / "x.pdf", [Image.new("RGB", (2550, 3300), "white")])
+    monkeypatch.setitem(sys.modules, "PIL", None)
+    monkeypatch.setitem(sys.modules, "PIL.Image", None)
+    llamadas: list = []
+    monkeypatch.setattr(ocr, "_rasterizar_pdf", lambda *a, **k: llamadas.append(a) or [])
+    r = ocr.extraer(origen)
+    assert r.estado == "error"
+    assert r.detalle["razon"] == (
+        "Pillow no esta instalado; no se puede medir la pagina rasterizada"
+    )
+    assert "codigo" not in r.detalle
+    assert llamadas == []          # ni siquiera se rasteriza
+
+
+def test_dimensiones_de_png_no_se_traga_la_falta_de_pillow(tmp_path: Path, monkeypatch):
+    import sys
+
+    png = tmp_path / "p.png"
+    Image.new("RGB", (10, 20), "white").save(png)
+    assert ocr._dimensiones_de_png(png) == (10, 20)
+    (tmp_path / "roto.png").write_bytes(b"no es un png")
+    assert ocr._dimensiones_de_png(tmp_path / "roto.png") is None   # no decodifica: ilegible
+    monkeypatch.setitem(sys.modules, "PIL", None)
+    monkeypatch.setitem(sys.modules, "PIL.Image", None)
+    with pytest.raises(ImportError):
+        ocr._dimensiones_de_png(png)
+
+
 def test_pdf_a_y_d_llevan_confianza_promedio_ponderada():
     a = _pagina_ocr("sin_texto", "ab", 0, 0)
     c = _pagina_ocr("sin_texto", "xy", 0, 3)
