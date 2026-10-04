@@ -5798,8 +5798,11 @@ jobs:
           # 47 -> 48 (2026-10-03, Proyectos E2a T4, ronda 2, ROTURA-1): +1 -- un symlink de
           #   directorio mas `..` ya no se procesa en el lugar (huella y extraccion del mismo
           #   archivo). Numero LOCAL: el controlador lo re-mide con el runner.
-          grep -qE "^48 passed" /tmp/ingesta_tests || {
-            echo "PISO ROTO: se esperaban 48 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+          # 48 -> 51 (Jax#338 ronda 19): +3 -- ningun FIFO cuelga la ingesta: `ingerir` de un FIFO lo
+          #   rechaza sin copiar, `sha256_de` de un FIFO no se cuelga, y la huella se calcula desde el
+          #   MISMO descriptor validado del que se copia. Medido LOCAL: 51 passed.
+          grep -qE "^51 passed" /tmp/ingesta_tests || {
+            echo "PISO ROTO: se esperaban 51 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
       # Task 9 (2026-09-21, procesamiento-archivos-nucleo): mide si los
       # extractos SIRVEN -- el criterio §7.B corregido ese mismo dia (el

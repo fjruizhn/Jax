@@ -169,6 +169,7 @@ Ronda de arreglo 2 (2026-09-21, task-8-hallazgos-r2.md -- lo que la ronda
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import random
 import shutil
@@ -181,7 +182,7 @@ from motor_registry import tool_authority
 
 from procesamiento import compuerta
 from procesamiento.extractores import excel, ocr, pdf, word
-from procesamiento.ficha import Ficha, sha256_de
+from procesamiento.ficha import Ficha, abrir_archivo_regular, sha256_de
 
 
 class IngestaError(Exception):
@@ -361,8 +362,12 @@ def _candidatos_de_nombre(origen: Path, huella: str) -> list[str]:
     ]
 
 
-def _asegurar_en_fuente(origen: Path, fuente_abs: Path, huella: str) -> Path:
-    """Copia `origen` a `fuente_abs` bajo un nombre LIBRE. Nunca pisa un
+def _asegurar_en_fuente(origen: Path, fuente_abs: Path) -> tuple[Path, str]:
+    """Copia `origen` a `fuente_abs` bajo un nombre LIBRE y devuelve
+    `(destino, huella)`. Jax#338 ronda 19: el origen se abre UNA vez, validado
+    como archivo regular (`abrir_archivo_regular`: sin bloquear en un FIFO), y
+    la huella sha256 se calcula MIENTRAS se copia desde ese mismo descriptor:
+    no hay ventana entre el hash y la copia. Nunca pisa un
     archivo existente de contenido distinto, y nunca sigue un symlink --
     ni para leerlo (para decidir si "ya está") ni para escribir a través
     de él (C-1).
@@ -387,10 +392,15 @@ def _asegurar_en_fuente(origen: Path, fuente_abs: Path, huella: str) -> Path:
     éxito el contenido YA está completo: ningún lector puede ver un
     archivo a medio escribir bajo el nombre final, porque el nombre final
     nunca es el que se escribe."""
+    lectura = abrir_archivo_regular(origen)
     temporal = fuente_abs / f".tmp-{os.getpid()}-{uuid.uuid4().hex}"
     try:
-        with open(temporal, "wb") as escritura, open(origen, "rb") as lectura:
-            shutil.copyfileobj(lectura, escritura)
+        h = hashlib.sha256()
+        with open(temporal, "wb") as escritura, lectura:
+            for bloque in iter(lambda: lectura.read(1024 * 1024), b""):
+                h.update(bloque)
+                escritura.write(bloque)
+        huella = h.hexdigest()
 
         candidatos = _candidatos_de_nombre(origen, huella)
         for nombre_candidato in candidatos:
@@ -426,13 +436,13 @@ def _asegurar_en_fuente(origen: Path, fuente_abs: Path, huella: str) -> Path:
                 if not destino_literal.is_file():
                     continue
                 if sha256_de(destino_literal) == huella:
-                    return destino_literal  # mismo contenido -- ya está
+                    return destino_literal, huella  # mismo contenido -- ya está
                 continue  # contenido distinto -- siguiente candidato
             except OSError as exc:
                 if exc.errno == errno.ELOOP:
                     continue  # se volvió symlink justo antes del link() (TOCTOU)
                 raise
-            return destino_literal
+            return destino_literal, huella
 
         raise ValueError(
             f"ingesta: no se pudo asegurar un nombre libre en 'fuente/' para "
@@ -708,8 +718,9 @@ def ingerir(origen: Path, trabajo: Path, *, subruta: str | Path | None = None) -
         destino = en_el_lugar            # E2a T4: ya esta en fuente/, no se copia
         huella = sha256_de(destino)      # la huella sale del MISMO archivo que se extrae
     else:
-        huella = sha256_de(origen)
-        destino = _asegurar_en_fuente(origen, fuente_abs, huella)  # C-1/C-3
+        # Jax#338 ronda 19: una sola apertura validada; la huella sale de los
+        # MISMOS bytes que se copian a fuente/.
+        destino, huella = _asegurar_en_fuente(origen, fuente_abs)  # C-1/C-3
 
     carpeta = ruta_procesado(trabajo_abs, huella)
     camino_actual = _camino_de(destino, extension_actual)
