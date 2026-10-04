@@ -1276,14 +1276,14 @@ def _resolver_imagen(
 def _dimensiones_de_png(ruta: Path) -> tuple[int, int] | None:
     """Ancho y alto del PNG RASTERIZADO de una pagina, leidos del archivo (no del
     TSV, que puede no traer la fila de pagina); `None` si no se pueden leer."""
-    try:
-        from PIL import Image
+    from PIL import Image   # su ausencia NO es una pagina ilegible: `extraer` la avisa antes de rasterizar
 
+    try:
         with Image.open(ruta) as imagen:
             ancho, alto = imagen.size
-        return (ancho, alto) if ancho > 0 and alto > 0 else None
-    except Exception:  # fail-soft: sin Pillow o con un PNG que no abre, la pagina cuenta como ilegible
+    except Exception:  # fail-soft: un PNG que no decodifica cuenta como pagina ilegible
         return None
+    return (ancho, alto) if ancho > 0 and alto > 0 else None
 
 
 def _resolver_pdf_sin_texto(
@@ -1492,6 +1492,16 @@ def extraer(origen: Path, idioma: str = "spa", camino: str | None = None) -> Res
                     detalle={
                         "razon": "pdftoppm no esta instalado (poppler-utils); "
                         "no se puede rasterizar el PDF para OCR",
+                    },
+                )
+            try:
+                import PIL.Image  # noqa: F401  (D mide el PNG rasterizado con Pillow)
+            except ImportError:
+                return Resultado(
+                    estado="error", salidas={}, extractor=EXTRACTOR,
+                    version=_version() or "desconocida",
+                    detalle={
+                        "razon": "Pillow no esta instalado; no se puede medir la pagina rasterizada",
                     },
                 )
             # I-7 (final-hallazgos.md, ronda de cierre) -- "ahora" de la
