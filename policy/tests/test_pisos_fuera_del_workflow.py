@@ -11,7 +11,7 @@ Qué fija este archivo (permanente, no depende de ninguna fotografía de master)
   * el workflow no conserva ningún piso literal (`grep -qE "^N passed`);
   * cada clave que el workflow usa existe, y cada clave de los datos se usa una vez
     (un piso huérfano sería un piso que nadie compara).
-La equivalencia byte a byte con master está en test_pisos_migracion_desde_master.py.
+Que ningún piso baje respecto de master lo cubre el job `pisos-no-bajan` (docs/ci/pisos.md).
 """
 from __future__ import annotations
 

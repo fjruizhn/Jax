@@ -1,18 +1,17 @@
-"""Migración de los pisos de policy.yml a ci/pisos.json: nada cambió de valor ni de nombre.
+"""Nombres de jobs, checks y pasos de policy.yml tras la migración de los pisos a ci/pisos.json.
 
 La fotografía `fixtures/policy_master_364ded9.json` se extrajo UNA vez de
 `git show 364ded9:.github/workflows/policy.yml` (master antes de la migración) con un
-extractor independiente del que escribió los datos (yaml.safe_load + regex sobre cada
-`run:`). Estas pruebas comparan el estado actual con esa fotografía:
+extractor independiente del que escribió los datos (yaml.safe_load). Estas pruebas comparan el
+estado actual con esa fotografía:
 
-  1. los nombres de los jobs (id y `name:`) son IDÉNTICOS, y los de los pasos de cada job
-     conservan los de master en el mismo orden (un paso nuevo solo puede ir al final);
-     el nombre de un job es el nombre del check que ve GitHub;
-  2. cada piso de master está en el mismo paso, con el mismo patrón, el mismo archivo de
-     salida y el mismo mensaje, BYTE A BYTE, y el mínimo del B9 vale igual.
+  * los nombres de los jobs (id y `name:`) son IDÉNTICOS, y los de los pasos de cada job
+    conservan los de master en el mismo orden (un paso nuevo solo puede ir al final);
+    el nombre de un job es el nombre del check que ve GitHub.
 
-OJO: son pruebas de MIGRACIÓN. Cuando un piso suba o un paso se renombre a propósito, estas
-pruebas fallarán por diseño: se actualizan o se retiran (ver docs/ci/pisos.md).
+Los VALORES de los pisos (el patrón, el mensaje y el mínimo del B9) ya no se comparan aquí contra la
+fotografía: subir un piso es legítimo, y que ninguno baje lo cubre de forma permanente el job
+`pisos-no-bajan` contra la punta de master (ver docs/ci/pisos.md).
 """
 from __future__ import annotations
 
