@@ -42,7 +42,7 @@ sudo -l                                            # confirmar la regla de sudoe
 sudo install -o root -g root -m 0755 ops/permisos_proyectos.py /usr/local/sbin/jax-permisos-proyectos
 # --aplicar y el --verificar posterior van en el bloque de abajo, con las unidades de jaxsvc detenidas
 ```
-**`--aplicar` y `--deshacer` se corren SOLO con TODAS las unidades de `jaxsvc` detenidas, en UN bloque, y se restauran al salir.** El guion falla cerrado, sin mutar nada, si hay cualquier proceso o hilo con el uid de `jaxsvc` (lo lee de `/proc`; si no puede leer el estado de un pid listado, también falla; `--verificar` no lo exige). Por qué, en dos líneas: un proceso `jaxsvc` vivo puede renombrar carpetas mientras root recorre el árbol, y todas las carreras de renombre (symlinks, hardlinks, intercambio de nombres, ocultas que cambian de proyecto) parten de eso; sin procesos `jaxsvc`, nadie con permiso de renombrar corre en paralelo (queda `fruiz`, dueño, y root, que es confiable por premisa). Las unidades solo se **detienen**: no se enmascaran, porque viven en `/etc/systemd/system` y un `mask --runtime` no las tapa; con los timers parados no se disparan. El bloque, en este orden: (a) premisas (sin archivos setuid/setgid de `jaxsvc` y sin crontab de `jaxsvc`; la premisa del setuid va **por montaje**: se leen los montajes visibles con `findmnt -rn --kernel` (con un TARGET repetido vale el último, el visible), se saltan los que traen `nosuid` como opción completa y los sistemas virtuales sin archivos de usuario (la lista, con su motivo, está comentada en el bloque; `autofs` también, porque recorrerlo dispara montajes), un montaje FUSE sin `nosuid` corta, y cada uno de los demás se recorre con `find <TARGET> -xdev …`, donde cualquier error —`Permission denied` incluido— corta; el mismo dispositivo en varios TARGET se recorre en cada uno); (b) la lista de unidades y timers de `jaxsvc` (`list-units` y `list-timers` con `'jax*'`, filtradas por `User=`), con **cada consulta capturada: si una falla, o la lista sale vacía, o falta una de la lista mínima esperada, se corta**; el estado textual (`active`, `inactive`, `failed`, `activating`) de cada una, guardado ANTES de detener nada; (c) el `trap` de restauración; (d) `stop` de cada una; (e) comprobar por su salida textual que quedaron detenidas, `ps -u jaxsvc` vacío y `/proc/*/status` y `/proc/*/task/*/status` sin los cuatro uid; (f) el guion; (g) `--verificar`; (h) el trap **arranca en orden inverso las que estaban `active` o `activating` (una unidad que estaba arrancando se restaura igual), exige que vuelvan a `active` **y estables** (siguen `active` durante `ESTABLE` segundos —entero ≥ 1, por defecto 5; con 0 o no numérico el bloque corta antes de detener nada—, y al cierre `NRestarts` —`systemctl show -p NRestarts --value`— no sube en ese intervalo: una unidad en bucle de reinicios se ve `active` o `activating` un instante y no cuenta) y, si alguna no vuelve, dice cuáles y cómo arrancarla a mano y sale con código distinto de 0 aunque el guion haya ido bien** (conserva el código del fallo original si lo hubo). **Desde justo antes del primer `stop` el bloque ignora INT, TERM y HUP** (los procesos hijos, el guion incluido, heredan el ignorar) y antes de detener nada imprime el aviso con la orden para arrancar a mano. Por qué, en dos líneas: cortar a mitad de la aplicación no es seguro (el árbol queda a medias y el trap tendría que restaurar mientras otra señal lo interrumpe), y `--aplicar` es idempotente, así que lo correcto es dejar que termine y repetirlo si hace falta. Si de verdad hay que cortarlo, `kill -9` y después `sudo systemctl start <las unidades activas>` (el aviso las lista).
+**`--aplicar` y `--deshacer` se corren SOLO con TODAS las unidades de `jaxsvc` detenidas, en UN bloque, y se restauran al salir.** El guion falla cerrado, sin mutar nada, si hay cualquier proceso o hilo con el uid de `jaxsvc` (lo lee de `/proc`; si no puede leer el estado de un pid listado, también falla; `--verificar` no lo exige). Por qué, en dos líneas: un proceso `jaxsvc` vivo puede renombrar carpetas mientras root recorre el árbol, y todas las carreras de renombre (symlinks, hardlinks, intercambio de nombres, ocultas que cambian de proyecto) parten de eso; sin procesos `jaxsvc`, nadie con permiso de renombrar corre en paralelo (queda `fruiz`, dueño, y root, que es confiable por premisa). Las unidades solo se **detienen**: no se enmascaran, porque viven en `/etc/systemd/system` y un `mask --runtime` no las tapa; con los timers parados no se disparan. El bloque, en este orden: (a) premisas (sin archivos setuid/setgid de `jaxsvc` y sin crontab de `jaxsvc`; la premisa del setuid va **por montaje**: se leen los montajes visibles con `findmnt -rn --kernel` (con un TARGET repetido vale el último, el visible), se saltan los que traen `nosuid` como opción completa y los sistemas virtuales sin archivos de usuario (la lista, con su motivo, está comentada en el bloque; `autofs` también, porque recorrerlo dispara montajes), un montaje FUSE sin `nosuid` corta, y cada uno de los demás se recorre con `find <TARGET> -xdev …`, donde cualquier error corta salvo una excepción acotada (el `Permission denied` del punto de montaje de un FUSE `nosuid` visible, que cuelga directamente del montaje recorrido: cinco condiciones, escritas en el bloque); el mismo dispositivo en varios TARGET se recorre en cada uno); (b) la lista de unidades y timers de `jaxsvc` (`list-units` y `list-timers` con `'jax*'`, filtradas por `User=`), con **cada consulta capturada: si una falla, o la lista sale vacía, o falta una de la lista mínima esperada, se corta**; el estado textual (`active`, `inactive`, `failed`, `activating`) de cada una, guardado ANTES de detener nada; (c) el `trap` de restauración; (d) `stop` de cada una; (e) comprobar por su salida textual que quedaron detenidas, `ps -u jaxsvc` vacío y `/proc/*/status` y `/proc/*/task/*/status` sin los cuatro uid; (f) el guion; (g) `--verificar`; (h) el trap **arranca en orden inverso las que estaban `active` o `activating` (una unidad que estaba arrancando se restaura igual), exige que vuelvan a `active` **y estables** (siguen `active` durante `ESTABLE` segundos —entero ≥ 1, por defecto 5; con 0 o no numérico el bloque corta antes de detener nada—, y al cierre `NRestarts` —`systemctl show -p NRestarts --value`— no sube en ese intervalo: una unidad en bucle de reinicios se ve `active` o `activating` un instante y no cuenta) y, si alguna no vuelve, dice cuáles y cómo arrancarla a mano y sale con código distinto de 0 aunque el guion haya ido bien** (conserva el código del fallo original si lo hubo). **Desde justo antes del primer `stop` el bloque ignora INT, TERM y HUP** (los procesos hijos, el guion incluido, heredan el ignorar) y antes de detener nada imprime el aviso con la orden para arrancar a mano. Por qué, en dos líneas: cortar a mitad de la aplicación no es seguro (el árbol queda a medias y el trap tendría que restaurar mientras otra señal lo interrumpe), y `--aplicar` es idempotente, así que lo correcto es dejar que termine y repetirlo si hace falta. Si de verdad hay que cortarlo, `kill -9` y después `sudo systemctl start <las unidades activas>` (el aviso las lista).
 
 **Bloque de `--aplicar`:**
 ```bash
@@ -69,8 +69,15 @@ ESTABLE=$((10#$ESTABLE))
 #       (i)   OPTIONS trae `nosuid` COMO OPCIÓN COMPLETA: se salta (ahí un setuid no da uid);
 #       (ii)  sin nosuid y FUSE (fuse, fuse.*, fuseblk): se corta; no se puede descartar un setuid y un FUSE puede negar
 #             la lectura incluso a root (en hall9000, el sshfs);
-#       (iii) sin nosuid y de otro tipo: `find <TARGET> -xdev -type f -user jaxsvc -perm /6000`. CUALQUIER error de find,
-#             Permission denied incluido, corta; encontrar algo, también. No se parsea ningún mensaje de find.
+#       (iii) sin nosuid y de otro tipo: `find <TARGET> -xdev -type f -user jaxsvc -perm /6000`. Encontrar algo corta, y
+#             cualquier error de find corta, SALVO una excepción acotada (función `tolerar_errores`): el punto de montaje de
+#             un FUSE nosuid ilegible (el sshfs de hall9000) cuelga del montaje que se recorre y find lo stat-ea desde el
+#             padre, aunque ese FUSE ya se salta por nosuid (nada queda sin revisar). Un error se tolera SOLO si cumple LAS
+#             CINCO: (a) el mensaje, con LC_ALL=C, es exactamente `find: '<p>': Permission denied`, en una sola línea;
+#             (b) `<p>` no trae barra invertida, comilla simple ni carácter de control; (c) `<p>`, con solo el espacio
+#             pasado a \x20, es EXACTAMENTE el TARGET de una fila VISIBLE de la lista ya resuelta, y esa fila es FUSE
+#             (fuse o fuse.*, no fuseblk) con `nosuid` como opción completa; (d) el montaje visible MÁS LARGO que contiene
+#             ese TARGET es el que se recorre; (e) cualquier otra línea de error, o un find que falla sin mensaje, corta.
 #     Montajes superpuestos (el mismo TARGET repetido): vale el VISIBLE, el último en el orden de mountinfo (`findmnt
 #     --kernel` lo conserva). El mismo dispositivo en varios TARGET NO se deduplica: se recorre cada uno.
 #     `find` corre con LC_ALL=C (vía `env`, porque `sudo` puede limpiar el entorno). `findmnt -r` escapa espacio, salto de
@@ -102,6 +109,22 @@ VISIBLES="$(printf '%s\n' "$MONTAJES" \
   || falla "findmnt devolvió una línea que no es «ID TARGET FSTYPE OPTIONS»"
 ERRF="$(mktemp)" || falla "no se pudo crear un archivo temporal"
 SETUID=""
+tolerar_errores() {      # $1 = TARGET (forma de findmnt) del montaje recorrido; $2 = su ruta real; $3 = su tipo
+  local linea p pe
+  [ -s "$ERRF" ] || falla "no se pudo buscar archivos setuid/setgid de jaxsvc en $2 ($3): find falló sin mensaje"
+  while IFS= read -r linea; do
+    case "$linea" in "find: '"*"': Permission denied") ;; *) falla "no se pudo buscar archivos setuid/setgid de jaxsvc en $2 ($3): $linea" ;; esac
+    p="${linea#"find: '"}"; p="${p%"': Permission denied"}"
+    case "$p" in *\\*|*\'*|*[[:cntrl:]]*) falla "no se pudo buscar archivos setuid/setgid de jaxsvc en $2 ($3): $linea" ;; esac
+    pe="${p// /\\x20}"
+    printf '%s\n' "$VISIBLES" | PE="$pe" PADRE="$1" awk '
+      $2 == ENVIRON["PE"] { if (($3 == "fuse" || $3 ~ /^fuse\./) && ("," $4 ",") ~ /,nosuid,/) fuse = 1 }
+      $2 != ENVIRON["PE"] && ($2 == "/" || index(ENVIRON["PE"], $2 "/") == 1) { if (length($2) > length(mejor)) mejor = $2 }
+      END { exit !(fuse && mejor == ENVIRON["PADRE"]) }' \
+      || falla "no se pudo buscar archivos setuid/setgid de jaxsvc en $2 ($3): $linea (no es el punto de montaje de un FUSE nosuid visible que cuelgue de este montaje)"
+    echo "  (tolero: $p es el punto de montaje de un FUSE nosuid, ya saltado)"
+  done < "$ERRF"
+}
 echo "premisa (a): setuid/setgid de jaxsvc, montaje por montaje"
 while read -r _id destino tipo opciones; do
   case ",$opciones," in *,nosuid,*) echo "  salto $destino ($tipo): nosuid"; continue ;; esac
@@ -111,7 +134,7 @@ while read -r _id destino tipo opciones; do
   case "$ruta" in *\\*) falla "el nombre del montaje $destino tiene un escape de findmnt que no se interpreta (solo \\x20)" ;; esac
   echo "  recorro $ruta ($tipo)"
   hallado="$(sudo env LC_ALL=C find "$ruta" -xdev -type f -user jaxsvc -perm /6000 -print 2>"$ERRF")" \
-    || falla "no se pudo buscar archivos setuid/setgid de jaxsvc en $ruta ($tipo): find falló${ERRF:+: $(cat "$ERRF")}"
+    || tolerar_errores "$destino" "$ruta" "$tipo"
   [ -z "$hallado" ] || SETUID="$SETUID$hallado"$'\n'
 done <<< "$VISIBLES"
 rm -f "$ERRF"
@@ -287,8 +310,15 @@ ESTABLE=$((10#$ESTABLE))
 #       (i)   OPTIONS trae `nosuid` COMO OPCIÓN COMPLETA: se salta (ahí un setuid no da uid);
 #       (ii)  sin nosuid y FUSE (fuse, fuse.*, fuseblk): se corta; no se puede descartar un setuid y un FUSE puede negar
 #             la lectura incluso a root (en hall9000, el sshfs);
-#       (iii) sin nosuid y de otro tipo: `find <TARGET> -xdev -type f -user jaxsvc -perm /6000`. CUALQUIER error de find,
-#             Permission denied incluido, corta; encontrar algo, también. No se parsea ningún mensaje de find.
+#       (iii) sin nosuid y de otro tipo: `find <TARGET> -xdev -type f -user jaxsvc -perm /6000`. Encontrar algo corta, y
+#             cualquier error de find corta, SALVO una excepción acotada (función `tolerar_errores`): el punto de montaje de
+#             un FUSE nosuid ilegible (el sshfs de hall9000) cuelga del montaje que se recorre y find lo stat-ea desde el
+#             padre, aunque ese FUSE ya se salta por nosuid (nada queda sin revisar). Un error se tolera SOLO si cumple LAS
+#             CINCO: (a) el mensaje, con LC_ALL=C, es exactamente `find: '<p>': Permission denied`, en una sola línea;
+#             (b) `<p>` no trae barra invertida, comilla simple ni carácter de control; (c) `<p>`, con solo el espacio
+#             pasado a \x20, es EXACTAMENTE el TARGET de una fila VISIBLE de la lista ya resuelta, y esa fila es FUSE
+#             (fuse o fuse.*, no fuseblk) con `nosuid` como opción completa; (d) el montaje visible MÁS LARGO que contiene
+#             ese TARGET es el que se recorre; (e) cualquier otra línea de error, o un find que falla sin mensaje, corta.
 #     Montajes superpuestos (el mismo TARGET repetido): vale el VISIBLE, el último en el orden de mountinfo (`findmnt
 #     --kernel` lo conserva). El mismo dispositivo en varios TARGET NO se deduplica: se recorre cada uno.
 #     `find` corre con LC_ALL=C (vía `env`, porque `sudo` puede limpiar el entorno). `findmnt -r` escapa espacio, salto de
@@ -320,6 +350,22 @@ VISIBLES="$(printf '%s\n' "$MONTAJES" \
   || falla "findmnt devolvió una línea que no es «ID TARGET FSTYPE OPTIONS»"
 ERRF="$(mktemp)" || falla "no se pudo crear un archivo temporal"
 SETUID=""
+tolerar_errores() {      # $1 = TARGET (forma de findmnt) del montaje recorrido; $2 = su ruta real; $3 = su tipo
+  local linea p pe
+  [ -s "$ERRF" ] || falla "no se pudo buscar archivos setuid/setgid de jaxsvc en $2 ($3): find falló sin mensaje"
+  while IFS= read -r linea; do
+    case "$linea" in "find: '"*"': Permission denied") ;; *) falla "no se pudo buscar archivos setuid/setgid de jaxsvc en $2 ($3): $linea" ;; esac
+    p="${linea#"find: '"}"; p="${p%"': Permission denied"}"
+    case "$p" in *\\*|*\'*|*[[:cntrl:]]*) falla "no se pudo buscar archivos setuid/setgid de jaxsvc en $2 ($3): $linea" ;; esac
+    pe="${p// /\\x20}"
+    printf '%s\n' "$VISIBLES" | PE="$pe" PADRE="$1" awk '
+      $2 == ENVIRON["PE"] { if (($3 == "fuse" || $3 ~ /^fuse\./) && ("," $4 ",") ~ /,nosuid,/) fuse = 1 }
+      $2 != ENVIRON["PE"] && ($2 == "/" || index(ENVIRON["PE"], $2 "/") == 1) { if (length($2) > length(mejor)) mejor = $2 }
+      END { exit !(fuse && mejor == ENVIRON["PADRE"]) }' \
+      || falla "no se pudo buscar archivos setuid/setgid de jaxsvc en $2 ($3): $linea (no es el punto de montaje de un FUSE nosuid visible que cuelgue de este montaje)"
+    echo "  (tolero: $p es el punto de montaje de un FUSE nosuid, ya saltado)"
+  done < "$ERRF"
+}
 echo "premisa (a): setuid/setgid de jaxsvc, montaje por montaje"
 while read -r _id destino tipo opciones; do
   case ",$opciones," in *,nosuid,*) echo "  salto $destino ($tipo): nosuid"; continue ;; esac
@@ -329,7 +375,7 @@ while read -r _id destino tipo opciones; do
   case "$ruta" in *\\*) falla "el nombre del montaje $destino tiene un escape de findmnt que no se interpreta (solo \\x20)" ;; esac
   echo "  recorro $ruta ($tipo)"
   hallado="$(sudo env LC_ALL=C find "$ruta" -xdev -type f -user jaxsvc -perm /6000 -print 2>"$ERRF")" \
-    || falla "no se pudo buscar archivos setuid/setgid de jaxsvc en $ruta ($tipo): find falló${ERRF:+: $(cat "$ERRF")}"
+    || tolerar_errores "$destino" "$ruta" "$tipo"
   [ -z "$hallado" ] || SETUID="$SETUID$hallado"$'\n'
 done <<< "$VISIBLES"
 rm -f "$ERRF"
