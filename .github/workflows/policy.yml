@@ -1959,10 +1959,10 @@ jobs:
       # `pytest.importorskip("PIL.Image")` en `_ocr_test.py` genera los
       # fixtures (imágenes con texto real) -- mismo patrón de riesgo que
       # openpyxl/pdfplumber: sin Pillow instalado, "1 skipped" y EXIT 0.
-      # Pillow NO va en requirements-archivos.txt (ese archivo es de
-      # dependencias del EXTRACTOR; Pillow sólo genera fixtures de test,
-      # tesseract no la usa) -- se instala acá, en el paso que la necesita.
-      # poppler-utils (pdftoppm) tampoco -- verificado 2026-09-21 que
+      # Pillow viene de requirements-archivos.txt (pillow==12.3.0 desde Jax#338), que este
+      # mismo job instala más arriba. El `pip install pillow` de abajo es redundante pero se
+      # queda: policy/tests/test_pisos_migracion_desde_master.py fija el orden de los pasos de master.
+      # poppler-utils (pdftoppm) es paquete de sistema -- verificado 2026-09-21 que
       # NO viene preinstalado en la imagen base de este job (python:3.12-slim
       # equivalente): `which pdftoppm` da vacío sin este apt-get.
       - run: sudo apt-get install -y tesseract-ocr tesseract-ocr-spa poppler-utils
@@ -2903,8 +2903,7 @@ jobs:
         # 49 -> 50 (fix de revision, MAJOR-1): +1, test_las_pruebas_no_tocan_el_nucleo_de_sistema.
         # 50 -> 51 (2026-10-03, E2a): +1, test_en_profundidad_2_se_excluye_toda_carpeta_oculta_y_solo_las_ocultas
         # (la exclusion pasa de un nombre fijo a toda carpeta oculta de profundidad 2). Local: 52 passed + 1 solo-host.
-        # 51 -> 53 (ronda 4): +2, symlink oculto no es carpeta excluida / la cuenta forense incluye la
-        # carpeta oculta. Local: 54 passed + 1 solo-host (55 pruebas; el runner salta 2).
+        # Historia de los números del piso: docs/ci/pisos.md (los números viven en ci/pisos.json).
         run: |
           PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
           python3 .github/ci/piso.py verificar permisos-proyectos/permisos_proyectos /tmp/permisos_proyectos || exit $?
