@@ -56,7 +56,7 @@ from procesamiento.resultado import Resultado
 # (sin Pillow ni JAX_WORKSPACE_DIR) para que el freno de dependencias decida con
 # la MISMA funcion; los nombres de siempre siguen disponibles en `ocr`.
 from procesamiento.tipos_imagen import tiene_firma_de_imagen as _tiene_firma_de_imagen
-from procesamiento.tipos_imagen import tipo_por_cabecera
+from procesamiento.tipos_imagen import leer_cabecera, tipo_por_cabecera
 
 try:
     # Bare primero, por consistencia con los otros symlinks de las_manos/ (via
@@ -311,11 +311,9 @@ def camino_de(origen: Path, sufijo: str | None = None) -> str:
     """El camino (`"pdf"`/`"imagen"`) que toma el OCR para este archivo: la
     MISMA decision para `ocr.extraer`, la compuerta y la ingesta."""
     origen = Path(origen)
-    try:
-        with open(origen, "rb") as fh:
-            cabecera = fh.read(1024)
-    except OSError:
-        cabecera = b""
+    # Jax#338 ronda 19: sin bloquear (un `open()` de un FIFO espera un escritor);
+    # lo que no es un archivo regular no da tipo por contenido y decide la extension.
+    cabecera = leer_cabecera(origen) or b""
     sufijo = sufijo if sufijo is not None else origen.suffix
     return camino_de_tipo(tipo_por_cabecera(cabecera, sufijo), sufijo)
 

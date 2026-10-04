@@ -5516,8 +5516,11 @@ jobs:
           #   un MPO de un cuadro sigue con los bytes originales. La prueba del MPO de iPhone y la de
           #   la version ("6") se reescriben (no suman). Cuenta del runner: 202 recolectadas menos las
           #   2 de LACTOVI que salta = 200 passed, 2 skipped. Medido LOCAL en hall9000: 202 passed.
-          grep -qE "^200 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 200 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 202 -> 203 recolectadas (Jax#338 ronda 19, cierre): +1 -- `ocr.camino_de` y la ingesta
+          #   leen la cabecera sin bloquear (un FIFO no los cuelga). Cuenta del runner: 203 menos las 2
+          #   de LACTOVI = 201 passed, 2 skipped. Medido LOCAL en hall9000: 203 passed.
+          grep -qE "^201 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 201 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,

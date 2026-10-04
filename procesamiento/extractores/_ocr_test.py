@@ -3398,3 +3398,27 @@ def test_n44_un_mpo_de_un_solo_cuadro_sigue_con_los_bytes_originales(tmp_path, m
     r = ocr.extraer(destino)
     assert entradas == [destino.read_bytes()]
     assert "<!-- cuadro" not in r.salidas["texto.txt"]
+
+
+def test_n45_camino_de_y_la_ingesta_no_se_cuelgan_con_un_fifo(tmp_path):
+    """Jax#338 ronda 19: `ocr.camino_de` (y la ingesta, que lo usa) leen la
+    cabecera con `tipos_imagen.leer_cabecera`, sin bloquear: un FIFO no es un
+    archivo regular, el contenido no decide y decide la extension."""
+    import os
+    import threading
+
+    from procesamiento import ingesta
+
+    for nombre, esperado in (("tuberia.png", "imagen"), ("tuberia.pdf", "pdf")):
+        fifo = tmp_path / nombre
+        os.mkfifo(fifo)
+        for funcion in (lambda: ocr.camino_de(fifo), lambda: ingesta._camino_de(fifo, fifo.suffix)):
+            resultado: list = []
+            hilo = threading.Thread(target=lambda: resultado.append(funcion()), daemon=True)
+            hilo.start()
+            hilo.join(5)
+            if hilo.is_alive():
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))   # libera el open() colgado
+                hilo.join(5)
+                raise AssertionError(f"se colgo leyendo el FIFO {nombre}")
+            assert resultado == [esperado]
