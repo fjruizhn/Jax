@@ -112,7 +112,9 @@ import collections
 import json
 import logging
 import os
+import signal
 import socket
+import stat
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -181,6 +183,7 @@ _RESULTADOS_RECORDADOS = 10000
 
 _HOST_POR_OMISION = "127.0.0.1"
 _LEER_BYTES = 65536
+_SONDEO_S = 2.0  # tope del connect() de prueba al socket huérfano; agotarlo = fallar cerrado
 
 #: Cabeceras de salto (RFC 9110 §7.6.1) y las que el proxy recalcula. `accept-encoding`
 #: lo pone SIEMPRE el proxy en `identity`: un cuerpo comprimido no se puede leer al pasar.
@@ -785,13 +788,21 @@ class Servidor:
         self._servidor.close()
         if self._servidor_jaxqwen is not None:
             self._servidor_jaxqwen.close()
+            # El socket propio se borra YA, al dejar de escuchar, y no después de wait_closed():
+            # wait_closed espera a las conexiones en vuelo, y si systemd agota TimeoutStopSec
+            # y manda SIGKILL durante esa espera, el socket quedaría huérfano.
+            self._borrar_socket_propio()
+
+    def _borrar_socket_propio(self) -> None:
+        if self._socket_jaxqwen is not None:
+            self._socket_jaxqwen.unlink(missing_ok=True)
+            self._socket_jaxqwen = None  # una sola vez: un segundo close() no borra lo ajeno
 
     async def wait_closed(self) -> None:
         await self._servidor.wait_closed()
         if self._servidor_jaxqwen is not None:
             await self._servidor_jaxqwen.wait_closed()
-        if self._socket_jaxqwen is not None:
-            self._socket_jaxqwen.unlink(missing_ok=True)
+        self._borrar_socket_propio()
         await self._proxy.cerrar()
         self._proxy.registro.cerrar()
 
@@ -803,14 +814,70 @@ class Servidor:
             await self.wait_closed()
 
 
+def _config_invalida_socket() -> ConfigInvalida:
+    return ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_SOCKET"),)))
+
+
+def _sondear_oyente(ruta: Path) -> None:
+    """connect() de prueba. Vuelve normal SOLO si nadie escucha (ECONNREFUSED); cualquier otro
+    resultado (conexión lograda, ENOENT, EACCES, tiempo agotado...) levanta y el llamador falla cerrado."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as prueba:
+        prueba.settimeout(_SONDEO_S)
+        try:
+            prueba.connect(str(ruta))
+        except ConnectionRefusedError:
+            return
+    raise OSError("hay_oyente")
+
+
+def _huella_socket(ruta: Path) -> tuple | None:
+    """Identidad del objeto en `ruta` SIN seguir enlaces; None si no es un socket nuestro."""
+    st = os.lstat(ruta)
+    if not stat.S_ISSOCK(st.st_mode) or st.st_uid != os.geteuid():
+        return None
+    return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _despejar_socket_huerfano(ruta: Path) -> None:
+    """Deja `ruta` libre para el bind si y solo si es un socket PROPIO SIN oyente; si no existe, no
+    hace nada. Cualquier otra cosa (enlace, archivo, otro tipo, otro uid, alguien escuchando, un
+    error inesperado) levanta ConfigInvalida y NO borra nada: igual que antes de esta limpieza.
+
+    Carrera (connect -> unlink): POSIX no tiene un unlink condicional, así que no hay garantía
+    total. Se reduce así: la huella (dev, ino, mtime_ns, ctime_ns) se toma antes del connect y se
+    vuelve a tomar justo antes del unlink; si cambió, alguien reemplazó el socket (un bind nuevo
+    crea un inodo nuevo) y NO se borra. Queda la ventana de microsegundos entre ese segundo
+    lstat y el unlink. No es explotable con el despliegue: el directorio es 0750 jaxsvc:jaxqwen-proxy
+    (el chequeo del padre rechaza escritura de grupo/otros), así que solo el uid dueño puede crear
+    o reemplazar entradas, y el único otro candidato a hacer bind ahí es una segunda instancia
+    de este mismo proxy, que systemd no lanza mientras la primera corre (Type=simple, una unidad)."""
+    try:
+        antes = _huella_socket(ruta)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise _config_invalida_socket() from None
+    if antes is None:
+        raise _config_invalida_socket()
+    try:
+        _sondear_oyente(ruta)
+        if _huella_socket(ruta) != antes:
+            raise _config_invalida_socket()
+        ruta.unlink()
+    except ConfigInvalida:
+        raise
+    except OSError:  # oyente, ENOENT entre medio, permisos, tiempo agotado: nada se borra
+        raise _config_invalida_socket() from None
+    log.warning("proxy_carril socket_huerfano_limpiado ruta=%s", ruta)
+
+
 async def arrancar(cfg: Config) -> Servidor:
     interruptor.ruta_del_interruptor()  # InterruptorSinConfigurar: sin saber dónde está el freno, no hay cerebro
     if cfg.jaxqwen_socket is not None:
         parent = cfg.jaxqwen_socket.parent
         if parent.is_symlink() or not parent.is_dir() or parent.stat().st_mode & 0o022:
             raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_SOCKET"),)))
-        if cfg.jaxqwen_socket.exists() or cfg.jaxqwen_socket.is_symlink():
-            raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_SOCKET"),)))
+        await asyncio.to_thread(_despejar_socket_huerfano, cfg.jaxqwen_socket)
     # Un registro que no cuadra NO se abre (RegistroCorrupto): sin registro no hay cerebro.
     registro = await asyncio.to_thread(Registro, cfg.registro)
     proxy = None
@@ -854,7 +921,36 @@ async def _principal() -> None:
     cfg = config_desde_entorno()
     servidor = await arrancar(cfg)
     log.info("proxy_carril escuchando host=%s puerto=%d", cfg.host, cfg.puerto)
-    await servidor.serve_forever()
+    await _servir_hasta_la_senal(servidor)
+
+
+async def _servir_hasta_la_senal(servidor: Servidor) -> None:
+    """SIGTERM/SIGINT = parada ordenada: se cancela serve_forever, cuyo `finally` cierra los
+    servidores, borra el socket propio y cierra proxy y registro. Vuelve normal (salida 0:
+    systemd marca "Deactivated successfully" y Restart=on-failure no lo relanza). Solo la
+    primera señal cuenta; las siguientes no interrumpen el cierre en curso."""
+    loop = asyncio.get_running_loop()
+    tarea = asyncio.ensure_future(servidor.serve_forever())
+    pedida = False
+
+    def parar() -> None:
+        nonlocal pedida
+        if not pedida:
+            pedida = True
+            log.info("proxy_carril parada_ordenada")
+            tarea.cancel()
+
+    senales = (signal.SIGTERM, signal.SIGINT)
+    for sig in senales:
+        loop.add_signal_handler(sig, parar)
+    try:
+        await tarea
+    except asyncio.CancelledError:
+        if not pedida:  # cancelación ajena a la señal: no se silencia
+            raise
+    finally:
+        for sig in senales:
+            loop.remove_signal_handler(sig)
 
 
 if __name__ == "__main__":
