@@ -1849,8 +1849,11 @@ jobs:
           # 159 -> 160 (2026-10-03, Jax#338 ronda 9, N29): +1 en _procesamiento_routes_test.py (un
           # salto de linea al final del formato no se acepta: `fullmatch`). Medido con este comando
           # exacto: 160 passed.
-          grep -qE "^160 passed" /tmp/f2e-sr3-source || {
-            echo "PISO ROTO: se esperaban 160 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
+          # 160 -> 162 (2026-10-03, Jax#338 ronda 18): +2 en _procesamiento_routes_test.py (sin Pillow,
+          # un PNG con firma llamado `foto` da 503: el freno decide por contenido; `png_animado` viaja
+          # como formato estable del contrato). Medido con este comando exacto: 162 passed.
+          grep -qE "^162 passed" /tmp/f2e-sr3-source || {
+            echo "PISO ROTO: se esperaban 162 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
         env:
           PYTHONPATH: .:las_manos
       - name: Piso exacto de tests CORRIDOS
@@ -5501,8 +5504,12 @@ jobs:
           #   passed, 2 skipped. Medido LOCAL en hall9000: 197 passed.
           # Ronda 17: la prueba de la version de la logica pasa a exigir "4" (reescrita, no suma);
           #   sigue en 197 recolectadas, 195 passed + 2 skipped en el runner.
-          grep -qE "^195 passed, 2 skipped" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 195 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          # 197 -> 200 recolectadas (Jax#338 ronda 18): +3 -- un APNG de dos cuadros (con el cuadro por
+          #   defecto dentro y fuera de la animacion) es formato_no_soportado:png_animado sin tesseract,
+          #   y un APNG de un cuadro sigue como PNG. Cuenta del runner: 200 recolectadas menos las 2 de
+          #   LACTOVI que salta = 198 passed, 2 skipped. Medido LOCAL en hall9000: 200 passed.
+          grep -qE "^198 passed, 2 skipped" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 198 tests CORRIDOS y exactamente 2 skipped (las 2 imagenes reales de LACTOVI, solo en hall9000) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
@@ -6014,8 +6021,9 @@ jobs:
           # dependencias: 95 passed.
           # 95 -> 98 (Jax#338 ronda 8): ver F2-E-SR3 (+3); medido: 98 passed.
           # 98 -> 99 (Jax#338 ronda 9, N29): ver F2-E-SR3 (+1); medido: 99 passed.
-          grep -qE "^99 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 99 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          # 99 -> 101 (Jax#338 ronda 18): ver F2-E-SR3 (+2); medido: 101 passed.
+          grep -qE "^101 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 101 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # jax-14 (2026-10-03): freno de dependencias de extraccion. Piso exacto de
       # procesamiento/_dependencias_test.py: 29 passed (10 de la ronda 0 + 19 de la
@@ -6032,8 +6040,11 @@ jobs:
           # 31 -> 32 (Jax#338 ronda 2): +1 -- con PIL._imaging bloqueado, pillow figura como faltante.
           # 32 -> 34 (Jax#338 ronda 17): +2 -- sin Pillow se frena `sello.gif`, y cada extension que
           #   Pillow registra para un formato cuya firma el OCR acepta. Medido localmente: 34 passed.
-          grep -qE "^34 passed" /tmp/dependencias_tests || {
-            echo "PISO ROTO: se esperaban 34 tests CORRIDOS (no skipeados) del freno de dependencias."; exit 1; }
+          # 34 -> 37 (Jax#338 ronda 18): +3 -- el freno decide por CONTENIDO como la compuerta: un PNG
+          #   llamado `foto` frena sin Pillow; un PDF llamado `.png` no se frena por Pillow y si por
+          #   pdfplumber; sin contenido legible decide la extension. Medido localmente: 37 passed.
+          grep -qE "^37 passed" /tmp/dependencias_tests || {
+            echo "PISO ROTO: se esperaban 37 tests CORRIDOS (no skipeados) del freno de dependencias."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
