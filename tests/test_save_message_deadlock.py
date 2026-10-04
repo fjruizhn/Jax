@@ -1,0 +1,378 @@
+# tests/test_save_message_deadlock.py
+"""Deadlocks 1213 en save_message: ningun mensaje se pierde por un deadlock.
+
+DIAGNOSTICO 2026-10-04 (rama fix/deadlocks-save-message), reproducido contra
+una base aislada clonada de jax_memory_test (MariaDB 12.3.3, REPEATABLE-READ,
+pool autocommit): 12 workers x 200 mensajes sobre 4 conversaciones
+compartidas dieron 1563 deadlocks de 2400 intentos, turn_numbers duplicados
+y mensajes PERDIDOS EN SILENCIO (el @db_error_handler traga el 1213 y el
+guardado es fire-and-forget).
+
+Grafo capturado (LATEST DETECTED DEADLOCK, SHOW ENGINE INNODB STATUS):
+
+  T1 (paso 5, `UPDATE messages SET embedding... WHERE conversation_id AND
+      turn_number`): posee una capa del INDICE VECTORIAL HNSW (tabla
+      interna `messages#i#NN`) y espera el lock X del PRIMARY de una fila
+      ajena. Medido con 1272 row locks y 35 undo entries: el WHERE matcheaba
+      ~35 filas con el MISMO turn_number, duplicado por la carrera MAX+1.
+  T2 (paso 3, `INSERT INTO messages`): posee su fila nueva (vector default
+      en CEROS, que cae siempre en la misma zona del grafo HNSW) y espera
+      justo la capa del indice que tiene T1.
+
+  Ciclo: T1 espera la fila de T2  <->  T2 espera la capa vectorial de T1.
+
+Causa raiz (dos condiciones que se potencian):
+  1. Carrera MAX+1 sin UNIQUE(conversation_id, turn_number): dos writers
+     concurrentes calculan el mismo turn_number; el UPDATE de embedding de
+     uno bloquea las filas del otro, cerrando el ciclo con el indice HNSW.
+     Colateral medido: turnos duplicados y el embedding de un mensaje
+     pisando a los demas del mismo turn.
+  2. INSERT (con embedding default) y UPDATE de embedding (reescritura del
+     grafo) en transacciones distintas: el indice HNSW es un recurso
+     compartido entre ambas sentencias, y con vectores en cero todas las
+     inserciones nuevas compiten por la misma zona del grafo.
+
+Arreglo (ver jax/memory/db.py::_insertar_turno_atomico): transaccion corta
+BEGIN...COMMIT con el turn asignado bajo SELECT ... FOR UPDATE (serializa
+por conversacion), UNIQUE KEY como respaldo de la carrera, reintento acotado
+e idempotente ante 1213/1205/1062 (cada intento recalcula desde cero; el
+rollback de la transaccion muerta garantiza que el mismo mensaje no se
+guarda dos veces) y vectorizacion por id de fila (una sola fila, sin rango).
+"""
+from __future__ import annotations
+
+import asyncio
+import functools
+import os
+
+import aiomysql
+import pytest
+
+from jax.core.db_connect_config import db_connect_timeout_seconds
+from jax.memory import db as dbmod
+import _esquema_memoria
+
+from base_de_test import es_base_de_test  # noqa: E402
+
+_DB = os.getenv("JAX_DB_NAME", "")
+requiere_db_de_prueba = pytest.mark.skipif(
+    not os.getenv("JAX_DB_HOST") or not es_base_de_test(_DB),
+    reason="necesita una MariaDB real y JAX_DB_NAME en una base de tests",
+)
+
+_USER = 990_060  # reservado para este archivo
+
+
+def asincrono(fn):
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        return asyncio.run(fn(*a, **k))
+    return wrapper
+
+
+async def _conn():
+    return await aiomysql.connect(
+        host=os.environ["JAX_DB_HOST"], port=int(os.environ["JAX_DB_PORT"]),
+        user=os.getenv("JAX_DB_USER", ""), password=os.getenv("JAX_DB_PASSWORD", ""),
+        db=os.environ["JAX_DB_NAME"], autocommit=True,
+        connect_timeout=db_connect_timeout_seconds())
+
+
+async def _sql(conn, query, args=(), fetch=False):
+    async with conn.cursor() as cur:
+        await cur.execute(query, args)
+        if fetch:
+            return list(await cur.fetchall())
+        return cur.lastrowid
+
+
+_DDL = _esquema_memoria.ddl()
+
+
+@pytest.fixture
+def limpio():
+    creadas = asyncio.run(_preparar())
+    asyncio.run(_vaciar())
+    yield
+    asyncio.run(_teardown(creadas))
+
+
+async def _preparar() -> list[str]:
+    creadas = []
+    conn = await _conn()
+    try:
+        for nombre, ddl in _DDL.items():
+            existe = await _sql(
+                conn,
+                "SELECT 1 FROM information_schema.TABLES "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+                (nombre,), fetch=True)
+            if not existe:
+                await _sql(conn, ddl)
+                creadas.append(nombre)
+    finally:
+        conn.close()
+    return creadas
+
+
+async def _vaciar():
+    conn = await _conn()
+    try:
+        base = os.environ["JAX_DB_NAME"]
+        assert es_base_de_test(base), f"me negue a vaciar tablas en {base!r}"
+        await _esquema_memoria.vaciar(conn)
+    finally:
+        conn.close()
+
+
+async def _teardown(creadas: list[str]):
+    await _vaciar()
+    conn = await _conn()
+    try:
+        for nombre in reversed(list(_DDL)):
+            if nombre in creadas:
+                await _sql(conn, f"DROP TABLE {nombre}")
+    finally:
+        conn.close()
+
+
+async def _memoria(monkeypatch) -> dbmod.MemoryDB:
+    m = dbmod.MemoryDB()
+    ok = await m.connect(
+        os.environ["JAX_DB_HOST"], os.getenv("JAX_DB_USER", ""),
+        os.getenv("JAX_DB_PASSWORD", ""), os.environ["JAX_DB_NAME"],
+        port=int(os.environ["JAX_DB_PORT"]))
+    assert ok, "MemoryDB no conecto: el test no probaria nada"
+
+    async def _emb(texto):
+        # deterministico y distinto por mensaje: no todos los vectores nuevos
+        # caen en el mismo punto del grafo HNSW
+        v = [0.0] * dbmod.EMBEDDING_DIM
+        h = abs(hash(texto)) % (10 ** 6)
+        v[0] = (h % 997) / 997.0
+        v[1] = ((h // 997) % 991) / 991.0
+        v[2] = 1.0
+        return v
+
+    monkeypatch.setattr(m, "get_embedding", _emb)
+    return m
+
+
+@asincrono
+@requiere_db_de_prueba
+async def test_la_carga_concurrente_no_pierde_ni_duplica(limpio, monkeypatch):
+    """La prueba de carga del bug: muchos writers sobre las mismas
+    conversaciones. ANTES del arreglo reproduce el deadlock 1213 y pierde
+    mensajes en silencio (medido: 1563/2400 intentos en deadlock); DESPUES
+    todos los mensajes quedan guardados exactamente una vez, sin turnos
+    duplicados y con el contador consistente."""
+
+    db = await _memoria(monkeypatch)
+    conn = await _conn()
+    try:
+        convs = [await db.start_conversation(source="test", user_id=_USER)
+                 for _ in range(4)]
+        workers, por_worker = 10, 120
+
+        async def worker(w):
+            for i in range(por_worker):
+                conv = convs[(w * 7 + i) % len(convs)]
+                task = db.save_message(conv, "user", f"w{w}-{i}", "kimi",
+                                       "kimi-k3", 5)
+                r = await task
+                assert r is not None, (
+                    f"mensaje w{w}-{i} perdido: save_message devolvio None "
+                    f"(deadlock sin reintento efectivo)")
+
+        await asyncio.gather(*[worker(w) for w in range(workers)])
+        await db.close()
+
+        esperados = workers * por_worker
+        total = (await _sql(conn, "SELECT COUNT(*) FROM messages", fetch=True))[0][0]
+        distintos = (await _sql(conn, "SELECT COUNT(DISTINCT content) FROM messages", fetch=True))[0][0]
+        duplicados = await _sql(
+            conn,
+            "SELECT conversation_id, turn_number, COUNT(*) FROM messages "
+            "GROUP BY 1, 2 HAVING COUNT(*) > 1", fetch=True)
+        marcador = ",".join(["%s"] * len(convs))
+        contador = (await _sql(
+            conn,
+            f"SELECT COALESCE(SUM(total_turns), 0) FROM conversations "
+            f"WHERE conversation_uuid IN ({marcador})", tuple(convs),
+            fetch=True))[0][0]
+
+        assert total == esperados, (
+            f"se perdieron mensajes: {total} filas de {esperados} enviados "
+            f"(deadlocks 1213 tragados por db_error_handler)")
+        assert distintos == esperados, (
+            f"hay {total - distintos} mensajes duplicados en contenido")
+        assert duplicados == [], (
+            f"turn_numbers duplicados (carrera MAX+1): {duplicados[:5]}")
+        assert contador == esperados, (
+            f"total_turns={contador} != {esperados}: contador desincronizado")
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Reintento idempotente ante 1213: con mocks, sin base de datos
+# ---------------------------------------------------------------------------
+
+class _CursorTramposo:
+    """Cursor que levanta un error (default 1213) en la ejecucion numero
+    `fallo_en` (1-based) de SU cursor. Registra todo lo ejecutado."""
+
+    def __init__(self, conn, fallo_en=None, codigo=1213):
+        self.conn = conn
+        self.fallo_en = fallo_en
+        self.codigo = codigo
+        self.n = 0
+        self.sql = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        return False
+
+    async def execute(self, sql, args=()):
+        self.n += 1
+        self.conn.ejecutados.append((sql, args))
+        if self.fallo_en is not None and self.n == self.fallo_en:
+            raise aiomysql.OperationalError(self.codigo, "error inyectado")
+
+    async def fetchone(self):
+        for sql, _ in reversed(self.conn.ejecutados):
+            if "MAX(turn_number)" in sql:
+                return (3,)
+            if "FROM conversations" in sql:
+                return (5, _USER, None)
+        return None
+
+    @property
+    def lastrowid(self):
+        return 42
+
+
+class _ConnTramposo:
+    """Secuencia de executes por cursor: dentro de un intento de guardado,
+    1 = SELECT MAX...FOR UPDATE, 2 = INSERT, 3 = UPDATE conversations."""
+
+    def __init__(self, fallo_en=None, codigo=1213):
+        self.ejecutados = []
+        self.begins = 0
+        self.commits = 0
+        self.rollbacks = 0
+        self._fallo_en = fallo_en
+        self._codigo = codigo
+
+    async def begin(self):
+        self.begins += 1
+
+    async def commit(self):
+        self.commits += 1
+
+    async def rollback(self):
+        self.rollbacks += 1
+
+    def cursor(self):
+        return _CursorTramposo(self, self._fallo_en, self._codigo)
+
+
+class _Acquire:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, *_):
+        return False
+
+
+class _PoolTramposo:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        return _Acquire(self.conn)
+
+
+def _db_con(con):
+    db = dbmod.MemoryDB()
+    db.pool = _PoolTramposo(con)
+    return db
+
+
+async def _sin_embedding(_texto):
+    return None
+
+
+@asincrono
+async def test_reintento_1213_guarda_exactamente_una_vez(monkeypatch):
+    """El INSERT muere una vez con 1213: la transaccion muerta se revierte,
+    se reintenta y el mensaje queda guardado UNA vez (idempotencia del
+    reintento: sin el rollback, el segundo intento duplicaria la fila)."""
+    con = _ConnTramposo(fallo_en=2)  # dentro del 1er intento: muere el INSERT
+    db = _db_con(con)
+    monkeypatch.setattr(db, "get_embedding", _sin_embedding)
+
+    r = await db._save_message_impl("uuid-x", "user", "hola", None, None, None)
+
+    assert r == {"conversation_id": 5, "turn_number": 3}
+    inserts = [s for s, _ in con.ejecutados if s.startswith("INSERT INTO messages")]
+    assert len(inserts) == 2, "se esperaba el INSERT fallido + el del reintento"
+    assert con.begins == 2 and con.commits == 1 and con.rollbacks == 1, (
+        f"begins={con.begins} commits={con.commits} rollbacks={con.rollbacks}: "
+        "la transaccion del deadlock no se revierte completa")
+
+
+@asincrono
+async def test_si_1213_persiste_devuelve_None_sin_duplicar(monkeypatch):
+    """Tres intentos, tres 1213: falla de verdad (None), pero cada intento
+    revierte su INSERT parcial -- ninguna fila queda a medias."""
+    class _ConnPersistente(_ConnTramposo):
+        async def begin(self):
+            self.begins += 1
+            self._fallo_en = 2  # el INSERT muere SIEMPRE
+
+    con = _ConnPersistente(codigo=1213)
+    db = _db_con(con)
+    monkeypatch.setattr(db, "get_embedding", _sin_embedding)
+
+    r = await db._save_message_impl("uuid-x", "user", "hola", None, None, None)
+
+    assert r is None
+    assert con.rollbacks == 3 and con.commits == 0, (
+        f"rollbacks={con.rollbacks} commits={con.commits}: un intento sin "
+        "revertir dejaria la fila INSERTada a pesar del fallo")
+    inserts = [s for s, _ in con.ejecutados if s.startswith("INSERT INTO messages")]
+    assert len(inserts) == 3, "los 3 intentos llegaron al INSERT (y revierten)"
+
+
+@asincrono
+async def test_el_insert_y_el_contador_son_una_sola_transaccion(monkeypatch):
+    """Si el UPDATE del contador muere, el INSERT del mensaje se revierte
+    tambien: los dos siempre avanzan juntos o ninguno. Y la vectorizacion no
+    corre si el mensaje no quedo guardado."""
+    class _CursorContadorTramposo(_CursorTramposo):
+        async def execute(self, sql, args=()):
+            self.n += 1
+            self.conn.ejecutados.append((sql, args))
+            if "UPDATE conversations" in sql:
+                raise aiomysql.OperationalError(1205, "Lock wait timeout")
+
+    class _Conn2(_ConnTramposo):
+        def cursor(self):
+            return _CursorContadorTramposo(self)
+
+    con = _Conn2()
+    db = _db_con(con)
+    monkeypatch.setattr(db, "get_embedding", _sin_embedding)
+
+    r = await db._save_message_impl("uuid-x", "user", "hola", None, None, None)
+
+    assert r is None
+    assert con.rollbacks == 3 and con.commits == 0
+    assert not any("UPDATE messages SET" in s for s, _ in con.ejecutados), (
+        "la vectorizacion no debe correr si el mensaje no quedo guardado")
