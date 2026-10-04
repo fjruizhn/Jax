@@ -1643,6 +1643,7 @@ jobs:
             tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py \
             tests/test_vocativo_faceta.py tests/test_router_easter_egg.py \
             tests/test_probar_c5_pasa_todas_las_compuertas.py \
+            tests/test_docker_rm_sin_fuga_de_volumenes.py \
             tests/test_identity_context.py tests/test_jacobs_director.py \
             tests/test_memory_correction.py tests/test_memory_helpers.py \
             tests/test_read_audit_log_unbound.py tests/test_template_hash.py \

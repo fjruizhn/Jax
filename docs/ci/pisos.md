@@ -859,8 +859,8 @@ Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skippe
 
 3470 -> 3472 el 2026-10-04 (Hyde, hall9000): +2 de `tests/test_docker_rm_sin_fuga_de_volumenes.py`
 (el barrido del árbol y el control del patrón). `docker rm -f` sin `-v` dejaba huérfano el
-datadir de cada MariaDB desechable: 341 volúmenes, 56 GB. Sumado al conteo vigente, no medido
-en el runner: si el runner da otro número, se corrige aquí con su salida.
+datadir de cada MariaDB desechable: 341 volúmenes, 56 GB. Sumado al conteo vigente: el runner midió 3470 con la prueba solo en la primera lista;
+se agregó también a la lista del paso del piso (las dos listas de tests-puros van juntas).
 
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
