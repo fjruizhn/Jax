@@ -3610,6 +3610,11 @@ re-medir sobre master en vez de sumar los deltas a ciegas.
   unshare del CI (otro entorno, Python 3.14.4, lista exacta del paso): 3503 passed + 1 failed
   preexistente (test_arranque_las_manos_no_shadowea_policy, falla igual en master 5f4f5e0), 3 skipped;
   el delta +12 es el dato firme, el absoluto lo manda el runner.
+3464 -> 3470 (2026-10-04, ronda 2 de fix/proxy-socket-huerfano): +6 = +5 en
+  tests/test_ejecutor_proxy_jaxqwen_uds.py (18 -> 23: parada con conexion colgada, tope de vaciado,
+  apagar() en proceso, socket reemplazado en close() y en la rama de error, dueño del padre; menos la
+  prueba con doble que se reemplazo) y +1 en tests/test_ejecutor_contratos_registro.py (cerrar() con
+  lock). Misma lista y metodo: 3509 passed + 1 failed preexistente (3503 -> 3509), 3 skipped.
 ````
 
 ## `tests-puros/ficha_tests`
