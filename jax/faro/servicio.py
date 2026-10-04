@@ -31,12 +31,13 @@ from dataclasses import dataclass
 from .aviso import Avisador, ConfigAviso, leer_credenciales
 from .bitacora import Bitacora, emisor_logger
 from .bitacora_db import ConfigBitacoraDB, EmisorTabla, crear_pool
-from .config import ConfigFaro, ConfigFaroInvalida, ConfigPuerto
+from .config import ConfigFaro, ConfigFaroInvalida, ConfigMemoria, ConfigPuerto
 from .control import ConfigControl, ServidorControl, validar_directorio_control
 from .identidad import Ejecucion
 from .logs import asegurar_logging
 from .paquete import PaqueteCargado, cargar_paquete
 from .transporte import PresupuestoBytes, ServidorPuerto
+from .herramientas.memoria import AdaptadorMemoria, crear_pool_memoria_prueba
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,9 @@ class Servicio:
     cfg_aviso: ConfigAviso | None = None
     cfg_control: ConfigControl | None = None
     avisador: Avisador | None = None
+    cfg_memoria: ConfigMemoria | None = None
+    pool_memoria: object | None = None
+    adaptador_memoria: AdaptadorMemoria | None = None
 
     def control(self, jaula_viva=None) -> ServidorControl:
         """El canal de control autenticado (0.3c): el unico lugar donde nace una `Ejecucion`. Se usa con
@@ -63,11 +67,15 @@ class Servicio:
 
     def crear_puerto(self, ejecucion: Ejecucion) -> ServidorPuerto:
         return ServidorPuerto(self.cfg_puerto, ejecucion, self.paquete, self.bitacora, presupuesto=self.presupuesto,
-                              solo_pruebas_mismo_uid=self.solo_pruebas_mismo_uid)
+                              solo_pruebas_mismo_uid=self.solo_pruebas_mismo_uid,
+                              adaptador_memoria=self.adaptador_memoria)
 
     async def cerrar(self) -> None:
         if self.avisador is not None:
             await self.avisador.cerrar()        # entrega lo pendiente (con plazo) y nunca lanza
+        if self.pool_memoria is not None:
+            self.pool_memoria.close()
+            await self.pool_memoria.wait_closed()
         self.pool.close()
         await self.pool.wait_closed()
 
@@ -81,12 +89,23 @@ async def arrancar(env: Mapping[str, str], *, crear_pool: Callable = crear_pool,
     cfg_puerto = ConfigPuerto.desde_entorno(env)
     cfg_aviso = ConfigAviso.desde_entorno(env)              # 0.3b: sin aviso de las denegaciones no hay servicio
     cfg_control = ConfigControl.desde_entorno(env, solo_pruebas_mismo_uid=solo_pruebas_mismo_uid)    # 0.3c
+    cfg_memoria = ConfigMemoria.desde_entorno(env)           # B9 desactivada por defecto; allowlist solo de test
     if os.geteuid() == 0:
         raise ConfigFaroInvalida("el servicio del Faro no corre como root: usa el usuario sin privilegios `faro`")
     validar_directorio_control(cfg_control)                 # un 0777 no deja arrancar (antes de tocar la base)
     credenciales = leer_credenciales(cfg_aviso.creds)       # falla cerrado: ausentes, incompletas o con escritura ajena
     paquete = await asyncio.to_thread(cargar_paquete, cfg_faro)
     pool = await crear_pool(cfg_db)
+    pool_memoria = None
+    adaptador_memoria = None
+    if cfg_memoria.habilitada:
+        try:
+            pool_memoria, lector_memoria = await crear_pool_memoria_prueba(cfg_memoria)
+            adaptador_memoria = AdaptadorMemoria(lector_memoria)
+        except Exception:
+            # El servicio puede seguir atendiendo el resto del Puerto, pero la
+            # herramienta falla cerrado con «memoria no disponible».
+            logger.exception("memoria no disponible: no se abrió la base de prueba")
     avisador = Avisador(cfg_aviso, credenciales)
     try:
         emisor = EmisorTabla(pool)
@@ -96,11 +115,15 @@ async def arrancar(env: Mapping[str, str], *, crear_pool: Callable = crear_pool,
         await avisador.iniciar()
     except BaseException:
         await avisador.cerrar()
+        if pool_memoria is not None:
+            pool_memoria.close()
+            await pool_memoria.wait_closed()
         pool.close()
         await pool.wait_closed()
         raise
-    return Servicio(cfg_faro, cfg_puerto, cfg_db, paquete, pool, emisor, bitacora, PresupuestoBytes(cfg_puerto.presupuesto_bytes),
-                    solo_pruebas_mismo_uid, cfg_aviso, cfg_control, avisador)
+    return Servicio(cfg_faro, cfg_puerto, cfg_db, paquete, pool, emisor, bitacora,
+                    PresupuestoBytes(cfg_puerto.presupuesto_bytes), solo_pruebas_mismo_uid,
+                    cfg_aviso, cfg_control, avisador, cfg_memoria, pool_memoria, adaptador_memoria)
 
 
 def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) -> int:

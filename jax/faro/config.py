@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REF_FRESCURA_POR_DEFECTO = "origin/main"
@@ -33,6 +33,46 @@ _RE_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 class ConfigFaroInvalida(ValueError):
     """La configuracion falta o no es valida: el Faro no arranca."""
+
+
+@dataclass(frozen=True)
+class ConfigMemoria:
+    """Compuerta explícita de memoria. Solo se conecta al perfil local de prueba.
+
+    B9 no está reactivada en producción y su contrato de integración para el
+    Faro sigue pendiente. La allowlist evita que este adaptador provisional
+    pueda apuntar a `jax_memory` o a un servidor distinto.
+    """
+    habilitada: bool = False
+    host: str = "127.0.0.1"
+    port: int = 3308
+    usuario: str = "jax_test"
+    clave: str = field(default="", repr=False)
+    base: str = "jax_memory_test"
+
+    @classmethod
+    def desde_entorno(cls, env: Mapping[str, str]) -> "ConfigMemoria":
+        raw = (env.get("JAX_FARO_MEMORIA_HABILITADA") or "false").strip().lower()
+        if raw in {"", "false", "0", "no"}:
+            return cls()
+        if raw not in {"true", "1", "si", "sí"}:
+            raise ConfigFaroInvalida("JAX_FARO_MEMORIA_HABILITADA debe ser true o false")
+        host = (env.get("JAX_FARO_MEMORIA_TEST_DB_HOST") or "").strip()
+        port_raw = (env.get("JAX_FARO_MEMORIA_TEST_DB_PORT") or "").strip()
+        user = (env.get("JAX_FARO_MEMORIA_TEST_DB_USER") or "").strip()
+        database = (env.get("JAX_FARO_MEMORIA_TEST_DB_NAME") or "").strip()
+        password = env.get("JAX_FARO_MEMORIA_TEST_DB_PASSWORD") or ""
+        try:
+            port = int(port_raw)
+        except ValueError as exc:
+            raise ConfigFaroInvalida("JAX_FARO_MEMORIA_TEST_DB_PORT debe ser 3308") from exc
+        if (host, port, user, database) != ("127.0.0.1", 3308, "jax_test", "jax_memory_test"):
+            raise ConfigFaroInvalida(
+                "memoria no disponible: este adaptador solo permite la base de prueba "
+                "jax_memory_test en 127.0.0.1:3308 con jax_test")
+        if not password:
+            raise ConfigFaroInvalida("memoria no disponible: falta la credencial de la base de prueba")
+        return cls(True, host, port, user, password, database)
 
 
 def sha_valido(sha: object) -> bool:

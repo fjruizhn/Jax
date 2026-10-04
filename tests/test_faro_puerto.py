@@ -97,7 +97,7 @@ def test_el_catalogo_es_solo_lectura_nada_lanza_agentes(cfg_puerto, cargado):
     async def caso():
         async with puerto(cfg_puerto, cargado) as srv, cliente_por_rele(srv) as c:
             nombres = {t.name for t in (await c.list_tools()).tools}
-            assert nombres == {"skills.buscar", "skills.leer", "agentes.listar"}
+            assert nombres == {"skills.buscar", "skills.leer", "agentes.listar", "memoria.buscar"}
             assert not any("lanzar" in n for n in nombres)
     corre(caso())
 

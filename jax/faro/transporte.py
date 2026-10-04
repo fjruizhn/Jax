@@ -55,6 +55,7 @@ from .identidad import Ejecucion, Identidad
 from .logs import asegurar_logging
 from .paquete import PaqueteCargado
 from .puerto import construir_servidor, servidor_de_bajo_nivel
+from .herramientas.memoria import AdaptadorMemoria
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +189,8 @@ class _Salida:
 class ServidorPuerto:
     def __init__(self, cfg: ConfigPuerto, ejecucion: Ejecucion, paquete: PaqueteCargado, bitacora: Bitacora,
                  *, freno: Callable[[], bool] | None = None, solo_pruebas_mismo_uid: bool = False,
-                 presupuesto: "PresupuestoBytes | None" = None):
+                 presupuesto: "PresupuestoBytes | None" = None,
+                 adaptador_memoria: AdaptadorMemoria | None = None):
         """`solo_pruebas_mismo_uid`: SOLO PARA PRUEBAS. Sin ella, `uid_esperado` no puede ser el del propio
         servicio (otro proceso del usuario `faro` entraria como si fuera la jaula) ni root. Es un argumento del
         constructor: no se lee del entorno ni de la configuracion, de modo que el servicio real no la activa."""
@@ -201,6 +203,7 @@ class ServidorPuerto:
         self.ejecucion = ejecucion
         self._paquete = paquete
         self._bitacora = bitacora
+        self._adaptador_memoria = adaptador_memoria
         self._freno = freno if freno is not None else _freno.puesto
         self.ruta_socket: Path = Path(cfg.socket_dir) / f"{ejecucion.run_id}.sock"
         self.ruta_token: Path = Path(cfg.socket_dir) / f"{ejecucion.run_id}.token"
@@ -332,7 +335,8 @@ class ServidorPuerto:
                 await self._rechazar(id_conexion, cred, "token_invalido")
                 return
             identidad = Identidad(e, id_conexion, peer_pid=cred[0], peer_uid=cred[1], peer_gid=cred[2])
-            mcp = construir_servidor(self._paquete, identidad=identidad, bitacora=self._bitacora, freno=self._freno)
+            mcp = construir_servidor(self._paquete, identidad=identidad, bitacora=self._bitacora,
+                                     freno=self._freno, adaptador_memoria=self._adaptador_memoria)
             bajo = servidor_de_bajo_nivel(mcp)
             salida = _Salida(escritor, self.presupuesto, self._cfg.mensaje_timeout_s)
             entrada = _Lineas(lector, self.presupuesto, self._cfg.max_mensaje, self._cfg.mensaje_timeout_s)
