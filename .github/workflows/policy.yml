@@ -6841,21 +6841,18 @@ jobs:
           python-version: "3.12"
       - run: sudo apt-get -qq update && sudo apt-get -qq install -y acl
       - run: pip install -r requirements.txt pytest
-      - name: Crear jaxsvc y fruiz, y dar a fruiz lo mínimo para correr el escritor de la prueba de herencia
+      - name: Dar a fruiz lo mínimo para correr el escritor de la prueba de herencia
         # Solo en runners de GitHub (VM desechable): en uno persistente no se dejan ACLs ni cuentas; ahí la prueba falla con su mensaje claro.
         if: runner.environment == 'github-hosted'
         # La prueba test_entrada_y_fuente_creadas_despues_heredan_grupo_setgid_y_acl_por_defecto
         # corre el escritor real COMO fruiz (quien opera en producción y está en la ACL), con el
         # intérprete de pytest. En el runner, el checkout (/home/runner/work/...) y el intérprete
         # (/opt/hostedtoolcache/...) solo los lee el usuario `runner`: sin esto la prueba falla con
-        # su mensaje «el usuario fruiz no puede leer ...». Las cuentas jaxsvc y fruiz se crean aquí (idempotente; las pruebas
-        # ya no crean cuentas y fallan con un mensaje claro si faltan) y a fruiz se le da `x` en cada directorio padre y `rX` en el checkout y
+        # su mensaje «el usuario fruiz no puede leer ...». Se crea la cuenta aquí (idempotente, igual
+        # que la fixture de la prueba) y se le da `x` en cada directorio padre y `rX` en el checkout y
         # en el prefijo del intérprete. El runner es una VM desechable: no hay riesgo en abrir esto.
         run: |
-          # Las cuentas las crea ESTE paso, no las pruebas (que fallan con un mensaje claro si faltan).
-          for cuenta in jaxsvc fruiz; do
-            getent passwd "$cuenta" >/dev/null || sudo useradd --system --no-create-home "$cuenta"
-          done
+          for cuenta in jaxsvc fruiz; do getent passwd "$cuenta" >/dev/null || sudo useradd --system --no-create-home "$cuenta"; done  # Jax#340: las pruebas ya no crean cuentas
           PREFIJO=$(python -c 'import sys; print(sys.prefix)')
           for destino in "$GITHUB_WORKSPACE" "$PREFIJO"; do
             d=$(dirname "$destino")
@@ -6894,123 +6891,7 @@ jobs:
         # (la exclusion pasa de un nombre fijo a toda carpeta oculta de profundidad 2). Local: 52 passed + 1 solo-host.
         # 51 -> 53 (ronda 4): +2, symlink oculto no es carpeta excluida / la cuenta forense incluye la
         # carpeta oculta. Local: 54 passed + 1 solo-host (55 pruebas; el runner salta 2).
-        # 53 -> 68 (2026-10-03, fix/permisos-sin-otros): +15, sin acceso para "otros" (spec madre §5) y la raíz
-        # del workspace: arbol con o::r-x da NO CUMPLE (1), --verificar marca otros en la raíz (2), --aplicar
-        # cierra la raíz sin tocar dueño/grupo (1), --aplicar deja 2770/0660 y other::--- en modo y ACL (1),
-        # --verificar cuenta cada bit de otros (6), lo creado por jaxsvc y por fruiz hereda other::--- (2),
-        # un usuario ajeno lee antes y no después (1) y el arnés deja entrar al usuario de pytest por su
-        # entrada nombrada (1). Medido en local (fruiz, con el núcleo real instalado): 66 passed + 3 skipped
-        # + 1 solo-host deseleccionado; las 2 diferencias con el runner son las pruebas que se saltan aquí por
-        # el núcleo real y que el runner SÍ corre: 66 + 2 = 68 passed, 2 skipped. Manda el runner.
-        # 68 -> 70 y skipped 2 -> 1 (misma rama): la prueba de lectura/escritura cruzada jaxsvc/fruiz ya no
-        # corre contra /home/fruiz/jax-workspace (en hall9000, un symlink a produccion /srv/jax-data: escribia
-        # y borraba ahi) sino sobre un arbol propio de tmp_path, asi que el runner la CORRE en vez de saltarla
-        # (+1 passed, -1 skipped), y +1 prueba guarda (ninguna ruta fija de las pruebas resuelve a /srv/jax-data
-        # ni /srv/jax-prod). El skip que queda es test_aplicar_rechaza_explicitamente_por_raiz_no_configurada_
-        # cuando_env_es_legible (no hay /etc/jax/.env en el runner). Local: 68 passed + 3 skipped (los 3 por
-        # el nucleo real; 2 de ellos el runner los corre: 68 + 2 = 70). Ningun piso baja. Manda el runner.
-        # 70 -> 88 (ronda 2 de #340, 2026-10-03): +18 pruebas, skipped 1 -> 1. Primer CI real de 70: 69 passed + 1
-        # failed + 1 skipped (la falla era del arnes, ver el commit de las pruebas: un setfacl sin sudo del usuario
-        # `runner` sobre objetos que ya no eran suyos). Nuevas: TOCTOU de la raiz (2), paso por la raiz de jaxsvc y
-        # fruiz (+1 aplica por GRUPO, +1 falla cerrado, 2 verificar, 1 unitaria de _puede_atravesar), entradas
-        # nombradas ajenas (7 parametros + 1 aplicar falla cerrado), respaldo de la raiz y deshacer (2), ventana
-        # del chown (determinista, 1), la guarda de literales (1), y la de nobody pasa a seguir el runbook (sin
-        # cambio de cuenta). Local: 86 passed + 3 skipped (2 de los 3 el runner los corre: 86 + 2 = 88), 1 skipped
-        # en el runner (el de /etc/jax/.env). Las pruebas nuevas no se saltan en el runner: nobody, el grupo `users`
-        # y la cuenta jaxsvc/fruiz las crea el job o ya existen. Sin medir en el runner: manda el runner.
-        # 88 -> 89 (ronda 3 de #340): +1, la entrada agregada ENTRE la pasada previa y la mutacion no sobrevive a
-        # --aplicar (la mutacion reemplaza la ACL entera con `setfacl --set`). La prueba de --deshacer cambia de
-        # contenido (sin bits de otros) pero no suma. Local: 87 passed + 3 skipped (2 de los 3 el runner los corre:
-        # 87 + 2 = 89), 1 skipped en el runner. Ningun piso baja. Sin medir en el runner: manda el runner.
-        # 89 -> 93 (ronda 4 de #340): +4. Tras --deshacer jaxsvc sigue operando y otros no tienen ningun bit (1), el
-        # control negativo de la prueba de etapas (1) y las dos del runbook (sin accesos temporales para terceros;
-        # bloques de shell validos con set -euo pipefail). La prueba de --deshacer cambia de contenido (conserva a
-        # jaxsvc) y las de la carrera y las etapas se endurecen, sin sumar. Local: 91 passed + 3 skipped (2 de los
-        # 3 el runner los corre: 91 + 2 = 93), 1 skipped en el runner. Ningun piso baja. Sin medir en el runner:
-        # manda el runner.
-        # 93 -> 100 (ronda 5 de #340): +7. Carpetas ocultas solo en cuanto a otros (--verificar la marca; --aplicar y
-        # --deshacer la cierran sin tocar dueño, grupo ni ACL nombradas ni seguir un symlink: 3), --deshacer falla
-        # cerrado si jaxsvc no atraviesa la raiz por el dueño/grupo actuales (1) o por el modo que va a restaurar
-        # (1) y verifica de nuevo al terminar (1), y la prueba que EJECUTA el bloque de verificacion del runbook
-        # contra un arbol temporal (1). Local: 98 passed + 3 skipped (2 de los 3 el runner los corre: 98 + 2 =
-        # 100), 1 skipped en el runner. Ningun piso baja. Sin medir en el runner: manda el runner.
-        # 100 -> 103 (ronda 6 de #340): +3. Hardlinks en carpetas ocultas (no se tocan; --verificar los marca y
-        # --aplicar/--deshacer fallan cerrado antes de mutar: 1), el camino de fracaso de la verificacion final de
-        # --deshacer (1) y la guarda de que las pruebas no instalan en /usr/local/sbin ni crean cuentas (1). El
-        # fixture del nucleo pasa a una copia bajo /run y ya no se salta si existe el nucleo real, asi que local
-        # ahora da 104 passed + 0 skipped; el runner salta solo la del /etc/jax/.env (104 - 1 = 103). Las cuentas
-        # jaxsvc y fruiz las crea el paso del job (antes las creaba la prueba de jaxsvc). Ningun piso baja. Sin medir
-        # en el runner: manda el runner.
-        # 103 -> 107 (ronda 7 de #340): +4. Root deja de mutar las carpetas ocultas: una oculta con bits de otros
-        # hace fallar cerrado a --aplicar y a --deshacer sin cambiar nada (2 pruebas, una por accion, que reemplazan
-        # a las dos que exigian cerrarlas), una oculta limpia no los detiene y queda intacta (2), un no_cumple que
-        # surge durante la mutacion llega al JSON y el cliente no dice OK (1) y ninguna prueba llama a
-        # _generar_respaldo_validado sin sustituir RUTA_RESPALDOS (1). Local: 108 passed + 0 skipped; el runner salta
-        # solo la del /etc/jax/.env (108 - 1 = 107). Ningun piso baja. Sin medir en el runner: manda el runner.
-        # 107 -> 112 (ronda 8 de #340): +5. nlink vuelto a mirar antes de cada mutacion de un archivo: un hardlink
-        # creado entre la ACL y el fchown se anota y no se muta (aplicar y deshacer: 2), la orden manual citada con
-        # shlex.quote (1), el nucleo que falla a medio mutar dice a_medio_aplicar y el cliente sale con 1 (1) y la
-        # receta del runbook con variable (1). Local: 113 passed + 0 skipped; el runner salta solo la del
-        # /etc/jax/.env (113 - 1 = 112). Ningun piso baja. Sin medir en el runner: manda el runner.
-        # 112 -> 127 (ronda 9 de #340): +15. KeyboardInterrupt y SystemExit a medio mutar emiten a_medio_aplicar (2),
-        # el bit de ejecucion en archivos gobernados (4) y el 0660 exacto (1), la raiz 770 fruiz:jaxsvc (--verificar
-        # la exige y --aplicar la fija: 1 + 3 por el setgid, y falla cerrado con dueño o grupo distintos: 3) y las
-        # rutas con caracteres de control sin lineas inyectadas (1). Local: 128 passed + 0 skipped; el runner salta solo
-        # la del /etc/jax/.env (128 - 1 = 127). Ningun piso baja. Sin medir en el runner: manda el runner.
-        # 127 -> 133 (ronda 10 de #340): +6. La mutacion compara (st_dev, st_ino) de la raiz y de proyectos/ contra lo que
-        # validó la pasada previa, y dueño y grupo, antes de cualquier fchmod: un directorio real que los sustituye entre
-        # pasadas conserva su modo (raiz y proyectos/ x aplicar y deshacer: 4) y el restaurador de la raiz de --deshacer
-        # tambien compara (1); y una prueba verifica que el bloque del runbook ya no repite el control (c) (1). La prueba
-        # del 750 en el bloque se quita (lo cubre --verificar). Local: 134 passed + 0 skipped; el runner salta solo la del
-        # /etc/jax/.env (134 - 1 = 133). Ningun piso baja. Sin medir en el runner: manda el runner.
-        # 138 -> 152 (ronda 12 de #340): +14. --aplicar y --deshacer fallan cerrado si hay procesos de jaxsvc vivos
-        # (leidos de /proc, procesos Y cada hilo): con procesos simulados, antes de la pasada previa (2), sin procesos
-        # aplican y deshacen (2), aparece uno justo antes de mutar (2), aparece durante la mutacion y el cliente no dice
-        # OK (2), --verificar no lo exige (1), la cuenta jaxsvc no existe (1), el parseo de los cuatro uid con un /proc
-        # de mentira (1), los hilos del /proc de mentira (1), un proceso jaxsvc real y efimero (1) y la guarda de que
-        # toda prueba sustituye la inspeccion (1). Local medido: 153 passed + 0 skipped; el runner salta solo la del
-        # /etc/jax/.env (153 - 1 = 152). Ningun piso baja. Sin medir en el runner: manda el runner.
-        # 152 -> 160 (ronda 13 de #340): +8. Un status ilegible (PermissionError, EIO; de proceso o de hilo) hace fallar
-        # cerrado la inspeccion de procesos y un pid que desaparece (ENOENT/ESRCH) se ignora (1); el runbook trae UN bloque
-        # ejecutable para --aplicar y otro para --deshacer que la prueba ejecuta con un PATH de stubs (sudo, systemctl, ps,
-        # find, crontab) y un /proc de mentira: con todo bien llama a stop, mask, is-active, el guion, --verificar, unmask y
-        # start en orden (2: aplicar y deshacer), con un servicio que no se detiene falla antes de mutar y el trap restaura
-        # (2), con un setuid o un crontab de jaxsvc falla antes de parar nada (2) y con un hilo de jaxsvc en /proc tambien
-        # (1). Local medido: 161 passed + 0 skipped; el runner salta solo la del /etc/jax/.env (161 - 1 = 160). Ningun piso
-        # baja. Sin medir en el runner: manda el runner.
-        # 178 -> 190 (ronda 15 de #340): +12. Una unidad que estaba `activating` se restaura igual que una `active` (el trap la
-        # arranca y verifica que llegue a active; si no vuelve el rc no es 0: 2 + 2, aplicar y deshacer) y una señal INT o
-        # TERM a mitad del bloque, con el guion colgado o con un stop colgado, restaura y sale con 130 / 143 (2 bloques x 2
-        # señales x 2 momentos = 8). Local medido: 191 passed + 0 skipped; el runner salta solo la del /etc/jax/.env
-        # (191 - 1 = 190). Ningun piso baja. Sin medir en el runner: manda el runner.
-        # 190 -> 194 (ronda 16 de #340): +4. La restauracion de los bloques del runbook ignora nuevas señales (INT, TERM y HUP)
-        # desde su primera linea y conserva el codigo de la primera: TERM con el guion colgado y, mientras restaura (un start
-        # que se demora), HUP e INT -- y la variante INT primero -- la dejan completa y verificada con rc 143 / 130 (2 señales
-        # primeras x 2 bloques). Local medido: 195 passed + 0 skipped; el runner salta solo la del /etc/jax/.env
-        # (195 - 1 = 194). Ningun piso baja. Sin medir en el runner: manda el runner.
-        # 194 -> 198 (ronda 17 de #340): +4 netos. Los bloques del runbook ignoran INT, TERM y HUP desde justo antes del primer
-        # stop hasta el final (sin traps de señal ni rc por señal): se borran las 12 pruebas del diseño anterior (INT/TERM con rc
-        # 130/143: 8, segunda señal mientras restaura: 4) y entran 16: INT+TERM+HUP durante el stop, el guion y la restauracion
-        # (3 momentos x 2 bloques = 6), una sola señal durante el guion (3 x 2 = 6), el rc del guion si fallo con señales (2) y
-        # la linea de aviso antes de detener nada (2). Cada una exige las unidades activas restauradas en orden inverso y
-        # verificadas con is-active DESPUES de su start. Local medido: 199 passed + 0 skipped; el runner salta solo la del
-        # /etc/jax/.env (199 - 1 = 198). Ningun piso baja. Sin medir en el runner: manda el runner. La suite tarda ahora ~50 s
-        # (los cuelgues de los stubs duran 1 s a proposito).
-        # 160 -> 178 (ronda 14 de #340): +18. Los bloques ejecutables del runbook ya no enmascaran (las unidades viven en
-        # /etc/systemd/system), ninguna consulta falla en silencio y la restauracion se verifica: ademas del caso «todo
-        # bien» (comprueba el estado de todas antes de detener, restaura en orden inverso solo las activas: 2), una unidad
-        # que estaba inactiva no se arranca (2), un servicio que no se detiene (2), list-units, list-timers y show que
-        # fallan, una lista sin una unidad esperada y un is-active con salida inesperada cortan antes de detener (10), la
-        # lista vacia (2), start que falla al restaurar sale con error aunque el guion haya ido bien (2) y el trap conserva
-        # el rc del fallo original (2); las 2 de premisas y la del hilo en /proc siguen. Local medido: 179 passed + 0
-        # skipped; el runner salta solo la del /etc/jax/.env (179 - 1 = 178). Ningun piso baja. Sin medir en el runner:
-        # manda el runner.
-        # 133 -> 138 (ronda 11 de #340): +5. Cada entrada abierta en la mutacion se compara por inode con la que enumero
-        # scandir (intercambio de nombres visible/ <-> .claude-flow/ entre el scandir y el open, aplicar y deshacer: 2),
-        # no se muta un inode que las pasadas previas vieron en una oculta aunque cambie de nombre (1) y la verificacion
-        # final relee las ocultas y marca NO CUMPLE si cambiaron dueño o ACL (chown y setfacl: 2). Local: 139 passed +
-        # 0 skipped; el runner salta solo la del /etc/jax/.env (139 - 1 = 138). Ningun piso baja. Sin medir en el runner:
-        # manda el runner.
+        # Jax#340: 199 recolectadas − 1 skip /etc/jax/.env = 198 passed (medido como usuario no-fruiz)
         run: |
           PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
           grep -qE "^198 passed, 1 skipped" /tmp/permisos_proyectos || {
