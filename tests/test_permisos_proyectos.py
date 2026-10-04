@@ -2970,7 +2970,7 @@ case "$cmd" in
   show) if [ -n "$FALLA_SHOW" ]; then echo "Failed to get properties" >&2; exit 1; fi
         grep "^$4 $2 " "$D/props" | sed "s/^[^ ]* [^ ]* //" ;;
   stop) for u in "$@"; do
-          if [ "$COLGAR_STOP" = "$u" ]; then sleep 30; fi
+          if [ "$COLGAR_STOP" = "$u" ]; then sleep "${COLGAR_STOP_S:-1}"; fi
           case " $NO_SE_DETIENE " in *" $u "*) ;; *) sed -i "/^$u\\$/d" "$D/activas"; sed -i "/^$u\\$/d" "$D/activating" ;; esac
         done ;;
   start) for u in "$@"; do
@@ -3016,7 +3016,7 @@ def _entorno_del_bloque(tmp_path: Path, uid_jaxsvc: int, *, extra: dict | None =
     (datos / "ps").write_text("")
     (datos / "activating").write_text("")
     (datos / "permisos.sh").write_text(
-        '#!/bin/sh\necho "permisos $*" >> "$STUB_DIR/log"\n[ -n "$COLGAR_EN_GUION" ] && [ "$1" != --verificar ] && sleep 30\n'
+        '#!/bin/sh\necho "permisos $*" >> "$STUB_DIR/log"\n[ -n "$COLGAR_EN_GUION" ] && [ "$1" != --verificar ] && sleep "$COLGAR_EN_GUION"\n'
         'case "$1" in --verificar) exit 0;; *) exit "${PERMISOS_RC:-0}";; esac\n')
     os.chmod(datos / "permisos.sh", 0o755)
     scripts = {
@@ -3252,6 +3252,102 @@ def test_una_segunda_senal_mientras_restaura_no_corta_la_restauracion(
     assert any(l.startswith("systemctl is-active") for l in log[ultimo_start:]), "no verificó que volvieran"
     assert proc.returncode == rc_esperado, (proc.returncode, error)
     assert "OK:" not in salida
+
+
+_AVISO_DE_VENTANA = "durante la ventana el bloque no se interrumpe con Ctrl-C"
+_ACTIVAS_ANTES = ["jax-las-manos.service", "jax-platform.service", "jax-catalogo-modelos.service",
+                  "jax-catalogo-modelos.timer"]
+
+
+def _correr_con_señales(marca: str, modo: str, tmp_path: Path, momento: str, señales: list, *, env_extra=None):
+    """Lanza el bloque en su propio grupo y, en el `momento` indicado, le manda las `señales` (al grupo, como un
+    Ctrl-C del terminal). Devuelve (proc, salida, error, log)."""
+    import signal
+    import time as _t
+    env = {"DEMORA_START": "0.4", "REINTENTOS": "3"}
+    espera = {
+        "durante el stop": ("systemctl stop jax-las-manos.service", {"COLGAR_STOP": "jax-las-manos.service", "COLGAR_STOP_S": "1"}),
+        "durante el guion": (f"permisos {modo}", {"COLGAR_EN_GUION": "1"}),
+        "durante la restauracion": ("systemctl start", {}),
+    }[momento]
+    env.update(espera[1])
+    env.update(env_extra or {})
+    entorno = _entorno_del_bloque(tmp_path, pwd.getpwnam("jaxsvc").pw_uid, extra=env)
+    proc = subprocess.Popen(["bash", "-s"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=entorno, text=True, cwd=str(RAIZ_REPO), start_new_session=True)
+    proc.stdin.write(_bloque_del_runbook(marca))
+    proc.stdin.close()
+    log_path = tmp_path / "datos" / "log"
+    pgid = os.getpgid(proc.pid)
+    try:
+        for _ in range(300):
+            lineas = log_path.read_text().splitlines()
+            if any(l == espera[0] or (momento == "durante la restauracion" and l.startswith(espera[0])) for l in lineas):
+                break
+            _t.sleep(0.02)
+        else:
+            raise AssertionError(f"el bloque no llegó a {momento}: {lineas}")
+        for nombre in señales:
+            os.killpg(pgid, getattr(signal, f"SIG{nombre}"))
+            _t.sleep(0.1)
+        salida, error = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            os.killpg(pgid, signal.SIGKILL)
+    return proc, salida, error, log_path.read_text().splitlines()
+
+
+def _exigir_restauracion_completa_y_verificada(log: list, tmp_path: Path, error: str) -> None:
+    iniciadas = [l.split()[-1] for l in _llamadas(log, "start")]
+    assert iniciadas == _ACTIVAS_ANTES[::-1], f"la restauración quedó incompleta o desordenada: {iniciadas}\n{error}"
+    assert sorted((tmp_path / "datos" / "activas").read_text().split()) == sorted(_ACTIVAS_ANTES)
+    # CADA unidad restaurada se verificó con is-active DESPUES de su start
+    for u in iniciadas:
+        i_start = max(i for i, l in enumerate(log) if l == f"systemctl start {u}")
+        assert any(l == f"systemctl is-active {u}" for l in log[i_start + 1:]), f"{u} no se verificó tras su start"
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+@pytest.mark.parametrize("momento", ["durante el stop", "durante el guion", "durante la restauracion"])
+def test_int_term_y_hup_durante_la_ventana_se_ignoran_y_el_bloque_termina_normal(tmp_path, _identidades, marca, modo, momento):
+    """Desde justo antes del primer stop, el bloque ignora INT, TERM y HUP (los hijos heredan el ignorar, el guion
+    tampoco las recibe): durante el stop, durante el guion y durante la restauracion termina NORMAL, con todas las
+    unidades restauradas y verificadas, rc 0, y la linea de aviso impresa antes de detener nada."""
+    proc, salida, error, log = _correr_con_señales(marca, modo, tmp_path, momento, ["INT", "TERM", "HUP"])
+    assert proc.returncode == 0, (proc.returncode, error)
+    assert _AVISO_DE_VENTANA in salida + error, "falta la línea de aviso"
+    assert "kill -9" in salida + error and "sudo systemctl start jax-platform.service" in salida + error
+    assert any(l == f"permisos {modo}" for l in log), "el guion no terminó de correr"
+    _exigir_restauracion_completa_y_verificada(log, tmp_path, error)
+    assert "OK:" in salida
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+@pytest.mark.parametrize("senal", ["INT", "TERM", "HUP"])
+def test_una_sola_senal_durante_el_guion_tampoco_corta_el_bloque(tmp_path, _identidades, marca, modo, senal):
+    proc, salida, error, log = _correr_con_señales(marca, modo, tmp_path, "durante el guion", [senal])
+    assert proc.returncode == 0, (senal, proc.returncode, error)
+    _exigir_restauracion_completa_y_verificada(log, tmp_path, error)
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_con_señales_el_rc_es_el_del_guion_si_el_guion_fallo(tmp_path, _identidades, marca, modo):
+    proc, salida, error, log = _correr_con_señales(marca, modo, tmp_path, "durante el guion", ["TERM", "INT"],
+                                                   env_extra={"PERMISOS_RC": "7"})
+    assert proc.returncode == 7, (proc.returncode, error)
+    _exigir_restauracion_completa_y_verificada(log, tmp_path, error)
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_la_linea_de_aviso_se_imprime_antes_de_detener_nada(tmp_path, _identidades, marca, modo):
+    entorno = _entorno_del_bloque(tmp_path, pwd.getpwnam("jaxsvc").pw_uid)
+    entorno["PATH"] = entorno["PATH"]
+    r = subprocess.run(["bash", "-s"], input=_bloque_del_runbook(marca), env=entorno, capture_output=True, text=True,
+                       timeout=60, cwd=str(RAIZ_REPO))
+    assert r.returncode == 0, r.stderr
+    texto = r.stdout + r.stderr
+    assert (f"{_AVISO_DE_VENTANA}; si hace falta cortarlo, kill -9 y después: sudo systemctl start "
+            "jax-catalogo-modelos.timer jax-catalogo-modelos.service jax-platform.service jax-las-manos.service") in texto, texto
 
 
 @pytest.mark.parametrize("marca,modo", _BLOQUES)
