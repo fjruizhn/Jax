@@ -3,7 +3,7 @@
 Por qué existe: GitHub deja de ejecutar un workflow cuyo archivo supera unos 512 000
 bytes («workflow file issue»); cada PR que subía un piso le sumaba comentarios y
 policy.yml ya rozaba el límite. Los números salen a un archivo de datos y el
-workflow los lee en tiempo de ejecución con `ci/piso.py`.
+workflow los lee en tiempo de ejecución con `.github/ci/piso.py`.
 
 Qué fija este archivo (permanente, no depende de ninguna fotografía de master):
   * el lector falla CERRADO: sin archivo, sin parsear o sin la clave, sale con 2 y
@@ -29,9 +29,9 @@ import yaml
 RAIZ = Path(__file__).resolve().parents[2]
 WORKFLOW = RAIZ / ".github" / "workflows" / "policy.yml"
 PISOS = RAIZ / "ci" / "pisos.json"
-PISO_PY = RAIZ / "ci" / "piso.py"
+PISO_PY = RAIZ / ".github" / "ci" / "piso.py"
 
-USO = re.compile(r"python3 ci/piso\.py (verificar|minimo) ([^\s)]+)")
+USO = re.compile(r"python3 \.github/ci/piso\.py (verificar|minimo) ([^\s)]+)")
 
 
 def _modulo():
@@ -42,9 +42,11 @@ def _modulo():
 
 
 def _correr(directorio: Path, *args: str) -> subprocess.CompletedProcess:
-    """Corre una copia de piso.py junto al pisos.json que haya en `directorio`."""
-    shutil.copy(PISO_PY, directorio / "piso.py")
-    return subprocess.run([sys.executable, str(directorio / "piso.py"), *args],
+    """Corre una copia de .github/ci/piso.py contra el ci/pisos.json que haya en `directorio`."""
+    destino = directorio / ".github" / "ci"
+    destino.mkdir(parents=True, exist_ok=True)
+    shutil.copy(PISO_PY, destino / "piso.py")
+    return subprocess.run([sys.executable, str(destino / "piso.py"), *args],
                           capture_output=True, text=True, cwd=directorio)
 
 
@@ -56,7 +58,8 @@ def salida(tmp_path):
 
 
 def _escribir(directorio: Path, datos) -> None:
-    (directorio / "pisos.json").write_text(
+    (directorio / "ci").mkdir(exist_ok=True)
+    (directorio / "ci" / "pisos.json").write_text(
         datos if isinstance(datos, str) else json.dumps(datos), encoding="utf-8")
 
 
@@ -187,7 +190,7 @@ def test_cada_llamada_del_workflow_sale_con_el_codigo_del_lector():
     for jid, run in _pasos_run():
         lineas = [l.strip() for l in run.splitlines() if l.strip() and not l.strip().startswith("#")]
         for i, l in enumerate(lineas):
-            if "ci/piso.py verificar" in l:
+            if ".github/ci/piso.py verificar" in l:
                 assert l.endswith("|| exit $?") or i == len(lineas) - 1, (jid, l)
 
 
@@ -196,8 +199,8 @@ def test_el_lector_de_la_cadena_de_minimo_no_corre_con_error_ignorado():
     otro comando un fallo del lector quedaría tragado."""
     for jid, run in _pasos_run():
         for l in run.splitlines():
-            if "ci/piso.py minimo" in l:
-                assert re.match(r"\s*[A-Z_]+=\$\(python3 ci/piso\.py minimo \S+\) \|\| exit \$\?\s*$", l), l
+            if ".github/ci/piso.py minimo" in l:
+                assert re.match(r"\s*[A-Z_]+=\$\(python3 \.github/ci/piso\.py minimo \S+\) \|\| exit \$\?\s*$", l), l
 
 
 def test_el_archivo_real_de_pisos_es_valido():
@@ -207,3 +210,26 @@ def test_el_archivo_real_de_pisos_es_valido():
         mod.piso(datos, clave)
     for clave in datos["minimos"]:
         mod.minimo(datos, clave)
+
+
+# --- gobernanza: lector y comparador dentro de la reserva de `.github/` ----------------------
+
+def test_el_lector_vive_en_github_y_no_queda_copia_fuera_de_la_reserva():
+    assert PISO_PY.is_file()
+    assert not (RAIZ / "ci" / "piso.py").exists(), "una copia en ci/ queda fuera de la reserva de Fernando"
+    assert [p.name for p in (RAIZ / "ci").iterdir()] == ["pisos.json"], "ci/ solo guarda datos, nunca lógica"
+
+
+def test_ninguna_llamada_del_workflow_usa_un_lector_fuera_de_github():
+    texto = WORKFLOW.read_text(encoding="utf-8")
+    llamadas = re.findall(r"\S*piso\.py", texto)
+    assert llamadas and set(llamadas) == {".github/ci/piso.py"}
+
+
+def test_el_workflow_corre_el_comparador_contra_la_punta_de_master():
+    pasos = [r for _, r in _pasos_run() if "comparar_pisos.py" in r]
+    assert len(pasos) == 1
+    run = pasos[0]
+    assert "git fetch" in run and "refs/heads/master:refs/remotes/origin/master" in run
+    assert "python3 .github/ci/comparar_pisos.py origin/master || exit $?" in run
+    assert (RAIZ / ".github" / "ci" / "comparar_pisos.py").is_file()

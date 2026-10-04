@@ -27,7 +27,7 @@ RAIZ = Path(__file__).resolve().parents[2]
 FOTO = json.loads((Path(__file__).parent / "fixtures" / "policy_master_364ded9.json").read_text(encoding="utf-8"))
 ACTUAL = yaml.safe_load((RAIZ / ".github" / "workflows" / "policy.yml").read_text(encoding="utf-8"))
 DATOS = json.loads((RAIZ / "ci" / "pisos.json").read_text(encoding="utf-8"))
-LLAMADA = re.compile(r"python3 ci/piso\.py verificar (\S+) (\S+)")
+LLAMADA = re.compile(r"python3 \.github/ci/piso\.py verificar (\S+) (\S+)")
 
 
 def test_los_jobs_son_los_mismos():
