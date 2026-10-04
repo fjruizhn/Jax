@@ -23,6 +23,7 @@ import logging
 import functools
 import json
 import math
+import random
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
@@ -43,6 +44,43 @@ logger = logging.getLogger("jax.memory")
 # scripts/migrar_embeddings.py. Todo lo de abajo lee EMBED en cada uso, no al
 # importar. EMBEDDING_DIM queda como alias de lectura para quien lo importaba.
 EMBEDDING_DIM = EMBED.dim
+
+
+#: Reintento del guardado de mensajes (diagnostico 2026-10-04, ver
+#: _save_message_impl y tests/test_save_message_deadlock.py). 1213 = deadlock,
+#: 1205 = lock wait timeout: el indice vectorial HNSW (tablas internas
+#: messages#i#NN) es un recurso compartido entre conversaciones, y aunque el
+#: mutex GET_LOCK serializa los escritores DE ESTE CODIGO, quedan writers
+#: ajenos (otros repos, scripts, migraciones) con los que el ciclo es
+#: posible -- el reintento es el respaldo. 1062 = turn_number duplicado: el
+#: respaldo de la carrera MAX+1 por si la UNIQUE KEY rechaza el turn
+#: calculado. 1020 = "record changed since last read; try restarting
+#: transaction": transitorio por definicion. Ninguno es transitorio "gratis":
+#: cada reintento recalcula todo dentro de una transaccion nueva, y la muerta
+#: quedo revertida entera, asi que el mismo mensaje no se guarda dos veces.
+# 1020 "Record has changed since last read; try restarting transaction":
+# MariaDB lo devuelve cuando una lectura con bloqueo (o el chequeo de clave
+# duplicada de un INSERT) encuentra la fila cambiada por otra transaccion;
+# es transitorio por definicion -- la respuesta es reiniciar la transaccion,
+# que es exactamente lo que hace el reintento.
+_ERRORES_REINTENTABLES_GUARDADO = frozenset({1213, 1205, 1062, 1020})
+_INTENTOS_GUARDADO_MENSAJE = 3
+_ESPERA_BASE_REINTENTO_SEG = 0.05
+
+# Mutex de escritura del indice vectorial HNSW (ronda 3 del diagnostico,
+# 2026-10-04): toda sentencia que INSERTE en messages o reescriba un
+# embedding toca las capas internas del grafo (tablas messages#i#NN), que
+# son UN SOLO recurso compartido entre conversaciones. Dos transacciones
+# multi-sentencia que escriben el indice a la vez ciclan ahi (deadlock
+# medido incluso entre writers de conversaciones distintas, ambos con el
+# vector default en ceros cayendo en el supremo de la capa). GET_LOCK
+# serializa los escritores del indice: un solo escritor a la vez => el
+# ciclo es imposible por construccion. El nombre lleva la base de datos
+# porque GET_LOCK es por servidor, no por schema: bases de test distintas
+# no se bloquean entre si. NO es transaccional (sobrevive al rollback de
+# la victima del deadlock): por eso la liberacion es explicita en finally.
+_NOMBRE_BASE_MUTEX_HNSW = "jax_hnsw_write"
+_ESPERA_MUTEX_HNSW_SEG = 10
 
 
 # ------------------------------------------------------------
@@ -788,13 +826,24 @@ class MemoryDB:
                 resultado["fallidas"] += 1
                 continue
             async with self.pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        f"UPDATE {table} SET {_col()} = VEC_FromText(%s) "
-                        f"WHERE id = %s AND {_zero_embedding_sql(_col())}",
-                        (json.dumps(embedding), fila_id),
-                    )
-                    resultado["reparadas"] += cur.rowcount
+                nombre_mutex = None
+                try:
+                    async with conn.cursor() as cur:
+                        # Mismo mutex que save_message(): toda reescritura del
+                        # indice HNSW pasa por un solo escritor (ronda 3 del
+                        # diagnostico). Un 1213 aqui lo traga
+                        # db_error_handler y la fila se reintenta en la
+                        # pasada siguiente -- no se pierde nada.
+                        nombre_mutex = await self._adquirir_mutex_hnsw(cur)
+                        await cur.execute(
+                            f"UPDATE {table} SET {_col()} = VEC_FromText(%s) "
+                            f"WHERE id = %s AND {_zero_embedding_sql(_col())}",
+                            (json.dumps(embedding), fila_id),
+                        )
+                        resultado["reparadas"] += cur.rowcount
+                finally:
+                    if nombre_mutex:
+                        await self._liberar_mutex_hnsw(conn, nombre_mutex)
 
         if resultado["fallidas"]:
             logger.warning(
@@ -887,7 +936,49 @@ class MemoryDB:
         loguean (decorador) -- devuelve None en ese caso. Si guarda bien,
         devuelve {"conversation_id": int, "turn_number": int} para que un
         caller que awaitee el Task de save_message() tenga con que
-        identificar la fila real, sin FK nuevo ni cambiar el schema."""
+        identificar la fila real, sin FK nuevo ni cambiar el schema.
+
+        POR QUE LA TRANSACCION CORTA, EL MUTEX DEL INDICE Y EL REINTENTO
+        (diagnostico completo en tests/test_save_message_deadlock.py, medido
+        2026-10-04 contra MariaDB 12.3.3, REPEATABLE-READ, pool autocommit,
+        en TRES rondas):
+
+        Ronda 1: con INSERT y UPDATE del contador en transacciones sueltas,
+        bajo carga concurrente el paso de vectorizacion (UPDATE ... WHERE
+        conversation_id AND turn_number, que con la carrera MAX+1 matcheaba
+        DECENAS de filas del mismo turn_number) y el INSERT de otro writer
+        se interbloqueaban a traves de las capas internas del indice
+        vectorial HNSW (tablas messages#i#NN): 1563 deadlocks de 2400
+        intentos en la repro, y el @db_error_handler tragaba el 1213
+        PERDIENDO EL MENSAJE en silencio (el guardado es fire-and-forget).
+
+        Ronda 2: la atomicidad sola no basto. Con INSERT+contador en una
+        transaccion y el turn bajo SELECT ... FOR UPDATE del rango, el
+        next-key lock del rango ataba la FRONTERA entre conversaciones
+        adyacentes en el indice (conversation_id, turn_number): writer de
+        la conv 6 y writer de la conv 5 interbloqueados por el record
+        frontera. Se movio el candado a la FILA de la conversacion (los
+        writers de distintas conversaciones no comparten ningun lock) y el
+        MAX se lee sin FOR UPDATE bajo esa serializacion.
+
+        Ronda 3: el candado por conversacion TAMPOCO basta. El indice HNSW
+        es UN SOLO recurso entre conversaciones: todo INSERT escribe el
+        vector default en ceros, y todas esas entradas compiten por la
+        misma zona del grafo. Medido: INSERT (conv 1) vs INSERT (conv 2)
+        interbloqueados en el supremo de la capa (messages#i#06), con
+        errores 1020 ("record changed, restart transaction") escapando al
+        caller. MariaDB exige la columna del VECTOR KEY NOT NULL, asi que
+        no se puede diferir el indice con un default NULL. Arreglo: un
+        mutex GET_LOCK por base de datos serializa TODOS los escritores
+        del indice (INSERT de mensaje, vectorizacion por id y backfill):
+        un solo escritor a la vez => el ciclo es imposible por
+        construccion.
+
+        El reintento acotado ante 1213/1205/1062/1020 (recalcula todo desde
+        cero; el rollback de la transaccion muerta garantiza que el mismo
+        mensaje nunca se guarda dos veces) queda como RESPALDO para
+        escritores del indice que no pasen por este codigo (otros repos,
+        scripts, migraciones)."""
         role_enum = _normalize_role(role)
         facet_enum = _normalize_role(facet) if facet else None
 
@@ -912,44 +1003,186 @@ class MemoryDB:
                     return
                 conv_id, conv_user_id, conv_project_id = row[0], row[1], row[2]
 
-                # 2. turn_number = ultimo + 1
-                await cur.execute(
-                    "SELECT COALESCE(MAX(turn_number), 0) + 1 FROM messages "
-                    "WHERE conversation_id = %s",
-                    (conv_id,),
-                )
-                turn = (await cur.fetchone())[0]
+        # 2.-4. INSERT + contador en una transaccion corta, con reintento
+        # idempotente ante deadlock / lock wait / turn duplicado.
+        msg_id = turn = None
+        for intento in range(1, _INTENTOS_GUARDADO_MENSAJE + 1):
+            try:
+                msg_id, turn = await self._insertar_turno_atomico(
+                    conv_id, role_enum, content, facet_enum, model, latency_ms,
+                    conv_user_id, conv_project_id)
+                break
+            except Exception as e:
+                codigo = e.args[0] if getattr(e, "args", None) else None
+                if codigo not in _ERRORES_REINTENTABLES_GUARDADO or \
+                        intento == _INTENTOS_GUARDADO_MENSAJE:
+                    raise
+                espera = _ESPERA_BASE_REINTENTO_SEG * intento + random.uniform(0, 0.05)
+                logger.warning(
+                    "save_message: %s en intento %d/%d (conv=%s), "
+                    "reintentando en %.0f ms",
+                    e, intento, _INTENTOS_GUARDADO_MENSAJE,
+                    conversation_uuid[:8], espera * 1000)
+                await asyncio.sleep(espera)
 
-                # 3. insertar el mensaje (role ya normalizado al ENUM)
-                await cur.execute(
-                    "INSERT INTO messages "
-                    "(conversation_id, turn_number, role, content, facet_used, model, "
-                    "latency_ms, user_id, project_id) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                    (conv_id, turn, role_enum, content, facet_enum, model, latency_ms,
-                     conv_user_id, conv_project_id),
-                )
-
-                # 4. actualizar contador de turnos
-                await cur.execute(
-                    "UPDATE conversations SET total_turns = total_turns + 1 WHERE id = %s",
-                    (conv_id,),
-                )
-
-        # 5. vectorizar fuera del bloque — no retiene conexion mientras Ollama trabaja
+        # 5. vectorizar fuera de la transaccion -- no retiene conexion ni
+        # locks mientras se calcula el embedding, y por id (PRIMARY): una
+        # sola fila, sin recorrer el rango de turnos de la conversacion.
+        # El UPDATE reescribe las capas del indice HNSW: toma el MISMO mutex
+        # que el INSERT, asi el indice nunca tiene dos escritores a la vez
+        # (ronda 3 del diagnostico) y el reintento es solo respaldo. El
+        # UPDATE es idempotente por naturaleza (repite el mismo valor), asi
+        # que el reintento no corre riesgo de duplicar nada.
         embedding = await self.get_embedding(content)
         if embedding and self.pool:
             vec_str = json.dumps(embedding)
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        f"UPDATE messages SET {_col()} = VEC_FromText(%s) "
-                        "WHERE conversation_id = %s AND turn_number = %s",
-                        (vec_str, conv_id, turn),
-                    )
+            for intento in range(1, _INTENTOS_GUARDADO_MENSAJE + 1):
+                try:
+                    async with self.pool.acquire() as conn:
+                        nombre_mutex = None
+                        try:
+                            async with conn.cursor() as cur:
+                                nombre_mutex = await self._adquirir_mutex_hnsw(cur)
+                                await cur.execute(
+                                    f"UPDATE messages SET {_col()} = VEC_FromText(%s) "
+                                    "WHERE id = %s",
+                                    (vec_str, msg_id),
+                                )
+                        finally:
+                            if nombre_mutex:
+                                await self._liberar_mutex_hnsw(conn, nombre_mutex)
+                    break
+                except Exception as e:
+                    codigo = e.args[0] if getattr(e, "args", None) else None
+                    if codigo not in _ERRORES_REINTENTABLES_GUARDADO or \
+                            intento == _INTENTOS_GUARDADO_MENSAJE:
+                        raise
+                    espera = _ESPERA_BASE_REINTENTO_SEG * intento + random.uniform(0, 0.05)
+                    logger.warning(
+                        "save_message (vectorizacion): %s en intento %d/%d "
+                        "(msg_id=%s), reintentando en %.0f ms",
+                        e, intento, _INTENTOS_GUARDADO_MENSAJE,
+                        msg_id, espera * 1000)
+                    await asyncio.sleep(espera)
 
         logger.debug(f"Mensaje guardado: conv={conversation_uuid[:8]} turn={turn} role={role_enum}")
         return {"conversation_id": conv_id, "turn_number": turn}
+
+    async def _adquirir_mutex_hnsw(self, cur) -> str:
+        """Bloquea hasta tener el mutex de escritura del indice HNSW.
+        Devuelve el nombre del lock adquirido (para RELEASE_LOCK). Si no se
+        consigue en _ESPERA_MUTEX_HNSW_SEG levanta OperationalError(1205)
+        para reutilizar el reintento del guardado."""
+        await cur.execute("SELECT DATABASE()")
+        fila = await cur.fetchone()
+        nombre = f"{_NOMBRE_BASE_MUTEX_HNSW}:{fila[0] if fila else ''}"[:64]
+        await cur.execute(
+            "SELECT GET_LOCK(%s, %s)", (nombre, _ESPERA_MUTEX_HNSW_SEG))
+        fila = await cur.fetchone()
+        if not fila or not fila[0]:
+            raise aiomysql.OperationalError(
+                1205, f"mutex {nombre} no adquirido en "
+                      f"{_ESPERA_MUTEX_HNSW_SEG}s")
+        return nombre
+
+    async def _liberar_mutex_hnsw(self, conn, nombre: str) -> None:
+        """RELEASE_LOCK best-effort: si la conexion murio (o el lock ya se
+        libero al cerrarse), el servidor libera solo; aqui no se enmascara
+        nada porque el guardado ya committed/rollbacked."""
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT RELEASE_LOCK(%s)", (nombre,))
+        except Exception:
+            pass
+
+    async def _insertar_turno_atomico(self, conv_id, role_enum, content,
+                                      facet_enum, model, latency_ms,
+                                      conv_user_id, conv_project_id):
+        """INSERT del mensaje + UPDATE del contador de turnos en UNA
+        transaccion, bajo el mutex del indice HNSW (ronda 3: un solo
+        escritor del indice a la vez, ver _adquirir_mutex_hnsw). El turn se
+        asigna con la fila de la conversacion bloqueada (FOR UPDATE), que
+        serializa los writers de la MISMA conversacion; el MAX se lee sin
+        FOR UPDATE bajo esa serializacion. La UNIQUE KEY (conversation_id,
+        turn_number) -- ver jax/memory/migrations.py -- es el respaldo: si
+        dos writers igualaran el turn a pesar de todo (p. ej. un writer de
+        otro repo que no tome el candado), una recibe 1062, reintenta y
+        recalcula.
+
+        Devuelve (msg_id, turn_number). Ante cualquier error hace rollback
+        completo y deja escapar la excepcion: nunca deja el INSERT commitado
+        sin el contador (o viceversa), que es lo que hacia perder mensajes y
+        desincronizar total_turns.
+
+        POR QUE el candado es la FILA de la conversacion y no un
+        SELECT ... FOR UPDATE sobre el rango de mensajes (cambiado
+        2026-10-04, ronda 2 del diagnostico): con el rango bloqueado bajo
+        REPEATABLE READ, el escaneo toma next-key locks que atan la
+        FRONTERA entre conversaciones adyacentes en el indice
+        (conversation_id, turn_number) -- medido en el grafo: writer de la
+        conv 6 e writer de la conv 5 (FOR UPDATE) interbloqueados por el
+        record frontera (5, ultimo_turno). Con la fila padre, writers de
+        distintas conversaciones no comparten NI UN lock; los de la misma
+        se serializan en una sola fila. El turn se lee SIN FOR UPDATE:
+        serializados por la fila padre, el MAX ve el ultimo commit."""
+        async with self.pool.acquire() as conn:
+            nombre_mutex = None
+            await conn.begin()
+            try:
+                async with conn.cursor() as cur:
+                    # El mutex del indice HNSW es la PRIMERA sentencia: los
+                    # writers que esperan no tienen NADA bloqueado, asi que
+                    # esperan sin formar ciclos. Con un solo escritor en el
+                    # indice, el deadlock INSERT-vs-INSERT de la capa HNSW
+                    # (ronda 3 del diagnostico) es imposible por construccion.
+                    nombre_mutex = await self._adquirir_mutex_hnsw(cur)
+                    await cur.execute(
+                        "SELECT id FROM conversations WHERE id = %s FOR UPDATE",
+                        (conv_id,),
+                    )
+                    if not await cur.fetchone():
+                        raise RuntimeError(
+                            f"conversacion {conv_id} desaparecio entre el "
+                            f"lookup y el insert")
+                    await cur.execute(
+                        "SELECT COALESCE(MAX(turn_number), 0) + 1 FROM messages "
+                        "WHERE conversation_id = %s",
+                        (conv_id,),
+                    )
+                    turn = (await cur.fetchone())[0]
+                    await cur.execute(
+                        "INSERT INTO messages "
+                        "(conversation_id, turn_number, role, content, facet_used, model, "
+                        "latency_ms, user_id, project_id) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        (conv_id, turn, role_enum, content, facet_enum, model, latency_ms,
+                         conv_user_id, conv_project_id),
+                    )
+                    msg_id = cur.lastrowid
+                    await cur.execute(
+                        "UPDATE conversations SET total_turns = total_turns + 1 WHERE id = %s",
+                        (conv_id,),
+                    )
+                await conn.commit()
+                return msg_id, turn
+            except BaseException:
+                # rollback SIEMPRE que la transaccion no llego a COMMIT:
+                # libera los locks aun en la conexion cuya transaccion el
+                # servidor ya revirio como victima del deadlock (rollback
+                # sobre una transaccion ya muerta es un no-op inofensivo) y,
+                # en los demas errores, revierte el INSERT parcial -- es lo
+                # que vuelve el reintento idempotente.
+                try:
+                    await conn.rollback()
+                except Exception:
+                    pass  # la conexion puede ya estar rota: no enmascara el error original
+                raise
+            finally:
+                # GET_LOCK no es transaccional: sobrevive al rollback de la
+                # victima del deadlock. Sin RELEASE_LOCK explicito el mutex
+                # quedaria tomado hasta que la conexion del pool se cierre.
+                if nombre_mutex:
+                    await self._liberar_mutex_hnsw(conn, nombre_mutex)
 
     # --------------------------------------------------------
     # Metodos para el WORKER de extraccion (batch, post-conversacion)

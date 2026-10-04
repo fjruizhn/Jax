@@ -120,6 +120,12 @@ class _Cursor:
     async def execute(self, sql, args=None):
         self.log.append(sql)
 
+    async def fetchone(self):
+        # protocolo del mutex HNSW: el lock siempre se adquiere en el mock
+        if any("GET_LOCK" in s for s in reversed(self.log)):
+            return (1,)
+        return ("jax_memory_test_mock",)
+
     async def fetchall(self):
         return self.filas
 

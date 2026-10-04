@@ -110,7 +110,8 @@ jobs:
         # tables; jax_test has grants only on this job's suffixed test DB, never production.
         # The root conftest's governance bootstrap reads host configuration;
         # this explicit boundary does not load it or migrate any shared schema.
-        # Measured 2026-09-26 against MariaDB 12.3.3: 102 passed, no skips/errors.
+        # Medido 2026-09-26 contra MariaDB 12.3.3: 102 passed, no skips/errors.
+        # +7 con tests/test_save_message_deadlock.py (2026-10-04): 109.
         run: |
           set -euo pipefail
           python -m pytest --confcutdir=tests \
@@ -124,6 +125,7 @@ jobs:
             tests/test_worker_backfill.py \
             tests/test_url_proveedor_workers_memoria.py \
             tests/test_legacy_adoption.py \
+            tests/test_save_message_deadlock.py \
             -q --junitxml="$RUNNER_TEMP/memory-b9.xml"
           MINIMO_CASOS=$(python3 .github/ci/piso.py minimo memory-b9-regression/casos) || exit $?
           export MINIMO_CASOS
