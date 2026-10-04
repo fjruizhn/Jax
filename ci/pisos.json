@@ -1,0 +1,176 @@
+{
+  "version": 1,
+  "pisos": {
+    "las-voces-faro-readonly/las-voces-faro-readonly": {
+      "patron": "^24 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 24 tests CORRIDOS."
+    },
+    "archivos-de-test-en-ci/wireados": {
+      "patron": "^7 passed",
+      "mensaje": "PISO ROTO: se esperaban 7 tests CORRIDOS."
+    },
+    "no-naked-claude-subprocess/scanner": {
+      "patron": "^54 passed",
+      "mensaje": "PISO ROTO: se esperaban 54 tests CORRIDOS del scanner."
+    },
+    "no-naked-claude-subprocess/titular": {
+      "patron": "^9 passed",
+      "mensaje": "PISO ROTO: se esperaban 9 tests CORRIDOS del control de Titular."
+    },
+    "no-naked-claude-subprocess/arranque": {
+      "patron": "^7 passed",
+      "mensaje": "PISO ROTO: se esperaban 7 tests CORRIDOS del control de preparar_arranque."
+    },
+    "no-naked-claude-subprocess/lanza": {
+      "patron": "^5 passed",
+      "mensaje": "PISO ROTO: se esperaban 5 tests CORRIDOS."
+    },
+    "hyde-sandbox-unit/hydesb": {
+      "patron": "^6 passed",
+      "mensaje": "PISO ROTO: se esperaban 6 tests CORRIDOS de hyde_sandbox."
+    },
+    "hyde-sandbox-unit/golden": {
+      "patron": "^3 passed",
+      "mensaje": "PISO ROTO: se esperaban 3 tests CORRIDOS de la golden de Hyde."
+    },
+    "cli-sandbox-unit/clisb": {
+      "patron": "^251 passed",
+      "mensaje": "PISO ROTO: se esperaban 251 tests CORRIDOS de cli_sandbox."
+    },
+    "faro-fase0/faro": {
+      "patron": "^671 passed",
+      "mensaje": "PISO ROTO: se esperaban 671 tests CORRIDOS del Faro."
+    },
+    "faro-bitacora-db/faro-db": {
+      "patron": "^40 passed",
+      "mensaje": "PISO ROTO: se esperaban 40 tests CORRIDOS de la bitacora y los topes del Faro."
+    },
+    "faro-jaula/faro-jaula": {
+      "patron": "^11 passed",
+      "mensaje": "PISO ROTO: se esperaban 11 tests CORRIDOS de la jaula del Faro."
+    },
+    "facet-health-io/out": {
+      "patron": "^27 passed",
+      "mensaje": "PISO ROTO: se esperaban 27 tests CORRIDOS (no skipeados)."
+    },
+    "pipeline-results-historial-db/out": {
+      "patron": "^2 passed",
+      "mensaje": "PISO ROTO: se esperaban 2 tests CORRIDOS (no skipeados)."
+    },
+    "subpipeline-contrato-db/out": {
+      "patron": "^295 passed",
+      "mensaje": "PISO ROTO: se esperaban 295 tests CORRIDOS (no skipeados)."
+    },
+    "memory-vector-zero-io/out": {
+      "patron": "^203 passed",
+      "mensaje": "PISO ROTO: se esperaban 203 tests CORRIDOS (no skipeados)."
+    },
+    "hyde-containment/hyde": {
+      "patron": "^21 passed",
+      "mensaje": "PISO ROTO: se esperaban 21 tests CORRIDOS (no skipeados)."
+    },
+    "facet-resolver-seal/seal": {
+      "patron": "^13 passed",
+      "mensaje": "PISO ROTO: se esperaban 13 tests CORRIDOS (no skipeados)."
+    },
+    "plan-timeout-ceiling/ptc": {
+      "patron": "^16 passed",
+      "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS."
+    },
+    "mirror-sync/ms": {
+      "patron": "^14 passed",
+      "mensaje": "PISO ROTO: se esperaban 14 tests CORRIDOS."
+    },
+    "mirror-sync/cu": {
+      "patron": "^22 passed",
+      "mensaje": "PISO ROTO: se esperaban 22 tests CORRIDOS y 0 skipped."
+    },
+    "mirror-sync/ks": {
+      "patron": "^2 passed in",
+      "mensaje": "PISO ROTO: se esperaban 2 tests CORRIDOS y 0 skipped."
+    },
+    "ollama-num-parallel/onp": {
+      "patron": "^33 passed",
+      "mensaje": "PISO ROTO: se esperaban 33 tests CORRIDOS."
+    },
+    "governance/f2e-sr": {
+      "patron": "^18 passed",
+      "mensaje": "PISO ROTO: se esperaban 18 tests CORRIDOS de F2-E-SR source integrity."
+    },
+    "governance/f2e-sr3": {
+      "patron": "^212 passed",
+      "mensaje": "PISO ROTO: se esperaban 212 tests CORRIDOS de F2-E-SR3."
+    },
+    "governance/f2e-sr3-source": {
+      "patron": "^156 passed",
+      "mensaje": "PISO ROTO: se esperaban 156 tests CORRIDOS de F2-E-SR3 source/auth/routing."
+    },
+    "governance/gov": {
+      "patron": "^263 passed",
+      "mensaje": "PISO ROTO: se esperaban 263 tests CORRIDOS."
+    },
+    "tests-puros/out": {
+      "patron": "^3452 passed, 45 skipped",
+      "mensaje": "PISO ROTO: se esperaban 3452 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."
+    },
+    "tests-puros/ficha_tests": {
+      "patron": "^16 passed",
+      "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS de procesamiento/_ficha_test.py -- el tipo que fija el fallo cerrado de toda la ronda."
+    },
+    "tests-puros/resultado_tests": {
+      "patron": "^16 passed",
+      "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS de procesamiento/_resultado_test.py -- el tipo que fija el fallo cerrado de toda la ronda."
+    },
+    "tests-puros/excel_tests": {
+      "patron": "^14 passed",
+      "mensaje": "PISO ROTO: se esperaban 14 tests CORRIDOS (no skipeados) del extractor de Excel. Si esto da '... skipped', openpyxl no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."
+    },
+    "tests-puros/pdf_tests": {
+      "patron": "^23 passed",
+      "mensaje": "PISO ROTO: se esperaban 23 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."
+    },
+    "tests-puros/ocr_tests": {
+      "patron": "^35 passed",
+      "mensaje": "PISO ROTO: se esperaban 35 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."
+    },
+    "tests-puros/word_tests": {
+      "patron": "^23 passed",
+      "mensaje": "PISO ROTO: se esperaban 23 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."
+    },
+    "tests-puros/compuerta_tests": {
+      "patron": "^35 passed",
+      "mensaje": "PISO ROTO: se esperaban 35 tests CORRIDOS de la compuerta."
+    },
+    "tests-puros/ingesta_tests": {
+      "patron": "^48 passed",
+      "mensaje": "PISO ROTO: se esperaban 48 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."
+    },
+    "tests-puros/medir_utilidad_tests": {
+      "patron": "^11 passed",
+      "mensaje": "PISO ROTO: se esperaban 11 tests CORRIDOS del medidor de utilidad. Si esto da '... skipped', openpyxl no se instalo."
+    },
+    "tests-puros/procesar_archivos_tests": {
+      "patron": "^12 passed",
+      "mensaje": "PISO ROTO: se esperaban 12 tests CORRIDOS del guion de procesar_archivos. Si esto da '... skipped', openpyxl no se instalo."
+    },
+    "tests-puros/procesamiento_routes_tests": {
+      "patron": "^95 passed",
+      "mensaje": "PISO ROTO: se esperaban 95 tests CORRIDOS del endpoint de Procesamiento."
+    },
+    "tests-puros/dependencias_tests": {
+      "patron": "^29 passed",
+      "mensaje": "PISO ROTO: se esperaban 29 tests CORRIDOS (no skipeados) del freno de dependencias."
+    },
+    "jacobs-gobernanza-db/out": {
+      "patron": "^170 passed",
+      "mensaje": "PISO ROTO: se esperaban 170 tests CORRIDOS."
+    },
+    "permisos-proyectos/permisos_proyectos": {
+      "patron": "^53 passed, 2 skipped",
+      "mensaje": "PISO ROTO: se esperaban 53 tests CORRIDOS (no skipeados) y exactamente 2 skipped."
+    }
+  },
+  "minimos": {
+    "memory-b9-regression/casos": 102
+  }
+}
