@@ -758,6 +758,14 @@ Patrón vigente al migrar (2026-10-03, master 364ded9): `^18 passed`
 
 Sin historia anotada en el workflow.
 
+## `governance/f2e-sr2`
+
+Piso introducido por JAX #341 (2026-10-04): `^26 passed`
+
+Medido en la combinación del PR con `master` (`f1ac7c2`):
+`PYTHONPATH=.:las_manos:jax/core python3 -m pytest
+tests/test_f2e_step_status.py -q`; 26 passed.
+
 ## `governance/f2e-sr3`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^212 passed`
