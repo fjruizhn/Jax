@@ -673,7 +673,7 @@ def test_pdf_donde_ninguna_pagina_da_texto_ni_es_de_pagina_es_ok_sin_texto(tmp_p
 
 def _pagina_ocr(
     clasificacion: str, texto: str = "", dudosas: int = 0, palabras: int = 0,
-    ancho: int = 2480, alto: int = 3508,
+    ancho: int = 0, alto: int = 0,
 ) -> dict:
     """Resultado de `_ocr_una_imagen` para una pagina, a mano (sin tesseract)."""
     return {
@@ -684,15 +684,19 @@ def _pagina_ocr(
     }
 
 
-_A = lambda: _pagina_ocr("sin_texto")                                  # regla A, tamano A4 a 300 (de pagina)
-_A_CHICA = lambda: _pagina_ocr("sin_texto", ancho=3333, alto=1667)    # regla A, 800x400 pt: NO es de pagina
+# Las dimensiones de D salen del PNG RASTERIZADO (`dimensiones`), no del TSV: las
+# paginas de estas pruebas llevan ancho=alto=0 (un TSV sin la fila de pagina).
+_DIM_A4 = (2480, 3508)
+_DIM_CHICA = (3333, 1667)                                              # 800x400 pt: NO es de pagina
+_A = lambda: _pagina_ocr("sin_texto")                                  # regla A
+_A_CHICA = _A
 _B = lambda: _pagina_ocr("sin_texto", "Gerente 95 area operaciones planta", 4, 5)   # regla B
 _ILEGIBLE = lambda: {"clasificacion": "ilegible", "causa": "tesseract_no_lee"}
 
 
 @pytest.mark.parametrize("paginas", [1, 2])
 def test_pdf_de_paginas_todas_regla_a_es_parcial_pagina_sin_texto(paginas):
-    r = ocr._resolver_pdf([_A() for _ in range(paginas)], "spa")
+    r = ocr._resolver_pdf([_A() for _ in range(paginas)], "spa", [_DIM_A4] * paginas)
     assert r.estado == "parcial"
     assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
     assert r.detalle["razon"] == "posible documento escaneado sin texto: revisar o reescanear"
@@ -705,7 +709,7 @@ def test_pdf_de_paginas_todas_regla_a_es_parcial_pagina_sin_texto(paginas):
 
 
 def test_pdf_a_sin_tamano_de_pagina_es_ok_imagen_sin_texto():
-    r = ocr._resolver_pdf([_A_CHICA(), _A_CHICA()], "spa")
+    r = ocr._resolver_pdf([_A(), _A()], "spa", [_DIM_CHICA, _DIM_CHICA])
     assert r.estado == "ok"
     assert r.detalle["codigo"] == "imagen_sin_texto"
     assert r.detalle["paginas"] == 2
@@ -715,7 +719,7 @@ def test_pdf_a_sin_tamano_de_pagina_es_ok_imagen_sin_texto():
 
 
 def test_pdf_con_alguna_pagina_a_de_tamano_de_pagina_es_d_con_sus_dimensiones():
-    r = ocr._resolver_pdf([_A_CHICA(), _A()], "spa")
+    r = ocr._resolver_pdf([_A(), _A()], "spa", [_DIM_CHICA, _DIM_A4])
     assert r.estado == "parcial"
     assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
     assert r.detalle["pagina_de_referencia"] == "A4"
@@ -724,14 +728,14 @@ def test_pdf_con_alguna_pagina_a_de_tamano_de_pagina_es_d_con_sus_dimensiones():
 
 
 def test_pdf_a_chica_con_una_ilegible_sigue_siendo_ok_imagen_sin_texto():
-    r = ocr._resolver_pdf([_ILEGIBLE(), _A_CHICA()], "spa")
+    r = ocr._resolver_pdf([_ILEGIBLE(), _A()], "spa", [_DIM_CHICA, _DIM_CHICA])
     assert r.estado == "ok"
     assert r.detalle["codigo"] == "imagen_sin_texto"
 
 
 def test_pdf_con_una_pagina_b_y_otra_a_conserva_el_texto_dudoso():
     """B tiene prioridad sobre D, como en las imagenes; el texto de B se conserva."""
-    r = ocr._resolver_pdf([_A(), _B()], "spa")
+    r = ocr._resolver_pdf([_A(), _B()], "spa", [_DIM_A4, _DIM_A4])
     assert r.estado == "parcial"
     assert r.detalle["codigo"] == "imagen_texto_dudoso"
     assert r.detalle["razon"] == ocr.RAZON_MAYORIA_DUDOSA
@@ -742,19 +746,63 @@ def test_pdf_con_una_pagina_b_y_otra_a_conserva_el_texto_dudoso():
     assert r.detalle["_camino"] == "pdf"
 
 
-def test_pdf_con_a_e_ilegibles_se_resuelve_por_las_paginas_legibles():
-    r = ocr._resolver_pdf([_ILEGIBLE(), _A(), None], "spa")
+def test_pdf_con_a_o_b_e_ilegible_es_error_no_parcial():
+    """Una pagina que no se pudo leer NO se esconde bajo un parcial: si alguna
+    es `None` o `ilegible` el PDF es `error`, con `paginas_ilegibles`."""
+    dims = [_DIM_A4] * 3
+    for otras in ([_A()], [_B()]):
+        r = ocr._resolver_pdf([_ILEGIBLE(), *otras, None], "spa", dims)
+        assert r.estado == "error"
+        assert r.salidas == {}
+        assert r.detalle["codigo"] == "archivo_no_procesable"
+        assert r.detalle["paginas_ilegibles"] == [1, 3]
+        assert r.detalle["paginas"] == 3
+        assert r.detalle["_camino"] == "pdf"
+    r = ocr._resolver_pdf([_A(), None], "spa", [_DIM_A4] * 2)
+    assert r.estado == "error"
+    assert r.detalle["paginas_ilegibles"] == [2]
+    assert "codigo" not in r.detalle
+
+
+def test_pdf_a_con_dimensiones_ilegibles_cuenta_como_pagina_ilegible():
+    """Si el PNG rasterizado no se puede medir, esa pagina es ilegible."""
+    r = ocr._resolver_pdf([_A(), _A()], "spa", [_DIM_A4, None])
+    assert r.estado == "error"
+    assert r.detalle["paginas_ilegibles"] == [2]
+    r = ocr._resolver_pdf([_A()], "spa")      # sin dimensiones: tampoco hay D
+    assert r.estado == "error"
+
+
+def test_pdf_d_usa_las_dimensiones_del_png_no_las_del_tsv(tmp_path: Path, monkeypatch):
+    """Por el camino real de `extraer`: pdftoppm de verdad sobre una pagina carta;
+    el resultado OCR NO trae la fila de pagina del TSV (ancho=alto=0)."""
+    from PIL import Image
+
+    monkeypatch.setattr(ocr, "_ocr_una_imagen", lambda ruta, idioma: _pagina_ocr("sin_texto"))
+    origen = tmp_path / "carta.pdf"
+    Image.new("RGB", (2550, 3300), "white").save(origen, resolution=300)
+    r = ocr.extraer(origen)
     assert r.estado == "parcial"
     assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
-    r = ocr._resolver_pdf([_ILEGIBLE(), _B(), None], "spa")
-    assert r.estado == "parcial"
-    assert r.detalle["codigo"] == "imagen_texto_dudoso"
-    assert "Gerente" in r.salidas["texto.txt"]
+    assert r.detalle["pagina_de_referencia"] == "carta"
+    assert (r.detalle["ancho"], r.detalle["alto"]) == (2550, 3300)
+
+
+def test_pdf_a_y_d_llevan_confianza_promedio_ponderada():
+    a = _pagina_ocr("sin_texto", "ab", 0, 0)
+    c = _pagina_ocr("sin_texto", "xy", 0, 3)
+    a["confianza_promedio"], c["confianza_promedio"] = 10.0, 50.0
+    for dims in ([_DIM_CHICA] * 2, [_DIM_A4] * 2):
+        r = ocr._resolver_pdf([a, c], "spa", dims)
+        assert r.detalle["confianza_promedio"] == 50.0      # ponderada por palabras
+    r = ocr._resolver_pdf([_A()], "spa", [_DIM_A4])
+    assert r.detalle["confianza_promedio"] == 0.0           # sin palabras
 
 
 def test_pdf_con_todas_las_paginas_none_sigue_en_error_con_su_razon():
-    r = ocr._resolver_pdf([None, None], "spa")
+    r = ocr._resolver_pdf([None, None], "spa", [None, None])
     assert r.estado == "error"
+    assert r.detalle["paginas_ilegibles"] == [1, 2]
     assert r.salidas == {}
     assert r.detalle["razon"] == "ninguna pagina del PDF dio texto util via OCR"
     assert r.detalle["paginas"] == 2
@@ -762,12 +810,13 @@ def test_pdf_con_todas_las_paginas_none_sigue_en_error_con_su_razon():
 
 
 def test_pdf_con_todas_las_paginas_ilegibles_es_error_con_el_codigo_que_corresponde():
-    r = ocr._resolver_pdf([_ILEGIBLE(), None], "spa")
+    r = ocr._resolver_pdf([_ILEGIBLE(), None], "spa", [None, None])
     assert r.estado == "error"
     assert r.salidas == {}
     assert r.detalle["codigo"] == "archivo_no_procesable"
     assert r.detalle["_camino"] == "pdf"
     assert r.detalle["paginas"] == 2
+    assert r.detalle["paginas_ilegibles"] == [1, 2]
 
 
 def test_pdf_con_una_pagina_buena_y_otra_sin_texto_sigue_como_antes():
