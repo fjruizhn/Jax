@@ -804,7 +804,7 @@ def _pdf_tipo_word_con_fotos(destino: Path) -> Path:
         ruido = Image.effect_noise((ancho, alto), 12).convert("RGB")
         return Image.blend(degradado, ruido, 0.25).filter(ImageFilter.GaussianBlur(2))
 
-    pagina = Image.new("RGB", (663, 878), "white")
+    pagina = Image.new("RGB", (680, 880), "white")   # 8,5 x 11 in a 80 ppi: carta
     pagina.paste(foto(560, 300), (50, 60))
     pagina.paste(foto(560, 300), (50, 460))
     pagina.save(destino, resolution=80)

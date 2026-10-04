@@ -1277,9 +1277,10 @@ def _resolver_pdf_sin_texto(resultados: list[dict | None], idioma: str) -> Resul
     se trata IGUAL que una imagen (`_resolver_imagen`), por las paginas LEGIBLES:
     - alguna con mayoria de palabras dudosas (B, con al menos MINIMO_CARACTERES):
       `parcial` + `imagen_texto_dudoso`, CONSERVANDO su texto (B antes que D);
-    - si no, todas son A (menos de MINIMO_CARACTERES): `parcial` +
-      `imagen_pagina_sin_texto` (toda pagina de un PDF tiene tamano de pagina),
-      con el aviso, nunca texto inventado.
+    - si no, todas son A (menos de MINIMO_CARACTERES), como la imagen: con alguna
+      pagina rasterizada de tamano de pagina (`_implica_pagina`) -> `parcial` +
+      `imagen_pagina_sin_texto` (D); si ninguna lo es -> `ok` +
+      `imagen_sin_texto` (A). Siempre el aviso, nunca texto inventado.
     `error` queda SOLO para lo ilegible: todas las paginas `None` o `ilegible`."""
     total = len(resultados)
     legibles = [
@@ -1328,12 +1329,25 @@ def _resolver_pdf_sin_texto(resultados: list[dict | None], idioma: str) -> Resul
             estado="parcial", salidas={"texto.txt": f"{NOTA_TEXTO_DUDOSO}\n{cuerpo}"},
             extractor=EXTRACTOR, version=_version() or "desconocida", detalle=detalle,
         )
-    # (D) todas las paginas legibles son A: posible escaneo sin texto.
-    detalle["razon"] = "posible documento escaneado sin texto: revisar o reescanear"
-    detalle["codigo"] = CODIGO_IMAGEN_PAGINA_SIN_TEXTO
+    # Todas las paginas legibles son A. Como en una imagen: con tamano de
+    # PAGINA (`_implica_pagina` sobre las dimensiones RASTERIZADAS) es la (D); si
+    # no, la (A).
+    for numero, r in legibles:
+        pagina = _implica_pagina(r["ancho"], r["alto"])
+        if pagina is not None:
+            detalle["ancho"], detalle["alto"] = r["ancho"], r["alto"]
+            detalle["pagina_de_referencia"] = pagina
+            detalle["razon"] = "posible documento escaneado sin texto: revisar o reescanear"
+            detalle["codigo"] = CODIGO_IMAGEN_PAGINA_SIN_TEXTO
+            return Resultado(
+                estado="parcial",
+                salidas={"texto.txt": f"{AVISO_IMAGEN_SIN_TEXTO}\n{NOTA_PAGINA_SIN_TEXTO}"},
+                extractor=EXTRACTOR, version=_version() or "desconocida", detalle=detalle,
+            )
+    detalle["razon"] = "el OCR no devolvio texto util"
+    detalle["codigo"] = CODIGO_IMAGEN_SIN_TEXTO
     return Resultado(
-        estado="parcial",
-        salidas={"texto.txt": f"{AVISO_IMAGEN_SIN_TEXTO}\n{NOTA_PAGINA_SIN_TEXTO}"},
+        estado="ok", salidas={"texto.txt": AVISO_IMAGEN_SIN_TEXTO},
         extractor=EXTRACTOR, version=_version() or "desconocida", detalle=detalle,
     )
 
