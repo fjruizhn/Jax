@@ -239,6 +239,8 @@ class _CursorTramposo:
         self.n += 1
         self.conn.ejecutados.append((sql, args))
         if self.fallo_en is not None and self.n == self.fallo_en:
+            self.fallo_en = None
+            self.conn._fallo_en = None  # el fallo de una sola vez NO se re-arma en el cursor del reintento
             raise aiomysql.OperationalError(self.codigo, "error inyectado")
 
     async def fetchone(self):

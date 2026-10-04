@@ -23,6 +23,7 @@ import logging
 import functools
 import json
 import math
+import random
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
@@ -43,6 +44,21 @@ logger = logging.getLogger("jax.memory")
 # scripts/migrar_embeddings.py. Todo lo de abajo lee EMBED en cada uso, no al
 # importar. EMBEDDING_DIM queda como alias de lectura para quien lo importaba.
 EMBEDDING_DIM = EMBED.dim
+
+
+#: Reintento del guardado de mensajes (diagnostico 2026-10-04, ver
+#: _save_message_impl y tests/test_save_message_deadlock.py). 1213 = deadlock,
+#: 1205 = lock wait timeout: bajo carga, el indice vectorial HNSW (tablas
+#: internas messages#i#NN) comparte locks entre INSERT y UPDATE de embedding,
+#: y pueden escapar interleavings que el SELECT ... FOR UPDATE no cubre (ej.
+#: contra el FOR UPDATE del worker B9 sobre la misma conversacion). 1062 =
+#: turn_number duplicado: el respaldo de la carrera MAX+1 por si la UNIQUE KEY
+#: rechaza el turn calculado. Ninguno es transitorio "gratis": cada reintento
+#: recalcula todo dentro de una transaccion nueva, y la muerta quedo revertida
+#: entera, asi que el mismo mensaje no se guarda dos veces.
+_ERRORES_REINTENTABLES_GUARDADO = frozenset({1213, 1205, 1062})
+_INTENTOS_GUARDADO_MENSAJE = 3
+_ESPERA_BASE_REINTENTO_SEG = 0.05
 
 
 # ------------------------------------------------------------
@@ -887,7 +903,25 @@ class MemoryDB:
         loguean (decorador) -- devuelve None en ese caso. Si guarda bien,
         devuelve {"conversation_id": int, "turn_number": int} para que un
         caller que awaitee el Task de save_message() tenga con que
-        identificar la fila real, sin FK nuevo ni cambiar el schema."""
+        identificar la fila real, sin FK nuevo ni cambiar el schema.
+
+        POR QUE LA TRANSACCION CORTA Y EL REINTENTO (diagnostico completo en
+        tests/test_save_message_deadlock.py, medido 2026-10-04 contra MariaDB
+        12.3.3, REPEATABLE-READ, pool autocommit): con INSERT y UPDATE del
+        contador en transacciones sueltas, bajo carga concurrente el paso
+        de vectorizacion (UPDATE ... WHERE conversation_id AND turn_number,
+        que con la carrera MAX+1 matcheaba DECENAS de filas del mismo
+        turn_number) y el INSERT de otro writer se interbloqueaban a traves
+        de las capas internas del indice vectorial HNSW (tablas
+        messages#i#NN): 1563 deadlocks de 2400 intentos en la repro, y el
+        @db_error_handler tragaba el 1213 PERDIENDO EL MENSAJE en silencio
+        (el guardado es fire-and-forget). El arreglo: (1) INSERT + contador
+        en UNA transaccion corta, con el turn asignado bajo SELECT ...
+        FOR UPDATE que serializa por conversacion; (2) reintento acotado ante
+        1213/1205/1062 que recalcula todo desde cero -- el rollback de la
+        transaccion muerta garantiza que el mismo mensaje nunca se guarda
+        dos veces; (3) vectorizacion por id de fila (una sola fila, sin
+        rango que pueda pisar turnos duplicados historicos)."""
         role_enum = _normalize_role(role)
         facet_enum = _normalize_role(facet) if facet else None
 
@@ -912,44 +946,119 @@ class MemoryDB:
                     return
                 conv_id, conv_user_id, conv_project_id = row[0], row[1], row[2]
 
-                # 2. turn_number = ultimo + 1
-                await cur.execute(
-                    "SELECT COALESCE(MAX(turn_number), 0) + 1 FROM messages "
-                    "WHERE conversation_id = %s",
-                    (conv_id,),
-                )
-                turn = (await cur.fetchone())[0]
+        # 2.-4. INSERT + contador en una transaccion corta, con reintento
+        # idempotente ante deadlock / lock wait / turn duplicado.
+        msg_id = turn = None
+        for intento in range(1, _INTENTOS_GUARDADO_MENSAJE + 1):
+            try:
+                msg_id, turn = await self._insertar_turno_atomico(
+                    conv_id, role_enum, content, facet_enum, model, latency_ms,
+                    conv_user_id, conv_project_id)
+                break
+            except Exception as e:
+                codigo = e.args[0] if getattr(e, "args", None) else None
+                if codigo not in _ERRORES_REINTENTABLES_GUARDADO or \
+                        intento == _INTENTOS_GUARDADO_MENSAJE:
+                    raise
+                espera = _ESPERA_BASE_REINTENTO_SEG * intento + random.uniform(0, 0.05)
+                logger.warning(
+                    "save_message: %s en intento %d/%d (conv=%s), "
+                    "reintentando en %.0f ms",
+                    e, intento, _INTENTOS_GUARDADO_MENSAJE,
+                    conversation_uuid[:8], espera * 1000)
+                await asyncio.sleep(espera)
 
-                # 3. insertar el mensaje (role ya normalizado al ENUM)
-                await cur.execute(
-                    "INSERT INTO messages "
-                    "(conversation_id, turn_number, role, content, facet_used, model, "
-                    "latency_ms, user_id, project_id) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                    (conv_id, turn, role_enum, content, facet_enum, model, latency_ms,
-                     conv_user_id, conv_project_id),
-                )
-
-                # 4. actualizar contador de turnos
-                await cur.execute(
-                    "UPDATE conversations SET total_turns = total_turns + 1 WHERE id = %s",
-                    (conv_id,),
-                )
-
-        # 5. vectorizar fuera del bloque — no retiene conexion mientras Ollama trabaja
+        # 5. vectorizar fuera de la transaccion -- no retiene conexion ni
+        # locks mientras se calcula el embedding, y por id (PRIMARY): una
+        # sola fila, sin recorrer el rango de turnos de la conversacion.
+        # También se reintenta: el UPDATE reescribe las capas del indice
+        # HNSW y compite con los INSERT de otros writers (mismo ciclo que
+        # el del diagnostico, pero acotado a esta sentencia); el UPDATE es
+        # idempotente por naturaleza (repite el mismo valor), asi que el
+        # reintento no corre riesgo de duplicar nada.
         embedding = await self.get_embedding(content)
         if embedding and self.pool:
             vec_str = json.dumps(embedding)
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        f"UPDATE messages SET {_col()} = VEC_FromText(%s) "
-                        "WHERE conversation_id = %s AND turn_number = %s",
-                        (vec_str, conv_id, turn),
-                    )
+            for intento in range(1, _INTENTOS_GUARDADO_MENSAJE + 1):
+                try:
+                    async with self.pool.acquire() as conn:
+                        async with conn.cursor() as cur:
+                            await cur.execute(
+                                f"UPDATE messages SET {_col()} = VEC_FromText(%s) "
+                                "WHERE id = %s",
+                                (vec_str, msg_id),
+                            )
+                    break
+                except Exception as e:
+                    codigo = e.args[0] if getattr(e, "args", None) else None
+                    if codigo not in _ERRORES_REINTENTABLES_GUARDADO or \
+                            intento == _INTENTOS_GUARDADO_MENSAJE:
+                        raise
+                    espera = _ESPERA_BASE_REINTENTO_SEG * intento + random.uniform(0, 0.05)
+                    logger.warning(
+                        "save_message (vectorizacion): %s en intento %d/%d "
+                        "(msg_id=%s), reintentando en %.0f ms",
+                        e, intento, _INTENTOS_GUARDADO_MENSAJE,
+                        msg_id, espera * 1000)
+                    await asyncio.sleep(espera)
 
         logger.debug(f"Mensaje guardado: conv={conversation_uuid[:8]} turn={turn} role={role_enum}")
         return {"conversation_id": conv_id, "turn_number": turn}
+
+    async def _insertar_turno_atomico(self, conv_id, role_enum, content,
+                                      facet_enum, model, latency_ms,
+                                      conv_user_id, conv_project_id):
+        """INSERT del mensaje + UPDATE del contador de turnos en UNA
+        transaccion. El turn se asigna bajo SELECT ... FOR UPDATE, que
+        serializa los writers de la MISMA conversacion (el FOR UPDATE toma
+        next-key locks del rango de turnos; dos transacciones que calculan
+        MAX+1 de la conversacion se ordenan una detras de otra en vez de
+        calcular el mismo numero). La UNIQUE KEY (conversation_id,
+        turn_number) -- ver jax/memory/migrations.py -- es el respaldo: si
+        dos writers igualaran el turn a pesar de todo, una recibe 1062,
+        reintenta y recalcula.
+
+        Devuelve (msg_id, turn_number). Ante cualquier error hace rollback
+        completo y deja escapar la excepcion: nunca deja el INSERT commitado
+        sin el contador (o viceversa), que es lo que hacia perder mensajes y
+        desincronizar total_turns."""
+        async with self.pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT COALESCE(MAX(turn_number), 0) + 1 FROM messages "
+                        "WHERE conversation_id = %s FOR UPDATE",
+                        (conv_id,),
+                    )
+                    turn = (await cur.fetchone())[0]
+                    await cur.execute(
+                        "INSERT INTO messages "
+                        "(conversation_id, turn_number, role, content, facet_used, model, "
+                        "latency_ms, user_id, project_id) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        (conv_id, turn, role_enum, content, facet_enum, model, latency_ms,
+                         conv_user_id, conv_project_id),
+                    )
+                    msg_id = cur.lastrowid
+                    await cur.execute(
+                        "UPDATE conversations SET total_turns = total_turns + 1 WHERE id = %s",
+                        (conv_id,),
+                    )
+                await conn.commit()
+                return msg_id, turn
+            except BaseException:
+                # rollback SIEMPRE que la transaccion no llego a COMMIT:
+                # libera los locks aun en la conexion cuya transaccion el
+                # servidor ya revirio como victima del deadlock (rollback
+                # sobre una transaccion ya muerta es un no-op inofensivo) y,
+                # en los demas errores, revierte el INSERT parcial -- es lo
+                # que vuelve el reintento idempotente.
+                try:
+                    await conn.rollback()
+                except Exception:
+                    pass  # la conexion puede ya estar rota: no enmascara el error original
+                raise
 
     # --------------------------------------------------------
     # Metodos para el WORKER de extraccion (batch, post-conversacion)
