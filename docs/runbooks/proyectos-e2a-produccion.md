@@ -42,7 +42,7 @@ sudo -l                                            # confirmar la regla de sudoe
 sudo install -o root -g root -m 0755 ops/permisos_proyectos.py /usr/local/sbin/jax-permisos-proyectos
 # --aplicar y el --verificar posterior van en el bloque de abajo, con las unidades de jaxsvc detenidas
 ```
-**`--aplicar` y `--deshacer` se corren SOLO con TODAS las unidades de `jaxsvc` detenidas, en UN bloque, y se restauran al salir.** El guion falla cerrado, sin mutar nada, si hay cualquier proceso o hilo con el uid de `jaxsvc` (lo lee de `/proc`; si no puede leer el estado de un pid listado, también falla; `--verificar` no lo exige). Por qué, en dos líneas: un proceso `jaxsvc` vivo puede renombrar carpetas mientras root recorre el árbol, y todas las carreras de renombre (symlinks, hardlinks, intercambio de nombres, ocultas que cambian de proyecto) parten de eso; sin procesos `jaxsvc`, nadie con permiso de renombrar corre en paralelo (queda `fruiz`, dueño, y root, que es confiable por premisa). Las unidades solo se **detienen**: no se enmascaran, porque viven en `/etc/systemd/system` y un `mask --runtime` no las tapa; con los timers parados no se disparan. El bloque, en este orden: (a) premisas (sin archivos setuid/setgid de `jaxsvc` y sin crontab de `jaxsvc`; el `find` corre con `LC_ALL=C` y tolera SOLO un error `Permission denied` cuyo path sea exactamente un punto de montaje `fuse*` de `findmnt` —p. ej. el sshfs de hall9000, que da EACCES hasta a root—: cualquier otro error, o un `find` que falla sin mensaje, corta); (b) la lista de unidades y timers de `jaxsvc` (`list-units` y `list-timers` con `'jax*'`, filtradas por `User=`), con **cada consulta capturada: si una falla, o la lista sale vacía, o falta una de la lista mínima esperada, se corta**; el estado textual (`active`, `inactive`, `failed`, `activating`) de cada una, guardado ANTES de detener nada; (c) el `trap` de restauración; (d) `stop` de cada una; (e) comprobar por su salida textual que quedaron detenidas, `ps -u jaxsvc` vacío y `/proc/*/status` y `/proc/*/task/*/status` sin los cuatro uid; (f) el guion; (g) `--verificar`; (h) el trap **arranca en orden inverso las que estaban `active` o `activating` (una unidad que estaba arrancando se restaura igual), exige que vuelvan a `active` **y estables** (siguen `active` durante `ESTABLE` segundos, por defecto 5, y `NRestarts` —`systemctl show -p NRestarts --value`— no sube en ese intervalo: una unidad en bucle de reinicios se ve `active` o `activating` un instante y no cuenta) y, si alguna no vuelve, dice cuáles y cómo arrancarla a mano y sale con código distinto de 0 aunque el guion haya ido bien** (conserva el código del fallo original si lo hubo). **Desde justo antes del primer `stop` el bloque ignora INT, TERM y HUP** (los procesos hijos, el guion incluido, heredan el ignorar) y antes de detener nada imprime el aviso con la orden para arrancar a mano. Por qué, en dos líneas: cortar a mitad de la aplicación no es seguro (el árbol queda a medias y el trap tendría que restaurar mientras otra señal lo interrumpe), y `--aplicar` es idempotente, así que lo correcto es dejar que termine y repetirlo si hace falta. Si de verdad hay que cortarlo, `kill -9` y después `sudo systemctl start <las unidades activas>` (el aviso las lista).
+**`--aplicar` y `--deshacer` se corren SOLO con TODAS las unidades de `jaxsvc` detenidas, en UN bloque, y se restauran al salir.** El guion falla cerrado, sin mutar nada, si hay cualquier proceso o hilo con el uid de `jaxsvc` (lo lee de `/proc`; si no puede leer el estado de un pid listado, también falla; `--verificar` no lo exige). Por qué, en dos líneas: un proceso `jaxsvc` vivo puede renombrar carpetas mientras root recorre el árbol, y todas las carreras de renombre (symlinks, hardlinks, intercambio de nombres, ocultas que cambian de proyecto) parten de eso; sin procesos `jaxsvc`, nadie con permiso de renombrar corre en paralelo (queda `fruiz`, dueño, y root, que es confiable por premisa). Las unidades solo se **detienen**: no se enmascaran, porque viven en `/etc/systemd/system` y un `mask --runtime` no las tapa; con los timers parados no se disparan. El bloque, en este orden: (a) premisas (sin archivos setuid/setgid de `jaxsvc` y sin crontab de `jaxsvc`; el `find` corre con `LC_ALL=C` y tolera SOLO un error `Permission denied` cuyo path sea exactamente el `TARGET` de un montaje `fuse*` con `nosuid` en `findmnt` (comparado contra su salida cruda, sin decodificar; un path con `\` o carácter de control no se tolera) —p. ej. el sshfs de hall9000, que da EACCES hasta a root—: cualquier otro error, o un `find` que falla sin mensaje, corta); (b) la lista de unidades y timers de `jaxsvc` (`list-units` y `list-timers` con `'jax*'`, filtradas por `User=`), con **cada consulta capturada: si una falla, o la lista sale vacía, o falta una de la lista mínima esperada, se corta**; el estado textual (`active`, `inactive`, `failed`, `activating`) de cada una, guardado ANTES de detener nada; (c) el `trap` de restauración; (d) `stop` de cada una; (e) comprobar por su salida textual que quedaron detenidas, `ps -u jaxsvc` vacío y `/proc/*/status` y `/proc/*/task/*/status` sin los cuatro uid; (f) el guion; (g) `--verificar`; (h) el trap **arranca en orden inverso las que estaban `active` o `activating` (una unidad que estaba arrancando se restaura igual), exige que vuelvan a `active` **y estables** (siguen `active` durante `ESTABLE` segundos —entero ≥ 1, por defecto 5; con 0 o no numérico el bloque corta antes de detener nada—, y al cierre `NRestarts` —`systemctl show -p NRestarts --value`— no sube en ese intervalo: una unidad en bucle de reinicios se ve `active` o `activating` un instante y no cuenta) y, si alguna no vuelve, dice cuáles y cómo arrancarla a mano y sale con código distinto de 0 aunque el guion haya ido bien** (conserva el código del fallo original si lo hubo). **Desde justo antes del primer `stop` el bloque ignora INT, TERM y HUP** (los procesos hijos, el guion incluido, heredan el ignorar) y antes de detener nada imprime el aviso con la orden para arrancar a mano. Por qué, en dos líneas: cortar a mitad de la aplicación no es seguro (el árbol queda a medias y el trap tendría que restaurar mientras otra señal lo interrumpe), y `--aplicar` es idempotente, así que lo correcto es dejar que termine y repetirlo si hace falta. Si de verdad hay que cortarlo, `kill -9` y después `sudo systemctl start <las unidades activas>` (el aviso las lista).
 
 **Bloque de `--aplicar`:**
 ```bash
@@ -54,25 +54,34 @@ PROC="${PROC:-/proc}"
 # Lista mínima que TIENE que aparecer (hoy en hall9000): si alguna falta, el descubrimiento está incompleto y se corta.
 ESPERADAS="${ESPERADAS:-jax-las-manos.service jax-platform.service jax-ariadna-pm.service jax-ejecutor-proxy.service jax-catalogo-modelos.service jax-limpiar-bases-de-test.service jax-catalogo-modelos.timer jax-limpiar-bases-de-test.timer}"
 REINTENTOS="${REINTENTOS:-5}"; ESPERA="${ESPERA:-1}"
-# ESTABLE: segundos que una unidad restaurada tiene que seguir 'active', sin que NRestarts suba, para contar como vuelta.
+# ESTABLE: segundos (entero >= 1) que una unidad restaurada tiene que seguir 'active', sin que NRestarts suba, para
+# contar como vuelta. Con 0 la ventana no miraría nada: se corta ANTES de detener nada.
 ESTABLE="${ESTABLE:-5}"
 falla() { echo "NO CUMPLE: $*" >&2; exit 1; }
-case "$ESTABLE" in ''|*[!0-9]*) falla "ESTABLE tiene que ser un entero de segundos: '$ESTABLE'" ;; esac
+case "$ESTABLE" in ''|*[!0-9]*) falla "ESTABLE tiene que ser un entero de segundos >= 1: '$ESTABLE'" ;; esac
+ESTABLE=$((10#$ESTABLE))
+[ "$ESTABLE" -ge 1 ] || falla "ESTABLE tiene que ser un entero de segundos >= 1 (con 0 la ventana de estabilidad no mira nada)"
 
 # (a) PREMISAS: si no se cumplen, el bloque falla antes de tocar nada.
 #     Un montaje FUSE (en hall9000, sshfs) da EACCES incluso a root y `find` sale 1. Se toleran SOLO los errores
-#     «Permission denied» cuyo path es EXACTAMENTE un punto de montaje fuse* de `findmnt`; cualquier otro error, o un
-#     fallo sin mensaje, corta. `find` corre con LC_ALL=C (vía `env`, porque `sudo` puede limpiar el entorno): su mensaje
-#     es `find: '/ruta': Permission denied` con comillas ASCII en cualquier idioma, y así se parsea.
-#     (`findmnt -r` escapa los espacios del path como \x20: se decodifican para compararlos con lo que imprime find.)
-FUSE="$(findmnt -rn -o TARGET,FSTYPE | awk '$2 ~ /^fuse/ {print $1}' | while IFS= read -r m; do printf '%b\n' "$m"; done)" \
-  || falla "no se pudo listar los montajes (findmnt)"
+#     «Permission denied» cuyo path es EXACTAMENTE el TARGET de un montaje fuse* de `findmnt` CON `nosuid` en sus
+#     OPTIONS (sin nosuid, un setuid de jaxsvc dentro sería operante y no mirarlo no es tolerable); cualquier otro
+#     error, o un fallo sin mensaje, corta. `find` corre con LC_ALL=C (vía `env`, porque `sudo` puede limpiar el
+#     entorno): su mensaje es `find: '/ruta': Permission denied` con comillas ASCII en cualquier idioma.
+#     NO se decodifica nada de findmnt: se compara contra su salida CRUDA (`-r` escapa espacio, salto de línea y
+#     barra invertida como \xNN), así un nombre de montaje con \x0a no puede fabricar otro path. Del lado de find,
+#     un path con barra invertida o carácter de control NO se tolera; si no, solo el espacio se pasa a la forma
+#     escapada (\x20) y se compara con el campo TARGET exacto (awk, `$1 == path`).
+MONTAJES="$(findmnt -rn -o TARGET,FSTYPE,OPTIONS)" || falla "no se pudo listar los montajes (findmnt)"
 ERRF="$(mktemp)" || falla "no se pudo crear un archivo temporal"
 SETUID="$(sudo env LC_ALL=C find / "$RAIZ" -xdev \( -path /proc -o -path /sys \) -prune -o -type f -user jaxsvc -perm /6000 -print 2>"$ERRF")" || {
   [ -s "$ERRF" ] || { rm -f "$ERRF"; falla "no se pudo buscar archivos setuid/setgid de jaxsvc: find falló sin mensaje"; }
   while IFS= read -r linea; do
     p="${linea#"find: '"}"; p="${p%"': Permission denied"}"
-    if [ "$p" = "$linea" ] || ! printf '%s\n' "$FUSE" | grep -qxF -- "$p"; then
+    case "$p" in *\\*|*[[:cntrl:]]*) p="$linea" ;; esac     # barra invertida o control: no se tolera
+    pe="${p// /\\x20}"
+    if [ "$p" = "$linea" ] || ! printf '%s\n' "$MONTAJES" \
+         | PE="$pe" awk '$2 ~ /^fuse/ && $1 == ENVIRON["PE"] && ("," $3 ",") ~ /,nosuid,/ { ok = 1 } END { exit !ok }'; then
       rm -f "$ERRF"; falla "no se pudo buscar archivos setuid/setgid de jaxsvc: $linea"
     fi
   done < "$ERRF"; }
@@ -158,13 +167,16 @@ restaurar() {
       [ "$(sudo systemctl is-active "${LISTA[i]}")" = active ] || { MALA[i]=1; MOTIVO[i]="dejó de estar 'active' en la ventana de ${ESTABLE} s"; }
     done
   done
-  # 3) NRestarts no tiene que haber subido
+  # 3) cierre: NRestarts igual al de partida Y 'active' AL FINAL. La consulta de estado va DESPUÉS de leer el contador:
+  #    una unidad que se apaga sin reiniciarse tras la última lectura no cuenta como restaurada.
   for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
     [ "${ESTADOS[i]}" = active ] || [ "${ESTADOS[i]}" = activating ] || continue
     [ -z "${MALA[i]:-}" ] || continue
-    [ -n "${NR0[i]:-}" ] || continue
-    n="$(sudo systemctl show -p NRestarts --value "${LISTA[i]}")" || n=""
-    [ "$n" = "${NR0[i]}" ] || { MALA[i]=1; MOTIVO[i]="NRestarts pasó de ${NR0[i]} a '${n}' (bucle de reinicios)"; }
+    if [ -n "${NR0[i]:-}" ]; then
+      n="$(sudo systemctl show -p NRestarts --value "${LISTA[i]}")" || n=""
+      [ "$n" = "${NR0[i]}" ] || { MALA[i]=1; MOTIVO[i]="NRestarts pasó de ${NR0[i]} a '${n}' (bucle de reinicios)"; continue; }
+    fi
+    [ "$(sudo systemctl is-active "${LISTA[i]}")" = active ] || { MALA[i]=1; MOTIVO[i]="no estaba 'active' al cierre de la ventana"; }
   done
   for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
     [ -z "${MALA[i]:-}" ] || fallidas+=("${LISTA[i]}")
@@ -177,6 +189,8 @@ restaurar() {
     for u in "${fallidas[@]}"; do echo "  arrancarla a mano: sudo systemctl start $u" >&2; done
     [ "$rc" -ne 0 ] || rc=1
   fi
+  # el OK es del trap, al final, y solo si el guion devolvió 0 Y todas las unidades volvieron estables
+  [ "$rc" -ne 0 ] || echo "OK: --aplicar terminó con jaxsvc detenido y las unidades restauradas (activas y estables)"
   exit "$rc"
 }
 trap restaurar EXIT
@@ -216,7 +230,7 @@ $PERMISOS --aplicar
 # (g) VERIFICAR
 $PERMISOS --verificar
 # (h) al salir, el trap restaura (start en orden inverso, verificado: 'active' estable y NRestarts sin subir).
-echo "OK: --aplicar terminó con jaxsvc detenido; el trap restaura las unidades al salir"
+echo "guion terminado; restaurando unidades… (el OK lo dice el trap, al final, si todas vuelven estables)"
 ```
 
 **Bloque de `--deshacer`** (el mismo, sin `--verificar`: tras `--deshacer` el árbol ya no es el aplicado):
@@ -229,25 +243,34 @@ PROC="${PROC:-/proc}"
 # Lista mínima que TIENE que aparecer (hoy en hall9000): si alguna falta, el descubrimiento está incompleto y se corta.
 ESPERADAS="${ESPERADAS:-jax-las-manos.service jax-platform.service jax-ariadna-pm.service jax-ejecutor-proxy.service jax-catalogo-modelos.service jax-limpiar-bases-de-test.service jax-catalogo-modelos.timer jax-limpiar-bases-de-test.timer}"
 REINTENTOS="${REINTENTOS:-5}"; ESPERA="${ESPERA:-1}"
-# ESTABLE: segundos que una unidad restaurada tiene que seguir 'active', sin que NRestarts suba, para contar como vuelta.
+# ESTABLE: segundos (entero >= 1) que una unidad restaurada tiene que seguir 'active', sin que NRestarts suba, para
+# contar como vuelta. Con 0 la ventana no miraría nada: se corta ANTES de detener nada.
 ESTABLE="${ESTABLE:-5}"
 falla() { echo "NO CUMPLE: $*" >&2; exit 1; }
-case "$ESTABLE" in ''|*[!0-9]*) falla "ESTABLE tiene que ser un entero de segundos: '$ESTABLE'" ;; esac
+case "$ESTABLE" in ''|*[!0-9]*) falla "ESTABLE tiene que ser un entero de segundos >= 1: '$ESTABLE'" ;; esac
+ESTABLE=$((10#$ESTABLE))
+[ "$ESTABLE" -ge 1 ] || falla "ESTABLE tiene que ser un entero de segundos >= 1 (con 0 la ventana de estabilidad no mira nada)"
 
 # (a) PREMISAS: si no se cumplen, el bloque falla antes de tocar nada.
 #     Un montaje FUSE (en hall9000, sshfs) da EACCES incluso a root y `find` sale 1. Se toleran SOLO los errores
-#     «Permission denied» cuyo path es EXACTAMENTE un punto de montaje fuse* de `findmnt`; cualquier otro error, o un
-#     fallo sin mensaje, corta. `find` corre con LC_ALL=C (vía `env`, porque `sudo` puede limpiar el entorno): su mensaje
-#     es `find: '/ruta': Permission denied` con comillas ASCII en cualquier idioma, y así se parsea.
-#     (`findmnt -r` escapa los espacios del path como \x20: se decodifican para compararlos con lo que imprime find.)
-FUSE="$(findmnt -rn -o TARGET,FSTYPE | awk '$2 ~ /^fuse/ {print $1}' | while IFS= read -r m; do printf '%b\n' "$m"; done)" \
-  || falla "no se pudo listar los montajes (findmnt)"
+#     «Permission denied» cuyo path es EXACTAMENTE el TARGET de un montaje fuse* de `findmnt` CON `nosuid` en sus
+#     OPTIONS (sin nosuid, un setuid de jaxsvc dentro sería operante y no mirarlo no es tolerable); cualquier otro
+#     error, o un fallo sin mensaje, corta. `find` corre con LC_ALL=C (vía `env`, porque `sudo` puede limpiar el
+#     entorno): su mensaje es `find: '/ruta': Permission denied` con comillas ASCII en cualquier idioma.
+#     NO se decodifica nada de findmnt: se compara contra su salida CRUDA (`-r` escapa espacio, salto de línea y
+#     barra invertida como \xNN), así un nombre de montaje con \x0a no puede fabricar otro path. Del lado de find,
+#     un path con barra invertida o carácter de control NO se tolera; si no, solo el espacio se pasa a la forma
+#     escapada (\x20) y se compara con el campo TARGET exacto (awk, `$1 == path`).
+MONTAJES="$(findmnt -rn -o TARGET,FSTYPE,OPTIONS)" || falla "no se pudo listar los montajes (findmnt)"
 ERRF="$(mktemp)" || falla "no se pudo crear un archivo temporal"
 SETUID="$(sudo env LC_ALL=C find / "$RAIZ" -xdev \( -path /proc -o -path /sys \) -prune -o -type f -user jaxsvc -perm /6000 -print 2>"$ERRF")" || {
   [ -s "$ERRF" ] || { rm -f "$ERRF"; falla "no se pudo buscar archivos setuid/setgid de jaxsvc: find falló sin mensaje"; }
   while IFS= read -r linea; do
     p="${linea#"find: '"}"; p="${p%"': Permission denied"}"
-    if [ "$p" = "$linea" ] || ! printf '%s\n' "$FUSE" | grep -qxF -- "$p"; then
+    case "$p" in *\\*|*[[:cntrl:]]*) p="$linea" ;; esac     # barra invertida o control: no se tolera
+    pe="${p// /\\x20}"
+    if [ "$p" = "$linea" ] || ! printf '%s\n' "$MONTAJES" \
+         | PE="$pe" awk '$2 ~ /^fuse/ && $1 == ENVIRON["PE"] && ("," $3 ",") ~ /,nosuid,/ { ok = 1 } END { exit !ok }'; then
       rm -f "$ERRF"; falla "no se pudo buscar archivos setuid/setgid de jaxsvc: $linea"
     fi
   done < "$ERRF"; }
@@ -333,13 +356,16 @@ restaurar() {
       [ "$(sudo systemctl is-active "${LISTA[i]}")" = active ] || { MALA[i]=1; MOTIVO[i]="dejó de estar 'active' en la ventana de ${ESTABLE} s"; }
     done
   done
-  # 3) NRestarts no tiene que haber subido
+  # 3) cierre: NRestarts igual al de partida Y 'active' AL FINAL. La consulta de estado va DESPUÉS de leer el contador:
+  #    una unidad que se apaga sin reiniciarse tras la última lectura no cuenta como restaurada.
   for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
     [ "${ESTADOS[i]}" = active ] || [ "${ESTADOS[i]}" = activating ] || continue
     [ -z "${MALA[i]:-}" ] || continue
-    [ -n "${NR0[i]:-}" ] || continue
-    n="$(sudo systemctl show -p NRestarts --value "${LISTA[i]}")" || n=""
-    [ "$n" = "${NR0[i]}" ] || { MALA[i]=1; MOTIVO[i]="NRestarts pasó de ${NR0[i]} a '${n}' (bucle de reinicios)"; }
+    if [ -n "${NR0[i]:-}" ]; then
+      n="$(sudo systemctl show -p NRestarts --value "${LISTA[i]}")" || n=""
+      [ "$n" = "${NR0[i]}" ] || { MALA[i]=1; MOTIVO[i]="NRestarts pasó de ${NR0[i]} a '${n}' (bucle de reinicios)"; continue; }
+    fi
+    [ "$(sudo systemctl is-active "${LISTA[i]}")" = active ] || { MALA[i]=1; MOTIVO[i]="no estaba 'active' al cierre de la ventana"; }
   done
   for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
     [ -z "${MALA[i]:-}" ] || fallidas+=("${LISTA[i]}")
@@ -352,6 +378,8 @@ restaurar() {
     for u in "${fallidas[@]}"; do echo "  arrancarla a mano: sudo systemctl start $u" >&2; done
     [ "$rc" -ne 0 ] || rc=1
   fi
+  # el OK es del trap, al final, y solo si el guion devolvió 0 Y todas las unidades volvieron estables
+  [ "$rc" -ne 0 ] || echo "OK: --deshacer terminó con jaxsvc detenido y las unidades restauradas (activas y estables)"
   exit "$rc"
 }
 trap restaurar EXIT
@@ -390,7 +418,7 @@ HALLADOS="$(awk -v u="$UID_JAXSVC" '/^Uid:/ { for (i = 2; i <= 5; i++) if ($i ==
 $PERMISOS --deshacer
 # (g) no hay --verificar tras --deshacer: el árbol ya no es el aplicado (dueño fruiz:fruiz, sin la ACL de fruiz)
 # (h) al salir, el trap restaura (start en orden inverso, verificado: 'active' estable y NRestarts sin subir).
-echo "OK: --deshacer terminó con jaxsvc detenido; el trap restaura las unidades al salir"
+echo "guion terminado; restaurando unidades… (el OK lo dice el trap, al final, si todas vuelven estables)"
 ```
 
 Después del bloque de `--aplicar`, la verificación independiente (la de abajo). Si el guion dice «hay procesos de jaxsvc vivos (pids …)», se detienen esas unidades y se repite; un proceso que aparece durante la mutación se anota y el comando sale con 1.

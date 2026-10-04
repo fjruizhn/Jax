@@ -3487,7 +3487,7 @@ def test_un_montaje_fuse_con_un_espacio_en_el_nombre_se_tolera_comparando_la_for
 # --- ronda 2: ESTABLE >= 1, sin OK prematuro, y la caida final --------------------------------------------------
 
 @pytest.mark.parametrize("marca,modo", _BLOQUES)
-@pytest.mark.parametrize("valor", ["0", "00", "", "abc", "-1", "1.5"])
+@pytest.mark.parametrize("valor", ["0", "00", "abc", "-1", "1.5"])  # (vacio = sin definir: toma el 5 por defecto)
 def test_un_ESTABLE_que_no_es_un_entero_mayor_o_igual_a_uno_corta_antes_de_detener_nada(tmp_path, _identidades, marca, modo, valor):
     r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env={"ESTABLE": valor})
     assert r.returncode != 0 and "NO CUMPLE" in r.stderr and "ESTABLE" in r.stderr, (valor, r.stdout + r.stderr)
