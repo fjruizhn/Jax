@@ -307,6 +307,12 @@ def _limpiar_como_root(ruta: Path) -> None:
     subprocess.run(["sudo", "-n", "rm", "-rf", str(ruta)], capture_output=True)
 
 
+def _crear_archivo_de_fruiz_0600(ruta: Path) -> None:
+    """Un archivo vacio de fruiz 0600 SIN ACL, creado como root: antes de aplicar el arbol de pruebas es del usuario de
+    pytest (0755) y, en un runner, fruiz no puede escribir ahi (en hall9000 pytest corre como fruiz)."""
+    subprocess.run(["sudo", "-n", "install", "-o", "fruiz", "-g", "fruiz", "-m", "0600", "/dev/null", str(ruta)], check=True)
+
+
 def _como_fruiz(codigo_python: str, timeout: int = 30) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["sudo", "-n", "-u", "fruiz", "python3", "-c", codigo_python],
@@ -1446,8 +1452,31 @@ print(path)
 # --verificar no lo contaba. El árbol tiene que ser cerrado por sí mismo.
 
 def _acl(ruta: Path) -> list[str]:
-    salida = subprocess.run(["getfacl", "-p", str(ruta)], capture_output=True, text=True, check=True).stdout
+    """getfacl como ROOT: tras aplicar (2770/0660, sin otros) el usuario de pytest de un runner (`runner`) ya no
+    entra, y en hall9000 solo entraba porque es fruiz."""
+    salida = subprocess.run(["sudo", "-n", "getfacl", "-p", str(ruta)], capture_output=True, text=True, check=True).stdout
     return [l.split("\t")[0].strip() for l in salida.splitlines() if l.strip() and not l.startswith("#")]
+
+
+def _stat_root(ruta: Path):
+    """os.stat como ROOT (devuelve un objeto con los st_*): las comprobaciones posteriores a una mutacion no pueden
+    depender de que el usuario de pytest tenga paso por un arbol que ya no tiene bits de otros."""
+    import types
+    r = subprocess.run(["sudo", "-n", "python3", "-c",
+                        "import os, sys, json; st = os.stat(sys.argv[1]); print(json.dumps({k: getattr(st, k) for k in "
+                        "('st_uid', 'st_gid', 'st_mode', 'st_ino', 'st_dev', 'st_nlink', 'st_mtime_ns', 'st_ctime_ns')}))",
+                        str(ruta)], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise FileNotFoundError(r.stderr.strip().splitlines()[-1] if r.stderr.strip() else str(ruta))
+    return types.SimpleNamespace(**json.loads(r.stdout))
+
+
+def _existe_root(ruta: Path) -> bool:
+    try:
+        _stat_root(ruta)
+        return True
+    except FileNotFoundError:
+        return False
 
 
 def _otros_en_nombres(ruta: Path) -> list[str]:
@@ -1766,9 +1795,8 @@ def test_aplicar_no_interrumpe_un_lector_escritor_concurrente(arbol_temporal, _i
     eso ahora el arbol vive en un directorio propio, ver `base_propia`.)"""
     proyectos = arbol_temporal / "proyectos"
     archivo = proyectos / "un-proyecto" / "actividad.log"
-    r_crear = _como_fruiz(f"import os; os.close(os.open({str(archivo)!r}, os.O_CREAT | os.O_WRONLY, 0o600))")
-    assert r_crear.returncode == 0, r_crear.stdout + r_crear.stderr
-    assert archivo.stat().st_mode & 0o7777 == 0o600
+    _crear_archivo_de_fruiz_0600(archivo)
+    assert _stat_root(archivo).st_mode & 0o7777 == 0o600
 
     detener = arbol_temporal.parent / "detener-escritor"
     detener.unlink(missing_ok=True)
@@ -1816,8 +1844,7 @@ def _sondear_etapas(arbol: Path, parchear: str) -> list:
     os.fchmod) para sondear, tras cada una, si fruiz sigue pudiendo abrir su archivo. Devuelve [[etapa, rc]]."""
     proyectos = arbol / "proyectos"
     archivo = proyectos / "un-proyecto" / "actividad.log"
-    r_crear = _como_fruiz(f"import os; os.close(os.open({str(archivo)!r}, os.O_CREAT | os.O_WRONLY, 0o600))")
-    assert r_crear.returncode == 0, r_crear.stdout + r_crear.stderr
+    _crear_archivo_de_fruiz_0600(archivo)
     codigo = f"""
 import sys, json, os, subprocess
 sys.path.insert(0, {str(RAIZ_REPO / "ops")!r})
@@ -1981,7 +2008,7 @@ def test_verificar_marca_otros_en_una_carpeta_oculta_y_en_su_contenido(arbol_tem
 
 
 def _foto_completa(ruta: Path) -> tuple:
-    st = ruta.stat()
+    st = _stat_root(ruta)
     return (st.st_uid, st.st_gid, st.st_mode, st.st_mtime_ns, st.st_ctime_ns, tuple(_acl(ruta)))
 
 
@@ -2367,7 +2394,7 @@ def test_un_hardlink_creado_entre_la_acl_y_el_chown_no_se_muta_y_se_anota(arbol_
     enlace = arbol_temporal.parent / "enlace-hacia-fuera"
     if accion == "deshacer":
         assert not _recorrer_directo(proyectos, accion="aplicar")["no_cumple"]
-    dueno_antes = archivo.stat().st_uid
+    dueno_antes = _stat_root(archivo).st_uid
     preparar = f"""
 _set = pp._setfacl_reemplazar
 estado = {{"hecho": False}}
@@ -2379,9 +2406,9 @@ def con_enlace(fd, acl, **k):
 pp._setfacl_reemplazar = con_enlace
 """
     out = _ciclo_nucleo_cliente(proyectos, arbol_temporal, accion, preparar)
-    assert enlace.exists() and archivo.stat().st_nlink == 2, "el gancho no creó el enlace: la prueba no probó nada"
+    assert _existe_root(enlace) and _stat_root(archivo).st_nlink == 2, "el gancho no creó el enlace: la prueba no probó nada"
     assert any("hardlink" in l and str(archivo) in l for l in (out["json"] or {}).get("no_cumple", [])), out
-    assert archivo.stat().st_uid == dueno_antes, "se hizo el fchown sobre un inode que ya tenia otro enlace"
+    assert _stat_root(archivo).st_uid == dueno_antes, "se hizo el fchown sobre un inode que ya tenia otro enlace"
     # (el modo si cambio: la mutacion de la ACL -- anterior al enlace -- ya fija mascara y `other`; lo que no se
     # hizo despues del enlace es el fchown y el fchmod.)
     assert out["rc"] == 1, out
@@ -2605,7 +2632,7 @@ def test_un_directorio_real_que_sustituye_a_la_raiz_o_a_proyectos_entre_pasadas_
         sustituto = proyectos
         original, desplazado = proyectos, Path(str(proyectos) + ".orig")
     modo_ajeno = _foto(ajeno)[2]
-    ino_ajeno = ajeno.stat().st_ino
+    ino_ajeno = _stat_root(ajeno).st_ino
     extra = f"""
 import os
 estado = {{"hecho": False}}
@@ -2619,7 +2646,7 @@ def hook_entre():
     datos = _recorrer_directo(proyectos, accion=accion, extra_codigo=extra, puede_fallar=True,
                               conceder_al_terminar=False)
     assert "error" in datos, datos
-    assert sustituto.stat().st_ino == ino_ajeno, "el gancho no sustituyó el directorio: la prueba no probó nada"
+    assert _stat_root(sustituto).st_ino == ino_ajeno, "el gancho no sustituyó el directorio: la prueba no probó nada"
     assert datos["a_medio"] is False, f"no habia empezado a mutar: no es a_medio_aplicar ({datos})"
     assert "cambió" in datos["error"], datos["error"]
     assert _foto(sustituto)[2] == modo_ajeno, "se hizo fchmod sobre el directorio sustituto"
@@ -2661,17 +2688,17 @@ salida["modo_final"] = os.stat(raiz).st_mode & 0o7777
 # --- ronda 11: cada entrada abierta se compara por inode con la que enumero scandir -------------------
 
 def _huella_de(ruta: Path) -> tuple:
-    st = ruta.stat()
+    st = _stat_root(ruta)
     return (st.st_uid, st.st_gid, st.st_mode, st.st_ctime_ns, tuple(_acl(ruta)))
 
 
 def _arbol_con_oculta_y_hermana(arbol: Path) -> tuple:
-    """proyectos/un-proyecto/{visible/, .claude-flow/ (limpia, de quien corre pytest, con un archivo)}."""
+    """proyectos/un-proyecto/{visible/, .estado-de-ia/ (limpia, de quien corre pytest, con un archivo)}."""
     proyectos = arbol / "proyectos"
     proyecto = proyectos / "un-proyecto"
     visible = proyecto / "visible"
     visible.mkdir()
-    oculta = proyecto / ".claude-flow"
+    oculta = proyecto / ".estado-de-ia"
     _mkdir_oculta_limpia(oculta)
     (oculta / "estado.json").write_text("{}")
     os.chmod(oculta / "estado.json", 0o600)
@@ -2695,14 +2722,14 @@ def hook_scandir(ruta):
 @pytest.mark.parametrize("accion", ["aplicar", "deshacer"])
 def test_un_intercambio_de_nombres_entre_el_scandir_y_el_open_no_hace_que_root_mute_la_oculta(
         arbol_temporal, _identidades, accion):
-    """Despues de que scandir enumera `visible`, un proceso intercambia los nombres de `visible/` y `.claude-flow/`.
+    """Despues de que scandir enumera `visible`, un proceso intercambia los nombres de `visible/` y `.estado-de-ia/`.
     Root abriria `visible` -- ahora el inode de la oculta -- y le cambiaria ACL, dueño y modo. Se compara
     (st_dev, st_ino) del descriptor abierto con lo enumerado: si no coincide, no se muta, no se desciende y se anota."""
     proyectos, proyecto, visible, oculta = _arbol_con_oculta_y_hermana(arbol_temporal)
     if accion == "deshacer":
         # el arbol se aplica primero (con la oculta ya creada: es de quien corre pytest y no se toca)
         assert not _recorrer_directo(proyectos, accion="aplicar", conceder_al_terminar=False)["no_cumple"]
-    ino_oculta = oculta.stat().st_ino
+    ino_oculta = _stat_root(oculta).st_ino
     huella = _huella_de(oculta)
     huella_archivo = _huella_de(oculta / "estado.json")
     marca = arbol_temporal.parent / "ctime-tras-el-intercambio"
@@ -2711,7 +2738,7 @@ def test_un_intercambio_de_nombres_entre_el_scandir_y_el_open_no_hace_que_root_m
         "def _h(ruta):", "def _h(ruta):") + "\n_rec = pp._recorrer\ndef _con_hook(*a, **k):\n"
         "    if k.get('accion') in ('aplicar', 'deshacer'):\n        k.setdefault('hook_tras_scandir', _h)\n    return _rec(*a, **k)\npp._recorrer = _con_hook\n")
     # tras el intercambio, el inode de la oculta esta bajo el nombre `visible`
-    assert visible.stat().st_ino == ino_oculta, "el gancho no intercambió los nombres: la prueba no probó nada"
+    assert _stat_root(visible).st_ino == ino_oculta, "el gancho no intercambió los nombres: la prueba no probó nada"
     h = _huella_de(visible)
     assert h[:3] == huella[:3] and h[4] == huella[4], "root mutó la carpeta oculta (dueño, grupo, modo o ACL)"
     assert h[3] == int(marca.read_text()), "root mutó la carpeta oculta (cambió su ctime tras el intercambio)"
@@ -2743,7 +2770,7 @@ def _con_hook(*a, **k):
     return _rec(*a, **k)
 pp._recorrer = _con_hook
 """)
-    assert movida.exists() and not oculta.exists()
+    assert _existe_root(movida) and not _existe_root(oculta)
     assert [_huella_de(movida)[i] for i in (0, 1, 2, 4)] == huella, "root mutó una carpeta que era oculta"
     no_cumple = (out["json"] or {}).get("no_cumple", [])
     assert any("carpeta oculta" in l and "movida" in l for l in no_cumple), out
@@ -2771,7 +2798,7 @@ def _con_hook(*a, **k):
 pp._recorrer = _con_hook
 """)
     no_cumple = (out["json"] or {}).get("no_cumple", [])
-    assert any("carpeta oculta mutada" in l and ".claude-flow" in l for l in no_cumple), out
+    assert any("carpeta oculta mutada" in l and ".estado-de-ia" in l for l in no_cumple), out
     assert out["rc"] == 1, out
 
 
@@ -3181,6 +3208,7 @@ def _correr_con_señales(marca: str, modo: str, tmp_path: Path, momento: str, se
                             env=entorno, text=True, cwd=str(RAIZ_REPO), start_new_session=True)
     proc.stdin.write(_bloque_del_runbook(marca))
     proc.stdin.close()
+    proc.stdin = None   # Python 3.12: communicate() hace stdin.flush() y revienta si ya esta cerrado
     log_path = tmp_path / "datos" / "log"
     pgid = os.getpgid(proc.pid)
     try:
@@ -3398,7 +3426,7 @@ def test_ninguna_prueba_corre_la_mutacion_sin_sustituir_la_inspeccion_de_proceso
 # --- MAJOR-1: la raiz se abre por descriptor, sin seguir symlinks ------------------------------
 
 def _modo_y_acl(ruta: Path) -> tuple[str, list[str]]:
-    return oct(ruta.stat().st_mode & 0o7777), _acl(ruta)
+    return oct(_stat_root(ruta).st_mode & 0o7777), _acl(ruta)
 
 
 @pytest.mark.parametrize("que_se_cambia", ["la raiz", "el directorio padre de la raiz"])
@@ -3448,7 +3476,7 @@ def _arbol_como_produccion(base: Path, *, dueno: str, grupo: str, modo: int) -> 
 
 
 def _foto(ruta: Path) -> tuple:
-    st = ruta.stat()
+    st = _stat_root(ruta)
     return st.st_uid, st.st_gid, st.st_mode & 0o7777
 
 
