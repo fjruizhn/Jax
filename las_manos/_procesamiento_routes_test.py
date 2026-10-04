@@ -1209,15 +1209,10 @@ class TrabajoHTTPTest(unittest.TestCase):
     def test_post_sin_pillow_una_imagen_con_firma_llamada_foto_da_503(self):
         """Jax#338 ronda 18 (MAJOR de Sol r17): el freno decide como la compuerta,
         por la FIRMA del contenido (leido a traves del jail); un PNG llamado
-        `foto` frena el lote igual que un `.png`."""
-        from io import BytesIO
-
-        from PIL import Image
-
-        salida = BytesIO()
-        Image.new("RGB", (8, 8), "white").save(salida, "PNG")
+        `foto` frena el lote igual que un `.png`. Sin Pillow en la prueba: el job
+        `governance` no la instala, y el freno solo lee la firma."""
         foto = Path(self._tmpdir.name) / "foto"
-        foto.write_bytes(salida.getvalue())
+        foto.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
 
         async def _noop(*args, **kwargs):
             return None
