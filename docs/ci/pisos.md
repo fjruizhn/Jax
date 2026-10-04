@@ -3668,6 +3668,8 @@ Jax#338 (2026-10-04): `^35 passed` → `^201 passed`, imagen sin texto, union de
 
 2026-10-04 (esta rama): `^201 passed` → `^201 passed, 2 skipped`. La línea `grep -qE "^201 passed, 2 skipped"` entró con 2127bb3 (Jax#338, antes de que Jax#343 pasara los pisos a `ci/pisos.json`) y la migración la dejó sin las saltadas; se vuelven a fijar (las 2 imágenes reales de LACTOVI no están en el runner). Lo permite la excepción de endurecimiento del comparador.
 
+Jax#350 r3 (2026-10-04): `^201 passed, 2 skipped` → `^219 passed, 2 skipped`; añade 18 casos del OCR de PDF escaneado y su tratamiento como imagen. Re-medición local en hall9000: `221 passed`, porque las dos imágenes reales de LACTOVI están disponibles aquí; en el runner faltan y se esperan como skipped.
+
 Sin historia anotada en el workflow.
 
 ## `tests-puros/word_tests`
