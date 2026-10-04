@@ -226,15 +226,19 @@ def _socket_con_oyente(path):
     return s
 
 
-@pytest.mark.parametrize("senal", [signal.SIGTERM, signal.SIGINT])
-def test_parada_ordenada_por_senal_no_deja_socket_y_sale_con_cero(tmp_path, senal):
-    """Proceso REAL (`python -m jax.ejecutor.proxy_carril`): lo que hace systemd al parar."""
-    path = _dir_socket(tmp_path)
+def _puerto_libre():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _lanzar_proxy(tmp_path, path, puerto=0):
+    """Proceso REAL (`python -m jax.ejecutor.proxy_carril`): lo que lanza systemd. Espera al socket."""
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": str(_RAIZ_REPO),
         "JAX_KILL_SWITCH_PATH": str(tmp_path / "KILL"),
         "JAX_PROXY_CARRIL_UPSTREAM": "http://127.0.0.1:9", "JAX_PROXY_CARRIL_RAIZ": str(tmp_path / "locks"),
-        "JAX_PROXY_CARRIL_TOPE_S": "1", "JAX_PROXY_CARRIL_PUERTO": "0",
+        "JAX_PROXY_CARRIL_TOPE_S": "1", "JAX_PROXY_CARRIL_PUERTO": str(puerto),
         "JAX_EJECUTOR_REGISTRO": str(tmp_path / "registro.jsonl"),
         "JAX_EJECUTOR_PAUSA": str(tmp_path / "PAUSA"), "JAX_EJECUTOR_VIGIA_LATIDO": str(tmp_path / "latido"),
         "JAX_EJECUTOR_VIGIA_LATIDO_MAX_S": "60", "JAX_PROXY_CARRIL_MODELO": MODELO_PERMITIDO,
@@ -242,24 +246,88 @@ def test_parada_ordenada_por_senal_no_deja_socket_y_sale_con_cero(tmp_path, sena
         "JAX_PROXY_CARRIL_JAXQWEN_SOCKET": str(path),
         "JAX_PROXY_CARRIL_JAXQWEN_UID": str(os.getuid()), "JAX_PROXY_CARRIL_JAXQWEN_GID": str(os.getgid()),
     }
-    (tmp_path / "locks").mkdir()
+    (tmp_path / "locks").mkdir(exist_ok=True)
     proc = subprocess.Popen([sys.executable, "-m", "jax.ejecutor.proxy_carril"], cwd=_RAIZ_REPO, env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    limite = time.monotonic() + 30
+    while not path.exists():
+        assert proc.poll() is None, proc.stderr.read().decode()
+        assert time.monotonic() < limite, "el proxy no llegó a crear el socket"
+        time.sleep(0.05)
+    time.sleep(0.3)  # que los manejadores de señal estén instalados
+    return proc
+
+
+def _cabeceras_a_medias(puerto):
+    c = socket.create_connection(("127.0.0.1", puerto), timeout=5)
+    c.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Le")  # nunca termina
+    time.sleep(0.2)
+    return c
+
+
+def _matar(proc):
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
+
+
+@pytest.mark.parametrize("senal", [signal.SIGTERM, signal.SIGINT])
+def test_parada_ordenada_por_senal_no_deja_socket_y_sale_con_cero(tmp_path, senal):
+    path = _dir_socket(tmp_path)
+    proc = _lanzar_proxy(tmp_path, path)
     try:
-        limite = time.monotonic() + 30
-        while not path.exists():
-            assert proc.poll() is None, proc.stderr.read().decode()
-            assert time.monotonic() < limite, "el proxy no llegó a crear el socket"
-            time.sleep(0.05)
-        time.sleep(0.3)  # que serve_forever y los manejadores de señal estén instalados
         proc.send_signal(senal)
         codigo = proc.wait(timeout=20)
     finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait()
+        _matar(proc)
     assert codigo == 0, proc.stderr.read().decode()
     assert not path.exists(), "un stop ordenado no debe dejar el socket"
+
+
+def test_con_una_conexion_tcp_colgada_el_socket_unix_desaparece_al_instante(tmp_path):
+    """MAJOR-1: antes, tras el SIGTERM el socket Unix seguía aceptando mientras se vaciaba el TCP."""
+    path = _dir_socket(tmp_path)
+    puerto = _puerto_libre()
+    proc = _lanzar_proxy(tmp_path, path, puerto)
+    colgada = _cabeceras_a_medias(puerto)
+    try:
+        t0 = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+        while path.exists() and time.monotonic() - t0 < 5:
+            time.sleep(0.02)
+        assert time.monotonic() - t0 <= 0.5, "el socket tardó más de 0,5 s en desaparecer"
+        assert proc.poll() is None, "el proceso debía seguir vivo, vaciando la conexión colgada"
+        cliente = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            with pytest.raises((FileNotFoundError, ConnectionRefusedError)): cliente.connect(str(path))
+        finally:
+            cliente.close()
+    finally:
+        colgada.close()
+        _matar(proc)
+
+
+def test_con_una_conexion_colgada_sale_con_cero_tras_el_tope_y_corta_al_cliente(tmp_path):
+    path = _dir_socket(tmp_path)
+    puerto = _puerto_libre()
+    proc = _lanzar_proxy(tmp_path, path, puerto)
+    colgada = _cabeceras_a_medias(puerto)
+    colgada.settimeout(0.1)
+    try:
+        t0 = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+        codigo = proc.wait(timeout=proxy_carril.TOPE_VACIADO_S + 5)
+        duracion = time.monotonic() - t0
+        assert codigo == 0, proc.stderr.read().decode()
+        assert duracion < proxy_carril.TOPE_VACIADO_S + 4, f"tardó {duracion:.1f} s: la colgada lo retuvo"
+        colgada.settimeout(2)
+        try:
+            assert colgada.recv(1) == b"", "el cliente colgado debía ver el cierre"
+        except ConnectionResetError:
+            pass  # abort() = RST: también es un corte
+    finally:
+        colgada.close()
+        _matar(proc)
 
 
 def test_socket_huerfano_propio_sin_oyente_se_limpia_y_el_proxy_arranca(tmp_path, caplog):
@@ -331,14 +399,24 @@ def test_enlace_roto_ni_archivo_regular_ni_directorio_se_borran(tmp_path):
 
 
 def test_socket_de_otro_uid_no_se_borra(tmp_path, monkeypatch):
-    """No se puede crear un socket de otro uid sin root: se simula que NOSOTROS somos otro uid."""
-    async def scenario():
-        path = _dir_socket(tmp_path)
-        _socket_huerfano(path)
-        monkeypatch.setattr(proxy_carril.os, "geteuid", lambda: os.getuid() + 1)
-        with pytest.raises(ConfigInvalida): await arrancar(_cfg_socket(tmp_path, path))
-        assert path.is_socket()
-    _correr(scenario())
+    """No se puede crear un socket de otro uid sin root: se simula que NOSOTROS somos otro uid.
+    Se llama a la limpieza directamente para aislar este chequeo del del dueño del padre."""
+    path = _dir_socket(tmp_path)
+    _socket_huerfano(path)
+    monkeypatch.setattr(proxy_carril.os, "geteuid", lambda: os.getuid() + 1)
+    with pytest.raises(ConfigInvalida): proxy_carril._despejar_socket_huerfano(path)
+    assert path.is_socket()
+
+
+def test_padre_de_otro_dueno_se_rechaza_aunque_el_modo_sea_correcto(tmp_path, monkeypatch):
+    """MINOR-3: el padre debe ser del euid o de root, no solo tener buen modo."""
+    parent = tmp_path / "run"
+    parent.mkdir(mode=0o700)
+    assert proxy_carril._padre_valido(parent)
+    monkeypatch.setattr(proxy_carril.os, "geteuid", lambda: os.getuid() + 1)  # el padre pasa a ser "de otro"
+    assert not proxy_carril._padre_valido(parent)
+    (tmp_path / "enlace").symlink_to(parent)
+    assert not proxy_carril._padre_valido(tmp_path / "enlace")
 
 
 def test_padre_con_escritura_de_grupo_sigue_rechazando_aunque_el_socket_sea_huerfano(tmp_path):
@@ -404,26 +482,64 @@ def test_carrera_socket_reemplazado_entre_el_connect_y_el_unlink_no_borra_el_nue
         for s in oyentes: s.close()
 
 
-def test_close_borra_el_socket_sin_esperar_a_wait_closed(tmp_path):
-    """Si systemd manda SIGKILL mientras wait_closed espera conexiones en vuelo, el socket ya no está.
-    El servidor de asyncio se sustituye por un doble inerte: en Python >= 3.13 asyncio borra solo el
-    socket al cerrar, y en 3.12 (el del CI) no; el contrato es del Servidor, no de la versión."""
-    class Inerte:
-        def close(self): pass
-        async def wait_closed(self): pass
+def test_apagar_deja_de_escuchar_de_inmediato_y_aborta_lo_colgado_al_agotar_el_tope(tmp_path):
+    async def scenario():
+        path = _dir_socket(tmp_path)
+        server = await arrancar(_cfg_socket(tmp_path, path))
+        puerto = server.sockets[0].getsockname()[1]
+        lector, escritor = await asyncio.open_connection("127.0.0.1", puerto)
+        escritor.write(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Le")
+        await escritor.drain()
+        await asyncio.sleep(0.1)
+        tarea = asyncio.ensure_future(server.apagar(tope_s=0.5))
+        await asyncio.sleep(0.1)
+        assert not tarea.done(), "debía seguir vaciando la conexión colgada"
+        assert not path.exists(), "el socket Unix debe irse al dejar de escuchar, no al terminar el vaciado"
+        with pytest.raises(OSError): await asyncio.open_connection("127.0.0.1", puerto)
+        await tarea
+        try:
+            assert await asyncio.wait_for(lector.read(), 2) == b""
+        except ConnectionResetError:
+            pass
+        escritor.close()
+        with pytest.raises(OSError, match="registro_cerrado"):
+            server._proxy.registro.anotar({"evento": "tarde"})
+    _correr(scenario())
+
+
+def test_close_no_borra_un_socket_que_fue_reemplazado(tmp_path):
+    """MINOR-2: se borra el inodo que creamos, no lo que haya en la ruta."""
+    oyentes = []
 
     async def scenario():
         path = _dir_socket(tmp_path)
         server = await arrancar(_cfg_socket(tmp_path, path))
-        real = server._servidor_jaxqwen
-        server._servidor_jaxqwen = Inerte()
         try:
-            assert path.is_socket()
+            os.unlink(path)  # alguien lo reemplaza por otro, con oyente
+            oyentes.append(_socket_con_oyente(path))
             server.close()
-            assert not path.exists()
+            assert path.is_socket(), "close() borró un socket que no era el suyo"
         finally:
-            real.close()
-            await real.wait_closed()
-            server._servidor_jaxqwen = None
             await server.wait_closed()
-    _correr(scenario())
+    try:
+        _correr(scenario())
+    finally:
+        for s in oyentes: s.close()
+
+
+def test_si_arrancar_falla_tras_el_bind_no_borra_un_socket_reemplazado(tmp_path, monkeypatch):
+    oyentes = []
+
+    async def scenario():
+        path = _dir_socket(tmp_path)
+        def chown_que_reemplaza_y_falla(*_a, **_k):
+            os.unlink(path)
+            oyentes.append(_socket_con_oyente(path))
+            raise OSError("chown fallido")
+        monkeypatch.setattr(proxy_carril.os, "chown", chown_que_reemplaza_y_falla)
+        with pytest.raises(OSError, match="chown fallido"): await arrancar(_cfg_socket(tmp_path, path))
+        assert path.is_socket(), "la rama de error borró un socket que no era el suyo"
+    try:
+        _correr(scenario())
+    finally:
+        for s in oyentes: s.close()

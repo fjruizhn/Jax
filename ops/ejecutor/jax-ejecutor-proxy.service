@@ -16,6 +16,8 @@ Environment=PYTHONPATH=/home/fruiz/jax:/home/fruiz/jax/las_manos
 ExecStart=/home/fruiz/jax/.venv/bin/python -m jax.ejecutor.proxy_carril
 Restart=on-failure
 RestartSec=5
+# Mayor que TOPE_VACIADO_S (10 s) de proxy_carril: la parada ordenada vacía y sale con 0 antes del SIGKILL.
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
