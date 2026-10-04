@@ -664,6 +664,25 @@ def _snapshot_for_owner(job_id: str, request: Request):
 @router.post("/trabajos", response_model=TrabajoCreadoResponse, status_code=202)
 async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoResponse:
     ownership = _processing_ownership(request)
+    # Jax#338 ronda 18: las validaciones BARATAS (cantidad de rutas, formato del
+    # project_uuid) van antes del freno, que lee cabeceras de los archivos.
+    if len(req.rutas) > _MAX_RUTAS_POR_TRABAJO:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"demasiadas rutas en un solo trabajo: {len(req.rutas)} > "
+                f"{_MAX_RUTAS_POR_TRABAJO} (JAX_PROCESAMIENTO_MAX_RUTAS) -- "
+                "partilo en más de un pedido"
+            ),
+        )
+    # E2a: validado ANTES del `acquire()` -- un proyecto inválido o no ACTIVE
+    # no toma cupo ni deja un registro `pending`. LAS MANOS no verifica
+    # membresía (solo la credencial de plataforma llega acá, y jax-platform ya
+    # verificó el papel): esto solo impide trabajar sobre un proyecto
+    # archivado, oculto o inexistente. El uuid es ASCII por la regex, así que
+    # tampoco hace falta chequear que se codifique a UTF-8.
+    if not _UUID_CANONICO.fullmatch(req.project_uuid):
+        raise HTTPException(status_code=422, detail={"code": "project_uuid_invalido"})
     # jax-14 (2026-10-03): freno de dependencias. Sin pdfplumber/openpyxl/
     # python-docx los PDF/DOCX/XLSX salian `sin_extractor` en silencio. 503 ANTES
     # de crear el trabajo y de tomar cupo: el despachador de la plataforma
@@ -689,23 +708,6 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
                 "tipos": dependencias.tipos_de(extractores["faltan"]),
             },
         )
-    if len(req.rutas) > _MAX_RUTAS_POR_TRABAJO:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"demasiadas rutas en un solo trabajo: {len(req.rutas)} > "
-                f"{_MAX_RUTAS_POR_TRABAJO} (JAX_PROCESAMIENTO_MAX_RUTAS) -- "
-                "partilo en más de un pedido"
-            ),
-        )
-    # E2a: validado ANTES del `acquire()` -- un proyecto inválido o no ACTIVE
-    # no toma cupo ni deja un registro `pending`. LAS MANOS no verifica
-    # membresía (solo la credencial de plataforma llega acá, y jax-platform ya
-    # verificó el papel): esto solo impide trabajar sobre un proyecto
-    # archivado, oculto o inexistente. El uuid es ASCII por la regex, así que
-    # tampoco hace falta chequear que se codifique a UTF-8.
-    if not _UUID_CANONICO.fullmatch(req.project_uuid):
-        raise HTTPException(status_code=422, detail={"code": "project_uuid_invalido"})
     try:
         estado_proyecto = await proyecto_activo.identidad_activa_del_proyecto(req.project_uuid, ownership)
     except Exception as e:

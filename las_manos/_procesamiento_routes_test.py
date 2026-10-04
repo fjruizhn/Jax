@@ -1225,6 +1225,36 @@ class TrabajoHTTPTest(unittest.TestCase):
         assert response.json()["detail"]["faltan"] == ["pillow"]
         assert self.store._index == {}
 
+    def test_post_lote_sobre_el_maximo_con_dependencia_faltante_da_422_sin_leer_cabeceras(self):
+        """Jax#338 ronda 18: las validaciones baratas (cantidad maxima de rutas,
+        formato del project_uuid) van ANTES de que el freno lea cabeceras."""
+        leidas: list = []
+
+        def abrir_espia(ruta):
+            leidas.append(ruta)
+            return None
+
+        with _estado_falta("pillow"), patch.object(rutas_mod, "_ruta_del_jail", abrir_espia), \
+             patch.object(rutas_mod, "_MAX_RUTAS_POR_TRABAJO", 2), TestClient(_app()) as client:
+            response = self._post(client, rutas=["a.png", "b.png", "c.png"])
+        assert response.status_code == 422, response.text
+        assert leidas == [], "el freno leyo cabeceras de un lote que se rechaza por tamano"
+        assert self.store._index == {}
+
+    def test_post_project_uuid_invalido_con_dependencia_faltante_da_422_sin_leer_cabeceras(self):
+        leidas: list = []
+
+        def abrir_espia(ruta):
+            leidas.append(ruta)
+            return None
+
+        with _estado_falta("pillow"), patch.object(rutas_mod, "_ruta_del_jail", abrir_espia), \
+             TestClient(_app()) as client:
+            response = self._post(client, project_uuid="no-es-un-uuid", rutas=["a.png"])
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"]["code"] == "project_uuid_invalido"
+        assert leidas == []
+
     def test_post_paquete_faltante_sin_mapa_bloquea_todos_los_tipos(self):
         with _estado_falta("linea-no-reconocida:3"), TestClient(_app()) as client:
             response = self._post(client, rutas=["a.png"])
