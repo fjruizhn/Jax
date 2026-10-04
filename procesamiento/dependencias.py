@@ -29,7 +29,7 @@ import re
 from pathlib import Path
 from typing import Callable
 
-from procesamiento.tipos_imagen import EXTENSIONES_IMAGEN, tipo_por_contenido
+from procesamiento.tipos_imagen import EXTENSIONES_IMAGEN, leer_cabecera, tipo_por_contenido
 
 REQUIREMENTS = Path(__file__).resolve().parent.parent / "requirements-archivos.txt"
 
@@ -162,11 +162,11 @@ def _tipo_de_contenido(ruta, abrir: Callable[[str], Path | None] | None) -> str 
         return None
     try:
         destino = abrir(ruta)
-        if destino is None:
-            return None
-        with open(destino, "rb") as fh:
-            cabecera = fh.read(1024)
-    except Exception:  # fail-soft: una ruta que no se puede abrir no da tipo por contenido y decide la extension (el respaldo de siempre); el freno nunca se cae por una ruta rota
+        # Ronda 19: sin bloquear; un FIFO (u otro no regular) no se lee
+        cabecera = leer_cabecera(destino) if destino is not None else None
+    except Exception:  # fail-soft: una ruta que no se puede resolver no da tipo por contenido y decide la extension (el respaldo de siempre); el freno nunca se cae por una ruta rota
+        return None
+    if cabecera is None:
         return None
     return tipo_por_contenido(cabecera, Path(str(ruta)).suffix)
 

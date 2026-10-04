@@ -29,7 +29,7 @@ from pathlib import Path
 
 from procesamiento.extractores import excel, ocr, pdf, word
 from procesamiento.resultado import Resultado
-from procesamiento.tipos_imagen import EXTENSIONES_IMAGEN, tipo_por_contenido
+from procesamiento.tipos_imagen import EXTENSIONES_IMAGEN, leer_cabecera, tipo_por_contenido
 
 # Jax#338 ronda 17: la MISMA fuente que el freno de dependencias (antes eran dos
 # copias a mano y a las dos les faltaba `.gif`).
@@ -42,10 +42,10 @@ def _tipo_por_contenido(origen: Path) -> str | None:
     contenido no da una señal decisiva (zip -- xlsx y docx son el mismo
     contenedor -- o un formato no reconocido): en ese caso la extensión
     decide sola, como siempre."""
-    try:
-        with open(origen, "rb") as fh:
-            cabecera = fh.read(1024)
-    except OSError:
+    # Jax#338 ronda 19: sin bloquear (un `open()` de un FIFO espera un
+    # escritor); lo que no es un archivo regular no da tipo por contenido.
+    cabecera = leer_cabecera(origen)
+    if cabecera is None:
         return None
     # Una sola fuente de verdad: `tipos_imagen.tipo_por_contenido` (OLE2, firma
     # de imagen, despues %PDF), la MISMA que usa el freno de dependencias.

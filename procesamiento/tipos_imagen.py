@@ -12,7 +12,10 @@ imagen, `%PDF`, OLE2), la misma para el OCR, la compuerta y el freno de
 dependencias, que ahora decide como la compuerta: por la firma cuando el
 archivo se puede leer, por la extension como respaldo.
 
-Modulo liviano a proposito: sin imports. `dependencias` lo usa para decidir
+Ronda 19: `leer_cabecera` lee esos primeros bytes SIN bloquear (un FIFO en el
+jail colgaba el `open()` del freno), y la usan el freno y la compuerta.
+
+Modulo liviano a proposito: solo la biblioteca estandar (os, stat). `dependencias` lo usa para decidir
 que tipos frena cuando FALTA Pillow, asi que no puede importar Pillow, ni
 `ocr` (que exige JAX_WORKSPACE_DIR al importarse). Por eso la lista esta
 escrita aca, y la verifican contra los datos `_compuerta_test.py` y
@@ -20,6 +23,9 @@ escrita aca, y la verifican contra los datos `_compuerta_test.py` y
 cuya firma `ocr.tipo_por_cabecera` acepta tiene que estar en esta lista.
 """
 from __future__ import annotations
+
+import os
+import stat
 
 EXTENSIONES_IMAGEN: frozenset[str] = frozenset({
     ".png", ".apng",                            # PNG
@@ -78,3 +84,23 @@ def tipo_por_contenido(cabecera: bytes, sufijo: str = "") -> str | None:
     if cabecera[:8] == FIRMA_OLE2:
         return "ole2"
     return tipo_por_cabecera(cabecera, sufijo)
+
+
+def leer_cabecera(ruta, n: int = 1024) -> bytes | None:
+    """Los primeros `n` bytes de `ruta` SIN bloquear (Jax#338 ronda 19): abre
+    con O_RDONLY | O_NONBLOCK | O_NOFOLLOW y, si no es un archivo regular
+    (FIFO, socket, dispositivo, directorio), devuelve None SIN leer. Tambien
+    None si no se puede abrir, incluido un enlace simbolico (O_NOFOLLOW).
+    Quien llama decide entonces por la extension."""
+    try:
+        fd = os.open(ruta, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        return os.read(fd, n)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
