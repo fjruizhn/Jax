@@ -89,6 +89,20 @@ _INDICES = [
      "CREATE INDEX idx_facts_revision ON facts (is_verified, expires_at, created_at)"),
 ]
 
+#: Nombre del indice unico de (conversation_id, turn_number). Cierra la
+#: carrera MAX+1 del guardado de mensajes: aunque dos writers concurrentes
+#: calculen el mismo turn (respaldo del SELECT ... FOR UPDATE, que hoy lo
+#: serializa), una de las dos transacciones recibe 1062 y reintenta
+#: recalculando. Mismo nombre en jax_memory_schema.sql: el checker de deriva
+#: compara el DDL completo y una base migrada tiene que quedar igual que una
+#: creada de cero. Ver tests/test_save_message_deadlock.py para el
+#: diagnostico completo (deadlocks 1213 por carrera + indice vectorial HNSW).
+UNIQUE_MESSAGES_TURN = "uq_messages_conversation_turn"
+_DDL_UNIQUE_MESSAGES_TURN = (
+    "ALTER TABLE messages ADD UNIQUE KEY "
+    "uq_messages_conversation_turn (conversation_id, turn_number)"
+)
+
 # Backfill de las filas anteriores a la columna. Idempotente por el WHERE: solo
 # toca las que todavia no tienen la copia. Sin esto, toda la memoria historica
 # queda invisible para la busqueda -- una migracion a medias que se ve como
@@ -164,6 +178,64 @@ async def _reposicionar_si_hace_falta(cur, tabla: str, columna: str, ddl: str) -
     )
 
 
+async def _asegurar_unique_messages_turn(cur) -> None:
+    """Crea el UNIQUE (conversation_id, turn_number) de messages, saneando
+    antes los turnos duplicados historicos. Idempotente: si el indice ya
+    existe no toca nada.
+
+    POR QUE EXISTE (diagnostico 2026-10-04, tests/test_save_message_deadlock.
+    py): la asignacion de turn_number era SELECT MAX+1 SIN candado, una
+    carrera: bajo carga, dos writers calculaban el mismo turn, el UPDATE de
+    embedding por (conversation_id, turn_number) matcheaba decenas de filas
+    y se interbloqueaba con INSERTs ajenos a traves de las capas del indice
+    vectorial HNSW (1563 deadlocks de 2400 intentos en la repro). El codigo
+    de guardado ya serializa con SELECT ... FOR UPDATE y reintenta; este
+    indice es el candado de base de datos que hace imposible la carrera aun
+    si el codigo de manana se equivoca (Principio IX: el contrato va antes
+    que la capacidad).
+
+    El saneamiento NO PIERDE mensajes: para cada (conversacion, turn)
+    duplicado, la fila de id menor conserva el turn y las demas se
+    reenumeran al FINAL de esa conversacion, en orden de id -- preserva el
+    orden relativo de lectura (get_conversation_history ordena por
+    turn_number) y no sobrescribe ningun turno existente. Base historica
+    medida en produccion: hasta 34 turnos duplicados por corrida, siempre
+    pocos grupos.
+    """
+    await cur.execute(
+        "SELECT COUNT(*) FROM information_schema.STATISTICS "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='messages' AND INDEX_NAME=%s",
+        (UNIQUE_MESSAGES_TURN,),
+    )
+    if (await cur.fetchone())[0]:
+        return
+
+    await cur.execute(
+        "SELECT conversation_id, turn_number FROM messages "
+        "GROUP BY conversation_id, turn_number HAVING COUNT(*) > 1")
+    duplicados = await cur.fetchall()
+    for conv_id, _turn in duplicados:
+        await cur.execute(
+            "SELECT id FROM messages WHERE conversation_id=%s AND turn_number=%s "
+            "ORDER BY id ASC", (conv_id, _turn))
+        ids = [fila[0] for fila in await cur.fetchall()]
+        await cur.execute(
+            "SELECT COALESCE(MAX(turn_number), 0) FROM messages "
+            "WHERE conversation_id=%s", (conv_id,))
+        turn_libre = (await cur.fetchone())[0]
+        for msg_id in ids[1:]:  # la de id menor conserva el turn original
+            turn_libre += 1
+            await cur.execute(
+                "UPDATE messages SET turn_number=%s WHERE id=%s",
+                (turn_libre, msg_id))
+        logger.info(
+            "migracion: %d turnos duplicados reenumerados en conversation_id=%s",
+            len(ids) - 1, conv_id)
+
+    await cur.execute(_DDL_UNIQUE_MESSAGES_TURN)
+    logger.info("migracion: indice %s creado", UNIQUE_MESSAGES_TURN)
+
+
 async def ensure_schema(pool) -> bool:
     """Aplica lo que falte. Devuelve True si el esquema quedo al dia (todos
     los pasos, en TODAS las tablas, sin un solo error).
@@ -219,6 +291,15 @@ async def ensure_schema(pool) -> bool:
                             "con el resto de la migracion",
                             tabla, columna, type(e).__name__, e)
                         ok = False
+
+                try:
+                    await _asegurar_unique_messages_turn(cur)
+                except Exception as e:  # fail-soft: sin este indice el guardado sigue funcionando (el FOR UPDATE serializa), pero la carrera de turnos vuelve a ser posible -- se registra, ok pasa a False, y el proximo arranque reintenta saneamiento + ALTER
+                    logger.error(
+                        "migracion: unique %s fallo (%s: %s) -- se sigue con el "
+                        "resto de la migracion",
+                        UNIQUE_MESSAGES_TURN, type(e).__name__, e)
+                    ok = False
 
                 for tabla, indice, ddl in _INDICES:
                     try:
