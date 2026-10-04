@@ -54,9 +54,8 @@ def test_no_hay_lector_devuelve_memoria_no_disponible():
         asyncio.run(AdaptadorMemoria().buscar(identidad(), "consulta", 10))
 
 
-def test_no_hay_identidad_devuelve_memoria_no_disponible():
-    with pytest.raises(MemoriaNoDisponible, match="memoria no disponible"):
-        asyncio.run(AdaptadorMemoria(Reader([])).buscar(None, "consulta", 10))
+def test_no_hay_identidad_devuelve_lista_vacia():
+    assert asyncio.run(AdaptadorMemoria(Reader([envelope("hidden", "dato")])).buscar(None, "dato", 10)) == []
 
 
 @pytest.mark.parametrize(("consulta", "limite"), [("", 10), ("x" * 201, 10), ("x", 0), ("x", 101)])
@@ -88,6 +87,7 @@ def test_configuracion_de_memoria_apagada_por_defecto_y_solo_acepta_base_de_prue
     assert cfg.habilitada is True
     assert (cfg.host, cfg.port, cfg.usuario, cfg.base, cfg.clave) == (
         "127.0.0.1", 3308, "jax_test", "jax_memory_test", "test-secret")
+    assert "test-secret" not in repr(cfg)
     for key, value in (("JAX_FARO_MEMORIA_TEST_DB_HOST", "10.0.0.1"),
                        ("JAX_FARO_MEMORIA_TEST_DB_NAME", "jax_memory"),
                        ("JAX_FARO_MEMORIA_TEST_DB_USER", "root")):

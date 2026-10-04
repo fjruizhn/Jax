@@ -29,7 +29,7 @@ class CursorObservado:
         return await self._context.__aexit__(*args)
 
     async def execute(self, sql, args=()):
-        self._sentencias.append(sql.strip().upper())
+        self._sentencias.append((sql.strip().upper(), tuple(args)))
         return await self._cursor.execute(sql, args)
 
     async def fetchall(self):
@@ -76,8 +76,9 @@ def test_reader_mariadb_solo_lee_scope_del_socket_en_base_de_prueba():
         user = os.environ.get("JAX_DB_USER", "")
         password = os.environ.get("JAX_DB_PASSWORD", "")
         database = os.environ.get("JAX_DB_NAME", "")
+        puertos_permitidos = {3306, 3308} if os.getenv("CI") else {3308}
         if (host != "127.0.0.1" or user != "jax_test" or not password or not es_base_de_test(database)
-                or port not in {3308, 3306}):
+                or port not in puertos_permitidos):
             pytest.fail("memoria DB test requires 127.0.0.1, jax_test, and jax_memory_test[_suffix] only")
 
         pool = await aiomysql.create_pool(host=host, port=port, user=user, password=password, db=database,
@@ -100,8 +101,10 @@ def test_reader_mariadb_solo_lee_scope_del_socket_en_base_de_prueba():
             result = await AdaptadorMemoria(reader).buscar(Identidad(execution, "conn", 1, 1, 1), "no existe", 5)
             assert result == []
             assert statements
-            assert all(sql.startswith(("SELECT", "SET TRANSACTION")) for sql in statements)
-            assert any("WHERE R.TENANT_ID=%S" in sql for sql in statements)
+            assert all(sql.startswith(("SELECT", "SET TRANSACTION")) for sql, _ in statements)
+            queries = [(sql, args) for sql, args in statements if sql.startswith("SELECT")]
+            assert all("WHERE R.TENANT_ID=%S" in sql and "tenant-db" in args for sql, args in queries)
+            assert any("user-db" in args for _, args in queries)
         finally:
             pool.close()
             await pool.wait_closed()

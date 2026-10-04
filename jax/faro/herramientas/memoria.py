@@ -20,7 +20,9 @@ class AdaptadorMemoria:
         self._lector = lector
 
     async def buscar(self, identidad, consulta: str, limite: int) -> list[dict[str, str]]:
-        if self._lector is None or identidad is None:
+        if identidad is None:
+            return []
+        if self._lector is None:
             raise MemoriaNoDisponible("memoria no disponible")
         if not isinstance(consulta, str) or not consulta.strip() or len(consulta) > 200:
             raise ValueError("consulta debe tener entre 1 y 200 caracteres")
