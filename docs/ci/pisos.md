@@ -846,12 +846,15 @@ Source-integrity cases run in their own exact-count step below.
 predicate vocabulary, root-only governed-domain import tripwire,
 native/canonical structured shapes, bounded encodings, and the
 F2-B -> F2-C -> F2-D receipt/render/revalidation path.
-263 -> 273 el 2026-10-04 (F2-E Tramo 1): six shared external-output
-adapter regressions and four Jacobs notice integration regressions. The
-integration suite exercises canonical PIPELINE_STATUS resolution, the
-current F2-C template/renderer, F2-D transport-unit revalidation, and the
-fixed Telegram transport boundary.
 ```
+
+## `governance/f2e-external-output`
+
+Piso agregado el 2026-10-04 para el canal de aviso Jacobs Telegram: `^10 passed`.
+Los 6 tests del adaptador compartido y 4 de integración ejecutan resolución
+canónica PIPELINE_STATUS, plantilla/render F2-C vigente, revalidación F2-D y
+transporte Telegram fijo. Se deja aparte del piso histórico `governance/gov`
+para conservar byte a byte el registro de la migración de pisos.
 
 ## `tests-puros/out`
 

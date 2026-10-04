@@ -49,6 +49,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import aiomysql
+
 logger = logging.getLogger("jacobs.aviso")
 
 #: Fire-and-forget: referencia fuerte a las tareas en vuelo para que el GC no
@@ -95,10 +97,10 @@ async def _avisar(pipeline_id: str, nombre: str, estado: str) -> None:
             pipeline_id,
         )
         raise
-    except Exception:  # fail-soft: send_telegram_alert no debería lanzar, pero esto es la última barrera -- ya se loguea con exc_info arriba, nunca sube al caller
+    except (aiomysql.MySQLError, OSError, RuntimeError, TimeoutError, TypeError, ValueError) as exc:
         logger.error(
-            "Aviso Telegram de fin de pipeline %s: excepción inesperada llamando a send_telegram_alert",
-            pipeline_id, exc_info=True,
+            "Aviso gobernado de fin de pipeline %s no pudo prepararse o comprometerse (%s)",
+            pipeline_id, type(exc).__name__, exc_info=True,
         )
         return
     if committed.state.value != "OUTPUT_COMMITTED_TO_TRANSPORT":
