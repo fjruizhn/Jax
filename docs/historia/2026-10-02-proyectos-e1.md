@@ -58,7 +58,7 @@ Todo medido en hall9000 con un proceso uvicorn y cliente, backend y MariaDB en e
 ## Despliegue — 2026-10-02 (GO de Fernando en sesión, hall9000)
 HISTORIA, verificada en el momento. Salidas en `~/respaldos-despliegue/2026-10-02-proyectos-e1/`.
 
-1. **Respaldo** de `jax_memory` (11 MB). Restauración probada: conversations, messages, facts, decisions, action_items, projects y jax_users salieron idénticas a producción. Antes del despliegue, producción estaba en jax `152cb23`, jax-platform `9d91f1b` y bundle `index-DaBnCBjU.js`.
+1. **Respaldo** de `jax_memory` (11 MB). Restauración probada: conversations, messages, facts, decisions, action_items, projects y jax_users dieron los mismos conteos de filas que producción (el registro `restauracion-probada.txt` guarda solo conteos por tabla, no hashes ni comparación de contenido). Antes del despliegue, producción estaba en jax `152cb23`, jax-platform `9d91f1b` y bundle `index-DaBnCBjU.js`.
 2. **jax** `152cb23` → `fb1b228`.
    - Trae El Faro fase 0. Se verificó que no se ejecuta en producción: nada importa `jax.faro` y no hay unidad systemd.
    - Trae también #310 (LAS VOCES), #315 y #314.
