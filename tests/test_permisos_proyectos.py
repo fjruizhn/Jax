@@ -3037,7 +3037,7 @@ exit "$rc"
 # `setuid|<ruta>` imprime esa ruta, `eacces` / `eio` / `silencio` fallan con rc 1 (los dos primeros con su mensaje de
 # find en comillas ASCII sobre el propio montaje), `denegado|<ruta>` falla con `Permission denied` sobre OTRA ruta
 # (el punto de montaje de un montaje anidado, que find stat-ea desde el padre) y `crudo|<texto>` emite ese texto
-# tal cual por stderr (con \\n como salto de linea). Un montaje que no esta en el mapa no tiene nada (salvo STUB_SETUID, que se imprime).
+# tal cual por stderr (con \\n como salto de linea) y `truncado|<texto>` lo emite SIN el salto de linea final. Un montaje que no esta en el mapa no tiene nada (salvo STUB_SETUID, que se imprime).
 _STUB_FIND = """#!/bin/sh
 echo "find $*" >> "$STUB_DIR/log"
 for exigido in "-xdev" "-type f" "-user jaxsvc" "-perm /6000"; do
@@ -3053,6 +3053,7 @@ case "$accion" in
   silencio) exit 1 ;;
   denegado) echo "find: '$arg': Permission denied" >&2; exit 1 ;;
   crudo) printf '%b\\n' "$arg" >&2; exit 1 ;;
+  truncado) printf '%b' "$arg" >&2; exit 1 ;;
   *) [ -z "$STUB_SETUID" ] || echo "$STUB_SETUID" ;;
 esac
 exit 0
@@ -3063,7 +3064,25 @@ exit 0
 _STUB_FINDMNT = """#!/bin/sh
 [ "$*" = "-rn --kernel -o ID,TARGET,FSTYPE,OPTIONS" ] || { echo "findmnt: argumentos inesperados: $*" >&2; exit 2; }
 [ -z "$STUB_FINDMNT_RC" ] || { echo "findmnt: fallo simulado" >&2; exit "$STUB_FINDMNT_RC"; }
+echo findmnt >> "$STUB_DIR/log"
 printf '%s\n' "${STUB_FINDMNT-1 / ext4 rw,relatime}"
+[ ! -f "$STUB_DIR/montados" ] || cat "$STUB_DIR/montados"
+"""
+
+# `ls` falso, para el disparo de los autofs (`ls -d -- <TARGET>/.`). STUB_AUTOFS_MAP: lineas `TARGET|accion|arg`:
+# `monta|<fila de findmnt>` agrega esa fila a lo que lista findmnt DESPUES (lo que monto el autofs al accederlo),
+# `falla` sale con error, `cuelga` no termina (el `timeout` del bloque lo corta). Un autofs fuera del mapa no monta nada.
+_STUB_LS = """#!/bin/sh
+echo "ls $*" >> "$STUB_DIR/log"
+[ "$1" = -d ] && [ "$2" = -- ] || { echo "ls: argumentos inesperados: $*" >&2; exit 2; }
+dest="${3%/.}"
+acc=$(printf '%s\n' "$STUB_AUTOFS_MAP" | awk -F'|' -v t="$dest" '$1 == t { a = $2; r = $3 } END { print a "|" r }')
+case "${acc%%|*}" in
+  monta) printf '%s\n' "${acc#*|}" >> "$STUB_DIR/montados" ;;
+  falla) echo "ls: cannot access '$3': Permission denied" >&2; exit 2 ;;
+  cuelga) exec sleep 5 ;;
+esac
+exit 0
 """
 
 _UNIDADES_ESPERADAS_DE_PRUEBA = ("jax-las-manos.service jax-platform.service jax-catalogo-modelos.service "
@@ -3105,6 +3124,7 @@ def _entorno_del_bloque(tmp_path: Path, uid_jaxsvc: int, *, extra: dict | None =
         "ps": '#!/bin/sh\nif [ -s "$STUB_DIR/ps" ]; then cat "$STUB_DIR/ps"; exit 0; fi\nexit 1\n',
         "find": _STUB_FIND,
         "findmnt": _STUB_FINDMNT,
+        "ls": _STUB_LS,
         "crontab": '#!/bin/sh\nif [ -n "$STUB_CRON" ]; then echo "$STUB_CRON"; exit 0; fi\necho "no crontab for jaxsvc" >&2\nexit 1\n',
     }
     for nombre, texto in scripts.items():
@@ -3517,6 +3537,73 @@ def test_un_error_de_find_que_no_cumple_las_cinco_condiciones_corta(tmp_path, _i
     assert r.returncode != 0 and "NO CUMPLE" in r.stderr, (que, r.stdout + r.stderr)
     assert not _llamadas(log, "stop"), f"{que}: detuvo algo antes de cortar"
     assert not any(l.startswith("permisos") for l in log), f"{que}: llego al guion"
+
+
+# --- ronda 4: un autofs se DISPARA antes de la lista definitiva; el diagnostico de find se lee entero -----------------
+
+_AUTOFS = ["1 / ext4 rw", "2 /srv/auto autofs rw,direct"]
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_un_autofs_que_al_dispararse_monta_un_nfs_sin_nosuid_con_un_setuid_corta(tmp_path, _identidades, marca, modo):
+    env = _env_montajes(_AUTOFS, ["/srv/auto|setuid|/srv/auto/escalar"],
+                        STUB_AUTOFS_MAP="/srv/auto|monta|9 /srv/auto nfs4 rw,relatime")
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=env)
+    assert r.returncode != 0 and "/srv/auto/escalar" in r.stderr, r.stdout + r.stderr
+    assert not _llamadas(log, "stop") and not any(l.startswith("permisos") for l in log)
+    # el disparo es anterior a la lista definitiva (la segunda lectura de findmnt) y a todo find
+    i_ls = _indice(log, "ls -d -- /srv/auto/.")
+    assert i_ls < max(i for i, l in enumerate(log) if l == "findmnt"), "no volvio a leer los montajes tras el disparo"
+    assert [l for l in log if l == "findmnt"] == ["findmnt", "findmnt"]
+    assert i_ls < _indice(log, "find /srv/auto -xdev")
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_un_autofs_que_al_dispararse_monta_un_nfs_con_nosuid_se_salta_y_sigue(tmp_path, _identidades, marca, modo):
+    env = _env_montajes(_AUTOFS, ["/srv/auto|setuid|/srv/auto/escalar"],
+                        STUB_AUTOFS_MAP="/srv/auto|monta|9 /srv/auto nfs4 ro,nosuid,nodev,relatime")
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert any(l == f"permisos {modo}" for l in log), "el guion no corrio"
+    assert not any(l.startswith("find /srv/auto") for l in log), "recorrio un NFS nosuid"
+    assert "salto /srv/auto (nfs4): nosuid" in r.stdout
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_un_autofs_que_al_dispararse_monta_un_fuse_sin_nosuid_corta(tmp_path, _identidades, marca, modo):
+    env = _env_montajes(_AUTOFS, STUB_AUTOFS_MAP="/srv/auto|monta|9 /srv/auto fuse.sshfs rw,relatime")
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=env)
+    assert r.returncode != 0 and "FUSE sin nosuid" in r.stderr, r.stdout + r.stderr
+    assert not _llamadas(log, "stop")
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+@pytest.mark.parametrize("que,mapa,extra", [
+    ("el disparo falla", "/srv/auto|falla|", {}),
+    ("el disparo excede el tiempo", "/srv/auto|cuelga|", {"TOPE_AUTOFS": "1"}),
+])
+def test_un_disparo_de_autofs_que_falla_o_excede_el_tiempo_corta_y_nombra_el_punto(tmp_path, _identidades, marca, modo, que, mapa, extra):
+    env = _env_montajes(_AUTOFS, STUB_AUTOFS_MAP=mapa, **extra)
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=env)
+    assert r.returncode != 0 and "NO CUMPLE" in r.stderr and "autofs" in r.stderr and "/srv/auto" in r.stderr, (que, r.stdout + r.stderr)
+    assert not _llamadas(log, "stop"), f"{que}: detuvo algo antes de cortar"
+    assert not any(l.startswith("permisos") for l in log)
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+@pytest.mark.parametrize("que,fila,mapa", [
+    ("un Permission denied COMPLETO pero sin salto final, sobre un path que no es FUSE",
+     "2 /mnt/n ext4 rw", "/mnt/n|truncado|find: '/mnt/n': Permission denied"),
+    ("el mensaje truncado antes del salto, sobre el punto de un FUSE nosuid",
+     _FUSE_NOSUID, "/|truncado|find: '/home/x/montaje': Permission"),
+    ("un Permission denied valido sin salto final sobre el punto de un FUSE nosuid (find siempre lo termina)",
+     _FUSE_NOSUID, "/|truncado|find: '/home/x/montaje': Permission denied"),
+])
+def test_un_diagnostico_de_find_sin_salto_de_linea_final_corta(tmp_path, _identidades, marca, modo, que, fila, mapa):
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid,
+                               env=_env_montajes(["1 / ext4 rw", fila], [mapa]))
+    assert r.returncode != 0 and "NO CUMPLE" in r.stderr, (que, r.stdout + r.stderr)
+    assert not _llamadas(log, "stop") and not any(l.startswith("permisos") for l in log)
 
 
 @pytest.mark.parametrize("marca,modo", _BLOQUES)
