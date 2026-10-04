@@ -169,6 +169,7 @@ Ronda de arreglo 2 (2026-09-21, task-8-hallazgos-r2.md -- lo que la ronda
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import random
 import shutil
@@ -181,7 +182,7 @@ from motor_registry import tool_authority
 
 from procesamiento import compuerta
 from procesamiento.extractores import excel, ocr, pdf, word
-from procesamiento.ficha import Ficha, sha256_de
+from procesamiento.ficha import Ficha, abrir_archivo_regular, sha256_de
 
 
 class IngestaError(Exception):
@@ -259,6 +260,25 @@ def _version_vigente(nombre_extractor: str) -> str | None:
         return modulo._version()
     except Exception:  # fail-soft: modulo._version() puede fallar (import roto, atributo ausente); se devuelve None y el llamador lo trata como version desconocida, forzando reextraccion en vez de confiar en una cache que no puede validar
         return None
+
+
+def _version_logica_vigente(nombre_extractor: str, camino: str = "") -> str | None:
+    """Version de la LOGICA de clasificacion del extractor (`VERSION_LOGICA`
+    del modulo), distinta de `extractor_version` (la de la herramienta, p. ej.
+    tesseract): un cambio de regla no mueve la de la herramienta. `None` si el
+    extractor no la declara -- y entonces una ficha sin la clave coincide.
+    Puede depender del camino (`version_logica(camino)` del modulo): el OCR
+    versiona la logica de las imagenes y no la del PDF escaneado."""
+    modulo = _MODULOS_POR_EXTRACTOR.get(nombre_extractor)
+    funcion = getattr(modulo, "version_logica", None)
+    return funcion(camino) if callable(funcion) else None
+
+
+def _camino_de(destino: Path, extension: str = "") -> str:
+    """`"pdf"` o `"imagen"`: el camino del OCR, decidido por la MISMA funcion
+    que usan `ocr.extraer` y la compuerta (`ocr.camino_de`: el CONTENIDO manda
+    cuando decide, la extension cuando no)."""
+    return ocr.camino_de(destino, extension or None)
 
 
 def _ahora() -> str:
@@ -342,8 +362,12 @@ def _candidatos_de_nombre(origen: Path, huella: str) -> list[str]:
     ]
 
 
-def _asegurar_en_fuente(origen: Path, fuente_abs: Path, huella: str) -> Path:
-    """Copia `origen` a `fuente_abs` bajo un nombre LIBRE. Nunca pisa un
+def _asegurar_en_fuente(origen: Path, fuente_abs: Path) -> tuple[Path, str]:
+    """Copia `origen` a `fuente_abs` bajo un nombre LIBRE y devuelve
+    `(destino, huella)`. Jax#338 ronda 19: el origen se abre UNA vez, validado
+    como archivo regular (`abrir_archivo_regular`: sin bloquear en un FIFO), y
+    la huella sha256 se calcula MIENTRAS se copia desde ese mismo descriptor:
+    no hay ventana entre el hash y la copia. Nunca pisa un
     archivo existente de contenido distinto, y nunca sigue un symlink --
     ni para leerlo (para decidir si "ya está") ni para escribir a través
     de él (C-1).
@@ -368,10 +392,15 @@ def _asegurar_en_fuente(origen: Path, fuente_abs: Path, huella: str) -> Path:
     éxito el contenido YA está completo: ningún lector puede ver un
     archivo a medio escribir bajo el nombre final, porque el nombre final
     nunca es el que se escribe."""
+    lectura = abrir_archivo_regular(origen)
     temporal = fuente_abs / f".tmp-{os.getpid()}-{uuid.uuid4().hex}"
     try:
-        with open(temporal, "wb") as escritura, open(origen, "rb") as lectura:
-            shutil.copyfileobj(lectura, escritura)
+        h = hashlib.sha256()
+        with open(temporal, "wb") as escritura, lectura:
+            for bloque in iter(lambda: lectura.read(1024 * 1024), b""):
+                h.update(bloque)
+                escritura.write(bloque)
+        huella = h.hexdigest()
 
         candidatos = _candidatos_de_nombre(origen, huella)
         for nombre_candidato in candidatos:
@@ -407,13 +436,13 @@ def _asegurar_en_fuente(origen: Path, fuente_abs: Path, huella: str) -> Path:
                 if not destino_literal.is_file():
                     continue
                 if sha256_de(destino_literal) == huella:
-                    return destino_literal  # mismo contenido -- ya está
+                    return destino_literal, huella  # mismo contenido -- ya está
                 continue  # contenido distinto -- siguiente candidato
             except OSError as exc:
                 if exc.errno == errno.ELOOP:
                     continue  # se volvió symlink justo antes del link() (TOCTOU)
                 raise
-            return destino_literal
+            return destino_literal, huella
 
         raise ValueError(
             f"ingesta: no se pudo asegurar un nombre libre en 'fuente/' para "
@@ -428,7 +457,9 @@ def _asegurar_en_fuente(origen: Path, fuente_abs: Path, huella: str) -> Path:
         temporal.unlink(missing_ok=True)
 
 
-def _ficha_de_cache_valida(carpeta: Path, huella: str, extension_actual: str) -> Ficha | None:
+def _ficha_de_cache_valida(
+    carpeta: Path, huella: str, extension_actual: str, camino_actual: str = ""
+) -> Ficha | None:
     """Lee la ficha cacheada en `carpeta` y decide si es un acierto de
     caché VÁLIDO. `None` si hay que reextraer -- ficha ilegible (I-4),
     estado no reconstruible (I-1), extractor/versión desactualizados
@@ -453,6 +484,11 @@ def _ficha_de_cache_valida(carpeta: Path, huella: str, extension_actual: str) ->
     if version_vigente is None or ficha.extractor_version != version_vigente:
         return None  # I-2
 
+    if ficha.detalle.get("_version_logica") != _version_logica_vigente(
+        ficha.extractor, camino_actual
+    ):
+        return None  # la regla del extractor cambio: la ficha vieja no se reusa
+
     if ficha.detalle.get("_extension_ingesta") != extension_actual:
         return None  # I-3
 
@@ -467,7 +503,7 @@ def _ficha_de_cache_valida(carpeta: Path, huella: str, extension_actual: str) ->
 
 
 def _estado_de_error_cacheado(
-    carpeta: Path, huella: str, extension_actual: str
+    carpeta: Path, huella: str, extension_actual: str, camino_actual: str = ""
 ) -> tuple[Ficha | None, int]:
     """D-2: lee la ficha cacheada en `carpeta`, si la hay, y la interpreta
     como un intento previo FALLIDO (`error` o `sin_extractor` -- el ruling
@@ -515,6 +551,10 @@ def _estado_de_error_cacheado(
     version_vigente = _version_vigente(ficha.extractor)
     if version_vigente is not None and ficha.extractor_version != version_vigente:
         return None, 0  # I-2: el extractor cambió -- la cuenta arranca de cero
+    if ficha.detalle.get("_version_logica") != _version_logica_vigente(
+        ficha.extractor, camino_actual
+    ):
+        return None, 0  # la regla cambio: el tope D-2 tambien arranca de cero
     # version_vigente is None: "no sé" -- se sigue de largo y se cuenta la
     # ficha como utilizable, con los intentos que ya tenía.
 
@@ -678,11 +718,15 @@ def ingerir(origen: Path, trabajo: Path, *, subruta: str | Path | None = None) -
         destino = en_el_lugar            # E2a T4: ya esta en fuente/, no se copia
         huella = sha256_de(destino)      # la huella sale del MISMO archivo que se extrae
     else:
-        huella = sha256_de(origen)
-        destino = _asegurar_en_fuente(origen, fuente_abs, huella)  # C-1/C-3
+        # Jax#338 ronda 19: una sola apertura validada; la huella sale de los
+        # MISMOS bytes que se copian a fuente/.
+        destino, huella = _asegurar_en_fuente(origen, fuente_abs)  # C-1/C-3
 
     carpeta = ruta_procesado(trabajo_abs, huella)
-    ficha_cacheada = _ficha_de_cache_valida(carpeta, huella, extension_actual)
+    camino_actual = _camino_de(destino, extension_actual)
+    ficha_cacheada = _ficha_de_cache_valida(
+        carpeta, huella, extension_actual, camino_actual
+    )
     if ficha_cacheada is not None:
         # Cache vivo y VERIFICADO -- cero trabajo.
         return ficha_cacheada
@@ -694,7 +738,7 @@ def ingerir(origen: Path, trabajo: Path, *, subruta: str | Path | None = None) -
     # llamada con un PDF patológico), porque I-1 nunca cachea un `error` a
     # propósito -- un fallo transitorio tiene que poder curarse.
     ficha_error_previa, intentos_previos = _estado_de_error_cacheado(
-        carpeta, huella, extension_actual
+        carpeta, huella, extension_actual, camino_actual
     )
     if ficha_error_previa is not None and intentos_previos >= _MAX_INTENTOS_ERROR:
         return ficha_error_previa
@@ -768,6 +812,9 @@ def ingerir(origen: Path, trabajo: Path, *, subruta: str | Path | None = None) -
             "_extension_ingesta": extension_actual,
             "_salidas_ingesta": salidas_ingesta,
         }
+        logica = _version_logica_vigente(resultado.extractor, camino_actual)
+        if logica is not None:
+            detalle["_version_logica"] = logica
         if resultado.estado in {"error", "sin_extractor"}:
             # D-2: registra CUÁNTOS intentos lleva este fallo -- es lo que
             # `_estado_de_error_cacheado` lee en la próxima ingesta para

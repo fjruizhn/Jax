@@ -72,13 +72,13 @@ from pathlib import Path
 
 from procesamiento.dependencias import codigo_de_import
 from procesamiento.resultado import Resultado
+from procesamiento.tipos_imagen import FIRMA_OLE2
 
 EXTRACTOR = "python-docx"
 
-# Firma de las cabeceras OLE2 Compound File Binary Format -- el contenedor
-# binario que usan .doc/.xls/.ppt "viejos" (pre-2007). Los primeros 8 bytes
-# de CUALQUIER archivo así son EXACTAMENTE estos, sin excepción.
-_FIRMA_OLE2 = bytes.fromhex("D0CF11E0A1B11AE1")
+# La firma OLE2 (Compound File Binary Format, el contenedor de .doc/.xls/.ppt
+# "viejos", pre-2007) es `tipos_imagen.FIRMA_OLE2`: los primeros 8 bytes de
+# CUALQUIER archivo asi son EXACTAMENTE esos.
 
 
 def _version() -> str | None:
@@ -105,7 +105,7 @@ def _version() -> str | None:
 def _es_binario_ole2(origen: Path) -> bool:
     try:
         with open(origen, "rb") as fh:
-            return fh.read(len(_FIRMA_OLE2)) == _FIRMA_OLE2
+            return fh.read(len(FIRMA_OLE2)) == FIRMA_OLE2
     except OSError:
         return False
 

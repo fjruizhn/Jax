@@ -120,6 +120,40 @@ def _imagen_mixta_real_y_ruido(
     return destino
 
 
+def _tesseract_con_tsv_fijo(monkeypatch, lineas: list, plano: str | None = None) -> None:
+    """Tesseract SIMULADO con un TSV FIJO, sea cual sea la imagen que recibe
+    (Jax#338 ronda 14): las pruebas que fijan UMBRALES de clasificacion (cantidad
+    de palabras, mayoria dudosa, `ok` exacto) no pueden depender del
+    reconocimiento de la version de tesseract instalada. `lineas` como en
+    `_tsv_por_lineas`; el texto plano por defecto son los renglones unidos por
+    salto de linea. Todo lo que no es tesseract (pdftoppm) corre de verdad."""
+    real = ocr.subprocess.run
+    if plano is None:
+        plano = "\n".join(
+            " ".join(p for _, p in (linea[1] if isinstance(linea, tuple) else linea))
+            for linea in lineas
+        )
+
+    def fake(cmd, *a, **k):
+        if not cmd or cmd[0] != "tesseract" or "--version" in cmd:
+            return real(cmd, *a, **k)
+        if cmd[-1] == "tsv":
+            return _SalidaSimulada(_tsv_por_lineas(lineas).encode())
+        return _SalidaSimulada(plano.encode())
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+
+
+# Cuatro renglones confiables (13 palabras, ninguna dudosa): `ok` con cualquier
+# version de tesseract, porque no la llama.
+_LINEAS_CONFIABLES = [
+    [(95, "Estado"), (95, "de"), (95, "Situación"), (95, "Financiera")],
+    [(95, "Activos"), (95, "totales"), (95, "1,234,567.89"), (95, "USD")],
+    [(95, "Pasivos"), (95, "totales"), (95, "987,654.32"), (95, "USD")],
+    [(95, "Patrimonio")],
+]
+
+
 # ---------------------------------------------------------------------------
 # Integración: imagen suelta (con tesseract real)
 # ---------------------------------------------------------------------------
@@ -141,22 +175,140 @@ def test_lee_texto_en_espanol_con_tildes_y_guion_largo(tmp_path: Path):
     assert "palabras_dudosas" not in r.detalle
 
 
-def test_una_imagen_en_blanco_no_se_declara_ok(tmp_path: Path):
-    """Fallo cerrado: si el OCR no leyó nada, NO hay extracto."""
+def test_una_imagen_en_blanco_es_un_documento_valido_sin_texto(tmp_path: Path):
+    """Decision de Fernando (2026-10-03): una IMAGEN sin texto util (foto,
+    plano, pasto) es un documento valido, no un error. `ok` con el codigo
+    estable `imagen_sin_texto`, y la unica salida es un aviso explicito --
+    nunca texto inventado ni la basura del OCR."""
     from PIL import Image
 
     blanco = tmp_path / "blanco.png"
     Image.new("RGB", (400, 200), "white").save(blanco)
     r = ocr.extraer(blanco)
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == "imagen_sin_texto"
+    assert r.detalle["razon"] == "el OCR no devolvio texto util"
+    # regla (C): el aviso dice SOLO que el OCR no encontro texto
+    assert r.salidas["texto.txt"] == "<!-- el OCR no encontró texto -->"
+    assert "foto" not in r.salidas["texto.txt"]
+
+
+def test_una_imagen_con_texto_claro_no_lleva_codigo_imagen_sin_texto(tmp_path: Path, monkeypatch):
+    """Umbral (`ok` exacto, sin codigo): tesseract SIMULADO con TSV fijo (ronda 14)."""
+    _tesseract_con_tsv_fijo(monkeypatch, _LINEAS_CONFIABLES)
+    r = ocr.extraer(_imagen_multilinea(tmp_path / "claro.png", [
+        "Estado de Situación Financiera — año 2026",
+        "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD",
+        "Patrimonio neto 246,913.57 USD",
+    ]))
+    assert r.estado == "ok"
+    assert "codigo" not in r.detalle
+    assert "no encontró texto" not in r.salidas["texto.txt"]
+
+
+def test_un_jpeg_truncado_es_archivo_ilegible_y_error(tmp_path: Path):
+    """`error` queda SOLO para un archivo danado o que no se puede abrir."""
+    import random
+
+    from PIL import Image
+
+    random.seed(1)
+    img = Image.new("L", (600, 400))
+    img.putdata([random.randint(0, 255) for _ in range(600 * 400)])
+    completo = tmp_path / "completo.jpg"
+    img.save(completo, quality=90)
+    datos = completo.read_bytes()
+    roto = tmp_path / "roto.jpg"
+    roto.write_bytes(datos[: len(datos) // 3])
+
+    r = ocr.extraer(roto)
+
     assert r.estado == "error"
     assert r.salidas == {}
+    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["razon"]
 
 
-def test_ruido_con_mayoria_de_palabras_dudosas_da_error(tmp_path: Path):
+def test_bytes_que_no_son_una_imagen_son_archivo_ilegible(tmp_path: Path):
+    falso = tmp_path / "falso.png"
+    falso.write_bytes(b"esto no es un png")
+    r = ocr.extraer(falso)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_ilegible"
+
+
+def test_un_pdf_escaneado_sin_texto_se_trata_como_una_imagen(tmp_path: Path):
+    """Decision de Fernando (2026-10-04): un PDF sin texto util se trata IGUAL
+    que una imagen. Una pagina que NO tiene tamano de pagina (800x400) es la
+    regla A: `ok` + `imagen_sin_texto` + el aviso, como la imagen de 800x400."""
+    from PIL import Image
+
+    origen = _pdf_de_imagenes(
+        tmp_path / "vacio.pdf", [Image.new("RGB", (800, 400), "white")]
+    )
+    r = ocr.extraer(origen)
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == "imagen_sin_texto"
+    assert r.salidas == {"texto.txt": ocr.AVISO_IMAGEN_SIN_TEXTO}
+
+
+def test_un_pdf_escaneado_tamano_carta_sin_texto_es_parcial_pagina_sin_texto(tmp_path: Path):
+    """La regla D de la imagen, para la pagina rasterizada: carta a 300 ppi."""
+    from PIL import Image
+
+    origen = tmp_path / "carta.pdf"
+    Image.new("RGB", (2550, 3300), "white").save(origen, resolution=300)
+    r = ocr.extraer(origen)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
+    assert r.detalle["razon"] == "posible documento escaneado sin texto: revisar o reescanear"
+    assert r.detalle["pagina_de_referencia"] == ocr._implica_pagina(r.detalle["ancho"], r.detalle["alto"])
+    assert r.detalle["pagina_de_referencia"] is not None
+    assert r.salidas["texto.txt"].startswith(ocr.AVISO_IMAGEN_SIN_TEXTO)
+
+
+def test_la_cache_reusa_una_imagen_sin_texto(tmp_path: Path, monkeypatch):
+    """Una imagen sin texto es un resultado VALIDO (`ok`), asi que la
+    ingesta lo cachea: la segunda pasada no vuelve a llamar al extractor."""
+    from motor_registry import tool_authority
+
+    from procesamiento import compuerta, ingesta
+
+    raiz = tmp_path.resolve()
+    monkeypatch.setattr(tool_authority, "WORKSPACE_ROOT", raiz)
+    from PIL import Image
+
+    origen = tmp_path / "foto.png"
+    Image.new("RGB", (400, 200), "white").save(origen)
+    trabajo = raiz / "trabajo"
+
+    f1 = ingesta.ingerir(origen, trabajo)
+    assert f1.estado == "ok"
+    assert f1.detalle["codigo"] == "imagen_sin_texto"
+
+    llamadas = []
+    original = compuerta.extraer
+    monkeypatch.setattr(
+        compuerta, "extraer", lambda *a, **k: llamadas.append(a) or original(*a, **k)
+    )
+    f2 = ingesta.ingerir(origen, trabajo)
+    assert llamadas == []
+    assert f2.estado == "ok"
+    assert f2.detalle["codigo"] == "imagen_sin_texto"
+
+
+def test_ruido_con_mayoria_de_palabras_dudosas_es_parcial_texto_dudoso(tmp_path: Path, monkeypatch):
     """30 glifos sueltos al azar (no palabras): más de la mitad de las
     palabras que tesseract "reconoce" caen por debajo de
     CONFIANZA_MINIMA_PALABRA -- eso es 'sin texto útil' aunque el texto
-    plano tenga más caracteres que MINIMO_CARACTERES."""
+    plano tenga más caracteres que MINIMO_CARACTERES. Umbral (mayoria
+    dudosa): tesseract SIMULADO con un TSV fijo de 10 glifos, 7 dudosos
+    (ronda 14)."""
+    _tesseract_con_tsv_fijo(monkeypatch, [
+        [(20, "a!"), (25, "I1l"), (30, "0O#"), (95, "Ao"), (15, "$%"),
+         (22, "&*"), (95, "oA"), (35, "l0"), (95, "AA"), (18, "!!")],
+    ])
     import random
 
     from PIL import Image, ImageDraw
@@ -175,10 +327,13 @@ def test_ruido_con_mayoria_de_palabras_dudosas_da_error(tmp_path: Path):
     img.save(origen)
 
     r = ocr.extraer(origen)
-    assert r.estado == "error"
-    assert r.salidas == {}
+    # regla (B): mayoria de dudosas -> parcial, CONSERVANDO el texto leido
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_texto_dudoso"
+    assert "texto de baja confianza" in r.salidas["texto.txt"]
+    assert len(r.salidas["texto.txt"].splitlines()) >= 2  # nota + texto leido
     assert "palabras_dudosas" in r.detalle
-    assert "confianza baja" in r.detalle["razon"]
+    assert "texto de baja confianza" in r.detalle["razon"]
 
 
 def test_texto_real_mezclado_con_ruido_da_parcial_con_palabras_dudosas_nombradas(
@@ -236,12 +391,13 @@ def test_membrete_con_pocas_palabras_da_parcial_con_dimensiones(tmp_path: Path):
 
 def test_texto_corto_registra_confianza_promedio_igual(tmp_path: Path):
     """I-1: `BALANCE` (7 caracteres) cae por MINIMO_CARACTERES y sale
-    'error' -- pero tesseract SÍ corrió y SÍ midió una confianza (~96 %), y
+    `ok`/`imagen_sin_texto` -- pero tesseract SÍ corrió y SÍ midió una confianza (~96 %), y
     esa franja de "texto corto" es justo la que hace falta para calibrar
     los umbrales. La confianza tiene que registrarse pase o no pase."""
     origen = _imagen_una_linea(tmp_path / "balance.png", "BALANCE")
     r = ocr.extraer(origen)
-    assert r.estado == "error"
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == "imagen_sin_texto"
     assert "confianza_promedio" in r.detalle
     assert r.detalle["confianza_promedio"] > 0
 
@@ -249,11 +405,12 @@ def test_texto_corto_registra_confianza_promedio_igual(tmp_path: Path):
 def test_texto_por_debajo_del_minimo_de_caracteres_no_se_declara_ok(tmp_path: Path):
     """Pin de MINIMO_CARACTERES por el lado bajo: "Vencido" son 7
     caracteres (por debajo de 8) con alta confianza y NO forma mayoría
-    dudosa -- si esto no fuera 'error', la única explicación sería que
+    dudosa -- si esto no fuera `imagen_sin_texto`, la única explicación sería que
     MINIMO_CARACTERES bajó."""
     origen = _imagen_una_linea(tmp_path / "vencido.png", "Vencido")
     r = ocr.extraer(origen)
-    assert r.estado == "error"
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == "imagen_sin_texto"
     assert r.detalle["caracteres"] == 7
 
 
@@ -490,9 +647,9 @@ def test_pdf_pagina_con_membrete_corto_es_parcial_con_paginas_con_dudas(tmp_path
     assert "Estado de Situación Financiera" in r.salidas["texto.txt"]
 
 
-def test_pdf_donde_ninguna_pagina_da_texto_es_error(tmp_path: Path):
-    """C-3: escaneo puro imagen, sin ninguna página legible -- 'error', no
-    'ok' con un extracto vacío."""
+def test_pdf_donde_ninguna_pagina_da_texto_ni_es_de_pagina_es_ok_sin_texto(tmp_path: Path):
+    """Dos paginas en blanco que no tienen tamano de pagina: regla A (`ok` +
+    `imagen_sin_texto`), igual que la imagen; las paginas vacias se nombran."""
     from PIL import Image
 
     b1 = Image.new("RGB", (1100, 450), "white")
@@ -501,9 +658,245 @@ def test_pdf_donde_ninguna_pagina_da_texto_es_error(tmp_path: Path):
 
     r = ocr.extraer(origen)
 
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == "imagen_sin_texto"
+    assert r.detalle["paginas"] == 2
+    assert r.detalle["paginas_sin_texto"] == [1, 2]
+    assert r.detalle["_camino"] == "pdf"
+    assert r.salidas == {"texto.txt": ocr.AVISO_IMAGEN_SIN_TEXTO}
+
+
+# ---------------------------------------------------------------------------
+# PDF sin texto util = imagen (decision de Fernando, 2026-10-04)
+# ---------------------------------------------------------------------------
+
+
+def _pagina_ocr(
+    clasificacion: str, texto: str = "", dudosas: int = 0, palabras: int = 0,
+    ancho: int = 0, alto: int = 0,
+) -> dict:
+    """Resultado de `_ocr_una_imagen` para una pagina, a mano (sin tesseract)."""
+    return {
+        "texto": texto, "caracteres": len(texto), "n_palabras": palabras,
+        "confianza_promedio": 30.0 if dudosas else 0.0,
+        "palabras_dudosas": [{"palabra": f"w{i}", "confianza": 20.0} for i in range(dudosas)],
+        "ancho": ancho, "alto": alto, "clasificacion": clasificacion,
+    }
+
+
+# Las dimensiones de D salen del PNG RASTERIZADO (`dimensiones`), no del TSV: las
+# paginas de estas pruebas llevan ancho=alto=0 (un TSV sin la fila de pagina).
+_DIM_A4 = (2480, 3508)
+_DIM_CHICA = (3333, 1667)                                              # 800x400 pt: NO es de pagina
+_A = lambda: _pagina_ocr("sin_texto")                                  # regla A
+_B = lambda: _pagina_ocr("sin_texto", "Gerente 95 area operaciones planta", 4, 5)   # regla B
+_ILEGIBLE = lambda: {"clasificacion": "ilegible", "causa": "tesseract_no_lee"}
+
+
+@pytest.mark.parametrize("paginas", [1, 2])
+def test_pdf_de_paginas_todas_regla_a_es_parcial_pagina_sin_texto(paginas):
+    r = ocr._resolver_pdf([_A() for _ in range(paginas)], "spa", [_DIM_A4] * paginas)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
+    assert r.detalle["razon"] == "posible documento escaneado sin texto: revisar o reescanear"
+    assert r.detalle["paginas"] == paginas
+    assert r.detalle["paginas_sin_texto"] == list(range(1, paginas + 1))
+    assert r.detalle["_camino"] == "pdf"
+    assert r.salidas == {
+        "texto.txt": f"{ocr.AVISO_IMAGEN_SIN_TEXTO}\n{ocr.NOTA_PAGINA_SIN_TEXTO}"
+    }
+
+
+def test_pdf_a_sin_tamano_de_pagina_es_ok_imagen_sin_texto():
+    r = ocr._resolver_pdf([_A(), _A()], "spa", [_DIM_CHICA, _DIM_CHICA])
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == "imagen_sin_texto"
+    assert r.detalle["paginas"] == 2
+    assert r.detalle["paginas_sin_texto"] == [1, 2]
+    assert "pagina_de_referencia" not in r.detalle
+    assert r.salidas == {"texto.txt": ocr.AVISO_IMAGEN_SIN_TEXTO}
+
+
+def test_pdf_con_alguna_pagina_a_de_tamano_de_pagina_es_d_con_sus_dimensiones():
+    r = ocr._resolver_pdf([_A(), _A()], "spa", [_DIM_CHICA, _DIM_A4])
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
+    assert r.detalle["pagina_de_referencia"] == "A4"
+    assert (r.detalle["ancho"], r.detalle["alto"]) == (2480, 3508)
+    assert r.detalle["razon"] == "posible documento escaneado sin texto: revisar o reescanear"
+
+
+def test_pdf_con_una_pagina_b_y_otra_a_conserva_el_texto_dudoso():
+    """B tiene prioridad sobre D, como en las imagenes; el texto de B se conserva."""
+    r = ocr._resolver_pdf([_A(), _B()], "spa", [_DIM_A4, _DIM_A4])
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_texto_dudoso"
+    assert r.detalle["razon"] == ocr.RAZON_MAYORIA_DUDOSA
+    assert r.salidas["texto.txt"].startswith(ocr.NOTA_TEXTO_DUDOSO)
+    assert "Gerente 95 area operaciones planta" in r.salidas["texto.txt"]
+    assert r.detalle["paginas"] == 2
+    assert r.detalle["paginas_texto_dudoso"] == [2]
+    assert r.detalle["_camino"] == "pdf"
+
+
+def test_pdf_con_a_o_b_e_ilegible_es_error_no_parcial():
+    """Una pagina que no se pudo leer NO se esconde bajo un parcial: si alguna
+    es `None` o `ilegible` el PDF es `error`, con `paginas_ilegibles`."""
+    dims = [_DIM_A4] * 3
+    for otras in ([_A()], [_B()]):
+        r = ocr._resolver_pdf([_ILEGIBLE(), *otras, None], "spa", dims)
+        assert r.estado == "error"
+        assert r.salidas == {}
+        assert r.detalle["codigo"] == "archivo_no_procesable"
+        assert r.detalle["paginas_ilegibles"] == [1, 3]
+        assert r.detalle["paginas"] == 3
+        assert r.detalle["_camino"] == "pdf"
+    r = ocr._resolver_pdf([_A(), None], "spa", [_DIM_A4] * 2)
+    assert r.estado == "error"
+    assert r.detalle["paginas_ilegibles"] == [2]
+    assert "codigo" not in r.detalle
+
+
+def test_pdf_a_con_dimensiones_ilegibles_cuenta_como_pagina_ilegible():
+    """Si el PNG rasterizado no se puede medir, esa pagina es ilegible."""
+    r = ocr._resolver_pdf([_A(), _A()], "spa", [_DIM_A4, None])
+    assert r.estado == "error"
+    assert r.detalle["paginas_ilegibles"] == [2]
+    r = ocr._resolver_pdf([_A()], "spa")      # sin dimensiones: tampoco hay D
+    assert r.estado == "error"
+
+
+def test_pdf_d_usa_las_dimensiones_del_png_no_las_del_tsv(tmp_path: Path, monkeypatch):
+    """Por el camino real de `extraer`: pdftoppm de verdad sobre una pagina carta;
+    el resultado OCR NO trae la fila de pagina del TSV (ancho=alto=0)."""
+    from PIL import Image
+
+    monkeypatch.setattr(ocr, "_ocr_una_imagen", lambda ruta, idioma: _pagina_ocr("sin_texto"))
+    origen = tmp_path / "carta.pdf"
+    Image.new("RGB", (2550, 3300), "white").save(origen, resolution=300)
+    r = ocr.extraer(origen)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
+    assert r.detalle["pagina_de_referencia"] == "carta"
+    assert (r.detalle["ancho"], r.detalle["alto"]) == (2550, 3300)
+
+
+def test_pdf_sin_pillow_es_error_por_la_dependencia_no_archivo_ilegible(tmp_path: Path, monkeypatch):
+    """Un PDF legible y sin texto, con Pillow AUSENTE: la causa es la dependencia
+    (como con pdftoppm), no un archivo ilegible. Se avisa ANTES de rasterizar."""
+    import sys
+
+    origen = _pdf_de_imagenes(tmp_path / "x.pdf", [Image.new("RGB", (2550, 3300), "white")])
+    monkeypatch.setitem(sys.modules, "PIL", None)
+    monkeypatch.setitem(sys.modules, "PIL.Image", None)
+    llamadas: list = []
+    monkeypatch.setattr(ocr, "_rasterizar_pdf", lambda *a, **k: llamadas.append(a) or [])
+    r = ocr.extraer(origen)
+    assert r.estado == "error"
+    assert r.detalle["razon"] == (
+        "Pillow no esta instalado; no se puede medir la pagina rasterizada"
+    )
+    assert "codigo" not in r.detalle
+    assert llamadas == []          # ni siquiera se rasteriza
+
+
+def test_dimensiones_de_png_no_se_traga_la_falta_de_pillow(tmp_path: Path, monkeypatch):
+    import sys
+
+    png = tmp_path / "p.png"
+    Image.new("RGB", (10, 20), "white").save(png)
+    assert ocr._dimensiones_de_png(png) == (10, 20)
+    (tmp_path / "roto.png").write_bytes(b"no es un png")
+    assert ocr._dimensiones_de_png(tmp_path / "roto.png") is None   # no decodifica: ilegible
+    monkeypatch.setitem(sys.modules, "PIL", None)
+    monkeypatch.setitem(sys.modules, "PIL.Image", None)
+    with pytest.raises(ImportError):
+        ocr._dimensiones_de_png(png)
+
+
+def test_pdf_a_y_d_llevan_confianza_promedio_ponderada():
+    a = _pagina_ocr("sin_texto", "ab", 0, 0)
+    c = _pagina_ocr("sin_texto", "xy", 0, 3)
+    a["confianza_promedio"], c["confianza_promedio"] = 10.0, 50.0
+    for dims in ([_DIM_CHICA] * 2, [_DIM_A4] * 2):
+        r = ocr._resolver_pdf([a, c], "spa", dims)
+        assert r.detalle["confianza_promedio"] == 50.0      # ponderada por palabras
+    r = ocr._resolver_pdf([_A()], "spa", [_DIM_A4])
+    assert r.detalle["confianza_promedio"] == 0.0           # sin palabras
+
+
+def test_pdf_con_todas_las_paginas_none_sigue_en_error_con_su_razon():
+    r = ocr._resolver_pdf([None, None], "spa", [None, None])
+    assert r.estado == "error"
+    assert r.detalle["paginas_ilegibles"] == [1, 2]
+    assert r.salidas == {}
+    assert r.detalle["razon"] == "ninguna pagina del PDF dio texto util via OCR"
+    assert r.detalle["paginas"] == 2
+    assert "codigo" not in r.detalle
+
+
+def test_pdf_con_todas_las_paginas_ilegibles_es_error_con_el_codigo_que_corresponde():
+    r = ocr._resolver_pdf([_ILEGIBLE(), None], "spa", [None, None])
     assert r.estado == "error"
     assert r.salidas == {}
+    assert r.detalle["codigo"] == "archivo_no_procesable"
+    assert r.detalle["_camino"] == "pdf"
     assert r.detalle["paginas"] == 2
+    assert r.detalle["paginas_ilegibles"] == [1, 2]
+
+
+def test_pdf_con_una_pagina_buena_y_otra_sin_texto_sigue_como_antes():
+    buena = _pagina_ocr("ok", "Estado de Situacion Financiera", 0, 12)
+    buena["confianza_promedio"] = 95.0
+    r = ocr._resolver_pdf([buena, _A()], "spa")
+    assert r.estado == "parcial"
+    assert "codigo" not in r.detalle
+    assert r.detalle["paginas_sin_texto"] == [2]
+    assert "Estado de Situacion Financiera" in r.salidas["texto.txt"]
+
+
+def test_pdf_extraer_con_todas_las_paginas_ilegibles_es_error(tmp_path: Path, monkeypatch):
+    """Por el camino real de `extraer`: rasterizado de verdad, tesseract falla."""
+    from PIL import Image
+
+    monkeypatch.setattr(ocr, "_ocr_una_imagen", lambda ruta, idioma: None)
+    origen = _pdf_de_imagenes(
+        tmp_path / "x.pdf", [Image.new("RGB", (800, 400), "white") for _ in range(2)]
+    )
+    r = ocr.extraer(origen)
+    assert r.estado == "error"
+    assert r.salidas == {}
+
+
+def _pdf_tipo_word_con_fotos(destino: Path) -> Path:
+    """Fixture SINTETICO del caso «DUI RMR.pdf»: un PDF como el que genera Word,
+    una pagina carta con dos fotos de baja resolucion (80 ppi) incrustadas y sin
+    capa de texto. Degradado con ruido y desenfoque, sin ningun texto."""
+    from PIL import Image, ImageFilter
+
+    def foto(ancho: int, alto: int):
+        degradado = Image.linear_gradient("L").resize((ancho, alto)).convert("RGB")
+        ruido = Image.effect_noise((ancho, alto), 12).convert("RGB")
+        return Image.blend(degradado, ruido, 0.25).filter(ImageFilter.GaussianBlur(2))
+
+    pagina = Image.new("RGB", (680, 880), "white")   # 8,5 x 11 in a 80 ppi: carta
+    pagina.paste(foto(560, 300), (50, 60))
+    pagina.paste(foto(560, 300), (50, 460))
+    pagina.save(destino, resolution=80)
+    return destino
+
+
+def test_pdf_tipo_word_con_fotos_de_baja_resolucion_es_parcial_pagina_sin_texto(tmp_path: Path):
+    """El caso «DUI RMR.pdf» por el camino REAL (pdftoppm + tesseract): antes
+    `error` / `ocr_sin_texto`; ahora `parcial` + `imagen_pagina_sin_texto`."""
+    if shutil.which("pdftoppm") is None:
+        pytest.skip("pdftoppm no instalado")
+    origen = _pdf_tipo_word_con_fotos(tmp_path / "dui-sintetico.pdf")
+    r = ocr.extraer(origen)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
+    assert r.detalle["_camino"] == "pdf"
+    assert ocr.AVISO_IMAGEN_SIN_TEXTO in r.salidas["texto.txt"]
 
 
 def test_rasterizado_usa_workspace_dir_no_tmp(tmp_path: Path, monkeypatch):
@@ -744,3 +1137,2580 @@ def test_workspace_dir_resuelve_symlinks(tmp_path: Path, monkeypatch):
         "sin .resolve(), esto hubiera quedado apuntando al symlink, no al "
         "destino real"
     )
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 1: S-1 (lista de rutas), MAJOR-2 (decodificar entero),
+# MINOR-1/3/4/6
+# ---------------------------------------------------------------------------
+
+
+def _ruidosa(destino: Path, size=(600, 400), seed=1) -> Path:
+    import random
+
+    from PIL import Image
+
+    rnd = random.Random(seed)
+    img = Image.new("L", size)
+    img.putdata([rnd.randint(0, 255) for _ in range(size[0] * size[1])])
+    img.save(destino)
+    return destino
+
+
+def _sin_llamar_a_tesseract(monkeypatch) -> list:
+    llamadas: list = []
+    real = ocr.subprocess.run
+
+    def espia(cmd, *a, **k):
+        llamadas.append(list(cmd))
+        return real(cmd, *a, **k)
+
+    monkeypatch.setattr(ocr.subprocess, "run", espia)
+    return llamadas
+
+
+def test_s1_un_png_cuyo_contenido_es_la_ruta_de_otra_imagen_no_se_lee(
+    tmp_path: Path, monkeypatch
+):
+    """S-1: tesseract interpreta una entrada que no es imagen como LISTA DE
+    RUTAS. Un `foto.png` con la ruta de otra imagen real del host la leeria.
+    Por la razon correcta: los bytes magicos no coinciden, ni se llama a
+    tesseract."""
+    secreta = _imagen_multilinea(tmp_path / "secreta.png", [
+        "Estado de Situación Financiera — año 2026",
+        "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD",
+        "Patrimonio neto 246,913.57 USD",
+    ])
+    señuelo = tmp_path / "foto.png"
+    señuelo.write_text(str(secreta) + "\n", encoding="utf8")
+    llamadas = _sin_llamar_a_tesseract(monkeypatch)
+
+    r = ocr.extraer(señuelo)
+
+    assert r.estado == "error"
+    assert r.salidas == {}
+    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["causa"] == "firma_invalida"
+    # (`tesseract --version` de `_version()` no lee ninguna imagen)
+    assert not any(c and c[0] == "tesseract" and "--version" not in c for c in llamadas)
+
+
+def test_s1_bytes_aleatorios_son_archivo_ilegible_sin_reventar(tmp_path: Path):
+    import random
+
+    azar = tmp_path / "azar.jpg"
+    azar.write_bytes(random.Random(5).randbytes(4096))
+    r = ocr.extraer(azar)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_ilegible"
+
+
+def test_s1_la_imagen_va_a_tesseract_por_stdin_nunca_por_ruta(
+    tmp_path: Path, monkeypatch
+):
+    origen = _imagen_una_linea(tmp_path / "linea.png", "Activos totales 1,234 USD")
+    visto: list = []
+    real = ocr.subprocess.run
+
+    def espia(cmd, *a, **k):
+        if cmd and cmd[0] == "tesseract" and "--version" not in cmd:
+            visto.append((list(cmd), k.get("input")))
+        return real(cmd, *a, **k)
+
+    monkeypatch.setattr(ocr.subprocess, "run", espia)
+    ocr.extraer(origen)
+
+    assert visto, "tesseract no se invoco"
+    for cmd, entrada in visto:
+        assert cmd[1] == "-"
+        assert str(origen) not in cmd
+        assert isinstance(entrada, bytes) and entrada == origen.read_bytes()
+
+
+@pytest.mark.parametrize("formato", ["png", "jpg", "tif", "bmp", "webp"])
+def test_cada_formato_de_imagen_pasa_por_stdin_y_se_lee(tmp_path: Path, formato: str):
+    from PIL import Image
+
+    base = _imagen_multilinea(tmp_path / "base.png", [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    destino = tmp_path / f"doc.{formato}"
+    Image.open(base).convert("RGB").save(destino)
+    r = ocr.extraer(destino)
+    # tesseract REAL: solo propiedades robustas entre versiones (ronda 14)
+    assert r.estado != "error"
+    assert "Activos" in r.salidas["texto.txt"]
+
+
+@pytest.mark.parametrize("formato", ["tif", "png", "jpg"])
+def test_major2_imagen_truncada_es_archivo_ilegible(tmp_path: Path, formato: str):
+    """MAJOR-2: un TIFF truncado da rc=0 y vacio en tesseract (quedaba `ok`).
+    Se decodifica ENTERA con Pillow antes de OCR."""
+    completa = _ruidosa(tmp_path / f"c.{formato}")
+    datos = completa.read_bytes()
+    rota = tmp_path / f"rota.{formato}"
+    rota.write_bytes(datos[: len(datos) // 2])
+    r = ocr.extraer(rota)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["causa"] == "no_decodifica"
+
+
+def test_major2_jpeg_con_el_cuerpo_corrupto_es_archivo_ilegible(tmp_path: Path):
+    import random
+
+    completa = _ruidosa(tmp_path / "c.jpg")
+    d = completa.read_bytes()
+    i = d.index(b"\xff\xda") + 14
+    malo = tmp_path / "malo.jpg"
+    malo.write_bytes(d[:i] + random.Random(7).randbytes(len(d) - i - 2) + b"\xff\xd9")
+    r = ocr.extraer(malo)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_ilegible"
+
+
+def test_major2_imagen_con_demasiados_pixeles_es_ilegible(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(ocr, "MAX_PIXELES", 1000)
+    r = ocr.extraer(_ruidosa(tmp_path / "grande.png", size=(100, 100)))
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "imagen_demasiado_grande"
+    assert r.detalle["causa"] == "demasiados_pixeles"
+
+
+def test_minor3_la_ficha_no_copia_stderr_ni_rutas(tmp_path: Path):
+    señuelo = tmp_path / "secreto-ruta.png"
+    señuelo.write_text("/etc/passwd\n", encoding="utf8")
+    r = ocr.extraer(señuelo)
+    volcado = json.dumps(dict(r.detalle))
+    assert "stderr" not in r.detalle
+    assert str(tmp_path) not in volcado and "/etc/passwd" not in volcado
+
+
+def test_minor4_el_tipo_por_cabecera_busca_la_firma_en_los_primeros_1024_bytes(tmp_path: Path):
+    con_basura = tmp_path / "a.pdf"
+    con_basura.write_bytes(b"\x00\xef\xbb\xbf  basura\n" + b"%PDF-1.4\n")
+    assert ocr.tipo_por_cabecera(con_basura.read_bytes()[:1024], ".pdf") == "pdf"
+    lejos = tmp_path / "b.pdf"
+    lejos.write_bytes(b"x" * 2000 + b"%PDF-1.4")
+    assert ocr.tipo_por_cabecera(lejos.read_bytes()[:1024]) is None
+    assert ocr.camino_de(tmp_path / "no-existe.png") == "imagen"
+
+
+def test_minor6_foto_de_4032x3024_con_ruido_no_es_un_error(tmp_path: Path):
+    """Forma del dato real: una foto de telefono (12 Mpx), no un fixture de
+    400x200."""
+    origen = _ruidosa(tmp_path / "foto.jpg", size=(4032, 3024), seed=2)
+    r = ocr.extraer(origen)
+    assert r.estado in {"ok", "parcial"}
+    assert r.detalle["ancho"] == 4032 and r.detalle["alto"] == 3024
+
+
+def _documento_fotografiado(destino: Path) -> Path:
+    """Texto real en baja resolucion + ruido + desenfoque: el tipo de foto
+    de documento que da mayoria de palabras dudosas."""
+    import random
+
+    from PIL import Image, ImageDraw, ImageFilter
+
+    # Parametros medidos 2026-10-03 (tesseract 5.5.0): 171 palabras, 134
+    # dudosas. Hay un acantilado -- un poco mas de ruido o de desenfoque y
+    # tesseract no reconoce NINGUNA palabra -- por eso el test comprueba la
+    # forma del fixture antes de usarlo.
+    img = Image.new("L", (1000, 700), 215)
+    d = ImageDraw.Draw(img)
+    fuente = _fuente(8)
+    for i in range(22):
+        d.text(
+            (20, 20 + i * 30),
+            f"Gerente {i} area operaciones planta Choluteca turno {i * 7}",
+            fill=70, font=fuente,
+        )
+    img = img.filter(ImageFilter.GaussianBlur(0.5))
+    rnd = random.Random(11)
+    px = img.load()
+    for x in range(img.width):
+        for y in range(img.height):
+            px[x, y] = max(0, min(255, px[x, y] + rnd.randint(-16, 16)))
+    img.save(destino)
+    return destino
+
+
+def test_minor6_documento_fotografiado_sintetico_no_es_un_error(tmp_path: Path, monkeypatch):
+    """Umbrales (10 palabras, mayoria dudosa, el texto conservado): tesseract
+    SIMULADO con un TSV fijo de la forma medida en 2026-10-03 con 5.5.0 (22
+    renglones, la mayoria de las palabras dudosas), ronda 14. La foto real
+    sigue siendo la entrada."""
+    _tesseract_con_tsv_fijo(monkeypatch, [
+        [(30, "Gerente"), (95, str(i)), (25, "area"), (40, "operaciones"), (20, "planta")]
+        for i in range(22)
+    ])
+    origen = _documento_fotografiado(tmp_path / "doc-foto.jpg")
+    analisis = ocr._ocr_una_imagen(origen, "spa")
+    assert analisis is not None and analisis["n_palabras"] >= 10
+    # la forma del caso: la mayoria de las palabras reconocidas son dudosas
+    assert len(analisis["palabras_dudosas"]) / analisis["n_palabras"] > 0.5
+    r = ocr.extraer(origen)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_texto_dudoso"
+    assert r.salidas["texto.txt"].count("\n") > 10  # el texto leido se conserva
+
+
+def _ingerir_imagen_sin_texto(tmp_path, monkeypatch):
+    from motor_registry import tool_authority
+    from PIL import Image
+
+    from procesamiento import ingesta
+
+    monkeypatch.setattr(tool_authority, "WORKSPACE_ROOT", tmp_path.resolve())
+    origen = tmp_path / "foto.png"
+    Image.new("RGB", (400, 200), "white").save(origen)
+    trabajo = tmp_path.resolve() / "trabajo"
+    ficha = ingesta.ingerir(origen, trabajo)
+    return ingesta, origen, trabajo, ficha
+
+
+def test_minor1_la_ficha_lleva_la_version_de_la_logica_del_ocr(tmp_path, monkeypatch):
+    _, _, _, ficha = _ingerir_imagen_sin_texto(tmp_path, monkeypatch)
+    assert ficha.detalle["_version_logica"] == ocr.VERSION_LOGICA_IMAGEN
+
+
+def test_minor1_cambiar_la_logica_invalida_la_cache(tmp_path, monkeypatch):
+    from procesamiento import compuerta
+
+    ingesta, origen, trabajo, _ = _ingerir_imagen_sin_texto(tmp_path, monkeypatch)
+    monkeypatch.setattr(ocr, "VERSION_LOGICA_IMAGEN", "otra-regla")
+    llamadas = []
+    original = compuerta.extraer
+    monkeypatch.setattr(
+        compuerta, "extraer", lambda *a, **k: llamadas.append(a) or original(*a, **k)
+    )
+    f2 = ingesta.ingerir(origen, trabajo)
+    assert len(llamadas) == 1
+    assert f2.detalle["_version_logica"] == "otra-regla"
+
+
+def test_minor1_un_error_viejo_con_tres_intentos_se_reintenta_si_cambio_la_logica(
+    tmp_path, monkeypatch
+):
+    """El tope D-2 (3 intentos) congelaba el `error` viejo; una ficha escrita
+    con otra logica no cuenta como intento previo."""
+    from procesamiento import compuerta
+    from procesamiento.ficha import Ficha
+
+    ingesta, origen, trabajo, ficha = _ingerir_imagen_sin_texto(tmp_path, monkeypatch)
+    carpeta = ingesta.ruta_procesado(trabajo, ficha.sha256)
+    viejo = Ficha(
+        sha256=ficha.sha256, origen=ficha.origen, extractor=ficha.extractor,
+        extractor_version=ficha.extractor_version, fecha=ficha.fecha, estado="error",
+        detalle={"razon": "vieja", "_extension_ingesta": ".png", "_intentos": 3},
+    )
+    (carpeta / "ficha.json").write_text(viejo.a_json(), encoding="utf8")
+    llamadas = []
+    original = compuerta.extraer
+    monkeypatch.setattr(
+        compuerta, "extraer", lambda *a, **k: llamadas.append(a) or original(*a, **k)
+    )
+    f2 = ingesta.ingerir(origen, trabajo)
+    assert len(llamadas) == 1
+    assert f2.estado == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 1: regla de Fernando (A/B/D) -- tamano de pagina
+# ---------------------------------------------------------------------------
+
+
+def _blanca(destino: Path, ancho: int, alto: int) -> Path:
+    from PIL import Image
+
+    Image.new("L", (ancho, alto), 255).save(destino)
+    return destino
+
+
+@pytest.mark.parametrize("ancho,alto", [
+    (2480, 3508),   # A4 a 300 DPI
+    (3508, 2480),   # apaisada
+    (2550, 3300),   # carta a 300
+    (1240, 1754),   # A4 a 150 (el borde bajo del DPI implicito)
+    (2480, 3482),   # proporcion 1,404: dentro de +-0,02 de A4
+])
+def test_d_imagen_del_tamano_de_una_pagina_sin_texto_es_parcial(
+    tmp_path: Path, ancho: int, alto: int
+):
+    r = ocr.extraer(_blanca(tmp_path / "p.png", ancho, alto))
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
+    assert "posible documento escaneado sin texto: revisar o reescanear" in r.salidas["texto.txt"]
+    assert r.detalle["ancho"] == ancho and r.detalle["alto"] == alto
+
+
+@pytest.mark.parametrize("ancho,alto", [
+    (4032, 3024), (3024, 4032), (5500, 3830), (3288, 3740), (1500, 780),
+    (2480, 3457),   # proporcion 1,394: justo fuera de +-0,02 de A4
+    (2000, 2870),   # proporcion 1,435: justo fuera
+    (1157, 1637),   # A4 a 140 DPI: bajo el minimo
+    (3391, 4793),   # A4 a 410 DPI: sobre el maximo
+])
+def test_a_una_imagen_que_no_es_pagina_sin_texto_es_ok(tmp_path: Path, ancho, alto):
+    r = ocr.extraer(_blanca(tmp_path / "f.png", ancho, alto))
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == "imagen_sin_texto"
+
+
+def test_implica_pagina_es_pura_y_nombra_la_referencia():
+    assert ocr._implica_pagina(2480, 3508) == "A4"
+    assert ocr._implica_pagina(2550, 3300) == "carta"
+    assert ocr._implica_pagina(4032, 3024) is None
+    assert ocr._implica_pagina(0, 0) is None
+
+
+def test_b_tiene_prioridad_sobre_d_aunque_la_imagen_sea_una_pagina():
+    r = {
+        "texto": "algo leido con baja confianza", "caracteres": 29, "n_palabras": 6,
+        "confianza_promedio": 30.0, "palabras_dudosas": [{"palabra": "x", "confianza": 10.0}],
+        "ancho": 0, "alto": 0, "clasificacion": "sin_texto",
+    }
+    res = ocr._resolver_imagen(r, "spa", [(2480, 3508)])
+    assert res.estado == "parcial"
+    assert res.detalle["codigo"] == "imagen_texto_dudoso"
+    assert "algo leido con baja confianza" in res.salidas["texto.txt"]
+
+
+_REAL = Path(
+    "/srv/jax-data/jax-workspace/proyectos/01a1029d-3078-7707-aab7-2000d235137f"
+    "/fuente/documenatcion-legal/socios/RTN Angel Molina.jpeg"
+)
+
+
+@pytest.mark.skipif(not _REAL.is_file(), reason="imagen real de produccion ausente (solo hall9000)")
+def test_real_rtn_angel_molina_es_pagina_sin_texto():
+    """Solo lectura sobre la imagen real de produccion (2480x3508)."""
+    r = ocr.extraer(_REAL)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_pagina_sin_texto"
+
+
+_REAL_ORG = _REAL.parents[2] / "fotos" / "IMG_2353.jpeg"
+
+
+@pytest.mark.skipif(not _REAL_ORG.is_file(), reason="IMG_2353.jpeg real ausente (solo hall9000)")
+def test_real_img_2353_organigrama_es_parcial_y_legible():
+    r = ocr.extraer(_REAL_ORG)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == "imagen_texto_dudoso"
+    assert len(r.salidas["texto.txt"]) > 200
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 2: TIFF multipagina (N1), una sola lectura (N2), firma de
+# imagen antes de %PDF (N3), Pillow (N4), logica por camino (N5), tope (N6)
+# ---------------------------------------------------------------------------
+
+
+def _tiff_multipagina(destino: Path, paginas: list) -> Path:
+    paginas[0].save(destino, save_all=True, append_images=paginas[1:])
+    return destino
+
+
+def test_n1_tiff_con_la_segunda_pagina_truncada_es_archivo_ilegible(tmp_path: Path):
+    import random
+
+    from PIL import Image
+
+    rnd = random.Random(3)
+    paginas = []
+    for _ in range(2):
+        im = Image.new("L", (300, 200))
+        im.putdata([rnd.randint(0, 255) for _ in range(300 * 200)])
+        paginas.append(im)
+    completo = _tiff_multipagina(tmp_path / "ok.tif", paginas)
+    datos = completo.read_bytes()
+    roto = tmp_path / "multi_trunc_cut.tif"
+    roto.write_bytes(datos[: int(len(datos) * 0.75)])
+
+    r = ocr.extraer(roto)
+
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_ilegible"
+    assert r.detalle["causa"] == "no_decodifica"
+
+
+def test_n1_tiff_con_una_pagina_bomba_se_rechaza_sin_decodificarla(tmp_path: Path):
+    """Pagina 2 de 20000x10000 (200 Mpx): antes pasaba la validacion porque
+    solo se miraba el fotograma 0. Sin monkeypatch del tope."""
+    from PIL import Image
+
+    pequena = Image.new("1", (300, 200), 1)
+    bomba = Image.new("1", (20000, 10000), 1)
+    origen = tmp_path / "bomba.tif"
+    pequena.save(origen, save_all=True, append_images=[bomba], compression="group4")
+
+    r = ocr.extraer(origen)
+
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "imagen_demasiado_grande"
+    assert r.detalle["causa"] == "demasiados_pixeles"
+
+
+def test_n1_tiff_con_demasiadas_paginas_se_rechaza(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    monkeypatch.setattr(ocr, "MAX_PAGINAS", 3)
+    paginas = [Image.new("L", (50, 50), 255) for _ in range(4)]
+    origen = _tiff_multipagina(tmp_path / "largo.tif", paginas)
+    r = ocr.extraer(origen)
+    assert r.estado == "error"
+    assert r.detalle["causa"] == "demasiadas_paginas"
+
+
+def test_n1_tiff_de_dos_paginas_con_texto_en_las_dos_sale_completo(tmp_path: Path):
+    from PIL import Image
+
+    p1 = _imagen_multilinea(tmp_path / "p1.png", [
+        "Primera pagina del contrato", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    p2 = _imagen_multilinea(tmp_path / "p2.png", [
+        "Segunda pagina de anexos", "Garantia hipotecaria sobre inmueble",
+        "Avaluo comercial 5,000,000.00 USD", "Firmado ante notario publico",
+    ])
+    tif = _tiff_multipagina(
+        tmp_path / "dos.tif", [Image.open(p1).convert("RGB"), Image.open(p2).convert("RGB")]
+    )
+
+    r = ocr.extraer(tif)
+
+    # tesseract REAL: solo propiedades robustas entre versiones (ronda 14)
+    assert r.estado != "error"
+    texto = r.salidas["texto.txt"]
+    assert "Primera" in texto
+    assert "Segunda" in texto
+    assert r.detalle["paginas"] == 2
+
+
+def test_n1_cada_pagina_va_por_stdin_como_png_no_el_tiff_original(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    p1 = _imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD")
+    tif = _tiff_multipagina(
+        tmp_path / "dos.tif",
+        [Image.open(p1).convert("RGB"), Image.open(p1).convert("RGB")],
+    )
+    entradas: list = []
+    real = ocr.subprocess.run
+
+    def espia(cmd, *a, **k):
+        if cmd and cmd[0] == "tesseract" and "--version" not in cmd and "tsv" not in cmd:
+            entradas.append(k.get("input"))
+        return real(cmd, *a, **k)
+
+    monkeypatch.setattr(ocr.subprocess, "run", espia)
+    ocr.extraer(tif)
+    assert len(entradas) == 2
+    assert all(e.startswith(b"\x89PNG") for e in entradas)
+
+
+def test_n2_los_bytes_se_leen_una_vez_y_son_los_que_van_a_tesseract(
+    tmp_path: Path, monkeypatch
+):
+    """Carrera validar/leer: si el archivo cambia DESPUES de validarlo, lo que
+    se procesa sigue siendo lo validado."""
+    origen = _imagen_multilinea(tmp_path / "doc.png", [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    original = origen.read_bytes()
+    real_validar = ocr._validar_imagen
+
+    def validar_y_cambiar(datos, *a, **k):
+        resultado = real_validar(datos, *a, **k)
+        origen.write_text("/etc/hostname\n")  # el archivo cambia tras validar
+        return resultado
+
+    monkeypatch.setattr(ocr, "_validar_imagen", validar_y_cambiar)
+    entradas: list = []
+    real = ocr.subprocess.run
+
+    def espia(cmd, *a, **k):
+        if cmd and cmd[0] == "tesseract" and "--version" not in cmd:
+            entradas.append(k.get("input"))
+        return real(cmd, *a, **k)
+
+    monkeypatch.setattr(ocr.subprocess, "run", espia)
+    r = ocr.extraer(origen)
+    assert r.estado != "error"          # tesseract REAL: solo lo robusto (ronda 14)
+    assert "Activos" in r.salidas["texto.txt"]
+    assert entradas and all(e == original for e in entradas)
+
+
+def test_n3_un_png_con_metadata_pdf_es_una_imagen(tmp_path: Path):
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+
+    base = _imagen_multilinea(tmp_path / "b.png", [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    meta = PngInfo()
+    meta.add_text("Software", "exportado de %PDF-1.7")
+    destino = tmp_path / "con-meta.png"
+    Image.open(base).save(destino, pnginfo=meta)
+    assert b"%PDF" in destino.read_bytes()[:1024]
+
+    assert ocr.tipo_por_cabecera(destino.read_bytes()[:1024]) == "imagen"
+    r = ocr.extraer(destino)
+    assert r.estado != "error"          # tesseract REAL: solo lo robusto (ronda 14)
+    assert "Activos" in r.salidas["texto.txt"]
+
+
+def test_n5_la_version_de_la_logica_depende_del_camino():
+    assert ocr.version_logica("imagen") == ocr.VERSION_LOGICA_IMAGEN
+    assert ocr.version_logica("pdf") == ocr.VERSION_LOGICA_PDF == "1"
+
+
+def test_n5_una_ficha_vieja_de_pdf_escaneado_sin_marca_ya_no_se_reusa(
+    tmp_path, monkeypatch
+):
+    """Decision de Fernando 2026-10-04: un PDF sin texto util cambio de `error`
+    a `parcial`, asi que una ficha de PDF escrita SIN la marca de la logica (o
+    con otra) no se reusa -- igual que una de imagen. `ok` exacto en las dos
+    fichas: tesseract SIMULADO con TSV fijo; pdftoppm corre de verdad."""
+    import json
+
+    from motor_registry import tool_authority
+    from PIL import Image
+
+    from procesamiento import compuerta, ingesta
+
+    monkeypatch.setattr(tool_authority, "WORKSPACE_ROOT", tmp_path.resolve())
+    trabajo = tmp_path.resolve() / "trabajo"
+    lineas = [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ]
+    pdf = _pdf_de_imagenes(
+        tmp_path / "escaneo.pdf",
+        [Image.open(_imagen_multilinea(tmp_path / "pg.png", lineas)).convert("RGB")],
+    )
+    img = _imagen_multilinea(tmp_path / "foto.png", lineas)
+    _tesseract_con_tsv_fijo(monkeypatch, _LINEAS_CONFIABLES)
+
+    for origen in (pdf, img):
+        f = ingesta.ingerir(origen, trabajo)
+        assert f.estado == "ok"
+        if origen is pdf:
+            assert f.detalle["_version_logica"] == ocr.VERSION_LOGICA_PDF
+        ruta = ingesta.ruta_procesado(trabajo, f.sha256) / "ficha.json"
+        datos = json.loads(ruta.read_text(encoding="utf8"))
+        datos["detalle"].pop("_version_logica", None)  # ficha escrita ANTES
+        ruta.write_text(json.dumps(datos), encoding="utf8")
+
+    llamadas: list = []
+    original = compuerta.extraer
+    monkeypatch.setattr(
+        compuerta, "extraer", lambda *a, **k: llamadas.append(a) or original(*a, **k)
+    )
+    ingesta.ingerir(pdf, trabajo)
+    assert len(llamadas) == 1      # el PDF cambio de logica: se reextrae
+    ingesta.ingerir(img, trabajo)
+    assert len(llamadas) == 2      # la imagen tambien
+
+
+def test_n5_un_error_viejo_de_pdf_sin_marca_no_cuenta_como_intento_previo(
+    tmp_path, monkeypatch
+):
+    """El `error` de un PDF escrito antes de la marca (3 intentos = tope D-2) se
+    reintenta y ya no cuenta para el tope: ahora ese PDF da `ok` (imagen_sin_texto)."""
+    from motor_registry import tool_authority
+    from PIL import Image
+
+    from procesamiento import compuerta, ingesta
+    from procesamiento.ficha import Ficha
+
+    monkeypatch.setattr(tool_authority, "WORKSPACE_ROOT", tmp_path.resolve())
+    trabajo = tmp_path.resolve() / "trabajo"
+    pdf = _pdf_de_imagenes(
+        tmp_path / "vacio.pdf", [Image.new("RGB", (1100, 450), "white")]
+    )
+    ficha = ingesta.ingerir(pdf, trabajo)
+    assert ficha.estado == "ok"
+    carpeta = ingesta.ruta_procesado(trabajo, ficha.sha256)
+    viejo = Ficha(
+        sha256=ficha.sha256, origen=ficha.origen, extractor=ficha.extractor,
+        extractor_version=ficha.extractor_version, fecha=ficha.fecha, estado="error",
+        detalle={
+            "razon": "ninguna pagina del PDF dio texto util via OCR",
+            "_extension_ingesta": ".pdf", "_intentos": 3,
+        },
+    )
+    (carpeta / "ficha.json").write_text(viejo.a_json(), encoding="utf8")
+    llamadas: list = []
+    original = compuerta.extraer
+    monkeypatch.setattr(
+        compuerta, "extraer", lambda *a, **k: llamadas.append(a) or original(*a, **k)
+    )
+    f2 = ingesta.ingerir(pdf, trabajo)
+    assert len(llamadas) == 1
+    assert f2.estado == "ok"
+    assert f2.detalle["codigo"] == "imagen_sin_texto"
+
+
+def test_n6_una_imagen_de_200_millones_de_pixeles_es_demasiados_pixeles(tmp_path: Path):
+    from PIL import Image
+
+    origen = tmp_path / "enorme.tif"
+    Image.new("1", (20000, 10000), 1).save(origen, compression="group4")
+    r = ocr.extraer(origen)
+    assert r.estado == "error"
+    assert r.detalle["causa"] == "demasiados_pixeles"
+
+
+def test_n6_el_tope_de_pixeles_deja_pasar_la_foto_real_mas_grande():
+    assert ocr.MAX_PIXELES == 100_000_000
+    assert 13630 * 3826 < ocr.MAX_PIXELES
+
+
+def test_minor3_un_fallo_inesperado_no_copia_el_mensaje_de_la_excepcion(
+    tmp_path: Path, monkeypatch
+):
+    def revienta(*a, **k):
+        raise RuntimeError("/ruta/secreta/con/contenido")
+
+    monkeypatch.setattr(ocr, "_validar_imagen", revienta)
+    r = ocr.extraer(_imagen_una_linea(tmp_path / "x.png", "Activos totales 1,234 USD"))
+    assert r.estado == "error"
+    assert "RuntimeError" in r.detalle["razon"]
+    assert "secreta" not in json.dumps(dict(r.detalle))
+
+
+def test_decision_a_y_b_coinciden_se_aplica_a_b_exige_ocho_caracteres():
+    """Decision del controlador (Fernando puede cambiarla): menos de 8
+    caracteres CON mayoria de palabras dudosas es A (o D si es pagina), no B:
+    con una o dos palabras no hay texto que conservar."""
+    r = {
+        "texto": "ab c", "caracteres": 4, "n_palabras": 2, "confianza_promedio": 20.0,
+        "palabras_dudosas": [{"palabra": "ab", "confianza": 10.0}, {"palabra": "c", "confianza": 9.0}],
+        "ancho": 0, "alto": 0, "clasificacion": "sin_texto",
+    }
+    a = ocr._resolver_imagen(r, "spa", [(4032, 3024)])
+    assert a.estado == "ok" and a.detalle["codigo"] == "imagen_sin_texto"
+    d = ocr._resolver_imagen(r, "spa", [(2480, 3508)])
+    assert d.estado == "parcial" and d.detalle["codigo"] == "imagen_pagina_sin_texto"
+
+
+def test_d_en_un_tiff_multipagina_exige_que_todas_las_paginas_sean_de_pagina():
+    r = {
+        "texto": "", "caracteres": 0, "n_palabras": 0, "confianza_promedio": 0.0,
+        "palabras_dudosas": [], "ancho": 0, "alto": 0, "clasificacion": "sin_texto",
+    }
+    todas = ocr._resolver_imagen(r, "spa", [(2480, 3508), (2480, 3508)])
+    assert todas.detalle["codigo"] == "imagen_pagina_sin_texto"
+    mezcla = ocr._resolver_imagen(r, "spa", [(2480, 3508), (4032, 3024)])
+    assert mezcla.detalle["codigo"] == "imagen_sin_texto"
+
+
+def test_un_jpeg_mpo_de_dos_fotogramas_se_lee_cuadro_por_cuadro(tmp_path: Path, monkeypatch):
+    """Fotos de iPhone (MPO, 2 fotogramas: la foto y una vista previa): 30 de
+    las 33 imagenes reales de LACTOVI. Ronda 19 (BLOCK de Sol r18): cada cuadro
+    va a tesseract con SUS bytes JPEG originales (sin re-codificar), como las
+    paginas de un TIFF; el primero es exactamente el comienzo del archivo, asi
+    que la foto se lee igual que antes. Antes se leia solo el primer cuadro."""
+    from PIL import Image
+
+    base = _imagen_multilinea(tmp_path / "b.png", [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    grande = Image.open(base).convert("RGB")
+    mpo = tmp_path / "foto.jpeg"
+    grande.save(mpo, format="MPO", save_all=True, append_images=[grande.resize((550, 225))])
+    assert getattr(Image.open(mpo), "n_frames", 1) == 2
+    entradas: list = []
+    real = ocr.subprocess.run
+
+    def espia(cmd, *a, **k):
+        if cmd and cmd[0] == "tesseract" and "--version" not in cmd and "tsv" not in cmd:
+            entradas.append(k.get("input"))
+        return real(cmd, *a, **k)
+
+    monkeypatch.setattr(ocr.subprocess, "run", espia)
+    r = ocr.extraer(mpo)
+    assert r.estado != "error"          # tesseract REAL: solo lo robusto (ronda 14)
+    assert "Activos" in r.salidas["texto.txt"]
+    assert r.detalle["paginas"] == 2
+    datos = mpo.read_bytes()
+    assert len(entradas) == 2
+    assert datos.startswith(entradas[0]) and entradas[0].startswith(b"\xff\xd8")
+    assert entradas[1].startswith(b"\xff\xd8") and entradas[1] in datos
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 3: animaciones (N8), marcas de leptonica (N9), camino por
+# contenido (N10), PIL.Image en proceso limpio (N11), TIFF en streaming con
+# tope total y plazo (N13)
+# ---------------------------------------------------------------------------
+
+
+def _tesseract_llamado(monkeypatch) -> list:
+    """Espia: lista de las llamadas a tesseract que NO son `--version`."""
+    llamadas: list = []
+    real = ocr.subprocess.run
+
+    def espia(cmd, *a, **k):
+        if cmd and cmd[0] == "tesseract" and "--version" not in cmd:
+            llamadas.append(list(cmd))
+        return real(cmd, *a, **k)
+
+    monkeypatch.setattr(ocr.subprocess, "run", espia)
+    return llamadas
+
+
+def test_n8_un_gif_animado_con_un_fotograma_enorme_se_rechaza_sin_tesseract(
+    tmp_path: Path, monkeypatch
+):
+    """leptonica decodifica TODOS los fotogramas antes de rechazar la
+    animacion (8 de 15000x15000 llevaron a tesseract a 1,79 GB). Se rechaza
+    leyendo SOLO la estructura del GIF: ni Pillow decodifica ni tesseract
+    corre."""
+    import io
+    import time
+
+    from PIL import Image
+
+    chico = Image.new("P", (100, 100), 0)
+    enorme = Image.new("P", (10000, 10000), 1)
+    buf = io.BytesIO()
+    chico.save(buf, format="GIF", save_all=True, append_images=[enorme, enorme])
+    gif = tmp_path / "anim.gif"
+    gif.write_bytes(buf.getvalue())
+    llamadas = _tesseract_llamado(monkeypatch)
+
+    t0 = time.monotonic()
+    r = ocr.extraer(gif)
+
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "formato_no_soportado"
+    assert r.detalle["causa"] == "animacion_no_soportada"
+    assert r.detalle["formato"] == "gif_animado"
+    assert llamadas == []
+    assert time.monotonic() - t0 < 5
+
+
+def test_n8_un_webp_animado_se_rechaza_sin_tesseract(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    cuadros = [Image.new("RGB", (120, 80), c) for c in ("red", "green", "blue")]
+    webp = tmp_path / "anim.webp"
+    cuadros[0].save(webp, save_all=True, append_images=cuadros[1:], duration=100)
+    assert getattr(Image.open(webp), "n_frames", 1) > 1
+    llamadas = _tesseract_llamado(monkeypatch)
+
+    r = ocr.extraer(webp)
+
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "formato_no_soportado"
+    assert r.detalle["causa"] == "animacion_no_soportada"
+    assert r.detalle["formato"] == "webp_animado"
+    assert llamadas == []
+
+
+@pytest.mark.parametrize("formato", ["gif", "webp"])
+def test_n8_un_gif_o_webp_de_un_solo_fotograma_sigue_como_hoy(tmp_path: Path, formato):
+    from PIL import Image
+
+    base = _imagen_multilinea(tmp_path / "b.png", [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    destino = tmp_path / f"quieta.{formato}"
+    Image.open(base).convert("RGB").save(destino)
+    r = ocr.extraer(destino)
+    assert r.estado != "error"          # tesseract REAL: solo lo robusto (ronda 14)
+    assert "Activos" in r.salidas["texto.txt"]
+
+
+def test_n9_leptonica_por_stdin_escribe_pixreadmem_y_se_reconoce(tmp_path: Path, monkeypatch):
+    """Con un tesseract SIMULADO que imita su stderr real por stdin. Los casos
+    REALES (rc=1 con `pixReadMem` y rc=0 con `is not uint`) estan en
+    `test_n15_*`."""
+    class Falso:
+        returncode = 1
+        stdout = b""
+        stderr = (b"Error in pixReadMem: Unsupported image type\n"
+                  b"Error during processing.\n")
+
+    real = ocr.subprocess.run
+
+    def fake_run(cmd, **k):
+        return real(cmd, **k) if "--version" in cmd else Falso()
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake_run)
+    assert ocr._ocr_bytes(b"x", "spa") == {"clasificacion": "ilegible", "causa": "tesseract_no_lee"}
+    assert "pixReadMem" in ocr._MARCAS_ARCHIVO_ILEGIBLE
+
+    r = ocr.extraer(_imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD"))
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_no_procesable"
+    assert r.detalle["causa"] == "tesseract_no_lee"
+
+
+def test_n9_la_marca_sola_basta_aunque_no_diga_pixreadstream(monkeypatch):
+    class Falso:
+        returncode = 1
+        stdout = b""
+        stderr = b"Error in pixReadMem: algo\n"
+
+    real = ocr.subprocess.run
+    monkeypatch.setattr(
+        ocr.subprocess, "run", lambda cmd, **k: real(cmd, **k) if "--version" in cmd else Falso()
+    )
+    assert ocr._ocr_bytes(b"x", "spa")["causa"] == "tesseract_no_lee"
+
+
+def test_n10_un_png_llamado_pdf_no_reusa_la_ficha_vieja_y_deja_su_camino(
+    tmp_path, monkeypatch
+):
+    """La version de la logica se decide por el CONTENIDO (como la compuerta),
+    no por la extension: un PNG llamado x.pdf es una imagen."""
+    import json
+
+    from motor_registry import tool_authority
+    from PIL import Image
+
+    from procesamiento import compuerta, ingesta
+
+    monkeypatch.setattr(tool_authority, "WORKSPACE_ROOT", tmp_path.resolve())
+    trabajo = tmp_path.resolve() / "trabajo"
+    png = _imagen_multilinea(tmp_path / "x.png", [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    falso_pdf = tmp_path / "x.pdf"
+    falso_pdf.write_bytes(png.read_bytes())
+    _tesseract_con_tsv_fijo(monkeypatch, _LINEAS_CONFIABLES)   # `ok` exacto: simulado (ronda 14)
+
+    f = ingesta.ingerir(falso_pdf, trabajo)
+    assert f.estado == "ok"
+    assert f.detalle["_camino"] == "imagen"
+    assert f.detalle["_version_logica"] == ocr.VERSION_LOGICA_IMAGEN
+    ruta = ingesta.ruta_procesado(trabajo, f.sha256) / "ficha.json"
+    datos = json.loads(ruta.read_text(encoding="utf8"))
+    datos["detalle"].pop("_version_logica")
+    ruta.write_text(json.dumps(datos), encoding="utf8")
+
+    llamadas: list = []
+    original = compuerta.extraer
+    monkeypatch.setattr(
+        compuerta, "extraer", lambda *a, **k: llamadas.append(a) or original(*a, **k)
+    )
+    ingesta.ingerir(falso_pdf, trabajo)
+    assert len(llamadas) == 1
+
+
+def test_n10_un_pdf_escaneado_deja_camino_pdf(tmp_path: Path):
+    from PIL import Image
+
+    lineas = [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ]
+    pdf = _pdf_de_imagenes(
+        tmp_path / "e.pdf",
+        [Image.open(_imagen_multilinea(tmp_path / "pg.png", lineas)).convert("RGB")],
+    )
+    assert ocr.extraer(pdf).detalle["_camino"] == "pdf"
+    assert ocr.extraer(_imagen_multilinea(tmp_path / "i.png", lineas)).detalle["_camino"] == "imagen"
+
+
+def test_n13_la_suma_de_pixeles_de_un_tiff_pasa_el_tope_total_sin_decodificar(
+    tmp_path: Path, monkeypatch
+):
+    from PIL import Image
+
+    paginas = [Image.new("L", (100, 100), 255) for _ in range(5)]
+    tif = _tiff_multipagina(tmp_path / "cinco.tif", paginas)
+    monkeypatch.setattr(ocr, "MAX_PIXELES_TOTAL", 25_000)  # la pagina 3 (30 000) lo pasa
+    llamadas = _tesseract_llamado(monkeypatch)
+
+    r = ocr.extraer(tif)
+
+    assert r.estado == "error"
+    assert r.detalle["causa"] == "demasiados_pixeles"
+    assert llamadas == []  # ninguna pagina se decodifico ni se leyo
+
+
+def test_n13_los_topes_por_defecto():
+    assert ocr.MAX_PIXELES_TOTAL == 300_000_000
+    assert ocr.PLAZO_TOTAL_SEGUNDOS == 900
+
+
+def test_n13_un_tiff_valido_se_lee_pagina_a_pagina_y_no_guarda_los_png(tmp_path: Path):
+    """Sigue dando el texto completo de las dos paginas (streaming)."""
+    from PIL import Image
+
+    p1 = _imagen_multilinea(tmp_path / "p1.png", [
+        "Primera pagina del contrato", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ])
+    p2 = _imagen_multilinea(tmp_path / "p2.png", [
+        "Segunda pagina de anexos", "Garantia hipotecaria sobre inmueble",
+        "Avaluo comercial 5,000,000.00 USD", "Firmado ante notario publico",
+    ])
+    tif = _tiff_multipagina(
+        tmp_path / "dos.tif", [Image.open(p1).convert("RGB"), Image.open(p2).convert("RGB")]
+    )
+    r = ocr.extraer(tif)
+    assert "Primera" in r.salidas["texto.txt"] and "Segunda" in r.salidas["texto.txt"]
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 3 (cierre): TIFF de coma flotante / 16 bits y rc=0 con stderr
+# ---------------------------------------------------------------------------
+
+
+def test_rc_cero_con_una_marca_de_lectura_fallida_en_stderr_es_tesseract_no_lee(
+    tmp_path: Path, monkeypatch
+):
+    class Falso:
+        returncode = 0
+        stdout = b""
+        stderr = b"Error in pixReadFromTiffStream: sample format = 3 is not uint\n"
+
+    real = ocr.subprocess.run
+    monkeypatch.setattr(
+        ocr.subprocess, "run", lambda cmd, **k: real(cmd, **k) if "--version" in cmd else Falso()
+    )
+    assert ocr._ocr_bytes(b"x", "spa") == {"clasificacion": "ilegible", "causa": "tesseract_no_lee"}
+
+    r = ocr.extraer(_imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD"))
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "archivo_no_procesable"
+    assert r.detalle["causa"] == "tesseract_no_lee"
+    assert r.detalle.get("codigo") != "imagen_sin_texto"
+
+
+def test_rc_cero_con_stderr_normal_no_se_toma_por_fallo(tmp_path: Path):
+    """Control: 'Estimating resolution as N' en stderr es ruido normal."""
+    r = ocr.extraer(_imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD"))
+    assert r.estado in {"ok", "parcial"}
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 5
+# ---------------------------------------------------------------------------
+
+
+class _Reloj:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+def _tesseract_con_reloj(monkeypatch, reloj, avance, modo="ok"):
+    """Tesseract simulado: cada llamada consume `avance` segundos del reloj
+    simulado; `modo="timeout"` lanza TimeoutExpired tras consumirlos."""
+    import subprocess
+
+    llamadas: list = []
+    real = ocr.subprocess.run
+
+    class Salida:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        llamadas.append(k.get("timeout"))
+        reloj.t += avance
+        if modo == "timeout":
+            raise subprocess.TimeoutExpired(cmd, k.get("timeout"))
+        return Salida()
+
+    monkeypatch.setattr(ocr, "_reloj", reloj)
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    return llamadas
+
+
+def _tiff_de_dos_paginas(tmp_path: Path) -> Path:
+    from PIL import Image
+
+    return _tiff_multipagina(
+        tmp_path / "dos.tif", [Image.new("L", (200, 100), 255) for _ in range(2)]
+    )
+
+
+def test_n16_un_solo_presupuesto_se_descuenta_en_cada_llamada(tmp_path, monkeypatch):
+    reloj = _Reloj()
+    timeouts = _tesseract_con_reloj(monkeypatch, reloj, avance=250)
+    ocr.extraer(_tiff_de_dos_paginas(tmp_path))
+    # 2 paginas x (texto + tsv): restante 900, 650, 400, 150, cada una tope 300
+    assert timeouts == [300, 300, 300, 150]
+
+
+def test_n16_con_el_presupuesto_agotado_no_se_llama_a_otra_pagina(tmp_path, monkeypatch):
+    reloj = _Reloj()
+    timeouts = _tesseract_con_reloj(monkeypatch, reloj, avance=500)
+    r = ocr.extraer(_tiff_de_dos_paginas(tmp_path))
+    assert len(timeouts) == 2          # pagina 1 (texto+tsv) y se corta
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "ocr_tiempo_excedido"
+    assert r.detalle["causa"] == "tiempo_excedido"
+
+
+def test_n16_timeout_con_el_presupuesto_consumido_es_tiempo_excedido(tmp_path, monkeypatch):
+    reloj = _Reloj()
+    _tesseract_con_reloj(monkeypatch, reloj, avance=1000, modo="timeout")
+    r = ocr.extraer(_tiff_de_dos_paginas(tmp_path))
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "ocr_tiempo_excedido"
+    assert r.detalle["causa"] == "tiempo_excedido"
+
+
+def test_n16_timeout_por_llamada_con_presupuesto_restante_tiene_su_causa(tmp_path, monkeypatch):
+    reloj = _Reloj()
+    _tesseract_con_reloj(monkeypatch, reloj, avance=300, modo="timeout")
+    r = ocr.extraer(_tiff_de_dos_paginas(tmp_path))
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "ocr_tiempo_excedido"
+    assert r.detalle["causa"] == "tiempo_por_llamada"
+
+
+def test_n16_una_imagen_suelta_tambien_usa_el_presupuesto_y_el_codigo(tmp_path, monkeypatch):
+    reloj = _Reloj()
+    _tesseract_con_reloj(monkeypatch, reloj, avance=300, modo="timeout")
+    r = ocr.extraer(_imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD"))
+    assert r.detalle["codigo"] == "ocr_tiempo_excedido"
+
+
+def _pdf_escaneado(tmp_path: Path) -> Path:
+    from PIL import Image
+
+    lineas = [
+        "Estado de Situación Financiera", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD",
+    ]
+    return _pdf_de_imagenes(
+        tmp_path / "e.pdf",
+        [Image.open(_imagen_multilinea(tmp_path / "pg.png", lineas)).convert("RGB")],
+    )
+
+
+def test_n17_pdf_con_4_bytes_de_basura_llamado_pdf_es_pdf_en_las_tres(tmp_path: Path):
+    from procesamiento import compuerta, ingesta
+
+    f = tmp_path / "escaneo.pdf"
+    f.write_bytes(b"\x00\x01\x02\x03" + _pdf_escaneado(tmp_path).read_bytes())
+    assert ocr.camino_de(f) == "pdf"
+    assert ingesta._camino_de(f, ".pdf") == "pdf"
+    assert compuerta._tipo_por_contenido(f) == "pdf"
+    assert ocr.extraer(f).detalle["_camino"] == "pdf"
+    assert compuerta.extraer(f).detalle["_camino"] == "pdf"
+
+
+def test_n20_pdf_desplazado_con_otro_nombre_no_es_pdf_y_las_tres_coinciden(tmp_path: Path):
+    """`%PDF` desplazado solo vale con extension .pdf: con `.png` ni la
+    compuerta, ni ocr, ni la ingesta lo toman por PDF."""
+    from procesamiento import compuerta, ingesta
+
+    f = tmp_path / "escaneo.png"
+    f.write_bytes(b"\x00\x01\x02\x03" + _pdf_escaneado(tmp_path).read_bytes())
+    assert compuerta._tipo_por_contenido(f) is None
+    assert ocr.camino_de(f) == "imagen"
+    assert ingesta._camino_de(f, ".png") == "imagen"
+
+
+@pytest.mark.parametrize("nombre", ["nota.txt", "datos.csv", "correo.eml"])
+def test_n20_un_archivo_que_menciona_pdf_sigue_en_sin_extractor(tmp_path: Path, nombre):
+    from procesamiento import compuerta
+
+    f = tmp_path / nombre
+    f.write_text("hola\nver el adjunto %PDF-1.7 en la siguiente pagina\n", encoding="utf8")
+    r = compuerta.extraer(f)
+    assert r.estado == "sin_extractor"
+
+
+def test_n17_pdf_con_2000_bytes_de_basura_la_misma_decision_en_las_tres(
+    tmp_path: Path, monkeypatch
+):
+    """Decision documentada: sin %PDF en los primeros 1024 bytes el CONTENIDO
+    no decide y manda la EXTENSION (.pdf -> camino pdf), igual que la
+    compuerta siempre hizo. La compuerta le pasa ese camino a `ocr.extraer`."""
+    from procesamiento import compuerta, ingesta
+
+    f = tmp_path / "Escanear 1.pdf"
+    f.write_bytes(b"\x00" * 2000 + _pdf_escaneado(tmp_path).read_bytes())
+    assert ocr.camino_de(f) == "pdf"
+    assert ingesta._camino_de(f, ".pdf") == "pdf"
+    pasados: list = []
+    real = compuerta.ocr.extraer
+    monkeypatch.setattr(
+        compuerta.ocr, "extraer",
+        lambda *a, **k: pasados.append(k.get("camino")) or real(*a, **k),
+    )
+    compuerta.extraer(f)
+    assert pasados == ["pdf"]
+
+
+def test_n17_la_firma_de_imagen_manda_y_un_zip_no_se_confunde_con_pdf():
+    assert ocr.tipo_por_cabecera(b"\x89PNG\r\n\x1a\n" + b"x" * 50 + b"%PDF", ".pdf") == "imagen"
+    assert ocr.tipo_por_cabecera(b"%PDF-1.7 ...") == "pdf"                       # al inicio, sin extension
+    assert ocr.tipo_por_cabecera(b"\x00\x01\x02\x03%PDF-1.7", ".pdf") == "pdf"    # desplazado, con .pdf
+    assert ocr.tipo_por_cabecera(b"\x00\x01\x02\x03%PDF-1.7", ".txt") is None    # desplazado, sin .pdf
+    assert ocr.tipo_por_cabecera(b"\x00\x01\x02\x03%PDF-1.7") is None
+    assert ocr.tipo_por_cabecera(b"x" * 2000 + b"%PDF-1.7", ".pdf") is None
+    assert ocr.tipo_por_cabecera(b"PK\x03\x04" + b"x" * 30 + b"%PDF", ".pdf") is None
+
+
+def test_n21_los_modos_fuera_de_png_tienen_su_tope_por_fotograma(tmp_path, monkeypatch):
+    from PIL import Image
+
+    assert ocr.MAX_PIXELES_OTROS_MODOS == 25_000_000
+    monkeypatch.setattr(ocr, "MAX_PIXELES_OTROS_MODOS", 5_000)
+    destino = tmp_path / "cmyk.tif"
+    Image.new("CMYK", (100, 100)).save(destino)
+    r = ocr.extraer(destino)
+    assert r.detalle["causa"] == "demasiados_pixeles"
+    rgb = tmp_path / "rgb.png"
+    Image.new("RGB", (100, 100), "white").save(rgb)
+    assert ocr.extraer(rgb).estado == "ok"
+
+
+def test_cmyk_de_dos_paginas_sigue_leyendose_como_rgb(tmp_path: Path):
+    from PIL import Image
+
+    p1 = _imagen_multilinea(tmp_path / "a.png", [
+        "Primera pagina del contrato", "Activos totales 1,234,567.89 USD",
+        "Pasivos totales 987,654.32 USD", "Patrimonio neto 246,913.57 USD"])
+    p2 = _imagen_multilinea(tmp_path / "b.png", [
+        "Segunda pagina de anexos", "Garantia hipotecaria sobre inmueble",
+        "Avaluo comercial 5,000,000.00 USD", "Firmado ante notario publico"])
+    tif = tmp_path / "cmyk2.tif"
+    Image.open(p1).convert("CMYK").save(
+        tif, save_all=True, append_images=[Image.open(p2).convert("CMYK")])
+    r = ocr.extraer(tif)
+    assert "Primera" in r.salidas["texto.txt"] and "Segunda" in r.salidas["texto.txt"]
+
+
+def test_n18_memory_error_no_es_archivo_danado(tmp_path: Path, monkeypatch):
+    def sin_memoria(*a, **k):
+        raise MemoryError
+
+    monkeypatch.setattr(ocr, "_a_modo_legible", sin_memoria)
+    r = ocr.extraer(_tiff_de_dos_paginas(tmp_path))
+    assert r.estado == "error"
+    assert r.detalle["causa"] == "sin_memoria"
+    assert r.detalle["codigo"] != "archivo_ilegible"
+
+
+def test_n18_memory_error_al_decodificar_tampoco_es_archivo_danado(tmp_path, monkeypatch):
+    from PIL import Image
+
+    def sin_memoria(self, *a, **k):
+        raise MemoryError
+
+    origen = _imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD")
+    monkeypatch.setattr(Image.Image, "load", sin_memoria)
+    r = ocr.extraer(origen)
+    assert r.estado == "error"
+    assert r.detalle["causa"] == "sin_memoria"
+    assert r.detalle["codigo"] != "archivo_ilegible"
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 6 (cierre): I;16L / I;16N con TEXTO real
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 7: N22 (I;16 con valores 0-255) y N23 (codigo por causa)
+# ---------------------------------------------------------------------------
+
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 8: formato no soportado = error VISIBLE que nombra el formato y
+# la accion; la deteccion es SIEMPRE antes de llamar a tesseract
+# ---------------------------------------------------------------------------
+
+_ACCION = "conviértelo a JPEG o PNG y vuelve a subirlo"
+
+
+def _assert_formato_no_soportado(r, formato: str, causa: str, llamadas: list):
+    assert r.estado == "error"
+    assert r.salidas == {}
+    assert r.detalle["codigo"] == "formato_no_soportado"
+    assert r.detalle["causa"] == causa
+    assert r.detalle["formato"] == formato
+    assert r.detalle["razon"] == f"formato de imagen no soportado ({formato}): {_ACCION}"
+    assert llamadas == [], "se llamo a tesseract: la deteccion tiene que ser previa"
+
+
+def test_formato_gif_animado_razon_y_accion(tmp_path: Path, monkeypatch):
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    a = Image.new("RGB", (50, 50), "red")
+    a.save(buf, format="GIF", save_all=True, append_images=[Image.new("RGB", (50, 50), "blue")])
+    gif = tmp_path / "a.gif"
+    gif.write_bytes(buf.getvalue())
+    llamadas = _tesseract_llamado(monkeypatch)
+    _assert_formato_no_soportado(ocr.extraer(gif), "gif_animado", "animacion_no_soportada", llamadas)
+
+
+def test_formato_webp_animado_razon_y_accion(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    cuadros = [Image.new("RGB", (60, 40), c) for c in ("red", "green")]
+    webp = tmp_path / "a.webp"
+    cuadros[0].save(webp, save_all=True, append_images=cuadros[1:], duration=100)
+    llamadas = _tesseract_llamado(monkeypatch)
+    _assert_formato_no_soportado(ocr.extraer(webp), "webp_animado", "animacion_no_soportada", llamadas)
+
+
+def test_formato_coma_flotante_es_f_en_tiff(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    destino = tmp_path / "f.tif"
+    Image.new("F", (200, 100), 3.0).save(destino)
+    llamadas = _tesseract_llamado(monkeypatch)
+    _assert_formato_no_soportado(ocr.extraer(destino), "coma_flotante", "modo_no_soportado", llamadas)
+
+
+def test_formato_entero_32_bits_es_i_en_tiff(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    destino = tmp_path / "i.tif"
+    Image.new("I", (200, 100), 3).save(destino)
+    llamadas = _tesseract_llamado(monkeypatch)
+    _assert_formato_no_soportado(ocr.extraer(destino), "entero_32_bits", "modo_no_soportado", llamadas)
+
+
+@pytest.mark.parametrize("como", ["tiff_i16", "png_i16", "tiff_i16b"])
+def test_formato_gris_16_bits_en_una_pagina(tmp_path: Path, monkeypatch, como: str):
+    """TODO I;16* es no soportado, con cualquier rango de valores (incluso con
+    texto): un solo pixel >= 256 dejaba la pagina negra en leptonica."""
+    from PIL import Image
+
+    base = _imagen_multilinea(tmp_path / "b.png", [
+        "Activos totales 1,234,567.89 USD", "Pasivos totales 987,654.32 USD",
+        "Patrimonio neto 246,913.57 USD", "Factura numero 12345 pagada"])
+    pagina = Image.open(base).convert("L").convert("I").convert("I;16")      # valores 0-255
+    if como == "tiff_i16":
+        destino = tmp_path / "x.tif"; pagina.save(destino)
+    elif como == "png_i16":
+        destino = tmp_path / "x.png"; pagina.save(destino)
+    else:
+        le = pagina.tobytes(); be = bytearray(le); be[0::2], be[1::2] = le[1::2], le[0::2]
+        destino = tmp_path / "x.tif"; Image.frombytes("I;16B", pagina.size, bytes(be)).save(destino)
+    llamadas = _tesseract_llamado(monkeypatch)
+    _assert_formato_no_soportado(ocr.extraer(destino), "gris_16_bits", "modo_no_soportado", llamadas)
+
+
+def test_formato_gris_16_bits_con_una_pagina_de_16_bits_en_un_tiff_multipagina(tmp_path, monkeypatch):
+    from PIL import Image
+
+    destino = tmp_path / "mixto.tif"
+    Image.new("L", (100, 100), 255).save(
+        destino, save_all=True, append_images=[Image.new("I;16", (100, 100), 1000)])
+    llamadas = _tesseract_llamado(monkeypatch)
+    _assert_formato_no_soportado(ocr.extraer(destino), "gris_16_bits", "modo_no_soportado", llamadas)
+
+
+def test_el_formato_de_cada_modo_de_16_bits_f_e_i():
+    for modo in ("I;16", "I;16B", "I;16L", "I;16N"):
+        assert ocr._formato_de_modo(modo) == "gris_16_bits"
+    assert ocr._formato_de_modo("F") == "coma_flotante"
+    assert ocr._formato_de_modo("I") == "entero_32_bits"
+    assert ocr._formato_de_modo("RGB") is None and ocr._formato_de_modo("CMYK") is None
+
+
+def _bmp(ancho: int, alto: int, bpp: int, compresion: int) -> bytes:
+    import struct
+
+    pix = struct.pack("<H", 0xFFFF) * (ancho * alto)
+    info = struct.pack("<IiiHHIIiiII", 40, ancho, alto, 1, bpp, compresion, len(pix), 2835, 2835, 0, 0)
+    masks = struct.pack("<III", 0xF800, 0x07E0, 0x001F) if compresion == 3 else b""
+    off = 14 + 40 + len(masks)
+    return b"BM" + struct.pack("<IHHI", off + len(pix), 0, 0, off) + info + masks + pix
+
+
+def test_formato_bmp_16_bits_rgb565_se_detecta_por_el_header_antes_de_tesseract(tmp_path, monkeypatch):
+    destino = tmp_path / "565.bmp"
+    destino.write_bytes(_bmp(64, 32, 16, 3))
+    llamadas = _tesseract_llamado(monkeypatch)
+    _assert_formato_no_soportado(ocr.extraer(destino), "bmp_16_bits", "bmp_no_soportado", llamadas)
+
+
+def test_un_bmp_de_16_bits_sin_compresion_no_se_marca_como_formato_no_soportado(tmp_path):
+    """Control: la deteccion es por header (16 bpp con mascaras de bits), no por
+    cualquier BMP de 16 bpp."""
+    destino = tmp_path / "555.bmp"
+    destino.write_bytes(_bmp(64, 32, 16, 0))
+    r = ocr.extraer(destino)
+    assert r.detalle.get("codigo") != "formato_no_soportado"
+
+
+# --- archivo_no_procesable: Pillow lo decodifica y leptonica lo rechaza -----
+
+
+def _imagen_de_ruido(tmp_path: Path, rnd=None):
+    import random
+
+    from PIL import Image
+
+    rnd = rnd or random.Random(1)
+    im = Image.new("L", (600, 400))
+    im.putdata([rnd.randint(0, 255) for _ in range(240000)])
+    return im
+
+
+def _tesseract_simulado_rc1_pixreadmem(monkeypatch) -> list:
+    """Tesseract SIMULADO: rc=1 con la marca `pixReadMem`. La prueba no depende
+    de la version de libpng, libjpeg ni leptonica del runner: los archivos son
+    reales (Pillow los decodifica) pero el rechazo de leptonica se simula."""
+    llamadas: list = []
+    real = ocr.subprocess.run
+
+    class Rechazo:
+        returncode = 1
+        stdout = b""
+        stderr = b"Error in pixReadMem: png: no pix returned\nError during processing.\n"
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        llamadas.append(list(cmd))
+        return Rechazo()
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    return llamadas
+
+
+def _assert_no_procesable(r, llamadas):
+    assert r.estado == "error"
+    assert r.salidas == {}
+    assert r.detalle["codigo"] == "archivo_no_procesable"
+    assert r.detalle["causa"] == "tesseract_no_lee"
+    assert r.detalle["razon"] == (
+        "el OCR no pudo leer la imagen (dañada o en un formato no soportado)")
+    assert "formato" not in r.detalle
+    assert llamadas, "tesseract (simulado) tenia que haberse llamado: Pillow si lo decodifica"
+
+
+def test_n26_un_png_cortado_antes_de_iend_es_archivo_no_procesable(tmp_path: Path, monkeypatch):
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    _imagen_de_ruido(tmp_path).save(buf, format="PNG")
+    cortado = tmp_path / "sin-iend.png"
+    cortado.write_bytes(buf.getvalue()[:-12])
+    Image.open(cortado).load()                     # el archivo es real y Pillow lo decodifica
+    llamadas = _tesseract_simulado_rc1_pixreadmem(monkeypatch)
+    _assert_no_procesable(ocr.extraer(cortado), llamadas)
+
+
+def test_n26_un_jpeg_con_basura_en_los_datos_es_archivo_no_procesable(tmp_path: Path, monkeypatch):
+    import io
+    import random
+
+    from PIL import Image
+
+    rnd = random.Random(1)      # el MISMO generador arma la imagen y la basura (reproducible)
+    buf = io.BytesIO()
+    _imagen_de_ruido(tmp_path, rnd).save(buf, format="JPEG")
+    datos = bytearray(buf.getvalue())
+    for i in range(len(datos) // 2, len(datos) // 2 + 400):
+        datos[i] = rnd.randint(0, 255)
+    roto = tmp_path / "basura.jpg"
+    roto.write_bytes(bytes(datos))
+    Image.open(roto).load()                        # el archivo es real y Pillow lo decodifica
+    llamadas = _tesseract_simulado_rc1_pixreadmem(monkeypatch)
+    _assert_no_procesable(ocr.extraer(roto), llamadas)
+
+
+@pytest.mark.parametrize("causa,codigo", [
+    ("firma_invalida", "archivo_ilegible"),
+    ("no_decodifica", "archivo_ilegible"),
+    ("tesseract_no_lee", "archivo_no_procesable"),
+    ("demasiados_pixeles", "imagen_demasiado_grande"),
+    ("demasiadas_paginas", "imagen_demasiado_grande"),
+])
+def test_cada_causa_tiene_su_codigo_y_su_razon(causa: str, codigo: str):
+    """`archivo_ilegible` (danado) SOLO firma invalida y no decodifica;
+    `archivo_no_procesable` cuando Pillow lo decodifico y leptonica no (puede
+    estar danado O ser un formato que no leemos: no se afirma ninguna de las dos);
+    `formato_no_soportado` solo con `formato` (ver las pruebas por formato);
+    los topes de tamano son `imagen_demasiado_grande`."""
+    d = ocr._ilegible(causa, "spa").detalle
+    assert d["codigo"] == codigo and d["causa"] == causa
+    assert "formato" not in d
+    if codigo == "archivo_ilegible":
+        assert "danado" in d["razon"]
+    if codigo == "archivo_no_procesable":
+        assert "dañada o en un formato no soportado" in d["razon"]
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 9: N28 (alfa), N30 (BMP con mascaras de 32 bpp), N31 (TIFF con signo)
+# ---------------------------------------------------------------------------
+
+_MODOS_CON_ALFA = {"RGBA", "LA", "PA", "RGBa", "La"}
+
+
+def _tesseract_que_registra(monkeypatch) -> list:
+    """Tesseract SIMULADO que registra los bytes que RECIBE (por stdin) y
+    responde bien: la prueba no depende de la version de leptonica."""
+    recibidos: list = []
+    real = ocr.subprocess.run
+
+    class Salida:
+        returncode = 0
+        stdout = b"texto"
+        stderr = b""
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        recibidos.append(k.get("input"))
+        return Salida()
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    return recibidos
+
+
+def _assert_llego_sin_alfa_y_con_fondo_blanco(recibidos: list):
+    from io import BytesIO
+
+    from PIL import Image
+
+    assert recibidos, "tesseract no recibio nada"
+    sobre_blanco = []
+    for datos in recibidos:
+        assert datos.startswith(b"\x89PNG"), "no se le pasan los bytes originales a leptonica"
+        with Image.open(BytesIO(datos)) as im:
+            assert im.mode not in _MODOS_CON_ALFA
+            assert "transparency" not in im.info
+            rgb = im.convert("RGB")
+            # ronda 11 (N36): con transparencia real se aplana sobre blanco Y sobre negro
+            assert rgb.getpixel((2, 2)) in {(255, 255, 255), (0, 0, 0)}
+            if rgb.getpixel((2, 2)) == (255, 255, 255):
+                sobre_blanco.append(rgb.convert("L").getextrema()[0])
+    assert sobre_blanco, "el fondo transparente tiene que llegar sobre blanco"
+    assert all(minimo < 100 for minimo in sobre_blanco), "el texto oscuro tiene que seguir ahi"
+
+
+def _rotulo_transparente(modo: str = "RGBA"):
+    """Fondo TRANSPARENTE con texto oscuro (la imagen de un logo o sello)."""
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGBA", (700, 120), (0, 0, 0, 0))
+    ImageDraw.Draw(im).text((20, 30), "Total a pagar: 1,500.00 Lempiras", fill=(0, 0, 0, 255), font=_fuente(36))
+    return im if modo == "RGBA" else im.convert(modo)
+
+
+def test_n28_webp_lossless_con_fondo_transparente_llega_sin_alfa_y_con_fondo_blanco(tmp_path, monkeypatch):
+    destino = tmp_path / "rotulo.webp"
+    _rotulo_transparente().save(destino, lossless=True)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    _assert_llego_sin_alfa_y_con_fondo_blanco(recibidos)
+
+
+def test_n28_tiff_rgba_con_fondo_transparente_llega_sin_alfa_y_con_fondo_blanco(tmp_path, monkeypatch):
+    destino = tmp_path / "rotulo.tif"
+    _rotulo_transparente().save(destino)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    _assert_llego_sin_alfa_y_con_fondo_blanco(recibidos)
+
+
+def test_n28_gif_con_indice_transparente_llega_sin_alfa_y_con_fondo_blanco(tmp_path, monkeypatch):
+    from PIL import Image, ImageDraw
+
+    im = Image.new("P", (700, 120), 0)
+    im.putpalette([0, 0, 0, 20, 20, 20] + [0, 0, 0] * 254)   # indice 0 = fondo (transparente, negro)
+    ImageDraw.Draw(im).text((20, 30), "Total a pagar: 1,500.00 Lempiras", fill=1, font=_fuente(36))
+    destino = tmp_path / "rotulo.gif"
+    im.save(destino, transparency=0)
+    assert "transparency" in Image.open(destino).info
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    _assert_llego_sin_alfa_y_con_fondo_blanco(recibidos)
+
+
+def test_n28_png_la_con_fondo_transparente_llega_sin_alfa_y_con_fondo_blanco(tmp_path, monkeypatch):
+    destino = tmp_path / "rotulo_la.png"
+    _rotulo_transparente("LA").save(destino)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    _assert_llego_sin_alfa_y_con_fondo_blanco(recibidos)
+
+
+def test_n28_png_p_con_transparencia_en_info_llega_sin_alfa_y_con_fondo_blanco(tmp_path, monkeypatch):
+    from PIL import Image, ImageDraw
+
+    im = Image.new("P", (700, 120), 0)
+    im.putpalette([0, 0, 0, 20, 20, 20] + [0, 0, 0] * 254)
+    ImageDraw.Draw(im).text((20, 30), "Total a pagar: 1,500.00 Lempiras", fill=1, font=_fuente(36))
+    destino = tmp_path / "rotulo_p.png"
+    im.save(destino, transparency=0)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    _assert_llego_sin_alfa_y_con_fondo_blanco(recibidos)
+
+
+def test_n28_una_imagen_sin_alfa_sigue_mandando_los_bytes_originales(tmp_path, monkeypatch):
+    destino = tmp_path / "plano.jpg"
+    _imagen_una_linea(tmp_path / "a.png", "Activos totales 1,234 USD")
+    from PIL import Image
+
+    Image.open(tmp_path / "a.png").convert("RGB").save(destino)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    assert recibidos and all(r == destino.read_bytes() for r in recibidos)
+
+
+def _bmp_32(ancho: int, alto: int, cabecera: int, compresion: int = 3) -> bytes:
+    import struct
+
+    from PIL import Image, ImageDraw
+
+    gris = Image.new("L", (ancho, alto), 255)
+    ImageDraw.Draw(gris).text((10, 10), "Activos totales 1,234 USD", fill=0, font=_fuente(28))
+    datos = gris.tobytes()
+    filas = []
+    for y in range(alto - 1, -1, -1):                        # BMP: de abajo hacia arriba
+        fila = datos[y * ancho:(y + 1) * ancho]
+        filas.append(b"".join(struct.pack("<I", 0xFF000000 | g << 16 | g << 8 | g) for g in fila))
+    pix = b"".join(filas)
+    info = struct.pack("<IiiHHIIiiII", cabecera, ancho, alto, 1, 32, compresion, len(pix), 2835, 2835, 0, 0)
+    mascaras = struct.pack("<III", 0xFF0000, 0xFF00, 0xFF)
+    if cabecera == 40:
+        info += mascaras
+    else:                                                    # V5: las mascaras van dentro del header
+        info += (mascaras + struct.pack("<I", 0xFF000000)).ljust(cabecera - 40, b"\0")
+    desplazamiento = 14 + len(info)
+    return b"BM" + struct.pack("<IHHI", desplazamiento + len(pix), 0, 0, desplazamiento) + info + pix
+
+
+@pytest.mark.parametrize("cabecera", [40, 124])
+def test_n30_un_bmp_de_32_bpp_con_mascaras_llega_a_tesseract_como_png(tmp_path, monkeypatch, cabecera):
+    from io import BytesIO
+
+    from PIL import Image
+
+    destino = tmp_path / f"b{cabecera}.bmp"
+    destino.write_bytes(_bmp_32(400, 60, cabecera))
+    with Image.open(destino) as im:                          # Pillow SI lo decodifica
+        im.load()
+    recibidos = _tesseract_que_registra(monkeypatch)
+    r = ocr.extraer(destino)
+    assert recibidos and all(d.startswith(b"\x89PNG") for d in recibidos)
+    assert r.detalle.get("codigo") != "formato_no_soportado"
+    with Image.open(BytesIO(recibidos[0])) as png:
+        assert png.mode not in _MODOS_CON_ALFA
+
+
+def _tiff_gris_16_con_signo(destino: Path, ancho: int = 64, alto: int = 32) -> Path:
+    """TIFF de un canal de 16 bits con SampleFormat=2 (entero CON SIGNO): Pillow
+    lo informa como modo `I`."""
+    import struct
+
+    datos = struct.pack("<h", 100) * (ancho * alto)
+    etiquetas = sorted([
+        (256, 3, 1, ancho), (257, 3, 1, alto), (258, 3, 1, 16), (259, 3, 1, 1),
+        (262, 3, 1, 1), (273, 4, 1, None), (277, 3, 1, 1), (278, 3, 1, alto),
+        (279, 4, 1, len(datos)), (339, 3, 1, 2),
+    ])
+    n = len(etiquetas)
+    inicio_datos = 8 + 2 + n * 12 + 4
+    salida = b"II*\x00" + struct.pack("<I", 8) + struct.pack("<H", n)
+    for etiqueta, tipo, cuenta, valor in etiquetas:
+        if etiqueta == 273:
+            salida += struct.pack("<HHII", etiqueta, tipo, cuenta, inicio_datos)
+        elif tipo == 4:
+            salida += struct.pack("<HHII", etiqueta, tipo, cuenta, valor)
+        else:
+            salida += struct.pack("<HHIHH", etiqueta, tipo, cuenta, valor, 0)
+    destino.write_bytes(salida + struct.pack("<I", 0) + datos)
+    return destino
+
+
+def test_n31_un_tiff_de_16_bits_con_signo_es_gris_16_bits_y_no_entero_32_bits(tmp_path, monkeypatch):
+    from PIL import Image
+
+    destino = _tiff_gris_16_con_signo(tmp_path / "s16.tif")
+    assert Image.open(destino).mode == "I"
+    llamadas = _tesseract_llamado(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "formato_no_soportado"
+    assert r.detalle["formato"] == "gris_16_bits"
+    assert llamadas == []
+
+
+def test_n31_un_tiff_de_32_bits_sigue_siendo_entero_32_bits(tmp_path, monkeypatch):
+    from PIL import Image
+
+    destino = tmp_path / "i32.tif"
+    Image.new("I", (64, 32), 5).save(destino)
+    llamadas = _tesseract_llamado(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.detalle["formato"] == "entero_32_bits"
+    assert llamadas == []
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 10: N32 (fondo por contraste), N33 (transparencia REAL y dpi),
+# N34 (tope de pixeles del aplanado)
+# ---------------------------------------------------------------------------
+
+
+def _recibido(recibidos: list):
+    from io import BytesIO
+
+    from PIL import Image
+
+    assert recibidos, "tesseract no recibio nada"
+    assert recibidos[0].startswith(b"\x89PNG")
+    im = Image.open(BytesIO(recibidos[0]))
+    im.load()
+    return im
+
+
+def _recibido_con_fondo(recibidos: list, fondo: tuple):
+    """La imagen recibida por tesseract cuyo fondo (pixel (2,2)) es `fondo`."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    assert recibidos, "tesseract no recibio nada"
+    for datos in recibidos:
+        assert datos.startswith(b"\x89PNG")
+        im = Image.open(BytesIO(datos))
+        im.load()
+        if im.convert("RGB").getpixel((2, 2)) == fondo:
+            return im
+    raise AssertionError(f"ninguna imagen llego con fondo {fondo}")
+
+
+def _rotulo(color_tinta, formato: str, destino: Path, fondo=(0, 0, 0, 0)):
+    """Texto de `color_tinta` sobre fondo TRANSPARENTE, en el formato dado."""
+    from PIL import Image, ImageDraw
+
+    texto = "Total a pagar: 1,500.00 Lempiras"
+    if formato == "gif":
+        paleta = [0, 0, 0] + list(color_tinta) + [0, 0, 0] * 254
+        im = Image.new("P", (700, 120), 0)
+        im.putpalette(paleta)
+        ImageDraw.Draw(im).text((20, 30), texto, fill=1, font=_fuente(36))
+        im.save(destino, transparency=0)
+        return
+    im = Image.new("RGBA", (700, 120), fondo)
+    ImageDraw.Draw(im).text((20, 30), texto, fill=tuple(color_tinta) + (255,), font=_fuente(36))
+    if formato == "webp":
+        im.save(destino, lossless=True)
+    else:
+        im.save(destino)
+
+
+@pytest.mark.parametrize("formato", ["webp", "tif", "png", "gif"])
+def test_n32_texto_claro_sobre_transparente_llega_con_fondo_negro_y_tinta_clara(
+    tmp_path, monkeypatch, formato
+):
+    destino = tmp_path / f"claro.{formato}"
+    _rotulo((255, 255, 255), formato, destino)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    rgb = _recibido_con_fondo(recibidos, (0, 0, 0)).convert("RGB")   # tinta clara: tiene que llegar sobre NEGRO
+    assert rgb.convert("L").getextrema()[1] > 200, "la tinta clara tiene que conservarse"
+
+
+@pytest.mark.parametrize("formato", ["webp", "tif", "png", "gif"])
+def test_n32_texto_oscuro_sobre_transparente_sigue_llegando_con_fondo_blanco(
+    tmp_path, monkeypatch, formato
+):
+    destino = tmp_path / f"oscuro.{formato}"
+    _rotulo((0, 0, 0) if formato != "gif" else (20, 20, 20), formato, destino)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    rgb = _recibido(recibidos).convert("RGB")
+    assert rgb.getpixel((2, 2)) == (255, 255, 255)
+    assert rgb.convert("L").getextrema()[0] < 100
+
+
+def test_n32_png_rgb_con_trns_de_fondo_negro_y_texto_blanco_conserva_la_tinta(tmp_path, monkeypatch):
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGB", (700, 120), (0, 0, 0))
+    ImageDraw.Draw(im).text((20, 30), "Total a pagar: 1,500.00 Lempiras", fill=(255, 255, 255), font=_fuente(36))
+    destino = tmp_path / "trns.png"
+    im.save(destino, transparency=(0, 0, 0))
+    assert Image.open(destino).info["transparency"] == (0, 0, 0)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    rgb = _recibido_con_fondo(recibidos, (0, 0, 0)).convert("RGB")
+    assert rgb.convert("L").getextrema()[1] > 200
+
+
+def test_n33_un_png_rgba_con_alfa_255_en_todo_manda_los_bytes_originales(tmp_path, monkeypatch):
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGBA", (700, 120), (255, 255, 255, 255))
+    ImageDraw.Draw(im).text((20, 30), "Total a pagar: 1,500.00 Lempiras", fill=(0, 0, 0, 255), font=_fuente(36))
+    destino = tmp_path / "opaco.png"
+    im.save(destino, dpi=(190, 190))
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    assert recibidos and all(r == destino.read_bytes() for r in recibidos)
+
+
+def test_n33_un_png_rgb_con_trns_que_no_coincide_con_ningun_pixel_manda_los_bytes_originales(
+    tmp_path, monkeypatch
+):
+    from PIL import Image
+
+    im = Image.new("RGB", (300, 80), (200, 200, 200))
+    destino = tmp_path / "trns_sin_efecto.png"
+    im.save(destino, transparency=(1, 2, 3))
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    assert recibidos and all(r == destino.read_bytes() for r in recibidos)
+
+
+def test_n33_el_aplanado_conserva_el_dpi_en_el_png_que_llega(tmp_path, monkeypatch):
+    """Sin `dpi` tesseract estima la resolucion y lee distinto (una captura de
+    190 dpi pasaba de 1910 a 1852 caracteres)."""
+    destino = tmp_path / "dpi.png"
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGBA", (700, 120), (0, 0, 0, 0))
+    ImageDraw.Draw(im).text((20, 30), "Total a pagar", fill=(0, 0, 0, 255), font=_fuente(36))
+    im.save(destino, dpi=(189.99, 189.99))
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    dpi = _recibido(recibidos).info.get("dpi")
+    assert dpi is not None and abs(dpi[0] - 189.99) < 1 and abs(dpi[1] - 189.99) < 1
+
+
+def test_n34_un_png_rgba_de_30_mpx_con_transparencia_real_es_imagen_demasiado_grande(
+    tmp_path, monkeypatch
+):
+    from PIL import Image
+
+    assert ocr.MAX_PIXELES_OTROS_MODOS == 25_000_000
+    im = Image.new("RGBA", (6000, 5000), (0, 0, 0, 0))     # 30 Mpx, transparente
+    destino = tmp_path / "enorme.png"
+    im.save(destino)
+    del im
+    llamadas = _tesseract_llamado(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "imagen_demasiado_grande"
+    assert r.detalle["causa"] == "demasiados_pixeles"
+    assert llamadas == []
+
+
+def test_n34_un_png_rgba_opaco_de_30_mpx_sigue_el_camino_de_antes(tmp_path, monkeypatch):
+    from PIL import Image
+
+    im = Image.new("RGBA", (6000, 5000), (255, 255, 255, 255))   # 30 Mpx, opaco
+    destino = tmp_path / "opaco30.png"
+    im.save(destino)
+    del im
+    recibidos = _tesseract_que_registra(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.detalle.get("codigo") != "imagen_demasiado_grande"
+    assert recibidos and all(d == destino.read_bytes() for d in recibidos)
+
+
+def _tiff_con_pagina_grande(destino: Path, transparente: bool) -> Path:
+    """TIFF de 2 paginas: la PRIMERA es la grande (el minimo que supera el tope
+    de 25 Mpx: 5000x5001), para que el rechazo ocurra antes de leer ninguna."""
+    from PIL import Image
+
+    alfa = 0 if transparente else 255
+    grande = Image.new("RGBA", (5000, 5001), (0, 0, 0, alfa))
+    chica = Image.new("RGBA", (100, 60), (255, 255, 255, 255))
+    grande.save(destino, save_all=True, append_images=[chica], compression="tiff_adobe_deflate")
+    return destino
+
+
+def test_n34_un_tiff_multipagina_con_una_pagina_de_mas_de_25_mpx_transparente_es_demasiado_grande(
+    tmp_path: Path, monkeypatch
+):
+    destino = _tiff_con_pagina_grande(tmp_path / "grande_transparente.tif", transparente=True)
+    assert 5000 * 5001 > ocr.MAX_PIXELES_OTROS_MODOS
+    llamadas = _tesseract_llamado(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "imagen_demasiado_grande"
+    assert r.detalle["causa"] == "demasiados_pixeles"
+    assert llamadas == []
+
+
+def test_n34_control_la_misma_pagina_opaca_no_la_toca_el_tope_del_aplanado(tmp_path, monkeypatch):
+    destino = _tiff_con_pagina_grande(tmp_path / "grande_opaca.tif", transparente=False)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.detalle.get("codigo") != "imagen_demasiado_grande"
+    assert len(recibidos) >= 2          # se leyeron las dos paginas
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 11: N36 (doble pasada sobre blanco y negro para la transparencia
+# REAL, sin heuristica de luminancia) y N37 (tope del aplanado de un TIFF
+# multipagina comprobado ANTES del OCR de cualquier pagina)
+# ---------------------------------------------------------------------------
+
+_TEXTO_LOGO = ("Total a pagar: 1,500.00 Lempiras", "Fecha: 03/10/2026")
+_ZONA_TEXTO_LOGO = (640, 40, 1600, 280)     # donde va el texto en el lienzo de 1600x300
+_BLANCO, _NEGRO = (255, 255, 255), (0, 0, 0)
+
+
+class _SalidaSimulada:
+    returncode = 0
+    stderr = b""
+
+    def __init__(self, stdout: bytes):
+        self.stdout = stdout
+
+
+def _tesseract_que_lee(monkeypatch) -> list:
+    """Tesseract SIMULADO que LEE lo que recibe: decodifica la imagen y "ve" el
+    texto del logo solo si en su zona hay contraste (tinta distinta del fondo).
+    Devuelve la lista de fondos (pixel (2,2), siempre transparente en el
+    original) de cada imagen recibida. No depende de la version de leptonica."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    fondos: list = []
+    real = ocr.subprocess.run
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        with Image.open(BytesIO(k["input"])) as im:
+            fondos.append(im.convert("RGB").getpixel((2, 2)))
+            bajo, alto = im.convert("L").crop(_ZONA_TEXTO_LOGO).getextrema()
+        legible = alto - bajo > 100
+        if cmd[-1] == "tsv":
+            palabras = " ".join(_TEXTO_LOGO).split() if legible else []
+            return _SalidaSimulada(_tsv([(95, p) for p in palabras]).encode())
+        return _SalidaSimulada("\n".join(_TEXTO_LOGO).encode() if legible else b"")
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    return fondos
+
+
+def _tesseract_por_fondo(monkeypatch, por_fondo: dict) -> list:
+    """Tesseract SIMULADO que responde segun el fondo (pixel (2,2)) de lo que
+    recibe: `por_fondo[fondo] = [(confianza, palabra), ...]`."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    fondos: list = []
+    real = ocr.subprocess.run
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        with Image.open(BytesIO(k["input"])) as im:
+            fondo = im.convert("RGB").getpixel((2, 2))
+        fondos.append(fondo)
+        filas = por_fondo.get(fondo, [])
+        if cmd[-1] == "tsv":
+            return _SalidaSimulada(_tsv(filas).encode())
+        return _SalidaSimulada(" ".join(p for _, p in filas).encode())
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    return fondos
+
+
+def _logo_en_imagen(caso: str, gif: bool = False, con_texto: bool = True):
+    """Sonda del auditor (r10/lum.py), fondo TRANSPARENTE de 1600x300.
+    A: emblema CLARO grande + texto OSCURO (la media de lo opaco es clara).
+    I: bloque OSCURO grande + texto BLANCO (la media de lo opaco es oscura)."""
+    from PIL import Image, ImageDraw
+
+    figura, tinta = {"A": (_BLANCO, (10, 10, 10)), "I": ((20, 20, 20), _BLANCO)}[caso]
+    if gif:   # indice 0 transparente; 1 figura; 2 tinta (colores distintos: el GIF no los fusiona)
+        im = Image.new("P", (1600, 300), 0)
+        im.putpalette(list(_NEGRO) + list(figura) + list(tinta) + [0, 0, 0] * 253)
+        relleno_figura, relleno_tinta = 1, 2
+    else:
+        im = Image.new("RGBA", (1600, 300), (0, 0, 0, 0))
+        relleno_figura, relleno_tinta = figura + (255,), tinta + (255,)
+    d = ImageDraw.Draw(im)
+    if caso == "A":
+        d.ellipse((10, 10, 290, 290), fill=relleno_figura)
+        d.rectangle((300, 20, 620, 280), fill=relleno_figura)
+    else:
+        d.rectangle((10, 10, 620, 290), fill=relleno_figura)
+    if con_texto:
+        for i, linea in enumerate(_TEXTO_LOGO):
+            d.text((640, 60 + i * 100), linea, fill=relleno_tinta, font=_fuente(44))
+    return im
+
+
+def _logo(caso: str, formato: str, destino: Path, con_texto: bool = True) -> Path:
+    from PIL import Image
+
+    im = _logo_en_imagen(caso, gif=formato == "gif", con_texto=con_texto)
+    if formato == "gif":
+        im.save(destino, transparency=0)
+        assert "transparency" in Image.open(destino).info
+    elif formato == "webp":
+        im.save(destino, lossless=True)
+    else:
+        im.save(destino)
+    return destino
+
+
+@pytest.mark.parametrize("formato", ["png", "webp", "tif", "gif"])
+@pytest.mark.parametrize("caso", ["A", "I"])
+def test_n36_logo_con_figura_grande_prueba_los_dos_fondos_y_conserva_el_texto(
+    tmp_path, monkeypatch, caso, formato
+):
+    destino = _logo(caso, formato, tmp_path / f"logo_{caso}.{formato}")
+    fondos = _tesseract_que_lee(monkeypatch)
+    r = ocr.extraer(destino)
+    assert {_BLANCO, _NEGRO} <= set(fondos), "con transparencia real se prueban los dos fondos"
+    assert r.detalle.get("codigo") != ocr.CODIGO_IMAGEN_SIN_TEXTO
+    assert _TEXTO_LOGO[0] in r.salidas["texto.txt"], "el texto que lee alguno de los dos fondos se conserva"
+
+
+def test_n36_imagen_transparente_sin_texto_prueba_los_dos_fondos_y_es_imagen_sin_texto(
+    tmp_path, monkeypatch
+):
+    destino = _logo("A", "png", tmp_path / "emblema.png", con_texto=False)
+    fondos = _tesseract_que_lee(monkeypatch)
+    r = ocr.extraer(destino)
+    assert set(fondos) == {_BLANCO, _NEGRO}
+    assert r.estado == "ok"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_SIN_TEXTO
+
+
+def test_n36_imagen_opaca_una_sola_pasada_con_los_bytes_originales(tmp_path, monkeypatch):
+    from PIL import Image
+
+    im = Image.new("RGBA", (1600, 300), (255, 255, 255, 255))
+    im.alpha_composite(_logo_en_imagen("A"))          # el mismo logo, sobre blanco OPACO
+    destino = tmp_path / "logo_opaco.png"
+    im.save(destino)
+    recibidos = _tesseract_que_registra(monkeypatch)
+    ocr.extraer(destino)
+    assert len(recibidos) == 2, "una sola pasada: texto plano + tsv"
+    assert all(r == destino.read_bytes() for r in recibidos)
+
+
+def test_n36_en_un_tiff_multipagina_las_dos_pasadas_son_por_pagina(tmp_path, monkeypatch):
+    destino = tmp_path / "logos.tif"
+    _logo_en_imagen("A").save(destino, save_all=True, append_images=[_logo_en_imagen("I")])
+    fondos = _tesseract_que_lee(monkeypatch)
+    r = ocr.extraer(destino)
+    assert {_BLANCO, _NEGRO} <= set(fondos)
+    texto = r.salidas["texto.txt"]
+    assert f"<!-- página 1 -->\n{_TEXTO_LOGO[0]}" in texto, "pagina 1 (A) se lee sobre blanco"
+    assert f"<!-- página 2 -->\n{_TEXTO_LOGO[0]}" in texto, "pagina 2 (I) se lee sobre negro"
+
+
+def test_n37_tiff_con_la_pagina_1_opaca_y_la_2_transparente_de_mas_de_25_mpx_no_llama_a_tesseract(
+    tmp_path, monkeypatch
+):
+    from PIL import Image
+
+    destino = tmp_path / "opaca_y_grande.tif"
+    chica = Image.new("RGB", (900, 120), "white")
+    ImageDraw.Draw(chica).text((20, 40), "Activos totales 1,234 USD", fill="black", font=_fuente(34))
+    grande = Image.new("RGBA", (5000, 5001), (0, 0, 0, 0))      # el minimo sobre 25 Mpx
+    chica.save(destino, save_all=True, append_images=[grande], compression="tiff_adobe_deflate")
+    del grande
+    with Image.open(destino) as im:
+        im.seek(1)
+        assert im.mode == "RGBA" and im.size[0] * im.size[1] > ocr.MAX_PIXELES_OTROS_MODOS
+    llamadas = _tesseract_llamado(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "imagen_demasiado_grande"
+    assert r.detalle["causa"] == "demasiados_pixeles"
+    assert llamadas == [], "el tope se comprueba en TODAS las paginas antes del OCR de ninguna"
+
+
+def test_n36_si_un_fondo_reconoce_texto_aunque_sea_dudoso_es_texto_dudoso(tmp_path, monkeypatch):
+    """Con la union de las dos pasadas (ronda 12), lo que reconoce un solo fondo,
+    aunque sea dudoso, entra en el resultado: la imagen sale
+    parcial/imagen_texto_dudoso, no ok/imagen_sin_texto."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((255, 255, 255), "png", destino)
+    fondos = _tesseract_por_fondo(monkeypatch, {
+        _BLANCO: [],
+        _NEGRO: [(30, f"negro{i}") for i in range(5)],          # 5 palabras, todas dudosas
+    })
+    r = ocr.extraer(destino)
+    assert set(fondos) == {_BLANCO, _NEGRO}
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    assert "negro0" in r.salidas["texto.txt"]
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 12: con transparencia real, el resultado es la UNION de las dos
+# pasadas (blanca, luego negra); no se elige una y se descarta la otra
+# ---------------------------------------------------------------------------
+
+
+def _tsv_por_lineas(lineas: list, ancho: int = 700, alto: int = 120) -> str:
+    """`tsv` sintetico con una fila de palabra por `(confianza, palabra)`, cada
+    renglon de `lineas` con su propio `line_num`. Un renglon es una lista de
+    palabras (caja (0, 0, 10, 10)) o `((left, top, width, height), palabras)`:
+    todas sus palabras llevan esa caja."""
+    filas = [
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
+        f"1\t1\t0\t0\t0\t0\t0\t0\t{ancho}\t{alto}\t-1\t",
+    ]
+    for n_linea, linea in enumerate(lineas, start=1):
+        caja, palabras = linea if isinstance(linea, tuple) else ((0, 0, 10, 10), linea)
+        izq, arriba, ancho_caja, alto_caja = caja
+        for n_palabra, (conf, palabra) in enumerate(palabras, start=1):
+            filas.append(
+                f"5\t1\t1\t1\t{n_linea}\t{n_palabra}\t{izq}\t{arriba}\t{ancho_caja}\t{alto_caja}"
+                f"\t{conf}\t{palabra}")
+    return "\n".join(filas)
+
+
+def _tesseract_por_fondo_con_lineas(monkeypatch, por_fondo: dict) -> list:
+    """Tesseract SIMULADO segun el fondo (pixel (2,2)) de lo que recibe:
+    `por_fondo[fondo] = (texto_plano, [[(confianza, palabra), ...], ...])`."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    fondos: list = []
+    real = ocr.subprocess.run
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        with Image.open(BytesIO(k["input"])) as im:
+            fondo = im.convert("RGB").getpixel((2, 2))
+        fondos.append(fondo)
+        plano, lineas = por_fondo.get(fondo, ("", []))
+        if cmd[-1] == "tsv":
+            return _SalidaSimulada(_tsv_por_lineas(lineas).encode())
+        return _SalidaSimulada(plano.encode())
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    return fondos
+
+
+def test_n38_total_en_la_pasada_blanca_y_l500_en_la_negra_salen_los_dos(tmp_path, monkeypatch):
+    """La sonda de Sol (r11): con la eleccion, la pasada blanca leyo `TOTAL` y la
+    negra `L500`, se descarto una y el resultado fue ok/imagen_sin_texto."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    fondos = _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("TOTAL", [[(95, "TOTAL")]]),
+        _NEGRO: ("L500", [[(95, "L500")]]),
+    })
+    r = ocr.extraer(destino)
+    assert set(fondos) == {_BLANCO, _NEGRO}
+    assert r.detalle.get("codigo") != ocr.CODIGO_IMAGEN_SIN_TEXTO
+    texto = r.salidas["texto.txt"]
+    assert "TOTAL" in texto and "L500" in texto
+    assert texto.index("TOTAL") < texto.index("L500"), "primero la pasada blanca, luego la negra"
+    assert r.detalle["palabras_totales"] == 2 and r.detalle["caracteres"] == len("TOTAL\nL500")
+
+
+def test_n38_el_texto_real_no_se_pierde_ante_veinte_palabras_de_ruido(tmp_path, monkeypatch):
+    """La otra sonda de Sol (r11): la pasada blanca lee `Total a pagar 5000` y la
+    negra 20 palabras espurias, tambien confiables; el texto real se conserva."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    ruido = [(95, f"zx{i}") for i in range(20)]
+    fondos = _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Total a pagar 5000", [[(95, "Total"), (95, "a"), (95, "pagar"), (95, "5000")]]),
+        _NEGRO: (" ".join(p for _, p in ruido), [ruido]),
+    })
+    r = ocr.extraer(destino)
+    assert set(fondos) == {_BLANCO, _NEGRO}
+    assert "Total a pagar 5000" in r.salidas["texto.txt"]
+    assert r.detalle["palabras_totales"] == 24
+
+
+def test_n38_una_linea_que_aparece_en_las_dos_pasadas_va_una_sola_vez(tmp_path, monkeypatch):
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    total = [(95, "Total"), (95, "a"), (95, "pagar"), (95, "5000")]
+    fondos = _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Total a pagar 5000\nFecha 03/10", [total, [(95, "Fecha"), (95, "03/10")]]),
+        _NEGRO: ("  Total   a pagar  5000 \nOtra linea", [total, [(95, "Otra"), (95, "linea")]]),
+    })
+    r = ocr.extraer(destino)
+    assert set(fondos) == {_BLANCO, _NEGRO}
+    texto = r.salidas["texto.txt"]
+    assert texto.count("Total") == 1, "la linea repetida (normalizada) va una sola vez"
+    assert "Fecha 03/10" in texto and "Otra linea" in texto
+    assert r.detalle["palabras_totales"] == 8, "las palabras de la linea repetida tampoco se cuentan dos veces"
+
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 13: duplicado = mismo texto Y cajas superpuestas; si las dos
+# pasadas aportan renglones propios, como mucho parcial/imagen_texto_dudoso;
+# version de la logica "3"; sin marca de pagina en un solo fotograma
+# ---------------------------------------------------------------------------
+
+
+def test_n39_dos_total_en_posiciones_distintas_uno_por_pasada_aparecen_los_dos(tmp_path, monkeypatch):
+    """La sonda de Sol (r12): con la deduplicacion solo por texto, el TOTAL de la
+    negra se descartaba como duplicado del de la blanca y salia
+    ok/imagen_sin_texto con una sola palabra."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("TOTAL", [((10, 10, 100, 30), [(95, "TOTAL")])]),
+        _NEGRO: ("TOTAL", [((500, 80, 100, 30), [(95, "TOTAL")])]),
+    })
+    r = ocr.extraer(destino)
+    assert r.salidas["texto.txt"].count("TOTAL") == 2
+    assert r.detalle["palabras_totales"] == 2
+    assert r.detalle.get("codigo") != ocr.CODIGO_IMAGEN_SIN_TEXTO
+
+
+def test_n39_el_mismo_renglon_en_la_misma_caja_aparece_una_sola_vez(tmp_path, monkeypatch):
+    """Control: cajas superpuestas en 0,8 de la menor (>= 0,5) son el mismo renglon."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    total = [(95, "Total"), (95, "a"), (95, "pagar"), (95, "5000")]
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Total a pagar 5000", [((20, 30, 500, 40), total)]),
+        _NEGRO: ("Total  a pagar 5000", [((120, 30, 500, 40), total)]),
+    })
+    r = ocr.extraer(destino)
+    assert r.salidas["texto.txt"].count("Total") == 1
+    assert r.detalle["palabras_totales"] == 4
+
+
+def test_n39_el_mismo_texto_con_cajas_superpuestas_menos_de_la_mitad_aparece_dos_veces(tmp_path, monkeypatch):
+    """Interseccion de 0,4 de la menor de las dos areas (< 0,5): son dos renglones."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    total = [(95, "Total"), (95, "a"), (95, "pagar"), (95, "5000")]
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Total a pagar 5000", [((0, 0, 500, 40), total)]),
+        _NEGRO: ("Total a pagar 5000", [((300, 0, 500, 40), total)]),
+    })
+    r = ocr.extraer(destino)
+    assert r.salidas["texto.txt"].count("Total") == 2
+    assert r.detalle["palabras_totales"] == 8
+
+
+def test_n39_si_las_dos_pasadas_aportan_renglones_propios_es_como_mucho_texto_dudoso(tmp_path, monkeypatch):
+    """La sonda de Sol (r12): 5 palabras reales en la blanca y 5 espurias en la
+    negra, todas con confianza 95, daban `ok` sin codigo."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    reales = [(95, p) for p in ("Total", "a", "pagar", "1,500.00", "Lempiras")]
+    espurias = [(95, p) for p in ("qwe", "rty", "uio", "asd", "fgh")]
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Total a pagar 1,500.00 Lempiras", [((20, 30, 600, 40), reales)]),
+        _NEGRO: ("qwe rty uio asd fgh", [((20, 80, 300, 30), espurias)]),
+    })
+    r = ocr.extraer(destino)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    texto = r.salidas["texto.txt"]
+    assert "Total a pagar 1,500.00 Lempiras" in texto and "qwe rty uio asd fgh" in texto
+
+
+def test_n39_si_solo_una_pasada_aporta_tambien_es_como_mucho_parcial(tmp_path, monkeypatch):
+    """Ronda 16 (invariante 1): una imagen con transparencia real NUNCA sale
+    `ok`, aunque solo aporte una pasada (la otra repite su renglon en la misma
+    caja) con 10 palabras confiables. Antes de la ronda 16 esto era `ok`."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    palabras = [(95, f"palabra{i}") for i in range(10)]
+    plano = " ".join(p for _, p in palabras)
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: (plano, [((20, 30, 600, 40), palabras)]),
+        _NEGRO: (plano, [((20, 30, 600, 40), palabras)]),
+    })
+    r = ocr.extraer(destino)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    assert r.detalle["razon"] == ocr.RAZON_IMAGEN_TRANSPARENTE
+    assert r.salidas["texto.txt"] == f"{ocr.NOTA_TEXTO_DUDOSO}\n{plano}"
+
+
+def test_n39_la_version_de_la_logica_de_imagen_es_6():
+    """La union de las dos pasadas cambia la regla: una ficha de imagen escrita
+    con la logica "2" (la seleccion) no se reusa. Ronda 17: "4", porque las
+    invariantes de la ronda 16 (transparencia nunca ok, ninguna linea del texto
+    plano se pierde) cambian la clasificacion de las fichas escritas con "3".
+    Ronda 18: "5", porque un APNG de mas de un cuadro pasa a ser
+    formato_no_soportado:png_animado (una ficha "4" lo daba ok/imagen_sin_texto).
+    Ronda 19: "6", porque un MPO de varios cuadros se lee cuadro por cuadro."""
+    assert ocr.VERSION_LOGICA_IMAGEN == "6"
+    assert ocr.version_logica("imagen") == "6"
+
+
+def test_n39_una_imagen_de_un_solo_fotograma_con_transparencia_no_lleva_marca_de_pagina(
+    tmp_path, monkeypatch
+):
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Total a pagar 5000", [((20, 30, 500, 40), [(95, "Total"), (95, "a"), (95, "pagar"), (95, "5000")])]),
+    })
+    r = ocr.extraer(destino)
+    assert "<!-- página" not in r.salidas["texto.txt"]
+    assert r.salidas["texto.txt"] == f"{ocr.NOTA_TEXTO_DUDOSO}\nTotal a pagar 5000"   # parcial (ronda 16)
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 14: en la union, el texto se arma desde el TSV (una sola
+# fuente para el texto, la deduplicacion, las metricas y `aportan_las_dos`)
+# ---------------------------------------------------------------------------
+
+
+def test_n40_un_homonimo_del_tsv_negro_en_otra_posicion_aparece_aunque_el_texto_plano_no_lo_repita(
+    tmp_path, monkeypatch
+):
+    """La sonda de Sol (r13): el TSV negro trae dos renglones `Total a pagar`,
+    uno en la misma caja que el de la blanca y otro en otra posicion; su texto
+    plano trae una sola linea. Con el texto plano, la deduplicacion por
+    contenido borraba el renglon de la otra posicion."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    total = [(95, "Total"), (95, "a"), (95, "pagar")]
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Total a pagar", [((20, 20, 300, 40), total)]),
+        _NEGRO: ("Total a pagar", [((20, 20, 300, 40), total), ((20, 200, 300, 40), total)]),
+    })
+    r = ocr.extraer(destino)
+    texto = r.salidas["texto.txt"]
+    assert texto.count("Total a pagar") == 2, "el renglon de la otra posicion se conserva"
+    assert r.detalle["palabras_totales"] == 6
+
+
+def test_n40_una_pasada_sin_filas_tsv_y_con_texto_plano_lo_conserva_sin_verificar(
+    tmp_path, monkeypatch
+):
+    """Ronda 15 (BLOCK de Sol r14; antes esta prueba fijaba el descarte): TSV
+    blanco VACIO con texto plano, y TSV negro con 10 palabras de confianza 95.
+    Una pasada sin renglones TSV y con texto plano aporta sus lineas tal cual
+    (sin deduplicar: no hay cajas), y el resultado es como mucho
+    parcial/imagen_texto_dudoso con su razon propia. Las metricas siguen
+    saliendo solo del TSV. Ronda 16 (invariante 2): la linea del texto plano de
+    la NEGRA, que no esta en el texto final, tambien se agrega."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    palabras = [(95, f"palabra{i}") for i in range(10)]
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Texto plano de la blanca sin filas", []),
+        _NEGRO: ("lo que diga el texto plano no cuenta", [((20, 30, 600, 40), palabras)]),
+    })
+    r = ocr.extraer(destino)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    assert ocr.RAZON_IMAGEN_TRANSPARENTE in r.detalle["razon"]
+    assert ocr.RAZON_TEXTO_SIN_POSICION in r.detalle["razon"]
+    texto = r.salidas["texto.txt"]
+    assert "Texto plano de la blanca sin filas" in texto
+    assert " ".join(p for _, p in palabras) in texto
+    assert "lo que diga el texto plano no cuenta" in texto, "ninguna linea del texto plano se pierde"
+    assert r.detalle["palabras_totales"] == 10
+
+
+def test_n41_una_pasada_sin_filas_tsv_y_sin_texto_plano_no_aporta(tmp_path, monkeypatch):
+    """Control: con texto plano vacio y TSV vacio la pasada no aporta, igual
+    que en la ronda 14. Ronda 16: la imagen es transparente, asi que el estado
+    es parcial, sin el motivo de "sin posicion"."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    palabras = [(95, f"palabra{i}") for i in range(10)]
+    plano = " ".join(p for _, p in palabras)
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("", []),
+        _NEGRO: (plano, [((20, 30, 600, 40), palabras)]),
+    })
+    r = ocr.extraer(destino)
+    assert r.estado == "parcial"
+    assert r.detalle["razon"] == ocr.RAZON_IMAGEN_TRANSPARENTE
+    assert r.salidas["texto.txt"] == f"{ocr.NOTA_TEXTO_DUDOSO}\n{plano}"
+
+
+def test_n41_texto_plano_sin_renglones_tsv_en_las_dos_pasadas_se_conserva(tmp_path, monkeypatch):
+    """La sonda de Sol (r14): «Saldo pendiente 1000» en el texto plano de las
+    dos pasadas y TSV sin palabras daba ok/imagen_sin_texto."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Saldo pendiente 1000", []),
+        _NEGRO: ("Saldo pendiente 1000", []),
+    })
+    r = ocr.extraer(destino)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    assert ocr.RAZON_TEXTO_SIN_POSICION in r.detalle["razon"]
+    assert "Saldo pendiente 1000" in r.salidas["texto.txt"]
+
+
+def test_n41_en_un_tiff_la_pagina_con_texto_plano_sin_tsv_aparece_con_su_marca(tmp_path, monkeypatch):
+    from io import BytesIO
+
+    from PIL import Image
+
+    destino = tmp_path / "dos.tif"
+    pagina1 = Image.new("RGBA", (700, 120), (0, 0, 0, 0))
+    pagina2 = Image.new("RGBA", (800, 150), (0, 0, 0, 0))
+    for im in (pagina1, pagina2):
+        ImageDraw.Draw(im).text((20, 30), "Total", fill=(0, 0, 0, 255), font=_fuente(36))
+    pagina1.save(destino, save_all=True, append_images=[pagina2])
+    palabras = [(95, f"palabra{i}") for i in range(10)]
+    real = ocr.subprocess.run
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        with Image.open(BytesIO(k["input"])) as im:
+            segunda = im.size[0] == 800
+        if segunda:                      # pagina 2: texto plano, TSV sin palabras
+            return _SalidaSimulada(_tsv_por_lineas([]).encode() if cmd[-1] == "tsv"
+                                   else b"Saldo pendiente 1000")
+        if cmd[-1] == "tsv":
+            return _SalidaSimulada(_tsv_por_lineas([((20, 30, 600, 40), palabras)]).encode())
+        return _SalidaSimulada(" ".join(p for _, p in palabras).encode())
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    r = ocr.extraer(destino)
+    texto = r.salidas["texto.txt"]
+    assert "<!-- página 1 -->" in texto
+    assert "<!-- página 2 -->\nSaldo pendiente 1000" in texto
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 16: invariante 1 (una imagen con transparencia real NUNCA sale
+# `ok`; (A) y (D) siguen) e invariante 2 (ninguna linea del texto plano de
+# ninguna pasada se pierde)
+# ---------------------------------------------------------------------------
+
+
+def test_n42_texto_plano_con_un_tsv_insuficiente_en_las_dos_pasadas_se_conserva(tmp_path, monkeypatch):
+    """La sonda de Sol (r15): «Saldo pendiente 1000» en el texto plano y un TSV
+    con solo «X» en las dos pasadas daba ok/imagen_sin_texto: el plano se
+    descartaba porque el TSV tenia alguna fila."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: ("Saldo pendiente 1000", [((20, 30, 40, 40), [(95, "X")])]),
+        _NEGRO: ("Saldo pendiente 1000", [((20, 30, 40, 40), [(95, "X")])]),
+    })
+    r = ocr.extraer(destino)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    assert "Saldo pendiente 1000" in r.salidas["texto.txt"]
+    assert ocr.RAZON_TEXTO_SIN_POSICION in r.detalle["razon"]
+
+
+def test_n42_ruido_que_agrega_solo_la_segunda_pasada_no_llega_a_ok(tmp_path, monkeypatch):
+    """La otra sonda de Sol (r15): 10 palabras confiables en la blanca; la
+    negra repite esas 10 en la misma caja y agrega «xyz» en otra. Daba `ok`."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    palabras = [(95, f"palabra{i}") for i in range(10)]
+    plano = " ".join(p for _, p in palabras)
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: (plano, [((20, 30, 600, 40), palabras)]),
+        _NEGRO: (plano + "\nxyz", [((20, 30, 600, 40), palabras), ((20, 200, 60, 30), [(95, "xyz")])]),
+    })
+    r = ocr.extraer(destino)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    assert "xyz" in r.salidas["texto.txt"]
+
+
+def test_n42_una_imagen_transparente_con_30_palabras_confiables_identicas_es_parcial(tmp_path, monkeypatch):
+    """Invariante 1, en general: con transparencia real el estado es como mucho
+    parcial + imagen_texto_dudoso, con la razon de la transparencia, aunque las
+    dos pasadas lean exactamente lo mismo con confianza alta."""
+    destino = tmp_path / "rotulo.png"
+    _rotulo((0, 0, 0), "png", destino)
+    renglones = [((20, 20 + 50 * i, 600, 40), [(95, f"p{i}x{j}") for j in range(10)]) for i in range(3)]
+    plano = "\n".join(" ".join(p for _, p in palabras) for _, palabras in renglones)
+    _tesseract_por_fondo_con_lineas(monkeypatch, {
+        _BLANCO: (plano, renglones),
+        _NEGRO: (plano, renglones),
+    })
+    r = ocr.extraer(destino)
+    assert r.estado == "parcial"
+    assert r.detalle["codigo"] == ocr.CODIGO_IMAGEN_TEXTO_DUDOSO
+    assert r.detalle["razon"] == ocr.RAZON_IMAGEN_TRANSPARENTE
+    assert r.detalle["palabras_totales"] == 30
+    assert r.salidas["texto.txt"] == f"{ocr.NOTA_TEXTO_DUDOSO}\n{plano}"
+
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 18: un PNG/APNG de mas de un cuadro es `png_animado`, igual que
+# un GIF o WebP animado (formato_no_soportado, sin tesseract)
+# ---------------------------------------------------------------------------
+
+
+def _apng(destino: Path, cuadro_por_defecto_aparte: bool) -> Path:
+    """La sonda de Sol (r17): 2 cuadros, el primero en blanco y el segundo con
+    texto. Leido como una sola imagen, salia ok/imagen_sin_texto."""
+    from PIL import Image, ImageDraw
+
+    blanco = Image.new("RGB", (600, 120), "white")
+    texto = blanco.copy()
+    ImageDraw.Draw(texto).text((20, 30), "SALDO PENDIENTE 1000", fill="black", font=_fuente(36))
+    blanco.save(destino, save_all=True, append_images=[texto], default_image=cuadro_por_defecto_aparte)
+    with Image.open(destino) as im:
+        assert im.format == "PNG" and im.n_frames == 2
+    return destino
+
+
+@pytest.mark.parametrize("cuadro_por_defecto_aparte", [False, True])
+def test_n43_un_apng_de_dos_cuadros_es_png_animado_sin_tesseract(tmp_path, monkeypatch, cuadro_por_defecto_aparte):
+    destino = _apng(tmp_path / "animado.png", cuadro_por_defecto_aparte)
+    llamadas = _tesseract_llamado(monkeypatch)
+    r = ocr.extraer(destino)
+    _assert_formato_no_soportado(r, "png_animado", "animacion_no_soportada", llamadas)
+
+
+def test_n43_un_apng_de_un_solo_cuadro_sigue_como_un_png(tmp_path, monkeypatch):
+    """Control: un APNG con `acTL` de 1 cuadro (Pillow informa n_frames 1) va
+    por el camino de siempre: los bytes originales a tesseract."""
+    import struct
+    import zlib
+    from io import BytesIO
+
+    from PIL import Image
+
+    salida = BytesIO()
+    Image.new("RGB", (300, 80), "white").save(salida, "PNG")
+    png = salida.getvalue()
+
+    def trozo(tipo: bytes, datos: bytes) -> bytes:
+        return struct.pack(">I", len(datos)) + tipo + datos + struct.pack(">I", zlib.crc32(tipo + datos))
+
+    fin_ihdr = 8 + 8 + 13 + 4
+    apng = (png[:fin_ihdr] + trozo(b"acTL", struct.pack(">II", 1, 0))
+            + trozo(b"fcTL", struct.pack(">IIIIIHHBB", 0, 300, 80, 0, 0, 1, 10, 0, 0)) + png[fin_ihdr:])
+    destino = tmp_path / "un_cuadro.png"
+    destino.write_bytes(apng)
+    with Image.open(destino) as im:
+        assert im.n_frames == 1
+    recibidos = _tesseract_que_registra(monkeypatch)
+    r = ocr.extraer(destino)
+    assert r.detalle.get("codigo") != "formato_no_soportado"
+    assert recibidos and all(d == apng for d in recibidos)
+
+
+
+# ---------------------------------------------------------------------------
+# Jax#338 ronda 19: un MPO de varios cuadros se lee cuadro por cuadro (no se
+# rechaza: los telefonos generan MPO)
+# ---------------------------------------------------------------------------
+
+
+def _tesseract_que_ve_tinta(monkeypatch) -> list:
+    """Tesseract SIMULADO que LEE lo que recibe: si la imagen tiene tinta
+    oscura devuelve «SALDO PENDIENTE 1000», si no, nada. Devuelve las entradas
+    de texto plano (una por cuadro)."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    entradas: list = []
+    real = ocr.subprocess.run
+
+    def fake(cmd, **k):
+        if "--version" in cmd:
+            return real(cmd, **k)
+        with Image.open(BytesIO(k["input"])) as im:
+            tinta = im.convert("L").getextrema()[0] < 100
+        palabras = ["SALDO", "PENDIENTE", "1000"] if tinta else []
+        if cmd[-1] == "tsv":
+            return _SalidaSimulada(_tsv([(95, p) for p in palabras]).encode())
+        entradas.append(k["input"])
+        return _SalidaSimulada(" ".join(palabras).encode())
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake)
+    return entradas
+
+
+def test_n44_un_mpo_con_el_texto_en_el_segundo_cuadro_lo_conserva(tmp_path, monkeypatch):
+    """La sonda de Sol (r18): cuadro 1 en blanco y cuadro 2 con texto; leido
+    como una sola imagen, el texto se perdia."""
+    from PIL import Image, ImageDraw
+
+    blanco = Image.new("RGB", (600, 120), "white")
+    texto = blanco.copy()
+    ImageDraw.Draw(texto).text((20, 30), "SALDO PENDIENTE 1000", fill="black", font=_fuente(36))
+    destino = tmp_path / "foto.jpg"
+    blanco.save(destino, format="MPO", save_all=True, append_images=[texto])
+    with Image.open(destino) as im:
+        assert im.format == "MPO" and im.n_frames == 2
+    entradas = _tesseract_que_ve_tinta(monkeypatch)
+    r = ocr.extraer(destino)
+    assert len(entradas) == 2, "un OCR por cuadro"
+    assert all(e.startswith(b"\xff\xd8") for e in entradas), "cada cuadro va como su JPEG original"
+    assert "<!-- cuadro 2 -->\nSALDO PENDIENTE 1000" in r.salidas["texto.txt"]
+    assert r.detalle.get("codigo") != ocr.CODIGO_IMAGEN_SIN_TEXTO
+
+
+def test_n44_un_mpo_de_un_solo_cuadro_sigue_con_los_bytes_originales(tmp_path, monkeypatch):
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGB", (600, 120), "white")
+    ImageDraw.Draw(im).text((20, 30), "SALDO PENDIENTE 1000", fill="black", font=_fuente(36))
+    destino = tmp_path / "una.jpg"
+    im.save(destino, format="MPO", save_all=True, append_images=[])
+    with Image.open(destino) as abierto:
+        assert getattr(abierto, "n_frames", 1) == 1
+    entradas = _tesseract_que_ve_tinta(monkeypatch)
+    r = ocr.extraer(destino)
+    assert entradas == [destino.read_bytes()]
+    assert "<!-- cuadro" not in r.salidas["texto.txt"]
+
+
+def test_n45_camino_de_y_la_ingesta_no_se_cuelgan_con_un_fifo(tmp_path):
+    """Jax#338 ronda 19: `ocr.camino_de` (y la ingesta, que lo usa) leen la
+    cabecera con `tipos_imagen.leer_cabecera`, sin bloquear: un FIFO no es un
+    archivo regular, el contenido no decide y decide la extension."""
+    import os
+    import threading
+
+    from procesamiento import ingesta
+
+    for nombre, esperado in (("tuberia.png", "imagen"), ("tuberia.pdf", "pdf")):
+        fifo = tmp_path / nombre
+        os.mkfifo(fifo)
+        for funcion in (lambda: ocr.camino_de(fifo), lambda: ingesta._camino_de(fifo, fifo.suffix)):
+            resultado: list = []
+            hilo = threading.Thread(target=lambda: resultado.append(funcion()), daemon=True)
+            hilo.start()
+            hilo.join(5)
+            if hilo.is_alive():
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))   # libera el open() colgado
+                hilo.join(5)
+                raise AssertionError(f"se colgo leyendo el FIFO {nombre}")
+            assert resultado == [esperado]

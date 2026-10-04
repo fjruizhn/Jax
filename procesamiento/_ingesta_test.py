@@ -1460,3 +1460,62 @@ def test_symlink_de_directorio_mas_punto_punto_no_envenena_el_cache(tmp_path: Pa
     assert ficha.sha256 == sha256_de(ajeno)                      # se ingirio lo que el kernel abrio
     assert (trabajo / "fuente" / "x.xlsx").read_bytes() == propio.read_bytes()   # el propio, intacto
     assert Path(ficha.origen) != Path("fuente/x.xlsx")
+
+
+# -- Jax#338 ronda 19: ningun FIFO cuelga la ingesta ---------------------------
+def _sin_colgarse(funcion, fifo, plazo=5.0):
+    """Corre `funcion()` en un hilo con plazo y devuelve lo que devolvio o la
+    excepcion que lanzo. Si se cuelga (un `open()` bloqueante en el FIFO espera
+    un escritor), abre el extremo de escritura para liberarlo y falla."""
+    import os
+    import threading
+
+    resultado: list = []
+
+    def correr():
+        try:
+            resultado.append(funcion())
+        except Exception as exc:  # fail-soft: la prueba registra la excepcion para afirmar sobre ella
+            resultado.append(exc)
+
+    hilo = threading.Thread(target=correr, daemon=True)
+    hilo.start()
+    hilo.join(plazo)
+    if hilo.is_alive():
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        hilo.join(plazo)
+        raise AssertionError("se colgo leyendo un FIFO")
+    return resultado[0]
+
+
+def test_ingerir_un_fifo_no_se_cuelga_y_lo_rechaza_sin_copiar(tmp_path: Path):
+    import os
+
+    fifo = tmp_path / "tuberia.xlsx"
+    os.mkfifo(fifo)
+    trabajo = tmp_path / "trabajo"
+    r = _sin_colgarse(lambda: ingesta.ingerir(fifo, trabajo), fifo)
+    assert isinstance(r, ValueError) and "no es un archivo regular" in str(r), r
+    fuente = trabajo / "fuente"
+    assert not fuente.exists() or list(fuente.iterdir()) == [], "no se copia nada (ni queda el temporal)"
+
+
+def test_sha256_de_un_fifo_no_se_cuelga(tmp_path: Path):
+    import os
+
+    fifo = tmp_path / "tuberia"
+    os.mkfifo(fifo)
+    r = _sin_colgarse(lambda: sha256_de(fifo), fifo)
+    assert isinstance(r, ValueError) and "no es un archivo regular" in str(r), r
+
+
+def test_asegurar_en_fuente_copia_y_calcula_la_huella_desde_el_mismo_descriptor(tmp_path: Path):
+    """Control: un archivo regular se copia completo y la huella devuelta es
+    la de esos mismos bytes."""
+    origen = tmp_path / "doc.bin"
+    origen.write_bytes(b"contenido " * 50_000)
+    fuente = tmp_path / "trabajo" / "fuente"
+    fuente.mkdir(parents=True)
+    destino, huella = ingesta._asegurar_en_fuente(origen, fuente)
+    assert destino.read_bytes() == origen.read_bytes()
+    assert huella == sha256_de(origen) == sha256_de(destino)

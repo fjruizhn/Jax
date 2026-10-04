@@ -274,9 +274,30 @@ def _resultado_no_codificable(ruta: str) -> ResultadoArchivo:
     )
 
 
+_FORMATO_ESTABLE = re.compile(r"[a-z0-9_]{1,40}")   # con `fullmatch`: `$` aceptaria un "\n" final
+
+
 def _codigo_de_ficha(ficha) -> str | None:
+    """El codigo de error de la ficha. `formato_no_soportado` viaja como
+    `formato_no_soportado:<formato>` (p. ej. `formato_no_soportado:gif_animado`)
+    para que la plataforma nombre el formato y la accion; el formato solo se
+    agrega a ese codigo y solo si es un identificador estable (`[a-z0-9_]`), no
+    texto libre de una ficha cacheada."""
     codigo = ficha.detalle.get("codigo") if ficha.estado == "error" else None
-    return codigo if isinstance(codigo, str) else None
+    if not isinstance(codigo, str):
+        return None
+    formato = ficha.detalle.get("formato")
+    if (codigo == "formato_no_soportado" and isinstance(formato, str)
+            and _FORMATO_ESTABLE.fullmatch(formato)):
+        return f"{codigo}:{formato}"
+    return codigo
+
+
+def _ruta_del_jail(ruta: str) -> Path | None:
+    """La ruta resuelta por el jail (la misma resolucion que el procesamiento),
+    o None si queda fuera: el freno de dependencias lee su cabecera."""
+    resuelta, _ = tool_authority.resolve_jailed_path(ruta, [])
+    return resuelta
 
 
 def _procesar_una_ruta(trabajo: Path, ruta: str) -> ResultadoArchivo:
@@ -643,26 +664,8 @@ def _snapshot_for_owner(job_id: str, request: Request):
 @router.post("/trabajos", response_model=TrabajoCreadoResponse, status_code=202)
 async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoResponse:
     ownership = _processing_ownership(request)
-    # jax-14 (2026-10-03): freno de dependencias. Sin pdfplumber/openpyxl/
-    # python-docx los PDF/DOCX/XLSX salian `sin_extractor` en silencio. 503 ANTES
-    # de crear el trabajo y de tomar cupo: el despachador de la plataforma
-    # trata 5xx como reintento y las filas siguen `en_cola` hasta que se arregle.
-    # El freno es POR TIPO: solo se frena un lote con alguna ruta cuya extension
-    # dependa de un paquete faltante (un lote de imagenes sigue). `estado()` hace
-    # E/S de modulos: va fuera del loop (asyncio.to_thread).
-    extractores = await asyncio.to_thread(dependencias.estado)
-    if not extractores["ok"] and dependencias.lote_afectado(extractores["faltan"], req.rutas):
-        if aviso_extractores.log_si_toca():
-            logger.error("POST /procesamiento/trabajos rechazado: faltan extractores %s", extractores["faltan"])
-        aviso_extractores.avisar_si_toca(extractores["faltan"])
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "extractores_no_disponibles",
-                "faltan": extractores["faltan"],
-                "tipos": dependencias.tipos_de(extractores["faltan"]),
-            },
-        )
+    # Jax#338 ronda 18: las validaciones BARATAS (cantidad de rutas, formato del
+    # project_uuid) van antes del freno, que lee cabeceras de los archivos.
     if len(req.rutas) > _MAX_RUTAS_POR_TRABAJO:
         raise HTTPException(
             status_code=422,
@@ -680,6 +683,31 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
     # tampoco hace falta chequear que se codifique a UTF-8.
     if not _UUID_CANONICO.fullmatch(req.project_uuid):
         raise HTTPException(status_code=422, detail={"code": "project_uuid_invalido"})
+    # jax-14 (2026-10-03): freno de dependencias. Sin pdfplumber/openpyxl/
+    # python-docx los PDF/DOCX/XLSX salian `sin_extractor` en silencio. 503 ANTES
+    # de crear el trabajo y de tomar cupo: el despachador de la plataforma
+    # trata 5xx como reintento y las filas siguen `en_cola` hasta que se arregle.
+    # El freno es POR TIPO: solo se frena un lote con alguna ruta cuya extension
+    # dependa de un paquete faltante (un lote de imagenes sigue). `estado()` hace
+    # E/S de modulos: va fuera del loop (asyncio.to_thread).
+    # Jax#338 ronda 18: el freno decide como la compuerta, por la FIRMA del
+    # contenido (leido a traves del jail, solo la cabecera y solo si falta algo)
+    # y por la extension como respaldo: un PNG llamado `foto` tambien frena.
+    extractores = await asyncio.to_thread(dependencias.estado)
+    if not extractores["ok"] and await asyncio.to_thread(
+        dependencias.lote_afectado, extractores["faltan"], req.rutas, _ruta_del_jail,
+    ):
+        if aviso_extractores.log_si_toca():
+            logger.error("POST /procesamiento/trabajos rechazado: faltan extractores %s", extractores["faltan"])
+        aviso_extractores.avisar_si_toca(extractores["faltan"])
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "extractores_no_disponibles",
+                "faltan": extractores["faltan"],
+                "tipos": dependencias.tipos_de(extractores["faltan"]),
+            },
+        )
     try:
         estado_proyecto = await proyecto_activo.identidad_activa_del_proyecto(req.project_uuid, ownership)
     except Exception as e:

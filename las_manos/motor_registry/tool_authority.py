@@ -50,6 +50,14 @@ from pathlib import Path
 from typing import Any
 
 from jacobs.store import event_append
+try:
+    # Bare primero, por consistencia con los otros symlinks de las_manos/ (via
+    # las_manos/workspace_dir.py). En produccion jax.core TAMBIEN es importable
+    # (drop-in z-pythonpath.conf, PYTHONPATH=/srv/jax-prod/jax); el calificado
+    # cubre el REPL/CI con solo la raiz del repo en sys.path.
+    from workspace_dir import workspace_dir
+except ImportError:
+    from jax.core.workspace_dir import workspace_dir
 from motor_registry.catalog import MotorCatalog
 
 logger = logging.getLogger("motor_registry.tool_authority")
@@ -58,10 +66,15 @@ logger = logging.getLogger("motor_registry.tool_authority")
 # valor que jacobs/executor.py::HYDE_WORKSPACE_DIR y
 # jax/muscles/subprocess_muscle.py. No se importa executor.py directamente
 # (módulo pesado, trae dependencias de pipeline que este gate no necesita);
-# los 3 call sites leen la misma env var en vez de repetir el literal (ver
-# DEUDA.md -- mismo patrón de "múltiples fuentes de verdad" de Bloque 3,
-# aplicado acá al path, no al vocabulario de capabilities).
-WORKSPACE_ROOT = Path(os.getenv("JAX_WORKSPACE_DIR", "/home/fruiz/jax-workspace")).resolve()
+# los call sites leen la misma env var con `workspace_dir()` (jax/core/
+# workspace_dir.py, liviano) en vez de repetir el literal (ver DEUDA.md --
+# mismo patrón de "múltiples fuentes de verdad" de Bloque 3, aplicado acá al
+# path, no al vocabulario de capabilities).
+# SIN valor por defecto (2026-10-03, el workspace se movió a
+# /srv/jax-data/jax-workspace): si la variable falta, este módulo no se
+# importa y el proceso no arranca. Es fallar cerrado a propósito -- un default
+# escribiría en silencio en otro lugar y partiría los datos.
+WORKSPACE_ROOT = workspace_dir()
 
 # tool_name -> capability key. Nunca un nombre de función libre -- si un
 # tool nuevo se declara en tools_catalog.py sin agregarlo acá, queda

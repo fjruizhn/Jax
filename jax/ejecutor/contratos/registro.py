@@ -70,6 +70,7 @@ class Registro:
         self.ruta = Path(ruta)
         self._lock = threading.Lock()
         self._roto = False
+        self._cerrado = False
         self._fd = os.open(self.ruta, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, 0o640)
         try:
             lector = os.open(self.ruta, os.O_RDONLY | os.O_CLOEXEC)
@@ -93,6 +94,8 @@ class Registro:
 
     def anotar(self, evento: dict) -> int:
         with self._lock:
+            if self._cerrado:
+                raise OSError("registro_cerrado")  # explícito: nunca se anota (ni se pierde) en silencio
             if self._roto:
                 raise OSError("registro_roto")
             n = self._n + 1
@@ -107,7 +110,13 @@ class Registro:
             return n
 
     def cerrar(self) -> None:
-        os.close(self._fd)
+        """Toma el lock: un `anotar` en vuelo (entre el write y el fsync) termina antes de que se
+        cierre el fd. Idempotente; tras cerrar, `anotar` levanta OSError("registro_cerrado")."""
+        with self._lock:
+            if self._cerrado:
+                return
+            self._cerrado = True
+            os.close(self._fd)
 
 
 def verificar_cadena(ruta) -> Verificacion:

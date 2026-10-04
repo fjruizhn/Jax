@@ -156,6 +156,7 @@ def _correr_arranque_real(tmp_path: Path, *, omitir: frozenset[str] = frozenset(
     """
     credencial_plataforma = secrets.token_urlsafe(32)
     credencial_jacobs = secrets.token_urlsafe(32)
+    (tmp_path / "workspace").mkdir(exist_ok=True)  # workspace_dir() exige que exista
     entorno = {
         "HOME": os.environ.get("HOME", str(tmp_path)),
         "PATH": "/usr/bin:/bin",
@@ -167,6 +168,7 @@ def _correr_arranque_real(tmp_path: Path, *, omitir: frozenset[str] = frozenset(
         "JAX_OLLAMA_URL": "http://ollama.invalid:11434",
         "JAX_LAS_MANOS_CREDENCIAL_PLATAFORMA": credencial_plataforma,
         "JAX_LAS_MANOS_CREDENCIAL_JACOBS": credencial_jacobs,
+        "JAX_WORKSPACE_DIR": str(tmp_path / "workspace"),  # sin default desde 2026-10-03
         "JAX_REPO_BASE": str(tmp_path / "repo"),
         "JAX_AUDIT_LOG_PATH": str(tmp_path / "audit" / "audit.jsonl"),
         "JAX_FACET_SEAL_PATH": str(tmp_path / "seal" / "facet-cache-seal"),
