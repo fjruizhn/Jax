@@ -31,7 +31,7 @@ WORKFLOW = RAIZ / ".github" / "workflows" / "policy.yml"
 PISOS = RAIZ / "ci" / "pisos.json"
 PISO_PY = RAIZ / "ci" / "piso.py"
 
-USO = re.compile(r"python3 ci/piso\.py (verificar|minimo) (\S+)")
+USO = re.compile(r"python3 ci/piso\.py (verificar|minimo) ([^\s)]+)")
 
 
 def _modulo():

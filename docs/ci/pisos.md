@@ -4305,3 +4305,12 @@ tiempo. Si el runner da otro número, manda el runner.
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^53 passed, 2 skipped`
 
 Sin historia anotada en el workflow.
+
+## `archivos-de-test-en-ci/pisos`
+
+Patrón vigente (2026-10-03): `^140 passed`
+
+Piso nuevo de esta migración: `policy/tests/test_pisos_fuera_del_workflow.py` (permanente) más
+`policy/tests/test_pisos_migracion_desde_master.py` (de migración: compara con la fotografía de
+master 364ded9). Medido 2026-10-03 en Python 3.14.4: 140 passed. Exacto: una prueba que
+desaparezca deja pasar en silencio la forma que cubría.

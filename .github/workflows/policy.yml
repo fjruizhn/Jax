@@ -64,8 +64,7 @@ jobs:
             tests/test_las_voces_faro_paquete.py \
             tests/test_las_voces_qwen_auto.py 2>&1 | tee /tmp/las-voces-faro-readonly
           # Medido 2026-10-03 en venv limpio con mcp==2.2.0: 6 MCP + 18 paquete/lanzador, 0 skipped.
-          grep -qE "^24 passed in " /tmp/las-voces-faro-readonly || {
-            echo "PISO ROTO: se esperaban exactamente 24 tests CORRIDOS."; exit 1; }
+          python3 ci/piso.py verificar las-voces-faro-readonly/las-voces-faro-readonly /tmp/las-voces-faro-readonly || exit $?
 
   memory-b9-regression:
     runs-on: ubuntu-latest
@@ -127,14 +126,17 @@ jobs:
             tests/test_url_proveedor_workers_memoria.py \
             tests/test_legacy_adoption.py \
             -q --junitxml="$RUNNER_TEMP/memory-b9.xml"
+          MINIMO_CASOS=$(python3 ci/piso.py minimo memory-b9-regression/casos) || exit $?
+          export MINIMO_CASOS
           python - <<'PY'
           import os
           import xml.etree.ElementTree as ET
           from pathlib import Path
           cases = list(ET.parse(Path(os.environ['RUNNER_TEMP']) / 'memory-b9.xml').iter('testcase'))
           incomplete = [case for case in cases if any(case.find(tag) is not None for tag in ('failure', 'error', 'skipped'))]
-          if len(cases) < 102 or incomplete:
-              raise SystemExit(f'B9 regression incomplete: {len(cases)} cases, {len(incomplete)} failed/error/skipped; minimum 102, none skipped')
+          minimo = int(os.environ['MINIMO_CASOS'])
+          if len(cases) < minimo or incomplete:
+              raise SystemExit(f'B9 regression incomplete: {len(cases)} cases, {len(incomplete)} failed/error/skipped; minimum {minimo}, none skipped')
           print(f'B9 regression: {len(cases)} passed, 0 failed, 0 errors, 0 skipped')
           PY
 
@@ -304,8 +306,11 @@ jobs:
         # Medido 2026-09-18 en venv limpio: 7 passed.
         run: |
           python -m pytest -q policy/tests/test_archivos_de_test_wireados_en_ci.py 2>&1 | tee /tmp/wireados
-          grep -qE "^7 passed" /tmp/wireados || {
-            echo "PISO ROTO: se esperaban 7 tests CORRIDOS."; exit 1; }
+          python3 ci/piso.py verificar archivos-de-test-en-ci/wireados /tmp/wireados || exit $?
+      - name: Piso exacto de tests CORRIDOS de los pisos fuera del workflow
+        run: |
+          python -m pytest -q policy/tests/test_pisos_fuera_del_workflow.py policy/tests/test_pisos_migracion_desde_master.py 2>&1 | tee /tmp/pisos
+          python3 ci/piso.py verificar archivos-de-test-en-ci/pisos /tmp/pisos || exit $?
 
   ci-usa-la-mariadb-de-produccion:
     runs-on: ubuntu-latest
@@ -340,14 +345,14 @@ jobs:
         # deja pasar en silencio la forma que cubria.
         run: |
           python -m pytest -q policy/tests/test_claude_subprocess_solo_via_sandbox.py 2>&1 | tee /tmp/scanner
-          grep -qE "^54 passed" /tmp/scanner || { echo "PISO ROTO: se esperaban 54 tests CORRIDOS del scanner."; exit 1; }
+          python3 ci/piso.py verificar no-naked-claude-subprocess/scanner /tmp/scanner || exit $?
       - name: Piso exacto del control "un Titular solo nace en exigir_titular"
         # 9 tests (MINOR-16, ronda 2): 7 autopruebas del detector + el escaneo que ve el
         # arbol y el real. Medido con JAX_PLATFORM_REPO_ROOT=/nonexistent. Exacto: una
         # autoprueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           python -m pytest -q policy/tests/test_titular_solo_via_exigir_titular.py 2>&1 | tee /tmp/titular
-          grep -qE "^9 passed" /tmp/titular || { echo "PISO ROTO: se esperaban 9 tests CORRIDOS del control de Titular."; exit 1; }
+          python3 ci/piso.py verificar no-naked-claude-subprocess/titular /tmp/titular || exit $?
       - name: Piso exacto del control "quien llama a run_cli cablea preparar_arranque"
         # 7 tests (MINOR-35, auditoria del SHA 174da8c): el escaneo del arbol real (hoy sin
         # llamadores, pasa vacio a proposito) + 6 autopruebas sobre snippets. Medido con
@@ -355,13 +360,13 @@ jobs:
         # pasar un llamador sin arranque cuando los pasos 6 y 9 lo agreguen.
         run: |
           python -m pytest -q policy/tests/test_run_cli_solo_con_preparar_arranque.py 2>&1 | tee /tmp/arranque
-          grep -qE "^7 passed" /tmp/arranque || { echo "PISO ROTO: se esperaban 7 tests CORRIDOS del control de preparar_arranque."; exit 1; }
+          python3 ci/piso.py verificar no-naked-claude-subprocess/arranque /tmp/arranque || exit $?
       - name: Piso exacto de la guardia del arranque del Ejecutor
         # 5 tests (Ejecutor SP1 plan 6, 2026-09-17): nadie usa remoto_claude ni vigilar sin
         # exigir_contratos. Exacto: uno que desaparezca deja pasar un lanzador sin contratos.
         run: |
           python -m pytest -q policy/tests/test_ejecutor_lanza_solo_con_contratos.py 2>&1 | tee /tmp/lanza
-          grep -qE "^5 passed" /tmp/lanza || { echo "PISO ROTO: se esperaban 5 tests CORRIDOS."; exit 1; }
+          python3 ci/piso.py verificar no-naked-claude-subprocess/lanza /tmp/lanza || exit $?
 
   # El scanner de arriba (no-naked-claude-subprocess) protege que nadie
   # lance `claude` fuera de hyde_sandbox.py -- pero hasta 2026-08-25 la
@@ -391,8 +396,7 @@ jobs:
           #   LlamadaAlLockCompartidoTest.test_run_sandboxed_claude_llama_al_nucleo... .
           #   Quedan los 6 del lock (defaults, fail-closed, ruta fuera del workspace x3,
           #   cruce real entre dos procesos de SO). Medido: 6 passed.
-          grep -qE "^6 passed" /tmp/hydesb || {
-            echo "PISO ROTO: se esperaban 6 tests CORRIDOS de hyde_sandbox."; exit 1; }
+          python3 ci/piso.py verificar hyde-sandbox-unit/hydesb /tmp/hydesb || exit $?
       # Golden de wrap_hyde_command (D-4, facetas-por-suscripcion, 2026-10-01):
       # el argv y el env de Hyde congelados ANTES de que pase al nucleo comun
       # cli_sandbox. Piso exacto: 3 tests (coincide con la golden, la fixture no
@@ -400,8 +404,7 @@ jobs:
       - run: python -m pytest _hyde_wrap_golden_test.py -v
       - run: |
           python -m pytest _hyde_wrap_golden_test.py -q 2>&1 | tee /tmp/golden
-          grep -qE "^3 passed" /tmp/golden || {
-            echo "PISO ROTO: se esperaban 3 tests CORRIDOS de la golden de Hyde."; exit 1; }
+          python3 ci/piso.py verificar hyde-sandbox-unit/golden /tmp/golden || exit $?
 
   # cli_sandbox: nucleo comun del confinamiento de CLIs de suscripcion
   # (facetas-por-suscripcion, 2026-10-01, paso 1). El archivo mezcla logica pura
@@ -431,8 +434,7 @@ jobs:
       - run: python -m pytest _cli_sandbox_test.py -v
       - run: |
           python -m pytest _cli_sandbox_test.py -q 2>&1 | tee /tmp/clisb
-          grep -qE "^251 passed" /tmp/clisb || {
-            echo "PISO ROTO: se esperaban 251 tests CORRIDOS de cli_sandbox."; exit 1; }
+          python3 ci/piso.py verificar cli-sandbox-unit/clisb /tmp/clisb || exit $?
           if grep -qE "skipped" /tmp/clisb; then
             echo "HAY TESTS SALTADOS: la contencion real no se ejercito."; exit 1; fi
 
@@ -462,8 +464,7 @@ jobs:
       - run: python -m pytest tests/test_faro_paquete.py tests/test_faro_puerto.py tests/test_faro_puerto_e2e.py tests/test_faro_transporte.py tests/test_faro_cadena.py tests/test_faro_requirements.py tests/test_faro_aviso.py tests/test_faro_topes.py tests/test_faro_control.py tests/test_faro_lanzador.py tests/test_faro_acl.py -v
       - run: |
           python -m pytest tests/test_faro_paquete.py tests/test_faro_puerto.py tests/test_faro_puerto_e2e.py tests/test_faro_transporte.py tests/test_faro_cadena.py tests/test_faro_requirements.py tests/test_faro_aviso.py tests/test_faro_topes.py tests/test_faro_control.py tests/test_faro_lanzador.py tests/test_faro_acl.py -q 2>&1 | tee /tmp/faro
-          grep -qE "^671 passed" /tmp/faro || {
-            echo "PISO ROTO: se esperaban 671 tests CORRIDOS del Faro."; exit 1; }
+          python3 ci/piso.py verificar faro-fase0/faro /tmp/faro || exit $?
           if grep -qE "skipped" /tmp/faro; then
             echo "HAY TESTS SALTADOS: el Faro se ejercita completo o no cuenta."; exit 1; fi
 
@@ -495,8 +496,7 @@ jobs:
       - run: python -m pytest tests/test_faro_bitacora_db.py tests/test_faro_topes_db.py -v
       - run: |
           python -m pytest tests/test_faro_bitacora_db.py tests/test_faro_topes_db.py -q 2>&1 | tee /tmp/faro-db
-          grep -qE "^40 passed" /tmp/faro-db || {
-            echo "PISO ROTO: se esperaban 40 tests CORRIDOS de la bitacora y los topes del Faro."; exit 1; }
+          python3 ci/piso.py verificar faro-bitacora-db/faro-db /tmp/faro-db || exit $?
           if grep -qE "skipped" /tmp/faro-db; then
             echo "HAY TESTS SALTADOS: la bitacora se prueba contra una base real o no cuenta."; exit 1; fi
 
@@ -527,8 +527,7 @@ jobs:
       - run: python -m pytest tests/test_faro_jaula_real.py -v
       - run: |
           python -m pytest tests/test_faro_jaula_real.py -q 2>&1 | tee /tmp/faro-jaula
-          grep -qE "^11 passed" /tmp/faro-jaula || {
-            echo "PISO ROTO: se esperaban 11 tests CORRIDOS de la jaula del Faro."; exit 1; }
+          python3 ci/piso.py verificar faro-jaula/faro-jaula /tmp/faro-jaula || exit $?
           if grep -qE "skipped" /tmp/faro-jaula; then
             echo "HAY TESTS SALTADOS: la jaula se ejercita con bwrap y uids reales o no cuenta."; exit 1; fi
 
@@ -693,8 +692,7 @@ jobs:
           #   anterior: 3 failed, 17 passed (el cuarto, restaurado sin
           #   fallos, es guarda de regresion).
           # 26 -> 27 (2026-09-23, auditoría de jax#273): +1 test de la cancelación durante el restaurado.
-          grep -qE "^27 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 27 tests CORRIDOS (no skipeados)."; exit 1; }
+          python3 ci/piso.py verificar facet-health-io/out /tmp/out || exit $?
 
   # Task 9 (2026-09-18, historial-y-arreglos-de-pipeline): el historial de la
   # Mesa necesita prompt/modelo_real/depends_on por paso en
@@ -730,8 +728,7 @@ jobs:
       - run: python -m pytest jacobs/_pipeline_results_historial_test.py -v
       - run: |
           python -m pytest jacobs/_pipeline_results_historial_test.py -q 2>&1 | tee /tmp/out
-          grep -qE "^2 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2 tests CORRIDOS (no skipeados)."; exit 1; }
+          python3 ci/piso.py verificar pipeline-results-historial-db/out /tmp/out || exit $?
 
   # Frente F (2026-09-16): contrato de sub-pipelines contra una MariaDB REAL.
   # Las tablas de Jacobs (jacobs_pipelines/steps/events y la nueva
@@ -1111,8 +1108,7 @@ jobs:
           #   --completar idempotente, --completar con sha distinto, --revertir con trabajos en
           #   vuelo, --revertir reintentable, reaplicar tras corte, reaplicar con proyecto
           #   archivado). Numero LOCAL: el controlador lo re-mide con el runner.
-          grep -qE "^295 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 295 tests CORRIDOS (no skipeados)."; exit 1; }
+          python3 ci/piso.py verificar subpipeline-contrato-db/out /tmp/out || exit $?
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -1428,8 +1424,7 @@ jobs:
           #   tests/test_b9_shared_memory.py, que probaba `_render_legacy_repl_memory`
           #   (jax/core/main.py, retirado). Puro: pasaba sin DB en la medicion local
           #   (3864 -> 3825 passed sobre tests/ completo, mismo comando). Manda el runner.
-          grep -qE "^203 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 203 tests CORRIDOS (no skipeados)."; exit 1; }
+          python3 ci/piso.py verificar memory-vector-zero-io/out /tmp/out || exit $?
       - name: Publicar resumen de segunda corrida de memoria
         if: failure()
         run: |
@@ -1538,8 +1533,7 @@ jobs:
       # medido dos veces contra el arbol real, sin DB de por medio.
       - run: |
           python -m pytest _hyde_containment_test.py -q 2>&1 | tee /tmp/hyde
-          grep -qE "^21 passed" /tmp/hyde || {
-            echo "PISO ROTO: se esperaban 21 tests CORRIDOS (no skipeados)."; exit 1; }
+          python3 ci/piso.py verificar hyde-containment/hyde /tmp/hyde || exit $?
 
   facet-resolver-seal:
     runs-on: ubuntu-latest
@@ -1562,8 +1556,7 @@ jobs:
           # no con `None`, y el test nuevo lo fija adelantando el reloj una
           # hora (la carrera real es de sub-milisegundo, 1/20.000 sobre xfs:
           # esperarla en un test seria un flake, no una prueba).
-          grep -qE "^13 passed" /tmp/seal || {
-            echo "PISO ROTO: se esperaban 13 tests CORRIDOS (no skipeados)."; exit 1; }
+          python3 ci/piso.py verificar facet-resolver-seal/seal /tmp/seal || exit $?
 
   # Renombrado de `facet-resolver-sync` el 2026-09-01: el checker se generalizo
   # a FAMILIAS de espejos y ahora cubre tambien credential_resolver.
@@ -1606,8 +1599,7 @@ jobs:
       - run: PYTHONPATH=las_manos python -m pytest jacobs/_plan_timeout_ceiling_test.py -v
       - run: |
           PYTHONPATH=las_manos python -m pytest jacobs/_plan_timeout_ceiling_test.py -q 2>&1 | tee /tmp/ptc
-          grep -qE "^16 passed" /tmp/ptc || {
-            echo "PISO ROTO: se esperaban 16 tests CORRIDOS."; exit 1; }
+          python3 ci/piso.py verificar plan-timeout-ceiling/ptc /tmp/ptc || exit $?
 
   mirror-sync:
     runs-on: ubuntu-latest
@@ -1632,8 +1624,7 @@ jobs:
       - run: python -m pytest scripts/_check_mirror_sync_test.py -v
       - run: |
           python -m pytest scripts/_check_mirror_sync_test.py -q 2>&1 | tee /tmp/ms
-          grep -qE "^14 passed" /tmp/ms || {
-            echo "PISO ROTO: se esperaban 14 tests CORRIDOS."; exit 1; }
+          python3 ci/piso.py verificar mirror-sync/ms /tmp/ms || exit $?
       # La comparacion por AST de la familia `cola_uso` contra la copia REAL de
       # jax-platform (Task 7, 2026-09-15). Corre ACA y no en tests-puros porque
       # este es el unico job con el checkout de jax-platform: alla el mismo test
@@ -1683,8 +1674,7 @@ jobs:
         # del mismo checkout de jax-platform@master con Task 7b adentro.
         run: |
           python -m pytest tests/test_cola_uso_escritores.py -q 2>&1 | tee /tmp/cu
-          grep -qE "^22 passed" /tmp/cu || {
-            echo "PISO ROTO: se esperaban 22 tests CORRIDOS y 0 skipped."; exit 1; }
+          python3 ci/piso.py verificar mirror-sync/cu /tmp/cu || exit $?
       - name: El freno que escribe la plataforma mata el motor en vuelo
         env:
           JAX_PLATFORM_REPO_ROOT: /tmp/jax-platform
@@ -1696,8 +1686,7 @@ jobs:
           # escritor real de la plataforma. Sin el checkout se saltan: se exige 0 skipped.
           # Rebase 2026-09-17: sin aiofiles (E-19), desde requirements.txt. Medido dos
           # veces contra jax-platform origin/master 97e4b3e (incluye #95): 2 passed.
-          grep -qE "^2 passed in" /tmp/ks || {
-            echo "PISO ROTO: se esperaban 2 tests CORRIDOS y 0 skipped."; exit 1; }
+          python3 ci/piso.py verificar mirror-sync/ks /tmp/ks || exit $?
 
   ollama-num-parallel:
     # Tripwire del invariante del que cuelga ENTERA la decision de
@@ -1726,8 +1715,7 @@ jobs:
         # silencio, que es como el scanner P10 estuvo meses verde sobre cero.
         run: |
           python -m pytest scripts/_check_ollama_num_parallel_test.py -q 2>&1 | tee /tmp/onp
-          grep -qE "^33 passed" /tmp/onp || {
-            echo "PISO ROTO: se esperaban 33 tests CORRIDOS."; exit 1; }
+          python3 ci/piso.py verificar ollama-num-parallel/onp /tmp/onp || exit $?
       - name: El tripwire es rojo cuando NO puede medir (fail-closed)
         # Sin proceso `ollama serve` no hay nada que medir, y eso es rojo --
         # no "no aplica". En este runner no hay Ollama, asi que el caso se
@@ -1775,8 +1763,7 @@ jobs:
       - name: Piso exacto de F2-E-SR source integrity regressions
         run: |
           python -m pytest tests/test_f2e_runtime_status_remediation.py -q 2>&1 | tee /tmp/f2e-sr
-          grep -qE "^18 passed" /tmp/f2e-sr || {
-            echo "PISO ROTO: se esperaban 18 tests CORRIDOS de F2-E-SR source integrity."; exit 1; }
+          python3 ci/piso.py verificar governance/f2e-sr /tmp/f2e-sr || exit $?
         env:
           PYTHONPATH: .:las_manos
       - name: F2-E-SR3 Processing ownership and governed-status regressions
@@ -1800,8 +1787,7 @@ jobs:
           # 208 -> 212 (2026-10-03, SR3 caller immutability): +4 store
           # derivation, update-rejection, and replay-contradiction cases.
           # Measured on Python 3.12 with this exact five-file command.
-          grep -qE "^212 passed" /tmp/f2e-sr3 || {
-            echo "PISO ROTO: se esperaban 212 tests CORRIDOS de F2-E-SR3."; exit 1; }
+          python3 ci/piso.py verificar governance/f2e-sr3 /tmp/f2e-sr3 || exit $?
         env:
           PYTHONPATH: .:las_manos
       - name: F2-E-SR3 Processing source authentication and routing regressions
@@ -1842,8 +1828,7 @@ jobs:
           # 155 -> 156 (2026-10-03, jax-14 ronda 3, MINOR-N5): +1, un valor enorme (1e28)
           # se baja al techo (86400 s aviso, 3600 s log) con warning. Medido con este
           # comando exacto, con y sin las tres dependencias: 156 passed.
-          grep -qE "^156 passed" /tmp/f2e-sr3-source || {
-            echo "PISO ROTO: se esperaban 156 tests CORRIDOS de F2-E-SR3 source/auth/routing."; exit 1; }
+          python3 ci/piso.py verificar governance/f2e-sr3-source /tmp/f2e-sr3-source || exit $?
         env:
           PYTHONPATH: .:las_manos
       - name: Piso exacto de tests CORRIDOS
@@ -1900,8 +1885,7 @@ jobs:
           # predicate vocabulary, root-only governed-domain import tripwire,
           # native/canonical structured shapes, bounded encodings, and the
           # F2-B -> F2-C -> F2-D receipt/render/revalidation path.
-          grep -qE "^263 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 263 tests CORRIDOS."; exit 1; }
+          python3 ci/piso.py verificar governance/gov /tmp/gov || exit $?
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en
@@ -5168,8 +5152,7 @@ jobs:
           #   (29 -> 37: el barrido marca CUALQUIER `or` tras la lectura; 9 casos parametrizados
           #   reemplazan la prueba de `or ""`). Misma lista y metodo (unshare, Python 3.14.4):
           #   3451 passed + 1 failed preexistente = 3452, 45 skipped, 1 xfailed.
-          grep -qE "^3452 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 3452 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          python3 ci/piso.py verificar tests-puros/out /tmp/out || exit $?
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -5186,13 +5169,11 @@ jobs:
       - name: Ficha -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_ficha_test.py 2>&1 | tee /tmp/ficha_tests
-          grep -qE "^16 passed" /tmp/ficha_tests || {
-            echo "PISO ROTO: se esperaban 16 tests CORRIDOS de procesamiento/_ficha_test.py -- el tipo que fija el fallo cerrado de toda la ronda."; exit 1; }
+          python3 ci/piso.py verificar tests-puros/ficha_tests /tmp/ficha_tests || exit $?
       - name: Resultado -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_resultado_test.py 2>&1 | tee /tmp/resultado_tests
-          grep -qE "^16 passed" /tmp/resultado_tests || {
-            echo "PISO ROTO: se esperaban 16 tests CORRIDOS de procesamiento/_resultado_test.py -- el tipo que fija el fallo cerrado de toda la ronda."; exit 1; }
+          python3 ci/piso.py verificar tests-puros/resultado_tests /tmp/resultado_tests || exit $?
       # Task 3 (2026-09-20, procesamiento-archivos-nucleo): extractor de Excel
       # -- TODAS las hojas, no la que LibreOffice se digna a convertir (medido
       # 2026-09-20: 1 de 6, sin error y sin aviso). requirements-archivos.txt
@@ -5218,8 +5199,7 @@ jobs:
         run: |
           python -m pytest -q procesamiento/extractores/_excel_test.py 2>&1 | tee /tmp/excel_tests
           # 2026-10-03 (jax-14, ronda 1): +1 (ImportError que no es ModuleNotFoundError -> dependencia_rota). Medido en local, Python 3.14 con las 3 dependencias: 14 passed.
-          grep -qE "^14 passed" /tmp/excel_tests || {
-            echo "PISO ROTO: se esperaban 14 tests CORRIDOS (no skipeados) del extractor de Excel. Si esto da '... skipped', openpyxl no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          python3 ci/piso.py verificar tests-puros/excel_tests /tmp/excel_tests || exit $?
 
       # Task 4 (2026-09-20/21, procesamiento-archivos-nucleo): PDF nativo
       # -- pdftotext destruye las tablas, y en un expediente financiero la
@@ -5280,8 +5260,7 @@ jobs:
         run: |
           python -m pytest -q procesamiento/extractores/_pdf_test.py 2>&1 | tee /tmp/pdf_tests
           # 2026-10-03 (jax-14, ronda 1): +1 (dependencia_rota). Medido en local, Python 3.14 con las 3 dependencias: 23 passed.
-          grep -qE "^23 passed" /tmp/pdf_tests || {
-            echo "PISO ROTO: se esperaban 23 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          python3 ci/piso.py verificar tests-puros/pdf_tests /tmp/pdf_tests || exit $?
 
       # Task 5 (2026-09-21, procesamiento-archivos-nucleo): OCR -- PDF
       # escaneado e imagen. tesseract por subproceso, nunca por binding
@@ -5345,8 +5324,7 @@ jobs:
       - name: OCR -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_ocr_test.py 2>&1 | tee /tmp/ocr_tests
-          grep -qE "^35 passed" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 35 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          python3 ci/piso.py verificar tests-puros/ocr_tests /tmp/ocr_tests || exit $?
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
@@ -5404,8 +5382,7 @@ jobs:
         run: |
           python -m pytest -q procesamiento/extractores/_word_test.py 2>&1 | tee /tmp/word_tests
           # 2026-10-03 (jax-14, ronda 1): +1 (dependencia_rota). Medido en local, Python 3.14 con las 3 dependencias: 23 passed.
-          grep -qE "^23 passed" /tmp/word_tests || {
-            echo "PISO ROTO: se esperaban 23 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          python3 ci/piso.py verificar tests-puros/word_tests /tmp/word_tests || exit $?
 
       # Task 7 (2026-09-20/21, procesamiento-archivos-nucleo): la compuerta
       # -- elige extractor por tipo, y NUNCA paga el caro (OCR) si el barato
@@ -5481,8 +5458,7 @@ jobs:
         run: |
           python -m pytest -q procesamiento/_compuerta_test.py 2>&1 | tee /tmp/compuerta_tests
           # 2026-10-03 (jax-14, ronda 1): +1 (pdfplumber roto no escapa crudo ni rutea a OCR). Medido en local, Python 3.14 con las 3 dependencias: 35 passed.
-          grep -qE "^35 passed" /tmp/compuerta_tests || {
-            echo "PISO ROTO: se esperaban 35 tests CORRIDOS de la compuerta."; exit 1; }
+          python3 ci/piso.py verificar tests-puros/compuerta_tests /tmp/compuerta_tests || exit $?
 
       # Task 8 (2026-09-21, procesamiento-archivos-nucleo): la ingesta con
       # cache -- la tarea que produce el ahorro real. Indexa por sha256 del
@@ -5617,8 +5593,7 @@ jobs:
           # 47 -> 48 (2026-10-03, Proyectos E2a T4, ronda 2, ROTURA-1): +1 -- un symlink de
           #   directorio mas `..` ya no se procesa en el lugar (huella y extraccion del mismo
           #   archivo). Numero LOCAL: el controlador lo re-mide con el runner.
-          grep -qE "^48 passed" /tmp/ingesta_tests || {
-            echo "PISO ROTO: se esperaban 48 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+          python3 ci/piso.py verificar tests-puros/ingesta_tests /tmp/ingesta_tests || exit $?
 
       # Task 9 (2026-09-21, procesamiento-archivos-nucleo): mide si los
       # extractos SIRVEN -- el criterio §7.B corregido ese mismo dia (el
@@ -5652,8 +5627,7 @@ jobs:
       - name: Medidor de utilidad de extractos -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q scripts/_medir_utilidad_extractos_test.py 2>&1 | tee /tmp/medir_utilidad_tests
-          grep -qE "^11 passed" /tmp/medir_utilidad_tests || {
-            echo "PISO ROTO: se esperaban 11 tests CORRIDOS del medidor de utilidad. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+          python3 ci/piso.py verificar tests-puros/medir_utilidad_tests /tmp/medir_utilidad_tests || exit $?
 
       # Camino de entrada más simple (2026-09-21, procesamiento-archivos-
       # nucleo): `scripts/procesar_archivos.py` -- `procesar(proyecto,
@@ -5680,8 +5654,7 @@ jobs:
       - name: Procesar archivos -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q scripts/_procesar_archivos_test.py 2>&1 | tee /tmp/procesar_archivos_tests
-          grep -qE "^12 passed" /tmp/procesar_archivos_tests || {
-            echo "PISO ROTO: se esperaban 12 tests CORRIDOS del guion de procesar_archivos. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+          python3 ci/piso.py verificar tests-puros/procesar_archivos_tests /tmp/procesar_archivos_tests || exit $?
 
       # Endpoint de Procesamiento de Archivos (2026-09-20): `procesamiento/`
       # (jax#252) estaba terminado pero nadie lo llamaba desde HTTP.
@@ -5851,8 +5824,7 @@ jobs:
           # tres dependencias: 94 passed en ambos.
           # 94 -> 95 el 2026-10-03 (jax-14 ronda 3): ver F2-E-SR3; con y sin las tres
           # dependencias: 95 passed.
-          grep -qE "^95 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 95 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          python3 ci/piso.py verificar tests-puros/procesamiento_routes_tests /tmp/procesamiento_routes_tests || exit $?
 
       # jax-14 (2026-10-03): freno de dependencias de extraccion. Piso exacto de
       # procesamiento/_dependencias_test.py: 29 passed (10 de la ronda 0 + 19 de la
@@ -5864,8 +5836,7 @@ jobs:
       - name: Freno de dependencias de extraccion -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_dependencias_test.py 2>&1 | tee /tmp/dependencias_tests
-          grep -qE "^29 passed" /tmp/dependencias_tests || {
-            echo "PISO ROTO: se esperaban 29 tests CORRIDOS (no skipeados) del freno de dependencias."; exit 1; }
+          python3 ci/piso.py verificar tests-puros/dependencias_tests /tmp/dependencias_tests || exit $?
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
@@ -6736,8 +6707,7 @@ jobs:
           #   y ahora exige idx_ejecutor_punto_host_respaldo. Medido local con las migraciones
           #   de jax-platform master: ese archivo 3 -> 5 passed. Los dos vistos en rojo contra
           #   el exportador viejo (a8de3fd: 2 failed / 3 passed).
-          grep -qE "^170 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 170 tests CORRIDOS."; exit 1; }
+          python3 ci/piso.py verificar jacobs-gobernanza-db/out /tmp/out || exit $?
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira
@@ -6893,5 +6863,4 @@ jobs:
         # carpeta oculta. Local: 54 passed + 1 solo-host (55 pruebas; el runner salta 2).
         run: |
           PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
-          grep -qE "^53 passed, 2 skipped" /tmp/permisos_proyectos || {
-            echo "PISO ROTO: se esperaban 53 tests CORRIDOS (no skipeados) y exactamente 2 skipped."; exit 1; }
+          python3 ci/piso.py verificar permisos-proyectos/permisos_proyectos /tmp/permisos_proyectos || exit $?

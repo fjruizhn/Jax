@@ -168,6 +168,10 @@
     "permisos-proyectos/permisos_proyectos": {
       "patron": "^53 passed, 2 skipped",
       "mensaje": "PISO ROTO: se esperaban 53 tests CORRIDOS (no skipeados) y exactamente 2 skipped."
+    },
+    "archivos-de-test-en-ci/pisos": {
+      "patron": "^140 passed",
+      "mensaje": "PISO ROTO: se esperaban 140 tests CORRIDOS de los pisos fuera del workflow."
     }
   },
   "minimos": {
