@@ -40,10 +40,292 @@ Volcado de `jax_memory` (`mariadb-dump --single-transaction --routines --trigger
 python3 ops/permisos_proyectos.py --verificar      # solo lectura; anotar la salida
 sudo -l                                            # confirmar la regla de sudoers (Preconditions)
 sudo install -o root -g root -m 0755 ops/permisos_proyectos.py /usr/local/sbin/jax-permisos-proyectos
-python3 ops/permisos_proyectos.py --aplicar
-python3 ops/permisos_proyectos.py --verificar      # tiene que dar 0
+# --aplicar y el --verificar posterior van en el bloque de abajo, con las unidades de jaxsvc detenidas
 ```
-Hacerlo desde un checkout cuyo HEAD tenga el guion commiteado (el núcleo se compara contra `git show HEAD:ops/permisos_proyectos.py`). **Requisito de `workspace-proyectos.md`:** el `fchmod(0o660)` de `tool_authority.py` tiene que estar ya en `/srv/jax-prod` (paso 3 de esta secuencia lo despliega; si no está, `--aplicar` NO se corre: ver «Aplicación en producción: BLOQUEADA» en ese runbook). Verificación: `--verificar` sale `0`; luego la **prueba real como `jaxsvc`** de ese runbook (paso 6: escritura cruzada `jaxsvc`/`fruiz` en un subdirectorio propio) en verde. Reversión: `python3 ops/permisos_proyectos.py --deshacer`.
+**`--aplicar` y `--deshacer` se corren SOLO con TODAS las unidades de `jaxsvc` detenidas, en UN bloque, y se restauran al salir.** El guion falla cerrado, sin mutar nada, si hay cualquier proceso o hilo con el uid de `jaxsvc` (lo lee de `/proc`; si no puede leer el estado de un pid listado, también falla; `--verificar` no lo exige). Por qué, en dos líneas: un proceso `jaxsvc` vivo puede renombrar carpetas mientras root recorre el árbol, y todas las carreras de renombre (symlinks, hardlinks, intercambio de nombres, ocultas que cambian de proyecto) parten de eso; sin procesos `jaxsvc`, nadie con permiso de renombrar corre en paralelo (queda `fruiz`, dueño, y root, que es confiable por premisa). Las unidades solo se **detienen**: no se enmascaran, porque viven en `/etc/systemd/system` y un `mask --runtime` no las tapa; con los timers parados no se disparan. El bloque, en este orden: (a) premisas (sin archivos setuid/setgid de `jaxsvc` y sin crontab de `jaxsvc`); (b) la lista de unidades y timers de `jaxsvc` (`list-units` y `list-timers` con `'jax*'`, filtradas por `User=`), con **cada consulta capturada: si una falla, o la lista sale vacía, o falta una de la lista mínima esperada, se corta**; el estado textual (`active`, `inactive`, `failed`, `activating`) de cada una, guardado ANTES de detener nada; (c) el `trap` de restauración; (d) `stop` de cada una; (e) comprobar por su salida textual que quedaron detenidas, `ps -u jaxsvc` vacío y `/proc/*/status` y `/proc/*/task/*/status` sin los cuatro uid; (f) el guion; (g) `--verificar`; (h) el trap **arranca en orden inverso las que estaban `active` o `activating` (una unidad que estaba arrancando se restaura igual), verifica con `is-active` que vuelvan y, si alguna no vuelve, dice cuáles y cómo arrancarla a mano y sale con código distinto de 0 aunque el guion haya ido bien** (conserva el código del fallo original si lo hubo). **Desde justo antes del primer `stop` el bloque ignora INT, TERM y HUP** (los procesos hijos, el guion incluido, heredan el ignorar) y antes de detener nada imprime el aviso con la orden para arrancar a mano. Por qué, en dos líneas: cortar a mitad de la aplicación no es seguro (el árbol queda a medias y el trap tendría que restaurar mientras otra señal lo interrumpe), y `--aplicar` es idempotente, así que lo correcto es dejar que termine y repetirlo si hace falta. Si de verdad hay que cortarlo, `kill -9` y después `sudo systemctl start <las unidades activas>` (el aviso las lista).
+
+**Bloque de `--aplicar`:**
+```bash
+# BLOQUE-APLICAR
+set -euo pipefail
+PERMISOS="${PERMISOS:-python3 ops/permisos_proyectos.py}"   # (las pruebas lo sustituyen)
+RAIZ="${RAIZ:-/srv/jax-data/jax-workspace}"
+PROC="${PROC:-/proc}"
+# Lista mínima que TIENE que aparecer (hoy en hall9000): si alguna falta, el descubrimiento está incompleto y se corta.
+ESPERADAS="${ESPERADAS:-jax-las-manos.service jax-platform.service jax-ariadna-pm.service jax-ejecutor-proxy.service jax-catalogo-modelos.service jax-limpiar-bases-de-test.service jax-catalogo-modelos.timer jax-limpiar-bases-de-test.timer}"
+REINTENTOS="${REINTENTOS:-5}"; ESPERA="${ESPERA:-1}"
+falla() { echo "NO CUMPLE: $*" >&2; exit 1; }
+
+# (a) PREMISAS: si no se cumplen, el bloque falla antes de tocar nada.
+SETUID="$(sudo find / "$RAIZ" -xdev \( -path /proc -o -path /sys \) -prune -o -type f -user jaxsvc -perm /6000 -print)" \
+  || falla "no se pudo buscar archivos setuid/setgid de jaxsvc"
+[ -z "$SETUID" ] || falla "hay archivos setuid/setgid de jaxsvc (podrían volver a darle uid): $SETUID"
+CRON="$(sudo crontab -u jaxsvc -l 2>&1 || true)"
+case "$CRON" in *"no crontab"*) ;; *) falla "jaxsvc tiene crontab (podría arrancar procesos): $CRON" ;; esac
+
+# (b) LISTA de unidades y timers de jaxsvc. NINGUNA consulta puede fallar en silencio: cada salida se captura y, si la
+#     consulta falla, se corta. Un timer, socket o path cuenta por la unidad que dispara (Triggers=).
+UNIDADES="$(sudo systemctl list-units --all --plain --no-legend 'jax*')" || falla "falló systemctl list-units"
+TEMPORIZADORES="$(sudo systemctl list-timers --all --plain --no-legend 'jax*')" || falla "falló systemctl list-timers"
+CANDIDATAS="$({ printf '%s\n' "$UNIDADES" | awk 'NF {print $1}'; \
+  printf '%s\n' "$TEMPORIZADORES" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /\.timer$/) print $i}'; } | sort -u)" \
+  || falla "no se pudo armar la lista de unidades"
+[ -n "$CANDIDATAS" ] || falla "la lista de unidades 'jax*' está vacía (en hall9000 hay al menos las de ESPERADAS)"
+TIMERS=(); ACTIVADORES=(); SERVICIOS=()
+while read -r u; do
+  de_jaxsvc=no
+  usuario="$(sudo systemctl show -p User --value "$u")" || falla "falló systemctl show -p User $u"
+  [ "$usuario" = jaxsvc ] && de_jaxsvc=si
+  if [ "$de_jaxsvc" = no ]; then
+    disparadas="$(sudo systemctl show -p Triggers --value "$u")" || falla "falló systemctl show -p Triggers $u"
+    for t in $disparadas; do
+      usuario_t="$(sudo systemctl show -p User --value "$t")" || falla "falló systemctl show -p User $t"
+      [ "$usuario_t" = jaxsvc ] && de_jaxsvc=si
+    done
+  fi
+  [ "$de_jaxsvc" = si ] || continue
+  case "$u" in *.timer) TIMERS+=("$u") ;; *.service) SERVICIOS+=("$u") ;; *) ACTIVADORES+=("$u") ;; esac
+done <<< "$CANDIDATAS"
+LISTA=("${TIMERS[@]}" "${ACTIVADORES[@]}" "${SERVICIOS[@]}")   # los timers se paran primero
+[ "${#LISTA[@]}" -gt 0 ] || falla "ninguna unidad de jaxsvc en la lista: el descubrimiento falló"
+for esperada in $ESPERADAS; do
+  encontrada=no
+  for u in "${LISTA[@]}"; do [ "$u" = "$esperada" ] && encontrada=si; done
+  [ "$encontrada" = si ] || falla "falta la unidad esperada de jaxsvc $esperada: el descubrimiento está incompleto"
+done
+
+# ESTADO de CADA unidad ANTES de detener nada, por su salida textual (no solo por el código de salida).
+ESTADOS=()
+for u in "${LISTA[@]}"; do
+  estado="$(sudo systemctl is-active "$u" || true)"
+  case "$estado" in active|inactive|failed|activating) ;; *) falla "estado inesperado de $u: '$estado'" ;; esac
+  ESTADOS+=("$estado")
+done
+
+# (c) TRAP de restauración (EXIT): arranca en orden INVERSO solo las que estaban 'active', verifica con is-active que
+#     vuelvan (con unos pocos reintentos) y, si alguna no vuelve, lo dice, explica cómo arrancarla y sale con código
+#     distinto de 0 AUNQUE la aplicación haya ido bien. Conserva el código del fallo original si lo hubo.
+restaurar() {
+  local rc=$? i u intento fallidas=()      # rc del fallo real (o 0)
+  trap - EXIT
+  set +e
+  for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
+    [ "${ESTADOS[i]}" = active ] || [ "${ESTADOS[i]}" = activating ] || continue
+    sudo systemctl start "${LISTA[i]}" || echo "AVISO: systemctl start ${LISTA[i]} falló" >&2
+  done
+  for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
+    [ "${ESTADOS[i]}" = active ] || [ "${ESTADOS[i]}" = activating ] || continue
+    u="${LISTA[i]}"
+    for ((intento = 0; intento < REINTENTOS; intento++)); do
+      [ "$(sudo systemctl is-active "$u")" = active ] && break
+      sleep "$ESPERA"
+    done
+    [ "$(sudo systemctl is-active "$u")" = active ] || fallidas+=("$u")
+  done
+  if [ "${#fallidas[@]}" -gt 0 ]; then
+    echo "ERROR: no volvieron a 'active': ${fallidas[*]}" >&2
+    for u in "${fallidas[@]}"; do echo "  arrancarla a mano: sudo systemctl start $u" >&2; done
+    [ "$rc" -ne 0 ] || rc=1
+  fi
+  exit "$rc"
+}
+trap restaurar EXIT
+
+# VENTANA SIN SEÑALES: desde justo antes del primer stop (con el trap EXIT ya armado) INT, TERM y HUP se IGNORAN hasta
+# el final, incluidos el guion y la restauración (los procesos hijos heredan el ignorar). Así no hay ventanas entre
+# manejadores: el rc es el del fallo real o 0.
+A_ARRANCAR=""
+for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
+  if [ "${ESTADOS[i]}" = active ] || [ "${ESTADOS[i]}" = activating ]; then A_ARRANCAR="$A_ARRANCAR ${LISTA[i]}"; fi
+done
+echo "AVISO: durante la ventana el bloque no se interrumpe con Ctrl-C; si hace falta cortarlo, kill -9 y después: sudo systemctl start${A_ARRANCAR}" >&2
+trap '' INT TERM HUP
+
+# (d) PARAR cada timer y unidad (sin mask: las unidades viven en /etc/systemd/system y un mask --runtime no las tapa;
+#     con los timers parados no se disparan, y arrancarlos solo puede hacerlo root, que es confiable por premisa).
+for u in "${LISTA[@]}"; do sudo systemctl stop "$u" || falla "no se pudo detener $u"; done
+
+# (e) COMPROBAR: ninguna activa (por su salida textual), `ps -u jaxsvc` vacío y /proc sin los cuatro uid de jaxsvc.
+for u in "${LISTA[@]}"; do
+  estado="$(sudo systemctl is-active "$u" || true)"
+  case "$estado" in inactive|failed) ;; *) falla "$u no quedó detenida (estado: '$estado')" ;; esac
+done
+PS_SALIDA="$(ps -u jaxsvc -o pid= 2>&1)" || { rc_ps=$?; [ "$rc_ps" -eq 1 ] || falla "ps -u jaxsvc falló (rc $rc_ps)"; }
+[ -z "$PS_SALIDA" ] || falla "quedan procesos de jaxsvc (ps -u jaxsvc): $PS_SALIDA"
+command -v awk >/dev/null || falla "no hay awk para recorrer $PROC"
+UID_JAXSVC="$(id -u jaxsvc)" || falla "no existe la cuenta jaxsvc"
+shopt -s nullglob
+ARCHIVOS_PROC=("$PROC"/[0-9]*/status "$PROC"/[0-9]*/task/*/status)
+[ "${#ARCHIVOS_PROC[@]}" -gt 0 ] || falla "no se pudo leer $PROC: ningún status de proceso"
+# (un proceso que termina mientras se lee puede hacer que awk avise de un archivo que ya no está: se tolera)
+HALLADOS="$(awk -v u="$UID_JAXSVC" '/^Uid:/ { for (i = 2; i <= 5; i++) if ($i == u) print FILENAME }' "${ARCHIVOS_PROC[@]}" 2>/dev/null | sort -u || true)"
+[ -z "$HALLADOS" ] || falla "/proc muestra procesos o hilos de jaxsvc (alguno de los cuatro uid): $HALLADOS"
+
+# (f) APLICAR
+$PERMISOS --aplicar
+# (g) VERIFICAR
+$PERMISOS --verificar
+# (h) al salir, el trap restaura (start en orden inverso, verificado con is-active).
+echo "OK: --aplicar terminó con jaxsvc detenido; el trap restaura las unidades al salir"
+```
+
+**Bloque de `--deshacer`** (el mismo, sin `--verificar`: tras `--deshacer` el árbol ya no es el aplicado):
+```bash
+# BLOQUE-DESHACER
+set -euo pipefail
+PERMISOS="${PERMISOS:-python3 ops/permisos_proyectos.py}"   # (las pruebas lo sustituyen)
+RAIZ="${RAIZ:-/srv/jax-data/jax-workspace}"
+PROC="${PROC:-/proc}"
+# Lista mínima que TIENE que aparecer (hoy en hall9000): si alguna falta, el descubrimiento está incompleto y se corta.
+ESPERADAS="${ESPERADAS:-jax-las-manos.service jax-platform.service jax-ariadna-pm.service jax-ejecutor-proxy.service jax-catalogo-modelos.service jax-limpiar-bases-de-test.service jax-catalogo-modelos.timer jax-limpiar-bases-de-test.timer}"
+REINTENTOS="${REINTENTOS:-5}"; ESPERA="${ESPERA:-1}"
+falla() { echo "NO CUMPLE: $*" >&2; exit 1; }
+
+# (a) PREMISAS: si no se cumplen, el bloque falla antes de tocar nada.
+SETUID="$(sudo find / "$RAIZ" -xdev \( -path /proc -o -path /sys \) -prune -o -type f -user jaxsvc -perm /6000 -print)" \
+  || falla "no se pudo buscar archivos setuid/setgid de jaxsvc"
+[ -z "$SETUID" ] || falla "hay archivos setuid/setgid de jaxsvc (podrían volver a darle uid): $SETUID"
+CRON="$(sudo crontab -u jaxsvc -l 2>&1 || true)"
+case "$CRON" in *"no crontab"*) ;; *) falla "jaxsvc tiene crontab (podría arrancar procesos): $CRON" ;; esac
+
+# (b) LISTA de unidades y timers de jaxsvc. NINGUNA consulta puede fallar en silencio: cada salida se captura y, si la
+#     consulta falla, se corta. Un timer, socket o path cuenta por la unidad que dispara (Triggers=).
+UNIDADES="$(sudo systemctl list-units --all --plain --no-legend 'jax*')" || falla "falló systemctl list-units"
+TEMPORIZADORES="$(sudo systemctl list-timers --all --plain --no-legend 'jax*')" || falla "falló systemctl list-timers"
+CANDIDATAS="$({ printf '%s\n' "$UNIDADES" | awk 'NF {print $1}'; \
+  printf '%s\n' "$TEMPORIZADORES" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /\.timer$/) print $i}'; } | sort -u)" \
+  || falla "no se pudo armar la lista de unidades"
+[ -n "$CANDIDATAS" ] || falla "la lista de unidades 'jax*' está vacía (en hall9000 hay al menos las de ESPERADAS)"
+TIMERS=(); ACTIVADORES=(); SERVICIOS=()
+while read -r u; do
+  de_jaxsvc=no
+  usuario="$(sudo systemctl show -p User --value "$u")" || falla "falló systemctl show -p User $u"
+  [ "$usuario" = jaxsvc ] && de_jaxsvc=si
+  if [ "$de_jaxsvc" = no ]; then
+    disparadas="$(sudo systemctl show -p Triggers --value "$u")" || falla "falló systemctl show -p Triggers $u"
+    for t in $disparadas; do
+      usuario_t="$(sudo systemctl show -p User --value "$t")" || falla "falló systemctl show -p User $t"
+      [ "$usuario_t" = jaxsvc ] && de_jaxsvc=si
+    done
+  fi
+  [ "$de_jaxsvc" = si ] || continue
+  case "$u" in *.timer) TIMERS+=("$u") ;; *.service) SERVICIOS+=("$u") ;; *) ACTIVADORES+=("$u") ;; esac
+done <<< "$CANDIDATAS"
+LISTA=("${TIMERS[@]}" "${ACTIVADORES[@]}" "${SERVICIOS[@]}")   # los timers se paran primero
+[ "${#LISTA[@]}" -gt 0 ] || falla "ninguna unidad de jaxsvc en la lista: el descubrimiento falló"
+for esperada in $ESPERADAS; do
+  encontrada=no
+  for u in "${LISTA[@]}"; do [ "$u" = "$esperada" ] && encontrada=si; done
+  [ "$encontrada" = si ] || falla "falta la unidad esperada de jaxsvc $esperada: el descubrimiento está incompleto"
+done
+
+# ESTADO de CADA unidad ANTES de detener nada, por su salida textual (no solo por el código de salida).
+ESTADOS=()
+for u in "${LISTA[@]}"; do
+  estado="$(sudo systemctl is-active "$u" || true)"
+  case "$estado" in active|inactive|failed|activating) ;; *) falla "estado inesperado de $u: '$estado'" ;; esac
+  ESTADOS+=("$estado")
+done
+
+# (c) TRAP de restauración (EXIT): arranca en orden INVERSO solo las que estaban 'active', verifica con is-active que
+#     vuelvan (con unos pocos reintentos) y, si alguna no vuelve, lo dice, explica cómo arrancarla y sale con código
+#     distinto de 0 AUNQUE la aplicación haya ido bien. Conserva el código del fallo original si lo hubo.
+restaurar() {
+  local rc=$? i u intento fallidas=()      # rc del fallo real (o 0)
+  trap - EXIT
+  set +e
+  for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
+    [ "${ESTADOS[i]}" = active ] || [ "${ESTADOS[i]}" = activating ] || continue
+    sudo systemctl start "${LISTA[i]}" || echo "AVISO: systemctl start ${LISTA[i]} falló" >&2
+  done
+  for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
+    [ "${ESTADOS[i]}" = active ] || [ "${ESTADOS[i]}" = activating ] || continue
+    u="${LISTA[i]}"
+    for ((intento = 0; intento < REINTENTOS; intento++)); do
+      [ "$(sudo systemctl is-active "$u")" = active ] && break
+      sleep "$ESPERA"
+    done
+    [ "$(sudo systemctl is-active "$u")" = active ] || fallidas+=("$u")
+  done
+  if [ "${#fallidas[@]}" -gt 0 ]; then
+    echo "ERROR: no volvieron a 'active': ${fallidas[*]}" >&2
+    for u in "${fallidas[@]}"; do echo "  arrancarla a mano: sudo systemctl start $u" >&2; done
+    [ "$rc" -ne 0 ] || rc=1
+  fi
+  exit "$rc"
+}
+trap restaurar EXIT
+
+# VENTANA SIN SEÑALES: desde justo antes del primer stop (con el trap EXIT ya armado) INT, TERM y HUP se IGNORAN hasta
+# el final, incluidos el guion y la restauración (los procesos hijos heredan el ignorar). Así no hay ventanas entre
+# manejadores: el rc es el del fallo real o 0.
+A_ARRANCAR=""
+for ((i = ${#LISTA[@]} - 1; i >= 0; i--)); do
+  if [ "${ESTADOS[i]}" = active ] || [ "${ESTADOS[i]}" = activating ]; then A_ARRANCAR="$A_ARRANCAR ${LISTA[i]}"; fi
+done
+echo "AVISO: durante la ventana el bloque no se interrumpe con Ctrl-C; si hace falta cortarlo, kill -9 y después: sudo systemctl start${A_ARRANCAR}" >&2
+trap '' INT TERM HUP
+
+# (d) PARAR cada timer y unidad (sin mask: las unidades viven en /etc/systemd/system y un mask --runtime no las tapa;
+#     con los timers parados no se disparan, y arrancarlos solo puede hacerlo root, que es confiable por premisa).
+for u in "${LISTA[@]}"; do sudo systemctl stop "$u" || falla "no se pudo detener $u"; done
+
+# (e) COMPROBAR: ninguna activa (por su salida textual), `ps -u jaxsvc` vacío y /proc sin los cuatro uid de jaxsvc.
+for u in "${LISTA[@]}"; do
+  estado="$(sudo systemctl is-active "$u" || true)"
+  case "$estado" in inactive|failed) ;; *) falla "$u no quedó detenida (estado: '$estado')" ;; esac
+done
+PS_SALIDA="$(ps -u jaxsvc -o pid= 2>&1)" || { rc_ps=$?; [ "$rc_ps" -eq 1 ] || falla "ps -u jaxsvc falló (rc $rc_ps)"; }
+[ -z "$PS_SALIDA" ] || falla "quedan procesos de jaxsvc (ps -u jaxsvc): $PS_SALIDA"
+command -v awk >/dev/null || falla "no hay awk para recorrer $PROC"
+UID_JAXSVC="$(id -u jaxsvc)" || falla "no existe la cuenta jaxsvc"
+shopt -s nullglob
+ARCHIVOS_PROC=("$PROC"/[0-9]*/status "$PROC"/[0-9]*/task/*/status)
+[ "${#ARCHIVOS_PROC[@]}" -gt 0 ] || falla "no se pudo leer $PROC: ningún status de proceso"
+# (un proceso que termina mientras se lee puede hacer que awk avise de un archivo que ya no está: se tolera)
+HALLADOS="$(awk -v u="$UID_JAXSVC" '/^Uid:/ { for (i = 2; i <= 5; i++) if ($i == u) print FILENAME }' "${ARCHIVOS_PROC[@]}" 2>/dev/null | sort -u || true)"
+[ -z "$HALLADOS" ] || falla "/proc muestra procesos o hilos de jaxsvc (alguno de los cuatro uid): $HALLADOS"
+
+# (f) DESHACER
+$PERMISOS --deshacer
+# (g) no hay --verificar tras --deshacer: el árbol ya no es el aplicado (dueño fruiz:fruiz, sin la ACL de fruiz)
+# (h) al salir, el trap restaura (start en orden inverso, verificado con is-active).
+echo "OK: --deshacer terminó con jaxsvc detenido; el trap restaura las unidades al salir"
+```
+
+Después del bloque de `--aplicar`, la verificación independiente (la de abajo). Si el guion dice «hay procesos de jaxsvc vivos (pids …)», se detienen esas unidades y se repite; un proceso que aparece durante la mutación se anota y el comando sale con 1.
+Hacerlo desde un checkout cuyo HEAD tenga el guion commiteado (el núcleo se compara contra `git show HEAD:ops/permisos_proyectos.py`). **Requisito de `workspace-proyectos.md`:** el `fchmod(0o660)` de `tool_authority.py` tiene que estar ya en `/srv/jax-prod` (paso 3 de esta secuencia lo despliega; si no está, `--aplicar` NO se corre: ver «Aplicación en producción: BLOQUEADA» en ese runbook). Verificación: `--verificar` sale `0`; luego la **prueba real como `jaxsvc`** de ese runbook (paso 6: escritura cruzada `jaxsvc`/`fruiz` en un subdirectorio propio) en verde. Reversión: `python3 ops/permisos_proyectos.py --deshacer` (no reabre a otros; ver más abajo).
+**Sin acceso para «otros» (spec madre §5: 2770 en directorios, 0660 en archivos).** `--aplicar` deja `other::---` en el modo y en la ACL de acceso y por defecto de todo `proyectos/`, y quita los bits de otros a la **raíz del workspace** (el padre de `proyectos/`, hoy `/srv/jax-data/jax-workspace`, `fruiz:jaxsvc` 770) sin cambiar su dueño ni su grupo. `--verificar` cuenta como NO CUMPLE: cualquier bit de otros en `proyectos/`, debajo y en esa raíz; que `jaxsvc` o `fruiz` no puedan atravesar la raíz; y **cualquier entrada ACL nombrada (usuario o grupo) que no sea de `jaxsvc` ni de `fruiz`**, en la raíz o en el árbol.
+**La raíz del workspace es `fruiz:jaxsvc` 770** (el setgid solo si ya lo tiene): `--aplicar` la deja en `0770` sin cambiar dueño ni grupo, `--verificar` exige `770 fruiz:jaxsvc`, y si el dueño o el grupo no coinciden `--aplicar` **falla cerrado antes de mutar** (este guion no cambia dueños de la raíz). Un `setfacl -m` manual sobre la raíz recalcula la máscara y la deja en `0750`: `--verificar` lo marca. **Un archivo gobernado es exactamente `0660`**: `--verificar` marca cualquier bit de ejecución (modo o ACL efectiva). Las rutas con caracteres de control en el nombre se muestran **escapadas** (`\n`) y para ellas no se imprime ninguna orden copiable: se renombra la carpeta a mano. Si el núcleo se interrumpe o falla a medio mutar (incluido Ctrl-C), imprime `a_medio_aplicar`, la última ruta y la instrucción de volver a correrlo (es idempotente).
+**`--aplicar` falla cerrado, sin cambiar nada**, en dos casos, antes de tocar un solo objeto (pasada de solo lectura): (1) `jaxsvc` o `fruiz` no podrían atravesar la raíz sin el bit de otros. Hoy `fruiz` entra a la raíz **como dueño** y `jaxsvc` **por el grupo** `jaxsvc` (ninguno está en el grupo del otro): una raíz `fruiz:fruiz 0755`, que es lo que deja un `mkdir` con umask 022, dejaría fuera a `jaxsvc`, y `--deshacer` restaura el modo desde el respaldo pero no arregla un dueño o grupo equivocado. (2) Hay una entrada ACL nombrada ajena: `--aplicar` **no la borra** (ni la amplía con la máscara): la lista y una persona decide si se quita (`setfacl -x u:<nombre> <ruta>`) o si es legítima. En ambos casos el mensaje dice qué objeto y qué cuenta; se corrige y se repite.
+**Límite conocido (archivos 0600):** un archivo que su dueño crea con modo `0600` es una decisión de ese proceso, y la máscara heredada de la ACL por defecto lo respeta: el otro lado (`jaxsvc` o `fruiz`) no lo puede abrir, tanto después de `--aplicar` como después de `--deshacer`. No es un fallo del guion. Para corregir un caso se vuelve a correr `--aplicar` (deja `0660` con las dos cuentas en la ACL) o se hace `chmod 0660` sobre ese archivo. Las herramientas que escriben en `proyectos/` deben crear con `0660` (el escritor de LAS MANOS ya hace `fchmod 0660`).
+**Efecto a saber antes de aplicar:** los archivos pasan a `0660` y pierden cualquier bit de ejecución que tuvieran (medido por la auditoría: 290 de 292 archivos lo tenían, todos por la máscara `rwx` que dejaba el guion viejo y ninguno de dueño).
+**Verificación tras aplicar** (los dos puntos se hacen cumplir en el bloque; si algo no da, imprime `NO CUMPLE` y sale con código distinto de 0, y no se sigue): (a) `--verificar` da 0 (exige, entre otras cosas, la raíz `770 fruiz:jaxsvc`); (b) como root, `getfacl -R -p <raíz>/proyectos` mostrado solo para las líneas `other::` y `default:other::` tiene que dar **únicamente** `other::---` y `default:other::---`.
+```bash
+bash <<'VERIFICACION'
+set -euo pipefail
+RAIZ="${RAIZ:-/srv/jax-data/jax-workspace}"   # por defecto la JAX_WORKSPACE_DIR real; las pruebas la sustituyen
+python3 ops/permisos_proyectos.py --verificar "$RAIZ" || { echo "NO CUMPLE: --verificar no dio 0" >&2; exit 1; }
+OTROS=$(sudo getfacl -R -p "$RAIZ/proyectos" | grep -E '^(default:)?other::' | sort -u)
+ESPERADO=$(printf 'default:other::---\nother::---')
+if [ "$OTROS" != "$ESPERADO" ]; then
+  echo "NO CUMPLE: other en proyectos/ no es solo ---:" >&2; echo "$OTROS" >&2; exit 1
+fi
+echo "OK: --verificar en 0 (incluida la raiz 770 fruiz:jaxsvc) y other cerrado en todo proyectos/"
+VERIFICACION
+```
+Nota: **una lectura como `nobody` no se usa como prueba**. Mientras la raíz esté en 770, `nobody` no la atraviesa y esa lectura falla aunque `proyectos/` siguiera abierto: una prueba que no puede fallar no valida nada. Darle a `nobody` una entrada temporal para que sí pueda fallar abre los documentos de los clientes mientras dura la prueba, así que tampoco se hace: la verificación (b) mide directamente lo que importa, los bits de otros. (Y `test -r` no sirve como prueba de permisos en este host: el `test` de uutils mira solo los bits del modo, no las ACL.) **Carpetas ocultas** (`proyectos/<proyecto>/.<nombre>/`, estado de herramientas): **este guion NO las toca nunca**, ni a ellas ni a su contenido (ningún `chmod`, `chown` ni `setfacl` como root: un inode que `jaxsvc` pueda enlazar desde fuera sería una carrera). Solo las **mira**: si alguna tiene un bit de otros (modo, `other::` de acceso o, en directorios, por defecto) o un archivo con más de un enlace duro, `--verificar` la marca NO CUMPLE y **`--aplicar` y `--deshacer` fallan cerrado antes de mutar nada**, con cada ruta y la orden de corrección. **La corrección es manual: la ejecuta una persona**, con la oculta a la vista:
+```bash
+set -euo pipefail
+OCULTA="${OCULTA:?asignar OCULTA con la ruta tal como la imprimió el guion (ya citada), sin retipearla}"
+sudo chmod -R o-rwx -- "$OCULTA"
+sudo find "$OCULTA" -type d -exec setfacl -d -m o::--- {} +     # solo si el aviso habla de la ACL por defecto
+```
+**No se retipea la ruta ni se pega a mano**: el nombre de una oculta lo controla quien la crea y puede llevar comillas, `$(...)` o `;`. El guion imprime la orden con la ruta ya citada con `shlex.quote`: se **asigna a la variable `OCULTA` con esa misma forma de citar** (`OCULTA='...'` tal cual salió, o con `printf %q`) y las órdenes usan siempre `"$OCULTA"` entre comillas dobles y `--` antes de la ruta. Si la orden impresa por el guion tiene `'` o `$` en la ruta, leerla entera antes de ejecutar nada, como root.
+Un hardlink no se corrige con `chmod` (es el mismo inode que otra ruta, quizá fuera de `proyectos/`): se averigua quién lo enlaza (`sudo find / -xdev -samefile <archivo>`) y se quita el enlace de la oculta. Una oculta limpia (sin bits de otros ni hardlinks) no detiene a nada y no se modifica: la mutación compara por inode cada entrada abierta con la enumerada y no toca ningún inode que las pasadas previas vieron dentro de una oculta (aunque alguien intercambie nombres a mitad de la corrida; se anota «la entrada cambió durante el recorrido» y el comando sale con 1), y al final relee las ocultas y marca NO CUMPLE si su dueño, grupo o ACL cambiaron. El bloque de arriba las incluye porque `getfacl -R` las recorre.
+**Después de cualquier traslado del workspace**, volver a medir la cadena completa con `namei -l <archivo de proyectos/>`: cada tramo, desde `/`, tiene que ser lo que se espera (sin bit de otros en la raíz del workspace ni abajo, y `fruiz` y `jaxsvc` con paso). El 2026-10-03 el traslado a `/srv/jax-data` quitó la barrera que daba `/home/fruiz` (750) y nadie lo notó.
+**`--deshacer` devuelve el dueño a `fruiz:fruiz`, conserva a `jaxsvc` y NUNCA reabre a otros.** Deja `proyectos/` con dueño y grupo `fruiz:fruiz` (lo de antes de E2a), pero **conserva** `u:jaxsvc:rwx` (`rw-` en archivos) con su máscara, en la ACL de acceso y en la por defecto, y `other::---`: modo `0770` en directorios y `0660` en archivos, y `default:other::---` en los directorios (lo que se cree después nace cerrado). Así LAS MANOS (`jaxsvc` no es del grupo `fruiz`) sigue operando y nadie más entra; se quita solo la entrada nombrada de `fruiz`, que ya es dueño y grupo. De la raíz restaura solo dueño y grupo del modo que guardó el respaldo forense más reciente de confianza (`/var/backups/jax-permisos/`, que registra modo y ACL de la raíz); si ese modo tenía bits de otros **no los restaura y lo dice**. **Antes de mutar nada, `--deshacer` calcula si `jaxsvc` y `fruiz` atravesarían la raíz** con el modo que va a restaurar y el dueño y grupo actuales; si no, **falla cerrado sin tocar nada** y lo explica (p. ej. la raíz pasó a `fruiz:fruiz` sin ACL de `jaxsvc`: se corrige la raíz y se repite). Al terminar verifica de nuevo y solo imprime `OK` si los dos la atraviesan; si no, sale con código 1. Si no hay respaldo válido lo dice («Raíz del workspace: NO restaurada») y no la toca. Las carpetas ocultas no las toca (ver más arriba): si tienen bits de otros, falla cerrado antes de mutar. Un `--deshacer` es una reversión de propiedad, nunca una reapertura: si de verdad hiciera falta que otros lean `proyectos/`, es una decisión de Fernando y se hace a mano, no con este guion.
+**Hay que reinstalar el núcleo privilegiado.** Este cambio modifica `ops/permisos_proyectos.py`, que es el núcleo (`--nucleo-privilegiado` corre ese mismo archivo). El instalado en `/usr/local/sbin/jax-permisos-proyectos` queda desfasado respecto de HEAD: `--verificar` lo avisa y `--aplicar` se niega hasta reinstalar. Lo hace root, desde un checkout con el cambio ya integrado en `master`, con la orden de arriba (`sudo install -o root -g root -m 0755 ops/permisos_proyectos.py /usr/local/sbin/jax-permisos-proyectos`) y se comprueba con `sha256sum`. La regla de sudoers no cambia (mismas tres órdenes).
 > **Orden.** Si el despliegue de jax (paso 3) es el que trae el `fchmod`, se hace el paso 3 antes del `--aplicar` de este paso. Los demás pasos de este runbook no dependen de ello.
 ### 3. jax a producción (LAS MANOS con `project_uuid`)
 Con el procedimiento de `docs/runbooks/despliegue.md` de jax-platform (sección jax). Reiniciar `jax-las-manos`. Verificación: un `POST /procesamiento/trabajos` con un `project_uuid` inexistente responde **422** con `proyecto_no_activo`; `systemctl is-active jax-las-manos` da `active`; **el arreglo de la ingesta tiene que estar desplegado** (`grep -c _origen_ya_en_fuente /srv/jax-prod/jax/procesamiento/ingesta.py` da `1` o más): sin él, procesar un archivo de LACTOVI que ya vive en `fuente/sub/` lo **copiaría** a la raíz de `fuente/` (duplica datos del cliente, cambia los sha y cierra la reversión), y el paso 5 no se corre; `/proc/<pid>/cwd` del servicio apunta a `/srv/jax-prod/jax` (un servicio sirve desde un checkout: se verifica, no se supone).

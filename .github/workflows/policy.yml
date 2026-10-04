@@ -2870,7 +2870,7 @@ jobs:
         # que la fixture de la prueba) y se le da `x` en cada directorio padre y `rX` en el checkout y
         # en el prefijo del intérprete. El runner es una VM desechable: no hay riesgo en abrir esto.
         run: |
-          getent passwd fruiz >/dev/null || sudo useradd --system --no-create-home fruiz
+          for cuenta in jaxsvc fruiz; do getent passwd "$cuenta" >/dev/null || sudo useradd --system --no-create-home "$cuenta"; done  # Jax#340: las pruebas ya no crean cuentas
           PREFIJO=$(python -c 'import sys; print(sys.prefix)')
           for destino in "$GITHUB_WORKSPACE" "$PREFIJO"; do
             d=$(dirname "$destino")
