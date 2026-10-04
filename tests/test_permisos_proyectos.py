@@ -3035,7 +3035,9 @@ exit "$rc"
 # que hay en otro montaje no se ve desde este). Exige los argumentos que el bloque promete (-xdev, -type f, -user
 # jaxsvc, -perm /6000) y LC_ALL=C. El comportamiento de cada montaje sale de STUB_FIND_MAP, lineas `TARGET|accion|arg`:
 # `setuid|<ruta>` imprime esa ruta, `eacces` / `eio` / `silencio` fallan con rc 1 (los dos primeros con su mensaje de
-# find en comillas ASCII). Un montaje que no esta en el mapa no tiene nada (salvo STUB_SETUID, que se imprime).
+# find en comillas ASCII sobre el propio montaje), `denegado|<ruta>` falla con `Permission denied` sobre OTRA ruta
+# (el punto de montaje de un montaje anidado, que find stat-ea desde el padre) y `crudo|<texto>` emite ese texto
+# tal cual por stderr (con \\n como salto de linea). Un montaje que no esta en el mapa no tiene nada (salvo STUB_SETUID, que se imprime).
 _STUB_FIND = """#!/bin/sh
 echo "find $*" >> "$STUB_DIR/log"
 for exigido in "-xdev" "-type f" "-user jaxsvc" "-perm /6000"; do
@@ -3049,6 +3051,8 @@ case "$accion" in
   eacces) echo "find: '$1': Permission denied" >&2; exit 1 ;;
   eio) echo "find: '$1': Input/output error" >&2; exit 1 ;;
   silencio) exit 1 ;;
+  denegado) echo "find: '$arg': Permission denied" >&2; exit 1 ;;
+  crudo) printf '%b\\n' "$arg" >&2; exit 1 ;;
   *) [ -z "$STUB_SETUID" ] || echo "$STUB_SETUID" ;;
 esac
 exit 0
@@ -3463,6 +3467,56 @@ def test_un_fuse_nosuid_ilegible_no_corta_y_ni_se_recorre(tmp_path, _identidades
     assert any(l == f"permisos {modo}" for l in log), "el guion no corrio"
     assert not any("/home/x/montaje" in l for l in _finds(log)), "recorrio un montaje nosuid"
     assert "salto /home/x/montaje" in r.stdout
+
+
+# El punto de montaje de un FUSE nosuid ilegible cuelga del montaje que se recorre: find lo stat-ea desde el padre y falla
+# aunque ese FUSE ya se salto. Se tolera SOLO ese error, con las cinco condiciones del diseno (ver el bloque).
+_FUSE_NOSUID = "2 /home/x/montaje fuse.sshfs rw,nosuid,nodev,relatime"
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+@pytest.mark.parametrize("filas,mapa", [
+    (["1 / ext4 rw", _FUSE_NOSUID], ["/|denegado|/home/x/montaje"]),
+    (["1 / ext4 rw", "2 /mnt/mi\\x20montaje fuse.sshfs rw,nosuid"], ["/|denegado|/mnt/mi montaje"]),
+    (["1 / ext4 rw", "2 /data xfs rw", "3 /data/f fuse.sshfs rw,nosuid"], ["/data|denegado|/data/f"]),
+])
+def test_el_eacces_del_punto_de_montaje_de_un_fuse_nosuid_visible_no_corta(tmp_path, _identidades, marca, modo, filas, mapa):
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=_env_montajes(filas, mapa))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert any(l == f"permisos {modo}" for l in log), "el guion no corrio"
+    assert not any(l.startswith("find ") and ("montaje" in l or "/data/f" in l) for l in log), "recorrio el FUSE nosuid"
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+@pytest.mark.parametrize("que,filas,mapa", [
+    ("la fila visible del path NO es FUSE (nosuid, ext4)",
+     ["1 / ext4 rw", "2 /home/x/montaje ext4 rw,nosuid"], ["/|denegado|/home/x/montaje"]),
+    ("la fila visible es FUSE sin nosuid, aunque otra fila superpuesta lo tenga",
+     ["1 / ext4 rw", "2 /home/x/montaje fuse.sshfs rw,nosuid", "3 /home/x/montaje fuse.sshfs rw"],
+     ["/|denegado|/home/x/montaje"]),
+    ("fuseblk no cuenta como FUSE tolerable",
+     ["1 / ext4 rw", "2 /home/x/montaje fuseblk rw,nosuid"], ["/|denegado|/home/x/montaje"]),
+    ("un subdirectorio de ese FUSE", ["1 / ext4 rw", _FUSE_NOSUID], ["/|denegado|/home/x/montaje/sub"]),
+    ("un path que no es ningun montaje", ["1 / ext4 rw", _FUSE_NOSUID], ["/|denegado|/home/x/otro"]),
+    ("el FUSE cuelga de OTRO montaje mas largo que el recorrido (se recorre /, el padre es /data)",
+     ["1 / ext4 rw", "2 /data xfs rw", "3 /data/f fuse.sshfs rw,nosuid"], ["/|denegado|/data/f"]),
+    ("un path con comilla simple",
+     ["1 / ext4 rw", "2 /home/x/mon'taje fuse.sshfs rw,nosuid"], ["/|crudo|find: '/home/x/mon'taje': Permission denied"]),
+    ("un path con salto de linea",
+     ["1 / ext4 rw", "2 /home/x/a\\x0ab fuse.sshfs rw,nosuid"], ["/|crudo|find: '/home/x/a\\nb': Permission denied"]),
+    ("un path con barra invertida",
+     ["1 / ext4 rw", "2 /home/x/a\\x5cb fuse.sshfs rw,nosuid"], ["/|crudo|find: '/home/x/a\\\\b': Permission denied"]),
+    ("otro error junto al tolerable",
+     ["1 / ext4 rw", _FUSE_NOSUID],
+     ["/|crudo|find: '/home/x/montaje': Permission denied\\nfind: '/otro': Input/output error"]),
+    ("el mismo error dos veces con basura delante",
+     ["1 / ext4 rw", _FUSE_NOSUID], ["/|crudo|find: aviso\\nfind: '/home/x/montaje': Permission denied"]),
+])
+def test_un_error_de_find_que_no_cumple_las_cinco_condiciones_corta(tmp_path, _identidades, marca, modo, que, filas, mapa):
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=_env_montajes(filas, mapa))
+    assert r.returncode != 0 and "NO CUMPLE" in r.stderr, (que, r.stdout + r.stderr)
+    assert not _llamadas(log, "stop"), f"{que}: detuvo algo antes de cortar"
+    assert not any(l.startswith("permisos") for l in log), f"{que}: llego al guion"
 
 
 @pytest.mark.parametrize("marca,modo", _BLOQUES)
