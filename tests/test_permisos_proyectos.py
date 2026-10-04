@@ -3038,8 +3038,9 @@ exit "$rc"
 # find en comillas ASCII). Un montaje que no esta en el mapa no tiene nada (salvo STUB_SETUID, que se imprime).
 _STUB_FIND = """#!/bin/sh
 echo "find $*" >> "$STUB_DIR/log"
-case " $* " in *" -xdev "*" -type f "*" -user jaxsvc "*" -perm /6000 "*) ;; *)
-  echo "find: argumentos inesperados: $*" >&2; exit 2 ;; esac
+for exigido in "-xdev" "-type f" "-user jaxsvc" "-perm /6000"; do
+  case " $* " in *" $exigido "*) ;; *) echo "find: argumentos inesperados: $*" >&2; exit 2 ;; esac
+done
 [ "$LC_ALL" = C ] || { echo "find: falta LC_ALL=C" >&2; exit 2; }
 acc=$(printf '%s\n' "$STUB_FIND_MAP" | awk -F'|' -v t="$1" '$1 == t { a = $2; r = $3 } END { print a "|" r }')
 accion="${acc%%|*}"; arg="${acc#*|}"
