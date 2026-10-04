@@ -3000,6 +3000,10 @@ case "$cmd" in
           case "$4" in
             *.service) n=$(cat "$D/nr.$4" 2>/dev/null || echo 0)
                        if [ "$NRESTARTS_SUBE" = "$4" ]; then n=$((n + 1)); echo "$n" > "$D/nr.$4"; fi
+                       # la unidad se apaga SIN reiniciarse justo despues de la segunda lectura del contador
+                       # (la de cierre de la ventana): el contador no sube pero ya no esta activa
+                       q=$(cat "$D/nq.$4" 2>/dev/null || echo 0); q=$((q + 1)); echo "$q" > "$D/nq.$4"
+                       if [ "$APAGA_TRAS_LECTURA" = "$4" ] && [ "$q" -ge 2 ]; then touch "$D/caida.$4"; fi
                        echo "$n" ;;
           esac
         else grep "^$4 $2 " "$D/props" | sed "s/^[^ ]* [^ ]* //"; fi ;;
@@ -3014,7 +3018,8 @@ case "$cmd" in
            else sed -i "/^$u\\$/d" "$D/activating"; grep -qx "$u" "$D/activas" || echo "$u" >> "$D/activas"; touch "$D/arr.$u"; fi
          done ;;
   is-active) if [ "$1" = "$IS_ACTIVE_RARO" ]; then echo "desconocido"; exit 4; fi
-             if [ "$ALTERNA" = "$1" ] && [ -f "$D/arr.$1" ]; then
+             if [ -f "$D/caida.$1" ]; then echo inactive; rc=3
+             elif [ "$ALTERNA" = "$1" ] && [ -f "$D/arr.$1" ]; then
                # tras `start` la unidad parece sana en las dos primeras consultas y despues alterna (bucle de reinicios):
                # a la tercera `activating`, a la cuarta `active`, y asi
                n=$(cat "$D/alt.$1" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$D/alt.$1"
@@ -3075,7 +3080,7 @@ def _entorno_del_bloque(tmp_path: Path, uid_jaxsvc: int, *, extra: dict | None =
         "systemctl": _STUB_SYSTEMCTL,
         "ps": '#!/bin/sh\nif [ -s "$STUB_DIR/ps" ]; then cat "$STUB_DIR/ps"; exit 0; fi\nexit 1\n',
         "find": _STUB_FIND,
-        "findmnt": '#!/bin/sh\nprintf "%s\\n" "${STUB_FINDMNT-/ ext4}"\n',
+        "findmnt": '#!/bin/sh\nprintf "%s\\n" "${STUB_FINDMNT-/ ext4 rw,relatime}"\n',
         "crontab": '#!/bin/sh\nif [ -n "$STUB_CRON" ]; then echo "$STUB_CRON"; exit 0; fi\necho "no crontab for jaxsvc" >&2\nexit 1\n',
     }
     for nombre, texto in scripts.items():
@@ -3089,7 +3094,7 @@ def _entorno_del_bloque(tmp_path: Path, uid_jaxsvc: int, *, extra: dict | None =
     entorno.update({"PATH": f"{stubs}:{os.environ['PATH']}", "STUB_DIR": str(datos), "PERMISOS": str(datos / "permisos.sh"),
                     "PROC": str(proc), "RAIZ": str(tmp_path / "raiz"), "NO_SE_DETIENE": "",
                     "ESPERADAS": _UNIDADES_ESPERADAS_DE_PRUEBA, "REINTENTOS": "2", "ESPERA": "0",
-                    "ESTABLE": "0"})
+                    "ESTABLE": "1"})
     entorno.update(extra or {})
     return entorno
 
@@ -3380,9 +3385,11 @@ _MONTAJE = "/home/x/montaje"
 _FINDMNT_CON_FUSE = f"/ ext4\n/boot ext4\n{_MONTAJE} fuse.sshfs\n"
 
 
-def _env_find(ruta: str, error: str, *, fstype: str, rc: str = "1") -> dict:
+def _env_find(ruta: str, error: str, *, fstype: str, rc: str = "1", opciones: str = "rw,nosuid,nodev",
+              target: str = _MONTAJE) -> dict:
+    """`findmnt -rn -o TARGET,FSTYPE,OPTIONS` crudo: el TARGET sale escapado (\\x20, \\x0a), no decodificado."""
     return {"STUB_FIND_ERR": error, "STUB_FIND_RUTA": ruta, "STUB_FIND_RC": rc,
-            "STUB_FINDMNT": f"/ ext4\n/boot ext4\n{_MONTAJE} {fstype}"}
+            "STUB_FINDMNT": f"/ ext4 rw\n/boot ext4 rw\n{target} {fstype} {opciones}"}
 
 
 @pytest.mark.parametrize("marca,modo", _BLOQUES)
@@ -3404,6 +3411,18 @@ def test_un_permission_denied_en_un_punto_de_montaje_fuse_no_corta_el_bloque(tmp
     ("otro error (EIO) en un punto de montaje FUSE",
      _env_find(_MONTAJE, "Input/output error", fstype="fuse.sshfs"), f"{_MONTAJE}': Input/output error"),
     ("find sale 1 sin ningun mensaje", {"STUB_FIND_RC": "1"}, "sin mensaje"),
+    ("punto de montaje FUSE SIN nosuid (un setuid de jaxsvc ahi dentro seria operante)",
+     _env_find(_MONTAJE, "Permission denied", fstype="fuse.sshfs", opciones="rw,nodev,relatime"),
+     f"{_MONTAJE}': Permission denied"),
+    ("un TARGET FUSE con un salto de linea escapado (\\x0a) no habilita el path de despues del salto",
+     _env_find("/secret", "Permission denied", fstype="fuse.sshfs", target="/tmp/evil\\x0a/secret"),
+     "/secret': Permission denied"),
+    ("el path del mensaje trae una barra invertida (nunca se tolera, aunque 'coincida' con un TARGET escapado)",
+     _env_find("/tmp/evil\\x0a/secret", "Permission denied", fstype="fuse.sshfs", target="/tmp/evil\\x0a/secret"),
+     "evil"),
+    ("el path del mensaje trae un caracter de control",
+     _env_find("/tmp/ev\til", "Permission denied", fstype="fuse.sshfs", target="/tmp/ev\\x09il"),
+     "ev"),
 ])
 def test_cualquier_otro_error_de_find_corta_antes_de_detener_nada(tmp_path, _identidades, marca, modo, que, env, fragmento):
     r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env=env)
@@ -3454,6 +3473,57 @@ def test_una_unidad_active_y_estable_se_da_por_restaurada_y_se_miro_nrestarts(tm
     assert r.returncode == 0, r.stdout + r.stderr
     consultas = [l for l in log if l.startswith("systemctl show -p NRestarts")]
     assert any(l.endswith("jax-platform.service") for l in consultas), f"no leyo NRestarts: {log}"
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_un_montaje_fuse_con_un_espacio_en_el_nombre_se_tolera_comparando_la_forma_escapada(tmp_path, _identidades, marca, modo):
+    """El unico escape que se desanda es el espacio: find imprime `/a b`, findmnt -r imprime `/a\\x20b`."""
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid,
+                               env=_env_find("/mnt/mi montaje", "Permission denied", fstype="fuse.sshfs",
+                                             target="/mnt/mi\\x20montaje"))
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+# --- ronda 2: ESTABLE >= 1, sin OK prematuro, y la caida final --------------------------------------------------
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+@pytest.mark.parametrize("valor", ["0", "00", "", "abc", "-1", "1.5"])
+def test_un_ESTABLE_que_no_es_un_entero_mayor_o_igual_a_uno_corta_antes_de_detener_nada(tmp_path, _identidades, marca, modo, valor):
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid, env={"ESTABLE": valor})
+    assert r.returncode != 0 and "NO CUMPLE" in r.stderr and "ESTABLE" in r.stderr, (valor, r.stdout + r.stderr)
+    assert not _llamadas(log, "stop"), "detuvo unidades con una ventana de estabilidad invalida"
+    assert not any(l.startswith("permisos") for l in log)
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_el_ok_lo_imprime_el_trap_solo_si_la_restauracion_salio_bien(tmp_path, _identidades, marca, modo):
+    (tmp_path / "bien").mkdir()
+    bien, _ = _correr_el_bloque(marca, tmp_path / "bien", pwd.getpwnam("jaxsvc").pw_uid)
+    assert bien.returncode == 0, bien.stdout + bien.stderr
+    assert f"OK: {modo} terminó" in bien.stdout, "con todo bien tiene que decir OK"
+    assert bien.stdout.index("restaurando unidades") < bien.stdout.index("OK:"), "el OK tiene que venir despues de restaurar"
+    (tmp_path / "mal").mkdir()
+    mal, log = _correr_el_bloque(marca, tmp_path / "mal", pwd.getpwnam("jaxsvc").pw_uid,
+                                 env={"FALLA_START": "jax-platform.service"})
+    assert any(l == f"permisos {modo}" for l in log), "el guion tenia que haber corrido bien"
+    assert mal.returncode != 0 and "no volvieron" in mal.stderr
+    assert "OK:" not in mal.stdout + mal.stderr, f"dijo OK con una unidad sin restaurar: {mal.stdout}"
+    assert "restaurando unidades" in mal.stdout, "el mensaje neutro del cuerpo falta"
+
+
+@pytest.mark.parametrize("marca,modo", _BLOQUES)
+def test_una_unidad_que_se_apaga_sin_reiniciarse_tras_la_ultima_lectura_no_cuenta_como_restaurada(tmp_path, _identidades, marca, modo):
+    """Pasa el ultimo is-active de la ventana, se apaga antes de la lectura final de NRestarts y el contador no sube:
+    la consulta de estado FINAL, posterior a esa lectura, es la que la delata."""
+    r, log = _correr_el_bloque(marca, tmp_path, pwd.getpwnam("jaxsvc").pw_uid,
+                               env={"APAGA_TRAS_LECTURA": "jax-platform.service"})
+    assert r.returncode != 0, "salio con 0 dejando apagada una unidad"
+    assert "no volvieron" in r.stderr and "jax-platform.service" in r.stderr, r.stderr
+    assert "OK:" not in r.stdout + r.stderr
+    # la ultima consulta de estado de esa unidad es POSTERIOR a su ultima lectura de NRestarts
+    u = "jax-platform.service"
+    ultima_lectura = max(i for i, l in enumerate(log) if l == f"systemctl show -p NRestarts --value {u}")
+    assert any(l == f"systemctl is-active {u}" for l in log[ultima_lectura + 1:]), "no re-consulto el estado tras leer"
 
 
 @pytest.mark.parametrize("que,env,fragmento", [
