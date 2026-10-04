@@ -24,11 +24,18 @@ La clave es `<job>/<archivo temporal que lee>`. El único mínimo numérico que 
 Como `ci/pisos.json` es un dato y no lógica del workflow, un PR que solo sube un piso
 no toca `.github/workflows/`. Para que eso no sea una forma de rebajar un piso sin pasar por
 Fernando, el lector (`.github/ci/piso.py`) y el comparador (`.github/ci/comparar_pisos.py`)
-viven en `.github/`, reservado a Fernando. El paso «Los pisos no bajan respecto de la punta de
-master» de `archivos-de-test-en-ci` falla si, respecto de `origin/master`, baja un N (passed),
-sube un M (skipped), cambia la forma o el archivo de un patrón, desaparece una clave o baja el
-mínimo del B9. Subir N y agregar claves está permitido. Si la punta aún no tiene `ci/pisos.json`
-(el PR que lo introdujo), los pisos de la base se derivan del `policy.yml` de esa misma punta.
+viven en `.github/`, reservado a Fernando. El job `pisos-no-bajan` (nuevo, aislado) falla si, respecto de la punta de `master`, baja un N
+(passed), sube un M (skipped), cambia la forma o el archivo de un patrón, desaparece una clave o baja
+el mínimo del B9, o si `ci/pisos.json` repite una clave. Subir N y agregar claves está permitido.
+**Única excepción a «solo un N mayor»: bajar M (skipped) se permite a propósito**, porque menos
+saltadas endurece el piso.
+
+El job solo hace checkout (`persist-credentials: false`), `git fetch` de la base desde la URL fija del
+repositorio (`github.server_url`/`github.repository`) a `refs/pisos-base/master`, y
+`python3 -I .github/ci/comparar_pisos.py`. No ejecuta código del PR: un `conftest.py` o un
+`sitecustomize` podrían reescribir `.git/config` o las refs si corrieran antes. Si la punta aún no
+tiene `ci/pisos.json` (el PR que lo introdujo), los pisos de la base se derivan del `policy.yml` de esa
+misma punta.
 
 ---
 
@@ -4314,10 +4321,10 @@ Sin historia anotada en el workflow.
 
 ## `archivos-de-test-en-ci/pisos`
 
-Patrón vigente (2026-10-04): `^213 passed`
+Patrón vigente (2026-10-04): `^223 passed`
 
 Piso nuevo de la migración: `policy/tests/test_pisos_fuera_del_workflow.py` (permanente),
 `policy/tests/test_pisos_migracion_desde_master.py` (de migración, compara con la fotografía de
-master 364ded9) y `policy/tests/test_comparar_pisos.py` (el comparador). 140 -> 213 el
-2026-10-04 al agregar el comparador y sus 70 casos más 3 pruebas de gobernanza. Medido en
+master 364ded9) y `policy/tests/test_comparar_pisos.py` (el comparador). 140 -> 213 -> 223 el
+2026-10-04 al agregar el comparador y sus casos, las pruebas del job aislado y las de claves duplicadas. Medido en
 Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.

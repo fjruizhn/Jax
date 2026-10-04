@@ -265,7 +265,7 @@ def test_la_base_se_trae_de_la_url_fija_a_una_ref_propia_no_del_origin_configura
 def test_el_paso_comparador_ya_no_esta_en_el_job_de_las_pruebas():
     for jid, run in _pasos_run():
         if jid != JOB_COMPARADOR:
-            assert "comparar_pisos.py" not in run, jid
+            assert ".github/ci/comparar_pisos.py" not in run, jid
 
 
 def test_el_comparador_usa_solo_la_biblioteca_estandar():

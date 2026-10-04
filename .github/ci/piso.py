@@ -27,13 +27,23 @@ RUTA_PISOS = Path(__file__).resolve().parents[2] / "ci" / "pisos.json"
 VERSION = 1
 
 
+def _sin_duplicados(pares):
+    """object_pairs_hook: una clave repetida es un error, no «gana la última»."""
+    d: dict = {}
+    for k, v in pares:
+        if k in d:
+            raise ValueError(f"clave duplicada: {k!r}")
+        d[k] = v
+    return d
+
+
 class PisoError(Exception):
     """Cualquier problema que impida conocer un piso. Nunca se resuelve con un valor por defecto."""
 
 
 def cargar(ruta: Path = RUTA_PISOS) -> dict:
     try:
-        datos = json.loads(Path(ruta).read_text(encoding="utf-8"))
+        datos = json.loads(Path(ruta).read_text(encoding="utf-8"), object_pairs_hook=_sin_duplicados)
     except OSError as e:
         raise PisoError(f"no se puede leer {ruta}: {e}") from e
     except ValueError as e:

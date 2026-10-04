@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Compara los pisos de CI del head contra los de la PUNTA de origin/master: un piso nunca baja.
+"""Compara los pisos de CI del head contra los de la PUNTA de refs/pisos-base/master: un piso nunca baja.
 
 Vive en `.github/` (ruta reservada a Fernando) por la misma razón que `piso.py`: quien
 pudiera debilitar este comparador podría debilitar todos los pisos sin pasar por la
 integración reservada. Los DATOS están en `ci/pisos.json`; el archivo temporal que lee cada
 piso está en la llamada de `.github/workflows/policy.yml`, así que se compara de ahí.
 
-Uso:  python3 .github/ci/comparar_pisos.py [<ref-base>]      (por defecto `origin/master`)
+Uso:  python3 -I .github/ci/comparar_pisos.py [<ref-base>]      (por defecto `refs/pisos-base/master`)
+
+Corre en el job aislado `pisos-no-bajan` de policy.yml: checkout, fetch de la base desde la URL fija
+del repositorio a `refs/pisos-base/master` y este script, sin ejecutar código del PR antes (un
+conftest.py o un sitecustomize podrían reescribir .git/config o las refs). Solo biblioteca estándar.
 
 Reglas, para cada clave de la base:
   * la clave tiene que seguir en el head;
@@ -14,7 +18,10 @@ Reglas, para cada clave de la base:
   * el patrón conserva EXACTAMENTE su forma y solo puede cambiar N (passed) hacia arriba;
     en la forma `^N passed, M skipped`, M no puede subir;
   * un mínimo numérico no baja ni deja de ser un entero.
-Subir N, bajar M y agregar claves nuevas está permitido. El mensaje puede cambiar.
+Subir N y agregar claves nuevas está permitido. El mensaje puede cambiar.
+Única excepción a «solo un N mayor»: bajar M (skipped) se permite a propósito, porque menos
+saltadas endurece el piso (hay menos pruebas que pueden dejar de correr sin que nadie lo vea).
+Una clave repetida en `ci/pisos.json` es un error (falla cerrado), aunque hoy no rebaje nada.
 Un patrón con una forma que este parser no reconoce, base o head, es un error: no se adivina.
 
 La base se lee de `git show <ref>:ci/pisos.json` + `git show <ref>:.github/workflows/policy.yml`.
@@ -35,6 +42,7 @@ import sys
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parents[2]
+REF_BASE = "refs/pisos-base/master"
 RUTA_DATOS = "ci/pisos.json"
 RUTA_WORKFLOW = ".github/workflows/policy.yml"
 
@@ -53,6 +61,15 @@ _GREP_VIEJO = re.compile(
     re.M)
 _MINIMO_VIEJO = re.compile(r"len\(cases\) < (\d+)")
 _LLAMADA = re.compile(r"python3 \.github/ci/piso\.py verificar ([^\s)]+) (\S+)")
+
+
+def _sin_duplicados(pares):
+    d: dict = {}
+    for k, v in pares:
+        if k in d:
+            raise ValueError(f"clave duplicada: {k!r}")
+        d[k] = v
+    return d
 
 
 class PisosError(Exception):
@@ -103,7 +120,7 @@ def extraer_de_workflow_viejo(texto: str) -> dict:
 def armar_nuevo(datos_json: str, texto_workflow: str, origen: str) -> dict:
     """Pisos de un estado nuevo: `ci/pisos.json` + el archivo que cada llamada del workflow lee."""
     try:
-        datos = json.loads(datos_json)
+        datos = json.loads(datos_json, object_pairs_hook=_sin_duplicados)
     except ValueError as e:
         raise PisosError(f"{origen}: {RUTA_DATOS} no es JSON válido: {e}") from e
     if not isinstance(datos, dict) or not isinstance(datos.get("pisos"), dict) \
@@ -200,7 +217,7 @@ def cargar_base(raiz: Path, ref: str) -> tuple[dict, str]:
 
 
 def main(argv: list[str], raiz: Path = RAIZ) -> int:
-    ref = argv[0] if argv else "origin/master"
+    ref = argv[0] if argv else REF_BASE
     if len(argv) > 1:
         print("uso: comparar_pisos.py [<ref-base>]", file=sys.stderr)
         return 2

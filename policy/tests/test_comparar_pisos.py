@@ -315,7 +315,7 @@ def _base(repo, workflow, datos=None):
         _escribir(repo, "ci/pisos.json", datos if isinstance(datos, str) else json.dumps(datos))
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "base")
-    _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+    _git(repo, "update-ref", "refs/pisos-base/master", "HEAD")
 
 
 def _correr(repo, *args):
@@ -352,8 +352,8 @@ def test_bajar_m_es_la_unica_excepcion_a_solo_subir_n_y_esta_documentada():
     h = copy.deepcopy(BASE)
     h["pisos"]["j/salta"]["patron"] = "^53 passed, 0 skipped"
     assert cp.comparar(BASE, h) == []
-    assert "única excepción" in (RAIZ / "docs" / "ci" / "pisos.md").read_text(encoding="utf-8")
-    assert "única excepción" in cp.__doc__
+    assert "única excepción" in (RAIZ / "docs" / "ci" / "pisos.md").read_text(encoding="utf-8").lower()
+    assert "única excepción" in cp.__doc__.lower()
 
 
 def test_el_head_borra_pisos_json_y_la_base_lo_tiene_es_rojo(repo):
@@ -444,7 +444,7 @@ def test_base_sin_el_workflow_falla_cerrado(repo):
     _escribir(repo, "ci/pisos.json", json.dumps(DATOS_NUEVOS))
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "base")
-    _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+    _git(repo, "update-ref", "refs/pisos-base/master", "HEAD")
     _escribir(repo, ".github/workflows/policy.yml", WORKFLOW_BASE_NUEVO)
     assert _correr(repo).returncode == 2
 

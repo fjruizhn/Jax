@@ -310,10 +310,24 @@ jobs:
         run: |
           python -m pytest -q policy/tests/test_pisos_fuera_del_workflow.py policy/tests/test_pisos_migracion_desde_master.py policy/tests/test_comparar_pisos.py 2>&1 | tee /tmp/pisos
           python3 .github/ci/piso.py verificar archivos-de-test-en-ci/pisos /tmp/pisos || exit $?
+
+  # Los pisos viven en ci/pisos.json (fuera de la reserva de .github/**): este job impide que un
+  # PR baje uno. JOB AISLADO a proposito: no instala ni ejecuta nada del PR (ni pytest, ni pip, ni
+  # nada que importe el repo), porque un conftest.py o un sitecustomize del PR podrian reescribir
+  # .git/config o las refs y falsear la base. La base viene de la URL fija del repositorio a una
+  # ref propia, sin depender del remote configurado. Ver docs/ci/pisos.md.
+  pisos-no-bajan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Traer la base desde la URL fija del repositorio
+        run: |
+          git fetch --no-tags --depth=1 "${{ github.server_url }}/${{ github.repository }}" +refs/heads/master:refs/pisos-base/master || exit $?
       - name: Los pisos no bajan respecto de la punta de master
         run: |
-          git fetch --no-tags --depth=1 origin +refs/heads/master:refs/remotes/origin/master || exit $?
-          python3 .github/ci/comparar_pisos.py origin/master || exit $?
+          python3 -I .github/ci/comparar_pisos.py refs/pisos-base/master || exit $?
 
   ci-usa-la-mariadb-de-produccion:
     runs-on: ubuntu-latest
