@@ -4356,10 +4356,10 @@ lecturas como root) pasa la suite de 55 a 199 pruebas recolectadas; el runner sa
 
 ## `archivos-de-test-en-ci/pisos`
 
-Patrón vigente (2026-10-04): `^223 passed`
+Patrón vigente (2026-10-04): `^227 passed`
 
 Piso nuevo de la migración: `policy/tests/test_pisos_fuera_del_workflow.py` (permanente),
 `policy/tests/test_pisos_migracion_desde_master.py` (de migración, compara con la fotografía de
 master 364ded9) y `policy/tests/test_comparar_pisos.py` (el comparador). 140 -> 213 -> 223 el
-2026-10-04 al agregar el comparador y sus casos, las pruebas del job aislado y las de claves duplicadas. Medido en
+2026-10-04 al agregar el comparador y sus casos, las pruebas del job aislado y las de claves duplicadas; 223 -> 227 (2026-10-04, ci/pisos-skipped-y-comentarios): +4 netas del comparador (5 pruebas de la excepción `^N passed` -> `^N' passed, M skipped`, menos 1 parámetro que deja de ser rojo). Medido en
 Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.

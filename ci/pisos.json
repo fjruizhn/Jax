@@ -170,8 +170,8 @@
       "mensaje": "PISO ROTO: se esperaban 306 tests CORRIDOS (no skipeados) y exactamente 1 skipped."
     },
     "archivos-de-test-en-ci/pisos": {
-      "patron": "^223 passed",
-      "mensaje": "PISO ROTO: se esperaban 223 tests CORRIDOS de los pisos fuera del workflow."
+      "patron": "^227 passed",
+      "mensaje": "PISO ROTO: se esperaban 227 tests CORRIDOS de los pisos fuera del workflow."
     }
   },
   "minimos": {
