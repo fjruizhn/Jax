@@ -4315,9 +4315,12 @@ tiempo. Si el runner da otro número, manda el runner.
 
 ## `permisos-proyectos/permisos_proyectos`
 
-Patrón vigente al migrar (2026-10-03, master 364ded9): `^53 passed, 2 skipped`
+Patrón vigente (2026-10-04, Jax#340): `^198 passed, 1 skipped`. Antes `^53 passed, 2 skipped` (master 364ded9).
 
-Sin historia anotada en el workflow.
+Historia: Jax#340 (permisos de proyectos sin acceso para otros; el runbook con bloques ejecutables; pruebas con stubs y
+lecturas como root) pasa la suite de 55 a 199 pruebas recolectadas; el runner salta solo la que necesita `/etc/jax/.env`:
+199 − 1 = 198 passed, medido corriendo pytest como un usuario que no es fruiz ni jaxsvc. El paso del job crea las cuentas
+`jaxsvc` y `fruiz` (las pruebas no las crean).
 
 ## `archivos-de-test-en-ci/pisos`
 
