@@ -3604,6 +3604,12 @@ re-medir sobre master en vez de sumar los deltas a ciegas.
   (29 -> 37: el barrido marca CUALQUIER `or` tras la lectura; 9 casos parametrizados
   reemplazan la prueba de `or ""`). Misma lista y metodo (unshare, Python 3.14.4):
   3451 passed + 1 failed preexistente = 3452, 45 skipped, 1 xfailed.
+3452 -> 3464 (2026-10-04, fix/proxy-socket-huerfano): +12 en tests/test_ejecutor_proxy_jaxqwen_uds.py
+  (6 -> 18: parada ordenada por SIGTERM/SIGINT con proceso real, limpieza del socket huerfano propio
+  y sus negativas, carrera connect->unlink, close() borra el socket). Medido SIN el aislamiento
+  unshare del CI (otro entorno, Python 3.14.4, lista exacta del paso): 3503 passed + 1 failed
+  preexistente (test_arranque_las_manos_no_shadowea_policy, falla igual en master 5f4f5e0), 3 skipped;
+  el delta +12 es el dato firme, el absoluto lo manda el runner.
 ````
 
 ## `tests-puros/ficha_tests`
