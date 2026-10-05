@@ -142,3 +142,72 @@ def test_install_memory_scope_sin_bandera_no_hace_nada(tmp_path):
                        env={"PATH": "/usr/bin:/bin", "JAX_SYSTEMD_SRC": str(ROOT), "JAX_SYSTEMD_DEST": str(destino)},
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 2 and not list(destino.iterdir())
+
+
+# --- Auditoria Jax#355, MINOR 5: el instalador con un systemctl de mentira ---
+
+def _instalar(tmp_path, destino, fuente=ROOT, real=None):
+    """Corre el instalador con un `systemctl` falso en el PATH que solo anota sus argumentos.
+    Cada llamada usa su propio directorio de trabajo: el registro es solo el de esa corrida."""
+    n = len(list(tmp_path.glob("corrida-*")))
+    base = tmp_path / f"corrida-{n}"
+    bin_falso = base / "bin"
+    bin_falso.mkdir(parents=True)
+    registro = base / "llamadas.txt"
+    falso = bin_falso / "systemctl"
+    falso.write_text(f'#!/bin/sh\necho "$@" >> "{registro}"\n', encoding="utf-8")
+    falso.chmod(0o755)
+    env = {"PATH": f"{bin_falso}:/usr/bin:/bin", "JAX_SYSTEMD_SRC": str(fuente), "JAX_SYSTEMD_DEST": str(destino)}
+    if real is not None:
+        env["JAX_SYSTEMD_REAL"] = str(real)
+    r = subprocess.run(["bash", str(ROOT / "install-memory-scope.sh"), "--instalar-obsoleto"],
+                       env=env, capture_output=True, text=True, timeout=60)
+    llamadas = registro.read_text(encoding="utf-8").splitlines() if registro.exists() else []
+    return r, llamadas
+
+
+def test_el_instalador_nunca_habilita_ni_arranca_nada(tmp_path):
+    real = tmp_path / "etc"
+    real.mkdir()
+    prueba = tmp_path / "otro"
+    prueba.mkdir()
+    for destino, esperado in ((real, ["daemon-reload"]), (prueba, [])):
+        r, llamadas = _instalar(tmp_path, destino, real=real)
+        assert r.returncode == 0, r.stderr
+        # Solo se recarga, y solo en el destino real; jamas enable/start/restart.
+        assert llamadas == esperado, llamadas
+
+
+def test_una_barra_final_en_el_destino_no_salta_el_daemon_reload(tmp_path):
+    real = tmp_path / "etc"
+    real.mkdir()
+    for forma in (f"{real}/", f"{real}//", f"{real}/./"):
+        r, llamadas = _instalar(tmp_path, forma, real=real)
+        assert r.returncode == 0, r.stderr
+        assert llamadas == ["daemon-reload"], (forma, llamadas)
+
+
+def test_el_origen_por_defecto_es_produccion_y_no_el_checkout_de_trabajo():
+    texto = (ROOT / "install-memory-scope.sh").read_text(encoding="utf-8")
+    assert "/srv/jax-prod/jax/config/systemd" in texto
+    assert "${JAX_SYSTEMD_SRC:-/home/" not in texto
+
+
+def test_retira_solo_los_dropins_que_instalo_el_y_ya_no_estan_en_el_repo(tmp_path):
+    import shutil
+    fuente = tmp_path / "fuente"
+    shutil.copytree(ROOT, fuente)
+    destino = tmp_path / "etc"
+    destino.mkdir()
+    r, _ = _instalar(tmp_path, destino, fuente=fuente)
+    assert r.returncode == 0, r.stderr
+    carpeta = destino / "jax-memory-worker.service.d"
+    ajeno = carpeta / "99-del-operador.conf"
+    ajeno.write_text("[Service]\n", encoding="utf-8")
+    (fuente / "jax-memory-worker.service.d" / "z-pythonpath.conf").unlink()
+    r, _ = _instalar(tmp_path, destino, fuente=fuente)
+    assert r.returncode == 0, r.stderr
+    assert not (carpeta / "z-pythonpath.conf").exists(), "un drop-in que ya no esta en el repo debe retirarse"
+    assert ajeno.exists(), "un .conf ajeno al guion no se toca nunca"
+    assert (carpeta / "checkout-de-produccion.conf").exists()
+    assert (destino / "jax-memory-synthesis.service.d" / "z-pythonpath.conf").exists()   # la otra unidad no se afecta
