@@ -145,6 +145,19 @@ def test_pipeline_projection_requires_consistent_cursor_and_page_bound(monkeypat
         GovernedStructuredRenderer().render_json(envelope, context)
 
 
+def test_discarded_pipeline_projection_accepts_nullable_timestamp_only(monkeypatch):
+    from policy.governance.structured_projection import GovernedStructuredRenderer, StructuredProjectionError
+    envelope, context = _resolved_pipeline_envelope(monkeypatch,
+        row_overrides={"descartado_at": None}, extra_tool_data={"cursor_siguiente": None})
+    rendered = GovernedStructuredRenderer().render_json(envelope, context)
+    assert rendered.payload["pipelines"][0]["descartado_at"] is None
+    for invalid in (True, "not-a-timestamp", [], {}):
+        envelope, context = _resolved_pipeline_envelope(monkeypatch,
+            row_overrides={"descartado_at": invalid}, extra_tool_data={"cursor_siguiente": None})
+        with pytest.raises(StructuredProjectionError, match="descartado_at"):
+            GovernedStructuredRenderer().render_json(envelope, context)
+
+
 def test_f2d_structured_transport_binds_exact_bytes_and_rejects_ack(monkeypatch):
     from policy.governance.structured_lifecycle import (
         STRUCTURED_BYTES_LIFECYCLE_API_VERSION,

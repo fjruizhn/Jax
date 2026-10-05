@@ -88,8 +88,8 @@ def _validate_pipeline_row(row: Mapping[str, object], *, discarded: bool) -> Non
     for field in ("duracion_s", "costo_usd"):
         if row[field] is not None and not _is_number(row[field]):
             raise StructuredProjectionError(f"pipeline {field} must be null or a finite number")
-    if "descartado_at" in row and not _is_number(row["descartado_at"]):
-        raise StructuredProjectionError("pipeline descartado_at must be a finite number")
+    if "descartado_at" in row and row["descartado_at"] is not None and not _is_number(row["descartado_at"]):
+        raise StructuredProjectionError("pipeline descartado_at must be null or a finite number")
     _validate_causa(row["causa"])
 
 
