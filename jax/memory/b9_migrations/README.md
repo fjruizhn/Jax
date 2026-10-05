@@ -31,3 +31,10 @@ Solo SQL, aditivas e idempotentes, aplicadas a mano como el resto (nunca al arra
 
 Van ANTES del código que las usa (el worker de embeddings consulta `embedding_generation_attempts`
 en cada corrida). Ver `docs/runbooks/memoria-cola-atascada.md`.
+- `010_embedding_generation_drop_redundant_index.sql`: quita `idx_embedding_generation_revision`,
+  cubierto por la UNIQUE de 008. Aplicar DESPUES de 008 (sin ella MariaDB rechaza el DROP con 1553:
+  falla cerrado). Verificado con EXPLAIN y con las FK reales en una base desechable: las consultas por
+  (revision, espacio) y por revision usan `uq_embedding_generation_revision_space`.
+- Los intentos huerfanos de `embedding_generation_attempts` se limpian en la purga de contenido
+  (`DELETE a FROM ...` en `content_purge`): las revisiones quedan de tombstone, asi que una FK
+  ON DELETE CASCADE nunca dispararia.

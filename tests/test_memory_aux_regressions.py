@@ -390,6 +390,7 @@ async def test_real_migracion_010_quita_el_indice_redundante_y_las_consultas_sig
                     await cur.execute(sql.strip().rstrip(";"))
                 await cur.execute("SHOW INDEX FROM embedding_generations")
                 assert "idx_embedding_generation_revision" not in {r["Key_name"] for r in await cur.fetchall()}
+                await cur.execute("INSERT INTO embedding_generations (generation_id,revision_id,embedding_space_id,generated_at) VALUES ('g1','r1','s1',NOW(6)),('g2','r2','s1',NOW(6))")
                 await cur.execute("EXPLAIN SELECT generation_id FROM embedding_generations WHERE revision_id=%s AND embedding_space_id=%s", ("r1", "s1"))
                 plan = await cur.fetchone()
                 assert plan["key"] == "uq_embedding_generation_revision_space", plan

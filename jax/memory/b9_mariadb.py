@@ -508,6 +508,8 @@ class PersistentMemoryAPI:
                 # retaining the safe immutable revision/event tombstone.
                 await cur.execute("DELETE p FROM memory_revision_payloads p JOIN memory_revisions r ON r.revision_id=p.revision_id WHERE r.memory_id=%s", (memory_id,))
                 await cur.execute("DELETE e FROM embedding_generations e JOIN memory_revisions r ON r.revision_id=e.revision_id WHERE r.memory_id=%s", (memory_id,))
+                # Las revisiones quedan como tombstone (no hay FK que arrastre estas filas): se limpian aqui.
+                await cur.execute("DELETE a FROM embedding_generation_attempts a JOIN memory_revisions r ON r.revision_id=a.revision_id WHERE r.memory_id=%s", (memory_id,))
                 await cur.execute("UPDATE memory_revisions SET payload=NULL WHERE memory_id=%s", (memory_id,))
             await self._write(cur,obj,rev,prov,event,projection); return rid
         return await self._store.mutation(op)
