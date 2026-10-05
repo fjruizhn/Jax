@@ -19,3 +19,15 @@ duplication). Adding a second source of truth for 005 would just grow that
 same deuda; the guard-per-step Python hook is the only copy, and its bajada
 is `revert_project_lifecycle_migration`, run by hand via
 `scripts/b9_revertir_005.py --aplicar` (dry-run by default).
+
+## Migraciones 007-009 (2026-10-05)
+
+Solo SQL, aditivas e idempotentes, aplicadas a mano como el resto (nunca al arrancar):
+
+- `007_extraction_job_events.sql`: auditoría del re-encolado de jobs en cuarentena.
+- `008_embedding_generation_unique.sql`: UNIQUE (revision_id, embedding_space_id). Falla sin
+  cambiar nada si hay duplicados: correr antes el SELECT que trae el propio archivo.
+- `009_embedding_generation_attempts.sql`: contador de intentos fallidos por revisión.
+
+Van ANTES del código que las usa (el worker de embeddings consulta `embedding_generation_attempts`
+en cada corrida). Ver `docs/runbooks/memoria-cola-atascada.md`.
