@@ -271,7 +271,7 @@ def test_ninguna_herramienta_del_puerto_crea_altera_ni_cierra_una_ejecucion(mund
         async with puerto(mundo.cfg_puerto, mundo.cargado) as srv, cliente_por_rele(srv) as c:
             return {t.name for t in (await c.list_tools()).tools}, {r.name for r in (await c.list_resources()).resources}
     herramientas, recursos = corre(caso())
-    assert herramientas == {"skills.buscar", "skills.leer", "agentes.listar"}
+    assert herramientas == {"skills.buscar", "skills.leer", "agentes.listar", "memoria.buscar"}
     assert not any("ejecucion" in n or "control" in n or "tenant" in n for n in herramientas | recursos)
 
 
@@ -587,6 +587,61 @@ def test_el_servicio_arranca_con_el_aviso_como_observador_y_el_control_sirve_eje
     filas = corre(caso())
     assert [f["evento"] for f in filas if f["evento"].startswith("control_")] == ["control_creado", "control_cerrado"]
     assert verificar_cadena(filas) == []
+
+
+def test_el_servicio_no_abre_b9_si_la_compuerta_de_memoria_no_esta_habilitada(entorno, monkeypatch):
+    from jax.faro import servicio as servicio_mod
+
+    def no_debe_conectar(_cfg):
+        raise AssertionError("la B9 no se conecta cuando memoria está deshabilitada")
+
+    monkeypatch.setattr(servicio_mod, "crear_pool_memoria_prueba", no_debe_conectar)
+    async def caso():
+        servicio = await arrancar(entorno, crear_pool=_fabrica(), solo_pruebas_mismo_uid=True)
+        try:
+            assert not servicio.cfg_memoria.habilitada
+            assert servicio.pool_memoria is None
+            assert servicio.adaptador_memoria is None
+            assert servicio.crear_puerto(ejecucion())._adaptador_memoria is None
+        finally:
+            await servicio.cerrar()
+    corre(caso())
+
+
+def test_el_servicio_habilitado_pasa_al_helper_solo_el_perfil_de_prueba(entorno, monkeypatch):
+    from jax.faro import servicio as servicio_mod
+    from jax.faro.herramientas.memoria import AdaptadorMemoria
+
+    entorno.update({
+        "JAX_FARO_MEMORIA_HABILITADA": "true",
+        "JAX_FARO_MEMORIA_TEST_DB_HOST": "127.0.0.1",
+        "JAX_FARO_MEMORIA_TEST_DB_PORT": "3308",
+        "JAX_FARO_MEMORIA_TEST_DB_USER": "jax_test",
+        "JAX_FARO_MEMORIA_TEST_DB_NAME": "jax_memory_test",
+        "JAX_FARO_MEMORIA_TEST_DB_PASSWORD": "clave-local-de-prueba",
+        "JAX_FARO_MEMORIA_TIMEOUT_S": "1.25",
+    })
+    pool, lector, capturado = FalsoPool(), object(), []
+
+    async def abrir(cfg):
+        capturado.append(cfg)
+        return pool, lector
+
+    monkeypatch.setattr(servicio_mod, "crear_pool_memoria_prueba", abrir)
+
+    async def caso():
+        servicio = await arrancar(entorno, crear_pool=_fabrica(FalsoPool()), solo_pruebas_mismo_uid=True)
+        try:
+            cfg = capturado[0]
+            assert (cfg.host, cfg.port, cfg.usuario, cfg.base, cfg.timeout_s) == (
+                "127.0.0.1", 3308, "jax_test", "jax_memory_test", 1.25)
+            assert servicio.pool_memoria is pool
+            assert isinstance(servicio.adaptador_memoria, AdaptadorMemoria)
+            assert servicio.adaptador_memoria._timeout_s == 1.25
+        finally:
+            await servicio.cerrar()
+
+    corre(caso())
 
 
 def test_el_servicio_arrancado_avisa_de_verdad_por_http_un_rechazo_del_canal_de_control(entorno):

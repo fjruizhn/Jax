@@ -19,7 +19,7 @@ No hace falta tocar `.github/workflows/`. Un piso nunca tiene valor por defecto:
 
 Cada paso del workflow llama `python3 .github/ci/piso.py verificar <clave> <archivo-de-salida>`.
 La clave es `<job>/<archivo temporal que lee>`. El único mínimo numérico que no es un
-`patron` es `memory-b9-regression/casos`, en la sección `minimos`. (175 -> 176 el 2026-10-05, auditoria final Jax#354: +1 prueba del orden de indices del esquema; local, base jax_memory_test_memb9_ci, 0 skipped. Antes: 167 -> 175 el 2026-10-05, re-auditoria Jax#354: +8 pruebas (detector de SuccessExitStatus y su control, 011/012/013 sobre la DDL real con VECTOR KEY + FK CASCADE incluido el 1205, EXPLAIN de 012/013, marcha atras ejecutada; las dos de README/timeout estaticas se reescribieron); local, 0 skipped. Antes: 152 -> 167 el 2026-10-05, Jax#354: +15 pruebas de los 8 MINOR, local con MariaDB desechable, 0 skipped. Antes, 102 -> 152 el 2026-10-05: el 102 era la medicion del 2026-09-26 y habia quedado atras; local contra MariaDB desechable, misma lista de 10 archivos, 121 antes de la rama y 152 despues, 0 skipped. Es un MINIMO: el runner puede medir mas, nunca debe dar menos.)
+`patron` es `memory-b9-regression/casos`, en la sección `minimos`. (176 -> 183 el 2026-10-05, run PR 37317897149, job 111789176129, SHA `daab357ce80b1e7e1843155b88e2f57c9adf93bd`: 183 passed, 0 failed/errors/skips sobre el par combinado Faro/B9. Antes: 175 -> 176 el 2026-10-05, auditoria final Jax#354: +1 prueba del orden de indices del esquema; local, base jax_memory_test_memb9_ci, 0 skipped. Antes: 167 -> 175 el 2026-10-05, re-auditoria Jax#354: +8 pruebas (detector de SuccessExitStatus y su control, 011/012/013 sobre la DDL real con VECTOR KEY + FK CASCADE incluido el 1205, EXPLAIN de 012/013, marcha atras ejecutada; las dos de README/timeout estaticas se reescribieron); local, 0 skipped. Antes: 152 -> 167 el 2026-10-05, Jax#354: +15 pruebas de los 8 MINOR, local con MariaDB desechable, 0 skipped. Antes, 102 -> 152 el 2026-10-05: el 102 era la medicion del 2026-09-26 y habia quedado atras; local contra MariaDB desechable, misma lista de 10 archivos, 121 antes de la rama y 152 despues, 0 skipped. Es un MINIMO: el runner puede medir mas, nunca debe dar menos.)
 
 Como `ci/pisos.json` es un dato y no lógica del workflow, un PR que solo sube un piso
 no toca `.github/workflows/`. Para que eso no sea una forma de rebajar un piso sin pasar por
@@ -114,7 +114,7 @@ Sin historia anotada en el workflow.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^671 passed`
 
-Sin historia anotada en el workflow.
+Piso actualizado 2026-10-04: `^688 passed`. Sobre el piso 683, se suman pruebas de payload hostil, timeout con cancelación, truncamiento explícito, cableado del perfil de prueba y concurrencia en peor caso; 0 skips.
 
 ## `faro-bitacora-db/faro-db`
 
@@ -127,6 +127,10 @@ Sin historia anotada en el workflow.
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^11 passed`
 
 Sin historia anotada en el workflow.
+
+## `memory-b9-regression/casos`
+
+Mínimo actualizado 2026-10-05: `183` casos. El run PR `37317897149`, job `111789176129`, sobre SHA `daab357ce80b1e7e1843155b88e2f57c9adf93bd`, terminó 183 passed, 0 failed/errors/skips para el par combinado Faro/B9. El conteo previo de esta rama era 128 y el de #354 era 176; se conserva la medición exacta mayor. Las seis fronteras de `memoria.buscar` cubren rechazo de configuración forzada hacia producción, apertura solo del perfil permitido, rollback con timeout que descarta la conexión, cancelación durante rollback sin segundo intento, validación de síntesis sin leer su BLOB y delegación de `fetchone` por el cursor observado de la prueba MariaDB. La prueba MariaDB real mantiene tablas de sesión temporales y comprueba que el reader solo emite lecturas y valida sus fuentes exactas.
 
 ## `facet-health-io/out`
 

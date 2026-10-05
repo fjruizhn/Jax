@@ -47,7 +47,7 @@ def test_un_cliente_mcp_real_lista_y_lee_una_skill_a_traves_del_rele(montaje, mo
                 plantillas = await c.list_resource_templates()
                 assert any("skill://" in t.uri_template for t in plantillas.resource_templates)
                 tools = {t.name for t in (await c.list_tools()).tools}
-                assert {"skills.buscar", "skills.leer", "agentes.listar"} <= tools
+                assert {"skills.buscar", "skills.leer", "agentes.listar", "memoria.buscar"} <= tools
                 prompts = {p.name for p in (await c.list_prompts()).prompts}
                 assert "skills.leer" in prompts
                 # listar: las skills del paquete

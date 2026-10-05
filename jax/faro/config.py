@@ -18,13 +18,14 @@ una variable ausente o vacia no tiene valor por defecto, es un error.
                            escritura de grupo/otros
   JAX_FARO_MAX_MENSAJE     opcional, tope en bytes de UN mensaje MCP (default 1 MiB)
   JAX_FARO_PRESUPUESTO_BYTES, JAX_FARO_HANDSHAKE_S, JAX_FARO_MENSAJE_TIMEOUT_S, JAX_FARO_COSTO_CONEXION_BYTES   opcionales; ver ConfigPuerto
+  JAX_FARO_MEMORIA_TIMEOUT_S   opcional; plazo maximo de lectura B9 de prueba (default 5 s)
 """
 from __future__ import annotations
 
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REF_FRESCURA_POR_DEFECTO = "origin/main"
@@ -33,6 +34,63 @@ _RE_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 class ConfigFaroInvalida(ValueError):
     """La configuracion falta o no es valida: el Faro no arranca."""
+
+
+@dataclass(frozen=True)
+class ConfigMemoria:
+    """Compuerta explícita de memoria. Solo se conecta al perfil local de prueba.
+
+    B9 no está reactivada en producción y su contrato de integración para el
+    Faro sigue pendiente. La allowlist evita que este adaptador provisional
+    pueda apuntar a `jax_memory` o a un servidor distinto.
+    """
+    habilitada: bool = False
+    host: str = "127.0.0.1"
+    port: int = 3308
+    usuario: str = "jax_test"
+    clave: str = field(default="", repr=False)
+    base: str = "jax_memory_test"
+    timeout_s: float = 5.0
+
+    def __post_init__(self) -> None:
+        if self.habilitada and (self.host, self.port, self.usuario, self.base) != (
+                "127.0.0.1", 3308, "jax_test", "jax_memory_test"):
+            raise ConfigFaroInvalida(
+                "memoria no disponible: este adaptador solo permite la base de prueba "
+                "jax_memory_test en 127.0.0.1:3308 con jax_test")
+        if self.habilitada and not self.clave:
+            raise ConfigFaroInvalida("memoria no disponible: falta la credencial de la base de prueba")
+        if not isinstance(self.timeout_s, (int, float)) or isinstance(self.timeout_s, bool) or not 0 < self.timeout_s <= 30:
+            raise ConfigFaroInvalida("JAX_FARO_MEMORIA_TIMEOUT_S debe estar entre 0 y 30 segundos")
+
+    @classmethod
+    def desde_entorno(cls, env: Mapping[str, str]) -> "ConfigMemoria":
+        raw = (env.get("JAX_FARO_MEMORIA_HABILITADA") or "false").strip().lower()
+        if raw in {"", "false", "0", "no"}:
+            return cls()
+        if raw not in {"true", "1", "si", "sí"}:
+            raise ConfigFaroInvalida("JAX_FARO_MEMORIA_HABILITADA debe ser true o false")
+        host = (env.get("JAX_FARO_MEMORIA_TEST_DB_HOST") or "").strip()
+        port_raw = (env.get("JAX_FARO_MEMORIA_TEST_DB_PORT") or "").strip()
+        user = (env.get("JAX_FARO_MEMORIA_TEST_DB_USER") or "").strip()
+        database = (env.get("JAX_FARO_MEMORIA_TEST_DB_NAME") or "").strip()
+        password = env.get("JAX_FARO_MEMORIA_TEST_DB_PASSWORD") or ""
+        timeout_raw = (env.get("JAX_FARO_MEMORIA_TIMEOUT_S") or "5").strip()
+        try:
+            timeout_s = float(timeout_raw)
+        except ValueError as exc:
+            raise ConfigFaroInvalida("JAX_FARO_MEMORIA_TIMEOUT_S debe estar entre 0 y 30 segundos") from exc
+        try:
+            port = int(port_raw)
+        except ValueError as exc:
+            raise ConfigFaroInvalida("JAX_FARO_MEMORIA_TEST_DB_PORT debe ser 3308") from exc
+        if (host, port, user, database) != ("127.0.0.1", 3308, "jax_test", "jax_memory_test"):
+            raise ConfigFaroInvalida(
+                "memoria no disponible: este adaptador solo permite la base de prueba "
+                "jax_memory_test en 127.0.0.1:3308 con jax_test")
+        if not password:
+            raise ConfigFaroInvalida("memoria no disponible: falta la credencial de la base de prueba")
+        return cls(True, host, port, user, password, database, timeout_s)
 
 
 def sha_valido(sha: object) -> bool:
