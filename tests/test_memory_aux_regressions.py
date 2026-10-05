@@ -1,5 +1,6 @@
 """Isolated worker regressions; no production config or provider calls."""
 import asyncio
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
@@ -440,7 +441,8 @@ async def test_real_migracion_011_quita_el_filesort_de_las_dos_lecturas_de_mensa
                     await cur.execute(q); assert "filesort" in (await cur.fetchone())["Extra"]     # el problema, medido
                 sql = "\n".join(l for l in (Path(__file__).resolve().parents[1] / "jax/memory/b9_migrations/011_messages_conversation_turn_index.sql").read_text().splitlines() if not l.lstrip().startswith("--"))
                 for _ in range(2):                                                                     # idempotente
-                    await cur.execute(sql.strip().rstrip(";"))
+                    for st in (x.strip() for x in sql.split(";") if x.strip()):
+                        await cur.execute(st)
                 for q in (asc, desc):
                     await cur.execute(q); plan = await cur.fetchone()
                     assert "filesort" not in plan["Extra"] and plan["key"] == "idx_messages_conversation_turn", plan
@@ -451,19 +453,21 @@ async def test_real_migracion_011_quita_el_filesort_de_las_dos_lecturas_de_mensa
 _RAIZ = __import__("pathlib").Path(__file__).resolve().parents[1]
 
 
-def test_readme_de_migraciones_trae_la_marcha_atras_exacta_de_007_a_011():
+def test_readme_de_migraciones_trae_la_marcha_atras_exacta_de_007_a_013():
     texto = (_RAIZ / "jax/memory/b9_migrations/README.md").read_text(encoding="utf-8")
-    assert "Marcha atrás" in texto
+    assert "Marcha atrás" in texto and "ALGORITHM=COPY" in texto and "lock_wait_timeout" in texto
     pasos = [
-        "DROP INDEX IF EXISTS idx_messages_conversation_turn",                                         # 011
+        "ALTER TABLE messages ADD INDEX IF NOT EXISTS idx_conversation (conversation_id)",              # 013 (antes que 011: la FK lo necesita)
+        "ALTER TABLE conversations DROP INDEX IF EXISTS idx_conversations_open",                        # 012
+        "ALTER TABLE messages DROP INDEX IF EXISTS idx_messages_conversation_turn",                     # 011
         "ADD INDEX IF NOT EXISTS idx_embedding_generation_revision (revision_id, embedding_space_id)",  # 010 (antes que 008)
         "DROP TABLE IF EXISTS embedding_generation_attempts",                                           # 009
         "DROP INDEX IF EXISTS uq_embedding_generation_revision_space",                                  # 008
         "DROP TABLE IF EXISTS memory_extraction_job_events",                                            # 007
     ]
     posiciones = [texto.index(p) for p in pasos]
-    assert posiciones == sorted(posiciones), "la marcha atras va en orden inverso: 011, 010, 009, 008, 007 (la 008 despues de restaurar el indice de la 010)"
-    assert texto.index(pasos[1]) < texto.index(pasos[3])   # el indice de la 010 vuelve ANTES de bajar la 008
+    assert posiciones == sorted(posiciones), "marcha atras en orden inverso: 013, 012, 011, 010, 009, 008, 007"
+    assert texto.count("SET SESSION lock_wait_timeout=10;") >= 4          # 011, 012, 013 y su marcha atras
 
 
 def test_install_memory_scope_no_habilita_el_worker_sin_bandera_explicita():
@@ -476,6 +480,42 @@ def test_install_memory_scope_no_habilita_el_worker_sin_bandera_explicita():
     assert subprocess.run(["bash", "-n", str(script)]).returncode == 0
 
 
+_QUE_CALLAN_CODIGOS = ("SuccessExitStatus", "RestartPreventExitStatus")
+
+
+def _opciones_que_callan_codigos(texto: str) -> list[str]:
+    """Claves de la seccion [Service] que harian que systemd NO trate 2 o 3 como fallo (callarian el aviso)."""
+    return [k for k in _QUE_CALLAN_CODIGOS if _opciones_servicio(texto, k)]
+
+
+def _opciones_servicio(texto: str, clave: str) -> list[str]:
+    actual, valores = None, []
+    for linea in texto.splitlines():
+        linea = linea.strip()
+        if linea.startswith("[") and linea.endswith("]"):
+            actual = linea[1:-1]
+        elif actual == "Service" and linea.startswith(f"{clave}="):
+            valores.append(linea.split("=", 1)[1])
+    return valores
+
+
+def test_ninguna_unidad_jax_memory_calla_los_codigos_de_salida_2_o_3():
+    """Re-auditoria Jax#354: SuccessExitStatus/RestartPreventExitStatus en [Service] de CUALQUIER unidad
+    (o de sus drop-ins versionados) convertirian el 2 o el 3 en 'exito' y aviso-fallo no se enteraria."""
+    unidades = sorted((_RAIZ / "config/systemd").glob("jax-memory-*.service"))
+    dropins = sorted((_RAIZ / "config/systemd").glob("jax-memory-*.service.d/*.conf"))
+    assert len(unidades) == 5
+    for archivo in [*unidades, *dropins]:
+        assert _opciones_que_callan_codigos(archivo.read_text(encoding="utf-8")) == [], archivo.name
+
+
+def test_el_detector_de_codigos_silenciados_detecta_de_verdad():
+    # un control que no falla cuando debe no valida nada
+    assert _opciones_que_callan_codigos("[Service]\nSuccessExitStatus=2 3\n") == ["SuccessExitStatus"]
+    assert _opciones_que_callan_codigos("[Service]\nRestartPreventExitStatus=3\n") == ["RestartPreventExitStatus"]
+    assert _opciones_que_callan_codigos("[Unit]\nSuccessExitStatus=2\n[Service]\nType=oneshot\n") == []
+
+
 def test_unidades_y_runbook_documentan_los_codigos_de_salida():
     for unidad in ("jax-memory-worker.service", "jax-memory-vector-health.service"):
         t = (_RAIZ / "config/systemd" / unidad).read_text(encoding="utf-8")
@@ -485,3 +525,172 @@ def test_unidades_y_runbook_documentan_los_codigos_de_salida():
     rb = (_RAIZ / "docs/runbooks/memoria-cola-atascada.md").read_text(encoding="utf-8")
     for frase in ("Códigos de salida", "INCONSISTENT", "UNKNOWN", "digest", "memory_processed"):
         assert frase in rb, frase
+
+
+# --- Re-auditoria Jax#354: 011/012/013 con la DDL REAL de produccion (VECTOR KEY + FK ON DELETE CASCADE) ---
+
+import re as _re
+
+_MIG = _RAIZ / "jax/memory/b9_migrations"
+
+
+def _ddl_produccion(tabla: str) -> str:
+    """DDL de `tabla` tal como esta HOY en produccion (antes de 011/012/013): el esquema versionado, con
+    los indices de esas migraciones quitados y `idx_conversation` repuesto."""
+    texto = (_RAIZ / "jax_memory_schema.sql").read_text(encoding="utf-8")
+    ddl = _re.search(r"CREATE TABLE `%s` \(.*?\) ENGINE=InnoDB[^;]*;" % tabla, texto, _re.S).group(0)
+    lineas = [l for l in ddl.splitlines()
+              if "idx_messages_conversation_turn" not in l and "idx_conversations_open" not in l and "`idx_conversation`" not in l]
+    if tabla == "messages":
+        i = next(n for n, l in enumerate(lineas) if "PRIMARY KEY" in l)
+        lineas.insert(i + 1, "  KEY `idx_conversation` (`conversation_id`),")
+    return "\n".join(lineas).rstrip(";")
+
+
+def _sentencias(nombre: str, *, timeout: int | None = None) -> list[str]:
+    sql = "\n".join(l for l in (_MIG / nombre).read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("--"))
+    if timeout is not None:
+        sql = sql.replace("lock_wait_timeout=10", f"lock_wait_timeout={timeout}")
+    return [x.strip() for x in sql.split(";") if x.strip()]
+
+
+async def _conexion_real():
+    import aiomysql
+    from base_de_test import exigir_base_de_test
+    if not os.getenv("JAX_DB_HOST"):
+        pytest.skip("requires an isolated CI test database")
+    return await aiomysql.connect(host=os.environ["JAX_DB_HOST"], port=int(os.getenv("JAX_DB_PORT", "3306")),
+                                  user=os.getenv("JAX_DB_USER", "root"), password=os.getenv("JAX_DB_PASSWORD", ""),
+                                  db=exigir_base_de_test(), autocommit=True, cursorclass=__import__("aiomysql").DictCursor)
+
+
+async def _con_tablas_reales(escenario):
+    """Crea conversations/messages persistentes con la DDL real en la base DESECHABLE y las borra al final."""
+    c1 = await _conexion_real()
+    try:
+        async with c1.cursor() as cur:
+            await cur.execute("SET SESSION lock_wait_timeout=5")        # red de seguridad de la prueba: nunca colgarse
+            await cur.execute("DROP TABLE IF EXISTS messages"); await cur.execute("DROP TABLE IF EXISTS conversations")
+            await cur.execute(_ddl_produccion("conversations")); await cur.execute(_ddl_produccion("messages"))
+        await escenario(c1)
+    finally:
+        async with c1.cursor() as cur:
+            await cur.execute("DROP TABLE IF EXISTS messages"); await cur.execute("DROP TABLE IF EXISTS conversations")
+        c1.close()
+
+
+def test_011_012_013_fijan_lock_wait_timeout_dentro_del_propio_sql_y_documentan_la_copia():
+    for nombre in ("011_messages_conversation_turn_index.sql", "012_conversations_open_index.sql",
+                   "013_messages_drop_redundant_conversation_index.sql"):
+        crudo = (_MIG / nombre).read_text(encoding="utf-8")
+        sentencias = _sentencias(nombre)
+        assert sentencias[0] == "SET SESSION lock_wait_timeout=10", nombre            # ANTES del ALTER
+        assert sentencias[1].startswith("ALTER TABLE"), nombre
+        for frase in ("ALGORITHM=COPY", "LOCK=SHARED", "bloquea escrituras", "sin subir el limite"):
+            assert frase in crudo, (nombre, frase)
+        assert "ALGORITHM=COPY, LOCK=SHARED" in sentencias[1], nombre                    # explicito, no a criterio del motor
+
+
+@pytest.mark.asyncio
+async def test_real_011_sobre_la_ddl_de_produccion_con_vector_key_y_fk_cascade():
+    async def escenario(c1):
+        async with c1.cursor() as cur:
+            await cur.execute("SHOW CREATE TABLE messages"); ddl = (await cur.fetchone())["Create Table"]
+            assert "VECTOR KEY" in ddl.upper() or "VECTOR" in ddl.upper() and "ON DELETE CASCADE" in ddl     # la tabla ES la real
+            await cur.execute("INSERT INTO conversations (conversation_uuid) VALUES ('u1')")
+            await cur.execute("INSERT INTO messages (conversation_id,turn_number,role,content) VALUES (1,1,'user','x'),(1,1,'user','y')")
+            for st in _sentencias("011_messages_conversation_turn_index.sql", timeout=10):
+                await cur.execute(st)
+            for st in _sentencias("011_messages_conversation_turn_index.sql", timeout=10):      # idempotente
+                await cur.execute(st)
+            await cur.execute("SHOW INDEX FROM messages")
+            assert "idx_messages_conversation_turn" in {r["Key_name"] for r in await cur.fetchall()}
+            await cur.execute("DELETE FROM conversations WHERE id=1")                              # la FK CASCADE sigue viva
+            await cur.execute("SELECT COUNT(*) AS n FROM messages"); assert (await cur.fetchone())["n"] == 0
+    await _con_tablas_reales(escenario)
+
+
+@pytest.mark.asyncio
+async def test_real_011_con_una_escritura_abierta_se_agota_el_tiempo_sin_cambiar_nada_y_se_reintenta():
+    import pymysql
+    async def escenario(c1):
+        c2 = await _conexion_real()
+        try:
+            async with c2.cursor() as cur2:
+                await cur2.execute("SET SESSION lock_wait_timeout=5")
+            async with c1.cursor() as cur:
+                await cur.execute("INSERT INTO conversations (conversation_uuid) VALUES ('u1')")
+            async with c2.cursor() as cur2:
+                await cur2.execute("START TRANSACTION")
+                await cur2.execute("INSERT INTO messages (conversation_id,turn_number,role,content) VALUES (1,1,'user','abierta')")
+            async with c1.cursor() as cur:
+                with pytest.raises(pymysql.err.OperationalError) as e:
+                    for st in _sentencias("011_messages_conversation_turn_index.sql", timeout=1):
+                        await cur.execute(st)
+                assert e.value.args[0] == 1205                                                        # lock wait timeout
+                await cur.execute("SHOW INDEX FROM messages")
+                assert "idx_messages_conversation_turn" not in {r["Key_name"] for r in await cur.fetchall()}   # nada cambio
+            async with c2.cursor() as cur2:
+                await cur2.execute("ROLLBACK")
+            async with c1.cursor() as cur:                                                            # reintento, mismo limite
+                for st in _sentencias("011_messages_conversation_turn_index.sql", timeout=1):
+                    await cur.execute(st)
+                await cur.execute("SHOW INDEX FROM messages")
+                assert "idx_messages_conversation_turn" in {r["Key_name"] for r in await cur.fetchall()}
+        finally:
+            c2.close()
+    await _con_tablas_reales(escenario)
+
+
+@pytest.mark.asyncio
+async def test_real_012_el_indice_de_abiertas_cambia_el_plan_de_stale_open_conversations():
+    consulta = ("EXPLAIN SELECT COUNT(*) AS n FROM conversations c WHERE c.ended_at IS NULL "
+                "AND c.started_at<NOW(6)-INTERVAL 7 DAY")
+    async def escenario(c1):
+        async with c1.cursor() as cur:
+            await cur.execute("INSERT INTO conversations (conversation_uuid,started_at,ended_at) "
+                              "SELECT CONCAT('c',seq), NOW()-INTERVAL (seq%400) DAY, IF(seq%50=0,NULL,NOW()) FROM seq_1_to_2000")
+            await cur.execute("ANALYZE TABLE conversations")
+            await cur.fetchall()
+            await cur.execute(consulta); antes = await cur.fetchone()
+            for st in _sentencias("012_conversations_open_index.sql", timeout=10):
+                await cur.execute(st)
+            for st in _sentencias("012_conversations_open_index.sql", timeout=10):                  # idempotente
+                await cur.execute(st)
+            await cur.execute("ANALYZE TABLE conversations"); await cur.fetchall()
+            await cur.execute(consulta); despues = await cur.fetchone()
+        assert despues["key"] == "idx_conversations_open", (antes, despues)
+        assert despues["rows"] < antes["rows"], (antes, despues)                                    # EXPLAIN antes/despues
+    await _con_tablas_reales(escenario)
+
+
+@pytest.mark.asyncio
+async def test_real_013_quita_idx_conversation_sin_que_ninguna_consulta_pierda_plan():
+    consultas = {
+        "bounds (COUNT/SUM por conversacion)": "EXPLAIN SELECT COUNT(*), COALESCE(SUM(CHAR_LENGTH(content)+CHAR_LENGTH(role)+3),0) FROM messages WHERE conversation_id=5",
+        "mensajes ASC": "EXPLAIN SELECT id, turn_number, role, content FROM messages WHERE conversation_id = 5 ORDER BY turn_number ASC, id ASC",
+        "mensajes DESC": "EXPLAIN SELECT role, content FROM messages WHERE conversation_id = 5 ORDER BY turn_number DESC, id DESC LIMIT 20",
+        "borrado en cascada": "EXPLAIN DELETE FROM messages WHERE conversation_id = 5",
+    }
+    async def escenario(c1):
+        async with c1.cursor() as cur:
+            await cur.execute("INSERT INTO conversations (conversation_uuid) SELECT CONCAT('c',seq) FROM seq_1_to_30")
+            await cur.execute("INSERT INTO messages (conversation_id,turn_number,role,content) SELECT 1+(seq%29), seq, 'user','x' FROM seq_1_to_900")
+            await cur.execute("ANALYZE TABLE messages"); await cur.fetchall()
+            for n in ("011_messages_conversation_turn_index.sql",):
+                for st in _sentencias(n, timeout=10): await cur.execute(st)
+            antes = {}
+            for nombre, q in consultas.items():
+                await cur.execute(q); antes[nombre] = await cur.fetchone()
+            for st in _sentencias("013_messages_drop_redundant_conversation_index.sql", timeout=10): await cur.execute(st)
+            for st in _sentencias("013_messages_drop_redundant_conversation_index.sql", timeout=10): await cur.execute(st)   # idempotente
+            await cur.execute("SHOW INDEX FROM messages")
+            nombres = {r["Key_name"] for r in await cur.fetchall()}
+            assert "idx_conversation" not in nombres and "idx_messages_conversation_turn" in nombres
+            for nombre, q in consultas.items():
+                await cur.execute(q); plan = await cur.fetchone()
+                assert plan["key"] == "idx_messages_conversation_turn", (nombre, plan)
+                assert "filesort" not in (plan["Extra"] or ""), (nombre, plan)
+            await cur.execute("DELETE FROM conversations WHERE id=5")                                # la FK sigue indexada y viva
+            await cur.execute("SELECT COUNT(*) AS n FROM messages WHERE conversation_id=5"); assert (await cur.fetchone())["n"] == 0
+    await _con_tablas_reales(escenario)
