@@ -1,13 +1,13 @@
 # Traspaso — Faro 0.4 `memoria.buscar`
 
-Actualizado: 2026-10-04 · rama `feat/faro-0.4-memoria-buscar`
+Actualizado: 2026-10-05 · rama `feat/faro-0.4-memoria-buscar`
 
 ## Estado
 
-- PR JAX #352, base `master` en `142c91f13b200d41e38c214a46c266e56749c7eb`.
-- Último commit implementador: `223291f` más cambios locales sin commit para hacer rollback acotado, descartar conexiones colgadas y validar síntesis por existencia de payload sin seleccionar el BLOB.
-- Sol re-auditó `223291f`: 0 BLOCK, 2 MAJOR abiertos (rollback colgado durante cancelación y SELECT sin cota del BLOB de fuentes de síntesis). Ambos tienen regresiones locales nuevas; la reauditoría del SHA corregido queda pendiente.
-- CI de GitHub debe ejecutarse sobre el nuevo SHA; la integración MariaDB usa el job aislado. Sin conexión ni cableado a B9 de producción.
+- PR JAX #352, reconciliado con `origin/master` `d136cce5d88b3420a5066b40e7786c158118f29e` mediante merge regular.
+- Se conserva la limpieza #353 (`docker rm -fv`) llegada desde master.
+- Raíz del rojo `memory-b9-regression` de `aae11a8`: `CursorObservado` del test MariaDB no exponía `fetchone`, aunque el reader lo usa legítimamente para validar la fuente de síntesis. Se añadió delegación y regresión directa; el mínimo sube de 107 a 108.
+- Verificación focal: 5 passed. El perfil DB de pruebas no está expuesto en este host y Docker no está disponible a este usuario; el comando exacto de 11 módulos debe ejecutarse por el job aislado de CI, sin alterar host/base/usuario ni conectar B9 de producción.
 
 ## Decisiones que no deben cambiar
 
@@ -26,5 +26,5 @@ Actualizado: 2026-10-04 · rama `feat/faro-0.4-memoria-buscar`
 ## Para quien retome
 
 1. Parte de `git rev-parse HEAD` y este archivo; no reconstruyas el estado desde memoria.
-2. Confirmar `git status` y commit de los cambios locales descritos; medir pisos; ejecutar suite/políticas; actualizar el PR y pedir auditoría Sol del SHA exacto.
+2. Confirmar `git status`, ejecutar la suite exacta `memory-b9-regression` en CI aislada, medir el resultado y subir el piso si supera 108; después archivar este traspaso en `docs/historia/`, borrar `TRASPASO.md`, actualizar PR y pedir auditoría Sol del SHA exacto.
 3. No integrar ni desplegar.

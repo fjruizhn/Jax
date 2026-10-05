@@ -130,7 +130,7 @@ Sin historia anotada en el workflow.
 
 ## `memory-b9-regression/casos`
 
-Mínimo actualizado 2026-10-04: `107` casos. Base previa `103` (10 módulos, cero skips/errores) + cuatro pruebas de frontera de `memoria.buscar`: rechazo de configuración forzada hacia producción, apertura solo del perfil permitido, rollback con timeout que descarta la conexión y validación de síntesis sin leer su BLOB. La prueba MariaDB real mantiene tablas de sesión temporales y comprueba que el reader solo emite lecturas y valida sus fuentes exactas.
+Mínimo actualizado 2026-10-05: `108` casos. Base previa `103` (10 módulos, cero skips/errores) + cinco pruebas de frontera de `memoria.buscar`: rechazo de configuración forzada hacia producción, apertura solo del perfil permitido, rollback con timeout que descarta la conexión, validación de síntesis sin leer su BLOB y delegación de `fetchone` por el cursor observado de la prueba MariaDB. La prueba MariaDB real mantiene tablas de sesión temporales y comprueba que el reader solo emite lecturas y valida sus fuentes exactas.
 
 ## `facet-health-io/out`
 

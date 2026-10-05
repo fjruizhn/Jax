@@ -38,6 +38,9 @@ class CursorObservado:
     async def fetchall(self):
         return await self._cursor.fetchall()
 
+    async def fetchone(self):
+        return await self._cursor.fetchone()
+
 
 class ConnObservada:
     def __init__(self, conn, sentencias):
@@ -54,6 +57,19 @@ class ConnObservada:
 
     def cursor(self):
         return CursorObservado(self._conn.cursor(), self._sentencias)
+
+
+def test_cursor_observado_delega_fetchone():
+    class Cursor:
+        async def fetchone(self):
+            return {"revision_id": "source-rev"}
+
+    async def caso():
+        observado = CursorObservado(None, [])
+        observado._cursor = Cursor()
+        assert await observado.fetchone() == {"revision_id": "source-rev"}
+
+    asyncio.run(caso())
 
 
 def test_rollback_colgado_cierra_la_conexion_y_respeta_el_limite():
