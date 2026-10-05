@@ -1,9 +1,0 @@
-# Traspaso continuo — F2-E Tramo 1
-
-- Objetivo: reconciliar JAX PR #344 (Jacobs aviso Telegram por texto gobernado) con `origin/master` actual, re-medición de pisos y CI verde para reauditoría corta de C3.
-- Hecho: `origin/master` observado en `d136cce5d88b3420a5066b40e7786c158118f29e` (#353); merge regular creado localmente como `b89508c324f26ca93ece7d0114731ac19e6e0750`. El merge preserva sin cambios respecto del padre F2-E `policy/governance/external_output.py`, `jacobs/governed_aviso.py`, sus pruebas y los contratos F2-B/C/D.
-- Pisos: `governance/f2e-external-output` queda en `^10 passed`; el paso aislado pasó localmente con `10 passed`. `tests-puros/out` queda en `^3473 passed, 45 skipped`, medición del runner documentada por #353 para sus tres pruebas Docker. F2-E no agrega pruebas a ese paso; sus diez pruebas son el paso aislado anterior. OCR conserva `^219 passed, 2 skipped` para el runner.
-- Verificado: `policy/tests/test_pisos_migracion_desde_master.py`, `test_pisos_fuera_del_workflow.py` y `test_archivos_de_test_wireados_en_ci.py`: `155 passed`; F2-E: `10 passed`; `git diff --check` de ambos lados del merge: limpio. La ejecución local completa de la lista de `tests-puros` alcanzó `3512 passed, 3 skipped, 3 xfailed`, pero falla una prueba ambiental ajena: `tests/test_arranque_las_manos_no_shadowea_policy.py::test_arranque_real_no_colisiona_con_policy_de_la_raiz`, porque el hijo no puede leer `/etc/jax/build/implementation-identity.json` (`PermissionError`). No alterarla ni bajar el piso.
-- CI del SHA publicado anterior no certifica el merge nuevo. Falta publicar la rama, correr checks del SHA y obtener reauditoría C3. No mergear PR ni desplegar.
-- Tramo 2 de F2-E continúa en el worktree separado `f2e-structured-projection-jax` y su par de Plataforma; no reutilizar ni mezclar archivos con este branch.
-- Límites: sin `push`, `gh`, integración a master, despliegue ni auditoría propia.
