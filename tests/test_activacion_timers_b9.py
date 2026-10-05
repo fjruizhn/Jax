@@ -42,7 +42,13 @@ def test_estado_correcto_pasa_sin_mutar_nada(tmp_path):
     assert "5 timers B9" in resultado.stdout
 
 
-@pytest.mark.parametrize("modo", ["disabled_inactive", "sin_next", "falla"])
+def test_timer_monotonico_con_proximo_disparo_real_pasa(tmp_path):
+    """Sin Realtime pero con un monotónico real (5min) SÍ hay próximo disparo."""
+    resultado = _correr("correcto_monotonico", tmp_path)
+    assert resultado.returncode == 0, resultado.stderr
+
+
+@pytest.mark.parametrize("modo", ["disabled_inactive", "sin_next", "muerto_real", "falla"])
 def test_cualquier_estado_inactivo_o_incompleto_falla_cerrado(modo, tmp_path):
     resultado = _correr(modo, tmp_path)
     assert resultado.returncode != 0
