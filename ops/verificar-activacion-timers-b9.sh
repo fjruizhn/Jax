@@ -71,7 +71,22 @@ for timer in "${timers[@]}"; do
 
   # Cada propiedad es obligatoria y se valida por valor exacto: una salida
   # truncada, "n/a" o un estado nuevo/desconocido es roja por diseño.
-  if [ "$unit_file_state" != enabled ] || [ "$active_state" != active ] || [ "$sub_state" != waiting ] || { [ -z "$next_elapse" ] || [ "$next_elapse" = n/a ]; } && { [ -z "$next_monotonic" ] || [ "$next_monotonic" = n/a ]; }; then
+  #
+  # "Sin próximo disparo" (B1, auditoría de #356): el systemd real imprime
+  # NextElapseUSecRealtime= (vacío) y NextElapseUSecMonotonic=infinity para un timer
+  # muerto -- medido en hall9000. Un timer de CALENDARIO activo muestra Realtime con
+  # fecha y Monotonic=0, así que cuenta Realtime; un timer monotónico activo
+  # (OnUnitActiveSec/OnBootSec) tiene Realtime vacío y un Monotonic real. Por eso solo
+  # falta el disparo si Realtime está vacío o n/a Y el monotónico es "", n/a, infinity o 0.
+  # Cada condición va en su propia variable: la forma anterior mezclaba `||` y `&&` sin
+  # agrupar y se evaluaba como (A||B||C||D) && E.
+  sin_realtime=0
+  { [ -z "$next_elapse" ] || [ "$next_elapse" = n/a ]; } && sin_realtime=1
+  sin_monotonico=0
+  case "$next_monotonic" in "" | n/a | infinity | 0) sin_monotonico=1 ;; esac
+  sin_disparo=0
+  if [ "$sin_realtime" -eq 1 ] && [ "$sin_monotonico" -eq 1 ]; then sin_disparo=1; fi
+  if [ "$unit_file_state" != enabled ] || [ "$active_state" != active ] || [ "$sub_state" != waiting ] || [ "$sin_disparo" -eq 1 ]; then
     echo "TIMER B9 NO ACTIVADO: $timer UnitFileState=${unit_file_state:-<vacío>} ActiveState=${active_state:-<vacío>} SubState=${sub_state:-<vacío>} NextElapseUSecRealtime=${next_elapse:-<vacío>} NextElapseUSecMonotonic=${next_monotonic:-<vacío>} -- se exige enabled/active/waiting/próximo disparo" >&2
     fallo=1
   fi
