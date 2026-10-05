@@ -509,6 +509,36 @@ def _correr_con_capa_cargado_de_prueba(tmp_path: Path, modo: str) -> subprocess.
 
 
 @pytest.mark.skipif(not SYSTEMCTL_FALSO.is_file(), reason="falta tests/fixtures/systemctl-falso-para-pruebas.sh")
+def test_la_capa_cargado_nunca_consulta_una_plantilla(tmp_path):
+    """m2 (ronda 3 de #356): de las plantillas (`nombre@.service`) el guion verifica archivo y
+    disco, pero NO le pregunta a systemd por ellas -- la consulta de estado no acepta una plantilla
+    ("neither a valid invocation ID nor unit name"). Un doble que registra cada consulta y falla
+    si le preguntan por `*@.*` lo demuestra; ademas el arbol completo (que incluye
+    aviso-fallo@.service) tiene que dar 0."""
+    _construir_arbol_completo(tmp_path)
+    registro = tmp_path.parent / (tmp_path.name + "-consultas.log")
+    doble = tmp_path.parent / (tmp_path.name + "-doble.sh")
+    doble.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "$*" >> "{registro}"\n'
+        'for a in "$@"; do case "$a" in *@.*) echo "consulta por una plantilla: $a" >&2; exit 1;; esac; done\n'
+        f'exec "{SYSTEMCTL_FALSO}" "$@"\n',
+        encoding="utf-8",
+    )
+    doble.chmod(0o755)
+    resultado = subprocess.run(
+        ["sudo", "-n", "env", f"SYSTEMCTL_DE_PRUEBA={doble}", "SYSTEMCTL_FALSO_MODO=correcto", str(SCRIPT), str(tmp_path)],
+        capture_output=True, text=True,
+    )
+    consultas = registro.read_text(encoding="utf-8") if registro.exists() else ""
+    registro.unlink(missing_ok=True)
+    doble.unlink(missing_ok=True)
+    assert consultas, "el doble no recibio ninguna consulta: la capa cargado no corrio"
+    assert "@." not in consultas, consultas
+    assert resultado.returncode == 0, resultado.stderr
+
+
+@pytest.mark.skipif(not SYSTEMCTL_FALSO.is_file(), reason="falta tests/fixtures/systemctl-falso-para-pruebas.sh")
 def test_capa_cargado_de_prueba_correcta_da_cero(tmp_path):
     """MINOR-1 (ronda 6): activar la capa cargado bajo RAIZ_PRUEBA, por sí
     solo, no tiene que hacer fallar nada cuando el systemctl de mentira

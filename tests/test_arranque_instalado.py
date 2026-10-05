@@ -22,12 +22,15 @@ peor que una sola que puede fallar.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from manifiesto_arranque import MANIFIESTO, ROOT, leer_manifiesto as _leer_manifiesto
+from manifiesto_arranque import (
+    DUENOS, MANIFIESTO, ROOT, leer_manifiesto as _leer_manifiesto, leer_manifiesto_con_dueno,
+)
 
 SCRIPT = ROOT / "ops" / "verificar-arranque-instalado.sh"
 
@@ -232,15 +235,89 @@ def test_git_en_srv_jax_prod_necesita_safe_directory():
     )
 
 
-def test_el_instalador_respalda_la_base_del_proxy_antes_de_pisarla():
-    """m3 de la auditoria de #356: instalar_registro_y_cerco.sh pisaba la base instalada del
-    proxy sin respaldo. Ahora la copia (con marca de tiempo) a /etc/jax-ejecutor-cerco/respaldos/
-    ANTES del `install` y dice como revertir. Prueba estatica: el guion toca el sistema real y
-    no se puede correr aqui."""
+# --- Dueño de cada fila (M1 de la re-auditoria de #356) -------------------------------------
+# Tres archivos del manifiesto son ESPEJOS de otro repo: nada lo declaraba y alguien podia editar
+# la copia de aqui. Ahora cada fila lleva su dueño y la ruta en el dueño.
+
+_ESPEJOS = {
+    "/etc/systemd/system/jax-las-manos.service.d/esperar-db.conf":
+        ("jax-platform", "ops/mariadb-12.3/systemd/esperar-db.conf"),
+    "/usr/local/sbin/jax-db-esperar":
+        ("jax-platform", "ops/mariadb-12.3/systemd/jax-db-esperar"),
+    "/etc/systemd/system/aviso-fallo@.service":
+        ("claude-skills", "systemd/hall9000/sistema/aviso-fallo@.service"),
+}
+_REPOS_DUENOS = {
+    "jax-platform": ("JAX_PLATFORM_REPO", "/home/fruiz/jax-platform"),
+    "claude-skills": ("CLAUDE_SKILLS_REPO", "/home/fruiz/claude-skills"),
+}
+
+
+def test_cada_fila_declara_su_dueno_y_la_ruta_en_el_dueno():
+    for repo_abs, instalada, dueno, ruta_dueno in leer_manifiesto_con_dueno():
+        assert dueno in DUENOS, f"{instalada}: dueño {dueno!r} no es uno de {DUENOS}"
+        if dueno == "jax":
+            assert ruta_dueno == "-", f"{instalada}: una fila de jax no lleva ruta en otro repo (usa '-')"
+        else:
+            assert ruta_dueno != "-" and not ruta_dueno.startswith("/"), f"{instalada}: falta la ruta (relativa) en {dueno}"
+
+
+def test_los_espejos_declaran_su_repo_dueno_y_todo_lo_demas_es_de_jax():
+    obtenido = {str(i): (d, r) for _, i, d, r in leer_manifiesto_con_dueno() if d != "jax"}
+    assert obtenido == _ESPEJOS
+
+
+@pytest.mark.parametrize("instalada", sorted(_ESPEJOS))
+def test_cada_espejo_coincide_con_el_archivo_del_repo_dueno(instalada):
+    """El espejo se compara con la fuente cuando ese checkout existe (rutas por env:
+    JAX_PLATFORM_REPO y CLAUDE_SKILLS_REPO; por defecto las de hall9000). Si no existe el
+    checkout o el archivo en su rama actual, skip con el motivo -- no se inventa el resultado."""
+    dueno, ruta = _ESPEJOS[instalada]
+    variable, defecto = _REPOS_DUENOS[dueno]
+    raiz = Path(os.environ.get(variable, defecto))
+    fuente = raiz / ruta
+    if not fuente.is_file():
+        pytest.skip(f"no hay {fuente} (checkout de {dueno} ausente o en otra rama; ajusta {variable})")
+    espejo = next(r for r, i, _, _ in leer_manifiesto_con_dueno() if str(i) == instalada)
+    assert espejo.read_bytes() == fuente.read_bytes(), (
+        f"{espejo} ya no coincide con {dueno}:{ruta}; el dueño es {dueno}, no se edita aqui: "
+        f"cambia la fuente y vuelve a copiar"
+    )
+
+
+def test_el_instalador_del_proxy_delega_el_respaldo_y_lo_hace_antes_de_pisar_la_base():
+    """m3: la linea que pisa la base del proxy va precedida de la llamada al guion de respaldo."""
     lineas = (ROOT / "ops" / "ejecutor" / "instalar_registro_y_cerco.sh").read_text(encoding="utf-8").splitlines()
     codigo = [l for l in lineas if not l.lstrip().startswith("#")]
-    pisa = next(i for i, l in enumerate(codigo) if "jax-ejecutor-proxy.service\" /etc/systemd/system/" in l)
-    respaldo = [i for i, l in enumerate(codigo)
-                if "/etc/jax-ejecutor-cerco/respaldos" in l and "MARCA" in l and "jax-ejecutor-proxy.service" in l]
-    assert respaldo and respaldo[0] < pisa, "no hay respaldo con marca de tiempo antes de pisar la base del proxy"
-    assert any("Para revertir" in l and "respaldos" in l for l in codigo[pisa:]), "no imprime como revertir"
+    pisa = next(i for i, l in enumerate(codigo) if 'jax-ejecutor-proxy.service" /etc/systemd/system/' in l)
+    llamada = [i for i, l in enumerate(codigo) if "respaldar-base-del-proxy.sh" in l]
+    assert llamada and llamada[0] < pisa, "el instalador no respalda la base del proxy antes de pisarla"
+
+
+def test_el_respaldo_de_la_base_del_proxy_copia_el_archivo_original_sin_sudo(tmp_path):
+    """m3 (ronda 3): se EJECUTA el guion de respaldo sobre un arbol falso (DESTDIR, sin sudo)."""
+    guion = ROOT / "ops" / "ejecutor" / "respaldar-base-del-proxy.sh"
+    base = tmp_path / "etc" / "systemd" / "system" / "jax-ejecutor-proxy.service"
+    base.parent.mkdir(parents=True)
+    original = "[Service]\nUser=fruiz\n"
+    base.write_text(original, encoding="utf-8")
+    r = subprocess.run([str(guion), "20261006-120000", str(tmp_path)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    copia = tmp_path / "etc" / "jax-ejecutor-cerco" / "respaldos" / "jax-ejecutor-proxy.service.20261006-120000"
+    assert copia.is_file() and copia.read_text(encoding="utf-8") == original
+    assert base.read_text(encoding="utf-8") == original, "el respaldo no debe tocar la base"
+    assert "Para revertir" in r.stdout and "respaldos/jax-ejecutor-proxy.service.20261006-120000" in r.stdout
+
+
+def test_el_respaldo_sin_base_instalada_no_falla_ni_crea_nada(tmp_path):
+    guion = ROOT / "ops" / "ejecutor" / "respaldar-base-del-proxy.sh"
+    r = subprocess.run([str(guion), "20261006-120000", str(tmp_path)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert not (tmp_path / "etc").exists()
+
+
+@pytest.mark.parametrize("marca", ["", "../x", "a b", "2026;rm"])
+def test_el_respaldo_rechaza_una_marca_invalida(tmp_path, marca):
+    guion = ROOT / "ops" / "ejecutor" / "respaldar-base-del-proxy.sh"
+    r = subprocess.run([str(guion), marca, str(tmp_path)], capture_output=True, text=True)
+    assert r.returncode != 0

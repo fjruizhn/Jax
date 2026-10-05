@@ -39,14 +39,14 @@ def _correr(patron: str, destdir: Path) -> subprocess.CompletedProcess:
 
 
 def test_instala_los_dropins_de_una_unidad_byte_a_byte_y_modo_644(tmp_path):
-    resultado = _correr("jax-las-manos.service.d", tmp_path)
+    resultado = _correr("jax-memory-worker.service.d", tmp_path)
     assert resultado.returncode == 0, resultado.stderr
 
     esperados = [
         (repo_abs, instalada) for repo_abs, instalada in leer_manifiesto()
-        if str(instalada).startswith("/etc/systemd/system/jax-las-manos.service.d/")
+        if str(instalada).startswith("/etc/systemd/system/jax-memory-worker.service.d/")
     ]
-    assert esperados, "el manifiesto no tiene drop-ins de jax-las-manos.service.d"
+    assert esperados, "el manifiesto no tiene drop-ins de jax-memory-worker.service.d"
     for repo_abs, instalada in esperados:
         destino = tmp_path / str(instalada).lstrip("/")
         assert destino.is_file(), f"no se instaló: {destino}"
@@ -86,7 +86,7 @@ def _repo_adulterado(tmp_path: Path, repo_rel: str, instalada: str, contenido: s
     repo = tmp_path / "repo"
     (repo / "ops").mkdir(parents=True)
     (repo / "ops" / "manifiesto-arranque-instalado.tsv").write_text(
-        f"{repo_rel}\t{instalada}\n", encoding="utf-8"
+        f"{repo_rel}\t{instalada}\tjax\t-\n", encoding="utf-8"
     )
     archivo = repo / repo_rel
     archivo.parent.mkdir(parents=True, exist_ok=True)
@@ -126,7 +126,7 @@ def test_rechaza_archivo_de_repo_que_resuelve_fuera_del_repo(tmp_path):
     repo = tmp_path / "repo"
     (repo / "ops").mkdir(parents=True)
     (repo / "ops" / "manifiesto-arranque-instalado.tsv").write_text(
-        "escape.conf\t/etc/systemd/system/jax-malo3.service.d/escape.conf\n", encoding="utf-8"
+        "escape.conf\t/etc/systemd/system/jax-malo3.service.d/escape.conf\tjax\t-\n", encoding="utf-8"
     )
     (repo / "escape.conf").symlink_to(fuera)
 
@@ -144,7 +144,6 @@ def test_todo_bajo_destdir_nunca_fuera(tmp_path):
     pasar por DESTDIR, este glob lo encontraría vacío o el test de arriba
     ya habría fallado contra el /etc real (que en CI ni existe)."""
     for patron in (
-        "jax-las-manos.service.d",
         "jax-memory-worker.service.d",
         "jax-memory-synthesis.service.d",
         "jax-memory-embedding.service.d",
@@ -157,7 +156,7 @@ def test_todo_bajo_destdir_nunca_fuera(tmp_path):
         assert resultado.returncode == 0, f"{patron}: {resultado.stderr}"
     instalados = list(tmp_path.rglob("*"))
     archivos = [p for p in instalados if p.is_file()]
-    assert len(archivos) == 21, f"se esperaban 21 archivos instalados (20 drop-ins + el guion), hubo {len(archivos)}: {archivos}"
+    assert len(archivos) == 16, f"se esperaban 16 archivos instalados (15 drop-ins + el guion), hubo {len(archivos)}: {archivos}"
 
 
 @pytest.mark.parametrize("destdir_literal", ["/", "", "/tmp/../"])
@@ -175,8 +174,24 @@ def test_destdir_que_resuelve_a_raiz_se_trata_como_instalacion_real(destdir_lite
     if ROOT.resolve() == Path("/srv/jax-prod/jax"):
         pytest.skip("desde /srv/jax-prod/jax los frenos pasan y se escribiria en el /etc real")
     resultado = subprocess.run(
-        [str(SCRIPT), "jax-las-manos.service.d", str(ROOT), destdir_literal],
+        [str(SCRIPT), "jax-memory-worker.service.d", str(ROOT), destdir_literal],
         capture_output=True, text=True,
     )
     assert resultado.returncode != 0
     assert "instalación real (sin DESTDIR)" in resultado.stderr, resultado.stderr
+
+
+# --- Dueño de la fila (M1 de la re-auditoria de #356) ---------------------------------------
+
+@pytest.mark.parametrize("patron, repo_dueno, ruta_dueno", [
+    # La unidad completa: incluye esperar-db.conf, que es de jax-platform.
+    ("jax-las-manos.service.d", "jax-platform", "ops/mariadb-12.3/systemd/esperar-db.conf"),
+    ("/usr/local/sbin/jax-db-esperar", "jax-platform", "ops/mariadb-12.3/systemd/jax-db-esperar"),
+    ("/etc/systemd/system/aviso-fallo@.service", "claude-skills", "systemd/hall9000/sistema/aviso-fallo@.service"),
+])
+def test_rechaza_instalar_una_fila_de_otro_dueno(tmp_path, patron, repo_dueno, ruta_dueno):
+    resultado = _correr(patron, tmp_path)
+    assert resultado.returncode == 3, (resultado.returncode, resultado.stderr)
+    assert repo_dueno in resultado.stderr and ruta_dueno in resultado.stderr, resultado.stderr
+    assert "no es de jax" in resultado.stderr, resultado.stderr
+    assert not list(tmp_path.rglob("*")), "no debe instalarse NADA si una fila es de otro dueno"

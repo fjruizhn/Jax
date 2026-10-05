@@ -19,16 +19,30 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFIESTO = ROOT / "ops" / "manifiesto-arranque-instalado.tsv"
 
 
-def leer_manifiesto() -> list[tuple[Path, Path]]:
-    """Los pares (ruta absoluta en el repo, ruta absoluta instalada) que
-    también lee ops/verificar-arranque-instalado.sh, del mismo archivo."""
-    pares = []
+DUENOS = ("jax", "jax-platform", "claude-skills")
+
+
+def leer_manifiesto_con_dueno() -> list[tuple[Path, Path, str, str]]:
+    """Las filas completas del manifiesto, con CUATRO columnas separadas por tabulador:
+    ruta en este repo, ruta instalada, dueño (`jax`, `jax-platform` o `claude-skills`) y
+    ruta del archivo en el repo dueño (`-` si el dueño es `jax`: el archivo ES de este repo).
+    Una fila que no tenga las cuatro es un error: un espejo sin dueño declarado no se admite."""
+    filas = []
     for linea in MANIFIESTO.read_text(encoding="utf-8").splitlines():
         if not linea.strip():
             continue
-        repo_rel, instalada = linea.split("\t")
-        pares.append((ROOT / repo_rel, Path(instalada)))
-    return pares
+        campos = linea.split("\t")
+        if len(campos) != 4:
+            raise AssertionError(f"fila del manifiesto sin las 4 columnas (repo, instalada, dueño, ruta en el dueño): {linea!r}")
+        repo_rel, instalada, dueno, ruta_dueno = campos
+        filas.append((ROOT / repo_rel, Path(instalada), dueno, ruta_dueno))
+    return filas
+
+
+def leer_manifiesto() -> list[tuple[Path, Path]]:
+    """Los pares (ruta absoluta en el repo, ruta absoluta instalada) que
+    también lee ops/verificar-arranque-instalado.sh, del mismo archivo."""
+    return [(repo_abs, instalada) for repo_abs, instalada, _, _ in leer_manifiesto_con_dueno()]
 
 
 def timers_b9() -> list[str]:

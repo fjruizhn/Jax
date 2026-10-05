@@ -48,7 +48,20 @@ def test_timer_monotonico_con_proximo_disparo_real_pasa(tmp_path):
     assert resultado.returncode == 0, resultado.stderr
 
 
-@pytest.mark.parametrize("modo", ["disabled_inactive", "sin_next", "muerto_real", "falla"])
+def test_timer_running_mientras_corre_su_servicio_pasa(tmp_path):
+    """m4 (ronda 3 de #356): un timer cuyo servicio esta corriendo en ese instante tiene
+    SubState=running (systemd.timer: waiting | running | elapsed). Es un timer sano; exigir
+    solo `waiting` daba un rojo falso justo cuando el worker esta trabajando. Se sigue
+    exigiendo enabled, active y proximo disparo."""
+    resultado = _correr("running_con_disparo", tmp_path)
+    assert resultado.returncode == 0, resultado.stderr
+
+
+@pytest.mark.parametrize("modo", [
+    "disabled_inactive", "sin_next", "muerto_real", "falla",
+    # m1 (ronda 3): enabled/active/waiting pero sin proximo disparo.
+    "sin_next_monotonico_cero", "realtime_na",
+])
 def test_cualquier_estado_inactivo_o_incompleto_falla_cerrado(modo, tmp_path):
     resultado = _correr(modo, tmp_path)
     assert resultado.returncode != 0

@@ -18,6 +18,14 @@ case "$modo" in
     printf 'ActiveState=inactive\nSubState=dead\nUnitFileState=disabled\nNextElapseUSecRealtime=\nNextElapseUSecMonotonic=infinity\n' ;;
   sin_next)
     printf 'UnitFileState=enabled\nActiveState=active\nSubState=waiting\nNextElapseUSecRealtime=\nNextElapseUSecMonotonic=infinity\n' ;;
+  sin_next_monotonico_cero)
+    # enabled/active/waiting pero SIN proximo disparo: Realtime vacio y Monotonic=0 (m1, ronda 3).
+    printf 'UnitFileState=enabled\nActiveState=active\nSubState=waiting\nNextElapseUSecRealtime=\nNextElapseUSecMonotonic=0\n' ;;
+  realtime_na)
+    printf 'UnitFileState=enabled\nActiveState=active\nSubState=waiting\nNextElapseUSecRealtime=n/a\nNextElapseUSecMonotonic=n/a\n' ;;
+  running_con_disparo)
+    # El timer disparo su servicio y este sigue corriendo: SubState=running (m4, ronda 3).
+    printf 'UnitFileState=enabled\nActiveState=active\nSubState=running\nNextElapseUSecRealtime=Sun 2026-09-27 12:00:00 CST\nNextElapseUSecMonotonic=0\n' ;;
   correcto_monotonico)
     # Timer de OnUnitActiveSec/OnBootSec: sin Realtime, con un monotónico real.
     printf 'UnitFileState=enabled\nActiveState=active\nSubState=waiting\nNextElapseUSecRealtime=\nNextElapseUSecMonotonic=5min\n' ;;
