@@ -421,3 +421,188 @@ async def test_real_mensajes_empatados_en_turno_salen_siempre_por_id():
         assert [r['message_id'] for r in rows]==[1,2]
     finally:
         pool.close(); await pool.wait_closed()
+
+
+# --- Auditoria 2026-10-05, MAJOR-1: salida mal formada del extractor != fuente invalida ---
+
+def _process_claimed_con(raw, *, bounds_error=None):
+    """Corre process_claimed con un extractor doble que responde `raw`."""
+    import asyncio, time
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from jax.memory import worker
+    from jax.memory.b9 import ScopeContext
+    scope=ScopeContext('service:memory-extraction','SERVICE','1','1',calling_component='memory-extraction')
+    async def op(operation): return await operation(None)
+    api=SimpleNamespace(_store=SimpleNamespace(mutation=op),_auth=AsyncMock(return_value=SimpleNamespace(scope=scope)),_project_permissions=Mock())
+    writer=SimpleNamespace(_api=api,_build_request_scope=AsyncMock(return_value=scope),persist_frozen=AsyncMock())
+    messages=[{'message_id':1,'turn_number':1,'role':'user','content':'hola'}]
+    db=SimpleNamespace(get_conversation_messages=AsyncMock(return_value=messages))
+    jobs=SimpleNamespace(freeze=AsyncMock(),fail=AsyncMock(),
+        validate_message_bounds=AsyncMock(side_effect=bounds_error))
+    llm=SimpleNamespace(invoke=AsyncMock(return_value=raw))
+    job={'claim_token':'token','request_id':'r','trace_id':'t','frozen_output':None}
+    ok=asyncio.run(worker.process_claimed(db,llm,{'id':1,'user_id':1,'tenant_id':1},writer,jobs,job,
+                                          {'calls':0,'max_calls':5},time.monotonic()+10))
+    return ok,jobs,writer
+
+
+@pytest.mark.parametrize('raw',[
+    '{"facts":[{"text":"sin procedencia"}]}',                      # fact sin source_turns
+    'esto no es json',                                            # no parseable
+    '{"facts":[{"text":"x","source_turns":[{"message_id":"9","turn_number":9,"role":"user"}]}]}',  # turno inventado
+    '{"facts":{"no":"es lista"}}',
+])
+def test_salida_mal_formada_del_extractor_reintenta_y_no_pone_en_cuarentena(raw):
+    ok,jobs,writer=_process_claimed_con(raw)
+    assert ok is False
+    jobs.fail.assert_awaited_once()
+    args,kwargs=jobs.fail.await_args
+    assert kwargs.get('quarantine') is False, (args,kwargs)   # RETRY: fail() cuarentena solo al agotar intentos
+    assert kwargs.get('unknown') in (None,False)
+    assert args[2]=='EXTRACTOR_OUTPUT_INVALID'
+    jobs.freeze.assert_not_called(); writer.persist_frozen.assert_not_called()
+
+
+def test_limites_de_la_fuente_siguen_en_cuarentena_inmediata():
+    ok,jobs,_=_process_claimed_con('{}',bounds_error=ValueError('conversation input limit exceeded'))
+    assert ok is False
+    assert jobs.fail.await_args.kwargs.get('quarantine') is True
+
+
+@pytest.mark.asyncio
+async def test_real_salida_invalida_agota_intentos_y_recien_ahi_cuarentena():
+    """Con MariaDB: RETRY mientras queden intentos; QUARANTINED al agotarlos (JAX_MEMORY_MAX_ATTEMPTS)."""
+    pool,api,jobs,job,request=await real_extraction_fixture()
+    try:
+        async def estado():
+            async with pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute('SELECT state,error_code,attempts FROM memory_extraction_jobs WHERE conversation_id=1')
+                    return await cur.fetchone()
+        jobs.max_attempts=2
+        await jobs.fail(1,job['claim_token'],'EXTRACTOR_OUTPUT_INVALID',quarantine=False)   # intento 1 de 2
+        assert (await estado())['state']=='RETRY'
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("UPDATE memory_extraction_jobs SET next_attempt_at=NULL WHERE conversation_id=1")
+            await conn.commit()
+        job2=await jobs.claim(1,run_id='r2')                                                  # intento 2 de 2
+        assert job2 and job2['attempts']==2
+        await jobs.fail(1,job2['claim_token'],'EXTRACTOR_OUTPUT_INVALID',quarantine=False)
+        assert (await estado())['state']=='QUARANTINED'
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+# --- MAJOR-1 (cont.): la unidad queda roja mientras haya jobs atascados ---
+
+def _run_once_con(monkeypatch, *, pending, stuck, claim=None):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from jax.memory import worker
+    db=SimpleNamespace(pool=object(),connect=AsyncMock(return_value=True),close=AsyncMock())
+    jobs=SimpleNamespace(pending=AsyncMock(return_value=pending),claim=AsyncMock(return_value=claim),
+                         stuck_count=AsyncMock(return_value=stuck))
+    monkeypatch.setenv('JAX_DB_HOST','isolated-test')
+    monkeypatch.setattr(worker,'MemoryDB',lambda:db)
+    monkeypatch.setattr(worker,'ExtractionJobs',lambda *a,**k:jobs)
+    monkeypatch.setattr(worker,'build_extractor',AsyncMock(return_value=object()))
+    monkeypatch.setattr(worker,'cerrar_cliente_http',AsyncMock())
+    return worker,db,jobs
+
+
+@pytest.mark.asyncio
+async def test_cola_vacia_pero_con_jobs_en_cuarentena_sale_con_error(monkeypatch):
+    """pending() excluye QUARANTINED: sin esto la cola 'vacia' salia verde para siempre."""
+    worker,db,jobs=_run_once_con(monkeypatch,pending=[],stuck=2)
+    with pytest.raises(RuntimeError,match='stuck.*2'): await worker.run_once(b9_writer=object())
+    db.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_corrida_sana_sin_atascados_sale_verde(monkeypatch):
+    worker,db,jobs=_run_once_con(monkeypatch,pending=[],stuck=0)
+    await worker.run_once(b9_writer=object())
+
+
+@pytest.mark.asyncio
+async def test_atascados_se_cuentan_aunque_la_corrida_procese_bien(monkeypatch):
+    worker,db,jobs=_run_once_con(monkeypatch,pending=[{'id':1}],stuck=1,claim={'claim_token':'t'})
+    monkeypatch.setattr(worker,'process_claimed',__import__('unittest.mock',fromlist=['AsyncMock']).AsyncMock(return_value=True))
+    with pytest.raises(RuntimeError,match='stuck.*1'): await worker.run_once(b9_writer=object())
+
+
+@pytest.mark.asyncio
+async def test_real_stuck_count_cuenta_quarantined_y_unknown():
+    pool,api,jobs,job,request=await real_extraction_fixture()
+    try:
+        assert await jobs.stuck_count()==0
+        await jobs.fail(1,job['claim_token'],'X',quarantine=True)
+        assert await jobs.stuck_count()==1
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+# --- MAJOR-1 (cont.): re-encolar un job en cuarentena tras revisarlo, con auditoria ---
+
+async def _fixture_con_eventos():
+    pool,api,jobs,job,request=await real_extraction_fixture()
+    from pathlib import Path
+    sql=(Path(__file__).parents[1]/'jax/memory/b9_migrations/007_extraction_job_events.sql').read_text()
+    sql='\n'.join(l for l in sql.splitlines() if not l.lstrip().startswith('--'))
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            for st in sql.split(';'):
+                if st.strip().startswith('CREATE TABLE IF NOT EXISTS'):
+                    await cur.execute(st.replace('CREATE TABLE IF NOT EXISTS','CREATE TEMPORARY TABLE'))
+        await conn.commit()
+    return pool,api,jobs,job,request
+
+
+@pytest.mark.asyncio
+async def test_real_reencolar_deja_el_job_listo_y_registra_el_evento():
+    pool,api,jobs,job,request=await _fixture_con_eventos()
+    try:
+        await jobs.fail(1,job['claim_token'],'ValueError',quarantine=True)
+        res=await jobs.requeue(1,actor='fernando',reason='revisado: salida mal formada, reintentar')
+        assert res['previous_state']=='QUARANTINED'
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute('SELECT state,attempts,error_code,next_attempt_at,claim_token,lease_until FROM memory_extraction_jobs WHERE conversation_id=1')
+                row=await cur.fetchone()
+                assert row=={'state':'READY','attempts':0,'error_code':None,'next_attempt_at':None,'claim_token':None,'lease_until':None}
+                await cur.execute('SELECT event_kind,actor,reason,details,conversation_id FROM memory_extraction_job_events')
+                ev=await cur.fetchall()
+        assert len(ev)==1 and ev[0]['event_kind']=='REQUEUE' and ev[0]['actor']=='fernando'
+        assert ev[0]['conversation_id']==1 and 'ValueError' in ev[0]['details'] and 'QUARANTINED' in ev[0]['details']
+        assert [c['id'] for c in await jobs.pending(5)]==[1]          # vuelve a la cola
+        assert await jobs.stuck_count()==0
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_real_reencolar_rechaza_lo_que_no_esta_en_cuarentena_y_exige_actor_y_motivo():
+    pool,api,jobs,job,request=await _fixture_con_eventos()
+    try:
+        with pytest.raises(ValueError,match='QUARANTINED'):            # esta RUNNING
+            await jobs.requeue(1,actor='fernando',reason='x')
+        await jobs.fail(1,job['claim_token'],'ValueError',quarantine=True)
+        for actor,reason in (('',"r"),('f','')):
+            with pytest.raises(ValueError): await jobs.requeue(1,actor=actor,reason=reason)
+        with pytest.raises(ValueError,match='no existe'): await jobs.requeue(999,actor='f',reason='r')
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute('SELECT COUNT(*) AS n FROM memory_extraction_job_events')
+                assert (await cur.fetchone())['n']==0                  # nada rechazado deja evento
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+def test_cli_reencolar_y_atascados_estan_documentados_en_el_modulo():
+    from jax.memory import worker
+    assert '--reencolar' in worker.__doc__ and '--atascados' in worker.__doc__
+    args=worker._parse_args(['--reencolar','7','--motivo','revisado','--actor','fernando'])
+    assert (args.reencolar,args.motivo,args.actor)==(7,'revisado','fernando')
+    with pytest.raises(SystemExit): worker._parse_args(['--reencolar','7'])          # sin motivo no hay re-encolado
