@@ -9,12 +9,15 @@ Lectura de la base de producción (solo `SELECT`, `SHOW` y `EXPLAIN`): MariaDB e
 `600` que se borra al salir, nunca como `-p...` en la línea de comandos:
 
 ```bash
-sudo bash -c 'set -euo pipefail; set -a; . /etc/jax/.env; set +a
-T=$(mktemp -d); chmod 700 $T; trap "rm -rf $T" EXIT
-printf "[client]\nhost=127.0.0.1\nport=3308\nuser=%s\npassword=\"%s\"\ndatabase=%s\n" \
-  "$JAX_DB_USER" "$JAX_DB_PASSWORD" "$JAX_DB_NAME" > $T/c.cnf; chmod 600 $T/c.cnf
-mariadb --defaults-extra-file=$T/c.cnf -t < /ruta/a/la-consulta.sql'
+( set -euo pipefail; set -a; . <(sudo -n cat /etc/jax/.env); set +a
+  T=$(mktemp -d); chmod 700 "$T"; trap 'rm -rf "$T"' EXIT
+  printf '[client]\nhost=127.0.0.1\nport=3308\nuser=%s\npassword="%s"\ndatabase=%s\n' \
+    "$JAX_DB_USER" "$JAX_DB_PASSWORD" "$JAX_DB_NAME" > "$T/c.cnf"; chmod 600 "$T/c.cnf"
+  mariadb --defaults-extra-file="$T/c.cnf" -t < /ruta/a/la-consulta.sql )
 ```
+
+(El archivo `/etc/jax/.env` es `root:jaxsvc 640`: se lee con `sudo -n cat`, como exige
+`tests/test_env_se_lee_con_sudo.py`; el subshell evita que las variables queden en tu sesión.)
 
 ## 1. Propiedad de archivos, timers y SHA
 
