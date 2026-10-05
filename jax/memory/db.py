@@ -988,7 +988,7 @@ class MemoryDB:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT id, turn_number, role, content FROM messages "
-                    "WHERE conversation_id = %s ORDER BY turn_number ASC",
+                    "WHERE conversation_id = %s ORDER BY turn_number ASC, id ASC",
                     (conv_id,),
                 )
                 rows = await cur.fetchall()

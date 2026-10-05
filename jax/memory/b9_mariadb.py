@@ -292,7 +292,7 @@ class PersistentMemoryAPI:
                     'max_items':int(__import__('os').getenv('JAX_MEMORY_MAX_ITEMS','100'))}
             if not counts or counts['message_count']>limits['max_messages'] or counts['character_count']>limits['max_chars']:
                 raise ScopeDenied('extraction source exceeds input limits')
-            await cur.execute("SELECT id AS message_id,turn_number,role,content FROM messages WHERE conversation_id=%s ORDER BY turn_number ASC LIMIT %s FOR UPDATE", (conversation_id,limits['max_messages']+1))
+            await cur.execute("SELECT id AS message_id,turn_number,role,content FROM messages WHERE conversation_id=%s ORDER BY turn_number ASC, id ASC LIMIT %s FOR UPDATE", (conversation_id,limits['max_messages']+1))
             messages=list(await cur.fetchall())
             if source_digest(conv,messages)!=job['input_digest']: raise ScopeDenied('extraction source changed')
             from .extraction_jobs import _normalize_source_turns
