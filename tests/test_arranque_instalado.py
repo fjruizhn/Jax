@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 from manifiesto_arranque import (
-    DUENOS, MANIFIESTO, ROOT, leer_manifiesto as _leer_manifiesto, leer_manifiesto_con_dueno,
+    DUENOS, ESPEJOS as _ESPEJOS, MANIFIESTO, REPOS_DUENOS as _REPOS_DUENOS, ROOT, leer_manifiesto as _leer_manifiesto, leer_manifiesto_con_dueno,
 )
 
 SCRIPT = ROOT / "ops" / "verificar-arranque-instalado.sh"
@@ -239,20 +239,6 @@ def test_git_en_srv_jax_prod_necesita_safe_directory():
 # Tres archivos del manifiesto son ESPEJOS de otro repo: nada lo declaraba y alguien podia editar
 # la copia de aqui. Ahora cada fila lleva su dueño y la ruta en el dueño.
 
-_ESPEJOS = {
-    "/etc/systemd/system/jax-las-manos.service.d/esperar-db.conf":
-        ("jax-platform", "ops/mariadb-12.3/systemd/esperar-db.conf"),
-    "/usr/local/sbin/jax-db-esperar":
-        ("jax-platform", "ops/mariadb-12.3/systemd/jax-db-esperar"),
-    "/etc/systemd/system/aviso-fallo@.service":
-        ("claude-skills", "systemd/hall9000/sistema/aviso-fallo@.service"),
-}
-_REPOS_DUENOS = {
-    "jax-platform": ("JAX_PLATFORM_REPO", "/home/fruiz/jax-platform"),
-    "claude-skills": ("CLAUDE_SKILLS_REPO", "/home/fruiz/claude-skills"),
-}
-
-
 def test_cada_fila_declara_su_dueno_y_la_ruta_en_el_dueno():
     for repo_abs, instalada, dueno, ruta_dueno in leer_manifiesto_con_dueno():
         assert dueno in DUENOS, f"{instalada}: dueño {dueno!r} no es uno de {DUENOS}"
@@ -270,7 +256,7 @@ def test_los_espejos_declaran_su_repo_dueno_y_todo_lo_demas_es_de_jax():
 @pytest.mark.parametrize("instalada", sorted(_ESPEJOS))
 def test_cada_espejo_coincide_con_el_archivo_del_repo_dueno(instalada):
     """El espejo se compara con la fuente cuando ese checkout existe (rutas por env:
-    JAX_PLATFORM_REPO y CLAUDE_SKILLS_REPO; por defecto las de hall9000). Si no existe el
+    las variables de REPOS_DUENOS en manifiesto_arranque.py; por defecto las de hall9000). Si no existe el
     checkout o el archivo en su rama actual, skip con el motivo -- no se inventa el resultado."""
     dueno, ruta = _ESPEJOS[instalada]
     variable, defecto = _REPOS_DUENOS[dueno]

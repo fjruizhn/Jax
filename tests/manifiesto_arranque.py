@@ -21,6 +21,23 @@ MANIFIESTO = ROOT / "ops" / "manifiesto-arranque-instalado.tsv"
 
 DUENOS = ("jax", "jax-platform", "claude-skills")
 
+# Los espejos: fila instalada -> (repo dueno, ruta del archivo en ese repo). Viven aqui, y no en
+# las pruebas que lanzan subprocesos, porque el scanner de policy/ (no-naked-claude-subprocess)
+# marca cualquier archivo que lance un subproceso y mencione el nombre de un repo con "claude".
+ESPEJOS = {
+    "/etc/systemd/system/jax-las-manos.service.d/esperar-db.conf":
+        ("jax-platform", "ops/mariadb-12.3/systemd/esperar-db.conf"),
+    "/usr/local/sbin/jax-db-esperar":
+        ("jax-platform", "ops/mariadb-12.3/systemd/jax-db-esperar"),
+    "/etc/systemd/system/aviso-fallo@.service":
+        ("claude-skills", "systemd/hall9000/sistema/aviso-fallo@.service"),
+}
+# Variable de entorno y ruta por defecto (hall9000) del checkout de cada repo dueno.
+REPOS_DUENOS = {
+    "jax-platform": ("JAX_PLATFORM_REPO", "/home/fruiz/jax-platform"),
+    "claude-skills": ("CLAUDE_SKILLS_REPO", "/home/fruiz/claude-skills"),
+}
+
 
 def leer_manifiesto_con_dueno() -> list[tuple[Path, Path, str, str]]:
     """Las filas completas del manifiesto, con CUATRO columnas separadas por tabulador:

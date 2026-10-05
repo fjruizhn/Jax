@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from manifiesto_arranque import ROOT, leer_manifiesto
+from manifiesto_arranque import ESPEJOS, ROOT, leer_manifiesto
 
 SCRIPT = ROOT / "ops" / "instalar-dropins-de-servicio.sh"
 
@@ -183,13 +183,14 @@ def test_destdir_que_resuelve_a_raiz_se_trata_como_instalacion_real(destdir_lite
 
 # --- Dueño de la fila (M1 de la re-auditoria de #356) ---------------------------------------
 
-@pytest.mark.parametrize("patron, repo_dueno, ruta_dueno", [
+@pytest.mark.parametrize("patron, instalada_ajena", [
     # La unidad completa: incluye esperar-db.conf, que es de jax-platform.
-    ("jax-las-manos.service.d", "jax-platform", "ops/mariadb-12.3/systemd/esperar-db.conf"),
-    ("/usr/local/sbin/jax-db-esperar", "jax-platform", "ops/mariadb-12.3/systemd/jax-db-esperar"),
-    ("/etc/systemd/system/aviso-fallo@.service", "claude-skills", "systemd/hall9000/sistema/aviso-fallo@.service"),
+    ("jax-las-manos.service.d", "/etc/systemd/system/jax-las-manos.service.d/esperar-db.conf"),
+    ("/usr/local/sbin/jax-db-esperar", "/usr/local/sbin/jax-db-esperar"),
+    ("/etc/systemd/system/aviso-fallo@.service", "/etc/systemd/system/aviso-fallo@.service"),
 ])
-def test_rechaza_instalar_una_fila_de_otro_dueno(tmp_path, patron, repo_dueno, ruta_dueno):
+def test_rechaza_instalar_una_fila_de_otro_dueno(tmp_path, patron, instalada_ajena):
+    repo_dueno, ruta_dueno = ESPEJOS[instalada_ajena]
     resultado = _correr(patron, tmp_path)
     assert resultado.returncode == 3, (resultado.returncode, resultado.stderr)
     assert repo_dueno in resultado.stderr and ruta_dueno in resultado.stderr, resultado.stderr
