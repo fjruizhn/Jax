@@ -19,7 +19,7 @@ No hace falta tocar `.github/workflows/`. Un piso nunca tiene valor por defecto:
 
 Cada paso del workflow llama `python3 .github/ci/piso.py verificar <clave> <archivo-de-salida>`.
 La clave es `<job>/<archivo temporal que lee>`. El único mínimo numérico que no es un
-`patron` es `memory-b9-regression/casos`, en la sección `minimos`. (102 -> 152 el 2026-10-05: el 102 era la medicion del 2026-09-26 y habia quedado atras; local contra MariaDB desechable, misma lista de 10 archivos, 121 antes de la rama y 152 despues, 0 skipped. Es un MINIMO: el runner puede medir mas, nunca debe dar menos.)
+`patron` es `memory-b9-regression/casos`, en la sección `minimos`. (152 -> 167 el 2026-10-05, Jax#354: +15 pruebas de los 8 MINOR, local con MariaDB desechable, 0 skipped. Antes, 102 -> 152 el 2026-10-05: el 102 era la medicion del 2026-09-26 y habia quedado atras; local contra MariaDB desechable, misma lista de 10 archivos, 121 antes de la rama y 152 despues, 0 skipped. Es un MINIMO: el runner puede medir mas, nunca debe dar menos.)
 
 Como `ci/pisos.json` es un dato y no lógica del workflow, un PR que solo sube un piso
 no toca `.github/workflows/`. Para que eso no sea una forma de rebajar un piso sin pasar por
@@ -858,6 +858,8 @@ F2-B -> F2-C -> F2-D receipt/render/revalidation path.
 ## `tests-puros/out`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
+
+3476 -> 3477 el 2026-10-05 (auditoria Jax#354, misma rama, delta de archivo local): `tests/test_hnsw_recall_tripwire.py` 6 -> 7 (+1: con faltantes y recall vencido a la vez gana el fallo general; el recall solo sale con el codigo propio 3).
 
 3473 -> 3476 el 2026-10-05 (misma rama, medido LOCAL como delta de archivo): `tests/test_hnsw_recall_tripwire.py` 3 -> 6. El tripwire de recall deja de ser codigo muerto: lo ejecuta vector-health (`jax/memory/recall_tripwire.py`) y falla la unidad; +3 pruebas de ese cableado. 45 skipped no cambia.
 
