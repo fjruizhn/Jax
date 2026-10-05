@@ -133,6 +133,43 @@ def test_jacobs_stable_status_gets_observation_time_not_transition_time(monkeypa
     assert evidence.observation.observed_at > datetime.fromtimestamp(old_transition, timezone.utc)
 
 
+def test_jacobs_status_snapshot_batch_uses_one_primary_key_query_and_is_immutable(monkeypatch):
+    from jacobs import store
+    executed = []
+
+    class Cursor:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, sql, parameters):
+            executed.append((sql, parameters))
+        async def fetchall(self):
+            return [
+                {"pipeline_id": "pipeline-2", "tenant_id": "tenant-a", "user_id": "user-a", "status": "completed"},
+                {"pipeline_id": "pipeline-1", "tenant_id": "tenant-a", "user_id": "user-a", "status": "running"},
+            ]
+
+    class Connection:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        def cursor(self, *_args):
+            return Cursor()
+
+    monkeypatch.setattr(store, "conexion_del_pool", lambda: Connection())
+    snapshots = asyncio.run(store.pipeline_status_snapshots(("pipeline-1", "pipeline-2")))
+    assert len(executed) == 1
+    sql, parameters = executed[0]
+    assert "SELECT pipeline_id, user_id, tenant_id, status" in sql
+    assert "WHERE pipeline_id IN (%s,%s)" in sql
+    assert parameters == ("pipeline-1", "pipeline-2")
+    assert snapshots["pipeline-1"].status.value == "running"
+    with pytest.raises(TypeError):
+        snapshots["pipeline-3"] = snapshots["pipeline-1"]
+
+
 def test_job_and_jacobs_configuration_identity_is_nonsecret_and_changes_digest(tmp_path):
     from policy.governance.runtime_status import runtime_status_source_configuration_digest
     job_a = JobStore(str(tmp_path / "a.jsonl")).source_configuration()
