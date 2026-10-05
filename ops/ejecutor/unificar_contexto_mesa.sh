@@ -36,7 +36,7 @@ MARCA="$(date +%Y%m%d-%H%M%S)"
 TMP="$(mktemp -d)"
 CONTENEDOR=""
 limpiar() {
-  if [ -n "$CONTENEDOR" ]; then sudo -n docker rm -f "$CONTENEDOR" >/dev/null 2>&1 || true; fi
+  if [ -n "$CONTENEDOR" ]; then sudo -n docker rm -fv "$CONTENEDOR" >/dev/null 2>&1 || true; fi
   rm -rf "$TMP"
 }
 trap limpiar EXIT
@@ -90,7 +90,7 @@ probar_restauracion() {
   done
   sudo -n docker exec -e MYSQL_PWD="$clave" "$CONTENEDOR" mariadb -uroot -N -B prueba \
     -e "CHECKSUM TABLE facet_binding, model EXTENDED" | sed -E 's/^[^.]+\.//' > "$DIR/checksum_restaurado.tsv"
-  sudo -n docker rm -f "$CONTENEDOR" >/dev/null
+  sudo -n docker rm -fv "$CONTENEDOR" >/dev/null
   CONTENEDOR=""
   if ! cmp -s "$DIR/checksum_antes.tsv" "$DIR/checksum_restaurado.tsv"; then
     diff "$DIR/checksum_antes.tsv" "$DIR/checksum_restaurado.tsv" >&2 || true

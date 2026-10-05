@@ -70,7 +70,7 @@ def servidor_db():
         _esperar("127.0.0.1", int(puerto), "root", clave)
         yield {"host": "127.0.0.1", "puerto": int(puerto), "usuario": "root", "clave": clave}
     finally:
-        subprocess.run([*docker, "rm", "-f", nombre], capture_output=True)
+        subprocess.run([*docker, "rm", "-fv", nombre], capture_output=True)
 
 
 class BaseDePrueba:
