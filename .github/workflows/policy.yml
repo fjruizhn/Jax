@@ -461,7 +461,7 @@ jobs:
   # (la base medida de 671 + 15 de memoria.buscar + 2 de configuración/control; sin skips).
   # La CI usa Python 3.12 y confirma el mismo piso.
   # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 72 +
-  # control 171 + lanzador 77 + acl 43 + memoria 15; desde aviso, los pasos 0.3b y 0.3c y su auditoria). Las pruebas con bwrap y uids
+  # control 170 + lanzador 77 + acl 43 + memoria 15; desde aviso, los pasos 0.3b y 0.3c y su auditoria). Las pruebas con bwrap y uids
   # reales estan en el job `faro-jaula`; las de la base real, en `faro-bitacora-db`.
   faro-fase0:
     runs-on: ubuntu-latest
