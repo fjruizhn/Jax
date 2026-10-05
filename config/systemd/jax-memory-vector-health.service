@@ -1,6 +1,7 @@
 [Unit]
 Description=JAX B9 vector health check
 After=network-online.target mariadb.service
+OnFailure=aviso-fallo@%n.service
 
 [Service]
 Type=oneshot
@@ -8,6 +9,7 @@ User=jaxsvc
 Group=jaxsvc
 WorkingDirectory=/srv/jax-prod/jax
 EnvironmentFile=/etc/jax/.env
+ExecStartPre=/usr/local/sbin/jax-checkout-de-produccion-sano.sh /srv/jax-prod/jax
 ExecStart=/srv/jax-prod/jax/.venv/bin/python -m jax.memory.embedding_worker --health
 StandardOutput=journal
 StandardError=journal
