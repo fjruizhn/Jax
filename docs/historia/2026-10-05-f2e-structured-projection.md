@@ -32,3 +32,37 @@ El módulo `coverage` no estaba instalado localmente; no se produjo porcentaje d
 ## Pendiente de continuación
 
 Publicar la rama, esperar CI completa de JAX, congelar el SHA resultante, actualizar el pin de par exacto de Platform y ejecutar sus pisos medidos. Antes de integrar, pedir revisión independiente de escalón 3 sobre el SHA exacto. Comando inicial: `git diff --check && git log --format='%H%n%B' origin/master..HEAD`.
+
+## Remediación Tier 3 MAJOR-1/2
+
+**Fuente:** commits `3f2393fae56564d02123892c68cb9eda13d233ca`,
+`dc7e857f1e4b920d97befd9d69838d168311aae0`,
+`92a9d706c39c28f40d5975a8d39b7d1a5db2e70e` y
+`e60e339`.
+
+MAJOR-1 se cerró con el contrato cerrado de `jax.pipeline-list.json.1`:
+las listas activas conservan sus dos claves externas (`pipelines`, `has_more`)
+y las descartadas sus tres claves (`pipelines`, `has_more`,
+`cursor_siguiente`). Las filas activas contienen exactamente `pipeline_id`,
+`name`, `created_at`, `updated_at`, `duracion_s`, `costo_usd`, `causa`; las
+descartadas agregan `descartado_at`. Solo F2-C añade `status`. Se rechazan
+extras, tipos incorrectos, booleanos donde se espera número, números no
+finitos, duplicados, más de 50 filas y cursores descartados inconsistentes.
+`causa` admite solamente la forma real de Platform: `tipo` y, de forma
+opcional, `paso` entero y `detalle` texto.
+
+MAJOR-2 se cerró con `pipeline_status_snapshots(ids)`: una sola consulta de
+cuatro columnas (`pipeline_id`, `user_id`, `tenant_id`, `status`) por PRIMARY
+KEY para 1--50 IDs distintos, y snapshots inmutables marcados después de la
+lectura. `JacobsPipelineStatusResolver.evidence_many(arguments_seq, scope)`
+preserva orden y cardinalidad, emite evidencia individual `UNAVAILABLE` para
+ausentes/fallos de lectura, `WRONG_SCOPE` para dueño distinto y conserva los
+receipts F2-B individuales. `evidence()` delega a ese camino.
+
+Evidencia local: suites focalizadas F2-E, **58 passed**; piso exacto de
+proyección, **14 passed**; migración de pisos, **227 passed**. El piso F2-E
+subió de 8 a 14. No había `JAX_DB_*` ni contenedor local de una base aislada,
+por lo que no se ejecutó `EXPLAIN`; no se leyó ni modificó configuración,
+usuario o base de producción. El test de forma de consulta verifica el único
+`SELECT ... WHERE pipeline_id IN (...)`; queda pendiente medir el plan sobre
+una base aislada proporcionada antes de consideración de producción.
