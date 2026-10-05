@@ -1,0 +1,267 @@
+"""`docker rm -f` sin `-v` deja huérfano el volumen anónimo del contenedor.
+
+La imagen de MariaDB declara `VOLUME /var/lib/mysql`. Un contenedor arrancado con
+`--rm` y borrado con `docker rm -f` (sin `-v`) deja su datadir como volumen anónimo:
+el 2026-10-04 había 343 así en hall9000 (56 GB, 22 con copias de `jax_memory`).
+Medido ese día: `rm -f` → +1 volumen huérfano; `rm -fv` → 0. `-v` solo borra los
+anónimos: un volumen con nombre sobrevive (probado en la auditoría del PR #353).
+
+Cómo barre (segunda ronda de auditoría del PR #353: los regex por línea eran una
+persecución sin fin):
+- Python, con `ast`: listas y tuplas con el elemento "rm" (banderas en cualquier
+  posición después), concatenaciones `docker + ["rm", ...]`, f-strings y cadenas que
+  son un comando de shell. Comentarios y docstrings no cuentan.
+- Shell, con un tokenizador: líneas partidas con `\\` unidas, comentarios fuera,
+  `docker`/`docker container`/opciones globales/variables con «docker» en el nombre,
+  y TODAS las banderas hasta el fin del comando (docker las acepta después del nombre).
+- `docker exec|run ... rm -f x` es un `rm` DENTRO del contenedor: no cuenta.
+
+Límite declarado: una variable que no diga «docker» en su nombre (`$D rm -f`) no se
+reconoce como docker. Se prefiere eso a marcar cada `$SUDO rm -f archivo`.
+"""
+import ast
+import re
+import subprocess
+from pathlib import Path
+
+RAIZ = Path(__file__).resolve().parent.parent
+ESTE = "tests/test_docker_rm_sin_fuga_de_volumenes.py"
+
+_ES_DOCKER = re.compile(r"(?:\S*/)?docker|\$\{?\w*docker\w*(?:\[@\])?\}?|\{[^{}]*docker[^{}]*\}|dk", re.I)
+_SEPARADORES = {";", "&&", "||", "|", "(", ")", "`", "$("}
+_FALSO = {"false", "0", "f", "no"}
+
+
+def _fuerza_sin_volumenes(banderas):
+    """True si entre las banderas hay force y no hay volumes (orden libre)."""
+    fuerza = volumenes = False
+    for b in banderas:
+        if b.startswith("--"):
+            nombre, _, valor = b[2:].partition("=")
+            activa = valor.lower() not in _FALSO if valor else True
+            if nombre == "force":
+                fuerza = activa
+            elif nombre == "volumes":
+                volumenes = activa
+        elif b.startswith("-") and len(b) > 1:
+            fuerza |= "f" in b[1:]
+            volumenes |= "v" in b[1:]
+    return fuerza and not volumenes
+
+
+def _tokens_shell(linea):
+    linea = re.sub(r"(^|\s)#.*$", "", linea)          # comentario
+    for sep in ("&&", "||", "$(", ";", "|", "(", ")", "`"):
+        linea = linea.replace(sep, f" {sep} ")
+    return [t.strip("\"'") for t in linea.split()]
+
+
+def culpables_shell(texto):
+    hallados = []
+    unido = re.sub(r"\\\r?\n\s*", " ", texto)
+    for linea in unido.splitlines():
+        toks = _tokens_shell(linea)
+        for i, t in enumerate(toks):
+            if t != "rm":
+                continue
+            # Hacia atrás, dentro del mismo comando: ¿lo llama docker?
+            es_docker = dentro = False
+            for j in range(i - 1, max(-1, i - 8), -1):
+                previo = toks[j]
+                if previo in _SEPARADORES:
+                    break
+                if previo in ("exec", "run"):
+                    dentro = True
+                if _ES_DOCKER.fullmatch(previo):
+                    es_docker = True
+                    break
+            if not es_docker or dentro:
+                continue
+            banderas = []
+            for siguiente in toks[i + 1:]:
+                if siguiente in _SEPARADORES:
+                    break
+                if siguiente.startswith("-"):
+                    banderas.append(siguiente)
+            if _fuerza_sin_volumenes(banderas):
+                hallados.append(" ".join(toks[max(0, i - 3):i + 1 + len(banderas) + 1]))
+    return hallados
+
+
+def _texto_de(nodo, fuente):
+    return ast.get_source_segment(fuente, nodo) or ""
+
+
+def culpables_python(fuente):
+    try:
+        arbol = ast.parse(fuente)
+    except SyntaxError:
+        return culpables_shell(fuente)  # no es Python válido: se barre como texto
+    padres = {hijo: nodo for nodo in ast.walk(arbol) for hijo in ast.iter_child_nodes(nodo)}
+    docstrings = set()
+    for nodo in ast.walk(arbol):
+        if isinstance(nodo, ast.Expr) and isinstance(nodo.value, ast.Constant) and isinstance(nodo.value.value, str):
+            docstrings.add(nodo.value)
+    hallados = []
+    for nodo in ast.walk(arbol):
+        if isinstance(nodo, (ast.List, ast.Tuple)):
+            elts = nodo.elts
+            indices = [k for k, e in enumerate(elts) if isinstance(e, ast.Constant) and e.value == "rm"]
+            if not indices:
+                continue
+            i = indices[0]
+            antes = elts[:i]
+            if any(isinstance(e, ast.Constant) and e.value in ("exec", "run") for e in antes):
+                continue
+            es_docker = any(_ES_DOCKER.search(_texto_de(e, fuente)) for e in antes)
+            padre = padres.get(nodo)
+            if not es_docker and i == 0 and isinstance(padre, ast.BinOp) and isinstance(padre.op, ast.Add) \
+                    and padre.right is nodo:
+                izquierda = _texto_de(padre.left, fuente)
+                # `algo + ["rm", ...]`: un prefijo de comando. Docker salvo que sea claramente sudo.
+                es_docker = bool(_ES_DOCKER.search(izquierda)) or not re.search(r"sudo", izquierda, re.I)
+            if not es_docker:
+                continue
+            banderas = [e.value for e in elts[i + 1:]
+                        if isinstance(e, ast.Constant) and isinstance(e.value, str) and e.value.startswith("-")]
+            if _fuerza_sin_volumenes(banderas):
+                hallados.append(" ".join(_texto_de(nodo, fuente).split()))
+        elif isinstance(nodo, ast.JoinedStr):
+            partes = [p.value if isinstance(p, ast.Constant) else "{" + _texto_de(p.value, fuente) + "}"
+                      for p in nodo.values]
+            hallados += culpables_shell("".join(str(x) for x in partes))
+        elif isinstance(nodo, ast.Constant) and isinstance(nodo.value, str) and nodo not in docstrings \
+                and not isinstance(padres.get(nodo), ast.JoinedStr) and " rm" in nodo.value:
+            hallados += culpables_shell(nodo.value)
+    return hallados
+
+
+def culpables_en_texto(texto, es_python=None):
+    if es_python is None:
+        es_python = not texto.lstrip().startswith("#!") or "python" in texto.split("\n", 1)[0]
+        if es_python:
+            try:
+                ast.parse(texto)
+            except SyntaxError:
+                es_python = False
+    return culpables_python(texto) if es_python else culpables_shell(texto)
+
+
+def _archivos():
+    salida = subprocess.run(["git", "ls-files", "-z"], cwd=RAIZ,
+                            capture_output=True, check=True).stdout
+    for nombre in salida.decode("utf-8").split("\0"):
+        if not nombre or nombre == ESTE:
+            continue
+        ruta = RAIZ / nombre
+        if not ruta.is_file() or ruta.is_symlink():
+            continue
+        if ruta.suffix in (".sh", ".bash"):
+            yield ruta, False
+            continue
+        if ruta.suffix == ".py":
+            yield ruta, True
+            continue
+        try:
+            with open(ruta, "rb") as f:
+                primera = f.readline(200)
+        except OSError:
+            continue
+        if primera.startswith(b"#!"):
+            yield ruta, b"python" in primera
+
+
+def test_ningun_docker_rm_forzado_sin_borrar_volumenes():
+    culpables, ilegibles = [], []
+    for ruta, es_python in _archivos():
+        try:
+            texto = ruta.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            ilegibles.append(str(ruta.relative_to(RAIZ)))
+            continue
+        for hallado in culpables_en_texto(texto, es_python):
+            culpables.append(f"{ruta.relative_to(RAIZ)}: {hallado}")
+    assert not ilegibles, "guiones versionados que no son UTF-8 (no se pueden barrer):\n" + "\n".join(ilegibles)
+    assert not culpables, "docker rm forzado sin -v (deja el volumen anónimo):\n" + "\n".join(culpables)
+
+
+FUGAN_SHELL = [
+    'sudo docker rm -f "$X"',
+    "docker rm --force x",
+    "docker rm --force=true c",
+    "docker container rm -f x",
+    "$DOCKER rm -f x",
+    '"${DOCKER[@]}" rm -f x',
+    "${DOCKER_CMD} rm -f x",
+    "docker -H unix:///x rm -f c",
+    "docker --context=x rm -f c",
+    "sudo -E docker rm -f c",
+    "xargs docker rm -f",
+    "sudo -n docker rm \\\n   -f \"$C\"",
+    "sudo -n docker rm \\\r\n   -f \"$C\"",
+    'docker rm "$C" -f',
+    "docker rm x --force",
+    '"docker" rm -f c',
+    "docker rm -f c --volumes=0",
+    "docker rm -f c --volumes=f",
+]
+FUGAN_PYTHON = [
+    '[*docker, "rm", "-f", nombre]',
+    '[*dk, "rm", "-f", n]',
+    '[*docker, "rm", n, "-f"]',
+    '[*docker, "rm", "--force", n]',
+    'DOCKER + ["rm", "-f", n]',
+    'docker + ["rm", "-f", nombre]',
+    'docker_cmd + ["rm", "-f", n]',
+    'DOCKER_CMD + ["rm", "-f", n]',
+    'self.docker + ["rm", "-f", n]',
+    'base + ["rm", "-f", n]',
+    '[*docker,\n    "rm",\n    "-f",\n    nombre]',
+    '[*docker, "rm", "-f", nombres[0]]',
+    '[*docker, "rm", "-f", c["nombre"]]',
+    'subprocess.run(("docker", "rm", "-f", n))',
+    'subprocess.run(f"{docker} rm -f {n}", shell=True)',
+    'subprocess.run("docker rm -f x", shell=True)',
+]
+NO_FUGAN_SHELL = [
+    'sudo docker rm -fv "$X"',
+    'sudo docker rm -vf "$X"',
+    "docker rm -f -v x",
+    "docker rm -v -f x",
+    "docker rm -f --volumes x",
+    "docker rm x",
+    "docker rm --force=false x",
+    "docker rm --force=0 x",
+    'rm -f "$TMP/archivo"',
+    '$SUDO rm -f "$TMP/archivo"',
+    "docker stop x",
+    "docker exec c rm -f /tmp/x",
+    "# nunca uses docker rm -f",
+    "docker stop x; rm -f /tmp/y",
+]
+NO_FUGAN_PYTHON = [
+    '[*docker, "rm", "-fv", nombre]',
+    '[*docker, "rm", "-f", "-v", n]',
+    '["sudo", "-n", "rm", "-f", str(ruta)]',
+    'sudo + ["rm", "-f", p]',
+    '[*docker, "exec", c, "rm", "-f", "/tmp/x"]',
+    '# nunca uses docker rm -f\nx = 1',
+    'def f():\n    """No uses docker rm -f."""\n    return 1',
+    'DOCKER = 1\nsubprocess.run(["rm", "-f", p])',
+]
+
+
+def test_detecta_las_formas_que_fugan():
+    for caso in FUGAN_SHELL:
+        assert culpables_en_texto(caso, es_python=False), f"no detectó (shell): {caso!r}"
+    for caso in FUGAN_PYTHON:
+        assert culpables_en_texto(caso, es_python=True), f"no detectó (python): {caso!r}"
+
+
+def test_deja_pasar_lo_que_no_fuga():
+    for caso in NO_FUGAN_SHELL:
+        assert not culpables_en_texto(caso, es_python=False), \
+            f"falso positivo (shell): {caso!r} -> {culpables_en_texto(caso, es_python=False)}"
+    for caso in NO_FUGAN_PYTHON:
+        assert not culpables_en_texto(caso, es_python=True), \
+            f"falso positivo (python): {caso!r} -> {culpables_en_texto(caso, es_python=True)}"
