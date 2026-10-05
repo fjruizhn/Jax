@@ -494,8 +494,8 @@ def _opciones_servicio(texto: str, clave: str) -> list[str]:
         linea = linea.strip()
         if linea.startswith("[") and linea.endswith("]"):
             actual = linea[1:-1]
-        elif actual == "Service" and linea.startswith(f"{clave}="):
-            valores.append(linea.split("=", 1)[1])
+        elif actual == "Service" and linea.partition("=")[0].strip() == clave and "=" in linea:
+            valores.append(linea.partition("=")[2].strip())
     return valores
 
 
@@ -513,6 +513,8 @@ def test_el_detector_de_codigos_silenciados_detecta_de_verdad():
     # un control que no falla cuando debe no valida nada
     assert _opciones_que_callan_codigos("[Service]\nSuccessExitStatus=2 3\n") == ["SuccessExitStatus"]
     assert _opciones_que_callan_codigos("[Service]\nRestartPreventExitStatus=3\n") == ["RestartPreventExitStatus"]
+    assert _opciones_que_callan_codigos("[Service]\nSuccessExitStatus = 2 3\n") == ["SuccessExitStatus"]   # systemd admite espacios
+    assert _opciones_que_callan_codigos("[Service]\n  RestartPreventExitStatus\t=\t3\n") == ["RestartPreventExitStatus"]
     assert _opciones_que_callan_codigos("[Unit]\nSuccessExitStatus=2\n[Service]\nType=oneshot\n") == []
 
 
@@ -597,7 +599,7 @@ async def test_real_011_sobre_la_ddl_de_produccion_con_vector_key_y_fk_cascade()
     async def escenario(c1):
         async with c1.cursor() as cur:
             await cur.execute("SHOW CREATE TABLE messages"); ddl = (await cur.fetchone())["Create Table"]
-            assert "VECTOR KEY" in ddl.upper() or "VECTOR" in ddl.upper() and "ON DELETE CASCADE" in ddl     # la tabla ES la real
+            assert "VECTOR KEY" in ddl.upper() and "ON DELETE CASCADE" in ddl.upper()     # la tabla ES la real
             await cur.execute("INSERT INTO conversations (conversation_uuid) VALUES ('u1')")
             await cur.execute("INSERT INTO messages (conversation_id,turn_number,role,content) VALUES (1,1,'user','x'),(1,1,'user','y')")
             for st in _sentencias("011_messages_conversation_turn_index.sql", timeout=10):
@@ -714,3 +716,13 @@ async def test_real_la_marcha_atras_del_readme_restaura_el_estado_de_produccion_
             await cur.execute("SHOW INDEX FROM conversations"); c = {r["Key_name"] for r in await cur.fetchall()}
         assert "idx_conversation" in m and "idx_messages_conversation_turn" not in m and "idx_conversations_open" not in c
     await _con_tablas_reales(escenario)
+
+
+def test_el_esquema_versionado_ordena_los_indices_como_los_deja_show_create_tras_011_a_013():
+    """check_memory_schema_drift.py compara texto: tras 011-013 los indices agregados van al final de los KEY
+    (despues de idx_conv_tenant / idx_msg_scope), no donde se declararon a mano."""
+    texto = (_RAIZ / "jax_memory_schema.sql").read_text(encoding="utf-8")
+    conv = _re.search(r"CREATE TABLE `conversations` \(.*?\) ENGINE", texto, _re.S).group(0)
+    msgs = _re.search(r"CREATE TABLE `messages` \(.*?\) ENGINE", texto, _re.S).group(0)
+    assert conv.index("`idx_conv_tenant`") < conv.index("`idx_conversations_open`")
+    assert msgs.index("`idx_msg_scope`") < msgs.index("`idx_messages_conversation_turn`") < msgs.index("VECTOR KEY")

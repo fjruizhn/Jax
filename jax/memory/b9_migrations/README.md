@@ -52,7 +52,7 @@ fallan en estas tablas (la `VECTOR KEY` de `messages` y la FK `ON DELETE CASCADE
 copia la tabla: durante ~1-3 s con el volumen actual se **bloquea escrituras** (las lecturas siguen). Cada
 archivo empieza con `SET SESSION lock_wait_timeout=10;` para no esperar indefinidamente un bloqueo de
 metadatos; si se agota (error 1205) el ALTER no cambio nada: **reintentar mas tarde, sin subir el limite**.
-Aplicar en ventana tranquila. Probadas contra tablas con la DDL de produccion, incluido el camino del 1205.
+Aplicar en ventana tranquila. Probadas contra tablas creadas con la DDL del esquema versionado (`jax_memory_schema.sql`); verificado ademas por la auditoria con la DDL real de produccion, incluidas las `fk_*_project`. Incluye el camino del 1205.
 
 ## Marcha atrás de 007–013 (2026-10-05)
 
