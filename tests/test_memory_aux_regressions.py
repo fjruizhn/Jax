@@ -275,6 +275,7 @@ async def _pool_de_embeddings():
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute("DROP TEMPORARY TABLE embedding_generations")
+            await cur.execute("DROP TEMPORARY TABLE embedding_generation_attempts")
             await cur.execute("CREATE TEMPORARY TABLE embedding_generations (generation_id CHAR(36) PRIMARY KEY, revision_id CHAR(36), embedding_space_id CHAR(71), generated_at DATETIME(6), embedding_payload LONGBLOB, KEY idx_embedding_generation_revision (revision_id, embedding_space_id))")
             await cur.execute("CREATE TEMPORARY TABLE embedding_spaces (embedding_space_id CHAR(71) PRIMARY KEY, schema_version VARCHAR(64), provider_runtime_class VARCHAR(64), model_identifier VARCHAR(255), model_version_or_digest VARCHAR(255) NULL, dimension INT, normalization VARCHAR(64), distance_semantics VARCHAR(64), created_at DATETIME(6))")
             for nombre in ("008_embedding_generation_unique.sql", "009_embedding_generation_attempts.sql"):
@@ -370,5 +371,27 @@ async def test_real_migraciones_008_y_009_son_idempotentes_y_la_unica_rechaza_du
                 with pytest.raises(aiomysql.IntegrityError):
                     await cur.execute("INSERT INTO embedding_generations (generation_id,revision_id,embedding_space_id,generated_at) VALUES ('g2','r1','s1',NOW(6))")
                 await cur.execute("INSERT INTO embedding_generations (generation_id,revision_id,embedding_space_id,generated_at) VALUES ('g3','r1','s2',NOW(6))")   # otro espacio: permitido
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_real_migracion_010_quita_el_indice_redundante_y_las_consultas_siguen_usando_la_unica():
+    """La UNIQUE 008 cubre (revision_id, embedding_space_id): idx_embedding_generation_revision sobra."""
+    from pathlib import Path
+    pool = await _pool_de_embeddings()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SHOW INDEX FROM embedding_generations")
+                assert "idx_embedding_generation_revision" in {r["Key_name"] for r in await cur.fetchall()}
+                sql = "\n".join(l for l in (Path(__file__).resolve().parents[1] / "jax/memory/b9_migrations/010_embedding_generation_drop_redundant_index.sql").read_text().splitlines() if not l.lstrip().startswith("--"))
+                for _ in range(2):                                    # idempotente
+                    await cur.execute(sql.strip().rstrip(";"))
+                await cur.execute("SHOW INDEX FROM embedding_generations")
+                assert "idx_embedding_generation_revision" not in {r["Key_name"] for r in await cur.fetchall()}
+                await cur.execute("EXPLAIN SELECT generation_id FROM embedding_generations WHERE revision_id=%s AND embedding_space_id=%s", ("r1", "s1"))
+                plan = await cur.fetchone()
+                assert plan["key"] == "uq_embedding_generation_revision_space", plan
     finally:
         pool.close(); await pool.wait_closed()
