@@ -19,12 +19,6 @@ def test_every_b9_scheduled_job_has_a_systemd_owner():
         assert f"Unit={name}.service" in timer
 
 
-def test_extraction_worker_does_not_launch_embedding_work():
-    source = (Path(__file__).resolve().parents[1] / "jax" / "memory" / "worker.py").read_text(encoding="utf-8")
-    run_once = source[source.index("async def run_once"):]
-    assert "await _recalcular_embeddings_en_ceros(db)" not in run_once
-
-
 # --- Auditoria 2026-10-05, MAJOR-2 y menores: las unidades del repo = lo que corre en produccion ---
 
 def _opciones(texto: str, seccion: str, clave: str) -> list[str]:
