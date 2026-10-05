@@ -352,3 +352,72 @@ async def test_new_revision_tenant_comes_from_resolved_object_and_sql_binds_ever
     assert 'prior_revision_id,tenant_id)' in statement
     assert args[-1]=='tenant-1'
     assert statement.count('%s')==len(args)
+
+
+# --- Auditoria 2026-10-05, MAJOR-3: el digest de la fuente no puede depender del azar ---
+# `messages` tiene grupos (conversacion, turno) duplicados (152 medidos). Con
+# `ORDER BY turn_number` a secas, dos lecturas del mismo origen podian devolver
+# los empatados en orden distinto -> digest distinto -> cuarentena espuria.
+
+class _CursorQueGrabaSQL:
+    def __init__(self, rows): self.sql=[]; self.rows=rows
+    async def __aenter__(self): return self
+    async def __aexit__(self,*a): return False
+    async def execute(self, sql, args=None): self.sql.append(sql)
+    async def fetchall(self): return self.rows
+
+
+def test_las_dos_lecturas_de_mensajes_del_digest_desempatan_por_id():
+    import asyncio
+    from types import SimpleNamespace
+    from jax.memory.db import MemoryDB
+    cur=_CursorQueGrabaSQL([])
+    conn=SimpleNamespace(cursor=lambda *a,**k: cur)
+    class _Acq:
+        async def __aenter__(self): return conn
+        async def __aexit__(self,*a): return False
+    db=MemoryDB(); db.pool=SimpleNamespace(acquire=lambda: _Acq())
+    asyncio.run(db.get_conversation_messages(1))
+    assert any('ORDER BY turn_number ASC, id ASC' in s for s in cur.sql), cur.sql
+    import inspect
+    from jax.memory import b9_mariadb
+    src=inspect.getsource(b9_mariadb)
+    assert 'ORDER BY turn_number ASC LIMIT' not in src
+    assert 'ORDER BY turn_number ASC, id ASC LIMIT' in src
+
+
+@pytest.mark.asyncio
+async def test_real_mensajes_empatados_en_turno_salen_siempre_por_id():
+    """Con una tabla SIN indice por turno (orden fisico = orden de insercion), dos mensajes
+    del mismo turn_number insertados en orden inverso deben salir por id en ambas lecturas."""
+    from test_b9_persistent_api import _b9_ci_test_pool
+    from jax.memory.db import MemoryDB
+    pool=await _b9_ci_test_pool()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute('CREATE TEMPORARY TABLE messages (id BIGINT,conversation_id BIGINT,turn_number INT,role VARCHAR(32),content TEXT) ENGINE=Aria')
+                await cur.execute("INSERT INTO messages VALUES (2,1,1,'assistant','segundo'),(1,1,1,'user','primero')")
+            await conn.commit()
+        import aiomysql
+        class _Conn:  # MemoryDB lee tuplas; el pool de test es DictCursor
+            def __init__(self,c): self._c=c
+            def cursor(self): return self._c.cursor(aiomysql.Cursor)
+        class _Acq:
+            async def __aenter__(self_): self_.c=await pool.acquire(); return _Conn(self_.c)
+            async def __aexit__(self_,*a): pool.release(self_.c); return False
+        db=MemoryDB(); db.pool=type('P',(),{'acquire':staticmethod(lambda:_Acq())})()
+        got=await db.get_conversation_messages(1)
+        assert [m['message_id'] for m in got]==[1,2]
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                import inspect
+                from jax.memory import b9_mariadb
+                src=inspect.getsource(b9_mariadb)
+                start=src.index('SELECT id AS message_id,turn_number,role,content FROM messages')
+                sql=src[start:src.index('"',start)].replace('conversation_id=%s','conversation_id=1').replace('LIMIT %s','LIMIT 10')
+                await cur.execute(sql)
+                rows=await cur.fetchall()
+        assert [r['message_id'] for r in rows]==[1,2]
+    finally:
+        pool.close(); await pool.wait_closed()
