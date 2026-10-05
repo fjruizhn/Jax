@@ -230,3 +230,17 @@ def test_git_en_srv_jax_prod_necesita_safe_directory():
     assert con_flag_root.returncode == 0, (
         f"sudo -n git -c safe.directory status debería dar 0: {con_flag_root!r}"
     )
+
+
+def test_el_instalador_respalda_la_base_del_proxy_antes_de_pisarla():
+    """m3 de la auditoria de #356: instalar_registro_y_cerco.sh pisaba la base instalada del
+    proxy sin respaldo. Ahora la copia (con marca de tiempo) a /etc/jax-ejecutor-cerco/respaldos/
+    ANTES del `install` y dice como revertir. Prueba estatica: el guion toca el sistema real y
+    no se puede correr aqui."""
+    lineas = (ROOT / "ops" / "ejecutor" / "instalar_registro_y_cerco.sh").read_text(encoding="utf-8").splitlines()
+    codigo = [l for l in lineas if not l.lstrip().startswith("#")]
+    pisa = next(i for i, l in enumerate(codigo) if "jax-ejecutor-proxy.service\" /etc/systemd/system/" in l)
+    respaldo = [i for i, l in enumerate(codigo)
+                if "/etc/jax-ejecutor-cerco/respaldos" in l and "MARCA" in l and "jax-ejecutor-proxy.service" in l]
+    assert respaldo and respaldo[0] < pisa, "no hay respaldo con marca de tiempo antes de pisar la base del proxy"
+    assert any("Para revertir" in l and "respaldos" in l for l in codigo[pisa:]), "no imprime como revertir"
