@@ -1605,6 +1605,7 @@ jobs:
           tests/test_loadtest_apps_protegidas.py
           tests/test_ejecutor_probar_c4_conteo_remoto.py
           tests/test_ejecutor_cuenta_de_servicio.py
+          tests/test_instalar_dropins_de_servicio.py tests/test_activacion_timers_b9.py
           tests/test_env_se_lee_con_sudo.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py
@@ -1794,6 +1795,7 @@ jobs:
             tests/test_loadtest_apps_protegidas.py \
             tests/test_ejecutor_probar_c4_conteo_remoto.py \
             tests/test_ejecutor_cuenta_de_servicio.py \
+            tests/test_instalar_dropins_de_servicio.py tests/test_activacion_timers_b9.py \
             tests/test_env_se_lee_con_sudo.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py \
@@ -2624,6 +2626,14 @@ jobs:
           --confcutdir=tests/policy
           -p no:cacheprovider
           --basetemp="${RUNNER_TEMP}/identity-foundation-shadow-pytest"
+      # Arranque de systemd versionado (ops/versionar-drop-ins-v2, 2026-10-05): en paso propio
+      # porque 6 de sus casos exigen el host de produccion (/srv/jax-prod/jax) y se saltan en el
+      # runner -- el piso del bloque de arriba no admite que suban las saltadas (M <= 45, ver
+      # docs/ci/pisos.md). Medido con /srv/jax-prod tapado (sudo unshare --mount): 33 passed, 6 skipped.
+      - name: Arranque de systemd -- piso exacto de tests CORRIDOS y saltados
+        run: |
+          python -m pytest -q tests/test_arranque_instalado.py tests/test_verificar_arranque_instalado.py 2>&1 | tee /tmp/arranque_instalado
+          python3 .github/ci/piso.py verificar tests-puros/arranque_instalado /tmp/arranque_instalado || exit $?
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
