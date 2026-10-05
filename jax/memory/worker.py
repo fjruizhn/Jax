@@ -471,43 +471,6 @@ async def process_one(db: MemoryDB, extractor: HttpMuscle, conv: dict,
     return True
 
 
-# Filas de `messages` con las que se midio el recall del indice HNSW (jax#128,
-# 2026-09-11): ef_search=400 -> 93,3 % de recall@5. Ese numero es una propiedad
-# de ESE tamano, no del sistema.
-FILAS_AL_MEDIR_RECALL = 1607
-
-
-async def _avisar_si_hay_que_remedir_recall(db: MemoryDB) -> None:
-    """Avisa cuando `messages` crecio un orden de magnitud desde la ultima
-    medicion del recall del indice vectorial.
-
-    El recall de un grafo HNSW se degrada al crecer la tabla, y lo hace EN
-    SILENCIO: ninguna consulta falla, simplemente empiezan a faltar recuerdos.
-    DEUDA.md decia "volver a medirlo cuando crezca un orden de magnitud" -- una
-    condicion que no vigila nadie porque no tiene fecha ni dueno. Esto la pone
-    donde se ve, cada 20 minutos.
-
-    Avisa y no rompe: un tripwire que tumba la corrida del worker que vigila es
-    peor que no tenerlo.
-    """
-    try:
-        filas = await db.contar_filas("messages")
-    except Exception as e:  # fail-soft: es el tripwire que VIGILA el recall del HNSW, no escribe nada; si no puede contar filas solo se pierde el aviso de esta corrida (se reintenta a los 20 min) y tumbar al vigilante seria peor que no avisar
-        logger.error(f"tripwire de recall: no se pudo contar messages: {type(e).__name__}: {e}")
-        return
-    if filas is None or filas < FILAS_AL_MEDIR_RECALL * 10:
-        return
-    logger.warning(
-        f"messages tiene {filas} filas y el recall del indice HNSW se midio con "
-        f"{FILAS_AL_MEDIR_RECALL} (93,3 % con ef_search=400). Un grafo HNSW pierde "
-        f"recall al crecer, y lo hace sin error: hay que VOLVER A MEDIRLO contra la "
-        f"busqueda exacta (IGNORE INDEX idx_{EMBED.column}) y, si bajo, subir "
-        f"JAX_MEMORY_HNSW_EF_SEARCH. Medir por DISTANCIA, no por ids: messages "
-        f"tiene duplicados exactos y los empates hacen fallar una comparacion "
-        f"de conjuntos sin que el indice pierda nada. Ver DEUDA.md."
-    )
-
-
 def _positive_limit(name: str, default: int) -> int:
     value=int(os.environ.get(name,str(default)))
     if value<=0: raise ValueError(f'{name} must be positive')
