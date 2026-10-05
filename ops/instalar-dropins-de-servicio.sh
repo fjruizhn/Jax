@@ -22,6 +22,10 @@
 # sola en /etc a mitad de una instalación interrumpida (M5). Este guion NO
 # hace daemon-reload ni systemctl: sólo copia archivos.
 #
+# DUEÑO (re-auditoría de #356, M1): la tercera columna del manifiesto dice de qué repo es la
+# fuente de cada fila. Este guion solo instala las de `jax`; ante una fila de `jax-platform` o
+# `claude-skills` (espejos) rechaza la corrida con código 3 y dice el repo y la ruta que la instala.
+#
 # LÍMITES CONOCIDOS (auditoría de #356, m3): este guion solo COPIA y SOBRESCRIBE lo que el
 # manifiesto lista; NO retira los .conf que ya estén instalados y el manifiesto no mencione
 # (los sobrantes los marca como diferencia ops/verificar-arranque-instalado.sh, pero hay que
@@ -110,7 +114,30 @@ esac
 
 instalados=0
 
-while IFS=$'\t' read -r repo_rel instalada || [ -n "$repo_rel" ]; do
+# M1 (re-auditoría de #356): este guion SOLO instala filas cuyo dueño es `jax`. Las demás son
+# espejos de otro repo (jax-platform, claude-skills): el verificador las compara, pero las
+# instala el procedimiento de SU dueño, no este. Se examinan TODAS las filas del patrón antes
+# de copiar nada: si una no es de jax, se rechaza la corrida entera (código 3) y no queda
+# nada a medias.
+ajenas=""
+while IFS=$'\t' read -r repo_rel instalada dueno ruta_dueno || [ -n "$repo_rel" ]; do
+  [ -z "$repo_rel" ] && continue
+  case "$MODO" in
+    exacto) [ "$instalada" = "$OBJETIVO" ] || continue ;;
+    prefijo) case "$instalada" in "$OBJETIVO"*) ;; *) continue ;; esac ;;
+  esac
+  if [ "$dueno" != jax ]; then
+    ajenas="${ajenas}  $instalada -> no es de jax: es un espejo de ${dueno:-<sin dueño>}:${ruta_dueno:--}; se instala con el procedimiento de ese repo
+"
+  fi
+done < "$MANIFIESTO"
+if [ -n "$ajenas" ]; then
+  echo "instalar-dropins-de-servicio: '$PATRON_O_RUTA' incluye filas que no son de jax -- rechazado (no se instaló nada):" >&2
+  printf '%s' "$ajenas" >&2
+  exit 3
+fi
+
+while IFS=$'\t' read -r repo_rel instalada dueno ruta_dueno || [ -n "$repo_rel" ]; do
   [ -z "$repo_rel" ] && continue
 
   case "$MODO" in

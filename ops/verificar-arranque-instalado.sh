@@ -238,8 +238,18 @@ verificar_directorio_padre() {
   fi
 }
 
-while IFS=$'\t' read -r repo_rel instalada || [ -n "$repo_rel" ]; do
+# Columnas del manifiesto: repo, instalada, dueño (jax | jax-platform | claude-skills) y la ruta
+# del archivo en el repo dueño ("-" si es de jax). Se COMPARAN TODAS las filas, sean de quien
+# sean: el dueño solo dice dónde se edita la fuente de un espejo (M1, re-auditoría de #356).
+while IFS=$'\t' read -r repo_rel instalada dueno ruta_dueno || [ -n "$repo_rel" ]; do
   [ -z "$repo_rel" ] && continue
+  case "$dueno" in
+    jax | jax-platform | claude-skills) ;;
+    *)
+      echo "MANIFIESTO: la fila de $instalada no declara un dueño válido (jax, jax-platform o claude-skills): '${dueno:-<vacío>}'" >&2
+      fallo=1
+      ;;
+  esac
   repo_abs="$REPO/$repo_rel"
   instalada_real="${RAIZ_DISCO%/}$instalada"
   revisados=$((revisados + 1))
