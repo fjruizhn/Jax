@@ -2629,7 +2629,7 @@ jobs:
       # Arranque de systemd versionado (ops/versionar-drop-ins-v2, 2026-10-05): en paso propio
       # porque 6 de sus casos exigen el host de produccion (/srv/jax-prod/jax) y se saltan en el
       # runner -- el piso del bloque de arriba no admite que suban las saltadas (M <= 45, ver
-      # docs/ci/pisos.md). Medido con /srv/jax-prod tapado (sudo unshare --mount): 33 passed, 6 skipped.
+      # docs/ci/pisos.md). Medido con /srv/jax-prod tapado (sudo unshare --mount): 37 passed, 6 skipped.
       - name: Arranque de systemd -- piso exacto de tests CORRIDOS y saltados
         run: |
           python -m pytest -q tests/test_arranque_instalado.py tests/test_verificar_arranque_instalado.py 2>&1 | tee /tmp/arranque_instalado
