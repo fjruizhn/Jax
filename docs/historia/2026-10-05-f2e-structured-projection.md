@@ -78,3 +78,11 @@ El `EXPLAIN` se ejecutó en modo lectura contra la base aislada existente
 user_id, tenant_id FROM jacobs_pipelines WHERE pipeline_id IN (...)` de 50
 IDs. El plan informó `type=range`, `possible_keys=PRIMARY`, `key=PRIMARY`,
 `rows=50`, `Extra=Using where`, sin `Using filesort` ni `Using temporary`.
+
+La CI publicada posterior midió **214 passed** en el piso exacto
+`governance/f2e-sr3` (run `37289729319`, job `111697043414`), por lo que el
+piso subió de 212 a 214 sin modificar los demás. La lista pública de
+descartados permite `descartado_at` nulo; F2-C conserva la forma cerrada y
+acepta en ese campo únicamente un número finito o `null`, con regresión para
+rechazar booleanos, texto, arreglos y objetos. La consistencia de cursor
+descartado sigue validándose.
