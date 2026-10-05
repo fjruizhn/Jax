@@ -22,6 +22,17 @@ Uso:
     set -a; source <(sudo -n cat /etc/jax/.env); set +a
     PYTHONPATH=. .venv/bin/python -m jax.memory.worker
 
+Cola atascada (auditoria 2026-10-05). La unidad sale con error mientras haya jobs QUARANTINED o
+UNKNOWN: espera a una persona. Una salida mal formada del extractor se reintenta
+(JAX_MEMORY_MAX_ATTEMPTS) y solo al agotar intentos queda en cuarentena. Para resolver:
+    python -m jax.memory.worker --atascados
+    python -m jax.memory.worker --reencolar <conversation_id> --motivo "<por que>" [--actor <quien>]
+`--reencolar` solo acepta un job QUARANTINED, lo deja en READY con intentos 0 y registra el evento
+REQUEUE en memory_extraction_job_events (migracion 007), con el usuario real del proceso y, aparte, el
+--actor declarado. Rechaza INCONSISTENT_*, memory_processed=TRUE y UNKNOWN. Revisar ANTES de re-encolar.
+Codigos de salida: 0 ok; 1 fallo general (incluida configuracion invalida); 2 solo hay jobs
+atascados esperando a una persona (UNKNOWN cuenta unicamente si se quedo: ver stuck_count).
+
 En memoria de Jairo Urbina.
 """
 
@@ -40,7 +51,8 @@ from jax.memory.b9 import (MutationAuthorizationRequest, ObjectKind, ScopeContex
                            ScopeDenied, Visibility)
 from jax.memory.b9_mariadb import MariaDBB9Store, PersistentMemoryAPI
 from jax.memory.mapping_pool import MappingPool
-from jax.memory.extraction_jobs import ExtractionJobs, normalize_extraction, source_digest
+from jax.memory.extraction_jobs import (ERROR_SALIDA_DEL_EXTRACTOR, ExtractionJobs, ExtractorOutputError,
+                                        StuckJobsError, normalize_extraction, source_digest)
 from jax.memory.b9 import AuthorizationDenied, B9Error
 from jax.memory.scope_authority import MariaDBScopeAuthorityResolver
 from jax.memory.db import EMBED, MemoryDB
@@ -462,70 +474,38 @@ async def process_one(db: MemoryDB, extractor: HttpMuscle, conv: dict,
     return True
 
 
-# Tope de filas por tabla y por corrida para el recalculo de embeddings en
-# ceros. Acota el tiempo contra Ollama; lo que no entra, entra en la corrida
-# siguiente (el timer corre cada 20 min).
-BACKFILL_LIMIT = 50
+class ConfigError(ValueError):
+    """Un limite de configuracion invalido: la corrida falla ANTES de llamar al extractor y ningun job
+    se pone en cuarentena por eso (no es culpa de la fuente ni del extractor)."""
 
 
-# Filas de `messages` con las que se midio el recall del indice HNSW (jax#128,
-# 2026-09-11): ef_search=400 -> 93,3 % de recall@5. Ese numero es una propiedad
-# de ESE tamano, no del sistema.
-FILAS_AL_MEDIR_RECALL = 1607
+#: Codigos de salida del worker (aviso-fallo distingue incidentes por ellos).
+EXIT_GENERAL = 1      # fallos generales: extraccion, conexion, configuracion
+EXIT_STUCK_JOBS = 2   # solo hay jobs QUARANTINED/UNKNOWN esperando a una persona
 
 
-async def _avisar_si_hay_que_remedir_recall(db: MemoryDB) -> None:
-    """Avisa cuando `messages` crecio un orden de magnitud desde la ultima
-    medicion del recall del indice vectorial.
-
-    El recall de un grafo HNSW se degrada al crecer la tabla, y lo hace EN
-    SILENCIO: ninguna consulta falla, simplemente empiezan a faltar recuerdos.
-    DEUDA.md decia "volver a medirlo cuando crezca un orden de magnitud" -- una
-    condicion que no vigila nadie porque no tiene fecha ni dueno. Esto la pone
-    donde se ve, cada 20 minutos.
-
-    Avisa y no rompe: un tripwire que tumba la corrida del worker que vigila es
-    peor que no tenerlo.
-    """
-    try:
-        filas = await db.contar_filas("messages")
-    except Exception as e:  # fail-soft: es el tripwire que VIGILA el recall del HNSW, no escribe nada; si no puede contar filas solo se pierde el aviso de esta corrida (se reintenta a los 20 min) y tumbar al vigilante seria peor que no avisar
-        logger.error(f"tripwire de recall: no se pudo contar messages: {type(e).__name__}: {e}")
-        return
-    if filas is None or filas < FILAS_AL_MEDIR_RECALL * 10:
-        return
-    logger.warning(
-        f"messages tiene {filas} filas y el recall del indice HNSW se midio con "
-        f"{FILAS_AL_MEDIR_RECALL} (93,3 % con ef_search=400). Un grafo HNSW pierde "
-        f"recall al crecer, y lo hace sin error: hay que VOLVER A MEDIRLO contra la "
-        f"busqueda exacta (IGNORE INDEX idx_{EMBED.column}) y, si bajo, subir "
-        f"JAX_MEMORY_HNSW_EF_SEARCH. Medir por DISTANCIA, no por ids: messages "
-        f"tiene duplicados exactos y los empates hacen fallar una comparacion "
-        f"de conjuntos sin que el indice pierda nada. Ver DEUDA.md."
-    )
-
-
-async def _recalcular_embeddings_en_ceros(db: MemoryDB) -> None:
-    """Reintenta los embeddings que quedaron en vector cero (ver
-    MemoryDB.backfill_zero_embeddings). Va ANTES de la extraccion porque
-    `run_once` vuelve temprano cuando no hay conversaciones pendientes -- el
-    caso de casi todas las corridas --, y despues de ese return no correria
-    nunca. Cada tabla por separado: el fallo de una no se lleva a la otra."""
-    for tabla in ("messages", "facts"):
-        try:
-            r = await db.backfill_zero_embeddings(tabla, limit=BACKFILL_LIMIT)
-        except Exception as e:  # fail-soft: el recalculo es independiente de la extraccion (otro proveedor); el error queda en el journal y la corrida siguiente, a los 20 min, reintenta la misma fila
-            logger.error(f"recalculo de embeddings en ceros ({tabla}) fallo: "
-                         f"{type(e).__name__}: {e}")
-            continue
-        if r["pendientes"]:
-            logger.info(f"embeddings en ceros ({tabla}): {r}")
+def exit_code_for(error: BaseException) -> int:
+    return EXIT_STUCK_JOBS if isinstance(error, StuckJobsError) else EXIT_GENERAL
 
 
 def _positive_limit(name: str, default: int) -> int:
-    value=int(os.environ.get(name,str(default)))
-    if value<=0: raise ValueError(f'{name} must be positive')
+    raw=os.environ.get(name,str(default))
+    try: value=int(raw)
+    except (TypeError,ValueError): raise ConfigError(f'{name}={raw!r} must be a positive integer') from None
+    if value<=0: raise ConfigError(f'{name} must be positive')
     return value
+
+
+#: Todo limite que lee la corrida. Se validan JUNTOS antes de reclamar o llamar al extractor.
+_LIMITES=(('JAX_MEMORY_RUN_TIMEOUT_SECONDS',840),('JAX_MEMORY_LEASE_SECONDS',900),('JAX_MEMORY_MAX_ATTEMPTS',3),
+          ('JAX_MEMORY_MAX_CALLS',40),('JAX_MEMORY_MAX_MESSAGES',1000),('JAX_MEMORY_MAX_CHARS',96000),
+          ('JAX_MEMORY_MAX_ITEMS',100),('JAX_MEMORY_MAX_ITEM_CHARS',12000),('JAX_MEMORY_CHUNK_CHARS',12000),
+          ('JAX_MEMORY_MAX_CHUNKS',8),('JAX_MEMORY_MAX_RESPONSE_CHARS',240000),
+          ('JAX_MEMORY_OPEN_CONVERSATION_WARN_DAYS',7))
+
+
+def _validar_limites() -> None:
+    for name,default in _LIMITES: _positive_limit(name,default)
 
 
 async def process_claimed(db, extractor, conv, writer, jobs, job, budget, deadline):
@@ -543,6 +523,7 @@ async def process_claimed(db, extractor, conv, writer, jobs, job, budget, deadli
         max_chars=_positive_limit('JAX_MEMORY_MAX_CHARS',96000)
         max_items=_positive_limit('JAX_MEMORY_MAX_ITEMS',100)
         max_item_chars=_positive_limit('JAX_MEMORY_MAX_ITEM_CHARS',12000)
+        max_response_chars=_positive_limit('JAX_MEMORY_MAX_RESPONSE_CHARS',240000)  # antes de pagar al extractor
         await jobs.validate_message_bounds(conv_id,max_messages,max_chars)
         messages=await db.get_conversation_messages(conv_id)
         if messages is None: raise RuntimeError('conversation messages unavailable')
@@ -564,19 +545,34 @@ async def process_claimed(db, extractor, conv, writer, jobs, job, budget, deadli
                 if left<=0: raise RuntimeError('run deadline exceeded')
                 budget['calls']+=1
                 raw=await asyncio.wait_for(extractor.invoke(EXTRACTION_PROMPT.format(conversation=chunk),decorate=False),timeout=min(left,120))
-                if not isinstance(raw,str) or len(raw)>_positive_limit('JAX_MEMORY_MAX_RESPONSE_CHARS',240000):
-                    raise ValueError('extraction response limit exceeded')
-                parsed=_parse_json(raw)
-                # Validate full chunk before accumulating; never skip malformed entries.
-                normalize_extraction(parsed,max_items=max_items,max_text_chars=max_item_chars,allowed_turns=chunk_turns)
-                for category in data: data[category].extend(parsed.get(category,[]))
-                normalize_extraction(data,max_items=max_items,max_text_chars=max_item_chars,allowed_turns=allowed_turns)
-            items=normalize_extraction(data,max_items=max_items,max_text_chars=max_item_chars,allowed_turns=allowed_turns)
+                # Todo ValueError de aqui en adelante es culpa de la SALIDA del extractor, no de la
+                # fuente: RETRY acotado, no cuarentena al primer intento (auditoria 2026-10-05, MAJOR-1).
+                try:
+                    if not isinstance(raw,str) or len(raw)>max_response_chars:
+                        raise ValueError('extraction response limit exceeded')
+                    parsed=_parse_json(raw)
+                    # Validate full chunk before accumulating; never skip malformed entries.
+                    normalize_extraction(parsed,max_items=max_items,max_text_chars=max_item_chars,allowed_turns=chunk_turns)
+                    for category in data: data[category].extend(parsed.get(category,[]))
+                    normalize_extraction(data,max_items=max_items,max_text_chars=max_item_chars,allowed_turns=allowed_turns)
+                except ValueError as bad_output:
+                    raise ExtractorOutputError(str(bad_output)) from bad_output
+            try:
+                items=normalize_extraction(data,max_items=max_items,max_text_chars=max_item_chars,allowed_turns=allowed_turns)
+            except ValueError as bad_output:
+                raise ExtractorOutputError(str(bad_output)) from bad_output
             await jobs.freeze(conv_id,token,digest,items)
         committing=True
         await writer.persist_frozen(conv,job)
         logger.info('conv %s: committed %s extraction items',conv_id,len(items))
         return True
+    except ConfigError:
+        raise  # configuracion invalida: no es de la fuente ni del extractor; no se cuarentena
+    except ExtractorOutputError as error:
+        # RETRY (backoff); fail() lo pasa a QUARANTINED solo al agotar JAX_MEMORY_MAX_ATTEMPTS.
+        await jobs.fail(conv_id,token,ERROR_SALIDA_DEL_EXTRACTOR,quarantine=False)
+        logger.error('conv %s: extractor output invalid (%s); retry', conv_id, error)
+        return False
     except (ScopeDenied,AuthorizationDenied,ValueError) as error:
         await jobs.fail(conv_id,token,type(error).__name__,quarantine=True)
         logger.error('conv %s: quarantined %s',conv_id,type(error).__name__)
@@ -588,6 +584,25 @@ async def process_claimed(db, extractor, conv, writer, jobs, job, budget, deadli
         return False
 
 
+async def _avisar_conversaciones_abiertas(jobs) -> None:
+    """Lista en el log (WARNING) las conversaciones con ended_at NULL de mas de N dias.
+
+    pending() exige ended_at: una conversacion que nadie cierra no entra nunca a la cola y su
+    memoria no se destila (12 desde junio, medido 2026-10-05). Este aviso NO las cierra --cerrarlas
+    es decision de una persona-- ni hace fallar la corrida: es una observacion, no la extraccion.
+    """
+    days=_positive_limit('JAX_MEMORY_OPEN_CONVERSATION_WARN_DAYS',7)
+    try:
+        total,sample=await jobs.stale_open_conversations(days,limit=20)
+    except Exception as error:  # fail-soft: es un diagnostico de solo lectura y no puede tumbar la extraccion; el fallo queda en el log y la corrida siguiente reintenta
+        logger.error('no se pudo revisar las conversaciones abiertas: %s',type(error).__name__)
+        return
+    if total:
+        ids=', '.join(str(row['id']) for row in sample)
+        logger.warning('%s conversaciones llevan mas de %s dias abiertas (ended_at NULL) y nunca entran a la cola de extraccion; '
+                       'mas antiguas (id): %s. Cerrarlas es decision de una persona.',total,days,ids)
+
+
 async def _run_once(limit: int = 10, *, b9_writer: PersistentExtractionWriter | None = None) -> None:
     host=os.environ.get('JAX_DB_HOST')
     if not host: raise RuntimeError('JAX_DB_HOST is required')
@@ -595,33 +610,42 @@ async def _run_once(limit: int = 10, *, b9_writer: PersistentExtractionWriter | 
     try:
         ok=await db.connect(host=host,user=os.getenv('JAX_DB_USER',''),password=os.getenv('JAX_DB_PASSWORD',''),database=os.getenv('JAX_DB_NAME','jax_memory'),migrate_schema=False)
         if not ok: raise RuntimeError('memory connection failed')
+        _validar_limites()  # configuracion invalida = la corrida falla sin reclamar nada ni llamar al extractor
         run_seconds=_positive_limit('JAX_MEMORY_RUN_TIMEOUT_SECONDS',840)
         lease_seconds=_positive_limit('JAX_MEMORY_LEASE_SECONDS',900)
         if lease_seconds<=run_seconds: raise ValueError('extraction lease must exceed run deadline')
         jobs=ExtractionJobs(MappingPool(db.pool),lease_seconds=lease_seconds,max_attempts=_positive_limit('JAX_MEMORY_MAX_ATTEMPTS',3))
+        await _avisar_conversaciones_abiertas(jobs)
         pending=await jobs.pending(limit)
         if pending is None: raise RuntimeError('memory queue unavailable')
         if not pending:
             logger.info('No pending conversations')
-            return
-        writer=b9_writer or build_persistent_extraction_writer(db.pool)
-        extractor=await build_extractor()
-        budget={'calls':0,'max_calls':_positive_limit('JAX_MEMORY_MAX_CALLS',40)}
-        deadline=time.monotonic()+run_seconds
-        run_id=str(uuid.uuid4())
-        for conv in pending:
-            if time.monotonic()>=deadline:
-                failures+=1; break
-            try:
-                job=await jobs.claim(conv['id'],run_id=run_id)
-                if job is not None:
-                    if job.get('quarantined'):
-                        failures+=1
-                    elif not await process_claimed(db,extractor,conv,writer,jobs,job,budget,deadline): failures+=1
-            except Exception as error:  # fail-soft: un reclamo fallido no bloquea la cola; failures obliga a relanzar al final y systemd observa código no cero.
-                failures+=1
-                logger.error('conv %s: claim failed %s',conv['id'],type(error).__name__)
-        if failures: raise RuntimeError(f'memory extraction failures: {failures}')
+        else:
+            writer=b9_writer or build_persistent_extraction_writer(db.pool)
+            extractor=await build_extractor()
+            budget={'calls':0,'max_calls':_positive_limit('JAX_MEMORY_MAX_CALLS',40)}
+            deadline=time.monotonic()+run_seconds
+            run_id=str(uuid.uuid4())
+            for conv in pending:
+                if time.monotonic()>=deadline:
+                    failures+=1; break
+                try:
+                    job=await jobs.claim(conv['id'],run_id=run_id)
+                    if job is not None:
+                        if job.get('quarantined'):
+                            failures+=1
+                        elif not await process_claimed(db,extractor,conv,writer,jobs,job,budget,deadline): failures+=1
+                except Exception as error:  # fail-soft: un reclamo fallido no bloquea la cola; failures obliga a relanzar al final y systemd observa código no cero.
+                    failures+=1
+                    logger.error('conv %s: claim failed %s',conv['id'],type(error).__name__)
+        # pending() excluye QUARANTINED/UNKNOWN: se cuentan aparte y la unidad queda roja
+        # hasta que una persona los resuelva (--atascados / --reencolar). Auditoria 2026-10-05, MAJOR-1.
+        stuck=await jobs.stuck_count()
+        if failures or stuck:
+            detail=f'memory extraction failures: {failures}'
+            if stuck: detail+=f'; stuck jobs (QUARANTINED/UNKNOWN) awaiting a person: {stuck}'
+            # Solo atascados (sin fallos nuevos): codigo 2; con fallos, el general (1).
+            raise (StuckJobsError if stuck and not failures else RuntimeError)(detail)
     finally:
         await db.close()
         await cerrar_cliente_http()
@@ -632,5 +656,53 @@ async def run_once(limit: int = 10, *, b9_writer: PersistentExtractionWriter | N
         timeout=_positive_limit('JAX_MEMORY_RUN_TIMEOUT_SECONDS',840))
 
 
+def _actores(args):
+    """(usuario real del proceso, actor declarado o None). El real sale del uid, no de una variable de entorno."""
+    import pwd
+    return pwd.getpwuid(os.getuid()).pw_name,(args.actor or None)
+
+
+def _parse_args(argv=None):
+    import argparse
+    parser=argparse.ArgumentParser(prog='python -m jax.memory.worker',description='Worker de extraccion de memoria')
+    parser.add_argument('--atascados',action='store_true',help='lista los jobs QUARANTINED/UNKNOWN y sale')
+    parser.add_argument('--reencolar',type=int,metavar='CONVERSATION_ID',
+                        help='re-encola un job en cuarentena YA REVISADO (exige --motivo; deja un evento de auditoria)')
+    parser.add_argument('--motivo',help='por que se re-encola (obligatorio con --reencolar)')
+    parser.add_argument('--actor',help='quien dice ser (se registra APARTE del usuario real del proceso, que siempre se registra)')
+    args=parser.parse_args(argv)
+    if args.reencolar is not None and not (args.motivo or '').strip():
+        parser.error('--reencolar exige --motivo')
+    return args
+
+
+async def _admin(args) -> int:
+    """Herramientas de una persona sobre la cola: listar atascados y re-encolar."""
+    host=os.environ.get('JAX_DB_HOST')
+    if not host: raise RuntimeError('JAX_DB_HOST is required')
+    db=MemoryDB()
+    try:
+        ok=await db.connect(host=host,user=os.getenv('JAX_DB_USER',''),password=os.getenv('JAX_DB_PASSWORD',''),database=os.getenv('JAX_DB_NAME','jax_memory'),migrate_schema=False)
+        if not ok: raise RuntimeError('memory connection failed')
+        jobs=ExtractionJobs(MappingPool(db.pool))
+        if args.reencolar is not None:
+            real,declared=_actores(args)
+            result=await jobs.requeue(args.reencolar,actor=real,declared_actor=declared,reason=args.motivo)
+            print(f"re-encolado: conversacion {result['conversation_id']} (antes {result['previous_state']}/{result['previous_error_code']}) por {real} (declarado: {declared})")
+            return 0
+        for row in await jobs.list_stuck():
+            print(f"{row['conversation_id']}\t{row['state']}\t{row['error_code']}\tintentos={row['attempts']}\t{row['updated_at']}")
+        return 0
+    finally:
+        await db.close()
+
+
 if __name__ == '__main__':
-    asyncio.run(run_once())
+    _args=_parse_args()
+    if _args.atascados or _args.reencolar is not None:
+        raise SystemExit(asyncio.run(_admin(_args)))
+    try:
+        asyncio.run(run_once())
+    except StuckJobsError as _error:
+        logger.error('%s',_error)
+        raise SystemExit(EXIT_STUCK_JOBS)

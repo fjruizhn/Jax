@@ -2,6 +2,7 @@ import asyncio
 import json
 import pytest
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 
 from motor_registry.job_store import JobStore
 from policy.governance.runtime_status import MotorJobStatusResolver
@@ -12,6 +13,18 @@ from policy.governance.response import ResponseScope
 def _scope():
     return ResponseScope("production", "tenant-a", None, "user-a", "service:jax",
                          "human:fernando", "governance", "request-a", "trace-a")
+
+
+def _status_batch(*pipelines):
+    by_id = {pipeline.pipeline_id: pipeline for pipeline in pipelines}
+    async def snapshots(ids):
+        from jacobs import store
+        observed_at = datetime.now(timezone.utc)
+        return MappingProxyType({pipeline_id: store.PipelineStatusSnapshot(
+            pipeline_id=pipeline_id, tenant_id=pipeline.tenant_id, user_id=pipeline.user_id,
+            status=pipeline.status, observed_at=observed_at)
+            for pipeline_id in ids if (pipeline := by_id.get(pipeline_id)) is not None})
+    return snapshots
 
 
 def _job_event(job_id="job-a", status="completed", **overrides):
@@ -113,13 +126,48 @@ def test_jacobs_stable_status_gets_observation_time_not_transition_time(monkeypa
     pipeline = models.Pipeline(pipeline_id="pipeline-old", name="p", invoked_by="web", mode="supervised",
         status=models.PipelineStatus.completed, tenant_id="tenant-a", user_id="user-a",
         updated_at=old_transition)
-    async def pipeline_get(_pipeline_id):
-        return pipeline
-    monkeypatch.setattr(jacobs_store, "pipeline_get", pipeline_get)
+    monkeypatch.setattr(jacobs_store, "pipeline_status_snapshots", _status_batch(pipeline))
     evidence = asyncio.run(JacobsPipelineStatusResolver().evidence(
         {"pipeline_id": "pipeline-old", "status": "completed"}, _scope()))
     assert evidence.observation.status is ResolutionStatus.RESOLVED
     assert evidence.observation.observed_at > datetime.fromtimestamp(old_transition, timezone.utc)
+
+
+def test_jacobs_status_snapshot_batch_uses_one_primary_key_query_and_is_immutable(monkeypatch):
+    from jacobs import store
+    executed = []
+
+    class Cursor:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, sql, parameters):
+            executed.append((sql, parameters))
+        async def fetchall(self):
+            return [
+                {"pipeline_id": "pipeline-2", "tenant_id": "tenant-a", "user_id": "user-a", "status": "completed"},
+                {"pipeline_id": "pipeline-1", "tenant_id": "tenant-a", "user_id": "user-a", "status": "running"},
+            ]
+
+    class Connection:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        def cursor(self, *_args):
+            return Cursor()
+
+    monkeypatch.setattr(store, "conexion_del_pool", lambda: Connection())
+    snapshots = asyncio.run(store.pipeline_status_snapshots(("pipeline-1", "pipeline-2")))
+    assert len(executed) == 1
+    sql, parameters = executed[0]
+    assert "SELECT pipeline_id, user_id, tenant_id, status" in sql
+    assert "WHERE pipeline_id IN (%s,%s)" in sql
+    assert parameters == ("pipeline-1", "pipeline-2")
+    assert snapshots["pipeline-1"].status.value == "running"
+    with pytest.raises(TypeError):
+        snapshots["pipeline-3"] = snapshots["pipeline-1"]
 
 
 def test_job_and_jacobs_configuration_identity_is_nonsecret_and_changes_digest(tmp_path):
@@ -143,9 +191,7 @@ def test_jacobs_database_change_invalidates_previously_minted_receipt(monkeypatc
     pipeline = models.Pipeline(pipeline_id="pipeline-a", name="p", invoked_by="web", mode="supervised",
         status=models.PipelineStatus.completed, tenant_id="tenant-a", user_id="user-a",
         updated_at=1.0)
-    async def pipeline_get(_pipeline_id):
-        return pipeline
-    monkeypatch.setattr(jacobs_store, "pipeline_get", pipeline_get)
+    monkeypatch.setattr(jacobs_store, "pipeline_status_snapshots", _status_batch(pipeline))
     platform_config = {
         "FACET_RUNTIME_STATUS": {"state_contract": "JAXEngineState.FacetState", "status_field": "status",
             "observed_at_field": "resolver_read_time", "allowed_statuses": ["idle", "thinking", "error", "offline"]},
@@ -197,13 +243,15 @@ def test_pipeline_read_keeps_one_scope_and_status_snapshot_during_transition(mon
     source = {"status": models.PipelineStatus.running, "tenant_id": "tenant-a", "user_id": "user-a"}
     captured = asyncio.Event()
     continue_read = asyncio.Event()
-    async def pipeline_get(_pipeline_id):
+    async def snapshots(ids):
         row = dict(source)
         captured.set()
         await continue_read.wait()
-        return models.Pipeline(pipeline_id="pipeline-race", name="p", invoked_by="web", mode="supervised",
-            status=row["status"], tenant_id=row["tenant_id"], user_id=row["user_id"], updated_at=1.0)
-    monkeypatch.setattr(jacobs_store, "pipeline_get", pipeline_get)
+        from jacobs import store
+        return MappingProxyType({pipeline_id: store.PipelineStatusSnapshot(
+            pipeline_id=pipeline_id, tenant_id=row["tenant_id"], user_id=row["user_id"],
+            status=row["status"], observed_at=datetime.now(timezone.utc)) for pipeline_id in ids})
+    monkeypatch.setattr(jacobs_store, "pipeline_status_snapshots", snapshots)
     async def scenario():
         task = asyncio.create_task(JacobsPipelineStatusResolver().evidence(
             {"pipeline_id": "pipeline-race", "status": "running"}, _scope()))

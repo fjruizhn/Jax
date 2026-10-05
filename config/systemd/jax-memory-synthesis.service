@@ -1,6 +1,7 @@
 [Unit]
 Description=JAX B9 memory synthesis
 After=network-online.target mariadb.service
+OnFailure=aviso-fallo@%n.service
 
 [Service]
 Type=oneshot

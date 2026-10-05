@@ -22,7 +22,7 @@ class ReferenceValidationStatus(str,Enum):
 class ConflictPolicy(str,Enum):
     SINGLE_SOURCE_REQUIRED="SINGLE_SOURCE_REQUIRED"; ALL_SOURCES_AGREE="ALL_SOURCES_AGREE"; PREFERRED_SOURCE_WITH_EXPLICIT_FALLBACK="PREFERRED_SOURCE_WITH_EXPLICIT_FALLBACK"
 class AdapterKind(str,Enum):
-    CAPABILITY_AVAILABLE="CAPABILITY_AVAILABLE"; FILE_EXISTS="FILE_EXISTS"; B9_DESIGNATED_CURRENT_SOURCE="B9_DESIGNATED_CURRENT_SOURCE"; MOTOR_JOB_STATUS="MOTOR_JOB_STATUS"; JACOBS_PIPELINE_STATUS="JACOBS_PIPELINE_STATUS"; FACET_RUNTIME_STATUS="FACET_RUNTIME_STATUS"; ENGINE_STATUS="ENGINE_STATUS"; LAS_MANOS_PROCESSING_JOB_STATUS="LAS_MANOS_PROCESSING_JOB_STATUS"
+    CAPABILITY_AVAILABLE="CAPABILITY_AVAILABLE"; FILE_EXISTS="FILE_EXISTS"; B9_DESIGNATED_CURRENT_SOURCE="B9_DESIGNATED_CURRENT_SOURCE"; MOTOR_JOB_STATUS="MOTOR_JOB_STATUS"; JACOBS_PIPELINE_STATUS="JACOBS_PIPELINE_STATUS"; JACOBS_STEP_STATUS="JACOBS_STEP_STATUS"; FACET_RUNTIME_STATUS="FACET_RUNTIME_STATUS"; ENGINE_STATUS="ENGINE_STATUS"; LAS_MANOS_PROCESSING_JOB_STATUS="LAS_MANOS_PROCESSING_JOB_STATUS"
 class SourceScopeClass(str,Enum):
     EXACT_RESPONSE_SCOPE="EXACT_RESPONSE_SCOPE"; INSTALLATION_GLOBAL="INSTALLATION_GLOBAL"
 def _digest(v:Any)->str:return "sha256:"+hashlib.sha256(json.dumps(_plain(_freeze(v)),sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
@@ -112,9 +112,9 @@ class RegistryEntry:
         if self.template_contract_ref is not None:object.__setattr__(self,"template_contract_ref",_text(self.template_contract_ref,"template_contract_ref"))
         b,a=self.binding,self.adapter
         if (a.resolver_id,a.resolver_version,a.source_identity,a.source_configuration_digest)!=(b.resolver_implementation_identity,b.resolver_version,b.designated_source_identity,b.source_configuration_digest):raise GovernanceContractError("adapter must exactly match approved binding")
-        expected={AdapterKind.CAPABILITY_AVAILABLE:"CAPABILITY_AVAILABLE",AdapterKind.FILE_EXISTS:"FILE_EXISTS",AdapterKind.B9_DESIGNATED_CURRENT_SOURCE:"B9_DESIGNATED_CURRENT_SOURCE",AdapterKind.MOTOR_JOB_STATUS:"JOB_STATUS",AdapterKind.JACOBS_PIPELINE_STATUS:"PIPELINE_STATUS",AdapterKind.FACET_RUNTIME_STATUS:"FACET_RUNTIME_STATUS",AdapterKind.ENGINE_STATUS:"ENGINE_STATUS",AdapterKind.LAS_MANOS_PROCESSING_JOB_STATUS:"PROCESSING_JOB_STATUS"}[a.adapter_kind]
+        expected={AdapterKind.CAPABILITY_AVAILABLE:"CAPABILITY_AVAILABLE",AdapterKind.FILE_EXISTS:"FILE_EXISTS",AdapterKind.B9_DESIGNATED_CURRENT_SOURCE:"B9_DESIGNATED_CURRENT_SOURCE",AdapterKind.MOTOR_JOB_STATUS:"JOB_STATUS",AdapterKind.JACOBS_PIPELINE_STATUS:"PIPELINE_STATUS",AdapterKind.JACOBS_STEP_STATUS:"STEP_STATUS",AdapterKind.FACET_RUNTIME_STATUS:"FACET_RUNTIME_STATUS",AdapterKind.ENGINE_STATUS:"ENGINE_STATUS",AdapterKind.LAS_MANOS_PROCESSING_JOB_STATUS:"PROCESSING_JOB_STATUS"}[a.adapter_kind]
         if b.predicate!=expected:raise GovernanceContractError("adapter kind/predicate mismatch")
-        required_scope={AdapterKind.MOTOR_JOB_STATUS:SourceScopeClass.EXACT_RESPONSE_SCOPE,AdapterKind.JACOBS_PIPELINE_STATUS:SourceScopeClass.EXACT_RESPONSE_SCOPE,AdapterKind.FACET_RUNTIME_STATUS:SourceScopeClass.INSTALLATION_GLOBAL,AdapterKind.ENGINE_STATUS:SourceScopeClass.INSTALLATION_GLOBAL,AdapterKind.LAS_MANOS_PROCESSING_JOB_STATUS:SourceScopeClass.EXACT_RESPONSE_SCOPE}.get(a.adapter_kind)
+        required_scope={AdapterKind.MOTOR_JOB_STATUS:SourceScopeClass.EXACT_RESPONSE_SCOPE,AdapterKind.JACOBS_PIPELINE_STATUS:SourceScopeClass.EXACT_RESPONSE_SCOPE,AdapterKind.JACOBS_STEP_STATUS:SourceScopeClass.EXACT_RESPONSE_SCOPE,AdapterKind.FACET_RUNTIME_STATUS:SourceScopeClass.INSTALLATION_GLOBAL,AdapterKind.ENGINE_STATUS:SourceScopeClass.INSTALLATION_GLOBAL,AdapterKind.LAS_MANOS_PROCESSING_JOB_STATUS:SourceScopeClass.EXACT_RESPONSE_SCOPE}.get(a.adapter_kind)
         if required_scope is not None and b.source_scope_class is not required_scope:raise GovernanceContractError("runtime status adapter/source scope mismatch")
         if required_scope is None and b.source_scope_class is not None:raise GovernanceContractError("existing adapter cannot declare a runtime status source scope")
         # B9's existing designated-current-source resolver has exactly one
@@ -194,6 +194,7 @@ _STATUS_EVIDENCE_TOKEN=object()
 _RUNTIME_STATUS_SOURCE_IDENTITIES={
     AdapterKind.MOTOR_JOB_STATUS:"motor:job-store",
     AdapterKind.JACOBS_PIPELINE_STATUS:"jacobs:canonical-store",
+    AdapterKind.JACOBS_STEP_STATUS:"jacobs:canonical-step-store",
     AdapterKind.FACET_RUNTIME_STATUS:"platform:facet-state",
     AdapterKind.ENGINE_STATUS:"platform:las-manos-health",AdapterKind.LAS_MANOS_PROCESSING_JOB_STATUS:"las-manos:processing-job-store",
 }
@@ -316,7 +317,7 @@ class ResolverRegistry:
             value=result.value
             o=ResolutionObservation(ResolutionStatus.RESOLVED,observed,b9_evidence.provenance_ref,value)
             return self._fresh_observation(o,b,now),o
-        status_kinds={AdapterKind.MOTOR_JOB_STATUS,AdapterKind.JACOBS_PIPELINE_STATUS,AdapterKind.FACET_RUNTIME_STATUS,AdapterKind.ENGINE_STATUS,AdapterKind.LAS_MANOS_PROCESSING_JOB_STATUS}
+        status_kinds={AdapterKind.MOTOR_JOB_STATUS,AdapterKind.JACOBS_PIPELINE_STATUS,AdapterKind.JACOBS_STEP_STATUS,AdapterKind.FACET_RUNTIME_STATUS,AdapterKind.ENGINE_STATUS,AdapterKind.LAS_MANOS_PROCESSING_JOB_STATUS}
         if e.adapter.adapter_kind in status_kinds:
             evidence=runtime_status_evidence
             if not isinstance(evidence,RuntimeStatusEvidence) or evidence.adapter_kind is not e.adapter.adapter_kind:return ResolutionStatus.UNAVAILABLE,ResolutionObservation(ResolutionStatus.UNAVAILABLE,now,"server:missing-runtime-status-evidence",{})
