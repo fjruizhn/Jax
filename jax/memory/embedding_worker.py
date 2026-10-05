@@ -34,6 +34,7 @@ from jax.memory.b9 import (EmbeddingSpaceIdentity, MutationAuthorizationRequest,
 from jax.memory.b9_mariadb import MariaDBB9Store, PersistentMemoryAPI
 from jax.memory.scope_authority import MariaDBScopeAuthorityResolver
 from jax.memory.embedding_config import CONFIG
+from jax.memory.recall_tripwire import recall_requiere_remedicion
 from jax.core.cliente_http_compartido import cerrar_cliente_http, obtener_cliente_http
 from jax.core.config_entorno import url_requerida
 from jax.core.db_connect_config import db_connect_timeout_seconds
@@ -259,11 +260,19 @@ async def run_b9_vector_health() -> int:
                     (identity.embedding_space_id,)
                 )
                 (missing,) = await cur.fetchone()
+
+                async def contar_messages():
+                    await cur.execute("SELECT COUNT(*) FROM messages")
+                    return (await cur.fetchone())[0]
+                recall_vencido = await recall_requiere_remedicion(contar_messages)
     finally:
         pool.close()
         await pool.wait_closed()
+    if recall_vencido:
+        logger.error("B9 vector health: el recall del indice HNSW de messages hay que volver a medirlo (ver el ERROR anterior)")
     if missing:
         logger.error("B9 vector health: %s current revision(s) have no embedding generation", missing)
+    if missing or recall_vencido:
         return 1
     logger.info("B9 vector health: every current retrievable revision has a generation")
     return 0

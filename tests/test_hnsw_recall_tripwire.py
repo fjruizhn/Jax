@@ -9,11 +9,10 @@ silencio -- ninguna consulta falla, simplemente empiezan a faltar recuerdos.
 
 DEUDA.md decia "hay que volver a medirlo cuando `messages` crezca un orden de
 magnitud". Una condicion asi no la vigila nadie: no tiene fecha, no tiene dueno
-y no hay nada que la mire. Esto la convierte en un WARNING en el journal del
-worker, que corre cada 20 minutos.
+y no hay nada que la mire. Desde 2026-10-05 lo ejecuta vector-health y falla la unidad.
 
-No falla nada ni bloquea: avisa. Lo que hay que hacer cuando aparezca esta en el
-propio mensaje.
+La unidad de vector-health sale con error (no bloquea la extraccion ni escribe nada). Lo que
+hay que hacer cuando aparezca esta en el propio mensaje.
 """
 from __future__ import annotations
 
