@@ -47,5 +47,13 @@ Esperar CI remota y nueva revisión de escalón 3 del SHA exacto del PR. No desp
 
 - CI sobre `73af9f5` ejecutó los once módulos B9: 126 casos pasaron y uno falló. La aserción del observador agrupaba por `CURRENT_REVISION_ID` la consulta candidata y la consulta de fuente; la candidata no tiene por qué seleccionar `has_payload`. Se acota la selección a `WHERE r.revision_id`, que identifica la validación de fuente y conserva la comprobación de que no se lee el BLOB.
 - La auditoría Tier 3 también reprodujo cancelación durante el rollback normal: el `except BaseException` de `_retrieve_scoped` iniciaba una segunda limpieza después de que `_rollback_bounded` ya había descartado la conexión. La corrección marca el intento antes de esperarlo; la regresión integrada exige una sola llamada a rollback, un solo cierre, propagación de `CancelledError` y retorno bajo 0,1 s con un plazo de 0,05 s.
-- El piso exacto pasa a 128: los 127 casos medidos por CI más la regresión de cancelación. Los comentarios del workflow Faro se reconciliaron con la medida vigente de 688 casos (control 171, memoria 15).
+- El piso exacto pasa a 128: los 127 casos medidos por CI más la regresión de cancelación. Los comentarios del workflow Faro se reconciliaron con la medida vigente de 688 casos (control 170, memoria 15).
 - Aún se requiere CI aislada sobre el SHA nuevo y auditoría Tier 3 del SHA exacto. No integrar ni desplegar sin PASS.
+
+### Reconciliación con master `e53e59e` · 2026-10-05
+
+- La rama se reconcilió mediante merge regular con `origin/master` `e53e59e9d86bf55b20ba4f9305846e2839f5af36`. Los únicos conflictos fueron `.github/workflows/policy.yml` y `ci/pisos.json`.
+- Se conservaron en conjunto los gates aditivos de master: B9 `memory-b9-regression` mínimo 176, SR2 `f2e-sr2` 26, structured projection 15, external output 10 y tests puros 3477/45. El mínimo B9 anterior de esta rama era 128, por lo que prevalece 176 hasta que CI aislada mida el par combinado.
+- Verificación local posterior al merge: Faro DB no dependiente de MariaDB externa 6 passed (1 prueba de DB aislada no corrida), SR2 26 passed, structured projection 15 passed y external output 10 passed. La suite B9 completa queda reservada al job MariaDB efímero; el perfil de prueba permaneció `jax_test@127.0.0.1:3308/jax_memory_test` y no hubo conexión productiva.
+- Inspección del camino `memoria.buscar`: su `ScopeContext` usa exclusivamente usuario/tenant de la identidad de socket; el reader abre transacción `READ ONLY` y emite consultas de lectura; el resultado se limita y pasa por `envolver_payload_no_confiable`; fallas del reader salen como `MemoriaNoDisponible`.
+- Queda CI sobre el SHA combinado y auditoría Tier 3 del SHA exacto. No integrar ni desplegar sin PASS.
