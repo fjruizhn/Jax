@@ -9,13 +9,17 @@ Implementar únicamente el núcleo de autoridad de reglas aprobado por Fernando 
 - La cadena de recuperación A–D terminó en JAX master `f69f045a35fc5d6143b1d6a17934ee01b42d55d1`, con CI post-merge `37322257433` verde.
 - La rama `feat/faro-f1.1-rule-authority` parte exactamente de ese master.
 - La coordinación está publicada en `claude-skills` commit `d0132ac7` con `[EN CURSO: hall9000.codex]`.
-- Se inició descubrimiento de solo lectura del código vigente y de los contratos Block 4/5/6/Faro.
+- Se completó el descubrimiento de solo lectura del código vigente y de los contratos Block 4/5/6/Faro.
+- La arquitectura Tier 3 emitió `APROBADO PARA IMPLEMENTAR CON CONDICIONES` y confirmó como condición previa la corrección del adapter completo de persistencia de Block 4.
+- La revisión Tier 4 del diseño final emitió `APROBADO PARA IMPLEMENTAR`, sin bloqueadores; se incorporaron sus precisiones sobre leases, vigencia, clasificación de capabilities, checkpoint externo y recuperación idempotente.
+- Se escribió `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-kernel-design.md` para revisión humana.
+- Baseline focal: `729 passed, 39 skipped, 1 failed`; el único fallo es la prueba MariaDB que exige variables restringidas de `jax_memory_test`, ausentes en esta sesión. No se cambió host/base/user ni se accedió a producción.
+- El intento de enrutamiento `agentdb_route` de Ruflo falló con `EACCES` al crear `/.claude-flow/policy`; no produjo análisis ni cambió estado del repo.
 
 ## Falta
 
-- Terminar el mapa de contratos existentes.
-- Obtener diseño Tier 3 y resolver cualquier ambigüedad.
-- Escribir y someter a revisión humana la spec y el plan exigidos por Superpowers.
+- Someter la spec escrita a revisión humana, como exige el flujo de brainstorming de Superpowers.
+- Tras aprobación humana, escribir y revisar el plan exigido por Superpowers.
 - Implementar con TDD mediante Tier 2, verificar, auditar el SHA exacto y abrir PR.
 
 ## Decisiones
@@ -27,5 +31,5 @@ Implementar únicamente el núcleo de autoridad de reglas aprobado por Fernando 
 ## Siguiente comando
 
 ```bash
-git status --short && rg -n "RATIFICATION_GRANTED|human:fernando|policy_corpus_hash|effective_authority" policy tests/policy
+sed -n '1,560p' docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-kernel-design.md
 ```
