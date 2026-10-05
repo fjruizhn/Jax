@@ -62,8 +62,8 @@
       "mensaje": "PISO ROTO: se esperaban 295 tests CORRIDOS (no skipeados)."
     },
     "memory-vector-zero-io/out": {
-      "patron": "^206 passed",
-      "mensaje": "PISO ROTO: se esperaban 206 tests CORRIDOS (no skipeados)."
+      "patron": "^214 passed",
+      "mensaje": "PISO ROTO: se esperaban 214 tests CORRIDOS (no skipeados)."
     },
     "hyde-containment/hyde": {
       "patron": "^21 passed",

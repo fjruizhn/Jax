@@ -480,6 +480,8 @@ passed"), no el de sumar comentarios: ese error ya rompio CI hoy.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^203 passed`
 
+206 -> 214 el 2026-10-05 (rama fix/b9-driver-runbooks, medido LOCAL como delta de archivo): `test_b9_systemd_ownership.py` 5 -> 13 (+8: los tres drop-ins de worker y synthesis, versionados y comprobados, y el instalador que los instala, ejecutado contra un destino de prueba). El runner tiene la ultima palabra.
+
 203 -> 206 el 2026-10-05 (rama fix/memoria-worker-cuarentena-aviso-orden, hall9000, medido LOCAL: 123 -> 126 passed sobre la misma lista de archivos): `test_b9_systemd_ownership.py` +4 (cinco unidades con OnFailure, ExecStartPre del checkout sano, timer de synthesis a las 04:30, las cinco existen) y -1 (se borra la prueba que solo comprobaba que `run_once` no llamaba a `_recalcular_embeddings_en_ceros`, codigo muerto borrado). El runner tiene la ultima palabra: si mide otro numero, se corrige aqui y en `ci/pisos.json`.
 
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
