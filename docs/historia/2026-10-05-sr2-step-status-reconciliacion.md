@@ -35,8 +35,16 @@ propio piso exacto para la semántica de `STEP_STATUS`.
 
 ## Decisión y límites
 
-El alcance de esta reconciliación fue indicado por la sesión padre. Se
-inspeccionaron las acciones de GitHub: el workflow usa etiquetas como
-`actions/checkout@v4` y `actions/setup-python@v5`. Convertirlas a SHA exactos
-es un cambio de cadena de suministro fuera del alcance de SR2, por lo que no
-se modificaron aquí.
+**Quién decidió:** Fernando Ruiz fijó el orden y los límites de SR2 en la
+recuperación del 2026-10-05; Codex decidió el merge regular y la verificación
+técnica.
+
+**Pendiente:** publicar el nuevo JAX HEAD, obtener CI verde para ese SHA,
+actualizar en Platform #189 el pin exacto, reconciliar su master, ejecutar
+el par completo y auditar ambos SHAs finales antes de cualquier integración.
+
+**Alternativas descartadas:** no se reutilizó el veredicto del par anterior
+porque sus SHAs ya no serían los finales; tampoco se mezcló el worktree
+alterno de Platform con cambios locales sin publicar. Se inspeccionaron las
+acciones de GitHub: pasar sus etiquetas a SHA exactos es otro cambio de
+cadena de suministro y no forma parte de esta reconciliación.
