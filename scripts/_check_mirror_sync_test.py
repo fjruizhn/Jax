@@ -258,3 +258,71 @@ def test_perder_la_guarda_en_una_funcion_con_marcador_es_drift_en_cualquier_copi
 def test_una_funcion_ausente_cuenta_como_que_no_llama(tmp_path):
     drift, _, faltantes = revisar(_con_llamadas(tmp_path, CON_GUARDA, "def guarda():\n    return None\n"))
     assert len(faltantes) == 2 and all("(espejo)" in f for f in faltantes)
+
+
+# ---------------------------------------------------------------------------
+# El ORDEN: la guarda va antes de la primera apertura de conexion (orden del AST del cuerpo)
+# ---------------------------------------------------------------------------
+
+def _fam_orden(tmp_path, canonico, espejo):
+    return Familia(
+        nombre="prueba",
+        canonico=_escribir(tmp_path, "canonico.py", canonico),
+        espejos=(("espejo", _escribir(tmp_path, "espejo.py", espejo)),),
+        compartidos=("guarda",),
+        llamadas_obligatorias=(("abre", "guarda"),),
+    )
+
+
+def _fuente(cuerpo: str, asincrona: bool = True) -> str:
+    sangrado = "\n".join("    " + l for l in cuerpo.strip("\n").split("\n"))
+    return f"def guarda():\n    return None\n\n\n{'async ' if asincrona else ''}def abre():\n{sangrado}\n"
+
+
+BIEN = _fuente("guarda()\nconn = await aiomysql.connect(db='x')\nreturn conn")
+
+
+@pytest.mark.parametrize("conexion", [
+    "await aiomysql.connect(db='x')", "pymysql.connect(db='x')", "await get_pool()", "await aiomysql.create_pool(db='x')",
+])
+def test_guarda_antes_de_la_conexion_pasa(tmp_path, conexion):
+    fuente = _fuente(f"guarda()\nconn = {conexion}\nreturn conn")
+    assert revisar(_fam_orden(tmp_path, fuente, fuente)) == ([], [], [])
+
+
+@pytest.mark.parametrize("conexion", [
+    "await aiomysql.connect(db='x')", "pymysql.connect(db='x')", "await get_pool()", "await aiomysql.create_pool(db='x')",
+])
+@pytest.mark.parametrize("copia", ["canonico", "espejo"])
+def test_guarda_despues_de_la_conexion_es_drift_en_cualquier_copia(tmp_path, conexion, copia):
+    mal = _fuente(f"conn = {conexion}\nguarda()\nreturn conn")
+    canonico, espejo = (mal, BIEN) if copia == "canonico" else (BIEN, mal)
+    _, _, faltantes = revisar(_fam_orden(tmp_path, canonico, espejo))
+    assert len(faltantes) == 1 and "despues de abrir una conexion" in faltantes[0], faltantes
+    assert ("(jax)" if copia == "canonico" else "(espejo)") in faltantes[0]
+
+
+def test_la_guarda_dentro_de_un_if_no_cuenta_porque_no_se_ejecuta_siempre(tmp_path):
+    fuente = _fuente("if cond:\n    guarda()\nconn = await aiomysql.connect(db='x')\nreturn conn")
+    _, _, faltantes = revisar(_fam_orden(tmp_path, fuente, BIEN))
+    assert faltantes and "no llama a guarda" in faltantes[0]
+
+
+def test_la_guarda_con_await_y_la_funcion_sincrona_tambien_se_ordenan(tmp_path):
+    ok = _fuente("await guarda()\nconn = pymysql.connect(db='x')\nreturn conn")
+    assert revisar(_fam_orden(tmp_path, ok, ok)) == ([], [], [])
+    mal = _fuente("conn = pymysql.connect(db='x')\nguarda()\nreturn conn", asincrona=False)
+    _, _, faltantes = revisar(_fam_orden(tmp_path, BIEN, mal))
+    assert "despues de abrir una conexion" in faltantes[0]
+
+
+def test_la_conexion_y_la_guarda_en_la_misma_sentencia_no_pasan(tmp_path):
+    mal = _fuente("conn = [pymysql.connect(db='x'), guarda()]\nreturn conn")
+    _, _, faltantes = revisar(_fam_orden(tmp_path, BIEN, mal))
+    assert faltantes and "no llama a guarda" in faltantes[0]
+
+
+def test_una_funcion_sin_conexion_directa_solo_exige_la_guarda(tmp_path):
+    """`asegurar_base_de_test` no abre conexiones por si misma: delega. Basta con la guarda."""
+    fuente = _fuente("guarda()\nreturn asyncio.run(otra())")
+    assert revisar(_fam_orden(tmp_path, fuente, fuente)) == ([], [], [])

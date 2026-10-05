@@ -74,6 +74,7 @@ _PERMISO = "JAX_TEST_DB_PERMITIR_INSTANCIA_DE_PRODUCCION"
 @pytest.fixture
 def fuera_de_ci(monkeypatch):
     monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     monkeypatch.delenv(_PERMISO, raising=False)
 
 
@@ -82,8 +83,10 @@ def test_el_constructor_se_niega_en_los_puertos_de_produccion_fuera_de_ci(fuera_
     with pytest.raises(Exception, match=_PERMISO):
         P.guarda({**_ENTORNO_OK, "JAX_DB_PORT": puerto})
     monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
     P.guarda({**_ENTORNO_OK, "JAX_DB_PORT": puerto})          # en CI cada job trae su contenedor
     monkeypatch.delenv("CI")
+    monkeypatch.delenv("GITHUB_ACTIONS")
     monkeypatch.setenv(_PERMISO, "1")
     P.guarda({**_ENTORNO_OK, "JAX_DB_PORT": puerto})
 

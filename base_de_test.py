@@ -328,15 +328,18 @@ def _permiso_instancia_de_produccion() -> bool:
 
 
 # LIMITE DE ESTA GUARDA (auditoria Jax#355, MINOR 2). El puerto es una HEURISTICA, no una frontera:
-# - `CI` lo exporta el entorno de quien corre; `CI=1` en un puesto de trabajo con la MariaDB de
-#   produccion en 3308 abre la puerta igual, y lo mismo vale para `JAX_DB_PORT`. No hay una forma
-#   robusta de distinguir «runner de CI» de «sesion que dice serlo» desde dentro de este proceso:
-#   quien controla el entorno controla tambien esa senal y la variable de permiso.
+# - Se trata la corrida como CI solo si `CI` Y `GITHUB_ACTIONS=true` (el runner de GitHub Actions,
+#   tambien el de hall9000, exporta las dos). Un `CI=1` suelto ya no abre la puerta. Pero las dos
+#   las exporta el entorno de quien corre: `CI=1 GITHUB_ACTIONS=true` a mano en un puesto de trabajo
+#   la abre igual, y lo mismo vale para `JAX_DB_PORT`. No hay una forma robusta de distinguir
+#   «runner de CI» de «sesion que dice serlo» desde dentro de este proceso: quien controla el
+#   entorno controla tambien esa senal y la variable de permiso.
 # - Un contenedor o una base de produccion en un puerto que NO sea 3306/3308 tampoco se detecta.
 # Lo que SI cubre: el error por descuido (la sesion que exporta /etc/jax/.env, el default 3306 de
 # `_parametros_de_conexion`), que es el que ocurrio. La frontera real son las credenciales: `jax_test`
-# solo tiene permisos sobre bases `jax_memory_test*`. Endurecerlo (p. ej. exigir tambien
-# GITHUB_ACTIONS) cambia esta funcion en los dos repos a la vez: lo vigila `check_mirror_sync.py`.
+# solo tiene permisos sobre bases `jax_memory_test*`. Cambiar esta funcion la cambia en los dos
+# repos a la vez: lo vigila `check_mirror_sync.py` (identica byte a byte, y las tres funciones de
+# conexion tienen que llamarla antes de abrir nada).
 # Esto va como comentario y no en el docstring a proposito: el espejo se compara por el codigo de la
 # funcion, y asi esta nota no obliga a tocar jax-platform.
 def exigir_conexion_permitida(base: str, *, lectura_de_produccion: bool = False) -> None:
@@ -349,8 +352,8 @@ def exigir_conexion_permitida(base: str, *, lectura_de_produccion: bool = False)
        `VARIABLE_PERMISO_INSTANCIA_DE_PRODUCCION`: sin ella, ni leer.
     2. El puerto (el de `_parametros_de_conexion()`, con su mismo default 3306):
        ilegible o fuera de 1..65535 es un error; uno de `PUERTOS_DE_PRODUCCION`
-       fuera de CI exige la misma variable. En CI cada job trae su propio
-       contenedor (ver `_en_ci`), asi que ahi no aplica.
+       fuera de CI exige la misma variable. En CI (`CI` Y `GITHUB_ACTIONS=true`)
+       cada job trae su propio contenedor (ver `_en_ci`), asi que ahi no aplica.
     """
     permiso = _permiso_instancia_de_produccion()
     if lectura_de_produccion:
@@ -372,9 +375,10 @@ def exigir_conexion_permitida(base: str, *, lectura_de_produccion: bool = False)
         puerto = 0
     if not 1 <= puerto <= 65535:
         raise BaseDeTestInvalida(f"JAX_DB_PORT={crudo!r} no es un puerto valido (1..65535): no se conecta a ciegas.")
-    if puerto in PUERTOS_DE_PRODUCCION and not _en_ci() and not permiso:
+    en_ci = _en_ci() and os.environ.get("GITHUB_ACTIONS", "").strip().lower() == "true"
+    if puerto in PUERTOS_DE_PRODUCCION and not en_ci and not permiso:
         raise BaseDeTestInvalida(
-            f"JAX_DB_PORT={puerto} es la MariaDB de PRODUCCION (3306 y 3308) y esto no es CI: la suite "
+            f"JAX_DB_PORT={puerto} es la MariaDB de PRODUCCION (3306 y 3308) y esto no es CI (CI y GITHUB_ACTIONS=true): la suite "
             f"crea y borra bases ahi. Usa un contenedor desechable en otro puerto, o exporta "
             f"{VARIABLE_PERMISO_INSTANCIA_DE_PRODUCCION}=1 si de verdad quieres correr contra esa instancia.")
 

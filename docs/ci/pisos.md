@@ -739,6 +739,8 @@ Sin historia anotada en el workflow.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^14 passed`
 
+36 el 2026-10-05 (ronda de cierre de #355; medido LOCAL: 20 -> 36 passed): +16 pruebas del ORDEN (la guarda de conexión va como sentencia de primer nivel antes de la primera apertura de conexión: connect, get_pool, create_pool; en jax y en cada espejo).
+
 20 el 2026-10-05 (auditoría jax-platform #195, rama fix/b9-driver-runbooks; medido LOCAL: 14 -> 20 passed): +6 pruebas de las llamadas obligatorias (la guarda no se puede perder en una función con marcador de divergencia, en ninguna copia). El runner tiene la última palabra.
 
 ## `mirror-sync/cu`
@@ -895,6 +897,8 @@ para conservar byte a byte el registro de la migración de pisos.
 ## `tests-puros/out`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
+
+3491 -> 3501 el 2026-10-05 (ronda de cierre de #355, medido LOCAL como delta de archivo): `tests/test_base_por_sesion.py` 40 -> 50 colectados (+10: `CI` solo cuenta con `GITHUB_ACTIONS=true`; 5 entornos por 2 puertos). 45 skipped no cambia.
 
 3490 -> 3491 el 2026-10-05 (auditoría Jax#355, MINOR 1; delta de archivo local): `tests/test_base_por_sesion.py` 39 -> 40 (+1: un nombre con prefijo y sufijo inválido se niega). 45 skipped no cambia.
 

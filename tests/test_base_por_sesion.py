@@ -500,6 +500,7 @@ def conector(monkeypatch):
     monkeypatch.setenv("JAX_DB_USER", "jax_test")
     monkeypatch.setenv("JAX_DB_PASSWORD", "x")
     monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     monkeypatch.delenv(VARIABLE_PERMISO, raising=False)
     return c
 
@@ -577,9 +578,31 @@ def test_en_ci_los_puertos_de_produccion_siguen_permitidos(conector, monkeypatch
     """Los jobs de CI corren su propio contenedor en 3306: la guarda no los toca."""
     from base_de_test import exigir_conexion_permitida
     monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
     for puerto in ("3306", "3308"):
         monkeypatch.setenv("JAX_DB_PORT", puerto)
         exigir_conexion_permitida("jax_memory_test_sesion1")
+
+
+@pytest.mark.parametrize("entorno", [
+    {"CI": "true"},                                  # `CI` suelto: ya no alcanza
+    {"CI": "1"},
+    {"GITHUB_ACTIONS": "true"},                      # tampoco la otra sola
+    {"CI": "true", "GITHUB_ACTIONS": "false"},
+    {"CI": "true", "GITHUB_ACTIONS": ""},
+])
+@pytest.mark.parametrize("puerto", ["3306", "3308"])
+def test_ci_solo_cuenta_con_ci_y_github_actions_true(conector, monkeypatch, entorno, puerto):
+    """El runner de GitHub Actions (tambien el de hall9000) exporta `CI` y `GITHUB_ACTIONS=true`.
+    Una de las dos sola, o `GITHUB_ACTIONS` distinto de `true`, sigue exigiendo el permiso explicito."""
+    from base_de_test import exigir_conexion_permitida
+    for clave, valor in entorno.items():
+        monkeypatch.setenv(clave, valor)
+    monkeypatch.setenv("JAX_DB_PORT", puerto)
+    with pytest.raises(BaseDeTestInvalida, match=VARIABLE_PERMISO):
+        exigir_conexion_permitida("jax_memory_test_sesion1")
+    monkeypatch.setenv(VARIABLE_PERMISO, "1")        # y el permiso explicito sigue abriendo la puerta
+    exigir_conexion_permitida("jax_memory_test_sesion1")
 
 
 def test_un_puerto_ajeno_fuera_de_ci_se_permite_sin_variable(conector, monkeypatch):

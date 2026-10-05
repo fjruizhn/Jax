@@ -71,7 +71,8 @@ class Familia:
     espejos: tuple[tuple[str, Path], ...]  # (etiqueta legible, ruta)
     compartidos: tuple[str, ...]
     nota: str = ""
-    # (funcion, llamada): la funcion tiene que llamar a `llamada` en TODAS las copias, y esto NO
+    # (funcion, llamada): la funcion tiene que llamar a `llamada` en TODAS las copias, como sentencia
+    # de primer nivel y ANTES de la primera apertura de conexion (connect/get_pool/create_pool), y esto NO
     # lo excusa el marcador de divergencia. Una funcion declarada como divergente puede diferir
     # en lo que quiera MENOS en perder un control de seguridad (auditoria jax-platform #195:
     # sin esto, quitar la guarda de las funciones con marcador daba rc=0).
@@ -129,18 +130,47 @@ def _extract(path: Path, compartidos: tuple[str, ...]) -> dict[str, tuple[str, s
     return out
 
 
-def _llama_a(path: Path, funcion: str, llamada: str) -> bool:
-    """¿La funcion de modulo `funcion` de `path` contiene una llamada a `llamada`?
-    (Name o atributo; sync o async). Falso si la funcion no existe."""
+#: Lo que abre una conexion: `aiomysql.connect`, `pymysql.connect`, `get_pool`, `create_pool`
+#: (como atributo de cualquier modulo o como nombre suelto).
+_ABRE_CONEXION = frozenset({"connect", "get_pool", "create_pool"})
+
+
+def _nombre_llamado(call: ast.Call) -> str | None:
+    f = call.func
+    if isinstance(f, ast.Name):
+        return f.id
+    if isinstance(f, ast.Attribute):
+        return f.attr
+    return None
+
+
+def _guarda_antes_de_conectar(path: Path, funcion: str, llamada: str) -> str | None:
+    """Revisa la funcion de modulo `funcion` de `path` (sync o async). Devuelve None si esta bien,
+    o el motivo: «no existe», «no llama a X» o «llama a X despues de abrir una conexion».
+
+    La guarda tiene que ser una SENTENCIA de primer nivel del cuerpo (`llamada(...)`, con o sin
+    `await`), y tiene que estar ANTES, en el orden del AST, de la primera sentencia del cuerpo que
+    contenga una apertura de conexion. Una guarda dentro de un `if`, un `try` o una funcion anidada no
+    cuenta: no se ejecuta siempre. Esa misma sentencia es la que se compara con el orden de
+    `lineno`, asi que `x = connect(); guarda()` en una linea tampoco pasa por casualidad."""
     tree = ast.parse(path.read_text(), filename=str(path))
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == funcion:
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Call):
-                    f = sub.func
-                    if (isinstance(f, ast.Name) and f.id == llamada) or (isinstance(f, ast.Attribute) and f.attr == llamada):
-                        return True
-    return False
+    nodo = next((n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == funcion), None)
+    if nodo is None:
+        return "no existe"
+    llamadas_en = lambda stmt: [c for c in ast.walk(stmt) if isinstance(c, ast.Call)]  # noqa: E731
+    indice_guarda = indice_conexion = None
+    for i, stmt in enumerate(nodo.body):
+        if indice_guarda is None and isinstance(stmt, ast.Expr):
+            valor = stmt.value.value if isinstance(stmt.value, ast.Await) else stmt.value
+            if isinstance(valor, ast.Call) and _nombre_llamado(valor) == llamada:
+                indice_guarda = i
+        if indice_conexion is None and any(_nombre_llamado(c) in _ABRE_CONEXION for c in llamadas_en(stmt)):
+            indice_conexion = i
+    if indice_guarda is None:
+        return f"no llama a {llamada}"
+    if indice_conexion is not None and indice_conexion <= indice_guarda:
+        return f"llama a {llamada} despues de abrir una conexion"
+    return None
 
 
 def revisar(familia: Familia) -> tuple[list[str], list[str], list[str]]:
@@ -168,8 +198,10 @@ def revisar(familia: Familia) -> tuple[list[str], list[str], list[str]]:
     # Llamadas obligatorias: en el canonico y en cada espejo; el marcador no las excusa.
     for funcion, llamada in familia.llamadas_obligatorias:
         for etiqueta, ruta in (("jax", familia.canonico), *familia.espejos):
-            if not _llama_a(ruta, funcion, llamada):
-                faltantes.append(f"{funcion} no llama a {llamada} ({etiqueta})")
+            motivo = _guarda_antes_de_conectar(ruta, funcion, llamada)
+            if motivo is not None:
+                faltantes.append(f"{funcion}: {motivo} ({etiqueta})" if motivo != f"no llama a {llamada}"
+                                 else f"{funcion} no llama a {llamada} ({etiqueta})")
     return drift, declaradas, faltantes
 
 
