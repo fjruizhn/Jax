@@ -503,7 +503,8 @@ def _run_once_con(monkeypatch, *, pending, stuck, claim=None):
     from jax.memory import worker
     db=SimpleNamespace(pool=object(),connect=AsyncMock(return_value=True),close=AsyncMock())
     jobs=SimpleNamespace(pending=AsyncMock(return_value=pending),claim=AsyncMock(return_value=claim),
-                         stuck_count=AsyncMock(return_value=stuck))
+                         stuck_count=AsyncMock(return_value=stuck),
+                         stale_open_conversations=AsyncMock(return_value=(0,[])))
     monkeypatch.setenv('JAX_DB_HOST','isolated-test')
     monkeypatch.setattr(worker,'MemoryDB',lambda:db)
     monkeypatch.setattr(worker,'ExtractionJobs',lambda *a,**k:jobs)
@@ -606,3 +607,50 @@ def test_cli_reencolar_y_atascados_estan_documentados_en_el_modulo():
     args=worker._parse_args(['--reencolar','7','--motivo','revisado','--actor','fernando'])
     assert (args.reencolar,args.motivo,args.actor)==(7,'revisado','fernando')
     with pytest.raises(SystemExit): worker._parse_args(['--reencolar','7'])          # sin motivo no hay re-encolado
+
+
+# --- Conversaciones que nunca se cierran: se listan, no se cierran (auditoria 2026-10-05) ---
+
+@pytest.mark.asyncio
+async def test_real_conversaciones_abiertas_mas_de_siete_dias_se_listan_y_no_se_tocan():
+    from test_b9_persistent_api import _b9_ci_test_pool
+    from jax.memory.extraction_jobs import ExtractionJobs
+    pool=await _b9_ci_test_pool()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute('CREATE TEMPORARY TABLE conversations (id BIGINT PRIMARY KEY,started_at DATETIME(6),ended_at DATETIME(6) NULL,KEY idx_started(started_at))')
+                await cur.execute("INSERT INTO conversations VALUES (1,NOW(6)-INTERVAL 10 DAY,NULL),(2,NOW(6)-INTERVAL 2 DAY,NULL),"
+                                  "(3,NOW(6)-INTERVAL 30 DAY,NOW(6)-INTERVAL 29 DAY),(4,NOW(6)-INTERVAL 40 DAY,NULL)")
+            await conn.commit()
+        total,rows=await ExtractionJobs(pool).stale_open_conversations(7,limit=1)
+        assert total==2                                   # 1 y 4; la 2 es reciente y la 3 esta cerrada
+        assert [r['id'] for r in rows]==[4]               # la mas vieja primero, acotado por limit
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute('SELECT COUNT(*) AS n FROM conversations WHERE ended_at IS NULL')
+                assert (await cur.fetchone())['n']==3     # no cierra nada
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_la_corrida_avisa_de_las_abiertas_aunque_la_cola_este_vacia_y_no_falla_por_eso(monkeypatch,caplog):
+    worker,db,jobs=_run_once_con(monkeypatch,pending=[],stuck=0)
+    from unittest.mock import AsyncMock
+    jobs.stale_open_conversations=AsyncMock(return_value=(12,[{'id':4,'started_at':'2026-06-03'},{'id':9,'started_at':'2026-06-04'}]))
+    with caplog.at_level('WARNING',logger='jax.memory.worker'):
+        await worker.run_once(b9_writer=object())            # sale verde: es un aviso
+    msg=' '.join(r.getMessage() for r in caplog.records if r.levelname=='WARNING')
+    assert '12' in msg and '4' in msg and '9' in msg and '7' in msg
+    jobs.stale_open_conversations.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_si_el_aviso_de_abiertas_falla_la_extraccion_sigue(monkeypatch,caplog):
+    worker,db,jobs=_run_once_con(monkeypatch,pending=[],stuck=0)
+    from unittest.mock import AsyncMock
+    jobs.stale_open_conversations=AsyncMock(side_effect=RuntimeError('db'))
+    with caplog.at_level('ERROR',logger='jax.memory.worker'):
+        await worker.run_once(b9_writer=object())
+    assert any('abiertas' in r.getMessage() for r in caplog.records)
