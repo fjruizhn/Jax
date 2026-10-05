@@ -130,7 +130,11 @@ Sin historia anotada en el workflow.
 
 ## `memory-b9-regression/casos`
 
-Mínimo actualizado 2026-10-05: `183` casos. El run PR `37317897149`, job `111789176129`, sobre SHA `daab357ce80b1e7e1843155b88e2f57c9adf93bd`, terminó 183 passed, 0 failed/errors/skips para el par combinado Faro/B9. El conteo previo de esta rama era 128 y el de #354 era 176; se conserva la medición exacta mayor. Las seis fronteras de `memoria.buscar` cubren rechazo de configuración forzada hacia producción, apertura solo del perfil permitido, rollback con timeout que descarta la conexión, cancelación durante rollback sin segundo intento, validación de síntesis sin leer su BLOB y delegación de `fetchone` por el cursor observado de la prueba MariaDB. La prueba MariaDB real mantiene tablas de sesión temporales y comprueba que el reader solo emite lecturas y valida sus fuentes exactas.
+Mínimo 188 -> 194 el 2026-10-05 (auditoría Jax#355, MINOR 3; medido LOCAL con la misma lista, 0 skipped): `tests/test_memory_b9_provision.py` 5 -> 11 (+6: guarda de puerto del constructor, `SELECT DATABASE()` tras cada script, rechazo de `USE`, guarda de puerto del driver).
+
+Mínimo actualizado 2026-10-05 (rama fix/b9-driver-runbooks): `188` casos, medido LOCAL contra MariaDB desechable en 127.0.0.1:3306 con la misma lista más `tests/test_memory_b9_provision.py` (+5, puras: el esquema se carga sin `CREATE DATABASE`/`USE` de producción, el divisor respeta `DELIMITER`, la guarda, el orden de migraciones); 0 skipped. El mismo job corre ahora `tests/memory_b9_provision.py` y `tests/memory_b9_regression_driver.py` (19 casos) sobre un segundo servicio MariaDB vacío; esa parte no suma casos pytest y falla el paso si algún caso no es PASS. Antes: `183`.
+
+Historia previa (183): el run PR `37317897149`, job `111789176129`, sobre SHA `daab357ce80b1e7e1843155b88e2f57c9adf93bd`, terminó 183 passed, 0 failed/errors/skips para el par combinado Faro/B9. El conteo previo de esta rama era 128 y el de #354 era 176; se conserva la medición exacta mayor. Las seis fronteras de `memoria.buscar` cubren rechazo de configuración forzada hacia producción, apertura solo del perfil permitido, rollback con timeout que descarta la conexión, cancelación durante rollback sin segundo intento, validación de síntesis sin leer su BLOB y delegación de `fetchone` por el cursor observado de la prueba MariaDB. La prueba MariaDB real mantiene tablas de sesión temporales y comprueba que el reader solo emite lecturas y valida sus fuentes exactas.
 
 ## `facet-health-io/out`
 
@@ -478,6 +482,12 @@ passed"), no el de sumar comentarios: ese error ya rompio CI hoy.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^203 passed`
 
+218 -> 223 el 2026-10-05 (re-auditoría de #355; medido LOCAL con la lista completa del job: 223 passed): `test_b9_systemd_ownership.py` 17 -> 22 (+5: un argumento desconocido del instalador se rechaza antes de instalar nada).
+
+214 -> 218 el 2026-10-05 (auditoría Jax#355, MINOR 5; medido LOCAL con la lista completa del job: 218 passed): `test_b9_systemd_ownership.py` 13 -> 17 (+4: el instalador con un systemctl falso en el PATH, la barra final del destino, el origen de producción y la poda de lo que ya no está en el repo).
+
+206 -> 214 el 2026-10-05 (rama fix/b9-driver-runbooks, medido LOCAL como delta de archivo): `test_b9_systemd_ownership.py` 5 -> 13 (+8: los tres drop-ins de worker y synthesis, versionados y comprobados, y el instalador que los instala, ejecutado contra un destino de prueba). El runner tiene la ultima palabra.
+
 203 -> 206 el 2026-10-05 (rama fix/memoria-worker-cuarentena-aviso-orden, hall9000, medido LOCAL: 123 -> 126 passed sobre la misma lista de archivos): `test_b9_systemd_ownership.py` +4 (cinco unidades con OnFailure, ExecStartPre del checkout sano, timer de synthesis a las 04:30, las cinco existen) y -1 (se borra la prueba que solo comprobaba que `run_once` no llamaba a `_recalcular_embeddings_en_ceros`, codigo muerto borrado). El runner tiene la ultima palabra: si mide otro numero, se corrige aqui y en `ci/pisos.json`.
 
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
@@ -731,7 +741,11 @@ Sin historia anotada en el workflow.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^14 passed`
 
-Sin historia anotada en el workflow.
+37 el 2026-10-05 (cierre de la auditoría conjunta de #355; medido LOCAL: 36 -> 37 passed): +1 prueba que fija las `llamadas_obligatorias` reales de la familia `base_de_test`.
+
+36 el 2026-10-05 (ronda de cierre de #355; medido LOCAL: 20 -> 36 passed): +16 pruebas del ORDEN (la guarda de conexión va como sentencia de primer nivel antes de la primera apertura de conexión: connect, get_pool, create_pool; en jax y en cada espejo).
+
+20 el 2026-10-05 (auditoría jax-platform #195, rama fix/b9-driver-runbooks; medido LOCAL: 14 -> 20 passed): +6 pruebas de las llamadas obligatorias (la guarda no se puede perder en una función con marcador de divergencia, en ninguna copia). El runner tiene la última palabra.
 
 ## `mirror-sync/cu`
 
@@ -887,6 +901,12 @@ para conservar byte a byte el registro de la migración de pisos.
 ## `tests-puros/out`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
+
+3491 -> 3501 el 2026-10-05 (ronda de cierre de #355, medido LOCAL como delta de archivo): `tests/test_base_por_sesion.py` 40 -> 50 colectados (+10: `CI` solo cuenta con `GITHUB_ACTIONS=true`; 5 entornos por 2 puertos). 45 skipped no cambia.
+
+3490 -> 3491 el 2026-10-05 (auditoría Jax#355, MINOR 1; delta de archivo local): `tests/test_base_por_sesion.py` 39 -> 40 (+1: un nombre con prefijo y sufijo inválido se niega). 45 skipped no cambia.
+
+3477 -> 3490 el 2026-10-05 (rama fix/b9-driver-runbooks, medido LOCAL como delta de archivo): `tests/test_base_por_sesion.py` 26 -> 39 colectados (+13: la suite no abre conexiones a la instancia de produccion ni a `jax_memory` fuera de CI sin `JAX_TEST_DB_PERMITIR_INSTANCIA_DE_PRODUCCION`). 45 skipped no cambia. El runner tiene la ultima palabra.
 
 3476 -> 3477 el 2026-10-05 (auditoria Jax#354, misma rama, delta de archivo local): `tests/test_hnsw_recall_tripwire.py` 6 -> 7 (+1: con faltantes y recall vencido a la vez gana el fallo general; el recall solo sale con el codigo propio 3).
 
