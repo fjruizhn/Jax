@@ -49,6 +49,10 @@ Si un `UNKNOWN` se queda, investigar los marcadores (`memory_extraction_results`
    - No toca `frozen_output`/`input_digest`: una cuarentena por «fuente cambiada» volverá a caer.
    - Escribe el evento `REQUEUE` en `memory_extraction_job_events` con el **usuario real del proceso**
      (por uid) y, aparte, el `--actor` declarado en `details.declared_actor`.
+   - **Quién es la persona.** El comando necesita las credenciales de `/etc/jax/.env`, así que se corre con
+     `sudo` (como `jaxsvc` o `root`): el «actor real» del evento será `jaxsvc` o `root`, no tú. La persona
+     se rastrea en el **registro de sudo** (`journalctl _COMM=sudo` o `/var/log/auth.log`, a la hora del
+     evento `occurred_at`) y en el `--actor` declarado. Poner siempre un `--actor` verdadero.
 4. Auditoría: `SELECT * FROM memory_extraction_job_events WHERE conversation_id=<id>`.
 5. La unidad vuelve a verde en la corrida siguiente cuando no queda ningún atascado.
 

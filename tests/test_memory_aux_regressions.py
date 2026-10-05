@@ -467,7 +467,7 @@ def test_readme_de_migraciones_trae_la_marcha_atras_exacta_de_007_a_013():
     ]
     posiciones = [texto.index(p) for p in pasos]
     assert posiciones == sorted(posiciones), "marcha atras en orden inverso: 013, 012, 011, 010, 009, 008, 007"
-    assert texto.count("SET SESSION lock_wait_timeout=10;") >= 4          # 011, 012, 013 y su marcha atras
+    assert texto.index("SET SESSION lock_wait_timeout=10;") < texto.index(pasos[0])      # la marcha atras tambien limita la espera
 
 
 def test_install_memory_scope_no_habilita_el_worker_sin_bandera_explicita():
@@ -659,8 +659,8 @@ async def test_real_012_el_indice_de_abiertas_cambia_el_plan_de_stale_open_conve
                 await cur.execute(st)
             await cur.execute("ANALYZE TABLE conversations"); await cur.fetchall()
             await cur.execute(consulta); despues = await cur.fetchone()
-        assert despues["key"] == "idx_conversations_open", (antes, despues)
-        assert despues["rows"] < antes["rows"], (antes, despues)                                    # EXPLAIN antes/despues
+        assert despues["key"] == "idx_conversations_open", (antes["key"], antes["rows"], despues["key"], despues["rows"])
+        assert int(despues["rows"]) < int(antes["rows"]), (antes["type"], antes["rows"], despues["type"], despues["rows"])                                    # EXPLAIN antes/despues
     await _con_tablas_reales(escenario)
 
 
@@ -693,4 +693,23 @@ async def test_real_013_quita_idx_conversation_sin_que_ninguna_consulta_pierda_p
                 assert "filesort" not in (plan["Extra"] or ""), (nombre, plan)
             await cur.execute("DELETE FROM conversations WHERE id=5")                                # la FK sigue indexada y viva
             await cur.execute("SELECT COUNT(*) AS n FROM messages WHERE conversation_id=5"); assert (await cur.fetchone())["n"] == 0
+    await _con_tablas_reales(escenario)
+
+
+@pytest.mark.asyncio
+async def test_real_la_marcha_atras_del_readme_restaura_el_estado_de_produccion_dos_veces():
+    """Ejecuta los pasos 013/012/011 del README sobre la DDL real despues de aplicar las tres migraciones."""
+    bloque = _re.search(r"```sql\n(.*?)```", (_MIG / "README.md").read_text(encoding="utf-8"), _re.S).group(1)
+    pasos = [x.strip() for x in "\n".join(l for l in bloque.splitlines() if not l.lstrip().startswith("--")).split(";") if x.strip()]
+    sobre_tablas = [p for p in pasos if "messages" in p or "conversations" in p or "lock_wait" in p]
+    assert len(sobre_tablas) == 4
+    async def escenario(c1):
+        async with c1.cursor() as cur:
+            for n in ("011_messages_conversation_turn_index.sql", "012_conversations_open_index.sql", "013_messages_drop_redundant_conversation_index.sql"):
+                for st in _sentencias(n, timeout=10): await cur.execute(st)
+            for _ in range(2):
+                for st in sobre_tablas: await cur.execute(st)
+            await cur.execute("SHOW INDEX FROM messages"); m = {r["Key_name"] for r in await cur.fetchall()}
+            await cur.execute("SHOW INDEX FROM conversations"); c = {r["Key_name"] for r in await cur.fetchall()}
+        assert "idx_conversation" in m and "idx_messages_conversation_turn" not in m and "idx_conversations_open" not in c
     await _con_tablas_reales(escenario)
