@@ -457,13 +457,13 @@ def test_readme_de_migraciones_trae_la_marcha_atras_exacta_de_007_a_011():
     pasos = [
         "DROP INDEX IF EXISTS idx_messages_conversation_turn",                                         # 011
         "ADD INDEX IF NOT EXISTS idx_embedding_generation_revision (revision_id, embedding_space_id)",  # 010 (antes que 008)
-        "DROP INDEX IF EXISTS uq_embedding_generation_revision_space",                                  # 008
         "DROP TABLE IF EXISTS embedding_generation_attempts",                                           # 009
+        "DROP INDEX IF EXISTS uq_embedding_generation_revision_space",                                  # 008
         "DROP TABLE IF EXISTS memory_extraction_job_events",                                            # 007
     ]
     posiciones = [texto.index(p) for p in pasos]
     assert posiciones == sorted(posiciones), "la marcha atras va en orden inverso: 011, 010, 009, 008, 007 (la 008 despues de restaurar el indice de la 010)"
-    assert texto.index(pasos[1]) < texto.index(pasos[2])
+    assert texto.index(pasos[1]) < texto.index(pasos[3])   # el indice de la 010 vuelve ANTES de bajar la 008
 
 
 def test_install_memory_scope_no_habilita_el_worker_sin_bandera_explicita():

@@ -51,6 +51,10 @@ BATCH_SIZE = 50
 DEFAULT_MAX_ATTEMPTS = 5
 ESQUEMA_B9 = "b9-v1"
 
+#: Codigos de salida de vector-health (aviso-fallo distingue incidentes por ellos).
+EXIT_GENERAL = 1          # faltan vectores o fallo general
+EXIT_RECALL_REMEDIR = 3   # el tripwire pide volver a medir el recall del HNSW (el 2 es del worker: jobs atascados)
+
 
 def _max_attempts() -> int:
     value = int(os.environ.get("JAX_MEMORY_EMBED_MAX_ATTEMPTS", str(DEFAULT_MAX_ATTEMPTS)))
@@ -188,6 +192,7 @@ async def run_b9_embeddings(db: MemoryDB, *, writer: PersistentEmbeddingWriter |
     if not db.pool:
         raise RuntimeError("B9 embedding worker requires a connected pool")
     writer = writer or build_persistent_embedding_writer(db.pool)
+    identity_resuelta_aqui = identity is None
     identity = identity or await resolver_identidad()
     await avisar_si_cambio_el_digest(db.pool, identity)
     max_attempts = _max_attempts()
@@ -225,6 +230,15 @@ async def run_b9_embeddings(db: MemoryDB, *, writer: PersistentEmbeddingWriter |
             logger.exception("B9 embedding failed for memory %s", row["memory_id"])
             failed += 1
             await _registrar_fallo(db.pool, row["revision_id"], identity.embedding_space_id, type(error).__name__, max_attempts)
+    if identity_resuelta_aqui:
+        # El digest se leyo al inicio; si Ollama cambio de pesos a mitad de la corrida, lo generado
+        # despues pertenece a otro modelo pero quedo registrado con el digest viejo: la corrida falla.
+        final = await modelo_digest(CONFIG.model)
+        if final != identity.model_version_or_digest:
+            logger.error("B9 embeddings: el digest del modelo %s cambio DURANTE la corrida (%s -> %s); los vectores "
+                         "generados en ella no son confiables: se marca la corrida como fallida",
+                         CONFIG.model, identity.model_version_or_digest, final)
+            failed += 1
     return completed, failed
 
 
@@ -272,8 +286,9 @@ async def run_b9_vector_health() -> int:
         logger.error("B9 vector health: el recall del indice HNSW de messages hay que volver a medirlo (ver el ERROR anterior)")
     if missing:
         logger.error("B9 vector health: %s current revision(s) have no embedding generation", missing)
-    if missing or recall_vencido:
-        return 1
+        return EXIT_GENERAL            # faltan vectores: fallo general, aunque ademas haya que remedir el recall
+    if recall_vencido:
+        return EXIT_RECALL_REMEDIR
     logger.info("B9 vector health: every current retrievable revision has a generation")
     return 0
 

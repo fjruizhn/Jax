@@ -38,3 +38,28 @@ en cada corrida). Ver `docs/runbooks/memoria-cola-atascada.md`.
 - Los intentos huerfanos de `embedding_generation_attempts` se limpian en la purga de contenido
   (`DELETE a FROM ...` en `content_purge`): las revisiones quedan de tombstone, asi que una FK
   ON DELETE CASCADE nunca dispararia.
+- `011_messages_conversation_turn_index.sql`: indice `idx_messages_conversation_turn (conversation_id,
+  turn_number, id)`; quita el `Using filesort` de las dos lecturas de mensajes por conversacion. Va
+  tambien en `jax_memory_schema.sql`. Es un ALTER sobre una tabla con VECTOR KEY: ventana tranquila.
+
+## Marcha atrás de 007–011 (2026-10-05)
+
+Orden INVERSO: 011, 010, 009, 008, 007. Todo con `IF [NOT] EXISTS`, repetible. Respaldar antes
+(Principio VI). **Lo irreversible sin respaldo:** bajar 007 borra la auditoría del re-encolado y bajar
+009 borra los contadores de intentos; exportarlos antes si importan.
+
+```sql
+-- 011
+ALTER TABLE messages DROP INDEX IF EXISTS idx_messages_conversation_turn;
+-- 010: restaurar el índice ANTES de bajar la UNIQUE de 008 (la FK por revision_id lo necesita)
+ALTER TABLE embedding_generations ADD INDEX IF NOT EXISTS idx_embedding_generation_revision (revision_id, embedding_space_id);
+-- 009 (antes: SELECT * FROM embedding_generation_attempts si se quiere conservar el rastro)
+DROP TABLE IF EXISTS embedding_generation_attempts;
+-- 008 (solo después de restaurar el índice de la 010)
+ALTER TABLE embedding_generations DROP INDEX IF EXISTS uq_embedding_generation_revision_space;
+-- 007 (antes: SELECT * FROM memory_extraction_job_events si se quiere conservar la auditoría)
+DROP TABLE IF EXISTS memory_extraction_job_events;
+```
+
+El código nuevo del worker usa 007 y 009 en cada corrida: si se baja el esquema hay que volver también
+al código anterior (`5f4f5e0`), o el worker y la unidad de embeddings fallarán por tabla inexistente.
