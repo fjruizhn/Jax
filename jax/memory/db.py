@@ -1013,7 +1013,7 @@ class MemoryDB:
                 last_conv_id = row[0]
                 await cur.execute(
                     "SELECT role, content FROM messages "
-                    "WHERE conversation_id = %s ORDER BY turn_number DESC LIMIT %s",
+                    "WHERE conversation_id = %s ORDER BY turn_number DESC, id DESC LIMIT %s",
                     (last_conv_id, limit)
                 )
                 rows = await cur.fetchall()
