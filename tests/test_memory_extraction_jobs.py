@@ -272,7 +272,7 @@ async def test_worker_poison_does_not_starve_next_and_exit_is_failure(monkeypatc
     from unittest.mock import AsyncMock
     from jax.memory import worker
     db=SimpleNamespace(pool=object(),connect=AsyncMock(return_value=True),close=AsyncMock())
-    jobs=SimpleNamespace(pending=AsyncMock(return_value=[{'id':1},{'id':2}]),claim=AsyncMock(return_value={'claim_token':'token'}))
+    jobs=SimpleNamespace(pending=AsyncMock(return_value=[{'id':1},{'id':2}]),claim=AsyncMock(return_value={'claim_token':'token'}),stuck_count=AsyncMock(return_value=0))
     monkeypatch.setenv('JAX_DB_HOST','isolated-test')
     monkeypatch.setattr(worker,'MemoryDB',lambda:db)
     monkeypatch.setattr(worker,'ExtractionJobs',lambda *a,**k:jobs)
@@ -289,7 +289,7 @@ async def test_worker_claim_quarantine_exits_failed(monkeypatch):
     from unittest.mock import AsyncMock
     from jax.memory import worker
     db=SimpleNamespace(pool=object(),connect=AsyncMock(return_value=True),close=AsyncMock())
-    jobs=SimpleNamespace(pending=AsyncMock(return_value=[{'id':1}]),claim=AsyncMock(return_value={'quarantined':True}))
+    jobs=SimpleNamespace(pending=AsyncMock(return_value=[{'id':1}]),claim=AsyncMock(return_value={'quarantined':True}),stuck_count=AsyncMock(return_value=0))
     monkeypatch.setenv('JAX_DB_HOST','isolated-test')
     monkeypatch.setattr(worker,'MemoryDB',lambda:db)
     monkeypatch.setattr(worker,'ExtractionJobs',lambda *a,**k:jobs)

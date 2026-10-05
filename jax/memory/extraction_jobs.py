@@ -6,6 +6,19 @@ from .b9 import _digest
 from .b9_mariadb import MariaDBB9Store
 
 
+class ExtractorOutputError(ValueError):
+    """La SALIDA del extractor (LLM) no cumple el contrato.
+
+    Distinta de un ValueError por limites o autoridad de la FUENTE: la fuente esta bien y el
+    mismo job puede salir bien en otro intento, asi que va a RETRY (acotado por
+    JAX_MEMORY_MAX_ATTEMPTS; al agotarse, fail() lo pone en QUARANTINED). Un ValueError de
+    la fuente sigue en cuarentena inmediata. Auditoria 2026-10-05, MAJOR-1.
+    """
+
+
+ERROR_SALIDA_DEL_EXTRACTOR = 'EXTRACTOR_OUTPUT_INVALID'
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
 
@@ -146,3 +159,42 @@ class ExtractionJobs:
             backoff=min(3600,30*2**min(job['attempts'],6))
             await cur.execute("UPDATE memory_extraction_jobs SET state=%s,error_code=%s,next_attempt_at=DATE_ADD(NOW(6), INTERVAL %s SECOND),lease_until=NULL WHERE conversation_id=%s",(state,error_code[:128],backoff,conversation_id))
         await self.store.mutation(op)
+
+    async def stuck_count(self):
+        """Jobs que esperan a una persona: QUARANTINED o UNKNOWN. pending() los excluye (o los
+        deja a la recuperacion), asi que sin este conteo una cola 'vacia' sale verde con
+        conversaciones que nunca se destilaron."""
+        async def op(cur):
+            await cur.execute("SELECT COUNT(*) AS n FROM memory_extraction_jobs WHERE state IN ('QUARANTINED','UNKNOWN')")
+            return int((await cur.fetchone())['n'])
+        return await self.store.mutation(op)
+
+    async def list_stuck(self, limit=50):
+        async def op(cur):
+            await cur.execute("SELECT conversation_id,state,error_code,attempts,updated_at FROM memory_extraction_jobs "
+                "WHERE state IN ('QUARANTINED','UNKNOWN') ORDER BY updated_at,conversation_id LIMIT %s",(limit,))
+            return list(await cur.fetchall())
+        return await self.store.mutation(op)
+
+    async def requeue(self, conversation_id, *, actor, reason):
+        """Re-encola un job en cuarentena DESPUES de que una persona lo reviso.
+
+        Deja el job en READY con los intentos en 0 y registra el evento REQUEUE (quien, por que,
+        estado y error anteriores) en la MISMA transaccion: sin auditoria no hay re-encolado.
+        No toca frozen_output ni input_digest: si la cuarentena fue por 'fuente cambiada', el
+        job volvera a cuarentena y decide una persona. Solo acepta QUARANTINED.
+        """
+        actor=(actor or '').strip(); reason=(reason or '').strip()
+        if not actor or not reason: raise ValueError('requeue requires actor and reason')
+        async def op(cur):
+            await cur.execute("SELECT state,error_code,attempts FROM memory_extraction_jobs WHERE conversation_id=%s FOR UPDATE",(conversation_id,))
+            job=await cur.fetchone()
+            if not job: raise ValueError(f'el job de la conversacion {conversation_id} no existe')
+            if job['state']!='QUARANTINED':
+                raise ValueError(f"solo se re-encola un job QUARANTINED; esta en {job['state']}")
+            await cur.execute("INSERT INTO memory_extraction_job_events (event_id,conversation_id,event_kind,actor,reason,details) VALUES (%s,%s,'REQUEUE',%s,%s,%s)",
+                (str(uuid.uuid4()),conversation_id,actor[:128],reason[:512],
+                 canonical({'previous_state':job['state'],'previous_error_code':job['error_code'],'previous_attempts':job['attempts']})))
+            await cur.execute("UPDATE memory_extraction_jobs SET state='READY',attempts=0,error_code=NULL,next_attempt_at=NULL,claim_token=NULL,lease_until=NULL WHERE conversation_id=%s",(conversation_id,))
+            return {'conversation_id':conversation_id,'previous_state':job['state'],'previous_error_code':job['error_code']}
+        return await self.store.mutation(op)
