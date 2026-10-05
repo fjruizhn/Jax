@@ -22,6 +22,12 @@
 # sola en /etc a mitad de una instalación interrumpida (M5). Este guion NO
 # hace daemon-reload ni systemctl: sólo copia archivos.
 #
+# LÍMITES CONOCIDOS (auditoría de #356, m3): este guion solo COPIA y SOBRESCRIBE lo que el
+# manifiesto lista; NO retira los .conf que ya estén instalados y el manifiesto no mencione
+# (los sobrantes los marca como diferencia ops/verificar-arranque-instalado.sh, pero hay que
+# borrarlos a mano). Y NO instala las unidades base: esas no tienen instalador salvo la del
+# proxy (ops/ejecutor/instalar_registro_y_cerco.sh, que respalda la instalada antes).
+#
 # DESTDIR (default vacío = comportamiento de siempre, /etc real): para
 # probar sin tocar el /etc real, se invoca con DESTDIR=<directorio temporal>
 # y las rutas quedan bajo "$DESTDIR/etc/systemd/system/...". De los guiones
