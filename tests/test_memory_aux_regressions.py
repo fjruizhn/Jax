@@ -201,3 +201,174 @@ def test_synthesis_response_and_item_budgets(monkeypatch):
     monkeypatch.setenv("JAX_MEMORY_SYNTHESIS_MAX_ITEM_CHARS","2")
     with pytest.raises(ValueError,match="text limit"):
         synthesis.validated_insights({"insights":[{"text":"long","source_ids":[1,2]}]},facts)
+
+
+# --- Auditoria 2026-10-05, menores del worker de embeddings ---------------------------------
+
+def _cliente_ollama(monkeypatch, *, tags=None, falla=None):
+    """Sustituye el cliente HTTP compartido por uno que responde `tags` en /api/tags."""
+    from jax.memory import embedding_worker as embedding
+    monkeypatch.setenv("JAX_OLLAMA_URL", "http://ollama.invalid:11434")
+    llamadas = []
+    class Resp:
+        def raise_for_status(self):
+            if falla: raise falla
+        def json(self): return {"models": tags or []}
+    class Cliente:
+        async def get(self, url, timeout=None):
+            llamadas.append(url)
+            if falla and not isinstance(falla, Exception): raise falla
+            return Resp()
+    monkeypatch.setattr(embedding, "obtener_cliente_http", lambda: Cliente())
+    return llamadas
+
+
+def test_el_digest_del_modelo_sale_de_api_tags_de_ollama(monkeypatch):
+    from jax.memory import embedding_worker as embedding
+    llamadas = _cliente_ollama(monkeypatch, tags=[
+        {"name": "nomic-embed-text:latest", "digest": "otro"}, {"name": "bge-m3:latest", "digest": "7907aaaa"}])
+    assert asyncio.run(embedding.modelo_digest("bge-m3")) == "7907aaaa"      # sin tag = :latest, como Ollama
+    assert asyncio.run(embedding.modelo_digest("bge-m3:latest")) == "7907aaaa"
+    assert llamadas[0] == "http://ollama.invalid:11434/api/tags"
+
+
+@pytest.mark.parametrize("tags,falla", [
+    ([{"name": "otro:latest", "digest": "x"}], None),                       # el modelo no esta instalado
+    ([{"name": "bge-m3:latest"}], None),                                    # sin digest
+    ([{"name": "bge-m3:latest", "digest": ""}], None),                      # digest vacio
+    ([], RuntimeError("HTTP 500")),                                         # Ollama responde error
+    ([], ConnectionError("Ollama caido")),                                  # Ollama no responde
+])
+def test_si_ollama_no_da_el_digest_la_corrida_falla_y_no_guarda_none(monkeypatch, tags, falla):
+    from jax.memory import embedding_worker as embedding
+    _cliente_ollama(monkeypatch, tags=tags, falla=falla)
+    with pytest.raises(Exception):
+        asyncio.run(embedding.resolver_identidad())
+
+
+def test_la_identidad_lleva_el_digest_real_y_otro_digest_es_otro_espacio(monkeypatch):
+    from jax.memory import embedding_worker as embedding
+    ids = {}
+    for digest in ("d1", "d2"):
+        monkeypatch.setattr(embedding, "modelo_digest", AsyncMock(return_value=digest))
+        ident = asyncio.run(embedding.resolver_identidad())
+        assert ident.model_version_or_digest == digest
+        ids[digest] = ident.embedding_space_id
+    assert ids["d1"] != ids["d2"]                    # el cambio de modelo no se mezcla en el espacio viejo
+
+
+def test_vector_health_tambien_falla_si_no_puede_consultar_ollama(monkeypatch):
+    from jax.memory import embedding_worker as embedding
+    monkeypatch.setenv("JAX_DB_HOST", "127.0.0.1"); monkeypatch.setenv("JAX_DB_PORT", "1")
+    monkeypatch.setattr(embedding, "modelo_digest", AsyncMock(side_effect=RuntimeError("Ollama caido")))
+    monkeypatch.setattr(embedding, "cerrar_cliente_http", AsyncMock())
+    with pytest.raises(RuntimeError, match="Ollama caido"):
+        asyncio.run(embedding.run_b9_vector_health())
+
+
+async def _pool_de_embeddings():
+    """Tablas minimas de embeddings sobre el pool temporal de CI (una conexion)."""
+    from pathlib import Path
+    from test_b9_persistent_api import _b9_ci_test_pool
+    pool = await _b9_ci_test_pool()
+    mig = Path(__file__).resolve().parents[1] / "jax/memory/b9_migrations"
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DROP TEMPORARY TABLE embedding_generations")
+            await cur.execute("CREATE TEMPORARY TABLE embedding_generations (generation_id CHAR(36) PRIMARY KEY, revision_id CHAR(36), embedding_space_id CHAR(71), generated_at DATETIME(6), embedding_payload LONGBLOB, KEY idx_embedding_generation_revision (revision_id, embedding_space_id))")
+            await cur.execute("CREATE TEMPORARY TABLE embedding_spaces (embedding_space_id CHAR(71) PRIMARY KEY, schema_version VARCHAR(64), provider_runtime_class VARCHAR(64), model_identifier VARCHAR(255), model_version_or_digest VARCHAR(255) NULL, dimension INT, normalization VARCHAR(64), distance_semantics VARCHAR(64), created_at DATETIME(6))")
+            for nombre in ("008_embedding_generation_unique.sql", "009_embedding_generation_attempts.sql"):
+                sql = "\n".join(l for l in (mig / nombre).read_text().splitlines() if not l.lstrip().startswith("--"))
+                for st in sql.split(";"):
+                    if st.strip():
+                        await cur.execute(st.replace("CREATE TABLE IF NOT EXISTS", "CREATE TEMPORARY TABLE"))
+        await conn.commit()
+    return pool
+
+
+async def _sembrar_revisiones(pool, n):
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            for i in range(1, n + 1):
+                await cur.execute("INSERT INTO memory_objects (memory_id,tenant_id) VALUES (%s,'t')", (f"m{i}",))
+                await cur.execute("INSERT INTO memory_revisions (revision_id,memory_id,visibility,lifecycle_state,created_at) VALUES (%s,%s,'USER_PRIVATE','ACTIVE',%s)", (f"r{i}", f"m{i}", f"2026-01-01 00:00:0{i}"))
+                await cur.execute("INSERT INTO memory_revision_payloads (revision_id,payload) VALUES (%s,%s)", (f"r{i}", f"texto {i}".encode()))
+                await cur.execute("INSERT INTO memory_projections (memory_id,current_revision_id,current_lifecycle_state,reconciliation_required) VALUES (%s,%s,'ACTIVE',FALSE)", (f"m{i}", f"r{i}"))
+        await conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_real_una_fila_que_siempre_falla_no_bloquea_la_cola_y_se_registra(monkeypatch, caplog):
+    """BATCH_SIZE=1: sin contador de intentos, r1 ocupa la cabeza de la cola para siempre."""
+    import uuid
+    from jax.memory import embedding_worker as embedding
+    pool = await _pool_de_embeddings()
+    try:
+        await _sembrar_revisiones(pool, 3)
+        monkeypatch.setattr(embedding, "BATCH_SIZE", 1)
+        monkeypatch.setenv("JAX_MEMORY_EMBED_MAX_ATTEMPTS", "2")
+        identity = EmbeddingSpaceIdentity("b9-v1", "ollama", "bge-m3", "d1", 2, "unit", "cosine")
+
+        async def get_embedding(texto):
+            return None if texto == "texto 1" else [0.1, 0.2]
+        class Writer:
+            async def persist(self, memory_id, ident, vector, visibility, *, expected_revision_id=None):
+                async with pool.acquire() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute("INSERT INTO embedding_generations (generation_id,revision_id,embedding_space_id,generated_at) VALUES (%s,%s,%s,NOW(6))",
+                                          (str(uuid.uuid4()), expected_revision_id, ident.embedding_space_id))
+                    await conn.commit()
+                return "g"
+        db = SimpleNamespace(pool=pool, get_embedding=get_embedding)
+        resultados = []
+        with caplog.at_level("ERROR", logger="jax.memory.embedding_worker"):
+            for _ in range(5):
+                resultados.append(await embedding.run_b9_embeddings(db, writer=Writer(), identity=identity))
+        assert resultados == [(0, 1), (0, 1), (1, 0), (1, 0), (0, 0)], resultados
+        assert any("r1" in r.getMessage() and "saltad" in r.getMessage() for r in caplog.records)   # queda registrado
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT attempts FROM embedding_generation_attempts WHERE revision_id='r1'")
+                assert (await cur.fetchone())["attempts"] == 2
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_real_un_digest_nuevo_del_modelo_avisa_y_no_se_mezcla(caplog):
+    from jax.memory import embedding_worker as embedding
+    pool = await _pool_de_embeddings()
+    try:
+        viejo = EmbeddingSpaceIdentity("b9-v1", "ollama", "bge-m3", "d1", 1024, "unit", "cosine")
+        nuevo = EmbeddingSpaceIdentity("b9-v1", "ollama", "bge-m3", "d2", 1024, "unit", "cosine")
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("INSERT INTO embedding_spaces VALUES (%s,'b9-v1','ollama','bge-m3','d1',1024,'unit','cosine',NOW(6))", (viejo.embedding_space_id,))
+            await conn.commit()
+        with caplog.at_level("WARNING", logger="jax.memory.embedding_worker"):
+            await embedding.avisar_si_cambio_el_digest(pool, viejo)          # mismo digest: nada que avisar
+            assert not caplog.records
+            await embedding.avisar_si_cambio_el_digest(pool, nuevo)
+        msg = " ".join(r.getMessage() for r in caplog.records)
+        assert "d1" in msg and "d2" in msg and "espacio" in msg
+        assert viejo.embedding_space_id != nuevo.embedding_space_id
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_real_migraciones_008_y_009_son_idempotentes_y_la_unica_rechaza_duplicados():
+    import aiomysql
+    pool = await _pool_de_embeddings()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                from pathlib import Path
+                sql = "\n".join(l for l in (Path(__file__).resolve().parents[1] / "jax/memory/b9_migrations/008_embedding_generation_unique.sql").read_text().splitlines() if not l.lstrip().startswith("--"))
+                await cur.execute(sql.strip().rstrip(";"))                  # segunda vez: no falla
+                await cur.execute("INSERT INTO embedding_generations (generation_id,revision_id,embedding_space_id,generated_at) VALUES ('g1','r1','s1',NOW(6))")
+                with pytest.raises(aiomysql.IntegrityError):
+                    await cur.execute("INSERT INTO embedding_generations (generation_id,revision_id,embedding_space_id,generated_at) VALUES ('g2','r1','s1',NOW(6))")
+                await cur.execute("INSERT INTO embedding_generations (generation_id,revision_id,embedding_space_id,generated_at) VALUES ('g3','r1','s2',NOW(6))")   # otro espacio: permitido
+    finally:
+        pool.close(); await pool.wait_closed()
