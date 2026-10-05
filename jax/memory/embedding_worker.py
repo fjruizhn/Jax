@@ -34,7 +34,8 @@ from jax.memory.b9 import (EmbeddingSpaceIdentity, MutationAuthorizationRequest,
 from jax.memory.b9_mariadb import MariaDBB9Store, PersistentMemoryAPI
 from jax.memory.scope_authority import MariaDBScopeAuthorityResolver
 from jax.memory.embedding_config import CONFIG
-from jax.core.cliente_http_compartido import cerrar_cliente_http
+from jax.core.cliente_http_compartido import cerrar_cliente_http, obtener_cliente_http
+from jax.core.config_entorno import url_requerida
 from jax.core.db_connect_config import db_connect_timeout_seconds
 
 logging.basicConfig(
@@ -44,6 +45,91 @@ logging.basicConfig(
 logger = logging.getLogger("jax.memory.embedding_worker")
 
 BATCH_SIZE = 50
+
+#: Intentos fallidos por (revision, espacio) antes de que el worker salte la fila.
+DEFAULT_MAX_ATTEMPTS = 5
+ESQUEMA_B9 = "b9-v1"
+
+
+def _max_attempts() -> int:
+    value = int(os.environ.get("JAX_MEMORY_EMBED_MAX_ATTEMPTS", str(DEFAULT_MAX_ATTEMPTS)))
+    if value <= 0:
+        raise ValueError("JAX_MEMORY_EMBED_MAX_ATTEMPTS must be positive")
+    return value
+
+
+async def modelo_digest(model: str) -> str:
+    """Digest real del modelo de embeddings segun Ollama (`/api/tags`).
+
+    Auditoria 2026-10-05: el espacio de embeddings se registraba con digest None, asi que
+    re-descargar `bge-m3` con otros pesos mezclaba en silencio vectores de dos modelos. Si Ollama
+    no responde, no trae el modelo o no trae digest, la corrida FALLA: nunca se guarda None.
+    (`/api/show` no devuelve digest; `/api/tags` si.) Sin tag, Ollama entiende `:latest`.
+    """
+    url = url_requerida("JAX_OLLAMA_URL") + "/api/tags"
+    resp = await obtener_cliente_http().get(url, timeout=10.0)
+    resp.raise_for_status()
+    wanted = model if ":" in model else f"{model}:latest"
+    for entry in resp.json().get("models") or []:
+        if (entry.get("name") or entry.get("model")) == wanted:
+            digest = entry.get("digest")
+            if isinstance(digest, str) and digest.strip():
+                return digest.strip()
+            raise RuntimeError(f"Ollama no informa el digest del modelo {wanted}")
+    raise RuntimeError(f"Ollama no tiene instalado el modelo {wanted}")
+
+
+async def resolver_identidad() -> EmbeddingSpaceIdentity:
+    """Identidad del espacio B9 con el digest real del modelo; la usan el worker y vector-health."""
+    digest = await modelo_digest(CONFIG.model)
+    return EmbeddingSpaceIdentity(ESQUEMA_B9, "ollama", CONFIG.model, digest, CONFIG.dim, "unit", "cosine")
+
+
+async def avisar_si_cambio_el_digest(pool: object, identity: EmbeddingSpaceIdentity) -> None:
+    """Avisa (WARNING) cuando el digest del modelo cambio respecto del ultimo espacio registrado.
+
+    El digest es parte de embedding_space_id: un digest nuevo ES un espacio nuevo, y las
+    revisiones se vectorizan de nuevo en el, sin tocar los vectores del espacio anterior (no se
+    mezclan). Mientras dura esa re-vectorizacion, vector-health queda en rojo: ese es el aviso
+    que llega a Telegram; este WARNING deja la causa en el journal.
+    """
+    async with MappingPool(pool).acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT 1 AS ok FROM embedding_spaces WHERE embedding_space_id=%s",
+                              (identity.embedding_space_id,))
+            if await cur.fetchone():
+                return
+            await cur.execute(
+                "SELECT embedding_space_id,model_version_or_digest FROM embedding_spaces "
+                "WHERE model_identifier=%s AND dimension=%s AND provider_runtime_class=%s AND schema_version=%s "
+                "ORDER BY created_at DESC LIMIT 1",
+                (identity.model_identifier, identity.dimension, identity.provider_runtime_class,
+                 identity.schema_version))
+            previo = await cur.fetchone()
+    if previo:
+        logger.warning(
+            "B9 embeddings: el digest del modelo %s cambio (%s -> %s): se abre un espacio de embeddings "
+            "nuevo (%s) y las revisiones se re-vectorizan en el; no se mezclan con el espacio anterior (%s)",
+            identity.model_identifier, previo["model_version_or_digest"] or "UNKNOWN",
+            identity.model_version_or_digest, identity.embedding_space_id, previo["embedding_space_id"])
+
+
+async def _registrar_fallo(pool: object, revision_id: str, space_id: str, motivo: str, max_attempts: int) -> None:
+    """Cuenta un intento fallido de (revision, espacio); al llegar al tope la fila deja de intentarse."""
+    async with MappingPool(pool).acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO embedding_generation_attempts (revision_id,embedding_space_id,attempts,last_error) "
+                "VALUES (%s,%s,1,%s) ON DUPLICATE KEY UPDATE attempts=attempts+1,last_error=VALUES(last_error)",
+                (revision_id, space_id, motivo[:255]))
+            await cur.execute("SELECT attempts FROM embedding_generation_attempts WHERE revision_id=%s AND embedding_space_id=%s",
+                              (revision_id, space_id))
+            attempts = (await cur.fetchone())["attempts"]
+        await conn.commit()
+    if attempts >= max_attempts:
+        logger.error("B9 embedding: revision %s saltada tras %s intentos fallidos (%s); no se reintenta hasta que "
+                     "una persona borre su fila de embedding_generation_attempts; vector-health sigue en rojo por ella",
+                     revision_id, attempts, motivo)
 
 
 class PersistentEmbeddingWriter:
@@ -95,12 +181,15 @@ def build_persistent_embedding_writer(pool: object) -> PersistentEmbeddingWriter
     return PersistentEmbeddingWriter(api, revision_scope)
 
 
-async def run_b9_embeddings(db: MemoryDB, *, writer: PersistentEmbeddingWriter | None = None) -> tuple[int, int]:
+async def run_b9_embeddings(db: MemoryDB, *, writer: PersistentEmbeddingWriter | None = None,
+                            identity: EmbeddingSpaceIdentity | None = None) -> tuple[int, int]:
     """Generate B9 embeddings without changing a revision's scope or lifecycle."""
     if not db.pool:
         raise RuntimeError("B9 embedding worker requires a connected pool")
     writer = writer or build_persistent_embedding_writer(db.pool)
-    identity = EmbeddingSpaceIdentity("b9-v1", "ollama", CONFIG.model, None, CONFIG.dim, "unit", "cosine")
+    identity = identity or await resolver_identidad()
+    await avisar_si_cambio_el_digest(db.pool, identity)
+    max_attempts = _max_attempts()
     async with db.pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
@@ -109,9 +198,12 @@ async def run_b9_embeddings(db: MemoryDB, *, writer: PersistentEmbeddingWriter |
                 "JOIN memory_revisions r ON r.revision_id=pr.current_revision_id "
                 "JOIN memory_revision_payloads p ON p.revision_id=r.revision_id "
                 "LEFT JOIN embedding_generations g ON g.revision_id=r.revision_id AND g.embedding_space_id=%s "
+                "LEFT JOIN embedding_generation_attempts a ON a.revision_id=r.revision_id AND a.embedding_space_id=%s "
                 "WHERE pr.reconciliation_required=FALSE AND pr.current_lifecycle_state IN ('ACTIVE','VERIFIED') "
                 "AND p.payload IS NOT NULL AND g.generation_id IS NULL "
-                "ORDER BY r.created_at,r.revision_id LIMIT %s", (identity.embedding_space_id,BATCH_SIZE,)
+                "AND (a.attempts IS NULL OR a.attempts<%s) "
+                "ORDER BY r.created_at,r.revision_id LIMIT %s",
+                (identity.embedding_space_id, identity.embedding_space_id, max_attempts, BATCH_SIZE)
             )
             rows = await cur.fetchall()
     completed = failed = 0
@@ -123,13 +215,15 @@ async def run_b9_embeddings(db: MemoryDB, *, writer: PersistentEmbeddingWriter |
             vector = await asyncio.wait_for(db.get_embedding(payload or ""), float(os.getenv("JAX_MEMORY_EMBED_CALL_TIMEOUT_SECONDS", "120")))
             if vector is None:
                 failed += 1
+                await _registrar_fallo(db.pool, row["revision_id"], identity.embedding_space_id, "NO_VECTOR", max_attempts)
                 continue
             await writer.persist(row["memory_id"], identity, tuple(vector), Visibility(row["visibility"]),
                                  expected_revision_id=row["revision_id"])
             completed += 1
-        except Exception:  # fail-soft: one embedding failure must not stop the batch
+        except Exception as error:  # fail-soft: one embedding failure must not stop the batch; queda contada en el intento de la fila
             logger.exception("B9 embedding failed for memory %s", row["memory_id"])
             failed += 1
+            await _registrar_fallo(db.pool, row["revision_id"], identity.embedding_space_id, type(error).__name__, max_attempts)
     return completed, failed
 
 
@@ -143,6 +237,10 @@ async def run_b9_vector_health() -> int:
     host, port = os.environ.get("JAX_DB_HOST"), os.environ.get("JAX_DB_PORT")
     if not host or not port:
         raise RuntimeError("JAX_DB_HOST and JAX_DB_PORT are required for B9 vector health")
+    try:
+        identity = await resolver_identidad()
+    finally:
+        await cerrar_cliente_http()
     pool = await aiomysql.create_pool(
         host=host, port=int(port), user=os.environ.get("JAX_DB_USER", ""),
         password=os.environ.get("JAX_DB_PASSWORD", ""), db=os.environ.get("JAX_DB_NAME", "jax_memory"),
@@ -158,7 +256,7 @@ async def run_b9_vector_health() -> int:
                     "LEFT JOIN embedding_generations g ON g.revision_id=r.revision_id AND g.embedding_space_id=%s "
                     "WHERE r.lifecycle_state IN ('ACTIVE','VERIFIED') "
                     "AND p.reconciliation_required=FALSE AND x.payload IS NOT NULL AND g.generation_id IS NULL",
-                    (EmbeddingSpaceIdentity("b9-v1", "ollama", CONFIG.model, None, CONFIG.dim, "unit", "cosine").embedding_space_id,)
+                    (identity.embedding_space_id,)
                 )
                 (missing,) = await cur.fetchone()
     finally:
