@@ -80,14 +80,21 @@ for timer in "${timers[@]}"; do
   # falta el disparo si Realtime está vacío o n/a Y el monotónico es "", n/a, infinity o 0.
   # Cada condición va en su propia variable: la forma anterior mezclaba `||` y `&&` sin
   # agrupar y se evaluaba como (A||B||C||D) && E.
+  #
+  # SubState (m4, ronda 3 de #356): systemd.timer(5) define para un timer waiting | running |
+  # elapsed. `running` es el timer cuyo servicio disparado SIGUE corriendo en ese instante: un
+  # timer sano mientras el worker trabaja. Exigir solo `waiting` daba rojo falso justo entonces.
+  # Se acepta waiting y running; cualquier otro (dead, elapsed, failed, desconocido) sigue en
+  # rojo. enabled, active y el próximo disparo se siguen exigiendo igual. NO medido: qué muestra
+  # systemd en NextElapse* durante `running`; si lo vacía, esto dará rojo falso y se reintenta.
   sin_realtime=0
   { [ -z "$next_elapse" ] || [ "$next_elapse" = n/a ]; } && sin_realtime=1
   sin_monotonico=0
   case "$next_monotonic" in "" | n/a | infinity | 0) sin_monotonico=1 ;; esac
   sin_disparo=0
   if [ "$sin_realtime" -eq 1 ] && [ "$sin_monotonico" -eq 1 ]; then sin_disparo=1; fi
-  if [ "$unit_file_state" != enabled ] || [ "$active_state" != active ] || [ "$sub_state" != waiting ] || [ "$sin_disparo" -eq 1 ]; then
-    echo "TIMER B9 NO ACTIVADO: $timer UnitFileState=${unit_file_state:-<vacío>} ActiveState=${active_state:-<vacío>} SubState=${sub_state:-<vacío>} NextElapseUSecRealtime=${next_elapse:-<vacío>} NextElapseUSecMonotonic=${next_monotonic:-<vacío>} -- se exige enabled/active/waiting/próximo disparo" >&2
+  if [ "$unit_file_state" != enabled ] || [ "$active_state" != active ] || { [ "$sub_state" != waiting ] && [ "$sub_state" != running ]; } || [ "$sin_disparo" -eq 1 ]; then
+    echo "TIMER B9 NO ACTIVADO: $timer UnitFileState=${unit_file_state:-<vacío>} ActiveState=${active_state:-<vacío>} SubState=${sub_state:-<vacío>} NextElapseUSecRealtime=${next_elapse:-<vacío>} NextElapseUSecMonotonic=${next_monotonic:-<vacío>} -- se exige enabled/active/(waiting|running)/próximo disparo" >&2
     fallo=1
   fi
 done
