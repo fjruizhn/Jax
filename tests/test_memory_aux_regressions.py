@@ -561,7 +561,8 @@ async def _conexion_real():
         pytest.skip("requires an isolated CI test database")
     return await aiomysql.connect(host=os.environ["JAX_DB_HOST"], port=int(os.getenv("JAX_DB_PORT", "3306")),
                                   user=os.getenv("JAX_DB_USER", "root"), password=os.getenv("JAX_DB_PASSWORD", ""),
-                                  db=exigir_base_de_test(), autocommit=True, cursorclass=__import__("aiomysql").DictCursor)
+                                  db=exigir_base_de_test(), autocommit=True, connect_timeout=5,
+                                  cursorclass=aiomysql.DictCursor)
 
 
 async def _con_tablas_reales(escenario):
