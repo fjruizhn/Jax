@@ -1,5 +1,5 @@
-# Los ocho predicados cerrados de REFORMAS-v3.md §3.1.3 y tres adiciones
-# autorizadas (dos de F2-E-SR-001 y una de Fernando para SR3) — la lista es cerrada y versionada; ampliarla requiere enmienda
+# Los ocho predicados cerrados de REFORMAS-v3.md §3.1.3 y cuatro adiciones
+# autorizadas (dos de F2-E-SR-001, una para SR3 y STEP_STATUS para SR2) — la lista es cerrada y versionada; ampliarla requiere enmienda
 # (según el propio §3.1.3).
 #
 # Fuente: /opt/jax/docs/REFORMAS-v3.md §3.1.3, sha256
@@ -33,6 +33,9 @@ predicates:
   - name: PIPELINE_STATUS
     args: [pipeline_id, status]
     source_of_truth: "Jacobs canonical store"
+  - name: STEP_STATUS
+    args: [step_id, status]
+    source_of_truth: "Jacobs canonical step store joined to owner-acknowledged pipeline"
   - name: FACET_RUNTIME_STATUS
     args: [name, status]
     source_of_truth: "Platform FacetState"

@@ -16,12 +16,12 @@ from typing import Mapping
 
 from .response import GovernanceContractError, _text
 
-GOVERNED_DOMAIN_SPEC_VERSION = "f2-c.domain.6"
+GOVERNED_DOMAIN_SPEC_VERSION = "f2-c.domain.7"
 GOVERNED_RENDERER_API_VERSION = "f2-c.renderer.3"
 GOVERNED_ENVELOPE_SCHEMA_VERSIONS = frozenset({"f2-c.1"})
 
 # Structured payload inspection is deliberately small and bounded. It exists
-# only to prevent the five registered runtime-status propositions from being
+# only to prevent the six registered runtime-status propositions from being
 # encoded into otherwise ungoverned content; it is not a general JSON parser
 # or natural-language classifier.
 _STRUCTURED_STATUS_MAX_STRING_CHARS = 65_536
@@ -45,6 +45,10 @@ _STRUCTURED_PIPELINE_STATUS_VALUES = frozenset({
     "pending", "running", "completed", "failed", "aborted", "interrupted",
     "expired", "disputed", "discarded", "hidden",
 })
+_STRUCTURED_STEP_STATUS_VALUES = frozenset({
+    "pending", "running", "completed", "failed", "skipped", "blocked",
+    "blocked_human_gate",
+})
 _STRUCTURED_FACET_RUNTIME_STATUS_VALUES = frozenset({"idle", "thinking", "error", "offline"})
 _STRUCTURED_ENGINE_STATUS_VALUES = frozenset({"alive", "down"})
 _STRUCTURED_ENGINE_HEALTH_NAME = "las_manos"
@@ -55,7 +59,7 @@ _CANONICAL_STATUS_ALIASES = MappingProxyType({
     "completed": ("completed", "finished", "succeeded", "terminó", "termino", "finalizó", "finalizo", "correctamente"),
     "down": ("down", "unhealthy", "unavailable", "caído", "caido", "inactivo"),
     # Closed runtime vocabularies. They are interpreted only by the explicit
-    # JOB_STATUS / PIPELINE_STATUS / FACET_RUNTIME_STATUS grammars below;
+    # JOB_STATUS / PIPELINE_STATUS / STEP_STATUS / FACET_RUNTIME_STATUS grammars below;
     # ENGINE_STATUS keeps its narrower health-check vocabulary.
     "runtime": ("pending", "running", "failed", "aborted", "interrupted", "expired", "disputed", "discarded", "hidden", "idle", "thinking", "error", "offline", "cancelling", "cancelled", "rejected", "tools_requested"),
 })
@@ -164,6 +168,8 @@ class GovernedDomainSpecification:
             ("FILE_EXISTS", rf"\b(?:the\s+)?(?:file|archivo|path|ruta)\s+(?:{subject}|/[^\s]+)\s+{exists}\b|\b(?:{subject}|/[^\s]+)\s+{exists}\b"),
             ("FACET_EXISTS", rf"\b(?:facet|faceta)\s+(?:{subject})\s+{exists}\b"),
             ("PROCESSING_JOB_STATUS", r"\b(?:processing\s+job|trabajo\s+de\s+procesamiento)\s+[^\s]+\s+(?:(?:(?:is|was|está|esta|fue|ha)\s+)?(?:pending|running|cancelling|completed|failed|cancelled)|no\s+(?:pending|running|cancelling|completed|failed|cancelled))\b"),
+            ("STEP_STATUS", r"\b(?:jacobs\s+)?(?:step|paso)\s+[^\s]+\s+(?:(?:is|was|está|esta|fue|ha)\s+)?(?:pending|running|completed|failed|skipped|blocked|blocked_human_gate)\b"),
+            ("STEP_STATUS", r"\bjacobs\s+registra\s+actualmente\s+que\s+el\s+paso\s+[^\s]+\s+está\s+(?:pending|running|completed|failed|skipped|blocked|blocked_human_gate)\b"),
             ("JOB_STATUS", rf"\b(?:job|trabajo)\s+[^\s]+\s+(?:(?:(?:is|was|está|esta|fue|ha)\s+)?(?:{status})|no\s+(?:{status}))\b"),
             ("PIPELINE_STATUS", rf"\b(?:pipeline|tubería)\s+[^\s]+\s+(?:(?:(?:is|was|está|esta|fue|ha)\s+)?(?:{status})|no\s+(?:{status}))\b"),
             ("FACET_RUNTIME_STATUS", rf"\b(?:facet|faceta)\s+[^\s]+\s+{copula}\s+(?:{status})\b"),
@@ -268,6 +274,8 @@ class GovernedDomainSpecification:
                 found.add("PROCESSING_JOB_STATUS")
             if {"pipeline_id", "status"}.issubset(keys) and status in _STRUCTURED_PIPELINE_STATUS_VALUES:
                 found.add("PIPELINE_STATUS")
+            if {"step_id", "status"}.issubset(keys) and status in _STRUCTURED_STEP_STATUS_VALUES:
+                found.add("STEP_STATUS")
             if {"name", "status"}.issubset(keys):
                 name = node.get("name")
                 if isinstance(name, str):

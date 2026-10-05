@@ -760,6 +760,14 @@ Patrón vigente al migrar (2026-10-03, master 364ded9): `^18 passed`
 
 Sin historia anotada en el workflow.
 
+## `governance/f2e-sr2`
+
+Piso introducido por JAX #341 (2026-10-04): `^26 passed`
+
+Medido en la combinación del PR con `master` (`f1ac7c2`):
+`PYTHONPATH=.:las_manos:jax/core python3 -m pytest
+tests/test_f2e_step_status.py -q`; 26 passed.
+
 ## `governance/f2e-sr3`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^212 passed`
@@ -821,6 +829,15 @@ comando exacto, con y sin las tres dependencias: 156 passed.
 ## `governance/gov`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^263 passed`
+
+263 -> 264 (2026-10-04, SR2 STEP): medido sobre la combinación de `master` y
+JAX #341 con `PYTHONPATH=.:las_manos:jax/core python3 -m pytest
+tests/test_governance_claims.py tests/test_governance_loaders.py
+tests/test_governance_validator.py tests/test_governance_vocab_sweep.py
+tests/test_governance_renderer.py tests/test_governance_grounding.py
+tests/test_governed_response_contract.py tests/test_governed_resolution.py
+tests/test_governed_renderer.py -q`; 264 passed. El test de regresión SR2
+también se ejecutó aparte: 26 passed.
 
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 

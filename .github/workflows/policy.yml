@@ -1222,7 +1222,10 @@ jobs:
       # Desde E-19 (2026-09-16) todo sale de requirements.txt.
       - run: pip install -r requirements.txt pytest
       - name: Suite de gobernanza
-        run: python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py tests/test_governed_resolution.py tests/test_governed_renderer.py -v
+        run: |
+          python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py tests/test_governed_resolution.py tests/test_governed_renderer.py -v
+          PYTHONPATH=.:las_manos:jax/core python -m pytest tests/test_f2e_step_status.py -q 2>&1 | tee /tmp/f2e-sr2-step
+          python3 .github/ci/piso.py verificar governance/f2e-sr2 /tmp/f2e-sr2-step || exit $?
       - name: F2-D lifecycle contract
         run: python -m pytest tests/test_output_lifecycle.py tests/test_governed_renderer.py -q
       - name: F2-E-SR runtime-status source integrity regressions

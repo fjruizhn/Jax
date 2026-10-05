@@ -217,10 +217,11 @@ def test_motor_resolver_rejects_caller_selected_store():
         MotorJobStatusResolver(object())
 
 
-def test_runtime_registry_is_exactly_the_five_authorized_predicates():
+def test_runtime_registry_is_exactly_the_six_authorized_predicates():
     registry = _runtime_registry()
     assert {row["predicate"] for row in registry.status_table()} == {
-        "JOB_STATUS", "PROCESSING_JOB_STATUS", "PIPELINE_STATUS", "FACET_RUNTIME_STATUS", "ENGINE_STATUS"}
+        "JOB_STATUS", "PROCESSING_JOB_STATUS", "PIPELINE_STATUS", "STEP_STATUS",
+        "FACET_RUNTIME_STATUS", "ENGINE_STATUS"}
     assert all(row["freshness_sla_seconds"] in {15, 60} for row in registry.status_table())
     assert all(row["source_owner"] for row in registry.status_table())
 
