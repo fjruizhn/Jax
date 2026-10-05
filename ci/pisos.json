@@ -94,8 +94,8 @@
       "mensaje": "PISO ROTO: se esperaban 33 tests CORRIDOS."
     },
     "governance/f2e-sr": {
-      "patron": "^18 passed",
-      "mensaje": "PISO ROTO: se esperaban 18 tests CORRIDOS de F2-E-SR source integrity."
+      "patron": "^19 passed",
+      "mensaje": "PISO ROTO: se esperaban 19 tests CORRIDOS de F2-E-SR source integrity."
     },
     "governance/f2e-sr3": {
       "patron": "^212 passed",

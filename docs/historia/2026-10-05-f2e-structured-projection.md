@@ -66,3 +66,15 @@ por lo que no se ejecutó `EXPLAIN`; no se leyó ni modificó configuración,
 usuario o base de producción. El test de forma de consulta verifica el único
 `SELECT ... WHERE pipeline_id IN (...)`; queda pendiente medir el plan sobre
 una base aislada proporcionada antes de consideración de producción.
+
+La CI publicada del SHA `0c925e6` midió **19 passed** en
+`tests/test_f2e_runtime_status_remediation.py`; el piso exacto
+`governance/f2e-sr` subió de 18 a 19 para incluir la regresión de forma de la
+consulta batch. La procedencia es el run `37286787324`, job `111687462660`.
+No cambian los demás pisos ni la semántica F2-E-SR.
+
+El `EXPLAIN` se ejecutó en modo lectura contra la base aislada existente
+`jax_memory_test` en `127.0.0.1:3308`, para el `SELECT pipeline_id, status,
+user_id, tenant_id FROM jacobs_pipelines WHERE pipeline_id IN (...)` de 50
+IDs. El plan informó `type=range`, `possible_keys=PRIMARY`, `key=PRIMARY`,
+`rows=50`, `Extra=Using where`, sin `Using filesort` ni `Using temporary`.
