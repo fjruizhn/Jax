@@ -890,6 +890,8 @@ para conservar byte a byte el registro de la migración de pisos.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
 
+3477 -> 3490 el 2026-10-05 (rama fix/b9-driver-runbooks, medido LOCAL como delta de archivo): `tests/test_base_por_sesion.py` 26 -> 39 colectados (+13: la suite no abre conexiones a la instancia de produccion ni a `jax_memory` fuera de CI sin `JAX_TEST_DB_PERMITIR_INSTANCIA_DE_PRODUCCION`). 45 skipped no cambia. El runner tiene la ultima palabra.
+
 3476 -> 3477 el 2026-10-05 (auditoria Jax#354, misma rama, delta de archivo local): `tests/test_hnsw_recall_tripwire.py` 6 -> 7 (+1: con faltantes y recall vencido a la vez gana el fallo general; el recall solo sale con el codigo propio 3).
 
 3473 -> 3476 el 2026-10-05 (misma rama, medido LOCAL como delta de archivo): `tests/test_hnsw_recall_tripwire.py` 3 -> 6. El tripwire de recall deja de ser codigo muerto: lo ejecuta vector-health (`jax/memory/recall_tripwire.py`) y falla la unidad; +3 pruebas de ese cableado. 45 skipped no cambia.

@@ -174,6 +174,7 @@ async def _dropear_base_de_sesion(nombre: str) -> None:
     `jax_memory` y `jax_memory_test` de verdad."""
     if nombre == BASE_COMPARTIDA or not es_base_de_test(nombre):
         return
+    exigir_conexion_permitida(nombre)
     import aiomysql
 
     from jax.core.db_connect_config import db_connect_timeout_seconds
@@ -307,6 +308,65 @@ BASE_PLANTILLA = BASE_COMPARTIDA
 FILAS_MAXIMAS_A_COPIAR = int(os.environ.get("JAX_TEST_DB_FILAS_MAXIMAS", "2000"))
 
 
+#: Puertos donde vive la MariaDB de PRODUCCION (3308 en hall9000; 3306 es el
+#: default de `_parametros_de_conexion()` y el puerto que usa CI en su propio
+#: contenedor). Fuera de CI, conectarse a uno de ellos es conectarse al servidor
+#: que tambien tiene `jax_memory`: la suite CREA y BORRA bases ahi, y la semilla de
+#: gobernanza lee produccion. Un contenedor desechable usa otro puerto.
+PUERTOS_DE_PRODUCCION = frozenset({3306, 3308})
+
+#: El permiso explicito, para quien de verdad quiere correr la suite contra la
+#: instancia de produccion (hall9000: la base de test vive en la misma MariaDB).
+#: Habilita dos cosas, y solo dos: usar un puerto de `PUERTOS_DE_PRODUCCION` fuera
+#: de CI, y la conexion de SOLO LECTURA a `jax_memory` de la semilla de gobernanza.
+#: Nunca habilita escribir en una base sin sufijo de test.
+VARIABLE_PERMISO_INSTANCIA_DE_PRODUCCION = "JAX_TEST_DB_PERMITIR_INSTANCIA_DE_PRODUCCION"
+
+
+def _permiso_instancia_de_produccion() -> bool:
+    return os.environ.get(VARIABLE_PERMISO_INSTANCIA_DE_PRODUCCION, "").strip().lower() in ("1", "true", "yes")
+
+
+def exigir_conexion_permitida(base: str, *, lectura_de_produccion: bool = False) -> None:
+    """El control previo a CADA conexion de este modulo. Falla CERRADO, con el
+    motivo y la variable que lo levanta, antes de abrir nada.
+
+    1. La base: toda conexion de este modulo va a una base de tests
+       (`es_base_de_test`). La unica excepcion es `lectura_de_produccion=True`,
+       la lectura de `jax_memory` de la semilla de gobernanza, y solo con
+       `VARIABLE_PERMISO_INSTANCIA_DE_PRODUCCION`: sin ella, ni leer.
+    2. El puerto (el de `_parametros_de_conexion()`, con su mismo default 3306):
+       ilegible o fuera de 1..65535 es un error; uno de `PUERTOS_DE_PRODUCCION`
+       fuera de CI exige la misma variable. En CI cada job trae su propio
+       contenedor (ver `_en_ci`), asi que ahi no aplica.
+    """
+    permiso = _permiso_instancia_de_produccion()
+    if lectura_de_produccion:
+        if base != BASE_DE_PRODUCCION:
+            raise BaseDeTestInvalida(f"la lectura de produccion es solo de {BASE_DE_PRODUCCION!r}, no de {base!r}")
+        if not permiso:
+            raise BaseDeTestInvalida(
+                f"la suite iba a abrir una conexion a {BASE_DE_PRODUCCION!r}, la base de PRODUCCION. "
+                f"No se hace sin permiso explicito: exporta {VARIABLE_PERMISO_INSTANCIA_DE_PRODUCCION}=1 "
+                f"si de verdad quieres que la semilla de gobernanza lea produccion (solo lectura).")
+    elif not es_base_de_test(base):
+        raise BaseDeTestInvalida(
+            f"{base!r} no es una base de tests ({BASE_COMPARTIDA!r} o {BASE_COMPARTIDA + '_<sufijo>'!r}): "
+            f"esta suite no abre conexiones a otra base, y esto no lo levanta ninguna variable.")
+    crudo = os.environ.get("JAX_DB_PORT", "3306")
+    try:
+        puerto = int(crudo)
+    except ValueError:
+        puerto = 0
+    if not 1 <= puerto <= 65535:
+        raise BaseDeTestInvalida(f"JAX_DB_PORT={crudo!r} no es un puerto valido (1..65535): no se conecta a ciegas.")
+    if puerto in PUERTOS_DE_PRODUCCION and not _en_ci() and not permiso:
+        raise BaseDeTestInvalida(
+            f"JAX_DB_PORT={puerto} es la MariaDB de PRODUCCION (3306 y 3308) y esto no es CI: la suite "
+            f"crea y borra bases ahi. Usa un contenedor desechable en otro puerto, o exporta "
+            f"{VARIABLE_PERMISO_INSTANCIA_DE_PRODUCCION}=1 si de verdad quieres correr contra esa instancia.")
+
+
 def _parametros_de_conexion() -> dict:
     """Host, puerto y credenciales de la MariaDB, del entorno (/etc/jax/.env).
     El NOMBRE de la base no sale de acá: lo elige quien llama.
@@ -373,6 +433,7 @@ async def _clonar_esquema(nombre: str) -> int:
     _verificar_que_no_es_produccion(nombre)
     if nombre == BASE_COMPARTIDA:
         return -1
+    exigir_conexion_permitida(nombre)
 
     from jax.core.db_connect_config import db_connect_timeout_seconds
 
@@ -483,6 +544,9 @@ async def _reparar_gobernanza_de_sesion(nombre: str) -> dict:
     from jacobs import gobernanza_semilla
     from jax.core.db_connect_config import db_connect_timeout_seconds
 
+    # Las dos guardas ANTES de abrir cualquiera de las dos conexiones.
+    exigir_conexion_permitida(nombre)
+    exigir_conexion_permitida(BASE_DE_PRODUCCION, lectura_de_produccion=True)
     timeout = db_connect_timeout_seconds()
     conn = await aiomysql.connect(
         db=nombre, autocommit=True, connect_timeout=timeout,
@@ -520,6 +584,7 @@ def asegurar_base_de_test(nombre: str | None = None) -> str:
     _verificar_que_no_es_produccion(nombre)
     if nombre == BASE_COMPARTIDA or not os.environ.get("JAX_DB_HOST"):
         return nombre
+    exigir_conexion_permitida(nombre)  # antes de tocar el entorno o abrir nada
 
     anterior = os.environ.get(VARIABLE_DE_LA_BASE)
     os.environ[VARIABLE_DE_LA_BASE] = nombre
