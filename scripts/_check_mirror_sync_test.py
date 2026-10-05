@@ -206,3 +206,55 @@ def test_extract_ignora_lo_que_no_esta_declarado_como_compartido(tmp_path):
     extra = BASE + '\n\nSOLO_EN_UNO = "no se compara"\n'
     encontrados = _extract(_escribir(tmp_path, "x.py", extra), COMPARTIDOS)
     assert set(encontrados) == set(COMPARTIDOS)
+
+
+# ---------------------------------------------------------------------------
+# Llamadas obligatorias (auditoria jax-platform #195): el marcador no excusa perder la guarda
+# ---------------------------------------------------------------------------
+
+CON_GUARDA = '''\
+def guarda():
+    return None
+
+
+def conecta():
+    """DIVERGENCIA DELIBERADA: cada repo tiene su camino."""
+    guarda()
+    return 1
+
+
+async def conecta_async():
+    """DIVERGENCIA DELIBERADA."""
+    modulo.guarda()
+    return 2
+'''
+
+
+def _con_llamadas(tmp_path, canonico, espejo):
+    return Familia(
+        nombre="prueba",
+        canonico=_escribir(tmp_path, "canonico.py", canonico),
+        espejos=(("espejo", _escribir(tmp_path, "espejo.py", espejo)),),
+        compartidos=("guarda",),
+        llamadas_obligatorias=(("conecta", "guarda"), ("conecta_async", "guarda")),
+    )
+
+
+def test_con_la_guarda_en_las_dos_copias_no_hay_faltantes(tmp_path):
+    assert revisar(_con_llamadas(tmp_path, CON_GUARDA, CON_GUARDA)) == ([], [], [])
+
+
+@pytest.mark.parametrize("funcion", ["conecta", "conecta_async"])
+@pytest.mark.parametrize("copia", ["canonico", "espejo"])
+def test_perder_la_guarda_en_una_funcion_con_marcador_es_drift_en_cualquier_copia(tmp_path, funcion, copia):
+    """El marcador declara la funcion como divergente: aun asi no puede perder la llamada."""
+    sin = CON_GUARDA.replace("    guarda()\n", "    pass\n") if funcion == "conecta" else CON_GUARDA.replace("    modulo.guarda()\n", "    pass\n")
+    canonico, espejo = (sin, CON_GUARDA) if copia == "canonico" else (CON_GUARDA, sin)
+    drift, declaradas, faltantes = revisar(_con_llamadas(tmp_path, canonico, espejo))
+    assert any(f.startswith(f"{funcion} no llama a guarda") for f in faltantes), faltantes
+    assert (copia == "canonico" and "(jax)" in faltantes[0]) or (copia == "espejo" and "(espejo)" in faltantes[0])
+
+
+def test_una_funcion_ausente_cuenta_como_que_no_llama(tmp_path):
+    drift, _, faltantes = revisar(_con_llamadas(tmp_path, CON_GUARDA, "def guarda():\n    return None\n"))
+    assert len(faltantes) == 2 and all("(espejo)" in f for f in faltantes)

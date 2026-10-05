@@ -78,8 +78,8 @@
       "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS."
     },
     "mirror-sync/ms": {
-      "patron": "^14 passed",
-      "mensaje": "PISO ROTO: se esperaban 14 tests CORRIDOS."
+      "patron": "^20 passed",
+      "mensaje": "PISO ROTO: se esperaban 20 tests CORRIDOS."
     },
     "mirror-sync/cu": {
       "patron": "^22 passed",

@@ -739,7 +739,7 @@ Sin historia anotada en el workflow.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^14 passed`
 
-Sin historia anotada en el workflow.
+20 el 2026-10-05 (auditoría jax-platform #195, rama fix/b9-driver-runbooks; medido LOCAL: 14 -> 20 passed): +6 pruebas de las llamadas obligatorias (la guarda no se puede perder en una función con marcador de divergencia, en ninguna copia). El runner tiene la última palabra.
 
 ## `mirror-sync/cu`
 

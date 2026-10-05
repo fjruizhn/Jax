@@ -71,6 +71,11 @@ class Familia:
     espejos: tuple[tuple[str, Path], ...]  # (etiqueta legible, ruta)
     compartidos: tuple[str, ...]
     nota: str = ""
+    # (funcion, llamada): la funcion tiene que llamar a `llamada` en TODAS las copias, y esto NO
+    # lo excusa el marcador de divergencia. Una funcion declarada como divergente puede diferir
+    # en lo que quiera MENOS en perder un control de seguridad (auditoria jax-platform #195:
+    # sin esto, quitar la guarda de las funciones con marcador daba rc=0).
+    llamadas_obligatorias: tuple[tuple[str, str], ...] = ()
 
 
 def _bloque_declarativo(lineas: list[str], node: ast.AST) -> str:
@@ -124,6 +129,20 @@ def _extract(path: Path, compartidos: tuple[str, ...]) -> dict[str, tuple[str, s
     return out
 
 
+def _llama_a(path: Path, funcion: str, llamada: str) -> bool:
+    """¿La funcion de modulo `funcion` de `path` contiene una llamada a `llamada`?
+    (Name o atributo; sync o async). Falso si la funcion no existe."""
+    tree = ast.parse(path.read_text(), filename=str(path))
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == funcion:
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call):
+                    f = sub.func
+                    if (isinstance(f, ast.Name) and f.id == llamada) or (isinstance(f, ast.Attribute) and f.attr == llamada):
+                        return True
+    return False
+
+
 def revisar(familia: Familia) -> tuple[list[str], list[str], list[str]]:
     """Devuelve (drift, declaradas, faltantes) para una familia."""
     canonico = _extract(familia.canonico, familia.compartidos)
@@ -146,6 +165,11 @@ def revisar(familia: Familia) -> tuple[list[str], list[str], list[str]]:
                 declaradas.append(f"{name} ({etiqueta})")
             else:
                 drift.append(f"{name} ({etiqueta})")
+    # Llamadas obligatorias: en el canonico y en cada espejo; el marcador no las excusa.
+    for funcion, llamada in familia.llamadas_obligatorias:
+        for etiqueta, ruta in (("jax", familia.canonico), *familia.espejos):
+            if not _llama_a(ruta, funcion, llamada):
+                faltantes.append(f"{funcion} no llama a {llamada} ({etiqueta})")
     return drift, declaradas, faltantes
 
 
@@ -601,6 +625,14 @@ FAMILIAS = (
             "_dropear_base_de_sesion", "_clonar_esquema", "asegurar_base_de_test",
             "PUERTOS_DE_PRODUCCION", "VARIABLE_PERMISO_INSTANCIA_DE_PRODUCCION",
             "_permiso_instancia_de_produccion", "exigir_conexion_permitida",
+        ),
+        # Las tres funciones de conexion real llevan el marcador de divergencia (cada repo
+        # tiene su camino de esquema), pero NINGUNA puede perder la guarda: sin esto, quitarla
+        # de ellas y vaciar PUERTOS_DE_PRODUCCION daba rc=0 (jax-platform #195).
+        llamadas_obligatorias=(
+            ("_dropear_base_de_sesion", "exigir_conexion_permitida"),
+            ("_clonar_esquema", "exigir_conexion_permitida"),
+            ("asegurar_base_de_test", "exigir_conexion_permitida"),
         ),
         nota="Aislar la base de tests (2026-09-20): el mecanismo de jax (2026-09-17) "
              "existia pero jax-platform no lo tenia -- conftest.py:13 fijaba "
