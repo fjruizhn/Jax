@@ -112,7 +112,7 @@ jobs:
         # this explicit boundary does not load it or migrate any shared schema.
         # Measured 2026-09-26 against MariaDB 12.3.3: 102 passed, no skips/errors.
         # Re-measured 2026-10-05 (fix/memoria-worker-cuarentena-aviso-orden, local disposable DB):
-        # 167 passed, 0 skipped (121 before the branch). Floor in ci/pisos.json; the runner has the last word.
+        # 175 passed, 0 skipped (121 before the branch). Floor in ci/pisos.json; the runner has the last word.
         run: |
           set -euo pipefail
           python -m pytest --confcutdir=tests \
