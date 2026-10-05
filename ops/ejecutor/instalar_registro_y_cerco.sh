@@ -98,16 +98,10 @@ sudo install -o root -g root -m 0644 "$REPO/ops/ejecutor/ejecutor-cerco.service"
 "$REPO/ops/instalar-dropins-de-servicio.sh" jax-ejecutor-proxy.service.d "$REPO"
 # m3 (auditoría de #356): la base del proxy no tiene otro instalador y la línea de abajo la pisa.
 # Antes se respalda la instalada, con marca de tiempo, en /etc/jax-ejecutor-cerco/respaldos/
-# (fuera de /etc/systemd: systemd no la lee). Los drop-ins ya instalados NO se respaldan ni
-# se retiran aquí (ver instalar-dropins-de-servicio.sh).
-if [ -f /etc/systemd/system/jax-ejecutor-proxy.service ]; then
-  sudo install -d -o root -g root -m 0755 /etc/jax-ejecutor-cerco/respaldos
-  sudo cp -p /etc/systemd/system/jax-ejecutor-proxy.service "/etc/jax-ejecutor-cerco/respaldos/jax-ejecutor-proxy.service.$MARCA"
-fi
+# (ver respaldar-base-del-proxy.sh, que tiene su propia prueba) y se imprime cómo revertir.
+# Los drop-ins ya instalados NO se respaldan ni se retiran aquí (ver instalar-dropins-de-servicio.sh).
+"$REPO/ops/ejecutor/respaldar-base-del-proxy.sh" "$MARCA"
 sudo install -o root -g root -m 0644 "$REPO/ops/ejecutor/jax-ejecutor-proxy.service" /etc/systemd/system/
-if [ -f "/etc/jax-ejecutor-cerco/respaldos/jax-ejecutor-proxy.service.$MARCA" ]; then
-  echo "Para revertir la base del proxy: sudo cp -p /etc/jax-ejecutor-cerco/respaldos/jax-ejecutor-proxy.service.$MARCA /etc/systemd/system/jax-ejecutor-proxy.service y recargar systemd"
-fi
 sudo systemctl daemon-reload
 sudo systemctl enable ejecutor-cerco.service
 sudo systemctl restart ejecutor-cerco.service
