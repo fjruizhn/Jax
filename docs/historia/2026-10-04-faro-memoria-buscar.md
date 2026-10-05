@@ -57,3 +57,7 @@ Esperar CI remota y nueva revisión de escalón 3 del SHA exacto del PR. No desp
 - Verificación local posterior al merge: Faro DB no dependiente de MariaDB externa 6 passed (1 prueba de DB aislada no corrida), SR2 26 passed, structured projection 15 passed y external output 10 passed. La suite B9 completa queda reservada al job MariaDB efímero; el perfil de prueba permaneció `jax_test@127.0.0.1:3308/jax_memory_test` y no hubo conexión productiva.
 - Inspección del camino `memoria.buscar`: su `ScopeContext` usa exclusivamente usuario/tenant de la identidad de socket; el reader abre transacción `READ ONLY` y emite consultas de lectura; el resultado se limita y pasa por `envolver_payload_no_confiable`; fallas del reader salen como `MemoriaNoDisponible`.
 - Queda CI sobre el SHA combinado y auditoría Tier 3 del SHA exacto. No integrar ni desplegar sin PASS.
+
+### Piso B9 del par combinado
+
+- El run de PR `37317897149`, job `111789176129`, ejecutó `memory-b9-regression` sobre `daab357ce80b1e7e1843155b88e2f57c9adf93bd`: 183 passed, 0 failed, 0 errors y 0 skipped. El piso se elevó de 176 a 183 con esa evidencia exacta; no cambió lógica, perfil de prueba ni configuración de producción.

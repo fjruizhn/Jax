@@ -113,6 +113,8 @@ jobs:
         # Measured 2026-09-26 against MariaDB 12.3.3: 102 passed, no skips/errors.
         # Re-measured 2026-10-05 (fix/memoria-worker-cuarentena-aviso-orden, local disposable DB):
         # 176 passed, 0 skipped (121 before the branch). Floor in ci/pisos.json; the runner has the last word.
+        # Exact PR run 37317897149, job 111789176129, SHA daab357ce80b1e7e1843155b88e2f57c9adf93bd:
+        # 183 passed, 0 failed, 0 errors, 0 skipped; this merged Faro/B9 count is the current floor.
         run: |
           set -euo pipefail
           python -m pytest --confcutdir=tests \
