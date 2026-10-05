@@ -110,8 +110,8 @@
       "mensaje": "PISO ROTO: se esperaban 263 tests CORRIDOS."
     },
     "governance/f2e-structured-projection": {
-      "patron": "^8 passed in ",
-      "mensaje": "PISO ROTO: se esperaban exactamente 8 tests CORRIDOS de F2-E structured projection."
+      "patron": "^14 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 14 tests CORRIDOS de F2-E structured projection."
     },
     "tests-puros/out": {
       "patron": "^3473 passed, 45 skipped",
