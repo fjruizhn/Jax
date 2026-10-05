@@ -1,7 +1,24 @@
 """Explicit integration driver for a newly provisioned isolated MariaDB database.
 
-Run as a Python file, never through pytest/conftest. No schema provisioning,
-production credentials, providers, database drop, or global cleanup.
+Run as a Python file, never through pytest/conftest. No production credentials,
+providers, database drop, or global cleanup. The provider is a mock; SQL, API,
+permissions, triggers, locks and commits are real.
+
+FIXTURES. The database must be fresh and named `jax_memory_test_memb9_<sufijo>`,
+owned by user `jax_test`. `tests/memory_b9_provision.py` builds it, in this order:
+`jax_memory_schema.sql` (without its `CREATE DATABASE jax_memory` / `USE`), the minimal
+`jax_tenants`/`jax_users`, migrations 001->004, migration 005 (Python only, through
+`apply_project_authority_migration`), migrations 006->013, and the rows: `jax_tenants`
+1 and 2; `jax_users` 1 (tenant 1, admin), 2 (tenant 2, admin) and 4 (tenant 1,
+operator), all active. See `docs/runbooks/memoria-b9-reactivacion.md`, step 3.
+
+    export JAX_DB_HOST=127.0.0.1 JAX_DB_PORT=<port> JAX_DB_USER=jax_test \\
+           JAX_DB_PASSWORD=... JAX_DB_NAME=jax_memory_test_memb9_<sufijo> PYTHONPATH=.
+    python tests/memory_b9_provision.py && python tests/memory_b9_regression_driver.py
+
+CI runs both in the `memory-b9-regression` job (`.github/workflows/policy.yml`), against
+its own MariaDB service, so a change to the worker contract that this file does not
+follow turns that job red instead of leaving the driver stale.
 """
 import asyncio
 from contextlib import asynccontextmanager
@@ -10,6 +27,7 @@ import logging
 import math
 import time
 import os
+import re
 from pathlib import Path
 import sys
 import uuid
@@ -22,14 +40,23 @@ from jax.memory.b9 import ScopeContext, MutationAuthorizationRequest, Visibility
 from jax.memory.b9_mariadb import MariaDBB9Store, PersistentMemoryAPI, MariaDBB9Reader
 from jax.memory.mapping_pool import MappingPool
 from jax.memory.scope_authority import MariaDBScopeAuthorityResolver
-from jax.memory.extraction_jobs import ExtractionJobs, normalize_extraction, source_digest
+from jax.memory.extraction_jobs import ExtractionJobs, StuckJobsError, normalize_extraction, source_digest
 from jax.memory.lifecycle_worker import scan_and_mark
 from jax.core.db_connect_config import db_connect_timeout_seconds
 from jax.memory.legacy_adoption import source_content, row_digest
 from jax.memory.synthesis_jobs import SynthesisJobs, digest as synthesis_digest
 from jax.memory.synthesis_worker import build_persistent_synthesis_writer_for_scope
 
+TURN_HEADER=re.compile(r"\[message_id=(\S+) turn_number=(\d+) role=(\S+)\]")
 PAYLOAD={"facts":[{"text":"integration fact one"},{"text":"integration fact two"}],"decisions":[{"title":"integration decision","chosen":"chosen","reasoning":"reason"}],"action_items":[{"description":"integration action"}]}
+
+
+def payload_with_turns(turns):
+    """PAYLOAD where every item cites `turns` (list of {message_id,turn_number,role})."""
+    payload=json.loads(json.dumps(PAYLOAD))
+    for items in payload.values():
+        for item in items: item["source_turns"]=turns
+    return payload
 
 
 OLD_RETRIEVAL_SELECT = "SELECT o.memory_id,o.object_kind,o.tenant_id,UNIX_TIMESTAMP(o.created_at) AS object_created_at,r.revision_id,r.content_digest,r.visibility,r.user_id,r.project_id,r.lifecycle_state,UNIX_TIMESTAMP(r.created_at) AS revision_created_at,p.payload,r.provenance_status,r.prior_revision_id FROM memory_objects o JOIN memory_projections pr ON pr.memory_id=o.memory_id JOIN memory_revisions r ON r.revision_id=pr.current_revision_id LEFT JOIN memory_revision_payloads p ON p.revision_id=r.revision_id WHERE o.tenant_id=%s AND pr.reconciliation_required=FALSE AND r.lifecycle_state NOT IN ('TOMBSTONED','PURGED','EXPIRED') AND (r.visibility <> 'USER_PRIVATE' OR r.user_id=%s) AND (r.project_id IS NULL OR r.project_id=%s) ORDER BY r.created_at DESC LIMIT %s"
@@ -42,7 +69,12 @@ class Extractor:
         if self.invalid_once:
             self.invalid_once=False
             return "not valid json"
-        return json.dumps({"facts":[],"decisions":[],"action_items":[]} if self.empty else PAYLOAD)
+        if self.empty: return json.dumps({"facts":[],"decisions":[],"action_items":[]})
+        # The worker renders every turn as `[message_id=.. turn_number=.. role=..] text` and
+        # rejects any item whose `source_turns` are not exactly turns of THIS call.
+        prompt=args[0] if args else kwargs.get("prompt","")
+        turns=[{"message_id":m,"turn_number":int(n),"role":r} for m,n,r in TURN_HEADER.findall(prompt)][:1]
+        return json.dumps(payload_with_turns(turns))
 
 
 class FaultPool:
@@ -92,7 +124,7 @@ class Driver:
             async def close(self): pass
             async def get_conversation_messages(self,cid):
                 if cid in driver.none_messages: return None
-                return await driver.query("SELECT role,content FROM messages WHERE conversation_id=%s ORDER BY turn_number",(cid,))
+                return await driver.query("SELECT id AS message_id,turn_number,role,content FROM messages WHERE conversation_id=%s ORDER BY turn_number,id",(cid,))
         W.MemoryDB=ReadDB
         async def factory(): return driver.fake
         W.build_extractor=factory
@@ -123,6 +155,14 @@ class Driver:
     async def run(self,writer=None,expect_failure=False):
         try:
             await W.run_once(limit=100,b9_writer=writer)
+        except StuckJobsError as exc:
+            # Raised only with ZERO new failures (`stuck and not failures`): earlier cases left
+            # QUARANTINED/UNKNOWN jobs on purpose and the unit stays red until a person resolves them.
+            # Accept it for a run that expects success only if the DB really holds jobs counted as stuck.
+            if not expect_failure:
+                if not await ExtractionJobs(self.mapping).stuck_count(): raise
+                return type(exc).__name__
+            return type(exc).__name__
         except Exception as exc:
             if not expect_failure: raise
             return type(exc).__name__
@@ -212,7 +252,12 @@ class Driver:
         async def invalid():
             bad=await self.seed();good=await self.seed();self.fake.invalid_once=True
             await self.run(expect_failure=True)
-            assert (await self.state(bad))["state"]=="QUARANTINED" and (await self.state(good))["results"]==4,"JSON_blocks_queue"
+            # Malformed extractor output is the extractor's fault, not the source's: bounded RETRY, not quarantine.
+            bad_state=await self.state(bad)
+            assert bad_state["state"]=="RETRY" and not bad_state["memory_processed"] and (await self.state(good))["results"]==4,"JSON_blocks_queue"
+            assert await self.scalar("SELECT error_code FROM memory_extraction_jobs WHERE conversation_id=%s",(bad,))=="EXTRACTOR_OUTPUT_INVALID","JSON_error_code"
+            await self.retry_ready(bad);await self.run()
+            assert (await self.state(bad))["state"]=="COMPLETED" and (await self.state(bad))["results"]==4,"JSON_retry_not_completed"
         await self.case("JSON_invalid",invalid)
         async def empty():
             cid=await self.seed(empty=True);calls=self.fake.calls;before=await self.total();await self.run()
@@ -223,8 +268,8 @@ class Driver:
             cid=await self.seed();jobs=ExtractionJobs(self.mapping)
             first=await jobs.claim(cid,run_id=str(uuid.uuid4()))
             conv=(await self.query("SELECT id,conversation_uuid AS uuid,tenant_id,user_id,project_id FROM conversations WHERE id=%s",(cid,)))[0]
-            messages=await self.query("SELECT role,content FROM messages WHERE conversation_id=%s ORDER BY turn_number",(cid,))
-            await jobs.freeze(cid,first['claim_token'],source_digest(conv,messages),normalize_extraction(PAYLOAD,max_items=100,max_text_chars=12000))
+            messages=await self.query("SELECT id AS message_id,turn_number,role,content FROM messages WHERE conversation_id=%s ORDER BY turn_number,id",(cid,))
+            await jobs.freeze(cid,first['claim_token'],source_digest(conv,messages),normalize_extraction(payload_with_turns([{"message_id":str(messages[0]["message_id"]),"turn_number":messages[0]["turn_number"],"role":messages[0]["role"]}]),max_items=100,max_text_chars=12000))
             await self.query("UPDATE memory_extraction_jobs SET lease_until=DATE_SUB(NOW(6),INTERVAL 1 SECOND) WHERE conversation_id=%s",(cid,))
             second=await jobs.claim(cid,run_id=str(uuid.uuid4()));assert first['claim_token']!=second['claim_token'],"LEASE_token_not_replaced"
             writer=W.build_persistent_extraction_writer(self.pool)
