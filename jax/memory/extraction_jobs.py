@@ -6,6 +6,24 @@ from .b9 import _digest
 from .b9_mariadb import MariaDBB9Store
 
 
+class ExtractorOutputError(ValueError):
+    """La SALIDA del extractor (LLM) no cumple el contrato.
+
+    Distinta de un ValueError por limites o autoridad de la FUENTE: la fuente esta bien y el
+    mismo job puede salir bien en otro intento, asi que va a RETRY (acotado por
+    JAX_MEMORY_MAX_ATTEMPTS; al agotarse, fail() lo pone en QUARANTINED). Un ValueError de
+    la fuente sigue en cuarentena inmediata. Auditoria 2026-10-05, MAJOR-1.
+    """
+
+
+ERROR_SALIDA_DEL_EXTRACTOR = 'EXTRACTOR_OUTPUT_INVALID'
+
+
+class StuckJobsError(RuntimeError):
+    """Hay jobs QUARANTINED (o UNKNOWN que se quedaron) esperando a una persona. Codigo de salida 2
+    del worker; distinto de un fallo general (1) para que aviso-fallo distinga los incidentes."""
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
 
@@ -146,3 +164,81 @@ class ExtractionJobs:
             backoff=min(3600,30*2**min(job['attempts'],6))
             await cur.execute("UPDATE memory_extraction_jobs SET state=%s,error_code=%s,next_attempt_at=DATE_ADD(NOW(6), INTERVAL %s SECOND),lease_until=NULL WHERE conversation_id=%s",(state,error_code[:128],backoff,conversation_id))
         await self.store.mutation(op)
+
+    def _stuck_where(self):
+        """QUARANTINED siempre; UNKNOWN solo si ya no esta en su ventana de recuperacion.
+
+        UNKNOWN (commit sin acuse) lo resuelve el siguiente reclamo leyendo los marcadores de commit
+        (pending() lo incluye), asi que mientras sea reciente NO espera a una persona. Se cuenta si
+        supero max_attempts o si lleva mas de lease_seconds sin cambiar (se quedo).
+        """
+        return ("(state='QUARANTINED' OR (state='UNKNOWN' AND (attempts>=%s OR updated_at<NOW(6)-INTERVAL %s SECOND)))",
+                (self.max_attempts,self.lease_seconds))
+
+    async def stuck_count(self):
+        """Jobs que esperan a una persona. pending() excluye QUARANTINED, asi que sin este conteo
+        una cola 'vacia' sale verde con conversaciones que nunca se destilaron."""
+        where,args=self._stuck_where()
+        async def op(cur):
+            await cur.execute(f"SELECT COUNT(*) AS n FROM memory_extraction_jobs WHERE {where}",args)
+            return int((await cur.fetchone())['n'])
+        return await self.store.mutation(op)
+
+    async def list_stuck(self, limit=50):
+        """Lista TODO lo que es QUARANTINED o UNKNOWN (para revisarlo), este o no ya contado como atascado."""
+        async def op(cur):
+            await cur.execute("SELECT conversation_id,state,error_code,attempts,updated_at FROM memory_extraction_jobs "
+                "WHERE state IN ('QUARANTINED','UNKNOWN') ORDER BY updated_at,conversation_id LIMIT %s",(limit,))
+            return list(await cur.fetchall())
+        return await self.store.mutation(op)
+
+    async def requeue(self, conversation_id, *, actor, reason, declared_actor=None):
+        """Re-encola un job en cuarentena DESPUES de que una persona lo reviso.
+
+        Deja el job en READY con los intentos en 0 y registra el evento REQUEUE (quien, por que,
+        estado y error anteriores) en la MISMA transaccion: sin auditoria no hay re-encolado.
+        `actor` es quien ejecuto (el usuario real del proceso); `declared_actor` es lo que esa
+        persona dijo ser (--actor), y se guarda aparte en `details`.
+        Rechaza (ValueError, sin evento): lo que no esta QUARANTINED (UNKNOWN lo resuelve el siguiente
+        reclamo con los marcadores de commit; re-encolarlo descartaria esa resolucion), los
+        INCONSISTENT_* (los marcadores de commit se contradicen: re-encolar podria duplicar memoria) y
+        las conversaciones con memory_processed=TRUE (ya se destilaron). No toca frozen_output ni
+        input_digest: si la cuarentena fue por 'fuente cambiada', el job volvera a cuarentena.
+        """
+        actor=(actor or '').strip(); reason=(reason or '').strip()
+        if not actor or not reason: raise ValueError('requeue requires actor and reason')
+        async def op(cur):
+            await cur.execute("SELECT state,error_code,attempts FROM memory_extraction_jobs WHERE conversation_id=%s FOR UPDATE",(conversation_id,))
+            job=await cur.fetchone()
+            if not job: raise ValueError(f'el job de la conversacion {conversation_id} no existe')
+            if job['state']!='QUARANTINED':
+                raise ValueError(f"solo se re-encola un job QUARANTINED; esta en {job['state']}"
+                                 +(" (UNKNOWN lo resuelve el siguiente reclamo con los marcadores de commit)" if job['state']=='UNKNOWN' else ''))
+            if (job['error_code'] or '').startswith('INCONSISTENT_'):
+                raise ValueError(f"no se re-encola un job {job['error_code']}: los marcadores de commit se contradicen y re-encolar podria duplicar memoria; requiere reconciliacion manual")
+            await cur.execute("SELECT memory_processed FROM conversations WHERE id=%s FOR UPDATE",(conversation_id,))
+            source=await cur.fetchone()
+            if source is None or source['memory_processed']:
+                raise ValueError('no se re-encola: la conversacion no existe o ya tiene memory_processed=TRUE (ya se destilo)')
+            await cur.execute("INSERT INTO memory_extraction_job_events (event_id,conversation_id,event_kind,actor,reason,details) VALUES (%s,%s,'REQUEUE',%s,%s,%s)",
+                (str(uuid.uuid4()),conversation_id,actor[:128],reason[:512],
+                 canonical({'previous_state':job['state'],'previous_error_code':job['error_code'],'previous_attempts':job['attempts'],
+                            'declared_actor':declared_actor})))
+            await cur.execute("UPDATE memory_extraction_jobs SET state='READY',attempts=0,error_code=NULL,next_attempt_at=NULL,claim_token=NULL,lease_until=NULL WHERE conversation_id=%s",(conversation_id,))
+            return {'conversation_id':conversation_id,'previous_state':job['state'],'previous_error_code':job['error_code']}
+        return await self.store.mutation(op)
+
+    async def stale_open_conversations(self, days, *, limit=20):
+        """Conversaciones sin cerrar (ended_at NULL) cuya ULTIMA ACTIVIDAD (el mensaje mas reciente, o
+        started_at si no tiene mensajes) fue hace mas de `days` dias: pending() exige ended_at, asi que
+        nunca entran a la cola. Una vieja pero con mensajes recientes no esta abandonada. Solo LEE:
+        cerrarlas es decision de una persona. Devuelve (total, las `limit` mas inactivas)."""
+        activity="COALESCE((SELECT MAX(m.created_at) FROM messages m WHERE m.conversation_id=c.id),c.started_at)"
+        where=f"c.ended_at IS NULL AND c.started_at<NOW(6)-INTERVAL %s DAY AND {activity}<NOW(6)-INTERVAL %s DAY"
+        async def op(cur):
+            await cur.execute(f"SELECT COUNT(*) AS n FROM conversations c WHERE {where}",(days,days))
+            total=int((await cur.fetchone())['n'])
+            await cur.execute(f"SELECT c.id,{activity} AS last_activity FROM conversations c WHERE {where} "
+                "ORDER BY last_activity,c.id LIMIT %s",(days,days,limit))
+            return total,list(await cur.fetchall())
+        return await self.store.mutation(op)

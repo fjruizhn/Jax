@@ -401,6 +401,7 @@ async def test_aud004_persistent_purge_erases_revision_column_payloads_and_vecto
     assert "UPDATE memory_revisions SET payload=NULL WHERE memory_id=%s" in sql
     assert "DELETE p FROM memory_revision_payloads" in sql
     assert "DELETE e FROM embedding_generations" in sql
+    assert "DELETE a FROM embedding_generation_attempts" in sql      # no quedan intentos huerfanos tras la purga
 
 
 @pytest.mark.asyncio
@@ -490,6 +491,7 @@ async def _b9_ci_test_pool(*, authority=False, legacy=False):
             "CREATE TEMPORARY TABLE memory_events (event_id CHAR(36) PRIMARY KEY, memory_id CHAR(36), revision_id CHAR(36), event_kind VARCHAR(32), actor_principal VARCHAR(255), subject_user_id VARCHAR(128), authority_source VARCHAR(255), occurred_at DATETIME(6), details JSON, compensates_event_id CHAR(36), actor_type VARCHAR(64), delegation VARCHAR(255), calling_component VARCHAR(255), request_id VARCHAR(255), trace_id VARCHAR(255))",
             "CREATE TEMPORARY TABLE memory_projections (memory_id CHAR(36) PRIMARY KEY, current_revision_id CHAR(36), current_lifecycle_state VARCHAR(32), current_verification_state BOOLEAN, canonical_history_digest CHAR(71), reconciliation_required BOOLEAN)",
             "CREATE TEMPORARY TABLE embedding_generations (generation_id CHAR(36) PRIMARY KEY, revision_id CHAR(36), embedding_space_id CHAR(71), generated_at DATETIME(6), embedding_payload LONGBLOB)",
+            "CREATE TEMPORARY TABLE embedding_generation_attempts (revision_id CHAR(36) NOT NULL, embedding_space_id CHAR(71) NOT NULL, attempts INT NOT NULL DEFAULT 0, last_error VARCHAR(255) NULL, last_attempt_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), PRIMARY KEY (revision_id, embedding_space_id))",
         )
         if authority:
             tables+=(
@@ -813,6 +815,7 @@ async def test_aud004_content_purge_scrubs_physical_b9_storage():
                 revision_id=(await cur.fetchone())["revision_id"]
                 await cur.execute("INSERT INTO embedding_generations VALUES (%s,%s,%s,NOW(6),%s)",
                                   ("00000000-0000-0000-0000-000000000001",revision_id,"space",b"derived vector"))
+                await cur.execute("INSERT INTO embedding_generation_attempts (revision_id,embedding_space_id,attempts) VALUES (%s,'space',5)",(revision_id,))
             await conn.commit()
         await api.content_purge(auth("CONTENT_PURGE"),memory_id)
         async with pool.acquire() as conn:
@@ -823,6 +826,8 @@ async def test_aud004_content_purge_scrubs_physical_b9_storage():
                 assert all(row["payload"] is None for row in await cur.fetchall())
                 await cur.execute("SELECT e.embedding_payload FROM embedding_generations e JOIN memory_revisions r ON r.revision_id=e.revision_id WHERE r.memory_id=%s",(memory_id,))
                 assert not await cur.fetchall()
+                await cur.execute("SELECT COUNT(*) AS n FROM embedding_generation_attempts")
+                assert (await cur.fetchone())["n"] == 0
                 await cur.execute("SELECT current_lifecycle_state FROM memory_projections WHERE memory_id=%s",(memory_id,))
                 assert (await cur.fetchone())["current_lifecycle_state"] == "PURGED"
     finally:
