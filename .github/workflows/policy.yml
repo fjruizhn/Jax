@@ -1289,6 +1289,10 @@ jobs:
         run: |
           python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py tests/test_governed_resolution.py tests/test_governed_renderer.py -q 2>&1 | tee /tmp/gov
           python3 .github/ci/piso.py verificar governance/gov /tmp/gov || exit $?
+      - name: F2-E Jacobs governed external-output path
+        run: |
+          PYTHONPATH=.:las_manos python -m pytest tests/test_external_output.py jacobs/_governed_aviso_test.py -q 2>&1 | tee /tmp/f2e-external-output
+          python3 .github/ci/piso.py verificar governance/f2e-external-output /tmp/f2e-external-output || exit $?
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en

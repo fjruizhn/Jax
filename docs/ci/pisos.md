@@ -855,6 +855,14 @@ native/canonical structured shapes, bounded encodings, and the
 F2-B -> F2-C -> F2-D receipt/render/revalidation path.
 ```
 
+## `governance/f2e-external-output`
+
+Piso agregado el 2026-10-04 para el canal de aviso Jacobs Telegram: `^10 passed`.
+Los 6 tests del adaptador compartido y 4 de integración ejecutan resolución
+canónica PIPELINE_STATUS, plantilla/render F2-C vigente, revalidación F2-D y
+transporte Telegram fijo. Se deja aparte del piso histórico `governance/gov`
+para conservar byte a byte el registro de la migración de pisos.
+
 ## `tests-puros/out`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
@@ -3670,6 +3678,8 @@ Patrón vigente al migrar (2026-10-03, master 364ded9): `^35 passed`
 Jax#338 (2026-10-04): `^35 passed` → `^201 passed`, imagen sin texto, union de dos pasadas con transparencia, APNG/MPO, TIFF por pagina, FIFO; 203 recolectadas − 2 LACTOVI (skipif por archivo ausente) = 201 passed, 2 skipped en el runner; medido local hall9000 (203 passed).
 
 2026-10-04 (esta rama): `^201 passed` → `^201 passed, 2 skipped`. La línea `grep -qE "^201 passed, 2 skipped"` entró con 2127bb3 (Jax#338, antes de que Jax#343 pasara los pisos a `ci/pisos.json`) y la migración la dejó sin las saltadas; se vuelven a fijar (las 2 imágenes reales de LACTOVI no están en el runner). Lo permite la excepción de endurecimiento del comparador.
+
+Jax#350 r3 (2026-10-04): `^201 passed, 2 skipped` → `^219 passed, 2 skipped`; añade 18 casos del OCR de PDF escaneado y su tratamiento como imagen. Re-medición local en hall9000: `221 passed`, porque las dos imágenes reales de LACTOVI están disponibles aquí; en el runner faltan y se esperan como skipped.
 
 Sin historia anotada en el workflow.
 
