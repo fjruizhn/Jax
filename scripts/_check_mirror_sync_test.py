@@ -326,3 +326,23 @@ def test_una_funcion_sin_conexion_directa_solo_exige_la_guarda(tmp_path):
     """`asegurar_base_de_test` no abre conexiones por si misma: delega. Basta con la guarda."""
     fuente = _fuente("guarda()\nreturn asyncio.run(otra())")
     assert revisar(_fam_orden(tmp_path, fuente, fuente)) == ([], [], [])
+
+
+# ---------------------------------------------------------------------------
+# La familia REAL: sus llamadas obligatorias estan fijadas aqui (borrar una entrada pone esto en rojo)
+# ---------------------------------------------------------------------------
+
+def test_la_familia_base_de_test_exige_la_guarda_en_las_tres_funciones_de_conexion():
+    from check_mirror_sync import FAMILIAS
+    familia = next(f for f in FAMILIAS if f.nombre == "base_de_test")
+    assert familia.llamadas_obligatorias == (
+        ("_dropear_base_de_sesion", "exigir_conexion_permitida"),
+        ("_clonar_esquema", "exigir_conexion_permitida"),
+        ("asegurar_base_de_test", "exigir_conexion_permitida"),
+    )
+    # y los simbolos de la guarda siguen siendo compartidos (identicos byte a byte, sin marcador)
+    for simbolo in ("PUERTOS_DE_PRODUCCION", "VARIABLE_PERMISO_INSTANCIA_DE_PRODUCCION",
+                    "_permiso_instancia_de_produccion", "exigir_conexion_permitida"):
+        assert simbolo in familia.compartidos
+    # ninguna otra familia declara llamadas obligatorias sin que alguien lo decida a proposito
+    assert [f.nombre for f in FAMILIAS if f.llamadas_obligatorias] == ["base_de_test"]

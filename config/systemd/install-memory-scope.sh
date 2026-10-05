@@ -37,6 +37,14 @@ DEST="$(realpath -m -- "${JAX_SYSTEMD_DEST:-$REAL}")"
 UNIDADES=(jax-memory-worker jax-memory-synthesis)
 MANIFIESTO=".instalado-por-install-memory-scope"
 
+# `--instalar-obsoleto --print-origen`: imprime el origen y el destino YA resueltos y sale sin copiar nada.
+# Existe para que las pruebas comprueben el valor real del default, no un texto del archivo.
+if [[ "${2:-}" == "--print-origen" ]]; then
+  echo "origen=$SD"
+  echo "destino=$DEST"
+  exit 0
+fi
+
 echo "== Copia las unidades, sus timers y sus drop-ins (sin habilitar ni arrancar nada) =="
 for unidad in "${UNIDADES[@]}"; do
   dropins="$SD/$unidad.service.d"

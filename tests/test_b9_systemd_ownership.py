@@ -188,9 +188,19 @@ def test_una_barra_final_en_el_destino_no_salta_el_daemon_reload(tmp_path):
 
 
 def test_el_origen_por_defecto_es_produccion_y_no_el_checkout_de_trabajo():
-    texto = (ROOT / "install-memory-scope.sh").read_text(encoding="utf-8")
-    assert "/srv/jax-prod/jax/config/systemd" in texto
-    assert "${JAX_SYSTEMD_SRC:-/home/" not in texto
+    """Se ejecuta el guion con `--print-origen` (no copia nada) y se lee el valor RESUELTO: un
+    texto igual en un comentario del archivo no puede hacer pasar esta prueba."""
+    def _resuelto(**entorno):
+        r = subprocess.run(["bash", str(ROOT / "install-memory-scope.sh"), "--instalar-obsoleto", "--print-origen"],
+                           env={"PATH": "/usr/bin:/bin", **entorno}, capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        return dict(l.split("=", 1) for l in r.stdout.splitlines())
+
+    por_defecto = _resuelto()
+    assert por_defecto["origen"] == "/srv/jax-prod/jax/config/systemd"
+    assert por_defecto["destino"] == "/etc/systemd/system"
+    explicito = _resuelto(JAX_SYSTEMD_SRC="/otra/ruta", JAX_SYSTEMD_DEST="/tmp/x//")
+    assert explicito == {"origen": "/otra/ruta", "destino": "/tmp/x"}
 
 
 def test_retira_solo_los_dropins_que_instalo_el_y_ya_no_estan_en_el_repo(tmp_path):

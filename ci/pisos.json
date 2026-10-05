@@ -78,8 +78,8 @@
       "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS."
     },
     "mirror-sync/ms": {
-      "patron": "^36 passed",
-      "mensaje": "PISO ROTO: se esperaban 36 tests CORRIDOS."
+      "patron": "^37 passed",
+      "mensaje": "PISO ROTO: se esperaban 37 tests CORRIDOS."
     },
     "mirror-sync/cu": {
       "patron": "^22 passed",
@@ -102,7 +102,7 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 26 regresiones STEP_STATUS ejecutadas."
     },
     "governance/f2e-sr3": {
-      "patron": "^218 passed",
+      "patron": "^214 passed",
       "mensaje": "PISO ROTO: se esperaban 214 tests CORRIDOS de F2-E-SR3."
     },
     "governance/f2e-sr3-source": {

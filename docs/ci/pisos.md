@@ -739,6 +739,8 @@ Sin historia anotada en el workflow.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^14 passed`
 
+37 el 2026-10-05 (cierre de la auditoría conjunta de #355; medido LOCAL: 36 -> 37 passed): +1 prueba que fija las `llamadas_obligatorias` reales de la familia `base_de_test`.
+
 36 el 2026-10-05 (ronda de cierre de #355; medido LOCAL: 20 -> 36 passed): +16 pruebas del ORDEN (la guarda de conexión va como sentencia de primer nivel antes de la primera apertura de conexión: connect, get_pool, create_pool; en jax y en cada espejo).
 
 20 el 2026-10-05 (auditoría jax-platform #195, rama fix/b9-driver-runbooks; medido LOCAL: 14 -> 20 passed): +6 pruebas de las llamadas obligatorias (la guarda no se puede perder en una función con marcador de divergencia, en ninguna copia). El runner tiene la última palabra.
