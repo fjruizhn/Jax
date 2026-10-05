@@ -111,6 +111,8 @@ jobs:
         # The root conftest's governance bootstrap reads host configuration;
         # this explicit boundary does not load it or migrate any shared schema.
         # Measured 2026-09-26 against MariaDB 12.3.3: 102 passed, no skips/errors.
+        # Re-measured 2026-10-05 (fix/memoria-worker-cuarentena-aviso-orden, local disposable DB):
+        # 176 passed, 0 skipped (121 before the branch). Floor in ci/pisos.json; the runner has the last word.
         run: |
           set -euo pipefail
           python -m pytest --confcutdir=tests \
@@ -1290,6 +1292,10 @@ jobs:
         run: |
           python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py tests/test_governed_resolution.py tests/test_governed_renderer.py -q 2>&1 | tee /tmp/gov
           python3 .github/ci/piso.py verificar governance/gov /tmp/gov || exit $?
+      - name: F2-E Jacobs governed external-output path
+        run: |
+          PYTHONPATH=.:las_manos python -m pytest tests/test_external_output.py jacobs/_governed_aviso_test.py -q 2>&1 | tee /tmp/f2e-external-output
+          python3 .github/ci/piso.py verificar governance/f2e-external-output /tmp/f2e-external-output || exit $?
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en

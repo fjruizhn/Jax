@@ -19,7 +19,7 @@ No hace falta tocar `.github/workflows/`. Un piso nunca tiene valor por defecto:
 
 Cada paso del workflow llama `python3 .github/ci/piso.py verificar <clave> <archivo-de-salida>`.
 La clave es `<job>/<archivo temporal que lee>`. El único mínimo numérico que no es un
-`patron` es `memory-b9-regression/casos`, en la sección `minimos`.
+`patron` es `memory-b9-regression/casos`, en la sección `minimos`. (175 -> 176 el 2026-10-05, auditoria final Jax#354: +1 prueba del orden de indices del esquema; local, base jax_memory_test_memb9_ci, 0 skipped. Antes: 167 -> 175 el 2026-10-05, re-auditoria Jax#354: +8 pruebas (detector de SuccessExitStatus y su control, 011/012/013 sobre la DDL real con VECTOR KEY + FK CASCADE incluido el 1205, EXPLAIN de 012/013, marcha atras ejecutada; las dos de README/timeout estaticas se reescribieron); local, 0 skipped. Antes: 152 -> 167 el 2026-10-05, Jax#354: +15 pruebas de los 8 MINOR, local con MariaDB desechable, 0 skipped. Antes, 102 -> 152 el 2026-10-05: el 102 era la medicion del 2026-09-26 y habia quedado atras; local contra MariaDB desechable, misma lista de 10 archivos, 121 antes de la rama y 152 despues, 0 skipped. Es un MINIMO: el runner puede medir mas, nunca debe dar menos.)
 
 Como `ci/pisos.json` es un dato y no lógica del workflow, un PR que solo sube un piso
 no toca `.github/workflows/`. Para que eso no sea una forma de rebajar un piso sin pasar por
@@ -474,6 +474,8 @@ passed"), no el de sumar comentarios: ese error ya rompio CI hoy.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^203 passed`
 
+203 -> 206 el 2026-10-05 (rama fix/memoria-worker-cuarentena-aviso-orden, hall9000, medido LOCAL: 123 -> 126 passed sobre la misma lista de archivos): `test_b9_systemd_ownership.py` +4 (cinco unidades con OnFailure, ExecStartPre del checkout sano, timer de synthesis a las 04:30, las cinco existen) y -1 (se borra la prueba que solo comprobaba que `run_once` no llamaba a `_recalcular_embeddings_en_ceros`, codigo muerto borrado). El runner tiene la ultima palabra: si mide otro numero, se corrige aqui y en `ci/pisos.json`.
+
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 ```text
@@ -870,9 +872,21 @@ native/canonical structured shapes, bounded encodings, and the
 F2-B -> F2-C -> F2-D receipt/render/revalidation path.
 ```
 
+## `governance/f2e-external-output`
+
+Piso agregado el 2026-10-04 para el canal de aviso Jacobs Telegram: `^10 passed`.
+Los 6 tests del adaptador compartido y 4 de integración ejecutan resolución
+canónica PIPELINE_STATUS, plantilla/render F2-C vigente, revalidación F2-D y
+transporte Telegram fijo. Se deja aparte del piso histórico `governance/gov`
+para conservar byte a byte el registro de la migración de pisos.
+
 ## `tests-puros/out`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
+
+3476 -> 3477 el 2026-10-05 (auditoria Jax#354, misma rama, delta de archivo local): `tests/test_hnsw_recall_tripwire.py` 6 -> 7 (+1: con faltantes y recall vencido a la vez gana el fallo general; el recall solo sale con el codigo propio 3).
+
+3473 -> 3476 el 2026-10-05 (misma rama, medido LOCAL como delta de archivo): `tests/test_hnsw_recall_tripwire.py` 3 -> 6. El tripwire de recall deja de ser codigo muerto: lo ejecuta vector-health (`jax/memory/recall_tripwire.py`) y falla la unidad; +3 pruebas de ese cableado. 45 skipped no cambia.
 
 3470 -> 3473 el 2026-10-04 (Hyde, hall9000): +3 de `tests/test_docker_rm_sin_fuga_de_volumenes.py`
 (el barrido del árbol, las formas que fugan y las que no; ronda de auditoría del PR #353). `docker rm -f` sin `-v` dejaba huérfano el
@@ -3681,6 +3695,8 @@ Patrón vigente al migrar (2026-10-03, master 364ded9): `^35 passed`
 Jax#338 (2026-10-04): `^35 passed` → `^201 passed`, imagen sin texto, union de dos pasadas con transparencia, APNG/MPO, TIFF por pagina, FIFO; 203 recolectadas − 2 LACTOVI (skipif por archivo ausente) = 201 passed, 2 skipped en el runner; medido local hall9000 (203 passed).
 
 2026-10-04 (esta rama): `^201 passed` → `^201 passed, 2 skipped`. La línea `grep -qE "^201 passed, 2 skipped"` entró con 2127bb3 (Jax#338, antes de que Jax#343 pasara los pisos a `ci/pisos.json`) y la migración la dejó sin las saltadas; se vuelven a fijar (las 2 imágenes reales de LACTOVI no están en el runner). Lo permite la excepción de endurecimiento del comparador.
+
+Jax#350 r3 (2026-10-04): `^201 passed, 2 skipped` → `^219 passed, 2 skipped`; añade 18 casos del OCR de PDF escaneado y su tratamiento como imagen. Re-medición local en hall9000: `221 passed`, porque las dos imágenes reales de LACTOVI están disponibles aquí; en el runner faltan y se esperan como skipped.
 
 Sin historia anotada en el workflow.
 

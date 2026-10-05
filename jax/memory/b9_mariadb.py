@@ -292,7 +292,7 @@ class PersistentMemoryAPI:
                     'max_items':int(__import__('os').getenv('JAX_MEMORY_MAX_ITEMS','100'))}
             if not counts or counts['message_count']>limits['max_messages'] or counts['character_count']>limits['max_chars']:
                 raise ScopeDenied('extraction source exceeds input limits')
-            await cur.execute("SELECT id AS message_id,turn_number,role,content FROM messages WHERE conversation_id=%s ORDER BY turn_number ASC LIMIT %s FOR UPDATE", (conversation_id,limits['max_messages']+1))
+            await cur.execute("SELECT id AS message_id,turn_number,role,content FROM messages WHERE conversation_id=%s ORDER BY turn_number ASC, id ASC LIMIT %s FOR UPDATE", (conversation_id,limits['max_messages']+1))
             messages=list(await cur.fetchall())
             if source_digest(conv,messages)!=job['input_digest']: raise ScopeDenied('extraction source changed')
             from .extraction_jobs import _normalize_source_turns
@@ -508,6 +508,8 @@ class PersistentMemoryAPI:
                 # retaining the safe immutable revision/event tombstone.
                 await cur.execute("DELETE p FROM memory_revision_payloads p JOIN memory_revisions r ON r.revision_id=p.revision_id WHERE r.memory_id=%s", (memory_id,))
                 await cur.execute("DELETE e FROM embedding_generations e JOIN memory_revisions r ON r.revision_id=e.revision_id WHERE r.memory_id=%s", (memory_id,))
+                # Las revisiones quedan como tombstone (no hay FK que arrastre estas filas): se limpian aqui.
+                await cur.execute("DELETE a FROM embedding_generation_attempts a JOIN memory_revisions r ON r.revision_id=a.revision_id WHERE r.memory_id=%s", (memory_id,))
                 await cur.execute("UPDATE memory_revisions SET payload=NULL WHERE memory_id=%s", (memory_id,))
             await self._write(cur,obj,rev,prov,event,projection); return rid
         return await self._store.mutation(op)
