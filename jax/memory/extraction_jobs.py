@@ -198,3 +198,15 @@ class ExtractionJobs:
             await cur.execute("UPDATE memory_extraction_jobs SET state='READY',attempts=0,error_code=NULL,next_attempt_at=NULL,claim_token=NULL,lease_until=NULL WHERE conversation_id=%s",(conversation_id,))
             return {'conversation_id':conversation_id,'previous_state':job['state'],'previous_error_code':job['error_code']}
         return await self.store.mutation(op)
+
+    async def stale_open_conversations(self, days, *, limit=20):
+        """Conversaciones sin cerrar (ended_at NULL) hace mas de `days` dias: pending() exige
+        ended_at, asi que nunca entran a la cola. Solo LEE: cerrarlas es decision de una persona.
+        Devuelve (total, las `limit` mas viejas)."""
+        async def op(cur):
+            await cur.execute("SELECT COUNT(*) AS n FROM conversations WHERE ended_at IS NULL AND started_at<NOW(6)-INTERVAL %s DAY",(days,))
+            total=int((await cur.fetchone())['n'])
+            await cur.execute("SELECT id,started_at FROM conversations WHERE ended_at IS NULL AND started_at<NOW(6)-INTERVAL %s DAY "
+                "ORDER BY started_at,id LIMIT %s",(days,limit))
+            return total,list(await cur.fetchall())
+        return await self.store.mutation(op)

@@ -610,6 +610,25 @@ async def process_claimed(db, extractor, conv, writer, jobs, job, budget, deadli
         return False
 
 
+async def _avisar_conversaciones_abiertas(jobs) -> None:
+    """Lista en el log (WARNING) las conversaciones con ended_at NULL de mas de N dias.
+
+    pending() exige ended_at: una conversacion que nadie cierra no entra nunca a la cola y su
+    memoria no se destila (12 desde junio, medido 2026-10-05). Este aviso NO las cierra --cerrarlas
+    es decision de una persona-- ni hace fallar la corrida: es una observacion, no la extraccion.
+    """
+    days=_positive_limit('JAX_MEMORY_OPEN_CONVERSATION_WARN_DAYS',7)
+    try:
+        total,sample=await jobs.stale_open_conversations(days,limit=20)
+    except Exception as error:  # fail-soft: es un diagnostico de solo lectura y no puede tumbar la extraccion; el fallo queda en el log y la corrida siguiente reintenta
+        logger.error('no se pudo revisar las conversaciones abiertas: %s',type(error).__name__)
+        return
+    if total:
+        ids=', '.join(str(row['id']) for row in sample)
+        logger.warning('%s conversaciones llevan mas de %s dias abiertas (ended_at NULL) y nunca entran a la cola de extraccion; '
+                       'mas antiguas (id): %s. Cerrarlas es decision de una persona.',total,days,ids)
+
+
 async def _run_once(limit: int = 10, *, b9_writer: PersistentExtractionWriter | None = None) -> None:
     host=os.environ.get('JAX_DB_HOST')
     if not host: raise RuntimeError('JAX_DB_HOST is required')
@@ -621,6 +640,7 @@ async def _run_once(limit: int = 10, *, b9_writer: PersistentExtractionWriter | 
         lease_seconds=_positive_limit('JAX_MEMORY_LEASE_SECONDS',900)
         if lease_seconds<=run_seconds: raise ValueError('extraction lease must exceed run deadline')
         jobs=ExtractionJobs(MappingPool(db.pool),lease_seconds=lease_seconds,max_attempts=_positive_limit('JAX_MEMORY_MAX_ATTEMPTS',3))
+        await _avisar_conversaciones_abiertas(jobs)
         pending=await jobs.pending(limit)
         if pending is None: raise RuntimeError('memory queue unavailable')
         if not pending:
