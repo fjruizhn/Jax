@@ -48,6 +48,8 @@ def _correr(monkeypatch, db: _DBFalsa):
         def __init__(self,*args,**kwargs): pass
         async def pending(self,limit):
             return await db.get_unprocessed_conversations(limit)
+        async def stuck_count(self): return 0
+        async def stale_open_conversations(self, days, limit=20): return 0, []
     monkeypatch.setattr(worker,"ExtractionJobs",Jobs)
     monkeypatch.setenv("JAX_DB_HOST", "db-de-test")
     asyncio.run(worker.run_once())

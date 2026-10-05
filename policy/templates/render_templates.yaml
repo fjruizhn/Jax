@@ -1,8 +1,9 @@
 # Plantillas de renderer por predicado — REFORMAS-v3.md §3.1.6.
 # Trasladadas tal cual las tres que el documento da como ejemplo. Las
 # las restantes no tenían plantilla en REFORMAS-v3.md. Las plantillas
-# runtime de JOB_STATUS / ENGINE_STATUS y las dos adiciones autorizadas
-# PIPELINE_STATUS / FACET_RUNTIME_STATUS quedan definidas por F2-E-SR-001.
+# runtime de JOB_STATUS / ENGINE_STATUS y las adiciones autorizadas
+# PIPELINE_STATUS / FACET_RUNTIME_STATUS quedan definidas por F2-E-SR-001;
+# STEP_STATUS queda definido por F2-E-SR2.
 # Los predicados aún pendientes no pueden renderizarse.
 #
 # Fuente: /opt/jax/docs/REFORMAS-v3.md §3.1.6, sha256
@@ -40,6 +41,10 @@ templates:
   PIPELINE_STATUS:
     status: definida
     template: "Jacobs registra actualmente que el pipeline {pipeline_id} está {status}."
+
+  STEP_STATUS:
+    status: definida
+    template: "Jacobs registra actualmente que el paso {step_id} está {status}."
 
   FACET_RUNTIME_STATUS:
     status: definida

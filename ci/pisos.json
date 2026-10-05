@@ -62,8 +62,8 @@
       "mensaje": "PISO ROTO: se esperaban 295 tests CORRIDOS (no skipeados)."
     },
     "memory-vector-zero-io/out": {
-      "patron": "^203 passed",
-      "mensaje": "PISO ROTO: se esperaban 203 tests CORRIDOS (no skipeados)."
+      "patron": "^206 passed",
+      "mensaje": "PISO ROTO: se esperaban 206 tests CORRIDOS (no skipeados)."
     },
     "hyde-containment/hyde": {
       "patron": "^21 passed",
@@ -97,6 +97,10 @@
       "patron": "^19 passed",
       "mensaje": "PISO ROTO: se esperaban 19 tests CORRIDOS de F2-E-SR source integrity."
     },
+    "governance/f2e-sr2": {
+      "patron": "^26 passed",
+      "mensaje": "PISO ROTO: se esperaban exactamente 26 regresiones STEP_STATUS ejecutadas."
+    },
     "governance/f2e-sr3": {
       "patron": "^214 passed",
       "mensaje": "PISO ROTO: se esperaban 214 tests CORRIDOS de F2-E-SR3."
@@ -106,16 +110,20 @@
       "mensaje": "PISO ROTO: se esperaban 164 tests CORRIDOS de F2-E-SR3 source/auth/routing."
     },
     "governance/gov": {
-      "patron": "^263 passed",
-      "mensaje": "PISO ROTO: se esperaban 263 tests CORRIDOS."
+      "patron": "^264 passed",
+      "mensaje": "PISO ROTO: se esperaban 264 tests CORRIDOS."
+    },
+    "governance/f2e-external-output": {
+      "patron": "^10 passed",
+      "mensaje": "PISO ROTO: se esperaban 10 tests CORRIDOS de la frontera de salida externa F2-E."
     },
     "governance/f2e-structured-projection": {
       "patron": "^15 passed in ",
       "mensaje": "PISO ROTO: se esperaban exactamente 15 tests CORRIDOS de F2-E structured projection."
     },
     "tests-puros/out": {
-      "patron": "^3473 passed, 45 skipped",
-      "mensaje": "PISO ROTO: se esperaban 3473 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."
+      "patron": "^3477 passed, 45 skipped",
+      "mensaje": "PISO ROTO: se esperaban 3477 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."
     },
     "tests-puros/ficha_tests": {
       "patron": "^16 passed",
@@ -179,6 +187,6 @@
     }
   },
   "minimos": {
-    "memory-b9-regression/casos": 102
+    "memory-b9-regression/casos": 176
   }
 }

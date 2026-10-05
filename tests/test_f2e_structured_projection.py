@@ -207,6 +207,7 @@ def _resolved_pipeline_envelope(monkeypatch, *, claim_status=None, tool_status=N
     from policy.governance.resolution import ReceiptAuthenticator, ReferenceLookupRecord
     from policy.governance.runtime_status import (
         JacobsPipelineStatusResolver,
+        RUNTIME_STATUS_API_VERSION,
         build_runtime_status_registry,
     )
 
@@ -261,7 +262,7 @@ def _resolved_pipeline_envelope(monkeypatch, *, claim_status=None, tool_status=N
         claim = ClaimRecord(f"claim-pipeline-{index}", "PIPELINE_STATUS", arguments, scope,
             SourceClass.CURRENT_SOURCE, EpistemicStatus.CURRENT_OBSERVATION,
             resolution_receipt_ref=receipt_id, disposition=response.ClaimDisposition.ASSERTABLE,
-            template_contract=TemplateContract("PIPELINE_STATUS", "f2-e.runtime-status.3", "es"))
+            template_contract=TemplateContract("PIPELINE_STATUS", RUNTIME_STATUS_API_VERSION, "es"))
         receipt_ref = ReferenceRef(receipt_id, ReferenceType.RESOLUTION_RECEIPT,
             f"axioma://{receipt_id}", f"immutable:{receipt_id}",
             resolution_receipt.receipt_id, scope.scope_digest, TemporalClass.CURRENT,

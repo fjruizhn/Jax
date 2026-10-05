@@ -262,7 +262,7 @@ class GovernedStructuredRenderer:
         if envelope.candidate.schema_version not in GOVERNED_ENVELOPE_SCHEMA_VERSIONS:
             raise StructuredProjectionError("unsupported sealed envelope version")
         if (GOVERNED_RENDERER_API_VERSION != "f2-c.renderer.3"
-                or GOVERNED_DOMAIN_SPEC_VERSION != "f2-c.domain.6"
+                or GOVERNED_DOMAIN_SPEC_VERSION != "f2-c.domain.7"
                 or context.renderer_api_version != GOVERNED_RENDERER_API_VERSION
                 or context.domain_registry.specification.version != GOVERNED_DOMAIN_SPEC_VERSION):
             raise StructuredProjectionError("unsupported F2-C renderer/domain compatibility tuple")
