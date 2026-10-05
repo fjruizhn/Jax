@@ -94,16 +94,16 @@
       "mensaje": "PISO ROTO: se esperaban 33 tests CORRIDOS."
     },
     "governance/f2e-sr": {
-      "patron": "^18 passed",
-      "mensaje": "PISO ROTO: se esperaban 18 tests CORRIDOS de F2-E-SR source integrity."
+      "patron": "^19 passed",
+      "mensaje": "PISO ROTO: se esperaban 19 tests CORRIDOS de F2-E-SR source integrity."
     },
     "governance/f2e-sr2": {
       "patron": "^26 passed",
       "mensaje": "PISO ROTO: se esperaban exactamente 26 regresiones STEP_STATUS ejecutadas."
     },
     "governance/f2e-sr3": {
-      "patron": "^212 passed",
-      "mensaje": "PISO ROTO: se esperaban 212 tests CORRIDOS de F2-E-SR3."
+      "patron": "^214 passed",
+      "mensaje": "PISO ROTO: se esperaban 214 tests CORRIDOS de F2-E-SR3."
     },
     "governance/f2e-sr3-source": {
       "patron": "^164 passed",
@@ -116,6 +116,10 @@
     "governance/f2e-external-output": {
       "patron": "^10 passed",
       "mensaje": "PISO ROTO: se esperaban 10 tests CORRIDOS de la frontera de salida externa F2-E."
+    },
+    "governance/f2e-structured-projection": {
+      "patron": "^15 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 15 tests CORRIDOS de F2-E structured projection."
     },
     "tests-puros/out": {
       "patron": "^3477 passed, 45 skipped",

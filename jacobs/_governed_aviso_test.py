@@ -1,4 +1,6 @@
 import asyncio
+from datetime import datetime, timezone
+from types import MappingProxyType
 import pytest
 
 from jacobs import models, store
@@ -30,7 +32,20 @@ def _source(monkeypatch, pipeline):
     async def pipeline_get(_pipeline_id):
         return pipeline
 
+    async def pipeline_status_snapshots(pipeline_ids):
+        return MappingProxyType({
+            pipeline_id: store.PipelineStatusSnapshot(
+                pipeline_id=pipeline_id,
+                tenant_id=pipeline.tenant_id,
+                user_id=pipeline.user_id,
+                status=pipeline.status,
+                observed_at=datetime.now(timezone.utc),
+            )
+            for pipeline_id in pipeline_ids if pipeline_id == pipeline.pipeline_id
+        })
+
     monkeypatch.setattr(store, "pipeline_get", pipeline_get)
+    monkeypatch.setattr(store, "pipeline_status_snapshots", pipeline_status_snapshots)
 
 
 def test_pipeline_notice_resolves_canonical_status_renders_claim_then_commits_exact_text(monkeypatch):

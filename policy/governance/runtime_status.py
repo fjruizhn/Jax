@@ -372,38 +372,58 @@ class ProcessingJobStatusResolver:
 class JacobsPipelineStatusResolver:
     """Canonical Jacobs store only; projections and caller stores are excluded."""
     async def evidence(self, arguments: Mapping[str, object], scope: ResponseScope) -> RuntimeStatusEvidence:
+        return (await self.evidence_many((arguments,), scope))[0]
+
+    async def evidence_many(self, arguments_seq: tuple[Mapping[str, object], ...] | list[Mapping[str, object]],
+                            scope: ResponseScope) -> tuple[RuntimeStatusEvidence, ...]:
         if not isinstance(scope, ResponseScope) or scope.project_id is not None:
             raise GovernanceContractError("PIPELINE_STATUS project scope unsupported")
-        if not isinstance(arguments, Mapping) or set(arguments) != {"pipeline_id", "status"}:
-            raise GovernanceContractError("PIPELINE_STATUS arguments invalid")
-        pipeline_id, status = arguments["pipeline_id"], arguments["status"]
-        if not isinstance(pipeline_id, str) or not isinstance(status, str):
-            raise GovernanceContractError("PIPELINE_STATUS arguments invalid")
+        if not isinstance(arguments_seq, (tuple, list)) or not 1 <= len(arguments_seq) <= 50:
+            raise GovernanceContractError("PIPELINE_STATUS batch arguments invalid")
+        normalized: list[tuple[str, str]] = []
+        for arguments in arguments_seq:
+            if not isinstance(arguments, Mapping) or set(arguments) != {"pipeline_id", "status"}:
+                raise GovernanceContractError("PIPELINE_STATUS arguments invalid")
+            pipeline_id, status = arguments["pipeline_id"], arguments["status"]
+            if not isinstance(pipeline_id, str) or not pipeline_id or not isinstance(status, str) or not status:
+                raise GovernanceContractError("PIPELINE_STATUS arguments invalid")
+            normalized.append((pipeline_id, status))
+        ids = tuple(pipeline_id for pipeline_id, _status in normalized)
+        if len(set(ids)) != len(ids):
+            raise GovernanceContractError("PIPELINE_STATUS batch has duplicate pipeline identities")
         from jacobs import store as jacobs_store
         try:
-            pipeline = await jacobs_store.pipeline_get(pipeline_id)
+            snapshots = await jacobs_store.pipeline_status_snapshots(ids)
         except Exception:  # fail-soft: Jacobs inaccesible queda UNAVAILABLE, nunca se acredita.
-            pipeline = None
-        observed_at = datetime.now(timezone.utc) if pipeline is not None else None
-        if pipeline is None or observed_at is None or pipeline.tenant_id is None or pipeline.user_id is None:
-            obs = ResolutionObservation(ResolutionStatus.UNAVAILABLE, datetime.now(timezone.utc), "jacobs-pipeline:unavailable", {})
-        elif (pipeline.tenant_id, pipeline.user_id) != (scope.tenant_id, scope.subject_id):
-            obs = ResolutionObservation(ResolutionStatus.WRONG_SCOPE, observed_at, f"jacobs-pipeline:{pipeline_id}", {})
-        else:
-            status_value = getattr(getattr(pipeline, "status", None), "value", None)
-            if not isinstance(status_value, str):
-                obs = ResolutionObservation(ResolutionStatus.UNAVAILABLE, datetime.now(timezone.utc), "jacobs-pipeline:unavailable", {})
-            else:
-                obs = ResolutionObservation(ResolutionStatus.RESOLVED, observed_at,
-                    f"jacobs-pipeline:{pipeline_id}", {"pipeline_id": pipeline_id, "status": status_value})
+            snapshots = {}
         try:
             source_config = _jacobs_source_configuration(require_config=True)
         except Exception:  # fail-soft: missing Jacobs DB config must leave PIPELINE_STATUS unavailable.
             source_config = _jacobs_source_configuration()
-            obs = ResolutionObservation(ResolutionStatus.UNAVAILABLE, datetime.now(timezone.utc),
-                "jacobs-pipeline:source-configuration-unavailable", {})
-        return _runtime_status_evidence_from_server(AdapterKind.JACOBS_PIPELINE_STATUS, obs, scope,
-            runtime_status_source_configuration_digest("PIPELINE_STATUS", source_config))
+            observations = tuple(ResolutionObservation(ResolutionStatus.UNAVAILABLE, datetime.now(timezone.utc),
+                "jacobs-pipeline:source-configuration-unavailable", {}) for _ in normalized)
+        else:
+            observations = []
+            for pipeline_id, _requested_status in normalized:
+                snapshot = snapshots.get(pipeline_id)
+                if (snapshot is None or snapshot.tenant_id is None or snapshot.user_id is None):
+                    observation = ResolutionObservation(ResolutionStatus.UNAVAILABLE, datetime.now(timezone.utc),
+                        "jacobs-pipeline:unavailable", {})
+                elif (snapshot.tenant_id, snapshot.user_id) != (scope.tenant_id, scope.subject_id):
+                    observation = ResolutionObservation(ResolutionStatus.WRONG_SCOPE, snapshot.observed_at,
+                        f"jacobs-pipeline:{pipeline_id}", {})
+                else:
+                    status_value = getattr(snapshot.status, "value", None)
+                    if not isinstance(status_value, str):
+                        observation = ResolutionObservation(ResolutionStatus.UNAVAILABLE, datetime.now(timezone.utc),
+                            "jacobs-pipeline:unavailable", {})
+                    else:
+                        observation = ResolutionObservation(ResolutionStatus.RESOLVED, snapshot.observed_at,
+                            f"jacobs-pipeline:{pipeline_id}", {"pipeline_id": pipeline_id, "status": status_value})
+                observations.append(observation)
+        configuration_digest = runtime_status_source_configuration_digest("PIPELINE_STATUS", source_config)
+        return tuple(_runtime_status_evidence_from_server(AdapterKind.JACOBS_PIPELINE_STATUS, observation, scope,
+            configuration_digest) for observation in observations)
 
 
 class JacobsStepStatusResolver:

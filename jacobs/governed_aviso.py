@@ -51,9 +51,9 @@ from policy.governance.runtime_status import (
 
 
 _PREDICATE = "PIPELINE_STATUS"
-_BINDING_VERSION = "f2-e.runtime-status.3"
+_BINDING_VERSION = "f2-e.runtime-status.4"
 _RESOLVER_ID = "policy.governance.runtime_status:JacobsPipelineStatusResolver"
-_RESOLVER_VERSION = "f2-e.runtime-status-resolver.3"
+_RESOLVER_VERSION = "f2-e.runtime-status-resolver.4"
 _TEMPLATE_ID = "PIPELINE_STATUS"
 _LOCALE = "es"
 _AUTHENTICATOR = ReceiptAuthenticator(

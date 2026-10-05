@@ -1292,6 +1292,14 @@ jobs:
         run: |
           python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py tests/test_governed_response_contract.py tests/test_governed_resolution.py tests/test_governed_renderer.py -q 2>&1 | tee /tmp/gov
           python3 .github/ci/piso.py verificar governance/gov /tmp/gov || exit $?
+      # Keep additive F2-E coverage after every step in the frozen master
+      # sequence so the migration tripwire still compares master as a prefix.
+      - name: F2-E structured projection exact contract
+        run: |
+          python -m pytest tests/test_f2e_structured_projection.py -q 2>&1 | tee /tmp/f2e-structured-projection
+          python3 .github/ci/piso.py verificar governance/f2e-structured-projection /tmp/f2e-structured-projection || exit $?
+        env:
+          PYTHONPATH: .:las_manos
       - name: F2-E Jacobs governed external-output path
         run: |
           PYTHONPATH=.:las_manos python -m pytest tests/test_external_output.py jacobs/_governed_aviso_test.py -q 2>&1 | tee /tmp/f2e-external-output

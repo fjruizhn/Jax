@@ -2,6 +2,7 @@ import asyncio
 import threading
 from dataclasses import replace
 from datetime import datetime, timezone
+from types import MappingProxyType
 
 import pytest
 
@@ -20,6 +21,18 @@ from motor_registry.job_store import JobStore
 
 
 NOW = datetime(2026, 10, 2, tzinfo=timezone.utc)
+
+
+def _status_batch(*pipelines):
+    by_id = {pipeline.pipeline_id: pipeline for pipeline in pipelines}
+    async def snapshots(ids):
+        observed_at = datetime.now(timezone.utc)
+        from jacobs import store
+        return MappingProxyType({pipeline_id: store.PipelineStatusSnapshot(
+            pipeline_id=pipeline_id, tenant_id=pipeline.tenant_id, user_id=pipeline.user_id,
+            status=pipeline.status, observed_at=observed_at)
+            for pipeline_id in ids if (pipeline := by_id.get(pipeline_id)) is not None})
+    return snapshots
 _PLATFORM_SOURCE_CONFIGURATION = {
     "FACET_RUNTIME_STATUS": {"state_contract": "JAXEngineState.FacetState", "status_field": "status",
         "observed_at_field": "resolver_read_time", "allowed_statuses": ["idle", "thinking", "error", "offline"]},
@@ -143,9 +156,7 @@ def test_equal_job_and_pipeline_ids_remain_distinct_sources(tmp_path, monkeypatc
         recursion_depth=0, tenant_id="tenant-a", user_id="user-a", job_id=identifier)
     pipeline = models.Pipeline(pipeline_id=identifier, name="pipeline", invoked_by="web", mode="supervised",
         status=models.PipelineStatus.failed, tenant_id="tenant-a", user_id="user-a", updated_at=NOW.timestamp())
-    async def pipeline_get(_pipeline_id):
-        return pipeline
-    monkeypatch.setattr(jacobs_store, "pipeline_get", pipeline_get)
+    monkeypatch.setattr(jacobs_store, "pipeline_status_snapshots", _status_batch(pipeline))
     job = MotorJobStatusResolver().evidence({"job_id": identifier, "status": "pending"}, _scope())
     jacobs = asyncio.run(JacobsPipelineStatusResolver().evidence(
         {"pipeline_id": identifier, "status": "failed"}, _scope()))
@@ -377,11 +388,7 @@ def test_jacobs_pipeline_resolver_uses_canonical_store_and_exact_owner(monkeypat
         updated_at=NOW.timestamp(),
     )
 
-    async def pipeline_get(pipeline_id):
-        assert pipeline_id == "same-looking-id"
-        return pipeline
-
-    monkeypatch.setattr(store, "pipeline_get", pipeline_get)
+    monkeypatch.setattr(store, "pipeline_status_snapshots", _status_batch(pipeline))
     resolver = JacobsPipelineStatusResolver()
     evidence = asyncio.run(resolver.evidence(
         {"pipeline_id": "same-looking-id", "status": "running"}, _scope()))
@@ -406,11 +413,11 @@ def test_pipeline_status_uses_canonical_jacobs_state_not_platform_projection(mon
         tenant_id="tenant-a", user_id="user-a", updated_at=NOW.timestamp())
     called = []
 
-    async def canonical_pipeline_get(identifier):
-        called.append(identifier)
-        return pipeline
+    async def snapshots(ids):
+        called.extend(ids)
+        return await _status_batch(pipeline)(ids)
 
-    monkeypatch.setattr(jacobs_store, "pipeline_get", canonical_pipeline_get)
+    monkeypatch.setattr(jacobs_store, "pipeline_status_snapshots", snapshots)
     evidence = asyncio.run(JacobsPipelineStatusResolver().evidence(
         {"pipeline_id": pipeline.pipeline_id, "status": "interrupted"}, _scope()))
 
@@ -422,10 +429,10 @@ def test_pipeline_status_uses_canonical_jacobs_state_not_platform_projection(mon
 def test_unknown_jacobs_pipeline_never_resolves_and_ignores_caller_timestamps(monkeypatch):
     from jacobs import store
 
-    async def pipeline_get(_pipeline_id):
-        return None
+    async def snapshots(_ids):
+        return MappingProxyType({})
 
-    monkeypatch.setattr(store, "pipeline_get", pipeline_get)
+    monkeypatch.setattr(store, "pipeline_status_snapshots", snapshots)
     resolver = JacobsPipelineStatusResolver()
     # There is intentionally no observed_at/source argument to this API.
     from policy.governance.response import GovernanceContractError
@@ -435,3 +442,30 @@ def test_unknown_jacobs_pipeline_never_resolves_and_ignores_caller_timestamps(mo
     evidence = asyncio.run(resolver.evidence(
         {"pipeline_id": "missing", "status": "running"}, _scope()))
     assert evidence.observation.status is ResolutionStatus.UNAVAILABLE
+
+
+def test_jacobs_status_batch_is_ordered_bounded_and_uses_one_snapshot_read(monkeypatch):
+    from jacobs import models, store
+    _configure_jacobs_source(monkeypatch)
+    first = models.Pipeline(pipeline_id="pipeline-1", name="one", invoked_by="web", mode="supervised",
+        status=models.PipelineStatus.running, tenant_id="tenant-a", user_id="user-a")
+    second = models.Pipeline(pipeline_id="pipeline-2", name="two", invoked_by="web", mode="supervised",
+        status=models.PipelineStatus.completed, tenant_id="tenant-a", user_id="user-a")
+    calls = []
+    async def snapshots(ids):
+        calls.append(tuple(ids))
+        return await _status_batch(first, second)(ids)
+    monkeypatch.setattr(store, "pipeline_status_snapshots", snapshots)
+    resolver = JacobsPipelineStatusResolver()
+    arguments = ({"pipeline_id": "pipeline-2", "status": "completed"},
+        {"pipeline_id": "missing", "status": "running"},
+        {"pipeline_id": "pipeline-1", "status": "running"})
+    evidence = asyncio.run(resolver.evidence_many(arguments, _scope()))
+    assert calls == [("pipeline-2", "missing", "pipeline-1")]
+    assert [item.observation.status for item in evidence] == [
+        ResolutionStatus.RESOLVED, ResolutionStatus.UNAVAILABLE, ResolutionStatus.RESOLVED]
+    assert [item.observation.result.get("pipeline_id") for item in evidence] == ["pipeline-2", None, "pipeline-1"]
+    with pytest.raises(Exception, match="duplicate pipeline"):
+        asyncio.run(resolver.evidence_many((arguments[0], arguments[0]), _scope()))
+    with pytest.raises(Exception, match="batch arguments"):
+        asyncio.run(resolver.evidence_many(tuple(arguments[0] for _ in range(51)), _scope()))
