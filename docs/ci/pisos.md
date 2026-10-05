@@ -130,6 +130,8 @@ Sin historia anotada en el workflow.
 
 ## `memory-b9-regression/casos`
 
+Mínimo 188 -> 194 el 2026-10-05 (auditoría Jax#355, MINOR 3; medido LOCAL con la misma lista, 0 skipped): `tests/test_memory_b9_provision.py` 5 -> 11 (+6: guarda de puerto del constructor, `SELECT DATABASE()` tras cada script, rechazo de `USE`, guarda de puerto del driver).
+
 Mínimo actualizado 2026-10-05 (rama fix/b9-driver-runbooks): `188` casos, medido LOCAL contra MariaDB desechable en 127.0.0.1:3306 con la misma lista más `tests/test_memory_b9_provision.py` (+5, puras: el esquema se carga sin `CREATE DATABASE`/`USE` de producción, el divisor respeta `DELIMITER`, la guarda, el orden de migraciones); 0 skipped. El mismo job corre ahora `tests/memory_b9_provision.py` y `tests/memory_b9_regression_driver.py` (19 casos) sobre un segundo servicio MariaDB vacío; esa parte no suma casos pytest y falla el paso si algún caso no es PASS. Antes: `183`.
 
 Historia previa (183): el run PR `37317897149`, job `111789176129`, sobre SHA `daab357ce80b1e7e1843155b88e2f57c9adf93bd`, terminó 183 passed, 0 failed/errors/skips para el par combinado Faro/B9. El conteo previo de esta rama era 128 y el de #354 era 176; se conserva la medición exacta mayor. Las seis fronteras de `memoria.buscar` cubren rechazo de configuración forzada hacia producción, apertura solo del perfil permitido, rollback con timeout que descarta la conexión, cancelación durante rollback sin segundo intento, validación de síntesis sin leer su BLOB y delegación de `fetchone` por el cursor observado de la prueba MariaDB. La prueba MariaDB real mantiene tablas de sesión temporales y comprueba que el reader solo emite lecturas y valida sus fuentes exactas.
@@ -479,6 +481,8 @@ passed"), no el de sumar comentarios: ese error ya rompio CI hoy.
 ## `memory-vector-zero-io/out`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^203 passed`
+
+214 -> 218 el 2026-10-05 (auditoría Jax#355, MINOR 5; medido LOCAL con la lista completa del job: 218 passed): `test_b9_systemd_ownership.py` 13 -> 17 (+4: el instalador con un systemctl falso en el PATH, la barra final del destino, el origen de producción y la poda de lo que ya no está en el repo).
 
 206 -> 214 el 2026-10-05 (rama fix/b9-driver-runbooks, medido LOCAL como delta de archivo): `test_b9_systemd_ownership.py` 5 -> 13 (+8: los tres drop-ins de worker y synthesis, versionados y comprobados, y el instalador que los instala, ejecutado contra un destino de prueba). El runner tiene la ultima palabra.
 
@@ -891,6 +895,8 @@ para conservar byte a byte el registro de la migración de pisos.
 ## `tests-puros/out`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
+
+3490 -> 3491 el 2026-10-05 (auditoría Jax#355, MINOR 1; delta de archivo local): `tests/test_base_por_sesion.py` 39 -> 40 (+1: un nombre con prefijo y sufijo inválido se niega). 45 skipped no cambia.
 
 3477 -> 3490 el 2026-10-05 (rama fix/b9-driver-runbooks, medido LOCAL como delta de archivo): `tests/test_base_por_sesion.py` 26 -> 39 colectados (+13: la suite no abre conexiones a la instancia de produccion ni a `jax_memory` fuera de CI sin `JAX_TEST_DB_PERMITIR_INSTANCIA_DE_PRODUCCION`). 45 skipped no cambia. El runner tiene la ultima palabra.
 
