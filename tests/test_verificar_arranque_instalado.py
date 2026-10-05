@@ -13,7 +13,7 @@ que TODOS los tests de aquí, incluidos los que sólo usan RAIZ_PRUEBA bajo
 
 Frentes cubiertos:
 
-(a) RAIZ_PRUEBA con un árbol de 33 archivos completo y correcto -> 0.
+(a) RAIZ_PRUEBA con un árbol de 35 archivos completo y correcto -> 0.
 (b) RAIZ_PRUEBA con cada intruso real reproducido en las rondas 2, 3 y 5
     de la auditoría (fragmento y drop-in de más, en cada una de las 12
     rutas de systemd-analyze unit-paths que aplica, incluidas
@@ -114,8 +114,13 @@ def _limpiar_root(tmp_path):
     subprocess.run(["sudo", "rm", "-rf", str(tmp_path)], check=False)
 
 
+def _es_ejecutable(repo_abs: Path) -> bool:
+    """Los .sh y todo lo que vive en ops/sbin/ (aunque no lleve extension, como jax-db-esperar)."""
+    return repo_abs.suffix == ".sh" or repo_abs.parent == ROOT / "ops" / "sbin"
+
+
 def _construir_arbol_completo(destino: Path) -> None:
-    """Los 33 archivos del manifiesto, copiados byte a byte bajo `destino`
+    """Los 35 archivos del manifiesto, copiados byte a byte bajo `destino`
     con dueño/modo reales -- exactamente lo que RAIZ_PRUEBA espera
     encontrar para dar 0."""
     for repo_abs, instalada in leer_manifiesto():
@@ -124,7 +129,7 @@ def _construir_arbol_completo(destino: Path) -> None:
             ["sudo", "install", "-d", "-o", "root", "-g", "root", "-m", "0755", str(destino_archivo.parent)],
             check=True,
         )
-        modo = "0755" if repo_abs.suffix == ".sh" else "0644"
+        modo = "0755" if _es_ejecutable(repo_abs) else "0644"
         subprocess.run(
             ["sudo", "install", "-o", "root", "-g", "root", "-m", modo, str(repo_abs), str(destino_archivo)],
             check=True,
@@ -159,7 +164,17 @@ def test_arbol_completo_da_cero(tmp_path):
     _construir_arbol_completo(tmp_path)
     resultado = _correr(tmp_path)
     assert resultado.returncode == 0, resultado.stderr
-    assert "33 archivos" in resultado.stdout
+    assert "35 archivos" in resultado.stdout
+
+
+def test_un_guion_de_sbin_sin_extension_exige_755(tmp_path):
+    """m2 de la auditoria de #356: jax-db-esperar es ejecutable pero no termina en .sh; el
+    verificador tiene que exigirle 755 igual que a los .sh (si no, esperaria 644)."""
+    _construir_arbol_completo(tmp_path)
+    subprocess.run(["sudo", "chmod", "0644", str(tmp_path / "usr/local/sbin/jax-db-esperar")], check=True)
+    resultado = _correr(tmp_path)
+    assert resultado.returncode != 0
+    assert "jax-db-esperar" in resultado.stderr and "MODO INCORRECTO" in resultado.stderr, resultado.stderr
 
 
 @pytest.mark.parametrize("ruta_relativa", [
@@ -393,7 +408,7 @@ def test_produccion_ignora_systemctl_de_prueba_aunque_este_puesta():
     `SYSTEMCTL_DE_PRUEBA` apuntando al systemctl de mentira en modo
     "falla" (que, si se leyera, haría fallar TODO con "SYSTEMCTL SHOW
     FALLÓ"): el resultado tiene que ser IDÉNTICO al de correr sin esa
-    variable -- rc=0, 33 archivos.
+    variable -- rc=0, 35 archivos.
 
     **Prueba de mutación**: en una COPIA del guion se cambió la rama de
     producción para que leyera `SYSTEMCTL_CMD="${SYSTEMCTL_DE_PRUEBA:-$SYSTEMCTL_CMD}"`
@@ -409,7 +424,7 @@ def test_produccion_ignora_systemctl_de_prueba_aunque_este_puesta():
         f"producción con SYSTEMCTL_DE_PRUEBA puesta (modo falla) tiene que dar 0 igual -- "
         f"si falla, la variable se está leyendo en producción. stdout={resultado.stdout!r} stderr={resultado.stderr!r}"
     )
-    assert "33 archivos" in resultado.stdout, resultado.stdout
+    assert "35 archivos" in resultado.stdout, resultado.stdout
 
 
 def test_raiz_prueba_que_resuelve_a_raiz_activa_la_capa_cargado():

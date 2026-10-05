@@ -104,6 +104,22 @@ def test_el_guion_de_sanidad_tiene_bit_ejecutable_en_git():
     assert salida.startswith("100755"), f"modo en git no es ejecutable: {salida!r}"
 
 
+def test_el_guion_de_espera_de_la_base_tiene_bit_ejecutable_en_git():
+    salida = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-s", "ops/sbin/jax-db-esperar"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert salida.startswith("100755"), f"modo en git no es ejecutable: {salida!r}"
+
+
+def test_las_dependencias_de_esperar_db_estan_en_el_manifiesto():
+    """m2 de la auditoria de #356: esperar-db.conf llama a jax-db-esperar y engancha
+    OnFailure=aviso-fallo@%n.service; sin esas dos piezas instaladas la unidad falla."""
+    instaladas = {str(i) for _, i in _leer_manifiesto()}
+    assert "/usr/local/sbin/jax-db-esperar" in instaladas
+    assert "/etc/systemd/system/aviso-fallo@.service" in instaladas
+
+
 def test_guion_de_verificacion_tiene_bit_ejecutable_en_git():
     salida = subprocess.run(
         ["git", "-C", str(ROOT), "ls-files", "-s", "ops/verificar-arranque-instalado.sh"],

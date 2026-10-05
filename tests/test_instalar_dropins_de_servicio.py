@@ -170,6 +170,10 @@ def test_destdir_que_resuelve_a_raiz_se_trata_como_instalacion_real(destdir_lite
     raíz. Se prueba desde este worktree (no es /srv/jax-prod/jax) --
     tiene que abortar con el mensaje de "instalación real", nunca
     proceder silenciosamente como si fuera un DESTDIR de prueba."""
+    # m1 de la auditoria de #356: desde el checkout de produccion REPO == ROOT cumple los
+    # frenos y esta prueba escribiria en el /etc real. Nunca se corre ahi.
+    if ROOT.resolve() == Path("/srv/jax-prod/jax"):
+        pytest.skip("desde /srv/jax-prod/jax los frenos pasan y se escribiria en el /etc real")
     resultado = subprocess.run(
         [str(SCRIPT), "jax-las-manos.service.d", str(ROOT), destdir_literal],
         capture_output=True, text=True,
