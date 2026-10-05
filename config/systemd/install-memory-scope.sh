@@ -31,6 +31,14 @@ if [[ "${1:-}" != "--instalar-obsoleto" ]]; then
   exit 2
 fi
 
+# Argumentos: exactamente `--instalar-obsoleto` o `--instalar-obsoleto --print-origen`. Cualquier otra
+# cosa (un segundo argumento con una errata, o un tercero) se rechaza AQUI, antes de resolver o tocar nada:
+# un `--print-origin` mal escrito no puede terminar en una instalacion de verdad.
+if [[ $# -gt 2 || ( $# -eq 2 && "$2" != "--print-origen" ) ]]; then
+  echo "install-memory-scope.sh: argumento no reconocido: '${2}'${3:+ (y mas)}. Se admite solo --instalar-obsoleto [--print-origen]." >&2
+  exit 2
+fi
+
 REAL="$(realpath -m -- "${JAX_SYSTEMD_REAL:-/etc/systemd/system}")"
 SD="${JAX_SYSTEMD_SRC:-/srv/jax-prod/jax/config/systemd}"
 DEST="$(realpath -m -- "${JAX_SYSTEMD_DEST:-$REAL}")"

@@ -33,12 +33,17 @@ Estado verificado el 2026-10-05 (cámbialo por lo que mida `systemctl` el día q
 ## 0. Antes de tocar nada
 
 1. Fija el SHA destino (`<sha>`: el que se anotó en el paso 1 de `docs/runbooks/memoria-b9-reactivacion.md`; si no se anotó, no se improvisa: se escala).
-   **Pre-chequeo del destino (obligatorio, antes de parar nada):** `jax-platform` lee de este checkout las migraciones B9 y la de autoridad de proyecto en cada arranque (ver el paso 5). El SHA destino tiene que contener las tres cosas:
+   **Pre-chequeo del destino (obligatorio, antes de parar nada):** `jax-platform` lee de este checkout las migraciones B9 y la de autoridad de proyecto en cada arranque (ver el paso 5). El SHA destino tiene que contener las cuatro cosas (001, 002, 003 y 005):
 
    ```bash
    sudo git -c safe.directory=/srv/jax-prod/jax -C /srv/jax-prod/jax ls-tree --name-only <sha> \
      jax/memory/b9_migrations/001_b9_shared_memory.sql jax/memory/b9_migrations/002_b9_hardening.sql \
-     jax/memory/project_authority_migrations.py     # tienen que salir las tres rutas
+     jax/memory/project_authority_migrations.py     # tienen que salir las tres rutas (001, 002 y el archivo de 003+005)
+   # La 005 NO tiene archivo propio (vive solo en Python, dentro del archivo anterior): se comprueba su contenido
+   # y que el destino descienda del commit que la agregó.
+   sudo git -c safe.directory=/srv/jax-prod/jax -C /srv/jax-prod/jax show <sha>:jax/memory/project_authority_migrations.py \
+     | grep -c _apply_project_lifecycle_migration       # >= 1
+   sudo git -c safe.directory=/srv/jax-prod/jax -C /srv/jax-prod/jax merge-base --is-ancestor caa49501242ecff50d74e8da69f7fc993914b334 <sha> && echo ok
    ```
 
    Si falta alguna, **no es un destino válido por sí solo**: volver ahí con `jax-platform` actual la deja sin arrancar. Opciones: elegir un SHA posterior que las tenga, o volver también `jax-platform` a una versión sin ese llamador (mismo procedimiento sobre `/srv/jax-prod/jax-platform`, con su propio freno y su propio SHA anotado, y con las dos unidades paradas durante los dos `reset --hard`). El orden: los dos checkouts quedan en su SHA con `jax-platform` parada, y recién después arrancan (paso 5). Esa segunda marcha atrás es otra decisión con su propio GO.
@@ -112,7 +117,7 @@ El orden sale de las unidades: `jax-platform` declara `Wants=`/`After=jax-las-ma
 - `_apply_jax_b9_core_migrations`: ejecuta B9 **001 y 002** leyendo `jax/memory/b9_migrations/001_b9_shared_memory.sql` y `002_b9_hardening.sql` del checkout de jax. Si el directorio o alguno de los dos archivos no existe, levanta `RuntimeError("JAX-owned B9 migrations are missing")` y **`jax-platform` no arranca**.
 - `_apply_jax_project_authority_migration`: carga `jax/memory/project_authority_migrations.py` del mismo checkout y llama a `apply_project_authority_migration` (003 y 005). Si falta el archivo o la función, también `RuntimeError` y no arranca.
 
-O sea: con un SHA de jax **anterior a 291fb440 / 8bbdd2c5 / 97e2abe2** (las confirmaciones que agregaron el núcleo B9 con la 001, la 002 y la autoridad de proyecto; 291fb440 solo trae la 001, la 002 llegó con 8bbdd2c5: un SHA entre las dos tampoco sirve), `jax-platform` **falla al arrancar**, y no hay forma de «ignorarlo». Con un SHA que sí los contiene, 001, 002, 003 y 005 se reaplican en cada arranque (idempotentes).
+O sea: con un SHA de jax **anterior a los commits que agregaron cada migración**, cada una con su origen exacto (hallado con `git log -S` sobre el historial completo del checkout de producción, 2026-10-05): **001 desde 291fb440; 002 desde 8bbdd2c5; 003 desde 97e2abe2; 005 desde caa49501** (`caa49501242ecff50d74e8da69f7fc993914b334`, 2026-09-25, «autoridad de proyecto sobre B9 — D1–D5, §3-bis y migración 005»). 97e2abe2 trae la 003 y `apply_project_authority_migration`, pero **no** la 005. Qué pasa según dónde caiga el destino: sin 001/002 (antes de 291fb440 o de 8bbdd2c5) o sin el archivo de 003 (antes de 97e2abe2), `jax-platform` **no arranca**; con 97e2abe2 pero antes de caa49501 arranca, pero la 005 **no se aplica** (el hook solo trae la 003), y si el esquema ya la tiene queda un esquema más nuevo que el código — el efecto sobre `jax-platform` no está verificado, y por eso el pre-chequeo exige las cuatro, `jax-platform` **falla al arrancar**, y no hay forma de «ignorarlo». Con un SHA que sí los contiene, 001, 002, 003 y 005 se reaplican en cada arranque (idempotentes).
 
 El freno de `jax-platform` vigila `/srv/jax-prod/jax-platform`, **no** el checkout de jax: que la unidad arranque no confirma que el SHA de jax sea el esperado. Eso se confirma con el freno de las otras unidades (la línea del journal de `jax-ejecutor-proxy` o `jax-las-manos`) y con `rev-parse HEAD` del paso 2.
 

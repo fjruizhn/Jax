@@ -221,3 +221,23 @@ def test_retira_solo_los_dropins_que_instalo_el_y_ya_no_estan_en_el_repo(tmp_pat
     assert ajeno.exists(), "un .conf ajeno al guion no se toca nunca"
     assert (carpeta / "checkout-de-produccion.conf").exists()
     assert (destino / "jax-memory-synthesis.service.d" / "z-pythonpath.conf").exists()   # la otra unidad no se afecta
+
+
+@pytest.mark.parametrize("extra", [
+    ["--print-origin"],                 # errata de --print-origen
+    ["--print-origen", "sobra"],        # un tercer argumento
+    ["--instalar-obsoleto"],            # repetido
+    ["x"],
+    [""],
+])
+def test_un_argumento_desconocido_se_rechaza_antes_de_instalar_nada(tmp_path, extra):
+    """Antes, cualquier segundo argumento distinto de --print-origen se ignoraba y el guion instalaba."""
+    destino = tmp_path / "etc"
+    destino.mkdir()
+    r = subprocess.run(["bash", str(ROOT / "install-memory-scope.sh"), "--instalar-obsoleto", *extra],
+                       env={"PATH": "/usr/bin:/bin", "JAX_SYSTEMD_SRC": str(ROOT), "JAX_SYSTEMD_DEST": str(destino)},
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    assert "argumento no reconocido" in r.stderr
+    assert not list(destino.iterdir()), "no debe copiar nada"
+    assert r.stdout == ""

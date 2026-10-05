@@ -482,6 +482,8 @@ passed"), no el de sumar comentarios: ese error ya rompio CI hoy.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^203 passed`
 
+218 -> 223 el 2026-10-05 (re-auditoría de #355; medido LOCAL con la lista completa del job: 223 passed): `test_b9_systemd_ownership.py` 17 -> 22 (+5: un argumento desconocido del instalador se rechaza antes de instalar nada).
+
 214 -> 218 el 2026-10-05 (auditoría Jax#355, MINOR 5; medido LOCAL con la lista completa del job: 218 passed): `test_b9_systemd_ownership.py` 13 -> 17 (+4: el instalador con un systemctl falso en el PATH, la barra final del destino, el origen de producción y la poda de lo que ya no está en el repo).
 
 206 -> 214 el 2026-10-05 (rama fix/b9-driver-runbooks, medido LOCAL como delta de archivo): `test_b9_systemd_ownership.py` 5 -> 13 (+8: los tres drop-ins de worker y synthesis, versionados y comprobados, y el instalador que los instala, ejecutado contra un destino de prueba). El runner tiene la ultima palabra.
