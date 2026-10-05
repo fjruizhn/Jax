@@ -546,6 +546,8 @@ def _ddl_produccion(tabla: str) -> str:
     if tabla == "messages":
         i = next(n for n, l in enumerate(lineas) if "PRIMARY KEY" in l)
         lineas.insert(i + 1, "  KEY `idx_conversation` (`conversation_id`),")
+    fin = next(n for n, l in enumerate(lineas) if l.startswith(")"))
+    lineas[fin - 1] = lineas[fin - 1].rstrip(",")                  # el ultimo KEY quitado dejaba una coma colgando
     return "\n".join(lineas).rstrip(";")
 
 
