@@ -39,7 +39,8 @@ _MAX_CANONICAL_BYTES = 65_536
 _MAX_NESTING_DEPTH = 32
 _MAX_NODES = 1_024
 _PROJECTION_TOKEN = object()
-_PIPELINE_LIST_TOP_LEVEL_FIELDS = frozenset({"pipelines", "has_more", "cursor_siguiente"})
+_PIPELINE_LIST_ACTIVE_TOP_LEVEL_FIELDS = frozenset({"pipelines", "has_more"})
+_PIPELINE_LIST_DISCARDED_TOP_LEVEL_FIELDS = frozenset({"pipelines", "has_more", "cursor_siguiente"})
 _PIPELINE_ACTIVE_FIELDS = frozenset({
     "pipeline_id", "name", "created_at", "updated_at", "duracion_s", "costo_usd", "causa",
 })
@@ -71,11 +72,11 @@ def _validate_causa(value: object) -> None:
         raise StructuredProjectionError("pipeline causa detalle must be a nonempty string")
 
 
-def _validate_pipeline_row(row: Mapping[str, object]) -> None:
+def _validate_pipeline_row(row: Mapping[str, object], *, discarded: bool) -> None:
     if "status" in row:
         raise StructuredProjectionError("producer may not supply an accredited status slot")
     fields = set(row)
-    expected = _PIPELINE_DISCARDED_FIELDS if "descartado_at" in row else _PIPELINE_ACTIVE_FIELDS
+    expected = _PIPELINE_DISCARDED_FIELDS if discarded else _PIPELINE_ACTIVE_FIELDS
     if fields != expected:
         raise StructuredProjectionError("pipeline-list entry has an unsupported closed shape")
     for field in ("pipeline_id", "name"):
@@ -295,16 +296,21 @@ class GovernedStructuredRenderer:
         rows = frozen_untrusted.get("pipelines")
         if not isinstance(rows, tuple):
             raise StructuredProjectionError("pipeline-list DTO requires a pipelines array")
-        if set(frozen_untrusted) != _PIPELINE_LIST_TOP_LEVEL_FIELDS:
+        top_level_fields = set(frozen_untrusted)
+        discarded_page = "cursor_siguiente" in frozen_untrusted
+        expected_top_level = (_PIPELINE_LIST_DISCARDED_TOP_LEVEL_FIELDS if discarded_page
+            else _PIPELINE_LIST_ACTIVE_TOP_LEVEL_FIELDS)
+        if top_level_fields != expected_top_level:
             raise StructuredProjectionError("pipeline-list DTO has an unsupported top-level shape")
         if not isinstance(frozen_untrusted.get("has_more"), bool):
             raise StructuredProjectionError("pipeline-list has_more must be boolean")
-        cursor = frozen_untrusted.get("cursor_siguiente")
-        if frozen_untrusted["has_more"]:
-            if not isinstance(cursor, str) or not cursor:
-                raise StructuredProjectionError("pipeline-list with more rows requires a cursor")
-        elif cursor is not None:
-            raise StructuredProjectionError("pipeline-list without more rows must not carry a cursor")
+        if discarded_page:
+            cursor = frozen_untrusted["cursor_siguiente"]
+            if frozen_untrusted["has_more"]:
+                if not isinstance(cursor, str) or not cursor:
+                    raise StructuredProjectionError("discarded pipeline-list with more rows requires a cursor")
+            elif cursor is not None:
+                raise StructuredProjectionError("discarded pipeline-list without more rows must not carry a cursor")
         if len(rows) > _MAX_PIPELINES:
             raise StructuredProjectionError("pipeline-list exceeds the closed page bound")
 
@@ -322,7 +328,7 @@ class GovernedStructuredRenderer:
         for row in rows:
             if not isinstance(row, Mapping):
                 raise StructuredProjectionError("pipeline-list entries must be objects")
-            _validate_pipeline_row(row)
+            _validate_pipeline_row(row, discarded=discarded_page)
             pipeline_id = row.get("pipeline_id")
             if pipeline_id in seen_pipeline_ids:
                 raise StructuredProjectionError("pipeline-list contains duplicate pipeline identities")

@@ -134,10 +134,13 @@ def test_pipeline_projection_rejects_unknown_or_ill_typed_closed_rows(monkeypatc
 
 def test_pipeline_projection_requires_consistent_cursor_and_page_bound(monkeypatch):
     from policy.governance.structured_projection import GovernedStructuredRenderer, StructuredProjectionError
-    envelope, context = _resolved_pipeline_envelope(monkeypatch, extra_tool_data={"cursor_siguiente": "bad"})
+    envelope, context = _resolved_pipeline_envelope(monkeypatch,
+        row_overrides={"descartado_at": 1.0}, extra_tool_data={"cursor_siguiente": "bad"})
     with pytest.raises(StructuredProjectionError, match="without more rows"):
         GovernedStructuredRenderer().render_json(envelope, context)
-    envelope, context = _resolved_pipeline_envelope(monkeypatch, extra_tool_data={"has_more": True})
+    envelope, context = _resolved_pipeline_envelope(monkeypatch,
+        row_overrides={"descartado_at": 1.0},
+        extra_tool_data={"has_more": True, "cursor_siguiente": None})
     with pytest.raises(StructuredProjectionError, match="requires a cursor"):
         GovernedStructuredRenderer().render_json(envelope, context)
 
@@ -263,7 +266,7 @@ def _resolved_pipeline_envelope(monkeypatch, *, claim_status=None, tool_status=N
         row.update(row_overrides)
     if tool_status is not None:
         row["status"] = tool_status
-    data = {"pipelines": rows, "has_more": False, "cursor_siguiente": None}
+    data = {"pipelines": rows, "has_more": False}
     if extra_tool_data:
         data.update(extra_tool_data)
     candidate = response.GovernedResponseCandidate("f2-c.1", "response-1",
