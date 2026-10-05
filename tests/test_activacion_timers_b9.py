@@ -56,7 +56,7 @@ def test_el_contrato_no_habilita_ni_arranca_timers(tmp_path):
     assert resultado.returncode == 0, resultado.stderr
     contenido = SCRIPT.read_text(encoding="utf-8")
     codigo = "\n".join(line.split("#", 1)[0] for line in contenido.splitlines())
-    assert '"$SYSTEMCTL_CMD" show -p UnitFileState -p ActiveState -p SubState -p NextElapseUSecRealtime "$timer"' in codigo
+    assert '"$SYSTEMCTL_CMD" show -p UnitFileState -p ActiveState -p SubState -p NextElapseUSecRealtime -p NextElapseUSecMonotonic "$timer"' in codigo
     for verbo in ("enable", "start", "restart", "daemon-reload"):
         assert f'"$SYSTEMCTL_CMD" {verbo}' not in codigo
 

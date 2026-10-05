@@ -157,7 +157,7 @@ def test_todo_bajo_destdir_nunca_fuera(tmp_path):
         assert resultado.returncode == 0, f"{patron}: {resultado.stderr}"
     instalados = list(tmp_path.rglob("*"))
     archivos = [p for p in instalados if p.is_file()]
-    assert len(archivos) == 18, f"se esperaban 18 archivos instalados (17 drop-ins + el guion), hubo {len(archivos)}: {archivos}"
+    assert len(archivos) == 21, f"se esperaban 21 archivos instalados (20 drop-ins + el guion), hubo {len(archivos)}: {archivos}"
 
 
 @pytest.mark.parametrize("destdir_literal", ["/", "", "/tmp/../"])
