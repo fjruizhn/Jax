@@ -19,7 +19,7 @@ No hace falta tocar `.github/workflows/`. Un piso nunca tiene valor por defecto:
 
 Cada paso del workflow llama `python3 .github/ci/piso.py verificar <clave> <archivo-de-salida>`.
 La clave es `<job>/<archivo temporal que lee>`. El único mínimo numérico que no es un
-`patron` es `memory-b9-regression/casos`, en la sección `minimos`.
+`patron` es `memory-b9-regression/casos`, en la sección `minimos`. (102 -> 152 el 2026-10-05: el 102 era la medicion del 2026-09-26 y habia quedado atras; local contra MariaDB desechable, misma lista de 10 archivos, 121 antes de la rama y 152 despues, 0 skipped. Es un MINIMO: el runner puede medir mas, nunca debe dar menos.)
 
 Como `ci/pisos.json` es un dato y no lógica del workflow, un PR que solo sube un piso
 no toca `.github/workflows/`. Para que eso no sea una forma de rebajar un piso sin pasar por
@@ -474,6 +474,8 @@ passed"), no el de sumar comentarios: ese error ya rompio CI hoy.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^203 passed`
 
+203 -> 206 el 2026-10-05 (rama fix/memoria-worker-cuarentena-aviso-orden, hall9000, medido LOCAL: 123 -> 126 passed sobre la misma lista de archivos): `test_b9_systemd_ownership.py` +4 (cinco unidades con OnFailure, ExecStartPre del checkout sano, timer de synthesis a las 04:30, las cinco existen) y -1 (se borra la prueba que solo comprobaba que `run_once` no llamaba a `_recalcular_embeddings_en_ceros`, codigo muerto borrado). El runner tiene la ultima palabra: si mide otro numero, se corrige aqui y en `ci/pisos.json`.
+
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 ```text
@@ -856,6 +858,8 @@ F2-B -> F2-C -> F2-D receipt/render/revalidation path.
 ## `tests-puros/out`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
+
+3473 -> 3476 el 2026-10-05 (misma rama, medido LOCAL como delta de archivo): `tests/test_hnsw_recall_tripwire.py` 3 -> 6. El tripwire de recall deja de ser codigo muerto: lo ejecuta vector-health (`jax/memory/recall_tripwire.py`) y falla la unidad; +3 pruebas de ese cableado. 45 skipped no cambia.
 
 3470 -> 3473 el 2026-10-04 (Hyde, hall9000): +3 de `tests/test_docker_rm_sin_fuga_de_volumenes.py`
 (el barrido del árbol, las formas que fugan y las que no; ronda de auditoría del PR #353). `docker rm -f` sin `-v` dejaba huérfano el
