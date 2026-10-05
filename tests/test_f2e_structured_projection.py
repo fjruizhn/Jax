@@ -120,6 +120,28 @@ def test_structured_projection_rejects_unknown_schema_versions(monkeypatch):
             envelope, context, schema_version="jax.pipeline-list.json.2")
 
 
+@pytest.mark.parametrize("row_overrides", [
+    {"unreviewed": "field"}, {"name": {"nested": "object"}},
+    {"costo_usd": True}, {"created_at": "not-a-timestamp"},
+    {"causa": {"tipo": "fallo", "nested": {"unexpected": True}}},
+])
+def test_pipeline_projection_rejects_unknown_or_ill_typed_closed_rows(monkeypatch, row_overrides):
+    from policy.governance.structured_projection import GovernedStructuredRenderer, StructuredProjectionError
+    envelope, context = _resolved_pipeline_envelope(monkeypatch, row_overrides=row_overrides)
+    with pytest.raises(StructuredProjectionError):
+        GovernedStructuredRenderer().render_json(envelope, context)
+
+
+def test_pipeline_projection_requires_consistent_cursor_and_page_bound(monkeypatch):
+    from policy.governance.structured_projection import GovernedStructuredRenderer, StructuredProjectionError
+    envelope, context = _resolved_pipeline_envelope(monkeypatch, extra_tool_data={"cursor_siguiente": "bad"})
+    with pytest.raises(StructuredProjectionError, match="without more rows"):
+        GovernedStructuredRenderer().render_json(envelope, context)
+    envelope, context = _resolved_pipeline_envelope(monkeypatch, extra_tool_data={"has_more": True})
+    with pytest.raises(StructuredProjectionError, match="requires a cursor"):
+        GovernedStructuredRenderer().render_json(envelope, context)
+
+
 def test_f2d_structured_transport_binds_exact_bytes_and_rejects_ack(monkeypatch):
     from policy.governance.structured_lifecycle import (
         STRUCTURED_BYTES_LIFECYCLE_API_VERSION,
@@ -155,7 +177,7 @@ def test_f2d_structured_transport_binds_exact_bytes_and_rejects_ack(monkeypatch)
 
 
 def _resolved_pipeline_envelope(monkeypatch, *, claim_status=None, tool_status=None,
-                                extra_tool_data=None, second_pipeline=False):
+                                extra_tool_data=None, second_pipeline=False, row_overrides=None):
     """Compose a real Jacobs PIPELINE_STATUS resolution receipt for the tests."""
     from datetime import datetime, timezone
     from jacobs import models, store
@@ -188,10 +210,15 @@ def _resolved_pipeline_envelope(monkeypatch, *, claim_status=None, tool_status=N
             tenant_id="tenant-a", user_id="user-a", updated_at=now.timestamp()))
     canonical_by_id = {item.pipeline_id: item for item in pipelines}
 
-    async def pipeline_get(pipeline_id):
-        return canonical_by_id.get(pipeline_id)
+    async def pipeline_status_snapshots(pipeline_ids):
+        from datetime import datetime, timezone
+        from types import MappingProxyType
+        return MappingProxyType({pipeline_id: store.PipelineStatusSnapshot(
+            pipeline_id=pipeline_id, tenant_id=item.tenant_id, user_id=item.user_id,
+            status=item.status, observed_at=datetime.now(timezone.utc))
+            for pipeline_id in pipeline_ids if (item := canonical_by_id.get(pipeline_id)) is not None})
 
-    monkeypatch.setattr(store, "pipeline_get", pipeline_get)
+    monkeypatch.setattr(store, "pipeline_status_snapshots", pipeline_status_snapshots)
     platform_config = {
         "FACET_RUNTIME_STATUS": {"state_contract": "JAXEngineState.FacetState",
             "status_field": "status", "observed_at_field": "resolver_read_time",
@@ -227,12 +254,16 @@ def _resolved_pipeline_envelope(monkeypatch, *, claim_status=None, tool_status=N
         receipt_refs.append(receipt_ref)
         receipts[receipt_id] = resolution_receipt
         claim_refs.append(claim.claim_id)
-    rows = [{"pipeline_id": item.pipeline_id, "name": item.name, "costo_usd": 0.08}
+    rows = [{"pipeline_id": item.pipeline_id, "name": item.name,
+        "created_at": now.timestamp(), "updated_at": now.timestamp(),
+        "duracion_s": None, "costo_usd": 0.08, "causa": None}
         for item in pipelines]
     row = rows[0]
+    if row_overrides:
+        row.update(row_overrides)
     if tool_status is not None:
         row["status"] = tool_status
-    data = {"pipelines": rows, "has_more": False}
+    data = {"pipelines": rows, "has_more": False, "cursor_siguiente": None}
     if extra_tool_data:
         data.update(extra_tool_data)
     candidate = response.GovernedResponseCandidate("f2-c.1", "response-1",

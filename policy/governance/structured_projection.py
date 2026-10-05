@@ -39,10 +39,57 @@ _MAX_CANONICAL_BYTES = 65_536
 _MAX_NESTING_DEPTH = 32
 _MAX_NODES = 1_024
 _PROJECTION_TOKEN = object()
+_PIPELINE_LIST_TOP_LEVEL_FIELDS = frozenset({"pipelines", "has_more", "cursor_siguiente"})
+_PIPELINE_ACTIVE_FIELDS = frozenset({
+    "pipeline_id", "name", "created_at", "updated_at", "duracion_s", "costo_usd", "causa",
+})
+_PIPELINE_DISCARDED_FIELDS = _PIPELINE_ACTIVE_FIELDS | frozenset({"descartado_at"})
+_CAUSA_FIELDS = frozenset({"tipo", "paso", "detalle"})
+_MAX_PIPELINES = 50
 
 
 class StructuredProjectionError(GovernanceContractError):
     """The DTO cannot be projected under its exact F2-C contract."""
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _validate_causa(value: object) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Mapping) or not value:
+        raise StructuredProjectionError("pipeline causa must be null or a closed object")
+    if not set(value).issubset(_CAUSA_FIELDS) or "tipo" not in value:
+        raise StructuredProjectionError("pipeline causa has an unsupported shape")
+    if not isinstance(value["tipo"], str) or not value["tipo"]:
+        raise StructuredProjectionError("pipeline causa tipo must be a nonempty string")
+    if "paso" in value and (not isinstance(value["paso"], int) or isinstance(value["paso"], bool)):
+        raise StructuredProjectionError("pipeline causa paso must be an integer")
+    if "detalle" in value and (not isinstance(value["detalle"], str) or not value["detalle"]):
+        raise StructuredProjectionError("pipeline causa detalle must be a nonempty string")
+
+
+def _validate_pipeline_row(row: Mapping[str, object]) -> None:
+    if "status" in row:
+        raise StructuredProjectionError("producer may not supply an accredited status slot")
+    fields = set(row)
+    expected = _PIPELINE_DISCARDED_FIELDS if "descartado_at" in row else _PIPELINE_ACTIVE_FIELDS
+    if fields != expected:
+        raise StructuredProjectionError("pipeline-list entry has an unsupported closed shape")
+    for field in ("pipeline_id", "name"):
+        if not isinstance(row[field], str) or not row[field]:
+            raise StructuredProjectionError(f"pipeline {field} must be a nonempty string")
+    for field in ("created_at", "updated_at"):
+        if not _is_number(row[field]):
+            raise StructuredProjectionError(f"pipeline {field} must be a finite number")
+    for field in ("duracion_s", "costo_usd"):
+        if row[field] is not None and not _is_number(row[field]):
+            raise StructuredProjectionError(f"pipeline {field} must be null or a finite number")
+    if "descartado_at" in row and not _is_number(row["descartado_at"]):
+        raise StructuredProjectionError("pipeline descartado_at must be a finite number")
+    _validate_causa(row["causa"])
 
 
 @dataclass(frozen=True)
@@ -248,14 +295,18 @@ class GovernedStructuredRenderer:
         rows = frozen_untrusted.get("pipelines")
         if not isinstance(rows, tuple):
             raise StructuredProjectionError("pipeline-list DTO requires a pipelines array")
-        if set(frozen_untrusted) not in ({"pipelines", "has_more"},
-                {"pipelines", "has_more", "cursor_siguiente"}):
+        if set(frozen_untrusted) != _PIPELINE_LIST_TOP_LEVEL_FIELDS:
             raise StructuredProjectionError("pipeline-list DTO has an unsupported top-level shape")
         if not isinstance(frozen_untrusted.get("has_more"), bool):
             raise StructuredProjectionError("pipeline-list has_more must be boolean")
         cursor = frozen_untrusted.get("cursor_siguiente")
-        if cursor is not None and not isinstance(cursor, str):
-            raise StructuredProjectionError("pipeline-list cursor_siguiente must be string")
+        if frozen_untrusted["has_more"]:
+            if not isinstance(cursor, str) or not cursor:
+                raise StructuredProjectionError("pipeline-list with more rows requires a cursor")
+        elif cursor is not None:
+            raise StructuredProjectionError("pipeline-list without more rows must not carry a cursor")
+        if len(rows) > _MAX_PIPELINES:
+            raise StructuredProjectionError("pipeline-list exceeds the closed page bound")
 
         claims = {claim.claim_id: claim for claim in envelope.claims}
         visible_claim_ids = tuple(claim_id for block in envelope.content_blocks
@@ -271,11 +322,8 @@ class GovernedStructuredRenderer:
         for row in rows:
             if not isinstance(row, Mapping):
                 raise StructuredProjectionError("pipeline-list entries must be objects")
-            if "status" in row:
-                raise StructuredProjectionError("producer may not supply an accredited status slot")
+            _validate_pipeline_row(row)
             pipeline_id = row.get("pipeline_id")
-            if not isinstance(pipeline_id, str) or not pipeline_id:
-                raise StructuredProjectionError("pipeline-list entry requires pipeline_id")
             if pipeline_id in seen_pipeline_ids:
                 raise StructuredProjectionError("pipeline-list contains duplicate pipeline identities")
             seen_pipeline_ids.add(pipeline_id)
