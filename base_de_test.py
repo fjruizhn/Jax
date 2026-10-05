@@ -327,6 +327,18 @@ def _permiso_instancia_de_produccion() -> bool:
     return os.environ.get(VARIABLE_PERMISO_INSTANCIA_DE_PRODUCCION, "").strip().lower() in ("1", "true", "yes")
 
 
+# LIMITE DE ESTA GUARDA (auditoria Jax#355, MINOR 2). El puerto es una HEURISTICA, no una frontera:
+# - `CI` lo exporta el entorno de quien corre; `CI=1` en un puesto de trabajo con la MariaDB de
+#   produccion en 3308 abre la puerta igual, y lo mismo vale para `JAX_DB_PORT`. No hay una forma
+#   robusta de distinguir «runner de CI» de «sesion que dice serlo» desde dentro de este proceso:
+#   quien controla el entorno controla tambien esa senal y la variable de permiso.
+# - Un contenedor o una base de produccion en un puerto que NO sea 3306/3308 tampoco se detecta.
+# Lo que SI cubre: el error por descuido (la sesion que exporta /etc/jax/.env, el default 3306 de
+# `_parametros_de_conexion`), que es el que ocurrio. La frontera real son las credenciales: `jax_test`
+# solo tiene permisos sobre bases `jax_memory_test*`. Endurecerlo (p. ej. exigir tambien
+# GITHUB_ACTIONS) cambia esta funcion en los dos repos a la vez: lo vigila `check_mirror_sync.py`.
+# Esto va como comentario y no en el docstring a proposito: el espejo se compara por el codigo de la
+# funcion, y asi esta nota no obliga a tocar jax-platform.
 def exigir_conexion_permitida(base: str, *, lectura_de_produccion: bool = False) -> None:
     """El control previo a CADA conexion de este modulo. Falla CERRADO, con el
     motivo y la variable que lo levanta, antes de abrir nada.

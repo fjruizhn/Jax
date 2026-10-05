@@ -595,3 +595,24 @@ def test_un_puerto_ilegible_falla_cerrado(conector, monkeypatch, puerto):
     monkeypatch.setenv("JAX_DB_PORT", puerto)
     with pytest.raises(BaseDeTestInvalida, match="JAX_DB_PORT"):
         exigir_conexion_permitida("jax_memory_test_sesion1")
+
+
+def test_un_nombre_que_pasa_el_verificador_pero_no_es_base_de_test_se_niega(conector, monkeypatch):
+    """Auditoria Jax#355, MINOR 1. `jax_memory_test_A-B` tiene el prefijo (pasa
+    `_verificar_que_no_es_produccion`) pero no es un sufijo valido (`es_base_de_test` da False).
+    Sin la rama `elif not es_base_de_test(base)` de `exigir_conexion_permitida`, nada lo frenaria
+    antes de abrir la conexion: este control cae si se la quita."""
+    from base_de_test import _clonar_esquema, _dropear_base_de_sesion, _verificar_que_no_es_produccion, asegurar_base_de_test
+    nombre = "jax_memory_test_A-B"
+    assert _verificar_que_no_es_produccion(nombre) == nombre
+    assert not es_base_de_test(nombre)
+    monkeypatch.setenv("JAX_DB_PORT", "3399")
+    for permiso in (False, True):
+        if permiso:
+            monkeypatch.setenv(VARIABLE_PERMISO, "1")
+        with pytest.raises(BaseDeTestInvalida, match="no es una base de tests"):
+            asegurar_base_de_test(nombre)
+        with pytest.raises(BaseDeTestInvalida, match="no es una base de tests"):
+            asyncio.run(_clonar_esquema(nombre))
+    asyncio.run(_dropear_base_de_sesion(nombre))   # el borrado ya la ignoraba (es_base_de_test): sigue sin conectar
+    assert conector.intentos == []
