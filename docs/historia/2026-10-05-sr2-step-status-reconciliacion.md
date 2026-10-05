@@ -48,3 +48,27 @@ porque sus SHAs ya no serían los finales; tampoco se mezcló el worktree
 alterno de Platform con cambios locales sin publicar. Se inspeccionaron las
 acciones de GitHub: pasar sus etiquetas a SHA exactos es otro cambio de
 cadena de suministro y no forma parte de esta reconciliación.
+
+## Reconciliación posterior a Jax #344
+
+**Fuente:** `origin/master` `27527060e4524c34365bfce840bfd768672cfdcd`, que
+incluye Jax #354 (B9) y Jax #344 (F2-E tramo 1). Se integró con merge regular
+en esta misma rama, sin reset, rebase ni limpieza, en
+`92a0e20bacb07e085d0a2d9b920979ec34871899`.
+
+Git resolvió el merge sin conflictos. Se conservaron los pisos de master:
+`memory-vector-zero-io/out` `^206 passed`, `tests-puros/out` `^3477 passed,
+45 skipped`, y `memory-b9-regression/casos` `176`. El piso SR2 quedó intacto
+en `governance/f2e-sr2` con `^26 passed`; el nuevo job F2-E de salida externa
+permanece separado de `tests-puros` y conserva `^10 passed`.
+
+Validación local sobre este merge:
+
+- `tests/test_f2e_step_status.py`: `26 passed`.
+- `tests/test_external_output.py` y `jacobs/_governed_aviso_test.py`:
+  `10 passed`.
+- controles de cableado y pisos de CI: `55 passed`.
+
+La medición completa de los pisos B9, vector y tests puros queda a la CI del
+SHA publicado porque requieren los servicios y aislamiento del runner; no se
+redujo ni se alteró ningún piso para acomodar el entorno local.
