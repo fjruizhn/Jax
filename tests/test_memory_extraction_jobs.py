@@ -654,3 +654,33 @@ async def test_si_el_aviso_de_abiertas_falla_la_extraccion_sigue(monkeypatch,cap
     with caplog.at_level('ERROR',logger='jax.memory.worker'):
         await worker.run_once(b9_writer=object())
     assert any('abiertas' in r.getMessage() for r in caplog.records)
+
+
+# --- get_last_session_messages: desempate por id, coherente con turn_number DESC ---
+
+@pytest.mark.asyncio
+async def test_real_ultimos_mensajes_de_sesion_empatados_en_turno_salen_por_id():
+    """DESC,DESC y luego reversed(): quedan cronologicos, y los empatados en turno por id ascendente."""
+    from test_b9_persistent_api import _b9_ci_test_pool
+    import aiomysql
+    from jax.memory.db import MemoryDB
+    pool=await _b9_ci_test_pool()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute('CREATE TEMPORARY TABLE conversations (id BIGINT PRIMARY KEY,ended_at DATETIME(6) NULL)')
+                await cur.execute('CREATE TEMPORARY TABLE messages (id BIGINT,conversation_id BIGINT,turn_number INT,role VARCHAR(32),content TEXT) ENGINE=Aria')
+                await cur.execute("INSERT INTO conversations VALUES (1,NOW(6))")
+                await cur.execute("INSERT INTO messages VALUES (1,1,1,'user','primero'),(2,1,1,'assistant','segundo'),(3,1,2,'user','tercero')")
+            await conn.commit()
+        class _Conn:
+            def __init__(self,c): self._c=c
+            def cursor(self): return self._c.cursor(aiomysql.Cursor)
+        class _Acq:
+            async def __aenter__(self_): self_.c=await pool.acquire(); return _Conn(self_.c)
+            async def __aexit__(self_,*a): pool.release(self_.c); return False
+        db=MemoryDB(); db.pool=type('P',(),{'acquire':staticmethod(lambda:_Acq())})()
+        got=await db.get_last_session_messages(limit=10)
+        assert [m['content'] for m in got]==['primero','segundo','tercero']
+    finally:
+        pool.close(); await pool.wait_closed()
