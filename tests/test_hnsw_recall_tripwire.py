@@ -87,11 +87,16 @@ class VectorHealthLlamaAlTripwireTest(unittest.IsolatedAsyncioTestCase):
     async def test_sano_sale_cero(self):
         self.assertEqual(await self._correr(0, tripwire.FILAS_AL_MEDIR_RECALL), 0)
 
-    async def test_si_hay_que_remedir_el_recall_sale_distinto_de_cero(self):
-        self.assertEqual(await self._correr(0, tripwire.FILAS_AL_MEDIR_RECALL * 10), 1)
+    async def test_si_hay_que_remedir_el_recall_sale_con_el_codigo_propio_3(self):
+        # 2026-10-05 (auditoria Jax#354): 3 = remedir el recall; 1 queda para fallos generales
+        self.assertEqual(embedding_worker.EXIT_RECALL_REMEDIR, 3)
+        self.assertEqual(await self._correr(0, tripwire.FILAS_AL_MEDIR_RECALL * 10), 3)
 
-    async def test_vectores_faltantes_siguen_dando_rojo(self):
+    async def test_vectores_faltantes_siguen_dando_rojo_con_1(self):
         self.assertEqual(await self._correr(3, 10), 1)
+
+    async def test_faltantes_y_recall_a_la_vez_gana_el_fallo_general(self):
+        self.assertEqual(await self._correr(3, tripwire.FILAS_AL_MEDIR_RECALL * 10), 1)
 
 
 if __name__ == "__main__":

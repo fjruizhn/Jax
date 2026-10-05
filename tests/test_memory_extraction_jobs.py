@@ -612,7 +612,8 @@ def test_cli_reencolar_y_atascados_estan_documentados_en_el_modulo():
 # --- Conversaciones que nunca se cierran: se listan, no se cierran (auditoria 2026-10-05) ---
 
 @pytest.mark.asyncio
-async def test_real_conversaciones_abiertas_mas_de_siete_dias_se_listan_y_no_se_tocan():
+async def test_real_conversaciones_abiertas_se_miden_por_ultima_actividad_y_no_se_tocan():
+    """Una conversacion vieja pero con mensajes recientes NO esta abandonada (auditoria 2026-10-05, MINOR heredado)."""
     from test_b9_persistent_api import _b9_ci_test_pool
     from jax.memory.extraction_jobs import ExtractionJobs
     pool=await _b9_ci_test_pool()
@@ -620,16 +621,20 @@ async def test_real_conversaciones_abiertas_mas_de_siete_dias_se_listan_y_no_se_
         async with pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute('CREATE TEMPORARY TABLE conversations (id BIGINT PRIMARY KEY,started_at DATETIME(6),ended_at DATETIME(6) NULL,KEY idx_started(started_at))')
+                await cur.execute('CREATE TEMPORARY TABLE messages (id BIGINT PRIMARY KEY,conversation_id BIGINT,created_at DATETIME(6),KEY idx_conversation(conversation_id))')
                 await cur.execute("INSERT INTO conversations VALUES (1,NOW(6)-INTERVAL 10 DAY,NULL),(2,NOW(6)-INTERVAL 2 DAY,NULL),"
-                                  "(3,NOW(6)-INTERVAL 30 DAY,NOW(6)-INTERVAL 29 DAY),(4,NOW(6)-INTERVAL 40 DAY,NULL)")
+                                  "(3,NOW(6)-INTERVAL 30 DAY,NOW(6)-INTERVAL 29 DAY),(4,NOW(6)-INTERVAL 40 DAY,NULL),"
+                                  "(5,NOW(6)-INTERVAL 40 DAY,NULL),(6,NOW(6)-INTERVAL 40 DAY,NULL)")
+                # 5: vieja pero activa ayer -> NO se lista; 6: ultima actividad hace 20 dias -> SI
+                await cur.execute("INSERT INTO messages VALUES (1,5,NOW(6)-INTERVAL 1 DAY),(2,6,NOW(6)-INTERVAL 20 DAY),(3,6,NOW(6)-INTERVAL 21 DAY)")
             await conn.commit()
-        total,rows=await ExtractionJobs(pool).stale_open_conversations(7,limit=1)
-        assert total==2                                   # 1 y 4; la 2 es reciente y la 3 esta cerrada
-        assert [r['id'] for r in rows]==[4]               # la mas vieja primero, acotado por limit
+        total,rows=await ExtractionJobs(pool).stale_open_conversations(7,limit=2)
+        assert total==3                                   # 1, 4 y 6
+        assert [r['id'] for r in rows]==[4,6]             # por ultima actividad, la mas vieja primero, acotado por limit
         async with pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute('SELECT COUNT(*) AS n FROM conversations WHERE ended_at IS NULL')
-                assert (await cur.fetchone())['n']==3     # no cierra nada
+                assert (await cur.fetchone())['n']==5     # no cierra nada
     finally:
         pool.close(); await pool.wait_closed()
 
@@ -682,5 +687,128 @@ async def test_real_ultimos_mensajes_de_sesion_empatados_en_turno_salen_por_id()
         db=MemoryDB(); db.pool=type('P',(),{'acquire':staticmethod(lambda:_Acq())})()
         got=await db.get_last_session_messages(limit=10)
         assert [m['content'] for m in got]==['primero','segundo','tercero']
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+# --- Auditoria de Jax#354, 8 MINOR (2026-10-05) ---------------------------------------------
+
+@pytest.mark.asyncio
+async def test_limite_de_respuesta_invalido_falla_la_corrida_sin_llamar_al_extractor(monkeypatch):
+    """MINOR 1: un limite invalido es error de configuracion; no se paga DeepSeek ni se cuarentena nada."""
+    from unittest.mock import AsyncMock
+    worker,db,jobs=_run_once_con(monkeypatch,pending=[{'id':1}],stuck=0,claim={'claim_token':'t'})
+    monkeypatch.setenv('JAX_MEMORY_MAX_RESPONSE_CHARS','0')
+    process=AsyncMock(return_value=True); monkeypatch.setattr(worker,'process_claimed',process)
+    with pytest.raises(ValueError,match='JAX_MEMORY_MAX_RESPONSE_CHARS'): await worker.run_once(b9_writer=object())
+    jobs.claim.assert_not_called(); process.assert_not_called()
+    db.close.assert_awaited_once()
+
+
+def test_process_claimed_lee_todos_los_limites_antes_de_llamar_al_extractor(monkeypatch):
+    monkeypatch.setenv('JAX_MEMORY_MAX_RESPONSE_CHARS','abc')
+    from jax.memory import worker
+    from jax.memory.extraction_jobs import ExtractorOutputError
+    try: ok,jobs,writer=_process_claimed_con('{"facts":[]}')
+    except ValueError: ok=None
+    # sin llegar a invocar al extractor; y un limite invalido no es una "salida del extractor"
+    import inspect
+    src=inspect.getsource(worker.process_claimed)
+    assert src.index("JAX_MEMORY_MAX_RESPONSE_CHARS")<src.index("extractor.invoke")
+    assert issubclass(worker.ConfigError,ValueError) and not issubclass(worker.ConfigError,ExtractorOutputError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('code',['INCONSISTENT_COMMIT_MARKERS','INCONSISTENT_COMPLETION'])
+async def test_real_reencolar_rechaza_los_inconsistentes(code):
+    pool,api,jobs,job,request=await _fixture_con_eventos()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("UPDATE memory_extraction_jobs SET state='QUARANTINED',error_code=%s WHERE conversation_id=1",(code,))
+            await conn.commit()
+        with pytest.raises(ValueError,match='INCONSISTENT'): await jobs.requeue(1,actor='f',reason='r')
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute('SELECT COUNT(*) AS n FROM memory_extraction_job_events'); assert (await cur.fetchone())['n']==0
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_real_reencolar_rechaza_si_la_conversacion_ya_esta_procesada():
+    pool,api,jobs,job,request=await _fixture_con_eventos()
+    try:
+        await jobs.fail(1,job['claim_token'],'ValueError',quarantine=True)
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("UPDATE conversations SET memory_processed=TRUE WHERE id=1")
+            await conn.commit()
+        with pytest.raises(ValueError,match='memory_processed'): await jobs.requeue(1,actor='f',reason='r')
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+def test_codigos_de_salida_propios():
+    from jax.memory import worker
+    from jax.memory.extraction_jobs import StuckJobsError
+    assert issubclass(StuckJobsError,RuntimeError)
+    assert (worker.EXIT_GENERAL,worker.EXIT_STUCK_JOBS)==(1,2)
+    assert worker.exit_code_for(StuckJobsError('x'))==2
+    assert worker.exit_code_for(RuntimeError('x'))==1 and worker.exit_code_for(ValueError('x'))==1
+
+
+@pytest.mark.asyncio
+async def test_atascados_solos_salen_con_clase_propia_y_con_fallos_van_al_codigo_general(monkeypatch):
+    from jax.memory.extraction_jobs import StuckJobsError
+    worker,db,jobs=_run_once_con(monkeypatch,pending=[],stuck=2)
+    with pytest.raises(StuckJobsError): await worker.run_once(b9_writer=object())
+    from unittest.mock import AsyncMock
+    worker,db,jobs=_run_once_con(monkeypatch,pending=[{'id':1}],stuck=2,claim={'quarantined':True})
+    with pytest.raises(RuntimeError) as e: await worker.run_once(b9_writer=object())
+    assert not isinstance(e.value,StuckJobsError) and 'failures: 1' in str(e.value)
+
+
+def test_el_actor_real_es_el_usuario_del_proceso_y_el_declarado_se_registra_aparte():
+    import os, pwd
+    from jax.memory import worker
+    args=worker._parse_args(['--reencolar','7','--motivo','m','--actor','fernando'])
+    real,declared=worker._actores(args)
+    assert real==pwd.getpwuid(os.getuid()).pw_name and declared=='fernando'
+    assert worker._actores(worker._parse_args(['--atascados']))[1] is None
+
+
+@pytest.mark.asyncio
+async def test_real_el_evento_registra_actor_real_y_declarado():
+    import json
+    pool,api,jobs,job,request=await _fixture_con_eventos()
+    try:
+        await jobs.fail(1,job['claim_token'],'ValueError',quarantine=True)
+        await jobs.requeue(1,actor='proc-user',declared_actor='fernando',reason='r')
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute('SELECT actor,details FROM memory_extraction_job_events'); ev=await cur.fetchone()
+        assert ev['actor']=='proc-user' and json.loads(ev['details'])['declared_actor']=='fernando'
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_real_unknown_dentro_de_su_ventana_no_espera_a_una_persona():
+    """MINOR 5: UNKNOWN lo resuelve el siguiente reclamo con los marcadores; solo cuenta si se quedo."""
+    pool,api,jobs,job,request=await _fixture_con_eventos()
+    try:
+        jobs.max_attempts=3; jobs.lease_seconds=900
+        await jobs.fail(1,job['claim_token'],'ConnectionError',unknown=True)           # intento 1, recien
+        assert await jobs.stuck_count()==0
+        async def set_(sql):
+            async with pool.acquire() as conn:
+                async with conn.cursor() as cur: await cur.execute(sql)
+                await conn.commit()
+        await set_("UPDATE memory_extraction_jobs SET attempts=3 WHERE conversation_id=1")
+        assert await jobs.stuck_count()==1                                             # supero N intentos
+        await set_("UPDATE memory_extraction_jobs SET attempts=1,updated_at=NOW(6)-INTERVAL 1 HOUR WHERE conversation_id=1")
+        assert await jobs.stuck_count()==1                                             # se quedo mas alla del lease
+        with pytest.raises(ValueError,match='UNKNOWN'): await jobs.requeue(1,actor='f',reason='r')
     finally:
         pool.close(); await pool.wait_closed()

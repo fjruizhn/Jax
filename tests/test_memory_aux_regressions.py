@@ -396,3 +396,92 @@ async def test_real_migracion_010_quita_el_indice_redundante_y_las_consultas_sig
                 assert plan["key"] == "uq_embedding_generation_revision_space", plan
     finally:
         pool.close(); await pool.wait_closed()
+
+
+# --- Auditoria de Jax#354, 8 MINOR (2026-10-05) ---------------------------------------------
+
+@pytest.mark.asyncio
+async def test_real_si_el_digest_cambia_a_mitad_de_la_corrida_la_corrida_falla(monkeypatch, caplog):
+    """MINOR 7: el digest se lee al inicio y otra vez al final; si difiere, hay vectores de dos modelos."""
+    from jax.memory import embedding_worker as embedding
+    pool = await _pool_de_embeddings()
+    try:
+        db = SimpleNamespace(pool=pool, get_embedding=AsyncMock(return_value=[0.1, 0.2]))
+        for lecturas, esperado in ((["d1", "d1"], (0, 0)), (["d1", "d2"], (0, 1))):
+            monkeypatch.setattr(embedding, "modelo_digest", AsyncMock(side_effect=lecturas))
+            with caplog.at_level("ERROR", logger="jax.memory.embedding_worker"):
+                assert await embedding.run_b9_embeddings(db, writer=object()) == esperado
+        assert any("digest" in r.getMessage() and "d2" in r.getMessage() for r in caplog.records)
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+async def _pool_de_messages():
+    from test_b9_persistent_api import _b9_ci_test_pool
+    pool = await _b9_ci_test_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("CREATE TEMPORARY TABLE messages (id INT AUTO_INCREMENT PRIMARY KEY, conversation_id INT NOT NULL, turn_number INT NOT NULL, role VARCHAR(16), content TEXT, KEY idx_conversation (conversation_id))")
+            await cur.execute("INSERT INTO messages (conversation_id,turn_number,role,content) SELECT seq%20, seq, 'user', 'x' FROM seq_1_to_400")
+        await conn.commit()
+    return pool
+
+
+@pytest.mark.asyncio
+async def test_real_migracion_011_quita_el_filesort_de_las_dos_lecturas_de_mensajes():
+    from pathlib import Path
+    pool = await _pool_de_messages()
+    asc = "EXPLAIN SELECT id, turn_number, role, content FROM messages WHERE conversation_id = 5 ORDER BY turn_number ASC, id ASC"
+    desc = "EXPLAIN SELECT role, content FROM messages WHERE conversation_id = 5 ORDER BY turn_number DESC, id DESC LIMIT 20"
+    try:
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                for q in (asc, desc):
+                    await cur.execute(q); assert "filesort" in (await cur.fetchone())["Extra"]     # el problema, medido
+                sql = "\n".join(l for l in (Path(__file__).resolve().parents[1] / "jax/memory/b9_migrations/011_messages_conversation_turn_index.sql").read_text().splitlines() if not l.lstrip().startswith("--"))
+                for _ in range(2):                                                                     # idempotente
+                    await cur.execute(sql.strip().rstrip(";"))
+                for q in (asc, desc):
+                    await cur.execute(q); plan = await cur.fetchone()
+                    assert "filesort" not in plan["Extra"] and plan["key"] == "idx_messages_conversation_turn", plan
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+_RAIZ = __import__("pathlib").Path(__file__).resolve().parents[1]
+
+
+def test_readme_de_migraciones_trae_la_marcha_atras_exacta_de_007_a_011():
+    texto = (_RAIZ / "jax/memory/b9_migrations/README.md").read_text(encoding="utf-8")
+    assert "Marcha atrás" in texto
+    pasos = [
+        "DROP INDEX IF EXISTS idx_messages_conversation_turn",                                         # 011
+        "ADD INDEX IF NOT EXISTS idx_embedding_generation_revision (revision_id, embedding_space_id)",  # 010 (antes que 008)
+        "DROP INDEX IF EXISTS uq_embedding_generation_revision_space",                                  # 008
+        "DROP TABLE IF EXISTS embedding_generation_attempts",                                           # 009
+        "DROP TABLE IF EXISTS memory_extraction_job_events",                                            # 007
+    ]
+    posiciones = [texto.index(p) for p in pasos]
+    assert posiciones == sorted(posiciones), "la marcha atras va en orden inverso: 011, 010, 009, 008, 007 (la 008 despues de restaurar el indice de la 010)"
+    assert texto.index(pasos[1]) < texto.index(pasos[2])
+
+
+def test_install_memory_scope_no_habilita_el_worker_sin_bandera_explicita():
+    import subprocess
+    script = _RAIZ / "config/systemd/install-memory-scope.sh"
+    texto = script.read_text(encoding="utf-8")
+    assert "enable --now" not in texto and "--now" not in texto
+    r = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=20, cwd="/")
+    assert r.returncode != 0 and "obsoleto" in (r.stdout + r.stderr).lower()
+    assert subprocess.run(["bash", "-n", str(script)]).returncode == 0
+
+
+def test_unidades_y_runbook_documentan_los_codigos_de_salida():
+    for unidad in ("jax-memory-worker.service", "jax-memory-vector-health.service"):
+        t = (_RAIZ / "config/systemd" / unidad).read_text(encoding="utf-8")
+        assert "Códigos de salida" in t or "Codigos de salida" in t, unidad
+    assert "2 =" in (_RAIZ / "config/systemd/jax-memory-worker.service").read_text(encoding="utf-8")
+    assert "3 =" in (_RAIZ / "config/systemd/jax-memory-vector-health.service").read_text(encoding="utf-8")
+    rb = (_RAIZ / "docs/runbooks/memoria-cola-atascada.md").read_text(encoding="utf-8")
+    for frase in ("Códigos de salida", "INCONSISTENT", "UNKNOWN", "digest", "memory_processed"):
+        assert frase in rb, frase
