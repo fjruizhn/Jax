@@ -19,18 +19,17 @@ from __future__ import annotations
 
 import logging
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
-from jax.memory import worker
+from jax.memory import embedding_worker, recall_tripwire as tripwire
 
 
 class TripwireRecallTest(unittest.IsolatedAsyncioTestCase):
     async def test_avisa_cuando_messages_crecio_un_orden_de_magnitud(self):
-        db = AsyncMock()
-        db.contar_filas = AsyncMock(return_value=worker.FILAS_AL_MEDIR_RECALL * 10)
+        contar = AsyncMock(return_value=tripwire.FILAS_AL_MEDIR_RECALL * 10)
 
-        with self.assertLogs(worker.logger, level="WARNING") as capturado:
-            await worker._avisar_si_hay_que_remedir_recall(db)
+        with self.assertLogs(tripwire.logger, level="WARNING") as capturado:
+            self.assertTrue(await tripwire.recall_requiere_remedicion(contar))
 
         mensaje = "\n".join(capturado.output)
         self.assertIn("recall", mensaje.lower())
@@ -38,21 +37,62 @@ class TripwireRecallTest(unittest.IsolatedAsyncioTestCase):
                       "el aviso tiene que decir QUE se toca, no solo que algo pasa")
 
     async def test_no_avisa_mientras_la_tabla_sigue_en_el_mismo_orden(self):
-        db = AsyncMock()
-        db.contar_filas = AsyncMock(return_value=worker.FILAS_AL_MEDIR_RECALL * 3)
+        contar = AsyncMock(return_value=tripwire.FILAS_AL_MEDIR_RECALL * 3)
 
-        with self.assertNoLogs(worker.logger, level="WARNING"):
-            await worker._avisar_si_hay_que_remedir_recall(db)
+        with self.assertNoLogs(tripwire.logger, level="WARNING"):
+            self.assertFalse(await tripwire.recall_requiere_remedicion(contar))
 
-    async def test_un_fallo_al_contar_no_tumba_la_corrida_del_worker(self):
-        # El tripwire es una cortesia: si la consulta falla, el worker tiene que
-        # seguir procesando conversaciones. Un aviso que rompe lo que vigila es
-        # peor que no tenerlo.
-        db = AsyncMock()
-        db.contar_filas = AsyncMock(side_effect=RuntimeError("base caida"))
+    async def test_un_fallo_al_contar_no_se_traga(self):
+        # CAMBIO 2026-10-05: el tripwire ahora vive en vector-health, que es el chequeo de salud.
+        # Un chequeo que no puede mirar no puede dar verde: el error sube y la unidad falla.
+        contar = AsyncMock(side_effect=RuntimeError("base caida"))
+        with self.assertRaises(RuntimeError):
+            await tripwire.recall_requiere_remedicion(contar)
+        with self.assertRaises(RuntimeError):
+            await tripwire.recall_requiere_remedicion(AsyncMock(return_value=None))
 
-        with self.assertLogs(worker.logger, level="ERROR"):
-            await worker._avisar_si_hay_que_remedir_recall(db)
+
+class _PoolFalso:
+    """aiomysql.create_pool falso: `faltan` generaciones sin vector y `filas` en messages."""
+    def __init__(self, faltan, filas):
+        self.faltan, self.filas = faltan, filas
+    def acquire(self):
+        pool = self
+        class Cur:
+            sql = ""
+            async def execute(self, sql, args=None): self.sql = sql
+            async def fetchone(self): return (pool.filas,) if "FROM messages" in self.sql else (pool.faltan,)
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+        class Conn:
+            def cursor(self): return Cur()
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+        return Conn()
+    def close(self): pass
+    async def wait_closed(self): pass
+
+
+class VectorHealthLlamaAlTripwireTest(unittest.IsolatedAsyncioTestCase):
+    """Recableado (2026-10-05): el tripwire dejo de ser codigo muerto; vector-health lo ejecuta."""
+
+    async def _correr(self, faltan, filas):
+        pool = _PoolFalso(faltan, filas)
+        with patch.dict("os.environ", {"JAX_DB_HOST": "h", "JAX_DB_PORT": "1"}), \
+             patch.object(embedding_worker, "resolver_identidad",
+                          AsyncMock(return_value=embedding_worker.EmbeddingSpaceIdentity("b9-v1", "ollama", "m", "d", 2, "unit", "cosine"))), \
+             patch.object(embedding_worker, "cerrar_cliente_http", AsyncMock()), \
+             patch.object(embedding_worker.aiomysql, "create_pool", AsyncMock(return_value=pool)):
+            return await embedding_worker.run_b9_vector_health()
+
+    async def test_sano_sale_cero(self):
+        self.assertEqual(await self._correr(0, tripwire.FILAS_AL_MEDIR_RECALL), 0)
+
+    async def test_si_hay_que_remedir_el_recall_sale_distinto_de_cero(self):
+        self.assertEqual(await self._correr(0, tripwire.FILAS_AL_MEDIR_RECALL * 10), 1)
+
+    async def test_vectores_faltantes_siguen_dando_rojo(self):
+        self.assertEqual(await self._correr(3, 10), 1)
 
 
 if __name__ == "__main__":
