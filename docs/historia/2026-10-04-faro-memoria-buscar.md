@@ -42,3 +42,10 @@ Esperar CI remota y nueva revisión de escalón 3 del SHA exacto del PR. No desp
 - El host no expone las variables del perfil `jax_test` y Docker no está disponible al usuario de esta sesión. Por ello no se alteraron host, puerto, usuario, base ni credenciales para ejecutar la prueba MariaDB local.
 - La suite Faro amplia no pudo colectar porque este intérprete no tiene el paquete fijado `mcp`; fueron errores de entorno antes de ejecutar casos. El job CI instala las dependencias fijadas y levanta una MariaDB efímera, por lo que la evidencia decisiva sigue siendo `memory-b9-regression` sobre el SHA final.
 - Siguiente acción: publicar el SHA final, esperar CI aislada de los once módulos y pedir auditoría Tier 3 sobre ese SHA exacto. Si la medición supera 108, subir el piso en el mismo delta y repetir CI/auditoría. No integrar ni desplegar sin PASS.
+
+### Corrección posterior de CI y auditoría
+
+- CI sobre `73af9f5` ejecutó los once módulos B9: 126 casos pasaron y uno falló. La aserción del observador agrupaba por `CURRENT_REVISION_ID` la consulta candidata y la consulta de fuente; la candidata no tiene por qué seleccionar `has_payload`. Se acota la selección a `WHERE r.revision_id`, que identifica la validación de fuente y conserva la comprobación de que no se lee el BLOB.
+- La auditoría Tier 3 también reprodujo cancelación durante el rollback normal: el `except BaseException` de `_retrieve_scoped` iniciaba una segunda limpieza después de que `_rollback_bounded` ya había descartado la conexión. La corrección marca el intento antes de esperarlo; la regresión integrada exige una sola llamada a rollback, un solo cierre, propagación de `CancelledError` y retorno bajo 0,1 s con un plazo de 0,05 s.
+- El piso exacto pasa a 128: los 127 casos medidos por CI más la regresión de cancelación. Los comentarios del workflow Faro se reconciliaron con la medida vigente de 688 casos (control 171, memoria 15).
+- Aún se requiere CI aislada sobre el SHA nuevo y auditoría Tier 3 del SHA exacto. No integrar ni desplegar sin PASS.

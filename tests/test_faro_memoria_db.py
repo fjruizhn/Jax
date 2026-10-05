@@ -5,6 +5,7 @@ test no crea ni modifica objetos persistentes y cierra el pool al terminar.
 """
 import asyncio
 import os
+import time
 
 import aiomysql
 import pytest
@@ -87,6 +88,73 @@ def test_rollback_colgado_cierra_la_conexion_y_respeta_el_limite():
         with pytest.raises(TimeoutError):
             await _rollback_bounded(conn, timeout_s=0.02)
         assert conn.cerrada
+
+    asyncio.run(caso())
+
+
+def test_cancelar_reader_durante_rollback_no_intenta_un_segundo_rollback():
+    class Cursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def execute(self, *_args):
+            return None
+
+        async def fetchall(self):
+            return []
+
+    class Conexion:
+        def __init__(self):
+            self.inicio_rollback = asyncio.Event()
+            self.rollbacks = 0
+            self.cierres = 0
+
+        async def begin(self):
+            return None
+
+        async def rollback(self):
+            self.rollbacks += 1
+            self.inicio_rollback.set()
+            await asyncio.Event().wait()
+
+        def close(self):
+            self.cierres += 1
+
+        def cursor(self):
+            return Cursor()
+
+    class Pool:
+        def __init__(self, conn):
+            self.conn = conn
+
+        class Lease:
+            def __init__(self, conn):
+                self.conn = conn
+
+            async def __aenter__(self):
+                return self.conn
+
+            async def __aexit__(self, *args):
+                return None
+
+        def acquire(self):
+            return self.Lease(self.conn)
+
+    async def caso():
+        conn = Conexion()
+        reader = MariaDBB9Reader(Pool(conn), rollback_timeout_s=0.05)
+        task = asyncio.create_task(reader.retrieve(ScopeContext("user:test", "USER", "test", "tenant")))
+        await conn.inicio_rollback.wait()
+        inicio = time.monotonic()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert time.monotonic() - inicio < 0.1
+        assert conn.rollbacks == 1
+        assert conn.cierres == 1
 
     asyncio.run(caso())
 
@@ -238,7 +306,9 @@ def test_reader_mariadb_solo_lee_scope_del_socket_en_base_de_prueba():
             payload_queries = [(sql, args) for sql, args in candidate_queries if "LEFT(P.PAYLOAD,%S) AS PAYLOAD" in sql]
             assert payload_queries
             assert all(args[:2] == (8192, 8192) for _, args in payload_queries)
-            synthesis_source_queries = [sql for sql, _ in queries if "CURRENT_REVISION_ID" in sql]
+            synthesis_source_queries = [sql for sql, _ in queries
+                                        if "WHERE R.REVISION_ID=%S" in sql
+                                        and "CURRENT_REVISION_ID" in sql]
             assert synthesis_source_queries
             assert all("(P.PAYLOAD IS NOT NULL) AS HAS_PAYLOAD" in sql for sql in synthesis_source_queries)
         finally:

@@ -726,6 +726,7 @@ class MariaDBB9Reader:
                 await cur.execute("SET TRANSACTION READ ONLY")
                 await cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             await conn.begin()
+            rollback_attempted = False
             try:
                 async with conn.cursor() as cur:
                     # Equality branches preserve the previous visibility/project
@@ -830,10 +831,15 @@ class MariaDBB9Reader:
                             envelopes.append(MemoryEnvelope(obj,revision,tuple(prov),(),{"store":"B9_MARIADB"}))
                 # Explicitly end the read-only snapshot; no state can be
                 # committed by this read boundary.
+                rollback_attempted = True
                 await _rollback_bounded(conn, self._rollback_timeout_s)
                 return tuple(envelopes)
             except BaseException:
-                await _rollback_bounded(conn, self._rollback_timeout_s)
+                # _rollback_bounded already discarded the connection when it
+                # was cancelled or exceeded its deadline. Retrying here turns
+                # one cancellation into a second full cleanup deadline.
+                if not rollback_attempted:
+                    await _rollback_bounded(conn, self._rollback_timeout_s)
                 raise
 
     async def prompt_context(self, scope: ScopeContext, *, limit: int = 20) -> PromptMemoryContext:

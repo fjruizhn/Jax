@@ -110,7 +110,7 @@ jobs:
         # tables; jax_test has grants only on this job's suffixed test DB, never production.
         # The root conftest's governance bootstrap reads host configuration;
         # this explicit boundary does not load it or migrate any shared schema.
-        # 102 prior DB cases plus the Faro read-only probe and four pool/rollback/payload boundary cases = 107 minimum; each addition is a testcase.
+        # The isolated eleven-module suite measured 127 cases on 2026-10-05; the rollback-cancellation regression adds case 128.
         run: |
           set -euo pipefail
           python -m pytest --confcutdir=tests \
@@ -457,11 +457,11 @@ jobs:
   # TODO sale con HASH: mcp de requirements-faro.txt, pytest y el cliente de base de
   # requirements-faro-ci.txt (`--require-hashes`, sin `pip install` suelto: lo vigila
   # tests/test_faro_requirements.py). Piso exacto de tests CORRIDOS, cero saltados (un skip se ve igual
-  # que verde). Medido 2026-10-04 en hall9000 con Python 3.14: 683 passed
-  # (la base medida de 671 + 11 de memoria.buscar + 1 de configuración apagada; sin skips).
+  # que verde). Medido 2026-10-05 en hall9000 con Python 3.14: 688 passed
+  # (la base medida de 671 + 15 de memoria.buscar + 2 de configuración/control; sin skips).
   # La CI usa Python 3.12 y confirma el mismo piso.
   # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 72 +
-  # control 169 + lanzador 77 + acl 43 + memoria 11; desde aviso, los pasos 0.3b y 0.3c y su auditoria). Las pruebas con bwrap y uids
+  # control 171 + lanzador 77 + acl 43 + memoria 15; desde aviso, los pasos 0.3b y 0.3c y su auditoria). Las pruebas con bwrap y uids
   # reales estan en el job `faro-jaula`; las de la base real, en `faro-bitacora-db`.
   faro-fase0:
     runs-on: ubuntu-latest
