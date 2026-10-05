@@ -1,0 +1,20 @@
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=5
+Description=JAX — LAS MANOS (Sistema de capacidades)
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=fruiz
+WorkingDirectory=/home/fruiz/jax/las_manos
+EnvironmentFile=/etc/jax/.env
+ExecStart=/home/fruiz/jax/las_manos/.venv/bin/uvicorn server:app --host 127.0.0.1 --port 7777
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
