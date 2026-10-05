@@ -188,7 +188,7 @@ revisados=0
 verificar_propietario_y_modo() {
   # $1 = ruta real a stat-ear (con RAIZ_PRUEBA si aplica), $2 = ruta a
   # mostrar en los mensajes (siempre la de producción), $3 = "1" si es el
-  # .sh (755), si no 644. Llamada DIRECTA (nunca dentro de $(...)): puede
+  # .sh o de ops/sbin/ (755), si no 644. Llamada DIRECTA (nunca dentro de $(...)): puede
   # tocar `fallo` ella misma sin violar MAJOR-A.
   local real="$1" mostrar="$2" es_sh="$3" propietario grupo modo esperado
   read -r propietario grupo modo < <(stat -c '%U %G %a' "$real" 2>/dev/null) || {
@@ -271,7 +271,9 @@ while IFS=$'\t' read -r repo_rel instalada || [ -n "$repo_rel" ]; do
   fi
 
   case "$repo_rel" in
-    *.sh)
+    *.sh | ops/sbin/*)
+      # ops/sbin/ = guiones de /usr/local/sbin, ejecutables aunque no terminen en .sh
+      # (jax-db-esperar, m2 de la auditoria de #356).
       if [ ! -x "$repo_abs" ]; then
         echo "SIN BIT EJECUTABLE en el repo: $repo_abs" >&2
         fallo=1
@@ -619,7 +621,12 @@ while IFS= read -r unidad; do
 
   # b) Cargado -- producción, o modo prueba con SYSTEMCTL_DE_PRUEBA
   # (ronda 6, MINOR-1).
-  if [ "$CAPA_CARGADO_ACTIVA" = 1 ]; then
+  #
+  # Una PLANTILLA (`nombre@.service`, p. ej. aviso-fallo@.service) no se puede consultar
+  # con `systemctl show` ("neither a valid invocation ID nor unit name"): solo carga
+  # como instancia. De las plantillas se verifica el archivo (byte a byte, dueño, modo)
+  # y el disco, no la capa cargado (m2 de la auditoría de #356).
+  if [ "$CAPA_CARGADO_ACTIVA" = 1 ] && [[ "$unidad" != *@.* ]]; then
     if ! reales_cargado="$(obtener_reales_cargado "$unidad" | sort -u)"; then
       fallo=1
     fi

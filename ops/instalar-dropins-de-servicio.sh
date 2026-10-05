@@ -141,7 +141,8 @@ while IFS=$'\t' read -r repo_rel instalada || [ -n "$repo_rel" ]; do
       modo_archivo=0644
       ;;
     exacto)
-      if ! [[ "$base" =~ ^[A-Za-z0-9._-]+\.sh$ ]]; then
+      # .sh, o cualquier guion de ops/sbin/ (jax-db-esperar no lleva extension).
+      if ! { [[ "$base" =~ ^[A-Za-z0-9._-]+\.sh$ ]] || { [[ "$repo_rel" == ops/sbin/* ]] && [[ "$base" =~ ^[A-Za-z0-9._-]+$ ]]; }; }; then
         echo "instalar-dropins-de-servicio: nombre de guion inválido -- rechazado: $base" >&2
         exit 1
       fi
