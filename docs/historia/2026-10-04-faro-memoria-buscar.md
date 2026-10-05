@@ -28,3 +28,17 @@ Fernando confirmó que B9 **no está en producción** y que la reactivación sig
 ## Pendientes
 
 Esperar CI remota y nueva revisión de escalón 3 del SHA exacto del PR. No desplegar ni conectar a B9 de producción desde este cambio. El cable productivo requiere reactivación de B9 y un contrato aprobado.
+
+## Recuperación post-corte · 2026-10-05
+
+### Hechos comprobados
+
+- La rama se reconcilió mediante merge regular con `origin/master` `d136cce5d88b3420a5066b40e7786c158118f29e`; incorporó la limpieza #353 de contenedores MariaDB desechables (`docker rm -fv`). No se hizo reset, clean, force-push ni conexión productiva B9.
+- El rojo anterior de `memory-b9-regression` no era la limpieza #353. El reader validaba legítimamente una fuente de síntesis con `fetchone`, pero el cursor observado de la prueba MariaDB solo exponía `fetchall`, lo que provocaba `AttributeError`.
+- La regresión nueva falló antes de la corrección exactamente con ese `AttributeError`; después de delegar `fetchone`, las cinco pruebas no DB de `test_faro_memoria_db.py` pasaron. El mínimo de la suite aislada se eleva de 107 a 108, documentado en `ci/pisos.json` y `docs/ci/pisos.md`.
+
+### Verificación pendiente y motivo
+
+- El host no expone las variables del perfil `jax_test` y Docker no está disponible al usuario de esta sesión. Por ello no se alteraron host, puerto, usuario, base ni credenciales para ejecutar la prueba MariaDB local.
+- La suite Faro amplia no pudo colectar porque este intérprete no tiene el paquete fijado `mcp`; fueron errores de entorno antes de ejecutar casos. El job CI instala las dependencias fijadas y levanta una MariaDB efímera, por lo que la evidencia decisiva sigue siendo `memory-b9-regression` sobre el SHA final.
+- Siguiente acción: publicar el SHA final, esperar CI aislada de los once módulos y pedir auditoría Tier 3 sobre ese SHA exacto. Si la medición supera 108, subir el piso en el mismo delta y repetir CI/auditoría. No integrar ni desplegar sin PASS.
