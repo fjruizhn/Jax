@@ -5,6 +5,7 @@ removal of `CREATE DATABASE jax_memory`/`USE jax_memory` from the schema file, a
 the guard. The real build is exercised by the `memory-b9-regression` CI job, which
 provisions a fresh MariaDB and runs the driver on it.
 """
+import asyncio
 import importlib.util
 from pathlib import Path
 
@@ -15,7 +16,7 @@ _spec = importlib.util.spec_from_file_location("memory_b9_provision", _RAIZ / "t
 P = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(P)
 
-_ENTORNO_OK = {"JAX_DB_HOST": "127.0.0.1", "JAX_DB_PORT": "3306", "JAX_DB_USER": "jax_test",
+_ENTORNO_OK = {"JAX_DB_HOST": "127.0.0.1", "JAX_DB_PORT": "3399", "JAX_DB_USER": "jax_test",
                "JAX_DB_PASSWORD": "x", "JAX_DB_NAME": "jax_memory_test_memb9_ci"}
 
 
@@ -63,3 +64,79 @@ def test_el_orden_de_migraciones_cubre_todo_el_directorio():
     assert numeros == ["001", "002", "003", "004", "006", "007", "008", "009", "010", "011", "012", "013"]
     fuente = (_RAIZ / "tests/memory_b9_provision.py").read_text()
     assert '["001", "002", "003", "004", "006", "007", "008", "009", "010", "011", "012", "013"]' in fuente
+
+
+# --- Auditoria Jax#355, MINOR 3: la misma guarda de puerto y la base se verifica tras cada migracion ---
+
+_PERMISO = "JAX_TEST_DB_PERMITIR_INSTANCIA_DE_PRODUCCION"
+
+
+@pytest.fixture
+def fuera_de_ci(monkeypatch):
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv(_PERMISO, raising=False)
+
+
+@pytest.mark.parametrize("puerto", ["3306", "3308"])
+def test_el_constructor_se_niega_en_los_puertos_de_produccion_fuera_de_ci(fuera_de_ci, monkeypatch, puerto):
+    with pytest.raises(Exception, match=_PERMISO):
+        P.guarda({**_ENTORNO_OK, "JAX_DB_PORT": puerto})
+    monkeypatch.setenv("CI", "true")
+    P.guarda({**_ENTORNO_OK, "JAX_DB_PORT": puerto})          # en CI cada job trae su contenedor
+    monkeypatch.delenv("CI")
+    monkeypatch.setenv(_PERMISO, "1")
+    P.guarda({**_ENTORNO_OK, "JAX_DB_PORT": puerto})
+
+
+def test_el_puerto_que_se_evalua_es_el_del_entorno_recibido_no_el_del_proceso(fuera_de_ci, monkeypatch):
+    monkeypatch.setenv("JAX_DB_PORT", "3308")                  # el del proceso no manda
+    P.guarda({**_ENTORNO_OK, "JAX_DB_PORT": "3399"})
+    assert __import__("os").environ["JAX_DB_PORT"] == "3308"   # y no se pisa
+
+
+class _CursorFalso:
+    """Cursor de mentira: `base` es lo que contestaria SELECT DATABASE()."""
+
+    def __init__(self, base, cambia_con=None, a=None):
+        self.base, self.cambia_con, self.a, self.ejecutadas, self._fila = base, cambia_con, a, [], None
+
+    async def execute(self, sql, args=None):
+        self.ejecutadas.append(sql)
+        if sql == "SELECT DATABASE()":
+            self._fila = (self.base,)
+        elif sql == self.cambia_con:
+            self.base = self.a
+
+    async def fetchone(self):
+        return self._fila
+
+
+def test_la_base_se_verifica_despues_de_cada_script_y_falla_cerrado():
+    ok = _CursorFalso("jax_memory_test_memb9_ci")
+    asyncio.run(P._ejecutar(ok, ["SELECT 1", "SELECT 2"], "jax_memory_test_memb9_ci"))
+    assert ok.ejecutadas[-1] == "SELECT DATABASE()"
+    # una sentencia que (por cualquier camino) deja la conexion en otra base: se detecta al terminar
+    movida = _CursorFalso("jax_memory_test_memb9_ci", cambia_con="SELECT 2", a="jax_memory")
+    with pytest.raises(RuntimeError, match="database_changed"):
+        asyncio.run(P._ejecutar(movida, ["SELECT 1", "SELECT 2"], "jax_memory_test_memb9_ci"))
+
+
+def test_un_use_en_un_script_se_rechaza_antes_de_ejecutarse():
+    cur = _CursorFalso("jax_memory_test_memb9_ci")
+    with pytest.raises(RuntimeError, match="use_statement_refused"):
+        asyncio.run(P._ejecutar(cur, ["SELECT 1", "USE jax_memory"], "jax_memory_test_memb9_ci"))
+    assert "USE jax_memory" not in cur.ejecutadas
+
+
+def test_el_driver_tambien_pasa_por_la_guarda_de_puerto(fuera_de_ci, monkeypatch):
+    spec = importlib.util.spec_from_file_location("memory_b9_driver", _RAIZ / "tests/memory_b9_regression_driver.py")
+    D = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(D)
+    for k, v in {**_ENTORNO_OK, "JAX_DB_PORT": "3308", "JAX_DB_NAME": "jax_memory_test_memb9_ci"}.items():
+        monkeypatch.setenv(k, v)
+
+    async def _no_conectar(**kw):
+        raise AssertionError("el driver abrio una conexion pese a la guarda")
+    monkeypatch.setattr(D.aiomysql, "create_pool", _no_conectar)
+    with pytest.raises(Exception, match=_PERMISO):
+        asyncio.run(D.main())

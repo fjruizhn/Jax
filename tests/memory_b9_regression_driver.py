@@ -35,6 +35,7 @@ import uuid
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 
 import aiomysql
+from base_de_test import exigir_conexion_permitida
 from jax.memory import worker as W
 from jax.memory.b9 import ScopeContext, MutationAuthorizationRequest, Visibility, EmbeddingSpaceIdentity, ScopeDenied, AuthorizationDenied, ObjectKind
 from jax.memory.b9_mariadb import MariaDBB9Store, PersistentMemoryAPI, MariaDBB9Reader
@@ -114,7 +115,7 @@ class FaultCursor:
 
 class Driver:
     def __init__(self,pool):
-        self.pool=pool;self.mapping=MappingPool(pool);self.fake=Extractor();self.results={};self.none_messages=set()
+        self.pool=pool;self.mapping=MappingPool(pool);self.fake=Extractor();self.results={};self.none_messages=set();self.deliberate=set()
         self.api=PersistentMemoryAPI(MariaDBB9Store(self.mapping),MariaDBScopeAuthorityResolver(self.mapping))
         self.reader=MariaDBB9Reader(self.mapping,MariaDBScopeAuthorityResolver(self.mapping))
         driver=self
@@ -156,12 +157,16 @@ class Driver:
         try:
             await W.run_once(limit=100,b9_writer=writer)
         except StuckJobsError as exc:
-            # Raised only with ZERO new failures (`stuck and not failures`): earlier cases left
-            # QUARANTINED/UNKNOWN jobs on purpose and the unit stays red until a person resolves them.
-            # Accept it for a run that expects success only if the DB really holds jobs counted as stuck.
-            if not expect_failure:
-                if not await ExtractionJobs(self.mapping).stuck_count(): raise
-                return type(exc).__name__
+            # The worker raises this ONLY with zero new failures and a stuck count > 0, so a
+            # `stuck_count() > 0` re-check would be a tautology. The real assertion is WHICH jobs are
+            # stuck: each must be one this driver quarantined on purpose (`self.deliberate`), and the
+            # worker's own count must equal that list. A healthy conversation that ends up stuck
+            # during a run expected to succeed is a regression, and fails here.
+            if expect_failure: return type(exc).__name__
+            where,args=ExtractionJobs(self.mapping)._stuck_where()
+            stuck={row["conversation_id"] for row in await self.query(f"SELECT conversation_id FROM memory_extraction_jobs WHERE {where}",args)}
+            assert stuck and stuck<=self.deliberate,"STUCK_unexpected_job"
+            assert f"awaiting a person: {len(stuck)}" in str(exc),"STUCK_count_mismatch"
             return type(exc).__name__
         except Exception as exc:
             if not expect_failure: raise
@@ -196,6 +201,7 @@ class Driver:
         async def poison(uid=None,project=None):
             bad=await self.seed(uid=uid,project=project);good=await self.seed()
             await self.run(expect_failure=True)
+            self.deliberate.add(bad)
             assert (await self.state(bad))["state"]=="QUARANTINED","poison_not_quarantined"
             assert (await self.state(good))["results"]==4,"poison_blocks_healthy"
         await self.case("B_unbound_project",lambda:poison(1,900001))
@@ -282,6 +288,7 @@ class Driver:
             import time
             assert not await W.process_claimed(W.MemoryDB(),self.fake,conv,writer,jobs,second,budget,time.monotonic()+840),"SOURCE_changed_accepted"
             state=await self.state(cid)
+            self.deliberate.add(cid)
             assert state["state"]=="QUARANTINED" and state["results"]==0,"SOURCE_not_quarantined"
         await self.case("LEASE_and_source_changed",expired_token)
         async def partial_marker():
@@ -289,6 +296,7 @@ class Driver:
             await self.query("UPDATE memory_extraction_jobs SET state='UNKNOWN',lease_until=NULL WHERE conversation_id=%s",(cid,))
             # A persisted origin row without its processed/completed markers is ambiguous.
             await self.query("INSERT INTO memory_extraction_results (conversation_id,item_index,content_digest,memory_id,revision_id) VALUES (%s,0,%s,%s,%s)",(cid,'sha256:'+('0'*64),str(uuid.uuid4()),str(uuid.uuid4())))
+            self.deliberate.add(cid)
             await self.run(expect_failure=True)
             assert (await self.state(cid))["state"]=="QUARANTINED","UNKNOWN_partial_not_quarantined"
 
@@ -431,6 +439,7 @@ async def main():
         raise RuntimeError('test_database_guard')
     for name in ('JAX_DB_HOST','JAX_DB_PORT','JAX_DB_PASSWORD'):
         if not env.get(name):raise RuntimeError('test_configuration_missing')
+    exigir_conexion_permitida(env['JAX_DB_NAME'])  # same port guard as the suite: 3306/3308 outside CI need the explicit variable
     pool=await aiomysql.create_pool(host=env['JAX_DB_HOST'],port=int(env['JAX_DB_PORT']),user=env['JAX_DB_USER'],password=env['JAX_DB_PASSWORD'],db=env['JAX_DB_NAME'],minsize=1,maxsize=8,autocommit=False,charset='utf8mb4',connect_timeout=db_connect_timeout_seconds())
     driver=Driver(pool)
     try:

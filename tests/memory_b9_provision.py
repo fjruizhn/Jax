@@ -27,19 +27,24 @@ What it builds, in this order (same order the production deploy follows):
    ("not a tenant member"), which is a different, weaker control.
 
 Fail closed: the user must be `jax_test`, the database name must start with
-`jax_memory_test_memb9_`, and the database must be EMPTY (no tables). It never
-drops anything: a database that is not empty is refused, not cleaned.
+`jax_memory_test_memb9_`, the port goes through `base_de_test.exigir_conexion_permitida`
+(3306/3308 outside CI need an explicit variable) and the database must be EMPTY (no tables).
+It never drops anything: a database that is not empty is refused, not cleaned. After the schema,
+the platform tables, every migration, 005 and the fixtures it checks `SELECT DATABASE()` is still
+the test database, and a `USE` statement in any script is refused before it runs.
 """
 import asyncio
 import os
 from pathlib import Path
 import re
 import sys
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import aiomysql
 
+from base_de_test import exigir_conexion_permitida
 from jax.core.db_connect_config import db_connect_timeout_seconds
 from jax.memory.project_authority_migrations import apply_project_authority_migration
 
@@ -110,15 +115,36 @@ def guarda(env):
     for nombre in ("JAX_DB_HOST", "JAX_DB_PORT", "JAX_DB_PASSWORD"):
         if not env.get(nombre):
             raise RuntimeError("test_configuration_missing")
+    # The same port guard the suite uses (it reads os.environ): evaluated on THIS env's port,
+    # while CI and the permission variable still come from the process environment.
+    with mock.patch.dict(os.environ, {"JAX_DB_PORT": env["JAX_DB_PORT"]}):
+        exigir_conexion_permitida(env["JAX_DB_NAME"])
 
 
-async def _ejecutar(cur, sentencias):
+_USE = re.compile(r"^\s*USE\s", re.IGNORECASE)
+
+
+async def verificar_base(cur, esperada):
+    """Fail closed if the connection is no longer on the test database."""
+    await cur.execute("SELECT DATABASE()")
+    fila = await cur.fetchone()
+    actual = next(iter(fila.values())) if isinstance(fila, dict) else fila[0]
+    if actual != esperada:
+        raise RuntimeError("database_changed")
+
+
+async def _ejecutar(cur, sentencias, esperada):
+    """Run a script, then check `SELECT DATABASE()`. A `USE` is refused before it runs."""
     for sentencia in sentencias:
+        if _USE.match(sentencia):
+            raise RuntimeError("use_statement_refused")
         await cur.execute(sentencia)
+    await verificar_base(cur, esperada)
 
 
 async def provisionar(env):
     guarda(env)
+    base = env["JAX_DB_NAME"]
     conn = await aiomysql.connect(
         host=env["JAX_DB_HOST"], port=int(env["JAX_DB_PORT"]), user=env["JAX_DB_USER"],
         password=env["JAX_DB_PASSWORD"], db=env["JAX_DB_NAME"], autocommit=True, charset="utf8mb4",
@@ -128,19 +154,21 @@ async def provisionar(env):
             await cur.execute("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()")
             if (await cur.fetchone())[0]:
                 raise RuntimeError("fresh_database_required")
-            await _ejecutar(cur, sentencias_de_esquema())
-            await _ejecutar(cur, DDL_JAX_PLATAFORMA)
+            await _ejecutar(cur, sentencias_de_esquema(), base)
+            await _ejecutar(cur, DDL_JAX_PLATAFORMA, base)
             migraciones = {p.name[:3]: p for p in sorted(MIGRACIONES.glob("[0-9][0-9][0-9]_*.sql"))}
             if sorted(migraciones) != ["001", "002", "003", "004", "006", "007", "008", "009", "010", "011", "012", "013"]:
                 raise RuntimeError("migration_set_changed")  # a new migration must be placed in this order on purpose
             for numero in ("001", "002", "003", "004"):
-                await _ejecutar(cur, dividir_sentencias(migraciones[numero].read_text()))
+                await _ejecutar(cur, dividir_sentencias(migraciones[numero].read_text()), base)
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await apply_project_authority_migration(cur)  # 005, Python only
         async with conn.cursor() as cur:
+            await verificar_base(cur, base)
+        async with conn.cursor() as cur:
             for numero in ("006", "007", "008", "009", "010", "011", "012", "013"):
-                await _ejecutar(cur, dividir_sentencias(migraciones[numero].read_text()))
-            await _ejecutar(cur, FIXTURES)
+                await _ejecutar(cur, dividir_sentencias(migraciones[numero].read_text()), base)
+            await _ejecutar(cur, FIXTURES, base)
     finally:
         conn.close()
 
