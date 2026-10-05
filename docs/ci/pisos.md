@@ -19,7 +19,7 @@ No hace falta tocar `.github/workflows/`. Un piso nunca tiene valor por defecto:
 
 Cada paso del workflow llama `python3 .github/ci/piso.py verificar <clave> <archivo-de-salida>`.
 La clave es `<job>/<archivo temporal que lee>`. El único mínimo numérico que no es un
-`patron` es `memory-b9-regression/casos`, en la sección `minimos`. (152 -> 167 el 2026-10-05, Jax#354: +15 pruebas de los 8 MINOR, local con MariaDB desechable, 0 skipped. Antes, 102 -> 152 el 2026-10-05: el 102 era la medicion del 2026-09-26 y habia quedado atras; local contra MariaDB desechable, misma lista de 10 archivos, 121 antes de la rama y 152 despues, 0 skipped. Es un MINIMO: el runner puede medir mas, nunca debe dar menos.)
+`patron` es `memory-b9-regression/casos`, en la sección `minimos`. (167 -> 175 el 2026-10-05, re-auditoria Jax#354: +8 pruebas (detector de SuccessExitStatus y su control, 011/012/013 sobre la DDL real con VECTOR KEY + FK CASCADE incluido el 1205, EXPLAIN de 012/013, marcha atras ejecutada; las dos de README/timeout estaticas se reescribieron); local, 0 skipped. Antes: 152 -> 167 el 2026-10-05, Jax#354: +15 pruebas de los 8 MINOR, local con MariaDB desechable, 0 skipped. Antes, 102 -> 152 el 2026-10-05: el 102 era la medicion del 2026-09-26 y habia quedado atras; local contra MariaDB desechable, misma lista de 10 archivos, 121 antes de la rama y 152 despues, 0 skipped. Es un MINIMO: el runner puede medir mas, nunca debe dar menos.)
 
 Como `ci/pisos.json` es un dato y no lógica del workflow, un PR que solo sube un piso
 no toca `.github/workflows/`. Para que eso no sea una forma de rebajar un piso sin pasar por
