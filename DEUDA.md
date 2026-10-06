@@ -817,8 +817,8 @@ en el runner con `AssertionError: 0 != 3` — admitió cero — y en local daba 
   la propiedad. `las_manos/auth_servicio.py`: middleware ASGI **deny by default** (público sólo `GET /health`), cabecera
   `X-Jax-Credencial-Servicio`, `hmac.compare_digest` contra todas, identidades `plataforma`
   (`JAX_LAS_MANOS_CREDENCIAL_PLATAFORMA`: `/jacobs/*` + `POST /motor/authorize-facet`; declara `invoked_by=plataforma`,
-  `caller=jax_platform_chat`) y `jacobs` (`JAX_LAS_MANOS_CREDENCIAL_JACOBS`: `/motor/dispatch`, `/motor/job/*`,
-  `POST /jacobs/pipeline`; declara `caller=jacobs`, `invoked_by=ada`). Un `invoked_by`/`caller` del cuerpo que no es de
+  `caller=jax_platform_chat`) y `jacobs` (`JAX_LAS_MANOS_CREDENCIAL_JACOBS`: **desde el cierre de #362 solo** `POST /jacobs/pipeline`;
+  se retiraron `/motor/dispatch` y `/motor/job/*`, que nadie usaba; declara `caller=jacobs`, `invoked_by=ada`). Un `invoked_by`/`caller` del cuerpo que no es de
   la credencial → 403 antes de la ruta; claves duplicadas → 400. **Sólo `plataforma` aprueba o reanuda.** Sin las
   variables (o cortas, o iguales) LAS MANOS no arranca. `/execute`, `/plan` y `/audit/tail` no los alcanza ninguna
   identidad. Rechazos con `code`, sin prosa. Una ruta nueva bajo `/jacobs/` queda sólo para `plataforma` sin tocar nada.
@@ -843,8 +843,9 @@ en el runner con `AssertionError: 0 != 3` — admitió cero — y en local daba 
     sin credencial 401, identidad ajena 403, propia pasa; `authorize_facet.js` a 25 VUs con los tres caminos
     (permitido / fail-closed / caller ajeno) p95 5,81 ms, 6140 req/s, 100 % checks, 0 fallas.
   - **(2) CERRADO como propiedad.** No hay en el árbol un emisor de sub-pipelines de Ada que llame
-    `POST /jacobs/pipeline` (`grep` sin coincidencias fuera de tests/loadtest). Los tres llamados de `jacobs/executor.py`
-    ya mandan `encabezado_propio(IDENTIDAD_JACOBS)`. Un emisor futuro sin cabecera recibe 401 (el middleware es
+    `POST /jacobs/pipeline` (`grep` sin coincidencias fuera de tests/loadtest). Hoy `jacobs/executor.py` hace **cero** llamadas con
+    `encabezado_propio(IDENTIDAD_JACOBS)` (los tres llamados a LAS MANOS se retiraron con el despacho legacy, cierre de #362;
+    lo fija `tests/test_las_manos_auth_servicio.py::test_jacobs_ya_no_hace_ningun_pedido_http_a_las_manos`). Un emisor futuro sin cabecera recibe 401 (el middleware es
     deny-by-default), así que no puede quedar abierto en silencio.
   - **(1) DECISIÓN DE FERNANDO, no deuda técnica.** Medido: `fruiz` tiene `(ALL : ALL) ALL` en sudo (con contraseña y
     caché de sesión). Una cuenta de servicio para LAS MANOS/jax-platform con `.env` `root:jaxsvc 640` sólo cierra el

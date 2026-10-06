@@ -223,8 +223,6 @@ def test_la_ruta_nueva_bajo_jacobs_es_solo_de_la_plataforma():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("identidad,ruta,cuerpo", [
-    (IDENTIDAD_JACOBS, "/motor/dispatch", {"caller": "hyde", "capability": "code", "prompt": "x"}),
-    (IDENTIDAD_JACOBS, "/motor/dispatch", {"caller": "jax_platform_chat", "capability": "code", "prompt": "x"}),
     (IDENTIDAD_JACOBS, "/jacobs/pipeline", {"invoked_by": "plataforma"}),
     (IDENTIDAD_JACOBS, "/jacobs/pipeline", {"invoked_by": "jax_local"}),
     (IDENTIDAD_PLATAFORMA, "/jacobs/pipeline", {"invoked_by": "ada"}),
@@ -236,6 +234,26 @@ def test_declarar_otra_identidad_se_rechaza(identidad, ruta, cuerpo):
         r = c.post(ruta, json=cuerpo, headers=_h(identidad))
     assert r.status_code == 403, r.text
     assert r.json() == {"detail": {"code": auth_servicio.CODIGO_IDENTIDAD_DECLARADA}}
+
+
+@pytest.mark.parametrize("metodo,ruta", [
+    ("post", "/motor/dispatch"),
+    ("get", "/motor/job/j1"),
+    ("post", "/motor/job/j1/cancel"),
+])
+def test_jacobs_ya_no_tiene_permiso_sobre_los_motores(metodo, ruta):
+    """Jacobs no despacha motores (despacho legacy cerrado, 410) ni consulta o
+    cancela motor jobs: nada del arbol usa esas rutas con la credencial
+    `jacobs`. Un permiso que nadie usa es superficie sin dueno: 403 de ruta."""
+    with TestClient(_app()) as c:
+        r = getattr(c, metodo)(ruta, headers=_h(IDENTIDAD_JACOBS))
+    assert r.status_code == 403, r.text
+    assert r.json() == {"detail": {"code": auth_servicio.CODIGO_RUTA_NO_PERMITIDA}}
+
+
+def test_jacobs_conserva_solo_el_pipeline_de_sub_pipelines():
+    permiso = auth_servicio.PERMISOS[IDENTIDAD_JACOBS]
+    assert [(m, p.pattern) for m, p in permiso.rutas] == [("POST", "/jacobs/pipeline")]
 
 
 def test_la_plataforma_no_despacha_motores():
