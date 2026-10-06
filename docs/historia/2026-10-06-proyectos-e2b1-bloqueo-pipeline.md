@@ -54,6 +54,55 @@ E2b-3 permanecen fuera de este alcance.
   de Pipeline transporta ese contexto hasta el worker sin aceptar selección
   del modelo.
 
+## Ronda 2 — verificación del camino productivo (2026-10-06)
+
+Se comprobó la premisa operativa de Ronda 2 antes de cambiar el código:
+
+- `jax-las-manos.service` y `jax-platform.service` están activos en Hall9000.
+- El checkout productivo de JAX está en
+  `685579466c25771a4df5d5cfd2c51bc555a21fa6` (`master`, origin/master). Los
+  SHA-256 de `jacobs/executor.py` y `las_manos/motor_registry/routes.py`
+  desplegados coinciden con los del checkout de esta rama.
+- `jacobs/executor.py::_invoke_motor` llama a `POST /motor/dispatch`; el
+  handler desplegado rechaza esa ruta con 410 `GOVERNED_EXECUTION_REQUIRED`.
+  No se encontró ningún
+  llamador productivo de `POST /motor/governed-dispatch` ni del adaptador
+  `governed_motor_payload`.
+- En los registros de `jax-las-manos.service` desde su arranque
+  (2026-10-05 21:06:15 CST) hasta esta observación no aparecen llamadas a
+  `/jacobs/pipeline`, `/motor/dispatch` ni `/motor/governed-dispatch`. Por eso
+  no hay una corrida reciente en los registros con la que acreditar cuál
+  endpoint despachó una corrida viva; el código productivo desplegado sí
+  acredita el 410 del camino de motor de Jacobs.
+- El checkout productivo de jax-platform está en
+  `d283d900e1da5ef557ddd53dcde2f0808306785c` (`master`, origin/master). Su
+  `POST /api/pipelines` sobrescribe `user_id` y `tenant_id` autenticados y
+  reenvía el cuerpo a `POST /jacobs/pipeline`; no resuelve ni fija `project_id`
+  ni comprueba membresía del proyecto.
+- `governed_dispatch` carga un `ExecutionRequest` sellado por `execution_id`,
+  pero crea el job con `pipeline_id=None` y `project_id=None`. El request B6
+  conserva `context` dentro de su hash, pero el repo no contiene un llamador
+  productivo de `build_execution_request` que cree una ejecución por paso de
+  Pipeline para transportar esos valores.
+
+### Resolución
+
+La instrucción de Ronda 2 de usar `governed_dispatch` no coincide con el
+camino desplegado: `jacobs/executor.py` sigue en la ruta retirada, y no existe
+un ciclo de creación de ejecución B6 por paso que permita cambiarla a
+`governed_dispatch` con un `execution_id` auténtico. Crear ese ciclo, decidir
+qué decisión B5 autoriza cada paso y ligar los nuevos campos al artefacto B6
+excede el contrato escrito de E2b-1. No se inventó esa autoridad, no se
+reactivó `/motor/dispatch` y no se agregó una ruta paralela. Se conserva la
+evidencia en este PR para que el contrato de ejecución de Pipeline se resuelva
+antes de integrar biblioteca accesible desde modelos.
+
+- **Código funcional, EXPLAIN y carga:** no ejecutados; el punto de integración
+  gobernado requerido no existe en el checkout desplegado.
+- **Producción:** solo se consultaron estado de servicios, revisiones/archivos
+  desplegados y registros del servicio. No se escribió en producción ni se usó
+  `jax_memory` para pruebas.
+
 ## Procedencia de auditoría
 
 Auditoría de escalón 3 de solo lectura, invocada en esta sesión sobre el mismo
