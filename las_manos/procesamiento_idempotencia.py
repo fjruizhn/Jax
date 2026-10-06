@@ -96,6 +96,8 @@ SQL_TOMAR = (f"UPDATE {NOMBRE_TABLA} SET job_id = %s, creado_en = NOW(6) "
 SQL_TOMAR_FALLIDO = (f"UPDATE {NOMBRE_TABLA} SET job_id = %s, confirmado = 0, creado_en = NOW(6) "
                      "WHERE id = %s AND job_id = %s")
 SQL_CONFIRMAR = f"UPDATE {NOMBRE_TABLA} SET confirmado = 1 WHERE id = %s AND job_id = %s AND confirmado = 0"
+SQL_TIENE_CONFIRMADO = ("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() "
+                        "AND TABLE_NAME = %s AND COLUMN_NAME = 'confirmado'")
 # Tabla creada por una version anterior (sin la columna): se completa, repetible.
 SQL_AGREGAR_CONFIRMADO = (f"ALTER TABLE {NOMBRE_TABLA} ADD COLUMN IF NOT EXISTS confirmado TINYINT NOT NULL "
                           "DEFAULT 0 AFTER job_id")
@@ -167,7 +169,12 @@ async def init_tabla() -> None:
     async with jacobs_store.conexion(desechable=True) as conn:
         async with conn.cursor() as cur:
             await cur.execute(_DDL)
-            await cur.execute(SQL_AGREGAR_CONFIRMADO)
+            # Una tabla de una version anterior no trae `confirmado`. Se consulta ANTES del ALTER: con
+            # `ADD COLUMN IF NOT EXISTS` MariaDB deja un warning 1060 en cada arranque.
+            await cur.execute(SQL_TIENE_CONFIRMADO, (NOMBRE_TABLA,))
+            existe = (_valores(await cur.fetchone()))[0]
+            if not existe:
+                await cur.execute(SQL_AGREGAR_CONFIRMADO)
 
 
 def _valores(fila) -> tuple:

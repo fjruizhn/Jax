@@ -4422,14 +4422,15 @@ tiempo. Si el runner da otro número, manda el runner.
   y ahora exige idx_ejecutor_punto_host_respaldo. Medido local con las migraciones
   de jax-platform master: ese archivo 3 -> 5 passed. Los dos vistos en rojo contra
   el exportador viejo (a8de3fd: 2 failed / 3 passed).
-170 -> 209 el 2026-10-06 (idempotencia de POST /procesamiento/trabajos, rondas 1 a 3): +39 en el
-  archivo NUEVO las_manos/_procesamiento_idempotencia_db_test.py (28 pruebas + 11 casos de la tabla
-  compartida de contrato, ya con `rejected`), sumado a las dos listas del job (la que corre y la del piso).
-  Medido local, MariaDB 12.3.3 efimera propia dentro de su netns, CI=true: ese archivo 39 passed (x3).
-  Ronda 3 (columna `confirmado`, control registrado antes de confirmar, terminal sin tarea): 4 de las 6
-  pruebas nuevas vistas en rojo contra el codigo de la ronda 2 por ASERCION (no por AttributeError), y la
-  del log en rojo con el logger apagado. El total del job no se reproduce entero en local (hace falta el
-  esquema de jax-platform): 170 es el declarado de master + 39. Si el runner da otro numero, manda el runner.
+170 -> 215 el 2026-10-06 (idempotencia de POST /procesamiento/trabajos, rondas 1 a 4): +45 en el
+  archivo NUEVO las_manos/_procesamiento_idempotencia_db_test.py (34 pruebas + 11 casos de la tabla
+  compartida de contrato), sumado a las dos listas del job (la que corre y la del piso). Medido local,
+  MariaDB 12.3.3 efimera propia dentro de su netns, CI=true: ese archivo 45 passed. Ronda 4 (almacen sin
+  integridad, confirmado+ausente = desconocido, CAS demorados, reintento tras failed de punta a punta,
+  cancelacion que se propaga, init_tabla sin warning): los mutantes «siempre tomar_fallido», «tomar_fallido no
+  reinicia confirmado», «sin chequeo de integridad» y «confirmado+ausente se retoma» mueren cada uno con su
+  prueba. El total del job no se reproduce entero en local (hace falta el esquema de jax-platform): 170 es el
+  declarado de master + 45. Si el runner da otro numero, manda el runner.
 ```
 
 ## `permisos-proyectos/permisos_proyectos`

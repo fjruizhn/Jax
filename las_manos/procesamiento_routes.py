@@ -703,6 +703,11 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
     # Idempotencia (1/2): un reenvio de un pedido YA aceptado solo lee. Va antes del freno de extractores, de
     # la base de proyectos y del cupo: devolver el trabajo que ya existe no necesita nada de eso, y un
     # 429/503 aqui haria reintentar al llamador (duplicando el OCR) por algo que ya esta hecho.
+    if clave is not None and not _STORE.authoritative_history_intact:
+        # Con clave y el almacen sin integridad (ENOSPC, linea truncada) `authoritative_snapshot` devuelve None
+        # para todo: no se reclama ni se retoma nada. 503 reintentable, ANTES de tocar la tabla de claves.
+        logger.error("idempotencia: el almacen de trabajos perdio la integridad; se rechaza el pedido con clave")
+        raise HTTPException(status_code=503, detail={"code": "procesamiento_no_disponible"})
     identidad = request.scope.get("state", {}).get("identidad_servicio", "")
     huella = None
     if clave is not None:
@@ -808,10 +813,18 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
         raise
 
 
+_LIBERACIONES: set = set()
+
+
 async def _liberar_reclamo(identidad: str, clave: str, job_id: str) -> None:
+    """Devuelve el reclamo (solo si sigue siendo de `job_id`). La liberacion corre en una tarea propia y protegida:
+    si el pedido se cancela mientras espera, la cancelacion SE PROPAGA (no se traga) y el reclamo se libera igual."""
+    tarea = asyncio.ensure_future(idempotencia.liberar(identidad, clave, job_id))
+    _LIBERACIONES.add(tarea)
+    tarea.add_done_callback(_LIBERACIONES.discard)
     try:
-        await asyncio.shield(idempotencia.liberar(identidad, clave, job_id))
-    except BaseException:  # fail-soft: si no se pudo liberar, el reclamo queda huerfano y el reintento lo retoma pasada la gracia
+        await asyncio.shield(tarea)
+    except Exception:  # fail-soft: si no se pudo liberar, el reclamo queda huerfano y el reintento lo retoma pasada la gracia
         logger.warning("idempotencia: no se pudo liberar el reclamo del trabajo %s", job_id, exc_info=True)
 
 
@@ -855,7 +868,19 @@ async def _reenvio_de(reclamo, huella: str, ownership, clave: str) -> JSONRespon
     409 si la clave es de otro pedido; 503 reintentable si el trabajo puede estarse creando ahora."""
     if reclamo.solicitud_hash != huella:
         raise HTTPException(status_code=409, detail={"code": "idempotency_key_reuse"})
+    if not _STORE.authoritative_history_intact:
+        # Sin integridad el almacen contesta None para TODO (ENOSPC, ultima linea truncada): no se sabe cuales
+        # trabajos existen y retomar uno confirmado y vivo duplicaria el OCR. Cerrado, y antes de decidir nada.
+        logger.error("idempotencia: el almacen de trabajos perdio la integridad; no se resuelve la clave %s",
+                     idempotencia.abreviar(clave))
+        raise HTTPException(status_code=503, detail={"code": "procesamiento_no_disponible"})
     instantanea = _STORE.authoritative_snapshot(reclamo.job_id)
+    if instantanea is None and reclamo.confirmado:
+        # Confirmado pero ausente: el trabajo EXISTIO (se creo antes de confirmar) y el almacen ya no lo muestra.
+        # No es un huerfano: es DESCONOCIDO. Retomarlo podria duplicar un trabajo vivo; se pide reintentar y se grita.
+        logger.error("idempotencia: la clave %s esta confirmada para el trabajo %s pero el almacen no lo conoce; "
+                     "estado DESCONOCIDO, no se retoma", idempotencia.abreviar(clave), reclamo.job_id)
+        raise HTTPException(status_code=503, detail={"code": "idempotencia_estado_desconocido"})
     if instantanea is None and reclamo.antiguedad_s < idempotencia.gracia_segundos():
         # La ganadora reclamo y esta creando el trabajo ahora mismo (milisegundos): se le espera un
         # momento y, si no aparece, 503 reintentable. Nunca se crea otro trabajo en su lugar.

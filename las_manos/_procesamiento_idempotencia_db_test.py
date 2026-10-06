@@ -586,12 +586,16 @@ def test_el_cas_del_reintento_demorado_no_deja_dos_trabajos_vivos(ruta, monkeypa
     app, almacen, ejecutar = ruta
     monkeypatch.setenv("JAX_PROCESAMIENTO_IDEMPOTENCIA_GRACIA_SEGUNDOS", "1")
     _lento_tras_ganar(monkeypatch, 1.6)
-    real_tomar = idem.tomar_huerfana
 
-    async def tomar_lento(*a, **k):
-        await asyncio.sleep(0.6)
-        return await real_tomar(*a, **k)
-    monkeypatch.setattr(idem, "tomar_huerfana", tomar_lento)
+    def demorado(real_cas):
+        async def cas_lento(*a, **k):
+            await asyncio.sleep(0.6)
+            return await real_cas(*a, **k)
+        return cas_lento
+    # LOS DOS CAS (huerfano y fallido): un reintento que usara siempre `tomar_fallido`, que no exige confirmado=0,
+    # robaria el reclamo ya confirmado de la ganadora lenta y dejaria dos trabajos vivos.
+    monkeypatch.setattr(idem, "tomar_huerfana", demorado(idem.tomar_huerfana))
+    monkeypatch.setattr(idem, "tomar_fallido", demorado(idem.tomar_fallido))
 
     async def todo():
         await idem.init_tabla()
@@ -736,10 +740,8 @@ def test_cancelar_el_pedido_durante_la_confirmacion_no_deja_un_trabajo_pending(r
         await idem.init_tabla()
         clave = _clave()
         try:
-            try:
+            with pytest.raises(asyncio.CancelledError):      # la cancelacion SE PROPAGA, no se traga
                 await _post(app, clave, "a.pdf")
-            except BaseException:   # noqa: BLE001 - lo que nos importa es el estado que quedo
-                pass
             tras = (dict(almacen._index), dict(rutas_mod._CONTROLES), rutas_mod._SEMAFORO_TRABAJOS._value,
                     await _filas(clave))
             abortar["si"] = False
@@ -750,6 +752,159 @@ def test_cancelar_el_pedido_durante_la_confirmacion_no_deja_un_trabajo_pending(r
     assert [j["status"] for j in indice.values()] and all(j["status"] in ("failed", "cancelled") for j in indice.values())
     assert controles == {} and cupo == 4 and filas == []
     assert r2.status_code == 202
+
+
+def test_confirmado_luego_failed_y_reintento_programa_un_trabajo_nuevo_de_punta_a_punta(ruta):
+    """El trabajo se creo y confirmo (confirmado=1), despues fallo (p. ej. LAS MANOS se reinicio) y el llamador, que
+    nunca supo su job_id, reintenta con la misma clave: el trabajo NUEVO tiene que confirmar y PROGRAMAR su OCR.
+    Si `tomar_fallido` no reiniciara `confirmado`, la confirmacion del trabajo nuevo fallaria y se cancelaria
+    sin programar nada (el documento quedaria sin procesar)."""
+    app, almacen, ejecutar = ruta
+
+    async def todo():
+        await idem.init_tabla()
+        clave = _clave()
+        try:
+            r1 = await _post(app, clave, "a.pdf")
+            almacen.update(r1.json()["job_id"], status="failed", error="reinicio")
+            r2 = await _post(app, clave, "a.pdf")
+            r3 = await _post(app, clave, "a.pdf")
+            return r1, r2, r3, await _filas(clave)
+        finally:
+            await _borrar(clave)
+    r1, r2, r3, filas = asyncio.run(todo())
+    assert (r1.status_code, r2.status_code, r3.status_code) == (202, 202, 202)
+    nuevo = r2.json()["job_id"]
+    assert nuevo != r1.json()["job_id"] and r3.json()["job_id"] == nuevo and filas[0][1] == nuevo
+    assert ejecutar.await_count == 2, "el trabajo nuevo SI programo su OCR"
+    assert almacen._index[nuevo]["status"] not in ("cancelled", "failed")
+
+
+def _con_almacen_sin_integridad(tmp_path):
+    ruta_jsonl = tmp_path / "jobs.jsonl"
+    ruta_jsonl.write_bytes(b'{"job_id": "x", "status": "pend')               # ultima linea truncada, sin \n
+    almacen = ProcessingJobStore(str(ruta_jsonl))
+    assert almacen.authoritative_history_intact is False
+    return almacen
+
+
+def test_sin_integridad_del_almacen_un_pedido_con_clave_da_503_antes_de_reclamar(ruta, tmp_path, monkeypatch):
+    """A11 / MAJOR-1: con la historia truncada `authoritative_snapshot` devuelve None para todo. Con clave no se
+    reclama nada (ni siquiera una fila en la tabla) y no se programa OCR; sin clave sigue el camino de siempre."""
+    app, _almacen, ejecutar = ruta
+    monkeypatch.setattr(rutas_mod, "_STORE", _con_almacen_sin_integridad(tmp_path))
+
+    async def todo():
+        await idem.init_tabla()
+        clave = _clave()
+        try:
+            return await _post(app, clave, "a.pdf"), await _filas(clave)
+        finally:
+            await _borrar(clave)
+    r, filas = asyncio.run(todo())
+    assert r.status_code == 503 and r.json()["detail"]["code"] == "procesamiento_no_disponible", r.text
+    assert filas == [] and ejecutar.await_count == 0
+
+
+def test_a11c_perder_la_integridad_despues_de_crear_no_duplica_el_ocr(ruta, caplog):
+    """A11c: el trabajo se crea y confirma con el almacen sano; despues el almacen pierde la integridad y la
+    gracia vence una y otra vez con el llamador reintentando. Antes: un trabajo nuevo por reintento (5 OCR).
+    Ahora: 503 siempre, 1 solo OCR."""
+    app, almacen, ejecutar = ruta
+    caplog.set_level(logging.ERROR, logger="procesamiento_routes")
+
+    async def todo():
+        await idem.init_tabla()
+        clave = _clave()
+        try:
+            r1 = await _post(app, clave, "a.pdf")
+            almacen._history_integrity = False
+            salidas = []
+            for _ in range(4):
+                await _envejecer(clave, idem.gracia_segundos() + 30)
+                salidas.append(await _post(app, clave, "a.pdf"))
+            return r1, salidas
+        finally:
+            await _borrar(clave)
+    r1, salidas = asyncio.run(todo())
+    assert r1.status_code == 202 and all(r.status_code == 503 for r in salidas), [r.text for r in salidas]
+    assert ejecutar.await_count == 1
+    assert [t for t in caplog.records if "integridad" in t.getMessage()]
+
+
+def test_confirmado_pero_ausente_es_desconocido_y_nunca_se_retoma(ruta, caplog):
+    """MAJOR-1: confirmado=1 con el job_id ausente del almacen (sano) no es un huerfano: 503, error en el log y
+    ni un trabajo nuevo."""
+    app, almacen, ejecutar = ruta
+    caplog.set_level(logging.ERROR, logger="procesamiento_routes")
+
+    async def todo():
+        await idem.init_tabla()
+        clave = _clave()
+        try:
+            fantasma = str(uuid.uuid4())
+            r = await idem.reclamar(IDENTIDAD_PLATAFORMA, clave, _hash("a.pdf"), fantasma)
+            assert await idem.confirmar(r.id, fantasma)
+            await _envejecer(clave, idem.gracia_segundos() + 30)
+            return await _post(app, clave, "a.pdf"), fantasma, await _filas(clave)
+        finally:
+            await _borrar(clave)
+    r, fantasma, filas = asyncio.run(todo())
+    assert r.status_code == 503 and r.json()["detail"]["code"] == "idempotencia_estado_desconocido", r.text
+    assert filas == [(IDENTIDAD_PLATAFORMA, fantasma)] and len(almacen._index) == 0 and ejecutar.await_count == 0
+    assert [t for t in caplog.records if t.levelno == logging.ERROR and "DESCONOCIDO" in t.getMessage()]
+
+
+def test_liberar_el_reclamo_no_traga_la_cancelacion_y_libera_igual(monkeypatch):
+    """`_liberar_reclamo` relanza el CancelledError del pedido y la liberacion termina de todos modos."""
+    real = idem.liberar
+    avance = {"termino": False}
+
+    async def todo():
+        await idem.init_tabla()
+        clave = _clave()
+        entro = asyncio.Event()
+        try:
+            await idem.reclamar(IDENTIDAD_PLATAFORMA, clave, _hash("a.pdf"), "job-z")
+
+            async def liberar_lento(*a, **k):
+                entro.set()
+                await asyncio.sleep(0.3)
+                await real(*a, **k)
+                avance["termino"] = True
+            monkeypatch.setattr(idem, "liberar", liberar_lento)
+            tarea = asyncio.ensure_future(rutas_mod._liberar_reclamo(IDENTIDAD_PLATAFORMA, clave, "job-z"))
+            await entro.wait()
+            tarea.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await tarea
+            await asyncio.sleep(0.6)
+            return await _filas(clave)
+        finally:
+            await _borrar(clave)
+    assert asyncio.run(todo()) == [] and avance["termino"] is True
+
+
+def test_init_tabla_no_deja_warning_de_columna_duplicada_y_migra_una_tabla_vieja():
+    import warnings
+
+    async def sql(q):
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q)
+
+    async def todo():
+        await idem.init_tabla()
+        await sql(f"ALTER TABLE {idem.NOMBRE_TABLA} DROP COLUMN confirmado")      # tabla de la ronda 2
+        with warnings.catch_warnings(record=True) as primera:
+            warnings.simplefilter("always")
+            await idem.init_tabla()                                              # la agrega
+        with warnings.catch_warnings(record=True) as segunda:
+            warnings.simplefilter("always")
+            await idem.init_tabla()                                              # ya esta: ni ALTER ni warning
+        return primera, segunda
+    primera, segunda = asyncio.run(todo())
+    assert not [w for w in primera + segunda if "confirmado" in str(w.message) or "Duplicate" in str(w.message)]
 
 
 def test_si_crear_el_trabajo_falla_el_reclamo_se_libera(ruta):
