@@ -803,7 +803,7 @@ en el runner con `AssertionError: 0 != 3` — admitió cero — y en local daba 
 - **Llamadores reales (grep en jax y jax-platform + journal de 7 días de `jax-las-manos`):** jax-platform
   (`api/pipelines.py`: crear, leer, results, resume, cancel; `jax_engine/state.py`: sondeo de pipelines y `/health`;
   `api/chat.py`: `/motor/authorize-facet`; tablero: `/health`) y Jacobs dentro del propio proceso
-  (`jacobs/executor.py`: `/motor/dispatch`, `/motor/job/{id}`, `/cancel`). **Nadie** llama `/execute`, `/plan` de LAS
+  (`jacobs/executor.py`: `/motor/dispatch`, `/motor/job/{id}`, `/cancel` -- **medición fechada 2026-09-17, ya no vigente:** desde el cierre de #362 (2026-10-06) `jacobs/executor.py` no hace ningún pedido HTTP a LAS MANOS y la identidad `jacobs` solo conserva `POST /jacobs/pipeline`). **Nadie** llama `/execute`, `/plan` de LAS
   MANOS, `/audit/tail` ni `approve-step` (la UI de hoy no aprueba pasos en gate: sólo `resume`). El REPL no llama a
   LAS MANOS. El proxy del Ejecutor tampoco.
 - **DECISIÓN (autonomía de Fernando, 2026-09-17): credencial de servicio, no SO_PEERCRED.** Hyde, jax-platform y LAS
