@@ -36,3 +36,22 @@ puerto = 58291
 machine_id = "ee090efa28cd46a7a0bff22d34e57eb4"
 sudo = true
 descripcion = "bridge (.20): hosting de clientes en producción."
+
+# Fase 4b (ensayo del cutover de .20, ~/ejecutor-producto/fase4b-plan.md, M-3):
+# VMs DESECHABLES en la red aislada `ensayo-4b` (192.168.160.0/24, sin salida).
+# machine-id nuevos y fijos, escritos en el disco ANTES del primer arranque.
+# Existen solo durante la ventana del ensayo; al cerrarla se destruyen y estas dos
+# entradas se quitan por PR. Tienen DATOS DE CLIENTES (copia de .20 y clon de prod).
+[prod-ensayo]
+ip = "192.168.160.10"
+puerto = 58291
+machine_id = "a4e6f9e409754b768cc46e40fa2e3596"
+sudo = true
+descripcion = "prod-ensayo (192.168.160.10): clon desechable de prod (aaPanel), DESTINO del ensayo de la migración de .20. Solo existe durante la ventana del ensayo (4b el 2026-10-03, 4c desde el 2026-10-06)."
+
+[bridge-ensayo]
+ip = "192.168.160.20"
+puerto = 58291
+machine_id = "5b4c65e9c2e5434f93cb14065f86bd45"
+sudo = true
+descripcion = "bridge-ensayo (192.168.160.20): VM desechable con el respaldo de .20 en solo lectura en /srv/respaldo-bridge, ORIGEN del ensayo. Solo existe durante la ventana del ensayo (4b el 2026-10-03, 4c desde el 2026-10-06)."
