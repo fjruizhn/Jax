@@ -1,7 +1,10 @@
 """Fail-closed differential bank. Run: python3 docs/ci/jax357-differential.py.txt MASTER_SHA CANDIDATE_SHA"""
 import argparse
+import ast
 import importlib.util
 import itertools
+import json
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -11,6 +14,11 @@ PARSER.add_argument("master_sha")
 PARSER.add_argument("candidate_sha")
 ARGS = PARSER.parse_args()
 SCANNER = "tests/test_docker_rm_sin_fuga_de_volumenes.py"
+WHITELIST = {
+    "volume", "network", "image", "context", "buildx", "plugin", "secret",
+    "config", "node", "service", "stack",
+}
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def load_at(name, revision, tempdir):
@@ -207,31 +215,98 @@ negative += [("python", repr(["docker", "compose"] + option.split() + subcommand
              for option in ("", "--profile prod", "--env-file .env")
              for subcommand in ("exec", "run svc")]
 
+auditor_cases = json.loads((ROOT / "docs/ci/jax357-auditor-cases.json").read_text())
+own_cases = [
+    ("shell", 'ssh "$HOST" "docker rm -f $C"'),
+    ("shell", 'bash -c "docker rm -f x"'),
+    ("shell", 'eval "docker rm -f $c"'),
+    ("shell", "su - svc -c 'docker rm -f x'"),
+    ("shell", "timeout 30 bash -lc 'docker rm -f x'"),
+    ("shell", "watch -n1 'docker rm -f x'"),
+    ("python", 'subprocess.run(\'ssh h "docker rm -f x"\', shell=True)'),
+    ("python", 'os.system("bash -c \'docker rm -f x\'")'),
+    ("python", '["ssh", host, "sh -c \'docker rm -f x\'"]'),
+    ("python", 'subprocess.run(f\'ssh {host} "docker rm -f {name}"\', shell=True)'),
+    ("python", 'cmd = \'sudo sh -c "docker rm -f x"\''),
+    ("shell", "docker $OPTS rm -f x"),
+    ("shell", 'docker "${args[@]}" rm -f x'),
+    ("shell", "docker compose $FILES rm -f svc"),
+    ("shell", "$DOCKER_CMD rm -f x"),
+    ("shell", "docker $SUBCOMMAND rm -f x"),
+    ("python", '["docker", *opts, "rm", "-f", n]'),
+    ("python", '[*docker, *global_opts, "rm", "-f", n]'),
+    ("python", 'cmd + ["rm", "-f", n]'),
+    ("python", '[*docker, "rm", "-f", n]'),
+    ("python", '["docker", "compose", *files, "rm", "-f"]'),
+    ("shell", "cat <<'EOF'\ndocker rm -f x\nEOF"),
+    ("shell", 'cat <<EOF\nssh host "docker rm -f x"\nEOF'),
+    ("shell", "docker rm -f x <<'EOF'\ntext\nEOF"),
+    ("shell", "cat <<'EOF'\ndocker volume rm -f v\nEOF"),
+    ("shell", "docker -Dl debug rm -f x"),
+    ("shell", "docker -DH tcp://x rm -f x"),
+    ("shell", "docker -DHtcp://x rm -f x"),
+    ("python", '["docker", "-Dl", "debug", "rm", "-f", n]'),
+    ("python", '["docker", "compose", "--workdir", "/x", "rm", "-f"]'),
+]
+assert len(own_cases) == 30
+
+
+def documented_whitelist_case(kind, source):
+    if kind == "shell":
+        tokens = source.replace("'", " ").replace('"', " ").split()
+        return any(
+            tokens[i] == "docker" and tokens[i + 1] in WHITELIST and tokens[i + 2] == "rm"
+            for i in range(len(tokens) - 2)
+        )
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    return any(
+        isinstance(node, (ast.List, ast.Tuple))
+        and any(
+            i >= 2
+            and isinstance(node.elts[i - 2], ast.Constant)
+            and node.elts[i - 2].value == "docker"
+            and isinstance(node.elts[i - 1], ast.Constant)
+            and node.elts[i - 1].value in WHITELIST
+            and isinstance(node.elts[i], ast.Constant)
+            and node.elts[i].value == "rm"
+            for i in range(len(node.elts))
+        )
+        for node in ast.walk(tree)
+    )
+
 with tempfile.TemporaryDirectory(prefix="jax357-differential-") as tempdir:
     master = load_at("master_scanner", ARGS.master_sha, tempdir)
     candidate = load_at("candidate_scanner", ARGS.candidate_sha, tempdir)
-    false_negatives = []
-    false_positives = []
-    master_false_positives = []
+    mismatches = []
+    exceptions = []
     master_marked = candidate_marked = 0
-    for kind, source in positive + negative:
-        expected = (kind, source) in positive
+    cases = [(kind, source, "pr") for kind, source in positive + negative]
+    cases += [(item["kind"], item["source"], item["origin"]) for item in auditor_cases]
+    cases += [(kind, source, "codex-30") for kind, source in own_cases]
+    for kind, source, origin in cases:
         master_result = detect(master, kind, source)
         candidate_result = detect(candidate, kind, source)
         master_marked += master_result
         candidate_marked += candidate_result
-        if master_result and not expected:
-            master_false_positives.append((kind, source))
-        if candidate_result != expected:
-            (false_negatives if expected else false_positives).append((kind, source))
+        if master_result == candidate_result:
+            status = "MATCH"
+        elif master_result and not candidate_result and documented_whitelist_case(kind, source):
+            status = "WHITELIST"
+            exceptions.append((origin, kind, source))
+        else:
+            status = "LEAK" if master_result and not candidate_result else "NEW_MARK"
+            mismatches.append((origin, kind, source, status))
+        print(f"{status}\t{origin}\t{kind}\t{source!r}")
     print(f"master_sha={ARGS.master_sha} candidate_sha={ARGS.candidate_sha}")
-    print(f"positives={len(positive)} negatives={len(negative)} total={len(positive)+len(negative)}")
+    print(f"pr_cases={len(positive)+len(negative)} auditor_cases={len(auditor_cases)} own_cases={len(own_cases)} total={len(cases)}")
     print(f"master_marked={master_marked} candidate_marked={candidate_marked}")
-    print(f"candidate_false_negatives={len(false_negatives)} candidate_false_positives={len(false_positives)}")
-    print(f"master_false_positives={len(master_false_positives)}")
-    for kind, source in master_false_positives:
-        print(f"DOCUMENTED_MASTER_FALSE_POSITIVE {kind}: {source}")
-    for kind, source in false_negatives + false_positives:
-        print(f"CANDIDATE_MISMATCH {kind}: {source}")
-    if false_negatives or false_positives:
+    print(f"leaks={sum(item[3] == 'LEAK' for item in mismatches)} new_marks={sum(item[3] == 'NEW_MARK' for item in mismatches)} whitelist_exceptions={len(exceptions)}")
+    for origin, kind, source, status in mismatches:
+        print(f"MISMATCH {status} {origin} {kind}: {source!r}")
+    for origin, kind, source in exceptions:
+        print(f"DOCUMENTED_WHITELIST {origin} {kind}: {source!r}")
+    if mismatches:
         raise SystemExit(1)
