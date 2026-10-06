@@ -191,6 +191,52 @@ def test_health_sigue_publico():
 
 
 @pytest.mark.parametrize("metodo,ruta", [
+    ("post", "/execute"), ("get", "/audit/tail"), ("post", "/jacobs/ruta-nueva-de-manana"),
+    ("post", "/motor/dispatch"), ("get", "/motor/job/x"), ("post", "/motor/authorize-facet"),
+    ("get", "/jacobs/pipeline/p1"), ("post", "/jacobs/pipeline"), ("post", "/jacobs/plan"),
+    ("get", "/ruta-que-no-existe"),
+])
+def test_toda_ruta_no_publica_exige_credencial(metodo, ruta):
+    with TestClient(_app()) as c:
+        r = getattr(c, metodo)(ruta)
+    assert r.status_code == 401, (ruta, r.text)
+    assert r.json() == {"detail": {"code": auth_servicio.CODIGO_SIN_CREDENCIAL}}
+
+
+@pytest.mark.parametrize("identidad", [IDENTIDAD_PLATAFORMA, IDENTIDAD_JACOBS])
+def test_execute_y_audit_no_los_alcanza_ninguna_identidad(identidad):
+    """Sin llamador real (journal de 7 días + grep en jax y jax-platform): ni
+    `/execute` (staging sin gate para hyde) ni el log forense."""
+    with TestClient(_app()) as c:
+        assert c.post("/execute", headers=_h(identidad)).status_code == 403
+        assert c.get("/audit/tail", headers=_h(identidad)).status_code == 403
+
+
+def test_la_ruta_nueva_bajo_jacobs_es_solo_de_la_plataforma():
+    with TestClient(_app()) as c:
+        assert c.post("/jacobs/ruta-nueva-de-manana", headers=_h(IDENTIDAD_JACOBS)).status_code == 403
+        assert c.post("/jacobs/ruta-nueva-de-manana", headers=_h(IDENTIDAD_PLATAFORMA)).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+#  La identidad del cuerpo es la de la credencial
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("identidad,ruta,cuerpo", [
+    (IDENTIDAD_JACOBS, "/jacobs/pipeline", {"invoked_by": "plataforma"}),
+    (IDENTIDAD_JACOBS, "/jacobs/pipeline", {"invoked_by": "jax_local"}),
+    (IDENTIDAD_PLATAFORMA, "/jacobs/pipeline", {"invoked_by": "ada"}),
+    (IDENTIDAD_PLATAFORMA, "/motor/authorize-facet", {"caller": "jacobs", "facet": "kimi"}),
+    (IDENTIDAD_PLATAFORMA, "/jacobs/pipeline", {"invoked_by": ["plataforma"]}),
+])
+def test_declarar_otra_identidad_se_rechaza(identidad, ruta, cuerpo):
+    with TestClient(_app()) as c:
+        r = c.post(ruta, json=cuerpo, headers=_h(identidad))
+    assert r.status_code == 403, r.text
+    assert r.json() == {"detail": {"code": auth_servicio.CODIGO_IDENTIDAD_DECLARADA}}
+
+
+@pytest.mark.parametrize("metodo,ruta", [
     ("get", "/motor/job/j1"),
     ("post", "/motor/job/j1/cancel"),
 ])
