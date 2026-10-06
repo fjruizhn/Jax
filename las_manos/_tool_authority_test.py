@@ -855,6 +855,54 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
             assert result["decision"] == "rejected", (tool_name, result)
             assert (projects / rel).read_text() == "documento del proyecto\n"
 
+    async def test_write_file_git_commitea_bytes_autorizados_si_ruta_cambia_despues_de_replace(self):
+        safe = self.workspace / "safe"
+        safe.mkdir()
+        rel = Path("0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt")
+        safe_target = safe / rel
+        safe_target.parent.mkdir(parents=True)
+        safe_target.write_text("contenido previo seguro\n")
+        original_projects = self.workspace / "proyectos"
+        projects_target = original_projects / rel
+        projects_target.parent.mkdir(parents=True, exist_ok=True)
+        projects_target.write_text("SECRETO DEL PROYECTO\n")
+        moved_safe = self.workspace / "safe-original"
+        original_replace = tool_authority.os.replace
+        swapped = False
+
+        def replace_then_swap(src, dst, **kwargs):
+            nonlocal swapped
+            result = original_replace(src, dst, **kwargs)
+            if not swapped and kwargs.get("dst_dir_fd") is not None:
+                # La escritura por descriptor ya terminó. Reemplaza el nombre
+                # del directorio seguro por el árbol de proyectos antes de que
+                # la persistencia Git pueda volver a resolver el pathname.
+                safe.rename(moved_safe)
+                original_projects.rename(safe)
+                swapped = True
+            return result
+
+        try:
+            with patch.object(tool_authority.os, "replace", replace_then_swap):
+                result = await self._call(
+                    "write_file",
+                    {"path": f"safe/{rel.as_posix()}", "content": "bytes autorizados\n"},
+                )
+            assert swapped
+            assert result["decision"] == "executed", result
+            assert result["git_committed"] is True, result
+            assert (safe / rel).read_text() == "SECRETO DEL PROYECTO\n"
+            committed = subprocess.run(
+                ["git", "show", f"{result['git_sha']}:safe/{rel.as_posix()}"],
+                cwd=self.workspace, capture_output=True, text=True, check=True,
+            )
+            assert committed.stdout == "bytes autorizados\n", committed.stdout
+            assert "SECRETO DEL PROYECTO" not in committed.stdout
+        finally:
+            if swapped:
+                safe.rename(original_projects)
+                moved_safe.rename(safe)
+
     async def test_write_file_a_raiz_del_workspace_no_lanza(self):
         result = await self._call("write_file", {"path": ".", "content": "no"})
         assert result["decision"] in {"rejected", "execution_error"}, result

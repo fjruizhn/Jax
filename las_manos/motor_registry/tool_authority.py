@@ -45,6 +45,7 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -658,41 +659,92 @@ def _open_workspace_parent(path_str: str, projects_fd: int | None, *, create: bo
         raise
 
 
-def _git_commit_write(resolved: Path, *, job_id: str, tool_call_id: str) -> tuple[bool, str | None, str | None]:
-    """Commitea UN archivo (git add -- <path> puntual, nunca -A -- así un
-    commit del bucle no puede capturar trabajo a medias de Hyde escribiendo
-    en paralelo en otra parte del mismo workspace). Devuelve (ok, sha, error).
+def _git_commit_write(resolved: Path, *, content: str, job_id: str, tool_call_id: str) -> tuple[bool, str | None, str | None]:
+    """Commitea los bytes autorizados sin volver a leer el pathname.
 
-    Mensaje lleva job_id y tool_call_id -- traza el commit hasta la
-    iteración exacta del bucle que lo produjo (T1). Autor/committer fijos
-    vía -c, no ~/.gitconfig (distinguible de Fernando/Hyde).
+    El blob se crea desde `content`; un índice temporal parte del HEAD exacto
+    y actualiza solo esa entrada. Así un rename posterior al write no hace
+    que `git add` lea otro archivo. La referencia se avanza con compare-and-
+    swap para no pisar un commit concurrente.
 
-    Nunca lanza: un fallo de git (repo bloqueado, disco lleno) no debe
-    tumbar el job -- la escritura en disco YA ocurrió, fail-closed no es
-    retroactivo. El caller decide qué hacer con (ok=False, error=...)."""
+    Nunca lanza: el archivo ya fue escrito. El caller registra si no quedó
+    protegido por un commit.
+    """
     rel = resolved.relative_to(WORKSPACE_ROOT)
     base_cmd = ["git", "-C", str(WORKSPACE_ROOT), "-c", f"user.name={_GIT_AUTHOR_NAME}", "-c", f"user.email={_GIT_AUTHOR_EMAIL}"]
+    index_fd, index_path = tempfile.mkstemp(prefix="jax-tool-authority-index-")
+    os.close(index_fd)
+    env = os.environ.copy()
+    env["GIT_INDEX_FILE"] = index_path
+
+    def run(args: list[str], *, input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(base_cmd + args, capture_output=True, text=input_bytes is None,
+                              input=input_bytes, timeout=10, env=env)
+
     try:
-        add = subprocess.run(base_cmd + ["add", "--", str(rel)], capture_output=True, text=True, timeout=10)
-        if add.returncode != 0:
-            return False, None, f"git add falló: {add.stderr.strip()}"
-        commit = subprocess.run(
-            base_cmd + ["commit", "-m", f"tool_authority: write_file {rel} (job={job_id} tool_call={tool_call_id})"],
-            capture_output=True, text=True, timeout=10,
-        )
+        head = run(["rev-parse", "HEAD"])
+        if head.returncode != 0:
+            return False, None, f"git rev-parse HEAD falló: {head.stderr.strip()}"
+        parent_sha = head.stdout.strip()
+
+        blob = run(["hash-object", "-w", "--stdin"], input_bytes=content.encode("utf-8"))
+        if blob.returncode != 0:
+            return False, None, f"git hash-object falló: {blob.stderr.decode(errors='replace').strip()}"
+        blob_sha = blob.stdout.decode().strip()
+
+        read_tree = run(["read-tree", parent_sha])
+        if read_tree.returncode != 0:
+            return False, None, f"git read-tree falló: {read_tree.stderr.strip()}"
+        update = run(["update-index", "--add", "--cacheinfo", f"100644,{blob_sha},{rel}"])
+        if update.returncode != 0:
+            return False, None, f"git update-index falló: {update.stderr.strip()}"
+        tree = run(["write-tree"])
+        if tree.returncode != 0:
+            return False, None, f"git write-tree falló: {tree.stderr.strip()}"
+        old_tree = run(["rev-parse", f"{parent_sha}^{{tree}}"])
+        if old_tree.returncode == 0 and tree.stdout.strip() == old_tree.stdout.strip():
+            return True, parent_sha, None
+
+        hook_path_result = run(["config", "--path", "core.hooksPath"])
+        if hook_path_result.returncode == 0 and hook_path_result.stdout.strip():
+            hook_dir = Path(hook_path_result.stdout.strip())
+            if not hook_dir.is_absolute():
+                hook_dir = WORKSPACE_ROOT / hook_dir
+        else:
+            hook_dir_result = run(["rev-parse", "--git-path", "hooks"])
+            hook_dir = Path(hook_dir_result.stdout.strip()) if hook_dir_result.returncode == 0 else Path()
+            if not hook_dir.is_absolute():
+                hook_dir = WORKSPACE_ROOT / hook_dir
+        pre_commit = hook_dir / "pre-commit"
+        if pre_commit.is_file() and os.access(pre_commit, os.X_OK):
+            hook = subprocess.run([str(pre_commit)], cwd=WORKSPACE_ROOT, capture_output=True, text=True,
+                                  timeout=30, env=env)
+            if hook.returncode != 0:
+                return False, None, f"pre-commit rechazó la escritura: {hook.stderr.strip()}"
+
+        message = f"tool_authority: write_file {rel} (job={job_id} tool_call={tool_call_id})"
+        commit = run(["commit-tree", tree.stdout.strip(), "-p", parent_sha, "-m", message])
         if commit.returncode != 0:
-            # "nothing to commit" pasa si el contenido nuevo es IDÉNTICO al
-            # ya commiteado (el modelo reescribe lo mismo) -- no es un
-            # fallo real, el árbol ya refleja el estado deseado. Cualquier
-            # otro código de salida sí es un fallo real de git.
-            if "nothing to commit" in commit.stdout + commit.stderr:
-                head = subprocess.run(base_cmd + ["rev-parse", "HEAD"], capture_output=True, text=True, timeout=10)
-                return True, (head.stdout.strip() if head.returncode == 0 else None), None
-            return False, None, f"git commit falló: {commit.stderr.strip()}"
-        sha = subprocess.run(base_cmd + ["rev-parse", "HEAD"], capture_output=True, text=True, timeout=10)
-        return True, (sha.stdout.strip() if sha.returncode == 0 else None), None
+            return False, None, f"git commit-tree falló: {commit.stderr.strip()}"
+        commit_sha = commit.stdout.strip()
+        advance = run(["update-ref", "HEAD", commit_sha, parent_sha])
+        if advance.returncode != 0:
+            return False, None, f"git update-ref no pudo avanzar HEAD (cambio concurrente): {advance.stderr.strip()}"
+
+        # Refleja la entrada ya confirmada en el índice normal; cacheinfo no
+        # abre ni lee el pathname del workspace.
+        env.pop("GIT_INDEX_FILE", None)
+        staged = run(["update-index", "--add", "--cacheinfo", f"100644,{blob_sha},{rel}"])
+        if staged.returncode != 0:
+            logger.error("tool_authority: commit %s creado pero no se actualizó el índice local: %s", commit_sha, staged.stderr.strip())
+        return True, commit_sha, None
     except (subprocess.TimeoutExpired, OSError) as exc:
         return False, None, f"{type(exc).__name__}: {exc}"
+    finally:
+        try:
+            os.unlink(index_path)
+        except OSError:
+            pass
 
 
 async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Path, path_str: str, projects_fd: int | None, content: str, tool_call_id: str) -> dict:
@@ -750,7 +802,7 @@ async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Pat
         if parent_fd >= 0:
             os.close(parent_fd)
 
-    committed, sha, git_error = _git_commit_write(resolved, job_id=job_id, tool_call_id=tool_call_id)
+    committed, sha, git_error = _git_commit_write(resolved, content=content, job_id=job_id, tool_call_id=tool_call_id)
     if not committed:
         # T1: la escritura YA ocurrió (arriba) -- no se revierte de forma
         # retroactiva. Se declara el hueco explícito (sin protección de git

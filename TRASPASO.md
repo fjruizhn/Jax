@@ -14,9 +14,9 @@ Estado: implementación y pruebas focalizadas terminadas; falta auditoría adver
 - TDD rojo en master: los nuevos casos ejecutaban `read_file`/`write_file` sobre rutas de proyecto y symlink; el resolver compartido seguía aceptándolas.
 - Verde enfocado: 2 pruebas pytest, 8 subcasos.
 - Rojo carrera: la sustitución de `safe/` por symlink a `proyectos/` permitió lectura antes del cambio.
-- `las_manos/_tool_authority_test.py` + `las_manos/_procesamiento_routes_test.py`: 174 passed, 8 subtests; carreras cubierta para lectura/escritura, sustitución del propio `proyectos/` y `write_file(".")`.
+- `las_manos/_tool_authority_test.py` + `las_manos/_procesamiento_routes_test.py`: 175 passed, 8 subtests; cubre lectura/escritura bajo carrera y demuestra que Git confirma solo los bytes autorizados aunque el pathname pase a apuntar a `proyectos/` después de `os.replace`.
 - Suite `tests-puros`: 3578 passed, 3 skipped, 3 xfailed, 1 fallo ambiental ajeno: `test_arranque_real_no_colisiona_con_policy_de_la_raiz` no puede leer `/etc/jax/build/implementation-identity.json` con el usuario local. No se usó esta salida para fijar el piso CI.
-- Piso CI actualizado +5: `tests-puros/out` 3537 → 3542; `las_manos/_tool_authority_test.py` 66 → 71 contra `origin/master`; los 45 skips del runner no cambian.
+- Piso CI actualizado +6: `tests-puros/out` 3537 → 3543; `las_manos/_tool_authority_test.py` 66 → 72 contra `origin/master`; los 45 skips del runner no cambian.
 
 ## Límites y pendientes
 
