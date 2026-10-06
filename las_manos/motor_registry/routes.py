@@ -250,19 +250,25 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
     # Block 6: every catalog capability is governed in V1.  This legacy
     # transport endpoint must never consume a gate, create a job, or start a
     # worker; its request body is not an execution authority artifact.
+    correlacion = None
     if _B7_EVIDENCE_RECORDER is not None:
         try:
             _B7_EVIDENCE_RECORDER.record_governed_dispatch_denied()
         except Exception:  # fail-soft: legacy dispatch remains rejected if evidence persistence is unavailable.
             # No se traga en silencio: sin esta linea la evidencia B7 de una
-            # denegacion faltaria sin rastro. El identificador de correlacion
-            # permite buscar este fallo (y la denegacion que no quedo) en los
-            # logs; no se loguea nada del cuerpo del pedido.
+            # denegacion faltaria sin rastro. El MISMO identificador va en el log
+            # y en el cuerpo del 410: el operador une lo que vio el cliente con la
+            # evidencia que falto. No se loguea nada del cuerpo del pedido.
+            correlacion = uuid.uuid4().hex
             logger.exception(
                 "B7: no se pudo registrar la evidencia de /motor/dispatch denegado (410 se devuelve igual) correlacion=%s",
-                uuid.uuid4().hex,
+                correlacion,
             )
-    raise HTTPException(status_code=410, detail="GOVERNED_EXECUTION_REQUIRED")
+    if correlacion is None:
+        raise HTTPException(status_code=410, detail="GOVERNED_EXECUTION_REQUIRED")
+    # Solo cuando la evidencia fallo el cuerpo trae la correlacion; en el caso
+    # normal conserva su forma de siempre (el texto a secas).
+    raise HTTPException(status_code=410, detail={"code": "GOVERNED_EXECUTION_REQUIRED", "correlacion": correlacion})
 
 
 @router.post("/authorize-facet", response_model=FacetAuthorizeResponse)
