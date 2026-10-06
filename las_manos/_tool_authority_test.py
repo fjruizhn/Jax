@@ -87,6 +87,11 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(outside.unlink, missing_ok=True)
         (self.workspace / "escape_symlink.txt").symlink_to(outside)
 
+        proyecto = self.workspace / "proyectos" / "0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a" / "procesado" / "x"
+        proyecto.mkdir(parents=True)
+        (proyecto / "texto.txt").write_text("documento del proyecto\n")
+        (self.workspace / "alias_proyectos").symlink_to(self.workspace / "proyectos", target_is_directory=True)
+
         # GAP2 Fase4: write_file commitea -- el fixture necesita ser un repo
         # git real para probar el camino feliz de escritura sin mockear git.
         #
@@ -758,6 +763,36 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
         r = await self._call("read_file", {"path": "escape_symlink.txt"})
         assert r["decision"] == "rejected", r
         assert "escapa" in r["reason"], r
+
+    async def test_worker_rechaza_rutas_canonicas_bajo_proyectos_y_audita(self):
+        paths = (
+            "proyectos/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt",
+            "./proyectos/../proyectos/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt",
+            "proyectos//0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt",
+            "alias_proyectos/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt",
+        )
+        for path in paths:
+            for tool_name, args in (
+                ("read_file", {"path": path}),
+                ("write_file", {"path": path, "content": "no debe escribirse"}),
+            ):
+                with self.subTest(tool=tool_name, path=path):
+                    tool_authority.event_append.reset_mock()
+                    result = await self._call(tool_name, args)
+                    assert result["decision"] == "rejected", (tool_name, path, result)
+                    assert "proyectos" in result["reason"], result
+                    tool_authority.event_append.assert_awaited_once()
+                    event = tool_authority.event_append.await_args
+                    assert event.args[1] == "TOOL_CALL_REJECTED", event
+                    assert event.args[2]["tool_name"] == tool_name, event
+        assert (self.workspace / "proyectos/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt").read_text() == "documento del proyecto\n"
+
+    def test_jail_compartido_de_procesamiento_sigue_permitiendo_proyectos(self):
+        resolved, reason = tool_authority.resolve_jailed_path(
+            "proyectos/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt", []
+        )
+        assert reason is None, reason
+        assert resolved == (self.workspace / "proyectos/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt").resolve()
 
     # --- archivos ilegibles / binarios / grandes: NO son rechazos de autoridad ---
     async def test_archivo_no_existe_es_execution_error_no_rejected(self):

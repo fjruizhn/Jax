@@ -250,6 +250,14 @@ async def authorize_and_execute_tool_call(
             reason=jail_reason,
         )
 
+    if capability_key in {"file_read", "file_write"}:
+        projects_root = (WORKSPACE_ROOT / "proyectos").resolve(strict=False)
+        if resolved == projects_root or projects_root in resolved.parents:
+            return await _reject(
+                job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
+                reason=f"ruta restringida de proyectos: '{path_str}' resuelve dentro de '{projects_root}'",
+            )
+
     if tool_name == "write_file":
         content = args.get("content")
         if not isinstance(content, str):
