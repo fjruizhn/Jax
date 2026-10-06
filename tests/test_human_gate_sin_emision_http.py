@@ -340,6 +340,48 @@ def test_motor_dispatch_410_sin_falla_de_evidencia_no_loguea_error(motor, store_
     assert exc.value.detail == {"code": "GOVERNED_EXECUTION_REQUIRED", "correlacion": None, "evidencia_registrada": True}
 
 
+def test_motor_dispatch_410_registra_la_evidencia_fuera_del_event_loop(motor, store_falso, monkeypatch):
+    """El registrador es sincrono (toca disco/DB): tiene que correr en un hilo
+    aparte, no en el del loop. Con una llamada directa corre en el hilo del loop."""
+    import threading
+    from fastapi import HTTPException
+    routes, _ = motor
+    hilos = {}
+
+    class Registrador:
+        def record_governed_dispatch_denied(self):
+            hilos["registrador"] = threading.get_ident()
+
+    monkeypatch.setattr(routes, "_B7_EVIDENCE_RECORDER", Registrador())
+
+    async def correr():
+        hilos["loop"] = threading.get_ident()
+        with pytest.raises(HTTPException):
+            await routes.dispatch(_pedido("cualquier-cosa"))
+
+    asyncio.run(correr())
+    assert hilos["registrador"] != hilos["loop"]
+
+
+def test_motor_dispatch_410_sin_registrador_loguea_la_correlacion_del_cuerpo(motor, store_falso, monkeypatch, caplog):
+    import logging
+    import re
+    from fastapi import HTTPException
+    routes, lanzado = motor
+    monkeypatch.setattr(routes, "_B7_EVIDENCE_RECORDER", None)
+    with caplog.at_level(logging.ERROR, logger=routes.logger.name):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(routes.dispatch(_pedido("cualquier-cosa")))
+    cuerpo = exc.value.detail
+    assert exc.value.status_code == 410
+    assert cuerpo["evidencia_registrada"] is False
+    registros = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(registros) == 1
+    m = re.search(r"correlacion=([0-9a-f]{32})", registros[0].getMessage())
+    assert m and cuerpo["correlacion"] == m.group(1)
+    lanzado.assert_not_called()
+
+
 def test_motor_dispatch_con_token_emitido_pasa_y_lo_consume(motor, store_falso):
     routes, _ = motor
     store = store_falso

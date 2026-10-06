@@ -1,7 +1,7 @@
 """
 LAS MANOS — Motor Registry: endpoints HTTP.
 
-POST /motor/dispatch           — crea un job (pasa por policy, falla cerrado)
+POST /motor/dispatch           — legacy: siempre responde 410 (no crea job; la ejecucion es gobernada)
 GET  /motor/job/{job_id}       — consulta estado de un job
 POST /motor/job/{job_id}/cancel — solicita cancelación
 
@@ -260,7 +260,14 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
     # `correlacion` = hex si la evidencia NO quedo registrada y null si quedo.
     registrada = False
     correlacion = uuid.uuid4().hex
-    if _B7_EVIDENCE_RECORDER is not None:
+    if _B7_EVIDENCE_RECORDER is None:
+        # Sin registrador no hay evidencia: el cuerpo ofrece una correlacion, asi que
+        # tiene que existir tambien en el log.
+        logger.error(
+            "B7: sin registrador de evidencia para /motor/dispatch denegado (410 se devuelve igual) correlacion=%s",
+            correlacion,
+        )
+    else:
         try:
             await asyncio.to_thread(_B7_EVIDENCE_RECORDER.record_governed_dispatch_denied)
             registrada = True
