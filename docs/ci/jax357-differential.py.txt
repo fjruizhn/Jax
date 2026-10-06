@@ -236,6 +236,14 @@ RONDA9_MARCAS += [
     ("shell", "docker rm -f $(case $x in a) echo -v;; esac)"),
     ("shell", "docker rm -f $(docker ps -aq) -v"),
 ]
+# Ronda 11: `&` entre comillas, escapado o en una expansion no corta (master tampoco corta ahi).
+RONDA9_MARCAS += [
+    ("shell", "docker -H 'ssh://h?x&y' rm -f c"),
+    ("shell", 'docker rm "a&b" c1 -f'),
+    ("shell", "docker rm ${ids//&/ } -f"),
+    ("shell", "docker rm a\\&b -f"),
+    ("python", 'x = "docker rm ${ids//&/ } -f"'),
+]
 positive += RONDA9_MARCAS
 RONDA7_LIMPIOS = []  # los de la ronda 7 pasaron a ser falsos positivos aceptados (ronda 8)
 positive += [("python", source) for source in RONDA7_MARCAS]
