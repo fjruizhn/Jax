@@ -31,7 +31,6 @@ from config_entorno import ruta_absoluta_requerida, url_requerida
 # JAX_WORKSPACE_DIR sin default: jax/core/workspace_dir.py por symlink en las_manos/.
 from workspace_dir import workspace_dir
 from cliente_http_compartido import obtener_cliente_http
-from auth_servicio import IDENTIDAD_JACOBS, encabezado_propio
 from jacobs.models import HTTP_FACETS as _HTTP_FACETS
 from jacobs.models import MOTOR_FACETS as _MOTOR_FACETS
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus, faceta_ejecutable_en_pipeline
@@ -47,7 +46,6 @@ logger = logging.getLogger("jacobs.executor")
 
 # E-21 (2026-09-16): del entorno, validadas al importar. Sin ellas LAS MANOS no
 # arranca (EntornoInvalido en el journal) en vez de apuntar a un host fijo.
-LAS_MANOS_BASE = url_requerida("LAS_MANOS_URL")
 OLLAMA_URL     = url_requerida("JAX_OLLAMA_URL") + "/api/chat"
 
 # E-22 (2026-09-16): `documents/` dentro de JAX_REPO_BASE, la MISMA variable

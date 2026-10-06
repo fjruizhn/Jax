@@ -309,18 +309,26 @@ def test_server_instala_la_proteccion_al_importar():
 
 
 def test_jacobs_ya_no_hace_ningun_pedido_http_a_las_manos():
-    """Pipeline no despacha motores directamente (despacho legacy cerrado, 410):
-    el ultimo pedido a LAS MANOS era la cancelacion de un motor job, borrada con
-    el resto del codigo muerto. Si vuelve un pedido, vuelve con ejecucion
-    gobernada y esta prueba se reescribe a proposito (credencial incluida)."""
-    arbol = ast.parse((RAIZ / "jacobs" / "executor.py").read_text(encoding="utf-8"))
-    pedidos = [
-        ast.unparse(n) for n in ast.walk(arbol)
-        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-            and n.func.attr in {"get", "post", "put", "delete"} and n.args
-            and "LAS_MANOS_BASE" in ast.unparse(n.args[0]))
-    ]
-    assert pedidos == []
+    """Pipeline no despacha motores directamente (despacho legacy cerrado, 410): el
+    ultimo pedido a LAS MANOS era la cancelacion de un motor job, borrada con el
+    resto del codigo muerto. Se fija el comportamiento, no una constante: ningun
+    modulo de jacobs/ hace un pedido HTTP que apunte a LAS MANOS ni presenta su
+    credencial. Si vuelve un pedido, vuelve con ejecucion gobernada y esta prueba
+    se reescribe a proposito."""
+    hallazgos = []
+    for p in sorted((RAIZ / "jacobs").glob("*.py")):
+        if p.name.endswith("_test.py"):
+            continue
+        fuente = p.read_text(encoding="utf-8")
+        for n in ast.walk(ast.parse(fuente)):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr in {"get", "post", "put", "delete", "request", "stream"} and n.args):
+                destino = ast.unparse(n.args[0]).lower()
+                if any(m in destino for m in ("las_manos", "/motor/", "7777")):
+                    hallazgos.append(f"{p.name}:{n.lineno} {ast.unparse(n)[:80]}")
+        if "auth_servicio" in fuente or "encabezado_propio" in fuente:
+            hallazgos.append(f"{p.name}: usa la credencial de servicio de LAS MANOS")
+    assert hallazgos == []
 
 
 def test_encabezado_propio_sale_del_entorno_y_falla_cerrado(monkeypatch):
