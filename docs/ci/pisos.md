@@ -225,6 +225,8 @@ Sin historia anotada en el workflow.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^295 passed`
 
+295 -> 296 el 2026-10-06: +1 prueba de E2A confirma la exclusión mutua del workspace de datos contra un linked worktree. Medido en CI (`subpipeline-contrato-db`); se conserva el mínimo de tests corridos sin skips.
+
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 ```text
@@ -901,6 +903,9 @@ para conservar byte a byte el registro de la migración de pisos.
 ## `tests-puros/out`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
+
+3537 -> 3545 el 2026-10-06 (cerco de `proyectos/` para las herramientas de archivo del worker): +8 pruebas en `las_manos/_tool_authority_test.py` (rechazo auditado para rutas de proyecto, sustituciones concurrentes, persistencia Git desde los bytes autorizados, symlink final y carrera con el movimiento coordinado de carpetas hacia proyectos/, defensa de `write_file(".")` y no regresión del jail compartido de Procesamiento). El movimiento de carpetas de E2a-LACTOVI y read/write del worker comparten flock bajo `.git/project-tree.lock`. Delta medido contra `origin/master`: 66 -> 74 pruebas del archivo. El full-run local previo pasó 3578 con 3 skips y 3 xfails, pero una prueba falló porque el usuario del host no puede leer `/etc/jax/build/implementation-identity.json`; ese resultado no se usó para sustituir la medición del piso del runner (45 skips).
+3545 -> 3547 el 2026-10-06: +2 pruebas para corregir BLOCK de auditoría, verificando que linked worktrees comparten el inode del lock y que E2A bloquea el workspace de datos real, separado del checkout del código. `las_manos/_tool_authority_test.py`: 74 -> 75. El runner CI debe confirmar el conteo y conservar 45 skipped.
 
 3531 -> 3537 el 2026-10-06 (ronda 3 de #356; medido LOCAL por archivo con /srv/jax-prod, ~/claude-skills y ~/jax-platform tapados y confirmado con la suite completa del paso): `test_instalar_dropins_de_servicio.py` 11 -> 14 (+3: rechazo de filas de otro dueno) y `test_activacion_timers_b9.py` 9 -> 12 (+3: Monotonic=0, Realtime=n/a y SubState=running). 45 skipped no cambia.
 

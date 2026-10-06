@@ -35,6 +35,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -87,6 +88,11 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(outside.unlink, missing_ok=True)
         (self.workspace / "escape_symlink.txt").symlink_to(outside)
 
+        proyecto = self.workspace / "proyectos" / "0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a" / "procesado" / "x"
+        proyecto.mkdir(parents=True)
+        (proyecto / "texto.txt").write_text("documento del proyecto\n")
+        (self.workspace / "alias_proyectos").symlink_to(self.workspace / "proyectos", target_is_directory=True)
+
         # GAP2 Fase4: write_file commitea -- el fixture necesita ser un repo
         # git real para probar el camino feliz de escritura sin mockear git.
         #
@@ -127,6 +133,22 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
         for p in self._patchers:
             p.start()
         self.addCleanup(self._stop_patchers)
+
+    async def test_project_tree_lock_es_comun_entre_linked_worktrees(self):
+        from jax.core.project_tree_lock import abrir_project_tree_lock
+
+        linked = self.workspace.parent / f"{self.workspace.name}-linked"
+        self.addCleanup(shutil.rmtree, linked, ignore_errors=True)
+        subprocess.run(["git", "-C", str(self.workspace), "worktree", "add", "--detach", str(linked)],
+                       check=True, capture_output=True, text=True)
+        fd_main = abrir_project_tree_lock(self.workspace)
+        fd_linked = abrir_project_tree_lock(linked)
+        try:
+            assert os.fstat(fd_main).st_ino == os.fstat(fd_linked).st_ino
+            assert os.fstat(fd_main).st_dev == os.fstat(fd_linked).st_dev
+        finally:
+            os.close(fd_main)
+            os.close(fd_linked)
 
     def _stop_patchers(self):
         for p in self._patchers:
@@ -739,6 +761,13 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
         r = await self._call("read_file", {"path": "sub/../.env"})
         assert r["decision"] == "rejected", r
 
+        (self.workspace / "safe" / "subdir").mkdir(parents=True)
+        (self.workspace / "safe" / "secrets").mkdir()
+        (self.workspace / "safe" / "secrets" / "x").write_text("safe target")
+        (self.workspace / "alias_safe").symlink_to(self.workspace / "safe" / "subdir", target_is_directory=True)
+        r = await self._call("read_file", {"path": "alias_safe/../secrets/x"})
+        assert r["decision"] == "rejected", r
+
     async def test_case_variant_no_bypassa_ni_falsea_bloqueo(self):
         """.ENV/Secrets/ no coinciden con archivos reales en minúscula
         (filesystem case-sensitive) -- el resultado correcto es 'no
@@ -758,6 +787,219 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
         r = await self._call("read_file", {"path": "escape_symlink.txt"})
         assert r["decision"] == "rejected", r
         assert "escapa" in r["reason"], r
+
+    async def test_worker_rechaza_rutas_canonicas_bajo_proyectos_y_audita(self):
+        paths = (
+            "proyectos/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt",
+            "./proyectos/../proyectos/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt",
+            "proyectos//0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt",
+            "alias_proyectos/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt",
+        )
+        for path in paths:
+            for tool_name, args in (
+                ("read_file", {"path": path}),
+                ("write_file", {"path": path, "content": "no debe escribirse"}),
+            ):
+                with self.subTest(tool=tool_name, path=path):
+                    tool_authority.event_append.reset_mock()
+                    result = await self._call(tool_name, args)
+                    assert result["decision"] == "rejected", (tool_name, path, result)
+                    assert "proyectos" in result["reason"], result
+                    tool_authority.event_append.assert_awaited_once()
+                    event = tool_authority.event_append.await_args
+                    assert event.args[1] == "TOOL_CALL_REJECTED", event
+                    assert event.args[2]["tool_name"] == tool_name, event
+        assert (self.workspace / "proyectos/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt").read_text() == "documento del proyecto\n"
+
+    async def test_worker_rechaza_si_directorio_seguro_se_vuelve_symlink_a_proyectos(self):
+        original_resolve = tool_authority.resolve_jailed_path
+        for tool_name, safe_name, content in (
+            ("read_file", "read_safe", "no debe escribirse"),
+            ("write_file", "write_safe", "no debe escribirse"),
+        ):
+            path = f"{safe_name}/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt"
+            args = {"path": path} if tool_name == "read_file" else {"path": path, "content": content}
+            safe = self.workspace / safe_name
+            safe.mkdir()
+            (safe / "texto.txt").write_text("no secreto")
+
+            def resolve_y_cambia(path_str, forbidden_paths):
+                result = original_resolve(path_str, forbidden_paths)
+                safe.rename(self.workspace / f"safe-original-{safe_name}")
+                safe.symlink_to(self.workspace / "proyectos", target_is_directory=True)
+                return result
+
+            with patch.object(tool_authority, "resolve_jailed_path", resolve_y_cambia):
+                result = await self._call(tool_name, args)
+
+            assert result["decision"] == "rejected", (tool_name, result)
+            tool_authority.event_append.assert_awaited_with(
+                "test-job-id", "TOOL_CALL_REJECTED", unittest.mock.ANY,
+            )
+            assert (self.workspace / "proyectos/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt").read_text() == "documento del proyecto\n"
+
+    async def test_worker_rechaza_directorio_proyectos_renombrado_a_ruta_segura(self):
+        projects = self.workspace / "proyectos"
+        safe = self.workspace / "safe"
+        safe.mkdir()
+        rel = Path("0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt")
+        original_resolve = tool_authority.resolve_jailed_path
+
+        for tool_name in ("read_file", "write_file"):
+            safe_original = self.workspace / f"safe-original-{tool_name}"
+            projects_moved = False
+
+            def move_projects_after_resolve(path_str, forbidden_paths):
+                nonlocal projects_moved
+                result = original_resolve(path_str, forbidden_paths)
+                safe.rename(safe_original)
+                projects.rename(safe)
+                projects_moved = True
+                return result
+
+            def restore_projects():
+                if projects_moved:
+                    safe.rename(projects)
+                    safe_original.rename(safe)
+
+            path = f"safe/{rel.as_posix()}"
+            args = {"path": path} if tool_name == "read_file" else {"path": path, "content": "SOBRESCRITO"}
+            try:
+                with patch.object(tool_authority, "resolve_jailed_path", move_projects_after_resolve):
+                    result = await self._call(tool_name, args)
+            finally:
+                restore_projects()
+            assert result["decision"] == "rejected", (tool_name, result)
+            assert (projects / rel).read_text() == "documento del proyecto\n"
+
+    async def test_write_file_git_commitea_bytes_autorizados_si_ruta_cambia_despues_de_replace(self):
+        safe = self.workspace / "safe"
+        safe.mkdir()
+        rel = Path("0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt")
+        safe_target = safe / rel
+        safe_target.parent.mkdir(parents=True)
+        safe_target.write_text("contenido previo seguro\n")
+        original_projects = self.workspace / "proyectos"
+        projects_target = original_projects / rel
+        projects_target.parent.mkdir(parents=True, exist_ok=True)
+        projects_target.write_text("SECRETO DEL PROYECTO\n")
+        moved_safe = self.workspace / "safe-original"
+        original_replace = tool_authority.os.replace
+        swapped = False
+
+        def replace_then_swap(src, dst, **kwargs):
+            nonlocal swapped
+            result = original_replace(src, dst, **kwargs)
+            if not swapped and kwargs.get("dst_dir_fd") is not None:
+                # La escritura por descriptor ya terminó. Reemplaza el nombre
+                # del directorio seguro por el árbol de proyectos antes de que
+                # la persistencia Git pueda volver a resolver el pathname.
+                safe.rename(moved_safe)
+                original_projects.rename(safe)
+                swapped = True
+            return result
+
+        try:
+            with patch.object(tool_authority.os, "replace", replace_then_swap):
+                result = await self._call(
+                    "write_file",
+                    {"path": f"safe/{rel.as_posix()}", "content": "bytes autorizados\n"},
+                )
+            assert swapped
+            assert result["decision"] == "executed", result
+            assert result["git_committed"] is True, result
+            assert (safe / rel).read_text() == "SECRETO DEL PROYECTO\n"
+            committed = subprocess.run(
+                ["git", "show", f"{result['git_sha']}:safe/{rel.as_posix()}"],
+                cwd=self.workspace, capture_output=True, text=True, check=True,
+            )
+            assert committed.stdout == "bytes autorizados\n", committed.stdout
+            assert "SECRETO DEL PROYECTO" not in committed.stdout
+        finally:
+            if swapped:
+                safe.rename(original_projects)
+                moved_safe.rename(safe)
+
+    async def test_write_file_symlink_final_commitea_la_entrada_que_reemplaza(self):
+        target = self.workspace / "legit.txt"
+        alias = self.workspace / "alias_legit.txt"
+        original = target.read_text()
+        alias.symlink_to(target.name)
+
+        result = await self._call(
+            "write_file", {"path": "alias_legit.txt", "content": "alias nuevo\n"}
+        )
+
+        assert result["decision"] == "executed", result
+        assert result["git_committed"] is True, result
+        assert target.read_text() == original
+        assert alias.is_file() and not alias.is_symlink()
+        assert alias.read_text() == "alias nuevo\n"
+        committed = subprocess.run(
+            ["git", "show", f"{result['git_sha']}:alias_legit.txt"],
+            cwd=self.workspace, capture_output=True, text=True, check=True,
+        )
+        assert committed.stdout == "alias nuevo\n"
+        assert subprocess.run(
+            ["git", "show", f"{result['git_sha']}:legit.txt"],
+            cwd=self.workspace, capture_output=True, text=True, check=True,
+        ).stdout == original
+
+    async def test_movimiento_coordinado_a_proyectos_espera_a_que_termine_el_worker(self):
+        from jax.core.project_tree_lock import project_tree_lock
+
+        safe = self.workspace / "safe"
+        safe.mkdir()
+        project_destination = self.workspace / "proyectos" / "moved-safe"
+        mover_terminado = threading.Event()
+        original_replace = tool_authority.os.replace
+        mover_threads = []
+
+        def replace_then_start_coordinated_move(src, dst, **kwargs):
+            result = original_replace(src, dst, **kwargs)
+
+            def move_under_shared_lock():
+                with project_tree_lock(self.workspace):
+                    safe.rename(project_destination)
+                mover_terminado.set()
+
+            mover = threading.Thread(target=move_under_shared_lock)
+            mover_threads.append(mover)
+            mover.start()
+            return result
+
+        try:
+            with patch.object(tool_authority.os, "replace", replace_then_start_coordinated_move):
+                result = await self._call(
+                    "write_file", {"path": "safe/documento.txt", "content": "write completo\n"}
+                )
+            for mover in mover_threads:
+                mover.join(timeout=5)
+            assert mover_terminado.is_set(), "el movimiento no terminó después de liberar el lock"
+            assert result["decision"] == "executed" and result["git_committed"] is True, result
+            assert (project_destination / "documento.txt").read_text() == "write completo\n"
+            committed = subprocess.run(
+                ["git", "show", f"{result['git_sha']}:safe/documento.txt"],
+                cwd=self.workspace, capture_output=True, text=True, check=True,
+            )
+            assert committed.stdout == "write completo\n"
+        finally:
+            if project_destination.exists():
+                project_destination.rename(safe)
+            for mover in mover_threads:
+                if mover.is_alive():
+                    mover.join(timeout=5)
+
+    async def test_write_file_a_raiz_del_workspace_no_lanza(self):
+        result = await self._call("write_file", {"path": ".", "content": "no"})
+        assert result["decision"] in {"rejected", "execution_error"}, result
+
+    def test_jail_compartido_de_procesamiento_sigue_permitiendo_proyectos(self):
+        resolved, reason = tool_authority.resolve_jailed_path(
+            "proyectos/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt", []
+        )
+        assert reason is None, reason
+        assert resolved == (self.workspace / "proyectos/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt").resolve()
 
     # --- archivos ilegibles / binarios / grandes: NO son rechazos de autoridad ---
     async def test_archivo_no_existe_es_execution_error_no_rejected(self):

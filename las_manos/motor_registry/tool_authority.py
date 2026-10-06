@@ -39,6 +39,8 @@ En honor al Prof. Raúl Jacobs.
 """
 from __future__ import annotations
 
+import asyncio
+import fcntl
 import hashlib
 import json
 import logging
@@ -48,6 +50,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+from jax.core.project_tree_lock import abrir_project_tree_lock
 
 from jacobs.store import event_append
 try:
@@ -61,6 +64,10 @@ except ImportError:
 from motor_registry.catalog import MotorCatalog
 
 logger = logging.getLogger("motor_registry.tool_authority")
+
+
+class ForbiddenWorkspacePath(PermissionError):
+    """La ruta abierta cae en el árbol de proyectos o sale del workspace."""
 
 # JAX_WORKSPACE_DIR (/etc/jax/.env) es la única fuente de verdad -- mismo
 # valor que jacobs/executor.py::HYDE_WORKSPACE_DIR y
@@ -131,6 +138,21 @@ async def _execution_error(*, job_id: str, tool_name: str, caller: str, reason: 
     except Exception:  # fail-soft: mismo criterio que _reject
         logger.error("tool_authority: no se pudo registrar TOOL_CALL_EXECUTION_ERROR para job %s", job_id, exc_info=True)
     return {"tool_name": tool_name, "decision": "execution_error", "reason": reason, "content": None}
+
+
+async def _adquirir_project_tree_lock() -> int:
+    """Toma el lock sin bloquear el event loop y cierra el fd al cancelarse."""
+    fd = abrir_project_tree_lock(WORKSPACE_ROOT)
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError:
+                await asyncio.sleep(0.01)
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def resolve_jailed_path(path_str: str, forbidden_paths: list[str]) -> tuple[Path | None, str | None]:
@@ -243,26 +265,64 @@ async def authorize_and_execute_tool_call(
         )
 
     path_str = args.get("path")
-    resolved, jail_reason = resolve_jailed_path(path_str, cap.forbidden_paths)
-    if jail_reason is not None:
-        return await _reject(
-            job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
-            reason=jail_reason,
-        )
-
-    if tool_name == "write_file":
-        content = args.get("content")
-        if not isinstance(content, str):
+    project_tree_lock_fd = None
+    projects_fd = None
+    try:
+        if capability_key in {"file_read", "file_write"}:
+            try:
+                project_tree_lock_fd = await _adquirir_project_tree_lock()
+            except OSError as exc:
+                return await _reject(
+                    job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
+                    reason=f"no se pudo adquirir el candado del árbol de proyectos: {exc}",
+                )
+        try:
+            projects_fd = _open_projects_root_fd()
+        except OSError as exc:
             return await _reject(
                 job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
-                reason="falta 'content' (string) en los argumentos",
+                reason=f"no se pudo anclar el directorio protegido proyectos/: {exc}",
             )
-        return await _write_file(
-            job_id=job_id, tool_name=tool_name, caller=caller, resolved=resolved,
-            content=content, tool_call_id=tool_call_id,
-        )
 
-    return await _read_file(job_id=job_id, tool_name=tool_name, caller=caller, resolved=resolved)
+        resolved, jail_reason = resolve_jailed_path(path_str, cap.forbidden_paths)
+        if jail_reason is not None:
+            return await _reject(
+                job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
+                reason=jail_reason,
+            )
+
+        if capability_key in {"file_read", "file_write"}:
+            relative_parts = resolved.relative_to(WORKSPACE_ROOT).parts
+            # Rechazar sobre la ruta canónica y fijar proyectos_fd antes de
+            # resolverla; la ejecución también comprueba la identidad del
+            # árbol realmente abierto.
+            if relative_parts and relative_parts[0] == "proyectos":
+                return await _reject(
+                    job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
+                    reason=f"ruta restringida de proyectos: '{path_str}' resuelve dentro de 'proyectos/'",
+                )
+
+        if tool_name == "write_file":
+            content = args.get("content")
+            if not isinstance(content, str):
+                return await _reject(
+                    job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
+                    reason="falta 'content' (string) en los argumentos",
+                )
+            return await _write_file(
+                job_id=job_id, tool_name=tool_name, caller=caller, resolved=resolved,
+                path_str=path_str, projects_fd=projects_fd, content=content, tool_call_id=tool_call_id,
+            )
+
+        return await _read_file(job_id=job_id, tool_name=tool_name, caller=caller, resolved=resolved, path_str=path_str, projects_fd=projects_fd)
+    finally:
+        if projects_fd is not None:
+            os.close(projects_fd)
+        if project_tree_lock_fd is not None:
+            try:
+                fcntl.flock(project_tree_lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(project_tree_lock_fd)
 
 
 # --- Sobre fuente no confiable (contenido de read_file) ---
@@ -463,28 +523,32 @@ def _wrap_untrusted_source(rel: str, content: str) -> str:
     return f'<untrusted_source path="{safe_rel}" sha256="{sha}">\n{safe}\n</untrusted_source>'
 
 
-async def _read_file(*, job_id: str, tool_name: str, caller: str, resolved: Path) -> dict:
+async def _read_file(*, job_id: str, tool_name: str, caller: str, resolved: Path, path_str: str, projects_fd: int | None) -> dict:
     if not resolved.exists():
         return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason="archivo no encontrado")
     if resolved.is_dir():
         return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason="la ruta es un directorio, no un archivo")
 
     try:
-        size = resolved.stat().st_size
+        fd = _open_workspace_file(path_str, os.O_RDONLY, projects_fd)
+        with os.fdopen(fd, "rb") as source:
+            stat = os.fstat(source.fileno())
+            size = stat.st_size
+            raw = source.read(MAX_READ_BYTES + 1)
     except OSError as exc:
-        return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"no se pudo leer metadata del archivo: {exc}")
+        if isinstance(exc, ForbiddenWorkspacePath):
+            return await _reject(job_id=job_id, tool_name=tool_name, caller=caller, reason=str(exc))
+        if isinstance(exc, PermissionError):
+            return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason="sin permisos de lectura")
+        return await _reject(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"ruta cambió o contiene symlink durante la apertura segura: {exc}")
     if size > MAX_READ_BYTES:
         return await _execution_error(
             job_id=job_id, tool_name=tool_name, caller=caller,
             reason=f"archivo excede el límite de lectura ({size} bytes > {MAX_READ_BYTES})",
         )
 
-    try:
-        raw = resolved.read_bytes()
-    except PermissionError:
-        return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason="sin permisos de lectura")
-    except OSError as exc:
-        return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"error de OS al leer: {exc}")
+    if len(raw) > MAX_READ_BYTES:
+        return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"archivo excede el límite de lectura ({size} bytes > {MAX_READ_BYTES})")
 
     try:
         content = raw.decode("utf-8")
@@ -503,44 +567,226 @@ async def _read_file(*, job_id: str, tool_name: str, caller: str, resolved: Path
     return {"tool_name": tool_name, "decision": "executed", "reason": None, "content": wrapped, "bytes_read": size}
 
 
-def _git_commit_write(resolved: Path, *, job_id: str, tool_call_id: str) -> tuple[bool, str | None, str | None]:
-    """Commitea UN archivo (git add -- <path> puntual, nunca -A -- así un
-    commit del bucle no puede capturar trabajo a medias de Hyde escribiendo
-    en paralelo en otra parte del mismo workspace). Devuelve (ok, sha, error).
-
-    Mensaje lleva job_id y tool_call_id -- traza el commit hasta la
-    iteración exacta del bucle que lo produjo (T1). Autor/committer fijos
-    vía -c, no ~/.gitconfig (distinguible de Fernando/Hyde).
-
-    Nunca lanza: un fallo de git (repo bloqueado, disco lleno) no debe
-    tumbar el job -- la escritura en disco YA ocurrió, fail-closed no es
-    retroactivo. El caller decide qué hacer con (ok=False, error=...)."""
-    rel = resolved.relative_to(WORKSPACE_ROOT)
-    base_cmd = ["git", "-C", str(WORKSPACE_ROOT), "-c", f"user.name={_GIT_AUTHOR_NAME}", "-c", f"user.email={_GIT_AUTHOR_EMAIL}"]
+def _open_projects_root_fd() -> int | None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    root_fd = os.open(WORKSPACE_ROOT, flags)
     try:
-        add = subprocess.run(base_cmd + ["add", "--", str(rel)], capture_output=True, text=True, timeout=10)
-        if add.returncode != 0:
-            return False, None, f"git add falló: {add.stderr.strip()}"
-        commit = subprocess.run(
-            base_cmd + ["commit", "-m", f"tool_authority: write_file {rel} (job={job_id} tool_call={tool_call_id})"],
-            capture_output=True, text=True, timeout=10,
-        )
+        try:
+            return os.open("proyectos", flags, dir_fd=root_fd)
+        except FileNotFoundError:
+            return None
+    finally:
+        os.close(root_fd)
+
+
+def _same_directory(left_fd: int, right_fd: int) -> bool:
+    left, right = os.fstat(left_fd), os.fstat(right_fd)
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _inside_projects(directory_fd: int, projects_fd: int | None) -> bool:
+    if projects_fd is None:
+        return False
+    current = os.dup(directory_fd)
+    try:
+        for _ in range(128):
+            if _same_directory(current, projects_fd):
+                return True
+            parent = os.open("..", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0), dir_fd=current)
+            if _same_directory(current, parent):
+                os.close(parent)
+                return False
+            os.close(current)
+            current = parent
+        return True
+    finally:
+        os.close(current)
+
+
+def _path_components(path_str: str) -> tuple[str, ...]:
+    """Conserva `..` para recorrerlo con dirfd y no saltar symlinks léxicos."""
+    parts = tuple(component for component in Path(path_str).parts if component not in {"", "."})
+    if not parts:
+        raise IsADirectoryError(path_str)
+    return parts
+
+
+def _open_workspace_file(path_str: str, flags: int, projects_fd: int | None) -> int:
+    """Abre la ruta original con dirfd/O_NOFOLLOW, sin seguir symlinks."""
+    parts = _path_components(path_str)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    current = os.open(WORKSPACE_ROOT, directory_flags)
+    stack = [current]
+    try:
+        for index, component in enumerate(parts):
+            if component == "..":
+                if len(stack) == 1:
+                    raise ForbiddenWorkspacePath("la ruta sale del workspace")
+                os.close(stack.pop())
+                current = stack[-1]
+                continue
+            if len(stack) == 1 and component == "proyectos":
+                raise ForbiddenWorkspacePath("ruta restringida de proyectos")
+            has_more = any(part != ".." for part in parts[index + 1:])
+            if has_more:
+                next_fd = os.open(component, directory_flags, dir_fd=current)
+            else:
+                result_fd = os.open(component, flags | getattr(os, "O_NOFOLLOW", 0), dir_fd=current)
+                if _inside_projects(current, projects_fd):
+                    os.close(result_fd)
+                    raise ForbiddenWorkspacePath("la ruta abierta pertenece a proyectos/")
+                return result_fd
+            if _inside_projects(next_fd, projects_fd):
+                os.close(next_fd)
+                raise ForbiddenWorkspacePath("la ruta abierta pertenece a proyectos/")
+            stack.append(next_fd)
+            current = next_fd
+        raise IsADirectoryError(path_str)
+    finally:
+        for fd in stack:
+            os.close(fd)
+
+
+def _open_workspace_parent(path_str: str, projects_fd: int | None, *, create: bool = False) -> tuple[int, str, str]:
+    parts = _path_components(path_str)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    current = os.open(WORKSPACE_ROOT, directory_flags)
+    stack = [current]
+    rel_parts: list[str] = []
+    try:
+        for index, component in enumerate(parts[:-1]):
+            if component == "..":
+                if len(stack) == 1:
+                    raise ForbiddenWorkspacePath("la ruta sale del workspace")
+                os.close(stack.pop())
+                current = stack[-1]
+                rel_parts.pop()
+                continue
+            if len(stack) == 1 and component == "proyectos":
+                raise ForbiddenWorkspacePath("ruta restringida de proyectos")
+            try:
+                next_fd = os.open(component, directory_flags, dir_fd=current)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, dir_fd=current)
+                next_fd = os.open(component, directory_flags, dir_fd=current)
+            if _inside_projects(next_fd, projects_fd):
+                os.close(next_fd)
+                raise ForbiddenWorkspacePath("la ruta abierta pertenece a proyectos/")
+            stack.append(next_fd)
+            current = next_fd
+            rel_parts.append(component)
+        leaf = parts[-1]
+        if leaf == "..":
+            if len(stack) == 1:
+                raise ForbiddenWorkspacePath("la ruta sale del workspace")
+            os.close(stack.pop())
+            current = stack[-1]
+            raise IsADirectoryError(path_str)
+        if len(stack) == 1 and leaf == "proyectos":
+            raise ForbiddenWorkspacePath("ruta restringida de proyectos")
+        if _inside_projects(current, projects_fd):
+            raise ForbiddenWorkspacePath("la ruta abierta pertenece a proyectos/")
+        if leaf != "..":
+            rel_parts.append(leaf)
+        stack.pop()
+        return current, leaf, "/".join(rel_parts)
+    except BaseException:
+        for fd in stack:
+            os.close(fd)
+        raise
+
+
+def _git_commit_write(rel_path: str, *, content: str, job_id: str, tool_call_id: str) -> tuple[bool, str | None, str | None]:
+    """Commitea los bytes autorizados sin volver a leer el pathname.
+
+    El blob se crea desde `content`; un índice temporal parte del HEAD exacto
+    y actualiza solo esa entrada. Así un rename posterior al write no hace
+    que `git add` lea otro archivo. La referencia se avanza con compare-and-
+    swap para no pisar un commit concurrente.
+
+    Nunca lanza: el archivo ya fue escrito. El caller registra si no quedó
+    protegido por un commit.
+    """
+    rel = Path(rel_path)
+    base_cmd = ["git", "-C", str(WORKSPACE_ROOT), "-c", f"user.name={_GIT_AUTHOR_NAME}", "-c", f"user.email={_GIT_AUTHOR_EMAIL}"]
+    index_fd, index_path = tempfile.mkstemp(prefix="jax-tool-authority-index-")
+    os.close(index_fd)
+    env = os.environ.copy()
+    env["GIT_INDEX_FILE"] = index_path
+
+    def run(args: list[str], *, input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(base_cmd + args, capture_output=True, text=input_bytes is None,
+                              input=input_bytes, timeout=10, env=env)
+
+    try:
+        head = run(["rev-parse", "HEAD"])
+        if head.returncode != 0:
+            return False, None, f"git rev-parse HEAD falló: {head.stderr.strip()}"
+        parent_sha = head.stdout.strip()
+
+        blob = run(["hash-object", "-w", "--stdin"], input_bytes=content.encode("utf-8"))
+        if blob.returncode != 0:
+            return False, None, f"git hash-object falló: {blob.stderr.decode(errors='replace').strip()}"
+        blob_sha = blob.stdout.decode().strip()
+
+        read_tree = run(["read-tree", parent_sha])
+        if read_tree.returncode != 0:
+            return False, None, f"git read-tree falló: {read_tree.stderr.strip()}"
+        update = run(["update-index", "--add", "--cacheinfo", "100644", blob_sha, str(rel)])
+        if update.returncode != 0:
+            return False, None, f"git update-index falló: {update.stderr.strip()}"
+        tree = run(["write-tree"])
+        if tree.returncode != 0:
+            return False, None, f"git write-tree falló: {tree.stderr.strip()}"
+        old_tree = run(["rev-parse", f"{parent_sha}^{{tree}}"])
+        if old_tree.returncode == 0 and tree.stdout.strip() == old_tree.stdout.strip():
+            return True, parent_sha, None
+
+        hook_path_result = run(["config", "--path", "core.hooksPath"])
+        if hook_path_result.returncode == 0 and hook_path_result.stdout.strip():
+            hook_dir = Path(hook_path_result.stdout.strip())
+            if not hook_dir.is_absolute():
+                hook_dir = WORKSPACE_ROOT / hook_dir
+        else:
+            hook_dir_result = run(["rev-parse", "--git-path", "hooks"])
+            hook_dir = Path(hook_dir_result.stdout.strip()) if hook_dir_result.returncode == 0 else Path()
+            if not hook_dir.is_absolute():
+                hook_dir = WORKSPACE_ROOT / hook_dir
+        pre_commit = hook_dir / "pre-commit"
+        if pre_commit.is_file() and os.access(pre_commit, os.X_OK):
+            hook = subprocess.run([str(pre_commit)], cwd=WORKSPACE_ROOT, capture_output=True, text=True,
+                                  timeout=30, env=env)
+            if hook.returncode != 0:
+                return False, None, f"pre-commit rechazó la escritura: {hook.stderr.strip()}"
+
+        message = f"tool_authority: write_file {rel} (job={job_id} tool_call={tool_call_id})"
+        commit = run(["commit-tree", tree.stdout.strip(), "-p", parent_sha, "-m", message])
         if commit.returncode != 0:
-            # "nothing to commit" pasa si el contenido nuevo es IDÉNTICO al
-            # ya commiteado (el modelo reescribe lo mismo) -- no es un
-            # fallo real, el árbol ya refleja el estado deseado. Cualquier
-            # otro código de salida sí es un fallo real de git.
-            if "nothing to commit" in commit.stdout + commit.stderr:
-                head = subprocess.run(base_cmd + ["rev-parse", "HEAD"], capture_output=True, text=True, timeout=10)
-                return True, (head.stdout.strip() if head.returncode == 0 else None), None
-            return False, None, f"git commit falló: {commit.stderr.strip()}"
-        sha = subprocess.run(base_cmd + ["rev-parse", "HEAD"], capture_output=True, text=True, timeout=10)
-        return True, (sha.stdout.strip() if sha.returncode == 0 else None), None
+            return False, None, f"git commit-tree falló: {commit.stderr.strip()}"
+        commit_sha = commit.stdout.strip()
+        advance = run(["update-ref", "HEAD", commit_sha, parent_sha])
+        if advance.returncode != 0:
+            return False, None, f"git update-ref no pudo avanzar HEAD (cambio concurrente): {advance.stderr.strip()}"
+
+        # Refleja la entrada ya confirmada en el índice normal; cacheinfo no
+        # abre ni lee el pathname del workspace.
+        env.pop("GIT_INDEX_FILE", None)
+        staged = run(["update-index", "--add", "--cacheinfo", "100644", blob_sha, str(rel)])
+        if staged.returncode != 0:
+            logger.error("tool_authority: commit %s creado pero no se actualizó el índice local: %s", commit_sha, staged.stderr.strip())
+        return True, commit_sha, None
     except (subprocess.TimeoutExpired, OSError) as exc:
         return False, None, f"{type(exc).__name__}: {exc}"
+    finally:
+        try:
+            os.unlink(index_path)
+        except OSError:  # fail-soft: el indice temporal puede haberse eliminado ya; no cambia el commit.
+            pass
 
 
-async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Path, content: str, tool_call_id: str) -> dict:
+async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Path, path_str: str, projects_fd: int | None, content: str, tool_call_id: str) -> dict:
     size = len(content.encode("utf-8"))
     if size > MAX_WRITE_BYTES:
         return await _execution_error(
@@ -554,10 +800,8 @@ async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Pat
     # normaliza igual sin poder seguir symlinks que todavía no existen, lo
     # cual es correcto: un componente que no existe no puede ser un symlink
     # que escape el jail).
-    try:
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"no se pudo crear el directorio: {exc}")
+    parent_fd = -1
+    tmp_name = f".{resolved.name}.{os.urandom(8).hex()}.tmp"
 
     # Escritura atómica: temp file en el MISMO directorio (garantiza que
     # os.replace sea un rename atómico dentro del mismo filesystem, no una
@@ -566,7 +810,8 @@ async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Pat
     # permitida a propósito (T2): con git detrás, el contenido previo no se
     # pierde, queda en el commit anterior.
     try:
-        fd, tmp_path = tempfile.mkstemp(dir=str(resolved.parent), prefix=f".{resolved.name}.", suffix=".tmp")
+        parent_fd, leaf, rel_path = _open_workspace_parent(path_str, projects_fd, create=True)
+        fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o660, dir_fd=parent_fd)
         try:
             # B1 (auditoría 2026-09-25 de ops/permisos_proyectos.py): mkstemp() crea el
             # archivo en 0600 explícito. Bajo un directorio con ACL POSIX por defecto (el
@@ -583,17 +828,20 @@ async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Pat
             os.fchmod(fd, 0o660)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(content)
-            os.replace(tmp_path, resolved)
+            os.replace(tmp_name, leaf, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         except BaseException:
             try:
-                os.unlink(tmp_path)
+                os.unlink(tmp_name, dir_fd=parent_fd)
             except OSError:  # fail-soft: cleanup de tmp_path tras error real ya capturado arriba; el `raise` de abajo propaga la falla real, nadie depende de que este unlink haya funcionado
                 pass
             raise
     except OSError as exc:
-        return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"error de OS al escribir: {exc}")
+        return await _reject(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"ruta cambió o contiene symlink durante la apertura segura: {exc}")
+    finally:
+        if parent_fd >= 0:
+            os.close(parent_fd)
 
-    committed, sha, git_error = _git_commit_write(resolved, job_id=job_id, tool_call_id=tool_call_id)
+    committed, sha, git_error = _git_commit_write(rel_path, content=content, job_id=job_id, tool_call_id=tool_call_id)
     if not committed:
         # T1: la escritura YA ocurrió (arriba) -- no se revierte de forma
         # retroactiva. Se declara el hueco explícito (sin protección de git
@@ -603,15 +851,15 @@ async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Pat
         logger.error("tool_authority: write_file EJECUTADO pero SIN COMMITEAR job=%s path=%s error=%s", job_id, resolved, git_error)
         try:
             await event_append(job_id, "TOOL_CALL_WRITE_UNCOMMITTED", {
-                "tool_name": tool_name, "caller": caller, "path": str(resolved.relative_to(WORKSPACE_ROOT)), "error": git_error,
+            "tool_name": tool_name, "caller": caller, "path": rel_path, "error": git_error,
             })
         except Exception:  # fail-soft: mismo criterio que _reject/_execution_error
             logger.error("tool_authority: no se pudo registrar TOOL_CALL_WRITE_UNCOMMITTED para job %s", job_id, exc_info=True)
 
-    logger.info("tool_authority: write_file EJECUTADO job=%s path=%s (%d bytes) sha=%s", job_id, resolved, size, sha)
+    logger.info("tool_authority: write_file EJECUTADO job=%s path=%s (%d bytes) sha=%s", job_id, rel_path, size, sha)
     return {
         "tool_name": tool_name, "decision": "executed", "reason": None,
-        "content": f"Escrito: {resolved.relative_to(WORKSPACE_ROOT)} ({size} bytes)",
+        "content": f"Escrito: {rel_path} ({size} bytes)",
         "git_committed": committed, "git_sha": sha, "git_error": git_error,
         "bytes_written": size,
     }
