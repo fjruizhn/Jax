@@ -906,6 +906,14 @@ matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
 sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
 piso se vuelve a fijar desde los **3537 de master**.
 
+3746 -> 3768 (2026-10-06, JAX#357 ronda 10): +22 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 212 a 234): lectura doble tambien en shell (ventana de master y salto de subshell, unidas
+con OR), casos del auditor con acentos graves en numero par y `)` desbalanceado, separadores
+`|`/`||` pegados y los limites declarados. Medido por recoleccion (`pytest --collect-only -q`,
+PYTHONPATH=.:las_manos, Python 3.14.4, SIN `JAX_DB_HOST`) con la lista exacta de 195 archivos:
+3814 recolectadas en la rama, 3792 en 8a9203d0. Son 3768 passed + 45 skipped + 1 xfailed.
+No se corrio el paso completo.
+
 3713 -> 3746 (2026-10-06, JAX#357 ronda 9): +33 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
 (de 179 a 212): prefiltro de cadenas Python con cualquier espacio en blanco y subshell
 `$(...)`/acento grave que no corta las banderas en shell (anidados, `-v` posterior, sin cerrar).
