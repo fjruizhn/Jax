@@ -4422,6 +4422,15 @@ tiempo. Si el runner da otro número, manda el runner.
   y ahora exige idx_ejecutor_punto_host_respaldo. Medido local con las migraciones
   de jax-platform master: ese archivo 3 -> 5 passed. Los dos vistos en rojo contra
   el exportador viejo (a8de3fd: 2 failed / 3 passed).
+170 -> 172 el 2026-10-06 (auditoría global de descartes): +2 en
+  tests/test_jacobs_events_indice_auditoria_global.py -- comprueba que
+  init_tables() crea los índices global y por pipeline con sus columnas
+  exactas. La consulta de causas copiada del camino actual añade FORCE INDEX
+  (idx_events_pipeline_tipo), porque EXPLAIN con el nuevo índice global
+  mostró que MariaDB podía elegirlo para esa consulta por pipeline.
+  Re-medido ejecutando la lista completa de jacobs-gobernanza-db contra una
+  MariaDB 12.3.3 temporal en 127.0.0.1:33316: 172 passed, 0 failed.
+  Nunca se usó la base de producción.
 ```
 
 ## `permisos-proyectos/permisos_proyectos`

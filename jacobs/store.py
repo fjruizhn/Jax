@@ -979,6 +979,18 @@ _INDICES: list[tuple[str, str, str, bool]] = [
     ("jacobs_events", "idx_events_pipeline_tipo",
      "CREATE INDEX idx_events_pipeline_tipo ON jacobs_events "
      "(pipeline_id, event_type) ALGORITHM=INPLACE LOCK=NONE", True),
+    # 2026-10-06 (jax-platform pantalla de auditoría del descarte): el feed
+    # global consulta un event_type por vez, restringe ts y pagina en orden
+    # (ts DESC, id DESC). Este índice permite recorrer ese rango en el orden
+    # solicitado sin filesort; id desempata timestamps iguales. La variante
+    # por pipeline antepone pipeline_id para conservar el mismo orden cuando
+    # la pantalla filtra un pipeline concreto. Ambos son aditivos y online.
+    ("jacobs_events", "idx_events_auditoria_fecha",
+     "CREATE INDEX idx_events_auditoria_fecha ON jacobs_events "
+     "(event_type, ts, id) ALGORITHM=INPLACE LOCK=NONE", True),
+    ("jacobs_events", "idx_events_pipeline_auditoria_fecha",
+     "CREATE INDEX idx_events_pipeline_auditoria_fecha ON jacobs_events "
+     "(pipeline_id, event_type, ts, id) ALGORITHM=INPLACE LOCK=NONE", True),
     # 2026-09-22 (spec descartar-pipelines §6): la vista "Descartados" filtra
     # por dueño + status y ordena por descartado_at; la de ocultos (todos los
     # usuarios) por status + descartado_at. Sin estos, EXPLAIN da filesort.
@@ -1090,24 +1102,25 @@ _ER_CANT_DROP_FIELD_OR_KEY = 1091
 # (lock_wait_timeout) es 86400 s: una transaccion larga sobre la tabla dejaria
 # el arranque colgado un dia entero, sin error.
 #
-# Costo de la espera (review de 05c028b; actualizado 2026-09-22, fix round 1
-# de Task 1 -- descartar-pipelines): mientras UN DDL espera su metadata lock
+# Costo de la espera (review de 05c028b; actualizado 2026-10-06, auditoría
+# global de descartes): mientras UN DDL espera su metadata lock
 # EXCLUSIVO (hasta estos 30 s), ese pedido queda en la cola del MDL y las
 # lecturas y escrituras NUEVAS sobre la tabla se encolan detras de el. Cada
 # DDL acotado paga SU PROPIA espera de hasta 30 s, y todos corren uno detras
 # de otro en la MISMA sesion de `init_tables()` -- el peor caso es la SUMA,
-# no 30 s fijos. Hoy hay CINCO indices acotados en `_INDICES`
+# no 30 s fijos. Hoy hay SIETE indices acotados en `_INDICES`
 # (idx_jacobs_pipelines_duenio, idx_pipelines_descartados,
 # idx_pipelines_ocultos e idx_pipelines_visibles sobre jacobs_pipelines;
-# idx_events_pipeline_tipo sobre jacobs_events): 5 x 30 s = 150 s de Jacobs
-# detenido como peor caso si los cinco estan bloqueados a la vez, no un dia.
+# idx_events_pipeline_tipo, idx_events_auditoria_fecha e
+# idx_events_pipeline_auditoria_fecha sobre jacobs_events): 7 x 30 s = 210 s.
+# El índice retirado suma el octavo DDL, hasta 240 s si todos esperan a la vez.
 # Si vence, el indice no se crea (ERROR en el log) y el arranque SIGUE -- la
 # red de seguridad es el test de EXPLAIN de la plataforma en CI, que falla
 # si la consulta que lo necesita no lo usa.
 #
 # Desde 2026-09-23 se suma UN DDL acotado mas por cada indice de
 # `_INDICES_RETIRADOS` que todavia exista (hoy uno: idx_pipelines_status):
-# el peor caso pasa a 6 x 30 s = 180 s, y SOLO en el primer arranque despues
+# el peor caso pasa a 8 x 30 s = 240 s, y SOLO en el primer arranque despues
 # del despliegue -- en los siguientes el indice ya no esta y el chequeo de
 # information_schema lo salta sin DDL.
 #
@@ -1116,7 +1129,7 @@ _ER_CANT_DROP_FIELD_OR_KEY = 1091
 # "solo rendimiento": fallan CERRADO. La primera que vence el MDL aborta
 # `init_tables()` entero con una excepcion -- y como las columnas se agregan
 # ANTES que los indices en esta funcion, ese aborto ni siquiera llega a
-# intentar los 5 indices de arriba (no se suman a los 150 s: el arranque ya
+# intentar los 7 indices de arriba (no se suman a los 240 s: el arranque ya
 # se cayo antes).
 _LOCK_WAIT_DDL_SEGUNDOS = 30
 _ER_LOCK_WAIT_TIMEOUT = 1205
