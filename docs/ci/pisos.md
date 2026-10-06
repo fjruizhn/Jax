@@ -906,6 +906,16 @@ matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
 sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
 piso se vuelve a fijar desde los **3537 de master**.
 
+3562 -> 3584 (2026-10-06, JAX#357 ronda 5): +22. `test_whitelist_python_no_exime_un_rm_posterior_de_contenedor`
+(11 subcomandos de la lista blanca x con/sin ssh): un `rm` de la lista blanca ya no
+exime un `docker rm -f` posterior en la misma lista Python. Medido por recoleccion con
+la lista exacta de 195 archivos del paso "Piso exacto" (PYTHONPATH=.:las_manos, Python
+3.14.4): rama 3630 recolectadas, rama sin la ronda 5 3608, master 3583. Las 3608 de la
+ronda 4 son 3562 passed + 45 skipped + 1 xfailed; con las 22 nuevas: 3584 passed,
+45 skipped, 1 xfailed. Corrida local completa del paso (sin enmascarar el host): 3623
+passed, 3 skipped, 3 xfailed, 1 failed por entorno
+(`test_arranque_real_no_colisiona_con_policy_de_la_raiz`, ya documentado abajo).
+
 3537 -> 3562 (2026-10-06, JAX#357 ronda 4): +25 netos. El test del escáner tiene
 22 casos de whitelist (11 subcomandos, shell y listas Python literales), uno que
 fija el rechazo de prefijos dinámicos/contextos cercanos y dos de Python inválido

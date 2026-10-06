@@ -171,6 +171,12 @@ positive += [
     ("python", 'cmd = "docker container remove --force x"'),
 ]
 
+# Ronda 5: un `rm` de la lista blanca no exime un `docker rm -f` posterior en la misma lista.
+for subcommand in sorted(WHITELIST):
+    for ssh_prefix in ("", '"ssh", h, '):
+        positive.append(("python",
+                         f'[{ssh_prefix}"docker", "{subcommand}", "rm", "-f", v, "&&", "docker", "rm", "-f", c]'))
+
 negative = [
     ("shell", f"{wrapper}docker exec docker rm -f target") for wrapper in wrappers
 ]
@@ -278,7 +284,16 @@ def documented_whitelist_case(kind, source):
     )
 
 
+RONDA5_MEJORAS = {
+    # El segundo `rm` de la lista (docker) ahora se evalúa aunque el primero no sea docker.
+    '["ssh", "rm", "docker", "rm", "-f", n]',
+    '["sudo", "-u", "rm", "docker", "rm", "-f", n]',
+}
+
+
 def required_improvement(kind, source):
+    if kind == "python" and source in RONDA5_MEJORAS:
+        return True
     if "--workdir" in source and "compose" in source:
         return True
     if kind == "shell":
