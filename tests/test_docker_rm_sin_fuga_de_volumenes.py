@@ -431,6 +431,25 @@ def _ventana_de_shell_es_de_recurso(hallazgo):
     return bool(posibles) and all(_pegado_a_docker_y_subcomando(palabras, p) for p in posibles)
 
 
+def _hallazgos_de_cadenas_de_master(fuente):
+    """Los hallazgos de master que salieron de CADENAS (no de listas), recorriendo el árbol con
+    las mismas condiciones que `culpables_python_master` y sus funciones congeladas."""
+    arbol = ast.parse(fuente)
+    padres = {hijo: nodo for nodo in ast.walk(arbol) for hijo in ast.iter_child_nodes(nodo)}
+    docstrings = {n.value for n in ast.walk(arbol) if isinstance(n, ast.Expr)
+                  and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)}
+    hallados = []
+    for nodo in ast.walk(arbol):
+        if isinstance(nodo, ast.JoinedStr):
+            partes = [p.value if isinstance(p, ast.Constant) else "{" + _texto_de_master(p.value, fuente) + "}"
+                      for p in nodo.values]
+            hallados += culpables_shell_master("".join(str(x) for x in partes))
+        elif isinstance(nodo, ast.Constant) and isinstance(nodo.value, str) and nodo not in docstrings \
+                and not isinstance(padres.get(nodo), ast.JoinedStr) and " rm" in nodo.value:
+            hallados += culpables_shell_master(nodo.value)
+    return hallados
+
+
 def _sin_la_excepcion_de_lista_blanca(hallazgos_master, fuente=None):
     """Único recorte a master: `docker <volume|network|image|...> rm -f x` NO es un contenedor
     (un volumen con nombre no deja huérfano nada) y esta rama lo exime a propósito desde la
@@ -438,10 +457,13 @@ def _sin_la_excepcion_de_lista_blanca(hallazgos_master, fuente=None):
     marcado es ese.
 
     El TIPO del hallazgo viene de dónde salió, nunca de re-interpretar su texto: en modo shell
-    (`fuente=None`) todo es una ventana de shell. En modo Python (`fuente` = el código) un
-    hallazgo es de lista solo si su texto es el de un nodo List/Tuple de ese código, y entonces
-    se decide sobre el NODO; si ese texto aparece más veces de las que hay nodos, las demás
-    salieron de una cadena y no se eximen. Cualquier otro hallazgo es una ventana de shell."""
+    (`fuente=None`) todo es una ventana de shell. En modo Python (`fuente` = el código) los
+    hallazgos que master sacó de CADENAS (`_hallazgos_de_cadenas_de_master`) son ventanas de
+    shell; el resto (`veces[h]` menos los de cadenas) son de lista, y solo esos se deciden sobre
+    el NODO List/Tuple de ese texto (un nodo que master no marca no cuenta: solo importa que
+    exista uno con el mismo texto y sea de recurso con nombre)."""
+    if not hallazgos_master:
+        return []
     if fuente is None:
         return [h for h in hallazgos_master if not _ventana_de_shell_es_de_recurso(h)]
     listas = {}
@@ -449,12 +471,17 @@ def _sin_la_excepcion_de_lista_blanca(hallazgos_master, fuente=None):
         if isinstance(nodo, (ast.List, ast.Tuple)):
             texto = " ".join(_texto_de_master(nodo, fuente).split())
             listas.setdefault(texto, []).append(_lista_es_de_recurso_con_nombre(nodo))
+    de_cadenas = {}
+    for h in _hallazgos_de_cadenas_de_master(fuente):
+        de_cadenas[h] = de_cadenas.get(h, 0) + 1
     veces = {}
+    resultado = []
     for h in hallazgos_master:
         veces[h] = veces.get(h, 0) + 1
-    return [h for h in hallazgos_master
-            if not ((all(listas[h]) and veces[h] <= len(listas[h])) if h in listas
-                    else _ventana_de_shell_es_de_recurso(h))]
+        es_de_lista = h in listas and veces[h] > de_cadenas.get(h, 0)
+        if not (all(listas[h]) if es_de_lista else _ventana_de_shell_es_de_recurso(h)):
+            resultado.append(h)
+    return resultado
 
 
 def culpables_en_texto(texto, es_python=None, filename="<string>"):
