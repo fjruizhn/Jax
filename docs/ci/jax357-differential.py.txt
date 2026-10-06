@@ -277,11 +277,35 @@ def documented_whitelist_case(kind, source):
         for node in ast.walk(tree)
     )
 
+
+def required_improvement(kind, source):
+    if "--workdir" in source and "compose" in source:
+        return True
+    if kind == "shell":
+        return "docker compose -f a -f b -f c -f d -f e rm" in source
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    sequence = ["docker", "compose", "-f", "a", "-f", "b", "-f", "c",
+                "-f", "d", "-f", "e", "rm"]
+    return any(
+        isinstance(node, (ast.List, ast.Tuple))
+        and any(
+            [elt.value for elt in node.elts[i:i + len(sequence)]] == sequence
+            for i in range(len(node.elts) - len(sequence) + 1)
+            if all(isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                   for elt in node.elts[i:i + len(sequence)])
+        )
+        for node in ast.walk(tree)
+    )
+
 with tempfile.TemporaryDirectory(prefix="jax357-differential-") as tempdir:
     master = load_at("master_scanner", ARGS.master_sha, tempdir)
     candidate = load_at("candidate_scanner", ARGS.candidate_sha, tempdir)
     mismatches = []
     exceptions = []
+    expected_improvements = []
     master_marked = candidate_marked = 0
     cases = [(kind, source, "pr") for kind, source in positive + negative]
     cases += [(item["kind"], item["source"], item["origin"]) for item in auditor_cases]
@@ -289,21 +313,31 @@ with tempfile.TemporaryDirectory(prefix="jax357-differential-") as tempdir:
     for kind, source, origin in cases:
         master_result = detect(master, kind, source)
         candidate_result = detect(candidate, kind, source)
+        required = required_improvement(kind, source)
         master_marked += master_result
         candidate_marked += candidate_result
-        if master_result == candidate_result:
-            status = "MATCH"
-        elif master_result and not candidate_result and documented_whitelist_case(kind, source):
+        if master_result and not candidate_result and documented_whitelist_case(kind, source):
             status = "WHITELIST"
             exceptions.append((origin, kind, source))
-        else:
-            status = "LEAK" if master_result and not candidate_result else "NEW_MARK"
+        elif master_result and not candidate_result:
+            status = "LEAK"
             mismatches.append((origin, kind, source, status))
+        elif required and not candidate_result:
+            status = "EXPECTATION_MISS"
+            mismatches.append((origin, kind, source, status))
+        elif candidate_result and not master_result and required:
+            status = "EXPECTED_NEW_MARK"
+            expected_improvements.append((origin, kind, source))
+        elif candidate_result and not master_result:
+            status = "NEW_MARK"
+            mismatches.append((origin, kind, source, status))
+        else:
+            status = "MATCH"
         print(f"{status}\t{origin}\t{kind}\t{source!r}")
     print(f"master_sha={ARGS.master_sha} candidate_sha={ARGS.candidate_sha}")
     print(f"pr_cases={len(positive)+len(negative)} auditor_cases={len(auditor_cases)} own_cases={len(own_cases)} total={len(cases)}")
     print(f"master_marked={master_marked} candidate_marked={candidate_marked}")
-    print(f"leaks={sum(item[3] == 'LEAK' for item in mismatches)} new_marks={sum(item[3] == 'NEW_MARK' for item in mismatches)} whitelist_exceptions={len(exceptions)}")
+    print(f"leaks={sum(item[3] == 'LEAK' for item in mismatches)} unexpected_new_marks={sum(item[3] == 'NEW_MARK' for item in mismatches)} expectation_misses={sum(item[3] == 'EXPECTATION_MISS' for item in mismatches)} expected_candidate_only_marks={len(expected_improvements)} whitelist_exceptions={len(exceptions)}")
     for origin, kind, source, status in mismatches:
         print(f"MISMATCH {status} {origin} {kind}: {source!r}")
     for origin, kind, source in exceptions:
