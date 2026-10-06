@@ -26,14 +26,19 @@ def _git_directory(workspace_root: Path) -> Path:
 
 
 def abrir_project_tree_lock(workspace_root: Path) -> int:
-    """Abre el archivo estable de flock común a todos los worktrees del repo."""
-    ruta = _git_directory(workspace_root) / "project-tree.lock"
-    return os.open(ruta, os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o660)
+    """Abre el git-dir común para flock, sin un inode de archivo con dueño fijo.
+
+    El worker y E2A corren como usuarios distintos. El directorio .git ya
+    es accesible por ambos; flock sobre su fd evita que quien cree primero un
+    archivo determine si el otro actor puede abrirlo.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    return os.open(_git_directory(workspace_root), flags)
 
 
 @contextmanager
 def project_tree_lock(workspace_root: Path) -> Iterator[None]:
-    """Exclusión mutua para leer/escribir rutas y mover carpetas a proyectos/."""
+    """Exclusión mutua por git-dir para leer/escribir/mover el árbol de proyectos."""
     fd = abrir_project_tree_lock(workspace_root)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
