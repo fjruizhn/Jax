@@ -78,14 +78,42 @@ for head in python_heads:
     for flag in valid_flags:
         positive.append(("python", repr(head + flag + ["target"])))
 positive.append(("python", '["ssh", docker_host, "exec", "docker", "rm", "-f", n]'))
+positive += [
+    ("shell", "docker rm -f -v=false victim"),
+    ("shell", "docker rm -f -v=0 victim"),
+    ("shell", "docker rm -fv=false victim"),
+    ("shell", "docker rm -fv=0 victim"),
+    ("shell", "docker compose rm -f -v=false svc"),
+    ("shell", "docker compose rm -f -v=0 svc"),
+    ("python", '["docker", "rm", "-f", "-v=false", n]'),
+    ("python", '["docker", "rm", "-f", "-v=0", n]'),
+    ("python", '["docker", "rm", "-fv=false", n]'),
+    ("python", '["docker", "rm", "-fv=0", n]'),
+    ("python", '["docker", "compose", "rm", "-f", "-v=false", svc]'),
+    ("python", '["docker", "compose", "rm", "-f", "-v=0", svc]'),
+]
 
 negative = [
     ("shell", f"{wrapper}docker exec docker rm -f target") for wrapper in wrappers
 ]
+negative += [("shell", command) for command in (
+    "docker --context ctx exec docker rm -f target",
+    "docker -H tcp://x exec docker rm -f target",
+    "docker --context=ctx run docker rm -f target",
+    "docker rm -f=false target",
+    "docker rm -f=false -v=false target",
+)]
 negative += [("shell", f"docker compose {option} {subcommand} docker rm -f target")
              for option in ("", "--profile prod", "--env-file .env")
              for subcommand in ("exec", "run svc")]
 negative += [("python", repr(["docker", "exec", "docker", "rm", "-f", "target"]))]
+negative += [("python", source) for source in (
+    '["docker", "--context", "ctx", "exec", "docker", "rm", "-f", "target"]',
+    '["docker", "-H", "tcp://x", "exec", "docker", "rm", "-f", "target"]',
+    '["docker", "--context=ctx", "run", "docker", "rm", "-f", "target"]',
+    '["docker", "rm", "-f=false", "target"]',
+    '["docker", "rm", "-f=false", "-v=false", "target"]',
+)]
 negative += [("python", repr(["docker", "compose"] + option.split() + subcommand.split()
                               + ["docker", "rm", "-f", "target"]))
              for option in ("", "--profile prod", "--env-file .env")
@@ -96,6 +124,7 @@ with tempfile.TemporaryDirectory(prefix="jax357-differential-") as tempdir:
     candidate = load_at("candidate_scanner", ARGS.candidate_sha, tempdir)
     false_negatives = []
     false_positives = []
+    master_false_positives = []
     master_marked = candidate_marked = 0
     for kind, source in positive + negative:
         expected = (kind, source) in positive
@@ -103,12 +132,17 @@ with tempfile.TemporaryDirectory(prefix="jax357-differential-") as tempdir:
         candidate_result = detect(candidate, kind, source)
         master_marked += master_result
         candidate_marked += candidate_result
+        if master_result and not expected:
+            master_false_positives.append((kind, source))
         if candidate_result != expected:
             (false_negatives if expected else false_positives).append((kind, source))
     print(f"master_sha={ARGS.master_sha} candidate_sha={ARGS.candidate_sha}")
     print(f"positives={len(positive)} negatives={len(negative)} total={len(positive)+len(negative)}")
     print(f"master_marked={master_marked} candidate_marked={candidate_marked}")
     print(f"candidate_false_negatives={len(false_negatives)} candidate_false_positives={len(false_positives)}")
+    print(f"master_false_positives={len(master_false_positives)}")
+    for kind, source in master_false_positives:
+        print(f"DOCUMENTED_MASTER_FALSE_POSITIVE {kind}: {source}")
     for kind, source in false_negatives + false_positives:
         print(f"CANDIDATE_MISMATCH {kind}: {source}")
     if false_negatives or false_positives:

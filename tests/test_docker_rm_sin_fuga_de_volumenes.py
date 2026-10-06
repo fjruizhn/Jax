@@ -66,6 +66,23 @@ def _compose_exec_o_run(tokens):
     return False
 
 
+def _docker_exec_o_run(tokens):
+    k = 0
+    while k < len(tokens):
+        token = tokens[k]
+        if token in _DOCKER_OPCIONES_SIN_VALOR or token.startswith("--") and "=" in token:
+            k += 1
+        elif token in _DOCKER_OPCIONES_CON_VALOR:
+            k += 2
+        elif any(token.startswith(op) and len(token) > len(op) for op in ("-c", "-H", "-l")):
+            k += 1
+        elif token == "container":
+            k += 1
+        else:
+            return token in ("exec", "run")
+    return False
+
+
 def _fuerza_sin_volumenes(banderas):
     """True si entre las banderas hay force y no hay volumes (orden libre)."""
     fuerza = volumenes = False
@@ -78,8 +95,14 @@ def _fuerza_sin_volumenes(banderas):
             elif nombre == "volumes":
                 volumenes = activa
         elif b.startswith("-") and len(b) > 1:
-            fuerza |= "f" in b[1:]
-            volumenes |= "v" in b[1:]
+            cortas, tiene_valor, valor = b[1:].partition("=")
+            activa = valor.lower() not in _FALSO if tiene_valor else True
+            for indice, opcion in enumerate(cortas):
+                valor_opcion = activa if tiene_valor and indice == len(cortas) - 1 else True
+                if opcion == "f":
+                    fuerza = valor_opcion
+                elif opcion == "v":
+                    volumenes = valor_opcion
     return fuerza and not volumenes
 
 
@@ -105,9 +128,9 @@ def _es_docker_rm(toks, indice_rm):
         if _ES_DOCKER.fullmatch(toks[j]):
             if _compose_exec_o_run(toks[j + 1:indice_rm]):
                 return False
-            # docker exec/run ejecuta un comando dentro de un contenedor; no
-            # reinterpretar un contenedor llamado "docker" como el ejecutable.
-            if j + 1 < indice_rm and toks[j + 1] in ("exec", "run"):
+            # Docker global options may precede exec/run; do not reinterpret
+            # the following container name as another Docker executable.
+            if _docker_exec_o_run(toks[j + 1:indice_rm]):
                 return False
             if _prefijo_docker_rm(toks[j + 1:indice_rm]):
                 return True
@@ -186,13 +209,11 @@ def _es_prefijo_docker_rm(tokens):
             continue
         if _compose_exec_o_run(tokens[i + 1:]):
             return False
-        if i + 1 < len(tokens) and tokens[i + 1] in ("exec", "run"):
+        if _ES_DOCKER.fullmatch(token) and _docker_exec_o_run(tokens[i + 1:]):
             # `docker-host` can be an SSH destination before the real docker
             # executable (`ssh docker-host exec docker rm ...`). Only an exact
             # executable anchor closes the search as docker exec/run.
-            if _ES_DOCKER.fullmatch(token):
-                return False
-            continue
+            return False
         if _prefijo_docker_rm(tokens[i + 1:]):
             return True
     return False
@@ -308,6 +329,12 @@ FUGAN_SHELL = [
     "docker rm x --force",
     '"docker" rm -f c',
     "docker rm -f c --volumes=0",
+    "docker rm -f -v=false c",
+    "docker rm -fv=false c",
+    "docker rm -f -v=0 c",
+    "docker rm -fv=0 c",
+    "docker compose rm -f -v=false svc",
+    "docker compose rm -f -v=0 svc",
     "docker rm -f c --volumes=f",
     "docker compose -f x.yml rm -f",
     "docker compose -p proj rm -f svc",
@@ -374,6 +401,12 @@ FUGAN_PYTHON = [
     'subprocess.run("docker rm -f x", shell=True)',
     'subprocess.run(f"docker compose -f {yml} rm -f", shell=True)',
     'subprocess.run(f"sudo -u docker docker rm -f {n}", shell=True)',
+    '["docker", "rm", "-f", "-v=false", n]',
+    '["docker", "rm", "-fv=false", n]',
+    '["docker", "rm", "-f", "-v=0", n]',
+    '["docker", "rm", "-fv=0", n]',
+    '["docker", "compose", "rm", "-f", "-v=false", svc]',
+    '["docker", "compose", "rm", "-f", "-v=0", svc]',
     '["docker", "compose", "-f", "x.yml", "rm", "-f"]',
     '["docker", "compose", "-p", p, "rm", "-f", "-s"]',
     '["docker", "compose", "--profile", "prod", "rm", "-f"]',
@@ -405,11 +438,17 @@ NO_FUGAN_SHELL = [
     "docker rm x",
     "docker rm --force=false x",
     "docker rm --force=0 x",
+    "docker rm -f=false x",
+    "docker rm -f -v=true x",
+    "docker rm -fv=true x",
     'rm -f "$TMP/archivo"',
     '$SUDO rm -f "$TMP/archivo"',
     "docker stop x",
     "docker exec c rm -f /tmp/x",
     "docker exec docker rm -f /tmp/x",
+    "docker --context ctx exec docker rm -f /tmp/x",
+    "docker -H tcp://x exec docker rm -f /tmp/x",
+    "docker --context=ctx run docker rm -f /tmp/x",
     "docker compose exec docker rm -f /tmp/x",
     "docker compose run svc docker rm -f /tmp/x",
     "docker compose --profile prod exec docker rm -f /tmp/x",
@@ -425,10 +464,16 @@ NO_FUGAN_SHELL = [
 NO_FUGAN_PYTHON = [
     '[*docker, "rm", "-fv", nombre]',
     '[*docker, "rm", "-f", "-v", n]',
+    '["docker", "rm", "-f", "-v=true", n]',
+    '["docker", "rm", "-fv=true", n]',
+    '["docker", "rm", "-f=false", n]',
     '["sudo", "-n", "rm", "-f", str(ruta)]',
     'sudo + ["rm", "-f", p]',
     '[*docker, "exec", c, "rm", "-f", "/tmp/x"]',
     '["docker", "exec", "docker", "rm", "-f", "/tmp/x"]',
+    '["docker", "--context", "ctx", "exec", "docker", "rm", "-f", "/tmp/x"]',
+    '["docker", "-H", "tcp://x", "exec", "docker", "rm", "-f", "/tmp/x"]',
+    '["docker", "--context=ctx", "run", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "compose", "exec", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "compose", "run", "svc", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "compose", "--profile", "prod", "exec", "docker", "rm", "-f", "/tmp/x"]',
