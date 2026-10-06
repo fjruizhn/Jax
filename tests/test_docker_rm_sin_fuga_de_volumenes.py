@@ -16,20 +16,26 @@ persecución sin fin):
   y TODAS las banderas hasta el fin del comando (docker las acepta después del nombre).
 - `docker exec|run ... rm -f x` es un `rm` DENTRO del contenedor: no cuenta.
 
-Límite declarado: una variable que no diga «docker» en su nombre (`$D rm -f`) no se
-reconoce como docker. Se prefiere eso a marcar cada `$SUDO rm -f archivo`.
+Límites declarados: una variable que no diga «docker» en su nombre (`$D rm -f`) no se
+reconoce como docker; tampoco se sigue flujo indirecto de prefijos Python neutrales
+(`base = docker; base + ["rm", ...]`). Se prefiere eso a marcar comandos ajenos como
+`git + ["rm", ...]` o cada `$SUDO rm -f archivo`.
 """
 import ast
 import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 RAIZ = Path(__file__).resolve().parent.parent
 ESTE = "tests/test_docker_rm_sin_fuga_de_volumenes.py"
 
-_ES_DOCKER = re.compile(r"(?:\S*/)?docker|\$\{?\w*docker\w*(?:\[@\])?\}?|\{[^{}]*docker[^{}]*\}|dk", re.I)
+_ES_DOCKER = re.compile(r"(?:\S*/)?docker|\$\{?\w*docker\w*(?:\[@\])?\}?|\{[^{}]*docker[^{}]*\}|\bdk\b", re.I)
 _SEPARADORES = {";", "&&", "||", "|", "(", ")", "`", "$("}
 _FALSO = {"false", "0", "f", "no"}
+_DOCKER_OPCIONES_SIN_VALOR = {"--debug", "--tls", "--tlsverify"}
+_DOCKER_OPCIONES_CON_VALOR = {"-H", "--host", "--context", "--config", "--tlscacert", "--tlscert", "--tlskey"}
 
 
 def _fuerza_sin_volumenes(banderas):
@@ -56,6 +62,31 @@ def _tokens_shell(linea):
     return [t.strip("\"'") for t in linea.split()]
 
 
+def _es_docker_rm(toks, indice_rm):
+    """Reconoce docker [opciones] [container] rm, no otros subcomandos rm."""
+    for j in range(indice_rm - 1, max(-1, indice_rm - 12), -1):
+        if toks[j] in _SEPARADORES:
+            break
+        if not _ES_DOCKER.fullmatch(toks[j]):
+            continue
+        antes_rm = toks[j + 1:indice_rm]
+        if any(t in ("exec", "run") for t in antes_rm):
+            return False
+        if antes_rm and antes_rm[-1] == "container":
+            antes_rm = antes_rm[:-1]
+        k = 0
+        while k < len(antes_rm):
+            opcion = antes_rm[k]
+            if opcion in _DOCKER_OPCIONES_SIN_VALOR or opcion.startswith("--") and "=" in opcion:
+                k += 1
+            elif opcion in _DOCKER_OPCIONES_CON_VALOR:
+                k += 2
+            else:
+                return False
+        return True
+    return False
+
+
 def culpables_shell(texto):
     hallados = []
     unido = re.sub(r"\\\r?\n\s*", " ", texto)
@@ -64,18 +95,7 @@ def culpables_shell(texto):
         for i, t in enumerate(toks):
             if t != "rm":
                 continue
-            # Hacia atrás, dentro del mismo comando: ¿lo llama docker?
-            es_docker = dentro = False
-            for j in range(i - 1, max(-1, i - 8), -1):
-                previo = toks[j]
-                if previo in _SEPARADORES:
-                    break
-                if previo in ("exec", "run"):
-                    dentro = True
-                if _ES_DOCKER.fullmatch(previo):
-                    es_docker = True
-                    break
-            if not es_docker or dentro:
+            if not _es_docker_rm(toks, i):
                 continue
             banderas = []
             for siguiente in toks[i + 1:]:
@@ -93,10 +113,7 @@ def _texto_de(nodo, fuente):
 
 
 def culpables_python(fuente):
-    try:
-        arbol = ast.parse(fuente)
-    except SyntaxError:
-        return culpables_shell(fuente)  # no es Python válido: se barre como texto
+    arbol = ast.parse(fuente)
     padres = {hijo: nodo for nodo in ast.walk(arbol) for hijo in ast.iter_child_nodes(nodo)}
     docstrings = set()
     for nodo in ast.walk(arbol):
@@ -117,9 +134,7 @@ def culpables_python(fuente):
             padre = padres.get(nodo)
             if not es_docker and i == 0 and isinstance(padre, ast.BinOp) and isinstance(padre.op, ast.Add) \
                     and padre.right is nodo:
-                izquierda = _texto_de(padre.left, fuente)
-                # `algo + ["rm", ...]`: un prefijo de comando. Docker salvo que sea claramente sudo.
-                es_docker = bool(_ES_DOCKER.search(izquierda)) or not re.search(r"sudo", izquierda, re.I)
+                es_docker = bool(_ES_DOCKER.search(_texto_de(padre.left, fuente)))
             if not es_docker:
                 continue
             banderas = [e.value for e in elts[i + 1:]
@@ -215,7 +230,6 @@ FUGAN_PYTHON = [
     'docker_cmd + ["rm", "-f", n]',
     'DOCKER_CMD + ["rm", "-f", n]',
     'self.docker + ["rm", "-f", n]',
-    'base + ["rm", "-f", n]',
     '[*docker,\n    "rm",\n    "-f",\n    nombre]',
     '[*docker, "rm", "-f", nombres[0]]',
     '[*docker, "rm", "-f", c["nombre"]]',
@@ -238,6 +252,9 @@ NO_FUGAN_SHELL = [
     "docker exec c rm -f /tmp/x",
     "# nunca uses docker rm -f",
     "docker stop x; rm -f /tmp/y",
+    "docker volume rm -f x",
+    "docker image rm -f x",
+    "docker network rm -f x",
 ]
 NO_FUGAN_PYTHON = [
     '[*docker, "rm", "-fv", nombre]',
@@ -248,6 +265,9 @@ NO_FUGAN_PYTHON = [
     '# nunca uses docker rm -f\nx = 1',
     'def f():\n    """No uses docker rm -f."""\n    return 1',
     'DOCKER = 1\nsubprocess.run(["rm", "-f", p])',
+    'git + ["rm", "-f", p]',
+    'sdk + ["rm", "-f", p]',
+    'base + ["rm", "-f", p]',
 ]
 
 
@@ -265,3 +285,8 @@ def test_deja_pasar_lo_que_no_fuga():
     for caso in NO_FUGAN_PYTHON:
         assert not culpables_en_texto(caso, es_python=True), \
             f"falso positivo (python): {caso!r} -> {culpables_en_texto(caso, es_python=True)}"
+
+
+def test_python_que_no_parsea_falla_en_vez_de_degradar_a_shell():
+    with pytest.raises(SyntaxError):
+        culpables_en_texto("def roto(:\n    docker rm -f x", es_python=True)
