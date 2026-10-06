@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+import pytest
 
 from base_de_test import fijar_base_de_test  # noqa: E402
 
@@ -102,27 +103,24 @@ def _t(segundos):
 
 
 def test_el_motor_manda_sus_timeouts_de_dispatch_y_de_poll():
-    """E-24: el timeout pasó del cliente a CADA llamada. dispatch=30 y poll=15;
-    si una llamada lo pierde cae al default de 5 s y este test lo ve."""
+    """El motor legacy falla antes de obtener el cliente HTTP compartido."""
     from jacobs import executor
     from jacobs.models import Pipeline, Step
-    vistos, parche = _timeouts_vistos({
-        ("POST", "/motor/dispatch"): {"job_id": "j1", "status": "pending"},
-        ("GET", "/motor/job/j1"): {"status": "completed", "result_summary": "ok"},
-    })
+    from policy.execution_control.errors import GovernedExecutionRequiredError
 
     async def correr():
-        with parche, patch.object(executor, "MOTOR_POLL_INTERVAL", 0):
-            await executor._invoke_motor(
-                Step(facet="kimi", capability="generate", motor="kimi"),
-                Pipeline(name="t", invoked_by="t", user_id="1", tenant_id="1", mode="dry_run"),
-                timeout=60,
-            )
+        cliente = chc.obtener_cliente_http()
+        with patch.object(executor, "obtener_cliente_http", side_effect=AssertionError("no debe obtener cliente")):
+            with pytest.raises(GovernedExecutionRequiredError):
+                await executor._invoke_motor(
+                    Step(facet="kimi", capability="generate", motor="kimi"),
+                    Pipeline(name="t", invoked_by="t", user_id="1", tenant_id="1", mode="dry_run"),
+                    timeout=60,
+                )
+        assert chc.obtener_cliente_http() is cliente
         await chc.cerrar_cliente_http()
 
     asyncio.run(correr())
-    assert vistos[("POST", "/motor/dispatch")] == _t(30)
-    assert vistos[("GET", "/motor/job/j1")] == _t(15)
 
 
 def test_el_plan_local_manda_ollama_timeout():

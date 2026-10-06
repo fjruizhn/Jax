@@ -38,7 +38,9 @@ from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 from jacobs.plan import CapabilityUnbound
 from jacobs.policy import check_kill_switch
 from jacobs.usage_writer import record_direct_usage
-from policy.execution_control.errors import DirectHydeGovernedExecutionForbiddenError
+from policy.execution_control.errors import (
+    DirectHydeGovernedExecutionForbiddenError, GovernedExecutionRequiredError,
+)
 from interruptor import correr_con_interruptor
 
 logger = logging.getLogger("jacobs.executor")
@@ -609,104 +611,8 @@ async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
 
 
 async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: str | None = None) -> dict:
-    """Kimi/jax_local via Motor Registry de LAS MANOS. Polling hasta completar.
-
-    Bloque 3 (2026-08-21): _CAPABILITY_MAP eliminado -- resolvía alias
-    semánticos ("analysis"->"pipeline_analysis", etc.) a un nombre de
-    catálogo, pero verificado contra capability_motor real + jacobs_steps
-    histórico: ningún alias tuvo NUNCA una fila en capability_motor ni se
-    usó jamás con un facet-motor (kimi/jax_local) -- los 3 que sí se usan
-    (analysis/research/review) lo hacen exclusivamente con facets HTTP-directos,
-    donde este mapa nunca se consultaba. Muerto, no reemplazado. step.capability
-    llega acá ya validado por NIVEL A/B de validate_capability() (existe en
-    `capability`, el motor está en su allowed_motors) -- se despacha tal cual,
-    sin resolución intermedia."""
-    payload = {
-        "caller":     "jacobs",
-        "capability": step.capability,
-        "motor":      step.motor,  # None = MotorPolicy resuelve por competencia (R4)
-        "trace_id":   step.trace_id,
-        # El prompt ARMADO por _dispatch_step (regla de evidencia + objetivo +
-        # salidas de las dependencias + tarea). Antes se reconstruía acá desde
-        # step.input y el contexto de las dependencias se perdía: en la E2E de
-        # la cadena (1bb0da78, 2026-09-12) kimi tenía que "producir con el
-        # plan unificado" sin recibir el plan. El respaldo queda solo para
-        # callers directos que no pasan prompt.
-        "prompt":     prompt if prompt is not None
-                      else _EVIDENCE_RULE + "\n\n" + step.input.get("prompt", json.dumps(step.input)),
-        "user_id":    pipeline.user_id,
-        "tenant_id":  pipeline.tenant_id,
-        # GAP2 Fase3 (2026-08-19): mismo presupuesto que ya gobierna el
-        # polling de abajo (deadline = timeout) -- el bucle de tool-calling
-        # de worker.py lo consume como SU presupuesto de tiempo, no uno
-        # nuevo. Ningun cambio para el polling mismo, que sigue intacto.
-        "timeout_seconds": timeout,
-        # Task 7b (2026-09-18, historial-y-arreglos-de-pipeline): sin esto,
-        # record_motor_usage() (LAS MANOS) nunca sabe de qué pipeline es este
-        # job -- kimi/jax_local son las facetas de la MAYORIA de los pasos
-        # reales (Ruling 7, Task 1), asi que sin este campo el historial
-        # seguiria sin poder sumar el costo real para casi ningun pipeline.
-        "pipeline_id": pipeline.pipeline_id,
-    }
-    resp = await obtener_cliente_http().post(f"{LAS_MANOS_BASE}/motor/dispatch", json=payload, timeout=30,
-                                           headers=encabezado_propio(IDENTIDAD_JACOBS))
-    resp.raise_for_status()
-    dispatch = resp.json()
-
-    job_id = dispatch.get("job_id")
-    if dispatch.get("status") == "rejected":
-        reason = dispatch.get("rejected_reason", "sin razón")
-        logger.error(
-            "Motor Registry RECHAZÓ job (caller=jacobs, capability=%s, motor=%s): %s",
-            step.capability, step.motor or step.facet, reason,
-        )
-        raise RuntimeError(f"Motor Registry rechazó el job: {reason}")
-    if not job_id:
-        raise RuntimeError(f"Motor Registry no devolvió job_id: {dispatch}")
-
-    # Polling hasta timeout
-    try:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            await asyncio.sleep(MOTOR_POLL_INTERVAL)
-            resp = await obtener_cliente_http().get(f"{LAS_MANOS_BASE}/motor/job/{job_id}", timeout=15,
-                                                      headers=encabezado_propio(IDENTIDAD_JACOBS))
-            resp.raise_for_status()
-            job = resp.json()
-
-            status = job.get("status", "")
-            if status == "completed":
-                # Ronda de arreglo 1 de Task 1 (2026-09-18): con
-                # MotorJobView.model expuesto (las_manos/motor_registry/
-                # models.py + worker.py, esta misma ronda) el job trae el
-                # model_id REAL que despachó -- ya no None por default.
-                # kimi/jax_local son las facetas de la mayoría de los pasos
-                # reales; sin esto, casi todo el historial decía "Modelo
-                # desconocido".
-                step.modelo_real = job.get("model")
-                return {
-                    "success":        True,
-                    "facet":          step.facet,
-                    "job_id":         job_id,
-                    "result":         await _read_motor_result(job),
-                    "result_full":    job,
-                }
-            if status in ("failed", "cancelled", "rejected"):
-                raise RuntimeError(
-                    f"Motor job {job_id} terminó en estado '{status}': "
-                    f"{job.get('error', '')}"
-                )
-
-        raise asyncio.TimeoutError(
-            f"Motor job {job_id} no completó en {timeout}s"
-        )
-    except (asyncio.CancelledError, asyncio.TimeoutError):
-        # Vencer el paso sin avisarle a LAS MANOS deja el job corriendo y
-        # cobrando (pipeline b8f80733, 2026-09-12: kimi siguió 3 min después
-        # del aborto). Dos caminos llegan acá: el wait_for de _run_step
-        # (CancelledError) y el deadline de este polling (TimeoutError).
-        await _cancel_motor_job(job_id)
-        raise
+    """Bloquea el despacho legacy hasta que exista ejecución gobernada por paso."""
+    raise GovernedExecutionRequiredError("GOVERNED_EXECUTION_REQUIRED")
 
 
 async def _read_motor_result(job: dict) -> str:

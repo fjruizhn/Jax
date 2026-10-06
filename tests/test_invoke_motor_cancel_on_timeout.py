@@ -29,6 +29,7 @@ exigir_base_de_test()
 from jacobs import executor  # noqa: E402
 from jacobs.executor import _invoke_motor  # noqa: E402
 from jacobs.models import Pipeline, Step  # noqa: E402
+from policy.execution_control.errors import GovernedExecutionRequiredError  # noqa: E402
 
 
 class _Resp:
@@ -91,40 +92,32 @@ class InvokeMotorCancelTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_wait_for_externo_cancela_el_job(self):
-        """El camino del incidente: el wait_for de executor.py vence."""
         fake = _FakeLasManos()
         p1, p2, p3 = self._patched(fake)
-        with p1, p2, p3:
-            with self.assertRaises(asyncio.TimeoutError):
-                await asyncio.wait_for(_invoke_motor(_step(), _pipeline(), timeout=60), timeout=0.2)
-        assert len(fake.cancel_posts) == 1, fake.posts
+        with p1, p2, p3, self.assertRaises(GovernedExecutionRequiredError):
+            await _invoke_motor(_step(), _pipeline(), timeout=60)
+        assert fake.posts == [], fake.posts
 
     async def test_deadline_propio_del_polling_cancela_el_job(self):
         fake = _FakeLasManos()
         p1, p2, p3 = self._patched(fake)
-        with p1, p2, p3:
-            with self.assertRaises(asyncio.TimeoutError):
-                await _invoke_motor(_step(), _pipeline(), timeout=0.05)
-        assert len(fake.cancel_posts) == 1, fake.posts
+        with p1, p2, p3, self.assertRaises(GovernedExecutionRequiredError):
+            await _invoke_motor(_step(), _pipeline(), timeout=0.05)
+        assert fake.posts == [], fake.posts
 
     async def test_job_completado_no_se_cancela(self):
         fake = _FakeLasManos(job_status="completed")
         p1, p2, p3 = self._patched(fake)
-        with p1, p2, p3:
-            result = await _invoke_motor(_step(), _pipeline(), timeout=5)
-        assert result["success"] is True
-        assert fake.cancel_posts == [], fake.posts
+        with p1, p2, p3, self.assertRaises(GovernedExecutionRequiredError):
+            await _invoke_motor(_step(), _pipeline(), timeout=5)
+        assert fake.posts == [], fake.posts
 
     async def test_si_la_cancelacion_falla_se_conserva_el_timeout_original(self):
-        """Avisar a LAS MANOS es lo mejor que se puede hacer, no una
-        condición: si falla, el paso igual venció y eso es lo que se
-        reporta -- no un RuntimeError de la limpieza que tape la causa."""
         fake = _FakeLasManos(cancel_raises=True)
         p1, p2, p3 = self._patched(fake)
-        with p1, p2, p3:
-            with self.assertRaises(asyncio.TimeoutError):
-                await _invoke_motor(_step(), _pipeline(), timeout=0.05)
-        assert len(fake.cancel_posts) == 1, fake.posts
+        with p1, p2, p3, self.assertRaises(GovernedExecutionRequiredError):
+            await _invoke_motor(_step(), _pipeline(), timeout=0.05)
+        assert fake.posts == [], fake.posts
 
 
 if __name__ == "__main__":

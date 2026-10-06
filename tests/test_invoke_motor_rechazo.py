@@ -14,42 +14,28 @@ En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
-import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from base_de_test import exigir_base_de_test  # noqa: E402
 
 exigir_base_de_test()
 
 from jacobs.executor import _invoke_motor  # noqa: E402
+from policy.execution_control.errors import GovernedExecutionRequiredError  # noqa: E402
 from jacobs.models import Pipeline, Step  # noqa: E402
 
-_REASON = "timeout_seconds=900 excede el techo de 'generate' (5 min = 300s)"
-
-
-class _Resp:
-    status_code = 202
-
-    def json(self):
-        return {"job_id": "j1", "status": "rejected", "rejected_reason": _REASON}
-
-    def raise_for_status(self):
-        pass
-
-
 class InvokeMotorRechazoTest(unittest.IsolatedAsyncioTestCase):
-    async def test_el_rechazo_falla_con_su_motivo_real(self):
-        async def fake_post(client_self, url, **kw):
-            return _Resp()
-
+    async def test_motor_sin_ejecucion_gobernada_no_hace_http(self):
         step = Step(facet="kimi", capability="generate", motor="kimi")
         pipeline = Pipeline(name="t", invoked_by="t", user_id="1", tenant_id="1", mode="dry_run")
-        with patch("httpx.AsyncClient.post", fake_post):
-            with self.assertRaises(RuntimeError) as ctx:
+        cliente = Mock()
+        cliente.post = AsyncMock(side_effect=AssertionError("no debe despachar al Motor Registry"))
+        with patch("jacobs.executor.obtener_cliente_http", return_value=cliente) as obtener_cliente:
+            with self.assertRaises(GovernedExecutionRequiredError):
                 await _invoke_motor(step, pipeline, timeout=900)
-
-        assert _REASON in str(ctx.exception), str(ctx.exception)
+        obtener_cliente.assert_not_called()
+        cliente.post.assert_not_awaited()
 
 
 if __name__ == "__main__":

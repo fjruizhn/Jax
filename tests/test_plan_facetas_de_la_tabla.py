@@ -210,22 +210,56 @@ def test_el_menu_de_qwen_solo_ofrece_las_facetas_activas(monkeypatch):
     asyncio.run(correr())
     [payload] = cliente.posts
     texto = _mensaje_de_usuario(payload)
-    for inactiva in ("thot", "ada", "hyde"):
-        assert not _nombra(texto, inactiva), f"qwen ve '{inactiva}' en el menú sin estar activa:\n{texto}"
-    for activa in ("hipatia", "jekyll", "kimi"):
+    for inactiva in ("thot", "ada", "hyde", "kimi", "jax_local"):
+        assert not _nombra(texto, inactiva), f"qwen ve '{inactiva}' no ejecutable en el menú:\n{texto}"
+    for activa in ("hipatia", "jekyll"):
         assert _nombra(texto, activa), f"falta '{activa}' en el menú:\n{texto}"
 
 
 def test_el_menu_de_ada_solo_ofrece_las_facetas_activas(monkeypatch):
     cliente, _, _, correr = _correr_con_cerebros(
         monkeypatch, {"ada", "thot", "kimi", "jax_local"}, "x" * 250,
-        '[{"facet": "kimi", "capability": "analysis", "prompt": "x"}]')
+        '[{"facet": "ada", "capability": "implementation", "prompt": "x"}]')
     asyncio.run(correr())
     [payload] = cliente.streams
     texto = _mensaje_de_usuario(payload) + payload["messages"][0]["content"]
-    for inactiva in ("hipatia", "jekyll", "hyde"):
-        assert not _nombra(texto, inactiva), f"Ada ve '{inactiva}' sin estar activa"
-    assert _nombra(texto, "kimi")
+    menu = texto.split("Facetas disponibles:", 1)[1].split(".\\n", 1)[0]
+    for no_disponible in ("kimi", "jax_local", "hyde"):
+        assert not _nombra(menu, no_disponible), f"Ada ofrece '{no_disponible}'"
+    assert _nombra(menu, "ada")
+    from jacobs.plan import _menu_de_facetas
+    menu = _menu_de_facetas(frozenset({"ada", "thot", "kimi", "jax_local", "hyde"}), "thot")
+    assert {fila[0] for fila in menu} == {"ada"}
+
+
+def test_plan_y_preflight_rechazan_facetas_sin_dispatch_gobernado(monkeypatch):
+    from fastapi import HTTPException
+    from jacobs import store
+    from jacobs.models import StepSpec
+
+    monkeypatch.setattr(routes, "check_kill_switch", lambda: False)
+    evento = AsyncMock()
+    monkeypatch.setattr(store, "event_append", evento)
+    sin_prevuelo = AsyncMock()
+    monkeypatch.setattr(routes, "_prevuelo_o_503", sin_prevuelo)
+
+    for facet in ("kimi", "jax_local", "hyde"):
+        with pytest.raises(HTTPException) as rechazo_plan:
+            asyncio.run(routes.plan_only(routes.PlanRequest(
+                name="prueba", objective="x", invoked_by="plataforma", mode="dry_run",
+                steps=[StepSpec(facet=facet, capability="analysis", prompt="x")],
+            )))
+        assert rechazo_plan.value.status_code == 422
+        assert rechazo_plan.value.detail["code"] == "motor_gobernado_no_disponible"
+
+        with pytest.raises(HTTPException) as rechazo_prevuelo:
+            asyncio.run(routes.preflight(routes.PreflightRequest(
+                invoked_by="plataforma", objective="x",
+                steps=[StepSpec(facet=facet, capability="analysis", prompt="x")],
+            )))
+        assert rechazo_prevuelo.value.status_code == 422
+        assert rechazo_prevuelo.value.detail["code"] == "motor_gobernado_no_disponible"
+    sin_prevuelo.assert_not_awaited()
 
 
 def test_ada_no_se_consulta_si_el_patron_modular_pide_una_faceta_inactiva(monkeypatch):
@@ -235,7 +269,8 @@ def test_ada_no_se_consulta_si_el_patron_modular_pide_una_faceta_inactiva(monkey
     cliente, resolver, evento, correr = _correr_con_cerebros(
         monkeypatch, {"ada", "kimi", "jax_local"}, "x" * 250,
         '[{"facet": "kimi", "capability": "analysis", "prompt": "x"}]')
-    asyncio.run(correr())
+    with pytest.raises(plan_mod.MotorGobernadoNoDisponible):
+        asyncio.run(correr())
     assert cliente.streams == [], "Ada se consultó con thot inactiva"
     assert "ada" not in [c.args[0] for c in resolver.await_args_list]
     pipeline_id, tipo, payload = evento.await_args_list[0].args

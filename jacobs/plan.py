@@ -17,7 +17,7 @@ import uuid
 import logging
 from dataclasses import dataclass, field
 
-from jacobs.models import MAX_STEPS_PER_PIPELINE, MOTOR_FACETS, Step
+from jacobs.models import MAX_STEPS_PER_PIPELINE, MOTOR_FACETS, Step, faceta_ejecutable_en_pipeline
 from facet_resolver import resolve_facet, FacetUnavailableError
 from model_catalog import record_resolved_version_safe
 from contrato_dispatch import ModelDispatchConfigError, limite_de_salida
@@ -179,7 +179,7 @@ def _texto_cleanroom(arbitro_faceta: str) -> str:
         "el árbitro que Jacobs agrega solo al final del plan, después de este que "
         "estás generando -- ve TODOS los steps, no solo los anteriores a él, así que "
         "hace mejor esa auditoría que un step intermedio. Un facet no se audita a sí "
-        "mismo. Si los módulos backend y frontend fueron diseñados por 'ada' y 'kimi', "
+        "mismo. Si los módulos backend y frontend fueron diseñados por 'ada' y 'jekyll', "
         "un step que los audite debe usar un facet que no sea ninguno de los dos (y "
         f"que tampoco sea '{arbitro_faceta}'). La revisión independiente es la "
         "garantía de calidad: quien produce no es quien aprueba.\n"
@@ -305,6 +305,7 @@ def _menu_de_facetas(
     return [
         fila for fila in _MENU_DE_FACETAS
         if fila[0] in facetas_activas and fila[0] != arbitro_faceta
+        and faceta_ejecutable_en_pipeline(fila[0])
     ]
 
 
@@ -353,6 +354,28 @@ class PlanRejected(Exception):
             for v in violations
         )
         super().__init__(f"Plan rechazado -- {len(violations)} step(s) inejecutable(s): {detail}")
+
+
+class MotorGobernadoNoDisponible(PlanRejected):
+    """El paso necesita una ruta de ejecución gobernada que aún no existe."""
+    code = "motor_gobernado_no_disponible"
+
+
+def validar_facetas_ejecutables(steps: list[Step], pendientes: set[int] | None = None) -> None:
+    """Falla antes de cualquier despacho/pref-vuelo si el plan contiene un
+    paso sin ruta de ejecución gobernada disponible."""
+    indices = set(pendientes) if pendientes is not None else None
+    violaciones = [
+        PlanViolation(
+            step.step_index, step.facet, step.motor, step.capability,
+            f"la faceta '{step.facet}' requiere ejecución gobernada por paso no disponible",
+        )
+        for step in steps
+        if (indices is None or step.step_index in indices)
+        and not faceta_ejecutable_en_pipeline(step.facet)
+    ]
+    if violaciones:
+        raise MotorGobernadoNoDisponible(violaciones)
 
 
 def _check_cleanroom(steps: list) -> list[PlanViolation]:
@@ -425,11 +448,15 @@ def _build_capability_hint(governance: dict) -> str:
     paralelas que puedan divergir."""
     motors = governance["motors"]
     caps = governance["capabilities"]
-    tool_motors = sorted(m for m, has_tools in motors.items() if has_tools)
+    tool_motors = sorted(
+        m for m, has_tools in motors.items()
+        if has_tools and faceta_ejecutable_en_pipeline(m)
+    )
     by_motor: dict[str, set[str]] = {}
     for cap_key, entry in caps.items():
         for motor_key in entry["allowed_motors"]:
-            by_motor.setdefault(motor_key, set()).add(cap_key)
+            if faceta_ejecutable_en_pipeline(motor_key):
+                by_motor.setdefault(motor_key, set()).add(cap_key)
     if tool_motors:
         regla_archivos = (
             "\nREGLA FIJA (no es una elección): si el objetivo necesita LEER o "
@@ -716,6 +743,7 @@ class PlanBuilder:
                 f"{len(steps)} pasos (incluido el árbitro que agrega Jacobs) "
                 f"excede el límite duro de {MAX_STEPS_PER_PIPELINE}",
             )])
+        validar_facetas_ejecutables(steps)
         # T2/T3 (2026-08-21): gate único para AMBOS caminos -- vive acá, no
         # dentro de _from_spec ni _from_objective, para que ningún origen de
         # plan pueda saltárselo. cleanroom antes solo corría dentro de

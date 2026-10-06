@@ -24,6 +24,13 @@ HTTP_FACETS = frozenset({"hipatia", "jekyll", "thot", "ada"})
 MOTOR_FACETS = frozenset({"kimi", "jax_local"})
 
 
+def faceta_ejecutable_en_pipeline(faceta: str | None) -> bool:
+    """Indica si Jacobs puede despachar esta faceta con ejecución gobernada
+    por paso. Motor Registry y Hyde siguen cerrados hasta que exista ese
+    contrato en la ruta de pipeline."""
+    return faceta not in MOTOR_FACETS and faceta != "hyde"
+
+
 class PipelineStatus(str, Enum):
     pending     = "pending"
     running     = "running"
