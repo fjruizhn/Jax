@@ -95,11 +95,11 @@ def _indices_hosts_ssh(tokens, inicio=0):
         "b", "B", "c", "D", "E", "e", "F", "I", "i", "J", "L", "l",
         "m", "O", "o", "P", "p", "Q", "R", "S", "W", "w",
     }
-    valores_wrapper = {"-u", "-g", "-h", "-p", "-r", "-t", "-C", "-T", "-D", "-R"}
+    valores_wrapper = _indices_valores_sudo(tokens)
     hosts = set()
     i = inicio
     while i < len(tokens):
-        if tokens[i] != "ssh" or i > inicio and tokens[i - 1] in valores_wrapper:
+        if tokens[i] != "ssh" or i in valores_wrapper:
             i += 1
             continue
         k = i + 1
@@ -126,6 +126,48 @@ def _indices_hosts_ssh(tokens, inicio=0):
         # Continue after the host to discover nested SSH in the remote command.
         i = k + 1
     return hosts
+
+
+def _indices_valores_sudo(tokens):
+    """Índices consumidos como valores de opciones de sudo, sin ejecutar nada."""
+    cortas_con_valor = {"C", "D", "g", "h", "p", "r", "t", "u"}
+    largas_con_valor = {
+        "--chdir", "--chroot", "--close-from", "--command-timeout", "--group",
+        "--host", "--other-user", "--prompt", "--role", "--type", "--user",
+    }
+    valores = set()
+    for i, token in enumerate(tokens):
+        if token != "sudo":
+            continue
+        k = i + 1
+        while k < len(tokens):
+            opcion = tokens[k]
+            if opcion == "--":
+                break
+            if opcion.startswith("--"):
+                nombre, tiene_igual, _ = opcion.partition("=")
+                if nombre in largas_con_valor and not tiene_igual and k + 1 < len(tokens):
+                    valores.add(k + 1)
+                    k += 2
+                else:
+                    k += 1
+                continue
+            if opcion.startswith("-") and opcion != "-":
+                grupo = opcion[1:]
+                for posicion, letra in enumerate(grupo):
+                    if letra not in cortas_con_valor:
+                        continue
+                    if posicion == len(grupo) - 1 and k + 1 < len(tokens):
+                        valores.add(k + 1)
+                        k += 2
+                    else:
+                        k += 1
+                    break
+                else:
+                    k += 1
+                continue
+            break
+    return valores
 
 
 def _fuerza_sin_volumenes(banderas):
@@ -407,6 +449,10 @@ FUGAN_SHELL = [
     "ssh gateway ssh docker exec docker rm -f c",
     "ssh gateway exec ssh docker exec docker rm -f c",
     "sudo -u rm docker rm -f c",
+    "sudo --user ssh docker rm -f c",
+    "sudo -nu ssh docker rm -f c",
+    "sudo --group ssh docker container remove -f c",
+    "sudo -ng ssh docker container remove -f c",
     "sudo -E docker rm -f c",
     "xargs docker rm -f",
     "sudo -n docker rm \\\n   -f \"$C\"",
@@ -508,6 +554,10 @@ FUGAN_PYTHON = [
     'subprocess.run("docker rm -f x", shell=True)',
     'subprocess.run(f"docker compose -f {yml} rm -f", shell=True)',
     'subprocess.run(f"sudo -u docker docker rm -f {n}", shell=True)',
+    'subprocess.run("sudo --user ssh docker rm -f x", shell=True)',
+    'subprocess.run("sudo -nu ssh docker rm -f x", shell=True)',
+    'subprocess.run("sudo --group ssh docker container remove -f x", shell=True)',
+    'subprocess.run("sudo -ng ssh docker container remove -f x", shell=True)',
     'subprocess.run("docker container remove -f x", shell=True)',
     'cmd = "docker container remove --force x"',
     '["docker", "rm", "-f", "-v=false", n]',
