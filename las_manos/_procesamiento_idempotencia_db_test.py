@@ -98,6 +98,12 @@ def test_init_tabla_es_idempotente():
     assert ("uq_procesamiento_idem_clave", 0, "clave") in indices
 
 
+def test_el_hash_corto_del_log_es_el_mismo_que_calcula_jax_platform():
+    """Vector fijo, copiado a backend/tests/test_proyectos_documentos_despachador.py de jax-platform
+    (`abreviar_clave`): con el mismo hash corto las lineas de log de las dos puntas se unen."""
+    assert idem.abreviar("jxp-doc-a2dad605d3914f47985f83924083ec04") == "776783dd9d97"
+
+
 def test_el_segundo_reclamo_de_la_misma_clave_da_el_mismo_trabajo():
     async def todo():
         await idem.init_tabla()
