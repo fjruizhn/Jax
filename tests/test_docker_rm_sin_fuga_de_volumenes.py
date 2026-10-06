@@ -74,7 +74,7 @@ def culpables_shell(texto):
                 continue
             # Hacia atrás, dentro del mismo comando: ¿lo llama docker?
             es_docker = dentro = False
-            for j in range(i - 1, max(-1, i - 8), -1):
+            for j in range(i - 1, -1, -1):
                 previo = toks[j]
                 if previo in _SEPARADORES:
                     break
@@ -296,6 +296,10 @@ def test_whitelist_no_se_extiende_a_prefijos_dinamicos_ni_contextos_cercanos():
     assert culpables_en_texto("docker $SUBCOMMAND rm -f recurso", es_python=False)
     assert culpables_en_texto("docker context export rm -f recurso", es_python=False)
     assert not culpables_en_texto("docker rmi -f imagen", es_python=False)
+    assert culpables_en_texto(
+        "docker compose -f a -f b -f c -f d -f e rm -f svc", es_python=False
+    )
+    assert culpables_en_texto("docker compose --workdir /x rm -f svc", es_python=False)
 
 
 def test_python_que_no_parsea_falla_cerrado_con_la_ruta():
