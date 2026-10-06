@@ -744,6 +744,13 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
         r = await self._call("read_file", {"path": "sub/../.env"})
         assert r["decision"] == "rejected", r
 
+        (self.workspace / "safe" / "subdir").mkdir(parents=True)
+        (self.workspace / "safe" / "secrets").mkdir()
+        (self.workspace / "safe" / "secrets" / "x").write_text("safe target")
+        (self.workspace / "alias_safe").symlink_to(self.workspace / "safe" / "subdir", target_is_directory=True)
+        r = await self._call("read_file", {"path": "alias_safe/../secrets/x"})
+        assert r["decision"] == "rejected", r
+
     async def test_case_variant_no_bypassa_ni_falsea_bloqueo(self):
         """.ENV/Secrets/ no coinciden con archivos reales en minúscula
         (filesystem case-sensitive) -- el resultado correcto es 'no
@@ -786,6 +793,71 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
                     assert event.args[1] == "TOOL_CALL_REJECTED", event
                     assert event.args[2]["tool_name"] == tool_name, event
         assert (self.workspace / "proyectos/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt").read_text() == "documento del proyecto\n"
+
+    async def test_worker_rechaza_si_directorio_seguro_se_vuelve_symlink_a_proyectos(self):
+        original_resolve = tool_authority.resolve_jailed_path
+        for tool_name, safe_name, content in (
+            ("read_file", "read_safe", "no debe escribirse"),
+            ("write_file", "write_safe", "no debe escribirse"),
+        ):
+            path = f"{safe_name}/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt"
+            args = {"path": path} if tool_name == "read_file" else {"path": path, "content": content}
+            safe = self.workspace / safe_name
+            safe.mkdir()
+            (safe / "texto.txt").write_text("no secreto")
+
+            def resolve_y_cambia(path_str, forbidden_paths):
+                result = original_resolve(path_str, forbidden_paths)
+                safe.rename(self.workspace / f"safe-original-{safe_name}")
+                safe.symlink_to(self.workspace / "proyectos", target_is_directory=True)
+                return result
+
+            with patch.object(tool_authority, "resolve_jailed_path", resolve_y_cambia):
+                result = await self._call(tool_name, args)
+
+            assert result["decision"] == "rejected", (tool_name, result)
+            tool_authority.event_append.assert_awaited_with(
+                "test-job-id", "TOOL_CALL_REJECTED", unittest.mock.ANY,
+            )
+            assert (self.workspace / "proyectos/0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt").read_text() == "documento del proyecto\n"
+
+    async def test_worker_rechaza_directorio_proyectos_renombrado_a_ruta_segura(self):
+        projects = self.workspace / "proyectos"
+        safe = self.workspace / "safe"
+        safe.mkdir()
+        rel = Path("0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a/procesado/x/texto.txt")
+        original_resolve = tool_authority.resolve_jailed_path
+
+        for tool_name in ("read_file", "write_file"):
+            safe_original = self.workspace / f"safe-original-{tool_name}"
+            projects_moved = False
+
+            def move_projects_after_resolve(path_str, forbidden_paths):
+                nonlocal projects_moved
+                result = original_resolve(path_str, forbidden_paths)
+                safe.rename(safe_original)
+                projects.rename(safe)
+                projects_moved = True
+                return result
+
+            def restore_projects():
+                if projects_moved:
+                    safe.rename(projects)
+                    safe_original.rename(safe)
+
+            path = f"safe/{rel.as_posix()}"
+            args = {"path": path} if tool_name == "read_file" else {"path": path, "content": "SOBRESCRITO"}
+            try:
+                with patch.object(tool_authority, "resolve_jailed_path", move_projects_after_resolve):
+                    result = await self._call(tool_name, args)
+            finally:
+                restore_projects()
+            assert result["decision"] == "rejected", (tool_name, result)
+            assert (projects / rel).read_text() == "documento del proyecto\n"
+
+    async def test_write_file_a_raiz_del_workspace_no_lanza(self):
+        result = await self._call("write_file", {"path": ".", "content": "no"})
+        assert result["decision"] in {"rejected", "execution_error"}, result
 
     def test_jail_compartido_de_procesamiento_sigue_permitiendo_proyectos(self):
         resolved, reason = tool_authority.resolve_jailed_path(

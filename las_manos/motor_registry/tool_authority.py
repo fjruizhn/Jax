@@ -45,7 +45,6 @@ import logging
 import os
 import re
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +60,10 @@ except ImportError:
 from motor_registry.catalog import MotorCatalog
 
 logger = logging.getLogger("motor_registry.tool_authority")
+
+
+class ForbiddenWorkspacePath(PermissionError):
+    """La ruta abierta cae en el árbol de proyectos o sale del workspace."""
 
 # JAX_WORKSPACE_DIR (/etc/jax/.env) es la única fuente de verdad -- mismo
 # valor que jacobs/executor.py::HYDE_WORKSPACE_DIR y
@@ -243,34 +246,48 @@ async def authorize_and_execute_tool_call(
         )
 
     path_str = args.get("path")
-    resolved, jail_reason = resolve_jailed_path(path_str, cap.forbidden_paths)
-    if jail_reason is not None:
+    try:
+        projects_fd = _open_projects_root_fd()
+    except OSError as exc:
         return await _reject(
             job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
-            reason=jail_reason,
+            reason=f"no se pudo anclar el directorio protegido proyectos/: {exc}",
         )
-
-    if capability_key in {"file_read", "file_write"}:
-        projects_root = (WORKSPACE_ROOT / "proyectos").resolve(strict=False)
-        if resolved == projects_root or projects_root in resolved.parents:
+    try:
+        resolved, jail_reason = resolve_jailed_path(path_str, cap.forbidden_paths)
+        if jail_reason is not None:
             return await _reject(
                 job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
-                reason=f"ruta restringida de proyectos: '{path_str}' resuelve dentro de '{projects_root}'",
+                reason=jail_reason,
             )
 
-    if tool_name == "write_file":
-        content = args.get("content")
-        if not isinstance(content, str):
-            return await _reject(
-                job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
-                reason="falta 'content' (string) en los argumentos",
-            )
-        return await _write_file(
-            job_id=job_id, tool_name=tool_name, caller=caller, resolved=resolved,
-            content=content, tool_call_id=tool_call_id,
-        )
+        if capability_key in {"file_read", "file_write"}:
+            relative_parts = resolved.relative_to(WORKSPACE_ROOT).parts
+            # Rechazar sobre la ruta canónica y fijar proyectos_fd antes de
+            # resolverla; la ejecución también comprueba la identidad del
+            # árbol realmente abierto.
+            if relative_parts and relative_parts[0] == "proyectos":
+                return await _reject(
+                    job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
+                    reason=f"ruta restringida de proyectos: '{path_str}' resuelve dentro de 'proyectos/'",
+                )
 
-    return await _read_file(job_id=job_id, tool_name=tool_name, caller=caller, resolved=resolved)
+        if tool_name == "write_file":
+            content = args.get("content")
+            if not isinstance(content, str):
+                return await _reject(
+                    job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
+                    reason="falta 'content' (string) en los argumentos",
+                )
+            return await _write_file(
+                job_id=job_id, tool_name=tool_name, caller=caller, resolved=resolved,
+                path_str=path_str, projects_fd=projects_fd, content=content, tool_call_id=tool_call_id,
+            )
+
+        return await _read_file(job_id=job_id, tool_name=tool_name, caller=caller, resolved=resolved, path_str=path_str, projects_fd=projects_fd)
+    finally:
+        if projects_fd is not None:
+            os.close(projects_fd)
 
 
 # --- Sobre fuente no confiable (contenido de read_file) ---
@@ -471,28 +488,32 @@ def _wrap_untrusted_source(rel: str, content: str) -> str:
     return f'<untrusted_source path="{safe_rel}" sha256="{sha}">\n{safe}\n</untrusted_source>'
 
 
-async def _read_file(*, job_id: str, tool_name: str, caller: str, resolved: Path) -> dict:
+async def _read_file(*, job_id: str, tool_name: str, caller: str, resolved: Path, path_str: str, projects_fd: int | None) -> dict:
     if not resolved.exists():
         return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason="archivo no encontrado")
     if resolved.is_dir():
         return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason="la ruta es un directorio, no un archivo")
 
     try:
-        size = resolved.stat().st_size
+        fd = _open_workspace_file(path_str, os.O_RDONLY, projects_fd)
+        with os.fdopen(fd, "rb") as source:
+            stat = os.fstat(source.fileno())
+            size = stat.st_size
+            raw = source.read(MAX_READ_BYTES + 1)
     except OSError as exc:
-        return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"no se pudo leer metadata del archivo: {exc}")
+        if isinstance(exc, ForbiddenWorkspacePath):
+            return await _reject(job_id=job_id, tool_name=tool_name, caller=caller, reason=str(exc))
+        if isinstance(exc, PermissionError):
+            return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason="sin permisos de lectura")
+        return await _reject(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"ruta cambió o contiene symlink durante la apertura segura: {exc}")
     if size > MAX_READ_BYTES:
         return await _execution_error(
             job_id=job_id, tool_name=tool_name, caller=caller,
             reason=f"archivo excede el límite de lectura ({size} bytes > {MAX_READ_BYTES})",
         )
 
-    try:
-        raw = resolved.read_bytes()
-    except PermissionError:
-        return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason="sin permisos de lectura")
-    except OSError as exc:
-        return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"error de OS al leer: {exc}")
+    if len(raw) > MAX_READ_BYTES:
+        return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"archivo excede el límite de lectura ({size} bytes > {MAX_READ_BYTES})")
 
     try:
         content = raw.decode("utf-8")
@@ -509,6 +530,132 @@ async def _read_file(*, job_id: str, tool_name: str, caller: str, resolved: Path
     # (MAX_TOTAL_READ_BYTES) contra lo que el archivo pesa de verdad, no
     # contra bytes que agregamos nosotros (tags, path, sha256 de 64 hex).
     return {"tool_name": tool_name, "decision": "executed", "reason": None, "content": wrapped, "bytes_read": size}
+
+
+def _open_projects_root_fd() -> int | None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    root_fd = os.open(WORKSPACE_ROOT, flags)
+    try:
+        try:
+            return os.open("proyectos", flags, dir_fd=root_fd)
+        except FileNotFoundError:
+            return None
+    finally:
+        os.close(root_fd)
+
+
+def _same_directory(left_fd: int, right_fd: int) -> bool:
+    left, right = os.fstat(left_fd), os.fstat(right_fd)
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _inside_projects(directory_fd: int, projects_fd: int | None) -> bool:
+    if projects_fd is None:
+        return False
+    current = os.dup(directory_fd)
+    try:
+        for _ in range(128):
+            if _same_directory(current, projects_fd):
+                return True
+            parent = os.open("..", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0), dir_fd=current)
+            if _same_directory(current, parent):
+                os.close(parent)
+                return False
+            os.close(current)
+            current = parent
+        return True
+    finally:
+        os.close(current)
+
+
+def _path_components(path_str: str) -> tuple[str, ...]:
+    """Conserva `..` para recorrerlo con dirfd y no saltar symlinks léxicos."""
+    parts = tuple(component for component in Path(path_str).parts if component not in {"", "."})
+    if not parts:
+        raise IsADirectoryError(path_str)
+    return parts
+
+
+def _open_workspace_file(path_str: str, flags: int, projects_fd: int | None) -> int:
+    """Abre la ruta original con dirfd/O_NOFOLLOW, sin seguir symlinks."""
+    parts = _path_components(path_str)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    current = os.open(WORKSPACE_ROOT, directory_flags)
+    stack = [current]
+    try:
+        for index, component in enumerate(parts):
+            if component == "..":
+                if len(stack) == 1:
+                    raise ForbiddenWorkspacePath("la ruta sale del workspace")
+                os.close(stack.pop())
+                current = stack[-1]
+                continue
+            if len(stack) == 1 and component == "proyectos":
+                raise ForbiddenWorkspacePath("ruta restringida de proyectos")
+            has_more = any(part != ".." for part in parts[index + 1:])
+            if has_more:
+                next_fd = os.open(component, directory_flags, dir_fd=current)
+            else:
+                result_fd = os.open(component, flags | getattr(os, "O_NOFOLLOW", 0), dir_fd=current)
+                if _inside_projects(current, projects_fd):
+                    os.close(result_fd)
+                    raise ForbiddenWorkspacePath("la ruta abierta pertenece a proyectos/")
+                return result_fd
+            if _inside_projects(next_fd, projects_fd):
+                os.close(next_fd)
+                raise ForbiddenWorkspacePath("la ruta abierta pertenece a proyectos/")
+            stack.append(next_fd)
+            current = next_fd
+        raise IsADirectoryError(path_str)
+    finally:
+        for fd in stack:
+            os.close(fd)
+
+
+def _open_workspace_parent(path_str: str, projects_fd: int | None, *, create: bool = False) -> tuple[int, str]:
+    parts = _path_components(path_str)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    current = os.open(WORKSPACE_ROOT, directory_flags)
+    stack = [current]
+    try:
+        for index, component in enumerate(parts[:-1]):
+            if component == "..":
+                if len(stack) == 1:
+                    raise ForbiddenWorkspacePath("la ruta sale del workspace")
+                os.close(stack.pop())
+                current = stack[-1]
+                continue
+            if len(stack) == 1 and component == "proyectos":
+                raise ForbiddenWorkspacePath("ruta restringida de proyectos")
+            try:
+                next_fd = os.open(component, directory_flags, dir_fd=current)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, dir_fd=current)
+                next_fd = os.open(component, directory_flags, dir_fd=current)
+            if _inside_projects(next_fd, projects_fd):
+                os.close(next_fd)
+                raise ForbiddenWorkspacePath("la ruta abierta pertenece a proyectos/")
+            stack.append(next_fd)
+            current = next_fd
+        leaf = parts[-1]
+        if leaf == "..":
+            if len(stack) == 1:
+                raise ForbiddenWorkspacePath("la ruta sale del workspace")
+            os.close(stack.pop())
+            current = stack[-1]
+            raise IsADirectoryError(path_str)
+        if len(stack) == 1 and leaf == "proyectos":
+            raise ForbiddenWorkspacePath("ruta restringida de proyectos")
+        if _inside_projects(current, projects_fd):
+            raise ForbiddenWorkspacePath("la ruta abierta pertenece a proyectos/")
+        stack.pop()
+        return current, leaf
+    except BaseException:
+        for fd in stack:
+            os.close(fd)
+        raise
 
 
 def _git_commit_write(resolved: Path, *, job_id: str, tool_call_id: str) -> tuple[bool, str | None, str | None]:
@@ -548,7 +695,7 @@ def _git_commit_write(resolved: Path, *, job_id: str, tool_call_id: str) -> tupl
         return False, None, f"{type(exc).__name__}: {exc}"
 
 
-async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Path, content: str, tool_call_id: str) -> dict:
+async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Path, path_str: str, projects_fd: int | None, content: str, tool_call_id: str) -> dict:
     size = len(content.encode("utf-8"))
     if size > MAX_WRITE_BYTES:
         return await _execution_error(
@@ -562,10 +709,8 @@ async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Pat
     # normaliza igual sin poder seguir symlinks que todavía no existen, lo
     # cual es correcto: un componente que no existe no puede ser un symlink
     # que escape el jail).
-    try:
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"no se pudo crear el directorio: {exc}")
+    parent_fd = -1
+    tmp_name = f".{resolved.name}.{os.urandom(8).hex()}.tmp"
 
     # Escritura atómica: temp file en el MISMO directorio (garantiza que
     # os.replace sea un rename atómico dentro del mismo filesystem, no una
@@ -574,7 +719,8 @@ async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Pat
     # permitida a propósito (T2): con git detrás, el contenido previo no se
     # pierde, queda en el commit anterior.
     try:
-        fd, tmp_path = tempfile.mkstemp(dir=str(resolved.parent), prefix=f".{resolved.name}.", suffix=".tmp")
+        parent_fd, leaf = _open_workspace_parent(path_str, projects_fd, create=True)
+        fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o660, dir_fd=parent_fd)
         try:
             # B1 (auditoría 2026-09-25 de ops/permisos_proyectos.py): mkstemp() crea el
             # archivo en 0600 explícito. Bajo un directorio con ACL POSIX por defecto (el
@@ -591,15 +737,18 @@ async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Pat
             os.fchmod(fd, 0o660)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(content)
-            os.replace(tmp_path, resolved)
+            os.replace(tmp_name, leaf, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         except BaseException:
             try:
-                os.unlink(tmp_path)
+                os.unlink(tmp_name, dir_fd=parent_fd)
             except OSError:  # fail-soft: cleanup de tmp_path tras error real ya capturado arriba; el `raise` de abajo propaga la falla real, nadie depende de que este unlink haya funcionado
                 pass
             raise
     except OSError as exc:
-        return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"error de OS al escribir: {exc}")
+        return await _reject(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"ruta cambió o contiene symlink durante la apertura segura: {exc}")
+    finally:
+        if parent_fd >= 0:
+            os.close(parent_fd)
 
     committed, sha, git_error = _git_commit_write(resolved, job_id=job_id, tool_call_id=tool_call_id)
     if not committed:

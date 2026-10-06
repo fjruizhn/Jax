@@ -3,20 +3,20 @@
 Fecha: 2026-10-06  
 Rama: `fix/cerco-proyectos-tool-authority`  
 Base: `origin/master` (`f47820f5af36d7b0e4e0d5b2156ac6275c10462c`)  
-Estado: implementación y pruebas terminadas; falta auditoría adversarial, publicar PR y registrar el SHA/URL.
+Estado: implementación y pruebas focalizadas terminadas; falta auditoría adversarial satisfactoria, publicar PR y registrar SHA/URL.
 
 ## Alcance
 
-`authorize_and_execute_tool_call` rechaza y audita herramientas de archivo (`file_read` / `file_write`) cuya ruta canónica resuelve dentro de `WORKSPACE_ROOT/proyectos`. `resolve_jailed_path` queda intacta para el endpoint de Procesamiento.
+`authorize_and_execute_tool_call` rechaza y audita herramientas de archivo (`file_read` / `file_write`) cuya ruta canónica resuelve dentro de `WORKSPACE_ROOT/proyectos`. Lectura y escritura recorren la ruta original desde el workspace con descriptores de directorio y `O_NOFOLLOW`; se niegan symlinks de componentes y la raíz léxica `proyectos/`, sin volver a resolver el nombre protegido después de autorizar. `resolve_jailed_path` queda intacta para el endpoint de Procesamiento.
 
 ## Verificación
 
 - TDD rojo en master: los nuevos casos ejecutaban `read_file`/`write_file` sobre rutas de proyecto y symlink; el resolver compartido seguía aceptándolas.
 - Verde enfocado: 2 pruebas pytest, 8 subcasos.
-- `las_manos/_tool_authority_test.py`: 68 passed; `origin/master`: 66 passed.
-- `las_manos/_procesamiento_routes_test.py`: 103 passed.
+- Rojo carrera: la sustitución de `safe/` por symlink a `proyectos/` permitió lectura antes del cambio.
+- `las_manos/_tool_authority_test.py` + `las_manos/_procesamiento_routes_test.py`: 174 passed, 8 subtests; carreras cubierta para lectura/escritura, sustitución del propio `proyectos/` y `write_file(".")`.
 - Suite `tests-puros`: 3578 passed, 3 skipped, 3 xfailed, 1 fallo ambiental ajeno: `test_arranque_real_no_colisiona_con_policy_de_la_raiz` no puede leer `/etc/jax/build/implementation-identity.json` con el usuario local. No se usó esta salida para fijar el piso CI.
-- Piso CI actualizado +2: `tests-puros/out` 3537 → 3539, medido por diferencia del archivo de prueba contra `origin/master`; los 45 skips del runner no cambian.
+- Piso CI actualizado +5: `tests-puros/out` 3537 → 3542; `las_manos/_tool_authority_test.py` 66 → 71 contra `origin/master`; los 45 skips del runner no cambian.
 
 ## Límites y pendientes
 
