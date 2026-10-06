@@ -1030,20 +1030,32 @@ def test_python_lo_que_solo_marca_master_sigue_marcado_por_la_union(fuente):
     assert culpables_en_texto(fuente, es_python=True), f"master marca y la unión no: {fuente}"
 
 
-# La exención en sí: solo el `rm` marcado cuenta, y solo si va PEGADO a `docker <subcomando>`.
+# La exención en sí, probada SOBRE `_sin_la_excepcion_de_lista_blanca` (con la unión, la lectura
+# nueva marca esto por su cuenta y taparía los mutantes): solo cuenta el `rm` marcado, y solo si
+# va PEGADO a `docker <subcomando>`.
 @pytest.mark.parametrize("comando", [
     "docker volume rm -f v",
     "docker network rm -f n",
     "docker image rm -f i",
     "docker volume rm -f v & docker volume rm -f w",
 ])
-def test_la_exencion_de_recurso_con_nombre_sigue_funcionando(comando):
-    assert not culpables_en_texto(comando, es_python=False), f"falso positivo: {comando}"
-    assert not culpables_en_texto('["docker", "volume", "rm", "-f", v]', es_python=True)
+def test_la_exencion_de_recurso_con_nombre_sigue_funcionando_en_shell(comando):
+    hallazgos = culpables_shell_master(comando)
+    assert hallazgos, "master ya no marca: el caso no ejercita la exencion"
+    assert not _sin_la_excepcion_de_lista_blanca(hallazgos), f"falso positivo: {comando}"
+    assert not culpables_en_texto(comando, es_python=False)
 
 
-# Minor 3: la forma de la exención. Ensancharla (que no pida `rm` pegado al subcomando, ni
-# `docker` pegado al subcomando) exime de más: cada uno de estos es un `rm` de contenedor.
+def test_la_exencion_de_recurso_con_nombre_sigue_funcionando_en_listas():
+    for fuente in ['["docker", "volume", "rm", "-f", v]', '("docker", "network", "rm", "-f", n)']:
+        hallazgos = culpables_python_master(fuente)
+        assert hallazgos, "master ya no marca: el caso no ejercita la exencion"
+        assert not _sin_la_excepcion_de_lista_blanca(hallazgos), f"falso positivo: {fuente}"
+        assert not culpables_en_texto(fuente, es_python=True)
+
+
+# Minor 3: la forma de la exención. Ensancharla (no exigir `docker` ni el subcomando PEGADOS al
+# `rm` marcado, o exigirlos en cualquier lugar de la ventana) exime de más.
 @pytest.mark.parametrize("comando", [
     "docker volume ls rm -f c",
     "docker volume --opt rm -f c",
@@ -1051,15 +1063,61 @@ def test_la_exencion_de_recurso_con_nombre_sigue_funcionando(comando):
     "docker rm -f volume",
     "docker rm volume rm -f c",
     "docker image ls -f rm -f c",
+    "sudo volume rm -f c; docker rm -f c",
+    "docker rm volume -f c",
 ])
-def test_la_exencion_exige_docker_subcomando_rm_pegados(comando):
-    assert culpables_shell_master(comando), f"master ya no marca: {comando}"
-    assert culpables_en_texto(comando, es_python=False), f"se eximió de más: {comando}"
+def test_la_exencion_exige_docker_subcomando_rm_pegados_en_shell(comando):
+    hallazgos = culpables_shell_master(comando)
+    assert hallazgos, f"master ya no marca: {comando}"
+    assert _sin_la_excepcion_de_lista_blanca(hallazgos), f"se eximió de más: {comando}"
 
 
-def test_la_exencion_en_listas_exige_docker_subcomando_rm_pegados():
-    for fuente in ['["docker", "volume", "ls", "rm", "-f", c]',
-                   '["docker", "x", "volume", "rm", "-f", c]',
-                   '["docker", "rm", "-f", "volume", "rm"]']:
-        assert culpables_python_master(fuente), f"master ya no marca: {fuente}"
-        assert culpables_en_texto(fuente, es_python=True), f"se eximió de más: {fuente}"
+@pytest.mark.parametrize("fuente", [
+    '["docker", "volume", "ls", "rm", "-f", c]',
+    '["docker", "x", "volume", "rm", "-f", c]',
+    '["docker", "rm", "-f", "volume", "rm"]',
+    '["docker", "rm", "-f", c, "docker", "volume", "rm"]',
+    '[DOCKER, "volume", "rm", "-f", v] + ["rm", "-f", c]',
+])
+def test_la_exencion_exige_docker_subcomando_rm_pegados_en_listas(fuente):
+    hallazgos = culpables_python_master(fuente)
+    assert hallazgos, f"master ya no marca: {fuente}"
+    assert _sin_la_excepcion_de_lista_blanca(hallazgos), f"se eximió de más: {fuente}"
+
+
+def test_la_exencion_ante_dos_rm_posibles_marca_si_alguno_no_es_de_recurso_con_nombre():
+    """`docker volume rm rm -f`: la ventana tiene dos `rm` posibles y uno no va pegado a
+    `docker <subcomando>`. Ante la duda se marca (falso positivo conocido: un volumen llamado `rm`)."""
+    hallazgos = culpables_shell_master("docker volume rm rm -f")
+    assert hallazgos and _sin_la_excepcion_de_lista_blanca(hallazgos)
+    assert _sin_la_excepcion_de_lista_blanca(culpables_shell_master("volume docker x rm -f c"))
+
+
+def test_la_exencion_en_listas_no_lee_hacia_atras_con_indice_negativo():
+    """`rm` en la posición 0 no mira el final de la lista (`elts[-2]`, `elts[-1]`)."""
+    hallazgos = culpables_python_master('DOCKER + ["rm", "-f", "docker", "volume"]')
+    assert hallazgos and _sin_la_excepcion_de_lista_blanca(hallazgos)
+
+
+def test_sin_el_sha_de_master_la_comparacion_falla_y_no_vuelve_en_silencio(monkeypatch):
+    """El camino del checkout superficial sin red: ni `git show` ni `git fetch` lo traen."""
+    def siempre_falla(argv, **_):
+        return subprocess.CompletedProcess(argv, 128, stdout="", stderr="fatal: no hay red")
+    monkeypatch.setattr(subprocess, "run", siempre_falla)
+    with pytest.raises(pytest.fail.Exception, match="no se puede comparar el bloque congelado"):
+        _texto_de_este_archivo_en_master()
+
+
+def test_el_sha_de_master_se_trae_por_fetch_si_el_checkout_es_superficial(monkeypatch):
+    """`git show` falla la primera vez, `git fetch` lo trae y la segunda vez funciona."""
+    llamadas = []
+
+    def simulado(argv, **_):
+        llamadas.append(argv[1])
+        if argv[1] == "show":
+            return subprocess.CompletedProcess(argv, 0 if "fetch" in llamadas else 128,
+                                               stdout="TEXTO", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+    monkeypatch.setattr(subprocess, "run", simulado)
+    assert _texto_de_este_archivo_en_master() == "TEXTO"
+    assert llamadas == ["show", "fetch", "show"]
