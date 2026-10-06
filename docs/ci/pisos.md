@@ -906,6 +906,15 @@ matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
 sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
 piso se vuelve a fijar desde los **3537 de master**.
 
+3823 -> 3836 (2026-10-06, JAX#357 ronda 13): +13 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 289 a 302): el tipo del hallazgo de la exencion de lista blanca viene de dónde salio (shell:
+siempre ventana; Python: nodo List/Tuple del codigo, no su texto re-parseado), la prueba de que un
+hallazgo sin `rm` identificable no se exime y la de que el bloque congelado falla si el texto de
+master difiere en un byte. Medido por recoleccion (`pytest --collect-only -q`,
+PYTHONPATH=.:las_manos, SIN `JAX_DB_HOST`) con la lista exacta de 195 archivos: 3882
+recolectadas = 3836 passed + 45 skipped + 1 xfailed (3869 en 8d63035). No se corrio el paso
+completo.
+
 3788 -> 3823 (2026-10-06, JAX#357 ronda 12): +35 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
 (de 254 a 289): la exencion de lista blanca se decide por el `rm` que marco master y no por una
 regex sobre su ventana de texto (8 casos shell/`subprocess.run`), casos de Python que solo marca
