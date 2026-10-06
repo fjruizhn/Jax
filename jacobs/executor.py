@@ -850,34 +850,26 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     while isinstance(cap_error, CapabilityUnbound):
         # El reroute SOLO puede apuntar a facets que el predicado único
         # (jacobs.models.faceta_ejecutable_en_pipeline: lista blanca HTTP, el
-        # mismo del menú, el plan y el pre-vuelo) da por ejecutables: un
-        # candidato de motor (kimi/jax_local) ya no es destino. 'hyde' se excluye a propósito: tiene su
-        # propio gate de aprobación humana en run_pipeline, que chequea
-        # plan[i].facet == "hyde" ANTES de que este código corra — si el
-        # reroute pudiera asignar step.facet = "hyde" después de ese
-        # chequeo, el step ejecutaría con result["approved"] = True sin
-        # aprobación humana real. No alcanzable hoy (ninguna capability
-        # lista "hyde" en allowed_motors), pero a una fila de capability_motor
-        # de distancia (Bloque 3: la DB es la única fuente ahora, un INSERT
-        # directo lo cambiaría). 'jax_local' (R4: sumado a _MOTOR_FACETS, SÍ es un
-        # conjunto de dispatch) tampoco aparece hoy como candidato de
-        # reroute -- no porque esté excluido del dispatch, sino porque
-        # ninguna fila de capability_motor lo lista en allowed_motors
-        # todavía (mismo gap que "hyde": a una fila de capability_motor de
-        # distancia). NOTA: reroute SÍ puede apuntar a _HTTP_FACETS
-        # (ada/thot). Hasta 2026-08-26 eso era un agujero: esos facets no
-        # pasaban por NINGÚN check del Motor Registry, así que un reroute
-        # los usaba como puerta de atrás. Desde 2026-08-27 ya no: el
-        # re-chequeo del final de este bucle vuelve a llamar a
-        # validate_capability(), y su bloque NIVEL C aplica
-        # check_capability_admission() (checks 1-5: capability existe,
-        # allowed_callers, requires_human_gate, recursion_depth, claves
-        # prohibidas) al facet NUEVO, no al original. Checks 6-7 (resolver
-        # motor, motor.sandbox_only) son N/A — un facet HTTP no es un
-        # motor. El techo de timeout YA NO esta diferido: se exige en
-        # plan-time desde 2026-09-01 (_validate_plan_capabilities lo valida
-        # contra `capability.max_execution_minutes` para TODOS los steps,
-        # HTTP incluidos).
+        # mismo del menú, el plan y el pre-vuelo) da por ejecutables. Hoy eso es
+        # hipatia/jekyll/thot/ada. Un candidato de motor (kimi/jax_local), 'hyde'
+        # o cualquier faceta que no esté en la lista blanca NO es destino: el
+        # despacho de motores está cerrado (GovernedExecutionRequiredError) y
+        # 'hyde' tiene además su propio gate de aprobación humana en
+        # run_pipeline, que chequea plan[i].facet == "hyde" ANTES de que este
+        # código corra -- un reroute a 'hyde' lo saltaría. Como el filtro es el
+        # predicado y no una lista local, una fila nueva en capability_motor no
+        # puede abrir un destino: tiene que sumarse a HTTP_FACETS a propósito.
+        #
+        # El reroute a un facet HTTP no es una puerta de atrás: el re-chequeo
+        # del final de este bucle vuelve a llamar a validate_capability(), y su
+        # bloque NIVEL C aplica check_capability_admission() (checks 1-5:
+        # capability existe, allowed_callers, requires_human_gate,
+        # recursion_depth, claves prohibidas) al facet NUEVO, no al original
+        # (hasta 2026-08-26 esos facets no pasaban por ningún check). Checks 6-7
+        # (resolver motor, motor.sandbox_only) son N/A -- un facet HTTP no es un
+        # motor. El techo de timeout se exige en plan-time desde 2026-09-01
+        # (_validate_plan_capabilities, contra `capability.max_execution_minutes`
+        # para TODOS los steps).
         #
         # Residuo real que queda, distinto del viejo: NIVEL C pasa
         # human_gate_token=None fijo, y una denegación de admisión devuelve
