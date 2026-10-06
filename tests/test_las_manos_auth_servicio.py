@@ -223,8 +223,6 @@ def test_la_ruta_nueva_bajo_jacobs_es_solo_de_la_plataforma():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("identidad,ruta,cuerpo", [
-    (IDENTIDAD_JACOBS, "/motor/dispatch", {"caller": "hyde", "capability": "code", "prompt": "x"}),
-    (IDENTIDAD_JACOBS, "/motor/dispatch", {"caller": "jax_platform_chat", "capability": "code", "prompt": "x"}),
     (IDENTIDAD_JACOBS, "/jacobs/pipeline", {"invoked_by": "plataforma"}),
     (IDENTIDAD_JACOBS, "/jacobs/pipeline", {"invoked_by": "jax_local"}),
     (IDENTIDAD_PLATAFORMA, "/jacobs/pipeline", {"invoked_by": "ada"}),
@@ -236,6 +234,26 @@ def test_declarar_otra_identidad_se_rechaza(identidad, ruta, cuerpo):
         r = c.post(ruta, json=cuerpo, headers=_h(identidad))
     assert r.status_code == 403, r.text
     assert r.json() == {"detail": {"code": auth_servicio.CODIGO_IDENTIDAD_DECLARADA}}
+
+
+@pytest.mark.parametrize("metodo,ruta", [
+    ("post", "/motor/dispatch"),
+    ("get", "/motor/job/j1"),
+    ("post", "/motor/job/j1/cancel"),
+])
+def test_jacobs_ya_no_tiene_permiso_sobre_los_motores(metodo, ruta):
+    """Jacobs no despacha motores (despacho legacy cerrado, 410) ni consulta o
+    cancela motor jobs: nada del arbol usa esas rutas con la credencial
+    `jacobs`. Un permiso que nadie usa es superficie sin dueno: 403 de ruta."""
+    with TestClient(_app()) as c:
+        r = getattr(c, metodo)(ruta, headers=_h(IDENTIDAD_JACOBS))
+    assert r.status_code == 403, r.text
+    assert r.json() == {"detail": {"code": auth_servicio.CODIGO_RUTA_NO_PERMITIDA}}
+
+
+def test_jacobs_conserva_solo_el_pipeline_de_sub_pipelines():
+    permiso = auth_servicio.PERMISOS[IDENTIDAD_JACOBS]
+    assert [(m, p.pattern) for m, p in permiso.rutas] == [("POST", "/jacobs/pipeline")]
 
 
 def test_la_plataforma_no_despacha_motores():
@@ -308,19 +326,27 @@ def test_server_instala_la_proteccion_al_importar():
     assert len(llamadas) == 1, "server.py tiene que llamar proteger(app) a nivel de módulo"
 
 
-def test_jacobs_presenta_su_credencial_en_cada_pedido_a_las_manos():
-    arbol = ast.parse((RAIZ / "jacobs" / "executor.py").read_text(encoding="utf-8"))
-    pedidos = []
-    for n in ast.walk(arbol):
-        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                and n.func.attr in {"get", "post", "put", "delete"} and n.args
-                and "LAS_MANOS_BASE" in ast.unparse(n.args[0])):
-            pedidos.append(n)
-    assert len(pedidos) >= 3
-    for n in pedidos:
-        headers = [k for k in n.keywords if k.arg == "headers"]
-        assert headers and ast.unparse(headers[0].value) == "encabezado_propio(IDENTIDAD_JACOBS)", \
-            ast.unparse(n)
+def test_jacobs_ya_no_hace_ningun_pedido_http_a_las_manos():
+    """Pipeline no despacha motores directamente (despacho legacy cerrado, 410): el
+    ultimo pedido a LAS MANOS era la cancelacion de un motor job, borrada con el
+    resto del codigo muerto. Se fija el comportamiento, no una constante: ningun
+    modulo de jacobs/ hace un pedido HTTP que apunte a LAS MANOS ni presenta su
+    credencial. Si vuelve un pedido, vuelve con ejecucion gobernada y esta prueba
+    se reescribe a proposito."""
+    hallazgos = []
+    for p in sorted((RAIZ / "jacobs").glob("*.py")):
+        if p.name.endswith("_test.py"):
+            continue
+        fuente = p.read_text(encoding="utf-8")
+        for n in ast.walk(ast.parse(fuente)):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr in {"get", "post", "put", "delete", "request", "stream"} and n.args):
+                destino = ast.unparse(n.args[0]).lower()
+                if any(m in destino for m in ("las_manos", "/motor/", "7777")):
+                    hallazgos.append(f"{p.name}:{n.lineno} {ast.unparse(n)[:80]}")
+        if "auth_servicio" in fuente or "encabezado_propio" in fuente:
+            hallazgos.append(f"{p.name}: usa la credencial de servicio de LAS MANOS")
+    assert hallazgos == []
 
 
 def test_encabezado_propio_sale_del_entorno_y_falla_cerrado(monkeypatch):
