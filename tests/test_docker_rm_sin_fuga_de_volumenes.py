@@ -89,6 +89,26 @@ def _docker_exec_o_run(tokens):
     return False
 
 
+def _indice_host_ssh(tokens, inicio=0):
+    """Devuelve el índice del host SSH tras opciones con o sin argumento."""
+    opciones_con_valor = {"-b", "-c", "-D", "-E", "-e", "-F", "-i", "-J",
+                          "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R",
+                          "-S", "-W", "-w"}
+    for i in range(inicio, len(tokens)):
+        if tokens[i] != "ssh":
+            continue
+        k = i + 1
+        while k < len(tokens):
+            token = tokens[k]
+            if token in opciones_con_valor:
+                k += 2
+            elif token.startswith("-"):
+                k += 1
+            else:
+                return k
+    return None
+
+
 def _fuerza_sin_volumenes(banderas):
     """True si entre las banderas hay force y no hay volumes (orden libre)."""
     fuerza = volumenes = False
@@ -134,7 +154,7 @@ def _es_docker_rm(toks, indice_rm, subcomando):
         if _ES_DOCKER.fullmatch(toks[j]):
             if subcomando == "remove" and "container" not in toks[j + 1:indice_rm]:
                 continue
-            if j > inicio + 1 and toks[j - 1] == "ssh":
+            if _indice_host_ssh(toks, inicio + 1) == j:
                 # `ssh docker exec docker rm` has a host literally named docker;
                 # keep searching for the remote executable anchor.
                 continue
@@ -225,7 +245,7 @@ def _es_prefijo_docker_rm(tokens):
     for i, token in enumerate(tokens):
         if not _ES_DOCKER.search(token):
             continue
-        if i > 0 and tokens[i - 1] == "ssh":
+        if _indice_host_ssh(tokens) == i:
             continue
         if _compose_exec_o_run(tokens[i + 1:]):
             return False
@@ -275,7 +295,7 @@ def culpables_python(fuente, filename="<string>"):
                       for p in nodo.values]
             hallados += culpables_shell("".join(str(x) for x in partes))
         elif isinstance(nodo, ast.Constant) and isinstance(nodo.value, str) and nodo not in docstrings \
-                and not isinstance(padres.get(nodo), ast.JoinedStr) and " rm" in nodo.value:
+                and not isinstance(padres.get(nodo), ast.JoinedStr) and (" rm" in nodo.value or " remove" in nodo.value):
             hallados += culpables_shell(nodo.value)
     return hallados
 
@@ -353,6 +373,8 @@ FUGAN_SHELL = [
     "docker -- container rm -f c",
     "docker container remove -f c",
     "ssh docker exec docker rm -f c",
+    "ssh -p 22 docker exec docker rm -f c",
+    "ssh -o BatchMode=yes docker exec docker rm -f c",
     "ssh rm docker rm -f c",
     "sudo -u rm docker rm -f c",
     "sudo -E docker rm -f c",
@@ -419,6 +441,8 @@ FUGAN_PYTHON = [
     '["docker", "--", "container", "rm", "-f", n]',
     '["docker", "container", "remove", "-f", n]',
     '["ssh", "docker", "exec", "docker", "rm", "-f", n]',
+    '["ssh", "-p", "22", "docker", "exec", "docker", "rm", "-f", n]',
+    '["ssh", "-o", "BatchMode=yes", "docker", "exec", "docker", "rm", "-f", n]',
     '["ssh", "rm", "docker", "rm", "-f", n]',
     '["sudo", "-u", "rm", "docker", "rm", "-f", n]',
     '["docker", "--context", "network", "rm", "-f", n]',
@@ -445,6 +469,8 @@ FUGAN_PYTHON = [
     'subprocess.run("docker rm -f x", shell=True)',
     'subprocess.run(f"docker compose -f {yml} rm -f", shell=True)',
     'subprocess.run(f"sudo -u docker docker rm -f {n}", shell=True)',
+    'subprocess.run("docker container remove -f x", shell=True)',
+    'cmd = "docker container remove --force x"',
     '["docker", "rm", "-f", "-v=false", n]',
     '["docker", "rm", "-fv=false", n]',
     '["docker", "rm", "-f", "-v=0", n]',

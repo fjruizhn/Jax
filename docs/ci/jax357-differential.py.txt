@@ -99,6 +99,8 @@ positive += [
     ("shell", "docker -- container rm -f victim"),
     ("shell", "docker container remove -f victim"),
     ("shell", "ssh docker exec docker rm -f victim"),
+    ("shell", "ssh -p 22 docker exec docker rm -f victim"),
+    ("shell", "ssh -o BatchMode=yes docker exec docker rm -f victim"),
     ("shell", "ssh rm docker rm -f victim"),
     ("shell", "sudo -u rm docker rm -f victim"),
     ("python", '["docker", "-D=false", "rm", "-f", n]'),
@@ -109,8 +111,12 @@ positive += [
     ("python", '["docker", "--", "container", "rm", "-f", n]'),
     ("python", '["docker", "container", "remove", "-f", n]'),
     ("python", '["ssh", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["ssh", "-p", "22", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["ssh", "-o", "BatchMode=yes", "docker", "exec", "docker", "rm", "-f", n]'),
     ("python", '["ssh", "rm", "docker", "rm", "-f", n]'),
     ("python", '["sudo", "-u", "rm", "docker", "rm", "-f", n]'),
+    ("python", 'subprocess.run("docker container remove -f x", shell=True)'),
+    ("python", 'cmd = "docker container remove --force x"'),
 ]
 
 negative = [
