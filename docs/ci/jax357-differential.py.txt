@@ -244,7 +244,7 @@ own_cases = [
     ("shell", "cat <<'EOF'\ndocker volume rm -f v\nEOF"),
     ("shell", "docker -Dl debug rm -f x"),
     ("shell", "docker -DH tcp://x rm -f x"),
-    ("shell", "docker -DHtcp://x rm -f x"),
+    ("shell", "docker rmi -f imagen"),
     ("python", '["docker", "-Dl", "debug", "rm", "-f", n]'),
     ("python", '["docker", "compose", "--workdir", "/x", "rm", "-f"]'),
 ]

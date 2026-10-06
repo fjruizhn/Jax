@@ -900,15 +900,23 @@ para conservar byte a byte el registro de la migración de pisos.
 
 ## `tests-puros/out`
 
-3540 -> 3724 (2026-10-06, JAX#357 ronda 3): el archivo de regresiones pasó
-de 6 a 190 casos corridos al parametrizar A–E, cubrir opciones de Compose y SSH
-(incluidos grupos de opciones, comandos remotos anidados y rutas absolutas de SSH/sudo),
-y excluir `docker exec/run` con contenedor llamado `docker`; +184. Medido con la lista exacta de 195 archivos del paso "Piso exacto",
-Python 3.14.4, `requirements.txt`, `pytest` y `pytest-asyncio`; los cinco
-directorios del host se ocultaron en namespace de mount. Resultado: 3724 passed,
-45 skipped, 1 xfailed, 16 subtests. Un primer intento falló una prueba ajena por
-mantener `USER=root` tras bajar de `sudo`; con `USER=fruiz` y el usuario efectivo
-alineados, la repetición completa pasó.
+**Corrección (2026-10-06, JAX#357 ronda 4):** el registro de ronda 3 abajo midió
+3724 sobre la rama de trabajo anterior, no sobre la base vigente de master. La
+matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
+sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
+piso se vuelve a fijar desde los **3537 de master**.
+
+3537 -> 3562 (2026-10-06, JAX#357 ronda 4): +25 netos. El test del escáner tiene
+22 casos de whitelist (11 subcomandos, shell y listas Python literales), uno que
+fija el rechazo de prefijos dinámicos/contextos cercanos y dos de Python inválido
+que falla cerrado con ruta y línea. Medido con la lista exacta de 195 archivos
+del paso "Piso exacto", Python 3.14.4, `requirements.txt`, `pytest` y
+`pytest-asyncio`; los cinco directorios del host se ocultaron en namespace de
+mount. Resultado: 3562 passed, 45 skipped, 1 xfailed, 16 subtests.
+
+3540 -> 3724 (2026-10-06, JAX#357 ronda 3; **corregido arriba**): se contaron
+184 parametrizaciones nuevas, pero varias codificaban una semántica más estrecha
+que la de master. Ese total no era la base correcta para el piso final.
 
 3537 -> 3540 (2026-10-05, JAX#357 ronda 2): se agregaron tres pruebas en
 `tests/test_docker_rm_sin_fuga_de_volumenes.py`; la tercera,

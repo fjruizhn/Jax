@@ -295,6 +295,7 @@ def test_whitelist_no_se_extiende_a_prefijos_dinamicos_ni_contextos_cercanos():
     assert culpables_en_texto('["docker", *opts, "rm", "-f", recurso]', es_python=True)
     assert culpables_en_texto("docker $SUBCOMMAND rm -f recurso", es_python=False)
     assert culpables_en_texto("docker context export rm -f recurso", es_python=False)
+    assert not culpables_en_texto("docker rmi -f imagen", es_python=False)
 
 
 def test_python_que_no_parsea_falla_cerrado_con_la_ruta():
