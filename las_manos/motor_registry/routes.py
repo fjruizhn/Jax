@@ -1,12 +1,12 @@
 """
 LAS MANOS — Motor Registry: endpoints HTTP.
 
-POST /motor/dispatch           — legacy: siempre responde 410 (no crea job; la ejecucion es gobernada)
+POST /motor/dispatch           — legacy: por HTTP, 403 (ninguna identidad lo alcanza, ver proteger());
+                                 la funcion, si se llega, responde siempre 410 (no crea job)
 GET  /motor/job/{job_id}       — consulta estado de un job
 POST /motor/job/{job_id}/cancel — solicita cancelación
 
-El router se registra en server.py al conectar el Motor Registry.
-Este módulo no modifica server.py — eso es responsabilidad del Commit 2.
+El router se registra en server.py (`motor_router`).
 
 En memoria de Jairo Urbina.
 """
