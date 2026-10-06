@@ -274,7 +274,7 @@ def test_motor_dispatch_410_registra_la_evidencia_b7(motor, store_falso, monkeyp
     with pytest.raises(HTTPException) as exc:
         asyncio.run(routes.dispatch(_pedido("cualquier-cosa")))
     assert exc.value.status_code == 410
-    assert exc.value.detail == {"code": "GOVERNED_EXECUTION_REQUIRED", "correlacion": None}
+    assert exc.value.detail == {"code": "GOVERNED_EXECUTION_REQUIRED", "correlacion": None, "evidencia_registrada": True}
     registrador.record_governed_dispatch_denied.assert_called_once_with()
     lanzado.assert_not_called()
 
@@ -303,7 +303,8 @@ def test_motor_dispatch_410_sobrevive_a_que_la_evidencia_b7_falle(motor, store_f
             asyncio.run(routes.dispatch(pedido))
     assert exc.value.status_code == 410
     cuerpo = exc.value.detail
-    assert set(cuerpo) == {"code", "correlacion"}
+    assert set(cuerpo) == {"code", "correlacion", "evidencia_registrada"}
+    assert cuerpo["evidencia_registrada"] is False
     assert cuerpo["code"] == "GOVERNED_EXECUTION_REQUIRED"
     assert isinstance(cuerpo["correlacion"], str)
     registrador.record_governed_dispatch_denied.assert_called_once_with()
@@ -336,7 +337,7 @@ def test_motor_dispatch_410_sin_falla_de_evidencia_no_loguea_error(motor, store_
     # Forma unica del cuerpo (la misma del 403 del middleware): correlacion null
     # cuando la evidencia quedo registrada.
     assert exc.value.status_code == 410
-    assert exc.value.detail == {"code": "GOVERNED_EXECUTION_REQUIRED", "correlacion": None}
+    assert exc.value.detail == {"code": "GOVERNED_EXECUTION_REQUIRED", "correlacion": None, "evidencia_registrada": True}
 
 
 def test_motor_dispatch_con_token_emitido_pasa_y_lo_consume(motor, store_falso):

@@ -299,8 +299,11 @@ async def _denegar_dispatch_legacy(send, identidad: str) -> None:
         "POST /motor/dispatch denegado (despacho legacy cerrado) identidad=%s correlacion=%s",
         identidad, correlacion,
     )
-    await motor_routes.registrar_denegacion_de_dispatch(correlacion)
-    return await _responder(send, 403, CODIGO_RUTA_NO_PERMITIDA, correlacion=correlacion)
+    estado = await motor_routes.registrar_denegacion_de_dispatch(correlacion)
+    return await _responder(
+        send, 403, CODIGO_RUTA_NO_PERMITIDA, correlacion=correlacion,
+        evidencia_registrada=estado == motor_routes.EVIDENCIA_REGISTRADA,
+    )
 
 
 async def _responder(send, status: int, codigo: str, **extra) -> None:
