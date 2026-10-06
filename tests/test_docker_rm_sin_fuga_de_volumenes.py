@@ -114,27 +114,28 @@ def culpables_python(fuente, filename="<string>"):
             indices = [k for k, e in enumerate(elts) if isinstance(e, ast.Constant) and e.value == "rm"]
             if not indices:
                 continue
-            i = indices[0]
-            antes = elts[:i]
-            if i >= 2 and isinstance(elts[i - 1], ast.Constant) \
-                    and elts[i - 1].value in _SUBCOMANDOS_SIN_VOLUMEN_ANONIMO \
-                    and isinstance(elts[i - 2], ast.Constant) and elts[i - 2].value == "docker":
-                continue
-            if any(isinstance(e, ast.Constant) and e.value in ("exec", "run") for e in antes):
-                continue
-            es_docker = any(_ES_DOCKER.search(_texto_de(e, fuente)) for e in antes)
             padre = padres.get(nodo)
-            if not es_docker and i == 0 and isinstance(padre, ast.BinOp) and isinstance(padre.op, ast.Add) \
-                    and padre.right is nodo:
-                izquierda = _texto_de(padre.left, fuente)
-                # `algo + ["rm", ...]`: un prefijo de comando. Docker salvo que sea claramente sudo.
-                es_docker = bool(_ES_DOCKER.search(izquierda)) or not re.search(r"sudo", izquierda, re.I)
-            if not es_docker:
-                continue
-            banderas = [e.value for e in elts[i + 1:]
-                        if isinstance(e, ast.Constant) and isinstance(e.value, str) and e.value.startswith("-")]
-            if _fuerza_sin_volumenes(banderas):
-                hallados.append(" ".join(_texto_de(nodo, fuente).split()))
+            for i in indices:  # cada `rm` se evalúa por separado
+                antes = elts[:i]
+                if i >= 2 and isinstance(elts[i - 1], ast.Constant) \
+                        and elts[i - 1].value in _SUBCOMANDOS_SIN_VOLUMEN_ANONIMO \
+                        and isinstance(elts[i - 2], ast.Constant) and elts[i - 2].value == "docker":
+                    continue
+                if any(isinstance(e, ast.Constant) and e.value in ("exec", "run") for e in antes):
+                    continue
+                es_docker = any(_ES_DOCKER.search(_texto_de(e, fuente)) for e in antes)
+                if not es_docker and i == 0 and isinstance(padre, ast.BinOp) and isinstance(padre.op, ast.Add) \
+                        and padre.right is nodo:
+                    izquierda = _texto_de(padre.left, fuente)
+                    # `algo + ["rm", ...]`: un prefijo de comando. Docker salvo que sea claramente sudo.
+                    es_docker = bool(_ES_DOCKER.search(izquierda)) or not re.search(r"sudo", izquierda, re.I)
+                if not es_docker:
+                    continue
+                banderas = [e.value for e in elts[i + 1:]
+                            if isinstance(e, ast.Constant) and isinstance(e.value, str) and e.value.startswith("-")]
+                if _fuerza_sin_volumenes(banderas):
+                    hallados.append(" ".join(_texto_de(nodo, fuente).split()))
+                    break
         elif isinstance(nodo, ast.JoinedStr):
             partes = [p.value if isinstance(p, ast.Constant) else "{" + _texto_de(p.value, fuente) + "}"
                       for p in nodo.values]
@@ -288,6 +289,17 @@ def test_whitelist_python_solo_lista_de_literales(subcomando):
     assert not culpables_en_texto(
         f'["docker", "{subcomando}", "rm", "-f", recurso]', es_python=True
     )
+
+
+@pytest.mark.parametrize("con_ssh", [False, True], ids=["sin_ssh", "con_ssh"])
+@pytest.mark.parametrize("subcomando", sorted(_SUBCOMANDOS_SIN_VOLUMEN_ANONIMO))
+def test_whitelist_python_no_exime_un_rm_posterior_de_contenedor(subcomando, con_ssh):
+    """Cada `rm` de la lista se evalúa por separado: el de la lista blanca se saltea,
+    el `docker rm -f` de contenedor que viene después sigue vigilado."""
+    prefijo = '"ssh", h, ' if con_ssh else ""
+    fuente = (f'[{prefijo}"docker", "{subcomando}", "rm", "-f", v, "&&", '
+              f'"docker", "rm", "-f", c]')
+    assert culpables_en_texto(fuente, es_python=True), f"no detectó: {fuente}"
 
 
 def test_whitelist_no_se_extiende_a_prefijos_dinamicos_ni_contextos_cercanos():
