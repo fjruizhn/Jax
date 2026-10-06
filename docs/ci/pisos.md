@@ -902,6 +902,144 @@ para conservar byte a byte el registro de la migración de pisos.
 
 ## `tests-puros/out`
 
+**Corrección (2026-10-06, JAX#357 ronda 4):** el registro de ronda 3 abajo midió
+3724 sobre la rama de trabajo anterior, no sobre la base vigente de master. La
+matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
+sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
+piso se vuelve a fijar desde los **3537 de master**.
+
+3876 -> 3888 (2026-10-06, JAX#357 ronda 15): +12 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 307 a 319): prueba diferencial de que `_hallazgos_de_cadenas_de_master` cuenta exactamente lo que
+master saca de cadenas (7 fixtures, incluidas F1-F3 del auditor), las fixtures de lista sin exencion
+contra `_sin_la_excepcion_de_lista_blanca` (4) y dos nodos con el mismo texto y distinta calificacion
+(1). Medido sobre la mezcla con la misma lista de 195 archivos: 3934 recolectadas = 3888 passed + 45
+skipped + 1 xfailed. A confirmar en el runner.
+
+3841 (rama) + 35 (#362) = 3876 (2026-10-06, JAX#357 ronda 15, mezcla con origin/master 36dafaa2):
+`ci/pisos.json` choco con master en `tests-puros/out` (master: 3572; la rama: 3841 sobre su base). Se
+resolvio tomando 3841 + los 35 de #362 = 3876, medido sobre la mezcla por recoleccion
+(`pytest --collect-only -q`, PYTHONPATH=.:las_manos, SIN `JAX_DB_HOST`) con la lista exacta de 195
+archivos: 3922 recolectadas = 3876 passed + 45 skipped + 1 xfailed. `governance/f2e-sr3-source` queda
+en 166 (el de master). A confirmar en el runner.
+
+3836 -> 3841 (2026-10-06, JAX#357 ronda 14): +5 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 302 a 307): un nodo List/Tuple que master no marca ya no exime una ventana sacada de una cadena
+(3 casos: lista, tupla sin parentesis, f-string), un segundo `rm` lejos en la ventana, y que sin
+hallazgos de master no se re-parsea la fuente (el archivo baja de ~11 s a ~6 s). Medido por
+recoleccion (`pytest --collect-only -q`, PYTHONPATH=.:las_manos, SIN `JAX_DB_HOST`) con la lista
+exacta de 195 archivos: 3887 recolectadas = 3841 passed + 45 skipped + 1 xfailed (3882 en fc5927ca).
+No se corrio el paso completo.
+
+3823 -> 3836 (2026-10-06, JAX#357 ronda 13): +13 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 289 a 302): el tipo del hallazgo de la exencion de lista blanca viene de dónde salio (shell:
+siempre ventana; Python: nodo List/Tuple del codigo, no su texto re-parseado), la prueba de que un
+hallazgo sin `rm` identificable no se exime y la de que el bloque congelado falla si el texto de
+master difiere en un byte. Medido por recoleccion (`pytest --collect-only -q`,
+PYTHONPATH=.:las_manos, SIN `JAX_DB_HOST`) con la lista exacta de 195 archivos: 3882
+recolectadas = 3836 passed + 45 skipped + 1 xfailed (3869 en 8d63035). No se corrio el paso
+completo.
+
+3788 -> 3823 (2026-10-06, JAX#357 ronda 12): +35 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 254 a 289): la exencion de lista blanca se decide por el `rm` que marco master y no por una
+regex sobre su ventana de texto (8 casos shell/`subprocess.run`), casos de Python que solo marca
+master (fijan el OR), la forma de la exencion en shell y listas, y el camino del checkout
+superficial de la comparacion con `git show` (fetch del SHA o fallo explicito; ya no hay
+`return`). Medido por recoleccion (`pytest --collect-only -q`, PYTHONPATH=.:las_manos, SIN
+`JAX_DB_HOST`) con la lista exacta de 195 archivos: 3869 recolectadas en la rama, 3834 en
+a9339ceb. Son 3823 passed + 45 skipped + 1 xfailed. No se corrio el paso completo.
+Desde esta ronda la nota de la ronda 11 («sin el SHA comprueba solo el hash») ya no rige: sin el SHA
+la prueba intenta `git fetch` y, si no puede, falla. La exencion marca de mas un volumen llamado `rm`
+(`docker volume rm rm -f`): es fallo cerrado deliberado (ante la duda se marca).
+
+3768 -> 3788 (2026-10-06, JAX#357 ronda 11): +20 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 234 a 254): bloque de master congelado con prueba de hash y contra `git show`, "nunca menos
+que master", `&` entre comillas/escapado/en expansion, y pruebas directas de la lectura nueva
+(paridad del acento grave, acento grave como separador). Medido por recoleccion
+(`pytest --collect-only -q`, PYTHONPATH=.:las_manos, Python 3.14.4, SIN `JAX_DB_HOST`) con la
+lista exacta de 195 archivos: 3834 recolectadas en la rama, 3814 en 435d1ede. Son 3788 passed
++ 45 skipped + 1 xfailed. La prueba del bloque congelado no se salta nunca (sin el SHA en el
+checkout comprueba solo el hash). No se corrio el paso completo.
+
+3746 -> 3768 (2026-10-06, JAX#357 ronda 10): +22 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 212 a 234): lectura doble tambien en shell (ventana de master y salto de subshell, unidas
+con OR), casos del auditor con acentos graves en numero par y `)` desbalanceado, separadores
+`|`/`||` pegados y los limites declarados. Medido por recoleccion (`pytest --collect-only -q`,
+PYTHONPATH=.:las_manos, Python 3.14.4, SIN `JAX_DB_HOST`) con la lista exacta de 195 archivos:
+3814 recolectadas en la rama, 3792 en 8a9203d0. Son 3768 passed + 45 skipped + 1 xfailed.
+No se corrio el paso completo.
+
+3713 -> 3746 (2026-10-06, JAX#357 ronda 9): +33 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 179 a 212): prefiltro de cadenas Python con cualquier espacio en blanco y subshell
+`$(...)`/acento grave que no corta las banderas en shell (anidados, `-v` posterior, sin cerrar).
+Medido por recoleccion (`pytest --collect-only -q`, PYTHONPATH=.:las_manos, Python 3.14.4, SIN
+`JAX_DB_HOST`) con la lista exacta de 195 archivos: 3792 recolectadas en la rama, 3759 en
+f2be73e2. Son 3746 passed + 45 skipped + 1 xfailed (las 33 nuevas no llevan skip ni xfail).
+No se corrio el paso completo.
+
+3732 -> 3713 (2026-10-06, JAX#357 ronda 8): -19. La ronda 8 simplifica el escaner (cada lista
+Python se lee dos veces, argv sin cortar y como shell, unidas con OR) y las pruebas de
+`tests/test_docker_rm_sin_fuga_de_volumenes.py` pasan de 198 a 179: se quitan los falsos
+positivos que la lectura argv marca a proposito y se reagrupan las de separadores. Es
+un descenso solo frente a 282fd797 (master fija 3537, el piso sube respecto de master): baja por consolidar pruebas del propio escaner, no por
+perder cobertura (cada defecto sigue cubierto; 16 mutantes del escaner mueren). Medido por
+recoleccion (`pytest --collect-only -q`, PYTHONPATH=.:las_manos, Python 3.14.4, SIN
+`JAX_DB_HOST`) con la lista exacta de 195 archivos: 3759 recolectadas en la rama, 3778 en
+282fd797. Las 3759 son 3713 passed + 45 skipped + 1 xfailed. No se corrio el paso completo.
+
+3660 -> 3732 (2026-10-06, JAX#357 ronda 7): +72 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 126 a 198 pruebas): argv con separador literal, separadores `&`/`|&`/con espacios/pegados/en
+variable, alias `docker container remove`, `&` y redirecciones en shell. Medido por recoleccion
+(`pytest --collect-only -q`, PYTHONPATH=.:las_manos, Python 3.14.4, SIN `JAX_DB_HOST`) con la
+lista exacta de 195 archivos del paso "Piso exacto de tests CORRIDOS": 3778 recolectadas en la
+rama, 3706 en 9a5d3848 (misma lista, mismo entorno). Las 3706 de la ronda 6 son 3660 passed + 45
+skipped + 1 xfailed; las 72 nuevas no llevan skip ni xfail: 3732 passed, 45 skipped, 1 xfailed.
+No se corrio el paso completo: la recoleccion no ejecuta nada y no toca ninguna base.
+
+3584 -> 3660 (2026-10-06, JAX#357 ronda 6): +76 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 50 a 126 pruebas): 72 que fallan contra 07cac634 (falsos positivos y fugas de las listas
+Python con `&&`, `;`, `||`, `|`, con y sin ssh) y 4 de control. Medido por recoleccion
+(`pytest --collect-only -q`, PYTHONPATH=.:las_manos, Python 3.14.4, SIN `JAX_DB_HOST`) con la
+lista exacta de 195 archivos del paso "Piso exacto de tests CORRIDOS": 3706 recolectadas en la
+rama, 3630 en 07cac634 (la misma lista, mismo entorno). Las 3630 de la ronda 5 son 3584 passed
++ 45 skipped + 1 xfailed; las 76 nuevas no llevan skip ni xfail: 3660 passed, 45 skipped,
+1 xfailed. La rama ya trae origin/master f47820f5 (solo agrega `scripts/ejecutor_fase0/maquinas.toml`,
+sin pruebas). No se corrio el paso completo: la recoleccion no ejecuta nada y no toca ninguna base.
+
+3562 -> 3584 (2026-10-06, JAX#357 ronda 5): +22. `test_whitelist_python_no_exime_un_rm_posterior_de_contenedor`
+(11 subcomandos de la lista blanca x con/sin ssh): un `rm` de la lista blanca ya no
+exime un `docker rm -f` posterior en la misma lista Python. Medido por recoleccion con
+la lista exacta de 195 archivos del paso "Piso exacto" (PYTHONPATH=.:las_manos, Python
+3.14.4): rama 3630 recolectadas, rama sin la ronda 5 3608, master 3583. Las 3608 de la
+ronda 4 son 3562 passed + 45 skipped + 1 xfailed; con las 22 nuevas: 3584 passed,
+45 skipped, 1 xfailed. Corrida local completa del paso (sin enmascarar el host): 3623
+passed, 3 skipped, 3 xfailed, 1 failed por entorno
+(`test_arranque_real_no_colisiona_con_policy_de_la_raiz`, ya documentado abajo).
+
+3537 -> 3562 (2026-10-06, JAX#357 ronda 4): +25 netos. El test del escáner tiene
+22 casos de whitelist (11 subcomandos, shell y listas Python literales), uno que
+fija el rechazo de prefijos dinámicos/contextos cercanos y dos de Python inválido
+que falla cerrado con ruta y línea. Medido con la lista exacta de 195 archivos
+del paso "Piso exacto", Python 3.14.4, `requirements.txt`, `pytest` y
+`pytest-asyncio`; los cinco directorios del host se ocultaron en namespace de
+mount. Resultado: 3562 passed, 45 skipped, 1 xfailed, 16 subtests.
+
+3540 -> 3724 (2026-10-06, JAX#357 ronda 3; **corregido arriba**): se contaron
+184 parametrizaciones nuevas, pero varias codificaban una semántica más estrecha
+que la de master. Ese total no era la base correcta para el piso final.
+
+3537 -> 3540 (2026-10-05, JAX#357 ronda 2): se agregaron tres pruebas en
+`tests/test_docker_rm_sin_fuga_de_volumenes.py`; la tercera,
+`test_python_que_no_parsea_falla_en_vez_de_degradar_a_shell`, exige que un Python
+inválido lance `SyntaxError` en vez de analizarse como shell. Medido en hall9000 con la lista exacta del paso
+"Piso exacto", Python 3.14.4 y `sudo unshare --mount` ocultando
+`~/claude-skills`, `~/ejecutor-fase0`, `~/jax-platform`, `/srv/jax-prod` y el
+`/etc/jax/build` propio del host:
+3540 passed, 45 skipped, 1 xfailed y 16 subtests. El objeto `/etc/jax/build` se
+ocultó solo dentro del namespace porque el runner limpio no contiene esa
+configuración local. El total medido quedó tres sobre el piso registrado, igual a
+las tres pruebas nuevas de esta ronda.
+Los 45 skipped conservan el desglose vigente.
+
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
 
 Nota 2026-10-06 (simplificacion de #362): se revierte el registro de evidencia B7 en el middleware y los pisos vuelven a `^3570 passed, 45 skipped` (`tests-puros/out`) y `^166 passed` (`governance/f2e-sr3-source`); se descartan los intermedios 3574/3589/3590 y 170/185/186. FUENTE: LOCAL en hall9000 sin aislamiento `unshare`, listas exactas: 3610 passed, 3 skipped, 0 failed (tests-puros) y 166 passed (sr3-source); governance 264/15/10 sin cambio. `jacobs-gobernanza-db/out` NO cambia (`^170 passed`): una ronda intermedia lo toco por error al reemplazar 170 a ciegas en `ci/pisos.json`.

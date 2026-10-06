@@ -122,8 +122,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 15 tests CORRIDOS de F2-E structured projection."
     },
     "tests-puros/out": {
-      "patron": "^3572 passed, 45 skipped",
-      "mensaje": "PISO ROTO: se esperaban 3572 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."
+      "patron": "^3888 passed, 45 skipped",
+      "mensaje": "PISO ROTO: se esperaban 3888 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Re-medido el 2026-10-06 (ronda 15 de JAX#357) sobre la MEZCLA de la rama con origin/master (36dafaa2) por recoleccion con la lista exacta de 195 archivos del paso 'Piso exacto', sin JAX_DB_HOST: 3934 recolectadas = 3888 passed + 45 skipped + 1 xfailed (3841 de la rama + 35 de #362 + 12 de la ronda 15), a confirmar en el runner; 435d1ede recolecta 3814 con la misma lista."
     },
     "tests-puros/arranque_instalado": {
       "patron": "^46 passed, 9 skipped",
