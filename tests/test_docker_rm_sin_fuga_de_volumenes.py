@@ -870,16 +870,33 @@ def _bloque_congelado():
     return cuerpo
 
 
+def _texto_de_este_archivo_en_master():
+    """Este archivo en el SHA de master. Un checkout superficial (el runner de `tests-puros` hace
+    `actions/checkout` sin `fetch-depth`) no lo trae: se pide con `git fetch --depth=1 origin <sha>`
+    (GitHub sirve cualquier SHA alcanzable). Si tampoco así está, FALLA: un `return` aquí contaba
+    como passed sin haber comparado nada."""
+    def mostrar():
+        return subprocess.run(["git", "show", f"{_SHA_MASTER}:{ESTE}"], cwd=RAIZ,
+                              capture_output=True, text=True)
+    git = mostrar()
+    if git.returncode != 0:
+        pedido = subprocess.run(["git", "fetch", "--no-tags", "--depth=1", "origin", _SHA_MASTER],
+                                cwd=RAIZ, capture_output=True, text=True, timeout=120)
+        git = mostrar()
+        if git.returncode != 0:
+            pytest.fail(f"el SHA de master {_SHA_MASTER} no está en el checkout y no se pudo traer "
+                        f"(git fetch rc={pedido.returncode}: {pedido.stderr.strip()[:300]}): "
+                        "no se puede comparar el bloque congelado con master")
+    return git.stdout
+
+
 def test_el_bloque_congelado_es_el_de_master():
-    """El hash guardado es el del bloque tal cual. Si el SHA de master está en el checkout, el
-    texto también tiene que coincidir con `git show` (solo cambia el sufijo `_master`)."""
+    """El hash guardado es el del bloque tal cual, y el texto tiene que coincidir con `git show`
+    del SHA de master (solo cambia el sufijo `_master`)."""
     import hashlib
     cuerpo = _bloque_congelado()
     assert hashlib.sha256(cuerpo.encode()).hexdigest() == _HASH_BLOQUE_MASTER
-    git = subprocess.run(["git", "show", f"{_SHA_MASTER}:{ESTE}"], cwd=RAIZ, capture_output=True, text=True)
-    if git.returncode != 0:      # checkout superficial: queda el hash
-        return
-    maestro = git.stdout
+    maestro = _texto_de_este_archivo_en_master()
     maestro = maestro[maestro.index("_ES_DOCKER = "):maestro.index("def culpables_en_texto(")]
     nombres = ["_ES_DOCKER", "_SEPARADORES", "_FALSO", "_fuerza_sin_volumenes", "_tokens_shell",
                "culpables_shell", "_texto_de", "culpables_python"]
@@ -951,3 +968,76 @@ def test_python_que_no_parsea_falla_cerrado_con_la_ruta():
 def test_python_inferido_que_no_parsea_no_degrada_a_shell():
     with pytest.raises(SyntaxError):
         culpables_en_texto("def roto(:\n    docker rm -f recurso")
+
+
+# --- Ronda 12: la exención de lista blanca se decide por el `rm` que marcó master -------------
+# master no corta en un `&` suelto y su ventana llega a un `docker <volume|image|network> rm`
+# POSTERIOR; ese no es el `rm` marcado y el hallazgo (un `rm` de CONTENEDOR) no se descarta.
+CASOS_VENTANA_QUE_LLEGA_A_UN_RECURSO_POSTERIOR = [
+    "docker -H 'ssh://h?x&y' rm -f c & docker image rm i & docker run -d -p 1:1 -e A=1 --name n img",
+    'docker rm "a&b" -f & docker volume rm v & docker run --rm -d -p 80:80 -e A=1 --name n img',
+    "docker rm ${ids//&/ } -f & docker volume rm v & docker run -d -p 1:1 -e A=1 --name n -l x img",
+    'docker rm "a&b" c1 -f & docker volume rm v -f -f -f -f -f -f',
+]
+
+
+@pytest.mark.parametrize("comando", CASOS_VENTANA_QUE_LLEGA_A_UN_RECURSO_POSTERIOR)
+def test_shell_la_ventana_de_master_que_llega_a_un_recurso_posterior_no_exime_el_rm_de_contenedor(comando):
+    assert culpables_shell_master(comando), "el caso ya no ejercita a master"
+    assert culpables_en_texto(comando, es_python=False), f"se perdió un rm de contenedor: {comando}"
+
+
+@pytest.mark.parametrize("comando", CASOS_VENTANA_QUE_LLEGA_A_UN_RECURSO_POSTERIOR)
+def test_python_la_misma_cadena_dentro_de_subprocess_run_tampoco_se_pierde(comando):
+    fuente = f"subprocess.run({comando!r}, shell=True)"
+    assert culpables_python_master(fuente), "el caso ya no ejercita a master"
+    assert culpables_en_texto(fuente, es_python=True), f"se perdió un rm de contenedor: {fuente}"
+
+
+# Minor 1: casos de Python que master marca y la lectura nueva SOLA no (fija la unión OR en Python).
+@pytest.mark.parametrize("fuente", [
+    'subprocess.run("docker rm \\"a&b\\" c1 -f", shell=True)',
+    'subprocess.run("docker rm ${ids//&/ } -f", shell=True)',
+    "subprocess.run(\"docker -H 'ssh://h?x&y' rm -f c\", shell=True)",
+    'os.system("docker rm \\"a&b\\" c1 -f")',
+    'x = f"docker rm \\"a&b\\" -f {n}"',
+])
+def test_python_lo_que_solo_marca_master_sigue_marcado_por_la_union(fuente):
+    assert culpables_python_master(fuente), "master ya no marca: el caso no sirve"
+    assert not culpables_python(fuente), "la lectura nueva ya lo marca: el caso no fija el OR"
+    assert culpables_en_texto(fuente, es_python=True), f"master marca y la unión no: {fuente}"
+
+
+# La exención en sí: solo el `rm` marcado cuenta, y solo si va PEGADO a `docker <subcomando>`.
+@pytest.mark.parametrize("comando", [
+    "docker volume rm -f v",
+    "docker network rm -f n",
+    "docker image rm -f i",
+    "docker volume rm -f v & docker volume rm -f w",
+])
+def test_la_exencion_de_recurso_con_nombre_sigue_funcionando(comando):
+    assert not culpables_en_texto(comando, es_python=False), f"falso positivo: {comando}"
+    assert not culpables_en_texto('["docker", "volume", "rm", "-f", v]', es_python=True)
+
+
+# Minor 3: la forma de la exención. Ensancharla (que no pida `rm` pegado al subcomando, ni
+# `docker` pegado al subcomando) exime de más: cada uno de estos es un `rm` de contenedor.
+@pytest.mark.parametrize("comando", [
+    "docker volume ls rm -f c",
+    "docker volume --opt rm -f c",
+    "docker x volume rm -f c",
+    "docker rm -f volume",
+    "docker rm volume rm -f c",
+    "docker image ls -f rm -f c",
+])
+def test_la_exencion_exige_docker_subcomando_rm_pegados(comando):
+    assert culpables_shell_master(comando), f"master ya no marca: {comando}"
+    assert culpables_en_texto(comando, es_python=False), f"se eximió de más: {comando}"
+
+
+def test_la_exencion_en_listas_exige_docker_subcomando_rm_pegados():
+    for fuente in ['["docker", "volume", "ls", "rm", "-f", c]',
+                   '["docker", "x", "volume", "rm", "-f", c]',
+                   '["docker", "rm", "-f", "volume", "rm"]']:
+        assert culpables_python_master(fuente), f"master ya no marca: {fuente}"
+        assert culpables_en_texto(fuente, es_python=True), f"se eximió de más: {fuente}"
