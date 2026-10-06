@@ -1,0 +1,90 @@
+"""Deterministic differential bank for JAX #357; run from the repository root."""
+import importlib.util
+import itertools
+import subprocess
+from pathlib import Path
+
+root = Path.cwd()
+master_source = subprocess.run(
+    ["git", "show", "origin/master:tests/test_docker_rm_sin_fuga_de_volumenes.py"],
+    capture_output=True,
+    check=True,
+).stdout
+master_path = Path("/tmp/jax357_master_scanner.py")
+master_path.write_bytes(master_source)
+
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+master = load("master_scanner", master_path)
+branch = load("branch_scanner", root / "tests/test_docker_rm_sin_fuga_de_volumenes.py")
+positive = []
+heads = [
+    "docker rm", "docker container rm", "docker compose rm",
+    "docker compose -f x.yml rm", "docker compose -p proj rm",
+    "docker compose --profile prod rm", "docker compose --env-file .env rm",
+    "docker compose -fcompose.yml rm", "docker compose -pproj rm",
+    "docker compose -f a -f b -f c -f d -f e rm",
+    "docker --context=x rm", "docker -Htcp://x rm", "docker -H=tcp://x rm",
+    "docker -l=debug rm", "docker -cctx rm",
+]
+flags = ["-f", "--force", "-fs", "--force=true", "-f -s", "-f --volumes=0"]
+wrappers = ["", "sudo ", "sudo -u docker ", "sudo -g docker ", "env DOCKER_HOST=x "]
+for head, wrapper, flag in itertools.product(heads, wrappers, flags):
+    positive.append(("shell", wrapper + head + " " + flag + " target"))
+
+python_heads = [
+    ["docker", "rm"], ["docker", "container", "rm"],
+    ["docker", "compose", "-f", "x.yml", "rm"],
+    ["docker", "compose", "-p", "proj", "rm"],
+    ["docker", "-H=tcp://x", "rm"], ["docker", "-Htcp://x", "rm"],
+    ["docker", "-l=debug", "rm"], ["docker", "-cctx", "rm"],
+    ["ssh", "docker-host", "docker", "rm"],
+    ["sudo", "-u", "docker", "docker", "rm"],
+    ["docker", "compose", "--profile", "prod", "rm"],
+    ["docker", "compose", "--env-file", ".env", "rm"],
+    ["docker", "compose", "-fcompose.yml", "rm"],
+    ["docker", "compose", "-pproj", "rm"],
+    ["docker", "compose", "-f", "a", "-f", "b", "-f", "c", "-f", "d", "-f", "e", "rm"],
+    ["env", "DOCKER_HOST=x", "docker", "rm"],
+]
+for head, flag in itertools.product(python_heads, flags):
+    positive.append(("python", repr(head + flag.split() + ["target"])))
+
+negative = [
+    ("shell", f"{wrapper}docker exec docker rm -f target")
+    for wrapper in wrappers
+]
+negative += [("python", repr(["docker", "exec", "docker", "rm"] + flag.split() + ["target"]))
+             for flag in flags]
+
+false_negative = []
+false_positive = []
+master_count = branch_count = 0
+for kind, source in positive + negative:
+    should_detect = (kind, source) in positive
+    outcomes = []
+    for scanner in (master, branch):
+        try:
+            found = bool(scanner.culpables_en_texto(source, es_python=(kind == "python")))
+        except Exception:
+            found = False
+        outcomes.append(found)
+    master_count += outcomes[0]
+    branch_count += outcomes[1]
+    if outcomes[1] != should_detect:
+        (false_negative if should_detect else false_positive).append((kind, source, outcomes[1]))
+    if outcomes[0] and not outcomes[1] and should_detect:
+        print(f"MASTER_ONLY_POSITIVE {kind}: {source}")
+print(f"positives={len(positive)} negatives={len(negative)} total={len(positive)+len(negative)}")
+print(f"master_marked={master_count} branch_marked={branch_count}")
+print(f"branch_false_negatives={len(false_negative)} branch_false_positives={len(false_positive)}")
+for kind, source, _ in false_negative + false_positive:
+    print(f"BRANCH_MISMATCH {kind}: {source}")
+if false_negative or false_positive:
+    raise SystemExit(1)

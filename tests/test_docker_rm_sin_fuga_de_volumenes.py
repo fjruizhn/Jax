@@ -74,14 +74,18 @@ def _tokens_shell(linea):
 
 def _es_docker_rm(toks, indice_rm):
     """Reconoce docker [opciones] [container] rm, no otros subcomandos rm."""
-    docker = None
-    for j in range(indice_rm - 1, max(-1, indice_rm - 12), -1):
-        if toks[j] in _SEPARADORES:
-            break
-        if _ES_DOCKER.fullmatch(toks[j]) and _prefijo_docker_rm(toks[j + 1:indice_rm]):
-            docker = j
-            break
-    return docker is not None
+    inicio = indice_rm - 1
+    while inicio >= 0 and toks[inicio] not in _SEPARADORES:
+        inicio -= 1
+    for j in range(inicio + 1, indice_rm):
+        if _ES_DOCKER.fullmatch(toks[j]):
+            # docker exec/run ejecuta un comando dentro de un contenedor; no
+            # reinterpretar un contenedor llamado "docker" como el ejecutable.
+            if j + 1 < indice_rm and toks[j + 1] in ("exec", "run"):
+                return False
+            if _prefijo_docker_rm(toks[j + 1:indice_rm]):
+                return True
+    return False
 
 
 def culpables_shell(texto):
@@ -128,20 +132,25 @@ def _prefijo_docker_rm(tokens):
         elif token == "compose" and comando is None:
             comando = token
             k += 1
-        elif comando == "compose" and token in ("-f", "--file", "-p", "--project-name"):
-            if k + 1 >= len(tokens):
-                return False
-            k += 2
-        elif comando == "compose" and token.startswith(("--file=", "--project-name=")):
-            k += 1
+        elif comando == "compose":
+            # Compose acepta opciones globales en evolución, incluidas opciones
+            # con argumentos y formas adjuntas. El `rm` encontrado después por
+            # el escáner ya fija el subcomando de destino.
+            return True
         else:
             return False
     return True
 
 
 def _es_prefijo_docker_rm(tokens):
-    return any(_ES_DOCKER.search(token) and _prefijo_docker_rm(tokens[i + 1:])
-               for i, token in enumerate(tokens))
+    for i, token in enumerate(tokens):
+        if not _ES_DOCKER.search(token):
+            continue
+        if i + 1 < len(tokens) and tokens[i + 1] in ("exec", "run"):
+            return False
+        if _prefijo_docker_rm(tokens[i + 1:]):
+            return True
+    return False
 
 
 def culpables_python(fuente, filename="<string>"):
@@ -258,7 +267,12 @@ FUGAN_SHELL = [
     "docker compose -f x.yml rm -f",
     "docker compose -p proj rm -f svc",
     "docker compose --file x.yml rm -f svc",
+    "docker compose --profile prod rm -f svc",
+    "docker compose --env-file .env rm -f svc",
+    "docker compose -fcompose.yml rm -f svc",
+    "docker compose -pproj rm -f svc",
     "docker compose -f a.yml -f b.yml rm -fs svc",
+    "docker compose -f a -f b -f c -f d -f e rm -f svc",
     "sudo -u docker docker rm -f x",
     "sudo -g docker docker rm -f x",
     "docker -Htcp://x rm -f x",
@@ -310,8 +324,14 @@ FUGAN_PYTHON = [
     'subprocess.run(f"{docker} rm -f {n}", shell=True)',
     'subprocess.run("docker rm -f x", shell=True)',
     'subprocess.run(f"docker compose -f {yml} rm -f", shell=True)',
+    'subprocess.run(f"sudo -u docker docker rm -f {n}", shell=True)',
     '["docker", "compose", "-f", "x.yml", "rm", "-f"]',
     '["docker", "compose", "-p", p, "rm", "-f", "-s"]',
+    '["docker", "compose", "--profile", "prod", "rm", "-f"]',
+    '["docker", "compose", "--env-file", ".env", "rm", "-f"]',
+    '["docker", "compose", "-fcompose.yml", "rm", "-f"]',
+    '["docker", "compose", "-pproj", "rm", "-f"]',
+    '["docker", "compose", "-f", "a", "-f", "b", "-f", "c", "-f", "d", "-f", "e", "rm", "-f"]',
     '["ssh", "docker-host", "docker", "rm", "-f", n]',
     '["ssh", docker_host, "docker", "rm", "-f", n]',
     '["sudo", "-u", "docker", "docker", "rm", "-f", n]',
@@ -334,6 +354,7 @@ NO_FUGAN_SHELL = [
     '$SUDO rm -f "$TMP/archivo"',
     "docker stop x",
     "docker exec c rm -f /tmp/x",
+    "docker exec docker rm -f /tmp/x",
     "# nunca uses docker rm -f",
     "docker stop x; rm -f /tmp/y",
     "docker volume rm -f x",
@@ -348,6 +369,7 @@ NO_FUGAN_PYTHON = [
     '["sudo", "-n", "rm", "-f", str(ruta)]',
     'sudo + ["rm", "-f", p]',
     '[*docker, "exec", c, "rm", "-f", "/tmp/x"]',
+    '["docker", "exec", "docker", "rm", "-f", "/tmp/x"]',
     '# nunca uses docker rm -f\nx = 1',
     'def f():\n    """No uses docker rm -f."""\n    return 1',
     'DOCKER = 1\nsubprocess.run(["rm", "-f", p])',

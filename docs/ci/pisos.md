@@ -900,11 +900,11 @@ para conservar byte a byte el registro de la migración de pisos.
 
 ## `tests-puros/out`
 
-3540 -> 3621 (2026-10-06, JAX#357 ronda 3): el archivo de regresiones pasó
-de 6 a 87 casos corridos al parametrizar cada ejemplo de fuga A–E y el informe
-F; +81. Medido con la lista exacta de 195 archivos del paso "Piso exacto",
+3540 -> 3632 (2026-10-06, JAX#357 ronda 3): el archivo de regresiones pasó
+de 6 a 98 casos corridos al parametrizar A–E, agregar las opciones de Compose
+reportadas por auditoría y cubrir el caso `docker exec docker`; +92. Medido con la lista exacta de 195 archivos del paso "Piso exacto",
 Python 3.14.4, `requirements.txt`, `pytest` y `pytest-asyncio`; los cinco
-directorios del host se ocultaron en namespace de mount. Resultado: 3621 passed,
+directorios del host se ocultaron en namespace de mount. Resultado: 3632 passed,
 45 skipped, 1 xfailed, 16 subtests. Un primer intento falló una prueba ajena por
 mantener `USER=root` tras bajar de `sudo`; con `USER=fruiz` y el usuario efectivo
 alineados, la repetición completa pasó.
