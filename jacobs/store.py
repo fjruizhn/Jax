@@ -979,6 +979,18 @@ _INDICES: list[tuple[str, str, str, bool]] = [
     ("jacobs_events", "idx_events_pipeline_tipo",
      "CREATE INDEX idx_events_pipeline_tipo ON jacobs_events "
      "(pipeline_id, event_type) ALGORITHM=INPLACE LOCK=NONE", True),
+    # 2026-10-06 (jax-platform pantalla de auditoría del descarte): el feed
+    # global consulta un event_type por vez, restringe ts y pagina en orden
+    # (ts DESC, id DESC). Este índice permite recorrer ese rango en el orden
+    # solicitado sin filesort; id desempata timestamps iguales. La variante
+    # por pipeline antepone pipeline_id para conservar el mismo orden cuando
+    # la pantalla filtra un pipeline concreto. Ambos son aditivos y online.
+    ("jacobs_events", "idx_events_auditoria_fecha",
+     "CREATE INDEX idx_events_auditoria_fecha ON jacobs_events "
+     "(event_type, ts, id) ALGORITHM=INPLACE LOCK=NONE", True),
+    ("jacobs_events", "idx_events_pipeline_auditoria_fecha",
+     "CREATE INDEX idx_events_pipeline_auditoria_fecha ON jacobs_events "
+     "(pipeline_id, event_type, ts, id) ALGORITHM=INPLACE LOCK=NONE", True),
     # 2026-09-22 (spec descartar-pipelines §6): la vista "Descartados" filtra
     # por dueño + status y ordena por descartado_at; la de ocultos (todos los
     # usuarios) por status + descartado_at. Sin estos, EXPLAIN da filesort.
