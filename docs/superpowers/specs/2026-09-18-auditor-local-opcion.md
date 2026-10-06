@@ -41,9 +41,12 @@ pueden proyectarse sin salir de la allowlist y fallan cerradas en el vigía. La 
 final no vuelve a enviar claims ni un lote vacío: usa el resultado del vigía para marcar
 las claims como no auditadas.
 
-El registro C3 de selección es idempotente por ID de misión: una repetición idéntica
-responde OK sin agregar otra entrada; una faceta, proveedor, localidad o modo distinto
-para el mismo ID se rechaza. Así los turnos sucesivos y los reintentos tras perder la
+El registro C3 de selección es idempotente por ID de misión: al iniciar, el proxy
+reconstruye el índice desde la cadena C3 íntegra; una repetición idéntica responde OK
+sin agregar otra entrada y sobrevive reinicios. Una faceta, proveedor, localidad o modo
+distinto para el mismo ID se rechaza, incluso tras reiniciar el proxy. El índice conserva
+todas las selecciones existentes en la cadena, sin una ventana de deduplicación que pueda
+olvidar misiones antiguas. Así los turnos sucesivos y los reintentos tras perder la
 respuesta no bloquean el vigía ni ocultan un cambio de selección. La bitácora visible de
 misión conserva faceta, proveedor, localidad, modo y estado de auditoría de afirmaciones.
 

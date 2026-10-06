@@ -57,6 +57,9 @@ def test_c5_selection_uses_the_proxy_as_the_only_c3_writer(tmp_path):
                 await registrar_auditor_c5(mision_id="mision-1", faceta="thot", proveedor_id="openai",
                                            local=False, modo="SOLO_ORDENES",
                                            env={"JAX_PROXY_CARRIL_C5_SOCKET": str(path)})
+                # El índice se reconstruye desde C3 al reiniciar el proxy.
+                await server.apagar()
+                server = await arrancar(cfg)
                 # Mismo evento: OK idempotente, sin entrada C3 duplicada.
                 await registrar_auditor_c5(mision_id="mision-1", faceta="thot", proveedor_id="openai",
                                            local=False, modo="SOLO_ORDENES",
@@ -72,7 +75,9 @@ def test_c5_selection_uses_the_proxy_as_the_only_c3_writer(tmp_path):
 
     verificacion, eventos = asyncio.run(scenario())
     assert verificacion.ok
-    evento = eventos[-1]
+    selecciones = [e for e in eventos if e["evento"] == "c5_auditor_elegido"]
+    assert len(selecciones) == 1
+    evento = selecciones[0]
     assert {k: evento[k] for k in ("evento", "mision_id", "faceta", "proveedor_id", "local", "modo")} == {
         "evento": "c5_auditor_elegido", "mision_id": "mision-1", "faceta": "thot",
         "proveedor_id": "openai", "local": False, "modo": "SOLO_ORDENES"}

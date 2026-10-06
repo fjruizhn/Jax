@@ -141,7 +141,7 @@ from jax.core.cliente_http_compartido import crear_cliente_http
 from jax.ejecutor.cita import Motivo
 from jax.ejecutor.contratos import lectura
 from jax.ejecutor.contratos import pausa as pausa_c5
-from jax.ejecutor.contratos.registro import Registro
+from jax.ejecutor.contratos.registro import Registro, RegistroCorrupto, verificar_cadena
 from jax.ejecutor.prioridad import ESPERA_AGOTADA, EsperaAgotada, carril_ejecutor_async
 
 # Cuántas peticiones esperan el carril AHORA. Estado del proceso: sirve para ver la cola y para
@@ -447,7 +447,7 @@ def _ruta_sin_query(destino: bytes) -> str:
 
 
 class _Proxy:
-    def __init__(self, cfg: Config, registro: Registro) -> None:
+    def __init__(self, cfg: Config, registro: Registro, selecciones_c5: dict[str, tuple] | None = None) -> None:
         self.cfg = cfg
         self.registro = registro
         # tool_use_id ya anotados como resultado: la historia se repite entera en cada
@@ -455,7 +455,7 @@ class _Proxy:
         self._resultados_anotados: collections.OrderedDict = collections.OrderedDict()
         # Idempotencia por misión: un turno posterior o el reintento tras perder OK
         # repite la misma selección sin duplicar C3. Una selección distinta se rechaza.
-        self._misiones_c5_anotadas: collections.OrderedDict[str, tuple] = collections.OrderedDict()
+        self._misiones_c5_anotadas: dict[str, tuple] = dict(selecciones_c5 or {})
         self._candado_c5 = asyncio.Lock()
         # Un cliente propio del proxy (pool de conexiones), no uno por petición:
         # vive lo que vive el servidor y se cierra en `cerrar()`. Se construye con
@@ -516,8 +516,6 @@ class _Proxy:
                 if anterior is None:
                     await self._anotar(evento)
                     self._misiones_c5_anotadas[evento["mision_id"]] = seleccion
-                while len(self._misiones_c5_anotadas) > 4096:
-                    self._misiones_c5_anotadas.popitem(last=False)
             writer.write(b"OK\n")
             await writer.drain()
         except (asyncio.IncompleteReadError, asyncio.TimeoutError, ValueError, OSError, TypeError):
@@ -977,6 +975,29 @@ def _config_invalida_socket() -> ConfigInvalida:
     return ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_SOCKET"),)))
 
 
+def _selecciones_c5_del_registro(ruta: Path) -> dict[str, tuple]:
+    """Rehidrata el índice idempotente desde C3; solo una cadena íntegra es autoridad."""
+    verificacion = verificar_cadena(ruta)
+    if not verificacion.ok:
+        raise RegistroCorrupto("registro_c3_no_cuadra")
+    selecciones: dict[str, tuple] = {}
+    with open(ruta, "rb") as f:
+        for linea in f:
+            evento = json.loads(linea)
+            if evento.get("evento") != "c5_auditor_elegido":
+                continue
+            if (not all(isinstance(evento.get(k), str) for k in ("mision_id", "faceta", "proveedor_id"))
+                    or evento.get("local") is not False or evento.get("modo") != "SOLO_ORDENES"):
+                raise RegistroCorrupto("registro_c3_c5_invalido")
+            mision_id = evento["mision_id"]
+            seleccion = (evento["faceta"], evento["proveedor_id"], evento["local"], evento["modo"])
+            anterior = selecciones.get(mision_id)
+            if anterior is not None and anterior != seleccion:
+                raise RegistroCorrupto("registro_c3_c5_conflictivo")
+            selecciones[mision_id] = seleccion
+    return selecciones
+
+
 def _sondear_oyente(ruta: Path) -> None:
     """connect() de prueba. Vuelve normal SOLO si nadie escucha (ECONNREFUSED); cualquier otro
     resultado (conexión lograda, ENOENT, EACCES, tiempo agotado...) levanta y el llamador falla cerrado."""
@@ -1065,8 +1086,9 @@ async def arrancar(cfg: Config) -> Servidor:
     identidad = None
     identidad_c5 = None
     try:
+        selecciones_c5 = await asyncio.to_thread(_selecciones_c5_del_registro, cfg.registro)
         await asyncio.to_thread(registro.anotar, {"evento": "registro_abierto", "pid": os.getpid()})
-        proxy = _Proxy(cfg, registro)
+        proxy = _Proxy(cfg, registro, selecciones_c5)
         servidor = await asyncio.start_server(proxy.atender, cfg.host, cfg.puerto)
         if cfg.jaxqwen_socket is not None:
             path = cfg.jaxqwen_socket
