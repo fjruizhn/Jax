@@ -769,7 +769,12 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
                     return reenvio
                 # Reclamo huerfano ya vencido (el proceso murio antes de crear el trabajo): lo retoma UNO.
                 if not await idempotencia.tomar_huerfana(reclamo, candidato):
-                    raise HTTPException(status_code=503, detail={"code": "idempotencia_en_curso"})
+                    # Otro reintento lo retomo antes: se devuelve SU trabajo (esperando a que termine de crearse).
+                    actual = await idempotencia.buscar(identidad, clave)
+                    reenvio = await _reenvio_de(actual, huella, ownership) if actual is not None else None
+                    if reenvio is None:
+                        raise HTTPException(status_code=503, detail={"code": "idempotencia_en_curso"})
+                    return reenvio
             job_id_reclamado = candidato
             _purgar_en_segundo_plano()
         return await _crear_con_cupo(req, ownership, proyecto, job_id_reclamado)
@@ -782,6 +787,9 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
             except Exception:  # fail-soft: si no se pudo liberar, el reclamo queda huerfano y el reintento lo retoma pasada la gracia
                 logger.warning("idempotencia: no se pudo liberar el reclamo de un trabajo que no se creo", exc_info=True)
         raise
+
+
+_ESTADOS_QUE_SE_REINTENTAN = frozenset({JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.REJECTED})
 
 
 def _trabajo_existe(job_id: str) -> bool:
@@ -819,6 +827,12 @@ async def _reenvio_de(reclamo, huella: str, ownership) -> JSONResponse | None:
         return None
     if instantanea.owner != ownership:
         raise HTTPException(status_code=409, detail={"code": "idempotency_key_reuse"})
+    if instantanea.view.status in _ESTADOS_QUE_SE_REINTENTAN:
+        # Un trabajo que FALLO o se canceló sin que el llamador llegara a saber su job_id (si lo supiera, ya
+        # habria atado sus filas y no reenviaria): reenviar con la misma clave es reintentarlo. Devolverlo
+        # dejaria el documento en `error` por una caida de LAS MANOS (el arranque marca `failed` lo que
+        # corria) que el llamador nunca vio. Se retoma como un reclamo huerfano.
+        return None
     return JSONResponse(
         TrabajoCreadoResponse(job_id=reclamo.job_id, estado=instantanea.view.status.value).model_dump(),
         status_code=202, headers={"Idempotent-Replayed": "true"})

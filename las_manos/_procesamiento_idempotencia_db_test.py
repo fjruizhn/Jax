@@ -407,6 +407,31 @@ def test_un_reclamo_huerfano_viejo_se_retoma_y_crea_el_trabajo_una_vez(ruta):
     assert len(almacen._index) == 1 and ejecutar.await_count == 1
 
 
+def test_un_trabajo_fallido_que_el_llamador_nunca_vio_se_reintenta_con_la_misma_clave(ruta):
+    """LAS MANOS se reinicia y marca `failed` el trabajo que corria; el llamador (que no llego a conocer el
+    job_id) reenvia con la misma clave. Devolverle ese trabajo fallido dejaria su documento en `error` por algo
+    que nunca vio: se crea uno nuevo, una sola vez aunque lleguen varios reenvios a la vez."""
+    app, almacen, ejecutar = ruta
+
+    async def todo():
+        await idem.init_tabla()
+        clave = _clave()
+        try:
+            viejo = almacen.create(ownership=OWNER, caller=f"user:{OWNER.user_id}", capability="ingesta_archivos",
+                                   motor="n/a", trace_id="t", prompt="p", recursion_depth=0)
+            almacen.update(viejo, status="failed", error="proceso de LAS MANOS reiniciado")
+            await idem.reclamar(IDENTIDAD_PLATAFORMA, clave, _hash("a.pdf"), viejo)
+            respuestas = await asyncio.gather(*[_post(app, clave, "a.pdf") for _ in range(3)])
+            return viejo, respuestas, await _filas(clave)
+        finally:
+            await _borrar(clave)
+    viejo, respuestas, filas = asyncio.run(todo())
+    assert all(r.status_code == 202 for r in respuestas), [r.text for r in respuestas]
+    nuevos = {r.json()["job_id"] for r in respuestas}
+    assert len(nuevos) == 1 and viejo not in nuevos and filas == [(IDENTIDAD_PLATAFORMA, nuevos.pop())]
+    assert len(almacen._index) == 2 and ejecutar.await_count == 1
+
+
 def test_si_crear_el_trabajo_falla_el_reclamo_se_libera(ruta):
     app, almacen, ejecutar = ruta
 

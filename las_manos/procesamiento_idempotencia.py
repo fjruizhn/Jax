@@ -24,6 +24,11 @@ creen UN solo trabajo:
      puede estarse creando ahora mismo) pide esperar (503); pasada la gracia lo retoma con un
      CAS sobre el job_id (`tomar_huerfana`): de varios reintentos a la vez gana UNO.
 
+  4. Un reenvio cuyo trabajo ya existe pero FALLO o se cancelo (p. ej. LAS MANOS se reinicio y marco `failed`
+     lo que corria) sin que el llamador llegara a saber su job_id, se trata como el huerfano: se retoma con
+     el mismo CAS y se crea un trabajo nuevo. Si el llamador lo hubiera conocido, ya habria atado sus filas y no
+     reenviaria.
+
 El hash del pedido (dueno + project_uuid + rutas) hace que la misma clave con OTRO pedido sea un
 conflicto (409) y no un trabajo equivocado.
 
