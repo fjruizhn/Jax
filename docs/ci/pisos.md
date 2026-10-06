@@ -900,11 +900,12 @@ para conservar byte a byte el registro de la migración de pisos.
 
 ## `tests-puros/out`
 
-3540 -> 3680 (2026-10-06, JAX#357 ronda 3): el archivo de regresiones pasó
-de 6 a 146 casos corridos al parametrizar A–E, cubrir opciones de Compose y
-excluir `docker exec/run` con contenedor llamado `docker`; +140. Medido con la lista exacta de 195 archivos del paso "Piso exacto",
+3540 -> 3696 (2026-10-06, JAX#357 ronda 3): el archivo de regresiones pasó
+de 6 a 162 casos corridos al parametrizar A–E, cubrir opciones de Compose y SSH
+(incluidos grupos de opciones y comandos remotos anidados), y excluir `docker exec/run`
+con contenedor llamado `docker`; +156. Medido con la lista exacta de 195 archivos del paso "Piso exacto",
 Python 3.14.4, `requirements.txt`, `pytest` y `pytest-asyncio`; los cinco
-directorios del host se ocultaron en namespace de mount. Resultado: 3680 passed,
+directorios del host se ocultaron en namespace de mount. Resultado: 3696 passed,
 45 skipped, 1 xfailed, 16 subtests. Un primer intento falló una prueba ajena por
 mantener `USER=root` tras bajar de `sudo`; con `USER=fruiz` y el usuario efectivo
 alineados, la repetición completa pasó.
