@@ -98,7 +98,14 @@ async def _build_plan_or_reject(
             max_steps=max_steps, steps_spec=steps_spec,
         )
     except PlanRejected as exc:
-        evento = {"violations": [v.to_dict() for v in exc.violations]}
+        # MINOR 5 (auditoria #362): un plan que sale del propio LLM solo se
+        # puede validar DESPUES de la llamada; ese gasto no se evita antes del
+        # 422, pero queda dicho en el evento para que no pase por ejecucion.
+        evento = {
+            "violations": [v.to_dict() for v in exc.violations],
+            "origen_plan": "planificador" if not steps_spec else "pasos_explicitos",
+            "planificador_consultado": not steps_spec,
+        }
         if isinstance(exc, MotorGobernadoNoDisponible):
             evento["code"] = exc.code
         await store.event_append(

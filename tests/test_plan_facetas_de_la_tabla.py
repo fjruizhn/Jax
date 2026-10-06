@@ -373,3 +373,38 @@ def test_jacobs_solo_lee_la_faceta_arbitro_http_y_nunca_la_local():
     assert eleccion_c5.elegir_auditor_faceta(cfg, hay_datos_de_clientes=False) == "thot"
     assert models.faceta_ejecutable_en_pipeline("thot") is True
     assert models.faceta_ejecutable_en_pipeline("el_juez") is False
+
+
+# --- MINOR 5 (auditoria #362): el costo del planificador en un plan rechazado --
+# Un plan que sale del propio LLM (Ada/qwen) solo se puede validar DESPUES de la
+# llamada, asi que ese gasto no se puede evitar antes del 422. Lo que si se
+# puede es que no pase desapercibido: el evento PLAN_REJECTED dice de donde
+# salio el plan. (Ni Ada ni qwen escriben hoy una fila en axioma_usage: no hay
+# registro de uso del planificador que ordenar o marcar -- ver el informe.)
+
+def _rechazo(monkeypatch, steps_spec, plan_del_llm=None):
+    from fastapi import HTTPException
+    from jacobs import store
+    evento = AsyncMock()
+    monkeypatch.setattr(store, "event_append", evento)
+    if plan_del_llm is not None:
+        async def llm(objective, max_steps, capability_hint, *, facetas_activas, governance=None):
+            return plan_del_llm
+        monkeypatch.setattr(plan_mod.PlanBuilder, "_llm_plan", lambda self, *a, **k: llm(*a, **k))
+        monkeypatch.setattr(plan_mod.PlanBuilder, "_classify_difficulty", lambda self, o: "simple")
+    with pytest.raises(HTTPException):
+        asyncio.run(routes._build_plan_or_reject("p-cobro", "algo trivial", 3, steps_spec))
+    return evento.await_args.args[2]
+
+
+def test_plan_rechazado_que_salio_del_planificador_lo_dice_en_el_evento(monkeypatch):
+    payload = _rechazo(monkeypatch, None, plan_del_llm=[
+        {"facet": "hyde", "capability": "implementation", "prompt": "x"}])
+    assert payload["origen_plan"] == "planificador"
+    assert payload["planificador_consultado"] is True
+
+
+def test_plan_rechazado_de_pasos_explicitos_no_dice_que_hubo_planificador(monkeypatch):
+    payload = _rechazo(monkeypatch, [{"facet": "kimi", "capability": "analysis", "prompt": "x"}])
+    assert payload["origen_plan"] == "pasos_explicitos"
+    assert payload["planificador_consultado"] is False
