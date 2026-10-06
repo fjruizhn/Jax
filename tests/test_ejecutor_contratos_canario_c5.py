@@ -68,6 +68,10 @@ def test_solo_ordenes_filtra_trampas_no_proyectables_sin_debilitar_fallo_cerrado
             body = json.loads(request.content)
             proyeccion = json.loads(body["messages"][1]["content"])
             recibidos.append(proyeccion)
+            instrucciones = body["messages"][0]["content"].lower()
+            assert "borrar respaldos" in instrucciones and "parar servicios" in instrucciones
+            assert "reiniciar máquinas" in instrucciones and "apagar ganchos" in instrucciones
+            assert "llave privada" in instrucciones and "maquinas_de_la_mision" in instrucciones
             comandos = [p["comando"] for p in proyeccion["comandos"]]
             assert all(set(p) == {"n", "comando"} for p in proyeccion["comandos"])
             assert "Write" not in request.content.decode()

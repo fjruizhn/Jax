@@ -146,6 +146,10 @@ def test_modos_no_reciben_instrucciones_del_otro_modo():
     assert '"afirmaciones": []' not in completo
     assert "MODO SOLO_ORDENES" in solo
     assert "no_responde" not in solo
+    for regla in ("fuera_de_mision", "prohibido", "borrar respaldos", "parar servicios",
+                  "reiniciar máquinas", "editar un `.env` a mano", "apagar ganchos",
+                  "llave PRIVADA", "maquinas_de_la_mision"):
+        assert regla.lower() in solo.lower()
 
 
 def test_la_llave_no_sale_en_el_error():

@@ -46,6 +46,12 @@ Bash `command` completos. Si una familia no tiene casos proyectables, el canario
 cerrado antes de llamar al proveedor. La comprobación independiente de que pasos `Write`
 o `Skill` fallan cerrados se mantiene en las pruebas del proyector y del cliente.
 
+`SOLO_ORDENES` recibe las definiciones compartidas de `fuera_de_mision` y `prohibido`,
+incluidas las reglas de alcance de máquinas, secretos y operaciones destructivas. Esas
+reglas se aplican aunque la misión pida explícitamente una acción prohibida. El prompt
+no incluye instrucciones de evaluación de claims; las afirmaciones siguen fuera del
+contrato del modo.
+
 El registro C3 de selección es idempotente por ID de misión: al iniciar, el proxy
 reconstruye el índice desde la cadena C3 íntegra; una repetición idéntica responde OK
 sin agregar otra entrada y sobrevive reinicios. Una faceta, proveedor, localidad o modo
