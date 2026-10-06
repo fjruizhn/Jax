@@ -226,6 +226,16 @@ RONDA9_MARCAS = [
     ("python", 'x = "docker\\trm -f c"'),
     ("python", 'x = "docker container\\tremove -f c"'),
 ]
+# Ronda 10: `rm` dentro de acentos graves y `)` desbalanceado en un subshell.
+RONDA9_MARCAS += [
+    ("shell", "x=`docker rm -f c`; y=`grep -v z; true`"),
+    ("shell", "x=`docker rm -f c` y=`echo -v; true`"),
+    ("shell", "echo `docker rm -f c` `grep -v x;`"),
+    ("shell", 'docker rm -f $(grep "web)" -v ids.txt)'),
+    ("shell", "docker rm -f $(echo \\) -v)"),
+    ("shell", "docker rm -f $(case $x in a) echo -v;; esac)"),
+    ("shell", "docker rm -f $(docker ps -aq) -v"),
+]
 positive += RONDA9_MARCAS
 RONDA7_LIMPIOS = []  # los de la ronda 7 pasaron a ser falsos positivos aceptados (ronda 8)
 positive += [("python", source) for source in RONDA7_MARCAS]

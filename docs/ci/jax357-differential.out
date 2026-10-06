@@ -511,6 +511,13 @@ EXPECTED_NEW_MARK	pr	shell	'docker rm $(echo $(docker ps -aq) x) -f'
 EXPECTED_NEW_MARK	pr	shell	'docker rm $(docker ps -aq'
 EXPECTED_NEW_MARK	pr	python	'x = "docker\\trm -f c"'
 EXPECTED_NEW_MARK	pr	python	'x = "docker container\\tremove -f c"'
+MATCH	pr	shell	'x=`docker rm -f c`; y=`grep -v z; true`'
+MATCH	pr	shell	'x=`docker rm -f c` y=`echo -v; true`'
+MATCH	pr	shell	'echo `docker rm -f c` `grep -v x;`'
+MATCH	pr	shell	'docker rm -f $(grep "web)" -v ids.txt)'
+MATCH	pr	shell	'docker rm -f $(echo \\) -v)'
+MATCH	pr	shell	'docker rm -f $(case $x in a) echo -v;; esac)'
+MATCH	pr	shell	'docker rm -f $(docker ps -aq) -v'
 MATCH	pr	python	'["docker", "rm", c, "|", "-f"]'
 MATCH	pr	python	'["docker", "rm", c, ";", "--force"]'
 MATCH	pr	python	'["docker", "rm", c, "&&", "-f"]'
@@ -752,9 +759,9 @@ MATCH	codex-30	shell	'docker -DH tcp://x rm -f x'
 MATCH	codex-30	shell	'docker rmi -f imagen'
 MATCH	codex-30	python	'["docker", "-Dl", "debug", "rm", "-f", n]'
 MATCH	codex-30	python	'["docker", "compose", "--workdir", "/x", "rm", "-f"]'
-master_sha=f47820f5af36d7b0e4e0d5b2156ac6275c10462c candidate_sha=9bc6e16b016c898a83a156328aa9fbba658eb600
-pr_cases=588 auditor_cases=136 own_cases=30 total=754
-master_marked=594 candidate_marked=664
+master_sha=f47820f5af36d7b0e4e0d5b2156ac6275c10462c candidate_sha=b8bfa187eb975f3c5fb068b2897b92a04233c88a
+pr_cases=595 auditor_cases=136 own_cases=30 total=761
+master_marked=601 candidate_marked=671
 leaks=0 unexpected_new_marks=0 expectation_misses=0 expected_candidate_only_marks=75 whitelist_exceptions=5
 DOCUMENTED_WHITELIST auditor-126 shell: 'docker context rm -f c'
 DOCUMENTED_WHITELIST auditor-126 shell: 'docker buildx rm -f b'

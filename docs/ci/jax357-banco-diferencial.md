@@ -20,8 +20,8 @@ python3 docs/ci/jax357-differential.py.txt <SHA_MASTER> <SHA_CANDIDATO> > docs/c
 
 Qué SHAs compara el `.out` versionado: referencia = `master` en
 `f47820f5af36d7b0e4e0d5b2156ac6275c10462c` (su escáner es el de antes de la rama);
-candidato = el commit del escáner de la ronda 6, indicado en la primera línea de
-resumen del propio `.out` (`candidate_sha=`). Al cambiar el escáner hay que regenerar el
+candidato = el commit del escáner de la última ronda, el de la primera línea de
+resumen del propio `.out` (`candidate_sha=`, no el commit del `.out` ni el del piso). Al cambiar el escáner hay que regenerar el
 `.out` con el SHA nuevo.
 
 Desde la ronda 8 el banco no incluye los casos `docker rm -v c SEP rm -f p`: la lectura argv
