@@ -291,8 +291,8 @@ def culpables_python(fuente, filename="<string>"):
 # >>> BLOQUE CONGELADO: detección de master f47820f5af36d7b0e4e0d5b2156ac6275c10462c <<<
 # Copia TEXTUAL de las funciones de detección de `tests/test_docker_rm_sin_fuga_de_volumenes.py` en ese SHA
 # (shell y listas), solo con el sufijo `_master` en los nombres. NO SE EDITAN: la prueba
-# `test_el_bloque_congelado_es_el_de_master` compara su hash y, si el SHA está en el checkout,
-# el texto contra `git show`. La detección final es `master(x) OR nuevo(x)`.
+# `test_el_bloque_congelado_es_el_de_master` compara su hash y el texto contra `git show` del SHA de
+# master (lo trae por `git fetch` o FALLA, nunca lo omite). Detección final: `master(x) OR nuevo(x)`.
 _ES_DOCKER_master = re.compile(r"(?:\S*/)?docker|\$\{?\w*docker\w*(?:\[@\])?\}?|\{[^{}]*docker[^{}]*\}|dk", re.I)
 _SEPARADORES_master = {";", "&&", "||", "|", "(", ")", "`", "$("}
 _FALSO_master = {"false", "0", "f", "no"}
@@ -405,53 +405,71 @@ _HASH_BLOQUE_MASTER = "07e54de201fc9a4351e9a51a1052e7ad3be4481bb1c6b199e17568931
 _SHA_MASTER = "f47820f5af36d7b0e4e0d5b2156ac6275c10462c"
 
 
-def _es_rm_de_recurso_con_nombre(hallazgo):
-    """True si el `rm` que MARCÓ master en este hallazgo es `docker <volume|network|image|...> rm`.
+def _pegado_a_docker_y_subcomando(piezas, i):
+    """`piezas[i]` es un `rm` precedido, PEGADO, de `docker <volume|network|image|...>`."""
+    return i >= 2 and piezas[i - 2] == "docker" and piezas[i - 1] in _SUBCOMANDOS_SIN_VOLUMEN_ANONIMO
 
-    Se decide por el token `rm` marcado, no por una búsqueda en la ventana de texto: master no
-    corta en un `&` suelto y sigue juntando banderas, así que su ventana puede llegar a un
-    `docker volume rm` POSTERIOR que no es el `rm` marcado. Hallazgo de lista de Python: es el
-    texto fuente de la lista y el `rm` marcado es el primero. Hallazgo de shell: es la ventana
-    `toks[i-3 : i+1+n+1]`, así que el `rm` marcado está en las posiciones 0..3; si hay más de
-    una posible, solo se exime cuando TODAS son de un recurso con nombre (ante la duda, se marca)."""
-    try:
-        nodo = ast.parse(hallazgo, mode="eval").body
-    except SyntaxError:
-        nodo = None
-    if isinstance(nodo, (ast.List, ast.Tuple)):
-        cadenas = [e.value if isinstance(e, ast.Constant) else None for e in nodo.elts]
-        if "rm" not in cadenas:
-            return False
-        i = cadenas.index("rm")
-        return i >= 2 and cadenas[i - 2] == "docker" and cadenas[i - 1] in _SUBCOMANDOS_SIN_VOLUMEN_ANONIMO
+
+def _lista_es_de_recurso_con_nombre(nodo):
+    """Hallazgo de LISTA de Python, decidido sobre el nodo (no sobre su texto): el `rm` que marca
+    master es el primero de la lista."""
+    cadenas = [e.value if isinstance(e, ast.Constant) else None for e in nodo.elts]
+    if "rm" not in cadenas:
+        return False
+    return _pegado_a_docker_y_subcomando(cadenas, cadenas.index("rm"))
+
+
+def _ventana_de_shell_es_de_recurso(hallazgo):
+    """Hallazgo de SHELL (también el de una cadena dentro de Python): es la ventana de texto
+    `toks[i-3 : i+1+n+1]` de master, así que el `rm` marcado está en las posiciones 0..3. Master
+    no corta en un `&` suelto y su ventana puede llegar a un `docker volume rm` POSTERIOR que no
+    es el `rm` marcado: por eso no se busca una regex en ella. Si hay más de un `rm` posible, solo
+    se exime cuando TODOS son de un recurso con nombre (ante la duda, se marca); sin ningún `rm`
+    identificable, no se exime."""
     palabras = hallazgo.split()
     posibles = [p for p in range(min(4, len(palabras))) if palabras[p] == "rm"]
-    return bool(posibles) and all(
-        p >= 2 and palabras[p - 2] == "docker" and palabras[p - 1] in _SUBCOMANDOS_SIN_VOLUMEN_ANONIMO
-        for p in posibles)
+    return bool(posibles) and all(_pegado_a_docker_y_subcomando(palabras, p) for p in posibles)
 
 
-def _sin_la_excepcion_de_lista_blanca(hallazgos_master):
+def _sin_la_excepcion_de_lista_blanca(hallazgos_master, fuente=None):
     """Único recorte a master: `docker <volume|network|image|...> rm -f x` NO es un contenedor
     (un volumen con nombre no deja huérfano nada) y esta rama lo exime a propósito desde la
     ronda 1; master lo marcaba de más. Se descartan solo los hallazgos de master cuyo `rm`
-    marcado es ese (`_es_rm_de_recurso_con_nombre`)."""
-    return [h for h in hallazgos_master if not _es_rm_de_recurso_con_nombre(h)]
+    marcado es ese.
+
+    El TIPO del hallazgo viene de dónde salió, nunca de re-interpretar su texto: en modo shell
+    (`fuente=None`) todo es una ventana de shell. En modo Python (`fuente` = el código) un
+    hallazgo es de lista solo si su texto es el de un nodo List/Tuple de ese código, y entonces
+    se decide sobre el NODO; si ese texto aparece más veces de las que hay nodos, las demás
+    salieron de una cadena y no se eximen. Cualquier otro hallazgo es una ventana de shell."""
+    if fuente is None:
+        return [h for h in hallazgos_master if not _ventana_de_shell_es_de_recurso(h)]
+    listas = {}
+    for nodo in ast.walk(ast.parse(fuente)):
+        if isinstance(nodo, (ast.List, ast.Tuple)):
+            texto = " ".join(_texto_de_master(nodo, fuente).split())
+            listas.setdefault(texto, []).append(_lista_es_de_recurso_con_nombre(nodo))
+    veces = {}
+    for h in hallazgos_master:
+        veces[h] = veces.get(h, 0) + 1
+    return [h for h in hallazgos_master
+            if not ((all(listas[h]) and veces[h] <= len(listas[h])) if h in listas
+                    else _ventana_de_shell_es_de_recurso(h))]
 
 
 def culpables_en_texto(texto, es_python=None, filename="<string>"):
     """master(x) OR nuevo(x): lo que marca la detección congelada de master, más lo que suma
-    la nueva. Nunca se marca menos que master por construcción, salvo la excepción documentada
-    de la lista blanca (`_sin_la_excepcion_de_lista_blanca`)."""
+    la nueva. Se marca todo lo que master marca, salvo los hallazgos cuyo `rm` marcado es de un
+    recurso con nombre (`_sin_la_excepcion_de_lista_blanca`), la única excepción documentada."""
     if es_python is None:
         es_python = not texto.lstrip().startswith("#!") or "python" in texto.split("\n", 1)[0]
     if es_python:
         nuevo = culpables_python(texto, filename=filename)   # falla cerrado (SyntaxError)
-        viejo = culpables_python_master(texto)
+        viejo = _sin_la_excepcion_de_lista_blanca(culpables_python_master(texto), texto)
     else:
         nuevo = culpables_shell(texto)
-        viejo = culpables_shell_master(texto)
-    return nuevo + [h for h in _sin_la_excepcion_de_lista_blanca(viejo) if h not in nuevo]
+        viejo = _sin_la_excepcion_de_lista_blanca(culpables_shell_master(texto))
+    return nuevo + [h for h in viejo if h not in nuevo]
 
 
 def _archivos():
@@ -1050,7 +1068,7 @@ def test_la_exencion_de_recurso_con_nombre_sigue_funcionando_en_listas():
     for fuente in ['["docker", "volume", "rm", "-f", v]', '("docker", "network", "rm", "-f", n)']:
         hallazgos = culpables_python_master(fuente)
         assert hallazgos, "master ya no marca: el caso no ejercita la exencion"
-        assert not _sin_la_excepcion_de_lista_blanca(hallazgos), f"falso positivo: {fuente}"
+        assert not _sin_la_excepcion_de_lista_blanca(hallazgos, fuente), f"falso positivo: {fuente}"
         assert not culpables_en_texto(fuente, es_python=True)
 
 
@@ -1082,7 +1100,7 @@ def test_la_exencion_exige_docker_subcomando_rm_pegados_en_shell(comando):
 def test_la_exencion_exige_docker_subcomando_rm_pegados_en_listas(fuente):
     hallazgos = culpables_python_master(fuente)
     assert hallazgos, f"master ya no marca: {fuente}"
-    assert _sin_la_excepcion_de_lista_blanca(hallazgos), f"se eximió de más: {fuente}"
+    assert _sin_la_excepcion_de_lista_blanca(hallazgos, fuente), f"se eximió de más: {fuente}"
 
 
 def test_la_exencion_ante_dos_rm_posibles_marca_si_alguno_no_es_de_recurso_con_nombre():
@@ -1095,8 +1113,9 @@ def test_la_exencion_ante_dos_rm_posibles_marca_si_alguno_no_es_de_recurso_con_n
 
 def test_la_exencion_en_listas_no_lee_hacia_atras_con_indice_negativo():
     """`rm` en la posición 0 no mira el final de la lista (`elts[-2]`, `elts[-1]`)."""
-    hallazgos = culpables_python_master('DOCKER + ["rm", "-f", "docker", "volume"]')
-    assert hallazgos and _sin_la_excepcion_de_lista_blanca(hallazgos)
+    fuente = 'DOCKER + ["rm", "-f", "docker", "volume"]'
+    hallazgos = culpables_python_master(fuente)
+    assert hallazgos and _sin_la_excepcion_de_lista_blanca(hallazgos, fuente)
 
 
 def test_sin_el_sha_de_master_la_comparacion_falla_y_no_vuelve_en_silencio(monkeypatch):
@@ -1153,3 +1172,26 @@ def test_el_bloque_congelado_falla_si_master_difiere_en_un_byte(monkeypatch):
     monkeypatch.setitem(globals(), "_texto_de_este_archivo_en_master", lambda: adulterado)
     with pytest.raises(AssertionError):
         test_el_bloque_congelado_es_el_de_master()
+
+
+# Minor 2 de la ronda 13: un hallazgo sin `rm` identificable NO se exime (mata `return True` sin
+# `rm` en la lista y `all(...)` sin `bool(posibles)` en la ventana).
+@pytest.mark.parametrize("ventana", ["", "docker volume x", "docker volume ls -f", "a b c d e rm"])
+def test_una_ventana_de_shell_sin_rm_identificable_no_se_exime(ventana):
+    assert not _ventana_de_shell_es_de_recurso(ventana)
+    assert _sin_la_excepcion_de_lista_blanca([ventana]) == [ventana]
+
+
+@pytest.mark.parametrize("fuente", ['["docker", "volume"]', '["docker", "volume", x]', "[]", '["rm2"]'])
+def test_una_lista_sin_rm_no_se_exime(fuente):
+    nodo = ast.parse(fuente, mode="eval").body
+    assert not _lista_es_de_recurso_con_nombre(nodo)
+
+
+def test_la_exencion_de_listas_cuenta_nodos_y_no_texto_repetido():
+    """Si el texto de un hallazgo de lista aparece más veces que nodos hay, las demás salieron de
+    otra parte y no se eximen."""
+    fuente = '["docker", "volume", "rm", "-f", v]'
+    hallazgo = " ".join(fuente.split())
+    assert _sin_la_excepcion_de_lista_blanca([hallazgo], fuente) == []
+    assert _sin_la_excepcion_de_lista_blanca([hallazgo, hallazgo], fuente) == [hallazgo, hallazgo]
