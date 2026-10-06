@@ -1121,3 +1121,35 @@ def test_el_sha_de_master_se_trae_por_fetch_si_el_checkout_es_superficial(monkey
     monkeypatch.setattr(subprocess, "run", simulado)
     assert _texto_de_este_archivo_en_master() == "TEXTO"
     assert llamadas == ["show", "fetch", "show"]
+
+
+# --- Ronda 13: el tipo de hallazgo viene de dónde salió, no de re-interpretar su texto ---------
+_VENTANA_QUE_PARSEA_COMO_LISTA = '["docker","volume","rm",bin/docker --config if rm "&y" -f else 0] --force --force'
+
+
+def test_shell_una_ventana_que_parsea_como_lista_de_python_no_toma_el_camino_de_listas():
+    assert culpables_shell_master(_VENTANA_QUE_PARSEA_COMO_LISTA), "el caso ya no ejercita a master"
+    assert culpables_en_texto(_VENTANA_QUE_PARSEA_COMO_LISTA, es_python=False)
+
+
+def test_python_la_misma_ventana_dentro_de_una_cadena_no_se_exime_como_lista():
+    fuente = f"subprocess.run({_VENTANA_QUE_PARSEA_COMO_LISTA!r}, shell=True)"
+    assert culpables_python_master(fuente), "el caso ya no ejercita a master"
+    assert culpables_en_texto(fuente, es_python=True)
+
+
+def test_python_lista_con_comentario_cuyo_texto_aplanado_no_parsea_no_se_exime():
+    fuente = 'cmd = [# docker volume rm\n    ["docker"], "rm", "-f", c]\n'
+    assert culpables_python_master(fuente), "el caso ya no ejercita a master"
+    assert culpables_en_texto(fuente, es_python=True)
+
+
+# Minor 3 de la ronda 13: la prueba del bloque congelado tiene que FALLAR si el texto de master
+# difiere en un byte (mata el mutante que vuelve antes de compararlo).
+def test_el_bloque_congelado_falla_si_master_difiere_en_un_byte(monkeypatch):
+    real = _texto_de_este_archivo_en_master()
+    adulterado = real.replace('_FALSO = {"false"', '_FALSO = {"falsE"', 1)
+    assert adulterado != real
+    monkeypatch.setitem(globals(), "_texto_de_este_archivo_en_master", lambda: adulterado)
+    with pytest.raises(AssertionError):
+        test_el_bloque_congelado_es_el_de_master()
