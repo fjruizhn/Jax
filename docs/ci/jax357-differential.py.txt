@@ -217,6 +217,16 @@ RONDA7_MARCAS += [
     'DOCKER + ["rm", "rm", "-f"]',
     '["docker", "rm", c, "&&", "rm", "-f", p]',
 ]
+# Ronda 9: el subshell no corta las banderas en shell; el prefiltro ve cualquier espacio.
+RONDA9_MARCAS = [
+    ("shell", "docker rm $(docker ps -aq) -f"),
+    ("shell", "docker rm `docker ps -aq` -f"),
+    ("shell", "docker rm $(echo $(docker ps -aq) x) -f"),
+    ("shell", "docker rm $(docker ps -aq"),
+    ("python", 'x = "docker\\trm -f c"'),
+    ("python", 'x = "docker container\\tremove -f c"'),
+]
+positive += RONDA9_MARCAS
 RONDA7_LIMPIOS = []  # los de la ronda 7 pasaron a ser falsos positivos aceptados (ronda 8)
 positive += [("python", source) for source in RONDA7_MARCAS]
 RONDA6_MEJORAS |= set(RONDA7_MARCAS)
@@ -338,6 +348,8 @@ RONDA5_MEJORAS = {
 
 
 def required_improvement(kind, source):
+    if (kind, source) in RONDA9_MARCAS:
+        return True
     if kind == "python" and (source in RONDA5_MEJORAS or source in RONDA6_MEJORAS):
         return True
     if "container remove" in source or '"container", "remove"' in source:
