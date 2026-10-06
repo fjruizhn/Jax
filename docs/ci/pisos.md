@@ -902,6 +902,8 @@ para conservar byte a byte el registro de la migración de pisos.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
 
+3537 -> 3538 el 2026-10-06 (PR de skill migrando-hestia-a-aapanel): `test_ejecutor_contratos_auditor.py` 39 -> 40 (+1; prueba que la enumeración de skills del auditor coincide con `cerebros.toml`). Delta medido contra master con la prueba aislada: 39 tests anteriores y 1 nuevo. 45 skipped no cambia.
+
 3531 -> 3537 el 2026-10-06 (ronda 3 de #356; medido LOCAL por archivo con /srv/jax-prod, ~/claude-skills y ~/jax-platform tapados y confirmado con la suite completa del paso): `test_instalar_dropins_de_servicio.py` 11 -> 14 (+3: rechazo de filas de otro dueno) y `test_activacion_timers_b9.py` 9 -> 12 (+3: Monotonic=0, Realtime=n/a y SubState=running). 45 skipped no cambia.
 
 3529 -> 3531 el 2026-10-06 (ronda 2 de #356): `test_activacion_timers_b9.py` 7 -> 9 (+2: el caso `muerto_real` con la salida medida de systemd y el timer monotonico que si tiene proximo disparo). 45 skipped no cambia. Medido LOCAL por archivo con /srv/jax-prod tapado y confirmado con la suite completa del paso.

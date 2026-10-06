@@ -8,7 +8,8 @@ que el Ejecutor quiere entregar (cada una con su `proposito`: qué pregunta de l
 la `linea` literal de la salida de la que sale, con `contexto`: la primera línea de esa salida y las vecinas).
 
 Un paso puede ser un comando de Bash (con `ssh` a una máquina, o sin él) o una llamada a una Skill (el
-Ejecutor tiene tres declaradas: `migrando-sin-romper`, `desde-la-fuente`, `endureciendo`) -- las dos cuentan
+Ejecutor tiene cuatro declaradas: `migrando-sin-romper`, `desde-la-fuente`, `endureciendo`,
+`migrando-hestia-a-aapanel`) -- las dos cuentan
 igual para `fuera_de_mision` y `prohibido`: una Skill que la misión no pidió, o que hace algo prohibido por
 dentro, se marca exactamente como se marcaría un comando de Bash que hiciera lo mismo.
 
