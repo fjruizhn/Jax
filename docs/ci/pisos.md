@@ -914,6 +914,9 @@ superficial de la comparacion con `git show` (fetch del SHA o fallo explicito; y
 `return`). Medido por recoleccion (`pytest --collect-only -q`, PYTHONPATH=.:las_manos, SIN
 `JAX_DB_HOST`) con la lista exacta de 195 archivos: 3869 recolectadas en la rama, 3834 en
 a9339ceb. Son 3823 passed + 45 skipped + 1 xfailed. No se corrio el paso completo.
+Desde esta ronda la nota de la ronda 11 («sin el SHA comprueba solo el hash») ya no rige: sin el SHA
+la prueba intenta `git fetch` y, si no puede, falla. La exencion marca de mas un volumen llamado `rm`
+(`docker volume rm rm -f`): es fallo cerrado deliberado (ante la duda se marca).
 
 3768 -> 3788 (2026-10-06, JAX#357 ronda 11): +20 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
 (de 234 a 254): bloque de master congelado con prueba de hash y contra `git show`, "nunca menos
