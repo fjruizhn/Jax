@@ -308,7 +308,7 @@ def test_server_instala_la_proteccion_al_importar():
     assert len(llamadas) == 1, "server.py tiene que llamar proteger(app) a nivel de módulo"
 
 
-def test_jacobs_presenta_su_credencial_en_cada_pedido_a_las_manos():
+def test_jacobs_presenta_su_credencial_en_el_unico_pedido_restante_a_las_manos():
     arbol = ast.parse((RAIZ / "jacobs" / "executor.py").read_text(encoding="utf-8"))
     pedidos = []
     for n in ast.walk(arbol):
@@ -316,7 +316,8 @@ def test_jacobs_presenta_su_credencial_en_cada_pedido_a_las_manos():
                 and n.func.attr in {"get", "post", "put", "delete"} and n.args
                 and "LAS_MANOS_BASE" in ast.unparse(n.args[0])):
             pedidos.append(n)
-    assert len(pedidos) >= 3
+    # Pipeline no despacha motores directamente; queda la cancelación del job.
+    assert len(pedidos) == 1
     for n in pedidos:
         headers = [k for k in n.keywords if k.arg == "headers"]
         assert headers and ast.unparse(headers[0].value) == "encabezado_propio(IDENTIDAD_JACOBS)", \
