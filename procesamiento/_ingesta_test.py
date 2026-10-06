@@ -35,6 +35,7 @@ sólo un mapa hallazgo -> test:
 """
 import json
 import os
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -203,7 +204,11 @@ def test_mismo_nombre_y_mismo_contenido_no_duplica_en_fuente(tmp_path: Path):
     carpeta_a.mkdir()
     carpeta_b.mkdir()
     origen_a = _libro(carpeta_a / "balance.xlsx", valor=100)
-    origen_b = _libro(carpeta_b / "balance.xlsx", valor=100)
+    # Mismos BYTES, no solo el mismo valor: openpyxl graba la hora en el zip y en
+    # docProps, y dos libros guardados en segundos distintos tienen huellas distintas
+    # (la prueba fallaba al azar en CI, run 37529009314).
+    origen_b = carpeta_b / "balance.xlsx"
+    shutil.copyfile(origen_a, origen_b)
 
     primera = ingesta.ingerir(origen_a, trabajo)
     segunda = ingesta.ingerir(origen_b, trabajo)
