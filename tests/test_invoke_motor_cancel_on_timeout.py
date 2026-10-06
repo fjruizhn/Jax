@@ -1,5 +1,9 @@
 """
-Jacobs — un paso de motor que vence cancela su job en LAS MANOS.
+Jacobs — un paso de motor ya no despacha, sondea ni cancela jobs en LAS MANOS.
+
+HISTORIA: antes, un paso de motor que vencia cancelaba su job en LAS MANOS. El
+despacho esta cerrado (GovernedExecutionRequiredError, sin HTTP): estas pruebas
+fijan que NINGUN pedido sale, venza el paso por donde venza.
 
 Pipeline b8f80733 (2026-09-12): el paso 04 venció a los 300 s,
 `asyncio.wait_for` canceló a `_invoke_motor` y el pipeline abortó... pero
@@ -90,28 +94,28 @@ class InvokeMotorCancelTest(unittest.IsolatedAsyncioTestCase):
             patch("httpx.AsyncClient.get", get),
         )
 
-    async def test_wait_for_externo_cancela_el_job(self):
+    async def test_wait_for_externo_no_hace_ningun_pedido_a_las_manos(self):
         fake = _FakeLasManos()
         p1, p2 = self._patched(fake)
         with p1, p2, self.assertRaises(GovernedExecutionRequiredError):
             await _invoke_motor(_step(), _pipeline(), timeout=60)
         assert fake.posts == [], fake.posts
 
-    async def test_deadline_propio_del_polling_cancela_el_job(self):
+    async def test_deadline_propio_no_hace_ningun_pedido_a_las_manos(self):
         fake = _FakeLasManos()
         p1, p2 = self._patched(fake)
         with p1, p2, self.assertRaises(GovernedExecutionRequiredError):
             await _invoke_motor(_step(), _pipeline(), timeout=0.05)
         assert fake.posts == [], fake.posts
 
-    async def test_job_completado_no_se_cancela(self):
+    async def test_job_completado_no_hace_ningun_pedido_a_las_manos(self):
         fake = _FakeLasManos(job_status="completed")
         p1, p2 = self._patched(fake)
         with p1, p2, self.assertRaises(GovernedExecutionRequiredError):
             await _invoke_motor(_step(), _pipeline(), timeout=5)
         assert fake.posts == [], fake.posts
 
-    async def test_si_la_cancelacion_falla_se_conserva_el_timeout_original(self):
+    async def test_aunque_las_manos_fallaria_no_hay_pedido_ni_cancelacion(self):
         fake = _FakeLasManos(cancel_raises=True)
         p1, p2 = self._patched(fake)
         with p1, p2, self.assertRaises(GovernedExecutionRequiredError):
