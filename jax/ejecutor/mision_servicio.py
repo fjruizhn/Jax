@@ -395,12 +395,12 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
         # y elegir_y_resolver_auditor necesita nombres para consultar ejecutor_host.
         async with conexion(desechable=True) as conn:
             cfg = await eleccion_c5.leer_config(conn)
-            faceta, _, _ = await eleccion_c5.elegir_y_resolver_auditor(
-                conn, cfg=cfg, hosts_mision=turno.hosts, resolve_facet=resolve_facet)
+            faceta, _, _, modo = await eleccion_c5.elegir_y_resolver_auditor(
+                conn, cfg=cfg, hosts_mision=turno.hosts, resolve_facet=resolve_facet, devolver_modo=True)
         estado["faceta_auditor"] = faceta
         return await auditor_cliente.auditar(A.Lote(texto, (), A.afirmaciones_auditables(entrega), maquinas),
                                              faceta=faceta, max_tokens=cfg.max_tokens,
-                                             tope_s=cfg.tope_s)
+                                             tope_s=cfg.tope_s, modo=modo)
 
     async def cadena(ctx):
         return (await asyncio.to_thread(verificar_cadena, ctx.registro)).ok

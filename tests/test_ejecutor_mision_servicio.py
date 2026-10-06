@@ -363,7 +363,7 @@ def _sin_arrancar_de_verdad(tmp_path, monkeypatch):
             return False
 
     async def leer_config(conn):
-        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 400, False, False)
+        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 400, False, False, False)
 
     monkeypatch.setattr(jstore, "conexion", lambda **kw: _Conexion())
     monkeypatch.setattr(eleccion_c5, "leer_config", leer_config)
@@ -539,10 +539,10 @@ def test_el_turno_audita_con_el_plazo_de_axioma_config(monkeypatch):
             return False
 
     async def leer_config(conn):
-        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 555, False, False)
+        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 555, False, False, False)
 
-    async def elegir(conn, *, cfg, hosts_mision, resolve_facet):
-        return ("faceta-fake", None, None)
+    async def elegir(conn, *, cfg, hosts_mision, resolve_facet, devolver_modo=False):
+        return ("faceta-fake", None, None, "COMPLETO") if devolver_modo else ("faceta-fake", None, None)
 
     vistas = {}
 
@@ -558,7 +558,7 @@ def test_el_turno_audita_con_el_plazo_de_axioma_config(monkeypatch):
     turno = M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])})
     deps = S.dependencias_reales({}, turno, tope_s=1.0, espera_s=1.0)
     assert asyncio.run(deps.auditar("texto", object(), (S.A.Maquina("m", "192.0.2.9", 58291),))) == "revision"
-    assert vistas == {"faceta": "faceta-fake", "max_tokens": 100, "tope_s": 555}
+    assert vistas == {"faceta": "faceta-fake", "max_tokens": 100, "tope_s": 555, "modo": "COMPLETO"}
 
 
 @pytest.mark.parametrize("valor", ["sk-llave-secreta", "x" * 5000, "", "Proveedor_Fallo", 7, None, ["proveedor_fallo"]])
@@ -631,7 +631,7 @@ def test_dependencias_reales_deriva_el_cierre_de_cfg_tope_s(monkeypatch):
             return False
 
     async def leer_config(conn):
-        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 450, False, False)
+        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 450, False, False, False)
 
     vistos = {}
 

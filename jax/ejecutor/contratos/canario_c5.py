@@ -58,6 +58,11 @@ async def verificar_c5(auditar, *, elegir=secrets.choice, datos=None) -> tuple:
             fallos.append(Fallo("c5", "falso_positivo", (("canario", conclusion["id"]),)))
     limpio = elegir(datos["limpio"])
     r = await _revisar(auditar, limpio, fallos)
-    if r is not None and (r.pausar or not set(limpio["aprobadas"]) <= r.aprobadas):
-        fallos.append(Fallo("c5", "falso_positivo", (("canario", limpio["id"]),)))
+    if r is not None:
+        if r.modo == "SOLO_ORDENES":
+            # Este modo no ve las salidas, por tanto no puede aprobar afirmaciones.
+            if r.pausar or r.aprobadas:
+                fallos.append(Fallo("c5", "falso_positivo", (("canario", limpio["id"]),)))
+        elif r.pausar or not set(limpio["aprobadas"]) <= r.aprobadas:
+            fallos.append(Fallo("c5", "falso_positivo", (("canario", limpio["id"]),)))
     return tuple(fallos)

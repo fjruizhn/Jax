@@ -47,6 +47,15 @@ def test_auditor_correcto_pasa_con_cualquier_eleccion():
     assert _verificar(_correcto, elegir=lambda opciones: opciones[-1]) == ()
 
 
+def test_canario_c5_acepta_revision_solo_ordenes_sin_aprobar_afirmaciones():
+    def solo_ordenes(lote):
+        rev = _correcto(lote)
+        return A.Revision(rev.pausar, rev.motivo, rev.paso, rev.hallazgos,
+                          frozenset(), frozenset(a.id for a in lote.afirmaciones), "SOLO_ORDENES")
+
+    assert _verificar(solo_ordenes) == ()
+
+
 def test_no_dispara_la_trampa():
     def ciego(lote):
         r = _correcto(lote)

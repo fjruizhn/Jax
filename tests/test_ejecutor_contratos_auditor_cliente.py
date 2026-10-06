@@ -38,6 +38,53 @@ def test_llama_con_modelo_llave_y_tope_y_lee_la_revision():
     assert vistas["cuerpo"]["messages"][0]["content"] == AC.instrucciones()
 
 
+def test_solo_ordenes_proyecta_allowlist_y_no_serializa_secretos_en_body_http():
+    marcadores = [b"SECRET_STDOUT", b"SECRET_STDERR", b"SECRET_CONTEXT", b"SECRET_CLAIM",
+                  b"SECRET_ASSERTION_COMMAND", b"SECRET_STEP_INPUT"]
+    lote = A.Lote("Objetivo público", (A.Paso(9, "Bash", {"command": "uptime", "extra": "SECRET_STEP_INPUT"}, False),),
+                  (A.AfirmacionAuditable("a1", "SECRET_CLAIM", "SECRET_CLAIM_DATA", "hall9000",
+                                         "SECRET_ASSERTION_COMMAND",
+                                         "SECRET_STDOUT", ("SECRET_CONTEXT",)),),
+                  (A.Maquina("hall9000", "192.0.2.5", 58291),))
+    capturas = {"body": None}
+
+    def manejar(req):
+        capturas["body"] = req.content
+        contenido = json.dumps({"hallazgos": [], "afirmaciones": []})
+        return httpx.Response(200, json={"choices": [{"message": {"content": contenido}}]})
+
+    async def escenario():
+        async with _cliente(manejar) as cli:
+            await AC.auditar(lote, faceta=FACETA, max_tokens=40, tope_s=400, cliente=cli,
+                             modo="SOLO_ORDENES")
+
+    asyncio.run(escenario())
+    assert capturas["body"] is not None
+    assert all(marcador not in capturas["body"] for marcador in marcadores)
+    body = json.loads(capturas["body"])
+    assert set(body) == {"model", "max_completion_tokens", "messages"}
+    proyectado = json.loads(body["messages"][1]["content"])
+    assert set(proyectado) == {"objetivo", "maquinas", "comandos"}
+    assert proyectado["objetivo"] == "Objetivo público"
+    assert proyectado["comandos"] == [{"n": 9, "comando": "uptime"}]
+
+
+def test_falla_http_expone_solo_codigo_de_error_conocido_del_proveedor():
+    def manejar(req):
+        return httpx.Response(429, json={"error": {"code": "insufficient_quota",
+                                                     "message": "mensaje que no se debe propagar"}})
+
+    async def escenario():
+        async with _cliente(manejar) as cli:
+            await AC.auditar(LOTE, faceta=FACETA, max_tokens=8, tope_s=5, cliente=cli)
+
+    with pytest.raises(A.AuditorIlegible) as exc:
+        asyncio.run(escenario())
+    assert exc.value.codigo == "proveedor_fallo"
+    assert exc.value.proveedor_codigo == "insufficient_quota"
+    assert str(exc.value) == "proveedor_fallo"
+
+
 @pytest.mark.parametrize("respuesta", [httpx.Response(500, text="x"), httpx.Response(200, json={"choices": []}),
                                        httpx.Response(200, text="no json"),
                                        httpx.Response(200, json={"choices": [{"message": {"content": None}}]})])

@@ -44,6 +44,27 @@ def test_limpio_no_pausa_y_sin_veredicto_se_retiene():
     assert rev.pausar is False and rev.aprobadas == {"a1"} and rev.retenidas == {"a2"}
 
 
+def test_solo_ordenes_rechaza_cualquier_veredicto_de_afirmacion():
+    with pytest.raises(A.AuditorIlegible) as exc:
+        A.interpretar(LOTE, _r({"hallazgos": [], "afirmaciones": [{"id": "a1", "veredicto": "responde"}]}),
+                      modo="SOLO_ORDENES")
+    assert exc.value.codigo == "veredictos_afirmaciones_prohibidos"
+
+
+def test_solo_ordenes_rechaza_hallazgo_que_apunta_a_una_afirmacion():
+    with pytest.raises(A.AuditorIlegible) as exc:
+        A.interpretar(LOTE, _r({"hallazgos": [{"tipo": "prohibido", "paso": 1, "afirmacion": "a1"}],
+                               "afirmaciones": []}), modo="SOLO_ORDENES")
+    assert exc.value.codigo == "veredictos_afirmaciones_prohibidos"
+
+
+def test_solo_ordenes_retiene_todas_las_afirmaciones_sin_veredicto():
+    rev = A.interpretar(LOTE, _r({"hallazgos": [], "afirmaciones": []}), modo="SOLO_ORDENES")
+    assert rev.modo == "SOLO_ORDENES"
+    assert rev.aprobadas == frozenset()
+    assert rev.retenidas == frozenset({"a1", "a2"})
+
+
 def test_hallazgo_que_no_pausa_se_anota():
     rev = A.interpretar(LOTE, _r({"hallazgos": [{"tipo": "hardcoding", "paso": None}], "afirmaciones": []}))
     assert rev.pausar is False and rev.hallazgos == (A.Hallazgo("hardcoding", None, None),)

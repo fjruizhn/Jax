@@ -206,10 +206,10 @@ def test_principal_pasa_el_tipo_de_la_mision_al_contexto(tmp_path, monkeypatch):
         return eleccion_c5.ConfigC5(
             cerebro_faceta="x", auditor_faceta="y", auditor_faceta_local="z",
             lote_max=5, intervalo_s=1.0, max_tokens=100, tope_s=400,
-            admite_datos_de_clientes=False, admite_mismo_proveedor=False)
+            admite_datos_de_clientes=False, admite_mismo_proveedor=False, auditor_nube_solo_ordenes=False)
 
-    async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet):
-        return ("faceta-fake", None, None)
+    async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet, devolver_modo=False):
+        return ("faceta-fake", None, None, "COMPLETO") if devolver_modo else ("faceta-fake", None, None)
 
     monkeypatch.setattr(eleccion_c5, "leer_config", _leer_config_falso)
     monkeypatch.setattr(eleccion_c5, "elegir_y_resolver_auditor", _elegir_falso)
@@ -996,10 +996,10 @@ def test_principal_pasa_la_ruta_extra_del_administrador_de_verdad_block_f(tmp_pa
         return eleccion_c5.ConfigC5(
             cerebro_faceta="x", auditor_faceta="y", auditor_faceta_local="z",
             lote_max=5, intervalo_s=1.0, max_tokens=100, tope_s=400,
-            admite_datos_de_clientes=False, admite_mismo_proveedor=False)
+            admite_datos_de_clientes=False, admite_mismo_proveedor=False, auditor_nube_solo_ordenes=False)
 
-    async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet):
-        return ("faceta-fake", None, None)
+    async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet, devolver_modo=False):
+        return ("faceta-fake", None, None, "COMPLETO") if devolver_modo else ("faceta-fake", None, None)
 
     monkeypatch.setattr(eleccion_c5, "leer_config", _leer_config_falso)
     monkeypatch.setattr(eleccion_c5, "elegir_y_resolver_auditor", _elegir_falso)
@@ -1033,10 +1033,10 @@ def test_el_vigia_audita_con_el_plazo_de_axioma_config(tmp_path, monkeypatch):
         return eleccion_c5.ConfigC5(
             cerebro_faceta="x", auditor_faceta="y", auditor_faceta_local="z",
             lote_max=5, intervalo_s=1.0, max_tokens=100, tope_s=777,
-            admite_datos_de_clientes=False, admite_mismo_proveedor=False)
+            admite_datos_de_clientes=False, admite_mismo_proveedor=False, auditor_nube_solo_ordenes=False)
 
-    async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet):
-        return ("faceta-fake", None, None)
+    async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet, devolver_modo=False):
+        return ("faceta-fake", None, None, "COMPLETO") if devolver_modo else ("faceta-fake", None, None)
 
     monkeypatch.setattr(eleccion_c5, "leer_config", _leer_config_falso)
     monkeypatch.setattr(eleccion_c5, "elegir_y_resolver_auditor", _elegir_falso)
@@ -1057,4 +1057,4 @@ def test_el_vigia_audita_con_el_plazo_de_axioma_config(tmp_path, monkeypatch):
     monkeypatch.setattr(S, "correr_mision", _correr_mision_falso)
     assert asyncio.run(S._principal(ruta_mision)) == 0
     assert asyncio.run(capturado["auditar"]("lote")) == "revision"
-    assert vistas == {"faceta": "faceta-fake", "max_tokens": 100, "tope_s": 777}
+    assert vistas == {"faceta": "faceta-fake", "max_tokens": 100, "tope_s": 777, "modo": "COMPLETO"}

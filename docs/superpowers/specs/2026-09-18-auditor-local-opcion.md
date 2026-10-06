@@ -1,5 +1,40 @@
 # Auditor local para C5 — la opción, con números
 
+## Decisión posterior — C5 `SOLO_ORDENES` (2026-10-06)
+
+Fernando decide permitir auditoría de misiones sensibles usando la faceta de nube
+configurada `ejecutor.auditor_faceta`, exclusivamente cuando la nueva clave
+`ejecutor.c5_auditor_nube_solo_ordenes` existe y vale el booleano estricto `true`.
+La clave es obligatoria en la configuración C5, sin fallback en código; el seed la
+crea como `false`. Ausente, vacía o con cualquier valor distinto de `true`/`false`,
+el arranque falla cerrado antes de resolver o invocar al auditor de nube. Con `false`
+se conserva la selección del auditor local para misiones sensibles.
+
+`SOLO_ORDENES` es un modo de privacidad con alcance limitado: la nube recibe únicamente
+el objetivo de la misión, las instrucciones de auditoría, la identidad de máquina
+requerida por el contrato (machine-id legítimo) y el número y comando de cada paso que
+se pide juzgar, para que los hallazgos puedan citar su paso.
+No salen capturas de stdout/stderr, salidas, líneas citadas, contexto, afirmaciones
+(claims), entradas de pasos ni errores que contengan datos. El cuerpo HTTP se construye
+por allowlist de esos cuatro campos; la ausencia de contenido prohibido se comprueba
+contra el cuerpo serializado real. Los datos omitidos siguen disponibles localmente para
+la ejecución y la supervisión humana.
+
+El auditor en este modo solo juzga si cada comando pertenece al objetivo y al contrato
+de la misión y si el machine-id es legítimo. No inventa ni infiere salidas de comandos.
+Un veredicto sobre afirmaciones queda prohibido: cualquier respuesta con veredicto o
+contenido de claims invalida la auditoría y falla cerrada. Por tanto, las afirmaciones
+de la misión quedan explícitamente **no auditadas por C5** y requieren supervisión.
+Las lecturas de identidad que el contrato del Ejecutor exige continúan dentro del alcance
+de la misión y de su auditoría; este modo no autoriza omitirlas.
+
+La habilitación se administra como clave de `/admin/config`, con autorización exclusiva
+de superadmin. Cada misión registra de forma auditable la faceta y el modo efectivos en
+su bitácora; el arranque y C3 conservan el mismo dato en su registro append-only. El
+registro de claims marca expresamente que C5 en modo `SOLO_ORDENES` no los auditó.
+
+---
+
 > **Estado: OPCIÓN PARA DECIDIR, no implementada.** Pedida por Fernando el 2026-09-18 después de
 > cerrar la compuerta de datos de clientes. No cambia nada en producción hasta que él elija.
 

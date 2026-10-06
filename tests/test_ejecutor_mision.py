@@ -219,9 +219,25 @@ def test_turno_completo_entrega_el_par_con_la_linea_literal_y_las_crudas():
     assert r["verificacion"] == {"registro_cuadra": True, "cadena_ok": True, "pausa_puesta": False,
                                  "auditor_pauso": False, "auditor_legible": True}
     assert _codigos(eventos) == ["turno_lanzado", "arranque_verificado", "vigia_late", "cerebro_termino", "paso",
-                                 "afirmacion_entregada", "vigia_cerrado", "turno_completado"]
+                                 "auditoria_c5", "afirmacion_entregada", "vigia_cerrado", "turno_completado"]
+    assert r["auditoria_afirmaciones"] == "auditadas por C5"
     assert ("cerebro", SESION, False) in f.llamadas and f.llamadas[-1] == "cerrar_vigia"
     assert ("vigia", f"{MISION}-t1", frozenset({"ejecutor-prueba"}), "memoria de la VM") in f.llamadas
+
+
+def test_solo_ordenes_marca_afirmaciones_no_auditadas_en_bitacora_visible():
+    f = Falsas()
+    f.revision = Revision(False, None, None, (), frozenset(), frozenset({"a1"}),
+                          "SOLO_ORDENES", "thot")
+    resultado, eventos = _correr(f)
+    marca = "no auditadas por C5 (solo órdenes)"
+    assert resultado["auditoria_afirmaciones"] == marca
+    assert resultado["afirmaciones"] == []
+    assert resultado["descartadas"][0]["dato"] == "1.9Gi"
+    evento_auditoria = next(e for e in eventos if e["evento"] == "auditoria_c5")
+    assert evento_auditoria["datos"] == {"faceta": "thot", "modo": "SOLO_ORDENES", "afirmaciones": marca}
+    evento_afirmacion = next(e for e in eventos if e["evento"] == "afirmacion_descartada")
+    assert evento_afirmacion["datos"]["auditoria_c5"] == marca
 
 
 def test_el_turno_siguiente_retoma_la_sesion():

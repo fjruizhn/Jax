@@ -902,6 +902,12 @@ para conservar byte a byte el registro de la migración de pisos.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
 
+3537 -> 3552 el 2026-10-06 (C5 SOLO_ORDENES): +15 pruebas nuevas en los nueve
+archivos C5 incluidos en `tests-puros/out`; 45 skipped sin cambio. Delta medido
+con `pytest --collect-only` sobre la misma lista contra el SHA base y esta rama
+(447 -> 462); la corrida focal dio 462 passed. La integración re-mide este
+piso sobre `main`.
+
 3531 -> 3537 el 2026-10-06 (ronda 3 de #356; medido LOCAL por archivo con /srv/jax-prod, ~/claude-skills y ~/jax-platform tapados y confirmado con la suite completa del paso): `test_instalar_dropins_de_servicio.py` 11 -> 14 (+3: rechazo de filas de otro dueno) y `test_activacion_timers_b9.py` 9 -> 12 (+3: Monotonic=0, Realtime=n/a y SubState=running). 45 skipped no cambia.
 
 3529 -> 3531 el 2026-10-06 (ronda 2 de #356): `test_activacion_timers_b9.py` 7 -> 9 (+2: el caso `muerto_real` con la salida medida de systemd y el timer monotonico que si tiene proximo disparo). 45 skipped no cambia. Medido LOCAL por archivo con /srv/jax-prod tapado y confirmado con la suite completa del paso.

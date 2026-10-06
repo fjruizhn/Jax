@@ -10,6 +10,7 @@ FILAS = {"ejecutor.cerebro_faceta": "ejecutor", "ejecutor.auditor_faceta": "thot
          "ejecutor.auditor_faceta_local": "auditor_local", "ejecutor.c5_lote_max": "20",
          "ejecutor.c5_intervalo_s": "15", "ejecutor.c5_max_tokens": "4000", "ejecutor.c5_tope_s": "400",
          "ejecutor.c5_auditor_admite_datos_de_clientes": "false",
+         "ejecutor.c5_auditor_nube_solo_ordenes": "false",
          # Compuerta del mismo proveedor (2026-09-20): obligatoria y CERRADA, que es
          # como nace. Estos tests siguen midiendo el comportamiento estricto.
          "ejecutor.c5_auditor_admite_mismo_proveedor": "false"}
@@ -17,7 +18,7 @@ FILAS = {"ejecutor.cerebro_faceta": "ejecutor", "ejecutor.auditor_faceta": "thot
 
 def test_config_desde_filas():
     assert E.config_desde_filas(FILAS) == E.ConfigC5("ejecutor", "thot", "auditor_local", 20, 15.0, 4000,
-                                                    400, False, False)
+                                                    400, False, False, False)
 
 
 @pytest.mark.parametrize("clave, valor", [("ejecutor.c5_lote_max", "0"), ("ejecutor.c5_intervalo_s", "x"),
@@ -29,6 +30,8 @@ def test_config_desde_filas():
                                           ("ejecutor.c5_tope_s", "100000"), ("ejecutor.c5_tope_s", ""),
                                           ("ejecutor.c5_auditor_admite_datos_de_clientes", "si"),
                                           ("ejecutor.c5_auditor_admite_datos_de_clientes", "True"),
+                                          ("ejecutor.c5_auditor_nube_solo_ordenes", "si"),
+                                          ("ejecutor.c5_auditor_nube_solo_ordenes", "True"),
                                           ("ejecutor.auditor_faceta", ""),
                                           ("ejecutor.auditor_faceta_local", "")])
 def test_config_invalida(clave, valor):
@@ -47,6 +50,13 @@ def test_config_sin_tope_s_es_incompleta():
     with pytest.raises(ValueError) as e:
         E.config_desde_filas({k: v for k, v in FILAS.items() if k != "ejecutor.c5_tope_s"})
     assert e.value.args == ("config_c5_incompleta", ["ejecutor.c5_tope_s"])
+
+
+def test_config_sin_compuerta_solo_ordenes_es_incompleta():
+    with pytest.raises(ValueError) as e:
+        E.config_desde_filas({k: v for k, v in FILAS.items()
+                              if k != "ejecutor.c5_auditor_nube_solo_ordenes"})
+    assert e.value.args == ("config_c5_incompleta", ["ejecutor.c5_auditor_nube_solo_ordenes"])
 
 
 def test_tope_s_acepta_el_techo_y_rechaza_uno_mas():
@@ -118,6 +128,36 @@ def test_elegir_auditor_faceta_segun_datos_de_clientes():
     cfg = E.config_desde_filas(FILAS)
     assert E.elegir_auditor_faceta(cfg, hay_datos_de_clientes=True) == "auditor_local"
     assert E.elegir_auditor_faceta(cfg, hay_datos_de_clientes=False) == "thot"
+
+
+def test_solo_ordenes_selecciona_auditor_nube_sin_relajar_eleccion_de_proveedor():
+    cfg = E.config_desde_filas({**FILAS, "ejecutor.c5_auditor_nube_solo_ordenes": "true"})
+    assert E.elegir_auditor_faceta(cfg, hay_datos_de_clientes=True) == "thot"
+    assert E.modo_auditoria(cfg, hay_datos_de_clientes=True) == "SOLO_ORDENES"
+    assert E.modo_auditoria(cfg, hay_datos_de_clientes=False) != "SOLO_ORDENES"
+
+
+def test_compuerta_solo_ordenes_cerrada_conserva_auditor_local():
+    cfg = E.config_desde_filas(FILAS)
+    assert E.elegir_auditor_faceta(cfg, hay_datos_de_clientes=True) == "auditor_local"
+    assert E.modo_auditoria(cfg, hay_datos_de_clientes=True) != "SOLO_ORDENES"
+
+
+def test_validar_eleccion_solo_permite_auditor_nube_sensible_en_solo_ordenes():
+    comunes = dict(proveedor_cerebro="anthropic", proveedor_auditor="openai", auditor_es_local=False,
+                   admite_datos_de_clientes=False, hosts_mision={"cliente"},
+                   hosts_con_clientes={"cliente"}, hosts_conocidos={"cliente"})
+    assert E.validar_eleccion(**comunes)
+    assert E.validar_eleccion(**comunes, modo="SOLO_ORDENES")
+    assert E.validar_eleccion(**comunes, modo="SOLO_ORDENES",
+                              auditor_nube_solo_ordenes=True) == ()
+
+
+def test_validar_eleccion_rechaza_modo_desconocido():
+    comunes = dict(proveedor_cerebro="anthropic", proveedor_auditor="openai", auditor_es_local=False,
+                   admite_datos_de_clientes=False, hosts_mision={"cliente"},
+                   hosts_con_clientes={"cliente"}, hosts_conocidos={"cliente"})
+    assert E.validar_eleccion(**comunes, modo="SOLO_LO_QUE_SEA")
 
 
 def test_sensibles_son_las_con_datos_o_desconocidas():
