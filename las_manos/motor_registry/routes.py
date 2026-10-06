@@ -1,12 +1,17 @@
 """
 LAS MANOS — Motor Registry: endpoints HTTP.
 
-POST /motor/dispatch           — crea un job (pasa por policy, falla cerrado)
-GET  /motor/job/{job_id}       — consulta estado de un job
-POST /motor/job/{job_id}/cancel — solicita cancelación
+Por HTTP, `proteger(app)` (auth_servicio.py) decide antes que estas funciones: sin credencial
+valida responde 401; con credencial valida, solo `plataforma` alcanza POST /motor/authorize-facet y
+todo lo demas de /motor responde 403 (ruta_no_permitida_para_la_identidad).
 
-El router se registra en server.py al conectar el Motor Registry.
-Este módulo no modifica server.py — eso es responsabilidad del Commit 2.
+POST /motor/governed-dispatch     — despacho gobernado (sin ruta HTTP permitida a ninguna identidad)
+POST /motor/dispatch              — legacy: la funcion, si se llega, responde siempre 410 (no crea job)
+POST /motor/authorize-facet       — autoriza una faceta (identidad `plataforma`)
+GET  /motor/job/{job_id}          — estado de un job (sin ruta HTTP permitida a ninguna identidad)
+POST /motor/job/{job_id}/cancel   — cancelacion (sin ruta HTTP permitida a ninguna identidad)
+
+El router se registra en server.py (`motor_router`).
 
 En memoria de Jairo Urbina.
 """
@@ -39,7 +44,6 @@ import facet_resolver  # su sello (mtime de un archivo) invalida también el cat
 from motor_registry import job_tasks
 from motor_registry import worker as motor_worker
 from interruptor import interruptor_activo, ruta_del_interruptor
-import human_gate
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -187,33 +191,6 @@ def _ingest_governed_worker_completion(task: asyncio.Task, *, execution_id: str,
         logger.exception("No se pudo ingerir resultado B7 del job gobernado %s", job_id)
 
 
-def _rechazado(req: MotorDispatchRequest, motor: str | None, razon: str) -> MotorDispatchResponse:
-    """Un pedido rechazado deja su job REJECTED con la razón (testigo)."""
-    job_id = _STORE.create(
-        caller=req.caller,
-        capability=req.capability,
-        motor=motor or "none",
-        trace_id=req.trace_id,
-        prompt=req.prompt,
-        recursion_depth=req.recursion_depth,
-        pipeline_id=req.pipeline_id,
-    )
-    _STORE.update(
-        job_id,
-        status=JobStatus.REJECTED.value,
-        finished_at=time.time(),
-        error=razon,
-    )
-    return MotorDispatchResponse(
-        job_id=job_id,
-        status=JobStatus.REJECTED,
-        motor="none",
-        capability=req.capability,
-        trace_id=req.trace_id,
-        rejected_reason=razon,
-    )
-
-
 @router.post("/governed-dispatch", response_model=MotorDispatchResponse, status_code=202)
 async def governed_dispatch(req: GovernedDispatchRequest) -> MotorDispatchResponse:
     """Launch only a durably claimed, authoritative Block 6 execution."""
@@ -278,85 +255,39 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
     # Block 6: every catalog capability is governed in V1.  This legacy
     # transport endpoint must never consume a gate, create a job, or start a
     # worker; its request body is not an execution authority artifact.
-    if _B7_EVIDENCE_RECORDER is not None:
+    #
+    # DEFENSA EN PROFUNDIDAD, hoy INALCANZABLE por HTTP: desde #362 ninguna
+    # identidad tiene permiso sobre POST /motor/dispatch, asi que `proteger(app)`
+    # (auth_servicio) responde 403 antes de llegar aca -- y ese 403 NO deja
+    # evidencia B7, como cualquier 403 de autenticacion. Este cuerpo corre solo si
+    # alguna identidad vuelve a tener la ruta (o si se llama a la funcion directo).
+    # Cuerpo unico: {"code", "correlacion", "evidencia_registrada"}, con
+    # `correlacion` = hex si la evidencia NO quedo registrada y null si quedo.
+    registrada = False
+    correlacion = uuid.uuid4().hex
+    if _B7_EVIDENCE_RECORDER is None:
+        # Sin registrador no hay evidencia: el cuerpo ofrece una correlacion, asi que
+        # tiene que existir tambien en el log.
+        logger.error(
+            "B7: sin registrador de evidencia para /motor/dispatch denegado (410 se devuelve igual) correlacion=%s",
+            correlacion,
+        )
+    else:
         try:
-            _B7_EVIDENCE_RECORDER.record_governed_dispatch_denied()
+            await asyncio.to_thread(_B7_EVIDENCE_RECORDER.record_governed_dispatch_denied)
+            registrada = True
         except Exception:  # fail-soft: legacy dispatch remains rejected if evidence persistence is unavailable.
-            pass
-    raise HTTPException(status_code=410, detail="GOVERNED_EXECUTION_REQUIRED")
-
-    # Kept below as historical defensive logic for the governed adapter while
-    # it is wired in the service composition root.  It is unreachable from
-    # this legacy endpoint by construction.
-    await _ensure_catalog_fresh()
-    if _POLICY is None or _CATALOG is None:
-        raise HTTPException(status_code=503, detail="Motor Registry: catálogo no inicializado todavía")
-
-    result = _POLICY.check(
-        caller=req.caller,
-        capability=req.capability,
-        motor=req.motor,
-        context_keys=list(req.context.keys()),
-        recursion_depth=req.recursion_depth,
-        human_gate_token=req.human_gate_token,
-        timeout_seconds=req.timeout_seconds,
-    )
-
-    if not result.allowed:
-        return _rechazado(req, result.resolved_motor, result.reason)
-
-    # Human gate (2026-09-17): la política sólo mira que el token ESTÉ; acá se
-    # consume contra la base (un string inventado ya no aprueba). Va DESPUÉS
-    # de la política: un pedido que la política rechaza no quema el token.
-    cap = _CATALOG.get_capability(req.capability)
-    if cap is not None and cap.requires_human_gate:
-        veredicto = await human_gate.consumir_token_gate(
-            req.human_gate_token, uso=f"motor:{req.trace_id}"[:128],
-        )
-        if not veredicto.aceptado:
-            return _rechazado(req, result.resolved_motor, f"Human gate: {veredicto.motivo.value}")
-
-    # La ruta del freno se resuelve en CADA dispatch y ANTES de crear el job:
-    # sin la variable del freno el pedido falla cerrado sin dejar un job
-    # `pending` huérfano (revisión final del frente B, 2026-09-17).
-    ruta_del_freno = str(ruta_del_interruptor())
-    job_id = _STORE.create(
-        caller=req.caller,
-        capability=req.capability,
-        motor=result.resolved_motor,
-        trace_id=req.trace_id,
-        prompt=req.prompt,
-        recursion_depth=req.recursion_depth,
-        pipeline_id=req.pipeline_id,
-    )
-
-    task = asyncio.create_task(
-        motor_worker.run(
-            job_id=job_id,
-            motor=result.resolved_motor,
-            capability=req.capability,
-            prompt=req.prompt,
-            context=req.context,
-            store=_STORE,
-            catalog=_CATALOG,
-            kill_switch_path=ruta_del_freno,
-            user_id=req.user_id,
-            tenant_id=req.tenant_id,
-            caller=req.caller,
-            timeout_seconds=req.timeout_seconds,
-            pipeline_id=req.pipeline_id,
-        )
-    )
-    task.add_done_callback(lambda t: _log_worker_exception(t, job_id=job_id))
-    job_tasks.register(job_id, task)
-
-    return MotorDispatchResponse(
-        job_id=job_id,
-        status=JobStatus.PENDING,
-        motor=result.resolved_motor,
-        capability=req.capability,
-        trace_id=req.trace_id,
-    )
+            # No se traga en silencio. El MISMO identificador va en el log y en el
+            # cuerpo del 410; no se loguea nada del cuerpo del pedido.
+            logger.exception(
+                "B7: no se pudo registrar la evidencia de /motor/dispatch denegado (410 se devuelve igual) correlacion=%s",
+                correlacion,
+            )
+    raise HTTPException(status_code=410, detail={
+        "code": "GOVERNED_EXECUTION_REQUIRED",
+        "correlacion": None if registrada else correlacion,
+        "evidencia_registrada": registrada,
+    })
 
 
 @router.post("/authorize-facet", response_model=FacetAuthorizeResponse)

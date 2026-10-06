@@ -29,7 +29,10 @@ from redaccion import recortar_redactado
 from jacobs import store
 from jacobs.executor import RefIlegible, _load_ref
 from jacobs.models import MOTOR_FACETS, Pipeline, PipelineStatus, Step, StepStatus
-from jacobs.plan import PlanRejected, _check_cleanroom, _validate_plan_capabilities
+from jacobs.plan import (
+    MotorGobernadoNoDisponible, PlanRejected, _check_cleanroom,
+    _validate_plan_capabilities, validar_facetas_ejecutables,
+)
 from jacobs.policy import (
     MAX_PARALLEL_PIPELINES,
     ContencionAlReservar,
@@ -169,6 +172,10 @@ async def analizar(pipeline_id: str, invoked_by: str, reasignar: dict[str, str] 
     if violaciones:
         raise ContinuarRechazado(422, codigo, [v.to_dict() for v in violaciones])
     try:
+        validar_facetas_ejecutables(plan, set(a_correr))
+    except MotorGobernadoNoDisponible as exc:
+        raise ContinuarRechazado(422, exc.code, [v.to_dict() for v in exc.violations]) from exc
+    try:
         await _validate_plan_capabilities(plan)
     except PlanRejected as exc:
         raise ContinuarRechazado(422, codigo, [v.to_dict() for v in exc.violations]) from exc
@@ -181,6 +188,10 @@ def _pasos(a: Analisis) -> dict:
 
 
 async def _prevuelo_de(a: Analisis, user_id: str | None, tenant_id: str | None):
+    try:
+        validar_facetas_ejecutables(a.plan, set(a.pasos_a_correr))
+    except MotorGobernadoNoDisponible as exc:
+        raise ContinuarRechazado(422, exc.code, [v.to_dict() for v in exc.violations]) from exc
     return await prevuelo(
         a.plan, a.contexto, pendientes=set(a.pasos_a_correr),
         user_id=user_id or a.pipeline.user_id, tenant_id=tenant_id or a.pipeline.tenant_id,

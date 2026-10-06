@@ -800,10 +800,11 @@ en el runner con `AssertionError: 0 != 3` — admitió cero — y en local daba 
   `server.app` real de `c7d59cc` y la base sustituida, `POST /jacobs/pipeline/{id}/approve-step` SIN credencial y
   `{"invoked_by": "plataforma"}` → 200 y el paso de Hyde en `blocked_human_gate` pasaba a `pending`. La jaula de Hyde
   tiene red local (`--share-net`): Hyde se podía autoaprobar.
+- **`/motor/dispatch` y la evidencia B7 de denegacion (2026-10-06, cierre de #362).** Desde #362 **ninguna identidad** (`plataforma` ni `jacobs`) alcanza `POST /motor/dispatch`: el middleware responde 403 `ruta_no_permitida_para_la_identidad`, igual que en cualquier otra ruta. **Ese 403 no deja evidencia B7**, como cualquier 403 de autenticacion. La evidencia B7 de denegacion (`record_governed_dispatch_denied`) solo corre en `dispatch()` (410), hoy inalcanzable por HTTP; ahi el cuerpo es `{"code", "correlacion", "evidencia_registrada"}` y un fallo al registrar deja un log de error con la correlacion. Se intento registrar la evidencia en el middleware y se revirtio (acotarla con hilo, plazo y tope traia defectos nuevos en cada ronda). Si algun dia se quiere evidencia de los 403, va con un diseño propio, que no se resuelve aqui.
 - **Llamadores reales (grep en jax y jax-platform + journal de 7 días de `jax-las-manos`):** jax-platform
   (`api/pipelines.py`: crear, leer, results, resume, cancel; `jax_engine/state.py`: sondeo de pipelines y `/health`;
   `api/chat.py`: `/motor/authorize-facet`; tablero: `/health`) y Jacobs dentro del propio proceso
-  (`jacobs/executor.py`: `/motor/dispatch`, `/motor/job/{id}`, `/cancel`). **Nadie** llama `/execute`, `/plan` de LAS
+  (`jacobs/executor.py`: `/motor/dispatch`, `/motor/job/{id}`, `/cancel` -- **medición fechada 2026-09-17, ya no vigente:** desde el cierre de #362 (2026-10-06) `jacobs/executor.py` no hace ningún pedido HTTP a LAS MANOS y la identidad `jacobs` solo conserva `POST /jacobs/pipeline`). **Nadie** llama `/execute`, `/plan` de LAS
   MANOS, `/audit/tail` ni `approve-step` (la UI de hoy no aprueba pasos en gate: sólo `resume`). El REPL no llama a
   LAS MANOS. El proxy del Ejecutor tampoco.
 - **DECISIÓN (autonomía de Fernando, 2026-09-17): credencial de servicio, no SO_PEERCRED.** Hyde, jax-platform y LAS
@@ -817,8 +818,8 @@ en el runner con `AssertionError: 0 != 3` — admitió cero — y en local daba 
   la propiedad. `las_manos/auth_servicio.py`: middleware ASGI **deny by default** (público sólo `GET /health`), cabecera
   `X-Jax-Credencial-Servicio`, `hmac.compare_digest` contra todas, identidades `plataforma`
   (`JAX_LAS_MANOS_CREDENCIAL_PLATAFORMA`: `/jacobs/*` + `POST /motor/authorize-facet`; declara `invoked_by=plataforma`,
-  `caller=jax_platform_chat`) y `jacobs` (`JAX_LAS_MANOS_CREDENCIAL_JACOBS`: `/motor/dispatch`, `/motor/job/*`,
-  `POST /jacobs/pipeline`; declara `caller=jacobs`, `invoked_by=ada`). Un `invoked_by`/`caller` del cuerpo que no es de
+  `caller=jax_platform_chat`) y `jacobs` (`JAX_LAS_MANOS_CREDENCIAL_JACOBS`: **desde el cierre de #362 solo** `POST /jacobs/pipeline`;
+  se retiraron `/motor/dispatch` y `/motor/job/*`, que nadie usaba; declara `caller=jacobs`, `invoked_by=ada`). Un `invoked_by`/`caller` del cuerpo que no es de
   la credencial → 403 antes de la ruta; claves duplicadas → 400. **Sólo `plataforma` aprueba o reanuda.** Sin las
   variables (o cortas, o iguales) LAS MANOS no arranca. `/execute`, `/plan` y `/audit/tail` no los alcanza ninguna
   identidad. Rechazos con `code`, sin prosa. Una ruta nueva bajo `/jacobs/` queda sólo para `plataforma` sin tocar nada.
@@ -843,8 +844,9 @@ en el runner con `AssertionError: 0 != 3` — admitió cero — y en local daba 
     sin credencial 401, identidad ajena 403, propia pasa; `authorize_facet.js` a 25 VUs con los tres caminos
     (permitido / fail-closed / caller ajeno) p95 5,81 ms, 6140 req/s, 100 % checks, 0 fallas.
   - **(2) CERRADO como propiedad.** No hay en el árbol un emisor de sub-pipelines de Ada que llame
-    `POST /jacobs/pipeline` (`grep` sin coincidencias fuera de tests/loadtest). Los tres llamados de `jacobs/executor.py`
-    ya mandan `encabezado_propio(IDENTIDAD_JACOBS)`. Un emisor futuro sin cabecera recibe 401 (el middleware es
+    `POST /jacobs/pipeline` (`grep` sin coincidencias fuera de tests/loadtest). Hoy `jacobs/executor.py` hace **cero** llamadas con
+    `encabezado_propio(IDENTIDAD_JACOBS)` (los tres llamados a LAS MANOS se retiraron con el despacho legacy, cierre de #362;
+    lo fija `tests/test_las_manos_auth_servicio.py::test_jacobs_ya_no_hace_ningun_pedido_http_a_las_manos`). Un emisor futuro sin cabecera recibe 401 (el middleware es
     deny-by-default), así que no puede quedar abierto en silencio.
   - **(1) DECISIÓN DE FERNANDO, no deuda técnica.** Medido: `fruiz` tiene `(ALL : ALL) ALL` en sudo (con contraseña y
     caché de sesión). Una cuenta de servicio para LAS MANOS/jax-platform con `.env` `root:jaxsvc 640` sólo cierra el
@@ -1177,7 +1179,7 @@ Antes: 22-50 % de fallas en todas las celdas, TIME_WAIT 33.000-42.000 (el rango 
 - **Una sola constante (E-13):** `MAX_STEPS_PER_PIPELINE` vive en `jacobs/models.py`; `policy.py`, `routes.py`, `plan.py` y el validador la importan (antes, literales `20` repartidos).
 - **Facetas del planner desde la tabla `facet` (E-03/17/23):** una faceta desconocida o inactiva rechaza el plan (422 + `PLAN_REJECTED`) en vez de caer a `jax_local`; el menú de facetas de los prompts de Ada y qwen sale de las activas.
 - **Un archivo real por módulo (E-10/11):** `crypto_secrets`, `credential_resolver`, `model_catalog` y `cliente_http_compartido` de `las_manos/` son symlinks a `jax/core`.
-- **URLs de servicio desde el entorno, fail-closed (E-21):** `LAS_MANOS_URL`, `JAX_OLLAMA_URL`, `JAX_KOKORO_PYTHON` (esta última **retirada el 2026-09-17** con la voz) sin default; `config_entorno.url_requerida` exige URL base (sin path, query ni fragmento). Los workers de memoria leen la URL de DeepSeek de `provider.base_url`; un proveedor `deprecated` no da URL. Familia de espejos `config_entorno` en `scripts/check_mirror_sync.py` (copia verbatim en jax-platform).
+- **URLs de servicio desde el entorno, fail-closed (E-21):** `LAS_MANOS_URL`, `JAX_OLLAMA_URL`, `JAX_KOKORO_PYTHON` (esta última **retirada el 2026-09-17** con la voz) sin default. **Actualización 2026-10-06 (cierre de #362):** `jacobs/executor.py` ya no lee ni exige `LAS_MANOS_URL` (se retiró `LAS_MANOS_BASE` con el último pedido HTTP de Jacobs a LAS MANOS); `JAX_OLLAMA_URL` sigue exigida por `jacobs/executor.py` y `plan.py`. Reglas de formato: `config_entorno.url_requerida` exige URL base (sin path, query ni fragmento). Los workers de memoria leen la URL de DeepSeek de `provider.base_url`; un proveedor `deprecated` no da URL. Familia de espejos `config_entorno` en `scripts/check_mirror_sync.py` (copia verbatim en jax-platform).
 - **Documentos en `JAX_REPO_BASE`, escritura en `asyncio.to_thread`, sin `aiofiles` (E-12/18/22); `requirements.txt` fuente única del CI con `cryptography`/`pyyaml` fijados (E-19).**
 - **`_sin_autoetiqueta` con la cabecera de `authority_origin` y recorte simple del embedding (E-14/15).**
 - **Errores de proveedor redactados con la credencial conocida ANTES de recortar (E-16)** en executor, Ada y REPL; el error de tarea se redacta antes de ir a disco.
