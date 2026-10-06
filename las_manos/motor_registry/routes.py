@@ -245,30 +245,47 @@ async def governed_dispatch(req: GovernedDispatchRequest) -> MotorDispatchRespon
         capability=request.capability, trace_id=req.trace_id)
 
 
+async def registrar_denegacion_de_dispatch(correlacion: str) -> bool:
+    """Registra la evidencia B7 de que el despacho legacy fue DENEGADO. True si
+    quedo registrada (o no hay registrador configurado); False si fallo, y en
+    ese caso deja un log de ERROR con `correlacion` y la causa. No se traga el
+    fallo en silencio, no loguea nada del pedido y nunca levanta: la denegacion
+    se devuelve igual.
+
+    Lo llama el middleware (`auth_servicio.proteger`), que es donde la
+    denegacion de POST /motor/dispatch ocurre de verdad -- ninguna identidad
+    tiene permiso sobre esa ruta --, y dispatch() como defensa en profundidad."""
+    if _B7_EVIDENCE_RECORDER is None:
+        return True
+    try:
+        await asyncio.to_thread(_B7_EVIDENCE_RECORDER.record_governed_dispatch_denied)
+    except Exception:  # fail-soft: legacy dispatch remains rejected if evidence persistence is unavailable.
+        logger.exception(
+            "B7: no se pudo registrar la evidencia de /motor/dispatch denegado (la denegacion se devuelve igual) correlacion=%s",
+            correlacion,
+        )
+        return False
+    return True
+
+
 @router.post("/dispatch", response_model=MotorDispatchResponse, status_code=202)
 async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
     # Block 6: every catalog capability is governed in V1.  This legacy
     # transport endpoint must never consume a gate, create a job, or start a
     # worker; its request body is not an execution authority artifact.
-    correlacion = None
-    if _B7_EVIDENCE_RECORDER is not None:
-        try:
-            _B7_EVIDENCE_RECORDER.record_governed_dispatch_denied()
-        except Exception:  # fail-soft: legacy dispatch remains rejected if evidence persistence is unavailable.
-            # No se traga en silencio: sin esta linea la evidencia B7 de una
-            # denegacion faltaria sin rastro. El MISMO identificador va en el log
-            # y en el cuerpo del 410: el operador une lo que vio el cliente con la
-            # evidencia que falto. No se loguea nada del cuerpo del pedido.
-            correlacion = uuid.uuid4().hex
-            logger.exception(
-                "B7: no se pudo registrar la evidencia de /motor/dispatch denegado (410 se devuelve igual) correlacion=%s",
-                correlacion,
-            )
-    if correlacion is None:
-        raise HTTPException(status_code=410, detail="GOVERNED_EXECUTION_REQUIRED")
-    # Solo cuando la evidencia fallo el cuerpo trae la correlacion; en el caso
-    # normal conserva su forma de siempre (el texto a secas).
-    raise HTTPException(status_code=410, detail={"code": "GOVERNED_EXECUTION_REQUIRED", "correlacion": correlacion})
+    #
+    # DEFENSA EN PROFUNDIDAD: en produccion este cuerpo no se alcanza por HTTP.
+    # `proteger(app)` (auth_servicio) niega POST /motor/dispatch con 403 a toda
+    # identidad, y es el middleware quien registra la evidencia y devuelve la
+    # correlacion. Esto solo corre si alguien quita el permiso del middleware o
+    # llama a la funcion directo. Misma forma de cuerpo que el 403:
+    # {"code", "correlacion"}, con correlacion null si la evidencia quedo bien.
+    correlacion = uuid.uuid4().hex
+    registrada = await registrar_denegacion_de_dispatch(correlacion)
+    raise HTTPException(status_code=410, detail={
+        "code": "GOVERNED_EXECUTION_REQUIRED",
+        "correlacion": None if registrada else correlacion,
+    })
 
 
 @router.post("/authorize-facet", response_model=FacetAuthorizeResponse)

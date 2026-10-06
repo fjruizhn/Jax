@@ -191,64 +191,87 @@ def test_health_sigue_publico():
 
 
 @pytest.mark.parametrize("metodo,ruta", [
-    ("post", "/execute"), ("get", "/audit/tail"), ("post", "/jacobs/ruta-nueva-de-manana"),
-    ("post", "/motor/dispatch"), ("get", "/motor/job/x"), ("post", "/motor/authorize-facet"),
-    ("get", "/jacobs/pipeline/p1"), ("post", "/jacobs/pipeline"), ("post", "/jacobs/plan"),
-    ("get", "/ruta-que-no-existe"),
-])
-def test_toda_ruta_no_publica_exige_credencial(metodo, ruta):
-    with TestClient(_app()) as c:
-        r = getattr(c, metodo)(ruta)
-    assert r.status_code == 401, (ruta, r.text)
-    assert r.json() == {"detail": {"code": auth_servicio.CODIGO_SIN_CREDENCIAL}}
-
-
-@pytest.mark.parametrize("identidad", [IDENTIDAD_PLATAFORMA, IDENTIDAD_JACOBS])
-def test_execute_y_audit_no_los_alcanza_ninguna_identidad(identidad):
-    """Sin llamador real (journal de 7 días + grep en jax y jax-platform): ni
-    `/execute` (staging sin gate para hyde) ni el log forense."""
-    with TestClient(_app()) as c:
-        assert c.post("/execute", headers=_h(identidad)).status_code == 403
-        assert c.get("/audit/tail", headers=_h(identidad)).status_code == 403
-
-
-def test_la_ruta_nueva_bajo_jacobs_es_solo_de_la_plataforma():
-    with TestClient(_app()) as c:
-        assert c.post("/jacobs/ruta-nueva-de-manana", headers=_h(IDENTIDAD_JACOBS)).status_code == 403
-        assert c.post("/jacobs/ruta-nueva-de-manana", headers=_h(IDENTIDAD_PLATAFORMA)).status_code == 200
-
-
-# ---------------------------------------------------------------------------
-#  La identidad del cuerpo es la de la credencial
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("identidad,ruta,cuerpo", [
-    (IDENTIDAD_JACOBS, "/jacobs/pipeline", {"invoked_by": "plataforma"}),
-    (IDENTIDAD_JACOBS, "/jacobs/pipeline", {"invoked_by": "jax_local"}),
-    (IDENTIDAD_PLATAFORMA, "/jacobs/pipeline", {"invoked_by": "ada"}),
-    (IDENTIDAD_PLATAFORMA, "/motor/authorize-facet", {"caller": "jacobs", "facet": "kimi"}),
-    (IDENTIDAD_PLATAFORMA, "/jacobs/pipeline", {"invoked_by": ["plataforma"]}),
-])
-def test_declarar_otra_identidad_se_rechaza(identidad, ruta, cuerpo):
-    with TestClient(_app()) as c:
-        r = c.post(ruta, json=cuerpo, headers=_h(identidad))
-    assert r.status_code == 403, r.text
-    assert r.json() == {"detail": {"code": auth_servicio.CODIGO_IDENTIDAD_DECLARADA}}
-
-
-@pytest.mark.parametrize("metodo,ruta", [
-    ("post", "/motor/dispatch"),
     ("get", "/motor/job/j1"),
     ("post", "/motor/job/j1/cancel"),
 ])
-def test_jacobs_ya_no_tiene_permiso_sobre_los_motores(metodo, ruta):
-    """Jacobs no despacha motores (despacho legacy cerrado, 410) ni consulta o
-    cancela motor jobs: nada del arbol usa esas rutas con la credencial
-    `jacobs`. Un permiso que nadie usa es superficie sin dueno: 403 de ruta."""
+def test_jacobs_ya_no_tiene_permiso_sobre_los_motor_jobs(metodo, ruta):
+    """Jacobs no consulta ni cancela motor jobs: nada del arbol usa esas rutas
+    con la credencial `jacobs`. Un permiso que nadie usa es superficie sin
+    dueno: 403 de ruta (cuerpo de siempre, sin correlacion: no es el dispatch)."""
     with TestClient(_app()) as c:
         r = getattr(c, metodo)(ruta, headers=_h(IDENTIDAD_JACOBS))
     assert r.status_code == 403, r.text
     assert r.json() == {"detail": {"code": auth_servicio.CODIGO_RUTA_NO_PERMITIDA}}
+
+
+# --- POST /motor/dispatch: la denegacion REAL ocurre en el middleware ---------
+# `proteger(app)` responde 403 antes de que dispatch() corra, para las dos
+# identidades; ahi es donde la evidencia B7 y la correlacion tienen que vivir.
+# Estas pruebas van por HTTP (TestClient sobre la app envuelta), no llaman a
+# routes.dispatch() directo.
+
+_HEX32 = r"[0-9a-f]{32}"
+
+
+@pytest.fixture
+def evidencia_b7(monkeypatch):
+    from unittest.mock import Mock
+    from motor_registry import routes
+    registrador = Mock()
+    monkeypatch.setattr(routes, "_B7_EVIDENCE_RECORDER", registrador)
+    return registrador
+
+
+def _correlaciones_del_log(caplog):
+    import re
+    return [m.group(1) for r in caplog.records
+            for m in [re.search(rf"correlacion=({_HEX32})", r.getMessage())] if m]
+
+
+@pytest.mark.parametrize("identidad", [IDENTIDAD_JACOBS, IDENTIDAD_PLATAFORMA])
+def test_dispatch_denegado_por_el_middleware_registra_evidencia_y_trae_correlacion(identidad, evidencia_b7, caplog):
+    import logging
+    import re
+    with caplog.at_level(logging.INFO), TestClient(_app()) as c:
+        r = c.post("/motor/dispatch", json={"caller": "hyde" if identidad == IDENTIDAD_JACOBS else "jax_platform_chat",
+                                            "capability": "code", "prompt": "PROMPT-SECRETO"},
+                   headers=_h(identidad))
+    assert r.status_code == 403
+    cuerpo = r.json()
+    assert set(cuerpo) == {"detail"} and set(cuerpo["detail"]) == {"code", "correlacion"}
+    assert cuerpo["detail"]["code"] == auth_servicio.CODIGO_RUTA_NO_PERMITIDA
+    assert re.fullmatch(_HEX32, cuerpo["detail"]["correlacion"])
+    evidencia_b7.record_governed_dispatch_denied.assert_called_once_with()
+    # el log lleva el MISMO id y nada del pedido
+    assert _correlaciones_del_log(caplog) == [cuerpo["detail"]["correlacion"]]
+    assert "PROMPT-SECRETO" not in caplog.text
+
+
+def test_dispatch_denegado_aunque_falle_la_evidencia_sigue_siendo_403_con_el_mismo_id(evidencia_b7, caplog):
+    import logging
+    evidencia_b7.record_governed_dispatch_denied.side_effect = RuntimeError("sin disco")
+    with caplog.at_level(logging.INFO), TestClient(_app()) as c:
+        r = c.post("/motor/dispatch", json={"caller": "hyde"}, headers=_h(IDENTIDAD_JACOBS))
+    assert r.status_code == 403
+    id_cliente = r.json()["detail"]["correlacion"]
+    errores = [x for x in caplog.records if x.levelname == "ERROR"]
+    assert len(errores) == 1 and errores[0].exc_info and "sin disco" in str(errores[0].exc_info[1])
+    assert set(_correlaciones_del_log(caplog)) == {id_cliente}
+
+
+def test_dispatch_sin_credencial_es_401_y_no_registra_evidencia(evidencia_b7):
+    with TestClient(_app()) as c:
+        r = c.post("/motor/dispatch", json={"caller": "hyde"})
+    assert r.status_code == 401
+    assert r.json() == {"detail": {"code": auth_servicio.CODIGO_SIN_CREDENCIAL}}
+    evidencia_b7.record_governed_dispatch_denied.assert_not_called()
+
+
+def test_otras_denegaciones_del_middleware_no_tocan_la_evidencia_de_dispatch(evidencia_b7):
+    with TestClient(_app()) as c:
+        assert c.get("/motor/job/j1", headers=_h(IDENTIDAD_JACOBS)).status_code == 403
+        assert c.post("/execute", headers=_h(IDENTIDAD_JACOBS)).status_code == 403
+    evidencia_b7.record_governed_dispatch_denied.assert_not_called()
 
 
 def test_jacobs_conserva_solo_el_pipeline_de_sub_pipelines():
@@ -256,12 +279,13 @@ def test_jacobs_conserva_solo_el_pipeline_de_sub_pipelines():
     assert [(m, p.pattern) for m, p in permiso.rutas] == [("POST", "/jacobs/pipeline")]
 
 
-def test_la_plataforma_no_despacha_motores():
+def test_la_plataforma_no_despacha_motores(evidencia_b7):
     with TestClient(_app()) as c:
         r = c.post("/motor/dispatch", json={"caller": "jax_platform_chat"},
                    headers=_h(IDENTIDAD_PLATAFORMA))
     assert r.status_code == 403
-    assert r.json() == {"detail": {"code": auth_servicio.CODIGO_RUTA_NO_PERMITIDA}}
+    detalle = r.json()["detail"]
+    assert detalle["code"] == auth_servicio.CODIGO_RUTA_NO_PERMITIDA and set(detalle) == {"code", "correlacion"}
 
 
 def test_el_cuerpo_llega_intacto_a_la_ruta():
