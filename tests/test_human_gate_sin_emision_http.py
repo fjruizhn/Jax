@@ -261,6 +261,38 @@ def test_motor_dispatch_con_token_inventado_se_rechaza(motor, store_falso):
     lanzado.assert_not_called()
 
 
+def test_motor_dispatch_410_registra_la_evidencia_b7(motor, store_falso, monkeypatch):
+    """El 410 de /motor/dispatch no es mudo: deja la evidencia B7 de que el
+    despacho legacy fue denegado (control CTL.B6.GOVERNED_DISPATCH). Si alguien
+    borra el llamado al registrador, el endpoint seguiria dando 410 y nada se
+    pondria rojo -- esta prueba es la que lo fija."""
+    routes, lanzado = motor
+    from unittest.mock import Mock
+    from fastapi import HTTPException
+    registrador = Mock()
+    monkeypatch.setattr(routes, "_B7_EVIDENCE_RECORDER", registrador)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(routes.dispatch(_pedido("cualquier-cosa")))
+    assert exc.value.status_code == 410
+    registrador.record_governed_dispatch_denied.assert_called_once_with()
+    lanzado.assert_not_called()
+
+
+def test_motor_dispatch_410_sobrevive_a_que_la_evidencia_b7_falle(motor, store_falso, monkeypatch):
+    """Si persistir la evidencia falla, el despacho legacy sigue rechazado."""
+    routes, lanzado = motor
+    from unittest.mock import Mock
+    from fastapi import HTTPException
+    registrador = Mock()
+    registrador.record_governed_dispatch_denied.side_effect = RuntimeError("sin disco")
+    monkeypatch.setattr(routes, "_B7_EVIDENCE_RECORDER", registrador)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(routes.dispatch(_pedido("cualquier-cosa")))
+    assert exc.value.status_code == 410
+    registrador.record_governed_dispatch_denied.assert_called_once_with()
+    lanzado.assert_not_called()
+
+
 def test_motor_dispatch_con_token_emitido_pasa_y_lo_consume(motor, store_falso):
     routes, _ = motor
     store = store_falso
