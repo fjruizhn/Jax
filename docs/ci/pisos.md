@@ -906,6 +906,15 @@ matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
 sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
 piso se vuelve a fijar desde los **3537 de master**.
 
+3768 -> 3788 (2026-10-06, JAX#357 ronda 11): +20 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 234 a 254): bloque de master congelado con prueba de hash y contra `git show`, "nunca menos
+que master", `&` entre comillas/escapado/en expansion, y pruebas directas de la lectura nueva
+(paridad del acento grave, acento grave como separador). Medido por recoleccion
+(`pytest --collect-only -q`, PYTHONPATH=.:las_manos, Python 3.14.4, SIN `JAX_DB_HOST`) con la
+lista exacta de 195 archivos: 3834 recolectadas en la rama, 3814 en 435d1ede. Son 3788 passed
++ 45 skipped + 1 xfailed. La prueba del bloque congelado no se salta nunca (sin el SHA en el
+checkout comprueba solo el hash). No se corrio el paso completo.
+
 3746 -> 3768 (2026-10-06, JAX#357 ronda 10): +22 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
 (de 212 a 234): lectura doble tambien en shell (ventana de master y salto de subshell, unidas
 con OR), casos del auditor con acentos graves en numero par y `)` desbalanceado, separadores
