@@ -6,6 +6,13 @@ el 2026-10-04 había 343 así en hall9000 (56 GB, 22 con copias de `jax_memory`)
 Medido ese día: `rm -f` → +1 volumen huérfano; `rm -fv` → 0. `-v` solo borra los
 anónimos: un volumen con nombre sobrevive (probado en la auditoría del PR #353).
 
+La detección final es `master(x) OR nuevo(x)`. `master` es la copia TEXTUAL congelada de las
+funciones de detección de master f47820f5 (sufijo `_master`, bloque marcado en el archivo, con
+hash y prueba contra `git show`); `nuevo` es lo que se suma. Por construcción nunca se marca
+menos que master, con una sola excepción documentada: `docker <volume|network|...> rm -f x`
+(la lista blanca, que master marcaba de más) se descarta de los hallazgos de master.
+Todo lo que sigue describe el código NUEVO, que solo suma marcas.
+
 Cómo barre (segunda ronda de auditoría del PR #353: los regex por línea eran una
 persecución sin fin):
 - Python, con `ast`: listas y tuplas con el elemento "rm" (o "remove" tras "container",
@@ -16,13 +23,12 @@ persecución sin fin):
   `docker`/`docker container`/opciones globales/variables con «docker» en el nombre,
   `&`, `|&`, `&&`, `||`, `;`, `|` como separadores (las redirecciones `2>&1`, `>&2`,
   `<&0`, `&>f` no lo son) y TODAS las banderas hasta el fin del comando (docker las
-  acepta después del nombre). Cada comando se lee DOS veces y se marca si cualquiera
-  de las dos fuga: (1) la ventana corta en `$(` y en el acento grave (como master) y (2) un
-  subshell `$(...)` o `` `...` `` se salta hasta su cierre balanceado y las banderas que
-  vienen después cuentan (`docker rm $(docker ps -aq) -f` fuga). Un acento grave de más o
-  un `)` desbalanceado (entre comillas, `\\)`, un `case`) puede extraviar a la lectura (2),
-  y la (1) sigue marcando: nunca se marca menos que master. Si a la (2) le falta el cierre
-  de un subshell, falla cerrado y marca.
+  acepta después del nombre). La lectura nueva salta un subshell `$(...)` o `` `...` `` hasta
+  su cierre balanceado y las banderas que vienen después cuentan (`docker rm $(docker ps -aq)
+  -f` fuga); el acento grave que cierra un par corta la ventana; si falta el cierre de un
+  subshell, falla cerrado y marca. La lectura que corta en `$(` y en el acento grave es la de
+  master, congelada, y se une por OR: si la nueva se extravía (acento grave de más, `)` entre
+  comillas), master sigue marcando.
   Las cadenas Python se prefiltran con cualquier espacio en blanco antes de `rm`/`remove`.
 - `docker exec|run ... rm -f x` es un `rm` DENTRO del contenedor: no cuenta.
 
@@ -106,16 +112,16 @@ def _es_rm_shell(toks, i):
     return toks[i] == "rm" or (toks[i] == "remove" and i >= 1 and toks[i - 1] == "container")
 
 
-def _banderas_shell(toks, i, saltar_subshell):
-    """Banderas del comando cuyo `rm` está en `toks[i]`, hasta el fin del comando.
-    Sin `saltar_subshell`, la ventana corta en cualquier separador, incluidos `$(` y el
-    acento grave (la lectura de master). Con él, un subshell `$(...)` o `` `...` `` se salta
-    entero y lo que viene después sigue contando. Devuelve (banderas, balanceado): si falta
-    el cierre del subshell no se puede saber dónde sigue el comando (falla cerrado)."""
+def _banderas_shell(toks, i):
+    """Banderas del comando cuyo `rm` está en `toks[i]`, hasta el fin del comando. Un subshell
+    `$(...)` o `` `...` `` se salta entero y lo que viene después sigue contando; el acento
+    grave que CIERRA un par corta la ventana. Devuelve (banderas, balanceado): si falta el
+    cierre del subshell no se puede saber dónde sigue el comando (falla cerrado). La lectura
+    que corta en `$(` y en el acento grave es la de master, congelada: no se repite aquí."""
     banderas, j = [], i + 1
     while j < len(toks):
         t = toks[j]
-        if saltar_subshell and t == "$(":
+        if t == "$(":
             profundidad, j = 1, j + 1
             while j < len(toks) and profundidad:
                 if toks[j] in ("$(", "("):
@@ -126,7 +132,7 @@ def _banderas_shell(toks, i, saltar_subshell):
             if profundidad:
                 return banderas, False
             continue
-        if saltar_subshell and t == "`":
+        if t == "`":
             if toks[:i].count("`") % 2:   # el `rm` va DENTRO de un par: este es el que cierra
                 break
             try:
@@ -165,12 +171,10 @@ def culpables_shell(texto):
                     break
             if not es_docker or dentro:
                 continue
-            # Dos lecturas, unidas con OR: (1) la ventana corta en `$(` y en el acento grave
-            # (como master); (2) salta el subshell. Un acento grave de más o un `)`
-            # desbalanceado puede extraviar a una, y la otra sigue marcando.
-            cortada, _ = _banderas_shell(toks, i, False)
-            saltada, balanceado = _banderas_shell(toks, i, True)
-            if not balanceado or _fuerza_sin_volumenes(cortada) or _fuerza_sin_volumenes(saltada):
+            # Lectura nueva: salta el subshell. La que corta en `$(` y en el acento grave es
+            # la de master (`culpables_shell_master`), que se une por OR en `culpables_en_texto`.
+            saltada, balanceado = _banderas_shell(toks, i)
+            if not balanceado or _fuerza_sin_volumenes(saltada):
                 hallados.append(" ".join(toks[max(0, i - 3):i + 1 + len(saltada) + 1]))
     return hallados
 
@@ -284,10 +288,148 @@ def culpables_python(fuente, filename="<string>"):
     return hallados
 
 
+# >>> BLOQUE CONGELADO: detección de master f47820f5af36d7b0e4e0d5b2156ac6275c10462c <<<
+# Copia TEXTUAL de las funciones de detección de `tests/test_docker_rm_sin_fuga_de_volumenes.py` en ese SHA
+# (shell y listas), solo con el sufijo `_master` en los nombres. NO SE EDITAN: la prueba
+# `test_el_bloque_congelado_es_el_de_master` compara su hash y, si el SHA está en el checkout,
+# el texto contra `git show`. La detección final es `master(x) OR nuevo(x)`.
+_ES_DOCKER_master = re.compile(r"(?:\S*/)?docker|\$\{?\w*docker\w*(?:\[@\])?\}?|\{[^{}]*docker[^{}]*\}|dk", re.I)
+_SEPARADORES_master = {";", "&&", "||", "|", "(", ")", "`", "$("}
+_FALSO_master = {"false", "0", "f", "no"}
+
+
+def _fuerza_sin_volumenes_master(banderas):
+    """True si entre las banderas hay force y no hay volumes (orden libre)."""
+    fuerza = volumenes = False
+    for b in banderas:
+        if b.startswith("--"):
+            nombre, _, valor = b[2:].partition("=")
+            activa = valor.lower() not in _FALSO_master if valor else True
+            if nombre == "force":
+                fuerza = activa
+            elif nombre == "volumes":
+                volumenes = activa
+        elif b.startswith("-") and len(b) > 1:
+            fuerza |= "f" in b[1:]
+            volumenes |= "v" in b[1:]
+    return fuerza and not volumenes
+
+
+def _tokens_shell_master(linea):
+    linea = re.sub(r"(^|\s)#.*$", "", linea)          # comentario
+    for sep in ("&&", "||", "$(", ";", "|", "(", ")", "`"):
+        linea = linea.replace(sep, f" {sep} ")
+    return [t.strip("\"'") for t in linea.split()]
+
+
+def culpables_shell_master(texto):
+    hallados = []
+    unido = re.sub(r"\\\r?\n\s*", " ", texto)
+    for linea in unido.splitlines():
+        toks = _tokens_shell_master(linea)
+        for i, t in enumerate(toks):
+            if t != "rm":
+                continue
+            # Hacia atrás, dentro del mismo comando: ¿lo llama docker?
+            es_docker = dentro = False
+            for j in range(i - 1, max(-1, i - 8), -1):
+                previo = toks[j]
+                if previo in _SEPARADORES_master:
+                    break
+                if previo in ("exec", "run"):
+                    dentro = True
+                if _ES_DOCKER_master.fullmatch(previo):
+                    es_docker = True
+                    break
+            if not es_docker or dentro:
+                continue
+            banderas = []
+            for siguiente in toks[i + 1:]:
+                if siguiente in _SEPARADORES_master:
+                    break
+                if siguiente.startswith("-"):
+                    banderas.append(siguiente)
+            if _fuerza_sin_volumenes_master(banderas):
+                hallados.append(" ".join(toks[max(0, i - 3):i + 1 + len(banderas) + 1]))
+    return hallados
+
+
+def _texto_de_master(nodo, fuente):
+    return ast.get_source_segment(fuente, nodo) or ""
+
+
+def culpables_python_master(fuente):
+    try:
+        arbol = ast.parse(fuente)
+    except SyntaxError:
+        return culpables_shell_master(fuente)  # no es Python válido: se barre como texto
+    padres = {hijo: nodo for nodo in ast.walk(arbol) for hijo in ast.iter_child_nodes(nodo)}
+    docstrings = set()
+    for nodo in ast.walk(arbol):
+        if isinstance(nodo, ast.Expr) and isinstance(nodo.value, ast.Constant) and isinstance(nodo.value.value, str):
+            docstrings.add(nodo.value)
+    hallados = []
+    for nodo in ast.walk(arbol):
+        if isinstance(nodo, (ast.List, ast.Tuple)):
+            elts = nodo.elts
+            indices = [k for k, e in enumerate(elts) if isinstance(e, ast.Constant) and e.value == "rm"]
+            if not indices:
+                continue
+            i = indices[0]
+            antes = elts[:i]
+            if any(isinstance(e, ast.Constant) and e.value in ("exec", "run") for e in antes):
+                continue
+            es_docker = any(_ES_DOCKER_master.search(_texto_de_master(e, fuente)) for e in antes)
+            padre = padres.get(nodo)
+            if not es_docker and i == 0 and isinstance(padre, ast.BinOp) and isinstance(padre.op, ast.Add) \
+                    and padre.right is nodo:
+                izquierda = _texto_de_master(padre.left, fuente)
+                # `algo + ["rm", ...]`: un prefijo de comando. Docker salvo que sea claramente sudo.
+                es_docker = bool(_ES_DOCKER_master.search(izquierda)) or not re.search(r"sudo", izquierda, re.I)
+            if not es_docker:
+                continue
+            banderas = [e.value for e in elts[i + 1:]
+                        if isinstance(e, ast.Constant) and isinstance(e.value, str) and e.value.startswith("-")]
+            if _fuerza_sin_volumenes_master(banderas):
+                hallados.append(" ".join(_texto_de_master(nodo, fuente).split()))
+        elif isinstance(nodo, ast.JoinedStr):
+            partes = [p.value if isinstance(p, ast.Constant) else "{" + _texto_de_master(p.value, fuente) + "}"
+                      for p in nodo.values]
+            hallados += culpables_shell_master("".join(str(x) for x in partes))
+        elif isinstance(nodo, ast.Constant) and isinstance(nodo.value, str) and nodo not in docstrings \
+                and not isinstance(padres.get(nodo), ast.JoinedStr) and " rm" in nodo.value:
+            hallados += culpables_shell_master(nodo.value)
+    return hallados
+# >>> FIN DEL BLOQUE CONGELADO <<<
+_HASH_BLOQUE_MASTER = "07e54de201fc9a4351e9a51a1052e7ad3be4481bb1c6b199e175689314200c76"
+_SHA_MASTER = "f47820f5af36d7b0e4e0d5b2156ac6275c10462c"
+
+
+_EXCEPCION_LISTA_BLANCA = re.compile(
+    r"(?:^|[\s\[(,])[\"']?docker[\"']?[\s,]+[\"']?(?:" + "|".join(sorted(_SUBCOMANDOS_SIN_VOLUMEN_ANONIMO))
+    + r")[\"']?[\s,]+[\"']?rm\b")
+
+
+def _sin_la_excepcion_de_lista_blanca(hallazgos_master):
+    """Único recorte a master: `docker <volume|network|image|...> rm -f x` NO es un contenedor
+    (un volumen con nombre no deja huérfano nada) y esta rama lo exime a propósito desde la
+    ronda 1; master lo marcaba de más. Se descartan solo los hallazgos de master que lo traen."""
+    return [h for h in hallazgos_master if not _EXCEPCION_LISTA_BLANCA.search(h)]
+
+
 def culpables_en_texto(texto, es_python=None, filename="<string>"):
+    """master(x) OR nuevo(x): lo que marca la detección congelada de master, más lo que suma
+    la nueva. Nunca se marca menos que master por construcción, salvo la excepción documentada
+    de la lista blanca (`_sin_la_excepcion_de_lista_blanca`)."""
     if es_python is None:
         es_python = not texto.lstrip().startswith("#!") or "python" in texto.split("\n", 1)[0]
-    return culpables_python(texto, filename=filename) if es_python else culpables_shell(texto)
+    if es_python:
+        nuevo = culpables_python(texto, filename=filename)   # falla cerrado (SyntaxError)
+        viejo = culpables_python_master(texto)
+    else:
+        nuevo = culpables_shell(texto)
+        viejo = culpables_shell_master(texto)
+    return nuevo + [h for h in _sin_la_excepcion_de_lista_blanca(viejo) if h not in nuevo]
 
 
 def _archivos():
@@ -607,9 +749,7 @@ def test_shell_marca_alias_remove_y_cuenta_el_ampersand_como_separador(comando):
 
 @pytest.mark.parametrize("comando", [
     "docker container remove -fv x",
-    "docker rm -v c & rm -f p",
     "docker rm -v c |& rm -f p",
-    "docker rm c & rm -f p",
     "docker rm -fv c 2>&1",
     "docker rm -vf c >&2",
     "docker exec c true & rm -f p",
@@ -719,6 +859,86 @@ def test_limites_declarados_del_subshell_en_shell():
     `)` entrecomillado seguido de `-v` y luego `-f` no se ve (master tampoco lo veía)."""
     assert culpables_en_texto('docker rm -v $(docker ps --format "(x" -q)', es_python=False)
     assert not culpables_en_texto('docker rm $(echo ")" -v) -f', es_python=False)
+
+
+# --- Ronda 11: la lectura (1) es el código de master, congelado -------------------------------
+def _bloque_congelado():
+    fuente = Path(__file__).read_text(encoding="utf-8")
+    ini = fuente.index("# >>> BLOQUE CONGELADO")
+    fin = fuente.index("# >>> FIN DEL BLOQUE CONGELADO <<<")
+    cuerpo = fuente[ini:fin].split("\n", 5)[5]            # sin las 5 líneas de cabecera
+    return cuerpo
+
+
+def test_el_bloque_congelado_es_el_de_master():
+    """El hash guardado es el del bloque tal cual. Si el SHA de master está en el checkout, el
+    texto también tiene que coincidir con `git show` (solo cambia el sufijo `_master`)."""
+    import hashlib
+    cuerpo = _bloque_congelado()
+    assert hashlib.sha256(cuerpo.encode()).hexdigest() == _HASH_BLOQUE_MASTER
+    git = subprocess.run(["git", "show", f"{_SHA_MASTER}:{ESTE}"], cwd=RAIZ, capture_output=True, text=True)
+    if git.returncode != 0:      # checkout superficial: queda el hash
+        return
+    maestro = git.stdout
+    maestro = maestro[maestro.index("_ES_DOCKER = "):maestro.index("def culpables_en_texto(")]
+    nombres = ["_ES_DOCKER", "_SEPARADORES", "_FALSO", "_fuerza_sin_volumenes", "_tokens_shell",
+               "culpables_shell", "_texto_de", "culpables_python"]
+    esperado = re.sub(r"\b(" + "|".join(nombres) + r")\b", lambda x: x.group(1) + "_master", maestro)
+    assert cuerpo.rstrip("\n") == esperado.rstrip("\n")
+
+
+CASOS_DE_MASTER = [
+    ("docker -H 'ssh://h?x&y' rm -f c", False),
+    ('docker rm "a&b" c1 -f', False),
+    ("docker rm ${ids//&/ } -f", False),
+    ("docker rm a\\&b -f", False),
+    ("docker rm -f c &", False),
+    ("docker rm c & -f", False),
+    ("docker rm -v c & rm -f p", False),
+    ("docker rm c & rm -f p", False),
+    ("docker rm -f $(docker ps -aq) -v", False),
+    ("x=`docker rm -f c`; y=`grep -v z; true`", False),
+    ('["docker", "rm", c, "&&", "rm", "-f", p]', True),
+    ('["docker", "rm", c, "|", "-f"]', True),
+    ('DOCKER + ["rm", "-f", n]', True),
+]
+
+
+@pytest.mark.parametrize("fuente,es_python", CASOS_DE_MASTER)
+def test_nunca_se_marca_menos_que_master(fuente, es_python):
+    viejo = culpables_python_master(fuente) if es_python else culpables_shell_master(fuente)
+    if viejo:
+        assert culpables_en_texto(fuente, es_python=es_python), f"master marca y esto no: {fuente}"
+
+
+@pytest.mark.parametrize("comando", [
+    "docker -H 'ssh://h?x&y' rm -f c",
+    'docker rm "a&b" c1 -f',
+    "docker rm ${ids//&/ } -f",
+])
+def test_el_ampersand_entre_comillas_o_en_expansion_no_corta_la_lectura_de_master(comando):
+    assert culpables_en_texto(comando, es_python=False), f"no detectó: {comando}"
+
+
+# La lectura nueva se prueba SOLA (culpables_shell): con el OR, master taparía sus mutantes.
+@pytest.mark.parametrize("comando", [
+    "x=`docker rm -fv c`; y=`foo`",
+    "x=`docker rm -v c` y=`echo hi`",
+    "docker `echo x` rm -f c",
+    "docker `echo x` rm -f c; true",
+])
+def test_lectura_nueva_acento_grave_corta_la_paridad_y_es_separador(comando):
+    """El acento grave que CIERRA el par corta la ventana (no sigue leyendo hasta el próximo)
+    y es un separador hacia atrás: el `rm` tras `docker $(echo x)` no es de docker."""
+    assert not culpables_shell(comando), f"falso positivo: {comando}"
+
+
+def test_lectura_nueva_acento_grave_cerrado_marca_lo_que_sigue_sin_leer_de_mas():
+    assert culpables_shell("x=`docker rm -f c` y=`echo -v; true`")
+    assert culpables_shell("echo `docker rm -f c` `grep -v x;`")
+    # el acento grave que cierra corta: el `-v` de después NO es de este comando
+    assert culpables_shell("x=`docker rm -f c` -v")
+    assert culpables_shell("x=`docker rm -f c` -v y=`z`")
 
 
 def test_python_que_no_parsea_falla_cerrado_con_la_ruta():
