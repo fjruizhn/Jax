@@ -906,6 +906,14 @@ matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
 sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
 piso se vuelve a fijar desde los **3537 de master**.
 
+3836 -> 3841 (2026-10-06, JAX#357 ronda 14): +5 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 302 a 307): un nodo List/Tuple que master no marca ya no exime una ventana sacada de una cadena
+(3 casos: lista, tupla sin parentesis, f-string), un segundo `rm` lejos en la ventana, y que sin
+hallazgos de master no se re-parsea la fuente (el archivo baja de ~11 s a ~6 s). Medido por
+recoleccion (`pytest --collect-only -q`, PYTHONPATH=.:las_manos, SIN `JAX_DB_HOST`) con la lista
+exacta de 195 archivos: 3887 recolectadas = 3841 passed + 45 skipped + 1 xfailed (3882 en fc5927ca).
+No se corrio el paso completo.
+
 3823 -> 3836 (2026-10-06, JAX#357 ronda 13): +13 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
 (de 289 a 302): el tipo del hallazgo de la exencion de lista blanca viene de dónde salio (shell:
 siempre ventana; Python: nodo List/Tuple del codigo, no su texto re-parseado), la prueba de que un
