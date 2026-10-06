@@ -782,7 +782,7 @@ def _git_commit_write(rel_path: str, *, content: str, job_id: str, tool_call_id:
     finally:
         try:
             os.unlink(index_path)
-        except OSError:
+        except OSError:  # fail-soft: el indice temporal puede haberse eliminado ya; no cambia el commit.
             pass
 
 

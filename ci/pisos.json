@@ -58,8 +58,8 @@
       "mensaje": "PISO ROTO: se esperaban 2 tests CORRIDOS (no skipeados)."
     },
     "subpipeline-contrato-db/out": {
-      "patron": "^295 passed",
-      "mensaje": "PISO ROTO: se esperaban 295 tests CORRIDOS (no skipeados)."
+      "patron": "^296 passed",
+      "mensaje": "PISO ROTO: se esperaban 296 tests CORRIDOS (no skipeados)."
     },
     "memory-vector-zero-io/out": {
       "patron": "^223 passed",

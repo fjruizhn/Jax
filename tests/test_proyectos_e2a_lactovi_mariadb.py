@@ -9,6 +9,7 @@ Los DDL de tenants/usuarios/projects se toman de la prueba de E1 (misma fuente).
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import functools
 import hashlib
@@ -16,7 +17,6 @@ import importlib.util
 import json
 import os
 import stat
-import subprocess
 import threading
 import uuid
 from pathlib import Path
@@ -118,19 +118,19 @@ def test_mover_usa_el_workspace_de_datos_para_el_lock(tmp_path, monkeypatch):
     proyectos.mkdir(parents=True)
     origen, destino = proyectos / "suelto", proyectos / "uuid"
     origen.mkdir()
-    # El repositorio del código (donde vive el script) es distinto del workspace operado.
-    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
-    (workspace / "fixture.txt").write_text("workspace de datos\n")
-    subprocess.run(["git", "-C", str(workspace), "add", "fixture.txt"], check=True)
-    subprocess.run(["git", "-C", str(workspace), "-c", "user.name=test", "-c", "user.email=test@invalid",
-                    "commit", "-q", "-m", "fixture"], check=True)
+    # Simular el .git file de un linked worktree y su commondir sin subprocess:
+    # el checkout del código y este workspace temporal son repos distintos.
+    common_git_dir = workspace / ".git"
+    linked_git_dir = common_git_dir / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked_git_dir / "commondir").write_text("../..\n")
     linked = tmp_path / "linked"
-    subprocess.run(["git", "-C", str(workspace), "worktree", "add", "--detach", str(linked)],
-                   check=True, capture_output=True, text=True)
+    linked.mkdir()
+    linked_git_dir_from_worktree = os.path.relpath(linked_git_dir, linked)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir_from_worktree}\n")
     raices = []
     esperando_lock = threading.Event()
     rename_ejecutado = threading.Event()
-    errores = []
     lock_real = lactovi.project_tree_lock
 
     @contextlib.contextmanager
@@ -150,20 +150,12 @@ def test_mover_usa_el_workspace_de_datos_para_el_lock(tmp_path, monkeypatch):
     monkeypatch.setattr(lactovi.os, "rename", rename_observado)
     from jax.core.project_tree_lock import project_tree_lock
 
-    def mover():
-        try:
-            lactovi._mover(origen, destino, workspace)
-        except BaseException as exc:
-            errores.append(exc)
-
-    with project_tree_lock(linked):
-        hilo = threading.Thread(target=mover)
-        hilo.start()
-        assert esperando_lock.wait(timeout=2), "E2A no intentó adquirir el lock"
-        assert not rename_ejecutado.wait(timeout=0.05), "E2A no compartió el lock con el linked worktree"
-    hilo.join(timeout=2)
-    assert not hilo.is_alive(), "el movimiento no terminó tras liberar el lock"
-    assert not errores, errores
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with project_tree_lock(linked):
+            movimiento = executor.submit(lactovi._mover, origen, destino, workspace)
+            assert esperando_lock.wait(timeout=2), "E2A no intentó adquirir el lock"
+            assert not rename_ejecutado.wait(timeout=0.05), "E2A no compartió el lock con el linked worktree"
+        movimiento.result(timeout=2)
     assert raices == [workspace]
     assert rename_ejecutado.is_set() and destino.is_dir() and not origen.exists()
 
@@ -177,6 +169,7 @@ def _armar(ws: Path, *, duplicado: bool = False) -> dict[str, str]:
     """Proyecto suelto con 8 archivos regulares (ok, parcial, y seis sin ficha: aceptados, ocultos,
     por contenido y de tipo sin extractor), un symlink en una subcarpeta y `.claude-flow/`.
     Devuelve {ruta relativa en fuente/: sha}."""
+    (ws / ".git").mkdir(exist_ok=True)
     base = ws / "proyectos" / _CARPETA
     (base / "fuente" / "02-modelo").mkdir(parents=True)
     (base / "fuente" / "avaluos").mkdir(parents=True)

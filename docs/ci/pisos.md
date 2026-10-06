@@ -225,6 +225,8 @@ Sin historia anotada en el workflow.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^295 passed`
 
+295 -> 296 el 2026-10-06: +1 prueba de E2A confirma la exclusión mutua del workspace de datos contra un linked worktree. Medido en CI (`subpipeline-contrato-db`); se conserva el mínimo de tests corridos sin skips.
+
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 ```text
