@@ -11,26 +11,25 @@ un reenvio despues de un reinicio). Aqui se guarda la clave de forma durable, co
 `(identidad_servicio, clave)`, junto al `job_id` que se le dio. Una clave ya vista devuelve el
 MISMO trabajo, sin crear otro.
 
-Protocolo (RECLAMAR -> CREAR), pensado para que dos pedidos simultaneos con la misma clave
-creen UN solo trabajo:
+Protocolo (RECLAMAR -> CREAR -> CONFIRMAR), pensado para que NUNCA haya dos trabajos vivos con la misma
+clave, ni siquiera cuando una ganadora lenta se cruza con un reintento:
 
-  1. `reclamar`: INSERT de (identidad, clave, hash del pedido, job_id candidato). Si el UNIQUE
+  1. `reclamar`: INSERT de (identidad, clave, hash del pedido, job_id candidato, confirmado=0). Si el UNIQUE
      rechaza el INSERT, la perdedora lee la fila de la ganadora (`gano=False`).
-  2. Quien gano crea el trabajo con ESE job_id (`JobStore.create(job_id=...)`). Si crearlo
-     falla, `liberar` borra el reclamo (solo si sigue siendo suyo) para que el reintento no
-     herede un job_id que no existe.
-  3. Si el proceso muere entre 1 y 2 queda un reclamo HUERFANO (un job_id sin trabajo). Un
-     reintento no lo trata como trabajo existente: si es mas joven que la gracia (el trabajo
-     puede estarse creando ahora mismo) pide esperar (503); pasada la gracia lo retoma con un
-     CAS sobre el job_id (`tomar_huerfana`): de varios reintentos a la vez retoma UNO. Si la ganadora
-     original no estaba muerta sino lenta (tardo mas que la gracia entre el INSERT y crear el trabajo),
-     al terminar de crearlo relee el reclamo, ve que ya no es suyo, CANCELA su trabajo antes de programar el
-     OCR y devuelve el que figura en la tabla: queda un solo trabajo vivo, no dos.
-
+  2. Quien gano crea el trabajo con ESE job_id (`JobStore.create(job_id=...)`) y registra su control, y ANTES de
+     programar el OCR lo `confirmar`: `UPDATE ... SET confirmado=1 WHERE id=? AND job_id=<suyo> AND
+     confirmado=0`. Si afecta 0 filas, otro reintento le retomo el reclamo: cancela su trabajo y devuelve el
+     que figura en la tabla. Si la confirmacion falla (base caida), tambien cancela y contesta 503: cerrado.
+  3. Si el proceso muere entre 1 y 2 queda un reclamo HUERFANO (confirmado=0, un job_id sin trabajo). Un
+     reintento no lo trata como trabajo existente: si es mas joven que la gracia (el trabajo puede estarse
+     creando ahora mismo) espera y, si no aparece, pide reintentar (503); pasada la gracia lo retoma con
+     `tomar_huerfana`, un CAS sobre (job_id, confirmado=0). Ganadora lenta y reintento compiten por la MISMA
+     fila: o confirma ella (y el CAS del reintento falla: devuelve su trabajo) o gana el CAS (y la confirmacion
+     de ella falla: se cancela). No hay tercera salida, asi que queda un solo trabajo vivo y un solo OCR.
   4. Un reenvio cuyo trabajo ya existe pero FALLO o se cancelo (p. ej. LAS MANOS se reinicio y marco `failed`
-     lo que corria) sin que el llamador llegara a saber su job_id, se trata como el huerfano: se retoma con
-     el mismo CAS y se crea un trabajo nuevo. Si el llamador lo hubiera conocido, ya habria atado sus filas y no
-     reenviaria.
+     lo que corria) sin que el llamador llegara a saber su job_id, se retoma con `tomar_fallido`: un CAS sobre
+     el job_id viejo (sin exigir confirmado, ya esta en 1) que ademas REINICIA `confirmado` a 0 para que el
+     trabajo nuevo pase por el mismo paso 2. Si el llamador lo hubiera conocido, ya habria atado sus filas.
 
 El hash del pedido (dueno + project_uuid + rutas) hace que la misma clave con OTRO pedido sea un
 conflicto (409) y no un trabajo equivocado.
@@ -80,6 +79,7 @@ CREATE TABLE IF NOT EXISTS {NOMBRE_TABLA} (
     clave VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     solicitud_hash CHAR(64) CHARACTER SET ascii NOT NULL,
     job_id VARCHAR(36) CHARACTER SET ascii NOT NULL,
+    confirmado TINYINT NOT NULL DEFAULT 0,
     creado_en DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     PRIMARY KEY (id),
     UNIQUE KEY uq_procesamiento_idem_clave (identidad_servicio, clave),
@@ -89,9 +89,16 @@ CREATE TABLE IF NOT EXISTS {NOMBRE_TABLA} (
 
 SQL_INSERTAR = (f"INSERT INTO {NOMBRE_TABLA} (identidad_servicio, clave, solicitud_hash, job_id) "
                 "VALUES (%s, %s, %s, %s)")
-SQL_BUSCAR = (f"SELECT id, solicitud_hash, job_id, TIMESTAMPDIFF(MICROSECOND, creado_en, NOW(6)) / 1000000 "
+SQL_BUSCAR = (f"SELECT id, solicitud_hash, job_id, TIMESTAMPDIFF(MICROSECOND, creado_en, NOW(6)) / 1000000, confirmado "
               f"FROM {NOMBRE_TABLA} WHERE identidad_servicio = %s AND clave = %s")
-SQL_TOMAR = f"UPDATE {NOMBRE_TABLA} SET job_id = %s, creado_en = NOW(6) WHERE id = %s AND job_id = %s"
+SQL_TOMAR = (f"UPDATE {NOMBRE_TABLA} SET job_id = %s, creado_en = NOW(6) "
+             "WHERE id = %s AND job_id = %s AND confirmado = 0")
+SQL_TOMAR_FALLIDO = (f"UPDATE {NOMBRE_TABLA} SET job_id = %s, confirmado = 0, creado_en = NOW(6) "
+                     "WHERE id = %s AND job_id = %s")
+SQL_CONFIRMAR = f"UPDATE {NOMBRE_TABLA} SET confirmado = 1 WHERE id = %s AND job_id = %s AND confirmado = 0"
+# Tabla creada por una version anterior (sin la columna): se completa, repetible.
+SQL_AGREGAR_CONFIRMADO = (f"ALTER TABLE {NOMBRE_TABLA} ADD COLUMN IF NOT EXISTS confirmado TINYINT NOT NULL "
+                          "DEFAULT 0 AFTER job_id")
 SQL_LIBERAR = f"DELETE FROM {NOMBRE_TABLA} WHERE identidad_servicio = %s AND clave = %s AND job_id = %s"
 SQL_PURGAR = f"DELETE FROM {NOMBRE_TABLA} WHERE creado_en < NOW(6) - INTERVAL %s SECOND LIMIT %s"
 
@@ -152,6 +159,7 @@ class Reclamo:
     solicitud_hash: str
     antiguedad_s: float
     gano: bool
+    confirmado: bool = False
 
 
 async def init_tabla() -> None:
@@ -159,6 +167,7 @@ async def init_tabla() -> None:
     async with jacobs_store.conexion(desechable=True) as conn:
         async with conn.cursor() as cur:
             await cur.execute(_DDL)
+            await cur.execute(SQL_AGREGAR_CONFIRMADO)
 
 
 def _valores(fila) -> tuple:
@@ -172,8 +181,9 @@ async def buscar(identidad: str, clave: str) -> Reclamo | None:
             fila = await cur.fetchone()
     if fila is None:
         return None
-    id_, huella, job_id, edad = _valores(fila)
-    return Reclamo(id=int(id_), job_id=str(job_id), solicitud_hash=str(huella), antiguedad_s=float(edad), gano=False)
+    id_, huella, job_id, edad, confirmado = _valores(fila)
+    return Reclamo(id=int(id_), job_id=str(job_id), solicitud_hash=str(huella), antiguedad_s=float(edad), gano=False,
+                   confirmado=bool(confirmado))
 
 
 def _es_clave_duplicada(exc: BaseException) -> bool:
@@ -200,11 +210,29 @@ async def reclamar(identidad: str, clave: str, solicitud_hash: str, job_id: str)
 
 
 async def tomar_huerfana(reclamo: Reclamo, job_id_nuevo: str) -> bool:
-    """CAS: pasa un reclamo sin trabajo a `job_id_nuevo` solo si sigue apuntando al job_id viejo. De
-    varios reintentos a la vez, True para UNO (la ganadora lenta se entera al releer; ver el protocolo arriba)."""
+    """CAS: pasa un reclamo SIN CONFIRMAR a `job_id_nuevo` solo si sigue apuntando al job_id viejo y su
+    ganadora no lo confirmo. De varios reintentos a la vez, True para UNO; y si la ganadora lenta confirma
+    primero, False (ver el protocolo arriba)."""
     async with jacobs_store.conexion() as conn:
         async with conn.cursor() as cur:
             await cur.execute(SQL_TOMAR, (job_id_nuevo, reclamo.id, reclamo.job_id))
+            return cur.rowcount == 1
+
+
+async def tomar_fallido(reclamo: Reclamo, job_id_nuevo: str) -> bool:
+    """CAS del caso 4: el trabajo del reclamo termino failed/cancelled (o ya no existe estando confirmado) y se
+    reintenta. Exige solo que el job_id siga siendo el viejo, y deja `confirmado` en 0 para el trabajo nuevo."""
+    async with jacobs_store.conexion() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(SQL_TOMAR_FALLIDO, (job_id_nuevo, reclamo.id, reclamo.job_id))
+            return cur.rowcount == 1
+
+
+async def confirmar(reclamo_id: int, job_id: str) -> bool:
+    """La ganadora confirma su reclamo ANTES de programar el OCR. False si ya no es suyo (otro lo retomo)."""
+    async with jacobs_store.conexion() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(SQL_CONFIRMAR, (reclamo_id, job_id))
             return cur.rowcount == 1
 
 

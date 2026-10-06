@@ -511,7 +511,8 @@ def test_el_reenvio_la_toma_de_un_huerfano_y_el_reintento_de_un_fallido_quedan_e
 # Contrato de idempotencia COMPARTIDO con jax-platform: la MISMA tabla vive copiada en
 # backend/tests/test_proyectos_documentos_despachador.py (CONTRATO_IDEMPOTENCIA) y la falsa de LAS MANOS de
 # la plataforma la cumple. Si se cambia una, se cambia la otra: cada fila es (estado del trabajo que ya tiene
-# esa clave o None, el pedido es el mismo, resultado). `rejected` no existe en el vocabulario de jobs de LAS MANOS.
+# esa clave o None, el pedido es el mismo, resultado). `rejected` existe en `JobStatus` y en `_ESTADOS_QUE_SE_REINTENTAN`; el almacen de procesamiento no lo deja
+# ESCRIBIR (vocabulario cerrado), asi que la prueba lo inyecta en el indice.
 CONTRATO_IDEMPOTENCIA = (
     (None, True, "crea"),
     ("pending", True, "mismo"),
@@ -520,6 +521,7 @@ CONTRATO_IDEMPOTENCIA = (
     ("completed", True, "mismo"),
     ("failed", True, "crea"),
     ("cancelled", True, "crea"),
+    ("rejected", True, "crea"),
     ("pending", False, "conflicto"),
     ("failed", False, "conflicto"),
     ("completed", False, "conflicto"),
@@ -538,7 +540,9 @@ def test_contrato_compartido_de_idempotencia(ruta, previo, mismo_pedido, esperad
             if previo is not None:
                 viejo = almacen.create(ownership=OWNER, caller=f"user:{OWNER.user_id}", capability="ingesta_archivos",
                                        motor="n/a", trace_id="t", prompt="p", recursion_depth=0)
-                if previo != "pending":
+                if previo == "rejected":
+                    almacen._index[viejo]["status"] = "rejected"          # fuera del vocabulario que `update` admite
+                elif previo != "pending":
                     almacen.update(viejo, status=previo)
                 await idem.reclamar(IDENTIDAD_PLATAFORMA, clave, _hash("a.pdf" if mismo_pedido else "otro.pdf"), viejo)
             return viejo, await _post(app, clave, "a.pdf")
@@ -554,6 +558,192 @@ def test_contrato_compartido_de_idempotencia(ruta, previo, mismo_pedido, esperad
     else:
         assert r.status_code == 202 and r.json()["job_id"] != viejo
         assert len(almacen._index) == (1 if viejo is None else 2)
+
+
+def _lento_tras_ganar(monkeypatch, segundos):
+    real = idem.reclamar
+
+    async def lento(*a, **k):
+        r = await real(*a, **k)
+        if r.gano and not lento.ya:
+            lento.ya = True
+            await asyncio.sleep(segundos)
+        return r
+    lento.ya = False
+    monkeypatch.setattr(idem, "reclamar", lento)
+
+
+def test_el_cas_del_reintento_demorado_no_deja_dos_trabajos_vivos(ruta, monkeypatch):
+    """A6 del auditor: la ganadora lenta confirma ENTRE el chequeo del reintento y su CAS (el CAS llega 0,6 s
+    tarde). Con `confirmado` el CAS exige confirmado=0 y falla: el reintento devuelve el trabajo de la
+    ganadora. Antes, el CAS pasaba y quedaban dos trabajos con OCR."""
+    app, almacen, ejecutar = ruta
+    monkeypatch.setenv("JAX_PROCESAMIENTO_IDEMPOTENCIA_GRACIA_SEGUNDOS", "1")
+    _lento_tras_ganar(monkeypatch, 1.6)
+    real_tomar = idem.tomar_huerfana
+
+    async def tomar_lento(*a, **k):
+        await asyncio.sleep(0.6)
+        return await real_tomar(*a, **k)
+    monkeypatch.setattr(idem, "tomar_huerfana", tomar_lento)
+
+    async def todo():
+        await idem.init_tabla()
+        clave = _clave()
+        try:
+            async def segundo():
+                await asyncio.sleep(1.2)
+                return await _post(app, clave, "a.pdf")
+            r1, r2 = await asyncio.gather(_post(app, clave, "a.pdf"), segundo())
+            return r1, r2, await _filas(clave)
+        finally:
+            await _borrar(clave)
+    r1, r2, filas = asyncio.run(todo())
+    assert (r1.status_code, r2.status_code) == (202, 202), (r1.text, r2.text)
+    assert r1.json()["job_id"] == r2.json()["job_id"] == filas[0][1]
+    assert [j["status"] for j in almacen._index.values() if j["status"] != "cancelled"] and len(
+        [j for j in almacen._index.values() if j["status"] != "cancelled"]) == 1
+    assert ejecutar.await_count == 1
+
+
+def test_si_la_confirmacion_falla_se_cancela_el_trabajo_y_se_contesta_503(ruta, monkeypatch):
+    """MINOR-B: sin poder confirmar no se programa el OCR: el trabajo propio queda terminal, se libera el
+    reclamo y la respuesta es un 503 reintentable. Despues, el reenvio crea UNO."""
+    app, almacen, ejecutar = ruta
+    real = getattr(idem, "confirmar", None)
+    fallos = {"n": 1}
+
+    async def confirmar_que_falla(*a, **k):
+        if fallos["n"]:
+            fallos["n"] -= 1
+            raise ConnectionError("base caida un instante")
+        return await real(*a, **k)
+    monkeypatch.setattr(idem, "confirmar", confirmar_que_falla, raising=False)
+
+    async def todo():
+        await idem.init_tabla()
+        clave = _clave()
+        try:
+            r1 = await _post(app, clave, "a.pdf")
+            tras = (len(almacen._index), [j["status"] for j in almacen._index.values()], await _filas(clave),
+                    rutas_mod._SEMAFORO_TRABAJOS._value, dict(rutas_mod._CONTROLES), ejecutar.await_count)
+            return r1, tras, await _post(app, clave, "a.pdf")
+        finally:
+            await _borrar(clave)
+    r1, tras, r2 = asyncio.run(todo())
+    assert r1.status_code == 503 and r1.json()["detail"]["code"] == "idempotencia_no_disponible", r1.text
+    n, estados, filas, cupo, controles, ocr = tras
+    assert n == 1 and estados[0] in ("failed", "cancelled") and filas == [] and cupo == 4 and controles == {}
+    assert ocr == 0
+    assert r2.status_code == 202 and ejecutar.await_count == 1
+
+
+def test_perder_el_reclamo_y_no_poder_releer_tampoco_programa_el_ocr(ruta, monkeypatch):
+    """A7 del auditor: la ganadora lenta pierde el reclamo y ademas falla la lectura de la tabla. 503, un solo OCR
+    (el del reintento)."""
+    app, almacen, ejecutar = ruta
+    monkeypatch.setenv("JAX_PROCESAMIENTO_IDEMPOTENCIA_GRACIA_SEGUNDOS", "1")
+    _lento_tras_ganar(monkeypatch, 1.6)
+    real_buscar = idem.buscar
+    t0 = {}
+
+    async def buscar_falla(*a, **k):
+        import time
+        t0.setdefault("t", time.monotonic())
+        if time.monotonic() - t0["t"] > 1.5 and not buscar_falla.ya:
+            buscar_falla.ya = True
+            raise ConnectionError("base caida un instante")
+        return await real_buscar(*a, **k)
+    buscar_falla.ya = False
+    monkeypatch.setattr(idem, "buscar", buscar_falla)
+
+    async def todo():
+        await idem.init_tabla()
+        clave = _clave()
+        try:
+            async def segundo():
+                await asyncio.sleep(1.2)
+                return await _post(app, clave, "a.pdf")
+            return await asyncio.gather(_post(app, clave, "a.pdf"), segundo())
+        finally:
+            await _borrar(clave)
+    r1, r2 = asyncio.run(todo())
+    assert r2.status_code == 202
+    assert r1.status_code in (202, 503)
+    assert ejecutar.await_count == 1
+    assert len([j for j in almacen._index.values() if j["status"] not in ("cancelled", "failed")]) == 1
+
+
+def test_un_cancel_durante_la_confirmacion_encuentra_el_control(ruta, monkeypatch):
+    """A9 del auditor (regresion de la ronda 6): el control se registra ANTES de cualquier await posterior al
+    create. Un `POST .../cancel` que llega mientras se confirma el reclamo lo encuentra, y el worker arranca ya
+    cancelado."""
+    app, almacen, ejecutar = ruta
+    real = getattr(idem, "confirmar", None)
+
+    async def confirmar_lento(*a, **k):
+        await asyncio.sleep(0.3)
+        return await real(*a, **k)
+    monkeypatch.setattr(idem, "confirmar", confirmar_lento, raising=False)
+
+    async def cancel(job_id):
+        transporte = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transporte, base_url="http://las-manos") as c:
+            return await c.post(f"/procesamiento/trabajos/{job_id}/cancel", headers=_cabeceras(None))
+
+    async def todo():
+        await idem.init_tabla()
+        clave = _clave()
+        try:
+            async def cancelador():
+                for _ in range(300):
+                    await asyncio.sleep(0.01)
+                    if almacen._index:
+                        jid = next(iter(almacen._index))
+                        return jid, await cancel(jid)
+            r1, (jid, rc) = await asyncio.gather(_post(app, clave, "a.pdf"), cancelador())
+            return r1, jid, rc
+        finally:
+            await _borrar(clave)
+    r1, jid, rc = asyncio.run(todo())
+    assert r1.status_code == 202 and rc.status_code == 200, (r1.text, rc.text)
+    control = ejecutar.call_args.kwargs["control"]
+    assert control.cancelado is True, "el cancel no se perdio: el worker recibe el control ya cancelado"
+    assert almacen._index[jid]["status"] == "cancelling"
+
+
+def test_cancelar_el_pedido_durante_la_confirmacion_no_deja_un_trabajo_pending(ruta, monkeypatch):
+    """A10 del auditor: el pedido se aborta (CancelledError) durante la confirmacion. El trabajo queda terminal,
+    sin control ni cupo ni reclamo colgando, y el reenvio crea uno solo."""
+    app, almacen, ejecutar = ruta
+
+    real = getattr(idem, "confirmar", None)
+    abortar = {"si": True}
+
+    async def confirmar_abortado(*a, **k):
+        if abortar["si"]:
+            raise asyncio.CancelledError()
+        return await real(*a, **k)
+    monkeypatch.setattr(idem, "confirmar", confirmar_abortado, raising=False)
+
+    async def todo():
+        await idem.init_tabla()
+        clave = _clave()
+        try:
+            try:
+                await _post(app, clave, "a.pdf")
+            except BaseException:   # noqa: BLE001 - lo que nos importa es el estado que quedo
+                pass
+            tras = (dict(almacen._index), dict(rutas_mod._CONTROLES), rutas_mod._SEMAFORO_TRABAJOS._value,
+                    await _filas(clave))
+            abortar["si"] = False
+            return tras, await _post(app, clave, "a.pdf")
+        finally:
+            await _borrar(clave)
+    (indice, controles, cupo, filas), r2 = asyncio.run(todo())
+    assert [j["status"] for j in indice.values()] and all(j["status"] in ("failed", "cancelled") for j in indice.values())
+    assert controles == {} and cupo == 4 and filas == []
+    assert r2.status_code == 202
 
 
 def test_si_crear_el_trabajo_falla_el_reclamo_se_libera(ruta):

@@ -4422,13 +4422,14 @@ tiempo. Si el runner da otro número, manda el runner.
   y ahora exige idx_ejecutor_punto_host_respaldo. Medido local con las migraciones
   de jax-platform master: ese archivo 3 -> 5 passed. Los dos vistos en rojo contra
   el exportador viejo (a8de3fd: 2 failed / 3 passed).
-170 -> 202 el 2026-10-06 (idempotencia de POST /procesamiento/trabajos, rondas 1 y 2): +32 en el
-  archivo NUEVO las_manos/_procesamiento_idempotencia_db_test.py (22 pruebas + 10 casos de la tabla
-  compartida de contrato), sumado a las dos listas del job (la que corre y la del piso). Medido local,
-  MariaDB 12.3.3 efimera propia dentro de su netns, CI=true: ese archivo 32 passed. Contra el codigo
-  viejo de la ruta la ronda 1 daba 10 failed / 10 passed; la ronda 2 (ganadora lenta, log) las vio en rojo
-  contra el codigo sin el cambio. El total del job no se reproduce entero en local (hace falta el esquema
-  de jax-platform): 170 es el declarado de master + 32. Si el runner da otro numero, manda el runner.
+170 -> 208 el 2026-10-06 (idempotencia de POST /procesamiento/trabajos, rondas 1 a 3): +38 en el
+  archivo NUEVO las_manos/_procesamiento_idempotencia_db_test.py (27 pruebas + 11 casos de la tabla
+  compartida de contrato, ya con `rejected`), sumado a las dos listas del job (la que corre y la del piso).
+  Medido local, MariaDB 12.3.3 efimera propia dentro de su netns, CI=true: ese archivo 38 passed (x3).
+  Ronda 3 (columna `confirmado`, control registrado antes de confirmar, terminal sin tarea): 4 de las 6
+  pruebas nuevas vistas en rojo contra el codigo de la ronda 2 por ASERCION (no por AttributeError), y la
+  del log en rojo con el logger apagado. El total del job no se reproduce entero en local (hace falta el
+  esquema de jax-platform): 170 es el declarado de master + 38. Si el runner da otro numero, manda el runner.
 ```
 
 ## `permisos-proyectos/permisos_proyectos`

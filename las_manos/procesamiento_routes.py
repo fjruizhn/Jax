@@ -755,6 +755,7 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
     # Idempotencia (2/2): RECLAMAR la clave antes del cupo (y devolverla si el cupo falta), asi una ganadora
     # y sus perdedoras simultaneas no compiten por un permiso que las perdedoras nunca van a usar.
     job_id_reclamado: str | None = None
+    reclamo_id: int | None = None
     try:
         if clave is not None:
             candidato = str(uuid.uuid4())
@@ -767,25 +768,31 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
                 reenvio = await _reenvio_de(reclamo, huella, ownership, clave)
                 if reenvio is not None:
                     return reenvio
-                # Reclamo huerfano ya vencido (el proceso murio antes de crear el trabajo): lo retoma UNO.
-                if not await idempotencia.tomar_huerfana(reclamo, candidato):
-                    # Otro reintento lo retomo antes: se devuelve SU trabajo (esperando a que termine de crearse).
+                # Reclamo huerfano ya vencido (el proceso murio antes de crear el trabajo, o el trabajo termino
+                # failed/cancelled sin que el llamador lo conociera): lo retoma UNO, con el CAS que corresponde.
+                viejo = _STORE.authoritative_snapshot(reclamo.job_id)
+                huerfano = viejo is None and not reclamo.confirmado
+                tomar = idempotencia.tomar_huerfana if huerfano else idempotencia.tomar_fallido
+                if not await tomar(reclamo, candidato):
+                    # Otro reintento lo retomo antes, o la ganadora lenta lo confirmo: se devuelve SU trabajo
+                    # (esperando a que termine de crearse).
                     actual = await idempotencia.buscar(identidad, clave)
                     reenvio = await _reenvio_de(actual, huella, ownership, clave) if actual is not None else None
                     if reenvio is None:
                         raise HTTPException(status_code=503, detail={"code": "idempotencia_en_curso"})
                     return reenvio
-                viejo = _STORE.authoritative_snapshot(reclamo.job_id)
-                if viejo is None:
+                if huerfano:
                     logger.warning("idempotencia: se retoma el reclamo huerfano de la clave %s (trabajo %s nunca creado) "
                                    "-> trabajo nuevo %s", idempotencia.abreviar(clave), reclamo.job_id, candidato)
                 else:
                     logger.warning("idempotencia: se reintenta la clave %s: el trabajo %s termino %s sin que el "
                                    "llamador lo conociera -> trabajo nuevo %s", idempotencia.abreviar(clave),
-                                   reclamo.job_id, viejo.view.status.value, candidato)
+                                   reclamo.job_id, viejo.view.status.value if viejo is not None else "(perdido)",
+                                   candidato)
+            reclamo_id = reclamo.id
             job_id_reclamado = candidato
             _purgar_en_segundo_plano()
-        return await _crear_con_cupo(req, ownership, proyecto, job_id_reclamado, identidad, clave)
+        return await _crear_con_cupo(req, ownership, proyecto, job_id_reclamado, identidad, clave, reclamo_id)
     except _ReclamoPerdido as perdido:
         # Mi trabajo ya se cancelo; se devuelve el que figura en la tabla (esperando a que termine de crearse).
         reenvio = await _reenvio_de(perdido.actual, huella, ownership, clave) if perdido.actual is not None else None
@@ -795,12 +802,33 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
     except BaseException:
         if job_id_reclamado is not None and not _trabajo_existe(job_id_reclamado):
             # El trabajo no llego a existir: un reclamo que apunta a la nada haria esperar al reintento
-            # una gracia entera. Se devuelve (solo si sigue siendo suyo).
-            try:
-                await asyncio.shield(idempotencia.liberar(identidad, clave, job_id_reclamado))
-            except Exception:  # fail-soft: si no se pudo liberar, el reclamo queda huerfano y el reintento lo retoma pasada la gracia
-                logger.warning("idempotencia: no se pudo liberar el reclamo de un trabajo que no se creo", exc_info=True)
+            # una gracia entera. Se devuelve (solo si sigue siendo suyo). Si el trabajo SI llego a existir y
+            # se abandono, `_crear_con_cupo` ya lo dejo terminal y libero el reclamo.
+            await _liberar_reclamo(identidad, clave, job_id_reclamado)
         raise
+
+
+async def _liberar_reclamo(identidad: str, clave: str, job_id: str) -> None:
+    try:
+        await asyncio.shield(idempotencia.liberar(identidad, clave, job_id))
+    except BaseException:  # fail-soft: si no se pudo liberar, el reclamo queda huerfano y el reintento lo retoma pasada la gracia
+        logger.warning("idempotencia: no se pudo liberar el reclamo del trabajo %s", job_id, exc_info=True)
+
+
+def _terminar_sin_tarea(job_id: str, estado: JobStatus, motivo: str) -> None:
+    """Un trabajo que se creo pero NUNCA tuvo tarea (se perdio el reclamo, fallo la confirmacion, se cancelo el
+    pedido): pasa a terminal. Sin esto quedaba `pending` para siempre hasta el proximo reinicio. Sincrona y sin
+    awaits: corre aunque el pedido este siendo cancelado."""
+    control = _CONTROLES.get(job_id)
+    if control is not None:
+        control.cancelado = True                  # un POST .../cancel concurrente ya no encuentra nada que programar
+    try:
+        instantanea = _STORE.authoritative_snapshot(job_id)
+        if instantanea is not None and instantanea.view.status not in (
+                JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.REJECTED):
+            _STORE.update(job_id, status=estado.value, finished_at=time.time(), error=motivo)
+    except Exception:  # fail-soft: no se pudo escribir el estado terminal (disco); el arranque de LAS MANOS lo reconcilia a `failed`
+        logger.error("idempotencia: no se pudo dejar terminal el trabajo %s", job_id, exc_info=True)
 
 
 _ESTADOS_QUE_SE_REINTENTAN = frozenset({JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.REJECTED})
@@ -854,9 +882,6 @@ async def _reenvio_de(reclamo, huella: str, ownership, clave: str) -> JSONRespon
         status_code=202, headers={"Idempotent-Replayed": "true"})
 
 
-_SIN_RELECTURA = object()
-
-
 class _ReclamoPerdido(Exception):
     """La ganadora tardo mas que la gracia en crear su trabajo y otro reintento retomo el reclamo."""
     def __init__(self, actual):
@@ -865,7 +890,8 @@ class _ReclamoPerdido(Exception):
 
 
 async def _crear_con_cupo(req: TrabajoRequest, ownership, proyecto: str, job_id_fijo: str | None,
-                          identidad: str = "", clave: str | None = None) -> TrabajoCreadoResponse:
+                          identidad: str = "", clave: str | None = None,
+                          reclamo_id: int | None = None) -> TrabajoCreadoResponse:
     if _SEMAFORO_TRABAJOS.locked():
         raise HTTPException(
             status_code=429,
@@ -891,6 +917,9 @@ async def _crear_con_cupo(req: TrabajoRequest, ownership, proyecto: str, job_id_
     # liberando el permiso.
     permiso_transferido = False
     job_id: str | None = None
+    # Que estado terminal le toca a un trabajo que se crea y NO llega a tener tarea (por defecto `failed`:
+    # lo cancelo el pedido o revento algo; `cancelled` cuando se pierde el reclamo).
+    terminal = (JobStatus.FAILED, "el pedido no llego a programar el trabajo")
     try:
         job_id = _STORE.create(
             # B-6: the human uploader is derived from the authenticated,
@@ -911,22 +940,6 @@ async def _crear_con_cupo(req: TrabajoRequest, ownership, proyecto: str, job_id_
         # El campo que de verdad significa "proyecto" -- `update()` acepta
         # kwargs arbitrarios (van tal cual al JSONL).
         _STORE.update(job_id, proyecto=proyecto)
-        if clave is not None:
-            # ¿Sigue siendo MIO el reclamo? Si tarde mas que la gracia en llegar hasta aqui, otro reintento pudo
-            # retomarlo y crear SU trabajo: el mio se cancela ANTES de programar el OCR y se devuelve el suyo.
-            try:
-                actual = await idempotencia.buscar(identidad, clave)
-            except Exception:  # fail-soft: la base respondio hace un instante; un fallo de lectura aqui no justifica tirar un trabajo sano
-                logger.warning("idempotencia: no se pudo releer el reclamo tras crear el trabajo %s", job_id, exc_info=True)
-                actual = _SIN_RELECTURA
-            if actual is not _SIN_RELECTURA and (actual is None or actual.job_id != job_id):
-                _STORE.update(job_id, status=JobStatus.CANCELLED.value, finished_at=time.time(),
-                              error="reclamo de idempotencia retomado por otro reintento")
-                logger.warning("idempotencia: el reclamo de la clave %s ya no es del trabajo %s (lo retomo %s): "
-                               "se cancela antes de programar el OCR", idempotencia.abreviar(clave), job_id,
-                               actual.job_id if actual is not None else "nadie")
-                raise _ReclamoPerdido(actual)
-
         # Ronda 6: el control se crea y se registra ANTES de programar la
         # tarea. Antes lo creaba el worker en su primera vuelta del loop; un
         # `POST .../cancel` que llegaba en ese hueco no lo encontraba,
@@ -937,6 +950,28 @@ async def _crear_con_cupo(req: TrabajoRequest, ownership, proyecto: str, job_id_
         # ventana no existe.
         control = _ControlTrabajo(_STORE, job_id)
         _CONTROLES[job_id] = control
+        if clave is not None:
+            # CONFIRMAR el reclamo ANTES de programar el OCR (y con el control ya registrado: un cancel que llegue
+            # durante este await lo encuentra). Un UPDATE condicionado a (id, job_id, confirmado=0): si otro
+            # reintento retomo el reclamo mientras yo tardaba mas que la gracia, afecta 0 filas y mi trabajo
+            # se cancela sin haber programado nada. Si la confirmacion falla, tambien: cerrado.
+            try:
+                confirmado = await idempotencia.confirmar(reclamo_id, job_id)
+            except Exception as e:  # fail-closed: sin confirmar no se sabe si el reclamo sigue siendo mio; mejor no programar el OCR
+                logger.warning("idempotencia: no se pudo confirmar el reclamo del trabajo %s (%s); se cancela",
+                               job_id, type(e).__name__)
+                terminal = (JobStatus.FAILED, "no se pudo confirmar el reclamo de idempotencia")
+                raise HTTPException(status_code=503, detail={"code": "idempotencia_no_disponible"}) from e
+            if not confirmado:
+                try:
+                    actual = await idempotencia.buscar(identidad, clave)
+                except Exception:  # fail-soft: solo para decirle al llamador cual es el trabajo vigente; sin saberlo contesta 503
+                    actual = None
+                logger.warning("idempotencia: el reclamo de la clave %s ya no es del trabajo %s (lo retomo %s): "
+                               "se cancela antes de programar el OCR", idempotencia.abreviar(clave), job_id,
+                               actual.job_id if actual is not None else "nadie")
+                terminal = (JobStatus.CANCELLED, "reclamo de idempotencia retomado por otro reintento")
+                raise _ReclamoPerdido(actual)
         task = asyncio.create_task(
             _ejecutar_trabajo(job_id, proyecto, req.rutas, store=_STORE, control=control)
         )
@@ -957,8 +992,12 @@ async def _crear_con_cupo(req: TrabajoRequest, ownership, proyecto: str, job_id_
             # Nadie va a correr el `finally` del worker: el control
             # registrado arriba (si se llegó a registrar) se saca acá.
             if job_id is not None:
+                _terminar_sin_tarea(job_id, *terminal)
                 _CONTROLES.pop(job_id, None)
             _SEMAFORO_TRABAJOS.release()
+            if job_id is not None and clave is not None:
+                # El reclamo apuntaba a un trabajo que nunca tuvo tarea: se libera (solo si sigue siendo mio).
+                await _liberar_reclamo(identidad, clave, job_id)
 
 
 @router.get("/trabajos/{job_id}", response_model=TrabajoEstadoResponse)
