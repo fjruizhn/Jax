@@ -254,7 +254,14 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
         try:
             _B7_EVIDENCE_RECORDER.record_governed_dispatch_denied()
         except Exception:  # fail-soft: legacy dispatch remains rejected if evidence persistence is unavailable.
-            pass
+            # No se traga en silencio: sin esta linea la evidencia B7 de una
+            # denegacion faltaria sin rastro. El identificador de correlacion
+            # permite buscar este fallo (y la denegacion que no quedo) en los
+            # logs; no se loguea nada del cuerpo del pedido.
+            logger.exception(
+                "B7: no se pudo registrar la evidencia de /motor/dispatch denegado (410 se devuelve igual) correlacion=%s",
+                uuid.uuid4().hex,
+            )
     raise HTTPException(status_code=410, detail="GOVERNED_EXECUTION_REQUIRED")
 
 

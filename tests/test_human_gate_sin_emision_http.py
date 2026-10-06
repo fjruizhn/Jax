@@ -278,19 +278,43 @@ def test_motor_dispatch_410_registra_la_evidencia_b7(motor, store_falso, monkeyp
     lanzado.assert_not_called()
 
 
-def test_motor_dispatch_410_sobrevive_a_que_la_evidencia_b7_falle(motor, store_falso, monkeypatch):
-    """Si persistir la evidencia falla, el despacho legacy sigue rechazado."""
+def test_motor_dispatch_410_sobrevive_a_que_la_evidencia_b7_falle(motor, store_falso, monkeypatch, caplog):
+    """Si persistir la evidencia falla, el despacho legacy sigue rechazado Y el
+    fallo no se traga en silencio: log de ERROR con un identificador de
+    correlacion (y la causa) para poder rastrear la evidencia que falto."""
+    import logging
+    import re
     routes, lanzado = motor
     from unittest.mock import Mock
     from fastapi import HTTPException
     registrador = Mock()
     registrador.record_governed_dispatch_denied.side_effect = RuntimeError("sin disco")
     monkeypatch.setattr(routes, "_B7_EVIDENCE_RECORDER", registrador)
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(routes.dispatch(_pedido("cualquier-cosa")))
+    with caplog.at_level(logging.ERROR, logger=routes.logger.name):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(routes.dispatch(_pedido("cualquier-cosa")))
     assert exc.value.status_code == 410
+    assert exc.value.detail == "GOVERNED_EXECUTION_REQUIRED"
     registrador.record_governed_dispatch_denied.assert_called_once_with()
     lanzado.assert_not_called()
+    registros = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(registros) == 1
+    assert registros[0].exc_info and "sin disco" in str(registros[0].exc_info[1])
+    correlacion = re.search(r"correlacion=([0-9a-f]{12,})", registros[0].getMessage())
+    assert correlacion, registros[0].getMessage()
+    assert "B7" in registros[0].getMessage()
+
+
+def test_motor_dispatch_410_sin_falla_de_evidencia_no_loguea_error(motor, store_falso, monkeypatch, caplog):
+    import logging
+    routes, _ = motor
+    from unittest.mock import Mock
+    from fastapi import HTTPException
+    monkeypatch.setattr(routes, "_B7_EVIDENCE_RECORDER", Mock())
+    with caplog.at_level(logging.ERROR, logger=routes.logger.name):
+        with pytest.raises(HTTPException):
+            asyncio.run(routes.dispatch(_pedido("cualquier-cosa")))
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
 
 
 def test_motor_dispatch_con_token_emitido_pasa_y_lo_consume(motor, store_falso):
