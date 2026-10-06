@@ -16,7 +16,12 @@ def _git_directory(workspace_root: Path) -> Path:
         text = marker.read_text(encoding="utf-8").strip()
         if text.startswith("gitdir:"):
             target = Path(text.split(":", 1)[1].strip())
-            return target if target.is_absolute() else (workspace_root / target).resolve()
+            git_dir = target if target.is_absolute() else (workspace_root / target).resolve()
+            common_dir_file = git_dir / "commondir"
+            if common_dir_file.is_file():
+                common_dir = Path(common_dir_file.read_text(encoding="utf-8").strip())
+                return common_dir if common_dir.is_absolute() else (git_dir / common_dir).resolve()
+            return git_dir
     raise OSError(f"no se pudo resolver el directorio Git de {workspace_root}")
 
 

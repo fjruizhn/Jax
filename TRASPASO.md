@@ -3,7 +3,7 @@
 Fecha: 2026-10-06  
 Rama: `fix/cerco-proyectos-tool-authority`  
 Base: `origin/master` (`f47820f5af36d7b0e4e0d5b2156ac6275c10462c`)  
-Estado: implementación y pruebas focalizadas terminadas; falta auditoría adversarial satisfactoria, publicar PR y registrar SHA/URL.
+Estado: auditoría de a1a9a6ae RECHAZADA por divergencia de raíz del lock en E2A y linked worktrees. Corregí el lock para usar workspace operado y common-dir compartido; pruebas nuevas pasan. Falta revisar el SHA actualizado antes de publicar PR.
 
 ## Alcance
 
@@ -14,12 +14,12 @@ Estado: implementación y pruebas focalizadas terminadas; falta auditoría adver
 - TDD rojo en master: los nuevos casos ejecutaban `read_file`/`write_file` sobre rutas de proyecto y symlink; el resolver compartido seguía aceptándolas.
 - Verde enfocado: 2 pruebas pytest, 8 subcasos.
 - Rojo carrera: la sustitución de `safe/` por symlink a `proyectos/` permitió lectura antes del cambio.
-- `las_manos/_tool_authority_test.py` + `las_manos/_procesamiento_routes_test.py`: 177 passed, 8 warnings, 8 subtests; cubre carrera entre `os.replace` y persistencia Git, symlink final y que el movimiento coordinado espere hasta después de la lectura/escritura.
+- `las_manos/_tool_authority_test.py`, `las_manos/_procesamiento_routes_test.py` y `tests/test_proyectos_e2a_lactovi_mariadb.py` (sin DB): 180 passed, 13 skipped, 8 warnings, 8 subtests; incluye linked worktrees compartiendo el inode del lock y E2A tomando el lock del workspace de datos aunque el script viva en otro checkout. `py_compile` y `git diff --check` pasan.
 - Suite `tests-puros`: 3578 passed, 3 skipped, 3 xfailed, 1 fallo ambiental ajeno: `test_arranque_real_no_colisiona_con_policy_de_la_raiz` no puede leer `/etc/jax/build/implementation-identity.json` con el usuario local. No se usó esta salida para fijar el piso CI.
-- Piso CI actualizado +8: `tests-puros/out` 3537 → 3545; `las_manos/_tool_authority_test.py` 66 → 74 contra `origin/master`; los 45 skips del runner no cambian.
+- Piso CI esperado tras medir los dos tests nuevos: `tests-puros/out` 3545 → 3547; `las_manos/_tool_authority_test.py` 74 → 75; los 45 skips del runner no cambian. CI deberá confirmar el piso.
 
 ## Límites y pendientes
 
 - No se consultó ni modificó MariaDB, política, producción ni `PENDIENTES.md`.
-- No integrar. Crear PR independiente tras auditoría adversarial.
+- No integrar. Crear PR independiente tras auditoría adversarial APROBADA del SHA final.
 - Runbook `docs/constitucion/runbooks/traspaso-continuo.md` ausente en este checkout; se mantuvo este registro conforme al requisito general de continuidad.

@@ -215,11 +215,11 @@ def _escribir_mapa(ruta: Path, datos: dict) -> None:
         raise
 
 
-def _mover(origen: Path, destino: Path) -> None:
+def _mover(origen: Path, destino: Path, workspace_root: Path) -> None:
     """rename sin pisar: `os.rename` reemplazaria un directorio destino vacio."""
-    if os.path.lexists(destino):
-        raise EstadoImpide(f"el destino ya existe: {destino}")
-    with project_tree_lock(Path(__file__).resolve().parents[1]):
+    with project_tree_lock(workspace_root):
+        if os.path.lexists(destino):
+            raise EstadoImpide(f"el destino ya existe: {destino}")
         os.rename(origen, destino)
 
 
@@ -363,7 +363,7 @@ async def aplicar(pool, args) -> dict:
         "version": 1, "project_id": creado.project_id, "project_uuid": creado.project_uuid,
         "tenant_id": args.tenant_id, "dueno_user_id": args.dueno_user_id, "nombre": args.nombre,
         "ruta_vieja": str(base), "ruta_nueva": str(nueva), "sha256_antes": plan["hashes"]})
-    _mover(base, nueva)                                                      # 4. rename (si falla, nada se borra)
+    _mover(base, nueva, proyectos.parent)                                    # 4. rename (si falla, nada se borra)
     try:
         despues = _hashear_fuente(nueva / "fuente")                          # 5. sha256 (despues)
         if despues != plan["hashes"]:
@@ -375,10 +375,10 @@ async def aplicar(pool, args) -> dict:
     except CommitIncierto:
         raise                                                                # el disco NO se toca
     except ShaNoCuadra:
-        _mover(nueva, base)
+        _mover(nueva, base, proyectos.parent)
         raise
     except BaseException:
-        _mover(nueva, base)
+        _mover(nueva, base, proyectos.parent)
         print(f"ERROR al registrar documentos: se deshizo el rename (la carpeta volvio a {base}); el proyecto "
               f"{creado.project_id} sigue creado y ACTIVO, y el mapa {mapa} se conserva (borrarlo a mano antes de "
               f"reintentar --aplicar: no se pisa)", file=sys.stderr)
@@ -477,7 +477,7 @@ async def revertir(pool, ruta_mapa: str) -> dict:
                 await cur.execute("DELETE FROM project_documents WHERE project_id=%s", (pid,))
                 borradas = int(cur.rowcount)
             if not devuelta:
-                _mover(nueva, vieja)
+                _mover(nueva, vieja, vieja.parents[1])
                 movida = True
             if _hashear_fuente(vieja / "fuente") != mapa["sha256_antes"]:
                 raise ShaNoCuadra(f"los sha256 de fuente/ ya no son los del mapa (¿hubo subidas despues de "
@@ -486,7 +486,7 @@ async def revertir(pool, ruta_mapa: str) -> dict:
         except BaseException:
             await conn.rollback()
             if movida:
-                _mover(vieja, nueva)
+                _mover(vieja, nueva, vieja.parents[1])
             raise
         try:
             await conn.commit()

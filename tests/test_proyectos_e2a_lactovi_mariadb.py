@@ -9,12 +9,15 @@ Los DDL de tenants/usuarios/projects se toman de la prueba de E1 (misma fuente).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import hashlib
 import importlib.util
 import json
 import os
 import stat
+import subprocess
+import threading
 import uuid
 from pathlib import Path
 
@@ -107,6 +110,62 @@ async def _dueno() -> int:
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def test_mover_usa_el_workspace_de_datos_para_el_lock(tmp_path, monkeypatch):
+    workspace = tmp_path / "datos"
+    proyectos = workspace / "proyectos"
+    proyectos.mkdir(parents=True)
+    origen, destino = proyectos / "suelto", proyectos / "uuid"
+    origen.mkdir()
+    # El repositorio del código (donde vive el script) es distinto del workspace operado.
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    (workspace / "fixture.txt").write_text("workspace de datos\n")
+    subprocess.run(["git", "-C", str(workspace), "add", "fixture.txt"], check=True)
+    subprocess.run(["git", "-C", str(workspace), "-c", "user.name=test", "-c", "user.email=test@invalid",
+                    "commit", "-q", "-m", "fixture"], check=True)
+    linked = tmp_path / "linked"
+    subprocess.run(["git", "-C", str(workspace), "worktree", "add", "--detach", str(linked)],
+                   check=True, capture_output=True, text=True)
+    raices = []
+    esperando_lock = threading.Event()
+    rename_ejecutado = threading.Event()
+    errores = []
+    lock_real = lactovi.project_tree_lock
+
+    @contextlib.contextmanager
+    def lock_observado(root):
+        raices.append(Path(root))
+        esperando_lock.set()
+        with lock_real(root):
+            yield
+
+    rename_real = lactovi.os.rename
+
+    def rename_observado(src, dst):
+        rename_ejecutado.set()
+        return rename_real(src, dst)
+
+    monkeypatch.setattr(lactovi, "project_tree_lock", lock_observado)
+    monkeypatch.setattr(lactovi.os, "rename", rename_observado)
+    from jax.core.project_tree_lock import project_tree_lock
+
+    def mover():
+        try:
+            lactovi._mover(origen, destino, workspace)
+        except BaseException as exc:
+            errores.append(exc)
+
+    with project_tree_lock(linked):
+        hilo = threading.Thread(target=mover)
+        hilo.start()
+        assert esperando_lock.wait(timeout=2), "E2A no intentó adquirir el lock"
+        assert not rename_ejecutado.wait(timeout=0.05), "E2A no compartió el lock con el linked worktree"
+    hilo.join(timeout=2)
+    assert not hilo.is_alive(), "el movimiento no terminó tras liberar el lock"
+    assert not errores, errores
+    assert raices == [workspace]
+    assert rename_ejecutado.is_set() and destino.is_dir() and not origen.exists()
 
 
 def _ficha(sha: str, origen: str, estado: str) -> str:

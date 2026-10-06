@@ -134,6 +134,22 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
             p.start()
         self.addCleanup(self._stop_patchers)
 
+    async def test_project_tree_lock_es_comun_entre_linked_worktrees(self):
+        from jax.core.project_tree_lock import abrir_project_tree_lock
+
+        linked = self.workspace.parent / f"{self.workspace.name}-linked"
+        self.addCleanup(shutil.rmtree, linked, ignore_errors=True)
+        subprocess.run(["git", "-C", str(self.workspace), "worktree", "add", "--detach", str(linked)],
+                       check=True, capture_output=True, text=True)
+        fd_main = abrir_project_tree_lock(self.workspace)
+        fd_linked = abrir_project_tree_lock(linked)
+        try:
+            assert os.fstat(fd_main).st_ino == os.fstat(fd_linked).st_ino
+            assert os.fstat(fd_main).st_dev == os.fstat(fd_linked).st_dev
+        finally:
+            os.close(fd_main)
+            os.close(fd_linked)
+
     def _stop_patchers(self):
         for p in self._patchers:
             p.stop()
