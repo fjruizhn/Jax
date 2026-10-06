@@ -34,7 +34,7 @@ from cliente_http_compartido import obtener_cliente_http
 from auth_servicio import IDENTIDAD_JACOBS, encabezado_propio
 from jacobs.models import HTTP_FACETS as _HTTP_FACETS
 from jacobs.models import MOTOR_FACETS as _MOTOR_FACETS
-from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
+from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus, faceta_ejecutable_en_pipeline
 from jacobs.plan import CapabilityUnbound
 from jacobs.policy import check_kill_switch
 from jacobs.usage_writer import record_direct_usage
@@ -893,8 +893,10 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     tried_facets = {step.facet}
     cap_error = await validate_capability(step)
     while isinstance(cap_error, CapabilityUnbound):
-        # El reroute SOLO puede apuntar a facets efectivamente despachables
-        # (HTTP o Motor Registry). 'hyde' se excluye a propósito: tiene su
+        # El reroute SOLO puede apuntar a facets que el predicado único
+        # (jacobs.models.faceta_ejecutable_en_pipeline: lista blanca HTTP, el
+        # mismo del menú, el plan y el pre-vuelo) da por ejecutables: un
+        # candidato de motor (kimi/jax_local) ya no es destino. 'hyde' se excluye a propósito: tiene su
         # propio gate de aprobación humana en run_pipeline, que chequea
         # plan[i].facet == "hyde" ANTES de que este código corra — si el
         # reroute pudiera asignar step.facet = "hyde" después de ese
@@ -932,7 +934,7 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
         # capabilities con requires_human_gate=1 alcanzables por esta vía.
         untried = [
             c for c in cap_error.candidates
-            if c not in tried_facets and c in (_HTTP_FACETS | _MOTOR_FACETS)
+            if c not in tried_facets and faceta_ejecutable_en_pipeline(c)
         ]
         if not untried:
             raise ValueError(
