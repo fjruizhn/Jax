@@ -195,6 +195,30 @@ for sep, ssh_prefix in itertools.product(RONDA6_SEPARADORES, ("", '"ssh", h, '))
 positive += [("python", source) for source in RONDA6_MARCAS]
 RONDA6_MEJORAS = set(RONDA6_MARCAS)
 
+# Ronda 7: argv con separador literal como argumento, mas separadores, alias `remove`.
+RONDA7_MARCAS = [
+    '["docker", "rm", c, "|", "-f"]', '["docker", "rm", c, ";", "--force"]',
+    '["docker", "rm", c, "&&", "-f"]', '["docker", "rm", c, "&", "-f"]',
+    '["docker", "-H", "|", "rm", "-f", c]', '["docker", "--context", ";", "rm", "-f", c]',
+    '["find", ".", "-exec", "docker", "rm", "{}", ";", "-f"]',
+    '["xargs", "-d", "|", "docker", "rm", "-f"]',
+    '[*docker, "rm", *["-f"], c]',
+    '["docker", "container", "remove", "-f", c]',
+    '["ssh", h, "docker", "container", "remove", "-f", c]',
+]
+for sep in ("&", "|&", " && ", "&& ", "\\n"):
+    RONDA7_MARCAS.append(f'["ssh", h, "docker", "rm", "-f", c1, "{sep}", "docker", "rm", "-fv", c2]')
+RONDA7_MARCAS += [
+    '["ssh", h, "docker", "rm", "-f", "c1;", "docker", "rm", "-fv", c2]',
+    '["ssh", h, "docker", "rm", "-f", c1, SEP, "docker", "rm", "-fv", c2]',
+]
+RONDA7_LIMPIOS = [
+    '["ssh", h, "docker", "rm", "-v", c, "&", "rm", "-f", p]',
+    '["ssh", h, "docker", "rm", "-v", c, " && ", "rm", "-f", p]',
+]
+positive += [("python", source) for source in RONDA7_MARCAS]
+RONDA6_MEJORAS |= set(RONDA7_MARCAS)
+
 negative = [
     ("shell", f"{wrapper}docker exec docker rm -f target") for wrapper in wrappers
 ]
@@ -239,7 +263,7 @@ negative += [("python", repr(["docker", "compose"] + option.split() + subcommand
              for option in ("", "--profile prod", "--env-file .env")
              for subcommand in ("exec", "run svc")]
 
-negative += [("python", source) for source in RONDA6_LIMPIOS]
+negative += [("python", source) for source in RONDA6_LIMPIOS + RONDA7_LIMPIOS]
 
 auditor_cases = json.loads((ROOT / "docs/ci/jax357-auditor-cases.json").read_text())
 own_cases = [
@@ -314,6 +338,8 @@ RONDA5_MEJORAS = {
 def required_improvement(kind, source):
     if kind == "python" and (source in RONDA5_MEJORAS or source in RONDA6_MEJORAS):
         return True
+    if "container remove" in source or '"container", "remove"' in source:
+        return True  # ronda 7: `docker container remove` es el alias de `docker container rm`
     if "--workdir" in source and "compose" in source:
         return True
     if kind == "shell":
