@@ -22,7 +22,10 @@ creen UN solo trabajo:
   3. Si el proceso muere entre 1 y 2 queda un reclamo HUERFANO (un job_id sin trabajo). Un
      reintento no lo trata como trabajo existente: si es mas joven que la gracia (el trabajo
      puede estarse creando ahora mismo) pide esperar (503); pasada la gracia lo retoma con un
-     CAS sobre el job_id (`tomar_huerfana`): de varios reintentos a la vez gana UNO.
+     CAS sobre el job_id (`tomar_huerfana`): de varios reintentos a la vez retoma UNO. Si la ganadora
+     original no estaba muerta sino lenta (tardo mas que la gracia entre el INSERT y crear el trabajo),
+     al terminar de crearlo relee el reclamo, ve que ya no es suyo, CANCELA su trabajo antes de programar el
+     OCR y devuelve el que figura en la tabla: queda un solo trabajo vivo, no dos.
 
   4. Un reenvio cuyo trabajo ya existe pero FALLO o se cancelo (p. ej. LAS MANOS se reinicio y marco `failed`
      lo que corria) sin que el llamador llegara a saber su job_id, se trata como el huerfano: se retoma con
@@ -124,6 +127,11 @@ def espera_ms() -> int:
     return _entero_de_entorno(_VARIABLE_ESPERA, _ESPERA_POR_DEFECTO_MS, 0)
 
 
+def abreviar(clave: str) -> str:
+    """Hash corto de la clave para el log: identifica el reenvio sin dejar la clave entera."""
+    return hashlib.sha256(clave.encode("utf-8", "backslashreplace")).hexdigest()[:12]
+
+
 def clave_valida(clave: object) -> bool:
     return isinstance(clave, str) and _CLAVE_VALIDA.fullmatch(clave) is not None
 
@@ -193,7 +201,7 @@ async def reclamar(identidad: str, clave: str, solicitud_hash: str, job_id: str)
 
 async def tomar_huerfana(reclamo: Reclamo, job_id_nuevo: str) -> bool:
     """CAS: pasa un reclamo sin trabajo a `job_id_nuevo` solo si sigue apuntando al job_id viejo. De
-    varios reintentos a la vez, True para UNO."""
+    varios reintentos a la vez, True para UNO (la ganadora lenta se entera al releer; ver el protocolo arriba)."""
     async with jacobs_store.conexion() as conn:
         async with conn.cursor() as cur:
             await cur.execute(SQL_TOMAR, (job_id_nuevo, reclamo.id, reclamo.job_id))

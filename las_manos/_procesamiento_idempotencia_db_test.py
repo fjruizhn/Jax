@@ -21,6 +21,7 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import asyncio
+import logging
 import tempfile
 import uuid
 from pathlib import Path
@@ -200,7 +201,11 @@ def test_tomar_huerfana_es_un_cas_sobre_el_job_id():
 
 def test_explain_de_las_consultas_nuevas_usa_sus_indices():
     """EXPLAIN de la consulta REAL: la busqueda por (identidad, clave) va por el UNIQUE y la
-    purga por el indice de `creado_en`; ninguna recorre la tabla."""
+    purga por el indice de `creado_en`; ninguna recorre la tabla. El relleno lleva una MARCA unica por
+    corrida (como pide tests/test_delete_de_tablas_compartidas.py): dos sesiones sobre la misma base no se
+    borran el relleno entre si."""
+    marca = uuid.uuid4().hex                      # 32 caracteres: cabe en identidad_servicio
+
     async def explicar(sql, params):
         async with store.conexion() as conn:
             async with conn.cursor() as cur:
@@ -213,22 +218,22 @@ def test_explain_de_las_consultas_nuevas_usa_sus_indices():
         async with store.conexion() as conn:
             async with conn.cursor() as cur:
                 # Con la tabla vacia el optimizador elige `const`/`ALL` sin informar nada: se llena
-                # con filas de relleno del mismo tamano para que el plan sea el de produccion.
+                # con filas de relleno para que el plan sea el de produccion.
                 await cur.execute(
                     f"INSERT INTO {idem.NOMBRE_TABLA} (identidad_servicio, clave, solicitud_hash, job_id, creado_en) "
-                    f"SELECT 'relleno', CONCAT('explain-', seq), REPEAT('0', 64), UUID(), "
-                    f"NOW(6) - INTERVAL seq SECOND FROM seq_1_to_2000")
+                    f"SELECT %s, CONCAT('explain-', seq), REPEAT('0', 64), UUID(), "
+                    f"NOW(6) - INTERVAL seq SECOND FROM seq_1_to_2000", (marca,))
                 await cur.execute(f"ANALYZE TABLE {idem.NOMBRE_TABLA}")
                 await cur.fetchall()
         try:
-            buscar = await explicar(idem.SQL_BUSCAR, ("relleno", "explain-5"))
+            buscar = await explicar(idem.SQL_BUSCAR, (marca, "explain-5"))
             purgar = await explicar(idem.SQL_PURGAR.replace("DELETE", "SELECT id", 1)
                                     .replace(" LIMIT %s", ""), (3600,))
             return buscar, purgar
         finally:
             async with store.conexion() as conn:
                 async with conn.cursor() as cur:
-                    await cur.execute(f"DELETE FROM {idem.NOMBRE_TABLA} WHERE identidad_servicio = 'relleno'")
+                    await cur.execute(f"DELETE FROM {idem.NOMBRE_TABLA} WHERE identidad_servicio = %s", (marca,))
     buscar, purgar = asyncio.run(todo())
     assert buscar[0]["key"] == "uq_procesamiento_idem_clave", buscar
     assert "filesort" not in str(buscar[0].get("Extra")).lower()
@@ -430,6 +435,125 @@ def test_un_trabajo_fallido_que_el_llamador_nunca_vio_se_reintenta_con_la_misma_
     nuevos = {r.json()["job_id"] for r in respuestas}
     assert len(nuevos) == 1 and viejo not in nuevos and filas == [(IDENTIDAD_PLATAFORMA, nuevos.pop())]
     assert len(almacen._index) == 2 and ejecutar.await_count == 1
+
+
+def test_la_ganadora_lenta_que_pierde_el_reclamo_cancela_su_trabajo_y_queda_uno(ruta, monkeypatch):
+    """Gracia de 1 s y una demora de 1,6 s entre el INSERT y crear el trabajo: otro reintento vence la gracia y
+    retoma el reclamo. La ganadora original, al crear, relee, ve que ya no es suya, CANCELA su trabajo antes de
+    programar el OCR y devuelve el del reintento. Sin esto salian DOS trabajos vivos (OCR duplicado)."""
+    app, almacen, ejecutar = ruta
+    monkeypatch.setenv("JAX_PROCESAMIENTO_IDEMPOTENCIA_GRACIA_SEGUNDOS", "1")
+    real = idem.reclamar
+
+    async def lento(*a, **k):
+        r = await real(*a, **k)
+        if r.gano and not lento.ya:
+            lento.ya = True
+            await asyncio.sleep(1.6)
+        return r
+    lento.ya = False
+    monkeypatch.setattr(idem, "reclamar", lento)
+
+    async def todo():
+        await idem.init_tabla()
+        clave = _clave()
+        try:
+            async def segundo():
+                await asyncio.sleep(1.2)
+                return await _post(app, clave, "a.pdf")
+            r1, r2 = await asyncio.gather(_post(app, clave, "a.pdf"), segundo())
+            return r1, r2, await _filas(clave)
+        finally:
+            await _borrar(clave)
+    r1, r2, filas = asyncio.run(todo())
+    assert (r1.status_code, r2.status_code) == (202, 202), (r1.text, r2.text)
+    assert r1.json()["job_id"] == r2.json()["job_id"] == filas[0][1]
+    vivos = [j for j in almacen._index.values() if j["status"] != "cancelled"]
+    assert len(vivos) == 1 and len(almacen._index) == 2
+    assert ejecutar.await_count == 1, "el OCR se programa UNA vez"
+
+
+def test_el_reenvio_la_toma_de_un_huerfano_y_el_reintento_de_un_fallido_quedan_en_el_log(ruta, caplog):
+    app, almacen, ejecutar = ruta
+    caplog.set_level(logging.INFO, logger="procesamiento_routes")
+
+    async def todo():
+        await idem.init_tabla()
+        c_reenvio, c_huerfano, c_fallido = _clave(), _clave(), _clave()
+        try:
+            await _post(app, c_reenvio, "a.pdf")
+            await _post(app, c_reenvio, "a.pdf")
+            muerto = str(uuid.uuid4())
+            await idem.reclamar(IDENTIDAD_PLATAFORMA, c_huerfano, _hash("a.pdf"), muerto)
+            await _envejecer(c_huerfano, idem.gracia_segundos() + 30)
+            await _post(app, c_huerfano, "a.pdf")
+            viejo = almacen.create(ownership=OWNER, caller=f"user:{OWNER.user_id}", capability="ingesta_archivos",
+                                   motor="n/a", trace_id="t", prompt="p", recursion_depth=0)
+            almacen.update(viejo, status="failed", error="x")
+            await idem.reclamar(IDENTIDAD_PLATAFORMA, c_fallido, _hash("a.pdf"), viejo)
+            r = await _post(app, c_fallido, "a.pdf")
+            return (c_reenvio, c_huerfano, c_fallido, muerto, viejo, r.json()["job_id"],
+                    (await _filas(c_reenvio))[0][1])
+        finally:
+            for c in (c_reenvio, c_huerfano, c_fallido):
+                await _borrar(c)
+    c_reenvio, c_huerfano, c_fallido, muerto, viejo, nuevo, job_reenvio = asyncio.run(todo())
+    texto = [r.getMessage() for r in caplog.records]
+
+    def con(*partes):
+        return [t for t in texto if all(p in t for p in partes)]
+    assert con("reenvio", idem.abreviar(c_reenvio), job_reenvio)
+    assert con("huerfano", idem.abreviar(c_huerfano), muerto)
+    assert con("reintenta", idem.abreviar(c_fallido), viejo, nuevo)
+    assert not [t for t in texto if c_reenvio in t or c_huerfano in t or c_fallido in t], "la clave entera no va al log"
+
+
+# Contrato de idempotencia COMPARTIDO con jax-platform: la MISMA tabla vive copiada en
+# backend/tests/test_proyectos_documentos_despachador.py (CONTRATO_IDEMPOTENCIA) y la falsa de LAS MANOS de
+# la plataforma la cumple. Si se cambia una, se cambia la otra: cada fila es (estado del trabajo que ya tiene
+# esa clave o None, el pedido es el mismo, resultado). `rejected` no existe en el vocabulario de jobs de LAS MANOS.
+CONTRATO_IDEMPOTENCIA = (
+    (None, True, "crea"),
+    ("pending", True, "mismo"),
+    ("running", True, "mismo"),
+    ("cancelling", True, "mismo"),
+    ("completed", True, "mismo"),
+    ("failed", True, "crea"),
+    ("cancelled", True, "crea"),
+    ("pending", False, "conflicto"),
+    ("failed", False, "conflicto"),
+    ("completed", False, "conflicto"),
+)
+
+
+@pytest.mark.parametrize("previo,mismo_pedido,esperado", CONTRATO_IDEMPOTENCIA)
+def test_contrato_compartido_de_idempotencia(ruta, previo, mismo_pedido, esperado):
+    app, almacen, ejecutar = ruta
+
+    async def todo():
+        await idem.init_tabla()
+        clave = _clave()
+        try:
+            viejo = None
+            if previo is not None:
+                viejo = almacen.create(ownership=OWNER, caller=f"user:{OWNER.user_id}", capability="ingesta_archivos",
+                                       motor="n/a", trace_id="t", prompt="p", recursion_depth=0)
+                if previo != "pending":
+                    almacen.update(viejo, status=previo)
+                await idem.reclamar(IDENTIDAD_PLATAFORMA, clave, _hash("a.pdf" if mismo_pedido else "otro.pdf"), viejo)
+            return viejo, await _post(app, clave, "a.pdf")
+        finally:
+            await _borrar(clave)
+    viejo, r = asyncio.run(todo())
+    if esperado == "conflicto":
+        assert r.status_code == 409, r.text
+        assert len(almacen._index) == 1
+    elif esperado == "mismo":
+        assert r.status_code == 202 and r.json()["job_id"] == viejo
+        assert len(almacen._index) == 1
+    else:
+        assert r.status_code == 202 and r.json()["job_id"] != viejo
+        assert len(almacen._index) == (1 if viejo is None else 2)
 
 
 def test_si_crear_el_trabajo_falla_el_reclamo_se_libera(ruta):

@@ -4422,15 +4422,13 @@ tiempo. Si el runner da otro número, manda el runner.
   y ahora exige idx_ejecutor_punto_host_respaldo. Medido local con las migraciones
   de jax-platform master: ese archivo 3 -> 5 passed. Los dos vistos en rojo contra
   el exportador viejo (a8de3fd: 2 failed / 3 passed).
-170 -> 190 el 2026-10-06 (idempotencia de POST /procesamiento/trabajos): +20 en el
-  archivo NUEVO las_manos/_procesamiento_idempotencia_db_test.py, sumado a las dos
-  listas del job (la que corre y la del piso). Medido local, MariaDB 12.3.3
-  efimera propia dentro de su netns, CI=true: ese archivo 20 passed (x3 corridas).
-  Contra el codigo viejo de la ruta (master + el modulo nuevo): 10 failed / 10 passed
-  (las 10 que miran el comportamiento de la ruta; las otras 10 son del modulo y de
-  regresion sin clave). El total del job no se reproduce entero en local (hace falta
-  el esquema de jax-platform): 170 es el declarado de master + 19. Si el runner da
-  otro numero, manda el runner.
+170 -> 202 el 2026-10-06 (idempotencia de POST /procesamiento/trabajos, rondas 1 y 2): +32 en el
+  archivo NUEVO las_manos/_procesamiento_idempotencia_db_test.py (22 pruebas + 10 casos de la tabla
+  compartida de contrato), sumado a las dos listas del job (la que corre y la del piso). Medido local,
+  MariaDB 12.3.3 efimera propia dentro de su netns, CI=true: ese archivo 32 passed. Contra el codigo
+  viejo de la ruta la ronda 1 daba 10 failed / 10 passed; la ronda 2 (ganadora lenta, log) las vio en rojo
+  contra el codigo sin el cambio. El total del job no se reproduce entero en local (hace falta el esquema
+  de jax-platform): 170 es el declarado de master + 32. Si el runner da otro numero, manda el runner.
 ```
 
 ## `permisos-proyectos/permisos_proyectos`

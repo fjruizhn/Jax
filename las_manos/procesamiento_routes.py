@@ -713,7 +713,7 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
             logger.warning("idempotencia: no se pudo consultar la clave (%s)", type(e).__name__)
             raise HTTPException(status_code=503, detail={"code": "idempotencia_no_disponible"}) from e
         if previo is not None:
-            reenvio = await _reenvio_de(previo, huella, ownership)
+            reenvio = await _reenvio_de(previo, huella, ownership, clave)
             if reenvio is not None:
                 return reenvio
     # jax-14 (2026-10-03): freno de dependencias. Sin pdfplumber/openpyxl/
@@ -764,20 +764,34 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
                 logger.warning("idempotencia: no se pudo reclamar la clave (%s)", type(e).__name__)
                 raise HTTPException(status_code=503, detail={"code": "idempotencia_no_disponible"}) from e
             if not reclamo.gano:
-                reenvio = await _reenvio_de(reclamo, huella, ownership)
+                reenvio = await _reenvio_de(reclamo, huella, ownership, clave)
                 if reenvio is not None:
                     return reenvio
                 # Reclamo huerfano ya vencido (el proceso murio antes de crear el trabajo): lo retoma UNO.
                 if not await idempotencia.tomar_huerfana(reclamo, candidato):
                     # Otro reintento lo retomo antes: se devuelve SU trabajo (esperando a que termine de crearse).
                     actual = await idempotencia.buscar(identidad, clave)
-                    reenvio = await _reenvio_de(actual, huella, ownership) if actual is not None else None
+                    reenvio = await _reenvio_de(actual, huella, ownership, clave) if actual is not None else None
                     if reenvio is None:
                         raise HTTPException(status_code=503, detail={"code": "idempotencia_en_curso"})
                     return reenvio
+                viejo = _STORE.authoritative_snapshot(reclamo.job_id)
+                if viejo is None:
+                    logger.warning("idempotencia: se retoma el reclamo huerfano de la clave %s (trabajo %s nunca creado) "
+                                   "-> trabajo nuevo %s", idempotencia.abreviar(clave), reclamo.job_id, candidato)
+                else:
+                    logger.warning("idempotencia: se reintenta la clave %s: el trabajo %s termino %s sin que el "
+                                   "llamador lo conociera -> trabajo nuevo %s", idempotencia.abreviar(clave),
+                                   reclamo.job_id, viejo.view.status.value, candidato)
             job_id_reclamado = candidato
             _purgar_en_segundo_plano()
-        return await _crear_con_cupo(req, ownership, proyecto, job_id_reclamado)
+        return await _crear_con_cupo(req, ownership, proyecto, job_id_reclamado, identidad, clave)
+    except _ReclamoPerdido as perdido:
+        # Mi trabajo ya se cancelo; se devuelve el que figura en la tabla (esperando a que termine de crearse).
+        reenvio = await _reenvio_de(perdido.actual, huella, ownership, clave) if perdido.actual is not None else None
+        if reenvio is None:
+            raise HTTPException(status_code=503, detail={"code": "idempotencia_en_curso"}) from None
+        return reenvio
     except BaseException:
         if job_id_reclamado is not None and not _trabajo_existe(job_id_reclamado):
             # El trabajo no llego a existir: un reclamo que apunta a la nada haria esperar al reintento
@@ -808,7 +822,7 @@ def _purgar_en_segundo_plano() -> None:
     tarea.add_done_callback(_purgas.discard)
 
 
-async def _reenvio_de(reclamo, huella: str, ownership) -> JSONResponse | None:
+async def _reenvio_de(reclamo, huella: str, ownership, clave: str) -> JSONResponse | None:
     """La respuesta de un reenvio, o None si el reclamo es un HUERFANO ya vencido (hay que retomarlo).
     409 si la clave es de otro pedido; 503 reintentable si el trabajo puede estarse creando ahora."""
     if reclamo.solicitud_hash != huella:
@@ -833,12 +847,25 @@ async def _reenvio_de(reclamo, huella: str, ownership) -> JSONResponse | None:
         # dejaria el documento en `error` por una caida de LAS MANOS (el arranque marca `failed` lo que
         # corria) que el llamador nunca vio. Se retoma como un reclamo huerfano.
         return None
+    logger.info("idempotencia: reenvio de la clave %s -> trabajo %s (%s), sin crear otro",
+                idempotencia.abreviar(clave), reclamo.job_id, instantanea.view.status.value)
     return JSONResponse(
         TrabajoCreadoResponse(job_id=reclamo.job_id, estado=instantanea.view.status.value).model_dump(),
         status_code=202, headers={"Idempotent-Replayed": "true"})
 
 
-async def _crear_con_cupo(req: TrabajoRequest, ownership, proyecto: str, job_id_fijo: str | None) -> TrabajoCreadoResponse:
+_SIN_RELECTURA = object()
+
+
+class _ReclamoPerdido(Exception):
+    """La ganadora tardo mas que la gracia en crear su trabajo y otro reintento retomo el reclamo."""
+    def __init__(self, actual):
+        super().__init__("reclamo retomado por otro reintento")
+        self.actual = actual
+
+
+async def _crear_con_cupo(req: TrabajoRequest, ownership, proyecto: str, job_id_fijo: str | None,
+                          identidad: str = "", clave: str | None = None) -> TrabajoCreadoResponse:
     if _SEMAFORO_TRABAJOS.locked():
         raise HTTPException(
             status_code=429,
@@ -884,6 +911,21 @@ async def _crear_con_cupo(req: TrabajoRequest, ownership, proyecto: str, job_id_
         # El campo que de verdad significa "proyecto" -- `update()` acepta
         # kwargs arbitrarios (van tal cual al JSONL).
         _STORE.update(job_id, proyecto=proyecto)
+        if clave is not None:
+            # ¿Sigue siendo MIO el reclamo? Si tarde mas que la gracia en llegar hasta aqui, otro reintento pudo
+            # retomarlo y crear SU trabajo: el mio se cancela ANTES de programar el OCR y se devuelve el suyo.
+            try:
+                actual = await idempotencia.buscar(identidad, clave)
+            except Exception:  # fail-soft: la base respondio hace un instante; un fallo de lectura aqui no justifica tirar un trabajo sano
+                logger.warning("idempotencia: no se pudo releer el reclamo tras crear el trabajo %s", job_id, exc_info=True)
+                actual = _SIN_RELECTURA
+            if actual is not _SIN_RELECTURA and (actual is None or actual.job_id != job_id):
+                _STORE.update(job_id, status=JobStatus.CANCELLED.value, finished_at=time.time(),
+                              error="reclamo de idempotencia retomado por otro reintento")
+                logger.warning("idempotencia: el reclamo de la clave %s ya no es del trabajo %s (lo retomo %s): "
+                               "se cancela antes de programar el OCR", idempotencia.abreviar(clave), job_id,
+                               actual.job_id if actual is not None else "nadie")
+                raise _ReclamoPerdido(actual)
 
         # Ronda 6: el control se crea y se registra ANTES de programar la
         # tarea. Antes lo creaba el worker en su primera vuelta del loop; un
