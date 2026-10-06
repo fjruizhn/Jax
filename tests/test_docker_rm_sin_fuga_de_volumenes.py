@@ -23,6 +23,7 @@ reconoce como docker; tampoco se sigue flujo indirecto de prefijos Python neutra
 """
 import ast
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -59,9 +60,16 @@ def _fuerza_sin_volumenes(banderas):
 
 
 def _tokens_shell(linea):
-    linea = re.sub(r"(^|\s)#.*$", "", linea)          # comentario
-    linea = re.sub(r"&&|\|\||\$\(|[;|&()`]", r" \g<0> ", linea)
-    return [t.strip("\"'") for t in linea.split()]
+    lexer = shlex.shlex(linea, posix=True, punctuation_chars=";&|()<>`")
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    try:
+        return list(lexer)
+    except ValueError:
+        # Malformed quoting should not hide otherwise recognizable text.
+        linea = re.sub(r"(^|\s)#.*$", "", linea)
+        linea = re.sub(r"&&|\|\||\$\(|[;|`]", r" \g<0> ", linea)
+        return linea.split()
 
 
 def _es_docker_rm(toks, indice_rm):
@@ -70,9 +78,10 @@ def _es_docker_rm(toks, indice_rm):
     for j in range(indice_rm - 1, max(-1, indice_rm - 12), -1):
         if toks[j] in _SEPARADORES:
             break
-        if _ES_DOCKER.fullmatch(toks[j]):
+        if _ES_DOCKER.fullmatch(toks[j]) and _prefijo_docker_rm(toks[j + 1:indice_rm]):
             docker = j
-    return docker is not None and _prefijo_docker_rm(toks[docker + 1:indice_rm])
+            break
+    return docker is not None
 
 
 def culpables_shell(texto):
@@ -111,19 +120,28 @@ def _prefijo_docker_rm(tokens):
             if k + 1 >= len(tokens):
                 return False
             k += 2
+        elif any(token.startswith(op) and len(token) > len(op) for op in ("-c", "-H", "-l")):
+            k += 1
         elif token == "container" and comando is None:
             comando = token
             k += 1
-        elif token == "compose" and comando is None and k == len(tokens) - 1:
-            return True
+        elif token == "compose" and comando is None:
+            comando = token
+            k += 1
+        elif comando == "compose" and token in ("-f", "--file", "-p", "--project-name"):
+            if k + 1 >= len(tokens):
+                return False
+            k += 2
+        elif comando == "compose" and token.startswith(("--file=", "--project-name=")):
+            k += 1
         else:
             return False
     return True
 
 
 def _es_prefijo_docker_rm(tokens):
-    docker = next((i for i, token in enumerate(tokens) if _ES_DOCKER.search(token)), None)
-    return docker is not None and _prefijo_docker_rm(tokens[docker + 1:])
+    return any(_ES_DOCKER.search(token) and _prefijo_docker_rm(tokens[i + 1:])
+               for i, token in enumerate(tokens))
 
 
 def culpables_python(fuente, filename="<string>"):
@@ -196,7 +214,7 @@ def _archivos():
 
 
 def test_ningun_docker_rm_forzado_sin_borrar_volumenes():
-    culpables, ilegibles = [], []
+    culpables, ilegibles, errores_sintaxis = [], [], []
     for ruta, es_python in _archivos():
         try:
             texto = ruta.read_text(encoding="utf-8")
@@ -205,12 +223,16 @@ def test_ningun_docker_rm_forzado_sin_borrar_volumenes():
             continue
         try:
             hallazgos = culpables_en_texto(texto, es_python, filename=str(ruta))
-        except SyntaxError:
-            ilegibles.append(str(ruta.relative_to(RAIZ)))
+        except SyntaxError as error:
+            relativo = ruta.relative_to(RAIZ)
+            errores_sintaxis.append(
+                f"{relativo}:{error.lineno or 0}:{error.offset or 0}: {error.msg}"
+            )
             continue
         for hallado in hallazgos:
             culpables.append(f"{ruta.relative_to(RAIZ)}: {hallado}")
     assert not ilegibles, "guiones versionados que no son UTF-8 (no se pueden barrer):\n" + "\n".join(ilegibles)
+    assert not errores_sintaxis, "archivos Python que no parsean (no se pueden barrer):\n" + "\n".join(errores_sintaxis)
     assert not culpables, "docker rm forzado sin -v (deja el volumen anónimo):\n" + "\n".join(culpables)
 
 
@@ -233,6 +255,19 @@ FUGAN_SHELL = [
     '"docker" rm -f c',
     "docker rm -f c --volumes=0",
     "docker rm -f c --volumes=f",
+    "docker compose -f x.yml rm -f",
+    "docker compose -p proj rm -f svc",
+    "docker compose --file x.yml rm -f svc",
+    "docker compose -f a.yml -f b.yml rm -fs svc",
+    "sudo -u docker docker rm -f x",
+    "sudo -g docker docker rm -f x",
+    "docker -Htcp://x rm -f x",
+    "docker -H=tcp://x rm -f x",
+    "docker -l=debug rm -f x",
+    "docker -cctx rm -f x",
+    "docker rm x 2>&1 -f",
+    "docker rm x >&2 --force",
+    "docker rm x &>log -f",
     "docker compose rm -f",
     "docker -c ctx rm -f x",
     "docker -D rm -f x",
@@ -274,6 +309,15 @@ FUGAN_PYTHON = [
     'subprocess.run(("docker", "rm", "-f", n))',
     'subprocess.run(f"{docker} rm -f {n}", shell=True)',
     'subprocess.run("docker rm -f x", shell=True)',
+    'subprocess.run(f"docker compose -f {yml} rm -f", shell=True)',
+    '["docker", "compose", "-f", "x.yml", "rm", "-f"]',
+    '["docker", "compose", "-p", p, "rm", "-f", "-s"]',
+    '["ssh", "docker-host", "docker", "rm", "-f", n]',
+    '["ssh", docker_host, "docker", "rm", "-f", n]',
+    '["sudo", "-u", "docker", "docker", "rm", "-f", n]',
+    '["env", "DOCKER_HOST=x", "docker", "rm", "-f", n]',
+    '[*sudo, "DOCKER_HOST=x", "docker", "rm", "-f", n]',
+    '["docker", "-H=tcp://x", "rm", "-f", n]',
     '[*docker, "container", "rm", "-f", n]',
     'docker + ["container", "rm", "-f", n]',
 ]
@@ -318,11 +362,14 @@ NO_FUGAN_PYTHON = [
 ]
 
 
-def test_detecta_las_formas_que_fugan():
-    for caso in FUGAN_SHELL:
-        assert culpables_en_texto(caso, es_python=False), f"no detectó (shell): {caso!r}"
-    for caso in FUGAN_PYTHON:
-        assert culpables_en_texto(caso, es_python=True), f"no detectó (python): {caso!r}"
+@pytest.mark.parametrize("caso", FUGAN_SHELL)
+def test_detecta_fugas_shell(caso):
+    assert culpables_en_texto(caso, es_python=False), f"no detectó (shell): {caso!r}"
+
+
+@pytest.mark.parametrize("caso", FUGAN_PYTHON)
+def test_detecta_fugas_python(caso):
+    assert culpables_en_texto(caso, es_python=True), f"no detectó (python): {caso!r}"
 
 
 def test_deja_pasar_lo_que_no_fuga():
@@ -332,6 +379,19 @@ def test_deja_pasar_lo_que_no_fuga():
     for caso in NO_FUGAN_PYTHON:
         assert not culpables_en_texto(caso, es_python=True), \
             f"falso positivo (python): {caso!r} -> {culpables_en_texto(caso, es_python=True)}"
+
+
+def test_error_de_sintaxis_python_se_informa_separado_con_ruta_linea_y_mensaje(monkeypatch, tmp_path):
+    roto = tmp_path / "broken.py"
+    roto.write_text("def roto(:\n", encoding="utf-8")
+    monkeypatch.setattr(__import__(__name__), "_archivos", lambda: iter([(roto, True)]))
+    monkeypatch.setattr(__import__(__name__), "RAIZ", tmp_path)
+    with pytest.raises(AssertionError) as error:
+        test_ningun_docker_rm_forzado_sin_borrar_volumenes()
+    mensaje = str(error.value)
+    assert "broken.py:1:" in mensaje
+    assert "invalid syntax" in mensaje or "expected" in mensaje
+    assert "no son UTF-8" not in mensaje
 
 
 def test_python_que_no_parsea_falla_en_vez_de_degradar_a_shell():

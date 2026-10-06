@@ -900,16 +900,26 @@ para conservar byte a byte el registro de la migración de pisos.
 
 ## `tests-puros/out`
 
-3537 -> 3540 (2026-10-05, JAX#357 ronda 2): se agregaron dos pruebas en
-`tests/test_docker_rm_sin_fuga_de_volumenes.py` (parseo Python inválido con ruta y
-rechazo de la degradación a shell). Medido en hall9000 con la lista exacta del paso
+3540 -> 3621 (2026-10-06, JAX#357 ronda 3): el archivo de regresiones pasó
+de 6 a 87 casos corridos al parametrizar cada ejemplo de fuga A–E y el informe
+F; +81. Medido con la lista exacta de 195 archivos del paso "Piso exacto",
+Python 3.14.4, `requirements.txt`, `pytest` y `pytest-asyncio`; los cinco
+directorios del host se ocultaron en namespace de mount. Resultado: 3621 passed,
+45 skipped, 1 xfailed, 16 subtests. Un primer intento falló una prueba ajena por
+mantener `USER=root` tras bajar de `sudo`; con `USER=fruiz` y el usuario efectivo
+alineados, la repetición completa pasó.
+
+3537 -> 3540 (2026-10-05, JAX#357 ronda 2): se agregaron tres pruebas en
+`tests/test_docker_rm_sin_fuga_de_volumenes.py`; la tercera,
+`test_python_que_no_parsea_falla_en_vez_de_degradar_a_shell`, exige que un Python
+inválido lance `SyntaxError` en vez de analizarse como shell. Medido en hall9000 con la lista exacta del paso
 "Piso exacto", Python 3.14.4 y `sudo unshare --mount` ocultando
 `~/claude-skills`, `~/ejecutor-fase0`, `~/jax-platform`, `/srv/jax-prod` y el
 `/etc/jax/build` propio del host:
 3540 passed, 45 skipped, 1 xfailed y 16 subtests. El objeto `/etc/jax/build` se
 ocultó solo dentro del namespace porque el runner limpio no contiene esa
-configuración local. El total medido quedó tres sobre el piso registrado; esta
-ronda agregó dos funciones de prueba y no aisló el origen del tercer conteo.
+configuración local. El total medido quedó tres sobre el piso registrado, igual a
+las tres pruebas nuevas de esta ronda.
 Los 45 skipped conservan el desglose vigente.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
