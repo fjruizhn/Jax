@@ -127,13 +127,12 @@ PERMISOS: dict[str, Permiso] = {
             "caller": frozenset({"jax_platform_chat"}),
         },
     ),
-    # El propio proceso de LAS MANOS: Jacobs despacha pasos a motores y Ada
-    # crea sub-pipelines (con su token de un solo uso). Nunca aprueba ni reanuda.
+    # El propio proceso de LAS MANOS: Ada crea sub-pipelines (con su token de un
+    # solo uso). Jacobs ya NO despacha pasos a motores ni consulta/cancela motor
+    # jobs (despacho legacy cerrado, 410; sin esos pedidos en el arbol), asi que
+    # esos permisos se retiraron. Nunca aprueba ni reanuda.
     IDENTIDAD_JACOBS: Permiso(
         rutas=(
-            ("POST", re.compile(r"/motor/dispatch")),
-            ("GET", re.compile(rf"/motor/job/{_SEGMENTO}")),
-            ("POST", re.compile(rf"/motor/job/{_SEGMENTO}/cancel")),
             ("POST", re.compile(r"/jacobs/pipeline")),
         ),
         declarables={

@@ -34,6 +34,7 @@ exigir_base_de_test()
 from jacobs import store
 from jacobs.executor import _invoke_motor
 from jacobs.models import Pipeline, Step, StepStatus
+from policy.execution_control.errors import GovernedExecutionRequiredError
 
 
 def _pipeline():
@@ -45,56 +46,18 @@ class StepMotorTest(unittest.IsolatedAsyncioTestCase):
         step = Step(facet="kimi", capability="implementation", motor="ada")
         pipeline = _pipeline()
 
-        class _DispatchResp:
-            status_code = 200
-            def json(self): return {"job_id": "j1", "status": "pending"}
-            def raise_for_status(self): pass
-
-        fake_poll = AsyncMock()
-        fake_poll.return_value.status_code = 200
-        fake_poll.return_value.json = lambda: {"status": "completed", "result_summary": "ok"}
-        fake_poll.return_value.raise_for_status = lambda: None
-
-        captured = {}
-
-        async def fake_post(self, url, json=None, **kw):
-            captured["payload"] = json
-            return _DispatchResp()
-
-        with patch("httpx.AsyncClient.post", fake_post), \
-             patch("httpx.AsyncClient.get", fake_poll):
+        with patch("jacobs.executor.obtener_cliente_http", side_effect=AssertionError("no HTTP")) as client, \
+             self.assertRaises(GovernedExecutionRequiredError):
             await _invoke_motor(step, pipeline, timeout=5)
-
-        assert captured["payload"]["motor"] == "ada", captured["payload"]
+        client.assert_not_called()
 
     async def test_motor_ausente_manda_none_para_activar_resolver(self):
         step = Step(facet="kimi", capability="implementation", motor=None)
         pipeline = _pipeline()
-        fake_dispatch_json = {"job_id": "j2", "status": "pending"}
-        captured = {}
-
-        class _Resp:
-            status_code = 200
-            def json(self): return fake_dispatch_json
-            def raise_for_status(self): pass
-
-        class _RespDone:
-            status_code = 200
-            def json(self): return {"status": "completed", "result_summary": "ok"}
-            def raise_for_status(self): pass
-
-        async def fake_post(self, url, json=None, **kw):
-            captured["payload"] = json
-            return _Resp()
-
-        async def fake_get(self, url, **kw):
-            return _RespDone()
-
-        with patch("httpx.AsyncClient.post", fake_post), \
-             patch("httpx.AsyncClient.get", fake_get):
+        with patch("jacobs.executor.obtener_cliente_http", side_effect=AssertionError("no HTTP")) as client, \
+             self.assertRaises(GovernedExecutionRequiredError):
             await _invoke_motor(step, pipeline, timeout=5)
-
-        assert captured["payload"]["motor"] is None, captured["payload"]
+        client.assert_not_called()
 
 
 class StepMotorPersistenceTest(unittest.IsolatedAsyncioTestCase):

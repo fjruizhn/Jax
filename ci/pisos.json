@@ -106,8 +106,8 @@
       "mensaje": "PISO ROTO: se esperaban 214 tests CORRIDOS de F2-E-SR3."
     },
     "governance/f2e-sr3-source": {
-      "patron": "^164 passed",
-      "mensaje": "PISO ROTO: se esperaban 164 tests CORRIDOS de F2-E-SR3 source/auth/routing."
+      "patron": "^166 passed",
+      "mensaje": "PISO ROTO: se esperaban 166 tests CORRIDOS de F2-E-SR3 source/auth/routing."
     },
     "governance/gov": {
       "patron": "^264 passed",
@@ -122,8 +122,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 15 tests CORRIDOS de F2-E structured projection."
     },
     "tests-puros/out": {
-      "patron": "^3841 passed, 45 skipped",
-      "mensaje": "PISO ROTO: se esperaban 3841 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Re-medido el 2026-10-06 (ronda 14 de JAX#357) por recoleccion con la lista exacta de 195 archivos del paso 'Piso exacto', sin JAX_DB_HOST: 3887 recolectadas = 3841 passed + 45 skipped + 1 xfailed (3834 de la ronda 11 + 35 de la ronda 12 + 13 de la ronda 13 + 5 de la ronda 14); 435d1ede recolecta 3814 con la misma lista."
+      "patron": "^3876 passed, 45 skipped",
+      "mensaje": "PISO ROTO: se esperaban 3876 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Re-medido el 2026-10-06 (ronda 15 de JAX#357) sobre la MEZCLA de la rama con origin/master (36dafaa2) por recoleccion con la lista exacta de 195 archivos del paso 'Piso exacto', sin JAX_DB_HOST: 3922 recolectadas = 3876 passed + 45 skipped + 1 xfailed (3841 de la rama + 35 de #362), a confirmar en el runner; 435d1ede recolecta 3814 con la misma lista."
     },
     "tests-puros/arranque_instalado": {
       "patron": "^46 passed, 9 skipped",

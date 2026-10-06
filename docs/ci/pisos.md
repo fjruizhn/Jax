@@ -810,6 +810,8 @@ Patrón vigente al migrar (2026-10-03, master 364ded9): `^156 passed`
 
 Jax#338 (2026-10-04): `^156 passed` → `^164 passed`, +8 en las_manos/_procesamiento_routes_test.py (formato_no_soportado con formato, freno por contenido, 422 antes del freno); medido local hall9000.
 
+2026-10-06 (cierre de #362): `^164 passed` → `^166 passed`, +2 netas en `tests/test_las_manos_auth_servicio.py` (la identidad `jacobs` pierde `/motor/dispatch` y `/motor/job/*`: 3 pruebas de 403 + 1 de que conserva solo `/jacobs/pipeline`, menos 2 filas de `test_declarar_otra_identidad_se_rechaza`). Medido LOCAL en hall9000 con el comando exacto de tres archivos (`166 passed`). Esos +2 ya estaban contados en `tests-puros/out`, que corre el mismo archivo: el archivo cae en DOS pisos y la tanda anterior solo ajusto uno. Revisados todos los pasos de `policy.yml` que corren archivos tocados desde ea428368 (`auth_servicio`, `human_gate`, `arranque`, `invoke_motor_*`, `config_entorno`, `cliente_http`, `dispatch_step_reroute`, `plan_facetas`, `_arbitro_test`): solo este paso (fuera de `tests-puros/out`) corre uno de ellos; los otros pasos de `governance` (10 a 13) siguen en `^264`, `^15` y `^10`, medidos local.
+
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 ```text
@@ -905,6 +907,13 @@ para conservar byte a byte el registro de la migración de pisos.
 matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
 sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
 piso se vuelve a fijar desde los **3537 de master**.
+
+3841 (rama) + 35 (#362) = 3876 (2026-10-06, JAX#357 ronda 15, mezcla con origin/master 36dafaa2):
+`ci/pisos.json` choco con master en `tests-puros/out` (master: 3572; la rama: 3841 sobre su base). Se
+resolvio tomando 3841 + los 35 de #362 = 3876, medido sobre la mezcla por recoleccion
+(`pytest --collect-only -q`, PYTHONPATH=.:las_manos, SIN `JAX_DB_HOST`) con la lista exacta de 195
+archivos: 3922 recolectadas = 3876 passed + 45 skipped + 1 xfailed. `governance/f2e-sr3-source` queda
+en 166 (el de master). A confirmar en el runner.
 
 3836 -> 3841 (2026-10-06, JAX#357 ronda 14): +5 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
 (de 302 a 307): un nodo List/Tuple que master no marca ya no exime una ventana sacada de una cadena
@@ -1025,6 +1034,18 @@ las tres pruebas nuevas de esta ronda.
 Los 45 skipped conservan el desglose vigente.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
+
+Nota 2026-10-06 (simplificacion de #362): se revierte el registro de evidencia B7 en el middleware y los pisos vuelven a `^3570 passed, 45 skipped` (`tests-puros/out`) y `^166 passed` (`governance/f2e-sr3-source`); se descartan los intermedios 3574/3589/3590 y 170/185/186. FUENTE: LOCAL en hall9000 sin aislamiento `unshare`, listas exactas: 3610 passed, 3 skipped, 0 failed (tests-puros) y 166 passed (sr3-source); governance 264/15/10 sin cambio. `jacobs-gobernanza-db/out` NO cambia (`^170 passed`): una ronda intermedia lo toco por error al reemplazar 170 a ciegas en `ci/pisos.json`.
+
+3570 -> 3572 el 2026-10-06 (cierre de 2 MINOR de la auditoria sobre 7b71f7b2): +2 pruebas en `test_human_gate_sin_emision_http.py` (30 -> 32): el registrador B7 corre fuera del hilo del event loop, y sin registrador el 410 loguea (error) la misma correlacion que lleva el cuerpo. Aritmetica del runner: base 3570 + 2. Medido LOCAL el archivo: 32 passed. 45 skipped no cambia. El runner tiene la ultima palabra.
+
+3567 -> 3570 el 2026-10-06 (tercera tanda del cierre de #362, 4 MINOR de la auditoria sobre e5e5c347): +3 pruebas netas. +2 en `test_las_manos_auth_servicio.py` (3 de 403 para `jacobs` en `/motor/dispatch`, `GET /motor/job/*` y `POST /motor/job/*/cancel` + 1 de que solo conserva `/jacobs/pipeline`, menos 2 filas de `test_declarar_otra_identidad_se_rechaza` que ya no llegan a la comprobacion de identidad), +1 en `test_human_gate_sin_emision_http.py` (sin falla de evidencia B7 no hay log de error; la del log con correlacion amplia una prueba existente), +-0 en `test_arranque_las_manos_no_shadowea_policy.py` (ruta completa, mismas pruebas) y +-0 en los 4 renombrados. FUENTE: LOCAL en hall9000 sin aislamiento `unshare`, mismo comando del paso: 3610 passed, 3 skipped, 0 failed, contra 3607 de la tanda anterior; aritmetica del runner: 3567 confirmado + 3. 45 skipped no cambia. El runner tiene la ultima palabra.
+
+3560 -> 3567 el 2026-10-06 (segunda tanda del cierre de #362, pedido del coordinador): +7 pruebas netas. +1 `el_juez` en el rechazo del predicado y +2 de que C5/auditor local no pasan por el predicado (`test_plan_facetas_de_la_tabla.py`), +1 neta en `test_config_entorno.py` (2 pruebas -> 3: sin `LAS_MANOS_URL`, con `JAX_OLLAMA_URL`), +2 de `origen_plan` en PLAN_REJECTED, +1 de la allowlist del arranque real (`test_arranque_las_manos_no_shadowea_policy.py`); la prueba de 0 pedidos se reescribe (+-0). FUENTE: LOCAL en hall9000 sin aislamiento `unshare`, mismo comando del paso: HEAD 3607 passed, 3 skipped, 0 failed. Linea base comparable 3580 = 3579 medido en ea428368 + 1 (`test_arranque_real_no_colisiona_con_policy_de_la_raiz`, que en ese run fallaba por un PermissionError local y en el runner pasa, ya contada en su 3540). Delta 3607 - 3580 = +27 sobre 3540, es decir +7 sobre el 3560 anterior. 45 skipped no cambia. El runner tiene la ultima palabra.
+
+3540 -> 3560 el 2026-10-06 (cierre de los MINOR de #362, sobre ea428368, cuyo CI midio 3540): +20 pruebas netas. +2 evidencia B7 del 410 de `/motor/dispatch` (`test_human_gate_sin_emision_http.py`), +11 predicado como lista blanca (`test_plan_facetas_de_la_tabla.py`: 4 facetas aceptadas, 6 rechazadas, 1 plan), +5 reroute real de `_dispatch_step` (`test_dispatch_step_reroute.py`: 4 candidatos no ejecutables + 1 mixto), +2 guardas contra la resurreccion del despacho legacy (`test_invoke_motor_rechazo.py`); `test_jacobs_reusa_el_cliente_entre_llamadas` se reescribe (sonda nueva, +-0). FUENTE DE LA MEDICION: LOCAL en hall9000, sin aislamiento `unshare` (no se corrio con sudo), mismo comando que el paso `Piso exacto de tests CORRIDOS` sobre ea428368 (3579 passed) y sobre HEAD (3599 passed), mismas 3 skipped y mismo unico fallo preexistente de entorno (`test_arranque_real_no_colisiona_con_policy_de_la_raiz`) en las dos: delta +20 sumado al 3540 que el runner midio en ea428368. 45 skipped no cambia (no se agrego ningun skip). El runner tiene la ultima palabra: si mide otro numero, se corrige aqui y en `ci/pisos.json`.
+
+3537 -> 3540 el 2026-10-06 (pipeline honesto): +3 pruebas netas para rechazar facetas sin ejecución gobernada en plan/pre-vuelo, continuar y devolución antes de cualquier sonda o escritura; además los tests de `_invoke_motor` ahora comprueban que no obtiene cliente HTTP. Las pruebas focalizadas nuevas/modificadas pasan localmente; el full-run del piso requiere el runner aislado y conserva los 45 skips.
 
 3531 -> 3537 el 2026-10-06 (ronda 3 de #356; medido LOCAL por archivo con /srv/jax-prod, ~/claude-skills y ~/jax-platform tapados y confirmado con la suite completa del paso): `test_instalar_dropins_de_servicio.py` 11 -> 14 (+3: rechazo de filas de otro dueno) y `test_activacion_timers_b9.py` 9 -> 12 (+3: Monotonic=0, Realtime=n/a y SubState=running). 45 skipped no cambia.
 

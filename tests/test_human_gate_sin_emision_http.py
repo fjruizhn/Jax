@@ -261,6 +261,127 @@ def test_motor_dispatch_con_token_inventado_se_rechaza(motor, store_falso):
     lanzado.assert_not_called()
 
 
+def test_motor_dispatch_410_registra_la_evidencia_b7(motor, store_falso, monkeypatch):
+    """El 410 de /motor/dispatch no es mudo: deja la evidencia B7 de que el
+    despacho legacy fue denegado (control CTL.B6.GOVERNED_DISPATCH). Si alguien
+    borra el llamado al registrador, el endpoint seguiria dando 410 y nada se
+    pondria rojo -- esta prueba es la que lo fija."""
+    routes, lanzado = motor
+    from unittest.mock import Mock
+    from fastapi import HTTPException
+    registrador = Mock()
+    monkeypatch.setattr(routes, "_B7_EVIDENCE_RECORDER", registrador)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(routes.dispatch(_pedido("cualquier-cosa")))
+    assert exc.value.status_code == 410
+    assert exc.value.detail == {"code": "GOVERNED_EXECUTION_REQUIRED", "correlacion": None, "evidencia_registrada": True}
+    registrador.record_governed_dispatch_denied.assert_called_once_with()
+    lanzado.assert_not_called()
+
+
+def test_motor_dispatch_410_sobrevive_a_que_la_evidencia_b7_falle(motor, store_falso, monkeypatch, caplog):
+    """Si persistir la evidencia falla, el despacho legacy sigue rechazado Y el
+    fallo no se traga en silencio: log de ERROR con un identificador de
+    correlacion que TAMBIEN viaja en el cuerpo del 410, para que el operador una
+    lo que vio el cliente con la evidencia que falto. Nada del pedido (prompt,
+    token) va al log."""
+    import logging
+    import re
+    from logging import Formatter
+    routes, lanzado = motor
+    from unittest.mock import Mock
+    from fastapi import HTTPException
+    from motor_registry.models import MotorDispatchRequest
+    registrador = Mock()
+    registrador.record_governed_dispatch_denied.side_effect = RuntimeError("sin disco")
+    monkeypatch.setattr(routes, "_B7_EVIDENCE_RECORDER", registrador)
+    pedido = MotorDispatchRequest(caller="hyde", capability="code_swarm", motor="kimi",
+                                  prompt="PROMPT-SECRETO-7f3a", human_gate_token="TOKEN-SECRETO-9c1d",
+                                  timeout_seconds=60)
+    with caplog.at_level(logging.ERROR, logger=routes.logger.name):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(routes.dispatch(pedido))
+    assert exc.value.status_code == 410
+    cuerpo = exc.value.detail
+    assert set(cuerpo) == {"code", "correlacion", "evidencia_registrada"}
+    assert cuerpo["evidencia_registrada"] is False
+    assert cuerpo["code"] == "GOVERNED_EXECUTION_REQUIRED"
+    assert isinstance(cuerpo["correlacion"], str)
+    registrador.record_governed_dispatch_denied.assert_called_once_with()
+    lanzado.assert_not_called()
+    registros = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(registros) == 1
+    mensaje = registros[0].getMessage()
+    assert registros[0].exc_info and "sin disco" in str(registros[0].exc_info[1])
+    assert "B7" in mensaje
+    # La correlacion del log es la MISMA que recibio el cliente.
+    correlacion = re.search(r"correlacion=([0-9a-f]{32})", mensaje)
+    assert correlacion, mensaje
+    assert cuerpo["correlacion"] == correlacion.group(1)
+    # Nada del pedido en el log: ni en el mensaje ni en el traceback formateado.
+    completo = mensaje + Formatter().formatException(registros[0].exc_info)
+    for secreto in ("PROMPT-SECRETO-7f3a", "TOKEN-SECRETO-9c1d"):
+        assert secreto not in completo
+
+
+def test_motor_dispatch_410_sin_falla_de_evidencia_no_loguea_error(motor, store_falso, monkeypatch, caplog):
+    import logging
+    routes, _ = motor
+    from unittest.mock import Mock
+    from fastapi import HTTPException
+    monkeypatch.setattr(routes, "_B7_EVIDENCE_RECORDER", Mock())
+    with caplog.at_level(logging.ERROR, logger=routes.logger.name):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(routes.dispatch(_pedido("cualquier-cosa")))
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+    # Cuerpo unico del 410: correlacion null
+    # cuando la evidencia quedo registrada.
+    assert exc.value.status_code == 410
+    assert exc.value.detail == {"code": "GOVERNED_EXECUTION_REQUIRED", "correlacion": None, "evidencia_registrada": True}
+
+
+def test_motor_dispatch_410_registra_la_evidencia_fuera_del_event_loop(motor, store_falso, monkeypatch):
+    """El registrador es sincrono (toca disco/DB): tiene que correr en un hilo
+    aparte, no en el del loop. Con una llamada directa corre en el hilo del loop."""
+    import threading
+    from fastapi import HTTPException
+    routes, _ = motor
+    hilos = {}
+
+    class Registrador:
+        def record_governed_dispatch_denied(self):
+            hilos["registrador"] = threading.get_ident()
+
+    monkeypatch.setattr(routes, "_B7_EVIDENCE_RECORDER", Registrador())
+
+    async def correr():
+        hilos["loop"] = threading.get_ident()
+        with pytest.raises(HTTPException):
+            await routes.dispatch(_pedido("cualquier-cosa"))
+
+    asyncio.run(correr())
+    assert hilos["registrador"] != hilos["loop"]
+
+
+def test_motor_dispatch_410_sin_registrador_loguea_la_correlacion_del_cuerpo(motor, store_falso, monkeypatch, caplog):
+    import logging
+    import re
+    from fastapi import HTTPException
+    routes, lanzado = motor
+    monkeypatch.setattr(routes, "_B7_EVIDENCE_RECORDER", None)
+    with caplog.at_level(logging.ERROR, logger=routes.logger.name):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(routes.dispatch(_pedido("cualquier-cosa")))
+    cuerpo = exc.value.detail
+    assert exc.value.status_code == 410
+    assert cuerpo["evidencia_registrada"] is False
+    registros = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(registros) == 1
+    m = re.search(r"correlacion=([0-9a-f]{32})", registros[0].getMessage())
+    assert m and cuerpo["correlacion"] == m.group(1)
+    lanzado.assert_not_called()
+
+
 def test_motor_dispatch_con_token_emitido_pasa_y_lo_consume(motor, store_falso):
     routes, _ = motor
     store = store_falso

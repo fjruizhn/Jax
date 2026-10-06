@@ -210,22 +210,56 @@ def test_el_menu_de_qwen_solo_ofrece_las_facetas_activas(monkeypatch):
     asyncio.run(correr())
     [payload] = cliente.posts
     texto = _mensaje_de_usuario(payload)
-    for inactiva in ("thot", "ada", "hyde"):
-        assert not _nombra(texto, inactiva), f"qwen ve '{inactiva}' en el menú sin estar activa:\n{texto}"
-    for activa in ("hipatia", "jekyll", "kimi"):
+    for inactiva in ("thot", "ada", "hyde", "kimi", "jax_local"):
+        assert not _nombra(texto, inactiva), f"qwen ve '{inactiva}' no ejecutable en el menú:\n{texto}"
+    for activa in ("hipatia", "jekyll"):
         assert _nombra(texto, activa), f"falta '{activa}' en el menú:\n{texto}"
 
 
 def test_el_menu_de_ada_solo_ofrece_las_facetas_activas(monkeypatch):
     cliente, _, _, correr = _correr_con_cerebros(
         monkeypatch, {"ada", "thot", "kimi", "jax_local"}, "x" * 250,
-        '[{"facet": "kimi", "capability": "analysis", "prompt": "x"}]')
+        '[{"facet": "ada", "capability": "implementation", "prompt": "x"}]')
     asyncio.run(correr())
     [payload] = cliente.streams
     texto = _mensaje_de_usuario(payload) + payload["messages"][0]["content"]
-    for inactiva in ("hipatia", "jekyll", "hyde"):
-        assert not _nombra(texto, inactiva), f"Ada ve '{inactiva}' sin estar activa"
-    assert _nombra(texto, "kimi")
+    menu = texto.split("Facetas disponibles:", 1)[1].split(".\\n", 1)[0]
+    for no_disponible in ("kimi", "jax_local", "hyde"):
+        assert not _nombra(menu, no_disponible), f"Ada ofrece '{no_disponible}'"
+    assert _nombra(menu, "ada")
+    from jacobs.plan import _menu_de_facetas
+    menu = _menu_de_facetas(frozenset({"ada", "thot", "kimi", "jax_local", "hyde"}), "thot")
+    assert {fila[0] for fila in menu} == {"ada"}
+
+
+def test_plan_y_preflight_rechazan_facetas_sin_dispatch_gobernado(monkeypatch):
+    from fastapi import HTTPException
+    from jacobs import store
+    from jacobs.models import StepSpec
+
+    monkeypatch.setattr(routes, "check_kill_switch", lambda: False)
+    evento = AsyncMock()
+    monkeypatch.setattr(store, "event_append", evento)
+    sin_prevuelo = AsyncMock()
+    monkeypatch.setattr(routes, "_prevuelo_o_503", sin_prevuelo)
+
+    for facet in ("kimi", "jax_local", "hyde"):
+        with pytest.raises(HTTPException) as rechazo_plan:
+            asyncio.run(routes.plan_only(routes.PlanRequest(
+                name="prueba", objective="x", invoked_by="plataforma", mode="dry_run",
+                steps=[StepSpec(facet=facet, capability="analysis", prompt="x")],
+            )))
+        assert rechazo_plan.value.status_code == 422
+        assert rechazo_plan.value.detail["code"] == "motor_gobernado_no_disponible"
+
+        with pytest.raises(HTTPException) as rechazo_prevuelo:
+            asyncio.run(routes.preflight(routes.PreflightRequest(
+                invoked_by="plataforma", objective="x",
+                steps=[StepSpec(facet=facet, capability="analysis", prompt="x")],
+            )))
+        assert rechazo_prevuelo.value.status_code == 422
+        assert rechazo_prevuelo.value.detail["code"] == "motor_gobernado_no_disponible"
+    sin_prevuelo.assert_not_awaited()
 
 
 def test_ada_no_se_consulta_si_el_patron_modular_pide_una_faceta_inactiva(monkeypatch):
@@ -235,7 +269,8 @@ def test_ada_no_se_consulta_si_el_patron_modular_pide_una_faceta_inactiva(monkey
     cliente, resolver, evento, correr = _correr_con_cerebros(
         monkeypatch, {"ada", "kimi", "jax_local"}, "x" * 250,
         '[{"facet": "kimi", "capability": "analysis", "prompt": "x"}]')
-    asyncio.run(correr())
+    with pytest.raises(plan_mod.MotorGobernadoNoDisponible):
+        asyncio.run(correr())
     assert cliente.streams == [], "Ada se consultó con thot inactiva"
     assert "ada" not in [c.args[0] for c in resolver.await_args_list]
     pipeline_id, tipo, payload = evento.await_args_list[0].args
@@ -264,3 +299,112 @@ def test_el_plan_de_respaldo_con_una_faceta_inactiva_se_rechaza_nombrandola(monk
         asyncio.run(correr())
     assert [v.facet for v in e.value.violations] == ["thot"]
     assert "arbitro_no_disponible" in e.value.violations[0].reason
+
+
+# --- E2b-1a MINOR 1 (auditoria #362): lista blanca, no lista negra ---------
+
+@pytest.mark.parametrize("faceta", sorted(models.HTTP_FACETS))
+def test_el_predicado_acepta_solo_las_facetas_http_gobernadas(faceta):
+    assert models.faceta_ejecutable_en_pipeline(faceta) is True
+
+
+@pytest.mark.parametrize("faceta", ["kimi", "jax_local", "el_juez", "hyde", "faceta_nueva_subprocess", "", None])
+def test_el_predicado_rechaza_toda_faceta_fuera_de_la_lista_blanca(faceta):
+    """Una faceta nueva activada en la tabla (otro transporte, otro nombre) no
+    entra por omision: sin estar en HTTP_FACETS, el plan no pasa -- si no, falla
+    al ejecutar, despues de haber cobrado los pasos anteriores."""
+    assert models.faceta_ejecutable_en_pipeline(faceta) is False
+
+
+def test_validar_facetas_ejecutables_rechaza_una_faceta_nueva_no_listada():
+    nuevo = models.Step(facet="faceta_nueva_subprocess", capability="analysis", step_index=0)
+    ok = models.Step(facet="hipatia", capability="analysis", step_index=1)
+    with pytest.raises(plan_mod.MotorGobernadoNoDisponible) as exc:
+        plan_mod.validar_facetas_ejecutables([nuevo, ok])
+    assert [v.facet for v in exc.value.violations] == ["faceta_nueva_subprocess"]
+
+
+# --- El auditor local (el_juez) no es un paso de pipeline ------------------
+# `ejecutor.auditor_faceta_local` (hoy `el_juez`) lo elige C5 para auditar
+# misiones con datos de clientes. Con la lista blanca, el_juez no es ejecutable
+# como PASO de pipeline (igual que jax_local, que corre el mismo modelo): eso es
+# lo correcto, y NO rompe a C5 porque C5 no pasa por el predicado, el reroute,
+# el menu ni el arbitro de Jacobs. Estas dos pruebas fijan ambas mitades.
+
+def _modulos_py(*carpetas):
+    from pathlib import Path
+    raiz = Path(__file__).resolve().parents[1]
+    for carpeta in carpetas:
+        for p in sorted((raiz / carpeta).rglob("*.py")):
+            if "__pycache__" not in p.parts and not p.name.endswith("_test.py") and not p.name.startswith("test_"):
+                yield p
+
+
+def test_c5_y_el_auditor_local_no_pasan_por_el_predicado_ni_por_el_planificador_de_jacobs():
+    import ast
+    prohibidos_modulo = {"jacobs.plan", "jacobs.executor", "jacobs.models", "jacobs.continuar", "jacobs.devolucion"}
+    prohibidos_nombre = {"faceta_ejecutable_en_pipeline", "validar_facetas_ejecutables",
+                         "HTTP_FACETS", "MOTOR_FACETS", "FACETAS_CERRADAS_A_PROPOSITO", "PlanBuilder"}
+    hallazgos = []
+    archivos = list(_modulos_py("jax/ejecutor", "scripts/ejecutor_contratos"))
+    assert archivos, "no se encontro el codigo de C5"
+    for p in archivos:
+        for n in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
+            if isinstance(n, ast.ImportFrom) and n.module:
+                importados = {n.module} | {f"{n.module}.{a.name}" for a in n.names}
+                if importados & prohibidos_modulo or any(a.name in prohibidos_nombre for a in n.names):
+                    hallazgos.append(f"{p.name}:{n.lineno}")
+            elif isinstance(n, ast.Import) and any(a.name in prohibidos_modulo for a in n.names):
+                hallazgos.append(f"{p.name}:{n.lineno}")
+            elif isinstance(n, ast.Name) and n.id in prohibidos_nombre:
+                hallazgos.append(f"{p.name}:{n.lineno}")
+    assert hallazgos == []
+
+
+def test_jacobs_solo_lee_la_faceta_arbitro_http_y_nunca_la_local():
+    """El arbitro del plan sale SOLO de `ejecutor.auditor_faceta` (hoy thot, HTTP);
+    ninguna linea de jacobs/ lee `auditor_faceta_local`."""
+    leen_local = [p.name for p in _modulos_py("jacobs") if "auditor_faceta_local" in p.read_text(encoding="utf-8")]
+    assert leen_local == []
+    from jax.ejecutor.contratos import eleccion_c5
+    cfg = eleccion_c5.ConfigC5(**{**{c: None for c in eleccion_c5.ConfigC5.__dataclass_fields__},
+                                  "auditor_faceta": "thot", "auditor_faceta_local": "el_juez"})
+    assert eleccion_c5.elegir_auditor_faceta(cfg, hay_datos_de_clientes=True) == "el_juez"
+    assert eleccion_c5.elegir_auditor_faceta(cfg, hay_datos_de_clientes=False) == "thot"
+    assert models.faceta_ejecutable_en_pipeline("thot") is True
+    assert models.faceta_ejecutable_en_pipeline("el_juez") is False
+
+
+# --- MINOR 5 (auditoria #362): el costo del planificador en un plan rechazado --
+# Un plan que sale del propio LLM (Ada/qwen) solo se puede validar DESPUES de la
+# llamada, asi que ese gasto no se puede evitar antes del 422. Lo que si se
+# puede es que no pase desapercibido: el evento PLAN_REJECTED dice de donde
+# salio el plan. (Ni Ada ni qwen escriben hoy una fila en axioma_usage: no hay
+# registro de uso del planificador que ordenar o marcar -- ver el informe.)
+
+def _rechazo(monkeypatch, steps_spec, plan_del_llm=None):
+    from fastapi import HTTPException
+    from jacobs import store
+    evento = AsyncMock()
+    monkeypatch.setattr(store, "event_append", evento)
+    if plan_del_llm is not None:
+        async def llm(objective, max_steps, capability_hint, *, facetas_activas, governance=None):
+            return plan_del_llm
+        monkeypatch.setattr(plan_mod.PlanBuilder, "_llm_plan", lambda self, *a, **k: llm(*a, **k))
+        monkeypatch.setattr(plan_mod.PlanBuilder, "_classify_difficulty", lambda self, o: "simple")
+    with pytest.raises(HTTPException):
+        asyncio.run(routes._build_plan_or_reject("p-cobro", "algo trivial", 3, steps_spec))
+    return evento.await_args.args[2]
+
+
+def test_plan_rechazado_que_salio_del_planificador_lo_dice_en_el_evento(monkeypatch):
+    payload = _rechazo(monkeypatch, None, plan_del_llm=[
+        {"facet": "hyde", "capability": "implementation", "prompt": "x"}])
+    assert payload["origen_plan"] == "planificador"
+    assert payload["planificador_consultado"] is True
+
+
+def test_plan_rechazado_de_pasos_explicitos_no_dice_que_hubo_planificador(monkeypatch):
+    payload = _rechazo(monkeypatch, [{"facet": "kimi", "capability": "analysis", "prompt": "x"}])
+    assert payload["origen_plan"] == "pasos_explicitos"
+    assert payload["planificador_consultado"] is False
