@@ -908,6 +908,13 @@ matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
 sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
 piso se vuelve a fijar desde los **3537 de master**.
 
+3876 -> 3888 (2026-10-06, JAX#357 ronda 15): +12 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 307 a 319): prueba diferencial de que `_hallazgos_de_cadenas_de_master` cuenta exactamente lo que
+master saca de cadenas (7 fixtures, incluidas F1-F3 del auditor), las fixtures de lista sin exencion
+contra `_sin_la_excepcion_de_lista_blanca` (4) y dos nodos con el mismo texto y distinta calificacion
+(1). Medido sobre la mezcla con la misma lista de 195 archivos: 3934 recolectadas = 3888 passed + 45
+skipped + 1 xfailed. A confirmar en el runner.
+
 3841 (rama) + 35 (#362) = 3876 (2026-10-06, JAX#357 ronda 15, mezcla con origin/master 36dafaa2):
 `ci/pisos.json` choco con master en `tests-puros/out` (master: 3572; la rama: 3841 sobre su base). Se
 resolvio tomando 3841 + los 35 de #362 = 3876, medido sobre la mezcla por recoleccion
