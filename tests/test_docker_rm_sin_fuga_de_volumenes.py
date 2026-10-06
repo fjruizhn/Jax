@@ -72,6 +72,8 @@ def _docker_exec_o_run(tokens):
         token = tokens[k]
         if token in _DOCKER_OPCIONES_SIN_VALOR or token.startswith("--") and "=" in token:
             k += 1
+        elif token.startswith(("-D=", "-v=")):
+            k += 1
         elif token in _DOCKER_OPCIONES_CON_VALOR:
             k += 2
         elif any(token.startswith(op) and len(token) > len(op) for op in ("-c", "-H", "-l")):
@@ -168,6 +170,8 @@ def _prefijo_docker_rm(tokens):
     while k < len(tokens):
         token = tokens[k]
         if token in _DOCKER_OPCIONES_SIN_VALOR or token.startswith("--") and "=" in token:
+            k += 1
+        elif token.startswith(("-D=", "-v=")):
             k += 1
         elif token in _DOCKER_OPCIONES_CON_VALOR:
             if k + 1 >= len(tokens):
@@ -321,6 +325,10 @@ FUGAN_SHELL = [
     "${DOCKER_CMD} rm -f x",
     "docker -H unix:///x rm -f c",
     "docker --context=x rm -f c",
+    "docker -D=false rm -f c",
+    "docker -D=0 rm -f c",
+    "docker -v=false rm -f c",
+    "docker -v=0 rm -f c",
     "sudo -E docker rm -f c",
     "xargs docker rm -f",
     "sudo -n docker rm \\\n   -f \"$C\"",
@@ -377,6 +385,10 @@ FUGAN_PYTHON = [
     '["sudo", "docker", "rm", "-f", n]',
     '["docker", "-c", "ctx", "rm", "-f", n]',
     '["docker", "--context", "ctx", "rm", "-f", n]',
+    '["docker", "-D=false", "rm", "-f", n]',
+    '["docker", "-D=0", "rm", "-f", n]',
+    '["docker", "-v=false", "rm", "-f", n]',
+    '["docker", "-v=0", "rm", "-f", n]',
     '["docker", "--context", "network", "rm", "-f", n]',
     '["docker", "-H", "unix:///x", "rm", "-f", n]',
     '["docker", "--host", "unix:///x", "rm", "-f", n]',
@@ -449,6 +461,8 @@ NO_FUGAN_SHELL = [
     "docker --context ctx exec docker rm -f /tmp/x",
     "docker -H tcp://x exec docker rm -f /tmp/x",
     "docker --context=ctx run docker rm -f /tmp/x",
+    "docker -D=false exec docker rm -f /tmp/x",
+    "docker -v=false run docker rm -f /tmp/x",
     "docker compose exec docker rm -f /tmp/x",
     "docker compose run svc docker rm -f /tmp/x",
     "docker compose --profile prod exec docker rm -f /tmp/x",
@@ -474,6 +488,8 @@ NO_FUGAN_PYTHON = [
     '["docker", "--context", "ctx", "exec", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "-H", "tcp://x", "exec", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "--context=ctx", "run", "docker", "rm", "-f", "/tmp/x"]',
+    '["docker", "-D=false", "exec", "docker", "rm", "-f", "/tmp/x"]',
+    '["docker", "-v=false", "run", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "compose", "exec", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "compose", "run", "svc", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "compose", "--profile", "prod", "exec", "docker", "rm", "-f", "/tmp/x"]',

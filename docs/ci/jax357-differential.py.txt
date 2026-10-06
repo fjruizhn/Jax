@@ -91,6 +91,14 @@ positive += [
     ("python", '["docker", "rm", "-fv=0", n]'),
     ("python", '["docker", "compose", "rm", "-f", "-v=false", svc]'),
     ("python", '["docker", "compose", "rm", "-f", "-v=0", svc]'),
+    ("shell", "docker -D=false rm -f victim"),
+    ("shell", "docker -D=0 rm -f victim"),
+    ("shell", "docker -v=false rm -f victim"),
+    ("shell", "docker -v=0 rm -f victim"),
+    ("python", '["docker", "-D=false", "rm", "-f", n]'),
+    ("python", '["docker", "-D=0", "rm", "-f", n]'),
+    ("python", '["docker", "-v=false", "rm", "-f", n]'),
+    ("python", '["docker", "-v=0", "rm", "-f", n]'),
 ]
 
 negative = [
@@ -102,6 +110,8 @@ negative += [("shell", command) for command in (
     "docker --context=ctx run docker rm -f target",
     "docker rm -f=false target",
     "docker rm -f=false -v=false target",
+    "docker -D=false exec docker rm -f target",
+    "docker -v=false run docker rm -f target",
 )]
 negative += [("shell", f"docker compose {option} {subcommand} docker rm -f target")
              for option in ("", "--profile prod", "--env-file .env")
@@ -113,6 +123,8 @@ negative += [("python", source) for source in (
     '["docker", "--context=ctx", "run", "docker", "rm", "-f", "target"]',
     '["docker", "rm", "-f=false", "target"]',
     '["docker", "rm", "-f=false", "-v=false", "target"]',
+    '["docker", "-D=false", "exec", "docker", "rm", "-f", "target"]',
+    '["docker", "-v=false", "run", "docker", "rm", "-f", "target"]',
 )]
 negative += [("python", repr(["docker", "compose"] + option.split() + subcommand.split()
                               + ["docker", "rm", "-f", "target"]))
