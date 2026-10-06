@@ -68,15 +68,19 @@ def _compose_exec_o_run(tokens):
 
 def _docker_exec_o_run(tokens):
     k = 0
+    opciones = True
     while k < len(tokens):
         token = tokens[k]
-        if token in _DOCKER_OPCIONES_SIN_VALOR or token.startswith("--") and "=" in token:
+        if opciones and token == "--":
+            opciones = False
             k += 1
-        elif token.startswith(("-D=", "-v=")):
+        elif opciones and (token in _DOCKER_OPCIONES_SIN_VALOR or token.startswith("--") and "=" in token):
             k += 1
-        elif token in _DOCKER_OPCIONES_CON_VALOR:
+        elif opciones and token.startswith(("-D=", "-v=")):
+            k += 1
+        elif opciones and token in _DOCKER_OPCIONES_CON_VALOR:
             k += 2
-        elif any(token.startswith(op) and len(token) > len(op) for op in ("-c", "-H", "-l")):
+        elif opciones and any(token.startswith(op) and len(token) > len(op) for op in ("-c", "-H", "-l")):
             k += 1
         elif token == "container":
             k += 1
@@ -121,13 +125,19 @@ def _tokens_shell(linea):
         return linea.split()
 
 
-def _es_docker_rm(toks, indice_rm):
+def _es_docker_rm(toks, indice_rm, subcomando):
     """Reconoce docker [opciones] [container] rm, no otros subcomandos rm."""
     inicio = indice_rm - 1
     while inicio >= 0 and toks[inicio] not in _SEPARADORES:
         inicio -= 1
     for j in range(inicio + 1, indice_rm):
         if _ES_DOCKER.fullmatch(toks[j]):
+            if subcomando == "remove" and "container" not in toks[j + 1:indice_rm]:
+                continue
+            if j > inicio + 1 and toks[j - 1] == "ssh":
+                # `ssh docker exec docker rm` has a host literally named docker;
+                # keep searching for the remote executable anchor.
+                continue
             if _compose_exec_o_run(toks[j + 1:indice_rm]):
                 return False
             # Docker global options may precede exec/run; do not reinterpret
@@ -145,9 +155,9 @@ def culpables_shell(texto):
     for linea in unido.splitlines():
         toks = _tokens_shell(linea)
         for i, t in enumerate(toks):
-            if t != "rm":
+            if t not in ("rm", "remove"):
                 continue
-            if not _es_docker_rm(toks, i):
+            if not _es_docker_rm(toks, i, t):
                 continue
             banderas = []
             for siguiente in toks[i + 1:]:
@@ -167,17 +177,21 @@ def _texto_de(nodo, fuente):
 def _prefijo_docker_rm(tokens):
     comando = None
     k = 0
+    opciones_docker = True
     while k < len(tokens):
         token = tokens[k]
-        if token in _DOCKER_OPCIONES_SIN_VALOR or token.startswith("--") and "=" in token:
+        if opciones_docker and token == "--":
+            opciones_docker = False
             k += 1
-        elif token.startswith(("-D=", "-v=")):
+        elif opciones_docker and (token in _DOCKER_OPCIONES_SIN_VALOR or token.startswith("--") and "=" in token):
             k += 1
-        elif token in _DOCKER_OPCIONES_CON_VALOR:
+        elif opciones_docker and token.startswith(("-D=", "-v=")):
+            k += 1
+        elif opciones_docker and token in _DOCKER_OPCIONES_CON_VALOR:
             if k + 1 >= len(tokens):
                 return False
             k += 2
-        elif any(token.startswith(op) and len(token) > len(op) for op in ("-c", "-H", "-l")):
+        elif opciones_docker and any(token.startswith(op) and len(token) > len(op) for op in ("-c", "-H", "-l")):
             k += 1
         elif token == "container" and comando is None:
             comando = token
@@ -211,6 +225,8 @@ def _es_prefijo_docker_rm(tokens):
     for i, token in enumerate(tokens):
         if not _ES_DOCKER.search(token):
             continue
+        if i > 0 and tokens[i - 1] == "ssh":
+            continue
         if _compose_exec_o_run(tokens[i + 1:]):
             return False
         if _ES_DOCKER.fullmatch(token) and _docker_exec_o_run(tokens[i + 1:]):
@@ -234,22 +250,26 @@ def culpables_python(fuente, filename="<string>"):
     for nodo in ast.walk(arbol):
         if isinstance(nodo, (ast.List, ast.Tuple)):
             elts = nodo.elts
-            indices = [k for k, e in enumerate(elts) if isinstance(e, ast.Constant) and e.value == "rm"]
+            indices = [k for k, e in enumerate(elts)
+                       if isinstance(e, ast.Constant) and e.value in ("rm", "remove")]
             if not indices:
                 continue
-            i = indices[0]
-            antes = elts[:i]
-            tokens = [e.value if isinstance(e, ast.Constant) and isinstance(e.value, str)
-                      else _texto_de(e, fuente) for e in antes]
-            padre = padres.get(nodo)
-            if isinstance(padre, ast.BinOp) and isinstance(padre.op, ast.Add) and padre.right is nodo:
-                tokens.insert(0, _texto_de(padre.left, fuente))
-            if not _es_prefijo_docker_rm(tokens):
-                continue
-            banderas = [e.value for e in elts[i + 1:]
-                        if isinstance(e, ast.Constant) and isinstance(e.value, str) and e.value.startswith("-")]
-            if _fuerza_sin_volumenes(banderas):
-                hallados.append(" ".join(_texto_de(nodo, fuente).split()))
+            for i in indices:
+                antes = elts[:i]
+                tokens = [e.value if isinstance(e, ast.Constant) and isinstance(e.value, str)
+                          else _texto_de(e, fuente) for e in antes]
+                if elts[i].value == "remove" and "container" not in tokens:
+                    continue
+                padre = padres.get(nodo)
+                if isinstance(padre, ast.BinOp) and isinstance(padre.op, ast.Add) and padre.right is nodo:
+                    tokens.insert(0, _texto_de(padre.left, fuente))
+                if not _es_prefijo_docker_rm(tokens):
+                    continue
+                banderas = [e.value for e in elts[i + 1:]
+                            if isinstance(e, ast.Constant) and isinstance(e.value, str) and e.value.startswith("-")]
+                if _fuerza_sin_volumenes(banderas):
+                    hallados.append(" ".join(_texto_de(nodo, fuente).split()))
+                    break
         elif isinstance(nodo, ast.JoinedStr):
             partes = [p.value if isinstance(p, ast.Constant) else "{" + _texto_de(p.value, fuente) + "}"
                       for p in nodo.values]
@@ -329,6 +349,12 @@ FUGAN_SHELL = [
     "docker -D=0 rm -f c",
     "docker -v=false rm -f c",
     "docker -v=0 rm -f c",
+    "docker -- rm -f c",
+    "docker -- container rm -f c",
+    "docker container remove -f c",
+    "ssh docker exec docker rm -f c",
+    "ssh rm docker rm -f c",
+    "sudo -u rm docker rm -f c",
     "sudo -E docker rm -f c",
     "xargs docker rm -f",
     "sudo -n docker rm \\\n   -f \"$C\"",
@@ -389,6 +415,12 @@ FUGAN_PYTHON = [
     '["docker", "-D=0", "rm", "-f", n]',
     '["docker", "-v=false", "rm", "-f", n]',
     '["docker", "-v=0", "rm", "-f", n]',
+    '["docker", "--", "rm", "-f", n]',
+    '["docker", "--", "container", "rm", "-f", n]',
+    '["docker", "container", "remove", "-f", n]',
+    '["ssh", "docker", "exec", "docker", "rm", "-f", n]',
+    '["ssh", "rm", "docker", "rm", "-f", n]',
+    '["sudo", "-u", "rm", "docker", "rm", "-f", n]',
     '["docker", "--context", "network", "rm", "-f", n]',
     '["docker", "-H", "unix:///x", "rm", "-f", n]',
     '["docker", "--host", "unix:///x", "rm", "-f", n]',
@@ -458,11 +490,16 @@ NO_FUGAN_SHELL = [
     "docker stop x",
     "docker exec c rm -f /tmp/x",
     "docker exec docker rm -f /tmp/x",
+    "docker container exec docker rm -f /tmp/x",
+    "docker -- container exec docker rm -f /tmp/x",
+    "docker --context ctx container exec docker rm -f /tmp/x",
     "docker --context ctx exec docker rm -f /tmp/x",
     "docker -H tcp://x exec docker rm -f /tmp/x",
     "docker --context=ctx run docker rm -f /tmp/x",
     "docker -D=false exec docker rm -f /tmp/x",
     "docker -v=false run docker rm -f /tmp/x",
+    "docker -- exec docker rm -f /tmp/x",
+    "docker -- run docker rm -f /tmp/x",
     "docker compose exec docker rm -f /tmp/x",
     "docker compose run svc docker rm -f /tmp/x",
     "docker compose --profile prod exec docker rm -f /tmp/x",
@@ -470,6 +507,8 @@ NO_FUGAN_SHELL = [
     "# nunca uses docker rm -f",
     "docker stop x; rm -f /tmp/y",
     "docker volume rm -f x",
+    "docker remove -f x",
+    "docker compose remove -f svc",
     "docker image rm -f x",
     "docker network rm -f x",
     "docker rm x & rm -f /tmp/y",
@@ -485,11 +524,16 @@ NO_FUGAN_PYTHON = [
     'sudo + ["rm", "-f", p]',
     '[*docker, "exec", c, "rm", "-f", "/tmp/x"]',
     '["docker", "exec", "docker", "rm", "-f", "/tmp/x"]',
+    '["docker", "container", "exec", "docker", "rm", "-f", "/tmp/x"]',
+    '["docker", "--", "container", "exec", "docker", "rm", "-f", "/tmp/x"]',
+    '["docker", "--context", "ctx", "container", "exec", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "--context", "ctx", "exec", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "-H", "tcp://x", "exec", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "--context=ctx", "run", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "-D=false", "exec", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "-v=false", "run", "docker", "rm", "-f", "/tmp/x"]',
+    '["docker", "--", "exec", "docker", "rm", "-f", "/tmp/x"]',
+    '["docker", "--", "run", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "compose", "exec", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "compose", "run", "svc", "docker", "rm", "-f", "/tmp/x"]',
     '["docker", "compose", "--profile", "prod", "exec", "docker", "rm", "-f", "/tmp/x"]',
@@ -501,6 +545,7 @@ NO_FUGAN_PYTHON = [
     'sdk + ["rm", "-f", p]',
     'base + ["rm", "-f", p]',
     '["docker", "volume", "rm", "-f", v]',
+    '["docker", "remove", "-f", n]',
     '[*docker, "network", "rm", "-f", v]',
     '[*docker, "image", "rm", "-f", v]',
     '["docker", "-c", "rm", "-f", v]',
