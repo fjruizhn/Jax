@@ -1,10 +1,15 @@
 """
 LAS MANOS — Motor Registry: endpoints HTTP.
 
-POST /motor/dispatch           — legacy: por HTTP, 403 (ninguna identidad lo alcanza, ver proteger());
-                                 la funcion, si se llega, responde siempre 410 (no crea job)
-GET  /motor/job/{job_id}       — consulta estado de un job
-POST /motor/job/{job_id}/cancel — solicita cancelación
+Por HTTP, `proteger(app)` (auth_servicio.py) decide antes que estas funciones: sin credencial
+valida responde 401; con credencial valida, solo `plataforma` alcanza POST /motor/authorize-facet y
+todo lo demas de /motor responde 403 (ruta_no_permitida_para_la_identidad).
+
+POST /motor/governed-dispatch     — despacho gobernado (sin ruta HTTP permitida a ninguna identidad)
+POST /motor/dispatch              — legacy: la funcion, si se llega, responde siempre 410 (no crea job)
+POST /motor/authorize-facet       — autoriza una faceta (identidad `plataforma`)
+GET  /motor/job/{job_id}          — estado de un job (sin ruta HTTP permitida a ninguna identidad)
+POST /motor/job/{job_id}/cancel   — cancelacion (sin ruta HTTP permitida a ninguna identidad)
 
 El router se registra en server.py (`motor_router`).
 
