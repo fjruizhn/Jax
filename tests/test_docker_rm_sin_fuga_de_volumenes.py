@@ -33,6 +33,8 @@ RAIZ = Path(__file__).resolve().parent.parent
 ESTE = "tests/test_docker_rm_sin_fuga_de_volumenes.py"
 
 _ES_DOCKER = re.compile(r"(?:\S*/)?docker|\$\{?\w*docker\w*(?:\[@\])?\}?|\{[^{}]*docker[^{}]*\}|\bdk\b", re.I)
+_ES_SSH = re.compile(r"(?:\S*/)?ssh")
+_ES_SUDO = re.compile(r"(?:\S*/)?sudo")
 _SEPARADORES = {";", "&&", "||", "|", "&", "(", ")", "`", "$("}
 _FALSO = {"false", "0", "f", "no"}
 _DOCKER_OPCIONES_SIN_VALOR = {"-D", "--debug", "--tls", "--tlsverify"}
@@ -99,7 +101,7 @@ def _indices_hosts_ssh(tokens, inicio=0):
     hosts = set()
     i = inicio
     while i < len(tokens):
-        if tokens[i] != "ssh" or i in valores_wrapper:
+        if not _ES_SSH.fullmatch(tokens[i]) or i in valores_wrapper:
             i += 1
             continue
         k = i + 1
@@ -137,7 +139,7 @@ def _indices_valores_sudo(tokens):
     }
     valores = set()
     for i, token in enumerate(tokens):
-        if token != "sudo":
+        if not _ES_SUDO.fullmatch(token):
             continue
         k = i + 1
         while k < len(tokens):
@@ -443,6 +445,8 @@ FUGAN_SHELL = [
     "ssh -I none docker exec docker rm -f c",
     "ssh -P audit docker exec docker rm -f c",
     "ssh -M docker exec docker rm -f c",
+    "/usr/bin/ssh docker exec docker rm -f c",
+    "/usr/bin/ssh -M docker exec docker rm -f c",
     "ssh -4p 22 docker exec docker rm -f c",
     "ssh -vp 22 docker exec docker rm -f c",
     "ssh -46p 22 docker exec docker rm -f c",
@@ -453,6 +457,10 @@ FUGAN_SHELL = [
     "sudo -nu ssh docker rm -f c",
     "sudo --group ssh docker container remove -f c",
     "sudo -ng ssh docker container remove -f c",
+    "/usr/bin/sudo --user ssh docker rm -f c",
+    "/usr/bin/sudo -nu ssh docker rm -f c",
+    "/usr/bin/sudo --group ssh docker container remove -f c",
+    "/usr/bin/sudo -ng ssh docker container remove -f c",
     "sudo -E docker rm -f c",
     "xargs docker rm -f",
     "sudo -n docker rm \\\n   -f \"$C\"",
@@ -529,6 +537,12 @@ FUGAN_PYTHON = [
     '["ssh", "-46p", "22", "docker", "exec", "docker", "rm", "-f", n]',
     '["ssh", "gateway", "ssh", "docker", "exec", "docker", "rm", "-f", n]',
     '["ssh", "gateway", "exec", "ssh", "docker", "exec", "docker", "rm", "-f", n]',
+    '["/usr/bin/ssh", "docker", "exec", "docker", "rm", "-f", n]',
+    '["/usr/bin/ssh", "-M", "docker", "exec", "docker", "rm", "-f", n]',
+    '["/usr/bin/sudo", "--user", "ssh", "docker", "rm", "-f", n]',
+    '["/usr/bin/sudo", "-nu", "ssh", "docker", "rm", "-f", n]',
+    '["/usr/bin/sudo", "--group", "ssh", "docker", "container", "remove", "-f", n]',
+    '["/usr/bin/sudo", "-ng", "ssh", "docker", "container", "remove", "-f", n]',
     '["sudo", "-u", "rm", "docker", "rm", "-f", n]',
     '["docker", "--context", "network", "rm", "-f", n]',
     '["docker", "-H", "unix:///x", "rm", "-f", n]',
@@ -558,6 +572,12 @@ FUGAN_PYTHON = [
     'subprocess.run("sudo -nu ssh docker rm -f x", shell=True)',
     'subprocess.run("sudo --group ssh docker container remove -f x", shell=True)',
     'subprocess.run("sudo -ng ssh docker container remove -f x", shell=True)',
+    'subprocess.run("/usr/bin/ssh docker exec docker rm -f x", shell=True)',
+    'subprocess.run("/usr/bin/ssh -M docker exec docker rm -f x", shell=True)',
+    'subprocess.run("/usr/bin/sudo --user ssh docker rm -f x", shell=True)',
+    'subprocess.run("/usr/bin/sudo -nu ssh docker rm -f x", shell=True)',
+    'subprocess.run("/usr/bin/sudo --group ssh docker container remove -f x", shell=True)',
+    'subprocess.run("/usr/bin/sudo -ng ssh docker container remove -f x", shell=True)',
     'subprocess.run("docker container remove -f x", shell=True)',
     'cmd = "docker container remove --force x"',
     '["docker", "rm", "-f", "-v=false", n]',
