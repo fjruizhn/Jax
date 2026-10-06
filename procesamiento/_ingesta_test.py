@@ -33,11 +33,15 @@ sólo un mapa hallazgo -> test:
       test_I6_nombre_largo_con_colision_no_revienta
   I-7 (trabajo sin jail) -> test_I7_trabajo_fuera_del_workspace_se_rechaza
 """
+import io
 import json
 import os
+import re
 import shutil
 import threading
 import time
+import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -61,10 +65,29 @@ def _workspace_root_es_tmp(tmp_path, monkeypatch):
 
 
 def _libro(destino: Path, valor: int = 100) -> Path:
+    """Libro determinista: mismo valor => mismos bytes, se guarde cuando se guarde.
+
+    openpyxl graba la hora en docProps/core.xml y en cada entrada del zip; se fijan las dos."""
+    fija = datetime(2026, 1, 1)
     wb = openpyxl.Workbook()
+    wb.properties.created = fija
+    wb.properties.modified = fija
     wb.active["A1"] = "ACTIVOS"
     wb.active["B1"] = valor
-    wb.save(destino)
+    crudo = io.BytesIO()
+    wb.save(crudo)
+    salida = io.BytesIO()
+    with zipfile.ZipFile(crudo) as zin, zipfile.ZipFile(salida, "w", zipfile.ZIP_DEFLATED) as zout:
+        for entrada in zin.infolist():
+            datos = zin.read(entrada.filename)
+            if entrada.filename == "docProps/core.xml":
+                # openpyxl pisa `modified` con la hora actual al guardar.
+                datos = re.sub(rb"(<dcterms:modified[^>]*>)[^<]*(</dcterms:modified>)",
+                               rb"\g<1>2026-01-01T00:00:00Z\g<2>", datos)
+            fija_zip = zipfile.ZipInfo(entrada.filename, date_time=(2026, 1, 1, 0, 0, 0))
+            fija_zip.compress_type = zipfile.ZIP_DEFLATED
+            zout.writestr(fija_zip, datos)
+    destino.write_bytes(salida.getvalue())
     return destino
 
 
