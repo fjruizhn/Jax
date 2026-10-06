@@ -133,8 +133,14 @@ def test_elegir_auditor_faceta_segun_datos_de_clientes():
 def test_solo_ordenes_selecciona_auditor_nube_sin_relajar_eleccion_de_proveedor():
     cfg = E.config_desde_filas({**FILAS, "ejecutor.c5_auditor_nube_solo_ordenes": "true"})
     assert E.elegir_auditor_faceta(cfg, hay_datos_de_clientes=True) == "thot"
-    assert E.modo_auditoria(cfg, hay_datos_de_clientes=True) == "SOLO_ORDENES"
+    modo = E.modo_auditoria(cfg, hay_datos_de_clientes=True)
+    assert modo == "SOLO_ORDENES"
     assert E.modo_auditoria(cfg, hay_datos_de_clientes=False) != "SOLO_ORDENES"
+    assert E.validar_eleccion(
+        proveedor_cerebro="anthropic", proveedor_auditor="openai", auditor_es_local=False,
+        admite_datos_de_clientes=False, hosts_mision={"cliente"}, hosts_con_clientes={"cliente"},
+        hosts_conocidos={"cliente"}, admite_mismo_proveedor=False, modo=modo,
+        auditor_nube_solo_ordenes=cfg.auditor_nube_solo_ordenes) == ()
 
 
 def test_compuerta_solo_ordenes_cerrada_conserva_auditor_local():
