@@ -70,8 +70,7 @@ def _libro(destino: Path, valor: int = 100) -> Path:
     openpyxl graba la hora en docProps/core.xml y en cada entrada del zip; se fijan las dos."""
     fija = datetime(2026, 1, 1)
     wb = openpyxl.Workbook()
-    wb.properties.created = fija
-    wb.properties.modified = fija
+    wb.properties.created = fija  # `modified` lo pisa openpyxl al guardar: se fija abajo en el XML
     wb.active["A1"] = "ACTIVOS"
     wb.active["B1"] = valor
     crudo = io.BytesIO()
@@ -82,14 +81,38 @@ def _libro(destino: Path, valor: int = 100) -> Path:
             datos = zin.read(entrada.filename)
             if entrada.filename == "docProps/core.xml":
                 # openpyxl pisa `modified` con la hora actual al guardar.
-                datos = re.sub(rb"(<dcterms:modified[^>]*>)[^<]*(</dcterms:modified>)",
-                               rb"\g<1>2026-01-01T00:00:00Z\g<2>", datos)
+                datos, n = re.subn(rb"(<dcterms:modified[^>]*>)[^<]*(</dcterms:modified>)",
+                                   rb"\g<1>2026-01-01T00:00:00Z\g<2>", datos)
+                assert n == 1, "docProps/core.xml sin dcterms:modified: _libro dejaria de ser determinista"
             fija_zip = zipfile.ZipInfo(entrada.filename, date_time=(2026, 1, 1, 0, 0, 0))
             fija_zip.compress_type = zipfile.ZIP_DEFLATED
             zout.writestr(fija_zip, datos)
     destino.write_bytes(salida.getvalue())
     return destino
 
+
+
+def test_libro_es_determinista(tmp_path: Path, monkeypatch):
+    """`_libro` promete mismo valor => mismos bytes aunque openpyxl y zipfile vean otra hora."""
+    import datetime as dt
+    import types
+
+    import openpyxl.writer.excel as escritor
+
+    reloj = {"ahora": dt.datetime(2030, 5, 6, 7, 8, 9)}
+
+    class _Fecha(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return reloj["ahora"].replace(tzinfo=tz)
+
+    monkeypatch.setattr(escritor, "datetime", types.SimpleNamespace(datetime=_Fecha, timezone=dt.timezone))
+    monkeypatch.setattr(time, "time", lambda: reloj["ahora"].timestamp())
+    a = _libro(tmp_path / "a.xlsx", valor=100).read_bytes()
+    reloj["ahora"] = dt.datetime(2031, 1, 2, 3, 4, 6)
+    b = _libro(tmp_path / "b.xlsx", valor=100).read_bytes()
+    assert a == b
+    assert a != _libro(tmp_path / "c.xlsx", valor=999).read_bytes()
 
 # ---------------------------------------------------------------------------
 # El contrato original del brief (5 tests), adaptado al jail nuevo.
@@ -227,9 +250,9 @@ def test_mismo_nombre_y_mismo_contenido_no_duplica_en_fuente(tmp_path: Path):
     carpeta_a.mkdir()
     carpeta_b.mkdir()
     origen_a = _libro(carpeta_a / "balance.xlsx", valor=100)
-    # Mismos BYTES, no solo el mismo valor: openpyxl graba la hora en el zip y en
-    # docProps, y dos libros guardados en segundos distintos tienen huellas distintas
-    # (la prueba fallaba al azar en CI, run 37529009314).
+    # Mismos BYTES, explicito: la prueba trata de una huella identica y no depende de que
+    # `_libro` sea determinista (la version anterior generaba dos libros y fallaba al azar en
+    # CI, run 37529009314; `_libro` ya fija la hora, ver test_libro_es_determinista).
     origen_b = carpeta_b / "balance.xlsx"
     shutil.copyfile(origen_a, origen_b)
 

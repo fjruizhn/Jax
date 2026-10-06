@@ -158,8 +158,8 @@
       "mensaje": "PISO ROTO: se esperaban 42 tests CORRIDOS de la compuerta."
     },
     "tests-puros/ingesta_tests": {
-      "patron": "^51 passed",
-      "mensaje": "PISO ROTO: se esperaban 51 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."
+      "patron": "^52 passed",
+      "mensaje": "PISO ROTO: se esperaban 52 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."
     },
     "tests-puros/medir_utilidad_tests": {
       "patron": "^11 passed",
