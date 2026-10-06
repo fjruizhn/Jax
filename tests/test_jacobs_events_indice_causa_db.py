@@ -38,8 +38,10 @@ exigir_base_de_test()
 
 from jacobs import store  # noqa: E402
 
-# Copia literal de la forma de jax-platform backend/api/pipelines.py
-# (EVENTOS_DE_CAUSA / sql_eventos_de_causa), leída 2026-09-17.
+# Forma de jax-platform backend/api/pipelines.py
+# (EVENTOS_DE_CAUSA / sql_eventos_de_causa), releída 2026-10-06. El índice
+# global de auditoría comparte event_type como prefijo; FORCE conserva este
+# camino acotado a los pipelines solicitados.
 _TIPOS_DE_CAUSA = (
     "STEP_FAILED", "PIPELINE_ABORTED", "PIPELINE_CANCELLED",
     "KILL_SWITCH_ABORTED", "REAPED",
@@ -50,6 +52,7 @@ def _sql_eventos_de_causa(n_ids: int) -> str:
     ids = ", ".join(["%s"] * n_ids)
     tipos = ", ".join(["%s"] * len(_TIPOS_DE_CAUSA))
     return (f"SELECT pipeline_id, id, event_type, payload FROM jacobs_events "
+            "FORCE INDEX (idx_events_pipeline_tipo) "
             f"WHERE pipeline_id IN ({ids}) AND event_type IN ({tipos})")
 
 
