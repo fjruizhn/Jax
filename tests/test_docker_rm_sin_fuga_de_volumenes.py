@@ -1034,7 +1034,7 @@ def test_python_la_misma_cadena_dentro_de_subprocess_run_tampoco_se_pierde(coman
     assert culpables_en_texto(fuente, es_python=True), f"se perdió un rm de contenedor: {fuente}"
 
 
-# Minor 1: casos de Python que master marca y la lectura nueva SOLA no (fija la unión OR en Python).
+# MINOR 1 de la auditoría de la ronda 11: casos de Python que master marca y la lectura nueva SOLA no (fija la unión OR en Python).
 @pytest.mark.parametrize("fuente", [
     'subprocess.run("docker rm \\"a&b\\" c1 -f", shell=True)',
     'subprocess.run("docker rm ${ids//&/ } -f", shell=True)',
@@ -1072,7 +1072,7 @@ def test_la_exencion_de_recurso_con_nombre_sigue_funcionando_en_listas():
         assert not culpables_en_texto(fuente, es_python=True)
 
 
-# Minor 3: la forma de la exención. Ensancharla (no exigir `docker` ni el subcomando PEGADOS al
+# MINOR 3 de la auditoría de la ronda 11: la forma de la exención. Ensancharla (no exigir `docker` ni el subcomando PEGADOS al
 # `rm` marcado, o exigirlos en cualquier lugar de la ventana) exime de más.
 @pytest.mark.parametrize("comando", [
     "docker volume ls rm -f c",
@@ -1163,7 +1163,7 @@ def test_python_lista_con_comentario_cuyo_texto_aplanado_no_parsea_no_se_exime()
     assert culpables_en_texto(fuente, es_python=True)
 
 
-# Minor 3 de la ronda 13: la prueba del bloque congelado tiene que FALLAR si el texto de master
+# MINOR 3 de la auditoría de la ronda 12: la prueba del bloque congelado tiene que FALLAR si el texto de master
 # difiere en un byte (mata el mutante que vuelve antes de compararlo).
 def test_el_bloque_congelado_falla_si_master_difiere_en_un_byte(monkeypatch):
     real = _texto_de_este_archivo_en_master()
@@ -1174,7 +1174,7 @@ def test_el_bloque_congelado_falla_si_master_difiere_en_un_byte(monkeypatch):
         test_el_bloque_congelado_es_el_de_master()
 
 
-# Minor 2 de la ronda 13: un hallazgo sin `rm` identificable NO se exime (mata `return True` sin
+# MINOR 2 de la auditoría de la ronda 12: un hallazgo sin `rm` identificable NO se exime (mata `return True` sin
 # `rm` en la lista y `all(...)` sin `bool(posibles)` en la ventana).
 @pytest.mark.parametrize("ventana", ["", "docker volume x", "docker volume ls -f", "a b c d e rm"])
 def test_una_ventana_de_shell_sin_rm_identificable_no_se_exime(ventana):
@@ -1188,10 +1188,35 @@ def test_una_lista_sin_rm_no_se_exime(fuente):
     assert not _lista_es_de_recurso_con_nombre(nodo)
 
 
-def test_la_exencion_de_listas_cuenta_nodos_y_no_texto_repetido():
-    """Si el texto de un hallazgo de lista aparece más veces que nodos hay, las demás salieron de
-    otra parte y no se eximen."""
+# MINOR 1 de la auditoría de la ronda 13: un nodo List/Tuple que master NO marca, con el mismo texto que una ventana
+# sacada de una cadena, no exime esa ventana (se cuentan los hallazgos de cadenas, no los nodos).
+_W_DE_LISTA_SIN_MARCAR = '[ docker & rm , -f,"docker","network","rm",x]'
+
+
+@pytest.mark.parametrize("fuente", [
+    f"N = {_W_DE_LISTA_SIN_MARCAR}\nsubprocess.run({_W_DE_LISTA_SIN_MARCAR!r}, shell=True)\n",
+    'N = docker & rm , -f,"docker","network","rm",x\nos.system(\'docker & rm , -f,"docker","network","rm",x\')\n',
+    f"N = {_W_DE_LISTA_SIN_MARCAR}\nos.system(f{_W_DE_LISTA_SIN_MARCAR!r})\n",
+])
+def test_un_nodo_de_lista_que_master_no_marca_no_exime_una_ventana_de_cadena(fuente):
+    assert culpables_python_master(fuente), "el caso ya no ejercita a master"
+    assert culpables_en_texto(fuente, es_python=True), f"se perdió un rm de contenedor: {fuente}"
+
+
+def test_la_exencion_de_listas_sigue_eximiendo_cuando_el_hallazgo_es_de_la_lista():
     fuente = '["docker", "volume", "rm", "-f", v]'
     hallazgo = " ".join(fuente.split())
     assert _sin_la_excepcion_de_lista_blanca([hallazgo], fuente) == []
-    assert _sin_la_excepcion_de_lista_blanca([hallazgo, hallazgo], fuente) == [hallazgo, hallazgo]
+
+
+# MINOR 2 de la auditoría de la ronda 13: un segundo `rm` en la posición 4 o más de la ventana no cuenta (el `rm`
+# marcado está en 0..3). El segundo `rm` de abajo no lleva banderas y master no lo marca.
+def test_un_segundo_rm_lejos_en_la_ventana_no_cambia_la_exencion():
+    comando = "docker volume rm -f -f -f rm"
+    hallazgos = culpables_shell_master(comando)
+    assert len(hallazgos) == 1 and hallazgos[0].split()[6] == "rm"
+    assert _sin_la_excepcion_de_lista_blanca(hallazgos) == []
+
+
+def test_sin_hallazgos_de_master_no_se_re_parsea_la_fuente():
+    assert _sin_la_excepcion_de_lista_blanca([], "esto no es python (") == []
