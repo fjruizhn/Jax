@@ -405,16 +405,38 @@ _HASH_BLOQUE_MASTER = "07e54de201fc9a4351e9a51a1052e7ad3be4481bb1c6b199e17568931
 _SHA_MASTER = "f47820f5af36d7b0e4e0d5b2156ac6275c10462c"
 
 
-_EXCEPCION_LISTA_BLANCA = re.compile(
-    r"(?:^|[\s\[(,])[\"']?docker[\"']?[\s,]+[\"']?(?:" + "|".join(sorted(_SUBCOMANDOS_SIN_VOLUMEN_ANONIMO))
-    + r")[\"']?[\s,]+[\"']?rm\b")
+def _es_rm_de_recurso_con_nombre(hallazgo):
+    """True si el `rm` que MARCÓ master en este hallazgo es `docker <volume|network|image|...> rm`.
+
+    Se decide por el token `rm` marcado, no por una búsqueda en la ventana de texto: master no
+    corta en un `&` suelto y sigue juntando banderas, así que su ventana puede llegar a un
+    `docker volume rm` POSTERIOR que no es el `rm` marcado. Hallazgo de lista de Python: es el
+    texto fuente de la lista y el `rm` marcado es el primero. Hallazgo de shell: es la ventana
+    `toks[i-3 : i+1+n+1]`, así que el `rm` marcado está en las posiciones 0..3; si hay más de
+    una posible, solo se exime cuando TODAS son de un recurso con nombre (ante la duda, se marca)."""
+    try:
+        nodo = ast.parse(hallazgo, mode="eval").body
+    except SyntaxError:
+        nodo = None
+    if isinstance(nodo, (ast.List, ast.Tuple)):
+        cadenas = [e.value if isinstance(e, ast.Constant) else None for e in nodo.elts]
+        if "rm" not in cadenas:
+            return False
+        i = cadenas.index("rm")
+        return i >= 2 and cadenas[i - 2] == "docker" and cadenas[i - 1] in _SUBCOMANDOS_SIN_VOLUMEN_ANONIMO
+    palabras = hallazgo.split()
+    posibles = [p for p in range(min(4, len(palabras))) if palabras[p] == "rm"]
+    return bool(posibles) and all(
+        p >= 2 and palabras[p - 2] == "docker" and palabras[p - 1] in _SUBCOMANDOS_SIN_VOLUMEN_ANONIMO
+        for p in posibles)
 
 
 def _sin_la_excepcion_de_lista_blanca(hallazgos_master):
     """Único recorte a master: `docker <volume|network|image|...> rm -f x` NO es un contenedor
     (un volumen con nombre no deja huérfano nada) y esta rama lo exime a propósito desde la
-    ronda 1; master lo marcaba de más. Se descartan solo los hallazgos de master que lo traen."""
-    return [h for h in hallazgos_master if not _EXCEPCION_LISTA_BLANCA.search(h)]
+    ronda 1; master lo marcaba de más. Se descartan solo los hallazgos de master cuyo `rm`
+    marcado es ese (`_es_rm_de_recurso_con_nombre`)."""
+    return [h for h in hallazgos_master if not _es_rm_de_recurso_con_nombre(h)]
 
 
 def culpables_en_texto(texto, es_python=None, filename="<string>"):
