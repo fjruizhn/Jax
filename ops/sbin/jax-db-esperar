@@ -1,0 +1,58 @@
+#!/bin/bash
+# Espera a que la MariaDB de JAX (contenedor mariadb-12-3-jax) acepte consultas.
+# Lo corren jax-platform y jax-las-manos como ExecStartPre=+ (root: jaxsvc no
+# tiene acceso a docker), así que espera en CADA arranque del servicio, no solo
+# en el de la máquina.
+# POR QUÉ (2026-10-04, apagón de hall9000): docker-proxy ya acepta en
+# 127.0.0.1:3308 antes de que MariaDB esté lista, y los dos servicios caían con
+# «Lost connection to MySQL server during query». Esperar al puerto no basta: se
+# usa el healthcheck.sh oficial de la imagen (--connect pregunta
+# @@skip_networking, así que el servidor temporal de MARIADB_AUTO_UPGRADE no pasa
+# como sano; --innodb_initialized, con el usuario de .my-healthcheck.cnf).
+set -uo pipefail
+# Corre como root con el entorno del servicio (ExecStartPre=+ no limpia
+# Environment= ni WorkingDirectory=). Ese entorno apunta a directorios de
+# cuentas sin privilegios: PATH con ~/.local/bin y ~/.nvm (fruiz), HOME y
+# TMPDIR de jaxsvc, checkout de producción escribible por fruiz. Sin esto, un
+# `docker` falso o un .docker/config.json correrían o mandarían como root
+# (BLOCK de la auditoría del PR #191). Lista BLANCA: el guion se re-ejecuta con
+# un entorno vacío y solo pasan sus dos variables propias.
+if [[ -z "${_JAX_DB_ESPERAR_LIMPIO:-}" ]]; then
+    exec /usr/bin/env -i _JAX_DB_ESPERAR_LIMPIO=1 \
+        PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DOCKER_CONFIG=/root/.docker \
+        JAX_DB_CONTENEDOR="${JAX_DB_CONTENEDOR:-}" JAX_DB_ESPERA_SEG="${JAX_DB_ESPERA_SEG:-}" \
+        /bin/bash "$0" "$@"
+fi
+# Segunda capa: aunque la marca llegara puesta desde fuera, el entorno es este.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DOCKER_CONFIG=/root/.docker
+cd / || exit 1
+CONTENEDOR="${JAX_DB_CONTENEDOR:-mariadb-12-3-jax}"  # vacía => por defecto (:-)
+LIMITE_SEG="${JAX_DB_ESPERA_SEG:-540}"
+# Validadas: (( )) evalúa expresiones (a[$(cmd)] correría como root) y un
+# nombre que empiece con «-» sería una opción de docker exec.
+[[ "$LIMITE_SEG" =~ ^[0-9]+$ ]] || { echo "JAX_DB_ESPERA_SEG inválido" >&2; exit 2; }
+[[ "$CONTENEDOR" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "JAX_DB_CONTENEDOR inválido" >&2; exit 2; }
+inicio=$(/usr/bin/date +%s)
+primer_error=""
+ultimo_error=""
+while :; do
+    # timeout de fuera: un dockerd colgado lo explica este guion, no el
+    # TimeoutStartSec de systemd. timeout de dentro: que el healthcheck no quede
+    # vivo en el contenedor cuando se corta el cliente.
+    salida=$(/usr/bin/timeout 15 /usr/bin/docker exec "$CONTENEDOR" timeout 10 healthcheck.sh --connect --innodb_initialized 2>&1)
+    rc=$?
+    if (( rc == 0 )); then
+        espera=$(( $(/usr/bin/date +%s) - inicio ))
+        if (( espera > 0 )); then
+            echo "MariaDB de JAX lista tras ${espera} s (primer error: ${primer_error:-ninguno})"
+        fi
+        exit 0
+    fi
+    ultimo_error="rc=$rc ${salida//$'\n'/ | }"
+    [[ -n "$primer_error" ]] || { primer_error="$ultimo_error"; echo "esperando a MariaDB de JAX ($CONTENEDOR): $primer_error"; }
+    if (( $(/usr/bin/date +%s) - inicio >= LIMITE_SEG )); then
+        echo "MariaDB de JAX ($CONTENEDOR) no respondió en ${LIMITE_SEG} s. Primer error: $primer_error. Último: $ultimo_error" >&2
+        exit 1
+    fi
+    /usr/bin/sleep 2
+done

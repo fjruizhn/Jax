@@ -1,0 +1,12 @@
+# /etc/systemd/system/aviso-fallo@.service — plantilla de SISTEMA (m2, auditoría 2026-09-22).
+# Para las unidades de sistema de respaldo (backup-vms-sesamo). Corre como fruiz: las
+# credenciales de Telegram (/etc/restic/telegram.env) son fruiz:fruiz 600, y `systemctl show`
+# de una unidad de sistema no necesita privilegios.
+[Unit]
+Description=Aviso de fallo de %i
+
+[Service]
+Type=oneshot
+User=fruiz
+Group=fruiz
+ExecStart=/opt/backup-scripts/aviso-fallo-unidad.sh %i

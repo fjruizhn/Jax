@@ -902,6 +902,12 @@ para conservar byte a byte el registro de la migración de pisos.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
 
+3531 -> 3537 el 2026-10-06 (ronda 3 de #356; medido LOCAL por archivo con /srv/jax-prod, ~/claude-skills y ~/jax-platform tapados y confirmado con la suite completa del paso): `test_instalar_dropins_de_servicio.py` 11 -> 14 (+3: rechazo de filas de otro dueno) y `test_activacion_timers_b9.py` 9 -> 12 (+3: Monotonic=0, Realtime=n/a y SubState=running). 45 skipped no cambia.
+
+3529 -> 3531 el 2026-10-06 (ronda 2 de #356): `test_activacion_timers_b9.py` 7 -> 9 (+2: el caso `muerto_real` con la salida medida de systemd y el timer monotonico que si tiene proximo disparo). 45 skipped no cambia. Medido LOCAL por archivo con /srv/jax-prod tapado y confirmado con la suite completa del paso.
+
+3501 -> 3529 el 2026-10-05 (rama ops/versionar-drop-ins-v2, rescate de #274; medido LOCAL con la suite completa de este paso, /srv/jax-prod y ~/claude-skills, ~/ejecutor-fase0, ~/jax-platform tapados con `sudo unshare --mount`: 3562 passed, 45+6 skipped, de los cuales los 33 passed / 6 skipped de `test_arranque_instalado.py` y `test_verificar_arranque_instalado.py` van al piso nuevo `tests-puros/arranque_instalado`): +28 = `test_instalar_dropins_de_servicio.py` (11) + `test_activacion_timers_b9.py` (7) + `test_ejecutor_cuenta_de_servicio.py` 6 -> 16 (+10). 45 skipped no cambia. Un test local (`test_arranque_real_no_colisiona_con_policy_de_la_raiz`) falló por el entorno local (necesita el venv de las_manos del checkout), no por el cambio; se cuenta como passed del runner.
+
 3491 -> 3501 el 2026-10-05 (ronda de cierre de #355, medido LOCAL como delta de archivo): `tests/test_base_por_sesion.py` 40 -> 50 colectados (+10: `CI` solo cuenta con `GITHUB_ACTIONS=true`; 5 entornos por 2 puertos). 45 skipped no cambia.
 
 3490 -> 3491 el 2026-10-05 (auditoría Jax#355, MINOR 1; delta de archivo local): `tests/test_base_por_sesion.py` 39 -> 40 (+1: un nombre con prefijo y sufijo inválido se niega). 45 skipped no cambia.
@@ -3679,6 +3685,21 @@ re-medir sobre master en vez de sumar los deltas a ciegas.
   prueba con doble que se reemplazo) y +1 en tests/test_ejecutor_contratos_registro.py (cerrar() con
   lock). Misma lista y metodo: 3509 passed + 1 failed preexistente (3503 -> 3509), 3 skipped.
 ````
+
+## `tests-puros/arranque_instalado`
+
+Piso nuevo (2026-10-05, rama ops/versionar-drop-ins-v2): `^33 passed, 6 skipped`
+
+37 -> 46 passed y 6 -> 9 skipped el 2026-10-06 (ronda 3 de #356): +9 passed (dueno de cada fila 2 y respaldo de la base del proxy 6 netos en `test_arranque_instalado.py`, mas 1 en `test_verificar_arranque_instalado.py`: la capa cargado no consulta plantillas) y +3 skipped (los 3 espejos: cada uno se compara con su repo dueno solo si ese checkout existe, y en el runner no existe). Patron vigente: `^46 passed, 9 skipped`.
+
+33 -> 37 passed el 2026-10-06 (ronda 2 de #356): +3 en `test_arranque_instalado.py` (bit ejecutable de jax-db-esperar, dependencias de esperar-db.conf en el manifiesto, respaldo de la base del proxy) y +1 en `test_verificar_arranque_instalado.py` (755 a los guiones de ops/sbin/ sin extension). Los 6 saltados no cambian. Patron vigente: `^37 passed, 6 skipped`.
+
+`tests/test_arranque_instalado.py` (11 passed, 3 skipped) y `tests/test_verificar_arranque_instalado.py`
+(26 passed, 3 skipped), medidos con `/srv/jax-prod` tapado. Los 6 saltados exigen el host de produccion
+(`/srv/jax-prod/jax` y las rutas de `/etc/systemd/system`): en el runner se saltan. Paso propio porque
+el piso de `tests-puros/out` no admite que suban las saltadas (M <= 45). **En hall9000 esos 6 corren y
+dan rojo hasta el despliegue conjunto de jax con platform**: el manifiesto describe la verdad de master
+y 7 archivos instalados van por detras (ver el PR).
 
 ## `tests-puros/ficha_tests`
 
