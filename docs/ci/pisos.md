@@ -906,6 +906,16 @@ matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
 sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
 piso se vuelve a fijar desde los **3537 de master**.
 
+3584 -> 3660 (2026-10-06, JAX#357 ronda 6): +76 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 50 a 126 pruebas): 72 que fallan contra 07cac634 (falsos positivos y fugas de las listas
+Python con `&&`, `;`, `||`, `|`, con y sin ssh) y 4 de control. Medido por recoleccion
+(`pytest --collect-only -q`, PYTHONPATH=.:las_manos, Python 3.14.4, SIN `JAX_DB_HOST`) con la
+lista exacta de 195 archivos del paso "Piso exacto de tests CORRIDOS": 3706 recolectadas en la
+rama, 3630 en 07cac634 (la misma lista, mismo entorno). Las 3630 de la ronda 5 son 3584 passed
++ 45 skipped + 1 xfailed; las 76 nuevas no llevan skip ni xfail: 3660 passed, 45 skipped,
+1 xfailed. La rama ya trae origin/master f47820f5 (solo agrega `scripts/ejecutor_fase0/maquinas.toml`,
+sin pruebas). No se corrio el paso completo: la recoleccion no ejecuta nada y no toca ninguna base.
+
 3562 -> 3584 (2026-10-06, JAX#357 ronda 5): +22. `test_whitelist_python_no_exime_un_rm_posterior_de_contenedor`
 (11 subcomandos de la lista blanca x con/sin ssh): un `rm` de la lista blanca ya no
 exime un `docker rm -f` posterior en la misma lista Python. Medido por recoleccion con
