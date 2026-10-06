@@ -12,8 +12,10 @@ requiere_constitucion_real = pytest.mark.skipif(
     not CX.constitucion_disponible(), reason="host-bound, Fase 0: no existe en este runner")
 
 
-def test_skills_declaradas_son_las_tres_del_encargo():
-    assert CX.skills_declaradas() == ("migrando-sin-romper", "desde-la-fuente", "endureciendo")
+def test_skills_declaradas_incluyen_la_migracion_hestia():
+    assert CX.skills_declaradas() == (
+        "migrando-sin-romper", "desde-la-fuente", "endureciendo", "migrando-hestia-a-aapanel",
+    )
 
 
 @requiere_constitucion_real
@@ -65,6 +67,8 @@ def test_archivos_de_skills_con_una_fuente_de_prueba(tmp_path, monkeypatch):
     (fuente / "endureciendo" / "references").mkdir(parents=True)
     (fuente / "endureciendo" / "SKILL.md").write_text("e")
     (fuente / "endureciendo" / "references" / "checklist.md").write_text("c")
+    (fuente / "migrando-hestia-a-aapanel").mkdir(parents=True)
+    (fuente / "migrando-hestia-a-aapanel" / "SKILL.md").write_text("h")
     monkeypatch.setattr(CX, "skills_fuente", lambda: fuente)
 
     archivos = CX.archivos_de_skills()
@@ -72,7 +76,8 @@ def test_archivos_de_skills_con_una_fuente_de_prueba(tmp_path, monkeypatch):
     assert archivos["desde-la-fuente/SKILL.md"] == b"d"
     assert archivos["endureciendo/SKILL.md"] == b"e"
     assert archivos["endureciendo/references/checklist.md"] == b"c"
-    assert len(archivos) == 4
+    assert archivos["migrando-hestia-a-aapanel/SKILL.md"] == b"h"
+    assert len(archivos) == 5
 
 
 def test_archivos_de_skills_sin_una_carpeta_declarada_es_skillfaltante(tmp_path, monkeypatch):
@@ -87,8 +92,8 @@ def test_archivos_de_skills_sin_una_carpeta_declarada_es_skillfaltante(tmp_path,
     assert e.value.args[0] == "desde-la-fuente"  # el primero en orden de la lista
 
 
-def test_las_tres_skills_reales_de_claude_skills_hoy_dan_skillfaltante():
-    """Verdad operacional al 2026-09-22: las tres skills NO existen todavía en
+def test_las_skills_reales_de_claude_skills_hoy_dan_skillfaltante():
+    """Verdad operacional al 2026-09-22: las skills NO existen todavía en
     /home/fruiz/claude-skills/common/skills/ (sólo en el worktree sin mergear
     cs-freno-generados, rama fix/freno-generados). Esta prueba documenta el estado
     real y SE SALTA (no falla: `pytest.skip`, más abajo) el día que alguien las
@@ -97,7 +102,7 @@ def test_las_tres_skills_reales_de_claude_skills_hoy_dan_skillfaltante():
     lo que el código hace.)"""
     fuente = CX.skills_fuente()
     if all((fuente / n).is_dir() for n in CX.skills_declaradas()):
-        pytest.skip("las tres skills ya existen en la ruta canónica: mergeadas")
+        pytest.skip("las skills ya existen en la ruta canónica: mergeadas")
     with pytest.raises(CX.SkillFaltante):
         CX.archivos_de_skills()
 

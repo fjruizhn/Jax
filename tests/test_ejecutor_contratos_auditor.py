@@ -172,6 +172,25 @@ def test_las_instrucciones_mencionan_que_un_paso_puede_ser_una_skill():
     assert "Skill" in texto
 
 
+def test_las_skills_del_auditor_coinciden_con_cerebros_toml():
+    """H12: toda Skill permitida en la jaula debe ser visible para el auditor C5."""
+    import re
+    import tomllib
+    from pathlib import Path
+
+    raiz = Path(__file__).resolve().parents[1]
+    declaradas = tomllib.loads((raiz / "scripts/ejecutor_fase0/cerebros.toml").read_text())[
+        "constitucion"]["skills"]
+    instrucciones = (raiz / "jax/ejecutor/contratos/auditor_instrucciones.md").read_text()
+    bloque = re.search(r"tiene cuatro declaradas:(.*?)\) -- las dos cuentan",
+                       instrucciones, re.DOTALL)
+    assert bloque is not None
+    enumeradas = re.findall(r"`([^`]+)`", bloque.group(1))
+
+    assert enumeradas == declaradas
+    assert "migrando-hestia-a-aapanel" in declaradas
+
+
 def test_las_instrucciones_dicen_que_verificar_la_identidad_de_una_maquina_de_la_mision_no_se_sale():
     """Hallazgo medido 2026-10-03: el auditor marcaba `fuera_de_mision` el `cat /etc/machine-id` a una
     maquina DE la mision, que el contrato del Ejecutor le EXIGE al cerebro antes de operar (spec 3.4)."""

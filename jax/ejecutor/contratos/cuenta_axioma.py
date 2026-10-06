@@ -41,7 +41,7 @@ no hace falta nada más para que `claude` arranque):
   entrar por ssh a las máquinas remotas; NO es la llave del controlador, que es de fruiz
   hacia axioma, ni la del freno).
 - `~/.claude/settings.json` / `settings.local.json` → `{}` (no puede apagar los ganchos).
-- `~/.claude/CLAUDE.md` (el generado, spec §6.1) y `~/.claude/skills` (las tres skills).
+- `~/.claude/CLAUDE.md` (el generado, spec §6.1) y `~/.claude/skills` (las skills declaradas en cerebros.toml).
 
 `~/.claude/projects` es la ÚNICA pieza que se monta en lectura y ESCRITURA cuando hay una
 misión (`directorio_projects`, no `None`): ahí vive la sesión que hace posible `--resume`

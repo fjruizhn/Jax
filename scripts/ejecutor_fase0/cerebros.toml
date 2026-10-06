@@ -52,10 +52,10 @@ fuente = "/home/fruiz/claude-skills/common/CLAUDE.md.core"
 # encontrado ahí podría leerse como si tuviera la misma autoridad que este documento. La
 # `identidad`, más abajo, escribe su PROPIA jerarquía -- sin ese hueco.
 secciones = ["LAS POLÍTICAS DE MARINA", "LA REGLA ABSOLUTA", "LOS NUEVE PRINCIPIOS OPERATIVOS", "HONOR"]
-# Las tres skills que llegan a la jaula de axioma, tomadas COMPLETAS (con subcarpetas) de
+# Las cuatro skills que llegan a la jaula de axioma, tomadas COMPLETAS (con subcarpetas) de
 # claude-skills/common/skills/<nombre>/. El instalador (ops/ejecutor/instalar_contexto.sh)
 # las copia; la jaula (cuenta_axioma._jaula) las monta ro sobre "$HOME/.claude/skills".
-skills = ["migrando-sin-romper", "desde-la-fuente", "endureciendo"]
+skills = ["migrando-sin-romper", "desde-la-fuente", "endureciendo", "migrando-hestia-a-aapanel"]
 skills_fuente = "/home/fruiz/claude-skills/common/skills"
 identidad = """Eres el Ejecutor de Axioma. Trabajas para Fernando Ruiz administrando sus servidores.
 

@@ -98,9 +98,9 @@ def test_la_regla_de_machine_id_esta_escrita():
     assert "machine-id" in doc or "machine_id" in doc
 
 
-def test_las_tres_skills_declaradas():
+def test_las_cuatro_skills_declaradas():
     assert CEREBROS["constitucion"]["skills"] == [
-        "migrando-sin-romper", "desde-la-fuente", "endureciendo",
+        "migrando-sin-romper", "desde-la-fuente", "endureciendo", "migrando-hestia-a-aapanel",
     ]
 
 

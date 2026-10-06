@@ -215,7 +215,7 @@ def _eventos_del_stream(salida: bytes):
 
 
 #: Herramientas que cuentan como un PASO de la misión: Bash (comandos) y Skill (las
-#: tres skills declaradas en cerebros.toml, spec 2026-09-22 -- el arnés las tiene en
+#: skills declaradas en cerebros.toml, spec 2026-09-22 -- el arnés las tiene en
 #: --allowedTools junto con Bash). Cualquier otra (p. ej. Read) NO cuenta: el Ejecutor
 #: lee con `cat` (Bash), nunca con la herramienta Read.
 _HERRAMIENTAS_QUE_CUENTAN_COMO_PASO = frozenset({"Bash", "Skill"})
