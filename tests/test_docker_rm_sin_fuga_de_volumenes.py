@@ -16,9 +16,13 @@ persecución sin fin):
   `docker`/`docker container`/opciones globales/variables con «docker» en el nombre,
   `&`, `|&`, `&&`, `||`, `;`, `|` como separadores (las redirecciones `2>&1`, `>&2`,
   `<&0`, `&>f` no lo son) y TODAS las banderas hasta el fin del comando (docker las
-  acepta después del nombre). Un subshell `$(...)` o `` `...` `` se salta hasta su cierre
-  balanceado y las banderas que vienen después cuentan (`docker rm $(docker ps -aq) -f`
-  fuga); si falta el cierre no se sabe dónde sigue el comando y se marca (falla cerrado).
+  acepta después del nombre). Cada comando se lee DOS veces y se marca si cualquiera
+  de las dos fuga: (1) la ventana corta en `$(` y en el acento grave (como master) y (2) un
+  subshell `$(...)` o `` `...` `` se salta hasta su cierre balanceado y las banderas que
+  vienen después cuentan (`docker rm $(docker ps -aq) -f` fuga). Un acento grave de más o
+  un `)` desbalanceado (entre comillas, `\\)`, un `case`) puede extraviar a la lectura (2),
+  y la (1) sigue marcando: nunca se marca menos que master. Si a la (2) le falta el cierre
+  de un subshell, falla cerrado y marca.
   Las cadenas Python se prefiltran con cualquier espacio en blanco antes de `rm`/`remove`.
 - `docker exec|run ... rm -f x` es un `rm` DENTRO del contenedor: no cuenta.
 
@@ -38,6 +42,12 @@ p. ej. `["docker", "rm", "-v", c, "&&", "rm", "-f", p]` (el `-f` del `rm` de hos
 a docker) o `["docker", "rm", c, "&&", "touch", "-f", p]`. Se prefiere marcar de más.
 
 Límites declarados:
+- Falsos positivos aceptados en shell: `docker rm -f $(docker ps -aq) -v` marca (la lectura
+  (1) ve el `-f` y no el `-v`), y un subshell con un paréntesis sin par dentro de comillas
+  (`docker rm -v $(docker ps --format "(x" -q)`) se toma por sin cerrar y marca.
+- Fugas que master tampoco veía y siguen sin verse: un `)` entre comillas dentro de `$(...)`
+  seguido de `-v` y luego `-f` (`docker rm $(echo ")" -v) -f`). El escáner no entiende
+  comillas dentro del subshell.
 - Una variable que no diga «docker» en su nombre (`$D rm -f`) no se reconoce como docker.
   Se prefiere eso a marcar cada `$SUDO rm -f archivo`.
 - Un separador metido en una variable (`SEP`) no se reconoce: no corta la lectura de shell,
@@ -96,15 +106,16 @@ def _es_rm_shell(toks, i):
     return toks[i] == "rm" or (toks[i] == "remove" and i >= 1 and toks[i - 1] == "container")
 
 
-def _banderas_shell(toks, i):
-    """Banderas del comando cuyo `rm` está en `toks[i]`, hasta el fin del comando. Un
-    subshell `$(...)` o `` `...` `` se salta entero (sus banderas son de otro comando) y lo
-    que viene después sigue contando. Devuelve (banderas, balanceado): si falta el cierre del
-    subshell no se puede saber dónde sigue el comando, y quien llama marca (falla cerrado)."""
+def _banderas_shell(toks, i, saltar_subshell):
+    """Banderas del comando cuyo `rm` está en `toks[i]`, hasta el fin del comando.
+    Sin `saltar_subshell`, la ventana corta en cualquier separador, incluidos `$(` y el
+    acento grave (la lectura de master). Con él, un subshell `$(...)` o `` `...` `` se salta
+    entero y lo que viene después sigue contando. Devuelve (banderas, balanceado): si falta
+    el cierre del subshell no se puede saber dónde sigue el comando (falla cerrado)."""
     banderas, j = [], i + 1
     while j < len(toks):
         t = toks[j]
-        if t == "$(":
+        if saltar_subshell and t == "$(":
             profundidad, j = 1, j + 1
             while j < len(toks) and profundidad:
                 if toks[j] in ("$(", "("):
@@ -115,7 +126,9 @@ def _banderas_shell(toks, i):
             if profundidad:
                 return banderas, False
             continue
-        if t == "`":
+        if saltar_subshell and t == "`":
+            if toks[:i].count("`") % 2:   # el `rm` va DENTRO de un par: este es el que cierra
+                break
             try:
                 j = toks.index("`", j + 1) + 1
             except ValueError:
@@ -152,9 +165,13 @@ def culpables_shell(texto):
                     break
             if not es_docker or dentro:
                 continue
-            banderas, balanceado = _banderas_shell(toks, i)
-            if not balanceado or _fuerza_sin_volumenes(banderas):
-                hallados.append(" ".join(toks[max(0, i - 3):i + 1 + len(banderas) + 1]))
+            # Dos lecturas, unidas con OR: (1) la ventana corta en `$(` y en el acento grave
+            # (como master); (2) salta el subshell. Un acento grave de más o un `)`
+            # desbalanceado puede extraviar a una, y la otra sigue marcando.
+            cortada, _ = _banderas_shell(toks, i, False)
+            saltada, balanceado = _banderas_shell(toks, i, True)
+            if not balanceado or _fuerza_sin_volumenes(cortada) or _fuerza_sin_volumenes(saltada):
+                hallados.append(" ".join(toks[max(0, i - 3):i + 1 + len(saltada) + 1]))
     return hallados
 
 
@@ -652,6 +669,22 @@ def test_cadena_python_con_espacios_raros_no_marca_lo_que_no_fuga(fuente):
     "docker rm $(docker ps -aq -f",
     "docker rm `docker ps -aq",
     "docker rm $(echo $(docker ps -aq) -v",
+    # casos del auditor (ronda 9): acentos graves en número par, `)` desbalanceado
+    "x=`docker rm -f c`; y=`grep -v z; true`",
+    "x=`docker rm -f c` y=`echo -v; true`",
+    "echo `docker rm -f c` `grep -v x;`",
+    "x=`docker rm -f c`",
+    'docker rm -f $(grep "web)" -v ids.txt)',
+    "docker rm -f $(grep 'a)' -v ids)",
+    "docker rm -f $(echo \\) -v)",
+    "docker rm -f $(case $x in a) echo -v;; esac)",
+    "docker rm -f $(docker ps -aq | grep -v keep)",
+    "docker rm $((1+2)) -f",
+    # la lectura de master (la ventana corta en `$(`) sigue marcando: nunca menos que master
+    "docker rm -f $(docker ps -aq) -v",
+    'docker rm -f $(echo ")") -v',
+    "docker rm -f ${x%)} -v",
+    "docker rm -f <(echo) -v",
 ])
 def test_shell_las_banderas_posteriores_a_un_subshell_cuentan(comando):
     """Un subshell sin cerrar se marca (falla cerrado)."""
@@ -661,16 +694,31 @@ def test_shell_las_banderas_posteriores_a_un_subshell_cuentan(comando):
 @pytest.mark.parametrize("comando", [
     "docker rm $(docker ps -aq) -v",
     "docker rm $(docker ps -aq) -fv",
-    "docker rm -f $(docker ps -aq) -v",
     "docker rm `docker ps -aq` -v -f",
     "docker rm $(echo $(docker ps -aq) x) -vf",
     "docker rm $(docker ps -aq -f status=exited)",
     "docker rm -v $(docker ps -aq -f status=exited)",
     "docker ps -f $(echo x)",
     "x=$(docker rm -v c) -f",
+    "x=`docker rm -fv c`",
+    "x=`docker rm -v c`; y=`foo`",
 ])
 def test_shell_un_v_posterior_a_un_subshell_exime_y_sus_banderas_no_cuentan(comando):
     assert not culpables_en_texto(comando, es_python=False), f"falso positivo: {comando}"
+
+
+# Ronda 10: separadores `|` y `||` pegados a un argumento (mata el mutante que quita `|`).
+@pytest.mark.parametrize("pegado", ['"c1|"', '"c1||"', '"|c1"', '"||c1"', '"c1;"', '"c1&"'])
+def test_separador_pegado_de_cada_caracter_corta_la_lectura_de_shell(pegado):
+    fuente = f'["ssh", h, "docker", "rm", "-f", {pegado}, "docker", "rm", "-fv", c2]'
+    assert culpables_en_texto(fuente, es_python=True), f"no detectó: {fuente}"
+
+
+def test_limites_declarados_del_subshell_en_shell():
+    """Los dos límites del docstring: un paréntesis sin par entre comillas marca de más, y un
+    `)` entrecomillado seguido de `-v` y luego `-f` no se ve (master tampoco lo veía)."""
+    assert culpables_en_texto('docker rm -v $(docker ps --format "(x" -q)', es_python=False)
+    assert not culpables_en_texto('docker rm $(echo ")" -v) -f', es_python=False)
 
 
 def test_python_que_no_parsea_falla_cerrado_con_la_ruta():
