@@ -39,6 +39,8 @@ En honor al Prof. Raúl Jacobs.
 """
 from __future__ import annotations
 
+import asyncio
+import fcntl
 import hashlib
 import json
 import logging
@@ -48,6 +50,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+from jax.core.project_tree_lock import abrir_project_tree_lock
 
 from jacobs.store import event_append
 try:
@@ -135,6 +138,21 @@ async def _execution_error(*, job_id: str, tool_name: str, caller: str, reason: 
     except Exception:  # fail-soft: mismo criterio que _reject
         logger.error("tool_authority: no se pudo registrar TOOL_CALL_EXECUTION_ERROR para job %s", job_id, exc_info=True)
     return {"tool_name": tool_name, "decision": "execution_error", "reason": reason, "content": None}
+
+
+async def _adquirir_project_tree_lock() -> int:
+    """Toma el lock sin bloquear el event loop y cierra el fd al cancelarse."""
+    fd = abrir_project_tree_lock(WORKSPACE_ROOT)
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError:
+                await asyncio.sleep(0.01)
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def resolve_jailed_path(path_str: str, forbidden_paths: list[str]) -> tuple[Path | None, str | None]:
@@ -247,14 +265,25 @@ async def authorize_and_execute_tool_call(
         )
 
     path_str = args.get("path")
+    project_tree_lock_fd = None
+    projects_fd = None
     try:
-        projects_fd = _open_projects_root_fd()
-    except OSError as exc:
-        return await _reject(
-            job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
-            reason=f"no se pudo anclar el directorio protegido proyectos/: {exc}",
-        )
-    try:
+        if capability_key in {"file_read", "file_write"}:
+            try:
+                project_tree_lock_fd = await _adquirir_project_tree_lock()
+            except OSError as exc:
+                return await _reject(
+                    job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
+                    reason=f"no se pudo adquirir el candado del árbol de proyectos: {exc}",
+                )
+        try:
+            projects_fd = _open_projects_root_fd()
+        except OSError as exc:
+            return await _reject(
+                job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
+                reason=f"no se pudo anclar el directorio protegido proyectos/: {exc}",
+            )
+
         resolved, jail_reason = resolve_jailed_path(path_str, cap.forbidden_paths)
         if jail_reason is not None:
             return await _reject(
@@ -289,6 +318,11 @@ async def authorize_and_execute_tool_call(
     finally:
         if projects_fd is not None:
             os.close(projects_fd)
+        if project_tree_lock_fd is not None:
+            try:
+                fcntl.flock(project_tree_lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(project_tree_lock_fd)
 
 
 # --- Sobre fuente no confiable (contenido de read_file) ---

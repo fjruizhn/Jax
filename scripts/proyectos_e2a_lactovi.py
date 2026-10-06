@@ -75,6 +75,7 @@ from jax.memory.b9 import MutationAuthorizationRequest, ScopeContext, Visibility
 from jax.memory.b9_mariadb import MariaDBB9Store  # noqa: E402
 from jax.memory.project_authority import ProjectAuthorityAdmin  # noqa: E402
 from jax.memory.scope_authority import ProjectLifecycle  # noqa: E402
+from jax.core.project_tree_lock import project_tree_lock  # noqa: E402
 from procesamiento.compuerta import tiene_extractor  # noqa: E402
 from procesamiento.ficha import Ficha, sha256_de  # noqa: E402
 
@@ -218,7 +219,8 @@ def _mover(origen: Path, destino: Path) -> None:
     """rename sin pisar: `os.rename` reemplazaria un directorio destino vacio."""
     if os.path.lexists(destino):
         raise EstadoImpide(f"el destino ya existe: {destino}")
-    os.rename(origen, destino)
+    with project_tree_lock(Path(__file__).resolve().parents[1]):
+        os.rename(origen, destino)
 
 
 # --------------------------------------------------------------------------- base
@@ -373,10 +375,10 @@ async def aplicar(pool, args) -> dict:
     except CommitIncierto:
         raise                                                                # el disco NO se toca
     except ShaNoCuadra:
-        os.rename(nueva, base)
+        _mover(nueva, base)
         raise
     except BaseException:
-        os.rename(nueva, base)
+        _mover(nueva, base)
         print(f"ERROR al registrar documentos: se deshizo el rename (la carpeta volvio a {base}); el proyecto "
               f"{creado.project_id} sigue creado y ACTIVO, y el mapa {mapa} se conserva (borrarlo a mano antes de "
               f"reintentar --aplicar: no se pisa)", file=sys.stderr)
@@ -484,7 +486,7 @@ async def revertir(pool, ruta_mapa: str) -> dict:
         except BaseException:
             await conn.rollback()
             if movida:
-                os.rename(vieja, nueva)
+                _mover(vieja, nueva)
             raise
         try:
             await conn.commit()

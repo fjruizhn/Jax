@@ -35,6 +35,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -927,6 +928,51 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
             ["git", "show", f"{result['git_sha']}:legit.txt"],
             cwd=self.workspace, capture_output=True, text=True, check=True,
         ).stdout == original
+
+    async def test_movimiento_coordinado_a_proyectos_espera_a_que_termine_el_worker(self):
+        from jax.core.project_tree_lock import project_tree_lock
+
+        safe = self.workspace / "safe"
+        safe.mkdir()
+        project_destination = self.workspace / "proyectos" / "moved-safe"
+        mover_terminado = threading.Event()
+        original_replace = tool_authority.os.replace
+        mover_threads = []
+
+        def replace_then_start_coordinated_move(src, dst, **kwargs):
+            result = original_replace(src, dst, **kwargs)
+
+            def move_under_shared_lock():
+                with project_tree_lock(self.workspace):
+                    safe.rename(project_destination)
+                mover_terminado.set()
+
+            mover = threading.Thread(target=move_under_shared_lock)
+            mover_threads.append(mover)
+            mover.start()
+            return result
+
+        try:
+            with patch.object(tool_authority.os, "replace", replace_then_start_coordinated_move):
+                result = await self._call(
+                    "write_file", {"path": "safe/documento.txt", "content": "write completo\n"}
+                )
+            for mover in mover_threads:
+                mover.join(timeout=5)
+            assert mover_terminado.is_set(), "el movimiento no terminó después de liberar el lock"
+            assert result["decision"] == "executed" and result["git_committed"] is True, result
+            assert (project_destination / "documento.txt").read_text() == "write completo\n"
+            committed = subprocess.run(
+                ["git", "show", f"{result['git_sha']}:safe/documento.txt"],
+                cwd=self.workspace, capture_output=True, text=True, check=True,
+            )
+            assert committed.stdout == "write completo\n"
+        finally:
+            if project_destination.exists():
+                project_destination.rename(safe)
+            for mover in mover_threads:
+                if mover.is_alive():
+                    mover.join(timeout=5)
 
     async def test_write_file_a_raiz_del_workspace_no_lanza(self):
         result = await self._call("write_file", {"path": ".", "content": "no"})
