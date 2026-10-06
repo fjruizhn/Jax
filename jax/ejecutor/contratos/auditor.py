@@ -107,6 +107,8 @@ class Revision:
     retenidas: frozenset
     modo: str = "COMPLETO"
     faceta: str | None = None
+    proveedor_id: str | None = None
+    local: bool | None = None
 
 
 class AuditorIlegible(ValueError):

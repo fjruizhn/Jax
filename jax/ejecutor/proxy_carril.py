@@ -453,7 +453,9 @@ class _Proxy:
         # tool_use_id ya anotados como resultado: la historia se repite entera en cada
         # petición (medido con el arnés 2.1.273), cada resultado se anota una vez.
         self._resultados_anotados: collections.OrderedDict = collections.OrderedDict()
-        self._misiones_c5_anotadas: collections.OrderedDict[str, None] = collections.OrderedDict()
+        # Idempotencia por misión: un turno posterior o el reintento tras perder OK
+        # repite la misma selección sin duplicar C3. Una selección distinta se rechaza.
+        self._misiones_c5_anotadas: collections.OrderedDict[str, tuple] = collections.OrderedDict()
         self._candado_c5 = asyncio.Lock()
         # Un cliente propio del proxy (pool de conexiones), no uno por petición:
         # vive lo que vive el servidor y se cierra en `cerrar()`. Se construye con
@@ -507,10 +509,13 @@ class _Proxy:
                     or evento.get("modo") != "SOLO_ORDENES"):
                 raise ValueError("evento_c5_invalido")
             async with self._candado_c5:
-                if evento["mision_id"] in self._misiones_c5_anotadas:
-                    raise ValueError("evento_c5_duplicado")
-                await self._anotar(evento)
-                self._misiones_c5_anotadas[evento["mision_id"]] = None
+                seleccion = tuple(evento[k] for k in ("faceta", "proveedor_id", "local", "modo"))
+                anterior = self._misiones_c5_anotadas.get(evento["mision_id"])
+                if anterior is not None and anterior != seleccion:
+                    raise ValueError("evento_c5_conflictivo")
+                if anterior is None:
+                    await self._anotar(evento)
+                    self._misiones_c5_anotadas[evento["mision_id"]] = seleccion
                 while len(self._misiones_c5_anotadas) > 4096:
                     self._misiones_c5_anotadas.popitem(last=False)
             writer.write(b"OK\n")

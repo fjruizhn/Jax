@@ -6,8 +6,10 @@ Se implementa la opción para permitir auditoría C5 con la faceta de nube confi
 
 La selección registra faceta, proveedor, localidad y modo en la bitácora de misión y el journal de arranque. Para el C3 append-only, el vigía usa un socket Unix autenticado por UID hasta el proceso proxy, que sigue siendo el único escritor. La metadata se agrega a la cadena y, si el canal no está configurado o falla, el modo SOLO_ORDENES no inicia. La revisión final no reenvía claims ni un lote vacío; el vigía audita las órdenes por lotes. Las órdenes Skill/incompletas fallan cerradas porque no caben en la allowlist de comandos. La clave se debe sembrar false por migración en jax-platform y el endpoint de misiones de plataforma debe considerar el modo SOLO_ORDENES; eso requiere PR separado después del PR JAX.
 
+La reauditoría encontró que los turnos sucesivos reutilizan el ID de misión y que C3 rechazaba cualquier repetición. Se corrigió para aceptar idempotentemente la selección idéntica y rechazar una selección conflictiva; la bitácora visible también conserva proveedor y localidad.
+
 Pruebas: baseline de diez archivos contra `origin/master`, 470 recolectadas; rama, 493; delta +23. Se confirmó TDD rojo contra baseline para selección, proyección HTTP, rechazo de Skill/entradas inválidas, schema estricto, separación de instrucciones, modo de canario, código seguro de error HTTP y el rechazo de un auditor local en modo SOLO_ORDENES. No se ejecutaron pruebas DB ni se usó `jax_memory`.
 
 La única llamada real solicitada usó el resolvedor y cliente normal con una misión sintética y 128 tokens máximos. El resolvedor falló cerrado antes de HTTP: `FacetUnavailableError` (su log interno solo registró `RuntimeError`); no fue posible verificar saldo/proveedor y no se repitió la llamada.
 
-Pendiente de cierre: auditoría independiente Tier 3 sobre el SHA final y PRs separados de JAX y jax-platform.
+Pendiente de cierre: auditoría independiente Tier 3 sobre el SHA corregido y PRs separados de JAX y jax-platform.

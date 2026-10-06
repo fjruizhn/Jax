@@ -228,14 +228,15 @@ def test_turno_completo_entrega_el_par_con_la_linea_literal_y_las_crudas():
 def test_solo_ordenes_marca_afirmaciones_no_auditadas_en_bitacora_visible():
     f = Falsas()
     f.revision = Revision(False, None, None, (), frozenset(), frozenset({"a1"}),
-                          "SOLO_ORDENES", "thot")
+                          "SOLO_ORDENES", "thot", "openai", False)
     resultado, eventos = _correr(f)
     marca = "no auditadas por C5 (solo órdenes)"
     assert resultado["auditoria_afirmaciones"] == marca
     assert resultado["afirmaciones"] == []
     assert resultado["descartadas"][0]["dato"] == "1.9Gi"
     evento_auditoria = next(e for e in eventos if e["evento"] == "auditoria_c5")
-    assert evento_auditoria["datos"] == {"faceta": "thot", "modo": "SOLO_ORDENES", "afirmaciones": marca}
+    assert evento_auditoria["datos"] == {"faceta": "thot", "proveedor_id": "openai", "local": False,
+                                         "modo": "SOLO_ORDENES", "afirmaciones": marca}
     evento_afirmacion = next(e for e in eventos if e["evento"] == "afirmacion_descartada")
     assert evento_afirmacion["datos"]["auditoria_c5"] == marca
 

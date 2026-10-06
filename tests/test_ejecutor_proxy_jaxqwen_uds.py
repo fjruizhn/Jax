@@ -57,6 +57,15 @@ def test_c5_selection_uses_the_proxy_as_the_only_c3_writer(tmp_path):
                 await registrar_auditor_c5(mision_id="mision-1", faceta="thot", proveedor_id="openai",
                                            local=False, modo="SOLO_ORDENES",
                                            env={"JAX_PROXY_CARRIL_C5_SOCKET": str(path)})
+                # Mismo evento: OK idempotente, sin entrada C3 duplicada.
+                await registrar_auditor_c5(mision_id="mision-1", faceta="thot", proveedor_id="openai",
+                                           local=False, modo="SOLO_ORDENES",
+                                           env={"JAX_PROXY_CARRIL_C5_SOCKET": str(path)})
+                # Reutilizar el ID con otra selección debe fallar cerrado.
+                with pytest.raises(ValueError, match="registro_c3_c5_rechazado"):
+                    await registrar_auditor_c5(mision_id="mision-1", faceta="ada", proveedor_id="openai",
+                                               local=False, modo="SOLO_ORDENES",
+                                               env={"JAX_PROXY_CARRIL_C5_SOCKET": str(path)})
                 return verificar_cadena(cfg.registro), [json.loads(line) for line in cfg.registro.read_text().splitlines()]
             finally:
                 await server.apagar()

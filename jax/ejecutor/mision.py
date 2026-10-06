@@ -484,16 +484,20 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                 auditoria_afirmaciones = ("no auditadas por C5 (solo órdenes)"
                                           if revision.modo == "SOLO_ORDENES" else "auditadas por C5")
                 dice("auditoria_c5", faceta=revision.faceta, modo=revision.modo,
+                     proveedor_id=revision.proveedor_id, local=revision.local,
                      afirmaciones=auditoria_afirmaciones)
                 entrega = A.aplicar_revision(entrega, revision)
             except Exception as exc:  # fail-soft: el turno entrega las crudas; fail-CLOSED para las afirmaciones: con el auditor ilegible o caído no sale ninguna
                 auditor_legible = False
                 modo = getattr(exc, "modo", None)
                 faceta = getattr(exc, "faceta", None)
+                proveedor_id = getattr(exc, "proveedor_id", None)
+                local = getattr(exc, "local", None)
                 if modo in ("COMPLETO", "SOLO_ORDENES"):
                     auditoria_afirmaciones = ("no auditadas por C5 (solo órdenes)" if modo == "SOLO_ORDENES"
                                               else "no auditadas por C5 (auditor ilegible)")
-                    dice("auditoria_c5", faceta=faceta, modo=modo, afirmaciones=auditoria_afirmaciones)
+                    dice("auditoria_c5", faceta=faceta, proveedor_id=proveedor_id, local=local,
+                         modo=modo, afirmaciones=auditoria_afirmaciones)
                 # `motivo` SOLO para AuditorIlegible: su codigo es una constante (proveedor_fallo,
                 # json_invalido...). El texto de cualquier otra excepcion puede traer una llave
                 # o un cuerpo HTTP y no viaja.

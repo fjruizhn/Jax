@@ -541,6 +541,9 @@ def test_el_turno_audita_con_el_plazo_de_axioma_config(monkeypatch):
     async def leer_config(conn):
         return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 555, False, False, False)
 
+    async def es_local(conn, provider_id):
+        return False
+
     from types import SimpleNamespace
 
     async def elegir(conn, *, cfg, hosts_mision, resolve_facet, devolver_modo=False):
@@ -550,16 +553,18 @@ def test_el_turno_audita_con_el_plazo_de_axioma_config(monkeypatch):
 
     async def auditar_falso(lote, **kw):
         vistas.update(kw)
-        return "revision"
+        return S.A.Revision(False, None, None, (), frozenset(), frozenset(), kw["modo"], "thot")
 
     monkeypatch.setattr(jstore, "conexion", lambda **kw: _Conexion())
     monkeypatch.setattr(eleccion_c5, "leer_config", leer_config)
+    monkeypatch.setattr(eleccion_c5, "es_local", es_local)
     monkeypatch.setattr(S.arranque, "eleccion_del_auditor", elegir)
     monkeypatch.setattr(auditor_cliente, "auditar", auditar_falso)
     monkeypatch.setattr(S.A, "afirmaciones_auditables", lambda entrega: ())
     turno = M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])})
     deps = S.dependencias_reales({}, turno, tope_s=1.0, espera_s=1.0)
-    assert asyncio.run(deps.auditar("texto", object(), (S.A.Maquina("m", "192.0.2.9", 58291),))) == "revision"
+    revision = asyncio.run(deps.auditar("texto", object(), (S.A.Maquina("m", "192.0.2.9", 58291),)))
+    assert revision.proveedor_id == "openai" and revision.local is False
     assert vistas["faceta"].key == "thot"
     assert {k: v for k, v in vistas.items() if k != "faceta"} == {
         "max_tokens": 100, "tope_s": 555, "modo": "COMPLETO"}
