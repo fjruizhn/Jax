@@ -86,8 +86,7 @@ def test_cada_llamador_pasa_todos_los_parametros():
         assert isinstance(modo, ast.Name) and modo.id == "modo", funcion
     resolver = next(n for n in llamadas if isinstance(n.func, ast.Attribute)
                     and n.func.attr == "elegir_y_resolver_auditor")
-    assert any(k.arg == "devolver_modo" and isinstance(k.value, ast.Constant) and k.value.value is True
-               for k in resolver.keywords)
+    assert not any(k.arg == "devolver_modo" for k in resolver.keywords)
 
 
 def _viene_de_la_config(valor: ast.expr) -> bool:

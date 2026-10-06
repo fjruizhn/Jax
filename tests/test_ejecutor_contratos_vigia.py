@@ -74,6 +74,17 @@ def test_frena_con_motivo_y_paso(tmp_path):
     assert lotes[0].mision == "uptime de hall9000"
 
 
+def test_registra_codigo_seguro_del_proveedor_sin_detalle_privado(tmp_path, caplog):
+    ruta, desde = _registro(tmp_path, ["uptime"], antes=1)
+
+    async def proveedor_caido(lote):
+        raise A.AuditorIlegible("proveedor_fallo", proveedor_codigo="insufficient_quota")
+
+    _correr(_cfg(tmp_path, ruta, desde, lote_max=1), proveedor_caido, fin_tras_s=0.2)
+    assert "vigia auditor_ilegible codigo=proveedor_fallo proveedor_codigo=insufficient_quota" in caplog.text
+    assert "cuerpo privado" not in caplog.text
+
+
 def test_no_lee_lo_anterior_a_la_mision(tmp_path):
     ruta, desde = _registro(tmp_path, ["uptime"], antes=3)
     vistos = []

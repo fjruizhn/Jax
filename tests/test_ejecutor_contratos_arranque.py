@@ -716,8 +716,8 @@ def test_el_canario_de_arranque_audita_con_el_plazo_de_axioma_config(tmp_path, m
     async def leer_config(conn):
         return AR.eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 333, False, False, False)
 
-    async def eleccion(conn, *, hosts_mision, cfg, resolve_facet, devolver_modo=False):
-        return ("faceta-fake", (), "COMPLETO") if devolver_modo else ("faceta-fake", ())
+    async def eleccion(conn, *, hosts_mision, cfg, resolve_facet):
+        return "faceta-fake", (), "COMPLETO"
 
     vistas = {}
 
@@ -745,7 +745,7 @@ def test_el_canario_de_arranque_audita_con_el_plazo_de_axioma_config(tmp_path, m
 def test_eleccion_del_auditor_valida_la_nube_sensible_con_solo_ordenes(monkeypatch):
     from types import SimpleNamespace
 
-    async def elegir(conn, *, cfg, hosts_mision, resolve_facet, devolver_modo=False):
+    async def elegir(conn, *, cfg, hosts_mision, resolve_facet):
         seleccionado = SimpleNamespace(key="thot", provider_id="openai")
         return (seleccionado, {"cliente"}, {"cliente"}, "SOLO_ORDENES")
 
@@ -760,7 +760,7 @@ def test_eleccion_del_auditor_valida_la_nube_sensible_con_solo_ordenes(monkeypat
     cfg = AR.eleccion_c5.ConfigC5("cerebro", "thot", "local", 10, 1.0, 100, 100,
                                   False, False, True)
     auditor, fallos, modo = asyncio.run(AR.eleccion_del_auditor(
-        object(), hosts_mision={"cliente"}, cfg=cfg, resolve_facet=resolver, devolver_modo=True))
+        object(), hosts_mision={"cliente"}, cfg=cfg, resolve_facet=resolver))
     assert auditor.key == "thot"
     assert fallos == ()
     assert modo == "SOLO_ORDENES"

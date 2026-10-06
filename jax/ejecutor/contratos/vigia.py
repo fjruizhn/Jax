@@ -142,7 +142,8 @@ async def vigilar(cfg: ConfigVigia, auditar, fin: asyncio.Event, *, pausar=None,
                 try:
                     revision = await auditar(lote)
                 except A.AuditorIlegible as exc:
-                    log.error("vigia auditor_ilegible codigo=%s", exc.codigo)
+                    log.error("vigia auditor_ilegible codigo=%s proveedor_codigo=%s", exc.codigo,
+                              exc.proveedor_codigo or "desconocido")
                     await asyncio.to_thread(pausar, "auditor_ilegible", None, cfg, exc.codigo)
                     continue
                 except Exception as exc:  # fail-soft: el vigía no se cae por el auditor; FRENA (pausa auditor_caido) y sigue leyendo

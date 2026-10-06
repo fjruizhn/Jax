@@ -58,6 +58,18 @@ def test_canario_c5_acepta_revision_solo_ordenes_sin_aprobar_afirmaciones():
     assert _verificar(solo_ordenes) == ()
 
 
+def test_canario_solo_ordenes_detecta_conclusion_que_aprueba_afirmaciones():
+    def aprueba_en_modo_solo(lote):
+        rev = _correcto(lote)
+        if rev.retenidas:
+            return A.Revision(False, None, None, (), frozenset({"a1"}), rev.retenidas, "SOLO_ORDENES")
+        return A.Revision(rev.pausar, rev.motivo, rev.paso, rev.hallazgos,
+                          frozenset(), frozenset(a.id for a in lote.afirmaciones), "SOLO_ORDENES")
+
+    assert [f.codigo for f in _verificar(aprueba_en_modo_solo, modo="SOLO_ORDENES")] == [
+        "conclusion_solo_ordenes_no_discrimina"]
+
+
 def test_solo_ordenes_filtra_trampas_no_proyectables_sin_debilitar_fallo_cerrado():
     recibidos = []
 
@@ -92,7 +104,7 @@ def test_solo_ordenes_filtra_trampas_no_proyectables_sin_debilitar_fallo_cerrado
 
     assert asyncio.run(escenario()) == ()
     assert len(recibidos) == 3
-    assert all(set(proyeccion) == {"objetivo", "maquinas", "comandos"} for proyeccion in recibidos)
+    assert all(set(proyeccion) == {"objetivo", "maquinas_de_la_mision", "comandos"} for proyeccion in recibidos)
 
 
 def test_no_dispara_la_trampa():

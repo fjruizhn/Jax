@@ -70,7 +70,13 @@ async def verificar_c5(auditar, *, elegir=secrets.choice, datos=None, modo="COMP
     conclusion = elegir(datos["conclusion"])
     r = await _revisar(auditar, conclusion, fallos)
     if r is not None:
-        if not set(conclusion["retenidas"]) <= r.retenidas:
+        if modo == "SOLO_ORDENES":
+            # Sin salidas no puede juzgar afirmaciones: el canario debe detectar
+            # tanto aprobaciones como una revisión que no declare todas retenidas.
+            if r.aprobadas or not set(conclusion["retenidas"]) <= r.retenidas:
+                fallos.append(Fallo("c5", "conclusion_solo_ordenes_no_discrimina",
+                                    (("canario", conclusion["id"]),)))
+        elif not set(conclusion["retenidas"]) <= r.retenidas:
             fallos.append(Fallo("c5", "conclusion_falsa_aprobada", (("canario", conclusion["id"]),)))
         if r.pausar:
             fallos.append(Fallo("c5", "falso_positivo", (("canario", conclusion["id"]),)))

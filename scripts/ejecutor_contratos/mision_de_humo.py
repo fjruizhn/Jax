@@ -53,6 +53,25 @@ TOPE_CEREBRO_S = 900
 ESPERA_LATIDO_S = 120
 
 
+async def auditar_lote_mision_humo(lote, *, cfg, hosts_mision, conn, resolve_facet, cliente=None, mision_id=None):
+    """Resuelve faceta y modo como una sola decisión antes de enviar el lote a C5."""
+    from jax.ejecutor.contratos import auditor_cliente, eleccion_c5
+
+    faceta, _, _, modo = await eleccion_c5.elegir_y_resolver_auditor(
+        conn, cfg=cfg, hosts_mision=hosts_mision, resolve_facet=resolve_facet)
+    if mision_id is not None:
+        from jax.ejecutor.contratos import c3_control
+
+        local = await eleccion_c5.es_local(conn, faceta.provider_id)
+        await c3_control.registrar_auditor_c5(
+            mision_id=mision_id, faceta=faceta.key, proveedor_id=faceta.provider_id, local=local,
+            modo=modo, config_sha256=eleccion_c5.huella_config(cfg))
+    revision = await auditor_cliente.auditar(
+        lote, faceta=faceta, max_tokens=cfg.max_tokens, tope_s=cfg.tope_s,
+        modo=modo, cliente=cliente)
+    return faceta, revision
+
+
 def comandos_de_la_mision(ip: str, puerto: int) -> tuple:
     # `-tt` lo exige la regla `ssh_sin_tt` de C1: con pty, frenar la cuenta local (C4) corta lo remoto
     # con SIGHUP. Visto 2026-09-17 en la primera corrida: sin `-tt` el gancho bloqueó, el cerebro
@@ -176,10 +195,11 @@ async def principal(maquina: str) -> int:
         # auditar con OTRO sería aprobar con uno y mandarle los datos a otro.
         async with conexion(desechable=True) as conn:
             cfg = await eleccion_c5.leer_config(conn)
-            auditor_f, _, _ = await eleccion_c5.elegir_y_resolver_auditor(
-                conn, cfg=cfg, hosts_mision=frozenset({maquina}), resolve_facet=resolve_facet)
-        revision = await auditor_cliente.auditar(A.Lote(texto_mision, (), A.afirmaciones_auditables(entrega), A.maquinas_de(p.hosts, frozenset({maquina}))),
-                                                 faceta=auditor_f, max_tokens=cfg.max_tokens, tope_s=cfg.tope_s)
+            auditor_f, revision = await auditar_lote_mision_humo(
+                A.Lote(texto_mision, (), A.afirmaciones_auditables(entrega),
+                       A.maquinas_de(p.hosts, frozenset({maquina}))),
+                cfg=cfg, hosts_mision=frozenset({maquina}), conn=conn, resolve_facet=resolve_facet,
+                mision_id=id_mision)
         final_entrega = A.aplicar_revision(entrega, revision)
         for a in final_entrega.respaldadas:
             dice(("afirmacion", "entregada"), ("proposito", a.proposito), ("dato", a.dato), ("maquina", a.maquina),

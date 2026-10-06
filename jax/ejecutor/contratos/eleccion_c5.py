@@ -22,6 +22,9 @@ antes de que existiera un auditor local real.
 from __future__ import annotations
 
 import math
+import hashlib
+import json
+from dataclasses import asdict
 from dataclasses import dataclass
 
 from jax.ejecutor.contratos.fallo import Fallo
@@ -66,6 +69,12 @@ class ConfigC5:
     admite_datos_de_clientes: bool
     admite_mismo_proveedor: bool
     auditor_nube_solo_ordenes: bool
+
+
+def huella_config(cfg: ConfigC5) -> str:
+    """Identifica la foto íntegra de C5 sin persistir credenciales ni contenido de salida."""
+    cuerpo = json.dumps(asdict(cfg), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(cuerpo).hexdigest()
 
 
 def config_desde_filas(filas: dict) -> ConfigC5:
@@ -202,7 +211,7 @@ async def hosts_de_la_mision(conn, hosts) -> tuple:
     return frozenset(n for n, c in filas if c), frozenset(n for n, _ in filas)
 
 
-async def elegir_y_resolver_auditor(conn, *, cfg: ConfigC5, hosts_mision, resolve_facet, devolver_modo=False):
+async def elegir_y_resolver_auditor(conn, *, cfg: ConfigC5, hosts_mision, resolve_facet):
     """Punto único de elección + resolución del auditor. Lo usan los TRES consumidores
     reales de C5 -- el arranque (la compuerta, `arranque.py::p_c5`), el turno del cerebro
     (`mision_servicio.py::auditar`) y el vigía en vivo (`vigia_servicio.py::_principal`) --
@@ -212,18 +221,16 @@ async def elegir_y_resolver_auditor(conn, *, cfg: ConfigC5, hosts_mision, resolv
     DB, la resolución de red es responsabilidad de quien llama) -- eso además la hace
     fácil de probar con un doble de prueba, sin credenciales ni HTTP real.
 
-    Devuelve `(faceta_resuelta, hosts_con_clientes, hosts_conocidos)`; si `devolver_modo`
-    es true, agrega el modo efectivo al final. Los dos últimos
-    quedan para quien también necesite correr la compuerta (`validar_eleccion`) sin
-    repetir la consulta de hosts."""
+    Devuelve `(faceta_resuelta, hosts_con_clientes, hosts_conocidos, modo)`. La faceta y
+    el modo son inseparables: un modo COMPLETO por omisión podría enviar salidas y
+    afirmaciones de una máquina con datos de clientes a un auditor de nube."""
     if hosts_mision is None:
         con_clientes, conocidos = frozenset(), frozenset()
     else:
         con_clientes, conocidos = await hosts_de_la_mision(conn, hosts_mision)
     hay_datos = bool(sensibles(hosts_mision or frozenset(), con_clientes, conocidos))
     faceta = await resolve_facet(elegir_auditor_faceta(cfg, hay_datos_de_clientes=hay_datos))
-    resultado = (faceta, con_clientes, conocidos)
-    return (*resultado, modo_auditoria(cfg, hay_datos_de_clientes=hay_datos)) if devolver_modo else resultado
+    return faceta, con_clientes, conocidos, modo_auditoria(cfg, hay_datos_de_clientes=hay_datos)
 
 
 async def verificar_eleccion(conn, *, cfg: ConfigC5, proveedor_cerebro: str, proveedor_auditor: str,

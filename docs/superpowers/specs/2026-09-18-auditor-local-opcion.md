@@ -10,15 +10,18 @@ crea como `false`. Ausente, vacía o con cualquier valor distinto de `true`/`fal
 el arranque falla cerrado antes de resolver o invocar al auditor de nube. Con `false`
 se conserva la selección del auditor local para misiones sensibles.
 
-`SOLO_ORDENES` es un modo de privacidad con alcance limitado: la nube recibe únicamente
-el objetivo de la misión, las instrucciones de auditoría, la identidad de máquina
-requerida por el contrato (machine-id legítimo) y el número y comando de cada paso que
-se pide juzgar, para que los hallazgos puedan citar su paso.
-No salen capturas de stdout/stderr, salidas, líneas citadas, contexto, afirmaciones
-(claims), entradas de pasos ni errores que contengan datos. El cuerpo HTTP se construye
-por allowlist de esos cuatro campos; la ausencia de contenido prohibido se comprueba
-contra el cuerpo serializado real. Los datos omitidos siguen disponibles localmente para
-la ejecución y la supervisión humana.
+`SOLO_ORDENES` es un modo de privacidad con alcance limitado: la nube recibe el objetivo,
+las instrucciones, las máquinas de la misión y el número y la orden literal de cada paso
+que se pide juzgar. La orden viaja completa, aunque contenga nombres de dominios,
+carpetas o archivos conocidos por una salida previa. La decisión explícita de Fernando
+acepta que esos nombres derivados viajen como parte de la orden.
+
+No salen capturas, salidas, stdout, stderr, líneas citadas, contexto, afirmaciones
+(claims), ni conclusiones o afirmaciones sobre resultados. Tampoco se envían campos
+adicionales de las entradas de las herramientas. El cuerpo HTTP se construye por
+allowlist y la ausencia de contenido prohibido se comprueba contra el cuerpo serializado
+real. Los datos omitidos siguen disponibles localmente para la ejecución y la
+supervisión humana.
 
 El auditor en este modo solo juzga si cada comando pertenece al objetivo y al contrato
 de la misión y si el machine-id es legítimo. No inventa ni infiere salidas de comandos.
@@ -34,8 +37,8 @@ bitácora y en el journal de arranque. Para C3, `jaxsvc` informa la selección p
 socket Unix `JAX_PROXY_CARRIL_C5_SOCKET`; el proxy autentica su UID
 (`JAX_PROXY_CARRIL_C5_UID`) y escribe el evento en la cadena como único escritor. El
 socket se habilita con su grupo (`JAX_PROXY_CARRIL_C5_GID`). Si el canal falta o falla,
-la misión `SOLO_ORDENES` no inicia. El evento solo contiene ID de misión, faceta,
-proveedor, localidad y modo. El registro de claims marca expresamente que C5 en modo
+la misión no inicia. El evento solo contiene ID de misión, faceta, proveedor, localidad,
+modo y SHA-256 de la configuración C5 usada. El registro de claims marca expresamente que C5 en modo
 `SOLO_ORDENES` no los auditó. Las órdenes `Skill` o entradas sin Bash `command` no
 pueden proyectarse sin salir de la allowlist y fallan cerradas en el vigía. La revisión
 final no vuelve a enviar claims ni un lote vacío: usa el resultado del vigía para marcar
@@ -46,25 +49,34 @@ Bash `command` completos. Si una familia no tiene casos proyectables, el canario
 cerrado antes de llamar al proveedor. La comprobación independiente de que pasos `Write`
 o `Skill` fallan cerrados se mantiene en las pruebas del proyector y del cliente.
 
-`SOLO_ORDENES` recibe las definiciones compartidas de `fuera_de_mision` y `prohibido`,
-incluidas las reglas de alcance de máquinas, secretos y operaciones destructivas. Esas
-reglas se aplican aunque la misión pida explícitamente una acción prohibida. El prompt
-no incluye instrucciones de evaluación de claims; las afirmaciones siguen fuera del
-contrato del modo.
+`SOLO_ORDENES` contiene sus propias reglas de `fuera_de_mision` y `prohibido`, incluidas
+las reglas de alcance de máquinas, secretos e instrucciones destructivas. Esas reglas se
+aplican aunque la misión pida explícitamente una acción prohibida. El prompt no incluye
+instrucciones de evaluación de claims; las afirmaciones siguen fuera del contrato del
+modo. El prompt `COMPLETO` queda idéntico al anterior: solo se añade una sección separada
+para `SOLO_ORDENES`.
 
 El registro C3 de selección es idempotente por ID de misión: al iniciar, el proxy
 reconstruye el índice desde la cadena C3 íntegra; una repetición idéntica responde OK
-sin agregar otra entrada y sobrevive reinicios. Una faceta, proveedor, localidad o modo
-distinto para el mismo ID se rechaza, incluso tras reiniciar el proxy. El índice conserva
-todas las selecciones existentes en la cadena, sin una ventana de deduplicación que pueda
-olvidar misiones antiguas. Así los turnos sucesivos y los reintentos tras perder la
-respuesta no bloquean el vigía ni ocultan un cambio de selección. La bitácora visible de
-misión conserva faceta, proveedor, localidad, modo y estado de auditoría de afirmaciones.
+sin agregar otra entrada y sobrevive reinicios. El evento registra tanto `COMPLETO` como
+`SOLO_ORDENES` e incluye la huella de una única lectura de la configuración C5 para la
+misión. Faceta, proveedor, localidad, modo o huella distintos para el mismo ID se
+rechazan, incluso tras reiniciar el proxy. El índice conserva todas las selecciones
+existentes en la cadena, sin una ventana de deduplicación que pueda olvidar misiones
+antiguas. Así los turnos sucesivos y los reintentos tras perder la respuesta no bloquean
+el vigía ni ocultan un cambio de selección. La bitácora visible de misión conserva
+faceta, proveedor, localidad, modo y estado de auditoría de afirmaciones.
+
+El orden de integración es jax-platform #209 primero (siembra la clave cerrada y expone
+el estado en pantalla), y JAX #363 después (consume la clave y verifica que la semilla
+exista). La prueba DB de JAX lee la semilla migrada y falla si falta o no nace `false`;
+no la crea como fixture.
 
 ---
 
-> **Estado: OPCIÓN PARA DECIDIR, no implementada.** Pedida por Fernando el 2026-09-18 después de
-> cerrar la compuerta de datos de clientes. No cambia nada en producción hasta que él elija.
+> **Historia:** el análisis original de 2026-09-18 precede a la decisión de Fernando
+> registrada arriba el 2026-10-06. La implementación va por los PRs #209 y #363; su
+> integración queda sujeta al orden documentado.
 
 ## 1. El problema, en una línea
 

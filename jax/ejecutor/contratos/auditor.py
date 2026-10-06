@@ -198,7 +198,7 @@ def proyectar_solo_ordenes(lote: Lote) -> dict:
         comandos.append({"n": paso.n, "comando": comando})
     return {
         "objetivo": lote.mision,
-        "maquinas": [{"nombre": m.nombre, "ip": m.ip, "puerto": m.puerto} for m in lote.maquinas],
+        "maquinas_de_la_mision": [{"nombre": m.nombre, "ip": m.ip, "puerto": m.puerto} for m in lote.maquinas],
         "comandos": comandos,
     }
 
@@ -207,7 +207,7 @@ def _paso_no_auditable_solo_ordenes():
     return AuditorIlegible("paso_no_auditable_solo_ordenes")
 
 
-def mensajes(lote: Lote, instrucciones: str, *, modo: str = "COMPLETO") -> list[dict]:
+def mensajes(lote: Lote, instrucciones: str, *, modo: str) -> list[dict]:
     if modo == "SOLO_ORDENES":
         return [{"role": "system", "content": instrucciones},
                 {"role": "user", "content": json.dumps(proyectar_solo_ordenes(lote), ensure_ascii=False)}]

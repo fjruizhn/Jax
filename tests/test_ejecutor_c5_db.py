@@ -14,23 +14,24 @@ INVENTARIO = [("c5-hall9000", "192.0.2.105", "hypervisor", 1, 0), ("c5-atemai", 
               ("c5-baja", "192.0.2.121", "clientes", 0, 0)]
 
 
-async def _asegurar_compuerta_solo_ordenes_cerrada():
-    # La rama JAX puede probar contra jax-platform/master mientras la semilla
-    # correspondiente sigue en su PR aparte. El DB de CI es descartable.
+async def _comprobar_compuerta_solo_ordenes_sembrada():
+    # La semilla pertenece a jax-platform. Este test comprueba el contrato entre
+    # repositorios; no debe reparar ni ocultar que la migración no la sembró.
     async with store.conexion() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "INSERT INTO axioma_config (config_key, config_value) VALUES (%s, %s) "
-                "ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)",
-                ("ejecutor.c5_auditor_nube_solo_ordenes", "false"))
-        await conn.commit()
+                "SELECT config_value FROM axioma_config WHERE config_key = %s",
+                ("ejecutor.c5_auditor_nube_solo_ordenes",))
+            fila = await cur.fetchone()
+    assert fila is not None, "jax-platform debe sembrar la compuerta C5 solo órdenes"
+    assert fila[0] == "false", "la compuerta C5 solo órdenes debe nacer cerrada"
 
 
 async def _con_inventario(accion):
     # store.conexion() y no una conexion suelta: get_conn() ya no existe (frente F,
     # pool de Jacobs). La limpieza va en su propia conexion para que un error de
     # `accion` (que descarta la primera) no deje filas de prueba.
-    await _asegurar_compuerta_solo_ordenes_cerrada()
+    await _comprobar_compuerta_solo_ordenes_sembrada()
     try:
         async with store.conexion() as conn:
             async with conn.cursor() as cur:
@@ -110,7 +111,7 @@ async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
     (facet_resolver._query_facet) hace JOIN contra `model` por esa columna. `is_local`
     parametrizable: el peor caso (spec §4) es el auditor local bindeado a un proveedor
     que NO es local de verdad."""
-    await _asegurar_compuerta_solo_ordenes_cerrada()
+    await _comprobar_compuerta_solo_ordenes_sembrada()
     from jacobs import store
     async with store.conexion() as conn:
         async with conn.cursor() as cur:

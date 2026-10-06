@@ -9,14 +9,17 @@ from pathlib import Path
 
 
 async def registrar_auditor_c5(*, mision_id: str, faceta: str, proveedor_id: str, local: bool,
-                               modo: str, env=None) -> None:
+                               modo: str, config_sha256: str, env=None) -> None:
     """Solicita al único escritor del C3 que registre la selección efectiva de auditor."""
     env = os.environ if env is None else env
     ruta = env.get("JAX_PROXY_CARRIL_C5_SOCKET", "").strip()
-    if not ruta or not Path(ruta).is_absolute() or modo != "SOLO_ORDENES" or local:
+    if (not ruta or not Path(ruta).is_absolute() or modo not in ("COMPLETO", "SOLO_ORDENES")
+            or not isinstance(local, bool) or len(config_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in config_sha256)):
         raise ValueError("registro_c3_c5_sin_configuracion")
     evento = {"evento": "c5_auditor_elegido", "mision_id": mision_id, "faceta": faceta,
-              "proveedor_id": proveedor_id, "local": local, "modo": modo}
+              "proveedor_id": proveedor_id, "local": local, "modo": modo,
+              "config_sha256": config_sha256}
     cuerpo = json.dumps(evento, sort_keys=True, separators=(",", ":")).encode("utf-8")
     if len(cuerpo) > 4096:
         raise ValueError("registro_c3_c5_evento_invalido")

@@ -59,11 +59,6 @@ def instrucciones(modo: str = "COMPLETO") -> str:
     texto = _INSTRUCCIONES.read_text(encoding="utf-8")
     if modo not in ("COMPLETO", "SOLO_ORDENES"):
         raise ValueError("modo_auditoria_desconocido")
-    orden_inicio, orden_fin = "<!-- ORDENES_COMPARTIDAS: inicio -->", "<!-- ORDENES_COMPARTIDAS: fin -->"
-    if texto.count(orden_inicio) != 1 or texto.count(orden_fin) != 1:
-        raise ValueError("instrucciones_ordenes_compartidas_ausentes")
-    _, cola_ordenes = texto.split(orden_inicio, 1)
-    ordenes, _ = cola_ordenes.split(orden_fin, 1)
     inicio, fin = "<!-- SOLO_ORDENES: inicio -->", "<!-- SOLO_ORDENES: fin -->"
     if texto.count(inicio) != 1 or texto.count(fin) != 1:
         raise ValueError("instrucciones_solo_ordenes_ausentes")
@@ -72,12 +67,11 @@ def instrucciones(modo: str = "COMPLETO") -> str:
     if posterior.strip():
         raise ValueError("instrucciones_solo_ordenes_fuera_de_bloque")
     if modo == "SOLO_ORDENES":
-        return ordenes.strip() + "\n\n" + solo.strip()
-    return anterior.replace(orden_inicio, "").replace(orden_fin, "").rstrip()
+        return solo.strip()
+    return anterior.rstrip()
 
 
-async def auditar(lote: A.Lote, *, faceta, max_tokens: int, tope_s: float, cliente=None,
-                  modo: str = "COMPLETO") -> A.Revision:
+async def auditar(lote: A.Lote, *, faceta, max_tokens: int, tope_s: float, modo: str, cliente=None) -> A.Revision:
     if faceta.transport not in TRANSPORTES_SOPORTADOS:
         raise AuditorNoSoportado(faceta.transport)
     cliente = cliente or obtener_cliente_http()

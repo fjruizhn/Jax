@@ -87,8 +87,7 @@ async def principal(args) -> int:
             modo = eleccion_c5.modo_auditoria(cfg, hay_datos_de_clientes=hay_datos)
         else:
             auditor_f, con_clientes, conocidos, modo = await eleccion_c5.elegir_y_resolver_auditor(
-                conn, cfg=cfg, hosts_mision=frozenset({"hall9000"}), resolve_facet=resolve_facet,
-                devolver_modo=True)
+                conn, cfg=cfg, hosts_mision=frozenset({"hall9000"}), resolve_facet=resolve_facet)
         local = await eleccion_c5.es_local(conn, auditor_f.provider_id)
         # --auditor es una sobreescritura de medición y puede seleccionar un auditor local
         # aunque la config normal elija nube+SOLO_ORDENES. Un auditor local puede usar el

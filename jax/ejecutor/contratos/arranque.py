@@ -357,33 +357,32 @@ async def verificar_maquinas(ctx: Contexto, hosts, *, correr=cuenta_axioma.corre
             + await verificar_c6_estatico(ctx, a.con_c6, correr=correr))
 
 
-async def eleccion_del_auditor(conn, *, hosts_mision, cfg: eleccion_c5.ConfigC5, resolve_facet,
-                               devolver_modo=False) -> tuple:
+async def eleccion_del_auditor(conn, *, hosts_mision, cfg: eleccion_c5.ConfigC5, resolve_facet) -> tuple:
     """Elige y resuelve el auditor de C5 para ESTA misión, y corre la compuerta. Punto de
     prueba directo de la parte que el spec 2026-09-18-auditor-local-opcion.md §4 exige
     dejar escrita: `auditor_es_local` sale de `eleccion_c5.es_local(conn, ...)` --
     `provider.is_local` en la DB -- NUNCA de comparar el nombre de la faceta elegida. Un
     'auditor_local' mal bindeado a un proveedor de nube no pasa gratis; sigue
     necesitando la compuerta abierta. Devuelve `(faceta_resuelta, fallos_de_eleccion)`;
-    `p_c5` sólo le agrega los estáticos y el canario."""
+    `p_c5` sólo le agrega los estáticos y el canario. Devuelve siempre faceta, fallos y
+    modo juntos para impedir que una llamada olvide el modo sensible de la misión."""
     eleccion = await eleccion_c5.elegir_y_resolver_auditor(
-        conn, cfg=cfg, hosts_mision=hosts_mision, resolve_facet=resolve_facet, devolver_modo=devolver_modo)
-    auditor_f, con_clientes, conocidos = eleccion[:3]
-    modo = eleccion[3] if devolver_modo else None
+        conn, cfg=cfg, hosts_mision=hosts_mision, resolve_facet=resolve_facet)
+    auditor_f, con_clientes, conocidos, modo = eleccion
     cerebro = await resolve_facet(cfg.cerebro_faceta)
     if hosts_mision is None:
         fallos = eleccion_c5.validar_proveedores(proveedor_cerebro=cerebro.provider_id,
                                                   proveedor_auditor=auditor_f.provider_id,
                                                   admite_mismo_proveedor=cfg.admite_mismo_proveedor)
-        return (auditor_f, fallos, "COMPLETO") if devolver_modo else (auditor_f, fallos)
+        return auditor_f, fallos, modo
     fallos = eleccion_c5.validar_eleccion(
         proveedor_cerebro=cerebro.provider_id, proveedor_auditor=auditor_f.provider_id,
         auditor_es_local=await eleccion_c5.es_local(conn, auditor_f.provider_id),
         admite_datos_de_clientes=cfg.admite_datos_de_clientes, hosts_mision=frozenset(hosts_mision),
         hosts_con_clientes=con_clientes, hosts_conocidos=conocidos,
-        admite_mismo_proveedor=cfg.admite_mismo_proveedor, modo=modo or "COMPLETO",
+        admite_mismo_proveedor=cfg.admite_mismo_proveedor, modo=modo,
         auditor_nube_solo_ordenes=cfg.auditor_nube_solo_ordenes)
-    return (auditor_f, fallos, modo) if devolver_modo else (auditor_f, fallos)
+    return auditor_f, fallos, modo
 
 
 def verificar_token_github(env=None) -> tuple:
@@ -431,7 +430,7 @@ def pruebas_reales(ctx: Contexto) -> dict:
         async with conexion(desechable=True) as conn:
             cfg = await eleccion_c5.leer_config(conn)
             auditor_f, eleccion, modo = await eleccion_del_auditor(
-                conn, hosts_mision=ctx.hosts_mision, cfg=cfg, resolve_facet=resolve_facet, devolver_modo=True)
+                conn, hosts_mision=ctx.hosts_mision, cfg=cfg, resolve_facet=resolve_facet)
         log.info("c5_auditor_elegido faceta=%s proveedor=%s modo=%s",
                  getattr(auditor_f, "key", auditor_f), getattr(auditor_f, "provider_id", "desconocido"), modo)
 

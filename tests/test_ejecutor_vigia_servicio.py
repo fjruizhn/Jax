@@ -210,11 +210,12 @@ def test_principal_pasa_el_tipo_de_la_mision_al_contexto(tmp_path, monkeypatch):
 
     from types import SimpleNamespace
 
-    async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet, devolver_modo=False):
+    async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet):
         return (SimpleNamespace(key="thot", provider_id="openai"), (), "COMPLETO")
 
     monkeypatch.setattr(eleccion_c5, "leer_config", _leer_config_falso)
     monkeypatch.setattr(S.arranque, "eleccion_del_auditor", _elegir_falso)
+    monkeypatch.setattr(S.c3_control, "registrar_auditor_c5", lambda **kw: asyncio.sleep(0))
     monkeypatch.setattr(eleccion_c5, "es_local", lambda conn, provider_id: asyncio.sleep(0, result=False))
 
     llamadas = {}
@@ -1003,11 +1004,12 @@ def test_principal_pasa_la_ruta_extra_del_administrador_de_verdad_block_f(tmp_pa
 
     from types import SimpleNamespace
 
-    async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet, devolver_modo=False):
+    async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet):
         return (SimpleNamespace(key="thot", provider_id="openai"), (), "COMPLETO")
 
     monkeypatch.setattr(eleccion_c5, "leer_config", _leer_config_falso)
     monkeypatch.setattr(S.arranque, "eleccion_del_auditor", _elegir_falso)
+    monkeypatch.setattr(S.c3_control, "registrar_auditor_c5", lambda **kw: asyncio.sleep(0))
     monkeypatch.setattr(eleccion_c5, "es_local", lambda conn, provider_id: asyncio.sleep(0, result=False))
 
     llamadas = {}
@@ -1043,11 +1045,12 @@ def test_el_vigia_audita_con_el_plazo_de_axioma_config(tmp_path, monkeypatch):
 
     from types import SimpleNamespace
 
-    async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet, devolver_modo=False):
+    async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet):
         return (SimpleNamespace(key="thot", provider_id="openai"), (), "COMPLETO")
 
     monkeypatch.setattr(eleccion_c5, "leer_config", _leer_config_falso)
     monkeypatch.setattr(S.arranque, "eleccion_del_auditor", _elegir_falso)
+    monkeypatch.setattr(S.c3_control, "registrar_auditor_c5", lambda **kw: asyncio.sleep(0))
     monkeypatch.setattr(eleccion_c5, "es_local", lambda conn, provider_id: asyncio.sleep(0, result=False))
     vistas = {}
 

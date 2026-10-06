@@ -481,8 +481,8 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                 revision = await deps.auditar(turno.texto_de_mision, entrega,
                                               A.maquinas_de(hosts, maquinas_c5))
                 auditor_pauso = revision.pausar
-                auditoria_afirmaciones = ("no auditadas por C5 (solo órdenes)"
-                                          if revision.modo == "SOLO_ORDENES" else "auditadas por C5")
+                auditoria_afirmaciones = ("NO_AUDITADA_SOLO_ORDENES"
+                                          if revision.modo == "SOLO_ORDENES" else "AUDITADA_POR_C5")
                 dice("auditoria_c5", faceta=revision.faceta, modo=revision.modo,
                      proveedor_id=revision.proveedor_id, local=revision.local,
                      afirmaciones=auditoria_afirmaciones)
@@ -492,12 +492,14 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                 modo = getattr(exc, "modo", None)
                 faceta = getattr(exc, "faceta", None)
                 proveedor_id = getattr(exc, "proveedor_id", None)
+                proveedor_codigo = exc.proveedor_codigo if isinstance(exc, A.AuditorIlegible) else None
                 local = getattr(exc, "local", None)
                 if modo in ("COMPLETO", "SOLO_ORDENES"):
-                    auditoria_afirmaciones = ("no auditadas por C5 (solo órdenes)" if modo == "SOLO_ORDENES"
-                                              else "no auditadas por C5 (auditor ilegible)")
+                    auditoria_afirmaciones = ("NO_AUDITADA_SOLO_ORDENES" if modo == "SOLO_ORDENES"
+                                              else "NO_AUDITADA_ILEGIBLE")
                     dice("auditoria_c5", faceta=faceta, proveedor_id=proveedor_id, local=local,
-                         modo=modo, afirmaciones=auditoria_afirmaciones)
+                         modo=modo, afirmaciones=auditoria_afirmaciones,
+                         **({"proveedor_codigo": proveedor_codigo} if proveedor_codigo else {}))
                 # `motivo` SOLO para AuditorIlegible: su codigo es una constante (proveedor_fallo,
                 # json_invalido...). El texto de cualquier otra excepcion puede traer una llave
                 # o un cuerpo HTTP y no viaja.

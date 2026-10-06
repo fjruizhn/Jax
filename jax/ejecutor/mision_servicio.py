@@ -389,17 +389,20 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
     async def auditar(texto, entrega, maquinas):
         from facet_resolver import resolve_facet
         from jacobs.store import conexion
-        from jax.ejecutor.contratos import auditor_cliente, eleccion_c5
+        from jax.ejecutor.contratos import auditor_cliente, c3_control, eleccion_c5
         # Spec 2026-09-18-auditor-local-opcion.md §4: `turno.hosts`, no `maquinas` (que ya
         # perdió el nombre plano por A.maquinas_de) -- son las mismas máquinas de la misión,
         # y elegir_y_resolver_auditor necesita nombres para consultar ejecutor_host.
         async with conexion(desechable=True) as conn:
             cfg = await eleccion_c5.leer_config(conn)
             faceta, fallos, modo = await arranque.eleccion_del_auditor(
-                conn, hosts_mision=turno.hosts, cfg=cfg, resolve_facet=resolve_facet, devolver_modo=True)
+                conn, hosts_mision=turno.hosts, cfg=cfg, resolve_facet=resolve_facet)
             auditor_local = await eleccion_c5.es_local(conn, faceta.provider_id)
         if fallos:
             raise arranque.ContratosNoVerificados(fallos)
+        await c3_control.registrar_auditor_c5(
+            mision_id=turno.mision_id, faceta=faceta.key, proveedor_id=faceta.provider_id,
+            local=auditor_local, modo=modo, config_sha256=eleccion_c5.huella_config(cfg))
         estado["faceta_auditor"] = faceta
         if modo == "SOLO_ORDENES":
             # El vigía ya auditó cada orden desde C3. Esta revisión final antes juzgaba claims;

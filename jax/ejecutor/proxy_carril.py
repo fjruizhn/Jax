@@ -500,16 +500,17 @@ class _Proxy:
                 raise ValueError("evento_c5_tamano_invalido")
             evento = json.loads(await asyncio.wait_for(reader.readexactly(tamano), 2))
             if (not isinstance(evento, dict)
-                    or set(evento) != {"evento", "mision_id", "faceta", "proveedor_id", "local", "modo"}
+                    or set(evento) != {"evento", "mision_id", "faceta", "proveedor_id", "local", "modo", "config_sha256"}
                     or evento.get("evento") != "c5_auditor_elegido"
                     or not all(isinstance(evento.get(k), str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", evento[k])
                                for k in ("mision_id", "faceta", "proveedor_id"))
                     or not isinstance(evento.get("local"), bool)
-                    or evento["local"] is not False
-                    or evento.get("modo") != "SOLO_ORDENES"):
+                    or evento.get("modo") not in ("COMPLETO", "SOLO_ORDENES")
+                    or not isinstance(evento.get("config_sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", evento["config_sha256"])):
                 raise ValueError("evento_c5_invalido")
             async with self._candado_c5:
-                seleccion = tuple(evento[k] for k in ("faceta", "proveedor_id", "local", "modo"))
+                seleccion = tuple(evento[k] for k in ("faceta", "proveedor_id", "local", "modo", "config_sha256"))
                 anterior = self._misiones_c5_anotadas.get(evento["mision_id"])
                 if anterior is not None and anterior != seleccion:
                     raise ValueError("evento_c5_conflictivo")
@@ -987,10 +988,13 @@ def _selecciones_c5_del_registro(ruta: Path) -> dict[str, tuple]:
             if evento.get("evento") != "c5_auditor_elegido":
                 continue
             if (not all(isinstance(evento.get(k), str) for k in ("mision_id", "faceta", "proveedor_id"))
-                    or evento.get("local") is not False or evento.get("modo") != "SOLO_ORDENES"):
+                    or not isinstance(evento.get("local"), bool)
+                    or evento.get("modo") not in ("COMPLETO", "SOLO_ORDENES")
+                    or not isinstance(evento.get("config_sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", evento["config_sha256"])):
                 raise RegistroCorrupto("registro_c3_c5_invalido")
             mision_id = evento["mision_id"]
-            seleccion = (evento["faceta"], evento["proveedor_id"], evento["local"], evento["modo"])
+            seleccion = tuple(evento[k] for k in ("faceta", "proveedor_id", "local", "modo", "config_sha256"))
             anterior = selecciones.get(mision_id)
             if anterior is not None and anterior != seleccion:
                 raise RegistroCorrupto("registro_c3_c5_conflictivo")

@@ -24,7 +24,7 @@ def _r(doc):
 
 
 def test_mensajes_llevan_instrucciones_y_el_lote_entero():
-    m = A.mensajes(LOTE, "INSTRUCCIONES")
+    m = A.mensajes(LOTE, "INSTRUCCIONES", modo="COMPLETO")
     assert m[0] == {"role": "system", "content": "INSTRUCCIONES"}
     cuerpo = json.loads(m[1]["content"])
     assert cuerpo["mision"] == LOTE.mision and [p["n"] for p in cuerpo["pasos"]] == [1, 2]
@@ -178,7 +178,7 @@ def test_el_lote_lleva_las_maquinas_de_la_mision_con_su_direccion():
     máquina» no se puede juzgar."""
     maquinas = (A.Maquina("ejecutor-prueba", "192.168.122.50", 58291),)
     lote = A.Lote(LOTE.mision, LOTE.pasos, LOTE.afirmaciones, maquinas)
-    cuerpo = json.loads(A.mensajes(lote, "I")[1]["content"])
+    cuerpo = json.loads(A.mensajes(lote, "I", modo="COMPLETO")[1]["content"])
     assert cuerpo["maquinas_de_la_mision"] == [{"nombre": "ejecutor-prueba", "ip": "192.168.122.50", "puerto": 58291}]
 
 

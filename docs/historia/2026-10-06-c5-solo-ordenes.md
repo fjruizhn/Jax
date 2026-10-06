@@ -1,6 +1,6 @@
 # C5 auditor SOLO_ORDENES — 2026-10-06
 
-**Tipo:** HISTORIA. **Fuente:** encargo `/home/fruiz/encargos-codex/jax-c5-solo-ordenes.md` y diff/ejecuciones de esta rama. **Decidió:** Fernando Ruiz, 2026-10-06.
+**Tipo:** HISTORIA. **Fuente:** encargo `/home/fruiz/encargos-codex/jax-c5-solo-ordenes-r2.md` y diff/ejecuciones de esta rama. **Decidió:** Fernando Ruiz, 2026-10-06.
 
 Se implementa la opción para permitir auditoría C5 con la faceta de nube configurada en misiones sensibles, solo si `ejecutor.c5_auditor_nube_solo_ordenes` existe como booleano estricto `true`. La proyección HTTP usa lista blanca: objetivo, contrato de auditoría, identidad de máquina y número/comando por paso. No serializa capturas, stderr, líneas, contexto, claims ni campos extra de entrada. Las afirmaciones se conservan para supervisión humana y quedan marcadas como no auditadas por C5. Una respuesta que evalúe afirmaciones o use tipos de hallazgo no permitidos falla cerrada.
 
@@ -10,6 +10,16 @@ La reauditoría encontró que los turnos sucesivos reutilizan el ID de misión y
 
 Pruebas: baseline de diez archivos contra `origin/master`, 470 recolectadas; rama, 494; delta +24. Se confirmó TDD rojo contra baseline para selección, proyección HTTP, rechazo de Skill/entradas inválidas, schema estricto, separación de instrucciones, modo de canario, código seguro de error HTTP y el rechazo de un auditor local en modo SOLO_ORDENES. No se ejecutaron pruebas DB ni se usó `jax_memory`.
 
+La orden enviada al auditor cloud viaja literal y completa, incluso con dominios, rutas, carpetas o archivos derivados de salidas anteriores; así lo autorizó Fernando el 2026-10-06. Salidas, stdout, stderr, afirmaciones y conclusiones nunca viajan. El prompt de COMPLETO se restauró byte por byte; SOLO_ORDENES tiene bloque separado y propio.
+
+Ronda 2 cierra el BLOCK del default: `auditor_cliente.auditar` y `auditor.mensajes` exigen modo, y las funciones de selección siempre devuelven faceta y modo juntos. `mision_de_humo` ahora prueba con datos de clientes y transporte HTTP simulado que solo se envía la allowlist. `proveedor_codigo` queda en el evento de misión y log del vigía solo como código seguro. La proyección llama `maquinas_de_la_mision` igual que el prompt. El canario de `conclusion` rechaza cualquier aprobación de afirmaciones en SOLO_ORDENES.
+
+C3 registra tanto `COMPLETO` como `SOLO_ORDENES` y compara por misión el modo, faceta, proveedor, localidad y SHA-256 de la configuración; una lectura distinta falla cerrada. La selección del vigía y la auditoría final registran la misma huella. El endpoint de plataforma ahora propaga `auditoria_afirmaciones`; DetalleMision muestra estados `NO_AUDITADA_SOLO_ORDENES` / `NO_AUDITADA_ILEGIBLE` con i18n es/en.
+
+Orden de integración documentado: jax-platform #209 primero para sembrar la clave cerrada; JAX #363 después. El test DB de JAX ya no inserta la clave: la consulta y exige que la migración de plataforma la haya sembrado como `false`. Sin DB local no se validó la integración de migraciones; CI DB lo verifica tras #209.
+
+Verificación local ronda 2: JAX focal 511 passed en 12 archivos; la prueba de fuga se vio roja primero contra la implementación previa (`auditar_lote_mision_humo` inexistente) y verde tras el cambio. Plataforma Vitest completo 1392 passed / 0 fallidos; backend completo no-DB 2367 passed / 1477 skipped. No se usó MariaDB local: Docker negó acceso al socket y el test DB se detuvo en el guard al detectar el puerto de producción 3308. La nueva prueba de backend pasó con `JAX_CI_NO_DB=1` y `JAX_CONFIG_PATH=/dev/null`. Auditoría de pisos DB se hará en el runner: el piso 3839 resulta de 3838 medido previamente + una prueba pura adicional.
+
 La única llamada real solicitada usó el resolvedor y cliente normal con una misión sintética y 128 tokens máximos. El resolvedor falló cerrado antes de HTTP: `FacetUnavailableError` (su log interno solo registró `RuntimeError`); no fue posible verificar saldo/proveedor y no se repitió la llamada.
 
-Pendiente de cierre: auditoría independiente Tier 3 sobre el SHA corregido y PRs separados de JAX y jax-platform.
+Pendiente de cierre: SHA final, auditoría independiente Tier 3 sobre ambos SHA y actualizar los dos PRs. No integrar ni desplegar en esta tarea.

@@ -29,7 +29,7 @@ def test_llama_con_modelo_llave_y_tope_y_lee_la_revision():
 
     async def escenario():
         async with _cliente(manejar) as cli:
-            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=4000, tope_s=400, cliente=cli)
+            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=4000, tope_s=400, cliente=cli, modo="COMPLETO")
 
     rev = asyncio.run(escenario())
     assert rev.pausar is True and rev.paso == 1
@@ -64,7 +64,7 @@ def test_solo_ordenes_proyecta_allowlist_y_no_serializa_secretos_en_body_http():
     body = json.loads(capturas["body"])
     assert set(body) == {"model", "max_completion_tokens", "messages"}
     proyectado = json.loads(body["messages"][1]["content"])
-    assert set(proyectado) == {"objetivo", "maquinas", "comandos"}
+    assert set(proyectado) == {"objetivo", "maquinas_de_la_mision", "comandos"}
     assert proyectado["objetivo"] == "Objetivo público"
     assert proyectado["comandos"] == [{"n": 9, "comando": "uptime"}]
 
@@ -76,7 +76,7 @@ def test_falla_http_expone_solo_codigo_de_error_conocido_del_proveedor():
 
     async def escenario():
         async with _cliente(manejar) as cli:
-            await AC.auditar(LOTE, faceta=FACETA, max_tokens=8, tope_s=5, cliente=cli)
+            await AC.auditar(LOTE, faceta=FACETA, max_tokens=8, tope_s=5, cliente=cli, modo="COMPLETO")
 
     with pytest.raises(A.AuditorIlegible) as exc:
         asyncio.run(escenario())
@@ -91,7 +91,7 @@ def test_falla_http_expone_solo_codigo_de_error_conocido_del_proveedor():
 def test_error_del_proveedor_o_forma_rara_es_ilegible(respuesta):
     async def escenario():
         async with _cliente(lambda req: respuesta) as cli:
-            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, tope_s=400, cliente=cli)
+            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, tope_s=400, cliente=cli, modo="COMPLETO")
     with pytest.raises(A.AuditorIlegible):
         asyncio.run(escenario())
 
@@ -102,7 +102,7 @@ def test_red_caida_es_ilegible():
 
     async def escenario():
         async with _cliente(manejar) as cli:
-            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, tope_s=400, cliente=cli)
+            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, tope_s=400, cliente=cli, modo="COMPLETO")
     with pytest.raises(A.AuditorIlegible) as e:
         asyncio.run(escenario())
     assert e.value.codigo == "proveedor_fallo"
@@ -110,7 +110,7 @@ def test_red_caida_es_ilegible():
 
 def test_transporte_no_soportado():
     with pytest.raises(AC.AuditorNoSoportado):
-        asyncio.run(AC.auditar(LOTE, faceta=SimpleNamespace(**{**vars(FACETA), "transport": "http_gemini"}), max_tokens=10, tope_s=400))
+        asyncio.run(AC.auditar(LOTE, faceta=SimpleNamespace(**{**vars(FACETA), "transport": "http_gemini"}), max_tokens=10, tope_s=400, modo="COMPLETO"))
 
 
 def test_transporte_ollama_del_auditor_local_es_soportado():
@@ -129,7 +129,7 @@ def test_transporte_ollama_del_auditor_local_es_soportado():
 
     async def escenario():
         async with _cliente(manejar) as cli:
-            return await AC.auditar(LOTE, faceta=faceta_local, max_tokens=10, tope_s=400, cliente=cli)
+            return await AC.auditar(LOTE, faceta=faceta_local, max_tokens=10, tope_s=400, cliente=cli, modo="COMPLETO")
     rev = asyncio.run(escenario())
     assert rev.pausar is False
     assert vistas["url"] == "http://127.0.0.1:11435/v1/chat/completions"
@@ -158,7 +158,7 @@ def test_la_llave_no_sale_en_el_error():
 
     async def escenario():
         async with _cliente(manejar) as cli:
-            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, tope_s=400, cliente=cli)
+            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, tope_s=400, cliente=cli, modo="COMPLETO")
     with pytest.raises(A.AuditorIlegible) as e:
         asyncio.run(escenario())
     assert "llave-XYZ" not in repr(e.value) and e.value.__cause__ is None
@@ -196,7 +196,7 @@ def test_sin_credencial_no_se_emite_la_cabecera_authorization():
 
     async def escenario():
         async with _cliente(manejar) as cli:
-            return await AC.auditar(LOTE, faceta=faceta_local, max_tokens=10, tope_s=400, cliente=cli)
+            return await AC.auditar(LOTE, faceta=faceta_local, max_tokens=10, tope_s=400, cliente=cli, modo="COMPLETO")
 
     asyncio.run(escenario())
     assert vistas["tiene_auth"] is False, f"se emitio authorization={vistas['auth']!r}"
@@ -235,7 +235,7 @@ def test_auditor_local_sin_credencial_contra_un_servidor_http_real():
 
         async def escenario():
             async with httpx.AsyncClient() as cli:
-                return await AC.auditar(LOTE, faceta=faceta_local, max_tokens=10, tope_s=400, cliente=cli)
+                return await AC.auditar(LOTE, faceta=faceta_local, max_tokens=10, tope_s=400, cliente=cli, modo="COMPLETO")
 
         rev = asyncio.run(escenario())
     finally:
@@ -258,7 +258,7 @@ def test_el_plazo_de_la_llamada_es_el_que_se_pasa():
 
     async def escenario():
         async with _cliente(manejar) as cli:
-            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, cliente=cli, tope_s=400)
+            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, cliente=cli, tope_s=400, modo="COMPLETO")
     asyncio.run(escenario())
     assert vistos["timeout"] == {"connect": 400, "read": 400, "write": 400, "pool": 400}
 
@@ -266,7 +266,7 @@ def test_el_plazo_de_la_llamada_es_el_que_se_pasa():
 def test_el_plazo_es_obligatorio_sin_valor_por_omision():
     """Un consumidor que olvide pasarlo no hereda un 120 s escrito en codigo: no corre."""
     with pytest.raises(TypeError):
-        asyncio.run(AC.auditar(LOTE, faceta=FACETA, max_tokens=10))
+        asyncio.run(AC.auditar(LOTE, faceta=FACETA, max_tokens=10, modo="COMPLETO"))
 
 
 @pytest.mark.parametrize("error", [httpx.ReadTimeout("lento"), httpx.ConnectTimeout("lento"),
@@ -277,7 +277,7 @@ def test_el_plazo_vencido_es_proveedor_plazo_y_no_proveedor_fallo(error):
 
     async def escenario():
         async with _cliente(manejar) as cli:
-            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, cliente=cli, tope_s=1)
+            return await AC.auditar(LOTE, faceta=FACETA, max_tokens=10, cliente=cli, tope_s=1, modo="COMPLETO")
     with pytest.raises(A.AuditorIlegible) as e:
         asyncio.run(escenario())
     assert e.value.codigo == "proveedor_plazo" and e.value.__cause__ is None

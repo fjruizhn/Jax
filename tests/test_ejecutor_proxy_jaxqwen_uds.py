@@ -46,7 +46,8 @@ def test_c5_selection_uses_the_proxy_as_the_only_c3_writer(tmp_path):
             server = await arrancar(cfg)
             try:
                 inválido = {"evento": "c5_auditor_elegido", "mision_id": "mision-invalida", "faceta": "thot",
-                            "proveedor_id": "openai", "local": True, "modo": "SOLO_ORDENES"}
+                        "proveedor_id": "openai", "local": True, "modo": "INVALIDO",
+                        "config_sha256": "a" * 64}
                 reader, writer = await asyncio.open_unix_connection(str(path))
                 cuerpo = json.dumps(inválido).encode()
                 writer.write(struct.pack("!I", len(cuerpo)) + cuerpo)
@@ -56,6 +57,7 @@ def test_c5_selection_uses_the_proxy_as_the_only_c3_writer(tmp_path):
                 await writer.wait_closed()
                 await registrar_auditor_c5(mision_id="mision-1", faceta="thot", proveedor_id="openai",
                                            local=False, modo="SOLO_ORDENES",
+                                           config_sha256="a" * 64,
                                            env={"JAX_PROXY_CARRIL_C5_SOCKET": str(path)})
                 # El índice se reconstruye desde C3 al reiniciar el proxy.
                 await server.apagar()
@@ -63,12 +65,21 @@ def test_c5_selection_uses_the_proxy_as_the_only_c3_writer(tmp_path):
                 # Mismo evento: OK idempotente, sin entrada C3 duplicada.
                 await registrar_auditor_c5(mision_id="mision-1", faceta="thot", proveedor_id="openai",
                                            local=False, modo="SOLO_ORDENES",
+                                           config_sha256="a" * 64,
                                            env={"JAX_PROXY_CARRIL_C5_SOCKET": str(path)})
                 # Reutilizar el ID con otra selección debe fallar cerrado.
                 with pytest.raises(ValueError, match="registro_c3_c5_rechazado"):
                     await registrar_auditor_c5(mision_id="mision-1", faceta="ada", proveedor_id="openai",
                                                local=False, modo="SOLO_ORDENES",
+                                               config_sha256="a" * 64,
                                                env={"JAX_PROXY_CARRIL_C5_SOCKET": str(path)})
+                with pytest.raises(ValueError, match="registro_c3_c5_rechazado"):
+                    await registrar_auditor_c5(mision_id="mision-1", faceta="thot", proveedor_id="openai",
+                                               local=False, modo="SOLO_ORDENES", config_sha256="b" * 64,
+                                               env={"JAX_PROXY_CARRIL_C5_SOCKET": str(path)})
+                await registrar_auditor_c5(mision_id="mision-completo", faceta="juez_local", proveedor_id="ollama",
+                                           local=True, modo="COMPLETO", config_sha256="c" * 64,
+                                           env={"JAX_PROXY_CARRIL_C5_SOCKET": str(path)})
                 return verificar_cadena(cfg.registro), [json.loads(line) for line in cfg.registro.read_text().splitlines()]
             finally:
                 await server.apagar()
@@ -76,11 +87,11 @@ def test_c5_selection_uses_the_proxy_as_the_only_c3_writer(tmp_path):
     verificacion, eventos = asyncio.run(scenario())
     assert verificacion.ok
     selecciones = [e for e in eventos if e["evento"] == "c5_auditor_elegido"]
-    assert len(selecciones) == 1
+    assert len(selecciones) == 2
     evento = selecciones[0]
-    assert {k: evento[k] for k in ("evento", "mision_id", "faceta", "proveedor_id", "local", "modo")} == {
+    assert {k: evento[k] for k in ("evento", "mision_id", "faceta", "proveedor_id", "local", "modo", "config_sha256")} == {
         "evento": "c5_auditor_elegido", "mision_id": "mision-1", "faceta": "thot",
-        "proveedor_id": "openai", "local": False, "modo": "SOLO_ORDENES"}
+        "proveedor_id": "openai", "local": False, "modo": "SOLO_ORDENES", "config_sha256": "a" * 64}
     assert evento["n"] == 2
 
 
