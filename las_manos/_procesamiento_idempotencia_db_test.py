@@ -874,6 +874,47 @@ def test_confirmado_pero_ausente_es_desconocido_y_nunca_se_retoma(ruta, caplog):
     assert [t for t in caplog.records if t.levelno == logging.ERROR and "DESCONOCIDO" in t.getMessage()]
 
 
+def test_el_procedimiento_del_runbook_resuelve_una_clave_desconocida(ruta):
+    """docs/runbooks/idempotencia-clave-desconocida.md: el hash corto del log halla la clave con SHA2 en SQL (igual que
+    `abreviar`), el DELETE con (id, job_id, confirmado=1) borra EXACTAMENTE esa fila (y 0 si el job_id no coincide), y el
+    reenvio siguiente crea un trabajo nuevo y lo confirma, con su OCR."""
+    app, almacen, ejecutar = ruta
+
+    async def sql(q, a=()):
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(q, a)
+                return [tuple(f.values()) if isinstance(f, dict) else tuple(f) for f in await cur.fetchall()] \
+                    if cur.description else cur.rowcount
+
+    async def todo():
+        await idem.init_tabla()
+        clave = _clave()
+        try:
+            fantasma = str(uuid.uuid4())
+            r = await idem.reclamar(IDENTIDAD_PLATAFORMA, clave, _hash("a.pdf"), fantasma)
+            assert await idem.confirmar(r.id, fantasma)
+            await _envejecer(clave, idem.gracia_segundos() + 30)
+            antes = await _post(app, clave, "a.pdf")                          # DESCONOCIDA
+            hallada = await sql("SELECT id, job_id, confirmado FROM procesamiento_idempotencia "
+                                "WHERE confirmado = 1 AND LEFT(SHA2(clave, 256), 12) = %s", (idem.abreviar(clave),))
+            ajeno = await sql("DELETE FROM procesamiento_idempotencia WHERE id = %s AND job_id = %s AND confirmado = 1",
+                              (hallada[0][0], "otro-job"))
+            borradas = await sql("DELETE FROM procesamiento_idempotencia WHERE id = %s AND job_id = %s AND confirmado = 1",
+                                 (hallada[0][0], hallada[0][1]))
+            despues = await _post(app, clave, "a.pdf")
+            return fantasma, antes, hallada, ajeno, borradas, despues, await sql(
+                "SELECT job_id, confirmado FROM procesamiento_idempotencia WHERE clave = %s", (clave,))
+        finally:
+            await _borrar(clave)
+    fantasma, antes, hallada, ajeno, borradas, despues, fila = asyncio.run(todo())
+    assert antes.status_code == 503 and antes.json()["detail"]["code"] == "idempotencia_estado_desconocido"
+    assert [h[1:] for h in hallada] == [(fantasma, 1)]
+    assert ajeno == 0 and borradas == 1
+    assert despues.status_code == 202 and despues.json()["job_id"] != fantasma
+    assert fila == [(despues.json()["job_id"], 1)] and ejecutar.await_count == 1
+
+
 def test_liberar_el_reclamo_no_traga_la_cancelacion_y_libera_igual(monkeypatch):
     """`_liberar_reclamo` relanza el CancelledError del pedido y la liberacion termina de todos modos."""
     real = idem.liberar

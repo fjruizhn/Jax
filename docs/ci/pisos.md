@@ -4422,14 +4422,16 @@ tiempo. Si el runner da otro número, manda el runner.
   y ahora exige idx_ejecutor_punto_host_respaldo. Medido local con las migraciones
   de jax-platform master: ese archivo 3 -> 5 passed. Los dos vistos en rojo contra
   el exportador viejo (a8de3fd: 2 failed / 3 passed).
-170 -> 218 el 2026-10-06 (idempotencia de POST /procesamiento/trabajos, rondas 1 a 5): +48 en el
-  archivo NUEVO las_manos/_procesamiento_idempotencia_db_test.py (35 pruebas + 13 casos de la tabla
+170 -> 219 el 2026-10-06 (idempotencia de POST /procesamiento/trabajos, rondas 1 a 6): +49 en el
+  archivo NUEVO las_manos/_procesamiento_idempotencia_db_test.py (36 pruebas + 13 casos de la tabla
   compartida de contrato, ya con los desenlaces 503 `idempotencia_estado_desconocido` y
   `procesamiento_no_disponible`), sumado a las dos listas del job (la que corre y la del piso). Medido local,
-  MariaDB 12.3.3 efimera propia (--network none) dentro de su netns, CI=true: ese archivo 48 passed (x2).
+  MariaDB 12.3.3 efimera propia (--network none) dentro de su netns, CI=true: ese archivo 49 passed (x2).
   Ronda 5: el fallo de liberar tras una cancelacion se registra (mutante «sin callback» muerto) y los dos
   desenlaces 503 entran en el contrato (mutante «confirmado+ausente se retoma» muerto). El total del job no se
-  reproduce entero en local (hace falta el esquema de jax-platform): 170 es el declarado de master + 48.
+  reproduce entero en local (hace falta el esquema de jax-platform): 170 es el declarado de master + 49.
+  Ronda 6: +1, el procedimiento del runbook de clave desconocida (hash corto por SHA2 en SQL, DELETE exacto, reenvio que
+  crea y confirma un trabajo nuevo).
   Si el runner da otro numero, manda el runner.
 ```
 
