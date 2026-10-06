@@ -44,6 +44,7 @@ _FILAS_BASE = {
     "ejecutor.c5_max_tokens": "4000",
     "ejecutor.c5_tope_s": "400",
     "ejecutor.c5_auditor_admite_datos_de_clientes": "false",
+    "ejecutor.c5_auditor_nube_solo_ordenes": "false",
 }
 
 

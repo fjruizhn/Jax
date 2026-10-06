@@ -13,6 +13,8 @@ import pytest
 from jax.ejecutor.proxy_carril import Config, ConfigInvalida, _Proxy, arrancar, config_desde_entorno
 from tests.test_ejecutor_proxy_carril import MODELO_PERMITIDO, Upstream, _CUERPO, _correr
 from jax.ejecutor.contratos.pausa import latir
+from jax.ejecutor.contratos.c3_control import registrar_auditor_c5
+from jax.ejecutor.contratos.registro import verificar_cadena
 
 
 def test_peercred_requires_exact_dedicated_uid():
@@ -26,6 +28,71 @@ def test_peercred_requires_exact_dedicated_uid():
         def getsockopt(self, *_): raise OSError("credential unavailable")
     assert not _Proxy._peer_uid_permitido(Broken(), 1001)
     assert not _Proxy._peer_uid_permitido(object(), 1001)
+
+
+def test_c5_selection_uses_the_proxy_as_the_only_c3_writer(tmp_path):
+    async def scenario():
+        async with Upstream(modo="error") as upstream:
+            parent = tmp_path / "run"
+            parent.mkdir(mode=0o700)
+            path = parent / "c5.sock"
+            cfg = Config(upstream=upstream.url, raiz=tmp_path / "locks", tope_s=2,
+                         host="127.0.0.1", puerto=0, registro=tmp_path / "registro.jsonl",
+                         pausa=tmp_path / "PAUSA", latido=tmp_path / "latido", latido_max_s=60,
+                         modelo=MODELO_PERMITIDO, max_salida_tokens=1024, pensamiento="libre",
+                         c5_control_socket=path, c5_control_uid=os.getuid(), c5_control_gid=os.getgid())
+            cfg.raiz.mkdir()
+            latir(cfg.latido)
+            server = await arrancar(cfg)
+            try:
+                inválido = {"evento": "c5_auditor_elegido", "mision_id": "mision-invalida", "faceta": "thot",
+                        "proveedor_id": "openai", "local": True, "modo": "INVALIDO",
+                        "config_sha256": "a" * 64}
+                reader, writer = await asyncio.open_unix_connection(str(path))
+                cuerpo = json.dumps(inválido).encode()
+                writer.write(struct.pack("!I", len(cuerpo)) + cuerpo)
+                await writer.drain()
+                assert await reader.readline() == b"ERROR\n"
+                writer.close()
+                await writer.wait_closed()
+                await registrar_auditor_c5(mision_id="mision-1", faceta="thot", proveedor_id="openai",
+                                           local=False, modo="SOLO_ORDENES",
+                                           config_sha256="a" * 64,
+                                           env={"JAX_PROXY_CARRIL_C5_SOCKET": str(path)})
+                # El índice se reconstruye desde C3 al reiniciar el proxy.
+                await server.apagar()
+                server = await arrancar(cfg)
+                # Mismo evento: OK idempotente, sin entrada C3 duplicada.
+                await registrar_auditor_c5(mision_id="mision-1", faceta="thot", proveedor_id="openai",
+                                           local=False, modo="SOLO_ORDENES",
+                                           config_sha256="a" * 64,
+                                           env={"JAX_PROXY_CARRIL_C5_SOCKET": str(path)})
+                # Reutilizar el ID con otra selección debe fallar cerrado.
+                with pytest.raises(ValueError, match="registro_c3_c5_rechazado"):
+                    await registrar_auditor_c5(mision_id="mision-1", faceta="ada", proveedor_id="openai",
+                                               local=False, modo="SOLO_ORDENES",
+                                               config_sha256="a" * 64,
+                                               env={"JAX_PROXY_CARRIL_C5_SOCKET": str(path)})
+                with pytest.raises(ValueError, match="registro_c3_c5_rechazado"):
+                    await registrar_auditor_c5(mision_id="mision-1", faceta="thot", proveedor_id="openai",
+                                               local=False, modo="SOLO_ORDENES", config_sha256="b" * 64,
+                                               env={"JAX_PROXY_CARRIL_C5_SOCKET": str(path)})
+                await registrar_auditor_c5(mision_id="mision-completo", faceta="juez_local", proveedor_id="ollama",
+                                           local=True, modo="COMPLETO", config_sha256="c" * 64,
+                                           env={"JAX_PROXY_CARRIL_C5_SOCKET": str(path)})
+                return verificar_cadena(cfg.registro), [json.loads(line) for line in cfg.registro.read_text().splitlines()]
+            finally:
+                await server.apagar()
+
+    verificacion, eventos = asyncio.run(scenario())
+    assert verificacion.ok
+    selecciones = [e for e in eventos if e["evento"] == "c5_auditor_elegido"]
+    assert len(selecciones) == 2
+    evento = selecciones[0]
+    assert {k: evento[k] for k in ("evento", "mision_id", "faceta", "proveedor_id", "local", "modo", "config_sha256")} == {
+        "evento": "c5_auditor_elegido", "mision_id": "mision-1", "faceta": "thot",
+        "proveedor_id": "openai", "local": False, "modo": "SOLO_ORDENES", "config_sha256": "a" * 64}
+    assert evento["n"] == 2
 
 
 def test_qwen_socket_config_is_all_or_nothing_and_absolute():
@@ -47,6 +114,25 @@ def test_qwen_socket_config_is_all_or_nothing_and_absolute():
     assert config_desde_entorno(complete).jaxqwen_uid == 1001
     with pytest.raises(ConfigInvalida):
         config_desde_entorno({**complete, "JAX_PROXY_CARRIL_JAXQWEN_SOCKET": "relative.sock"})
+
+
+def test_c5_control_socket_config_is_all_or_nothing_and_absolute():
+    base = {
+        "JAX_PROXY_CARRIL_UPSTREAM": "http://127.0.0.1:9", "JAX_PROXY_CARRIL_RAIZ": "/tmp/locks",
+        "JAX_PROXY_CARRIL_TOPE_S": "5", "JAX_PROXY_CARRIL_PUERTO": "0",
+        "JAX_EJECUTOR_REGISTRO": "/tmp/log", "JAX_EJECUTOR_PAUSA": "/tmp/pause",
+        "JAX_EJECUTOR_VIGIA_LATIDO": "/tmp/beat", "JAX_EJECUTOR_VIGIA_LATIDO_MAX_S": "30",
+        "JAX_PROXY_CARRIL_MODELO": "qwen-fixed", "JAX_PROXY_CARRIL_PENSAMIENTO": "libre",
+        "JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS": "1024",
+    }
+    assert config_desde_entorno(base).c5_control_socket is None
+    with pytest.raises(ConfigInvalida):
+        config_desde_entorno({**base, "JAX_PROXY_CARRIL_C5_SOCKET": "/tmp/c5.sock"})
+    complete = {**base, "JAX_PROXY_CARRIL_C5_SOCKET": "/tmp/c5.sock",
+                "JAX_PROXY_CARRIL_C5_UID": "1001", "JAX_PROXY_CARRIL_C5_GID": "1002"}
+    assert config_desde_entorno(complete).c5_control_uid == 1001
+    with pytest.raises(ConfigInvalida):
+        config_desde_entorno({**complete, "JAX_PROXY_CARRIL_C5_SOCKET": "relative.sock"})
 
 
 def test_unix_transport_authenticates_uid_and_preserves_fixed_proxy_gates(tmp_path):

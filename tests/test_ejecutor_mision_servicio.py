@@ -363,7 +363,7 @@ def _sin_arrancar_de_verdad(tmp_path, monkeypatch):
             return False
 
     async def leer_config(conn):
-        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 400, False, False)
+        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 400, False, False, False)
 
     monkeypatch.setattr(jstore, "conexion", lambda **kw: _Conexion())
     monkeypatch.setattr(eleccion_c5, "leer_config", leer_config)
@@ -529,7 +529,7 @@ def test_config_de_codigo_invalida_falla_cerrado(filas):
 def test_el_turno_audita_con_el_plazo_de_axioma_config(monkeypatch):
     """`ejecutor.c5_tope_s` (cfg.tope_s) llega a auditor_cliente.auditar desde el turno del cerebro."""
     import jacobs.store as jstore
-    from jax.ejecutor.contratos import auditor_cliente, eleccion_c5
+    from jax.ejecutor.contratos import auditor_cliente, c3_control, eleccion_c5
 
     class _Conexion:
         async def __aenter__(self):
@@ -539,26 +539,36 @@ def test_el_turno_audita_con_el_plazo_de_axioma_config(monkeypatch):
             return False
 
     async def leer_config(conn):
-        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 555, False, False)
+        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 555, False, False, False)
+
+    async def es_local(conn, provider_id):
+        return False
+
+    from types import SimpleNamespace
 
     async def elegir(conn, *, cfg, hosts_mision, resolve_facet):
-        return ("faceta-fake", None, None)
+        return (SimpleNamespace(key="thot", provider_id="openai"), (), "COMPLETO")
 
     vistas = {}
 
     async def auditar_falso(lote, **kw):
         vistas.update(kw)
-        return "revision"
+        return S.A.Revision(False, None, None, (), frozenset(), frozenset(), kw["modo"], "thot")
 
     monkeypatch.setattr(jstore, "conexion", lambda **kw: _Conexion())
     monkeypatch.setattr(eleccion_c5, "leer_config", leer_config)
-    monkeypatch.setattr(eleccion_c5, "elegir_y_resolver_auditor", elegir)
+    monkeypatch.setattr(eleccion_c5, "es_local", es_local)
+    monkeypatch.setattr(S.arranque, "eleccion_del_auditor", elegir)
+    monkeypatch.setattr(c3_control, "registrar_auditor_c5", lambda **kw: asyncio.sleep(0))
     monkeypatch.setattr(auditor_cliente, "auditar", auditar_falso)
     monkeypatch.setattr(S.A, "afirmaciones_auditables", lambda entrega: ())
     turno = M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])})
     deps = S.dependencias_reales({}, turno, tope_s=1.0, espera_s=1.0)
-    assert asyncio.run(deps.auditar("texto", object(), (S.A.Maquina("m", "192.0.2.9", 58291),))) == "revision"
-    assert vistas == {"faceta": "faceta-fake", "max_tokens": 100, "tope_s": 555}
+    revision = asyncio.run(deps.auditar("texto", object(), (S.A.Maquina("m", "192.0.2.9", 58291),)))
+    assert revision.proveedor_id == "openai" and revision.local is False
+    assert vistas["faceta"].key == "thot"
+    assert {k: v for k, v in vistas.items() if k != "faceta"} == {
+        "max_tokens": 100, "tope_s": 555, "modo": "COMPLETO"}
 
 
 @pytest.mark.parametrize("valor", ["sk-llave-secreta", "x" * 5000, "", "Proveedor_Fallo", 7, None, ["proveedor_fallo"]])
@@ -631,7 +641,7 @@ def test_dependencias_reales_deriva_el_cierre_de_cfg_tope_s(monkeypatch):
             return False
 
     async def leer_config(conn):
-        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 450, False, False)
+        return eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 450, False, False, False)
 
     vistos = {}
 

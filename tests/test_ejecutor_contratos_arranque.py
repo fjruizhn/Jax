@@ -714,17 +714,20 @@ def test_el_canario_de_arranque_audita_con_el_plazo_de_axioma_config(tmp_path, m
             return False
 
     async def leer_config(conn):
-        return AR.eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 333, False, False)
+        return AR.eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 333, False, False, False)
 
     async def eleccion(conn, *, hosts_mision, cfg, resolve_facet):
-        return "faceta-fake", ()
+        return "faceta-fake", (), "COMPLETO"
 
     vistas = {}
 
     async def auditar_falso(lote, **kw):
         vistas.update(kw)
 
-    async def verificar_c5_falso(auditar):
+    modos = []
+
+    async def verificar_c5_falso(auditar, *, modo="COMPLETO"):
+        modos.append(modo)
         await auditar("lote")
         return ()
 
@@ -735,4 +738,29 @@ def test_el_canario_de_arranque_audita_con_el_plazo_de_axioma_config(tmp_path, m
     monkeypatch.setattr(auditor_cliente, "auditar", auditar_falso)
     monkeypatch.setattr(canario_c5, "verificar_c5", verificar_c5_falso)
     assert asyncio.run(AR.pruebas_reales(_ctx(tmp_path))["c5"]()) == ()
-    assert vistas == {"faceta": "faceta-fake", "max_tokens": 100, "tope_s": 333}
+    assert modos == ["COMPLETO"]
+    assert vistas == {"faceta": "faceta-fake", "max_tokens": 100, "tope_s": 333, "modo": "COMPLETO"}
+
+
+def test_eleccion_del_auditor_valida_la_nube_sensible_con_solo_ordenes(monkeypatch):
+    from types import SimpleNamespace
+
+    async def elegir(conn, *, cfg, hosts_mision, resolve_facet):
+        seleccionado = SimpleNamespace(key="thot", provider_id="openai")
+        return (seleccionado, {"cliente"}, {"cliente"}, "SOLO_ORDENES")
+
+    async def es_local(conn, provider_id):
+        return False
+
+    async def resolver(clave):
+        return SimpleNamespace(provider_id="ollama" if clave == "cerebro" else "openai")
+
+    monkeypatch.setattr(AR.eleccion_c5, "elegir_y_resolver_auditor", elegir)
+    monkeypatch.setattr(AR.eleccion_c5, "es_local", es_local)
+    cfg = AR.eleccion_c5.ConfigC5("cerebro", "thot", "local", 10, 1.0, 100, 100,
+                                  False, False, True)
+    auditor, fallos, modo = asyncio.run(AR.eleccion_del_auditor(
+        object(), hosts_mision={"cliente"}, cfg=cfg, resolve_facet=resolver))
+    assert auditor.key == "thot"
+    assert fallos == ()
+    assert modo == "SOLO_ORDENES"

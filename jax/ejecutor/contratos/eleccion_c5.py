@@ -22,6 +22,9 @@ antes de que existiera un auditor local real.
 from __future__ import annotations
 
 import math
+import hashlib
+import json
+from dataclasses import asdict
 from dataclasses import dataclass
 
 from jax.ejecutor.contratos.fallo import Fallo
@@ -34,6 +37,7 @@ CLAVES = ("ejecutor.cerebro_faceta", "ejecutor.auditor_faceta", "ejecutor.audito
           # puede tardar mas de 2 min -- con 120 s fijos se cortaba el 2026-10-03 (mision 6f00c8ce).
           "ejecutor.c5_tope_s",
           "ejecutor.c5_auditor_admite_datos_de_clientes",
+          "ejecutor.c5_auditor_nube_solo_ordenes",
           # Compuerta del MISMO proveedor (2026-09-20). Nace cerrada; abrirla es
           # DECISIÓN de Fernando y queda en axioma_config_audit con actor, fecha e IP.
           "ejecutor.c5_auditor_admite_mismo_proveedor")
@@ -64,6 +68,13 @@ class ConfigC5:
     tope_s: int
     admite_datos_de_clientes: bool
     admite_mismo_proveedor: bool
+    auditor_nube_solo_ordenes: bool
+
+
+def huella_config(cfg: ConfigC5) -> str:
+    """Identifica la foto íntegra de C5 sin persistir credenciales ni contenido de salida."""
+    cuerpo = json.dumps(asdict(cfg), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(cuerpo).hexdigest()
 
 
 def config_desde_filas(filas: dict) -> ConfigC5:
@@ -79,13 +90,16 @@ def config_desde_filas(filas: dict) -> ConfigC5:
     mismo = filas["ejecutor.c5_auditor_admite_mismo_proveedor"].strip()
     if mismo not in ("true", "false"):
         raise ValueError("config_c5_invalida", "ejecutor.c5_auditor_admite_mismo_proveedor")
+    solo_ordenes = filas["ejecutor.c5_auditor_nube_solo_ordenes"].strip()
+    if solo_ordenes not in ("true", "false"):
+        raise ValueError("config_c5_invalida", "ejecutor.c5_auditor_nube_solo_ordenes")
     lote, intervalo, tokens, tope = (int(filas["ejecutor.c5_lote_max"]), float(filas["ejecutor.c5_intervalo_s"]),
                                      int(filas["ejecutor.c5_max_tokens"]), int(filas["ejecutor.c5_tope_s"]))
     if lote <= 0 or not math.isfinite(intervalo) or intervalo <= 0 or tokens <= 0 or not 0 < tope <= TOPE_S_MAX:
         raise ValueError("config_c5_invalida", "numeros")
     return ConfigC5(filas["ejecutor.cerebro_faceta"].strip(), filas["ejecutor.auditor_faceta"].strip(),
                     filas["ejecutor.auditor_faceta_local"].strip(), lote, intervalo, tokens, tope,
-                    admite == "true", mismo == "true")
+                    admite == "true", mismo == "true", solo_ordenes == "true")
 
 
 def elegir_auditor_faceta(cfg: ConfigC5, *, hay_datos_de_clientes: bool) -> str:
@@ -93,7 +107,13 @@ def elegir_auditor_faceta(cfg: ConfigC5, *, hay_datos_de_clientes: bool) -> str:
     vienen de `cfg` (axioma_config). La verificación de que el elegido de verdad sirve
     -- proveedor distinto del cerebro, y si hace falta, local de verdad -- la sigue
     haciendo `validar_eleccion`/`verificar_eleccion`; esta función sólo decide CUÁL mirar."""
-    return cfg.auditor_faceta_local if hay_datos_de_clientes else cfg.auditor_faceta
+    return (cfg.auditor_faceta if hay_datos_de_clientes and cfg.auditor_nube_solo_ordenes
+            else cfg.auditor_faceta_local if hay_datos_de_clientes else cfg.auditor_faceta)
+
+
+def modo_auditoria(cfg: ConfigC5, *, hay_datos_de_clientes: bool) -> str:
+    """Modo de datos asociado a la misma decisión que elige la faceta."""
+    return "SOLO_ORDENES" if hay_datos_de_clientes and cfg.auditor_nube_solo_ordenes else "COMPLETO"
 
 
 def sensibles(hosts_mision, hosts_con_clientes, hosts_conocidos) -> frozenset:
@@ -143,17 +163,24 @@ def validar_proveedores(*, proveedor_cerebro: str, proveedor_auditor: str,
 
 def validar_eleccion(*, proveedor_cerebro: str, proveedor_auditor: str, auditor_es_local: bool,
                      admite_datos_de_clientes: bool, hosts_mision, hosts_con_clientes, hosts_conocidos,
-                     admite_mismo_proveedor: bool = False) -> tuple:
+                     admite_mismo_proveedor: bool = False, modo: str = "COMPLETO",
+                     auditor_nube_solo_ordenes: bool = False) -> tuple:
     """Las DOS compuertas son independientes y se evalúan por separado: abrir la
     del mismo proveedor no relaja la de datos de clientes, ni al revés. El default
     False de `admite_mismo_proveedor` es a propósito -- un llamador olvidadizo
     obtiene el comportamiento estricto."""
     fallos = list(validar_proveedores(proveedor_cerebro=proveedor_cerebro, proveedor_auditor=proveedor_auditor,
                                       admite_mismo_proveedor=admite_mismo_proveedor))
+    if modo not in ("COMPLETO", "SOLO_ORDENES"):
+        fallos.append(Fallo("c5", "modo_auditoria_desconocido"))
     if not hosts_mision:
         fallos.append(Fallo("c5", "mision_sin_maquinas"))
     sens = sensibles(hosts_mision, hosts_con_clientes, hosts_conocidos)
-    if sens and not (auditor_es_local or admite_datos_de_clientes):
+    solo_ordenes_valido = (modo == "SOLO_ORDENES" and auditor_nube_solo_ordenes and bool(sens)
+                           and not auditor_es_local)
+    if modo == "SOLO_ORDENES" and not solo_ordenes_valido:
+        fallos.append(Fallo("c5", "modo_solo_ordenes_no_autorizado"))
+    if sens and not (auditor_es_local or admite_datos_de_clientes or solo_ordenes_valido):
         fallos.append(Fallo("c5", "auditor_no_admite_datos_de_clientes", (("hosts", tuple(sorted(sens))),)))
     return tuple(fallos)
 
@@ -194,24 +221,27 @@ async def elegir_y_resolver_auditor(conn, *, cfg: ConfigC5, hosts_mision, resolv
     DB, la resolución de red es responsabilidad de quien llama) -- eso además la hace
     fácil de probar con un doble de prueba, sin credenciales ni HTTP real.
 
-    Devuelve `(faceta_resuelta, hosts_con_clientes, hosts_conocidos)`: los dos últimos
-    quedan para quien también necesite correr la compuerta (`validar_eleccion`) sin
-    repetir la consulta de hosts."""
+    Devuelve `(faceta_resuelta, hosts_con_clientes, hosts_conocidos, modo)`. La faceta y
+    el modo son inseparables: un modo COMPLETO por omisión podría enviar salidas y
+    afirmaciones de una máquina con datos de clientes a un auditor de nube."""
     if hosts_mision is None:
         con_clientes, conocidos = frozenset(), frozenset()
     else:
         con_clientes, conocidos = await hosts_de_la_mision(conn, hosts_mision)
     hay_datos = bool(sensibles(hosts_mision or frozenset(), con_clientes, conocidos))
     faceta = await resolve_facet(elegir_auditor_faceta(cfg, hay_datos_de_clientes=hay_datos))
-    return faceta, con_clientes, conocidos
+    return faceta, con_clientes, conocidos, modo_auditoria(cfg, hay_datos_de_clientes=hay_datos)
 
 
 async def verificar_eleccion(conn, *, cfg: ConfigC5, proveedor_cerebro: str, proveedor_auditor: str,
                              hosts_mision) -> tuple:
     """Lo que el arranque (plan 6) corre antes de cada misión: si devuelve fallos, no arranca."""
     con_clientes, conocidos = await hosts_de_la_mision(conn, hosts_mision)
+    hay_datos = bool(sensibles(hosts_mision, con_clientes, conocidos))
     return validar_eleccion(proveedor_cerebro=proveedor_cerebro, proveedor_auditor=proveedor_auditor,
                             auditor_es_local=await es_local(conn, proveedor_auditor),
                             admite_datos_de_clientes=cfg.admite_datos_de_clientes, hosts_mision=frozenset(hosts_mision),
                             hosts_con_clientes=con_clientes, hosts_conocidos=conocidos,
-                            admite_mismo_proveedor=cfg.admite_mismo_proveedor)
+                            admite_mismo_proveedor=cfg.admite_mismo_proveedor,
+                            modo=modo_auditoria(cfg, hay_datos_de_clientes=hay_datos),
+                            auditor_nube_solo_ordenes=cfg.auditor_nube_solo_ordenes)

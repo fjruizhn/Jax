@@ -382,12 +382,13 @@ class Dependencias:
 
 
 def _resultado(estado, codigo, *, rechazo=(), entrega=None, verificacion=None, sesion_iniciada=False,
-               entrega_codigo=None) -> dict:
+               entrega_codigo=None, auditoria_afirmaciones=None) -> dict:
     extra = {} if entrega_codigo is None else {"entrega_codigo": entrega_codigo}
     return {**extra,
         "estado": estado, "codigo": codigo, "rechazo": list(rechazo), "sesion_iniciada": sesion_iniciada,
         "afirmaciones": [_afirmacion(a) for a in entrega.respaldadas] if entrega else [],
         "descartadas": [_descartada(d) for d in entrega.descartadas] if entrega else [],
+        **({} if auditoria_afirmaciones is None else {"auditoria_afirmaciones": auditoria_afirmaciones}),
         "crudas": [_cruda(c) for c in entrega.crudas] if entrega else [],
         "verificacion": verificacion or {},
     }
@@ -419,7 +420,7 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
     vigia = await deps.abrir_vigia(ctx, turno.id_vigia, turno.texto_de_mision, turno.hosts)
     entrega, codigo, sesion_iniciada = None, None, False
     registro_cuadra, auditor_pauso, auditor_legible = False, False, True
-    resultado_entrega, clon = None, None
+    resultado_entrega, clon, auditoria_afirmaciones = None, None, None
     vigia_latio = False
     try:
         limite = time.monotonic() + deps.espera_latido_s
@@ -480,21 +481,40 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                 revision = await deps.auditar(turno.texto_de_mision, entrega,
                                               A.maquinas_de(hosts, maquinas_c5))
                 auditor_pauso = revision.pausar
+                auditoria_afirmaciones = ("NO_AUDITADA_SOLO_ORDENES"
+                                          if revision.modo == "SOLO_ORDENES" else "AUDITADA_POR_C5")
+                dice("auditoria_c5", faceta=revision.faceta, modo=revision.modo,
+                     proveedor_id=revision.proveedor_id, local=revision.local,
+                     afirmaciones=auditoria_afirmaciones)
                 entrega = A.aplicar_revision(entrega, revision)
             except Exception as exc:  # fail-soft: el turno entrega las crudas; fail-CLOSED para las afirmaciones: con el auditor ilegible o caído no sale ninguna
                 auditor_legible = False
+                modo = getattr(exc, "modo", None)
+                faceta = getattr(exc, "faceta", None)
+                proveedor_id = getattr(exc, "proveedor_id", None)
+                proveedor_codigo = exc.proveedor_codigo if isinstance(exc, A.AuditorIlegible) else None
+                local = getattr(exc, "local", None)
+                if modo in ("COMPLETO", "SOLO_ORDENES"):
+                    auditoria_afirmaciones = ("NO_AUDITADA_SOLO_ORDENES" if modo == "SOLO_ORDENES"
+                                              else "NO_AUDITADA_ILEGIBLE")
+                    dice("auditoria_c5", faceta=faceta, proveedor_id=proveedor_id, local=local,
+                         modo=modo, afirmaciones=auditoria_afirmaciones,
+                         **({"proveedor_codigo": proveedor_codigo} if proveedor_codigo else {}))
                 # `motivo` SOLO para AuditorIlegible: su codigo es una constante (proveedor_fallo,
                 # json_invalido...). El texto de cualquier otra excepcion puede traer una llave
                 # o un cuerpo HTTP y no viaja.
                 dice(AUDITOR_ILEGIBLE, tipo=type(exc).__name__,
-                     **({"motivo": exc.codigo} if isinstance(exc, A.AuditorIlegible) else {}))
+                     **({"motivo": exc.codigo} if isinstance(exc, A.AuditorIlegible) else {}),
+                     **({"faceta": faceta, "modo": modo,
+                         "afirmaciones": auditoria_afirmaciones} if auditoria_afirmaciones is not None else {}))
                 entrega = _retener_todo(entrega)
             if auditor_pauso:
                 dice("auditor_pauso", motivo=revision.motivo, paso=revision.paso)
             for a in entrega.respaldadas:
-                dice("afirmacion_entregada", **_afirmacion(a))
+                dice("afirmacion_entregada", **_afirmacion(a), auditoria_c5=auditoria_afirmaciones)
             for d in entrega.descartadas:
-                dice("afirmacion_descartada", estado=d.estado, codigo=d.motivo.codigo, dato=d.afirmacion.dato)
+                dice("afirmacion_descartada", estado=d.estado, codigo=d.motivo.codigo, dato=d.afirmacion.dato,
+                     auditoria_c5=auditoria_afirmaciones)
             if codigo is None and rc != 0:
                 codigo = "cerebro_fallo"
     finally:
@@ -572,4 +592,4 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
     estado = "completado" if codigo is None else "fallido"
     dice("turno_completado" if codigo is None else "turno_fallido", codigo=codigo)
     return _resultado(estado, codigo, entrega=entrega, verificacion=verificacion, sesion_iniciada=sesion_iniciada,
-                      entrega_codigo=resultado_entrega)
+                      entrega_codigo=resultado_entrega, auditoria_afirmaciones=auditoria_afirmaciones)

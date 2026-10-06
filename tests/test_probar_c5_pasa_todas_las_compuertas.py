@@ -77,6 +77,16 @@ def test_cada_llamador_pasa_todos_los_parametros():
         if esperados - pasados:
             faltan[f"{ruta.relative_to(RAIZ)}:{llamada.lineno}"] = sorted(esperados - pasados)
     assert faltan == {}, f"llamadores que dependen de un default: {faltan}"
+    arbol = ast.parse(PROBAR_C5.read_text(encoding="utf-8"))
+    llamadas = [n for n in ast.walk(arbol) if isinstance(n, ast.Call)]
+    por_nombre = {n.func.attr: n for n in llamadas if isinstance(n.func, ast.Attribute)}
+    for funcion in ("validar_eleccion", "auditar", "verificar_c5"):
+        llamada = por_nombre[funcion]
+        modo = next(k.value for k in llamada.keywords if k.arg == "modo")
+        assert isinstance(modo, ast.Name) and modo.id == "modo", funcion
+    resolver = next(n for n in llamadas if isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "elegir_y_resolver_auditor")
+    assert not any(k.arg == "devolver_modo" for k in resolver.keywords)
 
 
 def _viene_de_la_config(valor: ast.expr) -> bool:

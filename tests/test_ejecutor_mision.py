@@ -120,6 +120,7 @@ class Falsas:
         self.pausas_puestas = []
         self.poner_pausa_revienta = False
         self.auditor_ilegible = None  # codigo de AuditorIlegible a lanzar
+        self.auditor_proveedor_codigo = None
         self.cadena = True
         self.pausa_leida = None
         self.llamadas = []
@@ -167,7 +168,7 @@ class Falsas:
     async def auditar(self, texto, entrega, maquinas):
         self.maquinas_auditadas = maquinas
         if self.auditor_ilegible:
-            raise AuditorIlegible(self.auditor_ilegible)
+            raise AuditorIlegible(self.auditor_ilegible, modo="COMPLETO", proveedor_codigo=self.auditor_proveedor_codigo)
         if self.auditor_revienta:
             raise ValueError("json_invalido")
         if self.revision is not None:
@@ -219,9 +220,26 @@ def test_turno_completo_entrega_el_par_con_la_linea_literal_y_las_crudas():
     assert r["verificacion"] == {"registro_cuadra": True, "cadena_ok": True, "pausa_puesta": False,
                                  "auditor_pauso": False, "auditor_legible": True}
     assert _codigos(eventos) == ["turno_lanzado", "arranque_verificado", "vigia_late", "cerebro_termino", "paso",
-                                 "afirmacion_entregada", "vigia_cerrado", "turno_completado"]
+                                 "auditoria_c5", "afirmacion_entregada", "vigia_cerrado", "turno_completado"]
+    assert r["auditoria_afirmaciones"] == "AUDITADA_POR_C5"
     assert ("cerebro", SESION, False) in f.llamadas and f.llamadas[-1] == "cerrar_vigia"
     assert ("vigia", f"{MISION}-t1", frozenset({"ejecutor-prueba"}), "memoria de la VM") in f.llamadas
+
+
+def test_solo_ordenes_marca_afirmaciones_no_auditadas_en_bitacora_visible():
+    f = Falsas()
+    f.revision = Revision(False, None, None, (), frozenset(), frozenset({"a1"}),
+                          "SOLO_ORDENES", "thot", "openai", False)
+    resultado, eventos = _correr(f)
+    marca = "NO_AUDITADA_SOLO_ORDENES"
+    assert resultado["auditoria_afirmaciones"] == marca
+    assert resultado["afirmaciones"] == []
+    assert resultado["descartadas"][0]["dato"] == "1.9Gi"
+    evento_auditoria = next(e for e in eventos if e["evento"] == "auditoria_c5")
+    assert evento_auditoria["datos"] == {"faceta": "thot", "proveedor_id": "openai", "local": False,
+                                         "modo": "SOLO_ORDENES", "afirmaciones": marca}
+    evento_afirmacion = next(e for e in eventos if e["evento"] == "afirmacion_descartada")
+    assert evento_afirmacion["datos"]["auditoria_c5"] == marca
 
 
 def test_el_turno_siguiente_retoma_la_sesion():
@@ -346,7 +364,19 @@ def test_el_motivo_del_auditor_ilegible_queda_en_la_bitacora(codigo):
     r, eventos = _correr(f)
     assert r["codigo"] == "auditor_ilegible"
     (e,) = [x for x in eventos if x["evento"] == "auditor_ilegible"]
-    assert e["datos"] == {"tipo": "AuditorIlegible", "motivo": codigo}
+    assert e["datos"] == {"tipo": "AuditorIlegible", "motivo": codigo,
+                          "faceta": None, "modo": "COMPLETO",
+                          "afirmaciones": "NO_AUDITADA_ILEGIBLE"}
+
+
+def test_el_codigo_del_proveedor_se_registra_sin_el_cuerpo_del_error():
+    f = Falsas()
+    f.auditor_ilegible = "proveedor_fallo"
+    f.auditor_proveedor_codigo = "insufficient_quota"
+    _, eventos = _correr(f)
+    (e,) = [x for x in eventos if x["evento"] == "auditoria_c5"]
+    assert e["datos"]["proveedor_codigo"] == "insufficient_quota"
+    assert "salida privada del proveedor" not in json.dumps(e)
 
 
 def test_un_fallo_cualquiera_del_auditor_no_vuelca_su_mensaje_a_la_bitacora():

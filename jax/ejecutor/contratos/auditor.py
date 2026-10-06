@@ -105,12 +105,20 @@ class Revision:
     hallazgos: tuple
     aprobadas: frozenset
     retenidas: frozenset
+    modo: str = "COMPLETO"
+    faceta: str | None = None
+    proveedor_id: str | None = None
+    local: bool | None = None
 
 
 class AuditorIlegible(ValueError):
-    def __init__(self, codigo: str):
+    def __init__(self, codigo: str, *, modo: str | None = None, faceta: str | None = None,
+                 proveedor_codigo: str | None = None):
         super().__init__(codigo)
         self.codigo = codigo
+        self.modo = modo
+        self.faceta = faceta
+        self.proveedor_codigo = proveedor_codigo
 
 
 #: Los codigos constantes con que `AuditorIlegible` se levanta en este paquete. Son la unica lista de
@@ -118,6 +126,8 @@ class AuditorIlegible(ValueError):
 CODIGOS_ILEGIBLE = frozenset({
     "proveedor_fallo", "proveedor_plazo", "json_invalido", "forma_invalida", "tipo_desconocido",
     "cita_paso_inexistente", "cita_afirmacion_inexistente", "veredicto_desconocido", "veredicto_duplicado"})
+CODIGOS_ILEGIBLE = CODIGOS_ILEGIBLE | frozenset({"veredictos_afirmaciones_prohibidos", "modo_auditoria_desconocido"})
+CODIGOS_ILEGIBLE = CODIGOS_ILEGIBLE | frozenset({"paso_no_auditable_solo_ordenes"})
 DETALLE_INVALIDO = "detalle_invalido"
 DETALLE_NO_COPIADO = "detalle_no_copiado"
 
@@ -175,7 +185,34 @@ def afirmaciones_auditables(entrega) -> tuple:
                  for i, a in enumerate(entrega.respaldadas))
 
 
-def mensajes(lote: Lote, instrucciones: str) -> list[dict]:
+def proyectar_solo_ordenes(lote: Lote) -> dict:
+    """Lista blanca para la nube: jamás serializa un objeto del lote directamente."""
+    comandos = []
+    for paso in lote.pasos:
+        entrada = paso.entrada
+        if paso.herramienta != "Bash" or not isinstance(entrada, dict):
+            raise _paso_no_auditable_solo_ordenes()
+        comando = entrada.get("command")
+        if not isinstance(comando, str) or not comando:
+            raise _paso_no_auditable_solo_ordenes()
+        comandos.append({"n": paso.n, "comando": comando})
+    return {
+        "objetivo": lote.mision,
+        "maquinas_de_la_mision": [{"nombre": m.nombre, "ip": m.ip, "puerto": m.puerto} for m in lote.maquinas],
+        "comandos": comandos,
+    }
+
+
+def _paso_no_auditable_solo_ordenes():
+    return AuditorIlegible("paso_no_auditable_solo_ordenes")
+
+
+def mensajes(lote: Lote, instrucciones: str, *, modo: str) -> list[dict]:
+    if modo == "SOLO_ORDENES":
+        return [{"role": "system", "content": instrucciones},
+                {"role": "user", "content": json.dumps(proyectar_solo_ordenes(lote), ensure_ascii=False)}]
+    if modo != "COMPLETO":
+        raise ValueError("modo_auditoria_desconocido")
     cuerpo = {
         "mision": lote.mision,
         "maquinas_de_la_mision": [{"nombre": m.nombre, "ip": m.ip, "puerto": m.puerto} for m in lote.maquinas],
@@ -193,7 +230,9 @@ def _es_numero_de_paso(valor) -> bool:
     return isinstance(valor, int) and not isinstance(valor, bool)
 
 
-def interpretar(lote: Lote, texto) -> Revision:
+def interpretar(lote: Lote, texto, *, modo: str = "COMPLETO") -> Revision:
+    if modo not in ("COMPLETO", "SOLO_ORDENES"):
+        raise AuditorIlegible("modo_auditoria_desconocido")
     m = _BLOQUE.match(texto) if isinstance(texto, str) else None
     try:
         doc = json.loads(m.group(1) if m else texto)
@@ -203,6 +242,27 @@ def interpretar(lote: Lote, texto) -> Revision:
         raise AuditorIlegible("json_invalido")
     if not isinstance(doc.get("hallazgos"), list) or not isinstance(doc.get("afirmaciones"), list):
         raise AuditorIlegible("forma_invalida")
+    if modo == "SOLO_ORDENES":
+        if set(doc) != {"hallazgos", "afirmaciones"} or doc["afirmaciones"]:
+            raise AuditorIlegible("veredictos_afirmaciones_prohibidos")
+        pasos = {p.n for p in lote.pasos}
+        hallazgos = []
+        for h in doc["hallazgos"]:
+            if isinstance(h, dict) and "afirmacion" in h:
+                raise AuditorIlegible("veredictos_afirmaciones_prohibidos")
+            if (not isinstance(h, dict) or set(h) != {"tipo", "paso"}
+                    or h.get("tipo") not in ("fuera_de_mision", "prohibido")):
+                raise AuditorIlegible("tipo_desconocido")
+            paso = h.get("paso")
+            if h["tipo"] in PAUSAN and not (_es_numero_de_paso(paso) and paso in pasos):
+                raise AuditorIlegible("cita_paso_inexistente")
+            if paso is not None and not (_es_numero_de_paso(paso) and paso in pasos):
+                raise AuditorIlegible("cita_paso_inexistente")
+            hallazgos.append(Hallazgo(h["tipo"], paso, None))
+        que_pausan = [h for h in hallazgos if h.tipo in PAUSAN]
+        primero = que_pausan[0] if que_pausan else None
+        return Revision(bool(que_pausan), primero.tipo if primero else None, primero.paso if primero else None,
+                        tuple(hallazgos), frozenset(), frozenset(a.id for a in lote.afirmaciones), modo)
     pasos = {p.n for p in lote.pasos}
     ids = {a.id for a in lote.afirmaciones}
     hallazgos = []
@@ -232,7 +292,7 @@ def interpretar(lote: Lote, texto) -> Revision:
     que_pausan = [h for h in hallazgos if h.tipo in PAUSAN]
     primero = que_pausan[0] if que_pausan else None
     return Revision(bool(que_pausan), primero.tipo if primero else None, primero.paso if primero else None,
-                    tuple(hallazgos), frozenset(aprobadas), frozenset(ids - aprobadas))
+                    tuple(hallazgos), frozenset(aprobadas), frozenset(ids - aprobadas), modo)
 
 
 def aplicar_revision(entrega, revision: Revision):

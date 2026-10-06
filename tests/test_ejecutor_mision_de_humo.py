@@ -181,3 +181,69 @@ def test_el_id_de_mision_es_un_uuid_canonico():
     texto = _RUTA.read_text(encoding="utf-8")
     assert "id_mision = str(uuid.uuid4())" in texto
     assert not re.search(r'id_mision\s*=\s*f"humo-', texto)
+
+
+def test_el_humo_con_datos_de_clientes_solo_envia_ordenes_a_la_nube():
+    """La selección sensible debe llevar su modo hasta el cuerpo HTTP del humo."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import httpx
+    from jax.ejecutor.contratos import auditor as A, eleccion_c5 as E
+
+    cfg = E.config_desde_filas({
+        "ejecutor.cerebro_faceta": "cerebro",
+        "ejecutor.auditor_faceta": "thot",
+        "ejecutor.auditor_faceta_local": "juez_local",
+        "ejecutor.c5_lote_max": "1",
+        "ejecutor.c5_intervalo_s": "1",
+        "ejecutor.c5_max_tokens": "128",
+        "ejecutor.c5_tope_s": "2",
+        "ejecutor.c5_auditor_admite_datos_de_clientes": "false",
+        "ejecutor.c5_auditor_admite_mismo_proveedor": "false",
+        "ejecutor.c5_auditor_nube_solo_ordenes": "true",
+    })
+    vistas = []
+
+    async def responder(request):
+        vistas.append(__import__("json").loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"hallazgos": [], "afirmaciones": []}'}}]})
+
+    async def resolver(_clave):
+        return SimpleNamespace(key="thot", provider_id="openai", transport="http_openai_compat",
+                               model="auditor", base_url="https://auditor.invalid", credential="test")
+
+    async def escenario():
+        lote = A.Lote("objetivo humo", (A.Paso(1, "Bash", {"command": "hostname"}, False),),
+                      (A.AfirmacionAuditable("a1", "nombre", "cliente-sintetico", "cliente", "hostname", "cliente-sintetico", ()),),
+                      (A.Maquina("cliente", "192.0.2.8", 58291),))
+        async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as cliente:
+            return await H.auditar_lote_mision_humo(
+                lote, cfg=cfg, hosts_mision=frozenset({"cliente"}), conn=_ConexionCliente(),
+                resolve_facet=resolver, cliente=cliente)
+
+    asyncio.run(escenario())
+    cuerpo_usuario = __import__("json").loads(vistas[0]["messages"][1]["content"])
+    assert cuerpo_usuario == {
+        "objetivo": "objetivo humo",
+        "maquinas_de_la_mision": [{"nombre": "cliente", "ip": "192.0.2.8", "puerto": 58291}],
+        "comandos": [{"n": 1, "comando": "hostname"}],
+    }
+
+
+class _ConexionCliente:
+    class _Cursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def execute(self, *_):
+            pass
+
+        async def fetchall(self):
+            return [("cliente", True)]
+
+    def cursor(self):
+        return self._Cursor()

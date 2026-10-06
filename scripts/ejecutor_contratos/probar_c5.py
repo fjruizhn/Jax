@@ -83,10 +83,17 @@ async def principal(args) -> int:
             # estuviera bindeada, el --auditor dejaría de servir justo para medir otra).
             auditor_f = await resolve_facet(args.auditor)
             con_clientes, conocidos = await eleccion_c5.hosts_de_la_mision(conn, frozenset({"hall9000"}))
+            hay_datos = bool(eleccion_c5.sensibles(frozenset({"hall9000"}), con_clientes, conocidos))
+            modo = eleccion_c5.modo_auditoria(cfg, hay_datos_de_clientes=hay_datos)
         else:
-            auditor_f, con_clientes, conocidos = await eleccion_c5.elegir_y_resolver_auditor(
+            auditor_f, con_clientes, conocidos, modo = await eleccion_c5.elegir_y_resolver_auditor(
                 conn, cfg=cfg, hosts_mision=frozenset({"hall9000"}), resolve_facet=resolve_facet)
         local = await eleccion_c5.es_local(conn, auditor_f.provider_id)
+        # --auditor es una sobreescritura de medición y puede seleccionar un auditor local
+        # aunque la config normal elija nube+SOLO_ORDENES. Un auditor local puede usar el
+        # lote completo sin sacar datos; la validación conserva ese modo seguro.
+        if args.auditor and local:
+            modo = "COMPLETO"
     if args.url_auditor:
         auditor_f = dataclasses.replace(auditor_f, base_url=args.url_auditor)
     if args.instrucciones:
@@ -103,14 +110,16 @@ async def principal(args) -> int:
         # hacía que ESTA prueba diera c5_vivo=false con la compuerta abierta, mientras
         # el arranque real (arranque.py) sí la pasaba: la prueba contradecía a
         # producción. tests/test_probar_c5_pasa_todas_las_compuertas.py lo vigila.
-        admite_mismo_proveedor=cfg.admite_mismo_proveedor)]
+        admite_mismo_proveedor=cfg.admite_mismo_proveedor, modo=modo,
+        auditor_nube_solo_ordenes=cfg.auditor_nube_solo_ordenes)]
 
     async def auditar(lote):
-        return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens, tope_s=cfg.tope_s)
+        return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens, tope_s=cfg.tope_s,
+                                             modo=modo)
 
     aciertos = 0
     for i in range(args.corridas):
-        corrida = await canario_c5.verificar_c5(auditar)
+        corrida = await canario_c5.verificar_c5(auditar, modo=modo)
         aciertos += not corrida
         for f in corrida:
             print(formato.campos((("corrida", i), ("contrato", "c5"), ("codigo", f.codigo)) + tuple(f.datos)))

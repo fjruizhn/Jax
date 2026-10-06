@@ -24,7 +24,7 @@ def _r(doc):
 
 
 def test_mensajes_llevan_instrucciones_y_el_lote_entero():
-    m = A.mensajes(LOTE, "INSTRUCCIONES")
+    m = A.mensajes(LOTE, "INSTRUCCIONES", modo="COMPLETO")
     assert m[0] == {"role": "system", "content": "INSTRUCCIONES"}
     cuerpo = json.loads(m[1]["content"])
     assert cuerpo["mision"] == LOTE.mision and [p["n"] for p in cuerpo["pasos"]] == [1, 2]
@@ -42,6 +42,51 @@ def test_fuera_de_mision_citando_un_paso_real_pausa():
 def test_limpio_no_pausa_y_sin_veredicto_se_retiene():
     rev = A.interpretar(LOTE, _r({"hallazgos": [], "afirmaciones": [{"id": "a1", "veredicto": "responde"}]}))
     assert rev.pausar is False and rev.aprobadas == {"a1"} and rev.retenidas == {"a2"}
+
+
+def test_solo_ordenes_rechaza_cualquier_veredicto_de_afirmacion():
+    with pytest.raises(A.AuditorIlegible) as exc:
+        A.interpretar(LOTE, _r({"hallazgos": [], "afirmaciones": [{"id": "a1", "veredicto": "responde"}]}),
+                      modo="SOLO_ORDENES")
+    assert exc.value.codigo == "veredictos_afirmaciones_prohibidos"
+
+
+def test_solo_ordenes_rechaza_hallazgo_que_apunta_a_una_afirmacion():
+    with pytest.raises(A.AuditorIlegible) as exc:
+        A.interpretar(LOTE, _r({"hallazgos": [{"tipo": "prohibido", "paso": 1, "afirmacion": "a1"}],
+                               "afirmaciones": []}), modo="SOLO_ORDENES")
+    assert exc.value.codigo == "veredictos_afirmaciones_prohibidos"
+
+
+def test_solo_ordenes_rechaza_skill_que_no_se_puede_proyectar_sin_filtrar():
+    lote = A.Lote("objetivo", (A.Paso(7, "Skill", {"skill": "endureciendo", "args": "SECRETO"}, False),),
+                  (), LOTE.maquinas)
+    with pytest.raises(A.AuditorIlegible) as exc:
+        A.mensajes(lote, "instrucciones", modo="SOLO_ORDENES")
+    assert exc.value.codigo == "paso_no_auditable_solo_ordenes"
+
+
+def test_solo_ordenes_rechaza_bash_malformado():
+    lote = A.Lote("objetivo", (A.Paso(7, "Bash", {"command": None}, False),), (), LOTE.maquinas)
+    with pytest.raises(A.AuditorIlegible) as exc:
+        A.mensajes(lote, "instrucciones", modo="SOLO_ORDENES")
+    assert exc.value.codigo == "paso_no_auditable_solo_ordenes"
+
+
+@pytest.mark.parametrize("doc", [
+    {"hallazgos": [], "afirmaciones": [], "veredicto": "claim aprobado"},
+    {"hallazgos": [{"tipo": "prohibido", "paso": 1, "veredicto": "claim aprobado"}], "afirmaciones": []},
+])
+def test_solo_ordenes_rechaza_campos_extra_semanticos(doc):
+    with pytest.raises(A.AuditorIlegible):
+        A.interpretar(LOTE, _r(doc), modo="SOLO_ORDENES")
+
+
+def test_solo_ordenes_retiene_todas_las_afirmaciones_sin_veredicto():
+    rev = A.interpretar(LOTE, _r({"hallazgos": [], "afirmaciones": []}), modo="SOLO_ORDENES")
+    assert rev.modo == "SOLO_ORDENES"
+    assert rev.aprobadas == frozenset()
+    assert rev.retenidas == frozenset({"a1", "a2"})
 
 
 def test_hallazgo_que_no_pausa_se_anota():
@@ -133,7 +178,7 @@ def test_el_lote_lleva_las_maquinas_de_la_mision_con_su_direccion():
     máquina» no se puede juzgar."""
     maquinas = (A.Maquina("ejecutor-prueba", "192.168.122.50", 58291),)
     lote = A.Lote(LOTE.mision, LOTE.pasos, LOTE.afirmaciones, maquinas)
-    cuerpo = json.loads(A.mensajes(lote, "I")[1]["content"])
+    cuerpo = json.loads(A.mensajes(lote, "I", modo="COMPLETO")[1]["content"])
     assert cuerpo["maquinas_de_la_mision"] == [{"nombre": "ejecutor-prueba", "ip": "192.168.122.50", "puerto": 58291}]
 
 

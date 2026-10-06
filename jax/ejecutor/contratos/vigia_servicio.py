@@ -50,7 +50,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from jax.ejecutor.contratos import arranque, cuenta_axioma, formato, huella, pausa, politica, vigia
+from jax.ejecutor.contratos import arranque, c3_control, cuenta_axioma, formato, huella, pausa, politica, vigia
 from jax.ejecutor.contratos import auditor as A
 
 log = logging.getLogger("ejecutor.vigia_servicio")
@@ -407,8 +407,17 @@ async def _principal(ruta_mision: Path) -> int:
     # clientes.
     async with conexion(desechable=True) as conn:
         cfg = await eleccion_c5.leer_config(conn)
-        auditor_f, _, _ = await eleccion_c5.elegir_y_resolver_auditor(
-            conn, cfg=cfg, hosts_mision=mision.hosts, resolve_facet=resolve_facet)
+        auditor_f, fallos, modo = await arranque.eleccion_del_auditor(
+            conn, hosts_mision=mision.hosts, cfg=cfg, resolve_facet=resolve_facet)
+        local = await eleccion_c5.es_local(conn, auditor_f.provider_id)
+    if fallos:
+        raise arranque.ContratosNoVerificados(fallos)
+    log.info("c5_auditor_elegido faceta=%s proveedor=%s local=%s modo=%s",
+             getattr(auditor_f, "key", auditor_f), auditor_f.provider_id, local, modo)
+    await c3_control.registrar_auditor_c5(
+        mision_id=mision_id_desde_ruta(ruta_mision), faceta=auditor_f.key,
+        proveedor_id=auditor_f.provider_id, local=local, modo=modo,
+        config_sha256=eleccion_c5.huella_config(cfg))
     doc = json.loads(await asyncio.to_thread(ctx.cuenta.politica.read_bytes))
     hosts_pol = {h.nombre: h for h in politica.validar(doc).hosts}
     maquinas = A.maquinas_de(politica.validar(doc).hosts, mision.hosts)
@@ -450,7 +459,8 @@ async def _principal(ruta_mision: Path) -> int:
     mision_id = mision_id_desde_ruta(ruta_mision)
 
     async def auditar(lote):
-        return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens, tope_s=cfg.tope_s)
+        return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens,
+                                             tope_s=cfg.tope_s, modo=modo)
 
     async def _tomar_huella(nombre_host: str) -> huella.Huella:
         """`huella.argv_huella_servicio` -- una sola forma, apertura y cierre comparan

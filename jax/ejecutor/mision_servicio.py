@@ -50,7 +50,7 @@ import math
 import os
 import signal
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import redaccion
@@ -389,18 +389,36 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
     async def auditar(texto, entrega, maquinas):
         from facet_resolver import resolve_facet
         from jacobs.store import conexion
-        from jax.ejecutor.contratos import auditor_cliente, eleccion_c5
+        from jax.ejecutor.contratos import auditor_cliente, c3_control, eleccion_c5
         # Spec 2026-09-18-auditor-local-opcion.md §4: `turno.hosts`, no `maquinas` (que ya
         # perdió el nombre plano por A.maquinas_de) -- son las mismas máquinas de la misión,
         # y elegir_y_resolver_auditor necesita nombres para consultar ejecutor_host.
         async with conexion(desechable=True) as conn:
             cfg = await eleccion_c5.leer_config(conn)
-            faceta, _, _ = await eleccion_c5.elegir_y_resolver_auditor(
-                conn, cfg=cfg, hosts_mision=turno.hosts, resolve_facet=resolve_facet)
+            faceta, fallos, modo = await arranque.eleccion_del_auditor(
+                conn, hosts_mision=turno.hosts, cfg=cfg, resolve_facet=resolve_facet)
+            auditor_local = await eleccion_c5.es_local(conn, faceta.provider_id)
+        if fallos:
+            raise arranque.ContratosNoVerificados(fallos)
+        await c3_control.registrar_auditor_c5(
+            mision_id=turno.mision_id, faceta=faceta.key, proveedor_id=faceta.provider_id,
+            local=auditor_local, modo=modo, config_sha256=eleccion_c5.huella_config(cfg))
         estado["faceta_auditor"] = faceta
-        return await auditor_cliente.auditar(A.Lote(texto, (), A.afirmaciones_auditables(entrega), maquinas),
-                                             faceta=faceta, max_tokens=cfg.max_tokens,
-                                             tope_s=cfg.tope_s)
+        if modo == "SOLO_ORDENES":
+            # El vigía ya auditó cada orden desde C3. Esta revisión final antes juzgaba claims;
+            # en SOLO_ORDENES no se reenvía un lote vacío o datos de claims a la nube.
+            ids = frozenset(a.id for a in A.afirmaciones_auditables(entrega))
+            return A.Revision(False, None, None, (), frozenset(), ids, modo, faceta.key,
+                              faceta.provider_id, auditor_local)
+        try:
+            revision = await auditor_cliente.auditar(
+                A.Lote(texto, (), A.afirmaciones_auditables(entrega), maquinas), faceta=faceta,
+                max_tokens=cfg.max_tokens, tope_s=cfg.tope_s, modo=modo)
+        except A.AuditorIlegible as exc:
+            exc.proveedor_id = faceta.provider_id
+            exc.local = auditor_local
+            raise
+        return replace(revision, proveedor_id=faceta.provider_id, local=auditor_local)
 
     async def cadena(ctx):
         return (await asyncio.to_thread(verificar_cadena, ctx.registro)).ok
