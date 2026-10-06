@@ -54,19 +54,23 @@ INICIO_DE_SESION = time.time()
 
 os.environ["JAX_USAGE_SPOOL_DIR"] = tempfile.mkdtemp(prefix="jax-test-respaldo-uso-")
 
-#: E-21 (2026-09-16): jacobs/executor.py y plan.py leen LAS_MANOS_URL y
-#: JAX_OLLAMA_URL al importarse y NO arrancan sin ellas (fail-closed). Se fijan
-#: acá, antes de cualquier import. NO con los valores de producción: un test
-#: que olvide parchear el transporte le pegaría a LAS MANOS o al Ollama vivos.
-#: El dominio `.invalid` (RFC 6761) nunca resuelve, así que ese olvido falla con
-#: un error de DNS; el valor sigue siendo una URL válida y estable para las
-#: aserciones de ruta. tests/test_config_entorno.py lo vigila.
+#: E-21 (2026-09-16): jacobs/plan.py y executor.py leen JAX_OLLAMA_URL al
+#: importarse y NO arrancan sin ella (fail-closed). Desde el cierre de #362
+#: jacobs/executor.py YA NO lee LAS_MANOS_URL (Jacobs no le hace pedidos HTTP a
+#: LAS MANOS; tests/test_config_entorno.py::test_jacobs_no_depende_de_LAS_MANOS_URL
+#: lo fija): se sigue fijando acá porque otros módulos y pruebas la leen
+#: (p. ej. el arranque de LAS MANOS). Se fijan antes de cualquier import. NO con
+#: los valores de producción: un test que olvide parchear el transporte le
+#: pegaría a LAS MANOS o al Ollama vivos. El dominio `.invalid` (RFC 6761) nunca
+#: resuelve, así que ese olvido falla con un error de DNS; el valor sigue siendo
+#: una URL válida y estable para las aserciones de ruta.
+#: tests/test_config_entorno.py lo vigila.
 os.environ["LAS_MANOS_URL"] = "http://las-manos.invalid:7777"
 os.environ["JAX_OLLAMA_URL"] = "http://ollama.invalid:11434"
 
-#: 2026-09-17 (autenticación de servicio de LAS MANOS): jacobs/executor.py manda
-#: la credencial `jacobs` en cada pedido a LAS MANOS y server.py no arranca sin
-#: las dos. Valores de prueba generados por sesión, NUNCA los de /etc/jax/.env.
+#: 2026-09-17 (autenticación de servicio de LAS MANOS): server.py no arranca sin las
+#: credenciales de servicio (jacobs/executor.py ya no manda ninguna: no le hace
+#: pedidos a LAS MANOS). Valores de prueba generados por sesión, NUNCA los de /etc/jax/.env.
 import secrets as _secrets  # noqa: E402
 os.environ["JAX_LAS_MANOS_CREDENCIAL_PLATAFORMA"] = _secrets.token_urlsafe(32)
 os.environ["JAX_LAS_MANOS_CREDENCIAL_JACOBS"] = _secrets.token_urlsafe(32)

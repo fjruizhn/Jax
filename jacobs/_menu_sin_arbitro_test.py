@@ -44,9 +44,9 @@ def test_menu_de_facetas_excluye_al_arbitro_configurado():
     activas = frozenset({"hipatia", "jekyll", "thot", "ada", "kimi"})
     menu = _menu_de_facetas(activas, arbitro_faceta="thot")
     assert "thot" not in [fila[0] for fila in menu]
-    # El resto de las facetas activas sigue ofreciéndose -- no es un filtro
-    # que vacíe el menú entero.
-    assert {"hipatia", "jekyll", "ada", "kimi"} <= {fila[0] for fila in menu}
+    # Kimi queda fuera hasta disponer de despacho gobernado por paso.
+    assert {"hipatia", "jekyll", "ada"} <= {fila[0] for fila in menu}
+    assert "kimi" not in [fila[0] for fila in menu]
 
 
 def test_menu_de_facetas_sin_arbitro_configurado_no_filtra_nada():

@@ -455,6 +455,23 @@ def test_sin_presupuesto_persistido_no_ocurre():
     assert args[1] == "DEVOLUCION_SIN_PRESUPUESTO"
 
 
+def test_devolucion_no_prevuela_ni_reencola_faceta_sin_dispatch_gobernado():
+    from jacobs.devolucion import RESULTADO_COMPLETAR, evaluar_y_devolver
+
+    pipeline = _pipeline(context={
+        **{f"step_{i}_ref": "inline:{}" for i in range(6)},
+        "step_6_ref": _bloque_devolver(4),
+    })
+    pipeline.plan[4].facet = "kimi"
+    pila, m = _mocks()
+    with pila:
+        resultado, payload = _correr(evaluar_y_devolver(pipeline))
+    assert resultado == RESULTADO_COMPLETAR and payload == {}
+    m["prevuelo"].assert_not_awaited()
+    m["tx"].assert_not_awaited()
+    assert m["evento"].await_args.args[1] == "DEVOLUCION_MOTOR_GOBERNADO_NO_DISPONIBLE"
+
+
 # ---------------------------------------------------------------------------
 # Ronda de arreglo 2: el presupuesto es LO QUE QUEDA, no el techo completo.
 # Con tope=2, medir cada devolución contra el 100% del tope dejaba gastar
