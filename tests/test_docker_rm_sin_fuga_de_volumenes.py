@@ -40,6 +40,30 @@ _DOCKER_OPCIONES_CON_VALOR = {
     "-c", "--context", "-H", "--host", "-l", "--log-level", "--config",
     "--tlscacert", "--tlscert", "--tlskey",
 }
+_COMPOSE_OPCIONES_CON_VALOR = {
+    "-f", "--file", "-p", "--project-name", "--env-file", "--profile",
+    "--parallel", "--progress", "--ansi", "--project-directory",
+}
+
+
+def _compose_exec_o_run(tokens):
+    try:
+        k = tokens.index("compose") + 1
+    except ValueError:
+        return False
+    while k < len(tokens):
+        token = tokens[k]
+        if token in _COMPOSE_OPCIONES_CON_VALOR:
+            k += 2
+        elif token.startswith("--") and "=" in token:
+            k += 1
+        elif token.startswith(("-f", "-p")) and len(token) > 2:
+            k += 1
+        elif token.startswith("-"):
+            k += 1
+        else:
+            return token in ("exec", "run")
+    return False
 
 
 def _fuerza_sin_volumenes(banderas):
@@ -79,6 +103,8 @@ def _es_docker_rm(toks, indice_rm):
         inicio -= 1
     for j in range(inicio + 1, indice_rm):
         if _ES_DOCKER.fullmatch(toks[j]):
+            if _compose_exec_o_run(toks[j + 1:indice_rm]):
+                return False
             # docker exec/run ejecuta un comando dentro de un contenedor; no
             # reinterpretar un contenedor llamado "docker" como el ejecutable.
             if j + 1 < indice_rm and toks[j + 1] in ("exec", "run"):
@@ -133,10 +159,22 @@ def _prefijo_docker_rm(tokens):
             comando = token
             k += 1
         elif comando == "compose":
-            # Compose acepta opciones globales en evolución, incluidas opciones
-            # con argumentos y formas adjuntas. El `rm` encontrado después por
-            # el escáner ya fija el subcomando de destino.
-            return True
+            # Consumir opciones globales antes de que el llamador confirme que
+            # `rm` es el subcomando; un positional como `exec`/`run` significa
+            # que el rm encontrado pertenece al comando dentro del servicio.
+            if token in _COMPOSE_OPCIONES_CON_VALOR:
+                if k + 1 >= len(tokens):
+                    return False
+                k += 2
+            elif token.startswith("--") and "=" in token:
+                k += 1
+            elif token.startswith(("-f", "-p")) and len(token) > 2:
+                k += 1
+            elif token.startswith("-"):
+                # Las opciones booleanas no tienen argumento posicional.
+                k += 1
+            else:
+                return False
         else:
             return False
     return True
@@ -146,8 +184,15 @@ def _es_prefijo_docker_rm(tokens):
     for i, token in enumerate(tokens):
         if not _ES_DOCKER.search(token):
             continue
-        if i + 1 < len(tokens) and tokens[i + 1] in ("exec", "run"):
+        if _compose_exec_o_run(tokens[i + 1:]):
             return False
+        if i + 1 < len(tokens) and tokens[i + 1] in ("exec", "run"):
+            # `docker-host` can be an SSH destination before the real docker
+            # executable (`ssh docker-host exec docker rm ...`). Only an exact
+            # executable anchor closes the search as docker exec/run.
+            if _ES_DOCKER.fullmatch(token):
+                return False
+            continue
         if _prefijo_docker_rm(tokens[i + 1:]):
             return True
     return False
@@ -271,6 +316,10 @@ FUGAN_SHELL = [
     "docker compose --env-file .env rm -f svc",
     "docker compose -fcompose.yml rm -f svc",
     "docker compose -pproj rm -f svc",
+    "docker compose --project-directory /tmp/project rm -f svc",
+    "docker compose --parallel 4 rm -f svc",
+    "docker compose --progress plain rm -f svc",
+    "docker compose --ansi never rm -f svc",
     "docker compose -f a.yml -f b.yml rm -fs svc",
     "docker compose -f a -f b -f c -f d -f e rm -f svc",
     "sudo -u docker docker rm -f x",
@@ -331,9 +380,15 @@ FUGAN_PYTHON = [
     '["docker", "compose", "--env-file", ".env", "rm", "-f"]',
     '["docker", "compose", "-fcompose.yml", "rm", "-f"]',
     '["docker", "compose", "-pproj", "rm", "-f"]',
+    '["docker", "compose", "--project-directory", "/tmp/project", "rm", "-f"]',
+    '["docker", "compose", "--parallel", "4", "rm", "-f"]',
+    '["docker", "compose", "--progress", "plain", "rm", "-f"]',
+    '["docker", "compose", "--ansi", "never", "rm", "-f"]',
     '["docker", "compose", "-f", "a", "-f", "b", "-f", "c", "-f", "d", "-f", "e", "rm", "-f"]',
     '["ssh", "docker-host", "docker", "rm", "-f", n]',
     '["ssh", docker_host, "docker", "rm", "-f", n]',
+    '["ssh", "docker-host", "exec", "docker", "rm", "-f", n]',
+    '["ssh", docker_host, "exec", "docker", "rm", "-f", n]',
     '["sudo", "-u", "docker", "docker", "rm", "-f", n]',
     '["env", "DOCKER_HOST=x", "docker", "rm", "-f", n]',
     '[*sudo, "DOCKER_HOST=x", "docker", "rm", "-f", n]',
@@ -355,6 +410,10 @@ NO_FUGAN_SHELL = [
     "docker stop x",
     "docker exec c rm -f /tmp/x",
     "docker exec docker rm -f /tmp/x",
+    "docker compose exec docker rm -f /tmp/x",
+    "docker compose run svc docker rm -f /tmp/x",
+    "docker compose --profile prod exec docker rm -f /tmp/x",
+    "docker compose --env-file .env run svc docker rm -f /tmp/x",
     "# nunca uses docker rm -f",
     "docker stop x; rm -f /tmp/y",
     "docker volume rm -f x",
@@ -370,6 +429,10 @@ NO_FUGAN_PYTHON = [
     'sudo + ["rm", "-f", p]',
     '[*docker, "exec", c, "rm", "-f", "/tmp/x"]',
     '["docker", "exec", "docker", "rm", "-f", "/tmp/x"]',
+    '["docker", "compose", "exec", "docker", "rm", "-f", "/tmp/x"]',
+    '["docker", "compose", "run", "svc", "docker", "rm", "-f", "/tmp/x"]',
+    '["docker", "compose", "--profile", "prod", "exec", "docker", "rm", "-f", "/tmp/x"]',
+    '["docker", "compose", "--env-file", ".env", "run", "svc", "docker", "rm", "-f", "/tmp/x"]',
     '# nunca uses docker rm -f\nx = 1',
     'def f():\n    """No uses docker rm -f."""\n    return 1',
     'DOCKER = 1\nsubprocess.run(["rm", "-f", p])',

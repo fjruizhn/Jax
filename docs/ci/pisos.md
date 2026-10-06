@@ -900,11 +900,11 @@ para conservar byte a byte el registro de la migración de pisos.
 
 ## `tests-puros/out`
 
-3540 -> 3632 (2026-10-06, JAX#357 ronda 3): el archivo de regresiones pasó
-de 6 a 98 casos corridos al parametrizar A–E, agregar las opciones de Compose
-reportadas por auditoría y cubrir el caso `docker exec docker`; +92. Medido con la lista exacta de 195 archivos del paso "Piso exacto",
+3540 -> 3638 (2026-10-06, JAX#357 ronda 3): el archivo de regresiones pasó
+de 6 a 108 casos corridos al parametrizar A–E, cubrir opciones de Compose y
+excluir `docker exec/run` con contenedor llamado `docker`; +102. Medido con la lista exacta de 195 archivos del paso "Piso exacto",
 Python 3.14.4, `requirements.txt`, `pytest` y `pytest-asyncio`; los cinco
-directorios del host se ocultaron en namespace de mount. Resultado: 3632 passed,
+directorios del host se ocultaron en namespace de mount. Resultado: 3638 passed,
 45 skipped, 1 xfailed, 16 subtests. Un primer intento falló una prueba ajena por
 mantener `USER=root` tras bajar de `sudo`; con `USER=fruiz` y el usuario efectivo
 alineados, la repetición completa pasó.
@@ -3336,10 +3336,10 @@ el runner de este PR o el piso se rompe y muestra el número real.
 2797 -> 2801: +4, tests/test_probar_c5_pasa_todas_las_compuertas.py (los llamadores
 de validar_eleccion no dependen de un default; probar_c5.py mentía c5_vivo=false).
 NOTA DE REBASE (2026-09-22, jax#263 sobre jax#262): master subió el piso de 2671
-a 2674 (+3) mientras esta rama lo subía de 2671 a 2767 (+96). Resuelto SUMANDO las
+a 2674 (+3) mientras esta rama lo subía de 2671 a 2767 (+102.. Resuelto SUMANDO las
 dos deltas: 2674 + 96 = 2770. Si el runner dice otro número, manda el runner.
 2671 -> 2767 el 2026-09-22 (jax#263, fix de CI de la huella de servicio, rondas
-2-7): +96 tests netos -- los agregados a tests/test_ejecutor_contratos_huella.py,
+2-7): +102.tests netos -- los agregados a tests/test_ejecutor_contratos_huella.py,
 tests/test_ejecutor_huella_aceptar.py y tests/test_ejecutor_vigia_servicio.py a lo
 largo de las 6 rondas de auditoría adversarial, más DOS ARCHIVOS NUEVOS que este
 mismo fix cablea por primera vez en este job -- tests/test_ejecutor_huella_sh.py y
