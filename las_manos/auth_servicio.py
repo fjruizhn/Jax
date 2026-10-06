@@ -50,16 +50,12 @@ from __future__ import annotations
 
 import hmac
 import json
-import logging
 import os
 import re
-import uuid
 from dataclasses import dataclass
 from processing_ownership import ProcessingOwnershipError, processing_ownership_from_headers
 
 from config_entorno import EntornoInvalido
-
-logger = logging.getLogger(__name__)
 
 #: Cabecera con la que un llamador presenta su credencial.
 ENCABEZADO = "X-Jax-Credencial-Servicio"
@@ -233,8 +229,6 @@ class CredencialDeServicio:
 
         permiso = PERMISOS[identidad]
         if not permiso.admite_ruta(metodo, path):
-            if (metodo, path) == ("POST", "/motor/dispatch"):
-                return await _denegar_dispatch_legacy(send, identidad)
             return await _responder(send, 403, CODIGO_RUTA_NO_PERMITIDA)
         ownership = None
         if path == "/procesamiento/trabajos" or path.startswith("/procesamiento/trabajos/"):
@@ -287,27 +281,8 @@ def _reproducir(cuerpo: bytes, receive):
     return _receive
 
 
-async def _denegar_dispatch_legacy(send, identidad: str) -> None:
-    """La denegacion REAL de POST /motor/dispatch (despacho legacy cerrado, ninguna
-    identidad tiene la ruta): se registra donde ocurre. Evidencia B7 + un log con
-    la correlacion, y el MISMO id en el cuerpo del 403, para que el operador una
-    lo que vio el cliente con el registro. No se lee ni se loguea el cuerpo."""
-    from motor_registry import routes as motor_routes  # import tardio: el middleware no arrastra el Motor Registry (catalogo, workers) al importarse; solo se carga al denegar
-
-    correlacion = uuid.uuid4().hex
-    logger.warning(
-        "POST /motor/dispatch denegado (despacho legacy cerrado) identidad=%s correlacion=%s",
-        identidad, correlacion,
-    )
-    estado = await motor_routes.registrar_denegacion_de_dispatch(correlacion)
-    return await _responder(
-        send, 403, CODIGO_RUTA_NO_PERMITIDA, correlacion=correlacion,
-        evidencia_registrada=estado == motor_routes.EVIDENCIA_REGISTRADA,
-    )
-
-
-async def _responder(send, status: int, codigo: str, **extra) -> None:
-    cuerpo = json.dumps({"detail": {"code": codigo, **extra}}).encode("utf-8")
+async def _responder(send, status: int, codigo: str) -> None:
+    cuerpo = json.dumps({"detail": {"code": codigo}}).encode("utf-8")
     await send({
         "type": "http.response.start",
         "status": status,

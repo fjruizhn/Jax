@@ -334,7 +334,7 @@ def test_motor_dispatch_410_sin_falla_de_evidencia_no_loguea_error(motor, store_
         with pytest.raises(HTTPException) as exc:
             asyncio.run(routes.dispatch(_pedido("cualquier-cosa")))
     assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
-    # Forma unica del cuerpo (la misma del 403 del middleware): correlacion null
+    # Cuerpo unico del 410: correlacion null
     # cuando la evidencia quedo registrada.
     assert exc.value.status_code == 410
     assert exc.value.detail == {"code": "GOVERNED_EXECUTION_REQUIRED", "correlacion": None, "evidencia_registrada": True}

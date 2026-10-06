@@ -46,89 +46,9 @@ _STORE = JobStore(str(BASE_DIR / "logs" / "motor_jobs.jsonl"))
 _B7_EVIDENCE_RECORDER = None
 
 def configure_b7_evidence_recorder(recorder) -> None:
-    """Startup composition only; the legacy HTTP request cannot choose it.
-
-    Tambien valida al arrancar la configuracion del registro de denegaciones
-    (timeout y concurrencia): un valor invalido es EntornoInvalido y el servicio
-    no levanta, igual que el resto de las variables de /etc/jax/.env."""
+    """Startup composition only; the legacy HTTP request cannot choose it."""
     global _B7_EVIDENCE_RECORDER
     _B7_EVIDENCE_RECORDER = recorder
-    configurar_registro_de_denegaciones()
-
-
-# --- Registro de la evidencia de denegacion de /motor/dispatch -----------------
-# Corre en el camino de CUALQUIER pedido denegado por el middleware, asi que esta
-# acotado: fuera del hilo del bucle, con limite de tiempo y con tope de escrituras
-# en vuelo. Lo que no cabe se OMITE (y se cuenta), nunca se acumula ni bloquea.
-VARIABLE_TIMEOUT_DENEGACION = "JAX_B7_DENEGACION_TIMEOUT_S"
-VARIABLE_CONCURRENCIA_DENEGACION = "JAX_B7_DENEGACION_CONCURRENCIA"
-TIMEOUT_DENEGACION_POR_DEFECTO = 3.0
-CONCURRENCIA_DENEGACION_POR_DEFECTO = 4
-TIMEOUT_DENEGACION_MAXIMO = 60.0
-CONCURRENCIA_DENEGACION_MAXIMA = 64
-#: Cada cuanto, como maximo, se resume cuantas evidencias se omitieron.
-INTERVALO_AVISO_OMITIDAS_S = 60.0
-
-#: Resultado de registrar_denegacion_de_dispatch.
-EVIDENCIA_REGISTRADA = "registrada"
-EVIDENCIA_FALLIDA = "fallida"                  # error o timeout al escribirla
-EVIDENCIA_OMITIDA = "omitida_por_saturacion"   # sin cupo inmediato
-EVIDENCIA_SIN_REGISTRADOR = "sin_registrador"  # B7 no esta compuesto
-
-_DENEGACION: dict | None = None
-
-
-def _numero_del_entorno(entorno, nombre: str, defecto, tipo, minimo, maximo):
-    from config_entorno import EntornoInvalido
-    crudo = (entorno.get(nombre) or "").strip()
-    if not crudo:
-        return defecto
-    try:
-        valor = tipo(crudo)
-    except ValueError as exc:
-        raise EntornoInvalido(f"{nombre}={crudo!r} no es un numero valido ({tipo.__name__}).") from exc
-    if not (minimo < valor <= maximo if tipo is float else minimo <= valor <= maximo):
-        raise EntornoInvalido(f"{nombre}={crudo!r} fuera de rango ({minimo} a {maximo}).")
-    return valor
-
-
-def configurar_registro_de_denegaciones(entorno=None) -> dict:
-    """Lee y VALIDA la configuracion (fail-closed) y reinicia el estado: semaforo,
-    contador de omitidas y aviso pendiente. Sin variables, usa los defectos."""
-    import os
-    global _DENEGACION
-    entorno = os.environ if entorno is None else entorno
-    timeout = _numero_del_entorno(entorno, VARIABLE_TIMEOUT_DENEGACION, TIMEOUT_DENEGACION_POR_DEFECTO,
-                                  float, 0.0, TIMEOUT_DENEGACION_MAXIMO)
-    cupo = _numero_del_entorno(entorno, VARIABLE_CONCURRENCIA_DENEGACION, CONCURRENCIA_DENEGACION_POR_DEFECTO,
-                               int, 1, CONCURRENCIA_DENEGACION_MAXIMA)
-    if timeout != timeout:  # NaN
-        from config_entorno import EntornoInvalido
-        raise EntornoInvalido(f"{VARIABLE_TIMEOUT_DENEGACION} no puede ser NaN.")
-    _DENEGACION = {"timeout": timeout, "cupo": cupo, "semaforo": asyncio.Semaphore(cupo),
-                   "omitidas": 0, "omitidas_total": 0, "aviso_pendiente": False}
-    return _DENEGACION
-
-
-def _estado_denegacion() -> dict:
-    return _DENEGACION if _DENEGACION is not None else configurar_registro_de_denegaciones()
-
-
-def _avisar_omitidas(estado: dict) -> None:
-    n, estado["omitidas"], estado["aviso_pendiente"] = estado["omitidas"], 0, False
-    logger.warning(
-        "B7: %d evidencia(s) de /motor/dispatch denegado omitida(s) por saturacion en los ultimos %.0f s "
-        "(tope de %d escrituras en vuelo); las denegaciones se devolvieron igual",
-        n, INTERVALO_AVISO_OMITIDAS_S, estado["cupo"],
-    )
-
-
-def _contar_omitida(estado: dict) -> None:
-    estado["omitidas"] += 1
-    estado["omitidas_total"] += 1
-    if not estado["aviso_pendiente"]:
-        estado["aviso_pendiente"] = True
-        asyncio.get_running_loop().call_later(INTERVALO_AVISO_OMITIDAS_S, _avisar_omitidas, estado)
 # _CATALOG/_POLICY arrancan None -- se pueblan en el startup hook de
 # server.py (init_motor_catalog, abajo). [motors.*]/[capabilities.*] de
 # config.toml ya no se leen (R4 -- catalogo en DB). Ningun otro modulo
@@ -325,90 +245,32 @@ async def governed_dispatch(req: GovernedDispatchRequest) -> MotorDispatchRespon
         capability=request.capability, trace_id=req.trace_id)
 
 
-async def registrar_denegacion_de_dispatch(correlacion: str) -> str:
-    """Registra la evidencia B7 de que el despacho legacy fue DENEGADO y devuelve
-    EVIDENCIA_REGISTRADA / _FALLIDA / _OMITIDA / _SIN_REGISTRADOR. Nunca levanta y
-    nunca bloquea al llamador mas que el timeout configurado.
-
-    - Fuera del hilo del bucle (asyncio.to_thread): la escritura es sincrona.
-    - Con limite de tiempo (JAX_B7_DENEGACION_TIMEOUT_S, 3 s): si vence cuenta
-      como fallida (log ERROR con `correlacion`). El hilo no se puede cortar; el
-      cupo se libera cuando el hilo termina de verdad, no al vencer el plazo.
-    - Con tope de escrituras en vuelo (JAX_B7_DENEGACION_CONCURRENCIA, 4): sin
-      cupo inmediato NO se escribe la evidencia individual, se cuenta como omitida
-      y un WARNING agregado, como maximo por minuto, dice cuantas.
-    - Un fallo deja log de ERROR con `correlacion` y la causa; no se loguea nada
-      del pedido.
-
-    Lo llama el middleware (`auth_servicio.proteger`), que es donde la
-    denegacion de POST /motor/dispatch ocurre de verdad -- ninguna identidad
-    tiene permiso sobre esa ruta --, y dispatch() como defensa en profundidad."""
-    registrador = _B7_EVIDENCE_RECORDER
-    if registrador is None:
-        return EVIDENCIA_SIN_REGISTRADOR
-    estado = _estado_denegacion()
-    semaforo = estado["semaforo"]
-    if semaforo.locked():
-        _contar_omitida(estado)
-        return EVIDENCIA_OMITIDA
-    await semaforo.acquire()  # con cupo, no cede el control: la decision es atomica
-    try:
-        escritura = asyncio.ensure_future(asyncio.to_thread(registrador.record_governed_dispatch_denied))
-    except BaseException:
-        semaforo.release()
-        raise
-
-    vencida = []
-
-    def _terminada(tarea: asyncio.Future) -> None:
-        semaforo.release()  # el cupo vuelve cuando el hilo termino, venza o no el plazo
-        if not tarea.cancelled() and tarea.exception() is not None and vencida:
-            logger.error("B7: la evidencia de /motor/dispatch denegado fallo despues de vencer el plazo correlacion=%s",
-                         correlacion, exc_info=tarea.exception())
-
-    escritura.add_done_callback(_terminada)
-    try:
-        observacion = await asyncio.wait_for(asyncio.shield(escritura), timeout=estado["timeout"])
-    except asyncio.TimeoutError:
-        vencida.append(True)
-        logger.error(
-            "B7: la evidencia de /motor/dispatch denegado no termino en %.1f s (la denegacion se devuelve igual) correlacion=%s",
-            estado["timeout"], correlacion,
-        )
-        return EVIDENCIA_FALLIDA
-    except Exception:  # fail-soft: legacy dispatch remains rejected if evidence persistence is unavailable.
-        logger.exception(
-            "B7: no se pudo registrar la evidencia de /motor/dispatch denegado (la denegacion se devuelve igual) correlacion=%s",
-            correlacion,
-        )
-        return EVIDENCIA_FALLIDA
-    # El registrador devuelve la observacion ya persistida (EnforcementObservation):
-    # su observation_id es el vinculo exacto con la fila B7. Va en el log junto a
-    # la correlacion para unirlos sin depender de la hora. (El subject de esa fila
-    # es "denial:<uuid propio>", no la correlacion: cambiarlo exigiria policy/**.)
-    logger.info(
-        "B7: evidencia de /motor/dispatch denegado registrada observation_id=%s correlacion=%s",
-        getattr(observacion, "observation_id", None), correlacion,
-    )
-    return EVIDENCIA_REGISTRADA
-
-
 @router.post("/dispatch", response_model=MotorDispatchResponse, status_code=202)
 async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
     # Block 6: every catalog capability is governed in V1.  This legacy
     # transport endpoint must never consume a gate, create a job, or start a
     # worker; its request body is not an execution authority artifact.
     #
-    # DEFENSA EN PROFUNDIDAD: en produccion este cuerpo no se alcanza por HTTP.
-    # `proteger(app)` (auth_servicio) niega POST /motor/dispatch con 403 a toda
-    # identidad, y es el middleware quien registra la evidencia. Esto solo corre
-    # si alguien quita el permiso del middleware o llama a la funcion directo.
-    # Cuerpo del 410: {"code", "correlacion", "evidencia_registrada"}, con
+    # DEFENSA EN PROFUNDIDAD, hoy INALCANZABLE por HTTP: desde #362 ninguna
+    # identidad tiene permiso sobre POST /motor/dispatch, asi que `proteger(app)`
+    # (auth_servicio) responde 403 antes de llegar aca -- y ese 403 NO deja
+    # evidencia B7, como cualquier 403 de autenticacion. Este cuerpo corre solo si
+    # alguna identidad vuelve a tener la ruta (o si se llama a la funcion directo).
+    # Cuerpo unico: {"code", "correlacion", "evidencia_registrada"}, con
     # `correlacion` = hex si la evidencia NO quedo registrada y null si quedo.
-    # (El 403 del middleware es distinto en eso: su `correlacion` es SIEMPRE hex.)
+    registrada = False
     correlacion = uuid.uuid4().hex
-    estado = await registrar_denegacion_de_dispatch(correlacion)
-    registrada = estado == EVIDENCIA_REGISTRADA
+    if _B7_EVIDENCE_RECORDER is not None:
+        try:
+            await asyncio.to_thread(_B7_EVIDENCE_RECORDER.record_governed_dispatch_denied)
+            registrada = True
+        except Exception:  # fail-soft: legacy dispatch remains rejected if evidence persistence is unavailable.
+            # No se traga en silencio. El MISMO identificador va en el log y en el
+            # cuerpo del 410; no se loguea nada del cuerpo del pedido.
+            logger.exception(
+                "B7: no se pudo registrar la evidencia de /motor/dispatch denegado (410 se devuelve igual) correlacion=%s",
+                correlacion,
+            )
     raise HTTPException(status_code=410, detail={
         "code": "GOVERNED_EXECUTION_REQUIRED",
         "correlacion": None if registrada else correlacion,

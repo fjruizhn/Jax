@@ -237,89 +237,18 @@ def test_declarar_otra_identidad_se_rechaza(identidad, ruta, cuerpo):
 
 
 @pytest.mark.parametrize("metodo,ruta", [
+    ("post", "/motor/dispatch"),
     ("get", "/motor/job/j1"),
     ("post", "/motor/job/j1/cancel"),
 ])
-def test_jacobs_ya_no_tiene_permiso_sobre_los_motor_jobs(metodo, ruta):
-    """Jacobs no consulta ni cancela motor jobs: nada del arbol usa esas rutas
-    con la credencial `jacobs`. Un permiso que nadie usa es superficie sin
-    dueno: 403 de ruta (cuerpo de siempre, sin correlacion: no es el dispatch)."""
+def test_jacobs_ya_no_tiene_permiso_sobre_los_motores(metodo, ruta):
+    """Jacobs no despacha motores (despacho legacy cerrado, 410) ni consulta o
+    cancela motor jobs: nada del arbol usa esas rutas con la credencial
+    `jacobs`. Un permiso que nadie usa es superficie sin dueno: 403 de ruta."""
     with TestClient(_app()) as c:
         r = getattr(c, metodo)(ruta, headers=_h(IDENTIDAD_JACOBS))
     assert r.status_code == 403, r.text
     assert r.json() == {"detail": {"code": auth_servicio.CODIGO_RUTA_NO_PERMITIDA}}
-
-
-# --- POST /motor/dispatch: la denegacion REAL ocurre en el middleware ---------
-# `proteger(app)` responde 403 antes de que dispatch() corra, para las dos
-# identidades; ahi es donde la evidencia B7 y la correlacion tienen que vivir.
-# Estas pruebas van por HTTP (TestClient sobre la app envuelta), no llaman a
-# routes.dispatch() directo.
-
-_HEX32 = r"[0-9a-f]{32}"
-
-
-@pytest.fixture
-def evidencia_b7(monkeypatch):
-    from unittest.mock import Mock
-    from motor_registry import routes
-    registrador = Mock()
-    monkeypatch.setattr(routes, "_B7_EVIDENCE_RECORDER", registrador)
-    return registrador
-
-
-def _correlaciones_del_log(caplog):
-    import re
-    return [m.group(1) for r in caplog.records
-            for m in [re.search(rf"correlacion=({_HEX32})", r.getMessage())] if m]
-
-
-@pytest.mark.parametrize("identidad", [IDENTIDAD_JACOBS, IDENTIDAD_PLATAFORMA])
-def test_dispatch_denegado_por_el_middleware_registra_evidencia_y_trae_correlacion(identidad, evidencia_b7, caplog):
-    import logging
-    import re
-    with caplog.at_level(logging.INFO), TestClient(_app()) as c:
-        r = c.post("/motor/dispatch", json={"caller": "hyde" if identidad == IDENTIDAD_JACOBS else "jax_platform_chat",
-                                            "capability": "code", "prompt": "PROMPT-SECRETO"},
-                   headers=_h(identidad))
-    assert r.status_code == 403
-    cuerpo = r.json()
-    assert set(cuerpo) == {"detail"} and set(cuerpo["detail"]) == {"code", "correlacion", "evidencia_registrada"}
-    assert cuerpo["detail"]["code"] == auth_servicio.CODIGO_RUTA_NO_PERMITIDA
-    assert re.fullmatch(_HEX32, cuerpo["detail"]["correlacion"])
-    assert cuerpo["detail"]["evidencia_registrada"] is True
-    evidencia_b7.record_governed_dispatch_denied.assert_called_once_with()
-    # el log lleva el MISMO id y nada del pedido
-    assert set(_correlaciones_del_log(caplog)) == {cuerpo["detail"]["correlacion"]}
-    assert "PROMPT-SECRETO" not in caplog.text
-
-
-def test_dispatch_denegado_aunque_falle_la_evidencia_sigue_siendo_403_con_el_mismo_id(evidencia_b7, caplog):
-    import logging
-    evidencia_b7.record_governed_dispatch_denied.side_effect = RuntimeError("sin disco")
-    with caplog.at_level(logging.INFO), TestClient(_app()) as c:
-        r = c.post("/motor/dispatch", json={"caller": "hyde"}, headers=_h(IDENTIDAD_JACOBS))
-    assert r.status_code == 403
-    id_cliente = r.json()["detail"]["correlacion"]
-    assert r.json()["detail"]["evidencia_registrada"] is False
-    errores = [x for x in caplog.records if x.levelname == "ERROR"]
-    assert len(errores) == 1 and errores[0].exc_info and "sin disco" in str(errores[0].exc_info[1])
-    assert set(_correlaciones_del_log(caplog)) == {id_cliente}
-
-
-def test_dispatch_sin_credencial_es_401_y_no_registra_evidencia(evidencia_b7):
-    with TestClient(_app()) as c:
-        r = c.post("/motor/dispatch", json={"caller": "hyde"})
-    assert r.status_code == 401
-    assert r.json() == {"detail": {"code": auth_servicio.CODIGO_SIN_CREDENCIAL}}
-    evidencia_b7.record_governed_dispatch_denied.assert_not_called()
-
-
-def test_otras_denegaciones_del_middleware_no_tocan_la_evidencia_de_dispatch(evidencia_b7):
-    with TestClient(_app()) as c:
-        assert c.get("/motor/job/j1", headers=_h(IDENTIDAD_JACOBS)).status_code == 403
-        assert c.post("/execute", headers=_h(IDENTIDAD_JACOBS)).status_code == 403
-    evidencia_b7.record_governed_dispatch_denied.assert_not_called()
 
 
 def test_jacobs_conserva_solo_el_pipeline_de_sub_pipelines():
@@ -327,13 +256,12 @@ def test_jacobs_conserva_solo_el_pipeline_de_sub_pipelines():
     assert [(m, p.pattern) for m, p in permiso.rutas] == [("POST", "/jacobs/pipeline")]
 
 
-def test_la_plataforma_no_despacha_motores(evidencia_b7):
+def test_la_plataforma_no_despacha_motores():
     with TestClient(_app()) as c:
         r = c.post("/motor/dispatch", json={"caller": "jax_platform_chat"},
                    headers=_h(IDENTIDAD_PLATAFORMA))
     assert r.status_code == 403
-    detalle = r.json()["detail"]
-    assert detalle["code"] == auth_servicio.CODIGO_RUTA_NO_PERMITIDA and set(detalle) == {"code", "correlacion", "evidencia_registrada"}
+    assert r.json() == {"detail": {"code": auth_servicio.CODIGO_RUTA_NO_PERMITIDA}}
 
 
 def test_el_cuerpo_llega_intacto_a_la_ruta():
@@ -507,189 +435,3 @@ def test_la_jaula_de_hyde_no_recibe_la_credencial(monkeypatch, tmp_path):
     assert all(v.startswith("JAX_LAS_MANOS_CREDENCIAL_") for v in VARIABLES.values())
     assert set(env).isdisjoint(VARIABLES.values())
     assert not any(v in env.values() for v in CRED.values()), "credencial en el env de la jaula"
-
-
-# --- El registro de la evidencia esta ACOTADO: hilo, plazo y tope --------------
-# La denegacion de POST /motor/dispatch corre en el camino de cualquier pedido
-# denegado; escribir la evidencia (sincrona, a MariaDB) no puede bloquear el bucle,
-# colgar al cliente ni acumular hilos sin limite.
-
-@pytest.fixture
-def registro_acotado(monkeypatch):
-    """Devuelve una funcion que (re)configura timeout/concurrencia y el aviso."""
-    from motor_registry import routes
-
-    def configurar(timeout="3", concurrencia="4", aviso_s=60.0):
-        monkeypatch.setattr(routes, "INTERVALO_AVISO_OMITIDAS_S", aviso_s)
-        return routes.configurar_registro_de_denegaciones({
-            routes.VARIABLE_TIMEOUT_DENEGACION: timeout,
-            routes.VARIABLE_CONCURRENCIA_DENEGACION: concurrencia,
-        })
-    yield configurar
-    routes.configurar_registro_de_denegaciones({})
-
-
-def _cliente_asgi(app):
-    import httpx
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://las-manos.test")
-
-
-def test_la_evidencia_se_escribe_fuera_del_hilo_del_bucle(evidencia_b7, registro_acotado):
-    import asyncio
-    import threading
-    from motor_registry import routes
-    registro_acotado()
-    visto = {}
-
-    def escribir():
-        visto["hilo"] = threading.get_ident()
-
-    evidencia_b7.record_governed_dispatch_denied.side_effect = escribir
-
-    async def correr():
-        visto["bucle"] = threading.get_ident()
-        return await routes.registrar_denegacion_de_dispatch("a" * 32)
-
-    assert asyncio.run(correr()) == routes.EVIDENCIA_REGISTRADA
-    assert visto["hilo"] != visto["bucle"]
-
-
-def test_un_registrador_lento_no_retiene_el_403_mas_alla_del_plazo(evidencia_b7, registro_acotado, caplog):
-    import asyncio
-    import logging
-    import threading
-    import time
-    registro_acotado(timeout="0.1")
-    terminado = threading.Event()
-
-    def lento():
-        time.sleep(0.8)
-        terminado.set()
-
-    evidencia_b7.record_governed_dispatch_denied.side_effect = lento
-
-    async def correr():
-        async with _cliente_asgi(_app()) as c:
-            t0 = time.monotonic()
-            r = await c.post("/motor/dispatch", json={"caller": "hyde"}, headers=_h(IDENTIDAD_JACOBS))
-            return r, time.monotonic() - t0, terminado.is_set()
-
-    with caplog.at_level(logging.INFO):
-        r, demora, ya_termino = asyncio.run(correr())
-    assert r.status_code == 403
-    assert demora < 0.6 and not ya_termino, (demora, ya_termino)  # salio ANTES de que el registrador terminara
-    detalle = r.json()["detail"]
-    assert detalle["evidencia_registrada"] is False
-    errores = [x for x in caplog.records if x.levelname == "ERROR"]
-    assert len(errores) == 1 and detalle["correlacion"] in errores[0].getMessage()
-    assert terminado.wait(2)  # el hilo no se cancela; termina por su cuenta
-
-
-def test_cincuenta_denegaciones_simultaneas_respetan_el_tope_y_cuentan_las_omitidas(
-        evidencia_b7, registro_acotado, caplog):
-    import asyncio
-    import logging
-    import threading
-    import time
-    from motor_registry import routes
-    registro_acotado(timeout="5", concurrencia="4", aviso_s=0.2)
-    liberar = threading.Event()
-    lock = threading.Lock()
-    estadisticas = {"en_vuelo": 0, "maximo": 0, "llamadas": 0}
-
-    def escribir():
-        with lock:
-            estadisticas["en_vuelo"] += 1
-            estadisticas["llamadas"] += 1
-            estadisticas["maximo"] = max(estadisticas["maximo"], estadisticas["en_vuelo"])
-        liberar.wait(5)
-        with lock:
-            estadisticas["en_vuelo"] -= 1
-
-    evidencia_b7.record_governed_dispatch_denied.side_effect = escribir
-
-    async def correr():
-        async with _cliente_asgi(_app()) as c:
-            async def pedir():
-                return await c.post("/motor/dispatch", json={"caller": "hyde"}, headers=_h(IDENTIDAD_JACOBS))
-
-            async def soltar_luego():
-                await asyncio.sleep(0.3)
-                liberar.set()
-
-            resultados = await asyncio.gather(*[pedir() for _ in range(50)], soltar_luego())
-            await asyncio.sleep(0.5)  # deja correr el aviso agregado
-            return resultados[:-1]
-
-    with caplog.at_level(logging.INFO):
-        respuestas = asyncio.run(correr())
-    assert all(r.status_code == 403 for r in respuestas)
-    registradas = [r for r in respuestas if r.json()["detail"]["evidencia_registrada"]]
-    omitidas = [r for r in respuestas if not r.json()["detail"]["evidencia_registrada"]]
-    assert len(registradas) == 4 and len(omitidas) == 46
-    assert estadisticas["maximo"] <= 4 and estadisticas["llamadas"] == 4
-    assert routes._DENEGACION["omitidas_total"] == 46
-    avisos = [x for x in caplog.records if x.levelname == "WARNING" and "omitida" in x.getMessage()]
-    assert len(avisos) == 1 and "46" in avisos[0].getMessage()
-    # a cada omitida igual le llega su correlacion unica
-    assert len({r.json()["detail"]["correlacion"] for r in respuestas}) == 50
-
-
-def test_el_cupo_se_libera_al_terminar_la_escritura(evidencia_b7, registro_acotado):
-    import asyncio
-    from motor_registry import routes
-    registro_acotado(concurrencia="1")
-
-    async def correr():
-        a = await routes.registrar_denegacion_de_dispatch("a" * 32)
-        b = await routes.registrar_denegacion_de_dispatch("b" * 32)
-        return a, b
-
-    assert asyncio.run(correr()) == (routes.EVIDENCIA_REGISTRADA, routes.EVIDENCIA_REGISTRADA)
-
-
-@pytest.mark.parametrize("variable,valor", [
-    ("JAX_B7_DENEGACION_TIMEOUT_S", "0"), ("JAX_B7_DENEGACION_TIMEOUT_S", "-1"),
-    ("JAX_B7_DENEGACION_TIMEOUT_S", "abc"), ("JAX_B7_DENEGACION_TIMEOUT_S", "nan"),
-    ("JAX_B7_DENEGACION_TIMEOUT_S", "61"),
-    ("JAX_B7_DENEGACION_CONCURRENCIA", "0"), ("JAX_B7_DENEGACION_CONCURRENCIA", "-2"),
-    ("JAX_B7_DENEGACION_CONCURRENCIA", "2.5"), ("JAX_B7_DENEGACION_CONCURRENCIA", "65"),
-])
-def test_la_configuracion_invalida_del_registro_impide_arrancar(variable, valor, monkeypatch):
-    """Se valida al arrancar: configure_b7_evidence_recorder (composicion de
-    startup) levanta EntornoInvalido y el servicio no arranca."""
-    from motor_registry import routes
-    monkeypatch.setattr(routes, "_B7_EVIDENCE_RECORDER", None)
-    with pytest.raises(EntornoInvalido):
-        routes.configurar_registro_de_denegaciones({variable: valor})
-    monkeypatch.setenv(variable, valor)
-    with pytest.raises(EntornoInvalido):
-        routes.configure_b7_evidence_recorder(object())
-
-
-def test_la_configuracion_por_defecto_es_3_segundos_y_4_escrituras(registro_acotado):
-    from motor_registry import routes
-    estado = routes.configurar_registro_de_denegaciones({})
-    assert (estado["timeout"], estado["cupo"]) == (3.0, 4)
-
-
-def test_sin_registrador_B7_la_evidencia_no_figura_como_registrada(monkeypatch):
-    from motor_registry import routes
-    monkeypatch.setattr(routes, "_B7_EVIDENCE_RECORDER", None)
-    with TestClient(_app()) as c:
-        r = c.post("/motor/dispatch", json={"caller": "hyde"}, headers=_h(IDENTIDAD_JACOBS))
-    assert r.status_code == 403 and r.json()["detail"]["evidencia_registrada"] is False
-
-
-def test_el_log_une_la_correlacion_con_el_observation_id_de_la_fila_b7(evidencia_b7, caplog):
-    """El registrador devuelve la observacion persistida: su observation_id va en
-    el log junto a la correlacion, para unir el 403 que vio el cliente con la fila
-    B7 sin depender de la hora."""
-    import logging
-    from types import SimpleNamespace
-    evidencia_b7.record_governed_dispatch_denied.return_value = SimpleNamespace(observation_id="obs-1234")
-    with caplog.at_level(logging.INFO), TestClient(_app()) as c:
-        r = c.post("/motor/dispatch", json={"caller": "hyde"}, headers=_h(IDENTIDAD_JACOBS))
-    correlacion = r.json()["detail"]["correlacion"]
-    lineas = [x.getMessage() for x in caplog.records if "observation_id=obs-1234" in x.getMessage()]
-    assert len(lineas) == 1 and f"correlacion={correlacion}" in lineas[0]
