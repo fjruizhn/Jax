@@ -177,6 +177,24 @@ for subcommand in sorted(WHITELIST):
         positive.append(("python",
                          f'[{ssh_prefix}"docker", "{subcommand}", "rm", "-f", v, "&&", "docker", "rm", "-f", c]'))
 
+# Ronda 6: la lista se corta en `&&`, `;`, `||`, `|` y cada comando se evalua solo.
+RONDA6_SEPARADORES = ["&&", ";", "||", "|"]
+RONDA6_MARCAS = []     # fugas que el candidato debe marcar
+RONDA6_LIMPIOS = []    # falsos positivos que el candidato no debe marcar
+for sep, ssh_prefix in itertools.product(RONDA6_SEPARADORES, ("", '"ssh", h, ')):
+    RONDA6_MARCAS += [
+        f'[{ssh_prefix}"docker", "rm", "-f", c1, "{sep}", "docker", "rm", "-fv", c2]',
+        f'[{ssh_prefix}"docker", "run", img, "{sep}", "docker", "rm", "-f", c]',
+        f'[{ssh_prefix}"docker", "exec", c, "true", "{sep}", "docker", "rm", "-f", c]',
+    ]
+    for first in ('"docker", "rm", "-fv", c', '"docker", "rm", "-v", c'):
+        for later in ('"rm", "-rf", "/tmp/build"', '"sudo", "rm", "-f", lock'):
+            RONDA6_LIMPIOS.append(f'[{ssh_prefix}{first}, "{sep}", {later}]')
+    RONDA6_LIMPIOS.append(
+        f'[{ssh_prefix}"docker", "exec", c, "rm", "-f", p, "{sep}", "docker", "rm", "-fv", c]')
+positive += [("python", source) for source in RONDA6_MARCAS]
+RONDA6_MEJORAS = set(RONDA6_MARCAS)
+
 negative = [
     ("shell", f"{wrapper}docker exec docker rm -f target") for wrapper in wrappers
 ]
@@ -220,6 +238,8 @@ negative += [("python", repr(["docker", "compose"] + option.split() + subcommand
                               + ["docker", "rm", "-f", "target"]))
              for option in ("", "--profile prod", "--env-file .env")
              for subcommand in ("exec", "run svc")]
+
+negative += [("python", source) for source in RONDA6_LIMPIOS]
 
 auditor_cases = json.loads((ROOT / "docs/ci/jax357-auditor-cases.json").read_text())
 own_cases = [
@@ -292,7 +312,7 @@ RONDA5_MEJORAS = {
 
 
 def required_improvement(kind, source):
-    if kind == "python" and source in RONDA5_MEJORAS:
+    if kind == "python" and (source in RONDA5_MEJORAS or source in RONDA6_MEJORAS):
         return True
     if "--workdir" in source and "compose" in source:
         return True
