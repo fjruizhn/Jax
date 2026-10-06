@@ -145,23 +145,6 @@ def test_el_plan_local_manda_ollama_timeout():
     assert vistos[("POST", "/api/chat")] == _t(plan.OLLAMA_TIMEOUT)
 
 
-def test_jacobs_reusa_el_cliente_entre_llamadas():
-    from jacobs import executor
-    clientes = []
-
-    async def espia(client_self, request, **kwargs):
-        clientes.append(client_self)
-        return httpx.Response(200, json={}, request=request)
-
-    async def correr():
-        with patch.object(httpx.AsyncClient, "send", espia):
-            await executor._cancel_motor_job("a")
-            await executor._cancel_motor_job("b")
-
-    asyncio.run(correr())
-    assert len(clientes) == 2 and clientes[0] is clientes[1]
-
-
 def test_la_memoria_reusa_su_cliente_y_lo_cierra(monkeypatch):
     from jax.memory import db as dbmod
     monkeypatch.setenv("JAX_OLLAMA_URL", "http://ollama.test:11434")

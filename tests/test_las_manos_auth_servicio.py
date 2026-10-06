@@ -308,20 +308,19 @@ def test_server_instala_la_proteccion_al_importar():
     assert len(llamadas) == 1, "server.py tiene que llamar proteger(app) a nivel de módulo"
 
 
-def test_jacobs_presenta_su_credencial_en_el_unico_pedido_restante_a_las_manos():
+def test_jacobs_ya_no_hace_ningun_pedido_http_a_las_manos():
+    """Pipeline no despacha motores directamente (despacho legacy cerrado, 410):
+    el ultimo pedido a LAS MANOS era la cancelacion de un motor job, borrada con
+    el resto del codigo muerto. Si vuelve un pedido, vuelve con ejecucion
+    gobernada y esta prueba se reescribe a proposito (credencial incluida)."""
     arbol = ast.parse((RAIZ / "jacobs" / "executor.py").read_text(encoding="utf-8"))
-    pedidos = []
-    for n in ast.walk(arbol):
+    pedidos = [
+        ast.unparse(n) for n in ast.walk(arbol)
         if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                and n.func.attr in {"get", "post", "put", "delete"} and n.args
-                and "LAS_MANOS_BASE" in ast.unparse(n.args[0])):
-            pedidos.append(n)
-    # Pipeline no despacha motores directamente; queda la cancelación del job.
-    assert len(pedidos) == 1
-    for n in pedidos:
-        headers = [k for k in n.keywords if k.arg == "headers"]
-        assert headers and ast.unparse(headers[0].value) == "encabezado_propio(IDENTIDAD_JACOBS)", \
-            ast.unparse(n)
+            and n.func.attr in {"get", "post", "put", "delete"} and n.args
+            and "LAS_MANOS_BASE" in ast.unparse(n.args[0]))
+    ]
+    assert pedidos == []
 
 
 def test_encabezado_propio_sale_del_entorno_y_falla_cerrado(monkeypatch):

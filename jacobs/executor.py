@@ -55,8 +55,6 @@ OLLAMA_URL     = url_requerida("JAX_OLLAMA_URL") + "/api/chat"
 # estos .md. Validada al importar: sin ella LAS MANOS no arranca.
 REPO_DOCUMENTS_DIR = ruta_absoluta_requerida("JAX_REPO_BASE") / "documents"
 
-MOTOR_POLL_INTERVAL = 5  # segundos entre polls de job
-
 # Tope de seguridad para el output COMPLETO de cada dependencia declarada (~15K tokens).
 # Si el ensamble de muchas deps roza la ventana, ajustar y re-verificar con el log de C1.
 MAX_DEP_CONTEXT_CHARS = 60_000
@@ -613,47 +611,6 @@ async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
 async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: str | None = None) -> dict:
     """Bloquea el despacho legacy hasta que exista ejecución gobernada por paso."""
     raise GovernedExecutionRequiredError("GOVERNED_EXECUTION_REQUIRED")
-
-
-async def _read_motor_result(job: dict) -> str:
-    """Salida COMPLETA de un motor job. `result_summary` son 200 caracteres
-    (worker.py); era lo único que llegaba a los pasos siguientes y al repo.
-    Desde 2026-09-12 el worker guarda el texto entero en `result_path`.
-
-    Job sin result_path (anterior al arreglo): el resumen es todo lo que
-    existe. Job CON result_path ilegible: falla el paso -- pasar 200
-    caracteres en silencio como si fueran el producto es exactamente el
-    defecto que esto cierra."""
-    path = job.get("result_path")
-    if not path:
-        return job.get("result_summary", "") or ""
-    try:
-        return await asyncio.to_thread(Path(path).read_text, encoding="utf-8")
-    except OSError as exc:
-        raise RuntimeError(
-            f"Motor job {job.get('job_id')}: no se pudo leer su salida completa en {path}: {exc}"
-        ) from exc
-
-
-async def _cancel_motor_job(job_id: str) -> None:
-    """Pide a LAS MANOS que corte el job. Lo mejor que se puede hacer, no
-    una condición: el paso ya venció y eso es lo que se reporta. Si el aviso
-    falla, queda en el log con el job_id -- nunca reemplaza la causa real.
-    409 = el job ya había terminado solo, no hay nada que cortar."""
-    try:
-        resp = await obtener_cliente_http().post(f"{LAS_MANOS_BASE}/motor/job/{job_id}/cancel", timeout=5,
-                                                   headers=encabezado_propio(IDENTIDAD_JACOBS))
-        if resp.status_code not in (200, 409):
-            logger.error(
-                "No se pudo cancelar el motor job %s tras vencer su paso: HTTP %s",
-                job_id, resp.status_code,
-            )
-    except Exception as exc:  # noqa: BLE001  # fail-soft: el paso ya venció y se reporta fallido por timeout -- cancelar es un aviso best-effort a LAS MANOS, no una condición; el job_id queda en el log de error para cortarlo a mano
-        logger.error(
-            "No se pudo cancelar el motor job %s tras vencer su paso: %s -- "
-            "puede seguir corriendo y cobrando en LAS MANOS",
-            job_id, exc,
-        )
 
 
 # ----------------------------------------------------------------

@@ -39,7 +39,6 @@ import facet_resolver  # su sello (mtime de un archivo) invalida también el cat
 from motor_registry import job_tasks
 from motor_registry import worker as motor_worker
 from interruptor import interruptor_activo, ruta_del_interruptor
-import human_gate
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -185,33 +184,6 @@ def _ingest_governed_worker_completion(task: asyncio.Task, *, execution_id: str,
             view.result_path, execution_id=execution_id, job_id=job_id)
     except Exception:  # fail-soft: post-completion evidence cannot resurrect or alter a completed job.
         logger.exception("No se pudo ingerir resultado B7 del job gobernado %s", job_id)
-
-
-def _rechazado(req: MotorDispatchRequest, motor: str | None, razon: str) -> MotorDispatchResponse:
-    """Un pedido rechazado deja su job REJECTED con la razón (testigo)."""
-    job_id = _STORE.create(
-        caller=req.caller,
-        capability=req.capability,
-        motor=motor or "none",
-        trace_id=req.trace_id,
-        prompt=req.prompt,
-        recursion_depth=req.recursion_depth,
-        pipeline_id=req.pipeline_id,
-    )
-    _STORE.update(
-        job_id,
-        status=JobStatus.REJECTED.value,
-        finished_at=time.time(),
-        error=razon,
-    )
-    return MotorDispatchResponse(
-        job_id=job_id,
-        status=JobStatus.REJECTED,
-        motor="none",
-        capability=req.capability,
-        trace_id=req.trace_id,
-        rejected_reason=razon,
-    )
 
 
 @router.post("/governed-dispatch", response_model=MotorDispatchResponse, status_code=202)

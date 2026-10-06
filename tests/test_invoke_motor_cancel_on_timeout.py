@@ -88,34 +88,33 @@ class InvokeMotorCancelTest(unittest.IsolatedAsyncioTestCase):
         return (
             patch("httpx.AsyncClient.post", post),
             patch("httpx.AsyncClient.get", get),
-            patch.object(executor, "MOTOR_POLL_INTERVAL", 0.01),
         )
 
     async def test_wait_for_externo_cancela_el_job(self):
         fake = _FakeLasManos()
-        p1, p2, p3 = self._patched(fake)
-        with p1, p2, p3, self.assertRaises(GovernedExecutionRequiredError):
+        p1, p2 = self._patched(fake)
+        with p1, p2, self.assertRaises(GovernedExecutionRequiredError):
             await _invoke_motor(_step(), _pipeline(), timeout=60)
         assert fake.posts == [], fake.posts
 
     async def test_deadline_propio_del_polling_cancela_el_job(self):
         fake = _FakeLasManos()
-        p1, p2, p3 = self._patched(fake)
-        with p1, p2, p3, self.assertRaises(GovernedExecutionRequiredError):
+        p1, p2 = self._patched(fake)
+        with p1, p2, self.assertRaises(GovernedExecutionRequiredError):
             await _invoke_motor(_step(), _pipeline(), timeout=0.05)
         assert fake.posts == [], fake.posts
 
     async def test_job_completado_no_se_cancela(self):
         fake = _FakeLasManos(job_status="completed")
-        p1, p2, p3 = self._patched(fake)
-        with p1, p2, p3, self.assertRaises(GovernedExecutionRequiredError):
+        p1, p2 = self._patched(fake)
+        with p1, p2, self.assertRaises(GovernedExecutionRequiredError):
             await _invoke_motor(_step(), _pipeline(), timeout=5)
         assert fake.posts == [], fake.posts
 
     async def test_si_la_cancelacion_falla_se_conserva_el_timeout_original(self):
         fake = _FakeLasManos(cancel_raises=True)
-        p1, p2, p3 = self._patched(fake)
-        with p1, p2, p3, self.assertRaises(GovernedExecutionRequiredError):
+        p1, p2 = self._patched(fake)
+        with p1, p2, self.assertRaises(GovernedExecutionRequiredError):
             await _invoke_motor(_step(), _pipeline(), timeout=0.05)
         assert fake.posts == [], fake.posts
 
