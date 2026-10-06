@@ -91,7 +91,6 @@ def _libro(destino: Path, valor: int = 100) -> Path:
     return destino
 
 
-
 def test_libro_es_determinista(tmp_path: Path, monkeypatch):
     """`_libro` promete mismo valor => mismos bytes aunque openpyxl y zipfile vean otra hora."""
     import datetime as dt
@@ -107,12 +106,17 @@ def test_libro_es_determinista(tmp_path: Path, monkeypatch):
             return reloj["ahora"].replace(tzinfo=tz)
 
     monkeypatch.setattr(escritor, "datetime", types.SimpleNamespace(datetime=_Fecha, timezone=dt.timezone))
+    # `created` toma su valor por defecto en openpyxl/packaging/core.py (`created or now`).
+    import openpyxl.packaging.core as nucleo
+
+    monkeypatch.setattr(nucleo, "datetime", types.SimpleNamespace(datetime=_Fecha, timezone=dt.timezone))
     monkeypatch.setattr(time, "time", lambda: reloj["ahora"].timestamp())
     a = _libro(tmp_path / "a.xlsx", valor=100).read_bytes()
     reloj["ahora"] = dt.datetime(2031, 1, 2, 3, 4, 6)
     b = _libro(tmp_path / "b.xlsx", valor=100).read_bytes()
     assert a == b
     assert a != _libro(tmp_path / "c.xlsx", valor=999).read_bytes()
+
 
 # ---------------------------------------------------------------------------
 # El contrato original del brief (5 tests), adaptado al jail nuevo.
