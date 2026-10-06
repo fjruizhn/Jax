@@ -871,14 +871,18 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
         # (_validate_plan_capabilities, contra `capability.max_execution_minutes`
         # para TODOS los steps).
         #
-        # Residuo real que queda, distinto del viejo: NIVEL C pasa
-        # human_gate_token=None fijo, y una denegación de admisión devuelve
-        # str, no CapabilityUnbound. O sea: si el reroute aterriza en un
-        # facet HTTP con una capability que exige gate humano, el step
-        # falla DURO acá abajo (`raise ValueError`) en vez de seguir
-        # buscando candidatos. Es el comportamiento correcto (fail-closed),
-        # pero es una falla sin reintento — ver DEUDA.md para las
-        # capabilities con requires_human_gate=1 alcanzables por esta vía.
+        # Estado real de este bucle (revisado en el cierre de #362): un
+        # CapabilityUnbound solo sale del NIVEL B de validate_capability (los dos
+        # `return CapabilityUnbound` viven dentro de `if step.facet in
+        # _MOTOR_FACETS`), y un paso de motor ya no llega hasta acá: plan,
+        # pre-vuelo, continuar y devolución lo rechazan antes
+        # (validar_facetas_ejecutables). Hoy el bucle es defensa en profundidad,
+        # no un camino que se recorra; y como el destino del reroute tiene que
+        # ser un facet HTTP, lo que sigue valiendo para un paso HTTP directo es
+        # que NIVEL C pasa human_gate_token=None fijo: si su capability exige gate
+        # humano, la denegación vuelve como str y el paso falla DURO
+        # (`raise ValueError` abajo), sin reintento. Es fail-closed, y lo fija
+        # jacobs/_http_facet_admission_test.py (ver también DEUDA.md).
         untried = [
             c for c in cap_error.candidates
             if c not in tried_facets and faceta_ejecutable_en_pipeline(c)
