@@ -906,6 +906,16 @@ matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
 sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
 piso se vuelve a fijar desde los **3537 de master**.
 
+3732 -> 3713 (2026-10-06, JAX#357 ronda 8): -19. La ronda 8 simplifica el escaner (cada lista
+Python se lee dos veces, argv sin cortar y como shell, unidas con OR) y las pruebas de
+`tests/test_docker_rm_sin_fuga_de_volumenes.py` pasan de 198 a 179: se quitan los falsos
+positivos que la lectura argv marca a proposito y se reagrupan las de separadores. Es
+un descenso solo frente a 282fd797 (master fija 3537, el piso sube respecto de master): baja por consolidar pruebas del propio escaner, no por
+perder cobertura (cada defecto sigue cubierto; 16 mutantes del escaner mueren). Medido por
+recoleccion (`pytest --collect-only -q`, PYTHONPATH=.:las_manos, Python 3.14.4, SIN
+`JAX_DB_HOST`) con la lista exacta de 195 archivos: 3759 recolectadas en la rama, 3778 en
+282fd797. Las 3759 son 3713 passed + 45 skipped + 1 xfailed. No se corrio el paso completo.
+
 3660 -> 3732 (2026-10-06, JAX#357 ronda 7): +72 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
 (de 126 a 198 pruebas): argv con separador literal, separadores `&`/`|&`/con espacios/pegados/en
 variable, alias `docker container remove`, `&` y redirecciones en shell. Medido por recoleccion

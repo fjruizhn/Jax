@@ -122,8 +122,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 15 tests CORRIDOS de F2-E structured projection."
     },
     "tests-puros/out": {
-      "patron": "^3732 passed, 45 skipped",
-      "mensaje": "PISO ROTO: se esperaban 3732 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Re-medido el 2026-10-06 (ronda 7 de JAX#357) por recoleccion con la lista exacta de 195 archivos del paso 'Piso exacto', sin JAX_DB_HOST: 3778 recolectadas = 3732 passed + 45 skipped + 1 xfailed (3706 de la ronda 6 + 72 de la ronda 7); 9a5d3848 recolecta 3706 con la misma lista."
+      "patron": "^3713 passed, 45 skipped",
+      "mensaje": "PISO ROTO: se esperaban 3713 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Re-medido el 2026-10-06 (ronda 8 de JAX#357) por recoleccion con la lista exacta de 195 archivos del paso 'Piso exacto', sin JAX_DB_HOST: 3759 recolectadas = 3713 passed + 45 skipped + 1 xfailed (3778 de la ronda 7 menos 19: la ronda 8 simplifica las pruebas del escaner de 198 a 179); 282fd797 recolecta 3778 con la misma lista."
     },
     "tests-puros/arranque_instalado": {
       "patron": "^46 passed, 9 skipped",
