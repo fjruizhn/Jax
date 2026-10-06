@@ -20,4 +20,3 @@
   `project_id` validado a esa autoridad. No reactivar `/motor/dispatch`.
 - **Siguiente comprobación:** `git -C /home/fruiz/wt/jax-e2b1 status --short --branch`.
 - **Restricciones:** no se tocó `PENDIENTES.md`, jax-platform ni producción.
-
