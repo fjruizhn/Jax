@@ -35,5 +35,5 @@ async def registrar_auditor_c5(*, mision_id: str, faceta: str, proveedor_id: str
             writer.close()
             try:
                 await writer.wait_closed()
-            except OSError:
+            except OSError:  # fail-soft: el cierre local no cambia el resultado de la anotación C3
                 pass

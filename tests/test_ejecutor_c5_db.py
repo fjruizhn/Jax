@@ -14,10 +14,23 @@ INVENTARIO = [("c5-hall9000", "192.0.2.105", "hypervisor", 1, 0), ("c5-atemai", 
               ("c5-baja", "192.0.2.121", "clientes", 0, 0)]
 
 
+async def _asegurar_compuerta_solo_ordenes_cerrada():
+    # La rama JAX puede probar contra jax-platform/master mientras la semilla
+    # correspondiente sigue en su PR aparte. El DB de CI es descartable.
+    async with store.conexion() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO axioma_config (config_key, config_value) VALUES (%s, %s) "
+                "ON DUPLICATE KEY UPDATE config_value = VALUES(config_value)",
+                ("ejecutor.c5_auditor_nube_solo_ordenes", "false"))
+        await conn.commit()
+
+
 async def _con_inventario(accion):
     # store.conexion() y no una conexion suelta: get_conn() ya no existe (frente F,
     # pool de Jacobs). La limpieza va en su propia conexion para que un error de
     # `accion` (que descarta la primera) no deje filas de prueba.
+    await _asegurar_compuerta_solo_ordenes_cerrada()
     try:
         async with store.conexion() as conn:
             async with conn.cursor() as cur:
@@ -34,7 +47,7 @@ async def _con_inventario(accion):
             await conn.commit()
 
 
-def test_la_config_sembrada_se_lee_y_la_compuerta_nace_cerrada():
+def test_la_config_c5_se_lee_y_la_compuerta_nace_cerrada_en_db_de_prueba():
     async def accion(conn):
         return await E.leer_config(conn), await E.es_local(conn, "ollama"), await E.es_local(conn, "openai")
     cfg, ollama_local, openai_local = asyncio.run(_con_inventario(accion))
@@ -97,6 +110,7 @@ async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
     (facet_resolver._query_facet) hace JOIN contra `model` por esa columna. `is_local`
     parametrizable: el peor caso (spec §4) es el auditor local bindeado a un proveedor
     que NO es local de verdad."""
+    await _asegurar_compuerta_solo_ordenes_cerrada()
     from jacobs import store
     async with store.conexion() as conn:
         async with conn.cursor() as cur:

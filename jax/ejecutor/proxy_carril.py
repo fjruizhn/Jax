@@ -518,11 +518,11 @@ class _Proxy:
                     self._misiones_c5_anotadas[evento["mision_id"]] = seleccion
             writer.write(b"OK\n")
             await writer.drain()
-        except (asyncio.IncompleteReadError, asyncio.TimeoutError, ValueError, OSError, TypeError):
+        except (asyncio.IncompleteReadError, asyncio.TimeoutError, ValueError, OSError, TypeError):  # fail-soft: protocolo C5 inválido o desconectado recibe ERROR y se cierra; nunca se acepta la anotación
             writer.write(b"ERROR\n")
             try:
                 await writer.drain()
-            except OSError:
+            except OSError:  # fail-soft: cliente desconectado al recibir ERROR; _cerrar termina el canal
                 pass
         finally:
             await _cerrar(writer)

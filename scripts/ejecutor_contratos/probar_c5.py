@@ -103,7 +103,8 @@ async def principal(args) -> int:
         # hacía que ESTA prueba diera c5_vivo=false con la compuerta abierta, mientras
         # el arranque real (arranque.py) sí la pasaba: la prueba contradecía a
         # producción. tests/test_probar_c5_pasa_todas_las_compuertas.py lo vigila.
-        admite_mismo_proveedor=cfg.admite_mismo_proveedor)]
+        admite_mismo_proveedor=cfg.admite_mismo_proveedor, modo="COMPLETO",
+        auditor_nube_solo_ordenes=cfg.auditor_nube_solo_ordenes)]
 
     async def auditar(lote):
         return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens, tope_s=cfg.tope_s)

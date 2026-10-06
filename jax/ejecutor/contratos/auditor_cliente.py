@@ -46,7 +46,7 @@ def _codigo_proveedor_http(respuesta) -> str | None:
             codigo = error.get(campo)
             if isinstance(codigo, str) and codigo in _CODIGOS_PROVEEDOR_PUBLICABLES:
                 return codigo
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError):  # fail-soft: código proveedor es solo detalle; el status HTTP conserva el rechazo
         pass
     return None
 
