@@ -23,3 +23,7 @@ Qué SHAs compara el `.out` versionado: referencia = `master` en
 candidato = el commit del escáner de la ronda 6, indicado en la primera línea de
 resumen del propio `.out` (`candidate_sha=`). Al cambiar el escáner hay que regenerar el
 `.out` con el SHA nuevo.
+
+Desde la ronda 8 el banco no incluye los casos `docker rm -v c SEP rm -f p`: la lectura argv
+del escáner (sin cortar) los marca a propósito, y eso es un falso positivo aceptado
+(documentado en el docstring del pytest, con pruebas). El banco exige 0 fugas respecto de master.

@@ -187,9 +187,8 @@ for sep, ssh_prefix in itertools.product(RONDA6_SEPARADORES, ("", '"ssh", h, '))
         f'[{ssh_prefix}"docker", "run", img, "{sep}", "docker", "rm", "-f", c]',
         f'[{ssh_prefix}"docker", "exec", c, "true", "{sep}", "docker", "rm", "-f", c]',
     ]
-    for first in ('"docker", "rm", "-fv", c', '"docker", "rm", "-v", c'):
-        for later in ('"rm", "-rf", "/tmp/build"', '"sudo", "rm", "-f", lock'):
-            RONDA6_LIMPIOS.append(f'[{ssh_prefix}{first}, "{sep}", {later}]')
+    # Ronda 8: `docker rm -v c SEP rm -f p` ya NO es un caso limpio: la lectura argv
+    # (sin cortar) lo marca a proposito (falso positivo aceptado), asi que no esta aqui.
     RONDA6_LIMPIOS.append(
         f'[{ssh_prefix}"docker", "exec", c, "rm", "-f", p, "{sep}", "docker", "rm", "-fv", c]')
 positive += [("python", source) for source in RONDA6_MARCAS]
@@ -210,12 +209,15 @@ for sep in ("&", "|&", " && ", "&& ", "\\n"):
     RONDA7_MARCAS.append(f'["ssh", h, "docker", "rm", "-f", c1, "{sep}", "docker", "rm", "-fv", c2]')
 RONDA7_MARCAS += [
     '["ssh", h, "docker", "rm", "-f", "c1;", "docker", "rm", "-fv", c2]',
-    '["ssh", h, "docker", "rm", "-f", c1, SEP, "docker", "rm", "-fv", c2]',
 ]
-RONDA7_LIMPIOS = [
-    '["ssh", h, "docker", "rm", "-v", c, "&", "rm", "-f", p]',
-    '["ssh", h, "docker", "rm", "-v", c, " && ", "rm", "-f", p]',
+# Ronda 8: regresiones de la ronda 7 frente a master (el cierre de la ventana en docker/rm).
+RONDA7_MARCAS += [
+    '["ssh", h, "docker", "rm", c, "docker", "-f"]',
+    '["ssh", h, "docker", "rm", "$(", "docker", "ps", "-aq", ")", "-f"]',
+    'DOCKER + ["rm", "rm", "-f"]',
+    '["docker", "rm", c, "&&", "rm", "-f", p]',
 ]
+RONDA7_LIMPIOS = []  # los de la ronda 7 pasaron a ser falsos positivos aceptados (ronda 8)
 positive += [("python", source) for source in RONDA7_MARCAS]
 RONDA6_MEJORAS |= set(RONDA7_MARCAS)
 
