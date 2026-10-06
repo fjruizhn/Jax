@@ -16,7 +16,10 @@ persecución sin fin):
   `docker`/`docker container`/opciones globales/variables con «docker» en el nombre,
   `&`, `|&`, `&&`, `||`, `;`, `|` como separadores (las redirecciones `2>&1`, `>&2`,
   `<&0`, `&>f` no lo son) y TODAS las banderas hasta el fin del comando (docker las
-  acepta después del nombre).
+  acepta después del nombre). Un subshell `$(...)` o `` `...` `` se salta hasta su cierre
+  balanceado y las banderas que vienen después cuentan (`docker rm $(docker ps -aq) -f`
+  fuga); si falta el cierre no se sabe dónde sigue el comando y se marca (falla cerrado).
+  Las cadenas Python se prefiltran con cualquier espacio en blanco antes de `rm`/`remove`.
 - `docker exec|run ... rm -f x` es un `rm` DENTRO del contenedor: no cuenta.
 
 Listas Python y separadores (rondas 6 a 8). Una lista puede ser argv puro o llevar un
@@ -39,8 +42,6 @@ Límites declarados:
   Se prefiere eso a marcar cada `$SUDO rm -f archivo`.
 - Un separador metido en una variable (`SEP`) no se reconoce: no corta la lectura de shell,
   y si la lectura argv tampoco marca (por un `-v` posterior) el caso fuga. Igual que master.
-- En shell (cadenas), las banderas de un comando terminan en `$(` o `` ` ``:
-  `docker rm $(docker ps -aq) -f` no se marca. Igual que master.
 """
 import ast
 import re
@@ -95,6 +96,39 @@ def _es_rm_shell(toks, i):
     return toks[i] == "rm" or (toks[i] == "remove" and i >= 1 and toks[i - 1] == "container")
 
 
+def _banderas_shell(toks, i):
+    """Banderas del comando cuyo `rm` está en `toks[i]`, hasta el fin del comando. Un
+    subshell `$(...)` o `` `...` `` se salta entero (sus banderas son de otro comando) y lo
+    que viene después sigue contando. Devuelve (banderas, balanceado): si falta el cierre del
+    subshell no se puede saber dónde sigue el comando, y quien llama marca (falla cerrado)."""
+    banderas, j = [], i + 1
+    while j < len(toks):
+        t = toks[j]
+        if t == "$(":
+            profundidad, j = 1, j + 1
+            while j < len(toks) and profundidad:
+                if toks[j] in ("$(", "("):
+                    profundidad += 1
+                elif toks[j] == ")":
+                    profundidad -= 1
+                j += 1
+            if profundidad:
+                return banderas, False
+            continue
+        if t == "`":
+            try:
+                j = toks.index("`", j + 1) + 1
+            except ValueError:
+                return banderas, False
+            continue
+        if t in _SEPARADORES:
+            break
+        if t.startswith("-"):
+            banderas.append(t)
+        j += 1
+    return banderas, True
+
+
 def culpables_shell(texto):
     hallados = []
     unido = re.sub(r"\\\r?\n\s*", " ", texto)
@@ -118,13 +152,8 @@ def culpables_shell(texto):
                     break
             if not es_docker or dentro:
                 continue
-            banderas = []
-            for siguiente in toks[i + 1:]:
-                if siguiente in _SEPARADORES:
-                    break
-                if siguiente.startswith("-"):
-                    banderas.append(siguiente)
-            if _fuerza_sin_volumenes(banderas):
+            banderas, balanceado = _banderas_shell(toks, i)
+            if not balanceado or _fuerza_sin_volumenes(banderas):
                 hallados.append(" ".join(toks[max(0, i - 3):i + 1 + len(banderas) + 1]))
     return hallados
 
@@ -233,7 +262,7 @@ def culpables_python(fuente, filename="<string>"):
                       for p in nodo.values]
             hallados += culpables_shell("".join(str(x) for x in partes))
         elif isinstance(nodo, ast.Constant) and isinstance(nodo.value, str) and nodo not in docstrings \
-                and not isinstance(padres.get(nodo), ast.JoinedStr) and (" rm" in nodo.value or " remove" in nodo.value):
+                and not isinstance(padres.get(nodo), ast.JoinedStr) and re.search(r"\s(?:rm|remove)\b", nodo.value):
             hallados += culpables_shell(nodo.value)
     return hallados
 
@@ -582,6 +611,66 @@ def test_whitelist_no_se_extiende_a_prefijos_dinamicos_ni_contextos_cercanos():
         "docker compose -f a -f b -f c -f d -f e rm -f svc", es_python=False
     )
     assert culpables_en_texto("docker compose --workdir /x rm -f svc", es_python=False)
+
+
+# Ronda 9 (a): el prefiltro de cadenas Python ve cualquier espacio en blanco.
+@pytest.mark.parametrize("fuente", [
+    'x = "docker\\trm -f c"',
+    'x = "docker  rm -f c"',
+    'x = "docker container\\tremove -f c"',
+    'x = "docker\\t\\trm\\t-f c"',
+    'subprocess.run("docker\\trm -f c", shell=True)',
+])
+def test_cadena_python_con_cualquier_espacio_en_blanco_se_marca(fuente):
+    assert culpables_en_texto(fuente, es_python=True), f"no detectó: {fuente}"
+
+
+@pytest.mark.parametrize("fuente", [
+    'x = "docker\\trm -fv c"',
+    'x = "docker  rm -v -f c"',
+    'x = "docker\\tps -a"',
+    'x = "docker\\nrm -f c"',  # el salto de línea separa comandos: `rm` de host
+])
+def test_cadena_python_con_espacios_raros_no_marca_lo_que_no_fuga(fuente):
+    assert not culpables_en_texto(fuente, es_python=True), f"falso positivo: {fuente}"
+
+
+# Ronda 9 (b): en shell las banderas no cortan en `$(` ni en el acento grave.
+@pytest.mark.parametrize("comando", [
+    "docker rm $(docker ps -aq) -f",
+    "docker rm `docker ps -aq` -f",
+    "docker rm $(docker ps -aq) --force",
+    'docker rm "$(docker ps -aq)" -f',
+    "docker rm $(docker ps -aq -f status=exited) -f",
+    "docker rm $(echo $(docker ps -aq) x) -f",
+    "docker rm $(echo $(docker ps -aq) $(echo y)) -f",
+    "docker rm $( (echo a) ) -f",
+    "docker rm $(docker ps -aq) `echo c` -f",
+    "docker rm `echo a` $(echo b) -f",
+    "sudo docker container remove $(docker ps -aq) -f",
+    "docker rm $(docker ps -aq",
+    "docker rm $(docker ps -aq -f",
+    "docker rm `docker ps -aq",
+    "docker rm $(echo $(docker ps -aq) -v",
+])
+def test_shell_las_banderas_posteriores_a_un_subshell_cuentan(comando):
+    """Un subshell sin cerrar se marca (falla cerrado)."""
+    assert culpables_en_texto(comando, es_python=False), f"no detectó: {comando}"
+
+
+@pytest.mark.parametrize("comando", [
+    "docker rm $(docker ps -aq) -v",
+    "docker rm $(docker ps -aq) -fv",
+    "docker rm -f $(docker ps -aq) -v",
+    "docker rm `docker ps -aq` -v -f",
+    "docker rm $(echo $(docker ps -aq) x) -vf",
+    "docker rm $(docker ps -aq -f status=exited)",
+    "docker rm -v $(docker ps -aq -f status=exited)",
+    "docker ps -f $(echo x)",
+    "x=$(docker rm -v c) -f",
+])
+def test_shell_un_v_posterior_a_un_subshell_exime_y_sus_banderas_no_cuentan(comando):
+    assert not culpables_en_texto(comando, es_python=False), f"falso positivo: {comando}"
 
 
 def test_python_que_no_parsea_falla_cerrado_con_la_ruta():
