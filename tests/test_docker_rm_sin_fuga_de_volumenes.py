@@ -91,7 +91,10 @@ def _docker_exec_o_run(tokens):
 
 def _indices_hosts_ssh(tokens, inicio=0):
     """Todos los hosts SSH en un comando y sus comandos remotos anidados."""
-    opciones_con_valor = set("bBcDEeF IiJLMlmOoPpQRSWw".replace(" ", ""))
+    opciones_con_valor = {
+        "b", "B", "c", "D", "E", "e", "F", "I", "i", "J", "L", "l",
+        "m", "O", "o", "P", "p", "Q", "R", "S", "W", "w",
+    }
     valores_wrapper = {"-u", "-g", "-h", "-p", "-r", "-t", "-C", "-T", "-D", "-R"}
     hosts = set()
     i = inicio
@@ -397,6 +400,7 @@ FUGAN_SHELL = [
     "ssh -B lo docker exec docker rm -f c",
     "ssh -I none docker exec docker rm -f c",
     "ssh -P audit docker exec docker rm -f c",
+    "ssh -M docker exec docker rm -f c",
     "ssh -4p 22 docker exec docker rm -f c",
     "ssh -vp 22 docker exec docker rm -f c",
     "ssh -46p 22 docker exec docker rm -f c",
@@ -473,6 +477,7 @@ FUGAN_PYTHON = [
     '["ssh", "-B", "lo", "docker", "exec", "docker", "rm", "-f", n]',
     '["ssh", "-I", "none", "docker", "exec", "docker", "rm", "-f", n]',
     '["ssh", "-P", "audit", "docker", "exec", "docker", "rm", "-f", n]',
+    '["ssh", "-M", "docker", "exec", "docker", "rm", "-f", n]',
     '["ssh", "-4p", "22", "docker", "exec", "docker", "rm", "-f", n]',
     '["ssh", "-vp", "22", "docker", "exec", "docker", "rm", "-f", n]',
     '["ssh", "-46p", "22", "docker", "exec", "docker", "rm", "-f", n]',
