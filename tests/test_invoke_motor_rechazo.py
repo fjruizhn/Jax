@@ -38,5 +38,23 @@ class InvokeMotorRechazoTest(unittest.IsolatedAsyncioTestCase):
         cliente.post.assert_not_awaited()
 
 
+class CodigoMuertoDelDespachoLegacyTest(unittest.TestCase):
+    """E2b-1a MINOR 3 (auditoria #362): el despacho directo a LAS MANOS esta
+    cerrado; el codigo que lo sostenia (polling, lectura de resultado,
+    cancelacion, `_rechazado`) quedo inalcanzable y se borro. Mismo riesgo que
+    advierte `_invoke_hyde`: quien lo resucite sin que nada lo note reabre un
+    camino sin gobernar. Si hace falta de nuevo, va con ejecucion gobernada."""
+
+    def test_executor_ya_no_tiene_el_polling_ni_la_cancelacion_de_motor_jobs(self):
+        from jacobs import executor
+        for nombre in ("_read_motor_result", "_cancel_motor_job", "MOTOR_POLL_INTERVAL"):
+            self.assertFalse(hasattr(executor, nombre), nombre)
+
+    def test_las_manos_dispatch_ya_no_tiene_el_cuerpo_legacy(self):
+        from motor_registry import routes
+        self.assertFalse(hasattr(routes, "_rechazado"))
+        self.assertFalse(hasattr(routes, "human_gate"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

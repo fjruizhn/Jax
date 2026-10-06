@@ -145,6 +145,33 @@ def test_el_plan_local_manda_ollama_timeout():
     assert vistos[("POST", "/api/chat")] == _t(plan.OLLAMA_TIMEOUT)
 
 
+def test_jacobs_reusa_el_cliente_entre_llamadas():
+    """Sonda: el despacho HTTP directo de Jacobs (ya no existe la cancelacion de
+    motor jobs que se usaba antes)."""
+    from unittest.mock import AsyncMock
+
+    from facet_resolver import ResolvedFacet
+    from jacobs import executor
+    faceta = ResolvedFacet(key="hipatia", provider_id="p", base_url="http://x.test/v1", model="m",
+                           credential="c", transport="http_openai_compat", persona=None, params=None)
+    clientes = []
+
+    async def espia(client_self, request, **kwargs):
+        clientes.append(client_self)
+        return httpx.Response(200, request=request, json={
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": {}})
+
+    async def correr():
+        with patch.object(httpx.AsyncClient, "send", espia), \
+                patch.object(executor, "limite_de_salida", AsyncMock(return_value={"max_tokens": 10})):
+            await executor._invoke_http_openai_compat(faceta, "hola", 5)
+            await executor._invoke_http_openai_compat(faceta, "hola", 5)
+        await chc.cerrar_cliente_http()
+
+    asyncio.run(correr())
+    assert len(clientes) == 2 and clientes[0] is clientes[1]
+
+
 def test_la_memoria_reusa_su_cliente_y_lo_cierra(monkeypatch):
     from jax.memory import db as dbmod
     monkeypatch.setenv("JAX_OLLAMA_URL", "http://ollama.test:11434")
