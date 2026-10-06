@@ -3786,6 +3786,7 @@ Historia (comentarios que estaban sobre el piso en `policy.yml`):
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^48 passed`
 
 Jax#338 (2026-10-04): `^48 passed` → `^51 passed`, ningun FIFO cuelga la ingesta y la huella sale del mismo descriptor que la copia (+3); medido local hall9000.
+Jax#367 (2026-10-06): `^51 passed` → `^52 passed`, `test_libro_es_determinista` (el ayudante `_libro` da los mismos bytes aunque openpyxl y zipfile vean otra hora; mata el mutante sin reescritura del zip); medido local hall9000: 52 passed.
 
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
