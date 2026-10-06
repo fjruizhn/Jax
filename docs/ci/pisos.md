@@ -816,6 +816,8 @@ Jax#338 (2026-10-04): `^156 passed` → `^164 passed`, +8 en las_manos/_procesam
 
 2026-10-06 (registro acotado de la evidencia de `/motor/dispatch`, #362): `^170 passed` → `^185 passed`, +15 netas en `tests/test_las_manos_auth_servicio.py`: hilo del bucle (+1), plazo (+1), 50 denegaciones simultaneas (+1), cupo que se libera (+1), configuracion invalida (+9), defecto 3 s / 4 (+1), sin registrador (+1). Medido LOCAL con el comando exacto de tres archivos: `185 passed`.
 
+2026-10-06 (observation_id en el log, #362): `^185 passed` → `^186 passed`, +1 en `tests/test_las_manos_auth_servicio.py`. Medido LOCAL con el comando exacto de tres archivos: `186 passed`.
+
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 ```text
@@ -907,6 +909,8 @@ para conservar byte a byte el registro de la migración de pisos.
 ## `tests-puros/out`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
+
+3589 -> 3590 el 2026-10-06 (observation_id en el log, #362): +1 neta en `test_las_manos_auth_servicio.py`. FUENTE: LOCAL en hall9000 sin aislamiento `unshare`, mismo comando del paso: 3630 passed, 3 skipped, 0 failed, contra 3629; aritmetica del runner: 3589 + 1. 45 skipped no cambia. El runner tiene la ultima palabra.
 
 3574 -> 3589 el 2026-10-06 (registro acotado de la evidencia de `/motor/dispatch`, #362): +15 netas, todas de `test_las_manos_auth_servicio.py` (ese archivo corre tambien en el paso F2-E-SR3 source, que sube a 185). FUENTE: LOCAL en hall9000 sin aislamiento `unshare`, mismo comando del paso: 3629 passed, 3 skipped, 0 failed, contra 3614 de la tanda anterior; aritmetica del runner: 3574 + 15. 45 skipped no cambia. El runner tiene la ultima palabra.
 

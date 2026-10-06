@@ -368,7 +368,7 @@ async def registrar_denegacion_de_dispatch(correlacion: str) -> str:
 
     escritura.add_done_callback(_terminada)
     try:
-        await asyncio.wait_for(asyncio.shield(escritura), timeout=estado["timeout"])
+        observacion = await asyncio.wait_for(asyncio.shield(escritura), timeout=estado["timeout"])
     except asyncio.TimeoutError:
         vencida.append(True)
         logger.error(
@@ -382,6 +382,14 @@ async def registrar_denegacion_de_dispatch(correlacion: str) -> str:
             correlacion,
         )
         return EVIDENCIA_FALLIDA
+    # El registrador devuelve la observacion ya persistida (EnforcementObservation):
+    # su observation_id es el vinculo exacto con la fila B7. Va en el log junto a
+    # la correlacion para unirlos sin depender de la hora. (El subject de esa fila
+    # es "denial:<uuid propio>", no la correlacion: cambiarlo exigiria policy/**.)
+    logger.info(
+        "B7: evidencia de /motor/dispatch denegado registrada observation_id=%s correlacion=%s",
+        getattr(observacion, "observation_id", None), correlacion,
+    )
     return EVIDENCIA_REGISTRADA
 
 

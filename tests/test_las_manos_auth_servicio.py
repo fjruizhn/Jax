@@ -290,7 +290,7 @@ def test_dispatch_denegado_por_el_middleware_registra_evidencia_y_trae_correlaci
     assert cuerpo["detail"]["evidencia_registrada"] is True
     evidencia_b7.record_governed_dispatch_denied.assert_called_once_with()
     # el log lleva el MISMO id y nada del pedido
-    assert _correlaciones_del_log(caplog) == [cuerpo["detail"]["correlacion"]]
+    assert set(_correlaciones_del_log(caplog)) == {cuerpo["detail"]["correlacion"]}
     assert "PROMPT-SECRETO" not in caplog.text
 
 
@@ -679,3 +679,17 @@ def test_sin_registrador_B7_la_evidencia_no_figura_como_registrada(monkeypatch):
     with TestClient(_app()) as c:
         r = c.post("/motor/dispatch", json={"caller": "hyde"}, headers=_h(IDENTIDAD_JACOBS))
     assert r.status_code == 403 and r.json()["detail"]["evidencia_registrada"] is False
+
+
+def test_el_log_une_la_correlacion_con_el_observation_id_de_la_fila_b7(evidencia_b7, caplog):
+    """El registrador devuelve la observacion persistida: su observation_id va en
+    el log junto a la correlacion, para unir el 403 que vio el cliente con la fila
+    B7 sin depender de la hora."""
+    import logging
+    from types import SimpleNamespace
+    evidencia_b7.record_governed_dispatch_denied.return_value = SimpleNamespace(observation_id="obs-1234")
+    with caplog.at_level(logging.INFO), TestClient(_app()) as c:
+        r = c.post("/motor/dispatch", json={"caller": "hyde"}, headers=_h(IDENTIDAD_JACOBS))
+    correlacion = r.json()["detail"]["correlacion"]
+    lineas = [x.getMessage() for x in caplog.records if "observation_id=obs-1234" in x.getMessage()]
+    assert len(lineas) == 1 and f"correlacion={correlacion}" in lineas[0]
