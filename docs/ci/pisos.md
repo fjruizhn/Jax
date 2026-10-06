@@ -814,6 +814,8 @@ Jax#338 (2026-10-04): `^156 passed` → `^164 passed`, +8 en las_manos/_procesam
 
 2026-10-06 (ronda final de #362): `^166 passed` → `^170 passed`, +4 netas en `tests/test_las_manos_auth_servicio.py`: la denegacion de `POST /motor/dispatch` por el middleware se prueba por HTTP (+2 con jacobs y plataforma, +1 con la evidencia fallando, +1 sin credencial, +1 de otras denegaciones sin evidencia, +0 neto en las pruebas de motor jobs que pierden la fila de dispatch: -1). Medido LOCAL con el comando exacto de tres archivos: `170 passed`.
 
+2026-10-06 (registro acotado de la evidencia de `/motor/dispatch`, #362): `^170 passed` → `^185 passed`, +15 netas en `tests/test_las_manos_auth_servicio.py`: hilo del bucle (+1), plazo (+1), 50 denegaciones simultaneas (+1), cupo que se libera (+1), configuracion invalida (+9), defecto 3 s / 4 (+1), sin registrador (+1). Medido LOCAL con el comando exacto de tres archivos: `185 passed`.
+
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 ```text
@@ -905,6 +907,8 @@ para conservar byte a byte el registro de la migración de pisos.
 ## `tests-puros/out`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
+
+3574 -> 3589 el 2026-10-06 (registro acotado de la evidencia de `/motor/dispatch`, #362): +15 netas, todas de `test_las_manos_auth_servicio.py` (ese archivo corre tambien en el paso F2-E-SR3 source, que sube a 185). FUENTE: LOCAL en hall9000 sin aislamiento `unshare`, mismo comando del paso: 3629 passed, 3 skipped, 0 failed, contra 3614 de la tanda anterior; aritmetica del runner: 3574 + 15. 45 skipped no cambia. El runner tiene la ultima palabra.
 
 3570 -> 3574 el 2026-10-06 (ronda final de #362): +4 netas, las mismas de `test_las_manos_auth_servicio.py` (ese archivo corre tambien en este paso; el cuerpo exacto del 410 y la evidencia en `test_human_gate_sin_emision_http.py` son aserciones nuevas, +0). FUENTE: LOCAL en hall9000 sin aislamiento `unshare`, mismo comando del paso: 3614 passed, 3 skipped, 0 failed, contra 3610 de la tanda anterior; aritmetica del runner: 3570 + 4. 45 skipped no cambia. El runner tiene la ultima palabra. (Un commit intermedio, 5aa2732b, borro 14 pruebas por error y bajaba a 3596; se restauraron en 2b83d467 antes de medir.)
 
