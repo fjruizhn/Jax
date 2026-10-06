@@ -308,7 +308,7 @@ def test_el_predicado_acepta_solo_las_facetas_http_gobernadas(faceta):
     assert models.faceta_ejecutable_en_pipeline(faceta) is True
 
 
-@pytest.mark.parametrize("faceta", ["kimi", "jax_local", "hyde", "faceta_nueva_subprocess", "", None])
+@pytest.mark.parametrize("faceta", ["kimi", "jax_local", "el_juez", "hyde", "faceta_nueva_subprocess", "", None])
 def test_el_predicado_rechaza_toda_faceta_fuera_de_la_lista_blanca(faceta):
     """Una faceta nueva activada en la tabla (otro transporte, otro nombre) no
     entra por omision: sin estar en HTTP_FACETS, el plan no pasa -- si no, falla
@@ -322,3 +322,54 @@ def test_validar_facetas_ejecutables_rechaza_una_faceta_nueva_no_listada():
     with pytest.raises(plan_mod.MotorGobernadoNoDisponible) as exc:
         plan_mod.validar_facetas_ejecutables([nuevo, ok])
     assert [v.facet for v in exc.value.violations] == ["faceta_nueva_subprocess"]
+
+
+# --- El auditor local (el_juez) no es un paso de pipeline ------------------
+# `ejecutor.auditor_faceta_local` (hoy `el_juez`) lo elige C5 para auditar
+# misiones con datos de clientes. Con la lista blanca, el_juez no es ejecutable
+# como PASO de pipeline (igual que jax_local, que corre el mismo modelo): eso es
+# lo correcto, y NO rompe a C5 porque C5 no pasa por el predicado, el reroute,
+# el menu ni el arbitro de Jacobs. Estas dos pruebas fijan ambas mitades.
+
+def _modulos_py(*carpetas):
+    from pathlib import Path
+    raiz = Path(__file__).resolve().parents[1]
+    for carpeta in carpetas:
+        for p in sorted((raiz / carpeta).rglob("*.py")):
+            if "__pycache__" not in p.parts and not p.name.endswith("_test.py") and not p.name.startswith("test_"):
+                yield p
+
+
+def test_c5_y_el_auditor_local_no_pasan_por_el_predicado_ni_por_el_planificador_de_jacobs():
+    import ast
+    prohibidos_modulo = {"jacobs.plan", "jacobs.executor", "jacobs.models", "jacobs.continuar", "jacobs.devolucion"}
+    prohibidos_nombre = {"faceta_ejecutable_en_pipeline", "validar_facetas_ejecutables",
+                         "HTTP_FACETS", "MOTOR_FACETS", "FACETAS_CERRADAS_A_PROPOSITO", "PlanBuilder"}
+    hallazgos = []
+    archivos = list(_modulos_py("jax/ejecutor", "scripts/ejecutor_contratos"))
+    assert archivos, "no se encontro el codigo de C5"
+    for p in archivos:
+        for n in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
+            if isinstance(n, ast.ImportFrom) and n.module:
+                importados = {n.module} | {f"{n.module}.{a.name}" for a in n.names}
+                if importados & prohibidos_modulo or any(a.name in prohibidos_nombre for a in n.names):
+                    hallazgos.append(f"{p.name}:{n.lineno}")
+            elif isinstance(n, ast.Import) and any(a.name in prohibidos_modulo for a in n.names):
+                hallazgos.append(f"{p.name}:{n.lineno}")
+            elif isinstance(n, ast.Name) and n.id in prohibidos_nombre:
+                hallazgos.append(f"{p.name}:{n.lineno}")
+    assert hallazgos == []
+
+
+def test_jacobs_solo_lee_la_faceta_arbitro_http_y_nunca_la_local():
+    """El arbitro del plan sale SOLO de `ejecutor.auditor_faceta` (hoy thot, HTTP);
+    ninguna linea de jacobs/ lee `auditor_faceta_local`."""
+    leen_local = [p.name for p in _modulos_py("jacobs") if "auditor_faceta_local" in p.read_text(encoding="utf-8")]
+    assert leen_local == []
+    from jax.ejecutor.contratos import eleccion_c5
+    cfg = eleccion_c5.ConfigC5(**{**{c: None for c in eleccion_c5.ConfigC5.__dataclass_fields__},
+                                  "auditor_faceta": "thot", "auditor_faceta_local": "el_juez"})
+    assert eleccion_c5.elegir_auditor_faceta(cfg, hay_datos_de_clientes=True) == "el_juez"
+    assert eleccion_c5.elegir_auditor_faceta(cfg, hay_datos_de_clientes=False) == "thot"
+    assert models.faceta_ejecutable_en_pipeline("thot") is True
+    assert models.faceta_ejecutable_en_pipeline("el_juez") is False
