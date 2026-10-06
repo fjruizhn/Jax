@@ -19,30 +19,28 @@ persecución sin fin):
   acepta después del nombre).
 - `docker exec|run ... rm -f x` es un `rm` DENTRO del contenedor: no cuenta.
 
-Listas Python y separadores (rondas 6 y 7). Una lista puede ser argv puro (sin shell) o
-llevar un comando de shell partido en elementos. El escáner lo decide así:
-- La lista va a un shell, y se corta en los separadores (`&&`, `;`, `||`, `|`, `&`,
-  `|&`, con espacios normalizados y el salto de línea), si lleva un `ssh`/`bash`/`sh`/
-  `dash`/`zsh` o es argumento de una llamada con `shell=` distinto de False. Entonces
-  contexto, banderas, exec/run y lista blanca se leen dentro de cada comando.
-- Si no se sabe, es argv: el separador es un argumento más y las banderas se leen hasta
-  el final (`["docker", "rm", c, "|", "-f"]` fuga). Lo único que corta igual es que
-  aparezca otro `rm` o un `docker` literal: eso es un comando nuevo (`docker rm -f c1 &&
-  docker rm -fv c2`). Un `rm` pegado a un separador sin palabras entre medio sigue siendo
-  de docker (`["docker", "-H", "|", "rm", "-f", c]`), salvo que haya shell seguro, ya
-  hubiera otro `rm` o venga tras un subcomando que cierra (`ps`, `volume`, ...).
-- Mirar si la lista llega a `shell=True` no es viable cuando se arma en una variable y se
-  pasa después (`cmd = [...]; subprocess.run(cmd, shell=True)`): ante la duda se marca.
+Listas Python y separadores (rondas 6 a 8). Una lista puede ser argv puro o llevar un
+comando de shell partido en elementos, y desde el escáner no se puede saber cuál (la lista
+se arma en una variable y se pasa después). Por eso cada lista se lee DOS veces y se marca
+si CUALQUIERA de las dos lecturas fuga:
+1. argv puro: un solo comando, TODAS las banderas hasta el final de la lista, sin cortar
+   (`["docker", "rm", c, "|", "-f"]` fuga: docker acepta banderas después de los argumentos).
+2. shell: la lista se corta en los separadores literales (`&&`, `;`, `||`, `|`, `&`, `|&`,
+   con espacios normalizados, el salto de línea y el separador pegado a un argumento,
+   `"c1;"`), y contexto, banderas, exec/run y lista blanca se leen dentro de cada comando.
+Con el OR nunca se marca menos que con la lectura sin cortar de master.
+
+Falsos positivos ACEPTADOS: lo que marca la lectura argv aunque la lista vaya a un shell,
+p. ej. `["docker", "rm", "-v", c, "&&", "rm", "-f", p]` (el `-f` del `rm` de host se atribuye
+a docker) o `["docker", "rm", c, "&&", "touch", "-f", p]`. Se prefiere marcar de más.
 
 Límites declarados:
 - Una variable que no diga «docker» en su nombre (`$D rm -f`) no se reconoce como docker.
   Se prefiere eso a marcar cada `$SUDO rm -f archivo`.
-- Un separador pegado a un argumento (`"c1;"`) o metido en una variable no se reconoce
-  como separador; se falla cerrado: la ventana de banderas termina en el siguiente
-  `rm`/`docker` literal, y el efecto es marcar de más (`["docker", "rm", "-v", c, SEP,
-  "rm", "-f", p]` marca), nunca de menos.
-- Fuera de un shell seguro, un comando nuevo que no empieza por `rm` ni `docker` después
-  de un separador (`["docker", "rm", c, "|", "x", "-f"]`) se lee como argv y marca.
+- Un separador metido en una variable (`SEP`) no se reconoce: no corta la lectura de shell,
+  y si la lectura argv tampoco marca (por un `-v` posterior) el caso fuga. Igual que master.
+- En shell (cadenas), las banderas de un comando terminan en `$(` o `` ` ``:
+  `docker rm $(docker ps -aq) -f` no se marca. Igual que master.
 """
 import ast
 import re
@@ -57,7 +55,6 @@ ESTE = "tests/test_docker_rm_sin_fuga_de_volumenes.py"
 _ES_DOCKER = re.compile(r"(?:\S*/)?docker|\$\{?\w*docker\w*(?:\[@\])?\}?|\{[^{}]*docker[^{}]*\}|dk", re.I)
 _SEPARADORES = {";", "&&", "||", "|", "|&", "&", "(", ")", "`", "$("}
 _SEPARADORES_LISTA = {";", "&&", "||", "|", "|&", "&"}
-_SHELLS = {"ssh", "bash", "sh", "dash", "zsh"}
 _FALSO = {"false", "0", "f", "no"}
 _SUBCOMANDOS_SIN_VOLUMEN_ANONIMO = {
     "volume", "network", "image", "context", "buildx", "plugin", "secret",
@@ -136,14 +133,6 @@ def _texto_de(nodo, fuente):
     return ast.get_source_segment(fuente, nodo) or ""
 
 
-# Subcomandos de docker que ya cierran el comando: un `rm` que viene tras ellos y un
-# separador no es el `rm` de docker (`docker ps && rm -f x`).
-_SUBCOMANDOS_QUE_CIERRAN = _SUBCOMANDOS_SIN_VOLUMEN_ANONIMO | {
-    "ps", "stop", "start", "kill", "logs", "inspect", "pull", "push", "images", "info",
-    "version", "exec", "run",
-}
-
-
 def _cadena(nodo):
     return nodo.value if isinstance(nodo, ast.Constant) and isinstance(nodo.value, str) else None
 
@@ -179,26 +168,12 @@ def _es_separador_pegado(nodo):
     return bool(limpio) and (limpio[0] in ";&|" or limpio[-1] in ";&|")
 
 
-def _lista_va_a_un_shell(nodo, elts, padres):
-    """True si la lista claramente la lee un shell: lleva un `ssh`/`bash`/`sh`/... o es
-    argumento de una llamada con `shell=<algo que no sea False>`. Si la lista se arma en una
-    variable y se pasa después, esto no se puede saber desde aquí (ver docstring)."""
-    for e in elts:
-        valor = _cadena(e)
-        if valor is not None and valor.rsplit("/", 1)[-1] in _SHELLS:
-            return True
-    actual = nodo
-    while isinstance(padres.get(actual), ast.BinOp):
-        actual = padres[actual]
-    llamada = padres.get(actual)
-    if isinstance(llamada, ast.Call):
-        for kw in llamada.keywords:
-            if kw.arg == "shell" and not (isinstance(kw.value, ast.Constant) and not kw.value.value):
-                return True
-    return False
-
-
 def _culpable_lista(nodo, fuente, padres):
+    """Una lista se lee de dos maneras y fuga si CUALQUIERA de las dos fuga:
+    (1) como argv puro: un solo comando, TODAS las banderas hasta el final, sin cortar;
+    (2) como un comando de shell partido en elementos: cortada en los separadores, y cada
+        comando por separado (contexto, banderas, exec/run y lista blanca).
+    No hace falta saber si la lista llega a un shell, algo que no se puede ver desde aquí."""
     elts = _planas(nodo.elts)
     n = len(elts)
 
@@ -210,44 +185,34 @@ def _culpable_lista(nodo, fuente, padres):
     if not indices:
         return False
     padre = padres.get(nodo)
-    shell = _lista_va_a_un_shell(nodo, elts, padres)
-    separadores = [k for k, e in enumerate(elts) if _es_separador(e) or _es_separador_pegado(e)]
-    for i in indices:
-        # Dónde empieza el comando de este `rm`: tras el último separador que de verdad
-        # abre un comando. En una lista argv `["docker", "-H", "|", "rm", "-f", c]` el `rm`
-        # pegado al separador sigue siendo de docker; si hay shell, o ya hubo otro `rm`
-        # antes, o entre medio hay palabras, es un comando nuevo.
-        inicio = 0
-        for j in reversed([k for k in separadores if k < i]):
-            if shell or j + 1 < i or any(es_rm(k) for k in range(j)) \
-                    or (j >= 1 and _cadena(elts[j - 1]) in _SUBCOMANDOS_QUE_CIERRAN):
-                inicio = j + 1
-                break
-        # Dónde termina: en el siguiente `rm` o `docker` literal (comando nuevo aunque el
-        # separador sea una variable o vaya pegado) y, si va a un shell, en el separador.
-        fin = n
-        for k in range(i + 1, n):
-            if es_rm(k) or _cadena(elts[k]) == "docker" or (shell and k in separadores):
-                fin = k
-                break
-        antes = elts[inicio:i]
-        if i - inicio >= 2 and _cadena(elts[i - 1]) in _SUBCOMANDOS_SIN_VOLUMEN_ANONIMO \
-                and _cadena(elts[i - 2]) == "docker":
-            continue
-        if any(_cadena(e) in ("exec", "run") for e in antes):
-            continue
-        es_docker = any(_ES_DOCKER.search(_texto_de(e, fuente)) for e in antes
-                        if not isinstance(e, (ast.List, ast.Tuple)))
-        if not es_docker and i == 0 and isinstance(padre, ast.BinOp) and isinstance(padre.op, ast.Add) \
-                and padre.right is nodo:
-            izquierda = _texto_de(padre.left, fuente)
-            # `algo + ["rm", ...]`: un prefijo de comando. Docker salvo que sea claramente sudo.
-            es_docker = bool(_ES_DOCKER.search(izquierda)) or not re.search(r"sudo", izquierda, re.I)
-        if not es_docker:
-            continue
-        banderas = [v for v in (_cadena(e) for e in elts[i + 1:fin]) if v is not None and v.startswith("-")]
-        if _fuerza_sin_volumenes(banderas):
-            return True
+    cortes = [k for k, e in enumerate(elts) if _es_separador(e) or _es_separador_pegado(e)]
+    tramos, inicio = [], 0
+    for k in cortes:
+        tramos.append((inicio, k))
+        inicio = k + 1
+    tramos.append((inicio, n))
+    for inicio, fin in [(0, n)] + tramos:
+        for i in indices:
+            if not inicio <= i < fin:
+                continue
+            antes = elts[inicio:i]
+            if i - inicio >= 2 and _cadena(elts[i - 1]) in _SUBCOMANDOS_SIN_VOLUMEN_ANONIMO \
+                    and _cadena(elts[i - 2]) == "docker":
+                continue
+            if any(_cadena(e) in ("exec", "run") for e in antes):
+                continue
+            es_docker = any(_ES_DOCKER.search(_texto_de(e, fuente)) for e in antes
+                            if not isinstance(e, (ast.List, ast.Tuple)))
+            if not es_docker and i == 0 and isinstance(padre, ast.BinOp) and isinstance(padre.op, ast.Add) \
+                    and padre.right is nodo:
+                izquierda = _texto_de(padre.left, fuente)
+                # `algo + ["rm", ...]`: un prefijo de comando. Docker salvo que sea claramente sudo.
+                es_docker = bool(_ES_DOCKER.search(izquierda)) or not re.search(r"sudo", izquierda, re.I)
+            if not es_docker:
+                continue
+            banderas = [v for v in (_cadena(e) for e in elts[i + 1:fin]) if v is not None and v.startswith("-")]
+            if _fuerza_sin_volumenes(banderas):
+                return True
     return False
 
 
@@ -441,12 +406,13 @@ def _lista(*tramos, con_ssh):
 @pytest.mark.parametrize("con_ssh", [False, True], ids=["sin_ssh", "con_ssh"])
 @pytest.mark.parametrize("sep", _SEPS_LISTA)
 @pytest.mark.parametrize("rm_docker", ['"docker", "rm", "-fv", c', '"docker", "rm", "-v", c'])
-@pytest.mark.parametrize("despues", ['"rm", "-rf", "/tmp/build"', '"sudo", "rm", "-f", lock', '"rm", "-f", p'])
-def test_rm_de_host_tras_un_docker_rm_con_v_no_es_falso_positivo(con_ssh, sep, rm_docker, despues):
-    """Cada comando de la lista se evalúa solo: las banderas del `rm` de host que viene
-    después del separador no son las del `docker rm -v`."""
+@pytest.mark.parametrize("despues", ['"rm", "-rf", "/tmp/build"', '"sudo", "rm", "-f", lock'])
+def test_falso_positivo_aceptado_rm_de_host_tras_un_docker_rm_con_v(con_ssh, sep, rm_docker, despues):
+    """Falso positivo ACEPTADO (ronda 8): la lectura argv no corta, así que las banderas del
+    `rm` de host que viene tras el separador cuentan para el `rm` de docker. No se sabe
+    si la lista llega a un shell; ante la duda se marca (nunca menos que master)."""
     fuente = _lista(rm_docker, f'"{sep}"', despues, con_ssh=con_ssh)
-    assert not culpables_en_texto(fuente, es_python=True), f"falso positivo: {fuente}"
+    assert culpables_en_texto(fuente, es_python=True), f"se esperaba la marca: {fuente}"
 
 
 @pytest.mark.parametrize("con_ssh", [False, True], ids=["sin_ssh", "con_ssh"])
@@ -504,57 +470,48 @@ def test_separador_literal_en_lista_argv_no_corta_las_banderas(fuente):
 NO_FUGAN_CON_SEPARADOR = [
     '["echo", ";", "&&", "docker", "rm", "-fv", c]',
     '["docker", "exec", c, "rm", "-f", p, "&&", "docker", "rm", "-fv", c]',
-    '["docker", "rm", "-fv", c, "&&", "rm", "-rf", p]',
-    'DOCKER + ["rm", c, "&&", "rm", "-f", p]',
-    '[["docker"], "&&", "rm", "-f", c]',
-    '["ssh", h, "docker", "&&", "rm", "-f", c]',
-    'subprocess.run(["docker", "-H", x, "&&", "rm", "-f", c], shell=True)',
-    '["docker", "volume", "&&", "rm", "-f", c]',
 ]
 
 
 @pytest.mark.parametrize("fuente", NO_FUGAN_CON_SEPARADOR)
-def test_separador_con_comando_nuevo_sigue_cortando_donde_hay_shell_seguro(fuente):
+def test_separador_que_ninguna_lectura_marca(fuente):
     assert not culpables_en_texto(fuente, es_python=True), f"falso positivo: {fuente}"
 
 
 # MINOR-B: más separadores, espacios normalizados y separadores que no se reconocen.
 @pytest.mark.parametrize("sep", ["&", "|&", " && ", "&& ", " ; ", "\n", " \n ", "\r\n", "\t|\t"])
-def test_separadores_extra_y_con_espacios_cortan_en_listas_con_ssh(sep):
+def test_separadores_extra_y_con_espacios_cortan_en_listas(sep):
+    """La lectura de shell corta en ellos: el `-fv` del segundo comando no tapa al primero."""
     fuga = f'["ssh", h, "docker", "rm", "-f", c1, {sep!r}, "docker", "rm", "-fv", c2]'
-    limpio = f'["ssh", h, "docker", "rm", "-v", c, {sep!r}, "rm", "-f", p]'
     assert culpables_en_texto(fuga, es_python=True), f"no detectó: {fuga}"
-    assert not culpables_en_texto(limpio, es_python=True), f"falso positivo: {limpio}"
 
 
 @pytest.mark.parametrize("fuente", [
     '["ssh", h, "docker", "rm", "-f", "c1;", "docker", "rm", "-fv", c2]',
     '["ssh", h, "docker", "rm", "-f", "c1&&", "docker", "rm", "-fv", c2]',
-    '["ssh", h, "docker", "rm", "-f", c1, SEP, "docker", "rm", "-fv", c2]',
-    '["ssh", h, "docker", "rm", "-f", c1, SEP, "rm", "-fv", c2]',
-    '[*docker, "rm", "-f", c1, SEP, "docker", "rm", "-fv", c2]',
+    '["docker", "rm", "-f", ";c1", "docker", "rm", "-fv", c2]',
     '[*docker, "rm", *["-f"], c]',
+    '["ssh", h, "docker", "rm", "$(", "docker", "ps", "-aq", ")", "-f"]',
+    '["ssh", h, "docker", "rm", c, "docker", "-f"]',
+    'DOCKER + ["rm", "rm", "-f"]',
+    '["docker", "rm", c, "&&", "rm", "-f", p]',
 ])
-def test_separador_pegado_o_en_variable_falla_cerrado_y_marca(fuente):
-    """Límite declarado: un separador pegado a un argumento (`"c1;"`) o en una variable no
-    se reconoce como tal. Se falla cerrado: la ventana de banderas termina en el siguiente
-    `docker`/`rm` literal, y ahí el primer `docker rm -f` queda marcado."""
+def test_separador_pegado_y_lectura_argv_marcan(fuente):
+    """Un separador pegado a un argumento (`"c1;"`) corta en la lectura de shell. La lectura
+    argv (todas las banderas, sin cortar) marca lo que master ya marcaba."""
     assert culpables_en_texto(fuente, es_python=True), f"no detectó: {fuente}"
 
 
-def test_separador_en_variable_marca_tambien_el_caso_limpio_documentado():
-    """Contracara del cierre: sin reconocer el separador, `docker rm -v c SEP rm -f p` se
-    lee como un solo comando y el `-f` del `rm` de host se atribuye a docker. Es un falso
-    positivo asumido (se prefiere marcar a dejar fugar)."""
-    assert culpables_en_texto('["docker", "rm", "-v", c, SEP, "rm", "-f", p]', es_python=True)
+def test_limite_declarado_separador_en_variable_no_se_reconoce():
+    """Límite declarado: un separador metido en una variable no corta. Igual que master."""
+    fuente = '["ssh", h, "docker", "rm", "-f", c1, SEP, "docker", "rm", "-fv", c2]'
+    assert not culpables_en_texto(fuente, es_python=True)
 
 
-def test_limite_declarado_argv_con_comando_nuevo_que_no_es_rm_ni_docker_marca():
-    """Límite del docstring: sin shell seguro, `x -f` tras un separador se atribuye a docker."""
-    assert culpables_en_texto('["docker", "rm", c, "|", "x", "-f"]', es_python=True)
+def test_limite_declarado_argv_atribuye_las_banderas_de_otro_comando():
+    """Falso positivo aceptado: la lectura argv atribuye `-f` de otro comando a docker."""
     assert culpables_en_texto('["docker", "rm", c, "&&", "touch", "-f", p]', es_python=True)
-    # con un shell seguro el separador sí corta y el `-f` es de otro comando
-    assert not culpables_en_texto('["ssh", h, "docker", "rm", c, "&&", "touch", "-f", p]', es_python=True)
+    assert culpables_en_texto('["ssh", h, "docker", "rm", c, "&&", "touch", "-f", p]', es_python=True)
 
 
 # MINOR-C: `docker container remove` es el alias de `docker container rm`.
@@ -576,7 +533,6 @@ def test_container_remove_se_marca_como_rm(fuente):
     '["docker", "remove", "-f", c]',
     '["docker", "compose", "remove", "-f", s]',
     '["docker", "exec", c, "remove", "-f", p]',
-    '["ssh", h, "docker", "container", "remove", "-v", c, "&&", "rm", "-f", p]',
 ])
 def test_container_remove_no_marca_lo_que_no_fuga(fuente):
     assert not culpables_en_texto(fuente, es_python=True), f"falso positivo: {fuente}"
@@ -588,6 +544,8 @@ def test_container_remove_no_marca_lo_que_no_fuga(fuente):
     "sudo docker container remove -f x",
     "docker container remove x -f",
     "docker rm -f c1 & docker rm -fv c2",
+    "docker rm -f c&echo -v",
+    "docker rm -f c1&docker rm -fv c2",
     "docker rm -f c1 |& docker rm -fv c2",
     "docker rm -f c1 &\ndocker rm -fv c2",
     "docker rm -f c 2>&1",
