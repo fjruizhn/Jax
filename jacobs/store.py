@@ -1108,7 +1108,7 @@ _ER_CANT_DROP_FIELD_OR_KEY = 1091
 # lecturas y escrituras NUEVAS sobre la tabla se encolan detras de el. Cada
 # DDL acotado paga SU PROPIA espera de hasta 30 s, y todos corren uno detras
 # de otro en la MISMA sesion de `init_tables()` -- el peor caso es la SUMA,
-# no 30 s fijos. Hoy hay CINCO indices acotados en `_INDICES`
+# no 30 s fijos. Hoy hay SIETE indices acotados en `_INDICES`
 # (idx_jacobs_pipelines_duenio, idx_pipelines_descartados,
 # idx_pipelines_ocultos e idx_pipelines_visibles sobre jacobs_pipelines;
 # idx_events_pipeline_tipo, idx_events_auditoria_fecha e
@@ -1129,7 +1129,7 @@ _ER_CANT_DROP_FIELD_OR_KEY = 1091
 # "solo rendimiento": fallan CERRADO. La primera que vence el MDL aborta
 # `init_tables()` entero con una excepcion -- y como las columnas se agregan
 # ANTES que los indices en esta funcion, ese aborto ni siquiera llega a
-# intentar los 5 indices de arriba (no se suman a los 150 s: el arranque ya
+# intentar los 7 indices de arriba (no se suman a los 240 s: el arranque ya
 # se cayo antes).
 _LOCK_WAIT_DDL_SEGUNDOS = 30
 _ER_LOCK_WAIT_TIMEOUT = 1205
