@@ -800,6 +800,7 @@ en el runner con `AssertionError: 0 != 3` — admitió cero — y en local daba 
   `server.app` real de `c7d59cc` y la base sustituida, `POST /jacobs/pipeline/{id}/approve-step` SIN credencial y
   `{"invoked_by": "plataforma"}` → 200 y el paso de Hyde en `blocked_human_gate` pasaba a `pending`. La jaula de Hyde
   tiene red local (`--share-net`): Hyde se podía autoaprobar.
+- **`/motor/dispatch` y la evidencia B7 de denegacion (2026-10-06, cierre de #362).** Desde #362 **ninguna identidad** (`plataforma` ni `jacobs`) alcanza `POST /motor/dispatch`: el middleware responde 403 `ruta_no_permitida_para_la_identidad`, igual que en cualquier otra ruta. **Ese 403 no deja evidencia B7**, como cualquier 403 de autenticacion. La evidencia B7 de denegacion (`record_governed_dispatch_denied`) solo corre en `dispatch()` (410), hoy inalcanzable por HTTP; ahi el cuerpo es `{"code", "correlacion", "evidencia_registrada"}` y un fallo al registrar deja un log de error con la correlacion. Se intento registrar la evidencia en el middleware y se revirtio (acotarla con hilo, plazo y tope traia defectos nuevos en cada ronda). Si algun dia se quiere evidencia de los 403, va con un diseño propio, que no se resuelve aqui.
 - **Llamadores reales (grep en jax y jax-platform + journal de 7 días de `jax-las-manos`):** jax-platform
   (`api/pipelines.py`: crear, leer, results, resume, cancel; `jax_engine/state.py`: sondeo de pipelines y `/health`;
   `api/chat.py`: `/motor/authorize-facet`; tablero: `/health`) y Jacobs dentro del propio proceso
