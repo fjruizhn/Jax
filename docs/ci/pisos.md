@@ -900,6 +900,18 @@ para conservar byte a byte el registro de la migración de pisos.
 
 ## `tests-puros/out`
 
+3537 -> 3540 (2026-10-05, JAX#357 ronda 2): se agregaron dos pruebas en
+`tests/test_docker_rm_sin_fuga_de_volumenes.py` (parseo Python inválido con ruta y
+rechazo de la degradación a shell). Medido en hall9000 con la lista exacta del paso
+"Piso exacto", Python 3.14.4 y `sudo unshare --mount` ocultando
+`~/claude-skills`, `~/ejecutor-fase0`, `~/jax-platform`, `/srv/jax-prod` y el
+`/etc/jax/build` propio del host:
+3540 passed, 45 skipped, 1 xfailed y 16 subtests. El objeto `/etc/jax/build` se
+ocultó solo dentro del namespace porque el runner limpio no contiene esa
+configuración local. El total medido quedó tres sobre el piso registrado; esta
+ronda agregó dos funciones de prueba y no aisló el origen del tercer conteo.
+Los 45 skipped conservan el desglose vigente.
+
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
 
 3531 -> 3537 el 2026-10-06 (ronda 3 de #356; medido LOCAL por archivo con /srv/jax-prod, ~/claude-skills y ~/jax-platform tapados y confirmado con la suite completa del paso): `test_instalar_dropins_de_servicio.py` 11 -> 14 (+3: rechazo de filas de otro dueno) y `test_activacion_timers_b9.py` 9 -> 12 (+3: Monotonic=0, Realtime=n/a y SubState=running). 45 skipped no cambia.

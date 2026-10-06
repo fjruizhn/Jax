@@ -32,10 +32,13 @@ RAIZ = Path(__file__).resolve().parent.parent
 ESTE = "tests/test_docker_rm_sin_fuga_de_volumenes.py"
 
 _ES_DOCKER = re.compile(r"(?:\S*/)?docker|\$\{?\w*docker\w*(?:\[@\])?\}?|\{[^{}]*docker[^{}]*\}|\bdk\b", re.I)
-_SEPARADORES = {";", "&&", "||", "|", "(", ")", "`", "$("}
+_SEPARADORES = {";", "&&", "||", "|", "&", "(", ")", "`", "$("}
 _FALSO = {"false", "0", "f", "no"}
-_DOCKER_OPCIONES_SIN_VALOR = {"--debug", "--tls", "--tlsverify"}
-_DOCKER_OPCIONES_CON_VALOR = {"-H", "--host", "--context", "--config", "--tlscacert", "--tlscert", "--tlskey"}
+_DOCKER_OPCIONES_SIN_VALOR = {"-D", "--debug", "--tls", "--tlsverify"}
+_DOCKER_OPCIONES_CON_VALOR = {
+    "-c", "--context", "-H", "--host", "-l", "--log-level", "--config",
+    "--tlscacert", "--tlscert", "--tlskey",
+}
 
 
 def _fuerza_sin_volumenes(banderas):
@@ -57,34 +60,19 @@ def _fuerza_sin_volumenes(banderas):
 
 def _tokens_shell(linea):
     linea = re.sub(r"(^|\s)#.*$", "", linea)          # comentario
-    for sep in ("&&", "||", "$(", ";", "|", "(", ")", "`"):
-        linea = linea.replace(sep, f" {sep} ")
+    linea = re.sub(r"&&|\|\||\$\(|[;|&()`]", r" \g<0> ", linea)
     return [t.strip("\"'") for t in linea.split()]
 
 
 def _es_docker_rm(toks, indice_rm):
     """Reconoce docker [opciones] [container] rm, no otros subcomandos rm."""
+    docker = None
     for j in range(indice_rm - 1, max(-1, indice_rm - 12), -1):
         if toks[j] in _SEPARADORES:
             break
-        if not _ES_DOCKER.fullmatch(toks[j]):
-            continue
-        antes_rm = toks[j + 1:indice_rm]
-        if any(t in ("exec", "run") for t in antes_rm):
-            return False
-        if antes_rm and antes_rm[-1] == "container":
-            antes_rm = antes_rm[:-1]
-        k = 0
-        while k < len(antes_rm):
-            opcion = antes_rm[k]
-            if opcion in _DOCKER_OPCIONES_SIN_VALOR or opcion.startswith("--") and "=" in opcion:
-                k += 1
-            elif opcion in _DOCKER_OPCIONES_CON_VALOR:
-                k += 2
-            else:
-                return False
-        return True
-    return False
+        if _ES_DOCKER.fullmatch(toks[j]):
+            docker = j
+    return docker is not None and _prefijo_docker_rm(toks[docker + 1:indice_rm])
 
 
 def culpables_shell(texto):
@@ -112,8 +100,34 @@ def _texto_de(nodo, fuente):
     return ast.get_source_segment(fuente, nodo) or ""
 
 
-def culpables_python(fuente):
-    arbol = ast.parse(fuente)
+def _prefijo_docker_rm(tokens):
+    comando = None
+    k = 0
+    while k < len(tokens):
+        token = tokens[k]
+        if token in _DOCKER_OPCIONES_SIN_VALOR or token.startswith("--") and "=" in token:
+            k += 1
+        elif token in _DOCKER_OPCIONES_CON_VALOR:
+            if k + 1 >= len(tokens):
+                return False
+            k += 2
+        elif token == "container" and comando is None:
+            comando = token
+            k += 1
+        elif token == "compose" and comando is None and k == len(tokens) - 1:
+            return True
+        else:
+            return False
+    return True
+
+
+def _es_prefijo_docker_rm(tokens):
+    docker = next((i for i, token in enumerate(tokens) if _ES_DOCKER.search(token)), None)
+    return docker is not None and _prefijo_docker_rm(tokens[docker + 1:])
+
+
+def culpables_python(fuente, filename="<string>"):
+    arbol = ast.parse(fuente, filename=filename)
     padres = {hijo: nodo for nodo in ast.walk(arbol) for hijo in ast.iter_child_nodes(nodo)}
     docstrings = set()
     for nodo in ast.walk(arbol):
@@ -128,14 +142,12 @@ def culpables_python(fuente):
                 continue
             i = indices[0]
             antes = elts[:i]
-            if any(isinstance(e, ast.Constant) and e.value in ("exec", "run") for e in antes):
-                continue
-            es_docker = any(_ES_DOCKER.search(_texto_de(e, fuente)) for e in antes)
+            tokens = [e.value if isinstance(e, ast.Constant) and isinstance(e.value, str)
+                      else _texto_de(e, fuente) for e in antes]
             padre = padres.get(nodo)
-            if not es_docker and i == 0 and isinstance(padre, ast.BinOp) and isinstance(padre.op, ast.Add) \
-                    and padre.right is nodo:
-                es_docker = bool(_ES_DOCKER.search(_texto_de(padre.left, fuente)))
-            if not es_docker:
+            if isinstance(padre, ast.BinOp) and isinstance(padre.op, ast.Add) and padre.right is nodo:
+                tokens.insert(0, _texto_de(padre.left, fuente))
+            if not _es_prefijo_docker_rm(tokens):
                 continue
             banderas = [e.value for e in elts[i + 1:]
                         if isinstance(e, ast.Constant) and isinstance(e.value, str) and e.value.startswith("-")]
@@ -151,15 +163,12 @@ def culpables_python(fuente):
     return hallados
 
 
-def culpables_en_texto(texto, es_python=None):
+def culpables_en_texto(texto, es_python=None, filename="<string>"):
     if es_python is None:
         es_python = not texto.lstrip().startswith("#!") or "python" in texto.split("\n", 1)[0]
         if es_python:
-            try:
-                ast.parse(texto)
-            except SyntaxError:
-                es_python = False
-    return culpables_python(texto) if es_python else culpables_shell(texto)
+            return culpables_python(texto, filename=filename)
+    return culpables_python(texto, filename=filename) if es_python else culpables_shell(texto)
 
 
 def _archivos():
@@ -194,7 +203,12 @@ def test_ningun_docker_rm_forzado_sin_borrar_volumenes():
         except UnicodeDecodeError:
             ilegibles.append(str(ruta.relative_to(RAIZ)))
             continue
-        for hallado in culpables_en_texto(texto, es_python):
+        try:
+            hallazgos = culpables_en_texto(texto, es_python, filename=str(ruta))
+        except SyntaxError:
+            ilegibles.append(str(ruta.relative_to(RAIZ)))
+            continue
+        for hallado in hallazgos:
             culpables.append(f"{ruta.relative_to(RAIZ)}: {hallado}")
     assert not ilegibles, "guiones versionados que no son UTF-8 (no se pueden barrer):\n" + "\n".join(ilegibles)
     assert not culpables, "docker rm forzado sin -v (deja el volumen anónimo):\n" + "\n".join(culpables)
@@ -219,8 +233,32 @@ FUGAN_SHELL = [
     '"docker" rm -f c',
     "docker rm -f c --volumes=0",
     "docker rm -f c --volumes=f",
+    "docker compose rm -f",
+    "docker -c ctx rm -f x",
+    "docker -D rm -f x",
+    "docker -l debug rm -f x",
+    "docker --log-level debug rm -f x",
+    "docker --tlsverify --tlscacert ca --tlscert cert --tlskey key rm -f x",
+    "docker --context ctx rm -f x",
+    "docker --context network rm -f x",
+    "docker --host unix:///x rm -f x",
+    "docker --config /cfg rm -f x",
+    "docker --tls rm -f x",
+    "docker --tlsverify rm -f x",
+    "docker rm -f x -v & docker rm -f y",
+    "docker rm -f x -v& docker rm -f y",
 ]
 FUGAN_PYTHON = [
+    '["sudo", "docker", "rm", "-f", n]',
+    '["docker", "-c", "ctx", "rm", "-f", n]',
+    '["docker", "--context", "ctx", "rm", "-f", n]',
+    '["docker", "--context", "network", "rm", "-f", n]',
+    '["docker", "-H", "unix:///x", "rm", "-f", n]',
+    '["docker", "--host", "unix:///x", "rm", "-f", n]',
+    '["docker", "-l", "debug", "rm", "-f", n]',
+    '["docker", "--log-level", "debug", "rm", "-f", n]',
+    '["docker", "--config", "/cfg", "rm", "-f", n]',
+    '["docker", "--tlscacert", "ca", "--tlscert", "cert", "--tlskey", "key", "rm", "-f", n]',
     '[*docker, "rm", "-f", nombre]',
     '[*dk, "rm", "-f", n]',
     '[*docker, "rm", n, "-f"]',
@@ -236,6 +274,8 @@ FUGAN_PYTHON = [
     'subprocess.run(("docker", "rm", "-f", n))',
     'subprocess.run(f"{docker} rm -f {n}", shell=True)',
     'subprocess.run("docker rm -f x", shell=True)',
+    '[*docker, "container", "rm", "-f", n]',
+    'docker + ["container", "rm", "-f", n]',
 ]
 NO_FUGAN_SHELL = [
     'sudo docker rm -fv "$X"',
@@ -255,6 +295,8 @@ NO_FUGAN_SHELL = [
     "docker volume rm -f x",
     "docker image rm -f x",
     "docker network rm -f x",
+    "docker rm x & rm -f /tmp/y",
+    "docker rm x& rm -f /tmp/y",
 ]
 NO_FUGAN_PYTHON = [
     '[*docker, "rm", "-fv", nombre]',
@@ -268,6 +310,11 @@ NO_FUGAN_PYTHON = [
     'git + ["rm", "-f", p]',
     'sdk + ["rm", "-f", p]',
     'base + ["rm", "-f", p]',
+    '["docker", "volume", "rm", "-f", v]',
+    '[*docker, "network", "rm", "-f", v]',
+    '[*docker, "image", "rm", "-f", v]',
+    '["docker", "-c", "rm", "-f", v]',
+    'subprocess.run("docker rm x & rm -f /tmp/y", shell=True)',
 ]
 
 
@@ -290,3 +337,14 @@ def test_deja_pasar_lo_que_no_fuga():
 def test_python_que_no_parsea_falla_en_vez_de_degradar_a_shell():
     with pytest.raises(SyntaxError):
         culpables_en_texto("def roto(:\n    docker rm -f x", es_python=True)
+
+
+def test_python_inferido_que_no_parsea_no_degrada_a_shell():
+    with pytest.raises(SyntaxError):
+        culpables_en_texto("def roto(:\n    docker rm -f x")
+
+
+def test_python_ilegible_informa_la_ruta():
+    with pytest.raises(SyntaxError) as error:
+        culpables_python("def roto(:", filename="ruta/con error.py")
+    assert error.value.filename == "ruta/con error.py"
