@@ -531,6 +531,12 @@ CONTRATO_IDEMPOTENCIA = (
     ("pending", False, "conflicto"),
     ("failed", False, "conflicto"),
     ("completed", False, "conflicto"),
+    # Desenlaces que NO son un trabajo: 503 con un codigo estable que el despachador trata distinto.
+    # `confirmado_ausente`: la clave esta confirmada para un trabajo que el almacen sano no conoce -> DESCONOCIDO
+    # (503 idempotencia_estado_desconocido): el despachador salta ESE proyecto, nunca corta el ciclo ni retoma.
+    # `almacen_sin_integridad`: el almacen perdio la integridad -> 503 procesamiento_no_disponible (global).
+    ("confirmado_ausente", True, "desconocido"),
+    ("almacen_sin_integridad", True, "no_disponible"),
 )
 
 
@@ -543,14 +549,21 @@ def test_contrato_compartido_de_idempotencia(ruta, previo, mismo_pedido, esperad
         clave = _clave()
         try:
             viejo = None
-            if previo is not None:
+            if previo == "confirmado_ausente":
+                viejo = str(uuid.uuid4())                                     # nunca existio en el almacen
+                r = await idem.reclamar(IDENTIDAD_PLATAFORMA, clave, _hash("a.pdf"), viejo)
+                assert await idem.confirmar(r.id, viejo)
+                await _envejecer(clave, idem.gracia_segundos() + 30)
+            elif previo is not None:
                 viejo = almacen.create(ownership=OWNER, caller=f"user:{OWNER.user_id}", capability="ingesta_archivos",
                                        motor="n/a", trace_id="t", prompt="p", recursion_depth=0)
                 if previo == "rejected":
                     almacen._index[viejo]["status"] = "rejected"          # fuera del vocabulario que `update` admite
-                elif previo != "pending":
+                elif previo not in ("pending", "almacen_sin_integridad"):
                     almacen.update(viejo, status=previo)
                 await idem.reclamar(IDENTIDAD_PLATAFORMA, clave, _hash("a.pdf" if mismo_pedido else "otro.pdf"), viejo)
+                if previo == "almacen_sin_integridad":
+                    almacen._history_integrity = False
             return viejo, await _post(app, clave, "a.pdf")
         finally:
             await _borrar(clave)
@@ -558,6 +571,12 @@ def test_contrato_compartido_de_idempotencia(ruta, previo, mismo_pedido, esperad
     if esperado == "conflicto":
         assert r.status_code == 409, r.text
         assert len(almacen._index) == 1
+    elif esperado == "desconocido":
+        assert r.status_code == 503 and r.json()["detail"]["code"] == "idempotencia_estado_desconocido", r.text
+        assert len(almacen._index) == 0 and ejecutar.await_count == 0
+    elif esperado == "no_disponible":
+        assert r.status_code == 503 and r.json()["detail"]["code"] == "procesamiento_no_disponible", r.text
+        assert ejecutar.await_count == 0
     elif esperado == "mismo":
         assert r.status_code == 202 and r.json()["job_id"] == viejo
         assert len(almacen._index) == 1
@@ -883,6 +902,36 @@ def test_liberar_el_reclamo_no_traga_la_cancelacion_y_libera_igual(monkeypatch):
         finally:
             await _borrar(clave)
     assert asyncio.run(todo()) == [] and avance["termino"] is True
+
+
+def test_si_liberar_falla_tras_una_cancelacion_el_error_queda_en_el_log(caplog):
+    """MINOR-B: el pedido se cancela mientras espera la liberacion y la liberacion falla despues: nadie espera la
+    tarea, y su excepcion se registra igual (hash corto de la clave y job_id) en vez de quedar sin recoger."""
+    caplog.set_level(logging.ERROR, logger="procesamiento_routes")
+    clave = _clave()
+
+    async def todo():
+        entro = asyncio.Event()
+        real = idem.liberar
+
+        async def liberar_que_falla(*a, **k):
+            entro.set()
+            await asyncio.sleep(0.2)
+            raise ConnectionError("base caida al liberar")
+        idem.liberar = liberar_que_falla
+        try:
+            tarea = asyncio.ensure_future(rutas_mod._liberar_reclamo(IDENTIDAD_PLATAFORMA, clave, "job-liberar"))
+            await entro.wait()
+            tarea.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await tarea
+            await asyncio.sleep(0.5)
+        finally:
+            idem.liberar = real
+    asyncio.run(todo())
+    errores = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any(idem.abreviar(clave) in m and "job-liberar" in m and "ConnectionError" in m for m in errores), errores
+    assert not any(clave in m for m in errores), "la clave entera no va al log"
 
 
 def test_init_tabla_no_deja_warning_de_columna_duplicada_y_migra_una_tabla_vieja():

@@ -816,16 +816,30 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
 _LIBERACIONES: set = set()
 
 
+def _registrar_fallo_de_liberacion(tarea: asyncio.Future, job_id: str, clave: str) -> None:
+    """Callback de la tarea de liberacion: es QUIEN recoge su excepcion. Si el pedido se cancelo mientras esperaba,
+    nadie mas la espera y asyncio la dejaria sin recoger (`Task exception was never retrieved`)."""
+    if tarea.cancelled():
+        return
+    exc = tarea.exception()
+    if exc is not None:
+        logger.error("idempotencia: no se pudo liberar el reclamo de la clave %s (trabajo %s): %s: %s",
+                     idempotencia.abreviar(clave), job_id, type(exc).__name__, exc)
+
+
 async def _liberar_reclamo(identidad: str, clave: str, job_id: str) -> None:
     """Devuelve el reclamo (solo si sigue siendo de `job_id`). La liberacion corre en una tarea propia y protegida:
-    si el pedido se cancela mientras espera, la cancelacion SE PROPAGA (no se traga) y el reclamo se libera igual."""
+    si el pedido se cancela mientras espera, la cancelacion SE PROPAGA (no se traga) y el reclamo se libera igual;
+    y si la liberacion falla, el fallo queda en el log (con el hash corto de la clave y el job_id) aunque nadie
+    la este esperando."""
     tarea = asyncio.ensure_future(idempotencia.liberar(identidad, clave, job_id))
     _LIBERACIONES.add(tarea)
     tarea.add_done_callback(_LIBERACIONES.discard)
+    tarea.add_done_callback(lambda t: _registrar_fallo_de_liberacion(t, job_id, clave))
     try:
         await asyncio.shield(tarea)
-    except Exception:  # fail-soft: si no se pudo liberar, el reclamo queda huerfano y el reintento lo retoma pasada la gracia
-        logger.warning("idempotencia: no se pudo liberar el reclamo del trabajo %s", job_id, exc_info=True)
+    except Exception:  # fail-soft: ya lo registro el callback; el reclamo queda huerfano y el reintento lo retoma pasada la gracia
+        pass
 
 
 def _terminar_sin_tarea(job_id: str, estado: JobStatus, motivo: str) -> None:
