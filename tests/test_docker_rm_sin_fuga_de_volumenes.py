@@ -62,6 +62,7 @@ Límites declarados:
 import ast
 import re
 import subprocess
+import warnings
 from pathlib import Path
 
 import pytest
@@ -1247,3 +1248,54 @@ def test_un_segundo_rm_lejos_en_la_ventana_no_cambia_la_exencion():
 
 def test_sin_hallazgos_de_master_no_se_re_parsea_la_fuente():
     assert _sin_la_excepcion_de_lista_blanca([], "esto no es python (") == []
+
+
+# --- Ronda 15 ---------------------------------------------------------------------------------
+# MINOR 2 de la auditoría de la ronda 14: `_hallazgos_de_cadenas_de_master` tiene que contar
+# EXACTAMENTE lo que master saca de cadenas (ni docstrings, ni constantes dentro de un f-string,
+# ni cadenas sin ` rm`). Diferencial: Counter(master) == Counter(de listas) + Counter(de cadenas).
+_L = '[# docker volume rm\n -f ,"docker","rm","-f",c]'
+_W = '[# docker volume rm -f ,"docker","rm","-f",c]'
+_TEXTO_L = " ".join(_L.split())
+_FIXTURES_LISTAS_Y_CADENAS = {
+    "F0 solo la lista": (f"x = {_L}\n", [_TEXTO_L], []),
+    "F1 docstring con el texto de la ventana": (f"def f():\n    {_W!r}\n    return {_L}\n", [_TEXTO_L], []),
+    "F2 constante dentro de f-string": (f"x = {_L}\ny = f'{_W}{{z}}'\n", [_TEXTO_L], [_TEXTO_L + "{z}"]),
+    "F3 cadena sin ' rm' (tabs)": (f"x = {_L}\ny = {_W.replace(' ', chr(9))!r}\n", [_TEXTO_L], []),
+    "F4 cadena de shell": ('subprocess.run("docker rm -f c", shell=True)\n', [], ["docker rm -f c"]),
+    "F5 f-string de shell": ('subprocess.run(f"docker rm -f {c}", shell=True)\n', [], ["docker rm -f {c}"]),
+    "F6 lista y cadena": ('subprocess.run(["docker", "rm", "-f", c])\nos.system("docker rm -f c")\n',
+                          ['["docker", "rm", "-f", c]'], ["docker rm -f c"]),
+}
+
+
+@pytest.mark.parametrize("nombre", sorted(_FIXTURES_LISTAS_Y_CADENAS))
+def test_diferencial_los_hallazgos_de_cadenas_son_exactamente_los_de_master(nombre):
+    from collections import Counter
+    fuente, de_listas, de_cadenas = _FIXTURES_LISTAS_Y_CADENAS[nombre]
+    assert Counter(culpables_python_master(fuente)) == Counter(de_listas) + Counter(de_cadenas)
+    assert Counter(_hallazgos_de_cadenas_de_master(fuente)) == Counter(de_cadenas)
+
+
+@pytest.mark.parametrize("nombre", ["F0 solo la lista", "F1 docstring con el texto de la ventana",
+                                    "F2 constante dentro de f-string", "F3 cadena sin ' rm' (tabs)"])
+def test_las_fixtures_de_la_lista_sin_exencion_no_pierden_el_hallazgo(nombre):
+    """El `rm` de esa lista no es de recurso con nombre (el comentario se traga el resto): el
+    hallazgo de la lista queda, tenga lo que tenga de cadenas alrededor."""
+    fuente, _, _ = _FIXTURES_LISTAS_Y_CADENAS[nombre]
+    assert _sin_la_excepcion_de_lista_blanca(culpables_python_master(fuente), fuente) == [_TEXTO_L]
+    assert culpables_en_texto(fuente, es_python=True)
+
+
+# MINOR 3 de la auditoría de la ronda 14: dos nodos con el MISMO texto normalizado pero distinta
+# calificación (`"vol\<salto>ume"` vale `volume`, `"vol\ ume"` no): basta uno que no sea de
+# recurso con nombre para no eximir ese texto (mata `all` -> `any`).
+def test_dos_nodos_con_el_mismo_texto_y_distinta_calificacion_no_se_eximen():
+    fuente = ('A = ["docker","vol\\\nume","rm","-f",x]\n'
+              'B = ["docker","vol\\ ume","rm","-f",x]\n')
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        hallazgos = culpables_python_master(fuente)
+        assert len(hallazgos) == 2 and hallazgos[0] == hallazgos[1], "el caso ya no ejercita a master"
+        assert _sin_la_excepcion_de_lista_blanca(hallazgos, fuente) == hallazgos
+        assert culpables_en_texto(fuente, es_python=True)
