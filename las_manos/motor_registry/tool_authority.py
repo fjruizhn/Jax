@@ -613,11 +613,12 @@ def _open_workspace_file(path_str: str, flags: int, projects_fd: int | None) -> 
             os.close(fd)
 
 
-def _open_workspace_parent(path_str: str, projects_fd: int | None, *, create: bool = False) -> tuple[int, str]:
+def _open_workspace_parent(path_str: str, projects_fd: int | None, *, create: bool = False) -> tuple[int, str, str]:
     parts = _path_components(path_str)
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     current = os.open(WORKSPACE_ROOT, directory_flags)
     stack = [current]
+    rel_parts: list[str] = []
     try:
         for index, component in enumerate(parts[:-1]):
             if component == "..":
@@ -625,6 +626,7 @@ def _open_workspace_parent(path_str: str, projects_fd: int | None, *, create: bo
                     raise ForbiddenWorkspacePath("la ruta sale del workspace")
                 os.close(stack.pop())
                 current = stack[-1]
+                rel_parts.pop()
                 continue
             if len(stack) == 1 and component == "proyectos":
                 raise ForbiddenWorkspacePath("ruta restringida de proyectos")
@@ -640,6 +642,7 @@ def _open_workspace_parent(path_str: str, projects_fd: int | None, *, create: bo
                 raise ForbiddenWorkspacePath("la ruta abierta pertenece a proyectos/")
             stack.append(next_fd)
             current = next_fd
+            rel_parts.append(component)
         leaf = parts[-1]
         if leaf == "..":
             if len(stack) == 1:
@@ -651,15 +654,17 @@ def _open_workspace_parent(path_str: str, projects_fd: int | None, *, create: bo
             raise ForbiddenWorkspacePath("ruta restringida de proyectos")
         if _inside_projects(current, projects_fd):
             raise ForbiddenWorkspacePath("la ruta abierta pertenece a proyectos/")
+        if leaf != "..":
+            rel_parts.append(leaf)
         stack.pop()
-        return current, leaf
+        return current, leaf, "/".join(rel_parts)
     except BaseException:
         for fd in stack:
             os.close(fd)
         raise
 
 
-def _git_commit_write(resolved: Path, *, content: str, job_id: str, tool_call_id: str) -> tuple[bool, str | None, str | None]:
+def _git_commit_write(rel_path: str, *, content: str, job_id: str, tool_call_id: str) -> tuple[bool, str | None, str | None]:
     """Commitea los bytes autorizados sin volver a leer el pathname.
 
     El blob se crea desde `content`; un índice temporal parte del HEAD exacto
@@ -670,7 +675,7 @@ def _git_commit_write(resolved: Path, *, content: str, job_id: str, tool_call_id
     Nunca lanza: el archivo ya fue escrito. El caller registra si no quedó
     protegido por un commit.
     """
-    rel = resolved.relative_to(WORKSPACE_ROOT)
+    rel = Path(rel_path)
     base_cmd = ["git", "-C", str(WORKSPACE_ROOT), "-c", f"user.name={_GIT_AUTHOR_NAME}", "-c", f"user.email={_GIT_AUTHOR_EMAIL}"]
     index_fd, index_path = tempfile.mkstemp(prefix="jax-tool-authority-index-")
     os.close(index_fd)
@@ -695,7 +700,7 @@ def _git_commit_write(resolved: Path, *, content: str, job_id: str, tool_call_id
         read_tree = run(["read-tree", parent_sha])
         if read_tree.returncode != 0:
             return False, None, f"git read-tree falló: {read_tree.stderr.strip()}"
-        update = run(["update-index", "--add", "--cacheinfo", f"100644,{blob_sha},{rel}"])
+        update = run(["update-index", "--add", "--cacheinfo", "100644", blob_sha, str(rel)])
         if update.returncode != 0:
             return False, None, f"git update-index falló: {update.stderr.strip()}"
         tree = run(["write-tree"])
@@ -734,7 +739,7 @@ def _git_commit_write(resolved: Path, *, content: str, job_id: str, tool_call_id
         # Refleja la entrada ya confirmada en el índice normal; cacheinfo no
         # abre ni lee el pathname del workspace.
         env.pop("GIT_INDEX_FILE", None)
-        staged = run(["update-index", "--add", "--cacheinfo", f"100644,{blob_sha},{rel}"])
+        staged = run(["update-index", "--add", "--cacheinfo", "100644", blob_sha, str(rel)])
         if staged.returncode != 0:
             logger.error("tool_authority: commit %s creado pero no se actualizó el índice local: %s", commit_sha, staged.stderr.strip())
         return True, commit_sha, None
@@ -771,7 +776,7 @@ async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Pat
     # permitida a propósito (T2): con git detrás, el contenido previo no se
     # pierde, queda en el commit anterior.
     try:
-        parent_fd, leaf = _open_workspace_parent(path_str, projects_fd, create=True)
+        parent_fd, leaf, rel_path = _open_workspace_parent(path_str, projects_fd, create=True)
         fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o660, dir_fd=parent_fd)
         try:
             # B1 (auditoría 2026-09-25 de ops/permisos_proyectos.py): mkstemp() crea el
@@ -802,7 +807,7 @@ async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Pat
         if parent_fd >= 0:
             os.close(parent_fd)
 
-    committed, sha, git_error = _git_commit_write(resolved, content=content, job_id=job_id, tool_call_id=tool_call_id)
+    committed, sha, git_error = _git_commit_write(rel_path, content=content, job_id=job_id, tool_call_id=tool_call_id)
     if not committed:
         # T1: la escritura YA ocurrió (arriba) -- no se revierte de forma
         # retroactiva. Se declara el hueco explícito (sin protección de git
@@ -812,15 +817,15 @@ async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Pat
         logger.error("tool_authority: write_file EJECUTADO pero SIN COMMITEAR job=%s path=%s error=%s", job_id, resolved, git_error)
         try:
             await event_append(job_id, "TOOL_CALL_WRITE_UNCOMMITTED", {
-                "tool_name": tool_name, "caller": caller, "path": str(resolved.relative_to(WORKSPACE_ROOT)), "error": git_error,
+            "tool_name": tool_name, "caller": caller, "path": rel_path, "error": git_error,
             })
         except Exception:  # fail-soft: mismo criterio que _reject/_execution_error
             logger.error("tool_authority: no se pudo registrar TOOL_CALL_WRITE_UNCOMMITTED para job %s", job_id, exc_info=True)
 
-    logger.info("tool_authority: write_file EJECUTADO job=%s path=%s (%d bytes) sha=%s", job_id, resolved, size, sha)
+    logger.info("tool_authority: write_file EJECUTADO job=%s path=%s (%d bytes) sha=%s", job_id, rel_path, size, sha)
     return {
         "tool_name": tool_name, "decision": "executed", "reason": None,
-        "content": f"Escrito: {resolved.relative_to(WORKSPACE_ROOT)} ({size} bytes)",
+        "content": f"Escrito: {rel_path} ({size} bytes)",
         "git_committed": committed, "git_sha": sha, "git_error": git_error,
         "bytes_written": size,
     }

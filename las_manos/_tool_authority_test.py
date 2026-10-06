@@ -903,6 +903,31 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
                 safe.rename(original_projects)
                 moved_safe.rename(safe)
 
+    async def test_write_file_symlink_final_commitea_la_entrada_que_reemplaza(self):
+        target = self.workspace / "legit.txt"
+        alias = self.workspace / "alias_legit.txt"
+        original = target.read_text()
+        alias.symlink_to(target.name)
+
+        result = await self._call(
+            "write_file", {"path": "alias_legit.txt", "content": "alias nuevo\n"}
+        )
+
+        assert result["decision"] == "executed", result
+        assert result["git_committed"] is True, result
+        assert target.read_text() == original
+        assert alias.is_file() and not alias.is_symlink()
+        assert alias.read_text() == "alias nuevo\n"
+        committed = subprocess.run(
+            ["git", "show", f"{result['git_sha']}:alias_legit.txt"],
+            cwd=self.workspace, capture_output=True, text=True, check=True,
+        )
+        assert committed.stdout == "alias nuevo\n"
+        assert subprocess.run(
+            ["git", "show", f"{result['git_sha']}:legit.txt"],
+            cwd=self.workspace, capture_output=True, text=True, check=True,
+        ).stdout == original
+
     async def test_write_file_a_raiz_del_workspace_no_lanza(self):
         result = await self._call("write_file", {"path": ".", "content": "no"})
         assert result["decision"] in {"rejected", "execution_error"}, result
