@@ -89,24 +89,40 @@ def _docker_exec_o_run(tokens):
     return False
 
 
-def _indice_host_ssh(tokens, inicio=0):
-    """Devuelve el índice del host SSH tras opciones con o sin argumento."""
-    opciones_con_valor = {"-b", "-c", "-D", "-E", "-e", "-F", "-i", "-J",
-                          "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R",
-                          "-S", "-W", "-w"}
-    for i in range(inicio, len(tokens)):
-        if tokens[i] != "ssh":
+def _indices_hosts_ssh(tokens, inicio=0):
+    """Todos los hosts SSH en un comando y sus comandos remotos anidados."""
+    opciones_con_valor = set("bBcDEeF IiJLMlmOoPpQRSWw".replace(" ", ""))
+    valores_wrapper = {"-u", "-g", "-h", "-p", "-r", "-t", "-C", "-T", "-D", "-R"}
+    hosts = set()
+    i = inicio
+    while i < len(tokens):
+        if tokens[i] != "ssh" or i > inicio and tokens[i - 1] in valores_wrapper:
+            i += 1
             continue
         k = i + 1
         while k < len(tokens):
             token = tokens[k]
-            if token in opciones_con_valor:
-                k += 2
-            elif token.startswith("-"):
+            if token == "--":
                 k += 1
-            else:
-                return k
-    return None
+                break
+            if not token.startswith("-") or token == "-":
+                break
+            grupo = token[1:]
+            necesita_valor = False
+            for posicion, opcion in enumerate(grupo):
+                if opcion not in opciones_con_valor:
+                    continue
+                necesita_valor = True
+                k += 1 if posicion < len(grupo) - 1 else 2
+                break
+            if not necesita_valor:
+                k += 1
+        if k >= len(tokens):
+            break
+        hosts.add(k)
+        # Continue after the host to discover nested SSH in the remote command.
+        i = k + 1
+    return hosts
 
 
 def _fuerza_sin_volumenes(banderas):
@@ -150,11 +166,12 @@ def _es_docker_rm(toks, indice_rm, subcomando):
     inicio = indice_rm - 1
     while inicio >= 0 and toks[inicio] not in _SEPARADORES:
         inicio -= 1
+    ssh_hosts = _indices_hosts_ssh(toks, inicio + 1)
     for j in range(inicio + 1, indice_rm):
         if _ES_DOCKER.fullmatch(toks[j]):
             if subcomando == "remove" and "container" not in toks[j + 1:indice_rm]:
                 continue
-            if _indice_host_ssh(toks, inicio + 1) == j:
+            if j in ssh_hosts:
                 # `ssh docker exec docker rm` has a host literally named docker;
                 # keep searching for the remote executable anchor.
                 continue
@@ -242,10 +259,11 @@ def _prefijo_docker_rm(tokens):
 
 
 def _es_prefijo_docker_rm(tokens):
+    ssh_hosts = _indices_hosts_ssh(tokens)
     for i, token in enumerate(tokens):
         if not _ES_DOCKER.search(token):
             continue
-        if _indice_host_ssh(tokens) == i:
+        if i in ssh_hosts:
             continue
         if _compose_exec_o_run(tokens[i + 1:]):
             return False
@@ -376,6 +394,14 @@ FUGAN_SHELL = [
     "ssh -p 22 docker exec docker rm -f c",
     "ssh -o BatchMode=yes docker exec docker rm -f c",
     "ssh rm docker rm -f c",
+    "ssh -B lo docker exec docker rm -f c",
+    "ssh -I none docker exec docker rm -f c",
+    "ssh -P audit docker exec docker rm -f c",
+    "ssh -4p 22 docker exec docker rm -f c",
+    "ssh -vp 22 docker exec docker rm -f c",
+    "ssh -46p 22 docker exec docker rm -f c",
+    "ssh gateway ssh docker exec docker rm -f c",
+    "ssh gateway exec ssh docker exec docker rm -f c",
     "sudo -u rm docker rm -f c",
     "sudo -E docker rm -f c",
     "xargs docker rm -f",
@@ -444,6 +470,14 @@ FUGAN_PYTHON = [
     '["ssh", "-p", "22", "docker", "exec", "docker", "rm", "-f", n]',
     '["ssh", "-o", "BatchMode=yes", "docker", "exec", "docker", "rm", "-f", n]',
     '["ssh", "rm", "docker", "rm", "-f", n]',
+    '["ssh", "-B", "lo", "docker", "exec", "docker", "rm", "-f", n]',
+    '["ssh", "-I", "none", "docker", "exec", "docker", "rm", "-f", n]',
+    '["ssh", "-P", "audit", "docker", "exec", "docker", "rm", "-f", n]',
+    '["ssh", "-4p", "22", "docker", "exec", "docker", "rm", "-f", n]',
+    '["ssh", "-vp", "22", "docker", "exec", "docker", "rm", "-f", n]',
+    '["ssh", "-46p", "22", "docker", "exec", "docker", "rm", "-f", n]',
+    '["ssh", "gateway", "ssh", "docker", "exec", "docker", "rm", "-f", n]',
+    '["ssh", "gateway", "exec", "ssh", "docker", "exec", "docker", "rm", "-f", n]',
     '["sudo", "-u", "rm", "docker", "rm", "-f", n]',
     '["docker", "--context", "network", "rm", "-f", n]',
     '["docker", "-H", "unix:///x", "rm", "-f", n]',
