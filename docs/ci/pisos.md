@@ -812,6 +812,8 @@ Jax#338 (2026-10-04): `^156 passed` → `^164 passed`, +8 en las_manos/_procesam
 
 2026-10-06 (cierre de #362): `^164 passed` → `^166 passed`, +2 netas en `tests/test_las_manos_auth_servicio.py` (la identidad `jacobs` pierde `/motor/dispatch` y `/motor/job/*`: 3 pruebas de 403 + 1 de que conserva solo `/jacobs/pipeline`, menos 2 filas de `test_declarar_otra_identidad_se_rechaza`). Medido LOCAL en hall9000 con el comando exacto de tres archivos (`166 passed`). Esos +2 ya estaban contados en `tests-puros/out`, que corre el mismo archivo: el archivo cae en DOS pisos y la tanda anterior solo ajusto uno. Revisados todos los pasos de `policy.yml` que corren archivos tocados desde ea428368 (`auth_servicio`, `human_gate`, `arranque`, `invoke_motor_*`, `config_entorno`, `cliente_http`, `dispatch_step_reroute`, `plan_facetas`, `_arbitro_test`): solo este paso (fuera de `tests-puros/out`) corre uno de ellos; los otros pasos de `governance` (10 a 13) siguen en `^264`, `^15` y `^10`, medidos local.
 
+2026-10-06 (ronda final de #362): `^166 passed` → `^170 passed`, +4 netas en `tests/test_las_manos_auth_servicio.py`: la denegacion de `POST /motor/dispatch` por el middleware se prueba por HTTP (+2 con jacobs y plataforma, +1 con la evidencia fallando, +1 sin credencial, +1 de otras denegaciones sin evidencia, +0 neto en las pruebas de motor jobs que pierden la fila de dispatch: -1). Medido LOCAL con el comando exacto de tres archivos: `170 passed`.
+
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 ```text
@@ -903,6 +905,8 @@ para conservar byte a byte el registro de la migración de pisos.
 ## `tests-puros/out`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
+
+3570 -> 3574 el 2026-10-06 (ronda final de #362): +4 netas, las mismas de `test_las_manos_auth_servicio.py` (ese archivo corre tambien en este paso; el cuerpo exacto del 410 y la evidencia en `test_human_gate_sin_emision_http.py` son aserciones nuevas, +0). FUENTE: LOCAL en hall9000 sin aislamiento `unshare`, mismo comando del paso: 3614 passed, 3 skipped, 0 failed, contra 3610 de la tanda anterior; aritmetica del runner: 3570 + 4. 45 skipped no cambia. El runner tiene la ultima palabra. (Un commit intermedio, 5aa2732b, borro 14 pruebas por error y bajaba a 3596; se restauraron en 2b83d467 antes de medir.)
 
 3567 -> 3570 el 2026-10-06 (tercera tanda del cierre de #362, 4 MINOR de la auditoria sobre e5e5c347): +3 pruebas netas. +2 en `test_las_manos_auth_servicio.py` (3 de 403 para `jacobs` en `/motor/dispatch`, `GET /motor/job/*` y `POST /motor/job/*/cancel` + 1 de que solo conserva `/jacobs/pipeline`, menos 2 filas de `test_declarar_otra_identidad_se_rechaza` que ya no llegan a la comprobacion de identidad), +1 en `test_human_gate_sin_emision_http.py` (sin falla de evidencia B7 no hay log de error; la del log con correlacion amplia una prueba existente), +-0 en `test_arranque_las_manos_no_shadowea_policy.py` (ruta completa, mismas pruebas) y +-0 en los 4 renombrados. FUENTE: LOCAL en hall9000 sin aislamiento `unshare`, mismo comando del paso: 3610 passed, 3 skipped, 0 failed, contra 3607 de la tanda anterior; aritmetica del runner: 3567 confirmado + 3. 45 skipped no cambia. El runner tiene la ultima palabra.
 
