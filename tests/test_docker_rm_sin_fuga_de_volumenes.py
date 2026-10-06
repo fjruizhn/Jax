@@ -31,6 +31,7 @@ ESTE = "tests/test_docker_rm_sin_fuga_de_volumenes.py"
 
 _ES_DOCKER = re.compile(r"(?:\S*/)?docker|\$\{?\w*docker\w*(?:\[@\])?\}?|\{[^{}]*docker[^{}]*\}|dk", re.I)
 _SEPARADORES = {";", "&&", "||", "|", "(", ")", "`", "$("}
+_SEPARADORES_LISTA = {";", "&&", "||", "|"}
 _FALSO = {"false", "0", "f", "no"}
 _SUBCOMANDOS_SIN_VOLUMEN_ANONIMO = {
     "volume", "network", "image", "context", "buildx", "plugin", "secret",
@@ -100,6 +101,18 @@ def _texto_de(nodo, fuente):
     return ast.get_source_segment(fuente, nodo) or ""
 
 
+def _comandos_de_lista(elts):
+    """Pares (inicio, fin) de cada comando de una lista Python, cortada en los
+    separadores de shell que aparecen como elemento literal (`&&`, `;`, `||`, `|`)."""
+    tramos, inicio = [], 0
+    for k, e in enumerate(elts):
+        if isinstance(e, ast.Constant) and e.value in _SEPARADORES_LISTA:
+            tramos.append((inicio, k))
+            inicio = k + 1
+    tramos.append((inicio, len(elts)))
+    return tramos
+
+
 def culpables_python(fuente, filename="<string>"):
     arbol = ast.parse(fuente, filename=filename)
     padres = {hijo: nodo for nodo in ast.walk(arbol) for hijo in ast.iter_child_nodes(nodo)}
@@ -115,26 +128,33 @@ def culpables_python(fuente, filename="<string>"):
             if not indices:
                 continue
             padre = padres.get(nodo)
-            for i in indices:  # cada `rm` se evalúa por separado
-                antes = elts[:i]
-                if i >= 2 and isinstance(elts[i - 1], ast.Constant) \
-                        and elts[i - 1].value in _SUBCOMANDOS_SIN_VOLUMEN_ANONIMO \
-                        and isinstance(elts[i - 2], ast.Constant) and elts[i - 2].value == "docker":
-                    continue
-                if any(isinstance(e, ast.Constant) and e.value in ("exec", "run") for e in antes):
-                    continue
-                es_docker = any(_ES_DOCKER.search(_texto_de(e, fuente)) for e in antes)
-                if not es_docker and i == 0 and isinstance(padre, ast.BinOp) and isinstance(padre.op, ast.Add) \
-                        and padre.right is nodo:
-                    izquierda = _texto_de(padre.left, fuente)
-                    # `algo + ["rm", ...]`: un prefijo de comando. Docker salvo que sea claramente sudo.
-                    es_docker = bool(_ES_DOCKER.search(izquierda)) or not re.search(r"sudo", izquierda, re.I)
-                if not es_docker:
-                    continue
-                banderas = [e.value for e in elts[i + 1:]
-                            if isinstance(e, ast.Constant) and isinstance(e.value, str) and e.value.startswith("-")]
-                if _fuerza_sin_volumenes(banderas):
-                    hallados.append(" ".join(_texto_de(nodo, fuente).split()))
+            marcado = False
+            for inicio, fin_cmd in _comandos_de_lista(elts):  # cada comando, por separado
+                for i in indices:
+                    if not inicio <= i < fin_cmd:
+                        continue
+                    antes = elts[inicio:i]
+                    if i - inicio >= 2 and isinstance(elts[i - 1], ast.Constant) \
+                            and elts[i - 1].value in _SUBCOMANDOS_SIN_VOLUMEN_ANONIMO \
+                            and isinstance(elts[i - 2], ast.Constant) and elts[i - 2].value == "docker":
+                        continue
+                    if any(isinstance(e, ast.Constant) and e.value in ("exec", "run") for e in antes):
+                        continue
+                    es_docker = any(_ES_DOCKER.search(_texto_de(e, fuente)) for e in antes)
+                    if not es_docker and i == 0 and isinstance(padre, ast.BinOp) and isinstance(padre.op, ast.Add) \
+                            and padre.right is nodo:
+                        izquierda = _texto_de(padre.left, fuente)
+                        # `algo + ["rm", ...]`: un prefijo de comando. Docker salvo que sea claramente sudo.
+                        es_docker = bool(_ES_DOCKER.search(izquierda)) or not re.search(r"sudo", izquierda, re.I)
+                    if not es_docker:
+                        continue
+                    banderas = [e.value for e in elts[i + 1:fin_cmd]
+                                if isinstance(e, ast.Constant) and isinstance(e.value, str) and e.value.startswith("-")]
+                    if _fuerza_sin_volumenes(banderas):
+                        hallados.append(" ".join(_texto_de(nodo, fuente).split()))
+                        marcado = True
+                        break
+                if marcado:
                     break
         elif isinstance(nodo, ast.JoinedStr):
             partes = [p.value if isinstance(p, ast.Constant) else "{" + _texto_de(p.value, fuente) + "}"
@@ -300,6 +320,51 @@ def test_whitelist_python_no_exime_un_rm_posterior_de_contenedor(subcomando, con
     fuente = (f'[{prefijo}"docker", "{subcomando}", "rm", "-f", v, "&&", '
               f'"docker", "rm", "-f", c]')
     assert culpables_en_texto(fuente, es_python=True), f"no detectó: {fuente}"
+
+
+_SEPS_LISTA = ["&&", ";", "||", "|"]
+
+
+def _lista(*tramos, con_ssh):
+    """Arma el texto de una lista Python con los tramos unidos tal cual (ya con comillas)."""
+    prefijo = '"ssh", h, ' if con_ssh else ""
+    return "[" + prefijo + ", ".join(tramos) + "]"
+
+
+@pytest.mark.parametrize("con_ssh", [False, True], ids=["sin_ssh", "con_ssh"])
+@pytest.mark.parametrize("sep", _SEPS_LISTA)
+@pytest.mark.parametrize("rm_docker", ['"docker", "rm", "-fv", c', '"docker", "rm", "-v", c'])
+@pytest.mark.parametrize("despues", ['"rm", "-rf", "/tmp/build"', '"sudo", "rm", "-f", lock', '"rm", "-f", p'])
+def test_rm_de_host_tras_un_docker_rm_con_v_no_es_falso_positivo(con_ssh, sep, rm_docker, despues):
+    """Cada comando de la lista se evalúa solo: las banderas del `rm` de host que viene
+    después del separador no son las del `docker rm -v`."""
+    fuente = _lista(rm_docker, f'"{sep}"', despues, con_ssh=con_ssh)
+    assert not culpables_en_texto(fuente, es_python=True), f"falso positivo: {fuente}"
+
+
+@pytest.mark.parametrize("con_ssh", [False, True], ids=["sin_ssh", "con_ssh"])
+@pytest.mark.parametrize("sep", _SEPS_LISTA)
+def test_docker_rm_f_no_se_exime_por_las_banderas_del_docker_rm_fv_siguiente(con_ssh, sep):
+    """Las banderas de un comando no se leen hasta el final de la lista: el `-fv` del
+    segundo `docker rm` no tapa al primero."""
+    fuente = _lista('"docker", "rm", "-f", c1', f'"{sep}"', '"docker", "rm", "-fv", c2', con_ssh=con_ssh)
+    assert culpables_en_texto(fuente, es_python=True), f"no detectó: {fuente}"
+
+
+@pytest.mark.parametrize("con_ssh", [False, True], ids=["sin_ssh", "con_ssh"])
+@pytest.mark.parametrize("sep", _SEPS_LISTA)
+@pytest.mark.parametrize("antes", ['"docker", "run", img', '"docker", "exec", c, "true"'])
+def test_exec_o_run_de_un_comando_no_exime_al_docker_rm_de_otro(con_ssh, sep, antes):
+    """`run`/`exec` solo exime a los `rm` de SU comando: el `docker rm -f` que viene
+    después del separador es un comando aparte."""
+    fuente = _lista(antes, f'"{sep}"', '"docker", "rm", "-f", c', con_ssh=con_ssh)
+    assert culpables_en_texto(fuente, es_python=True), f"no detectó: {fuente}"
+
+
+@pytest.mark.parametrize("sep", _SEPS_LISTA)
+def test_exec_rm_dentro_del_contenedor_sigue_sin_contar_con_separadores(sep):
+    fuente = _lista('"docker", "exec", c, "rm", "-f", p', f'"{sep}"', '"docker", "rm", "-fv", c', con_ssh=True)
+    assert not culpables_en_texto(fuente, es_python=True), f"falso positivo: {fuente}"
 
 
 def test_whitelist_no_se_extiende_a_prefijos_dinamicos_ni_contextos_cercanos():
