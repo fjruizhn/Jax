@@ -810,6 +810,8 @@ Patrón vigente al migrar (2026-10-03, master 364ded9): `^156 passed`
 
 Jax#338 (2026-10-04): `^156 passed` → `^164 passed`, +8 en las_manos/_procesamiento_routes_test.py (formato_no_soportado con formato, freno por contenido, 422 antes del freno); medido local hall9000.
 
+2026-10-06 (cierre de #362): `^164 passed` → `^166 passed`, +2 netas en `tests/test_las_manos_auth_servicio.py` (la identidad `jacobs` pierde `/motor/dispatch` y `/motor/job/*`: 3 pruebas de 403 + 1 de que conserva solo `/jacobs/pipeline`, menos 2 filas de `test_declarar_otra_identidad_se_rechaza`). Medido LOCAL en hall9000 con el comando exacto de tres archivos (`166 passed`). Esos +2 ya estaban contados en `tests-puros/out`, que corre el mismo archivo: el archivo cae en DOS pisos y la tanda anterior solo ajusto uno. Revisados todos los pasos de `policy.yml` que corren archivos tocados desde ea428368 (`auth_servicio`, `human_gate`, `arranque`, `invoke_motor_*`, `config_entorno`, `cliente_http`, `dispatch_step_reroute`, `plan_facetas`, `_arbitro_test`): solo este paso (fuera de `tests-puros/out`) corre uno de ellos; los otros pasos de `governance` (10 a 13) siguen en `^264`, `^15` y `^10`, medidos local.
+
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 ```text
