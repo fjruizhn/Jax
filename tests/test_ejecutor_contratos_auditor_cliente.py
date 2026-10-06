@@ -139,6 +139,15 @@ def test_las_instrucciones_son_un_archivo_no_vacio():
     assert "fuera_de_mision" in AC.instrucciones() and "no_responde" in AC.instrucciones()
 
 
+def test_modos_no_reciben_instrucciones_del_otro_modo():
+    completo = AC.instrucciones("COMPLETO")
+    solo = AC.instrucciones("SOLO_ORDENES")
+    assert "MODO SOLO_ORDENES" not in completo
+    assert '"afirmaciones": []' not in completo
+    assert "MODO SOLO_ORDENES" in solo
+    assert "no_responde" not in solo
+
+
 def test_la_llave_no_sale_en_el_error():
     def manejar(req):
         return httpx.Response(401, text="llave-XYZ invalida")

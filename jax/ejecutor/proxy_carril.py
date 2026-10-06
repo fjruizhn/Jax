@@ -125,6 +125,7 @@ import collections
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import stat
@@ -248,6 +249,9 @@ class Config:
     jaxqwen_socket: Path | None = None
     jaxqwen_uid: int | None = None
     jaxqwen_gid: int | None = None
+    c5_control_socket: Path | None = None
+    c5_control_uid: int | None = None
+    c5_control_gid: int | None = None
 
 
 def config_desde_entorno(env=None) -> Config:
@@ -305,6 +309,21 @@ def config_desde_entorno(env=None) -> Config:
         raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_UID/GID"),))) from exc
     if jaxqwen_uid is not None and (jaxqwen_uid < 1 or jaxqwen_gid is None or jaxqwen_gid < 1):
         raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_UID/GID"),)))
+    c5_socket_raw = env.get("JAX_PROXY_CARRIL_C5_SOCKET", "").strip()
+    c5_uid_raw = env.get("JAX_PROXY_CARRIL_C5_UID", "").strip()
+    c5_gid_raw = env.get("JAX_PROXY_CARRIL_C5_GID", "").strip()
+    if any((c5_socket_raw, c5_uid_raw, c5_gid_raw)) and not all((c5_socket_raw, c5_uid_raw, c5_gid_raw)):
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_C5_*"),)))
+    c5_socket = Path(c5_socket_raw) if c5_socket_raw else None
+    try:
+        c5_uid = int(c5_uid_raw) if c5_uid_raw else None
+        c5_gid = int(c5_gid_raw) if c5_gid_raw else None
+    except ValueError as exc:
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_C5_UID/GID"),))) from exc
+    if c5_socket is not None and (not c5_socket.is_absolute() or len(os.fsencode(c5_socket)) >= 104):
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_C5_SOCKET"),)))
+    if c5_uid is not None and (c5_uid < 1 or c5_gid is None or c5_gid < 1):
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_C5_UID/GID"),)))
     pensamiento = obligatoria("JAX_PROXY_CARRIL_PENSAMIENTO")
     if pensamiento not in _PENSAMIENTOS:
         raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_PENSAMIENTO"),)))
@@ -322,6 +341,7 @@ def config_desde_entorno(env=None) -> Config:
         max_salida_tokens=positivo("JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS"),
         pensamiento=pensamiento,
         jaxqwen_socket=jaxqwen_socket, jaxqwen_uid=jaxqwen_uid, jaxqwen_gid=jaxqwen_gid,
+        c5_control_socket=c5_socket, c5_control_uid=c5_uid, c5_control_gid=c5_gid,
     )
 
 
@@ -433,6 +453,8 @@ class _Proxy:
         # tool_use_id ya anotados como resultado: la historia se repite entera en cada
         # petición (medido con el arnés 2.1.273), cada resultado se anota una vez.
         self._resultados_anotados: collections.OrderedDict = collections.OrderedDict()
+        self._misiones_c5_anotadas: collections.OrderedDict[str, None] = collections.OrderedDict()
+        self._candado_c5 = asyncio.Lock()
         # Un cliente propio del proxy (pool de conexiones), no uno por petición:
         # vive lo que vive el servidor y se cierra en `cerrar()`. Se construye con
         # crear_cliente_http() (E-24, el único constructor del árbol de servicio)
@@ -462,6 +484,45 @@ class _Proxy:
             return uid == expected_uid
         except (AttributeError, OSError, struct.error):
             return False
+
+    async def atender_c5_control(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                                 expected_uid: int) -> None:
+        """Canal local autenticado para que C5 anote la selección por el escritor único de C3."""
+        try:
+            if not self._peer_uid_permitido(writer.get_extra_info("socket"), expected_uid):
+                writer.write(b"DENIED\n")
+                await writer.drain()
+                return
+            tamano = struct.unpack("!I", await asyncio.wait_for(reader.readexactly(4), 2))[0]
+            if not 1 <= tamano <= 4096:
+                raise ValueError("evento_c5_tamano_invalido")
+            evento = json.loads(await asyncio.wait_for(reader.readexactly(tamano), 2))
+            if (not isinstance(evento, dict)
+                    or set(evento) != {"evento", "mision_id", "faceta", "proveedor_id", "local", "modo"}
+                    or evento.get("evento") != "c5_auditor_elegido"
+                    or not all(isinstance(evento.get(k), str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", evento[k])
+                               for k in ("mision_id", "faceta", "proveedor_id"))
+                    or not isinstance(evento.get("local"), bool)
+                    or evento["local"] is not False
+                    or evento.get("modo") != "SOLO_ORDENES"):
+                raise ValueError("evento_c5_invalido")
+            async with self._candado_c5:
+                if evento["mision_id"] in self._misiones_c5_anotadas:
+                    raise ValueError("evento_c5_duplicado")
+                await self._anotar(evento)
+                self._misiones_c5_anotadas[evento["mision_id"]] = None
+                while len(self._misiones_c5_anotadas) > 4096:
+                    self._misiones_c5_anotadas.popitem(last=False)
+            writer.write(b"OK\n")
+            await writer.drain()
+        except (asyncio.IncompleteReadError, asyncio.TimeoutError, ValueError, OSError, TypeError):
+            writer.write(b"ERROR\n")
+            try:
+                await writer.drain()
+            except OSError:
+                pass
+        finally:
+            await _cerrar(writer)
 
     async def atender(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                       imponer_pensamiento: bool = True) -> None:
@@ -811,12 +872,16 @@ class Servidor:
     vive el servidor."""
 
     def __init__(self, servidor: asyncio.Server, proxy: _Proxy, servidor_jaxqwen: asyncio.Server | None = None,
-                 socket_jaxqwen: Path | None = None) -> None:
+                 socket_jaxqwen: Path | None = None, servidor_c5: asyncio.Server | None = None,
+                 socket_c5: Path | None = None) -> None:
         self._servidor = servidor
         self._servidor_jaxqwen = servidor_jaxqwen
         self._socket_jaxqwen = socket_jaxqwen
+        self._servidor_c5 = servidor_c5
+        self._socket_c5 = socket_c5
         # (st_dev, st_ino) del socket que creamos: solo ese objeto se borra, nunca "lo que haya en la ruta".
         self._identidad_socket = _identidad_socket(socket_jaxqwen) if socket_jaxqwen is not None else None
+        self._identidad_c5 = _identidad_socket(socket_c5) if socket_c5 is not None else None
         self._proxy = proxy
 
     @property
@@ -831,6 +896,10 @@ class Servidor:
             # wait_closed espera a las conexiones en vuelo; si systemd agota TimeoutStopSec y manda
             # SIGKILL durante esa espera, un socket aún en disco quedaría huérfano Y aceptando.
             self._borrar_socket_propio()
+        if self._servidor_c5 is not None:
+            self._servidor_c5.close()
+            if self._socket_c5 is not None:
+                _borrar_si_es_nuestro(self._socket_c5, self._identidad_c5)
 
     def _borrar_socket_propio(self) -> None:
         if self._socket_jaxqwen is not None:
@@ -841,6 +910,8 @@ class Servidor:
         await self._servidor.wait_closed()
         if self._servidor_jaxqwen is not None:
             await self._servidor_jaxqwen.wait_closed()
+        if self._servidor_c5 is not None:
+            await self._servidor_c5.wait_closed()
 
     async def wait_closed(self) -> None:
         await self._esperar_servidores()
@@ -976,12 +1047,18 @@ async def arrancar(cfg: Config) -> Servidor:
         if not _padre_valido(parent):
             raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_SOCKET"),)))
         await asyncio.to_thread(_despejar_socket_huerfano, cfg.jaxqwen_socket)
+    if cfg.c5_control_socket is not None:
+        if not _padre_valido(cfg.c5_control_socket.parent):
+            raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_C5_SOCKET"),)))
+        await asyncio.to_thread(_despejar_socket_huerfano, cfg.c5_control_socket)
     # Un registro que no cuadra NO se abre (RegistroCorrupto): sin registro no hay cerebro.
     registro = await asyncio.to_thread(Registro, cfg.registro)
     proxy = None
     servidor = None
     servidor_jaxqwen = None
+    servidor_c5 = None
     identidad = None
+    identidad_c5 = None
     try:
         await asyncio.to_thread(registro.anotar, {"evento": "registro_abierto", "pid": os.getpid()})
         proxy = _Proxy(cfg, registro)
@@ -1000,12 +1077,26 @@ async def arrancar(cfg: Config) -> Servidor:
             identidad = _identidad_socket(path)
             os.chmod(path, 0o660, follow_symlinks=False)
             os.chown(path, -1, cfg.jaxqwen_gid, follow_symlinks=False)
+        if cfg.c5_control_socket is not None:
+            path = cfg.c5_control_socket
+            async def atender_c5(reader, writer):
+                await proxy.atender_c5_control(reader, writer, cfg.c5_control_uid)
+
+            servidor_c5 = await asyncio.start_unix_server(atender_c5, path=str(path))
+            identidad_c5 = _identidad_socket(path)
+            os.chmod(path, 0o660, follow_symlinks=False)
+            os.chown(path, -1, cfg.c5_control_gid, follow_symlinks=False)
     except BaseException:
         if servidor_jaxqwen is not None:
             servidor_jaxqwen.close()
             await servidor_jaxqwen.wait_closed()
             if cfg.jaxqwen_socket is not None:
                 _borrar_si_es_nuestro(cfg.jaxqwen_socket, identidad)
+        if servidor_c5 is not None:
+            servidor_c5.close()
+            await servidor_c5.wait_closed()
+            if cfg.c5_control_socket is not None:
+                _borrar_si_es_nuestro(cfg.c5_control_socket, identidad_c5)
         if servidor is not None:
             servidor.close()
             await servidor.wait_closed()
@@ -1014,7 +1105,8 @@ async def arrancar(cfg: Config) -> Servidor:
         registro.cerrar()
         raise
     return Servidor(servidor, proxy, servidor_jaxqwen,
-                    cfg.jaxqwen_socket if servidor_jaxqwen is not None else None)
+                    cfg.jaxqwen_socket if servidor_jaxqwen is not None else None,
+                    servidor_c5, cfg.c5_control_socket if servidor_c5 is not None else None)
 
 
 async def _principal() -> None:

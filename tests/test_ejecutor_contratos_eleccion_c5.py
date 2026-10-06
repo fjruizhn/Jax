@@ -153,6 +153,14 @@ def test_validar_eleccion_solo_permite_auditor_nube_sensible_en_solo_ordenes():
                               auditor_nube_solo_ordenes=True) == ()
 
 
+def test_validar_eleccion_solo_ordenes_rechaza_auditor_local():
+    comunes = dict(proveedor_cerebro="anthropic", proveedor_auditor="ollama", auditor_es_local=True,
+                   admite_datos_de_clientes=False, hosts_mision={"cliente"},
+                   hosts_con_clientes={"cliente"}, hosts_conocidos={"cliente"})
+    fallos = E.validar_eleccion(**comunes, modo="SOLO_ORDENES", auditor_nube_solo_ordenes=True)
+    assert any(f.codigo == "modo_solo_ordenes_no_autorizado" for f in fallos)
+
+
 def test_validar_eleccion_rechaza_modo_desconocido():
     comunes = dict(proveedor_cerebro="anthropic", proveedor_auditor="openai", auditor_es_local=False,
                    admite_datos_de_clientes=False, hosts_mision={"cliente"},

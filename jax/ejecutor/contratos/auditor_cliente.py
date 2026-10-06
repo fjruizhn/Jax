@@ -57,14 +57,16 @@ class AuditorNoSoportado(RuntimeError):
 
 def instrucciones(modo: str = "COMPLETO") -> str:
     texto = _INSTRUCCIONES.read_text(encoding="utf-8")
-    if modo == "SOLO_ORDENES":
-        inicio, fin = "<!-- SOLO_ORDENES: inicio -->", "<!-- SOLO_ORDENES: fin -->"
-        if inicio not in texto or fin not in texto:
-            raise ValueError("instrucciones_solo_ordenes_ausentes")
-        return texto.split(inicio, 1)[1].split(fin, 1)[0].strip()
-    if modo != "COMPLETO":
+    if modo not in ("COMPLETO", "SOLO_ORDENES"):
         raise ValueError("modo_auditoria_desconocido")
-    return texto
+    inicio, fin = "<!-- SOLO_ORDENES: inicio -->", "<!-- SOLO_ORDENES: fin -->"
+    if texto.count(inicio) != 1 or texto.count(fin) != 1:
+        raise ValueError("instrucciones_solo_ordenes_ausentes")
+    anterior, cola = texto.split(inicio, 1)
+    solo, posterior = cola.split(fin, 1)
+    if posterior.strip():
+        raise ValueError("instrucciones_solo_ordenes_fuera_de_bloque")
+    return solo.strip() if modo == "SOLO_ORDENES" else anterior.rstrip()
 
 
 async def auditar(lote: A.Lote, *, faceta, max_tokens: int, tope_s: float, cliente=None,
@@ -72,8 +74,11 @@ async def auditar(lote: A.Lote, *, faceta, max_tokens: int, tope_s: float, clien
     if faceta.transport not in TRANSPORTES_SOPORTADOS:
         raise AuditorNoSoportado(faceta.transport)
     cliente = cliente or obtener_cliente_http()
-    cuerpo = {"model": faceta.model, "max_completion_tokens": max_tokens,
-              "messages": A.mensajes(lote, instrucciones(modo), modo=modo)}
+    try:
+        cuerpo = {"model": faceta.model, "max_completion_tokens": max_tokens,
+                  "messages": A.mensajes(lote, instrucciones(modo), modo=modo)}
+    except A.AuditorIlegible as exc:
+        raise A.AuditorIlegible(exc.codigo, modo=modo, faceta=getattr(faceta, "key", None)) from None
     try:
         # Sin credencial NO se manda la cabecera: la ausencia es un hecho del transporte
         # ('ollama' esta exento por facet_resolver), no un valor vacio que se serializa.

@@ -395,9 +395,16 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
         # y elegir_y_resolver_auditor necesita nombres para consultar ejecutor_host.
         async with conexion(desechable=True) as conn:
             cfg = await eleccion_c5.leer_config(conn)
-            faceta, _, _, modo = await eleccion_c5.elegir_y_resolver_auditor(
-                conn, cfg=cfg, hosts_mision=turno.hosts, resolve_facet=resolve_facet, devolver_modo=True)
+            faceta, fallos, modo = await arranque.eleccion_del_auditor(
+                conn, hosts_mision=turno.hosts, cfg=cfg, resolve_facet=resolve_facet, devolver_modo=True)
+        if fallos:
+            raise arranque.ContratosNoVerificados(fallos)
         estado["faceta_auditor"] = faceta
+        if modo == "SOLO_ORDENES":
+            # El vigía ya auditó cada orden desde C3. Esta revisión final antes juzgaba claims;
+            # en SOLO_ORDENES no se reenvía un lote vacío o datos de claims a la nube.
+            ids = frozenset(a.id for a in A.afirmaciones_auditables(entrega))
+            return A.Revision(False, None, None, (), frozenset(), ids, modo, faceta.key)
         return await auditor_cliente.auditar(A.Lote(texto, (), A.afirmaciones_auditables(entrega), maquinas),
                                              faceta=faceta, max_tokens=cfg.max_tokens,
                                              tope_s=cfg.tope_s, modo=modo)

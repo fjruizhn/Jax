@@ -29,9 +29,17 @@ Las lecturas de identidad que el contrato del Ejecutor exige continúan dentro d
 de la misión y de su auditoría; este modo no autoriza omitirlas.
 
 La habilitación se administra como clave de `/admin/config`, con autorización exclusiva
-de superadmin. Cada misión registra de forma auditable la faceta y el modo efectivos en
-su bitácora; el arranque y C3 conservan el mismo dato en su registro append-only. El
-registro de claims marca expresamente que C5 en modo `SOLO_ORDENES` no los auditó.
+de superadmin. Cada misión registra de forma auditable faceta, proveedor y modo en su
+bitácora y en el journal de arranque. Para C3, `jaxsvc` informa la selección por el
+socket Unix `JAX_PROXY_CARRIL_C5_SOCKET`; el proxy autentica su UID
+(`JAX_PROXY_CARRIL_C5_UID`) y escribe el evento en la cadena como único escritor. El
+socket se habilita con su grupo (`JAX_PROXY_CARRIL_C5_GID`). Si el canal falta o falla,
+la misión `SOLO_ORDENES` no inicia. El evento solo contiene ID de misión, faceta,
+proveedor, localidad y modo. El registro de claims marca expresamente que C5 en modo
+`SOLO_ORDENES` no los auditó. Las órdenes `Skill` o entradas sin Bash `command` no
+pueden proyectarse sin salir de la allowlist y fallan cerradas en el vigía. La revisión
+final no vuelve a enviar claims ni un lote vacío: usa el resultado del vigía para marcar
+las claims como no auditadas.
 
 ---
 

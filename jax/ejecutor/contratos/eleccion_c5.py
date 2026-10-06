@@ -167,7 +167,8 @@ def validar_eleccion(*, proveedor_cerebro: str, proveedor_auditor: str, auditor_
     if not hosts_mision:
         fallos.append(Fallo("c5", "mision_sin_maquinas"))
     sens = sensibles(hosts_mision, hosts_con_clientes, hosts_conocidos)
-    solo_ordenes_valido = modo == "SOLO_ORDENES" and auditor_nube_solo_ordenes and bool(sens)
+    solo_ordenes_valido = (modo == "SOLO_ORDENES" and auditor_nube_solo_ordenes and bool(sens)
+                           and not auditor_es_local)
     if modo == "SOLO_ORDENES" and not solo_ordenes_valido:
         fallos.append(Fallo("c5", "modo_solo_ordenes_no_autorizado"))
     if sens and not (auditor_es_local or admite_datos_de_clientes or solo_ordenes_valido):

@@ -208,11 +208,14 @@ def test_principal_pasa_el_tipo_de_la_mision_al_contexto(tmp_path, monkeypatch):
             lote_max=5, intervalo_s=1.0, max_tokens=100, tope_s=400,
             admite_datos_de_clientes=False, admite_mismo_proveedor=False, auditor_nube_solo_ordenes=False)
 
+    from types import SimpleNamespace
+
     async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet, devolver_modo=False):
-        return ("faceta-fake", None, None, "COMPLETO") if devolver_modo else ("faceta-fake", None, None)
+        return (SimpleNamespace(key="thot", provider_id="openai"), (), "COMPLETO")
 
     monkeypatch.setattr(eleccion_c5, "leer_config", _leer_config_falso)
-    monkeypatch.setattr(eleccion_c5, "elegir_y_resolver_auditor", _elegir_falso)
+    monkeypatch.setattr(S.arranque, "eleccion_del_auditor", _elegir_falso)
+    monkeypatch.setattr(eleccion_c5, "es_local", lambda conn, provider_id: asyncio.sleep(0, result=False))
 
     llamadas = {}
 
@@ -998,11 +1001,14 @@ def test_principal_pasa_la_ruta_extra_del_administrador_de_verdad_block_f(tmp_pa
             lote_max=5, intervalo_s=1.0, max_tokens=100, tope_s=400,
             admite_datos_de_clientes=False, admite_mismo_proveedor=False, auditor_nube_solo_ordenes=False)
 
+    from types import SimpleNamespace
+
     async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet, devolver_modo=False):
-        return ("faceta-fake", None, None, "COMPLETO") if devolver_modo else ("faceta-fake", None, None)
+        return (SimpleNamespace(key="thot", provider_id="openai"), (), "COMPLETO")
 
     monkeypatch.setattr(eleccion_c5, "leer_config", _leer_config_falso)
-    monkeypatch.setattr(eleccion_c5, "elegir_y_resolver_auditor", _elegir_falso)
+    monkeypatch.setattr(S.arranque, "eleccion_del_auditor", _elegir_falso)
+    monkeypatch.setattr(eleccion_c5, "es_local", lambda conn, provider_id: asyncio.sleep(0, result=False))
 
     llamadas = {}
 
@@ -1035,11 +1041,14 @@ def test_el_vigia_audita_con_el_plazo_de_axioma_config(tmp_path, monkeypatch):
             lote_max=5, intervalo_s=1.0, max_tokens=100, tope_s=777,
             admite_datos_de_clientes=False, admite_mismo_proveedor=False, auditor_nube_solo_ordenes=False)
 
+    from types import SimpleNamespace
+
     async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet, devolver_modo=False):
-        return ("faceta-fake", None, None, "COMPLETO") if devolver_modo else ("faceta-fake", None, None)
+        return (SimpleNamespace(key="thot", provider_id="openai"), (), "COMPLETO")
 
     monkeypatch.setattr(eleccion_c5, "leer_config", _leer_config_falso)
-    monkeypatch.setattr(eleccion_c5, "elegir_y_resolver_auditor", _elegir_falso)
+    monkeypatch.setattr(S.arranque, "eleccion_del_auditor", _elegir_falso)
+    monkeypatch.setattr(eleccion_c5, "es_local", lambda conn, provider_id: asyncio.sleep(0, result=False))
     vistas = {}
 
     async def _auditar_falso(lote, **kw):
@@ -1057,4 +1066,6 @@ def test_el_vigia_audita_con_el_plazo_de_axioma_config(tmp_path, monkeypatch):
     monkeypatch.setattr(S, "correr_mision", _correr_mision_falso)
     assert asyncio.run(S._principal(ruta_mision)) == 0
     assert asyncio.run(capturado["auditar"]("lote")) == "revision"
-    assert vistas == {"faceta": "faceta-fake", "max_tokens": 100, "tope_s": 777, "modo": "COMPLETO"}
+    assert vistas["faceta"].key == "thot"
+    assert {k: v for k, v in vistas.items() if k != "faceta"} == {
+        "max_tokens": 100, "tope_s": 777, "modo": "COMPLETO"}

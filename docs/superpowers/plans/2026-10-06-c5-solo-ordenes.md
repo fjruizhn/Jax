@@ -33,8 +33,8 @@
 **Files:**
 - Modify: `docs/superpowers/specs/2026-09-18-auditor-local-opcion.md`
 
-- [ ] Add a dated decision section defining `SOLO_ORDENES`, exactly which data leaves, what stays local, superadmin `/admin/config` authorization, audit logging, and false default.
-- [ ] Review that the section states claims are not audited and that identity reads required by the executor contract remain in scope.
+- [x] Add a dated decision section defining `SOLO_ORDENES`, exactly which data leaves, what stays local, superadmin `/admin/config` authorization, audit logging, and false default.
+- [x] Review that the section states claims are not audited and that identity reads required by the executor contract remain in scope.
 
 ### Task 2: Implement mode selection, projection, and interpretation
 
@@ -47,15 +47,17 @@
 - Modify: `jax/ejecutor/mision.py`
 - Modify: `jax/ejecutor/mision_servicio.py`
 - Modify: `jax/ejecutor/contratos/vigia_servicio.py`
+- Modify: `jax/ejecutor/proxy_carril.py`
+- Add: `jax/ejecutor/contratos/c3_control.py`
 - Test: `tests/test_ejecutor_contratos_eleccion_c5.py`
 - Test: `tests/test_ejecutor_contratos_auditor.py`
 - Test: `tests/test_ejecutor_contratos_auditor_cliente.py`
 - Test: `tests/test_ejecutor_mision.py`
 
-- [ ] Add failing tests for strict config parsing, sensitive-mode selection and validation, allowlist-only request projection, body-level secret absence, and claim verdict rejection.
-- [ ] Run those tests against the unchanged baseline and confirm they fail for the intended behavior.
-- [ ] Implement the smallest changes consistent with the spec, including startup and per-mission audit records.
-- [ ] Run affected tests and policy checks.
+- [x] Add failing tests for strict config parsing, sensitive-mode selection and validation, allowlist-only request projection, body-level secret absence, and claim verdict rejection.
+- [x] Run those tests against the unchanged baseline and confirm they fail for the intended behavior.
+- [x] Implement the smallest changes consistent with the spec, including startup and per-mission C3 audit records through the proxy's sole writer.
+- [x] Run affected tests and policy checks.
 
 ### Task 3: Config administration split check
 
@@ -66,8 +68,7 @@
 
 ### Task 4: Verification and handoff
 
-- [ ] Measure changed-test count delta and update `docs/ci/pisos.md`.
-- [ ] Make one real minimal thot call through the system resolver/client without exposing credentials or putting them in argv; report exact outcome.
+- [x] Measure changed-test count delta and update `docs/ci/pisos.md`.
+- [x] Make one real minimal thot call through the system resolver/client without exposing credentials or putting them in argv; report exact outcome.
 - [ ] Review the exact implementation SHA with an independent Tier 3 adversarial reviewer.
 - [ ] Report PR, SHA, test results, test-floor delta, and provider-call result. Do not merge.
-

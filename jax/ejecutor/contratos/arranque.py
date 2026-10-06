@@ -432,7 +432,8 @@ def pruebas_reales(ctx: Contexto) -> dict:
             cfg = await eleccion_c5.leer_config(conn)
             auditor_f, eleccion, modo = await eleccion_del_auditor(
                 conn, hosts_mision=ctx.hosts_mision, cfg=cfg, resolve_facet=resolve_facet, devolver_modo=True)
-        log.info("c5_auditor_elegido faceta=%s modo=%s", getattr(auditor_f, "key", auditor_f), modo)
+        log.info("c5_auditor_elegido faceta=%s proveedor=%s modo=%s",
+                 getattr(auditor_f, "key", auditor_f), getattr(auditor_f, "provider_id", "desconocido"), modo)
 
         async def auditar(lote):
             return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens,

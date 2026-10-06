@@ -58,6 +58,30 @@ def test_solo_ordenes_rechaza_hallazgo_que_apunta_a_una_afirmacion():
     assert exc.value.codigo == "veredictos_afirmaciones_prohibidos"
 
 
+def test_solo_ordenes_rechaza_skill_que_no_se_puede_proyectar_sin_filtrar():
+    lote = A.Lote("objetivo", (A.Paso(7, "Skill", {"skill": "endureciendo", "args": "SECRETO"}, False),),
+                  (), LOTE.maquinas)
+    with pytest.raises(A.AuditorIlegible) as exc:
+        A.mensajes(lote, "instrucciones", modo="SOLO_ORDENES")
+    assert exc.value.codigo == "paso_no_auditable_solo_ordenes"
+
+
+def test_solo_ordenes_rechaza_bash_malformado():
+    lote = A.Lote("objetivo", (A.Paso(7, "Bash", {"command": None}, False),), (), LOTE.maquinas)
+    with pytest.raises(A.AuditorIlegible) as exc:
+        A.mensajes(lote, "instrucciones", modo="SOLO_ORDENES")
+    assert exc.value.codigo == "paso_no_auditable_solo_ordenes"
+
+
+@pytest.mark.parametrize("doc", [
+    {"hallazgos": [], "afirmaciones": [], "veredicto": "claim aprobado"},
+    {"hallazgos": [{"tipo": "prohibido", "paso": 1, "veredicto": "claim aprobado"}], "afirmaciones": []},
+])
+def test_solo_ordenes_rechaza_campos_extra_semanticos(doc):
+    with pytest.raises(A.AuditorIlegible):
+        A.interpretar(LOTE, _r(doc), modo="SOLO_ORDENES")
+
+
 def test_solo_ordenes_retiene_todas_las_afirmaciones_sin_veredicto():
     rev = A.interpretar(LOTE, _r({"hallazgos": [], "afirmaciones": []}), modo="SOLO_ORDENES")
     assert rev.modo == "SOLO_ORDENES"

@@ -125,6 +125,7 @@ CODIGOS_ILEGIBLE = frozenset({
     "proveedor_fallo", "proveedor_plazo", "json_invalido", "forma_invalida", "tipo_desconocido",
     "cita_paso_inexistente", "cita_afirmacion_inexistente", "veredicto_desconocido", "veredicto_duplicado"})
 CODIGOS_ILEGIBLE = CODIGOS_ILEGIBLE | frozenset({"veredictos_afirmaciones_prohibidos", "modo_auditoria_desconocido"})
+CODIGOS_ILEGIBLE = CODIGOS_ILEGIBLE | frozenset({"paso_no_auditable_solo_ordenes"})
 DETALLE_INVALIDO = "detalle_invalido"
 DETALLE_NO_COPIADO = "detalle_no_copiado"
 
@@ -187,14 +188,21 @@ def proyectar_solo_ordenes(lote: Lote) -> dict:
     comandos = []
     for paso in lote.pasos:
         entrada = paso.entrada
-        comando = entrada.get("command") if isinstance(entrada, dict) else None
-        if isinstance(comando, str):
-            comandos.append({"n": paso.n, "comando": comando})
+        if paso.herramienta != "Bash" or not isinstance(entrada, dict):
+            raise _paso_no_auditable_solo_ordenes()
+        comando = entrada.get("command")
+        if not isinstance(comando, str) or not comando:
+            raise _paso_no_auditable_solo_ordenes()
+        comandos.append({"n": paso.n, "comando": comando})
     return {
         "objetivo": lote.mision,
         "maquinas": [{"nombre": m.nombre, "ip": m.ip, "puerto": m.puerto} for m in lote.maquinas],
         "comandos": comandos,
     }
+
+
+def _paso_no_auditable_solo_ordenes():
+    return AuditorIlegible("paso_no_auditable_solo_ordenes")
 
 
 def mensajes(lote: Lote, instrucciones: str, *, modo: str = "COMPLETO") -> list[dict]:
@@ -233,20 +241,21 @@ def interpretar(lote: Lote, texto, *, modo: str = "COMPLETO") -> Revision:
     if not isinstance(doc.get("hallazgos"), list) or not isinstance(doc.get("afirmaciones"), list):
         raise AuditorIlegible("forma_invalida")
     if modo == "SOLO_ORDENES":
-        if doc["afirmaciones"]:
+        if set(doc) != {"hallazgos", "afirmaciones"} or doc["afirmaciones"]:
             raise AuditorIlegible("veredictos_afirmaciones_prohibidos")
         pasos = {p.n for p in lote.pasos}
         hallazgos = []
         for h in doc["hallazgos"]:
-            if not isinstance(h, dict) or h.get("tipo") not in ("fuera_de_mision", "prohibido"):
+            if isinstance(h, dict) and "afirmacion" in h:
+                raise AuditorIlegible("veredictos_afirmaciones_prohibidos")
+            if (not isinstance(h, dict) or set(h) != {"tipo", "paso"}
+                    or h.get("tipo") not in ("fuera_de_mision", "prohibido")):
                 raise AuditorIlegible("tipo_desconocido")
             paso = h.get("paso")
             if h["tipo"] in PAUSAN and not (_es_numero_de_paso(paso) and paso in pasos):
                 raise AuditorIlegible("cita_paso_inexistente")
             if paso is not None and not (_es_numero_de_paso(paso) and paso in pasos):
                 raise AuditorIlegible("cita_paso_inexistente")
-            if h.get("afirmacion") is not None:
-                raise AuditorIlegible("veredictos_afirmaciones_prohibidos")
             hallazgos.append(Hallazgo(h["tipo"], paso, None))
         que_pausan = [h for h in hallazgos if h.tipo in PAUSAN]
         primero = que_pausan[0] if que_pausan else None
