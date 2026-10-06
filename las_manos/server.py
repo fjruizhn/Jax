@@ -278,6 +278,15 @@ async def _jacobs_init() -> None:
 
     await jacobs_store.init_tables()
 
+    # Idempotencia de POST /procesamiento/trabajos: la tabla de claves se crea aqui (CREATE TABLE IF NOT
+    # EXISTS, repetible) y la config se valida al arrancar: un valor invalido tumba el arranque, no el
+    # primer pedido con clave.
+    import procesamiento_idempotencia
+    procesamiento_idempotencia.ttl_segundos()
+    procesamiento_idempotencia.gracia_segundos()
+    procesamiento_idempotencia.espera_ms()
+    await procesamiento_idempotencia.init_tabla()
+
     from motor_registry.routes import init_motor_catalog
     await init_motor_catalog()
 
