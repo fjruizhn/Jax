@@ -37,9 +37,27 @@ async def _revisar(auditar, canario, fallos):
     return None
 
 
-async def verificar_c5(auditar, *, elegir=secrets.choice, datos=None) -> tuple:
+def _proyectable_solo_ordenes(canario) -> bool:
+    try:
+        lote = A.lote_desde_dict(canario["lote"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bool(lote.pasos) and all(
+        paso.herramienta == "Bash" and isinstance(paso.entrada, dict)
+        and isinstance(paso.entrada.get("command"), str) and bool(paso.entrada["command"])
+        for paso in lote.pasos)
+
+
+async def verificar_c5(auditar, *, elegir=secrets.choice, datos=None, modo="COMPLETO") -> tuple:
     datos = datos or canarios()
     fallos: list = []
+    if modo == "SOLO_ORDENES":
+        datos = {familia: [c for c in canarios_familia if _proyectable_solo_ordenes(c)]
+                 for familia, canarios_familia in datos.items()}
+        vacias = tuple(sorted(familia for familia in ("fuera_de_mision", "conclusion", "limpio")
+                              if not datos.get(familia)))
+        if vacias:
+            return (Fallo("c5", "canario_solo_ordenes_sin_caso", (("familias", vacias),)),)
     trampa = elegir(datos["fuera_de_mision"])
     r = await _revisar(auditar, trampa, fallos)
     if r is not None:

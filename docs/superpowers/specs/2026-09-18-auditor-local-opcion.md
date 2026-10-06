@@ -41,6 +41,11 @@ pueden proyectarse sin salir de la allowlist y fallan cerradas en el vigía. La 
 final no vuelve a enviar claims ni un lote vacío: usa el resultado del vigía para marcar
 las claims como no auditadas.
 
+El canario de arranque en `SOLO_ORDENES` filtra cada familia a casos cuyos pasos sean
+Bash `command` completos. Si una familia no tiene casos proyectables, el canario falla
+cerrado antes de llamar al proveedor. La comprobación independiente de que pasos `Write`
+o `Skill` fallan cerrados se mantiene en las pruebas del proyector y del cliente.
+
 El registro C3 de selección es idempotente por ID de misión: al iniciar, el proxy
 reconstruye el índice desde la cadena C3 íntegra; una repetición idéntica responde OK
 sin agregar otra entrada y sobrevive reinicios. Una faceta, proveedor, localidad o modo

@@ -4,7 +4,9 @@ dispara por el motivo equivocado, el que pausa todo y el que se cae, no."""
 import asyncio
 import json
 import re
+from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from jax.ejecutor.contratos import auditor as A
@@ -29,10 +31,10 @@ def _correcto(lote):
     raise AssertionError("lote desconocido")
 
 
-def _verificar(auditar_sync, elegir=_primero):
+def _verificar(auditar_sync, elegir=_primero, modo="COMPLETO"):
     async def auditar(lote):
         return auditar_sync(lote)
-    return asyncio.run(C.verificar_c5(auditar, elegir=elegir))
+    return asyncio.run(C.verificar_c5(auditar, elegir=elegir, modo=modo))
 
 
 def test_los_canarios_son_validos_y_sin_ips_reales():
@@ -54,6 +56,39 @@ def test_canario_c5_acepta_revision_solo_ordenes_sin_aprobar_afirmaciones():
                           frozenset(), frozenset(a.id for a in lote.afirmaciones), "SOLO_ORDENES")
 
     assert _verificar(solo_ordenes) == ()
+
+
+def test_solo_ordenes_filtra_trampas_no_proyectables_sin_debilitar_fallo_cerrado():
+    recibidos = []
+
+    async def escenario():
+        from jax.ejecutor.contratos import auditor_cliente
+
+        def responder(request):
+            body = json.loads(request.content)
+            proyeccion = json.loads(body["messages"][1]["content"])
+            recibidos.append(proyeccion)
+            comandos = [p["comando"] for p in proyeccion["comandos"]]
+            assert all(set(p) == {"n", "comando"} for p in proyeccion["comandos"])
+            assert "Write" not in request.content.decode()
+            assert "SECRETO-CLIENTE-123" not in request.content.decode()
+            hallazgos = ([{"tipo": "prohibido", "paso": 2}]
+                         if any("ssh_host_ed25519_key" in comando or "id_ed25519" in comando
+                                or "systemctl stop" in comando for comando in comandos) else [])
+            contenido = json.dumps({"hallazgos": hallazgos, "afirmaciones": []})
+            return httpx.Response(200, json={"choices": [{"message": {"content": contenido}}]})
+
+        faceta = SimpleNamespace(transport="http_openai_compat", model="gpt-test", base_url="https://mock.invalid",
+                                 credential=None, key="thot")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as cliente:
+            async def auditar(lote):
+                return await auditor_cliente.auditar(lote, faceta=faceta, max_tokens=64, tope_s=1,
+                                                     cliente=cliente, modo="SOLO_ORDENES")
+            return await C.verificar_c5(auditar, elegir=lambda opciones: opciones[1], modo="SOLO_ORDENES")
+
+    assert asyncio.run(escenario()) == ()
+    assert len(recibidos) == 3
+    assert all(set(proyeccion) == {"objetivo", "maquinas", "comandos"} for proyeccion in recibidos)
 
 
 def test_no_dispara_la_trampa():

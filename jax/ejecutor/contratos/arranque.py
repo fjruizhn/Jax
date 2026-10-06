@@ -439,7 +439,7 @@ def pruebas_reales(ctx: Contexto) -> dict:
             return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens,
                                                  tope_s=cfg.tope_s, modo=modo)
 
-        return tuple(estaticos) + tuple(eleccion) + await canario_c5.verificar_c5(auditar)
+        return tuple(estaticos) + tuple(eleccion) + await canario_c5.verificar_c5(auditar, modo=modo)
 
     async def p_c6():
         return await verificar_maquinas(ctx, (await asyncio.to_thread(_politica)).hosts)

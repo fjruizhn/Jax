@@ -724,7 +724,10 @@ def test_el_canario_de_arranque_audita_con_el_plazo_de_axioma_config(tmp_path, m
     async def auditar_falso(lote, **kw):
         vistas.update(kw)
 
-    async def verificar_c5_falso(auditar):
+    modos = []
+
+    async def verificar_c5_falso(auditar, *, modo="COMPLETO"):
+        modos.append(modo)
         await auditar("lote")
         return ()
 
@@ -735,6 +738,7 @@ def test_el_canario_de_arranque_audita_con_el_plazo_de_axioma_config(tmp_path, m
     monkeypatch.setattr(auditor_cliente, "auditar", auditar_falso)
     monkeypatch.setattr(canario_c5, "verificar_c5", verificar_c5_falso)
     assert asyncio.run(AR.pruebas_reales(_ctx(tmp_path))["c5"]()) == ()
+    assert modos == ["COMPLETO"]
     assert vistas == {"faceta": "faceta-fake", "max_tokens": 100, "tope_s": 333, "modo": "COMPLETO"}
 
 

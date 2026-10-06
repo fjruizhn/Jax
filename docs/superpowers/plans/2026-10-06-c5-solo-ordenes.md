@@ -57,6 +57,7 @@
 - [x] Add failing tests for strict config parsing, sensitive-mode selection and validation, allowlist-only request projection, body-level secret absence, and claim verdict rejection.
 - [x] Run those tests against the unchanged baseline and confirm they fail for the intended behavior.
 - [x] Implement the smallest changes consistent with the spec, including startup and per-mission C3 audit records through the proxy's sole writer.
+- [x] Filter SOLO_ORDENES canaries to projectable Bash commands and exercise the real client/projection through a mock HTTP transport.
 - [x] Run affected tests and policy checks.
 
 ### Task 3: Config administration split check

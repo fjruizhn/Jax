@@ -3,10 +3,11 @@
 Estado: implementación en curso en `feat/c5-solo-ordenes`, rebasada sobre `origin/master` (`f47820f5`). No integrar. No tocar PENDIENTES ni DB de producción.
 
 - Spec y cambios JAX en el worktree `/home/fruiz/wt/jax-c5-solo-ordenes`.
-- Focal actual: 493 tests recolectadas en diez archivos; `origin/master`: 470; delta +23.
+- Focal actual: 494 tests recolectadas en diez archivos; `origin/master`: 470; delta +24.
 - El C3 selección solo órdenes pasa por `JAX_PROXY_CARRIL_C5_SOCKET` y UID/GID dedicados; el proxy mantiene el escritor único y el vigía falla cerrado si falta el canal.
 - Seed/admin de plataforma aún sin cambios. Inspección indica `/admin/config` es superadmin, audita todas las escrituras y no tiene catálogo de claves; el componente AdminSettings sí requiere un control visible con i18n. `backend/ejecutor/misiones.py::maquinas()` tiene un gate separado que debe aceptar el flag solo órdenes.
 - Luego abrir PR JAX antes de crear `/home/fruiz/wt/jxp-c5-solo-ordenes` y hacer PR independiente de plataforma.
 - Una llamada real thot con contenido sintético y 128 tokens falló en el resolvedor antes de HTTP (`FacetUnavailableError`, log interno `RuntimeError`); no repetir.
-- Reauditoría de `4589ffec` reprodujo un BLOCK: el índice idempotente solo vivía en memoria, aceptaba selección conflictiva tras reinicio y olvidaba entradas al superar 4096. Se corrige reconstruyéndolo desde el C3 íntegro, sin ventana acotada; se cubrió reinicio. También se conserva proveedor/localidad en la bitácora. Test UDS afectado: 25 passed; falta repetir focal de diez archivos y controles de pisos.
+- Auditoría de `50b5b683`: el BLOCK de idempotencia cerró y encontró MAJOR en canario, que elegía aleatoriamente `Write` incompatible con la proyección. SOLO_ORDENES ya filtra cada familia a casos Bash proyectables, falla cerrado si no queda familia, y una integración usa `auditor_cliente` real + `MockTransport`.
+- Verificación tras ese cambio: focal 494 passed; controles de pisos 227 passed; collect-only baseline `origin/master` 470 vs rama 494; diff-check y JSON válidos. Falta commit y auditoría Tier 3 del SHA actual.
 - Falta commit de los fixes de revisión, Tier 3 independiente del SHA corregido, abrir PR JAX y luego crear `/home/fruiz/wt/jxp-c5-solo-ordenes` para la PR de plataforma. Actualizar este archivo con los SHA/PR/resultados.
