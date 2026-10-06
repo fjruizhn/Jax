@@ -22,13 +22,19 @@ from pydantic import BaseModel, Field, field_validator
 # vez de definirlos.
 HTTP_FACETS = frozenset({"hipatia", "jekyll", "thot", "ada"})
 MOTOR_FACETS = frozenset({"kimi", "jax_local"})
+# Facetas que existen pero NO tienen ejecución gobernada por paso (a propósito).
+# No es la lista de lo ejecutable (eso es HTTP_FACETS, lista blanca): solo decide
+# qué motivo se reporta primero, "cerrada a propósito" vs. "no está en la tabla".
+FACETAS_CERRADAS_A_PROPOSITO = MOTOR_FACETS | frozenset({"hyde"})
 
 
 def faceta_ejecutable_en_pipeline(faceta: str | None) -> bool:
     """Indica si Jacobs puede despachar esta faceta con ejecución gobernada
-    por paso. Motor Registry y Hyde siguen cerrados hasta que exista ese
-    contrato en la ruta de pipeline."""
-    return faceta not in MOTOR_FACETS and faceta != "hyde"
+    por paso. LISTA BLANCA: solo las facetas HTTP gobernadas (NIVEL C). Motor
+    Registry (MOTOR_FACETS), Hyde y cualquier faceta que se active mañana en la
+    tabla con otro transporte quedan cerradas por omisión, hasta que exista ese
+    contrato en la ruta de pipeline y se sume acá a propósito."""
+    return faceta in HTTP_FACETS
 
 
 class PipelineStatus(str, Enum):

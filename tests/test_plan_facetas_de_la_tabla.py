@@ -299,3 +299,26 @@ def test_el_plan_de_respaldo_con_una_faceta_inactiva_se_rechaza_nombrandola(monk
         asyncio.run(correr())
     assert [v.facet for v in e.value.violations] == ["thot"]
     assert "arbitro_no_disponible" in e.value.violations[0].reason
+
+
+# --- E2b-1a MINOR 1 (auditoria #362): lista blanca, no lista negra ---------
+
+@pytest.mark.parametrize("faceta", sorted(models.HTTP_FACETS))
+def test_el_predicado_acepta_solo_las_facetas_http_gobernadas(faceta):
+    assert models.faceta_ejecutable_en_pipeline(faceta) is True
+
+
+@pytest.mark.parametrize("faceta", ["kimi", "jax_local", "hyde", "faceta_nueva_subprocess", "", None])
+def test_el_predicado_rechaza_toda_faceta_fuera_de_la_lista_blanca(faceta):
+    """Una faceta nueva activada en la tabla (otro transporte, otro nombre) no
+    entra por omision: sin estar en HTTP_FACETS, el plan no pasa -- si no, falla
+    al ejecutar, despues de haber cobrado los pasos anteriores."""
+    assert models.faceta_ejecutable_en_pipeline(faceta) is False
+
+
+def test_validar_facetas_ejecutables_rechaza_una_faceta_nueva_no_listada():
+    nuevo = models.Step(facet="faceta_nueva_subprocess", capability="analysis", step_index=0)
+    ok = models.Step(facet="hipatia", capability="analysis", step_index=1)
+    with pytest.raises(plan_mod.MotorGobernadoNoDisponible) as exc:
+        plan_mod.validar_facetas_ejecutables([nuevo, ok])
+    assert [v.facet for v in exc.value.violations] == ["faceta_nueva_subprocess"]

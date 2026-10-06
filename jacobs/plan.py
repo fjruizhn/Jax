@@ -17,7 +17,9 @@ import uuid
 import logging
 from dataclasses import dataclass, field
 
-from jacobs.models import MAX_STEPS_PER_PIPELINE, MOTOR_FACETS, Step, faceta_ejecutable_en_pipeline
+from jacobs.models import (
+    FACETAS_CERRADAS_A_PROPOSITO, MAX_STEPS_PER_PIPELINE, MOTOR_FACETS, Step, faceta_ejecutable_en_pipeline,
+)
 from facet_resolver import resolve_facet, FacetUnavailableError
 from model_catalog import record_resolved_version_safe
 from contrato_dispatch import ModelDispatchConfigError, limite_de_salida
@@ -743,15 +745,23 @@ class PlanBuilder:
                 f"{len(steps)} pasos (incluido el árbitro que agrega Jacobs) "
                 f"excede el límite duro de {MAX_STEPS_PER_PIPELINE}",
             )])
-        validar_facetas_ejecutables(steps)
         # T2/T3 (2026-08-21): gate único para AMBOS caminos -- vive acá, no
         # dentro de _from_spec ni _from_objective, para que ningún origen de
         # plan pueda saltárselo. cleanroom antes solo corría dentro de
         # _from_spec (nunca para planes del LLM) y solo advertía; ahora
         # bloquea para los dos caminos, mismo mecanismo que capabilities.
+        #
+        # Orden (E2b-1a MINOR 1): el predicado de ejecución es lista blanca, así
+        # que una faceta inventada o inactiva también es "no ejecutable" y
+        # taparía el motivo real (la tabla `facet`). Por eso la violación de la
+        # tabla va primero -- salvo para las facetas cerradas A PROPÓSITO
+        # (motores y Hyde), que siguen respondiendo
+        # motor_gobernado_no_disponible aunque la tabla no las tenga activas.
         facet_violations = _check_facets(steps, governance["facets"])
-        if facet_violations:
-            raise PlanRejected(facet_violations)
+        de_la_tabla = [v for v in facet_violations if v.facet not in FACETAS_CERRADAS_A_PROPOSITO]
+        if de_la_tabla:
+            raise PlanRejected(de_la_tabla)
+        validar_facetas_ejecutables(steps)
         cleanroom_violations = _check_cleanroom(steps)
         if cleanroom_violations:
             raise PlanRejected(cleanroom_violations)
