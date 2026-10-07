@@ -60,6 +60,7 @@ argumentos.
 """
 from __future__ import annotations
 
+import atexit
 import grp
 import json
 import os
@@ -80,7 +81,13 @@ SCRIPT = RAIZ_REPO / "ops" / "permisos_proyectos.py"
 # MAJOR-1 (revision Tarea 3 E2a): las pruebas NUNCA instalan ni borran el nucleo de sistema real
 # (/usr/local/sbin/jax-permisos-proyectos): usan una ruta propia bajo el directorio temporal,
 # que el guion lee de JAX_PERMISOS_NUCLEO.
-_DIR_NUCLEO_PRUEBA = Path(tempfile.mkdtemp(prefix="permisos-nucleo-"))
+# TemporaryDirectory (no `mkdtemp` a mano): lo cierra la fixture `_limpiar_nucleo_de_prueba` al
+# terminar el modulo, y `atexit` cubre los caminos en que esa fixture nunca corre (import sin
+# pruebas, --collect-only, sesion interrumpida antes del primer setup), que antes dejaban un
+# `permisos-nucleo-*` huerfano en /tmp.
+_TMP_NUCLEO = tempfile.TemporaryDirectory(prefix="permisos-nucleo-")
+atexit.register(_TMP_NUCLEO.cleanup)
+_DIR_NUCLEO_PRUEBA = Path(_TMP_NUCLEO.name)
 RUTA_INSTALADA = _DIR_NUCLEO_PRUEBA / "jax-permisos-proyectos"
 os.environ["JAX_PERMISOS_NUCLEO"] = str(RUTA_INSTALADA)
 RUTA_NUCLEO_SISTEMA = Path("/usr/local/sbin/jax-permisos-proyectos")
@@ -94,7 +101,7 @@ DUENO_ORIGINAL = "fruiz"
 def _limpiar_nucleo_de_prueba():
     yield
     subprocess.run(["sudo", "-n", "rm", "-f", str(RUTA_INSTALADA)], capture_output=True)
-    shutil.rmtree(_DIR_NUCLEO_PRUEBA, ignore_errors=True)
+    _TMP_NUCLEO.cleanup()
 
 
 _RESPALDOS_TEMPORALES = (
@@ -304,7 +311,15 @@ print(json.dumps({{
 
 
 def _limpiar_como_root(ruta: Path) -> None:
-    subprocess.run(["sudo", "-n", "rm", "-rf", str(ruta)], capture_output=True)
+    """Borrado garantizado y VISIBLE. Dentro del arbol quedan archivos de jaxsvc y fruiz (chown/setfacl
+    de las pruebas) que el usuario de la suite no puede borrar solo, asi que se borra como root; si el rm
+    falla o algo queda, el error sube (error de teardown en la fixture) en vez de dejar basura silenciosa
+    en /tmp -- el `capture_output` sin comprobacion anterior se tragaba los fallos."""
+    r = subprocess.run(["sudo", "-n", "rm", "-rf", str(ruta)], capture_output=True)
+    if r.returncode != 0 or ruta.exists():
+        raise AssertionError(
+            f"no se pudo borrar el arbol de prueba {ruta} (rc={r.returncode}): "
+            f"{r.stderr.decode(errors='replace').strip()}")
 
 
 def _crear_archivo_de_fruiz_0600(ruta: Path) -> None:
@@ -370,8 +385,10 @@ def base_propia(_identidades):
     prueba de concurrencia, no una carrera del guion). Aqui nadie reescribe los permisos."""
     base = Path(tempfile.mkdtemp(prefix="permisos-arbol-"))
     os.chmod(base, 0o755)
-    yield base
-    _limpiar_como_root(base)
+    try:
+        yield base
+    finally:
+        _limpiar_como_root(base)
 
 
 @pytest.fixture(scope="module")

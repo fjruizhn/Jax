@@ -301,9 +301,12 @@ def test_safe_directory_allows_one_foreign_owned_checkout_but_not_its_sibling(tm
     if can_sudo.returncode:
         pytest.skip("cross-UID Git regression requires noninteractive sudo")
 
-    base = Path(tempfile.mkdtemp(prefix="jax-dispatch-git-trust-", dir="/tmp"))
-    os.chmod(base, 0o755)
-    try:
+    # TemporaryDirectory keeps the world-searchable parent under /tmp (nobody has to
+    # traverse it) and guarantees removal; a failed removal raises instead of
+    # leaving a jax-dispatch-git-trust-* orphan in /tmp.
+    with tempfile.TemporaryDirectory(prefix="jax-dispatch-git-trust-", dir="/tmp") as raw:
+        base = Path(raw)
+        os.chmod(base, 0o755)
         trusted, sibling = base / "trusted", base / "sibling"
         for repo in (trusted, sibling):
             subprocess.run(["/usr/bin/git", "init", "-q", str(repo)], check=True)
@@ -325,8 +328,6 @@ def test_safe_directory_allows_one_foreign_owned_checkout_but_not_its_sibling(tm
         rejected = subprocess.run([*as_nobody, *sibling_command], capture_output=True, text=True)
         assert rejected.returncode != 0
         assert "dubious ownership" in rejected.stderr
-    finally:
-        shutil.rmtree(base)
 
 
 def test_every_dispatch_git_call_uses_the_central_exact_trust_argument(root, tmp_path, monkeypatch):

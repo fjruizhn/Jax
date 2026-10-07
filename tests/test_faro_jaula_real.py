@@ -73,13 +73,13 @@ def requiere_bwrap():
 @pytest.fixture
 def base():
     """Un directorio al que cualquier uid puede entrar (0711) para que lo que falle dentro falle por el 0700
-    de `faro` y no porque el camino hasta ahi no se pueda recorrer."""
-    d = Path(tempfile.mkdtemp(prefix="faro-real-", dir="/tmp"))
-    d.chmod(0o711)
-    try:
+    de `faro` y no porque el camino hasta ahi no se pueda recorrer. TemporaryDirectory (no `mkdtemp` a mano):
+    el borrado queda garantizado al salir, y si no puede borrar el error es un error de teardown VISIBLE -- el
+    `rmtree(ignore_errors=True)` de antes dejaba un `faro-real-*` huerfano en /tmp sin que nadie se enterara."""
+    with tempfile.TemporaryDirectory(prefix="faro-real-", dir="/tmp") as td:
+        d = Path(td)
+        d.chmod(0o711)
         yield d
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture
