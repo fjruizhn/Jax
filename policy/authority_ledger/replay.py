@@ -39,9 +39,9 @@ class ReconstructedAuthorityState:
     overlays: Mapping[str, OverlayPayload]
     revoked_overlays: frozenset[str]
     checkpoint: AuthorityLedgerCheckpoint
-    rule_ratification_grants: Mapping[str, AuthorityEvent] = field(default_factory=dict)
-    latest_rule_ratifications: Mapping[str, AuthorityEvent] = field(default_factory=dict)
-    revoked_rule_ratifications: frozenset[str] = frozenset()
+    _rule_ratification_grants: Mapping[str, AuthorityEvent] = field(default_factory=dict, repr=False)
+    _latest_rule_ratifications: Mapping[str, AuthorityEvent] = field(default_factory=dict, repr=False)
+    _revoked_rule_ratifications: frozenset[str] = field(default_factory=frozenset, repr=False)
     _verified_seal: object | None = None
 
     @property
@@ -52,6 +52,15 @@ class ReconstructedAuthorityState:
 
     def _is_verified(self) -> bool:
         return self._verified_seal is _REPLAY_SEAL
+
+    def current_rule_ratification(self, rule_id: str) -> AuthorityEvent | None:
+        """Return the latest grant only while it remains unrevoked."""
+        if not self._is_verified():
+            raise AuthorityStateError("rule ratification requiere replay verificado")
+        event = self._latest_rule_ratifications.get(rule_id)
+        if event is None or event.event_id in self._revoked_rule_ratifications:
+            return None
+        return event
 
 
 _REPLAY_SEAL = object()

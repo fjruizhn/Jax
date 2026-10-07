@@ -174,8 +174,7 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
             assert restored == events
             assert all(item.event_hash == event_hash(item) for item in restored)
             assert state.checkpoint.sequence == 8
-            assert state.latest_rule_ratifications["send-receipt"].event_id == events[6].event_id
-            assert events[6].event_id in state.revoked_rule_ratifications
+            assert state.current_rule_ratification("send-receipt") is None
             with connect() as db:
                 with db.cursor() as cursor:
                     cursor.execute(

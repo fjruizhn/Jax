@@ -100,6 +100,8 @@ class RuleRatificationGrantPayload:
             value = getattr(self, field)
             if not isinstance(value, str) or not _GIT_OID.fullmatch(value):
                 raise AuthorityEventValidationError(f"{field} OID inválido")
+        if len({len(self.rule_blob_oid), len(self.ratified_policy_revision), len(self.ratified_policy_tree_oid)}) != 1:
+            raise AuthorityEventValidationError("OID Git mezclan formatos SHA-1/SHA-256")
         sha256_id(self.rule_content_hash, "rule_content_hash")
         sha256_id(self.ratified_policy_snapshot_hash, "ratified_policy_snapshot_hash")
         object.__setattr__(self, "valid_from_utc", _time(self.valid_from_utc, "valid_from_utc"))
