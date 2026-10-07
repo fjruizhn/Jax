@@ -6,19 +6,21 @@ import uuid
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from .errors import (AuthorityStateError, LedgerCheckpointError, LedgerIntegrityError,
+from .errors import (AuthorityStateError, CheckpointPublicationOutcomeUnknownError,
+                     LedgerAlreadyInitializedError, LedgerCheckpointError, LedgerIntegrityError,
                      LedgerRollbackError, UnanchoredLedgerHeadError, TrustedRootMismatchError)
 from .models import (
     AuthorityEvent, AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
     _RATIFICATION_SNAPSHOT_SEAL, _RATIFICATION_STORAGE_SEAL,
     _RULE_RATIFICATION_SNAPSHOT_SEAL,
 )
-from .replay import event_hash, event_unsigned_bytes, genesis_hash, verify_authority_ledger
+from .replay import (event_hash, event_unsigned_bytes, genesis_hash,
+                     replay_authority_history, verify_authority_ledger)
 from .signatures import decode_public_key, public_key_bytes, public_key_fingerprint, sign
 from .storage import AuthorityLedgerStore
 from .trusted_root import TrustedAuthorityRoot
-from .canonical import plain
-from .trusted_checkpoint import CheckpointPublicationOutcomeUnknownError, TrustedCheckpointStore
+from .canonical import domain_hash, plain
+from .trusted_checkpoint import TrustedCheckpointStore
 
 
 def _uuid7() -> str:
@@ -28,12 +30,29 @@ def _uuid7() -> str:
     return str(creator())
 
 
-def initialize_authority_ledger(store: AuthorityLedgerStore, genesis: AuthorityLedgerGenesis, trusted_root: TrustedAuthorityRoot) -> None:
-    """Verify the externally pinned root; it does not write or bless a root."""
-    existing = store.get_genesis()
-    if existing != genesis:
+def initialize_authority_ledger(store: AuthorityLedgerStore, genesis: AuthorityLedgerGenesis, trusted_root: TrustedAuthorityRoot, checkpoint_store: TrustedCheckpointStore) -> None:
+    """Bootstrap an empty ledger once; use `verify_authority_ledger` afterward."""
+    if store.get_genesis() != genesis:
         raise TrustedRootMismatchError("genesis de storage no es el genesis solicitado")
-    verify_authority_ledger(existing, (), trusted_root)
+    with checkpoint_store.locked():
+        if checkpoint_store.path.exists():
+            raise LedgerAlreadyInitializedError("ledger authority ya inicializado; usar verify_authority_ledger")
+        events = store.events()
+        if checkpoint_store.bootstrap_receipt_path.exists():
+            raise LedgerAlreadyInitializedError("recibo bootstrap existe pero falta checkpoint; restaurar ambos artifacts, no reinicializar")
+        if events:
+            raise LedgerCheckpointError("bootstrap rechazado: ledger legacy con eventos sin checkpoint; conservar y recuperar artifacts")
+        if trusted_root.ledger_identity != genesis.ledger_identity or trusted_root.genesis_hash != genesis_hash(genesis):
+            raise TrustedRootMismatchError("genesis no coincide con trusted root")
+        public = decode_public_key(genesis.constitutional_public_key)
+        if trusted_root.constitutional_key_id != genesis.constitutional_key_id or trusted_root.constitutional_public_key_fingerprint != public_key_fingerprint(public_key_bytes(public)):
+            raise TrustedRootMismatchError("clave constitucional no coincide con trusted root")
+        from .models import AuthorityLedgerCheckpoint
+        checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, 0, None, None)
+        root_projection = {"schema_version": trusted_root.schema_version, "kind": trusted_root.kind, "ledger_identity": trusted_root.ledger_identity, "genesis_hash": trusted_root.genesis_hash, "constitutional_key_id": trusted_root.constitutional_key_id, "constitutional_public_key_fingerprint": trusted_root.constitutional_public_key_fingerprint}
+        receipt = {"schema_version": "1.0", "kind": "JAX_AUTHORITY_LEDGER_BOOTSTRAP_RECEIPT", "ledger_identity": genesis.ledger_identity, "genesis_hash": genesis_hash(genesis), "trusted_root_hash": domain_hash("JAX-TRUSTED-AUTHORITY-ROOT", "1.0", root_projection), "checkpoint_hash": checkpoint.authority_ledger_checkpoint_hash}
+        checkpoint_store.bootstrap(checkpoint, receipt)
+        verify_authority_ledger(genesis, (), trusted_root, checkpoint_store)
 
 
 def ratification_intent_from_candidate(corpus, evidence_refs: tuple[str, ...] = ()) -> AuthorityEventIntent:
@@ -53,13 +72,8 @@ def ratification_intent_from_candidate(corpus, evidence_refs: tuple[str, ...] = 
     )
 
 
-def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, private_key: Ed25519PrivateKey, intent: AuthorityEventIntent, *, event_id: str | None = None, recorded_at_utc: datetime | None = None, checkpoint_store: TrustedCheckpointStore | None = None) -> AuthorityEvent:
+def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, private_key: Ed25519PrivateKey, intent: AuthorityEventIntent, *, event_id: str | None = None, recorded_at_utc: datetime | None = None, checkpoint_store: TrustedCheckpointStore) -> AuthorityEvent:
     """Append one signed Fernando event after verifying the complete ledger."""
-    if checkpoint_store is None:
-        return _append_authority_event_unlocked(
-            store, trusted_root, private_key, intent, event_id=event_id,
-            recorded_at_utc=recorded_at_utc, checkpoint_store=None,
-        )
     # The checkpoint sidecar is the cross-process writer boundary for this
     # deployment's single host/local filesystem.  It spans every ledger read,
     # the DB append+commit, durable checkpoint publication, and its reread.
@@ -70,16 +84,16 @@ def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAut
         )
 
 
-def _append_authority_event_unlocked(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, private_key: Ed25519PrivateKey, intent: AuthorityEventIntent, *, event_id: str | None, recorded_at_utc: datetime | None, checkpoint_store: TrustedCheckpointStore | None) -> AuthorityEvent:
+def _append_authority_event_unlocked(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, private_key: Ed25519PrivateKey, intent: AuthorityEventIntent, *, event_id: str | None, recorded_at_utc: datetime | None, checkpoint_store: TrustedCheckpointStore) -> AuthorityEvent:
+    if checkpoint_store is None:
+        raise AuthorityStateError("append requiere checkpoint externo; no puede inicializarlo")
     if intent._ratification_snapshot_seal is _RATIFICATION_STORAGE_SEAL:
         raise AuthorityStateError("ratificación rehidratada desde storage no se puede volver a anexar")
     if (intent.event_type is AuthorityEventType.RATIFICATION_GRANTED
             and intent._ratification_snapshot_seal is not _RATIFICATION_SNAPSHOT_SEAL):
         raise AuthorityStateError("ratificación requiere snapshot sellado del candidate boundary")
     existing_events = store.events()
-    use_anchor = checkpoint_store is not None and (bool(existing_events) or checkpoint_store.path.exists())
-    state = verify_authority_ledger(store.get_genesis(), existing_events, trusted_root,
-                                    checkpoint_store if use_anchor else None)
+    state = verify_authority_ledger(store.get_genesis(), existing_events, trusted_root, checkpoint_store)
     if intent.event_type is AuthorityEventType.OVERLAY_ISSUED:
         assert intent.overlay is not None
         if not any(event.intent.policy_corpus_hash == intent.overlay.policy_corpus_hash
@@ -114,58 +128,58 @@ def _append_authority_event_unlocked(store: AuthorityLedgerStore, trusted_root: 
     # bytes precisely so this gate can cryptographically verify the candidate
     # against the reconstructed state. If replay rejects it, nothing reaches
     # storage and the append-only ledger cannot be poisoned.
-    verify_authority_ledger(genesis, events + (complete,), trusted_root)
+    replay_authority_history(genesis, events + (complete,), trusted_root)
     store.append(complete)
-    if checkpoint_store is not None:
-        from .models import AuthorityLedgerCheckpoint
-        # El evento NO se considera aceptado hasta que su checkpoint quedó
-        # escrito. Si el checkpoint falla, el evento ya es append-only y no se
-        # retira: se reporta como huérfano con error tipado y el verificador
-        # delata la cabeza sin anclar hasta la reconciliación.
-        checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, complete.sequence, complete.event_id, complete.event_hash)
-        try:
-            checkpoint_store._append_locked(checkpoint)
-        except CheckpointPublicationOutcomeUnknownError as exc:
-            raise LedgerCheckpointError(
-                f"evento {complete.event_id} (secuencia {complete.sequence}): resultado de publicación "
-                "desconocido después de os.replace — verificar/reconciliar con "
-                "reanchor_authority_checkpoint(store, trusted_root, checkpoint_store)"
-            ) from exc
-        except Exception as exc:
-            raise LedgerCheckpointError(
-                f"evento huérfano {complete.event_id} (secuencia {complete.sequence}): "
-                "escrito en el ledger sin checkpoint externo — reconciliar con "
-                "reanchor_authority_checkpoint(store, trusted_root, checkpoint_store)"
-            ) from exc
+    from .models import AuthorityLedgerCheckpoint
+    # The append is not accepted until its checkpoint is durably published.
+    checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, complete.sequence, complete.event_id, complete.event_hash)
+    try:
+        checkpoint_store._append_locked(checkpoint)
+    except CheckpointPublicationOutcomeUnknownError as exc:
+        raise CheckpointPublicationOutcomeUnknownError(
+            f"evento {complete.event_id} (secuencia {complete.sequence}): resultado de publicación "
+            "desconocido después de os.replace; verificar/reconciliar con "
+            "reanchor_authority_checkpoint(store, trusted_root, checkpoint_store)"
+        ) from exc
+    except Exception as exc:
+        raise LedgerCheckpointError(
+            f"evento huérfano {complete.event_id} (secuencia {complete.sequence}): "
+            "escrito en el ledger sin checkpoint externo — reconciliar con "
+            "reanchor_authority_checkpoint(store, trusted_root, checkpoint_store)"
+        ) from exc
     return complete
 
 
 def reanchor_authority_checkpoint(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, checkpoint_store) -> "AuthorityLedgerCheckpoint":
-    """Reconciliación de una cabeza sin checkpoint: re-ancla el checkpoint al
-    head EXISTENTE.
+    """Advance an existing checkpoint over a verified append-only DB suffix.
 
-    Procedimiento (auditor de #377): el evento huérfano no se retira (el ledger
-    es append-only); se verifica el stream COMPLETO sin ancla externa y, si el
-    head es válido, se escribe su checkpoint. Tras esto, el verificador con
-    ``checkpoint_store`` vuelve a pasar: la cabeza queda anclada y el ledger no
-    quedó inverificable para siempre."""
+    This cannot recreate missing trust evidence. It accepts only a valid-prefix
+    database head, and is idempotent when the checkpoint already matches.
+    """
     with checkpoint_store.locked():
         return _reanchor_authority_checkpoint_unlocked(store, trusted_root, checkpoint_store)
 
 
 def _reanchor_authority_checkpoint_unlocked(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, checkpoint_store) -> "AuthorityLedgerCheckpoint":
     from .models import AuthorityLedgerCheckpoint
-    genesis = store.get_genesis()
     events = store.events()
     if not events:
         raise AuthorityStateError("reconciliación exige un head existente")
+    if not checkpoint_store.path.exists():
+        raise LedgerIntegrityError("reanchor exige checkpoint externo vigente; no puede reconstruir confianza ausente")
+    genesis = store.get_genesis()
     head = events[-1]
     checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, head.sequence, head.event_id, head.event_hash)
     try:
         verify_authority_ledger(genesis, events, trusted_root, checkpoint_store)
     except UnanchoredLedgerHeadError:
         anchored = checkpoint_store.latest()
-        if (len(events) < anchored.sequence
+        if anchored.ledger_identity != genesis.ledger_identity:
+            raise LedgerRollbackError("checkpoint vigente pertenece a otro ledger")
+        if anchored.sequence == 0:
+            if anchored.head_event_id is not None or anchored.head_event_hash is not None:
+                raise LedgerRollbackError("checkpoint genesis inválido")
+        elif (len(events) < anchored.sequence
                 or events[anchored.sequence - 1].event_id != anchored.head_event_id
                 or events[anchored.sequence - 1].event_hash != anchored.head_event_hash):
             raise LedgerRollbackError("stream no conserva el checkpoint vigente como prefijo")
@@ -179,6 +193,6 @@ def _reanchor_authority_checkpoint_unlocked(store: AuthorityLedgerStore, trusted
             raise LedgerRollbackError("checkpoint vigente no coincide con el head DB")
         verify_authority_ledger(genesis, events, trusted_root, checkpoint_store)
         return checkpoint
-    verify_authority_ledger(genesis, events, trusted_root)
+    replay_authority_history(genesis, events, trusted_root)
     checkpoint_store._append_locked(checkpoint)
     return checkpoint

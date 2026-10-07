@@ -5,8 +5,10 @@ from policy.authority_ledger.errors import (AuthorityStateError, OverlayApplicab
                                             OverlayConflictError)
 from policy.authority_ledger.models import AuthorityEvent, AuthorityEventIntent, AuthorityEventType, OverlayType
 from policy.authority_ledger.replay import (ReconstructedAuthorityState, effective_overlays,
-                                            event_hash, event_unsigned_bytes, verify_authority_ledger)
-from policy.authority_ledger.service import append_authority_event
+                                            event_hash, event_unsigned_bytes)
+from policy.authority_ledger.replay import replay_authority_history, _effective_overlays_for_history
+from tests.policy.test_authority_ledger_events import verify_authority_ledger
+from tests.policy.test_authority_ledger_events import append_authority_event
 from policy.authority_ledger.signatures import sign
 from policy.authority_resolution.models import ConditionResult, EvaluationContext
 from tests.policy.test_authority_ledger_events import base_time, overlay, setup_ledger
@@ -123,11 +125,11 @@ def test_legacy_overlay_sin_ratificacion_queda_en_cuarentena_permanente_y_se_pue
         (activation_id, AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", ratification_event_id=ratification_id)),
     ))
 
-    state = verify_authority_ledger(store.get_genesis(), historical, root)
+    state = replay_authority_history(store.get_genesis(), historical, root)
     assert state.active_policy_corpus_hash == ratification.policy_corpus_hash
     assert state.overlays[legacy.overlay_id] == legacy
     assert state.quarantined_overlays == frozenset({legacy.overlay_id})
-    assert effective_overlays(state, context(), base_time()) == ()
+    assert _effective_overlays_for_history(state, context(), base_time()) == ()
 
     revoked = _legacy_signed_events(key, (
         (overlay_id, AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=legacy)),
@@ -135,6 +137,6 @@ def test_legacy_overlay_sin_ratificacion_queda_en_cuarentena_permanente_y_se_pue
         (activation_id, AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", ratification_event_id=ratification_id)),
         (revoke_id, AuthorityEventIntent(AuthorityEventType.OVERLAY_REVOKED, "human:fernando", overlay_id=legacy.overlay_id)),
     ))
-    revoked_state = verify_authority_ledger(store.get_genesis(), revoked, root)
+    revoked_state = replay_authority_history(store.get_genesis(), revoked, root)
     assert legacy.overlay_id in revoked_state.revoked_overlays
     assert legacy.overlay_id in revoked_state.quarantined_overlays

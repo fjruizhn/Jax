@@ -26,15 +26,10 @@ def test_valid_replay_artifact_mismatch_is_divergence(tmp_path, monkeypatch):
     checkpoints = TrustedCheckpointStore(tmp_path / "checkpoints")
     checkpoints.append(state.checkpoint)
     import policy.decision_record.replay as subject
-    original = subject.evaluate_decision_input
+    original = subject._build_historical_authority_envelope
     def changed(*args):
         value = original(*args)
-        snap = value.result.effective_authority_envelope
-        from policy.decision_record.models import EffectiveAuthorityEnvelopeSnapshot, DecisionResult, VerifiedDecisionEvaluation
-        altered = EffectiveAuthorityEnvelopeSnapshot(snap.schema_version, snap.kind, snap.static_resolution,
-            snap.active_policy_corpus_hash, snap.effective_authority_context_hash,
-            snap.authority_ledger_checkpoint_hash, ("different-overlay",), snap.lifecycle_status)
-        return type(value)(value.decision_input, value.authority_binding,
-            DecisionResult("1.0", "JAX_DECISION_RESULT", "EFFECTIVE_AUTHORITY_ANALYSIS_ONLY", altered))
-    monkeypatch.setattr(subject, "evaluate_decision_input", changed)
+        from dataclasses import replace
+        return replace(value, relevant_overlay_ids=("different-overlay",))
+    monkeypatch.setattr(subject, "_build_historical_authority_envelope", changed)
     assert replay_decision(record, store, root, checkpoints).status is DecisionReplayStatus.REPLAY_DIVERGENCE

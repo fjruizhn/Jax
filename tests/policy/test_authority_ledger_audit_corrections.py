@@ -9,8 +9,9 @@ from policy.authority_ledger.errors import (AuthorityEventValidationError,
                                             UnanchoredLedgerHeadError)
 from policy.authority_ledger.models import (AuthorityEventIntent, AuthorityEventType,
                                             OverlayPayload, OverlayScope, OverlayType)
-from policy.authority_ledger.replay import effective_overlays, verify_authority_ledger
-from policy.authority_ledger.service import append_authority_event
+from policy.authority_ledger.replay import effective_overlays
+from tests.policy.test_authority_ledger_events import verify_authority_ledger
+from tests.policy.test_authority_ledger_events import append_authority_event
 from policy.authority_ledger.storage import MariaDBAuthorityLedgerStore
 from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
 from policy.authority_resolution.models import EvaluationContext

@@ -24,8 +24,10 @@ from policy.authority_ledger.models import (
     AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
     OverlayPayload, OverlayScope, OverlayType, RuleRatificationGrantPayload,
 )
-from policy.authority_ledger.replay import event_hash, genesis_hash, verify_authority_ledger
-from policy.authority_ledger.service import append_authority_event, ratification_intent_from_candidate
+from policy.authority_ledger.replay import event_hash, genesis_hash
+from tests.policy.test_authority_ledger_events import verify_authority_ledger
+from tests.policy.test_authority_ledger_events import append_authority_event
+from policy.authority_ledger.service import ratification_intent_from_candidate
 from policy.authority_ledger.signatures import encode_public_key, public_key_bytes, public_key_fingerprint
 from policy.authority_ledger.storage import MariaDBAuthorityLedgerStore
 from policy.authority_ledger.trusted_root import TrustedAuthorityRoot

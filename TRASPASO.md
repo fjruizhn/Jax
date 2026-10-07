@@ -97,15 +97,35 @@ Diseño verificado: NINGÚN documento de docs/superpowers/specs menciona OVERLAY
 - **Verificación local:** suite `tests/policy/test_authority_ledger*.py` → **90
   passed** con `JAX_AUTHORITY_LEDGER_DOCKER_CMD='sudo -n docker'`; tanda focal
   31 passed; `py_compile` y `git diff --check` limpios.
-- CI del SHA `3167689a` sigue en curso; `subpipeline-contrato-db` aparece rojo y
-  sus logs aún no están disponibles hasta que termine el workflow. No declarar CI
-  verde.
-- Falta publicar estas correcciones y pedir auditoría escalón 3 del SHA exacto;
-  el CI y auditoría de `3167689a` no cubren estos cambios.
+- **Auditoría escalón 3 de `019a4f23` (2026-10-07): RECHAZADO.** Encontró dos
+  BLOCK: se podía escribir sin checkpoint y un replay sin ancla producía el mismo
+  sello que autoridad actual; además, DB vacía + checkpoint ausente permitía
+  bootstrap implícito. Encontró un MAJOR porque el tipo de error UNKNOWN se
+  colapsaba en el mismo `LedgerCheckpointError` que una ausencia conocida.
+- **Corrección completa en el árbol de trabajo:** `verify_authority_ledger` exige
+  checkpoint; el replay histórico devuelve `HistoricalAuthorityState` distinto,
+  no aceptado por consumidores actuales; append siempre verifica/ancla bajo lock.
+  Bootstrap es explícito y usa checkpoint cero más recibo exclusivo separado en
+  `/etc/jax/authority/trusted-checkpoint-bootstrap-receipt.json`; pérdida de log
+  o recibo exige restaurar el par, nunca rebootstrap. Reanchor no crea evidencia
+  ausente y puede avanzar desde checkpoint cero o recuperarse idempotentemente.
+  UNKNOWN conserva su error público diferenciado.
+- Runbooks actualizados: `docs/operations/trusted-files.md` y
+  `docs/runbooks/authority-root-recovery.md`.
+- **Verificación local final del árbol:** suite ledger + decision + execution →
+  **136 passed**; `compileall` y `git diff --check` limpios.
+- `jaxctl authority` operativo sigue **UNAVAILABLE**; no está verificado si el
+  ledger durable contiene overlays históricos sin ratificación. La decisión de
+  cuarentena sigue aplicada determinísticamente en replay.
+- CI del SHA `019a4f23` seguía ejecutando `tests-puros` y `faro-jaula` al retomar
+  estas correcciones; no corresponde al árbol actual y debe reemplazarse con CI
+  del nuevo SHA.
+- Falta publicar este árbol y solicitar auditoría escalón 3 del SHA exacto. No
+  integrar #381; sigue apilado sobre #379 → #377, y se integra en orden.
 - El PR #381 sigue abierto y apilado sobre #379 → #377; integrar en orden.
 
 ## Siguiente comando
 
-Publicar el cambio de cuarentena, solicitar auditoría escalón 3 del SHA exacto y
-verificar CI de ese SHA. No integrar hasta que auditoría, CI y preflight
-correspondan al mismo SHA.
+Publicar los cierres de autoridad/bootstrap, solicitar auditoría escalón 3 del
+SHA exacto y verificar CI de ese SHA. No integrar hasta que auditoría, CI y
+preflight correspondan al mismo SHA.

@@ -10,6 +10,8 @@ from policy.authority_ledger.signatures import encode_public_key, public_key_byt
 from policy.authority_ledger.storage import InMemoryAuthorityLedgerStore
 from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
 
+_TEST_CHECKPOINTS = {}
+
 
 def base_time():
     return datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -20,7 +22,55 @@ def setup_ledger():
     genesis = AuthorityLedgerGenesis("1.0", "JAX_AUTHORITY_LEDGER_GENESIS", "JAX-AUTHORITY-LEDGER/1", "human:fernando", "fernando-1", encode_public_key(key.public_key()))
     from policy.authority_ledger.replay import genesis_hash
     root = TrustedAuthorityRoot("1.0", "JAX_TRUSTED_AUTHORITY_ROOT", "JAX-AUTHORITY-LEDGER/1", genesis_hash(genesis), "fernando-1", public_key_fingerprint(public_key_bytes(key.public_key())))
-    return InMemoryAuthorityLedgerStore(genesis), root, key
+    store = InMemoryAuthorityLedgerStore(genesis)
+    from tempfile import TemporaryDirectory
+    from policy.authority_ledger.service import initialize_authority_ledger
+    from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
+    directory = TemporaryDirectory(prefix="jax-ledger-test-")
+    checkpoint = TrustedCheckpointStore(Path(directory.name) / "checkpoints.log",
+        bootstrap_receipt_path=Path(directory.name) / "bootstrap-receipt.json")
+    store._test_checkpoint_directory = directory
+    store._checkpoint_store = checkpoint
+    initialize_authority_ledger(store, genesis, root, checkpoint)
+    _TEST_CHECKPOINTS[root] = checkpoint
+    return store, root, key
+
+
+def append_authority_event(store, trusted_root, private_key, intent, **kwargs):
+    """Tests keep the production API's mandatory checkpoint explicit via setup_ledger."""
+    from policy.authority_ledger.service import append_authority_event as append
+    if "checkpoint_store" not in kwargs and not hasattr(store, "_checkpoint_store"):
+        cached = _TEST_CHECKPOINTS.get(trusted_root)
+        if cached is not None:
+            store._checkpoint_store = cached
+    if "checkpoint_store" not in kwargs and not hasattr(store, "_checkpoint_store"):
+        from tempfile import TemporaryDirectory
+        from policy.authority_ledger.service import initialize_authority_ledger
+        from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
+        directory = TemporaryDirectory(prefix="jax-ledger-test-")
+        checkpoint = TrustedCheckpointStore(Path(directory.name) / "checkpoints.log",
+            bootstrap_receipt_path=Path(directory.name) / "bootstrap-receipt.json")
+        store._test_checkpoint_directory = directory
+        store._checkpoint_store = checkpoint
+        initialize_authority_ledger(store, store.get_genesis(), trusted_root, checkpoint)
+        _TEST_CHECKPOINTS[trusted_root] = checkpoint
+    selected_checkpoint = kwargs["checkpoint_store"] if "checkpoint_store" in kwargs else store._checkpoint_store
+    if hasattr(selected_checkpoint, "path") and not selected_checkpoint.path.exists() and not store.events():
+        selected_checkpoint.bootstrap_receipt_path = selected_checkpoint.path.with_name(selected_checkpoint.path.name + ".bootstrap-receipt")
+        from policy.authority_ledger.service import initialize_authority_ledger
+        initialize_authority_ledger(store, store.get_genesis(), trusted_root, selected_checkpoint)
+    kwargs["checkpoint_store"] = selected_checkpoint
+    return append(store, trusted_root, private_key, intent, **kwargs)
+
+
+def verify_authority_ledger(genesis, events, trusted_root, checkpoint_store=None):
+    from policy.authority_ledger.replay import verify_authority_ledger as verify
+    checkpoint_store = checkpoint_store or _TEST_CHECKPOINTS.get(trusted_root)
+    if checkpoint_store is None:
+        checkpoint_store = next(iter(_TEST_CHECKPOINTS.values()), None)
+    if checkpoint_store is None:
+        raise AssertionError("test debe proveer checkpoint externo explícito")
+    return verify(genesis, events, trusted_root, checkpoint_store)
 
 
 def overlay(overlay_id="exception-a", *, conditions=(), target=("rule-a",), kind=OverlayType.EXCEPTION, code="EXCEPTION", delegate=None, target_overlay=None):

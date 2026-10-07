@@ -1,11 +1,12 @@
+from tests.policy.test_authority_ledger_events import verify_authority_ledger
 from pathlib import Path
 
 import pytest
 
 from policy.authority_ledger.errors import AuthorityEventValidationError, AuthorityStateError
 from policy.authority_ledger.models import AuthorityEventIntent, AuthorityEventType
-from policy.authority_ledger.replay import verify_authority_ledger
-from policy.authority_ledger.service import append_authority_event, ratification_intent_from_candidate
+from tests.policy.test_authority_ledger_events import append_authority_event
+from policy.authority_ledger.service import ratification_intent_from_candidate
 from policy.authority_resolution.candidate_loader import load_validated_candidate
 from tests.policy.test_authority_ledger_events import setup_ledger, ratification_intent
 

@@ -1,9 +1,9 @@
+from tests.policy.test_authority_ledger_events import verify_authority_ledger
 from datetime import timedelta
 
 from policy.authority_ledger.effective_context import build_effective_authority_context
 from policy.authority_ledger.models import AuthorityEventIntent, AuthorityEventType
-from policy.authority_ledger.replay import verify_authority_ledger
-from policy.authority_ledger.service import append_authority_event
+from tests.policy.test_authority_ledger_events import append_authority_event
 from policy.authority_resolution.models import EvaluationContext
 from tests.policy.test_authority_ledger_events import base_time, setup_ledger, ratification_intent, overlay
 

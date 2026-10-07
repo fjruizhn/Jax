@@ -9,14 +9,12 @@ from pathlib import Path
 import tempfile
 
 from .canonical import canonical_bytes
-from .errors import LedgerIntegrityError, LedgerRollbackError
+from .errors import (CheckpointPublicationOutcomeUnknownError,
+                     LedgerIntegrityError, LedgerRollbackError)
 from .models import AuthorityLedgerCheckpoint
 
 DEFAULT_TRUSTED_CHECKPOINT_PATH = Path("/var/lib/jax/authority/trusted-checkpoints.log")
-
-
-class CheckpointPublicationOutcomeUnknownError(LedgerIntegrityError):
-    """`os.replace` completed but its durability or reread could not be proven."""
+DEFAULT_BOOTSTRAP_RECEIPT_PATH = Path("/etc/jax/authority/trusted-checkpoint-bootstrap-receipt.json")
 
 
 class TrustedCheckpointStore:
@@ -26,8 +24,47 @@ class TrustedCheckpointStore:
     This assumes a single host/local filesystem; ``flock`` is not a distributed
     locking protocol.
     """
-    def __init__(self, path: Path = DEFAULT_TRUSTED_CHECKPOINT_PATH) -> None:
+    def __init__(self, path: Path = DEFAULT_TRUSTED_CHECKPOINT_PATH, *, bootstrap_receipt_path: Path = DEFAULT_BOOTSTRAP_RECEIPT_PATH) -> None:
         self.path = Path(path)
+        self.bootstrap_receipt_path = Path(bootstrap_receipt_path)
+
+    def bootstrap(self, checkpoint: AuthorityLedgerCheckpoint, receipt: dict) -> None:
+        """Create sequence-zero anchor and its separate one-time receipt exclusively."""
+        if checkpoint.sequence != 0 or checkpoint.head_event_id is not None or checkpoint.head_event_hash is not None:
+            raise LedgerIntegrityError("bootstrap exige checkpoint genesis de secuencia cero")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.bootstrap_receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.exists() or self.bootstrap_receipt_path.exists():
+            raise LedgerIntegrityError("bootstrap rechazado: checkpoint o recibo ya existe")
+        # Create checkpoint without replacement, then durable receipt. A crash
+        # between them is intentionally fail-closed and requires artifact recovery.
+        checkpoint_created = False
+        try:
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            checkpoint_created = True
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(canonical_bytes(checkpoint.projection()) + b"\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._fsync_directory(self.path.parent)
+            if self.latest().projection() != checkpoint.projection():
+                raise LedgerIntegrityError("checkpoint genesis publicado no coincide")
+            receipt_fd = os.open(self.bootstrap_receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(receipt_fd, "wb") as handle:
+                handle.write(canonical_bytes(receipt) + b"\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._fsync_directory(self.bootstrap_receipt_path.parent)
+        except Exception as exc:
+            # Never delete/overwrite a possibly durable checkpoint or receipt.
+            # Once the seq-0 path was created, even a failure while publishing
+            # its separate receipt has an outcome that requires matched-backup
+            # recovery; do not report it as a clean bootstrap rejection.
+            if checkpoint_created and not isinstance(exc, CheckpointPublicationOutcomeUnknownError):
+                raise CheckpointPublicationOutcomeUnknownError(
+                    "bootstrap publicó checkpoint cero, pero la durabilidad/recibo quedó desconocido; restaurar artifacts emparejados"
+                ) from exc
+            raise
 
     @property
     def lock_path(self) -> Path:
@@ -81,6 +118,28 @@ class TrustedCheckpointStore:
     def latest(self) -> AuthorityLedgerCheckpoint:
         return self._read_all()[-1]
 
+    def checkpoints(self) -> tuple[AuthorityLedgerCheckpoint, ...]:
+        return self._read_all()
+
+    def validate_bootstrap_receipt(self, expected: dict, has_genesis_checkpoint: bool) -> None:
+        """Require the exact one-time receipt iff the external log has seq 0."""
+        if not has_genesis_checkpoint:
+            if self.bootstrap_receipt_path.exists():
+                raise LedgerIntegrityError("recibo bootstrap presente sin checkpoint genesis")
+            return
+        try:
+            raw = self.bootstrap_receipt_path.read_bytes()
+        except OSError as exc:
+            raise LedgerIntegrityError("recibo bootstrap requerido y ausente/ilegible") from exc
+        if not raw.endswith(b"\n"):
+            raise LedgerIntegrityError("recibo bootstrap incompleto")
+        try:
+            value = json.loads(raw[:-1].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LedgerIntegrityError("recibo bootstrap inválido") from exc
+        if not isinstance(value, dict) or canonical_bytes(value) + b"\n" != raw or value != expected:
+            raise LedgerIntegrityError("recibo bootstrap no coincide con genesis/root/checkpoint")
+
     def _read_all(self) -> tuple[AuthorityLedgerCheckpoint, ...]:
         if not self.path.exists():
             raise LedgerIntegrityError("checkpoint externo ausente")
@@ -113,9 +172,10 @@ class TrustedCheckpointStore:
         if (checkpoint.schema_version != "1.0"
                 or checkpoint.kind != "JAX_AUTHORITY_LEDGER_CHECKPOINT"
                 or not isinstance(checkpoint.ledger_identity, str) or not checkpoint.ledger_identity
-                or type(checkpoint.sequence) is not int or checkpoint.sequence < 1
-                or not isinstance(checkpoint.head_event_id, str) or not checkpoint.head_event_id
-                or not isinstance(checkpoint.head_event_hash, str) or not checkpoint.head_event_hash):
+                or type(checkpoint.sequence) is not int or checkpoint.sequence < 0
+                or (checkpoint.sequence == 0 and (checkpoint.head_event_id is not None or checkpoint.head_event_hash is not None))
+                or (checkpoint.sequence > 0 and (not isinstance(checkpoint.head_event_id, str) or not checkpoint.head_event_id
+                or not isinstance(checkpoint.head_event_hash, str) or not checkpoint.head_event_hash))):
             raise LedgerIntegrityError("checkpoint externo inválido")
         if previous is not None:
             if checkpoint.ledger_identity != previous.ledger_identity:
@@ -124,7 +184,11 @@ class TrustedCheckpointStore:
                 raise LedgerIntegrityError("checkpoint externo no aumenta estrictamente")
 
     def _fsync_parent_directory(self) -> None:
-        directory_fd = os.open(self.path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        self._fsync_directory(self.path.parent)
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        directory_fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
             os.fsync(directory_fd)
         finally:

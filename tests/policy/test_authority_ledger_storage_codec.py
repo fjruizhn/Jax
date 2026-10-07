@@ -131,7 +131,7 @@ def test_event_storage_decoder_rejects_unknown_event_fields():
 
 
 def test_decoded_ratification_cannot_be_resigned_and_appended_as_validated_candidate():
-    from policy.authority_ledger.service import append_authority_event
+    from tests.policy.test_authority_ledger_events import append_authority_event
     from policy.authority_ledger.errors import AuthorityStateError
     from tests.policy.test_authority_ledger_events import setup_ledger
 

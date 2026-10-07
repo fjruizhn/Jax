@@ -64,11 +64,51 @@ class ReconstructedAuthorityState:
         return event
 
 
+@dataclass(frozen=True)
+class HistoricalAuthorityState:
+    """Verified replay of a prefix; structurally distinct from current authority."""
+    ratifications: Mapping[str, AuthorityEvent]
+    revoked_ratifications: frozenset[str]
+    active_ratification_event_id: str | None
+    overlays: Mapping[str, OverlayPayload]
+    revoked_overlays: frozenset[str]
+    checkpoint: AuthorityLedgerCheckpoint
+    _rule_ratification_grants: Mapping[str, AuthorityEvent] = field(default_factory=dict, repr=False)
+    _latest_rule_ratifications: Mapping[str, AuthorityEvent] = field(default_factory=dict, repr=False)
+    _revoked_rule_ratifications: frozenset[str] = field(default_factory=frozenset, repr=False)
+    quarantined_overlays: frozenset[str] = field(default_factory=frozenset)
+    _history_seal: object | None = field(default=None, repr=False)
+
+    @property
+    def active_policy_corpus_hash(self) -> str | None:
+        if self.active_ratification_event_id is None:
+            return None
+        return self.ratifications[self.active_ratification_event_id].intent.policy_corpus_hash
+
+    def _is_verified_history(self) -> bool:
+        return self._history_seal is _HISTORY_SEAL
+
+
+_HISTORY_SEAL = object()
+
+
 _REPLAY_SEAL = object()
 
 
-def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[AuthorityEvent], trusted_root: TrustedAuthorityRoot, checkpoint_store: TrustedCheckpointStore | None = None) -> ReconstructedAuthorityState:
-    """Verify external genesis anchor before replaying a single ledger event."""
+def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[AuthorityEvent], trusted_root: TrustedAuthorityRoot, checkpoint_store: TrustedCheckpointStore) -> ReconstructedAuthorityState:
+    """Verify current authority against its mandatory external checkpoint."""
+    if checkpoint_store is None:
+        raise AuthorityStateError("autoridad actual requiere TrustedCheckpointStore externo")
+    return _replay_authority_ledger(genesis, events, trusted_root, checkpoint_store, historical=False)
+
+
+def replay_authority_history(genesis: AuthorityLedgerGenesis, events: Iterable[AuthorityEvent], trusted_root: TrustedAuthorityRoot) -> HistoricalAuthorityState:
+    """Verify historical signed history for diagnosis; never returns current authority."""
+    return _replay_authority_ledger(genesis, events, trusted_root, None, historical=True)
+
+
+def _replay_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[AuthorityEvent], trusted_root: TrustedAuthorityRoot, checkpoint_store: TrustedCheckpointStore | None, *, historical: bool):
+    """Verify the external genesis and replay an explicitly current or historical view."""
     if trusted_root.ledger_identity != genesis.ledger_identity or trusted_root.genesis_hash != genesis_hash(genesis):
         raise TrustedRootMismatchError("genesis no coincide con trusted root")
     public = decode_public_key(genesis.constitutional_public_key)
@@ -149,6 +189,19 @@ def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[Au
         previous = event.event_hash
     checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, len(ordered), ordered[-1].event_id if ordered else None, previous)
     if checkpoint_store is not None:
+        anchor_rows = checkpoint_store.checkpoints() if hasattr(checkpoint_store, "checkpoints") else (checkpoint_store.latest(),)
+        has_genesis_anchor = bool(anchor_rows and anchor_rows[0].sequence == 0)
+        root_projection = {"schema_version": trusted_root.schema_version, "kind": trusted_root.kind,
+            "ledger_identity": trusted_root.ledger_identity, "genesis_hash": trusted_root.genesis_hash,
+            "constitutional_key_id": trusted_root.constitutional_key_id,
+            "constitutional_public_key_fingerprint": trusted_root.constitutional_public_key_fingerprint}
+        genesis_checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, 0, None, None)
+        receipt = {"schema_version": "1.0", "kind": "JAX_AUTHORITY_LEDGER_BOOTSTRAP_RECEIPT",
+            "ledger_identity": genesis.ledger_identity, "genesis_hash": genesis_hash(genesis),
+            "trusted_root_hash": domain_hash("JAX-TRUSTED-AUTHORITY-ROOT", "1.0", root_projection),
+            "checkpoint_hash": genesis_checkpoint.authority_ledger_checkpoint_hash}
+        if hasattr(checkpoint_store, "validate_bootstrap_receipt"):
+            checkpoint_store.validate_bootstrap_receipt(receipt, has_genesis_anchor)
         anchored = checkpoint_store.latest()
         if checkpoint.sequence < anchored.sequence:
             raise LedgerRollbackError("DB ledger truncado antes del checkpoint externo")
@@ -160,14 +213,15 @@ def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[Au
                 "inverificable para siempre")
         if checkpoint.projection() != anchored.projection():
             raise LedgerRollbackError("head DB no coincide con checkpoint externo")
-    return ReconstructedAuthorityState(
+    common = (
         MappingProxyType(dict(ratifications)), frozenset(revoked_ratifications), active,
         MappingProxyType(dict(overlays)), frozenset(revoked_overlays), checkpoint,
         MappingProxyType(dict(rule_grants_by_event_id)), MappingProxyType(dict(latest_rule_ratifications)),
         frozenset(revoked_rule_ratifications),
-        quarantined_overlays=frozenset(quarantined_overlays),
-        _verified_seal=_REPLAY_SEAL,
     )
+    if historical:
+        return HistoricalAuthorityState(*common, quarantined_overlays=frozenset(quarantined_overlays), _history_seal=_HISTORY_SEAL)
+    return ReconstructedAuthorityState(*common, quarantined_overlays=frozenset(quarantined_overlays), _verified_seal=_REPLAY_SEAL)
 
 
 def overlay_applicability(overlay: OverlayPayload, context, evaluation_time_utc: datetime) -> OverlayApplicability:
@@ -193,6 +247,16 @@ def effective_overlays(state: ReconstructedAuthorityState, context, evaluation_t
     """Apply the frozen pairwise matrix for one explicit evaluation."""
     if not isinstance(state, ReconstructedAuthorityState) or not state._is_verified():
         raise AuthorityStateError("effective state requiere replay verificado")
+    return _select_effective_overlays(state, context, evaluation_time_utc)
+
+
+def _effective_overlays_for_history(state: HistoricalAuthorityState, context, evaluation_time_utc: datetime) -> tuple[OverlayPayload, ...]:
+    if not isinstance(state, HistoricalAuthorityState) or not state._is_verified_history():
+        raise AuthorityStateError("historical state requiere replay histórico verificado")
+    return _select_effective_overlays(state, context, evaluation_time_utc)
+
+
+def _select_effective_overlays(state, context, evaluation_time_utc: datetime) -> tuple[OverlayPayload, ...]:
     active_hash = state.active_policy_corpus_hash
     if active_hash is None:
         return ()

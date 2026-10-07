@@ -19,12 +19,15 @@ class UnanchoredLedgerHeadError(LedgerIntegrityError):
 
 
 class LedgerCheckpointError(LedgerIntegrityError):
-    """El evento quedó escrito en el ledger pero su checkpoint externo no.
+    """The event is in the DB, but checkpoint publication is known not to have happened."""
 
-    El evento no se considera aceptado hasta que el checkpoint quedó escrito;
-    este error nombra al evento huérfano y la reconciliación disponible
-    (``reanchor_authority_checkpoint``): re-anclar el checkpoint al head
-    existente tras verificarlo."""
+
+class LedgerAlreadyInitializedError(LedgerIntegrityError):
+    """Bootstrap was requested for a ledger with existing trust artifacts."""
+
+
+class CheckpointPublicationOutcomeUnknownError(LedgerIntegrityError):
+    """Checkpoint replacement may have completed, but durability/readback is unproven."""
 
 
 class TrustedRootMismatchError(LedgerIntegrityError):

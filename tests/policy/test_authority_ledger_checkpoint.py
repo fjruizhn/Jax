@@ -5,9 +5,12 @@ import pytest
 from policy.authority_ledger.errors import (AuthorityStateError, LedgerCheckpointError,
                                             LedgerIntegrityError, LedgerRollbackError,
                                             UnanchoredLedgerHeadError)
+from policy.authority_ledger.errors import CheckpointPublicationOutcomeUnknownError
 from policy.authority_ledger.models import AuthorityEvent, AuthorityEventIntent, AuthorityEventType
-from policy.authority_ledger.replay import event_hash, event_unsigned_bytes, verify_authority_ledger
-from policy.authority_ledger.service import append_authority_event, reanchor_authority_checkpoint
+from policy.authority_ledger.replay import event_hash, event_unsigned_bytes
+from tests.policy.test_authority_ledger_events import verify_authority_ledger
+from tests.policy.test_authority_ledger_events import append_authority_event
+from policy.authority_ledger.service import reanchor_authority_checkpoint
 from policy.authority_ledger.signatures import sign
 from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
 from tests.policy.test_authority_ledger_events import setup_ledger
@@ -90,6 +93,18 @@ class _RereadFailsOnce(TrustedCheckpointStore):
         return super().latest()
 
 
+class _BootstrapReceiptDirectoryFsyncFails(TrustedCheckpointStore):
+    def __init__(self, path, *, bootstrap_receipt_path):
+        super().__init__(path, bootstrap_receipt_path=bootstrap_receipt_path)
+        self._directory_fsyncs = 0
+
+    def _fsync_directory(self, path):
+        self._directory_fsyncs += 1
+        if self._directory_fsyncs == 2:
+            raise OSError("receipt directory fsync failed")
+        return super()._fsync_directory(path)
+
+
 def _signed_event(key, event_id, sequence, previous_event_hash, intent):
     from tests.policy.test_authority_ledger_events import base_time
     provisional = AuthorityEvent(event_id, sequence, previous_event_hash, intent, base_time(), "", "sha256:" + "0" * 64)
@@ -157,6 +172,21 @@ def test_reconciliacion_reancla_el_checkpoint_del_head_y_el_verificador_pasa(tmp
     assert checkpoint.sequence == 2
     state = verify_authority_ledger(store.get_genesis(), store.events(), root, anchor)
     assert state.checkpoint.sequence == 2
+
+
+def test_reanchor_advances_from_genesis_checkpoint_after_first_db_append_orphans():
+    store, root, key = setup_ledger()
+    anchor = store._checkpoint_store
+    assert anchor.latest().sequence == 0
+    with pytest.raises(LedgerCheckpointError):
+        append_authority_event(store, root, key,
+            AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
+            checkpoint_store=_CheckpointRoto(anchor))
+    assert len(store.events()) == 1
+    assert anchor.latest().sequence == 0
+    reconciled = reanchor_authority_checkpoint(store, root, anchor)
+    assert reconciled.sequence == 1
+    assert verify_authority_ledger(store.get_genesis(), store.events(), root, anchor).checkpoint.sequence == 1
 
 
 def test_reconciliacion_exige_un_head_existente_y_un_stream_valido(tmp_path):
@@ -362,9 +392,120 @@ def test_post_replace_checkpoint_failure_has_unknown_outcome_and_reanchor_is_ide
         anchor.fail_next_directory_fsync = True
     else:
         anchor.fail_next_reread = True
-    with pytest.raises(LedgerCheckpointError, match="resultado de publicación desconocido") as excinfo:
+    with pytest.raises(CheckpointPublicationOutcomeUnknownError, match="resultado de publicación desconocido") as excinfo:
         append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"), event_id="018cc251-f400-7000-8000-000000000002", checkpoint_store=anchor)
     assert "sin checkpoint externo" not in str(excinfo.value)
     assert anchor.latest().sequence == 2
     assert reanchor_authority_checkpoint(store, root, anchor).sequence == 2
     assert verify_authority_ledger(store.get_genesis(), store.events(), root, anchor).checkpoint.sequence == 2
+
+
+def test_current_replay_requires_checkpoint_while_history_has_distinct_type():
+    from policy.authority_ledger.errors import AuthorityStateError
+    from policy.authority_ledger.replay import HistoricalAuthorityState, ReconstructedAuthorityState, replay_authority_history
+    from policy.authority_ledger.service import append_authority_event as append_current
+    from tests.policy.test_decision_input import context, instant
+    from policy.authority_ledger.effective_context import build_effective_authority_context
+    store, root, key = setup_ledger()
+    with pytest.raises(TypeError):
+        append_current(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"))
+    assert store.events() == ()
+    append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"))
+    from policy.authority_ledger.replay import verify_authority_ledger as verify_current
+    with pytest.raises(TypeError):
+        verify_current(store.get_genesis(), store.events(), root)
+    historical = replay_authority_history(store.get_genesis(), store.events(), root)
+    assert type(historical) is HistoricalAuthorityState
+    assert not isinstance(historical, ReconstructedAuthorityState)
+    with pytest.raises(AuthorityStateError, match="no verificado"):
+        build_effective_authority_context(historical, context(), instant())
+
+
+def test_bootstrap_receipt_is_required_only_for_sequence_zero_anchor(tmp_path):
+    from policy.authority_ledger.models import AuthorityLedgerCheckpoint
+    from policy.authority_ledger.errors import LedgerIntegrityError
+    store, root, key = setup_ledger()
+    anchor = store._checkpoint_store
+    verify_authority_ledger(store.get_genesis(), (), root, anchor)
+    original_receipt = anchor.bootstrap_receipt_path.read_bytes()
+    anchor.bootstrap_receipt_path.write_bytes(original_receipt.replace(b"sha256:", b"sha256:x", 1))
+    with pytest.raises(LedgerIntegrityError, match="recibo bootstrap"):
+        verify_authority_ledger(store.get_genesis(), (), root, anchor)
+    anchor.bootstrap_receipt_path.write_bytes(original_receipt)
+    event = append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"))
+    anchor.bootstrap_receipt_path.unlink()
+    with pytest.raises(LedgerIntegrityError, match="recibo bootstrap"):
+        verify_authority_ledger(store.get_genesis(), store.events(), root, anchor)
+
+    legacy = TrustedCheckpointStore(tmp_path / "legacy.log", bootstrap_receipt_path=tmp_path / "no-receipt.json")
+    legacy.append(AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", store.get_genesis().ledger_identity, 1, event.event_id, event.event_hash))
+    assert verify_authority_ledger(store.get_genesis(), store.events(), root, legacy).checkpoint.sequence == 1
+
+
+def test_initialize_existing_fails_without_modifying_checkpoint_or_receipt():
+    from policy.authority_ledger.service import initialize_authority_ledger
+    from policy.authority_ledger.errors import LedgerAlreadyInitializedError, LedgerIntegrityError
+    store, root, _ = setup_ledger()
+    anchor = store._checkpoint_store
+    checkpoint_bytes = anchor.path.read_bytes()
+    receipt_bytes = anchor.bootstrap_receipt_path.read_bytes()
+    with pytest.raises(LedgerAlreadyInitializedError, match="ya inicializado"):
+        initialize_authority_ledger(store, store.get_genesis(), root, anchor)
+    assert anchor.path.read_bytes() == checkpoint_bytes
+    assert anchor.bootstrap_receipt_path.read_bytes() == receipt_bytes
+    anchor.path.write_bytes(b"corrupt\n")
+    with pytest.raises(LedgerAlreadyInitializedError):
+        initialize_authority_ledger(store, store.get_genesis(), root, anchor)
+    assert anchor.path.read_bytes() == b"corrupt\n"
+
+
+def test_missing_checkpoint_cannot_be_recreated_by_append_or_reanchor(tmp_path):
+    from policy.authority_ledger.errors import LedgerIntegrityError
+    store, root, key = setup_ledger()
+    anchor = TrustedCheckpointStore(tmp_path / "trusted.log", bootstrap_receipt_path=tmp_path / "receipt.json")
+    append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"), checkpoint_store=anchor)
+    receipt = anchor.bootstrap_receipt_path.read_bytes()
+    events_before = store.events()
+    anchor.path.unlink()
+    from policy.authority_ledger.service import initialize_authority_ledger
+    with pytest.raises(LedgerIntegrityError, match="falta checkpoint"):
+        initialize_authority_ledger(store, store.get_genesis(), root, anchor)
+    with pytest.raises(LedgerIntegrityError):
+        append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"), checkpoint_store=anchor)
+    with pytest.raises(LedgerIntegrityError, match="no puede reconstruir confianza ausente"):
+        reanchor_authority_checkpoint(store, root, anchor)
+    assert not anchor.path.exists()
+    assert store.events() == events_before
+    assert anchor.bootstrap_receipt_path.read_bytes() == receipt
+
+
+def test_concurrent_initializers_publish_one_genesis_anchor(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from policy.authority_ledger.service import initialize_authority_ledger
+    store, root, _ = setup_ledger()
+    anchor = TrustedCheckpointStore(tmp_path / "trusted.log", bootstrap_receipt_path=tmp_path / "receipt.json")
+    def initialize():
+        try:
+            return initialize_authority_ledger(store, store.get_genesis(), root, anchor)
+        except Exception as exc:
+            return exc
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: initialize(), range(2)))
+    from policy.authority_ledger.errors import LedgerAlreadyInitializedError
+    assert sum(result is None for result in results) == 1
+    assert sum(isinstance(result, LedgerAlreadyInitializedError) for result in results) == 1
+    assert len(anchor.path.read_bytes().splitlines()) == 1
+    assert anchor.latest().sequence == 0
+    assert anchor.bootstrap_receipt_path.exists()
+
+
+def test_bootstrap_post_publish_failure_has_unknown_outcome_and_preserves_artifacts(tmp_path):
+    from policy.authority_ledger.service import initialize_authority_ledger
+    store, root, _ = setup_ledger()
+    anchor = _BootstrapReceiptDirectoryFsyncFails(
+        tmp_path / "trusted.log", bootstrap_receipt_path=tmp_path / "receipt.json")
+    with pytest.raises(CheckpointPublicationOutcomeUnknownError, match="bootstrap publicó checkpoint cero"):
+        initialize_authority_ledger(store, store.get_genesis(), root, anchor)
+    assert anchor.path.exists()
+    assert anchor.bootstrap_receipt_path.exists()
+    assert anchor.latest().sequence == 0

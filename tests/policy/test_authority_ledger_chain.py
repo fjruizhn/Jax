@@ -1,9 +1,9 @@
+from tests.policy.test_authority_ledger_events import verify_authority_ledger
 import pytest
 
 from policy.authority_ledger.errors import TrustedRootMismatchError
 from policy.authority_ledger.models import AuthorityEventIntent, AuthorityEventType
-from policy.authority_ledger.replay import verify_authority_ledger
-from policy.authority_ledger.service import append_authority_event
+from tests.policy.test_authority_ledger_events import append_authority_event
 from tests.policy.test_authority_ledger_events import setup_ledger
 
 
