@@ -2788,6 +2788,7 @@ jobs:
           las_manos/motor_registry/_authorize_facet_endpoint_test.py
           jacobs/_usage_writer_test.py
           las_manos/_catalog_from_db_test.py
+          las_manos/_procesamiento_idempotencia_db_test.py
           jacobs/_modelo_real_test.py
           las_manos/_output_validator_db_drift_test.py
           tests/test_jacobs_descarte_db.py
@@ -2817,6 +2818,7 @@ jobs:
             las_manos/motor_registry/_authorize_facet_endpoint_test.py \
             jacobs/_usage_writer_test.py \
             las_manos/_catalog_from_db_test.py \
+            las_manos/_procesamiento_idempotencia_db_test.py \
             jacobs/_modelo_real_test.py \
             las_manos/_output_validator_db_drift_test.py \
             tests/test_jacobs_descarte_db.py \

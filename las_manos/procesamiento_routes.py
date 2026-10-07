@@ -13,6 +13,12 @@ petición HTTP no puede quedarse esperando eso.
     GET  /procesamiento/trabajos/{id}        -> estado + resultados por archivo
     POST /procesamiento/trabajos/{id}/cancel -> deja de programar archivos nuevos
 
+Idempotencia (2026-10-06, auditoria de E3): `POST /procesamiento/trabajos` acepta un encabezado
+`Idempotency-Key` (16-128 caracteres `[A-Za-z0-9._:-]`). Una clave ya vista (por identidad de servicio)
+devuelve 202 con el MISMO `job_id`, el `estado` actual y `Idempotent-Replayed: true`, sin crear otro
+trabajo; la misma clave con otro pedido es 409 `idempotency_key_reuse`. Sin clave, todo igual que antes.
+Detalle del protocolo y de la carrera: `procesamiento_idempotencia.py`.
+
 Ronda 2 (B-1..B-6) cerró el jail sobre bytes NUL, el executor propio, la
 reconciliación al arrancar, el GET async y el principal obligatorio. La
 ronda 3 corrige el defecto ESTRUCTURAL que esa ronda dejó sin nombrar,
@@ -106,6 +112,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from motor_registry import job_tasks, tool_authority
@@ -115,6 +122,7 @@ from procesamiento import dependencias, ingesta
 from processing_job_store import ProcessingJobStore
 from processing_ownership import ProcessingOwnershipError, processing_ownership_from_scope
 
+import procesamiento_idempotencia as idempotencia
 import proyecto_activo
 
 logger = logging.getLogger(__name__)
@@ -186,6 +194,9 @@ class TrabajoRequest(BaseModel):
 
 class TrabajoCreadoResponse(BaseModel):
     job_id: str
+    # Solo en el reenvio de un pedido con `Idempotency-Key` ya visto: el estado ACTUAL del trabajo
+    # que ya existia (el pedido nuevo no lleva la clave `estado`, su forma no cambia).
+    estado: str | None = None
 
 
 class ResultadoArchivo(BaseModel):
@@ -661,9 +672,15 @@ def _snapshot_for_owner(job_id: str, request: Request):
     return snapshot
 
 
-@router.post("/trabajos", response_model=TrabajoCreadoResponse, status_code=202)
-async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoResponse:
+@router.post("/trabajos", response_model=TrabajoCreadoResponse, response_model_exclude_none=True, status_code=202)
+async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoResponse | JSONResponse:
     ownership = _processing_ownership(request)
+    # Idempotencia: SIN `Idempotency-Key` todo sigue como siempre (compatibilidad hacia atras).
+    claves = [v.decode("latin-1") for n, v in request.scope.get("headers", [])
+              if n.decode("latin-1").lower() == idempotencia.ENCABEZADO.lower()]
+    clave = claves[0] if claves else None
+    if len(claves) > 1 or (clave is not None and not idempotencia.clave_valida(clave)):
+        raise HTTPException(status_code=422, detail={"code": "idempotency_key_invalida"})
     # Jax#338 ronda 18: las validaciones BARATAS (cantidad de rutas, formato del
     # project_uuid) van antes del freno, que lee cabeceras de los archivos.
     if len(req.rutas) > _MAX_RUTAS_POR_TRABAJO:
@@ -683,6 +700,27 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
     # tampoco hace falta chequear que se codifique a UTF-8.
     if not _UUID_CANONICO.fullmatch(req.project_uuid):
         raise HTTPException(status_code=422, detail={"code": "project_uuid_invalido"})
+    # Idempotencia (1/2): un reenvio de un pedido YA aceptado solo lee. Va antes del freno de extractores, de
+    # la base de proyectos y del cupo: devolver el trabajo que ya existe no necesita nada de eso, y un
+    # 429/503 aqui haria reintentar al llamador (duplicando el OCR) por algo que ya esta hecho.
+    if clave is not None and not _STORE.authoritative_history_intact:
+        # Con clave y el almacen sin integridad (ENOSPC, linea truncada) `authoritative_snapshot` devuelve None
+        # para todo: no se reclama ni se retoma nada. 503 reintentable, ANTES de tocar la tabla de claves.
+        logger.error("idempotencia: el almacen de trabajos perdio la integridad; se rechaza el pedido con clave")
+        raise HTTPException(status_code=503, detail={"code": "procesamiento_no_disponible"})
+    identidad = request.scope.get("state", {}).get("identidad_servicio", "")
+    huella = None
+    if clave is not None:
+        huella = idempotencia.hash_de_solicitud(ownership, req.project_uuid, req.rutas)
+        try:
+            previo = await idempotencia.buscar(identidad, clave)
+        except Exception as e:  # fail-closed: con clave y sin poder consultarla no se arriesga un duplicado; el despachador reintenta un 503
+            logger.warning("idempotencia: no se pudo consultar la clave (%s)", type(e).__name__)
+            raise HTTPException(status_code=503, detail={"code": "idempotencia_no_disponible"}) from e
+        if previo is not None:
+            reenvio = await _reenvio_de(previo, huella, ownership, clave)
+            if reenvio is not None:
+                return reenvio
     # jax-14 (2026-10-03): freno de dependencias. Sin pdfplumber/openpyxl/
     # python-docx los PDF/DOCX/XLSX salian `sin_extractor` en silencio. 503 ANTES
     # de crear el trabajo y de tomar cupo: el despachador de la plataforma
@@ -719,6 +757,180 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
     if not estado_proyecto:
         raise HTTPException(status_code=422, detail={"code": "proyecto_no_activo"})
     proyecto = req.project_uuid
+    # Idempotencia (2/2): RECLAMAR la clave antes del cupo (y devolverla si el cupo falta), asi una ganadora
+    # y sus perdedoras simultaneas no compiten por un permiso que las perdedoras nunca van a usar.
+    job_id_reclamado: str | None = None
+    reclamo_id: int | None = None
+    try:
+        if clave is not None:
+            candidato = str(uuid.uuid4())
+            try:
+                reclamo = await idempotencia.reclamar(identidad, clave, huella, candidato)
+            except Exception as e:  # fail-closed: sin poder reclamar no se sabe si el trabajo ya existe
+                logger.warning("idempotencia: no se pudo reclamar la clave (%s)", type(e).__name__)
+                raise HTTPException(status_code=503, detail={"code": "idempotencia_no_disponible"}) from e
+            if not reclamo.gano:
+                reenvio = await _reenvio_de(reclamo, huella, ownership, clave)
+                if reenvio is not None:
+                    return reenvio
+                # Reclamo huerfano ya vencido (el proceso murio antes de crear el trabajo, o el trabajo termino
+                # failed/cancelled sin que el llamador lo conociera): lo retoma UNO, con el CAS que corresponde.
+                viejo = _STORE.authoritative_snapshot(reclamo.job_id)
+                huerfano = viejo is None and not reclamo.confirmado
+                tomar = idempotencia.tomar_huerfana if huerfano else idempotencia.tomar_fallido
+                if not await tomar(reclamo, candidato):
+                    # Otro reintento lo retomo antes, o la ganadora lenta lo confirmo: se devuelve SU trabajo
+                    # (esperando a que termine de crearse).
+                    actual = await idempotencia.buscar(identidad, clave)
+                    reenvio = await _reenvio_de(actual, huella, ownership, clave) if actual is not None else None
+                    if reenvio is None:
+                        raise HTTPException(status_code=503, detail={"code": "idempotencia_en_curso"})
+                    return reenvio
+                if huerfano:
+                    logger.warning("idempotencia: se retoma el reclamo huerfano de la clave %s (trabajo %s nunca creado) "
+                                   "-> trabajo nuevo %s", idempotencia.abreviar(clave), reclamo.job_id, candidato)
+                else:
+                    logger.warning("idempotencia: se reintenta la clave %s: el trabajo %s termino %s sin que el "
+                                   "llamador lo conociera -> trabajo nuevo %s", idempotencia.abreviar(clave),
+                                   reclamo.job_id, viejo.view.status.value if viejo is not None else "(perdido)",
+                                   candidato)
+            reclamo_id = reclamo.id
+            job_id_reclamado = candidato
+            _purgar_en_segundo_plano()
+        return await _crear_con_cupo(req, ownership, proyecto, job_id_reclamado, identidad, clave, reclamo_id)
+    except _ReclamoPerdido as perdido:
+        # Mi trabajo ya se cancelo; se devuelve el que figura en la tabla (esperando a que termine de crearse).
+        reenvio = await _reenvio_de(perdido.actual, huella, ownership, clave) if perdido.actual is not None else None
+        if reenvio is None:
+            raise HTTPException(status_code=503, detail={"code": "idempotencia_en_curso"}) from None
+        return reenvio
+    except BaseException:
+        if job_id_reclamado is not None and not _trabajo_existe(job_id_reclamado):
+            # El trabajo no llego a existir: un reclamo que apunta a la nada haria esperar al reintento
+            # una gracia entera. Se devuelve (solo si sigue siendo suyo). Si el trabajo SI llego a existir y
+            # se abandono, `_crear_con_cupo` ya lo dejo terminal y libero el reclamo.
+            await _liberar_reclamo(identidad, clave, job_id_reclamado)
+        raise
+
+
+_LIBERACIONES: set = set()
+
+
+def _registrar_fallo_de_liberacion(tarea: asyncio.Future, job_id: str, clave: str) -> None:
+    """Callback de la tarea de liberacion: es QUIEN recoge su excepcion. Si el pedido se cancelo mientras esperaba,
+    nadie mas la espera y asyncio la dejaria sin recoger (`Task exception was never retrieved`)."""
+    if tarea.cancelled():
+        return
+    exc = tarea.exception()
+    if exc is not None:
+        logger.error("idempotencia: no se pudo liberar el reclamo de la clave %s (trabajo %s): %s: %s",
+                     idempotencia.abreviar(clave), job_id, type(exc).__name__, exc)
+
+
+async def _liberar_reclamo(identidad: str, clave: str, job_id: str) -> None:
+    """Devuelve el reclamo (solo si sigue siendo de `job_id`). La liberacion corre en una tarea propia y protegida:
+    si el pedido se cancela mientras espera, la cancelacion SE PROPAGA (no se traga) y el reclamo se libera igual;
+    y si la liberacion falla, el fallo queda en el log (con el hash corto de la clave y el job_id) aunque nadie
+    la este esperando."""
+    tarea = asyncio.ensure_future(idempotencia.liberar(identidad, clave, job_id))
+    _LIBERACIONES.add(tarea)
+    tarea.add_done_callback(_LIBERACIONES.discard)
+    tarea.add_done_callback(lambda t: _registrar_fallo_de_liberacion(t, job_id, clave))
+    try:
+        await asyncio.shield(tarea)
+    except Exception:  # fail-soft: ya lo registro el callback; el reclamo queda huerfano y el reintento lo retoma pasada la gracia
+        pass
+
+
+def _terminar_sin_tarea(job_id: str, estado: JobStatus, motivo: str) -> None:
+    """Un trabajo que se creo pero NUNCA tuvo tarea (se perdio el reclamo, fallo la confirmacion, se cancelo el
+    pedido): pasa a terminal. Sin esto quedaba `pending` para siempre hasta el proximo reinicio. Sincrona y sin
+    awaits: corre aunque el pedido este siendo cancelado."""
+    control = _CONTROLES.get(job_id)
+    if control is not None:
+        control.cancelado = True                  # un POST .../cancel concurrente ya no encuentra nada que programar
+    try:
+        instantanea = _STORE.authoritative_snapshot(job_id)
+        if instantanea is not None and instantanea.view.status not in (
+                JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.REJECTED):
+            _STORE.update(job_id, status=estado.value, finished_at=time.time(), error=motivo)
+    except Exception:  # fail-soft: no se pudo escribir el estado terminal (disco); el arranque de LAS MANOS lo reconcilia a `failed`
+        logger.error("idempotencia: no se pudo dejar terminal el trabajo %s", job_id, exc_info=True)
+
+
+_ESTADOS_QUE_SE_REINTENTAN = frozenset({JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.REJECTED})
+
+
+def _trabajo_existe(job_id: str) -> bool:
+    return _STORE.authoritative_snapshot(job_id) is not None
+
+
+_purgas: set = set()
+
+
+def _purgar_en_segundo_plano() -> None:
+    """La purga de claves vencidas no la espera nadie: sale del camino del pedido."""
+    if any(not t.done() for t in _purgas):
+        return
+    tarea = asyncio.get_running_loop().create_task(idempotencia.purgar_si_toca())
+    _purgas.add(tarea)
+    tarea.add_done_callback(_purgas.discard)
+
+
+async def _reenvio_de(reclamo, huella: str, ownership, clave: str) -> JSONResponse | None:
+    """La respuesta de un reenvio, o None si el reclamo es un HUERFANO ya vencido (hay que retomarlo).
+    409 si la clave es de otro pedido; 503 reintentable si el trabajo puede estarse creando ahora."""
+    if reclamo.solicitud_hash != huella:
+        raise HTTPException(status_code=409, detail={"code": "idempotency_key_reuse"})
+    if not _STORE.authoritative_history_intact:
+        # Sin integridad el almacen contesta None para TODO (ENOSPC, ultima linea truncada): no se sabe cuales
+        # trabajos existen y retomar uno confirmado y vivo duplicaria el OCR. Cerrado, y antes de decidir nada.
+        logger.error("idempotencia: el almacen de trabajos perdio la integridad; no se resuelve la clave %s",
+                     idempotencia.abreviar(clave))
+        raise HTTPException(status_code=503, detail={"code": "procesamiento_no_disponible"})
+    instantanea = _STORE.authoritative_snapshot(reclamo.job_id)
+    if instantanea is None and reclamo.confirmado:
+        # Confirmado pero ausente: el trabajo EXISTIO (se creo antes de confirmar) y el almacen ya no lo muestra.
+        # No es un huerfano: es DESCONOCIDO. Retomarlo podria duplicar un trabajo vivo; se pide reintentar y se grita.
+        logger.error("idempotencia: la clave %s esta confirmada para el trabajo %s pero el almacen no lo conoce; "
+                     "estado DESCONOCIDO, no se retoma", idempotencia.abreviar(clave), reclamo.job_id)
+        raise HTTPException(status_code=503, detail={"code": "idempotencia_estado_desconocido"})
+    if instantanea is None and reclamo.antiguedad_s < idempotencia.gracia_segundos():
+        # La ganadora reclamo y esta creando el trabajo ahora mismo (milisegundos): se le espera un
+        # momento y, si no aparece, 503 reintentable. Nunca se crea otro trabajo en su lugar.
+        limite = time.monotonic() + idempotencia.espera_ms() / 1000
+        while instantanea is None and time.monotonic() < limite:
+            await asyncio.sleep(0.02)
+            instantanea = _STORE.authoritative_snapshot(reclamo.job_id)
+        if instantanea is None:
+            raise HTTPException(status_code=503, detail={"code": "idempotencia_en_curso"})
+    if instantanea is None:
+        return None
+    if instantanea.owner != ownership:
+        raise HTTPException(status_code=409, detail={"code": "idempotency_key_reuse"})
+    if instantanea.view.status in _ESTADOS_QUE_SE_REINTENTAN:
+        # Un trabajo que FALLO o se canceló sin que el llamador llegara a saber su job_id (si lo supiera, ya
+        # habria atado sus filas y no reenviaria): reenviar con la misma clave es reintentarlo. Devolverlo
+        # dejaria el documento en `error` por una caida de LAS MANOS (el arranque marca `failed` lo que
+        # corria) que el llamador nunca vio. Se retoma como un reclamo huerfano.
+        return None
+    logger.info("idempotencia: reenvio de la clave %s -> trabajo %s (%s), sin crear otro",
+                idempotencia.abreviar(clave), reclamo.job_id, instantanea.view.status.value)
+    return JSONResponse(
+        TrabajoCreadoResponse(job_id=reclamo.job_id, estado=instantanea.view.status.value).model_dump(),
+        status_code=202, headers={"Idempotent-Replayed": "true"})
+
+
+class _ReclamoPerdido(Exception):
+    """La ganadora tardo mas que la gracia en crear su trabajo y otro reintento retomo el reclamo."""
+    def __init__(self, actual):
+        super().__init__("reclamo retomado por otro reintento")
+        self.actual = actual
+
+
+async def _crear_con_cupo(req: TrabajoRequest, ownership, proyecto: str, job_id_fijo: str | None,
+                          identidad: str = "", clave: str | None = None,
+                          reclamo_id: int | None = None) -> TrabajoCreadoResponse:
     if _SEMAFORO_TRABAJOS.locked():
         raise HTTPException(
             status_code=429,
@@ -744,6 +956,9 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
     # liberando el permiso.
     permiso_transferido = False
     job_id: str | None = None
+    # Que estado terminal le toca a un trabajo que se crea y NO llega a tener tarea (por defecto `failed`:
+    # lo cancelo el pedido o revento algo; `cancelled` cuando se pierde el reclamo).
+    terminal = (JobStatus.FAILED, "el pedido no llego a programar el trabajo")
     try:
         job_id = _STORE.create(
             # B-6: the human uploader is derived from the authenticated,
@@ -758,11 +973,12 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
             trace_id=str(uuid.uuid4()),
             prompt="n/a -- este job no despacha un motor LLM, ver el campo 'proyecto'",
             recursion_depth=0,
+            # Con `Idempotency-Key`: el job_id que ya quedo reclamado en la base (None -> uno nuevo).
+            job_id=job_id_fijo,
         )
         # El campo que de verdad significa "proyecto" -- `update()` acepta
         # kwargs arbitrarios (van tal cual al JSONL).
         _STORE.update(job_id, proyecto=proyecto)
-
         # Ronda 6: el control se crea y se registra ANTES de programar la
         # tarea. Antes lo creaba el worker en su primera vuelta del loop; un
         # `POST .../cancel` que llegaba en ese hueco no lo encontraba,
@@ -773,6 +989,28 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
         # ventana no existe.
         control = _ControlTrabajo(_STORE, job_id)
         _CONTROLES[job_id] = control
+        if clave is not None:
+            # CONFIRMAR el reclamo ANTES de programar el OCR (y con el control ya registrado: un cancel que llegue
+            # durante este await lo encuentra). Un UPDATE condicionado a (id, job_id, confirmado=0): si otro
+            # reintento retomo el reclamo mientras yo tardaba mas que la gracia, afecta 0 filas y mi trabajo
+            # se cancela sin haber programado nada. Si la confirmacion falla, tambien: cerrado.
+            try:
+                confirmado = await idempotencia.confirmar(reclamo_id, job_id)
+            except Exception as e:  # fail-closed: sin confirmar no se sabe si el reclamo sigue siendo mio; mejor no programar el OCR
+                logger.warning("idempotencia: no se pudo confirmar el reclamo del trabajo %s (%s); se cancela",
+                               job_id, type(e).__name__)
+                terminal = (JobStatus.FAILED, "no se pudo confirmar el reclamo de idempotencia")
+                raise HTTPException(status_code=503, detail={"code": "idempotencia_no_disponible"}) from e
+            if not confirmado:
+                try:
+                    actual = await idempotencia.buscar(identidad, clave)
+                except Exception:  # fail-soft: solo para decirle al llamador cual es el trabajo vigente; sin saberlo contesta 503
+                    actual = None
+                logger.warning("idempotencia: el reclamo de la clave %s ya no es del trabajo %s (lo retomo %s): "
+                               "se cancela antes de programar el OCR", idempotencia.abreviar(clave), job_id,
+                               actual.job_id if actual is not None else "nadie")
+                terminal = (JobStatus.CANCELLED, "reclamo de idempotencia retomado por otro reintento")
+                raise _ReclamoPerdido(actual)
         task = asyncio.create_task(
             _ejecutar_trabajo(job_id, proyecto, req.rutas, store=_STORE, control=control)
         )
@@ -793,8 +1031,12 @@ async def crear_trabajo(req: TrabajoRequest, request: Request) -> TrabajoCreadoR
             # Nadie va a correr el `finally` del worker: el control
             # registrado arriba (si se llegó a registrar) se saca acá.
             if job_id is not None:
+                _terminar_sin_tarea(job_id, *terminal)
                 _CONTROLES.pop(job_id, None)
             _SEMAFORO_TRABAJOS.release()
+            if job_id is not None and clave is not None:
+                # El reclamo apuntaba a un trabajo que nunca tuvo tarea: se libera (solo si sigue siendo mio).
+                await _liberar_reclamo(identidad, clave, job_id)
 
 
 @router.get("/trabajos/{job_id}", response_model=TrabajoEstadoResponse)

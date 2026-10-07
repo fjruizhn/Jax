@@ -178,8 +178,8 @@
       "mensaje": "PISO ROTO: se esperaban 38 tests CORRIDOS (no skipeados) del freno de dependencias."
     },
     "jacobs-gobernanza-db/out": {
-      "patron": "^170 passed",
-      "mensaje": "PISO ROTO: se esperaban 170 tests CORRIDOS."
+      "patron": "^219 passed",
+      "mensaje": "PISO ROTO: se esperaban 219 tests CORRIDOS."
     },
     "permisos-proyectos/permisos_proyectos": {
       "patron": "^306 passed, 1 skipped",

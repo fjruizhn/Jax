@@ -1333,6 +1333,7 @@ class TrabajoHTTPTest(unittest.TestCase):
              patch("jacobs.subpipelines.config_subpipelines"), \
              patch.object(server.jacobs_store, "tamanio_pool"), \
              patch.object(server.jacobs_store, "init_tables", AsyncMock()), \
+             patch("procesamiento_idempotencia.init_tabla", AsyncMock()), \
              patch("motor_registry.routes.init_motor_catalog", AsyncMock()), \
              patch("jacobs.reaper.reap_orphaned_pipelines", AsyncMock()), \
              patch("jacobs.reaper.start_reaper_loop", AsyncMock()), \
@@ -1882,6 +1883,7 @@ class TrabajoHTTPTest(unittest.TestCase):
              patch("jacobs.subpipelines.config_subpipelines"), \
              patch.object(server.jacobs_store, "tamanio_pool"), \
              patch.object(server.jacobs_store, "init_tables", AsyncMock()), \
+             patch("procesamiento_idempotencia.init_tabla", AsyncMock()), \
              patch("motor_registry.routes.init_motor_catalog", AsyncMock()), \
              patch("jacobs.reaper.reap_orphaned_pipelines", AsyncMock()), \
              patch("jacobs.reaper.start_reaper_loop", AsyncMock()), \
