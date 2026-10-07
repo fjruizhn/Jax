@@ -61,8 +61,9 @@ transacción. Las cuatro tablas sí quedan definidas desde la migración.
 
 ## Verificación
 
-- Integración de este paso: `1 passed` contra MariaDB `12.3.3`; piso
-  `authority-rule-storage/mariadb` comprobado con `piso.py verificar`.
+- Integración de este paso: `7 passed` contra MariaDB `12.3.3` (ronda 2; antes `1 passed`
+  monolítico); piso `authority-rule-storage/mariadb` (`^7 passed in `) comprobado con
+  `piso.py verificar`.
 - Suites Faro/Block 4 seleccionadas: `228 passed`.
 - Los mutantes temporales de transacción ausente, hash no comparado y commit posterior
   al retorno fueron detectados por aserciones distintas y luego retirados.
@@ -85,6 +86,22 @@ transacción. Las cuatro tablas sí quedan definidas desde la migración.
 - El audit head se valida por forma y avance transaccional, pero no se reconcilia con
   un checkpoint externo ni se verifica criptográficamente una cadena completa ante un
   administrador hostil. El adapter no declara terminado ese contrato anti-rollback.
+
+## Nombre de las tablas
+
+El diseño (§11) nombra la tabla `rule_authority_decisions`; el encargo del paso 5 fijó
+`rule_decisions` y así quedó en la migración, el adapter, los GRANTs y las pruebas. No se
+renombró sin decisión: un renombrado toca migración, `storage.py`, `provisioning.py` y el
+test en un mismo commit, y debe decidirlo quien define el diseño.
+
+## Ronda 2
+
+`rollback()` fallido: se registra con `logger.exception` y se relanza el error original
+como `RuleAuthorityStorageError` (la marca `# fail-soft:` documenta por qué no se propaga el
+fallo del rollback: la conexión se cierra y MariaDB revierte la transacción abierta).
+Inmutabilidad: DELETE sobre una DENY sin hijos y sobre un permiso sin consumo, con una
+cuenta con GRANT, afirmando `(1644, '<tabla> are append-only')`; antes la FK del hijo
+tapaba al trigger. Provisioning: REVOKE/GRANT también a `user@'%'` si existe.
 
 ## Alternativas descartadas
 

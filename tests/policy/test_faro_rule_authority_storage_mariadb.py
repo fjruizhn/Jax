@@ -8,6 +8,7 @@ from pathlib import Path
 import secrets
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
 from types import MappingProxyType
@@ -17,12 +18,21 @@ import pymysql
 import pytest
 
 from jax.faro.catalogo_topes import cargar_catalogo_bytes
+from policy.authority_ledger.canonical import canonical_bytes
 from policy.authority_ledger.errors import AuthorityStateError
 from policy.rule_authority.errors import RuleAuthorityError
 from policy.rule_authority.models import (
     RuleDecision,
     RuleDecisionStatus,
     RuleEvaluationRequest,
+)
+from policy.rule_authority.provisioning import provision_application_account
+from policy.rule_authority.storage import (
+    MariaDBRuleDecisionStore,
+    RuleAuthorityStorageError,
+    _catalog_hash,
+    _decision_projection,
+    _record_hash,
 )
 
 
@@ -96,17 +106,40 @@ def _decision(
     )
 
 
-def test_mariadb_decision_store_is_atomic_idempotent_and_request_bound():
-    assert MIGRATION.is_file(), "falta la migración MariaDB de Rule Authority"
-    from policy.rule_authority.provisioning import provision_application_account
-    from policy.rule_authority.storage import MariaDBRuleDecisionStore, RuleAuthorityStorageError
+ZERO_HASH = "sha256:" + "0" * 64
+APP_USER = "jax_rule_authority_app_test"
+TRIGGER_USER = "jax_rule_authority_trigger_test"
+IMMUTABLE_TABLES = ("rule_decisions", "rule_permits", "rule_permit_consumptions")
 
+
+def _append_only(table: str) -> str:
+    """Código 1644 (SIGNAL de un trigger) y el mensaje exacto del trigger."""
+    return rf"\(1644, '{table} are append-only'\)"
+
+
+class _Db:
+    def __init__(self, docker, socket_path, root_password):
+        self.docker = docker
+        self.socket_path = socket_path
+        self.root_password = root_password
+
+    def connect_as(self, username: str, password: str, *, autocommit: bool, database="jax_rule_authority"):
+        return pymysql.connect(
+            unix_socket=str(self.socket_path), user=username, password=password,
+            database=database, autocommit=autocommit, charset="utf8mb4",
+        )
+
+    def root(self, *, autocommit: bool = False):
+        return self.connect_as("root", self.root_password, autocommit=autocommit)
+
+
+@pytest.fixture
+def db():
+    """MariaDB 12.3.3 efímera, sin red, con la migración aplicada. Una por prueba."""
+    assert MIGRATION.is_file(), "falta la migración MariaDB de Rule Authority"
     docker = shlex.split(os.environ.get("JAX_RULE_AUTHORITY_DOCKER_CMD", "docker"))
     root_password = secrets.token_urlsafe(24)
-    app_password = secrets.token_urlsafe(24)
-    trigger_password = secrets.token_urlsafe(24)
     container = f"jax-rule-authority-{uuid.uuid4().hex[:10]}"
-
     with tempfile.TemporaryDirectory(prefix="jax-rule-authority-socket-") as socket_dir:
         _run(
             docker, "run", "-d", "--rm", "--network", "none", "--name", container,
@@ -140,394 +173,12 @@ def test_mariadb_decision_store_is_atomic_idempotent_and_request_bound():
                     last_error = exc
                     time.sleep(1)
             assert admin is not None, f"MariaDB no aceptó conexiones: {last_error}"
-
             with admin:
                 with admin.cursor() as cursor:
                     cursor.execute("SELECT VERSION()")
                     assert cursor.fetchone()[0].startswith("12.3.3-")
                 _apply_migration(admin)
-                with admin.cursor() as cursor:
-                    cursor.execute(
-                        "CREATE USER 'jax_rule_authority_app_test'@'localhost' IDENTIFIED BY %s",
-                        (app_password,),
-                    )
-                    cursor.execute(
-                        "GRANT ALL PRIVILEGES ON jax_rule_authority.* "
-                        "TO 'jax_rule_authority_app_test'@'localhost' WITH GRANT OPTION"
-                    )
-                admin.commit()
-                provision_application_account(admin, "jax_rule_authority_app_test", app_password)
-                with admin.cursor() as cursor:
-                    cursor.execute("SHOW GRANTS FOR 'jax_rule_authority_app_test'@'localhost'")
-                    grants = "\n".join(row[0] for row in cursor.fetchall()).upper()
-                    assert "GRANT OPTION" not in grants
-                    assert "ALL PRIVILEGES" not in grants
-                    assert "TRIGGER" not in grants and "DELETE" not in grants
-                    cursor.execute(
-                        "CREATE USER 'jax_rule_authority_trigger_test'@'localhost' "
-                        "IDENTIFIED BY %s",
-                        (trigger_password,),
-                    )
-                    for table in ("rule_decisions", "rule_permits", "rule_permit_consumptions"):
-                        cursor.execute(
-                            f"GRANT SELECT,UPDATE,DELETE ON jax_rule_authority.{table} "
-                            "TO 'jax_rule_authority_trigger_test'@'localhost'"
-                        )
-                admin.commit()
-
-            def connect_as(username: str, password: str, *, autocommit: bool):
-                return pymysql.connect(
-                    unix_socket=str(socket_path), user=username, password=password,
-                    database="jax_rule_authority", autocommit=autocommit,
-                    charset="utf8mb4",
-                )
-
-            def app_connect():
-                # Explicit BEGIN in the adapter is required: autocommit makes the
-                # partial-write assertion kill the no-transaction mutant.
-                return connect_as("jax_rule_authority_app_test", app_password, autocommit=True)
-
-            request = _request("0199f8a1-8c00-7000-8000-000000000101")
-            store = MariaDBRuleDecisionStore(app_connect)
-            assert store.get(request) is None
-            assert store.get(_request(request.request_id, "other@example.test")) is None
-            alternate_catalog = MappingProxyType({
-                **dict(CATALOG),
-                "actos_externos": (*CATALOG["actos_externos"], "unidad-extra"),
-            })
-            other_pin_request = _request(request.request_id, catalog=alternate_catalog)
-            assert other_pin_request.request_hash == request.request_hash
-            assert store.get(other_pin_request) is None
-
-            decision = _decision(request)
-            assert store.record(request, decision) == decision
-
-            # The store preserves the model's immutable pin catalog on roundtrip.
-            catalog_store_request = _request("0199f8a1-8c00-7000-8000-000000000105")
-            catalog_store_decision = RuleDecision(
-                request_id=catalog_store_request.request_id,
-                request_hash=catalog_store_request.request_hash,
-                status=RuleDecisionStatus.DENY,
-                required_rule_id=catalog_store_request.rule_id,
-                reason_code="STOP_ACTIVE",
-                decided_at_utc=decision.decided_at_utc,
-                catalogo=CATALOG,
-            )
-            assert store.record(catalog_store_request, catalog_store_decision) == catalog_store_decision
-            assert store.get(catalog_store_request) == catalog_store_decision
-            foreign_catalog_decision = RuleDecision(
-                request_id=catalog_store_request.request_id,
-                request_hash=catalog_store_request.request_hash,
-                status=RuleDecisionStatus.DENY,
-                required_rule_id=catalog_store_request.rule_id,
-                reason_code="STOP_ACTIVE",
-                decided_at_utc=decision.decided_at_utc,
-                catalogo=MappingProxyType({"actos_externos": ("unidades-inventadas",)}),
-            )
-            with pytest.raises(AuthorityStateError):
-                store.record(catalog_store_request, foreign_catalog_decision)
-            malformed_catalog_decision = RuleDecision(
-                request_id=catalog_store_request.request_id,
-                request_hash=catalog_store_request.request_hash,
-                status=RuleDecisionStatus.DENY,
-                required_rule_id=catalog_store_request.rule_id,
-                reason_code="STOP_ACTIVE",
-                decided_at_utc=decision.decided_at_utc,
-                catalogo=MappingProxyType({"actos_externos": "mensajes"}),
-            )
-            with pytest.raises(RuleAuthorityError):
-                store.record(catalog_store_request, malformed_catalog_decision)
-
-            # A separate connection sees the row immediately after return: durable
-            # persistence is part of the synchronous return contract.
-            with app_connect() as independent:
-                with independent.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT request_hash,status,reason_code FROM rule_decisions "
-                        "WHERE request_id=%s",
-                        (request.request_id,),
-                    )
-                    assert cursor.fetchone() == (request.request_hash, "DENY", "STOP_ACTIVE")
-
-            replay = _decision(request, at=2)
-            assert store.record(request, replay) == decision
-            assert store.get(request) == decision
-            changed = _request(request.request_id, "other@example.test")
-            assert store.get(changed) is None
-            with pytest.raises(AuthorityStateError):
-                store.record(changed, _decision(changed))
-            with pytest.raises(AuthorityStateError):
-                store.record(other_pin_request, _decision(other_pin_request))
-
-            missing_request = _request("0199f8a1-8c00-7000-8000-000000000104")
-            missing = _decision(missing_request, status=RuleDecisionStatus.MISSING_RULE)
-            assert store.record(missing_request, missing) == missing
-            assert store.get(missing_request) == missing
-            with app_connect() as independent:
-                with independent.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT status,reason_code FROM rule_decisions WHERE request_id=%s",
-                        (missing_request.request_id,),
-                    )
-                    assert cursor.fetchone() == ("MISSING_RULE", "RULE_NOT_FOUND")
-
-            # Fail after INSERT but before the audit-head update can commit. With
-            # autocommit enabled above, this proves the adapter owns one transaction.
-            with connect_as("root", root_password, autocommit=False) as admin:
-                with admin.cursor() as cursor:
-                    cursor.execute("""
-                        CREATE TRIGGER fail_rule_authority_head_update
-                        BEFORE UPDATE ON rule_authority_audit_head FOR EACH ROW
-                        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='injected failure'
-                    """)
-                admin.commit()
-            failed_request = _request("0199f8a1-8c00-7000-8000-000000000102")
-            with pytest.raises(RuleAuthorityError):
-                store.record(failed_request, _decision(failed_request))
-            with connect_as("root", root_password, autocommit=True) as admin:
-                with admin.cursor() as cursor:
-                    cursor.execute("DROP TRIGGER fail_rule_authority_head_update")
-                    cursor.execute(
-                        "SELECT COUNT(*) FROM rule_decisions WHERE request_id=%s",
-                        (failed_request.request_id,),
-                    )
-                    assert cursor.fetchone()[0] == 0
-
-            permit_request = _request("0199f8a1-8c00-7000-8000-000000000103")
-            permit = _decision(permit_request, status=RuleDecisionStatus.PERMIT)
-            with pytest.raises(RuleAuthorityError):
-                store.record(permit_request, permit)
-            assert store.get(permit_request) is None
-
-            # An unavailable database is an error, never a returned PERMIT.
-            unavailable_calls = 0
-
-            def unavailable():
-                nonlocal unavailable_calls
-                unavailable_calls += 1
-                raise pymysql.err.OperationalError(2003, "database unavailable")
-
-            with pytest.raises(RuleAuthorityError):
-                MariaDBRuleDecisionStore(unavailable).record(
-                    missing_request, _decision(missing_request)
-                )
-            assert unavailable_calls == 1
-
-            # Distinct new UUID7 requests serialize on the audit head without
-            # deadlocking while holding missing-key gap locks.
-            concurrent_requests = [
-                _request(f"0199f8a1-8c00-7000-8000-{index:012d}")
-                for index in range(200, 208)
-            ]
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                results = list(pool.map(
-                    lambda item: store.record(item, _decision(item)), concurrent_requests
-                ))
-            assert results == [_decision(item) for item in concurrent_requests]
-
-            # Seed placeholder records for every immutable table, then exercise the
-            # triggers with a principal that does have UPDATE and DELETE grants.
-            zero_hash = "sha256:" + "0" * 64
-            permit_id = "0199f8a1-8c00-7000-8000-000000000111"
-            permit_request = _request("0199f8a1-8c00-7000-8000-000000000113")
-            from policy.authority_ledger.canonical import canonical_bytes
-            from policy.rule_authority.storage import (
-                _catalog_hash,
-                _decision_projection,
-                _record_hash,
-            )
-            seeded_permit_decision = RuleDecision(
-                request_id=permit_request.request_id,
-                request_hash=permit_request.request_hash,
-                status=RuleDecisionStatus.PERMIT,
-                required_rule_id=permit_request.rule_id,
-                reason_code=None,
-                decided_at_utc=datetime(2026, 10, 7, 12, 1, tzinfo=timezone.utc),
-            )
-            seeded_projection = _decision_projection(
-                seeded_permit_decision, _catalog_hash(permit_request.catalogo)
-            )
-            seeded_canonical = canonical_bytes(seeded_projection)
-            seeded_record_hash = _record_hash(
-                100, permit_request.request_id, None, seeded_projection
-            )
-
-            with app_connect() as app:
-                with app.cursor() as cursor:
-                    with pytest.raises(pymysql.MySQLError):
-                        cursor.execute(
-                            "INSERT INTO rule_decisions "
-                            "(request_id,request_hash,request_catalog_hash,required_rule_id,status,"
-                            "reason_code,decided_at_utc,canonical_decision,record_hash,audit_sequence) "
-                            "VALUES (%s,%s,%s,%s,'PERMIT',NULL,%s,%s,%s,999)",
-                            (permit_request.request_id, permit_request.request_hash,
-                             _catalog_hash(permit_request.catalogo), permit_request.rule_id,
-                             seeded_permit_decision.decided_at_utc.replace(tzinfo=None),
-                             seeded_canonical, seeded_record_hash),
-                        )
-
-            with connect_as("root", root_password, autocommit=False) as admin:
-                with admin.cursor() as cursor:
-                    cursor.execute("DROP TRIGGER trg_rule_decisions_no_permit_until_step6")
-                    cursor.execute(
-                        "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE "
-                        "WHERE TABLE_SCHEMA='jax_rule_authority' AND TABLE_NAME='rule_permits' "
-                        "AND CONSTRAINT_NAME='fk_rule_permits_decision'"
-                    )
-                    assert cursor.fetchone()[0] == 4
-                    cursor.execute(
-                        "SELECT COLUMN_NAME, REFERENCED_COLUMN_NAME FROM "
-                        "information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='jax_rule_authority' "
-                        "AND TABLE_NAME='rule_permits' AND CONSTRAINT_NAME='fk_rule_permits_decision' "
-                        "ORDER BY ORDINAL_POSITION"
-                    )
-                    assert cursor.fetchall() == (
-                        ("request_id", "request_id"),
-                        ("request_hash", "request_hash"),
-                        ("decision_status", "status"),
-                        ("rule_id", "required_rule_id"),
-                    )
-                    cursor.execute("SELECT @@FOREIGN_KEY_CHECKS")
-                    assert cursor.fetchone()[0] == 1
-                    cursor.execute(
-                        "INSERT INTO rule_decisions "
-                        "(request_id,request_hash,request_catalog_hash,required_rule_id,status,"
-                        "reason_code,decided_at_utc,canonical_decision,previous_record_hash,"
-                        "record_hash,audit_sequence) "
-                        "VALUES (%s,%s,%s,%s,'PERMIT',NULL,%s,%s,NULL,%s,100)",
-                        (permit_request.request_id, permit_request.request_hash,
-                         _catalog_hash(permit_request.catalogo), permit_request.rule_id,
-                         seeded_permit_decision.decided_at_utc.replace(tzinfo=None),
-                         seeded_canonical, seeded_record_hash),
-                    )
-                    cursor.execute(
-                        "SELECT request_id,request_hash,status,required_rule_id "
-                        "FROM rule_decisions WHERE request_id=%s",
-                        (request.request_id,),
-                    )
-                    assert cursor.fetchone() == (
-                        request.request_id, request.request_hash, "DENY", request.rule_id
-                    )
-                    permit_insert = (
-                        "INSERT INTO rule_permits "
-                        "(permit_id,request_id,request_hash,rule_id,rule_path,rule_blob_oid,"
-                        "rule_content_hash,policy_revision,policy_tree_oid,policy_snapshot_hash,"
-                        "ratification_event_id,authority_ledger_checkpoint,stop_checkpoint,"
-                        "capability_id,"
-                        "capability_version,capability_class,capability_limits,issued_at_utc,"
-                        "expires_at_utc,permit_hash,canonical_payload,previous_record_hash,"
-                        "record_hash,audit_sequence) VALUES "
-                        "(%s,%s,%s,'rule-one','policy/faro/rule-one.yaml',%s,%s,%s,%s,%s,%s,"
-                        "%s,%s,'mail.send','1','external',%s,UTC_TIMESTAMP(6),"
-                        "DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 5 MINUTE),%s,%s,%s,%s,100)"
-                    )
-                    permit_values = (
-                        permit_id, permit_request.request_id, permit_request.request_hash, "a" * 64,
-                        zero_hash, "b" * 64, "c" * 64, zero_hash,
-                        "0199f8a1-8c00-7000-8000-000000000112", b"{}", b"{}", b"{}",
-                        zero_hash, b"{}", zero_hash, zero_hash,
-                    )
-                    with pytest.raises(pymysql.MySQLError):
-                        cursor.execute(
-                            permit_insert, (*permit_values[:3], "a" * 41, *permit_values[4:])
-                        )
-                    with pytest.raises(pymysql.MySQLError):
-                        cursor.execute(
-                            permit_insert, (*permit_values[:3], "a" * 40 + "\n", *permit_values[4:])
-                        )
-                    cursor.execute("SAVEPOINT oid40_probe")
-                    oid40_values = (
-                        *permit_values[:3], "a" * 40, permit_values[4], "b" * 40,
-                        "c" * 40, *permit_values[7:],
-                    )
-                    cursor.execute(permit_insert, oid40_values)
-                    cursor.execute("ROLLBACK TO SAVEPOINT oid40_probe")
-                    with pytest.raises(pymysql.MySQLError):
-                        cursor.execute(
-                            permit_insert,
-                            (permit_id, request.request_id, request.request_hash, *permit_values[3:]),
-                        )
-                    with pytest.raises(pymysql.MySQLError):
-                        cursor.execute(
-                            permit_insert,
-                            (permit_id, permit_request.request_id, zero_hash, *permit_values[3:]),
-                        )
-                    with pytest.raises(pymysql.MySQLError):
-                        cursor.execute(
-                            permit_insert.replace("'rule-one'", "'other-rule'", 1),
-                            permit_values,
-                        )
-                    cursor.execute(permit_insert, permit_values)
-                    bad_consumption = (
-                        permit_id, "sha256:" + "f" * 64, b"{}", zero_hash, zero_hash, zero_hash,
-                    )
-                    with pytest.raises(pymysql.MySQLError):
-                        cursor.execute(
-                            "INSERT INTO rule_permit_consumptions "
-                            "(permit_id,request_hash,consumed_at_utc,canonical_payload,"
-                            "consumption_hash,previous_record_hash,record_hash,audit_sequence) "
-                            "VALUES (%s,%s,UTC_TIMESTAMP(6),%s,%s,%s,%s,101)",
-                            bad_consumption,
-                        )
-                    cursor.execute(
-                        "INSERT INTO rule_permit_consumptions "
-                        "(permit_id,request_hash,consumed_at_utc,canonical_payload,"
-                        "consumption_hash,previous_record_hash,record_hash,audit_sequence) "
-                        "VALUES (%s,%s,UTC_TIMESTAMP(6),%s,%s,%s,%s,101)",
-                        (permit_id, permit_request.request_hash, b"{}", zero_hash, zero_hash, zero_hash),
-                    )
-                admin.commit()
-            with pytest.raises(RuleAuthorityStorageError):
-                store.get(permit_request)
-
-            trigger = connect_as(
-                "jax_rule_authority_trigger_test", trigger_password, autocommit=False
-            )
-            with trigger:
-                for table, key, value in (
-                    ("rule_decisions", "request_id", permit_request.request_id),
-                    ("rule_permits", "permit_id", permit_id),
-                    ("rule_permit_consumptions", "permit_id", permit_id),
-                ):
-                    with trigger.cursor() as cursor:
-                        with pytest.raises(pymysql.MySQLError):
-                            cursor.execute(
-                                f"UPDATE {table} SET audit_sequence=audit_sequence+1 "
-                                f"WHERE {key}=%s",
-                                (value,),
-                            )
-                        trigger.rollback()
-                        with pytest.raises(pymysql.MySQLError):
-                            cursor.execute(f"DELETE FROM {table} WHERE {key}=%s", (value,))
-                        trigger.rollback()
-
-            with connect_as("root", root_password, autocommit=True) as admin:
-                with admin.cursor() as cursor:
-                    queries = (
-                        (
-                            "SELECT request_id FROM rule_decisions WHERE request_id=%s",
-                            (request.request_id,),
-                        ),
-                        (
-                            "SELECT request_id FROM rule_decisions "
-                            "WHERE required_rule_id=%s AND status=%s",
-                            (request.rule_id, "DENY"),
-                        ),
-                        (
-                            "SELECT permit_id FROM rule_permits WHERE expires_at_utc=%s",
-                            (datetime.now(timezone.utc),),
-                        ),
-                        (
-                            "SELECT permit_id FROM rule_permit_consumptions WHERE permit_id=%s",
-                            (permit_id,),
-                        ),
-                    )
-                    for query, params in queries:
-                        cursor.execute("EXPLAIN " + query, params)
-                        plan = cursor.fetchone()
-                        assert plan[5] is not None, f"EXPLAIN sin índice: {query}"
-                        extra = plan[9] or ""
-                        assert "Using filesort" not in extra and "Using temporary" not in extra
+            yield _Db(docker, socket_path, root_password)
         finally:
             subprocess.run(
                 [*docker, "stop", container], capture_output=True, text=True, check=False
@@ -536,7 +187,527 @@ def test_mariadb_decision_store_is_atomic_idempotent_and_request_bound():
                 ["sudo", "-n", "chown", "-R", f"{os.getuid()}:{os.getgid()}", socket_dir],
                 capture_output=True, text=True, check=False,
             )
-            if chown.returncode and __import__("sys").exc_info()[0] is None:
+            if chown.returncode and sys.exc_info()[0] is None:
                 raise RuntimeError(
                     f"falló la limpieza del socket MariaDB temporal: {chown.stderr.strip()}"
                 )
+
+
+@pytest.fixture
+def app(db):
+    """Cuenta de aplicación provisionada por el código versionado."""
+    password = secrets.token_urlsafe(24)
+    with db.root() as admin:
+        provision_application_account(admin, APP_USER, password)
+
+    def connect():
+        # Explicit BEGIN in the adapter is required: autocommit makes the
+        # partial-write assertion kill the no-transaction mutant.
+        return db.connect_as(APP_USER, password, autocommit=True)
+
+    return connect
+
+
+@pytest.fixture
+def trigger_account(db):
+    """Cuenta que SÍ tiene GRANT de UPDATE y DELETE: solo los triggers frenan."""
+    password = secrets.token_urlsafe(24)
+    with db.root() as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                f"CREATE USER '{TRIGGER_USER}'@'localhost' IDENTIFIED BY %s", (password,)
+            )
+            for table in IMMUTABLE_TABLES:
+                cursor.execute(
+                    f"GRANT SELECT,UPDATE,DELETE ON jax_rule_authority.{table} "
+                    f"TO '{TRIGGER_USER}'@'localhost'"
+                )
+        admin.commit()
+    return lambda: db.connect_as(TRIGGER_USER, password, autocommit=False)
+
+
+def _enable_permit_seeding(db) -> None:
+    """Quita el trigger que cierra PERMIT hasta el paso 6, solo en esta base efímera."""
+    with db.root() as admin:
+        with admin.cursor() as cursor:
+            cursor.execute("DROP TRIGGER trg_rule_decisions_no_permit_until_step6")
+        admin.commit()
+
+
+def _seed_permit_decision(cursor, request: RuleEvaluationRequest, sequence: int) -> None:
+    decision = RuleDecision(
+        request_id=request.request_id,
+        request_hash=request.request_hash,
+        status=RuleDecisionStatus.PERMIT,
+        required_rule_id=request.rule_id,
+        reason_code=None,
+        decided_at_utc=datetime(2026, 10, 7, 12, 1, tzinfo=timezone.utc),
+    )
+    projection = _decision_projection(decision, _catalog_hash(request.catalogo))
+    cursor.execute(
+        "INSERT INTO rule_decisions "
+        "(request_id,request_hash,request_catalog_hash,required_rule_id,status,"
+        "reason_code,decided_at_utc,canonical_decision,previous_record_hash,"
+        "record_hash,audit_sequence) "
+        "VALUES (%s,%s,%s,%s,'PERMIT',NULL,%s,%s,NULL,%s,%s)",
+        (request.request_id, request.request_hash, _catalog_hash(request.catalogo),
+         request.rule_id, decision.decided_at_utc.replace(tzinfo=None),
+         canonical_bytes(projection),
+         _record_hash(sequence, request.request_id, None, projection), sequence),
+    )
+
+
+PERMIT_INSERT = (
+    "INSERT INTO rule_permits "
+    "(permit_id,request_id,request_hash,rule_id,rule_path,rule_blob_oid,"
+    "rule_content_hash,policy_revision,policy_tree_oid,policy_snapshot_hash,"
+    "ratification_event_id,authority_ledger_checkpoint,stop_checkpoint,"
+    "capability_id,"
+    "capability_version,capability_class,capability_limits,issued_at_utc,"
+    "expires_at_utc,permit_hash,canonical_payload,previous_record_hash,"
+    "record_hash,audit_sequence) VALUES "
+    "(%s,%s,%s,'rule-one','policy/faro/rule-one.yaml',%s,%s,%s,%s,%s,%s,"
+    "%s,%s,'mail.send','1','external',%s,UTC_TIMESTAMP(6),"
+    "DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 5 MINUTE),%s,%s,%s,%s,%s)"
+)
+
+
+def _permit_values(permit_id: str, request: RuleEvaluationRequest, number: int, sequence: int):
+    return (
+        permit_id, request.request_id, request.request_hash, "a" * 64,
+        ZERO_HASH, "b" * 64, "c" * 64, ZERO_HASH,
+        "0199f8a1-8c00-7000-8000-000000000112", b"{}", b"{}", b"{}",
+        "sha256:" + f"{number:064x}", b"{}", ZERO_HASH, ZERO_HASH, sequence,
+    )
+
+
+CONSUMPTION_INSERT = (
+    "INSERT INTO rule_permit_consumptions "
+    "(permit_id,request_hash,consumed_at_utc,canonical_payload,"
+    "consumption_hash,previous_record_hash,record_hash,audit_sequence) "
+    "VALUES (%s,%s,UTC_TIMESTAMP(6),%s,%s,%s,%s,%s)"
+)
+
+
+def _record_deny(store, request_id: str):
+    request = _request(request_id)
+    decision = _decision(request)
+    assert store.record(request, decision) == decision
+    return request, decision
+
+
+def test_mariadb_store_rolls_back_partial_writes_and_fails_closed(db, app):
+    store = MariaDBRuleDecisionStore(app)
+
+    # Fail after INSERT but before the audit-head update can commit. With
+    # autocommit enabled in `app`, this proves the adapter owns one transaction.
+    with db.root() as admin:
+        with admin.cursor() as cursor:
+            cursor.execute("""
+                CREATE TRIGGER fail_rule_authority_head_update
+                BEFORE UPDATE ON rule_authority_audit_head FOR EACH ROW
+                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='injected failure'
+            """)
+        admin.commit()
+    failed_request = _request("0199f8a1-8c00-7000-8000-000000000102")
+    with pytest.raises(RuleAuthorityError):
+        store.record(failed_request, _decision(failed_request))
+    with db.root(autocommit=True) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute("DROP TRIGGER fail_rule_authority_head_update")
+            cursor.execute(
+                "SELECT COUNT(*) FROM rule_decisions WHERE request_id=%s",
+                (failed_request.request_id,),
+            )
+            assert cursor.fetchone()[0] == 0
+    assert store.get(failed_request) is None
+
+    # PERMIT is closed until step 6 and nothing is left behind.
+    permit_request = _request("0199f8a1-8c00-7000-8000-000000000103")
+    with pytest.raises(RuleAuthorityError):
+        store.record(permit_request, _decision(permit_request, status=RuleDecisionStatus.PERMIT))
+    assert store.get(permit_request) is None
+
+    # An unavailable database is an error, never a returned PERMIT.
+    unavailable_calls = 0
+
+    def unavailable():
+        nonlocal unavailable_calls
+        unavailable_calls += 1
+        raise pymysql.err.OperationalError(2003, "database unavailable")
+
+    other = _request("0199f8a1-8c00-7000-8000-000000000104")
+    with pytest.raises(RuleAuthorityError):
+        MariaDBRuleDecisionStore(unavailable).record(other, _decision(other))
+    assert unavailable_calls == 1
+
+    # Distinct new UUID7 requests serialize on the audit head without
+    # deadlocking while holding missing-key gap locks.
+    concurrent_requests = [
+        _request(f"0199f8a1-8c00-7000-8000-{index:012d}") for index in range(200, 208)
+    ]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(
+            lambda item: store.record(item, _decision(item)), concurrent_requests
+        ))
+    assert results == [_decision(item) for item in concurrent_requests]
+
+
+def test_mariadb_store_rollback_failure_is_logged_and_original_error_raised(db, app, caplog):
+    class RollbackBroken:
+        """Conexión real cuyo rollback() falla: el error original no se pierde."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def rollback(self):
+            raise pymysql.err.OperationalError(2013, "lost connection on rollback")
+
+    with db.root() as admin:
+        with admin.cursor() as cursor:
+            cursor.execute("""
+                CREATE TRIGGER fail_rule_authority_head_update
+                BEFORE UPDATE ON rule_authority_audit_head FOR EACH ROW
+                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='injected failure'
+            """)
+        admin.commit()
+    request = _request("0199f8a1-8c00-7000-8000-000000000106")
+    store = MariaDBRuleDecisionStore(lambda: RollbackBroken(app()))
+    with caplog.at_level("ERROR", logger="policy.rule_authority.storage"):
+        with pytest.raises(RuleAuthorityStorageError) as raised:
+            store.record(request, _decision(request))
+    assert "injected failure" in str(raised.value.__cause__)
+    assert any("rollback" in record.getMessage() for record in caplog.records)
+    assert any(record.exc_info for record in caplog.records)
+
+
+def test_mariadb_store_is_idempotent_durable_and_bound_to_request_and_catalog(db, app):
+    store = MariaDBRuleDecisionStore(app)
+    request = _request("0199f8a1-8c00-7000-8000-000000000101")
+    assert store.get(request) is None
+    assert store.get(_request(request.request_id, "other@example.test")) is None
+    alternate_catalog = MappingProxyType({
+        **dict(CATALOG),
+        "actos_externos": (*CATALOG["actos_externos"], "unidad-extra"),
+    })
+    other_pin_request = _request(request.request_id, catalog=alternate_catalog)
+    assert other_pin_request.request_hash == request.request_hash
+    assert store.get(other_pin_request) is None
+
+    decision = _decision(request)
+    assert store.record(request, decision) == decision
+
+    # M9: con la fila YA existente, el mismo request_id/request_hash bajo otro
+    # catálogo no la lee. Sin el chequeo de catálogo en get(), se devolvería o
+    # se lanzaría; la aserción exige None.
+    assert store.get(request) == decision
+    assert store.get(other_pin_request) is None
+
+    # The store preserves the model's immutable pin catalog on roundtrip.
+    catalog_store_request = _request("0199f8a1-8c00-7000-8000-000000000105")
+    catalog_store_decision = RuleDecision(
+        request_id=catalog_store_request.request_id,
+        request_hash=catalog_store_request.request_hash,
+        status=RuleDecisionStatus.DENY,
+        required_rule_id=catalog_store_request.rule_id,
+        reason_code="STOP_ACTIVE",
+        decided_at_utc=decision.decided_at_utc,
+        catalogo=CATALOG,
+    )
+    assert store.record(catalog_store_request, catalog_store_decision) == catalog_store_decision
+    assert store.get(catalog_store_request) == catalog_store_decision
+    foreign_catalog_decision = RuleDecision(
+        request_id=catalog_store_request.request_id,
+        request_hash=catalog_store_request.request_hash,
+        status=RuleDecisionStatus.DENY,
+        required_rule_id=catalog_store_request.rule_id,
+        reason_code="STOP_ACTIVE",
+        decided_at_utc=decision.decided_at_utc,
+        catalogo=MappingProxyType({"actos_externos": ("unidades-inventadas",)}),
+    )
+    with pytest.raises(AuthorityStateError):
+        store.record(catalog_store_request, foreign_catalog_decision)
+    malformed_catalog_decision = RuleDecision(
+        request_id=catalog_store_request.request_id,
+        request_hash=catalog_store_request.request_hash,
+        status=RuleDecisionStatus.DENY,
+        required_rule_id=catalog_store_request.rule_id,
+        reason_code="STOP_ACTIVE",
+        decided_at_utc=decision.decided_at_utc,
+        catalogo=MappingProxyType({"actos_externos": "mensajes"}),
+    )
+    with pytest.raises(RuleAuthorityError):
+        store.record(catalog_store_request, malformed_catalog_decision)
+
+    # A separate connection sees the row immediately after return: durable
+    # persistence is part of the synchronous return contract.
+    with app() as independent:
+        with independent.cursor() as cursor:
+            cursor.execute(
+                "SELECT request_hash,status,reason_code FROM rule_decisions "
+                "WHERE request_id=%s",
+                (request.request_id,),
+            )
+            assert cursor.fetchone() == (request.request_hash, "DENY", "STOP_ACTIVE")
+
+    replay = _decision(request, at=2)
+    assert store.record(request, replay) == decision
+    assert store.get(request) == decision
+    with app() as independent:
+        with independent.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM rule_decisions WHERE request_id=%s",
+                (request.request_id,),
+            )
+            assert cursor.fetchone()[0] == 1
+    changed = _request(request.request_id, "other@example.test")
+    assert store.get(changed) is None
+    with pytest.raises(AuthorityStateError):
+        store.record(changed, _decision(changed))
+    with pytest.raises(AuthorityStateError):
+        store.record(other_pin_request, _decision(other_pin_request))
+
+    missing_request = _request("0199f8a1-8c00-7000-8000-000000000107")
+    missing = _decision(missing_request, status=RuleDecisionStatus.MISSING_RULE)
+    assert store.record(missing_request, missing) == missing
+    assert store.get(missing_request) == missing
+    with app() as independent:
+        with independent.cursor() as cursor:
+            cursor.execute(
+                "SELECT status,reason_code FROM rule_decisions WHERE request_id=%s",
+                (missing_request.request_id,),
+            )
+            assert cursor.fetchone() == ("MISSING_RULE", "RULE_NOT_FOUND")
+
+
+def test_mariadb_append_only_triggers_fire_for_every_update_and_delete(db, app, trigger_account):
+    """Cada trigger se ejercita con una fila SIN hijos, para que la FK no lo tape."""
+    store = MariaDBRuleDecisionStore(app)
+    deny_request, _ = _record_deny(store, "0199f8a1-8c00-7000-8000-000000000301")
+    _enable_permit_seeding(db)
+
+    consumed_request = _request("0199f8a1-8c00-7000-8000-000000000302")
+    free_request = _request("0199f8a1-8c00-7000-8000-000000000303")
+    consumed_permit = "0199f8a1-8c00-7000-8000-000000000311"
+    free_permit = "0199f8a1-8c00-7000-8000-000000000312"
+    with db.root() as admin:
+        with admin.cursor() as cursor:
+            _seed_permit_decision(cursor, consumed_request, 100)
+            _seed_permit_decision(cursor, free_request, 101)
+            cursor.execute(
+                PERMIT_INSERT, _permit_values(consumed_permit, consumed_request, 1, 100)
+            )
+            cursor.execute(PERMIT_INSERT, _permit_values(free_permit, free_request, 2, 101))
+            cursor.execute(
+                CONSUMPTION_INSERT,
+                (consumed_permit, consumed_request.request_hash, b"{}",
+                 ZERO_HASH, ZERO_HASH, ZERO_HASH, 102),
+            )
+        admin.commit()
+
+    # (tabla, columna clave, valor): todas sin filas hijas que referencien la fila
+    # salvo `consumed_permit`, que solo se usa para UPDATE.
+    targets = (
+        ("rule_decisions", "request_id", deny_request.request_id),          # DENY sin hijos
+        ("rule_permits", "permit_id", free_permit),                         # permiso sin consumo
+        ("rule_permit_consumptions", "permit_id", consumed_permit),         # consumo (hoja)
+    )
+    trigger = trigger_account()
+    with trigger:
+        for table, key, value in targets:
+            for verb, sql in (
+                ("UPDATE", f"UPDATE {table} SET audit_sequence=audit_sequence+1 WHERE {key}=%s"),
+                ("DELETE", f"DELETE FROM {table} WHERE {key}=%s"),
+            ):
+                with trigger.cursor() as cursor:
+                    with pytest.raises(pymysql.MySQLError, match=_append_only(table)):
+                        cursor.execute(sql, (value,))
+                    trigger.rollback()
+        # UPDATE sobre filas con hijos también lo frena el trigger.
+        for table, key, value in (
+            ("rule_decisions", "request_id", consumed_request.request_id),
+            ("rule_permits", "permit_id", consumed_permit),
+        ):
+            with trigger.cursor() as cursor:
+                with pytest.raises(pymysql.MySQLError, match=_append_only(table)):
+                    cursor.execute(
+                        f"UPDATE {table} SET audit_sequence=audit_sequence+1 WHERE {key}=%s",
+                        (value,),
+                    )
+                trigger.rollback()
+
+    # Nada cambió: las tres filas objetivo siguen ahí.
+    with db.root(autocommit=True) as admin:
+        with admin.cursor() as cursor:
+            for table, key, value in targets:
+                cursor.execute(f"SELECT COUNT(*) FROM {table} WHERE {key}=%s", (value,))
+                assert cursor.fetchone()[0] == 1
+
+
+def test_mariadb_constraints_permit_gate_oids_and_indexed_plans(db, app):
+    store = MariaDBRuleDecisionStore(app)
+    request, _ = _record_deny(store, "0199f8a1-8c00-7000-8000-000000000401")
+    permit_request = _request("0199f8a1-8c00-7000-8000-000000000402")
+    permit_id = "0199f8a1-8c00-7000-8000-000000000411"
+    values = _permit_values(permit_id, permit_request, 1, 100)
+
+    # Mientras el paso 6 no exista, ni la cuenta de aplicación puede insertar PERMIT.
+    with app() as connection:
+        with connection.cursor() as cursor:
+            with pytest.raises(
+                pymysql.MySQLError, match=r"\(1644, 'PERMIT persistence requires step 6"
+            ):
+                cursor.execute(
+                    "INSERT INTO rule_decisions "
+                    "(request_id,request_hash,request_catalog_hash,required_rule_id,status,"
+                    "reason_code,decided_at_utc,canonical_decision,record_hash,audit_sequence) "
+                    "VALUES (%s,%s,%s,%s,'PERMIT',NULL,UTC_TIMESTAMP(6),%s,%s,999)",
+                    (permit_request.request_id, permit_request.request_hash,
+                     _catalog_hash(permit_request.catalogo), permit_request.rule_id,
+                     b"{}", ZERO_HASH),
+                )
+    _enable_permit_seeding(db)
+
+    with db.root() as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE "
+                "WHERE TABLE_SCHEMA='jax_rule_authority' AND TABLE_NAME='rule_permits' "
+                "AND CONSTRAINT_NAME='fk_rule_permits_decision'"
+            )
+            assert cursor.fetchone()[0] == 4
+            cursor.execute(
+                "SELECT COLUMN_NAME, REFERENCED_COLUMN_NAME FROM "
+                "information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='jax_rule_authority' "
+                "AND TABLE_NAME='rule_permits' AND CONSTRAINT_NAME='fk_rule_permits_decision' "
+                "ORDER BY ORDINAL_POSITION"
+            )
+            assert cursor.fetchall() == (
+                ("request_id", "request_id"),
+                ("request_hash", "request_hash"),
+                ("decision_status", "status"),
+                ("rule_id", "required_rule_id"),
+            )
+            cursor.execute("SELECT @@FOREIGN_KEY_CHECKS")
+            assert cursor.fetchone()[0] == 1
+            _seed_permit_decision(cursor, permit_request, 100)
+            with pytest.raises(pymysql.MySQLError):
+                cursor.execute(PERMIT_INSERT, (*values[:3], "a" * 41, *values[4:]))
+            with pytest.raises(pymysql.MySQLError):
+                cursor.execute(PERMIT_INSERT, (*values[:3], "a" * 40 + "\n", *values[4:]))
+            cursor.execute("SAVEPOINT oid40_probe")
+            cursor.execute(
+                PERMIT_INSERT,
+                (*values[:3], "a" * 40, values[4], "b" * 40, "c" * 40, *values[7:]),
+            )
+            cursor.execute("ROLLBACK TO SAVEPOINT oid40_probe")
+            with pytest.raises(pymysql.MySQLError):  # permiso sobre una decisión DENY
+                cursor.execute(
+                    PERMIT_INSERT, (permit_id, request.request_id, request.request_hash, *values[3:])
+                )
+            with pytest.raises(pymysql.MySQLError):  # hash ajeno
+                cursor.execute(PERMIT_INSERT, (permit_id, permit_request.request_id, ZERO_HASH, *values[3:]))
+            with pytest.raises(pymysql.MySQLError):  # regla ajena
+                cursor.execute(PERMIT_INSERT.replace("'rule-one'", "'other-rule'", 1), values)
+            cursor.execute(PERMIT_INSERT, values)
+            with pytest.raises(pymysql.MySQLError):  # consumo con hash ajeno
+                cursor.execute(
+                    CONSUMPTION_INSERT,
+                    (permit_id, "sha256:" + "f" * 64, b"{}", ZERO_HASH, ZERO_HASH, ZERO_HASH, 101),
+                )
+            cursor.execute(
+                CONSUMPTION_INSERT,
+                (permit_id, permit_request.request_hash, b"{}", ZERO_HASH, ZERO_HASH, ZERO_HASH, 101),
+            )
+        admin.commit()
+    with pytest.raises(RuleAuthorityStorageError):
+        store.get(permit_request)
+
+    with db.root(autocommit=True) as admin:
+        with admin.cursor() as cursor:
+            queries = (
+                ("SELECT request_id FROM rule_decisions WHERE request_id=%s", (request.request_id,)),
+                (
+                    "SELECT request_id FROM rule_decisions WHERE required_rule_id=%s AND status=%s",
+                    (request.rule_id, "DENY"),
+                ),
+                ("SELECT permit_id FROM rule_permits WHERE expires_at_utc=%s", (datetime.now(timezone.utc),)),
+                ("SELECT permit_id FROM rule_permit_consumptions WHERE permit_id=%s", (permit_id,)),
+            )
+            for query, params in queries:
+                cursor.execute("EXPLAIN " + query, params)
+                plan = cursor.fetchone()
+                assert plan[5] is not None, f"EXPLAIN sin índice: {query}"
+                extra = plan[9] or ""
+                assert "Using filesort" not in extra and "Using temporary" not in extra
+
+
+def _grants(admin, username: str, host: str) -> str:
+    with admin.cursor() as cursor:
+        cursor.execute(f"SHOW GRANTS FOR '{username}'@'{host}'")
+        return "\n".join(row[0] for row in cursor.fetchall()).upper()
+
+
+def _assert_least_privilege(grants: str) -> None:
+    assert "GRANT OPTION" not in grants
+    assert "ALL PRIVILEGES" not in grants
+    assert "TRIGGER" not in grants and "DELETE" not in grants
+    for table in IMMUTABLE_TABLES:
+        assert f"GRANT SELECT, INSERT ON `JAX_RULE_AUTHORITY`.`{table.upper()}`" in grants
+    assert "GRANT SELECT, UPDATE ON `JAX_RULE_AUTHORITY`.`RULE_AUTHORITY_AUDIT_HEAD`" in grants
+
+
+def _broad_account(admin, username: str, host: str, password: str) -> None:
+    with admin.cursor() as cursor:
+        cursor.execute(
+            f"CREATE USER '{username}'@'{host.replace('%', '%%')}' IDENTIFIED BY %s", (password,)
+        )
+        cursor.execute(
+            f"GRANT ALL PRIVILEGES ON jax_rule_authority.* TO '{username}'@'{host}' "
+            "WITH GRANT OPTION"
+        )
+    admin.commit()
+
+
+def test_mariadb_provisioning_revokes_prior_grants_for_localhost_and_wildcard_account(db):
+    password = secrets.token_urlsafe(24)
+    with db.root() as admin:
+        _broad_account(admin, APP_USER, "localhost", password)
+        _broad_account(admin, APP_USER, "%", password)
+        assert "ALL PRIVILEGES" in _grants(admin, APP_USER, "localhost")
+        assert "ALL PRIVILEGES" in _grants(admin, APP_USER, "%")
+        provision_application_account(admin, APP_USER, password)
+        _assert_least_privilege(_grants(admin, APP_USER, "localhost"))
+        _assert_least_privilege(_grants(admin, APP_USER, "%"))
+        # Repetible: una segunda provisión converge al mismo mínimo.
+        provision_application_account(admin, APP_USER, password)
+        _assert_least_privilege(_grants(admin, APP_USER, "localhost"))
+        _assert_least_privilege(_grants(admin, APP_USER, "%"))
+
+
+def test_mariadb_provisioning_without_wildcard_account_creates_none_and_main_runs(db, monkeypatch, capsys):
+    from policy.rule_authority import provisioning
+
+    password = secrets.token_urlsafe(24)
+    with db.root() as admin:
+        _broad_account(admin, APP_USER, "localhost", password)
+
+    monkeypatch.setenv("JAX_RULE_AUTHORITY_ADMIN_UNIX_SOCKET", str(db.socket_path))
+    monkeypatch.setenv("JAX_RULE_AUTHORITY_ADMIN_USER", "root")
+    monkeypatch.setenv("JAX_RULE_AUTHORITY_ADMIN_PASSWORD", db.root_password)
+    monkeypatch.setenv("JAX_RULE_AUTHORITY_APP_USERNAME", APP_USER)
+    monkeypatch.setenv("JAX_RULE_AUTHORITY_APP_PASSWORD", password)
+    assert provisioning.main() == 0
+    assert "provisioned" in capsys.readouterr().out
+    with db.root() as admin:
+        _assert_least_privilege(_grants(admin, APP_USER, "localhost"))
+        with admin.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM mysql.user WHERE User=%s AND Host='%%'", (APP_USER,))
+            assert cursor.fetchone()[0] == 0
+
+    monkeypatch.delenv("JAX_RULE_AUTHORITY_APP_PASSWORD")
+    with pytest.raises(SystemExit, match="JAX_RULE_AUTHORITY_APP_PASSWORD"):
+        provisioning.main()

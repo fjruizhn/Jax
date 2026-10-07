@@ -12,9 +12,20 @@
   `rule_authority_audit_head`; los tres registros append-only tienen triggers contra
   `UPDATE`/`DELETE`. La cuenta versionada solo inserta/lee esos registros y actualiza
   el head.
-- MariaDB 12.3.3 efímera: 1 passed en 5.64 s; piso
-  `authority-rule-storage/mariadb` verificado. Suite Faro/Block 4 seleccionada:
-  228 passed.
+- MariaDB 12.3.3 efímera: 7 passed en 34.61 s (una base por prueba); piso
+  `authority-rule-storage/mariadb` = `^7 passed in ` verificado con `piso.py verificar`.
+  El monolito de 1 prueba se dividió en 7 (rollback, rollback fallido, idempotencia/binding,
+  triggers append-only, restricciones/EXPLAIN, provisioning x2).
+- Ronda 2 de #375: el `rollback()` fallido ya no se traga (`_LOG.exception` + marca
+  `# fail-soft:`); los triggers de DELETE se ejercitan sobre filas sin hijos (DENY y permiso
+  sin consumo) afirmando código 1644 y mensaje; `get()` con fila existente y otro catálogo
+  devuelve None; provisioning aplica REVOKE/GRANT también a la cuenta homónima `@'%'` si
+  existe y tiene `main()` de operador (`JAX_RULE_AUTHORITY_ADMIN_*`/`_APP_*`); se quitó el
+  `pip install pymysql` suelto del paso de CI (el job ya lo instala antes).
+- Nombre de tabla: el diseño §11 dice `rule_authority_decisions`; el encargo del paso 5 y la
+  migración usan `rule_decisions`. No se renombró (decisión de Hyde); si se decide el nombre
+  del diseño, cambia la migración, `storage.py`, el test y los GRANTs de provisioning en un
+  mismo commit.
 - Mutantes comprobados: quitar `begin()` deja una fila tras fallo parcial; omitir la
   comparación de hash hace que `get()` devuelva una fila ajena; omitir el commit hace
   que otra conexión no vea la decisión al retornar. Los tres fallan en aserciones.

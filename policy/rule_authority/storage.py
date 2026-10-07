@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import logging
 from types import MappingProxyType
 from typing import Callable
 
@@ -13,6 +14,7 @@ from .errors import RuleAuthorityStorageError
 from .models import RuleDecision, RuleDecisionStatus, RuleEvaluationRequest
 
 
+_LOG = logging.getLogger(__name__)
 _DECISION_DOMAIN = "JAX-FARO-RULE-AUTHORITY-DECISION"
 _DECISION_VERSION = "1"
 _CATALOG_DOMAIN = "JAX-FARO-RULE-CATALOG"
@@ -187,8 +189,8 @@ class MariaDBRuleDecisionStore:
             if connection is not None:
                 try:
                     connection.rollback()
-                except Exception:
-                    pass
+                except Exception:  # fail-soft: el rollback fallido se registra y el error original se relanza como RuleAuthorityStorageError; la conexión se cierra y MariaDB revierte sola la transacción abierta
+                    _LOG.exception("rollback de Rule Authority falló; se relanza el error original")
             raise RuleAuthorityStorageError("no se pudo persistir la decisión") from exc
         finally:
             if connection is not None:

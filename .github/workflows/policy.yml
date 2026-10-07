@@ -2748,7 +2748,6 @@ jobs:
           JAX_RULE_AUTHORITY_DOCKER_CMD: docker
         run: |
           set -o pipefail
-          python -m pip install pymysql
           python -m pytest -q tests/policy/test_faro_rule_authority_storage_mariadb.py 2>&1 | tee /tmp/faro-rule-authority-storage-mariadb
           python3 .github/ci/piso.py verificar authority-rule-storage/mariadb /tmp/faro-rule-authority-storage-mariadb || exit $?
       - name: Block 4 authority-ledger MariaDB aislada -- piso exacto

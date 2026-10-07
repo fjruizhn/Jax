@@ -4612,6 +4612,22 @@ incluido `previous_event_hash`; el piso anterior era 5.
 Piso vigente (2026-10-07): `^1 passed in `. MariaDB 12.3.3 efímera con `--network none`;
 prueba migraciones, provisioning versionado y bloqueo de UPDATE/DELETE con GRANT explícito.
 
+## `authority-rule-storage/mariadb`
+
+Piso vigente (2026-10-07): `^7 passed in `. Antes `^1 passed in ` (un único test monolítico).
+MariaDB 12.3.3 efímera con `--network none`, una base por prueba. Las 7 pruebas: (1) rollback de
+escrituras parciales, PERMIT cerrado, store caído y concurrencia; (2) `rollback()` fallido se
+registra y se relanza el error original; (3) idempotencia, durabilidad y ligadura a request_hash y
+catálogo (con fila existente); (4) triggers append-only: UPDATE y DELETE sobre filas sin hijos
+con una cuenta que tiene GRANT, código 1644 y mensaje del trigger; (5) restricciones de PERMIT,
+OID y EXPLAIN; (6) provisioning revoca a `user@localhost` y a la homónima `user@'%'`;
+(7) provisioning sin cuenta `@'%'` no la crea y `main()` de operador. Medido el 2026-10-07 en
+hall9000 con el comando exacto del workflow (`JAX_RULE_AUTHORITY_DOCKER_CMD="sudo -n docker"`
+solo porque aquí docker exige sudo). El runner tiene la ultima palabra.
+
+El paso del workflow ya no hace `pip install pymysql`: el job lo instala antes en
+`pip install pytest pyyaml cryptography==49.0.0 pymysql` (sin versión; heredado, ver pendientes).
+
 ## `authority-rule-events/ratifications`
 
 Piso vigente (2026-10-07): `^12 passed in `. Cubre activación que rechaza grants individuales
