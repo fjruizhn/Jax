@@ -116,6 +116,8 @@ Patrón vigente al migrar (2026-10-03, master 364ded9): `^671 passed`
 
 Piso actualizado 2026-10-04: `^688 passed`. Sobre el piso 683, se suman pruebas de payload hostil, timeout con cancelación, truncamiento explícito, cableado del perfil de prueba y concurrencia en peor caso; 0 skips.
 
+Piso actualizado 2026-10-07 (GLM g1, F1.1 paso 8, avisos de la decisión del kernel): `^735 passed`. Sobre el piso 722, +13 en `tests/test_faro_aviso.py` (inmediato vs diario, texto redactado sin argumentos/montos/contenido/archivos, fail-soft del envío, tasa del orquestador, cola diaria una línea JSON por aviso, resumen que cuenta ilegibles y vacía al final, fail-soft sin disco, sin I/O en armar+emitir, y la frontera por AST: `policy/rule_authority` no importa el aviso ni el aviso importa `policy`). MEDIDO con el mismo comando del job (venv `~/tmp-glm/venv-faro`, Python 3.14.4, 0 skips). Los 4 mutantes del encargo (persistir antes de avisar, argumentos en el texto, excepción que propaga, PERMIT no obligante inmediato) vistos en rojo y revertidos.
+
 ## `faro-bitacora-db/faro-db`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^40 passed`
