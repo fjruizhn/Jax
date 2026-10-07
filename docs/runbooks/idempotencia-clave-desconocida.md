@@ -52,7 +52,15 @@ despacho sigue solo. Esto NO es una clave desconocida.
    «0 apariciones»):
    `test -f /srv/jax-prod/jax/las_manos/logs/procesamiento_jobs.jsonl && grep -c '"job_id": "<job_id>"'
     /srv/jax-prod/jax/las_manos/logs/procesamiento_jobs.jsonl`
-   Si el archivo no existe, parar: escalar a Fernando. Ver tambien los respaldos del archivo:
+   Si el archivo no existe, parar: escalar a Fernando. Ver tambien los respaldos del archivo. Donde estan (verificado el
+   2026-10-06): el barrido nocturno de `claude-skills/bin/backup-hall9000.sh` incluye `/srv/jax-prod` en `SISTEMA_RUTAS`
+   y lo sube con restic (etiqueta `hall9000-sistema`, host `hall9000`) a dos repos: `/etc/restic/local.env` y
+   `/etc/restic/r2.env` (como `fruiz`, nunca como root). Se lee asi, por cada repo:
+   `( set -a; . /etc/restic/local.env; set +a; restic snapshots --host hall9000 --tag hall9000-sistema;
+   restic dump <id-snapshot> /srv/jax-prod/jax/las_manos/logs/procesamiento_jobs.jsonl | grep -c '"job_id": "<job_id>"' )`
+   (repetir con `r2.env`). El respaldo es nocturno: un trabajo creado despues del ultimo snapshot no esta en ninguno, y
+   eso NO prueba que no exista. Si ningun repo responde o no hay snapshot que cubra la fecha de `creado_en`, no hay
+   respaldo localizable: **escalar a Fernando, no concluir «0 en los respaldos»**.
    - **0 apariciones en el JSONL y 0 en los respaldos**: el trabajo no esta en ningun lado. Va al procedimiento de abajo.
    - **0 en el JSONL pero aparece en un respaldo**: el JSONL perdio lineas. **No borrar nada: escalar a Fernando.**
    - **Una o mas apariciones en el JSONL**: el trabajo ESTA en el JSONL pero el almacen no lo muestra: es un trabajo en
@@ -64,7 +72,14 @@ despacho sigue solo. Esto NO es una clave desconocida.
 
 Solo con el diagnostico «0 y 0». Sin detener nada:
 
-1. Respaldar: copia del JSONL actual (`cp -p`) y volcado de la tabla (`mariadb-dump <base> procesamiento_idempotencia`).
+1. Respaldar, a un directorio nuevo `D=~/respaldos-despliegue/AAAA-MM-DD-idempotencia` (es donde van los respaldos de
+   cada despliegue; `mkdir -p "$D"`): `cp -p /srv/jax-prod/jax/las_manos/logs/procesamiento_jobs.jsonl "$D"/` y el volcado
+   de la tabla contra la MariaDB de produccion (`127.0.0.1:3308`; la 3306 esta muerta) con un archivo de opciones `600`,
+   **nunca la contrasena en la linea de comandos** (queda legible en `/proc/<pid>/cmdline`):
+   `mariadb-dump --defaults-extra-file=<cnf 600 con host=127.0.0.1, port=3308, user, password entre comillas>
+   --single-transaction <base> procesamiento_idempotencia > "$D"/procesamiento_idempotencia.sql`. El archivo de opciones
+   se arma como en `/etc/restic/mysql-backup-local.cnf` (mismo formato) y se borra al terminar. Comprobar que el `.sql`
+   termina en `-- Dump completed` y que el `cp` dejo un archivo del mismo tamano; si no, parar.
 2. Borrar SOLO esa fila y solo si sigue igual:
    `DELETE FROM procesamiento_idempotencia WHERE id = <id> AND job_id = '<job_id>' AND confirmado = 1;`
    Debe afectar 1 fila. Si afecta 0, algo cambio: parar y escalar.
