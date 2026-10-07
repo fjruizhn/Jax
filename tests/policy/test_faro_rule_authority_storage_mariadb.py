@@ -30,6 +30,7 @@ from policy.rule_authority.storage import (
     MariaDBRuleDecisionStore,
     RuleAuthorityStorageError,
     _catalog_hash,
+    _catalog_projection,
     _decision_projection,
     _record_hash,
 )
@@ -425,9 +426,10 @@ def test_mariadb_store_is_idempotent_durable_and_bound_to_request_and_catalog(db
     decision = _decision(request)
     assert store.record(request, decision) == decision
 
-    # M9: con la fila YA existente, el mismo request_id/request_hash bajo otro
-    # catálogo no la lee. Sin el chequeo de catálogo en get(), se devolvería o
-    # se lanzaría; la aserción exige None.
+    # Con la fila YA existente, el mismo request_id bajo otro catálogo no la lee.
+    # El None sale de `row[0] != request.request_hash` (el request_hash lleva el OID
+    # del pin y por eso difiere); el chequeo `row[1] != _catalog_hash(...)` de get()
+    # es defensa en profundidad y esta aserción no lo aísla.
     assert store.get(request) == decision
     assert store.get(other_pin_request) is None
 
@@ -480,6 +482,16 @@ def test_mariadb_store_is_idempotent_durable_and_bound_to_request_and_catalog(db
                 (missing_request.request_id,),
             )
             assert cursor.fetchone() == ("MISSING_RULE", "RULE_NOT_FOUND")
+
+
+@pytest.mark.parametrize("no_catalogo", [
+    pytest.param({"oid_pin": "0" * 40, "clases": {}}, id="dict"),
+    pytest.param(dict(CATALOG), id="copia-de-dict"),
+    pytest.param(None, id="none"),
+])
+def test_catalog_projection_rejects_anything_that_is_not_a_sealed_catalog(no_catalogo):
+    with pytest.raises(RuleAuthorityStorageError, match="catalogo de solicitud"):
+        _catalog_projection(no_catalogo)
 
 
 def test_mariadb_append_only_triggers_fire_for_every_update_and_delete(db, app, trigger_account):

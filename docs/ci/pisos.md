@@ -4621,8 +4621,8 @@ efímera: el provisioning revoca los privilegios previos (`REVOKE ALL PRIVILEGES
 
 ## `authority-rule-storage/mariadb`
 
-Piso vigente (2026-10-07): `^9 passed in `. Antes `^7` (ronda 2) y `^1 passed in ` (un único test
-monolítico). MariaDB 12.3.3 efímera con `--network none`, una base por prueba. Las 9 pruebas:
+Piso vigente (2026-10-07, r3 de #375): `^12 passed in `. Antes `^9` (+3: `_catalog_projection` rechaza dict, copia de dict y None) y `^7` (ronda 2) y `^1 passed in ` (un único test
+monolítico). MariaDB 12.3.3 efímera con `--network none`, una base por prueba. Las 9 pruebas originales (más las 3 de la proyección del catálogo, sin DB):
 (1) rollback de escrituras parciales, PERMIT cerrado, store caído y concurrencia; (2) `rollback()`
 fallido se registra y se relanza el error original; (3) `rollback()` fallido tras un
 `AuthorityStateError` también se registra y sale como `RuleAuthorityStorageError`;

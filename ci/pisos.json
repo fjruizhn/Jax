@@ -138,8 +138,8 @@
       "mensaje": "PISO ROTO: se esperaba la integración MariaDB aislada de Block 4 (4 tests CORRIDOS). Medido el 2026-10-07 en hall9000 con MariaDB 12.3.3 --network none."
     },
     "authority-rule-storage/mariadb": {
-      "patron": "^9 passed in ",
-      "mensaje": "PISO ROTO: se esperaban exactamente 9 pruebas de persistencia Rule Authority contra MariaDB 12.3.3 --network none (rollback, rollback fallido, rollback fallido tras error de estado, idempotencia/binding de hash y catálogo, triggers append-only, restricciones/EXPLAIN, provisioning x3). Medido el 2026-10-07 en hall9000 con MariaDB 12.3.3 --network none."
+      "patron": "^12 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 12 pruebas de persistencia Rule Authority contra MariaDB 12.3.3 --network none (rollback, rollback fallido, rollback fallido tras error de estado, idempotencia/binding de hash y catálogo, proyección del catálogo x3, triggers append-only, restricciones/EXPLAIN, provisioning x3). Medido el 2026-10-07 en hall9000 con MariaDB 12.3.3 --network none."
     },
     "authority-rule-events/ratifications": {
       "patron": "^12 passed in ",

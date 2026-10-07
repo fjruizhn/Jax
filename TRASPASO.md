@@ -89,3 +89,5 @@ El paso 6 de `RulePermit`/consumo queda fuera de esta rama.
 ```sh
 JAX_AUTHORITY_LEDGER_DOCKER_CMD='sudo -n docker' PYTHONPATH=. python3 -B -m pytest -q tests/policy -p no:cacheprovider
 ```
+
+- #375 r2 (2026-10-07): fusionado #371 `2b6c9cb3` (trae #370 final 28f1eac7, identity 659). Cerrados 2 MINOR de prueba: el comentario «M9» de `test_..._bound_to_request_and_catalog` ahora dice que el None sale de `row[0] != request.request_hash` y el chequeo de catálogo es defensa en profundidad; nueva prueba `_catalog_projection` rechaza lo que no es `CatalogoTopes` (3 casos; mutante sin el chequeo muere). Piso `authority-rule-storage/mariadb` = `^12 passed in ` (medido con MariaDB 12.3.3 efímera).
