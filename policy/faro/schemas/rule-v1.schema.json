@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://axioma/ecosistema/policy/faro/schemas/rule-v1.schema.json",
+  "title": "Regla Faro v1 (JAX_FARO_RULE)",
+  "description": "Espejo legible por maquina del shape cerrado que exige policy/rule_authority/schema.py (diseno F1.1 §7 + R-4). El VALIDADOR ES EL PYTHON: si este espejo y aquel divergen, la prueba test_el_espejo_json_existe_y_sus_vocabularios_coinciden se pone roja. Ninguna regla real existe hoy; los ejemplos ratificables viven solo como fixtures de prueba.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "rule_id", "effect", "action_class", "scope", "obligation_limits", "validity", "permit"],
+  "properties": {
+    "schema_version": {"enum": ["1.0"]},
+    "kind": {"enum": ["JAX_FARO_RULE"]},
+    "rule_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+    "effect": {"enum": ["PERMIT"]},
+    "action_class": {"enum": ["REVERSIBLE", "OBLIGATING"]},
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subjects", "capabilities", "objectives"],
+      "properties": {
+        "subjects": {"type": "array", "minItems": 1, "uniqueItems": true,
+                     "items": {"type": "string", "pattern": "^(human|actor):[a-z][a-z0-9-]{0,63}$"}},
+        "capabilities": {"type": "array", "minItems": 1, "uniqueItems": true,
+                         "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$"}},
+        "objectives": {"type": "array", "minItems": 1, "uniqueItems": true,
+                       "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"}}
+      }
+    },
+    "obligation_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quantity", "amount", "frequency"],
+      "properties": {
+        "quantity": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "object", "additionalProperties": false, "required": ["unit", "max"],
+             "properties": {"unit": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"},
+                            "max": {"type": "integer", "minimum": 1, "maximum": 9007199254740992}}}
+          ]
+        },
+        "amount": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "object", "additionalProperties": false, "required": ["currency", "max"],
+             "properties": {"currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+                            "max": {"type": "integer", "minimum": 1, "maximum": 9007199254740992}}}
+          ]
+        },
+        "frequency": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "object", "additionalProperties": false,
+             "required": ["max_occurrences", "window_seconds"],
+             "properties": {"max_occurrences": {"type": "integer", "minimum": 1, "maximum": 9007199254740992},
+                            "window_seconds": {"type": "integer", "minimum": 1, "maximum": 9007199254740992}}}
+          ]
+        }
+      }
+    },
+    "validity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["not_before_utc", "not_after_utc"],
+      "properties": {
+        "not_before_utc": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+        "not_after_utc": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"}
+          ]
+        }
+      }
+    },
+    "permit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ttl_seconds"],
+      "properties": {"ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}}
+    },
+    "tope": {
+      "description": "R-4: la clase del recurso se DECLARA; no se deduce del nombre. Las clases de agentes, enjambres y conexiones no existen en el vocabulario: un tope sobre ellas no se puede ni expresar.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resource_class", "resource", "maximum", "period"],
+      "properties": {
+        "resource_class": {"enum": ["connections", "concurrencia", "workers", "procesos_hijos", "hilos", "tasks", "llamadas_paralelas"]},
+        "resource": {"type": "string", "pattern": "^[a-z0-9_.-]{1,48}$"},
+        "maximum": {"type": "integer", "minimum": 1, "maximum": 9007199254740992},
+        "period": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,32}$"}
+      }
+    }
+  }
+}
