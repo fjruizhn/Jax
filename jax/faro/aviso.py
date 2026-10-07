@@ -25,12 +25,13 @@ escritura ajena o que son un enlace) el servicio no arranca. Fallar al ENVIAR, e
 from __future__ import annotations
 
 import asyncio
+import errno
 import fcntl
-import glob
 import json
 import logging
 import os
 import re
+import secrets
 import ipaddress
 import socket
 import stat
@@ -600,7 +601,12 @@ def _leer_seguro(ruta: str) -> str:
     """Lee un archivo de la cola SIN seguir enlaces: O_NOFOLLOW, y regular, del
     usuario actual y 0600. Un enlace plantado o un archivo ajeno levanta
     OSError (no se lee el destino)."""
-    fd = os.open(ruta, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        fd = os.open(ruta, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)   # NONBLOCK: un FIFO no cuelga
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:      # un enlace: inseguro, no un fallo de disco
+            raise PermissionError(f"es un enlace: {ruta}") from None
+        raise
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
@@ -623,34 +629,68 @@ def _leer_seguro(ruta: str) -> str:
     return b"".join(partes).decode("utf-8", errors="replace")
 
 
-def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str) -> "ResumenDiario | None":
+LEASE_S_POR_DEFECTO = 900.0
+
+
+def _patron_rotado(nombre_cola: str) -> "re.Pattern[str]":
+    """`<cola>.<20 digitos>.procesando` y, si esta reclamado,
+    `.<pid>-<16 hex>`. EXACTO: `cola.jsonl.otra.<ts>.procesando` no es de `cola.jsonl`."""
+    return re.compile(re.escape(nombre_cola) + r"\.(\d{20}\.procesando)(?:\.(\d+)-([0-9a-f]{16}))?")
+
+
+def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str,
+                   lease_s: float = LEASE_S_POR_DEFECTO) -> "ResumenDiario | None":
     """Compone el resumen de la cola diaria en DOS FASES. Devuelve un
     `ResumenDiario` (mensajes numerados 1/n + token) o None si no hay nada o no
-    se pudo leer con seguridad (y entonces no se borra NADA).
+    se pudo trabajar (y entonces no se borra NADA).
 
     Bajo el candado rota la cola a `<cola>.<ts>.procesando` ANTES de leer y
-    recoge los rotados de corridas no confirmadas. Los rotados NO se borran
-    aqui: el llamador envia los mensajes y, solo si salieron, llama a
-    `confirmar_resumen(token)`. Sin confirmacion la proxima corrida los vuelve
-    a entregar (al-menos-una-vez; un envio a medias puede repetir mensajes).
+    RECLAMA los rotados (los renombra a `….procesando.<pid>-<token>`): dos
+    resumidores simultaneos no se pisan, el segundo no ve lo ya reclamado. Un
+    reclamo con mas de `lease_s` segundos sin confirmar (proceso caido) se puede
+    reclamar de nuevo. Los archivos reclamados NO se borran aqui: el llamador
+    envia los mensajes y, solo si salieron, llama a `confirmar_resumen(token)`.
+    Sin confirmar, pasado el lease se re-entregan (al-menos-una-vez).
 
     No sigue enlaces ni lee archivos ajenos: cada archivo se abre con
-    O_NOFOLLOW y debe ser regular, del usuario actual y 0600; si no, None y
-    nada se lee ni se borra. Solo cuentan las lineas JSON con `texto` str.
-    Sincrono: los llamadores async lo envuelven en `asyncio.to_thread`."""
+    O_NOFOLLOW y debe ser regular, del usuario actual y 0600. Uno que no lo
+    cumple (PermissionError) NO aborta el resumen: pasa a cuarentena (`….cuarentena`, fuera del
+    patron, no se vuelve a leer) y se cuenta como `en_cuarentena=N`. Solo
+    cuentan las lineas JSON con `texto` str. Sincrono: los llamadores async lo
+    envuelven en `asyncio.to_thread`."""
     try:
         with _Candado(ruta_cola):
             cola = Path(ruta_cola)
-            rotados = sorted(str(p) for p in cola.parent.glob(glob.escape(cola.name) + ".*.procesando"))
             if cola.exists() or cola.is_symlink():
-                destino = f"{cola}.{time.time_ns():020d}.procesando"
-                os.replace(cola, destino)      # rotar ANTES de leer: lo que llega despues va a la cola nueva
-                rotados.append(destino)
-            if not rotados:
+                os.replace(cola, f"{cola}.{time.time_ns():020d}.procesando")   # rotar ANTES de leer
+            patron = _patron_rotado(cola.name)
+            ahora = time.time()
+            reclamados: list[str] = []
+            for p in sorted(cola.parent.iterdir(), key=lambda q: q.name):
+                m = patron.fullmatch(p.name)
+                if m is None:
+                    continue
+                if m.group(2) is not None and ahora - os.lstat(p).st_ctime < lease_s:
+                    continue                    # reclamado por otro resumidor, con lease vigente
+                base = p.name[:m.start(2)].rstrip(".") if m.group(2) is not None else p.name
+                nuevo = cola.parent / f"{base}.{os.getpid()}-{secrets.token_hex(8)}"
+                os.rename(p, nuevo)
+                reclamados.append(str(nuevo))
+            if not reclamados:
                 return None
             lineas: list[str] = []
-            for rotado in rotados:
-                lineas.extend(l for l in _leer_seguro(rotado).splitlines() if l.strip())
+            buenos: list[str] = []
+            cuarentena = 0
+            for ruta in reclamados:
+                try:
+                    texto = _leer_seguro(ruta)
+                except PermissionError as exc:   # enlace plantado, dueno o modo ajeno: se aparta, el resto sigue
+                    os.replace(ruta, ruta + ".cuarentena")
+                    cuarentena += 1
+                    logger.warning("rotado a cuarentena (%s)", type(exc).__name__)
+                    continue
+                buenos.append(ruta)
+                lineas.extend(l for l in texto.splitlines() if l.strip())
             por_clase: dict[str, int] = {}
             cuerpos: list[str] = []
             suprimidos = ilegibles = fallidos = 0
@@ -670,9 +710,9 @@ def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str) -> "Resume
                 suprimidos += suprimido
                 fallidos += fallido
                 por_clase[clase] = por_clase.get(clase, 0) + 1
-            if not cuerpos and not ilegibles:
-                for rotado in rotados:
-                    os.unlink(rotado)          # solo ruido sin avisos: se recoge y se sigue
+            if not cuerpos and not ilegibles and not cuarentena:
+                for ruta in buenos:
+                    os.unlink(ruta)            # solo ruido sin avisos: se recoge y se sigue
                 return None
             conteo = f"{len(cuerpos)} avisos"
             if suprimidos:
@@ -681,33 +721,38 @@ def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str) -> "Resume
                 conteo += f" · envio_fallido={fallidos}"
             if ilegibles:
                 conteo += f" · ilegibles={ilegibles}"
+            if cuarentena:
+                conteo += f" · en_cuarentena={cuarentena}"
             cabecera = (f"FARO · RESUMEN DIARIO DE REGLAS · {_campo_log(host, 64)} · "
                         f"{_iso_utc(_ahora_utc())}\n{conteo}")
             bloques = [f"clase={_campo_log(c, 160)} n={n}" for c, n in sorted(por_clase.items())] + cuerpos
-            return ResumenDiario(tuple(_mensajes_del_resumen(bloques, cabecera)), tuple(rotados), str(cola))
+            return ResumenDiario(tuple(_mensajes_del_resumen(bloques or ["(sin avisos legibles)"], cabecera)),
+                                 tuple(buenos), str(cola))
     except Exception as exc:  # fail-soft: sin lectura segura no hay resumen y no se borra nada
         logger.warning("no se pudo componer el resumen diario (%s)", type(exc).__name__)
         return None
 
 
 def confirmar_resumen(token: ResumenDiario) -> bool:
-    """Fase 2: el llamador ya ENVIO los mensajes; ahora se borran los rotados que
-    los respaldaban. Solo borra `<cola>.*.procesando` de la misma carpeta (un
+    """Fase 2: el llamador ya ENVIO los mensajes; se borran SOLO los archivos que
+    este token reclamo (`<cola>.<ts>.procesando.<pid>-<token>` de esa cola: un
     token fabricado no borra otra cosa). True si no queda ninguno."""
     try:
         cola = Path(token.ruta_cola)
+        patron = _patron_rotado(cola.name)
         with _Candado(cola):
             for ruta in token.rotados:
                 p = Path(ruta)
-                if p.parent != cola.parent or not (p.name.startswith(cola.name + ".") and p.name.endswith(".procesando")):
+                m = patron.fullmatch(p.name)
+                if p.parent != cola.parent or m is None or m.group(2) is None:
                     logger.warning("confirmar_resumen: ruta fuera de la cola, no se borra")
                     return False
                 try:
                     os.unlink(p)
-                except FileNotFoundError:  # fail-soft: ya no existe, objetivo cumplido
+                except FileNotFoundError:  # fail-soft: ya no existe (otro reclamo o confirmacion previa), objetivo cumplido
                     pass
         return True
-    except Exception as exc:  # fail-soft: si no se borra, la proxima corrida los recoge
+    except Exception as exc:  # fail-soft: si no se borra, tras el lease se recoge de nuevo
         logger.warning("no se pudo confirmar el resumen diario (%s)", type(exc).__name__)
         return False
 

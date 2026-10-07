@@ -557,9 +557,9 @@ from jax.faro.aviso import (_MAX_TEXTO, AvisoRegla, acumular_para_resumen, aviso
 
 HASH_OK = "sha256:" + "a1b2c3d4e5f67890deadbeeffeedface00112233445566778899aabbccddeeff"
 RAIZ = pathlib.Path(__file__).resolve().parents[1]
-def _resumir(cola, host="hall9000"):
+def _resumir(cola, host="hall9000", **kw):
     """Las dos fases juntas (el envio salio bien): la LISTA de mensajes, o None."""
-    r = resumen_diario(cola, host=host)
+    r = resumen_diario(cola, host=host, **kw)
     if r is None:
         return None
     assert confirmar_resumen(r) is True
@@ -846,7 +846,7 @@ def test_el_resumen_vacia_la_cola_y_no_deja_rotados_ni_repite(tmp_path):
     primero = _resumir(cola, host="hall9000")
     assert primero is not None and all(f"cuerpo-{i}" in "\n".join(primero) for i in range(3))
     assert not cola.exists()
-    assert list(tmp_path.glob("*.procesando")) == []
+    assert list(tmp_path.glob("*.procesando*")) == []
     assert _resumir(cola, host="hall9000") is None
 
 
@@ -866,12 +866,12 @@ def test_un_rotado_que_sobrevivio_a_una_caida_se_recoge_y_un_fallo_de_lectura_no
         raise OSError("disco roto")
 
     monkeypatch.setattr(modulo, "_leer_seguro", lee_mal)
-    assert _resumir(cola, host="hall9000") is None
+    assert _resumir(cola, host="hall9000") is None                  # un fallo de disco (no un archivo inseguro) aborta
     monkeypatch.setattr(modulo, "_leer_seguro", real)
-    assert len(list(tmp_path.glob("*.procesando"))) == 2            # el huerfano y el recien rotado
-    mensajes = "\n".join(_resumir(cola, host="hall9000"))
+    assert len(list(tmp_path.glob("*.procesando*"))) == 2            # el huerfano y el recien rotado, reclamados
+    mensajes = "\n".join(_resumir(cola, host="hall9000", lease_s=0))
     assert "huerfano-1" in mensajes and "nuevo-1" in mensajes
-    assert list(tmp_path.glob("*.procesando")) == [] and not cola.exists()
+    assert list(tmp_path.glob("*.procesando*")) == [] and not cola.exists()
 
 
 def test_el_resumen_numera_los_mensajes_y_no_trunca_en_silencio(tmp_path):
@@ -920,14 +920,14 @@ def test_el_resumen_no_se_borra_hasta_confirmar_y_se_reentrega_sin_duplicar(tmp_
     for i in range(3):
         assert acumular_para_resumen(AvisoRegla(f"cuerpo-{i}", "DENY|r|RL-A", True, "2026-10-07T03:04:05+00:00"), cola)
     primero = resumen_diario(cola, host="hall9000")
-    assert len(list(tmp_path.glob("*.procesando"))) == 1, "los rotados se borraron antes de confirmar"
+    assert len(list(tmp_path.glob("*.procesando*"))) == 1, "los rotados se borraron antes de confirmar"
     # Telegram cae: no se confirma. Llega un aviso nuevo; la segunda corrida recoge ambos.
     assert acumular_para_resumen(AvisoRegla("cuerpo-3", "DENY|r|RL-A", True, "2026-10-07T03:04:05+00:00"), cola)
-    segundo = resumen_diario(cola, host="hall9000")
+    segundo = resumen_diario(cola, host="hall9000", lease_s=0)         # el reclamo del primero vencio (lease 0)
     cuerpos = [l for m in segundo.mensajes for l in m.splitlines() if l.startswith("cuerpo-")]
     assert sorted(cuerpos) == [f"cuerpo-{i}" for i in range(4)]      # los 4, cada uno UNA vez
     assert confirmar_resumen(segundo) is True
-    assert list(tmp_path.glob("*.procesando")) == [] and not cola.exists()
+    assert list(tmp_path.glob("*.procesando*")) == [] and not cola.exists()
     assert confirmar_resumen(primero) is True                          # token viejo: idempotente
     assert resumen_diario(cola, host="hall9000") is None
 
@@ -961,36 +961,101 @@ def _cola_con_linea(ruta, texto="legitimo"):
     assert acumular_para_resumen(AvisoRegla(texto, "DENY|r|RL-A", True, "2026-10-07T03:04:05+00:00"), ruta)
 
 
-def test_una_cola_que_es_un_enlace_no_se_sigue(tmp_path):
+def test_una_cola_que_es_un_enlace_no_se_sigue_y_va_a_cuarentena(tmp_path):
     """MINOR / mutante «sin O_NOFOLLOW»: un symlink plantado en lugar de la cola NO se lee (el destino es
-    del usuario y 0600: solo O_NOFOLLOW lo detiene)."""
+    del usuario y 0600: solo O_NOFOLLOW lo detiene); queda en cuarentena y el resumen lo dice."""
     objetivo = tmp_path / "ajeno.jsonl"
     _cola_con_linea(objetivo, "SECRETO-DEL-DESTINO")
     antes = objetivo.read_text()
     cola = tmp_path / "cola.jsonl"
     cola.symlink_to(objetivo)
-    assert resumen_diario(cola, host="hall9000") is None
+    r = resumen_diario(cola, host="hall9000")
+    assert r is not None and "en_cuarentena=1" in r.mensajes[0]
+    assert "SECRETO-DEL-DESTINO" not in "\n".join(r.mensajes)
     assert objetivo.read_text() == antes and objetivo.exists()
-    # y un `.procesando` plantado como enlace tampoco
-    cola.unlink(missing_ok=True)
-    for p in tmp_path.glob("cola.jsonl.*.procesando"):
-        p.unlink()
+    assert confirmar_resumen(r) is True
+    assert len(list(tmp_path.glob("*.cuarentena"))) == 1
+    assert resumen_diario(cola, host="hall9000") is None             # la cuarentena no se vuelve a leer
+
+
+def test_un_rotado_malo_no_aborta_el_resumen_los_buenos_se_entregan(tmp_path):
+    """MINOR (1) / mutante «abortar todo»: un `.procesando` plantado como enlace va a cuarentena y los
+    legitimos SE ENTREGAN."""
+    objetivo = tmp_path / "ajeno.jsonl"
+    _cola_con_linea(objetivo, "SECRETO-DEL-DESTINO")
+    cola = tmp_path / "cola.jsonl"
     (tmp_path / "cola.jsonl.00000000000000000001.procesando").symlink_to(objetivo)
-    assert resumen_diario(cola, host="hall9000") is None
-    assert objetivo.read_text() == antes
+    _cola_con_linea(cola, "legitimo-1")
+    r = resumen_diario(cola, host="hall9000")
+    assert r is not None
+    todo = "\n".join(r.mensajes)
+    assert "legitimo-1" in todo and "en_cuarentena=1" in r.mensajes[0] and "SECRETO-DEL-DESTINO" not in todo
+    assert confirmar_resumen(r) is True
+    assert [p.name for p in tmp_path.glob("*.cuarentena")] == [
+        p.name for p in tmp_path.glob("cola.jsonl.00000000000000000001.procesando.*.cuarentena")]
+    assert objetivo.read_text().count("SECRETO-DEL-DESTINO") == 1
 
 
 def test_una_cola_con_modo_o_dueno_ajeno_no_se_lee(tmp_path, monkeypatch):
-    """MINOR / mutantes «sin modo» y «sin dueno»."""
+    """MINOR / mutantes «sin modo» y «sin dueno»: van a cuarentena, no se leen."""
     cola = tmp_path / "cola.jsonl"
-    _cola_con_linea(cola)
+    _cola_con_linea(cola, "no-me-leas")
     cola.chmod(0o644)
-    assert resumen_diario(cola, host="hall9000") is None
-    for p in tmp_path.glob("cola.jsonl.*.procesando"):
-        p.unlink()
-    _cola_con_linea(cola)
+    r = resumen_diario(cola, host="hall9000")
+    assert "en_cuarentena=1" in r.mensajes[0] and "no-me-leas" not in "\n".join(r.mensajes)
+    _cola_con_linea(cola, "no-me-leas-2")
     monkeypatch.setattr(os, "geteuid", lambda: 12345)
-    assert resumen_diario(cola, host="hall9000") is None
+    r = resumen_diario(cola, host="hall9000")
+    assert "en_cuarentena=1" in r.mensajes[0] and "no-me-leas-2" not in "\n".join(r.mensajes)
+
+
+def test_el_patron_de_rotados_es_exacto_y_dos_colas_no_se_mezclan(tmp_path):
+    """MINOR (2) / mutante «glob laxo»: `cola.jsonl.otra` en la misma carpeta no se mezcla con `cola.jsonl`."""
+    a, b = tmp_path / "cola.jsonl", tmp_path / "cola.jsonl.otra"
+    _cola_con_linea(a, "de-A")
+    _cola_con_linea(b, "de-B")
+    rb = resumen_diario(b, host="hall9000")              # rota B: `cola.jsonl.otra.<ts>.procesando`
+    ra = resumen_diario(a, host="hall9000")
+    assert "de-A" in "\n".join(ra.mensajes) and "de-B" not in "\n".join(ra.mensajes)
+    assert "de-B" in "\n".join(rb.mensajes) and "de-A" not in "\n".join(rb.mensajes)
+    assert confirmar_resumen(ra) is True
+    assert len(list(tmp_path.glob("cola.jsonl.otra.*.procesando.*"))) == 1     # lo de B sigue intacto
+    cruzado = type(ra)(rb.mensajes, rb.rotados, str(a))                          # token de B contra la cola A
+    assert confirmar_resumen(cruzado) is False
+    assert len(list(tmp_path.glob("cola.jsonl.otra.*.procesando.*"))) == 1
+    assert confirmar_resumen(rb) is True
+
+
+def test_dos_resumidores_simultaneos_no_duplican(tmp_path):
+    """MINOR (3) / mutante «sin reclamo»: lo reclamado por un resumidor no lo ve el otro; con lease vencido
+    se re-reclama. Y dos hilos concurrentes: 0 duplicados."""
+    cola = tmp_path / "cola.jsonl"
+    for i in range(50):
+        _cola_con_linea(cola, f"cuerpo-{i}")
+    r1 = resumen_diario(cola, host="hall9000")
+    assert resumen_diario(cola, host="hall9000") is None             # r1 lo reclamo: el segundo no lo ve
+    assert resumen_diario(cola, host="hall9000", lease_s=0) is not None   # lease vencido: se re-reclama
+    assert confirmar_resumen(r1) is True                              # el token viejo no borra lo del nuevo dueno
+    # dos hilos a la vez sobre una cola recien llenada
+    for p in tmp_path.glob("cola.jsonl.*"):
+        p.unlink()
+    for i in range(300):
+        _cola_con_linea(cola, f"cuerpo-{i}")
+    salidas: list = []
+
+    def resumir():
+        r = resumen_diario(cola, host="hall9000")
+        if r is not None:
+            salidas.append(r)
+
+    hilos = [threading.Thread(target=resumir) for _ in range(4)]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join()
+    cuerpos = [l for r in salidas for m in r.mensajes for l in m.splitlines() if l.startswith("cuerpo-")]
+    assert len(cuerpos) == 300 and len(set(cuerpos)) == 300, f"duplicados o perdidos: {len(cuerpos)}"
+    assert all(confirmar_resumen(r) for r in salidas)
 
 
 def test_solo_cuentan_las_lineas_json_con_texto_str(tmp_path):
