@@ -7,7 +7,7 @@ from datetime import datetime
 from .errors import AuthorityEventValidationError
 from .models import (
     AuthorityEvent, AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
-    OverlayPayload, OverlayScope, OverlayType, _RATIFICATION_SNAPSHOT_SEAL,
+    OverlayPayload, OverlayScope, OverlayType, _RATIFICATION_STORAGE_SEAL,
 )
 
 
@@ -99,12 +99,6 @@ def _overlay_from_projection(value):
 
 
 def intent_from_projection(value) -> AuthorityEventIntent:
-    if isinstance(value, dict) and set(value) == (_INTENT_FIELDS | {"_ratification_snapshot_seal"}):
-        # Rows written by the previous adapter persisted the dataclass shape.  Keep
-        # reading that exact historical shape; never accept an actual private seal.
-        if value["_ratification_snapshot_seal"] is not None:
-            raise AuthorityEventValidationError("canonical_intent legado contiene estado interno")
-        value = {key: item for key, item in value.items() if key != "_ratification_snapshot_seal"}
     _closed_object(value, _INTENT_FIELDS, "canonical_intent")
     try:
         event_type = AuthorityEventType(value["event_type"])
@@ -116,7 +110,7 @@ def intent_from_projection(value) -> AuthorityEventIntent:
         } - allowed_payload
         if actual_payload != allowed_payload or any(value[name] is not None for name in other_payload):
             raise AuthorityEventValidationError(f"payload inválido para {event_type.value}")
-        seal = _RATIFICATION_SNAPSHOT_SEAL if event_type is AuthorityEventType.RATIFICATION_GRANTED else None
+        seal = _RATIFICATION_STORAGE_SEAL if event_type is AuthorityEventType.RATIFICATION_GRANTED else None
         return AuthorityEventIntent(
             event_type=event_type,
             actor_id=value["actor_id"],

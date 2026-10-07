@@ -20,6 +20,7 @@ _TOKEN = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _DOC = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _ACTOR = re.compile(r"(?:human|actor):[a-z][a-z0-9-]{0,63}\Z")
 _RATIFICATION_SNAPSHOT_SEAL = object()
+_RATIFICATION_STORAGE_SEAL = object()
 
 
 def _nfc_token(value: object, field: str, pattern=_TOKEN) -> str:
@@ -198,7 +199,7 @@ class AuthorityEventIntent:
         if self.event_type is AuthorityEventType.RATIFICATION_GRANTED:
             if not isinstance(self.static_policy_view_projection, dict) or self.static_policy_view_projection.get("policy_corpus_hash") != self.policy_corpus_hash:
                 raise AuthorityEventValidationError("ratificación requiere static policy view ligado al hash")
-            if self._ratification_snapshot_seal is not _RATIFICATION_SNAPSHOT_SEAL:
+            if self._ratification_snapshot_seal not in (_RATIFICATION_SNAPSHOT_SEAL, _RATIFICATION_STORAGE_SEAL):
                 raise AuthorityEventValidationError("ratificación requiere snapshot sellado del candidate boundary")
 
     @classmethod

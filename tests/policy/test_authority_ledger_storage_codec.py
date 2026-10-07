@@ -107,20 +107,42 @@ def test_event_storage_decoder_rejects_unknown_event_fields():
     with pytest.raises(AuthorityEventValidationError):
         event_from_storage_row((1, projection["event_id"], projection))
 
+
+def test_decoded_ratification_cannot_be_resigned_and_appended_as_validated_candidate():
+    from policy.authority_ledger.service import append_authority_event
+    from policy.authority_ledger.errors import AuthorityStateError
+    from tests.policy.test_authority_ledger_events import setup_ledger
+
+    store, root, key = setup_ledger()
+    corpus_hash = "sha256:" + "f" * 64
+    projection = {
+        "event_type": "RATIFICATION_GRANTED",
+        "actor_id": "human:fernando",
+        "evidence_refs": [],
+        "policy_corpus_hash": corpus_hash,
+        "static_policy_view_projection": {"policy_corpus_hash": corpus_hash},
+        "ratification_event_id": None,
+        "overlay": None,
+        "overlay_id": None,
+    }
+    forged = __import__("policy.authority_ledger.serialization", fromlist=["intent_from_projection"]).intent_from_projection(projection)
+
+    with pytest.raises(AuthorityStateError, match="storage"):
+        append_authority_event(store, root, key, forged)
+
+    assert store.events() == ()
+
     projection = event_projection(sample_event())
     projection["intent"]["overlay_id"] = "unexpected-payload"
     with pytest.raises(AuthorityEventValidationError):
         event_from_storage_row((1, projection["event_id"], projection))
 
 
-def test_event_storage_decoder_accepts_only_the_exact_legacy_dataclass_shape():
+def test_event_storage_decoder_rejects_legacy_dataclass_shape():
     event = sample_event()
     projection = event_projection(event)
     projection["intent"]["_ratification_snapshot_seal"] = None
 
-    assert event_from_storage_row((1, event.event_id, projection)) == event
-
-    projection["intent"]["_ratification_snapshot_seal"] = "forged"
     with pytest.raises(AuthorityEventValidationError):
         event_from_storage_row((1, event.event_id, projection))
 
