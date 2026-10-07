@@ -2626,6 +2626,14 @@ jobs:
           --confcutdir=tests/policy
           -p no:cacheprovider
           --basetemp="${RUNNER_TEMP}/identity-foundation-shadow-pytest"
+      - name: Faro F1.1 rule authority models -- piso exacto
+        env:
+          PYTHONPATH: "."
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -o pipefail
+          python3 -B -m pytest -q tests/policy/test_faro_rule_authority_models.py 2>&1 | tee /tmp/faro-rule-authority-models
+          python3 .github/ci/piso.py verificar authority-rule-models/models /tmp/faro-rule-authority-models || exit $?
       # Arranque de systemd versionado (ops/versionar-drop-ins-v2, 2026-10-05): en paso propio
       # porque 9 de sus casos exigen el host de produccion (/srv/jax-prod/jax) o los checkouts de los repos duenos y se saltan en el
       # runner -- el piso del bloque de arriba no admite que suban las saltadas (M <= 45, ver

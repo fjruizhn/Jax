@@ -4622,6 +4622,15 @@ payload inmutable, variantes cerradas, validación de identificadores y vigencia
 repetidos por regla, selección del último grant y denegación de revocaciones desconocidas o
 duplicadas.
 
+## `authority-rule-models/models`
+
+Piso nuevo (2026-10-06): `^14 passed in `. Medido en hall9000 con Python 3.14.4 y el
+comando exacto del workflow: `python3 -B -m pytest -q
+tests/policy/test_faro_rule_authority_models.py`. Cubre hash derivado de la proyección
+cerrada, argumentos inmutables, validación de request ID y límites de actos/dinero, rechazo
+de límites de infraestructura, coherencia de status/reason y la idempotencia del store en
+memoria.
+
 ## `archivos-de-test-en-ci/pisos`
 
 Patrón vigente (2026-10-04): `^227 passed`
