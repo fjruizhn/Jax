@@ -25,6 +25,9 @@ def provision_application_account(connection, username: str, password: str) -> N
         cursor = connection.cursor()
         cursor.execute(f"CREATE USER IF NOT EXISTS {principal} IDENTIFIED BY %s", (password,))
         cursor.execute(f"ALTER USER {principal} IDENTIFIED BY %s", (password,))
+        # Converge to the contract: an account that pre-existed with broader
+        # privileges (or GRANT OPTION) must not keep them.
+        cursor.execute(f"REVOKE ALL PRIVILEGES, GRANT OPTION FROM {principal}")
         cursor.execute(f"GRANT SELECT ON jax_authority.authority_ledger_genesis TO {principal}")
         cursor.execute(f"GRANT SELECT,INSERT ON jax_authority.authority_events TO {principal}")
         cursor.execute(f"GRANT SELECT,UPDATE ON jax_authority.authority_ledger_head TO {principal}")

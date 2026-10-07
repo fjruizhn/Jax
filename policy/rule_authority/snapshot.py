@@ -37,7 +37,12 @@ import re
 import unicodedata
 from pathlib import Path
 
-from jax.faro.catalogo_topes import CatalogoTopesInvalido, cargar_catalogo_bytes
+from jax.faro.catalogo_topes import (
+    CatalogoTopes,
+    CatalogoTopesInvalido,
+    _cargar_catalogo_bytes,
+    _registrar_emisor,
+)
 from jax.faro.git_objetos import (
     MAX_BLOB_BYTES,
     FuenteInvalida,
@@ -55,11 +60,17 @@ from .schema import ReglaValidada, validar_regla
 # Testigo privado de construccion: fuera de este modulo nadie construye objetos
 # confiables (ni con dataclasses.replace, que aqui ya no aplica).
 _TESTIGO = object()
+# r7, MAJOR-1: ESTE modulo es el unico emisor de CatalogoTopes — registra su
+# testigo en el cargador; los bytes validados solos no alcanzan para sellar.
+_registrar_emisor(_TESTIGO)
 
 _PREFIJO = "faro/"                      # rutas relativas al arbol policy/ ya verificado
 _RE_NOMBRE_CANONICO = re.compile(r"[a-z][a-z0-9-]{0,63}\.yaml\Z")
 _RE_OBJETO = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
-_DOMINIO_SNAPSHOT = "jax-faro-policy-snapshot-v1"
+# r6: v2 — cambia lo que entra al hash: el catalogo sellado (CatalogoTopes) y
+# su piso D-4 de clases fijas en codigo hacen que el mismo pin no pueda cargar
+# igual que en v1.
+_DOMINIO_SNAPSHOT = "jax-faro-policy-snapshot-v2"
 
 
 def _hash_dominio(dominio: str, carga: bytes) -> str:
@@ -273,7 +284,10 @@ def load_trusted_policy_snapshot(repo: Path, pin: TrustedPolicyPin) -> TrustedPo
         raise RuleSnapshotError("catalogo-topes.json: el blob no corresponde a su OID")
     catalogo_hash = "sha256:" + hashlib.sha256(crudo_catalogo).hexdigest()
     try:
-        catalogo = cargar_catalogo_bytes(crudo_catalogo)
+        # r7, MAJOR-1: la validacion es privada; el sellado nace AQUI, con el
+        # testigo de este modulo y el OID del catalogo dentro del pin.
+        catalogo = CatalogoTopes(_cargar_catalogo_bytes(crudo_catalogo),
+                                 oid_pin=entrada_catalogo.oid, _testigo=_TESTIGO)
     except CatalogoTopesInvalido as exc:
         raise RuleSnapshotError(f"catalogo-topes.json del pin invalido: {exc}") from exc
 

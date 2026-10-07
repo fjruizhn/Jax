@@ -1,17 +1,20 @@
-# Traspaso Faro F1.1 #368/#369/#371
+# Traspaso Faro F1.1 · #371 (paso 4) · ronda 3
 
 ## Estado (2026-10-07)
 
-- Rama #371 `feat/faro-f1.1-evaluador`, worktree `/home/fruiz/wt/jax-faro-f11-paso4`.
-- #370 r5 y #372 providers están integrados; #369 corregido y el último commit CI de #368 están integrados en este árbol.
-- #368/#369: K3, K8, D2, D3, E4 y E10 verificados en sus ramas. Pisos ledger: codec 19, MariaDB 1, ratificaciones 12.
-- #371: límites requieren catálogo cargado, topes `2**53`, NFC antes del hash, unidades limitadas al catálogo, `get(request)` liga el hash y el store no acepta `_decisions` por constructor.
-- Python 3.14 instala `pymysql`; pisos de modelos 30 e Identity Foundation Shadow 579.
-- Suite ledger: 53 passed; modelos/schema/snapshot/ataques/providers: 264 passed.
-- Mutantes V4, V6, V8 y V9 mueren en sus pruebas específicas.
+- Rama `feat/faro-f1.1-evaluador`, worktree `/home/fruiz/wt/jax-371-r3`. Base: #370 `feat/faro-f1.1-schema-snapshot` @ 05183cb7 (fusionada con merge commit; conflictos de TRASPASO.md, ci/pisos.json y docs/ci/pisos.md resueltos conservando todos los pisos).
+- Hecho en la ronda 3 (cierra el veredicto de ronda 2): catálogo por tipo exacto `CatalogoTopes`; `RuleLimits` = envoltorio de `LimitesObligatorios`/`Tope` de #370, solo vía `limites_de(regla, catalogo)`; `RuleEvaluation` exige el mismo catálogo y el `request_hash` lleva el OID; `type(x) is str` en unidades/moneda; enteros de `arguments` con rango; `store.record` exige `RuleDecision`; sin campo huérfano ni import duplicado; `pymysql==1.2.0` con hashes (`requirements-faro-mariadb-ci.txt`); historia corregida.
+- Pisos medidos en hall9000 (Python 3.14.4): modelos 140, identity 613, codec 19, ratificaciones 12, MariaDB 4. `tests/policy` completo con MariaDB efímera: 803 passed, 15 skipped.
+- Mutantes: 36 mutaciones de `models.py`/`store.py` (28 de r3 + 8 de la corrección de la auditoría), todas muertas (tabla en `~/encargos-codex/entrega-faro-f11-371-r3.md`).
 
 ## Pendiente
 
-1. Cambiar `MappingProxyType` a `CatalogoTopes` sellado cuando se confirme el SHA r6 final de #370 y reapilar sobre él.
-2. Volver a correr suites y pisos sobre el SHA final, actualizar PR #371 y dejar el reporte en `~/encargos-codex/entrega-codex-faro-f11-368-369-371-r3.md`.
-- CI GitHub en #371 r5: `faro-bitacora-db` falla en `tests/test_faro_topes_db.py`; los casos crean `Topes` sin catálogo y usan el recurso legado `tokens`, por lo que D-4 los niega. El mismo fallo está en #370 r5. Se informó a Hyde para corregirlo en la rama de origen, sin alterar ese trabajo.
+- Auditoría de escalón 3 sobre el SHA final (otra invocación). Nada se declara aprobado aquí.
+- Si #370 cambia de SHA, repetir la fusión y re-medir identity (el piso depende de la lista del paso).
+- No hay evaluador en #371 (solo modelos y store): vigencia, STOP, snapshot y grants son pasos posteriores.
+
+## Siguiente comando
+
+```sh
+JAX_AUTHORITY_LEDGER_DOCKER_CMD='sudo -n docker' PYTHONPATH=. python3 -B -m pytest -q tests/policy -p no:cacheprovider
+```

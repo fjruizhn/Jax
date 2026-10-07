@@ -6,6 +6,7 @@ from .models import (
     RuleEvaluation,
     RuleEvaluationRequest,
     RuleLimits,
+    limites_de,
 )
 from .store import InMemoryRuleDecisionStore, RuleDecisionStore
 
@@ -17,6 +18,7 @@ __all__ = [
     "RuleEvaluation",
     "RuleEvaluationRequest",
     "RuleLimits",
+    "limites_de",
     "Alcance",
     "Cantidad",
     "Frecuencia",

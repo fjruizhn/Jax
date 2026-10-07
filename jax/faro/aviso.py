@@ -496,7 +496,7 @@ def aviso_de_decision(decision, *, host: str, obliga: bool | None = None) -> Avi
         texto = (f"FARO · {titulo} · {_campo_log(host, 64)}\n"
                  f"regla={_campo_log(regla, 128)} razon={_campo_log(razon or '-', 48)} "
                  f"req={req} a={creado}")
-    except Exception:  # fail-soft ante tipos raros: la decision se avisa igual, como no reconocible
+    except Exception:  # fail-soft: tipos raros, la decision se avisa igual, como no reconocible
         return _no_reconocible(decision, host)
     return AvisoRegla(texto=texto[:_MAX_TEXTO], clase=clase, inmediato=inmediato, creado_utc=creado)
 
@@ -704,7 +704,7 @@ def confirmar_resumen(token: ResumenDiario) -> bool:
                     return False
                 try:
                     os.unlink(p)
-                except FileNotFoundError:
+                except FileNotFoundError:  # fail-soft: ya no existe, objetivo cumplido
                     pass
         return True
     except Exception as exc:  # fail-soft: si no se borra, la proxima corrida los recoge

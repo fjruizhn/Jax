@@ -66,3 +66,15 @@ def test_el_ci_instala_todo_con_require_hashes_y_sin_pip_suelto(job):
     assert "pip install --require-hashes -r requirements-faro-ci.txt" in texto
     sueltos = [l.strip() for l in texto.splitlines() if "pip install" in l and "--require-hashes" not in l]
     assert sueltos == [], f"pip install sin hashes: {sueltos}"
+
+
+def test_pymysql_del_job_python314_esta_fijado_con_los_hashes_de_requirements_faro():
+    """El paso Python 3.14 de policy.yml instala pymysql con --require-hashes y la MISMA version y
+    hashes que ya fija requirements-faro.txt: una sola fuente, sin `pip install pymysql` suelto."""
+    fijado = _bloques("requirements-faro-mariadb-ci.txt")
+    assert list(fijado) == ["pymysql==1.2.0"]
+    assert fijado["pymysql==1.2.0"] == _bloques("requirements-faro.txt")["pymysql==1.2.0"]
+    texto = (RAIZ / ".github" / "workflows" / "policy.yml").read_text(encoding="utf-8")
+    assert "pip install --require-hashes -r requirements-faro-mariadb-ci.txt" in texto
+    assert not re.search(r"pip install [^\n]*\bpymysql\b", texto.replace(
+        "pip install --require-hashes -r requirements-faro-mariadb-ci.txt", ""))
