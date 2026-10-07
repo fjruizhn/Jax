@@ -4641,7 +4641,7 @@ Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la form
 
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-07, r8): `^591 passed`
+Patrón vigente (2026-10-07, r9): `^614 passed`
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4656,3 +4656,5 @@ master (que ya trae las pruebas de #368/#369/#374) y el piso decía 574; 576 +15
 (D-4 como segmento y subcadena: 7 compuestas + 6 exactas, el contrapeso de subids legítimos y que el helper
 `catalogo_del_pin` no deje repos temporales). Medido en hall9000 con Python 3.14.4, pytest 9.1.1,
 pyyaml 6.0.3, cryptography 49.0.0 y el comando exacto del paso (`bash --noprofile --norc -eo pipefail`).
+
+r9 (2026-10-07): 591 -> 614 (+23: D-4 con sinónimos en inglés y raíces x11, `w0rkers` no se niega (límite documentado) x1, subids legítimos del catálogo real x11). Medido con Python 3.14.4 y el comando exacto del paso.
