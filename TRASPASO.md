@@ -1,59 +1,50 @@
-# Traspaso · fix/authority-resolution-loader-seal
+# Traspaso · fix/authority-ledger-checkpoint-overlay
 
 ## Objetivo
 
-Cerrar en Block 3 el mismo patrón que la falla 1 de #377 (hallazgo del auditor
-de #377, fuera de alcance allí): `ValidatedCandidateCorpus._loader_seal` era
-`init=True` y `dataclasses.replace(corpus, ...)` conservaba el sello — un corpus
-alterado pasaba por validado. Encargo:
-`~/encargos-codex/encargo-glm-g2-loader-seal.md`.
-Base: `origin/fix/authority-ledger-sello-y-append` @ d082cc89 (#377 + cierre de
-auditoría de Hyde).
+Cerrar dos hallazgos del auditor de #377 (fuera de alcance allí): (1) `append`
+escribía el evento y DESPUÉS el checkpoint — si el checkpoint fallaba, la cabeza
+quedaba sin anclar y sin reporte; (2) `OVERLAY_ISSUED` hacia un corpus sin
+ratificación vigente pasaba el replay. Encargo:
+`~/encargos-codex/encargo-glm-g2-ledger-checkpoint-overlay.md`.
+Base: `origin/fix/authority-resolution-loader-seal` @ c3d471ed (#379).
+Diseño verificado: NINGÚN documento de docs/superpowers/specs menciona OVERLAY
+— corre la decisión de Hyde.
 
 ## Hecho en esta rama
 
-- `policy/authority_resolution/models.py`:
-  - `_loader_seal` pasa a `init=False`: ni el constructor ni `replace` lo
-    transportan; solo lo estampa `_from_validated_snapshot` (el loader).
-  - Nuevo `_content_binding` (`init=False`): digest del contenido congelado
-    (dominio `JAX-VALIDATED-CORPUS-CONTENT`) estampado por el loader;
-    `_was_loader_validated()` lo RE-DERIVA y compara — comparación de campos
-    honesta, NO recalcula el `policy_corpus_hash` de C14N/3 (cubre archivos del
-    snapshot, no el modelo). Todo consumidor existente (adapter,
-    `ratification_intent_from_candidate`) lo hereda sin cambios.
-  - Congelado profundo: las colecciones de todo el árbol (scope, relationships,
-    precedence, normative_sources, protected_metanorms, manifest.members,
-    normative_documents) entran como tuple/list y se guardan SIEMPRE como tuple,
-    desacopladas de la fuente; `normative_documents` exige FrozenNormativeDocument.
-  - `__post_init__` ya no exige el sello (no puede verlo): la puerta es el
-    consumidor, como en #377 tras el cierre de Hyde.
-- Tests: `test_authority_resolution_loader_seal.py` (6 ataques: replace con
-  hash alterado, replace con contenido alterado, construcción directa,
-  congelado profundo con listas desacopladas, drift de contenido detectado por
-  el digest, positivo del loader con el corpus real);
-  `candidate_boundary` ajustada (la construcción directa ya no rechaza en
-  constructor: produce un objeto que todo consumidor niega).
-- Bytes firmados INTACTOS: golden de #377 verde y diff vacío del corpus real
-  (hash/view/intent) contra d082cc89.
+1. **Checkpoint fail-closed**: el evento no se considera aceptado hasta que su
+   checkpoint quedó escrito. Si `checkpoint_store.append` falla,
+   `LedgerCheckpointError` (tipado, nuevo) nombra el evento huérfano (id y
+   secuencia) y el procedimiento; `verify_authority_ledger` con ancla reporta
+   «cabeza sin checkpoint» con la salida documentada;
+   `reanchor_authority_checkpoint(store, root, checkpoint)` re-ancla el
+   checkpoint al head EXISTENTE tras verificar el stream completo sin ancla.
+2. **Overlay exige ratificación vigente**: el replay rechaza OVERLAY_ISSUED
+   cuyo `policy_corpus_hash` no tenga ninguna ratificación no revocada en ese
+   punto del stream (misma lógica que ACTIVATION). Con el replay previo de
+   #377, `append` niega antes de escribir. `audit_003` pasa a esperar el
+   rechazo; la tanda MariaDB de 8 eventos se reordenó (overlay antes de
+   revocar la ratificación).
 
-## Mutantes muertos
+## Pruebas nuevas (6) y mutantes
 
-| Mutante | Fallos | Aserto que explota |
-|---|---|---|
-| «init=True» (sello vuelve a viajar) | 2 | `forged._loader_seal is None` ya no; replace transporta el sello |
-| «sin congelar» (_tupla_congelada no coerce) | 1 | el corpus guarda la lista viva: isinstance tuple / desacople explotan |
-| «sin comparar hash» (_was_loader_validated solo sello) | 1 | el drift de contenido pasa por válido |
+- checkpoint: fallo → huérfano tipado → verificador delata → reconciliación
+  cierra; reconciliación exige head existente y stream válido (3).
+- overlays: corpus jamás ratificado → rechazo pre-escritura; corpus con
+  ratificación revocada → rechazo (2). MariaDB: overlay sin ratificación deja
+  CERO filas nuevas (1; piso integration 5→6).
+- Mutantes muertos: «ignorar el fallo del checkpoint» (2 fallos) y «aceptar
+  overlay sin ratificación» (3 fallos). Tabla en la entrega.
 
 ## Pisos
 
-- Los cinco de #377 verificados con `piso.py verificar`: codec 19,
-  ratificaciones 12, seal 4, golden 7, integration (MariaDB efímera) 5 — sin
-  cambios.
-- Identity Foundation Shadow (sin piso propio en esta línea): A/B medido,
-  344 (d082cc89) → **350** en la rama (+6 del archivo nuevo, cableado en la
-  lista del paso).
-- Guardas CI: wireados + bash válido + pisos fuera del workflow = 237 passed.
+- `authority-ledger-mariadb/integration`: 5 → **6** (piso.py verificar OK,
+  docs/ci/pisos.md actualizado).
+- codec 19, ratificaciones 12, seal 4, golden 7 — verificados sin cambios.
+- Identity Foundation Shadow (sin piso en esta línea): 350 → **355**.
+- Guardas CI: 237 passed. Vector dorado verde (bytes firmados sin cambio).
 
 ## Pendiente
 
-- Auditoría de Hyde y merge (apilado sobre #377 — fusionar en orden).
+- Auditoría de Hyde y merge (apilado sobre #379 → #377; fusionar en orden).

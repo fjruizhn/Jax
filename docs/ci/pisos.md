@@ -4621,6 +4621,10 @@ efímera: el provisioning revoca los privilegios previos (`REVOKE ALL PRIVILEGES
 `SHOW GRANTS` coincide exacto con el contrato; la migración 002 falla cerrada con filas NULL aun con
 `sql_mode=''` (la fila queda intacta) y pasa con cero NULL.
 
+checkpoint-overlay (2026-10-07, auditor de #377): 5 -> 6 (+1: overlay a corpus no ratificado se
+rechaza antes de escribir — cero filas; la tanda de 8 eventos se reordenó para emitir el overlay
+antes de revocar la ratificación). Medido con la MariaDB efímera 12.3.3 (`--network none`).
+
 ## `authority-rule-events/ratifications`
 
 Piso vigente (2026-10-07): `^12 passed in `. Medido con el comando exacto del workflow. Cubre
