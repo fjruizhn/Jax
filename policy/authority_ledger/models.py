@@ -5,7 +5,7 @@ models a permission or an execution decision.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import re
@@ -19,7 +19,12 @@ from .ids import canonical_evidence_refs, sha256_id, uuid7_text
 _TOKEN = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _DOC = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _ACTOR = re.compile(r"(?:human|actor):[a-z][a-z0-9-]{0,63}\Z")
+_RULE_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
+_RULE_PATH = re.compile(r"policy/faro/[a-z][a-z0-9-]{0,63}\.yaml\Z")
+_GIT_OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _RATIFICATION_SNAPSHOT_SEAL = object()
+_RULE_RATIFICATION_SNAPSHOT_SEAL = object()
+_RULE_RATIFICATION_STORAGE_SEAL = object()
 
 
 def _nfc_token(value: object, field: str, pattern=_TOKEN) -> str:
@@ -58,6 +63,8 @@ class AuthorityEventType(str, Enum):
     ACTIVATION_DEACTIVATED = "ACTIVATION_DEACTIVATED"
     OVERLAY_ISSUED = "OVERLAY_ISSUED"
     OVERLAY_REVOKED = "OVERLAY_REVOKED"
+    RULE_RATIFICATION_GRANTED = "RULE_RATIFICATION_GRANTED"
+    RULE_RATIFICATION_REVOKED = "RULE_RATIFICATION_REVOKED"
 
 
 class OverlayType(str, Enum):
@@ -71,6 +78,48 @@ class OverlayApplicability(str, Enum):
     APPLICABLE = "APPLICABLE"
     NOT_APPLICABLE = "NOT_APPLICABLE"
     INDETERMINATE = "INDETERMINATE"
+
+
+@dataclass(frozen=True)
+class RuleRatificationGrantPayload:
+    rule_id: str
+    rule_path: str
+    rule_blob_oid: str
+    rule_content_hash: str
+    ratified_policy_revision: str
+    ratified_policy_tree_oid: str
+    ratified_policy_snapshot_hash: str
+    valid_from_utc: datetime
+    valid_until_utc: datetime | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "rule_id", _nfc_token(self.rule_id, "rule_id", _RULE_ID))
+        if not isinstance(self.rule_path, str) or not _RULE_PATH.fullmatch(self.rule_path):
+            raise AuthorityEventValidationError("rule_path debe ser policy/faro/<nombre>.yaml")
+        for field in ("rule_blob_oid", "ratified_policy_revision", "ratified_policy_tree_oid"):
+            value = getattr(self, field)
+            if not isinstance(value, str) or not _GIT_OID.fullmatch(value):
+                raise AuthorityEventValidationError(f"{field} OID inválido")
+        sha256_id(self.rule_content_hash, "rule_content_hash")
+        sha256_id(self.ratified_policy_snapshot_hash, "ratified_policy_snapshot_hash")
+        object.__setattr__(self, "valid_from_utc", _time(self.valid_from_utc, "valid_from_utc"))
+        if self.valid_until_utc is not None:
+            object.__setattr__(self, "valid_until_utc", _time(self.valid_until_utc, "valid_until_utc"))
+            if self.valid_until_utc <= self.valid_from_utc:
+                raise AuthorityEventValidationError("valid_until_utc debe ser posterior a valid_from_utc")
+
+    def projection(self) -> dict[str, Any]:
+        return {
+            "rule_id": self.rule_id,
+            "rule_path": self.rule_path,
+            "rule_blob_oid": self.rule_blob_oid,
+            "rule_content_hash": self.rule_content_hash,
+            "ratified_policy_revision": self.ratified_policy_revision,
+            "ratified_policy_tree_oid": self.ratified_policy_tree_oid,
+            "ratified_policy_snapshot_hash": self.ratified_policy_snapshot_hash,
+            "valid_from_utc": self.valid_from_utc.isoformat(),
+            "valid_until_utc": self.valid_until_utc.isoformat() if self.valid_until_utc else None,
+        }
 
 
 @dataclass(frozen=True)
@@ -174,6 +223,9 @@ class AuthorityEventIntent:
     overlay: OverlayPayload | None = None
     overlay_id: str | None = None
     _ratification_snapshot_seal: object | None = None
+    rule_ratification: RuleRatificationGrantPayload | None = None
+    rule_ratification_event_id: str | None = None
+    _rule_ratification_snapshot_seal: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "actor_id", _actor(self.actor_id, "actor_id"))
@@ -191,6 +243,8 @@ class AuthorityEventIntent:
             AuthorityEventType.ACTIVATION_DEACTIVATED: (),
             AuthorityEventType.OVERLAY_ISSUED: ("overlay",),
             AuthorityEventType.OVERLAY_REVOKED: ("overlay_id",),
+            AuthorityEventType.RULE_RATIFICATION_GRANTED: ("rule_ratification",),
+            AuthorityEventType.RULE_RATIFICATION_REVOKED: ("rule_ratification_event_id",),
         }[self.event_type]
         for name in required:
             if getattr(self, name) is None:
@@ -200,6 +254,45 @@ class AuthorityEventIntent:
                 raise AuthorityEventValidationError("ratificación requiere static policy view ligado al hash")
             if self._ratification_snapshot_seal is not _RATIFICATION_SNAPSHOT_SEAL:
                 raise AuthorityEventValidationError("ratificación requiere snapshot sellado del candidate boundary")
+        elif self._ratification_snapshot_seal is not None:
+            raise AuthorityEventValidationError("sello de corpus fuera de ratificación")
+        if self.event_type is AuthorityEventType.RULE_RATIFICATION_GRANTED:
+            if self.actor_id != "human:fernando":
+                raise AuthorityEventValidationError("ratificación individual requiere actor human:fernando")
+            if self.rule_ratification is not None and not isinstance(self.rule_ratification, RuleRatificationGrantPayload):
+                raise AuthorityEventValidationError("rule_ratification inválido")
+            if self._rule_ratification_snapshot_seal not in (
+                    _RULE_RATIFICATION_SNAPSHOT_SEAL, _RULE_RATIFICATION_STORAGE_SEAL):
+                raise AuthorityEventValidationError("ratificación individual requiere snapshot Faro sellado")
+        elif self._rule_ratification_snapshot_seal is not None:
+            raise AuthorityEventValidationError("sello Faro fuera de grant individual")
+        if self.rule_ratification_event_id is not None:
+            uuid7_text(self.rule_ratification_event_id, "rule_ratification_event_id")
+        expected_rule_fields = {
+            AuthorityEventType.RULE_RATIFICATION_GRANTED: {"rule_ratification"},
+            AuthorityEventType.RULE_RATIFICATION_REVOKED: {"rule_ratification_event_id"},
+        }.get(self.event_type, set())
+        present_rule_fields = set()
+        if self.rule_ratification is not None:
+            present_rule_fields.add("rule_ratification")
+        if self.rule_ratification_event_id is not None:
+            present_rule_fields.add("rule_ratification_event_id")
+        if present_rule_fields != expected_rule_fields:
+            raise AuthorityEventValidationError(f"payload Faro inválido para {self.event_type.value}")
+        rule_ratification_event_types = (
+            AuthorityEventType.RULE_RATIFICATION_GRANTED,
+            AuthorityEventType.RULE_RATIFICATION_REVOKED,
+        )
+        if self.event_type in rule_ratification_event_types:
+            legacy_payload_present = (
+                self.policy_corpus_hash is not None
+                or self.static_policy_view_projection is not None
+                or self.ratification_event_id is not None
+                or self.overlay is not None
+                or self.overlay_id is not None
+            )
+            if legacy_payload_present:
+                raise AuthorityEventValidationError("payload Block 4 heredado fuera de su variante")
 
     @classmethod
     def _from_validated_snapshot(cls, policy_corpus_hash: str, projection: dict[str, Any], evidence_refs: tuple[str, ...] = ()) -> "AuthorityEventIntent":
@@ -207,6 +300,20 @@ class AuthorityEventIntent:
                    policy_corpus_hash, projection, _ratification_snapshot_seal=_RATIFICATION_SNAPSHOT_SEAL)
 
     def canonical_projection(self) -> dict[str, Any]:
+        if self.event_type is AuthorityEventType.RULE_RATIFICATION_GRANTED:
+            return {
+                "event_type": self.event_type.value,
+                "actor_id": self.actor_id,
+                "evidence_refs": list(self.evidence_refs),
+                "rule_ratification": self.rule_ratification.projection(),
+            }
+        if self.event_type is AuthorityEventType.RULE_RATIFICATION_REVOKED:
+            return {
+                "event_type": self.event_type.value,
+                "actor_id": self.actor_id,
+                "evidence_refs": list(self.evidence_refs),
+                "rule_ratification_event_id": self.rule_ratification_event_id,
+            }
         return {
             "event_type": self.event_type.value, "actor_id": self.actor_id,
             "evidence_refs": list(self.evidence_refs), "policy_corpus_hash": self.policy_corpus_hash,

@@ -4615,6 +4615,13 @@ Piso nuevo (2026-10-06): `^1 passed in `. Medido en hall9000 con MariaDB 12.3.3 
 firma → INSERT → lectura → reconstrucción → hash/firma y replay. La base solo expone socket
 Unix al proceso de prueba.
 
+## `authority-rule-events/ratifications`
+
+Piso nuevo (2026-10-06): `^8 passed in `. Medido con el comando exacto del workflow. Cubre
+payload inmutable, variantes cerradas, validación de identificadores y vigencia, grants
+repetidos por regla, selección del último grant y denegación de revocaciones desconocidas o
+duplicadas.
+
 ## `archivos-de-test-en-ci/pisos`
 
 Patrón vigente (2026-10-04): `^227 passed`

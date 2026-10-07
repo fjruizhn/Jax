@@ -7,7 +7,10 @@ import uuid
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from .errors import AuthorityStateError, LedgerIntegrityError, TrustedRootMismatchError
-from .models import AuthorityEvent, AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis
+from .models import (
+    AuthorityEvent, AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
+    _RULE_RATIFICATION_SNAPSHOT_SEAL,
+)
 from .replay import event_hash, event_unsigned_bytes, genesis_hash, verify_authority_ledger
 from .signatures import decode_public_key, public_key_bytes, public_key_fingerprint, sign
 from .storage import AuthorityLedgerStore
@@ -58,6 +61,9 @@ def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAut
         raise AuthorityStateError("private key no corresponde al ratificador constitucional")
     if intent.actor_id != "human:fernando":
         raise AuthorityStateError("agentes/no-Fernando no pueden emitir authority events")
+    if (intent.event_type is AuthorityEventType.RULE_RATIFICATION_GRANTED and
+            intent._rule_ratification_snapshot_seal is not _RULE_RATIFICATION_SNAPSHOT_SEAL):
+        raise AuthorityStateError("rule grant requires a sealed Faro snapshot")
     events = store.events()
     provisional = AuthorityEvent(event_id or _uuid7(), len(events) + 1, events[-1].event_hash if events else None, intent, recorded_at_utc or datetime.now(timezone.utc), "", "sha256:" + "0" * 64)
     signature = sign(private_key, event_unsigned_bytes(provisional))

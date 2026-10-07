@@ -16,12 +16,17 @@ import pymysql
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from policy.authority_ledger.canonical import canonical_bytes
-from policy.authority_ledger.models import AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis
+from policy.authority_ledger.models import (
+    AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
+    OverlayPayload, OverlayScope, OverlayType, RuleRatificationGrantPayload,
+    _RULE_RATIFICATION_SNAPSHOT_SEAL,
+)
 from policy.authority_ledger.replay import event_hash, genesis_hash, verify_authority_ledger
-from policy.authority_ledger.service import append_authority_event
+from policy.authority_ledger.service import append_authority_event, ratification_intent_from_candidate
 from policy.authority_ledger.signatures import encode_public_key, public_key_bytes, public_key_fingerprint
 from policy.authority_ledger.storage import MariaDBAuthorityLedgerStore
 from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
+from policy.authority_resolution.candidate_loader import load_validated_candidate
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -124,32 +129,69 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                 db.commit()
 
             store = MariaDBAuthorityLedgerStore(connect)
-            event = append_authority_event(
-                store, root, key,
+            now = datetime(2026, 10, 6, tzinfo=timezone.utc)
+            corpus_intent = ratification_intent_from_candidate(load_validated_candidate(ROOT))
+            corpus_event_id = "018cc251-f400-7000-8000-000000000001"
+            overlay = OverlayPayload(
+                "test-exception", OverlayType.EXCEPTION, corpus_intent.policy_corpus_hash,
+                OverlayScope(("ALICE",), ("READ",)), now, None,
+                target_rule_ids=("send-receipt",), exception_code="TEST_ONLY",
+            )
+            grant = RuleRatificationGrantPayload(
+                "send-receipt", "policy/faro/send-receipt.yaml", "a" * 40,
+                "sha256:" + "b" * 64, "c" * 40, "d" * 40,
+                "sha256:" + "e" * 64, now, None,
+            )
+            intents = (
+                corpus_intent,
+                AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", ratification_event_id=corpus_event_id),
+                AuthorityEventIntent(AuthorityEventType.RATIFICATION_REVOKED, "human:fernando", ratification_event_id=corpus_event_id),
                 AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
-                event_id="018cc251-f400-7000-8000-000000000001",
-                recorded_at_utc=datetime(2026, 10, 6, tzinfo=timezone.utc),
+                AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=overlay),
+                AuthorityEventIntent(AuthorityEventType.OVERLAY_REVOKED, "human:fernando", overlay_id="test-exception"),
+                AuthorityEventIntent(
+                    AuthorityEventType.RULE_RATIFICATION_GRANTED,
+                    "human:fernando", rule_ratification=grant,
+                    _rule_ratification_snapshot_seal=_RULE_RATIFICATION_SNAPSHOT_SEAL,
+                ),
+                AuthorityEventIntent(
+                    AuthorityEventType.RULE_RATIFICATION_REVOKED, "human:fernando",
+                    rule_ratification_event_id="018cc251-f400-7000-8000-000000000007",
+                ),
+            )
+            events = tuple(
+                append_authority_event(
+                    store, root, key, intent,
+                    event_id=f"018cc251-f400-7000-8000-{index:012d}",
+                    recorded_at_utc=now,
+                )
+                for index, intent in enumerate(intents, 1)
             )
             restored = store.events()
             state = verify_authority_ledger(store.get_genesis(), restored, root)
 
-            assert len(restored) == 1
-            assert restored[0] == event
-            assert restored[0].event_hash == event_hash(restored[0])
-            assert state.checkpoint.sequence == 1
+            assert len(restored) == 8
+            assert restored == events
+            assert all(item.event_hash == event_hash(item) for item in restored)
+            assert state.checkpoint.sequence == 8
+            assert state.latest_rule_ratifications["send-receipt"].event_id == events[6].event_id
+            assert events[6].event_id in state.revoked_rule_ratifications
             with connect() as db:
                 with db.cursor() as cursor:
                     cursor.execute(
                         "SELECT canonical_intent,canonical_event,evidence_refs "
-                        "FROM jax_authority.authority_events WHERE sequence=1"
+                        "FROM jax_authority.authority_events ORDER BY sequence"
                     )
-                    intent_bytes, event_bytes, evidence_bytes = cursor.fetchone()
-            assert intent_bytes == canonical_bytes(event.intent.canonical_projection())
-            assert event_bytes == canonical_bytes(restored[0].unsigned_projection() | {
-                "signature": restored[0].signature,
-                "event_hash": restored[0].event_hash,
-            })
-            assert evidence_bytes == canonical_bytes(event.intent.evidence_refs)
+                    rows = cursor.fetchall()
+            assert len(rows) == 8
+            for stored, event in zip(rows, events, strict=True):
+                intent_bytes, event_bytes, evidence_bytes = stored
+                assert intent_bytes == canonical_bytes(event.intent.canonical_projection())
+                assert event_bytes == canonical_bytes(event.unsigned_projection() | {
+                    "signature": event.signature,
+                    "event_hash": event.event_hash,
+                })
+                assert evidence_bytes == canonical_bytes(event.intent.evidence_refs)
         finally:
             subprocess.run([*docker, "stop", container], capture_output=True, text=True, check=False)
             subprocess.run(

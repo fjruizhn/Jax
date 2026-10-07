@@ -1,7 +1,7 @@
 """Pure replay, event-chain verification, and effective overlay selection."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Iterable, Mapping
 from types import MappingProxyType
@@ -39,6 +39,9 @@ class ReconstructedAuthorityState:
     overlays: Mapping[str, OverlayPayload]
     revoked_overlays: frozenset[str]
     checkpoint: AuthorityLedgerCheckpoint
+    rule_ratification_grants: Mapping[str, AuthorityEvent] = field(default_factory=dict)
+    latest_rule_ratifications: Mapping[str, AuthorityEvent] = field(default_factory=dict)
+    revoked_rule_ratifications: frozenset[str] = frozenset()
     _verified_seal: object | None = None
 
     @property
@@ -68,10 +71,17 @@ def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[Au
     revoked_ratifications: set[str] = set()
     overlays: dict[str, OverlayPayload] = {}
     revoked_overlays: set[str] = set()
+    rule_grants_by_event_id: dict[str, AuthorityEvent] = {}
+    latest_rule_ratifications: dict[str, AuthorityEvent] = {}
+    revoked_rule_ratifications: set[str] = set()
+    event_ids_seen: set[str] = set()
     active: str | None = None
     for expected_sequence, event in enumerate(ordered, 1):
         if event.sequence != expected_sequence or event.previous_event_hash != previous:
             raise LedgerIntegrityError("chain sequence/predecessor inválida")
+        if event.event_id in event_ids_seen:
+            raise LedgerIntegrityError("event_id duplicado")
+        event_ids_seen.add(event.event_id)
         if event.intent.actor_id != genesis.constitutional_actor_id:
             raise AuthorityAuthenticationError("actor no es ratificador constitucional")
         verify(public, event_unsigned_bytes(event), event.signature)
@@ -104,6 +114,17 @@ def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[Au
             if intent.overlay_id not in overlays:
                 raise AuthorityStateError("revocación de overlay desconocido")
             revoked_overlays.add(intent.overlay_id)
+        elif intent.event_type is AuthorityEventType.RULE_RATIFICATION_GRANTED:
+            assert intent.rule_ratification is not None
+            rule_grants_by_event_id[event.event_id] = event
+            latest_rule_ratifications[intent.rule_ratification.rule_id] = event
+        elif intent.event_type is AuthorityEventType.RULE_RATIFICATION_REVOKED:
+            target = intent.rule_ratification_event_id
+            if target not in rule_grants_by_event_id:
+                raise AuthorityStateError("revocación de rule ratification desconocida")
+            if target in revoked_rule_ratifications:
+                raise AuthorityStateError("rule ratification revocada más de una vez")
+            revoked_rule_ratifications.add(target)
         else:  # defensive against enum extension without replay semantics
             raise LedgerIntegrityError("authority event type desconocido")
         previous = event.event_hash
@@ -116,7 +137,12 @@ def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[Au
             raise UnanchoredLedgerHeadError("DB ledger adelante de checkpoint externo")
         if checkpoint.projection() != anchored.projection():
             raise LedgerRollbackError("head DB no coincide con checkpoint externo")
-    return ReconstructedAuthorityState(MappingProxyType(dict(ratifications)), frozenset(revoked_ratifications), active, MappingProxyType(dict(overlays)), frozenset(revoked_overlays), checkpoint, _REPLAY_SEAL)
+    return ReconstructedAuthorityState(
+        MappingProxyType(dict(ratifications)), frozenset(revoked_ratifications), active,
+        MappingProxyType(dict(overlays)), frozenset(revoked_overlays), checkpoint,
+        MappingProxyType(dict(rule_grants_by_event_id)), MappingProxyType(dict(latest_rule_ratifications)),
+        frozenset(revoked_rule_ratifications), _REPLAY_SEAL,
+    )
 
 
 def overlay_applicability(overlay: OverlayPayload, context, evaluation_time_utc: datetime) -> OverlayApplicability:
