@@ -188,6 +188,10 @@
     "archivos-de-test-en-ci/pisos": {
       "patron": "^227 passed",
       "mensaje": "PISO ROTO: se esperaban 227 tests CORRIDOS de los pisos fuera del workflow."
+    },
+    "identity-foundation-shadow/policy": {
+      "patron": "^497 passed",
+      "mensaje": "PISO ROTO: se esperaban 497 tests CORRIDOS de Identity Foundation Shadow (la politica sin DB)."
     }
   },
   "minimos": {
