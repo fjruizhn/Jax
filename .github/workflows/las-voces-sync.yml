@@ -8,18 +8,6 @@ on:
     branches: ["master"]
   pull_request:
     branches: ["**"]
-    paths:
-      - "projects/las-voces/**"
-      - "scripts/axioma_sync.py"
-      - "scripts/las_voces_qwen_smoke.py"
-      - "tests/test_las_voces_sync.py"
-      - "tests/_las_voces_process.py"
-      - "tests/las_voces_qwen_parser.mjs"
-      - "tests/las_voces_qwen_context.mjs"
-      - "tests/test_las_voces_faro_readonly.py"
-      - "tests/test_las_voces_faro_mcp_client.py"
-      - "tests/_las_voces_readonly_fixture.py"
-      - ".github/workflows/las-voces-sync.yml"
 
 jobs:
   canonical-projections:
