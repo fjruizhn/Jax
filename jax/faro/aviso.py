@@ -387,7 +387,7 @@ class Avisador:
 
 
 # --------------------------------------------------------------------------- #
-# F1.1 paso 8: el aviso de una decision del kernel de reglas                   #
+# F1.1 paso 8 r2: el aviso de una decision del kernel de reglas               #
 # --------------------------------------------------------------------------- #
 #
 # §11 del diseno del kernel (2026-10-05): "los avisos inmediatos son fail-soft
@@ -396,38 +396,57 @@ class Avisador:
 # sensibles." La constitucion (LA AUTONOMIA) fija los dos plazos: "al instante
 # si obliga o si se nego por falta de regla; en un resumen diario lo demas".
 #
-# ESTE MODULO NO ES PARTE DE LA AUTORIDAD. No importa ni conoce
-# `policy/rule_authority/*` (la prueba tests/test_faro_aviso.py::
-# test_rule_authority_no_importa_aviso_y_aviso_no_importa_rule_authority cierra
-# la frontera por AST en las dos direcciones): el kernel decide y persiste, y
-# recien DESPUES quien lo orquesta llama a estas funciones. Nada de lo que
-# falle aca puede cambiar una decision que ya existe.
+# CONTRATO (r2, decision de Hyde 2026-10-07 tras el RECHAZADO de la r1): el
+# aviso consume el RuleDecision REAL de #371 (policy/rule_authority/models.py)
+# y usa SUS nombres: status, required_rule_id, reason_code, request_hash,
+# decided_at_utc. Ese import SI esta permitido en la direccion aviso->modelos;
+# lo que el invariante prohibe (y la prueba cierra, por AST y en un interprete
+# limpio) es la contraria: nada de rule_authority puede importar el aviso,
+# porque el aviso se consume DESPUES de la decision durable, nunca dentro.
+#
+# FALLO CERRADO ante lo no reconocible: una decision que no es un RuleDecision
+# reconocible (tipo raro, campo ausente, hash que no es string) NO devuelve
+# None en silencio -- genera un aviso INMEDIATO "DECISION NO RECONOCIBLE" que
+# la nombra por su clase (nada de argumentos, nada de subject: el repr de un
+# objeto cualquiera puede traer secretos). Y "si hay duda, obliga": el PERMIT
+# real no trae la clase del acto, asi que no se puede EXCLUIR que obligue y se
+# avisa al instante; el resumen diario queda para lo suprimido por tasa y para
+# lo que el orquestador quiera diferir.
 
-PERMIT = "PERMIT"
-DENY = "DENY"
-MISSING_RULE = "MISSING_RULE"
+from enum import Enum
+
+try:  # el enum REAL de #371 cuando la base lo trae (la prueba de equivalencia vive en los tests)
+    from policy.rule_authority.models import RuleDecisionStatus
+except ImportError:  # base sin #371: espejo con SUS tres valores exactos (31eb14bf)
+    class RuleDecisionStatus(str, Enum):  # espejo documentado del contrato de #371
+        MISSING_RULE = "MISSING_RULE"
+        DENY = "DENY"
+        PERMIT = "PERMIT"
 
 
-class DecisionDeRegla(Protocol):
-    """El contrato MINIMO de una decision del kernel (`policy/rule_authority/
-    models.py` de #371). Duck typing a proposito: importar esos modelos ataria
-    el aviso a la autoridad, y este modulo tiene que poder evolucionar (o
-    probarse) sin ella. Mientras #371 no llega a esta base, cualquier objeto
-    con estos atributos sirve; cuando llegue, sus instancias entran solas."""
+# La comparacion es por VALOR (no por identidad de miembro del enum): el
+# RuleDecisionStatus real de #371, el espejo de arriba y un string crudo con
+# el mismo nombre son el mismo status -- el contrato son los NOMBRES de #371.
+_TITULOS_REGLA = {
+    "DENY": "REGLA DENEGADA",
+    "MISSING_RULE": "SIN REGLA QUE CUBRA EL ACTO",
+    "PERMIT": "PERMISO (SI HAY DUDA, OBLIGA)",
+}
 
-    decision: str            # PERMIT | DENY | MISSING_RULE
-    rule_id: str             # en MISSING_RULE, la regla cuya falta se reporta
-    reason_code: str | None  # estable en el tiempo: lo cita el operador
-    request_hash: str | None
-    rule_hash: str | None
-    obliga: bool             # el efecto externo no se deshace solo
+
+def _status_de(decision) -> "str | None":
+    """El valor del status como string ('PERMIT'|'DENY'|'MISSING_RULE'), o None
+    si no se parece a un status (miembro del enum o string; nada de adivinar)."""
+    crudo = getattr(decision, "status", None)
+    valor = getattr(crudo, "value", crudo)
+    return valor if isinstance(valor, str) else None
 
 
 @dataclass(frozen=True)
 class AvisoRegla:
-    """Un aviso listo para mandar. `clase` es la llave del LimiteTasa; `texto`
-    ya viene redactado, aplanado y acotado; `inmediato` decide el canal (ahora
-    por Telegram, o a la cola del resumen diario)."""
+    """Un aviso listo para mandar. `clase` es la llave del LimiteTasa (incluye
+    la REGLA: una tormenta de una regla no tapa la negativa de otra); `texto`
+    ya viene redactado, aplanado y acotado; `inmediato` decide el canal."""
 
     texto: str
     clase: str
@@ -435,146 +454,244 @@ class AvisoRegla:
     creado_utc: str
 
 
-_TITULOS_REGLA = {
-    DENY: "REGLA DENEGADA",
-    MISSING_RULE: "SIN REGLA QUE CUBRA EL ACTO",
-    PERMIT: "PERMISO QUE OBLIGA",      # solo para PERMIT con obliga (inmediato)
-}
-
-
-def aviso_de_decision(decision: DecisionDeRegla, *, host: str) -> AvisoRegla | None:
-    """Decide el plazo de UNA decision y arma su texto. Pura: sin I/O ni
-    efectos (la hora del reloj es lo unico que lee del mundo).
-
-    Inmediato -- DENY, MISSING_RULE y PERMIT con `obliga` (la constitucion: al
-    instante si obliga o si se nego por falta de regla). Diario -- el PERMIT
-    que no obliga. None -- una decision que no es ninguna de las tres: no se
-    adivina un aviso para lo que no se conoce.
-
-    El texto NUNCA lleva argumentos de la solicitud, montos, contenido ni
-    nombres de archivo: solo regla, razon, los DOS hashes recortados a 12 hex
-    (alcanzan para cruzar con el ledger, sin regar el digest), host y hora
-    UTC. Todo valor pasa por `_campo_log`: un dato hostil no puede fabricar
-    una linea ni un campo. El registro de la decision puede venir cargado de
-    secretos; los campos que este texto nombra son exactamente los que §11
-    permite."""
-    tipo = getattr(decision, "decision", None)
-    if tipo not in (PERMIT, DENY, MISSING_RULE):
+def _hash_12(valor) -> str | None:
+    """`sha256:<digest>` recortado a `sha256:` + 12 hex del digest. None si no
+    es un string (fallo cerrado: el llamador lo trata como no reconocible)."""
+    if not isinstance(valor, str) or ":" not in valor:
         return None
-    obliga = bool(getattr(decision, "obliga", False))
-    razon = getattr(decision, "reason_code", None) or "-"
-    clase = f"{_campo_log(tipo, 48)}|{_campo_log(razon, 48)}"
-    if tipo == PERMIT and not obliga:
-        titulo, inmediato = "PERMISO", False
-    else:
-        titulo, inmediato = _TITULOS_REGLA.get(tipo, "DECISION"), True
-    # hashes a 12 hex y con cota: el aviso cita, no vuelca.
-    req = _campo_log((getattr(decision, "request_hash", None) or "-")[:12], 16)
-    regla_hash = _campo_log((getattr(decision, "rule_hash", None) or "-")[:12], 16)
+    digest = valor.split(":", 1)[1]
+    if len(digest) < 12:
+        return None
+    return f"sha256:{digest[:12]}"
+
+
+def _no_reconocible(decision, host: str) -> AvisoRegla:
+    """El aviso de fallo cerrado: clase del objeto, NADA mas. El repr de un
+    objeto cualquiera puede traer arguments/subject con secretos -- no viaja."""
     creado = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    nombre = _campo_log(type(decision).__qualname__, 120)
+    texto = (f"FARO · DECISION NO RECONOCIBLE · {_campo_log(host, 64)}\n"
+             f"clase={nombre} a={creado}")
+    return AvisoRegla(texto=texto[:_MAX_TEXTO], clase=f"no_reconocible|{nombre}",
+                      inmediato=True, creado_utc=creado)
+
+
+def aviso_de_decision(decision, *, host: str) -> AvisoRegla:
+    """Arma el aviso de UNA decision del kernel. Pura: sin I/O ni efectos.
+
+    Siempre devuelve un AvisoRegla (r2): lo reconocible por su `status` --
+    DENY y MISSING_RULE al instante; PERMIT tambien, porque el contrato real
+    no trae la clase del acto y "si hay duda, obliga". Cualquier otra cosa
+    (status ausente o raro, hash que no es string, TypeError al leer campos)
+    es el aviso INMEDIATO de decision no reconocible: nunca None silencioso.
+
+    El texto NUNCA lleva argumentos, montos, subject, contenido ni nombres de
+    archivo: solo regla (required_rule_id), razon, el request_hash recortado a
+    `sha256:`+12 hex y la hora UTC de la DECISION (decided_at_utc). Todo pasa
+    por `_campo_log`: un dato hostil no fabrica una linea ni un campo."""
+    try:
+        status = _status_de(decision)
+        titulo = _TITULOS_REGLA.get(status)
+        if titulo is None:
+            return _no_reconocible(decision, host)
+        regla = decision.required_rule_id
+        razon = decision.reason_code
+        crudo_hash = decision.request_hash
+        cuando = decision.decided_at_utc
+        if not isinstance(regla, str) or (razon is not None and not isinstance(razon, str)):
+            return _no_reconocible(decision, host)
+        # hash presente pero ilegible (un int, un sha256 sin digest): la
+        # decision no es el contrato -- fallo cerrado, no un "-" que calla.
+        req = _hash_12(crudo_hash) if crudo_hash is not None else "-"
+        if crudo_hash is not None and req is None:
+            return _no_reconocible(decision, host)
+        if isinstance(cuando, datetime):
+            creado = cuando.astimezone(timezone.utc).isoformat(timespec="seconds")
+        else:
+            # la hora de la decision es parte del contrato del modelo; si no
+            # llega, la del aviso -- pero la decision se avisa igual.
+            creado = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    except Exception:  # fail-soft ante tipos raros (r1, MINOR 7): TypeError de un request_hash=12345 u otro campo ilegible no rompe el aviso -- cae al no reconocible
+        return _no_reconocible(decision, host)
+    clase = f"{_campo_log(status, 48)}|{_campo_log(razon or '-', 48)}|{_campo_log(regla, 48)}"
     texto = (
         f"FARO · {titulo} · {_campo_log(host, 64)}\n"
-        f"regla={_campo_log(getattr(decision, 'rule_id', '') or '-', 120)} "
-        f"razon={_campo_log(razon, 120)} req={req} regla_hash={regla_hash} a={creado}"
+        f"regla={_campo_log(regla, 120)} razon={_campo_log(razon or '-', 120)} "
+        f"req={_campo_log(req, 22)} a={creado}"
     )
-    return AvisoRegla(texto=texto[:_MAX_TEXTO], clase=clase, inmediato=inmediato,
+    return AvisoRegla(texto=texto[:_MAX_TEXTO], clase=clase, inmediato=True,
                       creado_utc=creado)
+
+
+# --- la cola del resumen diario: sin perdidas y 0600 (r2) -------------------- #
+#
+# BLOCK-1 de la r1: leer y luego vaciar perdia lo que llegaba en el medio. La
+# cola ahora tiene un CANDADO (flock) junto al archivo: el escritor appendea
+# bajo el candado y el resumen ROTA antes de leer (os.replace de la cola a un
+# rotado `.procesando` con timestamp), tambien bajo el candado -- lo que llega
+# despues de la rotacion va a la cola nueva y lo espera el proximo resumen. Un
+# rotado que sobreviva (crash a mitad) lo recoge el siguiente resumen: nunca
+# se escribe un vacio sobre la cola (write_text("") era ademas 0644, MAJOR-3).
+#
+# Todo archivo que este modulo crea (cola, candado, rotados) nace 0600 por
+# os.open(..., 0o600), sin depender del umask de quien llama.
+
+import fcntl
+
+
+def _ruta_candado(ruta_cola) -> Path:
+    return Path(str(ruta_cola) + ".candado")
+
+
+class _Candado:
+    """flock EXclusivo sobre `<cola>.candado` (creado 0600). Context manager."""
+
+    def __init__(self, ruta_cola):
+        self._ruta = _ruta_candado(ruta_cola)
+
+    def __enter__(self):
+        self._fd = os.open(self._ruta, os.O_WRONLY | os.O_CREAT, 0o600)
+        fcntl.flock(self._fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self._fd, fcntl.LOCK_UN)
+        os.close(self._fd)
+        return False
+
+
+def acumular_para_resumen(aviso: AvisoRegla, ruta_cola: "os.PathLike[str] | str",
+                          *, suprimido_por_tasa: bool = False) -> bool:
+    """Deja el aviso en la cola del resumen diario (la de las 0600): UNA linea
+    JSON por aviso, bajo el candado y con `O_APPEND` + UN solo `write` --
+    atomico entre procesos y sin carreras con el resumen. `suprimido_por_tasa`
+    marca lo que el limite de tasa postergo (MAJOR-4): no se descarta, se
+    resume. Fail-soft: si el disco falla, False y el log."""
+    try:
+        linea = json.dumps(
+            {"creado_utc": aviso.creado_utc, "clase": aviso.clase, "texto": aviso.texto,
+             "suprimido_por_tasa": suprimido_por_tasa},
+            ensure_ascii=False, separators=(",", ":"))
+        with _Candado(ruta_cola):
+            fd = os.open(ruta_cola, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                os.write(fd, f"{linea}\n".encode("utf-8"))
+            finally:
+                os.close(fd)
+        return True
+    except OSError as exc:  # fail-soft: sin disco no hay resumen, pero tampoco excepcion hacia la decision
+        logger.warning("no se pudo acumular el aviso diario (%s): %s",
+                       type(exc).__name__, exc)
+        return False
+
+
+def _mensajes_del_resumen(cuerpos: list[str], conteo: str, host: str) -> list[str]:
+    """Arma los mensajes numerados (1/n): cada uno cabe en _MAX_TEXTO SIN
+    cortar un cuerpo a la mitad (MAJOR-5: el resumen nunca trunca en silencio;
+    si no caben, son MAS mensajes, no menos avisos)."""
+    hora = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    cabecera = (f"FARO · RESUMEN DIARIO DE REGLAS · {_campo_log(host, 64)} · {hora}\n"
+                f"{conteo}")
+    mensajes, actual = [], None
+    for cuerpo in cuerpos:
+        bloque = cuerpo if actual is None else "\n" + cuerpo
+        if actual is None or len(actual) + len(bloque) + len("\n· /n") > _MAX_TEXTO:
+            if actual is not None:
+                mensajes.append(actual)
+            actual = f"{cabecera}\n{cuerpo}"
+        else:
+            actual += bloque
+    if actual is not None:
+        mensajes.append(actual)
+    total = len(mensajes)
+    return [f"{m}\n· {i}/{total}" for i, m in enumerate(mensajes, 1)]
+
+
+def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str) -> "list[str] | None":
+    """Compone el resumen de la cola diaria y la VACIA. Devuelve la LISTA de
+    mensajes numerados (1/n) que el orquestador envia en orden; None si no hay
+    nada pendiente o no se pudo leer (y entonces no se vacia NADA).
+
+    Bajo el candado: rota la cola a `<cola>.<ts>.procesando` ANTES de leer
+    (BLOCK-1), recoge tambien los rotados que hayan sobrevivido de una corrida
+    anterior interrumpida (orden por nombre), y borra cada rotado solo despues
+    de tenerlo contado en un mensaje. Si la composicion falla, los rotados
+    siguen ahi y el proximo intento los vuelve a incluir."""
+    try:
+        with _Candado(ruta_cola):
+            cola = Path(ruta_cola)
+            rotados = sorted(str(p) for p in cola.parent.glob(cola.name + ".*.procesando"))
+            if not cola.exists() and not rotados:
+                return None
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            if cola.exists():
+                destino = str(cola) + f".{ts}.procesando"
+                os.replace(cola, destino)      # rotar ANTES de leer: lo que llega despues va a la cola nueva
+                rotados.append(destino)
+            lineas: list[str] = []
+            for rotado in rotados:
+                lineas.extend(l for l in Path(rotado).read_text(encoding="utf-8").splitlines() if l.strip())
+            por_clase: dict[str, int] = {}
+            cuerpos: list[str] = []
+            suprimidos = 0
+            ilegibles = 0
+            for linea in lineas:
+                try:
+                    dato = json.loads(linea)
+                    cuerpos.append(str(dato["texto"]).replace("\n", " · "))
+                    if dato.get("suprimido_por_tasa"):
+                        suprimidos += 1
+                    clase = str(dato.get("clase", "-"))
+                    por_clase[clase] = por_clase.get(clase, 0) + 1
+                except (ValueError, KeyError, TypeError):
+                    ilegibles += 1   # se cuenta y se dice: una linea corrupta no esconde a las demas
+            if not cuerpos and not ilegibles:
+                for rotado in rotados:
+                    os.unlink(rotado)          # solo ruido sin avisos: se recoge y se sigue
+                return None
+            conteo = f"{len(cuerpos)} avisos · " + " ".join(
+                f"{_campo_log(clase, 48)}={n}" for clase, n in sorted(por_clase.items()))
+            if suprimidos:
+                conteo += f" suprimidos_por_tasa={suprimidos}"
+            if ilegibles:
+                conteo += f" ilegibles={ilegibles}"
+            mensajes = _mensajes_del_resumen(cuerpos, conteo, host)
+            for rotado in rotados:
+                os.unlink(rotado)              # ya estan todos contados en mensajes: recien ahora se vacian
+            return mensajes
+    except OSError as exc:  # fail-soft: sin lectura no hay resumen y no se borra nada
+        logger.warning("no se pudo componer el resumen diario (%s): %s",
+                       type(exc).__name__, exc)
+        return None
 
 
 def emitir_aviso_inmediato(
     aviso: AvisoRegla, cfg: ConfigAviso, cred: Credenciales, *,
     enviar: Callable[[ConfigAviso, Credenciales, str], None] = enviar_telegram,
-    limite: LimiteTasa | None = None,
+    limite: LimiteTasa, ruta_cola: "os.PathLike[str] | str",
 ) -> bool:
     """Manda UN aviso inmediato por el canal que trae `cfg`. Fail-soft TOTAL:
     cualquier fallo del envio queda en el log de Faro y devuelve False; jamas
     levanta y jamas altera la decision (que ya se aplico y persistio antes de
     que alguien la pasara aca, §11). True solo si el envio salio.
 
-    La tasa: el `LimiteTasa` lo mantiene QUIEN LLAMA (una instancia por
-    proceso, compartida entre llamadas) -- una funcion libre no puede tener
-    estado, y sin instancia compartida el limite no limita nada. Sin `limite`
-    se envia directo: el limite es del orquestador, no del texto."""
+    ENVIO SINCRONO (r2, MINOR 12): esta funcion bloquea lo que tarde la red.
+    Los llamadores async la envuelven en `asyncio.to_thread` -- igual que el
+    Avisador de arriba con su ejecutor dedicado.
+
+    `limite` y `ruta_cola` son OBLIGATORIOS a proposito: una tasa que no se
+    pasa no limita nada, y una cola que no se pasa pierde lo suprimido. Si la
+    tasa corta el aviso, NO se descarta: va a la cola del resumen diario con
+    la marca `suprimido_por_tasa` (MAJOR-4) y devuelve False."""
     try:
-        if limite is not None and not limite.admitir(aviso.clase):
+        if not limite.admitir(aviso.clase):
             logger.info("aviso de regla suprimido por tasa clase=%s", aviso.clase)
+            acumular_para_resumen(aviso, ruta_cola, suprimido_por_tasa=True)
             return False
         enviar(cfg, cred, aviso.texto)
         return True
-    except Exception as exc:  # fail-soft: el aviso no llego; se cuenta y se sigue -- la decision ya esta hecha y persistida, y ningun fallo de Telegram puede tumbar al que la invoco
+    except Exception as exc:  # fail-soft: la decision ya esta hecha y persistida; ningun fallo de Telegram puede tumbar al que la invoco
         logger.warning(
             "aviso de regla no entregado (%s) clase=%s creado=%s",
             type(exc).__name__, aviso.clase, aviso.creado_utc)
         return False
-
-
-def acumular_para_resumen(aviso: AvisoRegla, ruta_cola: "os.PathLike[str] | str") -> bool:
-    """Deja el aviso en la cola del resumen diario (la de las 0600): UNA linea
-    JSON por aviso. Atomico entre procesos: `O_APPEND` + UN solo `write` -- dos
-    procesos acumulando nunca intercalan una linea. Fail-soft: si el disco
-    falla, False y el log; nada de este modulo lanza hacia la decision."""
-    try:
-        linea = json.dumps(
-            {"creado_utc": aviso.creado_utc, "clase": aviso.clase, "texto": aviso.texto},
-            ensure_ascii=False, separators=(",", ":"))
-        fd = os.open(ruta_cola, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        try:
-            os.write(fd, f"{linea}\n".encode("utf-8"))
-        finally:
-            os.close(fd)
-        return True
-    except OSError as exc:  # fail-soft: la cola es un archivo local; sin disco no hay resumen, pero tampoco excepcion
-        logger.warning("no se pudo acumular el aviso diario (%s): %s",
-                       type(exc).__name__, exc)
-        return False
-
-
-def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str) -> str | None:
-    """Compone el resumen de la cola diaria y la VACIA. None si no hay nada
-    pendiente o si no se pudo leer (y entonces NO se vacia: sin lectura no hay
-    resumen, y las lineas siguen para el proximo intento).
-
-    El vaciado es lo ULTIMO y es atomico (temporal + `os.replace`): si el
-    proceso cae tras componer y antes de vaciar, el proximo resumen vuelve a
-    incluir las mismas lineas -- un aviso diario se puede repetir, jamas se
-    pierde por resumir. Sin cron ni wiring: WHO llama y CUANDO es del
-    orquestador (§14.8: conectar avisos sin hacerlos parte de la autoridad)."""
-    try:
-        contenido = Path(ruta_cola).read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except OSError as exc:  # fail-soft: no se pudo leer; no se vacia nada
-        logger.warning("no se pudo leer la cola del resumen diario (%s): %s",
-                       type(exc).__name__, exc)
-        return None
-    lineas = [linea for linea in contenido.splitlines() if linea.strip()]
-    if not lineas:
-        return None
-    por_clase: dict[str, int] = {}
-    cuerpos: list[str] = []
-    ilegibles = 0
-    for linea in lineas:
-        try:
-            dato = json.loads(linea)
-            cuerpos.append(str(dato["texto"]).replace("\n", " · "))
-            clase = str(dato.get("clase", "-"))
-            por_clase[clase] = por_clase.get(clase, 0) + 1
-        except (ValueError, KeyError, TypeError):
-            ilegibles += 1   # se cuenta y se dice: una linea corrupta no esconde a las demas
-    conteo = " ".join(f"{_campo_log(clase, 48)}={n}" for clase, n in sorted(por_clase.items()))
-    if ilegibles:
-        conteo += f" ilegibles={ilegibles}"
-    hora = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    resumen = (
-        f"FARO · RESUMEN DIARIO DE REGLAS · {_campo_log(host, 64)} · {hora}\n"
-        f"{len(cuerpos)} avisos · {conteo}\n" + "\n".join(cuerpos)
-    )
-    try:
-        vacio = Path(ruta_cola).with_name(f".{Path(ruta_cola).name}.vacio")
-        vacio.write_text("", encoding="utf-8")
-        os.replace(vacio, ruta_cola)     # atomico: o queda la cola vieja o queda vacia
-    except OSError as exc:  # fail-soft: sin vaciado no hay resumen -- devolverlo duplicaria cada linea en el proximo intento
-        logger.warning("no se pudo vaciar la cola del resumen diario (%s): %s",
-                       type(exc).__name__, exc)
-        return None
-    return resumen[:_MAX_TEXTO]
