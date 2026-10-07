@@ -4641,7 +4641,7 @@ Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la form
 
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-07, paso 7 r3 de jax#373): `^704 passed`
+Patrón vigente (2026-10-07, paso 7 r3 de jax#373): `^712 passed`
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4661,3 +4661,6 @@ Paso 7 r3 (2026-10-07, jax#373 sobre #370 r8): 591 -> 704 (+113: 109 de `test_ru
 `test_rule_authority_ataques.py` por el límite declarado del lector de listas del workflow). Medido en
 hall9000 con Python 3.14.4, pytest 9.1.1, pyyaml, cryptography 49.0.0 y el comando exacto del paso
 (`bash --noprofile --norc -eo pipefail`).
+
+Paso 7 r3, cierre de MINOR (2026-10-07): 704 -> 712 (+8 de providers: procedencia con `..`/`.lock`/punto final,
+centinela aleatoria, caso especial de centinela conocida, versión que sube al escribir). Mismo comando exacto del paso.

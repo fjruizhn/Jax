@@ -1,7 +1,8 @@
 """Dobles deterministas de los proveedores (F1.1 paso 7 r2).
 
 Viven SOLO en pruebas (decision de Hyde): el modulo de produccion no tiene
-dobles y un kernel no puede armarse con ellos. Estos si son REALES donde el
+dobles. Eso no impide que alguien importe estos o escriba otros: lo que los
+frena en produccion es el cableado (fuera de alcance), no el modulo. Estos son REALES donde el
 contrato lo exige: RW-lock con condicion (lectores excluyen escritor y al
 reves), CAS atomica bajo lock en el checkpoint, reloj monotónico por proceso.
 La implementacion real de checkpoint persiste y hace fsync; esta no (memoria).
@@ -127,12 +128,17 @@ class _BaseConLeases:
     @contextmanager
     def lease_exclusivo(self) -> Iterator[VistaLease]:
         with self._lock.escribir():
-            self._numero += 1                                  # version nueva DENTRO
+            # Valor y version del MISMO instante: entrar NO avanza la version;
+            # avanza al ESCRIBIR (_reemplazar), y los compartidos posteriores ven
+            # el valor nuevo con la version nueva.
             yield VistaLease(self._valor, self._version())
 
     def _reemplazar(self, valor: object) -> None:
-        """Solo con el exclusivo tomado (los dobles de escritura lo garantizan)."""
+        """Solo con el exclusivo tomado POR ESTE HILO: valor y version cambian juntos."""
+        if self._lock._dueno != threading.get_ident():
+            raise RuleAuthorityError("escribir exige el lease exclusivo del hilo")
         self._valor = valor
+        self._numero += 1
 
 
 class PinFijo(_BaseConLeases):

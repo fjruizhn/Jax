@@ -43,6 +43,7 @@ codigo en el proceso ya perdio) — es orden, no aislamiento.
 from __future__ import annotations
 
 import re
+import secrets
 from datetime import datetime, timedelta
 from enum import Enum
 from contextlib import AbstractContextManager
@@ -245,18 +246,28 @@ class AlmacenCheckpoints(Protocol):
 
 # ------------------------------------------------- el guard de emision/consumo
 
-# Capability que NO existe en ningun catalogo: el guard la sondea y el catalogo
-# debe responder ClasificacionDesconocida (§13).
-CAPABILITY_CENTINELA = "__centinela_sin_clasificar__"
+# Prefijo reservado de las capabilities centinela. Cada sondeo usa un nombre
+# ALEATORIO (prefijo + token): un catalogo no puede tratar «la centinela» como
+# caso especial y responder REVERSIBLE a todo lo demas. El prefijo no es API.
+_PREFIJO_CENTINELA = "__centinela_sin_clasificar__"
 
-_RE_PROCEDENCIA = re.compile(
-    r"refs/(?:heads|tags)/[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*",
-    re.ASCII)
+
+def _nueva_centinela() -> str:
+    return f"{_PREFIJO_CENTINELA}{secrets.token_hex(16)}"
+
+
+_RE_SEGMENTO = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?"        # no termina en «.»
+_RE_PROCEDENCIA = re.compile(rf"refs/(?:heads|tags)/{_RE_SEGMENTO}(?:/{_RE_SEGMENTO})*", re.ASCII)
 
 
 def _procedencia_cerrada(procedencia: object) -> bool:
-    return (type(procedencia) is str and ".." not in procedencia
-            and _RE_PROCEDENCIA.fullmatch(procedencia) is not None)
+    """Forma cerrada (git check-ref-format, subconjunto): sin «..», sin segmento
+    que termine en «.lock» ni en «.», anclada y sensible a mayusculas."""
+    if type(procedencia) is not str or ".." in procedencia:
+        return False
+    if any(seg.endswith(".lock") for seg in procedencia.split("/")):
+        return False
+    return _RE_PROCEDENCIA.fullmatch(procedencia) is not None
 
 
 def _dentro_de_lease(nombre: str, proveedor: object, validar) -> None:
@@ -302,7 +313,7 @@ def _exigir_centinela_desconocida(catalogo: CatalogoClasificacion) -> None:
     """§13: una capability desconocida NIEGA. Responder un contrato (REVERSIBLE
     incluido) o None, o fallar con otra cosa, es un catalogo inservible."""
     try:
-        respuesta = catalogo.contrato_de(CAPABILITY_CENTINELA)
+        respuesta = catalogo.contrato_de(_nueva_centinela())
     except ClasificacionDesconocida:
         return
     except Exception as exc:
@@ -367,7 +378,7 @@ def exigir_contrato_de_emision(*, pin: object, checkpoint: object, stop: object,
 
 
 __all__ = [
-    "CAPABILITY_CENTINELA", "ORDEN_ADQUISICION", "VersionMonotonica", "ClaseCapability",
+    "ORDEN_ADQUISICION", "VersionMonotonica", "ClaseCapability",
     "FormaLimites", "ContratoCapability", "PinActivo", "EstadoStop", "CatalogoClasificacion",
     "VistaLease", "ProveedorPinActivo", "ProveedorStop", "RelojConfiable",
     "ProveedorClasificacion", "AlmacenCheckpoints", "exigir_contrato_de_emision",

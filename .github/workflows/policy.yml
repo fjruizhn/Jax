@@ -2654,7 +2654,7 @@ jobs:
         # validar_regla exige el sellado, fabricar con el OID del pin niega).
         # Ronda 8: 591 (576 medidos en master + 15: D-4 como segmento y subcadena x13,
         # subids legitimos no caen, el helper del pin no deja repos temporales).
-        # Paso 7 r3 (providers, jax#373) sobre el 591 de arriba: 704 (+113: +109 de
+        # Paso 7 r3 (providers, jax#373) sobre el 591 de arriba: 712 (+121: +117 de
         # test_rule_authority_providers.py —guard con lease valido y dato malo, exclusion
         # de leases determinista, catalogo con centinela, confirmar del checkpoint— y +4 de
         # test_rule_authority_ataques.py por el limite declarado del lector de listas, W3).

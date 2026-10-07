@@ -44,7 +44,6 @@ from policy.rule_authority.errors import (  # noqa: E402
     StopDesconocido,
 )
 from policy.rule_authority.providers import (  # noqa: E402
-    CAPABILITY_CENTINELA,
     ORDEN_ADQUISICION,
     ClaseCapability,
     ContratoCapability,
@@ -318,7 +317,14 @@ def test_m9_la_version_es_estable_mientras_se_lee() -> None:
         with proveedor.lease_compartido() as v2:
             assert v1.version == v2.version                   # estricta: sin avance por leer
     with proveedor.lease_exclusivo() as v3:
-        assert v3.version.es_posterior_a(v1.version)           # el escritor SI avanza
+        assert v3.version == v1.version                        # ENTRAR no avanza la version
+        proveedor._reemplazar(EstadoStop(activo=True, huella="y"))   # escribir: valor y version juntos
+    with proveedor.lease_compartido() as v4:
+        assert v4.version.es_posterior_a(v1.version)
+        assert v4.valor == EstadoStop(activo=True, huella="y")  # el compartido posterior ve lo escrito
+    assert v3.valor == EstadoStop(activo=False, huella="x")     # la vista del exclusivo: el instante de entrada
+    with pytest.raises(RuleAuthorityError, match="exclusivo"):  # y no se escribe sin el exclusivo
+        proveedor._reemplazar(EstadoStop(activo=False, huella="z"))
 
 
 def test_a14_estres_ninguna_lectura_durante_exclusivo(intervalo_corto) -> None:
@@ -363,6 +369,13 @@ def test_a14_estres_ninguna_lectura_durante_exclusivo(intervalo_corto) -> None:
 ])
 def test_x4_procedencia_fuera_de_la_forma_cerrada_niega(mala: str) -> None:
     pin = TrustedPolicyPin("jax", "0" * 40, "1" * 40, mala)   # el pin declara LA MISMA: solo la forma puede negar
+    _niega("forma cerrada", pin=PinFijo(pin, mala))
+
+
+@pytest.mark.parametrize("mala", ["refs/heads/a..b", "refs/heads/x.lock", "refs/heads/x.",
+                                  "refs/heads/x.lock/y", "refs/tags/v1.", "refs/heads/a/b.lock"])
+def test_procedencia_con_dos_puntos_lock_o_punto_final_niega(mala: str) -> None:
+    pin = TrustedPolicyPin("jax", "0" * 40, "1" * 40, mala)
     _niega("forma cerrada", pin=PinFijo(pin, mala))
 
 
@@ -527,10 +540,41 @@ def test_el_valor_del_lease_de_clasificacion_debe_ser_un_catalogo(valor: object)
 
 
 def test_el_catalogo_que_niega_la_centinela_pasa_y_la_centinela_no_existe() -> None:
-    assert CAPABILITY_CENTINELA
     exigir_contrato_de_emision(**_suite(clasificacion=_Crudo(CatalogoFijo({}))))
     with pytest.raises(ClasificacionDesconocida):
-        CatalogoFijo({"CAP_X": _contrato(ClaseCapability.OBLIGATING)}).contrato_de(CAPABILITY_CENTINELA)
+        CatalogoFijo({"CAP_X": _contrato(ClaseCapability.OBLIGATING)}).contrato_de("__no_existe__")
+
+
+class _CatalogoQueRegistra:
+    def __init__(self) -> None:
+        self.pedidas: list[str] = []
+
+    def contrato_de(self, capability: str) -> object:
+        self.pedidas.append(capability)
+        raise ClasificacionDesconocida(capability)
+
+
+def test_la_centinela_es_aleatoria_por_llamada_y_no_es_api_publica() -> None:
+    import policy.rule_authority.providers as P
+    assert not hasattr(P, "CAPABILITY_CENTINELA") and "CAPABILITY_CENTINELA" not in P.__all__
+    catalogo = _CatalogoQueRegistra()
+    for _ in range(3):
+        exigir_contrato_de_emision(**_suite(clasificacion=_Crudo(catalogo)))
+    assert len(catalogo.pedidas) == 3 and len(set(catalogo.pedidas)) == 3
+
+
+class _CatalogoQueConoceLaCentinelaVieja:
+    """Niega SOLO la centinela fija de la r3 y responde REVERSIBLE a todo lo demas."""
+
+    def contrato_de(self, capability: str) -> object:
+        if capability == "__centinela_sin_clasificar__":
+            raise ClasificacionDesconocida(capability)
+        return _contrato(ClaseCapability.REVERSIBLE)
+
+
+def test_catalogo_con_caso_especial_para_una_centinela_conocida_no_pasa() -> None:
+    _niega("capability desconocida",
+           clasificacion=_Crudo(_CatalogoQueConoceLaCentinelaVieja()))
 
 
 def test_a8_la_clase_es_enum_cerrado() -> None:
