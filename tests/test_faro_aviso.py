@@ -703,6 +703,14 @@ def test_las_horas_son_utc_aunque_la_maquina_este_en_otra_zona(monkeypatch, tmp_
         t.tzset()
 
 
+def test_una_hora_ingenua_no_se_acepta_como_utc():
+    """Mutante l (datetime.now() sin zona): la hora local ingenua no se convierte en silencio."""
+    from jax.faro.aviso import _ahora_utc, _iso_utc
+    assert _ahora_utc().utcoffset() == timedelta(0)
+    with pytest.raises(ValueError):
+        _iso_utc(datetime(2026, 10, 7, 3, 4, 5))
+
+
 def test_emitir_exige_limite_y_ruta_de_cola_sin_defaults(tmp_path):
     """MINOR 12: un limite que no se pasa no limita nada y una cola que no se pasa pierde lo suprimido."""
     av = aviso_de_decision(_decision(), host="hall9000")

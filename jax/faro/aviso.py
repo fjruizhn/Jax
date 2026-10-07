@@ -442,6 +442,8 @@ def _ahora_utc() -> datetime:
 
 
 def _iso_utc(momento: datetime) -> str:
+    if momento.tzinfo is None:      # una hora ingenua es hora local disfrazada: no se acepta nunca
+        raise ValueError("hora sin zona")
     return momento.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
