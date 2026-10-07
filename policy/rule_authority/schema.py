@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping
 
+from jax.faro.catalogo_topes import CatalogoTopes
+
 from .errors import RuleSchemaError
 
 SCHEMA_VERSION = "1.0"
@@ -139,6 +141,8 @@ def _validar_tope(valor: object, catalogo: object) -> "Tope":
             raise RuleSchemaError(f"tope.{clave}: obligatorio")
     if catalogo is None:
         raise RuleSchemaError("tope: sin catalogo del pin no se topea nada (B-3)")
+    if not isinstance(catalogo, CatalogoTopes):          # r7, MINOR-3: sellado o nada
+        raise RuleSchemaError("tope: el catalogo se exige SELLADO (CatalogoTopes del pin)")
     clase = datos["resource_class"]
     if clase not in catalogo:
         raise RuleSchemaError("tope.resource_class: clase fuera del catalogo cerrado (R-4)")

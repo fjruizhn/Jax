@@ -24,7 +24,7 @@ name: policy
 
 on:
   push:
-    branches: ["**"]
+    branches: ["master"]
   pull_request:
     branches: ["**"]
     types: [opened, synchronize, reopened, edited]
@@ -504,7 +504,12 @@ jobs:
   # R-4) agrego 32 pruebas de runtime, y las de mecanica pasaron a recursos del catalogo.
   # Re-medido ronda 5 (B-3): 721 — el catalogo llega del pin por parametro y sin el no se
   # topea nada (+1). Sin skips. La CI usa Python 3.12 y confirma el mismo piso.
-  # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 104 +
+  # Re-medido ronda 6 (D-4 piso de codigo + catalogo sellado): 722 — el runtime solo
+  # acepta el CatalogoTopes sellado del snapshot, nunca un Mapping cualquiera (+1).
+  # Re-medido ronda 7 (solo el snapshot emite; catalogo de pin de prueba): 726 —
+  # recursos de clase prohibida con subid ajeno (AUD2 x3) y catalogo de bytes
+  # sueltos niegan (+4).
+  # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 109 +
   # control 170 + lanzador 77 + acl 43 + memoria 15; desde aviso, los pasos 0.3b y 0.3c y su auditoria). Las pruebas con bwrap y uids
   # reales estan en el job `faro-jaula`; las de la base real, en `faro-bitacora-db`.
   faro-fase0:
@@ -2549,7 +2554,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - run: pip install pytest pyyaml cryptography==49.0.0 pymysql
+      - run: pip install pytest pyyaml cryptography==49.0.0 && pip install --require-hashes -r requirements-faro-mariadb-ci.txt
       - name: Identity Foundation Shadow (sin DB)
         env:
           PYTHONPATH: "."
@@ -2638,8 +2643,21 @@ jobs:
         # solo pytest+pyyaml+cryptography como el paso de arriba): 579 passed
         # (459 de la ronda 1 + 38 de rule_authority: 20 de schema por la decision
         # R-4 de Fernando y digitos ASCII, 2 de snapshot por el testigo no-dataclass,
-        # 16 de los ataques A-J del auditor como regresiones). Exacto: una prueba
-        # que desaparezca deja pasar en silencio la forma que cubria.
+        # 16 de los ataques A-J del auditor como regresiones). Ronda 5 (B-3): 555
+        # (+10 del catalogo del pin). Ronda 6 (D-4 piso de codigo): 562 (+7: K2 sexta
+        # clase niega en cargador y en pin, OID de objeto suelto del catalogo
+        # recalculado, cargador solo bytes, catalogo anidado niega, UTF-8 estricto,
+        # catalogo sellado inmutable). Ronda 7 (solo el snapshot emite el catalogo):
+        # 574 (+12: no hay fabrica publica de bytes a sellado, las seis palabras de
+        # D-4 niegan como subid, mayusculas/acentos/segmentos niegan, AUD2 de cruce
+        # de clases, vector dorado del hash con dominio v2, subclase de bytes niega,
+        # validar_regla exige el sellado, fabricar con el OID del pin niega).
+        # Ronda 8: 591 (576 medidos en master + 15: D-4 como segmento y subcadena x13,
+        # subids legitimos no caen, el helper del pin no deja repos temporales).
+        # Jax#371 r3: 613 (591 + 22 de tests/policy/test_rule_authority_providers.py, que la
+        # lista incorpora al reapilar #371 sobre #370; medido con pytest 9.1.1, pyyaml 6.0.3,
+        # cryptography 49.0.0 y el comando exacto del paso).
+        # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
           python -B -m pytest -q \

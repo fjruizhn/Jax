@@ -32,6 +32,8 @@ class InMemoryRuleDecisionStore:
             return decision
 
     def record(self, request: RuleEvaluationRequest, decision: RuleDecision) -> RuleDecision:
+        if type(request) is not RuleEvaluationRequest or type(decision) is not RuleDecision:
+            raise TypeError("record requiere RuleEvaluationRequest y RuleDecision")
         if (decision.request_id != request.request_id or
                 decision.request_hash != request.request_hash or
                 decision.required_rule_id != request.rule_id):

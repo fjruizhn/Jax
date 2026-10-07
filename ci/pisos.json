@@ -38,8 +38,8 @@
       "mensaje": "PISO ROTO: se esperaban 251 tests CORRIDOS de cli_sandbox."
     },
     "faro-fase0/faro": {
-      "patron": "^721 passed",
-      "mensaje": "PISO ROTO: se esperaban 721 tests CORRIDOS del Faro."
+      "patron": "^726 passed",
+      "mensaje": "PISO ROTO: se esperaban 726 tests CORRIDOS del Faro."
     },
     "faro-bitacora-db/faro-db": {
       "patron": "^40 passed",
@@ -134,8 +134,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 19 tests CORRIDOS del codec de persistencia de Block 4. Medido el 2026-10-07 en hall9000."
     },
     "authority-ledger-mariadb/integration": {
-      "patron": "^1 passed in ",
-      "mensaje": "PISO ROTO: se esperaba la integración MariaDB aislada de Block 4 (1 test CORRIDO). Medido el 2026-10-07 en hall9000 con MariaDB 12.3.3 --network none."
+      "patron": "^4 passed in ",
+      "mensaje": "PISO ROTO: se esperaba la integración MariaDB aislada de Block 4 (4 tests CORRIDOS). Medido el 2026-10-07 en hall9000 con MariaDB 12.3.3 --network none."
     },
     "authority-rule-storage/mariadb": {
       "patron": "^7 passed in ",
@@ -146,8 +146,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 12 pruebas de payload, codec y replay de ratificaciones Faro individuales. Medido el 2026-10-07 en hall9000."
     },
     "authority-rule-models/models": {
-      "patron": "^30 passed in ",
-      "mensaje": "PISO ROTO: se esperan 30 pruebas de modelos Rule Authority: límites ligados al catálogo sellado del snapshot, NFC antes del hash, hash ligado al lookup del store, denegaciones persistibles y regresiones."
+      "patron": "^140 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 140 pruebas de modelos Rule Authority (medido el 2026-10-07 en hall9000): catálogo exigido por tipo exacto CatalogoTopes, límites derivados de ReglaValidada con limites_de, solicitud/evaluación/decisión y store en memoria."
     },
     "tests-puros/ficha_tests": {
       "patron": "^16 passed",
@@ -210,8 +210,8 @@
       "mensaje": "PISO ROTO: se esperaban 227 tests CORRIDOS de los pisos fuera del workflow."
     },
     "identity-foundation-shadow/policy": {
-"patron": "^579 passed",
-      "mensaje": "PISO ROTO: se esperaban 579 tests CORRIDOS de Identity Foundation Shadow (la politica sin DB)."
+      "patron": "^613 passed",
+      "mensaje": "PISO ROTO: se esperaban 613 tests CORRIDOS de Identity Foundation Shadow (la politica sin DB)."
     }
   },
   "minimos": {

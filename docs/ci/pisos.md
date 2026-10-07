@@ -4609,8 +4609,15 @@ incluido `previous_event_hash`; el piso anterior era 5.
 
 ## `authority-ledger-mariadb/integration`
 
-Piso vigente (2026-10-07): `^1 passed in `. MariaDB 12.3.3 efímera con `--network none`;
-prueba migraciones, provisioning versionado y bloqueo de UPDATE/DELETE con GRANT explícito.
+Piso vigente (2026-10-07): `^4 passed in ` (antes 1). Medido en hall9000 con MariaDB 12.3.3 efímera
+`--network none`; la prueba aplica ambas migraciones, valida el upgrade nullable→NOT NULL,
+provisiona la cuenta de aplicación con el script versionado, genera una llave Ed25519 de prueba
+y valida firma → INSERT → lectura → reconstrucción → hash/firma y replay. También prueba que
+UPDATE/DELETE fallan aunque otro principal tenga esos GRANTs, por los triggers append-only. La
+base solo expone socket Unix al proceso de prueba. Tres pruebas nuevas, cada una con su MariaDB
+efímera: el provisioning revoca los privilegios previos (`REVOKE ALL PRIVILEGES, GRANT OPTION`) y
+`SHOW GRANTS` coincide exacto con el contrato; la migración 002 falla cerrada con filas NULL aun con
+`sql_mode=''` (la fila queda intacta) y pasa con cero NULL.
 
 ## `authority-rule-storage/mariadb`
 
@@ -4635,8 +4642,14 @@ Piso vigente (2026-10-07): `^12 passed in `. Cubre activación que rechaza grant
 
 ## `authority-rule-models/models`
 
-Piso actualizado (2026-10-07): `^30 passed in `. Catálogo cargado desde el snapshot, límites
-validados por clase/subid, NFC antes del hash, status/reason y store ligado al request hash.
+Piso vigente (2026-10-07, Jax#371 r3): `^140 passed in ` (antes 30; 132 en r3 antes de la corrección de la auditoría). Medido con Python 3.14.4.
+Cubre `tests/policy/test_faro_rule_authority_models.py`: el catálogo se exige por tipo EXACTO
+`CatalogoTopes` (sin `MappingProxyType` ni subclases), los límites se derivan de `ReglaValidada`
+(#370) con `limites_de` y se re-validan contra el catálogo (unidades, moneda, `Tope` como
+`<clase>.<subid>`, enteros <= 2**53), `RuleEvaluation` exige el mismo catálogo en solicitud y
+límites, el `request_hash` incluye el OID del catálogo, los enteros de `arguments` tienen rango, y
+el store exige `RuleDecision`. Cada control tiene su mutante y la prueba que lo mata en el reporte
+de entrega.
 
 
 ## `archivos-de-test-en-ci/pisos`
@@ -4651,6 +4664,23 @@ Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la form
 
 ## `identity-foundation-shadow/policy`
 
-Piso actualizado (2026-10-07): `^579 passed`. Medido con el paso completo del workflow
-Python 3.14 tras integrar los modelos de #371 y los proveedores de #372; el resultado exacto
-se vuelve a verificar sobre la base final.
+Patrón vigente (2026-10-07, Jax#371 r3): `^613 passed`
+
+Jax#371 r3: 591 -> 613. Al reapilar #371 sobre #370 (05183cb7) la lista del paso incorpora
+`tests/policy/test_rule_authority_providers.py` (+22); medido con el comando exacto del paso en un
+venv de Python 3.14.4 con pytest 9.1.1, pyyaml 6.0.3 y cryptography 49.0.0 (el instalado sin hashes
+del paso; pymysql 1.2.0 con hashes).
+
+Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
+solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
+de la constitución es que un número compartido lo re-mide el último en llegar, y sin piso no hay
+número. Medido en hall9000: 459 (ronda 1) + 38 (ronda 2) + 43 (ronda 3: catálogo de topes, copias/pickle, nombres que esquivan, blob gigante, identidad de las listas del workflow, y las tres dedicadas de razon propia: dígito Unicode, claves de límites, not_after) de rule_authority (20 de schema — decisión R-4 de
+Fernando del 2026-10-06 y dígitos ASCII; 2 de snapshot — testigo no-dataclass; 16 de los ataques
+A–J del auditor como regresiones). El paso re-corre la misma lista en `-q | tee` como memory-b9.
+Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.
+
+r8 (2026-10-07, ronda 8 de jax#370): 574 -> 591. El runner (tests-puros, Python 3.14) dio 576 con la rama sobre
+master (que ya trae las pruebas de #368/#369/#374) y el piso decía 574; 576 +15 pruebas nuevas de la r8
+(D-4 como segmento y subcadena: 7 compuestas + 6 exactas, el contrapeso de subids legítimos y que el helper
+`catalogo_del_pin` no deje repos temporales). Medido en hall9000 con Python 3.14.4, pytest 9.1.1,
+pyyaml 6.0.3, cryptography 49.0.0 y el comando exacto del paso (`bash --noprofile --norc -eo pipefail`).

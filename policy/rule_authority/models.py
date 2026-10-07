@@ -1,7 +1,14 @@
-"""Closed immutable request/evaluation/decision models for Faro F1.1."""
+"""Closed immutable request/evaluation/decision models for Faro F1.1.
+
+Una sola fuente de verdad para los topes: el catálogo SELLADO del pin
+(``jax.faro.catalogo_topes.CatalogoTopes``, #370) y el modelo de regla de #370
+(``ReglaValidada`` / ``LimitesObligatorios``). Este módulo no define taxonomía
+de unidades ni campos de límites propios: los límites se derivan con
+``limites_de`` y el catálogo se exige por tipo exacto.
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
 import re
@@ -9,17 +16,17 @@ import unicodedata
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from jax.faro.catalogo_topes import CatalogoTopes, es_de_catalogo
 from policy.authority_ledger.canonical import domain_hash
 from policy.authority_ledger.errors import AuthorityEventValidationError
 from policy.authority_ledger.ids import uuid7_text
-from types import MappingProxyType
-from .schema import MAX_CANTIDAD
+from .schema import (MAX_CANTIDAD, Cantidad, Frecuencia, LimitesObligatorios, Monto,
+                     ReglaValidada, Tope)
 
 _IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9._:-]{0,127}\Z")
-# This is only the ISO 4217 alphabetic-code shape. Membership is checked against
-# the trusted rule/capability contract before an evaluation can be authoritative.
+_ISO_MONEDA = re.compile(r"[A-Z]{3}\Z", re.ASCII)
 _REQUEST_HASH_DOMAIN = "JAX-FARO-RULE-REQUEST"
-_REQUEST_HASH_VERSION = "1"
+_REQUEST_HASH_VERSION = "2"        # v2: la identidad del catálogo (OID del pin) entra al hash
 _DENY_REASONS = frozenset({
     "AUTHORITY_INVALID",
     "CAPABILITY_MISMATCH",
@@ -32,8 +39,31 @@ _DENY_REASONS = frozenset({
 })
 
 
+def _catalogo(value: object, field_name: str) -> CatalogoTopes:
+    # Tipo EXACTO: ni un Mapping armado a mano ni una subclase con __slots__ que
+    # salte el testigo del constructor.
+    if type(value) is not CatalogoTopes:
+        raise AuthorityEventValidationError(
+            f"{field_name} requiere el catálogo sellado del snapshot (CatalogoTopes)")
+    return value
+
+
+def _entero(value: object, field_name: str) -> int:
+    if type(value) is not int or not 0 < value <= MAX_CANTIDAD:
+        raise AuthorityEventValidationError(
+            f"{field_name} debe ser entero positivo <= {MAX_CANTIDAD}")
+    return value
+
+
+def _unidad_de(catalogo: CatalogoTopes, clase: str, value: object, field_name: str) -> str:
+    # `type(...) is str`: una subclase con __eq__ == True pasaría el `in` del catálogo.
+    if type(value) is not str or value not in catalogo.get(clase, ()):
+        raise AuthorityEventValidationError(f"{field_name} fuera del catálogo {clase}")
+    return value
+
+
 def _identifier(value: object, field: str) -> str:
-    if (not isinstance(value, str) or not value or
+    if (type(value) is not str or not value or
             unicodedata.normalize("NFC", value) != value or
             not _IDENTIFIER.fullmatch(value)):
         raise AuthorityEventValidationError(f"{field} inválido")
@@ -44,6 +74,9 @@ def _freeze_json(value: Any, field: str) -> Any:
     if value is None or isinstance(value, (str, bool, int)):
         if isinstance(value, str):
             value = unicodedata.normalize("NFC", value)
+        elif isinstance(value, int) and not isinstance(value, bool) and abs(value) > MAX_CANTIDAD:
+            raise AuthorityEventValidationError(
+                f"{field} contiene un entero fuera de rango (|n| <= {MAX_CANTIDAD})")
         return value
     if isinstance(value, float):
         raise AuthorityEventValidationError(f"{field} no admite valores float")
@@ -76,63 +109,102 @@ def _utc(value: object, field: str) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+_RULE_HASH_DOMAIN = "JAX-FARO-RULE-LIMITS-SOURCE"
+
+
+def _proyeccion_regla(value: Any) -> Any:
+    if is_dataclass(value) and not isinstance(value, type):
+        return {f.name: _proyeccion_regla(getattr(value, f.name)) for f in fields(value)}
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat()
+    if isinstance(value, (tuple, list)):
+        return [_proyeccion_regla(item) for item in value]
+    return value
+
+
+def _hash_de_regla(regla: ReglaValidada) -> str:
+    return domain_hash(_RULE_HASH_DOMAIN, "1", _proyeccion_regla(regla))
+
+
 @dataclass(frozen=True)
 class RuleLimits:
-    """Only effect and cost limits are representable; infrastructure limits have no fields."""
+    """Envoltorio inmutable de los límites de UNA regla validada (#370).
 
-    catalogo: MappingProxyType | None = None
-    quantity: int | None = None
-    quantity_unit: str | None = None
-    amount: int | None = None
-    currency: str | None = None
-    frequency_count: int | None = None
-    frequency_unit: str | None = None
-    frequency_window_seconds: int | None = None
-    duration_seconds: int | None = None
-    tokens: int | None = None
-    cost_minor_units: int | None = None
-    cost_currency: str | None = None
+    No tiene campos de límites propios: ``limites`` es el ``LimitesObligatorios``
+    de la ``ReglaValidada`` y ``tope`` su ``Tope`` (donde viven frecuencia,
+    duración y tokens/costo, siempre ``<clase>.<subid>`` del catálogo);
+    ``rule_id`` y ``rule_hash`` identifican la regla de la que salieron.
+
+    Solo ``limites_de`` los construye: el constructor y ``dataclasses.replace``
+    (que lo invoca) siempre fallan, y ``limites_de`` crea la instancia sin pasar
+    por él y la valida. Es una barrera contra el uso accidental, no contra código
+    que fabrique la instancia a la fuerza (``object.__new__``)."""
+
+    catalogo: CatalogoTopes
+    limites: LimitesObligatorios
+    tope: Tope | None
+    rule_id: str
+    rule_hash: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.catalogo, MappingProxyType):
-            raise AuthorityEventValidationError("RuleLimits requiere catálogo cargado del snapshot")
-        if not any(getattr(self, name) is not None for name in (
-            "quantity", "quantity_unit", "amount", "currency", "frequency_count",
-            "frequency_unit", "frequency_window_seconds", "duration_seconds", "tokens",
-            "cost_minor_units", "cost_currency")):
+        raise AuthorityEventValidationError("RuleLimits solo se obtiene con limites_de(regla, catalogo)")
+
+    def _validar(self) -> None:
+        _identifier(self.rule_id, "rule_id")
+        if type(self.rule_hash) is not str or not re.fullmatch(r"sha256:[0-9a-f]{64}", self.rule_hash):
+            raise AuthorityEventValidationError("rule_hash inválido")
+        catalogo = _catalogo(self.catalogo, "RuleLimits")
+        limites = self.limites
+        if type(limites) is not LimitesObligatorios:
+            raise AuthorityEventValidationError("limites debe ser LimitesObligatorios de la regla")
+        if self.tope is not None and type(self.tope) is not Tope:
+            raise AuthorityEventValidationError("tope debe ser el Tope de la regla")
+        if limites.quantity is None and limites.amount is None and limites.frequency is None \
+                and self.tope is None:
             raise AuthorityEventValidationError("RuleLimits vacío")
-        for name in ("quantity", "amount", "frequency_count",
-                     "frequency_window_seconds", "duration_seconds", "tokens",
-                     "cost_minor_units"):
-            value = getattr(self, name)
-            if value is not None and (type(value) is not int or not 0 < value <= MAX_CANTIDAD):
-                raise AuthorityEventValidationError(f"{name} debe ser entero positivo <= {MAX_CANTIDAD}")
-        if (self.quantity is None) != (self.quantity_unit is None):
-            raise AuthorityEventValidationError("quantity y quantity_unit deben ir juntos")
-        if self.quantity_unit is not None:
-            object.__setattr__(self, "quantity_unit", _identifier(self.quantity_unit, "quantity_unit"))
-            if self.quantity_unit not in self.catalogo.get("actos_externos", ()):
-                raise AuthorityEventValidationError("quantity_unit fuera del catálogo actos_externos")
-        if (self.amount is None) != (self.currency is None):
-            raise AuthorityEventValidationError("amount y currency deben ir juntos")
-        if (self.cost_minor_units is None) != (self.cost_currency is None):
-            raise AuthorityEventValidationError("cost_minor_units y cost_currency deben ir juntos")
-        for field, category in (("currency", "monto_dinero"), ("cost_currency", "tokens_costo")):
-            unit = getattr(self, field)
-            if unit is not None and (not isinstance(unit, str) or unit != unit.lower() or unit not in self.catalogo.get(category, ())):
-                raise AuthorityEventValidationError(f"{field} fuera del catálogo {category}")
-        if (self.frequency_count is None) != (self.frequency_window_seconds is None):
-            raise AuthorityEventValidationError("frecuencia requiere count y window")
-        if (self.frequency_count is None) != (self.frequency_unit is None):
-            raise AuthorityEventValidationError("frecuencia requiere unidad del catálogo")
-        if self.frequency_unit is not None and self.frequency_unit not in self.catalogo.get("frecuencia", ()):
-            raise AuthorityEventValidationError("frequency_unit fuera del catálogo frecuencia")
-        if self.duration_seconds is not None and "segundos" not in self.catalogo.get("duracion", ()):
-            raise AuthorityEventValidationError("duracion.segundos fuera del catálogo")
-        if self.tokens is not None and "tokens" not in self.catalogo.get("tokens_costo", ()):
-            raise AuthorityEventValidationError("tokens fuera del catálogo tokens_costo")
-        if self.quantity is not None and self.amount is not None:
-            raise AuthorityEventValidationError("límites no pueden combinar quantity y amount")
+        if limites.quantity is not None:
+            if type(limites.quantity) is not Cantidad:
+                raise AuthorityEventValidationError("quantity debe ser Cantidad")
+            _unidad_de(catalogo, "actos_externos", limites.quantity.unit, "quantity.unit")
+            _entero(limites.quantity.max, "quantity.max")
+        if limites.amount is not None:
+            monto = limites.amount
+            if type(monto) is not Monto:
+                raise AuthorityEventValidationError("amount debe ser Monto")
+            # Monto usa la forma ISO de la regla (USD); el catálogo guarda el subid en
+            # minúscula (usd): se compara `currency.lower()` contra monto_dinero, de modo
+            # que `USD` de la regla corresponde a `usd` del catálogo y de la solicitud.
+            if type(monto.currency) is not str or not _ISO_MONEDA.fullmatch(monto.currency):
+                raise AuthorityEventValidationError("amount.currency fuera del catálogo monto_dinero")
+            _unidad_de(catalogo, "monto_dinero", monto.currency.lower(), "amount.currency")
+            _entero(monto.max, "amount.max")
+        if limites.frequency is not None:
+            if type(limites.frequency) is not Frecuencia:
+                raise AuthorityEventValidationError("frequency debe ser Frecuencia")
+            _entero(limites.frequency.max_occurrences, "frequency.max_occurrences")
+            _entero(limites.frequency.window_seconds, "frequency.window_seconds")
+        if self.tope is not None:
+            tope = self.tope
+            if (type(tope.resource_class) is not str or type(tope.resource) is not str
+                    or type(tope.period) is not str or not tope.period
+                    or not es_de_catalogo(tope.resource, catalogo)
+                    or tope.resource.partition(".")[0] != tope.resource_class):
+                raise AuthorityEventValidationError("tope fuera del catálogo cerrado (<clase>.<subid>)")
+            _entero(tope.maximum, "tope.maximum")
+
+
+def limites_de(regla: ReglaValidada, catalogo: CatalogoTopes) -> RuleLimits:
+    """Los límites de la regla validada, comprobados contra el catálogo sellado."""
+    if type(regla) is not ReglaValidada:
+        raise AuthorityEventValidationError("limites_de requiere una ReglaValidada")
+    limites = object.__new__(RuleLimits)       # sin __init__: no hay otra puerta
+    for nombre, valor in (("catalogo", catalogo), ("limites", regla.obligation_limits),
+                          ("tope", regla.tope), ("rule_id", regla.rule_id),
+                          ("rule_hash", "sha256:" + "0" * 64)):
+        object.__setattr__(limites, nombre, valor)
+    limites._validar()                          # primero la forma; el hash, ya sobre datos válidos
+    object.__setattr__(limites, "rule_hash", _hash_de_regla(regla))
+    return limites
 
 
 @dataclass(frozen=True)
@@ -144,39 +216,40 @@ class RuleEvaluationRequest:
     objective: str
     resource_id: str
     arguments: Mapping[str, Any]
-    catalogo: MappingProxyType | None = None
+    catalogo: CatalogoTopes
     quantity: int | None = None
     quantity_unit: str | None = None
     amount: int | None = None
     currency: str | None = None
+    rule_hash: str | None = None
     request_hash: str | None = None
 
     def __post_init__(self) -> None:
         uuid7_text(self.request_id, "request_id")
-        if not isinstance(self.catalogo, MappingProxyType):
-            raise AuthorityEventValidationError("RuleEvaluationRequest requiere catálogo cargado del snapshot")
-        for field in ("rule_id", "subject", "capability", "objective", "resource_id"):
-            object.__setattr__(self, field, _identifier(getattr(self, field), field))
+        _catalogo(self.catalogo, "RuleEvaluationRequest")
+        for field_name in ("rule_id", "subject", "capability", "objective", "resource_id"):
+            object.__setattr__(self, field_name, _identifier(getattr(self, field_name), field_name))
         if not isinstance(self.arguments, Mapping):
             raise AuthorityEventValidationError("arguments debe ser un objeto JSON")
         frozen = _freeze_json(self.arguments, "arguments")
         object.__setattr__(self, "arguments", frozen)
-        if self.quantity is not None and (type(self.quantity) is not int or not 0 < self.quantity <= MAX_CANTIDAD):
-            raise AuthorityEventValidationError("quantity debe ser entero positivo")
+        if self.quantity is not None:
+            _entero(self.quantity, "quantity")
         if (self.quantity is None) != (self.quantity_unit is None):
             raise AuthorityEventValidationError("quantity y quantity_unit deben ir juntos")
         if self.quantity_unit is not None:
-            object.__setattr__(self, "quantity_unit", _identifier(self.quantity_unit, "quantity_unit"))
-            if self.quantity_unit not in self.catalogo.get("actos_externos", ()):
-                raise AuthorityEventValidationError("quantity_unit fuera del catálogo actos_externos")
-        if self.amount is not None and (type(self.amount) is not int or not 0 < self.amount <= MAX_CANTIDAD):
-            raise AuthorityEventValidationError("amount debe ser entero positivo en unidades menores")
-        if (self.quantity is not None and self.amount is not None):
+            _unidad_de(self.catalogo, "actos_externos", self.quantity_unit, "quantity_unit")
+        if self.amount is not None:
+            _entero(self.amount, "amount")
+        if self.quantity is not None and self.amount is not None:
             raise AuthorityEventValidationError("solicitud no puede limitarse por quantity y amount a la vez")
         if (self.amount is None) != (self.currency is None):
             raise AuthorityEventValidationError("amount y currency deben ir juntos")
-        if self.currency is not None and (not isinstance(self.currency, str) or self.currency != self.currency.lower() or self.currency not in self.catalogo.get("monto_dinero", ())):
-            raise AuthorityEventValidationError("currency fuera del catálogo monto_dinero")
+        if self.currency is not None:
+            _unidad_de(self.catalogo, "monto_dinero", self.currency, "currency")
+        if self.rule_hash is not None and (type(self.rule_hash) is not str or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", self.rule_hash)):
+            raise AuthorityEventValidationError("rule_hash inválido")
         computed = domain_hash(_REQUEST_HASH_DOMAIN, _REQUEST_HASH_VERSION, self.canonical_projection())
         if self.request_hash is not None and self.request_hash != computed:
             raise AuthorityEventValidationError("request_hash no coincide con los campos")
@@ -195,6 +268,8 @@ class RuleEvaluationRequest:
             "quantity_unit": self.quantity_unit,
             "amount": self.amount,
             "currency": self.currency,
+            "catalogo_oid": self.catalogo.oid_pin,
+            "rule_hash": self.rule_hash,
         }
 
 
@@ -210,8 +285,16 @@ class RuleEvaluation:
     limits: RuleLimits
 
     def __post_init__(self) -> None:
-        if not isinstance(self.request, RuleEvaluationRequest) or not isinstance(self.limits, RuleLimits):
+        if type(self.request) is not RuleEvaluationRequest or type(self.limits) is not RuleLimits:
             raise AuthorityEventValidationError("evaluación requiere request y RuleLimits")
+        if self.limits.rule_id != self.request.rule_id:
+            raise AuthorityEventValidationError("los límites son de otra regla (rule_id distinto)")
+        if self.request.rule_hash is not None and self.request.rule_hash != self.limits.rule_hash:
+            raise AuthorityEventValidationError("los límites son de otra versión de la regla (rule_hash)")
+        # CatalogoTopes.__eq__ compara clases Y OID del pin (tipo exacto ya comprobado).
+        if self.request.catalogo != self.limits.catalogo:
+            raise AuthorityEventValidationError(
+                "solicitud y límites deben usar el mismo catálogo (misma identidad del pin)")
 
 
 @dataclass(frozen=True)
@@ -226,7 +309,7 @@ class RuleDecision:
     def __post_init__(self) -> None:
         uuid7_text(self.request_id, "request_id")
         _identifier(self.required_rule_id, "required_rule_id")
-        if not isinstance(self.request_hash, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", self.request_hash):
+        if type(self.request_hash) is not str or not re.fullmatch(r"sha256:[0-9a-f]{64}", self.request_hash):
             raise AuthorityEventValidationError("request_hash inválido")
         if not isinstance(self.status, RuleDecisionStatus):
             raise AuthorityEventValidationError("status inválido")
@@ -240,4 +323,3 @@ class RuleDecision:
         elif self.status is RuleDecisionStatus.DENY and self.reason_code == "RULE_NOT_FOUND":
             raise AuthorityEventValidationError("RULE_NOT_FOUND requiere MISSING_RULE")
         object.__setattr__(self, "decided_at_utc", _utc(self.decided_at_utc, "decided_at_utc"))
-    catalogo: MappingProxyType | None = None
