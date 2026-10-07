@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .errors import AuthorityEventValidationError
 from .models import (
@@ -134,13 +134,12 @@ def genesis_from_projection(value):
 
 
 def event_from_storage_row(row):
-    if len(row) == 3:
-        sequence, event_id, value = row
-        stored_intent = stored_evidence = None
-    elif len(row) == 5:
-        sequence, event_id, stored_intent, value, stored_evidence = row
-    else:
+    if len(row) != 10:
         raise AuthorityEventValidationError("fila authority_event inválida")
+    (sequence, event_id, event_type, actor_id, stored_intent, value,
+     stored_evidence, stored_hash, stored_signature, stored_recorded_at) = row
+    if stored_intent is None:
+        raise AuthorityEventValidationError("canonical_intent ausente")
     value = _json_value(value, "canonical_event")
     _closed_object(value, _EVENT_FIELDS, "canonical_event")
     try:
@@ -151,14 +150,27 @@ def event_from_storage_row(row):
             event_id, sequence, value["previous_event_hash"], intent,
             datetime.fromisoformat(value["recorded_at_utc"]), value["signature"], value["event_hash"],
         )
-        if len(row) == 5:
-            evidence = _json_value(stored_evidence, "evidence_refs")
-            if not isinstance(evidence, list) or evidence != list(event.intent.evidence_refs):
-                raise AuthorityEventValidationError("evidence_refs no coincide con canonical_event")
-            if stored_intent is not None:
-                intent_value = _json_value(stored_intent, "canonical_intent")
-                if intent_value != intent_projection(event.intent):
-                    raise AuthorityEventValidationError("canonical_intent no coincide con canonical_event")
+        intent_value = _json_value(stored_intent, "canonical_intent")
+        if intent_value != intent_projection(event.intent):
+            raise AuthorityEventValidationError("canonical_intent no coincide con canonical_event")
+        evidence = _json_value(stored_evidence, "evidence_refs")
+        if not isinstance(evidence, list) or evidence != list(event.intent.evidence_refs):
+            raise AuthorityEventValidationError("evidence_refs no coincide con canonical_event")
+        stored_time = stored_recorded_at
+        if not isinstance(stored_time, datetime):
+            raise AuthorityEventValidationError("recorded_at_utc de storage inválido")
+        if stored_time.tzinfo is None or stored_time.utcoffset() is None:
+            stored_time = stored_time.replace(tzinfo=timezone.utc)
+        else:
+            stored_time = stored_time.astimezone(timezone.utc)
+        if (
+            event_type != event.intent.event_type.value
+            or actor_id != event.intent.actor_id
+            or stored_hash != event.event_hash
+            or stored_signature != event.signature
+            or stored_time != event.recorded_at_utc
+        ):
+            raise AuthorityEventValidationError("columnas authority_event no coinciden con canonical_event")
         return event
     except (KeyError, TypeError, ValueError) as exc:
         raise AuthorityEventValidationError("canonical_event inválido") from exc

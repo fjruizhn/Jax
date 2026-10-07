@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime, timezone
 
 import pymysql
+import pytest
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -47,10 +48,6 @@ def _apply_migration(connection):
         for statement in triggers.split("//"):
             if statement.strip():
                 cursor.execute(statement)
-        cursor.execute(
-            "INSERT INTO jax_authority.authority_ledger_head "
-            "(singleton,sequence,head_event_id,head_event_hash) VALUES (1,0,NULL,NULL)"
-        )
     connection.commit()
 
 
@@ -96,10 +93,28 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                     cursor.execute("SELECT VERSION()")
                     assert cursor.fetchone()[0].startswith("12.3.3-")
                 _apply_migration(connection)
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT sequence,head_event_id,head_event_hash FROM jax_authority.authority_ledger_head WHERE singleton=1")
+                    assert cursor.fetchone() == (0, None, None)
 
             def connect():
                 return pymysql.connect(
                     unix_socket=str(socket_path), user="root", password=password,
+                    database="jax_authority", autocommit=False, charset="utf8mb4",
+                )
+
+            app_password = secrets.token_urlsafe(24)
+            with connect() as admin:
+                with admin.cursor() as cursor:
+                    cursor.execute("CREATE USER 'jax_authority_app_test'@'localhost' IDENTIFIED BY %s", (app_password,))
+                    cursor.execute("GRANT SELECT ON jax_authority.authority_ledger_genesis TO 'jax_authority_app_test'@'localhost'")
+                    cursor.execute("GRANT SELECT,INSERT ON jax_authority.authority_events TO 'jax_authority_app_test'@'localhost'")
+                    cursor.execute("GRANT SELECT,UPDATE ON jax_authority.authority_ledger_head TO 'jax_authority_app_test'@'localhost'")
+                admin.commit()
+
+            def app_connect():
+                return pymysql.connect(
+                    unix_socket=str(socket_path), user="jax_authority_app_test", password=app_password,
                     database="jax_authority", autocommit=False, charset="utf8mb4",
                 )
 
@@ -123,20 +138,32 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                     )
                 db.commit()
 
-            store = MariaDBAuthorityLedgerStore(connect)
+            store = MariaDBAuthorityLedgerStore(app_connect)
+            with pytest.raises(pymysql.err.OperationalError):
+                with app_connect() as app:
+                    with app.cursor() as cursor:
+                        cursor.execute("UPDATE jax_authority.authority_events SET actor_id='actor:tamper' WHERE sequence=1")
+                    app.commit()
             event = append_authority_event(
                 store, root, key,
                 AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
                 event_id="018cc251-f400-7000-8000-000000000001",
                 recorded_at_utc=datetime(2026, 10, 6, tzinfo=timezone.utc),
             )
+            second = append_authority_event(
+                store, root, key,
+                AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
+                event_id="018cc251-f400-7000-8000-000000000002",
+                recorded_at_utc=datetime(2026, 10, 6, 0, 0, 1, tzinfo=timezone.utc),
+            )
             restored = store.events()
             state = verify_authority_ledger(store.get_genesis(), restored, root)
 
-            assert len(restored) == 1
+            assert len(restored) == 2
             assert restored[0] == event
+            assert restored[1] == second
             assert restored[0].event_hash == event_hash(restored[0])
-            assert state.checkpoint.sequence == 1
+            assert state.checkpoint.sequence == 2
             with connect() as db:
                 with db.cursor() as cursor:
                     cursor.execute(
@@ -152,7 +179,9 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
             assert evidence_bytes == canonical_bytes(event.intent.evidence_refs)
         finally:
             subprocess.run([*docker, "stop", container], capture_output=True, text=True, check=False)
-            subprocess.run(
+            chown = subprocess.run(
                 ["sudo", "-n", "chown", "-R", f"{os.getuid()}:{os.getgid()}", socket_dir],
-                capture_output=True, text=True, check=True,
+                capture_output=True, text=True, check=False,
             )
+            if chown.returncode and __import__("sys").exc_info()[0] is None:
+                raise RuntimeError(f"falló la limpieza de permisos del socket temporal: {chown.stderr.strip()}")

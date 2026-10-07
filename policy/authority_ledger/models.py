@@ -5,7 +5,7 @@ models a permission or an execution decision.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import re
@@ -174,7 +174,7 @@ class AuthorityEventIntent:
     ratification_event_id: str | None = None
     overlay: OverlayPayload | None = None
     overlay_id: str | None = None
-    _ratification_snapshot_seal: object | None = None
+    _ratification_snapshot_seal: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "actor_id", _actor(self.actor_id, "actor_id"))
