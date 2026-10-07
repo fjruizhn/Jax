@@ -1,3 +1,22 @@
+# Traspaso · Faro F1.1 paso 7 (jax#373) ronda 3
+
+Rama `feat/faro-f1.1-providers-r3` (local, SIN empujar): b16216d7 (r2, RECHAZADO) + merge de
+`origin/feat/faro-f1.1-schema-snapshot` (#370 @ 05183cb7) + 3 commits de r3. Veredicto de entrada:
+`~/encargos-codex/veredicto-jax373-r2.md`; encargo: `encargo-glm-g2-faro-f11-paso7-r3.md` (B).
+
+Hecho en r3: BLOCK (sin `except...pass`; STOP ilegible niega), MAJOR-1 (guard probado con lease valido
+y solo el dato malo), MAJOR-2 (procedencia `refs/heads|tags/...` anclada e igual a la del pin,
+`type(pin) is TrustedPolicyPin`), MAJOR-3 (reloj `utcoffset() == 0`), MAJOR-4 (sin lecturas sueltas:
+todo es valor dentro de `VistaLease`, validado por tipo), MAJOR-5 (centinela, §13), MINOR (exclusion
+determinista de hilo a hilo, `confirmar` = el log contiene el head, `__delattr__`, forma de limites,
+W3 declarado y cerrado en falso). Piso Identity 704.
+
+Falta (no es de esta ronda): CI de GitHub sin verificar (no hay push); los 4 tests MariaDB de
+`tests/policy/test_authority_ledger_storage_mariadb.py` necesitan docker y no corrieron aqui.
+Interpretacion a confirmar: `FormaLimites` (enum cerrado) es mia — §10.7 solo dice «forma de limites».
+
+---
+
 # Traspaso · Faro F1.1 #368/#369/#371
 
 ## Objetivo
