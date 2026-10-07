@@ -68,21 +68,41 @@ class MariaDBAuthorityLedgerStore:
         from .serialization import event_from_storage_row
         with self._connect() as connection:
             cursor = connection.cursor()
-            cursor.execute("SELECT sequence,event_id,canonical_event FROM jax_authority.authority_events ORDER BY sequence ASC")
+            cursor.execute(
+                "SELECT sequence,event_id,event_type,actor_id,canonical_intent,canonical_event,"
+                "evidence_refs,previous_event_hash,event_hash,signature,recorded_at_utc "
+                "FROM jax_authority.authority_events ORDER BY sequence ASC"
+            )
             return tuple(event_from_storage_row(row) for row in cursor.fetchall())
 
     def append(self, event: AuthorityEvent) -> None:
         from .canonical import canonical_bytes
+        from .serialization import event_projection, intent_projection
         connection = self._connect()
         try:
             cursor = connection.cursor()
             cursor.execute("SELECT sequence,head_event_hash FROM jax_authority.authority_ledger_head WHERE singleton=1 FOR UPDATE")
             row = cursor.fetchone()
-            sequence, predecessor = row if row else (0, None)
+            if row is None:
+                raise AuthorityStateError("authority ledger head ausente")
+            sequence, predecessor = row
             if event.sequence != sequence + 1 or event.previous_event_hash != predecessor:
                 raise AuthorityStateError("append concurrente/stale")
-            cursor.execute("INSERT INTO jax_authority.authority_events (sequence,event_id,event_type,actor_id,canonical_event,previous_event_hash,event_hash,signature,recorded_at_utc) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", (event.sequence,event.event_id,event.intent.event_type.value,event.intent.actor_id,canonical_bytes(event),event.previous_event_hash,event.event_hash,event.signature,event.recorded_at_utc))
+            cursor.execute(
+                "INSERT INTO jax_authority.authority_events "
+                "(sequence,event_id,event_type,actor_id,canonical_intent,canonical_event,evidence_refs,previous_event_hash,event_hash,signature,recorded_at_utc) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    event.sequence, event.event_id, event.intent.event_type.value,
+                    event.intent.actor_id, canonical_bytes(intent_projection(event.intent)),
+                    canonical_bytes(event_projection(event)),
+                    canonical_bytes(event.intent.evidence_refs), event.previous_event_hash,
+                    event.event_hash, event.signature, event.recorded_at_utc,
+                ),
+            )
             cursor.execute("UPDATE jax_authority.authority_ledger_head SET sequence=%s,head_event_id=%s,head_event_hash=%s WHERE singleton=1", (event.sequence,event.event_id,event.event_hash))
+            if cursor.rowcount != 1:
+                raise AuthorityStateError("actualización del authority ledger head no tocó exactamente una fila")
             connection.commit()
         except Exception:
             connection.rollback()

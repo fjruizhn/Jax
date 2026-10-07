@@ -27,17 +27,20 @@ def catalogo_del_pin(bytes_catalogo: bytes | None = None):
             ["git", "show", "HEAD:policy/faro/catalogo-topes.json"],
             capture_output=True, check=True, cwd=RAIZ).stdout
 
-    def g(*args: str) -> str:
-        r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True)
-        assert r.returncode == 0, r.stderr.decode()
-        return r.stdout.decode().strip()
+    # r8 (MINOR r7): el repo temporal se borra al salir, pase lo que pase.
+    with tempfile.TemporaryDirectory(prefix="catalogo-pin-") as tmp:
+        repo = Path(tmp)
 
-    repo = Path(tempfile.mkdtemp(prefix="catalogo-pin-"))
-    g("init", "-q", "-b", "main")
-    (repo / "policy" / "faro").mkdir(parents=True)
-    (repo / "policy" / "faro" / "catalogo-topes.json").write_bytes(bytes_catalogo)
-    g("add", "-A")
-    g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "catalogo de prueba")
-    pin = TrustedPolicyPin("prueba", g("rev-parse", "HEAD"),
-                           g("rev-parse", "HEAD:policy"), "prueba:pin")
-    return load_trusted_policy_snapshot(repo, pin).catalogo
+        def g(*args: str) -> str:
+            r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True)
+            assert r.returncode == 0, r.stderr.decode()
+            return r.stdout.decode().strip()
+
+        g("init", "-q", "-b", "main")
+        (repo / "policy" / "faro").mkdir(parents=True)
+        (repo / "policy" / "faro" / "catalogo-topes.json").write_bytes(bytes_catalogo)
+        g("add", "-A")
+        g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "catalogo de prueba")
+        pin = TrustedPolicyPin("prueba", g("rev-parse", "HEAD"),
+                               g("rev-parse", "HEAD:policy"), "prueba:pin")
+        return load_trusted_policy_snapshot(repo, pin).catalogo
