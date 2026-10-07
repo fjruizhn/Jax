@@ -16,8 +16,10 @@ from pathlib import Path
 
 _GIT_SIN_HOOKS = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
 
-# Tope de tamano de blob leido por lotes (F1.1 §6): una regla es un YAML chico;
-# algo de megas no es una regla, es un ataque de memoria.
+# Tope de tamano de blob para el snapshot de reglas (F1.1 §6): una regla es un
+# YAML chico; algo de megas no es una regla, es un ataque de memoria. NO es un
+# default de leer_blobs: el paquete del Faro lee blobs de ~800 KB legitimamente,
+# asi que el tope es OPT-IN del snapshot (M-6, jax#370 r3).
 MAX_BLOB_BYTES = 1024 * 1024
 
 # `git replace` (refs/replace/) hace que un SHA muestre OTRO contenido sin cambiar el SHA: un
@@ -127,10 +129,19 @@ def listar(repo: Path, sha: str, *rutas: str) -> list[EntradaGit]:
     return entradas
 
 
-def leer_blobs(repo: Path, oids: list[str]) -> dict[str, bytes]:
+def leer_blobs(repo: Path, oids: list[str], *, max_bytes: int | None = None) -> dict[str, bytes]:
+    """Lee blobs por lote. Con ``max_bytes``, PRIMERO mira los tamanos con
+    ``cat-file --batch-check`` y niega cualquier exceso ANTES de cargar contenido
+    (no sirve de nada cargar un mega y rechazarlo despues)."""
     unicos = list(dict.fromkeys(oids))
     if not unicos:
         return {}
+    if max_bytes is not None:
+        r = git(repo, "cat-file", "--batch-check", entrada=("\n".join(unicos) + "\n").encode())
+        for linea in r.stdout.decode().splitlines():
+            oid, tipo, tam = (linea.split(" ") + ["", ""])[:3]
+            if tipo == "blob" and tam.isdigit() and int(tam) > max_bytes:
+                raise FuenteInvalida(f"blob {oid} excede {max_bytes} bytes: no es una regla")
     r = git(repo, "cat-file", "--batch", entrada=("\n".join(unicos) + "\n").encode())
     salida, i, blobs = r.stdout, 0, {}
     for oid in unicos:
@@ -139,8 +150,6 @@ def leer_blobs(repo: Path, oids: list[str]) -> dict[str, bytes]:
         if len(cabecera) != 3 or cabecera[0] != oid or cabecera[1] != "blob":
             raise FuenteInvalida(f"git cat-file devolvio algo inesperado para {oid}: {cabecera}")
         tam = int(cabecera[2])
-        if tam > MAX_BLOB_BYTES:
-            raise FuenteInvalida(f"blob {oid} excede {MAX_BLOB_BYTES} bytes: no es una regla")
         blobs[oid] = salida[fin + 1:fin + 1 + tam]
         i = fin + 1 + tam + 1
     return blobs

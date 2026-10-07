@@ -29,22 +29,16 @@ EFFECT = "PERMIT"
 ACTION_CLASSES = ("REVERSIBLE", "OBLIGATING")
 
 # R-4, DECISION DE FERNANDO (2026-10-06): solo admiten tope las clases de ACTOS
-# y DINERO — monto de dinero, cantidad de actos externos (mensajes, compras,
-# publicaciones), frecuencia, duracion y tokens/costo. NUNCA conexiones,
-# concurrencia, workers, hilos, procesos ni agentes (D-4). Lo que no esta aqui
-# no lleva tope, sin importar como se llame ni como se declare.
-CLASES_RECURSO_CON_TOPE = (
-    "monto_dinero", "actos_externos", "frecuencia", "duracion", "tokens_costo",
-)
-
-# D-4 (jax/faro/topes.py::PALABRAS_SIN_TOPE) mas la lista NUNCA de Fernando, en
-# castellano y en ingles: ni agentes ni conexiones ni concurrencia ni workers ni
-# hilos ni procesos llevan tope, se llamen como se llamen y aunque la clase
-# declarada sea legitima. Duplicado a proposito: policy no importa jax.
-PALABRAS_RECURSO_SIN_TOPE = (
-    "agent", "subagent", "enjambre", "swarm",
-    "conexion", "connection", "concurrenc", "worker", "hilo", "thread",
-    "proceso", "process", "paralel",
+# y DINERO del CATALOGO CERRADO compartido con el runtime
+# (`jax/faro/catalogo_topes.py`, hoja de stdlib): monto de dinero, actos
+# externos, frecuencia, duracion y tokens/costo. NUNCA conexiones,
+# concurrencia, workers, hilos, procesos ni agentes (D-4). Una lista negra por
+# palabras nunca cierra; el catalogo si: `resource` no es texto libre, es
+# `<clase>.<subid>` con el subid en el catalogo DE ESA clase. Fuera de ahi no
+# hay tope, en schema y en runtime, por igual.
+from jax.faro.catalogo_topes import (  # noqa: E402  (hoja, solo stdlib)
+    CATALOGO_TOPES,
+    CLASES_RECURSO_CON_TOPE,
 )
 
 # Techo por defecto de ttl_seconds: el kernel pasa el suyo de configuracion
@@ -151,9 +145,13 @@ def _validar_tope(valor: object) -> "Tope":
     clase = datos["resource_class"]
     if clase not in CLASES_RECURSO_CON_TOPE:
         raise RuleSchemaError("tope.resource_class: clase fuera del vocabulario cerrado (R-4)")
-    recurso = _nfc(datos["resource"], "tope.resource", _RE_RECURSO)
-    if any(palabra.startswith(PALABRAS_RECURSO_SIN_TOPE) for palabra in _RE_PALABRAS.split(recurso)):
-        raise RuleSchemaError("tope.resource: D-4, recurso de agentes o conexiones (se llame como se llame)")
+    recurso = datos["resource"]
+    if not isinstance(recurso, str) or not _RE_RECURSO.fullmatch(recurso):
+        raise RuleSchemaError("tope.resource: no canonico")
+    subid = recurso.partition(".")[2] if "." in recurso else ""
+    if recurso.partition(".")[0] != clase or subid not in CATALOGO_TOPES.get(clase, ()):
+        raise RuleSchemaError(
+            "tope.resource: fuera del catalogo cerrado — debe ser <clase>.<subid> de SU clase (R-4)")
     maximo = _entero_positivo(datos["maximum"], "tope.maximum")
     periodo = _nfc(datos["period"], "tope.period", _RE_PERIODO)
     return Tope(resource_class=clase, resource=recurso, maximum=maximo, period=periodo)

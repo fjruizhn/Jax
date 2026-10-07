@@ -40,7 +40,7 @@ def test_el_ejemplo_con_tope_es_valido_y_declara_su_clase() -> None:
     regla = validar_regla(_regla("regla-ejemplo-tope.yaml"))
     assert regla.tope is not None
     assert regla.tope.resource_class == "actos_externos"
-    assert regla.tope.resource == "mensajes.externos"
+    assert regla.tope.resource == "actos_externos.mensajes"
     assert regla.tope.maximum == 8
 
 
@@ -294,7 +294,7 @@ def test_tope_con_clase_fuera_de_vocabulario_rechaza() -> None:
 def test_el_vocabulario_de_clases_es_el_de_actos_y_dinero() -> None:
     # DECISION de Fernando (2026-10-06): solo actos y dinero; jamas infraestructura.
     assert CLASES_RECURSO_CON_TOPE == (
-        "monto_dinero", "actos_externos", "frecuencia", "duracion", "tokens_costo",
+        "actos_externos", "duracion", "frecuencia", "monto_dinero", "tokens_costo",
     )
 
 
@@ -383,6 +383,29 @@ def test_mutar_el_dict_de_entrada_despues_de_validar_no_cambia_la_regla() -> Non
     datos["permit"]["ttl_seconds"] = 9999
     assert regla.scope.subjects == validar_regla(copia).scope.subjects
     assert regla.permit.ttl_seconds == 60
+
+
+def test_digito_unicode_en_timestamp_rechaza() -> None:
+    datos = _regla()
+    datos["validity"]["not_before_utc"] = "\u0662\u0660\u0662\u0666-10-05T00:00:00Z"   # ٢٠٢٦
+    with pytest.raises(RuleSchemaError):
+        validar_regla(datos)
+
+
+def test_obligation_limits_sin_las_tres_claves_rechaza() -> None:
+    datos = _regla()
+    del datos["obligation_limits"]["amount"]
+    with pytest.raises(RuleSchemaError) as excinfo:
+        validar_regla(datos)
+    assert "amount" in str(excinfo.value)          # muere por ESTA clave, no por otra
+
+
+def test_validity_sin_not_after_rechaza() -> None:
+    datos = _regla()
+    del datos["validity"]["not_after_utc"]
+    with pytest.raises(RuleSchemaError) as excinfo:
+        validar_regla(datos)
+    assert "not_after_utc" in str(excinfo.value)   # M20: prueba propia, razon propia
 
 
 # ------------------------------------------- espejo JSON Schema (rule-v1)

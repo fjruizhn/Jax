@@ -37,7 +37,14 @@ import re
 import unicodedata
 from pathlib import Path
 
-from jax.faro.git_objetos import FuenteInvalida, git, leer_blobs, listar, oid_subarbol
+from jax.faro.git_objetos import (
+    MAX_BLOB_BYTES,
+    FuenteInvalida,
+    git,
+    leer_blobs,
+    listar,
+    oid_subarbol,
+)
 from policy.canonicalization.errors import CanonicalizationError, StrictYAMLError
 from policy.canonicalization.strict_yaml import load_strict_yaml
 
@@ -97,10 +104,12 @@ class ReglaSellada:
     """Una regla del snapshot, con sus bytes identificados. Solo la construye
     este modulo (testigo privado): una ReglaValidada suelta no es autoridad."""
 
-    __slots__ = ("ruta", "modo", "blob_oid", "content_hash", "regla", "_testigo")
+    __slots__ = ("ruta", "modo", "blob_oid", "content_hash", "regla")
 
     def __init__(self, *, ruta: str, modo: str, blob_oid: str, content_hash: str,
                  regla: ReglaValidada, _testigo: object = None) -> None:
+        # El testigo se COMPARA y se descarta: nunca queda en la instancia, asi
+        # nadie lo lee de un objeto legitimo para fabricar otro (r2).
         if _testigo is not _TESTIGO:
             raise RuleSnapshotError("ReglaSellada no se fabrica por la API publica")
         object.__setattr__(self, "ruta", ruta)
@@ -108,7 +117,15 @@ class ReglaSellada:
         object.__setattr__(self, "blob_oid", blob_oid)
         object.__setattr__(self, "content_hash", content_hash)
         object.__setattr__(self, "regla", regla)
-        object.__setattr__(self, "_testigo", _testigo)
+
+    def _clave(self) -> tuple:
+        return (self.ruta, self.modo, self.blob_oid, self.content_hash, self.regla)
+
+    def __eq__(self, otro: object) -> bool:
+        return isinstance(otro, ReglaSellada) and self._clave() == otro._clave()
+
+    def __hash__(self) -> int:
+        return hash(self._clave())
 
     def __setattr__(self, *_args) -> None:
         raise RuleSnapshotError("ReglaSellada es inmutable")
@@ -116,13 +133,17 @@ class ReglaSellada:
     def __delattr__(self, _name: str) -> None:
         raise RuleSnapshotError("ReglaSellada es inmutable")
 
+    def __reduce__(self) -> tuple:
+        # ni pickle ni copy: deserializar no puede fabricar objetos sellados
+        raise RuleSnapshotError("ReglaSellada no se serializa")
+
 
 class TrustedPolicySnapshot:
     """El snapshot sellado. El hash se RECALCULA en la construccion: cualquier
     combinacion de reglas que no corresponda a su propio hash, niega."""
 
     __slots__ = ("commit", "policy_tree_oid", "reglas", "snapshot_hash",
-                 "repositorio", "procedencia", "_testigo")
+                 "repositorio", "procedencia")
 
     def __init__(self, *, commit: str, policy_tree_oid: str, reglas: tuple[ReglaSellada, ...],
                  repositorio: str, procedencia: str, _testigo: object = None) -> None:
@@ -136,13 +157,25 @@ class TrustedPolicySnapshot:
         object.__setattr__(self, "snapshot_hash", _hash_dominio(_DOMINIO_SNAPSHOT, carga))
         object.__setattr__(self, "repositorio", repositorio)
         object.__setattr__(self, "procedencia", procedencia)
-        object.__setattr__(self, "_testigo", _testigo)
+
+    def _clave(self) -> tuple:
+        return (self.commit, self.policy_tree_oid, self.reglas, self.snapshot_hash,
+                self.repositorio, self.procedencia)
+
+    def __eq__(self, otro: object) -> bool:
+        return isinstance(otro, TrustedPolicySnapshot) and self._clave() == otro._clave()
+
+    def __hash__(self) -> int:
+        return hash(self._clave())
 
     def __setattr__(self, *_args) -> None:
         raise RuleSnapshotError("TrustedPolicySnapshot es inmutable")
 
     def __delattr__(self, _name: str) -> None:
         raise RuleSnapshotError("TrustedPolicySnapshot es inmutable")
+
+    def __reduce__(self) -> tuple:
+        raise RuleSnapshotError("TrustedPolicySnapshot no se serializa")
 
 
 def _clasificar(entradas) -> list:
@@ -168,6 +201,18 @@ def _clasificar(entradas) -> list:
                 f"{entrada.ruta}: nombre o ruta no canonica para regla (nested/mayusculas/cola)")
         if parece_regla:
             candidatos.append(entrada)
+            continue
+        # Lo que no es regla solo puede ser infraestructura conocida del
+        # directorio: README.md o schemas/<nombre>.json|.md. Cualquier otra cosa
+        # —sin extension, punto de ancho completo, cirilicos, colas— niega el
+        # snapshot: aqui no se ignora nada en silencio (§6.5).
+        _RE_INFRAESTRUCTURA = re.compile(r"[a-z][a-z0-9.-]{0,63}\.(json|md)\Z")
+        if nombre == "README.md" or (nombre.startswith("schemas/")
+                                     and nombre.count("/") == 1
+                                     and _RE_INFRAESTRUCTURA.fullmatch(nombre[8:])):
+            continue
+        raise RuleSnapshotError(
+            f"{entrada.ruta}: archivo no regla y no infraestructura conocida (§6.5: nada en silencio)")
     return candidatos
 
 
@@ -200,9 +245,11 @@ def load_trusted_policy_snapshot(repo: Path, pin: TrustedPolicyPin) -> TrustedPo
         raise RuleSnapshotError(str(exc)) from exc
     candidatos = _clasificar(entradas)
 
-    # (5) TODOS los blobs antes de validar uno (leer_blobs impone tope de tamano).
+    # (5) TODOS los blobs antes de validar uno; el snapshot impone su tope de
+    # tamano (opt-in de M-6: el paquete del Faro lee blobs grandes legitimamente).
     try:
-        blobs = leer_blobs(repo, [e.oid for e in candidatos])
+        blobs = leer_blobs(repo, [e.oid for e in candidatos],
+                           max_bytes=MAX_BLOB_BYTES)
     except FuenteInvalida as exc:
         raise RuleSnapshotError(str(exc)) from exc
 

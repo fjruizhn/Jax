@@ -187,3 +187,136 @@ def test_ataque_j_objeto_suelto_adulterado_niega(tmp_path: Path) -> None:
     assert "OID" in str(excinfo.value)
     # y el sha1 del contenido adulterado NO es el oid bajo el que se coló
     assert hashlib.sha1(b"blob %d\0" % len(otro) + otro).hexdigest() != oid
+
+
+# ------------------------------------------------- ronda 3: ataques r2 del auditor
+
+RECURSOS_PROHIBIDOS_R2 = [
+    "subprocess.spawn", "parallel.calls", "concurrent.requests", "multithread.jobs",
+    "sockets.abiertos", "conns.db", "tasks.systemd", "subagentes",
+    "multiagente.lanzados", "pids", "jobs.cola", "fork.hijos",
+    "sesiones.mcp", "subprocesos",
+]
+
+
+@pytest.mark.parametrize("clase,recurso", [
+    ("actos_externos", "subprocess.spawn"), ("actos_externos", "parallel.calls"),
+    ("frecuencia", "concurrent.requests"), ("actos_externos", "multithread.jobs"),
+    ("actos_externos", "sockets.abiertos"), ("actos_externos", "conns.db"),
+    ("frecuencia", "tasks.systemd"), ("actos_externos", "subagentes"),
+    ("actos_externos", "multiagente.lanzados"), ("duracion", "pids"),
+    ("actos_externos", "jobs.cola"), ("tokens_costo", "fork.hijos"),
+    ("actos_externos", "sesiones.mcp"), ("actos_externos", "subprocesos"),
+])
+def test_r2_recurso_fabricado_o_trasladado_niega_en_schema(clase: str, recurso: str) -> None:
+    datos = dict(load_strict_yaml(TOPE))
+    datos["tope"] = {"resource_class": clase, "resource": recurso, "maximum": 2, "period": "hora"}
+    with pytest.raises(RuleSchemaError):
+        validar_regla(datos)
+
+
+@pytest.mark.parametrize("recurso", RECURSOS_PROHIBIDOS_R2)
+def test_r2_recurso_fabricado_niega_en_runtime(recurso: str) -> None:
+    from jax.faro.catalogo_topes import es_recurso_de_catalogo
+    from jax.faro.topes import es_recurso_sin_tope
+    assert not es_recurso_de_catalogo(recurso)
+    assert es_recurso_sin_tope(recurso)          # el runtime los deja sin tope (TopeProhibido)
+
+
+def test_r2_el_catalogo_es_identico_en_json_python_y_runtime() -> None:
+    import json
+    from jax.faro.catalogo_topes import CATALOGO_TOPES, es_recurso_de_catalogo, recursos_del_catalogo
+    espejo = json.loads((Path(__file__).resolve().parents[2] / "policy" / "faro"
+                         / "schemas" / "rule-v1.schema.json").read_text())
+    enum_json = espejo["properties"]["tope"]["properties"]["resource"]["enum"]
+    assert sorted(enum_json) == sorted(recursos_del_catalogo())
+    for recurso in recursos_del_catalogo():
+        assert es_recurso_de_catalogo(recurso)
+    for clase in CATALOGO_TOPES:
+        for subid in CATALOGO_TOPES[clase]:
+            assert es_recurso_de_catalogo(f"{clase}.{subid}")
+
+
+def test_r2_copias_y_pickle_no_fabrican(tmp_path: Path) -> None:
+    import copy
+    import pickle
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
+    snap = _cargar(repo, commit, arbol)
+    for operacion in (lambda: copy.copy(snap), lambda: copy.deepcopy(snap),
+                      lambda: pickle.loads(pickle.dumps(snap)),
+                      lambda: copy.copy(snap.reglas[0]),
+                      lambda: pickle.loads(pickle.dumps(snap.reglas[0]))):
+        with pytest.raises(RuleSnapshotError):
+            operacion()
+
+
+def test_r2_el_testigo_no_se_puede_leer_de_la_instancia(tmp_path: Path) -> None:
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
+    snap = _cargar(repo, commit, arbol)
+    with pytest.raises(AttributeError):
+        _ = snap.reglas[0]._testigo
+    with pytest.raises(AttributeError):
+        _ = snap._testigo
+
+
+def test_r2_igualdad_por_valor_entre_recargas(tmp_path: Path) -> None:
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
+    a = _cargar(repo, commit, arbol)
+    b = _cargar(repo, commit, arbol)
+    assert a == b and hash(a) == hash(b)
+    assert a.reglas[0] == b.reglas[0] and hash(a.reglas[0]) == hash(b.reglas[0])
+
+
+def test_r2_pin_en_mayusculas_niega(tmp_path: Path) -> None:
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
+    with pytest.raises(RuleSnapshotError):
+        TrustedPolicyPin("jax", commit.upper(), arbol, "p")
+
+
+def test_r2_commit_distinto_con_mismo_arbol_policy_carga_ese_commit(tmp_path: Path) -> None:
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
+    (repo / "otro.txt").write_text("x")          # fuera de policy/: el arbol policy no cambia
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "y")
+    c2 = _git(repo, "rev-parse", "HEAD")
+    snap = _cargar(repo, c2, arbol)
+    assert snap.commit == c2 and len(snap.reglas) == 1
+
+
+@pytest.mark.parametrize("nombre", ["ejemplo．yaml", "ejemplo.yaml ", "ejemplo", "ejemplo.yаml"])
+def test_r2_nombres_que_esquivan_la_vista_niegan(tmp_path: Path, nombre: str) -> None:
+    repo = tmp_path / "r"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "policy" / "faro").mkdir(parents=True)
+    (repo / "policy" / "faro" / nombre).write_bytes(REGLA)
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x")
+    with pytest.raises(RuleSnapshotError):
+        _cargar(repo, _git(repo, "rev-parse", "HEAD"), _git(repo, "rev-parse", "HEAD:policy"))
+
+
+def test_r3_blob_gigante_con_nombre_de_regla_niega(tmp_path: Path) -> None:
+    gigante = b"# relleno\n" * (1024 * 1024 // 10 + 1)     # > 1 MiB, nombre canonico
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/grande.yaml": gigante})
+    with pytest.raises(RuleSnapshotError) as excinfo:
+        _cargar(repo, commit, arbol)
+    assert "excede" in str(excinfo.value)
+
+
+def test_r3_las_dos_listas_de_identity_foundation_son_iguales() -> None:
+    """La lista vive dos veces en policy.yml (paso principal y paso del piso):
+    si divergen, el piso mide otra cosa que la que corre. Un solo archivo."""
+    import re as _re
+    import yaml as _yaml
+    flujo = _yaml.safe_load((Path(__file__).resolve().parents[2] / ".github" / "workflows"
+                             / "policy.yml").read_text())
+    listas = []
+    for job in flujo["jobs"].values():
+        for paso in job.get("steps", []):
+            run = paso.get("run", "")
+            if "identity-foundation-shadow-pytest" in str(run) or \
+               ("identity-foundation-shadow/policy" in str(run) and "tee" in str(run)):
+                listas.append(sorted(_re.findall(r"(?:tests/policy|policy/enforcement_evidence)/[a-z_0-9]+\.py", run)))
+    assert len(listas) == 2, f"se esperaban exactamente 2 pasos con la lista, hay {len(listas)}"
+    assert listas[0] == listas[1], "las dos listas de Identity Foundation divergen"

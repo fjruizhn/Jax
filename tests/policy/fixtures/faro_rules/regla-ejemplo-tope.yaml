@@ -25,6 +25,6 @@ permit:
 
 tope:
   resource_class: actos_externos
-  resource: mensajes.externos
+  resource: actos_externos.mensajes
   maximum: 8
   period: hora
