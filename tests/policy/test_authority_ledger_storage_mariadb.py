@@ -23,7 +23,6 @@ from policy.authority_ledger.canonical import canonical_bytes
 from policy.authority_ledger.models import (
     AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
     OverlayPayload, OverlayScope, OverlayType, RuleRatificationGrantPayload,
-    _RULE_RATIFICATION_SNAPSHOT_SEAL,
 )
 from policy.authority_ledger.replay import event_hash, genesis_hash, verify_authority_ledger
 from policy.authority_ledger.service import append_authority_event, ratification_intent_from_candidate
@@ -207,11 +206,7 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                 AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
                 AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=overlay),
                 AuthorityEventIntent(AuthorityEventType.OVERLAY_REVOKED, "human:fernando", overlay_id="test-exception"),
-                AuthorityEventIntent(
-                    AuthorityEventType.RULE_RATIFICATION_GRANTED,
-                    "human:fernando", rule_ratification=grant,
-                    _rule_ratification_snapshot_seal=_RULE_RATIFICATION_SNAPSHOT_SEAL,
-                ),
+                AuthorityEventIntent._rule_grant_from_sealed_snapshot(grant),
                 AuthorityEventIntent(
                     AuthorityEventType.RULE_RATIFICATION_REVOKED, "human:fernando",
                     rule_ratification_event_id="018cc251-f400-7000-8000-000000000007",

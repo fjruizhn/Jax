@@ -30,10 +30,15 @@ class AlwaysEqual:
         return True
 
 
-def test_ratification_model_rejects_equal_but_unsealed_snapshot():
+def test_ratification_seal_is_not_constructor_reachable():
     corpus_hash = "sha256:" + "f" * 64
 
-    with pytest.raises(AuthorityEventValidationError, match="snapshot sellado"):
+    # El sello es init=False: el constructor no lo acepta (ni un AlwaysEqual
+    # que engañaría a un __eq__), y dataclasses.replace no lo transporta.
+    # Sin sello el intent se construye, pero la frontera que firma lo rechaza
+    # (test_append_rejects_equal_but_unsealed_ratification_intent y los
+    # ataques de test_authority_ledger_seal_attacks.py).
+    with pytest.raises(TypeError):
         AuthorityEventIntent(
             AuthorityEventType.RATIFICATION_GRANTED,
             "human:fernando",

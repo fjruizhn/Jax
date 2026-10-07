@@ -29,8 +29,13 @@ def _active():
 
 
 def test_audit_001_unsealed_hash_snapshot_pair_rejected():
-    with pytest.raises(AuthorityEventValidationError):
-        AuthorityEventIntent(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", (), "sha256:" + "f" * 64, {"policy_corpus_hash": "sha256:" + "f" * 64})
+    # Desde que el sello es init=False, el par sin sellar se construye pero no
+    # llega al ledger: la frontera que firma lo rechaza y no escribe nada.
+    store, root, key = setup_ledger()
+    unsealed = AuthorityEventIntent(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", (), "sha256:" + "f" * 64, {"policy_corpus_hash": "sha256:" + "f" * 64})
+    with pytest.raises(AuthorityStateError, match="snapshot sellado"):
+        append_authority_event(store, root, key, unsealed)
+    assert store.events() == ()
 
 
 def test_audit_002_replay_state_is_deeply_sealed():
