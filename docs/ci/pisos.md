@@ -908,6 +908,16 @@ matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
 sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
 piso se vuelve a fijar desde los **3537 de master**.
 
+3888 -> 3892 (2026-10-07, higiene de CI, rama propia sobre master 83f8f56b): +4 de
+`tests/test_higiene_tmp.py`, archivo nuevo: el contador de /tmp — el conftest raíz fotografía
+/tmp al importar y `pytest_sessionfinish` pone la corrida en roja si queda un temporal propio
+sin borrar; además borra los seis `jax-test-*` de aislamiento del conftest, que antes quedaban
+en /tmp por cada corrida. El archivo entra a la lista del paso a propósito: el contador solo ve
+lo que la MISMA sesión de pytest deja (una sesión suelta solo se vigilaría a sí misma). Medido
+por recolección (`pytest --collect-only -q`, PYTHONPATH=.:las_manos, SIN `JAX_DB_HOST`) con la
+lista exacta de 196 archivos: 3938 recolectadas = 3892 passed + 45 skipped + 1 xfailed. A
+confirmar en el runner.
+
 3876 -> 3888 (2026-10-06, JAX#357 ronda 15): +12 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
 (de 307 a 319): prueba diferencial de que `_hallazgos_de_cadenas_de_master` cuenta exactamente lo que
 master saca de cadenas (7 fixtures, incluidas F1-F3 del auditor), las fixtures de lista sin exencion
@@ -4620,6 +4630,18 @@ base solo expone socket Unix al proceso de prueba. Tres pruebas nuevas, cada una
 efímera: el provisioning revoca los privilegios previos (`REVOKE ALL PRIVILEGES, GRANT OPTION`) y
 `SHOW GRANTS` coincide exacto con el contrato; la migración 002 falla cerrada con filas NULL aun con
 `sql_mode=''` (la fila queda intacta) y pasa con cero NULL.
+
+Readiness de la efímera: el fallo del marcador «init process done» (documentado 2026-10-07, higiene
+de CI). El entrypoint de la imagen `mariadb` arranca un servidor TEMPORAL —con su socket Unix— para
+inicializar el directorio de datos, lo apaga y recién entonces levanta el real. La espera vieja
+("ya hay socket en `/run/mysqld/mysqld.sock`, luego ya puedo conectar") le daba al servidor temporal:
+la conexión se establecía, el temporal moría y la prueba caía con `pymysql` 2003 (`MySQL server has
+gone away`), intermitente según la velocidad del host. La corrección espera primero el marcador
+`init process done` en los logs del contenedor y recién después sondea con `SELECT 1` por el socket,
+con tope de 60 s y los `docker logs` en el mensaje de error, sin `sleep` fijo. El helper
+(`_wait_until_ready`, aplicado a las 4 pruebas del archivo) vive en #371 (d4ffe62f, pendiente de
+entrar a master cuando se escribió esto): no se duplica aquí — si este job lo necesita antes de que
+#371 entre, se toma tal cual de ese SHA.
 
 ## `authority-rule-events/ratifications`
 

@@ -44,15 +44,15 @@ def _as_foreign_identity(root: Path, env: dict[str, str]) -> subprocess.Complete
 def foreign_owned_repo():
     # A world-searchable temporary parent lets nobody inspect files while the
     # repository itself remains owned by the test runner, a different UID.
-    base = Path(tempfile.mkdtemp(prefix="jaxqwen-git-trust-", dir="/tmp"))
-    base.chmod(0o755)
-    repo = base / "authorized"
-    repo.mkdir(mode=0o755)
-    _repo(repo)
-    try:
+    # TemporaryDirectory guarantees cleanup on exit and surfaces a failed
+    # removal as a teardown error instead of leaving an orphan behind.
+    with tempfile.TemporaryDirectory(prefix="jaxqwen-git-trust-", dir="/tmp") as raw:
+        base = Path(raw)
+        base.chmod(0o755)
+        repo = base / "authorized"
+        repo.mkdir(mode=0o755)
+        _repo(repo)
         yield repo, base
-    finally:
-        shutil.rmtree(base, ignore_errors=True)
 
 
 def test_real_dubious_ownership_failure_without_exception(foreign_owned_repo):

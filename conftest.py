@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -52,7 +53,68 @@ RESPALDO_DE_PRODUCCION = Path("/srv/jax-data/usage-spool")
 #: freno siempre rojo se termina ignorando.
 INICIO_DE_SESION = time.time()
 
-os.environ["JAX_USAGE_SPOOL_DIR"] = tempfile.mkdtemp(prefix="jax-test-respaldo-uso-")
+#: Higiene de /tmp (2026-10-07, encargo de Hyde): los seis directorios de
+#: aislamiento que crea este conftest (respaldo de uso, repo base, audit log,
+#: facet seal, interruptor, workspace) vivían para siempre en /tmp del runner
+#: -- uno por corrida de suite. `_temporal_de_sesion` los registra y
+#: `pytest_sessionfinish` los borra antes del contador de abajo: un freno que
+#: ensucia justo lo que vigila no valida nada.
+_TEMPORALES_DE_SESION: list[str] = []
+
+
+def _temporal_de_sesion(prefix: str) -> str:
+    """Un mkdtemp que ESTA sesión se lleva puesto al salir."""
+    ruta = tempfile.mkdtemp(prefix=prefix)
+    _TEMPORALES_DE_SESION.append(ruta)
+    return ruta
+
+
+#: Prefijos que la suite crea directamente en la raíz de /tmp. El contador de
+#: `pytest_sessionfinish` sólo vigila éstos: /tmp es compartido con todo el
+#: host (otras sesiones, docker, el SO) y un contador sin filtro daría roja
+#: por ruido ajeno. `tests/test_higiene_tmp.py` ejercita el detector Y vigila
+#: que cada `mkdtemp`/`mkstemp`/`TemporaryDirectory` nuevo de tests/ esté
+#: cubierto por esta lista.
+PREFIJOS_TMP_PROPIOS = (
+    "faro-real-",
+    "jaxqwen-git-trust-",
+    "jaxqwen-git-link-",
+    "jax-dispatch-git-trust-",
+    "permisos-nucleo-",
+    "permisos-arbol-",
+    "respaldos-prueba-",
+    "intruso-",
+    "jax-test-",
+    "jax-tripwire-",
+    "jax-ledger-socket-",
+    "lv001b-faro-",
+)
+
+#: La foto de /tmp al importar este conftest (antes de cualquier test). Se
+#: cuentan los DOS directorios: `gettempdir()` (a donde van los mkdtemp sin
+#: `dir=`, que con TMPDIR apuntando a otro lado no es /tmp) y "/tmp" literal
+#: (a donde van los que declaran `dir="/tmp"` porque otro uid tiene que poder
+#: atravesarlos).
+_DIRECTORIOS_DE_CONTEO = sorted({str(Path(tempfile.gettempdir())), "/tmp"})
+
+ENTRADAS_TMP_AL_INICIO = frozenset(
+    entrada
+    for directorio in _DIRECTORIOS_DE_CONTEO
+    for entrada in os.listdir(directorio)
+)
+
+
+def fugaces_de_tmp(antes: frozenset[str], ahora: list[str]) -> list[str]:
+    """Entradas NUEVAS en la raíz de /tmp respecto de la foto `antes` cuyo
+    nombre lleva un prefijo de la suite: los temporales que algún mkdtemp/
+    mkstemp/TemporaryDirectory de tests/ dejó sin borrar."""
+    return sorted(
+        nombre for nombre in set(ahora) - set(antes)
+        if nombre.startswith(PREFIJOS_TMP_PROPIOS)
+    )
+
+
+os.environ["JAX_USAGE_SPOOL_DIR"] = _temporal_de_sesion("jax-test-respaldo-uso-")
 
 #: E-21 (2026-09-16): jacobs/plan.py y executor.py leen JAX_OLLAMA_URL al
 #: importarse y NO arrancan sin ella (fail-closed). Desde el cierre de #362
@@ -79,7 +141,7 @@ os.environ["JAX_LAS_MANOS_CREDENCIAL_JACOBS"] = _secrets.token_urlsafe(32)
 #: $JAX_REPO_BASE/documents. En producción es /home/fruiz/jax/repo, que el
 #: admin de jax-platform lista. Un test que ejercite _persist_step_to_repo no
 #: puede dejar ahí un documento de mentira: mismo criterio que el respaldo de uso.
-os.environ["JAX_REPO_BASE"] = tempfile.mkdtemp(prefix="jax-test-repo-")
+os.environ["JAX_REPO_BASE"] = _temporal_de_sesion("jax-test-repo-")
 
 #: 2026-09-18 (detector de cobertura, hallazgo real: FileNotFoundError/
 #: PermissionError en las_manos/motor_registry/_authorize_facet_endpoint_test.py
@@ -95,7 +157,7 @@ os.environ["JAX_REPO_BASE"] = tempfile.mkdtemp(prefix="jax-test-repo-")
 #: (ver _audit_init_a) -- eso sigue funcionando, esto lo cierra para TODO el
 #: resto de la suite, no solo para ese test.
 os.environ["JAX_AUDIT_LOG_PATH"] = os.path.join(
-    tempfile.mkdtemp(prefix="jax-test-audit-log-"), "audit.jsonl")
+    _temporal_de_sesion("jax-test-audit-log-"), "audit.jsonl")
 
 #: 2026-09-17: `jax/core/facet_resolver.py` y `las_manos/facet_resolver.py`
 #: leen JAX_FACET_SEAL_PATH al importarse, con default
@@ -109,14 +171,14 @@ os.environ["JAX_AUDIT_LOG_PATH"] = os.path.join(
 #: respetaría; el conftest tiene que pisarlo igual.
 #: tests/test_conftest_aisla_facet_seal.py lo vigila.
 os.environ["JAX_FACET_SEAL_PATH"] = os.path.join(
-    tempfile.mkdtemp(prefix="jax-test-facet-seal-"), "facet-cache-seal"
+    _temporal_de_sesion("jax-test-facet-seal-"), "facet-cache-seal"
 )
 # El kill switch, aislado por la misma razón (2026-09-16, frente B). Desde
 # ese día la ruta del freno sale de JAX_KILL_SWITCH_PATH y /etc/jax/.env la
 # define: un test que pusiera el freno sin esto detendría a JAX en producción.
 # Asignación y no setdefault, a propósito.
 os.environ["JAX_KILL_SWITCH_PATH"] = os.path.join(
-    tempfile.mkdtemp(prefix="jax-test-interruptor-"), "PAUSE")
+    _temporal_de_sesion("jax-test-interruptor-"), "PAUSE")
 
 #: 2026-10-03: JAX_WORKSPACE_DIR no tiene valor por defecto (falla cerrado:
 #: jax/core/workspace_dir.py). tool_authority.py y jacobs/executor.py la leen al
@@ -125,7 +187,7 @@ os.environ["JAX_KILL_SWITCH_PATH"] = os.path.join(
 #: `setdefault`, como las demas: un .env de produccion sourceado antes de pytest
 #: no puede apuntar la suite al workspace vivo. Un test que necesite otra raiz
 #: sigue usando `monkeypatch.setenv`. tests/test_workspace_dir.py lo vigila.
-os.environ["JAX_WORKSPACE_DIR"] = tempfile.mkdtemp(prefix="jax-test-workspace-")
+os.environ["JAX_WORKSPACE_DIR"] = _temporal_de_sesion("jax-test-workspace-")
 
 #: La base de tests de ESTA sesión (decisión de Fernando, 2026-09-17).
 #: Tres sesiones de Claude compartían `jax_memory_test` y se pisaban de
@@ -299,12 +361,48 @@ def cambios_del_freno_de_produccion(
     )
 
 
+def _higiene_de_tmp_al_terminar(session) -> None:
+    """Borra los temporales de aislamiento de ESTA sesión y corre el contador
+    de /tmp: un temporal propio que quedó sin borrar (fallo invisible de un
+    `rmtree(ignore_errors=True)`, guión embebido muerto a medias, fixture sin
+    teardown) pone la corrida en roja. Orden: primero borrar los registrados,
+    después contar -- así el contador no ve lo que sí se limpió.
+
+    Matiz del host compartido: si otra sesión corre SU suite a la vez en la
+    misma máquina, sus temporales propios aparecen como "nuevos" aquí y ésta
+    da roja por basura ajena. En el runner de CI no hay sesiones solapadas;
+    local, una roja de este freno se lee sabiendo quién más corría."""
+    sin_borrar = []
+    for ruta in _TEMPORALES_DE_SESION:
+        try:
+            shutil.rmtree(ruta)
+        except OSError as e:
+            sin_borrar.append(f"{ruta} ({e})")
+    ahora = [
+        entrada
+        for directorio in _DIRECTORIOS_DE_CONTEO
+        for entrada in os.listdir(directorio)
+    ]
+    fugaces = fugaces_de_tmp(ENTRADAS_TMP_AL_INICIO, ahora)
+    if sin_borrar or fugaces:
+        print(
+            f"\nHIGIENE DE /tmp: la suite dejó temporales sin borrar.\n"
+            f"  sin poder borrar: {sin_borrar}\n"
+            f"  huerfanos con prefijo propio: {fugaces}\n"
+            f"  (un mkdtemp/mkstemp/TemporaryDirectory de tests/ cuyo cleanup no corrió;"
+            f" ver tests/test_higiene_tmp.py)",
+            file=sys.stderr,
+        )
+        session.exitstatus = 1
+
+
 def pytest_sessionfinish(session, exitstatus):
     """El chequeo que NO depende del orden de colección.
 
     Un test que mira el directorio de producción sólo ve lo escrito por los
     tests que corrieron ANTES que él. Acá ya corrieron todos.
     """
+    _higiene_de_tmp_al_terminar(session)
     nuevos = archivos_nuevos_en(RESPALDO_DE_PRODUCCION, INICIO_DE_SESION)
     if nuevos:
         print(

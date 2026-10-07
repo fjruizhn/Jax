@@ -122,8 +122,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 15 tests CORRIDOS de F2-E structured projection."
     },
     "tests-puros/out": {
-      "patron": "^3888 passed, 45 skipped",
-      "mensaje": "PISO ROTO: se esperaban 3888 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Re-medido el 2026-10-06 (ronda 15 de JAX#357) sobre la MEZCLA de la rama con origin/master (36dafaa2) por recoleccion con la lista exacta de 195 archivos del paso 'Piso exacto', sin JAX_DB_HOST: 3934 recolectadas = 3888 passed + 45 skipped + 1 xfailed (3841 de la rama + 35 de #362 + 12 de la ronda 15), a confirmar en el runner; 435d1ede recolecta 3814 con la misma lista."
+      "patron": "^3892 passed, 45 skipped",
+      "mensaje": "PISO ROTO: se esperaban 3892 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Re-medido el 2026-10-07 (higiene de CI, rama propia sobre master 83f8f56b) por recoleccion con la lista exacta de 196 archivos del paso 'Piso exacto', sin JAX_DB_HOST: 3938 recolectadas = 3892 passed + 45 skipped + 1 xfailed (+4 de tests/test_higiene_tmp.py, nuevo: el contador de /tmp del conftest raiz, que ademas borra los seis jax-test-* de aislamiento), a confirmar en el runner. Antes (2026-10-06, ronda 15 de JAX#357, mezcla con origin/master 36dafaa2): 3934 recolectadas = 3888 passed + 45 skipped + 1 xfailed (3841 de la rama + 35 de #362 + 12 de la ronda 15), con lista de 195 archivos; 435d1ede recolectaba 3814."
     },
     "tests-puros/arranque_instalado": {
       "patron": "^46 passed, 9 skipped",
