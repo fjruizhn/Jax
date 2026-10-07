@@ -529,160 +529,197 @@ def test_minor3_un_resumen_fallido_se_cuenta_como_clase_resumen(tmp_path):
     assert av.fallidos_por_clase.get("resumen", 0) >= 1
 
 
+
 # --------------------------------------------------------------------------- #
 # F1.1 paso 8 r2: el aviso de la decision del kernel de reglas (§11, #371)    #
 #                                                                             #
 # El aviso NO es parte de la autoridad: el kernel decide y persiste, y ESTO   #
-# corre despues. Contrato r2 contra el RuleDecision REAL de #371 (status,     #
-# required_rule_id, reason_code, request_hash, decided_at_utc). Todo lo de    #
-# aca es fail-soft y sin red (el envio va con un doble); la unica "red" es    #
-# la de siempre: nunca la de verdad.                                          #
+# corre despues. Contrato contra el RuleDecision REAL de #371 (instancias     #
+# reales, no un doble). Todo fail-soft y sin red: el envio va con un doble.   #
 # --------------------------------------------------------------------------- #
 
 import ast
-import dataclasses
-import json as _json
-import pathlib
-import subprocess
-import sys
-import types
-from datetime import datetime, timezone
-
 import builtins
 import collections
-import time as _time
+import io
+import json as _json
+import pathlib
+import pkgutil
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
 
-from jax.faro.aviso import (AvisoRegla, RuleDecisionStatus, _MAX_TEXTO,
-                            acumular_para_resumen, aviso_de_decision,
+import policy.rule_authority as _rule_authority
+from policy.rule_authority.models import RuleDecision, RuleDecisionStatus
+
+from jax.faro.aviso import (_MAX_TEXTO, AvisoRegla, acumular_para_resumen, aviso_de_decision,
                             emitir_aviso_inmediato, resumen_diario)
 
-DENY = "DENY"
-MISSING_RULE = "MISSING_RULE"
-PERMIT = "PERMIT"
-
 HASH_OK = "sha256:" + "a1b2c3d4e5f67890deadbeeffeedface00112233445566778899aabbccddeeff"
+RAIZ = pathlib.Path(__file__).resolve().parents[1]
+_RAZON_DE = {RuleDecisionStatus.DENY: "RULE_EXPIRED", RuleDecisionStatus.MISSING_RULE: "RULE_NOT_FOUND",
+             RuleDecisionStatus.PERMIT: None}
 
 
-@dataclasses.dataclass(frozen=True)
-class _Decision:
-    """Fiel al RuleDecision de #371 (31eb14bf): SUS seis campos, nada mas."""
-    request_id: str
-    request_hash: str
-    status: str
-    required_rule_id: str
-    reason_code: str | None
-    decided_at_utc: datetime
+def _decision(status=RuleDecisionStatus.DENY, regla="RL-para-gastar-dinero", cuando=None, **extra) -> RuleDecision:
+    """Un RuleDecision REAL de #371 (pasa su validacion). `extra` cuelga atributos
+    AJENOS al contrato (subject, arguments...) para probar que no viajan."""
+    d = RuleDecision(request_id="018f3b2a-9c1d-7abc-9ef0-1234567890ab", request_hash=HASH_OK, status=status,
+                     required_rule_id=regla, reason_code=_RAZON_DE[status],
+                     decided_at_utc=cuando or datetime(2026, 10, 7, 3, 4, 5, tzinfo=timezone.utc))
+    for k, v in extra.items():
+        object.__setattr__(d, k, v)
+    return d
 
 
-def _decision(status=DENY, regla="RL-para-gastar-dinero", razon="RULE_EXPIRED",
-              cuando=None, hash_=HASH_OK, **extra):
-    """Una decision del contrato; `extra` cuelga atributos EXTRA (subject,
-    arguments...) para probar que no viajan: al alcance del getattr."""
-    base = dict(request_id="018f3b2a-9c1d-7abc-def0-1234567890ab", request_hash=hash_,
-                status=status, required_rule_id=regla, reason_code=razon,
-                decided_at_utc=cuando or datetime(2026, 10, 7, 3, 4, 5, tzinfo=timezone.utc))
-    base.update(extra)
-    return types.SimpleNamespace(**base)
+def _forzar(decision: RuleDecision, **campos) -> RuleDecision:
+    """Salta la validacion de #371 para fabricar la decision CORRUPTA que el aviso tiene que aguantar."""
+    for k, v in campos.items():
+        object.__setattr__(decision, k, v)
+    return decision
 
 
-# El subject y los argumentos de la decision: LO QUE NO PUEDE SALIR (§11).
+# Lo que NO puede salir (§11): subject y argumentos de la decision.
 SECRETOS_DE_LA_DECISION = {
     "subject": "usuario-con-correo@secreto.hn",
-    "arguments": ["sk-SECRETO-DE-PRUEBA-no-sale", "/etc/secreto/llaves.env"],
-    "amount": 987654.32,
+    "arguments": {"clave": "sk-SECRETO-DE-PRUEBA-no-sale", "ruta": "/etc/secreto/llaves.env"},
+    "amount": 987654,
     "contenido": "MENSAJE-SECRETO-DEL-USUARIO",
     "archivo": "/tmp/plan-secreto.md",
 }
-SECRETOS_PLANOS = [s for v in SECRETOS_DE_LA_DECISION.values()
-                   for s in (v if isinstance(v, list) else [str(v)])]
+SECRETOS_PLANOS = ["usuario-con-correo@secreto.hn", "sk-SECRETO-DE-PRUEBA-no-sale", "/etc/secreto/llaves.env",
+                   "987654", "MENSAJE-SECRETO-DEL-USUARIO", "/tmp/plan-secreto.md"]
 
 
-def test_los_tres_status_generan_aviso_inmediato_con_los_nombres_de_371():
-    deny = aviso_de_decision(_decision(status=DENY), host="hall9000")
-    assert deny.inmediato is True and "REGLA DENEGADA" in deny.texto
-    missing = aviso_de_decision(_decision(status=MISSING_RULE, razon="RULE_NOT_FOUND"), host="hall9000")
-    assert missing.inmediato is True and "SIN REGLA QUE CUBRA EL ACTO" in missing.texto
-    permit = aviso_de_decision(_decision(status=PERMIT, razon=None), host="hall9000")
-    # el contrato real no trae la clase del acto: no se puede EXCLUIR que obligue
-    assert permit.inmediato is True and "SI HAY DUDA, OBLIGA" in permit.texto
+def test_los_tres_status_reales_de_371_se_avisan_al_instante_con_su_titulo():
+    for status, titulo in ((RuleDecisionStatus.DENY, "REGLA DENEGADA"),
+                           (RuleDecisionStatus.MISSING_RULE, "SIN REGLA QUE CUBRA EL ACTO"),
+                           (RuleDecisionStatus.PERMIT, "PERMISO (OBLIGA O NO SE PUDO DESCARTAR QUE OBLIGUE)")):
+        av = aviso_de_decision(_decision(status), host="hall9000")
+        assert av.inmediato is True, status
+        assert titulo in av.texto, status
 
 
-def test_el_texto_lleva_regla_razon_hash_y_la_hora_utc_de_la_decision():
+def test_un_permiso_se_difiere_solo_si_el_llamador_dice_que_no_obliga():
+    """Mutante d: un PERMIT NO obligante no puede salir como inmediato. Si hay duda (obliga ausente
+    o que no es un bool), obliga."""
+    permit = _decision(RuleDecisionStatus.PERMIT)
+    assert aviso_de_decision(permit, host="h", obliga=False).inmediato is False
+    assert aviso_de_decision(permit, host="h", obliga=True).inmediato is True
+    assert aviso_de_decision(permit, host="h").inmediato is True
+    assert aviso_de_decision(permit, host="h", obliga="no").inmediato is True
+    assert aviso_de_decision(permit, host="h", obliga=0).inmediato is True
+    # una negativa nunca se difiere, diga lo que diga `obliga`
+    assert aviso_de_decision(_decision(RuleDecisionStatus.DENY), host="h", obliga=False).inmediato is True
+    assert aviso_de_decision(_decision(RuleDecisionStatus.MISSING_RULE), host="h", obliga=False).inmediato is True
+
+
+def test_el_texto_lleva_regla_razon_hash_de_12_hex_y_la_hora_utc_de_la_decision():
     cuando = datetime(2026, 10, 7, 3, 4, 5, tzinfo=timezone.utc)
-    av = aviso_de_decision(_decision(status=DENY, cuando=cuando), host="hall9000")
+    av = aviso_de_decision(_decision(cuando=cuando), host="hall9000")
     lineas = av.texto.splitlines()
-    assert len(lineas) == 2                                   # ni una linea fabricada
-    assert "regla=RL-para-gastar-dinero" in lineas[1]          # SUS nombres: required_rule_id
+    assert len(lineas) == 2                                    # ni una linea fabricada
+    assert "regla=RL-para-gastar-dinero" in lineas[1]
     assert "razon=RULE_EXPIRED" in lineas[1]
-    assert "req=sha256:a1b2c3d4e5f6" in lineas[1]              # sha256: + 12 hex del digest
-    assert f"a={cuando.isoformat(timespec='seconds')}" in lineas[1]   # la hora de la DECISION
-    assert av.creado_utc == cuando.isoformat(timespec="seconds")
-    assert av.creado_utc.endswith("+00:00")                    # UTC, no hora local
+    assert "req=sha256:a1b2c3d4e5f6 " in lineas[1]             # sha256: + EXACTAMENTE 12 hex (no 5)
+    assert f"a={cuando.isoformat(timespec='seconds')}" in lineas[1]
+    assert av.creado_utc == "2026-10-07T03:04:05+00:00"
+    assert av.clase == "DENY|RULE_EXPIRED|RL-para-gastar-dinero"   # la clase de tasa incluye la REGLA
 
 
-def test_una_decision_desconocida_es_aviso_inmediato_no_reconocible_sin_secretos():
-    """BLOCK-2: nunca None silencioso. El aviso nombra la decision por su
-    CLASE y nada mas -- el repr de un objeto cualquiera puede traer secretos."""
-    rara = _decision(status="TAL_VEZ", **SECRETOS_DE_LA_DECISION)
-    av = aviso_de_decision(rara, host="hall9000")
-    assert av is not None and av.inmediato is True
-    assert "DECISION NO RECONOCIBLE" in av.texto
-    assert "SimpleNamespace" in av.texto
-    for secreto in SECRETOS_PLANOS:
-        assert secreto not in av.texto, f"el aviso de lo no reconocible filtro {secreto!r}"
+@pytest.mark.parametrize("campo", ["subject", "arguments", "amount", "contenido", "archivo"])
+def test_el_texto_no_filtra_subject_ni_argumentos_ni_montos_ni_contenido(campo):
+    """Mutantes b (arguments) y g (subject): cada secreto, colgado de una decision VALIDA, uno por uno."""
+    for status in RuleDecisionStatus:
+        av = aviso_de_decision(_decision(status, **{campo: SECRETOS_DE_LA_DECISION[campo]}), host="hall9000")
+        for secreto in SECRETOS_PLANOS:
+            assert secreto not in av.texto, f"{status}: el aviso filtro {secreto!r} ({campo})"
+        assert av.inmediato is True
 
 
-def test_un_status_ausente_o_un_hash_ilegible_tambien_cierran_cerrado():
-    sin_status = types.SimpleNamespace(**SECRETOS_DE_LA_DECISION)  # ni status tiene
-    av = aviso_de_decision(sin_status, host="hall9000")
-    assert av.inmediato is True and "DECISION NO RECONOCIBLE" in av.texto
-    con_hash_int = _decision(request_hash=12345)  # MINOR 7: TypeError potencial
-    av2 = aviso_de_decision(con_hash_int, host="hall9000")
-    assert av2.inmediato is True and "DECISION NO RECONOCIBLE" in av2.texto
+def test_una_decision_no_reconocible_es_aviso_inmediato_y_no_filtra_nada():
+    """BLOCK-2: ni None ni raise. Aviso INMEDIATO que nombra la CLASE y nada mas: el repr de un objeto
+    cualquiera puede traer secretos."""
+    import types
+    raras = [
+        types.SimpleNamespace(**SECRETOS_DE_LA_DECISION),                       # sin status: no es el contrato
+        types.SimpleNamespace(decision="DENY", rule_id="RL-1", obliga=False, **SECRETOS_DE_LA_DECISION),
+        None, "DENY", 7, {"status": "DENY", **SECRETOS_DE_LA_DECISION},
+        _forzar(_decision(**SECRETOS_DE_LA_DECISION), status="TAL_VEZ"),        # status que no es del enum
+        _forzar(_decision(**SECRETOS_DE_LA_DECISION), request_hash=12345),      # MINOR 7: tipo raro
+        _forzar(_decision(**SECRETOS_DE_LA_DECISION), request_hash="sha256:abc"),
+        _forzar(_decision(**SECRETOS_DE_LA_DECISION), required_rule_id=None),
+        _forzar(_decision(**SECRETOS_DE_LA_DECISION), decided_at_utc="ayer"),
+    ]
+    for rara in raras:
+        av = aviso_de_decision(rara, host="hall9000", obliga=False)    # obliga=False tampoco lo difiere
+        assert av is not None and av.inmediato is True, rara
+        assert "DECISION NO RECONOCIBLE" in av.texto, rara
+        assert type(rara).__qualname__ in av.texto
+        assert av.creado_utc.endswith("+00:00")
+        for secreto in SECRETOS_PLANOS:
+            assert secreto not in av.texto, f"el aviso de lo no reconocible filtro {secreto!r}"
 
 
-def test_el_texto_no_filtra_argumentos_montos_subject_ni_archivos():
-    """La decision trae subject, arguments, monto, contenido y archivos como
-    ATRIBUTOS REALES de una decision VALIDA: nada de eso viaja (§11, mutante g)."""
-    decision = _decision(status=PERMIT, razon=None, **SECRETOS_DE_LA_DECISION)
-    av = aviso_de_decision(decision, host="hall9000")
-    for secreto in SECRETOS_PLANOS:
-        assert secreto not in av.texto, f"el aviso filtro {secreto!r}"
-    assert av.inmediato is True  # la decision es valida: se avisa, no se calla
+def test_una_decision_que_lanza_al_leerse_tambien_cierra_cerrado():
+    class _Rota(RuleDecision):
+        @property
+        def status(self):
+            raise TypeError("campo ilegible")
+    rota = object.__new__(_Rota)
+    av = aviso_de_decision(rota, host="hall9000")
+    assert av.inmediato is True and "DECISION NO RECONOCIBLE" in av.texto and "_Rota" in av.texto
 
 
-def test_un_required_rule_id_hostil_no_fabrica_lineas():
-    av = aviso_de_decision(_decision(regla="RL-1\ninyectada=SI\rSECRETO"), host="hall9000")
+def test_un_required_rule_id_hostil_no_fabrica_lineas_ni_campos():
+    av = aviso_de_decision(_forzar(_decision(), required_rule_id="RL-1\ninyectada=SI\rSECRETO"), host="hall9000")
     assert len(av.texto.splitlines()) == 2
+    assert "\ninyectada" not in av.texto and "inyectada=SI" not in av.texto
 
 
-def test_emitir_exige_limite_y_ruta_de_cola_sin_defaults():
-    """MINOR 12: un limite que no se pasa no limita nada y una cola que no se
-    pasa pierde lo suprimido -- los dos son obligatorios."""
+def test_las_horas_son_utc_aunque_la_maquina_este_en_otra_zona(monkeypatch, tmp_path):
+    """Mutante l: la hora local desplaza el offset. Se fija una zona (UTC-6) y se mira CADA hora que
+    el modulo escribe: la de la decision, la del no reconocible y la del resumen."""
+    import time as t
+    monkeypatch.setenv("TZ", "XXX6")
+    t.tzset()
+    try:
+        otra_zona = timezone(timedelta(hours=5))
+        av = aviso_de_decision(_decision(cuando=datetime(2026, 10, 7, 8, 4, 5, tzinfo=otra_zona)), host="h")
+        assert av.creado_utc == "2026-10-07T03:04:05+00:00" and "a=2026-10-07T03:04:05+00:00" in av.texto
+        nr = aviso_de_decision(None, host="h")
+        assert nr.creado_utc.endswith("+00:00") and "a=" + nr.creado_utc in nr.texto
+        cola = tmp_path / "cola.jsonl"
+        assert acumular_para_resumen(av, cola) is True
+        cabecera = resumen_diario(cola, host="h")[0].splitlines()[0]
+        assert cabecera.endswith("+00:00"), cabecera
+    finally:
+        monkeypatch.undo()
+        t.tzset()
+
+
+def test_emitir_exige_limite_y_ruta_de_cola_sin_defaults(tmp_path):
+    """MINOR 12: un limite que no se pasa no limita nada y una cola que no se pasa pierde lo suprimido."""
     av = aviso_de_decision(_decision(), host="hall9000")
+    cfg = _cfg(tmp_path)
     with pytest.raises(TypeError):
-        emitir_aviso_inmediato(av, _cfg(tmp_path), CRED, enviar=lambda *a: None,
-                               ruta_cola=tmp_path / "cola.jsonl")
+        emitir_aviso_inmediato(av, cfg, CRED, enviar=lambda *a: None, ruta_cola=tmp_path / "cola.jsonl")
     with pytest.raises(TypeError):
-        emitir_aviso_inmediato(av, _cfg(tmp_path), CRED, enviar=lambda *a: None,
-                               limite=LimiteTasa(5, 10.0))
+        emitir_aviso_inmediato(av, cfg, CRED, enviar=lambda *a: None, limite=LimiteTasa(5, 10.0))
 
 
 def test_emitir_envia_el_texto_y_devuelve_true(tmp_path):
     av = aviso_de_decision(_decision(), host="hall9000")
     mandados = []
-
-    def enviar(cfg, cred, texto):
-        mandados.append(texto)
-
-    limite = LimiteTasa(5, 10.0)
     cola = tmp_path / "cola.jsonl"
-    assert emitir_aviso_inmediato(av, _cfg(tmp_path), CRED, enviar=enviar, limite=limite, ruta_cola=cola) is True
-    assert mandados == [av.texto]
+    ok = emitir_aviso_inmediato(av, _cfg(tmp_path), CRED, enviar=lambda cfg, cred, texto: mandados.append(texto),
+                                limite=LimiteTasa(5, 10.0), ruta_cola=cola)
+    assert ok is True and mandados == [av.texto]
     assert not cola.exists()            # nada suprimido: la cola ni se crea
 
 
 def test_emitir_es_fail_soft_cuando_el_envio_explota(tmp_path, caplog):
+    """Mutante c: un envio que falla no se propaga hacia quien aplico la decision."""
     av = aviso_de_decision(_decision(), host="hall9000")
 
     def explota(cfg, cred, texto):
@@ -696,94 +733,126 @@ def test_emitir_es_fail_soft_cuando_el_envio_explota(tmp_path, caplog):
 
 
 def test_lo_suprimido_por_tasa_va_a_la_cola_con_marca_y_no_tapa_otra_regla(tmp_path):
-    """MAJOR-4: la clase de tasa incluye la REGLA -- una tormenta de RL-A no
-    gasta el cupo de RL-B -- y lo suprimido NO se descarta: va a la cola con
-    suprimido_por_tasa=true."""
+    """MAJOR-4 / mutante j: la clase de tasa incluye la REGLA (la tormenta de RL-A no gasta el cupo de
+    RL-B) y lo suprimido NO se descarta: va a la cola con suprimido_por_tasa=true."""
     cola = tmp_path / "cola.jsonl"
     reloj = [0.0]
     limite = LimiteTasa(2, 1000.0, reloj=lambda: reloj[0])
     envios = []
-
-    def enviar(cfg, cred, texto):
-        envios.append(texto)
-
     cfg = _cfg(tmp_path)
-    deneg_a = aviso_de_decision(_decision(status=DENY, regla="RL-A", razon="RULE_EXPIRED"), host="hall9000")
-    deneg_b = aviso_de_decision(_decision(status=DENY, regla="RL-B", razon="RULE_EXPIRED"), host="hall9000")
 
-    assert emitir_aviso_inmediato(deneg_a, cfg, CRED, enviar=enviar, limite=limite, ruta_cola=cola) is True
-    reloj[0] += 1.0
-    assert emitir_aviso_inmediato(deneg_a, cfg, CRED, enviar=enviar, limite=limite, ruta_cola=cola) is True
-    reloj[0] += 1.0
-    assert emitir_aviso_inmediato(deneg_a, cfg, CRED, enviar=enviar, limite=limite, ruta_cola=cola) is False  # RL-A agoto su rafaga
-    assert emitir_aviso_inmediato(deneg_b, cfg, CRED, enviar=enviar, limite=limite, ruta_cola=cola) is True   # RL-B tiene la suya
+    def emitir(av):
+        return emitir_aviso_inmediato(av, cfg, CRED, enviar=lambda c, k, texto: envios.append(texto),
+                                      limite=limite, ruta_cola=cola)
+
+    a = aviso_de_decision(_decision(regla="RL-A"), host="hall9000")
+    b = aviso_de_decision(_decision(regla="RL-B"), host="hall9000")
+    assert emitir(a) is True and emitir(a) is True
+    assert emitir(a) is False                    # RL-A agoto su rafaga: suprimido, NO enviado
+    assert emitir(b) is True                     # el DENY de RL-B tiene su propio cupo
     assert len(envios) == 3
-
     lineas = cola.read_text(encoding="utf-8").splitlines()
-    assert len(lineas) == 1                              # el suprimido de RL-A esta en la cola
+    assert len(lineas) == 1                      # el suprimido de RL-A esta en la cola, no se perdio
     dato = _json.loads(lineas[0])
-    assert dato["suprimido_por_tasa"] is True
-    assert "RL-A" in dato["clase"]
+    assert dato["suprimido_por_tasa"] is True and "RL-A" in dato["clase"] and dato["texto"] == a.texto
+    resumen = resumen_diario(cola, host="hall9000")
+    assert "suprimidos_por_tasa=1" in resumen[0]  # y el resumen lo cuenta
 
 
 def test_la_cola_y_el_candado_nacen_y_se_mantienen_0600(tmp_path):
-    """MAJOR-3: ni la cola ni el candado dependen del umask de quien llama --
-    se mide con un umask laxo 022 y tras resumir y volver a acumular."""
+    """MAJOR-3 / mutante e: con el umask MAS laxo (000) la cola y el candado salen 0600 igual, y tras
+    resumir y volver a acumular (la cola NUEVA) tambien."""
     cola = tmp_path / "cola.jsonl"
-    av = aviso_de_decision(_decision(status=PERMIT, razon=None), host="hall9000")
-    old = os.umask(0o022)
+    av = aviso_de_decision(_decision(RuleDecisionStatus.PERMIT), host="hall9000", obliga=False)
+    old = os.umask(0)
     try:
         assert acumular_para_resumen(av, cola) is True
         assert cola.stat().st_mode & 0o777 == 0o600
         assert (tmp_path / "cola.jsonl.candado").stat().st_mode & 0o777 == 0o600
         assert resumen_diario(cola, host="hall9000") is not None
-        assert acumular_para_resumen(av, cola) is True      # la cola NUEVA tras el resumen
+        assert acumular_para_resumen(av, cola) is True
         assert cola.stat().st_mode & 0o777 == 0o600
+        assert (tmp_path / "cola.jsonl.candado").stat().st_mode & 0o777 == 0o600
     finally:
         os.umask(old)
 
 
 def test_la_carrera_escritor_resumen_no_pierde_ni_duplica(tmp_path):
-    """BLOCK-1: un escritor REAL en otro proceso mete 20 000 lineas mientras
-    este proceso resume en bucle. Perdidos = 0, duplicados = 0."""
-    import tempfile
+    """BLOCK-1: un escritor REAL en otro proceso mete 20 000 lineas mientras este proceso resume en bucle.
+    Perdidos = 0 y duplicados = 0; y la carrera tiene que haber ocurrido de verdad (varias rotaciones)."""
     cola = tmp_path / "cola.jsonl"
     total = 20000
     escritor = tmp_path / "escritor.py"
     escritor.write_text(
         "import sys\n"
-        f"sys.path.insert(0, {str(pathlib.Path(__file__).resolve().parents[1])!r})\n"
+        f"sys.path.insert(0, {str(RAIZ)!r})\n"
         "from jax.faro.aviso import AvisoRegla, acumular_para_resumen\n"
         f"cola = {str(cola)!r}\n"
         f"for i in range({total}):\n"
         "    acumular_para_resumen(AvisoRegla(texto=f'cuerpo-{i}', clase='PERMIT|ok|RL-A',"
-        " inmediato=False, creado_utc='2026-10-07T03:04:05+00:00'), cola)\n"
-        "print('listo')\n", encoding="utf-8")
+        " inmediato=False, creado_utc='2026-10-07T03:04:05+00:00'), cola)\n", encoding="utf-8")
     proc = subprocess.Popen([sys.executable, str(escritor)], stdout=subprocess.DEVNULL)
     vistos: list[str] = []
+    rotaciones = 0
     try:
-        while proc.poll() is None or cola.exists():
+        while proc.poll() is None:
             mensajes = resumen_diario(cola, host="hall9000")
             if mensajes:
+                rotaciones += 1
                 vistos.extend(mensajes)
-            if proc.poll() is not None and not cola.exists():
-                break
-            _time.sleep(0.01)
+        assert proc.wait(timeout=120) == 0
     finally:
-        proc.wait(timeout=120)
-    mensajes = resumen_diario(cola, host="hall9000")
+        if proc.poll() is None:
+            proc.kill()
+    mensajes = resumen_diario(cola, host="hall9000")       # lo que quedo tras el ultimo
     if mensajes:
         vistos.extend(mensajes)
     cuerpos = [l for m in vistos for l in m.splitlines() if l.startswith("cuerpo-")]
-    conteo = collections.Counter(cuerpos)
-    assert len(cuerpos) == total, f"perdidos: {total - len(cuerpos)}"
-    duplicados = [c for c, n in conteo.items() if n > 1]
-    assert duplicados == [], f"duplicados: {duplicados[:5]}"
+    assert rotaciones >= 3, f"la carrera no ocurrio de verdad ({rotaciones} rotaciones)"
+    assert len(set(cuerpos)) == total, f"perdidos: {total - len(set(cuerpos))}"
+    duplicados = [c for c, n in collections.Counter(cuerpos).items() if n > 1]
+    assert duplicados == [] and len(cuerpos) == total, f"duplicados: {duplicados[:5]}"
+    assert resumen_diario(cola, host="hall9000") is None   # nada quedo, nada se repite
+
+
+def test_el_resumen_vacia_la_cola_y_no_deja_rotados_ni_repite(tmp_path):
+    """Mutante f: tras resumir no queda cola, ni rotado, y un segundo resumen no repite nada."""
+    cola = tmp_path / "cola.jsonl"
+    for i in range(3):
+        av = AvisoRegla(texto=f"cuerpo-{i}", clase="PERMIT|ok|RL-A", inmediato=False, creado_utc="2026-10-07T03:04:05+00:00")
+        assert acumular_para_resumen(av, cola) is True
+    primero = resumen_diario(cola, host="hall9000")
+    assert primero is not None and all(f"cuerpo-{i}" in "\n".join(primero) for i in range(3))
+    assert not cola.exists()
+    assert list(tmp_path.glob("*.procesando")) == []
+    assert resumen_diario(cola, host="hall9000") is None
+
+
+def test_un_rotado_que_sobrevivio_a_una_caida_se_recoge_y_un_fallo_de_lectura_no_borra_nada(tmp_path, monkeypatch):
+    cola = tmp_path / "cola.jsonl"
+    huerfano = tmp_path / "cola.jsonl.00000000000000000001.procesando"
+    huerfano.write_text(_json.dumps({"creado_utc": "x", "clase": "DENY|r|RL-A", "texto": "huerfano-1",
+                                     "suprimido_por_tasa": False}) + "\n", encoding="utf-8")
+    av = AvisoRegla(texto="nuevo-1", clase="DENY|r|RL-A", inmediato=True, creado_utc="2026-10-07T03:04:05+00:00")
+    assert acumular_para_resumen(av, cola) is True
+    # un fallo de lectura: devuelve None y NO se borra ni se pierde nada
+    real = pathlib.Path.read_text
+
+    def lee_mal(self, *a, **k):
+        raise OSError("disco roto")
+
+    monkeypatch.setattr(pathlib.Path, "read_text", lee_mal)
+    assert resumen_diario(cola, host="hall9000") is None
+    monkeypatch.setattr(pathlib.Path, "read_text", real)
+    assert len(list(tmp_path.glob("*.procesando"))) == 2            # el huerfano y el recien rotado
+    mensajes = "\n".join(resumen_diario(cola, host="hall9000"))
+    assert "huerfano-1" in mensajes and "nuevo-1" in mensajes
+    assert list(tmp_path.glob("*.procesando")) == [] and not cola.exists()
 
 
 def test_el_resumen_numera_los_mensajes_y_no_trunca_en_silencio(tmp_path):
-    """MAJOR-5: 200 avisos con cuerpos largos -> mensajes numerados (k/n), cada
-    uno cabe en _MAX_TEXTO SIN cortar cuerpos, y la cola queda vacia."""
+    """MAJOR-5: 200 avisos con cuerpos largos -> mensajes numerados (k/n), cada uno cabe en _MAX_TEXTO SIN
+    cortar cuerpos, la cuenta dice 200 y la cola queda vacia: ninguno se pierde."""
     cola = tmp_path / "cola.jsonl"
     texto_largo = "x" * 300
     for i in range(200):
@@ -792,24 +861,39 @@ def test_el_resumen_numera_los_mensajes_y_no_trunca_en_silencio(tmp_path):
         assert acumular_para_resumen(av, cola) is True
     mensajes = resumen_diario(cola, host="hall9000")
     assert mensajes is not None and len(mensajes) > 1
+    assert "200 avisos" in mensajes[0]
     for k, m in enumerate(mensajes, 1):
         assert len(m) <= _MAX_TEXTO
         assert m.splitlines()[-1] == f"· {k}/{len(mensajes)}"
     todo = "\n".join(mensajes)
-    for i in range(200):                      # ningun cuerpo cortado a la mitad
-        assert f"cuerpo-{i:03d} {texto_largo}" in todo, f"el aviso {i} se perdio o trunco"
-    assert resumen_diario(cola, host="hall9000") is None      # la cola quedo vacia
+    for i in range(200):
+        assert f"cuerpo-{i:03d} {texto_largo}" in todo, f"el aviso {i} se perdio o se trunco"
+    assert resumen_diario(cola, host="hall9000") is None
 
 
-def test_resumen_sin_cola_devuelve_none(tmp_path):
-    assert resumen_diario(tmp_path / "no-existe.jsonl", host="hall9000") is None
+def test_un_cuerpo_gigante_se_recorta_con_marca_y_el_mensaje_cabe(tmp_path):
+    cola = tmp_path / "cola.jsonl"
+    av = AvisoRegla(texto="y" * 9000, clase="DENY|r|RL-A", inmediato=True, creado_utc="2026-10-07T03:04:05+00:00")
+    assert acumular_para_resumen(av, cola) is True
+    mensajes = resumen_diario(cola, host="hall9000")
+    assert all(len(m) <= _MAX_TEXTO for m in mensajes)
+    assert "car. recortados]" in "\n".join(mensajes)       # se dice, no se calla
+
+
+def test_el_resumen_cuenta_las_lineas_ilegibles(tmp_path):
+    cola = tmp_path / "cola.jsonl"
+    assert acumular_para_resumen(AvisoRegla("ok-1", "DENY|r|RL-A", True, "2026-10-07T03:04:05+00:00"), cola) is True
+    with open(cola, "a", encoding="utf-8") as f:
+        f.write("esto no es json\n[1, 2]\n")
+    mensajes = resumen_diario(cola, host="hall9000")
+    assert "ilegibles=2" in mensajes[0] and "ok-1" in "\n".join(mensajes)
 
 
 def test_acumular_es_una_linea_json_por_aviso(tmp_path):
     cola = tmp_path / "cola.jsonl"
     for i in range(3):
-        av = AvisoRegla(texto=f"cuerpo-{i}", clase="DENY|RULE_EXPIRED|RL-A",
-                        inmediato=True, creado_utc="2026-10-07T03:04:05+00:00")
+        av = AvisoRegla(texto=f"cuerpo-{i}", clase="DENY|RULE_EXPIRED|RL-A", inmediato=True,
+                        creado_utc="2026-10-07T03:04:05+00:00")
         assert acumular_para_resumen(av, cola) is True
     lineas = cola.read_text(encoding="utf-8").splitlines()
     assert len(lineas) == 3
@@ -817,62 +901,79 @@ def test_acumular_es_una_linea_json_por_aviso(tmp_path):
         assert set(_json.loads(linea)) == {"creado_utc", "clase", "texto", "suprimido_por_tasa"}
 
 
+def test_acumular_es_fail_soft_sin_disco(tmp_path, caplog):
+    av = AvisoRegla("t", "DENY|r|RL-A", True, "2026-10-07T03:04:05+00:00")
+    with caplog.at_level(logging.WARNING):
+        assert acumular_para_resumen(av, tmp_path / "no-existe" / "cola.jsonl") is False
+    assert "no se pudo acumular" in caplog.text
+
+
 def test_aviso_y_emitir_sin_io_por_ninguna_via(monkeypatch, tmp_path):
-    """Mutantes a y a2: armar el aviso y emitirlo no abren NI UN archivo --
-    ni con open, ni con os.open, ni con Path.write_text. Los vigilantes
-    capturan la funcion REAL antes de parchear: sin recursion (MINOR 9)."""
+    """Mutantes a y a2: armar el aviso y emitirlo (sin suprimir) no abren NI UN archivo: ni open, ni io.open,
+    ni os.open, ni Path.open/write_text/write_bytes. Los vigilantes llaman a la funcion REAL capturada
+    antes de parchear: no hay recursion (MINOR 9)."""
+    cfg, av = _cfg(tmp_path), aviso_de_decision(_decision(), host="hall9000")   # la config escribe: ANTES de vigilar
     abiertos = []
-    open_real, os_open_real = open, os.open
-    write_text_real = pathlib.Path.write_text
+    reales = {"open": builtins.open, "io.open": io.open, "os.open": os.open, "P.open": pathlib.Path.open,
+              "P.write_text": pathlib.Path.write_text, "P.write_bytes": pathlib.Path.write_bytes}
 
-    def open_vigilado(*a, **k):
-        abiertos.append(("open", a))
-        return open_real(*a, **k)
+    def vigilar(nombre):
+        real = reales[nombre]
 
-    def os_open_vigilado(*a, **k):
-        abiertos.append(("os.open", a))
-        return os_open_real(*a, **k)
+        def vigilante(*a, **k):
+            abiertos.append(nombre)
+            return real(*a, **k)
+        return vigilante
 
-    def write_text_vigilado(self, *a, **k):
-        abiertos.append(("write_text", (str(self),)))
-        return write_text_real(self, *a, **k)
-
-    monkeypatch.setattr(builtins, "open", open_vigilado)
-    monkeypatch.setattr(os, "open", os_open_vigilado)
-    monkeypatch.setattr(pathlib.Path, "write_text", write_text_vigilado)
-    av = aviso_de_decision(_decision(), host="hall9000")
-    assert av.inmediato is True
-    assert emitir_aviso_inmediato(av, _cfg(tmp_path), CRED, enviar=lambda *a: None,
+    monkeypatch.setattr(builtins, "open", vigilar("open"))
+    monkeypatch.setattr(io, "open", vigilar("io.open"))
+    monkeypatch.setattr(os, "open", vigilar("os.open"))
+    monkeypatch.setattr(pathlib.Path, "open", vigilar("P.open"))
+    monkeypatch.setattr(pathlib.Path, "write_text", vigilar("P.write_text"))
+    monkeypatch.setattr(pathlib.Path, "write_bytes", vigilar("P.write_bytes"))
+    assert emitir_aviso_inmediato(av, cfg, CRED, enviar=lambda *a: None,
                                   limite=LimiteTasa(5, 10.0), ruta_cola=tmp_path / "cola.jsonl") is True
     assert abiertos == [], "armar y emitir no tocan ni config, ni log a archivo, ni store"
 
 
-def test_ningun_modulo_de_rule_authority_importa_aviso():
-    """La frontera del paso 8 (§14.8), lado estatico: por AST, ningun modulo de
-    policy/rule_authority importa el aviso (directo o por alias). Que aviso
-    importe los MODELOS de #371 si esta permitido ( direccion aviso->modelos)."""
-    raiz = pathlib.Path(__file__).resolve().parents[1]
-
-    def _imports(texto):
-        hallados = set()
-        for nodo in ast.walk(ast.parse(texto)):
-            if isinstance(nodo, ast.Import):
-                hallados.update(alias.name for alias in nodo.names)
-            elif isinstance(nodo, ast.ImportFrom) and nodo.module:
-                hallados.add(nodo.module)
-        return hallados
-
-    for py in sorted((raiz / "policy" / "rule_authority").rglob("*.py")):
-        for nombre in _imports(py.read_text(encoding="utf-8")):
-            assert "aviso" not in nombre, f"{py} importa {nombre!r}: el aviso no es parte de la autoridad"
+def _imports_de(texto: str) -> set[str]:
+    hallados = set()
+    for nodo in ast.walk(ast.parse(texto)):
+        if isinstance(nodo, ast.Import):
+            hallados.update(alias.name for alias in nodo.names)
+        elif isinstance(nodo, ast.ImportFrom):
+            hallados.add(nodo.module or "")
+            hallados.update(f"{nodo.module}.{alias.name}" for alias in nodo.names)
+    return hallados
 
 
-def test_rule_authority_carga_sin_el_aviso_en_un_interprete_limpio(tmp_path):
-    """MINOR 10: el invariante en un interprete REAL -- importar TODA la
-    autoridad no puede arrastrar el aviso (import estatico, transitivo o
-    dinamico: sys.modules lo ve todo)."""
-    raiz = pathlib.Path(__file__).resolve().parents[1]
-    codigo = "import sys\nimport policy.rule_authority\nassert 'jax.faro.aviso' not in sys.modules, 'la autoridad cargo el aviso'\n"
-    r = subprocess.run([sys.executable, "-c", codigo], capture_output=True, text=True,
-                       cwd=str(raiz), timeout=120)
+def test_ningun_modulo_de_rule_authority_importa_el_aviso_estaticamente():
+    """Mutante i: la frontera del paso 8, lado estatico: por AST, ningun modulo de policy/rule_authority
+    importa el aviso (el resto de jax.faro SI lo usa, p. ej. snapshot). (aviso -> modelos esta permitido; esta es la direccion contraria.)"""
+    archivos = sorted((RAIZ / "policy" / "rule_authority").rglob("*.py"))
+    assert archivos, "no se encontro policy/rule_authority"
+    for py in archivos:
+        for nombre in _imports_de(py.read_text(encoding="utf-8")):
+            assert "aviso" not in nombre.split("."), \
+                f"{py} importa {nombre!r}: el aviso no es parte de la autoridad"
+
+
+def test_rule_authority_carga_sin_el_aviso_en_un_interprete_limpio():
+    """Mutante h: el AST no ve un import dinamico ni transitivo; sys.modules de un interprete NUEVO si.
+    Se importan TODOS los submodulos de policy.rule_authority."""
+    nombres = [m.name for m in pkgutil.walk_packages(_rule_authority.__path__, "policy.rule_authority.")]
+    assert "policy.rule_authority.models" in nombres
+    codigo = ("import importlib, sys\n"
+              "import policy.rule_authority, policy.rule_authority.models\n"
+              f"for n in {nombres!r}: importlib.import_module(n)\n"
+              "assert 'jax.faro.aviso' not in sys.modules, 'la autoridad cargo el aviso'\n"
+              )
+    r = subprocess.run([sys.executable, "-c", codigo], capture_output=True, text=True, cwd=str(RAIZ),
+                       env={**os.environ, "PYTHONPATH": str(RAIZ)}, timeout=120)
     assert r.returncode == 0, (r.stdout, r.stderr)
+
+
+def test_aviso_importa_el_modelo_real_de_371():
+    """La direccion permitida: el aviso usa EL RuleDecision de #371, no un espejo."""
+    import jax.faro.aviso as modulo
+    assert modulo.RuleDecision is RuleDecision and modulo.RuleDecisionStatus is RuleDecisionStatus
