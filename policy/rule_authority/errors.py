@@ -16,3 +16,34 @@ class RuleSchemaError(RuleAuthorityError):
 
 class RuleSnapshotError(RuleAuthorityError):
     """El snapshot de policy/faro no se puede cargar con garantias (§6)."""
+
+
+# ------------------------------------------------------------- paso 7 (§9, §11)
+
+class ProveedorInvalido(RuleAuthorityError):
+    """Un proveedor confiable falta o no satisface el contrato (p.ej. solo
+    relee valores, sin leases): NO se emite ni se consume nada."""
+
+
+class VersionRetrocedio(RuleAuthorityError):
+    """Una version monotonica no repite ni retrocede (sin ABA, §9)."""
+
+
+class StopDesconocido(RuleAuthorityError):
+    """STOP ilegible o sin configurar: el kernel traduce esto en DENY (fail-closed)."""
+
+
+class CheckpointInvalido(RuleAuthorityError):
+    """El checkpoint externo rechaza retrocesos y heads conflictivos (§11)."""
+
+
+class RelojInvalido(RuleAuthorityError):
+    """El reloj entrego una hora sin timezone o invalida."""
+
+
+class RelojRetrocedio(RuleAuthorityError):
+    """El reloj retrocedio respecto de la emision: DENY (§13)."""
+
+
+class ClasificacionDesconocida(RuleAuthorityError):
+    """Capability sin clasificacion confiable: DENY, nunca rebaja (§7)."""

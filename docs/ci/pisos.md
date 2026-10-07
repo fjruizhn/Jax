@@ -4613,7 +4613,7 @@ Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la form
 
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-06, r4): `^545 passed`
+Patrón vigente (2026-10-06, paso 7): `^567 passed`
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla

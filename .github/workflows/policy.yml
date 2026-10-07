@@ -2564,6 +2564,7 @@ jobs:
           tests/policy/test_rule_authority_schema.py
           tests/policy/test_rule_authority_snapshot.py
           tests/policy/test_rule_authority_ataques.py
+          tests/policy/test_rule_authority_providers.py
           tests/policy/test_shadow_manifest.py
           tests/policy/test_strict_yaml.py
           tests/policy/test_v3_array_semantics.py
@@ -2634,7 +2635,7 @@ jobs:
       - name: Identity Foundation Shadow -- piso exacto de tests CORRIDOS
         # Jax#370 ronda 2 (M-5): la lista de arriba crece con cada area de policy y
         # nada la pisaba. Medido el 2026-10-06 en hall9000 (Python 3.14.4, pytest 9,
-        # solo pytest+pyyaml+cryptography como el paso de arriba): 545 passed
+        # solo pytest+pyyaml+cryptography como el paso de arriba): 567 passed
         # (459 de la ronda 1 + 38 de rule_authority: 20 de schema por la decision
         # R-4 de Fernando y digitos ASCII, 2 de snapshot por el testigo no-dataclass,
         # 16 de los ataques A-J del auditor como regresiones). Exacto: una prueba
@@ -2649,7 +2650,8 @@ jobs:
             tests/policy/test_policy_corpus_hash.py \
             tests/policy/test_rule_authority_schema.py \
             tests/policy/test_rule_authority_snapshot.py \
-            tests/policy/test_rule_authority_ataques.py \
+            tests/policy/test_rule_authority_ataques.py
+          tests/policy/test_rule_authority_providers.py \
             tests/policy/test_shadow_manifest.py \
             tests/policy/test_strict_yaml.py \
             tests/policy/test_v3_array_semantics.py \
