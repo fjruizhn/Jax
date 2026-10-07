@@ -247,16 +247,46 @@ def _alterar_authority(corpus):
     )
 
 
+def _alterar_canonicalizer_identity(corpus):
+    nuevo = "JAX-POLICY-C14N/2"
+    assert nuevo != corpus.canonicalizer_identity
+    object.__setattr__(corpus, "canonicalizer_identity", nuevo)
+
+
+def _alterar_bootstrap_bundle_id(corpus):
+    # Otro hash con la MISMA forma valida de _HASH: el valor sigue pasando la
+    # validacion de forma del __post_init__ original; solo el binding lo delata.
+    nuevo = "sha256:" + "34" * 32
+    assert nuevo != corpus.bootstrap_bundle_id
+    object.__setattr__(corpus, "bootstrap_bundle_id", nuevo)
+
+
 @pytest.mark.parametrize(
     "alterar",
-    [_alterar_normative_documents, _alterar_policy_corpus_hash, _alterar_manifest, _alterar_authority],
-    ids=["normative_documents", "policy_corpus_hash", "manifest", "authority"],
+    [
+        _alterar_normative_documents,
+        _alterar_policy_corpus_hash,
+        _alterar_manifest,
+        _alterar_authority,
+        _alterar_canonicalizer_identity,
+        _alterar_bootstrap_bundle_id,
+    ],
+    ids=[
+        "normative_documents",
+        "policy_corpus_hash",
+        "manifest",
+        "authority",
+        "canonicalizer_identity",
+        "bootstrap_bundle_id",
+    ],
 )
 def test_cada_campo_del_binding_esta_fijado(alterar):
     """Alterar UN campo tras sellar (``object.__setattr__``) rompe el binding y
     ambos consumidores niegan. Mata los mutantes que quitan esa entrada de
     ``_contenido_canonico``: M4 (normative_documents), M5 (policy_corpus_hash),
-    M6 (manifest) y el de authority."""
+    M6 (manifest), el de authority, y los de ``canonicalizer_identity`` y
+    ``bootstrap_bundle_id`` (fijados el 2026-10-07, chore/pisos-doc-binding:
+    las seis entradas del dict quedan ejercitadas una por una)."""
     corpus = load_validated_candidate(ROOT)
     assert corpus._was_loader_validated()
     alterar(corpus)

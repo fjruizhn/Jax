@@ -210,8 +210,8 @@
       "mensaje": "PISO ROTO: se esperaban 7 tests CORRIDOS del vector dorado (6 tipos históricos + genesis). Si cambió el formato canónico a propósito, recaptura las constantes en el mismo commit."
     },
     "authority-resolution-loader-seal/ataques": {
-      "patron": "^14 passed in ",
-      "mensaje": "PISO ROTO: se esperaban 14 tests CORRIDOS de los ataques al sello del loader de Block 3 (replace, construccion directa, congelado, subclases, metodo sombreado, binding por campo)."
+      "patron": "^16 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS de los ataques al sello del loader de Block 3 (replace, construccion directa, congelado, subclases, metodo sombreado, binding por campo de las 6 entradas). 14 -> 16 el 2026-10-07 (chore/pisos-doc-binding, sobre #379 7bd266e7): +2 del binding campo por campo, canonicalizer_identity y bootstrap_bundle_id (mutantes de quitarlos de _contenido_canonico medidos muertos)."
     }
   },
   "minimos": {

@@ -2677,7 +2677,10 @@ jobs:
           python3 .github/ci/piso.py verificar authority-ledger-golden/vectors /tmp/authority-ledger-golden || exit $?
       - name: Block 3 sello del loader (authority_resolution) -- piso exacto
         # Ataques de falsificación del sello del corpus validado (replace,
-        # subclases, método sombreado, binding campo por campo).
+        # subclases, método sombreado, binding campo por campo de las 6
+        # entradas). 16 passed: 14 -> 16 el 2026-10-07 (chore/pisos-doc-binding,
+        # sobre #379): +2 fijando canonicalizer_identity y bootstrap_bundle_id
+        # (mutantes de quitarlos de _contenido_canonico medidos muertos).
         env:
           PYTHONPATH: "."
         run: |

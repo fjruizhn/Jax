@@ -4639,15 +4639,44 @@ master 364ded9) y `policy/tests/test_comparar_pisos.py` (el comparador). 140 -> 
 2026-10-04 al agregar el comparador y sus casos, las pruebas del job aislado y las de claves duplicadas; 223 -> 227 (2026-10-04, ci/pisos-skipped-y-comentarios): +4 netas del comparador (5 pruebas de la excepción `^N passed` -> `^N' passed, M skipped`, menos 1 parámetro que deja de ser rojo). Medido en
 Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.
 
+## `authority-ledger-seal/attacks`
+
+Piso vigente (2026-10-07): `^4 passed in `, medido en hall9000 con el comando exacto del paso
+(`pytest -q tests/policy/test_authority_ledger_seal_attacks.py`) y `piso.py verificar` rc=0.
+Procedencia: Jax#377, cierre en `d082cc89` (forma final: aserción incondicional del congelado
+profundo sobre `protected_metanorms[0]` y sobre un corpus con documentos). Ataques de
+falsificación del sello de ratificación y de la proyección congelada: `replace()` no transporta
+el sello (`init=False`), la proyección congelada no muta tras sellar, y la frontera que firma
+(`append_authority_event`) re-deriva la coherencia hash/proyección antes de firmar. Cada test
+mata un mutante del arreglo (tabla mutante→prueba→aserción en la entrega de #377).
+
+## `authority-ledger-golden/vectors`
+
+Piso vigente (2026-10-07): `^7 passed in `, medido en hall9000 con el comando exacto del paso
+(`pytest -q tests/policy/test_authority_ledger_golden_vectors.py`) y `piso.py verificar` rc=0.
+Procedencia: Jax#377, cierre en `d082cc89` (parametrize con `list(zip(...))`, sin
+PytestRemovedIn10Warning). Los 6 tipos históricos de evento + el genesis: los BYTES firmados
+capturados como constantes sobre master `83f8f56b` ANTES del arreglo de sellos/proyección
+congelada, con entrada 100 % determinista (llave Ed25519 fija, ids y tiempo fijos, proyección
+sintética que ejerce el congelado profundo). El congelado no cambia la serialización: si este
+piso explota por un cambio INTENCIONAL de formato canónico, las constantes se recapturan en el
+mismo commit que lo declara; explotar sin cambio declarado es una regresión de serialización
+que rompe la verificabilidad del ledger histórico.
+
 ## `authority-resolution-loader-seal/ataques`
 
 Piso exacto propio (2026-10-07, Jax#379, ronda 2) del archivo
 `tests/policy/test_authority_resolution_loader_seal.py`: antes solo contaba dentro del paso
-grande «Identity Foundation Shadow», sin número propio. 14 passed (Python 3.14.4, local):
+grande «Identity Foundation Shadow», sin número propio. 16 passed (Python 3.14.4, local):
 6 de la ronda 1 (replace, replace con contenido alterado, construcción directa, congelado
 profundo, drift del digest, sello y binding del corpus real) + 4 de subclases y método
 sombreado (definición de subclase falla, subclase que afirma estar validada, subclase con
-sello legítimo, método sombreado en la instancia) + 4 del binding campo por campo
-(`normative_documents`, `policy_corpus_hash`, `manifest`, `authority`). Patrón: `^14 passed in `.
+sello legítimo, método sombreado en la instancia) + 6 del binding campo por campo — las seis
+entradas de `_contenido_canonico`, una por caso (`normative_documents`, `policy_corpus_hash`,
+`manifest`, `authority`, `canonicalizer_identity`, `bootstrap_bundle_id`). Patrón: `^16 passed in `.
+14 -> 16 el 2026-10-07 (chore/pisos-doc-binding, sobre #379 `7bd266e7`): +2 fijando
+`canonicalizer_identity` (alterado a otra identidad plausible) y `bootstrap_bundle_id` (otro
+hash con la misma forma válida de `_HASH`, para que solo el binding lo delate); los mutantes
+que quitan cada entrada del dict mueren (medidos: cada mutante derriba solo su caso).
 Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_subclass__`» y quitar
 cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
