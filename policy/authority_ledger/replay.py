@@ -53,8 +53,8 @@ class ReconstructedAuthorityState:
     def _is_verified(self) -> bool:
         return self._verified_seal is _REPLAY_SEAL
 
-    def current_rule_ratification(self, rule_id: str) -> AuthorityEvent | None:
-        """Return the latest grant only while it remains unrevoked."""
+    def latest_unrevoked_rule_ratification(self, rule_id: str) -> AuthorityEvent | None:
+        """Return the latest unrevoked grant; temporal validity belongs to rule evaluation."""
         if not self._is_verified():
             raise AuthorityStateError("rule ratification requiere replay verificado")
         event = self._latest_rule_ratifications.get(rule_id)

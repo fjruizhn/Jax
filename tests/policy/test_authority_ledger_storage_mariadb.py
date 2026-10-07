@@ -32,6 +32,7 @@ from policy.authority_resolution.candidate_loader import load_validated_candidat
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "policy/authority_ledger/migrations/001_authority_ledger.sql"
+UPGRADE_MIGRATION = ROOT / "policy/authority_ledger/migrations/002_canonical_intent_not_null.sql"
 IMAGE = os.environ.get("JAX_AUTHORITY_LEDGER_TEST_MARIADB_IMAGE", "mariadb:12.3.3")
 
 
@@ -39,20 +40,25 @@ def _run(docker: list[str], *args: str, **kwargs):
     return subprocess.run([*docker, *args], check=True, capture_output=True, text=True, **kwargs)
 
 
-def _apply_migration(connection):
+def _apply_migration(connection, path):
     sql = "\n".join(
-        line for line in MIGRATION.read_text(encoding="utf-8").splitlines()
+        line for line in path.read_text(encoding="utf-8").splitlines()
         if not line.lstrip().startswith("--")
     )
-    before_triggers, rest = sql.split("DELIMITER //", 1)
-    triggers, _ = rest.split("DELIMITER ;", 1)
     with connection.cursor() as cursor:
-        for statement in before_triggers.split(";"):
-            if statement.strip():
-                cursor.execute(statement)
-        for statement in triggers.split("//"):
-            if statement.strip():
-                cursor.execute(statement)
+        if "DELIMITER //" in sql:
+            before_triggers, rest = sql.split("DELIMITER //", 1)
+            triggers, _ = rest.split("DELIMITER ;", 1)
+            for statement in before_triggers.split(";"):
+                if statement.strip():
+                    cursor.execute(statement)
+            for statement in triggers.split("//"):
+                if statement.strip():
+                    cursor.execute(statement)
+        else:
+            for statement in sql.split(";"):
+                if statement.strip():
+                    cursor.execute(statement)
     connection.commit()
 
 
@@ -97,8 +103,21 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                 with connection.cursor() as cursor:
                     cursor.execute("SELECT VERSION()")
                     assert cursor.fetchone()[0].startswith("12.3.3-")
-                _apply_migration(connection)
+                _apply_migration(connection, MIGRATION)
+                # Exercise the upgrade path from the former nullable shape.
                 with connection.cursor() as cursor:
+                    cursor.execute(
+                        "ALTER TABLE jax_authority.authority_events "
+                        "MODIFY canonical_intent LONGBLOB NULL"
+                    )
+                connection.commit()
+                _apply_migration(connection, UPGRADE_MIGRATION)
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SHOW COLUMNS FROM jax_authority.authority_events "
+                        "LIKE 'canonical_intent'"
+                    )
+                    assert cursor.fetchone()[2] == "NO"
                     cursor.execute("SELECT sequence,head_event_id,head_event_hash FROM jax_authority.authority_ledger_head WHERE singleton=1")
                     assert cursor.fetchone() == (0, None, None)
 
@@ -109,18 +128,34 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                 )
 
             app_password = secrets.token_urlsafe(24)
+            from policy.authority_ledger.provisioning import provision_application_account
+            with connect() as admin:
+                provision_application_account(admin, "jax_authority_app_test", app_password)
+
+            trigger_password = secrets.token_urlsafe(24)
             with connect() as admin:
                 with admin.cursor() as cursor:
-                    cursor.execute("CREATE USER 'jax_authority_app_test'@'localhost' IDENTIFIED BY %s", (app_password,))
-                    cursor.execute("GRANT SELECT ON jax_authority.authority_ledger_genesis TO 'jax_authority_app_test'@'localhost'")
-                    cursor.execute("GRANT SELECT,INSERT ON jax_authority.authority_events TO 'jax_authority_app_test'@'localhost'")
-                    cursor.execute("GRANT SELECT,UPDATE ON jax_authority.authority_ledger_head TO 'jax_authority_app_test'@'localhost'")
+                    cursor.execute(
+                        "CREATE USER 'jax_authority_trigger_test'@'localhost' IDENTIFIED BY %s",
+                        (trigger_password,),
+                    )
+                    cursor.execute(
+                        "GRANT SELECT,UPDATE,DELETE ON jax_authority.authority_events "
+                        "TO 'jax_authority_trigger_test'@'localhost'"
+                    )
                 admin.commit()
 
             def app_connect():
                 return pymysql.connect(
                     unix_socket=str(socket_path), user="jax_authority_app_test", password=app_password,
                     database="jax_authority", autocommit=False, charset="utf8mb4",
+                )
+
+            def trigger_connect():
+                return pymysql.connect(
+                    unix_socket=str(socket_path), user="jax_authority_trigger_test",
+                    password=trigger_password, database="jax_authority",
+                    autocommit=False, charset="utf8mb4",
                 )
 
             key = Ed25519PrivateKey.generate()
@@ -194,7 +229,7 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
             assert restored == events
             assert all(item.event_hash == event_hash(item) for item in restored)
             assert state.checkpoint.sequence == 8
-            assert state.current_rule_ratification("send-receipt") is None
+            assert state.latest_unrevoked_rule_ratification("send-receipt") is None
             with connect() as db:
                 with db.cursor() as cursor:
                     cursor.execute(
@@ -211,6 +246,17 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                     "event_hash": event.event_hash,
                 })
                 assert evidence_bytes == canonical_bytes(event.intent.evidence_refs)
+            with trigger_connect() as privileged:
+                with privileged.cursor() as cursor:
+                    with pytest.raises(pymysql.MySQLError):
+                        cursor.execute(
+                            "UPDATE authority_events SET actor_id='actor:tamper' WHERE sequence=1"
+                        )
+                    privileged.rollback()
+                    with pytest.raises(pymysql.MySQLError):
+                        cursor.execute("DELETE FROM authority_events WHERE sequence=1")
+                    privileged.rollback()
+            assert store.events() == events
         finally:
             subprocess.run([*docker, "stop", container], capture_output=True, text=True, check=False)
             chown = subprocess.run(

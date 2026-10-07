@@ -4604,24 +4604,23 @@ lecturas como root) pasa la suite de 55 a 199 pruebas recolectadas; el runner sa
 ## `authority-ledger-codec/codec`
 
 Piso vigente (2026-10-07): `^19 passed in `. Medido en Hall9000 con el comando exacto del
-workflow, tras los arreglos de #368/#369.
+workflow. Incluye payload por variante y el contraste de todas las columnas denormalizadas,
+incluido `previous_event_hash`; el piso anterior era 5.
 
 ## `authority-ledger-mariadb/integration`
 
 Piso vigente (2026-10-07): `^1 passed in `. MariaDB 12.3.3 efímera con `--network none`;
-la cuenta de ataque conserva GRANT de SELECT/UPDATE/DELETE y los triggers impiden UPDATE/DELETE.
+prueba migraciones, provisioning versionado y bloqueo de UPDATE/DELETE con GRANT explícito.
 
 ## `authority-rule-events/ratifications`
 
-Piso vigente (2026-10-07): `^12 passed in `. Incluye las regresiones de grants individuales
-sobre el kernel corregido.
-
+Piso vigente (2026-10-07): `^12 passed in `. Cubre activación que rechaza grants individuales
+(E4), payload Block 4 heredado (E10), y regresiones de ratificación/revocación. Antes: 8.
 
 ## `authority-rule-models/models`
 
-Piso actualizado (2026-10-07): `^29 passed in `. Medido en Hall9000 con Python 3.14.4 y
-el comando exacto del workflow. Cubre el catálogo cargado desde el snapshot, límites de actos
-y dinero, NFC antes del hash, coherencia status/reason y el store ligado al hash recibido.
+Piso actualizado (2026-10-07): `^29 passed in `. Catálogo cargado desde el snapshot, límites
+validados por clase/subid, NFC antes del hash, status/reason y store ligado al request hash.
 
 
 ## `archivos-de-test-en-ci/pisos`

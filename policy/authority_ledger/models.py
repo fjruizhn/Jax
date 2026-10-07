@@ -255,7 +255,8 @@ class AuthorityEventIntent:
         if self.event_type is AuthorityEventType.RATIFICATION_GRANTED:
             if not isinstance(self.static_policy_view_projection, dict) or self.static_policy_view_projection.get("policy_corpus_hash") != self.policy_corpus_hash:
                 raise AuthorityEventValidationError("ratificación requiere static policy view ligado al hash")
-            if self._ratification_snapshot_seal not in (_RATIFICATION_SNAPSHOT_SEAL, _RATIFICATION_STORAGE_SEAL):
+            if (self._ratification_snapshot_seal is not _RATIFICATION_SNAPSHOT_SEAL
+                    and self._ratification_snapshot_seal is not _RATIFICATION_STORAGE_SEAL):
                 raise AuthorityEventValidationError("ratificación requiere snapshot sellado del candidate boundary")
         elif self._ratification_snapshot_seal is not None:
             raise AuthorityEventValidationError("sello de corpus fuera de ratificación")
@@ -264,8 +265,8 @@ class AuthorityEventIntent:
                 raise AuthorityEventValidationError("ratificación individual requiere actor human:fernando")
             if self.rule_ratification is not None and not isinstance(self.rule_ratification, RuleRatificationGrantPayload):
                 raise AuthorityEventValidationError("rule_ratification inválido")
-            if self._rule_ratification_snapshot_seal not in (
-                    _RULE_RATIFICATION_SNAPSHOT_SEAL, _RULE_RATIFICATION_STORAGE_SEAL):
+            if (self._rule_ratification_snapshot_seal is not _RULE_RATIFICATION_SNAPSHOT_SEAL
+                    and self._rule_ratification_snapshot_seal is not _RULE_RATIFICATION_STORAGE_SEAL):
                 raise AuthorityEventValidationError("ratificación individual requiere snapshot Faro sellado")
         elif self._rule_ratification_snapshot_seal is not None:
             raise AuthorityEventValidationError("sello Faro fuera de grant individual")

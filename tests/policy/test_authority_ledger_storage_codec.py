@@ -33,7 +33,8 @@ def sample_event(intent=None, number=1):
 
 def storage_row(event, *, sequence=None, event_id=None, event_type=None, actor_id=None,
                 canonical_intent=_UNSET, canonical_event=None, evidence_refs=None,
-                event_hash_value=None, signature=None, recorded_at_utc=None):
+                previous_event_hash=_UNSET, event_hash_value=None, signature=None,
+                recorded_at_utc=None):
     return (
         event.sequence if sequence is None else sequence,
         event.event_id if event_id is None else event_id,
@@ -42,6 +43,7 @@ def storage_row(event, *, sequence=None, event_id=None, event_type=None, actor_i
         canonical_bytes(intent_projection(event.intent)) if canonical_intent is _UNSET else canonical_intent,
         canonical_bytes(event_projection(event)) if canonical_event is None else canonical_event,
         canonical_bytes(event.intent.evidence_refs) if evidence_refs is None else evidence_refs,
+        event.previous_event_hash if previous_event_hash is _UNSET else previous_event_hash,
         event.event_hash if event_hash_value is None else event_hash_value,
         event.signature if signature is None else signature,
         event.recorded_at_utc.replace(tzinfo=None) if recorded_at_utc is None else recorded_at_utc,
@@ -114,6 +116,15 @@ def test_event_storage_decoder_rejects_unknown_event_fields():
         event_from_storage_row(storage_row(sample_event(), canonical_event=canonical_bytes(projection)))
 
     projection = event_projection(sample_event())
+    projection["intent"]["policy_corpus_hash"] = "sha256:" + "f" * 64
+    with pytest.raises(AuthorityEventValidationError, match="payload inválido para ACTIVATION_DEACTIVATED"):
+        event_from_storage_row(storage_row(
+            sample_event(),
+            canonical_event=canonical_bytes(projection),
+            canonical_intent=canonical_bytes(projection["intent"]),
+        ))
+
+    projection = event_projection(sample_event())
     projection["intent"]["overlay_id"] = "unexpected-payload"
     with pytest.raises(AuthorityEventValidationError):
         event_from_storage_row(storage_row(sample_event(), canonical_event=canonical_bytes(projection)))
@@ -179,6 +190,10 @@ def test_event_storage_decoder_rejects_table_columns_that_disagree_with_canonica
 
 def test_event_storage_reader_selects_all_columns_it_validates():
     event = sample_event()
+    with pytest.raises(AuthorityEventValidationError, match="columnas authority_event"):
+        event_from_storage_row(
+            storage_row(event, previous_event_hash="sha256:" + "c" * 64)
+        )
     queries = []
 
     class Cursor:
@@ -200,7 +215,7 @@ def test_event_storage_reader_selects_all_columns_it_validates():
 
     assert MariaDBAuthorityLedgerStore(Connection).events() == (event,)
     assert queries == [
-        "SELECT sequence,event_id,event_type,actor_id,canonical_intent,canonical_event,evidence_refs,event_hash,signature,recorded_at_utc "
+        "SELECT sequence,event_id,event_type,actor_id,canonical_intent,canonical_event,evidence_refs,previous_event_hash,event_hash,signature,recorded_at_utc "
         "FROM jax_authority.authority_events ORDER BY sequence ASC"
     ]
 
