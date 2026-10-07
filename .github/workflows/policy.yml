@@ -2566,6 +2566,7 @@ jobs:
           tests/policy/test_rule_authority_schema.py
           tests/policy/test_rule_authority_snapshot.py
           tests/policy/test_rule_authority_ataques.py
+          tests/policy/test_rule_authority_providers.py
           tests/policy/test_shadow_manifest.py
           tests/policy/test_strict_yaml.py
           tests/policy/test_v3_array_semantics.py
@@ -2643,8 +2644,12 @@ jobs:
         # (+10 del catalogo del pin). Ronda 6 (D-4 piso de codigo): 562 (+7: K2 sexta
         # clase niega en cargador y en pin, OID de objeto suelto del catalogo
         # recalculado, cargador solo bytes, catalogo anidado niega, UTF-8 estricto,
-        # catalogo sellado inmutable). Exacto: una prueba
-        # que desaparezca deja pasar en silencio la forma que cubria.
+        # catalogo sellado inmutable). Paso 7 r2 (providers, jax#372): 602 (+40:
+        # interfaces con leases RW reales, guard de emision, CAS del checkpoint,
+        # reloj monotonico por proceso; el archivo entra en AMBAS listas y el piso
+        # se mide con ESTE paso — la prueba de identidad de listas parsea el run
+        # como bash: shlex linea a linea, un .py suelto es exit 126). Exacto: una
+        # prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
           python -B -m pytest -q \
@@ -2656,6 +2661,7 @@ jobs:
             tests/policy/test_rule_authority_schema.py \
             tests/policy/test_rule_authority_snapshot.py \
             tests/policy/test_rule_authority_ataques.py \
+            tests/policy/test_rule_authority_providers.py \
             tests/policy/test_shadow_manifest.py \
             tests/policy/test_strict_yaml.py \
             tests/policy/test_v3_array_semantics.py \

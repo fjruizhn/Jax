@@ -190,8 +190,8 @@
       "mensaje": "PISO ROTO: se esperaban 227 tests CORRIDOS de los pisos fuera del workflow."
     },
     "identity-foundation-shadow/policy": {
-      "patron": "^562 passed",
-      "mensaje": "PISO ROTO: se esperaban 562 tests CORRIDOS de Identity Foundation Shadow (la politica sin DB)."
+      "patron": "^602 passed",
+      "mensaje": "PISO ROTO: se esperaban 602 tests CORRIDOS de Identity Foundation Shadow (la politica sin DB)."
     }
   },
   "minimos": {
