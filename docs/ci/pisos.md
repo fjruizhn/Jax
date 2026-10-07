@@ -4626,7 +4626,7 @@ Piso vigente (2026-10-07): `^12 passed in `. Cubre activación que rechaza grant
 
 ## `authority-rule-models/models`
 
-Piso vigente (2026-10-07, Jax#371 r3): `^140 passed in ` (antes 30; 132 en r3 antes de la corrección de la auditoría). Medido con Python 3.14.4.
+Piso vigente (2026-10-07, Jax#371 r3): `^151 passed in ` (antes 30; 132 en r3, 140 tras la corrección de rule_id/rule_hash, 151 con la validación de `Tope.period`). Medido con Python 3.14.4.
 Cubre `tests/policy/test_faro_rule_authority_models.py`: el catálogo se exige por tipo EXACTO
 `CatalogoTopes` (sin `MappingProxyType` ni subclases), los límites se derivan de `ReglaValidada`
 (#370) con `limites_de` y se re-validan contra el catálogo (unidades, moneda, `Tope` como

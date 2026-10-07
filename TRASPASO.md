@@ -4,7 +4,7 @@
 
 - Rama `feat/faro-f1.1-evaluador`, worktree `/home/fruiz/wt/jax-371-r3`. Base: #370 `feat/faro-f1.1-schema-snapshot` @ 28f1eac7 (antes 05183cb7) (fusionada con merge commit; conflictos de TRASPASO.md, ci/pisos.json y docs/ci/pisos.md resueltos conservando todos los pisos).
 - Hecho en la ronda 3 (cierra el veredicto de ronda 2): catálogo por tipo exacto `CatalogoTopes`; `RuleLimits` = envoltorio de `LimitesObligatorios`/`Tope` de #370, solo vía `limites_de(regla, catalogo)`; `RuleEvaluation` exige el mismo catálogo y el `request_hash` lleva el OID; `type(x) is str` en unidades/moneda; enteros de `arguments` con rango; `store.record` exige `RuleDecision`; sin campo huérfano ni import duplicado; `pymysql==1.2.0` con hashes (`requirements-faro-mariadb-ci.txt`); historia corregida.
-- Pisos medidos en hall9000 (Python 3.14.4): modelos 140, identity 659 (re-medido tras fusionar #370 final 28f1eac7), codec 19, ratificaciones 12, MariaDB 4. `tests/policy` completo con MariaDB efímera: 857 passed, 15 skipped.
+- Pisos medidos en hall9000 (Python 3.14.4): modelos 151, identity 659 (re-medido tras fusionar #370 final 28f1eac7), codec 19, ratificaciones 12, MariaDB 4. `tests/policy` completo con MariaDB efímera: 857 passed, 15 skipped.
 - Mutantes: 36 mutaciones de `models.py`/`store.py` (28 de r3 + 8 de la corrección de la auditoría), todas muertas (tabla en `~/encargos-codex/entrega-faro-f11-371-r3.md`).
 
 ## Pendiente

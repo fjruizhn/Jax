@@ -20,8 +20,9 @@ from jax.faro.catalogo_topes import CatalogoTopes, es_de_catalogo
 from policy.authority_ledger.canonical import domain_hash
 from policy.authority_ledger.errors import AuthorityEventValidationError
 from policy.authority_ledger.ids import uuid7_text
+from .errors import RuleSchemaError
 from .schema import (MAX_CANTIDAD, Cantidad, Frecuencia, LimitesObligatorios, Monto,
-                     ReglaValidada, Tope)
+                     ReglaValidada, Tope, _validar_periodo)
 
 _IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9._:-]{0,127}\Z")
 _ISO_MONEDA = re.compile(r"[A-Z]{3}\Z", re.ASCII)
@@ -186,11 +187,15 @@ class RuleLimits:
         if self.tope is not None:
             tope = self.tope
             if (type(tope.resource_class) is not str or type(tope.resource) is not str
-                    or type(tope.period) is not str or not tope.period
                     or not es_de_catalogo(tope.resource, catalogo)
                     or tope.resource.partition(".")[0] != tope.resource_class):
                 raise AuthorityEventValidationError("tope fuera del catálogo cerrado (<clase>.<subid>)")
             _entero(tope.maximum, "tope.maximum")
+            try:        # misma regla que el schema de #370: subid de `frecuencia`, str exacto, NFC
+                _validar_periodo(tope.period, catalogo)
+            except RuleSchemaError as exc:
+                raise AuthorityEventValidationError(
+                    "tope.period fuera del catálogo frecuencia (por_hora, por_dia…)") from exc
 
 
 def limites_de(regla: ReglaValidada, catalogo: CatalogoTopes) -> RuleLimits:
