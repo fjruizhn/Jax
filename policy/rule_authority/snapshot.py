@@ -3,42 +3,52 @@
 `load_trusted_policy_snapshot(repo, pin)` carga las reglas Faro del commit EXACTO
 que fija el pin, nunca del arbol de trabajo:
 
-  1. el commit y el arbol `policy/` esperados existen y coinciden;
-  2. lectura por objetos Git con las defensas de ``jax/faro/git_objetos.py``
+  1. el pin se resuelve UNA sola vez: ``rev-parse --verify --end-of-options
+     <commit>^{commit}`` debe devolver EXACTAMENTE ``pin.commit`` (un nombre de
+     rama con forma hex, o el oid de un tag anotado, no pasan);
+  2. el arbol ``policy/`` de ese commit debe coincidir con el del pin, y la
+     enumeracion sale de ESE arbol ya verificado (nada se resuelve dos veces);
+  3. lectura por objetos Git con las defensas de ``jax/faro/git_objetos.py``
      (entorno limpio, hooks y fsmonitor apagados, replace objects desactivado);
-  3. solo blobs ``100644`` con ruta directa ``policy/faro/<nombre>.yaml``;
-     symlinks, submodules, bits de ejecucion, rutas anidadas y nombres no
-     canonicos niegan el snapshot completo (los archivos que no son reglas --
-     README, ``schemas/*.json`` -- simplemente no son reglas y no se enumeran);
-  4. TODOS los blobs se obtienen antes de validar uno, y el hash
-     ``rule_content_hash`` se calcula sobre los BYTES CRUDOS antes de parsear;
-  5. YAML estricto (sin claves duplicadas, aliases ni merge keys) y shape
+  4. solo blobs ``100644`` con ruta directa ``faro/<nombre>.yaml`` (desde la
+     raiz del arbol policy/); symlinks, submodules, bits de ejecucion, rutas
+     anidadas, nombres no canonicos y EXTENSIONES que aparentan ser regla
+     (``.YAML``, ``.yaml.bak``) niegan el snapshot completo; los archivos que
+     no son reglas (README, ``schemas/*.json``) simplemente no se enumeran;
+  5. TODOS los blobs se obtienen antes de validar uno, con tope de tamano;
+  6. el OID git de cada blob se RECALCULA desde sus bytes y se compara (un
+     objeto suelto adulterado no pasa), y ``rule_content_hash`` se calcula
+     sobre los BYTES CRUDOS antes de parsear;
+  7. YAML estricto (sin claves duplicadas, aliases ni merge keys) y shape
      cerrado rule-v1;
-  6. una regla invalida o un ``rule_id`` duplicado rechazan el snapshot ENTERO;
-  7. el resultado es profundamente inmutable y sellado: no se fabrica por la API
-     publica, solo este modulo construye objetos confiables.
+  8. una regla invalida o un ``rule_id`` duplicado rechazan el snapshot ENTERO;
+  9. el resultado es profundamente inmutable y sellado: clases NO-dataclass
+     con testigo privado, asi ``dataclasses.replace`` no puede fabricar
+     objetos con el sello ajeno, y el hash del snapshot se recalcula dentro
+     del constructor ante cualquier manipulacion.
 
-El sello impide fabricacion ACCIDENTAL; no es aislamiento frente a codigo
-arbitrario dentro del proceso (§6).
+El testigo impide fabricacion ACCIDENTAL por la API publica; no es aislamiento
+frente a codigo arbitrario dentro del proceso (§6).
 """
 from __future__ import annotations
 
 import hashlib
 import re
 import unicodedata
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from jax.faro.git_objetos import FuenteInvalida, git, leer_blobs, listar, oid_subarbol
-from policy.canonicalization.errors import StrictYAMLError
+from policy.canonicalization.errors import CanonicalizationError, StrictYAMLError
 from policy.canonicalization.strict_yaml import load_strict_yaml
 
 from .errors import RuleSnapshotError
 from .schema import ReglaValidada, validar_regla
 
-_SELLO = object()
+# Testigo privado de construccion: fuera de este modulo nadie construye objetos
+# confiables (ni con dataclasses.replace, que aqui ya no aplica).
+_TESTIGO = object()
 
-_PREFIJO = "policy/faro/"
+_PREFIJO = "faro/"                      # rutas relativas al arbol policy/ ya verificado
 _RE_NOMBRE_CANONICO = re.compile(r"[a-z][a-z0-9-]{0,63}\.yaml\Z")
 _RE_OBJETO = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _DOMINIO_SNAPSHOT = "jax-faro-policy-snapshot-v1"
@@ -48,76 +58,117 @@ def _hash_dominio(dominio: str, carga: bytes) -> str:
     return "sha256:" + hashlib.sha256(dominio.encode() + b"\0" + carga).hexdigest()
 
 
-@dataclass(frozen=True)
+def _oid_git_de(contenido: bytes, largo_oid: int) -> str:
+    """El OID que git calcularia para este blob (sha1 o sha256 segun el repo)."""
+    cabecera = b"blob %d\0" % len(contenido)
+    digesto = hashlib.sha1(cabecera + contenido) if largo_oid == 40 else hashlib.sha256(cabecera + contenido)
+    return digesto.hexdigest()
+
+
 class TrustedPolicyPin:
     """El pin activo: commit exacto, arbol esperado de ``policy/`` y procedencia.
-    Nada de nombres moviles: la raiz es el SHA, no una rama."""
-    repositorio: str
-    commit: str
-    policy_tree_oid: str
-    procedencia: str
+    Nada de nombres moviles: la raiz es el SHA, no una rama ni un tag. ``repositorio``
+    se valida (no vacio, NFC) y se conserva para auditoria; ligarlo al origen real
+    (remote/URL) es trabajo del ActivePolicyPinProvider, no del loader."""
 
-    def __post_init__(self) -> None:
-        for campo in ("repositorio", "procedencia"):
-            valor = getattr(self, campo)
+    __slots__ = ("repositorio", "commit", "policy_tree_oid", "procedencia")
+
+    def __init__(self, repositorio: str, commit: str, policy_tree_oid: str, procedencia: str) -> None:
+        for campo, valor in (("repositorio", repositorio), ("procedencia", procedencia)):
             if not isinstance(valor, str) or not valor.strip() \
                     or unicodedata.normalize("NFC", valor) != valor:
                 raise RuleSnapshotError(f"pin.{campo}: no vacio y en NFC")
-        for campo in ("commit", "policy_tree_oid"):
-            valor = getattr(self, campo)
+        for campo, valor in (("commit", commit), ("policy_tree_oid", policy_tree_oid)):
             if not isinstance(valor, str) or not _RE_OBJETO.fullmatch(valor):
                 raise RuleSnapshotError(f"pin.{campo}: debe ser un oid hex completo")
+        object.__setattr__(self, "repositorio", repositorio)
+        object.__setattr__(self, "commit", commit)
+        object.__setattr__(self, "policy_tree_oid", policy_tree_oid)
+        object.__setattr__(self, "procedencia", procedencia)
+
+    def __setattr__(self, *_args) -> None:
+        raise RuleSnapshotError("TrustedPolicyPin es inmutable")
+
+    def __delattr__(self, _name: str) -> None:
+        raise RuleSnapshotError("TrustedPolicyPin es inmutable")
 
 
-@dataclass(frozen=True)
 class ReglaSellada:
     """Una regla del snapshot, con sus bytes identificados. Solo la construye
-    este modulo (sello privado): una ReglaValidada suelta no es autoridad."""
-    ruta: str
-    blob_oid: str
-    content_hash: str            # sha256 de los BYTES CRUDOS del blob (§5)
-    regla: ReglaValidada
-    _sello: object = field(repr=False, compare=False)
+    este modulo (testigo privado): una ReglaValidada suelta no es autoridad."""
 
-    def __post_init__(self) -> None:
-        if self._sello is not _SELLO:
+    __slots__ = ("ruta", "modo", "blob_oid", "content_hash", "regla", "_testigo")
+
+    def __init__(self, *, ruta: str, modo: str, blob_oid: str, content_hash: str,
+                 regla: ReglaValidada, _testigo: object = None) -> None:
+        if _testigo is not _TESTIGO:
             raise RuleSnapshotError("ReglaSellada no se fabrica por la API publica")
+        object.__setattr__(self, "ruta", ruta)
+        object.__setattr__(self, "modo", modo)
+        object.__setattr__(self, "blob_oid", blob_oid)
+        object.__setattr__(self, "content_hash", content_hash)
+        object.__setattr__(self, "regla", regla)
+        object.__setattr__(self, "_testigo", _testigo)
+
+    def __setattr__(self, *_args) -> None:
+        raise RuleSnapshotError("ReglaSellada es inmutable")
+
+    def __delattr__(self, _name: str) -> None:
+        raise RuleSnapshotError("ReglaSellada es inmutable")
 
 
-@dataclass(frozen=True)
 class TrustedPolicySnapshot:
-    commit: str
-    policy_tree_oid: str
-    reglas: tuple[ReglaSellada, ...]          # ordenadas por ruta
-    snapshot_hash: str                        # dominio propio, lista ordenada (§6)
-    repositorio: str
-    procedencia: str                          # procedencia del pin que lo cargo
-    _sello: object = field(repr=False, compare=False)
+    """El snapshot sellado. El hash se RECALCULA en la construccion: cualquier
+    combinacion de reglas que no corresponda a su propio hash, niega."""
 
-    def __post_init__(self) -> None:
-        if self._sello is not _SELLO:
+    __slots__ = ("commit", "policy_tree_oid", "reglas", "snapshot_hash",
+                 "repositorio", "procedencia", "_testigo")
+
+    def __init__(self, *, commit: str, policy_tree_oid: str, reglas: tuple[ReglaSellada, ...],
+                 repositorio: str, procedencia: str, _testigo: object = None) -> None:
+        if _testigo is not _TESTIGO:
             raise RuleSnapshotError("TrustedPolicySnapshot no se fabrica por la API publica")
+        carga = "".join(f"{r.ruta}\0{r.modo}\0{r.blob_oid}\0{r.content_hash}\n"
+                        for r in reglas).encode()
+        object.__setattr__(self, "commit", commit)
+        object.__setattr__(self, "policy_tree_oid", policy_tree_oid)
+        object.__setattr__(self, "reglas", tuple(reglas))
+        object.__setattr__(self, "snapshot_hash", _hash_dominio(_DOMINIO_SNAPSHOT, carga))
+        object.__setattr__(self, "repositorio", repositorio)
+        object.__setattr__(self, "procedencia", procedencia)
+        object.__setattr__(self, "_testigo", _testigo)
+
+    def __setattr__(self, *_args) -> None:
+        raise RuleSnapshotError("TrustedPolicySnapshot es inmutable")
+
+    def __delattr__(self, _name: str) -> None:
+        raise RuleSnapshotError("TrustedPolicySnapshot es inmutable")
 
 
-def _clasificar(entradas) -> tuple[list, list]:
-    """Separa candidatos a regla de archivos que no son reglas; NIEGA lo raro."""
-    candidatos, ignorados = [], []
+def _clasificar(entradas) -> list:
+    """Candidatos a regla del arbol policy/ ya verificado. NIEGA lo raro:
+    modos que no sean blob plano, el propio faro/ que no sea arbol, y nombres
+    que aparenten regla sin ser canonicos (incluida la extension en mayusculas
+    o con cola .bak). Los archivos claramente ajenos a reglas (README.md,
+    schemas/*.json) no se enumeran."""
+    candidatos = []
     for entrada in entradas:
+        if entrada.ruta == "faro":
+            raise RuleSnapshotError(
+                f"faro no es un arbol (modo {entrada.modo}): symlink o archivo en su lugar")
         if not entrada.ruta.startswith(_PREFIJO):
-            continue                                    # fuera de policy/faro: nada que ver
-        nombre = entrada.ruta[len(_PREFIJO):]
-        es_yaml = nombre.endswith((".yaml", ".yml"))
+            continue                                    # fuera de faro/: nada que ver
         if entrada.modo != "100644":
             raise RuleSnapshotError(
                 f"{entrada.ruta}: modo {entrada.modo} no admitido (symlink/submodulo/ejecutable)")
-        if es_yaml and not _RE_NOMBRE_CANONICO.fullmatch(nombre):
+        nombre = entrada.ruta[len(_PREFIJO):]
+        parece_regla = ".yaml" in nombre.casefold() or ".yml" in nombre.casefold()
+        if parece_regla and not _RE_NOMBRE_CANONICO.fullmatch(nombre):
             raise RuleSnapshotError(
-                f"{entrada.ruta}: nombre o ruta no canonica para regla (nested/no-canonico)")
-        if es_yaml:
+                f"{entrada.ruta}: nombre o ruta no canonica para regla (nested/mayusculas/cola)")
+        if parece_regla:
             candidatos.append(entrada)
-        else:
-            ignorados.append(entrada)                   # README, schemas/*.json: no son reglas
-    return candidatos, ignorados
+    return candidatos
 
 
 def load_trusted_policy_snapshot(repo: Path, pin: TrustedPolicyPin) -> TrustedPolicySnapshot:
@@ -125,39 +176,49 @@ def load_trusted_policy_snapshot(repo: Path, pin: TrustedPolicyPin) -> TrustedPo
         raise RuleSnapshotError(f"el repositorio {repo} no es un directorio")
 
     try:
-        # (1) el commit existe, exacto, como commit; y el arbol policy/ coincide con el pin.
-        r = git(repo, "cat-file", "-e", f"{pin.commit}^{{commit}}", aceptar=(0, 1, 128))
-        if r.returncode != 0:
-            raise RuleSnapshotError(f"el commit {pin.commit} no existe en {repo}")
-        arbol_real = oid_subarbol(repo, pin.commit, "policy")
+        # (1) UNA sola resolucion: el pin debe SER ese commit exacto. Un nombre
+        # de rama con forma hex o el oid de un tag anotado no coinciden y niegan.
+        r = git(repo, "rev-parse", "--verify", "--end-of-options", f"{pin.commit}^{{commit}}")
     except FuenteInvalida as exc:
         raise RuleSnapshotError(str(exc)) from exc
-    if arbol_real != pin.policy_tree_oid:
+    resuelto = r.stdout.decode().strip()
+    if resuelto != pin.commit:
+        raise RuleSnapshotError(
+            f"el pin no es el commit exacto: {pin.commit[:16]}… resuelve a {resuelto[:16]}…")
+
+    try:
+        # (2) arbol policy/ contra el pin; la enumeracion sale de ESE arbol.
+        arbol = oid_subarbol(repo, pin.commit, "policy")
+    except FuenteInvalida as exc:
+        raise RuleSnapshotError(str(exc)) from exc
+    if arbol != pin.policy_tree_oid:
         raise RuleSnapshotError("el arbol policy/ no coincide con el pin: no se carga nada")
 
-    # (2-3) enumerar solo policy/faro, por objetos; nada del arbol de trabajo.
     try:
-        entradas = listar(repo, pin.commit, "policy/faro")
+        entradas = listar(repo, arbol, "faro")
     except FuenteInvalida as exc:
         raise RuleSnapshotError(str(exc)) from exc
-    candidatos, _ = _clasificar(entradas)
+    candidatos = _clasificar(entradas)
 
-    # (4) TODOS los blobs antes de validar uno.
+    # (5) TODOS los blobs antes de validar uno (leer_blobs impone tope de tamano).
     try:
         blobs = leer_blobs(repo, [e.oid for e in candidatos])
     except FuenteInvalida as exc:
         raise RuleSnapshotError(str(exc)) from exc
 
-    # (5-6) hash de bytes crudos ANTES de parsear; una invalida rompe el snapshot entero.
+    # (6) OID recalculado + hash de bytes crudos ANTES de parsear.
     selladas: list[ReglaSellada] = []
-    ordenadas = sorted(candidatos, key=lambda e: e.ruta)
     vistos: set[str] = set()
-    for entrada in ordenadas:
+    for entrada in sorted(candidatos, key=lambda e: e.ruta):
         crudo = blobs[entrada.oid]
+        oid_real = _oid_git_de(crudo, len(entrada.oid))
+        if oid_real != entrada.oid:
+            raise RuleSnapshotError(
+                f"{entrada.ruta}: el blob no corresponde a su OID (objeto adulterado)")
         content_hash = "sha256:" + hashlib.sha256(crudo).hexdigest()
         try:
             datos = load_strict_yaml(crudo)
-        except StrictYAMLError as exc:
+        except (StrictYAMLError, CanonicalizationError) as exc:
             raise RuleSnapshotError(f"{entrada.ruta}: YAML no estricto: {exc}") from exc
         try:
             regla = validar_regla(datos)
@@ -166,16 +227,11 @@ def load_trusted_policy_snapshot(repo: Path, pin: TrustedPolicyPin) -> TrustedPo
         if regla.rule_id in vistos:
             raise RuleSnapshotError(f"rule_id duplicado en el snapshot: {regla.rule_id}")
         vistos.add(regla.rule_id)
-        selladas.append(ReglaSellada(ruta=entrada.ruta, blob_oid=entrada.oid,
-                                     content_hash=content_hash, regla=regla, _sello=_SELLO))
+        selladas.append(ReglaSellada(ruta=f"policy/{entrada.ruta}", modo=entrada.modo,
+                                     blob_oid=entrada.oid, content_hash=content_hash,
+                                     regla=regla, _testigo=_TESTIGO))
 
-    # §6: hash del snapshot = dominio propio + lista ordenada de (ruta, modo, oid, hash).
-    carga = "".join(
-        f"{s.ruta}\0{e.modo}\0{s.blob_oid}\0{s.content_hash}\n"
-        for s, e in zip(selladas, ordenadas)
-    ).encode()
     return TrustedPolicySnapshot(
         commit=pin.commit, policy_tree_oid=pin.policy_tree_oid, reglas=tuple(selladas),
-        snapshot_hash=_hash_dominio(_DOMINIO_SNAPSHOT, carga),
-        repositorio=pin.repositorio, procedencia=pin.procedencia, _sello=_SELLO,
+        repositorio=pin.repositorio, procedencia=pin.procedencia, _testigo=_TESTIGO,
     )

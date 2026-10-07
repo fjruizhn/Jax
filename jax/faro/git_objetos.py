@@ -16,6 +16,10 @@ from pathlib import Path
 
 _GIT_SIN_HOOKS = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
 
+# Tope de tamano de blob leido por lotes (F1.1 §6): una regla es un YAML chico;
+# algo de megas no es una regla, es un ataque de memoria.
+MAX_BLOB_BYTES = 1024 * 1024
+
 # `git replace` (refs/replace/) hace que un SHA muestre OTRO contenido sin cambiar el SHA: un
 # paquete «fijado por SHA» dejaria de serlo. Se apaga con la bandera Y con la variable.
 _SIN_REPLACE = ("--no-replace-objects",)
@@ -114,8 +118,12 @@ def listar(repo: Path, sha: str, *rutas: str) -> list[EntradaGit]:
         if not crudo:
             continue
         meta, _, ruta = crudo.partition(b"\t")
-        modo, _tipo, oid = meta.decode().split(" ")
-        entradas.append(EntradaGit(modo, oid, ruta.decode("utf-8")))
+        modo, _tipo, oid = meta.decode("ascii").split(" ")
+        try:
+            ruta_texto = ruta.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise FuenteInvalida("ruta de objeto no UTF-8: el snapshot niega") from exc
+        entradas.append(EntradaGit(modo, oid, ruta_texto))
     return entradas
 
 
@@ -131,6 +139,8 @@ def leer_blobs(repo: Path, oids: list[str]) -> dict[str, bytes]:
         if len(cabecera) != 3 or cabecera[0] != oid or cabecera[1] != "blob":
             raise FuenteInvalida(f"git cat-file devolvio algo inesperado para {oid}: {cabecera}")
         tam = int(cabecera[2])
+        if tam > MAX_BLOB_BYTES:
+            raise FuenteInvalida(f"blob {oid} excede {MAX_BLOB_BYTES} bytes: no es una regla")
         blobs[oid] = salida[fin + 1:fin + 1 + tam]
         i = fin + 1 + tam + 1
     return blobs

@@ -109,12 +109,21 @@ def test_cualquier_cambio_de_byte_cambia_el_hash(tmp_path: Path, mutacion) -> No
 
 
 def test_un_identificador_en_nfd_niega_el_snapshot_nunca_se_confunde(tmp_path: Path) -> None:
-    # §7 exige identificadores NFC: los bytes NFD no cargan, asi que jamas pueden
-    # colisionar con la forma NFC de la misma regla.
+    # §7 exige identificadores NFC y ASCII por patron: los bytes NFD no cargan,
+    # asi que jamas pueden colisionar con la forma NFC de la misma regla.
     nfd = REGLA.replace(b"ejemplo-regla", unicodedata.normalize("NFD", "ejemplo-reglá").encode())
     repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": nfd})
-    with pytest.raises(RuleSnapshotError):
+    with pytest.raises(RuleSnapshotError) as excinfo:
         _cargar(repo, commit, arbol)
+    assert "regla invalida" in str(excinfo.value)     # muere por identificador, no por otra cosa
+
+
+def test_nfd_en_un_comentario_cambia_el_hash_igual_que_cualquier_byte(tmp_path: Path) -> None:
+    nfc = REGLA + b"# comentario con a\n"
+    nfd = REGLA + unicodedata.normalize("NFD", "# comentario con á\n").encode()
+    a = _repo(tmp_path / "a", {"policy/faro/ejemplo.yaml": nfc})
+    b = _repo(tmp_path / "b", {"policy/faro/ejemplo.yaml": nfd})
+    assert _cargar(*a).reglas[0].content_hash != _cargar(*b).reglas[0].content_hash
 
 
 def test_el_yaml_canonizado_nunca_produce_el_hash_de_los_bytes(tmp_path: Path) -> None:
@@ -221,8 +230,22 @@ def test_replace_objects_no_desvia_la_lectura(tmp_path: Path) -> None:
     assert snap.reglas[0].content_hash == "sha256:" + hashlib.sha256(REGLA).hexdigest()
 
 
-def test_hooks_configurados_no_desvian_la_lectura(tmp_path: Path) -> None:
+def test_las_defensas_de_git_van_en_cada_invocacion(tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sin este chequeo, un mutante que quite hooksPath/fsmonitor/replace/env
+    limpio sobrevive: el plumbing de git no corre hooks de todos modos. Se
+    captura la invocacion REAL y se exigen las banderas y el entorno."""
     repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
+    capturadas = []
+    real_run = subprocess.run
+
+    def espia_run(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args")
+        capturadas.append((list(argv), dict(kwargs.get("env") or {})))
+        return real_run(*args, **kwargs)
+
+    import jax.faro.git_objetos as go
+    monkeypatch.setattr(go.subprocess, "run", espia_run)
     hooks = repo / ".git" / "hooks-propios"
     hooks.mkdir()
     (hooks / "pre-commit").write_text("#!/bin/sh\nexit 1\n")
@@ -231,6 +254,28 @@ def test_hooks_configurados_no_desvian_la_lectura(tmp_path: Path) -> None:
     _git(repo, "config", "core.fsmonitor", "true")
     snap = _cargar(repo, commit, arbol)
     assert len(snap.reglas) == 1
+    # Solo las invocaciones del loader (vanane con --no-replace-objects); las del
+    # helper de prueba (_git: "git -C ...") no llevan defensas ni deben.
+    deloader = [(a, e) for a, e in capturadas if len(a) > 1 and a[1] == "--no-replace-objects"]
+    assert deloader, "el loader no invoco git con sus defensas"
+    for argv, entorno in deloader:
+        assert "--no-replace-objects" in argv
+        assert "core.hooksPath=/dev/null" in argv
+        assert "core.fsmonitor=false" in argv
+        assert entorno.get("GIT_CONFIG_NOSYSTEM") == "1"
+        assert entorno.get("GIT_CONFIG_GLOBAL") == "/dev/null"
+        assert entorno.get("GIT_NO_REPLACE_OBJECTS") == "1"
+        assert not any(k.startswith("GIT_") and k not in
+                       ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_NO_REPLACE_OBJECTS",
+                        "GIT_TERMINAL_PROMPT") for k in entorno)
+        assert "core.hooksPath=/dev/null" in argv
+        assert "core.fsmonitor=false" in argv
+        assert entorno.get("GIT_CONFIG_NOSYSTEM") == "1"
+        assert entorno.get("GIT_CONFIG_GLOBAL") == "/dev/null"
+        assert entorno.get("GIT_NO_REPLACE_OBJECTS") == "1"
+        assert not any(k.startswith("GIT_") and k not in
+                       ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_NO_REPLACE_OBJECTS",
+                        "GIT_TERMINAL_PROMPT") for k in entorno)
 
 
 def test_entorno_git_envenenado_no_desvia_la_lectura(monkeypatch: pytest.MonkeyPatch,
@@ -257,9 +302,11 @@ def _repo_entrada(tmp: Path, accion) -> tuple[Path, str, str]:
     return repo, _git(repo, "rev-parse", "HEAD").strip(), _git(repo, "rev-parse", "HEAD:policy").strip()
 
 
-def test_symlink_rechaza(tmp_path: Path) -> None:
+def test_symlink_a_una_regla_valida_rechaza(tmp_path: Path) -> None:
+    destino = tmp_path / "regla-de-verdad.yaml"
+    destino.write_bytes(REGLA)                       # si se quita el chequeo de modo, CARGA
     def accion(repo: Path) -> None:
-        os.symlink("/etc/passwd", repo / "policy" / "faro" / "enlace.yaml")
+        os.symlink(str(destino), repo / "policy" / "faro" / "enlace.yaml")
     repo, commit, arbol = _repo_entrada(tmp_path, accion)
     with pytest.raises(RuleSnapshotError):
         _cargar(repo, commit, arbol)
@@ -294,12 +341,15 @@ def test_yaml_anidado_bajo_subdirectorio_rechaza(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("nombre", ["Ejemplo.yaml", "ejemplo.yml", "ejemplo regla.yaml",
                                     "a" * 65 + ".yaml"])
-def test_nombre_no_canonico_rechaza(tmp_path: Path, nombre: str) -> None:
+def test_nombre_no_canonico_rechaza_por_el_nombre(tmp_path: Path, nombre: str) -> None:
+    # Contenido DISTINTO y valido (otro rule_id): la unica razon de rechazo es el nombre.
+    unica = REGLA.replace(b"ejemplo-regla", b"regla-unica") + b"# propia\n"
     def accion(repo: Path) -> None:
-        (repo / "policy" / "faro" / nombre).write_bytes(REGLA)
+        (repo / "policy" / "faro" / nombre).write_bytes(unica)
     repo, commit, arbol = _repo_entrada(tmp_path, accion)
-    with pytest.raises(RuleSnapshotError):
+    with pytest.raises(RuleSnapshotError) as excinfo:
         _cargar(repo, commit, arbol)
+    assert "no canonica" in str(excinfo.value)
 
 
 # ------------------------------------- atomicidad y contenido invalido §13
@@ -355,15 +405,27 @@ def test_un_clone_con_historia_reescrita_no_conserva_procedencia(tmp_path: Path)
 # --------------------------------------------------------- sello y API publica
 
 def test_el_snapshot_no_se_fabrica_por_la_api_publica() -> None:
-    with pytest.raises(TypeError):
+    with pytest.raises(RuleSnapshotError):
         TrustedPolicySnapshot(commit="0" * 40, policy_tree_oid="0" * 40, reglas=(),
-                              snapshot_hash="sha256:x", repositorio="jax", procedencia="p")
+                              repositorio="jax", procedencia="p")
 
 
 def test_la_regla_sellada_no_se_fabrica_por_la_api_publica() -> None:
-    with pytest.raises(TypeError):
-        ReglaSellada(ruta="policy/faro/x.yaml", blob_oid="0" * 40,
+    with pytest.raises(RuleSnapshotError):
+        ReglaSellada(ruta="policy/faro/x.yaml", modo="100644", blob_oid="0" * 40,
                      content_hash="sha256:x", regla=None)          # type: ignore[arg-type]
+
+
+def test_dataclasses_replace_no_fabrica_objetos_sellados(tmp_path: Path) -> None:
+    import dataclasses
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA,
+                                           "policy/faro/ejemplo-tope.yaml": REGLA_TOPE})
+    snap = _cargar(repo, commit, arbol)
+    r0, r1 = snap.reglas
+    with pytest.raises(TypeError):                      # no son dataclasses: no hay replace
+        dataclasses.replace(r1, regla=r0.regla)         # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        dataclasses.replace(snap, reglas=(r0,))         # type: ignore[arg-type]
 
 
 def test_el_snapshot_es_profundamente_inmutable(tmp_path: Path) -> None:
