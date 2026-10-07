@@ -4621,6 +4621,14 @@ efímera: el provisioning revoca los privilegios previos (`REVOKE ALL PRIVILEGES
 `SHOW GRANTS` coincide exacto con el contrato; la migración 002 falla cerrada con filas NULL aun con
 `sql_mode=''` (la fila queda intacta) y pasa con cero NULL.
 
+## `authority-rule-events/ratifications`
+
+Piso vigente (2026-10-07): `^12 passed in `. Medido con el comando exacto del workflow. Cubre
+payload inmutable, variantes cerradas, validación de identificadores y vigencia, grants
+repetidos por regla, selección del último grant, activación que no acepta un grant individual,
+rechazo del payload Block 4 heredado y denegación de revocaciones desconocidas o duplicadas.
+Antes: 8.
+
 ## `archivos-de-test-en-ci/pisos`
 
 Patrón vigente (2026-10-04): `^227 passed`

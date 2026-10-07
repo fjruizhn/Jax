@@ -2649,6 +2649,13 @@ jobs:
           set -o pipefail
           python -m pytest -q tests/policy/test_authority_ledger_storage_mariadb.py 2>&1 | tee /tmp/authority-ledger-mariadb
           python3 .github/ci/piso.py verificar authority-ledger-mariadb/integration /tmp/authority-ledger-mariadb || exit $?
+      - name: Block 4 rule ratification events -- piso exacto
+        env:
+          PYTHONPATH: "."
+        run: |
+          set -o pipefail
+          python -m pytest -q tests/policy/test_authority_ledger_rule_ratifications.py 2>&1 | tee /tmp/authority-rule-events
+          python3 .github/ci/piso.py verificar authority-rule-events/ratifications /tmp/authority-rule-events || exit $?
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

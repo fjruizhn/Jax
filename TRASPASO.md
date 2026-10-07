@@ -25,10 +25,24 @@ entrada está en `~/encargos-codex/jax-faro-f11-veredicto-368-369-371-r2.md`.
   `STRICT_ALL_TABLES`. Tres pruebas MariaDB nuevas (SHOW GRANTS exacto; 002 con NULL y
   `sql_mode=''`; 002 sin NULL). Piso `authority-ledger-mariadb/integration`: 1 -> 4.
 
+## Hecho en esta rama (#369)
+
+- Se integró el kernel corregido de #368 conservando las pruebas de las ocho variantes del
+  ledger.
+- La activación solo acepta una ratificación de corpus; una ratificación individual no puede
+  servir como su destino (E4).
+- `current_rule_ratification` se renombró a `latest_unrevoked_rule_ratification`; su contrato
+  aclara que la vigencia temporal la evalúa Rule Authority.
+- Los sellos de las ratificaciones individuales también se validan por identidad; una
+  instancia `AlwaysEqual` es rechazada.
+- La prueba E10 llega al constructor y mata la mutación que elimina el rechazo de payload Block
+  4 heredado.
+- Pisos verificados en esta rama: codec 19, MariaDB 1, ratificaciones 12.
+- Se incorporó desde #368 la instalación de `pymysql` en el paso Python 3.14, necesaria para el test MariaDB del workflow.
+- Suite `tests/policy/test_authority_ledger*.py`: 53 passed. K3, K8, D2, D3, E4 y E10 muertos.
+
 ## Falta
 
-- Repetir las pruebas de #368 tras completar #369 y confirmar ambos pisos en el SHA final.
-- Incorporar esta base corregida a #369, luego cerrar sus pruebas/piso.
 - #371 espera el SHA final de #370 antes del rebase sobre `origin/feat/faro-f1.1-schema-snapshot`.
 - Re-medición final de los pisos sobre la base real apilada, merge-tree y reporte de entrega.
 
@@ -41,7 +55,7 @@ entrada está en `~/encargos-codex/jax-faro-f11-veredicto-368-369-371-r2.md`.
 
 ## Siguiente comando
 
-Desde el worktree #368, ejecutar:
+Desde el worktree #369, ejecutar:
 
 ```sh
 JAX_AUTHORITY_LEDGER_DOCKER_CMD='sudo -n docker' PYTHONPATH=. python3 -B -m pytest -q tests/policy/test_authority_ledger*.py

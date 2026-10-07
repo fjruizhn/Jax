@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from .errors import AuthorityEventValidationError
 from .models import (
     AuthorityEvent, AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
-    OverlayPayload, OverlayScope, OverlayType, _RATIFICATION_STORAGE_SEAL,
+    OverlayPayload, OverlayScope, OverlayType, RuleRatificationGrantPayload,
+    _RATIFICATION_STORAGE_SEAL, _RULE_RATIFICATION_STORAGE_SEAL,
 )
 
 
@@ -18,6 +19,12 @@ _INTENT_FIELDS = {
 _EVENT_FIELDS = {
     "event_id", "sequence", "previous_event_hash", "intent",
     "recorded_at_utc", "signature", "event_hash",
+}
+_RULE_GRANT_INTENT_FIELDS = {
+    "event_type", "actor_id", "evidence_refs", "rule_ratification",
+}
+_RULE_REVOKE_INTENT_FIELDS = {
+    "event_type", "actor_id", "evidence_refs", "rule_ratification_event_id",
 }
 _VARIANT_PAYLOAD_FIELDS = {
     AuthorityEventType.RATIFICATION_GRANTED: {"policy_corpus_hash", "static_policy_view_projection"},
@@ -99,6 +106,43 @@ def _overlay_from_projection(value):
 
 
 def intent_from_projection(value) -> AuthorityEventIntent:
+    if isinstance(value, dict) and value.get("event_type") == AuthorityEventType.RULE_RATIFICATION_GRANTED.value:
+        _closed_object(value, _RULE_GRANT_INTENT_FIELDS, "canonical_intent")
+        raw = _closed_object(value["rule_ratification"], {
+            "rule_id", "rule_path", "rule_blob_oid", "rule_content_hash",
+            "ratified_policy_revision", "ratified_policy_tree_oid",
+            "ratified_policy_snapshot_hash", "valid_from_utc", "valid_until_utc",
+        }, "rule_ratification")
+        try:
+            grant = RuleRatificationGrantPayload(
+                rule_id=raw["rule_id"],
+                rule_path=raw["rule_path"],
+                rule_blob_oid=raw["rule_blob_oid"],
+                rule_content_hash=raw["rule_content_hash"],
+                ratified_policy_revision=raw["ratified_policy_revision"],
+                ratified_policy_tree_oid=raw["ratified_policy_tree_oid"],
+                ratified_policy_snapshot_hash=raw["ratified_policy_snapshot_hash"],
+                valid_from_utc=datetime.fromisoformat(raw["valid_from_utc"]),
+                valid_until_utc=datetime.fromisoformat(raw["valid_until_utc"]) if raw["valid_until_utc"] is not None else None,
+            )
+            return AuthorityEventIntent(
+                AuthorityEventType.RULE_RATIFICATION_GRANTED,
+                value["actor_id"], _array(value["evidence_refs"], "evidence_refs"),
+                rule_ratification=grant,
+                _rule_ratification_snapshot_seal=_RULE_RATIFICATION_STORAGE_SEAL,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AuthorityEventValidationError("rule_ratification inválido") from exc
+    if isinstance(value, dict) and value.get("event_type") == AuthorityEventType.RULE_RATIFICATION_REVOKED.value:
+        _closed_object(value, _RULE_REVOKE_INTENT_FIELDS, "canonical_intent")
+        try:
+            return AuthorityEventIntent(
+                AuthorityEventType.RULE_RATIFICATION_REVOKED,
+                value["actor_id"], _array(value["evidence_refs"], "evidence_refs"),
+                rule_ratification_event_id=value["rule_ratification_event_id"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AuthorityEventValidationError("rule ratification revoke inválido") from exc
     _closed_object(value, _INTENT_FIELDS, "canonical_intent")
     try:
         event_type = AuthorityEventType(value["event_type"])
