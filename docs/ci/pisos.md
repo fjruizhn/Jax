@@ -4603,24 +4603,19 @@ lecturas como root) pasa la suite de 55 a 199 pruebas recolectadas; el runner sa
 
 ## `authority-ledger-codec/codec`
 
-Piso nuevo (2026-10-06): `^5 passed in `. Medido en hall9000 con el comando exacto del workflow:
-`pytest -q tests/policy/test_authority_ledger_storage_codec.py`. Cubre proyección cerrada,
-rechazo de campos desconocidos, lectura de la forma histórica exacta y persistencia de
-`canonical_intent`, `canonical_event` y `evidence_refs`.
+Piso vigente (2026-10-07): `^19 passed in `. Medido en Hall9000 con el comando exacto del
+workflow, tras los arreglos de #368/#369.
 
 ## `authority-ledger-mariadb/integration`
 
-Piso nuevo (2026-10-06): `^1 passed in `. Medido en hall9000 con MariaDB 12.3.3 efímera
-`--network none`; la prueba aplica la migración, genera una llave Ed25519 de prueba y valida
-firma → INSERT → lectura → reconstrucción → hash/firma y replay. La base solo expone socket
-Unix al proceso de prueba.
+Piso vigente (2026-10-07): `^1 passed in `. MariaDB 12.3.3 efímera con `--network none`;
+la cuenta de ataque conserva GRANT de SELECT/UPDATE/DELETE y los triggers impiden UPDATE/DELETE.
 
 ## `authority-rule-events/ratifications`
 
-Piso nuevo (2026-10-06): `^8 passed in `. Medido con el comando exacto del workflow. Cubre
-payload inmutable, variantes cerradas, validación de identificadores y vigencia, grants
-repetidos por regla, selección del último grant y denegación de revocaciones desconocidas o
-duplicadas.
+Piso vigente (2026-10-07): `^12 passed in `. Incluye las regresiones de grants individuales
+sobre el kernel corregido.
+
 
 ## `authority-rule-models/models`
 
@@ -4641,12 +4636,6 @@ Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la form
 
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-06, r4): `^545 passed`
-
-Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
-solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
-de la constitución es que un número compartido lo re-mide el último en llegar, y sin piso no hay
-número. Medido en hall9000: 459 (ronda 1) + 38 (ronda 2) + 43 (ronda 3: catálogo de topes, copias/pickle, nombres que esquivan, blob gigante, identidad de las listas del workflow, y las tres dedicadas de razon propia: dígito Unicode, claves de límites, not_after) de rule_authority (20 de schema — decisión R-4 de
-Fernando del 2026-10-06 y dígitos ASCII; 2 de snapshot — testigo no-dataclass; 16 de los ataques
-A–J del auditor como regresiones). El paso re-corre la misma lista en `-q | tee` como memory-b9.
-Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.
+Piso actualizado (2026-10-07): `^577 passed`. Medido con el paso completo del workflow
+Python 3.14 tras integrar los modelos de #371 y los proveedores de #372; el resultado exacto
+se vuelve a verificar sobre la base final.
