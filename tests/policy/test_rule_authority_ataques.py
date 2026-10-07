@@ -422,22 +422,58 @@ def test_r3_blob_gigante_con_nombre_de_regla_niega(tmp_path: Path) -> None:
     assert "excede" in str(excinfo.value)
 
 
-def test_r3_las_dos_listas_de_identity_foundation_son_iguales() -> None:
-    """La lista vive dos veces en policy.yml (paso principal y paso del piso):
-    si divergen, el piso mide otra cosa que la que corre. Un solo archivo."""
-    import re as _re
+def _argv_de_run(run: str) -> list:
+    """Los argumentos EFECTIVOS del comando pytest, como bash los veria: se unen
+    las continuaciones (barra + salto) y cada LINEA restante es un COMANDO
+    propio; el que invoca pytest es el que cuenta. Si un .py quedo en linea
+    propia, bash lo EJECUTARIA despues de pytest (exit 126) y pytest no lo ve."""
+    import shlex
+    continuo = run.replace("\\\n", " ")
+    for linea in continuo.splitlines():
+        argv = shlex.split(linea)
+        if any("pytest" in a for a in argv[:5]):
+            return argv
+    return []
+
+
+def _pasos_identity() -> list:
     import yaml as _yaml
-    flujo = _yaml.safe_load((Path(__file__).resolve().parents[2] / ".github" / "workflows"
-                             / "policy.yml").read_text())
-    listas = []
+    flujo = _yaml.safe_load((RAIZ / ".github" / "workflows" / "policy.yml").read_text())
+    pasos = []
     for job in flujo["jobs"].values():
         for paso in job.get("steps", []):
-            run = paso.get("run", "")
-            if "identity-foundation-shadow-pytest" in str(run) or \
-               ("identity-foundation-shadow/policy" in str(run) and "tee" in str(run)):
-                listas.append(sorted(_re.findall(r"(?:tests/policy|policy/enforcement_evidence)/[a-z_0-9]+\.py", run)))
-    assert len(listas) == 2, f"se esperaban exactamente 2 pasos con la lista, hay {len(listas)}"
+            nombre = str(paso.get("name", "")) + str(paso.get("run", ""))
+            if "Identity Foundation" in nombre:
+                pasos.append(paso)
+    return pasos
+
+
+def test_r3_las_dos_listas_de_identity_foundation_son_iguales() -> None:
+    """La lista vive dos veces en policy.yml (paso principal y paso del piso):
+    si divergen, el piso mide otra cosa que la que corre. Se comparan los
+    ARGUMENTOS EFECTIVOS que recibe pytest en cada paso (shlex tras unir
+    continuaciones) — no un regex de nombres: la r2 de #372 encontro que el
+    regex pasaba con el paso roto (exit 126)."""
+    pasos = _pasos_identity()
+    assert len(pasos) == 2, f"se esperaban exactamente 2 pasos de Identity, hay {len(pasos)}"
+    listas = []
+    for paso in pasos:
+        argv = _argv_de_run(paso["run"])
+        assert argv, "el paso no corre pytest"
+        archivos = [a for a in argv if a.endswith(".py")]
+        assert archivos, "el paso no lista archivos de prueba"
+        listas.append(sorted(archivos))
+        # B-1 (r2 de #372): un .py en linea PROPIA no es argumento de pytest —
+        # bash lo ejecutaria como comando tras el paso (exit 126, CI roja).
+        import shlex
+        for linea in paso["run"].replace("\\\n", " ").splitlines():
+            tokens = shlex.split(linea)
+            if tokens and tokens[0].endswith(".py"):
+                raise AssertionError(f"archivo como comando suelto: {tokens[0]}")
     assert listas[0] == listas[1], "las dos listas de Identity Foundation divergen"
+    # y los archivos existen de verdad
+    for archivo in listas[0]:
+        assert (RAIZ / archivo).is_file(), f"{archivo} no existe"
 
 
 # ------------------------------------- ronda 5: el catalogo sale del PIN (B-3)

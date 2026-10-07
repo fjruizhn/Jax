@@ -2569,6 +2569,7 @@ jobs:
           tests/policy/test_rule_authority_schema.py
           tests/policy/test_rule_authority_snapshot.py
           tests/policy/test_rule_authority_ataques.py
+          tests/policy/test_rule_authority_providers.py
           tests/policy/test_shadow_manifest.py
           tests/policy/test_strict_yaml.py
           tests/policy/test_v3_array_semantics.py
@@ -2651,6 +2652,8 @@ jobs:
         # D-4 niegan como subid, mayusculas/acentos/segmentos niegan, AUD2 de cruce
         # de clases, vector dorado del hash con dominio v2, subclase de bytes niega,
         # validar_regla exige el sellado, fabricar con el OID del pin niega).
+        # Paso 7 r2 reapilado (providers, jax#372): 614 (+40 mas: interfaces con
+        # leases RW reales, guard de emision, CAS del checkpoint, reloj monotonico).
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
@@ -2663,6 +2666,7 @@ jobs:
             tests/policy/test_rule_authority_schema.py \
             tests/policy/test_rule_authority_snapshot.py \
             tests/policy/test_rule_authority_ataques.py \
+            tests/policy/test_rule_authority_providers.py \
             tests/policy/test_shadow_manifest.py \
             tests/policy/test_strict_yaml.py \
             tests/policy/test_v3_array_semantics.py \
