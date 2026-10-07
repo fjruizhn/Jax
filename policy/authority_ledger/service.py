@@ -18,7 +18,7 @@ from .signatures import decode_public_key, public_key_bytes, public_key_fingerpr
 from .storage import AuthorityLedgerStore
 from .trusted_root import TrustedAuthorityRoot
 from .canonical import plain
-from .trusted_checkpoint import TrustedCheckpointStore
+from .trusted_checkpoint import CheckpointPublicationOutcomeUnknownError, TrustedCheckpointStore
 
 
 def _uuid7() -> str:
@@ -105,7 +105,7 @@ def _append_authority_event_unlocked(store: AuthorityLedgerStore, trusted_root: 
         projection = intent.static_policy_view_projection
         if projection is None or projection.get("policy_corpus_hash") != intent.policy_corpus_hash:
             raise AuthorityStateError("policy_corpus_hash no coincide con la proyección congelada del snapshot")
-    events = store.events()
+    events = existing_events
     provisional = AuthorityEvent(event_id or _uuid7(), len(events) + 1, events[-1].event_hash if events else None, intent, recorded_at_utc or datetime.now(timezone.utc), "", "sha256:" + "0" * 64)
     signature = sign(private_key, event_unsigned_bytes(provisional))
     signed = AuthorityEvent(provisional.event_id, provisional.sequence, provisional.previous_event_hash, provisional.intent, provisional.recorded_at_utc, signature, "sha256:" + "0" * 64)
@@ -125,6 +125,12 @@ def _append_authority_event_unlocked(store: AuthorityLedgerStore, trusted_root: 
         checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, complete.sequence, complete.event_id, complete.event_hash)
         try:
             checkpoint_store._append_locked(checkpoint)
+        except CheckpointPublicationOutcomeUnknownError as exc:
+            raise LedgerCheckpointError(
+                f"evento {complete.event_id} (secuencia {complete.sequence}): resultado de publicación "
+                "desconocido después de os.replace — verificar/reconciliar con "
+                "reanchor_authority_checkpoint(store, trusted_root, checkpoint_store)"
+            ) from exc
         except Exception as exc:
             raise LedgerCheckpointError(
                 f"evento huérfano {complete.event_id} (secuencia {complete.sequence}): "
@@ -153,6 +159,8 @@ def _reanchor_authority_checkpoint_unlocked(store: AuthorityLedgerStore, trusted
     events = store.events()
     if not events:
         raise AuthorityStateError("reconciliación exige un head existente")
+    head = events[-1]
+    checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, head.sequence, head.event_id, head.event_hash)
     try:
         verify_authority_ledger(genesis, events, trusted_root, checkpoint_store)
     except UnanchoredLedgerHeadError:
@@ -162,9 +170,15 @@ def _reanchor_authority_checkpoint_unlocked(store: AuthorityLedgerStore, trusted
                 or events[anchored.sequence - 1].event_hash != anchored.head_event_hash):
             raise LedgerRollbackError("stream no conserva el checkpoint vigente como prefijo")
     else:
-        raise AuthorityStateError("reconciliación solo procede ante una cabeza sin checkpoint")
+        # `os.replace` may have completed before the previous writer lost its
+        # directory fsync or reread.  The matching head is already published;
+        # finish its durability/re-read obligations idempotently.
+        checkpoint_store._fsync_parent_directory()
+        published = checkpoint_store.latest()
+        if published.projection() != checkpoint.projection():
+            raise LedgerRollbackError("checkpoint vigente no coincide con el head DB")
+        verify_authority_ledger(genesis, events, trusted_root, checkpoint_store)
+        return checkpoint
     verify_authority_ledger(genesis, events, trusted_root)
-    head = events[-1]
-    checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, head.sequence, head.event_id, head.event_hash)
     checkpoint_store._append_locked(checkpoint)
     return checkpoint

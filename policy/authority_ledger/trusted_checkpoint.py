@@ -15,6 +15,10 @@ from .models import AuthorityLedgerCheckpoint
 DEFAULT_TRUSTED_CHECKPOINT_PATH = Path("/var/lib/jax/authority/trusted-checkpoints.log")
 
 
+class CheckpointPublicationOutcomeUnknownError(LedgerIntegrityError):
+    """`os.replace` completed but its durability or reread could not be proven."""
+
+
 class TrustedCheckpointStore:
     """Append-only checkpoint anchor for one host and its local filesystem.
 
@@ -61,13 +65,18 @@ class TrustedCheckpointStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)
-            self._fsync_parent_directory()
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-        published = self.latest()
-        if published.projection() != checkpoint.projection():
-            raise LedgerIntegrityError("checkpoint externo publicado no coincide con el checkpoint solicitado")
+        try:
+            self._fsync_parent_directory()
+            published = self.latest()
+            if published.projection() != checkpoint.projection():
+                raise LedgerIntegrityError("checkpoint externo publicado no coincide con el checkpoint solicitado")
+        except Exception as exc:
+            raise CheckpointPublicationOutcomeUnknownError(
+                "resultado de publicación del checkpoint desconocido después de os.replace"
+            ) from exc
 
     def latest(self) -> AuthorityLedgerCheckpoint:
         return self._read_all()[-1]

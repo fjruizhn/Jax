@@ -5,9 +5,10 @@ import pytest
 from policy.authority_ledger.errors import (AuthorityStateError, LedgerCheckpointError,
                                             LedgerIntegrityError, LedgerRollbackError,
                                             UnanchoredLedgerHeadError)
-from policy.authority_ledger.models import AuthorityEventIntent, AuthorityEventType
-from policy.authority_ledger.replay import verify_authority_ledger
+from policy.authority_ledger.models import AuthorityEvent, AuthorityEventIntent, AuthorityEventType
+from policy.authority_ledger.replay import event_hash, event_unsigned_bytes, verify_authority_ledger
 from policy.authority_ledger.service import append_authority_event, reanchor_authority_checkpoint
+from policy.authority_ledger.signatures import sign
 from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
 from tests.policy.test_authority_ledger_events import setup_ledger
 
@@ -55,6 +56,68 @@ class _CheckpointRoto:
 
     def latest(self):
         return self._inner.latest()
+
+
+class _FsyncDirectoryFailsOnce(TrustedCheckpointStore):
+    def __init__(self, path):
+        super().__init__(path)
+        self.fail_next_directory_fsync = False
+
+    def _fsync_parent_directory(self):
+        if self.fail_next_directory_fsync:
+            self.fail_next_directory_fsync = False
+            raise OSError("fsync directory failed")
+        return super()._fsync_parent_directory()
+
+
+class _RereadFailsOnce(TrustedCheckpointStore):
+    def __init__(self, path):
+        super().__init__(path)
+        self.fail_next_reread = False
+        self._publishing = False
+
+    def _append_locked(self, checkpoint):
+        self._publishing = True
+        try:
+            return super()._append_locked(checkpoint)
+        finally:
+            self._publishing = False
+
+    def latest(self):
+        if self._publishing and self.fail_next_reread:
+            self.fail_next_reread = False
+            raise OSError("reread failed")
+        return super().latest()
+
+
+def _signed_event(key, event_id, sequence, previous_event_hash, intent):
+    from tests.policy.test_authority_ledger_events import base_time
+    provisional = AuthorityEvent(event_id, sequence, previous_event_hash, intent, base_time(), "", "sha256:" + "0" * 64)
+    signed = AuthorityEvent(event_id, sequence, previous_event_hash, intent, base_time(), sign(key, event_unsigned_bytes(provisional)), "sha256:" + "0" * 64)
+    return AuthorityEvent(event_id, sequence, previous_event_hash, intent, base_time(), signed.signature, event_hash(signed))
+
+
+class _RevokesAfterSnapshot:
+    """Simulates a DB writer committing a revocation between read and append."""
+
+    def __init__(self, inner, key, revocation):
+        self._inner, self._key, self._revocation = inner, key, revocation
+        self._snapshot_read = False
+        self._revoked = False
+
+    def get_genesis(self):
+        if self._snapshot_read and not self._revoked:
+            prior = self._inner.events()[-1]
+            self._inner.append(_signed_event(self._key, "018cc251-f400-7000-8000-000000000002", 2, prior.event_hash, self._revocation))
+            self._revoked = True
+        return self._inner.get_genesis()
+
+    def events(self):
+        self._snapshot_read = True
+        return self._inner.events()
+
+    def append(self, event):
+        return self._inner.append(event)
 
 
 def test_checkpoint_changes_when_ledger_advances():
@@ -275,3 +338,33 @@ def test_checkpoint_append_rejects_an_invalid_candidate_before_publication(tmp_p
     with pytest.raises(LedgerIntegrityError):
         anchor.append(invalid)
     assert not anchor.path.exists()
+
+
+def test_append_uses_one_snapshot_and_stale_store_rejects_candidate_after_concurrent_revocation():
+    """A concurrent revoke cannot change a candidate's replay input mid-append."""
+    from tests.policy.test_authority_ledger_events import overlay, ratification_intent
+    store, root, key = setup_ledger()
+    ratification = append_authority_event(store, root, key, ratification_intent(), event_id="018cc251-f400-7000-8000-000000000001")
+    revocation = AuthorityEventIntent(AuthorityEventType.RATIFICATION_REVOKED, "human:fernando", ratification_event_id=ratification.event_id)
+    racing_store = _RevokesAfterSnapshot(store, key, revocation)
+    with pytest.raises(AuthorityStateError, match="append fuera de secuencia/predecesor"):
+        append_authority_event(racing_store, root, key, AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=overlay("racing-overlay")), event_id="018cc251-f400-7000-8000-000000000003")
+    assert [event.intent.event_type for event in store.events()] == [AuthorityEventType.RATIFICATION_GRANTED, AuthorityEventType.RATIFICATION_REVOKED]
+
+
+@pytest.mark.parametrize("store_type, failure", [(_FsyncDirectoryFailsOnce, "directory"), (_RereadFailsOnce, "reread")])
+def test_post_replace_checkpoint_failure_has_unknown_outcome_and_reanchor_is_idempotent(tmp_path, store_type, failure):
+    """After replace, a transient durability/read failure may already have published the head."""
+    store, root, key = setup_ledger()
+    anchor = store_type(tmp_path / "checkpoints.log")
+    append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"), event_id="018cc251-f400-7000-8000-000000000001", checkpoint_store=anchor)
+    if failure == "directory":
+        anchor.fail_next_directory_fsync = True
+    else:
+        anchor.fail_next_reread = True
+    with pytest.raises(LedgerCheckpointError, match="resultado de publicación desconocido") as excinfo:
+        append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"), event_id="018cc251-f400-7000-8000-000000000002", checkpoint_store=anchor)
+    assert "sin checkpoint externo" not in str(excinfo.value)
+    assert anchor.latest().sequence == 2
+    assert reanchor_authority_checkpoint(store, root, anchor).sequence == 2
+    assert verify_authority_ledger(store.get_genesis(), store.events(), root, anchor).checkpoint.sequence == 2

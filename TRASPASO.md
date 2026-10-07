@@ -84,11 +84,24 @@ Diseño verificado: NINGÚN documento de docs/superpowers/specs menciona OVERLAY
   el corpus se ratifique después y permite revocarlos. La frontera de append
   sigue rechazando nuevas emisiones sin ratificación antes de escribir. Se
   conserva la compatibilidad posicional de `ReconstructedAuthorityState`.
-- **Verificación local final hasta ahora:** `JAX_AUTHORITY_LEDGER_DOCKER_CMD='sudo
-  -n docker' pytest -q tests/policy/test_authority_ledger*.py` → **87 passed**;
-  `git diff --check` limpio. La guarda `no-fail-open-except` pasó 21/21.
-- CI del SHA anterior `0c2be6fd`: 31/31 checks verdes. Falta publicar la cuarentena
-  y verificar CI/auditoría del nuevo SHA exacto.
+- **Auditoría escalón 3 de `3167689a` (2026-10-07): RECHAZADO.** Encontró un
+  BLOCK: append sin checkpoint podía tomar dos snapshots y persistir una nueva
+  emisión después de una revocación concurrente. Encontró un MAJOR: error tras
+  `os.replace` reportaba incorrectamente un evento huérfano y reanchor no era
+  idempotente cuando el checkpoint ya coincidía con DB.
+- **Corrección en el árbol de trabajo:** append usa el snapshot `existing_events`
+  único para validar, firmar y reproducir; el store DB rechaza el candidato stale.
+  Errores tras `os.replace` se tipan como resultado de publicación desconocido;
+  reanchor vuelve a sincronizar, relee y verifica idempotentemente un checkpoint
+  que ya coincide con el head.
+- **Verificación local:** suite `tests/policy/test_authority_ledger*.py` → **90
+  passed** con `JAX_AUTHORITY_LEDGER_DOCKER_CMD='sudo -n docker'`; tanda focal
+  31 passed; `py_compile` y `git diff --check` limpios.
+- CI del SHA `3167689a` sigue en curso; `subpipeline-contrato-db` aparece rojo y
+  sus logs aún no están disponibles hasta que termine el workflow. No declarar CI
+  verde.
+- Falta publicar estas correcciones y pedir auditoría escalón 3 del SHA exacto;
+  el CI y auditoría de `3167689a` no cubren estos cambios.
 - El PR #381 sigue abierto y apilado sobre #379 → #377; integrar en orden.
 
 ## Siguiente comando
