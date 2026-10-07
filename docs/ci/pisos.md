@@ -4641,7 +4641,7 @@ Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la form
 
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-07, paso 7 r3 de jax#373): `^712 passed`
+Patrón vigente (2026-10-07, merge de jax#370 r10 con jax#373 paso 7 r3): `^758 passed`
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4664,3 +4664,9 @@ hall9000 con Python 3.14.4, pytest 9.1.1, pyyaml, cryptography 49.0.0 y el coman
 
 Paso 7 r3, cierre de MINOR (2026-10-07): 704 -> 712 (+8 de providers: procedencia con `..`/`.lock`/punto final,
 centinela aleatoria, caso especial de centinela conocida, versión que sube al escribir). Mismo comando exacto del paso.
+
+r9 (2026-10-07): 591 -> 614 (+23: D-4 con sinónimos en inglés y raíces x11, `w0rkers` no se niega (límite documentado) x1, subids legítimos del catálogo real x11). Medido con Python 3.14.4 y el comando exacto del paso.
+
+r10 (2026-10-07, cierre del hallazgo del auditor en jax#370): 614 -> 637 (+23 netas: el periodo de un tope solo es un subid de la clase `frecuencia` del catalogo del pin; 1 prueba vieja se reemplaza por 20 negativas parametrizadas, 2 positivas del catalogo real y 2 de contrato). Medido con Python 3.14.4 y el comando exacto del paso.
+
+Merge (2026-10-07): #370 r10 (637) + #373 paso 7 r3 (712) -> 758. Las dos ramas venian de bases distintas (637 y 712), por eso no se suman: se midió. Medido en hall9000 con Python 3.14.4, pytest 9.1.1, pyyaml 6.0.3, cryptography 49.0.0 y el comando exacto del paso (`bash --noprofile --norc -eo pipefail`): 758 passed.

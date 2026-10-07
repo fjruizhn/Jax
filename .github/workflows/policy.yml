@@ -2654,10 +2654,16 @@ jobs:
         # validar_regla exige el sellado, fabricar con el OID del pin niega).
         # Ronda 8: 591 (576 medidos en master + 15: D-4 como segmento y subcadena x13,
         # subids legitimos no caen, el helper del pin no deja repos temporales).
+        # Ronda 9: 614 (+23: D-4 con sinonimos en ingles y raices x11, w0rkers no se
+        # niega -limite documentado-, subids legitimos del catalogo real x11).
+        # Ronda 10: 637 (+23: tope.period solo es un subid de la clase frecuencia del
+        # catalogo del pin; 20 negativas, 2 positivas del catalogo real, 2 de contrato).
         # Paso 7 r3 (providers, jax#373) sobre el 591 de arriba: 712 (+121: +117 de
         # test_rule_authority_providers.py —guard con lease valido y dato malo, exclusion
         # de leases determinista, catalogo con centinela, confirmar del checkpoint— y +4 de
         # test_rule_authority_ataques.py por el limite declarado del lector de listas, W3).
+        # Merge de #370 r10 (637) con #373 paso 7 r3 (712): 758 medidos con el comando
+        # exacto de este paso (las dos ramas venian de bases distintas; no se suma, se mide).
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
