@@ -4667,12 +4667,7 @@ Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la form
 
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-07, Jax#371 r3): `^613 passed`
-
-Jax#371 r3: 591 -> 613. Al reapilar #371 sobre #370 (05183cb7) la lista del paso incorpora
-`tests/policy/test_rule_authority_providers.py` (+22); medido con el comando exacto del paso en un
-venv de Python 3.14.4 con pytest 9.1.1, pyyaml 6.0.3 y cryptography 49.0.0 (el instalado sin hashes
-del paso; pymysql 1.2.0 con hashes).
+Patrón vigente (2026-10-07, Jax#371 r3 sobre #370 ronda 10): `^659 passed`
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4682,8 +4677,16 @@ Fernando del 2026-10-06 y dígitos ASCII; 2 de snapshot — testigo no-dataclass
 A–J del auditor como regresiones). El paso re-corre la misma lista en `-q | tee` como memory-b9.
 Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.
 
+Jax#371 r3 (re-apilado sobre #370 final 28f1eac7, ronda 10): 637 -> 659. #370 final deja 637; al reapilar #371 la lista
+del paso incorpora `tests/policy/test_rule_authority_providers.py` (+22). Medido en hall9000 con el comando exacto del paso
+(`bash --noprofile --norc`) en un venv de Python 3.14.4 con pytest 9.1.1, pyyaml 6.0.3 y cryptography 49.0.0: 659 passed.
+
 r8 (2026-10-07, ronda 8 de jax#370): 574 -> 591. El runner (tests-puros, Python 3.14) dio 576 con la rama sobre
 master (que ya trae las pruebas de #368/#369/#374) y el piso decía 574; 576 +15 pruebas nuevas de la r8
 (D-4 como segmento y subcadena: 7 compuestas + 6 exactas, el contrapeso de subids legítimos y que el helper
 `catalogo_del_pin` no deje repos temporales). Medido en hall9000 con Python 3.14.4, pytest 9.1.1,
 pyyaml 6.0.3, cryptography 49.0.0 y el comando exacto del paso (`bash --noprofile --norc -eo pipefail`).
+
+r9 (2026-10-07): 591 -> 614 (+23: D-4 con sinónimos en inglés y raíces x11, `w0rkers` no se niega (límite documentado) x1, subids legítimos del catálogo real x11). Medido con Python 3.14.4 y el comando exacto del paso.
+
+r10 (2026-10-07, cierre del hallazgo del auditor en jax#370): 614 -> 637 (+23 netas: el periodo de un tope solo es un subid de la clase `frecuencia` del catalogo del pin; 1 prueba vieja se reemplaza por 20 negativas parametrizadas, 2 positivas del catalogo real y 2 de contrato). Medido con Python 3.14.4 y el comando exacto del paso.

@@ -49,22 +49,33 @@ CLASES_TOPEABLES = frozenset({"monto_dinero", "actos_externos", "frecuencia",
 # admite colarse por debajo de una clase admitida.
 PALABRAS_PROHIBIDAS_D4 = frozenset({"conexiones", "concurrencia", "workers",
                                     "hilos", "procesos", "agentes"})
-# r8: comparar la palabra exacta no alcanza (``conexiones_db``, ``num_hilos``,
-# ``subprocesos``, ``multiagente`` cargaban). Se niega la palabra como SEGMENTO
-# (separadores ``_``, ``-``, ``.``) y como SUBCADENA —de la palabra y de su
-# raiz en singular— para las formas compuestas.
-_RAICES_PROHIBIDAS_D4 = frozenset({"conexion", "concurrencia", "worker",
-                                   "hilo", "proceso", "agente"})
-_RE_SEPARADORES = re.compile(r"[_.\-]")
+# r8/r9: comparar la palabra exacta no alcanza (``conexiones_db``, ``num_hilos``,
+# ``subprocesos``, ``multiagente`` cargaban). Se niega como SUBCADENA (tras
+# NFC y minusculas) la palabra y su raiz, en espanol y en ingles (sinonimos:
+# ``connection``, ``thread``, ``concurrency``, ``process``, ``agent``,
+# ``socket``, ``pool``, ``conn``, ``job``, ``worker``).
+_RAICES_PROHIBIDAS_D4 = frozenset({
+    "conexion", "concurrencia", "worker", "hilo", "proceso", "agente",
+    "connection", "thread", "concurrency", "process", "agent", "socket",
+    "pool", "conn", "job"})
 
 
 def _viola_d4(subid: str) -> bool:
-    """True si el subid (tras NFC) es una palabra de D-4, la lleva como
-    segmento o la contiene fundida en una forma compuesta."""
-    normal = unicodedata.normalize("NFC", subid)
-    if any(seg in PALABRAS_PROHIBIDAS_D4 for seg in _RE_SEPARADORES.split(normal)):
-        return True
-    return any(raiz in normal for raiz in _RAICES_PROHIBIDAS_D4)
+    """True si el subid (tras NFC y minusculas) contiene como subcadena una
+    palabra de D-4 o una de sus raices/sinonimos.
+
+    No hay control por segmentos: la regex de subid (``_RE_SUBID``) no admite
+    ``-`` ni ``.``, y un segmento igual a una palabra ya contiene su raiz.
+
+    Limites conocidos: ``pool`` y ``job`` (y ``conn``) como subcadena pueden
+    chocar con un subid legitimo futuro (``carpool``, ``jobless``...); si
+    llega uno, se decide en codigo revisado, no se afloja la lista a ciegas.
+    Tampoco hay heuristica de leet: ``w0rkers`` carga (el catalogo es
+    ratificado por Fernando, no entrada libre)."""
+    normal = unicodedata.normalize("NFC", subid).lower()
+    return any(raiz in normal for raiz in _RAICES_PROHIBIDAS_D4) or any(
+        palabra in normal for palabra in PALABRAS_PROHIBIDAS_D4)
+
 
 # Emisor unico (r7, MAJOR-1): el snapshot registra AQUI su testigo al
 # importarse; la lista se llena una sola vez. La clase compara identidad — el
