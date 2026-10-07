@@ -12,7 +12,7 @@ scope:
   objectives: [objetivo-ejemplo]
 
 obligation_limits:
-  quantity: {unit: llamadas, max: 100}
+  quantity: {unit: mensajes, max: 100}
   amount: null
   frequency: {max_occurrences: 100, window_seconds: 3600}
 
