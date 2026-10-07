@@ -6,7 +6,8 @@ import uuid
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from .errors import AuthorityStateError, LedgerIntegrityError, TrustedRootMismatchError
+from .errors import (AuthorityStateError, LedgerCheckpointError, LedgerIntegrityError,
+                     TrustedRootMismatchError)
 from .models import (
     AuthorityEvent, AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
     _RATIFICATION_SNAPSHOT_SEAL, _RATIFICATION_STORAGE_SEAL,
@@ -92,5 +93,38 @@ def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAut
     store.append(complete)
     if checkpoint_store is not None:
         from .models import AuthorityLedgerCheckpoint
-        checkpoint_store.append(AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, complete.sequence, complete.event_id, complete.event_hash))
+        # El evento NO se considera aceptado hasta que su checkpoint quedó
+        # escrito. Si el checkpoint falla, el evento ya es append-only y no se
+        # retira: se reporta como huérfano con error tipado y el verificador
+        # delata la cabeza sin anclar hasta la reconciliación.
+        checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, complete.sequence, complete.event_id, complete.event_hash)
+        try:
+            checkpoint_store.append(checkpoint)
+        except Exception as exc:
+            raise LedgerCheckpointError(
+                f"evento huérfano {complete.event_id} (secuencia {complete.sequence}): "
+                "escrito en el ledger sin checkpoint externo — reconciliar con "
+                "reanchor_authority_checkpoint(store, trusted_root, checkpoint_store)"
+            ) from exc
     return complete
+
+
+def reanchor_authority_checkpoint(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, checkpoint_store) -> "AuthorityLedgerCheckpoint":
+    """Reconciliación de una cabeza sin checkpoint: re-ancla el checkpoint al
+    head EXISTENTE.
+
+    Procedimiento (auditor de #377): el evento huérfano no se retira (el ledger
+    es append-only); se verifica el stream COMPLETO sin ancla externa y, si el
+    head es válido, se escribe su checkpoint. Tras esto, el verificador con
+    ``checkpoint_store`` vuelve a pasar: la cabeza queda anclada y el ledger no
+    quedó inverificable para siempre."""
+    from .models import AuthorityLedgerCheckpoint
+    genesis = store.get_genesis()
+    events = store.events()
+    verify_authority_ledger(genesis, events, trusted_root)
+    if not events:
+        raise AuthorityStateError("reconciliación exige un head existente")
+    head = events[-1]
+    checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, head.sequence, head.event_id, head.event_hash)
+    checkpoint_store.append(checkpoint)
+    return checkpoint

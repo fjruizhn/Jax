@@ -200,13 +200,16 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                 "sha256:" + "b" * 64, "c" * 40, "d" * 40,
                 "sha256:" + "e" * 64, now, None,
             )
+            # El overlay se emite ANTES de revocar la ratificación: desde el
+            # hallazgo del auditor de #377, OVERLAY_ISSUED exige ratificación
+            # vigente del corpus objetivo en ese punto del stream.
             intents = (
                 corpus_intent,
                 AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", ratification_event_id=corpus_event_id),
-                AuthorityEventIntent(AuthorityEventType.RATIFICATION_REVOKED, "human:fernando", ratification_event_id=corpus_event_id),
-                AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
                 AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=overlay),
                 AuthorityEventIntent(AuthorityEventType.OVERLAY_REVOKED, "human:fernando", overlay_id="test-exception"),
+                AuthorityEventIntent(AuthorityEventType.RATIFICATION_REVOKED, "human:fernando", ratification_event_id=corpus_event_id),
+                AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
                 rule_grant_intent(grant),
                 AuthorityEventIntent(
                     AuthorityEventType.RULE_RATIFICATION_REVOKED, "human:fernando",

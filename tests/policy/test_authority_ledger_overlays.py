@@ -1,7 +1,8 @@
 from datetime import timedelta
 import pytest
 
-from policy.authority_ledger.errors import OverlayApplicabilityIndeterminateError, OverlayConflictError
+from policy.authority_ledger.errors import (AuthorityStateError, OverlayApplicabilityIndeterminateError,
+                                            OverlayConflictError)
 from policy.authority_ledger.models import AuthorityEventIntent, AuthorityEventType, OverlayType
 from policy.authority_ledger.replay import effective_overlays, verify_authority_ledger
 from policy.authority_ledger.service import append_authority_event
@@ -40,3 +41,35 @@ def test_overlapping_different_overlay_fails_and_suspension_removes_target():
     source = overlay()
     suspension = overlay("suspension-a", kind=OverlayType.SUSPENSION, target=(), target_overlay=source.overlay_id)
     assert effective_overlays(state_with(source, suspension), context(), base_time()) == ()
+
+
+# ------------------- overlay exige ratificación vigente (auditor de #377)
+
+def test_overlay_a_corpus_no_ratificado_se_rechaza_antes_de_escribir():
+    """Un overlay cuyo corpus objetivo jamás fue ratificado no entra al ledger:
+    el replay previo de #377 lo niega antes de firmar hacia el storage."""
+    from tests.policy.test_authority_ledger_events import ratification_intent
+    store, root, key = setup_ledger()
+    huerfano = OverlayPayload(
+        "huerfano", OverlayType.EXCEPTION, "sha256:" + "b" * 64,
+        OverlayScope(("ALICE",), ("READ",)), base_time(), base_time() + timedelta(days=1),
+        target_rule_ids=("rule-a",), exception_code="HUERFANO",
+    )
+    with pytest.raises(AuthorityStateError, match="overlay exige ratificación"):
+        append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=huerfano))
+    assert store.events() == ()
+
+
+def test_overlay_a_corpus_con_ratificacion_revocada_tampoco_pasa():
+    from tests.policy.test_authority_ledger_events import ratification_intent
+    store, root, key = setup_ledger()
+    rat = append_authority_event(store, root, key, ratification_intent())
+    append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.RATIFICATION_REVOKED, "human:fernando", ratification_event_id=rat.event_id))
+    tras_revocacion = OverlayPayload(
+        "tras-revocacion", OverlayType.EXCEPTION, rat.intent.policy_corpus_hash,
+        OverlayScope(("ALICE",), ("READ",)), base_time(), base_time() + timedelta(days=1),
+        target_rule_ids=("rule-a",), exception_code="TARDIO",
+    )
+    with pytest.raises(AuthorityStateError, match="overlay exige ratificación"):
+        append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=tras_revocacion))
+    assert len(store.events()) == 2   # ratificación + revocación: el overlay no dejó rastro

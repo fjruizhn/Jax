@@ -117,6 +117,14 @@ def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[Au
             assert intent.overlay is not None
             if intent.overlay.overlay_id in overlays:
                 raise AuthorityStateError("overlay_id duplicado")
+            # Un overlay sólo se emite contra un corpus con ratificación VIGENTE
+            # (misma lógica que la activación): si su hash objetivo no tiene
+            # ninguna ratificación no revocada en este punto del stream, el
+            # evento es inválido.
+            if not any(event.intent.policy_corpus_hash == intent.overlay.policy_corpus_hash
+                       for event_id, event in ratifications.items()
+                       if event_id not in revoked_ratifications):
+                raise AuthorityStateError("overlay exige ratificación vigente del corpus objetivo")
             overlays[intent.overlay.overlay_id] = intent.overlay
         elif intent.event_type is AuthorityEventType.OVERLAY_REVOKED:
             assert intent.overlay_id is not None
@@ -143,7 +151,11 @@ def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[Au
         if checkpoint.sequence < anchored.sequence:
             raise LedgerRollbackError("DB ledger truncado antes del checkpoint externo")
         if checkpoint.sequence > anchored.sequence:
-            raise UnanchoredLedgerHeadError("DB ledger adelante de checkpoint externo")
+            raise UnanchoredLedgerHeadError(
+                "cabeza sin checkpoint: DB ledger adelante del checkpoint externo — "
+                "reconciliar re-anclando el checkpoint al head existente "
+                "(reanchor_authority_checkpoint); el head verificado no queda "
+                "inverificable para siempre")
         if checkpoint.projection() != anchored.projection():
             raise LedgerRollbackError("head DB no coincide con checkpoint externo")
     return ReconstructedAuthorityState(

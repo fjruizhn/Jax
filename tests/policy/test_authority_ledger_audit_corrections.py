@@ -48,12 +48,17 @@ def test_audit_002_replay_state_is_deeply_sealed():
 
 
 def test_audit_003_cross_corpus_overlay_never_effective():
+    # Desde el hallazgo del auditor de #377: un overlay cuyo corpus objetivo no
+    # tiene ratificación vigente se rechaza EN el append (replay previo) — ya no
+    # se escribe para que el filtrado de efectividad lo ignore: nunca nace.
     store, root, key, rat = _active()
     bad = overlay("other")
     object.__setattr__(bad, "policy_corpus_hash", "sha256:" + "b" * 64)
-    append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=bad))
+    with pytest.raises(AuthorityStateError, match="overlay exige ratificación"):
+        append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=bad))
     state = verify_authority_ledger(store.get_genesis(), store.events(), root)
     assert effective_overlays(state, _context(), base_time()) == ()
+    assert len(store.events()) == 2   # ratificación + activación: el overlay rechazado no dejó rastro
 
 
 def test_audit_004_external_checkpoint_rejects_old_prefix(tmp_path):

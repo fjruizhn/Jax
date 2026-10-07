@@ -18,6 +18,15 @@ class UnanchoredLedgerHeadError(LedgerIntegrityError):
     pass
 
 
+class LedgerCheckpointError(LedgerIntegrityError):
+    """El evento quedó escrito en el ledger pero su checkpoint externo no.
+
+    El evento no se considera aceptado hasta que el checkpoint quedó escrito;
+    este error nombra al evento huérfano y la reconciliación disponible
+    (``reanchor_authority_checkpoint``): re-anclar el checkpoint al head
+    existente tras verificarlo."""
+
+
 class TrustedRootMismatchError(LedgerIntegrityError):
     pass
 
