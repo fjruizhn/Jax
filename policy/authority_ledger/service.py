@@ -7,7 +7,7 @@ import uuid
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from .errors import (AuthorityStateError, LedgerCheckpointError, LedgerIntegrityError,
-                     TrustedRootMismatchError)
+                     LedgerRollbackError, UnanchoredLedgerHeadError, TrustedRootMismatchError)
 from .models import (
     AuthorityEvent, AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
     _RATIFICATION_SNAPSHOT_SEAL, _RATIFICATION_STORAGE_SEAL,
@@ -60,7 +60,10 @@ def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAut
     if (intent.event_type is AuthorityEventType.RATIFICATION_GRANTED
             and intent._ratification_snapshot_seal is not _RATIFICATION_SNAPSHOT_SEAL):
         raise AuthorityStateError("ratificación requiere snapshot sellado del candidate boundary")
-    state = verify_authority_ledger(store.get_genesis(), store.events(), trusted_root)
+    existing_events = store.events()
+    use_anchor = checkpoint_store is not None and (bool(existing_events) or checkpoint_store.path.exists())
+    state = verify_authority_ledger(store.get_genesis(), existing_events, trusted_root,
+                                    checkpoint_store if use_anchor else None)
     genesis = store.get_genesis()
     public = decode_public_key(genesis.constitutional_public_key)
     # A key mismatch is never an actor-id workaround.
@@ -121,9 +124,19 @@ def reanchor_authority_checkpoint(store: AuthorityLedgerStore, trusted_root: Tru
     from .models import AuthorityLedgerCheckpoint
     genesis = store.get_genesis()
     events = store.events()
-    verify_authority_ledger(genesis, events, trusted_root)
     if not events:
         raise AuthorityStateError("reconciliación exige un head existente")
+    try:
+        verify_authority_ledger(genesis, events, trusted_root, checkpoint_store)
+    except UnanchoredLedgerHeadError:
+        anchored = checkpoint_store.latest()
+        if (len(events) < anchored.sequence
+                or events[anchored.sequence - 1].event_id != anchored.head_event_id
+                or events[anchored.sequence - 1].event_hash != anchored.head_event_hash):
+            raise LedgerRollbackError("stream no conserva el checkpoint vigente como prefijo")
+    else:
+        raise AuthorityStateError("reconciliación solo procede ante una cabeza sin checkpoint")
+    verify_authority_ledger(genesis, events, trusted_root)
     head = events[-1]
     checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, head.sequence, head.event_id, head.event_hash)
     checkpoint_store.append(checkpoint)

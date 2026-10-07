@@ -24,8 +24,22 @@ Diseño verificado: NINGÚN documento de docs/superpowers/specs menciona OVERLAY
    cuyo `policy_corpus_hash` no tenga ninguna ratificación no revocada en ese
    punto del stream (misma lógica que ACTIVATION). Con el replay previo de
    #377, `append` niega antes de escribir. `audit_003` pasa a esperar el
-   rechazo; la tanda MariaDB de 8 eventos se reordenó (overlay antes de
-   revocar la ratificación).
+  rechazo; la tanda MariaDB de 8 eventos se reordenó (overlay antes de
+  revocar la ratificación).
+
+3. **Ronda 2 contra el rechazo del escalón 3 (2026-10-07)**: reanchor solo
+   procede ante `UnanchoredLedgerHeadError` y exige que el checkpoint vigente
+   siga siendo prefijo del stream; append valida el ancla antes de escribir;
+   el store rechaza retrocesos/secuencias repetidas y falla cerrado ante una
+   última línea parcial. Se reemplazó `pytest.raises(Exception)` por
+   `pytest.raises(LedgerIntegrityError)`. Pruebas de regresión para rollback,
+   head huérfano, DB retrocedida y línea parcial.
+
+4. **Verificación local de la ronda 2**: 16 pruebas focales pasaron; la suite
+   completa `tests/policy/test_authority_ledger*.py`, ejecutada con
+   `JAX_AUTHORITY_LEDGER_DOCKER_CMD='sudo -n docker'`, dio **79 passed**.
+   `git diff --check` limpio. Se observó que el veredicto previo no cubre la
+   carrera entre reanchor y append; queda reportada como riesgo residual.
 
 ## Pruebas nuevas (6) y mutantes
 
@@ -47,4 +61,11 @@ Diseño verificado: NINGÚN documento de docs/superpowers/specs menciona OVERLAY
 
 ## Pendiente
 
-- Auditoría de Hyde y merge (apilado sobre #379 → #377; fusionar en orden).
+- Revisión adversarial independiente de la ronda 2 sobre el SHA exacto.
+- Verificar CI de ese SHA. El PR sigue apilado sobre #379 → #377; integrar en orden.
+
+## Siguiente comando
+
+Después de publicar el commit de ronda 2, solicitar auditoría escalón 3 sobre
+el SHA exacto y actualizar este traspaso con su veredicto. No integrar hasta
+que auditoría, CI y preflight de integración correspondan al mismo SHA.
