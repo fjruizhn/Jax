@@ -5,7 +5,9 @@ from .errors import ResolverContractError
 from .models import ValidatedCandidateCorpus, ValidatedStaticPolicyView
 
 def to_static_policy_view(corpus: ValidatedCandidateCorpus) -> ValidatedStaticPolicyView:
-    if not isinstance(corpus, ValidatedCandidateCorpus) or not corpus._was_loader_validated():
+    # Tipo EXACTO y método de la clase sin enlazar: ni una subclase ni un atributo
+    # de instancia pueden responder por sí mismos que están validados.
+    if type(corpus) is not ValidatedCandidateCorpus or not ValidatedCandidateCorpus._was_loader_validated(corpus):
         raise ResolverContractError("adapter sólo acepta ValidatedCandidateCorpus")
     docs = tuple(sorted(corpus.normative_documents, key=lambda d: d.id))
     return ValidatedStaticPolicyView(

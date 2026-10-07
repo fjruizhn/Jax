@@ -43,7 +43,9 @@ def ratification_intent_from_candidate(corpus, evidence_refs: tuple[str, ...] = 
     """
     from policy.authority_resolution.adapter import to_static_policy_view
     from policy.authority_resolution.models import ValidatedCandidateCorpus
-    if not isinstance(corpus, ValidatedCandidateCorpus) or not corpus._was_loader_validated():
+    # Tipo EXACTO y método de la clase sin enlazar (ver el adapter): el objeto no
+    # responde por su propia validación.
+    if type(corpus) is not ValidatedCandidateCorpus or not ValidatedCandidateCorpus._was_loader_validated(corpus):
         raise AuthorityStateError("ratificación requiere ValidatedCandidateCorpus atómico")
     view = to_static_policy_view(corpus)
     projection = plain(view)

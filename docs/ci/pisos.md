@@ -4638,3 +4638,16 @@ Piso nuevo de la migración: `policy/tests/test_pisos_fuera_del_workflow.py` (pe
 master 364ded9) y `policy/tests/test_comparar_pisos.py` (el comparador). 140 -> 213 -> 223 el
 2026-10-04 al agregar el comparador y sus casos, las pruebas del job aislado y las de claves duplicadas; 223 -> 227 (2026-10-04, ci/pisos-skipped-y-comentarios): +4 netas del comparador (5 pruebas de la excepción `^N passed` -> `^N' passed, M skipped`, menos 1 parámetro que deja de ser rojo). Medido en
 Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.
+
+## `authority-resolution-loader-seal/ataques`
+
+Piso exacto propio (2026-10-07, Jax#379, ronda 2) del archivo
+`tests/policy/test_authority_resolution_loader_seal.py`: antes solo contaba dentro del paso
+grande «Identity Foundation Shadow», sin número propio. 14 passed (Python 3.14.4, local):
+6 de la ronda 1 (replace, replace con contenido alterado, construcción directa, congelado
+profundo, drift del digest, sello y binding del corpus real) + 4 de subclases y método
+sombreado (definición de subclase falla, subclase que afirma estar validada, subclase con
+sello legítimo, método sombreado en la instancia) + 4 del binding campo por campo
+(`normative_documents`, `policy_corpus_hash`, `manifest`, `authority`). Patrón: `^14 passed in `.
+Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_subclass__`» y quitar
+cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.

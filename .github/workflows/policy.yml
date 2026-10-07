@@ -2675,6 +2675,15 @@ jobs:
           set -o pipefail
           python -m pytest -q tests/policy/test_authority_ledger_golden_vectors.py 2>&1 | tee /tmp/authority-ledger-golden
           python3 .github/ci/piso.py verificar authority-ledger-golden/vectors /tmp/authority-ledger-golden || exit $?
+      - name: Block 3 sello del loader (authority_resolution) -- piso exacto
+        # Ataques de falsificación del sello del corpus validado (replace,
+        # subclases, método sombreado, binding campo por campo).
+        env:
+          PYTHONPATH: "."
+        run: |
+          set -o pipefail
+          python -m pytest -q tests/policy/test_authority_resolution_loader_seal.py 2>&1 | tee /tmp/authority-resolution-loader-seal
+          python3 .github/ci/piso.py verificar authority-resolution-loader-seal/ataques /tmp/authority-resolution-loader-seal || exit $?
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

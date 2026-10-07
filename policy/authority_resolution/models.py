@@ -272,6 +272,9 @@ class ValidatedCandidateCorpus:
     _loader_seal: object | None = field(default=None, init=False, repr=False, compare=False)
     _content_binding: str | None = field(default=None, init=False, repr=False, compare=False)
 
+    def __init_subclass__(cls, **kwargs) -> None:
+        raise TypeError("ValidatedCandidateCorpus no se subclasea: la validación no se delega al objeto")
+
     def __post_init__(self) -> None:
         if not _HASH.fullmatch(self.policy_corpus_hash) or not _HASH.fullmatch(self.bootstrap_bundle_id):
             raise InvalidValidatedCorpusError("hash inválido")
