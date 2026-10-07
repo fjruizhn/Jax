@@ -43,6 +43,46 @@ def _run(docker: list[str], *args: str, **kwargs):
     return subprocess.run([*docker, *args], check=True, capture_output=True, text=True, **kwargs)
 
 
+def _container_logs(docker: list[str], container: str) -> str:
+    logs = subprocess.run([*docker, "logs", container], capture_output=True, text=True, check=False)
+    return logs.stdout + logs.stderr
+
+
+def _wait_until_ready(docker: list[str], container: str, socket_dir: str, password: str, timeout: float = 60.0) -> Path:
+    """Block until the FINAL mysqld answers `SELECT 1` on the socket; return the socket path.
+
+    The image entrypoint starts a temporary server (with a socket) to initialise the data
+    directory, stops it and starts the real one: a socket or a `SELECT 1` seen before the
+    "init process done" marker belongs to a server that is about to disappear. So wait for the
+    marker first and only then poll with a real query. No fixed sleep: bounded polling.
+    """
+    socket_path = Path(socket_dir) / "mysqld.sock"
+    deadline = time.monotonic() + timeout
+    last_error: BaseException | None = None
+    initialised = False
+    while time.monotonic() < deadline:
+        if not initialised:
+            initialised = "init process done" in _container_logs(docker, container)
+        if initialised:
+            try:
+                _run(docker, "exec", "--user=root", container, "chmod", "0755", "/run/mysqld")
+                with pymysql.connect(
+                    unix_socket=str(socket_path), user="root", password=password,
+                    autocommit=False, charset="utf8mb4", connect_timeout=5,
+                ) as probe:
+                    with probe.cursor() as cursor:
+                        cursor.execute("SELECT 1")
+                        if cursor.fetchone() == (1,):
+                            return socket_path
+            except (OSError, pymysql.MySQLError, subprocess.CalledProcessError) as exc:
+                last_error = exc
+        time.sleep(0.25)
+    raise AssertionError(
+        f"MariaDB no quedó lista en {timeout:.0f} s (init terminado: {initialised}; "
+        f"último error: {last_error}).\n--- docker logs ---\n{_container_logs(docker, container)[-4000:]}"
+    )
+
+
 def _apply_migration(connection, path):
     sql = "\n".join(
         line for line in path.read_text(encoding="utf-8").splitlines()
@@ -76,32 +116,11 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
             "-e", f"MARIADB_ROOT_PASSWORD={password}", IMAGE,
         )
         try:
-            socket_path = Path(socket_dir) / "mysqld.sock"
-            socket_ready = False
-            for _ in range(90):
-                probe = subprocess.run(
-                    [*docker, "exec", container, "test", "-S", "/run/mysqld/mysqld.sock"],
-                    capture_output=True, text=True, check=False,
-                )
-                if probe.returncode == 0:
-                    socket_ready = True
-                    break
-                time.sleep(1)
-            assert socket_ready, "MariaDB no creó su socket Unix"
-            _run(docker, "exec", "--user=root", container, "chmod", "0755", "/run/mysqld")
-            connection = None
-            last_error = None
-            for _ in range(90):
-                try:
-                    connection = pymysql.connect(
-                        unix_socket=str(socket_path), user="root", password=password,
-                        autocommit=False, charset="utf8mb4",
-                    )
-                    break
-                except (OSError, pymysql.MySQLError) as exc:
-                    last_error = exc
-                    time.sleep(1)
-            assert connection is not None, f"MariaDB socket no disponible: {last_error}"
+            socket_path = _wait_until_ready(docker, container, socket_dir, password)
+            connection = pymysql.connect(
+                unix_socket=str(socket_path), user="root", password=password,
+                autocommit=False, charset="utf8mb4",
+            )
             with connection:
                 with connection.cursor() as cursor:
                     cursor.execute("SELECT VERSION()")
@@ -283,19 +302,7 @@ def _ephemeral_mariadb():
             "-e", f"MARIADB_ROOT_PASSWORD={password}", IMAGE,
         )
         try:
-            socket_ready = False
-            for _ in range(90):
-                probe = subprocess.run(
-                    [*docker, "exec", container, "test", "-S", "/run/mysqld/mysqld.sock"],
-                    capture_output=True, text=True, check=False,
-                )
-                if probe.returncode == 0:
-                    socket_ready = True
-                    break
-                time.sleep(1)
-            assert socket_ready, "MariaDB no creó su socket Unix"
-            _run(docker, "exec", "--user=root", container, "chmod", "0755", "/run/mysqld")
-            socket_path = str(Path(socket_dir) / "mysqld.sock")
+            socket_path = str(_wait_until_ready(docker, container, socket_dir, password))
 
             def connect(**kwargs):
                 kwargs.setdefault("user", "root")
@@ -304,16 +311,6 @@ def _ephemeral_mariadb():
                     unix_socket=socket_path, autocommit=False, charset="utf8mb4", **kwargs
                 )
 
-            last_error = None
-            for _ in range(90):
-                try:
-                    connect().close()
-                    break
-                except (OSError, pymysql.MySQLError) as exc:
-                    last_error = exc
-                    time.sleep(1)
-            else:
-                raise AssertionError(f"MariaDB socket no disponible: {last_error}")
             yield connect
         finally:
             subprocess.run([*docker, "stop", container], capture_output=True, text=True, check=False)
