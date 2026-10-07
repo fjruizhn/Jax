@@ -172,9 +172,13 @@ class MariaDBRuleDecisionStore:
                     raise RuleAuthorityStorageError("audit head cambió durante la transacción")
             connection.commit()
             return decision
-        except (AuthorityStateError, RuleAuthorityStorageError):
+        except (AuthorityStateError, RuleAuthorityStorageError) as exc:
             if connection is not None:
-                connection.rollback()
+                try:
+                    connection.rollback()
+                except Exception as rollback_exc:  # fail-soft: el rollback fallido se registra y sale como RuleAuthorityStorageError (nunca se traga ni deja escapar un error crudo); la conexión se cierra y MariaDB revierte sola la transacción abierta
+                    _LOG.exception("rollback de Rule Authority falló; se relanza como error tipado")
+                    raise RuleAuthorityStorageError("no se pudo persistir la decisión") from exc
             raise
         except Exception as exc:
             if connection is not None:

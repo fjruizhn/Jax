@@ -385,6 +385,33 @@ def test_mariadb_store_rollback_failure_is_logged_and_original_error_raised(db, 
     assert any(record.exc_info for record in caplog.records)
 
 
+def test_mariadb_store_rollback_failure_after_state_error_is_typed_and_logged(db, app, caplog):
+    class RollbackBroken:
+        """Conexión real cuyo rollback() falla tras un AuthorityStateError."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def rollback(self):
+            raise pymysql.err.OperationalError(2013, "lost connection on rollback")
+
+    request_id = "0199f8a1-8c00-7000-8000-000000000107"
+    first = _request(request_id)
+    assert MariaDBRuleDecisionStore(app).record(first, _decision(first)) == _decision(first)
+    other = _request(request_id, recipient="other@example.test")
+    store = MariaDBRuleDecisionStore(lambda: RollbackBroken(app()))
+    with caplog.at_level("ERROR", logger="policy.rule_authority.storage"):
+        with pytest.raises(RuleAuthorityStorageError) as raised:
+            store.record(other, _decision(other))
+    assert not isinstance(raised.value, AuthorityStateError)
+    assert "reutilizado con otro hash" in str(raised.value.__cause__)
+    assert any("rollback" in record.getMessage() for record in caplog.records)
+    assert any(record.exc_info for record in caplog.records)
+
+
 def test_mariadb_store_is_idempotent_durable_and_bound_to_request_and_catalog(db, app):
     store = MariaDBRuleDecisionStore(app)
     request = _request("0199f8a1-8c00-7000-8000-000000000101")
@@ -658,6 +685,20 @@ def test_mariadb_provisioning_revokes_prior_grants_for_localhost_and_wildcard_ac
         provision_application_account(admin, APP_USER, password)
         _assert_least_privilege(_grants(admin, APP_USER, "localhost"))
         _assert_least_privilege(_grants(admin, APP_USER, "%"))
+
+
+def test_mariadb_provisioning_revokes_every_host_entry_of_the_account(db):
+    password = secrets.token_urlsafe(24)
+    with db.root() as admin:
+        _broad_account(admin, APP_USER, "localhost", password)
+        _broad_account(admin, APP_USER, "127.0.0.1", password)
+        assert "ALL PRIVILEGES" in _grants(admin, APP_USER, "127.0.0.1")
+        provision_application_account(admin, APP_USER, password)
+        _assert_least_privilege(_grants(admin, APP_USER, "localhost"))
+        _assert_least_privilege(_grants(admin, APP_USER, "127.0.0.1"))
+        with admin.cursor() as cursor:
+            cursor.execute("SELECT host FROM mysql.user WHERE user=%s ORDER BY host", (APP_USER,))
+            assert [row[0] for row in cursor.fetchall()] == ["127.0.0.1", "localhost"]
 
 
 def test_mariadb_provisioning_without_wildcard_account_creates_none_and_main_runs(db, monkeypatch, capsys):

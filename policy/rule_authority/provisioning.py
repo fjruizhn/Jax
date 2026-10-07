@@ -7,14 +7,15 @@ import re
 
 _USERNAME = re.compile(r"[A-Za-z0-9_]{1,32}\Z")
 _TABLES_APPEND_ONLY = ("rule_decisions", "rule_permits", "rule_permit_consumptions")
-# El principal canónico es user@localhost (creado si falta). Si además existe la
-# cuenta homónima user@'%', se le aplica el mismo REVOKE/GRANT: una cuenta con el
-# mismo nombre y otro host no puede conservar privilegios previos. No se crea.
-_HOMONYM_HOST = "%"
+# El principal canónico es user@localhost (creado si falta). Toda otra entrada de
+# mysql.user con el mismo nombre (`%`, 127.0.0.1, ::1, un host concreto...) recibe
+# el mismo REVOKE/GRANT: una cuenta homónima no puede conservar privilegios previos.
+# Esas entradas no se crean, solo se acotan.
+_CANONICAL_HOST = "localhost"
 
 
 def _principal(username: str, host: str) -> str:
-    return f"`{username}`@`{host}`"
+    return f"`{username}`@`{host.replace('`', '``')}`"
 
 
 def _apply_least_privilege(cursor, principal: str) -> None:
@@ -33,19 +34,17 @@ def provision_application_account(connection, username: str, password: str) -> N
     if not isinstance(password, str) or not password:
         raise ValueError("Rule Authority app password requerido")
 
-    principal = _principal(username, "localhost")
+    principal = _principal(username, _CANONICAL_HOST)
     cursor = None
     try:
         cursor = connection.cursor()
         cursor.execute(f"CREATE USER IF NOT EXISTS {principal} IDENTIFIED BY %s", (password,))
         cursor.execute(f"ALTER USER {principal} IDENTIFIED BY %s", (password,))
         _apply_least_privilege(cursor, principal)
-        cursor.execute(
-            "SELECT COUNT(*) FROM mysql.user WHERE User=%s AND Host=%s",
-            (username, _HOMONYM_HOST),
-        )
-        if cursor.fetchone()[0]:
-            _apply_least_privilege(cursor, _principal(username, _HOMONYM_HOST))
+        cursor.execute("SELECT host FROM mysql.user WHERE user=%s", (username,))
+        homonym_hosts = sorted({row[0] for row in cursor.fetchall()} - {_CANONICAL_HOST})
+        for host in homonym_hosts:
+            _apply_least_privilege(cursor, _principal(username, host))
         connection.commit()
     except Exception:
         connection.rollback()

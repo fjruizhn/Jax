@@ -56,6 +56,7 @@
 - #370 r6 y el reapilado de #371 pueden mover la base; todavía falta reapilar esta
   rama y repetir pisos y merge-tree contra los tips fijados.
 - Tips GitHub al último chequeo: #370 `85cee9ca`, #371 `31eb14bf`, #372 `57547cfe`.
+- Ronda 3 de #375 (2026-10-07): fusionado `origin/feat/faro-f1.1-evaluador` @ 002fc9ba (trae #370 final). `RuleDecision` ya no lleva `catalogo` y el catálogo del request es `CatalogoTopes` sellado: `storage.py` proyecta clases + `oid_pin`. MINOR (a): el `rollback()` de la rama `AuthorityStateError`/`RuleAuthorityStorageError` se protege (log + `RuleAuthorityStorageError`). MINOR (b): provisioning aplica REVOKE/GRANT a toda entrada homónima de `mysql.user`. Piso `authority-rule-storage/mariadb` = 9.
 
 # Traspaso Faro F1.1 · #371 (paso 4) · ronda 3
 
