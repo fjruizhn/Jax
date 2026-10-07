@@ -78,6 +78,7 @@ class RuleLimits:
     """Only effect and cost limits are representable; infrastructure limits have no fields."""
 
     quantity: int | None = None
+    quantity_unit: str | None = None
     amount: int | None = None
     currency: str | None = None
     frequency_count: int | None = None
@@ -98,6 +99,10 @@ class RuleLimits:
             currency = getattr(self, name)
             if currency is not None and (not isinstance(currency, str) or not _CURRENCY.fullmatch(currency)):
                 raise AuthorityEventValidationError(f"{name} debe tener formato alpha-3")
+        if (self.quantity is None) != (self.quantity_unit is None):
+            raise AuthorityEventValidationError("quantity y quantity_unit deben ir juntos")
+        if self.quantity_unit is not None:
+            object.__setattr__(self, "quantity_unit", _identifier(self.quantity_unit, "quantity_unit"))
         if (self.amount is None) != (self.currency is None):
             raise AuthorityEventValidationError("amount y currency deben ir juntos")
         if (self.cost_minor_units is None) != (self.cost_currency is None):
@@ -118,6 +123,7 @@ class RuleEvaluationRequest:
     resource_id: str
     arguments: Mapping[str, Any]
     quantity: int | None = None
+    quantity_unit: str | None = None
     amount: int | None = None
     currency: str | None = None
     request_hash: str | None = None
@@ -132,6 +138,10 @@ class RuleEvaluationRequest:
         object.__setattr__(self, "arguments", frozen)
         if self.quantity is not None and (type(self.quantity) is not int or self.quantity <= 0):
             raise AuthorityEventValidationError("quantity debe ser entero positivo")
+        if (self.quantity is None) != (self.quantity_unit is None):
+            raise AuthorityEventValidationError("quantity y quantity_unit deben ir juntos")
+        if self.quantity_unit is not None:
+            object.__setattr__(self, "quantity_unit", _identifier(self.quantity_unit, "quantity_unit"))
         if self.amount is not None and (type(self.amount) is not int or self.amount <= 0):
             raise AuthorityEventValidationError("amount debe ser entero positivo en unidades menores")
         if (self.quantity is not None and self.amount is not None):
@@ -155,6 +165,7 @@ class RuleEvaluationRequest:
             "resource_id": self.resource_id,
             "arguments": _thaw_json(self.arguments),
             "quantity": self.quantity,
+            "quantity_unit": self.quantity_unit,
             "amount": self.amount,
             "currency": self.currency,
         }

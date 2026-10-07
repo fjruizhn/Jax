@@ -26,6 +26,7 @@ def request(**overrides):
         "resource_id": "message:invoice-42",
         "arguments": {"recipient": "client@example.test", "body": "Invoice ready"},
         "quantity": 1,
+        "quantity_unit": "messages",
         "amount": None,
     }
     values.update(overrides)
@@ -49,6 +50,31 @@ def test_request_hash_is_derived_from_closed_canonical_projection():
     assert request(arguments={"nested": {}}).request_hash != request(arguments={"nested": []}).request_hash
 
 
+def test_request_hash_includes_quantity_unit():
+    assert request(quantity_unit="messages").request_hash != request(quantity_unit="recipients").request_hash
+
+
+@pytest.mark.parametrize(
+    ("quantity", "quantity_unit"),
+    [(1, None), (None, "messages")],
+)
+def test_request_requires_quantity_and_unit_together(quantity, quantity_unit):
+    with pytest.raises(AuthorityEventValidationError):
+        request(quantity=quantity, quantity_unit=quantity_unit)
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        {"quantity": 1},
+        {"quantity_unit": "messages"},
+    ],
+)
+def test_rule_limits_require_quantity_and_unit_together(limits):
+    with pytest.raises(AuthorityEventValidationError):
+        RuleLimits(**limits)
+
+
 @pytest.mark.parametrize("arguments", [{"nested": object()}])
 def test_request_rejects_opaque_arguments(arguments):
     with pytest.raises(AuthorityEventValidationError):
@@ -65,7 +91,7 @@ def test_request_validates_uuid7_and_exactly_one_action_or_money_limit():
 
 
 def test_rule_limits_allow_only_action_money_frequency_duration_and_cost():
-    assert RuleLimits(quantity=2, duration_seconds=30, tokens=400, cost_minor_units=10, cost_currency="USD")
+    assert RuleLimits(quantity=2, quantity_unit="messages", duration_seconds=30, tokens=400, cost_minor_units=10, cost_currency="USD")
 
 
 @pytest.mark.parametrize("field", FORBIDDEN_LIMIT_FIELDS)

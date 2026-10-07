@@ -4624,12 +4624,13 @@ duplicadas.
 
 ## `authority-rule-models/models`
 
-Piso nuevo (2026-10-06): `^14 passed in `. Medido en hall9000 con Python 3.14.4 y el
+Piso nuevo (2026-10-06): `^19 passed in `. Medido en hall9000 con Python 3.14.4 y el
 comando exacto del workflow: `python3 -B -m pytest -q
 tests/policy/test_faro_rule_authority_models.py`. Cubre hash derivado de la proyección
-cerrada, argumentos inmutables, validación de request ID y límites de actos/dinero, rechazo
-de límites de infraestructura, coherencia de status/reason y la idempotencia del store en
-memoria.
+cerrada con unidad de cantidad, argumentos inmutables, validación de request ID y límites de
+actos/dinero, rechazo de límites de infraestructura, coherencia de status/reason y la
+idempotencia del store en memoria. Se midió de nuevo tras el hallazgo MAJOR de auditoría
+Tier 3 que pidió ligar explícitamente la unidad a quantity y al request hash.
 
 ## `archivos-de-test-en-ci/pisos`
 

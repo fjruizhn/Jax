@@ -142,8 +142,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 8 pruebas de payload, codec y replay de ratificaciones Faro individuales. Medido el 2026-10-06 en hall9000."
     },
     "authority-rule-models/models": {
-      "patron": "^14 passed in ",
-      "mensaje": "PISO ROTO: se esperaban exactamente 14 pruebas de modelos, hash de solicitud y store en memoria de Rule Authority. Medido el 2026-10-06 en hall9000 con Python 3.14.4."
+      "patron": "^19 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 19 pruebas de modelos, unidad/hash de solicitud y store en memoria de Rule Authority. Medido el 2026-10-06 en hall9000 con Python 3.14.4."
     },
     "tests-puros/ficha_tests": {
       "patron": "^16 passed",
