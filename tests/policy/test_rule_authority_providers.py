@@ -1,15 +1,22 @@
-"""Proveedores confiables (F1.1 paso 7 r2): interfaces, guard y dobles reales.
+"""Proveedores confiables (F1.1 paso 7 r3): interfaces, guard y dobles reales.
 
-Portados los ataques A1-A14 del auditor como regresiones, con carreras REALES
-de hilos (0 lecturas durante exclusivo; 0 bifurcaciones de checkpoint) y los
-mutantes G/M del guion reconstruidos contra el diseño nuevo.
+Los dobles viven en ``proveedores_dobles.py`` (solo pruebas). Aqui:
+
+  - el guard se prueba con leases VALIDOS y SOLO el dato malo, para que cada
+    validacion muera por SU razon (X1-X4), no por el chequeo del lease;
+  - la exclusion de los leases se prueba de forma DETERMINISTA (el hilo que
+    intenta entrar o entra —y la prueba cae— o queda esperando, observable en
+    ``esperando()``): sin dormir a ver si «tiene suerte»;
+  - las carreras con hilos que quedan son de estres adicional, no la prueba.
 """
 from __future__ import annotations
 
+import ast
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -17,6 +24,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 from proveedores_dobles import (  # noqa: E402
+    CatalogoFijo,
     CheckpointsEnMemoria,
     ClasificacionFija,
     PinFijo,
@@ -26,7 +34,7 @@ from proveedores_dobles import (  # noqa: E402
     StopIlegible,
 )
 
-from policy.rule_authority.errors import (
+from policy.rule_authority.errors import (  # noqa: E402
     CheckpointInvalido,
     ClasificacionDesconocida,
     ProveedorInvalido,
@@ -35,32 +43,107 @@ from policy.rule_authority.errors import (
     RuleAuthorityError,
     StopDesconocido,
 )
-from policy.rule_authority.providers import (
+from policy.rule_authority.providers import (  # noqa: E402
+    CAPABILITY_CENTINELA,
     ORDEN_ADQUISICION,
     ClaseCapability,
     ContratoCapability,
     EstadoStop,
+    FormaLimites,
+    PinActivo,
     VersionMonotonica,
     VistaLease,
     exigir_contrato_de_emision,
 )
-from policy.rule_authority.snapshot import TrustedPolicyPin
+from policy.rule_authority.snapshot import TrustedPolicyPin  # noqa: E402
 
-PIN = TrustedPolicyPin("jax", "0" * 40, "1" * 40, "prueba:paso7r2")
+PROC = "refs/heads/main"
+PIN = TrustedPolicyPin("jax", "0" * 40, "1" * 40, PROC)
 T0 = datetime(2026, 10, 6, 12, 0, 0, tzinfo=timezone.utc)
+RAIZ = Path(__file__).resolve().parents[2]
 
 
-def _suite(checkpoint_publicado: bool = True) -> dict:
+def _contrato(clase: ClaseCapability) -> ContratoCapability:
+    return ContratoCapability(identidad="cap-x", version="v1", clase=clase,
+                              unidad="mensajes", moneda=None,
+                              forma_limites=FormaLimites.CANTIDAD)
+
+
+def _suite(checkpoint_publicado: bool = True, **cambios: object) -> dict:
     checkpoint = CheckpointsEnMemoria()
     if checkpoint_publicado:
         checkpoint.publicar("h1", anterior="")
-    return {
-        "pin": PinFijo(PIN, "checkpoint:externo"),
+    base: dict = {
+        "pin": PinFijo(PIN, PROC),
         "checkpoint": checkpoint,
         "stop": StopFijo(activo=False, huella="sha256:x"),
         "reloj": RelojDeterminista(T0),
-        "clasificacion": ClasificacionFija({}),
+        "clasificacion": ClasificacionFija({"CAP_X": _contrato(ClaseCapability.OBLIGATING)}),
     }
+    base.update(cambios)
+    return base
+
+
+def _niega(motivo: str, **cambios: object) -> None:
+    """El guard NIEGA con ProveedorInvalido cuyo mensaje contiene ``motivo``: la
+    razon importa (un lease valido + dato malo no puede caer por otra cosa)."""
+    with pytest.raises(ProveedorInvalido, match=motivo):
+        exigir_contrato_de_emision(**_suite(**cambios))
+
+
+class _Crudo:
+    """Proveedor con leases VALIDOS (context manager real) que entrega
+    EXACTAMENTE el valor y la version que se le digan, sin validar nada."""
+
+    def __init__(self, valor: object, version: object = None) -> None:
+        self._valor = valor
+        self._version = VersionMonotonica(1) if version is None else version
+
+    @contextmanager
+    def lease_compartido(self):
+        yield VistaLease(self._valor, self._version)       # type: ignore[arg-type]
+
+    def lease_exclusivo(self):
+        return self.lease_compartido()
+
+
+class _RelojCrudo:
+    """Reloj que entrega TAL CUAL lo que se le diga (los dobles lo normalizan a UTC)."""
+
+    def __init__(self, momento: object) -> None:
+        self._momento = momento
+
+    def ahora(self) -> object:
+        return self._momento
+
+    def marcar_emision(self, momento: datetime) -> None:
+        return None
+
+
+@contextmanager
+def _intervalo_de_conmutacion(valor: float):
+    """Cambia el intervalo de conmutacion de hilos y SIEMPRE lo restaura."""
+    original = sys.getswitchinterval()
+    sys.setswitchinterval(valor)
+    try:
+        yield
+    finally:
+        sys.setswitchinterval(original)
+
+
+@pytest.fixture
+def intervalo_corto():
+    with _intervalo_de_conmutacion(1e-6):
+        yield
+
+
+def test_el_intervalo_de_conmutacion_se_restaura_aun_si_el_cuerpo_falla() -> None:
+    original = sys.getswitchinterval()
+    with pytest.raises(RuntimeError):
+        with _intervalo_de_conmutacion(1e-6):
+            assert sys.getswitchinterval() != original
+            raise RuntimeError("falla el cuerpo")
+    assert sys.getswitchinterval() == original
 
 
 # ------------------------------------------------------------ tipos de valor
@@ -78,95 +161,181 @@ def test_version_invalida_niega(malo: object) -> None:
         VersionMonotonica(malo)                               # type: ignore[arg-type]
 
 
-def test_version_inmutable() -> None:
+def test_version_inmutable_sin_setter_ni_deleter() -> None:
     v = VersionMonotonica(1)
     with pytest.raises(RuleAuthorityError):
         v.numero = 2                                          # type: ignore[misc]
+    with pytest.raises(RuleAuthorityError):
+        del v._numero
+    assert v.numero == 1
 
 
-def test_m10_version_negativa_niega() -> None:
+def test_contrato_inmutable_sin_setter_ni_deleter() -> None:
+    c = _contrato(ClaseCapability.OBLIGATING)
+    with pytest.raises(RuleAuthorityError):
+        c.clase = ClaseCapability.REVERSIBLE                  # type: ignore[misc]
+    for campo in ("clase", "forma_limites", "identidad"):
+        with pytest.raises(RuleAuthorityError):
+            delattr(c, campo)
+    assert c.clase is ClaseCapability.OBLIGATING and c.forma_limites is FormaLimites.CANTIDAD
+
+
+def test_forma_de_limites_es_enum_cerrado_y_entra_en_la_identidad() -> None:
+    """§10.7: el consumo revalida la forma de limites; un contrato que cambia
+    SOLO la forma no es el mismo contrato."""
+    with pytest.raises(ProveedorInvalido):
+        ContratoCapability(identidad="c", version="v", clase=ClaseCapability.OBLIGATING,
+                           unidad=None, moneda=None, forma_limites="cantidad")   # type: ignore[arg-type]
+    a = _contrato(ClaseCapability.OBLIGATING)
+    b = ContratoCapability(identidad="cap-x", version="v1", clase=ClaseCapability.OBLIGATING,
+                           unidad="mensajes", moneda=None, forma_limites=FormaLimites.MONTO)
+    assert a != b and hash(a) != hash(b)
+
+
+def test_m10_m8_version_negativa_niega_e_iguales_no_son_posteriores() -> None:
     with pytest.raises(ProveedorInvalido):
         VersionMonotonica(-1)
-
-
-def test_m2_el_compartido_libera_de_verdad() -> None:
-    """M2 (fuga de lectores): si el compartido no decrementara, el exclusivo
-    quedaria esperando para siempre. Con hilo y plazo: entra o queda claro."""
-    proveedor = PinFijo(PIN, "p")
-    with proveedor.lease_compartido():
-        pass                                                # al salir: cero lectores
-    entro: list[bool] = []
-
-    def escritor() -> None:
-        with proveedor.lease_exclusivo():
-            entro.append(True)
-
-    hilo = threading.Thread(target=escritor, daemon=True)
-    hilo.start()
-    hilo.join(timeout=2.0)
-    assert entro, "el compartido no libero: el exclusivo no entra nunca (fuga)"
+    assert VersionMonotonica(5).es_posterior_a(VersionMonotonica(5)) is False
 
 
 # ------------------------------------------------------------------- leases
 
-def test_a2_el_exclusivo_excluye_de_verdad() -> None:
-    proveedor = PinFijo(PIN, "p")
-    with proveedor.lease_exclusivo():
-        with pytest.raises(Exception):                        # un compartido NUNCA entra
-            with proveedor.lease_exclusivo():
+def _intento_en_hilo(abrir):
+    """Hilo que intenta ``with abrir():``. Devuelve (entro, soltar, hilo)."""
+    entro, soltar = threading.Event(), threading.Event()
+
+    def correr() -> None:
+        with abrir():
+            entro.set()
+            soltar.wait(timeout=5.0)
+
+    hilo = threading.Thread(target=correr, daemon=True)
+    hilo.start()
+    return entro, soltar, hilo
+
+
+def _hasta_entrar_o_esperar(proveedor: object, entro: threading.Event) -> None:
+    """DETERMINISTA: vuelve cuando el hilo YA ENTRO (la prueba va a caer) o YA
+    ESTA ESPERANDO en el lock. Sin dormir un tiempo y rezar."""
+    limite = time.monotonic() + 5.0
+    while not entro.is_set() and proveedor.esperando() == 0:      # type: ignore[attr-defined]
+        assert time.monotonic() < limite, "el hilo ni entro ni espero (¿murio?)"
+        time.sleep(0.0005)
+
+
+@pytest.mark.parametrize("duenyo,intento,razon", [
+    ("lease_exclusivo", "lease_compartido", "M1: el compartido entro con un exclusivo vivo"),
+    ("lease_exclusivo", "lease_exclusivo", "X7: dos exclusivos a la vez (los escritores no se excluyen)"),
+    ("lease_compartido", "lease_exclusivo", "X9: el exclusivo entro con un compartido vivo (no espera)"),
+])
+def test_a2_la_exclusion_es_real_de_hilo_a_hilo(duenyo: str, intento: str, razon: str) -> None:
+    """El hilo que intenta entrar DEBE quedar esperando mientras el dueño vive y
+    entrar apenas lo suelta. Hilos distintos: la reentrada del mismo hilo (que el
+    doble niega aparte) no puede hacer pasar esta prueba por la razon equivocada."""
+    proveedor = PinFijo(PIN, PROC)
+    soltar = None
+    try:
+        with getattr(proveedor, duenyo)():
+            entro, soltar, hilo = _intento_en_hilo(getattr(proveedor, intento))
+            _hasta_entrar_o_esperar(proveedor, entro)
+            assert not entro.is_set(), razon
+        assert entro.wait(timeout=5.0), "soltado el dueño, el que esperaba no entro (¿lock que no libera?)"
+    finally:
+        if soltar is not None:
+            soltar.set()
+    hilo.join(timeout=5.0)
+    assert not hilo.is_alive()
+
+
+def test_dos_compartidos_coexisten() -> None:
+    """Si los lectores se excluyeran entre si, la barrera expira (BrokenBarrierError)."""
+    proveedor = PinFijo(PIN, PROC)
+    barrera = threading.Barrier(2, timeout=5.0)
+    errores: list[BaseException] = []
+
+    def lector() -> None:
+        try:
+            with proveedor.lease_compartido():
+                barrera.wait()                     # los DOS dentro a la vez
+        except threading.BrokenBarrierError as exc:
+            errores.append(exc)
+
+    hilos = [threading.Thread(target=lector, daemon=True) for _ in range(2)]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join(timeout=10.0)
+    assert errores == []
+
+
+@pytest.mark.parametrize("externo,interno", [
+    ("lease_exclusivo", "lease_compartido"),      # compartido DENTRO de exclusivo
+    ("lease_exclusivo", "lease_exclusivo"),
+    ("lease_compartido", "lease_exclusivo"),      # promocion
+])
+def test_reentrada_del_mismo_hilo_es_error_tipado_no_bloqueo(externo: str, interno: str) -> None:
+    """Declarado en el Protocolo: reentrada y promocion del mismo hilo NO se
+    soportan y fallan al instante (sin deadlock)."""
+    proveedor = PinFijo(PIN, PROC)
+    with getattr(proveedor, externo)():
+        with pytest.raises(RuleAuthorityError, match="no soportada"):
+            with getattr(proveedor, interno)():
                 pass
+    with proveedor.lease_exclusivo():              # y el lock quedo sano
+        pass
 
 
-def test_el_lease_entrega_valor_y_version_del_mismo_instante() -> None:
-    proveedor = PinFijo(PIN, "p")
-    with proveedor.lease_compartido() as vista:
-        assert isinstance(vista, VistaLease)
-        assert vista.valor[0] == PIN and isinstance(vista.version, VersionMonotonica)
+def test_el_lease_entrega_valor_y_version_del_mismo_instante_con_la_misma_forma() -> None:
+    proveedor = PinFijo(PIN, PROC)
+    with proveedor.lease_compartido() as compartida:
+        pass
+    with proveedor.lease_exclusivo() as exclusiva:
+        pass
+    for vista in (compartida, exclusiva):
+        assert isinstance(vista, VistaLease) and isinstance(vista.version, VersionMonotonica)
+        assert type(vista.valor) is PinActivo and vista.valor.pin == PIN
+    assert type(compartida.valor) is type(exclusiva.valor)
+
+
+def test_m2_el_compartido_libera_de_verdad() -> None:
+    """Fuga de lectores: si el compartido no decrementara, el exclusivo esperaria
+    para siempre. Hilo con plazo: cae roja, no cuelga."""
+    proveedor = PinFijo(PIN, PROC)
+    with proveedor.lease_compartido():
+        pass
+    entro, soltar, hilo = _intento_en_hilo(proveedor.lease_exclusivo)
+    try:
+        assert entro.wait(timeout=5.0), "el compartido no libero: el exclusivo no entra nunca"
+    finally:
+        soltar.set()
+    hilo.join(timeout=5.0)
 
 
 def test_m9_la_version_es_estable_mientras_se_lee() -> None:
-    """Si cada lease avanzara la version, esta igualdad estricta rompe. El
-    exclusivo entra en hilo con plazo: con una fuga de lectores (M2) queda
-    ROJA, no colgada."""
+    """Si cada lease avanzara la version, esta igualdad estricta rompe."""
     proveedor = StopFijo(activo=False, huella="x")
     with proveedor.lease_compartido() as v1:
         with proveedor.lease_compartido() as v2:
             assert v1.version == v2.version                   # estricta: sin avance por leer
-    avanzo: list[bool] = []
-
-    def escritor() -> None:
-        with proveedor.lease_exclusivo() as v3:
-            avanzo.append(v3.version.es_posterior_a(v1.version))   # el escritor SI avanza
-
-    hilo = threading.Thread(target=escritor, daemon=True)
-    hilo.start()
-    hilo.join(timeout=2.0)
-    assert avanzo == [True], "el exclusivo no entro (fuga de lectores) o no avanzo"
+    with proveedor.lease_exclusivo() as v3:
+        assert v3.version.es_posterior_a(v1.version)           # el escritor SI avanza
 
 
-def test_a3_el_estado_ve_la_version_del_momento() -> None:
-    proveedor = StopFijo(activo=False, huella="x")
-    antes = proveedor.estado().version
-    with proveedor.lease_exclusivo():
-        pass
-    assert proveedor.estado().version.es_posterior_a(antes)
-
-
-def test_a14_carrera_real_ninguna_lectura_durante_exclusivo() -> None:
-    sys.setswitchinterval(1e-6)
-    proveedor = PinFijo(PIN, "p")
+def test_a14_estres_ninguna_lectura_durante_exclusivo(intervalo_corto) -> None:
+    """Estres ADICIONAL (la prueba determinista es test_a2_*): 0 lecturas con exclusivo vivo."""
+    proveedor = PinFijo(PIN, PROC)
     violaciones = [0]
     exclusivo_vivo = [False]
-    parar = [False]
+    parar = threading.Event()
 
     def lector() -> None:
-        while not parar[0]:
+        while not parar.is_set():
             with proveedor.lease_compartido():
                 if exclusivo_vivo[0]:
                     violaciones[0] += 1
 
     def escritor() -> None:
-        while not parar[0]:
+        while not parar.is_set():
             with proveedor.lease_exclusivo():
                 exclusivo_vivo[0] = True
                 time.sleep(0)
@@ -177,7 +346,7 @@ def test_a14_carrera_real_ninguna_lectura_durante_exclusivo() -> None:
     for h in hilos:
         h.start()
     time.sleep(0.35)
-    parar[0] = True
+    parar.set()
     for h in hilos:
         h.join(timeout=5.0)
         assert not h.is_alive(), "un hilo de la carrera no termino (¿lock que no libera?)"
@@ -186,43 +355,115 @@ def test_a14_carrera_real_ninguna_lectura_durante_exclusivo() -> None:
 
 # ---------------------------------------------------------------------- pin
 
-def test_a11_procedencia_sellada_nunca_movil_ni_vacia() -> None:
-    with pytest.raises(ProveedorInvalido):
-        PinFijo(PIN, "refs/heads/main")
-    with pytest.raises(ProveedorInvalido):
-        PinFijo(PIN, "")
-    proveedor = PinFijo(PIN, "checkpoint:externo")
-    assert proveedor.pin_activo()[1] == "checkpoint:externo"
+@pytest.mark.parametrize("mala", [
+    "main", "HEAD", "origin/main", "heads/main", "REFS/heads/main", " refs/heads/main",
+    "refs/heads/main ", "refs/heads/main\n", "refs/heads/", "refs/heads", "refs/heads/a b",
+    "refs/remotes/origin/main", "refs/Heads/main", "refs/heads/../main", "refs/heads//x",
+    "refs/heads/máin", "refs/tags/", "refs/heads/-x",
+])
+def test_x4_procedencia_fuera_de_la_forma_cerrada_niega(mala: str) -> None:
+    pin = TrustedPolicyPin("jax", "0" * 40, "1" * 40, mala)   # el pin declara LA MISMA: solo la forma puede negar
+    _niega("forma cerrada", pin=PinFijo(pin, mala))
 
 
-def test_a12_no_hay_lease_fabricable_en_produccion() -> None:
-    """El lease solo existe como vista entregada por el proveedor; fabricar una
-    VistaLease a mano no da acceso a nada (el kernel consume el context manager)."""
-    import policy.rule_authority.providers as P
-    assert not hasattr(P, "_Lease")
-    falsa = VistaLease(valor=None, version=VersionMonotonica(999))
-    assert falsa.valor is None                               # un dato, no una llave
+@pytest.mark.parametrize("buena", ["refs/heads/main", "refs/tags/v1.2.3", "refs/heads/feat/faro-f1.1_x"])
+def test_x4_procedencia_cerrada_pasa(buena: str) -> None:
+    pin = TrustedPolicyPin("jax", "0" * 40, "1" * 40, buena)
+    exigir_contrato_de_emision(**_suite(pin=PinFijo(pin, buena)))
+
+
+def test_x1_procedencia_sellada_distinta_de_la_del_pin_niega() -> None:
+    _niega("difiere", pin=PinFijo(PIN, "refs/heads/otra"))     # ambas de forma cerrada, pero distintas
+    _niega("forma cerrada", pin=PinFijo(PIN, ""))
+
+
+def test_x1_pin_de_una_subclase_niega() -> None:
+    class _PinHijo(TrustedPolicyPin):
+        pass
+    hijo = _PinHijo("jax", "0" * 40, "1" * 40, PROC)
+    assert isinstance(hijo, TrustedPolicyPin)
+    _niega("exactamente TrustedPolicyPin", pin=PinFijo(hijo, PROC))
+
+
+@pytest.mark.parametrize("valor", [None, (PIN, PROC), "x", object(), PinActivo(None, PROC)])  # type: ignore[arg-type]
+def test_vista_lease_con_valor_malo_niega_en_el_pin(valor: object) -> None:
+    _niega("pin_activo", pin=_Crudo(valor))
 
 
 # --------------------------------------------------------------------- stop
 
-def test_a6_estado_stop_validado() -> None:
-    with pytest.raises(ProveedorInvalido):
-        StopFijo(activo=None, huella="x")                     # type: ignore[arg-type]
-    with pytest.raises(ProveedorInvalido):
-        StopFijo(activo=False, huella="")
-    estado = StopFijo(activo=False, huella="x").estado()
-    assert estado.activo is False                             # bool real, no truthy
+@pytest.mark.parametrize("estado", [
+    EstadoStop(activo=None, huella="x"),       # type: ignore[arg-type]
+    EstadoStop(activo=1, huella="x"),          # type: ignore[arg-type]
+    EstadoStop(activo="false", huella="x"),    # type: ignore[arg-type]
+    EstadoStop(activo=False, huella=""),
+    EstadoStop(activo=False, huella=None),     # type: ignore[arg-type]
+    EstadoStop(activo=False, huella=5),        # type: ignore[arg-type]
+])
+def test_x2_estado_stop_mal_formado_niega(estado: EstadoStop) -> None:
+    _niega("EstadoStop mal formado", stop=_Crudo(estado))
 
 
-def test_stop_ilegible_es_tipado() -> None:
-    with pytest.raises(StopDesconocido):
-        StopIlegible().estado()
+@pytest.mark.parametrize("valor", [None, (False, "x"), "x"])
+def test_x2_el_valor_del_lease_de_stop_debe_ser_estadostop(valor: object) -> None:
+    _niega("no es EstadoStop", stop=_Crudo(valor))
+
+
+def test_stop_ilegible_el_guard_niega_no_delega() -> None:
+    """BLOCK r2: STOP ilegible NO es un estado valido que el guard deja pasar."""
+    _niega("StopDesconocido", stop=StopIlegible())
+    with pytest.raises(StopDesconocido):                      # el doble SI es ilegible de verdad
+        with StopIlegible().lease_compartido():
+            pass
+
+
+def test_stop_activo_es_un_estado_valido_para_el_guard() -> None:
+    """El guard verifica el CONTRATO del proveedor; que el STOP este activo lo
+    traduce el kernel en DENY, no el guard."""
+    exigir_contrato_de_emision(**_suite(stop=StopFijo(activo=True, huella="sha256:y")))
 
 
 # --------------------------------------------------------------------- reloj
 
-def test_m4_reloj_ingenuo_niega() -> None:
+class _TzSinOffset(tzinfo):
+    def utcoffset(self, _dt):
+        return None
+
+    def dst(self, _dt):
+        return None
+
+    def tzname(self, _dt):
+        return None
+
+
+@pytest.mark.parametrize("momento", [
+    datetime(2026, 10, 6, 12, 0, 0),                                              # ingenua
+    datetime(2026, 10, 6, 12, 0, 0, tzinfo=timezone(timedelta(hours=-6))),         # hora local consciente
+    datetime(2026, 10, 6, 12, 0, 0, tzinfo=timezone(timedelta(minutes=1))),
+    datetime(2026, 10, 6, 12, 0, 0, tzinfo=_TzSinOffset()),                        # utcoffset() None
+])
+def test_x3_reloj_que_no_es_utc_consciente_niega(momento: datetime) -> None:
+    _niega("UTC consciente", reloj=_RelojCrudo(momento))
+
+
+@pytest.mark.parametrize("momento", [None, "2026-10-06T12:00:00+00:00", 1759752000])
+def test_reloj_que_no_entrega_datetime_niega(momento: object) -> None:
+    _niega("datetime", reloj=_RelojCrudo(momento))
+
+
+def test_reloj_utc_con_otra_clase_de_tz_pasa_y_el_que_lanza_niega() -> None:
+    exigir_contrato_de_emision(**_suite(reloj=_RelojCrudo(datetime(2026, 10, 6, tzinfo=timezone(timedelta(0))))))
+
+    class _Roto:
+        def ahora(self):
+            raise RelojRetrocedio("retrocedio")
+
+        def marcar_emision(self, momento):
+            return None
+    _niega("ahora\\(\\) no sirve", reloj=_Roto())
+
+
+def test_m4_reloj_ingenuo_del_doble_niega() -> None:
     reloj = RelojDeterminista(datetime(2026, 10, 6, 12, 0, 0))   # sin tz
     with pytest.raises(RelojInvalido):
         reloj.ahora()
@@ -252,22 +493,58 @@ def test_marcar_emision_sube_el_piso() -> None:
 
 # ------------------------------------------------------------- clasificación
 
-def _contrato(clase: ClaseCapability) -> ContratoCapability:
-    return ContratoCapability(identidad="cap-x", version="v1", clase=clase,
-                              unidad="mensajes", moneda=None)
+class _CatalogoPermisivo:
+    """Responde SIEMPRE ``respuesta`` (un contrato REVERSIBLE, None...) a cualquier
+    capability, desconocida incluida: el catalogo que §13 prohibe."""
+
+    def __init__(self, respuesta: object) -> None:
+        self._respuesta = respuesta
+
+    def contrato_de(self, capability: str) -> object:
+        return self._respuesta
+
+
+class _CatalogoQueExplota:
+    def contrato_de(self, capability: str) -> object:
+        raise KeyError(capability)
+
+
+@pytest.mark.parametrize("catalogo", [
+    _CatalogoPermisivo(_contrato(ClaseCapability.REVERSIBLE)),
+    _CatalogoPermisivo(_contrato(ClaseCapability.OBLIGATING)),
+    _CatalogoPermisivo(None),
+    _CatalogoQueExplota(),
+])
+def test_x5_capability_desconocida_que_no_niega_se_niega(catalogo: object) -> None:
+    """§13 (decision de Hyde): capability desconocida => NIEGA. El guard sondea
+    la centinela y exige ClasificacionDesconocida; REVERSIBLE o None pasaban."""
+    _niega("capability desconocida|centinela", clasificacion=_Crudo(catalogo))
+
+
+@pytest.mark.parametrize("valor", [None, "x", {"CAP_X": 1}])
+def test_el_valor_del_lease_de_clasificacion_debe_ser_un_catalogo(valor: object) -> None:
+    _niega("CatalogoClasificacion", clasificacion=_Crudo(valor))
+
+
+def test_el_catalogo_que_niega_la_centinela_pasa_y_la_centinela_no_existe() -> None:
+    assert CAPABILITY_CENTINELA
+    exigir_contrato_de_emision(**_suite(clasificacion=_Crudo(CatalogoFijo({}))))
+    with pytest.raises(ClasificacionDesconocida):
+        CatalogoFijo({"CAP_X": _contrato(ClaseCapability.OBLIGATING)}).contrato_de(CAPABILITY_CENTINELA)
 
 
 def test_a8_la_clase_es_enum_cerrado() -> None:
     with pytest.raises(ProveedorInvalido):
         ContratoCapability(identidad="c", version="v", clase="reversible?",   # type: ignore[arg-type]
-                           unidad=None, moneda=None)
+                           unidad=None, moneda=None, forma_limites=FormaLimites.NINGUNA)
     with pytest.raises(ProveedorInvalido):
         ClasificacionFija({"D": None})                         # type: ignore[dict-item]
 
 
 def test_m11_la_ausente_obliga_nunca_rebaja() -> None:
-    with pytest.raises(ClasificacionDesconocida):
-        ClasificacionFija({}).contrato_de("CAP_X")
+    with ClasificacionFija({}).lease_compartido() as vista:
+        with pytest.raises(ClasificacionDesconocida):
+            vista.valor.contrato_de("CAP_X")                   # type: ignore[attr-defined]
 
 
 def test_sin_rebaja_entre_versiones_del_contrato() -> None:
@@ -275,7 +552,8 @@ def test_sin_rebaja_entre_versiones_del_contrato() -> None:
     with pytest.raises(ProveedorInvalido):
         proveedor.republicar("CAP_X", _contrato(ClaseCapability.REVERSIBLE))
     proveedor.republicar("CAP_X", _contrato(ClaseCapability.OBLIGATING))   # igual: ok
-    proveedor.republicar("CAP_X", _contrato(ClaseCapability.OBLIGATING))   # subir: ok
+    with proveedor.lease_compartido() as vista:
+        assert vista.valor.contrato_de("CAP_X").clase is ClaseCapability.OBLIGATING   # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------- checkpoint
@@ -302,20 +580,25 @@ def test_g1_retroceso_y_conflicto_niegan() -> None:
         checkpoints.publicar("h3", anterior="otro")
 
 
-def test_confirmar_relee_el_log() -> None:
+def test_confirmar_es_el_log_contiene_el_head_exacto() -> None:
+    """§11: no exige que sea el head ACTUAL (otra operacion pudo agregar un
+    descendiente) y un head que nunca se publico NO se confirma."""
     checkpoints = CheckpointsEnMemoria()
     checkpoints.publicar("h1", anterior="")
-    assert checkpoints.confirmar("h1") is True
-    assert checkpoints.confirmar("h9") is False
+    checkpoints.publicar("h2", anterior="h1")
+    assert checkpoints.confirmar("h2") is True
+    assert checkpoints.confirmar("h1") is True                 # contenido, aunque ya no sea el actual
+    assert checkpoints.confirmar("h9") is False                # «siempre True» muere aqui
+    assert CheckpointsEnMemoria().confirmar("h1") is False
 
 
-def test_a13_carrera_hilos_cero_bifurcaciones() -> None:
-    sys.setswitchinterval(1e-6)
+def test_a13_carrera_hilos_cero_bifurcaciones(intervalo_corto) -> None:
     bifurcaciones = 0
     for _ in range(300):
         checkpoints = CheckpointsEnMemoria()
         checkpoints.publicar("h0", anterior="")
         exitosos: list[str] = []
+        rechazos: list[CheckpointInvalido] = []
         barrera = threading.Barrier(2)
 
         def escritor(head: str) -> None:
@@ -323,20 +606,69 @@ def test_a13_carrera_hilos_cero_bifurcaciones() -> None:
             try:
                 checkpoints.publicar(head, anterior="h0")
                 exitosos.append(head)
-            except CheckpointInvalido:
-                pass
+            except CheckpointInvalido as exc:
+                rechazos.append(exc)
 
         hilos = [threading.Thread(target=escritor, args=(h,)) for h in ("hA", "hB")]
         for h in hilos:
             h.start()
         for h in hilos:
             h.join()
+        assert len(exitosos) + len(rechazos) == 2
         if len(exitosos) == 2:
             bifurcaciones += 1
     assert bifurcaciones == 0, f"{bifurcaciones} bifurcaciones aceptadas"
 
 
+class _CheckpointRecorder:
+    """Checkpoint cuyo ``confirmar`` registra lo que le llaman y responde lo que se le diga."""
+
+    def __init__(self, head: object = "h1", responde: object = True, explota: bool = False) -> None:
+        self._head, self._responde, self._explota = head, responde, explota
+        self.confirmados: list[object] = []
+
+    def head_actual(self) -> object:
+        return self._head
+
+    def publicar(self, head: str, *, anterior: str) -> None:
+        return None
+
+    def confirmar(self, head: str) -> object:
+        self.confirmados.append(head)
+        if self._explota:
+            raise OSError("log ilegible")
+        return self._responde
+
+
+def test_el_guard_llama_confirmar_con_el_head_exacto() -> None:
+    rec = _CheckpointRecorder(head="h7")
+    exigir_contrato_de_emision(**_suite(checkpoint=rec))
+    assert rec.confirmados == ["h7"]
+
+
+@pytest.mark.parametrize("responde", [False, None, "si", 1])
+def test_el_guard_niega_si_el_log_no_confirma_el_head(responde: object) -> None:
+    """Cae si el guard no llama confirmar, o lo acepta sin ser exactamente True."""
+    _niega("no contiene el head", checkpoint=_CheckpointRecorder(responde=responde))
+
+
+def test_el_guard_niega_si_confirmar_explota_o_el_head_es_ilegible() -> None:
+    _niega("confirmar no sirve", checkpoint=_CheckpointRecorder(explota=True))
+    _niega("nunca publicado", checkpoint=_CheckpointRecorder(head=""))
+    _niega("nunca publicado", checkpoint=_CheckpointRecorder(head=None))
+
+
+def test_a10_checkpoint_nunca_publicado_niega() -> None:
+    with pytest.raises(ProveedorInvalido) as excinfo:
+        exigir_contrato_de_emision(**_suite(checkpoint_publicado=False))
+    assert "nunca publicado" in str(excinfo.value)
+
+
 # -------------------------------------------------------------------- guard
+
+def test_el_guard_pasa_la_suite_completa() -> None:
+    exigir_contrato_de_emision(**_suite())                    # no lanza
+
 
 def test_a4_el_guard_niega_mocks() -> None:
     with pytest.raises(ProveedorInvalido):
@@ -344,15 +676,8 @@ def test_a4_el_guard_niega_mocks() -> None:
                                     reloj=Mock(), clasificacion=Mock())
 
 
-class _Falso:
-    def pin_activo(self):
-        return None
-
-    def estado(self):
-        return EstadoStop(activo=None, version=None, huella="")   # type: ignore[arg-type]
-
-    def contrato_de(self, capability: str):
-        return None
+class _LeaseRoto:
+    """Pasa el isinstance (tiene los metodos) pero sus leases no sirven."""
 
     def lease_compartido(self):
         return None
@@ -361,62 +686,30 @@ class _Falso:
         return None
 
 
-def test_a5_el_guard_niega_vistas_y_valores_none() -> None:
-    suite = _suite()
-    for campo in ("pin", "stop", "clasificacion"):
-        mala = _suite()
-        mala[campo] = _Falso()
-        with pytest.raises(ProveedorInvalido):
-            exigir_contrato_de_emision(**mala)
-    assert suite  # silencia linters; el bucle ya probo los tres
+class _LeaseVersionTrucha(_Crudo):
+    def __init__(self, valor: object) -> None:
+        super().__init__(valor, version=99)
 
 
-def test_a10_checkpoint_nunca_publicado_niega() -> None:
-    suite = _suite(checkpoint_publicado=False)
-    with pytest.raises(ProveedorInvalido) as excinfo:
-        exigir_contrato_de_emision(**suite)
-    assert "nunca publicado" in str(excinfo.value)
+@pytest.mark.parametrize("campo,valor", [
+    ("pin", PinActivo(PIN, PROC)),
+    ("stop", EstadoStop(activo=False, huella="x")),
+    ("clasificacion", CatalogoFijo({})),
+])
+def test_a5_m5_m12_leases_rotos_o_con_vista_trucha_niegan(campo: str, valor: object) -> None:
+    """Cada proveedor con el VALOR bueno: lo unico malo es el lease o la version."""
+    _niega("lease", **{campo: _LeaseRoto()})
+    _niega("VistaLease", **{campo: _LeaseVersionTrucha(valor)})
 
 
-def test_el_guard_pasa_la_suite_completa() -> None:
-    exigir_contrato_de_emision(**_suite())                    # no lanza
-
-
-class _PinConLeasesRotos:
-    """Pasa el isinstance (tiene todos los metodos) y entrega un pin VALIDO;
-    solo sus leases estan rotos (devuelven None). Si el guard no mirara la
-    vista del lease, este doble pasaria."""
-
-    def lease_compartido(self):
-        return None
-
-    def lease_exclusivo(self):
-        return None
-
-    def pin_activo(self):
-        return (PIN, "checkpoint:externo")
-
-
-def test_g2_m12_el_guard_exige_leases_con_vista_valida() -> None:
-    for campo, roto in (("pin", _PinConLeasesRotos()), ):
-        suite = _suite()
-        suite[campo] = roto
-        with pytest.raises(ProveedorInvalido) as excinfo:
-            exigir_contrato_de_emision(**suite)
-        assert "lease" in str(excinfo.value) or "VistaLease" in str(excinfo.value)
-    for campo in ("pin", "stop", "clasificacion"):
-        suite = _suite()
-        suite[campo] = ProveedorSinLeases()          # ni siquiera implementa el Protocolo
-        with pytest.raises(ProveedorInvalido):
-            exigir_contrato_de_emision(**suite)
+@pytest.mark.parametrize("campo", ["pin", "stop", "clasificacion"])
+def test_el_proveedor_sin_leases_ni_siquiera_implementa_el_protocolo(campo: str) -> None:
+    _niega("no implementa", **{campo: ProveedorSinLeases()})
 
 
 def test_falta_cualquier_proveedor_niega() -> None:
     for campo in ("pin", "checkpoint", "stop", "reloj", "clasificacion"):
-        suite = _suite()
-        suite[campo] = None
-        with pytest.raises(ProveedorInvalido):
-            exigir_contrato_de_emision(**suite)
+        _niega("falta el proveedor", **{campo: None})
 
 
 def test_el_orden_global_de_adquisicion_es_el_del_diseno() -> None:
@@ -424,109 +717,70 @@ def test_el_orden_global_de_adquisicion_es_el_del_diseno() -> None:
                                  "authority_ledger_head", "audit_head")
 
 
-# --------------------------------- mutantes M6/M7/M8/M12: la razón propia
-
-def test_m8_versiones_iguales_no_son_posteriores() -> None:
-    assert VersionMonotonica(5).es_posterior_a(VersionMonotonica(5)) is False
-
-
 class _PinSinExclusivo:
-    """lease_compartido FUNCIONA; lease_exclusivo existe como atributo pero no
-    es llamable (pasa el isinstance de runtime_checkable, que solo mira
-    atributos). Si el guard no lo exigiera llamable, este doble pasaria."""
+    """lease_compartido FUNCIONA; lease_exclusivo existe pero no es llamable."""
 
     def __init__(self) -> None:
-        self._base = _BasePrestada()
-
-    def lease_compartido(self):
-        return self._base.lease_compartido()
-
-    lease_exclusivo = None
-
-    def pin_activo(self):
-        return (PIN, "checkpoint:externo")
-
-
-class _BasePrestada:
-    def __init__(self) -> None:
-        from proveedores_dobles import PinFijo
-        self._real = PinFijo(PIN, "p")
+        self._real = PinFijo(PIN, PROC)
 
     def lease_compartido(self):
         return self._real.lease_compartido()
 
+    lease_exclusivo = None
+
 
 def test_m12_el_guard_exige_lease_exclusivo_llamable() -> None:
-    suite = _suite()
-    suite["pin"] = _PinSinExclusivo()
-    with pytest.raises(ProveedorInvalido):
-        exigir_contrato_de_emision(**suite)
-    # La capa que mata a M12 es el isinstance runtime_checkable de 3.12+
-    # (atributos no llamables no implementan el Protocolo); el chequeo explicito
-    # del guard es cinturon y tirantes.
+    _niega("no implementa", pin=_PinSinExclusivo())
 
 
 class _CheckpointAtributosMuertos:
-    """head_actual funciona; publicar/confirmar existen pero no llaman."""
-
-    def __init__(self) -> None:
-        self._real = CheckpointsEnMemoria()
-        self._real.publicar("h1", anterior="")
-
     def head_actual(self) -> str:
-        return self._real.head_actual()
+        return "h1"
 
     publicar = None
     confirmar = None
 
 
 def test_m6_el_guard_exige_publicar_y_confirmar_llamables() -> None:
-    suite = _suite()
-    suite["checkpoint"] = _CheckpointAtributosMuertos()
-    with pytest.raises(ProveedorInvalido):
-        exigir_contrato_de_emision(**suite)
-    # M6 muere por el isinstance (callable en 3.12+); ver nota de M12.
+    _niega("no implementa", checkpoint=_CheckpointAtributosMuertos())
 
 
 class _RelojSinMarcar:
-    def __init__(self) -> None:
-        self._real = RelojDeterminista(T0)
-
     def ahora(self) -> object:
-        return self._real.ahora()
+        return T0
 
     marcar_emision = None
 
 
 def test_m7_el_guard_exige_marcar_emision_llamable() -> None:
-    suite = _suite()
-    suite["reloj"] = _RelojSinMarcar()
-    with pytest.raises(ProveedorInvalido):
-        exigir_contrato_de_emision(**suite)
-    # M7 muere por el isinstance (callable en 3.12+); ver nota de M12.
+    _niega("no implementa", reloj=_RelojSinMarcar())
 
 
-class _PinConVistaTrucha:
-    """El lease FUNCIONA (context manager de verdad) pero la vista trae una
-    version que no es VersionMonotonica. Sin la validacion de la vista, pasa."""
-
-    def lease_compartido(self):
-        from contextlib import contextmanager
-        @contextmanager
-        def cm():
-            yield VistaLease(valor=(PIN, "checkpoint:externo"), version=99)
-        return cm()
-
-    def lease_exclusivo(self):
-        return self.lease_compartido()
-
-    def pin_activo(self):
-        return (PIN, "checkpoint:externo")
+def test_a12_no_hay_lease_fabricable_en_produccion() -> None:
+    import policy.rule_authority.providers as P
+    assert not hasattr(P, "_Lease")
+    falsa = VistaLease(valor=None, version=VersionMonotonica(999))
+    assert falsa.valor is None                               # un dato, no una llave
 
 
-def test_m5_la_vista_del_lease_se_valida() -> None:
-    suite = _suite()
-    suite["pin"] = _PinConVistaTrucha()
-    with pytest.raises(ProveedorInvalido) as excinfo:
-        exigir_contrato_de_emision(**suite)
-    assert "VistaLease" in str(excinfo.value) or "vista" in str(excinfo.value)
+def test_produccion_no_importa_pruebas() -> None:
+    """policy/ y jax/ nunca importan tests/ ni los dobles (el modulo de produccion
+    no depende de nada que viva en pruebas)."""
+    for raiz in ("policy", "jax"):
+        base = RAIZ / raiz
+        if not base.is_dir():
+            continue
+        for archivo in base.rglob("*.py"):
+            if "tests" in archivo.relative_to(base).parts or archivo.name.startswith("test_") \
+                    or archivo.name.endswith("_test.py"):
+                continue
+            arbol = ast.parse(archivo.read_text(encoding="utf-8"))
+            for nodo in ast.walk(arbol):
+                nombres = []
+                if isinstance(nodo, ast.Import):
+                    nombres = [a.name for a in nodo.names]
+                elif isinstance(nodo, ast.ImportFrom):
+                    nombres = [nodo.module or ""]
+                for nombre in nombres:
+                    assert nombre.split(".")[0] != "tests" and "proveedores_dobles" not in nombre, \
+                        f"{archivo}: importa {nombre}"

@@ -26,6 +26,7 @@ from policy.rule_authority.providers import (
     ClaseCapability,
     ContratoCapability,
     EstadoStop,
+    PinActivo,
     VersionMonotonica,
     VistaLease,
 )
@@ -34,42 +35,69 @@ from policy.rule_authority.snapshot import TrustedPolicyPin
 
 class RWLock:
     """Lector-escritor real: el compartido espera si hay exclusivo vivo; el
-    exclusivo espera a que no haya compartidos ni otro exclusivo. Contador bajo
-    lock (threading.Condition)."""
+    exclusivo espera a que no haya compartidos ni otro exclusivo. Contadores
+    bajo lock (threading.Condition). Reentrada y promocion del MISMO hilo son
+    errores tipados, no bloqueos eternos (declarado en el Protocolo):
+    compartido dentro de exclusivo, exclusivo dentro de exclusivo y exclusivo
+    dentro de compartido."""
 
     def __init__(self) -> None:
         self._cond = threading.Condition()
         self._lectores = 0
+        self._ids_lectores: dict[int, int] = {}
         self._escritor = False
-        self._dueno: int | None = None          # reentrada de escritura: error, no deadlock
+        self._dueno: int | None = None
+        self._esperando = 0              # hilos bloqueados en wait(): observable por las pruebas
+
+    def esperando(self) -> int:
+        with self._cond:
+            return self._esperando
+
+    def _esperar(self) -> None:
+        """Con ``self._cond`` tomado."""
+        self._esperando += 1
+        try:
+            self._cond.wait()
+        finally:
+            self._esperando -= 1
 
     @contextmanager
     def leer(self) -> Iterator[None]:
+        yo = threading.get_ident()
         with self._cond:
+            if self._dueno == yo:
+                raise RuleAuthorityError("compartido dentro de exclusivo: reentrada no soportada")
             while self._escritor:
-                self._cond.wait()
+                self._esperar()
             self._lectores += 1
+            self._ids_lectores[yo] = self._ids_lectores.get(yo, 0) + 1
         try:
             yield
         finally:
             with self._cond:
                 self._lectores -= 1
+                self._ids_lectores[yo] -= 1
+                if not self._ids_lectores[yo]:
+                    del self._ids_lectores[yo]
                 self._cond.notify_all()
 
     @contextmanager
     def escribir(self) -> Iterator[None]:
-        if self._dueno == threading.get_ident():
-            raise RuleAuthorityError("exclusivo dentro de exclusivo: reentrada no soportada")
+        yo = threading.get_ident()
         with self._cond:
+            if self._dueno == yo:
+                raise RuleAuthorityError("exclusivo dentro de exclusivo: reentrada no soportada")
+            if yo in self._ids_lectores:
+                raise RuleAuthorityError("exclusivo dentro de compartido: promocion no soportada")
             while self._escritor or self._lectores:
-                self._cond.wait()
+                self._esperar()
             self._escritor = True
-        self._dueno = threading.get_ident()
+            self._dueno = yo
         try:
             yield
         finally:
-            self._dueno = None
             with self._cond:
+                self._dueno = None
                 self._escritor = False
                 self._cond.notify_all()
 
@@ -86,6 +114,10 @@ class _BaseConLeases:
 
     def _version(self) -> VersionMonotonica:
         return VersionMonotonica(self._numero)
+
+    def esperando(self) -> int:
+        """Hilos bloqueados esperando un lease (para pruebas deterministas)."""
+        return self._lock.esperando()
 
     @contextmanager
     def lease_compartido(self) -> Iterator[VistaLease]:
@@ -104,36 +136,32 @@ class _BaseConLeases:
 
 
 class PinFijo(_BaseConLeases):
-    """Doble: el pin fijo con SU procedencia sellada — vacia o movil (refs/) niega."""
+    """Doble: el pin con la procedencia que se le diga. NO valida: la forma de
+    la procedencia es del GUARD (las pruebas necesitan un lease valido con un
+    pin malo para demostrar que el guard lo niega)."""
 
     def __init__(self, pin: TrustedPolicyPin, procedencia: str) -> None:
-        if not isinstance(procedencia, str) or not procedencia.strip() \
-                or procedencia.startswith("refs/"):
-            raise ProveedorInvalido("la procedencia del pin es sellada: nunca vacia ni refs/")
-        super().__init__((pin, procedencia))
-
-    def pin_activo(self) -> tuple[TrustedPolicyPin, str]:
-        return self._valor                                    # type: ignore[return-value]
+        super().__init__(PinActivo(pin, procedencia))
 
 
 class StopFijo(_BaseConLeases):
-    """Doble: STOP conocido. ``activo`` es bool o niega (None jamas pasa)."""
+    """Doble: STOP con lo que se le diga. NO valida (lo valida el guard)."""
 
     def __init__(self, *, activo: bool, huella: str) -> None:
-        if isinstance(activo, bool) is False or not isinstance(huella, str) or not huella:
-            raise ProveedorInvalido("StopFijo exige activo: bool y huella no vacia")
-        super().__init__((activo, huella))
-
-    def estado(self) -> EstadoStop:
-        activo, huella = self._valor
-        return EstadoStop(activo=activo, version=self._version(), huella=huella)
+        super().__init__(EstadoStop(activo=activo, huella=huella))
 
 
 class StopIlegible:
-    """Doble: la fuente que no se puede leer — fail-closed tipado."""
+    """Doble: la fuente que no se puede leer — el lease lanza el error tipado
+    (fail-closed). Implementa el Protocolo: el guard lo niega por ILEGIBLE."""
 
-    def estado(self) -> EstadoStop:
+    @contextmanager
+    def lease_compartido(self) -> Iterator[VistaLease]:
         raise StopDesconocido("STOP ilegible o sin configurar: DENY")
+        yield                                            # pragma: no cover
+
+    def lease_exclusivo(self):
+        return self.lease_compartido()
 
 
 class RelojDeterminista:
@@ -171,37 +199,48 @@ class RelojDeterminista:
         self._piso = max(self._piso or momento, momento)
 
 
+class CatalogoFijo:
+    """Valor del lease de clasificacion: capability ausente => ClasificacionDesconocida."""
+
+    def __init__(self, contratos: dict) -> None:
+        self._contratos = dict(contratos)
+
+    def contrato_de(self, capability: str) -> ContratoCapability:
+        try:
+            return self._contratos[capability]
+        except KeyError:
+            raise ClasificacionDesconocida(
+                f"capability sin clasificacion confiable: {capability!r} (el kernel NIEGA)") from None
+
+    def con(self, capability: str, contrato: ContratoCapability) -> "CatalogoFijo":
+        return CatalogoFijo({**self._contratos, capability: contrato})
+
+
 class ClasificacionFija(_BaseConLeases):
-    """Doble: catalogo fijo. Clase del enum cerrado o niega; contrato None o mal
-    formado niega; republicar una capability con clase MAS BAJA niega (sin rebaja)."""
+    """Doble: catalogo fijo. Clase del enum cerrado o niega; contrato mal formado
+    niega; republicar una capability con clase MAS BAJA niega (sin rebaja)."""
 
     _JERARQUIA = {ClaseCapability.REVERSIBLE: 0, ClaseCapability.OBLIGATING: 1}
 
     def __init__(self, contratos: dict) -> None:
-        validados: dict[str, ContratoCapability] = {}
         for capability, contrato in contratos.items():
             if not isinstance(contrato, ContratoCapability):
                 raise ProveedorInvalido(f"{capability}: contrato no es ContratoCapability")
             if not isinstance(contrato.clase, ClaseCapability):
                 raise ProveedorInvalido(f"{capability}: clase fuera del enum cerrado")
-            validados[capability] = contrato
-        super().__init__(validados)
+        super().__init__(CatalogoFijo(contratos))
 
     def republicar(self, capability: str, contrato: ContratoCapability) -> None:
         """Con el EXCLUSIVO tomado; la clase nunca baja (sin rebaja)."""
-        with self.lease_exclusivo():
-            actual = self._valor.get(capability)               # type: ignore[union-attr]
+        with self.lease_exclusivo() as vista:
+            try:
+                actual = vista.valor.contrato_de(capability)       # type: ignore[attr-defined]
+            except ClasificacionDesconocida:
+                actual = None
             if actual is not None and self._JERARQUIA[contrato.clase] < self._JERARQUIA[actual.clase]:
                 raise ProveedorInvalido(
                     f"{capability}: sin rebaja — {contrato.clase.value} baja de {actual.clase.value}")
-            self._reemplazar({**self._valor, capability: contrato})  # type: ignore[dict-item]
-
-    def contrato_de(self, capability: str) -> ContratoCapability:
-        try:
-            return self._valor[capability]                     # type: ignore[index]
-        except KeyError:
-            raise ClasificacionDesconocida(
-                f"capability sin clasificacion confiable: {capability!r} (el kernel OBLIGA)") from None
+            self._reemplazar(vista.valor.con(capability, contrato))  # type: ignore[attr-defined]
 
 
 class CheckpointsEnMemoria:
@@ -241,13 +280,14 @@ class CheckpointsEnMemoria:
             self._head = head
 
     def confirmar(self, head: str) -> bool:
-        """Relee y exige que el log contenga el head exacto (§10 paso 15)."""
+        """Relee: el log CONTIENE el head exacto (§10 paso 15, §11). No exige
+        que sea el actual: una operacion posterior pudo agregar un descendiente."""
         with self._lock:
-            return self._head == head and any(h == head for _, h in self._log)
+            return any(h == head for _, h in self._log)
 
 
 class ProveedorSinLeases:
-    """Doble NEGATIVO: solo relee valores (el anti-contrato). El guard niega."""
+    """Doble NEGATIVO: solo relee valores, sin leases (el anti-contrato). El guard niega."""
 
     def __init__(self, valor: object = None) -> None:
         self._valor = valor
