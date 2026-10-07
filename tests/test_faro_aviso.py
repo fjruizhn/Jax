@@ -597,21 +597,6 @@ SECRETOS_PLANOS = [s for v in SECRETOS_DE_LA_DECISION.values()
                    for s in (v if isinstance(v, list) else [str(v)])]
 
 
-def test_el_espejo_de_status_coincide_con_el_enum_real_de_371():
-    """El contrato son los TRES valores de #371. Si la base trae el enum real,
-    el espejo y los titulos tienen que casar con SUS valores (anti-deriva para
-    cuando #371 se integre); si no lo trae, el espejo es el que se prueba."""
-    valores = {m.value for m in RuleDecisionStatus}
-    assert valores == {"PERMIT", "DENY", "MISSING_RULE"}
-    try:
-        from policy.rule_authority import models as _models
-    except ImportError:
-        _models = None
-    if _models is not None:
-        reales = {m.value for m in _models.RuleDecisionStatus}
-        assert reales == valores, "el enum real de #371 cambio: actualizar el contrato del aviso"
-
-
 def test_los_tres_status_generan_aviso_inmediato_con_los_nombres_de_371():
     deny = aviso_de_decision(_decision(status=DENY), host="hall9000")
     assert deny.inmediato is True and "REGLA DENEGADA" in deny.texto
@@ -633,17 +618,6 @@ def test_el_texto_lleva_regla_razon_hash_y_la_hora_utc_de_la_decision():
     assert f"a={cuando.isoformat(timespec='seconds')}" in lineas[1]   # la hora de la DECISION
     assert av.creado_utc == cuando.isoformat(timespec="seconds")
     assert av.creado_utc.endswith("+00:00")                    # UTC, no hora local
-
-
-def test_el_aviso_con_el_enum_real_de_371_si_la_base_lo_trae():
-    """Si #371 esta en la base, el status del enum REAL tiene que entrar igual:
-    la comparacion es por valor, no por identidad de miembro."""
-    try:
-        from policy.rule_authority.models import RuleDecisionStatus as Real
-    except ImportError:
-        return  # base sin #371: el espejo ya se probo arriba
-    av = aviso_de_decision(_decision(status=Real.DENY), host="hall9000")
-    assert av.inmediato is True and "REGLA DENEGADA" in av.texto
 
 
 def test_una_decision_desconocida_es_aviso_inmediato_no_reconocible_sin_secretos():

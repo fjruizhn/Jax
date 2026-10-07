@@ -45,6 +45,8 @@ from typing import Protocol
 
 from cli_sandbox import _campo_log
 
+from policy.rule_authority.models import RuleDecision, RuleDecisionStatus
+
 from .config import ConfigFaroInvalida
 
 logger = logging.getLogger(__name__)
@@ -412,17 +414,6 @@ class Avisador:
 # real no trae la clase del acto, asi que no se puede EXCLUIR que obligue y se
 # avisa al instante; el resumen diario queda para lo suprimido por tasa y para
 # lo que el orquestador quiera diferir.
-
-from enum import Enum
-
-try:  # el enum REAL de #371 cuando la base lo trae (la prueba de equivalencia vive en los tests)
-    from policy.rule_authority.models import RuleDecisionStatus
-except ImportError:  # base sin #371: espejo con SUS tres valores exactos (31eb14bf)
-    class RuleDecisionStatus(str, Enum):  # espejo documentado del contrato de #371
-        MISSING_RULE = "MISSING_RULE"
-        DENY = "DENY"
-        PERMIT = "PERMIT"
-
 
 # La comparacion es por VALOR (no por identidad de miembro del enum): el
 # RuleDecisionStatus real de #371, el espejo de arriba y un string crudo con
