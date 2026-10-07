@@ -25,6 +25,7 @@ _GIT_OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _RATIFICATION_SNAPSHOT_SEAL = object()
 _RULE_RATIFICATION_SNAPSHOT_SEAL = object()
 _RULE_RATIFICATION_STORAGE_SEAL = object()
+_RATIFICATION_STORAGE_SEAL = object()
 
 
 def _nfc_token(value: object, field: str, pattern=_TOKEN) -> str:
@@ -100,6 +101,8 @@ class RuleRatificationGrantPayload:
             value = getattr(self, field)
             if not isinstance(value, str) or not _GIT_OID.fullmatch(value):
                 raise AuthorityEventValidationError(f"{field} OID inválido")
+        if len({len(self.rule_blob_oid), len(self.ratified_policy_revision), len(self.ratified_policy_tree_oid)}) != 1:
+            raise AuthorityEventValidationError("OID Git mezclan formatos SHA-1/SHA-256")
         sha256_id(self.rule_content_hash, "rule_content_hash")
         sha256_id(self.ratified_policy_snapshot_hash, "ratified_policy_snapshot_hash")
         object.__setattr__(self, "valid_from_utc", _time(self.valid_from_utc, "valid_from_utc"))
@@ -222,7 +225,7 @@ class AuthorityEventIntent:
     ratification_event_id: str | None = None
     overlay: OverlayPayload | None = None
     overlay_id: str | None = None
-    _ratification_snapshot_seal: object | None = None
+    _ratification_snapshot_seal: object | None = field(default=None, repr=False, compare=False)
     rule_ratification: RuleRatificationGrantPayload | None = None
     rule_ratification_event_id: str | None = None
     _rule_ratification_snapshot_seal: object | None = field(default=None, repr=False, compare=False)
@@ -252,7 +255,7 @@ class AuthorityEventIntent:
         if self.event_type is AuthorityEventType.RATIFICATION_GRANTED:
             if not isinstance(self.static_policy_view_projection, dict) or self.static_policy_view_projection.get("policy_corpus_hash") != self.policy_corpus_hash:
                 raise AuthorityEventValidationError("ratificación requiere static policy view ligado al hash")
-            if self._ratification_snapshot_seal is not _RATIFICATION_SNAPSHOT_SEAL:
+            if self._ratification_snapshot_seal not in (_RATIFICATION_SNAPSHOT_SEAL, _RATIFICATION_STORAGE_SEAL):
                 raise AuthorityEventValidationError("ratificación requiere snapshot sellado del candidate boundary")
         elif self._ratification_snapshot_seal is not None:
             raise AuthorityEventValidationError("sello de corpus fuera de ratificación")

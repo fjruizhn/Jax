@@ -2,12 +2,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from policy.authority_ledger.errors import AuthorityEventValidationError, AuthorityStateError
+from policy.authority_ledger.errors import AuthorityEventValidationError, AuthorityStateError, LedgerIntegrityError
 from policy.authority_ledger.models import (
-    AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
+    AuthorityEvent, AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
     RuleRatificationGrantPayload, _RULE_RATIFICATION_SNAPSHOT_SEAL,
 )
-from policy.authority_ledger.replay import genesis_hash, verify_authority_ledger
+from policy.authority_ledger.replay import event_hash, event_unsigned_bytes, genesis_hash, verify_authority_ledger
 from policy.authority_ledger.service import append_authority_event
 from policy.authority_ledger.serialization import intent_from_projection, intent_projection
 from policy.authority_ledger.signatures import (
@@ -15,6 +15,7 @@ from policy.authority_ledger.signatures import (
 )
 from policy.authority_ledger.storage import InMemoryAuthorityLedgerStore
 from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
+from policy.authority_ledger.signatures import sign
 
 
 def sample_grant():
@@ -119,11 +120,25 @@ def test_rule_ratification_grant_rejects_bad_path_oid_hash_and_empty_validity():
         RuleRatificationGrantPayload(**(sample_grant().__dict__ | {
             "valid_until_utc": datetime(2026, 10, 6, tzinfo=timezone.utc),
         }))
+    with pytest.raises(AuthorityEventValidationError, match="OID"):
+        RuleRatificationGrantPayload(**(sample_grant().__dict__ | {"ratified_policy_tree_oid": "d" * 64}))
+
+    sha256_oids = RuleRatificationGrantPayload(**(sample_grant().__dict__ | {
+        "rule_blob_oid": "a" * 64,
+        "ratified_policy_revision": "c" * 64,
+        "ratified_policy_tree_oid": "d" * 64,
+    }))
+    assert len(sha256_oids.rule_blob_oid) == 64
 
 
 def test_rule_ratification_codec_rejects_unexpected_fields_and_non_fernando_actor():
     projection = intent_projection(_grant_intent())
     projection["overlay_id"] = "not-part-of-rule-grant"
+    with pytest.raises(AuthorityEventValidationError):
+        intent_from_projection(projection)
+
+    projection = intent_projection(_grant_intent())
+    projection["policy_corpus_hash"] = "sha256:" + "a" * 64
     with pytest.raises(AuthorityEventValidationError):
         intent_from_projection(projection)
 
@@ -164,8 +179,19 @@ def test_replay_selects_latest_grant_and_revoking_it_does_not_restore_previous_g
 
     state = verify_authority_ledger(store.get_genesis(), store.events(), root)
 
-    assert state.latest_rule_ratifications["send-receipt"].event_id == second_id
-    assert second_id in state.revoked_rule_ratifications
+    assert state.current_rule_ratification("send-receipt") is None
+    assert state.current_rule_ratification("missing-rule") is None
+
+
+def test_replay_exposes_only_the_unrevoked_latest_rule_grant():
+    store, root, key = _ledger()
+    second_id = "018cc251-f400-7000-8000-000000000002"
+    append_authority_event(store, root, key, _test_signable_grant_intent(), event_id="018cc251-f400-7000-8000-000000000001")
+    append_authority_event(store, root, key, _test_signable_grant_intent(), event_id=second_id)
+
+    state = verify_authority_ledger(store.get_genesis(), store.events(), root)
+
+    assert state.current_rule_ratification("send-receipt").event_id == second_id
 
 
 def test_replay_rejects_unknown_and_duplicate_rule_ratification_revocations():
@@ -179,6 +205,53 @@ def test_replay_rejects_unknown_and_duplicate_rule_ratification_revocations():
     )
     with pytest.raises(AuthorityStateError):
         verify_authority_ledger(store.get_genesis(), store.events(), root)
+
+
+@pytest.mark.parametrize("direction", ["corpus_to_rule", "rule_to_corpus"])
+def test_replay_rejects_cross_type_revocations_of_real_grant_ids(direction):
+    from tests.policy.test_authority_ledger_events import ratification_intent
+
+    store, root, key = _ledger()
+    corpus_id = "018cc251-f400-7000-8000-000000000020"
+    rule_id = "018cc251-f400-7000-8000-000000000021"
+    if direction == "corpus_to_rule":
+        append_authority_event(store, root, key, ratification_intent(), event_id=corpus_id)
+        append_authority_event(
+            store, root, key,
+            AuthorityEventIntent(AuthorityEventType.RULE_RATIFICATION_REVOKED,
+                                 "human:fernando", rule_ratification_event_id=corpus_id),
+            event_id=rule_id,
+        )
+    else:
+        append_authority_event(store, root, key, _test_signable_grant_intent(), event_id=rule_id)
+        append_authority_event(
+            store, root, key,
+            AuthorityEventIntent(AuthorityEventType.RATIFICATION_REVOKED,
+                                 "human:fernando", ratification_event_id=rule_id),
+            event_id=corpus_id,
+        )
+
+    with pytest.raises(AuthorityStateError):
+        verify_authority_ledger(store.get_genesis(), store.events(), root)
+
+
+def test_replay_rejects_duplicate_event_id_even_with_valid_signature_and_chain_hash():
+    store, root, key = _ledger()
+    first = append_authority_event(
+        store, root, key,
+        AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
+        event_id="018cc251-f400-7000-8000-000000000030",
+    )
+    provisional = AuthorityEvent(first.event_id, 2, first.event_hash, first.intent,
+                                 first.recorded_at_utc, "", "sha256:" + "0" * 64)
+    signature = sign(key, event_unsigned_bytes(provisional))
+    signed = AuthorityEvent(first.event_id, 2, first.event_hash, first.intent,
+                            first.recorded_at_utc, signature, "sha256:" + "0" * 64)
+    duplicate = AuthorityEvent(first.event_id, 2, first.event_hash, first.intent,
+                               first.recorded_at_utc, signature, event_hash(signed))
+
+    with pytest.raises(LedgerIntegrityError, match="duplicado"):
+        verify_authority_ledger(store.get_genesis(), (first, duplicate), root)
 
     store, root, key = _ledger()
     grant_id = "018cc251-f400-7000-8000-000000000002"
