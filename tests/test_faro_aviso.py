@@ -553,10 +553,19 @@ import policy.rule_authority as _rule_authority
 from policy.rule_authority.models import RuleDecision, RuleDecisionStatus
 
 from jax.faro.aviso import (_MAX_TEXTO, AvisoRegla, acumular_para_resumen, aviso_de_decision,
-                            emitir_aviso_inmediato, resumen_diario)
+                            confirmar_resumen, emitir_aviso_inmediato, resumen_diario)
 
 HASH_OK = "sha256:" + "a1b2c3d4e5f67890deadbeeffeedface00112233445566778899aabbccddeeff"
 RAIZ = pathlib.Path(__file__).resolve().parents[1]
+def _resumir(cola, host="hall9000"):
+    """Las dos fases juntas (el envio salio bien): la LISTA de mensajes, o None."""
+    r = resumen_diario(cola, host=host)
+    if r is None:
+        return None
+    assert confirmar_resumen(r) is True
+    return list(r.mensajes)
+
+
 _RAZON_DE = {RuleDecisionStatus.DENY: "RULE_EXPIRED", RuleDecisionStatus.MISSING_RULE: "RULE_NOT_FOUND",
              RuleDecisionStatus.PERMIT: None}
 
@@ -696,7 +705,7 @@ def test_las_horas_son_utc_aunque_la_maquina_este_en_otra_zona(monkeypatch, tmp_
         assert "a=" + nr.creado_utc in nr.texto
         cola = tmp_path / "cola.jsonl"
         assert acumular_para_resumen(av, cola) is True
-        cabecera = resumen_diario(cola, host="h")[0].splitlines()[0]
+        cabecera = _resumir(cola, host="h")[0].splitlines()[0]
         es_ahora_en_utc(cabecera.rsplit(" · ", 1)[1])
     finally:
         monkeypatch.undo()
@@ -768,7 +777,7 @@ def test_lo_suprimido_por_tasa_va_a_la_cola_con_marca_y_no_tapa_otra_regla(tmp_p
     assert len(lineas) == 1                      # el suprimido de RL-A esta en la cola, no se perdio
     dato = _json.loads(lineas[0])
     assert dato["suprimido_por_tasa"] is True and "RL-A" in dato["clase"] and dato["texto"] == a.texto
-    resumen = resumen_diario(cola, host="hall9000")
+    resumen = _resumir(cola, host="hall9000")
     assert "suprimidos_por_tasa=1" in resumen[0]  # y el resumen lo cuenta
 
 
@@ -782,7 +791,7 @@ def test_la_cola_y_el_candado_nacen_y_se_mantienen_0600(tmp_path):
         assert acumular_para_resumen(av, cola) is True
         assert cola.stat().st_mode & 0o777 == 0o600
         assert (tmp_path / "cola.jsonl.candado").stat().st_mode & 0o777 == 0o600
-        assert resumen_diario(cola, host="hall9000") is not None
+        assert _resumir(cola, host="hall9000") is not None
         assert acumular_para_resumen(av, cola) is True
         assert cola.stat().st_mode & 0o777 == 0o600
         assert (tmp_path / "cola.jsonl.candado").stat().st_mode & 0o777 == 0o600
@@ -809,7 +818,7 @@ def test_la_carrera_escritor_resumen_no_pierde_ni_duplica(tmp_path):
     rotaciones = 0
     try:
         while proc.poll() is None:
-            mensajes = resumen_diario(cola, host="hall9000")
+            mensajes = _resumir(cola, host="hall9000")
             if mensajes:
                 rotaciones += 1
                 vistos.extend(mensajes)
@@ -817,7 +826,7 @@ def test_la_carrera_escritor_resumen_no_pierde_ni_duplica(tmp_path):
     finally:
         if proc.poll() is None:
             proc.kill()
-    mensajes = resumen_diario(cola, host="hall9000")       # lo que quedo tras el ultimo
+    mensajes = _resumir(cola, host="hall9000")       # lo que quedo tras el ultimo
     if mensajes:
         vistos.extend(mensajes)
     cuerpos = [l for m in vistos for l in m.splitlines() if l.startswith("cuerpo-")]
@@ -825,7 +834,7 @@ def test_la_carrera_escritor_resumen_no_pierde_ni_duplica(tmp_path):
     assert len(set(cuerpos)) == total, f"perdidos: {total - len(set(cuerpos))}"
     duplicados = [c for c, n in collections.Counter(cuerpos).items() if n > 1]
     assert duplicados == [] and len(cuerpos) == total, f"duplicados: {duplicados[:5]}"
-    assert resumen_diario(cola, host="hall9000") is None   # nada quedo, nada se repite
+    assert _resumir(cola, host="hall9000") is None   # nada quedo, nada se repite
 
 
 def test_el_resumen_vacia_la_cola_y_no_deja_rotados_ni_repite(tmp_path):
@@ -834,11 +843,11 @@ def test_el_resumen_vacia_la_cola_y_no_deja_rotados_ni_repite(tmp_path):
     for i in range(3):
         av = AvisoRegla(texto=f"cuerpo-{i}", clase="PERMIT|ok|RL-A", inmediato=False, creado_utc="2026-10-07T03:04:05+00:00")
         assert acumular_para_resumen(av, cola) is True
-    primero = resumen_diario(cola, host="hall9000")
+    primero = _resumir(cola, host="hall9000")
     assert primero is not None and all(f"cuerpo-{i}" in "\n".join(primero) for i in range(3))
     assert not cola.exists()
     assert list(tmp_path.glob("*.procesando")) == []
-    assert resumen_diario(cola, host="hall9000") is None
+    assert _resumir(cola, host="hall9000") is None
 
 
 def test_un_rotado_que_sobrevivio_a_una_caida_se_recoge_y_un_fallo_de_lectura_no_borra_nada(tmp_path, monkeypatch):
@@ -846,19 +855,21 @@ def test_un_rotado_que_sobrevivio_a_una_caida_se_recoge_y_un_fallo_de_lectura_no
     huerfano = tmp_path / "cola.jsonl.00000000000000000001.procesando"
     huerfano.write_text(_json.dumps({"creado_utc": "x", "clase": "DENY|r|RL-A", "texto": "huerfano-1",
                                      "suprimido_por_tasa": False}) + "\n", encoding="utf-8")
+    huerfano.chmod(0o600)
     av = AvisoRegla(texto="nuevo-1", clase="DENY|r|RL-A", inmediato=True, creado_utc="2026-10-07T03:04:05+00:00")
     assert acumular_para_resumen(av, cola) is True
     # un fallo de lectura: devuelve None y NO se borra ni se pierde nada
-    real = pathlib.Path.read_text
+    import jax.faro.aviso as modulo
+    real = modulo._leer_seguro
 
-    def lee_mal(self, *a, **k):
+    def lee_mal(ruta):
         raise OSError("disco roto")
 
-    monkeypatch.setattr(pathlib.Path, "read_text", lee_mal)
-    assert resumen_diario(cola, host="hall9000") is None
-    monkeypatch.setattr(pathlib.Path, "read_text", real)
+    monkeypatch.setattr(modulo, "_leer_seguro", lee_mal)
+    assert _resumir(cola, host="hall9000") is None
+    monkeypatch.setattr(modulo, "_leer_seguro", real)
     assert len(list(tmp_path.glob("*.procesando"))) == 2            # el huerfano y el recien rotado
-    mensajes = "\n".join(resumen_diario(cola, host="hall9000"))
+    mensajes = "\n".join(_resumir(cola, host="hall9000"))
     assert "huerfano-1" in mensajes and "nuevo-1" in mensajes
     assert list(tmp_path.glob("*.procesando")) == [] and not cola.exists()
 
@@ -872,7 +883,7 @@ def test_el_resumen_numera_los_mensajes_y_no_trunca_en_silencio(tmp_path):
         av = AvisoRegla(texto=f"cuerpo-{i:03d} {texto_largo}", clase=f"PERMIT|ok|RL-{i % 7}",
                         inmediato=False, creado_utc="2026-10-07T03:04:05+00:00")
         assert acumular_para_resumen(av, cola) is True
-    mensajes = resumen_diario(cola, host="hall9000")
+    mensajes = _resumir(cola, host="hall9000")
     assert mensajes is not None and len(mensajes) > 1
     assert "200 avisos" in mensajes[0]
     for k, m in enumerate(mensajes, 1):
@@ -881,14 +892,14 @@ def test_el_resumen_numera_los_mensajes_y_no_trunca_en_silencio(tmp_path):
     todo = "\n".join(mensajes)
     for i in range(200):
         assert f"cuerpo-{i:03d} {texto_largo}" in todo, f"el aviso {i} se perdio o se trunco"
-    assert resumen_diario(cola, host="hall9000") is None
+    assert _resumir(cola, host="hall9000") is None
 
 
 def test_un_cuerpo_gigante_se_recorta_con_marca_y_el_mensaje_cabe(tmp_path):
     cola = tmp_path / "cola.jsonl"
     av = AvisoRegla(texto="y" * 9000, clase="DENY|r|RL-A", inmediato=True, creado_utc="2026-10-07T03:04:05+00:00")
     assert acumular_para_resumen(av, cola) is True
-    mensajes = resumen_diario(cola, host="hall9000")
+    mensajes = _resumir(cola, host="hall9000")
     assert all(len(m) <= _MAX_TEXTO for m in mensajes)
     assert "car. recortados]" in "\n".join(mensajes)       # se dice, no se calla
 
@@ -898,8 +909,97 @@ def test_el_resumen_cuenta_las_lineas_ilegibles(tmp_path):
     assert acumular_para_resumen(AvisoRegla("ok-1", "DENY|r|RL-A", True, "2026-10-07T03:04:05+00:00"), cola) is True
     with open(cola, "a", encoding="utf-8") as f:
         f.write("esto no es json\n[1, 2]\n")
-    mensajes = resumen_diario(cola, host="hall9000")
+    mensajes = _resumir(cola, host="hall9000")
     assert "ilegibles=2" in mensajes[0] and "ok-1" in "\n".join(mensajes)
+
+
+def test_el_resumen_no_se_borra_hasta_confirmar_y_se_reentrega_sin_duplicar(tmp_path):
+    """MAJOR-1 / mutante «borra antes de confirmar»: si el envio falla (el llamador no confirma), los
+    rotados siguen en disco; la corrida siguiente los re-entrega UNA vez cada linea; tras confirmar, nada."""
+    cola = tmp_path / "cola.jsonl"
+    for i in range(3):
+        assert acumular_para_resumen(AvisoRegla(f"cuerpo-{i}", "DENY|r|RL-A", True, "2026-10-07T03:04:05+00:00"), cola)
+    primero = resumen_diario(cola, host="hall9000")
+    assert len(list(tmp_path.glob("*.procesando"))) == 1, "los rotados se borraron antes de confirmar"
+    # Telegram cae: no se confirma. Llega un aviso nuevo; la segunda corrida recoge ambos.
+    assert acumular_para_resumen(AvisoRegla("cuerpo-3", "DENY|r|RL-A", True, "2026-10-07T03:04:05+00:00"), cola)
+    segundo = resumen_diario(cola, host="hall9000")
+    cuerpos = [l for m in segundo.mensajes for l in m.splitlines() if l.startswith("cuerpo-")]
+    assert sorted(cuerpos) == [f"cuerpo-{i}" for i in range(4)]      # los 4, cada uno UNA vez
+    assert confirmar_resumen(segundo) is True
+    assert list(tmp_path.glob("*.procesando")) == [] and not cola.exists()
+    assert confirmar_resumen(primero) is True                          # token viejo: idempotente
+    assert resumen_diario(cola, host="hall9000") is None
+
+
+def test_confirmar_resumen_solo_borra_rotados_de_esa_cola(tmp_path):
+    from jax.faro.aviso import ResumenDiario
+    ajeno = tmp_path / "importante.txt"
+    ajeno.write_text("no me borres")
+    falso = ResumenDiario(("x",), (str(ajeno),), str(tmp_path / "cola.jsonl"))
+    assert confirmar_resumen(falso) is False and ajeno.exists()
+
+
+def test_un_envio_que_falla_va_a_la_cola_con_marca_y_el_resumen_lo_cuenta(tmp_path):
+    """MAJOR-2 / mutante «solo log»: con Telegram caido (excepcion o False) la negativa no queda solo en un
+    log: esta en la cola con envio_fallido y el resumen la cuenta."""
+    def explota(cfg, cred, texto):
+        raise RuntimeError("Telegram caido")
+
+    for enviar in (explota, lambda cfg, cred, texto: False):
+        cola = tmp_path / f"cola-{id(enviar)}.jsonl"
+        av = aviso_de_decision(_decision(), host="hall9000")
+        assert emitir_aviso_inmediato(av, _cfg(tmp_path), CRED, enviar=enviar, limite=LimiteTasa(5, 10.0),
+                                      ruta_cola=cola) is False
+        dato = _json.loads(cola.read_text(encoding="utf-8").splitlines()[0])
+        assert dato["envio_fallido"] is True and dato["texto"] == av.texto
+        resumen = _resumir(cola)
+        assert "envio_fallido=1" in resumen[0] and "REGLA DENEGADA" in "\n".join(resumen)
+
+
+def _cola_con_linea(ruta, texto="legitimo"):
+    assert acumular_para_resumen(AvisoRegla(texto, "DENY|r|RL-A", True, "2026-10-07T03:04:05+00:00"), ruta)
+
+
+def test_una_cola_que_es_un_enlace_no_se_sigue(tmp_path):
+    """MINOR / mutante «sin O_NOFOLLOW»: un symlink plantado en lugar de la cola NO se lee (el destino es
+    del usuario y 0600: solo O_NOFOLLOW lo detiene)."""
+    objetivo = tmp_path / "ajeno.jsonl"
+    _cola_con_linea(objetivo, "SECRETO-DEL-DESTINO")
+    antes = objetivo.read_text()
+    cola = tmp_path / "cola.jsonl"
+    cola.symlink_to(objetivo)
+    assert resumen_diario(cola, host="hall9000") is None
+    assert objetivo.read_text() == antes and objetivo.exists()
+    # y un `.procesando` plantado como enlace tampoco
+    cola.unlink(missing_ok=True)
+    for p in tmp_path.glob("cola.jsonl.*.procesando"):
+        p.unlink()
+    (tmp_path / "cola.jsonl.00000000000000000001.procesando").symlink_to(objetivo)
+    assert resumen_diario(cola, host="hall9000") is None
+    assert objetivo.read_text() == antes
+
+
+def test_una_cola_con_modo_o_dueno_ajeno_no_se_lee(tmp_path, monkeypatch):
+    """MINOR / mutantes «sin modo» y «sin dueno»."""
+    cola = tmp_path / "cola.jsonl"
+    _cola_con_linea(cola)
+    cola.chmod(0o644)
+    assert resumen_diario(cola, host="hall9000") is None
+    for p in tmp_path.glob("cola.jsonl.*.procesando"):
+        p.unlink()
+    _cola_con_linea(cola)
+    monkeypatch.setattr(os, "geteuid", lambda: 12345)
+    assert resumen_diario(cola, host="hall9000") is None
+
+
+def test_solo_cuentan_las_lineas_json_con_texto_str(tmp_path):
+    cola = tmp_path / "cola.jsonl"
+    _cola_con_linea(cola, "bueno-1")
+    with open(cola, "a", encoding="utf-8") as f:
+        f.write('{"texto": 5}\n{"clase": "x"}\n"suelta"\n')
+    mensajes = _resumir(cola)
+    assert "1 avisos" in mensajes[0] and "ilegibles=3" in mensajes[0]
 
 
 def test_acumular_es_una_linea_json_por_aviso(tmp_path):
@@ -911,7 +1011,7 @@ def test_acumular_es_una_linea_json_por_aviso(tmp_path):
     lineas = cola.read_text(encoding="utf-8").splitlines()
     assert len(lineas) == 3
     for linea in lineas:
-        assert set(_json.loads(linea)) == {"creado_utc", "clase", "texto", "suprimido_por_tasa"}
+        assert set(_json.loads(linea)) == {"creado_utc", "clase", "texto", "suprimido_por_tasa", "envio_fallido"}
 
 
 def test_acumular_es_fail_soft_sin_disco(tmp_path, caplog):

@@ -536,15 +536,15 @@ class _Candado:
 
 
 def acumular_para_resumen(aviso: AvisoRegla, ruta_cola: "os.PathLike[str] | str",
-                          *, suprimido_por_tasa: bool = False) -> bool:
+                          *, suprimido_por_tasa: bool = False, envio_fallido: bool = False) -> bool:
     """Deja el aviso en la cola del resumen diario: UNA linea JSON por aviso,
     bajo el candado, con `O_APPEND` y UN solo `write`. `suprimido_por_tasa`
-    marca lo que el limite de tasa postergo: no se descarta, se resume.
+    marca lo que el limite de tasa postergo y `envio_fallido` lo que no pudo enviarse: no se descarta, se resume.
     Fail-soft: si el disco falla, False y el log (la decision ya se aplico)."""
     try:
         linea = json.dumps(
             {"creado_utc": aviso.creado_utc, "clase": aviso.clase, "texto": aviso.texto,
-             "suprimido_por_tasa": suprimido_por_tasa},
+             "suprimido_por_tasa": suprimido_por_tasa, "envio_fallido": envio_fallido},
             ensure_ascii=False, separators=(",", ":"))
         with _Candado(ruta_cola):
             fd = os.open(ruta_cola, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -583,22 +583,66 @@ def _mensajes_del_resumen(bloques: list[str], cabecera: str) -> list[str]:
     return [f"{m}\n· {i}/{total}" for i, m in enumerate(mensajes, 1)]
 
 
-def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str) -> "list[str] | None":
-    """Compone el resumen de la cola diaria. Devuelve la LISTA de mensajes
-    numerados (1/n) que el orquestador envia en orden; None si no hay nada
-    pendiente o no se pudo leer (y entonces no se borra NADA).
+@dataclass(frozen=True)
+class ResumenDiario:
+    """El resumen compuesto y el TOKEN para confirmarlo: los `.procesando` que lo
+    respaldan siguen en disco hasta `confirmar_resumen(token)`."""
 
-    Bajo el candado rota la cola a `<cola>.<ts>.procesando` ANTES de leer,
-    recoge tambien los rotados que hayan sobrevivido de una corrida
-    interrumpida (orden por nombre) y los borra solo despues de tenerlos
-    contados en los mensajes. Si algo falla, los rotados siguen ahi y el
-    proximo intento los vuelve a incluir. Sincrono: los llamadores async lo
-    envuelven en `asyncio.to_thread`."""
+    mensajes: tuple[str, ...]
+    rotados: tuple[str, ...]
+    ruta_cola: str
+
+
+_MAX_LEIDO = 16 * 1024 * 1024
+
+
+def _leer_seguro(ruta: str) -> str:
+    """Lee un archivo de la cola SIN seguir enlaces: O_NOFOLLOW, y regular, del
+    usuario actual y 0600. Un enlace plantado o un archivo ajeno levanta
+    OSError (no se lee el destino)."""
+    fd = os.open(ruta, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise PermissionError(f"no es un archivo regular: {ruta}")
+        if st.st_uid != os.geteuid():
+            raise PermissionError(f"dueno ajeno: {ruta}")
+        if st.st_mode & 0o777 != 0o600:
+            raise PermissionError(f"modo distinto de 0600: {ruta}")
+        partes, total = [], 0
+        while True:
+            trozo = os.read(fd, 1 << 20)
+            if not trozo:
+                break
+            total += len(trozo)
+            if total > _MAX_LEIDO:
+                raise OSError(f"cola demasiado grande: {ruta}")
+            partes.append(trozo)
+    finally:
+        os.close(fd)
+    return b"".join(partes).decode("utf-8", errors="replace")
+
+
+def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str) -> "ResumenDiario | None":
+    """Compone el resumen de la cola diaria en DOS FASES. Devuelve un
+    `ResumenDiario` (mensajes numerados 1/n + token) o None si no hay nada o no
+    se pudo leer con seguridad (y entonces no se borra NADA).
+
+    Bajo el candado rota la cola a `<cola>.<ts>.procesando` ANTES de leer y
+    recoge los rotados de corridas no confirmadas. Los rotados NO se borran
+    aqui: el llamador envia los mensajes y, solo si salieron, llama a
+    `confirmar_resumen(token)`. Sin confirmacion la proxima corrida los vuelve
+    a entregar (al-menos-una-vez; un envio a medias puede repetir mensajes).
+
+    No sigue enlaces ni lee archivos ajenos: cada archivo se abre con
+    O_NOFOLLOW y debe ser regular, del usuario actual y 0600; si no, None y
+    nada se lee ni se borra. Solo cuentan las lineas JSON con `texto` str.
+    Sincrono: los llamadores async lo envuelven en `asyncio.to_thread`."""
     try:
         with _Candado(ruta_cola):
             cola = Path(ruta_cola)
             rotados = sorted(str(p) for p in cola.parent.glob(glob.escape(cola.name) + ".*.procesando"))
-            if cola.exists():
+            if cola.exists() or cola.is_symlink():
                 destino = f"{cola}.{time.time_ns():020d}.procesando"
                 os.replace(cola, destino)      # rotar ANTES de leer: lo que llega despues va a la cola nueva
                 rotados.append(destino)
@@ -606,22 +650,25 @@ def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str) -> "list[s
                 return None
             lineas: list[str] = []
             for rotado in rotados:
-                texto = Path(rotado).read_text(encoding="utf-8", errors="replace")
-                lineas.extend(l for l in texto.splitlines() if l.strip())
+                lineas.extend(l for l in _leer_seguro(rotado).splitlines() if l.strip())
             por_clase: dict[str, int] = {}
             cuerpos: list[str] = []
-            suprimidos = ilegibles = 0
+            suprimidos = ilegibles = fallidos = 0
             for linea in lineas:
                 try:
                     dato = json.loads(linea)
-                    cuerpo = _recortar(str(dato["texto"]).replace("\n", " · "))
+                    if not isinstance(dato, dict) or not isinstance(dato["texto"], str):
+                        raise TypeError("linea sin texto str")
+                    cuerpo = _recortar(dato["texto"].replace("\n", " · "))
                     clase = str(dato.get("clase", "-"))
                     suprimido = bool(dato.get("suprimido_por_tasa"))
-                except (ValueError, KeyError, TypeError, AttributeError):
+                    fallido = bool(dato.get("envio_fallido"))
+                except (ValueError, KeyError, TypeError):
                     ilegibles += 1   # se cuenta y se dice: una linea corrupta no esconde a las demas
                     continue
                 cuerpos.append(cuerpo)
                 suprimidos += suprimido
+                fallidos += fallido
                 por_clase[clase] = por_clase.get(clase, 0) + 1
             if not cuerpos and not ilegibles:
                 for rotado in rotados:
@@ -630,18 +677,39 @@ def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str) -> "list[s
             conteo = f"{len(cuerpos)} avisos"
             if suprimidos:
                 conteo += f" · suprimidos_por_tasa={suprimidos}"
+            if fallidos:
+                conteo += f" · envio_fallido={fallidos}"
             if ilegibles:
                 conteo += f" · ilegibles={ilegibles}"
             cabecera = (f"FARO · RESUMEN DIARIO DE REGLAS · {_campo_log(host, 64)} · "
                         f"{_iso_utc(_ahora_utc())}\n{conteo}")
             bloques = [f"clase={_campo_log(c, 160)} n={n}" for c, n in sorted(por_clase.items())] + cuerpos
-            mensajes = _mensajes_del_resumen(bloques, cabecera)
-            for rotado in rotados:
-                os.unlink(rotado)              # ya estan todos contados en mensajes: recien ahora se borran
-            return mensajes
-    except Exception as exc:  # fail-soft: sin lectura no hay resumen y no se borra nada
+            return ResumenDiario(tuple(_mensajes_del_resumen(bloques, cabecera)), tuple(rotados), str(cola))
+    except Exception as exc:  # fail-soft: sin lectura segura no hay resumen y no se borra nada
         logger.warning("no se pudo componer el resumen diario (%s)", type(exc).__name__)
         return None
+
+
+def confirmar_resumen(token: ResumenDiario) -> bool:
+    """Fase 2: el llamador ya ENVIO los mensajes; ahora se borran los rotados que
+    los respaldaban. Solo borra `<cola>.*.procesando` de la misma carpeta (un
+    token fabricado no borra otra cosa). True si no queda ninguno."""
+    try:
+        cola = Path(token.ruta_cola)
+        with _Candado(cola):
+            for ruta in token.rotados:
+                p = Path(ruta)
+                if p.parent != cola.parent or not (p.name.startswith(cola.name + ".") and p.name.endswith(".procesando")):
+                    logger.warning("confirmar_resumen: ruta fuera de la cola, no se borra")
+                    return False
+                try:
+                    os.unlink(p)
+                except FileNotFoundError:
+                    pass
+        return True
+    except Exception as exc:  # fail-soft: si no se borra, la proxima corrida los recoge
+        logger.warning("no se pudo confirmar el resumen diario (%s)", type(exc).__name__)
+        return False
 
 
 def emitir_aviso_inmediato(
@@ -660,15 +728,20 @@ def emitir_aviso_inmediato(
     `limite` y `ruta_cola` son OBLIGATORIOS a proposito: una tasa que no se
     pasa no limita nada, y una cola que no se pasa pierde lo suprimido. Si la
     tasa corta el aviso, NO se descarta: va a la cola del resumen diario con la
-    marca `suprimido_por_tasa` y devuelve False."""
+    marca `suprimido_por_tasa` y devuelve False. Si el ENVIO falla (excepcion o
+    False) tambien va a la cola, con la marca `envio_fallido`: una negativa no
+    puede quedar solo en un log."""
     try:
         if not limite.admitir(aviso.clase):
             logger.info("aviso de regla suprimido por tasa clase=%s", aviso.clase)
             acumular_para_resumen(aviso, ruta_cola, suprimido_por_tasa=True)
             return False
-        enviar(cfg, cred, aviso.texto)
+        if enviar(cfg, cred, aviso.texto) is False:
+            raise AvisoNoEntregado("el envio devolvio False")
         return True
     except Exception as exc:  # fail-soft: la decision ya esta hecha y persistida; ningun fallo de Telegram puede tumbar al que la invoco
         logger.warning("aviso de regla no entregado (%s) clase=%s creado=%s",
                        type(exc).__name__, aviso.clase, aviso.creado_utc)
+        # que no llego NO se pierde: a la cola del resumen con la marca (y el resumen la cuenta)
+        acumular_para_resumen(aviso, ruta_cola, envio_fallido=True)
         return False
