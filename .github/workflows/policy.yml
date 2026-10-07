@@ -2554,7 +2554,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - run: pip install pytest pyyaml cryptography==49.0.0 pymysql
+      - run: pip install pytest pyyaml cryptography==49.0.0 && pip install --require-hashes -r requirements-faro-mariadb-ci.txt
       - name: Identity Foundation Shadow (sin DB)
         env:
           PYTHONPATH: "."
@@ -2654,6 +2654,9 @@ jobs:
         # validar_regla exige el sellado, fabricar con el OID del pin niega).
         # Ronda 8: 591 (576 medidos en master + 15: D-4 como segmento y subcadena x13,
         # subids legitimos no caen, el helper del pin no deja repos temporales).
+        # Jax#371 r3: 613 (591 + 22 de tests/policy/test_rule_authority_providers.py, que la
+        # lista incorpora al reapilar #371 sobre #370; medido con pytest 9.1.1, pyyaml 6.0.3,
+        # cryptography 49.0.0 y el comando exacto del paso).
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail

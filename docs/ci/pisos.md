@@ -4626,8 +4626,14 @@ Piso vigente (2026-10-07): `^12 passed in `. Cubre activación que rechaza grant
 
 ## `authority-rule-models/models`
 
-Piso actualizado (2026-10-07): `^30 passed in `. Catálogo cargado desde el snapshot, límites
-validados por clase/subid, NFC antes del hash, status/reason y store ligado al request hash.
+Piso vigente (2026-10-07, Jax#371 r3): `^132 passed in ` (antes 30). Medido con Python 3.14.4.
+Cubre `tests/policy/test_faro_rule_authority_models.py`: el catálogo se exige por tipo EXACTO
+`CatalogoTopes` (sin `MappingProxyType` ni subclases), los límites se derivan de `ReglaValidada`
+(#370) con `limites_de` y se re-validan contra el catálogo (unidades, moneda, `Tope` como
+`<clase>.<subid>`, enteros <= 2**53), `RuleEvaluation` exige el mismo catálogo en solicitud y
+límites, el `request_hash` incluye el OID del catálogo, los enteros de `arguments` tienen rango, y
+el store exige `RuleDecision`. Cada control tiene su mutante y la prueba que lo mata en el reporte
+de entrega.
 
 
 ## `archivos-de-test-en-ci/pisos`
@@ -4642,7 +4648,12 @@ Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la form
 
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-07, r8): `^591 passed`
+Patrón vigente (2026-10-07, Jax#371 r3): `^613 passed`
+
+Jax#371 r3: 591 -> 613. Al reapilar #371 sobre #370 (05183cb7) la lista del paso incorpora
+`tests/policy/test_rule_authority_providers.py` (+22); medido con el comando exacto del paso en un
+venv de Python 3.14.4 con pytest 9.1.1, pyyaml 6.0.3 y cryptography 49.0.0 (el instalado sin hashes
+del paso; pymysql 1.2.0 con hashes).
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
