@@ -20,6 +20,7 @@ def provision_application_account(connection, username: str, password: str) -> N
         cursor = connection.cursor()
         cursor.execute(f"CREATE USER IF NOT EXISTS {principal} IDENTIFIED BY %s", (password,))
         cursor.execute(f"ALTER USER {principal} IDENTIFIED BY %s", (password,))
+        cursor.execute(f"REVOKE ALL PRIVILEGES, GRANT OPTION FROM {principal}")
         for table in ("rule_decisions", "rule_permits", "rule_permit_consumptions"):
             cursor.execute(f"GRANT SELECT,INSERT ON jax_rule_authority.{table} TO {principal}")
         cursor.execute(

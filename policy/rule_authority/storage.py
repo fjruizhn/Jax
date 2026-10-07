@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+from types import MappingProxyType
 from typing import Callable
 
 from policy.authority_ledger.canonical import canonical_bytes, domain_hash
@@ -14,22 +15,45 @@ from .models import RuleDecision, RuleDecisionStatus, RuleEvaluationRequest
 
 _DECISION_DOMAIN = "JAX-FARO-RULE-AUTHORITY-DECISION"
 _DECISION_VERSION = "1"
+_CATALOG_DOMAIN = "JAX-FARO-RULE-CATALOG"
+_CATALOG_VERSION = "1"
 _DECISION_FIELDS = frozenset({
-    "request_id", "request_hash", "status", "required_rule_id", "reason_code",
-    "decided_at_utc",
+    "request_id", "request_hash", "request_catalog_hash", "status",
+    "required_rule_id", "reason_code", "decided_at_utc",
+    "catalogo",
 })
 
 
-def _decision_projection(decision: RuleDecision) -> dict[str, object]:
+def _catalog_projection(catalog):
+    if catalog is None:
+        return None
+    if not isinstance(catalog, MappingProxyType) or any(
+        not isinstance(key, str)
+        or not isinstance(values, tuple)
+        or not values
+        or any(not isinstance(value, str) for value in values)
+        for key, values in catalog.items()
+    ):
+        raise RuleAuthorityStorageError("catalogo de decisión inválido")
+    return {key: list(values) for key, values in catalog.items()}
+
+
+def _catalog_hash(catalog) -> str:
+    return domain_hash(_CATALOG_DOMAIN, _CATALOG_VERSION, _catalog_projection(catalog))
+
+
+def _decision_projection(decision: RuleDecision, request_catalog_hash: str) -> dict[str, object]:
     return {
         "request_id": decision.request_id,
         "request_hash": decision.request_hash,
+        "request_catalog_hash": request_catalog_hash,
         "status": decision.status.value,
         "required_rule_id": decision.required_rule_id,
         "reason_code": decision.reason_code,
         "decided_at_utc": decision.decided_at_utc.isoformat(
             timespec="microseconds"
         ).replace("+00:00", "Z"),
+        "catalogo": _catalog_projection(decision.catalogo),
     }
 
 
@@ -71,15 +95,16 @@ class MariaDBRuleDecisionStore:
             connection = self._connect()
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT request_hash,required_rule_id,status,reason_code,decided_at_utc,"
+                    "SELECT request_hash,request_catalog_hash,required_rule_id,status,reason_code,decided_at_utc,"
                     "canonical_decision,previous_record_hash,record_hash,audit_sequence "
                     "FROM rule_decisions WHERE request_id=%s",
                     (request.request_id,),
                 )
                 row = cursor.fetchone()
-            if row is None or row[0] != request.request_hash:
+            if (row is None or row[0] != request.request_hash
+                    or row[1] != _catalog_hash(request.catalogo)):
                 return None
-            return self._decode_row(request.request_id, row)
+            return self._decode_row(request.request_id, row, request.catalogo)
         except RuleAuthorityStorageError:
             raise
         except Exception as exc:
@@ -100,21 +125,19 @@ class MariaDBRuleDecisionStore:
                 "PERMIT requiere insertar RulePermit en la misma transacción (paso 6)"
             )
 
-        projection = _decision_projection(decision)
+        request_catalog_hash = _catalog_hash(request.catalogo)
+        projection = _decision_projection(decision, request_catalog_hash)
+        if (projection["catalogo"] is not None
+                and projection["catalogo"] != _catalog_projection(request.catalogo)):
+            raise AuthorityStateError("catalogo de decisión no corresponde al pin de la solicitud")
         canonical = canonical_bytes(projection)
         connection = None
         try:
             connection = self._connect()
             connection.begin()
             with connection.cursor() as cursor:
-                existing = self._select_request(cursor, request.request_id)
-                if existing is not None:
-                    stored = self._decode_row(request.request_id, existing)
-                    if stored.request_hash != request.request_hash:
-                        raise AuthorityStateError("request_id reutilizado con otro hash")
-                    connection.commit()
-                    return stored
-
+                # Acquire the singleton first. This serializes writers before
+                # any missing-key/gap lock can be held while waiting for it.
                 cursor.execute(
                     "SELECT audit_sequence,head_hash FROM rule_authority_audit_head "
                     "WHERE singleton=1 FOR UPDATE"
@@ -122,17 +145,27 @@ class MariaDBRuleDecisionStore:
                 head = cursor.fetchone()
                 if head is None or type(head[0]) is not int or head[0] < 0:
                     raise RuleAuthorityStorageError("audit head ausente o inválido")
+                existing = self._select_request(cursor, request.request_id)
+                if existing is not None:
+                    if existing[1] != request_catalog_hash:
+                        raise AuthorityStateError("request_id reutilizado con otro catálogo")
+                    stored = self._decode_row(request.request_id, existing, request.catalogo)
+                    if stored.request_hash != request.request_hash:
+                        raise AuthorityStateError("request_id reutilizado con otro hash")
+                    connection.commit()
+                    return stored
                 sequence = head[0] + 1
                 previous_hash = head[1]
                 record_hash = _record_hash(sequence, request.request_id, previous_hash, projection)
                 cursor.execute(
                     "INSERT INTO rule_decisions "
-                    "(request_id,request_hash,required_rule_id,status,reason_code,decided_at_utc,"
-                    "canonical_decision,previous_record_hash,record_hash,audit_sequence) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "(request_id,request_hash,request_catalog_hash,required_rule_id,status,"
+                    "reason_code,decided_at_utc,canonical_decision,previous_record_hash,"
+                    "record_hash,audit_sequence) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (
-                        request.request_id, request.request_hash, decision.required_rule_id,
-                        decision.status.value, decision.reason_code,
+                        request.request_id, request.request_hash, request_catalog_hash,
+                        decision.required_rule_id, decision.status.value, decision.reason_code,
                         decision.decided_at_utc.astimezone(timezone.utc).replace(tzinfo=None),
                         canonical, previous_hash, record_hash, sequence,
                     ),
@@ -164,7 +197,7 @@ class MariaDBRuleDecisionStore:
     @staticmethod
     def _select_request(cursor, request_id: str):
         cursor.execute(
-            "SELECT request_hash,required_rule_id,status,reason_code,decided_at_utc,"
+            "SELECT request_hash,request_catalog_hash,required_rule_id,status,reason_code,decided_at_utc,"
             "canonical_decision,previous_record_hash,record_hash,audit_sequence "
             "FROM rule_decisions WHERE request_id=%s FOR UPDATE",
             (request_id,),
@@ -172,9 +205,9 @@ class MariaDBRuleDecisionStore:
         return cursor.fetchone()
 
     @staticmethod
-    def _decode_row(request_id: str, row) -> RuleDecision:
+    def _decode_row(request_id: str, row, expected_catalog=None) -> RuleDecision:
         (
-            request_hash, required_rule_id, status, reason, decided_at, payload_bytes,
+            request_hash, request_catalog_hash, required_rule_id, status, reason, decided_at, payload_bytes,
             previous_hash, stored_hash, sequence,
         ) = row
         try:
@@ -186,10 +219,15 @@ class MariaDBRuleDecisionStore:
             if payload["request_id"] != request_id:
                 raise ValueError("request_id distinto en proyección")
             if (payload["request_hash"] != request_hash
+                    or payload["request_catalog_hash"] != request_catalog_hash
                     or payload["required_rule_id"] != required_rule_id
                     or payload["status"] != status
                     or payload["reason_code"] != reason):
                 raise ValueError("columnas distintas de la proyección")
+            if status == RuleDecisionStatus.PERMIT.value:
+                raise ValueError("PERMIT está cerrado hasta el adapter atómico del paso 6")
+            if request_catalog_hash != _catalog_hash(expected_catalog):
+                raise ValueError("catálogo del request distinto de la proyección")
             projected_time = datetime.fromisoformat(
                 payload["decided_at_utc"].replace("Z", "+00:00")
             )
@@ -206,6 +244,23 @@ class MariaDBRuleDecisionStore:
                 required_rule_id=required_rule_id,
                 reason_code=reason,
                 decided_at_utc=projected_time,
+                catalogo=_decode_catalog(payload["catalogo"], expected_catalog),
             )
         except Exception as exc:
             raise RuleAuthorityStorageError("fila de decisión inválida") from exc
+
+
+def _decode_catalog(value, expected_catalog):
+    if value is None:
+        return None
+    if not isinstance(value, dict) or any(
+        not isinstance(key, str)
+        or not isinstance(values, list)
+        or any(not isinstance(item, str) for item in values)
+        for key, values in value.items()
+    ):
+        raise ValueError("catálogo de decisión inválido")
+    decoded = MappingProxyType({key: tuple(values) for key, values in value.items()})
+    if value != _catalog_projection(expected_catalog):
+        raise ValueError("catalogo no corresponde al pin de la solicitud")
+    return decoded
