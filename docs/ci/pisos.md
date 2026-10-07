@@ -4624,13 +4624,10 @@ duplicadas.
 
 ## `authority-rule-models/models`
 
-Piso nuevo (2026-10-06): `^19 passed in `. Medido en hall9000 con Python 3.14.4 y el
-comando exacto del workflow: `python3 -B -m pytest -q
-tests/policy/test_faro_rule_authority_models.py`. Cubre hash derivado de la proyección
-cerrada con unidad de cantidad, argumentos inmutables, validación de request ID y límites de
-actos/dinero, rechazo de límites de infraestructura, coherencia de status/reason y la
-idempotencia del store en memoria. Se midió de nuevo tras el hallazgo MAJOR de auditoría
-Tier 3 que pidió ligar explícitamente la unidad a quantity y al request hash.
+Piso actualizado (2026-10-07): `^29 passed in `. Medido en Hall9000 con Python 3.14.4 y
+el comando exacto del workflow. Cubre el catálogo cargado desde el snapshot, límites de actos
+y dinero, NFC antes del hash, coherencia status/reason y el store ligado al hash recibido.
+
 
 ## `archivos-de-test-en-ci/pisos`
 
@@ -4641,3 +4638,15 @@ Piso nuevo de la migración: `policy/tests/test_pisos_fuera_del_workflow.py` (pe
 master 364ded9) y `policy/tests/test_comparar_pisos.py` (el comparador). 140 -> 213 -> 223 el
 2026-10-04 al agregar el comparador y sus casos, las pruebas del job aislado y las de claves duplicadas; 223 -> 227 (2026-10-04, ci/pisos-skipped-y-comentarios): +4 netas del comparador (5 pruebas de la excepción `^N passed` -> `^N' passed, M skipped`, menos 1 parámetro que deja de ser rojo). Medido en
 Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.
+
+## `identity-foundation-shadow/policy`
+
+Patrón vigente (2026-10-06, r4): `^545 passed`
+
+Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
+solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
+de la constitución es que un número compartido lo re-mide el último en llegar, y sin piso no hay
+número. Medido en hall9000: 459 (ronda 1) + 38 (ronda 2) + 43 (ronda 3: catálogo de topes, copias/pickle, nombres que esquivan, blob gigante, identidad de las listas del workflow, y las tres dedicadas de razon propia: dígito Unicode, claves de límites, not_after) de rule_authority (20 de schema — decisión R-4 de
+Fernando del 2026-10-06 y dígitos ASCII; 2 de snapshot — testigo no-dataclass; 16 de los ataques
+A–J del auditor como regresiones). El paso re-corre la misma lista en `-q | tee` como memory-b9.
+Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.

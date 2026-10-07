@@ -1,4 +1,4 @@
-"""Faro individual-rule authority value objects and decision storage."""
+"""Faro individual-rule authority models, schema and snapshot services."""
 
 from .models import (
     RuleDecision,
@@ -17,4 +17,17 @@ __all__ = [
     "RuleEvaluation",
     "RuleEvaluationRequest",
     "RuleLimits",
+    "Alcance",
+    "Cantidad",
+    "Frecuencia",
+    "LimitesObligatorios",
+    "Monto",
+    "ReglaValidada",
+    "Tope",
+    "Vigencia",
+    "PermitConfig",
+    "validar_regla",
 ]
+
+from .schema import (Alcance, Cantidad, Frecuencia, LimitesObligatorios, Monto,
+                     PermitConfig, ReglaValidada, Tope, Vigencia, validar_regla)

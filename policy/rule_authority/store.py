@@ -11,7 +11,7 @@ from .models import RuleDecision, RuleEvaluationRequest
 
 
 class RuleDecisionStore(Protocol):
-    def get(self, request_id: str) -> RuleDecision | None: ...
+    def get(self, request: RuleEvaluationRequest) -> RuleDecision | None: ...
     def record(self, request: RuleEvaluationRequest, decision: RuleDecision) -> RuleDecision: ...
 
 
@@ -19,12 +19,17 @@ class RuleDecisionStore(Protocol):
 class InMemoryRuleDecisionStore:
     """Thread-safe unique-request store for tests; not durable authority storage."""
 
-    _decisions: dict[str, RuleDecision] = field(default_factory=dict)
+    _decisions: dict[str, RuleDecision] = field(default_factory=dict, init=False, repr=False)
     _lock: RLock = field(default_factory=RLock, repr=False)
 
-    def get(self, request_id: str) -> RuleDecision | None:
+    def get(self, request: RuleEvaluationRequest) -> RuleDecision | None:
+        if not isinstance(request, RuleEvaluationRequest):
+            raise TypeError("get requiere RuleEvaluationRequest para ligar request_hash")
         with self._lock:
-            return self._decisions.get(request_id)
+            decision = self._decisions.get(request.request_id)
+            if decision is None or decision.request_hash != request.request_hash:
+                return None
+            return decision
 
     def record(self, request: RuleEvaluationRequest, decision: RuleDecision) -> RuleDecision:
         if (decision.request_id != request.request_id or

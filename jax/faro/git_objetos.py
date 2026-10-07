@@ -16,6 +16,12 @@ from pathlib import Path
 
 _GIT_SIN_HOOKS = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
 
+# Tope de tamano de blob para el snapshot de reglas (F1.1 §6): una regla es un
+# YAML chico; algo de megas no es una regla, es un ataque de memoria. NO es un
+# default de leer_blobs: el paquete del Faro lee blobs de ~800 KB legitimamente,
+# asi que el tope es OPT-IN del snapshot (M-6, jax#370 r3).
+MAX_BLOB_BYTES = 1024 * 1024
+
 # `git replace` (refs/replace/) hace que un SHA muestre OTRO contenido sin cambiar el SHA: un
 # paquete «fijado por SHA» dejaria de serlo. Se apaga con la bandera Y con la variable.
 _SIN_REPLACE = ("--no-replace-objects",)
@@ -82,6 +88,24 @@ def resolver_ref(repo: Path, ref: str) -> str:
     return r.stdout.decode().strip() if r.returncode == 0 else ""
 
 
+def oid_subarbol(repo: Path, commit: str, ruta: str) -> str:
+    """El OID del ARBOL `ruta` en `commit`, verificado como arbol (F1.1 §6: el pin
+    compara el arbol esperado de `policy/` contra el real). Falla cerrado: si
+    `commit` no existe o `ruta` no es un arbol, no hay snapshot.
+
+    OJO con la sintaxis: `<commit>:<ruta>^{tree}` NO vale (todo lo que sigue al
+    colon se toma como ruta); se usa `ls-tree`, que si declara el tipo."""
+    r = git(repo, "ls-tree", "-z", "--full-tree", commit, "--", ruta)
+    entradas = [e for e in r.stdout.split(b"\0") if e]
+    if len(entradas) != 1:
+        raise FuenteInvalida(f"no existe el arbol {ruta} en {commit}")
+    meta, _, _ruta = entradas[0].partition(b"\t")
+    modo, tipo, oid = meta.decode().split(" ")
+    if tipo != "tree":
+        raise FuenteInvalida(f"{ruta} no es un arbol en {commit} (tipo {tipo})")
+    return oid
+
+
 @dataclass(frozen=True)
 class EntradaGit:
     modo: str
@@ -96,15 +120,28 @@ def listar(repo: Path, sha: str, *rutas: str) -> list[EntradaGit]:
         if not crudo:
             continue
         meta, _, ruta = crudo.partition(b"\t")
-        modo, _tipo, oid = meta.decode().split(" ")
-        entradas.append(EntradaGit(modo, oid, ruta.decode("utf-8")))
+        modo, _tipo, oid = meta.decode("ascii").split(" ")
+        try:
+            ruta_texto = ruta.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise FuenteInvalida("ruta de objeto no UTF-8: el snapshot niega") from exc
+        entradas.append(EntradaGit(modo, oid, ruta_texto))
     return entradas
 
 
-def leer_blobs(repo: Path, oids: list[str]) -> dict[str, bytes]:
+def leer_blobs(repo: Path, oids: list[str], *, max_bytes: int | None = None) -> dict[str, bytes]:
+    """Lee blobs por lote. Con ``max_bytes``, PRIMERO mira los tamanos con
+    ``cat-file --batch-check`` y niega cualquier exceso ANTES de cargar contenido
+    (no sirve de nada cargar un mega y rechazarlo despues)."""
     unicos = list(dict.fromkeys(oids))
     if not unicos:
         return {}
+    if max_bytes is not None:
+        r = git(repo, "cat-file", "--batch-check", entrada=("\n".join(unicos) + "\n").encode())
+        for linea in r.stdout.decode().splitlines():
+            oid, tipo, tam = (linea.split(" ") + ["", ""])[:3]
+            if tipo == "blob" and tam.isdigit() and int(tam) > max_bytes:
+                raise FuenteInvalida(f"blob {oid} excede {max_bytes} bytes: no es una regla")
     r = git(repo, "cat-file", "--batch", entrada=("\n".join(unicos) + "\n").encode())
     salida, i, blobs = r.stdout, 0, {}
     for oid in unicos:

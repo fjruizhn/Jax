@@ -12,11 +12,12 @@ from typing import Any, Mapping
 from policy.authority_ledger.canonical import domain_hash
 from policy.authority_ledger.errors import AuthorityEventValidationError
 from policy.authority_ledger.ids import uuid7_text
+from types import MappingProxyType
+from .schema import MAX_CANTIDAD
 
 _IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9._:-]{0,127}\Z")
 # This is only the ISO 4217 alphabetic-code shape. Membership is checked against
 # the trusted rule/capability contract before an evaluation can be authoritative.
-_CURRENCY = re.compile(r"[A-Z]{3}\Z")
 _REQUEST_HASH_DOMAIN = "JAX-FARO-RULE-REQUEST"
 _REQUEST_HASH_VERSION = "1"
 _DENY_REASONS = frozenset({
@@ -28,7 +29,6 @@ _DENY_REASONS = frozenset({
     "RULE_EXPIRED",
     "RULE_NOT_FOUND",
     "STOP_ACTIVE",
-    "STORAGE_FAILURE",
 })
 
 
@@ -42,8 +42,8 @@ def _identifier(value: object, field: str) -> str:
 
 def _freeze_json(value: Any, field: str) -> Any:
     if value is None or isinstance(value, (str, bool, int)):
-        if isinstance(value, str) and unicodedata.normalize("NFC", value) != value:
-            raise AuthorityEventValidationError(f"{field} debe estar en NFC")
+        if isinstance(value, str):
+            value = unicodedata.normalize("NFC", value)
         return value
     if isinstance(value, float):
         raise AuthorityEventValidationError(f"{field} no admite valores float")
@@ -52,8 +52,11 @@ def _freeze_json(value: Any, field: str) -> Any:
     if isinstance(value, Mapping):
         frozen: dict[str, Any] = {}
         for key, item in value.items():
-            if not isinstance(key, str) or not key or unicodedata.normalize("NFC", key) != key:
+            if not isinstance(key, str) or not key:
                 raise AuthorityEventValidationError(f"{field} contiene clave inválida")
+            key = unicodedata.normalize("NFC", key)
+            if key in frozen:
+                raise AuthorityEventValidationError(f"{field} contiene claves duplicadas tras NFC")
             frozen[key] = _freeze_json(item, field)
         return MappingProxyType(frozen)
     raise AuthorityEventValidationError(f"{field} debe ser JSON cerrado")
@@ -77,11 +80,13 @@ def _utc(value: object, field: str) -> datetime:
 class RuleLimits:
     """Only effect and cost limits are representable; infrastructure limits have no fields."""
 
+    catalogo: MappingProxyType | None = None
     quantity: int | None = None
     quantity_unit: str | None = None
     amount: int | None = None
     currency: str | None = None
     frequency_count: int | None = None
+    frequency_unit: str | None = None
     frequency_window_seconds: int | None = None
     duration_seconds: int | None = None
     tokens: int | None = None
@@ -89,26 +94,42 @@ class RuleLimits:
     cost_currency: str | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.catalogo, MappingProxyType):
+            raise AuthorityEventValidationError("RuleLimits requiere catálogo cargado del snapshot")
+        if not any(getattr(self, name) is not None for name in (
+            "quantity", "amount", "frequency_count", "frequency_window_seconds",
+            "duration_seconds", "tokens", "cost_minor_units")):
+            raise AuthorityEventValidationError("RuleLimits vacío")
         for name in ("quantity", "amount", "frequency_count",
                      "frequency_window_seconds", "duration_seconds", "tokens",
                      "cost_minor_units"):
             value = getattr(self, name)
-            if value is not None and (type(value) is not int or value <= 0):
-                raise AuthorityEventValidationError(f"{name} debe ser entero positivo")
-        for name in ("currency", "cost_currency"):
-            currency = getattr(self, name)
-            if currency is not None and (not isinstance(currency, str) or not _CURRENCY.fullmatch(currency)):
-                raise AuthorityEventValidationError(f"{name} debe tener formato alpha-3")
+            if value is not None and (type(value) is not int or not 0 < value <= MAX_CANTIDAD):
+                raise AuthorityEventValidationError(f"{name} debe ser entero positivo <= {MAX_CANTIDAD}")
         if (self.quantity is None) != (self.quantity_unit is None):
             raise AuthorityEventValidationError("quantity y quantity_unit deben ir juntos")
         if self.quantity_unit is not None:
             object.__setattr__(self, "quantity_unit", _identifier(self.quantity_unit, "quantity_unit"))
+            if self.quantity_unit not in self.catalogo.get("actos_externos", ()):
+                raise AuthorityEventValidationError("quantity_unit fuera del catálogo actos_externos")
         if (self.amount is None) != (self.currency is None):
             raise AuthorityEventValidationError("amount y currency deben ir juntos")
         if (self.cost_minor_units is None) != (self.cost_currency is None):
             raise AuthorityEventValidationError("cost_minor_units y cost_currency deben ir juntos")
+        for field, category in (("currency", "monto_dinero"), ("cost_currency", "tokens_costo")):
+            unit = getattr(self, field)
+            if unit is not None and (not isinstance(unit, str) or unit != unit.lower() or unit not in self.catalogo.get(category, ())):
+                raise AuthorityEventValidationError(f"{field} fuera del catálogo {category}")
         if (self.frequency_count is None) != (self.frequency_window_seconds is None):
             raise AuthorityEventValidationError("frecuencia requiere count y window")
+        if (self.frequency_count is None) != (self.frequency_unit is None):
+            raise AuthorityEventValidationError("frecuencia requiere unidad del catálogo")
+        if self.frequency_unit is not None and self.frequency_unit not in self.catalogo.get("frecuencia", ()):
+            raise AuthorityEventValidationError("frequency_unit fuera del catálogo frecuencia")
+        if self.duration_seconds is not None and "segundos" not in self.catalogo.get("duracion", ()):
+            raise AuthorityEventValidationError("duracion.segundos fuera del catálogo")
+        if self.tokens is not None and "tokens" not in self.catalogo.get("tokens_costo", ()):
+            raise AuthorityEventValidationError("tokens fuera del catálogo tokens_costo")
         if self.quantity is not None and self.amount is not None:
             raise AuthorityEventValidationError("límites no pueden combinar quantity y amount")
 
@@ -122,6 +143,7 @@ class RuleEvaluationRequest:
     objective: str
     resource_id: str
     arguments: Mapping[str, Any]
+    catalogo: MappingProxyType | None = None
     quantity: int | None = None
     quantity_unit: str | None = None
     amount: int | None = None
@@ -130,26 +152,30 @@ class RuleEvaluationRequest:
 
     def __post_init__(self) -> None:
         uuid7_text(self.request_id, "request_id")
+        if not isinstance(self.catalogo, MappingProxyType):
+            raise AuthorityEventValidationError("RuleEvaluationRequest requiere catálogo cargado del snapshot")
         for field in ("rule_id", "subject", "capability", "objective", "resource_id"):
             object.__setattr__(self, field, _identifier(getattr(self, field), field))
         if not isinstance(self.arguments, Mapping):
             raise AuthorityEventValidationError("arguments debe ser un objeto JSON")
         frozen = _freeze_json(self.arguments, "arguments")
         object.__setattr__(self, "arguments", frozen)
-        if self.quantity is not None and (type(self.quantity) is not int or self.quantity <= 0):
+        if self.quantity is not None and (type(self.quantity) is not int or not 0 < self.quantity <= MAX_CANTIDAD):
             raise AuthorityEventValidationError("quantity debe ser entero positivo")
         if (self.quantity is None) != (self.quantity_unit is None):
             raise AuthorityEventValidationError("quantity y quantity_unit deben ir juntos")
         if self.quantity_unit is not None:
             object.__setattr__(self, "quantity_unit", _identifier(self.quantity_unit, "quantity_unit"))
-        if self.amount is not None and (type(self.amount) is not int or self.amount <= 0):
+            if self.quantity_unit not in self.catalogo.get("actos_externos", ()):
+                raise AuthorityEventValidationError("quantity_unit fuera del catálogo actos_externos")
+        if self.amount is not None and (type(self.amount) is not int or not 0 < self.amount <= MAX_CANTIDAD):
             raise AuthorityEventValidationError("amount debe ser entero positivo en unidades menores")
         if (self.quantity is not None and self.amount is not None):
             raise AuthorityEventValidationError("solicitud no puede limitarse por quantity y amount a la vez")
         if (self.amount is None) != (self.currency is None):
             raise AuthorityEventValidationError("amount y currency deben ir juntos")
-        if self.currency is not None and (not isinstance(self.currency, str) or not _CURRENCY.fullmatch(self.currency)):
-            raise AuthorityEventValidationError("currency debe tener formato alpha-3")
+        if self.currency is not None and (not isinstance(self.currency, str) or self.currency != self.currency.lower() or self.currency not in self.catalogo.get("monto_dinero", ())):
+            raise AuthorityEventValidationError("currency fuera del catálogo monto_dinero")
         computed = domain_hash(_REQUEST_HASH_DOMAIN, _REQUEST_HASH_VERSION, self.canonical_projection())
         if self.request_hash is not None and self.request_hash != computed:
             raise AuthorityEventValidationError("request_hash no coincide con los campos")
@@ -213,3 +239,4 @@ class RuleDecision:
         elif self.status is RuleDecisionStatus.DENY and self.reason_code == "RULE_NOT_FOUND":
             raise AuthorityEventValidationError("RULE_NOT_FOUND requiere MISSING_RULE")
         object.__setattr__(self, "decided_at_utc", _utc(self.decided_at_utc, "decided_at_utc"))
+    catalogo: MappingProxyType | None = None

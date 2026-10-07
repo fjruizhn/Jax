@@ -38,8 +38,8 @@
       "mensaje": "PISO ROTO: se esperaban 251 tests CORRIDOS de cli_sandbox."
     },
     "faro-fase0/faro": {
-      "patron": "^688 passed",
-      "mensaje": "PISO ROTO: se esperaban 688 tests CORRIDOS del Faro."
+      "patron": "^721 passed",
+      "mensaje": "PISO ROTO: se esperaban 721 tests CORRIDOS del Faro."
     },
     "faro-bitacora-db/faro-db": {
       "patron": "^40 passed",
@@ -142,8 +142,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 12 pruebas de payload, codec y replay de ratificaciones Faro individuales. Re-medido el 2026-10-07 en hall9000 tras integrar #368 y #369."
     },
     "authority-rule-models/models": {
-      "patron": "^19 passed in ",
-      "mensaje": "PISO ROTO: se esperaban exactamente 19 pruebas de modelos, unidad/hash de solicitud y store en memoria de Rule Authority. Medido el 2026-10-06 en hall9000 con Python 3.14.4."
+      "patron": "^29 passed in ",
+      "mensaje": "PISO ROTO: se esperan 29 pruebas de modelos Rule Authority: límites ligados al catálogo sellado del snapshot, NFC antes del hash, hash ligado al lookup del store, denegaciones persistibles y regresiones."
     },
     "tests-puros/ficha_tests": {
       "patron": "^16 passed",
@@ -204,6 +204,10 @@
     "archivos-de-test-en-ci/pisos": {
       "patron": "^227 passed",
       "mensaje": "PISO ROTO: se esperaban 227 tests CORRIDOS de los pisos fuera del workflow."
+    },
+    "identity-foundation-shadow/policy": {
+      "patron": "^555 passed",
+      "mensaje": "PISO ROTO: se esperaban 497 tests CORRIDOS de Identity Foundation Shadow (la politica sin DB)."
     }
   },
   "minimos": {

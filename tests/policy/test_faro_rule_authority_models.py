@@ -12,6 +12,9 @@ from policy.rule_authority.models import (
 )
 from policy.rule_authority.store import InMemoryRuleDecisionStore
 from policy.authority_ledger.errors import AuthorityEventValidationError, AuthorityStateError
+from jax.faro.catalogo_topes import cargar_catalogo_bytes
+
+CATALOG = cargar_catalogo_bytes(b'''{"version":1,"decision":"test fixture","clases":{"monto_dinero":["hnl","usd"],"actos_externos":["mensajes","correos","publicaciones","compras","pagos"],"frecuencia":["por_hora","por_dia"],"duracion":["segundos"],"tokens_costo":["tokens","usd"]}}''')
 
 FORBIDDEN_LIMIT_FIELDS = ("connections", "concurrency", "workers", "threads", "processes", "agents")
 
@@ -25,8 +28,9 @@ def request(**overrides):
         "objective": "notify-client",
         "resource_id": "message:invoice-42",
         "arguments": {"recipient": "client@example.test", "body": "Invoice ready"},
+        "catalogo": CATALOG,
         "quantity": 1,
-        "quantity_unit": "messages",
+        "quantity_unit": "mensajes",
         "amount": None,
     }
     values.update(overrides)
@@ -50,8 +54,18 @@ def test_request_hash_is_derived_from_closed_canonical_projection():
     assert request(arguments={"nested": {}}).request_hash != request(arguments={"nested": []}).request_hash
 
 
+def test_request_arguments_are_normalized_to_nfc_before_hashing():
+    composed = request(arguments={"texto": "café"})
+    decomposed = request(arguments={"texto": "cafe\u0301"})
+    assert composed.arguments["texto"] == "café"
+    assert decomposed.arguments["texto"] == "café"
+    assert composed.request_hash == decomposed.request_hash
+    with pytest.raises(AuthorityEventValidationError, match="claves duplicadas tras NFC"):
+        request(arguments={"é": 1, "e\u0301": 2})
+
+
 def test_request_hash_includes_quantity_unit():
-    assert request(quantity_unit="messages").request_hash != request(quantity_unit="recipients").request_hash
+    assert request(quantity_unit="mensajes").request_hash != request(quantity_unit="correos").request_hash
 
 
 @pytest.mark.parametrize(
@@ -72,7 +86,7 @@ def test_request_requires_quantity_and_unit_together(quantity, quantity_unit):
 )
 def test_rule_limits_require_quantity_and_unit_together(limits):
     with pytest.raises(AuthorityEventValidationError):
-        RuleLimits(**limits)
+        RuleLimits(catalogo=CATALOG, **limits)
 
 
 @pytest.mark.parametrize("arguments", [{"nested": object()}])
@@ -91,7 +105,51 @@ def test_request_validates_uuid7_and_exactly_one_action_or_money_limit():
 
 
 def test_rule_limits_allow_only_action_money_frequency_duration_and_cost():
-    assert RuleLimits(quantity=2, quantity_unit="messages", duration_seconds=30, tokens=400, cost_minor_units=10, cost_currency="USD")
+    assert RuleLimits(catalogo=CATALOG, quantity=2, quantity_unit="mensajes",
+                      frequency_count=2, frequency_window_seconds=3600,
+                      frequency_unit="por_hora", duration_seconds=30, tokens=400,
+                      cost_minor_units=10, cost_currency="usd")
+
+
+def test_limits_require_snapshot_catalog_and_nonempty_values():
+    with pytest.raises(AuthorityEventValidationError, match="catálogo cargado"):
+        RuleLimits(quantity=1, quantity_unit="mensajes")
+    with pytest.raises(AuthorityEventValidationError, match="vacío"):
+        RuleLimits(catalogo=CATALOG)
+
+
+@pytest.mark.parametrize("bad", ["conexiones", "recipients"])
+def test_limits_reject_units_outside_loaded_catalog(bad):
+    with pytest.raises(AuthorityEventValidationError, match="catálogo"):
+        RuleLimits(catalogo=CATALOG, quantity=1, quantity_unit=bad)
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"quantity": True, "quantity_unit": "mensajes"},
+    {"amount": 2**53 + 1, "currency": "usd"},
+    {"currency": "usd"},
+])
+def test_limits_reject_bool_overflow_and_currency_without_amount(kwargs):
+    with pytest.raises(AuthorityEventValidationError):
+        RuleLimits(catalogo=CATALOG, **kwargs)
+
+
+def test_permit_has_no_persistable_reason_and_storage_failure_is_not_a_reason():
+    with pytest.raises(AuthorityEventValidationError):
+        RuleDecision("0199f8a1-8c00-7000-8000-000000000001", "sha256:"+"a"*64,
+                     RuleDecisionStatus.PERMIT, "rule-one", "STORAGE_FAILURE",
+                     datetime(2026, 10, 6, tzinfo=timezone.utc))
+    with pytest.raises(AuthorityEventValidationError):
+        RuleDecision("0199f8a1-8c00-7000-8000-000000000001", "sha256:"+"a"*64,
+                     RuleDecisionStatus.DENY, "rule-one", "STORAGE_FAILURE",
+                     datetime(2026, 10, 6, tzinfo=timezone.utc))
+
+
+def test_rule_evaluation_request_limits_use_catalog_units_and_reject_bool():
+    with pytest.raises(AuthorityEventValidationError):
+        request(quantity=True)
+    with pytest.raises(AuthorityEventValidationError, match="catálogo"):
+        request(quantity_unit="recipients")
 
 
 @pytest.mark.parametrize("field", FORBIDDEN_LIMIT_FIELDS)
@@ -114,7 +172,8 @@ def test_memory_decision_store_is_idempotent_by_request_id_and_hash():
 
     assert store.record(submitted, decision) == decision
     assert store.record(request(), decision) == decision
-    assert store.get(submitted.request_id) == decision
+    assert store.get(submitted) == decision
+    assert store.get(request(arguments={"recipient": "different"})) is None
     changed = request(arguments={"recipient": "different"})
     changed_decision = RuleDecision(
         request_id=changed.request_id,
@@ -126,6 +185,11 @@ def test_memory_decision_store_is_idempotent_by_request_id_and_hash():
     )
     with pytest.raises(AuthorityStateError):
         store.record(changed, changed_decision)
+
+
+def test_memory_store_cannot_inject_decisions_in_constructor():
+    with pytest.raises(TypeError):
+        InMemoryRuleDecisionStore(_decisions={})
 
 
 def test_memory_store_rejects_decision_for_different_request():
@@ -143,7 +207,7 @@ def test_memory_store_rejects_decision_for_different_request():
 
     with pytest.raises(AuthorityStateError):
         store.record(submitted, decision)
-    assert store.get(submitted.request_id) is None
+    assert store.get(submitted) is None
 
 
 @pytest.mark.parametrize(
