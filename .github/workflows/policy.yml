@@ -1808,6 +1808,7 @@ jobs:
             tests/test_store_indice_duenio.py \
             tests/test_cola_uso_escritores.py \
             tests/test_respaldo_de_uso_aislado.py \
+            tests/test_higiene_tmp.py \
             tests/test_prevuelo_config.py \
             tests/test_jacobs_epoca_ejecutor.py \
             tests/test_jacobs_resume_epoca.py \
@@ -2530,12 +2531,14 @@ jobs:
           python3 .github/ci/piso.py verificar tests-puros/procesamiento_routes_tests /tmp/procesamiento_routes_tests || exit $?
 
       # jax-14 (2026-10-03): freno de dependencias de extraccion. Piso exacto de
-      # procesamiento/_dependencias_test.py: 29 passed (10 de la ronda 0 + 19 de la
+      # procesamiento/_dependencias_test.py: 38 passed (10 de la ronda 0 + 19 de la
       # ronda 1: estado() nunca lanza, lineas no reconocidas, marcadores, freno por
-      # tipo), medido localmente con
+      # tipo, + 9 de Jax#338 el 2026-10-04: Pillow declarado, .gif y toda imagen
+      # que el OCR acepta, freno por contenido, FIFO), medido localmente con
       # pdfplumber, openpyxl y python-docx instalados. Si da "skipped", falta
       # una dependencia declarada: no es un piso mas alto, es justo la falla
-      # que este modulo existe para atrapar.
+      # que este modulo existe para atrapar. Re-medido el 2026-10-07 (higiene de
+      # CI, rama propia sobre master 83f8f56b): 38 passed con el comando de abajo.
       - name: Freno de dependencias de extraccion -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_dependencias_test.py 2>&1 | tee /tmp/dependencias_tests
@@ -2547,7 +2550,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - run: pip install pytest pyyaml cryptography==49.0.0 pymysql
+      # pymysql con hash (higiene de CI, 2026-10-07): este job lo instalaba SUELTO, sin version
+      # ni hash. requirements-faro-mariadb-ci.txt es byte a byte el mismo blob de #371
+      # (17f0a3e2): pymysql==1.2.0 con los mismos hashes que requirements-faro.txt, sin
+      # dependencias transitivas. Invocacion aparte porque --require-hashes no admite
+      # paquetes sueltos en la misma linea.
+      - run: |
+          pip install pytest pyyaml cryptography==49.0.0
+          pip install --require-hashes -r requirements-faro-mariadb-ci.txt
       - name: Identity Foundation Shadow (sin DB)
         env:
           PYTHONPATH: "."
@@ -2941,7 +2951,9 @@ jobs:
   # `runner` con NOPASSWD:ALL (mismo esquema que el runner real de GitHub Actions),
   # `acl` instalado, sin ningún checkout previo -- 28 passed, 1 skipped (el que necesita
   # /home/fruiz/jax-workspace/proyectos real, que ningún runner de GitHub Actions tiene).
-  # Si esto da "29 passed", este runner SÍ tiene ese árbol -- no es el runner esperado.
+  # [2026-10-07, higiene de CI] La cifra de ESA ronda era 28+1; el piso vigente es otro
+  # (306 passed, 1 skipped, ci/pisos.json): si el runner diera 307 passed sin skips,
+  # tendría /etc/jax/.env de un host de jax -- no es el runner esperado.
   permisos-proyectos:
     runs-on: ubuntu-latest
     steps:
@@ -2999,6 +3011,12 @@ jobs:
         # 49 -> 50 (fix de revision, MAJOR-1): +1, test_las_pruebas_no_tocan_el_nucleo_de_sistema.
         # 50 -> 51 (2026-10-03, E2a): +1, test_en_profundidad_2_se_excluye_toda_carpeta_oculta_y_solo_las_ocultas
         # (la exclusion pasa de un nombre fijo a toda carpeta oculta de profundidad 2). Local: 52 passed + 1 solo-host.
+        # 51 -> 306 (2026-10-04, fix/runbook-bloque-fuse-y-estable, Jax#345): +255 en cinco rondas
+        # del runbook del bloque FUSE/estable (el detalle, ronda por ronda, en docs/ci/pisos.md).
+        # 307 recolectadas; el runner salta la misma 1 que necesita /etc/jax/.env: 306 passed,
+        # 1 skipped (piso vigente en ci/pisos.json). Re-medido el 2026-10-07 (higiene de CI, rama
+        # propia sobre master 83f8f56b) con el comando de abajo: 307 passed, 0 skipped en hall9000
+        # como fruiz (alli /etc/jax/.env existe y corre la que el runner salta).
         # Historia de los números del piso: docs/ci/pisos.md (los números viven en ci/pisos.json).
         run: |
           PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
