@@ -499,10 +499,12 @@ jobs:
   # TODO sale con HASH: mcp de requirements-faro.txt, pytest y el cliente de base de
   # requirements-faro-ci.txt (`--require-hashes`, sin `pip install` suelto: lo vigila
   # tests/test_faro_requirements.py). Piso exacto de tests CORRIDOS, cero saltados (un skip se ve igual
-  # que verde). Medido 2026-10-05 en hall9000 con Python 3.14: 688 passed
-  # (la base medida de 671 + 15 de memoria.buscar + 2 de configuración/control; sin skips).
-  # La CI usa Python 3.12 y confirma el mismo piso.
-  # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 72 +
+  # que verde). Medido 2026-10-05 en hall9000 con Python 3.14: 688 passed; re-medido el
+  # 2026-10-06 (jax#370 r3): 720 passed — el catalogo cerrado de topes (decision de Fernando,
+  # R-4) agrego 32 pruebas de runtime (15 recursos fabricados que niegan + 12 del catalogo que
+  # topean + 5 de catalogo/estructura), y las de mecanica pasaron a recursos del catalogo
+  # (topes 72 -> 104). Sin skips. La CI usa Python 3.12 y confirma el mismo piso.
+  # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 104 +
   # control 170 + lanzador 77 + acl 43 + memoria 15; desde aviso, los pasos 0.3b y 0.3c y su auditoria). Las pruebas con bwrap y uids
   # reales estan en el job `faro-jaula`; las de la base real, en `faro-bitacora-db`.
   faro-fase0:
@@ -2632,7 +2634,7 @@ jobs:
       - name: Identity Foundation Shadow -- piso exacto de tests CORRIDOS
         # Jax#370 ronda 2 (M-5): la lista de arriba crece con cada area de policy y
         # nada la pisaba. Medido el 2026-10-06 en hall9000 (Python 3.14.4, pytest 9,
-        # solo pytest+pyyaml+cryptography como el paso de arriba): 497 passed
+        # solo pytest+pyyaml+cryptography como el paso de arriba): 540 passed
         # (459 de la ronda 1 + 38 de rule_authority: 20 de schema por la decision
         # R-4 de Fernando y digitos ASCII, 2 de snapshot por el testigo no-dataclass,
         # 16 de los ataques A-J del auditor como regresiones). Exacto: una prueba

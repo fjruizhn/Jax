@@ -4613,12 +4613,12 @@ Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la form
 
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-06): `^497 passed`
+Patrón vigente (2026-10-06, r3): `^540 passed`
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
 de la constitución es que un número compartido lo re-mide el último en llegar, y sin piso no hay
-número. Medido en hall9000: 459 (ronda 1) + 38 de rule_authority (20 de schema — decisión R-4 de
+número. Medido en hall9000: 459 (ronda 1) + 38 (ronda 2) + 43 (ronda 3: catálogo de topes, copias/pickle, nombres que esquivan, blob gigante, identidad de las listas del workflow, y las tres dedicadas de razon propia: dígito Unicode, claves de límites, not_after) de rule_authority (20 de schema — decisión R-4 de
 Fernando del 2026-10-06 y dígitos ASCII; 2 de snapshot — testigo no-dataclass; 16 de los ataques
 A–J del auditor como regresiones). El paso re-corre la misma lista en `-q | tee` como memory-b9.
 Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.
