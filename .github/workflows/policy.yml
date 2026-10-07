@@ -2742,6 +2742,15 @@ jobs:
           set -o pipefail
           python -m pytest -q tests/policy/test_authority_ledger_storage_codec.py 2>&1 | tee /tmp/authority-ledger-codec
           python3 .github/ci/piso.py verificar authority-ledger-codec/codec /tmp/authority-ledger-codec || exit $?
+      - name: Faro F1.1 Rule Authority MariaDB aislada -- piso exacto
+        env:
+          PYTHONPATH: "."
+          JAX_RULE_AUTHORITY_DOCKER_CMD: docker
+        run: |
+          set -o pipefail
+          python -m pip install pymysql
+          python -m pytest -q tests/policy/test_faro_rule_authority_storage_mariadb.py 2>&1 | tee /tmp/faro-rule-authority-storage-mariadb
+          python3 .github/ci/piso.py verificar authority-rule-storage/mariadb /tmp/faro-rule-authority-storage-mariadb || exit $?
       - name: Block 4 authority-ledger MariaDB aislada -- piso exacto
         env:
           PYTHONPATH: "."

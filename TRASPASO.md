@@ -1,17 +1,31 @@
-# Traspaso Faro F1.1 #368/#369/#371
+# Traspaso Faro F1.1 paso 5
 
 ## Estado (2026-10-07)
 
-- Rama #371 `feat/faro-f1.1-evaluador`, worktree `/home/fruiz/wt/jax-faro-f11-paso4`.
-- #370 r5 y #372 providers están integrados; #369 corregido y el último commit CI de #368 están integrados en este árbol.
-- #368/#369: K3, K8, D2, D3, E4 y E10 verificados en sus ramas. Pisos ledger: codec 19, MariaDB 1, ratificaciones 12.
-- #371: límites requieren catálogo cargado, topes `2**53`, NFC antes del hash, unidades limitadas al catálogo, `get(request)` liga el hash y el store no acepta `_decisions` por constructor.
-- Python 3.14 instala `pymysql`; pisos de modelos 30 e Identity Foundation Shadow 579.
-- Suite ledger: 53 passed; modelos/schema/snapshot/ataques/providers: 264 passed.
-- Mutantes V4, V6, V8 y V9 mueren en sus pruebas específicas.
+- Rama: `feat/faro-f1.1-storage-mariadb`, creada desde `origin/feat/faro-f1.1-evaluador` en `31eb14bf`.
+- Worktree: `/home/fruiz/wt/jax-faro-f11-paso5`.
+- Baseline: `tests/policy/test_faro_rule_authority_models.py`: 30 passed.
+- Implementados `policy/rule_authority/migrations/001_rule_authority_kernel.sql`,
+  `storage.py`, `provisioning.py`, el error tipado, el test efímero y el paso de CI.
+- La migración crea `rule_decisions`, `rule_permits`, `rule_permit_consumptions` y
+  `rule_authority_audit_head`; los tres registros append-only tienen triggers contra
+  `UPDATE`/`DELETE`. La cuenta versionada solo inserta/lee esos registros y actualiza
+  el head.
+- MariaDB 12.3.3 efímera: 1 passed; piso `authority-rule-storage/mariadb` verificado.
+  Suite Faro/Block 4 seleccionada: 228 passed.
+- Mutantes comprobados: quitar `begin()` deja una fila tras fallo parcial; omitir la
+  comparación de hash hace que `get()` devuelva una fila ajena; omitir el commit hace
+  que otra conexión no vea la decisión al retornar. Los tres fallan en aserciones.
+- Alcance conservador: `DENY` y `MISSING_RULE` se guardan; `PERMIT` falla cerrado
+  hasta que el paso 6 agregue `RulePermit` para insertarlo atómicamente.
+- #370 r6 y el reapilado de #371 pueden mover la base; todavía falta reapilar esta
+  rama y repetir pisos y merge-tree contra los tips fijados.
 
-## Pendiente
+## Siguiente comando después del reapilado de #371
 
-1. Cambiar `MappingProxyType` a `CatalogoTopes` sellado cuando se confirme el SHA r6 final de #370 y reapilar sobre él.
-2. Volver a correr suites y pisos sobre el SHA final, actualizar PR #371 y dejar el reporte en `~/encargos-codex/entrega-codex-faro-f11-368-369-371-r3.md`.
-- CI GitHub en #371 r5: `faro-bitacora-db` falla en `tests/test_faro_topes_db.py`; los casos crean `Topes` sin catálogo y usan el recurso legado `tokens`, por lo que D-4 los niega. El mismo fallo está en #370 r5. Se informó a Hyde para corregirlo en la rama de origen, sin alterar ese trabajo.
+`git fetch origin && git rebase --onto origin/feat/faro-f1.1-evaluador 31eb14bf feat/faro-f1.1-storage-mariadb`
+
+Después del rebase, repetir la integración MariaDB con
+`JAX_RULE_AUTHORITY_DOCKER_CMD='sudo -n docker'`, el piso, las suites Faro/Block 4,
+EXPLAIN y merge-tree frente a #370/#371/#372; actualizar este archivo en cada commit.
+El paso 6 de `RulePermit`/consumo queda fuera de esta rama.
