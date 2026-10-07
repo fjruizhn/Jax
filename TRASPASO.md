@@ -76,16 +76,23 @@ Diseño verificado: NINGÚN documento de docs/superpowers/specs menciona OVERLAY
   falle explícitamente. Marcados `fail-closed`; la guarda local quedó 21/21.
 - Esta anotación requiere un SHA nuevo y CI nuevo; la auditoría final debe cubrir
   ese SHA exacto, junto con la resolución de overlays históricos.
-- **UNAVAILABLE:** `jaxctl authority` no pudo consultar el Block 4 operativo en
-  hall9000. No está verificado si hay OVERLAY_ISSUED históricos sin ratificación
-  vigente. Fernando debe decidir si, de existir, se conservan en cuarentena, se
-  rechaza el ledger completo o se conserva su efecto histórico. Pregunta enviada
-  el 2026-10-07; esperar respuesta antes de cambiar esa semántica.
+- **Decisión de Fernando (2026-10-07): cuarentena** para OVERLAY_ISSUED histórico
+  sin ratificación vigente. `jaxctl authority` no pudo consultar el Block 4
+  operativo en hall9000 (`UNAVAILABLE`); no está verificado si hay eventos así.
+- **Implementación de cuarentena, en el árbol de trabajo:** replay preserva los
+  eventos firmados, los expone en `quarantined_overlays`, no los aplica aunque
+  el corpus se ratifique después y permite revocarlos. La frontera de append
+  sigue rechazando nuevas emisiones sin ratificación antes de escribir. Se
+  conserva la compatibilidad posicional de `ReconstructedAuthorityState`.
+- **Verificación local final hasta ahora:** `JAX_AUTHORITY_LEDGER_DOCKER_CMD='sudo
+  -n docker' pytest -q tests/policy/test_authority_ledger*.py` → **87 passed**;
+  `git diff --check` limpio. La guarda `no-fail-open-except` pasó 21/21.
+- CI del SHA anterior `0c2be6fd`: 31/31 checks verdes. Falta publicar la cuarentena
+  y verificar CI/auditoría del nuevo SHA exacto.
 - El PR #381 sigue abierto y apilado sobre #379 → #377; integrar en orden.
 
 ## Siguiente comando
 
-Tras resolver la semántica de overlays históricos, completar el cambio, actualizar
-este traspaso, publicar y solicitar auditoría escalón 3 del SHA exacto; verificar
-CI de ese SHA. No integrar hasta que auditoría, CI y preflight correspondan al
-mismo SHA.
+Publicar el cambio de cuarentena, solicitar auditoría escalón 3 del SHA exacto y
+verificar CI de ese SHA. No integrar hasta que auditoría, CI y preflight
+correspondan al mismo SHA.

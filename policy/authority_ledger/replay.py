@@ -43,6 +43,7 @@ class ReconstructedAuthorityState:
     _latest_rule_ratifications: Mapping[str, AuthorityEvent] = field(default_factory=dict, repr=False)
     _revoked_rule_ratifications: frozenset[str] = field(default_factory=frozenset, repr=False)
     _verified_seal: object | None = None
+    quarantined_overlays: frozenset[str] = field(default_factory=frozenset)
 
     @property
     def active_policy_corpus_hash(self) -> str | None:
@@ -80,6 +81,7 @@ def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[Au
     revoked_ratifications: set[str] = set()
     overlays: dict[str, OverlayPayload] = {}
     revoked_overlays: set[str] = set()
+    quarantined_overlays: set[str] = set()
     rule_grants_by_event_id: dict[str, AuthorityEvent] = {}
     latest_rule_ratifications: dict[str, AuthorityEvent] = {}
     revoked_rule_ratifications: set[str] = set()
@@ -117,14 +119,14 @@ def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[Au
             assert intent.overlay is not None
             if intent.overlay.overlay_id in overlays:
                 raise AuthorityStateError("overlay_id duplicado")
-            # Un overlay sólo se emite contra un corpus con ratificación VIGENTE
-            # (misma lógica que la activación): si su hash objetivo no tiene
-            # ninguna ratificación no revocada en este punto del stream, el
-            # evento es inválido.
+            # Historical append-only streams may contain an overlay issued
+            # before its target corpus had a live ratification.  Preserve its
+            # signed history and allow a later revoke, but quarantine it
+            # permanently: later ratification never makes it effective.
             if not any(event.intent.policy_corpus_hash == intent.overlay.policy_corpus_hash
                        for event_id, event in ratifications.items()
                        if event_id not in revoked_ratifications):
-                raise AuthorityStateError("overlay exige ratificación vigente del corpus objetivo")
+                quarantined_overlays.add(intent.overlay.overlay_id)
             overlays[intent.overlay.overlay_id] = intent.overlay
         elif intent.event_type is AuthorityEventType.OVERLAY_REVOKED:
             assert intent.overlay_id is not None
@@ -162,7 +164,9 @@ def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[Au
         MappingProxyType(dict(ratifications)), frozenset(revoked_ratifications), active,
         MappingProxyType(dict(overlays)), frozenset(revoked_overlays), checkpoint,
         MappingProxyType(dict(rule_grants_by_event_id)), MappingProxyType(dict(latest_rule_ratifications)),
-        frozenset(revoked_rule_ratifications), _REPLAY_SEAL,
+        frozenset(revoked_rule_ratifications),
+        quarantined_overlays=frozenset(quarantined_overlays),
+        _verified_seal=_REPLAY_SEAL,
     )
 
 
@@ -195,6 +199,8 @@ def effective_overlays(state: ReconstructedAuthorityState, context, evaluation_t
     candidates: list[OverlayPayload] = []
     for overlay_id, overlay in state.overlays.items():
         if overlay_id in state.revoked_overlays:
+            continue
+        if overlay_id in state.quarantined_overlays:
             continue
         if overlay.policy_corpus_hash != active_hash:
             continue

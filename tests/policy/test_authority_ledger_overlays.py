@@ -3,9 +3,11 @@ import pytest
 
 from policy.authority_ledger.errors import (AuthorityStateError, OverlayApplicabilityIndeterminateError,
                                             OverlayConflictError)
-from policy.authority_ledger.models import AuthorityEventIntent, AuthorityEventType, OverlayType
-from policy.authority_ledger.replay import effective_overlays, verify_authority_ledger
+from policy.authority_ledger.models import AuthorityEvent, AuthorityEventIntent, AuthorityEventType, OverlayType
+from policy.authority_ledger.replay import (ReconstructedAuthorityState, effective_overlays,
+                                            event_hash, event_unsigned_bytes, verify_authority_ledger)
 from policy.authority_ledger.service import append_authority_event
+from policy.authority_ledger.signatures import sign
 from policy.authority_resolution.models import ConditionResult, EvaluationContext
 from tests.policy.test_authority_ledger_events import base_time, overlay, setup_ledger
 from policy.authority_ledger.models import OverlayPayload, OverlayScope
@@ -23,6 +25,32 @@ def state_with(*items):
     for item in items:
         append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=item))
     return verify_authority_ledger(store.get_genesis(), store.events(), root)
+
+
+def test_reconstructed_state_preserves_the_prior_positional_constructor_layout():
+    """Quarantine is additive and cannot rebind legacy private replay fields."""
+    checkpoint = state_with().checkpoint
+    grants, latest, revoked, seal = {"grant": "event"}, {"rule": "event"}, frozenset({"grant"}), object()
+    state = ReconstructedAuthorityState({}, frozenset(), None, {}, frozenset(), checkpoint,
+                                        grants, latest, revoked, seal)
+    assert state._rule_ratification_grants == grants
+    assert state._latest_rule_ratifications == latest
+    assert state._revoked_rule_ratifications == revoked
+    assert state._verified_seal is seal
+    assert state.quarantined_overlays == frozenset()
+
+
+def _legacy_signed_events(key, intents):
+    """Construct historical signed rows without the current append boundary."""
+    events = []
+    previous = None
+    for sequence, (event_id, intent) in enumerate(intents, 1):
+        provisional = AuthorityEvent(event_id, sequence, previous, intent, base_time(), "", "sha256:" + "0" * 64)
+        signed = AuthorityEvent(event_id, sequence, previous, intent, base_time(), sign(key, event_unsigned_bytes(provisional)), "sha256:" + "0" * 64)
+        complete = AuthorityEvent(event_id, sequence, previous, intent, base_time(), signed.signature, event_hash(signed))
+        events.append(complete)
+        previous = complete.event_hash
+    return tuple(events)
 
 
 def test_false_not_applicable_missing_fails_closed_and_identical_deduplicates():
@@ -73,3 +101,40 @@ def test_overlay_a_corpus_con_ratificacion_revocada_tampoco_pasa():
     with pytest.raises(AuthorityStateError, match="overlay exige ratificación"):
         append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=tras_revocacion))
     assert len(store.events()) == 2   # ratificación + revocación: el overlay no dejó rastro
+
+
+def test_legacy_overlay_sin_ratificacion_queda_en_cuarentena_permanente_y_se_puede_revocar():
+    """Old signed history replays, but later ratification never activates its overlay."""
+    from tests.policy.test_authority_ledger_events import ratification_intent
+    store, root, key = setup_ledger()
+    ratification = ratification_intent()
+    legacy = OverlayPayload(
+        "legacy-huerfano", OverlayType.EXCEPTION, ratification.policy_corpus_hash,
+        OverlayScope(("ALICE",), ("READ",)), base_time(), base_time() + timedelta(days=1),
+        target_rule_ids=("rule-a",), exception_code="LEGACY",
+    )
+    overlay_id = "018cc251-f400-7000-8000-000000000001"
+    ratification_id = "018cc251-f400-7000-8000-000000000002"
+    activation_id = "018cc251-f400-7000-8000-000000000003"
+    revoke_id = "018cc251-f400-7000-8000-000000000004"
+    historical = _legacy_signed_events(key, (
+        (overlay_id, AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=legacy)),
+        (ratification_id, ratification),
+        (activation_id, AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", ratification_event_id=ratification_id)),
+    ))
+
+    state = verify_authority_ledger(store.get_genesis(), historical, root)
+    assert state.active_policy_corpus_hash == ratification.policy_corpus_hash
+    assert state.overlays[legacy.overlay_id] == legacy
+    assert state.quarantined_overlays == frozenset({legacy.overlay_id})
+    assert effective_overlays(state, context(), base_time()) == ()
+
+    revoked = _legacy_signed_events(key, (
+        (overlay_id, AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=legacy)),
+        (ratification_id, ratification),
+        (activation_id, AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", ratification_event_id=ratification_id)),
+        (revoke_id, AuthorityEventIntent(AuthorityEventType.OVERLAY_REVOKED, "human:fernando", overlay_id=legacy.overlay_id)),
+    ))
+    revoked_state = verify_authority_ledger(store.get_genesis(), revoked, root)
+    assert legacy.overlay_id in revoked_state.revoked_overlays
+    assert legacy.overlay_id in revoked_state.quarantined_overlays

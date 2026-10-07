@@ -80,6 +80,12 @@ def _append_authority_event_unlocked(store: AuthorityLedgerStore, trusted_root: 
     use_anchor = checkpoint_store is not None and (bool(existing_events) or checkpoint_store.path.exists())
     state = verify_authority_ledger(store.get_genesis(), existing_events, trusted_root,
                                     checkpoint_store if use_anchor else None)
+    if intent.event_type is AuthorityEventType.OVERLAY_ISSUED:
+        assert intent.overlay is not None
+        if not any(event.intent.policy_corpus_hash == intent.overlay.policy_corpus_hash
+                   for event_id, event in state.ratifications.items()
+                   if event_id not in state.revoked_ratifications):
+            raise AuthorityStateError("overlay exige ratificación vigente del corpus objetivo")
     genesis = store.get_genesis()
     public = decode_public_key(genesis.constitutional_public_key)
     # A key mismatch is never an actor-id workaround.
