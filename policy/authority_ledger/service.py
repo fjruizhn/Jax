@@ -9,7 +9,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from .errors import AuthorityStateError, LedgerIntegrityError, TrustedRootMismatchError
 from .models import (
     AuthorityEvent, AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
-    _RATIFICATION_STORAGE_SEAL, _RULE_RATIFICATION_SNAPSHOT_SEAL,
+    _RATIFICATION_SNAPSHOT_SEAL, _RATIFICATION_STORAGE_SEAL,
+    _RULE_RATIFICATION_SNAPSHOT_SEAL,
 )
 from .replay import event_hash, event_unsigned_bytes, genesis_hash, verify_authority_ledger
 from .signatures import decode_public_key, public_key_bytes, public_key_fingerprint, sign
@@ -55,6 +56,9 @@ def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAut
     """Append one signed Fernando event after verifying the complete ledger."""
     if intent._ratification_snapshot_seal is _RATIFICATION_STORAGE_SEAL:
         raise AuthorityStateError("ratificación rehidratada desde storage no se puede volver a anexar")
+    if (intent.event_type is AuthorityEventType.RATIFICATION_GRANTED
+            and intent._ratification_snapshot_seal is not _RATIFICATION_SNAPSHOT_SEAL):
+        raise AuthorityStateError("ratificación requiere snapshot sellado del candidate boundary")
     state = verify_authority_ledger(store.get_genesis(), store.events(), trusted_root)
     genesis = store.get_genesis()
     public = decode_public_key(genesis.constitutional_public_key)

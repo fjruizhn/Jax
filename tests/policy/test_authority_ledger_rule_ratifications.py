@@ -98,6 +98,18 @@ def test_rule_ratification_grant_cannot_be_built_from_caller_supplied_fields():
             rule_ratification=sample_grant(),
         )
 
+    class AlwaysEqual:
+        def __eq__(self, other):
+            return True
+
+    with pytest.raises(AuthorityEventValidationError, match="snapshot Faro sellado"):
+        AuthorityEventIntent(
+            AuthorityEventType.RULE_RATIFICATION_GRANTED,
+            "human:fernando",
+            rule_ratification=sample_grant(),
+            _rule_ratification_snapshot_seal=AlwaysEqual(),
+        )
+
 
 def test_storage_decoding_does_not_authorize_a_new_human_rule_grant():
     store, root, key = _ledger()
@@ -147,6 +159,15 @@ def test_rule_ratification_codec_rejects_unexpected_fields_and_non_fernando_acto
     with pytest.raises(AuthorityEventValidationError):
         intent_from_projection(projection)
 
+    with pytest.raises(AuthorityEventValidationError, match="payload Block 4 heredado"):
+        AuthorityEventIntent(
+            AuthorityEventType.RULE_RATIFICATION_GRANTED,
+            "human:fernando",
+            policy_corpus_hash="sha256:" + "f" * 64,
+            rule_ratification=sample_grant(),
+            _rule_ratification_snapshot_seal=_RULE_RATIFICATION_SNAPSHOT_SEAL,
+        )
+
 
 def test_rule_ratification_revoke_points_to_one_exact_grant_event():
     event_id = "018cc251-f400-7000-8000-000000000001"
@@ -179,8 +200,8 @@ def test_replay_selects_latest_grant_and_revoking_it_does_not_restore_previous_g
 
     state = verify_authority_ledger(store.get_genesis(), store.events(), root)
 
-    assert state.current_rule_ratification("send-receipt") is None
-    assert state.current_rule_ratification("missing-rule") is None
+    assert state.latest_unrevoked_rule_ratification("send-receipt") is None
+    assert state.latest_unrevoked_rule_ratification("missing-rule") is None
 
 
 def test_replay_exposes_only_the_unrevoked_latest_rule_grant():
@@ -191,7 +212,19 @@ def test_replay_exposes_only_the_unrevoked_latest_rule_grant():
 
     state = verify_authority_ledger(store.get_genesis(), store.events(), root)
 
-    assert state.current_rule_ratification("send-receipt").event_id == second_id
+    assert state.latest_unrevoked_rule_ratification("send-receipt").event_id == second_id
+
+    append_authority_event(
+        store, root, key,
+        AuthorityEventIntent(
+            AuthorityEventType.ACTIVATION_GRANTED,
+            "human:fernando",
+            ratification_event_id=second_id,
+        ),
+        event_id="018cc251-f400-7000-8000-000000000003",
+    )
+    with pytest.raises(AuthorityStateError, match="activación requiere ratificación"):
+        verify_authority_ledger(store.get_genesis(), store.events(), root)
 
 
 def test_replay_rejects_unknown_and_duplicate_rule_ratification_revocations():
