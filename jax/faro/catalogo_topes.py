@@ -8,54 +8,85 @@ tree), y el runtime de topes lo recibe por parametro desde ese snapshot: sin
 catalogo no se topea NADA.
 
 Desde la ronda 6:
-- los bytes son UTF-8 ESTRICTO (sin BOM; UTF-16/32 niegan) y solo ``bytes``;
+- los bytes son UTF-8 ESTRICTO y solo ``bytes`` de tipo exacto (UTF-16/32
+  niegan en el decode; el BOM UTF-8 decodifica y lo niega ``json.loads``);
 - las CLASES son piso de CODIGO (D-4): exactamente las cinco de la decision de
   Fernando, ni mas ni menos. Un catalogo ratificado con una sexta clase
   (``conexiones``...) se NIEGA: la ratificacion cubre ESTAS cinco. Los SUBID
-  si son dato del pin;
-- el resultado es un ``CatalogoTopes`` SELLADO (tipo propio inmutable que solo
-  construye este modulo): el runtime exige ese tipo, nunca un ``Mapping``
-  cualquiera.
+  si son dato del pin — pero las seis palabras que D-4 excluye
+  (conexiones/concurrencia/workers/hilos/procesos/agentes) tampoco valen como
+  subid, en ninguna grafia (r7, MAJOR-2);
+- el resultado es un ``CatalogoTopes`` SELLADO que SOLO emite el snapshot del
+  pin (r7, MAJOR-1): la validacion es ``_cargar_catalogo_bytes`` (privada) y
+  la construccion exige el testigo que el snapshot registro al importarse.
+  El runtime exige ese tipo — con el OID del catalogo en el pin — y nunca un
+  ``Mapping`` cualquiera.
 
 Forma estricta y fail-closed: claves cerradas exactas (las de mas y las
 duplicadas niegan — `object_pairs_hook`, igual que el YAML de las reglas),
-version exacta, decision no vacia, clases no vacias con subids ASCII sin
-duplicados.
+version exacta, decision no vacia, clases no vacias con subids ASCII (NFC)
+sin duplicados.
 """
 from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from types import MappingProxyType
 from typing import Mapping
 
 VERSION_CATALOGO = 1
 _CLAVES_CERRADAS = frozenset({"version", "decision", "clases"})
-_RE_SUBID = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+_RE_SUBID = re.compile(r"[a-z][a-z0-9_]{0,63}\Z", re.ASCII)
+_RE_OID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z", re.ASCII)
 # D-4 (r6): las clases topeables son las cinco que decidio Fernando — piso de
 # CODIGO, no dato del pin. Cambiarlas es cambiar la decision, y eso pasa por
 # codigo revisado, no por un JSON ratificado a espaldas del cargador.
 CLASES_TOPEABLES = frozenset({"monto_dinero", "actos_externos", "frecuencia",
                               "duracion", "tokens_costo"})
+# D-4 (r7, MAJOR-2): las seis palabras excluidas tampoco valen como SUBID —
+# «nunca conexiones, concurrencia, workers, hilos, procesos ni agentes» no
+# admite colarse por debajo de una clase admitida.
+PALABRAS_PROHIBIDAS_D4 = frozenset({"conexiones", "concurrencia", "workers",
+                                    "hilos", "procesos", "agentes"})
 
-# Testigo privado de construccion: fuera de este modulo nadie fabrica catalogos
-# sellados (igual que las ReglaSellada del snapshot).
-_TESTIGO = object()
+# Emisor unico (r7, MAJOR-1): el snapshot registra AQUI su testigo al
+# importarse; la lista se llena una sola vez. La clase compara identidad — el
+# valor del testigo nunca sale de policy.rule_authority.snapshot.
+_EMISOR: list = []
+
+
+def _registrar_emisor(testigo: object) -> None:
+    """Solo lo llama ``policy.rule_authority.snapshot`` con SU testigo, una
+    vez. Con eso, CatalogoTopes solo puede construirlo el snapshot del pin."""
+    if _EMISOR:
+        raise CatalogoTopesInvalido("el emisor del catalogo ya esta registrado")
+    _EMISOR.append(testigo)
 
 
 class CatalogoTopes:
-    """El catalogo SELLADO que devuelve ``cargar_catalogo_bytes``. Solo lo
-    construye este modulo (testigo privado) y es inmutable: el runtime de topes
-    exige ESTE tipo, no un ``Mapping`` cualquiera — la unica puerta al conteo
-    con tope es el catalogo verificado del pin."""
+    """El catalogo SELLADO. Solo lo emite el snapshot del pin (r7, MAJOR-1):
+    la construccion exige el testigo que el snapshot registro, y lleva el OID
+    del catálogo dentro del pin. Inmutable; el runtime de topes exige ESTE
+    tipo — la unica puerta al conteo con tope es el pin verificado."""
 
-    __slots__ = ("_clases",)
+    __slots__ = ("_clases", "_oid_pin")
 
-    def __init__(self, clases: Mapping[str, tuple], *, _testigo: object = None) -> None:
-        if _testigo is not _TESTIGO:
-            raise CatalogoTopesInvalido("CatalogoTopes no se fabrica por la API publica")
+    def __init__(self, clases: Mapping[str, tuple], *, oid_pin: str,
+                 _testigo: object = None) -> None:
+        if not _EMISOR or _testigo is not _EMISOR[0]:
+            raise CatalogoTopesInvalido(
+                "CatalogoTopes solo lo emite el snapshot del pin (r7, MAJOR-1)")
+        if not isinstance(oid_pin, str) or not _RE_OID.fullmatch(oid_pin):
+            raise CatalogoTopesInvalido("CatalogoTopes exige el OID del catalogo en el pin")
         # copia defensiva + proxy: ni quien llama ni quien recibe mutan el interior
         object.__setattr__(self, "_clases", MappingProxyType(dict(clases)))
+        object.__setattr__(self, "_oid_pin", oid_pin)
+
+    @property
+    def oid_pin(self) -> str:
+        """El OID git del catalogo dentro del pin: de ahi salio este sellado."""
+        return self._oid_pin
 
     def __setattr__(self, *_args) -> None:
         raise CatalogoTopesInvalido("CatalogoTopes es inmutable")
@@ -89,13 +120,16 @@ class CatalogoTopes:
         return self._clases.values()
 
     def __eq__(self, otro: object) -> bool:
-        return isinstance(otro, CatalogoTopes) and self._clases == otro._clases
+        return isinstance(otro, CatalogoTopes) and self._clave() == otro._clave()
 
     def __hash__(self) -> int:
-        return hash(tuple(sorted(self._clases.items())))
+        return hash(self._clave())
+
+    def _clave(self) -> tuple:
+        return (tuple(sorted(self._clases.items())), self._oid_pin)
 
     def __repr__(self) -> str:
-        return f"CatalogoTopes({dict(self._clases)!r})"
+        return f"CatalogoTopes({dict(self._clases)!r}, oid_pin={self._oid_pin[:12]}…)"
 
 
 class CatalogoTopesInvalido(RuntimeError):
@@ -111,17 +145,21 @@ def _sin_claves_duplicadas(pares: list[tuple[str, object]]) -> dict:
     return resultado
 
 
-def cargar_catalogo_bytes(crudo: bytes) -> CatalogoTopes:
-    """Valida los BYTES del catalogo y devuelve el catalogo sellado.
+def _cargar_catalogo_bytes(crudo: bytes) -> dict[str, tuple[str, ...]]:
+    """Valida los BYTES del catalogo y devuelve las clases CERRADAS (dict).
+    PRIVADA (r7, MAJOR-1): quien sella es el snapshot, con estos datos y SU
+    testigo — aqui no nace ningun CatalogoTopes.
     M-8: la clave duplicada no gana — niega. Falla cerrado ante cualquier vicio.
-    r6: solo ``bytes`` en UTF-8 estricto (sin BOM; UTF-16/32 niegan) y las
-    clases exactas de D-4."""
-    if not isinstance(crudo, bytes):
-        raise CatalogoTopesInvalido("el catalogo se recibe como bytes, no como texto")
+    r6/r7: solo ``bytes`` de tipo EXACTO en UTF-8 estricto, texto normalizado a
+    NFC (UTF-16/32 niegan en el decode; el BOM UTF-8, json.loads) y las clases
+    exactas de D-4, sin sus seis palabras como subid."""
+    if type(crudo) is not bytes:
+        raise CatalogoTopesInvalido("el catalogo se recibe como bytes exactos, no como texto")
     try:
-        texto = crudo.decode("utf-8")              # estricto: BOM y UTF-16/32 niegan
+        texto = crudo.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise CatalogoTopesInvalido("catalogo ilegible: no es UTF-8 estricto") from exc
+    texto = unicodedata.normalize("NFC", texto)
     try:
         datos = json.loads(texto, object_pairs_hook=_sin_claves_duplicadas)
     except CatalogoTopesInvalido:
@@ -149,6 +187,9 @@ def cargar_catalogo_bytes(crudo: bytes) -> CatalogoTopes:
         for subid in subids:
             if not isinstance(subid, str) or not _RE_SUBID.fullmatch(subid):
                 raise CatalogoTopesInvalido(f"clase {clase}: subid invalido {subid!r}")
+            if subid in PALABRAS_PROHIBIDAS_D4:            # r7, MAJOR-2: ni por debajo
+                raise CatalogoTopesInvalido(
+                    f"clase {clase}: subid prohibido por D-4: {subid!r}")
             if subid in vistos:
                 raise CatalogoTopesInvalido(f"clase {clase}: subid duplicado {subid!r}")
             vistos.append(subid)
@@ -159,7 +200,7 @@ def cargar_catalogo_bytes(crudo: bytes) -> CatalogoTopes:
         raise CatalogoTopesInvalido(
             f"clases del catalogo: exactamente {sorted(CLASES_TOPEABLES)} (D-4, "
             f"decision de Fernando); el pin trae {sorted(cerradas)}")
-    return CatalogoTopes(cerradas, _testigo=_TESTIGO)
+    return cerradas
 
 
 def es_de_catalogo(recurso: object, catalogo: CatalogoTopes) -> bool:

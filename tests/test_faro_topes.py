@@ -20,12 +20,14 @@ import pytest
 
 from jax.faro.aviso import Avisador, ConfigAviso, Credenciales
 from jax.faro.bitacora import Bitacora
-from jax.faro.catalogo_topes import (cargar_catalogo_bytes, es_de_catalogo,
-                                     recursos_del_catalogo)
+from jax.faro.catalogo_topes import es_de_catalogo, recursos_del_catalogo
 from jax.faro.topes import ResultadoTope, TopeProhibido, Topes
 
 RAIZ = Path(__file__).resolve().parents[1]
-CATALOGO = cargar_catalogo_bytes((RAIZ / "policy" / "faro" / "catalogo-topes.json").read_bytes())
+# r7, MAJOR-1: el catalogo de las pruebas sale de un PIN de prueba (repo git
+# minimo + snapshot), como en produccion — nunca de bytes del disco suelto
+from tests.policy.catalogo_pin import catalogo_del_pin
+CATALOGO = catalogo_del_pin()
 from tests._faro_falsos import AlmacenMemoria
 from tests._faro_utils import corre
 
@@ -33,7 +35,7 @@ from tests._faro_utils import corre
 def _topes(almacen=None, **kw):
     registros = []
     bit = Bitacora(emisores=[registros.append], observadores=kw.pop("observadores", ()))
-    kw.setdefault("catalogo", CATALOGO)          # B-3: del snapshot evaluado, nunca de disco
+    kw.setdefault("catalogo", CATALOGO)          # B-3/r7: sellado por el snapshot del pin de prueba
     return Topes(almacen if almacen is not None else AlmacenMemoria(), bit, **kw), registros
 
 
@@ -206,7 +208,7 @@ def test_una_bitacora_que_falla_no_cambia_la_decision():
 def test_r6_el_runtime_exige_el_catalogo_sellado_del_snapshot():
     """r6: un Mapping cualquiera —dict, MappingProxyType, lo que sea— no abre el
     conteo con tope: solo el CatalogoTopes sellado que salio del snapshot
-    verificado del pin. Fabricar el tipo a mano, tampoco."""
+    verificado del pin. Fabricar el tipo a mano, tampoco — ni con el OID (r7)."""
     from types import MappingProxyType
     from jax.faro.catalogo_topes import CatalogoTopes, CatalogoTopesInvalido
     from jax.faro.config import ConfigFaroInvalida
@@ -217,8 +219,34 @@ def test_r6_el_runtime_exige_el_catalogo_sellado_del_snapshot():
     with pytest.raises(CatalogoTopesInvalido):
         es_de_catalogo("actos_externos.mensajes", MappingProxyType(misma_forma))
     with pytest.raises(CatalogoTopesInvalido):
-        CatalogoTopes(misma_forma)
-    _topes()      # con el sellado (el que _topes inyecta por defecto): normal
+        CatalogoTopes(misma_forma, oid_pin=CATALOGO.oid_pin)     # r7: ni con el OID del pin
+    t, _ = _topes()   # con el sellado del pin de prueba: normal
+    assert t.catalogo_oid == CATALOGO.oid_pin                    # r7, MAJOR-1: queda registrado
+
+
+@pytest.mark.parametrize("recurso", ["conexiones.usd", "workers.tokens", "agentes.segundos"])
+def test_r7_recurso_de_clase_prohibida_con_subid_ajeno_valido_niega(recurso):
+    """MAJOR-3 / mutante AUD2: el subid existe (en OTRA clase) y el recurso
+    parece del catalogo — no lo es: la clase prohibida nunca topea. Con el
+    mutante (buscar el subid en CUALQUIER clase), esto pasaria y la prueba muere."""
+    t, _ = _topes()
+    assert not es_de_catalogo(recurso, CATALOGO)
+    with pytest.raises(TopeProhibido):
+        corre(t.consumir(tenant="t1", recurso=recurso, cantidad=1, tope=5))
+
+
+def test_r7_topes_no_acepta_catalogo_de_bytes_sueltos():
+    """MAJOR-1: la validacion privada devuelve las clases SIN sellar; Topes no
+    las acepta. Solo el snapshot del pin emite CatalogoTopes."""
+    import subprocess
+    from jax.faro.config import ConfigFaroInvalida
+    import jax.faro.catalogo_topes as CT
+    suelto = CT._cargar_catalogo_bytes(
+        subprocess.run(["git", "show", "HEAD:policy/faro/catalogo-topes.json"],
+                       capture_output=True, check=True, cwd=RAIZ).stdout)
+    assert type(suelto) is dict
+    with pytest.raises(ConfigFaroInvalida):
+        Topes(AlmacenMemoria(), Bitacora(emisores=[]), catalogo=suelto)  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------- #

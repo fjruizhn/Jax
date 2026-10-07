@@ -10,22 +10,21 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from pathlib import Path
 
 import pymysql
 import pytest
 
 from jax.faro.bitacora import Bitacora
 from jax.faro.bitacora_db import EmisorTabla, crear_pool, verificar_cadena
-from jax.faro.catalogo_topes import cargar_catalogo_bytes
+from tests.policy.catalogo_pin import catalogo_del_pin
 from jax.faro.topes import AlmacenMariaDB, Topes
 from tests.test_faro_bitacora_db import basedb, servidor_db  # noqa: F401 (fixtures)
 
 N = 16
-# El conteo con tope exige el recurso DEL catalogo (D-4/R-4, r6): el sellado del
-# snapshot, inyectado como en produccion — 'tokens' suelto seria TopeProhibido.
-RAIZ = Path(__file__).resolve().parents[1]
-CATALOGO = cargar_catalogo_bytes((RAIZ / "policy" / "faro" / "catalogo-topes.json").read_bytes())
+# El conteo con tope exige el recurso DEL catalogo (D-4/R-4, r6) y el catalogo
+# SELLADO: el de un pin de prueba evaluado con el snapshot (r7, MAJOR-1), como
+# en produccion — bytes sueltos ya no pueden fabricar uno.
+CATALOGO = catalogo_del_pin()
 
 
 def _usado(basedb, tenant, recurso, periodo="total") -> int | None:

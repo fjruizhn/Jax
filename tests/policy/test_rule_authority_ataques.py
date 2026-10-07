@@ -24,7 +24,8 @@ from policy.rule_authority.snapshot import (
 
 import json
 
-from jax.faro.catalogo_topes import CatalogoTopesInvalido, cargar_catalogo_bytes
+from jax.faro.catalogo_topes import CatalogoTopesInvalido, _cargar_catalogo_bytes
+from tests.policy.catalogo_pin import catalogo_del_pin
 
 FIXTURES = Path(__file__).parent / "fixtures" / "faro_rules"
 REGLA = (FIXTURES / "regla-ejemplo.yaml").read_bytes()
@@ -33,7 +34,8 @@ TOPE = (FIXTURES / "regla-ejemplo-tope.yaml").read_bytes()
 RAIZ = Path(__file__).resolve().parents[2]
 RUTA_CATALOGO = "policy/faro/catalogo-topes.json"
 CATALOGO_BYTES_REPO = (RAIZ / RUTA_CATALOGO).read_bytes()
-CATALOGO = cargar_catalogo_bytes(CATALOGO_BYTES_REPO)
+# r7, MAJOR-1: el catalogo de las pruebas sale de un PIN de prueba, como en produccion
+CATALOGO = catalogo_del_pin()
 
 
 def validar_regla(datos, **kwargs):
@@ -265,7 +267,7 @@ def test_r4_el_catalogo_es_el_literal_exacto_de_la_decision_de_fernando() -> Non
     crudo = subprocess.run(["git", "show", "HEAD:policy/faro/catalogo-topes.json"],
                            capture_output=True, check=True, cwd=RAIZ).stdout
     assert json.loads(crudo) == LITERAL_DECISION_FERNANDO
-    clases = cargar_catalogo_bytes(crudo)
+    clases = _cargar_catalogo_bytes(crudo)
     assert {c: list(s) for c, s in clases.items()} == LITERAL_DECISION_FERNANDO["clases"]
 
 
@@ -334,7 +336,7 @@ def test_r4_catalogo_invalido_falla_cerrado() -> None:
                  ('{"version": 1, "version": 1, "decision": "x", "clases": '
                   + J.dumps(cinco) + '}').encode()]:                                # P7/M-8
         with pytest.raises(CatalogoTopesInvalido):
-            cargar_catalogo_bytes(malo)
+            _cargar_catalogo_bytes(malo)
 
 
 def test_r4_snapshot_con_mismo_arbol_pero_otro_commit_no_es_igual(tmp_path: Path) -> None:
@@ -559,12 +561,12 @@ def test_r6_k2_sexta_clase_ratificada_niega_en_el_cargador() -> None:
     from jax.faro.catalogo_topes import CLASES_TOPEABLES
     seis = {**LITERAL_DECISION_FERNANDO["clases"], "conexiones": ["abiertas"]}
     with pytest.raises(CatalogoTopesInvalido) as excinfo:
-        cargar_catalogo_bytes(_json5.dumps(
+        _cargar_catalogo_bytes(_json5.dumps(
             {"version": 1, "decision": "ratificado igual niega", "clases": seis}).encode())
     assert "D-4" in str(excinfo.value)
     cuatro = {c: s for c, s in LITERAL_DECISION_FERNANDO["clases"].items() if c != "duracion"}
     with pytest.raises(CatalogoTopesInvalido):
-        cargar_catalogo_bytes(_json5.dumps(
+        _cargar_catalogo_bytes(_json5.dumps(
             {"version": 1, "decision": "x", "clases": cuatro}).encode())
     assert CLASES_TOPEABLES == frozenset(LITERAL_DECISION_FERNANDO["clases"])  # el piso ES la decision
 
@@ -607,7 +609,7 @@ def test_r6_el_cargador_acepta_solo_bytes() -> None:
     for malo in (CATALOGO_BYTES_REPO.decode(), bytearray(CATALOGO_BYTES_REPO),
                  memoryview(CATALOGO_BYTES_REPO)):
         with pytest.raises(CatalogoTopesInvalido):
-            cargar_catalogo_bytes(malo)
+            _cargar_catalogo_bytes(malo)
 
 
 def test_r6_catalogo_anidado_en_subdirectorio_niega_igual(tmp_path: Path) -> None:
@@ -629,21 +631,100 @@ def test_r6_el_catalogo_debe_ser_utf8_estrito_sin_bom() -> None:
     for codificacion in ("utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le",
                          "utf-32-be"):
         with pytest.raises(CatalogoTopesInvalido):
-            cargar_catalogo_bytes(CATALOGO_BYTES_REPO.decode().encode(codificacion))
+            _cargar_catalogo_bytes(CATALOGO_BYTES_REPO.decode().encode(codificacion))
     with pytest.raises(CatalogoTopesInvalido):
-        cargar_catalogo_bytes(b"\xef\xbb\xbf" + CATALOGO_BYTES_REPO)   # BOM UTF-8
+        _cargar_catalogo_bytes(b"\xef\xbb\xbf" + CATALOGO_BYTES_REPO)   # BOM UTF-8
 
 
 def test_r6_el_catalogo_sellado_no_se_fabrica_ni_se_muta() -> None:
-    """El CatalogoTopes del snapshot es un tipo propio: no se construye por la
-    API publica (testigo), no se muta, y es lo UNICO que es_de_catalogo acepta —
-    un Mapping suelto con la misma forma niega."""
+    """El CatalogoTopes del snapshot es un tipo propio: no se construye fuera
+    del snapshot (r7: aunque lleves el OID del pin, sin su testigo no sella), no
+    se muta, y es lo UNICO que es_de_catalogo acepta — un Mapping suelto con la
+    misma forma niega."""
     from jax.faro.catalogo_topes import CatalogoTopes, es_de_catalogo
     misma_forma = {c: list(s) for c, s in CATALOGO.items()}
     with pytest.raises(CatalogoTopesInvalido):
-        CatalogoTopes(misma_forma)                       # fabricacion directa: no
+        CatalogoTopes(misma_forma, oid_pin=CATALOGO.oid_pin)   # sin testigo: no sella
     with pytest.raises(CatalogoTopesInvalido):
         es_de_catalogo("actos_externos.mensajes", misma_forma)      # dict: no
     assert es_de_catalogo("actos_externos.mensajes", CATALOGO) is True
     with pytest.raises(TypeError):
         CATALOGO._clases["conexiones"] = ("x",)          # type: ignore[index]
+
+
+def test_r7_no_hay_fabrica_publica_de_bytes_a_catalogo_sellado() -> None:
+    """MAJOR-1: ``cargar_catalogo_bytes`` ya no existe — la validacion es
+    privada y devuelve las clases SIN sellar; el unico emisor de CatalogoTopes
+    es el snapshot del pin. Con el mutante (fábrica publica de vuelta, o Topes
+    aceptando lo que ella devuelve), esta prueba rompe."""
+    import jax.faro.catalogo_topes as CT
+    assert not hasattr(CT, "cargar_catalogo_bytes"), "la fabrica publica volvio"
+    suelto = CT._cargar_catalogo_bytes(CATALOGO_BYTES_REPO)      # valida, NO sella
+    assert type(suelto) is dict
+    from jax.faro.topes import Topes
+    from jax.faro.bitacora import Bitacora
+    with pytest.raises(Exception) as excinfo:                    # ConfigFaroInvalida
+        Topes(None, Bitacora(emisores=[]), catalogo=suelto)      # type: ignore[arg-type]
+    assert "SELLADO" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("prohibida", sorted(
+    {"conexiones", "concurrencia", "workers", "hilos", "procesos", "agentes"}))
+def test_r7_las_seis_palabras_de_d4_niego_como_subid(prohibida: str) -> None:
+    """MAJOR-2: D-4 excluye esas seis palabras SIEMPRE — tambien por debajo de
+    una clase admitida. Un pin con cualquiera como subid niega al cargarse."""
+    malvado = _json5.dumps({"version": 1, "decision": "x",
+                            "clases": {**LITERAL_DECISION_FERNANDO["clases"],
+                                       "actos_externos": [prohibida]}}).encode()
+    with pytest.raises(CatalogoTopesInvalido) as excinfo:
+        _cargar_catalogo_bytes(malvado)
+    assert "prohibido por D-4" in str(excinfo.value)
+
+
+def test_r7_subid_con_mayusculas_o_acentos_niega_igual() -> None:
+    """MAJOR-2: la regex es ASCII estricta tras NFC — mayusculas, acentos
+    combinantes y segmentos con punto nunca valen como subid."""
+    for malo in ("CONEXIONES",                    # mayusculas: la regex es ASCII
+                 "conexio\u0301nes",              # acento combinante: NFC y ASCII lo niegan
+                 "wor\u200bkers",                  # ancho cero: ningun caracter invisible pasa
+                 "a.b", "conexiones.db"):          # segmentos con punto: nunca un subid
+        catalogo = _json5.dumps({"version": 1, "decision": "x",
+                                 "clases": {**LITERAL_DECISION_FERNANDO["clases"],
+                                            "duracion": [malo]}}).encode()
+        with pytest.raises(CatalogoTopesInvalido):
+            _cargar_catalogo_bytes(catalogo)
+
+
+def test_r7_es_de_catalogo_no_cruza_clases_aunque_el_subid_exista() -> None:
+    """MAJOR-3 / mutante AUD2: el subid puede existir en OTRA clase — el
+    recurso es de SU clase o no es del catalogo. La clase prohibida con subid
+    ajeno valido nunca pasa."""
+    from jax.faro.catalogo_topes import es_de_catalogo
+    for recurso in ("conexiones.usd", "workers.tokens", "agentes.segundos"):
+        assert not es_de_catalogo(recurso, CATALOGO), recurso
+
+
+def test_r7_una_subclase_de_bytes_tampoco_es_el_canal() -> None:
+    """MINOR-2: el canal es ``bytes`` de TIPO EXACTO — una subclase pasa el
+    isinstance clasico y aqui niega igual."""
+    class BytesTraviesos(bytes):
+        pass
+
+    with pytest.raises(CatalogoTopesInvalido):
+        _cargar_catalogo_bytes(BytesTraviesos(CATALOGO_BYTES_REPO))
+
+
+def test_r7_validar_regla_exige_el_catalogo_sellado_no_un_contenedor() -> None:
+    """MINOR-3: validar_regla/_validar_tope no aceptan cualquier contenedor con
+    forma de catalogo — solo el CatalogoTopes del pin (con dict custom pasaria
+    cualquier tope «del catalogo» que nadie verifico)."""
+    from policy.rule_authority.schema import validar_regla as _validar
+    datos = dict(load_strict_yaml(TOPE))
+    misma_forma = {c: list(s) for c, s in CATALOGO.items()}
+    with pytest.raises(RuleSchemaError) as excinfo:
+        _validar(datos, catalogo=misma_forma)              # type: ignore[arg-type]
+    assert "SELLADO" in str(excinfo.value)
+    from types import MappingProxyType
+    with pytest.raises(RuleSchemaError):
+        _validar(datos, catalogo=MappingProxyType(misma_forma))   # type: ignore[arg-type]
+    assert _validar(datos, catalogo=CATALOGO).tope is not None    # el sellado: normal

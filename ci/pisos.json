@@ -38,8 +38,8 @@
       "mensaje": "PISO ROTO: se esperaban 251 tests CORRIDOS de cli_sandbox."
     },
     "faro-fase0/faro": {
-      "patron": "^722 passed",
-      "mensaje": "PISO ROTO: se esperaban 722 tests CORRIDOS del Faro."
+      "patron": "^726 passed",
+      "mensaje": "PISO ROTO: se esperaban 726 tests CORRIDOS del Faro."
     },
     "faro-bitacora-db/faro-db": {
       "patron": "^40 passed",
@@ -190,8 +190,8 @@
       "mensaje": "PISO ROTO: se esperaban 227 tests CORRIDOS de los pisos fuera del workflow."
     },
     "identity-foundation-shadow/policy": {
-      "patron": "^562 passed",
-      "mensaje": "PISO ROTO: se esperaban 562 tests CORRIDOS de Identity Foundation Shadow (la politica sin DB)."
+      "patron": "^574 passed",
+      "mensaje": "PISO ROTO: se esperaban 574 tests CORRIDOS de Identity Foundation Shadow (la politica sin DB)."
     }
   },
   "minimos": {
