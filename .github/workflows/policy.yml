@@ -2655,6 +2655,8 @@ jobs:
         # subids legitimos no caen, el helper del pin no deja repos temporales).
         # Ronda 9: 614 (+23: D-4 con sinonimos en ingles y raices x11, w0rkers no se
         # niega -limite documentado-, subids legitimos del catalogo real x11).
+        # Ronda 10: 637 (+23: tope.period solo es un subid de la clase frecuencia del
+        # catalogo del pin; 20 negativas, 2 positivas del catalogo real, 2 de contrato).
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail

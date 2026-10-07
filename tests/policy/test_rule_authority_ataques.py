@@ -233,7 +233,7 @@ RECURSOS_PROHIBIDOS_R2 = [
 ])
 def test_r2_recurso_fabricado_o_trasladado_niega_en_schema(clase: str, recurso: str) -> None:
     datos = dict(load_strict_yaml(TOPE))
-    datos["tope"] = {"resource_class": clase, "resource": recurso, "maximum": 2, "period": "hora"}
+    datos["tope"] = {"resource_class": clase, "resource": recurso, "maximum": 2, "period": "por_hora"}
     with pytest.raises(RuleSchemaError):
         validar_regla(datos)
 
@@ -291,7 +291,7 @@ def test_r4_subid_valido_de_otra_clase_niega(C=None) -> None:
     """C3: el subid existe en el catalogo pero en OTRA clase."""
     datos = dict(load_strict_yaml(TOPE))
     datos["tope"] = {"resource_class": "monto_dinero", "resource": "tokens_costo.usd",
-                     "maximum": 2, "period": "hora"}
+                     "maximum": 2, "period": "por_hora"}
     with pytest.raises(RuleSchemaError) as excinfo:
         validar_regla(datos)
     assert "SU clase" in str(excinfo.value)

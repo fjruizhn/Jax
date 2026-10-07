@@ -52,7 +52,6 @@ _RE_OBJETIVO = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _RE_MONEDA = re.compile(r"[A-Z]{3}\Z")
 _RE_UNIDAD = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 _RE_RECURSO = re.compile(r"[a-z0-9_.-]{1,48}\Z")
-_RE_PERIODO = re.compile(r"[A-Za-z0-9_.:-]{1,32}\Z")
 _RE_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 
 _CLAVES_TOPE_NIVEL = frozenset({"schema_version", "kind", "rule_id", "effect", "action_class",
@@ -133,6 +132,17 @@ def _validar_frecuencia(valor: object) -> "Frecuencia":
     return Frecuencia(max_occurrences=ocurrencias, window_seconds=ventana)
 
 
+def _validar_periodo(valor: object, catalogo: CatalogoTopes) -> str:
+    """El periodo de un tope es un subid de la clase ``frecuencia`` del catalogo
+    SELLADO del pin (``por_hora``, ``por_dia``...): nunca texto libre. ``type is
+    str`` (ni subclases), NFC y pertenencia exacta; todo lo demas niega."""
+    if type(valor) is not str or unicodedata.normalize("NFC", valor) != valor \
+            or valor not in catalogo.get("frecuencia", ()):
+        raise RuleSchemaError(
+            "tope.period: fuera del catalogo cerrado — debe ser un subid de la clase frecuencia (R-4)")
+    return valor
+
+
 def _validar_tope(valor: object, catalogo: object) -> "Tope":
     datos = _objeto_cerrado(valor, "tope", frozenset({"resource_class", "resource",
                                                       "maximum", "period"}))
@@ -154,7 +164,7 @@ def _validar_tope(valor: object, catalogo: object) -> "Tope":
         raise RuleSchemaError(
             "tope.resource: fuera del catalogo cerrado — debe ser <clase>.<subid> de SU clase (R-4)")
     maximo = _entero_positivo(datos["maximum"], "tope.maximum")
-    periodo = _nfc(datos["period"], "tope.period", _RE_PERIODO)
+    periodo = _validar_periodo(datos["period"], catalogo)
     return Tope(resource_class=clase, resource=recurso, maximum=maximo, period=periodo)
 
 
