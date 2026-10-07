@@ -189,7 +189,7 @@ def test_append_holds_checkpoint_lock_before_its_first_ledger_read(tmp_path):
     def append_later():
         try:
             result.append(append_authority_event(observed, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"), event_id="018cc251-f400-7000-8000-000000000002", checkpoint_store=anchor))
-        except Exception as exc:  # pragma: no cover - asserted below
+        except Exception as exc:  # fail-closed: captured and asserted by the parent thread
             failure.append(exc)
 
     with anchor.locked():
@@ -215,7 +215,7 @@ def test_reanchor_holds_checkpoint_lock_before_its_first_ledger_read(tmp_path):
     def reanchor_later():
         try:
             result.append(reanchor_authority_checkpoint(observed, root, anchor))
-        except Exception as exc:  # pragma: no cover - asserted below
+        except Exception as exc:  # fail-closed: captured and asserted by the parent thread
             failure.append(exc)
 
     with anchor.locked():

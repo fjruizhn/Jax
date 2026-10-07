@@ -71,6 +71,11 @@ Diseño verificado: NINGÚN documento de docs/superpowers/specs menciona OVERLAY
   Supuesto: writers en un único host con filesystem local.
 - **Verificación:** `JAX_AUTHORITY_LEDGER_DOCKER_CMD='sudo -n docker' pytest -q
   tests/policy/test_authority_ledger*.py` → 85 passed; `git diff --check` limpio.
+- **CI de `24e823b0`:** `no-fail-open-except` detectó dos `except Exception` en
+  helpers de threads de pruebas; ambos capturan el error para que el hilo padre
+  falle explícitamente. Marcados `fail-closed`; la guarda local quedó 21/21.
+- Esta anotación requiere un SHA nuevo y CI nuevo; la auditoría final debe cubrir
+  ese SHA exacto, junto con la resolución de overlays históricos.
 - **UNAVAILABLE:** `jaxctl authority` no pudo consultar el Block 4 operativo en
   hall9000. No está verificado si hay OVERLAY_ISSUED históricos sin ratificación
   vigente. Fernando debe decidir si, de existir, se conservan en cuarentena, se
