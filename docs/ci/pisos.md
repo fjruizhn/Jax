@@ -4611,12 +4611,15 @@ denormalizadas (incluido `previous_event_hash`), lectura histórica exacta y per
 
 ## `authority-ledger-mariadb/integration`
 
-Piso vigente (2026-10-07): `^1 passed in `. Medido en hall9000 con MariaDB 12.3.3 efímera
+Piso vigente (2026-10-07): `^4 passed in ` (antes 1). Medido en hall9000 con MariaDB 12.3.3 efímera
 `--network none`; la prueba aplica ambas migraciones, valida el upgrade nullable→NOT NULL,
 provisiona la cuenta de aplicación con el script versionado, genera una llave Ed25519 de prueba
 y valida firma → INSERT → lectura → reconstrucción → hash/firma y replay. También prueba que
 UPDATE/DELETE fallan aunque otro principal tenga esos GRANTs, por los triggers append-only. La
-base solo expone socket Unix al proceso de prueba.
+base solo expone socket Unix al proceso de prueba. Tres pruebas nuevas, cada una con su MariaDB
+efímera: el provisioning revoca los privilegios previos (`REVOKE ALL PRIVILEGES, GRANT OPTION`) y
+`SHOW GRANTS` coincide exacto con el contrato; la migración 002 falla cerrada con filas NULL aun con
+`sql_mode=''` (la fila queda intacta) y pasa con cero NULL.
 
 ## `archivos-de-test-en-ci/pisos`
 

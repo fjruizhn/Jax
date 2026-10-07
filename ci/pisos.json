@@ -134,8 +134,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 19 tests CORRIDOS del codec de persistencia de Block 4. Medido el 2026-10-07 en hall9000."
     },
     "authority-ledger-mariadb/integration": {
-      "patron": "^1 passed in ",
-      "mensaje": "PISO ROTO: se esperaba la integración MariaDB aislada de Block 4 (1 test CORRIDO). Medido el 2026-10-06 en hall9000 con MariaDB 12.3.3 --network none."
+      "patron": "^4 passed in ",
+      "mensaje": "PISO ROTO: se esperaba la integración MariaDB aislada de Block 4 (4 tests CORRIDOS). Medido el 2026-10-07 en hall9000 con MariaDB 12.3.3 --network none."
     },
     "tests-puros/ficha_tests": {
       "patron": "^16 passed",

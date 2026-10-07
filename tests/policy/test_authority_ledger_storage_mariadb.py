@@ -1,11 +1,14 @@
 """Block 4 storage integration against an isolated MariaDB 12.3.3 instance."""
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
+import re
 import secrets
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -231,3 +234,134 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
             )
             if chown.returncode and __import__("sys").exc_info()[0] is None:
                 raise RuntimeError(f"falló la limpieza de permisos del socket temporal: {chown.stderr.strip()}")
+
+
+@contextlib.contextmanager
+def _ephemeral_mariadb():
+    """Disposable MariaDB 12.3.3 (--network none, Unix socket); yields (connect, root_password)."""
+    docker = shlex.split(os.environ.get("JAX_AUTHORITY_LEDGER_DOCKER_CMD", "docker"))
+    password = secrets.token_urlsafe(24)
+    container = f"jax-ledger-test-{uuid.uuid4().hex[:10]}"
+    with tempfile.TemporaryDirectory(prefix="jax-ledger-socket-") as socket_dir:
+        _run(
+            docker, "run", "-d", "--rm", "--network", "none", "--name", container,
+            "--mount", f"type=bind,source={socket_dir},target=/run/mysqld",
+            "-e", f"MARIADB_ROOT_PASSWORD={password}", IMAGE,
+        )
+        try:
+            socket_ready = False
+            for _ in range(90):
+                probe = subprocess.run(
+                    [*docker, "exec", container, "test", "-S", "/run/mysqld/mysqld.sock"],
+                    capture_output=True, text=True, check=False,
+                )
+                if probe.returncode == 0:
+                    socket_ready = True
+                    break
+                time.sleep(1)
+            assert socket_ready, "MariaDB no creó su socket Unix"
+            _run(docker, "exec", "--user=root", container, "chmod", "0755", "/run/mysqld")
+            socket_path = str(Path(socket_dir) / "mysqld.sock")
+
+            def connect(**kwargs):
+                kwargs.setdefault("user", "root")
+                kwargs.setdefault("password", password)
+                return pymysql.connect(
+                    unix_socket=socket_path, autocommit=False, charset="utf8mb4", **kwargs
+                )
+
+            last_error = None
+            for _ in range(90):
+                try:
+                    connect().close()
+                    break
+                except (OSError, pymysql.MySQLError) as exc:
+                    last_error = exc
+                    time.sleep(1)
+            else:
+                raise AssertionError(f"MariaDB socket no disponible: {last_error}")
+            yield connect
+        finally:
+            subprocess.run([*docker, "stop", container], capture_output=True, text=True, check=False)
+            chown = subprocess.run(
+                ["sudo", "-n", "chown", "-R", f"{os.getuid()}:{os.getgid()}", socket_dir],
+                capture_output=True, text=True, check=False,
+            )
+            if chown.returncode and sys.exc_info()[0] is None:
+                raise RuntimeError(f"falló la limpieza de permisos del socket temporal: {chown.stderr.strip()}")
+
+
+def test_provisioning_revokes_preexisting_privileges_and_grants_exact_contract():
+    user = "jax_authority_prov_test"
+    with _ephemeral_mariadb() as connect:
+        with connect() as admin:
+            _apply_migration(admin, MIGRATION)
+            with admin.cursor() as cursor:
+                cursor.execute(f"CREATE USER '{user}'@'localhost' IDENTIFIED BY 'old-password'")
+                cursor.execute(f"GRANT ALL PRIVILEGES ON *.* TO '{user}'@'localhost' WITH GRANT OPTION")
+                cursor.execute(f"GRANT ALL PRIVILEGES ON jax_authority.* TO '{user}'@'localhost' WITH GRANT OPTION")
+            admin.commit()
+        with connect(database="jax_authority") as admin:
+            from policy.authority_ledger.provisioning import provision_application_account
+            provision_application_account(admin, user, secrets.token_urlsafe(24))
+        with connect() as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(f"SHOW GRANTS FOR '{user}'@'localhost'")
+                grants = [row[0] for row in cursor.fetchall()]
+    usage = [g for g in grants if g.startswith("GRANT USAGE ON *.* TO ")]
+    assert len(usage) == 1 and re.fullmatch(
+        rf"GRANT USAGE ON \*\.\* TO `{user}`@`localhost`( IDENTIFIED .*)?", usage[0]
+    ), usage
+    assert "GRANT OPTION" not in usage[0]
+    assert sorted(g for g in grants if g not in usage) == sorted([
+        f"GRANT SELECT ON `jax_authority`.`authority_ledger_genesis` TO `{user}`@`localhost`",
+        f"GRANT SELECT, INSERT ON `jax_authority`.`authority_events` TO `{user}`@`localhost`",
+        f"GRANT SELECT, UPDATE ON `jax_authority`.`authority_ledger_head` TO `{user}`@`localhost`",
+    ])
+
+
+def _insert_event(cursor, sequence, intent):
+    cursor.execute(
+        "INSERT INTO jax_authority.authority_events (sequence,event_id,event_type,actor_id,"
+        "canonical_intent,canonical_event,evidence_refs,previous_event_hash,event_hash,signature,"
+        "recorded_at_utc) VALUES (%s,%s,'t','a',%s,'e','r',NULL,%s,'s','2026-10-07 00:00:00')",
+        (sequence, f"00000000-0000-0000-0000-{sequence:012d}", intent, f"sha256:{sequence:064d}"),
+    )
+
+
+def test_upgrade_migration_fails_closed_on_null_intent_even_with_permissive_sql_mode():
+    with _ephemeral_mariadb() as connect:
+        with connect() as db:
+            _apply_migration(db, MIGRATION)
+            with db.cursor() as cursor:
+                cursor.execute("ALTER TABLE jax_authority.authority_events MODIFY canonical_intent LONGBLOB NULL")
+                _insert_event(cursor, 1, None)
+                cursor.execute("SET SESSION sql_mode=''")
+                cursor.execute("SELECT @@SESSION.sql_mode")
+                assert cursor.fetchone()[0] == ""
+            db.commit()
+            with pytest.raises(pymysql.MySQLError, match="integrity review required"):
+                _apply_migration(db, UPGRADE_MIGRATION)
+            db.rollback()
+            with db.cursor() as cursor:
+                cursor.execute("SELECT sequence, canonical_intent FROM jax_authority.authority_events")
+                assert cursor.fetchall() == ((1, None),)
+                cursor.execute("SHOW COLUMNS FROM jax_authority.authority_events LIKE 'canonical_intent'")
+                assert cursor.fetchone()[2] == "YES"
+
+
+def test_upgrade_migration_passes_without_null_intent_and_keeps_rows():
+    with _ephemeral_mariadb() as connect:
+        with connect() as db:
+            _apply_migration(db, MIGRATION)
+            with db.cursor() as cursor:
+                cursor.execute("ALTER TABLE jax_authority.authority_events MODIFY canonical_intent LONGBLOB NULL")
+                _insert_event(cursor, 1, b"intent")
+                cursor.execute("SET SESSION sql_mode=''")
+            db.commit()
+            _apply_migration(db, UPGRADE_MIGRATION)
+            with db.cursor() as cursor:
+                cursor.execute("SELECT canonical_intent FROM jax_authority.authority_events")
+                assert cursor.fetchall() == ((b"intent",),)
+                cursor.execute("SHOW COLUMNS FROM jax_authority.authority_events LIKE 'canonical_intent'")
+                assert cursor.fetchone()[2] == "NO"

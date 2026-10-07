@@ -19,6 +19,11 @@ entrada está en `~/encargos-codex/jax-faro-f11-veredicto-368-369-371-r2.md`.
 - Suite `tests/policy/test_authority_ledger*.py`: 41 passed.
 - El codec corrió 19 pruebas; el piso `authority-ledger-codec/codec` quedó en 19.
 - El paso Python 3.14 del workflow instala `pymysql`, requerido por el job MariaDB aislado.
+- Ronda 3, dos hallazgos menores: el provisioning ahora hace `REVOKE ALL PRIVILEGES, GRANT OPTION`
+  antes de los GRANT (la cuenta preexistente con ALL converge al contrato) y la migración 002
+  aborta con `SIGNAL 45000` si hay filas NULL (independiente de `sql_mode`) y corre bajo
+  `STRICT_ALL_TABLES`. Tres pruebas MariaDB nuevas (SHOW GRANTS exacto; 002 con NULL y
+  `sql_mode=''`; 002 sin NULL). Piso `authority-ledger-mariadb/integration`: 1 -> 4.
 
 ## Falta
 
