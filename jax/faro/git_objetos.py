@@ -82,6 +82,24 @@ def resolver_ref(repo: Path, ref: str) -> str:
     return r.stdout.decode().strip() if r.returncode == 0 else ""
 
 
+def oid_subarbol(repo: Path, commit: str, ruta: str) -> str:
+    """El OID del ARBOL `ruta` en `commit`, verificado como arbol (F1.1 §6: el pin
+    compara el arbol esperado de `policy/` contra el real). Falla cerrado: si
+    `commit` no existe o `ruta` no es un arbol, no hay snapshot.
+
+    OJO con la sintaxis: `<commit>:<ruta>^{tree}` NO vale (todo lo que sigue al
+    colon se toma como ruta); se usa `ls-tree`, que si declara el tipo."""
+    r = git(repo, "ls-tree", "-z", "--full-tree", commit, "--", ruta)
+    entradas = [e for e in r.stdout.split(b"\0") if e]
+    if len(entradas) != 1:
+        raise FuenteInvalida(f"no existe el arbol {ruta} en {commit}")
+    meta, _, _ruta = entradas[0].partition(b"\t")
+    modo, tipo, oid = meta.decode().split(" ")
+    if tipo != "tree":
+        raise FuenteInvalida(f"{ruta} no es un arbol en {commit} (tipo {tipo})")
+    return oid
+
+
 @dataclass(frozen=True)
 class EntradaGit:
     modo: str
