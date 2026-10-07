@@ -2532,7 +2532,7 @@ jobs:
           python3 .github/ci/piso.py verificar tests-puros/procesamiento_routes_tests /tmp/procesamiento_routes_tests || exit $?
 
       # jax-14 (2026-10-03): freno de dependencias de extraccion. Piso exacto de
-      # procesamiento/_dependencias_test.py: 29 passed (10 de la ronda 0 + 19 de la
+      # procesamiento/_dependencias_test.py: 30 passed (10 de la ronda 0 + 19 de la
       # ronda 1: estado() nunca lanza, lineas no reconocidas, marcadores, freno por
       # tipo), medido localmente con
       # pdfplumber, openpyxl y python-docx instalados. Si da "skipped", falta
@@ -2635,7 +2635,7 @@ jobs:
       - name: Identity Foundation Shadow -- piso exacto de tests CORRIDOS
         # Jax#370 ronda 2 (M-5): la lista de arriba crece con cada area de policy y
         # nada la pisaba. Medido el 2026-10-06 en hall9000 (Python 3.14.4, pytest 9,
-        # solo pytest+pyyaml+cryptography como el paso de arriba): 567 passed
+        # solo pytest+pyyaml+cryptography como el paso de arriba): 579 passed
         # (459 de la ronda 1 + 38 de rule_authority: 20 de schema por la decision
         # R-4 de Fernando y digitos ASCII, 2 de snapshot por el testigo no-dataclass,
         # 16 de los ataques A-J del auditor como regresiones). Exacto: una prueba
@@ -2650,8 +2650,8 @@ jobs:
             tests/policy/test_policy_corpus_hash.py \
             tests/policy/test_rule_authority_schema.py \
             tests/policy/test_rule_authority_snapshot.py \
-            tests/policy/test_rule_authority_ataques.py
-          tests/policy/test_rule_authority_providers.py \
+            tests/policy/test_rule_authority_ataques.py \
+            tests/policy/test_rule_authority_providers.py \
             tests/policy/test_shadow_manifest.py \
             tests/policy/test_strict_yaml.py \
             tests/policy/test_v3_array_semantics.py \
@@ -3042,7 +3042,7 @@ jobs:
   # `runner` con NOPASSWD:ALL (mismo esquema que el runner real de GitHub Actions),
   # `acl` instalado, sin ningún checkout previo -- 28 passed, 1 skipped (el que necesita
   # /home/fruiz/jax-workspace/proyectos real, que ningún runner de GitHub Actions tiene).
-  # Si esto da "29 passed", este runner SÍ tiene ese árbol -- no es el runner esperado.
+  # Si esto da "30 passed", este runner SÍ tiene ese árbol -- no es el runner esperado.
   permisos-proyectos:
     runs-on: ubuntu-latest
     steps:

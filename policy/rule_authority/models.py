@@ -97,8 +97,9 @@ class RuleLimits:
         if not isinstance(self.catalogo, MappingProxyType):
             raise AuthorityEventValidationError("RuleLimits requiere catálogo cargado del snapshot")
         if not any(getattr(self, name) is not None for name in (
-            "quantity", "amount", "frequency_count", "frequency_window_seconds",
-            "duration_seconds", "tokens", "cost_minor_units")):
+            "quantity", "quantity_unit", "amount", "currency", "frequency_count",
+            "frequency_unit", "frequency_window_seconds", "duration_seconds", "tokens",
+            "cost_minor_units", "cost_currency")):
             raise AuthorityEventValidationError("RuleLimits vacío")
         for name in ("quantity", "amount", "frequency_count",
                      "frequency_window_seconds", "duration_seconds", "tokens",

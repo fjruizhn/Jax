@@ -134,6 +134,11 @@ def test_limits_reject_bool_overflow_and_currency_without_amount(kwargs):
         RuleLimits(catalogo=CATALOG, **kwargs)
 
 
+def test_request_rejects_currency_without_amount():
+    with pytest.raises(AuthorityEventValidationError, match="amount y currency"):
+        request(currency="usd")
+
+
 def test_permit_has_no_persistable_reason_and_storage_failure_is_not_a_reason():
     with pytest.raises(AuthorityEventValidationError):
         RuleDecision("0199f8a1-8c00-7000-8000-000000000001", "sha256:"+"a"*64,

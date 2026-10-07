@@ -142,8 +142,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 12 pruebas de payload, codec y replay de ratificaciones Faro individuales. Medido el 2026-10-07 en hall9000."
     },
     "authority-rule-models/models": {
-      "patron": "^29 passed in ",
-      "mensaje": "PISO ROTO: se esperan 29 pruebas de modelos Rule Authority: límites ligados al catálogo sellado del snapshot, NFC antes del hash, hash ligado al lookup del store, denegaciones persistibles y regresiones."
+      "patron": "^30 passed in ",
+      "mensaje": "PISO ROTO: se esperan 30 pruebas de modelos Rule Authority: límites ligados al catálogo sellado del snapshot, NFC antes del hash, hash ligado al lookup del store, denegaciones persistibles y regresiones."
     },
     "tests-puros/ficha_tests": {
       "patron": "^16 passed",
@@ -206,8 +206,8 @@
       "mensaje": "PISO ROTO: se esperaban 227 tests CORRIDOS de los pisos fuera del workflow."
     },
     "identity-foundation-shadow/policy": {
-"patron": "^577 passed",
-      "mensaje": "PISO ROTO: se esperaban 577 tests CORRIDOS de Identity Foundation Shadow (la politica sin DB)."
+"patron": "^579 passed",
+      "mensaje": "PISO ROTO: se esperaban 579 tests CORRIDOS de Identity Foundation Shadow (la politica sin DB)."
     }
   },
   "minimos": {

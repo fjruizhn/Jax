@@ -4619,7 +4619,7 @@ Piso vigente (2026-10-07): `^12 passed in `. Cubre activación que rechaza grant
 
 ## `authority-rule-models/models`
 
-Piso actualizado (2026-10-07): `^29 passed in `. Catálogo cargado desde el snapshot, límites
+Piso actualizado (2026-10-07): `^30 passed in `. Catálogo cargado desde el snapshot, límites
 validados por clase/subid, NFC antes del hash, status/reason y store ligado al request hash.
 
 
@@ -4635,6 +4635,6 @@ Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la form
 
 ## `identity-foundation-shadow/policy`
 
-Piso actualizado (2026-10-07): `^577 passed`. Medido con el paso completo del workflow
+Piso actualizado (2026-10-07): `^579 passed`. Medido con el paso completo del workflow
 Python 3.14 tras integrar los modelos de #371 y los proveedores de #372; el resultado exacto
 se vuelve a verificar sobre la base final.
