@@ -324,6 +324,20 @@ def test_limits_require_a_well_formed_rule_id(rule_id):
         limites_de(dataclasses.replace(_regla_obligating(), rule_id=rule_id), CATALOG)
 
 
+@pytest.mark.parametrize("periodo", ["workers", "Por_Hora", "", "hora", "por_hora ", 3600,
+                                     AlwaysEqualStr("workers"), "por_hora\u200b", "por\u0301_hora"])
+def test_tope_period_must_be_a_frequency_subid_of_the_catalog(periodo):
+    tope = Tope("frecuencia", "frecuencia.por_hora", 5, periodo)
+    with pytest.raises(AuthorityEventValidationError, match="period"):
+        limites_de(_a_mano_regla(tope=tope), CATALOG)
+
+
+@pytest.mark.parametrize("periodo", ["por_hora", "por_dia"])
+def test_tope_period_in_the_catalog_is_accepted(periodo):
+    tope = Tope("frecuencia", "frecuencia.por_hora", 5, periodo)
+    assert limites_de(_a_mano_regla(tope=tope), CATALOG).tope.period == periodo
+
+
 def test_tope_must_be_the_exact_tope_type_not_a_subclass():
     class TopeFalso(Tope):
         pass
@@ -434,10 +448,10 @@ def test_rule_limits_cannot_represent_infrastructure_limits():
         with pytest.raises(AuthorityEventValidationError):
             limites_de(_a_mano_regla(quantity=Cantidad(palabra, 3)), CATALOG)
         with pytest.raises(AuthorityEventValidationError):
-            limites_de(_a_mano_regla(tope=Tope(palabra, f"{palabra}.maximo", 3, "hora")), CATALOG)
+            limites_de(_a_mano_regla(tope=Tope(palabra, f"{palabra}.maximo", 3, "por_hora")), CATALOG)
         with pytest.raises(AuthorityEventValidationError):
             limites_de(_a_mano_regla(tope=Tope("actos_externos", f"actos_externos.{palabra}", 3,
-                                               "hora")), CATALOG)
+                                               "por_hora")), CATALOG)
         with pytest.raises(AuthorityEventValidationError):
             request(quantity_unit=palabra)
         # el catalogo del pin real tampoco tiene la palabra, ni como clase ni como subid

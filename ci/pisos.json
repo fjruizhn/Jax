@@ -146,8 +146,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 12 pruebas de payload, codec y replay de ratificaciones Faro individuales. Medido el 2026-10-07 en hall9000."
     },
     "authority-rule-models/models": {
-      "patron": "^140 passed in ",
-      "mensaje": "PISO ROTO: se esperaban 140 pruebas de modelos Rule Authority (medido el 2026-10-07 en hall9000): catálogo exigido por tipo exacto CatalogoTopes, límites derivados de ReglaValidada con limites_de, solicitud/evaluación/decisión y store en memoria."
+      "patron": "^151 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 151 pruebas de modelos Rule Authority (medido el 2026-10-07 en hall9000): catálogo exigido por tipo exacto CatalogoTopes, límites derivados de ReglaValidada con limites_de, solicitud/evaluación/decisión y store en memoria."
     },
     "tests-puros/ficha_tests": {
       "patron": "^16 passed",
