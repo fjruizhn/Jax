@@ -4621,6 +4621,25 @@ efímera: el provisioning revoca los privilegios previos (`REVOKE ALL PRIVILEGES
 `SHOW GRANTS` coincide exacto con el contrato; la migración 002 falla cerrada con filas NULL aun con
 `sql_mode=''` (la fila queda intacta) y pasa con cero NULL.
 
+## `authority-rule-storage/mariadb`
+
+Piso vigente (2026-10-07, r3 de #375): `^12 passed in `. Antes `^9` (+3: `_catalog_projection` rechaza dict, copia de dict y None) y `^7` (ronda 2) y `^1 passed in ` (un único test
+monolítico). MariaDB 12.3.3 efímera con `--network none`, una base por prueba. Las 9 pruebas originales (más las 3 de la proyección del catálogo, sin DB):
+(1) rollback de escrituras parciales, PERMIT cerrado, store caído y concurrencia; (2) `rollback()`
+fallido se registra y se relanza el error original; (3) `rollback()` fallido tras un
+`AuthorityStateError` también se registra y sale como `RuleAuthorityStorageError`;
+(4) idempotencia, durabilidad y ligadura a request_hash y al catálogo sellado del pin (con fila
+existente); (5) triggers append-only: UPDATE y DELETE sobre filas sin hijos con una cuenta que tiene
+GRANT, código 1644 y mensaje del trigger; (6) restricciones de PERMIT, OID y EXPLAIN;
+(7) provisioning revoca a `user@localhost` y a la homónima `user@'%'`; (8) provisioning revoca toda
+entrada homónima de `mysql.user` (prueba con `user@127.0.0.1`); (9) provisioning sin cuenta `@'%'`
+no la crea y `main()` de operador. Medido el 2026-10-07 en
+hall9000 con el comando exacto del workflow (`JAX_RULE_AUTHORITY_DOCKER_CMD="sudo -n docker"`
+solo porque aquí docker exige sudo). El runner tiene la ultima palabra.
+
+El paso del workflow ya no hace `pip install pymysql`: el job lo instala antes en
+`pip install pytest pyyaml cryptography==49.0.0 pymysql` (sin versión; heredado, ver pendientes).
+
 ## `authority-rule-events/ratifications`
 
 Piso vigente (2026-10-07): `^12 passed in `. Cubre activación que rechaza grants individuales
