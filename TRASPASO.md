@@ -18,6 +18,7 @@ entrada está en `~/encargos-codex/jax-faro-f11-veredicto-368-369-371-r2.md`.
   que tiene SELECT/UPDATE/DELETE.
 - Suite `tests/policy/test_authority_ledger*.py`: 41 passed.
 - El codec corrió 19 pruebas; el piso `authority-ledger-codec/codec` quedó en 19.
+- El paso Python 3.14 del workflow instala `pymysql`, requerido por el job MariaDB aislado.
 
 ## Hecho en esta rama (#369)
 
