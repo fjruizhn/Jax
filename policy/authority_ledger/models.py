@@ -5,7 +5,7 @@ models a permission or an execution decision.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import re
@@ -20,6 +20,7 @@ _TOKEN = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _DOC = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _ACTOR = re.compile(r"(?:human|actor):[a-z][a-z0-9-]{0,63}\Z")
 _RATIFICATION_SNAPSHOT_SEAL = object()
+_RATIFICATION_STORAGE_SEAL = object()
 
 
 def _nfc_token(value: object, field: str, pattern=_TOKEN) -> str:
@@ -173,7 +174,7 @@ class AuthorityEventIntent:
     ratification_event_id: str | None = None
     overlay: OverlayPayload | None = None
     overlay_id: str | None = None
-    _ratification_snapshot_seal: object | None = None
+    _ratification_snapshot_seal: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "actor_id", _actor(self.actor_id, "actor_id"))
@@ -198,7 +199,8 @@ class AuthorityEventIntent:
         if self.event_type is AuthorityEventType.RATIFICATION_GRANTED:
             if not isinstance(self.static_policy_view_projection, dict) or self.static_policy_view_projection.get("policy_corpus_hash") != self.policy_corpus_hash:
                 raise AuthorityEventValidationError("ratificación requiere static policy view ligado al hash")
-            if self._ratification_snapshot_seal is not _RATIFICATION_SNAPSHOT_SEAL:
+            if (self._ratification_snapshot_seal is not _RATIFICATION_SNAPSHOT_SEAL
+                    and self._ratification_snapshot_seal is not _RATIFICATION_STORAGE_SEAL):
                 raise AuthorityEventValidationError("ratificación requiere snapshot sellado del candidate boundary")
 
     @classmethod
