@@ -4601,6 +4601,20 @@ lecturas como root) pasa la suite de 55 a 199 pruebas recolectadas; el runner sa
 199 − 1 = 198 passed, medido corriendo pytest como un usuario que no es fruiz ni jaxsvc. El paso del job crea las cuentas
 `jaxsvc` y `fruiz` (las pruebas no las crean).
 
+## `authority-ledger-codec/codec`
+
+Piso nuevo (2026-10-06): `^5 passed in `. Medido en hall9000 con el comando exacto del workflow:
+`pytest -q tests/policy/test_authority_ledger_storage_codec.py`. Cubre proyección cerrada,
+rechazo de campos desconocidos, lectura de la forma histórica exacta y persistencia de
+`canonical_intent`, `canonical_event` y `evidence_refs`.
+
+## `authority-ledger-mariadb/integration`
+
+Piso nuevo (2026-10-06): `^1 passed in `. Medido en hall9000 con MariaDB 12.3.3 efímera
+`--network none`; la prueba aplica la migración, genera una llave Ed25519 de prueba y valida
+firma → INSERT → lectura → reconstrucción → hash/firma y replay. La base solo expone socket
+Unix al proceso de prueba.
+
 ## `archivos-de-test-en-ci/pisos`
 
 Patrón vigente (2026-10-04): `^227 passed`

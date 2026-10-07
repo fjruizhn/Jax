@@ -2634,6 +2634,21 @@ jobs:
         run: |
           python -m pytest -q tests/test_arranque_instalado.py tests/test_verificar_arranque_instalado.py 2>&1 | tee /tmp/arranque_instalado
           python3 .github/ci/piso.py verificar tests-puros/arranque_instalado /tmp/arranque_instalado || exit $?
+      - name: Block 4 authority-ledger storage codec -- piso exacto
+        env:
+          PYTHONPATH: "."
+        run: |
+          set -o pipefail
+          python -m pytest -q tests/policy/test_authority_ledger_storage_codec.py 2>&1 | tee /tmp/authority-ledger-codec
+          python3 .github/ci/piso.py verificar authority-ledger-codec/codec /tmp/authority-ledger-codec || exit $?
+      - name: Block 4 authority-ledger MariaDB aislada -- piso exacto
+        env:
+          PYTHONPATH: "."
+          JAX_AUTHORITY_LEDGER_DOCKER_CMD: docker
+        run: |
+          set -o pipefail
+          python -m pytest -q tests/policy/test_authority_ledger_storage_mariadb.py 2>&1 | tee /tmp/authority-ledger-mariadb
+          python3 .github/ci/piso.py verificar authority-ledger-mariadb/integration /tmp/authority-ledger-mariadb || exit $?
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
