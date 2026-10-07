@@ -427,12 +427,24 @@ def _argv_de_run(run: str) -> list:
     """Los argumentos EFECTIVOS del comando pytest, como bash los veria: se unen
     las continuaciones (barra + salto) y cada LINEA restante es un COMANDO
     propio; el que invoca pytest es el que cuenta. Si un .py quedo en linea
-    propia, bash lo EJECUTARIA despues de pytest (exit 126) y pytest no lo ve."""
+    propia, bash lo EJECUTARIA despues de pytest (exit 126) y pytest no lo ve.
+
+    LIMITE DECLARADO (W3): esto NO es un parser de bash, es ``shlex`` sobre la
+    linea unida. Un comentario dentro del comando (``# ...`` entre
+    continuaciones) lo trata bash de otra forma —el resto de la linea unida
+    deja de ser argumento— y ``shlex`` no lo reproduce. Por eso FALLA CERRADO:
+    cualquier ``#`` en la linea que invoca pytest se rechaza, en vez de
+    adivinar. Si algun dia hace falta un comentario ahi, se mueve arriba del
+    comando."""
     import shlex
     continuo = run.replace("\\\n", " ")
     for linea in continuo.splitlines():
         argv = shlex.split(linea)
         if any("pytest" in a for a in argv[:5]):
+            if "#" in linea:
+                raise AssertionError(
+                    "comentario dentro del comando pytest: este lector no es bash y no "
+                    "lo interpreta (limite declarado); muevelo fuera del comando")
             return argv
     return []
 
@@ -447,6 +459,25 @@ def _pasos_identity() -> list:
             if "Identity Foundation" in nombre:
                 pasos.append(paso)
     return pasos
+
+
+_RUN_BASE = "python -B -m pytest -q \\\n  a.py \\\n  b.py \\\n  --confcutdir=x 2>&1 | tee /tmp/o\n"
+
+
+def test_w3_argv_de_run_lee_la_forma_normal() -> None:
+    assert [a for a in _argv_de_run(_RUN_BASE) if a.endswith(".py")] == ["a.py", "b.py"]
+
+
+@pytest.mark.parametrize("run", [
+    "python -B -m pytest -q \\\n  a.py \\\n  # comentario \\\n  b.py \\\n  --confcutdir=x\n",
+    "python -B -m pytest -q \\\n  a.py \\\n  # comentario sin barra\n  b.py\n",
+    "python -B -m pytest -q a.py # b.py queda comentado en bash\n",
+])
+def test_w3_un_comentario_en_el_comando_pytest_falla_cerrado(run: str) -> None:
+    """bash no pasa b.py a pytest cuando hay un comentario en la continuacion;
+    shlex si lo veria. El lector no lo adivina: se niega."""
+    with pytest.raises(AssertionError, match="comentario"):
+        _argv_de_run(run)
 
 
 def test_r3_las_dos_listas_de_identity_foundation_son_iguales() -> None:
