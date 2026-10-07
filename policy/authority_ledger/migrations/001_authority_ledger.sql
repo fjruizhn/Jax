@@ -1,5 +1,6 @@
--- Block 4 authoritative event log.  The application DB user receives SELECT/INSERT
--- only; UPDATE/DELETE are intentionally absent.  Materialized state is a cache.
+-- Block 4 authoritative event log. The application writer principal needs SELECT
+-- on genesis/events, INSERT on events, and SELECT/UPDATE on the singleton head.
+-- It must not receive UPDATE/DELETE on genesis or authority_events.
 CREATE SCHEMA IF NOT EXISTS jax_authority;
 
 CREATE TABLE IF NOT EXISTS jax_authority.authority_ledger_genesis (
@@ -14,7 +15,7 @@ CREATE TABLE IF NOT EXISTS jax_authority.authority_events (
   event_id CHAR(36) NOT NULL UNIQUE,
   event_type VARCHAR(64) NOT NULL,
   actor_id VARCHAR(128) NOT NULL,
-  canonical_intent LONGBLOB NULL,
+  canonical_intent LONGBLOB NOT NULL,
   canonical_event LONGBLOB NOT NULL,
   evidence_refs LONGBLOB NOT NULL,
   previous_event_hash CHAR(71) NULL,
@@ -31,6 +32,9 @@ CREATE TABLE IF NOT EXISTS jax_authority.authority_ledger_head (
   head_event_hash CHAR(71) NULL,
   CONSTRAINT authority_head_singleton CHECK (singleton = 1)
 );
+
+INSERT IGNORE INTO jax_authority.authority_ledger_head
+  (singleton,sequence,head_event_id,head_event_hash) VALUES (1,0,NULL,NULL);
 
 DELIMITER //
 CREATE TRIGGER jax_authority.no_update_authority_events BEFORE UPDATE ON jax_authority.authority_events

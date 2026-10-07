@@ -129,6 +129,18 @@
       "patron": "^46 passed, 9 skipped",
       "mensaje": "PISO ROTO: se esperaban 46 tests CORRIDOS y exactamente 9 skipped (6 que exigen el host de produccion /srv/jax-prod/jax y 3 espejos que exigen el checkout del repo dueno) de los guiones de arranque de systemd."
     },
+    "authority-ledger-codec/codec": {
+      "patron": "^19 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 19 tests CORRIDOS del codec de persistencia de Block 4. Medido el 2026-10-07 en hall9000."
+    },
+    "authority-ledger-mariadb/integration": {
+      "patron": "^4 passed in ",
+      "mensaje": "PISO ROTO: se esperaba la integración MariaDB aislada de Block 4 (4 tests CORRIDOS). Medido el 2026-10-07 en hall9000 con MariaDB 12.3.3 --network none."
+    },
+    "authority-rule-events/ratifications": {
+      "patron": "^12 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 12 pruebas de payload, codec y replay de ratificaciones Faro individuales. Medido el 2026-10-07 en hall9000."
+    },
     "tests-puros/ficha_tests": {
       "patron": "^16 passed",
       "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS de procesamiento/_ficha_test.py -- el tipo que fija el fallo cerrado de toda la ronda."
