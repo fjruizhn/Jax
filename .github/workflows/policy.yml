@@ -2651,6 +2651,8 @@ jobs:
         # D-4 niegan como subid, mayusculas/acentos/segmentos niegan, AUD2 de cruce
         # de clases, vector dorado del hash con dominio v2, subclase de bytes niega,
         # validar_regla exige el sellado, fabricar con el OID del pin niega).
+        # Ronda 8: 591 (576 medidos en master + 15: D-4 como segmento y subcadena x13,
+        # subids legitimos no caen, el helper del pin no deja repos temporales).
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
