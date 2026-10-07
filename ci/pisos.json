@@ -38,8 +38,8 @@
       "mensaje": "PISO ROTO: se esperaban 251 tests CORRIDOS de cli_sandbox."
     },
     "faro-fase0/faro": {
-      "patron": "^721 passed",
-      "mensaje": "PISO ROTO: se esperaban 721 tests CORRIDOS del Faro."
+      "patron": "^726 passed",
+      "mensaje": "PISO ROTO: se esperaban 726 tests CORRIDOS del Faro."
     },
     "faro-bitacora-db/faro-db": {
       "patron": "^40 passed",
@@ -134,8 +134,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 19 tests CORRIDOS del codec de persistencia de Block 4. Medido el 2026-10-07 en hall9000."
     },
     "authority-ledger-mariadb/integration": {
-      "patron": "^1 passed in ",
-      "mensaje": "PISO ROTO: se esperaba la integración MariaDB aislada de Block 4 (1 test CORRIDO). Medido el 2026-10-07 en hall9000 con MariaDB 12.3.3 --network none."
+      "patron": "^4 passed in ",
+      "mensaje": "PISO ROTO: se esperaba la integración MariaDB aislada de Block 4 (4 tests CORRIDOS). Medido el 2026-10-07 en hall9000 con MariaDB 12.3.3 --network none."
     },
     "authority-rule-events/ratifications": {
       "patron": "^12 passed in ",
@@ -206,8 +206,8 @@
       "mensaje": "PISO ROTO: se esperaban 227 tests CORRIDOS de los pisos fuera del workflow."
     },
     "identity-foundation-shadow/policy": {
-"patron": "^579 passed",
-      "mensaje": "PISO ROTO: se esperaban 579 tests CORRIDOS de Identity Foundation Shadow (la politica sin DB)."
+      "patron": "^591 passed",
+      "mensaje": "PISO ROTO: se esperaban 591 tests CORRIDOS de Identity Foundation Shadow (la politica sin DB)."
     }
   },
   "minimos": {

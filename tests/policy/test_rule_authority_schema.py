@@ -15,12 +15,14 @@ import pytest
 
 from policy.canonicalization.errors import StrictYAMLError
 from policy.canonicalization.strict_yaml import load_strict_yaml
-from jax.faro.catalogo_topes import cargar_catalogo_bytes
+from tests.policy.catalogo_pin import catalogo_del_pin
 from policy.rule_authority.errors import RuleSchemaError
 from policy.rule_authority.schema import TTL_MAX_POR_DEFECTO, validar_regla as _validar
 
 # El catalogo de la decision de Fernando (B-3): llega del pin, nunca de un global
-CATALOGO = cargar_catalogo_bytes(json.dumps(
+# r7, MAJOR-1: el catalogo de las pruebas sale de un PIN de prueba con esta
+# decision (mismas cinco clases que la de Fernando), nunca de bytes sueltos
+CATALOGO = catalogo_del_pin(json.dumps(
     {"version": 1, "decision": "Fernando 2026-10-06: solo actos y dinero",
      "clases": {"monto_dinero": ["hnl", "usd"],
                 "actos_externos": ["mensajes", "correos", "publicaciones", "compras", "pagos"],

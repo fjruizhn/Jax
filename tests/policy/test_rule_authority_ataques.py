@@ -9,6 +9,7 @@ import dataclasses
 import hashlib
 import os
 import subprocess
+import tempfile
 import zlib
 from pathlib import Path
 
@@ -24,7 +25,8 @@ from policy.rule_authority.snapshot import (
 
 import json
 
-from jax.faro.catalogo_topes import cargar_catalogo_bytes
+from jax.faro.catalogo_topes import CatalogoTopesInvalido, _cargar_catalogo_bytes
+from tests.policy.catalogo_pin import catalogo_del_pin
 
 FIXTURES = Path(__file__).parent / "fixtures" / "faro_rules"
 REGLA = (FIXTURES / "regla-ejemplo.yaml").read_bytes()
@@ -33,7 +35,8 @@ TOPE = (FIXTURES / "regla-ejemplo-tope.yaml").read_bytes()
 RAIZ = Path(__file__).resolve().parents[2]
 RUTA_CATALOGO = "policy/faro/catalogo-topes.json"
 CATALOGO_BYTES_REPO = (RAIZ / RUTA_CATALOGO).read_bytes()
-CATALOGO = cargar_catalogo_bytes(CATALOGO_BYTES_REPO)
+# r7, MAJOR-1: el catalogo de las pruebas sale de un PIN de prueba, como en produccion
+CATALOGO = catalogo_del_pin()
 
 
 def validar_regla(datos, **kwargs):
@@ -265,7 +268,7 @@ def test_r4_el_catalogo_es_el_literal_exacto_de_la_decision_de_fernando() -> Non
     crudo = subprocess.run(["git", "show", "HEAD:policy/faro/catalogo-topes.json"],
                            capture_output=True, check=True, cwd=RAIZ).stdout
     assert json.loads(crudo) == LITERAL_DECISION_FERNANDO
-    clases = cargar_catalogo_bytes(crudo)
+    clases = _cargar_catalogo_bytes(crudo)
     assert {c: list(s) for c, s in clases.items()} == LITERAL_DECISION_FERNANDO["clases"]
 
 
@@ -310,6 +313,11 @@ def test_r4_el_catalogo_es_inmutable_en_el_proceso() -> None:
 def test_r4_catalogo_invalido_falla_cerrado() -> None:
     import json as J
     from jax.faro.catalogo_topes import CatalogoTopesInvalido
+    # r6: los dos ultimos casos llevan las CINCO clases de D-4 a proposito:
+    # con el piso de clases en codigo, un catalogo de relleno ({"a": ["b"]})
+    # negaria por D-4 y la prueba pasaria por la razon equivocada — la clave
+    # extra (N5) y la lista vacia (N9) tienen que ser la UNICA razon de negacion.
+    cinco = LITERAL_DECISION_FERNANDO["clases"]
     for malo in [b"no es json",
                  J.dumps({"version": 2, "decision": "x", "clases": {"a": ["b"]}}).encode(),
                  J.dumps({"version": 1, "decision": "x", "clases": {"a": ["b", "b"]}}).encode(),
@@ -321,9 +329,15 @@ def test_r4_catalogo_invalido_falla_cerrado() -> None:
                  J.dumps({"version": 1, "decision": "x", "clases": {"a": []}}).encode(),
                  J.dumps({"version": 1, "decision": "x", "clases": {"a": ["b"]},
                           "extra": 1}).encode(),
-                 b'{"version": 1, "version": 1, "decision": "x", "clases": {"a": ["b"]}}']:
+                 b'{"version": 1, "version": 1, "decision": "x", "clases": {"a": ["b"]}}',
+                 J.dumps({"version": 1, "decision": "x",
+                          "clases": {**cinco, "monto_dinero": []}}).encode(),      # N9
+                 J.dumps({"version": 1, "decision": "x", "clases": cinco,
+                          "extra": 1}).encode(),                                    # N5
+                 ('{"version": 1, "version": 1, "decision": "x", "clases": '
+                  + J.dumps(cinco) + '}').encode()]:                                # P7/M-8
         with pytest.raises(CatalogoTopesInvalido):
-            cargar_catalogo_bytes(malo)
+            _cargar_catalogo_bytes(malo)
 
 
 def test_r4_snapshot_con_mismo_arbol_pero_otro_commit_no_es_igual(tmp_path: Path) -> None:
@@ -433,14 +447,21 @@ import json as _json5
 
 
 def _catalogo_bytes(clases: dict) -> bytes:
-    return _json5.dumps({"version": 1, "decision": "prueba", "clases": clases}).encode()
+    """r6 (D-4 como piso): las CLASES son codigo, no dato del pin — este helper
+    solo sustituye SUBIDS de las cinco clases; un catalogo con otra clase no se
+    puede armar por aqui, tiene que negar en el cargador."""
+    fusion = {**LITERAL_DECISION_FERNANDO["clases"], **clases}
+    assert set(fusion) == set(LITERAL_DECISION_FERNANDO["clases"])
+    return _json5.dumps({"version": 1, "decision": "prueba", "clases": fusion}).encode()
 
 
 def test_r5_ataque_k_catalogo_estrechado_en_el_pin_la_regla_con_tope_niega(tmp_path: Path) -> None:
-    """K: el commit fijado estrecho el catalogo (sin actos_externos); la regla
-    con tope actos_externos.mensajes NO puede validar contra el catalogo del
-    working tree — niega contra el del PIN."""
-    estrecho = _catalogo_bytes({"monto_dinero": ["usd"]})
+    """K: el commit fijado estrecho el catalogo POR SUBID (actos_externos sin
+    mensajes); la regla con tope actos_externos.mensajes NO puede validar
+    contra el catalogo del working tree — niega contra el del PIN. (Estrechar
+    por CLASE ya no es expresable desde la r6: las cinco clases de D-4 son piso
+    de codigo y un catalogo sin alguna de ellas niega al cargarse.)"""
+    estrecho = _catalogo_bytes({"actos_externos": ["correos"]})
     repo, commit, arbol = _repo(tmp_path, {
         RUTA_CATALOGO: estrecho,
         "policy/faro/regla.yaml": TOPE,            # tope actos_externos.mensajes
@@ -457,10 +478,15 @@ def test_r5_catalogo_invalido_en_el_pin_niega_el_snapshot(tmp_path: Path) -> Non
 
 
 def test_r5_catalogo_con_clave_duplicada_en_el_pin_niega(tmp_path: Path) -> None:
-    duplicado = b'{"version": 1, "version": 1, "decision": "x", "clases": {"a": ["b"]}}'
+    """M-8: la clave duplicada no gana. Con las CINCO clases de D-4 en el
+    catálogo: sin el object_pairs_hook la duplicada pasaría y el snapshot
+    CARGARÍA (r6 — antes llevaba clases de relleno y negaba por D-4)."""
+    duplicado = ('{"version": 1, "version": 1, "decision": "x", "clases": '
+                 + _json5.dumps(LITERAL_DECISION_FERNANDO["clases"]) + '}').encode()
     repo, commit, arbol = _repo(tmp_path, {RUTA_CATALOGO: duplicado})
-    with pytest.raises(RuleSnapshotError):
+    with pytest.raises(RuleSnapshotError) as excinfo:
         _cargar(repo, commit, arbol)
+    assert "clave duplicada" in str(excinfo.value)
 
 
 def test_r5_catalogo_con_bit_de_ejecucion_en_el_pin_niega(tmp_path: Path) -> None:
@@ -490,7 +516,7 @@ def test_r5_mutar_el_catalogo_del_disco_no_cambia_el_snapshot(tmp_path: Path) ->
 
 def test_r5_el_hash_del_snapshot_cambia_si_cambia_el_catalogo(tmp_path: Path) -> None:
     catalogo_a = (RAIZ / "policy" / "faro" / "catalogo-topes.json").read_bytes()
-    catalogo_b = _catalogo_bytes({"monto_dinero": ["usd"]})       # mismo formato, otra decision
+    catalogo_b = _catalogo_bytes({"monto_dinero": ["eur"]})    # mismas cinco clases, otro subid
     a = _repo(tmp_path / "a", {"policy/faro/ejemplo.yaml": REGLA, RUTA_CATALOGO: catalogo_a})
     b = _repo(tmp_path / "b", {"policy/faro/ejemplo.yaml": REGLA, RUTA_CATALOGO: catalogo_b})
     assert _cargar(*a).snapshot_hash != _cargar(*b).snapshot_hash
@@ -506,14 +532,16 @@ def test_r5_el_snapshot_expone_el_catalogo_inmutable_del_pin(tmp_path: Path) -> 
 
 
 def test_r5_json_suelto_en_faro_que_no_es_el_catalogo_niega(tmp_path: Path) -> None:
-    """N6: cualquier *.json en faro/ que no sea catalogo-topes.json niega. Con
-    contenido de catalogo VALIDO pero nombre ajeno: si el clasificador lo
-    aceptara como catalogo, el snapshot cargaria — y debe negar por NOMBRE."""
-    otro_valido = _catalogo_bytes({"monto_dinero": ["usd"]})
-    repo, commit, arbol = _repo(tmp_path, {"policy/faro/otro.json": otro_valido},
-                                con_catalogo=False)
-    with pytest.raises(RuleSnapshotError):
-        _cargar(repo, commit, arbol)             # con el mutante N6 CARGARIA: por eso muere
+    """N6 (r6, con diente): cualquier *.json en faro/ que no sea
+    catalogo-topes.json niega. El repo se arma CON el catalogo real presente y
+    el suelto es un catalogo VALIDO con nombre ajeno (K14): asi la unica razon
+    posible de negacion es el clasificador — con el mutante N6 (cualquier .json
+    tolerado), el snapshot CARGARIA y esta prueba muere."""
+    otro_valido = _catalogo_bytes({})            # cinco clases: valido de verdad
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/otro.json": otro_valido})
+    with pytest.raises(RuleSnapshotError) as excinfo:
+        _cargar(repo, commit, arbol)
+    assert "no regla y no infraestructura" in str(excinfo.value)
 
 
 def test_r5_regla_con_tope_sin_catalogo_en_validacion_niega() -> None:
@@ -522,3 +550,216 @@ def test_r5_regla_con_tope_sin_catalogo_en_validacion_niega() -> None:
     with pytest.raises(RuleSchemaError) as excinfo:
         _validar(datos)                                           # sin catalogo: sin tope
     assert "sin catalogo" in str(excinfo.value)
+
+
+# ------------------------- ronda 6: D-4 como piso de codigo, UTF-8 y catalogo sellado
+
+
+def test_r6_k2_sexta_clase_ratificada_niega_en_el_cargador() -> None:
+    """K2 (D-4 como piso): «conexiones» ratificado en el pin no abre el catalogo.
+    Las clases son CODIGO (las cinco de la decision de Fernando); los subid son
+    dato. Que falte una clase, tambien niega: ni mas ni menos."""
+    from jax.faro.catalogo_topes import CLASES_TOPEABLES
+    seis = {**LITERAL_DECISION_FERNANDO["clases"], "conexiones": ["abiertas"]}
+    with pytest.raises(CatalogoTopesInvalido) as excinfo:
+        _cargar_catalogo_bytes(_json5.dumps(
+            {"version": 1, "decision": "ratificado igual niega", "clases": seis}).encode())
+    assert "D-4" in str(excinfo.value)
+    cuatro = {c: s for c, s in LITERAL_DECISION_FERNANDO["clases"].items() if c != "duracion"}
+    with pytest.raises(CatalogoTopesInvalido):
+        _cargar_catalogo_bytes(_json5.dumps(
+            {"version": 1, "decision": "x", "clases": cuatro}).encode())
+    assert CLASES_TOPEABLES == frozenset(LITERAL_DECISION_FERNANDO["clases"])  # el piso ES la decision
+
+
+def test_r6_k2_en_el_pin_la_regla_con_conexiones_niega_al_cargar(tmp_path: Path) -> None:
+    """El ataque K2 completo del auditor: pin con «conexiones» y una regla que la
+    usa bien — el snapshot niega AL CARGAR EL CATALOGO, antes de mirar la regla:
+    no hay ratificacion que valga contra el piso de codigo."""
+    k2 = _json5.dumps({"version": 1, "decision": "ampliado a espaldas del codigo",
+                       "clases": {**LITERAL_DECISION_FERNANDO["clases"],
+                                  "conexiones": ["abiertas"]}}).encode()
+    regla = (TOPE.replace(b"actos_externos.mensajes", b"conexiones.abiertas")
+                 .replace(b"resource_class: actos_externos", b"resource_class: conexiones"))
+    repo, commit, arbol = _repo(tmp_path, {RUTA_CATALOGO: k2, "policy/faro/r.yaml": regla})
+    with pytest.raises(RuleSnapshotError) as excinfo:
+        _cargar(repo, commit, arbol)
+    assert "catalogo-topes.json del pin invalido" in str(excinfo.value)
+    assert "D-4" in str(excinfo.value)
+
+
+def test_r6_objeto_suelto_del_catalogo_adulterado_niega(tmp_path: Path) -> None:
+    """P3: el OID del catalogo se RECALCULA de los bytes leidos. Un objeto suelto
+    de .git/objects reescrito con un zlib VALIDO de otro contenido (un catalogo
+    valido, con otro subid) no pasa: git no valida el hash al leer sueltos — el
+    snapshot si. Con el chequeo OID mutilado, este catalogo ajeno CARGARIA."""
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
+    oid = _git(repo, "rev-parse", "HEAD:policy/faro/catalogo-topes.json")
+    suelto = repo / ".git" / "objects" / oid[:2] / oid[2:]
+    assert suelto.is_file()                              # objeto suelto, no en pack
+    otro = _catalogo_bytes({"monto_dinero": ["eur"]})    # valido, pero NO es el del OID
+    suelto.chmod(0o644)                                  # git lo deja en solo-lectura
+    suelto.write_bytes(zlib.compress(b"blob %d\0" % len(otro) + otro))
+    with pytest.raises(RuleSnapshotError) as excinfo:
+        _cargar(repo, commit, arbol)
+    assert "catalogo-topes.json: el blob no corresponde a su OID" in str(excinfo.value)
+
+
+def test_r6_el_cargador_acepta_solo_bytes() -> None:
+    """P12: str, bytearray o memoryview no son el canal del catalogo: solo bytes."""
+    for malo in (CATALOGO_BYTES_REPO.decode(), bytearray(CATALOGO_BYTES_REPO),
+                 memoryview(CATALOGO_BYTES_REPO)):
+        with pytest.raises(CatalogoTopesInvalido):
+            _cargar_catalogo_bytes(malo)
+
+
+def test_r6_catalogo_anidado_en_subdirectorio_niega_igual(tmp_path: Path) -> None:
+    """P13: faro/sub/catalogo-topes.json no es el catalogo aunque el nombre
+    TERMINE igual — el clasificador exige la ruta exacta y el anidado niega el
+    snapshot completo (K10). Con el mutante (endswith), el anidado pasaria por
+    catalogo y el snapshot cargaria."""
+    repo, commit, arbol = _repo(
+        tmp_path, {"policy/faro/sub/catalogo-topes.json": CATALOGO_BYTES_REPO})
+    with pytest.raises(RuleSnapshotError) as excinfo:
+        _cargar(repo, commit, arbol)
+    assert "no regla y no infraestructura" in str(excinfo.value)
+
+
+def test_r6_el_catalogo_debe_ser_utf8_estrito_sin_bom() -> None:
+    """K8 + r6: UTF-16/32 (con y sin BOM) y UTF-8 con BOM niegan. El catalogo se
+    decodifica como UTF-8 estricto ANTES de json.loads: la autodeteccion de
+    codificacion de json sobre bytes no vale como contrato."""
+    for codificacion in ("utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le",
+                         "utf-32-be"):
+        with pytest.raises(CatalogoTopesInvalido):
+            _cargar_catalogo_bytes(CATALOGO_BYTES_REPO.decode().encode(codificacion))
+    with pytest.raises(CatalogoTopesInvalido):
+        _cargar_catalogo_bytes(b"\xef\xbb\xbf" + CATALOGO_BYTES_REPO)   # BOM UTF-8
+
+
+def test_r6_el_catalogo_sellado_no_se_fabrica_ni_se_muta() -> None:
+    """El CatalogoTopes del snapshot es un tipo propio: no se construye fuera
+    del snapshot (r7: aunque lleves el OID del pin, sin su testigo no sella), no
+    se muta, y es lo UNICO que es_de_catalogo acepta — un Mapping suelto con la
+    misma forma niega."""
+    from jax.faro.catalogo_topes import CatalogoTopes, es_de_catalogo
+    misma_forma = {c: list(s) for c, s in CATALOGO.items()}
+    with pytest.raises(CatalogoTopesInvalido):
+        CatalogoTopes(misma_forma, oid_pin=CATALOGO.oid_pin)   # sin testigo: no sella
+    with pytest.raises(CatalogoTopesInvalido):
+        es_de_catalogo("actos_externos.mensajes", misma_forma)      # dict: no
+    assert es_de_catalogo("actos_externos.mensajes", CATALOGO) is True
+    with pytest.raises(TypeError):
+        CATALOGO._clases["conexiones"] = ("x",)          # type: ignore[index]
+
+
+def test_r7_no_hay_fabrica_publica_de_bytes_a_catalogo_sellado() -> None:
+    """MAJOR-1: ``cargar_catalogo_bytes`` ya no existe — la validacion es
+    privada y devuelve las clases SIN sellar; el unico emisor de CatalogoTopes
+    es el snapshot del pin. Con el mutante (fábrica publica de vuelta, o Topes
+    aceptando lo que ella devuelve), esta prueba rompe."""
+    import jax.faro.catalogo_topes as CT
+    assert not hasattr(CT, "cargar_catalogo_bytes"), "la fabrica publica volvio"
+    suelto = CT._cargar_catalogo_bytes(CATALOGO_BYTES_REPO)      # valida, NO sella
+    assert type(suelto) is dict
+    from jax.faro.topes import Topes
+    from jax.faro.bitacora import Bitacora
+    with pytest.raises(Exception) as excinfo:                    # ConfigFaroInvalida
+        Topes(None, Bitacora(emisores=[]), catalogo=suelto)      # type: ignore[arg-type]
+    assert "SELLADO" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("prohibida", sorted(
+    {"conexiones", "concurrencia", "workers", "hilos", "procesos", "agentes"}))
+def test_r7_las_seis_palabras_de_d4_niego_como_subid(prohibida: str) -> None:
+    """MAJOR-2: D-4 excluye esas seis palabras SIEMPRE — tambien por debajo de
+    una clase admitida. Un pin con cualquiera como subid niega al cargarse."""
+    malvado = _json5.dumps({"version": 1, "decision": "x",
+                            "clases": {**LITERAL_DECISION_FERNANDO["clases"],
+                                       "actos_externos": [prohibida]}}).encode()
+    with pytest.raises(CatalogoTopesInvalido) as excinfo:
+        _cargar_catalogo_bytes(malvado)
+    assert "prohibido por D-4" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("compuesta", [
+    # r8 (MAJOR del auditor r7): D-4 no es una comparacion de palabra exacta
+    "conexiones_db", "workers_max", "subprocesos", "multiagente", "num_hilos",
+    "agentes_lanzados", "concurrencia_max",
+    # las seis exactas siguen negando
+    "conexiones", "concurrencia", "workers", "hilos", "procesos", "agentes",
+])
+def test_r8_d4_niega_la_palabra_como_segmento_y_como_subcadena(compuesta: str) -> None:
+    """Un subid que CONTIENE una de las seis palabras (segmento separado por
+    ``_`` o fundida en una forma compuesta: ``subprocesos``, ``multiagente``)
+    niega igual que la palabra sola."""
+    for clase in ("actos_externos", "duracion"):
+        malvado = json.dumps({"version": 1, "decision": "x",
+                              "clases": {**LITERAL_DECISION_FERNANDO["clases"],
+                                         clase: [compuesta]}}).encode()
+        with pytest.raises(CatalogoTopesInvalido) as excinfo:
+            _cargar_catalogo_bytes(malvado)
+        assert "prohibido por D-4" in str(excinfo.value)
+
+
+def test_r8_d4_no_bloquea_los_subids_legitimos_del_catalogo() -> None:
+    """Contrapeso del control de subcadena: ningun subid de la decision de Fernando cae."""
+    assert _cargar_catalogo_bytes(CATALOGO_BYTES_REPO)
+
+
+def test_r8_catalogo_del_pin_no_deja_repos_temporales() -> None:
+    """MINOR r7: el helper no deja ``catalogo-pin-*`` en el directorio temporal."""
+    base = Path(tempfile.gettempdir())
+    antes = set(base.glob("catalogo-pin-*"))
+    catalogo_del_pin()
+    catalogo_del_pin(CATALOGO_BYTES_REPO)
+    assert set(base.glob("catalogo-pin-*")) <= antes
+
+
+def test_r7_subid_con_mayusculas_o_acentos_niega_igual() -> None:
+    """MAJOR-2: la regex es ASCII estricta tras NFC — mayusculas, acentos
+    combinantes y segmentos con punto nunca valen como subid."""
+    for malo in ("CONEXIONES",                    # mayusculas: la regex es ASCII
+                 "conexio\u0301nes",              # acento combinante: NFC y ASCII lo niegan
+                 "wor\u200bkers",                  # ancho cero: ningun caracter invisible pasa
+                 "a.b", "conexiones.db"):          # segmentos con punto: nunca un subid
+        catalogo = _json5.dumps({"version": 1, "decision": "x",
+                                 "clases": {**LITERAL_DECISION_FERNANDO["clases"],
+                                            "duracion": [malo]}}).encode()
+        with pytest.raises(CatalogoTopesInvalido):
+            _cargar_catalogo_bytes(catalogo)
+
+
+def test_r7_es_de_catalogo_no_cruza_clases_aunque_el_subid_exista() -> None:
+    """MAJOR-3 / mutante AUD2: el subid puede existir en OTRA clase — el
+    recurso es de SU clase o no es del catalogo. La clase prohibida con subid
+    ajeno valido nunca pasa."""
+    from jax.faro.catalogo_topes import es_de_catalogo
+    for recurso in ("conexiones.usd", "workers.tokens", "agentes.segundos"):
+        assert not es_de_catalogo(recurso, CATALOGO), recurso
+
+
+def test_r7_una_subclase_de_bytes_tampoco_es_el_canal() -> None:
+    """MINOR-2: el canal es ``bytes`` de TIPO EXACTO — una subclase pasa el
+    isinstance clasico y aqui niega igual."""
+    class BytesTraviesos(bytes):
+        pass
+
+    with pytest.raises(CatalogoTopesInvalido):
+        _cargar_catalogo_bytes(BytesTraviesos(CATALOGO_BYTES_REPO))
+
+
+def test_r7_validar_regla_exige_el_catalogo_sellado_no_un_contenedor() -> None:
+    """MINOR-3: validar_regla/_validar_tope no aceptan cualquier contenedor con
+    forma de catalogo — solo el CatalogoTopes del pin (con dict custom pasaria
+    cualquier tope «del catalogo» que nadie verifico)."""
+    from policy.rule_authority.schema import validar_regla as _validar
+    datos = dict(load_strict_yaml(TOPE))
+    misma_forma = {c: list(s) for c, s in CATALOGO.items()}
+    with pytest.raises(RuleSchemaError) as excinfo:
+        _validar(datos, catalogo=misma_forma)              # type: ignore[arg-type]
+    assert "SELLADO" in str(excinfo.value)
+    from types import MappingProxyType
+    with pytest.raises(RuleSchemaError):
+        _validar(datos, catalogo=MappingProxyType(misma_forma))   # type: ignore[arg-type]
+    assert _validar(datos, catalogo=CATALOGO).tope is not None    # el sellado: normal

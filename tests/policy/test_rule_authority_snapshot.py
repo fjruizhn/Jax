@@ -474,3 +474,51 @@ def test_el_hash_del_snapshot_es_determinista_y_distingue_contenido(tmp_path: Pa
     otro = _repo(tmp_path / "otro", {"policy/faro/ejemplo.yaml": REGLA_TOPE})
     c = _cargar(*otro)
     assert a.snapshot_hash != c.snapshot_hash
+
+
+# --------------------------- ronda 7: vector dorado del hash del snapshot (MINOR-1)
+
+_VECTOR_REGLA = b'''schema_version: "1.0"
+kind: JAX_FARO_RULE
+rule_id: vector-dorado
+effect: PERMIT
+action_class: REVERSIBLE
+
+scope:
+  subjects: [actor:dorado]
+  capabilities: [CAP_DORADA]
+  objectives: [objetivo-dorado]
+
+obligation_limits:
+  quantity: null
+  amount: null
+  frequency: null
+
+validity:
+  not_before_utc: "2026-10-05T00:00:00Z"
+  not_after_utc: null
+
+permit:
+  ttl_seconds: 60
+'''
+_VECTOR_CATALOGO = (b'{"version":1,"decision":"vector dorado r7","clases":{"monto_dinero":["x"],'
+                    b'"actos_externos":["x"],"frecuencia":["x"],"duracion":["x"],"tokens_costo":["x"]}}')
+
+
+def test_r7_vector_dorado_del_hash_con_dominio_v2(tmp_path: Path) -> None:
+    """MINOR-1: el hash EXACTO de este snapshot, fijado como vector dorado. La
+    carga no lleva commit ni timestamps — solo blobs verificados — asi que este
+    valor solo cambia si cambia lo que entra al hash o su dominio (v2). Con el
+    mutante «-v1», el hash cambia y esta prueba rompe."""
+    repo = tmp_path / "vector"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "policy" / "faro").mkdir(parents=True)
+    (repo / "policy" / "faro" / "catalogo-topes.json").write_bytes(_VECTOR_CATALOGO)
+    (repo / "policy" / "faro" / "vector.yaml").write_bytes(_VECTOR_REGLA)
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "vector")
+    snap = _cargar(repo, _git(repo, "rev-parse", "HEAD").strip(),
+                   _git(repo, "rev-parse", "HEAD:policy").strip())
+    assert snap.snapshot_hash == (
+        "sha256:7ebf77751860ca24ee39bf1465f40b6497803a4577b0fbfe3229f69b1e858800")
