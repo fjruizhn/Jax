@@ -207,9 +207,10 @@ def _clasificar(entradas) -> list:
         # —sin extension, punto de ancho completo, cirilicos, colas— niega el
         # snapshot: aqui no se ignora nada en silencio (§6.5).
         _RE_INFRAESTRUCTURA = re.compile(r"[a-z][a-z0-9.-]{0,63}\.(json|md)\Z")
-        if nombre == "README.md" or (nombre.startswith("schemas/")
-                                     and nombre.count("/") == 1
-                                     and _RE_INFRAESTRUCTURA.fullmatch(nombre[8:])):
+        if nombre in ("README.md", "catalogo-topes.json") or (
+                nombre.startswith("schemas/")
+                and nombre.count("/") == 1
+                and _RE_INFRAESTRUCTURA.fullmatch(nombre[8:])):
             continue
         raise RuleSnapshotError(
             f"{entrada.ruta}: archivo no regla y no infraestructura conocida (§6.5: nada en silencio)")

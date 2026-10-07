@@ -230,21 +230,8 @@
           ]
         },
         "resource": {
-          "enum": [
-            "actos_externos.compras",
-            "actos_externos.correos",
-            "actos_externos.mensajes",
-            "actos_externos.pagos",
-            "actos_externos.publicaciones",
-            "duracion.segundos",
-            "frecuencia.por_dia",
-            "frecuencia.por_hora",
-            "monto_dinero.hnl",
-            "monto_dinero.usd",
-            "tokens_costo.tokens",
-            "tokens_costo.usd"
-          ],
-          "description": "<clase>.<subid> del catalogo cerrado compartido con el runtime (jax/faro/catalogo_topes.py). Fuera de ahi no hay tope."
+          "type": "string",
+          "description": "<clase>.<subid> del catalogo cerrado (policy/faro/catalogo-topes.json). Atado a SU clase por oneOf: un subid de otra clase no pasa."
         },
         "maximum": {
           "type": "integer",
@@ -255,7 +242,96 @@
           "type": "string",
           "pattern": "^[A-Za-z0-9_.:-]{1,32}$"
         }
-      }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "resource_class": {
+              "const": "actos_externos"
+            },
+            "resource": {
+              "enum": [
+                "actos_externos.compras",
+                "actos_externos.correos",
+                "actos_externos.mensajes",
+                "actos_externos.pagos",
+                "actos_externos.publicaciones"
+              ]
+            }
+          },
+          "required": [
+            "resource_class",
+            "resource"
+          ]
+        },
+        {
+          "properties": {
+            "resource_class": {
+              "const": "duracion"
+            },
+            "resource": {
+              "enum": [
+                "duracion.segundos"
+              ]
+            }
+          },
+          "required": [
+            "resource_class",
+            "resource"
+          ]
+        },
+        {
+          "properties": {
+            "resource_class": {
+              "const": "frecuencia"
+            },
+            "resource": {
+              "enum": [
+                "frecuencia.por_dia",
+                "frecuencia.por_hora"
+              ]
+            }
+          },
+          "required": [
+            "resource_class",
+            "resource"
+          ]
+        },
+        {
+          "properties": {
+            "resource_class": {
+              "const": "monto_dinero"
+            },
+            "resource": {
+              "enum": [
+                "monto_dinero.hnl",
+                "monto_dinero.usd"
+              ]
+            }
+          },
+          "required": [
+            "resource_class",
+            "resource"
+          ]
+        },
+        {
+          "properties": {
+            "resource_class": {
+              "const": "tokens_costo"
+            },
+            "resource": {
+              "enum": [
+                "tokens_costo.tokens",
+                "tokens_costo.usd"
+              ]
+            }
+          },
+          "required": [
+            "resource_class",
+            "resource"
+          ]
+        }
+      ]
     }
   }
 }

@@ -223,18 +223,105 @@ def test_r2_recurso_fabricado_niega_en_runtime(recurso: str) -> None:
     assert es_recurso_sin_tope(recurso)          # el runtime los deja sin tope (TopeProhibido)
 
 
-def test_r2_el_catalogo_es_identico_en_json_python_y_runtime() -> None:
+# --------------------------------------- ronda 4: la decision vive en policy/** (M-7)
+
+LITERAL_DECISION_FERNANDO = {
+    "version": 1,
+    "decision": "Fernando 2026-10-06: solo actos y dinero; nunca conexiones, concurrencia, workers, hilos, procesos ni agentes (D-4)",
+    "clases": {
+        "monto_dinero": ["hnl", "usd"],
+        "actos_externos": ["mensajes", "correos", "publicaciones", "compras", "pagos"],
+        "frecuencia": ["por_hora", "por_dia"],
+        "duracion": ["segundos"],
+        "tokens_costo": ["tokens", "usd"],
+    },
+}
+
+
+def test_r4_el_catalogo_es_el_literal_exacto_de_la_decision_de_fernando() -> None:
+    """C2: si alguien agrega «agentes» (o cualquier cambio) a los datos Y al
+    espejo a la vez, esta prueba lo ve — compara contra el LITERAL copiado aqui."""
     import json
-    from jax.faro.catalogo_topes import CATALOGO_TOPES, es_recurso_de_catalogo, recursos_del_catalogo
+    from jax.faro.catalogo_topes import CATALOGO_TOPES, DECISION_CATALOGO, cargar_catalogo
+    ruta = Path(__file__).resolve().parents[2] / "policy" / "faro" / "catalogo-topes.json"
+    assert json.loads(ruta.read_text()) == LITERAL_DECISION_FERNANDO
+    clases, decision = cargar_catalogo(ruta)
+    assert decision == LITERAL_DECISION_FERNANDO["decision"]
+    assert {c: list(s) for c, s in clases.items()} == LITERAL_DECISION_FERNANDO["clases"]
+    assert dict(CATALOGO_TOPES) == {c: tuple(s) for c, s in LITERAL_DECISION_FERNANDO["clases"].items()}
+    assert DECISION_CATALOGO == LITERAL_DECISION_FERNANDO["decision"]
+
+
+def test_r4_el_espejo_json_ata_cada_recurso_a_su_clase() -> None:
+    """monto_dinero + tokens_costo.usd tambien falla en el JSON: cada variante
+    oneOf fija la clase (const) y solo SUS recursos."""
+    import json
+    from jax.faro.catalogo_topes import CATALOGO_TOPES
     espejo = json.loads((Path(__file__).resolve().parents[2] / "policy" / "faro"
                          / "schemas" / "rule-v1.schema.json").read_text())
-    enum_json = espejo["properties"]["tope"]["properties"]["resource"]["enum"]
-    assert sorted(enum_json) == sorted(recursos_del_catalogo())
-    for recurso in recursos_del_catalogo():
-        assert es_recurso_de_catalogo(recurso)
-    for clase in CATALOGO_TOPES:
-        for subid in CATALOGO_TOPES[clase]:
-            assert es_recurso_de_catalogo(f"{clase}.{subid}")
+    variantes = espejo["properties"]["tope"]["oneOf"]
+    por_clase = {v["properties"]["resource_class"]["const"]:
+                 v["properties"]["resource"]["enum"] for v in variantes}
+    assert sorted(por_clase) == sorted(CATALOGO_TOPES)
+    for clase, subids in CATALOGO_TOPES.items():
+        assert sorted(por_clase[clase]) == sorted(f"{clase}.{s}" for s in subids)
+    assert "monto_dinero.usd" in por_clase["monto_dinero"]
+    assert "tokens_costo.usd" not in por_clase["monto_dinero"]     # clase ajena: atado
+
+
+def test_r4_subid_valido_de_otra_clase_niega(C=None) -> None:
+    """C3: el subid existe en el catalogo pero en OTRA clase."""
+    datos = dict(load_strict_yaml(TOPE))
+    datos["tope"] = {"resource_class": "monto_dinero", "resource": "tokens_costo.usd",
+                     "maximum": 2, "period": "hora"}
+    with pytest.raises(RuleSchemaError) as excinfo:
+        validar_regla(datos)
+    assert "SU clase" in str(excinfo.value)
+    datos["tope"]["resource"] = "actos_externos.tokens"
+    datos["tope"]["resource_class"] = "actos_externos"
+    with pytest.raises(RuleSchemaError):
+        validar_regla(datos)
+
+
+def test_r4_el_catalogo_es_inmutable_en_el_proceso() -> None:
+    from jax.faro.catalogo_topes import CATALOGO_TOPES
+    with pytest.raises(TypeError):
+        CATALOGO_TOPES["actos_externos"] = CATALOGO_TOPES["actos_externos"] + ("agentes",)
+    with pytest.raises(TypeError):
+        CATALOGO_TOPES["nueva"] = ("x",)
+    assert not __import__("jax.faro.catalogo_topes", fromlist=["x"]).es_recurso_de_catalogo("actos_externos.agentes")
+
+
+def test_r4_catalogo_invalido_o_ausente_falla_cerrado(tmp_path: Path) -> None:
+    import json as J
+    from jax.faro.catalogo_topes import CatalogoTopesInvalido, cargar_catalogo
+    with pytest.raises(CatalogoTopesInvalido):
+        cargar_catalogo(tmp_path / "no-existe.json")
+    for malo in [{"version": 2, "decision": "x", "clases": {"a": ["b"]}},
+                 {"version": 1, "decision": "x", "clases": {"a": ["b", "b"]}},
+                 {"version": 1, "decision": "x", "clases": {"a": ["B"]}},
+                 {"version": 1, "decision": "x", "clases": {}},
+                 {"version": 1, "decision": "x"},
+                 {"version": 1, "decision": "", "clases": {"a": ["b"]}},
+                 {"version": True, "decision": "x", "clases": {"a": ["b"]}}]:
+        ruta = tmp_path / "malo.json"
+        ruta.write_text(J.dumps(malo))
+        with pytest.raises(CatalogoTopesInvalido):
+            cargar_catalogo(ruta)
+
+
+def test_r4_snapshot_con_mismo_arbol_pero_otro_commit_no_es_igual(tmp_path: Path) -> None:
+    """C10: __eq__ que ignore el commit haria pasar por «el mismo» un snapshot
+    de otra revision. El commit es parte de la identidad."""
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
+    a = _cargar(repo, commit, arbol)
+    (repo / "otro.txt").write_text("x")
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "y")
+    c2 = _git(repo, "rev-parse", "HEAD")
+    b = _cargar(repo, c2, arbol)                       # mismo arbol policy, otro commit
+    assert b.commit == c2 and a.commit == commit
+    assert a != b and not (a == b)                      # C10: ignorar el commit rompe esto
 
 
 def test_r2_copias_y_pickle_no_fabrican(tmp_path: Path) -> None:

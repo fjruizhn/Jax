@@ -56,7 +56,6 @@ _RE_UNIDAD = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 _RE_RECURSO = re.compile(r"[a-z0-9_.-]{1,48}\Z")
 _RE_PERIODO = re.compile(r"[A-Za-z0-9_.:-]{1,32}\Z")
 _RE_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
-_RE_PALABRAS = re.compile(r"[._-]+")
 
 _CLAVES_TOPE_NIVEL = frozenset({"schema_version", "kind", "rule_id", "effect", "action_class",
                                 "scope", "obligation_limits", "validity", "permit", "tope"})
