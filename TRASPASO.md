@@ -14,3 +14,4 @@
 
 1. Cambiar `MappingProxyType` a `CatalogoTopes` sellado cuando se confirme el SHA r6 final de #370 y reapilar sobre él.
 2. Volver a correr suites y pisos sobre el SHA final, actualizar PR #371 y dejar el reporte en `~/encargos-codex/entrega-codex-faro-f11-368-369-371-r3.md`.
+- CI GitHub en #371 r5: `faro-bitacora-db` falla en casos de `tests/test_faro_topes_db.py` que usan el recurso obsoleto `tokens`; el mismo fallo está en #370 r5. Se informó a Hyde para que lo corrija en la rama de origen, sin alterar ese trabajo.
