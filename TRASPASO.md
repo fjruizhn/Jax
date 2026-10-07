@@ -33,6 +33,7 @@ entrada está en `~/encargos-codex/jax-faro-f11-veredicto-368-369-371-r2.md`.
 - La prueba E10 llega al constructor y mata la mutación que elimina el rechazo de payload Block
   4 heredado.
 - Pisos verificados en esta rama: codec 19, MariaDB 1, ratificaciones 12.
+- Se incorporó desde #368 la instalación de `pymysql` en el paso Python 3.14, necesaria para el test MariaDB del workflow.
 - Suite `tests/policy/test_authority_ledger*.py`: 53 passed. K3, K8, D2, D3, E4 y E10 muertos.
 
 ## Falta
