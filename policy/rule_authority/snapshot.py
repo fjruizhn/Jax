@@ -59,7 +59,10 @@ _TESTIGO = object()
 _PREFIJO = "faro/"                      # rutas relativas al arbol policy/ ya verificado
 _RE_NOMBRE_CANONICO = re.compile(r"[a-z][a-z0-9-]{0,63}\.yaml\Z")
 _RE_OBJETO = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
-_DOMINIO_SNAPSHOT = "jax-faro-policy-snapshot-v1"
+# r6: v2 — cambia lo que entra al hash: el catalogo sellado (CatalogoTopes) y
+# su piso D-4 de clases fijas en codigo hacen que el mismo pin no pueda cargar
+# igual que en v1.
+_DOMINIO_SNAPSHOT = "jax-faro-policy-snapshot-v2"
 
 
 def _hash_dominio(dominio: str, carga: bytes) -> str:

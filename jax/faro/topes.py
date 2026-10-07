@@ -43,7 +43,7 @@ MAX_CANTIDAD = 2 ** 53                      # lo que un entero de JSON/float rep
 # catalogo no hay tope, punto. Desde B-3 el catalogo NO se lee de disco: llega por parametro
 # (el snapshot evaluado lo carga del arbol verificado del pin). Importar este modulo no falla;
 # topear sin catalogo, si: sin catalogo no se topea NADA.
-from .catalogo_topes import es_de_catalogo  # noqa: E402  (hoja, solo stdlib)
+from .catalogo_topes import CatalogoTopes, es_de_catalogo  # noqa: E402  (hoja, solo stdlib)
 
 
 def es_recurso_sin_tope(recurso: str, catalogo) -> bool:
@@ -139,6 +139,11 @@ def _entero(valor: object, nombre: str, minimo: int, maximo: int) -> int:
 class Topes:
     def __init__(self, almacen: AlmacenTopes, bitacora: Bitacora, *,
                  plazo_s: float = 5.0, catalogo=None):
+        # r6: el catalogo se exige SELLADO (CatalogoTopes, el del snapshot): un
+        # Mapping cualquiera —leido del disco, inyectado— no abre el conteo con tope.
+        if catalogo is not None and not isinstance(catalogo, CatalogoTopes):
+            raise ConfigFaroInvalida(
+                "catalogo: solo el SELLADO del snapshot (CatalogoTopes), no un Mapping cualquiera")
         self._almacen = almacen
         self._bitacora = bitacora
         self._plazo_s = plazo_s

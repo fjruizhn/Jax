@@ -203,6 +203,24 @@ def test_una_bitacora_que_falla_no_cambia_la_decision():
     del registros
 
 
+def test_r6_el_runtime_exige_el_catalogo_sellado_del_snapshot():
+    """r6: un Mapping cualquiera —dict, MappingProxyType, lo que sea— no abre el
+    conteo con tope: solo el CatalogoTopes sellado que salio del snapshot
+    verificado del pin. Fabricar el tipo a mano, tampoco."""
+    from types import MappingProxyType
+    from jax.faro.catalogo_topes import CatalogoTopes, CatalogoTopesInvalido
+    from jax.faro.config import ConfigFaroInvalida
+    misma_forma = {c: list(s) for c, s in CATALOGO.items()}
+    for falso in (misma_forma, MappingProxyType(misma_forma)):
+        with pytest.raises(ConfigFaroInvalida):
+            Topes(AlmacenMemoria(), Bitacora(emisores=[]), catalogo=falso)
+    with pytest.raises(CatalogoTopesInvalido):
+        es_de_catalogo("actos_externos.mensajes", MappingProxyType(misma_forma))
+    with pytest.raises(CatalogoTopesInvalido):
+        CatalogoTopes(misma_forma)
+    _topes()      # con el sellado (el que _topes inyecta por defecto): normal
+
+
 # --------------------------------------------------------------------------- #
 # aviso                                                                       #
 # --------------------------------------------------------------------------- #
