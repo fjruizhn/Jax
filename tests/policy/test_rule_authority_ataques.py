@@ -9,6 +9,7 @@ import dataclasses
 import hashlib
 import os
 import subprocess
+import tempfile
 import zlib
 from pathlib import Path
 
@@ -679,6 +680,40 @@ def test_r7_las_seis_palabras_de_d4_niego_como_subid(prohibida: str) -> None:
     with pytest.raises(CatalogoTopesInvalido) as excinfo:
         _cargar_catalogo_bytes(malvado)
     assert "prohibido por D-4" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("compuesta", [
+    # r8 (MAJOR del auditor r7): D-4 no es una comparacion de palabra exacta
+    "conexiones_db", "workers_max", "subprocesos", "multiagente", "num_hilos",
+    "agentes_lanzados", "concurrencia_max",
+    # las seis exactas siguen negando
+    "conexiones", "concurrencia", "workers", "hilos", "procesos", "agentes",
+])
+def test_r8_d4_niega_la_palabra_como_segmento_y_como_subcadena(compuesta: str) -> None:
+    """Un subid que CONTIENE una de las seis palabras (segmento separado por
+    ``_`` o fundida en una forma compuesta: ``subprocesos``, ``multiagente``)
+    niega igual que la palabra sola."""
+    for clase in ("actos_externos", "duracion"):
+        malvado = json.dumps({"version": 1, "decision": "x",
+                              "clases": {**LITERAL_DECISION_FERNANDO["clases"],
+                                         clase: [compuesta]}}).encode()
+        with pytest.raises(CatalogoTopesInvalido) as excinfo:
+            _cargar_catalogo_bytes(malvado)
+        assert "prohibido por D-4" in str(excinfo.value)
+
+
+def test_r8_d4_no_bloquea_los_subids_legitimos_del_catalogo() -> None:
+    """Contrapeso del control de subcadena: ningun subid de la decision de Fernando cae."""
+    assert _cargar_catalogo_bytes(CATALOGO_BYTES_REPO)
+
+
+def test_r8_catalogo_del_pin_no_deja_repos_temporales() -> None:
+    """MINOR r7: el helper no deja ``catalogo-pin-*`` en el directorio temporal."""
+    base = Path(tempfile.gettempdir())
+    antes = set(base.glob("catalogo-pin-*"))
+    catalogo_del_pin()
+    catalogo_del_pin(CATALOGO_BYTES_REPO)
+    assert set(base.glob("catalogo-pin-*")) <= antes
 
 
 def test_r7_subid_con_mayusculas_o_acentos_niega_igual() -> None:

@@ -49,6 +49,22 @@ CLASES_TOPEABLES = frozenset({"monto_dinero", "actos_externos", "frecuencia",
 # admite colarse por debajo de una clase admitida.
 PALABRAS_PROHIBIDAS_D4 = frozenset({"conexiones", "concurrencia", "workers",
                                     "hilos", "procesos", "agentes"})
+# r8: comparar la palabra exacta no alcanza (``conexiones_db``, ``num_hilos``,
+# ``subprocesos``, ``multiagente`` cargaban). Se niega la palabra como SEGMENTO
+# (separadores ``_``, ``-``, ``.``) y como SUBCADENA —de la palabra y de su
+# raiz en singular— para las formas compuestas.
+_RAICES_PROHIBIDAS_D4 = frozenset({"conexion", "concurrencia", "worker",
+                                   "hilo", "proceso", "agente"})
+_RE_SEPARADORES = re.compile(r"[_.\-]")
+
+
+def _viola_d4(subid: str) -> bool:
+    """True si el subid (tras NFC) es una palabra de D-4, la lleva como
+    segmento o la contiene fundida en una forma compuesta."""
+    normal = unicodedata.normalize("NFC", subid)
+    if any(seg in PALABRAS_PROHIBIDAS_D4 for seg in _RE_SEPARADORES.split(normal)):
+        return True
+    return any(raiz in normal for raiz in _RAICES_PROHIBIDAS_D4)
 
 # Emisor unico (r7, MAJOR-1): el snapshot registra AQUI su testigo al
 # importarse; la lista se llena una sola vez. La clase compara identidad — el
@@ -152,7 +168,7 @@ def _cargar_catalogo_bytes(crudo: bytes) -> dict[str, tuple[str, ...]]:
     M-8: la clave duplicada no gana — niega. Falla cerrado ante cualquier vicio.
     r6/r7: solo ``bytes`` de tipo EXACTO en UTF-8 estricto, texto normalizado a
     NFC (UTF-16/32 niegan en el decode; el BOM UTF-8, json.loads) y las clases
-    exactas de D-4, sin sus seis palabras como subid."""
+    exactas de D-4, sin sus seis palabras como subid (ni como segmento ni fundidas en otra)."""
     if type(crudo) is not bytes:
         raise CatalogoTopesInvalido("el catalogo se recibe como bytes exactos, no como texto")
     try:
@@ -187,7 +203,7 @@ def _cargar_catalogo_bytes(crudo: bytes) -> dict[str, tuple[str, ...]]:
         for subid in subids:
             if not isinstance(subid, str) or not _RE_SUBID.fullmatch(subid):
                 raise CatalogoTopesInvalido(f"clase {clase}: subid invalido {subid!r}")
-            if subid in PALABRAS_PROHIBIDAS_D4:            # r7, MAJOR-2: ni por debajo
+            if _viola_d4(subid):            # r7 MAJOR-2 / r8: ni por debajo, ni compuesta
                 raise CatalogoTopesInvalido(
                     f"clase {clase}: subid prohibido por D-4: {subid!r}")
             if subid in vistos:
