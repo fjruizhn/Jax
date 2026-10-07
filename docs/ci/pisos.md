@@ -116,6 +116,8 @@ Patrón vigente al migrar (2026-10-03, master 364ded9): `^671 passed`
 
 Piso actualizado 2026-10-04: `^688 passed`. Sobre el piso 683, se suman pruebas de payload hostil, timeout con cancelación, truncamiento explícito, cableado del perfil de prueba y concurrencia en peor caso; 0 skips.
 
+Piso actualizado 2026-10-07 (jax#371 r3): `^727 passed` (antes 726). `tests/test_faro_requirements.py` suma la prueba que exige el pymysql del job Python 3.14 fijado con los hashes de `requirements-faro.txt` (+1). Medido en el run 37615855610 de CI: 727 passed, 0 skips.
+
 ## `faro-bitacora-db/faro-db`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^40 passed`
