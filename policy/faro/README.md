@@ -30,6 +30,16 @@ ratificación sin coincidencia. La ratificación es una vez **por contenido**: l
 misma ruta puede volver a coincidir más abajo en la historia si los bytes
 regresan; retirar autoridad para siempre exige revocación explícita.
 
+## El catálogo viaja en el pin (B-3)
+
+`catalogo-topes.json` es parte del snapshot: el loader lo lee **del árbol Git ya
+verificado del pin** (modo 100644, OID recalculado, tope de tamaño — como las
+reglas), las reglas validan sus topes contra **ese** catálogo (nunca contra el
+del working tree), entra en el `snapshot_hash` y queda expuesto e inmutable en
+el snapshot sellado. Si falta o es inválido en el pin, el snapshot se niega
+entero. El runtime de topes lo recibe por parámetro del snapshot evaluado: sin
+catálogo no se topea nada. Claves duplicadas o extra en el JSON niegan.
+
 ## El tope declara su clase (R-4 — decisión de Fernando, 2026-10-06)
 
 Antes, si un recurso aceptaba tope se deducía de su **nombre** — y un nombre

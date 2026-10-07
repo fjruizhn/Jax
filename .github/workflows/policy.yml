@@ -501,9 +501,9 @@ jobs:
   # tests/test_faro_requirements.py). Piso exacto de tests CORRIDOS, cero saltados (un skip se ve igual
   # que verde). Medido 2026-10-05 en hall9000 con Python 3.14: 688 passed; re-medido el
   # 2026-10-06 (jax#370 r3): 720 passed — el catalogo cerrado de topes (decision de Fernando,
-  # R-4) agrego 32 pruebas de runtime (15 recursos fabricados que niegan + 12 del catalogo que
-  # topean + 5 de catalogo/estructura), y las de mecanica pasaron a recursos del catalogo
-  # (topes 72 -> 104). Sin skips. La CI usa Python 3.12 y confirma el mismo piso.
+  # R-4) agrego 32 pruebas de runtime, y las de mecanica pasaron a recursos del catalogo.
+  # Re-medido ronda 5 (B-3): 721 — el catalogo llega del pin por parametro y sin el no se
+  # topea nada (+1). Sin skips. La CI usa Python 3.12 y confirma el mismo piso.
   # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 104 +
   # control 170 + lanzador 77 + acl 43 + memoria 15; desde aviso, los pasos 0.3b y 0.3c y su auditoria). Las pruebas con bwrap y uids
   # reales estan en el job `faro-jaula`; las de la base real, en `faro-bitacora-db`.

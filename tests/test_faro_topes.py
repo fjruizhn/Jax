@@ -11,6 +11,8 @@ Reglas que se defienden:
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import asyncio
 import time
 
@@ -18,8 +20,12 @@ import pytest
 
 from jax.faro.aviso import Avisador, ConfigAviso, Credenciales
 from jax.faro.bitacora import Bitacora
-from jax.faro.catalogo_topes import CATALOGO_TOPES, es_recurso_de_catalogo, recursos_del_catalogo
+from jax.faro.catalogo_topes import (cargar_catalogo_bytes, es_de_catalogo,
+                                     recursos_del_catalogo)
 from jax.faro.topes import ResultadoTope, TopeProhibido, Topes
+
+RAIZ = Path(__file__).resolve().parents[1]
+CATALOGO = cargar_catalogo_bytes((RAIZ / "policy" / "faro" / "catalogo-topes.json").read_bytes())
 from tests._faro_falsos import AlmacenMemoria
 from tests._faro_utils import corre
 
@@ -27,6 +33,7 @@ from tests._faro_utils import corre
 def _topes(almacen=None, **kw):
     registros = []
     bit = Bitacora(emisores=[registros.append], observadores=kw.pop("observadores", ()))
+    kw.setdefault("catalogo", CATALOGO)          # B-3: del snapshot evaluado, nunca de disco
     return Topes(almacen if almacen is not None else AlmacenMemoria(), bit, **kw), registros
 
 
@@ -132,10 +139,10 @@ def test_el_catalogo_es_solo_de_actos_y_dinero_d4():
     # Decision de Fernando (2026-10-06): monto de dinero, actos externos,
     # frecuencia, duracion y tokens/costo. La lista negra por palabras murio:
     # fuera del catalogo no hay tope, punto.
-    assert sorted(CATALOGO_TOPES) == ["actos_externos", "duracion", "frecuencia",
-                                      "monto_dinero", "tokens_costo"]
-    assert es_recurso_de_catalogo("actos_externos.mensajes")
-    assert not es_recurso_de_catalogo("actos_externos.sockets")
+    assert sorted(CATALOGO) == ["actos_externos", "duracion", "frecuencia",
+                                "monto_dinero", "tokens_costo"]
+    assert es_de_catalogo("actos_externos.mensajes", CATALOGO)
+    assert not es_de_catalogo("actos_externos.sockets", CATALOGO)
 
 
 @pytest.mark.parametrize("kw", [
@@ -190,7 +197,7 @@ def test_una_bitacora_que_falla_no_cambia_la_decision():
     def rota(registro):
         raise OSError("sin bitacora")
     registros = []
-    t = Topes(AlmacenMemoria(), Bitacora(emisores=[rota]))
+    t = Topes(AlmacenMemoria(), Bitacora(emisores=[rota]), catalogo=CATALOGO)
     assert not corre(t.consumir(tenant="t1", recurso="tokens_costo.tokens", cantidad=1, tope=0)).permitido       # sigue negando
     assert corre(t.consumir(tenant="t1", recurso="tokens_costo.tokens", cantidad=1, tope=None)).permitido          # sigue sin negar
     del registros
@@ -209,7 +216,7 @@ def test_el_tope_alcanzado_y_el_consumo_sin_regla_llegan_al_aviso(tmp_path):
     async def caso():
         cfg = ConfigAviso(creds=ruta, intervalo_s=0.05, rafaga=10)
         async with Avisador(cfg, Credenciales("x", "1"), enviar=enviados.append, host="h") as av:
-            t = Topes(AlmacenMemoria(), Bitacora(emisores=[], observadores=[av]))
+            t = Topes(AlmacenMemoria(), Bitacora(emisores=[], observadores=[av]), catalogo=CATALOGO)
             await t.consumir(tenant="t1", recurso="tokens_costo.tokens", cantidad=1, tope=None)
             await t.consumir(tenant="t1", recurso="monto_dinero.hnl", cantidad=5, tope=1)
             await asyncio.sleep(0.2)
@@ -240,7 +247,7 @@ def test_minor4_el_guardia_de_d4_es_semantico_cualquier_recurso_de_agentes_queda
     assert _consumir(t, recurso=recurso, tope=None).permitido
 
 
-@pytest.mark.parametrize("recurso", list(recursos_del_catalogo()))
+@pytest.mark.parametrize("recurso", list(recursos_del_catalogo(CATALOGO)))
 def test_r3_solo_el_catalogo_topea_la_decision_reemplazo_la_lista_negra(recurso):
     # Decision de Fernando (2026-10-06): topea SOLO el catalogo de actos y
     # dinero. La premisa vieja («todo lo que no es de agentes topea») murio.
@@ -329,7 +336,17 @@ def test_r3_fabricados_e_infraestructura_nunca_llevan_tope(recurso):
     assert _consumir(t, recurso=recurso, tope=None).permitido    # medir si se puede
 
 
-@pytest.mark.parametrize("recurso", recursos_del_catalogo())
+@pytest.mark.parametrize("recurso", recursos_del_catalogo(CATALOGO))
 def test_r3_todo_el_catalogo_lleva_tope_y_mide(recurso):
     t, registros = _topes()
     assert _consumir(t, recurso=recurso, tope=5).permitido       # del catalogo: topea
+
+
+def test_r5_sin_catalogo_no_se_topea_nada():
+    # B-3: el catalogo llega del snapshot evaluado; sin el, TODO tope niega
+    # (TopeProhibido) y medir sigue permitido.
+    t, _ = _topes()
+    t._catalogo = None                                       # como si viniera sin catalogo
+    with pytest.raises(TopeProhibido):
+        _consumir(t, recurso="actos_externos.mensajes", tope=5)
+    assert _consumir(t, recurso="actos_externos.mensajes", tope=None).permitido

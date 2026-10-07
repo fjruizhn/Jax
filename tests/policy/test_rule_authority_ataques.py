@@ -22,9 +22,24 @@ from policy.rule_authority.snapshot import (
     load_trusted_policy_snapshot,
 )
 
+import json
+
+from jax.faro.catalogo_topes import cargar_catalogo_bytes
+
 FIXTURES = Path(__file__).parent / "fixtures" / "faro_rules"
 REGLA = (FIXTURES / "regla-ejemplo.yaml").read_bytes()
 TOPE = (FIXTURES / "regla-ejemplo-tope.yaml").read_bytes()
+
+RAIZ = Path(__file__).resolve().parents[2]
+RUTA_CATALOGO = "policy/faro/catalogo-topes.json"
+CATALOGO_BYTES_REPO = (RAIZ / RUTA_CATALOGO).read_bytes()
+CATALOGO = cargar_catalogo_bytes(CATALOGO_BYTES_REPO)
+
+
+def validar_regla(datos, **kwargs):
+    from policy.rule_authority.schema import validar_regla as _validar
+    kwargs.setdefault("catalogo", CATALOGO)
+    return _validar(datos, **kwargs)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -33,10 +48,13 @@ def _git(repo: Path, *args: str) -> str:
     return r.stdout.decode().strip()
 
 
-def _repo(tmp: Path, files: dict[str, bytes], nombre: str = "repo") -> tuple[Path, str, str]:
+def _repo(tmp: Path, files: dict[str, bytes], nombre: str = "repo",
+          con_catalogo: bool = True) -> tuple[Path, str, str]:
     repo = tmp / nombre
     repo.mkdir(parents=True)
     _git(repo, "init", "-q", "-b", "main")
+    if con_catalogo:
+        files = {RUTA_CATALOGO: CATALOGO_BYTES_REPO, **files}
     for ruta, contenido in files.items():
         destino = repo / ruta
         destino.parent.mkdir(parents=True, exist_ok=True)
@@ -167,6 +185,8 @@ def test_ataque_i_symlink_a_regla_valida_niega(tmp_path: Path) -> None:
     repo.mkdir(parents=True)
     _git(repo, "init", "-q", "-b", "main")
     (repo / "policy" / "faro").mkdir(parents=True)
+    (repo / "policy" / "faro" / "catalogo-topes.json").write_bytes(
+        (RAIZ / "policy" / "faro" / "catalogo-topes.json").read_bytes())
     os.symlink(str(destino), repo / "policy" / "faro" / "enlace.yaml")
     _git(repo, "add", "-A")
     _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x")
@@ -217,10 +237,10 @@ def test_r2_recurso_fabricado_o_trasladado_niega_en_schema(clase: str, recurso: 
 
 @pytest.mark.parametrize("recurso", RECURSOS_PROHIBIDOS_R2)
 def test_r2_recurso_fabricado_niega_en_runtime(recurso: str) -> None:
-    from jax.faro.catalogo_topes import es_recurso_de_catalogo
+    from jax.faro.catalogo_topes import es_de_catalogo
     from jax.faro.topes import es_recurso_sin_tope
-    assert not es_recurso_de_catalogo(recurso)
-    assert es_recurso_sin_tope(recurso)          # el runtime los deja sin tope (TopeProhibido)
+    assert not es_de_catalogo(recurso, CATALOGO)
+    assert es_recurso_sin_tope(recurso, CATALOGO)   # el runtime los deja sin tope (TopeProhibido)
 
 
 # --------------------------------------- ronda 4: la decision vive en policy/** (M-7)
@@ -239,31 +259,26 @@ LITERAL_DECISION_FERNANDO = {
 
 
 def test_r4_el_catalogo_es_el_literal_exacto_de_la_decision_de_fernando() -> None:
-    """C2: si alguien agrega «agentes» (o cualquier cambio) a los datos Y al
-    espejo a la vez, esta prueba lo ve — compara contra el LITERAL copiado aqui."""
-    import json
-    from jax.faro.catalogo_topes import CATALOGO_TOPES, DECISION_CATALOGO, cargar_catalogo
-    ruta = Path(__file__).resolve().parents[2] / "policy" / "faro" / "catalogo-topes.json"
-    assert json.loads(ruta.read_text()) == LITERAL_DECISION_FERNANDO
-    clases, decision = cargar_catalogo(ruta)
-    assert decision == LITERAL_DECISION_FERNANDO["decision"]
+    """C2 + B-3(6): los BYTES del arbol git de HEAD (no del disco suelto) contra
+    el LITERAL copiado aqui; y el catalogo cargado de esos bytes, igual."""
+    import subprocess
+    crudo = subprocess.run(["git", "show", "HEAD:policy/faro/catalogo-topes.json"],
+                           capture_output=True, check=True, cwd=RAIZ).stdout
+    assert json.loads(crudo) == LITERAL_DECISION_FERNANDO
+    clases = cargar_catalogo_bytes(crudo)
     assert {c: list(s) for c, s in clases.items()} == LITERAL_DECISION_FERNANDO["clases"]
-    assert dict(CATALOGO_TOPES) == {c: tuple(s) for c, s in LITERAL_DECISION_FERNANDO["clases"].items()}
-    assert DECISION_CATALOGO == LITERAL_DECISION_FERNANDO["decision"]
 
 
 def test_r4_el_espejo_json_ata_cada_recurso_a_su_clase() -> None:
     """monto_dinero + tokens_costo.usd tambien falla en el JSON: cada variante
     oneOf fija la clase (const) y solo SUS recursos."""
     import json
-    from jax.faro.catalogo_topes import CATALOGO_TOPES
-    espejo = json.loads((Path(__file__).resolve().parents[2] / "policy" / "faro"
-                         / "schemas" / "rule-v1.schema.json").read_text())
+    espejo = json.loads((RAIZ / "policy" / "faro" / "schemas" / "rule-v1.schema.json").read_text())
     variantes = espejo["properties"]["tope"]["oneOf"]
     por_clase = {v["properties"]["resource_class"]["const"]:
                  v["properties"]["resource"]["enum"] for v in variantes}
-    assert sorted(por_clase) == sorted(CATALOGO_TOPES)
-    for clase, subids in CATALOGO_TOPES.items():
+    assert sorted(por_clase) == sorted(CATALOGO)
+    for clase, subids in CATALOGO.items():
         assert sorted(por_clase[clase]) == sorted(f"{clase}.{s}" for s in subids)
     assert "monto_dinero.usd" in por_clase["monto_dinero"]
     assert "tokens_costo.usd" not in por_clase["monto_dinero"]     # clase ajena: atado
@@ -284,30 +299,31 @@ def test_r4_subid_valido_de_otra_clase_niega(C=None) -> None:
 
 
 def test_r4_el_catalogo_es_inmutable_en_el_proceso() -> None:
-    from jax.faro.catalogo_topes import CATALOGO_TOPES
     with pytest.raises(TypeError):
-        CATALOGO_TOPES["actos_externos"] = CATALOGO_TOPES["actos_externos"] + ("agentes",)
+        CATALOGO["actos_externos"] = CATALOGO["actos_externos"] + ("agentes",)  # type: ignore[index]
     with pytest.raises(TypeError):
-        CATALOGO_TOPES["nueva"] = ("x",)
-    assert not __import__("jax.faro.catalogo_topes", fromlist=["x"]).es_recurso_de_catalogo("actos_externos.agentes")
+        CATALOGO["nueva"] = ("x",)                                              # type: ignore[index]
+    from jax.faro.catalogo_topes import es_de_catalogo
+    assert not es_de_catalogo("actos_externos.agentes", CATALOGO)
 
 
-def test_r4_catalogo_invalido_o_ausente_falla_cerrado(tmp_path: Path) -> None:
+def test_r4_catalogo_invalido_falla_cerrado() -> None:
     import json as J
-    from jax.faro.catalogo_topes import CatalogoTopesInvalido, cargar_catalogo
-    with pytest.raises(CatalogoTopesInvalido):
-        cargar_catalogo(tmp_path / "no-existe.json")
-    for malo in [{"version": 2, "decision": "x", "clases": {"a": ["b"]}},
-                 {"version": 1, "decision": "x", "clases": {"a": ["b", "b"]}},
-                 {"version": 1, "decision": "x", "clases": {"a": ["B"]}},
-                 {"version": 1, "decision": "x", "clases": {}},
-                 {"version": 1, "decision": "x"},
-                 {"version": 1, "decision": "", "clases": {"a": ["b"]}},
-                 {"version": True, "decision": "x", "clases": {"a": ["b"]}}]:
-        ruta = tmp_path / "malo.json"
-        ruta.write_text(J.dumps(malo))
+    from jax.faro.catalogo_topes import CatalogoTopesInvalido
+    for malo in [b"no es json",
+                 J.dumps({"version": 2, "decision": "x", "clases": {"a": ["b"]}}).encode(),
+                 J.dumps({"version": 1, "decision": "x", "clases": {"a": ["b", "b"]}}).encode(),
+                 J.dumps({"version": 1, "decision": "x", "clases": {"a": ["B"]}}).encode(),
+                 J.dumps({"version": 1, "decision": "x", "clases": {}}).encode(),
+                 J.dumps({"version": 1, "decision": "x"}).encode(),
+                 J.dumps({"version": 1, "decision": "", "clases": {"a": ["b"]}}).encode(),
+                 J.dumps({"version": True, "decision": "x", "clases": {"a": ["b"]}}).encode(),
+                 J.dumps({"version": 1, "decision": "x", "clases": {"a": []}}).encode(),
+                 J.dumps({"version": 1, "decision": "x", "clases": {"a": ["b"]},
+                          "extra": 1}).encode(),
+                 b'{"version": 1, "version": 1, "decision": "x", "clases": {"a": ["b"]}}']:
         with pytest.raises(CatalogoTopesInvalido):
-            cargar_catalogo(ruta)
+            cargar_catalogo_bytes(malo)
 
 
 def test_r4_snapshot_con_mismo_arbol_pero_otro_commit_no_es_igual(tmp_path: Path) -> None:
@@ -377,6 +393,8 @@ def test_r2_nombres_que_esquivan_la_vista_niegan(tmp_path: Path, nombre: str) ->
     _git(repo, "init", "-q", "-b", "main")
     (repo / "policy" / "faro").mkdir(parents=True)
     (repo / "policy" / "faro" / nombre).write_bytes(REGLA)
+    (repo / "policy" / "faro" / "catalogo-topes.json").write_bytes(
+        (RAIZ / "policy" / "faro" / "catalogo-topes.json").read_bytes())
     _git(repo, "add", "-A")
     _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x")
     with pytest.raises(RuleSnapshotError):
@@ -407,3 +425,100 @@ def test_r3_las_dos_listas_de_identity_foundation_son_iguales() -> None:
                 listas.append(sorted(_re.findall(r"(?:tests/policy|policy/enforcement_evidence)/[a-z_0-9]+\.py", run)))
     assert len(listas) == 2, f"se esperaban exactamente 2 pasos con la lista, hay {len(listas)}"
     assert listas[0] == listas[1], "las dos listas de Identity Foundation divergen"
+
+
+# ------------------------------------- ronda 5: el catalogo sale del PIN (B-3)
+
+import json as _json5
+
+
+def _catalogo_bytes(clases: dict) -> bytes:
+    return _json5.dumps({"version": 1, "decision": "prueba", "clases": clases}).encode()
+
+
+def test_r5_ataque_k_catalogo_estrechado_en_el_pin_la_regla_con_tope_niega(tmp_path: Path) -> None:
+    """K: el commit fijado estrecho el catalogo (sin actos_externos); la regla
+    con tope actos_externos.mensajes NO puede validar contra el catalogo del
+    working tree — niega contra el del PIN."""
+    estrecho = _catalogo_bytes({"monto_dinero": ["usd"]})
+    repo, commit, arbol = _repo(tmp_path, {
+        RUTA_CATALOGO: estrecho,
+        "policy/faro/regla.yaml": TOPE,            # tope actos_externos.mensajes
+    })
+    with pytest.raises(RuleSnapshotError) as excinfo:
+        _cargar(repo, commit, arbol)
+    assert "regla invalida" in str(excinfo.value)
+
+
+def test_r5_catalogo_invalido_en_el_pin_niega_el_snapshot(tmp_path: Path) -> None:
+    repo, commit, arbol = _repo(tmp_path, {RUTA_CATALOGO: b"no es json"})
+    with pytest.raises(RuleSnapshotError):
+        _cargar(repo, commit, arbol)
+
+
+def test_r5_catalogo_con_clave_duplicada_en_el_pin_niega(tmp_path: Path) -> None:
+    duplicado = b'{"version": 1, "version": 1, "decision": "x", "clases": {"a": ["b"]}}'
+    repo, commit, arbol = _repo(tmp_path, {RUTA_CATALOGO: duplicado})
+    with pytest.raises(RuleSnapshotError):
+        _cargar(repo, commit, arbol)
+
+
+def test_r5_catalogo_con_bit_de_ejecucion_en_el_pin_niega(tmp_path: Path) -> None:
+    repo = tmp_path / "r"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "policy" / "faro").mkdir(parents=True)
+    (repo / "policy" / "faro" / "catalogo-topes.json").write_bytes(CATALOGO_BYTES_REPO)
+    os.chmod(repo / "policy" / "faro" / "catalogo-topes.json", 0o755)
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x")
+    with pytest.raises(RuleSnapshotError):
+        _cargar(repo, _git(repo, "rev-parse", "HEAD"), _git(repo, "rev-parse", "HEAD:policy"))
+
+
+def test_r5_mutar_el_catalogo_del_disco_no_cambia_el_snapshot(tmp_path: Path) -> None:
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
+    antes = _cargar(repo, commit, arbol)
+    (repo / "policy" / "faro" / "catalogo-topes.json").write_bytes(b"basura")
+    os.symlink("/etc/passwd", tmp_path / "senuelo")
+    (repo / "policy" / "faro" / "catalogo-topes.json").unlink()
+    os.symlink("/etc/passwd", repo / "policy" / "faro" / "catalogo-topes.json")
+    despues = _cargar(repo, commit, arbol)
+    assert despues.snapshot_hash == antes.snapshot_hash
+    assert despues.catalogo_hash == antes.catalogo_hash
+
+
+def test_r5_el_hash_del_snapshot_cambia_si_cambia_el_catalogo(tmp_path: Path) -> None:
+    catalogo_a = (RAIZ / "policy" / "faro" / "catalogo-topes.json").read_bytes()
+    catalogo_b = _catalogo_bytes({"monto_dinero": ["usd"]})       # mismo formato, otra decision
+    a = _repo(tmp_path / "a", {"policy/faro/ejemplo.yaml": REGLA, RUTA_CATALOGO: catalogo_a})
+    b = _repo(tmp_path / "b", {"policy/faro/ejemplo.yaml": REGLA, RUTA_CATALOGO: catalogo_b})
+    assert _cargar(*a).snapshot_hash != _cargar(*b).snapshot_hash
+
+
+def test_r5_el_snapshot_expone_el_catalogo_inmutable_del_pin(tmp_path: Path) -> None:
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo-tope.yaml": TOPE})
+    snap = _cargar(repo, commit, arbol)
+    assert snap.catalogo is not None
+    assert "actos_externos" in snap.catalogo
+    with pytest.raises(TypeError):
+        snap.catalogo["nueva_clase"] = ("x",)                      # type: ignore[index]
+
+
+def test_r5_json_suelto_en_faro_que_no_es_el_catalogo_niega(tmp_path: Path) -> None:
+    """N6: cualquier *.json en faro/ que no sea catalogo-topes.json niega. Con
+    contenido de catalogo VALIDO pero nombre ajeno: si el clasificador lo
+    aceptara como catalogo, el snapshot cargaria — y debe negar por NOMBRE."""
+    otro_valido = _catalogo_bytes({"monto_dinero": ["usd"]})
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/otro.json": otro_valido},
+                                con_catalogo=False)
+    with pytest.raises(RuleSnapshotError):
+        _cargar(repo, commit, arbol)             # con el mutante N6 CARGARIA: por eso muere
+
+
+def test_r5_regla_con_tope_sin_catalogo_en_validacion_niega() -> None:
+    from policy.rule_authority.schema import validar_regla as _validar
+    datos = dict(load_strict_yaml(TOPE))
+    with pytest.raises(RuleSchemaError) as excinfo:
+        _validar(datos)                                           # sin catalogo: sin tope
+    assert "sin catalogo" in str(excinfo.value)

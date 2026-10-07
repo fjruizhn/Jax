@@ -8,18 +8,29 @@ schema tiene la prueba que lo atrapa.
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
 import pytest
 
 from policy.canonicalization.errors import StrictYAMLError
 from policy.canonicalization.strict_yaml import load_strict_yaml
+from jax.faro.catalogo_topes import cargar_catalogo_bytes
 from policy.rule_authority.errors import RuleSchemaError
-from policy.rule_authority.schema import (
-    CLASES_RECURSO_CON_TOPE,
-    TTL_MAX_POR_DEFECTO,
-    validar_regla,
-)
+from policy.rule_authority.schema import TTL_MAX_POR_DEFECTO, validar_regla as _validar
+
+# El catalogo de la decision de Fernando (B-3): llega del pin, nunca de un global
+CATALOGO = cargar_catalogo_bytes(json.dumps(
+    {"version": 1, "decision": "Fernando 2026-10-06: solo actos y dinero",
+     "clases": {"monto_dinero": ["hnl", "usd"],
+                "actos_externos": ["mensajes", "correos", "publicaciones", "compras", "pagos"],
+                "frecuencia": ["por_hora", "por_dia"], "duracion": ["segundos"],
+                "tokens_costo": ["tokens", "usd"]}}).encode())
+
+
+def validar_regla(datos, **kwargs):
+    kwargs.setdefault("catalogo", CATALOGO)
+    return _validar(datos, **kwargs)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "faro_rules"
 
@@ -293,7 +304,7 @@ def test_tope_con_clase_fuera_de_vocabulario_rechaza() -> None:
 
 def test_el_vocabulario_de_clases_es_el_de_actos_y_dinero() -> None:
     # DECISION de Fernando (2026-10-06): solo actos y dinero; jamas infraestructura.
-    assert CLASES_RECURSO_CON_TOPE == (
+    assert tuple(sorted(CATALOGO)) == (
         "actos_externos", "duracion", "frecuencia", "monto_dinero", "tokens_costo",
     )
 
@@ -419,7 +430,7 @@ def test_el_espejo_json_existe_y_sus_vocabularios_coinciden() -> None:
     assert propiedades["effect"]["enum"] == ["PERMIT"]
     assert propiedades["action_class"]["enum"] == ["REVERSIBLE", "OBLIGATING"]
     clases = propiedades["tope"]["properties"]["resource_class"]["enum"]
-    assert tuple(clases) == CLASES_RECURSO_CON_TOPE
+    assert tuple(clases) == tuple(sorted(CATALOGO))          # B-3: del catalogo, no de un global
     assert espejo.get("additionalProperties") is False
 
 

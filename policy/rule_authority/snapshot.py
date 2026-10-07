@@ -37,6 +37,7 @@ import re
 import unicodedata
 from pathlib import Path
 
+from jax.faro.catalogo_topes import CatalogoTopesInvalido, cargar_catalogo_bytes
 from jax.faro.git_objetos import (
     MAX_BLOB_BYTES,
     FuenteInvalida,
@@ -142,25 +143,30 @@ class TrustedPolicySnapshot:
     """El snapshot sellado. El hash se RECALCULA en la construccion: cualquier
     combinacion de reglas que no corresponda a su propio hash, niega."""
 
-    __slots__ = ("commit", "policy_tree_oid", "reglas", "snapshot_hash",
-                 "repositorio", "procedencia")
+    __slots__ = ("commit", "policy_tree_oid", "reglas", "catalogo", "catalogo_oid",
+                 "catalogo_hash", "snapshot_hash", "repositorio", "procedencia")
 
     def __init__(self, *, commit: str, policy_tree_oid: str, reglas: tuple[ReglaSellada, ...],
+                 catalogo: object = None, catalogo_oid: str = "", catalogo_hash: str = "",
                  repositorio: str, procedencia: str, _testigo: object = None) -> None:
         if _testigo is not _TESTIGO:
             raise RuleSnapshotError("TrustedPolicySnapshot no se fabrica por la API publica")
-        carga = "".join(f"{r.ruta}\0{r.modo}\0{r.blob_oid}\0{r.content_hash}\n"
-                        for r in reglas).encode()
+        carga = (f"catalogo-topes.json\0100644\0{catalogo_oid}\0{catalogo_hash}\n"
+                 + "".join(f"{r.ruta}\0{r.modo}\0{r.blob_oid}\0{r.content_hash}\n"
+                           for r in reglas)).encode()
         object.__setattr__(self, "commit", commit)
         object.__setattr__(self, "policy_tree_oid", policy_tree_oid)
         object.__setattr__(self, "reglas", tuple(reglas))
+        object.__setattr__(self, "catalogo", catalogo)
+        object.__setattr__(self, "catalogo_oid", catalogo_oid)
+        object.__setattr__(self, "catalogo_hash", catalogo_hash)
         object.__setattr__(self, "snapshot_hash", _hash_dominio(_DOMINIO_SNAPSHOT, carga))
         object.__setattr__(self, "repositorio", repositorio)
         object.__setattr__(self, "procedencia", procedencia)
 
     def _clave(self) -> tuple:
-        return (self.commit, self.policy_tree_oid, self.reglas, self.snapshot_hash,
-                self.repositorio, self.procedencia)
+        return (self.commit, self.policy_tree_oid, self.reglas, self.catalogo_hash,
+                self.snapshot_hash, self.repositorio, self.procedencia)
 
     def __eq__(self, otro: object) -> bool:
         return isinstance(otro, TrustedPolicySnapshot) and self._clave() == otro._clave()
@@ -178,13 +184,14 @@ class TrustedPolicySnapshot:
         raise RuleSnapshotError("TrustedPolicySnapshot no se serializa")
 
 
-def _clasificar(entradas) -> list:
-    """Candidatos a regla del arbol policy/ ya verificado. NIEGA lo raro:
-    modos que no sean blob plano, el propio faro/ que no sea arbol, y nombres
-    que aparenten regla sin ser canonicos (incluida la extension en mayusculas
-    o con cola .bak). Los archivos claramente ajenos a reglas (README.md,
-    schemas/*.json) no se enumeran."""
+def _clasificar(entradas) -> tuple[list, object]:
+    """Candidatos a regla y la entrada del CATALOGO (B-3: requerido, con trato
+    de objeto verificado — modo, OID, tamano — igual que las reglas). NIEGA lo
+    raro: modos que no sean blob plano, faro/ que no sea arbol, nombres que
+    aparenten regla sin ser canonicos, y cualquier *.json suelto en faro/ que
+    no sea el catalogo (N6). README.md y schemas/*.json|md no se enumeran."""
     candidatos = []
+    entrada_catalogo = None
     for entrada in entradas:
         if entrada.ruta == "faro":
             raise RuleSnapshotError(
@@ -207,14 +214,16 @@ def _clasificar(entradas) -> list:
         # —sin extension, punto de ancho completo, cirilicos, colas— niega el
         # snapshot: aqui no se ignora nada en silencio (§6.5).
         _RE_INFRAESTRUCTURA = re.compile(r"[a-z][a-z0-9.-]{0,63}\.(json|md)\Z")
-        if nombre in ("README.md", "catalogo-topes.json") or (
-                nombre.startswith("schemas/")
-                and nombre.count("/") == 1
-                and _RE_INFRAESTRUCTURA.fullmatch(nombre[8:])):
+        if nombre == "catalogo-topes.json":
+            entrada_catalogo = entrada                 # requerido: B-3
+            continue
+        if nombre == "README.md" or (nombre.startswith("schemas/")
+                                     and nombre.count("/") == 1
+                                     and _RE_INFRAESTRUCTURA.fullmatch(nombre[8:])):
             continue
         raise RuleSnapshotError(
             f"{entrada.ruta}: archivo no regla y no infraestructura conocida (§6.5: nada en silencio)")
-    return candidatos
+    return candidatos, entrada_catalogo
 
 
 def load_trusted_policy_snapshot(repo: Path, pin: TrustedPolicyPin) -> TrustedPolicySnapshot:
@@ -244,17 +253,30 @@ def load_trusted_policy_snapshot(repo: Path, pin: TrustedPolicyPin) -> TrustedPo
         entradas = listar(repo, arbol, "faro")
     except FuenteInvalida as exc:
         raise RuleSnapshotError(str(exc)) from exc
-    candidatos = _clasificar(entradas)
+    candidatos, entrada_catalogo = _clasificar(entradas)
+    if entrada_catalogo is None:
+        raise RuleSnapshotError("falta faro/catalogo-topes.json en el pin: sin catalogo no hay snapshot")
 
-    # (5) TODOS los blobs antes de validar uno; el snapshot impone su tope de
-    # tamano (opt-in de M-6: el paquete del Faro lee blobs grandes legitimamente).
+    # (5) TODOS los blobs antes de validar uno — el catalogo incluido, con el
+    # mismo tope de tamano; el snapshot impone su tope (opt-in de M-6).
     try:
-        blobs = leer_blobs(repo, [e.oid for e in candidatos],
+        blobs = leer_blobs(repo, [e.oid for e in candidatos] + [entrada_catalogo.oid],
                            max_bytes=MAX_BLOB_BYTES)
     except FuenteInvalida as exc:
         raise RuleSnapshotError(str(exc)) from exc
 
-    # (6) OID recalculado + hash de bytes crudos ANTES de parsear.
+    # (6) OID recalculado + hash de bytes crudos ANTES de parsear. El CATALOGO
+    # se verifica igual y se carga desde ESTE arbol (B-3): las reglas validan
+    # contra el catalogo del pin, nunca contra el del working tree.
+    crudo_catalogo = blobs[entrada_catalogo.oid]
+    if _oid_git_de(crudo_catalogo, len(entrada_catalogo.oid)) != entrada_catalogo.oid:
+        raise RuleSnapshotError("catalogo-topes.json: el blob no corresponde a su OID")
+    catalogo_hash = "sha256:" + hashlib.sha256(crudo_catalogo).hexdigest()
+    try:
+        catalogo = cargar_catalogo_bytes(crudo_catalogo)
+    except CatalogoTopesInvalido as exc:
+        raise RuleSnapshotError(f"catalogo-topes.json del pin invalido: {exc}") from exc
+
     selladas: list[ReglaSellada] = []
     vistos: set[str] = set()
     for entrada in sorted(candidatos, key=lambda e: e.ruta):
@@ -269,7 +291,7 @@ def load_trusted_policy_snapshot(repo: Path, pin: TrustedPolicyPin) -> TrustedPo
         except (StrictYAMLError, CanonicalizationError) as exc:
             raise RuleSnapshotError(f"{entrada.ruta}: YAML no estricto: {exc}") from exc
         try:
-            regla = validar_regla(datos)
+            regla = validar_regla(datos, catalogo=catalogo)
         except Exception as exc:
             raise RuleSnapshotError(f"{entrada.ruta}: regla invalida: {exc}") from exc
         if regla.rule_id in vistos:
@@ -281,5 +303,6 @@ def load_trusted_policy_snapshot(repo: Path, pin: TrustedPolicyPin) -> TrustedPo
 
     return TrustedPolicySnapshot(
         commit=pin.commit, policy_tree_oid=pin.policy_tree_oid, reglas=tuple(selladas),
+        catalogo=catalogo, catalogo_oid=entrada_catalogo.oid, catalogo_hash=catalogo_hash,
         repositorio=pin.repositorio, procedencia=pin.procedencia, _testigo=_TESTIGO,
     )

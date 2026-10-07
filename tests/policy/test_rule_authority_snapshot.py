@@ -27,6 +27,18 @@ FIXTURES = Path(__file__).parent / "fixtures" / "faro_rules"
 REGLA = (FIXTURES / "regla-ejemplo.yaml").read_bytes()
 REGLA_TOPE = (FIXTURES / "regla-ejemplo-tope.yaml").read_bytes()
 
+# El catalogo de la decision de Fernando (B-3: en el arbol del pin, no en disco)
+import json as _json
+CATALOGO = _json.dumps({"version": 1,
+                        "decision": "Fernando 2026-10-06: solo actos y dinero",
+                        "clases": {"monto_dinero": ["hnl", "usd"],
+                                   "actos_externos": ["mensajes", "correos", "publicaciones",
+                                                      "compras", "pagos"],
+                                   "frecuencia": ["por_hora", "por_dia"],
+                                   "duracion": ["segundos"],
+                                   "tokens_costo": ["tokens", "usd"]}}).encode()
+RUTA_CATALOGO = "policy/faro/catalogo-topes.json"
+
 _BASE = (b"kind: JAX_FARO_RULE\neffect: PERMIT\naction_class: REVERSIBLE\n"
          b"scope:\n  subjects: [actor:ejemplo]\n  capabilities: [CAPABILITY_ID]\n"
          b"  objectives: [objetivo-ejemplo]\nobligation_limits:\n  quantity: null\n"
@@ -41,11 +53,18 @@ def _git(repo: Path, *args: str) -> str:
     return r.stdout.decode()
 
 
-def _repo(tmp: Path, archivos: dict[str, bytes], nombre: str = "repo") -> tuple[Path, str, str]:
-    """Repo efimero con ``archivos`` cometidos: devuelve (repo, commit, policy_tree_oid)."""
+def _repo(tmp: Path, archivos: dict[str, bytes], nombre: str = "repo",
+          con_catalogo: bool = True) -> tuple[Path, str, str]:
+    """Repo efimero con ``archivos`` cometidos: devuelve (repo, commit, policy_tree_oid).
+    El catalogo de topes va SIEMPRE (B-3: es parte del pin); quien quiera probar
+    su ausencia pasa ``con_catalogo=False``."""
     repo = tmp / nombre
     repo.mkdir(parents=True)
     _git(repo, "init", "-q", "-b", "main")
+    if con_catalogo and "policy/faro" not in " ".join(archivos) :
+        archivos = dict(archivos)
+    if con_catalogo and RUTA_CATALOGO not in archivos:
+        archivos = {RUTA_CATALOGO: CATALOGO, **archivos}
     for ruta, contenido in archivos.items():
         destino = repo / ruta
         destino.parent.mkdir(parents=True, exist_ok=True)
@@ -76,10 +95,19 @@ def test_carga_las_reglas_con_hash_de_bytes_crudos(tmp_path: Path) -> None:
     assert snap.reglas[1].regla.rule_id == "ejemplo-regla"
 
 
-def test_policy_faro_vacio_es_snapshot_valido_vacio(tmp_path: Path) -> None:
-    repo, commit, arbol = _repo(tmp_path, {"policy/manifest.yaml": b"x: 1\n"})
+def test_policy_faro_solo_con_catalogo_es_snapshot_valido_vacio(tmp_path: Path) -> None:
+    repo, commit, arbol = _repo(tmp_path, {})                 # solo el catalogo
     snap = _cargar(repo, commit, arbol)
     assert snap.reglas == ()
+    assert snap.catalogo_hash.startswith("sha256:")
+
+
+def test_r5_falta_el_catalogo_en_el_pin_niega(tmp_path: Path) -> None:
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA},
+                                con_catalogo=False)
+    with pytest.raises(RuleSnapshotError) as excinfo:
+        _cargar(repo, commit, arbol)
+    assert "catalogo" in str(excinfo.value)
 
 
 def test_readme_y_esquema_json_no_son_reglas_y_no_estorban(tmp_path: Path) -> None:
@@ -296,6 +324,7 @@ def _repo_entrada(tmp: Path, accion) -> tuple[Path, str, str]:
     _git(repo, "init", "-q", "-b", "main")
     (repo / "policy" / "faro").mkdir(parents=True)
     (repo / "policy" / "faro" / "ejemplo.yaml").write_bytes(REGLA)
+    (repo / "policy" / "faro" / "catalogo-topes.json").write_bytes(CATALOGO)
     accion(repo)
     _git(repo, "add", "-A")
     _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x")

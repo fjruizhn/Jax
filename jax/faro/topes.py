@@ -40,13 +40,16 @@ TABLA = "faro_topes"
 MAX_CANTIDAD = 2 ** 53                      # lo que un entero de JSON/float representa sin perdida
 # D-4 / R-4: el catalogo cerrado es la unica puerta. Una lista negra por palabras nunca cierra
 # (pasaban `multiagente.lanzados`, `subprocesos`, `parallel.calls`, `conns.db`...); fuera del
-# catalogo no hay tope, punto. Se conserva el nombre historico para los llamadores de prueba.
-from .catalogo_topes import es_recurso_de_catalogo  # noqa: E402  (hoja, solo stdlib)
+# catalogo no hay tope, punto. Desde B-3 el catalogo NO se lee de disco: llega por parametro
+# (el snapshot evaluado lo carga del arbol verificado del pin). Importar este modulo no falla;
+# topear sin catalogo, si: sin catalogo no se topea NADA.
+from .catalogo_topes import es_de_catalogo  # noqa: E402  (hoja, solo stdlib)
 
 
-def es_recurso_sin_tope(recurso: str) -> bool:
-    """True para TODO recurso fuera del catalogo de actos y dinero (D-4 incluido)."""
-    return not es_recurso_de_catalogo(recurso)
+def es_recurso_sin_tope(recurso: str, catalogo) -> bool:
+    """True para TODO recurso fuera del catalogo de actos y dinero (D-4 incluido).
+    Sin catalogo, TODO recurso esta sin tope."""
+    return catalogo is None or not es_de_catalogo(recurso, catalogo)
 
 _RE_TENANT = RE_TENANT      # el mismo que valida el canal de control: un tenant aceptado alli nunca rompe aqui
 _RE_RECURSO = re.compile(r"^[a-z0-9_.-]{1,48}$")
@@ -134,10 +137,12 @@ def _entero(valor: object, nombre: str, minimo: int, maximo: int) -> int:
 
 
 class Topes:
-    def __init__(self, almacen: AlmacenTopes, bitacora: Bitacora, *, plazo_s: float = 5.0):
+    def __init__(self, almacen: AlmacenTopes, bitacora: Bitacora, *,
+                 plazo_s: float = 5.0, catalogo=None):
         self._almacen = almacen
         self._bitacora = bitacora
         self._plazo_s = plazo_s
+        self._catalogo = catalogo            # B-3: del snapshot evaluado, nunca de disco
         self._vistos_sin_regla: set[tuple[str, str, str]] = set()
         self.inciertos: dict[tuple[str, str], int] = {}       # (clave, periodo) -> cantidad de conteos de resultado desconocido
 
@@ -158,7 +163,7 @@ class Topes:
         cantidad = _entero(cantidad, "cantidad", 1, MAX_CANTIDAD)
         if tope is not None:
             tope = _entero(tope, "tope", 0, MAX_CANTIDAD)
-            if es_recurso_sin_tope(recurso):
+            if es_recurso_sin_tope(recurso, self._catalogo):
                 raise TopeProhibido(
                     f"D-4/R-4: {recurso!r} esta fuera del catalogo de topes (solo actos y dinero); solo se mide")
         extra = {k: (v if isinstance(v, (int, float, bool)) or v is None else str(v)[:200])

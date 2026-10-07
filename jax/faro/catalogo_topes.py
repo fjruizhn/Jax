@@ -1,27 +1,24 @@
-"""Cargador del catalogo cerrado de recursos que admiten tope (R-4, M-7).
+"""Cargador del catalogo cerrado de recursos que admiten tope (R-4, M-7 + B-3).
 
-La DECISION es de Fernando (2026-10-06) y por eso sus DATOS viven en
-``policy/faro/catalogo-topes.json`` — ``policy/**`` es reservado y lo integran
-Fernando o Hyde con ventana. Este modulo es solo el CARGADOR (hoja, stdlib):
+La DECISION es de Fernando (2026-10-06) y sus DATOS viven en
+``policy/faro/catalogo-topes.json`` — ``policy/**`` es reservado. Desde la ronda
+5 (B-3), este modulo NO lee disco: recibe BYTES y valida. Quien carga el
+catalogo es el SNAPSHOT desde el arbol ya verificado del pin (nunca el working
+tree), y el runtime de topes lo recibe por parametro desde ese snapshot: sin
+catalogo no se topea NADA.
 
-  - lee ese archivo por ruta fija relativa a la raiz del repo;
-  - valida su forma estricta (claves cerradas, listas de str ASCII sin
-    duplicados, version exacta) y FALLA CERRADO si falta o es invalido: sin
-    catalogo valido no se puede topear NADA;
-  - expone el catalogo INMUTABLE en el proceso (``MappingProxyType`` y tuplas:
-    mutarlo en runtime lanza, no se puede colar una clase por la puerta de atras).
-
-Una lista negra por palabras nunca cierra; un catalogo cerrado si. Fuera del
-catalogo no hay tope — en schema y en runtime, por igual.
+Forma estricta y fail-closed: claves cerradas exactas (las de mas y las
+duplicadas niegan — `object_pairs_hook`, igual que el YAML de las reglas),
+version exacta, decision no vacia, clases no vacias con subids ASCII sin
+duplicados. El resultado es INMUTABLE (``MappingProxyType``): mutarlo en el
+proceso lanza.
 """
 from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 from types import MappingProxyType
-
-RUTA_DATOS = Path(__file__).resolve().parents[2] / "policy" / "faro" / "catalogo-topes.json"
+from typing import Mapping
 
 VERSION_CATALOGO = 1
 _CLAVES_CERRADAS = frozenset({"version", "decision", "clases"})
@@ -32,14 +29,26 @@ class CatalogoTopesInvalido(RuntimeError):
     """El catalogo falta o no tiene la forma cerrada: fail-closed, nada se topea."""
 
 
-def cargar_catalogo(ruta: Path = RUTA_DATOS) -> tuple[MappingProxyType, str]:
-    """Valida y devuelve ``(clases, decision)`` inmutables. Falla cerrado."""
+def _sin_claves_duplicadas(pares: list[tuple[str, object]]) -> dict:
+    resultado: dict = {}
+    for clave, valor in pares:
+        if clave in resultado:
+            raise CatalogoTopesInvalido(f"clave duplicada en el catalogo: {clave!r}")
+        resultado[clave] = valor
+    return resultado
+
+
+def cargar_catalogo_bytes(crudo: bytes) -> MappingProxyType:
+    """Valida los BYTES del catalogo y devuelve las clases inmutables.
+    M-8: la clave duplicada no gana — niega. Falla cerrado ante cualquier vicio."""
+    if not isinstance(crudo, bytes):
+        raise CatalogoTopesInvalido("el catalogo se recibe como bytes, no como texto")
     try:
-        datos = json.loads(ruta.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise CatalogoTopesInvalido(f"falta el catalogo de topes: {ruta}") from exc
-    except (OSError, ValueError) as exc:
-        raise CatalogoTopesInvalido(f"catalogo de topes ilegible: {type(exc).__name__}") from exc
+        datos = json.loads(crudo, object_pairs_hook=_sin_claves_duplicadas)
+    except CatalogoTopesInvalido:
+        raise
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise CatalogoTopesInvalido(f"catalogo ilegible: {type(exc).__name__}") from exc
     if not isinstance(datos, dict) or frozenset(datos) != _CLAVES_CERRADAS:
         raise CatalogoTopesInvalido("el catalogo exige exactamente version, decision y clases")
     version = datos["version"]
@@ -55,40 +64,34 @@ def cargar_catalogo(ruta: Path = RUTA_DATOS) -> tuple[MappingProxyType, str]:
     for clase, subids in clases.items():
         if not isinstance(clase, str) or not _RE_SUBID.fullmatch(clase):
             raise CatalogoTopesInvalido(f"clase invalida: {clase!r}")
-        if not isinstance(subids, list) or not subids:
+        if not isinstance(subids, list) or not subids:          # N9: lista vacia niega
             raise CatalogoTopesInvalido(f"clase {clase}: lista no vacia")
-        vistos: list[str] = []          # se conserva el orden del archivo: es el
-        for subid in subids:            # dato de la decision, no un set cualquiera
+        vistos: list[str] = []          # se conserva el orden de la decision
+        for subid in subids:
             if not isinstance(subid, str) or not _RE_SUBID.fullmatch(subid):
                 raise CatalogoTopesInvalido(f"clase {clase}: subid invalido {subid!r}")
             if subid in vistos:
                 raise CatalogoTopesInvalido(f"clase {clase}: subid duplicado {subid!r}")
             vistos.append(subid)
         cerradas[clase] = tuple(vistos)
-    return MappingProxyType(cerradas), decision
+    return MappingProxyType(cerradas)
 
 
-CLASES, DECISION_CATALOGO = cargar_catalogo()
-
-# Inmutables expuestos: mutarlos en el proceso lanza (TypeError), no cambia nada.
-CATALOGO_TOPES: MappingProxyType = CLASES
-CLASES_RECURSO_CON_TOPE: tuple[str, ...] = tuple(sorted(CATALOGO_TOPES))
-
-
-def es_recurso_de_catalogo(recurso: object) -> bool:
+def es_de_catalogo(recurso: object, catalogo: Mapping) -> bool:
     """True solo si ``recurso`` es ``<clase>.<subid>`` con la clase declarada y el
-    subid en el catalogo de ESA clase. Todo lo demas —infraestructura, agentes,
-    variantes de idioma, nombres parecidos, subids de otra clase— queda fuera."""
+    subid en el catalogo DE ESA clase. Todo lo demas queda fuera."""
+    if not isinstance(catalogo, Mapping):
+        raise CatalogoTopesInvalido("el catalogo se recibe cargado (MappingProxyType)")
     if not isinstance(recurso, str):
         return False
     clase, sep, subid = recurso.partition(".")
     if not sep or subid.count("."):
         return False
-    return subid in CATALOGO_TOPES.get(clase, ())
+    return subid in catalogo.get(clase, ())
 
 
-def recursos_del_catalogo() -> tuple[str, ...]:
+def recursos_del_catalogo(catalogo: Mapping) -> tuple[str, ...]:
     """La lista plana ``clase.subid`` (para el espejo JSON y las pruebas de
     identidad entre datos, JSON, Python y runtime)."""
-    return tuple(sorted(f"{clase}.{subid}" for clase, subids in CATALOGO_TOPES.items()
+    return tuple(sorted(f"{clase}.{subid}" for clase, subids in catalogo.items()
                         for subid in subids))

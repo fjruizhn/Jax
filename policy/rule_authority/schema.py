@@ -36,10 +36,6 @@ ACTION_CLASSES = ("REVERSIBLE", "OBLIGATING")
 # palabras nunca cierra; el catalogo si: `resource` no es texto libre, es
 # `<clase>.<subid>` con el subid en el catalogo DE ESA clase. Fuera de ahi no
 # hay tope, en schema y en runtime, por igual.
-from jax.faro.catalogo_topes import (  # noqa: E402  (hoja, solo stdlib)
-    CATALOGO_TOPES,
-    CLASES_RECURSO_CON_TOPE,
-)
 
 # Techo por defecto de ttl_seconds: el kernel pasa el suyo de configuracion
 # confiable (``ttl_max_seconds``); sin el, rige este. Es un MAXIMO, no un valor.
@@ -135,20 +131,22 @@ def _validar_frecuencia(valor: object) -> "Frecuencia":
     return Frecuencia(max_occurrences=ocurrencias, window_seconds=ventana)
 
 
-def _validar_tope(valor: object) -> "Tope":
+def _validar_tope(valor: object, catalogo: object) -> "Tope":
     datos = _objeto_cerrado(valor, "tope", frozenset({"resource_class", "resource",
                                                       "maximum", "period"}))
     for clave in ("resource_class", "resource", "maximum", "period"):
         if clave not in datos:
             raise RuleSchemaError(f"tope.{clave}: obligatorio")
+    if catalogo is None:
+        raise RuleSchemaError("tope: sin catalogo del pin no se topea nada (B-3)")
     clase = datos["resource_class"]
-    if clase not in CLASES_RECURSO_CON_TOPE:
-        raise RuleSchemaError("tope.resource_class: clase fuera del vocabulario cerrado (R-4)")
+    if clase not in catalogo:
+        raise RuleSchemaError("tope.resource_class: clase fuera del catalogo cerrado (R-4)")
     recurso = datos["resource"]
     if not isinstance(recurso, str) or not _RE_RECURSO.fullmatch(recurso):
         raise RuleSchemaError("tope.resource: no canonico")
     subid = recurso.partition(".")[2] if "." in recurso else ""
-    if recurso.partition(".")[0] != clase or subid not in CATALOGO_TOPES.get(clase, ()):
+    if recurso.partition(".")[0] != clase or subid not in catalogo.get(clase, ()):
         raise RuleSchemaError(
             "tope.resource: fuera del catalogo cerrado — debe ser <clase>.<subid> de SU clase (R-4)")
     maximo = _entero_positivo(datos["maximum"], "tope.maximum")
@@ -223,11 +221,14 @@ class ReglaValidada:
     tope: Tope | None
 
 
-def validar_regla(datos: object, *, ttl_max_seconds: int | None = None) -> ReglaValidada:
+def validar_regla(datos: object, *, ttl_max_seconds: int | None = None,
+                  catalogo: object = None) -> ReglaValidada:
     """Valida el shape cerrado rule-v1. Falla cerrado con RuleSchemaError.
 
     ``ttl_max_seconds`` es el techo de configuracion confiable que aporta el
-    kernel al evaluar; sin el, rige ``TTL_MAX_POR_DEFECTO``.
+    kernel al evaluar; sin el, rige ``TTL_MAX_POR_DEFECTO``. ``catalogo`` es el
+    catálogo cargado DESDE EL PIN (B-3): una regla con tope solo valida contra
+    el catálogo del snapshot evaluado — sin catálogo, no se topea nada.
     """
     documento = _objeto_cerrado(datos, "regla", _CLAVES_TOPE_NIVEL)
     for clave in ("schema_version", "kind", "rule_id", "effect", "action_class",
@@ -286,7 +287,8 @@ def validar_regla(datos: object, *, ttl_max_seconds: int | None = None) -> Regla
         raise RuleSchemaError("ttl_max_seconds: techo de configuracion no positivo")
     ttl = _entero_positivo(permit_datos["ttl_seconds"], "permit.ttl_seconds", tope=techo_ttl)
 
-    tope = _validar_tope(documento["tope"]) if documento.get("tope") is not None else None
+    tope = (_validar_tope(documento["tope"], catalogo)
+            if documento.get("tope") is not None else None)
 
     if action_class == "OBLIGATING":
         if not_after is None:
