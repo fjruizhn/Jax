@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from policy.authority_ledger.errors import (AuthorityStateError, LedgerCheckpointError,
@@ -10,6 +12,32 @@ from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
 from tests.policy.test_authority_ledger_events import setup_ledger
 
 
+class _ObservingStore:
+    """Delegates to a real store and signals the first ledger read."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.events_read = threading.Event()
+
+    def get_genesis(self):
+        return self._inner.get_genesis()
+
+    def events(self):
+        self.events_read.set()
+        return self._inner.events()
+
+    def append(self, event):
+        return self._inner.append(event)
+
+
+def _checkpoint(ledger_identity, sequence, event_id, event_hash):
+    from policy.authority_ledger.models import AuthorityLedgerCheckpoint
+    return AuthorityLedgerCheckpoint(
+        "1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", ledger_identity,
+        sequence, event_id, event_hash,
+    )
+
+
 class _CheckpointRoto:
     """TrustedCheckpointStore cuyo append SIEMPRE falla (disco lleno/fsync)."""
 
@@ -18,6 +46,12 @@ class _CheckpointRoto:
 
     def append(self, checkpoint) -> None:
         raise OSError("checkpoint: disco lleno")
+
+    def _append_locked(self, checkpoint) -> None:
+        raise OSError("checkpoint: disco lleno")
+
+    def locked(self):
+        return self._inner.locked()
 
     def latest(self):
         return self._inner.latest()
@@ -142,3 +176,102 @@ def test_append_normal_no_reescribe_un_head_db_retrocedido(tmp_path):
         def append(self, event): raise AssertionError("no debe escribir")
     with pytest.raises(LedgerRollbackError):
         append_authority_event(_StoreVista(), root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"), checkpoint_store=anchor)
+
+
+def test_append_holds_checkpoint_lock_before_its_first_ledger_read(tmp_path):
+    """Removing the service-wide lock lets this append inspect stale state."""
+    store, root, key = setup_ledger()
+    anchor = TrustedCheckpointStore(tmp_path / "checkpoints.log")
+    append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"), event_id="018cc251-f400-7000-8000-000000000001", checkpoint_store=anchor)
+    observed = _ObservingStore(store)
+    result, failure = [], []
+
+    def append_later():
+        try:
+            result.append(append_authority_event(observed, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"), event_id="018cc251-f400-7000-8000-000000000002", checkpoint_store=anchor))
+        except Exception as exc:  # pragma: no cover - asserted below
+            failure.append(exc)
+
+    with anchor.locked():
+        thread = threading.Thread(target=append_later)
+        thread.start()
+        assert not observed.events_read.wait(0.15), "append leyó el ledger sin el candado compartido"
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert not failure
+    assert [event.sequence for event in result] == [2]
+
+
+def test_reanchor_holds_checkpoint_lock_before_its_first_ledger_read(tmp_path):
+    """Reanchor shares the writer lock, so it cannot bless a moving head."""
+    store, root, key = setup_ledger()
+    anchor = TrustedCheckpointStore(tmp_path / "checkpoints.log")
+    append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"), event_id="018cc251-f400-7000-8000-000000000001", checkpoint_store=anchor)
+    with pytest.raises(LedgerCheckpointError):
+        append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"), event_id="018cc251-f400-7000-8000-000000000002", checkpoint_store=_CheckpointRoto(anchor))
+    observed = _ObservingStore(store)
+    result, failure = [], []
+
+    def reanchor_later():
+        try:
+            result.append(reanchor_authority_checkpoint(observed, root, anchor))
+        except Exception as exc:  # pragma: no cover - asserted below
+            failure.append(exc)
+
+    with anchor.locked():
+        thread = threading.Thread(target=reanchor_later)
+        thread.start()
+        assert not observed.events_read.wait(0.15), "reanchor leyó el ledger sin el candado compartido"
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert not failure
+    assert [checkpoint.sequence for checkpoint in result] == [2]
+
+
+def test_direct_checkpoint_append_waits_for_the_same_writer_lock(tmp_path):
+    """Removing the store lock makes the replacement race lose a writer."""
+    anchor = TrustedCheckpointStore(tmp_path / "checkpoints.log")
+    first = _checkpoint("ledger", 1, "event-1", "sha256:" + "1" * 64)
+    second = _checkpoint("ledger", 2, "event-2", "sha256:" + "2" * 64)
+    anchor.append(first)
+    done = threading.Event()
+
+    def append_later():
+        anchor.append(second)
+        done.set()
+
+    with anchor.locked():
+        thread = threading.Thread(target=append_later)
+        thread.start()
+        assert not done.wait(0.15), "append directo reemplazó el archivo sin el candado compartido"
+        assert anchor.latest().sequence == 1
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert done.is_set()
+    assert anchor.latest().sequence == 2
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        (_checkpoint("ledger-a", 1, "event-1", "sha256:" + "1" * 64), _checkpoint("ledger-b", 2, "event-2", "sha256:" + "2" * 64)),
+        (_checkpoint("ledger", 1, "event-1", "sha256:" + "1" * 64), _checkpoint("ledger", 1, "event-2", "sha256:" + "2" * 64)),
+    ],
+)
+def test_checkpoint_append_validates_every_existing_row(tmp_path, first, second):
+    """Validating only latest silently accepts an identity switch or a sequence gap."""
+    from policy.authority_ledger.canonical import canonical_bytes
+    path = tmp_path / "checkpoints.log"
+    path.write_bytes(canonical_bytes(first.projection()) + b"\n" + canonical_bytes(second.projection()) + b"\n")
+    with pytest.raises(LedgerIntegrityError):
+        TrustedCheckpointStore(path).append(_checkpoint(second.ledger_identity, 4, "event-4", "sha256:" + "4" * 64))
+
+
+def test_checkpoint_append_rejects_an_invalid_candidate_before_publication(tmp_path):
+    """A malformed row must never become the trusted first checkpoint."""
+    from policy.authority_ledger.models import AuthorityLedgerCheckpoint
+    anchor = TrustedCheckpointStore(tmp_path / "checkpoints.log")
+    invalid = AuthorityLedgerCheckpoint("1.0", "WRONG_KIND", "ledger", 1, "event-1", "sha256:" + "1" * 64)
+    with pytest.raises(LedgerIntegrityError):
+        anchor.append(invalid)
+    assert not anchor.path.exists()

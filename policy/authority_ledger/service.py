@@ -55,6 +55,22 @@ def ratification_intent_from_candidate(corpus, evidence_refs: tuple[str, ...] = 
 
 def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, private_key: Ed25519PrivateKey, intent: AuthorityEventIntent, *, event_id: str | None = None, recorded_at_utc: datetime | None = None, checkpoint_store: TrustedCheckpointStore | None = None) -> AuthorityEvent:
     """Append one signed Fernando event after verifying the complete ledger."""
+    if checkpoint_store is None:
+        return _append_authority_event_unlocked(
+            store, trusted_root, private_key, intent, event_id=event_id,
+            recorded_at_utc=recorded_at_utc, checkpoint_store=None,
+        )
+    # The checkpoint sidecar is the cross-process writer boundary for this
+    # deployment's single host/local filesystem.  It spans every ledger read,
+    # the DB append+commit, durable checkpoint publication, and its reread.
+    with checkpoint_store.locked():
+        return _append_authority_event_unlocked(
+            store, trusted_root, private_key, intent, event_id=event_id,
+            recorded_at_utc=recorded_at_utc, checkpoint_store=checkpoint_store,
+        )
+
+
+def _append_authority_event_unlocked(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, private_key: Ed25519PrivateKey, intent: AuthorityEventIntent, *, event_id: str | None, recorded_at_utc: datetime | None, checkpoint_store: TrustedCheckpointStore | None) -> AuthorityEvent:
     if intent._ratification_snapshot_seal is _RATIFICATION_STORAGE_SEAL:
         raise AuthorityStateError("ratificación rehidratada desde storage no se puede volver a anexar")
     if (intent.event_type is AuthorityEventType.RATIFICATION_GRANTED
@@ -102,7 +118,7 @@ def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAut
         # delata la cabeza sin anclar hasta la reconciliación.
         checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, complete.sequence, complete.event_id, complete.event_hash)
         try:
-            checkpoint_store.append(checkpoint)
+            checkpoint_store._append_locked(checkpoint)
         except Exception as exc:
             raise LedgerCheckpointError(
                 f"evento huérfano {complete.event_id} (secuencia {complete.sequence}): "
@@ -121,6 +137,11 @@ def reanchor_authority_checkpoint(store: AuthorityLedgerStore, trusted_root: Tru
     head es válido, se escribe su checkpoint. Tras esto, el verificador con
     ``checkpoint_store`` vuelve a pasar: la cabeza queda anclada y el ledger no
     quedó inverificable para siempre."""
+    with checkpoint_store.locked():
+        return _reanchor_authority_checkpoint_unlocked(store, trusted_root, checkpoint_store)
+
+
+def _reanchor_authority_checkpoint_unlocked(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, checkpoint_store) -> "AuthorityLedgerCheckpoint":
     from .models import AuthorityLedgerCheckpoint
     genesis = store.get_genesis()
     events = store.events()
@@ -139,5 +160,5 @@ def reanchor_authority_checkpoint(store: AuthorityLedgerStore, trusted_root: Tru
     verify_authority_ledger(genesis, events, trusted_root)
     head = events[-1]
     checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, head.sequence, head.event_id, head.event_hash)
-    checkpoint_store.append(checkpoint)
+    checkpoint_store._append_locked(checkpoint)
     return checkpoint

@@ -61,11 +61,26 @@ Diseño verificado: NINGÚN documento de docs/superpowers/specs menciona OVERLAY
 
 ## Pendiente
 
-- Revisión adversarial independiente de la ronda 2 sobre el SHA exacto.
-- Verificar CI de ese SHA. El PR sigue apilado sobre #379 → #377; integrar en orden.
+- **Auditoría escalón 3 de `9470e4c1` (2026-10-07): RECHAZADO.** Halló dos BLOCK
+  por carrera entre append/reanchor y publicación monotónica del checkpoint; un
+  MAJOR por falta de `fsync` del directorio tras `os.replace`; y un MAJOR porque
+  el replay estricto de OVERLAY puede invalidar ledgers históricos.
+- **Corrección de carreras y durabilidad, en el árbol de trabajo:** lock sidecar
+  `flock` mantenido desde antes de leer el ledger hasta confirmar DB, publicar y
+  releer checkpoint; fsync del archivo y directorio; validación completa del log.
+  Supuesto: writers en un único host con filesystem local.
+- **Verificación:** `JAX_AUTHORITY_LEDGER_DOCKER_CMD='sudo -n docker' pytest -q
+  tests/policy/test_authority_ledger*.py` → 85 passed; `git diff --check` limpio.
+- **UNAVAILABLE:** `jaxctl authority` no pudo consultar el Block 4 operativo en
+  hall9000. No está verificado si hay OVERLAY_ISSUED históricos sin ratificación
+  vigente. Fernando debe decidir si, de existir, se conservan en cuarentena, se
+  rechaza el ledger completo o se conserva su efecto histórico. Pregunta enviada
+  el 2026-10-07; esperar respuesta antes de cambiar esa semántica.
+- El PR #381 sigue abierto y apilado sobre #379 → #377; integrar en orden.
 
 ## Siguiente comando
 
-Después de publicar el commit de ronda 2, solicitar auditoría escalón 3 sobre
-el SHA exacto y actualizar este traspaso con su veredicto. No integrar hasta
-que auditoría, CI y preflight de integración correspondan al mismo SHA.
+Tras resolver la semántica de overlays históricos, completar el cambio, actualizar
+este traspaso, publicar y solicitar auditoría escalón 3 del SHA exacto; verificar
+CI de ese SHA. No integrar hasta que auditoría, CI y preflight correspondan al
+mismo SHA.
