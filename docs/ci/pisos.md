@@ -4603,17 +4603,20 @@ lecturas como root) pasa la suite de 55 a 199 pruebas recolectadas; el runner sa
 
 ## `authority-ledger-codec/codec`
 
-Piso nuevo (2026-10-06): `^5 passed in `. Medido en hall9000 con el comando exacto del workflow:
-`pytest -q tests/policy/test_authority_ledger_storage_codec.py`. Cubre proyección cerrada,
-rechazo de campos desconocidos, lectura de la forma histórica exacta y persistencia de
-`canonical_intent`, `canonical_event` y `evidence_refs`.
+Piso vigente (2026-10-07): `^19 passed in `. Medido en hall9000 con el comando exacto del workflow:
+`pytest -q tests/policy/test_authority_ledger_storage_codec.py`. Incluye proyección cerrada,
+rechazo de campos desconocidos y de payloads fuera de variante, contraste de todas las columnas
+denormalizadas (incluido `previous_event_hash`), lectura histórica exacta y persistencia de
+`canonical_intent`, `canonical_event` y `evidence_refs`. Antes: 5.
 
 ## `authority-ledger-mariadb/integration`
 
-Piso nuevo (2026-10-06): `^1 passed in `. Medido en hall9000 con MariaDB 12.3.3 efímera
-`--network none`; la prueba aplica la migración, genera una llave Ed25519 de prueba y valida
-firma → INSERT → lectura → reconstrucción → hash/firma y replay. La base solo expone socket
-Unix al proceso de prueba.
+Piso vigente (2026-10-07): `^1 passed in `. Medido en hall9000 con MariaDB 12.3.3 efímera
+`--network none`; la prueba aplica ambas migraciones, valida el upgrade nullable→NOT NULL,
+provisiona la cuenta de aplicación con el script versionado, genera una llave Ed25519 de prueba
+y valida firma → INSERT → lectura → reconstrucción → hash/firma y replay. También prueba que
+UPDATE/DELETE fallan aunque otro principal tenga esos GRANTs, por los triggers append-only. La
+base solo expone socket Unix al proceso de prueba.
 
 ## `archivos-de-test-en-ci/pisos`
 

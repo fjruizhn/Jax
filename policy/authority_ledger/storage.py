@@ -70,7 +70,7 @@ class MariaDBAuthorityLedgerStore:
             cursor = connection.cursor()
             cursor.execute(
                 "SELECT sequence,event_id,event_type,actor_id,canonical_intent,canonical_event,"
-                "evidence_refs,event_hash,signature,recorded_at_utc "
+                "evidence_refs,previous_event_hash,event_hash,signature,recorded_at_utc "
                 "FROM jax_authority.authority_events ORDER BY sequence ASC"
             )
             return tuple(event_from_storage_row(row) for row in cursor.fetchall())

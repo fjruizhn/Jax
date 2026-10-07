@@ -134,10 +134,11 @@ def genesis_from_projection(value):
 
 
 def event_from_storage_row(row):
-    if len(row) != 10:
+    if len(row) != 11:
         raise AuthorityEventValidationError("fila authority_event inválida")
     (sequence, event_id, event_type, actor_id, stored_intent, value,
-     stored_evidence, stored_hash, stored_signature, stored_recorded_at) = row
+     stored_evidence, stored_previous_hash, stored_hash, stored_signature,
+     stored_recorded_at) = row
     if stored_intent is None:
         raise AuthorityEventValidationError("canonical_intent ausente")
     value = _json_value(value, "canonical_event")
@@ -166,6 +167,7 @@ def event_from_storage_row(row):
         if (
             event_type != event.intent.event_type.value
             or actor_id != event.intent.actor_id
+            or stored_previous_hash != event.previous_event_hash
             or stored_hash != event.event_hash
             or stored_signature != event.signature
             or stored_time != event.recorded_at_utc

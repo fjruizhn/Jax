@@ -199,7 +199,8 @@ class AuthorityEventIntent:
         if self.event_type is AuthorityEventType.RATIFICATION_GRANTED:
             if not isinstance(self.static_policy_view_projection, dict) or self.static_policy_view_projection.get("policy_corpus_hash") != self.policy_corpus_hash:
                 raise AuthorityEventValidationError("ratificación requiere static policy view ligado al hash")
-            if self._ratification_snapshot_seal not in (_RATIFICATION_SNAPSHOT_SEAL, _RATIFICATION_STORAGE_SEAL):
+            if (self._ratification_snapshot_seal is not _RATIFICATION_SNAPSHOT_SEAL
+                    and self._ratification_snapshot_seal is not _RATIFICATION_STORAGE_SEAL):
                 raise AuthorityEventValidationError("ratificación requiere snapshot sellado del candidate boundary")
 
     @classmethod

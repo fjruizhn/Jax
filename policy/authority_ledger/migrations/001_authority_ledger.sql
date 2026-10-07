@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS jax_authority.authority_events (
   event_id CHAR(36) NOT NULL UNIQUE,
   event_type VARCHAR(64) NOT NULL,
   actor_id VARCHAR(128) NOT NULL,
-  canonical_intent LONGBLOB NULL,
+  canonical_intent LONGBLOB NOT NULL,
   canonical_event LONGBLOB NOT NULL,
   evidence_refs LONGBLOB NOT NULL,
   previous_event_hash CHAR(71) NULL,
