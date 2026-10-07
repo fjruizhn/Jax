@@ -8,7 +8,7 @@ de unidades ni campos de límites propios: los límites se derivan con
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
 import re
@@ -109,7 +109,21 @@ def _utc(value: object, field: str) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-_LIMITES_DE = object()      # procedencia: solo `limites_de` lo tiene
+_RULE_HASH_DOMAIN = "JAX-FARO-RULE-LIMITS-SOURCE"
+
+
+def _proyeccion_regla(value: Any) -> Any:
+    if is_dataclass(value) and not isinstance(value, type):
+        return {f.name: _proyeccion_regla(getattr(value, f.name)) for f in fields(value)}
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat()
+    if isinstance(value, (tuple, list)):
+        return [_proyeccion_regla(item) for item in value]
+    return value
+
+
+def _hash_de_regla(regla: ReglaValidada) -> str:
+    return domain_hash(_RULE_HASH_DOMAIN, "1", _proyeccion_regla(regla))
 
 
 @dataclass(frozen=True)
@@ -118,17 +132,27 @@ class RuleLimits:
 
     No tiene campos de límites propios: ``limites`` es el ``LimitesObligatorios``
     de la ``ReglaValidada`` y ``tope`` su ``Tope`` (donde viven frecuencia,
-    duración y tokens/costo, siempre ``<clase>.<subid>`` del catálogo). Solo se
-    obtiene con ``limites_de``; ningún llamador arma límites a mano."""
+    duración y tokens/costo, siempre ``<clase>.<subid>`` del catálogo);
+    ``rule_id`` y ``rule_hash`` identifican la regla de la que salieron.
+
+    Solo ``limites_de`` los construye: el constructor y ``dataclasses.replace``
+    (que lo invoca) siempre fallan, y ``limites_de`` crea la instancia sin pasar
+    por él y la valida. Es una barrera contra el uso accidental, no contra código
+    que fabrique la instancia a la fuerza (``object.__new__``)."""
 
     catalogo: CatalogoTopes
     limites: LimitesObligatorios
     tope: Tope | None
-    _origen: object = field(default=None, repr=False, compare=False)
+    rule_id: str
+    rule_hash: str
 
     def __post_init__(self) -> None:
-        if self._origen is not _LIMITES_DE:
-            raise AuthorityEventValidationError("RuleLimits solo se obtiene con limites_de(regla, catalogo)")
+        raise AuthorityEventValidationError("RuleLimits solo se obtiene con limites_de(regla, catalogo)")
+
+    def _validar(self) -> None:
+        _identifier(self.rule_id, "rule_id")
+        if type(self.rule_hash) is not str or not re.fullmatch(r"sha256:[0-9a-f]{64}", self.rule_hash):
+            raise AuthorityEventValidationError("rule_hash inválido")
         catalogo = _catalogo(self.catalogo, "RuleLimits")
         limites = self.limites
         if type(limites) is not LimitesObligatorios:
@@ -147,7 +171,9 @@ class RuleLimits:
             monto = limites.amount
             if type(monto) is not Monto:
                 raise AuthorityEventValidationError("amount debe ser Monto")
-            # Monto usa la forma ISO de la regla (USD); el catálogo, su subid (usd).
+            # Monto usa la forma ISO de la regla (USD); el catálogo guarda el subid en
+            # minúscula (usd): se compara `currency.lower()` contra monto_dinero, de modo
+            # que `USD` de la regla corresponde a `usd` del catálogo y de la solicitud.
             if type(monto.currency) is not str or not _ISO_MONEDA.fullmatch(monto.currency):
                 raise AuthorityEventValidationError("amount.currency fuera del catálogo monto_dinero")
             _unidad_de(catalogo, "monto_dinero", monto.currency.lower(), "amount.currency")
@@ -171,7 +197,14 @@ def limites_de(regla: ReglaValidada, catalogo: CatalogoTopes) -> RuleLimits:
     """Los límites de la regla validada, comprobados contra el catálogo sellado."""
     if type(regla) is not ReglaValidada:
         raise AuthorityEventValidationError("limites_de requiere una ReglaValidada")
-    return RuleLimits(catalogo, regla.obligation_limits, regla.tope, _origen=_LIMITES_DE)
+    limites = object.__new__(RuleLimits)       # sin __init__: no hay otra puerta
+    for nombre, valor in (("catalogo", catalogo), ("limites", regla.obligation_limits),
+                          ("tope", regla.tope), ("rule_id", regla.rule_id),
+                          ("rule_hash", "sha256:" + "0" * 64)):
+        object.__setattr__(limites, nombre, valor)
+    limites._validar()                          # primero la forma; el hash, ya sobre datos válidos
+    object.__setattr__(limites, "rule_hash", _hash_de_regla(regla))
+    return limites
 
 
 @dataclass(frozen=True)
@@ -188,6 +221,7 @@ class RuleEvaluationRequest:
     quantity_unit: str | None = None
     amount: int | None = None
     currency: str | None = None
+    rule_hash: str | None = None
     request_hash: str | None = None
 
     def __post_init__(self) -> None:
@@ -213,6 +247,9 @@ class RuleEvaluationRequest:
             raise AuthorityEventValidationError("amount y currency deben ir juntos")
         if self.currency is not None:
             _unidad_de(self.catalogo, "monto_dinero", self.currency, "currency")
+        if self.rule_hash is not None and (type(self.rule_hash) is not str or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", self.rule_hash)):
+            raise AuthorityEventValidationError("rule_hash inválido")
         computed = domain_hash(_REQUEST_HASH_DOMAIN, _REQUEST_HASH_VERSION, self.canonical_projection())
         if self.request_hash is not None and self.request_hash != computed:
             raise AuthorityEventValidationError("request_hash no coincide con los campos")
@@ -232,6 +269,7 @@ class RuleEvaluationRequest:
             "amount": self.amount,
             "currency": self.currency,
             "catalogo_oid": self.catalogo.oid_pin,
+            "rule_hash": self.rule_hash,
         }
 
 
@@ -249,6 +287,10 @@ class RuleEvaluation:
     def __post_init__(self) -> None:
         if type(self.request) is not RuleEvaluationRequest or type(self.limits) is not RuleLimits:
             raise AuthorityEventValidationError("evaluación requiere request y RuleLimits")
+        if self.limits.rule_id != self.request.rule_id:
+            raise AuthorityEventValidationError("los límites son de otra regla (rule_id distinto)")
+        if self.request.rule_hash is not None and self.request.rule_hash != self.limits.rule_hash:
+            raise AuthorityEventValidationError("los límites son de otra versión de la regla (rule_hash)")
         # CatalogoTopes.__eq__ compara clases Y OID del pin (tipo exacto ya comprobado).
         if self.request.catalogo != self.limits.catalogo:
             raise AuthorityEventValidationError(

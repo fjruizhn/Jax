@@ -86,7 +86,7 @@ def _a_mano(clases=None):
 def request(**overrides):
     values = {
         "request_id": "0199f8a1-8c00-7000-8000-000000000001",
-        "rule_id": "rule-one",
+        "rule_id": "ejemplo-tope-mensajes",
         "subject": "actor:fernando",
         "capability": "mail.send",
         "objective": "notify-client",
@@ -292,14 +292,46 @@ def test_limits_with_money_and_usd_amount_are_derived():
 def test_no_caller_can_build_limits_by_hand():
     base = limites_de(_regla_obligating(), CATALOG)
     with pytest.raises(AuthorityEventValidationError, match="limites_de"):
-        RuleLimits(CATALOG, base.limites, base.tope)
+        RuleLimits(CATALOG, base.limites, base.tope, base.rule_id, base.rule_hash)
     with pytest.raises(AuthorityEventValidationError, match="limites_de"):
         RuleLimits(catalogo=CATALOG, limites=LimitesObligatorios(Cantidad("mensajes", 1), None, None),
-                   tope=None)
-    with pytest.raises(AuthorityEventValidationError, match="limites_de"):
-        RuleLimits(CATALOG, base.limites, base.tope, _origen=object())
+                   tope=None, rule_id="rule-one", rule_hash="sha256:" + "0" * 64)
     with pytest.raises(AuthorityEventValidationError):
         limites_de(dict(), CATALOG)                    # no es una ReglaValidada
+
+
+def test_limits_survive_no_dataclasses_replace():
+    """`replace` vuelve a llamar al constructor: no puede reproducir la procedencia."""
+    base = limites_de(_regla_obligating(), CATALOG)
+    with pytest.raises(AuthorityEventValidationError, match="limites_de"):
+        dataclasses.replace(base, limites=LimitesObligatorios(Cantidad("mensajes", 2**53), None, None))
+    with pytest.raises(AuthorityEventValidationError, match="limites_de"):
+        dataclasses.replace(base, rule_id="otra-regla")
+
+
+def test_limits_carry_the_rule_identity():
+    regla = _regla_obligating()
+    limites = limites_de(regla, CATALOG)
+    assert limites.rule_id == regla.rule_id
+    assert limites.rule_hash == limites_de(_regla_obligating(), CATALOG).rule_hash
+    otra = _regla_obligating(quantity={"unit": "mensajes", "max": 7})
+    assert limites_de(otra, CATALOG).rule_hash != limites.rule_hash
+
+
+@pytest.mark.parametrize("rule_id", ["Regla Mala!", "", AlwaysEqualStr("x y")])
+def test_limits_require_a_well_formed_rule_id(rule_id):
+    with pytest.raises(AuthorityEventValidationError, match="rule_id"):
+        limites_de(dataclasses.replace(_regla_obligating(), rule_id=rule_id), CATALOG)
+
+
+def test_tope_must_be_the_exact_tope_type_not_a_subclass():
+    class TopeFalso(Tope):
+        pass
+
+    base = _regla_obligating().tope
+    falso = TopeFalso(base.resource_class, base.resource, base.maximum, base.period)
+    with pytest.raises(AuthorityEventValidationError, match="Tope"):
+        limites_de(_a_mano_regla(tope=falso), CATALOG)
 
 
 @pytest.mark.parametrize("catalogo", [
@@ -439,6 +471,29 @@ def test_evaluation_rejects_requests_and_limits_from_different_catalogs():
     otros = limites_de(_regla_obligating(), OTRO_CATALOG)
     with pytest.raises(AuthorityEventValidationError, match="catálogo"):
         RuleEvaluation(request(), otros)
+
+
+def test_evaluation_requires_limits_of_the_same_rule():
+    otra = dataclasses.replace(_regla_obligating(), rule_id="regla-distinta")
+    with pytest.raises(AuthorityEventValidationError, match="rule_id"):
+        RuleEvaluation(request(rule_id="regla-distinta"), limites_de(_regla_obligating(), CATALOG))
+    with pytest.raises(AuthorityEventValidationError, match="rule_id"):
+        RuleEvaluation(request(), limites_de(otra, CATALOG))
+    # rule_id de la solicitud = el de la regla: pasa
+    RuleEvaluation(request(rule_id="ejemplo-tope-mensajes"), limites_de(_regla_obligating(), CATALOG))
+
+
+def test_evaluation_checks_rule_hash_when_the_request_carries_it():
+    regla = _regla_obligating()
+    limites = limites_de(regla, CATALOG)
+    ok = request(rule_id=regla.rule_id, rule_hash=limites.rule_hash)
+    RuleEvaluation(ok, limites)
+    assert ok.request_hash != request(rule_id=regla.rule_id).request_hash
+    otra = limites_de(_regla_obligating(quantity={"unit": "mensajes", "max": 7}), CATALOG)
+    with pytest.raises(AuthorityEventValidationError, match="rule_hash"):
+        RuleEvaluation(ok, otra)
+    with pytest.raises(AuthorityEventValidationError, match="rule_hash"):
+        request(rule_hash="no-es-hash")
 
 
 @pytest.mark.parametrize("malo", [None, "x", object()])
