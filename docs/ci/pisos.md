@@ -116,7 +116,7 @@ Patrón vigente al migrar (2026-10-03, master 364ded9): `^671 passed`
 
 Piso actualizado 2026-10-04: `^688 passed`. Sobre el piso 683, se suman pruebas de payload hostil, timeout con cancelación, truncamiento explícito, cableado del perfil de prueba y concurrencia en peor caso; 0 skips.
 
-Piso actualizado 2026-10-07 (F1.1 paso 8 r2, avisos de la decisión del kernel): `^766 passed`. Sobre el piso 726 de la base (`origin/feat/faro-f1.1-evaluador`, 002fc9ba), +40 en `tests/test_faro_aviso.py` (contrato contra el `RuleDecision` real de #371, fallo cerrado ante lo no reconocible, tasa por regla con lo suprimido a la cola, cola con flock y rotación antes de leer, 0600, carrera real de 20 000 líneas, resumen en mensajes i/n sin truncado silencioso, hora UTC, I/O vigilada sin recursión e invariante `rule_authority` → aviso en intérprete limpio). MEDIDO con el mismo comando del job (venv `~/tmp-glm/venv-faro`, Python 3.14.4, 0 skips); el job corre en 3.12.
+Piso actualizado 2026-10-07 (F1.1 paso 8 r2, avisos de la decisión del kernel): `^768 passed`. Sobre el piso 726 de la base (`origin/feat/faro-f1.1-evaluador`, 002fc9ba), +42 en `tests/test_faro_aviso.py` (contrato contra el `RuleDecision` real de #371, fallo cerrado ante lo no reconocible, tasa por regla con lo suprimido a la cola, cola con flock y rotación antes de leer, 0600, carrera real de 20 000 líneas, resumen en mensajes i/n sin truncado silencioso, hora UTC, I/O vigilada sin recursión e invariante `rule_authority` → aviso en intérprete limpio). MEDIDO con el mismo comando del job (venv `~/tmp-glm/venv-faro`, Python 3.14.4, 0 skips); el job corre en 3.12.
 
 ## `faro-bitacora-db/faro-db`
 

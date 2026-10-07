@@ -1026,6 +1026,36 @@ def test_el_patron_de_rotados_es_exacto_y_dos_colas_no_se_mezclan(tmp_path):
     assert confirmar_resumen(rb) is True
 
 
+def test_confirmar_resumen_no_borra_un_rotado_sin_reclamar(tmp_path):
+    """q5 / mutante «quitar la guarda m.group(2) is None»: un token que liste un `.procesando` SIN el
+    sufijo de reclamo (de otro, o fabricado) devuelve False y no borra nada."""
+    from jax.faro.aviso import ResumenDiario
+    cola = tmp_path / "cola.jsonl"
+    sin_reclamar = tmp_path / "cola.jsonl.00000000000000000007.procesando"
+    sin_reclamar.write_text("x\n")
+    token = ResumenDiario(("m",), (str(sin_reclamar),), str(cola))
+    assert confirmar_resumen(token) is False
+    assert sin_reclamar.exists()
+
+
+def test_el_patron_de_rotados_no_acepta_cuarentena(tmp_path):
+    """q6 / mutante «patron acepta cuarentena»: lo apartado a cuarentena no es un rotado y no se vuelve a leer."""
+    from jax.faro.aviso import _patron_rotado
+    patron = _patron_rotado("cola.jsonl")
+    ok = "cola.jsonl.00000000000000000007.procesando.123-0123456789abcdef"
+    assert patron.fullmatch("cola.jsonl.00000000000000000007.procesando") and patron.fullmatch(ok)
+    for malo in ("cola.jsonl.00000000000000000007.procesando.cuarentena", ok + ".cuarentena",
+                 "cola.jsonl.cuarentena"):
+        assert patron.fullmatch(malo) is None, malo
+    cola = tmp_path / "cola.jsonl"
+    for nombre in ("cola.jsonl.00000000000000000007.procesando.cuarentena", ok + ".cuarentena"):
+        p = tmp_path / nombre
+        p.write_text(_json.dumps({"creado_utc": "x", "clase": "c", "texto": "NO-ME-LEAS", "suprimido_por_tasa": False}) + "\n")
+        p.chmod(0o600)
+    assert resumen_diario(cola, host="hall9000") is None
+    assert len(list(tmp_path.glob("*.cuarentena"))) == 2
+
+
 def test_dos_resumidores_simultaneos_no_duplican(tmp_path):
     """MINOR (3) / mutante «sin reclamo»: lo reclamado por un resumidor no lo ve el otro; con lease vencido
     se re-reclama. Y dos hilos concurrentes: 0 duplicados."""
