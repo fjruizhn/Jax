@@ -4,9 +4,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import logging
-from types import MappingProxyType
 from typing import Callable
 
+from jax.faro.catalogo_topes import CatalogoTopes
 from policy.authority_ledger.canonical import canonical_bytes, domain_hash
 from policy.authority_ledger.errors import AuthorityStateError
 
@@ -22,22 +22,17 @@ _CATALOG_VERSION = "1"
 _DECISION_FIELDS = frozenset({
     "request_id", "request_hash", "request_catalog_hash", "status",
     "required_rule_id", "reason_code", "decided_at_utc",
-    "catalogo",
 })
 
 
 def _catalog_projection(catalog):
-    if catalog is None:
-        return None
-    if not isinstance(catalog, MappingProxyType) or any(
-        not isinstance(key, str)
-        or not isinstance(values, tuple)
-        or not values
-        or any(not isinstance(value, str) for value in values)
-        for key, values in catalog.items()
-    ):
-        raise RuleAuthorityStorageError("catalogo de decisión inválido")
-    return {key: list(values) for key, values in catalog.items()}
+    """Proyección canónica del catálogo SELLADO del pin (clases + OID del pin)."""
+    if type(catalog) is not CatalogoTopes:
+        raise RuleAuthorityStorageError("catalogo de solicitud inválido")
+    return {
+        "oid_pin": catalog.oid_pin,
+        "clases": {key: list(values) for key, values in catalog.items()},
+    }
 
 
 def _catalog_hash(catalog) -> str:
@@ -55,7 +50,6 @@ def _decision_projection(decision: RuleDecision, request_catalog_hash: str) -> d
         "decided_at_utc": decision.decided_at_utc.isoformat(
             timespec="microseconds"
         ).replace("+00:00", "Z"),
-        "catalogo": _catalog_projection(decision.catalogo),
     }
 
 
@@ -129,9 +123,6 @@ class MariaDBRuleDecisionStore:
 
         request_catalog_hash = _catalog_hash(request.catalogo)
         projection = _decision_projection(decision, request_catalog_hash)
-        if (projection["catalogo"] is not None
-                and projection["catalogo"] != _catalog_projection(request.catalogo)):
-            raise AuthorityStateError("catalogo de decisión no corresponde al pin de la solicitud")
         canonical = canonical_bytes(projection)
         connection = None
         try:
@@ -246,23 +237,6 @@ class MariaDBRuleDecisionStore:
                 required_rule_id=required_rule_id,
                 reason_code=reason,
                 decided_at_utc=projected_time,
-                catalogo=_decode_catalog(payload["catalogo"], expected_catalog),
             )
         except Exception as exc:
             raise RuleAuthorityStorageError("fila de decisión inválida") from exc
-
-
-def _decode_catalog(value, expected_catalog):
-    if value is None:
-        return None
-    if not isinstance(value, dict) or any(
-        not isinstance(key, str)
-        or not isinstance(values, list)
-        or any(not isinstance(item, str) for item in values)
-        for key, values in value.items()
-    ):
-        raise ValueError("catálogo de decisión inválido")
-    decoded = MappingProxyType({key: tuple(values) for key, values in value.items()})
-    if value != _catalog_projection(expected_catalog):
-        raise ValueError("catalogo no corresponde al pin de la solicitud")
-    return decoded

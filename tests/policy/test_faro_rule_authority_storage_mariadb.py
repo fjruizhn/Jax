@@ -11,13 +11,12 @@ import subprocess
 import sys
 import tempfile
 import time
-from types import MappingProxyType
 import uuid
 
 import pymysql
 import pytest
 
-from jax.faro.catalogo_topes import cargar_catalogo_bytes
+from tests.policy.catalogo_pin import catalogo_del_pin
 from policy.authority_ledger.canonical import canonical_bytes
 from policy.authority_ledger.errors import AuthorityStateError
 from policy.rule_authority.errors import RuleAuthorityError
@@ -39,7 +38,9 @@ from policy.rule_authority.storage import (
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "policy/rule_authority/migrations/001_rule_authority_kernel.sql"
 IMAGE = os.environ.get("JAX_RULE_AUTHORITY_TEST_MARIADB_IMAGE", "mariadb:12.3.3")
-CATALOG = cargar_catalogo_bytes((ROOT / "policy/faro/catalogo-topes.json").read_bytes())
+CATALOG = catalogo_del_pin()
+_CATALOG_BYTES = (ROOT / "policy/faro/catalogo-topes.json").read_bytes()
+ALTERNATE_CATALOG = catalogo_del_pin(_CATALOG_BYTES.replace(b'"pagos"]', b'"pagos", "ordenes"]'))
 
 
 def _run(docker: list[str], *args: str):
@@ -389,12 +390,9 @@ def test_mariadb_store_is_idempotent_durable_and_bound_to_request_and_catalog(db
     request = _request("0199f8a1-8c00-7000-8000-000000000101")
     assert store.get(request) is None
     assert store.get(_request(request.request_id, "other@example.test")) is None
-    alternate_catalog = MappingProxyType({
-        **dict(CATALOG),
-        "actos_externos": (*CATALOG["actos_externos"], "unidad-extra"),
-    })
-    other_pin_request = _request(request.request_id, catalog=alternate_catalog)
-    assert other_pin_request.request_hash == request.request_hash
+    other_pin_request = _request(request.request_id, catalog=ALTERNATE_CATALOG)
+    # El pin con otro catálogo cambia el request_hash (lleva el OID del pin).
+    assert other_pin_request.request_hash != request.request_hash
     assert store.get(other_pin_request) is None
 
     decision = _decision(request)
@@ -406,41 +404,15 @@ def test_mariadb_store_is_idempotent_durable_and_bound_to_request_and_catalog(db
     assert store.get(request) == decision
     assert store.get(other_pin_request) is None
 
-    # The store preserves the model's immutable pin catalog on roundtrip.
-    catalog_store_request = _request("0199f8a1-8c00-7000-8000-000000000105")
-    catalog_store_decision = RuleDecision(
-        request_id=catalog_store_request.request_id,
-        request_hash=catalog_store_request.request_hash,
-        status=RuleDecisionStatus.DENY,
-        required_rule_id=catalog_store_request.rule_id,
-        reason_code="STOP_ACTIVE",
-        decided_at_utc=decision.decided_at_utc,
-        catalogo=CATALOG,
-    )
-    assert store.record(catalog_store_request, catalog_store_decision) == catalog_store_decision
-    assert store.get(catalog_store_request) == catalog_store_decision
-    foreign_catalog_decision = RuleDecision(
-        request_id=catalog_store_request.request_id,
-        request_hash=catalog_store_request.request_hash,
-        status=RuleDecisionStatus.DENY,
-        required_rule_id=catalog_store_request.rule_id,
-        reason_code="STOP_ACTIVE",
-        decided_at_utc=decision.decided_at_utc,
-        catalogo=MappingProxyType({"actos_externos": ("unidades-inventadas",)}),
-    )
-    with pytest.raises(AuthorityStateError):
-        store.record(catalog_store_request, foreign_catalog_decision)
-    malformed_catalog_decision = RuleDecision(
-        request_id=catalog_store_request.request_id,
-        request_hash=catalog_store_request.request_hash,
-        status=RuleDecisionStatus.DENY,
-        required_rule_id=catalog_store_request.rule_id,
-        reason_code="STOP_ACTIVE",
-        decided_at_utc=decision.decided_at_utc,
-        catalogo=MappingProxyType({"actos_externos": "mensajes"}),
-    )
-    with pytest.raises(RuleAuthorityError):
-        store.record(catalog_store_request, malformed_catalog_decision)
+    # El catálogo del request queda persistido y ligado a la fila canónica.
+    with db.root(autocommit=True) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT request_catalog_hash FROM rule_decisions WHERE request_id=%s",
+                (request.request_id,),
+            )
+            assert cursor.fetchone()[0] == _catalog_hash(CATALOG)
+    assert _catalog_hash(CATALOG) != _catalog_hash(ALTERNATE_CATALOG)
 
     # A separate connection sees the row immediately after return: durable
     # persistence is part of the synchronous return contract.
