@@ -233,7 +233,7 @@ RECURSOS_PROHIBIDOS_R2 = [
 ])
 def test_r2_recurso_fabricado_o_trasladado_niega_en_schema(clase: str, recurso: str) -> None:
     datos = dict(load_strict_yaml(TOPE))
-    datos["tope"] = {"resource_class": clase, "resource": recurso, "maximum": 2, "period": "hora"}
+    datos["tope"] = {"resource_class": clase, "resource": recurso, "maximum": 2, "period": "por_hora"}
     with pytest.raises(RuleSchemaError):
         validar_regla(datos)
 
@@ -291,7 +291,7 @@ def test_r4_subid_valido_de_otra_clase_niega(C=None) -> None:
     """C3: el subid existe en el catalogo pero en OTRA clase."""
     datos = dict(load_strict_yaml(TOPE))
     datos["tope"] = {"resource_class": "monto_dinero", "resource": "tokens_costo.usd",
-                     "maximum": 2, "period": "hora"}
+                     "maximum": 2, "period": "por_hora"}
     with pytest.raises(RuleSchemaError) as excinfo:
         validar_regla(datos)
     assert "SU clase" in str(excinfo.value)
@@ -707,13 +707,51 @@ def test_r8_d4_no_bloquea_los_subids_legitimos_del_catalogo() -> None:
     assert _cargar_catalogo_bytes(CATALOGO_BYTES_REPO)
 
 
-def test_r8_catalogo_del_pin_no_deja_repos_temporales() -> None:
-    """MINOR r7: el helper no deja ``catalogo-pin-*`` en el directorio temporal."""
+def test_r8_catalogo_del_pin_no_deja_repos_temporales(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """MINOR r7: el helper no deja ``catalogo-pin-*`` en el directorio temporal.
+    El temporal se aisla en ``tmp_path`` para no mirar el /tmp compartido."""
+    aislado = tmp_path / "tmp-aislado"
+    aislado.mkdir()
+    monkeypatch.setenv("TMPDIR", str(aislado))
+    monkeypatch.setattr(tempfile, "tempdir", str(aislado))   # restaura al salir
     base = Path(tempfile.gettempdir())
+    assert base == aislado
     antes = set(base.glob("catalogo-pin-*"))
     catalogo_del_pin()
     catalogo_del_pin(CATALOGO_BYTES_REPO)
     assert set(base.glob("catalogo-pin-*")) <= antes
+
+
+@pytest.mark.parametrize("sinonimo", [
+    "connections", "threads", "concurrency", "processes", "agents",
+    "subagents", "sockets", "pool_db", "conns", "jobs_paralelos",
+    "Workers_Max",
+])
+def test_r9_d4_niega_sinonimos_en_ingles_y_raices(sinonimo: str) -> None:
+    from jax.faro.catalogo_topes import _viola_d4
+    assert _viola_d4(sinonimo)                                 # unidad
+    malvado = json.dumps({"version": 1, "decision": "x",
+                          "clases": {**LITERAL_DECISION_FERNANDO["clases"],
+                                     "actos_externos": [sinonimo.lower()]}}).encode()
+    with pytest.raises(CatalogoTopesInvalido) as excinfo:
+        _cargar_catalogo_bytes(malvado)
+    assert "prohibido por D-4" in str(excinfo.value)
+
+
+def test_r9_d4_leet_no_se_niega_limite_documentado() -> None:
+    """``w0rkers`` carga: no hay heuristica de leet (limite documentado en
+    ``_viola_d4``). Si algun dia se decide cubrirlo, esta prueba cambia."""
+    from jax.faro.catalogo_topes import _viola_d4
+    assert not _viola_d4("w0rkers")
+
+
+@pytest.mark.parametrize("legitimo", [
+    "hnl", "usd", "mensajes", "correos", "publicaciones", "compras", "pagos",
+    "por_hora", "por_dia", "segundos", "tokens"])
+def test_r9_d4_subids_legitimos_del_catalogo_real_no_caen(legitimo: str) -> None:
+    from jax.faro.catalogo_topes import _viola_d4
+    assert not _viola_d4(legitimo)
 
 
 def test_r7_subid_con_mayusculas_o_acentos_niega_igual() -> None:

@@ -367,11 +367,54 @@ def test_tope_con_maximo_sobre_el_rango_representable_rechaza() -> None:
         validar_regla(datos)
 
 
-def test_tope_con_periodo_mal_formado_rechaza() -> None:
+class _StrSub(str):
+    pass
+
+
+@pytest.mark.parametrize("periodo", [
+    "una hora!", "workers", "conexiones_db", "Por_Hora", "por_hora\u200b", "por\u200b_hora",
+    "por_hora ", " por_hora", "hora", "", 3600, None, True, ["por_hora"],
+    _StrSub("por_hora"), "frecuencia.por_hora", "duracion", "segundos",
+    "por_h\u00f3ra", "por_hora\n",
+])
+def test_tope_con_periodo_fuera_del_catalogo_rechaza(periodo: object) -> None:
     datos = _regla("regla-ejemplo-tope.yaml")
-    datos["tope"]["period"] = "una hora!"
-    with pytest.raises(RuleSchemaError):
+    datos["tope"]["period"] = periodo
+    with pytest.raises(RuleSchemaError) as excinfo:
         validar_regla(datos)
+    assert "tope.period" in str(excinfo.value)
+
+
+def _periodos_del_catalogo_real() -> list[str]:
+    raiz = Path(__file__).resolve().parents[2]
+    clases = json.loads((raiz / "policy" / "faro" / "catalogo-topes.json").read_text())["clases"]
+    return list(clases["frecuencia"])
+
+
+@pytest.mark.parametrize("periodo", _periodos_del_catalogo_real())
+def test_tope_con_cada_periodo_del_catalogo_real_valida(periodo: str) -> None:
+    datos = _regla("regla-ejemplo-tope.yaml")
+    datos["tope"]["period"] = periodo
+    assert validar_regla(datos).tope.period == periodo
+
+
+def test_los_periodos_legitimos_no_estan_vacios() -> None:
+    assert {"por_hora", "por_dia"} <= set(_periodos_del_catalogo_real())
+
+
+def test_el_periodo_sale_del_catalogo_del_pin_no_de_una_lista_propia() -> None:
+    """Un pin con otra frecuencia ('por_semana') la admite; 'por_hora' ausente, niega."""
+    otro = catalogo_del_pin(json.dumps(
+        {"version": 1, "decision": "x",
+         "clases": {"monto_dinero": ["usd"], "actos_externos": ["mensajes"],
+                    "frecuencia": ["por_semana"], "duracion": ["segundos"],
+                    "tokens_costo": ["tokens"]}}).encode())
+    datos = _regla("regla-ejemplo-tope.yaml")
+    datos["tope"]["period"] = "por_semana"
+    assert _validar(datos, catalogo=otro).tope.period == "por_semana"
+    datos["tope"]["period"] = "por_hora"
+    with pytest.raises(RuleSchemaError):
+        _validar(datos, catalogo=otro)
 
 
 # ------------------------------------------------ inmutabilidad y tipado duro

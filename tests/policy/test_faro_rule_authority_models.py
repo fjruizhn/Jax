@@ -409,7 +409,7 @@ def test_limit_numbers_accept_the_edge():
     pytest.param("duracion", "duracion.segundos.x", id="subid-compuesto"),
 ])
 def test_tope_resource_must_come_from_the_catalog(clase, recurso):
-    tope = Tope(resource_class=clase, resource=recurso, maximum=5, period="hora")
+    tope = Tope(resource_class=clase, resource=recurso, maximum=5, period="por_hora")
     with pytest.raises(AuthorityEventValidationError, match="tope"):
         limites_de(_a_mano_regla(tope=tope), CATALOG)
 
@@ -419,7 +419,7 @@ def test_tope_resource_must_come_from_the_catalog(clase, recurso):
                                      "monto_dinero.hnl", "actos_externos.pagos"])
 def test_tope_resource_in_the_catalog_is_accepted(recurso):
     clase = recurso.partition(".")[0]
-    tope = Tope(resource_class=clase, resource=recurso, maximum=5, period="hora")
+    tope = Tope(resource_class=clase, resource=recurso, maximum=5, period="por_hora")
     assert limites_de(_a_mano_regla(tope=tope), CATALOG).tope == tope
 
 
