@@ -687,12 +687,17 @@ def test_las_horas_son_utc_aunque_la_maquina_este_en_otra_zona(monkeypatch, tmp_
         otra_zona = timezone(timedelta(hours=5))
         av = aviso_de_decision(_decision(cuando=datetime(2026, 10, 7, 8, 4, 5, tzinfo=otra_zona)), host="h")
         assert av.creado_utc == "2026-10-07T03:04:05+00:00" and "a=2026-10-07T03:04:05+00:00" in av.texto
+        def es_ahora_en_utc(iso: str) -> None:       # no basta el sufijo: la hora misma tiene que ser UTC
+            assert iso.endswith("+00:00"), iso
+            assert abs((datetime.fromisoformat(iso) - datetime.now(timezone.utc)).total_seconds()) < 120, iso
+
         nr = aviso_de_decision(None, host="h")
-        assert nr.creado_utc.endswith("+00:00") and "a=" + nr.creado_utc in nr.texto
+        es_ahora_en_utc(nr.creado_utc)
+        assert "a=" + nr.creado_utc in nr.texto
         cola = tmp_path / "cola.jsonl"
         assert acumular_para_resumen(av, cola) is True
         cabecera = resumen_diario(cola, host="h")[0].splitlines()[0]
-        assert cabecera.endswith("+00:00"), cabecera
+        es_ahora_en_utc(cabecera.rsplit(" · ", 1)[1])
     finally:
         monkeypatch.undo()
         t.tzset()
