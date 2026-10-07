@@ -134,8 +134,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 19 tests CORRIDOS del codec de persistencia de Block 4. Medido el 2026-10-07 en hall9000."
     },
     "authority-ledger-mariadb/integration": {
-      "patron": "^4 passed in ",
-      "mensaje": "PISO ROTO: se esperaba la integración MariaDB aislada de Block 4 (4 tests CORRIDOS). Medido el 2026-10-07 en hall9000 con MariaDB 12.3.3 --network none."
+      "patron": "^5 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 5 tests CORRIDOS de la suite MariaDB aislada del ledger (4 de storage + 1 de rechazo pre-escritura)."
     },
     "authority-rule-events/ratifications": {
       "patron": "^12 passed in ",
@@ -200,6 +200,14 @@
     "archivos-de-test-en-ci/pisos": {
       "patron": "^227 passed",
       "mensaje": "PISO ROTO: se esperaban 227 tests CORRIDOS de los pisos fuera del workflow."
+    },
+    "authority-ledger-seal/attacks": {
+      "patron": "^4 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 4 tests CORRIDOS de los ataques de sello (replace, replace Faro, congelado profundo, drift de hash)."
+    },
+    "authority-ledger-golden/vectors": {
+      "patron": "^7 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 7 tests CORRIDOS del vector dorado (6 tipos históricos + genesis). Si cambió el formato canónico a propósito, recaptura las constantes en el mismo commit."
     }
   },
   "minimos": {
