@@ -2589,6 +2589,7 @@ jobs:
           tests/policy/test_authority_resolution_conflicts.py
           tests/policy/test_authority_resolution_result_contract.py
           tests/policy/test_authority_resolution_candidate_boundary.py
+          tests/policy/test_authority_resolution_loader_seal.py
           tests/policy/test_authority_resolution_determinism.py
           tests/policy/test_authority_resolution_purity.py
           tests/policy/test_enforcement_evidence_core.py
