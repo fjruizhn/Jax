@@ -39,7 +39,8 @@ def test_el_ejemplo_del_diseno_es_valido() -> None:
 def test_el_ejemplo_con_tope_es_valido_y_declara_su_clase() -> None:
     regla = validar_regla(_regla("regla-ejemplo-tope.yaml"))
     assert regla.tope is not None
-    assert regla.tope.resource_class == "llamadas_paralelas"
+    assert regla.tope.resource_class == "actos_externos"
+    assert regla.tope.resource == "mensajes.externos"
     assert regla.tope.maximum == 8
 
 
@@ -290,20 +291,33 @@ def test_tope_con_clase_fuera_de_vocabulario_rechaza() -> None:
         validar_regla(datos)
 
 
-def test_el_vocabulario_de_clases_es_el_cerrado_de_r4() -> None:
+def test_el_vocabulario_de_clases_es_el_de_actos_y_dinero() -> None:
+    # DECISION de Fernando (2026-10-06): solo actos y dinero; jamas infraestructura.
     assert CLASES_RECURSO_CON_TOPE == (
-        "connections", "concurrencia", "workers", "procesos_hijos",
-        "hilos", "tasks", "llamadas_paralelas",
+        "monto_dinero", "actos_externos", "frecuencia", "duracion", "tokens_costo",
     )
+
+
+@pytest.mark.parametrize("clase", [
+    "connections", "concurrencia", "workers", "procesos_hijos", "hilos",
+    "tasks", "llamadas_paralelas", "agentes", "enjambre", "conexion",
+])
+def test_clase_de_infraestructura_o_agentes_no_existe_en_el_vocabulario(clase: str) -> None:
+    datos = _regla("regla-ejemplo-tope.yaml")
+    datos["tope"]["resource_class"] = clase
+    with pytest.raises(RuleSchemaError):
+        validar_regla(datos)
 
 
 @pytest.mark.parametrize("recurso", [
     "agentes", "subagentes.globales", "enjambre.total", "swarm.workers",
-    "conexiones.remotas",        # la palabra prohibida de D-4 en castellano, se llame como se llame.
-    # OJO: "connections.*" NO va aqui: con R-4 declarativo la clase connections es
-    # legítima y tope-able; lo que se bloquea es la palabra castellana, no la clase.
+    "conexiones.remotas", "connections.remotas", "puerto.connections",   # D-4, ambos idiomas
+    "llm.paralelo", "workers.maximo", "hilos.pool", "procesos.hijos", "threads",
+    "concurrencia.maxima", "concurrency.limit", "processes",
 ])
-def test_tope_sobre_recurso_de_agentes_o_conexiones_rechaza(recurso: str) -> None:
+def test_tope_sobre_recurso_de_infraestructura_o_agentes_rechaza(recurso: str) -> None:
+    # Aunque la clase declarada sea legitima (actos_externos), el nombre del
+    # recurso delata infraestructura o agentes: NUNCA llevan tope.
     datos = _regla("regla-ejemplo-tope.yaml")
     datos["tope"]["resource"] = recurso
     with pytest.raises(RuleSchemaError):

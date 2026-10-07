@@ -28,16 +28,24 @@ KIND = "JAX_FARO_RULE"
 EFFECT = "PERMIT"
 ACTION_CLASSES = ("REVERSIBLE", "OBLIGATING")
 
-# R-4: vocabulario cerrado de clases de recurso que aceptan tope. D-4 pasa a ser
-# declarativo: lo que no esta aqui no lleva tope, sin importar como se llame.
+# R-4, DECISION DE FERNANDO (2026-10-06): solo admiten tope las clases de ACTOS
+# y DINERO — monto de dinero, cantidad de actos externos (mensajes, compras,
+# publicaciones), frecuencia, duracion y tokens/costo. NUNCA conexiones,
+# concurrencia, workers, hilos, procesos ni agentes (D-4). Lo que no esta aqui
+# no lleva tope, sin importar como se llame ni como se declare.
 CLASES_RECURSO_CON_TOPE = (
-    "connections", "concurrencia", "workers", "procesos_hijos",
-    "hilos", "tasks", "llamadas_paralelas",
+    "monto_dinero", "actos_externos", "frecuencia", "duracion", "tokens_costo",
 )
 
-# D-4 (jax/faro/topes.py::PALABRAS_SIN_TOPE): ni agentes ni conexiones llevan
-# tope, se llamen como se llamen. Duplicado a proposito: policy no importa jax.
-PALABRAS_RECURSO_SIN_TOPE = ("agent", "subagent", "enjambre", "swarm", "conexion")
+# D-4 (jax/faro/topes.py::PALABRAS_SIN_TOPE) mas la lista NUNCA de Fernando, en
+# castellano y en ingles: ni agentes ni conexiones ni concurrencia ni workers ni
+# hilos ni procesos llevan tope, se llamen como se llamen y aunque la clase
+# declarada sea legitima. Duplicado a proposito: policy no importa jax.
+PALABRAS_RECURSO_SIN_TOPE = (
+    "agent", "subagent", "enjambre", "swarm",
+    "conexion", "connection", "concurrenc", "worker", "hilo", "thread",
+    "proceso", "process", "paralel",
+)
 
 # Techo por defecto de ttl_seconds: el kernel pasa el suyo de configuracion
 # confiable (``ttl_max_seconds``); sin el, rige este. Es un MAXIMO, no un valor.
@@ -53,7 +61,7 @@ _RE_MONEDA = re.compile(r"[A-Z]{3}\Z")
 _RE_UNIDAD = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 _RE_RECURSO = re.compile(r"[a-z0-9_.-]{1,48}\Z")
 _RE_PERIODO = re.compile(r"[A-Za-z0-9_.:-]{1,32}\Z")
-_RE_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
+_RE_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 _RE_PALABRAS = re.compile(r"[._-]+")
 
 _CLAVES_TOPE_NIVEL = frozenset({"schema_version", "kind", "rule_id", "effect", "action_class",
@@ -253,6 +261,9 @@ def validar_regla(datos: object, *, ttl_max_seconds: int | None = None) -> Regla
 
     limites = _objeto_cerrado(documento["obligation_limits"], "obligation_limits",
                               frozenset({"quantity", "amount", "frequency"}))
+    for clave in ("quantity", "amount", "frequency"):
+        if clave not in limites:
+            raise RuleSchemaError(f"obligation_limits.{clave}: obligatorio (null si no aplica)")
     cantidad = _validar_cantidad(limites["quantity"]) if limites.get("quantity") is not None else None
     monto = _validar_monto(limites["amount"]) if limites.get("amount") is not None else None
     frecuencia = (_validar_frecuencia(limites["frequency"])
@@ -260,8 +271,9 @@ def validar_regla(datos: object, *, ttl_max_seconds: int | None = None) -> Regla
 
     vigencia_datos = _objeto_cerrado(documento["validity"], "validity",
                                      frozenset({"not_before_utc", "not_after_utc"}))
-    if "not_before_utc" not in vigencia_datos:
-        raise RuleSchemaError("validity.not_before_utc: obligatorio")
+    for clave in ("not_before_utc", "not_after_utc"):
+        if clave not in vigencia_datos:
+            raise RuleSchemaError(f"validity.{clave}: obligatorio (null si es abierto)")
     not_before = _timestamp_utc(vigencia_datos["not_before_utc"], "validity.not_before_utc")
     not_after = None
     if vigencia_datos.get("not_after_utc") is not None:

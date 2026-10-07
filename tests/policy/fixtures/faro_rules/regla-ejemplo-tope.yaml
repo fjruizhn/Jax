@@ -2,7 +2,7 @@
 # no se deduce del nombre. Fixture de prueba: ninguna regla esta activa.
 schema_version: "1.0"
 kind: JAX_FARO_RULE
-rule_id: ejemplo-tope-llamadas
+rule_id: ejemplo-tope-mensajes
 effect: PERMIT
 action_class: OBLIGATING
 
@@ -24,7 +24,7 @@ permit:
   ttl_seconds: 60
 
 tope:
-  resource_class: llamadas_paralelas
-  resource: llamadas_paralelas.globales
+  resource_class: actos_externos
+  resource: mensajes.externos
   maximum: 8
   period: hora

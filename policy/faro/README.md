@@ -30,15 +30,24 @@ ratificación sin coincidencia. La ratificación es una vez **por contenido**: l
 misma ruta puede volver a coincidir más abajo en la historia si los bytes
 regresan; retirar autoridad para siempre exige revocación explícita.
 
-## El tope declara su clase (R-4)
+## El tope declara su clase (R-4 — decisión de Fernando, 2026-10-06)
 
 Antes, si un recurso aceptaba tope se deducía de su **nombre** — y un nombre
 en otro idioma se escapaba (`conexion` bloqueado, `connections` colando). Ahora
 la regla **declara** la clase del recurso (`tope.resource_class`) con vocabulario
-cerrado: `connections, concurrencia, workers, procesos_hijos, hilos, tasks,
-llamadas_paralelas`. Las clases de agentes, enjambres y conexiones de D-4 no
-existen en el vocabulario: un tope sobre ellas no se puede ni expresar. El
-guardia semántico D-4 de `jax/faro/topes.py` sigue vigente en el runtime.
+cerrado, y ese vocabulario son **solo las clases de actos y dinero**:
+`monto_dinero` (monto de dinero), `actos_externos` (cantidad de actos externos:
+mensajes, compras, publicaciones), `frecuencia`, `duracion` y `tokens_costo`.
+
+**NUNCA llevan tope** — no existen en el vocabulario y además su nombre se
+rechaza aunque la clase declarada sea legítima: conexiones, concurrencia,
+workers, hilos, procesos y agentes (D-4, en castellano y en inglés).
+
+`jax/faro/topes.py` sigue con su guardia semántica D-4 para los recursos que
+llegan por el canal de control; consumir la clase DECLARADA de la regla en vez
+de deducir por nombre le corresponde al kernel de evaluación (paso 5-7 de
+F1.1, rama `feat/faro-f1.1-kernel`): este schema ya no deja ninguna vía a un
+tope prohibido.
 
 ## Cómo se carga
 
