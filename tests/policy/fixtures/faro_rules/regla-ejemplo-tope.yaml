@@ -27,4 +27,4 @@ tope:
   resource_class: actos_externos
   resource: actos_externos.mensajes
   maximum: 8
-  period: hora
+  period: por_hora
