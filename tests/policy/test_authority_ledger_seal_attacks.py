@@ -8,16 +8,17 @@ coherencia hash/proyección antes de firmar. Cada test aquí mata un mutante
 del arreglo (ver entrega para la tabla mutante→prueba→aserción).
 """
 import dataclasses
+from collections.abc import Mapping
 
 import pytest
 
+from policy.authority_ledger.canonical import plain
 from policy.authority_ledger.errors import AuthorityStateError
 from policy.authority_ledger.models import AuthorityEventIntent, RuleRatificationGrantPayload
 from policy.authority_ledger.service import append_authority_event
 from tests.policy.test_authority_ledger_events import ratification_intent, setup_ledger
-from tests.policy.test_authority_ledger_rule_ratifications import (
-    _test_signable_grant_intent, sample_grant,
-)
+from tests.policy._sellos_de_prueba import rule_grant_intent
+from tests.policy.test_authority_ledger_rule_ratifications import sample_grant
 
 
 def test_replace_attack_cannot_reuse_the_snapshot_seal():
@@ -46,7 +47,7 @@ def test_replace_attack_cannot_reuse_the_snapshot_seal():
 def test_rule_grant_replace_attack_cannot_reuse_the_faro_seal():
     """El mismo ataque contra el sello Faro individual de #369."""
     store, root, key = setup_ledger()
-    base = _test_signable_grant_intent()
+    base = rule_grant_intent(sample_grant())
     other = RuleRatificationGrantPayload(**(sample_grant().__dict__ | {"rule_id": "other-rule"}))
     forged = dataclasses.replace(base, rule_ratification=other)
     assert forged._rule_ratification_snapshot_seal is None
@@ -62,8 +63,10 @@ def test_projection_is_frozen_deep_after_sealing():
 
     En master la proyección era un dict mutable. Ahora es MappingProxyType
     hasta el fondo: ni la clave del hash ni los dicts anidados se dejan
-    escribir. (Mutantes «dict mutable» y «congelado superficial»: alguna de
-    las dos asignaciones deja de lanzar TypeError y este test explota.)
+    escribir. Las aserciones sobre `protected_metanorms[0]` y sobre un corpus
+    con documentos son incondicionales. (Mutantes «dict mutable», «congelado
+    superficial» y «congelar sin recursión»: alguna asignación deja de lanzar
+    TypeError o un tipo deja de ser Mapping/tuple, y este test explota.)
     """
     base = ratification_intent()
     with pytest.raises(TypeError):
@@ -71,11 +74,30 @@ def test_projection_is_frozen_deep_after_sealing():
     authority = base.static_policy_view_projection["authority_meta_contract"]
     with pytest.raises(TypeError):
         authority["scope_jurisdiction"] = "OTRO"
-    documents = base.static_policy_view_projection["ordinary_documents"]
-    assert isinstance(documents, tuple)
-    if documents:
-        with pytest.raises(TypeError):
-            documents[0]["id"] = "otro"
+    metanorms = authority["protected_metanorms"]
+    assert isinstance(metanorms, tuple) and metanorms
+    assert isinstance(metanorms[0], Mapping) and not isinstance(metanorms[0], dict)
+    with pytest.raises(TypeError):
+        metanorms[0]["non_waivable"] = False
+    assert isinstance(base.static_policy_view_projection["ordinary_documents"], tuple)
+
+    # Corpus de prueba CON documentos: el corpus real no los tiene, así que
+    # sin esto la profundidad de `ordinary_documents` no se ejercita.
+    plain_projection = plain(base.static_policy_view_projection)
+    plain_projection["ordinary_documents"] = [
+        {"id": "doc-a", "relationships": {"supersedes": ["doc-0"]}},
+    ]
+    with_docs = AuthorityEventIntent._from_validated_snapshot(
+        base.policy_corpus_hash, plain_projection,
+    )
+    documents = with_docs.static_policy_view_projection["ordinary_documents"]
+    assert isinstance(documents, tuple) and len(documents) == 1
+    assert not isinstance(documents[0], dict)
+    with pytest.raises(TypeError):
+        documents[0]["id"] = "otro"
+    with pytest.raises(TypeError):
+        documents[0]["relationships"]["supersedes"] = ()
+    assert isinstance(documents[0]["relationships"]["supersedes"], tuple)
 
 
 def test_hash_drift_after_sealing_is_recomputed_and_rejected_at_append():

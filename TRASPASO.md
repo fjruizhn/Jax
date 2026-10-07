@@ -14,7 +14,7 @@ contra el estado, envenenando un ledger append-only para siempre. Encargo:
 - `models.py`: sellos `_ratification_snapshot_seal` y
   `_rule_ratification_snapshot_seal` pasan a `init=False`; solo los estampan
   las fábricas `_from_validated_snapshot` (corpus) y
-  `_rule_grant_from_sealed_snapshot` (Faro, nueva). `__post_init__` ya no
+  el helper de prueba `tests/policy/_sellos_de_prueba.py` (Faro: en producción aún no hay vía que estampe el sello individual). `__post_init__` ya no
   puede ver sellos (siempre None en construcción): la frontera que firma
   (`append_authority_event`) es la que exige el sello correcto, como ya hacía.
 - `static_policy_view_projection` se congela profundo al construir
@@ -23,7 +23,7 @@ contra el estado, envenenando un ledger append-only para siempre. Encargo:
   firmados NO cambian — vector dorado clavado a master lo prueba.
 - `serialization.py` estampa los sellos de STORAGE tras construir (rehidratar
   no autoriza re-anexar; `append` sigue rechazándolos).
-- `service.py`: antes de firmar, re-deriva la coherencia
+- `service.py`: antes de firmar, compara (no recalcula) la coherencia
   hash↔proyección congelada; antes de `store.append`, replay completo
   `verify_authority_ledger(events + [nuevo])` — si el estado rechaza el
   evento, no se escribe nada (fallo 2, error cerrado).
@@ -60,3 +60,5 @@ contra el estado, envenenando un ledger append-only para siempre. Encargo:
 - Observación (fuera de alcance, reportada en la entrega):
   `ValidatedCandidateCorpus._loader_seal` (Block 3) tiene el mismo patrón
   `init=True` falsificable por `replace`.
+
+- Intents con proyección congelada (`MappingProxyType`) ya no son `copy.deepcopy`/`pickle`-ables; si hace falta copiarlos, usar `canonical_projection()` o `plain()`.

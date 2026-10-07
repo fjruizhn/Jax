@@ -71,8 +71,11 @@ def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAut
             intent._rule_ratification_snapshot_seal is not _RULE_RATIFICATION_SNAPSHOT_SEAL):
         raise AuthorityStateError("rule grant requires a sealed Faro snapshot")
     if intent.event_type is AuthorityEventType.RATIFICATION_GRANTED:
-        # The seal binds hash and projection at birth; the signing boundary
-        # re-derives that coherence because it is the one that answers for it.
+        # Compares fields: the hash field against the one carried inside the
+        # frozen projection. It does NOT recompute the hash from the projection.
+        # In-process `object.__setattr__` on both fields is outside the threat
+        # model (the seal is a guard against public paths, not a cryptographic
+        # boundary).
         projection = intent.static_policy_view_projection
         if projection is None or projection.get("policy_corpus_hash") != intent.policy_corpus_hash:
             raise AuthorityStateError("policy_corpus_hash no coincide con la proyección congelada del snapshot")

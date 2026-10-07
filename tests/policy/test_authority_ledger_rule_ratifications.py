@@ -15,6 +15,7 @@ from policy.authority_ledger.signatures import (
 )
 from policy.authority_ledger.storage import InMemoryAuthorityLedgerStore
 from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
+from tests.policy._sellos_de_prueba import rule_grant_intent
 from policy.authority_ledger.signatures import sign
 
 
@@ -60,7 +61,7 @@ def _grant_intent(grant=None):
 
 
 def _test_signable_grant_intent(grant=None):
-    return AuthorityEventIntent._rule_grant_from_sealed_snapshot(grant or sample_grant())
+    return rule_grant_intent(grant or sample_grant())
 
 
 def test_rule_ratification_grant_has_a_closed_payload_and_roundtrips():

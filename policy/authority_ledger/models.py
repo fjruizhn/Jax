@@ -319,14 +319,6 @@ class AuthorityEventIntent:
         object.__setattr__(intent, "_ratification_snapshot_seal", _RATIFICATION_SNAPSHOT_SEAL)
         return intent
 
-    @classmethod
-    def _rule_grant_from_sealed_snapshot(cls, rule_ratification: RuleRatificationGrantPayload, evidence_refs: tuple[str, ...] = ()) -> "AuthorityEventIntent":
-        """Only path that stamps the sealed Faro snapshot seal on an individual rule grant."""
-        intent = cls(AuthorityEventType.RULE_RATIFICATION_GRANTED, "human:fernando", evidence_refs,
-                     rule_ratification=rule_ratification)
-        object.__setattr__(intent, "_rule_ratification_snapshot_seal", _RULE_RATIFICATION_SNAPSHOT_SEAL)
-        return intent
-
     def canonical_projection(self) -> dict[str, Any]:
         if self.event_type is AuthorityEventType.RULE_RATIFICATION_GRANTED:
             return {

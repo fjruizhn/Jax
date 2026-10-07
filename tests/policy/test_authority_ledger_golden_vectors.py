@@ -110,7 +110,7 @@ def _build_chain():
     return events
 
 
-@pytest.mark.parametrize("intent,expected", zip(INTENTS, EXPECTED.values()), ids=list(EXPECTED))
+@pytest.mark.parametrize("intent,expected", list(zip(INTENTS, EXPECTED.values())), ids=list(EXPECTED))
 def test_signed_bytes_of_the_six_historical_types_are_pinned_to_master(intent, expected):
     event = next(item for item in _build_chain() if item.intent is intent)
     expected_unsigned, expected_signature, expected_hash = expected
