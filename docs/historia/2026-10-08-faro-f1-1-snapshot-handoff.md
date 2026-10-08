@@ -212,3 +212,15 @@ no concede autoridad ni prueba el estado operativo actual.
   `xfailed`, `xpassed` o `skipped`. El comparador contra `origin/master` no baja pisos.
 - El SHA previo no se debe integrar: esta corrección exige nuevo commit, auditoría Tier 3
   y CI completa exacta antes del merge.
+
+## Corrección: advertencia de colección sin filtro global · 2026-10-08
+
+- Auditoría Tier 3 rechazó la supresión global `-W ignore::pytest.PytestCollectionWarning`:
+  habría ocultado advertencias futuras de clases mal nombradas.
+- Corrección aplicada: `policy/enforcement_evidence/test_evidence.py` marca
+  `TestEvidenceIngester.__test__ = False`, porque es una clase auxiliar importada en
+  la suite y no una clase de prueba. Se eliminó el filtro global. Cualquier otra
+  advertencia de colección sigue visible y hace que falle el piso exacto.
+- La lista exacta de Identity Foundation Shadow pasó localmente: `657 passed in 5.23s`;
+  cero skipped, comparador contra `origin/master` y `git diff --check` limpios.
+- Este SHA aún requiere nueva auditoría Tier 3 y CI completa antes de integrar #370.
