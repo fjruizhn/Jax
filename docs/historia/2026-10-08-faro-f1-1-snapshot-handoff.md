@@ -166,3 +166,11 @@ no concede autoridad ni prueba el estado operativo actual.
   ninguno de los pisos heredados.
 - Este SHA todavía debe probarse y auditarse en CI; el nuevo trabajo requiere
   archivar y retirar el handoff antes de pedir auditoría final exacta.
+
+## Desglose del piso revisado · 2026-10-08
+
+- Auditoría de `6699c6d4fcc49a1477284e955826e7c51a64f350` confirmó que el
+  comparador y piso 729 son correctos; encontró que el comentario aún atribuía
+  109 pruebas a `topes`, mientras que su suite mide 113.
+- El comentario se ajustó a 113; el desglose ahora suma 729. Este cambio crea un
+  nuevo SHA, que requiere auditoría y CI exactas después de archivar este handoff.
