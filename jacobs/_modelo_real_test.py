@@ -242,59 +242,15 @@ class InvokeMotorModeloRealTest(unittest.IsolatedAsyncioTestCase):
         self.pids.append(pid)
         return pid
 
-    async def test_modelo_real_del_camino_de_motor_viaja_completo(self):
-        from motor_registry.models import JobStatus, MotorJobView  # las_manos, mismo proceso
+    async def test_motor_sin_ejecucion_gobernada_no_manda_http(self):
+        from policy.execution_control.errors import GovernedExecutionRequiredError
 
-        pid = self._pid()
-        step = Step(
-            step_id=str(uuid.uuid4()), pipeline_id=pid, step_index=0,
-            facet="kimi", capability="implementation", input={"prompt": "x"},
-            status=StepStatus.pending, trace_id=str(uuid.uuid4()),
-        )
-        ahora = time.time()
-        pipeline = Pipeline(
-            pipeline_id=pid, name="t-motor-modelo", invoked_by="plataforma",
-            mode="autonomous", status=PipelineStatus.running, plan=[step],
-            created_at=ahora, updated_at=ahora, run_epoch=0,
-        )
-        await store.pipeline_create(pipeline)
-        await store.step_upsert(step)
-
-        class _DispatchResp:
-            status_code = 200
-            def json(self): return {"job_id": "j1", "status": "pending"}
-            def raise_for_status(self): pass
-
-        job_view = MotorJobView(
-            job_id="j1", status=JobStatus.COMPLETED, motor="kimi",
-            capability="implementation", caller="jacobs", trace_id=step.trace_id,
-            created_at=ahora, result_summary="ok", model="kimi-k2.7-code",
-        )
-
-        class _JobResp:
-            status_code = 200
-            def json(self): return job_view.model_dump(mode="json")
-            def raise_for_status(self): pass
-
-        async def fake_post(self, url, json=None, **kw):
-            return _DispatchResp()
-
-        async def fake_get(self, url, **kw):
-            return _JobResp()
-
-        with patch("httpx.AsyncClient.post", fake_post), \
-             patch("httpx.AsyncClient.get", fake_get):
-            await executor._invoke_motor(step, pipeline, timeout=5)
-
-        self.assertEqual(step.modelo_real, "kimi-k2.7-code")
-
-        step.status = StepStatus.completed
-        escrito = await store.step_upsert_si_epoca(step, 0)
-        self.assertTrue(escrito)
-
-        reloaded = await store.steps_by_pipeline(pid)
-        self.assertEqual(len(reloaded), 1)
-        self.assertEqual(reloaded[0].modelo_real, "kimi-k2.7-code")
+        step = Step(facet="kimi", capability="implementation", motor="kimi")
+        pipeline = Pipeline(name="t", invoked_by="t", user_id="1", tenant_id="1", mode="dry_run")
+        with patch("jacobs.executor.obtener_cliente_http", side_effect=AssertionError("no HTTP")) as client:
+            with self.assertRaises(GovernedExecutionRequiredError):
+                await executor._invoke_motor(step, pipeline, timeout=5)
+        client.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -210,6 +210,9 @@ def _correr_arranque_real(tmp_path: Path, *, omitir: frozenset[str] = frozenset(
 #: `policy.enforcement_evidence.*`/`policy.execution_control.*` con éxito.
 #: Un resultado que NO matchea ninguna de las dos no prueba que el fix
 #: funcione: hay que mirar cuál es antes de asumir nada.
+_RUTA_IDENTIDAD = "/etc/jax/build/implementation-identity.json"
+
+
 def _firma_conocida_tras_el_fix(resultado: str) -> str | None:
     """Descripción corta de qué firma conocida matcheó `resultado`, o
     `None` si no es ninguna de las dos -- incluye el caso del guard
@@ -219,11 +222,22 @@ def _firma_conocida_tras_el_fix(resultado: str) -> str | None:
     misma ronda)."""
     if (
         resultado.startswith("RESULTADO:FileNotFoundError:")
-        and "implementation-identity.json" in resultado
+        and _RUTA_IDENTIDAD in resultado
     ):
         return (
             "FileNotFoundError sobre implementation-identity.json "
             "(TrustedImplementationIdentityProvider -- ya pasó los imports)"
+        )
+    if (
+        resultado.startswith("RESULTADO:PermissionError:")
+        and _RUTA_IDENTIDAD in resultado
+    ):
+        # hall9000 (y cualquier host con el despliegue real): /etc/jax/build existe
+        # (jaxsvc, 750) y el usuario que corre los tests no puede abrirlo. El
+        # open() ocurre DESPUES de los imports, igual que el FileNotFoundError.
+        return (
+            "PermissionError sobre implementation-identity.json "
+            "(el archivo existe pero este usuario no lo lee -- ya pasó los imports)"
         )
     if "OperationalError" in resultado:
         return "OperationalError de pymysql conectando al puerto 1 (ya pasó los imports)"
@@ -309,3 +323,29 @@ def test_allowlist_rechaza_el_guard_cortando_antes_de_los_imports(tmp_path: Path
         f"ronda 2) y sólo después, si el mensaje del guard de verdad "
         f"cambió, actualizar este test: {resultado}"
     )
+
+
+def test_la_allowlist_acepta_el_archivo_de_identidad_ilegible_pero_no_la_colision():
+    """Hallazgo del cierre de #362: en hall9000 el archivo existe y fruiz no lo
+    lee, asi que el arranque real termina en PermissionError (ya paso los
+    imports). Esa firma es valida; las de la colision y las del guard no."""
+    ilegible = ("RESULTADO:PermissionError::[Errno 13] Permission denied: "
+                "'/etc/jax/build/implementation-identity.json'")
+    assert _firma_conocida_tras_el_fix(ilegible) is not None
+    assert _firma_conocida_tras_el_fix(
+        "RESULTADO:PermissionError::[Errno 13] Permission denied: '/otro/archivo'") is None
+    # Un FileNotFoundError sobre OTRA ruta (aunque se llame igual) no es la firma:
+    # no prueba que el import haya pasado.
+    assert _firma_conocida_tras_el_fix(
+        "RESULTADO:FileNotFoundError::[Errno 2] No such file or directory: '/otro/implementation-identity.json'"
+    ) is None
+    assert _firma_conocida_tras_el_fix(
+        "RESULTADO:PermissionError::[Errno 13] Permission denied: '/otro/implementation-identity.json'"
+    ) is None
+    assert _firma_conocida_tras_el_fix(
+        "RESULTADO:FileNotFoundError::[Errno 2] No such file or directory: '/etc/jax/build/implementation-identity.json'"
+    ) is not None
+    assert _firma_conocida_tras_el_fix(
+        "RESULTADO:RuntimeError:ModuleNotFoundError:B7 trusted composition dependencies unavailable") is None
+    assert _firma_conocida_tras_el_fix(
+        "RESULTADO:RuntimeError::B7 trusted composition requires deployment and MariaDB configuration") is None

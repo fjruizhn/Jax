@@ -71,6 +71,12 @@ class Familia:
     espejos: tuple[tuple[str, Path], ...]  # (etiqueta legible, ruta)
     compartidos: tuple[str, ...]
     nota: str = ""
+    # (funcion, llamada): la funcion tiene que llamar a `llamada` en TODAS las copias, como sentencia
+    # de primer nivel y ANTES de la primera apertura de conexion (connect/get_pool/create_pool), y esto NO
+    # lo excusa el marcador de divergencia. Una funcion declarada como divergente puede diferir
+    # en lo que quiera MENOS en perder un control de seguridad (auditoria jax-platform #195:
+    # sin esto, quitar la guarda de las funciones con marcador daba rc=0).
+    llamadas_obligatorias: tuple[tuple[str, str], ...] = ()
 
 
 def _bloque_declarativo(lineas: list[str], node: ast.AST) -> str:
@@ -124,6 +130,49 @@ def _extract(path: Path, compartidos: tuple[str, ...]) -> dict[str, tuple[str, s
     return out
 
 
+#: Lo que abre una conexion: `aiomysql.connect`, `pymysql.connect`, `get_pool`, `create_pool`
+#: (como atributo de cualquier modulo o como nombre suelto).
+_ABRE_CONEXION = frozenset({"connect", "get_pool", "create_pool"})
+
+
+def _nombre_llamado(call: ast.Call) -> str | None:
+    f = call.func
+    if isinstance(f, ast.Name):
+        return f.id
+    if isinstance(f, ast.Attribute):
+        return f.attr
+    return None
+
+
+def _guarda_antes_de_conectar(path: Path, funcion: str, llamada: str) -> str | None:
+    """Revisa la funcion de modulo `funcion` de `path` (sync o async). Devuelve None si esta bien,
+    o el motivo: «no existe», «no llama a X» o «llama a X despues de abrir una conexion».
+
+    La guarda tiene que ser una SENTENCIA de primer nivel del cuerpo (`llamada(...)`, con o sin
+    `await`), y tiene que estar ANTES, en el orden del AST, de la primera sentencia del cuerpo que
+    contenga una apertura de conexion. Una guarda dentro de un `if`, un `try` o una funcion anidada no
+    cuenta: no se ejecuta siempre. Esa misma sentencia es la que se compara con el orden de
+    `lineno`, asi que `x = connect(); guarda()` en una linea tampoco pasa por casualidad."""
+    tree = ast.parse(path.read_text(), filename=str(path))
+    nodo = next((n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == funcion), None)
+    if nodo is None:
+        return "no existe"
+    llamadas_en = lambda stmt: [c for c in ast.walk(stmt) if isinstance(c, ast.Call)]  # noqa: E731
+    indice_guarda = indice_conexion = None
+    for i, stmt in enumerate(nodo.body):
+        if indice_guarda is None and isinstance(stmt, ast.Expr):
+            valor = stmt.value.value if isinstance(stmt.value, ast.Await) else stmt.value
+            if isinstance(valor, ast.Call) and _nombre_llamado(valor) == llamada:
+                indice_guarda = i
+        if indice_conexion is None and any(_nombre_llamado(c) in _ABRE_CONEXION for c in llamadas_en(stmt)):
+            indice_conexion = i
+    if indice_guarda is None:
+        return f"no llama a {llamada}"
+    if indice_conexion is not None and indice_conexion <= indice_guarda:
+        return f"llama a {llamada} despues de abrir una conexion"
+    return None
+
+
 def revisar(familia: Familia) -> tuple[list[str], list[str], list[str]]:
     """Devuelve (drift, declaradas, faltantes) para una familia."""
     canonico = _extract(familia.canonico, familia.compartidos)
@@ -146,6 +195,13 @@ def revisar(familia: Familia) -> tuple[list[str], list[str], list[str]]:
                 declaradas.append(f"{name} ({etiqueta})")
             else:
                 drift.append(f"{name} ({etiqueta})")
+    # Llamadas obligatorias: en el canonico y en cada espejo; el marcador no las excusa.
+    for funcion, llamada in familia.llamadas_obligatorias:
+        for etiqueta, ruta in (("jax", familia.canonico), *familia.espejos):
+            motivo = _guarda_antes_de_conectar(ruta, funcion, llamada)
+            if motivo is not None:
+                faltantes.append(f"{funcion}: {motivo} ({etiqueta})" if motivo != f"no llama a {llamada}"
+                                 else f"{funcion} no llama a {llamada} ({etiqueta})")
     return drift, declaradas, faltantes
 
 
@@ -575,15 +631,22 @@ FAMILIAS = (
         # MariaDB de hall9000: sus tablas mezclan catalogo de jax-platform con
         # las de jax), asi que el nombre, el prefijo y la validacion de sesion
         # tienen que ser IDENTICOS o los dos mecanismos inventarian nombres
-        # distintos sobre la misma base. Las 4 funciones de conexion real
+        # distintos sobre la misma base. Con DIVERGENCIA DELIBERADA quedan 8
+        # simbolos, en dos grupos: las 3 funciones de conexion real
         # (_dropear_base_de_sesion, _clonar_esquema, asegurar_base_de_test) y
-        # las 3 que narran historia propia de cada repo (_sufijo_automatico_
-        # de_sesion, fijar_base_de_test, exigir_base_de_test,
-        # _parametros_de_conexion) quedan con DIVERGENCIA DELIBERADA: el
-        # import del conector local (mismo patron que db_connect_config) y el
-        # camino de esquema propio (jacobs.store.init_tables() en jax,
+        # las 5 que narran historia propia de cada repo o su conector local
+        # (_sufijo_automatico_de_sesion, _borrar_al_salir, fijar_base_de_test,
+        # exigir_base_de_test, _parametros_de_conexion): el import del
+        # conector local (mismo patron que db_connect_config) y el camino de
+        # esquema propio (jacobs.store.init_tables() en jax,
         # db.migrations.run_migrations() en jax-platform) no pueden ser
         # iguales, y no es drift.
+        # La GUARDA de conexion a produccion (auditoria Jax#355; PUERTOS_DE_
+        # PRODUCCION, VARIABLE_PERMISO_INSTANCIA_DE_PRODUCCION, _permiso_
+        # instancia_de_produccion, exigir_conexion_permitida) NO diverge: la
+        # base fisica y el servidor son los mismos, asi que las dos copias
+        # tienen que ser identicas byte a byte. Sin marcador a proposito:
+        # cualquier diferencia es drift y rompe el checker.
         compartidos=(
             "BASE_COMPARTIDA", "BASE_DE_PRODUCCION", "VARIABLE_DEL_SUFIJO",
             "VARIABLE_DE_LA_BASE", "SUFIJO_VALIDO", "LARGO_MAXIMO_DEL_IDENTIFICADOR",
@@ -592,6 +655,16 @@ FAMILIAS = (
             "nombre_base_de_test", "fijar_base_de_test", "exigir_base_de_test",
             "BASE_PLANTILLA", "FILAS_MAXIMAS_A_COPIAR", "_parametros_de_conexion",
             "_dropear_base_de_sesion", "_clonar_esquema", "asegurar_base_de_test",
+            "PUERTOS_DE_PRODUCCION", "VARIABLE_PERMISO_INSTANCIA_DE_PRODUCCION",
+            "_permiso_instancia_de_produccion", "exigir_conexion_permitida",
+        ),
+        # Las tres funciones de conexion real llevan el marcador de divergencia (cada repo
+        # tiene su camino de esquema), pero NINGUNA puede perder la guarda: sin esto, quitarla
+        # de ellas y vaciar PUERTOS_DE_PRODUCCION daba rc=0 (jax-platform #195).
+        llamadas_obligatorias=(
+            ("_dropear_base_de_sesion", "exigir_conexion_permitida"),
+            ("_clonar_esquema", "exigir_conexion_permitida"),
+            ("asegurar_base_de_test", "exigir_conexion_permitida"),
         ),
         nota="Aislar la base de tests (2026-09-20): el mecanismo de jax (2026-09-17) "
              "existia pero jax-platform no lo tenia -- conftest.py:13 fijaba "

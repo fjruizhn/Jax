@@ -536,6 +536,11 @@ def test_el_prompt_que_recibe_ada_nombra_la_faceta_arbitro_configurada(monkeypat
     # y volvería ambigua la aserción -- con 'zeta' el único lugar posible
     # donde puede aparecer es la prohibición que arma el código).
     capturados: list = []
+    # El predicado de ejecucion es lista blanca (HTTP_FACETS): 'zeta' es ficticia,
+    # asi que se la declara ejecutable solo para esta prueba -- lo que se mide
+    # aca es el texto del prompt, no la lista blanca.
+    from jacobs import models
+    monkeypatch.setattr(models, "HTTP_FACETS", models.HTTP_FACETS | {"zeta"})
     steps = _correr_ada_plan_real(
         monkeypatch, plan_json, arbitro_faceta="zeta", capturados=capturados,
     )

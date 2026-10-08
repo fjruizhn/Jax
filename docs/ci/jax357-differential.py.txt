@@ -1,0 +1,439 @@
+"""Fail-closed differential bank. Run: python3 docs/ci/jax357-differential.py.txt MASTER_SHA CANDIDATE_SHA"""
+import argparse
+import ast
+import importlib.util
+import itertools
+import json
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+
+PARSER = argparse.ArgumentParser()
+PARSER.add_argument("master_sha")
+PARSER.add_argument("candidate_sha")
+ARGS = PARSER.parse_args()
+SCANNER = "tests/test_docker_rm_sin_fuga_de_volumenes.py"
+WHITELIST = {
+    "volume", "network", "image", "context", "buildx", "plugin", "secret",
+    "config", "node", "service", "stack",
+}
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def load_at(name, revision, tempdir):
+    source = subprocess.run(
+        ["git", "show", f"{revision}:{SCANNER}"], capture_output=True, check=True
+    ).stdout
+    path = Path(tempdir) / f"{name}.py"
+    path.write_bytes(source)
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def detect(scanner, kind, source):
+    return bool(scanner.culpables_en_texto(source, es_python=(kind == "python")))
+
+
+positive = []
+heads = [
+    "docker rm", "docker container rm", "docker compose rm",
+    "docker compose -f x.yml rm", "docker compose -p proj rm",
+    "docker compose --profile prod rm", "docker compose --env-file .env rm",
+    "docker compose --project-directory /tmp/project rm",
+    "docker compose --parallel 4 rm", "docker compose --progress plain rm",
+    "docker compose --ansi never rm", "docker compose -fcompose.yml rm",
+    "docker compose -pproj rm", "docker compose -f a -f b -f c -f d -f e rm",
+    "docker --context=x rm", "docker -Htcp://x rm", "docker -H=tcp://x rm",
+    "docker -l=debug rm", "docker -cctx rm",
+]
+wrappers = ["", "sudo ", "sudo -u docker ", "sudo -g docker ", "env DOCKER_HOST=x "]
+for head, wrapper in itertools.product(heads, wrappers):
+    valid_flags = ["-f", "--force"]
+    if "compose" in head:
+        valid_flags += ["-fs", "-f -s"]
+    for flag in valid_flags:
+        positive.append(("shell", wrapper + head + " " + flag + " target"))
+
+python_heads = [
+    ["docker", "rm"], ["docker", "container", "rm"],
+    ["docker", "compose", "-f", "x.yml", "rm"],
+    ["docker", "compose", "-p", "proj", "rm"],
+    ["docker", "compose", "--profile", "prod", "rm"],
+    ["docker", "compose", "--env-file", ".env", "rm"],
+    ["docker", "compose", "--project-directory", "/tmp/project", "rm"],
+    ["docker", "compose", "--parallel", "4", "rm"],
+    ["docker", "compose", "--progress", "plain", "rm"],
+    ["docker", "compose", "--ansi", "never", "rm"],
+    ["docker", "compose", "-fcompose.yml", "rm"],
+    ["docker", "compose", "-pproj", "rm"],
+    ["docker", "compose", "-f", "a", "-f", "b", "-f", "c", "-f", "d", "-f", "e", "rm"],
+    ["docker", "-H=tcp://x", "rm"], ["docker", "-Htcp://x", "rm"],
+    ["docker", "-l=debug", "rm"], ["docker", "-cctx", "rm"],
+    ["ssh", "docker-host", "docker", "rm"],
+    ["ssh", "docker-host", "exec", "docker", "rm"],
+    ["ssh", "docker_host", "exec", "docker", "rm"],
+    ["ssh", "docker-host", "docker", "rm"],
+    ["sudo", "-u", "docker", "docker", "rm"],
+    ["env", "DOCKER_HOST=x", "docker", "rm"],
+]
+for head in python_heads:
+    valid_flags = [["-f"], ["--force"]]
+    if "compose" in head:
+        valid_flags += [["-f", "-s"], ["-fs"]]
+    for flag in valid_flags:
+        positive.append(("python", repr(head + flag + ["target"])))
+positive.append(("python", '["ssh", docker_host, "exec", "docker", "rm", "-f", n]'))
+positive += [
+    ("shell", "docker rm -f -v=false victim"),
+    ("shell", "docker rm -f -v=0 victim"),
+    ("shell", "docker rm -fv=false victim"),
+    ("shell", "docker rm -fv=0 victim"),
+    ("shell", "docker compose rm -f -v=false svc"),
+    ("shell", "docker compose rm -f -v=0 svc"),
+    ("python", '["docker", "rm", "-f", "-v=false", n]'),
+    ("python", '["docker", "rm", "-f", "-v=0", n]'),
+    ("python", '["docker", "rm", "-fv=false", n]'),
+    ("python", '["docker", "rm", "-fv=0", n]'),
+    ("python", '["docker", "compose", "rm", "-f", "-v=false", svc]'),
+    ("python", '["docker", "compose", "rm", "-f", "-v=0", svc]'),
+    ("shell", "docker -D=false rm -f victim"),
+    ("shell", "docker -D=0 rm -f victim"),
+    ("shell", "docker -v=false rm -f victim"),
+    ("shell", "docker -v=0 rm -f victim"),
+    ("shell", "docker -- rm -f victim"),
+    ("shell", "docker -- container rm -f victim"),
+    ("shell", "docker container remove -f victim"),
+    ("shell", "ssh docker exec docker rm -f victim"),
+    ("shell", "ssh -p 22 docker exec docker rm -f victim"),
+    ("shell", "ssh -o BatchMode=yes docker exec docker rm -f victim"),
+    ("shell", "ssh rm docker rm -f victim"),
+    ("shell", "ssh -B lo docker exec docker rm -f victim"),
+    ("shell", "ssh -I none docker exec docker rm -f victim"),
+    ("shell", "ssh -P audit docker exec docker rm -f victim"),
+    ("shell", "ssh -M docker exec docker rm -f victim"),
+    ("shell", "ssh -4p 22 docker exec docker rm -f victim"),
+    ("shell", "ssh -vp 22 docker exec docker rm -f victim"),
+    ("shell", "ssh -46p 22 docker exec docker rm -f victim"),
+    ("shell", "ssh gateway ssh docker exec docker rm -f victim"),
+    ("shell", "ssh gateway exec ssh docker exec docker rm -f victim"),
+    ("shell", "sudo -u rm docker rm -f victim"),
+    ("shell", "sudo --user ssh docker rm -f victim"),
+    ("shell", "sudo -nu ssh docker rm -f victim"),
+    ("shell", "sudo --group ssh docker container remove -f victim"),
+    ("shell", "sudo -ng ssh docker container remove -f victim"),
+    ("shell", "/usr/bin/ssh docker exec docker rm -f victim"),
+    ("shell", "/usr/bin/ssh -M docker exec docker rm -f victim"),
+    ("shell", "/usr/bin/sudo --user ssh docker rm -f victim"),
+    ("shell", "/usr/bin/sudo -nu ssh docker rm -f victim"),
+    ("shell", "/usr/bin/sudo --group ssh docker container remove -f victim"),
+    ("shell", "/usr/bin/sudo -ng ssh docker container remove -f victim"),
+    ("python", '["docker", "-D=false", "rm", "-f", n]'),
+    ("python", '["docker", "-D=0", "rm", "-f", n]'),
+    ("python", '["docker", "-v=false", "rm", "-f", n]'),
+    ("python", '["docker", "-v=0", "rm", "-f", n]'),
+    ("python", '["docker", "--", "rm", "-f", n]'),
+    ("python", '["docker", "--", "container", "rm", "-f", n]'),
+    ("python", '["docker", "container", "remove", "-f", n]'),
+    ("python", '["ssh", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["ssh", "-p", "22", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["ssh", "-o", "BatchMode=yes", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["ssh", "rm", "docker", "rm", "-f", n]'),
+    ("python", '["ssh", "-B", "lo", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["ssh", "-I", "none", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["ssh", "-P", "audit", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["ssh", "-M", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["ssh", "-4p", "22", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["ssh", "-vp", "22", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["ssh", "-46p", "22", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["ssh", "gateway", "ssh", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["ssh", "gateway", "exec", "ssh", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["sudo", "-u", "rm", "docker", "rm", "-f", n]'),
+    ("python", 'subprocess.run("sudo --user ssh docker rm -f x", shell=True)'),
+    ("python", 'subprocess.run("sudo -nu ssh docker rm -f x", shell=True)'),
+    ("python", 'subprocess.run("sudo --group ssh docker container remove -f x", shell=True)'),
+    ("python", 'subprocess.run("sudo -ng ssh docker container remove -f x", shell=True)'),
+    ("python", 'subprocess.run("/usr/bin/ssh docker exec docker rm -f x", shell=True)'),
+    ("python", 'subprocess.run("/usr/bin/ssh -M docker exec docker rm -f x", shell=True)'),
+    ("python", 'subprocess.run("/usr/bin/sudo --user ssh docker rm -f x", shell=True)'),
+    ("python", 'subprocess.run("/usr/bin/sudo -nu ssh docker rm -f x", shell=True)'),
+    ("python", 'subprocess.run("/usr/bin/sudo --group ssh docker container remove -f x", shell=True)'),
+    ("python", 'subprocess.run("/usr/bin/sudo -ng ssh docker container remove -f x", shell=True)'),
+    ("python", '["/usr/bin/ssh", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["/usr/bin/ssh", "-M", "docker", "exec", "docker", "rm", "-f", n]'),
+    ("python", '["/usr/bin/sudo", "--user", "ssh", "docker", "rm", "-f", n]'),
+    ("python", '["/usr/bin/sudo", "-nu", "ssh", "docker", "rm", "-f", n]'),
+    ("python", '["/usr/bin/sudo", "--group", "ssh", "docker", "container", "remove", "-f", n]'),
+    ("python", '["/usr/bin/sudo", "-ng", "ssh", "docker", "container", "remove", "-f", n]'),
+    ("python", 'subprocess.run("docker container remove -f x", shell=True)'),
+    ("python", 'cmd = "docker container remove --force x"'),
+]
+
+# Ronda 5: un `rm` de la lista blanca no exime un `docker rm -f` posterior en la misma lista.
+for subcommand in sorted(WHITELIST):
+    for ssh_prefix in ("", '"ssh", h, '):
+        positive.append(("python",
+                         f'[{ssh_prefix}"docker", "{subcommand}", "rm", "-f", v, "&&", "docker", "rm", "-f", c]'))
+
+# Ronda 6: la lista se corta en `&&`, `;`, `||`, `|` y cada comando se evalua solo.
+RONDA6_SEPARADORES = ["&&", ";", "||", "|"]
+RONDA6_MARCAS = []     # fugas que el candidato debe marcar
+RONDA6_LIMPIOS = []    # falsos positivos que el candidato no debe marcar
+for sep, ssh_prefix in itertools.product(RONDA6_SEPARADORES, ("", '"ssh", h, ')):
+    RONDA6_MARCAS += [
+        f'[{ssh_prefix}"docker", "rm", "-f", c1, "{sep}", "docker", "rm", "-fv", c2]',
+        f'[{ssh_prefix}"docker", "run", img, "{sep}", "docker", "rm", "-f", c]',
+        f'[{ssh_prefix}"docker", "exec", c, "true", "{sep}", "docker", "rm", "-f", c]',
+    ]
+    # Ronda 8: `docker rm -v c SEP rm -f p` ya NO es un caso limpio: la lectura argv
+    # (sin cortar) lo marca a proposito (falso positivo aceptado), asi que no esta aqui.
+    RONDA6_LIMPIOS.append(
+        f'[{ssh_prefix}"docker", "exec", c, "rm", "-f", p, "{sep}", "docker", "rm", "-fv", c]')
+positive += [("python", source) for source in RONDA6_MARCAS]
+RONDA6_MEJORAS = set(RONDA6_MARCAS)
+
+# Ronda 7: argv con separador literal como argumento, mas separadores, alias `remove`.
+RONDA7_MARCAS = [
+    '["docker", "rm", c, "|", "-f"]', '["docker", "rm", c, ";", "--force"]',
+    '["docker", "rm", c, "&&", "-f"]', '["docker", "rm", c, "&", "-f"]',
+    '["docker", "-H", "|", "rm", "-f", c]', '["docker", "--context", ";", "rm", "-f", c]',
+    '["find", ".", "-exec", "docker", "rm", "{}", ";", "-f"]',
+    '["xargs", "-d", "|", "docker", "rm", "-f"]',
+    '[*docker, "rm", *["-f"], c]',
+    '["docker", "container", "remove", "-f", c]',
+    '["ssh", h, "docker", "container", "remove", "-f", c]',
+]
+for sep in ("&", "|&", " && ", "&& ", "\\n"):
+    RONDA7_MARCAS.append(f'["ssh", h, "docker", "rm", "-f", c1, "{sep}", "docker", "rm", "-fv", c2]')
+RONDA7_MARCAS += [
+    '["ssh", h, "docker", "rm", "-f", "c1;", "docker", "rm", "-fv", c2]',
+]
+# Ronda 8: regresiones de la ronda 7 frente a master (el cierre de la ventana en docker/rm).
+RONDA7_MARCAS += [
+    '["ssh", h, "docker", "rm", c, "docker", "-f"]',
+    '["ssh", h, "docker", "rm", "$(", "docker", "ps", "-aq", ")", "-f"]',
+    'DOCKER + ["rm", "rm", "-f"]',
+    '["docker", "rm", c, "&&", "rm", "-f", p]',
+]
+# Ronda 9: el subshell no corta las banderas en shell; el prefiltro ve cualquier espacio.
+RONDA9_MARCAS = [
+    ("shell", "docker rm $(docker ps -aq) -f"),
+    ("shell", "docker rm `docker ps -aq` -f"),
+    ("shell", "docker rm $(echo $(docker ps -aq) x) -f"),
+    ("shell", "docker rm $(docker ps -aq"),
+    ("python", 'x = "docker\\trm -f c"'),
+    ("python", 'x = "docker container\\tremove -f c"'),
+]
+# Ronda 10: `rm` dentro de acentos graves y `)` desbalanceado en un subshell.
+RONDA9_MARCAS += [
+    ("shell", "x=`docker rm -f c`; y=`grep -v z; true`"),
+    ("shell", "x=`docker rm -f c` y=`echo -v; true`"),
+    ("shell", "echo `docker rm -f c` `grep -v x;`"),
+    ("shell", 'docker rm -f $(grep "web)" -v ids.txt)'),
+    ("shell", "docker rm -f $(echo \\) -v)"),
+    ("shell", "docker rm -f $(case $x in a) echo -v;; esac)"),
+    ("shell", "docker rm -f $(docker ps -aq) -v"),
+]
+# Ronda 11: `&` entre comillas, escapado o en una expansion no corta (master tampoco corta ahi).
+RONDA9_MARCAS += [
+    ("shell", "docker -H 'ssh://h?x&y' rm -f c"),
+    ("shell", 'docker rm "a&b" c1 -f'),
+    ("shell", "docker rm ${ids//&/ } -f"),
+    ("shell", "docker rm a\\&b -f"),
+    ("python", 'x = "docker rm ${ids//&/ } -f"'),
+]
+positive += RONDA9_MARCAS
+RONDA7_LIMPIOS = []  # los de la ronda 7 pasaron a ser falsos positivos aceptados (ronda 8)
+positive += [("python", source) for source in RONDA7_MARCAS]
+RONDA6_MEJORAS |= set(RONDA7_MARCAS)
+
+negative = [
+    ("shell", f"{wrapper}docker exec docker rm -f target") for wrapper in wrappers
+]
+negative += [("shell", command) for command in (
+    "docker --context ctx exec docker rm -f target",
+    "docker -H tcp://x exec docker rm -f target",
+    "docker --context=ctx run docker rm -f target",
+    "docker rm -f=false target",
+    "docker rm -f=false -v=false target",
+    "docker -- exec docker rm -f target",
+    "docker -- run docker rm -f target",
+    "docker container exec docker rm -f target",
+    "docker -- container exec docker rm -f target",
+    "docker --context ctx container exec docker rm -f target",
+    "docker remove -f target",
+    "docker compose remove -f svc",
+    "docker -D=false exec docker rm -f target",
+    "docker -v=false run docker rm -f target",
+)]
+negative += [("shell", f"docker compose {option} {subcommand} docker rm -f target")
+             for option in ("", "--profile prod", "--env-file .env")
+             for subcommand in ("exec", "run svc")]
+negative += [("python", repr(["docker", "exec", "docker", "rm", "-f", "target"]))]
+negative += [("python", source) for source in (
+    '["docker", "--context", "ctx", "exec", "docker", "rm", "-f", "target"]',
+    '["docker", "-H", "tcp://x", "exec", "docker", "rm", "-f", "target"]',
+    '["docker", "--context=ctx", "run", "docker", "rm", "-f", "target"]',
+    '["docker", "rm", "-f=false", "target"]',
+    '["docker", "rm", "-f=false", "-v=false", "target"]',
+    '["docker", "--", "exec", "docker", "rm", "-f", "target"]',
+    '["docker", "--", "run", "docker", "rm", "-f", "target"]',
+    '["docker", "container", "exec", "docker", "rm", "-f", "target"]',
+    '["docker", "--", "container", "exec", "docker", "rm", "-f", "target"]',
+    '["docker", "--context", "ctx", "container", "exec", "docker", "rm", "-f", "target"]',
+    '["docker", "remove", "-f", "target"]',
+    '["docker", "compose", "remove", "-f", "svc"]',
+    '["docker", "-D=false", "exec", "docker", "rm", "-f", "target"]',
+    '["docker", "-v=false", "run", "docker", "rm", "-f", "target"]',
+)]
+negative += [("python", repr(["docker", "compose"] + option.split() + subcommand.split()
+                              + ["docker", "rm", "-f", "target"]))
+             for option in ("", "--profile prod", "--env-file .env")
+             for subcommand in ("exec", "run svc")]
+
+negative += [("python", source) for source in RONDA6_LIMPIOS + RONDA7_LIMPIOS]
+
+auditor_cases = json.loads((ROOT / "docs/ci/jax357-auditor-cases.json").read_text())
+own_cases = [
+    ("shell", 'ssh "$HOST" "docker rm -f $C"'),
+    ("shell", 'bash -c "docker rm -f x"'),
+    ("shell", 'eval "docker rm -f $c"'),
+    ("shell", "su - svc -c 'docker rm -f x'"),
+    ("shell", "timeout 30 bash -lc 'docker rm -f x'"),
+    ("shell", "watch -n1 'docker rm -f x'"),
+    ("python", 'subprocess.run(\'ssh h "docker rm -f x"\', shell=True)'),
+    ("python", 'os.system("bash -c \'docker rm -f x\'")'),
+    ("python", '["ssh", host, "sh -c \'docker rm -f x\'"]'),
+    ("python", 'subprocess.run(f\'ssh {host} "docker rm -f {name}"\', shell=True)'),
+    ("python", 'cmd = \'sudo sh -c "docker rm -f x"\''),
+    ("shell", "docker $OPTS rm -f x"),
+    ("shell", 'docker "${args[@]}" rm -f x'),
+    ("shell", "docker compose $FILES rm -f svc"),
+    ("shell", "$DOCKER_CMD rm -f x"),
+    ("shell", "docker $SUBCOMMAND rm -f x"),
+    ("python", '["docker", *opts, "rm", "-f", n]'),
+    ("python", '[*docker, *global_opts, "rm", "-f", n]'),
+    ("python", 'cmd + ["rm", "-f", n]'),
+    ("python", '[*docker, "rm", "-f", n]'),
+    ("python", '["docker", "compose", *files, "rm", "-f"]'),
+    ("shell", "cat <<'EOF'\ndocker rm -f x\nEOF"),
+    ("shell", 'cat <<EOF\nssh host "docker rm -f x"\nEOF'),
+    ("shell", "docker rm -f x <<'EOF'\ntext\nEOF"),
+    ("shell", "cat <<'EOF'\ndocker volume rm -f v\nEOF"),
+    ("shell", "docker -Dl debug rm -f x"),
+    ("shell", "docker -DH tcp://x rm -f x"),
+    ("shell", "docker rmi -f imagen"),
+    ("python", '["docker", "-Dl", "debug", "rm", "-f", n]'),
+    ("python", '["docker", "compose", "--workdir", "/x", "rm", "-f"]'),
+]
+assert len(own_cases) == 30
+
+
+def documented_whitelist_case(kind, source):
+    if kind == "shell":
+        tokens = source.replace("'", " ").replace('"', " ").split()
+        return any(
+            tokens[i] == "docker" and tokens[i + 1] in WHITELIST and tokens[i + 2] == "rm"
+            for i in range(len(tokens) - 2)
+        )
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    return any(
+        isinstance(node, (ast.List, ast.Tuple))
+        and any(
+            i >= 2
+            and isinstance(node.elts[i - 2], ast.Constant)
+            and node.elts[i - 2].value == "docker"
+            and isinstance(node.elts[i - 1], ast.Constant)
+            and node.elts[i - 1].value in WHITELIST
+            and isinstance(node.elts[i], ast.Constant)
+            and node.elts[i].value == "rm"
+            for i in range(len(node.elts))
+        )
+        for node in ast.walk(tree)
+    )
+
+
+RONDA5_MEJORAS = {
+    # El segundo `rm` de la lista (docker) ahora se evalúa aunque el primero no sea docker.
+    '["ssh", "rm", "docker", "rm", "-f", n]',
+    '["sudo", "-u", "rm", "docker", "rm", "-f", n]',
+}
+
+
+def required_improvement(kind, source):
+    if (kind, source) in RONDA9_MARCAS:
+        return True
+    if kind == "python" and (source in RONDA5_MEJORAS or source in RONDA6_MEJORAS):
+        return True
+    if "container remove" in source or '"container", "remove"' in source:
+        return True  # ronda 7: `docker container remove` es el alias de `docker container rm`
+    if "--workdir" in source and "compose" in source:
+        return True
+    if kind == "shell":
+        return "docker compose -f a -f b -f c -f d -f e rm" in source
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    sequence = ["docker", "compose", "-f", "a", "-f", "b", "-f", "c",
+                "-f", "d", "-f", "e", "rm"]
+    return any(
+        isinstance(node, (ast.List, ast.Tuple))
+        and any(
+            [elt.value for elt in node.elts[i:i + len(sequence)]] == sequence
+            for i in range(len(node.elts) - len(sequence) + 1)
+            if all(isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                   for elt in node.elts[i:i + len(sequence)])
+        )
+        for node in ast.walk(tree)
+    )
+
+with tempfile.TemporaryDirectory(prefix="jax357-differential-") as tempdir:
+    master = load_at("master_scanner", ARGS.master_sha, tempdir)
+    candidate = load_at("candidate_scanner", ARGS.candidate_sha, tempdir)
+    mismatches = []
+    exceptions = []
+    expected_improvements = []
+    master_marked = candidate_marked = 0
+    cases = [(kind, source, "pr") for kind, source in positive + negative]
+    cases += [(item["kind"], item["source"], item["origin"]) for item in auditor_cases]
+    cases += [(kind, source, "codex-30") for kind, source in own_cases]
+    for kind, source, origin in cases:
+        master_result = detect(master, kind, source)
+        candidate_result = detect(candidate, kind, source)
+        required = required_improvement(kind, source)
+        master_marked += master_result
+        candidate_marked += candidate_result
+        if master_result and not candidate_result and documented_whitelist_case(kind, source):
+            status = "WHITELIST"
+            exceptions.append((origin, kind, source))
+        elif master_result and not candidate_result:
+            status = "LEAK"
+            mismatches.append((origin, kind, source, status))
+        elif required and not candidate_result:
+            status = "EXPECTATION_MISS"
+            mismatches.append((origin, kind, source, status))
+        elif candidate_result and not master_result and required:
+            status = "EXPECTED_NEW_MARK"
+            expected_improvements.append((origin, kind, source))
+        elif candidate_result and not master_result:
+            status = "NEW_MARK"
+            mismatches.append((origin, kind, source, status))
+        else:
+            status = "MATCH"
+        print(f"{status}\t{origin}\t{kind}\t{source!r}")
+    print(f"master_sha={ARGS.master_sha} candidate_sha={ARGS.candidate_sha}")
+    print(f"pr_cases={len(positive)+len(negative)} auditor_cases={len(auditor_cases)} own_cases={len(own_cases)} total={len(cases)}")
+    print(f"master_marked={master_marked} candidate_marked={candidate_marked}")
+    print(f"leaks={sum(item[3] == 'LEAK' for item in mismatches)} unexpected_new_marks={sum(item[3] == 'NEW_MARK' for item in mismatches)} expectation_misses={sum(item[3] == 'EXPECTATION_MISS' for item in mismatches)} expected_candidate_only_marks={len(expected_improvements)} whitelist_exceptions={len(exceptions)}")
+    for origin, kind, source, status in mismatches:
+        print(f"MISMATCH {status} {origin} {kind}: {source!r}")
+    for origin, kind, source in exceptions:
+        print(f"DOCUMENTED_WHITELIST {origin} {kind}: {source!r}")
+    if mismatches:
+        raise SystemExit(1)

@@ -130,7 +130,11 @@ Sin historia anotada en el workflow.
 
 ## `memory-b9-regression/casos`
 
-Mínimo actualizado 2026-10-05: `183` casos. El run PR `37317897149`, job `111789176129`, sobre SHA `daab357ce80b1e7e1843155b88e2f57c9adf93bd`, terminó 183 passed, 0 failed/errors/skips para el par combinado Faro/B9. El conteo previo de esta rama era 128 y el de #354 era 176; se conserva la medición exacta mayor. Las seis fronteras de `memoria.buscar` cubren rechazo de configuración forzada hacia producción, apertura solo del perfil permitido, rollback con timeout que descarta la conexión, cancelación durante rollback sin segundo intento, validación de síntesis sin leer su BLOB y delegación de `fetchone` por el cursor observado de la prueba MariaDB. La prueba MariaDB real mantiene tablas de sesión temporales y comprueba que el reader solo emite lecturas y valida sus fuentes exactas.
+Mínimo 188 -> 194 el 2026-10-05 (auditoría Jax#355, MINOR 3; medido LOCAL con la misma lista, 0 skipped): `tests/test_memory_b9_provision.py` 5 -> 11 (+6: guarda de puerto del constructor, `SELECT DATABASE()` tras cada script, rechazo de `USE`, guarda de puerto del driver).
+
+Mínimo actualizado 2026-10-05 (rama fix/b9-driver-runbooks): `188` casos, medido LOCAL contra MariaDB desechable en 127.0.0.1:3306 con la misma lista más `tests/test_memory_b9_provision.py` (+5, puras: el esquema se carga sin `CREATE DATABASE`/`USE` de producción, el divisor respeta `DELIMITER`, la guarda, el orden de migraciones); 0 skipped. El mismo job corre ahora `tests/memory_b9_provision.py` y `tests/memory_b9_regression_driver.py` (19 casos) sobre un segundo servicio MariaDB vacío; esa parte no suma casos pytest y falla el paso si algún caso no es PASS. Antes: `183`.
+
+Historia previa (183): el run PR `37317897149`, job `111789176129`, sobre SHA `daab357ce80b1e7e1843155b88e2f57c9adf93bd`, terminó 183 passed, 0 failed/errors/skips para el par combinado Faro/B9. El conteo previo de esta rama era 128 y el de #354 era 176; se conserva la medición exacta mayor. Las seis fronteras de `memoria.buscar` cubren rechazo de configuración forzada hacia producción, apertura solo del perfil permitido, rollback con timeout que descarta la conexión, cancelación durante rollback sin segundo intento, validación de síntesis sin leer su BLOB y delegación de `fetchone` por el cursor observado de la prueba MariaDB. La prueba MariaDB real mantiene tablas de sesión temporales y comprueba que el reader solo emite lecturas y valida sus fuentes exactas.
 
 ## `facet-health-io/out`
 
@@ -478,6 +482,12 @@ passed"), no el de sumar comentarios: ese error ya rompio CI hoy.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^203 passed`
 
+218 -> 223 el 2026-10-05 (re-auditoría de #355; medido LOCAL con la lista completa del job: 223 passed): `test_b9_systemd_ownership.py` 17 -> 22 (+5: un argumento desconocido del instalador se rechaza antes de instalar nada).
+
+214 -> 218 el 2026-10-05 (auditoría Jax#355, MINOR 5; medido LOCAL con la lista completa del job: 218 passed): `test_b9_systemd_ownership.py` 13 -> 17 (+4: el instalador con un systemctl falso en el PATH, la barra final del destino, el origen de producción y la poda de lo que ya no está en el repo).
+
+206 -> 214 el 2026-10-05 (rama fix/b9-driver-runbooks, medido LOCAL como delta de archivo): `test_b9_systemd_ownership.py` 5 -> 13 (+8: los tres drop-ins de worker y synthesis, versionados y comprobados, y el instalador que los instala, ejecutado contra un destino de prueba). El runner tiene la ultima palabra.
+
 203 -> 206 el 2026-10-05 (rama fix/memoria-worker-cuarentena-aviso-orden, hall9000, medido LOCAL: 123 -> 126 passed sobre la misma lista de archivos): `test_b9_systemd_ownership.py` +4 (cinco unidades con OnFailure, ExecStartPre del checkout sano, timer de synthesis a las 04:30, las cinco existen) y -1 (se borra la prueba que solo comprobaba que `run_once` no llamaba a `_recalcular_embeddings_en_ceros`, codigo muerto borrado). El runner tiene la ultima palabra: si mide otro numero, se corrige aqui y en `ci/pisos.json`.
 
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
@@ -731,7 +741,11 @@ Sin historia anotada en el workflow.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^14 passed`
 
-Sin historia anotada en el workflow.
+37 el 2026-10-05 (cierre de la auditoría conjunta de #355; medido LOCAL: 36 -> 37 passed): +1 prueba que fija las `llamadas_obligatorias` reales de la familia `base_de_test`.
+
+36 el 2026-10-05 (ronda de cierre de #355; medido LOCAL: 20 -> 36 passed): +16 pruebas del ORDEN (la guarda de conexión va como sentencia de primer nivel antes de la primera apertura de conexión: connect, get_pool, create_pool; en jax y en cada espejo).
+
+20 el 2026-10-05 (auditoría jax-platform #195, rama fix/b9-driver-runbooks; medido LOCAL: 14 -> 20 passed): +6 pruebas de las llamadas obligatorias (la guarda no se puede perder en una función con marcador de divergencia, en ninguna copia). El runner tiene la última palabra.
 
 ## `mirror-sync/cu`
 
@@ -795,6 +809,8 @@ Measured on Python 3.12 with this exact five-file command.
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^156 passed`
 
 Jax#338 (2026-10-04): `^156 passed` → `^164 passed`, +8 en las_manos/_procesamiento_routes_test.py (formato_no_soportado con formato, freno por contenido, 422 antes del freno); medido local hall9000.
+
+2026-10-06 (cierre de #362): `^164 passed` → `^166 passed`, +2 netas en `tests/test_las_manos_auth_servicio.py` (la identidad `jacobs` pierde `/motor/dispatch` y `/motor/job/*`: 3 pruebas de 403 + 1 de que conserva solo `/jacobs/pipeline`, menos 2 filas de `test_declarar_otra_identidad_se_rechaza`). Medido LOCAL en hall9000 con el comando exacto de tres archivos (`166 passed`). Esos +2 ya estaban contados en `tests-puros/out`, que corre el mismo archivo: el archivo cae en DOS pisos y la tanda anterior solo ajusto uno. Revisados todos los pasos de `policy.yml` que corren archivos tocados desde ea428368 (`auth_servicio`, `human_gate`, `arranque`, `invoke_motor_*`, `config_entorno`, `cliente_http`, `dispatch_step_reroute`, `plan_facetas`, `_arbitro_test`): solo este paso (fuera de `tests-puros/out`) corre uno de ellos; los otros pasos de `governance` (10 a 13) siguen en `^264`, `^15` y `^10`, medidos local.
 
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
@@ -886,7 +902,169 @@ para conservar byte a byte el registro de la migración de pisos.
 
 ## `tests-puros/out`
 
+**Corrección (2026-10-06, JAX#357 ronda 4):** el registro de ronda 3 abajo midió
+3724 sobre la rama de trabajo anterior, no sobre la base vigente de master. La
+matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
+sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
+piso se vuelve a fijar desde los **3537 de master**.
+
+3876 -> 3888 (2026-10-06, JAX#357 ronda 15): +12 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 307 a 319): prueba diferencial de que `_hallazgos_de_cadenas_de_master` cuenta exactamente lo que
+master saca de cadenas (7 fixtures, incluidas F1-F3 del auditor), las fixtures de lista sin exencion
+contra `_sin_la_excepcion_de_lista_blanca` (4) y dos nodos con el mismo texto y distinta calificacion
+(1). Medido sobre la mezcla con la misma lista de 195 archivos: 3934 recolectadas = 3888 passed + 45
+skipped + 1 xfailed. A confirmar en el runner.
+
+3841 (rama) + 35 (#362) = 3876 (2026-10-06, JAX#357 ronda 15, mezcla con origin/master 36dafaa2):
+`ci/pisos.json` choco con master en `tests-puros/out` (master: 3572; la rama: 3841 sobre su base). Se
+resolvio tomando 3841 + los 35 de #362 = 3876, medido sobre la mezcla por recoleccion
+(`pytest --collect-only -q`, PYTHONPATH=.:las_manos, SIN `JAX_DB_HOST`) con la lista exacta de 195
+archivos: 3922 recolectadas = 3876 passed + 45 skipped + 1 xfailed. `governance/f2e-sr3-source` queda
+en 166 (el de master). A confirmar en el runner.
+
+3836 -> 3841 (2026-10-06, JAX#357 ronda 14): +5 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 302 a 307): un nodo List/Tuple que master no marca ya no exime una ventana sacada de una cadena
+(3 casos: lista, tupla sin parentesis, f-string), un segundo `rm` lejos en la ventana, y que sin
+hallazgos de master no se re-parsea la fuente (el archivo baja de ~11 s a ~6 s). Medido por
+recoleccion (`pytest --collect-only -q`, PYTHONPATH=.:las_manos, SIN `JAX_DB_HOST`) con la lista
+exacta de 195 archivos: 3887 recolectadas = 3841 passed + 45 skipped + 1 xfailed (3882 en fc5927ca).
+No se corrio el paso completo.
+
+3823 -> 3836 (2026-10-06, JAX#357 ronda 13): +13 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 289 a 302): el tipo del hallazgo de la exencion de lista blanca viene de dónde salio (shell:
+siempre ventana; Python: nodo List/Tuple del codigo, no su texto re-parseado), la prueba de que un
+hallazgo sin `rm` identificable no se exime y la de que el bloque congelado falla si el texto de
+master difiere en un byte. Medido por recoleccion (`pytest --collect-only -q`,
+PYTHONPATH=.:las_manos, SIN `JAX_DB_HOST`) con la lista exacta de 195 archivos: 3882
+recolectadas = 3836 passed + 45 skipped + 1 xfailed (3869 en 8d63035). No se corrio el paso
+completo.
+
+3788 -> 3823 (2026-10-06, JAX#357 ronda 12): +35 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 254 a 289): la exencion de lista blanca se decide por el `rm` que marco master y no por una
+regex sobre su ventana de texto (8 casos shell/`subprocess.run`), casos de Python que solo marca
+master (fijan el OR), la forma de la exencion en shell y listas, y el camino del checkout
+superficial de la comparacion con `git show` (fetch del SHA o fallo explicito; ya no hay
+`return`). Medido por recoleccion (`pytest --collect-only -q`, PYTHONPATH=.:las_manos, SIN
+`JAX_DB_HOST`) con la lista exacta de 195 archivos: 3869 recolectadas en la rama, 3834 en
+a9339ceb. Son 3823 passed + 45 skipped + 1 xfailed. No se corrio el paso completo.
+Desde esta ronda la nota de la ronda 11 («sin el SHA comprueba solo el hash») ya no rige: sin el SHA
+la prueba intenta `git fetch` y, si no puede, falla. La exencion marca de mas un volumen llamado `rm`
+(`docker volume rm rm -f`): es fallo cerrado deliberado (ante la duda se marca).
+
+3768 -> 3788 (2026-10-06, JAX#357 ronda 11): +20 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 234 a 254): bloque de master congelado con prueba de hash y contra `git show`, "nunca menos
+que master", `&` entre comillas/escapado/en expansion, y pruebas directas de la lectura nueva
+(paridad del acento grave, acento grave como separador). Medido por recoleccion
+(`pytest --collect-only -q`, PYTHONPATH=.:las_manos, Python 3.14.4, SIN `JAX_DB_HOST`) con la
+lista exacta de 195 archivos: 3834 recolectadas en la rama, 3814 en 435d1ede. Son 3788 passed
++ 45 skipped + 1 xfailed. La prueba del bloque congelado no se salta nunca (sin el SHA en el
+checkout comprueba solo el hash). No se corrio el paso completo.
+
+3746 -> 3768 (2026-10-06, JAX#357 ronda 10): +22 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 212 a 234): lectura doble tambien en shell (ventana de master y salto de subshell, unidas
+con OR), casos del auditor con acentos graves en numero par y `)` desbalanceado, separadores
+`|`/`||` pegados y los limites declarados. Medido por recoleccion (`pytest --collect-only -q`,
+PYTHONPATH=.:las_manos, Python 3.14.4, SIN `JAX_DB_HOST`) con la lista exacta de 195 archivos:
+3814 recolectadas en la rama, 3792 en 8a9203d0. Son 3768 passed + 45 skipped + 1 xfailed.
+No se corrio el paso completo.
+
+3713 -> 3746 (2026-10-06, JAX#357 ronda 9): +33 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 179 a 212): prefiltro de cadenas Python con cualquier espacio en blanco y subshell
+`$(...)`/acento grave que no corta las banderas en shell (anidados, `-v` posterior, sin cerrar).
+Medido por recoleccion (`pytest --collect-only -q`, PYTHONPATH=.:las_manos, Python 3.14.4, SIN
+`JAX_DB_HOST`) con la lista exacta de 195 archivos: 3792 recolectadas en la rama, 3759 en
+f2be73e2. Son 3746 passed + 45 skipped + 1 xfailed (las 33 nuevas no llevan skip ni xfail).
+No se corrio el paso completo.
+
+3732 -> 3713 (2026-10-06, JAX#357 ronda 8): -19. La ronda 8 simplifica el escaner (cada lista
+Python se lee dos veces, argv sin cortar y como shell, unidas con OR) y las pruebas de
+`tests/test_docker_rm_sin_fuga_de_volumenes.py` pasan de 198 a 179: se quitan los falsos
+positivos que la lectura argv marca a proposito y se reagrupan las de separadores. Es
+un descenso solo frente a 282fd797 (master fija 3537, el piso sube respecto de master): baja por consolidar pruebas del propio escaner, no por
+perder cobertura (cada defecto sigue cubierto; 16 mutantes del escaner mueren). Medido por
+recoleccion (`pytest --collect-only -q`, PYTHONPATH=.:las_manos, Python 3.14.4, SIN
+`JAX_DB_HOST`) con la lista exacta de 195 archivos: 3759 recolectadas en la rama, 3778 en
+282fd797. Las 3759 son 3713 passed + 45 skipped + 1 xfailed. No se corrio el paso completo.
+
+3660 -> 3732 (2026-10-06, JAX#357 ronda 7): +72 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 126 a 198 pruebas): argv con separador literal, separadores `&`/`|&`/con espacios/pegados/en
+variable, alias `docker container remove`, `&` y redirecciones en shell. Medido por recoleccion
+(`pytest --collect-only -q`, PYTHONPATH=.:las_manos, Python 3.14.4, SIN `JAX_DB_HOST`) con la
+lista exacta de 195 archivos del paso "Piso exacto de tests CORRIDOS": 3778 recolectadas en la
+rama, 3706 en 9a5d3848 (misma lista, mismo entorno). Las 3706 de la ronda 6 son 3660 passed + 45
+skipped + 1 xfailed; las 72 nuevas no llevan skip ni xfail: 3732 passed, 45 skipped, 1 xfailed.
+No se corrio el paso completo: la recoleccion no ejecuta nada y no toca ninguna base.
+
+3584 -> 3660 (2026-10-06, JAX#357 ronda 6): +76 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
+(de 50 a 126 pruebas): 72 que fallan contra 07cac634 (falsos positivos y fugas de las listas
+Python con `&&`, `;`, `||`, `|`, con y sin ssh) y 4 de control. Medido por recoleccion
+(`pytest --collect-only -q`, PYTHONPATH=.:las_manos, Python 3.14.4, SIN `JAX_DB_HOST`) con la
+lista exacta de 195 archivos del paso "Piso exacto de tests CORRIDOS": 3706 recolectadas en la
+rama, 3630 en 07cac634 (la misma lista, mismo entorno). Las 3630 de la ronda 5 son 3584 passed
++ 45 skipped + 1 xfailed; las 76 nuevas no llevan skip ni xfail: 3660 passed, 45 skipped,
+1 xfailed. La rama ya trae origin/master f47820f5 (solo agrega `scripts/ejecutor_fase0/maquinas.toml`,
+sin pruebas). No se corrio el paso completo: la recoleccion no ejecuta nada y no toca ninguna base.
+
+3562 -> 3584 (2026-10-06, JAX#357 ronda 5): +22. `test_whitelist_python_no_exime_un_rm_posterior_de_contenedor`
+(11 subcomandos de la lista blanca x con/sin ssh): un `rm` de la lista blanca ya no
+exime un `docker rm -f` posterior en la misma lista Python. Medido por recoleccion con
+la lista exacta de 195 archivos del paso "Piso exacto" (PYTHONPATH=.:las_manos, Python
+3.14.4): rama 3630 recolectadas, rama sin la ronda 5 3608, master 3583. Las 3608 de la
+ronda 4 son 3562 passed + 45 skipped + 1 xfailed; con las 22 nuevas: 3584 passed,
+45 skipped, 1 xfailed. Corrida local completa del paso (sin enmascarar el host): 3623
+passed, 3 skipped, 3 xfailed, 1 failed por entorno
+(`test_arranque_real_no_colisiona_con_policy_de_la_raiz`, ya documentado abajo).
+
+3537 -> 3562 (2026-10-06, JAX#357 ronda 4): +25 netos. El test del escáner tiene
+22 casos de whitelist (11 subcomandos, shell y listas Python literales), uno que
+fija el rechazo de prefijos dinámicos/contextos cercanos y dos de Python inválido
+que falla cerrado con ruta y línea. Medido con la lista exacta de 195 archivos
+del paso "Piso exacto", Python 3.14.4, `requirements.txt`, `pytest` y
+`pytest-asyncio`; los cinco directorios del host se ocultaron en namespace de
+mount. Resultado: 3562 passed, 45 skipped, 1 xfailed, 16 subtests.
+
+3540 -> 3724 (2026-10-06, JAX#357 ronda 3; **corregido arriba**): se contaron
+184 parametrizaciones nuevas, pero varias codificaban una semántica más estrecha
+que la de master. Ese total no era la base correcta para el piso final.
+
+3537 -> 3540 (2026-10-05, JAX#357 ronda 2): se agregaron tres pruebas en
+`tests/test_docker_rm_sin_fuga_de_volumenes.py`; la tercera,
+`test_python_que_no_parsea_falla_en_vez_de_degradar_a_shell`, exige que un Python
+inválido lance `SyntaxError` en vez de analizarse como shell. Medido en hall9000 con la lista exacta del paso
+"Piso exacto", Python 3.14.4 y `sudo unshare --mount` ocultando
+`~/claude-skills`, `~/ejecutor-fase0`, `~/jax-platform`, `/srv/jax-prod` y el
+`/etc/jax/build` propio del host:
+3540 passed, 45 skipped, 1 xfailed y 16 subtests. El objeto `/etc/jax/build` se
+ocultó solo dentro del namespace porque el runner limpio no contiene esa
+configuración local. El total medido quedó tres sobre el piso registrado, igual a
+las tres pruebas nuevas de esta ronda.
+Los 45 skipped conservan el desglose vigente.
+
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3452 passed, 45 skipped`
+
+Nota 2026-10-06 (simplificacion de #362): se revierte el registro de evidencia B7 en el middleware y los pisos vuelven a `^3570 passed, 45 skipped` (`tests-puros/out`) y `^166 passed` (`governance/f2e-sr3-source`); se descartan los intermedios 3574/3589/3590 y 170/185/186. FUENTE: LOCAL en hall9000 sin aislamiento `unshare`, listas exactas: 3610 passed, 3 skipped, 0 failed (tests-puros) y 166 passed (sr3-source); governance 264/15/10 sin cambio. `jacobs-gobernanza-db/out` NO cambia (`^170 passed`): una ronda intermedia lo toco por error al reemplazar 170 a ciegas en `ci/pisos.json`.
+
+3570 -> 3572 el 2026-10-06 (cierre de 2 MINOR de la auditoria sobre 7b71f7b2): +2 pruebas en `test_human_gate_sin_emision_http.py` (30 -> 32): el registrador B7 corre fuera del hilo del event loop, y sin registrador el 410 loguea (error) la misma correlacion que lleva el cuerpo. Aritmetica del runner: base 3570 + 2. Medido LOCAL el archivo: 32 passed. 45 skipped no cambia. El runner tiene la ultima palabra.
+
+3567 -> 3570 el 2026-10-06 (tercera tanda del cierre de #362, 4 MINOR de la auditoria sobre e5e5c347): +3 pruebas netas. +2 en `test_las_manos_auth_servicio.py` (3 de 403 para `jacobs` en `/motor/dispatch`, `GET /motor/job/*` y `POST /motor/job/*/cancel` + 1 de que solo conserva `/jacobs/pipeline`, menos 2 filas de `test_declarar_otra_identidad_se_rechaza` que ya no llegan a la comprobacion de identidad), +1 en `test_human_gate_sin_emision_http.py` (sin falla de evidencia B7 no hay log de error; la del log con correlacion amplia una prueba existente), +-0 en `test_arranque_las_manos_no_shadowea_policy.py` (ruta completa, mismas pruebas) y +-0 en los 4 renombrados. FUENTE: LOCAL en hall9000 sin aislamiento `unshare`, mismo comando del paso: 3610 passed, 3 skipped, 0 failed, contra 3607 de la tanda anterior; aritmetica del runner: 3567 confirmado + 3. 45 skipped no cambia. El runner tiene la ultima palabra.
+
+3560 -> 3567 el 2026-10-06 (segunda tanda del cierre de #362, pedido del coordinador): +7 pruebas netas. +1 `el_juez` en el rechazo del predicado y +2 de que C5/auditor local no pasan por el predicado (`test_plan_facetas_de_la_tabla.py`), +1 neta en `test_config_entorno.py` (2 pruebas -> 3: sin `LAS_MANOS_URL`, con `JAX_OLLAMA_URL`), +2 de `origen_plan` en PLAN_REJECTED, +1 de la allowlist del arranque real (`test_arranque_las_manos_no_shadowea_policy.py`); la prueba de 0 pedidos se reescribe (+-0). FUENTE: LOCAL en hall9000 sin aislamiento `unshare`, mismo comando del paso: HEAD 3607 passed, 3 skipped, 0 failed. Linea base comparable 3580 = 3579 medido en ea428368 + 1 (`test_arranque_real_no_colisiona_con_policy_de_la_raiz`, que en ese run fallaba por un PermissionError local y en el runner pasa, ya contada en su 3540). Delta 3607 - 3580 = +27 sobre 3540, es decir +7 sobre el 3560 anterior. 45 skipped no cambia. El runner tiene la ultima palabra.
+
+3540 -> 3560 el 2026-10-06 (cierre de los MINOR de #362, sobre ea428368, cuyo CI midio 3540): +20 pruebas netas. +2 evidencia B7 del 410 de `/motor/dispatch` (`test_human_gate_sin_emision_http.py`), +11 predicado como lista blanca (`test_plan_facetas_de_la_tabla.py`: 4 facetas aceptadas, 6 rechazadas, 1 plan), +5 reroute real de `_dispatch_step` (`test_dispatch_step_reroute.py`: 4 candidatos no ejecutables + 1 mixto), +2 guardas contra la resurreccion del despacho legacy (`test_invoke_motor_rechazo.py`); `test_jacobs_reusa_el_cliente_entre_llamadas` se reescribe (sonda nueva, +-0). FUENTE DE LA MEDICION: LOCAL en hall9000, sin aislamiento `unshare` (no se corrio con sudo), mismo comando que el paso `Piso exacto de tests CORRIDOS` sobre ea428368 (3579 passed) y sobre HEAD (3599 passed), mismas 3 skipped y mismo unico fallo preexistente de entorno (`test_arranque_real_no_colisiona_con_policy_de_la_raiz`) en las dos: delta +20 sumado al 3540 que el runner midio en ea428368. 45 skipped no cambia (no se agrego ningun skip). El runner tiene la ultima palabra: si mide otro numero, se corrige aqui y en `ci/pisos.json`.
+
+3537 -> 3540 el 2026-10-06 (pipeline honesto): +3 pruebas netas para rechazar facetas sin ejecución gobernada en plan/pre-vuelo, continuar y devolución antes de cualquier sonda o escritura; además los tests de `_invoke_motor` ahora comprueban que no obtiene cliente HTTP. Las pruebas focalizadas nuevas/modificadas pasan localmente; el full-run del piso requiere el runner aislado y conserva los 45 skips.
+
+3531 -> 3537 el 2026-10-06 (ronda 3 de #356; medido LOCAL por archivo con /srv/jax-prod, ~/claude-skills y ~/jax-platform tapados y confirmado con la suite completa del paso): `test_instalar_dropins_de_servicio.py` 11 -> 14 (+3: rechazo de filas de otro dueno) y `test_activacion_timers_b9.py` 9 -> 12 (+3: Monotonic=0, Realtime=n/a y SubState=running). 45 skipped no cambia.
+
+3529 -> 3531 el 2026-10-06 (ronda 2 de #356): `test_activacion_timers_b9.py` 7 -> 9 (+2: el caso `muerto_real` con la salida medida de systemd y el timer monotonico que si tiene proximo disparo). 45 skipped no cambia. Medido LOCAL por archivo con /srv/jax-prod tapado y confirmado con la suite completa del paso.
+
+3501 -> 3529 el 2026-10-05 (rama ops/versionar-drop-ins-v2, rescate de #274; medido LOCAL con la suite completa de este paso, /srv/jax-prod y ~/claude-skills, ~/ejecutor-fase0, ~/jax-platform tapados con `sudo unshare --mount`: 3562 passed, 45+6 skipped, de los cuales los 33 passed / 6 skipped de `test_arranque_instalado.py` y `test_verificar_arranque_instalado.py` van al piso nuevo `tests-puros/arranque_instalado`): +28 = `test_instalar_dropins_de_servicio.py` (11) + `test_activacion_timers_b9.py` (7) + `test_ejecutor_cuenta_de_servicio.py` 6 -> 16 (+10). 45 skipped no cambia. Un test local (`test_arranque_real_no_colisiona_con_policy_de_la_raiz`) falló por el entorno local (necesita el venv de las_manos del checkout), no por el cambio; se cuenta como passed del runner.
+
+3491 -> 3501 el 2026-10-05 (ronda de cierre de #355, medido LOCAL como delta de archivo): `tests/test_base_por_sesion.py` 40 -> 50 colectados (+10: `CI` solo cuenta con `GITHUB_ACTIONS=true`; 5 entornos por 2 puertos). 45 skipped no cambia.
+
+3490 -> 3491 el 2026-10-05 (auditoría Jax#355, MINOR 1; delta de archivo local): `tests/test_base_por_sesion.py` 39 -> 40 (+1: un nombre con prefijo y sufijo inválido se niega). 45 skipped no cambia.
+
+3477 -> 3490 el 2026-10-05 (rama fix/b9-driver-runbooks, medido LOCAL como delta de archivo): `tests/test_base_por_sesion.py` 26 -> 39 colectados (+13: la suite no abre conexiones a la instancia de produccion ni a `jax_memory` fuera de CI sin `JAX_TEST_DB_PERMITIR_INSTANCIA_DE_PRODUCCION`). 45 skipped no cambia. El runner tiene la ultima palabra.
 
 3476 -> 3477 el 2026-10-05 (auditoria Jax#354, misma rama, delta de archivo local): `tests/test_hnsw_recall_tripwire.py` 6 -> 7 (+1: con faltantes y recall vencido a la vez gana el fallo general; el recall solo sale con el codigo propio 3).
 
@@ -3660,6 +3838,21 @@ re-medir sobre master en vez de sumar los deltas a ciegas.
   lock). Misma lista y metodo: 3509 passed + 1 failed preexistente (3503 -> 3509), 3 skipped.
 ````
 
+## `tests-puros/arranque_instalado`
+
+Piso nuevo (2026-10-05, rama ops/versionar-drop-ins-v2): `^33 passed, 6 skipped`
+
+37 -> 46 passed y 6 -> 9 skipped el 2026-10-06 (ronda 3 de #356): +9 passed (dueno de cada fila 2 y respaldo de la base del proxy 6 netos en `test_arranque_instalado.py`, mas 1 en `test_verificar_arranque_instalado.py`: la capa cargado no consulta plantillas) y +3 skipped (los 3 espejos: cada uno se compara con su repo dueno solo si ese checkout existe, y en el runner no existe). Patron vigente: `^46 passed, 9 skipped`.
+
+33 -> 37 passed el 2026-10-06 (ronda 2 de #356): +3 en `test_arranque_instalado.py` (bit ejecutable de jax-db-esperar, dependencias de esperar-db.conf en el manifiesto, respaldo de la base del proxy) y +1 en `test_verificar_arranque_instalado.py` (755 a los guiones de ops/sbin/ sin extension). Los 6 saltados no cambian. Patron vigente: `^37 passed, 6 skipped`.
+
+`tests/test_arranque_instalado.py` (11 passed, 3 skipped) y `tests/test_verificar_arranque_instalado.py`
+(26 passed, 3 skipped), medidos con `/srv/jax-prod` tapado. Los 6 saltados exigen el host de produccion
+(`/srv/jax-prod/jax` y las rutas de `/etc/systemd/system`): en el runner se saltan. Paso propio porque
+el piso de `tests-puros/out` no admite que suban las saltadas (M <= 45). **En hall9000 esos 6 corren y
+dan rojo hasta el despliegue conjunto de jax con platform**: el manifiesto describe la verdad de master
+y 7 archivos instalados van por detras (ver el PR).
+
 ## `tests-puros/ficha_tests`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^16 passed`
@@ -3731,6 +3924,7 @@ Historia (comentarios que estaban sobre el piso en `policy.yml`):
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^48 passed`
 
 Jax#338 (2026-10-04): `^48 passed` → `^51 passed`, ningun FIFO cuelga la ingesta y la huella sale del mismo descriptor que la copia (+3); medido local hall9000.
+Jax#367 (2026-10-06): `^51 passed` → `^52 passed`, `test_libro_es_determinista` (el ayudante `_libro` da los mismos bytes aunque openpyxl y zipfile vean otra hora; mata el mutante sin reescritura del zip); medido local hall9000: 52 passed.
 
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
@@ -4381,6 +4575,17 @@ tiempo. Si el runner da otro número, manda el runner.
   y ahora exige idx_ejecutor_punto_host_respaldo. Medido local con las migraciones
   de jax-platform master: ese archivo 3 -> 5 passed. Los dos vistos en rojo contra
   el exportador viejo (a8de3fd: 2 failed / 3 passed).
+170 -> 219 el 2026-10-06 (idempotencia de POST /procesamiento/trabajos, rondas 1 a 6): +49 en el
+  archivo NUEVO las_manos/_procesamiento_idempotencia_db_test.py (36 pruebas + 13 casos de la tabla
+  compartida de contrato, ya con los desenlaces 503 `idempotencia_estado_desconocido` y
+  `procesamiento_no_disponible`), sumado a las dos listas del job (la que corre y la del piso). Medido local,
+  MariaDB 12.3.3 efimera propia (--network none) dentro de su netns, CI=true: ese archivo 49 passed (x2).
+  Ronda 5: el fallo de liberar tras una cancelacion se registra (mutante «sin callback» muerto) y los dos
+  desenlaces 503 entran en el contrato (mutante «confirmado+ausente se retoma» muerto). El total del job no se
+  reproduce entero en local (hace falta el esquema de jax-platform): 170 es el declarado de master + 49.
+  Ronda 6: +1, el procedimiento del runbook de clave desconocida (hash corto por SHA2 en SQL, DELETE exacto, reenvio que
+  crea y confirma un trabajo nuevo).
+  Si el runner da otro numero, manda el runner.
 ```
 
 ## `permisos-proyectos/permisos_proyectos`
@@ -4395,6 +4600,34 @@ Historia: Jax#340 (permisos de proyectos sin acceso para otros; el runbook con b
 lecturas como root) pasa la suite de 55 a 199 pruebas recolectadas; el runner salta solo la que necesita `/etc/jax/.env`:
 199 − 1 = 198 passed, medido corriendo pytest como un usuario que no es fruiz ni jaxsvc. El paso del job crea las cuentas
 `jaxsvc` y `fruiz` (las pruebas no las crean).
+
+## `authority-ledger-codec/codec`
+
+Piso vigente (2026-10-07): `^19 passed in `. Medido en hall9000 con el comando exacto del workflow:
+`pytest -q tests/policy/test_authority_ledger_storage_codec.py`. Incluye proyección cerrada,
+rechazo de campos desconocidos y de payloads fuera de variante, contraste de todas las columnas
+denormalizadas (incluido `previous_event_hash`), lectura histórica exacta y persistencia de
+`canonical_intent`, `canonical_event` y `evidence_refs`. Antes: 5.
+
+## `authority-ledger-mariadb/integration`
+
+Piso vigente (2026-10-07): `^4 passed in ` (antes 1). Medido en hall9000 con MariaDB 12.3.3 efímera
+`--network none`; la prueba aplica ambas migraciones, valida el upgrade nullable→NOT NULL,
+provisiona la cuenta de aplicación con el script versionado, genera una llave Ed25519 de prueba
+y valida firma → INSERT → lectura → reconstrucción → hash/firma y replay. También prueba que
+UPDATE/DELETE fallan aunque otro principal tenga esos GRANTs, por los triggers append-only. La
+base solo expone socket Unix al proceso de prueba. Tres pruebas nuevas, cada una con su MariaDB
+efímera: el provisioning revoca los privilegios previos (`REVOKE ALL PRIVILEGES, GRANT OPTION`) y
+`SHOW GRANTS` coincide exacto con el contrato; la migración 002 falla cerrada con filas NULL aun con
+`sql_mode=''` (la fila queda intacta) y pasa con cero NULL.
+
+## `authority-rule-events/ratifications`
+
+Piso vigente (2026-10-07): `^12 passed in `. Medido con el comando exacto del workflow. Cubre
+payload inmutable, variantes cerradas, validación de identificadores y vigencia, grants
+repetidos por regla, selección del último grant, activación que no acepta un grant individual,
+rechazo del payload Block 4 heredado y denegación de revocaciones desconocidas o duplicadas.
+Antes: 8.
 
 ## `archivos-de-test-en-ci/pisos`
 

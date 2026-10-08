@@ -31,29 +31,27 @@ from config_entorno import ruta_absoluta_requerida, url_requerida
 # JAX_WORKSPACE_DIR sin default: jax/core/workspace_dir.py por symlink en las_manos/.
 from workspace_dir import workspace_dir
 from cliente_http_compartido import obtener_cliente_http
-from auth_servicio import IDENTIDAD_JACOBS, encabezado_propio
 from jacobs.models import HTTP_FACETS as _HTTP_FACETS
 from jacobs.models import MOTOR_FACETS as _MOTOR_FACETS
-from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
+from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus, faceta_ejecutable_en_pipeline
 from jacobs.plan import CapabilityUnbound
 from jacobs.policy import check_kill_switch
 from jacobs.usage_writer import record_direct_usage
-from policy.execution_control.errors import DirectHydeGovernedExecutionForbiddenError
+from policy.execution_control.errors import (
+    DirectHydeGovernedExecutionForbiddenError, GovernedExecutionRequiredError,
+)
 from interruptor import correr_con_interruptor
 
 logger = logging.getLogger("jacobs.executor")
 
 # E-21 (2026-09-16): del entorno, validadas al importar. Sin ellas LAS MANOS no
 # arranca (EntornoInvalido en el journal) en vez de apuntar a un host fijo.
-LAS_MANOS_BASE = url_requerida("LAS_MANOS_URL")
 OLLAMA_URL     = url_requerida("JAX_OLLAMA_URL") + "/api/chat"
 
 # E-22 (2026-09-16): `documents/` dentro de JAX_REPO_BASE, la MISMA variable
 # con la que jax-platform (api/admin/repository.py, REPO_BASE) lista y sirve
 # estos .md. Validada al importar: sin ella LAS MANOS no arranca.
 REPO_DOCUMENTS_DIR = ruta_absoluta_requerida("JAX_REPO_BASE") / "documents"
-
-MOTOR_POLL_INTERVAL = 5  # segundos entre polls de job
 
 # Tope de seguridad para el output COMPLETO de cada dependencia declarada (~15K tokens).
 # Si el ensamble de muchas deps roza la ventana, ajustar y re-verificar con el log de C1.
@@ -609,145 +607,8 @@ async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
 
 
 async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: str | None = None) -> dict:
-    """Kimi/jax_local via Motor Registry de LAS MANOS. Polling hasta completar.
-
-    Bloque 3 (2026-08-21): _CAPABILITY_MAP eliminado -- resolvía alias
-    semánticos ("analysis"->"pipeline_analysis", etc.) a un nombre de
-    catálogo, pero verificado contra capability_motor real + jacobs_steps
-    histórico: ningún alias tuvo NUNCA una fila en capability_motor ni se
-    usó jamás con un facet-motor (kimi/jax_local) -- los 3 que sí se usan
-    (analysis/research/review) lo hacen exclusivamente con facets HTTP-directos,
-    donde este mapa nunca se consultaba. Muerto, no reemplazado. step.capability
-    llega acá ya validado por NIVEL A/B de validate_capability() (existe en
-    `capability`, el motor está en su allowed_motors) -- se despacha tal cual,
-    sin resolución intermedia."""
-    payload = {
-        "caller":     "jacobs",
-        "capability": step.capability,
-        "motor":      step.motor,  # None = MotorPolicy resuelve por competencia (R4)
-        "trace_id":   step.trace_id,
-        # El prompt ARMADO por _dispatch_step (regla de evidencia + objetivo +
-        # salidas de las dependencias + tarea). Antes se reconstruía acá desde
-        # step.input y el contexto de las dependencias se perdía: en la E2E de
-        # la cadena (1bb0da78, 2026-09-12) kimi tenía que "producir con el
-        # plan unificado" sin recibir el plan. El respaldo queda solo para
-        # callers directos que no pasan prompt.
-        "prompt":     prompt if prompt is not None
-                      else _EVIDENCE_RULE + "\n\n" + step.input.get("prompt", json.dumps(step.input)),
-        "user_id":    pipeline.user_id,
-        "tenant_id":  pipeline.tenant_id,
-        # GAP2 Fase3 (2026-08-19): mismo presupuesto que ya gobierna el
-        # polling de abajo (deadline = timeout) -- el bucle de tool-calling
-        # de worker.py lo consume como SU presupuesto de tiempo, no uno
-        # nuevo. Ningun cambio para el polling mismo, que sigue intacto.
-        "timeout_seconds": timeout,
-        # Task 7b (2026-09-18, historial-y-arreglos-de-pipeline): sin esto,
-        # record_motor_usage() (LAS MANOS) nunca sabe de qué pipeline es este
-        # job -- kimi/jax_local son las facetas de la MAYORIA de los pasos
-        # reales (Ruling 7, Task 1), asi que sin este campo el historial
-        # seguiria sin poder sumar el costo real para casi ningun pipeline.
-        "pipeline_id": pipeline.pipeline_id,
-    }
-    resp = await obtener_cliente_http().post(f"{LAS_MANOS_BASE}/motor/dispatch", json=payload, timeout=30,
-                                           headers=encabezado_propio(IDENTIDAD_JACOBS))
-    resp.raise_for_status()
-    dispatch = resp.json()
-
-    job_id = dispatch.get("job_id")
-    if dispatch.get("status") == "rejected":
-        reason = dispatch.get("rejected_reason", "sin razón")
-        logger.error(
-            "Motor Registry RECHAZÓ job (caller=jacobs, capability=%s, motor=%s): %s",
-            step.capability, step.motor or step.facet, reason,
-        )
-        raise RuntimeError(f"Motor Registry rechazó el job: {reason}")
-    if not job_id:
-        raise RuntimeError(f"Motor Registry no devolvió job_id: {dispatch}")
-
-    # Polling hasta timeout
-    try:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            await asyncio.sleep(MOTOR_POLL_INTERVAL)
-            resp = await obtener_cliente_http().get(f"{LAS_MANOS_BASE}/motor/job/{job_id}", timeout=15,
-                                                      headers=encabezado_propio(IDENTIDAD_JACOBS))
-            resp.raise_for_status()
-            job = resp.json()
-
-            status = job.get("status", "")
-            if status == "completed":
-                # Ronda de arreglo 1 de Task 1 (2026-09-18): con
-                # MotorJobView.model expuesto (las_manos/motor_registry/
-                # models.py + worker.py, esta misma ronda) el job trae el
-                # model_id REAL que despachó -- ya no None por default.
-                # kimi/jax_local son las facetas de la mayoría de los pasos
-                # reales; sin esto, casi todo el historial decía "Modelo
-                # desconocido".
-                step.modelo_real = job.get("model")
-                return {
-                    "success":        True,
-                    "facet":          step.facet,
-                    "job_id":         job_id,
-                    "result":         await _read_motor_result(job),
-                    "result_full":    job,
-                }
-            if status in ("failed", "cancelled", "rejected"):
-                raise RuntimeError(
-                    f"Motor job {job_id} terminó en estado '{status}': "
-                    f"{job.get('error', '')}"
-                )
-
-        raise asyncio.TimeoutError(
-            f"Motor job {job_id} no completó en {timeout}s"
-        )
-    except (asyncio.CancelledError, asyncio.TimeoutError):
-        # Vencer el paso sin avisarle a LAS MANOS deja el job corriendo y
-        # cobrando (pipeline b8f80733, 2026-09-12: kimi siguió 3 min después
-        # del aborto). Dos caminos llegan acá: el wait_for de _run_step
-        # (CancelledError) y el deadline de este polling (TimeoutError).
-        await _cancel_motor_job(job_id)
-        raise
-
-
-async def _read_motor_result(job: dict) -> str:
-    """Salida COMPLETA de un motor job. `result_summary` son 200 caracteres
-    (worker.py); era lo único que llegaba a los pasos siguientes y al repo.
-    Desde 2026-09-12 el worker guarda el texto entero en `result_path`.
-
-    Job sin result_path (anterior al arreglo): el resumen es todo lo que
-    existe. Job CON result_path ilegible: falla el paso -- pasar 200
-    caracteres en silencio como si fueran el producto es exactamente el
-    defecto que esto cierra."""
-    path = job.get("result_path")
-    if not path:
-        return job.get("result_summary", "") or ""
-    try:
-        return await asyncio.to_thread(Path(path).read_text, encoding="utf-8")
-    except OSError as exc:
-        raise RuntimeError(
-            f"Motor job {job.get('job_id')}: no se pudo leer su salida completa en {path}: {exc}"
-        ) from exc
-
-
-async def _cancel_motor_job(job_id: str) -> None:
-    """Pide a LAS MANOS que corte el job. Lo mejor que se puede hacer, no
-    una condición: el paso ya venció y eso es lo que se reporta. Si el aviso
-    falla, queda en el log con el job_id -- nunca reemplaza la causa real.
-    409 = el job ya había terminado solo, no hay nada que cortar."""
-    try:
-        resp = await obtener_cliente_http().post(f"{LAS_MANOS_BASE}/motor/job/{job_id}/cancel", timeout=5,
-                                                   headers=encabezado_propio(IDENTIDAD_JACOBS))
-        if resp.status_code not in (200, 409):
-            logger.error(
-                "No se pudo cancelar el motor job %s tras vencer su paso: HTTP %s",
-                job_id, resp.status_code,
-            )
-    except Exception as exc:  # noqa: BLE001  # fail-soft: el paso ya venció y se reporta fallido por timeout -- cancelar es un aviso best-effort a LAS MANOS, no una condición; el job_id queda en el log de error para cortarlo a mano
-        logger.error(
-            "No se pudo cancelar el motor job %s tras vencer su paso: %s -- "
-            "puede seguir corriendo y cobrando en LAS MANOS",
-            job_id, exc,
-        )
+    """Bloquea el despacho legacy hasta que exista ejecución gobernada por paso."""
+    raise GovernedExecutionRequiredError("GOVERNED_EXECUTION_REQUIRED")
 
 
 # ----------------------------------------------------------------
@@ -987,46 +848,44 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     tried_facets = {step.facet}
     cap_error = await validate_capability(step)
     while isinstance(cap_error, CapabilityUnbound):
-        # El reroute SOLO puede apuntar a facets efectivamente despachables
-        # (HTTP o Motor Registry). 'hyde' se excluye a propósito: tiene su
-        # propio gate de aprobación humana en run_pipeline, que chequea
-        # plan[i].facet == "hyde" ANTES de que este código corra — si el
-        # reroute pudiera asignar step.facet = "hyde" después de ese
-        # chequeo, el step ejecutaría con result["approved"] = True sin
-        # aprobación humana real. No alcanzable hoy (ninguna capability
-        # lista "hyde" en allowed_motors), pero a una fila de capability_motor
-        # de distancia (Bloque 3: la DB es la única fuente ahora, un INSERT
-        # directo lo cambiaría). 'jax_local' (R4: sumado a _MOTOR_FACETS, SÍ es un
-        # conjunto de dispatch) tampoco aparece hoy como candidato de
-        # reroute -- no porque esté excluido del dispatch, sino porque
-        # ninguna fila de capability_motor lo lista en allowed_motors
-        # todavía (mismo gap que "hyde": a una fila de capability_motor de
-        # distancia). NOTA: reroute SÍ puede apuntar a _HTTP_FACETS
-        # (ada/thot). Hasta 2026-08-26 eso era un agujero: esos facets no
-        # pasaban por NINGÚN check del Motor Registry, así que un reroute
-        # los usaba como puerta de atrás. Desde 2026-08-27 ya no: el
-        # re-chequeo del final de este bucle vuelve a llamar a
-        # validate_capability(), y su bloque NIVEL C aplica
-        # check_capability_admission() (checks 1-5: capability existe,
-        # allowed_callers, requires_human_gate, recursion_depth, claves
-        # prohibidas) al facet NUEVO, no al original. Checks 6-7 (resolver
-        # motor, motor.sandbox_only) son N/A — un facet HTTP no es un
-        # motor. El techo de timeout YA NO esta diferido: se exige en
-        # plan-time desde 2026-09-01 (_validate_plan_capabilities lo valida
-        # contra `capability.max_execution_minutes` para TODOS los steps,
-        # HTTP incluidos).
+        # El reroute SOLO puede apuntar a facets que el predicado único
+        # (jacobs.models.faceta_ejecutable_en_pipeline: lista blanca HTTP, el
+        # mismo del menú, el plan y el pre-vuelo) da por ejecutables. Hoy eso es
+        # hipatia/jekyll/thot/ada. Un candidato de motor (kimi/jax_local), 'hyde'
+        # o cualquier faceta que no esté en la lista blanca NO es destino: el
+        # despacho de motores está cerrado (GovernedExecutionRequiredError) y
+        # 'hyde' tiene además su propio gate de aprobación humana en
+        # run_pipeline, que chequea plan[i].facet == "hyde" ANTES de que este
+        # código corra -- un reroute a 'hyde' lo saltaría. Como el filtro es el
+        # predicado y no una lista local, una fila nueva en capability_motor no
+        # puede abrir un destino: tiene que sumarse a HTTP_FACETS a propósito.
         #
-        # Residuo real que queda, distinto del viejo: NIVEL C pasa
-        # human_gate_token=None fijo, y una denegación de admisión devuelve
-        # str, no CapabilityUnbound. O sea: si el reroute aterriza en un
-        # facet HTTP con una capability que exige gate humano, el step
-        # falla DURO acá abajo (`raise ValueError`) en vez de seguir
-        # buscando candidatos. Es el comportamiento correcto (fail-closed),
-        # pero es una falla sin reintento — ver DEUDA.md para las
-        # capabilities con requires_human_gate=1 alcanzables por esta vía.
+        # El reroute a un facet HTTP no es una puerta de atrás: el re-chequeo
+        # del final de este bucle vuelve a llamar a validate_capability(), y su
+        # bloque NIVEL C aplica check_capability_admission() (checks 1-5:
+        # capability existe, allowed_callers, requires_human_gate,
+        # recursion_depth, claves prohibidas) al facet NUEVO, no al original
+        # (hasta 2026-08-26 esos facets no pasaban por ningún check). Checks 6-7
+        # (resolver motor, motor.sandbox_only) son N/A -- un facet HTTP no es un
+        # motor. El techo de timeout se exige en plan-time desde 2026-09-01
+        # (_validate_plan_capabilities, contra `capability.max_execution_minutes`
+        # para TODOS los steps).
+        #
+        # Estado real de este bucle (revisado en el cierre de #362): un
+        # CapabilityUnbound solo sale del NIVEL B de validate_capability (los dos
+        # `return CapabilityUnbound` viven dentro de `if step.facet in
+        # _MOTOR_FACETS`), y un paso de motor ya no llega hasta acá: plan,
+        # pre-vuelo, continuar y devolución lo rechazan antes
+        # (validar_facetas_ejecutables). Hoy el bucle es defensa en profundidad,
+        # no un camino que se recorra; y como el destino del reroute tiene que
+        # ser un facet HTTP, lo que sigue valiendo para un paso HTTP directo es
+        # que NIVEL C pasa human_gate_token=None fijo: si su capability exige gate
+        # humano, la denegación vuelve como str y el paso falla DURO
+        # (`raise ValueError` abajo), sin reintento. Es fail-closed, y lo fija
+        # jacobs/_http_facet_admission_test.py (ver también DEUDA.md).
         untried = [
             c for c in cap_error.candidates
-            if c not in tried_facets and c in (_HTTP_FACETS | _MOTOR_FACETS)
+            if c not in tried_facets and faceta_ejecutable_en_pipeline(c)
         ]
         if not untried:
             raise ValueError(

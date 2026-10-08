@@ -68,3 +68,59 @@ def test_nivel_a_no_reenruta():
     final_step, error = _dispatch_with_reroute(step, fake_validate)
     assert error == "capability desconocida: 'capability-inventada' no está en VALID_CAPABILITIES"
     assert final_step.facet == "ada"  # no cambió
+
+
+# --- E2b-1a MINOR 2 (auditoria #362): el reroute REAL usa el predicado ------
+# Las pruebas de arriba son una replica de la logica. Estas ejercitan
+# jacobs.executor._dispatch_step de verdad (validate_capability y el store
+# reemplazados; nada toca la DB ni la red).
+
+import asyncio  # noqa: E402
+from unittest.mock import AsyncMock, patch  # noqa: E402
+
+import pytest  # noqa: E402
+
+from base_de_test import exigir_base_de_test  # noqa: E402
+
+
+def _despachar_con_candidatos(candidatos, *, facet_original="ada"):
+    exigir_base_de_test()
+    from jacobs import executor
+    from jacobs.models import Step
+
+    step = Step(facet=facet_original, capability="code_swarm", step_index=0)
+    evento = AsyncMock()
+
+    async def validar(s):
+        if s.facet == facet_original:
+            return CapabilityUnbound(required=["code_swarm"], candidates=list(candidatos), task_id="t1")
+        return None
+
+    async def correr():
+        with patch.object(executor, "validate_capability", validar), \
+             patch.object(executor.store, "event_append", evento), \
+             patch.object(executor, "_build_context_input", side_effect=RuntimeError("llego al dispatch")):
+            return await executor._dispatch_step(step, executor.Pipeline(
+                name="t", invoked_by="t", user_id="1", tenant_id="1", mode="dry_run"))
+
+    return step, evento, correr
+
+
+@pytest.mark.parametrize("candidato", ["kimi", "jax_local", "hyde", "faceta_nueva_subprocess"])
+def test_el_reroute_real_no_aterriza_en_una_faceta_no_ejecutable(candidato):
+    """Un candidato que el predicado rechaza (motor, Hyde, faceta nueva) no es
+    destino de reroute: candidatos agotados, sin evento STEP_REROUTED."""
+    step, evento, correr = _despachar_con_candidatos([candidato])
+    with pytest.raises(ValueError, match="candidatos agotados"):
+        asyncio.run(correr())
+    assert step.facet == "ada"
+    evento.assert_not_awaited()
+
+
+def test_el_reroute_real_salta_los_no_ejecutables_y_elige_el_primer_http():
+    step, evento, correr = _despachar_con_candidatos(["kimi", "hyde", "thot"])
+    with pytest.raises(RuntimeError, match="llego al dispatch"):
+        asyncio.run(correr())
+    assert step.facet == "thot"
+    [llamada] = evento.await_args_list
+    assert llamada.args[1] == "STEP_REROUTED" and llamada.args[2]["new_facet"] == "thot"

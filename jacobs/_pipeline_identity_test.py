@@ -68,8 +68,9 @@ class PipelineIdentityTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ExecutorMotorPayloadTest(unittest.IsolatedAsyncioTestCase):
-    async def test_invoke_motor_incluye_identidad_del_pipeline(self):
+    async def test_invoke_motor_rechaza_sin_obtener_cliente_http(self):
         from jacobs import executor
+        from policy.execution_control.errors import GovernedExecutionRequiredError
 
         pipeline = Pipeline(
             pipeline_id="p1", name="t", invoked_by="Fernando", mode="supervised",
@@ -115,14 +116,10 @@ class ExecutorMotorPayloadTest(unittest.IsolatedAsyncioTestCase):
         # tambien el GET (y bajando el intervalo de poll a 0) el test corre
         # rapido, deterministico, sin pegarle a un servicio real, y sin
         # necesitar ningun try/except.
-        with patch("httpx.AsyncClient.post", fake_post), \
-             patch("httpx.AsyncClient.get", fake_get), \
-             patch("jacobs.executor.MOTOR_POLL_INTERVAL", 0):
-            result = await executor._invoke_motor(step, pipeline, timeout=30)
-
-        self.assertEqual(captured["json"].get("user_id"), "1")
-        self.assertEqual(captured["json"].get("tenant_id"), "test-tenant")
-        self.assertTrue(result.get("success"))
+        with patch.object(executor, "obtener_cliente_http", side_effect=AssertionError("no HTTP")) as client, \
+             self.assertRaises(GovernedExecutionRequiredError):
+            await executor._invoke_motor(step, pipeline, timeout=30)
+        client.assert_not_called()
 
 
 if __name__ == "__main__":

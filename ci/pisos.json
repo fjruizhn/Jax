@@ -62,8 +62,8 @@
       "mensaje": "PISO ROTO: se esperaban 295 tests CORRIDOS (no skipeados)."
     },
     "memory-vector-zero-io/out": {
-      "patron": "^206 passed",
-      "mensaje": "PISO ROTO: se esperaban 206 tests CORRIDOS (no skipeados)."
+      "patron": "^223 passed",
+      "mensaje": "PISO ROTO: se esperaban 223 tests CORRIDOS (no skipeados)."
     },
     "hyde-containment/hyde": {
       "patron": "^21 passed",
@@ -78,8 +78,8 @@
       "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS."
     },
     "mirror-sync/ms": {
-      "patron": "^14 passed",
-      "mensaje": "PISO ROTO: se esperaban 14 tests CORRIDOS."
+      "patron": "^37 passed",
+      "mensaje": "PISO ROTO: se esperaban 37 tests CORRIDOS."
     },
     "mirror-sync/cu": {
       "patron": "^22 passed",
@@ -106,8 +106,8 @@
       "mensaje": "PISO ROTO: se esperaban 214 tests CORRIDOS de F2-E-SR3."
     },
     "governance/f2e-sr3-source": {
-      "patron": "^164 passed",
-      "mensaje": "PISO ROTO: se esperaban 164 tests CORRIDOS de F2-E-SR3 source/auth/routing."
+      "patron": "^166 passed",
+      "mensaje": "PISO ROTO: se esperaban 166 tests CORRIDOS de F2-E-SR3 source/auth/routing."
     },
     "governance/gov": {
       "patron": "^264 passed",
@@ -122,8 +122,24 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 15 tests CORRIDOS de F2-E structured projection."
     },
     "tests-puros/out": {
-      "patron": "^3477 passed, 45 skipped",
-      "mensaje": "PISO ROTO: se esperaban 3477 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."
+      "patron": "^3888 passed, 45 skipped",
+      "mensaje": "PISO ROTO: se esperaban 3888 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Re-medido el 2026-10-06 (ronda 15 de JAX#357) sobre la MEZCLA de la rama con origin/master (36dafaa2) por recoleccion con la lista exacta de 195 archivos del paso 'Piso exacto', sin JAX_DB_HOST: 3934 recolectadas = 3888 passed + 45 skipped + 1 xfailed (3841 de la rama + 35 de #362 + 12 de la ronda 15), a confirmar en el runner; 435d1ede recolecta 3814 con la misma lista."
+    },
+    "tests-puros/arranque_instalado": {
+      "patron": "^46 passed, 9 skipped",
+      "mensaje": "PISO ROTO: se esperaban 46 tests CORRIDOS y exactamente 9 skipped (6 que exigen el host de produccion /srv/jax-prod/jax y 3 espejos que exigen el checkout del repo dueno) de los guiones de arranque de systemd."
+    },
+    "authority-ledger-codec/codec": {
+      "patron": "^19 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 19 tests CORRIDOS del codec de persistencia de Block 4. Medido el 2026-10-07 en hall9000."
+    },
+    "authority-ledger-mariadb/integration": {
+      "patron": "^4 passed in ",
+      "mensaje": "PISO ROTO: se esperaba la integración MariaDB aislada de Block 4 (4 tests CORRIDOS). Medido el 2026-10-07 en hall9000 con MariaDB 12.3.3 --network none."
+    },
+    "authority-rule-events/ratifications": {
+      "patron": "^12 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 12 pruebas de payload, codec y replay de ratificaciones Faro individuales. Medido el 2026-10-07 en hall9000."
     },
     "tests-puros/ficha_tests": {
       "patron": "^16 passed",
@@ -154,8 +170,8 @@
       "mensaje": "PISO ROTO: se esperaban 42 tests CORRIDOS de la compuerta."
     },
     "tests-puros/ingesta_tests": {
-      "patron": "^51 passed",
-      "mensaje": "PISO ROTO: se esperaban 51 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."
+      "patron": "^52 passed",
+      "mensaje": "PISO ROTO: se esperaban 52 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."
     },
     "tests-puros/medir_utilidad_tests": {
       "patron": "^11 passed",
@@ -174,8 +190,8 @@
       "mensaje": "PISO ROTO: se esperaban 38 tests CORRIDOS (no skipeados) del freno de dependencias."
     },
     "jacobs-gobernanza-db/out": {
-      "patron": "^170 passed",
-      "mensaje": "PISO ROTO: se esperaban 170 tests CORRIDOS."
+      "patron": "^219 passed",
+      "mensaje": "PISO ROTO: se esperaban 219 tests CORRIDOS."
     },
     "permisos-proyectos/permisos_proyectos": {
       "patron": "^306 passed, 1 skipped",
@@ -187,6 +203,6 @@
     }
   },
   "minimos": {
-    "memory-b9-regression/casos": 183
+    "memory-b9-regression/casos": 194
   }
 }
