@@ -1,20 +1,32 @@
-# Traspaso Faro F1.1 · #371 (paso 4) · ronda 3
+# Traspaso — Faro F1.1 avisos de decisión · PR #376
 
-## Estado (2026-10-07)
+## Objetivo
 
-- Rama `feat/faro-f1.1-evaluador`, worktree `/home/fruiz/wt/jax-371-r3`. Base: #370 `feat/faro-f1.1-schema-snapshot` @ 28f1eac7 (antes 05183cb7) (fusionada con merge commit; conflictos de TRASPASO.md, ci/pisos.json y docs/ci/pisos.md resueltos conservando todos los pisos).
-- Hecho en la ronda 3 (cierra el veredicto de ronda 2): catálogo por tipo exacto `CatalogoTopes`; `RuleLimits` = envoltorio de `LimitesObligatorios`/`Tope` de #370, solo vía `limites_de(regla, catalogo)`; `RuleEvaluation` exige el mismo catálogo y el `request_hash` lleva el OID; `type(x) is str` en unidades/moneda; enteros de `arguments` con rango; `store.record` exige `RuleDecision`; sin campo huérfano ni import duplicado; `pymysql==1.2.0` con hashes (`requirements-faro-mariadb-ci.txt`); historia corregida.
-- Pisos medidos en hall9000 (Python 3.14.4): modelos 151, identity 659 (re-medido tras fusionar #370 final 28f1eac7), codec 19, ratificaciones 12, MariaDB 4. `tests/policy` completo con MariaDB efímera: 857 passed, 15 skipped.
-- Mutantes: 36 mutaciones de `models.py`/`store.py` (28 de r3 + 8 de la corrección de la auditoría), todas muertas (tabla en `~/encargos-codex/entrega-faro-f11-371-r3.md`).
+Entregar los avisos del Rule Authority después de la decisión durable, sin hacerlos
+parte de la autoridad. El aviso inmediato es fail-soft; el resumen diario conserva
+entrega al menos una vez y no descarta avisos ante fallos.
 
-## Pendiente
+## Estado verificado · 2026-10-07
 
-- Auditoría de escalón 3 sobre el SHA final (otra invocación). Nada se declara aprobado aquí.
-- Si #370 cambia de SHA, repetir la fusión y re-medir identity (el piso depende de la lista del paso).
-- No hay evaluador en #371 (solo modelos y store): vigencia, STOP, snapshot y grants son pasos posteriores.
+- PR #376 (`feat/faro-f1.1-avisos-r2`) está apilado sobre el evaluador de #371.
+- Su padre avanzó de `b967dff` a `d4ffe62` (r3). La sincronización solo conflictuó
+  en `ci/pisos.json` y `docs/ci/pisos.md`.
+- Se conservó el piso `faro-fase0/faro = 768`: el comando exacto del job pasó en
+  el worktree con Python 3.14.4, **768 passed, 0 skipped**. La nota compara con el
+  nuevo baseline `727` de #371 r3, por eso registra +41.
+- El merge con #371 r3 incorpora también la corrección de readiness de MariaDB y
+  los cambios de CI del padre.
+- La punta publicada de #376 aún debe obtener CI nuevo después de este merge.
+- PR #382 se mantiene como PR documental aparte; su rama se sincronizó con master y
+  su base se cambió a master para evitar comparar el piso contra una rama vieja.
+- PR #381 es independiente y sigue rechazado por auditoría; no reutilizar su SHA ni
+  confundirlo con aprobación del ledger.
 
-## Siguiente comando
+## Siguiente paso
 
-```sh
-JAX_AUTHORITY_LEDGER_DOCKER_CMD='sudo -n docker' PYTHONPATH=. python3 -B -m pytest -q tests/policy -p no:cacheprovider
-```
+1. Terminar la resolución de los dos archivos de pisos y revisar el diff.
+2. Crear el merge commit con `Co-Authored-By: Codex <noreply@openai.com>` y publicar
+   la rama de #376.
+3. Confirmar que #376 queda mergeable y que los checks del SHA nuevo pasan, incluido
+   `faro-fase0`, sin bajar pisos ni saltar pruebas.
+4. Mantener ambos PR abiertos; esta ronda no integra a master.

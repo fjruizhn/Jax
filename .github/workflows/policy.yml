@@ -509,7 +509,9 @@ jobs:
   # Re-medido ronda 7 (solo el snapshot emite; catalogo de pin de prueba): 726 —
   # recursos de clase prohibida con subid ajeno (AUD2 x3) y catalogo de bytes
   # sueltos niegan (+4).
-  # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 109 +
+  # Re-medido jax#371 (r3): 727 — test_faro_requirements.py suma la prueba del pymysql fijado
+  # del job Python 3.14 (+1; requirements 8). Visto en el run 37615855610: 727 passed.
+  # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 8 + aviso 109 + topes 110 +
   # control 170 + lanzador 77 + acl 43 + memoria 15; desde aviso, los pasos 0.3b y 0.3c y su auditoria). Las pruebas con bwrap y uids
   # reales estan en el job `faro-jaula`; las de la base real, en `faro-bitacora-db`.
   faro-fase0:
