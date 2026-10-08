@@ -199,3 +199,16 @@ no concede autoridad ni prueba el estado operativo actual.
   heredados sin bajar, 51 pisos totales en el head.
 - Este cambio aún necesita auditoría Tier 3 exacta, CI completa verde y el protocolo
   de integración antes de integrar #370.
+
+## Matcher del piso sin prefijos permisivos · 2026-10-08
+
+- Auditoría Tier 3 de `347b1e9adcff9f72ea397cb11c082813817c1d2a` rechazó el matcher
+  `^657 passed`: aceptaba resúmenes con `xfailed` o `xpassed`.
+- Se restauró el matcher estricto `^657 passed in ` y se silenció únicamente
+  `PytestCollectionWarning` para `TestEvidenceIngester`, una clase auxiliar que pytest
+  anunciaba como no coleccionable. La lista exacta del workflow ahora da
+  `657 passed in 4.73s`; el piso y la verificación independiente de cero skipped pasan.
+- Casos sintéticos del piso: acepta `657 passed in ...`; rechaza `657 passed` con
+  `xfailed`, `xpassed` o `skipped`. El comparador contra `origin/master` no baja pisos.
+- El SHA previo no se debe integrar: esta corrección exige nuevo commit, auditoría Tier 3
+  y CI completa exacta antes del merge.

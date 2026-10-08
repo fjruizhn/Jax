@@ -2660,7 +2660,8 @@ jobs:
         # Ronda 10: 637 (+23: tope.period solo es un subid de la clase frecuencia del
         # catalogo del pin; 20 negativas, 2 positivas del catalogo real, 2 de contrato).
         # Ronda 12: 657 (+14 pruebas incorporadas por schema/snapshot Faro F1.1;
-        # CI midió 657 passed en el SHA 49b0e1bb). El piso admite advertencias de pytest;
+        # CI midió 657 en el SHA 49b0e1bb. Se suprime solo la advertencia de colección
+        # conocida de TestEvidenceIngester para conservar el resumen estricto del piso;
         # el resumen completo, incluido 0 skipped,
         # es el piso: un salto no puede verse verde por prefijo.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
@@ -2739,7 +2740,8 @@ jobs:
             tests/policy/test_execution_storage.py \
             tests/policy/test_execution_motor_adapter.py \
             tests/policy/test_execution_boundaries.py \
-            --confcutdir=tests/policy -p no:cacheprovider 2>&1 | tee /tmp/identity-foundation
+            --confcutdir=tests/policy -p no:cacheprovider \
+            -W ignore::pytest.PytestCollectionWarning 2>&1 | tee /tmp/identity-foundation
           python3 .github/ci/piso.py verificar identity-foundation-shadow/policy /tmp/identity-foundation || exit $?
           if grep -qE "[0-9]+ skipped" /tmp/identity-foundation; then
             echo "HAY TESTS SALTADOS: Identity Foundation Shadow se ejercita completa o no cuenta."; exit 1
