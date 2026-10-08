@@ -185,3 +185,17 @@ no concede autoridad ni prueba el estado operativo actual.
   tipado. Control local: **4 passed**, diff-check limpio.
 - Falta cometer, archivar/retirar handoff, publicar el nuevo SHA, auditarlo y
   esperar CI exacta.
+
+## Desfase de piso Identity Foundation Shadow · 2026-10-08
+
+- CI del SHA `49b0e1bbf1fe1b735f9dfd660240b0a5c68b9c8f` ejecutó 657 pruebas,
+  pero `ci/pisos.json` todavía exigía 643. El conjunto incluye las nuevas pruebas de
+  schema/snapshot Faro F1.1.
+- Se actualizó el piso a 657 y el comentario de `policy.yml` a Ronda 12 (+14).
+  La ejecución exacta local, con Python 3.14.4 y la misma lista de pruebas del
+  workflow, dio `657 passed, 1 warning`; el matcher acepta el conteo con o sin
+  advertencias. El workflow ya verifica cero skipped por separado.
+- `python3 .github/ci/comparar_pisos.py origin/master` pasó: 50 pisos y 1 mínimo
+  heredados sin bajar, 51 pisos totales en el head.
+- Este cambio aún necesita auditoría Tier 3 exacta, CI completa verde y el protocolo
+  de integración antes de integrar #370.
