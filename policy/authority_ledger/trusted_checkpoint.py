@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 
 from .canonical import canonical_bytes
 from .errors import (CheckpointPublicationOutcomeUnknownError,
@@ -27,6 +28,9 @@ class TrustedCheckpointStore:
     def __init__(self, path: Path = DEFAULT_TRUSTED_CHECKPOINT_PATH, *, bootstrap_receipt_path: Path = DEFAULT_BOOTSTRAP_RECEIPT_PATH) -> None:
         self.path = Path(path)
         self.bootstrap_receipt_path = Path(bootstrap_receipt_path)
+        self._thread_lock = threading.RLock()
+        self._lock_depth = 0
+        self._lock_handle = None
 
     def bootstrap(self, checkpoint: AuthorityLedgerCheckpoint, receipt: dict) -> None:
         """Create sequence-zero anchor and its separate one-time receipt exclusively."""
@@ -72,14 +76,39 @@ class TrustedCheckpointStore:
 
     @contextmanager
     def locked(self):
-        """Hold the checkpoint writer lock across a complete ledger transaction."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.lock_path.open("a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        """Hold the checkpoint lock across a transaction; nesting is thread-reentrant."""
+        with self._thread_lock:
+            if self._lock_depth == 0:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self._lock_handle = self.lock_path.open("a+b")
+                fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX)
+            self._lock_depth += 1
             try:
                 yield self
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                self._lock_depth -= 1
+                if self._lock_depth == 0:
+                    try:
+                        fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_UN)
+                    finally:
+                        self._lock_handle.close()
+                        self._lock_handle = None
+
+    def sync_for_verification(self) -> None:
+        """Re-establish file and directory durability before issuing authority."""
+        if not self.path.is_file():
+            raise LedgerIntegrityError("checkpoint externo ausente o ilegible")
+        if not self.bootstrap_receipt_path.is_file():
+            raise LedgerIntegrityError("recibo bootstrap requerido y ausente/ilegible")
+        try:
+            self._fsync_file(self.path)
+            self._fsync_directory(self.path.parent)
+            self._fsync_file(self.bootstrap_receipt_path)
+            self._fsync_directory(self.bootstrap_receipt_path.parent)
+        except OSError as exc:
+            raise LedgerIntegrityError(
+                "no se pudo confirmar durabilidad del checkpoint/recibo; autoridad no verificable"
+            ) from exc
 
     def append(self, checkpoint: AuthorityLedgerCheckpoint) -> None:
         with self.locked():
@@ -187,6 +216,14 @@ class TrustedCheckpointStore:
 
     def _fsync_parent_directory(self) -> None:
         self._fsync_directory(self.path.parent)
+
+    @staticmethod
+    def _fsync_file(path: Path) -> None:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:

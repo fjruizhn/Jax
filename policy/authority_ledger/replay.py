@@ -98,7 +98,20 @@ _REPLAY_SEAL = object()
 def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[AuthorityEvent], trusted_root: TrustedAuthorityRoot, checkpoint_store: TrustedCheckpointStore) -> ReconstructedAuthorityState:
     """Verify current authority against its mandatory external checkpoint."""
     checkpoint_store = require_trusted_checkpoint_store(checkpoint_store)
-    return _replay_authority_ledger(genesis, events, trusted_root, checkpoint_store, historical=False)
+    # Authenticate the requested identity first so an invalid root cannot be
+    # masked by an unavailable local checkpoint artifact.
+    if trusted_root.ledger_identity != genesis.ledger_identity or trusted_root.genesis_hash != genesis_hash(genesis):
+        raise TrustedRootMismatchError("genesis no coincide con trusted root")
+    public = decode_public_key(genesis.constitutional_public_key)
+    if (trusted_root.constitutional_key_id != genesis.constitutional_key_id
+            or trusted_root.constitutional_public_key_fingerprint != public_key_fingerprint(public_key_bytes(public))):
+        raise TrustedRootMismatchError("clave constitucional no coincide con trusted root")
+    # Readers share the writer lock so a visible-but-not-durable os.replace,
+    # bootstrap receipt, or append cannot be promoted to current authority.
+    # The lock is reentrant for the writer's own pre/post-append verification.
+    with checkpoint_store.locked():
+        checkpoint_store.sync_for_verification()
+        return _replay_authority_ledger(genesis, events, trusted_root, checkpoint_store, historical=False)
 
 
 def replay_authority_history(genesis: AuthorityLedgerGenesis, events: Iterable[AuthorityEvent], trusted_root: TrustedAuthorityRoot) -> HistoricalAuthorityState:

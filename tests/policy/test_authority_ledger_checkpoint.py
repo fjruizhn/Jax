@@ -72,12 +72,18 @@ class _FsyncDirectoryFailsOnce(TrustedCheckpointStore):
     def __init__(self, path):
         super().__init__(path)
         self.fail_next_directory_fsync = False
+        self.fail_verification_fsync = False
 
     def _fsync_parent_directory(self):
         if self.fail_next_directory_fsync:
             self.fail_next_directory_fsync = False
             raise OSError("fsync directory failed")
         return super()._fsync_parent_directory()
+
+    def _fsync_directory(self, path):
+        if self.fail_verification_fsync:
+            raise OSError("verification fsync directory failed")
+        return TrustedCheckpointStore._fsync_directory(path)
 
 
 class _RereadFailsOnce(TrustedCheckpointStore):
@@ -418,6 +424,9 @@ def test_post_replace_checkpoint_failure_has_unknown_outcome_and_reanchor_is_ide
         append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"), event_id="018cc251-f400-7000-8000-000000000002", checkpoint_store=anchor)
     assert "sin checkpoint externo" not in str(excinfo.value)
     assert anchor.latest().sequence == 2
+    # A reader cannot merely trust the visible replace: it first retries and
+    # proves checkpoint, receipt, and parent-directory durability under lock.
+    assert verify_authority_ledger(store.get_genesis(), store.events(), root, anchor).checkpoint.sequence == 2
     assert reanchor_authority_checkpoint(store, root, anchor).sequence == 2
     assert verify_authority_ledger(store.get_genesis(), store.events(), root, anchor).checkpoint.sequence == 2
 
@@ -583,3 +592,19 @@ def test_bootstrap_post_publish_failure_has_unknown_outcome_and_preserves_artifa
     assert anchor.path.exists()
     assert anchor.bootstrap_receipt_path.exists()
     assert anchor.latest().sequence == 0
+    assert verify_authority_ledger(store.get_genesis(), (), root, anchor).checkpoint.sequence == 0
+
+
+def test_current_replay_denies_when_checkpoint_durability_cannot_be_reestablished(tmp_path):
+    store, root, key = setup_ledger()
+    anchor = _FsyncDirectoryFailsOnce(tmp_path / "trusted.log")
+    append_authority_event(
+        store, root, key,
+        AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
+        checkpoint_store=anchor,
+    )
+    anchor.fail_verification_fsync = True
+    with pytest.raises(LedgerIntegrityError, match="durabilidad del checkpoint/recibo"):
+        verify_authority_ledger(store.get_genesis(), store.events(), root, anchor)
+    anchor.fail_verification_fsync = False
+    assert verify_authority_ledger(store.get_genesis(), store.events(), root, anchor).checkpoint.sequence == 1

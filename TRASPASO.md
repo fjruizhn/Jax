@@ -161,3 +161,24 @@ preflight correspondan al mismo SHA.
   `python3 -m compileall -q policy/authority_ledger
   tests/policy/test_authority_ledger_checkpoint.py` y `git diff --check` limpios.
 - Falta publicar el SHA nuevo, esperar CI y pedir auditoría escalón 3 de ese SHA.
+
+## Cierre del BLOCK de UNKNOWN→VERIFIED · 2026-10-08
+
+- Auditoría escalón 3 de `932f724e`: **RECHAZADO**, un BLOCK reproducido.
+  Después de un `os.replace` cuyo fsync fallaba, un replay podía volver a sellar
+  el head visible como autoridad actual sin completar durabilidad; lo mismo
+  aplicaba al recibo de bootstrap secuencia cero.
+- Corrección: el replay actual toma el mismo lock reentrante de publicación y,
+  antes de reconstruir autoridad, fsync y vuelve a leer bajo ese lock el archivo
+  de checkpoints, su directorio, el recibo de bootstrap y su directorio. Si no
+  puede demostrar durabilidad, niega. Una lectura solo sella tras completar
+  esa comprobación; writers que ya poseen el lock pueden verificar sin liberar
+  la sección crítica.
+- Regresiones: append con resultado UNKNOWN seguido de replay; bootstrap con
+  resultado UNKNOWN seguido de replay; fsync persistente impide verificar y la
+  recuperación de fsync permite una verificación posterior.
+- Verificación local: `tests/policy/test_authority_ledger*.py` y
+  `tests/policy/test_decision_record.py` → **103 passed**; `compileall` y
+  `git diff --check` limpios.
+- Pendiente: commit/push de este cierre, CI completo y auditoría escalón 3 del
+  SHA nuevo antes de integrar #381.
