@@ -112,8 +112,10 @@ class _BootstrapReceiptDirectoryFsyncFails(TrustedCheckpointStore):
         self._directory_fsyncs = 0
 
     def _fsync_directory(self, path):
-        self._directory_fsyncs += 1
-        if self._directory_fsyncs == 2:
+        if (self.bootstrap_receipt_path.exists()
+                and path.resolve() == self.bootstrap_receipt_path.parent.resolve()
+                and self._directory_fsyncs == 0):
+            self._directory_fsyncs += 1
             raise OSError("receipt directory fsync failed")
         return super()._fsync_directory(path)
 
@@ -254,7 +256,8 @@ def test_checkpoint_store_rechaza_rollback_y_head_conflictivo(tmp_path):
     from policy.authority_ledger.models import AuthorityLedgerCheckpoint
     checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", store.get_genesis().ledger_identity, 1, event.event_id, event.event_hash)
     from policy.authority_ledger.canonical import canonical_bytes
-    anchor.path.write_bytes(canonical_bytes(checkpoint.projection()) + b"\n")
+    genesis_checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", store.get_genesis().ledger_identity, 0, None, None)
+    anchor.path.write_bytes(canonical_bytes(genesis_checkpoint.projection()) + b"\n" + canonical_bytes(checkpoint.projection()) + b"\n")
     with pytest.raises(LedgerRollbackError):
         anchor.append(AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", store.get_genesis().ledger_identity, 1, "different", event.event_hash))
     with pytest.raises(LedgerRollbackError):
@@ -341,7 +344,8 @@ def test_direct_checkpoint_append_waits_for_the_same_writer_lock(tmp_path):
     first = _checkpoint("ledger", 1, "event-1", "sha256:" + "1" * 64)
     second = _checkpoint("ledger", 2, "event-2", "sha256:" + "2" * 64)
     from policy.authority_ledger.canonical import canonical_bytes
-    anchor.path.write_bytes(canonical_bytes(first.projection()) + b"\n")
+    genesis = _checkpoint("ledger", 0, None, None)
+    anchor.path.write_bytes(canonical_bytes(genesis.projection()) + b"\n" + canonical_bytes(first.projection()) + b"\n")
     done = threading.Event()
 
     def append_later():
@@ -452,7 +456,7 @@ def test_current_replay_requires_checkpoint_while_history_has_distinct_type():
         build_effective_authority_context(historical, context(), instant())
 
 
-def test_bootstrap_receipt_is_required_for_genesis_and_legacy_sequence_one_anchors(tmp_path):
+def test_bootstrap_receipt_is_required_and_legacy_sequence_one_is_not_adopted_implicitly(tmp_path):
     from policy.authority_ledger.models import AuthorityLedgerCheckpoint
     from policy.authority_ledger.errors import LedgerIntegrityError
     store, root, key = setup_ledger()
@@ -475,13 +479,8 @@ def test_bootstrap_receipt_is_required_for_genesis_and_legacy_sequence_one_ancho
     with pytest.raises(LedgerIntegrityError, match="recibo bootstrap"):
         verify_authority_ledger(store.get_genesis(), store.events(), root, legacy)
     legacy.bootstrap_receipt_path.write_bytes(original_receipt)
-    assert verify_authority_ledger(store.get_genesis(), store.events(), root, legacy).checkpoint.sequence == 1
-    append_authority_event(
-        store, root, key,
-        AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
-        checkpoint_store=legacy,
-    )
-    assert verify_authority_ledger(store.get_genesis(), store.events(), root, legacy).checkpoint.sequence == 2
+    with pytest.raises(LedgerIntegrityError, match="genesis cero"):
+        verify_authority_ledger(store.get_genesis(), store.events(), root, legacy)
 
 
 def test_checkpoint_append_cannot_recreate_missing_external_log_from_database_head(tmp_path):
@@ -608,3 +607,29 @@ def test_current_replay_denies_when_checkpoint_durability_cannot_be_reestablishe
         verify_authority_ledger(store.get_genesis(), store.events(), root, anchor)
     anchor.fail_verification_fsync = False
     assert verify_authority_ledger(store.get_genesis(), store.events(), root, anchor).checkpoint.sequence == 1
+
+
+def test_checkpoint_and_receipt_directory_chains_are_fsynced_when_created(tmp_path):
+    class _RecordingCheckpointStore(TrustedCheckpointStore):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.fsynced_directories = []
+
+        def _fsync_directory(self, path):
+            self.fsynced_directories.append(path.resolve())
+            return TrustedCheckpointStore._fsync_directory(path)
+
+    anchor = _RecordingCheckpointStore(
+        tmp_path / "new-checkpoint-parent" / "nested" / "checkpoints.log",
+        bootstrap_receipt_path=tmp_path / "new-receipt-parent" / "nested" / "receipt.json",
+    )
+    anchor.bootstrap(_checkpoint("ledger", 0, None, None), {"bootstrap": "receipt"})
+
+    seen = set(anchor.fsynced_directories)
+    for leaf in (anchor.path.parent, anchor.bootstrap_receipt_path.parent):
+        parent = leaf.resolve()
+        while True:
+            assert parent in seen
+            if parent.parent == parent:
+                break
+            parent = parent.parent

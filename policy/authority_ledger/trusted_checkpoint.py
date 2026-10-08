@@ -36,8 +36,8 @@ class TrustedCheckpointStore:
         """Create sequence-zero anchor and its separate one-time receipt exclusively."""
         if checkpoint.sequence != 0 or checkpoint.head_event_id is not None or checkpoint.head_event_hash is not None:
             raise LedgerIntegrityError("bootstrap exige checkpoint genesis de secuencia cero")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.bootstrap_receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_durable_directory(self.path.parent)
+        self._ensure_durable_directory(self.bootstrap_receipt_path.parent)
         if self.path.exists() or self.bootstrap_receipt_path.exists():
             raise LedgerIntegrityError("bootstrap rechazado: checkpoint o recibo ya existe")
         # Create checkpoint without replacement, then durable receipt. A crash
@@ -50,7 +50,7 @@ class TrustedCheckpointStore:
                 handle.write(canonical_bytes(checkpoint.projection()) + b"\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            self._fsync_directory(self.path.parent)
+            self._fsync_directory_chain(self.path.parent)
             if self.latest().projection() != checkpoint.projection():
                 raise LedgerIntegrityError("checkpoint genesis publicado no coincide")
             receipt_fd = os.open(self.bootstrap_receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -58,7 +58,7 @@ class TrustedCheckpointStore:
                 handle.write(canonical_bytes(receipt) + b"\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            self._fsync_directory(self.bootstrap_receipt_path.parent)
+            self._fsync_directory_chain(self.bootstrap_receipt_path.parent)
         except Exception as exc:
             # Never delete/overwrite a possibly durable checkpoint or receipt.
             # Once the seq-0 path was created, even a failure while publishing
@@ -79,7 +79,7 @@ class TrustedCheckpointStore:
         """Hold the checkpoint lock across a transaction; nesting is thread-reentrant."""
         with self._thread_lock:
             if self._lock_depth == 0:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self._ensure_durable_directory(self.path.parent)
                 self._lock_handle = self.lock_path.open("a+b")
                 fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX)
             self._lock_depth += 1
@@ -102,9 +102,9 @@ class TrustedCheckpointStore:
             raise LedgerIntegrityError("recibo bootstrap requerido y ausente/ilegible")
         try:
             self._fsync_file(self.path)
-            self._fsync_directory(self.path.parent)
+            self._fsync_directory_chain(self.path.parent)
             self._fsync_file(self.bootstrap_receipt_path)
-            self._fsync_directory(self.bootstrap_receipt_path.parent)
+            self._fsync_directory_chain(self.bootstrap_receipt_path.parent)
         except OSError as exc:
             raise LedgerIntegrityError(
                 "no se pudo confirmar durabilidad del checkpoint/recibo; autoridad no verificable"
@@ -188,9 +188,9 @@ class TrustedCheckpointStore:
                 raise LedgerIntegrityError("checkpoint externo inválido") from exc
             if canonical_bytes(checkpoint.projection()) != row:
                 raise LedgerIntegrityError("checkpoint externo no es canónico")
-            if not checkpoints and checkpoint.sequence not in (0, 1):
+            if not checkpoints and checkpoint.sequence != 0:
                 raise LedgerIntegrityError(
-                    "primera fila del checkpoint debe ser genesis cero o legacy secuencia uno"
+                    "primera fila del checkpoint debe ser genesis cero; logs legacy requieren adopción explícita"
                 )
             self._validate_checkpoint(checkpoint, checkpoints[-1] if checkpoints else None)
             checkpoints.append(checkpoint)
@@ -215,7 +215,43 @@ class TrustedCheckpointStore:
                 raise LedgerIntegrityError("checkpoint externo no aumenta estrictamente")
 
     def _fsync_parent_directory(self) -> None:
-        self._fsync_directory(self.path.parent)
+        self._fsync_directory_chain(self.path.parent)
+
+    def _ensure_durable_directory(self, path: Path) -> None:
+        """Create missing directory components and persist every parent entry."""
+        missing = []
+        current = path
+        while not current.exists():
+            missing.append(current)
+            parent = current.parent
+            if parent == current:
+                raise LedgerIntegrityError("no existe ancestro para crear directorio confiable")
+            current = parent
+        if not current.is_dir():
+            raise LedgerIntegrityError("ruta de directorio confiable no es un directorio")
+        for directory in reversed(missing):
+            try:
+                directory.mkdir()
+            except FileExistsError:
+                if not directory.is_dir():
+                    raise LedgerIntegrityError("componente de directorio confiable fue reemplazado")
+            # Persist the new child entry in its parent. Then continue upward
+            # so a newly created ancestor itself is durable as well.
+            self._fsync_directory(directory.parent)
+        if not path.is_dir():
+            raise LedgerIntegrityError("directorio confiable ausente o reemplazado")
+
+    def _fsync_directory_chain(self, path: Path) -> None:
+        """Persist a directory and every ancestor entry up to the filesystem root."""
+        current = path
+        while True:
+            if not current.is_dir():
+                raise LedgerIntegrityError("directorio confiable ausente durante fsync")
+            self._fsync_directory(current)
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
 
     @staticmethod
     def _fsync_file(path: Path) -> None:

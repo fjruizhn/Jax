@@ -26,6 +26,17 @@ append-only checkpoints.
    bootstrap receipt and checkpoint log from the same recovery point. Do not
    combine either file with a different backup generation.
 
+## Deployment gate
+
+Before deploying a release that requires the checkpoint-zero receipt, inspect
+the live authority ledger and both trusted files through the designated Block 4
+operational interface. Record the observed checkpoint format and verify the
+ledger against the matching trusted root. If the operational interface is
+unavailable, the state is unknown, or the checkpoint log begins at sequence 1,
+do not deploy that release to the affected authority service. Preserve the
+artifacts and escalate for a separately approved, signed legacy-adoption
+ceremony. This code change does not perform or authorize that ceremony.
+
 ## Authority impact
 
 Critical authority material.
@@ -66,9 +77,12 @@ Escalate to the authority owner when no matched, verified backup set is
 available. A lost receipt or log is an authority-recovery incident, not an
 initialization request.
 
-Historical logs whose first record is sequence 1 remain valid when paired with
-their verified separate bootstrap receipt. Do not add an artificial sequence-0
-row to such a log during recovery.
+Current-authority verification requires the checkpoint log to begin at
+sequence zero. A legacy log beginning at sequence 1 is not adopted by pairing
+it with a deterministic genesis receipt. Until a signed adoption procedure is
+implemented and completed, preserve its artifacts and escalate to the
+authority owner; do not use it for current-authority decisions or insert a
+synthetic sequence-zero row.
 
 ## Prohibited actions
 

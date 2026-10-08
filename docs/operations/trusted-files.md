@@ -28,9 +28,11 @@ append or authority decision can proceed.
 
 Current-authority verification coordinates with writers through the same
 checkpoint sidecar lock. While holding it, the verifier confirms durability
-of the checkpoint log and bootstrap receipt (including both parent directories)
-before reading and comparing their exact snapshots with the ledger. If that
-durability check fails, it must not issue a verified current-authority state.
+of the checkpoint log and bootstrap receipt, then fsyncs each containing
+directory and its ancestors through the filesystem root before reading and
+comparing their exact snapshots with the ledger. Directory creation also
+persists each new directory entry in its parent. If any durability check fails,
+the verifier must not issue a verified current-authority state.
 
 Backups must preserve the receipt and checkpoint log as one matched recovery
 set. The recovery procedure is in
@@ -38,6 +40,8 @@ set. The recovery procedure is in
 empty replacement log, or a new zero anchor merely because either trusted file
 was lost or is unavailable.
 
-Historical checkpoint logs whose first *log* record is sequence 1 remain
-valid. They do not need a synthetic sequence-0 row in the log: checkpoint zero
-is represented by the separate bootstrap receipt.
+Current-authority verification requires the checkpoint log itself to begin at
+sequence zero. A legacy log beginning at sequence 1 is not adopted by pairing
+it with a deterministic genesis receipt. Until a signed adoption procedure is
+implemented and completed, such a deployment must remain unavailable for
+current-authority decisions; preserve and escalate its existing artifacts.

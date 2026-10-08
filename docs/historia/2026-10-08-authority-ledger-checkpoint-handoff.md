@@ -184,3 +184,30 @@ preflight correspondan al mismo SHA.
   `git diff --check` limpios.
 - Pendiente: commit/push de este cierre, CI completo y auditoría escalón 3 del
   SHA nuevo antes de integrar #381.
+- Auditoría de `7339bba5` detectó además dos pruebas de decision replay que
+  creaban un checkpoint aislado sin recibo. Se corrigieron para reutilizar el
+  checkpoint y recibo emparejados del ledger de prueba. Este ajuste cambia el
+  SHA; requiere CI y auditoría nuevas.
+- Auditoría adicional de `7339bba5` detectó que fsync solo del directorio hoja
+  no hace durable la entrada en sus ancestros si el árbol de directorios acaba
+  de crearse. Corrección local: creación componente por componente con fsync de
+  cada padre; bootstrap, append y replay sincronizan las cadenas de directorios
+  hasta la raíz del filesystem. Se añadió regresión de directorios anidados.
+  Verificación focal: checkpoint + decision replay → **32 passed**. Falta la
+  suite completa, nuevo SHA/CI y auditoría Tier 3 exacta.
+
+
+## Cierre del handoff · 2026-10-08
+
+- Se cerró el hallazgo Tier 3 del SHA `7339bba5`: directorios confiables creados
+  componente a componente y fsync de cada padre; replay fsync de archivo y
+  ancestros bajo lock; decision replay reutiliza checkpoint/receipt emparejados.
+- La adopción implícita de logs que comienzan en secuencia 1 fue eliminada. La
+  documentación exige inventario vivo antes de desplegar; si el Block 4 está
+  inaccesible o el formato es legacy, el despliegue queda bloqueado hasta una
+  ceremonia de adopción firmada separada. `jaxctl authority` no está instalado
+  en esta sesión, así que el estado operativo permanece UNAVAILABLE.
+- El código y pruebas locales se verificaron; publicar y auditar el SHA final,
+  esperar CI verde y seguir el procedimiento exacto de integración siguen
+  pendientes. Este archivo se archiva antes de la auditoría final según el
+  runbook de traspaso continuo.
