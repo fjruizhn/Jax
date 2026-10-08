@@ -295,15 +295,7 @@ def test_las_defensas_de_git_van_en_cada_invocacion(tmp_path: Path,
         assert entorno.get("GIT_NO_REPLACE_OBJECTS") == "1"
         assert not any(k.startswith("GIT_") and k not in
                        ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_NO_REPLACE_OBJECTS",
-                        "GIT_TERMINAL_PROMPT") for k in entorno)
-        assert "core.hooksPath=/dev/null" in argv
-        assert "core.fsmonitor=false" in argv
-        assert entorno.get("GIT_CONFIG_NOSYSTEM") == "1"
-        assert entorno.get("GIT_CONFIG_GLOBAL") == "/dev/null"
-        assert entorno.get("GIT_NO_REPLACE_OBJECTS") == "1"
-        assert not any(k.startswith("GIT_") and k not in
-                       ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_NO_REPLACE_OBJECTS",
-                        "GIT_TERMINAL_PROMPT") for k in entorno)
+                        "GIT_NO_LAZY_FETCH", "GIT_TERMINAL_PROMPT") for k in entorno)
 
 
 def test_entorno_git_envenenado_no_desvia_la_lectura(monkeypatch: pytest.MonkeyPatch,
@@ -521,4 +513,4 @@ def test_r7_vector_dorado_del_hash_con_dominio_v2(tmp_path: Path) -> None:
     snap = _cargar(repo, _git(repo, "rev-parse", "HEAD").strip(),
                    _git(repo, "rev-parse", "HEAD:policy").strip())
     assert snap.snapshot_hash == (
-        "sha256:7ebf77751860ca24ee39bf1465f40b6497803a4577b0fbfe3229f69b1e858800")
+        "sha256:65f864b35a376428d15489fc0ed629f163dfab23b61a7247500d64bbecd990b4")

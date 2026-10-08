@@ -212,6 +212,83 @@ def test_ataque_j_objeto_suelto_adulterado_niega(tmp_path: Path) -> None:
     assert hashlib.sha1(b"blob %d\0" % len(otro) + otro).hexdigest() != oid
 
 
+def _adulterar_objeto_suelto(repo: Path, oid: str) -> None:
+    """Cambia bytes bajo el nombre del OID sin cambiar la referencia que lo usa."""
+    objeto = repo / ".git" / "objects" / oid[:2] / oid[2:]
+    os.chmod(objeto, 0o644)
+    crudo = zlib.decompress(objeto.read_bytes())
+    objeto.write_bytes(zlib.compress(crudo + b"X"))
+
+
+@pytest.mark.parametrize("objetivo", ["commit", "root", "policy", "faro"])
+def test_ataque_j2_commit_y_cada_arbol_interpretado_se_autentican(tmp_path: Path,
+                                                                    objetivo: str) -> None:
+    """Un objeto suelto puede conservar nombre; nunca conserva su hash real."""
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
+    oids = {
+        "commit": commit,
+        "root": _git(repo, "rev-parse", "HEAD^{tree}"),
+        "policy": arbol,
+        "faro": _git(repo, "rev-parse", "HEAD:policy/faro"),
+    }
+    _adulterar_objeto_suelto(repo, oids[objetivo])
+    with pytest.raises(RuleSnapshotError) as excinfo:
+        _cargar(repo, commit, arbol)
+    assert "OID" in str(excinfo.value) or "corrupt loose object" in str(excinfo.value)
+
+
+def test_ataque_j3_limites_de_objetos_y_profundidad_niegan(tmp_path: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    import jax.faro.git_objetos as objetos
+    repo, commit, arbol = _repo(tmp_path, {
+        "policy/faro/ejemplo.yaml": REGLA,
+        "policy/faro/schemas/regla.json": b"{}",
+    })
+    monkeypatch.setattr(objetos, "MAX_SNAPSHOT_OBJECTS", 3)
+    with pytest.raises(RuleSnapshotError, match="limite de objetos"):
+        _cargar(repo, commit, arbol)
+    monkeypatch.setattr(objetos, "MAX_SNAPSHOT_OBJECTS", 1024)
+    monkeypatch.setattr(objetos, "MAX_SNAPSHOT_TREE_DEPTH", 2)
+    with pytest.raises(RuleSnapshotError, match="profundidad"):
+        _cargar(repo, commit, arbol)
+
+
+def test_ataque_j4_limite_agregado_niega_antes_de_cargar_reglas(tmp_path: Path,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    import jax.faro.git_objetos as objetos
+    repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
+    monkeypatch.setattr(objetos, "MAX_SNAPSHOT_BYTES", 1)
+    with pytest.raises(RuleSnapshotError, match="limite de objetos o bytes"):
+        _cargar(repo, commit, arbol)
+
+
+def test_ataque_j4b_blobs_cuentan_en_limites_antes_de_leer_contenido(tmp_path: Path) -> None:
+    from jax.faro.git_objetos import FuenteInvalida, leer_blobs
+    repo, _commit, _arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
+    oid = _git(repo, "rev-parse", "HEAD:policy/faro/ejemplo.yaml")
+    with pytest.raises(FuenteInvalida, match="limite de objetos"):
+        leer_blobs(repo, [oid], max_bytes=1024 * 1024, max_objects=0)
+    with pytest.raises(FuenteInvalida, match="limite agregado"):
+        leer_blobs(repo, [oid], max_bytes=1024 * 1024, max_total_bytes=1)
+
+
+def test_ataque_j5_repositorio_sha256_tambien_autentica_commit_y_arboles(tmp_path: Path) -> None:
+    repo = tmp_path / "sha256"
+    repo.mkdir()
+    inicio = subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main", "--object-format=sha256"],
+                            capture_output=True, check=False)
+    if inicio.returncode != 0:
+        pytest.skip("git no soporta repositorios SHA-256")
+    (repo / "policy" / "faro").mkdir(parents=True)
+    (repo / RUTA_CATALOGO).write_bytes(CATALOGO_BYTES_REPO)
+    (repo / "policy" / "faro" / "ejemplo.yaml").write_bytes(REGLA)
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x")
+    commit, arbol = _git(repo, "rev-parse", "HEAD"), _git(repo, "rev-parse", "HEAD:policy")
+    assert len(commit) == len(arbol) == 64
+    assert _cargar(repo, commit, arbol).reglas[0].blob_oid
+
+
 # ------------------------------------------------- ronda 3: ataques r2 del auditor
 
 RECURSOS_PROHIBIDOS_R2 = [
@@ -277,7 +354,7 @@ def test_r4_el_espejo_json_ata_cada_recurso_a_su_clase() -> None:
     oneOf fija la clase (const) y solo SUS recursos."""
     import json
     espejo = json.loads((RAIZ / "policy" / "faro" / "schemas" / "rule-v1.schema.json").read_text())
-    variantes = espejo["properties"]["tope"]["oneOf"]
+    variantes = espejo["properties"]["tope"]["oneOf"][1]["oneOf"]
     por_clase = {v["properties"]["resource_class"]["const"]:
                  v["properties"]["resource"]["enum"] for v in variantes}
     assert sorted(por_clase) == sorted(CATALOGO)

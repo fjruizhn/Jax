@@ -77,6 +77,31 @@ def test_el_consumo_sin_regla_se_anota_y_se_avisa_una_vez_por_tenant_recurso_y_p
     assert all(r["decision"] == "permitido" and "regla" in r["motivo"] for r in sin_regla)
 
 
+def test_resultado_y_bitacora_atan_el_consumo_al_catalogo_sellado_sin_permitir_suplantarlo():
+    """Si se omite ``catalogo_oid`` de base o se deja entrar desde ``contexto``,
+    un registro durable puede parecer atribuido a otro catálogo."""
+    t, registros = _topes()
+    resultado = corre(t.consumir(
+        tenant="t1", recurso="tokens_costo.tokens", cantidad=1, tope=None,
+        catalogo_oid="oid-forjado",
+    ))
+
+    assert resultado.catalogo_oid == CATALOGO.oid_pin
+    evento = next(r for r in registros if r["evento"] == "tope_sin_regla")
+    assert evento["catalogo_oid"] == CATALOGO.oid_pin
+    assert evento["catalogo_oid"] != "oid-forjado"
+
+
+def test_reconciliacion_durable_conserva_el_oid_del_catalogo_sellado():
+    """La reconciliación también es evidencia durable del contador y no puede
+    perder la procedencia que llevaba el resultado original."""
+    t, registros = _topes()
+    corre(t.reconciliar(tenant="t1", recurso="tokens_costo.tokens"))
+
+    evento = next(r for r in registros if r["evento"] == "tope_reconciliado")
+    assert evento["catalogo_oid"] == CATALOGO.oid_pin
+
+
 # --------------------------------------------------------------------------- #
 # con tope: falla cerrado al llegar                                           #
 # --------------------------------------------------------------------------- #

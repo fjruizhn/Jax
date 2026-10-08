@@ -508,7 +508,8 @@ jobs:
   # acepta el CatalogoTopes sellado del snapshot, nunca un Mapping cualquiera (+1).
   # Re-medido ronda 7 (solo el snapshot emite; catalogo de pin de prueba): 726 —
   # recursos de clase prohibida con subid ajeno (AUD2 x3) y catalogo de bytes
-  # sueltos niegan (+4).
+  # sueltos niegan (+4). Re-medido MAJOR-1: 728 — resultado y reconciliacion
+  # durables conservan el OID del catalogo sellado (+2).
   # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 109 +
   # control 170 + lanzador 77 + acl 43 + memoria 15; desde aviso, los pasos 0.3b y 0.3c y su auditoria). Las pruebas con bwrap y uids
   # reales estan en el job `faro-jaula`; las de la base real, en `faro-bitacora-db`.
@@ -2554,7 +2555,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - run: pip install pytest pyyaml cryptography==49.0.0 pymysql
+      - run: pip install pytest pyyaml cryptography==49.0.0 pymysql jsonschema==4.26.0
       - name: Identity Foundation Shadow (sin DB)
         env:
           PYTHONPATH: "."
@@ -2657,6 +2658,9 @@ jobs:
         # niega -limite documentado-, subids legitimos del catalogo real x11).
         # Ronda 10: 637 (+23: tope.period solo es un subid de la clase frecuencia del
         # catalogo del pin; 20 negativas, 2 positivas del catalogo real, 2 de contrato).
+        # Ronda 11: 643 (+6: los mismos vectores pasan por el espejo JSON Schema
+        # y por el validador Python). El resumen completo, incluido 0 skipped,
+        # es el piso: un salto no puede verse verde por prefijo.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
@@ -2735,6 +2739,9 @@ jobs:
             tests/policy/test_execution_boundaries.py \
             --confcutdir=tests/policy -p no:cacheprovider 2>&1 | tee /tmp/identity-foundation
           python3 .github/ci/piso.py verificar identity-foundation-shadow/policy /tmp/identity-foundation || exit $?
+          if grep -qE "[0-9]+ skipped" /tmp/identity-foundation; then
+            echo "HAY TESTS SALTADOS: Identity Foundation Shadow se ejercita completa o no cuenta."; exit 1
+          fi
       # Arranque de systemd versionado (ops/versionar-drop-ins-v2, 2026-10-05): en paso propio
       # porque 9 de sus casos exigen el host de produccion (/srv/jax-prod/jax) o los checkouts de los repos duenos y se saltan en el
       # runner -- el piso del bloque de arriba no admite que suban las saltadas (M <= 45, ver

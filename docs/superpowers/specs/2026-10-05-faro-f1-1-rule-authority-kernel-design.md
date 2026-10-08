@@ -155,10 +155,13 @@ de autoridad.
 
 El loader:
 
-1. comprueba que el commit y el árbol esperados existen y coinciden;
+1. comprueba que el commit y el árbol esperados existen y coinciden, y recalcula
+   el OID del commit desde sus bytes crudos;
 2. usa objetos Git, nunca el working tree;
 3. hereda o generaliza las defensas de `jax/faro/git_objetos.py`: entorno limpio,
-   hooks y fsmonitor apagados, replace objects desactivados;
+   hooks y fsmonitor apagados, replace objects y lazy fetch desactivados;
+   recalcula los OID de todos los árboles recorridos desde esos mismos bytes;
+   no interpreta una segunda vista de `ls-tree`;
 4. enumera exclusivamente blobs `100644` con ruta directa
    `policy/faro/<nombre>.yaml`;
 5. rechaza symlinks, submodules, modos desconocidos, rutas anidadas, nombres no
@@ -170,6 +173,12 @@ El loader:
 9. rechaza el snapshot completo si una regla falla o si hay `rule_id` duplicado;
 10. devuelve objetos profundamente inmutables con un sello privado que los callers no
     pueden fabricar por la API pública.
+
+El presupuesto es cerrado: formato Git SHA-1 o SHA-256 del repositorio, máximo
+1.024 objetos contando commit, árboles y blobs; profundidad máxima de 16; 8 MiB
+agregados entre objetos recorridos y blobs; y 1 MiB por blob. El cargador mide
+cantidad y tamaño acumulados antes de materializar el lote de blobs. Un límite
+excedido niega el snapshot completo.
 
 `policy_snapshot_hash` usa un dominio propio y la lista ordenada por ruta de
 `(path, mode, blob_oid, rule_content_hash)`. Sirve para auditar qué se cargó; no reemplaza
@@ -559,6 +568,10 @@ evita ciclos entre Block 4, el loader y el store.
 - una mutación del checkout durante la carga no cambia el snapshot;
 - mover una branch no cambia un pin ya cargado;
 - hooks, fsmonitor, replace objects y variables `GIT_*` no desvían la lectura;
+- commit, árbol raíz, árbol `policy/`, árboles `faro/` anidados y blobs adulterados
+  bajo su OID nominal niegan antes de producir un snapshot;
+- SHA-1 y SHA-256 usan el formato real del repositorio; árboles truncados,
+  inválidos o que excedan el presupuesto niegan;
 - symlink, submodule, modo o ruta inválidos fallan cerrado;
 - claves YAML duplicadas, aliases y merge keys fallan cerrado;
 - un clone con contenido anidado modificado no conserva procedencia;

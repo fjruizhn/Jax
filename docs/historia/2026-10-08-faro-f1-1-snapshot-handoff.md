@@ -45,3 +45,44 @@ no concede autoridad ni prueba el estado operativo actual.
 - Aún no integrar: falta publicar el SHA actualizado, esperar CI exacta y pedir
   auditoría escalón 3 del nuevo SHA. La auditoría aprobada de `28f1eac7` no cubre
   este head actualizado.
+
+## Rechazo y cierres de auditoría 2026-10-07/08
+
+- La auditoría escalón 3 de `d0206d029b9e7e3930c1a0f09d5bfd9a1595fb9f` fue
+  **RECHAZADO**: BLOCK por trees sueltos adulterados bajo el mismo OID; MAJOR por
+  atribución incompleta del catálogo y discrepancia JSON/Python; MAJOR por falta
+  de presupuesto agregado; MINOR por piso que toleraba pruebas saltadas y escape
+  `\010` accidental en el hash.
+- Cierres implementados: commit y árboles raw se verifican con `git hash-object`
+  y se interpretan desde esos mismos bytes; sin `ls-tree` en el camino confiable;
+  SHA-1/SHA-256 del repositorio; sin lazy fetch; límites de 1.024 objetos,
+  profundidad 16, 8 MiB agregados y 1 MiB por blob, comprobados antes de cargar
+  el lote; salida de `cat-file` validada y acotada.
+- `tope:null` conserva semántica de ausencia; JSON Schema y Python comparten seis
+  vectores, incluidos casos OBLIGATING positivo/negativo, periodos y catálogo.
+  `Topes` lleva el `catalogo_oid` sellado en resultados y eventos, reservado
+  contra suplantación por contexto.
+- La serialización usa `catalogo-topes.json\0` + `100644\0`; se actualizó el
+  vector dorado. Identity Foundation usa el piso exacto de 643 y rechaza
+  cualquier `skipped`; el piso de Faro pasa 726→728 por dos pruebas.
+- Verificación local actual: snapshot+ataques+schema → **307 passed**;
+  `compileall`, JSON Schema meta-valid y `git diff --check` limpios. No se pudo
+  colectar localmente `tests/test_faro_topes.py` porque este intérprete no tiene
+  la dependencia `mcp` ya instalada; el workflow de CI instala las dependencias
+  declaradas y ejecutará la suite completa.
+- Pendiente: documentar cierres en README/spec, archivar y quitar este traspaso
+  antes de la auditoría final, publicar un SHA candidato, esperar CI verde del
+  SHA exacto, auditarlo en escalón 3 y luego integrar #370. No reutilizar el
+  veredicto sobre `d0206d02`.
+
+
+## Cierre del handoff · 2026-10-08
+
+- Cierres tras la auditoría RECHAZADO de `d0206d02`: autenticación de objetos
+  commit/tree/blob desde sus bytes, presupuestos globales, procedencia del
+  catálogo y paridad de esquema Python/JSON; vector de serialización corregido.
+- Verificación local actual: snapshot+ataques+schema, **307 passed**;
+  `compileall` y `git diff --check` limpios. La CI completa y la auditoría
+  Tier 3 del SHA final aún son necesarias antes de integrar.
+- Este archivo se archiva antes de la auditoría final según el runbook de
+  traspaso continuo.

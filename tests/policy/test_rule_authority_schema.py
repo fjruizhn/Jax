@@ -474,9 +474,56 @@ def test_el_espejo_json_existe_y_sus_vocabularios_coinciden() -> None:
     assert propiedades["kind"]["enum"] == ["JAX_FARO_RULE"]
     assert propiedades["effect"]["enum"] == ["PERMIT"]
     assert propiedades["action_class"]["enum"] == ["REVERSIBLE", "OBLIGATING"]
-    clases = propiedades["tope"]["properties"]["resource_class"]["enum"]
+    tope_objeto = propiedades["tope"]["oneOf"][1]
+    clases = tope_objeto["properties"]["resource_class"]["enum"]
     assert tuple(clases) == tuple(sorted(CATALOGO))          # B-3: del catalogo, no de un global
     assert espejo.get("additionalProperties") is False
+
+
+def _hacer_obligante_valida(datos: dict) -> None:
+    datos["action_class"] = "OBLIGATING"
+    datos["obligation_limits"] = {
+        "quantity": {"unit": "mensajes", "max": 1},
+        "amount": None,
+        "frequency": {"max_occurrences": 1, "window_seconds": 60},
+    }
+    datos["validity"]["not_after_utc"] = "2026-10-05T00:01:00Z"
+
+
+@pytest.mark.parametrize("cambio,esperado", [
+    (lambda datos: datos.__setitem__("tope", None), True),
+    (lambda datos: datos.__setitem__("tope", {
+        "resource_class": "actos_externos", "resource": "actos_externos.mensajes",
+        "maximum": 1, "period": "por_hora",
+    }), True),
+    (lambda datos: datos.__setitem__("tope", {
+        "resource_class": "actos_externos", "resource": "actos_externos.mensajes",
+        "maximum": 1, "period": "inventado",
+    }), False),
+    (lambda datos: datos.__setitem__("tope", {
+        "resource_class": "actos_externos", "resource": "monto_dinero.hnl",
+        "maximum": 1, "period": "por_hora",
+    }), False),
+    (_hacer_obligante_valida, True),
+    (lambda datos: datos.__setitem__("action_class", "OBLIGATING"), False),
+])
+def test_el_espejo_json_y_python_aceptan_los_mismos_vectores_de_regla(cambio, esperado) -> None:
+    """Una brecha permite que otra herramienta acepte una regla que Faro niega."""
+    from jsonschema import Draft202012Validator
+
+    datos = _regla()
+    cambio(datos)
+    espejo = json.loads((Path(__file__).resolve().parents[2] / "policy" / "faro"
+                         / "schemas" / "rule-v1.schema.json").read_text())
+    json_acepta = not list(Draft202012Validator(espejo).iter_errors(datos))
+    try:
+        validar_regla(datos)
+        python_acepta = True
+    except RuleSchemaError:
+        python_acepta = False
+
+    assert python_acepta is esperado
+    assert json_acepta is esperado
 
 
 # ------------------------------------- YAML estricto: la fuente ya es cerrada

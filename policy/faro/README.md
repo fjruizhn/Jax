@@ -64,8 +64,19 @@ tope prohibido.
 `policy/rule_authority/snapshot.py::load_trusted_policy_snapshot(repo, pin)` —
 nunca el árbol de trabajo: objetos Git del commit exacto del pin, con las
 defensas de `jax/faro/git_objetos.py` (entorno limpio, hooks y fsmonitor
-apagados, replace objects desactivado). Una regla inválida, un `rule_id`
-duplicado o una entrada no canónica rechazan el snapshot **completo**.
+apagados, replace objects y lazy fetch desactivados). El loader recalcula el OID
+del commit, del árbol raíz y de cada árbol recorrido bajo `policy/faro` usando
+los bytes crudos y `git hash-object`; la lista de entradas se deriva de esos
+mismos bytes, nunca de una segunda vista `ls-tree`. Acepta el formato de objetos
+del repositorio (SHA-1 o SHA-256) y limita el snapshot completo a 1.024 objetos,
+16 niveles, 8 MiB agregados y 1 MiB por blob. Los excesos o cualquier objeto
+adulterado niegan la carga antes de validar reglas. Una regla inválida, un
+`rule_id` duplicado o una entrada no canónica rechazan el snapshot **completo**.
+
+El espejo JSON Schema y el validador Python comparten vectores positivos y
+negativos. El runtime de topes incluye el OID del catálogo sellado en el
+resultado y en cada anotación durable; contexto aportado por un caller no puede
+suplantarlo.
 
 Diseño completo: `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-kernel-design.md`.
 `policy/**` se integra solo por Fernando.

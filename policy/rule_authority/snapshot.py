@@ -47,9 +47,10 @@ from jax.faro.git_objetos import (
     MAX_BLOB_BYTES,
     FuenteInvalida,
     git,
+    largo_oid_del_repositorio,
     leer_blobs,
-    listar,
-    oid_subarbol,
+    listar_faro_desde_commit_verificado,
+    oid_de_objeto,
 )
 from policy.canonicalization.errors import CanonicalizationError, StrictYAMLError
 from policy.canonicalization.strict_yaml import load_strict_yaml
@@ -75,13 +76,6 @@ _DOMINIO_SNAPSHOT = "jax-faro-policy-snapshot-v2"
 
 def _hash_dominio(dominio: str, carga: bytes) -> str:
     return "sha256:" + hashlib.sha256(dominio.encode() + b"\0" + carga).hexdigest()
-
-
-def _oid_git_de(contenido: bytes, largo_oid: int) -> str:
-    """El OID que git calcularia para este blob (sha1 o sha256 segun el repo)."""
-    cabecera = b"blob %d\0" % len(contenido)
-    digesto = hashlib.sha1(cabecera + contenido) if largo_oid == 40 else hashlib.sha256(cabecera + contenido)
-    return digesto.hexdigest()
 
 
 class TrustedPolicyPin:
@@ -162,9 +156,10 @@ class TrustedPolicySnapshot:
                  repositorio: str, procedencia: str, _testigo: object = None) -> None:
         if _testigo is not _TESTIGO:
             raise RuleSnapshotError("TrustedPolicySnapshot no se fabrica por la API publica")
-        carga = (f"catalogo-topes.json\0100644\0{catalogo_oid}\0{catalogo_hash}\n"
-                 + "".join(f"{r.ruta}\0{r.modo}\0{r.blob_oid}\0{r.content_hash}\n"
-                           for r in reglas)).encode()
+        carga = (b"catalogo-topes.json\0" + b"100644\0" + catalogo_oid.encode("ascii")
+                 + b"\0" + catalogo_hash.encode("ascii") + b"\n"
+                 + b"".join(f"{r.ruta}\0{r.modo}\0{r.blob_oid}\0{r.content_hash}\n".encode("ascii")
+                            for r in reglas))
         object.__setattr__(self, "commit", commit)
         object.__setattr__(self, "policy_tree_oid", policy_tree_oid)
         object.__setattr__(self, "reglas", tuple(reglas))
@@ -253,18 +248,15 @@ def load_trusted_policy_snapshot(repo: Path, pin: TrustedPolicyPin) -> TrustedPo
             f"el pin no es el commit exacto: {pin.commit[:16]}… resuelve a {resuelto[:16]}…")
 
     try:
-        # (2) arbol policy/ contra el pin; la enumeracion sale de ESE arbol.
-        arbol = oid_subarbol(repo, pin.commit, "policy")
+        # (2) commit y arboles se leen de bytes crudos y se autentican por OID
+        # antes de interpretar cualquiera de sus entradas. No se usa ls-tree:
+        # un objeto suelto adulterado bajo un OID fijo no puede cambiar la vista.
+        largo_oid = largo_oid_del_repositorio(repo)
+        inventario = listar_faro_desde_commit_verificado(
+            repo, pin.commit, pin.policy_tree_oid, largo_oid=largo_oid)
     except FuenteInvalida as exc:
         raise RuleSnapshotError(str(exc)) from exc
-    if arbol != pin.policy_tree_oid:
-        raise RuleSnapshotError("el arbol policy/ no coincide con el pin: no se carga nada")
-
-    try:
-        entradas = listar(repo, arbol, "faro")
-    except FuenteInvalida as exc:
-        raise RuleSnapshotError(str(exc)) from exc
-    candidatos, entrada_catalogo = _clasificar(entradas)
+    candidatos, entrada_catalogo = _clasificar(inventario.entradas)
     if entrada_catalogo is None:
         raise RuleSnapshotError("falta faro/catalogo-topes.json en el pin: sin catalogo no hay snapshot")
 
@@ -272,7 +264,8 @@ def load_trusted_policy_snapshot(repo: Path, pin: TrustedPolicyPin) -> TrustedPo
     # mismo tope de tamano; el snapshot impone su tope (opt-in de M-6).
     try:
         blobs = leer_blobs(repo, [e.oid for e in candidatos] + [entrada_catalogo.oid],
-                           max_bytes=MAX_BLOB_BYTES)
+                           max_bytes=MAX_BLOB_BYTES, max_total_bytes=inventario.bytes_restantes,
+                           max_objects=inventario.objetos_restantes)
     except FuenteInvalida as exc:
         raise RuleSnapshotError(str(exc)) from exc
 
@@ -280,7 +273,7 @@ def load_trusted_policy_snapshot(repo: Path, pin: TrustedPolicyPin) -> TrustedPo
     # se verifica igual y se carga desde ESTE arbol (B-3): las reglas validan
     # contra el catalogo del pin, nunca contra el del working tree.
     crudo_catalogo = blobs[entrada_catalogo.oid]
-    if _oid_git_de(crudo_catalogo, len(entrada_catalogo.oid)) != entrada_catalogo.oid:
+    if oid_de_objeto(repo, "blob", crudo_catalogo, len(entrada_catalogo.oid)) != entrada_catalogo.oid:
         raise RuleSnapshotError("catalogo-topes.json: el blob no corresponde a su OID")
     catalogo_hash = "sha256:" + hashlib.sha256(crudo_catalogo).hexdigest()
     try:
@@ -295,7 +288,7 @@ def load_trusted_policy_snapshot(repo: Path, pin: TrustedPolicyPin) -> TrustedPo
     vistos: set[str] = set()
     for entrada in sorted(candidatos, key=lambda e: e.ruta):
         crudo = blobs[entrada.oid]
-        oid_real = _oid_git_de(crudo, len(entrada.oid))
+        oid_real = oid_de_objeto(repo, "blob", crudo, len(entrada.oid))
         if oid_real != entrada.oid:
             raise RuleSnapshotError(
                 f"{entrada.ruta}: el blob no corresponde a su OID (objeto adulterado)")

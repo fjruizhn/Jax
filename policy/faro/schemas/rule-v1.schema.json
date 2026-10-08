@@ -210,16 +210,14 @@
       }
     },
     "tope": {
-      "description": "R-4 (decision de Fernando 2026-10-06): catalogo cerrado de actos y dinero. resource = <clase>.<subid> del catalogo de ESA clase; conexiones/concurrencia/workers/hilos/procesos/agentes no existen en el (D-4).",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "resource_class",
-        "resource",
-        "maximum",
-        "period"
-      ],
-      "properties": {
+      "description": "R-4 (decision de Fernando 2026-10-06): catalogo cerrado de actos y dinero. null significa ausencia de tope. resource = <clase>.<subid> del catalogo de ESA clase; conexiones/concurrencia/workers/hilos/procesos/agentes no existen en el (D-4).",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resource_class", "resource", "maximum", "period"],
+          "properties": {
         "resource_class": {
           "enum": [
             "actos_externos",
@@ -240,7 +238,7 @@
         },
         "period": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9_.:-]{1,32}$"
+          "enum": ["por_dia", "por_hora"]
         }
       },
       "oneOf": [
@@ -331,7 +329,26 @@
             "resource"
           ]
         }
+          ]
+        }
       ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"action_class": {"const": "OBLIGATING"}}},
+      "then": {
+        "properties": {
+          "validity": {"properties": {"not_after_utc": {"type": "string"}}},
+          "obligation_limits": {
+            "properties": {"frequency": {"type": "object"}},
+            "oneOf": [
+              {"properties": {"quantity": {"type": "object"}, "amount": {"type": "null"}}},
+              {"properties": {"quantity": {"type": "null"}, "amount": {"type": "object"}}}
+            ]
+          }
+        }
+      }
+    }
+  ]
 }

@@ -55,7 +55,7 @@ _RE_TENANT = RE_TENANT      # el mismo que valida el canal de control: un tenant
 _RE_RECURSO = re.compile(r"^[a-z0-9_.-]{1,48}$")
 _RE_PERIODO = re.compile(r"^[A-Za-z0-9_.:-]{1,32}$")
 _RESERVADOS = frozenset({"evento", "momento", "decision", "motivo", "tenant", "recurso", "cantidad", "usado", "tope",
-                         "periodo"})
+                         "periodo", "catalogo_oid"})
 _MAX_CONTEXTO = 16
 _MAX_VISTOS = 4096
 
@@ -76,6 +76,7 @@ class ResultadoTope:
     tope: int | None
     medido: bool            # ¿se pudo contar?
     motivo: str             # "", "tope_alcanzado", "almacen_no_disponible" o "resultado_desconocido"
+    catalogo_oid: str | None = None  # OID del catalogo sellado que decidio si el recurso admite tope
 
 
 class AlmacenTopes(Protocol):
@@ -175,7 +176,8 @@ class Topes:
                     f"D-4/R-4: {recurso!r} esta fuera del catalogo de topes (solo actos y dinero); solo se mide")
         extra = {k: (v if isinstance(v, (int, float, bool)) or v is None else str(v)[:200])
                  for k, v in list(contexto.items())[:_MAX_CONTEXTO] if k not in _RESERVADOS}
-        base = {"tenant": tenant, "recurso": recurso, "cantidad": cantidad, "periodo": periodo, "tope": tope}
+        base = {"tenant": tenant, "recurso": recurso, "cantidad": cantidad, "periodo": periodo,
+                "tope": tope, "catalogo_oid": self.catalogo_oid}
         clave = f"{tenant}|{recurso}"
         try:
             aplicado, usado = await asyncio.wait_for(self._almacen.sumar(clave, periodo, cantidad, tope), self._plazo_s)
@@ -185,16 +187,16 @@ class Topes:
             self.inciertos[(clave, periodo)] = self.inciertos.get((clave, periodo), 0) + cantidad
             await self._anotar("tope_resultado_desconocido", **extra, **base,
                                decision="permitido" if tope is None else "denegado", motivo="resultado_desconocido")
-            return ResultadoTope(tope is None, None, tope, False, "resultado_desconocido")
+            return ResultadoTope(tope is None, None, tope, False, "resultado_desconocido", self.catalogo_oid)
         except Exception as exc:  # fail-soft: con tope NIEGA (fail-closed); sin tope no hay regla que niegue (D-4), se registra y avisa
             logger.warning("almacen de topes no disponible (%s)", type(exc).__name__)
             if tope is None:
-                return ResultadoTope(True, None, None, False, "almacen_no_disponible")
+                return ResultadoTope(True, None, None, False, "almacen_no_disponible", self.catalogo_oid)
             await self._anotar("tope_no_verificable", **extra, **base, decision="denegado", motivo="almacen_no_disponible")
-            return ResultadoTope(False, None, tope, False, "almacen_no_disponible")
+            return ResultadoTope(False, None, tope, False, "almacen_no_disponible", self.catalogo_oid)
         if not aplicado:
             await self._anotar("tope_superado", **extra, **base, usado=usado, decision="denegado", motivo="tope_alcanzado")
-            return ResultadoTope(False, usado, tope, True, "tope_alcanzado")
+            return ResultadoTope(False, usado, tope, True, "tope_alcanzado", self.catalogo_oid)
         if tope is None:
             visto = (tenant, recurso, periodo)
             if visto not in self._vistos_sin_regla:
@@ -203,7 +205,7 @@ class Topes:
                 self._vistos_sin_regla.add(visto)
                 await self._anotar("tope_sin_regla", **extra, **base, usado=usado, decision="permitido",
                                    motivo="sin_regla_de_tope")
-        return ResultadoTope(True, usado, tope, True, "")
+        return ResultadoTope(True, usado, tope, True, "", self.catalogo_oid)
 
     async def reconciliar(self, *, tenant: str, recurso: str, periodo: str = "total") -> dict:
         """Lee el contador REAL y cierra lo incierto de (tenant, recurso, periodo): anota `tope_reconciliado` con lo leido
@@ -221,5 +223,5 @@ class Topes:
                 self.inciertos[(clave, periodo)] = self.inciertos.get((clave, periodo), 0) + incierto
             raise
         await self._anotar("tope_reconciliado", tenant=tenant, recurso=recurso, periodo=periodo, usado=usado, incierto=incierto,
-                           motivo="reconciliacion")
+                           catalogo_oid=self.catalogo_oid, motivo="reconciliacion")
         return {"usado": usado, "incierto": incierto}
