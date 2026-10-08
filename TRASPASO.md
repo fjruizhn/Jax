@@ -174,6 +174,8 @@ preflight correspondan al mismo SHA.
   puede demostrar durabilidad, niega. Una lectura solo sella tras completar
   esa comprobación; writers que ya poseen el lock pueden verificar sin liberar
   la sección crítica.
+- `docs/operations/trusted-files.md` ahora documenta el contrato de lock y
+  durabilidad para los lectores de autoridad actual.
 - Regresiones: append con resultado UNKNOWN seguido de replay; bootstrap con
   resultado UNKNOWN seguido de replay; fsync persistente impide verificar y la
   recuperación de fsync permite una verificación posterior.

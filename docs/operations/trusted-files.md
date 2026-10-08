@@ -26,6 +26,12 @@ files as its existing anchor. Missing, empty, malformed, or mismatched
 bootstrap material or checkpoint log is an integrity failure: stop before an
 append or authority decision can proceed.
 
+Current-authority verification coordinates with writers through the same
+checkpoint sidecar lock. While holding it, the verifier confirms durability
+of the checkpoint log and bootstrap receipt (including both parent directories)
+before reading and comparing their exact snapshots with the ledger. If that
+durability check fails, it must not issue a verified current-authority state.
+
 Backups must preserve the receipt and checkpoint log as one matched recovery
 set. The recovery procedure is in
 `docs/runbooks/authority-root-recovery.md`. Never create a fresh receipt, an
