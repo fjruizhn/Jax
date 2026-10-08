@@ -1,62 +1,36 @@
-# Traspaso · Faro F1.1 #368/#369/#371
+# Traspaso — Faro F1.1 RULE AUTHORITY KERNEL
 
 ## Objetivo
 
-Cerrar los hallazgos del veredicto de escalón 3 para #368, #369 y #371. El veredicto de
-entrada está en `~/encargos-codex/jax-faro-f11-veredicto-368-369-371-r2.md`.
+Registrar las decisiones de implementación del contrato F1.1 aprobado por Fernando
+el 2026-10-05 y el estado verificable de esta ronda. Este archivo es un handoff;
+no concede autoridad ni prueba el estado operativo actual.
 
-## Hecho en esta rama (#368)
+## Estado verificado al 2026-10-07 · Hall9000
 
-- El modelo compara ambos sellos por identidad; el writer exige el sello de snapshot para
-  `RATIFICATION_GRANTED` y sigue rechazando el sello de storage.
-- `previous_event_hash` se lee y contrasta junto con las demás columnas denormalizadas.
-- `canonical_intent` es NOT NULL en la migración inicial y en la migración de upgrade.
-- Se agregó `policy.authority_ledger.provisioning` para crear la cuenta de aplicación y sus
-  grants limitados, usando credenciales del entorno.
-- Las pruebas K3, K8, D2 y D3 fallan al retirar el control correspondiente.
-- MariaDB 12.3.3 efímera pasó migración, provisión, append/replay y triggers con un principal
-  que tiene SELECT/UPDATE/DELETE.
-- Suite `tests/policy/test_authority_ledger*.py`: 41 passed.
-- El codec corrió 19 pruebas; el piso `authority-ledger-codec/codec` quedó en 19.
-- El paso Python 3.14 del workflow instala `pymysql`, requerido por el job MariaDB aislado.
-- Ronda 3, dos hallazgos menores: el provisioning ahora hace `REVOKE ALL PRIVILEGES, GRANT OPTION`
-  antes de los GRANT (la cuenta preexistente con ALL converge al contrato) y la migración 002
-  aborta con `SIGNAL 45000` si hay filas NULL (independiente de `sql_mode`) y corre bajo
-  `STRICT_ALL_TABLES`. Tres pruebas MariaDB nuevas (SHOW GRANTS exacto; 002 con NULL y
-  `sql_mode=''`; 002 sin NULL). Piso `authority-ledger-mariadb/integration`: 1 -> 4.
+- La spec F1.1 está en
+  `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-kernel-design.md`;
+  su sección 16 registra nueve decisiones de implementación.
+- PR #376 (`a3bf02c4`) se integró por solicitud explícita de Fernando en su rama
+  padre `feat/faro-f1.1-evaluador` mediante el merge
+  `5cfc44c6610c32f036cd4e978e88195dd5f91520`. Esta rama forma parte del PR #371;
+  el merge de #376 no pone por sí solo el código en `master`.
+- PR #382 integró la alineación documental en `master` mediante el merge
+  `1f9c2fa5eb8ec297bed7e70fa43dbef1e2ef52a5`. Su CI `push` sobre el merge terminó
+  verde y el `post-merge-guard` verificó el SHA, el tip de `master` y la ausencia
+  de carrera. El guard primero encontró una lectura inestable mientras nacía CI;
+  se repitió tras finalizar los jobs y entonces confirmó éxito.
+- Al verificar este handoff, los PRs de código F1.1 #370, #371, #373, #375 y #378
+  seguían abiertos y apilados. La cadena de código aún no estaba integrada en
+  `master`; comprobar sus refs y CI actuales antes de retomarlos.
+- La auditoría inicial de #382 detectó que un handoff anterior decía que #376
+  necesitaba sincronizarse y que #382 no debía integrarse. Ese texto fue corregido
+  en #382 antes de su merge; la copia de este archivo actualiza el estado posterior.
 
-## Hecho en esta rama (#369)
+## Decisiones y límites
 
-- Se integró el kernel corregido de #368 conservando las pruebas de las ocho variantes del
-  ledger.
-- La activación solo acepta una ratificación de corpus; una ratificación individual no puede
-  servir como su destino (E4).
-- `current_rule_ratification` se renombró a `latest_unrevoked_rule_ratification`; su contrato
-  aclara que la vigencia temporal la evalúa Rule Authority.
-- Los sellos de las ratificaciones individuales también se validan por identidad; una
-  instancia `AlwaysEqual` es rechazada.
-- La prueba E10 llega al constructor y mata la mutación que elimina el rechazo de payload Block
-  4 heredado.
-- Pisos verificados en esta rama: codec 19, MariaDB 1, ratificaciones 12.
-- Se incorporó desde #368 la instalación de `pymysql` en el paso Python 3.14, necesaria para el test MariaDB del workflow.
-- Suite `tests/policy/test_authority_ledger*.py`: 53 passed. K3, K8, D2, D3, E4 y E10 muertos.
-
-## Falta
-
-- #371 espera el SHA final de #370 antes del rebase sobre `origin/feat/faro-f1.1-schema-snapshot`.
-- Re-medición final de los pisos sobre la base real apilada, merge-tree y reporte de entrega.
-
-## Decisiones
-
-- Se siguen los cierres obligatorios del veredicto r2 y la decisión indicada por Fernando para
-  consumir el catálogo de topes de #370. No se escribe ni publica un veredicto de auditoría.
-- No se usan llaves de Fernando ni bases persistentes; las pruebas MariaDB usan contenedor
-  desechable, `--network none` y socket Unix.
-
-## Siguiente comando
-
-Desde el worktree #369, ejecutar:
-
-```sh
-JAX_AUTHORITY_LEDGER_DOCKER_CMD='sudo -n docker' PYTHONPATH=. python3 -B -m pytest -q tests/policy/test_authority_ledger*.py
-```
+- Faro decide permisos antes de ejecutar; el aviso comunica una decisión y no
+  modifica autoridad.
+- No inferir que una PR apilada quedó en `master` solo porque se integró en su
+  rama padre.
+- No reutilizar auditorías de un SHA anterior tras modificar el PR.

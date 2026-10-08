@@ -645,3 +645,85 @@ F1.1 queda listo para revisión cuando:
 - no existe integración con motor ni efecto externo;
 - el SHA final recibe auditoría adversarial Tier 3 sin bloqueadores;
 - Fernando integra los cambios bajo `policy/**`.
+
+## 16. Decisiones de implementación (2026-10-07)
+
+Lo que la implementación dejó distinto o más preciso que este texto, registrado con quién
+decidió y dónde vive el código. Procedencia de los veredictos y SHAs:
+`~/encargos-codex/LEDGER-2026-10-05-noche.md` (jornada 2026-10-07).
+
+1. **La tabla de decisiones se llama `rule_decisions`** (§11 la nombra
+   `rule_authority_decisions`). Decisión de Hyde (ledger 05:09: «se queda
+   `rule_decisions`, se alinea el diseño»). Código: migración
+   `policy/rule_authority/migrations/001_rule_authority_kernel.sql` (crea
+   `rule_authority_audit_head`, `rule_decisions`, `rule_permits`,
+   `rule_permit_consumptions`) — Jax#375 (`6ae6986a`, APROBADO), presente también en la
+   cadena de #371.
+
+2. **Capability desconocida, sin clasificar o rebajada NIEGA** (§13 ya lo decía; queda
+   confirmado como cierre obligatorio de auditoría). Hyde rechazó #373 r2 por permitirlo y
+   fijó: «capability desconocida NIEGA per §13» (ledger 04:20). Implementado en
+   `policy/rule_authority/` — Jax#373 (`72b02be7`, APROBADO).
+
+3. **Procedencia del pin con forma cerrada y anclada**: `refs/heads/<rama>` o
+   `refs/tags/<tag>` exacta, sensible a mayúsculas, sin espacios, e IGUAL a la procedencia
+   real del pin cargado. Código: `policy/rule_authority/providers.py`
+   (`_RE_PROCEDENCIA`) — Jax#373 (`72b02be7`); el rechazo que la introdujo fue el MAJOR-2
+   de la ronda 2 (`b16216d7`).
+
+4. **El catálogo de topes sale del snapshot sellado del pin**: SOLO el snapshot emite
+   `CatalogoTopes` (registro único de emisor en el proceso) y exige el OID del catálogo en
+   el pin. Decisión de Hyde en la auditoría de #370 r6 (ledger 03:50: «solo el snapshot
+   emite CatalogoTopes»). Código: `jax/faro/catalogo_topes.py` — Jax#370
+   (`28f1eac7`, APROBADO).
+
+5. **D-4 como piso de código con lista negra ampliada**: subid y sus segmentos/raíces se
+   niegan por lista negra ampliada con sinónimos en inglés (cerrados como MINOR de #370,
+   `a7757685`); la lista BLANCA en código queda recomendada para cuando se cablee el
+   runtime (recomendación de Hyde, ledger 05:04; decisión de Fernando pendiente). En la
+   misma cadena, `Tope.period` solo acepta subids de frecuencia del catálogo
+   (`28f1eac7`, #370) y `Cantidad.unit`/`Monto.currency` se validan contra el catálogo —
+   Jax#378 (`0c2822b5`, APROBADO; cerró el hueco del schema de #370 anotado en el ledger
+   05:09).
+
+6. **Los límites derivados llevan la regla atada**: `LimitesObligatorios` (los límites que
+   la evaluación deriva de la regla) incluye `rule_id` y `rule_hash` ligados a la
+   solicitud; nacieron del rechazo de #371 r3 («límites sin rule_id», ledger 05:12) y se
+   cerraron en `002fc9ba`; `limites_de` además valida `Tope.period` contra el catálogo
+   (`b967dff0`). Final: Jax#371 (`d4ffe62f`, APROBADO) —
+   `policy/rule_authority/models.py`.
+
+7. **`request_hash` incluye el catálogo**: `RuleEvaluationRequest` valida y proyecta el
+   catálogo sellado (con su OID) dentro del `domain_hash` del `request_hash`; un
+   catálogo distinto es una solicitud distinta. Código:
+   `policy/rule_authority/models.py` (`canonical_projection` → `request_hash`) —
+   Jax#371 (`d4ffe62f`).
+
+8. **Avisos (paso 8) con entrega al-menos-una-vez** (§11 los describía fail-soft sin este
+   mecanismo): `resumen_diario` trabaja en DOS FASES — reclama los rotados con un lease
+   (`lease_s`) y NO borra nada hasta que el llamador envía y llama
+   `confirmar_resumen(token)`; sin confirmar, pasado el lease se re-entregan. Archivos
+   ilegibles o inseguros a cuarentena (`.cuarentena`, `O_NOFOLLOW`), y los envíos
+   fallidos se marcan `envio_fallido` y vuelven a la cola (no se descartan). Código:
+   `jax/faro/aviso.py` — Jax#376 (`ea7fa5e3`, APROBADO; hitos `153560d0`, `82801e36`,
+   `92b98d36`).
+
+9. **Ledger de Block 4 endurecido**:
+   - sello `init=False` — `dataclasses.replace` no transporta el sello del snapshot de
+     ratificación (`policy/authority_ledger/models.py`) — Jax#377 (`d082cc89`,
+     APROBADO);
+   - replay previo al append — `append_authority_event` re-verifica TODO el stream
+     existente y el evento nuevo contra el estado reconstruido ANTES de escribir
+     (`policy/authority_ledger/service.py`) — Jax#377 (`d082cc89`);
+   - checkpoint externo tras el append con fallo cerrado — el evento no se acepta hasta
+     que su checkpoint queda escrito; si el checkpoint falla, el evento ya append-only
+     queda en el ledger y la operación falla cerrada exigiendo reconciliación explícita
+     (`service.py`) — Jax#381 (`ae4e9338`, en auditoría al escribir esto);
+   - `OVERLAY_ISSUED` exige ratificación vigente — un overlay solo es válido contra un
+     corpus con ratificación no revocada en ese punto del stream (`replay.py`) —
+     Jax#381 (`ae4e9338`).
+
+Nota de procedencia: las decisiones 4 y 5 se registran con la atribución que el ledger
+respalda (Hyde, en sus auditorías de #370); una co-atribución a Fernando del 2026-10-06
+para el catálogo no consta ahí. La lista blanca de D-4 sigue pendiente de decisión de
+Fernando.
