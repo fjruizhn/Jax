@@ -2659,8 +2659,9 @@ jobs:
         # niega -limite documentado-, subids legitimos del catalogo real x11).
         # Ronda 10: 637 (+23: tope.period solo es un subid de la clase frecuencia del
         # catalogo del pin; 20 negativas, 2 positivas del catalogo real, 2 de contrato).
-        # Ronda 11: 643 (+6: los mismos vectores pasan por el espejo JSON Schema
-        # y por el validador Python). El resumen completo, incluido 0 skipped,
+        # Ronda 12: 657 (+14 pruebas incorporadas por schema/snapshot Faro F1.1;
+        # CI midió 657 passed en el SHA 49b0e1bb). El piso admite advertencias de pytest;
+        # el resumen completo, incluido 0 skipped,
         # es el piso: un salto no puede verse verde por prefijo.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
