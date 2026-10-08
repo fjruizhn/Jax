@@ -1,0 +1,30 @@
+# Ejemplo ratificable de regla con tope (R-4): la clase del recurso se DECLARA,
+# no se deduce del nombre. Fixture de prueba: ninguna regla esta activa.
+schema_version: "1.0"
+kind: JAX_FARO_RULE
+rule_id: ejemplo-tope-mensajes
+effect: PERMIT
+action_class: OBLIGATING
+
+scope:
+  subjects: [actor:ejemplo]
+  capabilities: [CAPABILITY_ID]
+  objectives: [objetivo-ejemplo]
+
+obligation_limits:
+  quantity: {unit: llamadas, max: 100}
+  amount: null
+  frequency: {max_occurrences: 100, window_seconds: 3600}
+
+validity:
+  not_before_utc: "2026-10-05T00:00:00Z"
+  not_after_utc: "2027-10-05T00:00:00Z"
+
+permit:
+  ttl_seconds: 60
+
+tope:
+  resource_class: actos_externos
+  resource: actos_externos.mensajes
+  maximum: 8
+  period: por_hora

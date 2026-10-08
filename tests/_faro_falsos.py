@@ -120,10 +120,17 @@ class FalsoTelegram:
 # la atomicidad del conteo se prueba contra MariaDB, no contra esto).         #
 # --------------------------------------------------------------------------- #
 class AlmacenMemoria:
-    """Imita `AlmacenMariaDB.sumar(clave, periodo, cantidad, tope) -> (aplicado, usado)`."""
+    """Imita las lecturas y escrituras de `AlmacenMariaDB` para pruebas de política."""
 
     def __init__(self, modo="ok"):
         self.modo, self.usado, self.llamadas = modo, {}, []
+
+    async def leer(self, clave, periodo):
+        if self.modo == "colgar":
+            await asyncio.sleep(3600)
+        if self.modo == "fallar":
+            raise OSError("almacen de topes caido (falso)")
+        return self.usado.get((clave, periodo), 0)
 
     async def sumar(self, clave, periodo, cantidad, tope):
         self.llamadas.append((clave, periodo, cantidad, tope))

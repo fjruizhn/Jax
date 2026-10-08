@@ -1,0 +1,22 @@
+schema_version: "1.0"
+kind: JAX_FARO_RULE
+rule_id: ejemplo-regla
+effect: PERMIT
+action_class: REVERSIBLE
+
+scope:
+  subjects: [actor:ejemplo]
+  capabilities: [CAPABILITY_ID]
+  objectives: [objetivo-ejemplo]
+
+obligation_limits:
+  quantity: null
+  amount: null
+  frequency: null
+
+validity:
+  not_before_utc: "2026-10-05T00:00:00Z"
+  not_after_utc: null
+
+permit:
+  ttl_seconds: 60

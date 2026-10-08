@@ -62,6 +62,8 @@ def ingest_test_evidence_manifest(store, manifest_bytes:bytes, raw_output:bytes|
 
 class TestEvidenceIngester:
  """Fixed CI composition. Parsed manifest bytes remain untrusted until here."""
+ __test__ = False
+
  def __init__(self, lifecycle):
   """Bind CI facts from the fixed GitHub Actions composition only.
 
