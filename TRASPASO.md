@@ -34,3 +34,14 @@ no concede autoridad ni prueba el estado operativo actual.
 - No inferir que una PR apilada quedó en `master` solo porque se integró en su
   rama padre.
 - No reutilizar auditorías de un SHA anterior tras modificar el PR.
+
+## Reanudación 2026-10-07 · actualización de base de #370
+
+- Para satisfacer el preflight, se incorporó `master@a5460c886e8ff0fde447aff8a0adf97b07b89761`
+  al head anterior de #370 `28f1eac7fbb6523cf569eb53bd236a28fc228a10`.
+- El merge no produjo conflictos de código; tocó `TRASPASO.md` y añadió la
+  spec de decisión de #376 que ya estaba en master. El SHA resultante del merge
+  es `ce614b667d002545d82d4df0ed4d169d89cca69e`.
+- Aún no integrar: falta publicar el SHA actualizado, esperar CI exacta y pedir
+  auditoría escalón 3 del nuevo SHA. La auditoría aprobada de `28f1eac7` no cubre
+  este head actualizado.
