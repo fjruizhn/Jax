@@ -57,3 +57,29 @@ auditoría de Hyde).
 ## Pendiente
 
 - Auditoría de Hyde y merge (apilado sobre #377 — fusionar en orden).
+
+## Ronda de CI #379 · 2026-10-08
+
+- La CI anterior falló en
+  `test_upgrade_migration_fails_closed_on_null_intent_even_with_permissive_sql_mode`:
+  el socket Unix de la MariaDB efímera existía durante la inicialización, pero
+  desaparecía antes de la primera conexión que usaba el caso de prueba.
+- Causa trazada: la imagen inicia un servidor temporal para preparar su
+  directorio de datos y luego lo sustituye por el servidor final. La sonda
+  anterior comprobaba solo socket/una conexión, sin esperar el marcador del
+  entrypoint `init process done`; por tanto podía devolver el factory durante
+  esa transición.
+- Corrección local pendiente de auditoría: esperar el marcador y `SELECT 1`
+  del servidor final. El factory entregado después solo reintenta durante 10 s
+  errores transitorios de socket o MariaDB (2002, 2003, 2006, 2013); permisos,
+  autenticación y demás fallos permanentes se relanzan de inmediato. El timeout
+  incluye el último error y la espera de readiness incluye los últimos logs del
+  contenedor.
+- Verificación sin Docker: tres pruebas unitarias RED→GREEN para clasificación
+  restringida, reintento transitorio y propagación inmediata de `1045`; `3
+  passed`, `git diff --check` limpio. En Hall9000 el usuario de esta sesión no
+  puede acceder a `/var/run/docker.sock`, de modo que el ejercicio MariaDB real
+  queda para CI.
+- Antes de auditoría final: incorporar esta nota en el handoff histórico
+  `docs/historia/2026-10-08-faro-f1-1-snapshot-handoff.md` sobre la base que ya
+  lo contiene y retirar este traspaso operativo del candidato a `master`.

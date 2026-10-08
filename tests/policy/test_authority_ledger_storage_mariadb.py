@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 from pathlib import Path
 import re
@@ -43,6 +44,136 @@ def _run(docker: list[str], *args: str, **kwargs):
     return subprocess.run([*docker, *args], check=True, capture_output=True, text=True, **kwargs)
 
 
+_TRANSIENT_MARIADB_STARTUP_CODES = frozenset((2002, 2003, 2006, 2013))
+_TRANSIENT_SOCKET_ERRNOS = frozenset((errno.EAGAIN, errno.ECONNREFUSED, errno.EINTR, errno.ENOENT))
+
+
+def _is_transient_mariadb_startup_error(error: BaseException) -> bool:
+    """Return true only for a socket/server transition during startup."""
+    if isinstance(error, OSError):
+        return error.errno in _TRANSIENT_SOCKET_ERRNOS
+    return (
+        isinstance(error, pymysql.err.OperationalError)
+        and bool(error.args)
+        and type(error.args[0]) is int
+        and error.args[0] in _TRANSIENT_MARIADB_STARTUP_CODES
+    )
+
+
+def _connect_after_transient_mariadb_startup_error(connect_once, *, timeout: float, retry_delay: float):
+    """Retry only transient socket/server startup failures, bounded by ``timeout``."""
+    deadline = time.monotonic() + timeout
+    last_error = None
+    while True:
+        try:
+            return connect_once()
+        except (OSError, pymysql.MySQLError) as error:
+            if not _is_transient_mariadb_startup_error(error):
+                raise
+            last_error = error
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"MariaDB siguió inaccesible tras {timeout:.0f} s: {last_error}"
+            ) from last_error
+        time.sleep(retry_delay)
+
+
+def _container_logs(docker: list[str], container: str, *, tail: int) -> str:
+    logs = subprocess.run(
+        [*docker, "logs", "--tail", str(tail), container],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return logs.stdout + logs.stderr
+
+
+def _wait_until_ready(
+    docker: list[str], container: str, socket_dir: str, password: str, timeout: float = 60.0
+) -> Path:
+    """Wait for the final MariaDB server, after entrypoint initialization has finished."""
+    socket_path = Path(socket_dir) / "mysqld.sock"
+    deadline = time.monotonic() + timeout
+    last_error = None
+    initialized = False
+    while time.monotonic() < deadline:
+        if not initialized:
+            initialized = "init process done" in _container_logs(docker, container, tail=20)
+        if initialized:
+            _run(docker, "exec", "--user=root", container, "chmod", "0755", "/run/mysqld")
+            try:
+                def connect_once():
+                    return pymysql.connect(
+                        unix_socket=str(socket_path), user="root", password=password,
+                        autocommit=False, charset="utf8mb4", connect_timeout=5,
+                    )
+
+                with _connect_after_transient_mariadb_startup_error(
+                    connect_once, timeout=min(5.0, max(0.0, deadline - time.monotonic())),
+                    retry_delay=0.25,
+                ) as probe:
+                    with probe.cursor() as cursor:
+                        cursor.execute("SELECT 1")
+                        if cursor.fetchone() == (1,):
+                            return socket_path
+            except (OSError, pymysql.MySQLError, AssertionError) as error:
+                if not _is_transient_mariadb_startup_error(error.__cause__ or error):
+                    raise
+                last_error = error
+        time.sleep(0.25)
+    raise AssertionError(
+        f"MariaDB no quedó lista en {timeout:.0f} s (init terminado: {initialized}; "
+        f"último error: {last_error}).\n--- docker logs ---\n"
+        f"{_container_logs(docker, container, tail=200)[-4000:]}"
+    )
+
+
+def test_transient_mariadb_startup_errors_are_narrowly_classified():
+    assert _is_transient_mariadb_startup_error(OSError(errno.ENOENT, "socket absent"))
+    assert _is_transient_mariadb_startup_error(
+        pymysql.err.OperationalError(2003, "Can't connect to MySQL server")
+    )
+    assert not _is_transient_mariadb_startup_error(
+        pymysql.err.OperationalError(1045, "Access denied")
+    )
+    assert not _is_transient_mariadb_startup_error(ValueError("bad test setup"))
+
+
+def test_connect_retries_only_transient_mariadb_startup_error(monkeypatch):
+    attempts = 0
+    connection = object()
+
+    def connect_once():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise pymysql.err.OperationalError(2003, "socket temporarily unavailable")
+        return connection
+
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    assert _connect_after_transient_mariadb_startup_error(
+        connect_once, timeout=1, retry_delay=0
+    ) is connection
+    assert attempts == 2
+
+
+def test_connect_preserves_permanent_mariadb_error_without_retry(monkeypatch):
+    attempts = 0
+    failure = pymysql.err.OperationalError(1045, "Access denied")
+
+    def connect_once():
+        nonlocal attempts
+        attempts += 1
+        raise failure
+
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    with pytest.raises(pymysql.err.OperationalError, match="Access denied"):
+        _connect_after_transient_mariadb_startup_error(
+            connect_once, timeout=1, retry_delay=0
+        )
+    assert attempts == 1
+
+
 def _apply_migration(connection, path):
     sql = "\n".join(
         line for line in path.read_text(encoding="utf-8").splitlines()
@@ -76,32 +207,15 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
             "-e", f"MARIADB_ROOT_PASSWORD={password}", IMAGE,
         )
         try:
-            socket_path = Path(socket_dir) / "mysqld.sock"
-            socket_ready = False
-            for _ in range(90):
-                probe = subprocess.run(
-                    [*docker, "exec", container, "test", "-S", "/run/mysqld/mysqld.sock"],
-                    capture_output=True, text=True, check=False,
-                )
-                if probe.returncode == 0:
-                    socket_ready = True
-                    break
-                time.sleep(1)
-            assert socket_ready, "MariaDB no creó su socket Unix"
-            _run(docker, "exec", "--user=root", container, "chmod", "0755", "/run/mysqld")
-            connection = None
-            last_error = None
-            for _ in range(90):
-                try:
-                    connection = pymysql.connect(
-                        unix_socket=str(socket_path), user="root", password=password,
-                        autocommit=False, charset="utf8mb4",
-                    )
-                    break
-                except (OSError, pymysql.MySQLError) as exc:
-                    last_error = exc
-                    time.sleep(1)
-            assert connection is not None, f"MariaDB socket no disponible: {last_error}"
+            socket_path = _wait_until_ready(docker, container, socket_dir, password)
+            connection = _connect_after_transient_mariadb_startup_error(
+                lambda: pymysql.connect(
+                    unix_socket=str(socket_path), user="root", password=password,
+                    autocommit=False, charset="utf8mb4", connect_timeout=5,
+                ),
+                timeout=10,
+                retry_delay=0.25,
+            )
             with connection:
                 with connection.cursor() as cursor:
                     cursor.execute("SELECT VERSION()")
@@ -279,37 +393,20 @@ def _ephemeral_mariadb():
             "-e", f"MARIADB_ROOT_PASSWORD={password}", IMAGE,
         )
         try:
-            socket_ready = False
-            for _ in range(90):
-                probe = subprocess.run(
-                    [*docker, "exec", container, "test", "-S", "/run/mysqld/mysqld.sock"],
-                    capture_output=True, text=True, check=False,
-                )
-                if probe.returncode == 0:
-                    socket_ready = True
-                    break
-                time.sleep(1)
-            assert socket_ready, "MariaDB no creó su socket Unix"
-            _run(docker, "exec", "--user=root", container, "chmod", "0755", "/run/mysqld")
-            socket_path = str(Path(socket_dir) / "mysqld.sock")
+            socket_path = str(_wait_until_ready(docker, container, socket_dir, password))
 
             def connect(**kwargs):
                 kwargs.setdefault("user", "root")
                 kwargs.setdefault("password", password)
-                return pymysql.connect(
-                    unix_socket=socket_path, autocommit=False, charset="utf8mb4", **kwargs
+                kwargs.setdefault("connect_timeout", 5)
+                return _connect_after_transient_mariadb_startup_error(
+                    lambda: pymysql.connect(
+                        unix_socket=socket_path, autocommit=False, charset="utf8mb4", **kwargs
+                    ),
+                    timeout=10,
+                    retry_delay=0.25,
                 )
 
-            last_error = None
-            for _ in range(90):
-                try:
-                    connect().close()
-                    break
-                except (OSError, pymysql.MySQLError) as exc:
-                    last_error = exc
-                    time.sleep(1)
-            else:
-                raise AssertionError(f"MariaDB socket no disponible: {last_error}")
             yield connect
         finally:
             subprocess.run([*docker, "stop", container], capture_output=True, text=True, check=False)
