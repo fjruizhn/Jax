@@ -129,3 +129,14 @@ Diseño verificado: NINGÚN documento de docs/superpowers/specs menciona OVERLAY
 Publicar los cierres de autoridad/bootstrap, solicitar auditoría escalón 3 del
 SHA exacto y verificar CI de ese SHA. No integrar hasta que auditoría, CI y
 preflight correspondan al mismo SHA.
+
+## Reanudación 2026-10-07
+
+- PR #381 sigue abierto. El head vigente era `aa8d31e3`; CI falló únicamente en
+  `no-fail-open-except`, que exige una marca `fail-soft` en el `except Exception`
+  de `test_concurrent_initializers_publish_one_genesis_anchor`. El bloque
+  devuelve la excepción al hilo padre para que el propio test clasifique el
+  resultado y falle ante cualquier clase inesperada.
+- Se agregó esa justificación específica en la línea del `except`. Pendiente:
+  revisar el diff, publicar el SHA nuevo, esperar CI completa y obtener auditoría
+  escalón 3 de ese mismo SHA antes de cualquier integración.

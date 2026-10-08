@@ -487,7 +487,7 @@ def test_concurrent_initializers_publish_one_genesis_anchor(tmp_path):
     def initialize():
         try:
             return initialize_authority_ledger(store, store.get_genesis(), root, anchor)
-        except Exception as exc:
+        except Exception as exc:  # fail-soft: el hilo padre clasifica el error devuelto y falla ante cualquier resultado inesperado
             return exc
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _: initialize(), range(2)))
