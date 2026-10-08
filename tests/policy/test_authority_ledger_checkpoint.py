@@ -382,6 +382,16 @@ def test_checkpoint_append_rejects_an_invalid_candidate_before_publication(tmp_p
     assert anchor.path.read_bytes() == before
 
 
+def test_checkpoint_store_rejects_first_row_after_legacy_sequence_one(tmp_path):
+    from policy.authority_ledger.canonical import canonical_bytes
+    anchor = TrustedCheckpointStore(tmp_path / "checkpoints.log")
+    anchor.path.write_bytes(
+        canonical_bytes(_checkpoint("ledger", 2, "event-2", "sha256:" + "2" * 64).projection()) + b"\n"
+    )
+    with pytest.raises(LedgerIntegrityError, match="primera fila"):
+        anchor.checkpoints()
+
+
 def test_append_uses_one_snapshot_and_stale_store_rejects_candidate_after_concurrent_revocation():
     """A concurrent revoke cannot change a candidate's replay input mid-append."""
     from tests.policy.test_authority_ledger_events import overlay, ratification_intent
@@ -457,6 +467,12 @@ def test_bootstrap_receipt_is_required_for_genesis_and_legacy_sequence_one_ancho
         verify_authority_ledger(store.get_genesis(), store.events(), root, legacy)
     legacy.bootstrap_receipt_path.write_bytes(original_receipt)
     assert verify_authority_ledger(store.get_genesis(), store.events(), root, legacy).checkpoint.sequence == 1
+    append_authority_event(
+        store, root, key,
+        AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
+        checkpoint_store=legacy,
+    )
+    assert verify_authority_ledger(store.get_genesis(), store.events(), root, legacy).checkpoint.sequence == 2
 
 
 def test_checkpoint_append_cannot_recreate_missing_external_log_from_database_head(tmp_path):

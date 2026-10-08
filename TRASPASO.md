@@ -152,11 +152,12 @@ preflight correspondan al mismo SHA.
 - Corrección en el árbol de trabajo: `TrustedCheckpointStore.append()` exige
   archivo existente; primera fila admite solo secuencia 0 o legacy 1; replay
   actual exige el contrato completo de `TrustedCheckpointStore` y siempre
-  valida el recibo, también para log legacy seq=1. Los dobles de prueba delegan
-  el contrato completo.
+  valida el recibo, también para log legacy seq=1. Usa una sola lectura completa
+  del log como snapshot del head. Los dobles de prueba delegan el contrato
+  completo.
 - Verificación local tras el cierre: checkpoint **27 passed**; suite
   `JAX_AUTHORITY_LEDGER_DOCKER_CMD='sudo -n docker' pytest -q
-  tests/policy/test_authority_ledger*.py` → **99 passed**;
+  tests/policy/test_authority_ledger*.py` → **100 passed**;
   `python3 -m compileall -q policy/authority_ledger
   tests/policy/test_authority_ledger_checkpoint.py` y `git diff --check` limpios.
 - Falta publicar el SHA nuevo, esperar CI y pedir auditoría escalón 3 de ese SHA.

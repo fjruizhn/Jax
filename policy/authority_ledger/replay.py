@@ -188,6 +188,10 @@ def _replay_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[A
         previous = event.event_hash
     checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, len(ordered), ordered[-1].event_id if ordered else None, previous)
     if checkpoint_store is not None:
+        anchor_rows = checkpoint_store.checkpoints()
+        if (not isinstance(anchor_rows, tuple) or not anchor_rows
+                or any(type(row) is not AuthorityLedgerCheckpoint for row in anchor_rows)):
+            raise LedgerIntegrityError("checkpoint externo no devolvió una cadena válida")
         root_projection = {"schema_version": trusted_root.schema_version, "kind": trusted_root.kind,
             "ledger_identity": trusted_root.ledger_identity, "genesis_hash": trusted_root.genesis_hash,
             "constitutional_key_id": trusted_root.constitutional_key_id,
@@ -198,7 +202,9 @@ def _replay_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[A
             "trusted_root_hash": domain_hash("JAX-TRUSTED-AUTHORITY-ROOT", "1.0", root_projection),
             "checkpoint_hash": genesis_checkpoint.authority_ledger_checkpoint_hash}
         checkpoint_store.validate_bootstrap_receipt(receipt)
-        anchored = checkpoint_store.latest()
+        # Use one external snapshot; a second latest() read could race a writer
+        # and combine different checkpoint generations in one verification.
+        anchored = anchor_rows[-1]
         if checkpoint.sequence < anchored.sequence:
             raise LedgerRollbackError("DB ledger truncado antes del checkpoint externo")
         if checkpoint.sequence > anchored.sequence:
