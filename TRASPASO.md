@@ -126,3 +126,20 @@ no concede autoridad ni prueba el estado operativo actual.
 - Ramas locales aún no contienen este fix; publicar commit de trabajo y pedir
   auditoría nueva del SHA final. Luego esperar CI exacta; antes de la auditoría
   final, archivar el handoff actualizado y quitar `TRASPASO.md`.
+
+## Fallos de CI y corrección final · 2026-10-08
+
+- CI del SHA `137ef5d568ec35d475bc0c44c5a5ea65cc59ce6a` reportó dos defectos:
+  `no-fail-open-except` exigía documentar tres `except` de limpieza como fail-soft;
+  `faro-fase0` fallaba porque el fake `AlmacenMemoria` no implementaba `leer`,
+  aunque `Topes.reconciliar()` y `AlmacenMariaDB` sí dependen de esa lectura.
+- Se declararon las tres razones de cleanup junto a sus `except`; se completó el
+  protocolo `AlmacenTopes.leer()` y el fake, incluyendo los modos de error y timeout.
+- Verificación local: suite Faro fase 0 completa **728 passed** (Python 3.12,
+  dependencias instaladas desde requirements fijados con hash); controles de
+  snapshot/schema/ataques **313 passed** (Python 3.14, Unicode 16); control de
+  excepts **21 passed**; `git diff --check` limpio.
+- El nuevo candidate aún no está comprometido ni publicado. Cometer código con
+  este handoff, luego archivar su contenido y retirar `TRASPASO.md`, publicar el
+  SHA resultante, repetir auditoría Tier 3 exacta y esperar CI verde antes de
+  integrar #370.

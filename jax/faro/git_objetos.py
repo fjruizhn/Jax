@@ -167,11 +167,11 @@ def _leer_cabecera_cat_file(stream, deadline: float) -> bytes:
 def _terminar_cat_file(proceso) -> None:
     try:
         proceso.kill()
-    except (OSError, ProcessLookupError, subprocess.SubprocessError):
+    except (OSError, ProcessLookupError, subprocess.SubprocessError):  # fail-soft: cleanup must preserve the original failure
         pass
     try:
         proceso.wait(timeout=5)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError):  # fail-soft: cleanup must preserve the original failure
         pass
 
 
@@ -248,7 +248,7 @@ def _leer_objetos_lote_limitado(
             if pipe is not None:
                 try:
                     pipe.close()
-                except OSError:
+                except OSError:  # fail-soft: pipe cleanup must preserve the original failure
                     pass
 
 
