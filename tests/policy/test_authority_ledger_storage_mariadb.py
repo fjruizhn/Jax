@@ -88,6 +88,16 @@ def _container_logs(docker: list[str], container: str, *, tail: int) -> str:
     return logs.stdout + logs.stderr
 
 
+def _final_mariadb_server_ready(logs: str) -> bool:
+    """Recognize completed init or the final TCP listener, never port-0 init."""
+    if "init process done" in logs:
+        return True
+    return re.search(
+        r"ready for connections\.\s*Version: [^\n]*\bport:\s*'?3306'?(?=\s|$)",
+        logs,
+    ) is not None
+
+
 def _wait_until_ready(
     docker: list[str], container: str, socket_dir: str, password: str, timeout: float = 60.0
 ) -> Path:
@@ -98,7 +108,9 @@ def _wait_until_ready(
     initialized = False
     while time.monotonic() < deadline:
         if not initialized:
-            initialized = "init process done" in _container_logs(docker, container, tail=20)
+            initialized = _final_mariadb_server_ready(
+                _container_logs(docker, container, tail=200)
+            )
         if initialized:
             _run(docker, "exec", "--user=root", container, "chmod", "0755", "/run/mysqld")
             try:
@@ -172,6 +184,19 @@ def test_connect_preserves_permanent_mariadb_error_without_retry(monkeypatch):
             connect_once, timeout=1, retry_delay=0
         )
     assert attempts == 1
+
+
+def test_final_server_detection_ignores_temporary_port_zero_startup() -> None:
+    temporary = """mariadbd: ready for connections.
+Version: '12.3.3-MariaDB' socket: '/run/mysqld/mysqld.sock' port: 0 mariadb.org
+"""
+    final_server = """mariadbd: ready for connections.
+Version: '12.3.3-MariaDB' socket: '/run/mysqld/mysqld.sock' port: 3306 mariadb.org
+"""
+
+    assert not _final_mariadb_server_ready(temporary)
+    assert _final_mariadb_server_ready(final_server)
+    assert _final_mariadb_server_ready("init process done")
 
 
 def _apply_migration(connection, path):

@@ -4611,7 +4611,7 @@ denormalizadas (incluido `previous_event_hash`), lectura histórica exacta y per
 
 ## `authority-ledger-mariadb/integration`
 
-Piso vigente (2026-10-08): `^8 passed in `. La base #377 tenía 5 pruebas en MariaDB 12.3.3 efímera
+Piso vigente (2026-10-08): `^9 passed in `. La base #377 tenía 5 pruebas en MariaDB 12.3.3 efímera
 `--network none`; la prueba aplica ambas migraciones, valida el upgrade nullable→NOT NULL,
 provisiona la cuenta de aplicación con el script versionado, genera una llave Ed25519 de prueba
 y valida firma → INSERT → lectura → reconstrucción → hash/firma y replay. También prueba que
@@ -4621,8 +4621,11 @@ efímera: el provisioning revoca los privilegios previos (`REVOKE ALL PRIVILEGES
 `SHOW GRANTS` coincide exacto con el contrato; la migración 002 falla cerrada con filas NULL aun con
 `sql_mode=''` (la fila queda intacta) y pasa con cero NULL. Para cerrar el fallo de CI #379, se
 agregaron tres pruebas unitarias sin contenedor que clasifican errores de conexión, comprueban el
-reintento acotado de fallos transitorios y aseguran que `1045 Access denied` no se reintente. La
-CI completa debe confirmar el total de 8 en Python 3.14.
+reintento acotado de fallos transitorios y aseguran que `1045 Access denied` no se reintente.
+El fallo de CI confirmó que MariaDB 12.3.3 anuncia el servidor de inicialización como `port: 0`
+y el servidor final como `port: 3306`; el detector ahora espera el segundo (o el marcador explícito
+`init process done`) antes de autenticar y consultar `SELECT 1`. Una regresión unitaria cubre ambos
+formatos. La CI debe confirmar el total de 9 en Python 3.14.
 
 ## `authority-rule-events/ratifications`
 

@@ -257,6 +257,13 @@ no concede autoridad ni prueba el estado operativo actual.
   corregir ambos pisos: loader 17 e Identity Shadow 674. Ese estado posterior
   se registra en `docs/ci/pisos.md`; esta nota conserva solo la medición histórica
   del primer candidato, no una afirmación del piso vigente.
+- CI del SHA `3371ecd0` reveló que MariaDB 12.3.3 registra `ready for connections`
+  para el servidor de inicialización en `port: 0` antes del servidor final en
+  `port: 3306`; esperar solo `init process done` vencía aunque el servidor final
+  ya estuviera listo. La detección ahora reconoce el marcador de init o la pareja
+  ready+port 3306, luego exige conexión autenticada y `SELECT 1`. Piso de integración
+  MariaDB: 8 -> 9. La regresión unitaria del detector pasa localmente; CI del nuevo
+  SHA debe volver a medir las nueve pruebas y el resto del workflow.
 - El `TRASPASO.md` operacional de la rama se retiró del candidato para evitar
   publicar instrucciones de una sesión ya terminada. Este registro guarda el
   contexto histórico; no declara estado vivo de PR, CI ni autoridad.
