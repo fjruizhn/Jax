@@ -1,5 +1,18 @@
 # Traspaso · fix/authority-ledger-sello-y-append
 
+## Continuación 2026-10-08 · reapilado sobre master actual
+
+Fernando pidió integrar los pendientes. El #370 ya está en master (`dee9426...`), por lo
+que el SHA antiguo `d082cc89` dejó de ser integrable aunque tuvo APROBADO Tier 3 y CI
+verde. El worktree `jax-377-fix`, rama `codex/integration-377`, está en merge local con
+`origin/master` para actualizar la base. Se conservan los pisos de ledger y se añade el
+piso de Identity Shadow de master (657); el Faro hereda 729. Conflictos resueltos en
+`ci/pisos.json`; se mantuvo el handoff raíz porque esta tarea sigue abierta.
+
+Siguiente: validar JSON/YAML y diff, medir pisos aplicables, completar el merge commit con
+trailer de Codex, empujar la rama al PR #377, pedir auditoría Tier 3 y esperar CI sobre el
+SHA nuevo. No reutilizar el APROBADO ni los checks de `d082cc89`.
+
 ## Objetivo
 
 Cerrar las dos fallas serias del auditor de escalón 3 (ronda 3 de #368/#369),

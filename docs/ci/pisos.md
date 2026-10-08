@@ -4638,3 +4638,25 @@ Piso nuevo de la migración: `policy/tests/test_pisos_fuera_del_workflow.py` (pe
 master 364ded9) y `policy/tests/test_comparar_pisos.py` (el comparador). 140 -> 213 -> 223 el
 2026-10-04 al agregar el comparador y sus casos, las pruebas del job aislado y las de claves duplicadas; 223 -> 227 (2026-10-04, ci/pisos-skipped-y-comentarios): +4 netas del comparador (5 pruebas de la excepción `^N passed` -> `^N' passed, M skipped`, menos 1 parámetro que deja de ser rojo). Medido en
 Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.
+
+## `identity-foundation-shadow/policy`
+
+Patrón vigente (2026-10-07, r9): `^637 passed`
+
+Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
+solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
+de la constitución es que un número compartido lo re-mide el último en llegar, y sin piso no hay
+número. Medido en hall9000: 459 (ronda 1) + 38 (ronda 2) + 43 (ronda 3: catálogo de topes, copias/pickle, nombres que esquivan, blob gigante, identidad de las listas del workflow, y las tres dedicadas de razon propia: dígito Unicode, claves de límites, not_after) de rule_authority (20 de schema — decisión R-4 de
+Fernando del 2026-10-06 y dígitos ASCII; 2 de snapshot — testigo no-dataclass; 16 de los ataques
+A–J del auditor como regresiones). El paso re-corre la misma lista en `-q | tee` como memory-b9.
+Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.
+
+r8 (2026-10-07, ronda 8 de jax#370): 574 -> 591. El runner (tests-puros, Python 3.14) dio 576 con la rama sobre
+master (que ya trae las pruebas de #368/#369/#374) y el piso decía 574; 576 +15 pruebas nuevas de la r8
+(D-4 como segmento y subcadena: 7 compuestas + 6 exactas, el contrapeso de subids legítimos y que el helper
+`catalogo_del_pin` no deje repos temporales). Medido en hall9000 con Python 3.14.4, pytest 9.1.1,
+pyyaml 6.0.3, cryptography 49.0.0 y el comando exacto del paso (`bash --noprofile --norc -eo pipefail`).
+
+r9 (2026-10-07): 591 -> 614 (+23: D-4 con sinónimos en inglés y raíces x11, `w0rkers` no se niega (límite documentado) x1, subids legítimos del catálogo real x11). Medido con Python 3.14.4 y el comando exacto del paso.
+
+r10 (2026-10-07, cierre del hallazgo del auditor en jax#370): 614 -> 637 (+23 netas: el periodo de un tope solo es un subid de la clase `frecuencia` del catalogo del pin; 1 prueba vieja se reemplaza por 20 negativas parametrizadas, 2 positivas del catalogo real y 2 de contrato). Medido con Python 3.14.4 y el comando exacto del paso.

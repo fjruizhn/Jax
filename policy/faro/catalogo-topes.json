@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "decision": "Fernando 2026-10-06: solo actos y dinero; nunca conexiones, concurrencia, workers, hilos, procesos ni agentes (D-4)",
+  "clases": {
+    "monto_dinero": ["hnl", "usd"],
+    "actos_externos": ["mensajes", "correos", "publicaciones", "compras", "pagos"],
+    "frecuencia": ["por_hora", "por_dia"],
+    "duracion": ["segundos"],
+    "tokens_costo": ["tokens", "usd"]
+  }
+}

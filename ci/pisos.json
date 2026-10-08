@@ -38,8 +38,8 @@
       "mensaje": "PISO ROTO: se esperaban 251 tests CORRIDOS de cli_sandbox."
     },
     "faro-fase0/faro": {
-      "patron": "^688 passed",
-      "mensaje": "PISO ROTO: se esperaban 688 tests CORRIDOS del Faro."
+      "patron": "^729 passed",
+      "mensaje": "PISO ROTO: se esperaban 729 tests CORRIDOS del Faro."
     },
     "faro-bitacora-db/faro-db": {
       "patron": "^40 passed",
@@ -208,6 +208,10 @@
     "authority-ledger-golden/vectors": {
       "patron": "^7 passed in ",
       "mensaje": "PISO ROTO: se esperaban 7 tests CORRIDOS del vector dorado (6 tipos históricos + genesis). Si cambió el formato canónico a propósito, recaptura las constantes en el mismo commit."
+    },
+    "identity-foundation-shadow/policy": {
+      "patron": "^657 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 657 tests CORRIDOS y 0 skipped de Identity Foundation Shadow (la politica sin DB)."
     }
   },
   "minimos": {
