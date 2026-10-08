@@ -155,3 +155,14 @@ no concede autoridad ni prueba el estado operativo actual.
 - El PR remoto ya recibió `92c13ff`; este nuevo cambio vuelve a cambiar el SHA.
   Falta cometerlo con este handoff, retirar/archivar el handoff actualizado,
   publicar el SHA final, pedir auditoría exacta y esperar CI verde.
+
+## Piso exacto de CI · 2026-10-08
+
+- Auditoría de `e941c3b59befa6347bcb126fd85deaa66f3e05c1` detectó que la nueva
+  prueba del protocolo suma uno al set Faro y el piso permanecía en 728.
+- Re-medición de la suite completa Fase 0 con Python 3.12 y requirements fijados
+  por hash: **729 passed**. `ci/pisos.json` y el comentario del workflow quedan
+  actualizados a 729; `comparar_pisos.py origin/master` confirma que no baja
+  ninguno de los pisos heredados.
+- Este SHA todavía debe probarse y auditarse en CI; el nuevo trabajo requiere
+  archivar y retirar el handoff antes de pedir auditoría final exacta.
