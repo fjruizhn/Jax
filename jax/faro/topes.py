@@ -80,6 +80,9 @@ class ResultadoTope:
 
 
 class AlmacenTopes(Protocol):
+    async def leer(self, clave: str, periodo: str) -> int:
+        """Devuelve el contador confirmado para reconciliar un resultado incierto."""
+
     async def sumar(self, clave: str, periodo: str, cantidad: int, tope: int | None) -> tuple[bool, int]:
         """(aplicado, usado). Con `tope`, aplica SOLO si `usado + cantidad <= tope`, en una operacion atomica."""
 

@@ -21,7 +21,7 @@ import pytest
 from jax.faro.aviso import Avisador, ConfigAviso, Credenciales
 from jax.faro.bitacora import Bitacora
 from jax.faro.catalogo_topes import es_de_catalogo, recursos_del_catalogo
-from jax.faro.topes import ResultadoTope, TopeProhibido, Topes
+from jax.faro.topes import AlmacenTopes, ResultadoTope, TopeProhibido, Topes
 
 RAIZ = Path(__file__).resolve().parents[1]
 # r7, MAJOR-1: el catalogo de las pruebas sale de un PIN de prueba (repo git
@@ -90,6 +90,10 @@ def test_resultado_y_bitacora_atan_el_consumo_al_catalogo_sellado_sin_permitir_s
     evento = next(r for r in registros if r["evento"] == "tope_sin_regla")
     assert evento["catalogo_oid"] == CATALOGO.oid_pin
     assert evento["catalogo_oid"] != "oid-forjado"
+
+
+def test_el_contrato_de_almacen_declara_lectura_para_reconciliar():
+    assert callable(getattr(AlmacenTopes, "leer", None))
 
 
 def test_reconciliacion_durable_conserva_el_oid_del_catalogo_sellado():
