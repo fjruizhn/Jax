@@ -251,6 +251,9 @@ no concede autoridad ni prueba el estado operativo actual.
   errores permanentes: `3 passed`; `py_compile` y `git diff --check` pasaron.
   No se pudo ejecutar MariaDB localmente por falta de permiso al socket Docker;
   la integración real se comprueba en CI.
+- La lista exacta de Identity Foundation Shadow creció de 657 a 673 al incluir
+  los 16 casos del loader en ambos pasos del workflow. Medición local: `673
+  passed in 4.29s`, cero skipped; CI debe confirmarla en el SHA publicado.
 - El `TRASPASO.md` operacional de la rama se retiró del candidato para evitar
   publicar instrucciones de una sesión ya terminada. Este registro guarda el
   contexto histórico; no declara estado vivo de PR, CI ni autoridad.

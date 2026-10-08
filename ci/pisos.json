@@ -214,8 +214,8 @@
       "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS de los ataques al sello del loader de Block 3 (replace, construccion directa, congelado, subclases, metodo sombreado, binding por campo de las 6 entradas). 14 -> 16 el 2026-10-07 (chore/pisos-doc-binding, sobre #379 7bd266e7): +2 del binding campo por campo, canonicalizer_identity y bootstrap_bundle_id (mutantes de quitarlos de _contenido_canonico medidos muertos)."
     },
     "identity-foundation-shadow/policy": {
-      "patron": "^657 passed in ",
-      "mensaje": "PISO ROTO: se esperaban exactamente 657 tests CORRIDOS y 0 skipped de Identity Foundation Shadow (la politica sin DB)."
+      "patron": "^673 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 673 tests CORRIDOS y 0 skipped de Identity Foundation Shadow (incluye 16 ataques al sello del loader de autoridad)."
     }
   },
   "minimos": {

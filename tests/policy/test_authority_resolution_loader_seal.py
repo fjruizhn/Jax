@@ -218,6 +218,26 @@ def test_metodo_sombreado_en_la_instancia_no_engana_a_los_consumidores():
     _expect_deny(corpus)
 
 
+def test_contenido_canonico_sombreado_no_acepta_hash_alterado():
+    """Un atributo de instancia no puede elegir el contenido del binding.
+
+    El atacante conserva la proyección canónica que el loader selló, cambia el
+    hash público y sombrea ``_contenido_canonico`` para devolver la proyección
+    antigua. Antes del cierre, ``_was_loader_validated`` invocaba el método por
+    la instancia y ambos consumidores aceptaban este corpus que el loader no
+    produjo.
+    """
+    corpus = load_validated_candidate(ROOT)
+    contenido_sellado = corpus._contenido_canonico()
+    object.__setattr__(corpus, "policy_corpus_hash", "sha256:" + "ab" * 32)
+    object.__setattr__(corpus, "_contenido_canonico", lambda: contenido_sellado)
+
+    # Documenta la primitiva atacante sin depender de una llamada enlazada del
+    # consumidor: en la versión vulnerable este aserto era True.
+    assert not ValidatedCandidateCorpus._was_loader_validated(corpus)
+    _expect_deny(corpus)
+
+
 def _alterar_normative_documents(corpus):
     nuevo = (_documento_sintetico(),)
     assert nuevo != corpus.normative_documents

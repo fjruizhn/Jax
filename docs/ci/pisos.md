@@ -4685,7 +4685,7 @@ Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_
 cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-08, tras #370/#377): `^657 passed in `
+Patrón vigente (2026-10-08, tras #370/#377/#379): `^673 passed in `
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4709,3 +4709,8 @@ Ronda final de #370: 637 -> 657. Se añadieron las regresiones del matcher estri
 declaración explícita de `TestEvidenceIngester.__test__ = False`; medición exacta local
 de la lista del workflow: `657 passed in 5.23s`, cero skipped. Véase el cierre auditado
 en el registro histórico de Faro F1.1.
+
+El cierre de #379 agrega 16 casos del sello del loader de autoridad a esa lista: 657 -> 673.
+La misma ruta se incorpora tanto al paso detallado como al piso exacto; una regresión exige
+que ambas listas coincidan. Medición local exacta en Python 3.14.4: `673 passed in 4.29s`,
+cero skipped; el CI del PR debe confirmarlo sobre el SHA publicado.

@@ -341,7 +341,12 @@ class ValidatedCandidateCorpus:
         if self._loader_seal is not _VALIDATED_CANDIDATE_SEAL:
             return False
         binding = getattr(self, "_content_binding", None)
-        return binding == _digest_contenido(self._contenido_canonico())
+        # No se despacha por la instancia: aun un ``frozen`` dataclass puede
+        # recibir atributos mediante ``object.__setattr__``. Un atacante no
+        # puede sustituir la proyección que se compara contra el sello.
+        return binding == _digest_contenido(
+            ValidatedCandidateCorpus._contenido_canonico(self)
+        )
 
 @dataclass(frozen=True)
 class ValidatedStaticPolicyView:

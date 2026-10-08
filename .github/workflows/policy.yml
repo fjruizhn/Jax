@@ -2666,6 +2666,8 @@ jobs:
         # de colección permanecen visibles y rompen el resumen estricto del piso.
         # El resumen completo, incluido 0 skipped,
         # es el piso: un salto no puede verse verde por prefijo.
+        # #379 agrega 16 pruebas del sello del loader, también en la lista del paso
+        # anterior: piso combinado 673; ambas listas se comprueban iguales en tests.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
@@ -2708,6 +2710,7 @@ jobs:
             tests/policy/test_authority_resolution_conflicts.py \
             tests/policy/test_authority_resolution_result_contract.py \
             tests/policy/test_authority_resolution_candidate_boundary.py \
+            tests/policy/test_authority_resolution_loader_seal.py \
             tests/policy/test_authority_resolution_determinism.py \
             tests/policy/test_authority_resolution_purity.py \
             tests/policy/test_enforcement_evidence_core.py \
