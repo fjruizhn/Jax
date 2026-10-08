@@ -15,7 +15,7 @@ from .models import (AuthorityEvent, AuthorityEventType, AuthorityLedgerCheckpoi
                      OverlayPayload, OverlayType)
 from .signatures import decode_public_key, public_key_bytes, public_key_fingerprint, verify
 from .trusted_root import TrustedAuthorityRoot
-from .trusted_checkpoint import TrustedCheckpointStore
+from .trusted_checkpoint import TrustedCheckpointStore, require_trusted_checkpoint_store
 from .errors import LedgerRollbackError, UnanchoredLedgerHeadError
 
 
@@ -97,8 +97,7 @@ _REPLAY_SEAL = object()
 
 def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[AuthorityEvent], trusted_root: TrustedAuthorityRoot, checkpoint_store: TrustedCheckpointStore) -> ReconstructedAuthorityState:
     """Verify current authority against its mandatory external checkpoint."""
-    if checkpoint_store is None:
-        raise AuthorityStateError("autoridad actual requiere TrustedCheckpointStore externo")
+    checkpoint_store = require_trusted_checkpoint_store(checkpoint_store)
     return _replay_authority_ledger(genesis, events, trusted_root, checkpoint_store, historical=False)
 
 
@@ -189,8 +188,6 @@ def _replay_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[A
         previous = event.event_hash
     checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, len(ordered), ordered[-1].event_id if ordered else None, previous)
     if checkpoint_store is not None:
-        anchor_rows = checkpoint_store.checkpoints() if hasattr(checkpoint_store, "checkpoints") else (checkpoint_store.latest(),)
-        has_genesis_anchor = bool(anchor_rows and anchor_rows[0].sequence == 0)
         root_projection = {"schema_version": trusted_root.schema_version, "kind": trusted_root.kind,
             "ledger_identity": trusted_root.ledger_identity, "genesis_hash": trusted_root.genesis_hash,
             "constitutional_key_id": trusted_root.constitutional_key_id,
@@ -200,8 +197,7 @@ def _replay_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[A
             "ledger_identity": genesis.ledger_identity, "genesis_hash": genesis_hash(genesis),
             "trusted_root_hash": domain_hash("JAX-TRUSTED-AUTHORITY-ROOT", "1.0", root_projection),
             "checkpoint_hash": genesis_checkpoint.authority_ledger_checkpoint_hash}
-        if hasattr(checkpoint_store, "validate_bootstrap_receipt"):
-            checkpoint_store.validate_bootstrap_receipt(receipt, has_genesis_anchor)
+        checkpoint_store.validate_bootstrap_receipt(receipt)
         anchored = checkpoint_store.latest()
         if checkpoint.sequence < anchored.sequence:
             raise LedgerRollbackError("DB ledger truncado antes del checkpoint externo")

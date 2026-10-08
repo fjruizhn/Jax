@@ -20,7 +20,7 @@ from .signatures import decode_public_key, public_key_bytes, public_key_fingerpr
 from .storage import AuthorityLedgerStore
 from .trusted_root import TrustedAuthorityRoot
 from .canonical import domain_hash, plain
-from .trusted_checkpoint import TrustedCheckpointStore
+from .trusted_checkpoint import TrustedCheckpointStore, require_trusted_checkpoint_store
 
 
 def _uuid7() -> str:
@@ -32,6 +32,7 @@ def _uuid7() -> str:
 
 def initialize_authority_ledger(store: AuthorityLedgerStore, genesis: AuthorityLedgerGenesis, trusted_root: TrustedAuthorityRoot, checkpoint_store: TrustedCheckpointStore) -> None:
     """Bootstrap an empty ledger once; use `verify_authority_ledger` afterward."""
+    checkpoint_store = require_trusted_checkpoint_store(checkpoint_store)
     if store.get_genesis() != genesis:
         raise TrustedRootMismatchError("genesis de storage no es el genesis solicitado")
     with checkpoint_store.locked():
@@ -74,6 +75,7 @@ def ratification_intent_from_candidate(corpus, evidence_refs: tuple[str, ...] = 
 
 def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, private_key: Ed25519PrivateKey, intent: AuthorityEventIntent, *, event_id: str | None = None, recorded_at_utc: datetime | None = None, checkpoint_store: TrustedCheckpointStore) -> AuthorityEvent:
     """Append one signed Fernando event after verifying the complete ledger."""
+    checkpoint_store = require_trusted_checkpoint_store(checkpoint_store)
     # The checkpoint sidecar is the cross-process writer boundary for this
     # deployment's single host/local filesystem.  It spans every ledger read,
     # the DB append+commit, durable checkpoint publication, and its reread.
@@ -156,6 +158,7 @@ def reanchor_authority_checkpoint(store: AuthorityLedgerStore, trusted_root: Tru
     This cannot recreate missing trust evidence. It accepts only a valid-prefix
     database head, and is idempotent when the checkpoint already matches.
     """
+    checkpoint_store = require_trusted_checkpoint_store(checkpoint_store)
     with checkpoint_store.locked():
         return _reanchor_authority_checkpoint_unlocked(store, trusted_root, checkpoint_store)
 

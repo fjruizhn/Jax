@@ -88,12 +88,14 @@ class TrustedCheckpointStore:
     def _append_locked(self, checkpoint: AuthorityLedgerCheckpoint) -> None:
         """Publish while ``locked()`` is held, then reread the exact record."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        checkpoints = self._read_all() if self.path.exists() else ()
-        current = checkpoints[-1] if checkpoints else None
-        if current is not None and checkpoint.sequence <= current.sequence:
+        # Only bootstrap() may create the zero anchor. A normal append must
+        # never reconstruct missing external evidence from the DB head.
+        checkpoints = self._read_all()
+        current = checkpoints[-1]
+        if checkpoint.sequence <= current.sequence:
             raise LedgerRollbackError("checkpoint externo no permite retroceso ni secuencia repetida")
         self._validate_checkpoint(checkpoint, current)
-        prior = self.path.read_bytes() if self.path.exists() else b""
+        prior = self.path.read_bytes()
         payload = prior + canonical_bytes(checkpoint.projection()) + b"\n"
         fd, temporary = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
         try:
@@ -121,12 +123,8 @@ class TrustedCheckpointStore:
     def checkpoints(self) -> tuple[AuthorityLedgerCheckpoint, ...]:
         return self._read_all()
 
-    def validate_bootstrap_receipt(self, expected: dict, has_genesis_checkpoint: bool) -> None:
-        """Require the exact one-time receipt iff the external log has seq 0."""
-        if not has_genesis_checkpoint:
-            if self.bootstrap_receipt_path.exists():
-                raise LedgerIntegrityError("recibo bootstrap presente sin checkpoint genesis")
-            return
+    def validate_bootstrap_receipt(self, expected: dict) -> None:
+        """Require the exact external genesis receipt for every current log format."""
         try:
             raw = self.bootstrap_receipt_path.read_bytes()
         except OSError as exc:
@@ -161,6 +159,10 @@ class TrustedCheckpointStore:
                 raise LedgerIntegrityError("checkpoint externo inválido") from exc
             if canonical_bytes(checkpoint.projection()) != row:
                 raise LedgerIntegrityError("checkpoint externo no es canónico")
+            if not checkpoints and checkpoint.sequence not in (0, 1):
+                raise LedgerIntegrityError(
+                    "primera fila del checkpoint debe ser genesis cero o legacy secuencia uno"
+                )
             self._validate_checkpoint(checkpoint, checkpoints[-1] if checkpoints else None)
             checkpoints.append(checkpoint)
         if not checkpoints:
@@ -193,3 +195,15 @@ class TrustedCheckpointStore:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+
+
+def require_trusted_checkpoint_store(value) -> TrustedCheckpointStore:
+    """Reject partial adapters before they can represent current authority."""
+    required = ("locked", "latest", "checkpoints", "validate_bootstrap_receipt",
+                "append", "bootstrap")
+    if (not isinstance(value, TrustedCheckpointStore)
+            or any(not callable(getattr(value, name, None)) for name in required)):
+        raise LedgerIntegrityError(
+            "autoridad actual requiere TrustedCheckpointStore completo con checkpoint y recibo externos"
+        )
+    return value

@@ -140,3 +140,23 @@ preflight correspondan al mismo SHA.
 - Se agregó esa justificación específica en la línea del `except`. Pendiente:
   revisar el diff, publicar el SHA nuevo, esperar CI completa y obtener auditoría
   escalón 3 de ese mismo SHA antes de cualquier integración.
+
+## Auditoría e1843cef y cierre de BLOCKs · 2026-10-07
+
+- Auditoría escalón 3 de `e1843cefa1aab52d4b34318fc3da0d5fc47f3069`:
+  **RECHAZADO**, dos BLOCK. (1) `append()` podía crear desde cero un log con
+  cualquier checkpoint positivo, y replay aceptaba primera secuencia 1 sin
+  recibo, permitiendo reconstruir la evidencia externa desde la DB. (2) el
+  replay degradaba un proveedor que solo tuviera `latest()` y omitía la
+  validación del recibo por `hasattr`.
+- Corrección en el árbol de trabajo: `TrustedCheckpointStore.append()` exige
+  archivo existente; primera fila admite solo secuencia 0 o legacy 1; replay
+  actual exige el contrato completo de `TrustedCheckpointStore` y siempre
+  valida el recibo, también para log legacy seq=1. Los dobles de prueba delegan
+  el contrato completo.
+- Verificación local tras el cierre: checkpoint **27 passed**; suite
+  `JAX_AUTHORITY_LEDGER_DOCKER_CMD='sudo -n docker' pytest -q
+  tests/policy/test_authority_ledger*.py` → **99 passed**;
+  `python3 -m compileall -q policy/authority_ledger
+  tests/policy/test_authority_ledger_checkpoint.py` y `git diff --check` limpios.
+- Falta publicar el SHA nuevo, esperar CI y pedir auditoría escalón 3 de ese SHA.
