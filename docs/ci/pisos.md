@@ -4670,13 +4670,13 @@ que rompe la verificabilidad del ledger histórico.
 
 Piso exacto propio (2026-10-07, Jax#379, ronda 2) del archivo
 `tests/policy/test_authority_resolution_loader_seal.py`: antes solo contaba dentro del paso
-grande «Identity Foundation Shadow», sin número propio. 16 passed (Python 3.14.4, local):
+grande «Identity Foundation Shadow», sin número propio. 17 passed (Python 3.14.4, local):
 6 de la ronda 1 (replace, replace con contenido alterado, construcción directa, congelado
 profundo, drift del digest, sello y binding del corpus real) + 4 de subclases y método
 sombreado (definición de subclase falla, subclase que afirma estar validada, subclase con
 sello legítimo, método sombreado en la instancia) + 6 del binding campo por campo — las seis
 entradas de `_contenido_canonico`, una por caso (`normative_documents`, `policy_corpus_hash`,
-`manifest`, `authority`, `canonicalizer_identity`, `bootstrap_bundle_id`). Patrón: `^16 passed in `.
+`manifest`, `authority`, `canonicalizer_identity`, `bootstrap_bundle_id`) y la proyección canónica sombreada. Patrón: `^17 passed in `.
 14 -> 16 el 2026-10-07 (chore/pisos-doc-binding, sobre #379 `7bd266e7`): +2 fijando
 `canonicalizer_identity` (alterado a otra identidad plausible) y `bootstrap_bundle_id` (otro
 hash con la misma forma válida de `_HASH`, para que solo el binding lo delate); los mutantes
@@ -4685,7 +4685,7 @@ Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_
 cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-08, tras #370/#377/#379): `^673 passed in `
+Patrón vigente (2026-10-08, tras #370/#377/#379): `^674 passed in `
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4710,7 +4710,8 @@ declaración explícita de `TestEvidenceIngester.__test__ = False`; medición ex
 de la lista del workflow: `657 passed in 5.23s`, cero skipped. Véase el cierre auditado
 en el registro histórico de Faro F1.1.
 
-El cierre de #379 agrega 16 casos del sello del loader de autoridad a esa lista: 657 -> 673.
+El cierre de #379 agrega 16 casos del sello del loader de autoridad a esa lista: 657 -> 673;
+el cierre del bypass de proyección canónica agrega uno: 673 -> 674.
 La misma ruta se incorpora tanto al paso detallado como al piso exacto; una regresión exige
-que ambas listas coincidan. Medición local exacta en Python 3.14.4: `673 passed in 4.29s`,
-cero skipped; el CI del PR debe confirmarlo sobre el SHA publicado.
+que ambas listas coincidan. Medición local exacta en Python 3.14.4: `674 passed` en la lista
+completa, cero skipped; el CI del PR debe confirmarlo sobre el SHA publicado.

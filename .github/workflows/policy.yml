@@ -2666,8 +2666,8 @@ jobs:
         # de colección permanecen visibles y rompen el resumen estricto del piso.
         # El resumen completo, incluido 0 skipped,
         # es el piso: un salto no puede verse verde por prefijo.
-        # #379 agrega 16 pruebas del sello del loader, también en la lista del paso
-        # anterior: piso combinado 673; ambas listas se comprueban iguales en tests.
+        # #379 agrega 17 pruebas del sello del loader, también en la lista del paso
+        # anterior: piso combinado 674; ambas listas se comprueban iguales en tests.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
@@ -2802,9 +2802,8 @@ jobs:
       - name: Block 3 sello del loader (authority_resolution) -- piso exacto
         # Ataques de falsificación del sello del corpus validado (replace,
         # subclases, método sombreado, binding campo por campo de las 6
-        # entradas). 16 passed: 14 -> 16 el 2026-10-07 (chore/pisos-doc-binding,
-        # sobre #379): +2 fijando canonicalizer_identity y bootstrap_bundle_id
-        # (mutantes de quitarlos de _contenido_canonico medidos muertos).
+        # entradas y proyección canónica sombreada). 17 passed: 14 -> 16 el
+        # 2026-10-07; 16 -> 17 el 2026-10-08 por cierre del bypass del método.
         env:
           PYTHONPATH: "."
         run: |
