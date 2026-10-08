@@ -2661,10 +2661,11 @@ jobs:
         # test_rule_authority_providers.py —guard con lease valido y dato malo, exclusion
         # de leases determinista, catalogo con centinela, confirmar del checkpoint— y +4 de
         # test_rule_authority_ataques.py por el limite declarado del lector de listas, W3).
-        # Merge anterior #370 r10 (637) + #373 paso 7 r3 (121) midió 758. El SHA final
-        # de #370 añade 20 tests de policy al árbol combinado: 778 passed medidos con
-        # el comando exacto de este paso, Python 3.14.4; TestEvidenceIngester declara
-        # __test__=False y cualquier otra advertencia permanece visible.
+        # Merge #370 final + providers r3 midió 778. Las revisiones del auditor añaden
+        # prioridad de writer, catálogo cerrado, tipos escalares exactos y el contrato
+        # de límites alineado al schema: 791 passed, medidos con el comando exacto de
+        # este paso, Python 3.14.4. TestEvidenceIngester declara __test__=False;
+        # cualquier otra advertencia permanece visible.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail

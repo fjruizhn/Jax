@@ -16,7 +16,6 @@ from typing import Iterator
 
 from policy.rule_authority.errors import (
     CheckpointInvalido,
-    ClasificacionDesconocida,
     ProveedorInvalido,
     RelojInvalido,
     RelojRetrocedio,
@@ -24,6 +23,7 @@ from policy.rule_authority.errors import (
     StopDesconocido,
 )
 from policy.rule_authority.providers import (
+    CatalogoClasificacion,
     ClaseCapability,
     ContratoCapability,
     EstadoStop,
@@ -49,6 +49,7 @@ class RWLock:
         self._escritor = False
         self._dueno: int | None = None
         self._esperando = 0              # hilos bloqueados en wait(): observable por las pruebas
+        self._esperando_escritores = 0   # evita que lectores nuevos adelanten writers
 
     def esperando(self) -> int:
         with self._cond:
@@ -68,7 +69,7 @@ class RWLock:
         with self._cond:
             if self._dueno == yo:
                 raise RuleAuthorityError("compartido dentro de exclusivo: reentrada no soportada")
-            while self._escritor:
+            while self._escritor or self._esperando_escritores:
                 self._esperar()
             self._lectores += 1
             self._ids_lectores[yo] = self._ids_lectores.get(yo, 0) + 1
@@ -90,10 +91,15 @@ class RWLock:
                 raise RuleAuthorityError("exclusivo dentro de exclusivo: reentrada no soportada")
             if yo in self._ids_lectores:
                 raise RuleAuthorityError("exclusivo dentro de compartido: promocion no soportada")
-            while self._escritor or self._lectores:
-                self._esperar()
-            self._escritor = True
-            self._dueno = yo
+            self._esperando_escritores += 1
+            try:
+                while self._escritor or self._lectores:
+                    self._esperar()
+                self._escritor = True
+                self._dueno = yo
+            finally:
+                self._esperando_escritores -= 1
+                self._cond.notify_all()
         try:
             yield
         finally:
@@ -205,21 +211,7 @@ class RelojDeterminista:
         self._piso = max(self._piso or momento, momento)
 
 
-class CatalogoFijo:
-    """Valor del lease de clasificacion: capability ausente => ClasificacionDesconocida."""
-
-    def __init__(self, contratos: dict) -> None:
-        self._contratos = dict(contratos)
-
-    def contrato_de(self, capability: str) -> ContratoCapability:
-        try:
-            return self._contratos[capability]
-        except KeyError:
-            raise ClasificacionDesconocida(
-                f"capability sin clasificacion confiable: {capability!r} (el kernel NIEGA)") from None
-
-    def con(self, capability: str, contrato: ContratoCapability) -> "CatalogoFijo":
-        return CatalogoFijo({**self._contratos, capability: contrato})
+CatalogoFijo = CatalogoClasificacion
 
 
 class ClasificacionFija(_BaseConLeases):

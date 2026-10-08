@@ -62,7 +62,26 @@ T0 = datetime(2026, 10, 6, 12, 0, 0, tzinfo=timezone.utc)
 RAIZ = Path(__file__).resolve().parents[2]
 
 
+class _SiempreMayor(int):
+    def __gt__(self, otro: object) -> bool:
+        return True
+
+    def __eq__(self, otro: object) -> bool:
+        return False
+
+
+class _SiempreIgual(str):
+    def __eq__(self, otro: object) -> bool:
+        return True
+
+    __hash__ = str.__hash__
+
+
 def _contrato(clase: ClaseCapability) -> ContratoCapability:
+    if clase is ClaseCapability.REVERSIBLE:
+        return ContratoCapability(identidad="cap-x", version="v1", clase=clase,
+                                  unidad=None, moneda=None,
+                                  forma_limites=FormaLimites.NINGUNA)
     return ContratoCapability(identidad="cap-x", version="v1", clase=clase,
                               unidad="mensajes", moneda=None,
                               forma_limites=FormaLimites.CANTIDAD)
@@ -154,6 +173,20 @@ def test_a1_version_valida_entero_no_negativo_y_compara() -> None:
     assert VersionMonotonica(6).es_posterior_a(VersionMonotonica(5))
 
 
+def test_version_rechaza_subclase_int_con_comparacion_hostil() -> None:
+    with pytest.raises(ProveedorInvalido):
+        VersionMonotonica(_SiempreMayor(0))
+
+
+@pytest.mark.parametrize("campo", ["identidad", "version", "unidad", "moneda"])
+def test_contrato_rechaza_subclases_str_en_campos_de_identidad(campo: str) -> None:
+    datos = {"identidad": "cap-x", "version": "v1", "clase": ClaseCapability.OBLIGATING,
+             "unidad": "mensajes", "moneda": "HNL", "forma_limites": FormaLimites.CANTIDAD}
+    datos[campo] = _SiempreIgual(str(datos[campo]))
+    with pytest.raises(ProveedorInvalido):
+        ContratoCapability(**datos)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("malo", [True, -1, "5", 1.5, None])
 def test_version_invalida_niega(malo: object) -> None:
     with pytest.raises(ProveedorInvalido):
@@ -187,8 +220,44 @@ def test_forma_de_limites_es_enum_cerrado_y_entra_en_la_identidad() -> None:
                            unidad=None, moneda=None, forma_limites="cantidad")   # type: ignore[arg-type]
     a = _contrato(ClaseCapability.OBLIGATING)
     b = ContratoCapability(identidad="cap-x", version="v1", clase=ClaseCapability.OBLIGATING,
-                           unidad="mensajes", moneda=None, forma_limites=FormaLimites.MONTO)
+                           unidad=None, moneda="HNL", forma_limites=FormaLimites.MONTO)
     assert a != b and hash(a) != hash(b)
+
+
+@pytest.mark.parametrize(
+    "clase,unidad,moneda,forma",
+    [
+        (ClaseCapability.OBLIGATING, None, None, FormaLimites.NINGUNA),
+        (ClaseCapability.OBLIGATING, None, "HNL", FormaLimites.CANTIDAD),
+        (ClaseCapability.OBLIGATING, "mensajes", None, FormaLimites.MONTO),
+        (ClaseCapability.REVERSIBLE, "mensajes", None, FormaLimites.NINGUNA),
+        (ClaseCapability.REVERSIBLE, None, "HNL", FormaLimites.NINGUNA),
+    ],
+)
+def test_contrato_rechaza_forma_de_limites_incoherente(
+    clase: ClaseCapability, unidad: str | None, moneda: str | None,
+    forma: FormaLimites,
+) -> None:
+    with pytest.raises(ProveedorInvalido):
+        ContratoCapability(identidad="cap-x", version="v1", clase=clase,
+                           unidad=unidad, moneda=moneda, forma_limites=forma)
+
+
+def test_forma_limites_solo_contiene_los_tres_valores_del_schema() -> None:
+    assert {item.value for item in FormaLimites} == {"NINGUNA", "CANTIDAD", "MONTO"}
+
+
+def test_reversible_puede_declarar_forma_cantidad_o_monto_coherente() -> None:
+    cantidad = ContratoCapability(identidad="cap-c", version="v1",
+                                  clase=ClaseCapability.REVERSIBLE,
+                                  unidad="mensajes", moneda=None,
+                                  forma_limites=FormaLimites.CANTIDAD)
+    monto = ContratoCapability(identidad="cap-m", version="v1",
+                               clase=ClaseCapability.REVERSIBLE,
+                               unidad=None, moneda="HNL",
+                               forma_limites=FormaLimites.MONTO)
+    assert cantidad.forma_limites is FormaLimites.CANTIDAD
+    assert monto.forma_limites is FormaLimites.MONTO
 
 
 def test_m10_m8_version_negativa_niega_e_iguales_no_son_posteriores() -> None:
@@ -244,6 +313,47 @@ def test_a2_la_exclusion_es_real_de_hilo_a_hilo(duenyo: str, intento: str, razon
             soltar.set()
     hilo.join(timeout=5.0)
     assert not hilo.is_alive()
+
+
+def test_un_lector_nuevo_no_se_adelanta_a_un_escritor_que_ya_espera() -> None:
+    proveedor = PinFijo(PIN, PROC)
+    escritor_entro, soltar_escritor = threading.Event(), threading.Event()
+    lector_entro, soltar_lector = threading.Event(), threading.Event()
+
+    def escritor() -> None:
+        with proveedor.lease_exclusivo():
+            escritor_entro.set()
+            soltar_escritor.wait(timeout=5.0)
+
+    def lector() -> None:
+        with proveedor.lease_compartido():
+            lector_entro.set()
+            soltar_lector.wait(timeout=5.0)
+
+    with proveedor.lease_compartido():
+        hilo_escritor = threading.Thread(target=escritor, daemon=True)
+        hilo_escritor.start()
+        limite = time.monotonic() + 5.0
+        while proveedor.esperando() < 1:
+            assert time.monotonic() < limite, "el escritor no quedo esperando"
+            time.sleep(0.0005)
+        hilo_lector = threading.Thread(target=lector, daemon=True)
+        hilo_lector.start()
+        while proveedor.esperando() < 2 and not lector_entro.is_set():
+            assert time.monotonic() < limite, "el lector no quedo esperando"
+            time.sleep(0.0005)
+        assert not escritor_entro.is_set() and not lector_entro.is_set()
+
+    try:
+        assert escritor_entro.wait(timeout=5.0), "el escritor no progreso al liberar el lector"
+        assert not lector_entro.is_set(), "un lector nuevo adelanto al escritor pendiente"
+    finally:
+        soltar_escritor.set()
+    assert lector_entro.wait(timeout=5.0), "el lector no progreso despues del escritor"
+    soltar_lector.set()
+    hilo_escritor.join(timeout=5.0)
+    hilo_lector.join(timeout=5.0)
+    assert not hilo_escritor.is_alive() and not hilo_lector.is_alive()
 
 
 def test_dos_compartidos_coexisten() -> None:
@@ -529,9 +639,8 @@ class _CatalogoQueExplota:
     _CatalogoQueExplota(),
 ])
 def test_x5_capability_desconocida_que_no_niega_se_niega(catalogo: object) -> None:
-    """§13 (decision de Hyde): capability desconocida => NIEGA. El guard sondea
-    la centinela y exige ClasificacionDesconocida; REVERSIBLE o None pasaban."""
-    _niega("capability desconocida|centinela", clasificacion=_Crudo(catalogo))
+    """Los catalogos abiertos no cruzan la frontera cerrada del lease."""
+    _niega("CatalogoClasificacion cerrado", clasificacion=_Crudo(catalogo))
 
 
 @pytest.mark.parametrize("valor", [None, "x", {"CAP_X": 1}])
@@ -539,32 +648,14 @@ def test_el_valor_del_lease_de_clasificacion_debe_ser_un_catalogo(valor: object)
     _niega("CatalogoClasificacion", clasificacion=_Crudo(valor))
 
 
-def test_el_catalogo_que_niega_la_centinela_pasa_y_la_centinela_no_existe() -> None:
+def test_catalogo_cerrado_pasa_y_capability_ausente_niega() -> None:
     exigir_contrato_de_emision(**_suite(clasificacion=_Crudo(CatalogoFijo({}))))
     with pytest.raises(ClasificacionDesconocida):
         CatalogoFijo({"CAP_X": _contrato(ClaseCapability.OBLIGATING)}).contrato_de("__no_existe__")
 
 
-class _CatalogoQueRegistra:
-    def __init__(self) -> None:
-        self.pedidas: list[str] = []
-
-    def contrato_de(self, capability: str) -> object:
-        self.pedidas.append(capability)
-        raise ClasificacionDesconocida(capability)
-
-
-def test_la_centinela_es_aleatoria_por_llamada_y_no_es_api_publica() -> None:
-    import policy.rule_authority.providers as P
-    assert not hasattr(P, "CAPABILITY_CENTINELA") and "CAPABILITY_CENTINELA" not in P.__all__
-    catalogo = _CatalogoQueRegistra()
-    for _ in range(3):
-        exigir_contrato_de_emision(**_suite(clasificacion=_Crudo(catalogo)))
-    assert len(catalogo.pedidas) == 3 and len(set(catalogo.pedidas)) == 3
-
-
 class _CatalogoQueConoceLaCentinelaVieja:
-    """Niega SOLO la centinela fija de la r3 y responde REVERSIBLE a todo lo demas."""
+    """Catalogo abierto: intenta distinguir un nombre reservado y dar fallback."""
 
     def contrato_de(self, capability: str) -> object:
         if capability == "__centinela_sin_clasificar__":
@@ -572,9 +663,22 @@ class _CatalogoQueConoceLaCentinelaVieja:
         return _contrato(ClaseCapability.REVERSIBLE)
 
 
-def test_catalogo_con_caso_especial_para_una_centinela_conocida_no_pasa() -> None:
-    _niega("capability desconocida",
+def test_catalogo_abierto_con_caso_especial_no_pasa() -> None:
+    _niega("CatalogoClasificacion cerrado",
            clasificacion=_Crudo(_CatalogoQueConoceLaCentinelaVieja()))
+
+
+class _CatalogoQueEvadePrefijoCentinela:
+    """Elige excepcion por prefijo y da clase reversible al resto del mundo."""
+
+    def contrato_de(self, capability: str) -> object:
+        if capability.startswith("__centinela_sin_clasificar__"):
+            raise ClasificacionDesconocida(capability)
+        return _contrato(ClaseCapability.REVERSIBLE)
+
+
+def test_un_catalogo_con_fallback_permisivo_no_pasa_por_evitar_el_sondeo() -> None:
+    _niega("CatalogoClasificacion cerrado", clasificacion=_Crudo(_CatalogoQueEvadePrefijoCentinela()))
 
 
 def test_a8_la_clase_es_enum_cerrado() -> None:

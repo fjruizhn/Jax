@@ -22,8 +22,8 @@ Contratos que este modulo fija:
     monotonico por proceso — el retroceso se detecta contra la ULTIMA LECTURA
     y ``marcar_emision`` no puede bajar el piso.
   - **Clasificacion** (§13): capability desconocida, sin clasificacion o
-    rebajada => el kernel NIEGA. El guard sondea una capability centinela y
-    exige ``ClasificacionDesconocida``; cualquier otra respuesta niega. Una
+    rebajada => el kernel NIEGA. El guard exige un mapa concreto, cerrado e
+    inmutable; una capability ausente produce ``ClasificacionDesconocida``. Una
     clase nunca baja respecto de la version anterior del contrato.
   - **Checkpoint**: monotonico, CAS atomica con anterior exacto, idempotencia
     SOLO con el mismo anterior y el mismo head. ``confirmar(head)`` es «el log
@@ -43,11 +43,11 @@ codigo en el proceso ya perdio) — es orden, no aislamiento.
 from __future__ import annotations
 
 import re
-import secrets
 from datetime import datetime, timedelta
 from enum import Enum
 from contextlib import AbstractContextManager
-from typing import NamedTuple, Protocol, runtime_checkable
+from types import MappingProxyType
+from typing import Mapping, NamedTuple, Protocol, runtime_checkable
 
 from .errors import (
     ClasificacionDesconocida,
@@ -75,7 +75,7 @@ class VersionMonotonica:
     __slots__ = ("_numero",)
 
     def __init__(self, numero: int) -> None:
-        if isinstance(numero, bool) or not isinstance(numero, int) or numero < 0:
+        if type(numero) is not int or numero < 0:
             raise ProveedorInvalido(f"version invalida: {numero!r}")
         object.__setattr__(self, "_numero", numero)
 
@@ -109,12 +109,14 @@ class ClaseCapability(str, Enum):
 
 
 class FormaLimites(str, Enum):
-    """Forma de los limites que acepta la capability (§10.7): el permiso la
-    guarda y el consumo revalida que no cambio. Enum cerrado."""
+    """Forma de límite compatible con el schema de Rule Authority.
+
+    Una acción obligatoria declara exactamente cantidad o monto; ambos a la
+    vez no forman parte del contrato.
+    """
     NINGUNA = "NINGUNA"
     CANTIDAD = "CANTIDAD"
     MONTO = "MONTO"
-    CANTIDAD_Y_MONTO = "CANTIDAD_Y_MONTO"
 
 
 class ContratoCapability:
@@ -126,17 +128,26 @@ class ContratoCapability:
     def __init__(self, *, identidad: str, version: str, clase: ClaseCapability,
                  unidad: str | None, moneda: str | None,
                  forma_limites: FormaLimites) -> None:
-        if not isinstance(identidad, str) or not identidad.strip():
+        if type(identidad) is not str or not identidad.strip():
             raise ProveedorInvalido("ContratoCapability: identidad no vacia")
-        if not isinstance(version, str) or not version.strip():
+        if type(version) is not str or not version.strip():
             raise ProveedorInvalido("ContratoCapability: version no vacia")
-        if not isinstance(clase, ClaseCapability):
+        if type(clase) is not ClaseCapability:
             raise ProveedorInvalido("ContratoCapability: clase fuera del enum cerrado")
-        if not isinstance(forma_limites, FormaLimites):
+        if type(forma_limites) is not FormaLimites:
             raise ProveedorInvalido("ContratoCapability: forma_limites fuera del enum cerrado")
         for campo, valor in (("unidad", unidad), ("moneda", moneda)):
-            if valor is not None and (not isinstance(valor, str) or not valor.strip()):
+            if valor is not None and (type(valor) is not str or not valor.strip()):
                 raise ProveedorInvalido(f"ContratoCapability: {campo} invalida")
+        campos_coherentes = (
+            (forma_limites is FormaLimites.NINGUNA and unidad is None and moneda is None)
+            or (forma_limites is FormaLimites.CANTIDAD and unidad is not None and moneda is None)
+            or (forma_limites is FormaLimites.MONTO and unidad is None and moneda is not None)
+        )
+        if not campos_coherentes:
+            raise ProveedorInvalido("ContratoCapability: forma_limites y unidad/moneda incoherentes")
+        if clase is ClaseCapability.OBLIGATING and forma_limites is FormaLimites.NINGUNA:
+            raise ProveedorInvalido("ContratoCapability: OBLIGATING exige exactamente un limite")
         object.__setattr__(self, "identidad", identidad)
         object.__setattr__(self, "version", version)
         object.__setattr__(self, "clase", clase)
@@ -175,12 +186,41 @@ class EstadoStop(NamedTuple):
     huella: str
 
 
-@runtime_checkable
-class CatalogoClasificacion(Protocol):
-    """Valor del lease de clasificacion. ``contrato_de`` solo existe DENTRO del
-    lease. Capability ausente o sin clasificar: ``ClasificacionDesconocida``."""
+class CatalogoClasificacion:
+    """Mapa cerrado e inmutable de capabilities conocidas.
 
-    def contrato_de(self, capability: str) -> ContratoCapability: ...
+    Una capability ausente siempre niega. No acepta una implementacion abierta
+    con fallback permisivo: el conjunto de nombres del catalogo es el contrato.
+    Se entrega como valor dentro del lease de clasificacion.
+    """
+
+    __slots__ = ("_contratos",)
+
+    def __init__(self, contratos: Mapping[str, ContratoCapability]) -> None:
+        copia = dict(contratos)
+        for capability, contrato in copia.items():
+            if type(capability) is not str or not capability.strip():
+                raise ProveedorInvalido("catalogo: capability vacia o invalida")
+            if type(contrato) is not ContratoCapability:
+                raise ProveedorInvalido(f"catalogo: contrato invalido para {capability!r}")
+        object.__setattr__(self, "_contratos", MappingProxyType(copia))
+
+    def __setattr__(self, *_args) -> None:
+        raise RuleAuthorityError("CatalogoClasificacion es inmutable")
+
+    def __delattr__(self, _nombre: str) -> None:
+        raise RuleAuthorityError("CatalogoClasificacion es inmutable")
+
+    def contrato_de(self, capability: str) -> ContratoCapability:
+        try:
+            return self._contratos[capability]
+        except KeyError:
+            raise ClasificacionDesconocida(
+                f"capability sin clasificacion confiable: {capability!r} (el kernel NIEGA)"
+            ) from None
+
+    def con(self, capability: str, contrato: ContratoCapability) -> "CatalogoClasificacion":
+        return CatalogoClasificacion({**self._contratos, capability: contrato})
 
 
 class VistaLease(NamedTuple):
@@ -246,16 +286,6 @@ class AlmacenCheckpoints(Protocol):
 
 # ------------------------------------------------- el guard de emision/consumo
 
-# Prefijo reservado de las capabilities centinela. Cada sondeo usa un nombre
-# ALEATORIO (prefijo + token): un catalogo no puede tratar «la centinela» como
-# caso especial y responder REVERSIBLE a todo lo demas. El prefijo no es API.
-_PREFIJO_CENTINELA = "__centinela_sin_clasificar__"
-
-
-def _nueva_centinela() -> str:
-    return f"{_PREFIJO_CENTINELA}{secrets.token_hex(16)}"
-
-
 _RE_SEGMENTO = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?"        # no termina en «.»
 _RE_PROCEDENCIA = re.compile(rf"refs/(?:heads|tags)/{_RE_SEGMENTO}(?:/{_RE_SEGMENTO})*", re.ASCII)
 
@@ -274,8 +304,8 @@ def _dentro_de_lease(nombre: str, proveedor: object, validar) -> None:
     """Abre el lease COMPARTIDO y valida la vista Y su valor sin salir de el."""
     try:
         with proveedor.lease_compartido() as vista:          # type: ignore[attr-defined]
-            if not isinstance(vista, VistaLease) \
-                    or not isinstance(vista.version, VersionMonotonica):
+            if type(vista) is not VistaLease \
+                    or type(vista.version) is not VersionMonotonica:
                 raise ProveedorInvalido(f"{nombre}: el lease no entrega una VistaLease valida")
             validar(vista.valor)
     except ProveedorInvalido:
@@ -304,24 +334,8 @@ def _validar_stop(valor: object) -> None:
 
 
 def _validar_clasificacion(valor: object) -> None:
-    if not isinstance(valor, CatalogoClasificacion):
-        raise ProveedorInvalido("clasificacion: el valor del lease no implementa CatalogoClasificacion")
-    _exigir_centinela_desconocida(valor)
-
-
-def _exigir_centinela_desconocida(catalogo: CatalogoClasificacion) -> None:
-    """§13: una capability desconocida NIEGA. Responder un contrato (REVERSIBLE
-    incluido) o None, o fallar con otra cosa, es un catalogo inservible."""
-    try:
-        respuesta = catalogo.contrato_de(_nueva_centinela())
-    except ClasificacionDesconocida:
-        return
-    except Exception as exc:
-        raise ProveedorInvalido(
-            f"clasificacion: la centinela fallo con {type(exc).__name__}, no con "
-            "ClasificacionDesconocida") from exc
-    raise ProveedorInvalido(
-        f"clasificacion: respondio {respuesta!r} a una capability desconocida (§13: debe negar)")
+    if type(valor) is not CatalogoClasificacion:
+        raise ProveedorInvalido("clasificacion: el lease debe entregar el CatalogoClasificacion cerrado")
 
 
 def _validar_reloj(reloj: object) -> None:
@@ -358,8 +372,8 @@ def exigir_contrato_de_emision(*, pin: object, checkpoint: object, stop: object,
     - el valor de cada lease se valida POR TIPO y DENTRO del lease; un Mock, un
       None o un STOP ilegible se niegan aqui;
     - pin: ``type(pin) is TrustedPolicyPin``, procedencia de forma cerrada e
-      igual a la del pin; reloj UTC consciente; clasificacion que niega la
-      capability centinela; checkpoint publicado y que ``confirmar`` su head.
+      igual a la del pin; reloj UTC consciente; clasificacion como mapa cerrado
+      donde toda capability ausente niega; checkpoint publicado y confirmado.
     """
     esperados = (("pin_activo", pin, ProveedorPinActivo), ("stop", stop, ProveedorStop),
                  ("clasificacion", clasificacion, ProveedorClasificacion),
