@@ -234,7 +234,7 @@ def test_ataque_j2_commit_y_cada_arbol_interpretado_se_autentican(tmp_path: Path
     _adulterar_objeto_suelto(repo, oids[objetivo])
     with pytest.raises(RuleSnapshotError) as excinfo:
         _cargar(repo, commit, arbol)
-    assert "OID" in str(excinfo.value) or "corrupt loose object" in str(excinfo.value)
+    assert any(texto in str(excinfo.value) for texto in ("OID", "corrupt loose object", "truncado"))
 
 
 def test_ataque_j3_limites_de_objetos_y_profundidad_niegan(tmp_path: Path,
@@ -258,7 +258,7 @@ def test_ataque_j4_limite_agregado_niega_antes_de_cargar_reglas(tmp_path: Path,
     import jax.faro.git_objetos as objetos
     repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
     monkeypatch.setattr(objetos, "MAX_SNAPSHOT_BYTES", 1)
-    with pytest.raises(RuleSnapshotError, match="limite de objetos o bytes"):
+    with pytest.raises(RuleSnapshotError, match="presupuesto"):
         _cargar(repo, commit, arbol)
 
 
@@ -268,8 +268,178 @@ def test_ataque_j4b_blobs_cuentan_en_limites_antes_de_leer_contenido(tmp_path: P
     oid = _git(repo, "rev-parse", "HEAD:policy/faro/ejemplo.yaml")
     with pytest.raises(FuenteInvalida, match="limite de objetos"):
         leer_blobs(repo, [oid], max_bytes=1024 * 1024, max_objects=0)
-    with pytest.raises(FuenteInvalida, match="limite agregado"):
+    with pytest.raises(FuenteInvalida, match="presupuesto"):
         leer_blobs(repo, [oid], max_bytes=1024 * 1024, max_total_bytes=1)
+
+
+def test_ataque_j4c_blob_que_crece_tras_precheck_se_rechaza_antes_de_leer_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess as subprocess_module
+    from types import SimpleNamespace
+    import jax.faro.git_objetos as objetos
+
+    repo, _commit, _arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
+    oid = _git(repo, "rev-parse", "HEAD:policy/faro/ejemplo.yaml")
+    body_reads: list[int] = []
+
+    class _Stdout:
+        def readline(self, _limit: int) -> bytes:
+            return f"{oid} blob 5\n".encode()
+
+        def read(self, size: int = -1) -> bytes:
+            body_reads.append(size)
+            return b"12345"[:size]
+
+        def close(self) -> None:
+            return None
+
+    class _Stdin:
+        def write(self, _data: bytes) -> int:
+            return len(_data)
+
+        def fileno(self) -> int:
+            return 77
+
+        def flush(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class _Process:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.stdin = _Stdin()
+            self.stdout = _Stdout()
+            self.returncode = 0
+
+        def wait(self, timeout: int | None = None) -> int:
+            return 0
+
+        def kill(self) -> None:
+            return None
+
+    original_git = objetos.git
+
+    def _git_with_racing_size(_repo, *args, **kwargs):
+        if args[:2] == ("cat-file", "--batch-check"):
+            return SimpleNamespace(stdout=f"{oid} blob 1\n".encode())
+        if args[:2] == ("cat-file", "--batch"):
+            return SimpleNamespace(stdout=f"{oid} blob 5\n".encode() + b"12345\n")
+        return original_git(_repo, *args, **kwargs)
+
+    monkeypatch.setattr(objetos, "git", _git_with_racing_size)
+    monkeypatch.setattr(subprocess_module, "Popen", _Process)
+    monkeypatch.setattr(objetos, "_leer_cabecera_cat_file", lambda _stream, _deadline: f"{oid} blob 5\n".encode())
+    monkeypatch.setattr(objetos.select, "select", lambda readable, writable, _exceptional, _timeout: (readable, writable, []))
+    with pytest.raises(objetos.FuenteInvalida, match="excede"):
+        objetos.leer_blobs(repo, [oid], max_bytes=4, max_total_bytes=4)
+    assert body_reads == []
+
+
+@pytest.mark.parametrize("tipo,ref", [("commit", "HEAD"), ("tree", "HEAD:policy")])
+def test_objeto_git_que_crece_tras_precheck_se_rechaza_antes_de_materializar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tipo: str, ref: str,
+) -> None:
+    import subprocess as subprocess_module
+    from types import SimpleNamespace
+    import jax.faro.git_objetos as objetos
+
+    repo, _commit, _arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
+    oid = _git(repo, "rev-parse", ref)
+    body_reads: list[int] = []
+    captured_batch: list[bytes] = []
+
+    class _Stdout:
+        def readline(self, _limit: int) -> bytes:
+            return f"{oid} {tipo} 5\n".encode()
+
+        def read(self, size: int = -1) -> bytes:
+            body_reads.append(size)
+            return b"12345"[:size]
+
+        def close(self) -> None:
+            return None
+
+    class _Stdin:
+        def write(self, data: bytes) -> int:
+            return len(data)
+
+        def fileno(self) -> int:
+            return 77
+
+        def flush(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class _Process:
+        killed = False
+        waited = False
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.stdin = _Stdin()
+            self.stdout = _Stdout()
+            self.returncode = 0
+
+        def wait(self, timeout: int | None = None) -> int:
+            self.waited = True
+            return 0
+
+        def kill(self) -> None:
+            self.killed = True
+
+    process: list[_Process] = []
+    original_git = objetos.git
+
+    def _git_with_racing_size(_repo, *args, **kwargs):
+        if args[:2] == ("cat-file", "--batch-check"):
+            return SimpleNamespace(stdout=f"{oid} {tipo} 1\n".encode())
+        if args[:2] == ("cat-file", "--batch"):
+            captured_batch.append(b"5-byte body captured")
+            return SimpleNamespace(stdout=f"{oid} {tipo} 5\n".encode() + b"12345\n")
+        return original_git(_repo, *args, **kwargs)
+
+    def _popen(*args, **kwargs):
+        instance = _Process(*args, **kwargs)
+        process.append(instance)
+        return instance
+
+    monkeypatch.setattr(objetos, "git", _git_with_racing_size)
+    monkeypatch.setattr(subprocess_module, "Popen", _popen)
+    monkeypatch.setattr(objetos, "_leer_cabecera_cat_file", lambda _stream, _deadline: f"{oid} {tipo} 5\n".encode())
+    monkeypatch.setattr(objetos.select, "select", lambda readable, writable, _exceptional, _timeout: (readable, writable, []))
+    with pytest.raises(objetos.FuenteInvalida, match="excede"):
+        objetos.leer_objeto_verificado(repo, oid, tipo=tipo, max_bytes=4)
+    assert body_reads == []
+    assert captured_batch == []
+    assert process and process[0].killed and process[0].waited
+
+
+def test_cat_file_colgado_tiene_deadline_y_se_termina(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess as subprocess_module
+    import sys
+    import jax.faro.git_objetos as objetos
+
+    repo, _commit, _arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
+    oid = _git(repo, "rev-parse", "HEAD:policy/faro/ejemplo.yaml")
+    real_popen = subprocess_module.Popen
+    script = (
+        "import sys,time; oid=sys.stdin.readline().strip(); "
+        "print(f'{oid} blob 5', flush=True); time.sleep(0.15)"
+    )
+
+    def _popen_colgado(_args, **kwargs):
+        return real_popen(
+            [sys.executable, "-c", script], stdin=kwargs["stdin"], stdout=kwargs["stdout"],
+            stderr=kwargs["stderr"], env=kwargs["env"], bufsize=kwargs["bufsize"],
+        )
+
+    monkeypatch.setattr(objetos, "_CAT_FILE_IO_TIMEOUT_SECONDS", 0.02, raising=False)
+    monkeypatch.setattr(subprocess_module, "Popen", _popen_colgado)
+    with pytest.raises(objetos.FuenteInvalida, match="plazo"):
+        objetos._leer_objetos_lote_limitado(repo, [(oid, "blob", 10)])
 
 
 def test_ataque_j5_repositorio_sha256_tambien_autentica_commit_y_arboles(tmp_path: Path) -> None:
@@ -679,7 +849,7 @@ def test_r6_objeto_suelto_del_catalogo_adulterado_niega(tmp_path: Path) -> None:
     suelto.write_bytes(zlib.compress(b"blob %d\0" % len(otro) + otro))
     with pytest.raises(RuleSnapshotError) as excinfo:
         _cargar(repo, commit, arbol)
-    assert "catalogo-topes.json: el blob no corresponde a su OID" in str(excinfo.value)
+    assert "OID no corresponde a sus bytes" in str(excinfo.value)
 
 
 def test_r6_el_cargador_acepta_solo_bytes() -> None:

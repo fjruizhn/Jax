@@ -73,8 +73,14 @@ del repositorio (SHA-1 o SHA-256) y limita el snapshot completo a 1.024 objetos,
 adulterado niegan la carga antes de validar reglas. Una regla inválida, un
 `rule_id` duplicado o una entrada no canónica rechazan el snapshot **completo**.
 
-El espejo JSON Schema y el validador Python comparten vectores positivos y
-negativos. El runtime de topes incluye el OID del catálogo sellado en el
+El espejo JSON Schema comprueba forma y léxico; al validar timestamps, el caller
+debe habilitar un `FormatChecker`. El orden real del intervalo
+`not_after_utc > not_before_utc` es una regla semántica que JSON Schema estándar
+no puede expresar de forma portable: únicamente `validar_regla()` produce la
+regla confiable y debe ejecutarse siempre después del espejo. Los vectores
+compartidos cubren la semántica representable; las pruebas separadas demuestran
+la validación de calendario y el límite del espejo para el orden temporal. El
+runtime de topes incluye el OID del catálogo sellado en el
 resultado y en cada anotación durable; contexto aportado por un caller no puede
 suplantarlo.
 

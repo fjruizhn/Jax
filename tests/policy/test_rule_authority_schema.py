@@ -490,6 +490,25 @@ def _hacer_obligante_valida(datos: dict) -> None:
     datos["validity"]["not_after_utc"] = "2026-10-05T00:01:00Z"
 
 
+def _validador_espejo(espejo: dict):
+    from datetime import datetime
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    checker = FormatChecker()
+
+    @checker.checks("date-time")
+    def _fecha_utc_canonica(valor: object) -> bool:
+        if not isinstance(valor, str):
+            return True
+        try:
+            datetime.strptime(valor, "%Y-%m-%dT%H:%M:%SZ")
+            return True
+        except ValueError:
+            return False
+
+    return Draft202012Validator(espejo, format_checker=checker)
+
+
 @pytest.mark.parametrize("cambio,esperado", [
     (lambda datos: datos.__setitem__("tope", None), True),
     (lambda datos: datos.__setitem__("tope", {
@@ -509,13 +528,11 @@ def _hacer_obligante_valida(datos: dict) -> None:
 ])
 def test_el_espejo_json_y_python_aceptan_los_mismos_vectores_de_regla(cambio, esperado) -> None:
     """Una brecha permite que otra herramienta acepte una regla que Faro niega."""
-    from jsonschema import Draft202012Validator
-
     datos = _regla()
     cambio(datos)
     espejo = json.loads((Path(__file__).resolve().parents[2] / "policy" / "faro"
                          / "schemas" / "rule-v1.schema.json").read_text())
-    json_acepta = not list(Draft202012Validator(espejo).iter_errors(datos))
+    json_acepta = not list(_validador_espejo(espejo).iter_errors(datos))
     try:
         validar_regla(datos)
         python_acepta = True
@@ -524,6 +541,27 @@ def test_el_espejo_json_y_python_aceptan_los_mismos_vectores_de_regla(cambio, es
 
     assert python_acepta is esperado
     assert json_acepta is esperado
+
+
+def test_formato_json_schema_rechaza_fecha_calendaria_inexistente() -> None:
+    datos = _regla()
+    datos["validity"]["not_before_utc"] = "2026-02-30T00:00:00Z"
+    espejo = json.loads((Path(__file__).resolve().parents[2] / "policy" / "faro"
+                         / "schemas" / "rule-v1.schema.json").read_text())
+    assert list(_validador_espejo(espejo).iter_errors(datos))
+    with pytest.raises(RuleSchemaError):
+        validar_regla(datos)
+
+
+def test_orden_temporal_es_semantica_python_que_schema_estandar_no_expresa() -> None:
+    """El éxito estructural del espejo nunca sustituye el validador de autoridad."""
+    datos = _regla()
+    datos["validity"]["not_after_utc"] = datos["validity"]["not_before_utc"]
+    espejo = json.loads((Path(__file__).resolve().parents[2] / "policy" / "faro"
+                         / "schemas" / "rule-v1.schema.json").read_text())
+    assert not list(_validador_espejo(espejo).iter_errors(datos))
+    with pytest.raises(RuleSchemaError):
+        validar_regla(datos)
 
 
 # ------------------------------------- YAML estricto: la fuente ya es cerrada

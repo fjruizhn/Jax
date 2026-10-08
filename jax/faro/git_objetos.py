@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import os
 import re
+import select
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -135,6 +137,121 @@ def oid_de_objeto(repo: Path, tipo: str, contenido: bytes, largo_oid: int) -> st
     return oid
 
 
+_CAT_FILE_IO_TIMEOUT_SECONDS = 120.0
+
+
+def _leer_exacto(stream, longitud: int, deadline: float) -> bytes:
+    partes = []
+    restante = longitud
+    while restante:
+        espera = deadline - time.monotonic()
+        if espera <= 0 or not select.select([stream.fileno()], [], [], espera)[0]:
+            raise FuenteInvalida("cat-file excedió el plazo de lectura")
+        parte = os.read(stream.fileno(), min(restante, 64 * 1024))
+        if not parte:
+            raise FuenteInvalida("cat-file devolvio contenido truncado")
+        partes.append(parte)
+        restante -= len(parte)
+    return b"".join(partes)
+
+
+def _leer_cabecera_cat_file(stream, deadline: float) -> bytes:
+    cabecera = bytearray()
+    while len(cabecera) < 257:
+        cabecera.extend(_leer_exacto(stream, 1, deadline))
+        if cabecera[-1] == 0x0A:
+            return bytes(cabecera)
+    raise FuenteInvalida("cat-file devolvió una cabecera demasiado larga")
+
+
+def _terminar_cat_file(proceso) -> None:
+    try:
+        proceso.kill()
+    except (OSError, ProcessLookupError, subprocess.SubprocessError):
+        pass
+    try:
+        proceso.wait(timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _leer_objetos_lote_limitado(
+    repo: Path,
+    solicitudes: list[tuple[str, str, int]],
+    *,
+    max_total_bytes: int | None = None,
+) -> list[ObjetoGit]:
+    """Lee `cat-file --batch` en streaming; decide el límite con su cabecera real.
+
+    No consulta tamaños en otro proceso: un objeto suelto puede cambiar entre dos
+    invocaciones. El cuerpo se lee solo después de comprobar su tamaño contra el
+    presupuesto individual y el agregado que queda.
+    """
+    if not solicitudes:
+        return []
+    try:
+        proceso = subprocess.Popen(
+            ["git", *_SIN_REPLACE, *_GIT_SIN_HOOKS, "-C", str(repo), "cat-file", "--batch"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env=_entorno_limpio(), bufsize=0,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise FuenteInvalida(f"no se pudo iniciar cat-file en streaming: {type(exc).__name__}") from exc
+    resultados: list[ObjetoGit] = []
+    restante_total = max_total_bytes
+    deadline = time.monotonic() + _CAT_FILE_IO_TIMEOUT_SECONDS
+    try:
+        if proceso.stdin is None or proceso.stdout is None:
+            raise FuenteInvalida("cat-file no abrió sus pipes")
+        for oid, tipo, limite_individual in solicitudes:
+            if not _RE_OID.fullmatch(oid) or tipo not in {"blob", "tree", "commit"}:
+                raise FuenteInvalida("solicitud de objeto Git inválida")
+            limite = limite_individual
+            if restante_total is not None:
+                limite = min(limite, restante_total)
+            consulta = (oid + "\n").encode("ascii")
+            if not select.select([], [proceso.stdin.fileno()], [], max(0, deadline - time.monotonic()))[1]:
+                raise FuenteInvalida("cat-file excedió el plazo de escritura")
+            proceso.stdin.write(consulta)
+            proceso.stdin.flush()
+            cabecera = _leer_cabecera_cat_file(proceso.stdout, deadline)
+            campos = cabecera[:-1].decode("ascii", errors="replace").split(" ")
+            if len(campos) != 3 or campos[0] != oid or campos[1] != tipo or not campos[2].isdigit():
+                raise FuenteInvalida(f"{oid}: cabecera cat-file inesperada")
+            tamano = int(campos[2])
+            if str(tamano) != campos[2]:
+                raise FuenteInvalida(f"{oid}: tamaño cat-file no canónico")
+            if tamano > limite:
+                raise FuenteInvalida(f"{tipo} {oid} excede el presupuesto de {limite} bytes")
+            contenido = _leer_exacto(proceso.stdout, tamano, deadline)
+            if _leer_exacto(proceso.stdout, 1, deadline) != b"\n":
+                raise FuenteInvalida(f"{oid}: separador cat-file inválido")
+            resultados.append(ObjetoGit(tipo, contenido))
+            if restante_total is not None:
+                restante_total -= tamano
+        proceso.stdin.close()
+        proceso.wait(timeout=max(0.001, deadline - time.monotonic()))
+        if proceso.stdout.read(1):
+            raise FuenteInvalida("cat-file devolvió bytes sobrantes")
+        codigo = proceso.returncode
+        if codigo != 0:
+            raise FuenteInvalida(f"cat-file terminó con rc={codigo}")
+        return resultados
+    except FuenteInvalida:
+        _terminar_cat_file(proceso)
+        raise
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
+        _terminar_cat_file(proceso)
+        raise FuenteInvalida(f"falló lectura acotada de cat-file: {type(exc).__name__}") from exc
+    finally:
+        for pipe in (proceso.stdin, proceso.stdout):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
+
+
 def leer_objeto_verificado(repo: Path, oid: str, *, tipo: str, max_bytes: int) -> ObjetoGit:
     """Lee un objeto y prueba su identidad desde sus bytes crudos.
 
@@ -144,27 +261,11 @@ def leer_objeto_verificado(repo: Path, oid: str, *, tipo: str, max_bytes: int) -
     """
     if not _RE_OID.fullmatch(oid):
         raise FuenteInvalida("OID de objeto no canonico")
-    r = git(repo, "cat-file", "--batch-check", entrada=(oid + "\n").encode())
-    linea = r.stdout.decode("ascii", errors="replace").strip()
-    partes = linea.split(" ")
-    if len(partes) != 3 or partes[0] != oid or partes[1] != tipo or not partes[2].isdigit():
-        raise FuenteInvalida(f"{oid}: objeto no es {tipo}")
-    tamano = int(partes[2])
-    if tamano > max_bytes:
-        raise FuenteInvalida(f"{tipo} {oid} excede {max_bytes} bytes")
-    r = git(repo, "cat-file", "--batch", entrada=(oid + "\n").encode())
-    cabecera, separador, resto = r.stdout.partition(b"\n")
-    if not separador:
-        raise FuenteInvalida(f"{oid}: cat-file no devolvio contenido")
-    partes = cabecera.decode("ascii", errors="replace").split(" ")
-    if len(partes) != 3 or partes[0] != oid or partes[1] != tipo or partes[2] != str(tamano):
-        raise FuenteInvalida(f"{oid}: cat-file devolvio cabecera inesperada")
-    if len(resto) != tamano + 1 or not resto.endswith(b"\n"):
-        raise FuenteInvalida(f"{oid}: cat-file devolvio longitud inesperada")
-    contenido = resto[:-1]
+    objeto = _leer_objetos_lote_limitado(repo, [(oid, tipo, max_bytes)])[0]
+    contenido = objeto.contenido
     if oid_de_objeto(repo, tipo, contenido, len(oid)) != oid:
         raise FuenteInvalida(f"{tipo} {oid}: OID no corresponde a sus bytes")
-    return ObjetoGit(tipo, contenido)
+    return objeto
 
 
 def _entradas_arbol(contenido: bytes, largo_oid: int) -> list[tuple[str, str, bytes]]:
@@ -205,15 +306,19 @@ def listar_faro_desde_commit_verificado(repo: Path, commit: str, policy_oid: str
         raise FuenteInvalida("OID del pin no coincide con el formato del repositorio")
     presupuesto_objetos, presupuesto_bytes = MAX_SNAPSHOT_OBJECTS, MAX_SNAPSHOT_BYTES
 
-    def consumir(objeto: ObjetoGit) -> None:
+    def leer_y_consumir(oid: str, tipo: str, limite_individual: int) -> ObjetoGit:
         nonlocal presupuesto_objetos, presupuesto_bytes
+        if presupuesto_objetos <= 0:
+            raise FuenteInvalida("snapshot excede limite de objetos")
+        limite = min(limite_individual, presupuesto_bytes)
+        objeto = leer_objeto_verificado(repo, oid, tipo=tipo, max_bytes=limite)
         presupuesto_objetos -= 1
         presupuesto_bytes -= len(objeto.contenido)
         if presupuesto_objetos < 0 or presupuesto_bytes < 0:
             raise FuenteInvalida("snapshot excede limite de objetos o bytes")
+        return objeto
 
-    commit_obj = leer_objeto_verificado(repo, commit, tipo="commit", max_bytes=MAX_SNAPSHOT_COMMIT_BYTES)
-    consumir(commit_obj)
+    commit_obj = leer_y_consumir(commit, "commit", MAX_SNAPSHOT_COMMIT_BYTES)
     cabeceras, _, _cuerpo = commit_obj.contenido.partition(b"\n\n")
     arboles = [linea[5:] for linea in cabeceras.split(b"\n") if linea.startswith(b"tree ")]
     if len(arboles) != 1 or not _RE_OID.fullmatch(arboles[0].decode("ascii", errors="replace")):
@@ -225,8 +330,7 @@ def listar_faro_desde_commit_verificado(repo: Path, commit: str, policy_oid: str
     def leer_arbol(oid: str, profundidad: int) -> list[tuple[str, str, bytes]]:
         if profundidad > MAX_SNAPSHOT_TREE_DEPTH:
             raise FuenteInvalida("snapshot excede profundidad maxima de arboles")
-        objeto = leer_objeto_verificado(repo, oid, tipo="tree", max_bytes=MAX_SNAPSHOT_TREE_BYTES)
-        consumir(objeto)
+        objeto = leer_y_consumir(oid, "tree", MAX_SNAPSHOT_TREE_BYTES)
         return _entradas_arbol(objeto.contenido, len(oid))
 
     raiz_entradas = leer_arbol(raiz, 0)
@@ -307,45 +411,23 @@ def listar(repo: Path, sha: str, *rutas: str) -> list[EntradaGit]:
 
 def leer_blobs(repo: Path, oids: list[str], *, max_bytes: int | None = None,
                max_total_bytes: int | None = None, max_objects: int | None = None) -> dict[str, bytes]:
-    """Lee blobs por lote. Con ``max_bytes``, PRIMERO mira los tamanos con
-    ``cat-file --batch-check`` y niega cualquier exceso ANTES de cargar contenido
-    (no sirve de nada cargar un mega y rechazarlo despues)."""
+    """Lee blobs por lote; los límites se aplican a la cabecera del mismo stream
+    antes de leer cada body, sin confiar en un precheck de otra invocación Git."""
     unicos = list(dict.fromkeys(oids))
     if not unicos:
         return {}
     if max_objects is not None and len(unicos) > max_objects:
         raise FuenteInvalida(f"snapshot excede limite de objetos ({max_objects})")
-    if max_bytes is not None or max_total_bytes is not None:
-        r = git(repo, "cat-file", "--batch-check", entrada=("\n".join(unicos) + "\n").encode())
-        filas = r.stdout.decode("ascii", errors="replace").splitlines()
-        if len(filas) != len(unicos):
-            raise FuenteInvalida("cat-file --batch-check devolvio cantidad de filas inesperada")
-        total = 0
-        for esperado, linea in zip(unicos, filas, strict=True):
-            partes = linea.split(" ")
-            if len(partes) != 3 or partes[0] != esperado or partes[1] != "blob" or not partes[2].isdigit():
-                raise FuenteInvalida(f"cat-file --batch-check invalido para {esperado}")
-            tam = int(partes[2])
-            if max_bytes is not None and tam > max_bytes:
-                raise FuenteInvalida(f"blob {esperado} excede {max_bytes} bytes: no es una regla")
-            total += tam
-        if max_total_bytes is not None and total > max_total_bytes:
-            raise FuenteInvalida(f"snapshot excede limite agregado de bytes ({max_total_bytes})")
-    r = git(repo, "cat-file", "--batch", entrada=("\n".join(unicos) + "\n").encode())
-    salida, i, blobs = r.stdout, 0, {}
-    for oid in unicos:
-        fin = salida.find(b"\n", i)
-        if fin < 0:
-            raise FuenteInvalida(f"git cat-file devolvio cabecera truncada para {oid}")
-        cabecera = salida[i:fin].decode("ascii", errors="replace").split(" ")
-        if len(cabecera) != 3 or cabecera[0] != oid or cabecera[1] != "blob" or not cabecera[2].isdigit():
-            raise FuenteInvalida(f"git cat-file devolvio algo inesperado para {oid}: {cabecera}")
-        tam = int(cabecera[2])
-        inicio, fin_contenido = fin + 1, fin + 1 + tam
-        if fin_contenido >= len(salida) or salida[fin_contenido:fin_contenido + 1] != b"\n":
-            raise FuenteInvalida(f"git cat-file devolvio blob truncado para {oid}")
-        blobs[oid] = salida[inicio:fin_contenido]
-        i = fin_contenido + 1
-    if i != len(salida):
-        raise FuenteInvalida("git cat-file devolvio bytes sobrantes")
+    limite_individual = max_bytes
+    if limite_individual is None:
+        limite_individual = max_total_bytes if max_total_bytes is not None else (1 << 63) - 1
+    objetos = _leer_objetos_lote_limitado(
+        repo, [(oid, "blob", limite_individual) for oid in unicos],
+        max_total_bytes=max_total_bytes,
+    )
+    blobs = {}
+    for oid, objeto in zip(unicos, objetos, strict=True):
+        if oid_de_objeto(repo, "blob", objeto.contenido, len(oid)) != oid:
+            raise FuenteInvalida(f"blob {oid}: OID no corresponde a sus bytes")
+        blobs[oid] = objeto.contenido
     return blobs
