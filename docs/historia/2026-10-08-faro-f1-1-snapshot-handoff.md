@@ -143,3 +143,15 @@ no concede autoridad ni prueba el estado operativo actual.
   este handoff, luego archivar su contenido y retirar `TRASPASO.md`, publicar el
   SHA resultante, repetir auditoría Tier 3 exacta y esperar CI verde antes de
   integrar #370.
+
+## Contrato de lectura completado · 2026-10-08
+
+- La revisión Tier 3 de `92c13ff2471aa4cbbd518542d7a0eb6eb15d2682` detectó que
+  `AlmacenTopes` (protocolo de producción) tampoco declaraba `leer`, aunque
+  `Topes.reconciliar()` lo llama y el almacén MariaDB ya lo implementa.
+- Se añadió una regresión que comprobó RED (`AlmacenTopes.leer` ausente); el
+  protocolo ahora declara la lectura y la prueba, junto con `tests/test_faro_topes.py`,
+  pasa: **113 passed**.
+- El PR remoto ya recibió `92c13ff`; este nuevo cambio vuelve a cambiar el SHA.
+  Falta cometerlo con este handoff, retirar/archivar el handoff actualizado,
+  publicar el SHA final, pedir auditoría exacta y esperar CI verde.
