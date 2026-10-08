@@ -1,5 +1,34 @@
 # Traspaso · Faro F1.1 paso 7 (jax#373) ronda 3
 
+## Continuación 2026-10-08 · rebase sobre #370 final
+
+El usuario pidió integrar toda la cadena pendiente. Esta rama tiene una preparación local
+sin commit que reaplica el snapshot de #370 final (`3692173f`) sobre el trabajo r3 de
+providers. Cambios re-medidos en el árbol combinado:
+
+- Faro Fase0: **729 passed**, sin skips, con el comando del workflow en Python 3.12.15.
+- Identity Foundation Shadow: **778 passed**, sin skips, medido previamente con Python
+  3.14.4 y el comando exacto del workflow; el entorno local de esta sesión solo ofrece
+  Python 3.12.15, por lo que CI debe repetir la medición en 3.14.
+- Se actualizaron `ci/pisos.json`, comentarios del workflow y el spec/handoff de #370.
+- `git diff --check` limpio.
+
+Antes de integrar #373 falta completar el commit de esta reaplicación, empujar la rama,
+actualizar la base de su PR a `master`, esperar CI nueva y pedir auditoría Tier 3 del SHA
+exacto. No usar la CI del SHA previo como evidencia para el nuevo commit.
+
+Estado auditoría: el PR #371 c36c0543 fue **RECHAZADO** por tres BLOCK de providers,
+un MAJOR en la cola de avisos de #376 y un piso documental desactualizado. La cola se
+está corrigiendo en el worktree `jax-faro-f11-paso4`; incorpora límite/rotación por
+segmento y cuarentena de segmentos legados >16 MiB. El proveedor r3 de esta rama contiene
+el contrato de leases, guard y checkpoint endurecido que el auditor pide para sustituir
+los providers iniciales rechazados de #371. Coordinar ese reemplazo al reapilar #371 y
+mantener auditoría exacta después del cambio.
+
+Los 4 tests de MariaDB de `tests/policy/test_authority_ledger_storage_mariadb.py`
+requieren Docker; CI aislada los corre en runner. No se hicieron cambios ni despliegues a
+producción.
+
 Rama `feat/faro-f1.1-providers-r3` (local, SIN empujar): b16216d7 (r2, RECHAZADO) + merge de
 `origin/feat/faro-f1.1-schema-snapshot` (#370 @ 05183cb7) + 3 commits de r3. Veredicto de entrada:
 `~/encargos-codex/veredicto-jax373-r2.md`; encargo: `encargo-glm-g2-faro-f11-paso7-r3.md` (B).

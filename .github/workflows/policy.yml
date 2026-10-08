@@ -506,10 +506,9 @@ jobs:
   # topea nada (+1). Sin skips. La CI usa Python 3.12 y confirma el mismo piso.
   # Re-medido ronda 6 (D-4 piso de codigo + catalogo sellado): 722 — el runtime solo
   # acepta el CatalogoTopes sellado del snapshot, nunca un Mapping cualquiera (+1).
-  # Re-medido ronda 7 (solo el snapshot emite; catalogo de pin de prueba): 726 —
-  # recursos de clase prohibida con subid ajeno (AUD2 x3) y catalogo de bytes
-  # sueltos niegan (+4).
-  # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 109 +
+  # Re-medido sobre #370 final (2026-10-08): 729 passed; el protocolo de lectura
+  # de Topes y sus regresiones llevan el subgrupo a 113.
+  # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 113 +
   # control 170 + lanzador 77 + acl 43 + memoria 15; desde aviso, los pasos 0.3b y 0.3c y su auditoria). Las pruebas con bwrap y uids
   # reales estan en el job `faro-jaula`; las de la base real, en `faro-bitacora-db`.
   faro-fase0:
@@ -2554,7 +2553,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - run: pip install pytest pyyaml cryptography==49.0.0 pymysql
+      - run: pip install pytest pyyaml cryptography==49.0.0 jsonschema==4.26.0 && pip install --require-hashes -r requirements-faro-mariadb-ci.txt
       - name: Identity Foundation Shadow (sin DB)
         env:
           PYTHONPATH: "."
@@ -2662,8 +2661,10 @@ jobs:
         # test_rule_authority_providers.py —guard con lease valido y dato malo, exclusion
         # de leases determinista, catalogo con centinela, confirmar del checkpoint— y +4 de
         # test_rule_authority_ataques.py por el limite declarado del lector de listas, W3).
-        # Merge de #370 r10 (637) con #373 paso 7 r3 (712): 758 medidos con el comando
-        # exacto de este paso (las dos ramas venian de bases distintas; no se suma, se mide).
+        # Merge anterior #370 r10 (637) + #373 paso 7 r3 (121) midió 758. El SHA final
+        # de #370 añade 20 tests de policy al árbol combinado: 778 passed medidos con
+        # el comando exacto de este paso, Python 3.14.4; TestEvidenceIngester declara
+        # __test__=False y cualquier otra advertencia permanece visible.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
@@ -2743,6 +2744,9 @@ jobs:
             tests/policy/test_execution_boundaries.py \
             --confcutdir=tests/policy -p no:cacheprovider 2>&1 | tee /tmp/identity-foundation
           python3 .github/ci/piso.py verificar identity-foundation-shadow/policy /tmp/identity-foundation || exit $?
+          if grep -qE "[0-9]+ skipped" /tmp/identity-foundation; then
+            echo "HAY TESTS SALTADOS: Identity Foundation Shadow se ejercita completa o no cuenta."; exit 1
+          fi
       # Arranque de systemd versionado (ops/versionar-drop-ins-v2, 2026-10-05): en paso propio
       # porque 9 de sus casos exigen el host de produccion (/srv/jax-prod/jax) o los checkouts de los repos duenos y se saltan en el
       # runner -- el piso del bloque de arriba no admite que suban las saltadas (M <= 45, ver

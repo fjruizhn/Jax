@@ -21,7 +21,7 @@ import pytest
 from jax.faro.aviso import Avisador, ConfigAviso, Credenciales
 from jax.faro.bitacora import Bitacora
 from jax.faro.catalogo_topes import es_de_catalogo, recursos_del_catalogo
-from jax.faro.topes import ResultadoTope, TopeProhibido, Topes
+from jax.faro.topes import AlmacenTopes, ResultadoTope, TopeProhibido, Topes
 
 RAIZ = Path(__file__).resolve().parents[1]
 # r7, MAJOR-1: el catalogo de las pruebas sale de un PIN de prueba (repo git
@@ -75,6 +75,35 @@ def test_el_consumo_sin_regla_se_anota_y_se_avisa_una_vez_por_tenant_recurso_y_p
     assert {(r["tenant"], r["recurso"], r["periodo"]) for r in sin_regla} == {
         ("t1", "tokens_costo.tokens", "total"), ("t2", "tokens_costo.tokens", "total"), ("t1", "monto_dinero.hnl", "total"), ("t1", "tokens_costo.tokens", "2026-10")}
     assert all(r["decision"] == "permitido" and "regla" in r["motivo"] for r in sin_regla)
+
+
+def test_resultado_y_bitacora_atan_el_consumo_al_catalogo_sellado_sin_permitir_suplantarlo():
+    """Si se omite ``catalogo_oid`` de base o se deja entrar desde ``contexto``,
+    un registro durable puede parecer atribuido a otro catálogo."""
+    t, registros = _topes()
+    resultado = corre(t.consumir(
+        tenant="t1", recurso="tokens_costo.tokens", cantidad=1, tope=None,
+        catalogo_oid="oid-forjado",
+    ))
+
+    assert resultado.catalogo_oid == CATALOGO.oid_pin
+    evento = next(r for r in registros if r["evento"] == "tope_sin_regla")
+    assert evento["catalogo_oid"] == CATALOGO.oid_pin
+    assert evento["catalogo_oid"] != "oid-forjado"
+
+
+def test_el_contrato_de_almacen_declara_lectura_para_reconciliar():
+    assert callable(getattr(AlmacenTopes, "leer", None))
+
+
+def test_reconciliacion_durable_conserva_el_oid_del_catalogo_sellado():
+    """La reconciliación también es evidencia durable del contador y no puede
+    perder la procedencia que llevaba el resultado original."""
+    t, registros = _topes()
+    corre(t.reconciliar(tenant="t1", recurso="tokens_costo.tokens"))
+
+    evento = next(r for r in registros if r["evento"] == "tope_reconciliado")
+    assert evento["catalogo_oid"] == CATALOGO.oid_pin
 
 
 # --------------------------------------------------------------------------- #

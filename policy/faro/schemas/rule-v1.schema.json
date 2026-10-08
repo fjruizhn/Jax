@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://axioma/ecosistema/policy/faro/schemas/rule-v1.schema.json",
   "title": "Regla Faro v1 (JAX_FARO_RULE)",
-  "description": "Espejo legible por maquina del shape cerrado que exige policy/rule_authority/schema.py (diseno F1.1 §7 + R-4). El VALIDADOR ES EL PYTHON: si este espejo y aquel divergen, la prueba test_el_espejo_json_existe_y_sus_vocabularios_coinciden se pone roja. Ninguna regla real existe hoy; los ejemplos ratificables viven solo como fixtures de prueba.",
+  "description": "Espejo estructural y lexico del shape cerrado de policy/rule_authority/schema.py (F1.1 §7 + R-4). Habilite un date-time FormatChecker para validar fechas; JSON Schema estándar no puede comparar los extremos del intervalo. Solo validar_regla() produce una regla confiable y debe ejecutarse siempre. Ninguna regla real existe hoy; los ejemplos ratificables viven solo como fixtures de prueba.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -180,6 +180,7 @@
       "properties": {
         "not_before_utc": {
           "type": "string",
+          "format": "date-time",
           "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
         },
         "not_after_utc": {
@@ -189,6 +190,7 @@
             },
             {
               "type": "string",
+              "format": "date-time",
               "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
             }
           ]
@@ -210,16 +212,14 @@
       }
     },
     "tope": {
-      "description": "R-4 (decision de Fernando 2026-10-06): catalogo cerrado de actos y dinero. resource = <clase>.<subid> del catalogo de ESA clase; conexiones/concurrencia/workers/hilos/procesos/agentes no existen en el (D-4).",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "resource_class",
-        "resource",
-        "maximum",
-        "period"
-      ],
-      "properties": {
+      "description": "R-4 (decision de Fernando 2026-10-06): catalogo cerrado de actos y dinero. null significa ausencia de tope. resource = <clase>.<subid> del catalogo de ESA clase; conexiones/concurrencia/workers/hilos/procesos/agentes no existen en el (D-4).",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resource_class", "resource", "maximum", "period"],
+          "properties": {
         "resource_class": {
           "enum": [
             "actos_externos",
@@ -240,7 +240,7 @@
         },
         "period": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9_.:-]{1,32}$"
+          "enum": ["por_dia", "por_hora"]
         }
       },
       "oneOf": [
@@ -331,7 +331,26 @@
             "resource"
           ]
         }
+          ]
+        }
       ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"action_class": {"const": "OBLIGATING"}}},
+      "then": {
+        "properties": {
+          "validity": {"properties": {"not_after_utc": {"type": "string"}}},
+          "obligation_limits": {
+            "properties": {"frequency": {"type": "object"}},
+            "oneOf": [
+              {"properties": {"quantity": {"type": "object"}, "amount": {"type": "null"}}},
+              {"properties": {"quantity": {"type": "null"}, "amount": {"type": "object"}}}
+            ]
+          }
+        }
+      }
+    }
+  ]
 }
