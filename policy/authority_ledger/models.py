@@ -5,14 +5,16 @@ models a permission or an execution decision.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import re
+from types import MappingProxyType
 import unicodedata
-from typing import Any, Mapping
+from typing import Any
 
-from .canonical import canonical_bytes, domain_hash
+from .canonical import canonical_bytes, domain_hash, plain
 from .errors import AuthorityEventValidationError, AuthorityStateError
 from .ids import canonical_evidence_refs, sha256_id, uuid7_text
 
@@ -55,6 +57,20 @@ def _set_ids(values: object, field: str, parser=_doc_id) -> tuple[str, ...]:
     if len(result) != len(set(result)):
         raise AuthorityEventValidationError(f"{field} duplicado")
     return tuple(sorted(result))
+
+
+def _frozen_projection(value: Any) -> Any:
+    """Freeze a validated projection: immutable mappings/tuples all the way down.
+
+    `dataclasses.replace` cannot carry an `init=False` seal into a rebuilt
+    intent, and a frozen projection cannot be mutated after sealing, so a
+    forged hash/projection pair can no longer ride a legitimately sealed one.
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _frozen_projection(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_frozen_projection(item) for item in value)
+    return value
 
 
 class AuthorityEventType(str, Enum):
@@ -221,14 +237,14 @@ class AuthorityEventIntent:
     actor_id: str
     evidence_refs: tuple[str, ...] = ()
     policy_corpus_hash: str | None = None
-    static_policy_view_projection: dict[str, Any] | None = None
+    static_policy_view_projection: Mapping[str, Any] | None = None
     ratification_event_id: str | None = None
     overlay: OverlayPayload | None = None
     overlay_id: str | None = None
-    _ratification_snapshot_seal: object | None = field(default=None, repr=False, compare=False)
+    _ratification_snapshot_seal: object | None = field(default=None, init=False, repr=False, compare=False)
     rule_ratification: RuleRatificationGrantPayload | None = None
     rule_ratification_event_id: str | None = None
-    _rule_ratification_snapshot_seal: object | None = field(default=None, repr=False, compare=False)
+    _rule_ratification_snapshot_seal: object | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "actor_id", _actor(self.actor_id, "actor_id"))
@@ -253,23 +269,15 @@ class AuthorityEventIntent:
             if getattr(self, name) is None:
                 raise AuthorityEventValidationError(f"{self.event_type}: {name} requerido")
         if self.event_type is AuthorityEventType.RATIFICATION_GRANTED:
-            if not isinstance(self.static_policy_view_projection, dict) or self.static_policy_view_projection.get("policy_corpus_hash") != self.policy_corpus_hash:
+            if not isinstance(self.static_policy_view_projection, Mapping) or self.static_policy_view_projection.get("policy_corpus_hash") != self.policy_corpus_hash:
                 raise AuthorityEventValidationError("ratificación requiere static policy view ligado al hash")
-            if (self._ratification_snapshot_seal is not _RATIFICATION_SNAPSHOT_SEAL
-                    and self._ratification_snapshot_seal is not _RATIFICATION_STORAGE_SEAL):
-                raise AuthorityEventValidationError("ratificación requiere snapshot sellado del candidate boundary")
-        elif self._ratification_snapshot_seal is not None:
-            raise AuthorityEventValidationError("sello de corpus fuera de ratificación")
+        if self.static_policy_view_projection is not None:
+            object.__setattr__(self, "static_policy_view_projection", _frozen_projection(self.static_policy_view_projection))
         if self.event_type is AuthorityEventType.RULE_RATIFICATION_GRANTED:
             if self.actor_id != "human:fernando":
                 raise AuthorityEventValidationError("ratificación individual requiere actor human:fernando")
             if self.rule_ratification is not None and not isinstance(self.rule_ratification, RuleRatificationGrantPayload):
                 raise AuthorityEventValidationError("rule_ratification inválido")
-            if (self._rule_ratification_snapshot_seal is not _RULE_RATIFICATION_SNAPSHOT_SEAL
-                    and self._rule_ratification_snapshot_seal is not _RULE_RATIFICATION_STORAGE_SEAL):
-                raise AuthorityEventValidationError("ratificación individual requiere snapshot Faro sellado")
-        elif self._rule_ratification_snapshot_seal is not None:
-            raise AuthorityEventValidationError("sello Faro fuera de grant individual")
         if self.rule_ratification_event_id is not None:
             uuid7_text(self.rule_ratification_event_id, "rule_ratification_event_id")
         expected_rule_fields = {
@@ -299,9 +307,17 @@ class AuthorityEventIntent:
                 raise AuthorityEventValidationError("payload Block 4 heredado fuera de su variante")
 
     @classmethod
-    def _from_validated_snapshot(cls, policy_corpus_hash: str, projection: dict[str, Any], evidence_refs: tuple[str, ...] = ()) -> "AuthorityEventIntent":
-        return cls(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", evidence_refs,
-                   policy_corpus_hash, projection, _ratification_snapshot_seal=_RATIFICATION_SNAPSHOT_SEAL)
+    def _from_validated_snapshot(cls, policy_corpus_hash: str, projection: Mapping[str, Any], evidence_refs: tuple[str, ...] = ()) -> "AuthorityEventIntent":
+        """Only path that stamps the candidate-boundary seal on a corpus ratification.
+
+        The seal is `init=False`: `dataclasses.replace` cannot carry it into a
+        rebuilt intent, so a replaced intent reaches append unsealed and the
+        signing boundary rejects it.
+        """
+        intent = cls(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", evidence_refs,
+                     policy_corpus_hash, projection)
+        object.__setattr__(intent, "_ratification_snapshot_seal", _RATIFICATION_SNAPSHOT_SEAL)
+        return intent
 
     def canonical_projection(self) -> dict[str, Any]:
         if self.event_type is AuthorityEventType.RULE_RATIFICATION_GRANTED:
@@ -321,7 +337,9 @@ class AuthorityEventIntent:
         return {
             "event_type": self.event_type.value, "actor_id": self.actor_id,
             "evidence_refs": list(self.evidence_refs), "policy_corpus_hash": self.policy_corpus_hash,
-            "static_policy_view_projection": self.static_policy_view_projection,
+            # The frozen projection is an in-memory invariant; the canonical
+            # boundary emits plain structures so stored bytes never change.
+            "static_policy_view_projection": plain(self.static_policy_view_projection) if self.static_policy_view_projection is not None else None,
             "ratification_event_id": self.ratification_event_id,
             "overlay": self.overlay.semantic_projection() | {"overlay_id": self.overlay.overlay_id} if self.overlay else None,
             "overlay_id": self.overlay_id,

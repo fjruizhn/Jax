@@ -70,11 +70,25 @@ def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAut
     if (intent.event_type is AuthorityEventType.RULE_RATIFICATION_GRANTED and
             intent._rule_ratification_snapshot_seal is not _RULE_RATIFICATION_SNAPSHOT_SEAL):
         raise AuthorityStateError("rule grant requires a sealed Faro snapshot")
+    if intent.event_type is AuthorityEventType.RATIFICATION_GRANTED:
+        # Compares fields: the hash field against the one carried inside the
+        # frozen projection. It does NOT recompute the hash from the projection.
+        # In-process `object.__setattr__` on both fields is outside the threat
+        # model (the seal is a guard against public paths, not a cryptographic
+        # boundary).
+        projection = intent.static_policy_view_projection
+        if projection is None or projection.get("policy_corpus_hash") != intent.policy_corpus_hash:
+            raise AuthorityStateError("policy_corpus_hash no coincide con la proyección congelada del snapshot")
     events = store.events()
     provisional = AuthorityEvent(event_id or _uuid7(), len(events) + 1, events[-1].event_hash if events else None, intent, recorded_at_utc or datetime.now(timezone.utc), "", "sha256:" + "0" * 64)
     signature = sign(private_key, event_unsigned_bytes(provisional))
     signed = AuthorityEvent(provisional.event_id, provisional.sequence, provisional.previous_event_hash, provisional.intent, provisional.recorded_at_utc, signature, "sha256:" + "0" * 64)
     complete = AuthorityEvent(signed.event_id, signed.sequence, signed.previous_event_hash, signed.intent, signed.recorded_at_utc, signed.signature, event_hash(signed))
+    # Full replay WITH the new event: the signature is computed over ephemeral
+    # bytes precisely so this gate can cryptographically verify the candidate
+    # against the reconstructed state. If replay rejects it, nothing reaches
+    # storage and the append-only ledger cannot be poisoned.
+    verify_authority_ledger(genesis, events + (complete,), trusted_root)
     store.append(complete)
     if checkpoint_store is not None:
         from .models import AuthorityLedgerCheckpoint

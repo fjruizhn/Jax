@@ -2767,7 +2767,7 @@ jobs:
           JAX_AUTHORITY_LEDGER_DOCKER_CMD: docker
         run: |
           set -o pipefail
-          python -m pytest -q tests/policy/test_authority_ledger_storage_mariadb.py 2>&1 | tee /tmp/authority-ledger-mariadb
+          python -m pytest -q tests/policy/test_authority_ledger_storage_mariadb.py tests/policy/test_authority_ledger_append_validation_mariadb.py 2>&1 | tee /tmp/authority-ledger-mariadb
           python3 .github/ci/piso.py verificar authority-ledger-mariadb/integration /tmp/authority-ledger-mariadb || exit $?
       - name: Block 4 rule ratification events -- piso exacto
         env:
@@ -2776,6 +2776,24 @@ jobs:
           set -o pipefail
           python -m pytest -q tests/policy/test_authority_ledger_rule_ratifications.py 2>&1 | tee /tmp/authority-rule-events
           python3 .github/ci/piso.py verificar authority-rule-events/ratifications /tmp/authority-rule-events || exit $?
+      - name: Block 4 authority-ledger sellos y append -- piso exacto
+        # Ataques de falsificación del sello (replace / mutación / drift de
+        # hash) del fix de sellos init=False + proyección congelada.
+        env:
+          PYTHONPATH: "."
+        run: |
+          set -o pipefail
+          python -m pytest -q tests/policy/test_authority_ledger_seal_attacks.py 2>&1 | tee /tmp/authority-ledger-seal
+          python3 .github/ci/piso.py verificar authority-ledger-seal/attacks /tmp/authority-ledger-seal || exit $?
+      - name: Block 4 authority-ledger golden vectors -- piso exacto
+        # Bytes firmados de los seis tipos históricos clavados a master
+        # 83f8f56b: el congelado de la proyección no cambia la serialización.
+        env:
+          PYTHONPATH: "."
+        run: |
+          set -o pipefail
+          python -m pytest -q tests/policy/test_authority_ledger_golden_vectors.py 2>&1 | tee /tmp/authority-ledger-golden
+          python3 .github/ci/piso.py verificar authority-ledger-golden/vectors /tmp/authority-ledger-golden || exit $?
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

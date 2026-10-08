@@ -5,7 +5,7 @@ import pytest
 from policy.authority_ledger.errors import AuthorityEventValidationError, AuthorityStateError, LedgerIntegrityError
 from policy.authority_ledger.models import (
     AuthorityEvent, AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
-    RuleRatificationGrantPayload, _RULE_RATIFICATION_SNAPSHOT_SEAL,
+    RuleRatificationGrantPayload,
 )
 from policy.authority_ledger.replay import event_hash, event_unsigned_bytes, genesis_hash, verify_authority_ledger
 from policy.authority_ledger.service import append_authority_event
@@ -15,6 +15,7 @@ from policy.authority_ledger.signatures import (
 )
 from policy.authority_ledger.storage import InMemoryAuthorityLedgerStore
 from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
+from tests.policy._sellos_de_prueba import rule_grant_intent
 from policy.authority_ledger.signatures import sign
 
 
@@ -60,12 +61,7 @@ def _grant_intent(grant=None):
 
 
 def _test_signable_grant_intent(grant=None):
-    return AuthorityEventIntent(
-        AuthorityEventType.RULE_RATIFICATION_GRANTED,
-        "human:fernando",
-        rule_ratification=grant or sample_grant(),
-        _rule_ratification_snapshot_seal=_RULE_RATIFICATION_SNAPSHOT_SEAL,
-    )
+    return rule_grant_intent(grant or sample_grant())
 
 
 def test_rule_ratification_grant_has_a_closed_payload_and_roundtrips():
@@ -90,25 +86,30 @@ def test_rule_ratification_grant_has_a_closed_payload_and_roundtrips():
     assert intent_projection(restored) == projection
 
 
-def test_rule_ratification_grant_cannot_be_built_from_caller_supplied_fields():
-    with pytest.raises(AuthorityEventValidationError):
+def test_rule_grant_seal_is_not_constructor_reachable():
+    # El sello es init=False: ni el constructor ni dataclasses.replace pueden
+    # portarlo. Sin sello el intent se construye, pero la frontera que firma
+    # (append) lo rechaza -- ver test_storage_decoding_does_not_authorize_a_new_human_rule_grant
+    # y los ataques de test_authority_ledger_seal_attacks.py.
+    with pytest.raises(TypeError):
         AuthorityEventIntent(
             AuthorityEventType.RULE_RATIFICATION_GRANTED,
             "human:fernando",
             rule_ratification=sample_grant(),
+            _rule_ratification_snapshot_seal=object(),
         )
-
-    class AlwaysEqual:
-        def __eq__(self, other):
-            return True
-
-    with pytest.raises(AuthorityEventValidationError, match="snapshot Faro sellado"):
-        AuthorityEventIntent(
-            AuthorityEventType.RULE_RATIFICATION_GRANTED,
-            "human:fernando",
-            rule_ratification=sample_grant(),
-            _rule_ratification_snapshot_seal=AlwaysEqual(),
+    unsealed = AuthorityEventIntent(
+        AuthorityEventType.RULE_RATIFICATION_GRANTED,
+        "human:fernando",
+        rule_ratification=sample_grant(),
+    )
+    store, root, key = _ledger()
+    with pytest.raises(AuthorityStateError, match="sealed Faro snapshot"):
+        append_authority_event(
+            store, root, key, unsealed,
+            event_id="018cc251-f400-7000-8000-000000000011",
         )
+    assert store.events() == ()
 
 
 def test_storage_decoding_does_not_authorize_a_new_human_rule_grant():
@@ -165,7 +166,6 @@ def test_rule_ratification_codec_rejects_unexpected_fields_and_non_fernando_acto
             "human:fernando",
             policy_corpus_hash="sha256:" + "f" * 64,
             rule_ratification=sample_grant(),
-            _rule_ratification_snapshot_seal=_RULE_RATIFICATION_SNAPSHOT_SEAL,
         )
 
 
@@ -214,34 +214,39 @@ def test_replay_exposes_only_the_unrevoked_latest_rule_grant():
 
     assert state.latest_unrevoked_rule_ratification("send-receipt").event_id == second_id
 
-    append_authority_event(
-        store, root, key,
-        AuthorityEventIntent(
-            AuthorityEventType.ACTIVATION_GRANTED,
-            "human:fernando",
-            ratification_event_id=second_id,
-        ),
-        event_id="018cc251-f400-7000-8000-000000000003",
-    )
+    # E4 (#369): una ACTIVATION_GRANTED hacia un id que no es ratificación de
+    # corpus se rechaza ANTES de escribir -- con triggers append-only, escribirla
+    # volvería el ledger inverificable para siempre.
     with pytest.raises(AuthorityStateError, match="activación requiere ratificación"):
-        verify_authority_ledger(store.get_genesis(), store.events(), root)
+        append_authority_event(
+            store, root, key,
+            AuthorityEventIntent(
+                AuthorityEventType.ACTIVATION_GRANTED,
+                "human:fernando",
+                ratification_event_id=second_id,
+            ),
+            event_id="018cc251-f400-7000-8000-000000000003",
+        )
+    verify_authority_ledger(store.get_genesis(), store.events(), root)
+    assert len(store.events()) == 2
 
 
 def test_replay_rejects_unknown_and_duplicate_rule_ratification_revocations():
     store, root, key = _ledger()
     missing = "018cc251-f400-7000-8000-000000000009"
-    append_authority_event(
-        store, root, key,
-        AuthorityEventIntent(AuthorityEventType.RULE_RATIFICATION_REVOKED,
-                             "human:fernando", rule_ratification_event_id=missing),
-        event_id="018cc251-f400-7000-8000-000000000001",
-    )
-    with pytest.raises(AuthorityStateError):
-        verify_authority_ledger(store.get_genesis(), store.events(), root)
+    with pytest.raises(AuthorityStateError, match="rule ratification desconocida"):
+        append_authority_event(
+            store, root, key,
+            AuthorityEventIntent(AuthorityEventType.RULE_RATIFICATION_REVOKED,
+                                 "human:fernando", rule_ratification_event_id=missing),
+            event_id="018cc251-f400-7000-8000-000000000001",
+        )
+    verify_authority_ledger(store.get_genesis(), store.events(), root)
+    assert store.events() == ()
 
 
 @pytest.mark.parametrize("direction", ["corpus_to_rule", "rule_to_corpus"])
-def test_replay_rejects_cross_type_revocations_of_real_grant_ids(direction):
+def test_append_rejects_cross_type_revocations_of_real_grant_ids(direction):
     from tests.policy.test_authority_ledger_events import ratification_intent
 
     store, root, key = _ledger()
@@ -249,23 +254,25 @@ def test_replay_rejects_cross_type_revocations_of_real_grant_ids(direction):
     rule_id = "018cc251-f400-7000-8000-000000000021"
     if direction == "corpus_to_rule":
         append_authority_event(store, root, key, ratification_intent(), event_id=corpus_id)
-        append_authority_event(
-            store, root, key,
-            AuthorityEventIntent(AuthorityEventType.RULE_RATIFICATION_REVOKED,
-                                 "human:fernando", rule_ratification_event_id=corpus_id),
-            event_id=rule_id,
-        )
+        with pytest.raises(AuthorityStateError, match="rule ratification desconocida"):
+            append_authority_event(
+                store, root, key,
+                AuthorityEventIntent(AuthorityEventType.RULE_RATIFICATION_REVOKED,
+                                     "human:fernando", rule_ratification_event_id=corpus_id),
+                event_id=rule_id,
+            )
     else:
         append_authority_event(store, root, key, _test_signable_grant_intent(), event_id=rule_id)
-        append_authority_event(
-            store, root, key,
-            AuthorityEventIntent(AuthorityEventType.RATIFICATION_REVOKED,
-                                 "human:fernando", ratification_event_id=rule_id),
-            event_id=corpus_id,
-        )
+        with pytest.raises(AuthorityStateError, match="ratificación desconocida"):
+            append_authority_event(
+                store, root, key,
+                AuthorityEventIntent(AuthorityEventType.RATIFICATION_REVOKED,
+                                     "human:fernando", ratification_event_id=rule_id),
+                event_id=corpus_id,
+            )
 
-    with pytest.raises(AuthorityStateError):
-        verify_authority_ledger(store.get_genesis(), store.events(), root)
+    verify_authority_ledger(store.get_genesis(), store.events(), root)
+    assert len(store.events()) == 1
 
 
 def test_replay_rejects_duplicate_event_id_even_with_valid_signature_and_chain_hash():
@@ -286,6 +293,8 @@ def test_replay_rejects_duplicate_event_id_even_with_valid_signature_and_chain_h
     with pytest.raises(LedgerIntegrityError, match="duplicado"):
         verify_authority_ledger(store.get_genesis(), (first, duplicate), root)
 
+    # La doble revocación del mismo grant ya no se escribe: append la rechaza
+    # contra el estado antes de firmar hacia el ledger.
     store, root, key = _ledger()
     grant_id = "018cc251-f400-7000-8000-000000000002"
     revoke_id = "018cc251-f400-7000-8000-000000000003"
@@ -295,8 +304,9 @@ def test_replay_rejects_duplicate_event_id_even_with_valid_signature_and_chain_h
         "human:fernando", rule_ratification_event_id=grant_id,
     )
     append_authority_event(store, root, key, revoke, event_id=revoke_id)
-    append_authority_event(
-        store, root, key, revoke, event_id="018cc251-f400-7000-8000-000000000004",
-    )
-    with pytest.raises(AuthorityStateError):
-        verify_authority_ledger(store.get_genesis(), store.events(), root)
+    with pytest.raises(AuthorityStateError, match="revocada más de una vez"):
+        append_authority_event(
+            store, root, key, revoke, event_id="018cc251-f400-7000-8000-000000000004",
+        )
+    verify_authority_ledger(store.get_genesis(), store.events(), root)
+    assert len(store.events()) == 2

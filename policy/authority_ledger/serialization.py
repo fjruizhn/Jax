@@ -125,12 +125,13 @@ def intent_from_projection(value) -> AuthorityEventIntent:
                 valid_from_utc=datetime.fromisoformat(raw["valid_from_utc"]),
                 valid_until_utc=datetime.fromisoformat(raw["valid_until_utc"]) if raw["valid_until_utc"] is not None else None,
             )
-            return AuthorityEventIntent(
+            intent = AuthorityEventIntent(
                 AuthorityEventType.RULE_RATIFICATION_GRANTED,
                 value["actor_id"], _array(value["evidence_refs"], "evidence_refs"),
                 rule_ratification=grant,
-                _rule_ratification_snapshot_seal=_RULE_RATIFICATION_STORAGE_SEAL,
             )
+            object.__setattr__(intent, "_rule_ratification_snapshot_seal", _RULE_RATIFICATION_STORAGE_SEAL)
+            return intent
         except (KeyError, TypeError, ValueError) as exc:
             raise AuthorityEventValidationError("rule_ratification inválido") from exc
     if isinstance(value, dict) and value.get("event_type") == AuthorityEventType.RULE_RATIFICATION_REVOKED.value:
@@ -155,7 +156,7 @@ def intent_from_projection(value) -> AuthorityEventIntent:
         if actual_payload != allowed_payload or any(value[name] is not None for name in other_payload):
             raise AuthorityEventValidationError(f"payload inválido para {event_type.value}")
         seal = _RATIFICATION_STORAGE_SEAL if event_type is AuthorityEventType.RATIFICATION_GRANTED else None
-        return AuthorityEventIntent(
+        intent = AuthorityEventIntent(
             event_type=event_type,
             actor_id=value["actor_id"],
             evidence_refs=_array(value["evidence_refs"], "evidence_refs"),
@@ -164,8 +165,10 @@ def intent_from_projection(value) -> AuthorityEventIntent:
             ratification_event_id=value["ratification_event_id"],
             overlay=_overlay_from_projection(value["overlay"]),
             overlay_id=value["overlay_id"],
-            _ratification_snapshot_seal=seal,
         )
+        if seal is not None:
+            object.__setattr__(intent, "_ratification_snapshot_seal", seal)
+        return intent
     except (KeyError, TypeError, ValueError) as exc:
         raise AuthorityEventValidationError("canonical_intent inválido") from exc
 
