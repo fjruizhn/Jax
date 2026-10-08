@@ -38,8 +38,8 @@
       "mensaje": "PISO ROTO: se esperaban 251 tests CORRIDOS de cli_sandbox."
     },
     "faro-fase0/faro": {
-      "patron": "^688 passed",
-      "mensaje": "PISO ROTO: se esperaban 688 tests CORRIDOS del Faro."
+      "patron": "^729 passed",
+      "mensaje": "PISO ROTO: se esperaban 729 tests CORRIDOS del Faro."
     },
     "faro-bitacora-db/faro-db": {
       "patron": "^40 passed",
@@ -134,8 +134,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 19 tests CORRIDOS del codec de persistencia de Block 4. Medido el 2026-10-07 en hall9000."
     },
     "authority-ledger-mariadb/integration": {
-      "patron": "^5 passed in ",
-      "mensaje": "PISO ROTO: se esperaban 5 tests CORRIDOS de la suite MariaDB aislada del ledger (4 de storage + 1 de rechazo pre-escritura)."
+      "patron": "^8 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 8 tests CORRIDOS de la suite MariaDB aislada del ledger (5 de storage/append + 3 de robustez del ciclo de vida del socket de arranque)."
     },
     "authority-rule-events/ratifications": {
       "patron": "^12 passed in ",
@@ -212,6 +212,10 @@
     "authority-resolution-loader-seal/ataques": {
       "patron": "^16 passed in ",
       "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS de los ataques al sello del loader de Block 3 (replace, construccion directa, congelado, subclases, metodo sombreado, binding por campo de las 6 entradas). 14 -> 16 el 2026-10-07 (chore/pisos-doc-binding, sobre #379 7bd266e7): +2 del binding campo por campo, canonicalizer_identity y bootstrap_bundle_id (mutantes de quitarlos de _contenido_canonico medidos muertos)."
+    },
+    "identity-foundation-shadow/policy": {
+      "patron": "^657 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 657 tests CORRIDOS y 0 skipped de Identity Foundation Shadow (la politica sin DB)."
     }
   },
   "minimos": {

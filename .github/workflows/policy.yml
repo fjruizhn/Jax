@@ -499,10 +499,19 @@ jobs:
   # TODO sale con HASH: mcp de requirements-faro.txt, pytest y el cliente de base de
   # requirements-faro-ci.txt (`--require-hashes`, sin `pip install` suelto: lo vigila
   # tests/test_faro_requirements.py). Piso exacto de tests CORRIDOS, cero saltados (un skip se ve igual
-  # que verde). Medido 2026-10-05 en hall9000 con Python 3.14: 688 passed
-  # (la base medida de 671 + 15 de memoria.buscar + 2 de configuración/control; sin skips).
-  # La CI usa Python 3.12 y confirma el mismo piso.
-  # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 72 +
+  # que verde). Medido 2026-10-05 en hall9000 con Python 3.14: 688 passed; re-medido el
+  # 2026-10-06 (jax#370 r3): 720 passed — el catalogo cerrado de topes (decision de Fernando,
+  # R-4) agrego 32 pruebas de runtime, y las de mecanica pasaron a recursos del catalogo.
+  # Re-medido ronda 5 (B-3): 721 — el catalogo llega del pin por parametro y sin el no se
+  # topea nada (+1). Sin skips. La CI usa Python 3.12 y confirma el mismo piso.
+  # Re-medido ronda 6 (D-4 piso de codigo + catalogo sellado): 722 — el runtime solo
+  # acepta el CatalogoTopes sellado del snapshot, nunca un Mapping cualquiera (+1).
+  # Re-medido ronda 7 (solo el snapshot emite; catalogo de pin de prueba): 726 —
+  # recursos de clase prohibida con subid ajeno (AUD2 x3) y catalogo de bytes
+  # sueltos niegan (+4). Re-medido MAJOR-1: 728 — resultado y reconciliacion
+  # durables conservan el OID del catalogo sellado (+2). El contrato de lectura
+  # de AlmacenTopes agrega una prueba de reconciliacion: piso actual 729 (+1).
+  # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 113 +
   # control 170 + lanzador 77 + acl 43 + memoria 15; desde aviso, los pasos 0.3b y 0.3c y su auditoria). Las pruebas con bwrap y uids
   # reales estan en el job `faro-jaula`; las de la base real, en `faro-bitacora-db`.
   faro-fase0:
@@ -2547,7 +2556,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - run: pip install pytest pyyaml cryptography==49.0.0 pymysql
+      - run: pip install pytest pyyaml cryptography==49.0.0 pymysql jsonschema==4.26.0
       - name: Identity Foundation Shadow (sin DB)
         env:
           PYTHONPATH: "."
@@ -2559,6 +2568,9 @@ jobs:
           tests/policy/test_legacy_identity_comparison.py
           tests/policy/test_normative_projection.py
           tests/policy/test_policy_corpus_hash.py
+          tests/policy/test_rule_authority_schema.py
+          tests/policy/test_rule_authority_snapshot.py
+          tests/policy/test_rule_authority_ataques.py
           tests/policy/test_shadow_manifest.py
           tests/policy/test_strict_yaml.py
           tests/policy/test_v3_array_semantics.py
@@ -2627,6 +2639,114 @@ jobs:
           --confcutdir=tests/policy
           -p no:cacheprovider
           --basetemp="${RUNNER_TEMP}/identity-foundation-shadow-pytest"
+      - name: Identity Foundation Shadow -- piso exacto de tests CORRIDOS
+        # Jax#370 ronda 2 (M-5): la lista de arriba crece con cada area de policy y
+        # nada la pisaba. Medido el 2026-10-06 en hall9000 (Python 3.14.4, pytest 9,
+        # solo pytest+pyyaml+cryptography como el paso de arriba): 545 passed
+        # (459 de la ronda 1 + 38 de rule_authority: 20 de schema por la decision
+        # R-4 de Fernando y digitos ASCII, 2 de snapshot por el testigo no-dataclass,
+        # 16 de los ataques A-J del auditor como regresiones). Ronda 5 (B-3): 555
+        # (+10 del catalogo del pin). Ronda 6 (D-4 piso de codigo): 562 (+7: K2 sexta
+        # clase niega en cargador y en pin, OID de objeto suelto del catalogo
+        # recalculado, cargador solo bytes, catalogo anidado niega, UTF-8 estricto,
+        # catalogo sellado inmutable). Ronda 7 (solo el snapshot emite el catalogo):
+        # 574 (+12: no hay fabrica publica de bytes a sellado, las seis palabras de
+        # D-4 niegan como subid, mayusculas/acentos/segmentos niegan, AUD2 de cruce
+        # de clases, vector dorado del hash con dominio v2, subclase de bytes niega,
+        # validar_regla exige el sellado, fabricar con el OID del pin niega).
+        # Ronda 8: 591 (576 medidos en master + 15: D-4 como segmento y subcadena x13,
+        # subids legitimos no caen, el helper del pin no deja repos temporales).
+        # Ronda 9: 614 (+23: D-4 con sinonimos en ingles y raices x11, w0rkers no se
+        # niega -limite documentado-, subids legitimos del catalogo real x11).
+        # Ronda 10: 637 (+23: tope.period solo es un subid de la clase frecuencia del
+        # catalogo del pin; 20 negativas, 2 positivas del catalogo real, 2 de contrato).
+        # Ronda 12: 657 (+14 pruebas incorporadas por schema/snapshot Faro F1.1;
+        # CI midió 657 en el SHA 49b0e1bb. TestEvidenceIngester declara __test__=False:
+        # es una clase auxiliar y no se debe coleccionar como prueba; otras advertencias
+        # de colección permanecen visibles y rompen el resumen estricto del piso.
+        # El resumen completo, incluido 0 skipped,
+        # es el piso: un salto no puede verse verde por prefijo.
+        # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
+        run: |
+          set -o pipefail
+          python -B -m pytest -q \
+            tests/policy/test_bootstrap_root.py \
+            tests/policy/test_canonical_json.py \
+            tests/policy/test_legacy_identity_comparison.py \
+            tests/policy/test_normative_projection.py \
+            tests/policy/test_policy_corpus_hash.py \
+            tests/policy/test_rule_authority_schema.py \
+            tests/policy/test_rule_authority_snapshot.py \
+            tests/policy/test_rule_authority_ataques.py \
+            tests/policy/test_shadow_manifest.py \
+            tests/policy/test_strict_yaml.py \
+            tests/policy/test_v3_array_semantics.py \
+            tests/policy/test_v3_authoritative_manifest.py \
+            tests/policy/test_v3_authority_meta_contract.py \
+            tests/policy/test_v3_bootstrap_bundle.py \
+            tests/policy/test_v3_bootstrap_root.py \
+            tests/policy/test_v3_candidate_activation.py \
+            tests/policy/test_v3_cli.py \
+            tests/policy/test_v3_cross_validation.py \
+            tests/policy/test_v3_external_constraints.py \
+            tests/policy/test_v3_field_classes.py \
+            tests/policy/test_v3_normative_membership.py \
+            tests/policy/test_v3_normative_policy_document.py \
+            tests/policy/test_v3_normative_projection.py \
+            tests/policy/test_v3_path_security.py \
+            tests/policy/test_v3_policy_corpus_hash.py \
+            tests/policy/test_v3_protected_metanorms.py \
+            tests/policy/test_v3_reference_catalog.py \
+            tests/policy/test_v3_relationship_graph.py \
+            tests/policy/test_v3_root_pair.py \
+            tests/policy/test_v3_unicode_normalization.py \
+            tests/policy/test_authority_resolution_context.py \
+            tests/policy/test_authority_resolution_applicability.py \
+            tests/policy/test_authority_resolution_indeterminacy.py \
+            tests/policy/test_authority_resolution_precedence.py \
+            tests/policy/test_authority_resolution_supersession.py \
+            tests/policy/test_authority_resolution_conflicts.py \
+            tests/policy/test_authority_resolution_result_contract.py \
+            tests/policy/test_authority_resolution_candidate_boundary.py \
+            tests/policy/test_authority_resolution_determinism.py \
+            tests/policy/test_authority_resolution_purity.py \
+            tests/policy/test_enforcement_evidence_core.py \
+            tests/policy/test_enforcement_evidence_mariadb_api.py \
+            tests/policy/test_block8_adapters_docs.py \
+            policy/enforcement_evidence/test_evidence.py \
+            tests/policy/test_authority_ledger_events.py \
+            tests/policy/test_authority_ledger_chain.py \
+            tests/policy/test_authority_ledger_ratification.py \
+            tests/policy/test_authority_ledger_activation.py \
+            tests/policy/test_authority_ledger_overlays.py \
+            tests/policy/test_authority_ledger_context_hash.py \
+            tests/policy/test_authority_ledger_checkpoint.py \
+            tests/policy/test_authority_ledger_authentication.py \
+            tests/policy/test_authority_ledger_concurrency.py \
+            tests/policy/test_authority_ledger_audit_corrections.py \
+            tests/policy/test_effective_authority_envelope.py \
+            tests/policy/test_decision_input.py \
+            tests/policy/test_decision_identity.py \
+            tests/policy/test_decision_record.py \
+            tests/policy/test_decision_storage.py \
+            tests/policy/test_decision_replay.py \
+            tests/policy/test_decision_authority_binding.py \
+            tests/policy/test_decision_determinism.py \
+            tests/policy/test_decision_boundaries.py \
+            tests/policy/test_execution_request.py \
+            tests/policy/test_execution_authorization.py \
+            tests/policy/test_execution_identity.py \
+            tests/policy/test_execution_human_approval.py \
+            tests/policy/test_execution_dry_run.py \
+            tests/policy/test_execution_state_machine.py \
+            tests/policy/test_execution_storage.py \
+            tests/policy/test_execution_motor_adapter.py \
+            tests/policy/test_execution_boundaries.py \
+            --confcutdir=tests/policy -p no:cacheprovider 2>&1 | tee /tmp/identity-foundation
+          python3 .github/ci/piso.py verificar identity-foundation-shadow/policy /tmp/identity-foundation || exit $?
+          if grep -qE "[0-9]+ skipped" /tmp/identity-foundation; then
+            echo "HAY TESTS SALTADOS: Identity Foundation Shadow se ejercita completa o no cuenta."; exit 1
+          fi
       # Arranque de systemd versionado (ops/versionar-drop-ins-v2, 2026-10-05): en paso propio
       # porque 9 de sus casos exigen el host de produccion (/srv/jax-prod/jax) o los checkouts de los repos duenos y se saltan en el
       # runner -- el piso del bloque de arriba no admite que suban las saltadas (M <= 45, ver
@@ -2648,6 +2768,7 @@ jobs:
           JAX_AUTHORITY_LEDGER_DOCKER_CMD: docker
         run: |
           set -o pipefail
+          # Piso 8: cinco casos de integración + tres regresiones de retry clasificado.
           python -m pytest -q tests/policy/test_authority_ledger_storage_mariadb.py tests/policy/test_authority_ledger_append_validation_mariadb.py 2>&1 | tee /tmp/authority-ledger-mariadb
           python3 .github/ci/piso.py verificar authority-ledger-mariadb/integration /tmp/authority-ledger-mariadb || exit $?
       - name: Block 4 rule ratification events -- piso exacto

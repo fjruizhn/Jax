@@ -4611,7 +4611,7 @@ denormalizadas (incluido `previous_event_hash`), lectura histórica exacta y per
 
 ## `authority-ledger-mariadb/integration`
 
-Piso vigente (2026-10-07): `^4 passed in ` (antes 1). Medido en hall9000 con MariaDB 12.3.3 efímera
+Piso vigente (2026-10-08): `^8 passed in `. La base #377 tenía 5 pruebas en MariaDB 12.3.3 efímera
 `--network none`; la prueba aplica ambas migraciones, valida el upgrade nullable→NOT NULL,
 provisiona la cuenta de aplicación con el script versionado, genera una llave Ed25519 de prueba
 y valida firma → INSERT → lectura → reconstrucción → hash/firma y replay. También prueba que
@@ -4619,7 +4619,10 @@ UPDATE/DELETE fallan aunque otro principal tenga esos GRANTs, por los triggers a
 base solo expone socket Unix al proceso de prueba. Tres pruebas nuevas, cada una con su MariaDB
 efímera: el provisioning revoca los privilegios previos (`REVOKE ALL PRIVILEGES, GRANT OPTION`) y
 `SHOW GRANTS` coincide exacto con el contrato; la migración 002 falla cerrada con filas NULL aun con
-`sql_mode=''` (la fila queda intacta) y pasa con cero NULL.
+`sql_mode=''` (la fila queda intacta) y pasa con cero NULL. Para cerrar el fallo de CI #379, se
+agregaron tres pruebas unitarias sin contenedor que clasifican errores de conexión, comprueban el
+reintento acotado de fallos transitorios y aseguran que `1045 Access denied` no se reintente. La
+CI completa debe confirmar el total de 8 en Python 3.14.
 
 ## `authority-rule-events/ratifications`
 
@@ -4680,3 +4683,29 @@ hash con la misma forma válida de `_HASH`, para que solo el binding lo delate);
 que quitan cada entrada del dict mueren (medidos: cada mutante derriba solo su caso).
 Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_subclass__`» y quitar
 cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
+## `identity-foundation-shadow/policy`
+
+Patrón vigente (2026-10-08, tras #370/#377): `^657 passed in `
+
+Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
+solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
+de la constitución es que un número compartido lo re-mide el último en llegar, y sin piso no hay
+número. Medido en hall9000: 459 (ronda 1) + 38 (ronda 2) + 43 (ronda 3: catálogo de topes, copias/pickle, nombres que esquivan, blob gigante, identidad de las listas del workflow, y las tres dedicadas de razon propia: dígito Unicode, claves de límites, not_after) de rule_authority (20 de schema — decisión R-4 de
+Fernando del 2026-10-06 y dígitos ASCII; 2 de snapshot — testigo no-dataclass; 16 de los ataques
+A–J del auditor como regresiones). El paso re-corre la misma lista en `-q | tee` como memory-b9.
+Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.
+
+r8 (2026-10-07, ronda 8 de jax#370): 574 -> 591. El runner (tests-puros, Python 3.14) dio 576 con la rama sobre
+master (que ya trae las pruebas de #368/#369/#374) y el piso decía 574; 576 +15 pruebas nuevas de la r8
+(D-4 como segmento y subcadena: 7 compuestas + 6 exactas, el contrapeso de subids legítimos y que el helper
+`catalogo_del_pin` no deje repos temporales). Medido en hall9000 con Python 3.14.4, pytest 9.1.1,
+pyyaml 6.0.3, cryptography 49.0.0 y el comando exacto del paso (`bash --noprofile --norc -eo pipefail`).
+
+r9 (2026-10-07): 591 -> 614 (+23: D-4 con sinónimos en inglés y raíces x11, `w0rkers` no se niega (límite documentado) x1, subids legítimos del catálogo real x11). Medido con Python 3.14.4 y el comando exacto del paso.
+
+r10 (2026-10-07, cierre del hallazgo del auditor en jax#370): 614 -> 637 (+23 netas: el periodo de un tope solo es un subid de la clase `frecuencia` del catalogo del pin; 1 prueba vieja se reemplaza por 20 negativas parametrizadas, 2 positivas del catalogo real y 2 de contrato). Medido con Python 3.14.4 y el comando exacto del paso.
+
+Ronda final de #370: 637 -> 657. Se añadieron las regresiones del matcher estricto y
+declaración explícita de `TestEvidenceIngester.__test__ = False`; medición exacta local
+de la lista del workflow: `657 passed in 5.23s`, cero skipped. Véase el cierre auditado
+en el registro histórico de Faro F1.1.
