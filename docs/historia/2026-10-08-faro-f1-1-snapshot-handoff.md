@@ -223,4 +223,15 @@ no concede autoridad ni prueba el estado operativo actual.
   advertencia de colección sigue visible y hace que falle el piso exacto.
 - La lista exacta de Identity Foundation Shadow pasó localmente: `657 passed in 5.23s`;
   cero skipped, comparador contra `origin/master` y `git diff --check` limpios.
-- Este SHA aún requiere nueva auditoría Tier 3 y CI completa antes de integrar #370.
+- Ese SHA fue auditado, integrado como PR #370 y pasó `post-merge-guard`; el
+  recibo final quedó en el registro de integración de esa fecha.
+
+## Archivo del traspaso raíz · 2026-10-08
+
+- El traspaso operativo que reapareció al actualizar la rama de #377 sobre
+  `master` se retiró del cambio candidato. Era una instrucción de continuación
+  ligada a un worktree y a SHAs ya superados; conservarlo en `master` habría
+  publicado un pendiente falso.
+- Este documento conserva el contexto histórico de Faro F1.1. El estado vivo de
+  cualquier PR o CI debe consultarse en sus refs, checks y auditorías del SHA
+  exacto; este archivo no es autoridad operativa.
