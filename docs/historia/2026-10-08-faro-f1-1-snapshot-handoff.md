@@ -174,3 +174,14 @@ no concede autoridad ni prueba el estado operativo actual.
   109 pruebas a `topes`, mientras que su suite mide 113.
 - El comentario se ajustó a 113; el desglose ahora suma 729. Este cambio crea un
   nuevo SHA, que requiere auditoría y CI exactas después de archivar este handoff.
+
+## Justificación de stderr acotado · 2026-10-08
+
+- CI exacta de `5d72b97e23603ad5ec40e0b7e1bd8fe97978e4ba` pasó `no-fail-open-except`
+  pero falló `test_stderr_no_se_tira`: `jax/faro/git_objetos.py` usa
+  `stderr=DEVNULL` sin motivo en el registro controlado.
+- Añadido el permiso con justificación específica: no se captura la salida del
+  recorrido Git, el código de salida se valida y el caller falla cerrado con error
+  tipado. Control local: **4 passed**, diff-check limpio.
+- Falta cometer, archivar/retirar handoff, publicar el nuevo SHA, auditarlo y
+  esperar CI exacta.
