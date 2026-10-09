@@ -53,6 +53,7 @@ from policy.rule_authority.providers import (  # noqa: E402
     VersionMonotonica,
     VistaLease,
     exigir_contrato_de_emision,
+    leases_de_emision,
 )
 from policy.rule_authority.snapshot import TrustedPolicyPin  # noqa: E402
 
@@ -435,6 +436,40 @@ def test_m9_la_version_es_estable_mientras_se_lee() -> None:
     assert v3.valor == EstadoStop(activo=False, huella="x")     # la vista del exclusivo: el instante de entrada
     with pytest.raises(RuleAuthorityError, match="exclusivo"):  # y no se escribe sin el exclusivo
         proveedor._reemplazar(EstadoStop(activo=False, huella="z"))
+
+
+def test_los_leases_de_emision_mantienen_las_tres_vistas_hasta_el_fin_del_contexto() -> None:
+    """Rompe si la frontera cierra algun lease antes de que quien decide termine.
+
+    El cambio que debe volverla roja es adquirir y validar cada lease por
+    separado: entonces el escritor de ese proveedor entraria dentro del
+    contexto, antes de que la persistencia de una decision pueda terminar.
+    """
+    pin = PinFijo(PIN, PROC)
+    clasificacion = ClasificacionFija({"CAP_X": _contrato(ClaseCapability.OBLIGATING)})
+    stop = StopFijo(activo=False, huella="sha256:x")
+    suite = _suite(pin=pin, clasificacion=clasificacion, stop=stop)
+    bloqueados: list[tuple[threading.Event, threading.Event, threading.Thread]] = []
+
+    with leases_de_emision(**suite) as vistas:
+        assert vistas.pin.valor == PinActivo(PIN, PROC)
+        assert vistas.clasificacion.valor.contrato_de("CAP_X").identidad == "cap-x"
+        assert vistas.stop.valor == EstadoStop(activo=False, huella="sha256:x")
+        for proveedor in (pin, clasificacion, stop):
+            intento = _intento_en_hilo(proveedor.lease_exclusivo)
+            bloqueados.append(intento)
+            _hasta_entrar_o_esperar(proveedor, intento[0])
+            assert not intento[0].is_set(), "el escritor entro antes de persistir la decision"
+
+    try:
+        for entro, _soltar, _hilo in bloqueados:
+            assert entro.wait(timeout=5.0), "el escritor no progreso al cerrar la frontera"
+    finally:
+        for _entro, soltar, _hilo in bloqueados:
+            soltar.set()
+    for _entro, _soltar, hilo in bloqueados:
+        hilo.join(timeout=5.0)
+        assert not hilo.is_alive()
 
 
 def test_a14_estres_ninguna_lectura_durante_exclusivo(intervalo_corto) -> None:

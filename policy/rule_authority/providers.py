@@ -45,7 +45,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 from enum import Enum
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from types import MappingProxyType
 from typing import Mapping, NamedTuple, Protocol, runtime_checkable
 
@@ -229,6 +229,19 @@ class VistaLease(NamedTuple):
     version: VersionMonotonica
 
 
+class VistasDeEmision(NamedTuple):
+    """Las tres vistas estables que una evaluacion puede usar y persistir.
+
+    Esta tupla solo vive dentro de :func:`leases_de_emision`. Sus leases siguen
+    abiertos hasta que el llamador deja ese contexto, por lo que un escritor de
+    pin, clasificacion o STOP no puede intercalarse entre la comprobacion y el
+    commit durable de la decision.
+    """
+    pin: VistaLease
+    clasificacion: VistaLease
+    stop: VistaLease
+
+
 @runtime_checkable
 class _ProveedorConLeases(Protocol):
     """Contrato de leases: exclusion real escritor-lector y entre escritores; la
@@ -300,14 +313,14 @@ def _procedencia_cerrada(procedencia: object) -> bool:
     return _RE_PROCEDENCIA.fullmatch(procedencia) is not None
 
 
-def _dentro_de_lease(nombre: str, proveedor: object, validar) -> None:
-    """Abre el lease COMPARTIDO y valida la vista Y su valor sin salir de el."""
+def _abrir_lease_compartido(stack: ExitStack, nombre: str, proveedor: object, validar) -> VistaLease:
+    """Abre y valida una vista sin soltarla; ``stack`` cierra en orden inverso."""
     try:
-        with proveedor.lease_compartido() as vista:          # type: ignore[attr-defined]
-            if type(vista) is not VistaLease \
-                    or type(vista.version) is not VersionMonotonica:
-                raise ProveedorInvalido(f"{nombre}: el lease no entrega una VistaLease valida")
-            validar(vista.valor)
+        vista = stack.enter_context(proveedor.lease_compartido())  # type: ignore[attr-defined]
+        if type(vista) is not VistaLease or type(vista.version) is not VersionMonotonica:
+            raise ProveedorInvalido(f"{nombre}: el lease no entrega una VistaLease valida")
+        validar(vista.valor)
+        return vista
     except ProveedorInvalido:
         raise
     except Exception as exc:
@@ -364,38 +377,68 @@ def _validar_checkpoint(checkpoint: object) -> None:
         raise ProveedorInvalido("checkpoint: el log no contiene el head exacto (§11)")
 
 
-def exigir_contrato_de_emision(*, pin: object, checkpoint: object, stop: object,
-                               reloj: object, clasificacion: object) -> None:
-    """Lo que el kernel llama ANTES de evaluar o consumir.
-
-    - todos los proveedores presentes y ``isinstance`` de SU Protocolo;
-    - el valor de cada lease se valida POR TIPO y DENTRO del lease; un Mock, un
-      None o un STOP ilegible se niegan aqui;
-    - pin: ``type(pin) is TrustedPolicyPin``, procedencia de forma cerrada e
-      igual a la del pin; reloj UTC consciente; clasificacion como mapa cerrado
-      donde toda capability ausente niega; checkpoint publicado y confirmado.
-    """
-    esperados = (("pin_activo", pin, ProveedorPinActivo), ("stop", stop, ProveedorStop),
+def _exigir_proveedores(*, pin: object, checkpoint: object, stop: object,
+                        reloj: object, clasificacion: object) -> None:
+    """Valida la forma de las dependencias antes de tomar cualquier lease."""
+    esperados = (("pin_activo", pin, ProveedorPinActivo),
                  ("clasificacion", clasificacion, ProveedorClasificacion),
-                 ("checkpoint", checkpoint, AlmacenCheckpoints), ("reloj", reloj, RelojConfiable))
+                 ("stop", stop, ProveedorStop),
+                 ("checkpoint", checkpoint, AlmacenCheckpoints),
+                 ("reloj", reloj, RelojConfiable))
     for nombre, proveedor, protocolo in esperados:
         if proveedor is None:
             raise ProveedorInvalido(f"falta el proveedor {nombre}")
         if not isinstance(proveedor, protocolo):
             raise ProveedorInvalido(f"{nombre}: no implementa {protocolo.__name__}")
 
-    _dentro_de_lease("pin_activo", pin, _validar_pin)
-    _dentro_de_lease("stop", stop, _validar_stop)
-    _dentro_de_lease("clasificacion", clasificacion, _validar_clasificacion)
-    _validar_reloj(reloj)
-    _validar_checkpoint(checkpoint)
+
+@contextmanager
+def leases_de_emision(*, pin: object, checkpoint: object, stop: object,
+                      reloj: object, clasificacion: object):
+    """Adquiere el borde compartido ``pin -> clasificacion -> STOP``.
+
+    La evaluacion y el consumo deben mantener este contexto hasta que su
+    decision (y, si existe, su permiso) quede persistida y confirmada. El
+    orden coincide con ``ORDEN_ADQUISICION``; ``ExitStack`` libera al reves al
+    salir, incluso si falla una validacion o el commit del llamador.
+    """
+    _exigir_proveedores(pin=pin, checkpoint=checkpoint, stop=stop, reloj=reloj,
+                         clasificacion=clasificacion)
+    with ExitStack() as stack:
+        vista_pin = _abrir_lease_compartido(stack, "pin_activo", pin, _validar_pin)
+        vista_clasificacion = _abrir_lease_compartido(
+            stack, "clasificacion", clasificacion, _validar_clasificacion)
+        vista_stop = _abrir_lease_compartido(stack, "stop", stop, _validar_stop)
+        _validar_reloj(reloj)
+        _validar_checkpoint(checkpoint)
+        yield VistasDeEmision(vista_pin, vista_clasificacion, vista_stop)
+
+
+def exigir_contrato_de_emision(*, pin: object, checkpoint: object, stop: object,
+                               reloj: object, clasificacion: object) -> None:
+    """Verifica que las dependencias pueden abrir la frontera de emision.
+
+    - todos los proveedores presentes y ``isinstance`` de SU Protocolo;
+    - el valor de cada lease se valida POR TIPO y DENTRO de una frontera comun;
+      un Mock, un None o un STOP ilegible se niegan aqui;
+    - pin: ``type(pin) is TrustedPolicyPin``, procedencia de forma cerrada e
+      igual a la del pin; reloj UTC consciente; clasificacion como mapa cerrado
+      donde toda capability ausente niega; checkpoint publicado y confirmado.
+
+    Es una comprobacion de arranque compatible con los callers existentes. El
+    camino que evalua o consume una solicitud debe usar ``leases_de_emision``
+    para no soltar las vistas antes de persistir su resultado.
+    """
+    with leases_de_emision(pin=pin, checkpoint=checkpoint, stop=stop, reloj=reloj,
+                           clasificacion=clasificacion):
+        pass
 
 
 __all__ = [
     "ORDEN_ADQUISICION", "VersionMonotonica", "ClaseCapability",
     "FormaLimites", "ContratoCapability", "PinActivo", "EstadoStop", "CatalogoClasificacion",
-    "VistaLease", "ProveedorPinActivo", "ProveedorStop", "RelojConfiable",
-    "ProveedorClasificacion", "AlmacenCheckpoints", "exigir_contrato_de_emision",
+    "VistaLease", "VistasDeEmision", "ProveedorPinActivo", "ProveedorStop", "RelojConfiable",
+    "ProveedorClasificacion", "AlmacenCheckpoints", "leases_de_emision", "exigir_contrato_de_emision",
     "ClasificacionDesconocida", "ProveedorInvalido", "RelojInvalido", "RuleAuthorityError",
     "StopDesconocido",
 ]

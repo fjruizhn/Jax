@@ -27,17 +27,28 @@ Fernando decidió alinear `FormaLimites` al schema vigente: enum cerrado con `NI
 `unidad`/`moneda` deben coincidir con la forma. No se amplía schema ni evaluador.
 
 En `feat/faro-f1.1-providers-r2`, el rechazo Tier 3 anterior incluía prioridad de writer,
-catálogo cerrado, tipos escalares exactos y esta incoherencia. El cambio local actual elimina
-`CANTIDAD_Y_MONTO`, valida coherencia, ajusta las regresiones y el piso Identity Shadow a 791.
-Evidencia local Python 3.14.4: providers 130 passed; lista exacta Identity Shadow 791 passed,
-cero skipped; py_compile, JSON y diff-check limpios. El CI remoto todavía no cubre estos cambios.
+catálogo cerrado, tipos escalares exactos y esta incoherencia. Se eliminó `CANTIDAD_Y_MONTO`,
+se validó coherencia y la regresión contra subclases hostiles; el piso Identity Shadow actual
+es 795. El commit local `bcadb31d` recoge esos cambios. Evidencia local Python 3.14.4:
+providers 131 passed; lista exacta Identity Shadow 795 passed, cero skipped; py_compile,
+JSON y diff-check limpios. El CI remoto todavía no cubre estos cambios.
+
+La auditoría de arquitectura determinó que el contrato normativo de la spec requiere leases
+compartidos en orden `pin → clasificación → STOP`, mantenidos hasta persistir la decisión.
+El cambio local sin commit añade `leases_de_emision(...)`, devuelve las tres vistas dentro de
+un contexto y los libera en orden inverso; una regresión demuestra que los writers exclusivos
+quedan bloqueados hasta salir. Provider suite: 131 passed; diff-check y py_compile limpios.
+Este PR aún no incluye evaluador ni store; al reconstruir #371, `store.record()` debe quedar
+dentro del contexto. El orden y retención de leases no se puede afirmar end-to-end hasta ese
+cambio.
 
 ## Dependencias y próximo paso
 
 PR #373 debe actualizar su base a `master` después de mergear #379, incluir los cambios locales,
 remedir el piso sobre el árbol final y recibir nueva auditoría Tier 3 del SHA exacto antes de
 integrar. #371 consume #373 y además necesita la corrección de cola de #376; #375 y #378 están
-apilados sobre #371. No desplegar.
+apilados sobre #371. No desplegar. Pendiente independiente: obtener la decisión de Fernando
+sobre la semántica `OVERLAY_ISSUED` de #381 antes de cerrar ese PR.
 
 ```sh
 cd /home/fruiz/wt/jax-faro-f11-providers && git status --short --branch
