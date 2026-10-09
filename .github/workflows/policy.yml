@@ -2571,6 +2571,7 @@ jobs:
           tests/policy/test_rule_authority_schema.py
           tests/policy/test_rule_authority_snapshot.py
           tests/policy/test_rule_authority_ataques.py
+          tests/policy/test_rule_authority_providers.py
           tests/policy/test_shadow_manifest.py
           tests/policy/test_strict_yaml.py
           tests/policy/test_v3_array_semantics.py
@@ -2669,6 +2670,8 @@ jobs:
         # #379 agrega 18 pruebas del sello del loader y 2 de ratificación, también
         # en la lista del paso anterior: piso combinado 677; ambas listas se
         # comprueban iguales en tests.
+        # #373 agrega providers y cierres de clasificación/pin. Tras combinarlo
+        # con #379, la misma lista exacta mide 816 passed, cero skipped.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
@@ -2681,6 +2684,7 @@ jobs:
             tests/policy/test_rule_authority_schema.py \
             tests/policy/test_rule_authority_snapshot.py \
             tests/policy/test_rule_authority_ataques.py \
+            tests/policy/test_rule_authority_providers.py \
             tests/policy/test_shadow_manifest.py \
             tests/policy/test_strict_yaml.py \
             tests/policy/test_v3_array_semantics.py \

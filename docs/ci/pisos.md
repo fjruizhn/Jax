@@ -4688,7 +4688,7 @@ Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_
 cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-09, tras cierre de hallazgos #379): `^677 passed in `
+Patrón vigente (2026-10-09, #373 reapilado sobre master posterior a #379): `^816 passed in `
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4720,3 +4720,13 @@ ratificación (writer genérico e interno niegan intent caller-created) llevan 6
 La misma ruta se incorpora tanto al paso detallado como al piso exacto; una regresión exige
 que ambas listas coincidan. Medición local exacta en Python 3.14.4: `677 passed` en la lista
 completa, cero skipped; el CI del PR debe confirmarlo sobre el SHA publicado.
+
+El trabajo previo de providers de #373 midió 778 al combinar #370 final con providers r3;
+los cierres de auditoría y la alineación de `FormaLimites` elevaron ese árbol a 791, y el
+cierre de subclases hostiles de `str` lo dejó en 795. Esos conteos pertenecen al árbol
+anterior a #379 y no se suman a este piso.
+
+El reapilado final de #373 incorpora sus providers y regresiones de pin/clasificación a la
+lista que ya incluye los cierres de #379: `677 -> 816` (`139` pruebas netas). Medición exacta
+del comando del workflow en Python 3.14.4: `816 passed`, cero skipped. Las dos listas del
+workflow siguen incluyendo `test_rule_authority_providers.py` y se verifican idénticas.

@@ -1,0 +1,7 @@
+# El Faro: cliente de MariaDB para la prueba "Block 4 authority-ledger MariaDB aislada" (job de
+# Python 3.14), FIJADO CON HASH. Instalar con:  pip install --require-hashes -r requirements-faro-mariadb-ci.txt
+# pymysql 1.2.0 es la misma version y los mismos hashes que ya fija requirements-faro.txt (sin
+# dependencias transitivas); tests/test_faro_requirements.py vigila que las dos listas coincidan.
+pymysql==1.2.0 \
+    --hash=sha256:62169ce6d5510f08e140c5e7990ee884a9764024e4a9a27b2cc11f1099322ae0 \
+    --hash=sha256:6c7b17ca686988104d7426c27895b455cdeea3e9d3ceb1270f0c3704fead8c33

@@ -88,11 +88,11 @@ class TrustedPolicyPin:
 
     def __init__(self, repositorio: str, commit: str, policy_tree_oid: str, procedencia: str) -> None:
         for campo, valor in (("repositorio", repositorio), ("procedencia", procedencia)):
-            if not isinstance(valor, str) or not valor.strip() \
+            if type(valor) is not str or not valor.strip() \
                     or unicodedata.normalize("NFC", valor) != valor:
                 raise RuleSnapshotError(f"pin.{campo}: no vacio y en NFC")
         for campo, valor in (("commit", commit), ("policy_tree_oid", policy_tree_oid)):
-            if not isinstance(valor, str) or not _RE_OBJETO.fullmatch(valor):
+            if type(valor) is not str or not _RE_OBJETO.fullmatch(valor):
                 raise RuleSnapshotError(f"pin.{campo}: debe ser un oid hex completo")
         object.__setattr__(self, "repositorio", repositorio)
         object.__setattr__(self, "commit", commit)
