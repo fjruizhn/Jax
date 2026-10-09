@@ -224,6 +224,25 @@ def test_pin_mal_formado_rechaza(pin_kwargs: dict) -> None:
         TrustedPolicyPin(**campos)
 
 
+@pytest.mark.parametrize("campo, valor", [
+    ("repositorio", "jax"),
+    ("commit", "0" * 40),
+    ("policy_tree_oid", "0" * 40),
+    ("procedencia", "prueba:pin"),
+])
+def test_pin_rechaza_subclase_str_hostil_en_cualquier_campo(campo: str, valor: str) -> None:
+    """Evita que __eq__ hostil falsee la procedencia contra PinActivo."""
+    class _TextoHostil(str):
+        def __eq__(self, otro: object) -> bool:
+            return True
+
+    campos = {"repositorio": "jax", "commit": "0" * 40, "policy_tree_oid": "0" * 40,
+              "procedencia": "prueba:pin"}
+    campos[campo] = _TextoHostil(valor)
+    with pytest.raises(RuleSnapshotError):
+        TrustedPolicyPin(**campos)
+
+
 def test_mover_la_rama_no_cambia_un_pin_ya_cargado(tmp_path: Path) -> None:
     repo, commit, arbol = _repo(tmp_path, {"policy/faro/ejemplo.yaml": REGLA})
     antes = _cargar(repo, commit, arbol)
