@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import fcntl
+import io
 import json
 import logging
 import os
@@ -519,8 +520,13 @@ class _Candado:
         self._fd = -1
 
     def __enter__(self):
-        self._fd = os.open(self._ruta, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        self._fd = os.open(self._ruta, flags, 0o600)
         try:
+            st = os.fstat(self._fd)
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid()
+                    or st.st_mode & 0o777 != 0o600):
+                raise PermissionError("candado inseguro")
             fcntl.flock(self._fd, fcntl.LOCK_EX)
         except BaseException:
             os.close(self._fd)
@@ -613,13 +619,17 @@ class ResumenDiario:
 
 
 _MAX_LEIDO = 16 * 1024 * 1024
+_MAX_RESUMEN_SEGMENTOS = 8
+_MAX_RESUMEN_CANDIDATOS = _MAX_RESUMEN_SEGMENTOS * 4
+_MAX_RESUMEN_LINEAS = 128
+_MAX_RESUMEN_MENSAJES = _MAX_RESUMEN_LINEAS * 2 + 1
 
 
-class _ColaDemasiadoGrande(PermissionError):
-    """Segmento legado que supera el presupuesto: preservar en cuarentena."""
+class _PresupuestoAgotado(OSError):
+    """El lote cambió después de seleccionarse; se deja sin confirmar."""
 
 
-def _leer_seguro(ruta: str) -> str:
+def _leer_seguro(ruta: str, max_bytes: int = _MAX_LEIDO) -> bytes:
     """Lee un archivo de la cola SIN seguir enlaces: O_NOFOLLOW, y regular, del
     usuario actual y 0600. Un enlace plantado o un archivo ajeno levanta
     OSError (no se lee el destino)."""
@@ -643,12 +653,76 @@ def _leer_seguro(ruta: str) -> str:
             if not trozo:
                 break
             total += len(trozo)
-            if total > _MAX_LEIDO:
-                raise _ColaDemasiadoGrande(f"cola demasiado grande: {ruta}")
+            if total > max_bytes:
+                raise _PresupuestoAgotado(f"se excedio el presupuesto del lote: {ruta}")
             partes.append(trozo)
     finally:
         os.close(fd)
-    return b"".join(partes).decode("utf-8", errors="replace")
+    return b"".join(partes)
+
+
+def _archivo_seguro(fd: int, ruta: str) -> None:
+    st = os.fstat(fd)
+    if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid()
+            or st.st_mode & 0o777 != 0o600):
+        raise PermissionError(f"archivo inseguro: {ruta}")
+
+
+def _escribir_todo(fd: int, datos: bytes) -> None:
+    vista = memoryview(datos)
+    while vista:
+        escrito = os.write(fd, vista)
+        if escrito <= 0:
+            raise OSError("escritura parcial en cola de avisos")
+        vista = vista[escrito:]
+
+
+def _partir_rotado(cola: Path, ruta: str, prefijo: bytes, resto: bytes) -> None:
+    """Deja el prefijo reclamado para su token y devuelve el resto a la cola.
+
+    El resto se publica primero con nombre no reclamado; luego el prefijo
+    reclamado se reemplaza atómicamente. Una caída puede reentregar datos, pero
+    nunca perderlos.
+    """
+    if not resto:
+        return
+    cola = Path(cola)
+    temp_resto = cola.parent / f".{cola.name}.{secrets.token_hex(8)}.tmp"
+    temp_prefijo = cola.parent / f".{cola.name}.{secrets.token_hex(8)}.tmp"
+    with _Candado(cola):
+        try:
+            for temporal, contenido in ((temp_resto, resto), (temp_prefijo, prefijo)):
+                fd = os.open(temporal, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+                try:
+                    _archivo_seguro(fd, str(temporal))
+                    _escribir_todo(fd, contenido)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            destino = cola.parent / f"{cola.name}.{time.time_ns():020d}.procesando"
+            os.replace(temp_resto, destino)
+            dirfd = os.open(cola.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                os.fsync(dirfd)
+            finally:
+                os.close(dirfd)
+            fd = os.open(ruta, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+            try:
+                _archivo_seguro(fd, ruta)
+            finally:
+                os.close(fd)
+            os.replace(temp_prefijo, ruta)
+            dirfd = os.open(cola.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                os.fsync(dirfd)
+            finally:
+                os.close(dirfd)
+        finally:
+            for temporal in (temp_resto, temp_prefijo):
+                try:
+                    os.unlink(temporal)
+                except FileNotFoundError:
+                    pass
 
 
 LEASE_S_POR_DEFECTO = 900.0
@@ -667,7 +741,7 @@ def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str,
     se pudo trabajar (y entonces no se borra NADA).
 
     Bajo el candado rota la cola a `<cola>.<ts>.procesando` ANTES de leer y
-    RECLAMA los rotados (los renombra a `….procesando.<pid>-<token>`): dos
+    RECLAMA un lote acotado de rotados (los renombra a `….procesando.<pid>-<token>`): dos
     resumidores simultaneos no se pisan, el segundo no ve lo ya reclamado. Un
     reclamo con mas de `lease_s` segundos sin confirmar (proceso caido) se puede
     reclamar de nuevo. Los archivos reclamados NO se borran aqui: el llamador
@@ -681,6 +755,7 @@ def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str,
     cuentan las lineas JSON con `texto` str. Sincrono: los llamadores async lo
     envuelven en `asyncio.to_thread`."""
     try:
+        cuarentena = 0
         with _Candado(ruta_cola):
             cola = Path(ruta_cola)
             if cola.exists() or cola.is_symlink():
@@ -688,68 +763,116 @@ def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str,
             patron = _patron_rotado(cola.name)
             ahora = time.time()
             reclamados: list[str] = []
+            bytes_reclamados = 0
+            candidatos = 0
             for p in sorted(cola.parent.iterdir(), key=lambda q: q.name):
                 m = patron.fullmatch(p.name)
                 if m is None:
                     continue
                 if m.group(2) is not None and ahora - os.lstat(p).st_ctime < lease_s:
                     continue                    # reclamado por otro resumidor, con lease vigente
+                candidatos += 1
+                if candidatos > _MAX_RESUMEN_CANDIDATOS:
+                    break
+                if len(reclamados) >= _MAX_RESUMEN_SEGMENTOS:
+                    break
+                try:
+                    st = os.lstat(p)
+                    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o777 != 0o600:
+                        # Reclamar para cuarentena sin abrir ni seguir un enlace.
+                        pass
+                    elif st.st_size > _MAX_LEIDO:
+                        os.replace(p, str(p) + ".cuarentena")
+                        cuarentena += 1
+                        continue
+                    elif bytes_reclamados + st.st_size > _MAX_LEIDO:
+                        continue
+                    else:
+                        bytes_reclamados += st.st_size
+                except OSError:
+                    continue
                 base = p.name[:m.start(2)].rstrip(".") if m.group(2) is not None else p.name
                 nuevo = cola.parent / f"{base}.{os.getpid()}-{secrets.token_hex(8)}"
                 os.rename(p, nuevo)
                 reclamados.append(str(nuevo))
-            if not reclamados:
-                return None
-            lineas: list[str] = []
-            buenos: list[str] = []
-            cuarentena = 0
-            for ruta in reclamados:
-                try:
-                    texto = _leer_seguro(ruta)
-                except PermissionError as exc:   # enlace plantado, dueno o modo ajeno: se aparta, el resto sigue
-                    os.replace(ruta, ruta + ".cuarentena")
-                    cuarentena += 1
-                    logger.warning("rotado a cuarentena (%s)", type(exc).__name__)
-                    continue
-                buenos.append(ruta)
-                lineas.extend(l for l in texto.splitlines() if l.strip())
-            por_clase: dict[str, int] = {}
-            cuerpos: list[str] = []
-            suprimidos = ilegibles = fallidos = 0
-            for linea in lineas:
-                try:
-                    dato = json.loads(linea)
-                    if not isinstance(dato, dict) or not isinstance(dato["texto"], str):
-                        raise TypeError("linea sin texto str")
-                    cuerpo = _recortar(dato["texto"].replace("\n", " · "))
-                    clase = str(dato.get("clase", "-"))
-                    suprimido = bool(dato.get("suprimido_por_tasa"))
-                    fallido = bool(dato.get("envio_fallido"))
-                except (ValueError, KeyError, TypeError):
-                    ilegibles += 1   # se cuenta y se dice: una linea corrupta no esconde a las demas
-                    continue
-                cuerpos.append(cuerpo)
-                suprimidos += suprimido
-                fallidos += fallido
-                por_clase[clase] = por_clase.get(clase, 0) + 1
-            if not cuerpos and not ilegibles and not cuarentena:
-                for ruta in buenos:
-                    os.unlink(ruta)            # solo ruido sin avisos: se recoge y se sigue
-                return None
-            conteo = f"{len(cuerpos)} avisos"
-            if suprimidos:
-                conteo += f" · suprimidos_por_tasa={suprimidos}"
-            if fallidos:
-                conteo += f" · envio_fallido={fallidos}"
-            if ilegibles:
-                conteo += f" · ilegibles={ilegibles}"
-            if cuarentena:
-                conteo += f" · en_cuarentena={cuarentena}"
-            cabecera = (f"FARO · RESUMEN DIARIO DE REGLAS · {_campo_log(host, 64)} · "
-                        f"{_iso_utc(_ahora_utc())}\n{conteo}")
-            bloques = [f"clase={_campo_log(c, 160)} n={n}" for c, n in sorted(por_clase.items())] + cuerpos
-            return ResumenDiario(tuple(_mensajes_del_resumen(bloques or ["(sin avisos legibles)"], cabecera)),
-                                 tuple(buenos), str(cola))
+        if not reclamados:
+            return None
+        buenos: list[str] = []
+        partes: list[bytes] = []
+        bytes_leidos = 0
+        for ruta in reclamados:
+            try:
+                datos = _leer_seguro(ruta, _MAX_LEIDO - bytes_leidos)
+            except PermissionError as exc:   # enlace plantado, dueno o modo ajeno: se aparta, el resto sigue
+                os.replace(ruta, ruta + ".cuarentena")
+                cuarentena += 1
+                logger.warning("rotado a cuarentena (%s)", type(exc).__name__)
+                continue
+            buenos.append(ruta)
+            partes.append(datos)
+            bytes_leidos += len(datos)
+        datos_lote = b"".join(
+            parte if not parte or parte.endswith(b"\n") else parte + b"\n"
+            for parte in partes
+        )
+        stream = io.BytesIO(datos_lote)
+        procesadas: list[bytes] = []
+        for _ in range(_MAX_RESUMEN_LINEAS):
+            linea = stream.readline()
+            if not linea:
+                break
+            procesadas.append(linea)
+        prefijo = b"".join(procesadas)
+        resto = datos_lote[len(prefijo):]
+        if resto:
+            # El resto se publica primero y el token solo conserva el prefijo.
+            _partir_rotado(cola, buenos[0], prefijo, resto)
+            # Los segmentos adicionales sí quedaron completamente representados
+            # en el lote y pueden confirmarse junto con el prefijo conservado.
+            for ruta in buenos[1:]:
+                os.unlink(ruta)
+            buenos = buenos[:1]
+        lineas = [l.decode("utf-8", errors="replace") for l in procesadas if l.strip()]
+        por_clase: dict[str, int] = {}
+        cuerpos: list[str] = []
+        suprimidos = ilegibles = fallidos = 0
+        for linea in lineas:
+            try:
+                dato = json.loads(linea)
+                if not isinstance(dato, dict) or not isinstance(dato["texto"], str):
+                    raise TypeError("linea sin texto str")
+                cuerpo = _recortar(dato["texto"].replace("\n", " · "))
+                clase = str(dato.get("clase", "-"))
+                suprimido = bool(dato.get("suprimido_por_tasa"))
+                fallido = bool(dato.get("envio_fallido"))
+            except (ValueError, KeyError, TypeError):
+                ilegibles += 1   # se cuenta y se dice: una linea corrupta no esconde a las demas
+                continue
+            cuerpos.append(cuerpo)
+            suprimidos += suprimido
+            fallidos += fallido
+            por_clase[clase] = por_clase.get(clase, 0) + 1
+        if not cuerpos and not ilegibles and not cuarentena:
+            for ruta in buenos:
+                os.unlink(ruta)            # solo ruido sin avisos: se recoge y se sigue
+            return None
+        conteo = f"{len(cuerpos)} avisos"
+        if suprimidos:
+            conteo += f" · suprimidos_por_tasa={suprimidos}"
+        if fallidos:
+            conteo += f" · envio_fallido={fallidos}"
+        if ilegibles:
+            conteo += f" · ilegibles={ilegibles}"
+        if cuarentena:
+            conteo += f" · en_cuarentena={cuarentena}"
+        cabecera = (f"FARO · RESUMEN DIARIO DE REGLAS · {_campo_log(host, 64)} · "
+                    f"{_iso_utc(_ahora_utc())}\n{conteo}")
+        bloques = [f"clase={_campo_log(c, 160)} n={n}" for c, n in sorted(por_clase.items())] + cuerpos
+        mensajes = _mensajes_del_resumen(bloques or ["(sin avisos legibles)"], cabecera)
+        if len(mensajes) > _MAX_RESUMEN_MENSAJES:
+            raise RuntimeError("el lote excede el limite de mensajes")
+        return ResumenDiario(tuple(mensajes),
+                             tuple(buenos), str(cola))
     except Exception as exc:  # fail-soft: sin lectura segura no hay resumen y no se borra nada
         logger.warning("no se pudo componer el resumen diario (%s)", type(exc).__name__)
         return None

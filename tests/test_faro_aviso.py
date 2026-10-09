@@ -883,13 +883,15 @@ def test_el_resumen_numera_los_mensajes_y_no_trunca_en_silencio(tmp_path):
         av = AvisoRegla(texto=f"cuerpo-{i:03d} {texto_largo}", clase=f"PERMIT|ok|RL-{i % 7}",
                         inmediato=False, creado_utc="2026-10-07T03:04:05+00:00")
         assert acumular_para_resumen(av, cola) is True
-    mensajes = _resumir(cola, host="hall9000")
-    assert mensajes is not None and len(mensajes) > 1
-    assert "200 avisos" in mensajes[0]
-    for k, m in enumerate(mensajes, 1):
-        assert len(m) <= _MAX_TEXTO
-        assert m.splitlines()[-1] == f"· {k}/{len(mensajes)}"
-    todo = "\n".join(mensajes)
+    lotes = []
+    while (mensajes := _resumir(cola, host="hall9000")) is not None:
+        lotes.append(mensajes)
+    assert len(lotes) == 2 and "128 avisos" in lotes[0][0] and "72 avisos" in lotes[1][0]
+    for mensajes in lotes:
+        for k, m in enumerate(mensajes, 1):
+            assert len(m) <= _MAX_TEXTO
+            assert m.splitlines()[-1] == f"· {k}/{len(mensajes)}"
+    todo = "\n".join(m for lote in lotes for m in lote)
     for i in range(200):
         assert f"cuerpo-{i:03d} {texto_largo}" in todo, f"el aviso {i} se perdio o se trunco"
     assert _resumir(cola, host="hall9000") is None
@@ -1032,10 +1034,157 @@ def test_escritor_rota_antes_de_superar_el_presupuesto_por_segmento(tmp_path, mo
     assert segmentos
     assert all(p.stat().st_size <= modulo._MAX_LEIDO for p in segmentos)
     assert cola.stat().st_size <= modulo._MAX_LEIDO
-    resumen = resumen_diario(cola, host="hall9000")
-    assert resumen is not None
-    assert all(f"cuerpo-{i}" in "\n".join(resumen.mensajes) for i in range(3))
-    assert confirmar_resumen(resumen)
+    partes = []
+    while (resumen := resumen_diario(cola, host="hall9000")) is not None:
+        partes.extend(resumen.mensajes)
+        assert confirmar_resumen(resumen)
+    assert all(f"cuerpo-{i}" in "\n".join(partes) for i in range(3))
+
+
+def _rotado_con_avisos(ruta, *textos):
+    lineas = [
+        _json.dumps({
+            "creado_utc": "2026-10-07T03:04:05+00:00",
+            "clase": "DENY|r|RL-A",
+            "texto": texto,
+            "suprimido_por_tasa": False,
+            "envio_fallido": False,
+        })
+        for texto in textos
+    ]
+    ruta.write_text("\n".join(lineas) + "\n", encoding="utf-8")
+    ruta.chmod(0o600)
+
+
+def test_resumen_reclama_un_lote_acotado_y_deja_rotados_para_la_llamada_siguiente(tmp_path, monkeypatch):
+    """Rompe si se reclaman todos los rotados de un backlog bajo un solo flock."""
+    import jax.faro.aviso as modulo
+
+    monkeypatch.setattr(modulo, "_MAX_RESUMEN_SEGMENTOS", 8)
+    monkeypatch.setattr(modulo, "_MAX_LEIDO", 400)
+    monkeypatch.setattr(modulo, "_MAX_RESUMEN_LINEAS", 8)
+    monkeypatch.setattr(modulo, "_MAX_RESUMEN_MENSAJES", 16)
+    cola = tmp_path / "cola.jsonl"
+    for indice in range(4):
+        _rotado_con_avisos(
+            tmp_path / f"cola.jsonl.{indice:020d}.procesando", f"aviso-{indice}")
+
+    primero = resumen_diario(cola, host="hall9000")
+
+    assert primero is not None
+    assert len(primero.rotados) == 2
+    assert sum(Path(r).stat().st_size for r in primero.rotados) <= modulo._MAX_LEIDO
+    assert {"aviso-0", "aviso-1"} <= set("\n".join(primero.mensajes).splitlines())
+    pendientes = list(tmp_path.glob("cola.jsonl.*.procesando"))
+    assert len(pendientes) == 2, "los rotados fuera del lote deben quedar para otro resumen"
+    assert confirmar_resumen(primero)
+    segundo = resumen_diario(cola, host="hall9000")
+    assert segundo is not None
+    assert {"aviso-2", "aviso-3"} <= set("\n".join(segundo.mensajes).splitlines())
+    assert confirmar_resumen(segundo)
+
+
+def test_resumen_parte_un_segmento_al_llegar_al_limite_de_lineas_sin_perder_el_resto(tmp_path, monkeypatch):
+    """Rompe si una sola cola grande materializa líneas o mensajes sin límite."""
+    import jax.faro.aviso as modulo
+
+    monkeypatch.setattr(modulo, "_MAX_RESUMEN_SEGMENTOS", 2)
+    monkeypatch.setattr(modulo, "_MAX_RESUMEN_LINEAS", 2)
+    monkeypatch.setattr(modulo, "_MAX_RESUMEN_MENSAJES", 4)
+    cola = tmp_path / "cola.jsonl"
+    _rotado_con_avisos(
+        tmp_path / "cola.jsonl.00000000000000000000.procesando",
+        "aviso-0", "aviso-1", "aviso-2", "aviso-3", "aviso-4",
+    )
+
+    primero = resumen_diario(cola, host="hall9000")
+
+    assert primero is not None
+    texto_primero = "\n".join(primero.mensajes)
+    assert "aviso-0" in texto_primero and "aviso-1" in texto_primero
+    assert "aviso-2" not in texto_primero
+    assert len(primero.mensajes) <= modulo._MAX_RESUMEN_MENSAJES
+    assert confirmar_resumen(primero)
+    monkeypatch.setattr(modulo, "_MAX_RESUMEN_LINEAS", 128)
+    monkeypatch.setattr(modulo, "_MAX_RESUMEN_MENSAJES", 257)
+    segundo = resumen_diario(cola, host="hall9000")
+    assert segundo is not None
+    assert {"aviso-2", "aviso-3", "aviso-4"} <= set("\n".join(segundo.mensajes).splitlines())
+    assert confirmar_resumen(segundo)
+
+
+def test_candado_fifo_no_bloquea_y_el_append_falla_soft(tmp_path):
+    """Rompe si `_Candado` abre un FIFO preexistente en modo bloqueante."""
+    cola = tmp_path / "cola.jsonl"
+    fifo = Path(str(cola) + ".candado")
+    os.mkfifo(fifo, 0o600)
+    terminado, resultados = threading.Event(), []
+
+    def acumular() -> None:
+        resultados.append(acumular_para_resumen(
+            AvisoRegla("aviso", "DENY|r|RL-A", True, "2026-10-07T03:04:05+00:00"), cola))
+        terminado.set()
+
+    hilo = threading.Thread(target=acumular, daemon=True)
+    hilo.start()
+    try:
+        hilo.join(timeout=0.25)
+        assert terminado.is_set(), "abrir un FIFO del candado no puede bloquear al escritor"
+        assert resultados == [False]
+    finally:
+        if hilo.is_alive():
+            lector = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                hilo.join(timeout=5.0)
+            finally:
+                os.close(lector)
+    assert not hilo.is_alive()
+    assert resumen_diario(cola, host="hall9000") is None
+
+
+def test_resumen_libera_candado_antes_de_leer_y_el_escritor_continua(tmp_path, monkeypatch):
+    """Un lector detenido no debe mantener bloqueado el append de nuevos avisos."""
+    import jax.faro.aviso as modulo
+
+    cola = tmp_path / "cola.jsonl"
+    _cola_con_linea(cola, "primero")
+    leyendo, continuar = threading.Event(), threading.Event()
+    lector_original = modulo._leer_seguro
+
+    def lector_pausado(ruta, *args):
+        leyendo.set()
+        assert continuar.wait(timeout=3)
+        return lector_original(ruta, *args)
+
+    monkeypatch.setattr(modulo, "_leer_seguro", lector_pausado)
+    resumenes = []
+    hilo_resumen = threading.Thread(
+        target=lambda: resumenes.append(resumen_diario(cola, host="hall9000")), daemon=True)
+    hilo_resumen.start()
+    assert leyendo.wait(timeout=2), "el resumen no alcanzó la lectura"
+
+    resultados = []
+    hilo_escritor = threading.Thread(
+        target=lambda: resultados.append(acumular_para_resumen(
+            AvisoRegla("segundo", "DENY|r|RL-A", True, "2026-10-07T03:04:05+00:00"), cola)),
+        daemon=True,
+    )
+    hilo_escritor.start()
+    hilo_escritor.join(timeout=1)
+    try:
+        assert not hilo_escritor.is_alive(), "el lector no debe retener el candado global"
+        assert resultados == [True]
+    finally:
+        continuar.set()
+        hilo_resumen.join(timeout=3)
+    assert not hilo_resumen.is_alive()
+    primero = resumenes[0]
+    assert primero is not None and "primero" in "\n".join(primero.mensajes)
+    assert confirmar_resumen(primero)
+    monkeypatch.setattr(modulo, "_leer_seguro", lector_original)
+    segundo = resumen_diario(cola, host="hall9000")
+    assert segundo is not None and "segundo" in "\n".join(segundo.mensajes)
+    assert confirmar_resumen(segundo)
 
 
 def test_una_cola_con_modo_o_dueno_ajeno_no_se_lee(tmp_path, monkeypatch):
@@ -1046,6 +1195,12 @@ def test_una_cola_con_modo_o_dueno_ajeno_no_se_lee(tmp_path, monkeypatch):
     r = resumen_diario(cola, host="hall9000")
     assert "en_cuarentena=1" in r.mensajes[0] and "no-me-leas" not in "\n".join(r.mensajes)
     _cola_con_linea(cola, "no-me-leas-2")
+    import jax.faro.aviso as modulo
+    class CandadoPrueba:
+        def __init__(self, *_args): pass
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+    monkeypatch.setattr(modulo, "_Candado", CandadoPrueba)
     monkeypatch.setattr(os, "geteuid", lambda: 12345)
     r = resumen_diario(cola, host="hall9000")
     assert "en_cuarentena=1" in r.mensajes[0] and "no-me-leas-2" not in "\n".join(r.mensajes)
@@ -1126,8 +1281,13 @@ def test_dos_resumidores_simultaneos_no_duplican(tmp_path):
     for h in hilos:
         h.join()
     cuerpos = [l for r in salidas for m in r.mensajes for l in m.splitlines() if l.startswith("cuerpo-")]
-    assert len(cuerpos) == 300 and len(set(cuerpos)) == 300, f"duplicados o perdidos: {len(cuerpos)}"
+    assert len(cuerpos) == len(set(cuerpos)), f"duplicados entre resumidores: {len(cuerpos)}"
     assert all(confirmar_resumen(r) for r in salidas)
+    # Los límites por lote dejan trabajo para las siguientes llamadas; se drena sin pérdidas.
+    while (r := resumen_diario(cola, host="hall9000", lease_s=0)) is not None:
+        cuerpos.extend(l for m in r.mensajes for l in m.splitlines() if l.startswith("cuerpo-"))
+        assert confirmar_resumen(r)
+    assert len(cuerpos) == 300 and len(set(cuerpos)) == 300, f"duplicados o perdidos: {len(cuerpos)}"
 
 
 def test_solo_cuentan_las_lineas_json_con_texto_str(tmp_path):
