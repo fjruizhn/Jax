@@ -36,10 +36,12 @@ import secrets
 import ipaddress
 import socket
 import stat
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -541,6 +543,23 @@ class _Candado:
         return False
 
 
+def _reservar_rotado(cola: Path) -> Path:
+    """Reserva un nombre único de segmento sin sobrescribir avisos existentes."""
+    for intento in range(32):
+        destino = cola.parent / f"{cola.name}.{time.time_ns() + intento:020d}.procesando"
+        try:
+            fd = os.open(
+                destino,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+            )
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return destino
+    raise OSError("no se pudo reservar un nombre unico para el segmento")
+
+
 def acumular_para_resumen(aviso: AvisoRegla, ruta_cola: "os.PathLike[str] | str",
                           *, suprimido_por_tasa: bool = False, envio_fallido: bool = False) -> bool:
     """Deja el aviso en la cola del resumen diario: UNA linea JSON por aviso,
@@ -566,7 +585,7 @@ def acumular_para_resumen(aviso: AvisoRegla, ruta_cola: "os.PathLike[str] | str"
                 if st.st_size + len(datos) > _MAX_LEIDO:
                     os.close(fd)
                     fd = -1
-                    os.replace(ruta_cola, f"{ruta_cola}.{time.time_ns():020d}.procesando")
+                    os.replace(ruta_cola, _reservar_rotado(Path(ruta_cola)))
                     fd = os.open(ruta_cola, flags, 0o600)
                     st = os.fstat(fd)
                     if not stat.S_ISREG(st.st_mode) or st.st_size + len(datos) > _MAX_LEIDO:
@@ -624,6 +643,39 @@ _MAX_RESUMEN_CANDIDATOS = _MAX_RESUMEN_SEGMENTOS * 4
 _MAX_RESUMEN_ENTRADAS = 256
 _MAX_RESUMEN_LINEAS = 128
 _MAX_RESUMEN_MENSAJES = _MAX_RESUMEN_LINEAS * 2 + 1
+_MAX_RESUMEN_SCANNERS = 32
+_RESUMEN_SCANNERS: "OrderedDict[str, os.ScandirIterator]" = OrderedDict()
+_RESUMEN_SCANNERS_LOCK = threading.Lock()
+
+
+def _siguiente_pagina_directorio(cola: Path) -> list[os.DirEntry]:
+    """Lee una página acotada y conserva la posición para la llamada siguiente."""
+    directorio = cola.parent
+    clave = os.path.abspath(directorio)
+    with _RESUMEN_SCANNERS_LOCK:
+        scanner = _RESUMEN_SCANNERS.get(clave)
+        if scanner is None:
+            scanner = os.scandir(directorio)
+            _RESUMEN_SCANNERS[clave] = scanner
+            while len(_RESUMEN_SCANNERS) > _MAX_RESUMEN_SCANNERS:
+                _, expirado = _RESUMEN_SCANNERS.popitem(last=False)
+                expirado.close()
+        else:
+            _RESUMEN_SCANNERS.move_to_end(clave)
+        pagina: list[os.DirEntry] = []
+        try:
+            for _ in range(_MAX_RESUMEN_ENTRADAS):
+                try:
+                    pagina.append(next(scanner))
+                except StopIteration:
+                    scanner.close()
+                    _RESUMEN_SCANNERS.pop(clave, None)
+                    break
+        except BaseException:
+            scanner.close()
+            _RESUMEN_SCANNERS.pop(clave, None)
+            raise
+        return pagina
 
 
 class _PresupuestoAgotado(OSError):
@@ -700,22 +752,7 @@ def _partir_rotado(cola: Path, ruta: str, prefijo: bytes, resto: bytes) -> None:
                     os.fsync(fd)
                 finally:
                     os.close(fd)
-            destino = None
-            for intento in range(16):
-                candidato = cola.parent / f"{cola.name}.{time.time_ns() + intento:020d}.procesando"
-                try:
-                    reservado = os.open(
-                        candidato,
-                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                        0o600,
-                    )
-                except FileExistsError:
-                    continue
-                os.close(reservado)
-                destino = candidato
-                break
-            if destino is None:
-                raise OSError("no se pudo reservar nombre para el resto del rotado")
+            destino = _reservar_rotado(cola)
             os.replace(temp_resto, destino)
             dirfd = os.open(cola.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
             try:
@@ -775,18 +812,13 @@ def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str,
         with _Candado(ruta_cola):
             cola = Path(ruta_cola)
             if cola.exists() or cola.is_symlink():
-                os.replace(cola, f"{cola}.{time.time_ns():020d}.procesando")   # rotar ANTES de leer
+                os.replace(cola, _reservar_rotado(cola))   # rotar ANTES de leer
             patron = _patron_rotado(cola.name)
             ahora = time.time()
             reclamados: list[str] = []
             bytes_reclamados = 0
             candidatos = 0
-            with os.scandir(cola.parent) as entradas_dir:
-                entradas = []
-                for indice, entrada in enumerate(entradas_dir):
-                    if indice >= _MAX_RESUMEN_ENTRADAS:
-                        break
-                    entradas.append(entrada)
+            entradas = _siguiente_pagina_directorio(cola)
             for p in sorted(entradas, key=lambda q: q.name):
                 m = patron.fullmatch(p.name)
                 if m is None:

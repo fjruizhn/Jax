@@ -1037,6 +1037,66 @@ def test_un_lote_solo_con_sobredimensionados_avisa_que_envio_a_cuarentena(tmp_pa
     assert len(list(tmp_path.glob("*.cuarentena"))) == 1
 
 
+def test_escritor_no_sobrescribe_rotado_si_el_reloj_repite_nombre(tmp_path, monkeypatch):
+    import jax.faro.aviso as modulo
+
+    monkeypatch.setattr(modulo, "_MAX_LEIDO", 200)
+    monkeypatch.setattr(modulo.time, "time_ns", lambda: 1)
+    cola = tmp_path / "cola.jsonl"
+    colision = tmp_path / "cola.jsonl.00000000000000000001.procesando"
+    _rotado_con_avisos(colision, "rotado-existente")
+    _cola_con_linea(cola, "cola-previa")
+    assert acumular_para_resumen(
+        AvisoRegla("aviso-nuevo", "DENY|r|RL-A", True, "2026-10-07T03:04:05+00:00"), cola
+    )
+    assert "rotado-existente" in colision.read_text(encoding="utf-8")
+
+    mensajes = []
+    while (resumen := resumen_diario(cola, host="hall9000")) is not None:
+        mensajes.extend(resumen.mensajes)
+        assert confirmar_resumen(resumen)
+    combinado = "\n".join(mensajes)
+    assert "rotado-existente" in combinado
+    assert "cola-previa" in combinado
+    assert "aviso-nuevo" in combinado
+
+
+def test_rotacion_inicial_no_sobrescribe_si_el_reloj_repite_nombre(tmp_path, monkeypatch):
+    import jax.faro.aviso as modulo
+
+    monkeypatch.setattr(modulo.time, "time_ns", lambda: 1)
+    cola = tmp_path / "cola.jsonl"
+    _cola_con_linea(cola, "cola-viva")
+    colision = tmp_path / "cola.jsonl.00000000000000000001.procesando"
+    _rotado_con_avisos(colision, "rotado-existente")
+
+    resumen = resumen_diario(cola, host="hall9000")
+
+    assert resumen is not None
+    contenido = "\n".join(resumen.mensajes)
+    assert "cola-viva" in contenido and "rotado-existente" in contenido
+    assert confirmar_resumen(resumen)
+
+
+def test_busqueda_por_paginas_avanza_mas_alla_del_prefijo_de_entradas_ajenas(tmp_path, monkeypatch):
+    import jax.faro.aviso as modulo
+
+    monkeypatch.setattr(modulo, "_MAX_RESUMEN_ENTRADAS", 1)
+    for indice in range(3):
+        (tmp_path / f"ajeno-{indice}").write_text("irrelevante", encoding="utf-8")
+    _rotado_con_avisos(tmp_path / "cola.jsonl.00000000000000000001.procesando", "alcanza-el-cursor")
+    cola = tmp_path / "cola.jsonl"
+
+    resumen = None
+    for _ in range(8):
+        resumen = resumen_diario(cola, host="hall9000")
+        if resumen is not None:
+            break
+    assert resumen is not None
+    assert "alcanza-el-cursor" in "\n".join(resumen.mensajes)
+    assert confirmar_resumen(resumen)
+
+
 def test_escritor_rota_antes_de_superar_el_presupuesto_por_segmento(tmp_path, monkeypatch):
     import jax.faro.aviso as modulo
 
