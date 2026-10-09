@@ -5,14 +5,17 @@ import pytest
 from policy.authority_ledger.errors import AuthorityEventValidationError, AuthorityStateError
 from policy.authority_ledger.models import AuthorityEventIntent, AuthorityEventType
 from policy.authority_ledger.replay import verify_authority_ledger
-from policy.authority_ledger.service import append_authority_event, ratification_intent_from_candidate
+from policy.authority_ledger.service import (append_authority_event,
+                                             append_ratification_from_candidate,
+                                             ratification_intent_from_candidate,
+                                             _append_authority_event)
 from policy.authority_resolution.candidate_loader import load_validated_candidate
-from tests.policy.test_authority_ledger_events import setup_ledger, ratification_intent
+from tests.policy.test_authority_ledger_events import append_ratification, setup_ledger
 
 
 def test_ratification_is_distinct_from_activation():
     store, root, key = setup_ledger()
-    event = append_authority_event(store, root, key, ratification_intent())
+    event = append_ratification(store, root, key)
     state = verify_authority_ledger(store.get_genesis(), store.events(), root)
     assert event.event_id in state.ratifications
     assert state.active_policy_corpus_hash is None
@@ -30,10 +33,15 @@ class AlwaysEqual:
         return True
 
 
-def test_ratification_model_rejects_equal_but_unsealed_snapshot():
+def test_ratification_seal_is_not_constructor_reachable():
     corpus_hash = "sha256:" + "f" * 64
 
-    with pytest.raises(AuthorityEventValidationError, match="snapshot sellado"):
+    # El sello es init=False: el constructor no lo acepta (ni un AlwaysEqual
+    # que engañaría a un __eq__), y dataclasses.replace no lo transporta.
+    # Sin sello el intent se construye, pero la frontera que firma lo rechaza
+    # (test_append_rejects_equal_but_unsealed_ratification_intent y los
+    # ataques de test_authority_ledger_seal_attacks.py).
+    with pytest.raises(TypeError):
         AuthorityEventIntent(
             AuthorityEventType.RATIFICATION_GRANTED,
             "human:fernando",
@@ -44,13 +52,32 @@ def test_ratification_model_rejects_equal_but_unsealed_snapshot():
         )
 
 
-def test_append_rejects_equal_but_unsealed_ratification_intent():
+def test_generic_append_rejects_all_caller_created_ratification_intents():
     corpus = load_validated_candidate(Path(__file__).resolve().parents[2])
     intent = ratification_intent_from_candidate(corpus)
     object.__setattr__(intent, "_ratification_snapshot_seal", AlwaysEqual())
     store, root, key = setup_ledger()
 
-    with pytest.raises(AuthorityStateError, match="snapshot sellado"):
+    with pytest.raises(AuthorityStateError, match="append_ratification_from_candidate"):
         append_authority_event(store, root, key, intent)
 
     assert store.events() == ()
+
+
+def test_internal_non_ratification_writer_rejects_caller_ratification_intent():
+    corpus = load_validated_candidate(Path(__file__).resolve().parents[2])
+    intent = ratification_intent_from_candidate(corpus)
+    store, root, key = setup_ledger()
+
+    with pytest.raises(AuthorityStateError, match="append_ratification_from_candidate"):
+        _append_authority_event(store, root, key, intent)
+
+    assert store.events() == ()
+
+
+def test_atomic_append_captures_candidate_view_and_signs_it():
+    corpus = load_validated_candidate(Path(__file__).resolve().parents[2])
+    store, root, key = setup_ledger()
+    event = append_ratification_from_candidate(store, root, key, corpus)
+    assert event.intent.policy_corpus_hash == corpus.policy_corpus_hash
+    assert event.intent.static_policy_view_projection["policy_corpus_hash"] == corpus.policy_corpus_hash

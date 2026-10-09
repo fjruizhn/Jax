@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 from pathlib import Path
 import re
@@ -23,13 +24,15 @@ from policy.authority_ledger.canonical import canonical_bytes
 from policy.authority_ledger.models import (
     AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
     OverlayPayload, OverlayScope, OverlayType, RuleRatificationGrantPayload,
-    _RULE_RATIFICATION_SNAPSHOT_SEAL,
 )
 from policy.authority_ledger.replay import event_hash, genesis_hash, verify_authority_ledger
-from policy.authority_ledger.service import append_authority_event, ratification_intent_from_candidate
+from policy.authority_ledger.service import (append_authority_event,
+                                             append_ratification_from_candidate,
+                                             ratification_intent_from_candidate)
 from policy.authority_ledger.signatures import encode_public_key, public_key_bytes, public_key_fingerprint
 from policy.authority_ledger.storage import MariaDBAuthorityLedgerStore
 from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
+from tests.policy._sellos_de_prueba import rule_grant_intent
 from policy.authority_resolution.candidate_loader import load_validated_candidate
 
 
@@ -41,6 +44,161 @@ IMAGE = os.environ.get("JAX_AUTHORITY_LEDGER_TEST_MARIADB_IMAGE", "mariadb:12.3.
 
 def _run(docker: list[str], *args: str, **kwargs):
     return subprocess.run([*docker, *args], check=True, capture_output=True, text=True, **kwargs)
+
+
+_TRANSIENT_MARIADB_STARTUP_CODES = frozenset((2002, 2003, 2006, 2013))
+_TRANSIENT_SOCKET_ERRNOS = frozenset((errno.EAGAIN, errno.ECONNREFUSED, errno.EINTR, errno.ENOENT))
+
+
+def _is_transient_mariadb_startup_error(error: BaseException) -> bool:
+    """Return true only for a socket/server transition during startup."""
+    if isinstance(error, OSError):
+        return error.errno in _TRANSIENT_SOCKET_ERRNOS
+    return (
+        isinstance(error, pymysql.err.OperationalError)
+        and bool(error.args)
+        and type(error.args[0]) is int
+        and error.args[0] in _TRANSIENT_MARIADB_STARTUP_CODES
+    )
+
+
+def _connect_after_transient_mariadb_startup_error(connect_once, *, timeout: float, retry_delay: float):
+    """Retry only transient socket/server startup failures, bounded by ``timeout``."""
+    deadline = time.monotonic() + timeout
+    last_error = None
+    while True:
+        try:
+            return connect_once()
+        except (OSError, pymysql.MySQLError) as error:
+            if not _is_transient_mariadb_startup_error(error):
+                raise
+            last_error = error
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"MariaDB siguió inaccesible tras {timeout:.0f} s: {last_error}"
+            ) from last_error
+        time.sleep(retry_delay)
+
+
+def _container_logs(docker: list[str], container: str, *, tail: int) -> str:
+    logs = subprocess.run(
+        [*docker, "logs", "--tail", str(tail), container],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return logs.stdout + logs.stderr
+
+
+def _final_mariadb_server_ready(logs: str) -> bool:
+    """Recognize completed init or the final TCP listener, never port-0 init."""
+    if "init process done" in logs:
+        return True
+    return re.search(
+        r"ready for connections\.\s*Version: [^\n]*\bport:\s*'?3306'?(?=\s|$)",
+        logs,
+    ) is not None
+
+
+def _wait_until_ready(
+    docker: list[str], container: str, socket_dir: str, password: str, timeout: float = 60.0
+) -> Path:
+    """Wait for the final MariaDB server, after entrypoint initialization has finished."""
+    socket_path = Path(socket_dir) / "mysqld.sock"
+    deadline = time.monotonic() + timeout
+    last_error = None
+    initialized = False
+    while time.monotonic() < deadline:
+        if not initialized:
+            initialized = _final_mariadb_server_ready(
+                _container_logs(docker, container, tail=200)
+            )
+        if initialized:
+            _run(docker, "exec", "--user=root", container, "chmod", "0755", "/run/mysqld")
+            try:
+                def connect_once():
+                    return pymysql.connect(
+                        unix_socket=str(socket_path), user="root", password=password,
+                        autocommit=False, charset="utf8mb4", connect_timeout=5,
+                    )
+
+                with _connect_after_transient_mariadb_startup_error(
+                    connect_once, timeout=min(5.0, max(0.0, deadline - time.monotonic())),
+                    retry_delay=0.25,
+                ) as probe:
+                    with probe.cursor() as cursor:
+                        cursor.execute("SELECT 1")
+                        if cursor.fetchone() == (1,):
+                            return socket_path
+            except (OSError, pymysql.MySQLError, AssertionError) as error:
+                if not _is_transient_mariadb_startup_error(error.__cause__ or error):
+                    raise
+                last_error = error
+        time.sleep(0.25)
+    raise AssertionError(
+        f"MariaDB no quedó lista en {timeout:.0f} s (init terminado: {initialized}; "
+        f"último error: {last_error}).\n--- docker logs ---\n"
+        f"{_container_logs(docker, container, tail=200)[-4000:]}"
+    )
+
+
+def test_transient_mariadb_startup_errors_are_narrowly_classified():
+    assert _is_transient_mariadb_startup_error(OSError(errno.ENOENT, "socket absent"))
+    assert _is_transient_mariadb_startup_error(
+        pymysql.err.OperationalError(2003, "Can't connect to MySQL server")
+    )
+    assert not _is_transient_mariadb_startup_error(
+        pymysql.err.OperationalError(1045, "Access denied")
+    )
+    assert not _is_transient_mariadb_startup_error(ValueError("bad test setup"))
+
+
+def test_connect_retries_only_transient_mariadb_startup_error(monkeypatch):
+    attempts = 0
+    connection = object()
+
+    def connect_once():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise pymysql.err.OperationalError(2003, "socket temporarily unavailable")
+        return connection
+
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    assert _connect_after_transient_mariadb_startup_error(
+        connect_once, timeout=1, retry_delay=0
+    ) is connection
+    assert attempts == 2
+
+
+def test_connect_preserves_permanent_mariadb_error_without_retry(monkeypatch):
+    attempts = 0
+    failure = pymysql.err.OperationalError(1045, "Access denied")
+
+    def connect_once():
+        nonlocal attempts
+        attempts += 1
+        raise failure
+
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    with pytest.raises(pymysql.err.OperationalError, match="Access denied"):
+        _connect_after_transient_mariadb_startup_error(
+            connect_once, timeout=1, retry_delay=0
+        )
+    assert attempts == 1
+
+
+def test_final_server_detection_ignores_temporary_port_zero_startup() -> None:
+    temporary = """mariadbd: ready for connections.
+Version: '12.3.3-MariaDB' socket: '/run/mysqld/mysqld.sock' port: 0 mariadb.org
+"""
+    final_server = """mariadbd: ready for connections.
+Version: '12.3.3-MariaDB' socket: '/run/mysqld/mysqld.sock' port: 3306 mariadb.org
+"""
+
+    assert not _final_mariadb_server_ready(temporary)
+    assert _final_mariadb_server_ready(final_server)
+    assert _final_mariadb_server_ready("init process done")
 
 
 def _apply_migration(connection, path):
@@ -76,32 +234,15 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
             "-e", f"MARIADB_ROOT_PASSWORD={password}", IMAGE,
         )
         try:
-            socket_path = Path(socket_dir) / "mysqld.sock"
-            socket_ready = False
-            for _ in range(90):
-                probe = subprocess.run(
-                    [*docker, "exec", container, "test", "-S", "/run/mysqld/mysqld.sock"],
-                    capture_output=True, text=True, check=False,
-                )
-                if probe.returncode == 0:
-                    socket_ready = True
-                    break
-                time.sleep(1)
-            assert socket_ready, "MariaDB no creó su socket Unix"
-            _run(docker, "exec", "--user=root", container, "chmod", "0755", "/run/mysqld")
-            connection = None
-            last_error = None
-            for _ in range(90):
-                try:
-                    connection = pymysql.connect(
-                        unix_socket=str(socket_path), user="root", password=password,
-                        autocommit=False, charset="utf8mb4",
-                    )
-                    break
-                except (OSError, pymysql.MySQLError) as exc:
-                    last_error = exc
-                    time.sleep(1)
-            assert connection is not None, f"MariaDB socket no disponible: {last_error}"
+            socket_path = _wait_until_ready(docker, container, socket_dir, password)
+            connection = _connect_after_transient_mariadb_startup_error(
+                lambda: pymysql.connect(
+                    unix_socket=str(socket_path), user="root", password=password,
+                    autocommit=False, charset="utf8mb4", connect_timeout=5,
+                ),
+                timeout=10,
+                retry_delay=0.25,
+            )
             with connection:
                 with connection.cursor() as cursor:
                     cursor.execute("SELECT VERSION()")
@@ -188,7 +329,8 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                         cursor.execute("UPDATE jax_authority.authority_events SET actor_id='actor:tamper' WHERE sequence=1")
                     app.commit()
             now = datetime(2026, 10, 6, tzinfo=timezone.utc)
-            corpus_intent = ratification_intent_from_candidate(load_validated_candidate(ROOT))
+            candidate = load_validated_candidate(ROOT)
+            corpus_intent = ratification_intent_from_candidate(candidate)
             corpus_event_id = "018cc251-f400-7000-8000-000000000001"
             overlay = OverlayPayload(
                 "test-exception", OverlayType.EXCEPTION, corpus_intent.policy_corpus_hash,
@@ -201,29 +343,29 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                 "sha256:" + "e" * 64, now, None,
             )
             intents = (
-                corpus_intent,
                 AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", ratification_event_id=corpus_event_id),
                 AuthorityEventIntent(AuthorityEventType.RATIFICATION_REVOKED, "human:fernando", ratification_event_id=corpus_event_id),
                 AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
                 AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=overlay),
                 AuthorityEventIntent(AuthorityEventType.OVERLAY_REVOKED, "human:fernando", overlay_id="test-exception"),
-                AuthorityEventIntent(
-                    AuthorityEventType.RULE_RATIFICATION_GRANTED,
-                    "human:fernando", rule_ratification=grant,
-                    _rule_ratification_snapshot_seal=_RULE_RATIFICATION_SNAPSHOT_SEAL,
-                ),
+                rule_grant_intent(grant),
                 AuthorityEventIntent(
                     AuthorityEventType.RULE_RATIFICATION_REVOKED, "human:fernando",
                     rule_ratification_event_id="018cc251-f400-7000-8000-000000000007",
                 ),
             )
-            events = tuple(
+            first = append_ratification_from_candidate(
+                store, root, key, candidate,
+                event_id=corpus_event_id,
+                recorded_at_utc=now,
+            )
+            events = (first,) + tuple(
                 append_authority_event(
                     store, root, key, intent,
                     event_id=f"018cc251-f400-7000-8000-{index:012d}",
                     recorded_at_utc=now,
                 )
-                for index, intent in enumerate(intents, 1)
+                for index, intent in enumerate(intents, 2)
             )
             restored = store.events()
             state = verify_authority_ledger(store.get_genesis(), restored, root)
@@ -283,37 +425,20 @@ def _ephemeral_mariadb():
             "-e", f"MARIADB_ROOT_PASSWORD={password}", IMAGE,
         )
         try:
-            socket_ready = False
-            for _ in range(90):
-                probe = subprocess.run(
-                    [*docker, "exec", container, "test", "-S", "/run/mysqld/mysqld.sock"],
-                    capture_output=True, text=True, check=False,
-                )
-                if probe.returncode == 0:
-                    socket_ready = True
-                    break
-                time.sleep(1)
-            assert socket_ready, "MariaDB no creó su socket Unix"
-            _run(docker, "exec", "--user=root", container, "chmod", "0755", "/run/mysqld")
-            socket_path = str(Path(socket_dir) / "mysqld.sock")
+            socket_path = str(_wait_until_ready(docker, container, socket_dir, password))
 
             def connect(**kwargs):
                 kwargs.setdefault("user", "root")
                 kwargs.setdefault("password", password)
-                return pymysql.connect(
-                    unix_socket=socket_path, autocommit=False, charset="utf8mb4", **kwargs
+                kwargs.setdefault("connect_timeout", 5)
+                return _connect_after_transient_mariadb_startup_error(
+                    lambda: pymysql.connect(
+                        unix_socket=socket_path, autocommit=False, charset="utf8mb4", **kwargs
+                    ),
+                    timeout=10,
+                    retry_delay=0.25,
                 )
 
-            last_error = None
-            for _ in range(90):
-                try:
-                    connect().close()
-                    break
-                except (OSError, pymysql.MySQLError) as exc:
-                    last_error = exc
-                    time.sleep(1)
-            else:
-                raise AssertionError(f"MariaDB socket no disponible: {last_error}")
             yield connect
         finally:
             subprocess.run([*docker, "stop", container], capture_output=True, text=True, check=False)

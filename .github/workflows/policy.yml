@@ -506,8 +506,11 @@ jobs:
   # topea nada (+1). Sin skips. La CI usa Python 3.12 y confirma el mismo piso.
   # Re-medido ronda 6 (D-4 piso de codigo + catalogo sellado): 722 — el runtime solo
   # acepta el CatalogoTopes sellado del snapshot, nunca un Mapping cualquiera (+1).
-  # Re-medido sobre #370 final (2026-10-08): 729 passed; el protocolo de lectura
-  # de Topes y sus regresiones llevan el subgrupo a 113.
+  # Re-medido ronda 7 (solo el snapshot emite; catalogo de pin de prueba): 726 —
+  # recursos de clase prohibida con subid ajeno (AUD2 x3) y catalogo de bytes
+  # sueltos niegan (+4). Re-medido MAJOR-1: 728 — resultado y reconciliacion
+  # durables conservan el OID del catalogo sellado (+2). El contrato de lectura
+  # de AlmacenTopes agrega una prueba de reconciliacion: piso actual 729 (+1).
   # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 113 +
   # control 170 + lanzador 77 + acl 43 + memoria 15; desde aviso, los pasos 0.3b y 0.3c y su auditoria). Las pruebas con bwrap y uids
   # reales estan en el job `faro-jaula`; las de la base real, en `faro-bitacora-db`.
@@ -2553,7 +2556,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - run: pip install pytest pyyaml cryptography==49.0.0 jsonschema==4.26.0 && pip install --require-hashes -r requirements-faro-mariadb-ci.txt
+      - run: pip install pytest pyyaml cryptography==49.0.0 pymysql jsonschema==4.26.0
       - name: Identity Foundation Shadow (sin DB)
         env:
           PYTHONPATH: "."
@@ -2599,6 +2602,7 @@ jobs:
           tests/policy/test_authority_resolution_conflicts.py
           tests/policy/test_authority_resolution_result_contract.py
           tests/policy/test_authority_resolution_candidate_boundary.py
+          tests/policy/test_authority_resolution_loader_seal.py
           tests/policy/test_authority_resolution_determinism.py
           tests/policy/test_authority_resolution_purity.py
           tests/policy/test_enforcement_evidence_core.py
@@ -2657,15 +2661,17 @@ jobs:
         # niega -limite documentado-, subids legitimos del catalogo real x11).
         # Ronda 10: 637 (+23: tope.period solo es un subid de la clase frecuencia del
         # catalogo del pin; 20 negativas, 2 positivas del catalogo real, 2 de contrato).
-        # Paso 7 r3 (providers, jax#373) sobre el 591 de arriba: 712 (+121: +117 de
-        # test_rule_authority_providers.py —guard con lease valido y dato malo, exclusion
-        # de leases determinista, catalogo con centinela, confirmar del checkpoint— y +4 de
-        # test_rule_authority_ataques.py por el limite declarado del lector de listas, W3).
-        # Merge #370 final + providers r3 midió 778. Las revisiones del auditor añaden
-        # prioridad de writer, catálogo cerrado, tipos escalares exactos y el contrato
-        # de límites alineado al schema: 791 passed, medidos con el comando exacto de
-        # este paso, Python 3.14.4. TestEvidenceIngester declara __test__=False;
-        # cualquier otra advertencia permanece visible.
+        # Ronda 12: 657 (+14 pruebas incorporadas por schema/snapshot Faro F1.1;
+        # CI midió 657 en el SHA 49b0e1bb. TestEvidenceIngester declara __test__=False:
+        # es una clase auxiliar y no se debe coleccionar como prueba; otras advertencias
+        # de colección permanecen visibles y rompen el resumen estricto del piso.
+        # El resumen completo, incluido 0 skipped,
+        # es el piso: un salto no puede verse verde por prefijo.
+        # #379 agrega 18 pruebas del sello del loader y 2 de ratificación, también
+        # en la lista del paso anterior: piso combinado 677; ambas listas se
+        # comprueban iguales en tests.
+        # #373 agrega providers y cierres de clasificación/pin. Tras combinarlo
+        # con #379, la misma lista exacta mide 816 passed, cero skipped.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
@@ -2709,6 +2715,7 @@ jobs:
             tests/policy/test_authority_resolution_conflicts.py \
             tests/policy/test_authority_resolution_result_contract.py \
             tests/policy/test_authority_resolution_candidate_boundary.py \
+            tests/policy/test_authority_resolution_loader_seal.py \
             tests/policy/test_authority_resolution_determinism.py \
             tests/policy/test_authority_resolution_purity.py \
             tests/policy/test_enforcement_evidence_core.py \
@@ -2769,7 +2776,8 @@ jobs:
           JAX_AUTHORITY_LEDGER_DOCKER_CMD: docker
         run: |
           set -o pipefail
-          python -m pytest -q tests/policy/test_authority_ledger_storage_mariadb.py 2>&1 | tee /tmp/authority-ledger-mariadb
+          # Piso 9: cinco casos de integración + cuatro regresiones de detección/retry del arranque.
+          python -m pytest -q tests/policy/test_authority_ledger_storage_mariadb.py tests/policy/test_authority_ledger_append_validation_mariadb.py 2>&1 | tee /tmp/authority-ledger-mariadb
           python3 .github/ci/piso.py verificar authority-ledger-mariadb/integration /tmp/authority-ledger-mariadb || exit $?
       - name: Block 4 rule ratification events -- piso exacto
         env:
@@ -2778,6 +2786,35 @@ jobs:
           set -o pipefail
           python -m pytest -q tests/policy/test_authority_ledger_rule_ratifications.py 2>&1 | tee /tmp/authority-rule-events
           python3 .github/ci/piso.py verificar authority-rule-events/ratifications /tmp/authority-rule-events || exit $?
+      - name: Block 4 authority-ledger sellos y append -- piso exacto
+        # Ataques de falsificación del sello (replace / mutación / drift de
+        # hash) del fix de sellos init=False + proyección congelada.
+        env:
+          PYTHONPATH: "."
+        run: |
+          set -o pipefail
+          python -m pytest -q tests/policy/test_authority_ledger_seal_attacks.py 2>&1 | tee /tmp/authority-ledger-seal
+          python3 .github/ci/piso.py verificar authority-ledger-seal/attacks /tmp/authority-ledger-seal || exit $?
+      - name: Block 4 authority-ledger golden vectors -- piso exacto
+        # Bytes firmados de los seis tipos históricos clavados a master
+        # 83f8f56b: el congelado de la proyección no cambia la serialización.
+        env:
+          PYTHONPATH: "."
+        run: |
+          set -o pipefail
+          python -m pytest -q tests/policy/test_authority_ledger_golden_vectors.py 2>&1 | tee /tmp/authority-ledger-golden
+          python3 .github/ci/piso.py verificar authority-ledger-golden/vectors /tmp/authority-ledger-golden || exit $?
+      - name: Block 3 sello del loader (authority_resolution) -- piso exacto
+        # Ataques de falsificación del sello del corpus validado (replace,
+        # subclases, método sombreado, binding campo por campo de las 6
+        # entradas y proyección canónica sombreada). 17 passed: 14 -> 16 el
+        # 2026-10-07; 16 -> 17 el 2026-10-08 por cierre del bypass del método.
+        env:
+          PYTHONPATH: "."
+        run: |
+          set -o pipefail
+          python -m pytest -q tests/policy/test_authority_resolution_loader_seal.py 2>&1 | tee /tmp/authority-resolution-loader-seal
+          python3 .github/ci/piso.py verificar authority-resolution-loader-seal/ataques /tmp/authority-resolution-loader-seal || exit $?
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

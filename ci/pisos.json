@@ -134,8 +134,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 19 tests CORRIDOS del codec de persistencia de Block 4. Medido el 2026-10-07 en hall9000."
     },
     "authority-ledger-mariadb/integration": {
-      "patron": "^4 passed in ",
-      "mensaje": "PISO ROTO: se esperaba la integración MariaDB aislada de Block 4 (4 tests CORRIDOS). Medido el 2026-10-07 en hall9000 con MariaDB 12.3.3 --network none."
+      "patron": "^9 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 9 tests CORRIDOS de la suite MariaDB aislada del ledger (5 de storage/append + 4 de detección/reintento del servidor final)."
     },
     "authority-rule-events/ratifications": {
       "patron": "^12 passed in ",
@@ -201,9 +201,21 @@
       "patron": "^227 passed",
       "mensaje": "PISO ROTO: se esperaban 227 tests CORRIDOS de los pisos fuera del workflow."
     },
+    "authority-ledger-seal/attacks": {
+      "patron": "^4 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 4 tests CORRIDOS de los ataques de sello (replace, replace Faro, congelado profundo, drift de hash)."
+    },
+    "authority-ledger-golden/vectors": {
+      "patron": "^7 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 7 tests CORRIDOS del vector dorado (6 tipos históricos + genesis). Si cambió el formato canónico a propósito, recaptura las constantes en el mismo commit."
+    },
+    "authority-resolution-loader-seal/ataques": {
+      "patron": "^18 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 18 tests CORRIDOS de los ataques al sello del loader de Block 3 (replace, construccion directa, congelado, subclases, método sombreado, binding por campo de las 6 entradas, proyección canónica sombreada y política de copia/pickle). 14 -> 16 el 2026-10-07; 16 -> 17 el 2026-10-08 por cierre de sombreado de _contenido_canonico; 17 -> 18 por cierre de copy/deepcopy/pickle."
+    },
     "identity-foundation-shadow/policy": {
-      "patron": "^795 passed in ",
-      "mensaje": "PISO ROTO: se esperaban exactamente 795 tests CORRIDOS y 0 skipped de Identity Foundation Shadow (incluye el rechazo de subclases hostiles en los cuatro campos del pin)."
+      "patron": "^816 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 816 tests CORRIDOS y 0 skipped de Identity Foundation Shadow (incluye providers F1.1, sellos del loader y ratificación)."
     }
   },
   "minimos": {

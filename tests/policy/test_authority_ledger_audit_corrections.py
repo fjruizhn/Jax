@@ -14,7 +14,7 @@ from policy.authority_ledger.service import append_authority_event
 from policy.authority_ledger.storage import MariaDBAuthorityLedgerStore
 from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
 from policy.authority_resolution.models import EvaluationContext
-from tests.policy.test_authority_ledger_events import base_time, overlay, ratification_intent, setup_ledger
+from tests.policy.test_authority_ledger_events import append_ratification, base_time, overlay, setup_ledger
 
 
 def _context():
@@ -23,14 +23,19 @@ def _context():
 
 def _active():
     store, root, key = setup_ledger()
-    rat = append_authority_event(store, root, key, ratification_intent())
+    rat = append_ratification(store, root, key)
     append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", ratification_event_id=rat.event_id))
     return store, root, key, rat
 
 
 def test_audit_001_unsealed_hash_snapshot_pair_rejected():
-    with pytest.raises(AuthorityEventValidationError):
-        AuthorityEventIntent(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", (), "sha256:" + "f" * 64, {"policy_corpus_hash": "sha256:" + "f" * 64})
+    # Desde que el sello es init=False, el par sin sellar se construye pero no
+    # llega al ledger: la frontera que firma lo rechaza y no escribe nada.
+    store, root, key = setup_ledger()
+    unsealed = AuthorityEventIntent(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", (), "sha256:" + "f" * 64, {"policy_corpus_hash": "sha256:" + "f" * 64})
+    with pytest.raises(AuthorityStateError, match="append_ratification_from_candidate"):
+        append_authority_event(store, root, key, unsealed)
+    assert store.events() == ()
 
 
 def test_audit_002_replay_state_is_deeply_sealed():
@@ -54,7 +59,7 @@ def test_audit_003_cross_corpus_overlay_never_effective():
 def test_audit_004_external_checkpoint_rejects_old_prefix(tmp_path):
     store, root, key = setup_ledger()
     anchor = TrustedCheckpointStore(tmp_path / "checkpoints.log")
-    rat = append_authority_event(store, root, key, ratification_intent(), checkpoint_store=anchor)
+    rat = append_ratification(store, root, key, checkpoint_store=anchor)
     append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", ratification_event_id=rat.event_id), checkpoint_store=anchor)
     append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"), checkpoint_store=anchor)
     with pytest.raises(LedgerRollbackError):
