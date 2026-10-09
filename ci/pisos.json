@@ -202,8 +202,8 @@
       "mensaje": "PISO ROTO: se esperaban 227 tests CORRIDOS de los pisos fuera del workflow."
     },
     "identity-foundation-shadow/policy": {
-      "patron": "^791 passed in ",
-      "mensaje": "PISO ROTO: se esperaban exactamente 791 tests CORRIDOS y 0 skipped de Identity Foundation Shadow (incluye la forma de límites alineada al schema)."
+      "patron": "^795 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 795 tests CORRIDOS y 0 skipped de Identity Foundation Shadow (incluye el rechazo de subclases hostiles en los cuatro campos del pin)."
     }
   },
   "minimos": {

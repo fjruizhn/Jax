@@ -17,9 +17,8 @@ Evidencia local Python 3.14.4:
 - lista exacta `identity-foundation-shadow`: 795 passed, 0 skipped;
 - `git diff --check`: limpio.
 
-El verificador del piso falla cerrado porque `ci/pisos.json` aún exige 791.
-La lista medida es 795; quien posea `ci/pisos.json` debe subir su patrón e
-historia con esta medición. Este worktree no modifica ese archivo.
+El piso `identity-foundation-shadow/policy` quedó actualizado a 795 con la
+historia de la medición y de los cuatro ataques en `docs/ci/pisos.md`.
 
 ## Decisión y estado
 

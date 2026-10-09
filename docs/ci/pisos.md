@@ -4641,7 +4641,7 @@ Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la form
 
 ## `identity-foundation-shadow/policy`
 
-Patrón medido en #373 con los cierres de auditoría (2026-10-08): `^791 passed in `
+Patrón medido en #373 con los cierres de auditoría (2026-10-09): `^795 passed in `
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4670,3 +4670,11 @@ r9 (2026-10-07): 591 -> 614 (+23: D-4 con sinónimos en inglés y raíces x11, `
 r10 (2026-10-07, cierre del hallazgo del auditor en jax#370): 614 -> 637 (+23 netas: el periodo de un tope solo es un subid de la clase `frecuencia` del catalogo del pin; 1 prueba vieja se reemplaza por 20 negativas parametrizadas, 2 positivas del catalogo real y 2 de contrato). Medido con Python 3.14.4 y el comando exacto del paso.
 
 Merge (2026-10-08): #370 final (637) + providers r3 (121) -> 778. Las ramas venian de bases distintas, por eso no se suman: se midió sobre el árbol combinado. Las regresiones de prioridad de writer, mapa cerrado y tipos escalares elevan el total medido a 784 passed, 0 skipped. Fernando decidió el 2026-10-08 alinear `FormaLimites` al schema vigente: `NINGUNA`, `CANTIDAD` o `MONTO`; una acción obligatoria lleva exactamente uno. Las siete regresiones del contrato y la medición exacta dejan el piso en 791 passed, 0 skipped con Python 3.14.4.
+
+Corrección Tier 3 (2026-10-09, #373): 791 -> 795. `TrustedPolicyPin` ahora
+rechaza con `RuleSnapshotError` una subclase hostil de `str` en cada uno de
+sus cuatro campos: `repositorio`, `commit`, `policy_tree_oid` y `procedencia`.
+El caso hostil implementa `__eq__` como verdadero para cualquier valor; antes
+podía falsear la comparación de procedencia con `PinActivo`. Medido con el
+comando exacto de Identity Foundation Shadow en Python 3.14.4: 795 passed,
+0 skipped.
