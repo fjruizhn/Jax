@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from policy.authority_ledger.canonical import canonical_bytes
+from policy.authority_ledger.canonical import canonical_bytes, plain
 from policy.authority_ledger.models import AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis, OverlayPayload, OverlayScope, OverlayType
 from policy.authority_ledger.signatures import encode_public_key, public_key_bytes, public_key_fingerprint
 from policy.authority_ledger.storage import InMemoryAuthorityLedgerStore
@@ -39,16 +39,31 @@ def overlay(overlay_id="exception-a", *, conditions=(), target=("rule-a",), kind
 
 
 def ratification_intent(policy_hash=None):
-    from policy.authority_ledger.service import ratification_intent_from_candidate
     from policy.authority_resolution.candidate_loader import load_validated_candidate
-    return ratification_intent_from_candidate(load_validated_candidate(Path(__file__).resolve().parents[2]))
+    from policy.authority_resolution.adapter import to_static_policy_view
+    corpus = load_validated_candidate(Path(__file__).resolve().parents[2])
+    projection = plain(to_static_policy_view(corpus))
+    return AuthorityEventIntent(
+        AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", (),
+        projection["policy_corpus_hash"], projection,
+    )
+
+
+def append_ratification(store, root, key, *, evidence_refs=(), **kwargs):
+    """Test helper for the public atomic corpus-ratification write path."""
+    from policy.authority_ledger.service import append_ratification_from_candidate
+    from policy.authority_resolution.candidate_loader import load_validated_candidate
+    return append_ratification_from_candidate(
+        store, root, key, load_validated_candidate(Path(__file__).resolve().parents[2]),
+        evidence_refs, **kwargs,
+    )
 
 
 def test_evidence_refs_are_set_and_committed():
     base = ratification_intent()
-    one = AuthorityEventIntent._from_validated_snapshot(base.policy_corpus_hash, base.static_policy_view_projection, ("sha256:" + "b" * 64, "sha256:" + "a" * 64))
-    two = AuthorityEventIntent._from_validated_snapshot(base.policy_corpus_hash, base.static_policy_view_projection, ("sha256:" + "a" * 64, "sha256:" + "b" * 64))
-    changed = AuthorityEventIntent._from_validated_snapshot(base.policy_corpus_hash, base.static_policy_view_projection, ("sha256:" + "d" * 64,))
+    one = AuthorityEventIntent(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", ("sha256:" + "b" * 64, "sha256:" + "a" * 64), base.policy_corpus_hash, base.static_policy_view_projection)
+    two = AuthorityEventIntent(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", ("sha256:" + "a" * 64, "sha256:" + "b" * 64), base.policy_corpus_hash, base.static_policy_view_projection)
+    changed = AuthorityEventIntent(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", ("sha256:" + "d" * 64,), base.policy_corpus_hash, base.static_policy_view_projection)
     assert canonical_bytes(one.canonical_projection()) == canonical_bytes(two.canonical_projection())
     assert canonical_bytes(one.canonical_projection()) != canonical_bytes(changed.canonical_projection())
 

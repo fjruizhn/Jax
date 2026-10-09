@@ -291,43 +291,48 @@ class ValidatedCandidateCorpus:
             raise InvalidValidatedCorpusError("documentos no ordenados o duplicados")
 
     def _contenido_canonico(self) -> dict:
-        return {
-            "policy_corpus_hash": self.policy_corpus_hash,
-            "canonicalizer_identity": self.canonicalizer_identity,
-            "bootstrap_bundle_id": self.bootstrap_bundle_id,
-            "authority": asdict(self.authority),
-            "manifest": asdict(self.manifest),
-            "normative_documents": [asdict(documento) for documento in self.normative_documents],
-        }
+        return self._contenido_canonico_desde_campos(
+            self.policy_corpus_hash,
+            self.canonicalizer_identity,
+            self.bootstrap_bundle_id,
+            self.authority,
+            self.manifest,
+            self.normative_documents,
+        )
 
-    @classmethod
-    def _from_validated_snapshot(
-        cls,
+    @staticmethod
+    def _contenido_canonico_desde_campos(
         policy_corpus_hash: str,
         canonicalizer_identity: str,
         bootstrap_bundle_id: str,
         authority: FrozenAuthorityMetaContract,
         manifest: ValidatedManifestBinding,
         normative_documents: tuple[FrozenNormativeDocument, ...],
-    ) -> "ValidatedCandidateCorpus":
-        """Internal factory: only the loader owns the validation capability.
+    ) -> dict:
+        """Proyección de binding, sin crear ni sellar un candidate.
 
-        El sello es ``init=False``: ni el constructor ni ``dataclasses.replace``
-        lo transportan — un corpus reconstruido llega sin sello y todo
-        consumidor lo rechaza. El ``_content_binding`` liga el contenido
-        congelado: el digest estampado aquí es el que el consumidor re-deriva.
+        El loader y los consumidores capturan los seis campos una vez y usan
+        esta misma proyección. Así el check del sello no puede validar un
+        objeto y luego construir una vista desde lecturas distintas.
         """
-        corpus = cls(
-            policy_corpus_hash,
-            canonicalizer_identity,
-            bootstrap_bundle_id,
-            authority,
-            manifest,
-            normative_documents,
-        )
-        object.__setattr__(corpus, "_loader_seal", _VALIDATED_CANDIDATE_SEAL)
-        object.__setattr__(corpus, "_content_binding", _digest_contenido(corpus._contenido_canonico()))
-        return corpus
+        return {
+            "policy_corpus_hash": policy_corpus_hash,
+            "canonicalizer_identity": canonicalizer_identity,
+            "bootstrap_bundle_id": bootstrap_bundle_id,
+            "authority": asdict(authority),
+            "manifest": asdict(manifest),
+            "normative_documents": [asdict(documento) for documento in normative_documents],
+        }
+
+    def __copy__(self) -> "ValidatedCandidateCorpus":
+        return self
+
+    def __deepcopy__(self, memo: dict[int, object]) -> "ValidatedCandidateCorpus":
+        memo[id(self)] = self
+        return self
+
+    def __reduce_ex__(self, protocol: int):
+        raise TypeError("ValidatedCandidateCorpus no se serializa")
 
     def _was_loader_validated(self) -> bool:
         """Sello del loader Y digest del contenido re-derivado y comparado.
@@ -341,12 +346,11 @@ class ValidatedCandidateCorpus:
         if self._loader_seal is not _VALIDATED_CANDIDATE_SEAL:
             return False
         binding = getattr(self, "_content_binding", None)
-        # No se despacha por la instancia: aun un ``frozen`` dataclass puede
-        # recibir atributos mediante ``object.__setattr__``. Un atacante no
-        # puede sustituir la proyección que se compara contra el sello.
-        return binding == _digest_contenido(
-            ValidatedCandidateCorpus._contenido_canonico(self)
-        )
+        # No se despacha por la instancia: evita que una sombra accidental o
+        # una subclase altere la proyección evaluada. Esto no pretende aislar
+        # Python hostil dentro del mismo proceso: quien puede mutar memoria o
+        # importar sentinelas internos ya está fuera del límite de confianza.
+        return binding == _digest_contenido(ValidatedCandidateCorpus._contenido_canonico(self))
 
 @dataclass(frozen=True)
 class ValidatedStaticPolicyView:

@@ -6,7 +6,8 @@ from .models import (AuthorityEvent, AuthorityEventIntent, AuthorityEventType,
                      OverlayApplicability, OverlayPayload, OverlayScope, OverlayType,
                      RuleRatificationGrantPayload)
 from .replay import effective_overlays, verify_authority_ledger
-from .service import append_authority_event, initialize_authority_ledger, ratification_intent_from_candidate
+from .service import (append_authority_event, append_ratification_from_candidate,
+                      initialize_authority_ledger, ratification_intent_from_candidate)
 from .storage import InMemoryAuthorityLedgerStore
 from .trusted_root import TrustedAuthorityRoot
 
@@ -16,6 +17,6 @@ __all__ = [
     "EffectiveAuthorityEnvelope", "OverlayApplicability", "OverlayPayload", "OverlayScope",
     "RuleRatificationGrantPayload",
     "OverlayType", "TrustedAuthorityRoot", "InMemoryAuthorityLedgerStore",
-    "append_authority_event", "initialize_authority_ledger", "ratification_intent_from_candidate", "verify_authority_ledger",
+    "append_authority_event", "append_ratification_from_candidate", "initialize_authority_ledger", "ratification_intent_from_candidate", "verify_authority_ledger",
     "effective_overlays", "build_effective_authority_context", "build_effective_authority_envelope",
 ]

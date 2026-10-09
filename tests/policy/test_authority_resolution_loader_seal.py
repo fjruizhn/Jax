@@ -9,13 +9,12 @@ colecciones entran como tuple/list y se guardan SIEMPRE como tuple) y un
 que todo consumidor re-deriva y compara antes de confiar. Cada test mata un
 mutante del arreglo (tabla en la entrega).
 """
-import copy
 import dataclasses
 
 import pytest
 
 from policy.authority_ledger.errors import AuthorityStateError
-from policy.authority_ledger.service import ratification_intent_from_candidate
+from policy.authority_ledger.service import append_ratification_from_candidate
 from policy.authority_resolution import load_validated_candidate, to_static_policy_view
 from policy.authority_resolution.errors import ResolverContractError
 from policy.authority_resolution.models import ValidatedCandidateCorpus
@@ -37,7 +36,7 @@ def test_replace_no_transporta_el_sello_ni_el_binding():
     with pytest.raises(ResolverContractError):
         to_static_policy_view(forged)
     with pytest.raises(AuthorityStateError):
-        ratification_intent_from_candidate(forged)
+        append_ratification_from_candidate(None, None, None, forged)
 
 
 def test_replace_con_contenido_alterado_tampoco_valida():
@@ -68,7 +67,7 @@ def test_construccion_directa_no_es_corpus_valido():
     with pytest.raises(ResolverContractError):
         to_static_policy_view(unsealed)
     with pytest.raises(AuthorityStateError):
-        ratification_intent_from_candidate(unsealed)
+        append_ratification_from_candidate(None, None, None, unsealed)
 
 
 def _documento_sintetico():
@@ -129,7 +128,7 @@ def test_el_consumidor_recalcula_el_digest_del_contenido():
     with pytest.raises(ResolverContractError):
         to_static_policy_view(corpus)
     with pytest.raises(AuthorityStateError):
-        ratification_intent_from_candidate(corpus)
+        append_ratification_from_candidate(None, None, None, corpus)
 
 
 def test_el_loader_sella_y_liga_hash_y_contenido_del_corpus_real():
@@ -138,6 +137,17 @@ def test_el_loader_sella_y_liga_hash_y_contenido_del_corpus_real():
     # El binding es sensible al contenido: otro corpus, otro digest.
     otro = dataclasses.replace(corpus, policy_corpus_hash="sha256:" + "cd" * 32)
     assert otro._content_binding is None or otro._content_binding != corpus._content_binding
+
+
+def test_copias_devuelven_el_mismo_candidate_y_pickle_falla_cerrado():
+    import copy
+    import pickle
+
+    corpus = load_validated_candidate(ROOT)
+    assert copy.copy(corpus) is corpus
+    assert copy.deepcopy(corpus) is corpus
+    with pytest.raises(TypeError, match="no se serializa"):
+        pickle.dumps(corpus)
 
 
 # --- Ronda 2 (auditoría de c3d471ed): subclases y binding campo por campo ----
@@ -156,7 +166,7 @@ def _expect_deny(corpus):
     with pytest.raises(ResolverContractError):
         to_static_policy_view(corpus)
     with pytest.raises(AuthorityStateError):
-        ratification_intent_from_candidate(corpus)
+        append_ratification_from_candidate(None, None, None, corpus)
 
 
 def test_subclasear_el_corpus_falla_en_la_definicion():
@@ -199,8 +209,13 @@ def test_subclase_con_sello_y_binding_legitimos_tambien_es_negada(monkeypatch):
         pass
 
     corpus = load_validated_candidate(ROOT)
-    falso = copy.copy(corpus)
-    object.__setattr__(falso, "__class__", Falso)
+    falso = Falso(
+        corpus.policy_corpus_hash, corpus.canonicalizer_identity,
+        corpus.bootstrap_bundle_id, corpus.authority, corpus.manifest,
+        corpus.normative_documents,
+    )
+    object.__setattr__(falso, "_loader_seal", corpus._loader_seal)
+    object.__setattr__(falso, "_content_binding", corpus._content_binding)
     assert isinstance(falso, ValidatedCandidateCorpus)
     assert ValidatedCandidateCorpus._was_loader_validated(falso) is True
     _expect_deny(falso)

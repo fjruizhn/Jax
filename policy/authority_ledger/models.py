@@ -24,7 +24,6 @@ _ACTOR = re.compile(r"(?:human|actor):[a-z][a-z0-9-]{0,63}\Z")
 _RULE_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _RULE_PATH = re.compile(r"policy/faro/[a-z][a-z0-9-]{0,63}\.yaml\Z")
 _GIT_OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
-_RATIFICATION_SNAPSHOT_SEAL = object()
 _RULE_RATIFICATION_SNAPSHOT_SEAL = object()
 _RULE_RATIFICATION_STORAGE_SEAL = object()
 _RATIFICATION_STORAGE_SEAL = object()
@@ -305,19 +304,6 @@ class AuthorityEventIntent:
             )
             if legacy_payload_present:
                 raise AuthorityEventValidationError("payload Block 4 heredado fuera de su variante")
-
-    @classmethod
-    def _from_validated_snapshot(cls, policy_corpus_hash: str, projection: Mapping[str, Any], evidence_refs: tuple[str, ...] = ()) -> "AuthorityEventIntent":
-        """Only path that stamps the candidate-boundary seal on a corpus ratification.
-
-        The seal is `init=False`: `dataclasses.replace` cannot carry it into a
-        rebuilt intent, so a replaced intent reaches append unsealed and the
-        signing boundary rejects it.
-        """
-        intent = cls(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", evidence_refs,
-                     policy_corpus_hash, projection)
-        object.__setattr__(intent, "_ratification_snapshot_seal", _RATIFICATION_SNAPSHOT_SEAL)
-        return intent
 
     def canonical_projection(self) -> dict[str, Any]:
         if self.event_type is AuthorityEventType.RULE_RATIFICATION_GRANTED:
