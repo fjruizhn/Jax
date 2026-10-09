@@ -235,3 +235,35 @@ no concede autoridad ni prueba el estado operativo actual.
 - Este documento conserva el contexto histórico de Faro F1.1. El estado vivo de
   cualquier PR o CI debe consultarse en sus refs, checks y auditorías del SHA
   exacto; este archivo no es autoridad operativa.
+
+## #379 · sello del loader de autoridad · 2026-10-08
+
+- #379 se abrió apilado sobre el head anterior de #377. Tras integrarse #377, su
+  PR se cambió a `master` y la rama incorporó el nuevo tip antes de la revisión
+  final.
+- La CI anterior detectó una carrera en `_ephemeral_mariadb`: la imagen publica
+  un socket del servidor temporal mientras inicializa, antes de iniciar el
+  servidor definitivo. La espera ahora exige el fin de inicialización del
+  entrypoint y una conexión autenticada con `SELECT 1`; las reconexiones son
+  acotadas y solo aplican a errores de socket/servidor transitorios. Fallos de
+  credenciales como `1045` se propagan de inmediato.
+- Tres pruebas unitarias verifican clasificación, reintento y propagación de
+  errores permanentes: `3 passed`; `py_compile` y `git diff --check` pasaron.
+  No se pudo ejecutar MariaDB localmente por falta de permiso al socket Docker;
+  la integración real se comprueba en CI.
+- En el primer candidato de #379, la lista exacta de Identity Foundation
+  Shadow creció de 657 a 673 al incluir 16 casos del loader en ambos pasos.
+  La auditoría del SHA posterior encontró una regresión 17 del loader y exigió
+  corregir ambos pisos: loader 17 e Identity Shadow 674. Ese estado posterior
+  se registra en `docs/ci/pisos.md`; esta nota conserva solo la medición histórica
+  del primer candidato, no una afirmación del piso vigente.
+- CI del SHA `3371ecd0` reveló que MariaDB 12.3.3 registra `ready for connections`
+  para el servidor de inicialización en `port: 0` antes del servidor final en
+  `port: 3306`; esperar solo `init process done` vencía aunque el servidor final
+  ya estuviera listo. La detección ahora reconoce el marcador de init o la pareja
+  ready+port 3306, luego exige conexión autenticada y `SELECT 1`. Piso de integración
+  MariaDB: 8 -> 9. La regresión unitaria del detector pasa localmente; CI del nuevo
+  SHA debe volver a medir las nueve pruebas y el resto del workflow.
+- El `TRASPASO.md` operacional de la rama se retiró del candidato para evitar
+  publicar instrucciones de una sesión ya terminada. Este registro guarda el
+  contexto histórico; no declara estado vivo de PR, CI ni autoridad.

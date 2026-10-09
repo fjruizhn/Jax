@@ -18,7 +18,7 @@ from policy.execution_control.models import ExecutionEnvironment
 from policy.execution_control.service import create_execution
 from policy.execution_control.storage import InMemoryExecutionStore
 from policy.execution_control.storage import MariaDBExecutionStore
-from tests.policy.test_authority_ledger_events import setup_ledger, ratification_intent
+from tests.policy.test_authority_ledger_events import append_ratification, setup_ledger
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -37,7 +37,7 @@ class _Catalog:
 def catalog(): return _Catalog()
 
 def record():
-    store, root, key = setup_ledger(); rat = append_authority_event(store, root, key, ratification_intent())
+    store, root, key = setup_ledger(); rat = append_ratification(store, root, key)
     append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", (), ratification_event_id=rat.event_id))
     state = verify_authority_ledger(store.get_genesis(), store.events(), root)
     facts = (DecisionFact("EXECUTION_CAPABILITY", DecisionFactValueType.STRING, "CAP"), DecisionFact("EXECUTION_CALLER", DecisionFactValueType.STRING, "jacobs"), DecisionFact("EXECUTION_MOTOR", DecisionFactValueType.STRING, "m"), DecisionFact("EXECUTION_ENVIRONMENT", DecisionFactValueType.STRING, "SANDBOX"), DecisionFact("EXECUTION_TARGET", DecisionFactValueType.STRING, "JAX_WORKSPACE"), DecisionFact("EXECUTION_PARAMETERS_HASH", DecisionFactValueType.STRING, parameters_hash("p", {"x": 1})), DecisionFact("EXECUTION_TIMEOUT_SECONDS", DecisionFactValueType.INTEGER, 60), DecisionFact("EXECUTION_SANDBOX_REQUIRED", DecisionFactValueType.BOOLEAN, True), DecisionFact("EXECUTION_DRY_RUN_REQUIRED", DecisionFactValueType.BOOLEAN, False), DecisionFact("EXECUTION_HUMAN_APPROVAL_REQUIRED", DecisionFactValueType.BOOLEAN, False))

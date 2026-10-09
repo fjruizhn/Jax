@@ -9,7 +9,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from .errors import AuthorityStateError, LedgerIntegrityError, TrustedRootMismatchError
 from .models import (
     AuthorityEvent, AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
-    _RATIFICATION_SNAPSHOT_SEAL, _RATIFICATION_STORAGE_SEAL,
     _RULE_RATIFICATION_SNAPSHOT_SEAL,
 )
 from .replay import event_hash, event_unsigned_bytes, genesis_hash, verify_authority_ledger
@@ -36,29 +35,97 @@ def initialize_authority_ledger(store: AuthorityLedgerStore, genesis: AuthorityL
 
 
 def ratification_intent_from_candidate(corpus, evidence_refs: tuple[str, ...] = ()) -> AuthorityEventIntent:
-    """Mint a ratification intent only from Block 3's sealed candidate boundary.
+    """Build a non-signable ratification value for serialization consumers.
 
-    The static projection is captured from that same atomic object; callers
-    cannot pass a corpus hash and unrelated authority/documents separately.
+    This helper never appends. Production writes must use
+    :func:`append_ratification_from_candidate`, which keeps validation,
+    projection capture, and signing in one public flow.
     """
     from policy.authority_resolution.adapter import to_static_policy_view
-    from policy.authority_resolution.models import ValidatedCandidateCorpus
-    if not isinstance(corpus, ValidatedCandidateCorpus) or not corpus._was_loader_validated():
-        raise AuthorityStateError("ratificación requiere ValidatedCandidateCorpus atómico")
-    view = to_static_policy_view(corpus)
-    projection = plain(view)
-    return AuthorityEventIntent._from_validated_snapshot(
-        corpus.policy_corpus_hash, projection, evidence_refs
+
+    projection = plain(to_static_policy_view(corpus))
+    return AuthorityEventIntent(
+        AuthorityEventType.RATIFICATION_GRANTED,
+        "human:fernando",
+        evidence_refs,
+        projection["policy_corpus_hash"],
+        projection,
     )
 
 
+def append_ratification_from_candidate(
+    store: AuthorityLedgerStore,
+    trusted_root: TrustedAuthorityRoot,
+    private_key: Ed25519PrivateKey,
+    corpus,
+    evidence_refs: tuple[str, ...] = (),
+    *,
+    event_id: str | None = None,
+    recorded_at_utc: datetime | None = None,
+    checkpoint_store: TrustedCheckpointStore | None = None,
+) -> AuthorityEvent:
+    """Validate one candidate, derive its view, and append its ratification.
+
+    This is deliberately the only public RATIFICATION_GRANTED write path. It
+    captures one locally validated projection, takes the hash from that same
+    projection, then signs it without accepting a caller-constructed intent.
+    """
+    from policy.authority_resolution.adapter import to_static_policy_view
+    from policy.authority_resolution.errors import ResolverContractError
+
+    try:
+        view = to_static_policy_view(corpus)
+    except ResolverContractError as exc:
+        raise AuthorityStateError("ratificación requiere ValidatedCandidateCorpus atómico") from exc
+    projection = plain(view)
+    intent = AuthorityEventIntent(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", evidence_refs, projection["policy_corpus_hash"], projection)
+    # Keep this write path separate from `_append_authority_event`: that
+    # helper rejects RATIFICATION_GRANTED even when called directly. Reusing a
+    # raw-intent helper here would recreate the bypass this boundary closes.
+    verify_authority_ledger(store.get_genesis(), store.events(), trusted_root)
+    genesis = store.get_genesis()
+    public = decode_public_key(genesis.constitutional_public_key)
+    if public_key_bytes(private_key.public_key()) != public_key_bytes(public):
+        raise AuthorityStateError("private key no corresponde al ratificador constitucional")
+    events = store.events()
+    provisional = AuthorityEvent(event_id or _uuid7(), len(events) + 1, events[-1].event_hash if events else None, intent, recorded_at_utc or datetime.now(timezone.utc), "", "sha256:" + "0" * 64)
+    signature = sign(private_key, event_unsigned_bytes(provisional))
+    signed = AuthorityEvent(provisional.event_id, provisional.sequence, provisional.previous_event_hash, provisional.intent, provisional.recorded_at_utc, signature, "sha256:" + "0" * 64)
+    complete = AuthorityEvent(signed.event_id, signed.sequence, signed.previous_event_hash, signed.intent, signed.recorded_at_utc, signed.signature, event_hash(signed))
+    verify_authority_ledger(genesis, events + (complete,), trusted_root)
+    store.append(complete)
+    if checkpoint_store is not None:
+        from .models import AuthorityLedgerCheckpoint
+        checkpoint_store.append(AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, complete.sequence, complete.event_id, complete.event_hash))
+    return complete
+
+
 def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, private_key: Ed25519PrivateKey, intent: AuthorityEventIntent, *, event_id: str | None = None, recorded_at_utc: datetime | None = None, checkpoint_store: TrustedCheckpointStore | None = None) -> AuthorityEvent:
-    """Append one signed Fernando event after verifying the complete ledger."""
-    if intent._ratification_snapshot_seal is _RATIFICATION_STORAGE_SEAL:
-        raise AuthorityStateError("ratificación rehidratada desde storage no se puede volver a anexar")
-    if (intent.event_type is AuthorityEventType.RATIFICATION_GRANTED
-            and intent._ratification_snapshot_seal is not _RATIFICATION_SNAPSHOT_SEAL):
-        raise AuthorityStateError("ratificación requiere snapshot sellado del candidate boundary")
+    """Append a non-ratification Fernando event after full ledger replay."""
+    if intent.event_type is AuthorityEventType.RATIFICATION_GRANTED:
+        raise AuthorityStateError(
+            "RATIFICATION_GRANTED requiere append_ratification_from_candidate"
+        )
+    return _append_authority_event(
+        store, trusted_root, private_key, intent,
+        event_id=event_id,
+        recorded_at_utc=recorded_at_utc,
+        checkpoint_store=checkpoint_store,
+    )
+
+
+def _append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, private_key: Ed25519PrivateKey, intent: AuthorityEventIntent, *, event_id: str | None = None, recorded_at_utc: datetime | None = None, checkpoint_store: TrustedCheckpointStore | None = None) -> AuthorityEvent:
+    """Internal signer for non-ratification public writer boundaries.
+
+    The Python module is one trusted in-process component; private names do
+    not defend against code that can inspect memory or import internals. This
+    helper nevertheless fails closed for direct accidental/internal calls so
+    its callable surface cannot authorize a caller-created ratification.
+    """
+    if intent.event_type is AuthorityEventType.RATIFICATION_GRANTED:
+        raise AuthorityStateError(
+            "RATIFICATION_GRANTED requiere append_ratification_from_candidate"
+        )
     state = verify_authority_ledger(store.get_genesis(), store.events(), trusted_root)
     genesis = store.get_genesis()
     public = decode_public_key(genesis.constitutional_public_key)
@@ -70,15 +137,6 @@ def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAut
     if (intent.event_type is AuthorityEventType.RULE_RATIFICATION_GRANTED and
             intent._rule_ratification_snapshot_seal is not _RULE_RATIFICATION_SNAPSHOT_SEAL):
         raise AuthorityStateError("rule grant requires a sealed Faro snapshot")
-    if intent.event_type is AuthorityEventType.RATIFICATION_GRANTED:
-        # Compares fields: the hash field against the one carried inside the
-        # frozen projection. It does NOT recompute the hash from the projection.
-        # In-process `object.__setattr__` on both fields is outside the threat
-        # model (the seal is a guard against public paths, not a cryptographic
-        # boundary).
-        projection = intent.static_policy_view_projection
-        if projection is None or projection.get("policy_corpus_hash") != intent.policy_corpus_hash:
-            raise AuthorityStateError("policy_corpus_hash no coincide con la proyección congelada del snapshot")
     events = store.events()
     provisional = AuthorityEvent(event_id or _uuid7(), len(events) + 1, events[-1].event_hash if events else None, intent, recorded_at_utc or datetime.now(timezone.utc), "", "sha256:" + "0" * 64)
     signature = sign(private_key, event_unsigned_bytes(provisional))
