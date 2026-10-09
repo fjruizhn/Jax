@@ -621,6 +621,7 @@ class ResumenDiario:
 _MAX_LEIDO = 16 * 1024 * 1024
 _MAX_RESUMEN_SEGMENTOS = 8
 _MAX_RESUMEN_CANDIDATOS = _MAX_RESUMEN_SEGMENTOS * 4
+_MAX_RESUMEN_ENTRADAS = 256
 _MAX_RESUMEN_LINEAS = 128
 _MAX_RESUMEN_MENSAJES = _MAX_RESUMEN_LINEAS * 2 + 1
 
@@ -699,7 +700,22 @@ def _partir_rotado(cola: Path, ruta: str, prefijo: bytes, resto: bytes) -> None:
                     os.fsync(fd)
                 finally:
                     os.close(fd)
-            destino = cola.parent / f"{cola.name}.{time.time_ns():020d}.procesando"
+            destino = None
+            for intento in range(16):
+                candidato = cola.parent / f"{cola.name}.{time.time_ns() + intento:020d}.procesando"
+                try:
+                    reservado = os.open(
+                        candidato,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        0o600,
+                    )
+                except FileExistsError:
+                    continue
+                os.close(reservado)
+                destino = candidato
+                break
+            if destino is None:
+                raise OSError("no se pudo reservar nombre para el resto del rotado")
             os.replace(temp_resto, destino)
             dirfd = os.open(cola.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
             try:
@@ -765,7 +781,13 @@ def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str,
             reclamados: list[str] = []
             bytes_reclamados = 0
             candidatos = 0
-            for p in sorted(cola.parent.iterdir(), key=lambda q: q.name):
+            with os.scandir(cola.parent) as entradas_dir:
+                entradas = []
+                for indice, entrada in enumerate(entradas_dir):
+                    if indice >= _MAX_RESUMEN_ENTRADAS:
+                        break
+                    entradas.append(entrada)
+            for p in sorted(entradas, key=lambda q: q.name):
                 m = patron.fullmatch(p.name)
                 if m is None:
                     continue
@@ -777,12 +799,12 @@ def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str,
                 if len(reclamados) >= _MAX_RESUMEN_SEGMENTOS:
                     break
                 try:
-                    st = os.lstat(p)
+                    st = os.lstat(p.path)
                     if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o777 != 0o600:
                         # Reclamar para cuarentena sin abrir ni seguir un enlace.
                         pass
                     elif st.st_size > _MAX_LEIDO:
-                        os.replace(p, str(p) + ".cuarentena")
+                        os.replace(p.path, p.path + ".cuarentena")
                         cuarentena += 1
                         continue
                     elif bytes_reclamados + st.st_size > _MAX_LEIDO:
@@ -793,9 +815,9 @@ def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str,
                     continue
                 base = p.name[:m.start(2)].rstrip(".") if m.group(2) is not None else p.name
                 nuevo = cola.parent / f"{base}.{os.getpid()}-{secrets.token_hex(8)}"
-                os.rename(p, nuevo)
+                os.rename(p.path, nuevo)
                 reclamados.append(str(nuevo))
-        if not reclamados:
+        if not reclamados and not cuarentena:
             return None
         buenos: list[str] = []
         partes: list[bytes] = []

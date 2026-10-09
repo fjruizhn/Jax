@@ -1020,6 +1020,23 @@ def test_un_rotado_sobredimensionado_va_a_cuarentena_y_no_bloquea_avisos_nuevos(
     assert len(list(tmp_path.glob("*.cuarentena"))) == 1
 
 
+def test_un_lote_solo_con_sobredimensionados_avisa_que_envio_a_cuarentena(tmp_path):
+    from jax.faro.aviso import _MAX_LEIDO
+
+    cola = tmp_path / "cola.jsonl"
+    rotado = tmp_path / "cola.jsonl.00000000000000000001.procesando"
+    rotado.write_bytes(b"x" * (_MAX_LEIDO + 1))
+    rotado.chmod(0o600)
+
+    resumen = resumen_diario(cola, host="hall9000")
+
+    assert resumen is not None
+    assert "en_cuarentena=1" in resumen.mensajes[0]
+    assert resumen.rotados == ()
+    assert confirmar_resumen(resumen)
+    assert len(list(tmp_path.glob("*.cuarentena"))) == 1
+
+
 def test_escritor_rota_antes_de_superar_el_presupuesto_por_segmento(tmp_path, monkeypatch):
     import jax.faro.aviso as modulo
 
@@ -1096,6 +1113,13 @@ def test_resumen_parte_un_segmento_al_llegar_al_limite_de_lineas_sin_perder_el_r
         tmp_path / "cola.jsonl.00000000000000000000.procesando",
         "aviso-0", "aviso-1", "aviso-2", "aviso-3", "aviso-4",
     )
+    decoy = tmp_path / "cola.jsonl.00000000000000000001.procesando"
+    decoy.write_text("decoy\n", encoding="utf-8")
+    decoy.chmod(0o600)
+    colision = tmp_path / "cola.jsonl.00000000000000000002.procesando"
+    colision.write_text("sentinel\n", encoding="utf-8")
+    colision.chmod(0o600)
+    monkeypatch.setattr(modulo.time, "time_ns", lambda: 2)
 
     primero = resumen_diario(cola, host="hall9000")
 
@@ -1103,8 +1127,10 @@ def test_resumen_parte_un_segmento_al_llegar_al_limite_de_lineas_sin_perder_el_r
     texto_primero = "\n".join(primero.mensajes)
     assert "aviso-0" in texto_primero and "aviso-1" in texto_primero
     assert "aviso-2" not in texto_primero
+    assert colision.read_text(encoding="utf-8") == "sentinel\n"
     assert len(primero.mensajes) <= modulo._MAX_RESUMEN_MENSAJES
     assert confirmar_resumen(primero)
+    colision.unlink()
     monkeypatch.setattr(modulo, "_MAX_RESUMEN_LINEAS", 128)
     monkeypatch.setattr(modulo, "_MAX_RESUMEN_MENSAJES", 257)
     segundo = resumen_diario(cola, host="hall9000")
