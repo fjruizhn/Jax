@@ -25,6 +25,7 @@ escritura ajena o que son un enlace) el servicio no arranca. Fallar al ENVIAR, e
 from __future__ import annotations
 
 import asyncio
+import bisect
 import errno
 import fcntl
 import io
@@ -41,7 +42,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -640,42 +640,39 @@ class ResumenDiario:
 _MAX_LEIDO = 16 * 1024 * 1024
 _MAX_RESUMEN_SEGMENTOS = 8
 _MAX_RESUMEN_CANDIDATOS = _MAX_RESUMEN_SEGMENTOS * 4
-_MAX_RESUMEN_ENTRADAS = 256
 _MAX_RESUMEN_LINEAS = 128
 _MAX_RESUMEN_MENSAJES = _MAX_RESUMEN_LINEAS * 2 + 1
-_MAX_RESUMEN_SCANNERS = 32
-_RESUMEN_SCANNERS: "OrderedDict[str, os.ScandirIterator]" = OrderedDict()
-_RESUMEN_SCANNERS_LOCK = threading.Lock()
 
 
-def _siguiente_pagina_directorio(cola: Path) -> list[os.DirEntry]:
-    """Lee una página acotada y conserva la posición para la llamada siguiente."""
-    directorio = cola.parent
-    clave = os.path.abspath(directorio)
-    with _RESUMEN_SCANNERS_LOCK:
-        scanner = _RESUMEN_SCANNERS.get(clave)
-        if scanner is None:
-            scanner = os.scandir(directorio)
-            _RESUMEN_SCANNERS[clave] = scanner
-            while len(_RESUMEN_SCANNERS) > _MAX_RESUMEN_SCANNERS:
-                _, expirado = _RESUMEN_SCANNERS.popitem(last=False)
-                expirado.close()
-        else:
-            _RESUMEN_SCANNERS.move_to_end(clave)
-        pagina: list[os.DirEntry] = []
-        try:
-            for _ in range(_MAX_RESUMEN_ENTRADAS):
+def _nombres_candidatos_resumen(cola: Path, patron: "re.Pattern[str]", ahora: float,
+                                lease_s: float) -> list[str]:
+    """Devuelve los nombres elegibles mas antiguos con memoria acotada.
+
+    La enumeracion completa ocurre fuera del candado. No se guarda posicion
+    entre procesos: cada llamada vuelve a elegir por nombre, que incluye una
+    marca de tiempo ordenable, y el reclamo/eliminacion durable hace avanzar
+    la cola.
+    """
+    nombres: list[str] = []
+    with os.scandir(cola.parent) as entradas:
+        for entrada in entradas:
+            nombre = entrada.name
+            coincidencia = patron.fullmatch(nombre)
+            if coincidencia is None:
+                continue
+            if coincidencia.group(2) is not None:
                 try:
-                    pagina.append(next(scanner))
-                except StopIteration:
-                    scanner.close()
-                    _RESUMEN_SCANNERS.pop(clave, None)
-                    break
-        except BaseException:
-            scanner.close()
-            _RESUMEN_SCANNERS.pop(clave, None)
-            raise
-        return pagina
+                    if ahora - os.lstat(entrada.path).st_ctime < lease_s:
+                        continue
+                except OSError:
+                    continue
+            posicion = bisect.bisect_left(nombres, nombre)
+            if posicion >= _MAX_RESUMEN_CANDIDATOS:
+                continue
+            nombres.insert(posicion, nombre)
+            if len(nombres) > _MAX_RESUMEN_CANDIDATOS:
+                nombres.pop()
+    return nombres
 
 
 class _PresupuestoAgotado(OSError):
@@ -793,8 +790,10 @@ def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str,
     `ResumenDiario` (mensajes numerados 1/n + token) o None si no hay nada o no
     se pudo trabajar (y entonces no se borra NADA).
 
-    Bajo el candado rota la cola a `<cola>.<ts>.procesando` ANTES de leer y
-    RECLAMA un lote acotado de rotados (los renombra a `….procesando.<pid>-<token>`): dos
+    Bajo el candado rota la cola a `<cola>.<ts>.procesando` ANTES de leer. Fuera
+    del candado enumera el directorio y selecciona los candidatos mas antiguos
+    con memoria acotada; bajo el candado RECLAMA un lote acotado de rotados (los
+    renombra a `….procesando.<pid>-<token>`): dos
     resumidores simultaneos no se pisan, el segundo no ve lo ya reclamado. Un
     reclamo con mas de `lease_s` segundos sin confirmar (proceso caido) se puede
     reclamar de nuevo. Los archivos reclamados NO se borran aqui: el llamador
@@ -809,34 +808,39 @@ def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str,
     envuelven en `asyncio.to_thread`."""
     try:
         cuarentena = 0
+        cola = Path(ruta_cola)
         with _Candado(ruta_cola):
-            cola = Path(ruta_cola)
             if cola.exists() or cola.is_symlink():
                 os.replace(cola, _reservar_rotado(cola))   # rotar ANTES de leer
-            patron = _patron_rotado(cola.name)
-            ahora = time.time()
+        patron = _patron_rotado(cola.name)
+        ahora = time.time()
+        nombres = _nombres_candidatos_resumen(cola, patron, ahora, lease_s)
+        with _Candado(ruta_cola):
             reclamados: list[str] = []
             bytes_reclamados = 0
             candidatos = 0
-            entradas = _siguiente_pagina_directorio(cola)
-            for p in sorted(entradas, key=lambda q: q.name):
-                m = patron.fullmatch(p.name)
+            for nombre in nombres:
+                p = cola.parent / nombre
+                m = patron.fullmatch(nombre)
                 if m is None:
                     continue
-                if m.group(2) is not None and ahora - os.lstat(p).st_ctime < lease_s:
-                    continue                    # reclamado por otro resumidor, con lease vigente
+                try:
+                    if m.group(2) is not None and ahora - os.lstat(p).st_ctime < lease_s:
+                        continue                    # reclamado por otro resumidor, con lease vigente
+                except OSError:
+                    continue
                 candidatos += 1
                 if candidatos > _MAX_RESUMEN_CANDIDATOS:
                     break
                 if len(reclamados) >= _MAX_RESUMEN_SEGMENTOS:
                     break
                 try:
-                    st = os.lstat(p.path)
+                    st = os.lstat(p)
                     if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o777 != 0o600:
                         # Reclamar para cuarentena sin abrir ni seguir un enlace.
                         pass
                     elif st.st_size > _MAX_LEIDO:
-                        os.replace(p.path, p.path + ".cuarentena")
+                        os.replace(p, str(p) + ".cuarentena")
                         cuarentena += 1
                         continue
                     elif bytes_reclamados + st.st_size > _MAX_LEIDO:
@@ -847,7 +851,7 @@ def resumen_diario(ruta_cola: "os.PathLike[str] | str", *, host: str,
                     continue
                 base = p.name[:m.start(2)].rstrip(".") if m.group(2) is not None else p.name
                 nuevo = cola.parent / f"{base}.{os.getpid()}-{secrets.token_hex(8)}"
-                os.rename(p.path, nuevo)
+                os.rename(p, nuevo)
                 reclamados.append(str(nuevo))
         if not reclamados and not cuarentena:
             return None

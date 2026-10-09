@@ -1078,23 +1078,50 @@ def test_rotacion_inicial_no_sobrescribe_si_el_reloj_repite_nombre(tmp_path, mon
     assert confirmar_resumen(resumen)
 
 
-def test_busqueda_por_paginas_avanza_mas_alla_del_prefijo_de_entradas_ajenas(tmp_path, monkeypatch):
+def test_resumen_avanza_en_mas_de_32_directorios_con_paginas_ajenas(tmp_path, monkeypatch):
     import jax.faro.aviso as modulo
 
-    monkeypatch.setattr(modulo, "_MAX_RESUMEN_ENTRADAS", 1)
-    for indice in range(3):
-        (tmp_path / f"ajeno-{indice}").write_text("irrelevante", encoding="utf-8")
-    _rotado_con_avisos(tmp_path / "cola.jsonl.00000000000000000001.procesando", "alcanza-el-cursor")
-    cola = tmp_path / "cola.jsonl"
+    scandir_real = os.scandir
 
-    resumen = None
-    for _ in range(8):
-        resumen = resumen_diario(cola, host="hall9000")
-        if resumen is not None:
-            break
-    assert resumen is not None
-    assert "alcanza-el-cursor" in "\n".join(resumen.mensajes)
-    assert confirmar_resumen(resumen)
+    class _ScandirOrdenado:
+        def __init__(self, entradas):
+            self._entradas = iter(entradas)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self._entradas)
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.close()
+
+    directorios = {tmp_path / f"cola-{indice:02d}" for indice in range(33)}
+
+    def scandir_ordenado(ruta):
+        if pathlib.Path(ruta) in directorios:
+            return _ScandirOrdenado(sorted(scandir_real(ruta), key=lambda entrada: entrada.name))
+        return scandir_real(ruta)
+
+    monkeypatch.setattr(modulo.os, "scandir", scandir_ordenado)
+
+    for indice, directorio in enumerate(sorted(directorios)):
+        directorio.mkdir()
+        for entrada in range(257):
+            (directorio / f"ajeno-{entrada:04d}").write_text("irrelevante", encoding="utf-8")
+        _rotado_con_avisos(directorio / "cola.jsonl.00000000000000000001.procesando", f"cola-{indice:02d}")
+
+        resumen = modulo.resumen_diario(directorio / "cola.jsonl", host="hall9000")
+
+        assert resumen is not None
+        assert f"cola-{indice:02d}" in "\n".join(resumen.mensajes)
+        assert confirmar_resumen(resumen)
 
 
 def test_escritor_rota_antes_de_superar_el_presupuesto_por_segmento(tmp_path, monkeypatch):
