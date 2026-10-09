@@ -3,7 +3,7 @@
 ## Estado actual
 
 - #379 (`7cf27a09e00f6fae036bb98dae862bd7dcc53d8f`) fue aprobado por auditoría Tier 3 y pasó todos los checks del PR. Se integró como `d0c8a68f131849fb298c8cda9b5519e304088e11`. El `post-merge-guard` sigue esperando la corrida `push` de `tests-puros`; no declarar cerrado ni avanzar a otra integración hasta recibir su resultado.
-- #373 conserva los commits de provider, el cierre de subclases hostiles y el contexto de leases compartidos. La rama local `codex/faro-373-post379` incorpora el master posterior a #379; conflicto de merge resuelto localmente, pendiente de crear commit y actualizar TRASPASO con el SHA resultante. No se ha publicado.
+- #373 conserva los commits de provider, el cierre de subclases hostiles y el contexto de leases compartidos. La rama local `codex/faro-373-post379` incorpora el master posterior a #379; conflicto resuelto y commit local `f8d1900b`. No se ha publicado.
 - Piso combinado de Identity Foundation Shadow medido con el comando exacto del workflow en Python 3.14.4: `816 passed`, cero skipped. El workflow contiene la lista `test_rule_authority_providers.py` tanto en el paso principal como en el paso del piso; `ci/pisos.json` y `docs/ci/pisos.md` reflejan 816.
 - Pruebas locales tras combinar el árbol: 273 tests de providers y ataques, más el paso completo de Identity Shadow (816); JSON/YAML y `git diff --check` correctos.
 - #371 está reconstruido limpiamente en `/home/fruiz/wt/jax-faro-f11-paso4-rebuild`, commit `dbb656a0831e0dadae8261f0024da16038c6521f`, basado en el #373 anterior a combinar #379. Porta modelos/store y solo los dos archivos de cola; mantiene `store.record()` dentro de `leases_de_emision`. Falta rebasarlo sobre el #373 final, medir pisos, auditar y ejecutar CI.
