@@ -1,6 +1,6 @@
-"""El Faro, paso 0.3c (R3): el lanzador de jaula. Arma el argv de bwrap del plan: la jaula recibe por BIND DE
-ARCHIVO solo SU socket y SU token (y el rele, de solo lectura); nunca el directorio de sockets. Corre con un uid
-propio, distinto del de `faro` y del de root.
+"""El Faro, paso 0.3c (R3) + 0.6/R-2: el lanzador de jaula. Arma el argv de bwrap del plan: la jaula recibe
+por BIND DE ARCHIVO solo SU socket y SU token (y el rele, de solo lectura); nunca el directorio de
+sockets. Corre con un uid propio, distinto del de `faro` y del de root.
 
 MODELO (medido en hall9000, bubblewrap 0.11.1): el uid de la jaula lo pone la ELEVACION (`JAX_FARO_JAULA_ELEVAR`,
 con `{uid}`), no el argv. Un bwrap corriendo como root NO puede cambiar de uid dentro: el perfil de AppArmor
@@ -8,12 +8,17 @@ con `{uid}`), no el argv. Un bwrap corriendo como root NO puede cambiar de uid d
 sin privilegios ya corre con el uid de quien lo lanza (su namespace de usuario no cambia el uid que ve el
 kernel). Por eso el argv NO lleva `setpriv` ni `--cap-add`, y la configuracion exige `{uid}` en la elevacion.
 
+LA UNIDAD (0.6/R-2): el lanzador exige el gestor de unidades; `lanzar` arranca `faro-jaula-u<uid>.service`
+con el argv completo (elevacion + bwrap) DENTRO, y `jaula_viva` pregunta al cgroup, no al `Popen`.
+
 Aqui, sin bwrap ni uids reales: la forma exacta del argv, la validacion del uid, la configuracion que falla
-cerrado, el orden bitacora -> arranque y que el ejemplo versionado (`ops/faro/bwrap-ejemplo.txt`) no se desvie.
-Con bwrap real y uids reales (sudo): `test_faro_jaula_real.py`.
+cerrado, el orden bitacora -> arranque y que el ejemplo versionado (`ops/faro/bwrap-ejemplo.txt`) no se
+desvie. Con el user manager REAL de systemd: la prueba al final. Con bwrap real y uids reales (sudo):
+`test_faro_jaula_real.py`.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -24,11 +29,48 @@ from jax.faro.bitacora import Bitacora
 from jax.faro.config import ConfigFaroInvalida
 from jax.faro.jaula import (ConfigJaula, DESTINO_RELAY, DESTINO_SOCKET, DESTINO_TOKEN, LanzadorJaula, argv_montajes,
                             ejemplo, validar_uid_jaula)
+from jax.faro.scope import EstadoUnidad
 from tests._faro_utils import corre, ejecucion
 
 RAIZ = Path(__file__).resolve().parents[1]
 UID_JAULA = 50001
 SOCKET_DIR = "/run/faro"
+
+
+class ScopeDoble:
+    """El gestor de unidades de mentira: registra lo que le piden arrancar y devuelve un proceso de mentira."""
+
+    def __init__(self, *, error: Exception | None = None, proceso=None, estados: dict | None = None):
+        self.arrancados: list[tuple[int, tuple[str, ...]]] = []
+        self.error = error
+        self.proceso = proceso if proceso is not None else _Proc(0)
+        self.estados = estados or {}
+        self.muertes: list[int] = []
+
+    async def arrancar(self, uid, comando):
+        if self.error is not None:
+            raise self.error
+        self.arrancados.append((uid, tuple(comando)))
+        return self.proceso
+
+    async def estado(self, uid):
+        return self.estados.get(uid, EstadoUnidad.EMPTY)
+
+    async def matar(self, uid):
+        self.muertes.append(uid)
+
+    async def esperar_vacio(self, uid, *, plazo_s=None):
+        return self.estados.get(uid, EstadoUnidad.EMPTY)
+
+
+class _Proc:
+    def __init__(self, rc, demora=0.0):
+        self.rc, self.returncode, self.demora = rc, None, demora
+
+    async def wait(self):
+        await asyncio.sleep(self.demora)
+        self.returncode = self.rc
+        return self.rc
 
 
 def _rutas(run_id="run-1"):
@@ -50,9 +92,9 @@ def _cfg(bwrap, elevar=ELEVAR):
     return ConfigJaula(bwrap=bwrap, elevar=tuple(elevar))
 
 
-def _lanzador(bwrap, registros=None, **kw):
+def _lanzador(bwrap, registros=None, scope=None, **kw):
     bit = Bitacora(emisores=[registros.append] if registros is not None else [])
-    return LanzadorJaula(_cfg(bwrap), bit, **kw)
+    return LanzadorJaula(_cfg(bwrap), bit, scope if scope is not None else ScopeDoble(), **kw)
 
 
 def _pares(argv, opcion):
@@ -200,14 +242,15 @@ def test_las_rutas_que_se_montan_son_absolutas_y_sin_nul(bwrap, sock, tok):
 
 
 def test_el_argv_completo_antepone_la_elevacion_y_el_bwrap_configurados(bwrap):
-    l = LanzadorJaula(ConfigJaula(bwrap=bwrap, elevar=ELEVAR), Bitacora(emisores=[]))
+    l = LanzadorJaula(ConfigJaula(bwrap=bwrap, elevar=ELEVAR), Bitacora(emisores=[]), ScopeDoble())
     completo = l.argv_completo(ejecucion(uid_esperado=UID_JAULA), *_rutas(), ["/usr/bin/true"])
     assert completo[:6] == ["/usr/bin/sudo", "-n", "-u", f"#{UID_JAULA}", "--", str(bwrap)]
     assert completo[6:] == l.argv(ejecucion(uid_esperado=UID_JAULA), *_rutas(), ["/usr/bin/true"])
 
 
 def test_la_elevacion_lleva_el_uid_de_la_jaula_en_cada_aparicion_de_uid(bwrap):
-    l = LanzadorJaula(ConfigJaula(bwrap=bwrap, elevar=("/usr/bin/ayudante", "--uid={uid}", "--gid", "{uid}")), Bitacora(emisores=[]))
+    l = LanzadorJaula(ConfigJaula(bwrap=bwrap, elevar=("/usr/bin/ayudante", "--uid={uid}", "--gid", "{uid}")),
+                      Bitacora(emisores=[]), ScopeDoble())
     completo = l.argv_completo(ejecucion(uid_esperado=UID_JAULA), *_rutas(), ["/usr/bin/true"])
     assert completo[:4] == ["/usr/bin/ayudante", f"--uid={UID_JAULA}", "--gid", str(UID_JAULA)]
 
@@ -238,25 +281,33 @@ def _srv(uid=UID_JAULA, **kw):
     return _SrvFalso(ej, *_rutas(ej.run_id))
 
 
-def test_lanzar_anota_antes_de_arrancar_y_arranca_con_el_argv_completo_y_un_entorno_limpio(bwrap):
-    orden = []
-    llamadas = []
+def test_r2_sin_gestor_de_unidades_no_hay_lanzador(bwrap):
+    with pytest.raises(ConfigFaroInvalida, match="scope|unidad"):
+        LanzadorJaula(_cfg(bwrap), Bitacora(emisores=[]), None)
 
-    async def crear_proceso(*argv, **kw):
-        orden.append("arranque")
-        llamadas.append((argv, kw))
-        return "proceso"
+
+def test_lanzar_anota_antes_de_arrancar_y_arranca_la_unidad_con_el_argv_completo(bwrap):
+    orden = []
+
+    class _ScopeOrden(ScopeDoble):
+        async def arrancar(self, uid, comando):
+            orden.append("arranque")
+            return await super().arrancar(uid, comando)
+
+    scope = _ScopeOrden(proceso="proceso")
 
     async def caso():
         bit = Bitacora(emisores=[lambda r: orden.append(r["evento"])])
-        l = LanzadorJaula(_cfg(bwrap), bit, crear_proceso=crear_proceso)
+        l = LanzadorJaula(_cfg(bwrap), bit, scope)
         return await l.lanzar(_srv(), ["/usr/bin/python3", "-c", "pass"])
     assert corre(caso()) == "proceso"
     assert orden == ["jaula_lanzada", "arranque"]
-    argv, kw = llamadas[0]
-    assert list(argv[:6]) == ["/usr/bin/sudo", "-n", "-u", f"#{UID_JAULA}", "--", str(bwrap)] and "/usr/bin/setpriv" not in argv
-    assert set(kw["env"]) == {"PATH"} and kw["start_new_session"] is True
-    assert kw["stdin"] is not None and "shell" not in kw
+    (uid, argv), = scope.arrancados                            # UNA unidad, del uid de la jaula
+    assert uid == UID_JAULA
+    assert argv[:6] == ("/usr/bin/sudo", "-n", "-u", f"#{UID_JAULA}", "--", str(bwrap))
+    assert "/usr/bin/setpriv" not in argv
+    assert list(argv) == LanzadorJaula(_cfg(bwrap), Bitacora(emisores=[]), ScopeDoble()).argv_completo(
+        _srv().ejecucion, *_rutas(), ["/usr/bin/python3", "-c", "pass"])
 
 
 def test_lo_anotado_dice_quien_y_con_que_uid_y_no_lleva_el_token(bwrap, tmp_path):
@@ -264,11 +315,8 @@ def test_lo_anotado_dice_quien_y_con_que_uid_y_no_lleva_el_token(bwrap, tmp_path
     token = tmp_path / "x.token"
     token.write_text("TOKEN-SECRETO\n")
 
-    async def crear_proceso(*a, **k):
-        return None
-
     async def caso():
-        l = _lanzador(bwrap, registros, crear_proceso=crear_proceso)
+        l = _lanzador(bwrap, registros)
         srv = _srv()
         srv.ruta_token = token
         await l.lanzar(srv, ["/usr/bin/true"])
@@ -280,30 +328,25 @@ def test_lo_anotado_dice_quien_y_con_que_uid_y_no_lleva_el_token(bwrap, tmp_path
 
 
 def test_si_la_bitacora_no_puede_anotar_no_se_lanza_nada(bwrap):
-    lanzado = []
-
-    async def crear_proceso(*a, **k):
-        lanzado.append(1)
+    scope = ScopeDoble()
 
     def rota(registro):
         raise OSError("sin bitacora")
 
     async def caso():
-        l = LanzadorJaula(_cfg(bwrap), Bitacora(emisores=[rota]), crear_proceso=crear_proceso)
+        l = LanzadorJaula(_cfg(bwrap), Bitacora(emisores=[rota]), scope)
         await l.lanzar(_srv(), ["/usr/bin/true"])
     with pytest.raises(OSError):
         corre(caso())
-    assert lanzado == []
+    assert scope.arrancados == []
 
 
-def test_si_el_arranque_falla_se_anota_y_se_propaga(bwrap):
+def test_si_el_arranque_de_la_unidad_falla_se_anota_y_se_propaga(bwrap):
     registros = []
-
-    async def crear_proceso(*a, **k):
-        raise FileNotFoundError("no existe sudo")
+    scope = ScopeDoble(error=FileNotFoundError("no existe sudo"))
 
     async def caso():
-        await _lanzador(bwrap, registros, crear_proceso=crear_proceso).lanzar(_srv(), ["/usr/bin/true"])
+        await _lanzador(bwrap, registros, scope=scope).lanzar(_srv(), ["/usr/bin/true"])
     with pytest.raises(FileNotFoundError):
         corre(caso())
     assert [r["evento"] for r in registros] == ["jaula_lanzada", "jaula_fallo"]
@@ -311,40 +354,20 @@ def test_si_el_arranque_falla_se_anota_y_se_propaga(bwrap):
 
 
 def test_con_un_uid_invalido_no_se_anota_ni_se_arranca_nada(bwrap):
-    registros, lanzado = [], []
-
-    async def crear_proceso(*a, **k):
-        lanzado.append(1)
+    registros = []
+    scope = ScopeDoble()
 
     async def caso():
-        await _lanzador(bwrap, registros, crear_proceso=crear_proceso).lanzar(_srv(uid=0), ["/usr/bin/true"])
+        await _lanzador(bwrap, registros, scope=scope).lanzar(_srv(uid=0), ["/usr/bin/true"])
     with pytest.raises(ConfigFaroInvalida):
         corre(caso())
-    assert registros == [] and lanzado == []
+    assert registros == [] and scope.arrancados == []
 
 
-def test_lanzar_de_verdad_un_proceso_hijo_con_un_bwrap_falso(bwrap, tmp_path):
-    """Sin bwrap real: un `bwrap` de mentira que vuelca sus argumentos. Ejercita el arranque REAL (subproceso, sin
-    shell, entorno limpio, sesion propia) y que la elevacion del config se antepone."""
-    salida = tmp_path / "args.txt"
-    falso = tmp_path / "bwrap-falso"
-    falso.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {salida}\nenv > {tmp_path}/env.txt\n")
-    falso.chmod(0o755)
-    elevador = tmp_path / "elevador"
-    elevador.write_text(f"#!/bin/sh\necho \"$1\" > {tmp_path}/uid-pedido.txt\nshift\nexec \"$@\"\n")
-    elevador.chmod(0o755)
-
-    async def caso():
-        l = LanzadorJaula(ConfigJaula(bwrap=falso, elevar=(str(elevador), "{uid}")), Bitacora(emisores=[]))
-        p = await l.lanzar(_srv(), ["/usr/bin/true"])
-        return await p.wait()
-    assert corre(caso()) == 0
-    args = salida.read_text().splitlines()
-    assert "--bind" in args and DESTINO_SOCKET in args and "/usr/bin/setpriv" not in args
-    assert (tmp_path / "uid-pedido.txt").read_text().strip() == str(UID_JAULA)           # la elevacion recibio el uid de la jaula
-    entorno = dict(l.split("=", 1) for l in (tmp_path / "env.txt").read_text().splitlines() if "=" in l)
-    assert set(entorno) <= {"PATH", "PWD", "SHLVL", "_", "OLDPWD"}                        # nada heredado del servicio
-    assert os.environ.get("HOME") not in entorno.values()
+# La prueba con user manager REAL (`lanzar` -> systemd-run -> unidad verificada -> jaula_viva por el
+# cgroup -> kill) vive en tests/test_faro_scope.py::TestUserManagerReal: aqui no puede estar porque el
+# job `faro-fase0` de CI exige CERO saltados y el runner de GitHub no tiene user manager (limitacion
+# registrada en el plan 0.6, paso 3).
 
 
 # --------------------------------------------------------------------------- #
@@ -426,27 +449,11 @@ def test_major2_el_ejemplo_trae_los_dos_perfiles():
 
 # -- MINOR 7: el codigo de salida ---------------------------------------------------------------
 
-class _Proc:
-    def __init__(self, rc, demora=0.0):
-        self.rc, self.returncode, self.demora = rc, None, demora
-
-    async def wait(self):
-        await asyncio.sleep(self.demora)
-        self.returncode = self.rc
-        return self.rc
-
-
-import asyncio  # noqa: E402
-
-
 def test_minor7_se_anota_cuando_la_jaula_termina_con_su_codigo_de_salida(bwrap):
     registros = []
 
-    async def crear_proceso(*a, **k):
-        return _Proc(7, 0.05)
-
     async def caso():
-        l = _lanzador(bwrap, registros, crear_proceso=crear_proceso)
+        l = _lanzador(bwrap, registros, scope=ScopeDoble(proceso=_Proc(7, 0.05)))
         await l.lanzar(_srv(), ["/usr/bin/true"])
         await l.esperar_terminos()
     corre(caso())
@@ -459,36 +466,30 @@ def test_minor7_si_no_se_puede_anotar_el_termino_no_se_cae_nada(bwrap):
         if r["evento"] == "jaula_termino":
             raise OSError("sin bitacora")
 
-    async def crear_proceso(*a, **k):
-        return _Proc(0)
-
     async def caso():
-        l = LanzadorJaula(_cfg(bwrap), Bitacora(emisores=[emisor]), crear_proceso=crear_proceso)
+        l = LanzadorJaula(_cfg(bwrap), Bitacora(emisores=[emisor]), ScopeDoble(proceso=_Proc(0)))
         await l.lanzar(_srv(), ["/usr/bin/true"])
         await l.esperar_terminos()
     corre(caso())
 
 
-def test_minor2_el_lanzador_sabe_si_la_jaula_de_un_uid_sigue_viva(bwrap):
-    procs = [_Proc(0, 0.2)]
-
-    async def crear_proceso(*a, **k):
-        return procs.pop()
+def test_minor2_y_r2_el_lanzador_sabe_si_la_unidad_de_un_uid_sigue_viva_y_unknown_retiene(bwrap):
+    scope = ScopeDoble(estados={UID_JAULA: EstadoUnidad.LIVE, UID_JAULA + 1: EstadoUnidad.UNKNOWN})
 
     async def caso():
-        l = _lanzador(bwrap, crear_proceso=crear_proceso)
-        assert not l.jaula_viva(UID_JAULA)
-        await l.lanzar(_srv(), ["/usr/bin/true"])
-        viva = l.jaula_viva(UID_JAULA), l.jaula_viva(UID_JAULA + 1)
-        await l.esperar_terminos()
-        return viva, l.jaula_viva(UID_JAULA)
-    assert corre(caso()) == ((True, False), False)
+        l = _lanzador(bwrap, scope=scope)
+        viva = await l.jaula_viva(UID_JAULA), await l.jaula_viva(UID_JAULA + 1), await l.jaula_viva(UID_JAULA + 2)
+        scope.estados[UID_JAULA] = EstadoUnidad.EMPTY                 # murio hasta el ultimo proceso
+        scope.estados[UID_JAULA + 1] = EstadoUnidad.EMPTY
+        return viva, await l.jaula_viva(UID_JAULA), await l.jaula_viva(UID_JAULA + 1)
+    assert corre(caso()) == ((True, True, False), False, False)      # UNKNOWN tambien retiene (R-2)
 
 
 # -- MINOR 8: rango y sudoers --------------------------------------------------------------------
 
 def test_minor8_el_lanzador_revalida_el_rango_de_uids_de_jaula(bwrap):
-    l = LanzadorJaula(_cfg(bwrap), Bitacora(emisores=[]), uid_min=50000, uid_max=50010, uids_prohibidos={50005})
+    l = LanzadorJaula(_cfg(bwrap), Bitacora(emisores=[]), ScopeDoble(), uid_min=50000, uid_max=50010,
+                     uids_prohibidos={50005})
     l.argv(ejecucion(uid_esperado=50001), *_rutas(), ["/usr/bin/true"])
     for uid in (49999, 50011, 1001, 50005):
         with pytest.raises(ConfigFaroInvalida):
@@ -498,7 +499,7 @@ def test_minor8_el_lanzador_revalida_el_rango_de_uids_de_jaula(bwrap):
 def test_minor8_el_rango_del_lanzador_sale_de_la_configuracion_del_control(bwrap):
     from jax.faro.control import ConfigControl
     cc = ConfigControl(control_dir=Path("/x"), orquestador_uid=990, jaula_uid_min=50000, jaula_uid_max=50010, solo_pruebas_mismo_uid=True)
-    l = LanzadorJaula.desde_control(_cfg(bwrap), Bitacora(emisores=[]), cc)
+    l = LanzadorJaula.desde_control(_cfg(bwrap), Bitacora(emisores=[]), ScopeDoble(), cc)
     with pytest.raises(ConfigFaroInvalida):
         l.argv(ejecucion(uid_esperado=990), *_rutas(), ["/usr/bin/true"])
     with pytest.raises(ConfigFaroInvalida):

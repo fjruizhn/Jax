@@ -5,6 +5,16 @@ Estado: plan de implementación
 Rama: `codex/faro-r2`  
 Base: `origin/master@709237f901e8ec8840f6b2b39a1a2ce88682674a`
 
+## Estado
+
+Implementación lista en `codex/faro-r2`; pendiente reconciliar la base actual de `master`, revisión adversarial,
+auditoría Tier 3 del SHA exacto e integración por PR. No se instala ni despliega en este trabajo.
+
+Verificado el 2026-10-09 en systemd 259: `tests/test_faro_scope.py` — 102 passed, incluidas cuatro pruebas
+reales del user manager; comando exacto de CI `faro-fase0` — 834 passed, 4 deselected, cero skips. El caso
+`TasksMax=4K` quedó rechazado: systemd rechaza ese sufijo con `Invalid argument`; la configuración ahora
+acepta solo enteros positivos.
+
 ## Objetivo
 
 Cada ejecución lanzada por Faro debe correr dentro de un cgroup exclusivo con límites explícitos de memoria, CPU y tareas. La retención de su uid debe reflejar la población de ese cgroup, incluso si muere el proceso cliente o se reinicia el servicio. Todo estado que no se pueda verificar mantiene el uid ocupado. Al conectar `LanzadorJaula.lanzar` al canal de `Servicio`, el proveedor de liveness será obligatorio.

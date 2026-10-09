@@ -35,6 +35,7 @@ from jax.faro.bitacora import Bitacora
 from jax.faro.config import ConfigPuerto
 from jax.faro.control import ConfigControl, ServidorControl
 from jax.faro.jaula import ConfigJaula, LanzadorJaula, argv_montajes
+from jax.faro.scope import EstadoUnidad
 from jax.faro.transporte import ServidorPuerto
 from tests._faro_utils import RAIZ, corre, ejecucion, paquete_listo, puerto
 
@@ -230,12 +231,27 @@ except (ConnectionResetError, BrokenPipeError):
 """
 
 
+class _ScopeSiempreVacio:
+    """Doble del gestor de unidades para las pruebas de uids reales del CANAL: aqui no se ejercita 0.6,
+    solo SO_PEERCRED; las unidades no existen y el doble siempre lo confirma (EMPTY)."""
+
+    async def estado(self, uid):
+        return EstadoUnidad.EMPTY
+
+    async def matar(self, uid):
+        return None
+
+    async def esperar_vacio(self, uid, *, plazo_s=None):
+        return EstadoUnidad.EMPTY
+
+
 def _control(mundo, registros):
     d = mundo.base / "control"
     d.mkdir(mode=0o750)
     cfg = ConfigControl(control_dir=d, orquestador_uid=NOBODY, jaula_uid_min=20, jaula_uid_max=40, plazo_s=5.0)
     bit = Bitacora(emisores=[registros.append])
-    return ServidorControl(cfg, lambda ej: ServidorPuerto(mundo.cfg_puerto, ej, mundo.cargado, bit), bit)
+    return ServidorControl(cfg, lambda ej: ServidorPuerto(mundo.cfg_puerto, ej, mundo.cargado, bit), bit,
+                           _ScopeSiempreVacio())
 
 
 def test_el_canal_de_control_autentica_por_el_uid_real_del_kernel(mundo, requiere_sudo):
@@ -273,6 +289,10 @@ def test_un_uid_de_jaula_real_no_abre_el_socket_de_control(mundo, requiere_sudo)
 # --------------------------------------------------------------------------- #
 
 def test_lanzar_arranca_el_proceso_con_el_kernel_uid_de_la_jaula(mundo, requiere_sudo):
+    """La ELEVACION aislada (0.3c, sin unidad): el uid del kernel lo pone la elevacion, no el argv. El
+    camino completo CON unidad (lanzar -> systemd-run -> unidad verificada -> kill) esta en
+    `tests/test_faro_scope.py::TestUserManagerReal`, que necesita user manager y aqui no puede estar: el
+    job `faro-jaula` de CI exige cero saltados y el runner no tiene user manager."""
     falso = mundo.base / "bwrap-falso"
     falso.write_text("#!/usr/bin/python3\nimport os\nprint(os.getuid(), os.getgid())\n")
     falso.chmod(0o755)
@@ -280,8 +300,12 @@ def test_lanzar_arranca_el_proceso_con_el_kernel_uid_de_la_jaula(mundo, requiere
 
     async def caso():
         bit = Bitacora(emisores=[])
+        l = LanzadorJaula(cfg, bit, _ScopeSiempreVacio())
         async with ServidorPuerto(mundo.cfg_puerto, ejecucion(uid_esperado=JAULA), mundo.cargado, bit) as srv:
-            p = await LanzadorJaula(cfg, bit).lanzar(srv, ["/usr/bin/true"])
+            argv = l.argv_completo(srv.ejecucion, str(srv.ruta_socket), str(srv.ruta_token), ["/usr/bin/true"])
+            p = await asyncio.create_subprocess_exec(
+                *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE)
             salida, _ = await asyncio.wait_for(p.communicate(), 20)
             return salida.decode().split()
     uid, _gid = corre(caso())

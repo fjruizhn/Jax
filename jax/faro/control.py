@@ -28,6 +28,14 @@ creacion, la creacion se DESHACE: no hay ejecucion sin registro. Un rechazo se m
 
 D-4: no hay tope de agentes ni de ejecuciones concurrentes aqui; el unico limite es el rango de uids de jaula
 (un recurso del sistema operativo, que se dimensiona grande) y la memoria del Puerto (su presupuesto).
+
+R-2 / 0.6: LA UNIDAD MANDA. Cada jaula corre en su unidad `faro-jaula-u<uid>.service` (scope.py); el
+estado del uid se consulta a systemd SIEMPRE, aun cuando el uid no aparezca en los mapas en memoria (un
+reinicio del Faro no autoriza reutilizar un uid con cgroup superviviente). Solo `EstadoUnidad.EMPTY`
+libera o admite un uid; `LIVE` y `UNKNOWN` lo rechazan (fallo cerrado: lo que no se puede concluir,
+retiene). El proveedor de unidades es OBLIGATORIO: sin el no existe el canal de control. El cierre de una
+ejecucion conserva el uid, revoca su Puerto, mata TODA su unidad (hijos y nietos, sin tocar hermanas) y
+solo suelta el uid tras confirmar la unidad/cgroup vacio.
 """
 from __future__ import annotations
 
@@ -47,6 +55,7 @@ from pathlib import Path
 from .bitacora import Bitacora
 from .config import ConfigFaroInvalida
 from .identidad import RE_TENANT, Ejecucion
+from .scope import EstadoUnidad
 from .transporte import ServidorPuerto, credenciales_del_par
 
 logger = logging.getLogger(__name__)
@@ -209,19 +218,25 @@ class ServidorControl:
     """`crear_puerto(ejecucion) -> ServidorPuerto` es el del `Servicio` (con su bitacora y su UNICO presupuesto)."""
 
     def __init__(self, cfg: ConfigControl, crear_puerto: Callable[[Ejecucion], ServidorPuerto], bitacora: Bitacora,
-                 *, leer_credenciales: Callable = credenciales_del_par, jaula_viva: Callable[[int], bool] | None = None):
-        """`jaula_viva(uid) -> bool` (gancho para el lanzador, y para el scope de 0.6): mientras devuelva True, el
-        uid de una ejecucion CERRADA no se reasigna (un proceso suyo podria seguir vivo con ese uid)."""
+                 scope_manager, *, leer_credenciales: Callable = credenciales_del_par):
+        """`scope_manager` es el gestor de unidades de 0.6 (scope.py) y es OBLIGATORIO (R-2): sin el no se
+        puede saber si el uid de una jaula sigue ocupado por procesos vivos de su cgroup, asi que no hay
+        canal de control. Su contrato: `await estado(uid) -> EstadoUnidad`, `await matar(uid)`,
+        `await esperar_vacio(uid, *, plazo_s=None) -> EstadoUnidad`."""
+        if scope_manager is None:
+            raise ConfigFaroInvalida(
+                "sin el gestor de unidades (scope de 0.6) no hay canal de control: no se puede saber si un uid"
+                " de jaula sigue ocupado (R-2)")
         self._cfg = cfg
         self._crear_puerto = crear_puerto
         self._bitacora = bitacora
         self._credenciales = leer_credenciales
+        self._scope = scope_manager
         self._servidor: asyncio.AbstractServer | None = None
         self._tareas: set[asyncio.Task] = set()
         self._ejecuciones: dict[str, ServidorPuerto] = {}
         self._uids: dict[int, str] = {}                 # uid de jaula -> run_id de la ejecucion viva que lo usa
-        self._jaula_viva = jaula_viva
-        self._retenidos: set[int] = set()               # uids de ejecuciones cerradas cuya jaula sigue viva
+        self._retenidos: set[int] = set()               # uids de ejecuciones cerradas cuya unidad no se confirmo vacia
 
     @property
     def ruta_socket(self) -> Path:
@@ -332,24 +347,35 @@ class ServidorControl:
                 pass
 
     # -- operaciones ----------------------------------------------------------------------------
-    def _validar_uid_jaula(self, pedido: Mapping) -> int:
+    async def _validar_uid_jaula(self, pedido: Mapping) -> int:
         uid = pedido.get("uid_jaula")
         c = self._cfg
         if isinstance(uid, bool) or not isinstance(uid, int) or not c.jaula_uid_min <= uid <= c.jaula_uid_max:
             raise _Rechazo("uid_jaula_invalido")
         if uid in (0, os.geteuid(), c.orquestador_uid):      # el rango ya los excluye; defensa en profundidad
             raise _Rechazo("uid_jaula_invalido")
-        if uid in self._uids:
-            if uid in self._retenidos and self._jaula_viva is not None and not self._jaula_viva(uid):
+        if uid in self._uids and uid not in self._retenidos:
+            raise _Rechazo("uid_jaula_en_uso")               # reservado por una ejecucion viva de ESTE proceso
+        # R-2: se consulta systemd SIEMPRE, tambien sin reserva local: un reinicio del Faro no puede
+        # autorizar reutilizar un uid cuya unidad sigue viva (o que no se puede concluir).
+        try:
+            estado = await self._scope.estado(uid)
+        except Exception:  # fail-closed: una consulta rota es UNKNOWN, nunca un uid libre
+            logger.exception("la consulta de la unidad del uid %s fallo", uid)
+            estado = EstadoUnidad.UNKNOWN
+        if estado is EstadoUnidad.EMPTY:
+            if uid in self._retenidos:                       # confirmado vacio: se cae la retencion anterior
                 self._retenidos.discard(uid)
-                self._uids.pop(uid, None)           # la jaula ya murio: el uid se libera
-            else:
-                raise _Rechazo("uid_jaula_en_uso")
+                self._uids.pop(uid, None)
+        else:
+            raise _Rechazo("uid_jaula_en_uso" if estado is EstadoUnidad.LIVE else "uid_jaula_desconocido")
+        if uid in self._uids:                                # otro pedido reservo mientras esperabamos la consulta
+            raise _Rechazo("uid_jaula_en_uso")
         return uid
 
     async def _crear(self, cred, pedido: Mapping) -> dict:
         campos = {c: _texto(pedido, c) for c in CAMPOS_DE_IDENTIDAD}      # lo demas del pedido se IGNORA
-        uid = self._validar_uid_jaula(pedido)
+        uid = await self._validar_uid_jaula(pedido)
         run_id = "r-" + uuid.uuid4().hex[:24]
         id_correlacion = uuid.uuid4().hex
         try:
@@ -381,16 +407,29 @@ class ServidorControl:
         return {"ok": True, "run_id": run_id, "id_correlacion": id_correlacion, "uid_jaula": uid}
 
     async def _cerrar_ejecucion(self, run_id: str, srv: ServidorPuerto) -> None:
+        """El orden de cierre de R-2/0.6: (1) el uid se conserva desde ya; (2) se revoca el Puerto de ESA
+        ejecucion; (3) SIGKILL a TODA su unidad (hijos y nietos), sin tocar a las hermanas; (4) se espera
+        la confirmacion de unidad/cgroup vacio. Solo `EMPTY` suelta el uid: error o plazo vencido lo
+        dejan retenido hasta una consulta posterior que confirme vacio."""
         self._ejecuciones.pop(run_id, None)
         uid = srv.ejecucion.uid_esperado
-        if self._jaula_viva is not None and self._jaula_viva(uid):
-            self._retenidos.add(uid)                # sigue ocupado hasta que su jaula muera
-        else:
-            self._uids.pop(uid, None)
+        self._retenidos.add(uid)                    # 1. cerrandose: el uid NO se libera todavia
         try:
-            await srv.__aexit__(None, None, None)
+            await srv.__aexit__(None, None, None)   # 2. primero el Puerto de esa ejecucion
         except Exception:  # fail-soft: el cierre sigue; el socket de esa ejecucion ya no se atiende
             logger.exception("no se pudo cerrar bien el Puerto de %s", run_id)
+        try:
+            await self._scope.matar(uid)            # 3. SIGKILL a todos los procesos de su unidad
+        except Exception:  # fail-soft: el estado decide; un kill fallido nunca libera el uid
+            logger.exception("no se pudo matar la unidad del uid %s (ejecucion %s)", uid, run_id)
+        try:
+            estado = await self._scope.esperar_vacio(uid)   # 4. confirmacion de vacio
+        except Exception:  # fail-closed: sin confirmacion no hay liberacion
+            logger.exception("no se pudo confirmar el vacio de la unidad del uid %s", uid)
+            estado = EstadoUnidad.UNKNOWN
+        if estado is EstadoUnidad.EMPTY:            # 5. solo ahora se suelta; la reutilizacion pasa por otra consulta
+            self._retenidos.discard(uid)
+            self._uids.pop(uid, None)
 
     async def _cerrar(self, cred, pedido: Mapping) -> dict:
         run_id = pedido.get("run_id")

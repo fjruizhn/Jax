@@ -60,10 +60,16 @@ class Servicio:
     pool_memoria: object | None = None
     adaptador_memoria: AdaptadorMemoria | None = None
 
-    def control(self, jaula_viva=None) -> ServidorControl:
+    def control(self, scope_manager) -> ServidorControl:
         """El canal de control autenticado (0.3c): el unico lugar donde nace una `Ejecucion`. Se usa con
-        `async with servicio.control() as c:`; sus ejecuciones comparten el UNICO presupuesto del servicio."""
-        return ServidorControl(self.cfg_control, self.crear_puerto, self.bitacora, jaula_viva=jaula_viva)
+        `async with servicio.control(scope) as c:`; sus ejecuciones comparten el UNICO presupuesto del
+        servicio. `scope_manager` (el gestor de unidades de 0.6, scope.py) es OBLIGATORIO (R-2): sin el
+        no se construye el canal, porque no se puede saber si un uid de jaula sigue ocupado."""
+        if scope_manager is None:
+            raise ConfigFaroInvalida(
+                "Servicio.control exige el gestor de unidades (scope de 0.6): sin proveedor de liveness no"
+                " hay canal de control (R-2)")
+        return ServidorControl(self.cfg_control, self.crear_puerto, self.bitacora, scope_manager)
 
     def crear_puerto(self, ejecucion: Ejecucion) -> ServidorPuerto:
         return ServidorPuerto(self.cfg_puerto, ejecucion, self.paquete, self.bitacora, presupuesto=self.presupuesto,
