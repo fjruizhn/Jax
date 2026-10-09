@@ -20,9 +20,10 @@
 
 ## Siguientes pasos
 
-1. Obtener auditoría Tier 3 de la reconstrucción actualizada de #371; no actualizar el head remoto viejo (`c36c0543`) antes de que apruebe el SHA exacto.
-2. Con auditoría aprobada, confirmar la ventana, reemplazar el head remoto de #371 con esta reconstrucción sobre `master@35991faa`, completar CI y luego integrar mediante preflight y post-merge guard.
-3. Reconstruir #381 sobre el nuevo master, cerrar los dos BLOCKs, mantener la compuerta de ratificación aprobada por Fernando, medir pisos, auditar y completar CI.
-4. Reapilar #375 y #378 sobre #371 integrado; auditar y completar CI de cada PR en orden.
+1. Auditoría Tier 3 aprobó `61fd79fbe521bc843a11ad71d1513a4b3153af90` con 0 BLOCK, 0 MAJOR y 2 MINOR. El head remoto de #371 ya fue reemplazado bajo ventana abierta; `master@35991faa` coincide con la base del PR.
+2. La primera CI exacta detectó una excepción de limpieza temporal sin comentario `fail-soft` en `jax/faro/aviso.py:774`. Añadida la justificación (`os.replace` puede haber consumido el temporal); `policy/tests/test_no_fail_open_except.py` → 21 passed y `tests/test_faro_aviso.py` → 119 passed. Este ajuste requiere nueva auditoría Tier 3 y una corrida CI nueva antes del preflight/merge.
+3. Con auditoría aprobada y CI verde, confirmar ventana e integrar #371 mediante preflight y post-merge guard.
+4. Reconstruir #381 sobre el nuevo master, cerrar los dos BLOCKs, mantener la compuerta de ratificación aprobada por Fernando, medir pisos, auditar y completar CI.
+5. Reapilar #375 y #378 sobre #371 integrado; auditar y completar CI de cada PR en orden.
 
 No desplegar. No declarar cerrado Faro F1.1 hasta completar #371, #381, #375 y #378.

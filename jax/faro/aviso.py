@@ -771,7 +771,7 @@ def _partir_rotado(cola: Path, ruta: str, prefijo: bytes, resto: bytes) -> None:
             for temporal in (temp_resto, temp_prefijo):
                 try:
                     os.unlink(temporal)
-                except FileNotFoundError:
+                except FileNotFoundError:  # fail-soft: el temporal pudo consumirse con os.replace.
                     pass
 
 
