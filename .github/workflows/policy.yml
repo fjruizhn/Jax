@@ -2572,6 +2572,7 @@ jobs:
           tests/policy/test_rule_authority_snapshot.py
           tests/policy/test_rule_authority_ataques.py
           tests/policy/test_rule_authority_providers.py
+          tests/policy/test_faro_rule_authority_models.py
           tests/policy/test_shadow_manifest.py
           tests/policy/test_strict_yaml.py
           tests/policy/test_v3_array_semantics.py
@@ -2671,7 +2672,8 @@ jobs:
         # en la lista del paso anterior: piso combinado 677; ambas listas se
         # comprueban iguales en tests.
         # #373 agrega providers y cierres de clasificación/pin. Tras combinarlo
-        # con #379, la misma lista exacta mide 816 passed, cero skipped.
+        # con #379 la lista mide 816; #371 agrega los modelos en memoria (+152),
+        # por lo que el piso combinado medido es 968 passed, cero skipped.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
@@ -2685,6 +2687,7 @@ jobs:
             tests/policy/test_rule_authority_snapshot.py \
             tests/policy/test_rule_authority_ataques.py \
             tests/policy/test_rule_authority_providers.py \
+            tests/policy/test_faro_rule_authority_models.py \
             tests/policy/test_shadow_manifest.py \
             tests/policy/test_strict_yaml.py \
             tests/policy/test_v3_array_semantics.py \
