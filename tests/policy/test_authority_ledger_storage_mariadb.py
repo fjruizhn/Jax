@@ -26,7 +26,9 @@ from policy.authority_ledger.models import (
     OverlayPayload, OverlayScope, OverlayType, RuleRatificationGrantPayload,
 )
 from policy.authority_ledger.replay import event_hash, genesis_hash, verify_authority_ledger
-from policy.authority_ledger.service import append_authority_event, ratification_intent_from_candidate
+from policy.authority_ledger.service import (append_authority_event,
+                                             append_ratification_from_candidate,
+                                             ratification_intent_from_candidate)
 from policy.authority_ledger.signatures import encode_public_key, public_key_bytes, public_key_fingerprint
 from policy.authority_ledger.storage import MariaDBAuthorityLedgerStore
 from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
@@ -327,7 +329,8 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                         cursor.execute("UPDATE jax_authority.authority_events SET actor_id='actor:tamper' WHERE sequence=1")
                     app.commit()
             now = datetime(2026, 10, 6, tzinfo=timezone.utc)
-            corpus_intent = ratification_intent_from_candidate(load_validated_candidate(ROOT))
+            candidate = load_validated_candidate(ROOT)
+            corpus_intent = ratification_intent_from_candidate(candidate)
             corpus_event_id = "018cc251-f400-7000-8000-000000000001"
             overlay = OverlayPayload(
                 "test-exception", OverlayType.EXCEPTION, corpus_intent.policy_corpus_hash,
@@ -340,7 +343,6 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                 "sha256:" + "e" * 64, now, None,
             )
             intents = (
-                corpus_intent,
                 AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", ratification_event_id=corpus_event_id),
                 AuthorityEventIntent(AuthorityEventType.RATIFICATION_REVOKED, "human:fernando", ratification_event_id=corpus_event_id),
                 AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
@@ -352,13 +354,18 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                     rule_ratification_event_id="018cc251-f400-7000-8000-000000000007",
                 ),
             )
-            events = tuple(
+            first = append_ratification_from_candidate(
+                store, root, key, candidate,
+                event_id=corpus_event_id,
+                recorded_at_utc=now,
+            )
+            events = (first,) + tuple(
                 append_authority_event(
                     store, root, key, intent,
                     event_id=f"018cc251-f400-7000-8000-{index:012d}",
                     recorded_at_utc=now,
                 )
-                for index, intent in enumerate(intents, 1)
+                for index, intent in enumerate(intents, 2)
             )
             restored = store.events()
             state = verify_authority_ledger(store.get_genesis(), restored, root)

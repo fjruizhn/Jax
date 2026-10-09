@@ -3,7 +3,7 @@
 Hallazgo del auditor de #377: ``ValidatedCandidateCorpus._loader_seal`` era
 ``init=True`` y ``dataclasses.replace`` lo transportaba — un corpus alterado
 pasaba por validado. Cierre: sello ``init=False`` (solo lo estampa el loader
-en ``_from_validated_snapshot``), contenido congelado profundo (las
+después de C14N/3), contenido congelado profundo (las
 colecciones entran como tuple/list y se guardan SIEMPRE como tuple) y un
 ``_content_binding`` — digest del contenido congelado estampado por el loader
 que todo consumidor re-deriva y compara antes de confiar. Cada test mata un

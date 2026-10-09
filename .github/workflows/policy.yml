@@ -2666,8 +2666,9 @@ jobs:
         # de colección permanecen visibles y rompen el resumen estricto del piso.
         # El resumen completo, incluido 0 skipped,
         # es el piso: un salto no puede verse verde por prefijo.
-        # #379 agrega 17 pruebas del sello del loader, también en la lista del paso
-        # anterior: piso combinado 674; ambas listas se comprueban iguales en tests.
+        # #379 agrega 18 pruebas del sello del loader y 2 de ratificación, también
+        # en la lista del paso anterior: piso combinado 677; ambas listas se
+        # comprueban iguales en tests.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail

@@ -27,3 +27,19 @@ Quitar del modelo las fábricas generales que convertían datos de caller en obj
 ## Responsable
 
 Fernando pidió a Codex liderar el cierre de Faro F1.1 hoy. La revisión Kimi fue consultiva; Sol emitió la auditoría de escalón 3. Codex implementa, verifica y coordina la secuencia.
+
+## Actualización · bloqueo Tier 3 sobre `bc4089f`
+
+El auditor detectó que la prueba MariaDB de round-trip aún enviaba el primer
+`RATIFICATION_GRANTED` al writer genérico. Se cambió esa primera escritura a
+`append_ratification_from_candidate`, con el mismo candidate usado para
+construir el overlay; las siete escrituras restantes siguen por el writer
+genérico, conservando la cadena de ocho eventos.
+
+La lista exacta de Identity Foundation Shadow se volvió a medir con el comando
+del workflow: `677 passed in 4.43s`, cero skipped. El incremento desde 674 es
+de tres pruebas: una de `copy`/`deepcopy`/pickle del loader (el archivo ahora
+tiene 18) y dos regresiones del writer de ratificación. Por ello el piso se
+actualizó a `^677 passed in ` en `ci/pisos.json`, el workflow y esta memoria.
+La integración MariaDB sigue pendiente de CI: el host local no permite acceder
+al socket Docker.
