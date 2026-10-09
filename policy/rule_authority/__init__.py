@@ -1,6 +1,35 @@
-"""Rule Authority Kernel (F1.1) — paquete.
+"""Faro individual-rule authority models, schema and snapshot services."""
 
-Fase 1 (este paso 3): schema cerrado de regla Faro v1 y snapshot confiable de
-``policy/faro`` desde objetos Git. El kernel de evaluación (modelos, eventos,
-permisos, storage) vive en los módulos que agrega la rama paralela.
-"""
+from .models import (
+    RuleDecision,
+    RuleDecisionStatus,
+    RuleEvaluation,
+    RuleEvaluationRequest,
+    RuleLimits,
+    limites_de,
+)
+from .store import InMemoryRuleDecisionStore, RuleDecisionStore
+
+__all__ = [
+    "InMemoryRuleDecisionStore",
+    "RuleDecision",
+    "RuleDecisionStatus",
+    "RuleDecisionStore",
+    "RuleEvaluation",
+    "RuleEvaluationRequest",
+    "RuleLimits",
+    "limites_de",
+    "Alcance",
+    "Cantidad",
+    "Frecuencia",
+    "LimitesObligatorios",
+    "Monto",
+    "ReglaValidada",
+    "Tope",
+    "Vigencia",
+    "PermitConfig",
+    "validar_regla",
+]
+
+from .schema import (Alcance, Cantidad, Frecuencia, LimitesObligatorios, Monto,
+                     PermitConfig, ReglaValidada, Tope, Vigencia, validar_regla)
