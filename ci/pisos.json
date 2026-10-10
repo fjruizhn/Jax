@@ -134,16 +134,16 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 19 tests CORRIDOS del codec de persistencia de Block 4. Medido el 2026-10-07 en hall9000."
     },
     "authority-ledger-mariadb/integration": {
-      "patron": "^40 passed in ",
-      "mensaje": "PISO ROTO: se esperaban 40 tests CORRIDOS de la suite MariaDB aislada del ledger, tras añadir dos pruebas de evaluación DENY compartida: persistencia/retry y rollback real. Recolectadas 40; confirmar las pasadas en CI exacta."
+      "patron": "^45 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 45 tests CORRIDOS de la suite MariaDB aislada del ledger tras incorporar los cierres del merge #396 y las regresiones de evaluación DENY compartida. Recolectadas 45; confirmar las pasadas en CI exacta."
     },
     "authority-rule-storage/mariadb": {
-      "patron": "^19 passed in ",
-      "mensaje": "PISO ROTO: se esperaban exactamente 19 pruebas de persistencia Rule Authority, incluyendo siete variantes que confirman que record() standalone rechaza toda forma de entrada antes de abrir DB. La escritura solo vive bajo el owner Block 4. Recolectadas 19; confirmar las pasadas MariaDB en CI exacta."
+      "patron": "^28 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 28 pruebas de persistencia Rule Authority, readiness y diagnóstico MariaDB; incluye las regresiones de #392 y siete variantes que cierran record() standalone antes de abrir DB. Recolectadas 28; confirmar las pasadas MariaDB en CI exacta."
     },
     "authority-rule-unit/tests": {
-      "patron": "^52 passed in ",
-      "mensaje": "PISO ROTO: se esperaban exactamente 52 pruebas unitarias sin DB de Rule Authority (kernel, store, permit y checkpoint), incluidas recuperacion durable, identidad de retry, revalidacion de consume(), DENY tipado para reglas sin limites y carreras de STOP/pin/clasificacion contra consume(). Medido localmente el 2026-10-10 en la rama de trabajo descendiente de #389; confirmar el conteo en CI exacta."
+      "patron": "^55 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 55 pruebas unitarias sin DB de Rule Authority (kernel, store, permit y checkpoint), incluidas recuperacion durable, identidad de retry, revalidacion de consume(), DENY tipado para reglas sin limites y carreras de STOP/pin/clasificacion contra consume(). Medido localmente el 2026-10-10 sobre #388 reapilado; confirmar el conteo en CI exacta."
     },
     "authority-rule-events/ratifications": {
       "patron": "^12 passed in ",
@@ -222,8 +222,8 @@
       "mensaje": "PISO ROTO: se esperaban 18 tests CORRIDOS de los ataques al sello del loader de Block 3 (replace, construccion directa, congelado, subclases, método sombreado, binding por campo de las 6 entradas, proyección canónica sombreada y política de copia/pickle). 14 -> 16 el 2026-10-07; 16 -> 17 el 2026-10-08 por cierre de sombreado de _contenido_canonico; 17 -> 18 por cierre de copy/deepcopy/pickle."
     },
     "identity-foundation-shadow/policy": {
-      "patron": "^1044 passed in ",
-      "mensaje": "PISO ROTO: se esperaban exactamente 1044 tests CORRIDOS y 0 skipped de Identity Foundation Shadow, medidos localmente sobre la base integrada de #389; CI exacta debe confirmar este conteo."
+      "patron": "^1045 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 1045 tests CORRIDOS y 0 skipped de Identity Foundation Shadow, medidos localmente sobre #388 reapilado el 2026-10-10; CI exacta debe confirmar este conteo."
     }
   },
   "minimos": {

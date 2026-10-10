@@ -189,7 +189,7 @@ def _apply_migration(connection, migration: Path = MIGRATION) -> None:
                 cursor.execute(statement_text)
             except pymysql.MySQLError as error:
                 raise AssertionError(
-                    f"falló la sentencia {statement_ordinal} de la migración"
+                    f"falló la sentencia {statement_ordinal} de la migración {migration}"
                 ) from error
 
         for raw_line in sql.splitlines():
@@ -364,11 +364,55 @@ def test_migration_failure_identifies_statement_ordinal_without_retry(monkeypatc
     monkeypatch.setattr(sys.modules[__name__], "MIGRATION", migration)
     connection = Connection()
 
-    with pytest.raises(AssertionError, match="sentencia 2"):
-        _apply_migration(connection)
+    with pytest.raises(AssertionError, match=r"sentencia 2.*migration\.sql"):
+        _apply_migration(connection, migration)
 
     assert connection.cursor_instance.executed == ["ONE", "TWO"]
     assert not connection.committed
+
+
+def test_db_fixture_migrates_block4_before_rule_authority_once(monkeypatch, tmp_path) -> None:
+    applied = []
+
+    class Admin:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return self
+
+        def execute(self, _statement):
+            return None
+
+        def fetchone(self):
+            return ("12.3.3-MariaDB",)
+
+    monkeypatch.setattr(sys.modules[__name__], "_run", lambda *_args: None)
+    monkeypatch.setattr(
+        sys.modules[__name__], "_wait_until_ready", lambda *_args: tmp_path / "mysqld.sock"
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__], "_connect_after_transient_mariadb_startup_error",
+        lambda connect_once, **_kwargs: connect_once(),
+    )
+    monkeypatch.setattr(pymysql, "connect", lambda **_kwargs: Admin())
+    monkeypatch.setattr(
+        sys.modules[__name__], "_apply_migration",
+        lambda _admin, migration=MIGRATION: applied.append(migration),
+    )
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, "", ""),
+    )
+
+    fixture = db.__wrapped__()
+    next(fixture)
+    fixture.close()
+
+    assert applied == [AUTHORITY_LEDGER_MIGRATION, MIGRATION]
 
 
 def _request(
@@ -491,17 +535,14 @@ def db():
                     with admin.cursor() as cursor:
                         cursor.execute("SELECT VERSION()")
                         assert cursor.fetchone()[0].startswith("12.3.3-")
+                    # Provisioning needs Block 4 verification tables before Rule Authority.
+                    _apply_migration(admin, AUTHORITY_LEDGER_MIGRATION)
                     _apply_migration(admin)
             except Exception as error:
                 raise AssertionError(
                     f"falló la preparación de MariaDB aislada:\n"
                     f"{_container_diagnostics(docker, container)}"
                 ) from error
-            with admin:
-                # Provisioning grants read-only access to Block 4's verification
-                # tables. This isolated database must include that schema too.
-                _apply_migration(admin, AUTHORITY_LEDGER_MIGRATION)
-                _apply_migration(admin)
             yield _Db(docker, socket_path, root_password)
         finally:
             subprocess.run(

@@ -4652,11 +4652,12 @@ denormalizadas (incluido `previous_event_hash`), lectura histórica exacta y per
 
 ## `authority-ledger-mariadb/integration`
 
-Piso pendiente de confirmación CI (2026-10-10): `^40 passed in `. La corrida CI 38032592015
-contó 33 casos; después se añadieron cinco regresiones de transaction owner/checkpoint y dos
-pruebas de evaluación DENY bajo el owner compartido (persistencia/retry y rollback). La
-colección local exacta confirma 40 casos, pero Docker no está disponible en este host para
-ejecutarlos. La CI del SHA reapilado debe confirmar las 40 pasadas. La base #377 tenía 5 pruebas en MariaDB 12.3.3 efímera
+Piso local pendiente de ejecución MariaDB (2026-10-10): `^45 passed in `. El árbol reapilado
+colecciona 45 casos tras incorporar los cierres de #396 y las regresiones DENY compartidas;
+Docker no está disponible en hall9000 (`/var/run/docker.sock` denegado), así que el conteo de
+pasadas queda por confirmar en CI exacta. La corrida CI 38032592015 contó 33 casos; después
+se añadieron cinco regresiones de transaction owner/checkpoint y dos pruebas de evaluación
+DENY bajo el owner compartido (persistencia/retry y rollback). La base #377 tenía 5 pruebas en MariaDB 12.3.3 efímera
 `--network none`; la prueba aplica ambas migraciones, valida el upgrade nullable→NOT NULL,
 provisiona la cuenta de aplicación con el script versionado, genera una llave Ed25519 de prueba
 y valida firma → INSERT → lectura → reconstrucción → hash/firma y replay. También prueba que
@@ -4674,15 +4675,18 @@ formatos. La medición real con Docker del 2026-10-09 confirmó 10 en Python 3.1
 
 ## `authority-rule-storage/mariadb`
 
-Piso pendiente de confirmación CI: `^19 passed in `. La CI run `38035001043`, SHA
+Piso local pendiente de ejecución MariaDB (2026-10-10): `^28 passed in `. El árbol reapilado
+colecciona 28 pruebas al combinar la readiness/diagnóstico de #392 con Step 6/7; Docker no
+está disponible en hall9000, por lo que CI exacta debe confirmar el número de pasadas. La CI run `38035001043`, SHA
 `3857b4bc84a315346eedd11a9b32640427e2099e`, con el comando del workflow y MariaDB `12.3.3`
 efímera (`--network none`, socket Unix). Los casos retenidos cubren proyección del catálogo,
 triggers append-only, restricciones de permisos y OIDs, planes indexados, provisioning de mínimo
 privilegio y lectura histórica de permisos. La suite de producción ya no prueba APIs de escritura
 standalone que se eliminaron para exigir el owner Block 4; siete variantes comprueban que
 `record()` rechaza solicitudes DENY/MISSING_RULE/PERMIT y entradas inválidas/mismatched antes de
-abrir la base o mover el checkpoint. La colección local da 19 casos; CI del SHA reapilado debe
-confirmar el resultado completo. En la corrida previa, el fixture
+abrir la base o mover el checkpoint. El piso anterior era 19; el fixture reapilado incorpora
+las regresiones de readiness/diagnóstico de #392, una regresión de orden de migraciones y amplía
+la prueba del ordinal para comprobar también la ruta, además de los casos Step 6. En la corrida previa, el fixture
 solo creaba el schema Rule Authority, pero provisioning también consulta tablas de verificación
 Block 4 en `jax_authority`. El fixture ahora aplica primero la migración `authority_ledger` en la
 misma MariaDB efímera. El run confirmó 18 passed; la corrida completa del job aún falló porque el
@@ -4701,8 +4705,8 @@ comando exacto del workflow. Medición real con Docker: `10 passed`.
 
 ## `authority-rule-unit/tests`
 
-Piso local `^52 passed in `, medido el 2026-10-10 con el comando del workflow sobre la rama de
-trabajo descendiente de #389 y `PyYAML==6.0.3`, `cryptography==49.0.0`. Incluye recuperación
+Piso local `^55 passed in `, medido el 2026-10-10 con el comando del workflow sobre #388
+reapilado y `PyYAML==6.0.3`, `cryptography==49.0.0`. Incluye recuperación
 durable, identidad de retry, revalidación de `consume()`, DENY/Error estable en ambos límites
 del kernel cuando una regla sin límites recibe `rule_hash`, y carreras con barreras para cambios
 de STOP, pin y clasificación antes y durante `consume()` y la llamada al append del store. Estas
@@ -4725,10 +4729,9 @@ Antes: 8.
 
 ## `archivos-de-test-en-ci/pisos`
 
-Patrón vigente (2026-10-10, JAX#389): `^233 passed`. Medido en CI run `38044350914`
-sobre el SHA exacto `c78080442da81a468768a7af5b2c5b748ff56b37`; el job
-`archivos-de-test-en-ci` confirmó el piso. La medición local de los tres módulos del job da
-el mismo resultado (`233 passed`).
+Patrón local reapilado (2026-10-10): `^238 passed`. Medido con los tres módulos exactos del job
+en Python 3.14.4; falta confirmación de CI para el SHA final de #388. La medición CI `^233 passed`
+en run `38044350914` corresponde al SHA histórico `c78080442da81a468768a7af5b2c5b748ff56b37`.
 
 Piso nuevo de la migración: `policy/tests/test_pisos_fuera_del_workflow.py` (permanente),
 `policy/tests/test_pisos_migracion_desde_master.py` (de migración, compara con la fotografía de
@@ -4787,7 +4790,7 @@ Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_
 cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
 ## `identity-foundation-shadow/policy`
 
-Piso local reapilado (2026-10-10): `^1044 passed in `. El conteo del CI exacto del SHA nuevo
+Piso local reapilado (2026-10-10): `^1045 passed in `. El conteo del CI exacto del SHA nuevo
 debe confirmarlo antes de cerrar el piso.
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,

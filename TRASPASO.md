@@ -1,5 +1,42 @@
 # Traspaso continuo · Faro F1.1 paso 6
 
+## Actualización 2026-10-10 · reapilado selectivo #388 sobre #387
+
+- **Tip y base:** Fernando confirmó #390 integrado como `250b82c` y #387 como
+  `35bb78224c18ead407d72c7713ef4858df274623`; informó post-merge-guard SUCCESS para ambos,
+  sin carrera. `git fetch` confirma `origin/master=35bb7822` y que ese SHA es ancestro directo
+  de este HEAD. El PR #388 remoto sigue abierto en `3eac3fff`, base histórica `bf6b0580`;
+  sus checks anteriores no cubren la línea reapilada. El worktree propio es
+  `/home/fruiz/jax/.worktrees/codex-faro-f11-kernel-step6`, rama
+  `codex/faro-f11-kernel-step6`; backup `codex/faro388/pre-rebase-35bb` conserva el HEAD
+  previo al rebase. Se reaplicaron selectivamente los 51 commits locales desde la base
+  `0d6484f2`; el rango inicial de 31 conserva equivalencia de parches con el PR remoto.
+  HEAD antes de este cierre documental y los ajustes de pisos: `0e3346b9`.
+- **Conflicto con #387 y dependencias:** #387 retiró del master el storage, la migración base
+  `001_rule_authority_kernel.sql`, `RuleAuthorityStorageError` y el paso CI del fixture F1.1.
+  #388 Step 6/7 depende de esos contratos; se restauraron dentro de esta rama y se volvió a
+  cablear el job aislado `authority-rule-storage/mariadb`. No se modificó otro worktree.
+- **Fixture y diagnóstico:** se conservaron la readiness y los diagnósticos de #392
+  (timestamps, servidor final y `@@port`, estado/logs del contenedor ante fallo) junto a las
+  migraciones de #388. Una regresión fija el orden Block 4 antes de Rule Authority y evita
+  aplicar dos veces la migración F1.1. Los errores de migración incluyen ordinal y ruta del
+  archivo. La selección local de readiness, conectividad y migraciones pasó (8 pruebas),
+  incluidas la nueva regresión de orden y la aserción de ruta/ordinal. `docker info` falla por permiso denegado sobre
+  `/var/run/docker.sock`; no hay resultado MariaDB local.
+- **Pisos medidos para este árbol:** Rule Authority storage colecciona 28; Block 4 MariaDB
+  colecciona 45; Rule Authority unitario dio 55 pasadas; Identity Foundation Shadow dio
+  1045 pasadas y 0 skipped; los tres módulos de pisos dieron 238 pasadas. Los conteos de
+  MariaDB son de colección, no de ejecución. CI exacta debe validar todos los floors de este
+  SHA. Faro fase 0 no pudo ejecutarse con el Python del sistema porque falta el módulo `mcp`;
+  su piso heredado sigue en 780 y CI debe confirmarlo.
+- **Pendiente de gates:** diff-check, JSON y suites locales focalizadas deben quedar verdes;
+  luego actualizar/push del propio PR #388 para CI exacta, pedir auditoría Tier 3 independiente
+  del SHA final y esperar ambas antes de declarar listo. No se integra aquí: el workflow de
+  política contiene archivos reservados a Fernando. La ventana se debe verificar en la sesión
+  que intente integrar. Fernando autorizó este reapilado y el trabajo de cierre; Codex lo ejecuta.
+- **Quién decidió:** Fernando dio el tip oficial post-#387 y autorizó reapilar, medir, auditar
+  y ejecutar CI exacta; Codex resolvió el rebase y las regresiones descritas.
+
 ## Actualización 2026-10-10 · seguimiento local #388
 
 - **Estado verificado:** el commit de código `745fe9945d7a3d9b4482df4aee7e0701cd77c08e`, hijo directo de `f6d7ca13`, fue auditado con worktree limpio. `dfbd1fb0` registra ese veredicto, pero su propio delta-audit encontró que #392 acababa de integrarse siete segundos después del commit. #392 ya cerró: run `38052737043`, SHA `8d1d1c49`, 30/30 jobs SUCCESS; el `post-merge-guard` reportó `CI post-merge verificada`, master en `8d1d1c49` y ninguna carrera. Se hizo fetch: `origin/master=8d1d1c49`, mientras el merge-base de esta rama sigue en `0d6484f2`. Sin push ni rebase de #388.
