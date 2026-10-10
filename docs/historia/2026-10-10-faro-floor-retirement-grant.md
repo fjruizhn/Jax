@@ -2,6 +2,8 @@
 
 **Archivado:** 2026-10-10. Fuente: `TRASPASO.md` de la rama `codex/faro-floor-retirement-grant`. Este registro conserva estado, verificaciones y siguientes pasos; no otorga autoridad.
 
+El traspaso de la rama `codex/faro-grant-handoff-refresh` hasta `44704db54070a455d12819006e4be5ef13e21284` también se archiva aquí antes de la auditoría final de su PR #397: objetivo, evidencia, corrección del dictamen, estado de autoridad, decisiones, ownership y secuencia están asentados en las secciones siguientes. El archivo operativo `TRASPASO.md` se elimina del SHA final.
+
 ## Actualización verificada — 2026-10-10
 
 - #396 se integró como `3643568c045caa44cfcaf08e3101f1ce5126e8ce`; `post-merge-guard` terminó SUCCESS, default `master@3643568c`, sin carrera.
