@@ -2700,7 +2700,8 @@ jobs:
         # (#381 agrega checkpoint/overlay y cierra el writer caller-intent).
         # Schema-unidades (#378) añade 34 pruebas: 1003 -> 1037; r2 añade una
         # de catálogo forjado: 1038. El MINOR Tier 3 agrega dos vectores de paridad
-        # JSON/Python. Medición exacta del head reapilado: 1040 passed, cero skipped.
+        # JSON/Python. CI exacta de bc024578: 1042 passed, cero skipped.
+        # Incluye dos regresiones de separación de los checkpoints Block 4 y Rule Authority.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail

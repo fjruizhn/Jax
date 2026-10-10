@@ -4735,7 +4735,7 @@ Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_
 cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-09, #378 sobre master con #381 y MINOR de paridad): `^1040 passed in `
+Patrón vigente (2026-10-10, CI de #388 midió dos regresiones de checkpoint): `^1042 passed in `
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4793,3 +4793,5 @@ tanto en JSON Schema como en Python; con el pattern anterior, esos dos vectores 
 El incremento acumulado desde master es +37. Medido sobre el head reapilado en Python
 3.14.4 con la lista exacta del workflow: `1040 passed`, cero skipped; `piso.py verificar`
 rc=0.
+
+El CI exacto de `bc024578` midió `1042 passed`, cero skipped. El incremento de dos corresponde a las regresiones que prueban que el guard y `MariaDBRuleDecisionStore` rechazan un `TrustedCheckpointStore` real de Block 4. El piso queda alineado a 1042 en la corrección de esta cadena; debe confirmarlo la CI del SHA que la contiene.
