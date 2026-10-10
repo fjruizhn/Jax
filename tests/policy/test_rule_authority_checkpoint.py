@@ -15,7 +15,10 @@ from policy.rule_authority.trusted_checkpoint import (
     RuleAuditCheckpointStore,
     _checkpoint_hash,
 )
-from policy.rule_authority.providers import AlmacenCheckpoints, AlmacenCheckpointsBloqueable
+from policy.rule_authority.providers import (
+    AlmacenCheckpointAuditoria,
+    AlmacenCheckpointAuditoriaBloqueable,
+)
 from tests.policy.proveedores_dobles import CheckpointsEnMemoria
 
 
@@ -161,11 +164,11 @@ def test_lock_limpia_temporales_de_publicacion_abandonados(tmp_path):
 
 def test_protocol_declara_locked_y_store_real_lo_implementa(tmp_path):
     store = _bootstrapped_store(tmp_path / "audit-checkpoints.jsonl")
-    assert isinstance(store, AlmacenCheckpoints)
-    assert isinstance(store, AlmacenCheckpointsBloqueable)
+    assert isinstance(store, AlmacenCheckpointAuditoria)
+    assert isinstance(store, AlmacenCheckpointAuditoriaBloqueable)
     memory = CheckpointsEnMemoria()
-    assert isinstance(memory, AlmacenCheckpoints)
-    assert not isinstance(memory, AlmacenCheckpointsBloqueable)
+    assert isinstance(memory, AlmacenCheckpointAuditoria)
+    assert not isinstance(memory, AlmacenCheckpointAuditoriaBloqueable)
 
 
 def test_storage_mariadb_exige_checkpoint_bloqueable(tmp_path):
@@ -237,7 +240,7 @@ def test_no_se_infiere_genesis_desde_un_log_ausente_y_bootstrap_es_unico(tmp_pat
         store.publicar("sha256:" + "1" * 64, anterior="")
 
     store.bootstrap()
-    assert isinstance(store, AlmacenCheckpoints)
+    assert isinstance(store, AlmacenCheckpointAuditoria)
     assert store.confirmar(store.head_actual()) is True
     with pytest.raises(CheckpointInvalido, match="ya existe"):
         store.bootstrap()
