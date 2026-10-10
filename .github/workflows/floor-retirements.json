@@ -1,4 +1,23 @@
 {
   "version": 1,
-  "grants": []
+  "grants": [
+    {
+      "repository": "fjruizhn/Jax",
+      "pull_request": 387,
+      "base_branch": "master",
+      "floor_key": "authority-rule-storage/mariadb",
+      "floor_definition": {
+        "entry": {
+          "patron": "^20 passed in ",
+          "mensaje": "PISO ROTO: se esperan exactamente 20 pruebas de persistencia Rule Authority contra MariaDB 12.3.3 --network none (readiness del servidor final, puerto no temporal, retries transitorios y diagnóstico de fallos de migración). Ocho regresiones añadidas al piso anterior de 12; validar el conteo en CI."
+        },
+        "output_file": "/tmp/faro-rule-authority-storage-mariadb"
+      },
+      "floor_definition_sha256": "394bf2567f47c8d6942c3e30019376f34fedc15c175bc100e9cc830f2fdc3595",
+      "introducing_merge": "8d1d1c49c5795fd6416085084265006fbcb6d69b",
+      "introducing_parent1": "0d6484f2f56059e9fb0d11b04de8990375ee7c53",
+      "introducing_parent2": "597b9a75d32874a84613e1ed7a0de40ea9e620ab",
+      "expected_diff_sha256": "9f020c472765aba2ea0428fcf00ad0734c1b6145c2e0643f9781e7859043d4a5"
+    }
+  ]
 }
