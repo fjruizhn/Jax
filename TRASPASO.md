@@ -26,8 +26,11 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   `git diff --check` pasan.
 - Las pruebas MariaDB no se ejecutaron: el fixture Docker no puede abrir
   `/var/run/docker.sock` por permiso denegado.
-- GLM/ZCode está ejecutando revisión read-only del SHA `76c8ecd0` (checkpoint/almacenamiento
-  externo); el resultado todavía no ha llegado. Kimi CLI no está disponible por límite 403.
+- GLM/ZCode revisa read-only el SHA `76c8ecd0` (checkpoint/almacenamiento externo); su
+  veredicto final aún está pendiente. Observó que fallo post-commit/post-anclaje queda
+  cerrado hasta reconciliación explícita y que adapters futuros deben tomar primero el
+  mismo `flock`; falta runbook auditado de reconciliación antes de wiring productivo.
+  Kimi CLI no está disponible por límite 403.
 - Añadí regresión que forja una cadena hash-válida con un head histórico repetido. Pasa con
   el validador vigente; mutando temporalmente esa guardia, falla como se espera. Suite de
   checkpoint: 7 passed.

@@ -75,6 +75,8 @@ integración final queda pendiente de la respuesta de Fernando sobre overlays.
 - Bloqueo técnico abierto antes del wiring: la emisión todavía no comparte la misma
   transacción/row lock con el ledger Block 4. Resolver el contrato de conexión y orden de
   locks, implementar consumo y kernel, y validar en MariaDB CI.
-- GLM/ZCode tiene auditoría read-only en curso sobre `76c8ecd0`; no cubre los cambios
-  posteriores. La semántica `OVERLAY_ISSUED` permanece como decisión directa pendiente de
-  Fernando y bloquea integración, no el trabajo aislado.
+- GLM/ZCode revisa read-only `76c8ecd0`; el veredicto final está pendiente y no cubre
+  cambios posteriores. Hallazgos observados: post-commit/post-anclaje queda fail-closed
+  hasta reconciliación explícita; falta runbook auditado para esa reconciliación y cualquier
+  adapter nuevo debe tomar primero el mismo `flock`. La semántica `OVERLAY_ISSUED` permanece
+  como decisión directa pendiente de Fernando y bloquea integración, no el trabajo aislado.
