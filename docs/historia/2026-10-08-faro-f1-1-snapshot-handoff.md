@@ -272,13 +272,17 @@ no concede autoridad ni prueba el estado operativo actual.
 
 - Hubo dos auditorías Tier 3 independientes sobre el SHA exacto
   `bf0a11d940af4c67a6f8b015fc454c005685316e`. `audit_373_final` informó
-  APROBADO CON CAMBIOS, 0 BLOCK, 0 MAJOR y 2 MINOR. `audit_faro_heads` informó
-  APROBADO funcional, 0 BLOCK, 0 MAJOR y 3 MINOR: scan O(n) sin p95/RSS
-  (load test 0.9); `tests/test_faro_aviso.py:1081–1124` no aísla reinicio y
-  procesos cortos ni LRU > 32; y `test_faro_rule_authority_models` no invoca
-  el evaluador/wiring futuro. Son dos veredictos distintos: la nota que decía
-  2 MINOR reflejaba solo `audit_373_final` y omitía el tercer hallazgo de
-  `audit_faro_heads`.
+  APROBADO CON CAMBIOS, 0 BLOCK, 0 MAJOR y 2 MINOR: scan O(n) sin p95/RSS
+  (load test 0.9) y falta de presupuesto estructural futuro para
+  `RuleEvaluationRequest.arguments` ([veredicto](https://github.com/fjruizhn/Jax/pull/371#issuecomment-6091232740)).
+  `audit_faro_heads` informó APROBADO funcional, 0 BLOCK, 0 MAJOR y 3 MINOR:
+  scan O(n) sin p95/RSS; `tests/test_faro_aviso.py:1081–1124` no aísla reinicio
+  y procesos cortos ni LRU > 32; y `test_faro_rule_authority_models` no invoca
+  el evaluador/wiring futuro ([veredicto formal](https://github.com/fjruizhn/Jax/pull/371#issuecomment-6092620311)).
+  Ambos informes comparten el hallazgo O(n); los otros difieren. Una nota
+  intermedia parafraseó el tercer punto de `audit_faro_heads` como una
+  afirmación futura sobre `store.record()`/lease; el comentario formal precisa
+  la falta de invocación del evaluador/wiring ([nota de coordinación](https://github.com/fjruizhn/Jax/pull/371#issuecomment-6091653546)).
 - La CI de `bf0a11d…` midió 780 pruebas frente al piso anterior de 729; falló
   `faro-fase0` únicamente por ese desfase, mientras `tests-puros` pasó. El
   cambio `c86582af06e62888df649658300600e6ce5ccf14` actualizó
