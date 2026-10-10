@@ -526,6 +526,27 @@ def test_parser_de_grant_rechaza_campos_extra_y_hash_alterado():
         cp._validar_grant({**grant, "floor_definition_sha256": "0" * 64}, "test")
 
 
+def test_transicion_de_definicion_acepta_creacion_o_reemplazo_exacto():
+    objetivo = {"entry": {"patron": "^20 passed in ", "mensaje": "m"},
+                "output_file": "/tmp/x"}
+    anterior = {"entry": {"patron": "^12 passed in ", "mensaje": "m"},
+                "output_file": "/tmp/x"}
+    assert cp._validar_transicion_piso(None, objetivo, objetivo, objetivo) is None
+    assert cp._validar_transicion_piso(anterior, objetivo, objetivo, objetivo) is None
+
+
+@pytest.mark.parametrize("antes,propuesto,aterrizado", [
+    ({"entry": "20", "output_file": "/tmp/x"}, {"entry": "20", "output_file": "/tmp/x"},
+     {"entry": "20", "output_file": "/tmp/x"}),
+    (None, {"entry": "19", "output_file": "/tmp/x"}, {"entry": "20", "output_file": "/tmp/x"}),
+    (None, {"entry": "20", "output_file": "/tmp/x"}, {"entry": "19", "output_file": "/tmp/x"}),
+])
+def test_transicion_de_definicion_rechaza_cualquier_otro_estado(antes, propuesto, aterrizado):
+    objetivo = {"entry": "20", "output_file": "/tmp/x"}
+    with pytest.raises(cp.PisosError, match="transición exacta"):
+        cp._validar_transicion_piso(antes, propuesto, aterrizado, objetivo)
+
+
 def test_historia_incompleta_y_merge_ilegible_fallan_cerrado(monkeypatch, repo):
     real_git = cp._git
     monkeypatch.setattr(cp, "_git", lambda root, *args: subprocess.CompletedProcess(
@@ -553,24 +574,28 @@ def test_hash_de_diff_incluye_oid_modos_y_rutas(repo):
     assert cp._huella_diff_oids(repo, base, head) == cp._hash_canonico(rows)
 
 
-def test_registry_solo_autoriza_en_merge_dedicado_y_diff_exacto(repo, monkeypatch):
+@pytest.mark.parametrize("replacement", [False, True])
+def test_registry_solo_autoriza_en_merge_dedicado_y_diff_exacto(repo, monkeypatch, replacement):
     import os
     import json
 
     root_data = {"version": 1, "pisos": {"job/keep": {"patron": "^2 passed", "mensaje": "k"}}, "minimos": {}}
-    with_floor = copy.deepcopy(root_data)
+    prior_data = copy.deepcopy(root_data)
+    if replacement:
+        prior_data["pisos"]["job/retire"] = {"patron": "^0 passed", "mensaje": "old"}
+    with_floor = copy.deepcopy(prior_data)
     with_floor["pisos"]["job/retire"] = {"patron": "^1 passed", "mensaje": "r"}
     workflow = "jobs:\n  job:\n    steps:\n      - run: |\n"
     keep_call = "          python3 .github/ci/piso.py verificar job/keep /tmp/keep || exit $?\n"
     retire_call = "          python3 .github/ci/piso.py verificar job/retire /tmp/retire || exit $?\n"
-    _escribir(repo, "ci/pisos.json", json.dumps(root_data))
-    _escribir(repo, ".github/workflows/policy.yml", workflow + keep_call)
+    _escribir(repo, "ci/pisos.json", json.dumps(prior_data))
+    _escribir(repo, ".github/workflows/policy.yml", workflow + keep_call + (retire_call if replacement else ""))
     _escribir(repo, ".github/workflows/floor-retirements.json", '{"version":1,"grants":[]}')
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "baseline")
     baseline = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
-    # Introduce the floor in a two-parent merge, after a parent1 that lacks it.
+    # Introduce or replace the floor in a two-parent merge.
     _git(repo, "branch", "introduce")
     _git(repo, "checkout", "-q", "introduce")
     _escribir(repo, "ci/pisos.json", json.dumps(with_floor))

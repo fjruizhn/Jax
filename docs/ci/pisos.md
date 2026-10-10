@@ -54,8 +54,10 @@ completa del piso (entrada canónica y archivo que consume el workflow), hash SH
 merge de introducción con ambos padres y hash del diff esperado. La excepción solo se considera
 si la propia base evaluada es exactamente un merge dedicado de dos padres: parent1 es el estado
 previo, parent2 es el commit que añade solo el grant al registro, y el diff de ambos lados cambia
-únicamente el registro. Cualquier avance de `master` deja de ser esa transición y caduca el
-permiso. El diff esperado se calcula de rutas, modos y OIDs completos, no de texto parche; un
+únicamente el registro. El merge de introducción debe cambiar la definición de parent1 a la
+definición exacta del grant en parent2 y en el merge; el estado previo puede carecer de la clave
+o tener una definición diferente. Cualquier avance de `master` deja de ser esa transición y caduca
+el permiso. El diff esperado se calcula de rutas, modos y OIDs completos, no de texto parche; un
 archivo extra, cambio parcial, segundo retiro, diferencia de definición o permiso ambiguo/malformado
 conserva el rechazo ordinario. Los pisos desaparecidos se filtran solo individualmente después
 de acreditar todas esas condiciones; el permiso no autoriza otras bajas.
@@ -4700,6 +4702,11 @@ Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la form
 227 -> 233 (2026-10-10, soporte genérico de retiros): +6 pruebas para transición dedicada del
 registro, grant solo en la base exacta, hash raw de diff, fallos de historia incompleta y
 rechazo de grant en otra rama destino. Medido con el comando exacto de CI: `233 passed`.
+233 -> 238 (2026-10-10, transición exacta del piso para rollback #387): +4 casos unitarios para
+aceptar creación/reemplazo exactos y rechazar estados anterior/propuesto/aterrizado incorrectos;
+el escenario de integración del grant ahora cubre también reemplazo de una definición previa
+(+1 parámetro). Medición local con el comando exacto de CI en Python 3.14.4: `238 passed`; la
+corrida CI en Python 3.12 debe confirmarlo antes de integrar.
 
 ## `authority-ledger-seal/attacks`
 
