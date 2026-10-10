@@ -10,10 +10,6 @@ class RuleAuthorityError(RuntimeError):
     """Base de los errores de este paquete."""
 
 
-class RuleAuthorityStorageError(RuleAuthorityError):
-    """Persistencia durable no disponible o inconsistente; nunca equivale a PERMIT."""
-
-
 class RuleSchemaError(RuleAuthorityError):
     """Una regla no cumple el shape cerrado rule-v1 (§7 + R-4)."""
 

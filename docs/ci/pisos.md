@@ -4662,19 +4662,6 @@ y el servidor final como `port: 3306`; el detector ahora espera el segundo (o el
 `init process done`) antes de autenticar y consultar `SELECT 1`. Una regresión unitaria cubre ambos
 formatos. La medición real con Docker del 2026-10-09 confirmó 10 en Python 3.14.
 
-## `authority-rule-storage/mariadb`
-
-Piso configurado: `^20 passed in `. El 2026-10-10 se añadieron ocho regresiones de arranque,
-reintentos y diagnóstico al piso medido de 12; la siguiente CI exacta debe confirmar `20 passed`
-antes de considerarlo re-medido. La suite usa el comando del workflow y MariaDB `12.3.3` efímera
-(`--network none`, socket Unix). Los casos ejecutados comprueban
-rollback del append parcial, errores de rollback, idempotencia y binding de solicitud/hash/catálogo,
-readiness del servidor definitivo, puerto no temporal, diagnóstico de migración, triggers append-only,
-restricciones de permisos y OIDs, planes indexados y provisioning de mínimo privilegio para todas las
-cuentas homónimas. El test fuente fue portado desde el head #375
-`6ae6986af2c7fd68b4392e750d65779e5df20875`; la base vigente no contiene la implementación previa,
-por lo que no existe un código anterior ejecutable contra el que demostrar RED.
-
 checkpoint-overlay (2026-10-07, auditor de #377): 5 -> 6 (+1: overlay a corpus no ratificado se
 rechaza antes de escribir — cero filas; la tanda de 8 eventos se reordenó para emitir el overlay
 antes de revocar la ratificación). Medido con la MariaDB efímera 12.3.3 (`--network none`).

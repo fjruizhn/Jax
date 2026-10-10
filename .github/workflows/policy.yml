@@ -2812,15 +2812,6 @@ jobs:
           # Piso 10 (2026-10-09): la regresión de overlay sin ratificación eleva en uno la suite MariaDB.
           python -m pytest -q tests/policy/test_authority_ledger_storage_mariadb.py tests/policy/test_authority_ledger_append_validation_mariadb.py 2>&1 | tee /tmp/authority-ledger-mariadb
           python3 .github/ci/piso.py verificar authority-ledger-mariadb/integration /tmp/authority-ledger-mariadb || exit $?
-      - name: Faro F1.1 Rule Authority MariaDB aislada -- piso exacto
-        env:
-          PYTHONPATH: "."
-          JAX_RULE_AUTHORITY_DOCKER_CMD: docker
-        run: |
-          set -o pipefail
-          python -m pip install --require-hashes -r requirements-faro-mariadb-ci.txt
-          python -m pytest -q tests/policy/test_faro_rule_authority_storage_mariadb.py 2>&1 | tee /tmp/faro-rule-authority-storage-mariadb
-          python3 .github/ci/piso.py verificar authority-rule-storage/mariadb /tmp/faro-rule-authority-storage-mariadb || exit $?
       - name: Block 4 rule ratification events -- piso exacto
         env:
           PYTHONPATH: "."

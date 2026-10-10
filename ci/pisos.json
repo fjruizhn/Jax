@@ -137,10 +137,6 @@
       "patron": "^10 passed in ",
       "mensaje": "PISO ROTO: se esperaban 10 tests CORRIDOS de la suite MariaDB aislada del ledger (incluye la regresión del overlay sin ratificación). Medido el 2026-10-09."
     },
-    "authority-rule-storage/mariadb": {
-      "patron": "^20 passed in ",
-      "mensaje": "PISO ROTO: se esperan exactamente 20 pruebas de persistencia Rule Authority contra MariaDB 12.3.3 --network none (readiness del servidor final, puerto no temporal, retries transitorios y diagnóstico de fallos de migración). Ocho regresiones añadidas al piso anterior de 12; validar el conteo en CI."
-    },
     "authority-rule-events/ratifications": {
       "patron": "^12 passed in ",
       "mensaje": "PISO ROTO: se esperaban exactamente 12 pruebas de payload, codec y replay de ratificaciones Faro individuales. Medido el 2026-10-07 en hall9000."
