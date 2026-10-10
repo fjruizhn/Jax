@@ -286,10 +286,18 @@ def test_la_base_se_trae_de_la_url_fija_a_una_ref_propia_no_del_origin_configura
     assert "origin" not in run
 
 
-def test_registro_de_retiros_vigente_inicia_vacio_y_con_esquema_versionado():
+def test_registro_de_retiros_versionado_expone_grants_con_esquema_cerrado():
     registro = RAIZ / ".github" / "workflows" / "floor-retirements.json"
     datos = json.loads(registro.read_text(encoding="utf-8"))
-    assert datos == {"version": 1, "grants": []}
+    assert set(datos) == {"version", "grants"}
+    assert datos["version"] == 1
+    assert isinstance(datos["grants"], list)
+    campos_grant = {
+        "repository", "pull_request", "base_branch", "floor_key", "floor_definition",
+        "floor_definition_sha256", "introducing_merge", "introducing_parent1",
+        "introducing_parent2", "expected_diff_sha256",
+    }
+    assert all(isinstance(grant, dict) and set(grant) == campos_grant for grant in datos["grants"])
 
 
 def test_el_paso_comparador_ya_no_esta_en_el_job_de_las_pruebas():
