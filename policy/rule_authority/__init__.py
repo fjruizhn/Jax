@@ -11,6 +11,7 @@ from .models import (
 from .store import InMemoryRuleDecisionStore, RuleDecisionStore
 from .storage import MariaDBRuleDecisionStore
 from .errors import RuleAuthorityStorageError
+from .permit import RulePermit, RulePermitDraft
 
 __all__ = [
     "InMemoryRuleDecisionStore",
@@ -19,6 +20,8 @@ __all__ = [
     "RuleDecisionStatus",
     "RuleDecisionStore",
     "RuleAuthorityStorageError",
+    "RulePermit",
+    "RulePermitDraft",
     "RuleEvaluation",
     "RuleEvaluationRequest",
     "RuleLimits",
