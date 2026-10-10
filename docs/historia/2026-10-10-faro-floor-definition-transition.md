@@ -30,3 +30,12 @@
 ## Siguiente comando
 
 `gh run watch 38053864753 --repo fjruizhn/Jax --exit-status`
+
+## Cierre del traspaso — 2026-10-10
+
+- La auditoría Tier 3 del SHA `5ac7a74cc3072531505d8bdcff359df0dc39cebe` fue `RECHAZADO (BLOCK 1)` por conservar `TRASPASO.md` en el árbol. No identificó fallos de autoridad/código. Este archivo archiva ese traspaso y `TRASPASO.md` se quita antes de la auditoría final.
+- Kimi revisó en solo lectura; sin blockers. Su observación LOW sobre cambio aislado de `output_file` fue resuelta por Tier 3: `output_file` es parte de la identidad completa de `floor_definition`.
+- La CLI ZCode/GLM no produjo veredicto; emitió `Built-in skipped (not-due)` y se canceló sin modificar archivos.
+- Corrida CI #393 `38053864753` seguía con `tests-puros` en curso al último chequeo; el preflight oficial rechazó #393 hasta que termine verde.
+- El CI Python 3.12 del cambio de transición, el PR de soporte y el nuevo preflight/guard aún están pendientes.
+- El grant local #390 debe apuntar a la introducción de #392: merge `8d1d1c49c5795fd6416085084265006fbcb6d69b`, parent1 `0d6484f2f56059e9fb0d11b04de8990375ee7c53`, parent2 `597b9a75d32874a84613e1ed7a0de40ea9e620ab`; recalcular `expected_diff_sha256` tras el rebase final.
