@@ -49,10 +49,14 @@
 - Verificación disponible en el worktree posterior: el conjunto focalizado de kernel/modelos/
   permit/store/providers/checkpoint dio `333 passed`; el job unitario exacto da ahora `52 passed`.
   Se añadieron seis casos con barreras para STOP, pin y clasificación: cambios ganadores antes
-  del lease y escritores bloqueados durante el append durable. El harness mantiene fake el owner
-  transaccional/persistencia; no cierra el BLOCK Tier 3 de MariaDB ni la carrera integral de
-  revocación/consumo. El verificador falló con el piso anterior 46; actualizarlo a 52 requiere
-  repetirlo y CI exacta aún debe confirmar el SHA final. Identity Shadow
+  del lease y escritores bloqueados mientras la llamada al append del store está detenida. El
+  harness mantiene fake el owner transaccional/persistencia; no prueba escritura durable real ni
+  cierra el BLOCK Tier 3 de MariaDB o la carrera integral de revocación/consumo. El delta-audit
+  GLM de `d37279dc` encontró tres MINOR (liberación de barreras al fallar, observación antes del
+  append y deadline de 5 s); el commit posterior `546c5d95` extiende la pausa hasta la llamada al
+  append, y el follow-up local mueve la liberación dentro del pool y amplía el deadline a 10 s.
+  El verificador falló con el piso anterior 46; alinear a 52 pasó localmente y CI exacta aún debe
+  confirmar el SHA final. Identity Shadow
   dio `1044 passed`; `git diff --check` y `python3 -m json.tool ci/pisos.json` pasan.
 - Siguiente acción concreta: completar pruebas de carrera end-to-end de evaluate/consume con
   providers y owner transaccional; después, recibir el tip oficial, reapilar, re-medir los pisos exactos y actualizar

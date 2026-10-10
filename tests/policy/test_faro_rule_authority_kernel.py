@@ -418,7 +418,7 @@ def test_consume_denies_provider_change_that_wins_before_its_lease(tmp_path, mon
 
 
 @pytest.mark.parametrize("kind", ["stop", "pin", "classification"])
-def test_consume_holds_provider_lease_until_durable_append(tmp_path, monkeypatch, kind):
+def test_consume_holds_provider_lease_while_store_append_is_in_flight(tmp_path, monkeypatch, kind):
     kernel, providers = _kernel_consume_harness(tmp_path, monkeypatch)
     validated = threading.Event()
     release_validation = threading.Event()
@@ -451,28 +451,32 @@ def test_consume_holds_provider_lease_until_durable_append(tmp_path, monkeypatch
 
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
-            consume_future = pool.submit(
-                kernel.consume,
-                "0199f8a1-8c00-7000-8000-000000000062",
-                _request(capability="CAPABILITY_ID", objective="objetivo-ejemplo",
-                         quantity=1, quantity_unit="mensajes").request_hash,
-                "0199f8a1-8c00-7000-8000-000000000064",
-            )
-            assert validated.wait(timeout=5)
-            writer_future = pool.submit(update_provider)
-            assert writer_started.wait(timeout=5)
-            deadline = time.monotonic() + 5
-            while provider.esperando() == 0 and time.monotonic() < deadline:
-                threading.Event().wait(0.001)
-            assert provider.esperando() > 0
-            assert not writer_future.done()
-            release_validation.set()
-            assert append_started.wait(timeout=5)
-            assert provider.esperando() > 0
-            assert not writer_future.done()
-            release_append.set()
-            consumption = consume_future.result(timeout=5)
-            writer_future.result(timeout=5)
+            try:
+                consume_future = pool.submit(
+                    kernel.consume,
+                    "0199f8a1-8c00-7000-8000-000000000062",
+                    _request(capability="CAPABILITY_ID", objective="objetivo-ejemplo",
+                             quantity=1, quantity_unit="mensajes").request_hash,
+                    "0199f8a1-8c00-7000-8000-000000000064",
+                )
+                assert validated.wait(timeout=5)
+                writer_future = pool.submit(update_provider)
+                assert writer_started.wait(timeout=5)
+                deadline = time.monotonic() + 10
+                while provider.esperando() == 0 and time.monotonic() < deadline:
+                    threading.Event().wait(0.001)
+                assert provider.esperando() > 0
+                assert not writer_future.done()
+                release_validation.set()
+                assert append_started.wait(timeout=5)
+                assert provider.esperando() > 0
+                assert not writer_future.done()
+                release_append.set()
+                consumption = consume_future.result(timeout=5)
+                writer_future.result(timeout=5)
+            finally:
+                release_validation.set()
+                release_append.set()
         assert consumption._is_store_sealed()
     finally:
         release_validation.set()

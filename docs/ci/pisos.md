@@ -4705,8 +4705,8 @@ Piso local `^52 passed in `, medido el 2026-10-10 con el comando del workflow so
 trabajo descendiente de #389 y `PyYAML==6.0.3`, `cryptography==49.0.0`. Incluye recuperación
 durable, identidad de retry, revalidación de `consume()`, DENY/Error estable en ambos límites
 del kernel cuando una regla sin límites recibe `rule_hash`, y carreras con barreras para cambios
-de STOP, pin y clasificación antes y durante el lease de `consume()`. Estas carreras usan el
-owner transaccional de prueba y no sustituyen la integración con MariaDB. Se ejecuta bajo Python
+de STOP, pin y clasificación antes y durante `consume()` y la llamada al append del store. Estas
+carreras usan el owner/persistencia de prueba y no sustituyen la integración con MariaDB. Se ejecuta bajo Python
 3.14 para respetar Unicode 16, fijado por el canonizador compartido. CI del SHA actualizado debe
 confirmar el piso.
 Corre sin base de datos las pruebas del kernel (límites individuales y falla cerrada ante
