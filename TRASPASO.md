@@ -1,0 +1,8 @@
+# Traspaso: test de concurrencia B2 que bloquea JAX #395
+
+- Objetivo: reemplazar la medida temporal de `TrabajoWorkerTest.test_B2_archivos_del_mismo_trabajo_se_reparten_entre_hilos` por una prueba determinista del solapamiento real entre dos hilos; publicar en PR separado y obtener CI exacta verde para desbloquear #395.
+- Rama y base: `codex/faro-processing-concurrency-ci`, creada sobre `origin/master@834170c5b7443eb16e1713378ef69103595dfec2`.
+- Hecho: revisión Tier 3 read-only concluyó que el fallo de #395 es inestabilidad del reloj, no una regresión funcional. El job reportó 0.5126 s frente al límite de 0.5 s, con 0.210 s de pausa de loop. La revisión recomienda `threading.Barrier(2)`, dos IDs de hilo distintos y capturar `BrokenBarrierError` porque el worker convierte excepciones en resultados.
+- Falta: ejecutar baseline exacta en este worktree; escribir/ajustar la prueba bajo TDD; verificar el caso serial de forma determinista; actualizar historia, quitar este archivo, pedir auditoría Tier 3 del SHA final, publicar PR separado y esperar CI exacta.
+- Decisiones: Fernando autorizó a Codex coordinar los bloqueos Faro y continuar autónomamente. No se cambiará `las_manos/procesamiento_routes.py`; el fix se limita al test frágil. Kimi está limitado por 403 y GLM g5 por cuota; GLM g6 terminó una revisión read-only de #388. Una revisión interna Tier 3 confirmó que el ownership histórico de `fruiz-98` está cerrado y que la marca nueva de Codex está publicada en `claude-skills/main` como `fe7b6429`.
+- Siguiente comando: `PYTHONPATH=.:las_manos python -m pytest -q las_manos/_procesamiento_routes_test.py::TrabajoWorkerTest::test_B2_archivos_del_mismo_trabajo_se_reparten_entre_hilos`.
