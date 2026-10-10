@@ -304,10 +304,11 @@ def test_lanzar_anota_antes_de_arrancar_y_arranca_la_unidad_con_el_argv_completo
     assert orden == ["jaula_lanzada", "arranque"]
     (uid, argv), = scope.arrancados                            # UNA unidad, del uid de la jaula
     assert uid == UID_JAULA
-    assert argv[:6] == ("/usr/bin/sudo", "-n", "-u", f"#{UID_JAULA}", "--", str(bwrap))
-    assert "/usr/bin/setpriv" not in argv
+    # el argv completo tal cual (el `env -i` de la allowlist lo antepone el gestor real: test_faro_scope)
     assert list(argv) == LanzadorJaula(_cfg(bwrap), Bitacora(emisores=[]), ScopeDoble()).argv_completo(
         _srv().ejecucion, *_rutas(), ["/usr/bin/python3", "-c", "pass"])
+    assert argv[:6] == ("/usr/bin/sudo", "-n", "-u", f"#{UID_JAULA}", "--", str(bwrap))
+    assert "/usr/bin/setpriv" not in argv
 
 
 def test_lo_anotado_dice_quien_y_con_que_uid_y_no_lleva_el_token(bwrap, tmp_path):

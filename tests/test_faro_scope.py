@@ -268,6 +268,8 @@ class SistemaDoble:
             if nombre in ("MemoryMax", "CPUQuotaPerSecUSec", "TasksMax"):
                 valores[nombre] = u["propiedades"].get(nombre) if u else \
                     {"MemoryMax": "infinity", "CPUQuotaPerSecUSec": "infinity", "TasksMax": "96548"}[nombre]
+            if nombre == "Description":
+                valores[nombre] = u["propiedades"].get("Description", "") if u else ""
         # como systemd: clave=valor (el orden interno del manager no es el pedido)
         return 0, ("\n".join(f"{k}={v}" for k, v in valores.items() if k in nombres) + "\n").encode(), b""
 
@@ -306,23 +308,35 @@ def correr(coro):
 
 def test_el_argv_de_arranque_es_el_del_diseno_sin_defaults_ni_sorpresas():
     g = ScopeManager(ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128", slice="faro.slice"))
-    argv = g.argv_arrancar(UID, ["/usr/bin/sudo", "-n", "-u", "#50001", "--", "/usr/bin/bwrap", "--dev", "/dev"])
+    argv = g.argv_arrancar(UID, ["/usr/bin/sudo", "-n", "-u", "#50001", "--", "/usr/bin/bwrap", "--dev", "/dev"],
+                           intento="abc123")
     assert argv[0] == "/usr/bin/systemd-run"
     assert argv[1:6] == ["--user", "--quiet", "--pipe", "--collect", "--unit=faro-jaula-u50001.service"]
     assert "--slice=faro.slice" in argv
     for propiedad in ("Type=exec", "KillMode=control-group", "OOMPolicy=kill",
+                      "Description=FARO-R2-abc123",
                       "MemoryMax=256M", "CPUQuota=200%", "TasksMax=128"):
         assert f"--property={propiedad}" in argv, propiedad
-    assert argv[-8:] == ["/usr/bin/sudo", "-n", "-u", "#50001", "--", "/usr/bin/bwrap", "--dev", "/dev"]
+    # ALLOWLIST CERRADA (MAJOR 3): el comando corre bajo `env -i` — nada del entorno del manager
+    assert argv[-10:] == ["/usr/bin/env", "-i", "/usr/bin/sudo", "-n", "-u", "#50001",
+                          "--", "/usr/bin/bwrap", "--dev", "/dev"]
     texto = " ".join(argv)
     assert "MemoryMax=infinity" not in texto and "--scope" not in texto and "--system" not in texto
+    assert "--setenv" not in texto and "XDG_RUNTIME_DIR" not in texto
 
 
 @pytest.mark.parametrize("comando", [[], "bwrap", ["/usr/bin/bwrap", "x\x00y"], ["relativo/bwrap"], [5]])
 def test_el_argv_de_arranque_no_admite_un_comando_vacio_o_de_tipo_raro(comando):
     g = ScopeManager(ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128"))
     with pytest.raises(ConfigFaroInvalida):
-        g.argv_arrancar(UID, comando)
+        g.argv_arrancar(UID, comando, intento="abc123")
+
+
+@pytest.mark.parametrize("intento", [None, "", "con espacio", "con\x00nul"])
+def test_el_argv_de_arranque_exige_un_id_de_intento_usable(intento):
+    g = ScopeManager(ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128"))
+    with pytest.raises(ConfigFaroInvalida):
+        g.argv_arrancar(UID, ["/usr/bin/true"], intento=intento)
 
 
 def test_el_argv_de_kill_es_sigkill_a_toda_la_unidad():
@@ -462,7 +476,9 @@ def test_arrancar_arranca_la_unidad_del_uid_con_el_comando_y_la_da_por_lista(sis
         g = gestor(sistema)
         proceso = await g.arrancar(UID, ["/usr/bin/sudo", "-n", "-u", "#50001", "--", "/usr/bin/bwrap"])
         try:
-            assert sistema.arrancados == [(UNIDAD, ("/usr/bin/sudo", "-n", "-u", "#50001", "--", "/usr/bin/bwrap"))]
+            # el comando de la unidad corre bajo env -i (allowlist cerrada) con la elevacion dentro
+            assert sistema.arrancados == [(UNIDAD, ("/usr/bin/env", "-i", "/usr/bin/sudo", "-n", "-u",
+                                                    "#50001", "--", "/usr/bin/bwrap"))]
             assert await g.estado(UID) is EstadoUnidad.LIVE
             env = sistema.kw.get("env")
             # entorno minimo: PATH y, como mucho, las dos variables que ubican el bus del user manager
@@ -495,7 +511,7 @@ def test_arrancar_verifica_con_show_antes_de_dar_por_lista_la_unidad(sistema):
         g._crear_proceso = proceso
         await g.arrancar(UID, ["/usr/bin/true"])
         props = " ".join(a for a in shows[0] if a.startswith("--property="))
-        for esperada in ("ActiveState", "ControlGroup", "MemoryMax", "CPUQuotaPerSecUSec", "TasksMax"):
+        for esperada in ("ActiveState", "ControlGroup", "Description", "MemoryMax", "CPUQuotaPerSecUSec", "TasksMax"):
             assert esperada in props, esperada
         assert "--value" not in shows[0]                    # clave=valor: el orden interno de systemd no es el pedido
     correr(caso())
@@ -514,6 +530,70 @@ def test_arrancar_con_la_unidad_ocupada_por_otro_falla_y_no_la_toca(sistema):
     estado, muertes = correr(caso())
     assert estado is EstadoUnidad.LIVE                 # la original sigue viva: NO se mata la ajena
     assert muertes == []
+
+
+def test_block1_un_perdedor_tardio_no_adopta_la_unidad_del_ganador_ni_la_mata(sistema):
+    """El caso exacto del BLOCK 1: nuestro systemd-run aun figura vivo (returncode None para siempre,
+    como un rechazo que no llego al child watcher), la unidad activa es la del GANADOR (otra
+    Description). La identidad por intento — no la temporizacion — decide: fallo, y el kill con guard
+    deja al ganador intacto."""
+    async def caso():
+        _poblar(sistema, activa=True, poblada=1)
+        sistema.unidades[UNIDAD]["propiedades"]["Description"] = "FARO-R2-ganador"
+        sistema.unidades[UNIDAD]["propiedades"].update({"MemoryMax": str(sistema.cfg.bytes_memoria()),
+                                                        "CPUQuotaPerSecUSec": _timespan(sistema.cfg.usec_cpu()),
+                                                        "TasksMax": str(sistema.cfg.tareas())})
+        g = gestor(sistema)
+
+        async def proceso_tardio(*argv, **kw):
+            p = await sistema.crear_proceso(*argv, **kw)
+            if argv[0].endswith("systemd-run") and isinstance(p, ProcFalso):
+                p._rc = 0                                      # vive para siempre: el rechazo nunca llega
+            return p
+        g._crear_proceso = proceso_tardio
+        try:
+            await g.arrancar(UID, ["/usr/bin/true"])
+        except ScopeError as e:
+            assert "otro intento" in str(e)
+            return await g.estado(UID), sistema.muertes
+        raise AssertionError("tenia que fallar por identidad ajena")
+    estado, muertes = correr(caso())
+    assert estado is EstadoUnidad.LIVE                 # la unidad del ganador sigue viva
+    assert muertes == []                               # y jamas recibio nuestro kill
+
+
+def test_major2_cancelada_la_creacion_del_subproceso_la_unidad_nacida_se_limpia(sistema):
+    """MAJOR 2: la cancelacion llega MIENTRAS _crear_proceso esta en vuelo, despues de que el doble ya
+    creo la unidad. La limpieza acotada la encuentra (Description nuestra) y la mata; nunca queda viva
+    sin seguimiento."""
+    async def caso():
+        g = gestor(sistema)
+        adentro = asyncio.Event()
+
+        async def crear_lento(*argv, **kw):
+            p = await sistema.crear_proceso(*argv, **kw)       # la unidad YA nacio con NUESTRA Description
+            if argv[0].endswith("systemd-run"):
+                adentro.set()
+                await asyncio.Event().wait()                   # bloqueado antes de devolver el handle
+            return p
+        g._crear_proceso = crear_lento
+        tarea = asyncio.create_task(g.arrancar(UID, ["/usr/bin/true"]))
+        await asyncio.wait_for(adentro.wait(), 2)
+        tarea.cancel()
+        try:
+            await tarea
+        except asyncio.CancelledError:
+            pass
+        return sistema.muertes, await g.estado(UID)
+    muertes, estado = corre_con_plazo(caso())
+    assert muertes == [UNIDAD]                         # la unidad nacida de nuestro intento, muerta
+    assert estado is EstadoUnidad.EMPTY
+
+
+def corre_con_plazo(coro):
+    async def envolver():
+        return await asyncio.wait_for(coro, 10)
+    return asyncio.run(envolver())
 
 
 @pytest.mark.parametrize("romper", ["MemoryMax", "CPUQuotaPerSecUSec", "TasksMax"])
@@ -772,6 +852,26 @@ class TestUserManagerReal:
         finally:
             correr(self._limpiar(g, uid))
         assert estado is EstadoUnidad.EMPTY
+
+    def test_major3_el_entorno_persistente_del_manager_no_llega_a_la_cadena_de_la_unidad(self, tmp_path):
+        """MAJOR 3 con systemd REAL: el servicio transitorio hereda el entorno del user manager; con la
+        allowlist cerrada (`env -i`), nada de ese entorno llega a la cadena de la unidad. Las variables
+        del bus existen en esta sesion (sin ellas `--user` no conecta): la prueba las usa de centinela."""
+        uid, g = self._uid(), self._gestor()
+        salida = tmp_path / "env-de-la-unidad.txt"
+
+        async def caso():
+            await g.arrancar(uid, ["/bin/sh", "-c", f"env > {salida}; sleep 5"])
+            viva = await g.estado(uid)
+            await g.matar(uid)
+            return viva, await g.esperar_vacio(uid, plazo_s=10.0), salida.read_text()
+        try:
+            viva, estado, volcado = correr(caso())
+        finally:
+            correr(self._limpiar(g, uid))
+        assert viva is EstadoUnidad.LIVE and estado is EstadoUnidad.EMPTY
+        for prohibida in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "HOME", "LANG", "PATH"):
+            assert f"{prohibida}=" not in volcado, prohibida
 
     def test_el_lanzador_arranca_la_unidad_y_la_jaula_recibe_su_uid_por_la_elevacion(self, tmp_path):
         """El camino completo de `lanzar` (0.6/R-2) con systemd-run REAL y un bwrap de mentira: la unidad

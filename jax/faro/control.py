@@ -237,6 +237,7 @@ class ServidorControl:
         self._ejecuciones: dict[str, ServidorPuerto] = {}
         self._uids: dict[int, str] = {}                 # uid de jaula -> run_id de la ejecucion viva que lo usa
         self._retenidos: set[int] = set()               # uids de ejecuciones cerradas cuya unidad no se confirmo vacia
+        self._cierres: dict[int, asyncio.Task] = {}     # uid -> kill+confirmacion en vuelo (BLOCK 2)
 
     @property
     def ruta_socket(self) -> Path:
@@ -273,6 +274,10 @@ class ServidorControl:
             except TimeoutError:  # fail-soft: el apagado no puede colgarse; ya se cancelaron todas las tareas
                 logger.warning("el cierre del canal de control no termino en 5s: se sigue con el apagado")
             self._servidor = None
+        # BLOCK 2: los cierres que el apagado cancelo a mitad (la peticion `cerrar` corria en una
+        # conexion) se completan AQUI: la tarea de kill+confirmacion es propia y no muere con la
+        # conexion. Antes de cerrar las ejecuciones que quedaron vivas, se espera lo ya en vuelo.
+        await asyncio.gather(*list(self._cierres.values()), return_exceptions=True)
         for run_id, srv in list(self._ejecuciones.items()):
             await self._cerrar_ejecucion(run_id, srv)
         try:
@@ -409,8 +414,9 @@ class ServidorControl:
     async def _cerrar_ejecucion(self, run_id: str, srv: ServidorPuerto) -> None:
         """El orden de cierre de R-2/0.6: (1) el uid se conserva desde ya; (2) se revoca el Puerto de ESA
         ejecucion; (3) SIGKILL a TODA su unidad (hijos y nietos), sin tocar a las hermanas; (4) se espera
-        la confirmacion de unidad/cgroup vacio. Solo `EMPTY` suelta el uid: error o plazo vencido lo
-        dejan retenido hasta una consulta posterior que confirme vacio."""
+        la confirmacion de unidad/cgroup vacio. Solo `EMPTY` suelta el uid. El kill+confirmacion corre en
+        una TAREA propia que sobrevive a la cancelacion de la conexion que pidio el cierre (BLOCK 2): el
+        apagado (`__aexit__`) cancela las conexiones pero espera estas tareas antes de salir."""
         self._ejecuciones.pop(run_id, None)
         uid = srv.ejecucion.uid_esperado
         self._retenidos.add(uid)                    # 1. cerrandose: el uid NO se libera todavia
@@ -418,15 +424,26 @@ class ServidorControl:
             await srv.__aexit__(None, None, None)   # 2. primero el Puerto de esa ejecucion
         except Exception:  # fail-soft: el cierre sigue; el socket de esa ejecucion ya no se atiende
             logger.exception("no se pudo cerrar bien el Puerto de %s", run_id)
+        tarea = self._cierres.get(uid)
+        if tarea is None or tarea.done():
+            tarea = asyncio.create_task(self._matar_y_soltar(uid))
+            self._cierres[uid] = tarea
+        await asyncio.shield(tarea)                 # cancelada la conexion, la tarea sigue y __aexit__ la espera
+
+    async def _matar_y_soltar(self, uid: int) -> None:
+        """3. SIGKILL a todos los procesos de la unidad + 4. confirmacion de vacio + 5. liberacion.
+        Corre como tarea propia: una CancelledError de la conexion NO la interrumpe a mitad."""
         try:
             await self._scope.matar(uid)            # 3. SIGKILL a todos los procesos de su unidad
         except Exception:  # fail-soft: el estado decide; un kill fallido nunca libera el uid
-            logger.exception("no se pudo matar la unidad del uid %s (ejecucion %s)", uid, run_id)
+            logger.exception("no se pudo matar la unidad del uid %s", uid)
         try:
             estado = await self._scope.esperar_vacio(uid)   # 4. confirmacion de vacio
         except Exception:  # fail-closed: sin confirmacion no hay liberacion
             logger.exception("no se pudo confirmar el vacio de la unidad del uid %s", uid)
             estado = EstadoUnidad.UNKNOWN
+        finally:
+            self._cierres.pop(uid, None)
         if estado is EstadoUnidad.EMPTY:            # 5. solo ahora se suelta; la reutilizacion pasa por otra consulta
             self._retenidos.discard(uid)
             self._uids.pop(uid, None)

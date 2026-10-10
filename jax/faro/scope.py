@@ -29,6 +29,18 @@ SOLO EMPTY libera un uid. LIVE y UNKNOWN lo conservan/rechazan: el fallo es cerr
 El `ControlGroup` se LEE de systemd (`systemctl --user show`), nunca se deduce por concatenacion; la
 poblacion se comprueba en `<ControlGroup>/cgroup.events` del cgroupfs (legible: el subarbol del user
 manager esta delegado a su usuario).
+
+IDENTIDAD POR INTENTO (cierre del BLOCK 1 del veredicto Tier 3 sobre f2476099). La vida del `systemd-run`
+propio NO prueba propiedad: un perdedor de la carrera puede tardar en recibir su rechazo. Cada `arrancar`
+genera un id de intento y lo planta en `--property=Description=FARO-R2-<id>`; la unidad solo se da por
+NUESTRA si `show` devuelve exactamente esa Description (determinista, sin temporizacion), y la limpieza de
+un arranque fallido o cancelado SOLO mata si la Description vigente sigue siendo la del intento.
+
+ALLOWLIST CERRADA DE ENTORNO (decision de Fernando, 2026-10-09; cierra el MAJOR 3). El entorno del user
+manager llega PERSISTENTE al servicio transitorio (el entorno de systemd-run no se hereda), y la cadena
+elevacion+bwrap corre ANTES del `--clearenv` de bwrap. Por eso el comando de la unidad empieza con
+`/usr/bin/env -i`: la elevacion y bwrap reciben exactamente lo que el argv declara y NADA del manager.
+(`--setenv`+`UnsetEnvironment=` no cierra un conjunto desconocido de variables; `env -i` si.)
 """
 from __future__ import annotations
 
@@ -39,6 +51,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,8 +62,10 @@ logger = logging.getLogger(__name__)
 
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 SYSTEMCTL = "/usr/bin/systemctl"
+ENV_LIMPIA = "/usr/bin/env"
 RAIZ_CGROUP = Path("/sys/fs/cgroup")
 PREFIJO_UNIDAD = "faro-jaula-u"
+PREFIJO_INTENTO = "FARO-R2-"
 #: Lo unico que llega a systemd-run/systemctl: PATH y, SI EXISTEN, las dos variables que ubican el bus
 #: del user manager (sin XDG_RUNTIME_DIR, `--user` no conecta: medido en hall9000, systemd 259). No son
 #: secretos y systemd-run NO los hereda el servicio (el servicio recibe el entorno del manager, no el
@@ -214,15 +229,26 @@ class ScopeManager:
     def unidad(self, uid: int) -> str:
         return nombre_unidad(uid)
 
-    def argv_arrancar(self, uid: int, comando: Sequence[str]) -> list[str]:
+    @staticmethod
+    def description_de_intento(intento: str) -> str:
+        return f"{PREFIJO_INTENTO}{intento}"
+
+    def argv_arrancar(self, uid: int, comando: Sequence[str], *, intento: str) -> list[str]:
+        """`intento` es el id UNICO de este arranque: viaja en la Description de la unidad y es lo unico
+        que prueba propiedad (la vida del systemd-run propio no: BLOCK 1). El comando corre bajo
+        `env -i`: allowlist cerrada, nada del entorno persistente del manager (MAJOR 3)."""
+        if not isinstance(intento, str) or not intento or "\x00" in intento or " " in intento:
+            raise ConfigFaroInvalida("el id de intento tiene que ser un texto sin espacios ni NUL")
         comando = _validar_comando(comando)
         c = self._cfg
         return [
             self._systemd_run, "--user", "--quiet", "--pipe", "--collect",
             f"--unit={nombre_unidad(uid)}", f"--slice={c.slice}",
             "--property=Type=exec", "--property=KillMode=control-group", "--property=OOMPolicy=kill",
+            f"--property=Description={self.description_de_intento(intento)}",
             f"--property=MemoryMax={c.memory_max}", f"--property=CPUQuota={c.cpu_quota}",
             f"--property=TasksMax={c.tasks_max}",
+            ENV_LIMPIA, "-i",
             *comando,
         ]
 
@@ -321,15 +347,22 @@ class ScopeManager:
     # -- arranque ---------------------------------------------------------------------------
     async def arrancar(self, uid: int, comando: Sequence[str]) -> object:
         """Arranca la unidad del uid con `comando` (la elevacion + bwrap ya van dentro) y no la da por
-        lista hasta VERIFICARLA activa con los tres limites efectivos y con NUESTRO systemd-run vivo:
-        con `--pipe`, nuestro proceso vivo es lo que prueba que el servicio conectado es el nuestro. Lo
-        arrancado y no verificado se mata; una unidad que resulto ser de otra ejecucion, jamas."""
+        lista hasta VERIFICARLA activa, con los tres limites efectivos y con la DESCRIPTION de ESTE
+        intento: la identidad es determinista, no se infiere por temporizacion ni por la vida del
+        systemd-run propio. Lo arrancado y no verificado se mata SOLO si sigue llevando nuestra
+        Description; una unidad de otra ejecucion, jamas."""
         unidad = nombre_unidad(uid)
-        completo = self.argv_arrancar(uid, comando)
+        intento = uuid.uuid4().hex
+        completo = self.argv_arrancar(uid, comando, intento=intento)
         try:
             proceso = await self._crear_proceso(
                 *completo, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE, env=entorno_consulta())
+        except asyncio.CancelledError:
+            # MAJOR 2: el hijo pudo nacer (y crear la unidad) antes de que la cancelacion llegara;
+            # la limpieza espera acotadamente a que la unidad aparezca y solo mata si es NUESTRA.
+            await self._limpiar_intento(uid, intento)
+            raise
         except Exception as exc:
             raise ScopeError(f"no se pudo lanzar {unidad}: {type(exc).__name__}") from exc
         if getattr(proceso, "returncode", None) is not None:
@@ -338,32 +371,29 @@ class ScopeManager:
             # es de OTRA ejecucion: no se toca.
             raise ScopeError(f"{unidad} no arranco: rc={proceso.returncode} {await self._error(proceso)}")
         try:
-            return await self._verificar(proceso, unidad)
+            return await self._verificar(proceso, unidad, intento)
         except asyncio.CancelledError:
-            await self._matar_mejor_esfuerzo(uid)
+            await self._matar_si_es_nuestra(uid, intento)
             raise
         except _UnidadAjena as exc:
             raise ScopeError(str(exc)) from exc      # no se mata: la unidad activa es de otra ejecucion
         except Exception as exc:
-            await self._matar_mejor_esfuerzo(uid)
+            await self._matar_si_es_nuestra(uid, intento)
             raise ScopeError(f"{unidad} no se pudo verificar ({exc})") from exc
 
-    async def _verificar(self, proceso, unidad: str) -> object:
+    async def _verificar(self, proceso, unidad: str, intento: str) -> object:
         fin = time.monotonic() + self._cfg.plazo_arranque_s
         while True:
             rc = getattr(proceso, "returncode", None)
-            res = await self._consultar(unidad, ("ActiveState", "ControlGroup", "MemoryMax",
-                                                 "CPUQuotaPerSecUSec", "TasksMax"))
+            res = await self._consultar(unidad, ("ActiveState", "ControlGroup", "Description",
+                                                 "MemoryMax", "CPUQuotaPerSecUSec", "TasksMax"))
             if res is not None and res["ActiveState"].strip() == "active" and res["ControlGroup"].strip():
-                if rc is not None:
-                    # unidad activa PERO nuestro systemd-run ya termino: con --pipe eso es una
-                    # contradiccion — la unidad activa es de OTRA ejecucion (perdimos la carrera).
-                    raise _UnidadAjena(f"{unidad} esta activa pero nuestro systemd-run termino rc={rc}: no es nuestra")
+                if res["Description"] != self.description_de_intento(intento):
+                    # La unidad activa bajo este nombre lleva OTRA identidad: es de otro intento
+                    # (ganamos/perdimos la carrera contra el). No se toca. (BLOCK 1)
+                    raise _UnidadAjena(f"{unidad} esta activa con Description {res['Description']!r}:"
+                                       " es de otro intento")
                 self._comparar_limites(res, unidad)
-                # un perdedor de la carrera tarda unos ms en morir: asentar antes de dar por lista
-                await asyncio.sleep(self._intervalo_s)
-                if getattr(proceso, "returncode", None) is not None:
-                    raise _UnidadAjena(f"{unidad} esta activa pero systemd-run termino rc={proceso.returncode}")
                 return proceso
             if rc is not None:
                 # con --pipe, systemd-run solo termina antes que el servicio si ALGO fallo en el arranque
@@ -394,9 +424,35 @@ class ScopeManager:
         except Exception:  # solo decorar el mensaje de fallo de arranque; sin stderr no afea el error
             return ""
 
-    async def _matar_mejor_esfuerzo(self, uid: int) -> None:
-        with contextlib.suppress(Exception):
+    async def _matar_si_es_nuestra(self, uid: int, intento: str) -> bool:
+        """Limpieza con guard de identidad (BLOCK 1): mata la unidad del uid SOLO si su Description
+        vigente es la de ESTE intento. Consulta rota u otra identidad: NO se mata (fail-closed: lo que
+        no se puede identificar como nuestro no se toca) y se deja el rastro para el operador."""
+        unidad = nombre_unidad(uid)
+        try:
+            res = await self._consultar(unidad, ("Description",))
+            if res is None:
+                logger.warning("limpieza de %s: identidad no concluyente, no se mata", unidad)
+                return False
+            if res["Description"] != self.description_de_intento(intento):
+                logger.warning("limpieza de %s: Description %r no es la del intento, no se mata",
+                               unidad, res["Description"])
+                return False
             await self.matar(uid)
+            return True
+        except Exception:  # fail-closed: limpieza que no puede concluir no mata
+            logger.exception("limpieza de %s no pudo concluir", unidad)
+            return False
+
+    async def _limpiar_intento(self, uid: int, intento: str, *, plazo_s: float = 1.0) -> None:
+        """Cancelacion DURANTE la creacion del subproceso (MAJOR 2): el systemd-run pudo ya haber creado
+        la unidad despues del punto donde nos cancelaron. Espera acotada: si la unidad aparece con
+        NUESTRA Description, se mata; con otra identidad o sin aparecer, no se toca nada."""
+        fin = time.monotonic() + plazo_s
+        while time.monotonic() < fin:
+            if await self._matar_si_es_nuestra(uid, intento):
+                return
+            await asyncio.sleep(self._intervalo_s)
 
     # -- muerte -----------------------------------------------------------------------------
     async def matar(self, uid: int) -> None:

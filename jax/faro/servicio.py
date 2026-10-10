@@ -34,6 +34,7 @@ from .bitacora_db import ConfigBitacoraDB, EmisorTabla, crear_pool
 from .config import ConfigFaro, ConfigFaroInvalida, ConfigMemoria, ConfigPuerto
 from .control import ConfigControl, ServidorControl, validar_directorio_control
 from .identidad import Ejecucion
+from .jaula import LanzadorJaula
 from .logs import asegurar_logging
 from .paquete import PaqueteCargado, cargar_paquete
 from .transporte import PresupuestoBytes, ServidorPuerto
@@ -59,17 +60,37 @@ class Servicio:
     cfg_memoria: ConfigMemoria | None = None
     pool_memoria: object | None = None
     adaptador_memoria: AdaptadorMemoria | None = None
+    #: EL gestor de unidades del servicio (MAJOR 1): control y lanzador comparten ESTA instancia; no hay
+    #: dos proveedores de vida por uid. Lo adopta el primer `control(scope)` y a partir de ahi es fijo.
+    gestor_unidades: object = None
 
     def control(self, scope_manager) -> ServidorControl:
         """El canal de control autenticado (0.3c): el unico lugar donde nace una `Ejecucion`. Se usa con
         `async with servicio.control(scope) as c:`; sus ejecuciones comparten el UNICO presupuesto del
-        servicio. `scope_manager` (el gestor de unidades de 0.6, scope.py) es OBLIGATORIO (R-2): sin el
-        no se construye el canal, porque no se puede saber si un uid de jaula sigue ocupado."""
+        servicio. `scope_manager` (el gestor de unidades de 0.6, scope.py) es OBLIGATORIO (R-2) y es EL
+        MISMO para todo el servicio: sin el no se construye el canal, y un segundo gestor distinto se
+        rechaza — consultar la vida de un uid con un gestor y lanzar con otro partiria R-2 por la mitad."""
         if scope_manager is None:
             raise ConfigFaroInvalida(
                 "Servicio.control exige el gestor de unidades (scope de 0.6): sin proveedor de liveness no"
                 " hay canal de control (R-2)")
-        return ServidorControl(self.cfg_control, self.crear_puerto, self.bitacora, scope_manager)
+        if self.gestor_unidades is None:
+            self.gestor_unidades = scope_manager
+        elif scope_manager is not self.gestor_unidades:
+            raise ConfigFaroInvalida(
+                "este Servicio ya tiene su gestor de unidades: control y lanzador comparten UNA sola"
+                " instancia (R-2); pasar otro gestor partiria la verdad del uid en dos")
+        return ServidorControl(self.cfg_control, self.crear_puerto, self.bitacora, self.gestor_unidades)
+
+    def crear_lanzador(self, cfg_jaula, **kw) -> "LanzadorJaula":
+        """El lanzador de jaulas del servicio: se construye SOBRE el gestor de unidades ya adoptado por
+        `control` — nunca sobre otro. Sin `control(scope)` previo no hay lanzador (nadie lanzaria con el
+        gestor que el canal no conoce)."""
+        if self.gestor_unidades is None:
+            raise ConfigFaroInvalida(
+                "no hay gestor de unidades: Servicio.control(scope) lo fija primero; el lanzador se"
+                " construye siempre sobre EL gestor del canal (R-2)")
+        return LanzadorJaula.desde_control(cfg_jaula, self.bitacora, self.gestor_unidades, self.cfg_control, **kw)
 
     def crear_puerto(self, ejecucion: Ejecucion) -> ServidorPuerto:
         return ServidorPuerto(self.cfg_puerto, ejecucion, self.paquete, self.bitacora, presupuesto=self.presupuesto,

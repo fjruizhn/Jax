@@ -704,6 +704,33 @@ def test_r2_el_servicio_no_construye_el_control_sin_el_gestor_de_unidades(entorn
     corre(caso())
 
 
+def test_major1_el_servicio_tiene_un_solo_gestor_y_el_lanzador_lo_comparte(entorno, tmp_path):
+    """MAJOR 1: no hay dos proveedores de vida por uid. `control(scope)` adopta EL gestor del servicio;
+    un gestor distinto se rechaza, y el lanzador se construye solo sobre ese mismo gestor."""
+    from jax.faro.jaula import ConfigJaula
+    bwrap = tmp_path / "bwrap"
+    bwrap.write_text("#!/bin/sh\nexit 0\n")
+    bwrap.chmod(0o755)
+    cfg_jaula = ConfigJaula(bwrap=bwrap, elevar=("/usr/bin/sudo", "-n", "-u", "#{uid}", "--"))
+
+    async def caso():
+        s = await arrancar(entorno, crear_pool=_fabrica(), solo_pruebas_mismo_uid=True)
+        try:
+            with pytest.raises(ConfigFaroInvalida, match="control|gestor"):
+                s.crear_lanzador(cfg_jaula)                   # sin control(scope) previo no hay gestor
+            gestor = FalsoScope()
+            async with s.control(gestor) as srv:
+                assert srv._scope is gestor
+                lanzador = s.crear_lanzador(cfg_jaula)
+                assert lanzador._scope is gestor              # EL MISMO objeto, no otro igual
+            with pytest.raises(ConfigFaroInvalida, match="UNA sola|unico|dos"):
+                s.control(FalsoScope())                       # un segundo gestor distinto: no entra
+            s.control(gestor)                                 # el mismo gestor siempre vale
+        finally:
+            await s.cerrar()
+    corre(caso())
+
+
 def test_si_la_sonda_falla_tampoco_queda_el_avisador_corriendo(entorno):
     pool = FalsoPool("fallar")
     with pytest.raises(OSError):
@@ -922,6 +949,43 @@ def test_r2_el_fallo_del_kill_no_impide_el_cierre_ni_la_retencion(mundo):
             return c, b
     c, b = corre(caso())
     assert c["ok"] and b == {"ok": False, "error": "uid_jaula_en_uso"}   # cerrado, pero el uid retenido
+
+
+def test_block2_el_apagado_que_cancela_un_cierre_a_medias_termina_el_kill(mundo):
+    """El caso exacto del BLOCK 2: la peticion `cerrar` corre en una conexion; el apagado cancela esa
+    conexion mientras el kill esta en vuelo. La tarea de kill+confirmacion es propia y el apagado la
+    espera: la unidad muere y se confirma el vacio antes de salir."""
+    class ScopeLento(FalsoScope):
+        def __init__(self):
+            super().__init__()
+            self.entro = asyncio.Event()
+            self.salir = asyncio.Event()
+
+        async def matar(self, uid):
+            self.muertes.append(uid)
+            self.entro.set()
+            await self.salir.wait()                # kill lento: la cancelacion del apagado cae aqui
+
+    scope = ScopeLento()
+
+    async def caso():
+        cm = control(mundo, scope=scope)
+        srv = await cm.__aenter__()
+        r = await pedir(srv.ruta_socket, PEDIDO)
+        cierre = asyncio.create_task(pedir(srv.ruta_socket, {"op": "cerrar", "run_id": r["run_id"]}))
+        await asyncio.wait_for(scope.entro.wait(), 5)        # el kill ya esta en vuelo en la conexion
+
+        async def soltar():
+            await asyncio.sleep(0.05)
+            scope.salir.set()
+        asyncio.create_task(soltar())                        # libera el kill lento durante el apagado
+        await cm.__aexit__(None, None, None)                 # apagado: cancela la conexion `cerrar`
+        cierre.cancel()
+        return list(scope.muertes), list(scope.esperas), sorted(p.name for p in mundo.cfg_puerto.socket_dir.iterdir())
+    muertes, esperas, archivos = corre(caso())
+    assert muertes == [50001]                               # el kill corrio pese a la cancelacion
+    assert esperas == [50001]                               # y la confirmacion de vacio TAMBIEN (antes no llegaba)
+    assert archivos == []                                   # y el Puerto de la ejecucion quedo revocado
 
 
 @pytest.mark.parametrize("tenant", ["con espacio", "a|b", "x" * 65, "ñandú", "t\nx", "a;b", "a/b"])
