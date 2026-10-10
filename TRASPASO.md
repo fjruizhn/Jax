@@ -14,11 +14,20 @@
 - Causa 2: el test de recovery comparaba permits por identidad de objeto aunque recovery
   reconstruye un objeto sellado equivalente. La regresión compara ahora proyecciones completas
   y mantiene las aserciones de decisión y de repetición idempotente.
-- Verificación local: `tests/policy/test_faro_rule_permit.py` da 14 passed; MariaDB colecciona
-  43 casos en este entorno; `git diff --check` pasa. La ejecución MariaDB local no está
-  disponible por el acceso denegado al socket Docker.
-- Estos fixes requieren commit, delta-auditoría Tier 3 y CI exacta sobre el nuevo SHA. No usar
-  el resultado fallido de `d9d259a1` como evidencia del próximo head.
+- Los fixes quedaron comprometidos en `3bea3763`. Verificación local: el archivo
+  `tests/policy/test_faro_rule_permit.py` da 14 passed; colecciona 43 casos en
+  `test_authority_ledger_storage_mariadb.py`, y el comando exacto del workflow colecciona 45 al
+  sumar 2 de `test_authority_ledger_append_validation_mariadb.py`. `git diff --check` pasa. La
+  ejecución MariaDB local no está disponible por el acceso denegado al socket Docker.
+- La auditoría Tier 3 exacta de `3bea3763` aprobó el delta de código y señaló estos dos MINOR
+  documentales. Su policy `38093001626` terminó FAILURE únicamente por el piso unitario:
+  `faro-rule-authority-unit` midió 56 passed frente al patrón 55. El job de piso integrado en
+  `tests-puros` dio SUCCESS y confirmó 45 pruebas MariaDB (43 del archivo principal + 2 del
+  módulo complementario); los otros jobs de policy dieron SUCCESS. Canonical projections
+  `38093001621` terminó SUCCESS. Secret scan `38093001664` aún estaba IN_PROGRESS al actualizar
+  esta nota. El nuevo piso 56 se midió desde el log exacto y se alineó en `ci/pisos.json`; el
+  siguiente SHA requiere nueva auditoría y CI exactas. El resultado fallido de `d9d259a1` no es
+  evidencia del próximo head.
 
 ## Actualización 2026-10-10 · cierre de fallos MariaDB y retry PERMIT
 
