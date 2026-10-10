@@ -824,6 +824,28 @@ def test_decision_store_cierra_si_checkpoint_atrasado_o_publicacion_desconocida(
         unknown_store.record(third_request, _decision(third_request))
 
 
+def test_checkpoint_externo_adelantado_frente_a_db_restaurada_falla_antes_de_append(db, app, tmp_path):
+    # A restored DB is behind the external monotonic witness. It must be
+    # rejected before the decision row or the audit head can advance.
+    ahead = RuleAuditCheckpointStore(tmp_path / "ahead.jsonl")
+    ahead.bootstrap()
+    ahead.publicar("sha256:" + "9" * 64, anterior=ahead.head_actual())
+    store = MariaDBRuleDecisionStore(app, checkpoint_store=ahead)
+    request = _request("0199f8a1-8c00-7000-8000-000000000199")
+
+    with pytest.raises(RuleAuthorityStorageError, match="checkpoint.*head"):
+        store.record(request, _decision(request))
+    assert store.get(request) is None
+    with db.root(autocommit=True) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM rule_decisions")
+            assert cursor.fetchone()[0] == 0
+            cursor.execute(
+                "SELECT audit_sequence,head_hash FROM rule_authority_audit_head WHERE singleton=1"
+            )
+            assert cursor.fetchone() == (0, None)
+
+
 def test_permit_y_decision_se_persisten_atómicamente_y_reintento_reusa_head(db, app, tmp_path):
     with db.root() as admin:
         _apply_migration(admin, MIGRATION_STEP6)

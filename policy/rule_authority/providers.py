@@ -297,6 +297,13 @@ class AlmacenCheckpoints(Protocol):
     def confirmar(self, head: str) -> bool: ...
 
 
+@runtime_checkable
+class AlmacenCheckpointsBloqueable(AlmacenCheckpoints, Protocol):
+    """Checkpoint apto para escrituras MariaDB serializadas entre procesos."""
+
+    def locked(self) -> AbstractContextManager: ...
+
+
 # ------------------------------------------------- el guard de emision/consumo
 
 _RE_SEGMENTO = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?"        # no termina en «.»
@@ -438,7 +445,8 @@ __all__ = [
     "ORDEN_ADQUISICION", "VersionMonotonica", "ClaseCapability",
     "FormaLimites", "ContratoCapability", "PinActivo", "EstadoStop", "CatalogoClasificacion",
     "VistaLease", "VistasDeEmision", "ProveedorPinActivo", "ProveedorStop", "RelojConfiable",
-    "ProveedorClasificacion", "AlmacenCheckpoints", "leases_de_emision", "exigir_contrato_de_emision",
+    "ProveedorClasificacion", "AlmacenCheckpoints", "AlmacenCheckpointsBloqueable",
+    "leases_de_emision", "exigir_contrato_de_emision",
     "ClasificacionDesconocida", "ProveedorInvalido", "RelojInvalido", "RuleAuthorityError",
     "StopDesconocido",
 ]
