@@ -129,9 +129,6 @@ class RuleAuthorityKernel:
             clasificacion=self._classification_provider,
         ) as vistas:
             pin_activo = vistas.pin.valor
-            snapshot = load_trusted_policy_snapshot(
-                pin_activo.repositorio.repository_path, pin_activo.pin
-            )
             with self._ledger_store.checkpoint_fence(self._trusted_checkpoint_store) as fence:
                 with fence.transaction_owner(
                     self._store, purpose=AuthorityLedgerTransactionPurpose.CONSUMPTION
@@ -139,7 +136,28 @@ class RuleAuthorityKernel:
                     permit = owner.lock_permit_for_consumption(
                         permit_id, expected_request_hash
                     )
+                    # This replays only the immutable Block-4/DB integrity
+                    # boundary.  STOP, grants, rule content and capability
+                    # remain intentionally unread for an exact durable retry.
                     state = fence.verify_for_update(owner, self._trusted_root)
+                    recovered = self._store.recover_consumption_in_transaction(
+                        owner, expected_request_hash, consumption_request_id
+                    )
+                    if recovered is not None:
+                        if (type(recovered) is not RulePermitConsumption
+                                or not recovered._is_store_sealed()):
+                            raise RuleAuthorityStorageError(
+                                "recuperación de consumo no devolvió objeto sellado del store"
+                            )
+                        # The exact retry is a read-only terminal outcome.  It
+                        # deliberately precedes Block 4/current-authority
+                        # revalidation, but its owner must still finish before
+                        # releasing the two durable checkpoint fences.
+                        owner.rollback()
+                        return recovered
+                    snapshot = load_trusted_policy_snapshot(
+                        pin_activo.repositorio.repository_path, pin_activo.pin
+                    )
                     projection = self._store.load_consumption_request_in_transaction(
                         owner, snapshot.catalogo
                     )
@@ -241,6 +259,8 @@ class RuleAuthorityKernel:
         now = vistas.ahora_utc
         if vistas.stop.valor.activo:
             return self._deny(request, now, "STOP_ACTIVE"), None
+        if request.catalogo != snapshot.catalogo:
+            return self._deny(request, now, "CATALOG_MISMATCH"), None
         sealed = next((entry for entry in snapshot.reglas if entry.regla.rule_id == request.rule_id), None)
         if sealed is None:
             return (RuleDecision(request.request_id, request.request_hash,
@@ -323,8 +343,15 @@ class RuleAuthorityKernel:
         obligation = rule.obligation_limits
         if obligation.frequency is not None or rule.tope is not None:
             return None, "AUTHORITY_INVALID"
-        if obligation.quantity is None and obligation.amount is None:
+        if obligation.quantity is not None and obligation.amount is not None:
             return None, "AUTHORITY_INVALID"
+        if obligation.quantity is None and obligation.amount is None:
+            if (rule.action_class == "REVERSIBLE"
+                    and contract.clase.value == "REVERSIBLE"
+                    and contract.forma_limites is FormaLimites.NINGUNA
+                    and request.quantity is None and request.amount is None):
+                return {"form": "NINGUNA"}, None
+            return None, "OUT_OF_SCOPE"
 
         if obligation.quantity is not None:
             quantity = obligation.quantity

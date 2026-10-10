@@ -30,6 +30,7 @@ from policy.rule_authority.models import (
     RuleLimits,
     limites_de,
 )
+from policy.rule_authority.schema import RuleSchemaError
 from policy.rule_authority.schema import (
     MAX_CANTIDAD,
     Cantidad,
@@ -377,10 +378,23 @@ def test_limits_require_exact_sealed_catalog_type(catalogo):
         limites_de(_regla_obligating(), catalogo)
 
 
-def test_empty_limits_are_rejected_for_a_validated_reversible_rule():
+def test_empty_limits_are_preserved_for_a_validated_reversible_rule():
     vacia = validar_regla(_datos("regla-ejemplo.yaml"), catalogo=CATALOG)
-    with pytest.raises(AuthorityEventValidationError, match="RuleLimits vacío"):
-        limites_de(vacia, CATALOG)
+    limites = limites_de(vacia, CATALOG)
+
+    assert limites.limites.quantity is None
+    assert limites.limites.amount is None
+    assert limites.limites.frequency is None
+    assert limites.tope is None
+
+
+def test_reversible_rule_rejects_quantity_and_amount_together():
+    datos = _datos("regla-ejemplo.yaml")
+    datos["obligation_limits"]["quantity"] = {"unit": "mensajes", "max": 1}
+    datos["obligation_limits"]["amount"] = {"currency": "USD", "max": 1}
+
+    with pytest.raises(RuleSchemaError, match="simultáneamente"):
+        validar_regla(datos, catalogo=CATALOG)
 
 
 @pytest.mark.parametrize("unidad", ["llamadas", "recipients", "Mensajes", "mensajes​", *FORBIDDEN])

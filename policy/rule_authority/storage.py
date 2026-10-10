@@ -624,6 +624,78 @@ class MariaDBRuleDecisionStore:
             if connection is not None:
                 connection.close()
 
+    def recover_consumption_in_transaction(self, transaction_owner, request_hash: str,
+                                           consumption_request_id: str
+                                           ) -> RulePermitConsumption | None:
+        """Recover the exact retry after its permit row is locked.
+
+        A competing consume can commit between the initial durable lookup and
+        this owner's ``FOR UPDATE`` permit lock.  Its exact caller retry must
+        return before current authority is read; a different request hash or
+        caller retry ID remains a closed denial.
+        """
+        from policy.authority_ledger.storage import (
+            AuthorityLedgerTransactionPurpose,
+            MariaDBAuthorityLedgerTransactionOwner,
+        )
+
+        if type(transaction_owner) is not MariaDBAuthorityLedgerTransactionOwner:
+            raise AuthorityStateError("recuperación de consumo requiere transaction owner MariaDB sellado")
+        if transaction_owner._rule_authority_decision_store is not self:
+            raise AuthorityStateError("transaction owner no pertenece a este decision-store")
+        if (not transaction_owner.active
+                or not transaction_owner._verified
+                or transaction_owner.purpose is not AuthorityLedgerTransactionPurpose.CONSUMPTION
+                or not transaction_owner._permit_locked):
+            raise AuthorityStateError(
+                "recuperación de consumo requiere permit bloqueado y Block 4 verificado"
+            )
+        locked_permit = transaction_owner._locked_permit
+        if (type(locked_permit) is not RulePermit or not locked_permit._is_store_sealed()
+                or locked_permit.permit_id != transaction_owner._locked_permit_identity[0]
+                or locked_permit.request_hash != transaction_owner._locked_permit_identity[1]):
+            raise AuthorityStateError("permit bloqueado no está sellado para recuperación")
+        if type(request_hash) is not str or type(consumption_request_id) is not str:
+            raise TypeError("recuperación de consumo requiere identidades string exactas")
+        if transaction_owner._audit_head_locked:
+            locked_head = transaction_owner._locked_audit_head
+            if (type(locked_head) is not tuple or len(locked_head) != 2
+                    or type(locked_head[0]) is not int):
+                raise AuthorityStateError("owner perdió audit head bloqueado durante recuperación")
+            audit_sequence, db_head = locked_head
+        else:
+            audit_sequence, db_head = transaction_owner.lock_rule_authority_audit_head_for_update()
+        from .trusted_checkpoint import RULE_AUDIT_GENESIS_HEAD
+
+        expected_head = (
+            RULE_AUDIT_GENESIS_HEAD if audit_sequence == 0 and db_head is None else db_head
+        )
+        checkpoint_head = self._checkpoint_store.head_actual() if self._checkpoint_store else None
+        if (type(expected_head) is not str or checkpoint_head != expected_head
+                or self._checkpoint_store.confirmar(checkpoint_head) is not True):
+            raise RuleAuthorityStorageError(
+                "checkpoint externo no coincide con el audit head DB durante recuperación"
+            )
+        cursor = transaction_owner._cursor
+        cursor.execute(
+            "SELECT permit_id,request_hash,consumed_at_utc,canonical_payload,consumption_hash,"
+            "previous_record_hash,record_hash,audit_sequence,consumption_request_id "
+            "FROM jax_rule_authority.rule_permit_consumptions WHERE permit_id=%s FOR UPDATE",
+            (locked_permit.permit_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        consumption, record_hash, _sequence = self._decode_consumption_row(row)
+        if (consumption.request_hash != request_hash
+                or consumption.request_hash != locked_permit.request_hash):
+            raise AuthorityStateError("permit ya consumido con otro request_hash")
+        if consumption.consumption_request_id != consumption_request_id:
+            raise AuthorityStateError("permit ya consumido con consumption_request_id distinto")
+        if self._checkpoint_store.confirmar(record_hash) is not True:
+            raise RuleAuthorityStorageError("checkpoint no contiene consumo recuperado")
+        return consumption
+
     def _finalize_consumption_in_transaction(self, transaction_owner, consumption_draft
                                              ) -> RulePermitConsumption:
         """Persist, commit, and anchor one consumption while both fences hold.
@@ -660,7 +732,14 @@ class MariaDBRuleDecisionStore:
         projection = dict(consumption.projection())
         canonical_payload = canonical_bytes(projection)
         try:
-            audit_sequence, previous_hash = transaction_owner.lock_rule_authority_audit_head_for_update()
+            if transaction_owner._audit_head_locked:
+                locked_head = transaction_owner._locked_audit_head
+                if (type(locked_head) is not tuple or len(locked_head) != 2
+                        or type(locked_head[0]) is not int):
+                    raise AuthorityStateError("owner perdió audit head bloqueado durante consumo")
+                audit_sequence, previous_hash = locked_head
+            else:
+                audit_sequence, previous_hash = transaction_owner.lock_rule_authority_audit_head_for_update()
             from .trusted_checkpoint import RULE_AUDIT_GENESIS_HEAD
 
             checkpoint_head = self._checkpoint_store.head_actual()
@@ -837,12 +916,18 @@ class MariaDBRuleDecisionStore:
                 raise ValueError("columnas distintas de la proyección")
             if frozenset(payload) == _DECISION_FIELDS:
                 if expected_catalog is None:
-                    raise ValueError("decisión v2 requiere solicitud para verificarla")
-                request_projection = expected_catalog.canonical_projection()
-                if payload["request"] != request_projection:
+                    raise ValueError("decisión v2 requiere catálogo sellado para verificarla")
+                request_projection = payload["request"]
+                if type(request_projection) is not dict:
+                    raise ValueError("proyección completa de solicitud inválida")
+                request_values = dict(request_projection)
+                if request_values.pop("catalogo_oid", None) != expected_catalog.oid_pin:
+                    raise ValueError("proyección completa requiere otro catálogo")
+                request_values["catalogo"] = expected_catalog
+                rehydrated_request = RuleEvaluationRequest(**request_values)
+                if rehydrated_request.canonical_projection() != request_projection:
                     raise ValueError("proyección completa de solicitud no coincide")
-                recomputed = domain_hash("JAX-FARO-RULE-REQUEST", "2", request_projection)
-                if recomputed != request_hash:
+                if rehydrated_request.request_hash != request_hash:
                     raise ValueError("request_hash no coincide con la proyección persistida")
             if status == RuleDecisionStatus.PERMIT.value and not allow_permit:
                 raise ValueError("PERMIT está cerrado hasta el adapter atómico del paso 6")

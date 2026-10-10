@@ -31,6 +31,7 @@ _REQUEST_HASH_DOMAIN = "JAX-FARO-RULE-REQUEST"
 _REQUEST_HASH_VERSION = "2"        # v2: la identidad del catálogo (OID del pin) entra al hash
 _DENY_REASONS = frozenset({
     "AUTHORITY_INVALID",
+    "CATALOG_MISMATCH",
     "CAPABILITY_MISMATCH",
     "GRANT_INVALID",
     "OUT_OF_SCOPE",
@@ -200,10 +201,16 @@ def limites_de(regla: ReglaValidada, catalogo: CatalogoTopes) -> RuleLimits:
     """Los límites de la regla validada, comprobados contra el catálogo sellado."""
     if type(regla) is not ReglaValidada:
         raise AuthorityEventValidationError("limites_de requiere una ReglaValidada")
+    if (regla.obligation_limits.quantity is not None
+            and regla.obligation_limits.amount is not None):
+        raise AuthorityEventValidationError(
+            "RuleLimits no permite quantity y amount simultáneamente"
+        )
     if (regla.obligation_limits.quantity is None
             and regla.obligation_limits.amount is None
             and regla.obligation_limits.frequency is None
-            and regla.tope is None):
+            and regla.tope is None
+            and regla.action_class != "REVERSIBLE"):
         raise AuthorityEventValidationError("RuleLimits vacío no autoriza reglas sin límites")
     limites = object.__new__(RuleLimits)       # sin __init__: no hay otra puerta
     for nombre, valor in (("catalogo", catalogo), ("limites", regla.obligation_limits),

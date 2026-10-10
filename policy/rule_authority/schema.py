@@ -314,6 +314,10 @@ def validar_regla(datos: object, *, ttl_max_seconds: int | None = None,
              if limites.get("amount") is not None else None)
     frecuencia = (_validar_frecuencia(limites["frequency"])
                   if limites.get("frequency") is not None else None)
+    if cantidad is not None and monto is not None:
+        raise RuleSchemaError(
+            "obligation_limits.quantity y amount no pueden declararse simultáneamente"
+        )
 
     vigencia_datos = _objeto_cerrado(documento["validity"], "validity",
                                      frozenset({"not_before_utc", "not_after_utc"}))

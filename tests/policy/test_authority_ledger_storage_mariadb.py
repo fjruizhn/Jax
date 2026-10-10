@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pymysql
@@ -39,6 +40,10 @@ from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
 from policy.rule_authority.models import (
     RuleDecision, RuleDecisionStatus, RuleEvaluationRequest,
 )
+from policy.rule_authority.kernel import RuleAuthorityKernel
+from policy.rule_authority.providers import (
+    ClaseCapability, ContratoCapability, FormaLimites,
+)
 from policy.rule_authority.permit import (
     RulePermitConsumptionDraft, RulePermitDraft, _consumption_hash,
     _permit_after_kernel_evaluation,
@@ -56,12 +61,17 @@ from policy.authority_ledger.signatures import encode_public_key, public_key_byt
 from policy.authority_ledger.storage import (
     AuthorityLedgerTransactionPurpose, MariaDBAuthorityLedgerStore,
     MariaDBAuthorityLedgerTransactionOwner,
+    _AuthorityLedgerCheckpointFence,
 )
 from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
 from policy.authority_ledger.errors import AuthorityStateError, TrustedRootMismatchError
 from tests.policy._sellos_de_prueba import rule_grant_intent
 from policy.authority_resolution.candidate_loader import load_validated_candidate
 from tests.policy.catalogo_pin import catalogo_del_pin
+from tests.policy.proveedores_dobles import (
+    ClasificacionFija, PinFijo, RelojDeterminista, StopFijo,
+)
+from policy.rule_authority.snapshot import TrustedPolicyPin, load_trusted_policy_snapshot
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1062,6 +1072,9 @@ def _cross_schema_permit(request: RuleEvaluationRequest) -> tuple[RuleDecision, 
 def _initialized_cross_schema_consumption(*, include_retry_migration=True):
     """Both schemas plus the provisioned Rule Authority application principal."""
     with _initialized_authority_ledger() as (connect, ledger_store, root, _key, checkpoint_store):
+        # Test-only signing material for rule grants emitted through the real
+        # Block-4 append boundary by kernel integration tests below.
+        ledger_store._test_rule_grant_key = _key
         app_user = "jax_rule_authority_consume_test"
         app_password = secrets.token_urlsafe(24)
         with connect() as admin:
@@ -1082,6 +1095,75 @@ def _initialized_cross_schema_consumption(*, include_retry_migration=True):
 
         audit_checkpoint = _rule_authority_checkpoint_store(checkpoint_store)
         yield connect, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect
+
+
+def _kernel_permit_fixture(tmp_path, ledger_store, root, checkpoint_store,
+                           audit_checkpoint, app_connect, *, request_id, event_id):
+    """Build a real pinned policy repo and its matching Block-4 rule grant.
+
+    The MariaDB race tests must not manufacture a snapshot or authority state:
+    the temporary repository is committed, loaded through the production
+    snapshot loader, then the signed grant is derived from its sealed rule.
+    """
+    repo = tmp_path / "pinned-policy"
+    faro = repo / "policy" / "faro"
+    faro.mkdir(parents=True)
+    (faro / "catalogo-topes.json").write_bytes(
+        (ROOT / "policy/faro/catalogo-topes.json").read_bytes()
+    )
+    (faro / "ejemplo.yaml").write_bytes(
+        (ROOT / "tests/policy/fixtures/faro_rules/regla-ejemplo.yaml").read_bytes()
+    )
+
+    def git(*args):
+        completed = subprocess.run(
+            ["git", "-C", str(repo), *args], capture_output=True, text=True, check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        return completed.stdout.strip()
+
+    git("init", "-q", "-b", "main")
+    git("add", "-A")
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "faro fixture")
+    commit = git("rev-parse", "HEAD")
+    policy_tree_oid = git("rev-parse", "HEAD:policy")
+    pin_value = TrustedPolicyPin("jax", commit, policy_tree_oid, "refs/heads/main")
+    snapshot = load_trusted_policy_snapshot(repo, pin_value)
+    sealed = next(entry for entry in snapshot.reglas if entry.regla.rule_id == "ejemplo-regla")
+    now = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
+    grant = RuleRatificationGrantPayload(
+        sealed.regla.rule_id, sealed.ruta, sealed.blob_oid, sealed.content_hash,
+        snapshot.commit, snapshot.policy_tree_oid, snapshot.snapshot_hash, now, None,
+    )
+    grant_event = append_authority_event(
+        ledger_store, root, ledger_store._test_rule_grant_key, rule_grant_intent(grant), event_id=event_id,
+        recorded_at_utc=now, checkpoint_store=checkpoint_store,
+    )
+    request = RuleEvaluationRequest(
+        request_id=request_id, rule_id="ejemplo-regla", subject="actor:ejemplo",
+        capability="CAPABILITY_ID", objective="objetivo-ejemplo", resource_id="resource:1",
+        arguments={}, catalogo=snapshot.catalogo,
+    )
+    kernel = RuleAuthorityKernel(
+        active_policy_pin_provider=PinFijo(
+            pin_value, "refs/heads/main", repository_path=repo.resolve(),
+        ),
+        authority_ledger_store=ledger_store, trusted_root=root,
+        trusted_checkpoint_store=checkpoint_store,
+        stop_provider=StopFijo(activo=False, huella="sha256:stop-clear"),
+        trusted_clock=RelojDeterminista(now),
+        capability_classification_provider=ClasificacionFija({
+            "CAPABILITY_ID": ContratoCapability(
+                identidad="test.reversible.v1", version="1",
+                clase=ClaseCapability.REVERSIBLE, unidad=None, moneda=None,
+                forma_limites=FormaLimites.NINGUNA,
+            ),
+        }),
+        rule_authority_store=MariaDBRuleDecisionStore(
+            app_connect, checkpoint_store=audit_checkpoint,
+        ),
+    )
+    return kernel, request, grant_event
 
 
 def _consume_under_verified_fence(ledger_store, checkpoint_store, root, decision_store, draft):
@@ -1212,32 +1294,8 @@ def test_evaluation_insert_failure_rolls_back_decision_and_audit_head():
                 assert cursor.fetchone() == (0, None)
         from policy.rule_authority.trusted_checkpoint import RULE_AUDIT_GENESIS_HEAD
         assert audit_checkpoint.head_actual() == RULE_AUDIT_GENESIS_HEAD
-        assert decision_store.get(request) == decision
-        assert audit_checkpoint.confirmar(audit_checkpoint.head_actual()) is True
-
-        # A process retry may observe different live providers after the first
-        # commit.  Request identity wins: it recovers the sealed durable
-        # outcome, never recomputes a second decision or permit.
-        different_live_decision = RuleDecision(
-            request_id=request.request_id,
-            request_hash=request.request_hash,
-            status=RuleDecisionStatus.DENY,
-            required_rule_id=request.rule_id,
-            reason_code="STOP_ACTIVE",
-            decided_at_utc=datetime(2026, 10, 10, 12, 2, tzinfo=timezone.utc),
-        )
-        with ledger_store.checkpoint_fence(checkpoint_store) as fence:
-            with fence.transaction_owner(
-                decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
-            ) as owner:
-                fence.verify_for_update(owner, root)
-                retried_decision, retried_permit = decision_store.record_evaluation_in_transaction(
-                    owner, request, different_live_decision, None
-                )
-
-        assert retried_decision == decision
-        assert retried_permit is not None
-        assert retried_permit.projection() == permit.projection()
+        assert audit_checkpoint.confirmar(RULE_AUDIT_GENESIS_HEAD) is True
+        assert decision_store.get(request) is None
 
 
 def test_cross_schema_consumption_uses_provisioned_principal_and_retries_exact_permit():
@@ -1262,6 +1320,18 @@ def test_cross_schema_consumption_uses_provisioned_principal_and_retries_exact_p
         consumed = _consume_under_verified_fence(
             ledger_store, checkpoint_store, root, decision_store, draft
         )
+        with ledger_store.checkpoint_fence(checkpoint_store) as fence:
+            with fence.transaction_owner(
+                decision_store, purpose=AuthorityLedgerTransactionPurpose.CONSUMPTION
+            ) as owner:
+                owner.lock_permit_for_consumption(permit.permit_id, request.request_hash)
+                fence.verify_for_update(owner, root)
+                recovered_after_lock = decision_store.recover_consumption_in_transaction(
+                    owner, request.request_hash, draft.consumption_request_id
+                )
+                assert recovered_after_lock is not None
+                assert recovered_after_lock.projection() == consumed.projection()
+                owner.rollback()
         retry_draft = RulePermitConsumptionDraft(
             permit_id=permit.permit_id,
             consumption_request_id=draft.consumption_request_id,
@@ -1520,6 +1590,260 @@ def test_cross_schema_consumption_checkpoint_failure_reports_committed_state(mon
                 assert cursor.fetchone()[0] == 1
         assert checkpoint.head_actual() == permit_head
 
+        # A retry can acquire this permit after a competing commit that failed
+        # its external publication.  It must reject that current head mismatch
+        # before returning the historical consumption row.
+        with ledger_store.checkpoint_fence(checkpoint_store) as fence:
+            with fence.transaction_owner(
+                decision_store, purpose=AuthorityLedgerTransactionPurpose.CONSUMPTION
+            ) as owner:
+                owner.lock_permit_for_consumption(permit.permit_id, request.request_hash)
+                fence.verify_for_update(owner, root)
+                with pytest.raises(RuleAuthorityStorageError, match="audit head DB"):
+                    decision_store.recover_consumption_in_transaction(
+                        owner, request.request_hash, draft.consumption_request_id
+                    )
+
+
+def test_evaluation_checkpoint_failure_keeps_db_row_and_blocks_durable_recovery(monkeypatch):
+    with _initialized_cross_schema_consumption() as (
+        connect, ledger_store, root, checkpoint_store, _audit_checkpoint, app_connect,
+    ):
+        checkpoint = RuleAuditCheckpointStore(
+            checkpoint_store.path.with_name("rule-authority-evaluation-publication-failure.log")
+        )
+        checkpoint.bootstrap()
+        decision_store = MariaDBRuleDecisionStore(app_connect, checkpoint_store=checkpoint)
+        request = _cross_schema_request("0199f8a1-8c00-7000-8000-000000000936")
+        decision = RuleDecision(
+            request.request_id, request.request_hash, RuleDecisionStatus.DENY,
+            request.rule_id, "STOP_ACTIVE", datetime(2026, 10, 10, 12, 6, tzinfo=timezone.utc),
+        )
+
+        monkeypatch.setattr(
+            checkpoint, "publicar",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                CheckpointInvalido("publicación de evaluación inyectada")
+            ),
+        )
+        with pytest.raises(RuleAuthorityCommittedCheckpointError, match="evaluación confirmada en DB"):
+            with ledger_store.checkpoint_fence(checkpoint_store) as fence:
+                with fence.transaction_owner(
+                    decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
+                ) as owner:
+                    fence.verify_for_update(owner, root)
+                    decision_store.record_evaluation_in_transaction(owner, request, decision, None)
+
+        with connect(database="jax_rule_authority") as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM rule_decisions WHERE request_id=%s", (request.request_id,)
+                )
+                assert cursor.fetchone()[0] == 1
+                cursor.execute("SELECT audit_sequence FROM rule_authority_audit_head WHERE singleton=1")
+                assert cursor.fetchone()[0] == 1
+        with pytest.raises(RuleAuthorityStorageError, match="checkpoint externo no coincide"):
+            decision_store.recover_durable_evaluation(request)
+
+
+def test_kernel_evaluate_stop_deny_persists_and_exact_retry_recovers(monkeypatch, tmp_path):
+    with _initialized_cross_schema_consumption() as (
+        _connect, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+    ):
+        request = _cross_schema_request("0199f8a1-8c00-7000-8000-000000000937")
+        now = datetime(2026, 10, 10, 12, 7, tzinfo=timezone.utc)
+        pin = PinFijo(
+            TrustedPolicyPin("jax", "a" * 40, "b" * 40, "refs/heads/main"),
+            "refs/heads/main", repository_path=tmp_path,
+        )
+        snapshot = object()
+        snapshot_loads = []
+
+        def load_snapshot(*args):
+            snapshot_loads.append(args)
+            return snapshot
+
+        monkeypatch.setattr("policy.rule_authority.kernel.load_trusted_policy_snapshot", load_snapshot)
+        kernel = RuleAuthorityKernel(
+            active_policy_pin_provider=pin,
+            authority_ledger_store=ledger_store,
+            trusted_root=root,
+            trusted_checkpoint_store=checkpoint_store,
+            stop_provider=StopFijo(activo=True, huella="sha256:stop-active"),
+            trusted_clock=RelojDeterminista(now),
+            capability_classification_provider=ClasificacionFija({}),
+            rule_authority_store=MariaDBRuleDecisionStore(
+                app_connect, checkpoint_store=audit_checkpoint
+            ),
+        )
+
+        first = kernel.evaluate(request)
+        retry = kernel.evaluate(request)
+
+        assert first.decision.status is RuleDecisionStatus.DENY
+        assert first.decision.reason_code == "STOP_ACTIVE"
+        assert first.permit is None
+        assert retry == first
+        assert len(snapshot_loads) == 1
+
+
+def _revoke_rule_grant(ledger_store, root, checkpoint_store, grant_event, *, event_id):
+    return append_authority_event(
+        ledger_store, root, ledger_store._test_rule_grant_key,
+        AuthorityEventIntent(
+            AuthorityEventType.RULE_RATIFICATION_REVOKED, "human:fernando",
+            rule_ratification_event_id=grant_event.event_id,
+        ),
+        event_id=event_id,
+        recorded_at_utc=datetime(2026, 10, 10, 12, 1, tzinfo=timezone.utc),
+        checkpoint_store=checkpoint_store,
+    )
+
+
+def test_kernel_evaluate_serializes_rule_revocation_in_both_orders(monkeypatch, tmp_path):
+    """The real Block-4 fence orders a permit and a signed rule revocation."""
+    with _initialized_cross_schema_consumption() as (
+        _connect, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+    ):
+        kernel, request, grant_event = _kernel_permit_fixture(
+            tmp_path, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+            request_id="0199f8a1-8c00-7000-8000-000000000941",
+            event_id="0199f8a1-8c00-7000-8000-000000000942",
+        )
+        verified = threading.Event()
+        release = threading.Event()
+        original_verify = _AuthorityLedgerCheckpointFence.verify_for_update
+
+        def pause_after_verified(fence, owner, trusted_root):
+            state = original_verify(fence, owner, trusted_root)
+            if not verified.is_set():
+                verified.set()
+                assert release.wait(timeout=5), "la prueba no liberó Block 4"
+            return state
+
+        monkeypatch.setattr(_AuthorityLedgerCheckpointFence, "verify_for_update", pause_after_verified)
+        revoke_started = threading.Event()
+        revoke_lock_attempted = threading.Event()
+        original_locked = TrustedCheckpointStore.locked
+
+        @contextlib.contextmanager
+        def signal_revoke_lock_attempt(store):
+            if store is checkpoint_store and revoke_started.is_set():
+                revoke_lock_attempted.set()
+            with original_locked(store):
+                yield
+
+        monkeypatch.setattr(TrustedCheckpointStore, "locked", signal_revoke_lock_attempt)
+
+        def revoke():
+            revoke_started.set()
+            return _revoke_rule_grant(
+                ledger_store, root, checkpoint_store, grant_event,
+                event_id="0199f8a1-8c00-7000-8000-000000000943",
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            evaluation = pool.submit(kernel.evaluate, request)
+            assert verified.wait(timeout=5)
+            revocation = pool.submit(revoke)
+            assert revoke_started.wait(timeout=5)
+            assert revoke_lock_attempted.wait(timeout=5)
+            assert not revocation.done(), "la revocación entró durante el lock Block 4"
+            release.set()
+            outcome = evaluation.result(timeout=5)
+            revocation.result(timeout=5)
+
+        assert outcome.decision.status is RuleDecisionStatus.PERMIT
+        assert outcome.permit is not None
+        # Reverse order: once the revoke owns Block 4 first, a new evaluation
+        # sees no current grant and fails closed.
+        denied = kernel.evaluate(replace(
+            request, request_id="0199f8a1-8c00-7000-8000-000000000944",
+        ))
+        assert denied.decision.status is RuleDecisionStatus.DENY
+        assert denied.decision.reason_code == "AUTHORITY_INVALID"
+        assert denied.permit is None
+
+
+def test_kernel_consume_serializes_rule_revocation_in_both_orders(monkeypatch, tmp_path):
+    """A real permit lock + Block-4 owner cannot be crossed by revocation."""
+    with _initialized_cross_schema_consumption() as (
+        _connect, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+    ):
+        kernel, request, grant_event = _kernel_permit_fixture(
+            tmp_path / "first", ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+            request_id="0199f8a1-8c00-7000-8000-000000000951",
+            event_id="0199f8a1-8c00-7000-8000-000000000952",
+        )
+        permit = kernel.evaluate(request).permit
+        assert permit is not None
+        validated = threading.Event()
+        release = threading.Event()
+        original_validate = kernel._validate_consumption_context
+
+        def pause_after_block4(**kwargs):
+            validated.set()
+            assert release.wait(timeout=5), "la prueba no liberó consumo verificado"
+            return original_validate(**kwargs)
+
+        monkeypatch.setattr(kernel, "_validate_consumption_context", pause_after_block4)
+        revoke_started = threading.Event()
+        revoke_lock_attempted = threading.Event()
+        original_locked = TrustedCheckpointStore.locked
+
+        @contextlib.contextmanager
+        def signal_revoke_lock_attempt(store):
+            if store is checkpoint_store and revoke_started.is_set():
+                revoke_lock_attempted.set()
+            with original_locked(store):
+                yield
+
+        monkeypatch.setattr(TrustedCheckpointStore, "locked", signal_revoke_lock_attempt)
+
+        def revoke_first_grant():
+            revoke_started.set()
+            return _revoke_rule_grant(
+                ledger_store, root, checkpoint_store, grant_event,
+                event_id="0199f8a1-8c00-7000-8000-000000000953",
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            consumption = pool.submit(
+                kernel.consume, permit.permit_id, request.request_hash,
+                "0199f8a1-8c00-7000-8000-000000000954",
+            )
+            assert validated.wait(timeout=5)
+            revocation = pool.submit(revoke_first_grant)
+            assert revoke_started.wait(timeout=5)
+            assert revoke_lock_attempted.wait(timeout=5)
+            assert not revocation.done(), "la revocación entró durante consumo Block 4"
+            release.set()
+            consumed = consumption.result(timeout=5)
+            revocation.result(timeout=5)
+
+        assert consumed.permit_id == permit.permit_id
+
+        # Reverse order on a fresh, still-unconsumed permit: revoke first,
+        # then consume must replay Block 4 and reject its withdrawn grant.
+        kernel2, request2, grant_event2 = _kernel_permit_fixture(
+            tmp_path / "second", ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+            request_id="0199f8a1-8c00-7000-8000-000000000955",
+            event_id="0199f8a1-8c00-7000-8000-000000000956",
+        )
+        permit2 = kernel2.evaluate(request2).permit
+        assert permit2 is not None
+        _revoke_rule_grant(
+            ledger_store, root, checkpoint_store, grant_event2,
+            event_id="0199f8a1-8c00-7000-8000-000000000957",
+        )
+        with pytest.raises(AuthorityStateError, match="ratificación.*vigente"):
+            kernel2.consume(
+                permit2.permit_id, request2.request_hash,
+                "0199f8a1-8c00-7000-8000-000000000958",
+            )
+
+
+
 
 def test_cross_schema_consumption_close_failure_reports_anchored_committed_state():
     """A close error after COMMIT is surfaced only after the anchor advances."""
@@ -1588,8 +1912,7 @@ def _wait_for_innodb_lock_wait(connect, timeout=5.0):
     raise AssertionError("MariaDB no reportó el escritor esperando el lock de head")
 
 
-@pytest.mark.parametrize("completion", ["commit", "rollback"])
-def test_transaction_fence_holds_mariadb_head_lock_until_completion(completion):
+def test_evaluation_fence_holds_mariadb_head_lock_until_rollback():
     with _initialized_authority_ledger() as (connect, store, root, _key, checkpoint_store):
         writer_started = threading.Event()
         writer_acquired = threading.Event()
@@ -1652,16 +1975,13 @@ def test_transaction_fence_holds_mariadb_head_lock_until_completion(completion):
                 _wait_for_innodb_lock_wait(connect)
                 assert not checkpoint_lock_acquired.is_set(), "el checkpoint lock se perdió dentro del contexto"
                 assert not rule_authority_lock_acquired.is_set(), "el flock Rule Authority se perdió dentro del contexto"
-                if completion == "commit":
-                    owner.commit()
-                else:
-                    owner.rollback()
-                assert not checkpoint_lock_acquired.is_set(), "commit/rollback liberó el checkpoint antes del contexto"
-                assert not rule_authority_lock_acquired.is_set(), "commit/rollback liberó Rule Authority antes del contexto"
-                assert checkpoint_store._lock_depth == 1, "el fence perdió la propiedad del checkpoint tras finalizar DB"
+                owner.rollback()
+                assert not checkpoint_lock_acquired.is_set(), "rollback liberó el checkpoint antes del contexto"
+                assert not rule_authority_lock_acquired.is_set(), "rollback liberó Rule Authority antes del contexto"
+                assert checkpoint_store._lock_depth == 1, "el fence perdió la propiedad del checkpoint tras rollback DB"
                 assert rule_authority_checkpoint_store._depth == 1, "el lock RA se liberó antes del contexto"
 
-        assert writer_acquired.wait(5), "el escritor siguió bloqueado tras commit/rollback"
+        assert writer_acquired.wait(5), "el escritor siguió bloqueado tras rollback"
         assert checkpoint_lock_acquired.wait(5), "el checkpoint lock siguió retenido tras cerrar el contexto"
         assert rule_authority_lock_acquired.wait(5), "el flock Rule Authority siguió retenido tras cerrar el contexto"
         thread.join(timeout=5)

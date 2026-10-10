@@ -7,7 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime, timezone
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 from types import SimpleNamespace
 from contextlib import contextmanager
 
@@ -16,13 +16,16 @@ import pytest
 from policy.canonicalization.strict_yaml import load_strict_yaml
 from policy.rule_authority.kernel import RuleAuthorityKernel
 from policy.rule_authority.models import (
-    RuleDecisionStatus, RuleEvaluationRequest, _hash_de_regla,
+    RuleDecision, RuleDecisionStatus, RuleEvaluationRequest, _hash_de_regla,
 )
 from policy.rule_authority.storage import RuleAuthorityStorageError
 from policy.rule_authority.permit import (
     RulePermitConsumptionDraft, RulePermitDraft, _trusted_consumption, _trusted_permit,
 )
-from policy.rule_authority.storage import MariaDBRuleDecisionStore
+from policy.rule_authority.storage import (
+    MariaDBRuleDecisionStore, _catalog_hash, _decision_projection, _record_hash,
+)
+from policy.authority_ledger.canonical import canonical_bytes
 from policy.authority_ledger.errors import AuthorityStateError
 from policy.authority_ledger.storage import AuthorityLedgerTransactionPurpose
 from policy.rule_authority.providers import (
@@ -61,7 +64,7 @@ def _rule(name: str, **updates):
     return validar_regla(data, catalogo=CATALOG)
 
 
-def test_reversible_rule_without_any_limit_fails_closed():
+def test_reversible_rule_without_any_limit_emits_the_no_limit_projection():
     rule = _rule("regla-ejemplo.yaml")
     contract = ContratoCapability(identidad="mail.send.contract.v1", version="1",
                                   clase=ClaseCapability.REVERSIBLE, unidad=None, moneda=None,
@@ -69,8 +72,8 @@ def test_reversible_rule_without_any_limit_fails_closed():
 
     limits, reason = RuleAuthorityKernel._validate_request_limits(_request(), rule, contract)
 
-    assert limits is None
-    assert reason == "AUTHORITY_INVALID"
+    assert limits == {"form": "NINGUNA"}
+    assert reason is None
 
 
 def test_request_exceeding_rule_quantity_is_denied():
@@ -117,42 +120,43 @@ def test_frequency_rule_fails_closed_without_transactional_counter():
     assert reason == "AUTHORITY_INVALID"
 
 
-def test_unbounded_rule_with_request_hash_returns_stable_authority_deny(monkeypatch):
-    now = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
+def test_reversible_rule_with_no_limits_rejects_a_quantity_request():
     rule = _rule("regla-ejemplo.yaml")
-    request = _request(capability="CAPABILITY_ID", rule_hash=_hash_de_regla(rule))
-    sealed = SimpleNamespace(regla=rule, ruta="policy/faro/ejemplo.yaml",
-                             blob_oid="a" * 40, content_hash="sha256:" + "c" * 64)
-    snapshot = SimpleNamespace(commit="b" * 40, repositorio="jax", reglas=(sealed,),
-                               catalogo=CATALOG)
-    ratification = SimpleNamespace(valid_from_utc=now.replace(year=now.year - 1),
-                                   valid_until_utc=None)
-    grant_event = SimpleNamespace(event_id="0199f8a1-8c00-7000-8000-000000000061",
-                                  intent=SimpleNamespace(rule_ratification=ratification))
-    state = SimpleNamespace(
-        latest_unrevoked_rule_ratification=lambda _rule_id: grant_event,
-    )
     contract = ContratoCapability(
         identidad="mail.send.contract.v1", version="1",
         clase=ClaseCapability.REVERSIBLE, unidad=None, moneda=None,
         forma_limites=FormaLimites.NINGUNA,
     )
-    views = SimpleNamespace(
-        ahora_utc=now,
-        stop=SimpleNamespace(valor=SimpleNamespace(activo=False)),
-        clasificacion=SimpleNamespace(valor=SimpleNamespace(
-            contrato_de=lambda _capability: contract)),
+
+    limits, reason = RuleAuthorityKernel._validate_request_limits(
+        _request(quantity=1, quantity_unit="mensajes"), rule, contract
     )
-    monkeypatch.setattr(RuleAuthorityKernel, "_grant_matches", staticmethod(lambda *_args: True))
+
+    assert limits is None
+    assert reason == "OUT_OF_SCOPE"
+
+
+def test_initial_evaluation_denies_when_request_catalog_is_not_snapshot_catalog():
+    request = _request()
+    other_catalog = catalogo_del_pin(json.dumps({"version": 1, "decision": "other",
+                                                 "clases": CLASES}).encode())
+    rule = _rule("regla-ejemplo.yaml")
+    sealed = SimpleNamespace(regla=rule, ruta="policy/faro/ejemplo.yaml",
+                             blob_oid="a" * 40, content_hash="sha256:" + "c" * 64)
+    snapshot = SimpleNamespace(reglas=(sealed,), catalogo=other_catalog)
+    state = SimpleNamespace(latest_unrevoked_rule_ratification=Mock())
+    views = SimpleNamespace(ahora_utc=datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc),
+                            stop=SimpleNamespace(valor=SimpleNamespace(activo=False)))
     kernel = object.__new__(RuleAuthorityKernel)
 
     decision, permit = kernel._initial_evaluation(
-        request, snapshot, state, views, Path("/tmp"),
+        request, snapshot, state, views, Path("/tmp")
     )
 
     assert decision.status is RuleDecisionStatus.DENY
-    assert decision.reason_code == "AUTHORITY_INVALID"
+    assert decision.reason_code == "CATALOG_MISMATCH"
     assert permit is None
+    state.latest_unrevoked_rule_ratification.assert_not_called()
 
 
 def test_durable_request_projection_reconstructs_exactly_under_the_current_catalog():
@@ -181,6 +185,27 @@ def test_durable_request_projection_rejects_catalog_or_hash_drift():
         RuleAuthorityKernel._request_from_projection(
             original.canonical_projection(), other_catalog, original.request_hash
         )
+
+
+def test_v2_decision_recovery_rehydrates_the_full_request_with_the_sealed_catalog():
+    request = _request()
+    decision = RuleDecision(
+        request.request_id, request.request_hash, RuleDecisionStatus.DENY,
+        request.rule_id, "STOP_ACTIVE", datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc),
+    )
+    projection = _decision_projection(decision, _catalog_hash(CATALOG), request)
+    row = (
+        request.request_hash, _catalog_hash(CATALOG), request.rule_id,
+        decision.status.value, decision.reason_code, decision.decided_at_utc,
+        canonical_bytes(projection), None,
+        _record_hash(1, request.request_id, None, projection), 1,
+    )
+
+    recovered = MariaDBRuleDecisionStore._decode_row(
+        request.request_id, row, CATALOG
+    )
+
+    assert recovered == decision
 
 
 def test_consume_recovers_exact_durable_retry_before_mutable_providers(monkeypatch):
@@ -228,6 +253,40 @@ def test_consume_durable_retry_rejects_different_consumption_id(monkeypatch):
         kernel.consume("0199f8a1-8c00-7000-8000-000000000051",
                        "sha256:" + "b" * 64,
                        "0199f8a1-8c00-7000-8000-000000000052")
+
+
+def test_consume_recovers_same_request_after_permit_lock_before_live_revalidation(
+        tmp_path, monkeypatch):
+    kernel, _providers = _kernel_consume_harness(tmp_path, monkeypatch)
+    expected = _trusted_consumption(RulePermitConsumptionDraft(
+        permit_id="0199f8a1-8c00-7000-8000-000000000062",
+        consumption_request_id="0199f8a1-8c00-7000-8000-000000000073",
+        request_hash=_request(capability="CAPABILITY_ID", objective="objetivo-ejemplo",
+                              quantity=1, quantity_unit="mensajes").request_hash,
+        consumed_at_utc=datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc),
+    ))
+    def recover_after_block4(owner, request_hash, consumption_request_id):
+        assert owner.verified is True
+        assert request_hash == expected.request_hash
+        assert consumption_request_id == expected.consumption_request_id
+        return expected
+
+    recovered_after_lock = Mock(side_effect=recover_after_block4)
+    monkeypatch.setattr(kernel._store, "recover_consumption_in_transaction",
+                        recovered_after_lock, raising=False)
+    monkeypatch.setattr(
+        "policy.rule_authority.kernel.load_trusted_policy_snapshot",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("no debe recargar snapshot")),
+    )
+
+    result = kernel.consume(
+        expected.permit_id, expected.request_hash, expected.consumption_request_id
+    )
+
+    assert result is expected
+    recovered_after_lock.assert_called_once_with(
+        ANY, expected.request_hash, expected.consumption_request_id
+    )
 
 
 def test_consume_rejects_unsealed_store_recovery(monkeypatch):
@@ -322,10 +381,18 @@ def _kernel_consume_harness(tmp_path, monkeypatch, *, changed_provider=None):
     classification = ClasificacionFija({"CAPABILITY_ID": contract})
 
     class Owner:
+        def __init__(self):
+            self.active = True
+            self.verified = False
+
         def lock_permit_for_consumption(self, permit_id, request_hash):
             assert permit_id == permit.permit_id
             assert request_hash == permit.request_hash
             return permit
+
+        def rollback(self):
+            assert self.active
+            self.active = False
 
     owner = Owner()
 
@@ -333,9 +400,18 @@ def _kernel_consume_harness(tmp_path, monkeypatch, *, changed_provider=None):
         @contextmanager
         def transaction_owner(self, _store, *, purpose):
             assert purpose is AuthorityLedgerTransactionPurpose.CONSUMPTION
-            yield owner
+            try:
+                yield owner
+            except BaseException:
+                if owner.active:
+                    owner.rollback()
+                raise
+            else:
+                if owner.active:
+                    raise AssertionError("el owner de consumo salió activo")
 
         def verify_for_update(self, _owner, _trusted_root):
+            owner.verified = True
             return state
 
     fence = Fence()
@@ -348,13 +424,17 @@ def _kernel_consume_harness(tmp_path, monkeypatch, *, changed_provider=None):
     decision_store = MariaDBRuleDecisionStore(lambda: None)
     monkeypatch.setattr(decision_store, "recover_consumption", Mock(return_value=None))
     monkeypatch.setattr(
+        decision_store, "recover_consumption_in_transaction", lambda *_args: None,
+    )
+    monkeypatch.setattr(
         decision_store, "load_consumption_request_in_transaction",
         lambda _owner, _catalog: request.canonical_projection(),
     )
-    monkeypatch.setattr(
-        decision_store, "consume_permit",
-        lambda _owner, draft: _trusted_consumption(draft),
-    )
+    def consume_permit(owner, draft):
+        owner.rollback()
+        return _trusted_consumption(draft)
+
+    monkeypatch.setattr(decision_store, "consume_permit", consume_permit)
     monkeypatch.setattr(
         "policy.rule_authority.kernel.load_trusted_policy_snapshot",
         lambda _path, _pin: snapshot,
@@ -496,7 +576,7 @@ def test_consume_context_accepts_exact_current_rule_grant_scope_and_contract(mon
     ) is None
 
 
-def test_consume_context_types_unbounded_rule_hash_as_authority_error(monkeypatch):
+def test_consume_context_accepts_unbounded_reversible_rule_hash(monkeypatch):
     now = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
     permit, request, snapshot, state, views, _revision = _consumption_context(
         now, unbounded=True
@@ -505,11 +585,10 @@ def test_consume_context_types_unbounded_rule_hash_as_authority_error(monkeypatc
     monkeypatch.setattr("policy.rule_authority.kernel.es_ancestro", lambda *_args: True)
     kernel = object.__new__(RuleAuthorityKernel)
 
-    with pytest.raises(AuthorityStateError, match="sin límites"):
-        kernel._validate_consumption_context(
-            permit=permit, request=request, snapshot=snapshot, state=state, vistas=views,
-            repository_path=Path("/tmp"),
-        )
+    assert kernel._validate_consumption_context(
+        permit=permit, request=request, snapshot=snapshot, state=state, vistas=views,
+        repository_path=Path("/tmp"),
+    ) is None
 
 
 @pytest.mark.parametrize("change,reason", [
