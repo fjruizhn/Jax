@@ -26,6 +26,7 @@ from policy.rule_authority.models import (
     RuleDecisionStatus,
     RuleEvaluation,
     RuleEvaluationRequest,
+    RuleEvaluationOutcome,
     RuleLimits,
     limites_de,
 )
@@ -161,6 +162,13 @@ def test_request_hash_is_derived_from_closed_canonical_projection():
     with pytest.raises(AuthorityEventValidationError):
         request(request_hash="sha256:" + "0" * 64)
     assert request(arguments={"nested": {}}).request_hash != request(arguments={"nested": []}).request_hash
+
+
+def test_evaluation_outcome_liga_permit_solo_a_decision_permit():
+    denied = decision()
+    with pytest.raises(AuthorityEventValidationError, match="negativa requiere permit=None"):
+        RuleEvaluationOutcome(denied, object())
+    assert RuleEvaluationOutcome(denied, None).permit is None
 
 
 def test_request_hash_includes_the_catalog_identity():

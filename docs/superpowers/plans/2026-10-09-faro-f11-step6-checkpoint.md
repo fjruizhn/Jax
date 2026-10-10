@@ -7,10 +7,12 @@ Completar el límite durable de §10–§11 del diseño aprobado: las decisiones
 transacción MariaDB, y el resultado no se reconoce hasta que un checkpoint externo
 monotónico ancla exactamente el head confirmado.
 
-La semántica de `OVERLAY_ISSUED` queda fuera de este cambio. El kernel no consulta ni
-interpreta overlays, cuarentenas ni ratificaciones de corpus. El permiso requiere el
-grant individual vigente que resulte del replay verificado del ledger Block 4. La
-integración final queda pendiente de la respuesta de Fernando sobre overlays.
+Fernando confirmó el 2026-10-10 que `OVERLAY_ISSUED` exige ratificación vigente, no
+revocada y del mismo hash; overlays históricos inválidos quedan en cuarentena permanente.
+Este kernel no consulta overlays ni ratificaciones de corpus: el permiso requiere el grant
+individual vigente del replay verificado de Block 4. Fernando también decidió que el retry
+de consumo se identifica con `consumption_request_id` durable y que `evaluate` devuelve
+`RuleEvaluationOutcome(decision, permit | None)`.
 
 ## Restricciones
 
@@ -21,7 +23,8 @@ integración final queda pendiente de la respuesta de Fernando sobre overlays.
 - Tras commit, publicar y releer el head externo exacto antes de responder éxito.
 - Un checkpoint ausente, truncado, adelantado, contradictorio o no durable cierra emisión y consumo.
 - No conectar el kernel a dispatch, procesos, red ni efectos externos.
-- No publicar ni integrar mientras la decisión de overlays esté pendiente.
+- No integrar hasta CI y auditoría exactas; `.github/workflows/policy.yml` está reservado
+  y requiere que Fernando integre.
 
 ## Fases TDD
 
@@ -58,6 +61,12 @@ integración final queda pendiente de la respuesta de Fernando sobre overlays.
   por mismatch hasta reconciliación explícita; no se autocorrige el checkpoint desde DB.
 
 ## Estado
+
+- 2026-10-10: Fernando confirmó la semántica de OVERLAY, retry de consumo por
+  `consumption_request_id` y el resultado público `RuleEvaluationOutcome`.
+- 2026-10-10: comenzó la implementación de estos contratos sobre la rama de #388. El
+  incremento local añade el outcome cerrado y el identificador de retry durable; aún falta
+  el transaction owner compartido, el kernel `evaluate/consume` y la verificación MariaDB.
 
 - 2026-10-09: rama aislada creada desde master `bf6b0580`.
 - Incremento local: `RuleAuditCheckpointStore` con genesis explícito, CAS, log

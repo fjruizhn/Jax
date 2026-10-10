@@ -516,7 +516,7 @@ class MariaDBRuleDecisionStore:
             cursor = transaction_owner._cursor
             cursor.execute(
                 "SELECT permit_id,request_hash,consumed_at_utc,canonical_payload,consumption_hash,"
-                "previous_record_hash,record_hash,audit_sequence "
+                "previous_record_hash,record_hash,audit_sequence,consumption_request_id "
                 "FROM jax_rule_authority.rule_permit_consumptions "
                 "WHERE permit_id=%s FOR UPDATE",
                 (consumption.permit_id,),
@@ -524,15 +524,13 @@ class MariaDBRuleDecisionStore:
             existing = cursor.fetchone()
             if existing is not None:
                 stored, stored_record_hash, stored_sequence = self._decode_consumption_row(existing)
-                # The public idempotency identity is exactly permit_id plus
-                # request_hash. A client retry naturally has a fresh local
-                # timestamp, so it must return the durable consumption rather
-                # than treating that timestamp as a conflicting identity.
+                # A retry is recoverable only with the durable caller attempt ID.
                 if (stored.permit_id != locked_permit.permit_id
                         or stored.request_hash != locked_permit.request_hash
                         or stored.permit_id != consumption_draft.permit_id
-                        or stored.request_hash != consumption_draft.request_hash):
-                    raise AuthorityStateError("permit ya consumido con identidad distinta")
+                        or stored.request_hash != consumption_draft.request_hash
+                        or stored.consumption_request_id != consumption_draft.consumption_request_id):
+                    raise AuthorityStateError("permit ya consumido con consumption_request_id distinto")
                 if stored_sequence > audit_sequence:
                     raise RuleAuthorityStorageError("consumo almacenado está delante del audit head")
                 if (stored_sequence == audit_sequence
@@ -557,11 +555,12 @@ class MariaDBRuleDecisionStore:
             )
             cursor.execute(
                 "INSERT INTO jax_rule_authority.rule_permit_consumptions "
-                "(permit_id,request_hash,consumed_at_utc,canonical_payload,consumption_hash,"
-                "previous_record_hash,record_hash,audit_sequence) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                "(permit_id,consumption_request_id,request_hash,consumed_at_utc,canonical_payload,"
+                "consumption_hash,previous_record_hash,record_hash,audit_sequence) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
-                    consumption.permit_id, consumption.request_hash,
+                    consumption.permit_id, consumption.consumption_request_id,
+                    consumption.request_hash,
                     consumption.consumed_at_utc.astimezone(timezone.utc).replace(tzinfo=None),
                     canonical_payload, consumption.consumption_hash, previous_hash,
                     record_hash, sequence,
@@ -602,7 +601,7 @@ class MariaDBRuleDecisionStore:
     @staticmethod
     def _decode_consumption_row(row) -> tuple[RulePermitConsumption, str, int]:
         (permit_id, request_hash, consumed_at, payload_bytes, consumption_hash,
-         previous_hash, record_hash, sequence) = row
+         previous_hash, record_hash, sequence, consumption_request_id) = row
         try:
             raw = bytes(payload_bytes)
             payload = json.loads(raw.decode("utf-8"))
@@ -612,7 +611,8 @@ class MariaDBRuleDecisionStore:
                 raise ValueError("proyección de consumo no canónica")
             if (payload.get("permit_id") != permit_id
                     or payload.get("request_hash") != request_hash
-                    or payload.get("consumption_hash") != consumption_hash):
+                    or payload.get("consumption_hash") != consumption_hash
+                    or payload.get("consumption_request_id") != consumption_request_id):
                 raise ValueError("columnas de consumo difieren de la proyección")
             consumption = _trusted_consumption(payload)
             projected_time = datetime.fromisoformat(

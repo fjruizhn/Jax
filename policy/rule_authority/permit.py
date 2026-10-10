@@ -239,14 +239,16 @@ class RulePermit:
 @dataclass(frozen=True)
 class RulePermitConsumptionDraft:
     permit_id: str
+    consumption_request_id: str
     request_hash: str
     consumed_at_utc: datetime
 
     def __post_init__(self) -> None:
         try:
             uuid7_text(self.permit_id, "permit_id")
+            uuid7_text(self.consumption_request_id, "consumption_request_id")
         except Exception as exc:
-            raise AuthorityEventValidationError("permit_id inválido") from exc
+            raise AuthorityEventValidationError("identidad de consumo inválida") from exc
         if type(self.request_hash) is not str or not _SHA256.fullmatch(self.request_hash):
             raise AuthorityEventValidationError("request_hash inválido")
         object.__setattr__(self, "consumed_at_utc", _utc(self.consumed_at_utc, "consumed_at_utc"))
@@ -254,6 +256,7 @@ class RulePermitConsumptionDraft:
     def projection(self) -> dict[str, Any]:
         return {
             "permit_id": self.permit_id,
+            "consumption_request_id": self.consumption_request_id,
             "request_hash": self.request_hash,
             "consumed_at_utc": self.consumed_at_utc.isoformat(
                 timespec="microseconds"
@@ -268,9 +271,10 @@ class RulePermitConsumption:
         if _seal is not _SEAL:
             raise RuleAuthorityError("RulePermitConsumption solo lo entrega el store autoritativo")
         frozen = _freeze_json(payload, "RulePermitConsumption")
-        expected_fields = frozenset({"permit_id", "request_hash", "consumed_at_utc",
-                                     "consumption_hash"})
-        if not isinstance(frozen, Mapping) or frozenset(frozen) != expected_fields:
+        legacy_fields = frozenset({"permit_id", "request_hash", "consumed_at_utc",
+                                   "consumption_hash"})
+        current_fields = legacy_fields | {"consumption_request_id"}
+        if not isinstance(frozen, Mapping) or frozenset(frozen) not in (legacy_fields, current_fields):
             raise RuleAuthorityError("RulePermitConsumption: proyección cerrada inválida")
         expected_hash = _consumption_hash({key: value for key, value in frozen.items()
                                            if key != "consumption_hash"})
@@ -280,6 +284,8 @@ class RulePermitConsumption:
         object.__setattr__(self, "_seal", _SEAL)
 
     def __getattr__(self, name: str) -> Any:
+        if name == "consumption_request_id":
+            return self._payload.get(name)
         if name in self._payload:
             value = self._payload[name]
             if name == "consumed_at_utc" and type(value) is str:
@@ -343,8 +349,9 @@ def _trusted_consumption(value: RulePermitConsumptionDraft | Mapping[str, Any]
     elif isinstance(value, Mapping):
         payload = dict(value)
         stored_hash = payload.pop("consumption_hash", None)
-        expected = frozenset({"permit_id", "request_hash", "consumed_at_utc"})
-        if frozenset(payload) != expected:
+        legacy_fields = frozenset({"permit_id", "request_hash", "consumed_at_utc"})
+        current_fields = legacy_fields | {"consumption_request_id"}
+        if frozenset(payload) not in (legacy_fields, current_fields):
             raise RuleAuthorityError("RulePermitConsumption: proyección incompleta o con campos extra")
         if type(payload["consumed_at_utc"]) is str:
             try:
@@ -353,8 +360,23 @@ def _trusted_consumption(value: RulePermitConsumptionDraft | Mapping[str, Any]
                 )
             except ValueError as exc:
                 raise RuleAuthorityError("consumed_at_utc inválido") from exc
-        draft = RulePermitConsumptionDraft(**payload)
-        payload = draft.projection()
+        if frozenset(payload) == current_fields:
+            draft = RulePermitConsumptionDraft(**payload)
+            payload = draft.projection()
+        else:
+            # Historical rows predate durable retry identities. Preserve their
+            # canonical bytes; a caller cannot claim an identity they never stored.
+            try:
+                uuid7_text(payload["permit_id"], "permit_id")
+                if type(payload["request_hash"]) is not str or not _SHA256.fullmatch(payload["request_hash"]):
+                    raise ValueError("request_hash inválido")
+                if type(payload["consumed_at_utc"]) is str:
+                    payload["consumed_at_utc"] = datetime.fromisoformat(
+                        payload["consumed_at_utc"].replace("Z", "+00:00")
+                    )
+                payload["consumed_at_utc"] = _utc(payload["consumed_at_utc"], "consumed_at_utc")
+            except Exception as exc:
+                raise RuleAuthorityError("RulePermitConsumption histórica inválida") from exc
         computed = _consumption_hash(payload)
         if stored_hash is not None and stored_hash != computed:
             raise RuleAuthorityError("RulePermitConsumption consumption_hash no coincide")

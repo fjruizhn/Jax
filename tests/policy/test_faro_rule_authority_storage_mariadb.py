@@ -44,6 +44,7 @@ ROOT = Path(__file__).resolve().parents[2]
 AUTHORITY_LEDGER_MIGRATION = ROOT / "policy/authority_ledger/migrations/001_authority_ledger.sql"
 MIGRATION = ROOT / "policy/rule_authority/migrations/001_rule_authority_kernel.sql"
 MIGRATION_STEP6 = ROOT / "policy/rule_authority/migrations/002_enable_atomic_permits.sql"
+MIGRATION_STEP6_RETRY = ROOT / "policy/rule_authority/migrations/003_durable_consumption_request_id.sql"
 IMAGE = os.environ.get("JAX_RULE_AUTHORITY_TEST_MARIADB_IMAGE", "mariadb:12.3.3")
 CATALOG = catalogo_del_pin()
 _CATALOG_BYTES = (ROOT / "policy/faro/catalogo-topes.json").read_bytes()
@@ -1131,6 +1132,7 @@ def test_checkpoint_externo_adelantado_frente_a_db_restaurada_falla_antes_de_app
 def test_permit_y_decision_se_persisten_atómicamente_y_reintento_reusa_head(db, app, tmp_path):
     with db.root() as admin:
         _apply_migration(admin, MIGRATION_STEP6)
+        _apply_migration(admin, MIGRATION_STEP6_RETRY)
     checkpoint = RuleAuditCheckpointStore(tmp_path / "permit-audit.jsonl")
     checkpoint.bootstrap()
     store = MariaDBRuleDecisionStore(app, checkpoint_store=checkpoint)
@@ -1157,6 +1159,7 @@ def test_permit_y_decision_se_persisten_atómicamente_y_reintento_reusa_head(db,
 def test_fallo_de_insert_de_permit_revierte_decision_y_head(db, app, tmp_path):
     with db.root() as admin:
         _apply_migration(admin, MIGRATION_STEP6)
+        _apply_migration(admin, MIGRATION_STEP6_RETRY)
         with admin.cursor() as cursor:
             cursor.execute("""
                 CREATE TRIGGER fail_rule_permit_insert BEFORE INSERT ON rule_permits
@@ -1189,6 +1192,7 @@ def test_fallo_de_insert_de_permit_revierte_decision_y_head(db, app, tmp_path):
 def test_commit_de_permit_sin_anclaje_externo_no_se_reconoce_ni_reintenta(db, app, tmp_path):
     with db.root() as admin:
         _apply_migration(admin, MIGRATION_STEP6)
+        _apply_migration(admin, MIGRATION_STEP6_RETRY)
 
     class PublicationUnknown(RuleAuditCheckpointStore):
         def publicar(self, head: str, *, anterior: str) -> None:

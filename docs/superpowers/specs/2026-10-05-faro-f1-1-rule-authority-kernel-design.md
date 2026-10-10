@@ -344,8 +344,12 @@ RuleAuthorityKernel(
     trusted_clock,
     capability_classification_provider,
     rule_authority_store,
-).evaluate(request) -> RuleDecision
+).evaluate(request) -> RuleEvaluationOutcome
 ```
+
+`RuleEvaluationOutcome` contiene la decisión persistida y `permit` sellado para
+`PERMIT`; en `DENY` o `MISSING_RULE`, `permit` es `None`. El tipo rechaza las
+combinaciones cruzadas.
 
 Los providers son dependencias de arranque confiables y selladas. Su configuración no
 sale del request ni de la regla:
@@ -439,8 +443,14 @@ Propiedades:
 RuleAuthorityKernel.consume(
     permit_id,
     expected_request_hash,
+    consumption_request_id,
 ) -> RulePermitConsumption
 ```
+
+`consumption_request_id` es una identidad durable del intento: repetir el mismo
+ID recupera el consumo previamente confirmado; presentar otro ID para un permiso
+ya consumido se rechaza. El ID queda en la proyección canónica y en la fila
+append-only, para que un retry tras reinicio conserve la misma identidad.
 
 El kernel vuelve a consultar sus providers; el caller no aporta estado, snapshot, STOP ni
 hora. Antes de abrir la transacción adquiere leases compartidos del pin activo, contrato

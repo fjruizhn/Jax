@@ -66,6 +66,7 @@ MIGRATION = ROOT / "policy/authority_ledger/migrations/001_authority_ledger.sql"
 UPGRADE_MIGRATION = ROOT / "policy/authority_ledger/migrations/002_canonical_intent_not_null.sql"
 RULE_AUTHORITY_MIGRATION = ROOT / "policy/rule_authority/migrations/001_rule_authority_kernel.sql"
 RULE_AUTHORITY_STEP6_MIGRATION = ROOT / "policy/rule_authority/migrations/002_enable_atomic_permits.sql"
+RULE_AUTHORITY_STEP6_RETRY_MIGRATION = ROOT / "policy/rule_authority/migrations/003_durable_consumption_request_id.sql"
 IMAGE = os.environ.get("JAX_AUTHORITY_LEDGER_TEST_MARIADB_IMAGE", "mariadb:12.3.3")
 
 
@@ -977,6 +978,7 @@ def _initialized_cross_schema_consumption():
         with connect() as admin:
             _apply_migration(admin, RULE_AUTHORITY_MIGRATION)
             _apply_migration(admin, RULE_AUTHORITY_STEP6_MIGRATION)
+            _apply_migration(admin, RULE_AUTHORITY_STEP6_RETRY_MIGRATION)
             provision_rule_authority_account(admin, app_user, app_password)
 
         def app_connect():
@@ -1012,6 +1014,7 @@ def test_cross_schema_consumption_uses_provisioned_principal_and_retries_exact_p
         permit_head = audit_checkpoint.head_actual()
         draft = RulePermitConsumptionDraft(
             permit_id=permit.permit_id,
+            consumption_request_id="0199f8a1-8c00-7000-8000-000000000905",
             request_hash=request.request_hash,
             consumed_at_utc=datetime(2026, 10, 10, 12, 1, tzinfo=timezone.utc),
         )
@@ -1021,6 +1024,7 @@ def test_cross_schema_consumption_uses_provisioned_principal_and_retries_exact_p
         )
         retry_draft = RulePermitConsumptionDraft(
             permit_id=permit.permit_id,
+            consumption_request_id=draft.consumption_request_id,
             request_hash=request.request_hash,
             consumed_at_utc=datetime(2026, 10, 10, 12, 11, tzinfo=timezone.utc),
         )
@@ -1029,6 +1033,16 @@ def test_cross_schema_consumption_uses_provisioned_principal_and_retries_exact_p
         )
 
         assert retried.projection() == consumed.projection()
+        different_request = RulePermitConsumptionDraft(
+            permit_id=permit.permit_id,
+            consumption_request_id="0199f8a1-8c00-7000-8000-000000000908",
+            request_hash=request.request_hash,
+            consumed_at_utc=datetime(2026, 10, 10, 12, 12, tzinfo=timezone.utc),
+        )
+        with pytest.raises(AuthorityStateError, match="consumption_request_id"):
+            _consume_under_verified_fence(
+                ledger_store, checkpoint_store, root, decision_store, different_request
+            )
         assert audit_checkpoint.confirmar(audit_checkpoint.head_actual()) is True
         with connect(database="jax_rule_authority") as admin:
             with admin.cursor() as cursor:
@@ -1068,6 +1082,7 @@ def test_cross_schema_double_consumer_is_one_durable_consumption():
         )
         draft = RulePermitConsumptionDraft(
             permit_id=permit.permit_id,
+            consumption_request_id="0199f8a1-8c00-7000-8000-000000000906",
             request_hash=request.request_hash,
             consumed_at_utc=datetime(2026, 10, 10, 12, 2, tzinfo=timezone.utc),
         )
@@ -1110,6 +1125,7 @@ def test_cross_schema_consumption_insert_failure_rolls_back_permit_leaf_and_audi
             admin.commit()
         draft = RulePermitConsumptionDraft(
             permit_id=permit.permit_id,
+            consumption_request_id="0199f8a1-8c00-7000-8000-000000000909",
             request_hash=request.request_hash,
             consumed_at_utc=datetime(2026, 10, 10, 12, 3, tzinfo=timezone.utc),
         )
@@ -1153,6 +1169,7 @@ def test_cross_schema_consumption_checkpoint_failure_reports_committed_state(mon
         monkeypatch.setattr(checkpoint, "publicar", fail_publication)
         draft = RulePermitConsumptionDraft(
             permit_id=permit.permit_id,
+            consumption_request_id="0199f8a1-8c00-7000-8000-000000000910",
             request_hash=request.request_hash,
             consumed_at_utc=datetime(2026, 10, 10, 12, 4, tzinfo=timezone.utc),
         )
@@ -1205,6 +1222,7 @@ def test_cross_schema_consumption_close_failure_reports_anchored_committed_state
         fail_close = True
         draft = RulePermitConsumptionDraft(
             permit_id=permit.permit_id,
+            consumption_request_id="0199f8a1-8c00-7000-8000-000000000911",
             request_hash=request.request_hash,
             consumed_at_utc=datetime(2026, 10, 10, 12, 5, tzinfo=timezone.utc),
         )

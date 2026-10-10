@@ -4,8 +4,7 @@
 
 Completar en esta rama aislada el permiso `RulePermit` de un solo uso y su auditoría
 durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-kernel-design.md`
-§9–§15. No integrar ni publicar hasta cerrar los gates y resolver la pregunta humana de
-`OVERLAY_ISSUED`.
+§9–§15. No integrar hasta cerrar los gates y cumplir la autoridad reservada de workflows.
 
 ## Estado verificado
 
@@ -267,16 +266,18 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
 
 ## Límites de autoridad y alcance
 
-- La decisión directa de Fernando sigue pendiente: si `OVERLAY_ISSUED` requiere una
-  ratificación previa no revocada del mismo hash y cuarentena permanente para overlays
-  históricos inválidos.
+- **Decisión de Fernando, 2026-10-10:** `OVERLAY_ISSUED` requiere ratificación vigente,
+  no revocada y del mismo hash; los overlays históricos inválidos quedan en cuarentena
+  permanente. Resuelve la pregunta antes pendiente; no autoriza integración por sí sola.
+- **Decisión de Fernando, 2026-10-10:** el consumo lleva `consumption_request_id` durable;
+  el mismo ID recupera el retry confirmado, un ID distinto se rechaza. `evaluate` devuelve
+  `RuleEvaluationOutcome(decision, permit | None)`, con permiso solo en PERMIT.
 - El kernel de este paso debe ignorar overlays y ratificaciones del corpus; solo usa el
   grant individual de Block 4 derivado del ledger verificado.
 - No tocar el worktree `/home/fruiz/wt/jax-ledger-checkpoint` ni `codex/faro-r2`.
-- No hacer merge final hasta resolver la pregunta de OVERLAY y cerrar auditoría/CI. La
-  publicación de trabajo independiente puede continuar si la ejecución inmediata de
-  `/home/fruiz/claude-skills/bin/ventana estado` confirma ventana abierta; antes de integrar
-  también se vuelve a verificar la ventana según el procedimiento constitucional.
+- No integrar hasta cerrar auditoría/CI exactas y el procedimiento de integración. Antes de
+  publicar la rama o integrar, ejecutar `/home/fruiz/claude-skills/bin/ventana estado` de
+  inmediato; la pregunta de OVERLAY ya está resuelta, pero no sustituye esos gates.
 
 ## Siguiente acción exacta
 
@@ -294,6 +295,8 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
 - `policy/authority_ledger/storage.py`
 - `policy/rule_authority/store.py`
 - `policy/rule_authority/migrations/002_enable_atomic_permits.sql`
+- `policy/rule_authority/migrations/003_durable_consumption_request_id.sql`
+- `policy/rule_authority/models.py`
 - `tests/policy/test_faro_rule_permit.py`
 - `tests/policy/test_faro_rule_authority_store.py`
 - `tests/policy/test_rule_authority_checkpoint.py`
@@ -301,3 +304,23 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
 - `tests/policy/test_authority_ledger_storage_mariadb.py`
 - `docs/superpowers/plans/2026-10-09-faro-f11-step6-checkpoint.md`
 - `TRASPASO.md`
+
+### Decisiones confirmadas y contrato de retry · 2026-10-10
+
+- Fernando resolvió las tres preguntas públicas: `OVERLAY_ISSUED` exige ratificación vigente,
+  no revocada y del mismo hash; eventos históricos inválidos permanecen en cuarentena
+  permanente; `consumption_request_id` durable recupera solo el mismo retry y rechaza otro
+  ID; `evaluate` devuelve `RuleEvaluationOutcome(decision, permit | None)`.
+- El SHA publicado de partida es `3eac3fff32c9472f7d43884c5ad007166a9db3e4`. El delta local
+  de trabajo añade el outcome cerrado, el ID UUIDv7 en la proyección canónica de consumo, una
+  columna durable única con trigger de validación, y la cobertura de mismo ID/ID distinto.
+  El kernel todavía requiere wiring transaccional de evaluate/consume; no declarar el paso
+  terminado con este incremento.
+- Verificación local del delta: 185 passed en permisos, modelos, store, checkpoint y overlays;
+  `py_compile`, parser de las dos sentencias de migración y `git diff --check` pasan. La suite
+  MariaDB cross-schema colecciona; su ejecución local falló al arrancar el contenedor Docker.
+  En la consulta del SHA remoto de partida, policy y secret-scan seguían en curso; canonical
+  projections pasó. Consultar el rollup vigente, no asumir esos resultados como actuales.
+- Siguiente: completar y probar el transaction owner compartido Block 4/Rule Authority, el
+  kernel y la devolución/recovery del outcome; correr migración e integración MariaDB en CI;
+  medir floors afectados, delta-auditar y esperar CI del SHA exacto. No integrar todavía.

@@ -23,6 +23,7 @@ from policy.authority_ledger.ids import uuid7_text
 from .errors import RuleSchemaError
 from .schema import (MAX_CANTIDAD, Cantidad, Frecuencia, LimitesObligatorios, Monto,
                      ReglaValidada, Tope, _validar_periodo)
+from .permit import RulePermit
 
 _IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9._:-]{0,127}\Z")
 _ISO_MONEDA = re.compile(r"[A-Z]{3}\Z", re.ASCII)
@@ -328,3 +329,26 @@ class RuleDecision:
         elif self.status is RuleDecisionStatus.DENY and self.reason_code == "RULE_NOT_FOUND":
             raise AuthorityEventValidationError("RULE_NOT_FOUND requiere MISSING_RULE")
         object.__setattr__(self, "decided_at_utc", _utc(self.decided_at_utc, "decided_at_utc"))
+
+
+@dataclass(frozen=True)
+class RuleEvaluationOutcome:
+    """Persisted decision and its sole issued permit, when status is PERMIT."""
+
+    decision: RuleDecision
+    permit: RulePermit | None
+
+    def __post_init__(self) -> None:
+        if type(self.decision) is not RuleDecision:
+            raise AuthorityEventValidationError("outcome requiere RuleDecision exacta")
+        if self.decision.status is RuleDecisionStatus.PERMIT:
+            if type(self.permit) is not RulePermit or not self.permit._is_store_sealed():
+                raise AuthorityEventValidationError("PERMIT requiere RulePermit sellado del store")
+            if (self.permit.request_id != self.decision.request_id
+                    or self.permit.request_hash != self.decision.request_hash
+                    or self.permit.rule_id != self.decision.required_rule_id
+                    or self.permit.issued_at_utc.astimezone(timezone.utc)
+                    != self.decision.decided_at_utc):
+                raise AuthorityEventValidationError("RulePermit no corresponde a la decisión")
+        elif self.permit is not None:
+            raise AuthorityEventValidationError("decisión negativa requiere permit=None")

@@ -14,6 +14,9 @@ from policy.rule_authority.permit import (
     _trusted_consumption,
     _trusted_permit,
 )
+from policy.rule_authority.models import (
+    RuleDecision, RuleDecisionStatus, RuleEvaluationOutcome,
+)
 
 
 def _draft(**changes):
@@ -96,12 +99,14 @@ def test_roundtrip_conserva_hash_y_rechaza_hash_alterado():
 def test_consumo_es_un_registro_sellado_y_ligado_al_request_hash():
     draft = RulePermitConsumptionDraft(
         permit_id="0199f8a1-8c00-7000-8000-000000000211",
+        consumption_request_id="0199f8a1-8c00-7000-8000-000000000212",
         request_hash="sha256:" + "5" * 64,
         consumed_at_utc=datetime(2026, 10, 9, 12, 1, tzinfo=timezone.utc),
     )
     consumption = _trusted_consumption(draft)
     assert consumption.permit_id == draft.permit_id
     assert consumption.request_hash == draft.request_hash
+    assert consumption.consumption_request_id == draft.consumption_request_id
     assert consumption._is_store_sealed()
     with pytest.raises(RuleAuthorityError, match="store"):
         RulePermitConsumption(draft.projection())
@@ -110,3 +115,33 @@ def test_consumo_es_un_registro_sellado_y_ligado_al_request_hash():
     tampered["request_hash"] = "sha256:" + "f" * 64
     with pytest.raises(RuleAuthorityError, match="consumption_hash"):
         _trusted_consumption(tampered)
+
+
+def test_outcome_permit_requiere_decision_permit_y_registro_sellado():
+    decision = RuleDecision(
+        request_id="0199f8a1-8c00-7000-8000-000000000213",
+        request_hash="sha256:" + "1" * 64,
+        status=RuleDecisionStatus.PERMIT,
+        required_rule_id="rule-one",
+        reason_code=None,
+        decided_at_utc=datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc),
+    )
+    with pytest.raises(AuthorityEventValidationError, match="PERMIT requiere RulePermit sellado"):
+        RuleEvaluationOutcome(decision, None)
+    permit_draft = _draft(
+        request_id=decision.request_id,
+        request_hash=decision.request_hash,
+        issued_at_utc=decision.decided_at_utc,
+    )
+    permit = _trusted_permit(permit_draft)
+    assert RuleEvaluationOutcome(decision, permit).permit.permit_id == permit_draft.permit_id
+    other_request = RuleDecision(
+        request_id="0199f8a1-8c00-7000-8000-000000000214",
+        request_hash=decision.request_hash,
+        status=RuleDecisionStatus.PERMIT,
+        required_rule_id="rule-one",
+        reason_code=None,
+        decided_at_utc=decision.decided_at_utc,
+    )
+    with pytest.raises(AuthorityEventValidationError, match="no corresponde a la decisión"):
+        RuleEvaluationOutcome(other_request, permit)
