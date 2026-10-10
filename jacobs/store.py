@@ -985,6 +985,13 @@ _INDICES: list[tuple[str, str, str, bool]] = [
     ("jacobs_pipelines", "idx_pipelines_descartados",
      "CREATE INDEX idx_pipelines_descartados ON jacobs_pipelines "
      "(user_id, tenant_id, status, descartado_at) ALGORITHM=INPLACE LOCK=NONE", True),
+    # Plataforma (jax-platform PR #204, ronda 2): las vistas de superadmin
+    # filtran por tenant/status y recorren por descartado_at. Este índice es
+    # de Jacobs porque `jacobs_pipelines` y su esquema pertenecen a este repo;
+    # la plataforma no ejecuta DDL sobre tablas jacobs_* (Ruling T6-6).
+    ("jacobs_pipelines", "idx_pipelines_tenant_status_date",
+     "CREATE INDEX idx_pipelines_tenant_status_date ON jacobs_pipelines "
+     "(tenant_id, status, descartado_at, pipeline_id) ALGORITHM=INPLACE LOCK=NONE", True),
     ("jacobs_pipelines", "idx_pipelines_ocultos",
      "CREATE INDEX idx_pipelines_ocultos ON jacobs_pipelines "
      "(status, descartado_at) ALGORITHM=INPLACE LOCK=NONE", True),
