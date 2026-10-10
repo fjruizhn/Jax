@@ -17,6 +17,7 @@ from policy.canonicalization.errors import StrictYAMLError
 from policy.canonicalization.strict_yaml import load_strict_yaml
 from tests.policy.catalogo_pin import catalogo_del_pin
 from policy.rule_authority.errors import RuleSchemaError
+from jax.faro.catalogo_topes import CatalogoTopes
 from policy.rule_authority.schema import TTL_MAX_POR_DEFECTO, validar_regla as _validar
 
 # El catalogo de la decision de Fernando (B-3): llega del pin, nunca de un global
@@ -368,21 +369,47 @@ def test_monto_con_cada_moneda_del_catalogo_real_valida(moneda: str) -> None:
     assert regla.obligation_limits.amount.currency.lower() == moneda
 
 
+def _sin_tope(datos: dict) -> dict:
+    # Sin ``tope`` el unico que puede negar es el chequeo de unidad/moneda: si no,
+    # ``_validar_tope`` (que tambien niega sin catalogo) enmascara el mutante.
+    datos["tope"] = None
+    return datos
+
+
 def test_cantidad_o_monto_sin_catalogo_del_pin_niega() -> None:
     # B-3 extendido a los limites: sin catalogo sellado no hay vocabulario de
     # unidades ni monedas. La regla base (sin quantity/amount/tope) sigue
-    # validando sin catalogo: no hay nada que cerrar.
-    datos_cantidad = _regla("regla-ejemplo-tope.yaml")
-    with pytest.raises(RuleSchemaError, match="sin catalogo"):
+    # validando sin catalogo: no hay nada que cerrar. Sin tope, y con el prefijo
+    # del campo en el mensaje, para que lo afirmado sea el chequeo de ESTE helper.
+    datos_cantidad = _sin_tope(_regla("regla-ejemplo-tope.yaml"))
+    with pytest.raises(RuleSchemaError, match=r"^obligation_limits\.quantity\.unit: sin catalogo"):
         _validar(datos_cantidad, catalogo=None)
-    datos_monto = _regla("regla-ejemplo-tope.yaml")
+    datos_monto = _sin_tope(_regla("regla-ejemplo-tope.yaml"))
     datos_monto["obligation_limits"]["quantity"] = None
     datos_monto["obligation_limits"]["amount"] = {"currency": "USD", "max": 100}
-    with pytest.raises(RuleSchemaError, match="sin catalogo"):
+    with pytest.raises(RuleSchemaError, match=r"^obligation_limits\.amount\.currency: sin catalogo"):
         _validar(datos_monto, catalogo=None)
-    with pytest.raises(RuleSchemaError, match="SELLADO"):
+    with pytest.raises(RuleSchemaError,
+                       match=r"^obligation_limits\.quantity\.unit: el catalogo se exige SELLADO"):
         _validar(datos_cantidad, catalogo={"actos_externos": ["mensajes"]})
     _validar(_regla())          # REVERSIBLE sin limites: el catalogo no hace falta
+
+
+def test_un_catalogo_forjado_por_subclase_no_cuenta_como_sellado() -> None:
+    """``type(catalogo) is CatalogoTopes`` (como models.py): una subclase creada
+    con ``object.__new__`` salta el testigo del constructor y NO pasa, ni en el
+    helper de unidad/moneda ni en ``_validar_tope``."""
+    class Falso(CatalogoTopes):
+        pass
+    falso = object.__new__(Falso)
+    datos = _sin_tope(_regla("regla-ejemplo-tope.yaml"))
+    with pytest.raises(RuleSchemaError, match=r"^obligation_limits\.quantity\.unit: .*SELLADO"):
+        _validar(datos, catalogo=falso)
+    solo_tope = _regla("regla-ejemplo-tope.yaml")
+    solo_tope["obligation_limits"]["quantity"] = None
+    solo_tope["obligation_limits"]["frequency"] = None
+    with pytest.raises(RuleSchemaError, match=r"^tope: .*SELLADO"):
+        _validar(solo_tope, catalogo=falso)
 
 
 def test_la_unidad_y_la_moneda_salen_del_catalogo_del_pin() -> None:

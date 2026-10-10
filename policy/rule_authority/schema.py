@@ -164,7 +164,7 @@ def _validar_subid(valor: object, clase: str, campo: str, catalogo: object, *,
     Sin catalogo sellado no hay vocabulario que cerrar: niega (B-3)."""
     if catalogo is None:
         raise RuleSchemaError(f"{campo}: sin catalogo del pin no hay vocabulario (B-3)")
-    if not isinstance(catalogo, CatalogoTopes):
+    if type(catalogo) is not CatalogoTopes:
         raise RuleSchemaError(f"{campo}: el catalogo se exige SELLADO (CatalogoTopes del pin)")
     if type(valor) is not str or unicodedata.normalize("NFC", valor) != valor:
         raise RuleSchemaError(f"{campo}: identificador no canonico")
@@ -183,7 +183,7 @@ def _validar_tope(valor: object, catalogo: object) -> "Tope":
             raise RuleSchemaError(f"tope.{clave}: obligatorio")
     if catalogo is None:
         raise RuleSchemaError("tope: sin catalogo del pin no se topea nada (B-3)")
-    if not isinstance(catalogo, CatalogoTopes):          # r7, MINOR-3: sellado o nada
+    if type(catalogo) is not CatalogoTopes:          # r7, MINOR-3: sellado o nada
         raise RuleSchemaError("tope: el catalogo se exige SELLADO (CatalogoTopes del pin)")
     clase = datos["resource_class"]
     if clase not in catalogo:

@@ -2678,7 +2678,13 @@ jobs:
         # Schema-unidades (Jax#378, hallazgo del auditor de #371, reapilado sobre
         # master): 1002 (+34 — el schema valida quantity.unit contra actos_externos
         # y amount.currency contra monto_dinero: 16+8 negativas, 5+2 positivas del
-        # catalogo real, 1 sin catalogo, 1 de pin alterno, 1 de no-vacio).
+        # catalogo real, 1 sin catalogo, 1 de pin alterno, 1 de no-vacio). Ronda 2
+        # (Jax#378): 1003 (+1: catalogo forjado por subclase -- ``type(catalogo) is
+        # CatalogoTopes`` tambien en el helper y en ``_validar_tope``). La prueba de
+        # sin catalogo/sin sellar usa una regla SIN tope y afirma el prefijo del
+        # campo: verificado con git archive que el mutante de quitar el
+        # ``if catalogo is None`` del helper y el de quitar su chequeo de sellado
+        # hacen caer esa prueba (con tope, ``_validar_tope`` los enmascaraba).
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail

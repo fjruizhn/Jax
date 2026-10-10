@@ -4690,7 +4690,7 @@ Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_
 cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-09, reapilado de schema-unidades Jax#378 sobre master post-#371): `^1002 passed in `
+Patrón vigente (2026-10-09, reapilado de schema-unidades Jax#378 sobre master post-#371): `^1003 passed in `
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4740,3 +4740,4 @@ post-#371): 968 -> 1002 (+34: el schema valida `quantity.unit` contra `actos_ext
 valida ausente del catalogo), 5+2 positivas del catalogo real, 1 sin catalogo/sin sellar, 1 de
 pin alterno, 1 de no-vacio). Medido en hall9000 con Python 3.14 y el comando exacto del paso.
 
+Jax#378 r2 (2026-10-07): 1002 -> 1003 (+1: un catalogo forjado por subclase, `object.__new__`, niega en el helper de unidad/moneda y en `_validar_tope`; el schema compara `type(catalogo) is CatalogoTopes`, como models.py). Las pruebas de sin catalogo/sin sellar pasan a una regla SIN tope con el prefijo del campo afirmado; se comprobo con `git archive` que los mutantes M6 (`if catalogo is None: return valor` en el helper) y M5 (quitar su chequeo de sellado) hacen caer la aserción. Medido con el comando exacto del paso: 1003 passed.
