@@ -631,8 +631,9 @@ class MariaDBRuleDecisionStore:
 
         A competing consume can commit between the initial durable lookup and
         this owner's ``FOR UPDATE`` permit lock.  Its exact caller retry must
-        return before current authority is read; a different request hash or
-        caller retry ID remains a closed denial.
+        return after immutable Block 4 and Rule Authority audit-head integrity
+        have been verified, but before mutable current authority is read; a
+        different request hash or caller retry ID remains a closed denial.
         """
         from policy.authority_ledger.storage import (
             AuthorityLedgerTransactionPurpose,

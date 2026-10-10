@@ -1765,6 +1765,61 @@ def test_kernel_evaluate_serializes_rule_revocation_in_both_orders(monkeypatch, 
         assert denied.permit is None
 
 
+def test_kernel_evaluate_waits_for_revocation_that_already_holds_block4_flock(
+        monkeypatch, tmp_path):
+    """Revocation-first is concurrent: evaluation reaches, then waits on, Block 4."""
+    with _initialized_cross_schema_consumption() as (
+        _connect, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+    ):
+        kernel, request, grant_event = _kernel_permit_fixture(
+            tmp_path, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+            request_id="0199f8a1-8c00-7000-8000-000000000959",
+            event_id="0199f8a1-8c00-7000-8000-000000000960",
+        )
+        revoker_thread = []
+        revoke_lock_held = threading.Event()
+        evaluation_lock_attempted = threading.Event()
+        release_revocation = threading.Event()
+        original_locked = TrustedCheckpointStore.locked
+
+        @contextlib.contextmanager
+        def hold_revocation_lock(store):
+            is_revoker = threading.get_ident() in revoker_thread
+            if store is checkpoint_store and is_revoker:
+                with original_locked(store):
+                    revoke_lock_held.set()
+                    assert release_revocation.wait(timeout=5), "la prueba no liberó revocación"
+                    yield
+            else:
+                if store is checkpoint_store and revoke_lock_held.is_set():
+                    evaluation_lock_attempted.set()
+                with original_locked(store):
+                    yield
+
+        monkeypatch.setattr(TrustedCheckpointStore, "locked", hold_revocation_lock)
+
+        def revoke():
+            revoker_thread.append(threading.get_ident())
+            return _revoke_rule_grant(
+                ledger_store, root, checkpoint_store, grant_event,
+                event_id="0199f8a1-8c00-7000-8000-000000000961",
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            revocation = pool.submit(revoke)
+            assert revoke_lock_held.wait(timeout=5)
+            evaluation = pool.submit(kernel.evaluate, request)
+            assert evaluation_lock_attempted.wait(timeout=5)
+            assert not evaluation.done(), "evaluate no esperó la revocación que ya tenía Block 4"
+            release_revocation.set()
+            revocation.result(timeout=5)
+            outcome = evaluation.result(timeout=5)
+
+        assert outcome.decision.status is RuleDecisionStatus.DENY
+        assert outcome.decision.reason_code == "AUTHORITY_INVALID"
+        assert outcome.permit is None
+
+
 def test_kernel_consume_serializes_rule_revocation_in_both_orders(monkeypatch, tmp_path):
     """A real permit lock + Block-4 owner cannot be crossed by revocation."""
     with _initialized_cross_schema_consumption() as (
@@ -1841,6 +1896,63 @@ def test_kernel_consume_serializes_rule_revocation_in_both_orders(monkeypatch, t
                 permit2.permit_id, request2.request_hash,
                 "0199f8a1-8c00-7000-8000-000000000958",
             )
+
+
+def test_kernel_consume_waits_for_revocation_that_already_holds_block4_flock(
+        monkeypatch, tmp_path):
+    """A preexisting revocation fence wins before the permit can be consumed."""
+    with _initialized_cross_schema_consumption() as (
+        _connect, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+    ):
+        kernel, request, grant_event = _kernel_permit_fixture(
+            tmp_path, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+            request_id="0199f8a1-8c00-7000-8000-000000000962",
+            event_id="0199f8a1-8c00-7000-8000-000000000963",
+        )
+        permit = kernel.evaluate(request).permit
+        assert permit is not None
+        revoker_thread = []
+        revoke_lock_held = threading.Event()
+        consumption_lock_attempted = threading.Event()
+        release_revocation = threading.Event()
+        original_locked = TrustedCheckpointStore.locked
+
+        @contextlib.contextmanager
+        def hold_revocation_lock(store):
+            is_revoker = threading.get_ident() in revoker_thread
+            if store is checkpoint_store and is_revoker:
+                with original_locked(store):
+                    revoke_lock_held.set()
+                    assert release_revocation.wait(timeout=5), "la prueba no liberó revocación"
+                    yield
+            else:
+                if store is checkpoint_store and revoke_lock_held.is_set():
+                    consumption_lock_attempted.set()
+                with original_locked(store):
+                    yield
+
+        monkeypatch.setattr(TrustedCheckpointStore, "locked", hold_revocation_lock)
+
+        def revoke():
+            revoker_thread.append(threading.get_ident())
+            return _revoke_rule_grant(
+                ledger_store, root, checkpoint_store, grant_event,
+                event_id="0199f8a1-8c00-7000-8000-000000000964",
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            revocation = pool.submit(revoke)
+            assert revoke_lock_held.wait(timeout=5)
+            consumption = pool.submit(
+                kernel.consume, permit.permit_id, request.request_hash,
+                "0199f8a1-8c00-7000-8000-000000000965",
+            )
+            assert consumption_lock_attempted.wait(timeout=5)
+            assert not consumption.done(), "consume no esperó la revocación que ya tenía Block 4"
+            release_revocation.set()
+            revocation.result(timeout=5)
+            with pytest.raises(AuthorityStateError, match="ratificación.*vigente"):
+                consumption.result(timeout=5)
 
 
 

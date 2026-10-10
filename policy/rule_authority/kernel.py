@@ -150,8 +150,9 @@ class RuleAuthorityKernel:
                                 "recuperación de consumo no devolvió objeto sellado del store"
                             )
                         # The exact retry is a read-only terminal outcome.  It
-                        # deliberately precedes Block 4/current-authority
-                        # revalidation, but its owner must still finish before
+                        # follows the immutable Block 4/DB integrity check,
+                        # while deliberately preceding mutable current-authority
+                        # revalidation; its owner must still finish before
                         # releasing the two durable checkpoint fences.
                         owner.rollback()
                         return recovered
