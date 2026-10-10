@@ -2,6 +2,18 @@
 
 **Archivado:** 2026-10-10. Fuente: `TRASPASO.md` de la rama `codex/faro-floor-retirement-grant`. Este registro conserva estado, verificaciones y siguientes pasos; no otorga autoridad.
 
+## Actualización verificada — 2026-10-10
+
+- #396 se integró como `3643568c045caa44cfcaf08e3101f1ce5126e8ce`; `post-merge-guard` terminó SUCCESS, default `master@3643568c`, sin carrera.
+- #395 se integró como `ec01b2191b1a7c1e05854a345a610d72f8b643ea`; `post-merge-guard` terminó SUCCESS, default `master@ec01b219`, sin carrera. Este es el tip oficial de esta actualización.
+- #390 continúa OPEN en head `3e74c61463d1c7c6727b0fd40134bd774015b3f8`, base antigua `0d6484f2f56059e9fb0d11b04de8990375ee7c53`, estado UNSTABLE. El run `38049519208` falló el único caso pendiente del piso MariaDB durante `_apply_migration`, con `OperationalError 2013` (conexión perdida durante consulta); 11 casos pasaron y uno terminó con error. No se atribuye causa raíz al servidor ni se repite DDL automáticamente.
+- #387 continúa OPEN/DIRTY en head `b5f70fef88a6f7c2a19a9cfca4b7dd2716a04a51`, base `9b2744c33c37fdfeec87bac03ddd00c9b76e8fb5`. El trabajo local de preparación del revert permanece separado y requiere reapilado sobre el grant real y nueva auditoría/CI.
+- #388 sigue OPEN/DRAFT/CONFLICTING; su rama pertenece a otra sesión. El owner debe preservar los cambios Step 6/7 y reapilar luego de #390/#387, conservando el hardening y las ocho regresiones de #392 que ya están en `master`.
+- Se buscaron los nombres exactos `trusted-root.json`, `trusted_root.json`, `authority-root` y `trusted-root` en snapshots de los ocho repositorios Restic configurados (`local`, `r2`, `sesamo`, `r2-atemai`, `r2-bridge`, `vms-adata`, `prod-adata`, `prod-sesamo`); todos devolvieron cero coincidencias. La evidencia solo cubre esos snapshots/nombres y no autoriza recrear una raíz. Producción continúa bloqueada hasta recuperar material de raíz confiable aprobado y verificar el ledger.
+- La sesión principal pidió revisión read-only a GLM/ZCode; Kimi continúa sin poder responder por límite temporal HTTP 403. La revisión externa no sustituye la verificación en GitHub ni las auditorías obligatorias.
+
+La siguiente verificación exacta debe actualizar este registro si los PR o el tip cambian; los puntos anteriores son historia fechada, no estado operacional perpetuo.
+
 **Objetivo:** cerrar el permiso temporal de piso (#390), integrar el revert requerido de #385 (#387) y dejar registrado si producción puede habilitarse.
 
 ## Estado verificado al 2026-10-10
