@@ -43,8 +43,9 @@ misma punta.
 ## Retiros extraordinarios de pisos
 
 La desaparición sigue prohibida salvo un permiso genérico y exacto del registro versionado
-`.github/workflows/floor-retirements.json`. El registro de esta entrega está vacío: no concede
-ningún retiro. El workflow extrae el comparador desde la punta oficial de `master` y ejecuta
+`.github/workflows/floor-retirements.json`. El registro versionado puede estar vacío; cada grant
+autoriza solo el caso exacto que describe.
+El workflow extrae el comparador desde la punta oficial de `master` y ejecuta
 esa copia, nunca la del HEAD evaluado. Descarga historia completa; shallow, objetos ausentes,
 padres no verificables o errores de Git deniegan la excepción.
 
@@ -59,9 +60,16 @@ archivo extra, cambio parcial, segundo retiro, diferencia de definición o permi
 conserva el rechazo ordinario. Los pisos desaparecidos se filtran solo individualmente después
 de acreditar todas esas condiciones; el permiso no autoriza otras bajas.
 
-Para usar esta capacidad en un caso futuro, el grant válido debe integrarse primero en una PR
-separada y la PR de retiro debe apuntar exactamente al merge dedicado resultante. Esta etapa no
-añade autorización real, no modifica `ci/pisos.json` ni reapila ningún rollback.
+Cada retiro requiere que su grant exacto se integre primero en una PR separada y que la PR de
+retiro apunte exactamente al merge dedicado resultante. El grant solo autoriza el diff y el piso
+identificados; no modifica otros pisos ni habilita retiros adicionales.
+
+Registro 2026-10-10 (Jax #390): CI mostró que una prueba de soporte anterior exigía que el registro
+estuviera siempre vacío, contradiciendo el uso autorizado de grants exactos. La prueba ahora
+verifica el esquema versionado y el conjunto cerrado de campos, mientras la validación profunda
+de valores y alcance sigue en el comparador. El mismo test se reemplazó sin aumentar el piso
+`archivos-de-test-en-ci/pisos` (`233 passed`). Fernando autorizó el grant exacto para #387; falta
+CI sobre la base que incluya este ajuste antes de actualizar e integrar el rollback.
 
 ---
 
