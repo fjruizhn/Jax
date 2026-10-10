@@ -9,12 +9,16 @@ from .models import (
     limites_de,
 )
 from .store import InMemoryRuleDecisionStore, RuleDecisionStore
+from .storage import MariaDBRuleDecisionStore
+from .errors import RuleAuthorityStorageError
 
 __all__ = [
     "InMemoryRuleDecisionStore",
+    "MariaDBRuleDecisionStore",
     "RuleDecision",
     "RuleDecisionStatus",
     "RuleDecisionStore",
+    "RuleAuthorityStorageError",
     "RuleEvaluation",
     "RuleEvaluationRequest",
     "RuleLimits",
