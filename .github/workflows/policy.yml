@@ -388,10 +388,11 @@ jobs:
           destino="$GITHUB_WORKSPACE/.github/ci/comparar_pisos_base.py"
           [[ -d "$GITHUB_WORKSPACE/.github" && ! -L "$GITHUB_WORKSPACE/.github" ]]
           [[ -d "$GITHUB_WORKSPACE/.github/ci" && ! -L "$GITHUB_WORKSPACE/.github/ci" ]]
+          [[ ! -L "$destino" ]]
           temporal=$(mktemp "$GITHUB_WORKSPACE/.github/ci/.comparar_pisos_base.XXXXXX")
           git show refs/pisos-base/master:.github/ci/comparar_pisos.py > "$temporal"
           chmod 600 "$temporal"
-          mv -f "$temporal" "$destino"
+          mv -fT "$temporal" "$destino"
       - name: Los pisos no bajan respecto de la punta de master
         run: |
           python3 -I "$GITHUB_WORKSPACE/.github/ci/comparar_pisos_base.py" refs/pisos-base/master || exit $?

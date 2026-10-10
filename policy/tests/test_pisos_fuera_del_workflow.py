@@ -256,7 +256,8 @@ def test_el_comparador_corre_aislado_y_ejecuta_el_checker_extraido_de_la_base():
     assert "git show refs/pisos-base/master:.github/ci/comparar_pisos.py" in fetch
     assert 'destino="$GITHUB_WORKSPACE/.github/ci/comparar_pisos_base.py"' in fetch
     assert 'temporal=$(mktemp "$GITHUB_WORKSPACE/.github/ci/.comparar_pisos_base.XXXXXX")' in fetch
-    assert 'mv -f "$temporal" "$destino"' in fetch
+    assert '[[ ! -L "$destino" ]]' in fetch
+    assert 'mv -fT "$temporal" "$destino"' in fetch
     assert set(pasos[2]) == {"name", "run"} and pasos[2]["run"].strip() == COMPARAR
 
 
