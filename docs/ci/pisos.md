@@ -116,6 +116,8 @@ Patrón vigente al migrar (2026-10-03, master 364ded9): `^671 passed`
 
 Piso actualizado 2026-10-04: `^688 passed`. Sobre el piso 683, se suman pruebas de payload hostil, timeout con cancelación, truncamiento explícito, cableado del perfil de prueba y concurrencia en peor caso; 0 skips.
 
+Piso actualizado 2026-10-09 (JAX#371, Faro F1.1 paso 4): `^780 passed`, medido en GitHub Actions sobre el head exacto `bf0a11d940af4c67a6f8b015fc454c005685316e`, sin skips. El piso anterior era 729; el aumento neto de 51 pruebas corresponde a las regresiones de leases, rotación segura, límites y avance del resumen diario en `tests/test_faro_aviso.py`.
+
 ## `faro-bitacora-db/faro-db`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^40 passed`

@@ -20,8 +20,8 @@
 
 ## Siguientes pasos
 
-1. Auditoría Tier 3 aprobó `61fd79fbe521bc843a11ad71d1513a4b3153af90` con 0 BLOCK, 0 MAJOR y 2 MINOR. El head remoto de #371 ya fue reemplazado bajo ventana abierta; `master@35991faa` coincide con la base del PR.
-2. La primera CI exacta detectó una excepción de limpieza temporal sin comentario `fail-soft` en `jax/faro/aviso.py:774`. Añadida la justificación (`os.replace` puede haber consumido el temporal); `policy/tests/test_no_fail_open_except.py` → 21 passed y `tests/test_faro_aviso.py` → 119 passed. Este ajuste requiere nueva auditoría Tier 3 y una corrida CI nueva antes del preflight/merge.
+1. Auditoría Tier 3 aprobó `bf0a11d940af4c67a6f8b015fc454c005685316e` con 0 BLOCK, 0 MAJOR y 2 MINOR. El head remoto de #371 ya fue reemplazado bajo ventana abierta; `master@35991faa` coincide con la base del PR.
+2. La CI del head corregido pasó `no-fail-open-except` y detectó un piso Faro obsoleto: el runner midió 780 pruebas, mientras `ci/pisos.json` esperaba 729. La suite exacta terminó `780 passed`; la reproducción local completa también dio 780 passed. Se actualizó el piso a 780 y se registró la medición en `.github/workflows/policy.yml` y `docs/ci/pisos.md`; esa corrección requiere nueva auditoría Tier 3 y nueva CI exacta antes del preflight/merge.
 3. Con auditoría aprobada y CI verde, confirmar ventana e integrar #371 mediante preflight y post-merge guard.
 4. Reconstruir #381 sobre el nuevo master, cerrar los dos BLOCKs, mantener la compuerta de ratificación aprobada por Fernando, medir pisos, auditar y completar CI.
 5. Reapilar #375 y #378 sobre #371 integrado; auditar y completar CI de cada PR en orden.
