@@ -11,7 +11,9 @@ import pytest
 
 from policy.canonicalization.strict_yaml import load_strict_yaml
 from policy.rule_authority.kernel import RuleAuthorityKernel
-from policy.rule_authority.models import RuleEvaluationRequest
+from policy.rule_authority.models import (
+    RuleDecisionStatus, RuleEvaluationRequest, _hash_de_regla,
+)
 from policy.rule_authority.storage import RuleAuthorityStorageError
 from policy.rule_authority.permit import (
     RulePermitConsumptionDraft, RulePermitDraft, _trusted_consumption, _trusted_permit,
@@ -103,6 +105,44 @@ def test_frequency_rule_fails_closed_without_transactional_counter():
 
     assert limits is None
     assert reason == "AUTHORITY_INVALID"
+
+
+def test_unbounded_rule_with_request_hash_returns_stable_authority_deny(monkeypatch):
+    now = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
+    rule = _rule("regla-ejemplo.yaml")
+    request = _request(capability="CAPABILITY_ID", rule_hash=_hash_de_regla(rule))
+    sealed = SimpleNamespace(regla=rule, ruta="policy/faro/ejemplo.yaml",
+                             blob_oid="a" * 40, content_hash="sha256:" + "c" * 64)
+    snapshot = SimpleNamespace(commit="b" * 40, repositorio="jax", reglas=(sealed,),
+                               catalogo=CATALOG)
+    ratification = SimpleNamespace(valid_from_utc=now.replace(year=now.year - 1),
+                                   valid_until_utc=None)
+    grant_event = SimpleNamespace(event_id="0199f8a1-8c00-7000-8000-000000000061",
+                                  intent=SimpleNamespace(rule_ratification=ratification))
+    state = SimpleNamespace(
+        latest_unrevoked_rule_ratification=lambda _rule_id: grant_event,
+    )
+    contract = ContratoCapability(
+        identidad="mail.send.contract.v1", version="1",
+        clase=ClaseCapability.REVERSIBLE, unidad=None, moneda=None,
+        forma_limites=FormaLimites.NINGUNA,
+    )
+    views = SimpleNamespace(
+        ahora_utc=now,
+        stop=SimpleNamespace(valor=SimpleNamespace(activo=False)),
+        clasificacion=SimpleNamespace(valor=SimpleNamespace(
+            contrato_de=lambda _capability: contract)),
+    )
+    monkeypatch.setattr(RuleAuthorityKernel, "_grant_matches", staticmethod(lambda *_args: True))
+    kernel = object.__new__(RuleAuthorityKernel)
+
+    decision, permit = kernel._initial_evaluation(
+        request, snapshot, state, views, Path("/tmp"),
+    )
+
+    assert decision.status is RuleDecisionStatus.DENY
+    assert decision.reason_code == "AUTHORITY_INVALID"
+    assert permit is None
 
 
 def test_durable_request_projection_reconstructs_exactly_under_the_current_catalog():

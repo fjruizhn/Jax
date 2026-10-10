@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import timedelta
 import uuid
 
-from policy.authority_ledger.errors import AuthorityStateError
+from policy.authority_ledger.errors import AuthorityEventValidationError, AuthorityStateError
 from policy.authority_ledger.ids import uuid7_text
 from policy.authority_ledger.storage import AuthorityLedgerTransactionPurpose
 from jax.faro.git_objetos import es_ancestro
@@ -20,7 +20,7 @@ from .models import (RuleDecision, RuleDecisionStatus, RuleEvaluationOutcome,
                      RuleEvaluationRequest, limites_de)
 from .permit import (RulePermitConsumptionDraft, RulePermitDraft,
                      RulePermitConsumption, _permit_after_kernel_evaluation)
-from .providers import (ClaseCapability, ClasificacionDesconocida, FormaLimites, leases_de_emision)
+from .providers import (ClasificacionDesconocida, FormaLimites, leases_de_emision)
 from .snapshot import load_trusted_policy_snapshot
 from .storage import MariaDBRuleDecisionStore
 
@@ -192,9 +192,15 @@ class RuleAuthorityKernel:
                 or sealed.content_hash != permit.rule_content_hash):
             raise AuthorityStateError("regla actual no coincide con RulePermit")
         rule = sealed.regla
-        if (request.rule_hash is not None
-                and request.rule_hash != limites_de(rule, snapshot.catalogo).rule_hash):
-            raise AuthorityStateError("request rule_hash cambió desde la evaluación")
+        if request.rule_hash is not None:
+            try:
+                current_rule_hash = limites_de(rule, snapshot.catalogo).rule_hash
+            except AuthorityEventValidationError as exc:
+                raise AuthorityStateError(
+                    "regla actual sin límites no puede consumir RulePermit"
+                ) from exc
+            if request.rule_hash != current_rule_hash:
+                raise AuthorityStateError("request rule_hash cambió desde la evaluación")
         if es_ancestro(repository_path, permit.policy_revision, snapshot.commit) is not True:
             raise AuthorityStateError("pin actual no desciende de la revisión del RulePermit")
 
@@ -241,9 +247,13 @@ class RuleAuthorityKernel:
                                  RuleDecisionStatus.MISSING_RULE, request.rule_id,
                                  "RULE_NOT_FOUND", now), None)
         rule = sealed.regla
-        if (request.rule_hash is not None
-                and request.rule_hash != limites_de(rule, snapshot.catalogo).rule_hash):
-            return self._deny(request, now, "RULE_CHANGED"), None
+        if request.rule_hash is not None:
+            try:
+                current_rule_hash = limites_de(rule, snapshot.catalogo).rule_hash
+            except AuthorityEventValidationError:
+                return self._deny(request, now, "AUTHORITY_INVALID"), None
+            if request.rule_hash != current_rule_hash:
+                return self._deny(request, now, "RULE_CHANGED"), None
         grant_event = state.latest_unrevoked_rule_ratification(request.rule_id)
         if grant_event is None:
             return self._deny(request, now, "AUTHORITY_INVALID"), None

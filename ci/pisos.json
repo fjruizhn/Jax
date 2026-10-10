@@ -142,7 +142,7 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 19 pruebas de persistencia Rule Authority, incluyendo siete variantes que confirman que record() standalone rechaza toda forma de entrada antes de abrir DB. La escritura solo vive bajo el owner Block 4. Recolectadas 19; confirmar las pasadas MariaDB en CI exacta."
     },
     "authority-rule-unit/tests": {
-      "patron": "^44 passed in ",
+      "patron": "^45 passed in ",
       "mensaje": "PISO ROTO: se esperaban exactamente 44 pruebas unitarias sin DB de Rule Authority (kernel, store, permit y checkpoint), incluidas recuperacion durable, identidad de retry y revalidacion de consume(). Medido localmente el 2026-10-10 en la rama de trabajo descendiente de #389; confirmar el conteo en CI exacta."
     },
     "authority-rule-events/ratifications": {

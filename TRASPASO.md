@@ -1,6 +1,6 @@
 # Traspaso continuo · Faro F1.1 paso 6
 
-## Estado vivo 2026-10-10 · revisión Tier 3 del kernel local
+## Estado vivo 2026-10-10 · follow-up tras delta Tier 3
 
 - #389 está integrado en `origin/master` como `0f9b79633f4b9ca6fdf89cfb8b1a124d5f05027d`;
   `HEAD` de esta rama tiene ese mismo SHA como merge-base. Rebase es local. La publicación
@@ -18,13 +18,14 @@
   Fernando aún no ha pasado el tip oficial para reapilar #388; su publicación continúa
   pausada. #390 es un soporte separado de prueba de grants que prepara otra sesión; esta rama
   no incorpora ni publica ese cambio.
-- El commit local `b325613e82ff1394a322366f65219f69103342fe` conserva el diff completo de
-  implementación y la firma Codex; no está publicado. Tier 3 GLM exacto: NO APROBADO, con
-  BLOCK por carreras de providers contra `consume()` sin tests de kernel, BLOCK por falta de
-  CI exacta/MariaDB real, MAJOR por relación de linaje/supersession aún sin resolución escrita
-  frente al head remoto antiguo de #388, y MAJOR por `limites_de()` que aún permite la forma
-  vacía REVERSIBLE. Este último ya se corrigió en el worktree posterior y requiere SHA/auditoría
-  nuevos.
+- Los commits locales `b325613e` y `eeb65d1c` no están publicados. Tier 3 GLM exacto de
+  `b325613e`: NO APROBADO; BLOCK por carreras de providers contra `consume()` sin tests de
+  kernel y BLOCK por falta de CI exacta/MariaDB real; MAJOR por relación de linaje/supersession
+  no resuelta frente al head remoto antiguo de #388, y MAJOR porque `limites_de()` permitía
+  forma vacía REVERSIBLE. La delta exacta de `eeb65d1c` confirmó ese MAJOR cerrado, y encontró
+  dos MINOR nuevos: excepción sin DENY estable cuando `request.rule_hash` acompaña una regla
+  vacía, e import sin uso. Ambos se corrigieron en el worktree posterior; la nueva prueba eleva
+  el piso unitario de 44 a 45.
 - Trabajo local: el kernel valida alcance/límites individuales y construye un candidato
   PERMIT con TTL limitado por configuración, regla y grant; una regla sin quantity, amount,
   frequency ni tope vuelve a fallar cerrada, conforme a la condición aceptada en Tier 3 de
@@ -44,9 +45,9 @@
 - Falta probar el flujo completo del kernel contra MariaDB y confirmar en CI los caminos de
   emisión y consumo. Las suites MariaDB no corrieron localmente. El SHA actual todavía no
   tiene auditoría Tier 3 ni CI exacta; no reapilar hasta recibir el tip oficial.
-- Verificación disponible: las suites focalizadas kernel/modelos/permit/store/providers/
-  checkpoint y validaciones de consumo dieron `331 passed`; el job unitario exacto actual da
-  `44 passed`; Identity Shadow
+- Verificación disponible en el worktree posterior: el conjunto focalizado de kernel/modelos/
+  permit/store/providers/checkpoint dio `332 passed`; el job unitario exacto da `45 passed` y
+  el verificador local de piso pasa. Identity Shadow
   dio `1044 passed`; `git diff --check` y `python3 -m json.tool ci/pisos.json` pasan.
 - Siguiente acción concreta: completar pruebas de carrera end-to-end de evaluate/consume con
   providers y owner transaccional; después, recibir el tip oficial, reapilar, re-medir los pisos exactos y actualizar
