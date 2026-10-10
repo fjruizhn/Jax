@@ -4707,7 +4707,7 @@ Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_
 cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-09, #378 sobre master con #381 y r2): `^1038 passed in `
+Patrón vigente (2026-10-09, #378 sobre master con #381 y MINOR de paridad): `^1040 passed in `
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4758,5 +4758,9 @@ Schema-unidades (#378, hallazgo del auditor de #371), sobre master que ya contie
 Jax#378 r2 agrega una prueba (+1): un catálogo forjado con `object.__new__` no pasa la
 comprobación de tipo exacto en el helper de unidad/moneda ni en `_validar_tope`. Las
 pruebas sin catálogo/sin sellar usan una regla sin `tope` y afirman el prefijo del campo;
-los mutantes M5/M6 mueren con `git archive`. Piso parcial tras r2: 1038; se medirá de
-nuevo sobre el head final reapilado.
+los mutantes M5/M6 mueren con `git archive`. Incremento acumulado: 1003 -> 1038.
+
+El MINOR de Tier 3 agrega dos vectores de paridad (+2): `llamadas` y `EUR` se rechazan
+tanto en JSON Schema como en Python; con el pattern anterior, esos dos vectores fallan.
+El incremento acumulado desde master es +37; el piso total esperado se medirá en el tip
+reapilado con el comando exacto del workflow.

@@ -50,17 +50,31 @@ M5/M6 comprobados con copias `git archive` del árbol (mutante aplicado sobre el
 
 ## Pisos (re-medidos 2026-10-09 sobre el árbol reapilado, venv-faro Python 3.14.4)
 
-- `identity-foundation-shadow/policy`: 968 (master) → **1003** (+34 del schema de
-  unidades + 1 de la subclase forjada, r2). Medido con el comando exacto del paso
-  (lista extraída del propio workflow): `1003 passed in 5.34s`, 0 skipped,
-  `piso.py verificar` rc=0. En master este piso ya no es 659: #373/#379/#371 lo subieron
-  a 968 y la clave `authority-rule-models/models` (151) desapareció de `ci/pisos.json`
+- `identity-foundation-shadow/policy`: 968 (master) → **1005** (+34 del schema de
+  unidades + 1 de la subclase forjada, r2 + 2 de paridad del espejo, MINOR Tier 3).
+  Medido con el comando exacto del paso (lista extraída del propio workflow):
+  `1005 passed in 5.27s`, 0 skipped, `piso.py verificar` rc=0. En master este piso
+  ya no es 659: #373/#379/#371 lo subieron a 968 y la clave
+  `authority-rule-models/models` (151) desapareció de `ci/pisos.json`
   (los modelos entraron a la lista identity como `test_faro_rule_authority_models.py`).
 - `faro-fase0/faro`: **780** en master; esta rama no toca sus pruebas ni su job → sin
   re-medición local, CI confirma.
 - Guardas de CI sobre el árbol final: `archivos-de-test-en-ci/pisos` **227 passed**
   (`piso.py verificar` rc=0), `archivos-de-test-en-ci/wireados` **7 passed** (rc=0),
   `comparar_pisos.py` contra origin/master OK (54 pisos, ninguno baja).
+
+## MINOR del auditor Tier 3 (cerrado 2026-10-09, r3)
+
+- El espejo `policy/faro/schemas/rule-v1.schema.json` aceptaba unidades/monedas que
+  Python rechaza: `quantity.unit` solo tenía `pattern` de forma y `amount.currency`
+  solo `^[A-Z]{3}$`. Ahora son enums del catálogo sellado (actos_externos: compras,
+  correos, mensajes, pagos, publicaciones; monto_dinero en forma ISO: HNL, USD), igual
+  que `tope.period`/`resource` ya lo eran.
+- Pruebas: 2 vectores de paridad negativos (`llamadas`, `EUR`) en
+  `test_el_espejo_json_y_python_aceptan_los_mismos_vectores_de_regla` + binding del
+  test de vocabularios (los enums del espejo == catálogo real, unidades y monedas).
+- Mutante comprobado: con el espejo revertido a `pattern`, exactamente esos 2 vectores
+  fallan (stash/restore verificado); con el enum, 167 passed en el archivo.
 
 ## Pendiente
 
