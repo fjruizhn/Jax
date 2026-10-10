@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import errno
 import fcntl
 import json
@@ -1330,6 +1331,7 @@ def test_transaction_fence_rejects_trusted_root_mismatch_on_real_database():
             with _mariadb_transaction_owner(connect, fence, checkpoint_store) as owner:
                 with pytest.raises(TrustedRootMismatchError):
                     fence.verify_for_update(owner, wrong_root)
+                owner.rollback()
 
 
 def test_checkpoint_fence_reuses_owner_connection_and_rejects_real_autocommit():
@@ -1343,8 +1345,7 @@ def test_checkpoint_fence_reuses_owner_connection_and_rejects_real_autocommit():
         store = MariaDBAuthorityLedgerStore(counted_connect)
         with store.checkpoint_fence(checkpoint_store) as fence:
             with _mariadb_transaction_owner(counted_connect, fence, checkpoint_store) as owner:
-                with pytest.raises(AuthorityStateError, match="cursor requiere"):
-                    owner.cursor
+                assert not hasattr(owner, "cursor"), "el owner no expone cursor SQL crudo"
                 with pytest.raises(AuthorityStateError, match="owner MariaDB activo y sellado"):
                     fence.verify_for_update(object(), root)
                 assert fence.verify_for_update(owner, root).checkpoint.sequence == 0
@@ -1393,6 +1394,7 @@ def test_transaction_fence_rejects_db_head_not_matching_replay_on_real_database(
             with _mariadb_transaction_owner(connect, fence, checkpoint_store) as owner:
                 with pytest.raises(AuthorityStateError, match="head no coincide"):
                     fence.verify_for_update(owner, root)
+                owner.rollback()
 
 
 def test_checkpoint_fence_rejects_noncanonical_genesis_bytes():
@@ -1412,6 +1414,7 @@ def test_checkpoint_fence_rejects_noncanonical_genesis_bytes():
             with _mariadb_transaction_owner(connect, fence, checkpoint_store) as owner:
                 with pytest.raises(AuthorityStateError, match="canonical_genesis"):
                     fence.verify_for_update(owner, root)
+                owner.rollback()
 
 
 def test_provisioning_revokes_preexisting_privileges_and_grants_exact_contract():
