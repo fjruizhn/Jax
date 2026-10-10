@@ -619,6 +619,13 @@ def test_el_espejo_json_existe_y_sus_vocabularios_coinciden() -> None:
     tope_objeto = propiedades["tope"]["oneOf"][1]
     clases = tope_objeto["properties"]["resource_class"]["enum"]
     assert tuple(clases) == tuple(sorted(CATALOGO))          # B-3: del catalogo, no de un global
+    # Jax#378 (MINOR del auditor Tier 3): el espejo tambien cierra el vocabulario
+    # de unidad y moneda con el catalogo sellado, no solo con la forma.
+    limites = propiedades["obligation_limits"]["properties"]
+    unidades = limites["quantity"]["oneOf"][1]["properties"]["unit"]["enum"]
+    monedas = limites["amount"]["oneOf"][1]["properties"]["currency"]["enum"]
+    assert tuple(unidades) == tuple(sorted(_unidades_del_catalogo_real()))
+    assert tuple(monedas) == tuple(sorted(m.upper() for m in _monedas_del_catalogo_real()))
     assert espejo.get("additionalProperties") is False
 
 
@@ -651,6 +658,20 @@ def _validador_espejo(espejo: dict):
     return Draft202012Validator(espejo, format_checker=checker)
 
 
+def _obligante_con_unidad_inventada(datos: dict) -> None:
+    # MINOR del auditor de #378: ``llamadas`` pasa la FORMA del espejo viejo
+    # (pattern); con el enum del catalogo sellado, JSON y Python niegan igual.
+    _hacer_obligante_valida(datos)
+    datos["obligation_limits"]["quantity"]["unit"] = "llamadas"
+
+
+def _obligante_con_moneda_ausente(datos: dict) -> None:
+    # EUR es forma ISO 4217 valida ausente del catalogo: sin enum, el espejo firmaba.
+    _hacer_obligante_valida(datos)
+    datos["obligation_limits"]["quantity"] = None
+    datos["obligation_limits"]["amount"] = {"currency": "EUR", "max": 1}
+
+
 @pytest.mark.parametrize("cambio,esperado", [
     (lambda datos: datos.__setitem__("tope", None), True),
     (lambda datos: datos.__setitem__("tope", {
@@ -666,6 +687,8 @@ def _validador_espejo(espejo: dict):
         "maximum": 1, "period": "por_hora",
     }), False),
     (_hacer_obligante_valida, True),
+    (_obligante_con_unidad_inventada, False),
+    (_obligante_con_moneda_ausente, False),
     (lambda datos: datos.__setitem__("action_class", "OBLIGATING"), False),
 ])
 def test_el_espejo_json_y_python_aceptan_los_mismos_vectores_de_regla(cambio, esperado) -> None:

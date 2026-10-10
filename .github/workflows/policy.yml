@@ -2685,6 +2685,9 @@ jobs:
         # campo: verificado con git archive que el mutante de quitar el
         # ``if catalogo is None`` del helper y el de quitar su chequeo de sellado
         # hacen caer esa prueba (con tope, ``_validar_tope`` los enmascaraba).
+        # MINOR del auditor Tier 3 (Jax#378): 1005 (+2 — el espejo rule-v1.schema.json
+        # cierra quantity.unit y amount.currency con enums del catalogo sellado;
+        # paridad negativa llamadas/EUR: JSON y Python niegan igual).
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail

@@ -104,7 +104,8 @@
               "properties": {
                 "unit": {
                   "type": "string",
-                  "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+                  "description": "Vocabulario cerrado: subids de actos_externos del catalogo sellado (policy/faro/catalogo-topes.json). validar_regla() exige lo mismo (Jax#378).",
+                  "enum": ["compras", "correos", "mensajes", "pagos", "publicaciones"]
                 },
                 "max": {
                   "type": "integer",
@@ -130,7 +131,8 @@
               "properties": {
                 "currency": {
                   "type": "string",
-                  "pattern": "^[A-Z]{3}$"
+                  "description": "Forma ISO en mayusculas de los subids de monto_dinero del catalogo sellado; validar_regla() compara tras lower (USD <-> usd, Jax#378).",
+                  "enum": ["HNL", "USD"]
                 },
                 "max": {
                   "type": "integer",
