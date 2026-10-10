@@ -1,5 +1,29 @@
 # Traspaso continuo · Faro F1.1 paso 6
 
+## Actualización 2026-10-10 · fallos MariaDB hallados por CI exacta
+
+- **CI exacta de `7080bc8c`:** policy run `38090338324` terminó FAILURE únicamente en
+  `tests-puros`; `authority-ledger-mariadb` dio 37 passed / 8 failed. Secret scan
+  `38090338354` y canonical projections `38090338338` dieron SUCCESS; los demás jobs policy,
+  incluidos `faro-fase0`, `permisos-proyectos` y pisos, terminaron SUCCESS.
+- **Causas cotejadas con el log:** en PERMIT, el checkpoint externo ancla el head final del
+  RulePermit; la decisión es el `previous_record_hash` del permiso y no lleva ancla separada.
+  `load_consumption_request_in_transaction` exigía erróneamente ambos hashes en el checkpoint,
+  causando los fallos de lectura/consumo y las carreras asociadas. El resto eran defectos de
+  fixtures: dos migraciones/DDL usaban una conexión admin sin schema seleccionado; un test
+  capturaba el error esperado sin cerrar su transaction owner; el test de carrera cambiaba
+  request_id conservando el hash viejo; una expectativa de commit usaba el mensaje anterior.
+- **Correcciones locales sin commit:** validar que `permit.previous_record_hash` sea el hash de
+  decisión y que el hash final del permiso esté anclado; seleccionar explícitamente
+  `jax_rule_authority` para DDL/migración; rollback explícito en el test; recalcular hash al
+  cambiar request_id; actualizar la expectativa al contrato de commit vigente.
+- **Verificación local:** 176 pruebas unitarias focalizadas pasaron, MariaDB colecciona 45,
+  compileall y diff-check pasan. Las 45 no se ejecutaron localmente porque este host no puede
+  acceder a `/var/run/docker.sock`. Las correcciones requieren nueva auditoría Tier 3 y CI
+  exacta; el FAILURE `7080bc8c` no se considera cerrado hasta esos gates.
+- **Quién decidió:** Codex corrigió las causas reveladas por la CI exacta de #388, dentro del
+  cierre autorizado por Fernando.
+
 ## Actualización 2026-10-10 · cerrar delta Tier 3 de half-close
 
 - **CI exacta de `a2ed7590`:** policy run `38089606207` falló `faro-fase0` con 779

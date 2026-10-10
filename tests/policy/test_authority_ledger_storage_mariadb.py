@@ -368,7 +368,7 @@ def test_evaluation_owner_cannot_commit_before_block4_verification(tmp_path):
         with fence.transaction_owner(
             decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
         ) as owner:
-            with pytest.raises(AuthorityStateError, match="EVALUATION requiere verificación Block 4"):
+            with pytest.raises(AuthorityStateError, match="EVALUATION solo finaliza mediante record_evaluation_in_transaction"):
                 owner.commit()
 
     assert connection.rolled_back is True
@@ -1255,7 +1255,7 @@ def test_evaluation_insert_failure_rolls_back_decision_and_audit_head():
     with _initialized_cross_schema_consumption() as (
         connect, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
     ):
-        with connect() as admin:
+        with connect(database="jax_rule_authority") as admin:
             with admin.cursor() as cursor:
                 cursor.execute(
                     "CREATE TRIGGER fail_rule_decision_insert "
@@ -1428,7 +1428,7 @@ def test_retry_migration_preserves_legacy_consumption_and_rejects_new_identity()
         assert audit_checkpoint.confirmar(record_hash) is True
 
         # Apply the additive migration after the historical row already exists.
-        with connect() as admin:
+        with connect(database="jax_rule_authority") as admin:
             _apply_migration(admin, RULE_AUTHORITY_STEP6_RETRY_MIGRATION)
         with connect(database="jax_rule_authority") as admin:
             with admin.cursor() as cursor:
@@ -1603,6 +1603,7 @@ def test_cross_schema_consumption_checkpoint_failure_reports_committed_state(mon
                     decision_store.recover_consumption_in_transaction(
                         owner, request.request_hash, draft.consumption_request_id
                     )
+                owner.rollback()
 
 
 def test_evaluation_checkpoint_failure_keeps_db_row_and_blocks_durable_recovery(monkeypatch):
@@ -1758,7 +1759,7 @@ def test_kernel_evaluate_serializes_rule_revocation_in_both_orders(monkeypatch, 
         # Reverse order: once the revoke owns Block 4 first, a new evaluation
         # sees no current grant and fails closed.
         denied = kernel.evaluate(replace(
-            request, request_id="0199f8a1-8c00-7000-8000-000000000944",
+            request, request_id="0199f8a1-8c00-7000-8000-000000000944", request_hash=None,
         ))
         assert denied.decision.status is RuleDecisionStatus.DENY
         assert denied.decision.reason_code == "AUTHORITY_INVALID"

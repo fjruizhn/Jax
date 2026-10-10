@@ -565,11 +565,16 @@ class MariaDBRuleDecisionStore:
         persisted_permit = self._decode_permit_row(permit_row)
         if persisted_permit.projection() != permit.projection():
             raise RuleAuthorityStorageError("permit bloqueado difiere de fila durable")
-        if (self._checkpoint_store is None
-                or self._checkpoint_store.confirmar(row[8]) is not True
+        # A PERMIT evaluation appends a decision followed by its permit and
+        # externally anchors only the final head.  The permit's previous hash
+        # must therefore bind the decision row; requiring a second external
+        # checkpoint for this intermediate hash would reject every valid
+        # decision+permit pair.
+        if (permit_row[-3] != row[8]
+                or self._checkpoint_store is None
                 or self._checkpoint_store.confirmar(permit_row[-2]) is not True):
             raise RuleAuthorityStorageError(
-                "checkpoint externo no contiene la decisión y RulePermit bloqueados"
+                "checkpoint externo no contiene RulePermit o su decisión enlazada"
             )
         return request_projection
 
