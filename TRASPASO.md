@@ -311,6 +311,9 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   no revocada y del mismo hash; eventos históricos inválidos permanecen en cuarentena
   permanente; `consumption_request_id` durable recupera solo el mismo retry y rechaza otro
   ID; `evaluate` devuelve `RuleEvaluationOutcome(decision, permit | None)`.
+- Las menciones anteriores de esta bitácora a la pregunta de OVERLAY como pendiente describen
+  el estado previo a la respuesta y no son una condición actual. La respuesta resuelve el
+  bloqueo semántico; auditoría, CI y autoridad de integración siguen siendo gates separados.
 - El SHA publicado de partida es `3eac3fff32c9472f7d43884c5ad007166a9db3e4`. El delta local
   de trabajo añade el outcome cerrado, el ID UUIDv7 en la proyección canónica de consumo, una
   columna durable única con trigger de validación, y la cobertura de mismo ID/ID distinto.
@@ -324,3 +327,26 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
 - Siguiente: completar y probar el transaction owner compartido Block 4/Rule Authority, el
   kernel y la devolución/recovery del outcome; correr migración e integración MariaDB en CI;
   medir floors afectados, delta-auditar y esperar CI del SHA exacto. No integrar todavía.
+
+### Continuación de coordinación y auditoría arquitectónica · 2026-10-10
+
+- Fernando confirmó las decisiones anteriores. La auditoría Tier 3 read-only de `da66de55`
+  rechazó activar el paso 6 mientras sigan abiertos: (1) linealización común de emisión y
+  revocación Block 4, (2) recovery durable exacto de emisión/consumo, (3) binding confiable
+  entre pin y path del repositorio, y (4) binding de `capability_id` con la identidad del
+  contrato. También exige separar checkpoints Block 4/Rule Authority, preservar errores de
+  STOP/reloj, verificar permisos legacy sin retry id, y probar ventanas de crash y carreras.
+- El soporte autónomo de piso está en el commit local comunicado `4bc47e69`; cambia
+  `.github/workflows/policy.yml`, `ci/pisos.json` (de 227 a 232 para el job
+  `archivos-de-test-en-ci`) y `docs/ci/pisos.md`. Para evitar colisión, se acordó no publicar
+  #388 hasta integrar ese soporte y reconciliar el diff acumulado. La implementación del
+  kernel seguirá en esta rama sin editar esos tres archivos; si la medición obliga a cambiar
+  un piso, se coordinará antes de tocarlo.
+- Se corrigió el lenguaje del plan y del modelo `RuleEvaluationOutcome`: la decisión de
+  OVERLAY ya no aparece como gate pendiente y el outcome se define como forma de respuesta,
+  no prueba por sí sola de persistencia negativa. Tests unitarios del modelo/permiso:
+  163 passed; `py_compile` y `git diff --check` pasaron. La suite MariaDB no se ejecutó.
+- Siguiente secuencia: implementar primero el owner/recuperación store, luego los bindings
+  de permit y pin, el evaluador puro, y finalmente `evaluate`/`consume` con transacción y
+  pruebas de concurrencia/crash. No publicar hasta resolver la coordinación de pisos; no
+  integrar sin auditoría/CI exactas y procedimiento reservado para `policy.yml`.

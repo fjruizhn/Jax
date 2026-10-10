@@ -87,5 +87,6 @@ de consumo se identifica con `consumption_request_id` durable y que `evaluate` d
 - GLM/ZCode revisa read-only `76c8ecd0`; el veredicto final está pendiente y no cubre
   cambios posteriores. Hallazgos observados: post-commit/post-anclaje queda fail-closed
   hasta reconciliación explícita; falta runbook auditado para esa reconciliación y cualquier
-  adapter nuevo debe tomar primero el mismo `flock`. La semántica `OVERLAY_ISSUED` permanece
-  como decisión directa pendiente de Fernando y bloquea integración, no el trabajo aislado.
+  adapter nuevo debe tomar primero el mismo `flock`. En ese momento la semántica
+  `OVERLAY_ISSUED` seguía pendiente; Fernando la resolvió el 2026-10-10, según el apartado
+  de decisiones de este plan. La respuesta no reabre ni modifica esa decisión.

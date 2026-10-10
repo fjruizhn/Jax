@@ -333,7 +333,11 @@ class RuleDecision:
 
 @dataclass(frozen=True)
 class RuleEvaluationOutcome:
-    """Persisted decision and its sole issued permit, when status is PERMIT."""
+    """API result containing the decision and its store-issued permit, if any.
+
+    This value is not standalone proof that a negative decision was persisted.
+    PERMIT still requires a store-sealed RulePermit.
+    """
 
     decision: RuleDecision
     permit: RulePermit | None
