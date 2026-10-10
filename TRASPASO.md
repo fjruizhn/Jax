@@ -256,6 +256,14 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
 - La Tier 3 del delta `bf8bee46` recomendó precisar el historial del exit code; la corrección
   está incluida arriba. Pedir auditoría exacta del nuevo SHA y CI exacta tras publicarlo.
 
+### Actualización 2026-10-10 · revisión del contrato del kernel (preliminar)
+
+- Verificación viva de GitHub: #388 sigue abierto draft, head `445859bdb90922410983980f2f645755d4fafca0`, base `master@bf6b05809e1c3505efd7447b33685796ca42e3b6`, `mergeStateStatus=CLEAN`; los checks de ese SHA continúan verdes. El worktree de esta rama estaba limpio al iniciar esta revisión.
+- Una revisión arquitectónica Tier 3 de solo lectura identificó contradicciones/brechas que impiden implementar el kernel con seguridad sin cerrar el contrato: (a) §10 exige doble consumo secuencial fallido, pero §11 exige recuperar retries post-anclaje y la API actual no distingue ambos; (b) la emisión revalida Block 4 antes de persistir, pero `record_permit` no mantiene el lock de `authority_ledger_head` durante el commit; (c) `evaluate()->RuleDecision` no entrega al caller el `RulePermit` que crea; (d) el constructor no recibe una ruta confiable para `load_trusted_policy_snapshot(Path, pin)`; (e) la identidad del contrato de capability no queda ligada al identificador que se guarda en `RulePermit`. Referencias: spec §9–§11, `policy/rule_authority/storage.py`, `policy/rule_authority/snapshot.py`, `policy/rule_authority/permit.py`.
+- Se consultó a Fernando la semántica retry/single-use: propuesta recomendada `consumption_request_id` durable, mismo ID recupera, ID distinto falla. Esperar su decisión antes de alterar la API o la aceptación del spec. La pregunta independiente sobre `OVERLAY_ISSUED` también sigue pendiente y bloquea publicación/integración.
+- GitHub vivo: #375 permanece abierto y DIRTY sobre base obsoleta `feat/faro-f1.1-evaluador@61fd79fb`; #387 permanece abierto y su corrida visible `38023429466` falla `pisos-no-bajan`. Ambas son cadenas ajenas; no tocar worktrees ni ramas. #375 requiere reapilado y nueva auditoría/CI; #387 requiere que su owner resuelva su piso y cierre el revert antes de declarar estabilizada la fase previa.
+- Esta actualización solo cambió este handoff; no se modificó código, no se ejecutaron pruebas, y no hubo commit ni publicación. El siguiente trabajo local independiente es completar la descomposición de implementación y preparar cambios que no dependan de las decisiones humanas; no publicar ni integrar hasta resolverlas.
+
 ## Límites de autoridad y alcance
 
 - La decisión directa de Fernando sigue pendiente: si `OVERLAY_ISSUED` requiere una
