@@ -1187,7 +1187,7 @@ def _record_evaluation_permit(ledger_store, checkpoint_store, root, decision_sto
             )
 
 
-def test_evaluation_persists_permit_with_block4_verification_in_one_owner():
+def test_evaluation_persists_permit_with_block4_verification_in_one_owner(monkeypatch):
     """A permit cannot use the legacy standalone decision-store transaction.
 
     The same owner that replays Block 4 must append both the decision and the
@@ -1212,6 +1212,66 @@ def test_evaluation_persists_permit_with_block4_verification_in_one_owner():
         assert persisted_decision == decision
         assert permit is not None
         assert permit._is_store_sealed() is True
+
+        # The final permit row is the externally anchored head; its previous
+        # hash and sequence must bind the decision row. Recovery rejects a
+        # broken but self-consistent chain even if the final head is anchored.
+        from policy.rule_authority.storage import _permit_record_hash
+        for corruption in ("previous", "sequence"):
+            with ledger_store.checkpoint_fence(checkpoint_store) as fence:
+                with fence.transaction_owner(
+                    decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
+                ) as owner:
+                    fence.verify_for_update(owner, root)
+                    cursor = owner._cursor
+                    decision_row = decision_store._select_request(cursor, request.request_id)
+                    permit_row = decision_store._select_permit(cursor, request.request_id)
+                    corrupted = list(permit_row)
+                    if corruption == "previous":
+                        corrupted[-3] = "sha256:" + "f" * 64
+                    else:
+                        corrupted[-1] = decision_row[9] + 2
+                    corrupted[-2] = _permit_record_hash(
+                        corrupted[-1], permit.permit_id, corrupted[-3], permit.projection(),
+                    )
+                    with monkeypatch.context() as patch:
+                        patch.setattr(
+                            decision_store, "_select_permit",
+                            lambda _cursor, _request_id: tuple(corrupted),
+                        )
+                        patch.setattr(
+                            decision_store._checkpoint_store, "confirmar", lambda _head: True,
+                        )
+                        with pytest.raises(RuleAuthorityStorageError, match="enlaza de forma consecutiva"):
+                            decision_store.recover_evaluation_in_transaction(owner, request)
+                    owner.rollback()
+
+        with ledger_store.checkpoint_fence(checkpoint_store) as fence:
+            with fence.transaction_owner(
+                decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
+            ) as owner:
+                fence.verify_for_update(owner, root)
+                decision_row = decision_store._select_request(owner._cursor, request.request_id)
+                with monkeypatch.context() as patch:
+                    patch.setattr(decision_store._checkpoint_store, "confirmar", lambda _head: False)
+                    with pytest.raises(RuleAuthorityStorageError, match="head final de la evaluación"):
+                        decision_store._recover_anchored_evaluation(
+                            owner._cursor, request.request_id, decision_row, request.catalogo
+                        )
+                owner.rollback()
+
+        # Recovery and the same-owner idempotent append both accept the exact
+        # durable pair whose permit head anchors the decision predecessor.
+        with ledger_store.checkpoint_fence(checkpoint_store) as fence:
+            with fence.transaction_owner(
+                decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
+            ) as owner:
+                fence.verify_for_update(owner, root)
+                recovered = decision_store.recover_evaluation_in_transaction(owner, request)
+                assert recovered == (decision, permit)
+                assert decision_store.record_evaluation_in_transaction(
+                    owner, request, *recovered
+                ) == recovered
 
         with ledger_store.checkpoint_fence(checkpoint_store) as fence:
             with fence.transaction_owner(
@@ -1710,6 +1770,38 @@ def test_kernel_evaluate_serializes_rule_revocation_in_both_orders(monkeypatch, 
             tmp_path, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
             request_id="0199f8a1-8c00-7000-8000-000000000941",
             event_id="0199f8a1-8c00-7000-8000-000000000942",
+        )
+        # Force two identical requests to miss the fast recovery path before
+        # either can enter the shared Block-4 owner. The loser must recover the
+        # first committed decision+permit from that locked transaction.
+        recovery_barrier = threading.Barrier(2)
+        original_recover = kernel._store.recover_durable_evaluation
+
+        def both_initial_misses(candidate):
+            recovered = original_recover(candidate)
+            if recovered is None:
+                recovery_barrier.wait(timeout=10)
+            return recovered
+
+        monkeypatch.setattr(kernel._store, "recover_durable_evaluation", both_initial_misses)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(kernel.evaluate, request)
+            second = pool.submit(kernel.evaluate, request)
+            first_outcome = first.result(timeout=20)
+            second_outcome = second.result(timeout=20)
+        assert first_outcome.decision == second_outcome.decision
+        assert first_outcome.decision.status is RuleDecisionStatus.PERMIT
+        assert first_outcome.permit.projection() == second_outcome.permit.projection()
+        monkeypatch.setattr(kernel._store, "recover_durable_evaluation", original_recover)
+        with _connect(database="jax_rule_authority") as admin:
+            with admin.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) FROM rule_decisions WHERE request_id=%s", (request.request_id,))
+                assert cursor.fetchone()[0] == 1
+                cursor.execute("SELECT COUNT(*) FROM rule_permits WHERE request_id=%s", (request.request_id,))
+                assert cursor.fetchone()[0] == 1
+
+        request = replace(
+            request, request_id="0199f8a1-8c00-7000-8000-00000000094a", request_hash=None,
         )
         verified = threading.Event()
         release = threading.Event()

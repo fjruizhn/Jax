@@ -1,6 +1,6 @@
 # Traspaso continuo · Faro F1.1 paso 6
 
-## Actualización 2026-10-10 · fallos MariaDB hallados por CI exacta
+## Actualización 2026-10-10 · cierre de fallos MariaDB y retry PERMIT
 
 - **CI exacta de `7080bc8c`:** policy run `38090338324` terminó FAILURE únicamente en
   `tests-puros`; `authority-ledger-mariadb` dio 37 passed / 8 failed. Secret scan
@@ -13,16 +13,26 @@
   fixtures: dos migraciones/DDL usaban una conexión admin sin schema seleccionado; un test
   capturaba el error esperado sin cerrar su transaction owner; el test de carrera cambiaba
   request_id conservando el hash viejo; una expectativa de commit usaba el mensaje anterior.
-- **Correcciones locales sin commit:** validar que `permit.previous_record_hash` sea el hash de
-  decisión y que el hash final del permiso esté anclado; seleccionar explícitamente
-  `jax_rule_authority` para DDL/migración; rollback explícito en el test; recalcular hash al
-  cambiar request_id; actualizar la expectativa al contrato de commit vigente.
-- **Verificación local:** 176 pruebas unitarias focalizadas pasaron, MariaDB colecciona 45,
-  compileall y diff-check pasan. Las 45 no se ejecutaron localmente porque este host no puede
-  acceder a `/var/run/docker.sock`. Las correcciones requieren nueva auditoría Tier 3 y CI
-  exacta; el FAILURE `7080bc8c` no se considera cerrado hasta esos gates.
-- **Quién decidió:** Codex corrigió las causas reveladas por la CI exacta de #388, dentro del
-  cierre autorizado por Fernando.
+- **Delta Tier 3 exacta de `8de21634`:** RECHAZADO, BLOCK 0 / MAJOR 2 / MINOR 2 / LOW 0.
+  Encontró que solo consumo verificaba `permit.previous_record_hash == decision.record_hash`;
+  las tres rutas de recuperación de evaluación seguían confirmando el hash intermedio y podían
+  devolver una pareja no encadenada. También faltaban regresiones negativas y una carrera de
+  dos `evaluate()` idénticos; el handoff describía el contenido como local sin commit.
+- **Correcciones de este delta:** `_recover_anchored_evaluation` centraliza la validación de
+  evaluación PERMIT para recovery público, recovery bajo owner y repetición idempotente; la
+  lectura para consumo aplica el mismo vínculo decision→permit. Exige
+  permiso.previous = decision.record_hash, secuencia consecutiva y hash final del permiso
+  presente en el checkpoint; DENY sigue exigiendo su propio hash anclado. La suite
+  MariaDB existente añade rechazo de enlace roto y checkpoint final ausente, valida recovery y
+  repetición idempotente bajo owner, y fuerza dos misses simultáneos para que el segundo
+  `evaluate()` recupere la única pareja persistida. El delta conserva además las correcciones de
+  schema, rollback, request_hash y expectativa de commit del anterior.
+- **Verificación local:** 177 pruebas unitarias focalizadas pasaron; MariaDB colecciona 45,
+  compileall y diff-check pasan. Las pruebas MariaDB reales no se ejecutan en hall9000 porque
+  `/var/run/docker.sock` deniega acceso. La policy CI exacta de `8de21634` se sustituirá por la
+  de este delta; auditoría Tier 3 y CI exactas siguen siendo gates para su SHA final.
+- **Quién decidió:** Codex corrigió el CI y los hallazgos Tier 3 dentro del cierre autorizado
+  por Fernando.
 
 ## Actualización 2026-10-10 · cerrar delta Tier 3 de half-close
 

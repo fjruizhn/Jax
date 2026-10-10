@@ -208,17 +208,9 @@ class MariaDBRuleDecisionStore:
                     if (row[0] != request.request_hash or row[1] != _catalog_hash(request.catalogo)
                             or row[2] != request.rule_id):
                         raise AuthorityStateError("request_id reutilizado con otro hash/catálogo/regla")
-                    decision = self._decode_row(request.request_id, row, request.catalogo, allow_permit=True)
-                    permit = None
-                    if decision.status is RuleDecisionStatus.PERMIT:
-                        permit_row = self._select_permit(cursor, request.request_id)
-                        if permit_row is None:
-                            raise RuleAuthorityStorageError("PERMIT recuperado sin RulePermit")
-                        permit = self._decode_permit_row(permit_row)
-                        if self._checkpoint_store.confirmar(permit_row[-2]) is not True:
-                            raise RuleAuthorityStorageError("checkpoint no contiene RulePermit recuperado")
-                    elif self._checkpoint_store.confirmar(row[8]) is not True:
-                        raise RuleAuthorityStorageError("checkpoint no contiene decisión recuperada")
+                    decision, permit = self._recover_anchored_evaluation(
+                        cursor, request.request_id, row, request.catalogo
+                    )
                 connection.commit()
                 return decision, permit
         except (AuthorityStateError, RuleAuthorityStorageError):
@@ -269,22 +261,9 @@ class MariaDBRuleDecisionStore:
         if (existing[0] != request.request_hash or existing[1] != request_catalog_hash
                 or existing[2] != request.rule_id):
             raise AuthorityStateError("request_id reutilizado con otro hash/catálogo/regla")
-        stored_decision = self._decode_row(
-            request.request_id, existing, request.catalogo, allow_permit=True
+        return self._recover_anchored_evaluation(
+            cursor, request.request_id, existing, request.catalogo
         )
-        if self._checkpoint_store.confirmar(existing[8]) is not True:
-            raise RuleAuthorityStorageError(
-                "checkpoint externo no contiene la decisión idempotente")
-        if stored_decision.status is not RuleDecisionStatus.PERMIT:
-            return stored_decision, None
-        permit_row = self._select_permit(cursor, request.request_id)
-        if permit_row is None:
-            raise RuleAuthorityStorageError("PERMIT existente sin RulePermit durable")
-        stored_permit = self._decode_permit_row(permit_row)
-        if self._checkpoint_store.confirmar(permit_row[-2]) is not True:
-            raise RuleAuthorityStorageError(
-                "checkpoint externo no contiene RulePermit idempotente")
-        return stored_decision, stored_permit
 
     def _require_evaluation_owner(self, transaction_owner) -> None:
         from policy.authority_ledger.storage import (
@@ -364,23 +343,9 @@ class MariaDBRuleDecisionStore:
                 if (existing[0] != request.request_hash or existing[1] != request_catalog_hash
                         or existing[2] != request.rule_id):
                     raise AuthorityStateError("request_id reutilizado con otro hash/catálogo/regla")
-                stored_decision = self._decode_row(
-                    request.request_id, existing, request.catalogo, allow_permit=True
+                stored_decision, permit = self._recover_anchored_evaluation(
+                    cursor, request.request_id, existing, request.catalogo
                 )
-                if self._checkpoint_store.confirmar(existing[8]) is not True:
-                    raise RuleAuthorityStorageError(
-                        "checkpoint externo no contiene la decisión idempotente")
-                if stored_decision.status is RuleDecisionStatus.PERMIT:
-                    permit_row = self._select_permit(cursor, request.request_id)
-                    if permit_row is None:
-                        raise RuleAuthorityStorageError("PERMIT existente sin RulePermit durable")
-                    stored_permit = self._decode_permit_row(permit_row)
-                    if self._checkpoint_store.confirmar(permit_row[-2]) is not True:
-                        raise RuleAuthorityStorageError(
-                            "checkpoint externo no contiene RulePermit idempotente")
-                    permit = stored_permit
-                else:
-                    permit = None
                 transaction_owner._mark_evaluation_persisted()
                 close_error = transaction_owner._commit_evaluation_for_store()
                 if close_error is not None:
@@ -571,6 +536,7 @@ class MariaDBRuleDecisionStore:
         # checkpoint for this intermediate hash would reject every valid
         # decision+permit pair.
         if (permit_row[-3] != row[8]
+                or permit_row[-1] != row[9] + 1
                 or self._checkpoint_store is None
                 or self._checkpoint_store.confirmar(permit_row[-2]) is not True):
             raise RuleAuthorityStorageError(
@@ -898,6 +864,35 @@ class MariaDBRuleDecisionStore:
             (request_id,),
         )
         return cursor.fetchone()
+
+    def _recover_anchored_evaluation(self, cursor, request_id: str, decision_row, catalog):
+        """Decode an exact outcome and verify its final externally anchored row.
+
+        PERMIT is a two-row chain: its decision is an intermediate row whose
+        hash is authenticated by the permit's previous_record_hash, while the
+        checkpoint anchors the permit row. DENY has only the decision row, so
+        that decision hash is the externally anchored head.
+        """
+        decision = self._decode_row(request_id, decision_row, catalog, allow_permit=True)
+        permit = None
+        head_hash = decision_row[8]
+        if decision.status is RuleDecisionStatus.PERMIT:
+            permit_row = self._select_permit(cursor, request_id)
+            if permit_row is None:
+                raise RuleAuthorityStorageError("PERMIT existente sin RulePermit durable")
+            permit = self._decode_permit_row(permit_row)
+            if (permit_row[-3] != decision_row[8]
+                    or permit_row[-1] != decision_row[9] + 1):
+                raise RuleAuthorityStorageError(
+                    "RulePermit no enlaza de forma consecutiva el hash de la decisión durable"
+                )
+            head_hash = permit_row[-2]
+        if (self._checkpoint_store is None
+                or self._checkpoint_store.confirmar(head_hash) is not True):
+            raise RuleAuthorityStorageError(
+                "checkpoint externo no contiene el head final de la evaluación durable"
+            )
+        return decision, permit
 
     @staticmethod
     def _decode_row(request_id: str, row, expected_catalog=None, *, allow_permit: bool = False) -> RuleDecision:
