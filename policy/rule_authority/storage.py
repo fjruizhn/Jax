@@ -15,6 +15,7 @@ from .models import RuleDecision, RuleDecisionStatus, RuleEvaluationRequest
 from .permit import (RulePermit, RulePermitConsumption, RulePermitConsumptionDraft,
                      RulePermitDraft, _EvaluatedPermit, _trusted_consumption,
                      _trusted_permit)
+from .providers import AlmacenCheckpointsBloqueable
 
 
 _LOG = logging.getLogger(__name__)
@@ -136,11 +137,10 @@ class MariaDBRuleDecisionStore:
     def __init__(self, connection_factory: Callable[[], object], *, checkpoint_store=None) -> None:
         if not callable(connection_factory):
             raise TypeError("connection_factory debe ser invocable")
-        if checkpoint_store is not None and any(
-            not callable(getattr(checkpoint_store, name, None))
-            for name in ("locked", "head_actual", "publicar", "confirmar")
+        if checkpoint_store is not None and not isinstance(
+            checkpoint_store, AlmacenCheckpointsBloqueable
         ):
-            raise TypeError("checkpoint_store no implementa el contrato durable")
+            raise TypeError("checkpoint_store no implementa el contrato durable bloqueable")
         self._connect = connection_factory
         self._checkpoint_store = checkpoint_store
 

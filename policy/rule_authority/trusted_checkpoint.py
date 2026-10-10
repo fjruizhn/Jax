@@ -12,7 +12,8 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import tempfile
+import secrets
+import stat
 import threading
 
 from policy.authority_ledger.canonical import canonical_bytes, domain_hash
@@ -60,9 +61,10 @@ class _AuthorityLedgerLockToken:
 class RuleAuditCheckpointStore:
     """Hash-chained checkpoint log with CAS publication and durable reread.
 
-    ``head`` is the Rule Authority audit record hash. The first publication uses
-    the empty string as its predecessor; normal operation must compare this
-    external head to the locked MariaDB audit head before every mutation.
+    ``head`` is the Rule Authority audit record hash. Bootstrap explicitly
+    anchors genesis as sequence zero; the first audit publication uses that
+    genesis head as its predecessor. Normal operation compares this external
+    head to the locked MariaDB audit head before every mutation.
     """
 
     def __init__(self, path: Path) -> None:
@@ -83,10 +85,12 @@ class RuleAuditCheckpointStore:
         with self._thread_lock:
             if self._depth == 0:
                 self._ensure_durable_directory(self.path.parent)
-                self._lock_handle = self.lock_path.open("a+b")
+                flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+                self._lock_handle = os.fdopen(os.open(self.lock_path, flags, 0o600), "r+b")
                 try:
                     os.fchmod(self._lock_handle.fileno(), 0o600)
                     fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX)
+                    self._cleanup_abandoned_temporaries()
                     self._lock_thread_id = threading.get_ident()
                     self._lock_epoch += 1
                 except Exception:
@@ -225,19 +229,52 @@ class RuleAuditCheckpointStore:
     def _replace_log(self, rows: tuple[dict[str, object], ...]) -> None:
         self._ensure_durable_directory(self.path.parent)
         payload = b"".join(canonical_bytes(row) + b"\n" for row in rows)
-        fd, temporary = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
+        temporary_path = self.path.with_name(
+            f".{self.path.name}.tmp-{secrets.token_hex(16)}"
+        )
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)
         try:
+            fd = os.open(temporary_path, flags, 0o600)
             with os.fdopen(fd, "wb") as handle:
                 os.fchmod(handle.fileno(), 0o600)
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
+            os.replace(temporary_path, self.path)
             self._fsync_directory_chain(self.path.parent)
         except OSError as exc:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
             raise CheckpointInvalido("resultado de publicación durable desconocido") from exc
+
+    def _cleanup_abandoned_temporaries(self) -> None:
+        """Remove only this store's private, regular publication temp files.
+
+        The caller holds the checkpoint flock, so no cooperating publisher can
+        still own a temp file. Reserved 128-bit names and metadata checks avoid
+        treating unrelated files or symlinks as abandoned publications.
+        """
+        prefix = f".{self.path.name}.tmp-"
+        for candidate in self.path.parent.iterdir():
+            if not candidate.name.startswith(prefix):
+                continue
+            suffix = candidate.name[len(prefix):]
+            if len(suffix) != 32 or any(char not in "0123456789abcdef" for char in suffix):
+                continue
+            try:
+                metadata = candidate.lstat()
+                if (not stat.S_ISREG(metadata.st_mode)
+                        or stat.S_IMODE(metadata.st_mode) != 0o600
+                        or metadata.st_uid != os.getuid()
+                        or metadata.st_nlink != 1):
+                    continue
+                candidate.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise CheckpointInvalido("temporal abandonado de checkpoint no se pudo limpiar") from exc
 
     @classmethod
     def _ensure_durable_directory(cls, path: Path) -> None:

@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
+import stat
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from policy.authority_ledger.canonical import canonical_bytes
 from policy.rule_authority.errors import CheckpointInvalido
+from policy.rule_authority.storage import MariaDBRuleDecisionStore
 from policy.rule_authority.trusted_checkpoint import (
     RuleAuditCheckpointStore,
     _checkpoint_hash,
 )
-from policy.rule_authority.providers import AlmacenCheckpoints
+from policy.rule_authority.providers import AlmacenCheckpoints, AlmacenCheckpointsBloqueable
+from tests.policy.proveedores_dobles import CheckpointsEnMemoria
 
 
 def _bootstrapped_store(path):
@@ -97,6 +101,80 @@ def test_reinicio_relee_log_y_no_reinicializa_un_head_existente(tmp_path):
     second = RuleAuditCheckpointStore(path)
     assert second.head_actual() == "sha256:" + "1" * 64
     assert json.loads(path.read_text(encoding="utf-8").splitlines()[0])["sequence"] == 0
+
+
+def _bloquear_checkpoint(path, ready, acquired):
+    store = RuleAuditCheckpointStore(path)
+    ready.set()
+    with store.locked():
+        acquired.set()
+
+
+def test_flock_serializa_procesos_distintos(tmp_path):
+    path = tmp_path / "audit-checkpoints.jsonl"
+    store = _bootstrapped_store(path)
+    context = multiprocessing.get_context("fork")
+    ready = context.Event()
+    acquired = context.Event()
+    with store.locked():
+        process = context.Process(target=_bloquear_checkpoint, args=(path, ready, acquired))
+        process.start()
+        assert ready.wait(5)
+        assert not acquired.wait(0.2)
+    assert acquired.wait(5)
+    process.join(5)
+    assert process.exitcode == 0
+
+
+def test_lock_se_crea_con_modo_restringido_antes_de_aplicar_umask(tmp_path, monkeypatch):
+    store = RuleAuditCheckpointStore(tmp_path / "audit-checkpoints.jsonl")
+    real_open = os.open
+    observed = []
+
+    def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+        if os.fspath(path) == os.fspath(store.lock_path):
+            observed.append(mode)
+        if dir_fd is None:
+            return real_open(path, flags, mode)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", recording_open)
+    previous = os.umask(0)
+    try:
+        with store.locked():
+            assert stat.S_IMODE(store.lock_path.stat().st_mode) == 0o600
+    finally:
+        os.umask(previous)
+    assert observed == [0o600]
+
+
+def test_lock_limpia_temporales_de_publicacion_abandonados(tmp_path):
+    path = tmp_path / "audit-checkpoints.jsonl"
+    store = _bootstrapped_store(path)
+    abandoned = tmp_path / f".{path.name}.tmp-{'a' * 32}"
+    abandoned.write_bytes(b"partial checkpoint")
+    abandoned.chmod(0o600)
+
+    assert store.head_actual()
+    assert not abandoned.exists()
+
+
+def test_protocol_declara_locked_y_store_real_lo_implementa(tmp_path):
+    store = _bootstrapped_store(tmp_path / "audit-checkpoints.jsonl")
+    assert isinstance(store, AlmacenCheckpoints)
+    assert isinstance(store, AlmacenCheckpointsBloqueable)
+    memory = CheckpointsEnMemoria()
+    assert isinstance(memory, AlmacenCheckpoints)
+    assert not isinstance(memory, AlmacenCheckpointsBloqueable)
+
+
+def test_storage_mariadb_exige_checkpoint_bloqueable(tmp_path):
+    with pytest.raises(TypeError, match="contrato durable bloqueable"):
+        MariaDBRuleDecisionStore(lambda: None, checkpoint_store=CheckpointsEnMemoria())
+    MariaDBRuleDecisionStore(
+        lambda: None,
+        checkpoint_store=RuleAuditCheckpointStore(tmp_path / "rule-authority-checkpoint-contract.jsonl"),
+    )
 
 
 def test_lector_rechaza_head_historico_repetido_aunque_la_cadena_sea_valida(tmp_path):

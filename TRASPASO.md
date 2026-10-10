@@ -80,6 +80,33 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   revocada del mismo hash y cuarentena permanente de overlays históricos inválidos sigue
   sin respuesta. La implementación de este paso no decide esa semántica.
 
+### Actualización 2026-10-10 · fixes independientes del checkpoint
+
+- Rebase comprobado contra `origin/master@bf6b05809e1c3505efd7447b33685796ca42e3b6`:
+  `HEAD` ya descendía de ese SHA; `git rebase origin/master` terminó up-to-date. GitHub
+  confirma que #381 se integró como `ec89ef1e431facf420ef3f95e20c089a81f52430` y que
+  dicho commit es ancestro de master. Su worktree aparte no fue modificado.
+- GLM/ZCode auditó read-only `76c8ecd0` (no el head actual): 1 MAJOR de verificación
+  (MariaDB no ejecutada ni CI del branch), 3 MINOR y 4 LOW. La regresión de head histórico
+  duplicado ya está en `b7147a3a`; las demás observaciones de API, genesis, temporales,
+  permisos de lock, restauración DB/checkpoint y bloqueo entre procesos motivaron este
+  diff local. La auditoría no cubre estos cambios posteriores ni `HEAD` actual.
+- Diff local añade `AlmacenCheckpointsBloqueable` sin cambiar el protocolo base usado por
+  providers en memoria; el lock se crea directamente con modo `0600`; el genesis explícito
+  queda descrito correctamente; se limpian solo temporales privados del mismo store bajo
+  flock. Añade pruebas de bloqueo entre procesos, modo inicial, limpieza, contratos y de
+  rechazo antes de append si checkpoint adelanta a DB restaurada.
+- Verificación de raíz: suites de checkpoint/providers/modelos/permiso/store: `308 passed`;
+  pruebas de fence/transacción: `8 passed`; MariaDB storage colecciona `18 tests`. Un intento
+  de correr el lote mixto confirmó que el fixture Docker falla con permiso denegado en
+  `/var/run/docker.sock`; por tanto no cuenta como prueba MariaDB. `py_compile` y
+  `git diff --check` pasan. El runbook auditado para reconciliar commit DB sin ancla sigue
+  pendiente antes del wiring productivo.
+- Pendiente: cerrar diff, commit firmado por Codex, pedir auditoría Tier 3 del SHA exacto,
+  publicar solo tras ejecutar `/home/fruiz/claude-skills/bin/ventana estado`, y obtener CI
+  MariaDB verde. No hacer merge hasta respuesta de Fernando sobre `OVERLAY_ISSUED`; esa
+  decisión no se infiere de la auditoría ni del merge de #381.
+
 ## Límites de autoridad y alcance
 
 - La decisión directa de Fernando sigue pendiente: si `OVERLAY_ISSUED` requiere una
