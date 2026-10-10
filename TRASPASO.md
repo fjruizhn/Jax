@@ -136,6 +136,18 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   pisos. Repetir Tier 3 sobre el SHA final. No mergear mientras Fernando no resuelva la
   semántica de `OVERLAY_ISSUED`; tampoco habilitar wiring productivo sin el runbook de
   reconciliación auditado para commit DB exitoso sin ancla publicada.
+- CI exacta nueva del head `880896ffc9c79b1abfbf71b16b7dc9199a18b054`: run `38033529303`.
+  La auditoría Tier 3 del SHA registró `APROBADO CON CAMBIOS`, BLOCK 0, MAJOR 1 (CI no
+  cerrada), MINOR 1 (al job unitario le faltaban dependencias); los tres findings menores
+  previos sobre cableado, restore DB y wiring quedan cerrados. Reproduje el entorno mínimo:
+  con solo pytest no colecciona por falta de `yaml`; luego de agregar PyYAML faltaba
+  `cryptography`; con los pins `PyYAML==6.0.3` y `cryptography==49.0.0`, pasan los 25 tests.
+  El workflow local ya fija esas dos dependencias.
+- `archivos-de-test-en-ci` también falló en su paso de pisos, no en el scanner de archivos.
+  Repro local exacta: `policy/tests/test_pisos_migracion_desde_master.py` exigía solo el job
+  previo `pisos-no-bajan`; añadí `faro-rule-authority-unit` a `JOBS_NUEVOS`. Antes del fix,
+  el lote fue `226 passed, 1 failed` (227 casos); el piso de 227 sigue correcto. Los logs
+  finales del run completo aún deben confirmar ambos fixes y los gates MariaDB.
 
 ## Límites de autoridad y alcance
 
