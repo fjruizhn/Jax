@@ -405,36 +405,40 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
     # -- B-5: la mutación que más importa -- medir el LOOP, no el POST ---
     async def test_B5_el_trabajo_no_bloquea_el_loop_de_eventos(self):
         self._archivo_en_workspace("lento.pdf")
+        loop = asyncio.get_running_loop()
+        liberar_ingesta = threading.Event()
+        loop_respondio = asyncio.Event()
+        respondio_antes_de_liberar = []
+
+        def _registrar_respuesta_del_loop():
+            respondio_antes_de_liberar.append(not liberar_ingesta.is_set())
+            loop_respondio.set()
 
         def _ingerir_lento(origen, trabajo, *, subruta=None):
-            time.sleep(0.4)  # bloqueante DE VERDAD -- simula OCR real
+            # Si esta función corre en un worker, el event loop puede procesar
+            # el callback antes de liberar la ingesta. Si corre inline en el
+            # loop, el watchdog la libera y el callback queda marcado tarde.
+            loop.call_soon_threadsafe(_registrar_respuesta_del_loop)
+            liberar_ingesta.wait(timeout=10)
             return _ficha("z" * 64)
 
         job_id = self._crear_job()
-        retrasos: list[float] = []
-
-        async def _sondear_loop():
-            for _ in range(25):
-                t0 = time.perf_counter()
-                await asyncio.sleep(0.01)
-                retrasos.append(time.perf_counter() - t0 - 0.01)
-
+        watchdog = threading.Timer(10, liberar_ingesta.set)
+        watchdog.daemon = True
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_lento):
-            # El sondeo se crea PRIMERO y se le da tiempo real de arrancar
-            # y quedar DENTRO de su `sleep(0.01)` antes de lanzar el
-            # trabajo -- si no, un trabajo que bloquea antes de su primer
-            # `await` puede terminar ANTES de que el sondeo arranque, y el
-            # test pasa igual con una mutación que saca el `run_in_executor`
-            # (falso negativo, confirmado a mano en la ronda anterior).
-            sondeo = asyncio.create_task(_sondear_loop())
-            await asyncio.sleep(0.02)
-            await self._ejecutar(job_id, UUID_PRUEBA, ["lento.pdf"])
-            await sondeo
+            watchdog.start()
+            tarea = asyncio.create_task(
+                self._ejecutar(job_id, UUID_PRUEBA, ["lento.pdf"])
+            )
+            try:
+                await asyncio.wait_for(loop_respondio.wait(), timeout=11)
+            finally:
+                liberar_ingesta.set()
+                watchdog.cancel()
+                await tarea
 
-        peor = max(retrasos)
-        assert peor < 0.15, (
-            f"el loop de eventos se retrasó {peor:.3f}s durante el trabajo -- "
-            "el OCR no está corriendo fuera del loop"
+        assert respondio_antes_de_liberar == [True], (
+            "el event loop no procesó el callback mientras la ingesta seguía bloqueada"
         )
         assert self.store.get(job_id).status == JobStatus.COMPLETED
 
