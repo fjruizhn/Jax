@@ -235,12 +235,26 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   secret-scan `38036905796` también SUCCESS.
 - El fallo volvió a ser `test_el_rele_con_half_close_deja_llegar_la_respuesta_antes_de_salir`:
   `779 passed, 1 failed`, stdout vacío e `IndexError` al tomar la primera línea. En `2d6a0f41`
-  el mismo test pasó; esto todavía no identifica una causa. El test no capturaba stderr ni
-  informaba el exit code del rele. Cambié solo su diagnóstico para capturar ambos y mostrar
-  evidencia si falta la respuesta. No cambiar el runtime hasta inspeccionar la salida nueva.
+  el mismo test pasó; esto todavía no identifica una causa. El test previo ya comprobaba que
+  `proc.wait()` devolviera 0, pero no capturaba stderr ni incluía exit code/stdout en el fallo
+  por respuesta vacía. El cambio captura esos datos y agrega contexto a las aserciones. No
+  cambiar el runtime hasta identificar la causa.
 - No fue posible reproducir localmente: el Python del checkout no tiene el módulo `mcp`, así
   que la colección de `tests/test_faro_puerto_e2e.py` falla por dependencia ausente. CI exacta
-  del nuevo SHA debe confirmar la mejora diagnóstica y si el fallo persiste.
+  debe ser la fuente de resultado para esta prueba.
+
+### Cierre CI de la instrumentación half-close · 2026-10-10
+
+- SHA `bf8bee461a21860db1427199ce0be83d465999c2`: policy run `38037918992` terminó SUCCESS,
+  31/31 jobs; canonical projections `38037918990` y secret-scan `38037918993` SUCCESS.
+  `tests-puros` pasó, con Block 4 MariaDB y Rule Authority MariaDB en sus pisos; permisos y
+  pisos pasaron.
+- `faro-fase0` pasó `780 passed in 53.29s`; el test half-close instrumentado PASSED. La
+  captura adicional no reveló la causa de los fallos anteriores porque no se reprodujeron.
+  Mantener la observación histórica de `3857b4bc` y `05dfff13`; no inferir causa ambiental ni
+  modificar runtime sin nueva evidencia.
+- La Tier 3 del delta `bf8bee46` recomendó precisar el historial del exit code; la corrección
+  está incluida arriba. Pedir auditoría exacta del nuevo SHA y CI exacta tras publicarlo.
 
 ## Límites de autoridad y alcance
 
