@@ -365,12 +365,30 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Traer la base desde la URL fija del repositorio
+      - name: Traer historia completa y extraer el comparador oficial de la base
         run: |
-          git fetch --no-tags --depth=1 "${{ github.server_url }}/${{ github.repository }}" +refs/heads/master:refs/pisos-base/master || exit $?
+          set -euo pipefail
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}"
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            PR_MERGE_REF="refs/pull/${{ github.event.pull_request.number }}/merge"
+            FETCH_REFS=(+refs/heads/master:refs/pisos-base/master "+${PR_MERGE_REF}:refs/pisos-candidate/merge")
+          else
+            FETCH_REFS=(+refs/heads/master:refs/pisos-base/master)
+          fi
+          if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+            git fetch --no-tags --unshallow "$REPO_URL" "${FETCH_REFS[@]}"
+          else
+            git fetch --no-tags "$REPO_URL" "${FETCH_REFS[@]}"
+          fi
+          [[ "$(git rev-parse --is-shallow-repository)" == "false" ]]
+          git cat-file -e 'refs/pisos-base/master^{commit}'
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            [[ "$(git rev-parse HEAD)" == "$(git rev-parse refs/pisos-candidate/merge)" ]]
+          fi
+          git show refs/pisos-base/master:.github/ci/comparar_pisos.py > "$RUNNER_TEMP/comparar_pisos.py"
       - name: Los pisos no bajan respecto de la punta de master
         run: |
-          python3 -I .github/ci/comparar_pisos.py refs/pisos-base/master || exit $?
+          python3 -I "$RUNNER_TEMP/comparar_pisos.py" --head-root "$GITHUB_WORKSPACE" --base-ref refs/pisos-base/master --head-ref HEAD || exit $?
 
   ci-usa-la-mariadb-de-produccion:
     runs-on: ubuntu-latest

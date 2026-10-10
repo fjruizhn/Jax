@@ -310,6 +310,7 @@ def repo(tmp_path):
 
 def _base(repo, workflow, datos=None):
     _escribir(repo, ".github/workflows/policy.yml", workflow)
+    _escribir(repo, ".github/workflows/floor-retirements.json", '{"version":1,"grants":[]}')
     if datos is not None:
         _escribir(repo, "ci/pisos.json", datos if isinstance(datos, str) else json.dumps(datos))
     _git(repo, "add", "-A")
@@ -509,3 +510,136 @@ def test_ref_base_por_defecto_es_la_ref_propia_del_job():
 
 def test_argumentos_de_mas_fallan(repo):
     assert _correr(repo, "a", "b").returncode == 2
+
+
+def test_parser_de_grant_rechaza_campos_extra_y_hash_alterado():
+    definicion = {"entry": {"patron": "^1 passed", "mensaje": "m"}, "output_file": "/tmp/x"}
+    grant = {"repository": "acme/Jax", "pull_request": 7, "base_branch": "master",
+             "floor_key": "job/x", "floor_definition": definicion,
+             "floor_definition_sha256": cp._hash_canonico(definicion),
+             "introducing_merge": "a" * 40, "introducing_parent1": "b" * 40,
+             "introducing_parent2": "c" * 40, "expected_diff_sha256": "d" * 64}
+    assert cp._validar_grant(grant, "test") == grant
+    with pytest.raises(cp.PisosError):
+        cp._validar_grant({**grant, "extra": True}, "test")
+    with pytest.raises(cp.PisosError):
+        cp._validar_grant({**grant, "floor_definition_sha256": "0" * 64}, "test")
+
+
+def test_historia_incompleta_y_merge_ilegible_fallan_cerrado(monkeypatch, repo):
+    real_git = cp._git
+    monkeypatch.setattr(cp, "_git", lambda root, *args: subprocess.CompletedProcess(
+        ["git"], 0, stdout="true\n", stderr=""))
+    with pytest.raises(cp.PisosError, match="shallow"):
+        cp._historia_completa(repo)
+    monkeypatch.setattr(cp, "_git", lambda root, *args: subprocess.CompletedProcess(
+        ["git"], 1, stdout="", stderr="fatal: bad object"))
+    with pytest.raises(cp.PisosError):
+        cp._padres(repo, "f" * 40)
+    monkeypatch.setattr(cp, "_git", real_git)
+
+
+def test_hash_de_diff_incluye_oid_modos_y_rutas(repo):
+    _base(repo, WORKFLOW_BASE_NUEVO, DATOS_NUEVOS)
+    base = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _escribir(repo, "file.txt", "a\n")
+    _git(repo, "add", "file.txt")
+    _git(repo, "commit", "-q", "-m", "change")
+    head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    rows = cp._diff_filas(repo, base, head)
+    assert rows == [{"path": "file.txt", "old_mode": "000000", "new_mode": "100644",
+                     "old_oid": "0" * 40, "new_oid": _git(repo, "rev-parse", "HEAD:file.txt").stdout.strip(),
+                     "status": "A"}]
+    assert cp._huella_diff_oids(repo, base, head) == cp._hash_canonico(rows)
+
+
+def test_registry_solo_autoriza_en_merge_dedicado_y_diff_exacto(repo, monkeypatch):
+    import os
+    import json
+
+    root_data = {"version": 1, "pisos": {"job/keep": {"patron": "^2 passed", "mensaje": "k"}}, "minimos": {}}
+    with_floor = copy.deepcopy(root_data)
+    with_floor["pisos"]["job/retire"] = {"patron": "^1 passed", "mensaje": "r"}
+    workflow = "jobs:\n  job:\n    steps:\n      - run: |\n"
+    keep_call = "          python3 .github/ci/piso.py verificar job/keep /tmp/keep || exit $?\n"
+    retire_call = "          python3 .github/ci/piso.py verificar job/retire /tmp/retire || exit $?\n"
+    _escribir(repo, "ci/pisos.json", json.dumps(root_data))
+    _escribir(repo, ".github/workflows/policy.yml", workflow + keep_call)
+    _escribir(repo, ".github/workflows/floor-retirements.json", '{"version":1,"grants":[]}')
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "baseline")
+    baseline = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Introduce the floor in a two-parent merge, after a parent1 that lacks it.
+    _git(repo, "branch", "introduce")
+    _git(repo, "checkout", "-q", "introduce")
+    _escribir(repo, "ci/pisos.json", json.dumps(with_floor))
+    _escribir(repo, ".github/workflows/policy.yml", workflow + keep_call + retire_call)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "introducing side")
+    intro_side = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    intro_tree = _git(repo, "rev-parse", "HEAD^{tree}").stdout.strip()
+    intro = _git(repo, "commit-tree", intro_tree, "-p", baseline, "-p", intro_side,
+                 "-m", "introduce floor merge").stdout.strip()
+    _git(repo, "update-ref", "refs/heads/master", intro)
+    _git(repo, "checkout", "-q", "master")
+
+    # Fingerprint the exact intended removal before adding the grant.
+    _escribir(repo, "ci/pisos.json", json.dumps(root_data))
+    _escribir(repo, ".github/workflows/policy.yml", workflow + keep_call)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "candidate removal")
+    draft = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    expected = cp._huella_diff_oids(repo, intro, draft)
+    _git(repo, "reset", "-q", "--hard", intro)
+
+    intro_parents = cp._padres(repo, intro)
+    definition = {"entry": with_floor["pisos"]["job/retire"], "output_file": "/tmp/retire"}
+    grant = {"repository": "acme/Jax", "pull_request": 73, "base_branch": "master",
+             "floor_key": "job/retire", "floor_definition": definition,
+             "floor_definition_sha256": cp._hash_canonico(definition), "introducing_merge": intro,
+             "introducing_parent1": intro_parents[0], "introducing_parent2": intro_parents[1],
+             "expected_diff_sha256": expected}
+    registry = json.dumps({"version": 1, "grants": [grant]})
+    _escribir(repo, ".github/workflows/floor-retirements.json", registry)
+    _git(repo, "add", ".github/workflows/floor-retirements.json")
+    _git(repo, "commit", "-q", "-m", "grant-only commit")
+    grant_head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    grant_tree = _git(repo, "rev-parse", "HEAD^{tree}").stdout.strip()
+    grant_merge = _git(repo, "commit-tree", grant_tree, "-p", intro, "-p", grant_head,
+                       "-m", "dedicated grant merge").stdout.strip()
+    _git(repo, "update-ref", "refs/pisos-base/master", grant_merge)
+    _git(repo, "reset", "-q", "--hard", grant_merge)
+    _escribir(repo, "ci/pisos.json", json.dumps(root_data))
+    _escribir(repo, ".github/workflows/policy.yml", workflow + keep_call)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "PR exact removal")
+    candidate = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "update-ref", "refs/pisos-candidate/merge", candidate)
+    event = {"number": 73, "pull_request": {"number": 73, "base": {
+        "ref": "master", "sha": grant_merge, "repo": {"full_name": "acme/Jax"}}}}
+    _escribir(repo, "event.json", json.dumps(event))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(repo / "event.json"))
+    r = _correr(repo, "--head-root", str(repo), "--base-ref", "refs/pisos-base/master",
+                "--head-ref", "refs/pisos-candidate/merge")
+    assert r.returncode == 0, r.stdout + r.stderr
+    # Aunque el candidate tree ya contenga el registro, mover la base fuera de la
+    # transición exacta hace que ese grant no tenga autoridad.
+    _git(repo, "update-ref", "refs/pisos-base/master", intro)
+    event["pull_request"]["base"]["sha"] = intro
+    _escribir(repo, "event.json", json.dumps(event))
+    r = _correr(repo, "--head-root", str(repo), "--base-ref", "refs/pisos-base/master",
+                "--head-ref", "refs/pisos-candidate/merge")
+    assert r.returncode != 0
+    _git(repo, "update-ref", "refs/pisos-base/master", grant_merge)
+    event["pull_request"]["base"]["sha"] = grant_merge
+    _escribir(repo, "event.json", json.dumps(event))
+
+    # Any additional candidate path invalidates the OID fingerprint and restores rejection.
+    _escribir(repo, "extra.txt", "unexpected\n")
+    _git(repo, "add", "extra.txt")
+    _git(repo, "commit", "-q", "-m", "extra")
+    _git(repo, "update-ref", "refs/pisos-candidate/merge", "HEAD")
+    r = _correr(repo, "--head-root", str(repo), "--base-ref", "refs/pisos-base/master",
+                "--head-ref", "refs/pisos-candidate/merge")
+    assert r.returncode == 1 and "el piso desaparece" in r.stdout
