@@ -256,13 +256,14 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
 - La Tier 3 del delta `bf8bee46` recomendó precisar el historial del exit code; la corrección
   está incluida arriba. Pedir auditoría exacta del nuevo SHA y CI exacta tras publicarlo.
 
-### Actualización 2026-10-10 · revisión del contrato del kernel (preliminar)
+### Actualización 2026-10-10 · revisión del contrato del kernel (Tier 3)
 
-- Verificación viva de GitHub: #388 sigue abierto draft, head `445859bdb90922410983980f2f645755d4fafca0`, base `master@bf6b05809e1c3505efd7447b33685796ca42e3b6`, `mergeStateStatus=CLEAN`; los checks de ese SHA continúan verdes. El worktree de esta rama estaba limpio al iniciar esta revisión.
-- Una revisión arquitectónica Tier 3 de solo lectura identificó contradicciones/brechas que impiden implementar el kernel con seguridad sin cerrar el contrato: (a) §10 exige doble consumo secuencial fallido, pero §11 exige recuperar retries post-anclaje y la API actual no distingue ambos; (b) la emisión revalida Block 4 antes de persistir, pero `record_permit` no mantiene el lock de `authority_ledger_head` durante el commit; (c) `evaluate()->RuleDecision` no entrega al caller el `RulePermit` que crea; (d) el constructor no recibe una ruta confiable para `load_trusted_policy_snapshot(Path, pin)`; (e) la identidad del contrato de capability no queda ligada al identificador que se guarda en `RulePermit`. Referencias: spec §9–§11, `policy/rule_authority/storage.py`, `policy/rule_authority/snapshot.py`, `policy/rule_authority/permit.py`.
-- Se consultó a Fernando la semántica retry/single-use: propuesta recomendada `consumption_request_id` durable, mismo ID recupera, ID distinto falla. Esperar su decisión antes de alterar la API o la aceptación del spec. La pregunta independiente sobre `OVERLAY_ISSUED` también sigue pendiente y bloquea publicación/integración.
-- GitHub vivo: #375 permanece abierto y DIRTY sobre base obsoleta `feat/faro-f1.1-evaluador@61fd79fb`; #387 permanece abierto y su corrida visible `38023429466` falla `pisos-no-bajan`. Ambas son cadenas ajenas; no tocar worktrees ni ramas. #375 requiere reapilado y nueva auditoría/CI; #387 requiere que su owner resuelva su piso y cierre el revert antes de declarar estabilizada la fase previa.
-- Esta actualización solo cambió este handoff; no se modificó código, no se ejecutaron pruebas, y no hubo commit ni publicación. El siguiente trabajo local independiente es completar la descomposición de implementación y preparar cambios que no dependan de las decisiones humanas; no publicar ni integrar hasta resolverlas.
+- Contexto histórico al iniciar la revisión: #388 apuntaba a `445859bdb90922410983980f2f645755d4fafca0`, base `master@bf6b05809e1c3505efd7447b33685796ca42e3b6`, limpio y con checks verdes. No es el SHA vigente después del commit documental que sigue.
+- Tier 3 read-only sobre el SHA exacto `445859bdb90922410983980f2f645755d4fafca0` encontró bloqueos previos al kernel: (a) §10 exige que el segundo consumo falle, pero §11 exige recuperar un retry; falta ID de intento para distinguirlos; (b) la emisión no mantiene bloqueado `authority_ledger_head` desde replay hasta commit, permitiendo que una revocación se interponga; (c) `evaluate()->RuleDecision` no devuelve el `RulePermit` emitido; (d) un proceso reiniciado no puede recuperar el permiso de emisión porque el nuevo `permit_id`/hora genera otro draft; (e) falta binding confiable entre pin y `Path` del repositorio; (f) el permit guarda `capability_id`, pero el catálogo tiene una identidad de contrato independiente; (g) se mezclan los checkpoints Block 4 y Rule Authority, que tienen protocolos/dominios distintos; (h) el guard pierde causas STOP desconocido/reloj retrocedido al envolverlas como proveedor inválido; (i) `RuleLimits` no representa una regla REVERSIBLE sin límites. Referencias: spec §9–§11, `policy/rule_authority/{storage.py,snapshot.py,permit.py,providers.py,models.py}` y `policy/authority_ledger/storage.py`. No implementar sobre estas interfaces hasta cerrar los contratos que cambian comportamiento/autoridad.
+- Se consultó a Fernando la semántica retry/single-use: propuesta recomendada `consumption_request_id` durable, mismo ID recupera, ID distinto falla. Esperar su decisión antes de alterar la API o la aceptación del spec. La pregunta independiente sobre `OVERLAY_ISSUED` sigue pendiente y bloquea el merge final, no la publicación independiente autorizada tras verificar ventana.
+- Decisión pública de API también consultada: se recomienda `RuleEvaluationOutcome(decision, permit|None)` cerrado, con PERMIT↔permit y negativa↔None, porque el spec declara que `evaluate` devuelve solo `RuleDecision` y ese tipo oculta el único permit resultante. Esperar respuesta antes de cambiar la firma pública.
+- GitHub vivo: #385 (head `111ec66505001087ee33618c46db46aa11713eba`) está integrado en `9b2744c33c37fdfeec87bac03ddd00c9b76e8fb5`; #387 propone revertirlo y permanece abierto/UNSTABLE porque `pisos-no-bajan` falla en `38023429466`; resolver ese PR con su owner antes de decidir el destino de #375. #375 sigue abierto/DIRTY con base antigua, pero #385 lo reemplazó: mantenerlo estacionado; si #385 permanece, cerrarlo como supersedido por su owner; solo reconstruir el delta si #387 revierte #385. No tocar ramas ni worktrees ajenos.
+- El commit documental `34e91834ba9a2428d26b530fc4ebdcb3f82951e4` publicó la primera versión de esta nota. Su delta-audit exacta: APROBADO CON CAMBIOS, BLOCK 0, MAJOR 0, MINOR 3, tres LOW heredados; halló estado auto-invalidado, acción incondicional incorrecta sobre #375 y ampliación indebida del gate de overlays a publicación. El run `38040434309` terminó SUCCESS en proyecciones; policy `38040434329` y secret-scan `38040434389` siguen IN_PROGRESS en la lectura. Esta corrección local requiere SHA nuevo, CI exacta y delta-audit.
 
 ## Límites de autoridad y alcance
 
@@ -272,15 +273,16 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
 - El kernel de este paso debe ignorar overlays y ratificaciones del corpus; solo usa el
   grant individual de Block 4 derivado del ledger verificado.
 - No tocar el worktree `/home/fruiz/wt/jax-ledger-checkpoint` ni `codex/faro-r2`.
-- No publicar ni integrar hasta resolver la pregunta de OVERLAY, cerrar auditoría/CI y
-  revalidar la ventana inmediatamente antes de publicar/integrar. El trabajo aislado y el
-  rebase técnico pueden continuar sin decidir la semántica de OVERLAY.
+- No hacer merge final hasta resolver la pregunta de OVERLAY y cerrar auditoría/CI. La
+  publicación de trabajo independiente puede continuar si la ejecución inmediata de
+  `/home/fruiz/claude-skills/bin/ventana estado` confirma ventana abierta; antes de integrar
+  también se vuelve a verificar la ventana según el procedimiento constitucional.
 
 ## Siguiente acción exacta
 
 1. Ejecutar las cinco pruebas cross-schema contra MariaDB real con el principal provisionado; no inferir ese resultado de colección o de pruebas puras. Si el runner local sigue sin Docker, ejecutarlas en CI apropiada antes de wiring.
 2. Completar el wiring del kernel `evaluate`/`consume`, cobertura de clasificación/STOP/expiración/revocación/cambio de capability/pin y mediciones O(n) p95/RSS/EXPLAIN.
-3. Resolver la pregunta de OVERLAY con Fernando. No publicar ni integrar mientras siga pendiente; revalidar `bin/ventana estado` inmediatamente antes de cualquier publicación o integración.
+3. Resolver la pregunta de OVERLAY con Fernando antes del merge final. El trabajo/publicación independiente puede continuar con ventana abierta revalidada; antes de cada publicación o integración ejecutar `/home/fruiz/claude-skills/bin/ventana estado`.
 
 ## Archivos tocados
 
