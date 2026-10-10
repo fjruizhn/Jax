@@ -6,7 +6,15 @@ Cerrar el hallazgo del auditor de #371: `policy/rule_authority/schema.py` no val
 `Cantidad.unit` ni `Monto.currency` contra el catálogo sellado (solo `limites_de`
 re-validaba al evaluar), y la fixture `regla-ejemplo-tope.yaml` usaba `unit: llamadas`,
 fuera del catálogo. Encargo: `~/encargos-codex/encargo-glm-g2-schema-unidades.md`.
-Base: `origin/feat/faro-f1.1-evaluador` @ d4ffe62f.
+
+**Reapilado 2026-10-09 sobre `origin/master@8c850bce`** (post-merge de #371). Base
+original de la rama: `origin/feat/faro-f1.1-evaluador @ d4ffe62f`; #371 llegó a master
+por la rama reconstruida `feat/faro-f1.1-paso4-rebuild` (tip c86582af), por eso el PR
+estaba CONFLICTING y los SHAs del evaluador viejo no son ancestros de master. El delta
+propio (4 commits: schema+fixture+pruebas, pisos, docs, r2) se reapiló tal cual;
+`schema.py` y la fixture quedaron byte-idénticos a la rama original y el archivo de
+pruebas final = pruebas de master + las 35 de esta rama (los 3 nombres extra del archivo
+son pruebas nuevas de master, presentes y contadas en su piso 968).
 
 ## Hecho en esta rama
 
@@ -40,14 +48,21 @@ Base: `origin/feat/faro-f1.1-evaluador` @ d4ffe62f.
 
 M5/M6 comprobados con copias `git archive` del árbol (mutante aplicado sobre el schema nuevo, pruebas nuevas).
 
-## Pisos
+## Pisos (re-medidos 2026-10-09 sobre el árbol reapilado, venv-faro Python 3.14.4)
 
-- `identity-foundation-shadow/policy`: 659 → **694** (693 + 1 de la subclase forjada, r2; medido con el comando exacto del
-  paso, `piso.py verificar` OK; comentario del paso actualizado con el desglose).
-- `authority-rule-models/models`: **151** sin cambios (verificado).
-- `faro-fase0/faro`: **727** sin cambios (verificado con `~/tmp-glm/venv-faro`).
-- Guardas de CI: wireados + bash válido + pisos fuera del workflow = 237 passed.
+- `identity-foundation-shadow/policy`: 968 (master) → **1003** (+34 del schema de
+  unidades + 1 de la subclase forjada, r2). Medido con el comando exacto del paso
+  (lista extraída del propio workflow): `1003 passed in 5.34s`, 0 skipped,
+  `piso.py verificar` rc=0. En master este piso ya no es 659: #373/#379/#371 lo subieron
+  a 968 y la clave `authority-rule-models/models` (151) desapareció de `ci/pisos.json`
+  (los modelos entraron a la lista identity como `test_faro_rule_authority_models.py`).
+- `faro-fase0/faro`: **780** en master; esta rama no toca sus pruebas ni su job → sin
+  re-medición local, CI confirma.
+- Guardas de CI sobre el árbol final: `archivos-de-test-en-ci/pisos` **227 passed**
+  (`piso.py verificar` rc=0), `archivos-de-test-en-ci/wireados` **7 passed** (rc=0),
+  `comparar_pisos.py` contra origin/master OK (54 pisos, ninguno baja).
 
 ## Pendiente
 
-- Auditoría de Hyde y merge de Fernando (el ledger sello+append va aparte, por #377).
+- Auditoría de Hyde y merge de Fernando. #377 (ledger sello+append) y #379 ya están en
+  master; el PR quedó apuntando a master tras el reapilado.
