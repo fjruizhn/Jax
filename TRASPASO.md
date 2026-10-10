@@ -148,6 +148,21 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   previo `pisos-no-bajan`; añadí `faro-rule-authority-unit` a `JOBS_NUEVOS`. Antes del fix,
   el lote fue `226 passed, 1 failed` (227 casos); el piso de 227 sigue correcto. Los logs
   finales del run completo aún deben confirmar ambos fixes y los gates MariaDB.
+- CI `38033669969` sobre SHA `3784365fe1ae46ee17858cf29be6b0e2e3255157` confirmó el mismo
+  contrato de Unicode en ambos jobs Faro: `faro-fase0` dio 779 passed + 1 failed en Python
+  3.12, y `faro-rule-authority-unit` falló en colección con
+  `UNSUPPORTED_UNICODE_VERSION: runtime=15.0.0, pinned=16.0.0`. El workflow ya contiene un
+  cambio local a Python 3.14 en ambos jobs, coherente con otros jobs JAX que declaran que la
+  canonicalización Unicode 16 requiere Python 3.14. Reproducción local con el lock Faro/CI
+  hasheado en Python 3.14: la prueba de import pasó (`1 passed`); las 25 pruebas unitarias y
+  los 227 tests de migración de pisos también pasan localmente. Aún falta una corrida de CI
+  sobre el SHA que incorpora esta alineación.
+- Recomendación Tier 3 read-only: mantener intacto el guard de UCD, usar Python 3.14 en
+  `faro-fase0` y `faro-rule-authority-unit`; el resto del pipeline puede seguir en 3.12.
+  Medición adicional en venv limpio Python 3.14.4 con los requirements Faro hasheados y el
+  comando exacto: `780 passed` para fase 0 (incluida la prueba de límite RSS) y `25 passed`
+  para Rule Authority; ambos pisos locales se satisfacen. Esos conteos deben confirmarse en
+  CI sobre el siguiente head.
 
 ## Límites de autoridad y alcance
 
