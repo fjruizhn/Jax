@@ -7,6 +7,9 @@ import re
 
 _USERNAME = re.compile(r"[A-Za-z0-9_]{1,32}\Z")
 _TABLES_APPEND_ONLY = ("rule_decisions", "rule_permits", "rule_permit_consumptions")
+_AUTHORITY_LEDGER_VERIFY_TABLES = (
+    "authority_ledger_genesis", "authority_events", "authority_ledger_head",
+)
 # El principal canónico es user@localhost (creado si falta). Toda otra entrada de
 # mysql.user con el mismo nombre (`%`, 127.0.0.1, ::1, un host concreto...) recibe
 # el mismo REVOKE/GRANT: una cuenta homónima no puede conservar privilegios previos.
@@ -25,6 +28,11 @@ def _apply_least_privilege(cursor, principal: str) -> None:
     cursor.execute(
         f"GRANT SELECT,UPDATE ON jax_rule_authority.rule_authority_audit_head TO {principal}"
     )
+    # The shared consumption transaction verifies Block 4 under the same
+    # principal.  Those three tables are read-only; mutation remains owned by
+    # the authority-ledger writer principal.
+    for table in _AUTHORITY_LEDGER_VERIFY_TABLES:
+        cursor.execute(f"GRANT SELECT ON jax_authority.{table} TO {principal}")
 
 
 def provision_application_account(connection, username: str, password: str) -> None:

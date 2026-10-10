@@ -548,7 +548,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          # Canonicalization is pinned to Unicode 16, supplied by Python 3.14.
+          python-version: "3.14"
       - run: pip install --require-hashes -r requirements-faro.txt
       - run: pip install --require-hashes -r requirements-faro-ci.txt
       - run: python -m pytest tests/test_faro_paquete.py tests/test_faro_puerto.py tests/test_faro_puerto_e2e.py tests/test_faro_transporte.py tests/test_faro_cadena.py tests/test_faro_requirements.py tests/test_faro_aviso.py tests/test_faro_topes.py tests/test_faro_control.py tests/test_faro_lanzador.py tests/test_faro_acl.py tests/test_faro_memoria.py -v
@@ -1273,6 +1274,27 @@ jobs:
           set -e
           test "$rc" -eq 1 || {
             echo "FAIL-OPEN: sin Ollama vivo el tripwire devolvio $rc, se esperaba 1."; exit 1; }
+
+  faro-rule-authority-unit:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: "."
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # The shared canonicalizer fails closed unless the runtime supplies Unicode 16.
+          python-version: "3.14"
+      - run: python -m pip install pytest PyYAML==6.0.3 cryptography==49.0.0
+      - name: Faro Rule Authority -- store, permit y checkpoint (sin DB)
+        run: |
+          set -o pipefail
+          python -m pytest -q \
+            tests/policy/test_faro_rule_authority_store.py \
+            tests/policy/test_faro_rule_permit.py \
+            tests/policy/test_rule_authority_checkpoint.py \
+            2>&1 | tee /tmp/faro-rule-authority-unit
+          python3 .github/ci/piso.py verificar authority-rule-unit/tests /tmp/faro-rule-authority-unit || exit $?
 
   governance:
     # policy/governance/ (SP1 de REFORMAS Fase 2, 2026-08-18) tenia 38 tests
@@ -2703,7 +2725,8 @@ jobs:
         # (#381 agrega checkpoint/overlay y cierra el writer caller-intent).
         # Schema-unidades (#378) añade 34 pruebas: 1003 -> 1037; r2 añade una
         # de catálogo forjado: 1038. El MINOR Tier 3 agrega dos vectores de paridad
-        # JSON/Python. Medición exacta del head reapilado: 1040 passed, cero skipped.
+        # JSON/Python. CI exacta de bc024578: 1042 passed, cero skipped.
+        # Incluye dos regresiones de separación de los checkpoints Block 4 y Rule Authority.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
@@ -2809,7 +2832,7 @@ jobs:
           JAX_AUTHORITY_LEDGER_DOCKER_CMD: docker
         run: |
           set -o pipefail
-          # Piso 10 (2026-10-09): la regresión de overlay sin ratificación eleva en uno la suite MariaDB.
+          # Piso 33 (2026-10-10): CI midió 33 casos tras checkpoint/consumo; regresiones de manejo incluidas.
           python -m pytest -q tests/policy/test_authority_ledger_storage_mariadb.py tests/policy/test_authority_ledger_append_validation_mariadb.py 2>&1 | tee /tmp/authority-ledger-mariadb
           python3 .github/ci/piso.py verificar authority-ledger-mariadb/integration /tmp/authority-ledger-mariadb || exit $?
       - name: Faro F1.1 Rule Authority MariaDB aislada -- piso exacto

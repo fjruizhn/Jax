@@ -128,11 +128,14 @@ def test_el_rele_con_half_close_deja_llegar_la_respuesta_antes_de_salir(montaje)
             proc = await asyncio.create_subprocess_exec(
                 sys.executable, "-m", "jax.faro.relay", "--socket", str(srv.ruta_socket), "--token-file", str(srv.ruta_token),
                 cwd=str(RAIZ), env={**os.environ, "PYTHONPATH": str(RAIZ)},
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 7, "method": "ping"}).encode() + b"\n")
             await proc.stdin.drain()
             proc.stdin.close()
             salida = await asyncio.wait_for(proc.stdout.read(), 20)
+            codigo = await asyncio.wait_for(proc.wait(), 20)
+            error = await proc.stderr.read()
+            assert codigo == 0, f"el rele terminó con codigo={codigo}; stderr={error.decode(errors='replace')!r}"
+            assert salida.splitlines(), f"el rele no devolvió respuesta; stdout={salida!r}; stderr={error.decode(errors='replace')!r}"
             assert json.loads(salida.splitlines()[0])["id"] == 7
-            assert await asyncio.wait_for(proc.wait(), 20) == 0
     asyncio.run(caso())

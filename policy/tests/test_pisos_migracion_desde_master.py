@@ -33,7 +33,7 @@ DATOS = json.loads((RAIZ / "ci" / "pisos.json").read_text(encoding="utf-8"))
 LLAMADA = re.compile(r"python3 \.github/ci/piso\.py verificar (\S+) (\S+)")
 
 
-JOBS_NUEVOS = ["pisos-no-bajan"]  # el comparador de pisos: único job agregado, sin tocar los existentes
+JOBS_NUEVOS = ["pisos-no-bajan", "faro-rule-authority-unit"]
 
 
 def test_los_jobs_son_los_mismos_mas_el_comparador():

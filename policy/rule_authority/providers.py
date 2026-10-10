@@ -283,8 +283,12 @@ class RelojConfiable(Protocol):
 
 
 @runtime_checkable
-class AlmacenCheckpoints(Protocol):
-    """Checkpoint externo monotonico y OBLIGATORIO. CAS atomica con anterior
+class AlmacenCheckpointAuditoria(Protocol):
+    """Checkpoint externo de auditoría Rule Authority, monótono y obligatorio.
+
+    No representa el checkpoint de autoridad Block 4. El loader/replay de Block 4
+    usa su propio ``TrustedCheckpointStore`` dentro de ``checkpoint_fence``.
+    CAS atomica con anterior
     exacto; idempotente SOLO con el mismo anterior Y el mismo head;
     ``confirmar(head)`` relee y responde True solo si el log durable CONTIENE
     el head exacto (§10.15, §11). La implementacion REAL persiste y hace fsync
@@ -295,6 +299,13 @@ class AlmacenCheckpoints(Protocol):
     def publicar(self, head: str, *, anterior: str) -> None: ...
 
     def confirmar(self, head: str) -> bool: ...
+
+
+@runtime_checkable
+class AlmacenCheckpointAuditoriaBloqueable(AlmacenCheckpointAuditoria, Protocol):
+    """Checkpoint RA apto para escrituras MariaDB serializadas entre procesos."""
+
+    def locked(self) -> AbstractContextManager: ...
 
 
 # ------------------------------------------------- el guard de emision/consumo
@@ -362,7 +373,7 @@ def _validar_reloj(reloj: object) -> None:
         raise ProveedorInvalido("reloj: la hora debe ser UTC consciente (utcoffset == 0)")
 
 
-def _validar_checkpoint(checkpoint: object) -> None:
+def _validar_checkpoint_auditoria(checkpoint: object) -> None:
     try:
         head = checkpoint.head_actual()                      # type: ignore[attr-defined]
     except Exception as exc:
@@ -377,13 +388,13 @@ def _validar_checkpoint(checkpoint: object) -> None:
         raise ProveedorInvalido("checkpoint: el log no contiene el head exacto (§11)")
 
 
-def _exigir_proveedores(*, pin: object, checkpoint: object, stop: object,
+def _exigir_proveedores(*, pin: object, rule_audit_checkpoint: object, stop: object,
                         reloj: object, clasificacion: object) -> None:
     """Valida la forma de las dependencias antes de tomar cualquier lease."""
     esperados = (("pin_activo", pin, ProveedorPinActivo),
                  ("clasificacion", clasificacion, ProveedorClasificacion),
                  ("stop", stop, ProveedorStop),
-                 ("checkpoint", checkpoint, AlmacenCheckpoints),
+                 ("checkpoint Rule Authority", rule_audit_checkpoint, AlmacenCheckpointAuditoria),
                  ("reloj", reloj, RelojConfiable))
     for nombre, proveedor, protocolo in esperados:
         if proveedor is None:
@@ -393,7 +404,7 @@ def _exigir_proveedores(*, pin: object, checkpoint: object, stop: object,
 
 
 @contextmanager
-def leases_de_emision(*, pin: object, checkpoint: object, stop: object,
+def leases_de_emision(*, pin: object, rule_audit_checkpoint: object, stop: object,
                       reloj: object, clasificacion: object):
     """Adquiere el borde compartido ``pin -> clasificacion -> STOP``.
 
@@ -402,7 +413,8 @@ def leases_de_emision(*, pin: object, checkpoint: object, stop: object,
     orden coincide con ``ORDEN_ADQUISICION``; ``ExitStack`` libera al reves al
     salir, incluso si falla una validacion o el commit del llamador.
     """
-    _exigir_proveedores(pin=pin, checkpoint=checkpoint, stop=stop, reloj=reloj,
+    _exigir_proveedores(pin=pin, rule_audit_checkpoint=rule_audit_checkpoint,
+                         stop=stop, reloj=reloj,
                          clasificacion=clasificacion)
     with ExitStack() as stack:
         vista_pin = _abrir_lease_compartido(stack, "pin_activo", pin, _validar_pin)
@@ -410,11 +422,11 @@ def leases_de_emision(*, pin: object, checkpoint: object, stop: object,
             stack, "clasificacion", clasificacion, _validar_clasificacion)
         vista_stop = _abrir_lease_compartido(stack, "stop", stop, _validar_stop)
         _validar_reloj(reloj)
-        _validar_checkpoint(checkpoint)
+        _validar_checkpoint_auditoria(rule_audit_checkpoint)
         yield VistasDeEmision(vista_pin, vista_clasificacion, vista_stop)
 
 
-def exigir_contrato_de_emision(*, pin: object, checkpoint: object, stop: object,
+def exigir_contrato_de_emision(*, pin: object, rule_audit_checkpoint: object, stop: object,
                                reloj: object, clasificacion: object) -> None:
     """Verifica que las dependencias pueden abrir la frontera de emision.
 
@@ -429,7 +441,8 @@ def exigir_contrato_de_emision(*, pin: object, checkpoint: object, stop: object,
     camino que evalua o consume una solicitud debe usar ``leases_de_emision``
     para no soltar las vistas antes de persistir su resultado.
     """
-    with leases_de_emision(pin=pin, checkpoint=checkpoint, stop=stop, reloj=reloj,
+    with leases_de_emision(pin=pin, rule_audit_checkpoint=rule_audit_checkpoint,
+                           stop=stop, reloj=reloj,
                            clasificacion=clasificacion):
         pass
 
@@ -438,7 +451,9 @@ __all__ = [
     "ORDEN_ADQUISICION", "VersionMonotonica", "ClaseCapability",
     "FormaLimites", "ContratoCapability", "PinActivo", "EstadoStop", "CatalogoClasificacion",
     "VistaLease", "VistasDeEmision", "ProveedorPinActivo", "ProveedorStop", "RelojConfiable",
-    "ProveedorClasificacion", "AlmacenCheckpoints", "leases_de_emision", "exigir_contrato_de_emision",
+    "ProveedorClasificacion", "AlmacenCheckpointAuditoria",
+    "AlmacenCheckpointAuditoriaBloqueable",
+    "leases_de_emision", "exigir_contrato_de_emision",
     "ClasificacionDesconocida", "ProveedorInvalido", "RelojInvalido", "RuleAuthorityError",
     "StopDesconocido",
 ]

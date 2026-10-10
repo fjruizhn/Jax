@@ -12,6 +12,7 @@ Los dobles viven en ``proveedores_dobles.py`` (solo pruebas). Aqui:
 from __future__ import annotations
 
 import ast
+import inspect
 import sys
 import threading
 import time
@@ -56,6 +57,7 @@ from policy.rule_authority.providers import (  # noqa: E402
     leases_de_emision,
 )
 from policy.rule_authority.snapshot import TrustedPolicyPin  # noqa: E402
+from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore  # noqa: E402
 
 PROC = "refs/heads/main"
 PIN = TrustedPolicyPin("jax", "0" * 40, "1" * 40, PROC)
@@ -94,7 +96,7 @@ def _suite(checkpoint_publicado: bool = True, **cambios: object) -> dict:
         checkpoint.publicar("h1", anterior="")
     base: dict = {
         "pin": PinFijo(PIN, PROC),
-        "checkpoint": checkpoint,
+        "rule_audit_checkpoint": checkpoint,
         "stop": StopFijo(activo=False, huella="sha256:x"),
         "reloj": RelojDeterminista(T0),
         "clasificacion": ClasificacionFija({"CAP_X": _contrato(ClaseCapability.OBLIGATING)}),
@@ -472,6 +474,27 @@ def test_los_leases_de_emision_mantienen_las_tres_vistas_hasta_el_fin_del_contex
         assert not hilo.is_alive()
 
 
+def test_el_guard_nombra_el_checkpoint_de_auditoria_sin_confundirlo_con_block4() -> None:
+    parametros = inspect.signature(leases_de_emision).parameters
+    assert "rule_audit_checkpoint" in parametros
+    assert "checkpoint" not in parametros
+
+
+def test_el_guard_rechaza_el_checkpoint_real_de_block4(tmp_path) -> None:
+    checkpoint_block4 = TrustedCheckpointStore(
+        tmp_path / "block4-checkpoints.jsonl",
+        bootstrap_receipt_path=tmp_path / "block4-receipt.json",
+    )
+    from policy.rule_authority.providers import (
+        AlmacenCheckpointAuditoria,
+        AlmacenCheckpointAuditoriaBloqueable,
+    )
+
+    assert not isinstance(checkpoint_block4, AlmacenCheckpointAuditoria)
+    assert not isinstance(checkpoint_block4, AlmacenCheckpointAuditoriaBloqueable)
+    _niega("checkpoint Rule Authority: no implementa", rule_audit_checkpoint=checkpoint_block4)
+
+
 def test_a14_estres_ninguna_lectura_durante_exclusivo(intervalo_corto) -> None:
     """Estres ADICIONAL (la prueba determinista es test_a2_*): 0 lecturas con exclusivo vivo."""
     proveedor = PinFijo(PIN, PROC)
@@ -825,20 +848,20 @@ class _CheckpointRecorder:
 
 def test_el_guard_llama_confirmar_con_el_head_exacto() -> None:
     rec = _CheckpointRecorder(head="h7")
-    exigir_contrato_de_emision(**_suite(checkpoint=rec))
+    exigir_contrato_de_emision(**_suite(rule_audit_checkpoint=rec))
     assert rec.confirmados == ["h7"]
 
 
 @pytest.mark.parametrize("responde", [False, None, "si", 1])
 def test_el_guard_niega_si_el_log_no_confirma_el_head(responde: object) -> None:
     """Cae si el guard no llama confirmar, o lo acepta sin ser exactamente True."""
-    _niega("no contiene el head", checkpoint=_CheckpointRecorder(responde=responde))
+    _niega("no contiene el head", rule_audit_checkpoint=_CheckpointRecorder(responde=responde))
 
 
 def test_el_guard_niega_si_confirmar_explota_o_el_head_es_ilegible() -> None:
-    _niega("confirmar no sirve", checkpoint=_CheckpointRecorder(explota=True))
-    _niega("nunca publicado", checkpoint=_CheckpointRecorder(head=""))
-    _niega("nunca publicado", checkpoint=_CheckpointRecorder(head=None))
+    _niega("confirmar no sirve", rule_audit_checkpoint=_CheckpointRecorder(explota=True))
+    _niega("nunca publicado", rule_audit_checkpoint=_CheckpointRecorder(head=""))
+    _niega("nunca publicado", rule_audit_checkpoint=_CheckpointRecorder(head=None))
 
 
 def test_a10_checkpoint_nunca_publicado_niega() -> None:
@@ -855,7 +878,7 @@ def test_el_guard_pasa_la_suite_completa() -> None:
 
 def test_a4_el_guard_niega_mocks() -> None:
     with pytest.raises(ProveedorInvalido):
-        exigir_contrato_de_emision(pin=Mock(), checkpoint=Mock(), stop=Mock(),
+        exigir_contrato_de_emision(pin=Mock(), rule_audit_checkpoint=Mock(), stop=Mock(),
                                     reloj=Mock(), clasificacion=Mock())
 
 
@@ -891,7 +914,7 @@ def test_el_proveedor_sin_leases_ni_siquiera_implementa_el_protocolo(campo: str)
 
 
 def test_falta_cualquier_proveedor_niega() -> None:
-    for campo in ("pin", "checkpoint", "stop", "reloj", "clasificacion"):
+    for campo in ("pin", "rule_audit_checkpoint", "stop", "reloj", "clasificacion"):
         _niega("falta el proveedor", **{campo: None})
 
 
@@ -925,7 +948,7 @@ class _CheckpointAtributosMuertos:
 
 
 def test_m6_el_guard_exige_publicar_y_confirmar_llamables() -> None:
-    _niega("no implementa", checkpoint=_CheckpointAtributosMuertos())
+    _niega("no implementa", rule_audit_checkpoint=_CheckpointAtributosMuertos())
 
 
 class _RelojSinMarcar:

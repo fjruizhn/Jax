@@ -149,6 +149,12 @@ Piso actualizado 2026-10-04: `^688 passed`. Sobre el piso 683, se suman pruebas 
 
 Piso actualizado 2026-10-09 (JAX#371, Faro F1.1 paso 4): `^780 passed`, medido en GitHub Actions sobre el head exacto `bf0a11d940af4c67a6f8b015fc454c005685316e`, sin skips. El piso anterior era 729; el aumento neto de 51 pruebas corresponde a las regresiones de leases, rotación segura, límites y avance del resumen diario en `tests/test_faro_aviso.py`.
 
+CI 2026-10-10 sobre JAX#388 detectó que la importación del checkpoint Rule Authority usa el
+canonizador fijado a Unicode 16 y falla en Python 3.12 (UCD 15): el lote dio 779 passed y 1
+failed. El workflow de Faro se alinea ahora con Python 3.14, que suministra el UCD fijado; la
+suite completa medida en un venv limpio Python 3.14.4 dio `780 passed`, incluido el límite de
+RSS de transporte. El runner CI debe confirmar el mismo conteo en el SHA que cambia el job.
+
 ## `faro-bitacora-db/faro-db`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^40 passed`
@@ -4644,7 +4650,11 @@ denormalizadas (incluido `previous_event_hash`), lectura histórica exacta y per
 
 ## `authority-ledger-mariadb/integration`
 
-Piso vigente (2026-10-09): `^10 passed in `. La base #377 tenía 5 pruebas en MariaDB 12.3.3 efímera
+Piso de trabajo (2026-10-10): `^33 passed in `. La corrida CI 38032592015 contó 33 casos: 28
+pasaron y 5 fallaron por un import de test ausente, tres tests que no finalizaban explícitamente
+su transaction owner después de capturar el error, y una aserción de cursor incompatible con el
+contrato sellado. Se corrigieron esos tests; la siguiente corrida del SHA actualizado debe
+confirmar 33 pasadas antes de cerrar el piso. La base #377 tenía 5 pruebas en MariaDB 12.3.3 efímera
 `--network none`; la prueba aplica ambas migraciones, valida el upgrade nullable→NOT NULL,
 provisiona la cuenta de aplicación con el script versionado, genera una llave Ed25519 de prueba
 y valida firma → INSERT → lectura → reconstrucción → hash/firma y replay. También prueba que
@@ -4662,13 +4672,21 @@ formatos. La medición real con Docker del 2026-10-09 confirmó 10 en Python 3.1
 
 ## `authority-rule-storage/mariadb`
 
-Piso vigente: `^12 passed in `. Medido el 2026-10-09 en hall9000 con el comando del workflow
-y MariaDB `12.3.3` efímera (`--network none`, socket Unix). Los 12 casos ejecutados comprueban
-rollback del append parcial, errores de rollback, idempotencia y binding de solicitud/hash/catálogo,
-triggers append-only, restricciones de permisos y OIDs, planes indexados y provisioning de mínimo
-privilegio para todas las cuentas homónimas. El test fuente fue portado desde el head #375
-`6ae6986af2c7fd68b4392e750d65779e5df20875`; la base vigente no contiene la implementación previa,
-por lo que no existe un código anterior ejecutable contra el que demostrar RED.
+Piso vigente: `^18 passed in `. Medido por CI run `38035001043`, SHA
+`3857b4bc84a315346eedd11a9b32640427e2099e`, con el comando del workflow y MariaDB `12.3.3`
+efímera (`--network none`, socket Unix). Los 18 casos cubren rollback del append parcial y de
+fallos de escritura, idempotencia y binding de solicitud/hash/catálogo, proyección del catálogo,
+triggers append-only, restricciones de permisos y OIDs, planes indexados, provisioning de mínimo
+privilegio y persistencia/consumo de permiso con checkpoint externo. El piso anterior de 12,
+medido el 2026-10-09, precede a la ampliación de esta suite. En la corrida previa, el fixture
+solo creaba el schema Rule Authority, pero provisioning también consulta tablas de verificación
+Block 4 en `jax_authority`. El fixture ahora aplica primero la migración `authority_ledger` en la
+misma MariaDB efímera. El run confirmó 18 passed; la corrida completa del job aún falló porque el
+piso no se había actualizado desde 12.
+
+El test fuente fue portado desde el head #375 `6ae6986af2c7fd68b4392e750d65779e5df20875`;
+la base vigente no contiene la implementación previa, por lo que no existe un código anterior
+ejecutable contra el que demostrar RED.
 
 checkpoint-overlay (2026-10-07, auditor de #377): 5 -> 6 (+1: overlay a corpus no ratificado se
 rechaza antes de escribir — cero filas; la tanda de 8 eventos se reordenó para emitir el overlay
@@ -4676,6 +4694,16 @@ antes de revocar la ratificación). Medido con la MariaDB efímera 12.3.3 (`--ne
 
 9 -> 10 el 2026-10-09: la regresión MariaDB del overlay sin ratificación quedó incluida en el
 comando exacto del workflow. Medición real con Docker: `10 passed`.
+
+## `authority-rule-unit/tests`
+
+Piso inicial `^25 passed in `, medido localmente el 2026-10-10 con el comando del workflow y
+`PyYAML==6.0.3`, `cryptography==49.0.0`. Se ejecuta bajo Python 3.14 para respetar Unicode 16,
+fijado por el canonizador compartido. El venv limpio Python 3.14.4 del 2026-10-10 dio
+`25 passed`; CI del SHA actualizado debe confirmar el piso.
+Corre sin base de datos las pruebas del store en memoria, el contrato de RulePermit y el
+checkpoint externo (incluye serialización multiproceso, permisos iniciales del lock y cleanup
+de temporales abandonados). La integración MariaDB permanece en su job separado.
 
 ## `authority-rule-events/ratifications`
 
@@ -4741,7 +4769,7 @@ Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_
 cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-09, #378 sobre master con #381 y MINOR de paridad): `^1040 passed in `
+Patrón vigente (2026-10-10, CI de #388 midió dos regresiones de checkpoint): `^1042 passed in `
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4799,3 +4827,5 @@ tanto en JSON Schema como en Python; con el pattern anterior, esos dos vectores 
 El incremento acumulado desde master es +37. Medido sobre el head reapilado en Python
 3.14.4 con la lista exacta del workflow: `1040 passed`, cero skipped; `piso.py verificar`
 rc=0.
+
+El CI exacto de `bc024578` midió `1042 passed`, cero skipped, frente al piso anterior de 1040. Las dos pruebas que elevan este conteo son `test_el_guard_nombra_el_checkpoint_de_auditoria_sin_confundirlo_con_block4` y `test_el_guard_rechaza_el_checkpoint_real_de_block4`, ambas en `test_rule_authority_providers.py`, que sí está en la lista de Identity Foundation. La aserción que pasa el checkpoint Block 4 al constructor MariaDB vive en `test_rule_authority_checkpoint.py`, fuera de esa lista, y se añadió a una prueba existente; no contribuye al +2. El piso queda alineado a 1042 en la corrección de esta cadena; debe confirmarlo la CI del SHA que la contiene.
