@@ -44,7 +44,6 @@ from policy.rule_authority.providers import leases_de_emision
 from policy.rule_authority.snapshot import TrustedPolicyPin
 from tests.policy.catalogo_pin import catalogo_del_pin
 from tests.policy.proveedores_dobles import (
-    CheckpointsEnMemoria,
     ClasificacionFija,
     PinFijo,
     RelojDeterminista,
@@ -378,10 +377,12 @@ def test_limits_require_exact_sealed_catalog_type(catalogo):
         limites_de(_regla_obligating(), catalogo)
 
 
-def test_empty_limits_are_rejected():
+def test_empty_limits_are_allowed_only_for_a_validated_reversible_rule():
     vacia = validar_regla(_datos("regla-ejemplo.yaml"), catalogo=CATALOG)
-    with pytest.raises(AuthorityEventValidationError, match="vacío"):
-        limites_de(vacia, CATALOG)
+    limites = limites_de(vacia, CATALOG)
+    assert limites.rule_id == vacia.rule_id
+    assert limites.limites == vacia.obligation_limits
+    assert limites.tope is None
 
 
 @pytest.mark.parametrize("unidad", ["llamadas", "recipients", "Mensajes", "mensajes​", *FORBIDDEN])
@@ -675,8 +676,6 @@ def test_store_record_keeps_the_stop_lease_until_the_decision_is_persisted():
             assert not self.entered.is_set(), "STOP se libero antes de persistir la decision"
             return super().record(submitted, recorded)
 
-    checkpoint = CheckpointsEnMemoria()
-    checkpoint.publicar("h1", anterior="")
     pin = TrustedPolicyPin("jax", "0" * 40, "1" * 40, "refs/heads/main")
     stop = StopFijo(activo=False, huella="sha256:stop")
     submitted = request()
@@ -685,7 +684,6 @@ def test_store_record_keeps_the_stop_lease_until_the_decision_is_persisted():
 
     with leases_de_emision(
         pin=PinFijo(pin, "refs/heads/main"),
-        rule_audit_checkpoint=checkpoint,
         stop=stop,
         reloj=RelojDeterminista(NOW),
         clasificacion=ClasificacionFija({}),

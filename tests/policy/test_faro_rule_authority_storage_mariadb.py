@@ -1,7 +1,6 @@
 """MariaDB integration for Faro F1.1's durable decision store."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import errno
 import os
@@ -21,8 +20,13 @@ import pytest
 from tests.policy.catalogo_pin import catalogo_del_pin
 from policy.authority_ledger.canonical import canonical_bytes
 from policy.authority_ledger.errors import AuthorityStateError
-from policy.rule_authority.errors import CheckpointInvalido, RuleAuthorityError
-from policy.rule_authority.permit import RulePermitDraft, _permit_after_kernel_evaluation
+from policy.rule_authority.errors import CheckpointInvalido
+from policy.rule_authority.permit import (
+    RulePermitDraft,
+    _permit_after_kernel_evaluation,
+    _permit_hash,
+    _trusted_permit,
+)
 from policy.rule_authority.models import (
     RuleDecision,
     RuleDecisionStatus,
@@ -35,6 +39,7 @@ from policy.rule_authority.storage import (
     _catalog_hash,
     _catalog_projection,
     _decision_projection,
+    _permit_record_hash,
     _record_hash,
 )
 from policy.rule_authority.trusted_checkpoint import RuleAuditCheckpointStore
@@ -45,6 +50,7 @@ AUTHORITY_LEDGER_MIGRATION = ROOT / "policy/authority_ledger/migrations/001_auth
 MIGRATION = ROOT / "policy/rule_authority/migrations/001_rule_authority_kernel.sql"
 MIGRATION_STEP6 = ROOT / "policy/rule_authority/migrations/002_enable_atomic_permits.sql"
 MIGRATION_STEP6_RETRY = ROOT / "policy/rule_authority/migrations/003_durable_consumption_request_id.sql"
+MIGRATION_STEP6_BINDINGS = ROOT / "policy/rule_authority/migrations/004_permit_policy_capability_identity.sql"
 IMAGE = os.environ.get("JAX_RULE_AUTHORITY_TEST_MARIADB_IMAGE", "mariadb:12.3.3")
 CATALOG = catalogo_del_pin()
 _CATALOG_BYTES = (ROOT / "policy/faro/catalogo-topes.json").read_bytes()
@@ -420,6 +426,8 @@ def _permit_draft(request, decision, permit_id="0199f8a1-8c00-7000-8000-00000000
         authority_ledger_checkpoint={"sequence": 7, "head_event_hash": "sha256:" + "4" * 64},
         stop_checkpoint={"version": 3, "fingerprint": "stop:3"},
         capability_id=request.capability,
+        policy_repository_id="jax",
+        capability_contract_id="mail.send.contract.v1",
         capability_version="1",
         capability_class="OBLIGATING",
         capability_limits={"form": "CANTIDAD", "unit": "mensajes", "max": 2},
@@ -605,197 +613,65 @@ CONSUMPTION_INSERT = (
 )
 
 
-def _record_deny(store, request_id: str):
+def _record_deny(db, request_id: str):
+    """Seed a DENY row for schema/trigger tests, outside the production API."""
     request = _request(request_id)
     decision = _decision(request)
-    assert store.record(request, decision) == decision
+    projection = _decision_projection(decision, _catalog_hash(request.catalogo), request)
+    sequence = 1
+    record_hash = _record_hash(sequence, request.request_id, None, projection)
+    with db.root() as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO rule_decisions "
+                "(request_id,request_hash,request_catalog_hash,required_rule_id,status,"
+                "reason_code,decided_at_utc,canonical_decision,previous_record_hash,"
+                "record_hash,audit_sequence) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s)",
+                (request.request_id, request.request_hash, _catalog_hash(request.catalogo),
+                 request.rule_id, decision.status.value, decision.reason_code,
+                 decision.decided_at_utc.replace(tzinfo=None), canonical_bytes(projection),
+                 record_hash, sequence),
+            )
+        admin.commit()
     return request, decision
 
 
-def test_mariadb_store_rolls_back_partial_writes_and_fails_closed(db, app):
-    store = MariaDBRuleDecisionStore(app)
+@pytest.mark.parametrize("shape", [
+    "deny", "missing-rule", "permit", "bad-request", "bad-decision", "mismatch", "checkpoint",
+])
+def test_record_standalone_is_closed_before_database_access(shape, tmp_path):
+    calls = 0
 
-    # Fail after INSERT but before the audit-head update can commit. With
-    # autocommit enabled in `app`, this proves the adapter owns one transaction.
-    with db.root() as admin:
-        with admin.cursor() as cursor:
-            cursor.execute("""
-                CREATE TRIGGER fail_rule_authority_head_update
-                BEFORE UPDATE ON rule_authority_audit_head FOR EACH ROW
-                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='injected failure'
-            """)
-        admin.commit()
-    failed_request = _request("0199f8a1-8c00-7000-8000-000000000102")
-    with pytest.raises(RuleAuthorityError):
-        store.record(failed_request, _decision(failed_request))
-    with db.root(autocommit=True) as admin:
-        with admin.cursor() as cursor:
-            cursor.execute("DROP TRIGGER fail_rule_authority_head_update")
-            cursor.execute(
-                "SELECT COUNT(*) FROM rule_decisions WHERE request_id=%s",
-                (failed_request.request_id,),
-            )
-            assert cursor.fetchone()[0] == 0
-    assert store.get(failed_request) is None
+    def forbidden_connection():
+        nonlocal calls
+        calls += 1
+        raise AssertionError("record standalone no debe abrir DB")
 
-    # PERMIT is closed until step 6 and nothing is left behind.
-    permit_request = _request("0199f8a1-8c00-7000-8000-000000000103")
-    with pytest.raises(RuleAuthorityError):
-        store.record(permit_request, _decision(permit_request, status=RuleDecisionStatus.PERMIT))
-    assert store.get(permit_request) is None
-
-    # An unavailable database is an error, never a returned PERMIT.
-    unavailable_calls = 0
-
-    def unavailable():
-        nonlocal unavailable_calls
-        unavailable_calls += 1
-        raise pymysql.err.OperationalError(2003, "database unavailable")
-
-    other = _request("0199f8a1-8c00-7000-8000-000000000104")
-    with pytest.raises(RuleAuthorityError):
-        MariaDBRuleDecisionStore(unavailable).record(other, _decision(other))
-    assert unavailable_calls == 1
-
-    # Distinct new UUID7 requests serialize on the audit head without
-    # deadlocking while holding missing-key gap locks.
-    concurrent_requests = [
-        _request(f"0199f8a1-8c00-7000-8000-{index:012d}") for index in range(200, 208)
-    ]
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(
-            lambda item: store.record(item, _decision(item)), concurrent_requests
-        ))
-    assert results == [_decision(item) for item in concurrent_requests]
-
-
-def test_mariadb_store_rollback_failure_is_logged_and_original_error_raised(db, app, caplog):
-    class RollbackBroken:
-        """Conexión real cuyo rollback() falla: el error original no se pierde."""
-
-        def __init__(self, inner):
-            self._inner = inner
-
-        def __getattr__(self, name):
-            return getattr(self._inner, name)
-
-        def rollback(self):
-            raise pymysql.err.OperationalError(2013, "lost connection on rollback")
-
-    with db.root() as admin:
-        with admin.cursor() as cursor:
-            cursor.execute("""
-                CREATE TRIGGER fail_rule_authority_head_update
-                BEFORE UPDATE ON rule_authority_audit_head FOR EACH ROW
-                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='injected failure'
-            """)
-        admin.commit()
-    request = _request("0199f8a1-8c00-7000-8000-000000000106")
-    store = MariaDBRuleDecisionStore(lambda: RollbackBroken(app()))
-    with caplog.at_level("ERROR", logger="policy.rule_authority.storage"):
-        with pytest.raises(RuleAuthorityStorageError) as raised:
-            store.record(request, _decision(request))
-    assert "injected failure" in str(raised.value.__cause__)
-    assert any("rollback" in record.getMessage() for record in caplog.records)
-    assert any(record.exc_info for record in caplog.records)
-
-
-def test_mariadb_store_rollback_failure_after_state_error_is_typed_and_logged(db, app, caplog):
-    class RollbackBroken:
-        """Conexión real cuyo rollback() falla tras un AuthorityStateError."""
-
-        def __init__(self, inner):
-            self._inner = inner
-
-        def __getattr__(self, name):
-            return getattr(self._inner, name)
-
-        def rollback(self):
-            raise pymysql.err.OperationalError(2013, "lost connection on rollback")
-
-    request_id = "0199f8a1-8c00-7000-8000-000000000107"
-    first = _request(request_id)
-    assert MariaDBRuleDecisionStore(app).record(first, _decision(first)) == _decision(first)
-    other = _request(request_id, recipient="other@example.test")
-    store = MariaDBRuleDecisionStore(lambda: RollbackBroken(app()))
-    with caplog.at_level("ERROR", logger="policy.rule_authority.storage"):
-        with pytest.raises(RuleAuthorityStorageError) as raised:
-            store.record(other, _decision(other))
-    assert not isinstance(raised.value, AuthorityStateError)
-    assert "reutilizado con otro hash" in str(raised.value.__cause__)
-    assert any("rollback" in record.getMessage() for record in caplog.records)
-    assert any(record.exc_info for record in caplog.records)
-
-
-def test_mariadb_store_is_idempotent_durable_and_bound_to_request_and_catalog(db, app):
-    store = MariaDBRuleDecisionStore(app)
-    request = _request("0199f8a1-8c00-7000-8000-000000000101")
-    assert store.get(request) is None
-    assert store.get(_request(request.request_id, "other@example.test")) is None
-    other_pin_request = _request(request.request_id, catalog=ALTERNATE_CATALOG)
-    # El pin con otro catálogo cambia el request_hash (lleva el OID del pin).
-    assert other_pin_request.request_hash != request.request_hash
-    assert store.get(other_pin_request) is None
-
+    request = _request("0199f8a1-8c00-7000-8000-000000000191")
     decision = _decision(request)
-    assert store.record(request, decision) == decision
+    checkpoint = None
+    if shape == "missing-rule":
+        decision = _decision(request, status=RuleDecisionStatus.MISSING_RULE)
+    elif shape == "permit":
+        decision = _decision(request, status=RuleDecisionStatus.PERMIT)
+    elif shape == "bad-request":
+        request = None
+    elif shape == "bad-decision":
+        decision = object()
+    elif shape == "mismatch":
+        decision = _decision(_request("0199f8a1-8c00-7000-8000-000000000192"))
+    elif shape == "checkpoint":
+        checkpoint = RuleAuditCheckpointStore(tmp_path / "closed-record.jsonl")
+        checkpoint.bootstrap()
+        from policy.rule_authority.trusted_checkpoint import RULE_AUDIT_GENESIS_HEAD
+        initial_head = RULE_AUDIT_GENESIS_HEAD
+    store = MariaDBRuleDecisionStore(forbidden_connection, checkpoint_store=checkpoint)
 
-    # Con la fila YA existente, el mismo request_id bajo otro catálogo no la lee.
-    # El None sale de `row[0] != request.request_hash` (el request_hash lleva el OID
-    # del pin y por eso difiere); el chequeo `row[1] != _catalog_hash(...)` de get()
-    # es defensa en profundidad y esta aserción no lo aísla.
-    assert store.get(request) == decision
-    assert store.get(other_pin_request) is None
-
-    # El catálogo del request queda persistido y ligado a la fila canónica.
-    with db.root(autocommit=True) as admin:
-        with admin.cursor() as cursor:
-            cursor.execute(
-                "SELECT request_catalog_hash FROM rule_decisions WHERE request_id=%s",
-                (request.request_id,),
-            )
-            assert cursor.fetchone()[0] == _catalog_hash(CATALOG)
-    assert _catalog_hash(CATALOG) != _catalog_hash(ALTERNATE_CATALOG)
-
-    # A separate connection sees the row immediately after return: durable
-    # persistence is part of the synchronous return contract.
-    with app() as independent:
-        with independent.cursor() as cursor:
-            cursor.execute(
-                "SELECT request_hash,status,reason_code FROM rule_decisions "
-                "WHERE request_id=%s",
-                (request.request_id,),
-            )
-            assert cursor.fetchone() == (request.request_hash, "DENY", "STOP_ACTIVE")
-
-    replay = _decision(request, at=2)
-    assert store.record(request, replay) == decision
-    assert store.get(request) == decision
-    with app() as independent:
-        with independent.cursor() as cursor:
-            cursor.execute(
-                "SELECT COUNT(*) FROM rule_decisions WHERE request_id=%s",
-                (request.request_id,),
-            )
-            assert cursor.fetchone()[0] == 1
-    changed = _request(request.request_id, "other@example.test")
-    assert store.get(changed) is None
-    with pytest.raises(AuthorityStateError):
-        store.record(changed, _decision(changed))
-    with pytest.raises(AuthorityStateError):
-        store.record(other_pin_request, _decision(other_pin_request))
-
-    missing_request = _request("0199f8a1-8c00-7000-8000-000000000107")
-    missing = _decision(missing_request, status=RuleDecisionStatus.MISSING_RULE)
-    assert store.record(missing_request, missing) == missing
-    assert store.get(missing_request) == missing
-    with app() as independent:
-        with independent.cursor() as cursor:
-            cursor.execute(
-                "SELECT status,reason_code FROM rule_decisions WHERE request_id=%s",
-                (missing_request.request_id,),
-            )
-            assert cursor.fetchone() == ("MISSING_RULE", "RULE_NOT_FOUND")
+    with pytest.raises(RuleAuthorityStorageError, match="record standalone está cerrado"):
+        store.record(request, decision)
+    assert calls == 0
+    if checkpoint is not None:
+        assert checkpoint.head_actual() == initial_head
 
 
 @pytest.mark.parametrize("no_catalogo", [
@@ -811,7 +687,7 @@ def test_catalog_projection_rejects_anything_that_is_not_a_sealed_catalog(no_cat
 def test_mariadb_append_only_triggers_fire_for_every_update_and_delete(db, app, trigger_account):
     """Cada trigger se ejercita con una fila SIN hijos, para que la FK no lo tape."""
     store = MariaDBRuleDecisionStore(app)
-    deny_request, _ = _record_deny(store, "0199f8a1-8c00-7000-8000-000000000301")
+    deny_request, _ = _record_deny(db, "0199f8a1-8c00-7000-8000-000000000301")
     _enable_permit_seeding(db)
 
     consumed_request = _request("0199f8a1-8c00-7000-8000-000000000302")
@@ -874,7 +750,7 @@ def test_mariadb_append_only_triggers_fire_for_every_update_and_delete(db, app, 
 
 def test_mariadb_constraints_permit_gate_oids_and_indexed_plans(db, app):
     store = MariaDBRuleDecisionStore(app)
-    request, _ = _record_deny(store, "0199f8a1-8c00-7000-8000-000000000401")
+    request, _ = _record_deny(db, "0199f8a1-8c00-7000-8000-000000000401")
     permit_request = _request("0199f8a1-8c00-7000-8000-000000000402")
     permit_id = "0199f8a1-8c00-7000-8000-000000000411"
     values = _permit_values(permit_id, permit_request, 1, 100)
@@ -1057,82 +933,11 @@ def test_mariadb_provisioning_without_wildcard_account_creates_none_and_main_run
         provisioning.main()
 
 
-def test_decision_store_requiere_y_publica_checkpoint_externo_despues_del_commit(db, app, tmp_path):
-    checkpoint = RuleAuditCheckpointStore(tmp_path / "rule-audit.jsonl")
-    checkpoint.bootstrap()
-    store = MariaDBRuleDecisionStore(app, checkpoint_store=checkpoint)
-    request = _request("0199f8a1-8c00-7000-8000-000000000131")
-    decision = _decision(request)
-
-    assert store.record(request, decision) == decision
-    assert checkpoint.head_actual()
-    assert checkpoint.confirmar(checkpoint.head_actual()) is True
-    assert store.record(request, decision) == decision
-    with db.root(autocommit=True) as admin:
-        with admin.cursor() as cursor:
-            cursor.execute(
-                "SELECT audit_sequence,head_hash FROM rule_authority_audit_head WHERE singleton=1"
-            )
-            sequence, head_hash = cursor.fetchone()
-    assert sequence == 1
-    assert checkpoint.head_actual() == head_hash
-
-
-def test_decision_store_cierra_si_checkpoint_atrasado_o_publicacion_desconocida(db, app, tmp_path):
-    # Simulate a stale external copy: DB has a committed record but the supplied
-    # checkpoint contains only genesis. The next append must not proceed.
-    first_request = _request("0199f8a1-8c00-7000-8000-000000000132")
-    MariaDBRuleDecisionStore(app).record(first_request, _decision(first_request))
-    stale = RuleAuditCheckpointStore(tmp_path / "stale.jsonl")
-    stale.bootstrap()
-    stale_store = MariaDBRuleDecisionStore(app, checkpoint_store=stale)
-    second_request = _request("0199f8a1-8c00-7000-8000-000000000133")
-    with pytest.raises(RuleAuthorityStorageError, match="checkpoint.*head"):
-        stale_store.record(second_request, _decision(second_request))
-    assert stale_store.get(second_request) is None
-
-    class PublicationUnknown(RuleAuditCheckpointStore):
-        def publicar(self, head: str, *, anterior: str) -> None:
-            raise CheckpointInvalido("resultado de publicación durable desconocido")
-
-    unknown = PublicationUnknown(tmp_path / "unknown.jsonl")
-    unknown.bootstrap()
-    unknown_store = MariaDBRuleDecisionStore(app, checkpoint_store=unknown)
-    third_request = _request("0199f8a1-8c00-7000-8000-000000000134")
-    with pytest.raises(RuleAuthorityStorageError, match="checkpoint"):
-        unknown_store.record(third_request, _decision(third_request))
-    # The DB commit happened before publication failed; retry remains closed
-    # because the authoritative DB head and the old external anchor disagree.
-    with pytest.raises(RuleAuthorityStorageError, match="checkpoint.*head"):
-        unknown_store.record(third_request, _decision(third_request))
-
-
-def test_checkpoint_externo_adelantado_frente_a_db_restaurada_falla_antes_de_append(db, app, tmp_path):
-    # A restored DB is behind the external monotonic witness. It must be
-    # rejected before the decision row or the audit head can advance.
-    ahead = RuleAuditCheckpointStore(tmp_path / "ahead.jsonl")
-    ahead.bootstrap()
-    ahead.publicar("sha256:" + "9" * 64, anterior=ahead.head_actual())
-    store = MariaDBRuleDecisionStore(app, checkpoint_store=ahead)
-    request = _request("0199f8a1-8c00-7000-8000-000000000199")
-
-    with pytest.raises(RuleAuthorityStorageError, match="checkpoint.*head"):
-        store.record(request, _decision(request))
-    assert store.get(request) is None
-    with db.root(autocommit=True) as admin:
-        with admin.cursor() as cursor:
-            cursor.execute("SELECT COUNT(*) FROM rule_decisions")
-            assert cursor.fetchone()[0] == 0
-            cursor.execute(
-                "SELECT audit_sequence,head_hash FROM rule_authority_audit_head WHERE singleton=1"
-            )
-            assert cursor.fetchone() == (0, None)
-
-
-def test_permit_y_decision_se_persisten_atómicamente_y_reintento_reusa_head(db, app, tmp_path):
+def test_permit_standalone_esta_cerrado_al_owner_compartido(db, app, tmp_path):
     with db.root() as admin:
         _apply_migration(admin, MIGRATION_STEP6)
         _apply_migration(admin, MIGRATION_STEP6_RETRY)
+        _apply_migration(admin, MIGRATION_STEP6_BINDINGS)
     checkpoint = RuleAuditCheckpointStore(tmp_path / "permit-audit.jsonl")
     checkpoint.bootstrap()
     store = MariaDBRuleDecisionStore(app, checkpoint_store=checkpoint)
@@ -1141,25 +946,92 @@ def test_permit_y_decision_se_persisten_atómicamente_y_reintento_reusa_head(db,
     draft = _permit_draft(request, decision)
 
     evaluated_permit = _permit_after_kernel_evaluation(draft)
-    permit = store.record_permit(request, decision, evaluated_permit)
-    assert permit._is_store_sealed()
-    assert permit.projection()["permit_hash"]
-    assert checkpoint.head_actual()
-    assert store.record_permit(request, decision, evaluated_permit).projection() == permit.projection()
+    with pytest.raises(RuleAuthorityStorageError, match="record_permit standalone está cerrado"):
+        store.record_permit(request, decision, evaluated_permit)
+    from policy.rule_authority.trusted_checkpoint import RULE_AUDIT_GENESIS_HEAD
+    assert checkpoint.head_actual() == RULE_AUDIT_GENESIS_HEAD
     with db.root(autocommit=True) as admin:
         with admin.cursor() as cursor:
             cursor.execute("SELECT audit_sequence,head_hash FROM rule_authority_audit_head WHERE singleton=1")
-            assert cursor.fetchone()[0] == 2
+            assert cursor.fetchone() == (0, None)
             cursor.execute("SELECT COUNT(*) FROM rule_decisions WHERE request_id=%s", (request.request_id,))
-            assert cursor.fetchone()[0] == 1
+            assert cursor.fetchone()[0] == 0
             cursor.execute("SELECT COUNT(*) FROM rule_permits WHERE request_id=%s", (request.request_id,))
-            assert cursor.fetchone()[0] == 1
+            assert cursor.fetchone()[0] == 0
 
 
-def test_fallo_de_insert_de_permit_revierte_decision_y_head(db, app, tmp_path):
+def test_migracion_de_bindings_decodifica_permit_v1_para_auditoria(db):
+    """La migración no reescribe V1 ni permite que se presente como V2."""
+    request = _request("0199f8a1-8c00-7000-8000-000000000138")
+    decision = RuleDecision(
+        request_id=request.request_id,
+        request_hash=request.request_hash,
+        status=RuleDecisionStatus.PERMIT,
+        required_rule_id=request.rule_id,
+        reason_code=None,
+        decided_at_utc=datetime(2026, 10, 7, 12, 1, tzinfo=timezone.utc),
+    )
+    current = _trusted_permit(_permit_draft(request, decision))
+    historical = dict(current.projection())
+    historical.pop("policy_repository_id")
+    historical.pop("capability_contract_id")
+    historical["permit_hash"] = _permit_hash({
+        key: value for key, value in historical.items() if key != "permit_hash"
+    })
+    permit = _trusted_permit(historical)
+    decision_projection = _decision_projection(decision, _catalog_hash(request.catalogo))
+    decision_hash = _record_hash(1, request.request_id, None, decision_projection)
+    permit_hash = _permit_record_hash(2, permit.permit_id, decision_hash, dict(permit.projection()))
+
+    with db.root() as admin:
+        _apply_migration(admin, MIGRATION_STEP6)
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO rule_decisions "
+                "(request_id,request_hash,request_catalog_hash,required_rule_id,status,"
+                "reason_code,decided_at_utc,canonical_decision,previous_record_hash,record_hash,audit_sequence) "
+                "VALUES (%s,%s,%s,%s,'PERMIT',NULL,%s,%s,NULL,%s,1)",
+                (request.request_id, request.request_hash, _catalog_hash(request.catalogo),
+                 request.rule_id, decision.decided_at_utc.replace(tzinfo=None),
+                 canonical_bytes(decision_projection), decision_hash),
+            )
+            cursor.execute(
+                "INSERT INTO rule_permits "
+                "(permit_id,request_id,request_hash,rule_id,rule_path,rule_blob_oid,"
+                "rule_content_hash,policy_revision,policy_tree_oid,policy_snapshot_hash,"
+                "ratification_event_id,authority_ledger_checkpoint,stop_checkpoint,"
+                "capability_id,capability_version,capability_class,capability_limits,"
+                "issued_at_utc,expires_at_utc,permit_hash,canonical_payload,"
+                "previous_record_hash,record_hash,audit_sequence) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,2)",
+                (permit.permit_id, permit.request_id, permit.request_hash, permit.rule_id,
+                 permit.rule_path, permit.rule_blob_oid, permit.rule_content_hash,
+                 permit.policy_revision, permit.policy_tree_oid, permit.policy_snapshot_hash,
+                 permit.ratification_event_id,
+                 canonical_bytes(permit.authority_ledger_checkpoint),
+                 canonical_bytes(permit.stop_checkpoint), permit.capability_id,
+                 permit.capability_version, permit.capability_class,
+                 canonical_bytes(permit.capability_limits),
+                 permit.issued_at_utc.replace(tzinfo=None), permit.expires_at_utc.replace(tzinfo=None),
+                 permit.permit_hash, canonical_bytes(dict(permit.projection())),
+                 decision_hash, permit_hash),
+            )
+        admin.commit()
+        _apply_migration(admin, MIGRATION_STEP6_BINDINGS)
+        with admin.cursor() as cursor:
+            row = MariaDBRuleDecisionStore._select_permit(cursor, request.request_id)
+
+    decoded = MariaDBRuleDecisionStore._decode_permit_row(row)
+
+    assert decoded.projection() == permit.projection()
+    assert decoded._has_consumption_bindings() is False
+
+
+def test_record_permit_standalone_no_alcanza_el_insert(db, app, tmp_path):
     with db.root() as admin:
         _apply_migration(admin, MIGRATION_STEP6)
         _apply_migration(admin, MIGRATION_STEP6_RETRY)
+        _apply_migration(admin, MIGRATION_STEP6_BINDINGS)
         with admin.cursor() as cursor:
             cursor.execute("""
                 CREATE TRIGGER fail_rule_permit_insert BEFORE INSERT ON rule_permits
@@ -1171,7 +1043,7 @@ def test_fallo_de_insert_de_permit_revierte_decision_y_head(db, app, tmp_path):
     store = MariaDBRuleDecisionStore(app, checkpoint_store=checkpoint)
     request = _request("0199f8a1-8c00-7000-8000-000000000136")
     decision = _decision(request, status=RuleDecisionStatus.PERMIT)
-    with pytest.raises(RuleAuthorityStorageError):
+    with pytest.raises(RuleAuthorityStorageError, match="record_permit standalone está cerrado"):
         store.record_permit(
             request, decision,
             _permit_after_kernel_evaluation(_permit_draft(request, decision)),
@@ -1189,10 +1061,11 @@ def test_fallo_de_insert_de_permit_revierte_decision_y_head(db, app, tmp_path):
     assert checkpoint.head_actual() == checkpoint.checkpoints()[0]["head"]
 
 
-def test_commit_de_permit_sin_anclaje_externo_no_se_reconoce_ni_reintenta(db, app, tmp_path):
+def test_record_permit_standalone_no_depende_de_un_checkpoint_sin_lock(db, app, tmp_path):
     with db.root() as admin:
         _apply_migration(admin, MIGRATION_STEP6)
         _apply_migration(admin, MIGRATION_STEP6_RETRY)
+        _apply_migration(admin, MIGRATION_STEP6_BINDINGS)
 
     class PublicationUnknown(RuleAuditCheckpointStore):
         def publicar(self, head: str, *, anterior: str) -> None:
@@ -1200,16 +1073,15 @@ def test_commit_de_permit_sin_anclaje_externo_no_se_reconoce_ni_reintenta(db, ap
 
     checkpoint = PublicationUnknown(tmp_path / "unknown-permit.jsonl")
     checkpoint.bootstrap()
-    store = MariaDBRuleDecisionStore(app, checkpoint_store=checkpoint)
+    store = MariaDBRuleDecisionStore(
+        lambda: (_ for _ in ()).throw(AssertionError("no debe abrir DB")),
+        checkpoint_store=checkpoint,
+    )
     request = _request("0199f8a1-8c00-7000-8000-000000000137")
     decision = _decision(request, status=RuleDecisionStatus.PERMIT)
     draft = _permit_draft(request, decision)
     evaluated_permit = _permit_after_kernel_evaluation(draft)
-    with pytest.raises(RuleAuthorityStorageError, match="sin checkpoint"):
+    with pytest.raises(RuleAuthorityStorageError, match="record_permit standalone está cerrado"):
         store.record_permit(request, decision, evaluated_permit)
-    with db.root(autocommit=True) as admin:
-        with admin.cursor() as cursor:
-            cursor.execute("SELECT audit_sequence FROM rule_authority_audit_head WHERE singleton=1")
-            assert cursor.fetchone()[0] == 2
-    with pytest.raises(RuleAuthorityStorageError, match="checkpoint.*head"):
-        store.record_permit(request, decision, evaluated_permit)
+    from policy.rule_authority.trusted_checkpoint import RULE_AUDIT_GENESIS_HEAD
+    assert checkpoint.head_actual() == RULE_AUDIT_GENESIS_HEAD

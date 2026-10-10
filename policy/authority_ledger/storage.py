@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from enum import Enum
 from threading import RLock
 from typing import Protocol, Callable, Any, ContextManager, TYPE_CHECKING
 
@@ -31,10 +32,19 @@ class AuthorityLedgerStore(Protocol):
     def append(self, event: AuthorityEvent) -> None: ...
 
 
+class AuthorityLedgerTransactionPurpose(str, Enum):
+    """The only state-machine paths allowed on a shared MariaDB owner."""
+
+    EVALUATION = "EVALUATION"
+    CONSUMPTION = "CONSUMPTION"
+
+
 class AuthorityLedgerTransactionOwner(Protocol):
     """One already-started DB transaction shared by both schemas."""
     @property
     def active(self) -> bool: ...
+    @property
+    def purpose(self) -> AuthorityLedgerTransactionPurpose: ...
     def lock_permit_for_consumption(
         self, permit_id: str, request_hash: str
     ) -> "RulePermit": ...
@@ -55,7 +65,10 @@ class AuthorityLedgerVerificationFence(Protocol):
         trusted_root: "TrustedAuthorityRoot",
     ) -> "ReconstructedAuthorityState": ...
     def transaction_owner(
-        self, rule_authority_decision_store
+        self,
+        rule_authority_decision_store: "MariaDBRuleDecisionStore",
+        *,
+        purpose: AuthorityLedgerTransactionPurpose = AuthorityLedgerTransactionPurpose.CONSUMPTION,
     ) -> ContextManager[AuthorityLedgerTransactionOwner]: ...
 
 
@@ -204,16 +217,21 @@ class MariaDBAuthorityLedgerTransactionOwner:
     Block 4 verification succeeds.
     """
 
-    def __init__(self, connection, seal, checkpoint_fence) -> None:
+    def __init__(self, connection, seal, checkpoint_fence, purpose) -> None:
         if seal is not _TRANSACTION_OWNER_SEAL:
             raise AuthorityStateError("transaction owner debe crearse desde checkpoint fence")
+        if type(purpose) is not AuthorityLedgerTransactionPurpose:
+            raise AuthorityStateError("transaction owner requiere propósito de transacción canónico")
         self._connection = connection
         self._checkpoint_fence = checkpoint_fence
+        self._purpose = purpose
         self._cursor = None
         self._active = True
         self._verified = False
         self._permit_locked = False
         self._audit_head_locked = False
+        self._locked_audit_head = None
+        self._evaluation_persisted = False
         self._consumption_persisted = False
         self._locked_permit = None
         self._locked_permit_identity = None
@@ -227,6 +245,7 @@ class MariaDBAuthorityLedgerTransactionOwner:
         connection_factory: Callable[[], Any],
         checkpoint_fence: "_AuthorityLedgerCheckpointFence",
         rule_authority_lock_token,
+        purpose: AuthorityLedgerTransactionPurpose,
     ) -> "MariaDBAuthorityLedgerTransactionOwner":
         from pymysql.constants import SERVER_STATUS
 
@@ -264,7 +283,7 @@ class MariaDBAuthorityLedgerTransactionOwner:
             if type(status) is not int or not status & SERVER_STATUS.SERVER_STATUS_IN_TRANS:
                 connection.rollback()
                 raise AuthorityStateError("MariaDB no confirmó el inicio de la transacción")
-            owner = cls(connection, _TRANSACTION_OWNER_SEAL, checkpoint_fence)
+            owner = cls(connection, _TRANSACTION_OWNER_SEAL, checkpoint_fence, purpose)
             owner._rule_authority_lock_token = rule_authority_lock_token
             owner._cursor = connection.cursor()
             checkpoint_fence._register_owner(owner)
@@ -283,6 +302,10 @@ class MariaDBAuthorityLedgerTransactionOwner:
     def active(self) -> bool:
         return self._active
 
+    @property
+    def purpose(self) -> AuthorityLedgerTransactionPurpose:
+        return self._purpose
+
     def lock_permit_for_consumption(
         self, permit_id: str, request_hash: str
     ) -> "RulePermit":
@@ -297,6 +320,8 @@ class MariaDBAuthorityLedgerTransactionOwner:
         """
         if not self._active:
             raise AuthorityStateError("lock de permit requiere transaction owner activo")
+        if self._purpose is AuthorityLedgerTransactionPurpose.EVALUATION:
+            raise AuthorityStateError("EVALUATION no permite lock de permit")
         if self._verified:
             raise AuthorityStateError("lock de permit debe ocurrir antes de Block 4")
         if self._permit_locked:
@@ -307,7 +332,8 @@ class MariaDBAuthorityLedgerTransactionOwner:
             "SELECT permit_id,request_id,request_hash,decision_status,rule_id,rule_path,"
             "rule_blob_oid,rule_content_hash,policy_revision,policy_tree_oid,"
             "policy_snapshot_hash,ratification_event_id,authority_ledger_checkpoint,"
-            "stop_checkpoint,capability_id,capability_version,capability_class,"
+            "stop_checkpoint,capability_id,policy_repository_id,capability_contract_id,"
+            "capability_version,capability_class,"
             "capability_limits,issued_at_utc,expires_at_utc,permit_hash,canonical_payload,"
             "previous_record_hash,record_hash,audit_sequence "
             "FROM jax_rule_authority.rule_permits "
@@ -345,6 +371,8 @@ class MariaDBAuthorityLedgerTransactionOwner:
         """
         if not self._active or not self._verified:
             raise AuthorityStateError("consumo requiere verificación Block 4 previa")
+        if self._purpose is not AuthorityLedgerTransactionPurpose.CONSUMPTION:
+            raise AuthorityStateError("consumo requiere propósito CONSUMPTION")
         if not self._permit_locked or self._locked_permit_identity is None:
             raise AuthorityStateError("consumo requiere lock de permit previo")
         if self._consumption_persisted:
@@ -358,6 +386,30 @@ class MariaDBAuthorityLedgerTransactionOwner:
                 or not self._audit_head_locked or self._consumption_persisted):
             raise AuthorityStateError("estado inválido al sellar consumo atómico")
         self._consumption_persisted = True
+
+    def _mark_evaluation_persisted(self) -> None:
+        """Seal an evaluation append before its only permitted completion path.
+
+        An evaluation has no permit-row lock, but it still cannot commit until
+        Block 4 was replayed under this owner and Rule Authority's audit head
+        was locked last.  Keeping this state in the owner prevents a decision
+        store from treating a merely-open cross-schema transaction as proof of
+        authority.
+        """
+        if (not self._active or not self._verified
+                or self._purpose is not AuthorityLedgerTransactionPurpose.EVALUATION
+                or self._permit_locked or not self._audit_head_locked
+                or self._evaluation_persisted):
+            raise AuthorityStateError("estado inválido al sellar evaluación atómica")
+        self._evaluation_persisted = True
+
+    def _commit_evaluation_for_store(self) -> BaseException | None:
+        """Complete only a sealed EVALUATION append owned by Rule Authority."""
+        if (not self._evaluation_persisted
+                or self._purpose is not AuthorityLedgerTransactionPurpose.EVALUATION):
+            raise AuthorityStateError("evaluación no fue persistida para finalizar")
+        self._commit_db()
+        return self._post_commit_close_error
 
     def _commit_consumption_for_store(self) -> BaseException | None:
         """Private completion path; callers cannot commit a consumption half."""
@@ -402,8 +454,12 @@ class MariaDBAuthorityLedgerTransactionOwner:
         """
         if not self._active or not self._verified:
             raise AuthorityStateError("lock de audit head requiere verificación Block 4 previa")
-        if not self._permit_locked:
+        if (self._purpose is AuthorityLedgerTransactionPurpose.CONSUMPTION
+                and not self._permit_locked):
             raise AuthorityStateError("lock de audit head requiere lock de permit previo")
+        if (self._purpose is AuthorityLedgerTransactionPurpose.EVALUATION
+                and self._permit_locked):
+            raise AuthorityStateError("EVALUATION no puede llegar a audit head con permit bloqueado")
         if self._audit_head_locked:
             raise AuthorityStateError("audit head ya fue bloqueado por esta transacción")
         self._cursor.execute(
@@ -415,11 +471,17 @@ class MariaDBAuthorityLedgerTransactionOwner:
                 or type(row[0]) is not int or (row[1] is not None and type(row[1]) is not str)):
             raise AuthorityStateError("rule authority audit head ausente/ inválido")
         self._audit_head_locked = True
+        self._locked_audit_head = row
         return row
 
     def commit(self) -> None:
         if not self._active:
             raise AuthorityStateError("transacción Rule Authority ya finalizada")
+        if self._purpose is AuthorityLedgerTransactionPurpose.EVALUATION:
+            self.rollback()
+            raise AuthorityStateError(
+                "EVALUATION solo finaliza mediante record_evaluation_in_transaction"
+            )
         if self._permit_locked:
             self.rollback()
             raise AuthorityStateError(
@@ -553,7 +615,12 @@ class _AuthorityLedgerCheckpointFence:
         self._owner = owner
 
     @contextmanager
-    def transaction_owner(self, rule_authority_decision_store):
+    def transaction_owner(
+        self,
+        rule_authority_decision_store: "MariaDBRuleDecisionStore",
+        *,
+        purpose: AuthorityLedgerTransactionPurpose = AuthorityLedgerTransactionPurpose.CONSUMPTION,
+    ):
         """Acquire the wired RA fence, begin, and finalize before unlock.
 
         The caller passes the real MariaDB decision store instead of a free
@@ -562,6 +629,8 @@ class _AuthorityLedgerCheckpointFence:
         """
         if not self._active:
             raise AuthorityStateError("transaction owner requiere checkpoint fence Block 4 activo")
+        if type(purpose) is not AuthorityLedgerTransactionPurpose:
+            raise AuthorityStateError("transaction owner requiere propósito de transacción canónico")
         from policy.rule_authority.trusted_checkpoint import RuleAuditCheckpointStore
         from policy.rule_authority.storage import MariaDBRuleDecisionStore
 
@@ -580,7 +649,7 @@ class _AuthorityLedgerCheckpointFence:
             owner = None
             try:
                 owner = MariaDBAuthorityLedgerTransactionOwner._begin(
-                    connection_factory, self, rule_authority_lock_token
+                    connection_factory, self, rule_authority_lock_token, purpose
                 )
                 owner._rule_authority_decision_store = rule_authority_decision_store
                 yield owner
@@ -611,6 +680,16 @@ class _AuthorityLedgerCheckpointFence:
             raise AuthorityStateError("verify_for_update requiere transaction owner MariaDB activo y sellado")
         if self._owner is not transaction_owner:
             raise AuthorityStateError("transaction owner no fue creado dentro de este checkpoint fence")
+        if (transaction_owner.purpose is AuthorityLedgerTransactionPurpose.CONSUMPTION
+                and not transaction_owner._permit_locked):
+            raise AuthorityStateError(
+                "CONSUMPTION requiere lock de permit antes de verificación Block 4"
+            )
+        if (transaction_owner.purpose is AuthorityLedgerTransactionPurpose.EVALUATION
+                and transaction_owner._permit_locked):
+            raise AuthorityStateError(
+                "EVALUATION requiere verificación Block 4 sin lock de permit"
+            )
         from policy.rule_authority.errors import CheckpointInvalido
         from policy.rule_authority.trusted_checkpoint import (
             require_active_authority_ledger_lock_token,

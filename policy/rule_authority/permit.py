@@ -30,14 +30,29 @@ _FIELDS = frozenset({
     "permit_id", "request_id", "request_hash", "rule_id", "rule_path",
     "rule_blob_oid", "rule_content_hash", "policy_revision", "policy_tree_oid",
     "policy_snapshot_hash", "ratification_event_id", "authority_ledger_checkpoint",
-    "stop_checkpoint", "capability_id", "capability_version", "capability_class",
+    "stop_checkpoint", "capability_id", "policy_repository_id",
+    "capability_contract_id", "capability_version", "capability_class",
     "capability_limits", "issued_at_utc", "expires_at_utc",
 })
+_LEGACY_FIELDS = _FIELDS - {"policy_repository_id", "capability_contract_id"}
+_LEGACY_BINDING_PLACEHOLDER = "__historical_unbound__"
 
 
 def _identifier(value: object, field_name: str) -> str:
     if (type(value) is not str or not value or unicodedata.normalize("NFC", value) != value
             or not _IDENTIFIER.fullmatch(value)):
+        raise AuthorityEventValidationError(f"{field_name} inválido")
+    return value
+
+
+def _opaque_identity(value: object, field_name: str) -> str:
+    """Validate only the contract already made by the source provider.
+
+    Repository and capability-contract identities are opaque exact values.  A
+    permit records them; it must not normalize or silently impose a second
+    grammar on either provider's identity.
+    """
+    if type(value) is not str or not value.strip():
         raise AuthorityEventValidationError(f"{field_name} inválido")
     return value
 
@@ -100,6 +115,8 @@ class RulePermitDraft:
     authority_ledger_checkpoint: Mapping[str, Any]
     stop_checkpoint: Mapping[str, Any]
     capability_id: str
+    policy_repository_id: str
+    capability_contract_id: str
     capability_version: str
     capability_class: str
     capability_limits: Mapping[str, Any]
@@ -115,6 +132,8 @@ class RulePermitDraft:
                 raise AuthorityEventValidationError(f"{name} inválido") from exc
         _identifier(self.rule_id, "rule_id")
         _identifier(self.capability_id, "capability_id")
+        _opaque_identity(self.policy_repository_id, "policy_repository_id")
+        _opaque_identity(self.capability_contract_id, "capability_contract_id")
         if (type(self.capability_version) is not str or not self.capability_version
                 or unicodedata.normalize("NFC", self.capability_version) != self.capability_version
                 or not _VERSION_TOKEN.fullmatch(self.capability_version)):
@@ -159,6 +178,8 @@ class RulePermitDraft:
                                                          "authority_ledger_checkpoint"),
             "stop_checkpoint": _freeze_json(self.stop_checkpoint, "stop_checkpoint"),
             "capability_id": self.capability_id,
+            "policy_repository_id": self.policy_repository_id,
+            "capability_contract_id": self.capability_contract_id,
             "capability_version": self.capability_version,
             "capability_class": self.capability_class,
             "capability_limits": _freeze_json(self.capability_limits, "capability_limits"),
@@ -206,7 +227,8 @@ class RulePermit:
         if _seal is not _SEAL:
             raise RuleAuthorityError("RulePermit solo lo entrega el store autoritativo")
         frozen = _freeze_json(payload, "RulePermit")
-        if not isinstance(frozen, Mapping) or frozenset(frozen) != _FIELDS | {"permit_hash"}:
+        fields = frozenset(frozen) if isinstance(frozen, Mapping) else frozenset()
+        if fields not in (_FIELDS | {"permit_hash"}, _LEGACY_FIELDS | {"permit_hash"}):
             raise RuleAuthorityError("RulePermit: proyección cerrada inválida")
         expected = _permit_hash({key: value for key, value in frozen.items()
                                  if key != "permit_hash"})
@@ -234,6 +256,11 @@ class RulePermit:
 
     def _is_store_sealed(self) -> bool:
         return self._seal is _SEAL
+
+    def _has_consumption_bindings(self) -> bool:
+        """V1 rows stay inspectable but cannot cross the consumption boundary."""
+        return ("policy_repository_id" in self._payload
+                and "capability_contract_id" in self._payload)
 
 
 @dataclass(frozen=True)
@@ -321,7 +348,8 @@ def _trusted_permit(value: RulePermitDraft | Mapping[str, Any]) -> RulePermit:
     elif isinstance(value, Mapping):
         payload = dict(value)
         stored_hash = payload.pop("permit_hash", None)
-        if frozenset(payload) != _FIELDS:
+        payload_fields = frozenset(payload)
+        if payload_fields not in (_FIELDS, _LEGACY_FIELDS):
             raise RuleAuthorityError("RulePermit: proyección incompleta o con campos extra")
         for field_name in ("issued_at_utc", "expires_at_utc"):
             if type(payload[field_name]) is str:
@@ -331,8 +359,18 @@ def _trusted_permit(value: RulePermitDraft | Mapping[str, Any]) -> RulePermit:
                     )
                 except ValueError as exc:
                     raise RuleAuthorityError(f"RulePermit {field_name} inválido") from exc
-        draft = RulePermitDraft(**payload)
-        payload = draft.projection()
+        if payload_fields == _FIELDS:
+            payload = RulePermitDraft(**payload).projection()
+        else:
+            # Preserve V1 canonical bytes/hashes for audit.  Instantiate a
+            # throwaway V2 draft only to reuse the closed validation of the
+            # shared fields; its synthetic bindings never enter the V1 value.
+            checked = RulePermitDraft(
+                **payload,
+                policy_repository_id=_LEGACY_BINDING_PLACEHOLDER,
+                capability_contract_id=_LEGACY_BINDING_PLACEHOLDER,
+            ).projection()
+            payload = {key: checked[key] for key in _LEGACY_FIELDS}
         computed = _permit_hash(payload)
         if stored_hash is not None and stored_hash != computed:
             raise RuleAuthorityError("RulePermit permit_hash no coincide")

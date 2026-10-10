@@ -13,6 +13,7 @@ from policy.rule_authority.permit import (
     RulePermitDraft,
     _trusted_consumption,
     _trusted_permit,
+    _permit_hash,
 )
 from policy.rule_authority.models import (
     RuleDecision, RuleDecisionStatus, RuleEvaluationOutcome,
@@ -36,6 +37,8 @@ def _draft(**changes):
         "authority_ledger_checkpoint": {"sequence": 5, "head_event_hash": "sha256:" + "4" * 64},
         "stop_checkpoint": {"version": 7, "fingerprint": "stop:7"},
         "capability_id": "mail.send",
+        "policy_repository_id": "jax",
+        "capability_contract_id": "mail.send.contract.v1",
         "capability_version": "1",
         "capability_class": "OBLIGATING",
         "capability_limits": {"form": "CANTIDAD", "unit": "mensajes", "max": 3},
@@ -52,6 +55,8 @@ def test_permit_persistido_tiene_proyeccion_canónica_y_hash_de_dominio():
     projection = permit.projection()
     assert projection["permit_id"] == "0199f8a1-8c00-7000-8000-000000000201"
     assert projection["authority_ledger_checkpoint"]["sequence"] == 5
+    assert projection["policy_repository_id"] == "jax"
+    assert projection["capability_contract_id"] == "mail.send.contract.v1"
     assert projection["permit_hash"].startswith("sha256:")
     assert len(projection["permit_hash"]) == 71
     with pytest.raises(TypeError):
@@ -94,6 +99,35 @@ def test_roundtrip_conserva_hash_y_rechaza_hash_alterado():
     tampered["request_hash"] = "sha256:" + "f" * 64
     with pytest.raises(RuleAuthorityError, match="permit_hash"):
         _trusted_permit(tampered)
+
+
+@pytest.mark.parametrize("field_name, altered", [
+    ("policy_repository_id", "another-jax"),
+    ("capability_contract_id", "mail.send.contract.v2"),
+])
+def test_permit_v2_fija_las_identidades_de_repositorio_y_contrato(field_name, altered):
+    """Mata el mutante que omite cualquiera de los dos bindings del hash."""
+    trusted = _trusted_permit(_draft())
+    tampered = dict(trusted.projection())
+    tampered[field_name] = altered
+
+    with pytest.raises(RuleAuthorityError, match="permit_hash"):
+        _trusted_permit(tampered)
+
+
+def test_permit_historico_sin_bindings_sirve_para_auditar_pero_no_para_consumir():
+    """Un decoder puede leer V1 sin reescribirlo, pero no reactivarlo."""
+    current = _trusted_permit(_draft())
+    historical = dict(current.projection())
+    historical.pop("policy_repository_id")
+    historical.pop("capability_contract_id")
+    historical["permit_hash"] = _permit_hash({
+        key: value for key, value in historical.items() if key != "permit_hash"
+    })
+
+    decoded = _trusted_permit(historical)
+
+    assert decoded._has_consumption_bindings() is False
 
 
 def test_consumo_es_un_registro_sellado_y_ligado_al_request_hash():

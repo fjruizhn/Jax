@@ -54,7 +54,8 @@ from policy.rule_authority.storage import (
 )
 from policy.authority_ledger.signatures import encode_public_key, public_key_bytes, public_key_fingerprint
 from policy.authority_ledger.storage import (
-    MariaDBAuthorityLedgerStore, MariaDBAuthorityLedgerTransactionOwner,
+    AuthorityLedgerTransactionPurpose, MariaDBAuthorityLedgerStore,
+    MariaDBAuthorityLedgerTransactionOwner,
 )
 from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
 from policy.authority_ledger.errors import AuthorityStateError, TrustedRootMismatchError
@@ -69,6 +70,7 @@ UPGRADE_MIGRATION = ROOT / "policy/authority_ledger/migrations/002_canonical_int
 RULE_AUTHORITY_MIGRATION = ROOT / "policy/rule_authority/migrations/001_rule_authority_kernel.sql"
 RULE_AUTHORITY_STEP6_MIGRATION = ROOT / "policy/rule_authority/migrations/002_enable_atomic_permits.sql"
 RULE_AUTHORITY_STEP6_RETRY_MIGRATION = ROOT / "policy/rule_authority/migrations/003_durable_consumption_request_id.sql"
+RULE_AUTHORITY_BINDINGS_MIGRATION = ROOT / "policy/rule_authority/migrations/004_permit_policy_capability_identity.sql"
 IMAGE = os.environ.get("JAX_AUTHORITY_LEDGER_TEST_MARIADB_IMAGE", "mariadb:12.3.3")
 
 
@@ -304,7 +306,8 @@ def test_consumption_locks_permit_before_block4_without_exposing_cursor(tmp_path
                 "SELECT permit_id,request_id,request_hash,decision_status,rule_id,rule_path,"
                 "rule_blob_oid,rule_content_hash,policy_revision,policy_tree_oid,"
                 "policy_snapshot_hash,ratification_event_id,authority_ledger_checkpoint,"
-                "stop_checkpoint,capability_id,capability_version,capability_class,"
+                "stop_checkpoint,capability_id,policy_repository_id,capability_contract_id,"
+                "capability_version,capability_class,"
                 "capability_limits,issued_at_utc,expires_at_utc,permit_hash,canonical_payload,"
                 "previous_record_hash,record_hash,audit_sequence "
                 "FROM jax_rule_authority.rule_permits "
@@ -313,6 +316,85 @@ def test_consumption_locks_permit_before_block4_without_exposing_cursor(tmp_path
             )]
             with pytest.raises(AuthorityStateError, match="solo permite un permit"):
                 owner.lock_permit_for_consumption(permit_id, request_hash)
+            owner.rollback()
+
+
+def test_evaluation_owner_forbids_permit_lock_and_allows_audit_head_after_block4(
+    tmp_path, monkeypatch,
+):
+    """An evaluation has no permit row, but still serializes on the RA audit head."""
+    from tests.policy.test_authority_ledger_events import setup_ledger
+
+    ledger, _root, _key = setup_ledger()
+    connection = _RecordingTransactionConnection()
+    connection.cursor_instance.row = (0, None)
+    store = MariaDBAuthorityLedgerStore(lambda: pytest.fail("fence no abre conexiones"))
+    checkpoint = _bootstrapped_rule_authority_checkpoint_store(tmp_path)
+    decision_store = _rule_authority_decision_store(checkpoint, lambda: connection)
+
+    with store.checkpoint_fence(ledger._checkpoint_store) as fence:
+        with fence.transaction_owner(
+            decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
+        ) as owner:
+            with pytest.raises(AuthorityStateError, match="EVALUATION no permite lock de permit"):
+                owner.lock_permit_for_consumption("permit-id", "sha256:" + "a" * 64)
+            monkeypatch.setattr(owner, "_verify_for_update", lambda _store, _root: object())
+            assert fence.verify_for_update(owner, object()) is not None
+            assert owner.lock_rule_authority_audit_head_for_update() == (0, None)
+            owner.rollback()
+
+
+def test_evaluation_owner_cannot_commit_before_block4_verification(tmp_path):
+    """A purpose label cannot turn an unverified DB transaction into an evaluation."""
+    from tests.policy.test_authority_ledger_events import setup_ledger
+
+    ledger, _root, _key = setup_ledger()
+    connection = _RecordingTransactionConnection()
+    store = MariaDBAuthorityLedgerStore(lambda: pytest.fail("fence no abre conexiones"))
+    checkpoint = _bootstrapped_rule_authority_checkpoint_store(tmp_path)
+    decision_store = _rule_authority_decision_store(checkpoint, lambda: connection)
+
+    with store.checkpoint_fence(ledger._checkpoint_store) as fence:
+        with fence.transaction_owner(
+            decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
+        ) as owner:
+            with pytest.raises(AuthorityStateError, match="EVALUATION requiere verificación Block 4"):
+                owner.commit()
+
+    assert connection.rolled_back is True
+    assert connection.committed is False
+
+
+def test_consumption_owner_requires_permit_before_block4_then_allows_audit_head(
+    tmp_path, monkeypatch,
+):
+    """Consumption fixes the permit → Block 4 head → RA audit-head row order."""
+    from tests.policy.test_authority_ledger_events import setup_ledger
+    from policy.rule_authority.permit import _trusted_permit
+
+    ledger, _root, _key = setup_ledger()
+    connection = _RecordingTransactionConnection()
+    store = MariaDBAuthorityLedgerStore(lambda: pytest.fail("fence no abre conexiones"))
+    checkpoint = _bootstrapped_rule_authority_checkpoint_store(tmp_path)
+    decision_store = _rule_authority_decision_store(checkpoint, lambda: connection)
+    request = _cross_schema_request("0199f8a1-8c00-7000-8000-0000000009a4")
+    _decision, permit_draft = _cross_schema_permit(request)
+    sealed_permit = _trusted_permit(permit_draft)
+    monkeypatch.setattr(
+        MariaDBRuleDecisionStore, "_decode_permit_row", staticmethod(lambda _row: sealed_permit)
+    )
+
+    with store.checkpoint_fence(ledger._checkpoint_store) as fence:
+        with fence.transaction_owner(
+            decision_store, purpose=AuthorityLedgerTransactionPurpose.CONSUMPTION
+        ) as owner:
+            with pytest.raises(AuthorityStateError, match="CONSUMPTION requiere lock de permit"):
+                fence.verify_for_update(owner, object())
+            owner.lock_permit_for_consumption(permit_draft.permit_id, permit_draft.request_hash)
+            monkeypatch.setattr(owner, "_verify_for_update", lambda _store, _root: object())
+            assert fence.verify_for_update(owner, object()) is not None
+            connection.cursor_instance.row = (0, None)
+            assert owner.lock_rule_authority_audit_head_for_update() == (0, None)
             owner.rollback()
 
 
@@ -366,7 +448,8 @@ def test_locked_permit_is_fully_decoded_and_store_sealed(tmp_path):
         sealed.ratification_event_id,
         canonical_bytes(sealed.authority_ledger_checkpoint),
         canonical_bytes(sealed.stop_checkpoint), sealed.capability_id,
-        sealed.capability_version, sealed.capability_class,
+            sealed.policy_repository_id, sealed.capability_contract_id,
+            sealed.capability_version, sealed.capability_class,
         canonical_bytes(sealed.capability_limits), sealed.issued_at_utc,
         sealed.expires_at_utc, sealed.permit_hash, canonical_bytes(payload),
         previous_hash,
@@ -920,7 +1003,9 @@ def _mariadb_transaction_owner(connect, fence, checkpoint_store):
         _rule_authority_checkpoint_store(checkpoint_store),
         lambda **kwargs: connect(database="jax_authority", **kwargs),
     )
-    with fence.transaction_owner(decision_store) as owner:
+    with fence.transaction_owner(
+        decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
+    ) as owner:
         yield owner
 
 
@@ -963,6 +1048,8 @@ def _cross_schema_permit(request: RuleEvaluationRequest) -> tuple[RuleDecision, 
         authority_ledger_checkpoint={"sequence": 0, "head_event_hash": None},
         stop_checkpoint={"version": 0, "fingerprint": "stop:0"},
         capability_id=request.capability,
+        policy_repository_id="jax",
+        capability_contract_id="mail.send.contract.v1",
         capability_version="1",
         capability_class="OBLIGATING",
         capability_limits={"form": "CANTIDAD", "unit": "mensajes", "max": 2},
@@ -982,6 +1069,7 @@ def _initialized_cross_schema_consumption(*, include_retry_migration=True):
             _apply_migration(admin, RULE_AUTHORITY_STEP6_MIGRATION)
             if include_retry_migration:
                 _apply_migration(admin, RULE_AUTHORITY_STEP6_RETRY_MIGRATION)
+            _apply_migration(admin, RULE_AUTHORITY_BINDINGS_MIGRATION)
             provision_rule_authority_account(admin, app_user, app_password)
 
         def app_connect():
@@ -1004,6 +1092,154 @@ def _consume_under_verified_fence(ledger_store, checkpoint_store, root, decision
             return decision_store.consume_permit(owner, draft)
 
 
+def _record_evaluation_permit(ledger_store, checkpoint_store, root, decision_store,
+                              request, decision, draft):
+    """Persist test permits only through the same verified Block-4 owner as production."""
+    with ledger_store.checkpoint_fence(checkpoint_store) as fence:
+        with fence.transaction_owner(
+            decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
+        ) as owner:
+            fence.verify_for_update(owner, root)
+            return decision_store.record_evaluation_in_transaction(
+                owner, request, decision, _permit_after_kernel_evaluation(draft)
+            )
+
+
+def test_evaluation_persists_permit_with_block4_verification_in_one_owner():
+    """A permit cannot use the legacy standalone decision-store transaction.
+
+    The same owner that replays Block 4 must append both the decision and the
+    permit, so a revocation cannot interleave between verification and commit.
+    """
+    with _initialized_cross_schema_consumption() as (
+        _connect, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+    ):
+        decision_store = MariaDBRuleDecisionStore(app_connect, checkpoint_store=audit_checkpoint)
+        request = _cross_schema_request("0199f8a1-8c00-7000-8000-000000000921")
+        decision, draft = _cross_schema_permit(request)
+
+        with ledger_store.checkpoint_fence(checkpoint_store) as fence:
+            with fence.transaction_owner(
+                decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
+            ) as owner:
+                assert fence.verify_for_update(owner, root).checkpoint.sequence == 0
+                persisted_decision, permit = decision_store.record_evaluation_in_transaction(
+                    owner, request, decision, _permit_after_kernel_evaluation(draft)
+                )
+
+        assert persisted_decision == decision
+        assert permit is not None
+        assert permit._is_store_sealed() is True
+
+        with ledger_store.checkpoint_fence(checkpoint_store) as fence:
+            with fence.transaction_owner(
+                decision_store, purpose=AuthorityLedgerTransactionPurpose.CONSUMPTION
+            ) as owner:
+                owner.lock_permit_for_consumption(permit.permit_id, request.request_hash)
+                fence.verify_for_update(owner, root)
+                projection = decision_store.load_consumption_request_in_transaction(
+                    owner, request.catalogo
+                )
+                assert projection == request.canonical_projection()
+                owner.rollback()
+
+
+def test_evaluation_persists_and_recovers_deny_through_shared_owner():
+    with _initialized_cross_schema_consumption() as (
+        _connect, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+    ):
+        decision_store = MariaDBRuleDecisionStore(app_connect, checkpoint_store=audit_checkpoint)
+        request = _cross_schema_request("0199f8a1-8c00-7000-8000-000000000931")
+        decision = RuleDecision(
+            request.request_id, request.request_hash, RuleDecisionStatus.DENY,
+            request.rule_id, "STOP_ACTIVE", datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc),
+        )
+
+        with ledger_store.checkpoint_fence(checkpoint_store) as fence:
+            with fence.transaction_owner(
+                decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
+            ) as owner:
+                fence.verify_for_update(owner, root)
+                stored, permit = decision_store.record_evaluation_in_transaction(
+                    owner, request, decision, None
+                )
+
+        assert stored == decision
+        assert permit is None
+        assert decision_store.recover_durable_evaluation(request) == (decision, None)
+
+
+def test_evaluation_insert_failure_rolls_back_decision_and_audit_head():
+    with _initialized_cross_schema_consumption() as (
+        connect, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+    ):
+        with connect() as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "CREATE TRIGGER fail_rule_decision_insert "
+                    "BEFORE INSERT ON jax_rule_authority.rule_decisions FOR EACH ROW "
+                    "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='injected evaluation failure'"
+                )
+            admin.commit()
+        decision_store = MariaDBRuleDecisionStore(app_connect, checkpoint_store=audit_checkpoint)
+        request = _cross_schema_request("0199f8a1-8c00-7000-8000-000000000932")
+        decision = RuleDecision(
+            request.request_id, request.request_hash, RuleDecisionStatus.DENY,
+            request.rule_id, "STOP_ACTIVE", datetime(2026, 10, 10, 12, 1, tzinfo=timezone.utc),
+        )
+
+        with pytest.raises(RuleAuthorityStorageError, match="persistir evaluación"):
+            with ledger_store.checkpoint_fence(checkpoint_store) as fence:
+                with fence.transaction_owner(
+                    decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
+                ) as owner:
+                    fence.verify_for_update(owner, root)
+                    decision_store.record_evaluation_in_transaction(
+                        owner, request, decision, None
+                    )
+
+        with connect() as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM jax_rule_authority.rule_decisions WHERE request_id=%s",
+                    (request.request_id,),
+                )
+                assert cursor.fetchone()[0] == 0
+                cursor.execute(
+                    "SELECT audit_sequence,head_hash FROM jax_rule_authority.rule_authority_audit_head "
+                    "WHERE singleton=1"
+                )
+                assert cursor.fetchone() == (0, None)
+        from policy.rule_authority.trusted_checkpoint import RULE_AUDIT_GENESIS_HEAD
+        assert audit_checkpoint.head_actual() == RULE_AUDIT_GENESIS_HEAD
+        assert decision_store.get(request) == decision
+        assert audit_checkpoint.confirmar(audit_checkpoint.head_actual()) is True
+
+        # A process retry may observe different live providers after the first
+        # commit.  Request identity wins: it recovers the sealed durable
+        # outcome, never recomputes a second decision or permit.
+        different_live_decision = RuleDecision(
+            request_id=request.request_id,
+            request_hash=request.request_hash,
+            status=RuleDecisionStatus.DENY,
+            required_rule_id=request.rule_id,
+            reason_code="STOP_ACTIVE",
+            decided_at_utc=datetime(2026, 10, 10, 12, 2, tzinfo=timezone.utc),
+        )
+        with ledger_store.checkpoint_fence(checkpoint_store) as fence:
+            with fence.transaction_owner(
+                decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
+            ) as owner:
+                fence.verify_for_update(owner, root)
+                retried_decision, retried_permit = decision_store.record_evaluation_in_transaction(
+                    owner, request, different_live_decision, None
+                )
+
+        assert retried_decision == decision
+        assert retried_permit is not None
+        assert retried_permit.projection() == permit.projection()
+
+
 def test_cross_schema_consumption_uses_provisioned_principal_and_retries_exact_permit():
     with _initialized_cross_schema_consumption() as (
         connect, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
@@ -1011,8 +1247,9 @@ def test_cross_schema_consumption_uses_provisioned_principal_and_retries_exact_p
         decision_store = MariaDBRuleDecisionStore(app_connect, checkpoint_store=audit_checkpoint)
         request = _cross_schema_request("0199f8a1-8c00-7000-8000-000000000903")
         decision, permit_draft = _cross_schema_permit(request)
-        permit = decision_store.record_permit(
-            request, decision, _permit_after_kernel_evaluation(permit_draft)
+        _persisted_decision, permit = _record_evaluation_permit(
+            ledger_store, checkpoint_store, root, decision_store,
+            request, decision, permit_draft,
         )
         permit_head = audit_checkpoint.head_actual()
         draft = RulePermitConsumptionDraft(
@@ -1080,8 +1317,9 @@ def test_retry_migration_preserves_legacy_consumption_and_rejects_new_identity()
         decision_store = MariaDBRuleDecisionStore(app_connect, checkpoint_store=audit_checkpoint)
         request = _cross_schema_request("0199f8a1-8c00-7000-8000-000000000920")
         decision, permit_draft = _cross_schema_permit(request)
-        permit = decision_store.record_permit(
-            request, decision, _permit_after_kernel_evaluation(permit_draft)
+        _persisted_decision, permit = _record_evaluation_permit(
+            ledger_store, checkpoint_store, root, decision_store,
+            request, decision, permit_draft,
         )
 
         # Seed a valid pre-003 row without a retry identity. Its old canonical
@@ -1169,8 +1407,9 @@ def test_cross_schema_double_consumer_is_one_durable_consumption():
         decision_store = MariaDBRuleDecisionStore(app_connect, checkpoint_store=audit_checkpoint)
         request = _cross_schema_request("0199f8a1-8c00-7000-8000-000000000904")
         decision, permit_draft = _cross_schema_permit(request)
-        permit = decision_store.record_permit(
-            request, decision, _permit_after_kernel_evaluation(permit_draft)
+        _persisted_decision, permit = _record_evaluation_permit(
+            ledger_store, checkpoint_store, root, decision_store,
+            request, decision, permit_draft,
         )
         draft = RulePermitConsumptionDraft(
             permit_id=permit.permit_id,
@@ -1203,8 +1442,9 @@ def test_cross_schema_consumption_insert_failure_rolls_back_permit_leaf_and_audi
         decision_store = MariaDBRuleDecisionStore(app_connect, checkpoint_store=audit_checkpoint)
         request = _cross_schema_request("0199f8a1-8c00-7000-8000-000000000905")
         decision, permit_draft = _cross_schema_permit(request)
-        permit = decision_store.record_permit(
-            request, decision, _permit_after_kernel_evaluation(permit_draft)
+        _persisted_decision, permit = _record_evaluation_permit(
+            ledger_store, checkpoint_store, root, decision_store,
+            request, decision, permit_draft,
         )
         permit_head = audit_checkpoint.head_actual()
         with connect(database="jax_rule_authority") as admin:
@@ -1248,8 +1488,9 @@ def test_cross_schema_consumption_checkpoint_failure_reports_committed_state(mon
         decision_store = MariaDBRuleDecisionStore(app_connect, checkpoint_store=checkpoint)
         request = _cross_schema_request("0199f8a1-8c00-7000-8000-000000000906")
         decision, permit_draft = _cross_schema_permit(request)
-        permit = decision_store.record_permit(
-            request, decision, _permit_after_kernel_evaluation(permit_draft)
+        _persisted_decision, permit = _record_evaluation_permit(
+            ledger_store, checkpoint_store, root, decision_store,
+            request, decision, permit_draft,
         )
         permit_head = checkpoint.head_actual()
         def fail_publication(_head: str, *, anterior: str) -> None:
@@ -1307,8 +1548,9 @@ def test_cross_schema_consumption_close_failure_reports_anchored_committed_state
         )
         request = _cross_schema_request("0199f8a1-8c00-7000-8000-000000000907")
         decision, permit_draft = _cross_schema_permit(request)
-        permit = decision_store.record_permit(
-            request, decision, _permit_after_kernel_evaluation(permit_draft)
+        _persisted_decision, permit = _record_evaluation_permit(
+            ledger_store, checkpoint_store, root, decision_store,
+            request, decision, permit_draft,
         )
         permit_head = audit_checkpoint.head_actual()
         fail_close = True
@@ -1395,7 +1637,9 @@ def test_transaction_fence_holds_mariadb_head_lock_until_completion(completion):
                 rule_authority_checkpoint_store,
                 lambda **kwargs: connect(database="jax_authority", **kwargs),
             )
-            with fence.transaction_owner(decision_store) as owner:
+            with fence.transaction_owner(
+                decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
+            ) as owner:
                 state = fence.verify_for_update(owner, root)
                 assert state.checkpoint.sequence == 0
                 assert writer_errors == []
@@ -1482,7 +1726,9 @@ def test_checkpoint_fence_rolls_back_unfinalized_owner_before_releasing_flock():
                         _rule_authority_checkpoint_store(checkpoint_store),
                         lambda: connect(database="jax_authority"),
                     )
-                    with fence.transaction_owner(decision_store) as owner:
+                    with fence.transaction_owner(
+                        decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
+                    ) as owner:
                         assert fence.verify_for_update(owner, root).checkpoint.sequence == 0
             assert owner is not None and not owner.active
         finally:

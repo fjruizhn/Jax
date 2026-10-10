@@ -161,9 +161,6 @@ class RuleLimits:
             raise AuthorityEventValidationError("limites debe ser LimitesObligatorios de la regla")
         if self.tope is not None and type(self.tope) is not Tope:
             raise AuthorityEventValidationError("tope debe ser el Tope de la regla")
-        if limites.quantity is None and limites.amount is None and limites.frequency is None \
-                and self.tope is None:
-            raise AuthorityEventValidationError("RuleLimits vacío")
         if limites.quantity is not None:
             if type(limites.quantity) is not Cantidad:
                 raise AuthorityEventValidationError("quantity debe ser Cantidad")
@@ -203,6 +200,12 @@ def limites_de(regla: ReglaValidada, catalogo: CatalogoTopes) -> RuleLimits:
     """Los límites de la regla validada, comprobados contra el catálogo sellado."""
     if type(regla) is not ReglaValidada:
         raise AuthorityEventValidationError("limites_de requiere una ReglaValidada")
+    if (regla.action_class == "OBLIGATING"
+            and regla.obligation_limits.quantity is None
+            and regla.obligation_limits.amount is None
+            and regla.obligation_limits.frequency is None
+            and regla.tope is None):
+        raise AuthorityEventValidationError("RuleLimits vacío no autoriza reglas OBLIGATING")
     limites = object.__new__(RuleLimits)       # sin __init__: no hay otra puerta
     for nombre, valor in (("catalogo", catalogo), ("limites", regla.obligation_limits),
                           ("tope", regla.tope), ("rule_id", regla.rule_id),

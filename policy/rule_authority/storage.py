@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
-import logging
 from typing import Callable
 
 from jax.faro.catalogo_topes import CatalogoTopes
@@ -18,15 +17,15 @@ from .permit import (RulePermit, RulePermitConsumption, RulePermitConsumptionDra
 from .providers import AlmacenCheckpointAuditoriaBloqueable
 
 
-_LOG = logging.getLogger(__name__)
 _DECISION_DOMAIN = "JAX-FARO-RULE-AUTHORITY-DECISION"
 _DECISION_VERSION = "1"
 _CATALOG_DOMAIN = "JAX-FARO-RULE-CATALOG"
 _CATALOG_VERSION = "1"
-_DECISION_FIELDS = frozenset({
+_DECISION_FIELDS_V1 = frozenset({
     "request_id", "request_hash", "request_catalog_hash", "status",
     "required_rule_id", "reason_code", "decided_at_utc",
 })
+_DECISION_FIELDS = _DECISION_FIELDS_V1 | {"request"}
 _PERMIT_DOMAIN = "JAX-FARO-RULE-AUTHORITY-PERMIT-RECORD"
 _PERMIT_VERSION = "1"
 _CONSUMPTION_RECORD_DOMAIN = "JAX-FARO-RULE-AUTHORITY-CONSUMPTION-RECORD"
@@ -35,9 +34,11 @@ _PERMIT_FIELDS = frozenset({
     "permit_id", "request_id", "request_hash", "rule_id", "rule_path",
     "rule_blob_oid", "rule_content_hash", "policy_revision", "policy_tree_oid",
     "policy_snapshot_hash", "ratification_event_id", "authority_ledger_checkpoint",
-    "stop_checkpoint", "capability_id", "capability_version", "capability_class",
+    "stop_checkpoint", "capability_id", "policy_repository_id",
+    "capability_contract_id", "capability_version", "capability_class",
     "capability_limits", "issued_at_utc", "expires_at_utc", "permit_hash",
 })
+_PERMIT_LEGACY_FIELDS = _PERMIT_FIELDS - {"policy_repository_id", "capability_contract_id"}
 
 
 class RuleAuthorityCommittedCheckpointError(RuleAuthorityStorageError):
@@ -72,8 +73,9 @@ def _catalog_hash(catalog) -> str:
     return domain_hash(_CATALOG_DOMAIN, _CATALOG_VERSION, _catalog_projection(catalog))
 
 
-def _decision_projection(decision: RuleDecision, request_catalog_hash: str) -> dict[str, object]:
-    return {
+def _decision_projection(decision: RuleDecision, request_catalog_hash: str,
+                         request: RuleEvaluationRequest | None = None) -> dict[str, object]:
+    projection = {
         "request_id": decision.request_id,
         "request_hash": decision.request_hash,
         "request_catalog_hash": request_catalog_hash,
@@ -84,6 +86,9 @@ def _decision_projection(decision: RuleDecision, request_catalog_hash: str) -> d
             timespec="microseconds"
         ).replace("+00:00", "Z"),
     }
+    if request is not None:
+        projection["request"] = request.canonical_projection()
+    return projection
 
 
 def _record_hash(sequence: int, request_id: str, previous_hash: str | None,
@@ -170,284 +175,334 @@ class MariaDBRuleDecisionStore:
             if connection is not None:
                 connection.close()
 
-    def record(self, request: RuleEvaluationRequest, decision: RuleDecision) -> RuleDecision:
-        if not isinstance(request, RuleEvaluationRequest) or not isinstance(decision, RuleDecision):
-            raise TypeError("record requiere RuleEvaluationRequest y RuleDecision")
-        if (decision.request_id != request.request_id
-                or decision.request_hash != request.request_hash
-                or decision.required_rule_id != request.rule_id):
-            raise AuthorityStateError("decisión no corresponde a la solicitud")
-        if decision.status is RuleDecisionStatus.PERMIT:
-            raise RuleAuthorityStorageError(
-                "PERMIT requiere insertar RulePermit en la misma transacción (paso 6)"
-            )
+    def recover_durable_evaluation(self, request: RuleEvaluationRequest
+                                   ) -> tuple[RuleDecision, RulePermit | None] | None:
+        """Read an idempotent result under the RA checkpoint fence only.
 
-        if self._checkpoint_store is not None:
-            with self._checkpoint_store.locked():
-                return self._record_transaction(request, decision)
-        return self._record_transaction(request, decision)
-
-    def _record_transaction(self, request: RuleEvaluationRequest,
-                            decision: RuleDecision) -> RuleDecision:
-        request_catalog_hash = _catalog_hash(request.catalogo)
-        projection = _decision_projection(decision, request_catalog_hash)
-        canonical = canonical_bytes(projection)
-        connection = None
-        try:
-            connection = self._connect()
-            connection.begin()
-            with connection.cursor() as cursor:
-                # Acquire the singleton first. This serializes writers before
-                # any missing-key/gap lock can be held while waiting for it.
-                cursor.execute(
-                    "SELECT audit_sequence,head_hash FROM rule_authority_audit_head "
-                    "WHERE singleton=1 FOR UPDATE"
-                )
-                head = cursor.fetchone()
-                if head is None or type(head[0]) is not int or head[0] < 0:
-                    raise RuleAuthorityStorageError("audit head ausente o inválido")
-                checkpoint_head = None
-                if self._checkpoint_store is not None:
-                    from .trusted_checkpoint import RULE_AUDIT_GENESIS_HEAD
-
-                    checkpoint_head = self._checkpoint_store.head_actual()
-                    expected_head = (
-                        RULE_AUDIT_GENESIS_HEAD if head[0] == 0 and head[1] is None
-                        else head[1]
-                    )
-                    if (type(expected_head) is not str
-                            or checkpoint_head != expected_head
-                            or self._checkpoint_store.confirmar(checkpoint_head) is not True):
-                        raise RuleAuthorityStorageError(
-                            "checkpoint externo no coincide con el audit head DB"
-                        )
-                existing = self._select_request(cursor, request.request_id)
-                if existing is not None:
-                    if existing[1] != request_catalog_hash:
-                        raise AuthorityStateError("request_id reutilizado con otro catálogo")
-                    stored = self._decode_row(request.request_id, existing, request.catalogo)
-                    if stored.request_hash != request.request_hash:
-                        raise AuthorityStateError("request_id reutilizado con otro hash")
-                    if (self._checkpoint_store is not None
-                            and self._checkpoint_store.confirmar(existing[8]) is not True):
-                        raise RuleAuthorityStorageError(
-                            "checkpoint externo no contiene la decisión idempotente"
-                        )
-                    connection.commit()
-                    return stored
-                sequence = head[0] + 1
-                previous_hash = head[1]
-                record_hash = _record_hash(sequence, request.request_id, previous_hash, projection)
-                cursor.execute(
-                    "INSERT INTO rule_decisions "
-                    "(request_id,request_hash,request_catalog_hash,required_rule_id,status,"
-                    "reason_code,decided_at_utc,canonical_decision,previous_record_hash,"
-                    "record_hash,audit_sequence) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                    (
-                        request.request_id, request.request_hash, request_catalog_hash,
-                        decision.required_rule_id, decision.status.value, decision.reason_code,
-                        decision.decided_at_utc.astimezone(timezone.utc).replace(tzinfo=None),
-                        canonical, previous_hash, record_hash, sequence,
-                    ),
-                )
-                cursor.execute(
-                    "UPDATE rule_authority_audit_head SET audit_sequence=%s,head_hash=%s,"
-                    "head_kind='DECISION',head_key=%s WHERE singleton=1 AND audit_sequence=%s",
-                    (sequence, record_hash, request.request_id, sequence - 1),
-                )
-                if cursor.rowcount != 1:
-                    raise RuleAuthorityStorageError("audit head cambió durante la transacción")
-            connection.commit()
-            if self._checkpoint_store is not None:
-                try:
-                    self._checkpoint_store.publicar(record_hash, anterior=checkpoint_head)
-                    if self._checkpoint_store.confirmar(record_hash) is not True:
-                        raise RuleAuthorityStorageError(
-                            "checkpoint externo no confirma el head recién publicado"
-                        )
-                except Exception as exc:
-                    raise RuleAuthorityStorageError(
-                        "decisión confirmada en DB pero sin checkpoint externo confirmado"
-                    ) from exc
-            return decision
-        except (AuthorityStateError, RuleAuthorityStorageError) as exc:
-            if connection is not None:
-                try:
-                    connection.rollback()
-                except Exception as rollback_exc:  # fail-soft: el rollback fallido se registra y sale como RuleAuthorityStorageError (nunca se traga ni deja escapar un error crudo); la conexión se cierra y MariaDB revierte sola la transacción abierta
-                    _LOG.exception("rollback de Rule Authority falló; se relanza como error tipado")
-                    raise RuleAuthorityStorageError("no se pudo persistir la decisión") from exc
-            raise
-        except Exception as exc:
-            if connection is not None:
-                try:
-                    connection.rollback()
-                except Exception:  # fail-soft: el rollback fallido se registra y el error original se relanza como RuleAuthorityStorageError; la conexión se cierra y MariaDB revierte sola la transacción abierta
-                    _LOG.exception("rollback de Rule Authority falló; se relanza el error original")
-            raise RuleAuthorityStorageError("no se pudo persistir la decisión") from exc
-        finally:
-            if connection is not None:
-                connection.close()
-
-    def record_permit(self, request: RuleEvaluationRequest, decision: RuleDecision,
-                      evaluated_permit: _EvaluatedPermit) -> RulePermit:
-        """Atomically insert PERMIT + RulePermit, then anchor the committed head.
-
-        No caller receives a store-sealed permit unless the database transaction
-        committed and the external checkpoint log confirms the exact permit record.
+        This precedes mutable providers and Block 4 for retries.  A miss is
+        merely a miss; initial evaluation must later use the shared owner.
         """
+        if type(request) is not RuleEvaluationRequest:
+            raise TypeError("recuperación requiere RuleEvaluationRequest exacta")
         if self._checkpoint_store is None:
-            raise RuleAuthorityStorageError("PERMIT requiere checkpoint externo durable")
-        if (type(request) is not RuleEvaluationRequest or type(decision) is not RuleDecision
-                or type(evaluated_permit) is not _EvaluatedPermit
-                or not evaluated_permit._is_kernel_sealed()):
-            raise TypeError("record_permit requiere una evaluación sellada del kernel")
-        permit_draft = evaluated_permit._draft
-        if type(permit_draft) is not RulePermitDraft:
-            raise TypeError("evaluación sellada no contiene RulePermitDraft")
-        if (decision.status is not RuleDecisionStatus.PERMIT
-                or decision.reason_code is not None
-                or decision.request_id != request.request_id
-                or decision.request_hash != request.request_hash
-                or decision.required_rule_id != request.rule_id):
-            raise AuthorityStateError("decisión PERMIT no corresponde a la solicitud")
-        if (permit_draft.request_id != request.request_id
-                or permit_draft.request_hash != request.request_hash
-                or permit_draft.rule_id != request.rule_id
-                or permit_draft.issued_at_utc.astimezone(timezone.utc)
-                != decision.decided_at_utc.astimezone(timezone.utc)):
-            raise AuthorityStateError("RulePermit no corresponde a la decisión/request")
-
-        permit = _trusted_permit(permit_draft)
-        permit_projection = dict(permit.projection())
-        if frozenset(permit_projection) != _PERMIT_FIELDS:
-            raise RuleAuthorityStorageError("proyección RulePermit no coincide con el contrato de persistencia")
-        permit_payload = canonical_bytes(permit_projection)
-        request_catalog_hash = _catalog_hash(request.catalogo)
-        decision_projection = _decision_projection(decision, request_catalog_hash)
-        canonical_decision = canonical_bytes(decision_projection)
+            raise RuleAuthorityStorageError("recuperación requiere checkpoint Rule Authority durable")
         connection = None
         try:
             with self._checkpoint_store.locked():
                 connection = self._connect()
                 connection.begin()
                 with connection.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT audit_sequence,head_hash FROM rule_authority_audit_head "
-                        "WHERE singleton=1 FOR UPDATE"
-                    )
+                    cursor.execute("SELECT audit_sequence,head_hash FROM rule_authority_audit_head WHERE singleton=1 FOR UPDATE")
                     head = cursor.fetchone()
-                    if head is None or type(head[0]) is not int or head[0] < 0:
-                        raise RuleAuthorityStorageError("audit head ausente o inválido")
                     from .trusted_checkpoint import RULE_AUDIT_GENESIS_HEAD
-
-                    checkpoint_head = self._checkpoint_store.head_actual()
-                    expected_head = (RULE_AUDIT_GENESIS_HEAD if head[0] == 0 and head[1] is None
-                                     else head[1])
-                    if (type(expected_head) is not str or checkpoint_head != expected_head
-                            or self._checkpoint_store.confirmar(checkpoint_head) is not True):
-                        raise RuleAuthorityStorageError(
-                            "checkpoint externo no coincide con el audit head DB"
-                        )
-
-                    existing = self._select_request(cursor, request.request_id)
-                    if existing is not None:
-                        if (existing[1] != request_catalog_hash
-                                or existing[0] != request.request_hash
-                                or existing[2] != request.rule_id):
-                            raise AuthorityStateError("request_id reutilizado con otro hash/catálogo/regla")
-                        if existing[3] != RuleDecisionStatus.PERMIT.value:
-                            raise AuthorityStateError("request_id ya tiene decisión distinta de PERMIT")
-                        stored_decision = self._decode_row(
-                            request.request_id, existing, request.catalogo, allow_permit=True
-                        )
+                    if (not isinstance(head, tuple) or type(head[0]) is not int):
+                        raise RuleAuthorityStorageError("audit head ausente o inválido")
+                    expected = RULE_AUDIT_GENESIS_HEAD if head[0] == 0 and head[1] is None else head[1]
+                    if (type(expected) is not str or self._checkpoint_store.head_actual() != expected
+                            or self._checkpoint_store.confirmar(expected) is not True):
+                        raise RuleAuthorityStorageError("checkpoint externo no coincide con audit head DB")
+                    row = self._select_request(cursor, request.request_id)
+                    if row is None:
+                        connection.commit()
+                        return None
+                    if (row[0] != request.request_hash or row[1] != _catalog_hash(request.catalogo)
+                            or row[2] != request.rule_id):
+                        raise AuthorityStateError("request_id reutilizado con otro hash/catálogo/regla")
+                    decision = self._decode_row(request.request_id, row, request.catalogo, allow_permit=True)
+                    permit = None
+                    if decision.status is RuleDecisionStatus.PERMIT:
                         permit_row = self._select_permit(cursor, request.request_id)
                         if permit_row is None:
-                            raise RuleAuthorityStorageError("PERMIT existente sin RulePermit durable")
-                        stored_permit = self._decode_permit_row(permit_row)
-                        if dict(stored_permit.projection()) != permit_projection:
-                            raise AuthorityStateError("request_id reintentado con RulePermit distinto")
-                        if self._checkpoint_store.confirmar(permit_row[23]) is not True:
-                            raise RuleAuthorityStorageError("checkpoint no contiene RulePermit idempotente")
-                        connection.commit()
-                        return stored_permit
-
-                    decision_sequence = head[0] + 1
-                    decision_previous = head[1]
-                    decision_hash = _record_hash(
-                        decision_sequence, request.request_id, decision_previous,
-                        decision_projection,
-                    )
-                    cursor.execute(
-                        "INSERT INTO rule_decisions "
-                        "(request_id,request_hash,request_catalog_hash,required_rule_id,status,"
-                        "reason_code,decided_at_utc,canonical_decision,previous_record_hash,"
-                        "record_hash,audit_sequence) VALUES (%s,%s,%s,%s,'PERMIT',NULL,%s,%s,%s,%s,%s)",
-                        (request.request_id, request.request_hash, request_catalog_hash,
-                         request.rule_id, decision.decided_at_utc.astimezone(timezone.utc).replace(tzinfo=None),
-                         canonical_decision, decision_previous, decision_hash, decision_sequence),
-                    )
-                    permit_sequence = decision_sequence + 1
-                    permit_hash = _permit_record_hash(
-                        permit_sequence, permit.permit_id, decision_hash, permit_projection,
-                    )
-                    cursor.execute(
-                        "INSERT INTO rule_permits "
-                        "(permit_id,request_id,request_hash,rule_id,rule_path,rule_blob_oid,"
-                        "rule_content_hash,policy_revision,policy_tree_oid,policy_snapshot_hash,"
-                        "ratification_event_id,authority_ledger_checkpoint,stop_checkpoint,"
-                        "capability_id,capability_version,capability_class,capability_limits,"
-                        "issued_at_utc,expires_at_utc,permit_hash,canonical_payload,"
-                        "previous_record_hash,record_hash,audit_sequence) "
-                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                        (permit.permit_id, request.request_id, request.request_hash,
-                         permit.rule_id, permit.rule_path, permit.rule_blob_oid,
-                         permit.rule_content_hash, permit.policy_revision, permit.policy_tree_oid,
-                         permit.policy_snapshot_hash, permit.ratification_event_id,
-                         canonical_bytes(permit.authority_ledger_checkpoint),
-                         canonical_bytes(permit.stop_checkpoint), permit.capability_id,
-                         permit.capability_version, permit.capability_class,
-                         canonical_bytes(permit.capability_limits),
-                         decision.decided_at_utc.astimezone(timezone.utc).replace(tzinfo=None),
-                         permit.expires_at_utc.astimezone(timezone.utc).replace(tzinfo=None),
-                         permit.permit_hash, permit_payload, decision_hash, permit_hash,
-                         permit_sequence),
-                    )
-                    cursor.execute(
-                        "UPDATE rule_authority_audit_head SET audit_sequence=%s,head_hash=%s,"
-                        "head_kind='PERMIT',head_key=%s WHERE singleton=1 AND audit_sequence=%s",
-                        (permit_sequence, permit_hash, permit.permit_id, head[0]),
-                    )
-                    if cursor.rowcount != 1:
-                        raise RuleAuthorityStorageError("audit head cambió durante la transacción PERMIT")
+                            raise RuleAuthorityStorageError("PERMIT recuperado sin RulePermit")
+                        permit = self._decode_permit_row(permit_row)
+                        if self._checkpoint_store.confirmar(permit_row[-2]) is not True:
+                            raise RuleAuthorityStorageError("checkpoint no contiene RulePermit recuperado")
+                    elif self._checkpoint_store.confirmar(row[8]) is not True:
+                        raise RuleAuthorityStorageError("checkpoint no contiene decisión recuperada")
                 connection.commit()
-                try:
-                    self._checkpoint_store.publicar(permit_hash, anterior=checkpoint_head)
-                    if self._checkpoint_store.confirmar(permit_hash) is not True:
-                        raise RuleAuthorityStorageError("checkpoint no confirma el RulePermit recién publicado")
-                except Exception as exc:
-                    raise RuleAuthorityStorageError(
-                        "PERMIT confirmado en DB pero sin checkpoint externo confirmado"
-                    ) from exc
-                return permit
+                return decision, permit
         except (AuthorityStateError, RuleAuthorityStorageError):
             if connection is not None:
-                try:
-                    connection.rollback()
-                except Exception:  # fail-soft: registrar rollback fallido conserva como primario el error de estado original
-                    _LOG.exception("rollback de Rule Authority PERMIT falló")
+                connection.rollback()
             raise
         except Exception as exc:
             if connection is not None:
-                try:
-                    connection.rollback()
-                except Exception:  # fail-soft: registrar rollback fallido conserva como primario el error de persistencia original
-                    _LOG.exception("rollback de Rule Authority PERMIT falló")
-            raise RuleAuthorityStorageError("no se pudo persistir PERMIT + RulePermit") from exc
+                connection.rollback()
+            raise RuleAuthorityStorageError("no se pudo recuperar evaluación durable") from exc
         finally:
             if connection is not None:
                 connection.close()
+
+    def record(self, request: RuleEvaluationRequest, decision: RuleDecision) -> RuleDecision:
+        """Closed legacy API; evaluations must share Block-4 verification."""
+        raise RuleAuthorityStorageError(
+            "record standalone está cerrado: use record_evaluation_in_transaction con Block 4"
+        )
+
+    def record_permit(self, request: RuleEvaluationRequest, decision: RuleDecision,
+                      evaluated_permit: _EvaluatedPermit) -> RulePermit:
+        """Closed legacy API; production PERMIT writes require the shared Block-4 owner."""
+        raise RuleAuthorityStorageError(
+            "record_permit standalone está cerrado: use record_evaluation_in_transaction con Block 4"
+        )
+
+    def recover_evaluation_in_transaction(
+        self, transaction_owner, request: RuleEvaluationRequest
+    ) -> tuple[RuleDecision, RulePermit | None] | None:
+        """Recover an exact durable outcome before reading mutable providers.
+
+        This is deliberately called after Block 4 verification and while the
+        two checkpoint fences are held.  A hit is a complete idempotent result;
+        callers must not re-evaluate the current pin, STOP or clock first.
+        A miss leaves the Rule Authority audit row locked for the subsequent
+        append on the same EVALUATION owner.
+        """
+        self._require_evaluation_owner(transaction_owner)
+        if type(request) is not RuleEvaluationRequest:
+            raise TypeError("recuperación requiere RuleEvaluationRequest exacta")
+        request_catalog_hash = _catalog_hash(request.catalogo)
+        self._checked_audit_head_for_evaluation(transaction_owner)
+        cursor = transaction_owner._cursor
+        existing = self._select_request(cursor, request.request_id)
+        if existing is None:
+            return None
+        if (existing[0] != request.request_hash or existing[1] != request_catalog_hash
+                or existing[2] != request.rule_id):
+            raise AuthorityStateError("request_id reutilizado con otro hash/catálogo/regla")
+        stored_decision = self._decode_row(
+            request.request_id, existing, request.catalogo, allow_permit=True
+        )
+        if self._checkpoint_store.confirmar(existing[8]) is not True:
+            raise RuleAuthorityStorageError(
+                "checkpoint externo no contiene la decisión idempotente")
+        if stored_decision.status is not RuleDecisionStatus.PERMIT:
+            return stored_decision, None
+        permit_row = self._select_permit(cursor, request.request_id)
+        if permit_row is None:
+            raise RuleAuthorityStorageError("PERMIT existente sin RulePermit durable")
+        stored_permit = self._decode_permit_row(permit_row)
+        if self._checkpoint_store.confirmar(permit_row[-2]) is not True:
+            raise RuleAuthorityStorageError(
+                "checkpoint externo no contiene RulePermit idempotente")
+        return stored_decision, stored_permit
+
+    def _require_evaluation_owner(self, transaction_owner) -> None:
+        from policy.authority_ledger.storage import (
+            AuthorityLedgerTransactionPurpose,
+            MariaDBAuthorityLedgerTransactionOwner,
+        )
+
+        if type(transaction_owner) is not MariaDBAuthorityLedgerTransactionOwner:
+            raise AuthorityStateError("evaluación requiere transaction owner MariaDB sellado")
+        if transaction_owner._rule_authority_decision_store is not self:
+            raise AuthorityStateError("transaction owner no pertenece a este decision-store")
+        if (not transaction_owner.active or not transaction_owner._verified
+                or transaction_owner.purpose is not AuthorityLedgerTransactionPurpose.EVALUATION
+                or transaction_owner._permit_locked):
+            raise AuthorityStateError("evaluación requiere owner EVALUATION verificado sin permit lock")
+        if self._checkpoint_store is None:
+            raise RuleAuthorityStorageError("evaluación requiere checkpoint Rule Authority durable")
+
+    def _checked_audit_head_for_evaluation(self, transaction_owner) -> tuple[int, str | None, str]:
+        from .trusted_checkpoint import RULE_AUDIT_GENESIS_HEAD
+
+        if transaction_owner._audit_head_locked:
+            head = transaction_owner._locked_audit_head
+            if (not isinstance(head, tuple) or len(head) != 2
+                    or type(head[0]) is not int):
+                raise AuthorityStateError("owner EVALUATION perdió audit head bloqueado")
+            audit_sequence, previous_hash = head
+        else:
+            audit_sequence, previous_hash = transaction_owner.lock_rule_authority_audit_head_for_update()
+        checkpoint_head = self._checkpoint_store.head_actual()
+        expected_head = (
+            RULE_AUDIT_GENESIS_HEAD if audit_sequence == 0 and previous_hash is None
+            else previous_hash
+        )
+        if (type(expected_head) is not str or checkpoint_head != expected_head
+                or self._checkpoint_store.confirmar(checkpoint_head) is not True):
+            raise RuleAuthorityStorageError(
+                "checkpoint externo no coincide con el audit head DB antes de evaluar")
+        return audit_sequence, previous_hash, checkpoint_head
+
+    def record_evaluation_in_transaction(
+        self,
+        transaction_owner,
+        request: RuleEvaluationRequest,
+        decision: RuleDecision,
+        evaluated_permit: _EvaluatedPermit | None,
+    ) -> tuple[RuleDecision, RulePermit | None]:
+        """Append an evaluated decision under the already-verified shared owner.
+
+        The caller obtains ``transaction_owner`` only from Block 4's checkpoint
+        fence.  Thus the Block 4 replay, the Rule Authority audit-row lock, the
+        decision (and, for PERMIT, its permit) and the database commit form one
+        linearized operation.  The external Rule Authority checkpoint is
+        published only after the DB commit and while both checkpoint fences are
+        still held; a publication failure is a durable fail-closed outcome.
+        """
+        self._require_evaluation_owner(transaction_owner)
+        if type(request) is not RuleEvaluationRequest or type(decision) is not RuleDecision:
+            raise TypeError("evaluación requiere RuleEvaluationRequest y RuleDecision exactas")
+        if (decision.request_id != request.request_id
+                or decision.request_hash != request.request_hash
+                or decision.required_rule_id != request.rule_id):
+            raise AuthorityStateError("decisión no corresponde a la solicitud")
+
+        request_catalog_hash = _catalog_hash(request.catalogo)
+        decision_projection = _decision_projection(decision, request_catalog_hash, request)
+        canonical_decision = canonical_bytes(decision_projection)
+
+        try:
+            audit_sequence, previous_hash, checkpoint_head = (
+                self._checked_audit_head_for_evaluation(transaction_owner)
+            )
+
+            cursor = transaction_owner._cursor
+            existing = self._select_request(cursor, request.request_id)
+            if existing is not None:
+                if (existing[0] != request.request_hash or existing[1] != request_catalog_hash
+                        or existing[2] != request.rule_id):
+                    raise AuthorityStateError("request_id reutilizado con otro hash/catálogo/regla")
+                stored_decision = self._decode_row(
+                    request.request_id, existing, request.catalogo, allow_permit=True
+                )
+                if self._checkpoint_store.confirmar(existing[8]) is not True:
+                    raise RuleAuthorityStorageError(
+                        "checkpoint externo no contiene la decisión idempotente")
+                if stored_decision.status is RuleDecisionStatus.PERMIT:
+                    permit_row = self._select_permit(cursor, request.request_id)
+                    if permit_row is None:
+                        raise RuleAuthorityStorageError("PERMIT existente sin RulePermit durable")
+                    stored_permit = self._decode_permit_row(permit_row)
+                    if self._checkpoint_store.confirmar(permit_row[-2]) is not True:
+                        raise RuleAuthorityStorageError(
+                            "checkpoint externo no contiene RulePermit idempotente")
+                    permit = stored_permit
+                else:
+                    permit = None
+                transaction_owner._mark_evaluation_persisted()
+                close_error = transaction_owner._commit_evaluation_for_store()
+                if close_error is not None:
+                    raise RuleAuthorityCommittedCleanupError(
+                        "evaluación confirmada y anclada pero el cierre posterior al commit falló"
+                    ) from close_error
+                return stored_decision, permit
+
+            permit, permit_projection, permit_payload = self._validated_evaluation_permit(
+                request, decision, evaluated_permit
+            )
+
+            decision_sequence = audit_sequence + 1
+            decision_hash = _record_hash(
+                decision_sequence, request.request_id, previous_hash, decision_projection
+            )
+            cursor.execute(
+                "INSERT INTO rule_decisions "
+                "(request_id,request_hash,request_catalog_hash,required_rule_id,status,"
+                "reason_code,decided_at_utc,canonical_decision,previous_record_hash,"
+                "record_hash,audit_sequence) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (request.request_id, request.request_hash, request_catalog_hash,
+                 request.rule_id, decision.status.value, decision.reason_code,
+                 decision.decided_at_utc.astimezone(timezone.utc).replace(tzinfo=None),
+                 canonical_decision, previous_hash, decision_hash, decision_sequence),
+            )
+
+            head_hash = decision_hash
+            head_sequence = decision_sequence
+            head_kind = "DECISION"
+            head_key = request.request_id
+            if permit is not None:
+                assert permit_projection is not None and permit_payload is not None
+                permit_sequence = decision_sequence + 1
+                permit_record_hash = _permit_record_hash(
+                    permit_sequence, permit.permit_id, decision_hash, permit_projection
+                )
+                cursor.execute(
+                    "INSERT INTO rule_permits "
+                    "(permit_id,request_id,request_hash,rule_id,rule_path,rule_blob_oid,"
+                    "rule_content_hash,policy_revision,policy_tree_oid,policy_snapshot_hash,"
+                    "ratification_event_id,authority_ledger_checkpoint,stop_checkpoint,"
+                    "capability_id,policy_repository_id,capability_contract_id,"
+                    "capability_version,capability_class,capability_limits,"
+                    "issued_at_utc,expires_at_utc,permit_hash,canonical_payload,"
+                    "previous_record_hash,record_hash,audit_sequence) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (permit.permit_id, request.request_id, request.request_hash,
+                     permit.rule_id, permit.rule_path, permit.rule_blob_oid,
+                     permit.rule_content_hash, permit.policy_revision, permit.policy_tree_oid,
+                     permit.policy_snapshot_hash, permit.ratification_event_id,
+                     canonical_bytes(permit.authority_ledger_checkpoint),
+                     canonical_bytes(permit.stop_checkpoint), permit.capability_id,
+                     permit.policy_repository_id, permit.capability_contract_id,
+                     permit.capability_version, permit.capability_class,
+                     canonical_bytes(permit.capability_limits),
+                     decision.decided_at_utc.astimezone(timezone.utc).replace(tzinfo=None),
+                     permit.expires_at_utc.astimezone(timezone.utc).replace(tzinfo=None),
+                     permit.permit_hash, permit_payload, decision_hash, permit_record_hash,
+                     permit_sequence),
+                )
+                head_hash = permit_record_hash
+                head_sequence = permit_sequence
+                head_kind = "PERMIT"
+                head_key = permit.permit_id
+
+            cursor.execute(
+                "UPDATE rule_authority_audit_head SET audit_sequence=%s,head_hash=%s,"
+                "head_kind=%s,head_key=%s WHERE singleton=1 AND audit_sequence=%s",
+                (head_sequence, head_hash, head_kind, head_key, audit_sequence),
+            )
+            if cursor.rowcount != 1:
+                raise RuleAuthorityStorageError("audit head cambió durante la evaluación")
+            transaction_owner._mark_evaluation_persisted()
+            close_error = transaction_owner._commit_evaluation_for_store()
+            try:
+                self._checkpoint_store.publicar(head_hash, anterior=checkpoint_head)
+                if self._checkpoint_store.confirmar(head_hash) is not True:
+                    raise RuleAuthorityStorageError(
+                        "checkpoint externo no confirma la evaluación recién publicada")
+            except Exception as exc:
+                raise RuleAuthorityCommittedCheckpointError(
+                    "evaluación confirmada en DB pero sin checkpoint externo confirmado"
+                ) from exc
+            if close_error is not None:
+                raise RuleAuthorityCommittedCleanupError(
+                    "evaluación confirmada y anclada pero el cierre posterior al commit falló"
+                ) from close_error
+            return decision, permit
+        except (AuthorityStateError, RuleAuthorityStorageError):
+            raise
+        except Exception as exc:
+            raise RuleAuthorityStorageError("no se pudo persistir evaluación Rule Authority") from exc
+
+    @staticmethod
+    def _validated_evaluation_permit(
+        request: RuleEvaluationRequest,
+        decision: RuleDecision,
+        evaluated_permit: _EvaluatedPermit | None,
+    ) -> tuple[RulePermit | None, dict[str, object] | None, bytes | None]:
+        if decision.status is not RuleDecisionStatus.PERMIT:
+            if evaluated_permit is not None:
+                raise AuthorityStateError("decisión negativa no admite RulePermit")
+            return None, None, None
+        if (type(evaluated_permit) is not _EvaluatedPermit
+                or not evaluated_permit._is_kernel_sealed()):
+            raise AuthorityStateError("PERMIT requiere evaluación sellada del kernel")
+        draft = evaluated_permit._draft
+        if type(draft) is not RulePermitDraft:
+            raise AuthorityStateError("evaluación sellada no contiene RulePermitDraft")
+        if (draft.request_id != request.request_id
+                or draft.request_hash != request.request_hash
+                or draft.rule_id != request.rule_id
+                or draft.issued_at_utc.astimezone(timezone.utc)
+                != decision.decided_at_utc.astimezone(timezone.utc)):
+            raise AuthorityStateError("RulePermit no corresponde a la decisión/request")
+        permit = _trusted_permit(draft)
+        projection = dict(permit.projection())
+        if frozenset(projection) != _PERMIT_FIELDS:
+            raise RuleAuthorityStorageError(
+                "proyección RulePermit no coincide con el contrato de persistencia")
+        return permit, projection, canonical_bytes(projection)
 
     def consume_permit(self, transaction_owner, consumption_draft: RulePermitConsumptionDraft
                        ) -> RulePermitConsumption:
@@ -466,6 +521,108 @@ class MariaDBRuleDecisionStore:
             raise
         except Exception as exc:
             raise RuleAuthorityStorageError("no se pudo consumir RulePermit atómicamente") from exc
+
+    def load_consumption_request_in_transaction(self, transaction_owner, catalog):
+        """Load the canonical request only after permit and Block-4 locks are held."""
+        from policy.authority_ledger.storage import (
+            AuthorityLedgerTransactionPurpose,
+            MariaDBAuthorityLedgerTransactionOwner,
+        )
+
+        if (type(transaction_owner) is not MariaDBAuthorityLedgerTransactionOwner
+                or transaction_owner._rule_authority_decision_store is not self
+                or not transaction_owner.active or not transaction_owner._verified
+                or transaction_owner.purpose is not AuthorityLedgerTransactionPurpose.CONSUMPTION
+                or not transaction_owner._permit_locked):
+            raise AuthorityStateError(
+                "carga de solicitud requiere permit bloqueado y Block 4 verificado"
+            )
+        permit = transaction_owner._locked_permit
+        if type(permit) is not RulePermit or not permit._is_store_sealed():
+            raise AuthorityStateError("permit bloqueado no está sellado por Rule Authority")
+        cursor = transaction_owner._cursor
+        row = self._select_request(cursor, permit.request_id)
+        if row is None:
+            raise RuleAuthorityStorageError("RulePermit sin decisión durable")
+        decision = self._decode_row(permit.request_id, row, catalog, allow_permit=True)
+        if (decision.status is not RuleDecisionStatus.PERMIT
+                or decision.request_hash != permit.request_hash
+                or decision.required_rule_id != permit.rule_id):
+            raise RuleAuthorityStorageError("RulePermit no coincide con decisión PERMIT")
+        try:
+            decision_payload = json.loads(bytes(row[6]).decode("utf-8"))
+            request_projection = decision_payload["request"]
+        except Exception as exc:
+            raise RuleAuthorityStorageError(
+                "decisión durable carece de proyección completa de solicitud"
+            ) from exc
+        if type(request_projection) is not dict:
+            raise RuleAuthorityStorageError("proyección durable de solicitud inválida")
+
+        permit_row = self._select_permit(cursor, permit.request_id)
+        if permit_row is None:
+            raise RuleAuthorityStorageError("decisión PERMIT sin fila RulePermit")
+        persisted_permit = self._decode_permit_row(permit_row)
+        if persisted_permit.projection() != permit.projection():
+            raise RuleAuthorityStorageError("permit bloqueado difiere de fila durable")
+        if (self._checkpoint_store is None
+                or self._checkpoint_store.confirmar(row[8]) is not True
+                or self._checkpoint_store.confirmar(permit_row[-2]) is not True):
+            raise RuleAuthorityStorageError(
+                "checkpoint externo no contiene la decisión y RulePermit bloqueados"
+            )
+        return request_projection
+
+    def recover_consumption(self, permit_id: str, request_hash: str,
+                            consumption_request_id: str) -> RulePermitConsumption | None:
+        """Return only the exact durable attempt; a different retry ID is denied."""
+        if (type(permit_id) is not str or type(request_hash) is not str
+                or type(consumption_request_id) is not str):
+            raise TypeError("recuperación de consumo requiere identidades string exactas")
+        if self._checkpoint_store is None:
+            raise RuleAuthorityStorageError("recuperación de consumo requiere checkpoint durable")
+        connection = None
+        try:
+            with self._checkpoint_store.locked():
+                connection = self._connect()
+                connection.begin()
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT audit_sequence,head_hash FROM rule_authority_audit_head WHERE singleton=1 FOR UPDATE")
+                    head = cursor.fetchone()
+                    from .trusted_checkpoint import RULE_AUDIT_GENESIS_HEAD
+                    expected = (RULE_AUDIT_GENESIS_HEAD if head and head[0] == 0 and head[1] is None
+                                else (head[1] if head else None))
+                    if (type(expected) is not str or self._checkpoint_store.head_actual() != expected
+                            or self._checkpoint_store.confirmar(expected) is not True):
+                        raise RuleAuthorityStorageError("checkpoint externo no coincide con audit head DB")
+                    cursor.execute(
+                        "SELECT permit_id,request_hash,consumed_at_utc,canonical_payload,consumption_hash,"
+                        "previous_record_hash,record_hash,audit_sequence,consumption_request_id "
+                        "FROM rule_permit_consumptions WHERE permit_id=%s FOR UPDATE", (permit_id,))
+                    row = cursor.fetchone()
+                    if row is None:
+                        connection.commit()
+                        return None
+                    consumption, record_hash, _sequence = self._decode_consumption_row(row)
+                    if consumption.request_hash != request_hash:
+                        raise AuthorityStateError("permit ya consumido con otro request_hash")
+                    if consumption.consumption_request_id != consumption_request_id:
+                        raise AuthorityStateError("permit ya consumido con consumption_request_id distinto")
+                    if self._checkpoint_store.confirmar(record_hash) is not True:
+                        raise RuleAuthorityStorageError("checkpoint no contiene consumo recuperado")
+                connection.commit()
+                return consumption
+        except (AuthorityStateError, RuleAuthorityStorageError):
+            if connection is not None:
+                connection.rollback()
+            raise
+        except Exception as exc:
+            if connection is not None:
+                connection.rollback()
+            raise RuleAuthorityStorageError("no se pudo recuperar consumo durable") from exc
+        finally:
+            if connection is not None:
+                connection.close()
 
     def _finalize_consumption_in_transaction(self, transaction_owner, consumption_draft
                                              ) -> RulePermitConsumption:
@@ -492,6 +649,10 @@ class MariaDBRuleDecisionStore:
                 or locked_permit.permit_id != consumption_draft.permit_id
                 or locked_permit.request_hash != consumption_draft.request_hash):
             raise AuthorityStateError("consumo requiere RulePermit bloqueado, completo y sellado")
+        if locked_permit._has_consumption_bindings() is not True:
+            raise AuthorityStateError(
+                "RulePermit histórico sin binding de repositorio/contrato no es consumible"
+            )
         if self._checkpoint_store is None:
             raise RuleAuthorityStorageError("consumo requiere checkpoint Rule Authority durable")
 
@@ -644,7 +805,8 @@ class MariaDBRuleDecisionStore:
             "SELECT permit_id,request_id,request_hash,decision_status,rule_id,rule_path,"
             "rule_blob_oid,rule_content_hash,policy_revision,policy_tree_oid,"
             "policy_snapshot_hash,ratification_event_id,authority_ledger_checkpoint,"
-            "stop_checkpoint,capability_id,capability_version,capability_class,"
+            "stop_checkpoint,capability_id,policy_repository_id,capability_contract_id,"
+            "capability_version,capability_class,"
             "capability_limits,issued_at_utc,expires_at_utc,permit_hash,canonical_payload,"
             "previous_record_hash,record_hash,audit_sequence FROM rule_permits "
             "WHERE request_id=%s FOR UPDATE",
@@ -660,7 +822,8 @@ class MariaDBRuleDecisionStore:
         ) = row
         try:
             payload = json.loads(bytes(payload_bytes).decode("utf-8"))
-            if not isinstance(payload, dict) or frozenset(payload) != _DECISION_FIELDS:
+            if (not isinstance(payload, dict)
+                    or frozenset(payload) not in (_DECISION_FIELDS_V1, _DECISION_FIELDS)):
                 raise ValueError("proyección canónica cerrada inválida")
             if canonical_bytes(payload) != bytes(payload_bytes):
                 raise ValueError("proyección no canónica")
@@ -672,6 +835,15 @@ class MariaDBRuleDecisionStore:
                     or payload["status"] != status
                     or payload["reason_code"] != reason):
                 raise ValueError("columnas distintas de la proyección")
+            if frozenset(payload) == _DECISION_FIELDS:
+                if expected_catalog is None:
+                    raise ValueError("decisión v2 requiere solicitud para verificarla")
+                request_projection = expected_catalog.canonical_projection()
+                if payload["request"] != request_projection:
+                    raise ValueError("proyección completa de solicitud no coincide")
+                recomputed = domain_hash("JAX-FARO-RULE-REQUEST", "2", request_projection)
+                if recomputed != request_hash:
+                    raise ValueError("request_hash no coincide con la proyección persistida")
             if status == RuleDecisionStatus.PERMIT.value and not allow_permit:
                 raise ValueError("PERMIT está cerrado hasta el adapter atómico del paso 6")
             if request_catalog_hash != _catalog_hash(expected_catalog):
@@ -701,13 +873,15 @@ class MariaDBRuleDecisionStore:
         (permit_id, request_id, request_hash, decision_status, rule_id, rule_path,
          rule_blob_oid, rule_content_hash, policy_revision, policy_tree_oid,
          policy_snapshot_hash, ratification_event_id, authority_checkpoint,
-         stop_checkpoint, capability_id, capability_version, capability_class,
+         stop_checkpoint, capability_id, policy_repository_id, capability_contract_id,
+         capability_version, capability_class,
          capability_limits, issued_at, expires_at, stored_permit_hash,
          payload_bytes, previous_hash, stored_record_hash, sequence) = row
         try:
             raw = bytes(payload_bytes)
             payload = json.loads(raw.decode("utf-8"))
-            if type(payload) is not dict or frozenset(payload) != _PERMIT_FIELDS:
+            if (type(payload) is not dict
+                    or frozenset(payload) not in (_PERMIT_FIELDS, _PERMIT_LEGACY_FIELDS)):
                 raise ValueError("proyección RulePermit cerrada inválida")
             if canonical_bytes(payload) != raw:
                 raise ValueError("proyección RulePermit no canónica")
@@ -728,6 +902,11 @@ class MariaDBRuleDecisionStore:
                 "capability_class": capability_class,
                 "permit_hash": stored_permit_hash,
             }
+            if frozenset(payload) == _PERMIT_FIELDS:
+                columns["policy_repository_id"] = policy_repository_id
+                columns["capability_contract_id"] = capability_contract_id
+            elif policy_repository_id is not None or capability_contract_id is not None:
+                raise ValueError("RulePermit histórico tiene bindings SQL parciales")
             if decision_status != RuleDecisionStatus.PERMIT.value:
                 raise ValueError("RulePermit no enlaza una decisión PERMIT")
             if any(payload[name] != value for name, value in columns.items()):

@@ -1286,12 +1286,13 @@ jobs:
           # The shared canonicalizer fails closed unless the runtime supplies Unicode 16.
           python-version: "3.14"
       - run: python -m pip install pytest PyYAML==6.0.3 cryptography==49.0.0
-      - name: Faro Rule Authority -- store, permit y checkpoint (sin DB)
+      - name: Faro Rule Authority -- kernel, store, permit y checkpoint (sin DB)
         run: |
           set -o pipefail
           python -m pytest -q \
             tests/policy/test_faro_rule_authority_store.py \
             tests/policy/test_faro_rule_permit.py \
+            tests/policy/test_faro_rule_authority_kernel.py \
             tests/policy/test_rule_authority_checkpoint.py \
             2>&1 | tee /tmp/faro-rule-authority-unit
           python3 .github/ci/piso.py verificar authority-rule-unit/tests /tmp/faro-rule-authority-unit || exit $?
@@ -2832,7 +2833,7 @@ jobs:
           JAX_AUTHORITY_LEDGER_DOCKER_CMD: docker
         run: |
           set -o pipefail
-          # Piso 33 (2026-10-10): CI midió 33 casos tras checkpoint/consumo; regresiones de manejo incluidas.
+          # Piso local 40 (2026-10-10): tras reapilar se añadieron dos pruebas de evaluación DENY compartida; CI debe confirmar las 40 pasadas.
           python -m pytest -q tests/policy/test_authority_ledger_storage_mariadb.py tests/policy/test_authority_ledger_append_validation_mariadb.py 2>&1 | tee /tmp/authority-ledger-mariadb
           python3 .github/ci/piso.py verificar authority-ledger-mariadb/integration /tmp/authority-ledger-mariadb || exit $?
       - name: Block 4 rule ratification events -- piso exacto

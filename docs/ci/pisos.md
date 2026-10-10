@@ -4652,11 +4652,11 @@ denormalizadas (incluido `previous_event_hash`), lectura histórica exacta y per
 
 ## `authority-ledger-mariadb/integration`
 
-Piso de trabajo (2026-10-10): `^33 passed in `. La corrida CI 38032592015 contó 33 casos: 28
-pasaron y 5 fallaron por un import de test ausente, tres tests que no finalizaban explícitamente
-su transaction owner después de capturar el error, y una aserción de cursor incompatible con el
-contrato sellado. Se corrigieron esos tests; la siguiente corrida del SHA actualizado debe
-confirmar 33 pasadas antes de cerrar el piso. La base #377 tenía 5 pruebas en MariaDB 12.3.3 efímera
+Piso pendiente de confirmación CI (2026-10-10): `^40 passed in `. La corrida CI 38032592015
+contó 33 casos; después se añadieron cinco regresiones de transaction owner/checkpoint y dos
+pruebas de evaluación DENY bajo el owner compartido (persistencia/retry y rollback). La
+colección local exacta confirma 40 casos, pero Docker no está disponible en este host para
+ejecutarlos. La CI del SHA reapilado debe confirmar las 40 pasadas. La base #377 tenía 5 pruebas en MariaDB 12.3.3 efímera
 `--network none`; la prueba aplica ambas migraciones, valida el upgrade nullable→NOT NULL,
 provisiona la cuenta de aplicación con el script versionado, genera una llave Ed25519 de prueba
 y valida firma → INSERT → lectura → reconstrucción → hash/firma y replay. También prueba que
@@ -4674,13 +4674,15 @@ formatos. La medición real con Docker del 2026-10-09 confirmó 10 en Python 3.1
 
 ## `authority-rule-storage/mariadb`
 
-Piso vigente: `^18 passed in `. Medido por CI run `38035001043`, SHA
+Piso pendiente de confirmación CI: `^19 passed in `. La CI run `38035001043`, SHA
 `3857b4bc84a315346eedd11a9b32640427e2099e`, con el comando del workflow y MariaDB `12.3.3`
-efímera (`--network none`, socket Unix). Los 18 casos cubren rollback del append parcial y de
-fallos de escritura, idempotencia y binding de solicitud/hash/catálogo, proyección del catálogo,
+efímera (`--network none`, socket Unix). Los casos retenidos cubren proyección del catálogo,
 triggers append-only, restricciones de permisos y OIDs, planes indexados, provisioning de mínimo
-privilegio y persistencia/consumo de permiso con checkpoint externo. El piso anterior de 12,
-medido el 2026-10-09, precede a la ampliación de esta suite. En la corrida previa, el fixture
+privilegio y lectura histórica de permisos. La suite de producción ya no prueba APIs de escritura
+standalone que se eliminaron para exigir el owner Block 4; siete variantes comprueban que
+`record()` rechaza solicitudes DENY/MISSING_RULE/PERMIT y entradas inválidas/mismatched antes de
+abrir la base o mover el checkpoint. La colección local da 19 casos; CI del SHA reapilado debe
+confirmar el resultado completo. En la corrida previa, el fixture
 solo creaba el schema Rule Authority, pero provisioning también consulta tablas de verificación
 Block 4 en `jax_authority`. El fixture ahora aplica primero la migración `authority_ledger` en la
 misma MariaDB efímera. El run confirmó 18 passed; la corrida completa del job aún falló porque el
@@ -4699,11 +4701,14 @@ comando exacto del workflow. Medición real con Docker: `10 passed`.
 
 ## `authority-rule-unit/tests`
 
-Piso inicial `^25 passed in `, medido localmente el 2026-10-10 con el comando del workflow y
-`PyYAML==6.0.3`, `cryptography==49.0.0`. Se ejecuta bajo Python 3.14 para respetar Unicode 16,
-fijado por el canonizador compartido. El venv limpio Python 3.14.4 del 2026-10-10 dio
-`25 passed`; CI del SHA actualizado debe confirmar el piso.
-Corre sin base de datos las pruebas del store en memoria, el contrato de RulePermit y el
+Piso local `^44 passed in `, medido el 2026-10-10 con el comando del workflow sobre la rama de
+trabajo descendiente de #389 y `PyYAML==6.0.3`, `cryptography==49.0.0`. Incluye recuperación
+durable, identidad de retry y revalidación de `consume()`. Se ejecuta bajo Python 3.14 para
+respetar Unicode 16, fijado por el canonizador compartido. CI del SHA actualizado debe confirmar
+el piso.
+Corre sin base de datos las pruebas del kernel (límites individuales y falla cerrada ante
+argumentos sin matcher/frecuencia sin contador), store en memoria y rechazo de la API MariaDB
+de emisión fuera del owner Block 4, contrato de RulePermit y
 checkpoint externo (incluye serialización multiproceso, permisos iniciales del lock y cleanup
 de temporales abandonados). La integración MariaDB permanece en su job separado.
 
@@ -4717,7 +4722,10 @@ Antes: 8.
 
 ## `archivos-de-test-en-ci/pisos`
 
-Patrón vigente (2026-10-04): `^227 passed`
+Patrón vigente (2026-10-10, JAX#389): `^233 passed`. Medido en CI run `38044350914`
+sobre el SHA exacto `c78080442da81a468768a7af5b2c5b748ff56b37`; el job
+`archivos-de-test-en-ci` confirmó el piso. La medición local de los tres módulos del job da
+el mismo resultado (`233 passed`).
 
 Piso nuevo de la migración: `policy/tests/test_pisos_fuera_del_workflow.py` (permanente),
 `policy/tests/test_pisos_migracion_desde_master.py` (de migración, compara con la fotografía de
@@ -4776,7 +4784,8 @@ Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_
 cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-10, CI de #388 midió dos regresiones de checkpoint): `^1042 passed in `
+Piso local reapilado (2026-10-10): `^1044 passed in `. El conteo del CI exacto del SHA nuevo
+debe confirmarlo antes de cerrar el piso.
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4835,4 +4844,4 @@ El incremento acumulado desde master es +37. Medido sobre el head reapilado en P
 3.14.4 con la lista exacta del workflow: `1040 passed`, cero skipped; `piso.py verificar`
 rc=0.
 
-El CI exacto de `bc024578` midió `1042 passed`, cero skipped, frente al piso anterior de 1040. Las dos pruebas que elevan este conteo son `test_el_guard_nombra_el_checkpoint_de_auditoria_sin_confundirlo_con_block4` y `test_el_guard_rechaza_el_checkpoint_real_de_block4`, ambas en `test_rule_authority_providers.py`, que sí está en la lista de Identity Foundation. La aserción que pasa el checkpoint Block 4 al constructor MariaDB vive en `test_rule_authority_checkpoint.py`, fuera de esa lista, y se añadió a una prueba existente; no contribuye al +2. El piso queda alineado a 1042 en la corrección de esta cadena; debe confirmarlo la CI del SHA que la contiene.
+El CI exacto de `bc024578` midió `1042 passed`, cero skipped, frente al piso anterior de 1040. En la base local reapilada, el comando completo midió 1044; el delta local de pruebas de providers/modelos explica el +2 adicional. Se actualiza el patrón a 1044, pendiente de confirmación CI del SHA final.

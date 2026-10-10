@@ -12,6 +12,7 @@ from __future__ import annotations
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Iterator
 
 from policy.rule_authority.errors import (
@@ -28,6 +29,7 @@ from policy.rule_authority.providers import (
     ContratoCapability,
     EstadoStop,
     PinActivo,
+    RepositorioConfiable,
     VersionMonotonica,
     VistaLease,
 )
@@ -152,8 +154,15 @@ class PinFijo(_BaseConLeases):
     la procedencia es del GUARD (las pruebas necesitan un lease valido con un
     pin malo para demostrar que el guard lo niega)."""
 
-    def __init__(self, pin: TrustedPolicyPin, procedencia: str) -> None:
-        super().__init__(PinActivo(pin, procedencia))
+    def __init__(self, pin: TrustedPolicyPin, procedencia: str, *,
+                 repository_id: str | None = None, repository_path: Path | None = None) -> None:
+        binding = RepositorioConfiable(
+            repository_id=pin.repositorio if repository_id is None else repository_id,
+            repository_path=(Path(__file__).resolve().parents[2]
+                             if repository_path is None else repository_path),
+            procedencia=procedencia,
+        )
+        super().__init__(PinActivo(pin, binding))
 
 
 class StopFijo(_BaseConLeases):
