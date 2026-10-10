@@ -441,18 +441,32 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
     async def test_B2_archivos_del_mismo_trabajo_se_reparten_entre_hilos(self):
         self._archivo_en_workspace("p1.pdf")
         self._archivo_en_workspace("p2.pdf")
+        barrera = threading.Barrier(2, timeout=5)
+        hilos = set()
+        lock_hilos = threading.Lock()
+        fallos_barrera = []
 
         def _ingerir_lento(origen, trabajo, *, subruta=None):
-            time.sleep(0.3)
+            with lock_hilos:
+                hilos.add(threading.get_ident())
+            try:
+                barrera.wait()
+            except threading.BrokenBarrierError as exc:
+                # La ingesta convierte excepciones en resultados de error;
+                # conservar esta evidencia permite que el assert final falle
+                # con una causa clara si los trabajos se serializan.
+                fallos_barrera.append(exc)
+                raise
             return _ficha("e" * 64)
 
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_lento):
-            t0 = time.perf_counter()
             await self._ejecutar(job_id, UUID_PRUEBA, ["p1.pdf", "p2.pdf"])
-            dt = time.perf_counter() - t0
 
-        assert dt < 0.5, f"tardó {dt:.2f}s -- no se repartió entre los dos hilos disponibles"
+        resultados = json.loads(Path(self.store.get(job_id).result_path).read_text())
+        assert not fallos_barrera, "los dos archivos no alcanzaron juntos la barrera"
+        assert len(hilos) == 2, f"se usaron {len(hilos)} hilos distintos, no dos"
+        assert [r["estado"] for r in resultados] == ["ok", "ok"]
 
     # -- outer except: nunca deja running huérfano -----------------------
     async def test_una_excepcion_catastrofica_marca_failed_no_deja_running(self):
@@ -995,23 +1009,41 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         ventana no existe."""
         self._archivo_en_workspace("a.pdf")
         ingerir_mock = AsyncMock()
-        with patch.object(rutas_mod, "_STORE", self.store), \
-             patch.object(rutas_mod, "_EXECUTOR_OCR", self.executor), \
-             patch.object(rutas_mod, "_EXECUTOR_IO", self.executor_io), \
-             patch.object(rutas_mod, "_SEMAFORO_TRABAJOS", asyncio.Semaphore(2)), \
-             patch.object(rutas_mod.proyecto_activo, "identidad_activa_del_proyecto", AsyncMock(return_value=True)), \
-             patch.object(rutas_mod.ingesta, "ingerir", ingerir_mock):
-            creado = await rutas_mod.crear_trabajo(
-                rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=["a.pdf"]), _owned_request()
-            )
-            # SIN ceder el loop: el worker todavía no dio su primera vuelta.
-            respuesta = await rutas_mod.cancelar_trabajo(creado.job_id, _owned_request())
-            for _ in range(200):
-                if self.store.get(creado.job_id).status in (
-                    JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.FAILED,
-                ):
-                    break
-                await asyncio.sleep(0.01)
+        barrera = threading.Barrier(3, timeout=10)
+        liberar_workers = threading.Event()
+
+        def _ocupar_worker_ocr():
+            barrera.wait()
+            liberar_workers.wait(timeout=10)
+
+        # Ocupar ambos hilos antes de crear el trabajo garantiza que el
+        # worker quede en cola mientras cancelar_trabajo() cede el event loop
+        # al executor de I/O. Así se prueba el caso "cancelar antes de que
+        # arranque" sin depender de qué tarea gana una carrera de scheduling.
+        ocupantes = [self.executor.submit(_ocupar_worker_ocr) for _ in range(2)]
+        try:
+            barrera.wait()
+            with patch.object(rutas_mod, "_STORE", self.store), \
+                 patch.object(rutas_mod, "_EXECUTOR_OCR", self.executor), \
+                 patch.object(rutas_mod, "_EXECUTOR_IO", self.executor_io), \
+                 patch.object(rutas_mod, "_SEMAFORO_TRABAJOS", asyncio.Semaphore(2)), \
+                 patch.object(rutas_mod.proyecto_activo, "identidad_activa_del_proyecto", AsyncMock(return_value=True)), \
+                 patch.object(rutas_mod.ingesta, "ingerir", ingerir_mock):
+                creado = await rutas_mod.crear_trabajo(
+                    rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=["a.pdf"]), _owned_request()
+                )
+                respuesta = await rutas_mod.cancelar_trabajo(creado.job_id, _owned_request())
+        finally:
+            liberar_workers.set()
+            for ocupante in ocupantes:
+                ocupante.result(timeout=10)
+
+        for _ in range(200):
+            if self.store.get(creado.job_id).status in (
+                JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.FAILED,
+            ):
+                break
+            await asyncio.sleep(0.01)
 
         assert respuesta.estado == JobStatus.CANCELLING.value, respuesta
         # CRUDO (una entrada por línea del JSONL): el código de 146e0a5/f1d4298
