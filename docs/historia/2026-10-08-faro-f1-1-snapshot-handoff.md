@@ -267,3 +267,22 @@ no concede autoridad ni prueba el estado operativo actual.
 - El `TRASPASO.md` operacional de la rama se retiró del candidato para evitar
   publicar instrucciones de una sesión ya terminada. Este registro guarda el
   contexto histórico; no declara estado vivo de PR, CI ni autoridad.
+
+## #371 · auditorías y piso de Fase 0 · 2026-10-09
+
+- Hubo dos auditorías Tier 3 independientes sobre el SHA exacto
+  `bf0a11d940af4c67a6f8b015fc454c005685316e`. `audit_373_final` informó
+  APROBADO CON CAMBIOS, 0 BLOCK, 0 MAJOR y 2 MINOR. `audit_faro_heads` informó
+  APROBADO funcional, 0 BLOCK, 0 MAJOR y 3 MINOR: scan O(n) sin p95/RSS
+  (load test 0.9); `tests/test_faro_aviso.py:1081–1124` no aísla reinicio y
+  procesos cortos ni LRU > 32; y `test_faro_rule_authority_models` no invoca
+  el evaluador/wiring futuro. Son dos veredictos distintos: la nota que decía
+  2 MINOR reflejaba solo `audit_373_final` y omitía el tercer hallazgo de
+  `audit_faro_heads`.
+- La CI de `bf0a11d…` midió 780 pruebas frente al piso anterior de 729; falló
+  `faro-fase0` únicamente por ese desfase, mientras `tests-puros` pasó. El
+  cambio `c86582af06e62888df649658300600e6ce5ccf14` actualizó
+  `ci/pisos.json` y `docs/ci/pisos.md` a 780. Su delta-audit exacta fue
+  APROBADO CON CAMBIOS, 0 BLOCK/MAJOR y funcionalmente correcto; la CI de ese
+  SHA terminó verde. GitHub registra #371 integrado en `master` como
+  `8c850bcec5cd0233db5487343210c0ba96689f97`.
