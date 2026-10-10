@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -118,6 +119,37 @@ def test_lector_rechaza_head_historico_repetido_aunque_la_cadena_sea_valida(tmp_
 
     with pytest.raises(CheckpointInvalido, match="repite un head histórico"):
         store.head_actual()
+
+
+def test_fallo_fsync_del_archivo_conserva_el_head_anterior(tmp_path, monkeypatch):
+    store = _bootstrapped_store(tmp_path / "audit-checkpoints.jsonl")
+    genesis = store.head_actual()
+
+    def fail_fsync(_fd):
+        raise OSError("injected file fsync failure")
+
+    monkeypatch.setattr(os, "fsync", fail_fsync)
+    with pytest.raises(CheckpointInvalido, match="resultado de publicación durable desconocido"):
+        store.publicar("sha256:" + "1" * 64, anterior=genesis)
+
+    assert store.head_actual() == genesis
+
+
+def test_fallo_fsync_directorio_despues_de_replace_es_publicacion_incierta(tmp_path, monkeypatch):
+    store = _bootstrapped_store(tmp_path / "audit-checkpoints.jsonl")
+    genesis = store.head_actual()
+    new_head = "sha256:" + "1" * 64
+
+    def fail_directory_fsync(_path):
+        raise OSError("injected directory fsync failure")
+
+    monkeypatch.setattr(RuleAuditCheckpointStore, "_fsync_directory", fail_directory_fsync)
+    with pytest.raises(CheckpointInvalido, match="resultado de publicación durable desconocido"):
+        store.publicar(new_head, anterior=genesis)
+
+    # The rename is visible, but the failed directory fsync means callers cannot
+    # treat publication as acknowledged; a fresh read must validate the file.
+    assert store.head_actual() == new_head
 
 
 def test_no_se_infiere_genesis_desde_un_log_ausente_y_bootstrap_es_unico(tmp_path):
