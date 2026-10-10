@@ -245,3 +245,27 @@ preflight correspondan al mismo SHA.
   nuevas y conserva cuarentena determinista de las históricas.
 - Alternativa descartada: mantener la base apilada en la rama #379; esa rama ya
   está integrada y mantenerla como base ocultaba el writer incompatible.
+
+## Rechazo Tier 3 y corrección del writer/piso · 2026-10-09
+
+- Sol auditó el SHA `c8421337e3c380ae4347acb14f6b4e12628b6915` contra
+  `master@8c850bcec5cd0233db5487343210c0ba96689f97` y lo rechazó con dos BLOCK:
+  el helper privado de ratificación aceptaba un `AuthorityEventIntent` arbitrario,
+  y el piso Identity Foundation seguía en 968 pese a nuevas pruebas.
+- Corrección: se eliminó `_append_ratification_from_candidate_unlocked`; la
+  derivación desde candidate, verificación del ledger, firma, replay, escritura y
+  publicación durable del checkpoint viven dentro de
+  `append_ratification_from_candidate`, bajo su lock. Se añadió regresión que
+  impide reintroducir el helper. No cambia la API pública ni la captura única de
+  `plain(view)` para hash y proyección.
+- La ejecución de la lista exacta de 75 paths del workflow midió
+  **1003 passed, cero skipped** en Python 3.14.4. Piso, workflow y documentación
+  se alinearon a 1003. El verificador `piso.py` pasó.
+- Las pruebas focales (ratificación, eventos, checkpoints, overlays y sellos del
+  loader) pasaron: **64 passed**. `git diff --check` quedó limpio.
+- Estado: el nuevo SHA todavía requiere push, auditoría Tier 3 exacta, CI verde
+  completa y el procedimiento de integración. El rechazo no autoriza integración
+  del SHA anterior.
+- Alternativa descartada: conservar el helper privado con validaciones adicionales;
+  al aceptar payload de autoridad sigue creando otra frontera de firma. El writer
+  permanece dentro del flujo público que deriva el intent del candidate validado.

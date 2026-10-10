@@ -4697,7 +4697,7 @@ Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_
 cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-09, #371 sobre #373 y #379): `^968 passed in `
+Patrón vigente (2026-10-09, #381 sobre master@8c850bce): `^1003 passed in `
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4737,6 +4737,7 @@ anterior a #379 y no se suman a este piso.
 
 El reapilado final de #373 incorpora sus providers y regresiones de pin/clasificación a la
 lista que ya incluye los cierres de #379: `677 -> 816` (`139` pruebas netas). #371 añade
-152 pruebas de modelos/store, y el árbol apilado mide `968 passed`, cero skipped. Medición
-exacta del comando del workflow en Python 3.14.4. Las dos listas del workflow incluyen los
-archivos de providers y modelos, y se verifican idénticas.
+152 pruebas de modelos/store, y ese árbol apilado midió `968 passed`, cero skipped. #381
+añade pruebas de checkpoint/overlay y la regresión del writer caller-intent; la lista exacta
+del workflow se re-midió en Python 3.14.4: `1003 passed`, cero skipped. Las dos listas del
+workflow incluyen los archivos de providers y modelos, y se verifican idénticas.

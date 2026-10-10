@@ -2674,7 +2674,8 @@ jobs:
         # comprueban iguales en tests.
         # #373 agrega providers y cierres de clasificación/pin. Tras combinarlo
         # con #379 la lista mide 816; #371 agrega los modelos en memoria (+152),
-        # por lo que el piso combinado medido es 968 passed, cero skipped.
+        # por lo que el piso combinado medido es 1003 passed, cero skipped
+        # (#381 agrega checkpoint/overlay y cierra el writer caller-intent).
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail

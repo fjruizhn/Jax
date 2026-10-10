@@ -91,9 +91,9 @@ def test_overlay_a_corpus_no_ratificado_se_rechaza_antes_de_escribir():
 
 
 def test_overlay_a_corpus_con_ratificacion_revocada_tampoco_pasa():
-    from tests.policy.test_authority_ledger_events import ratification_intent
+    from tests.policy.test_authority_ledger_events import append_ratification
     store, root, key = setup_ledger()
-    rat = append_authority_event(store, root, key, ratification_intent())
+    rat = append_ratification(store, root, key)
     append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.RATIFICATION_REVOKED, "human:fernando", ratification_event_id=rat.event_id))
     tras_revocacion = OverlayPayload(
         "tras-revocacion", OverlayType.EXCEPTION, rat.intent.policy_corpus_hash,

@@ -11,6 +11,7 @@ from tests.policy.test_authority_ledger_events import (append_authority_event,
 from policy.authority_ledger.service import (append_ratification_from_candidate,
                                              ratification_intent_from_candidate,
                                              _append_authority_event)
+from policy.authority_ledger import service as authority_ledger_service
 from policy.authority_resolution.candidate_loader import load_validated_candidate
 
 
@@ -74,6 +75,14 @@ def test_internal_non_ratification_writer_rejects_caller_ratification_intent():
         _append_authority_event(store, root, key, intent, checkpoint_store=store._checkpoint_store)
 
     assert store.events() == ()
+
+
+def test_no_unlocked_writer_accepts_caller_constructed_ratification_intent():
+    # Signing must stay inside the validated-candidate API and its checkpoint
+    # lock. A private helper is importable Python and is not an authority
+    # boundary.
+    assert not hasattr(authority_ledger_service,
+                       "_append_ratification_from_candidate_unlocked")
 
 
 def test_atomic_append_captures_candidate_view_and_signs_it():

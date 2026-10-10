@@ -108,10 +108,38 @@ def append_ratification_from_candidate(
     )
     checkpoint_store = require_trusted_checkpoint_store(checkpoint_store)
     with checkpoint_store.locked():
-        return _append_ratification_from_candidate_unlocked(
-            store, trusted_root, private_key, intent, event_id=event_id,
-            recorded_at_utc=recorded_at_utc, checkpoint_store=checkpoint_store,
-        )
+        # Keep the signing path here: no importable helper accepts an
+        # AuthorityEventIntent and can turn caller supplied authority into a
+        # signed ledger event.
+        existing_events = store.events()
+        verify_authority_ledger(store.get_genesis(), existing_events, trusted_root, checkpoint_store)
+        genesis = store.get_genesis()
+        public = decode_public_key(genesis.constitutional_public_key)
+        if public_key_bytes(private_key.public_key()) != public_key_bytes(public):
+            raise AuthorityStateError("private key no corresponde al ratificador constitucional")
+        provisional = AuthorityEvent(event_id or _uuid7(), len(existing_events) + 1, existing_events[-1].event_hash if existing_events else None, intent, recorded_at_utc or datetime.now(timezone.utc), "", "sha256:" + "0" * 64)
+        signature = sign(private_key, event_unsigned_bytes(provisional))
+        signed = AuthorityEvent(provisional.event_id, provisional.sequence, provisional.previous_event_hash, provisional.intent, provisional.recorded_at_utc, signature, "sha256:" + "0" * 64)
+        complete = AuthorityEvent(signed.event_id, signed.sequence, signed.previous_event_hash, signed.intent, signed.recorded_at_utc, signed.signature, event_hash(signed))
+        replay_authority_history(genesis, existing_events + (complete,), trusted_root)
+        store.append(complete)
+        from .models import AuthorityLedgerCheckpoint
+        checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, complete.sequence, complete.event_id, complete.event_hash)
+        try:
+            checkpoint_store._append_locked(checkpoint)
+        except CheckpointPublicationOutcomeUnknownError as exc:
+            raise CheckpointPublicationOutcomeUnknownError(
+                f"evento {complete.event_id} (secuencia {complete.sequence}): resultado de publicación "
+                "desconocido después de os.replace; verificar/reconciliar con "
+                "reanchor_authority_checkpoint(store, trusted_root, checkpoint_store)"
+            ) from exc
+        except Exception as exc:
+            raise LedgerCheckpointError(
+                f"evento huérfano {complete.event_id} (secuencia {complete.sequence}): "
+                "escrito en el ledger sin checkpoint externo — reconciliar con "
+                "reanchor_authority_checkpoint(store, trusted_root, checkpoint_store)"
+            ) from exc
+        return complete
 
 
 def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, private_key: Ed25519PrivateKey, intent: AuthorityEventIntent, *, event_id: str | None = None, recorded_at_utc: datetime | None = None, checkpoint_store: TrustedCheckpointStore) -> AuthorityEvent:
@@ -179,38 +207,6 @@ def _append_authority_event_unlocked(store: AuthorityLedgerStore, trusted_root: 
     store.append(complete)
     from .models import AuthorityLedgerCheckpoint
     # The append is not accepted until its checkpoint is durably published.
-    checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, complete.sequence, complete.event_id, complete.event_hash)
-    try:
-        checkpoint_store._append_locked(checkpoint)
-    except CheckpointPublicationOutcomeUnknownError as exc:
-        raise CheckpointPublicationOutcomeUnknownError(
-            f"evento {complete.event_id} (secuencia {complete.sequence}): resultado de publicación "
-            "desconocido después de os.replace; verificar/reconciliar con "
-            "reanchor_authority_checkpoint(store, trusted_root, checkpoint_store)"
-        ) from exc
-    except Exception as exc:
-        raise LedgerCheckpointError(
-            f"evento huérfano {complete.event_id} (secuencia {complete.sequence}): "
-            "escrito en el ledger sin checkpoint externo — reconciliar con "
-            "reanchor_authority_checkpoint(store, trusted_root, checkpoint_store)"
-        ) from exc
-    return complete
-
-
-def _append_ratification_from_candidate_unlocked(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, private_key: Ed25519PrivateKey, intent: AuthorityEventIntent, *, event_id: str | None, recorded_at_utc: datetime | None, checkpoint_store: TrustedCheckpointStore) -> AuthorityEvent:
-    existing_events = store.events()
-    verify_authority_ledger(store.get_genesis(), existing_events, trusted_root, checkpoint_store)
-    genesis = store.get_genesis()
-    public = decode_public_key(genesis.constitutional_public_key)
-    if public_key_bytes(private_key.public_key()) != public_key_bytes(public):
-        raise AuthorityStateError("private key no corresponde al ratificador constitucional")
-    provisional = AuthorityEvent(event_id or _uuid7(), len(existing_events) + 1, existing_events[-1].event_hash if existing_events else None, intent, recorded_at_utc or datetime.now(timezone.utc), "", "sha256:" + "0" * 64)
-    signature = sign(private_key, event_unsigned_bytes(provisional))
-    signed = AuthorityEvent(provisional.event_id, provisional.sequence, provisional.previous_event_hash, provisional.intent, provisional.recorded_at_utc, signature, "sha256:" + "0" * 64)
-    complete = AuthorityEvent(signed.event_id, signed.sequence, signed.previous_event_hash, signed.intent, signed.recorded_at_utc, signed.signature, event_hash(signed))
-    replay_authority_history(genesis, existing_events + (complete,), trusted_root)
-    store.append(complete)
-    from .models import AuthorityLedgerCheckpoint
     checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, complete.sequence, complete.event_id, complete.event_hash)
     try:
         checkpoint_store._append_locked(checkpoint)
