@@ -24,7 +24,7 @@ The repair waits for the entrypoint-complete marker or the final port-3306 serve
 
 ## Pending verification
 
-The implementation is on branch `codex/faro-mariadb-readiness` in an isolated worktree. Its exact CI must show 15 passed in the dedicated MariaDB floor, with no skipped/error cases, before its auditor/preflight/merge. Then #390 must be re-based: both the floor definition hash and the exact diff hash authorized for #387 depend on the new master tree. The #388 owner was notified that their branch touches this fixture and the authority-ledger fixture; their worktree will not be edited by Codex.
+The implementation is on branch `codex/faro-mariadb-readiness` in an isolated worktree. Its exact CI must show 20 passed in the dedicated MariaDB floor, with no skipped/error cases, before its auditor/preflight/merge. Then #390 must be re-based: both the floor definition hash and the exact diff hash authorized for #387 depend on the new master tree. The #388 owner was notified that their branch touches this fixture and the authority-ledger fixture; their worktree will not be edited by Codex.
 
 ## Lesson
 

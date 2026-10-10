@@ -45,7 +45,7 @@
 - [ ] Run that test and verify it fails against the current fixture before implementation.
 - [ ] Add bounded final-server readiness probing, including `SELECT 1` and `SELECT @@port`; do not execute migration until both prove the final server is active.
 - [ ] Add safe failure diagnostics (timestamped Docker logs and `.State`) and statement ordinal context; do not include environment values or retry DDL.
-- [ ] Run the focused readiness tests and the full Rule Authority MariaDB suite; verify the exact count is 15 passed.
+- [ ] Run the focused readiness tests and the full Rule Authority MariaDB suite; verify the exact count is 20 passed.
 - [ ] Increase the floor and update its history in `ci/pisos.json` and `docs/ci/pisos.md` from the exact CI result; do not lower any floor.
 - [ ] Add the incident history with observed evidence, high-confidence root-cause hypothesis, what remains unproven, alternatives rejected, and the next CI verification.
 - [ ] Commit the implementation with the required Codex co-author trailer.

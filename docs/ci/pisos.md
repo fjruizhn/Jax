@@ -4662,9 +4662,9 @@ formatos. La medición real con Docker del 2026-10-09 confirmó 10 en Python 3.1
 
 ## `authority-rule-storage/mariadb`
 
-Piso configurado: `^15 passed in `. El 2026-10-10 se añadieron tres regresiones de arranque y
-diagnóstico al piso medido de 12; la siguiente CI exacta debe confirmar `15 passed` antes de
-considerarlo re-medido. La suite usa el comando del workflow y MariaDB `12.3.3` efímera
+Piso configurado: `^20 passed in `. El 2026-10-10 se añadieron ocho regresiones de arranque,
+reintentos y diagnóstico al piso medido de 12; la siguiente CI exacta debe confirmar `20 passed`
+antes de considerarlo re-medido. La suite usa el comando del workflow y MariaDB `12.3.3` efímera
 (`--network none`, socket Unix). Los casos ejecutados comprueban
 rollback del append parcial, errores de rollback, idempotencia y binding de solicitud/hash/catálogo,
 readiness del servidor definitivo, puerto no temporal, diagnóstico de migración, triggers append-only,
