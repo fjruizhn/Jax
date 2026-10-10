@@ -19,7 +19,7 @@ import pytest
 from tests.policy.catalogo_pin import catalogo_del_pin
 from policy.authority_ledger.canonical import canonical_bytes
 from policy.authority_ledger.errors import AuthorityStateError
-from policy.rule_authority.errors import RuleAuthorityError
+from policy.rule_authority.errors import CheckpointInvalido, RuleAuthorityError
 from policy.rule_authority.models import (
     RuleDecision,
     RuleDecisionStatus,
@@ -34,6 +34,7 @@ from policy.rule_authority.storage import (
     _decision_projection,
     _record_hash,
 )
+from policy.rule_authority.trusted_checkpoint import RuleAuditCheckpointStore
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -736,3 +737,53 @@ def test_mariadb_provisioning_without_wildcard_account_creates_none_and_main_run
     monkeypatch.delenv("JAX_RULE_AUTHORITY_APP_PASSWORD")
     with pytest.raises(SystemExit, match="JAX_RULE_AUTHORITY_APP_PASSWORD"):
         provisioning.main()
+
+
+def test_decision_store_requiere_y_publica_checkpoint_externo_despues_del_commit(db, app, tmp_path):
+    checkpoint = RuleAuditCheckpointStore(tmp_path / "rule-audit.jsonl")
+    checkpoint.bootstrap()
+    store = MariaDBRuleDecisionStore(app, checkpoint_store=checkpoint)
+    request = _request("0199f8a1-8c00-7000-8000-000000000131")
+    decision = _decision(request)
+
+    assert store.record(request, decision) == decision
+    assert checkpoint.head_actual()
+    assert checkpoint.confirmar(checkpoint.head_actual()) is True
+    assert store.record(request, decision) == decision
+    with db.root(autocommit=True) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT audit_sequence,head_hash FROM rule_authority_audit_head WHERE singleton=1"
+            )
+            sequence, head_hash = cursor.fetchone()
+    assert sequence == 1
+    assert checkpoint.head_actual() == head_hash
+
+
+def test_decision_store_cierra_si_checkpoint_atrasado_o_publicacion_desconocida(db, app, tmp_path):
+    # Simulate a stale external copy: DB has a committed record but the supplied
+    # checkpoint contains only genesis. The next append must not proceed.
+    first_request = _request("0199f8a1-8c00-7000-8000-000000000132")
+    MariaDBRuleDecisionStore(app).record(first_request, _decision(first_request))
+    stale = RuleAuditCheckpointStore(tmp_path / "stale.jsonl")
+    stale.bootstrap()
+    stale_store = MariaDBRuleDecisionStore(app, checkpoint_store=stale)
+    second_request = _request("0199f8a1-8c00-7000-8000-000000000133")
+    with pytest.raises(RuleAuthorityStorageError, match="checkpoint.*head"):
+        stale_store.record(second_request, _decision(second_request))
+    assert stale_store.get(second_request) is None
+
+    class PublicationUnknown(RuleAuditCheckpointStore):
+        def publicar(self, head: str, *, anterior: str) -> None:
+            raise CheckpointInvalido("resultado de publicación durable desconocido")
+
+    unknown = PublicationUnknown(tmp_path / "unknown.jsonl")
+    unknown.bootstrap()
+    unknown_store = MariaDBRuleDecisionStore(app, checkpoint_store=unknown)
+    third_request = _request("0199f8a1-8c00-7000-8000-000000000134")
+    with pytest.raises(RuleAuthorityStorageError, match="checkpoint"):
+        unknown_store.record(third_request, _decision(third_request))
+    # The DB commit happened before publication failed; retry remains closed
+    # because the authoritative DB head and the old external anchor disagree.
+    with pytest.raises(RuleAuthorityStorageError, match="checkpoint.*head"):
+        unknown_store.record(third_request, _decision(third_request))

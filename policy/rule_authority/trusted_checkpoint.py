@@ -27,6 +27,7 @@ _FIELDS = frozenset({
     "previous_checkpoint_hash", "checkpoint_hash",
 })
 _GENESIS_HEAD = domain_hash(_DOMAIN, _VERSION, {"kind": "GENESIS", "sequence": 0})
+RULE_AUDIT_GENESIS_HEAD = _GENESIS_HEAD
 
 
 class RuleAuditCheckpointStore:
@@ -54,7 +55,13 @@ class RuleAuditCheckpointStore:
             if self._depth == 0:
                 self._ensure_durable_directory(self.path.parent)
                 self._lock_handle = self.lock_path.open("a+b")
-                fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    os.fchmod(self._lock_handle.fileno(), 0o600)
+                    fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX)
+                except Exception:
+                    self._lock_handle.close()
+                    self._lock_handle = None
+                    raise
             self._depth += 1
             try:
                 yield self
@@ -142,6 +149,7 @@ class RuleAuditCheckpointStore:
         if not payload or not payload.endswith(b"\n"):
             raise CheckpointInvalido("checkpoint externo vacío o termina en fila parcial")
         rows: list[dict[str, object]] = []
+        seen_heads: set[str] = set()
         for raw in payload[:-1].split(b"\n"):
             if not raw:
                 raise CheckpointInvalido("checkpoint externo contiene fila vacía")
@@ -167,6 +175,9 @@ class RuleAuditCheckpointStore:
                 raise CheckpointInvalido("checkpoint externo rompe secuencia o hash chain")
             if not rows and (value["sequence"] != 0 or value["head"] != _GENESIS_HEAD):
                 raise CheckpointInvalido("primera fila debe ser genesis explícito")
+            if value["head"] in seen_heads:
+                raise CheckpointInvalido("checkpoint externo repite un head histórico")
+            seen_heads.add(value["head"])
             rows.append(value)
         return tuple(rows)
 

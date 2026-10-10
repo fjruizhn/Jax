@@ -78,10 +78,16 @@ class MariaDBRuleDecisionStore:
     same transaction.
     """
 
-    def __init__(self, connection_factory: Callable[[], object]) -> None:
+    def __init__(self, connection_factory: Callable[[], object], *, checkpoint_store=None) -> None:
         if not callable(connection_factory):
             raise TypeError("connection_factory debe ser invocable")
+        if checkpoint_store is not None and any(
+            not callable(getattr(checkpoint_store, name, None))
+            for name in ("locked", "head_actual", "publicar", "confirmar")
+        ):
+            raise TypeError("checkpoint_store no implementa el contrato durable")
         self._connect = connection_factory
+        self._checkpoint_store = checkpoint_store
 
     def get(self, request: RuleEvaluationRequest) -> RuleDecision | None:
         if not isinstance(request, RuleEvaluationRequest):
@@ -121,6 +127,13 @@ class MariaDBRuleDecisionStore:
                 "PERMIT requiere insertar RulePermit en la misma transacción (paso 6)"
             )
 
+        if self._checkpoint_store is not None:
+            with self._checkpoint_store.locked():
+                return self._record_transaction(request, decision)
+        return self._record_transaction(request, decision)
+
+    def _record_transaction(self, request: RuleEvaluationRequest,
+                            decision: RuleDecision) -> RuleDecision:
         request_catalog_hash = _catalog_hash(request.catalogo)
         projection = _decision_projection(decision, request_catalog_hash)
         canonical = canonical_bytes(projection)
@@ -138,6 +151,21 @@ class MariaDBRuleDecisionStore:
                 head = cursor.fetchone()
                 if head is None or type(head[0]) is not int or head[0] < 0:
                     raise RuleAuthorityStorageError("audit head ausente o inválido")
+                checkpoint_head = None
+                if self._checkpoint_store is not None:
+                    from .trusted_checkpoint import RULE_AUDIT_GENESIS_HEAD
+
+                    checkpoint_head = self._checkpoint_store.head_actual()
+                    expected_head = (
+                        RULE_AUDIT_GENESIS_HEAD if head[0] == 0 and head[1] is None
+                        else head[1]
+                    )
+                    if (type(expected_head) is not str
+                            or checkpoint_head != expected_head
+                            or self._checkpoint_store.confirmar(checkpoint_head) is not True):
+                        raise RuleAuthorityStorageError(
+                            "checkpoint externo no coincide con el audit head DB"
+                        )
                 existing = self._select_request(cursor, request.request_id)
                 if existing is not None:
                     if existing[1] != request_catalog_hash:
@@ -145,6 +173,11 @@ class MariaDBRuleDecisionStore:
                     stored = self._decode_row(request.request_id, existing, request.catalogo)
                     if stored.request_hash != request.request_hash:
                         raise AuthorityStateError("request_id reutilizado con otro hash")
+                    if (self._checkpoint_store is not None
+                            and self._checkpoint_store.confirmar(existing[8]) is not True):
+                        raise RuleAuthorityStorageError(
+                            "checkpoint externo no contiene la decisión idempotente"
+                        )
                     connection.commit()
                     return stored
                 sequence = head[0] + 1
@@ -171,6 +204,17 @@ class MariaDBRuleDecisionStore:
                 if cursor.rowcount != 1:
                     raise RuleAuthorityStorageError("audit head cambió durante la transacción")
             connection.commit()
+            if self._checkpoint_store is not None:
+                try:
+                    self._checkpoint_store.publicar(record_hash, anterior=checkpoint_head)
+                    if self._checkpoint_store.confirmar(record_hash) is not True:
+                        raise RuleAuthorityStorageError(
+                            "checkpoint externo no confirma el head recién publicado"
+                        )
+                except Exception as exc:
+                    raise RuleAuthorityStorageError(
+                        "decisión confirmada en DB pero sin checkpoint externo confirmado"
+                    ) from exc
             return decision
         except (AuthorityStateError, RuleAuthorityStorageError) as exc:
             if connection is not None:
