@@ -34,14 +34,16 @@ integración final queda pendiente de la respuesta de Fernando sobre overlays.
    verificación de cadena, y ningún éxito cuando falla el anclaje externo.
 4. Añadir modelos/proyecciones canónicas de permiso y consumo; cubrir hashes, round-trip,
    procedencia del store e idempotencia exacta por `request_id`.
-5. Implementar la persistencia atómica de decisión `PERMIT` + permiso y el consumo con
+5. Añadir modelo draft y objeto `RulePermit` con hash de dominio, proyección cerrada y
+   sello del store; un draft del caller nunca sirve para consumir.
+6. Implementar persistencia atómica de decisión `PERMIT` + permiso y el consumo con
    `permit_id` único; verificar carrera de doble consumo y orden con el head Block 4.
-6. Implementar kernel `evaluate`/`consume` con providers y leases ya existentes, sin
+7. Implementar kernel `evaluate`/`consume` con providers y leases ya existentes, sin
    wiring operativo; cubrir negativas, STOP, expiración, cambio de pin/capability, fallo
    del checkpoint y resultado idempotente.
-7. Añadir migración incremental necesaria y tests MariaDB de triggers, índices con
+8. Añadir migración incremental necesaria y tests MariaDB de triggers, índices con
    `EXPLAIN`, rollback y fallos inyectados.
-8. Ejecutar suites relacionadas, registrar limitaciones del runner local, revisar diff,
+9. Ejecutar suites relacionadas, registrar limitaciones del runner local, revisar diff,
    delta-auditar el SHA exacto y dejar PR listo sin integrar.
 
 ## Decisiones técnicas que deben quedar comprobables

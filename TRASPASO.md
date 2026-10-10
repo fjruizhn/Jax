@@ -17,8 +17,12 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   `MariaDBRuleDecisionStore` puede usarlo: mantiene el lock externo antes del lock DB,
   coteja el checkpoint con el audit head bloqueado antes de mutar, publica tras commit y
   falla cerrado si el head está atrasado o la publicación no se confirma.
+- Modelo `RulePermitDraft` + `RulePermit`: proyección canónica hash-bound, campos cerrados,
+  objetos profundamente inmutables; solo el helper interno del store sella un permiso
+  confiable. Ocho pruebas unitarias pasan.
 - Verificación local del incremento: `python3 -m pytest tests/policy/test_rule_authority_checkpoint.py tests/policy/test_rule_authority_providers.py tests/policy/test_faro_rule_authority_models.py -q`
-  → 289 passed; `git diff --check` limpio.
+  → 289 passed; `python3 -m pytest tests/policy/test_faro_rule_permit.py -q` → 8
+  passed; `git diff --check` limpio.
 - La suite MariaDB colecciona 14 pruebas, incluidas 2 nuevas para el checkpoint, pero no
   se ejecutó: el fixture Docker no puede abrir `/var/run/docker.sock` por permiso denegado.
 - El checkout compartido claude-skills está sincronizado; `claude-skills-sync pull`
@@ -50,7 +54,10 @@ En este worktree, continuar TDD desde la migración `policy/rule_authority/migra
 ## Archivos tocados
 
 - `policy/rule_authority/trusted_checkpoint.py`
+- `policy/rule_authority/permit.py`
+- `policy/rule_authority/__init__.py`
 - `policy/rule_authority/storage.py`
+- `tests/policy/test_faro_rule_permit.py`
 - `tests/policy/test_rule_authority_checkpoint.py`
 - `tests/policy/test_faro_rule_authority_storage_mariadb.py`
 - `docs/superpowers/plans/2026-10-09-faro-f11-step6-checkpoint.md`
