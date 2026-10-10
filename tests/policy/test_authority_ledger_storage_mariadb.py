@@ -1268,10 +1268,15 @@ def test_evaluation_persists_permit_with_block4_verification_in_one_owner(monkey
             ) as owner:
                 fence.verify_for_update(owner, root)
                 recovered = decision_store.recover_evaluation_in_transaction(owner, request)
-                assert recovered == (decision, permit)
-                assert decision_store.record_evaluation_in_transaction(
+                assert recovered[0] == decision
+                assert recovered[1] is not None
+                assert dict(recovered[1].projection()) == dict(permit.projection())
+                repeated = decision_store.record_evaluation_in_transaction(
                     owner, request, *recovered
-                ) == recovered
+                )
+                assert repeated[0] == recovered[0]
+                assert repeated[1] is not None
+                assert dict(repeated[1].projection()) == dict(recovered[1].projection())
 
         with ledger_store.checkpoint_fence(checkpoint_store) as fence:
             with fence.transaction_owner(

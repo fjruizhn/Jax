@@ -412,7 +412,10 @@ def _trusted_consumption(value: RulePermitConsumptionDraft | Mapping[str, Any]
                     payload["consumed_at_utc"] = datetime.fromisoformat(
                         payload["consumed_at_utc"].replace("Z", "+00:00")
                     )
-                payload["consumed_at_utc"] = _utc(payload["consumed_at_utc"], "consumed_at_utc")
+                consumed_at_utc = _utc(payload["consumed_at_utc"], "consumed_at_utc")
+                payload["consumed_at_utc"] = consumed_at_utc.isoformat(
+                    timespec="microseconds"
+                ).replace("+00:00", "Z")
             except Exception as exc:
                 raise RuleAuthorityError("RulePermitConsumption histórica inválida") from exc
         computed = _consumption_hash(payload)

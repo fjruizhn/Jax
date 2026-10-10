@@ -13,6 +13,7 @@ from policy.rule_authority.permit import (
     RulePermitDraft,
     _trusted_consumption,
     _trusted_permit,
+    _consumption_hash,
     _permit_hash,
 )
 from policy.rule_authority.models import (
@@ -149,6 +150,20 @@ def test_consumo_es_un_registro_sellado_y_ligado_al_request_hash():
     tampered["request_hash"] = "sha256:" + "f" * 64
     with pytest.raises(RuleAuthorityError, match="consumption_hash"):
         _trusted_consumption(tampered)
+
+
+def test_consumo_historico_conserva_proyeccion_json_canonica():
+    historical = {
+        "permit_id": "0199f8a1-8c00-7000-8000-000000000214",
+        "request_hash": "sha256:" + "6" * 64,
+        "consumed_at_utc": "2026-10-09T12:02:00.000000Z",
+    }
+    historical["consumption_hash"] = _consumption_hash(historical)
+
+    decoded = _trusted_consumption(historical)
+
+    assert dict(decoded.projection()) == historical
+    assert decoded.consumption_request_id is None
 
 
 def test_outcome_permit_requiere_decision_permit_y_registro_sellado():

@@ -1,5 +1,25 @@
 # Traspaso continuo · Faro F1.1 paso 6
 
+## Actualización 2026-10-10 · fallos de la CI exacta de d9d259a1
+
+- Policy `38091992759` falló en `tests-puros`, en la suite MariaDB del ledger de autoridad:
+  43 passed / 2 failed (45 corridos). Secret scan `38091992758` seguía ejecutándose en la
+  última consulta; canonical projections `38091992842` terminó SUCCESS. El resto de policy,
+  incluidos `faro-fase0`, Rule Authority unit, `permisos-proyectos` y `pisos-no-bajan`, terminó
+  SUCCESS.
+- Causa 1: `_trusted_consumption` validaba el timestamp de una fila histórica como UTC, pero
+  dejaba el objeto `datetime` en la proyección sellada; `RulePermitConsumption` correctamente
+  rechaza valores que no sean JSON cerrado. La rama histórica ahora serializa el UTC validado
+  al ISO canónico original. Se agregó una regresión unitaria que fallaba antes del arreglo.
+- Causa 2: el test de recovery comparaba permits por identidad de objeto aunque recovery
+  reconstruye un objeto sellado equivalente. La regresión compara ahora proyecciones completas
+  y mantiene las aserciones de decisión y de repetición idempotente.
+- Verificación local: `tests/policy/test_faro_rule_permit.py` da 14 passed; MariaDB colecciona
+  43 casos en este entorno; `git diff --check` pasa. La ejecución MariaDB local no está
+  disponible por el acceso denegado al socket Docker.
+- Estos fixes requieren commit, delta-auditoría Tier 3 y CI exacta sobre el nuevo SHA. No usar
+  el resultado fallido de `d9d259a1` como evidencia del próximo head.
+
 ## Actualización 2026-10-10 · cierre de fallos MariaDB y retry PERMIT
 
 - **CI exacta de `7080bc8c`:** policy run `38090338324` terminó FAILURE únicamente en
