@@ -201,14 +201,29 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
 - La misma CI reportó `faro-fase0`: `779 passed, 1 failed` en
   `test_el_rele_con_half_close_deja_llegar_la_respuesta_antes_de_salir` (`tests/test_faro_puerto_e2e.py:136`),
   con stdout vacío antes de intentar parsear la respuesta. No hay diagnóstico causal todavía;
-  no se cambia el runtime por conjetura. El job fallido fue relanzado para observar el mismo
-  SHA; consultar estado exacto del run antes de atribuirlo a intermitencia.
+  no se cambia el runtime por conjetura. El rerun de ese job fue cancelado al publicarse el
+  siguiente SHA; no aportó evidencia adicional. En la CI nueva de `2d6a0f41`, fase 0 pasó.
 - El delta-audit Tier 3 exacto de `3857b4bc` mantiene un MAJOR abierto mientras CI no cierre.
   El piso actualizado cambia el SHA: correr verificaciones locales disponibles, actualizar
   este handoff, commit Codex, consultar `/home/fruiz/claude-skills/bin/ventana estado`
   inmediatamente antes del push, y pedir delta-audit + CI exactas para el nuevo SHA.
 - No integrar hasta que CI y auditoría exactas cierren y Fernando responda la pregunta
   `OVERLAY_ISSUED`; esa respuesta sigue pendiente.
+
+### Cierre de CI y auditoría del piso · 2026-10-10
+
+- CI exacta de `2d6a0f41820c7f45ea4c8c8b85dd510623bb04d8`: policy run `38035792710`
+  SUCCESS (31/31 jobs), canonical projections `38035792716` SUCCESS, secret-scan
+  `38035792712` SUCCESS. `tests-puros` confirmó los dos pasos MariaDB y sus pisos; `faro-fase0`
+  pasó. `gh pr checks 388` mostró todos los checks en pass para ese head.
+- Addendum Tier 3 exacto del mismo SHA verificó la coincidencia PR/run/head y cerró el MAJOR:
+  `APROBADO CON CAMBIOS`, BLOCK 0, MAJOR 0, MINOR 0, LOW 3. El auditor no encontró hallazgos
+  nuevos en el delta de pisos y documentación.
+- El valor de Rule Authority se mantiene en 18. La falla previa de half-close en `3857b4bc`
+  no se reprodujo en `2d6a0f41`; queda registrada como observación histórica, sin fix de runtime.
+- El head de referencia de esta actualización es `2d6a0f41`; este commit documental crea un
+  SHA nuevo, que debe recibir su propia CI y delta-audit exacta antes de presentarlo como head
+  final listo. La decisión `OVERLAY_ISSUED` continúa pendiente y bloquea merge.
 
 ## Límites de autoridad y alcance
 
