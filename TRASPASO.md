@@ -9,7 +9,7 @@
   exacto de los tres módulos dio `233 passed` localmente y coincide con CI #389 run
   `38044350914` sobre `c78080442da81a468768a7af5b2c5b748ff56b37`.
 - Reconcilié pisos afectados sobre la base integrada: `authority-rule-unit/tests` mide
-  `44 passed`; Identity Foundation Shadow midió `1044 passed` en su comando completo.
+  `46 passed`; Identity Foundation Shadow midió `1044 passed` en su comando completo.
   Las suites MariaDB coleccionan 40 (Block 4) y 19 (Rule Authority); no se ejecutaron porque
   este host no puede abrir `/var/run/docker.sock`. Los pisos 40/19 y el 1044 necesitan CI
   exacta para confirmar el SHA final. `ci/pisos.json` y `docs/ci/pisos.md` reflejan estos
@@ -18,14 +18,14 @@
   Fernando aún no ha pasado el tip oficial para reapilar #388; su publicación continúa
   pausada. #390 es un soporte separado de prueba de grants que prepara otra sesión; esta rama
   no incorpora ni publica ese cambio.
-- Los commits locales `b325613e` y `eeb65d1c` no están publicados. Tier 3 GLM exacto de
+- Los commits locales `b325613e`, `eeb65d1c` y `511e83f0` no están publicados. Tier 3 GLM exacto de
   `b325613e`: NO APROBADO; BLOCK por carreras de providers contra `consume()` sin tests de
   kernel y BLOCK por falta de CI exacta/MariaDB real; MAJOR por relación de linaje/supersession
   no resuelta frente al head remoto antiguo de #388, y MAJOR porque `limites_de()` permitía
   forma vacía REVERSIBLE. La delta exacta de `eeb65d1c` confirmó ese MAJOR cerrado, y encontró
   dos MINOR nuevos: excepción sin DENY estable cuando `request.rule_hash` acompaña una regla
-  vacía, e import sin uso. Ambos se corrigieron en el worktree posterior; la nueva prueba eleva
-  el piso unitario de 44 a 45.
+  vacía, e import sin uso. `511e83f0` los corrigió y añadió pruebas de ambas ramas; su delta
+  Tier 3 está pendiente. El piso unitario sube localmente a 46.
 - Trabajo local: el kernel valida alcance/límites individuales y construye un candidato
   PERMIT con TTL limitado por configuración, regla y grant; una regla sin quantity, amount,
   frequency ni tope vuelve a fallar cerrada, conforme a la condición aceptada en Tier 3 de
@@ -46,7 +46,7 @@
   emisión y consumo. Las suites MariaDB no corrieron localmente. El SHA actual todavía no
   tiene auditoría Tier 3 ni CI exacta; no reapilar hasta recibir el tip oficial.
 - Verificación disponible en el worktree posterior: el conjunto focalizado de kernel/modelos/
-  permit/store/providers/checkpoint dio `332 passed`; el job unitario exacto da `45 passed` y
+  permit/store/providers/checkpoint dio `333 passed`; el job unitario exacto da `46 passed` y
   el verificador local de piso pasa. Identity Shadow
   dio `1044 passed`; `git diff --check` y `python3 -m json.tool ci/pisos.json` pasan.
 - Siguiente acción concreta: completar pruebas de carrera end-to-end de evaluate/consume con

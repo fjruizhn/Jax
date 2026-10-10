@@ -236,11 +236,22 @@ def test_consume_rejects_unsealed_store_recovery(monkeypatch):
                        "0199f8a1-8c00-7000-8000-000000000072")
 
 
-def _consumption_context(now):
-    request = _request(capability="CAPABILITY_ID", objective="objetivo-ejemplo",
-                       quantity=1, quantity_unit="mensajes")
-    rule = _rule("regla-ejemplo.yaml",
-                 quantity={"unit": "mensajes", "max": 2})
+def _consumption_context(now, *, unbounded=False):
+    if unbounded:
+        rule = _rule("regla-ejemplo.yaml")
+        request = _request(capability="CAPABILITY_ID", objective="objetivo-ejemplo",
+                           rule_hash=_hash_de_regla(rule))
+        capability_limits = {"form": "NINGUNA"}
+        contract_unit = None
+        limit_form = FormaLimites.NINGUNA
+    else:
+        request = _request(capability="CAPABILITY_ID", objective="objetivo-ejemplo",
+                           quantity=1, quantity_unit="mensajes")
+        rule = _rule("regla-ejemplo.yaml",
+                     quantity={"unit": "mensajes", "max": 2})
+        capability_limits = {"form": "CANTIDAD", "unit": "mensajes", "max": 2}
+        contract_unit = "mensajes"
+        limit_form = FormaLimites.CANTIDAD
     sealed = SimpleNamespace(regla=rule, ruta="policy/faro/ejemplo.yaml",
                               blob_oid="a" * 40, content_hash="sha256:" + "c" * 64)
     revision = "b" * 40
@@ -259,14 +270,14 @@ def _consumption_context(now):
         capability_id=request.capability, policy_repository_id="jax",
         capability_contract_id="mail.send.contract.v1", capability_version="1",
         capability_class="REVERSIBLE",
-        capability_limits={"form": "CANTIDAD", "unit": "mensajes", "max": 2},
+        capability_limits=capability_limits,
         issued_at_utc=now.replace(microsecond=0),
         expires_at_utc=now.replace(microsecond=0).replace(second=now.second + 30),
     ))
     contract = ContratoCapability(
         identidad="mail.send.contract.v1", version="1",
-        clase=ClaseCapability.REVERSIBLE, unidad="mensajes", moneda=None,
-        forma_limites=FormaLimites.CANTIDAD,
+        clase=ClaseCapability.REVERSIBLE, unidad=contract_unit, moneda=None,
+        forma_limites=limit_form,
     )
     grant = SimpleNamespace(valid_from_utc=now.replace(year=now.year - 1),
                             valid_until_utc=None)
@@ -295,6 +306,22 @@ def test_consume_context_accepts_exact_current_rule_grant_scope_and_contract(mon
         permit=permit, request=request, snapshot=snapshot, state=state, vistas=views,
         repository_path=Path("/tmp"),
     ) is None
+
+
+def test_consume_context_types_unbounded_rule_hash_as_authority_error(monkeypatch):
+    now = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
+    permit, request, snapshot, state, views, _revision = _consumption_context(
+        now, unbounded=True
+    )
+    monkeypatch.setattr(RuleAuthorityKernel, "_grant_matches", staticmethod(lambda *_args: True))
+    monkeypatch.setattr("policy.rule_authority.kernel.es_ancestro", lambda *_args: True)
+    kernel = object.__new__(RuleAuthorityKernel)
+
+    with pytest.raises(AuthorityStateError, match="sin límites"):
+        kernel._validate_consumption_context(
+            permit=permit, request=request, snapshot=snapshot, state=state, vistas=views,
+            repository_path=Path("/tmp"),
+        )
 
 
 @pytest.mark.parametrize("change,reason", [
