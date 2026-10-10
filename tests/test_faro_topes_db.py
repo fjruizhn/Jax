@@ -16,10 +16,15 @@ import pytest
 
 from jax.faro.bitacora import Bitacora
 from jax.faro.bitacora_db import EmisorTabla, crear_pool, verificar_cadena
+from tests.policy.catalogo_pin import catalogo_del_pin
 from jax.faro.topes import AlmacenMariaDB, Topes
 from tests.test_faro_bitacora_db import basedb, servidor_db  # noqa: F401 (fixtures)
 
 N = 16
+# El conteo con tope exige el recurso DEL catalogo (D-4/R-4, r6) y el catalogo
+# SELLADO: el de un pin de prueba evaluado con el snapshot (r7, MAJOR-1), como
+# en produccion — bytes sueltos ya no pueden fabricar uno.
+CATALOGO = catalogo_del_pin()
 
 
 def _usado(basedb, tenant, recurso, periodo="total") -> int | None:
@@ -33,7 +38,7 @@ def _usado(basedb, tenant, recurso, periodo="total") -> int | None:
         con.close()
 
 
-def _en_hilos(basedb, cantidades, tope, tenant="t1", recurso="tokens", periodo="total"):
+def _en_hilos(basedb, cantidades, tope, tenant="t1", recurso="tokens_costo.tokens", periodo="total"):
     """Un hilo por consumo, cada uno con su bucle, su pool y su conexion, alineados en una barrera."""
     barrera = threading.Barrier(len(cantidades))
     resultados = [None] * len(cantidades)
@@ -43,7 +48,7 @@ def _en_hilos(basedb, cantidades, tope, tenant="t1", recurso="tokens", periodo="
         async def correr():
             pool = await crear_pool(basedb.config_topes())
             try:
-                t = Topes(AlmacenMariaDB(pool), Bitacora(emisores=[]))
+                t = Topes(AlmacenMariaDB(pool), Bitacora(emisores=[]), catalogo=CATALOGO)
                 await asyncio.get_running_loop().run_in_executor(None, barrera.wait, 30)
                 return await t.consumir(tenant=tenant, recurso=recurso, cantidad=cantidad, tope=tope, periodo=periodo)
             finally:
@@ -71,14 +76,14 @@ def test_n_hilos_contra_un_tope_de_n_menos_uno_dejan_pasar_exactamente_n_menos_u
     rs = _en_hilos(basedb, [1] * N, tope=N - 1)
     assert sum(r.permitido for r in rs) == N - 1
     assert sum(not r.permitido for r in rs) == 1
-    assert _usado(basedb, "t1", "tokens") == N - 1                         # y la cuenta no se paso
+    assert _usado(basedb, "t1", "tokens_costo.tokens") == N - 1                         # y la cuenta no se paso
 
 
 def test_con_cantidades_distintas_lo_permitido_suma_exactamente_lo_usado_y_nunca_pasa_el_tope(basedb):
     cantidades = [1 + (i % 5) for i in range(24)]
     rs = _en_hilos(basedb, cantidades, tope=40)
     permitido = sum(c for c, r in zip(cantidades, rs) if r.permitido)
-    assert permitido <= 40 and _usado(basedb, "t1", "tokens") == permitido
+    assert permitido <= 40 and _usado(basedb, "t1", "tokens_costo.tokens") == permitido
     assert any(not r.permitido for r in rs)                                # 60 pedidos contra un tope de 40
 
 
@@ -86,26 +91,26 @@ def test_muchas_corrutinas_de_un_mismo_bucle_con_un_pool_chico_tampoco_se_pasan(
     async def caso():
         pool = await crear_pool(basedb.config_topes())             # maxsize=2: hay que hacer fila por conexion
         try:
-            t = Topes(AlmacenMariaDB(pool), Bitacora(emisores=[]))
-            return await asyncio.gather(*(t.consumir(tenant="t1", recurso="tokens", cantidad=1, tope=29) for _ in range(40)))
+            t = Topes(AlmacenMariaDB(pool), Bitacora(emisores=[]), catalogo=CATALOGO)
+            return await asyncio.gather(*(t.consumir(tenant="t1", recurso="tokens_costo.tokens", cantidad=1, tope=29) for _ in range(40)))
         finally:
             pool.close()
             await pool.wait_closed()
     rs = asyncio.run(caso())
-    assert sum(r.permitido for r in rs) == 29 and _usado(basedb, "t1", "tokens") == 29
+    assert sum(r.permitido for r in rs) == 29 and _usado(basedb, "t1", "tokens_costo.tokens") == 29
 
 
 def test_sin_tope_todos_pasan_y_la_cuenta_es_exacta(basedb):
     rs = _en_hilos(basedb, [2] * N, tope=None)
     assert all(r.permitido and r.medido for r in rs)
-    assert _usado(basedb, "t1", "tokens") == 2 * N
+    assert _usado(basedb, "t1", "tokens_costo.tokens") == 2 * N
 
 
 def test_los_periodos_y_los_tenants_son_cuentas_independientes(basedb):
     _en_hilos(basedb, [1] * 4, tope=None, periodo="2026-10")
     _en_hilos(basedb, [1] * 3, tope=None, periodo="2026-11")
     _en_hilos(basedb, [1] * 2, tope=None, tenant="t2")
-    assert (_usado(basedb, "t1", "tokens", "2026-10"), _usado(basedb, "t1", "tokens", "2026-11"), _usado(basedb, "t2", "tokens")) == (4, 3, 2)
+    assert (_usado(basedb, "t1", "tokens_costo.tokens", "2026-10"), _usado(basedb, "t1", "tokens_costo.tokens", "2026-11"), _usado(basedb, "t2", "tokens_costo.tokens")) == (4, 3, 2)
 
 
 def test_una_cuenta_que_llega_al_tope_sigue_negando_en_una_conexion_nueva(basedb):
@@ -123,9 +128,9 @@ def test_con_la_base_caida_el_tope_niega_y_sin_tope_deja_pasar(basedb):
         pool = await crear_pool(basedb.config_topes())
         pool.close()
         await pool.wait_closed()                                     # la base "se cae": ya no hay conexiones
-        t = Topes(AlmacenMariaDB(pool, plazo_s=2.0), Bitacora(emisores=[]))
-        return (await t.consumir(tenant="t1", recurso="tokens", cantidad=1, tope=5),
-                await t.consumir(tenant="t1", recurso="tokens", cantidad=1, tope=None))
+        t = Topes(AlmacenMariaDB(pool, plazo_s=2.0), Bitacora(emisores=[]), catalogo=CATALOGO)
+        return (await t.consumir(tenant="t1", recurso="tokens_costo.tokens", cantidad=1, tope=5),
+                await t.consumir(tenant="t1", recurso="tokens_costo.tokens", cantidad=1, tope=None))
     con_tope, sin_tope = asyncio.run(caso())
     assert not con_tope.permitido and con_tope.motivo == "almacen_no_disponible"
     assert sin_tope.permitido and not sin_tope.medido
@@ -136,9 +141,10 @@ def test_la_denegacion_por_tope_queda_en_la_bitacora_durable_y_la_cadena_verific
         pool_t = await crear_pool(basedb.config_topes())
         pool_b = await crear_pool(basedb.config())
         try:
-            t = Topes(AlmacenMariaDB(pool_t), Bitacora(emisores=[EmisorTabla(pool_b)]))
-            await t.consumir(tenant="t1", recurso="tokens", cantidad=1, tope=1, run_id="run-7")
-            await t.consumir(tenant="t1", recurso="tokens", cantidad=1, tope=1, run_id="run-7")
+            t = Topes(AlmacenMariaDB(pool_t), Bitacora(emisores=[EmisorTabla(pool_b)]),
+                      catalogo=CATALOGO)
+            await t.consumir(tenant="t1", recurso="tokens_costo.tokens", cantidad=1, tope=1, run_id="run-7")
+            await t.consumir(tenant="t1", recurso="tokens_costo.tokens", cantidad=1, tope=1, run_id="run-7")
         finally:
             for p in (pool_t, pool_b):
                 p.close()
@@ -201,7 +207,7 @@ def test_el_update_del_conteo_usa_la_clave_primaria(basedb):
     try:
         with con.cursor(pymysql.cursors.DictCursor) as cur:
             cur.execute("EXPLAIN UPDATE faro_topes SET usado = LAST_INSERT_ID(usado + 1) "
-                        "WHERE clave = 't1|tokens' AND periodo = 'total' AND usado + 1 <= 5")
+                        "WHERE clave = 't1|tokens_costo.tokens' AND periodo = 'total' AND usado + 1 <= 5")
             plan = cur.fetchall()
     finally:
         con.close()
@@ -273,21 +279,21 @@ def _con_pool(basedb, romper_en):
 
 def test_minor6_un_update_confirmado_sin_respuesta_es_resultado_desconocido_y_se_reconcilia(basedb):
     async def accion(pool_roto, pool_real):
-        t = Topes(AlmacenMariaDB(pool_roto), Bitacora(emisores=[]))
-        r = await t.consumir(tenant="t1", recurso="tokens", cantidad=3, tope=10)
-        rec = await Topes(AlmacenMariaDB(pool_real), Bitacora(emisores=[])).reconciliar(tenant="t1", recurso="tokens")
+        t = Topes(AlmacenMariaDB(pool_roto), Bitacora(emisores=[]), catalogo=CATALOGO)
+        r = await t.consumir(tenant="t1", recurso="tokens_costo.tokens", cantidad=3, tope=10)
+        rec = await Topes(AlmacenMariaDB(pool_real), Bitacora(emisores=[]), catalogo=CATALOGO).reconciliar(tenant="t1", recurso="tokens_costo.tokens")
         return r, t.inciertos, rec
     r, inciertos, rec = _con_pool(basedb, "UPDATE")(accion)
     assert not r.permitido and r.motivo == "resultado_desconocido"
-    assert inciertos == {("t1|tokens", "total"): 3}
-    assert _usado(basedb, "t1", "tokens") == 3                       # la base SI lo conto: lo desconocido era real
+    assert inciertos == {("t1|tokens_costo.tokens", "total"): 3}
+    assert _usado(basedb, "t1", "tokens_costo.tokens") == 3                       # la base SI lo conto: lo desconocido era real
     assert rec["usado"] == 3
 
 
 def test_minor6_un_corte_antes_del_update_es_un_fallo_normal_y_no_cuenta_nada(basedb):
     async def accion(pool_roto, pool_real):
-        t = Topes(AlmacenMariaDB(pool_roto), Bitacora(emisores=[]))
-        return await t.consumir(tenant="t1", recurso="tokens", cantidad=3, tope=10), t.inciertos
+        t = Topes(AlmacenMariaDB(pool_roto), Bitacora(emisores=[]), catalogo=CATALOGO)
+        return await t.consumir(tenant="t1", recurso="tokens_costo.tokens", cantidad=3, tope=10), t.inciertos
     r, inciertos = _con_pool(basedb, "INSERT")(accion)
     assert r.motivo == "almacen_no_disponible" and inciertos == {}
-    assert _usado(basedb, "t1", "tokens") in (None, 0)
+    assert _usado(basedb, "t1", "tokens_costo.tokens") in (None, 0)

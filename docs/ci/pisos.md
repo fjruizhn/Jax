@@ -116,6 +116,8 @@ Patrón vigente al migrar (2026-10-03, master 364ded9): `^671 passed`
 
 Piso actualizado 2026-10-04: `^688 passed`. Sobre el piso 683, se suman pruebas de payload hostil, timeout con cancelación, truncamiento explícito, cableado del perfil de prueba y concurrencia en peor caso; 0 skips.
 
+Piso actualizado 2026-10-09 (JAX#371, Faro F1.1 paso 4): `^780 passed`, medido en GitHub Actions sobre el head exacto `bf0a11d940af4c67a6f8b015fc454c005685316e`, sin skips. El piso anterior era 729; el aumento neto de 51 pruebas corresponde a las regresiones de leases, rotación segura, límites y avance del resumen diario en `tests/test_faro_aviso.py`.
+
 ## `faro-bitacora-db/faro-db`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^40 passed`
@@ -4611,7 +4613,7 @@ denormalizadas (incluido `previous_event_hash`), lectura histórica exacta y per
 
 ## `authority-ledger-mariadb/integration`
 
-Piso vigente (2026-10-07): `^4 passed in ` (antes 1). Medido en hall9000 con MariaDB 12.3.3 efímera
+Piso vigente (2026-10-09): `^10 passed in `. La base #377 tenía 5 pruebas en MariaDB 12.3.3 efímera
 `--network none`; la prueba aplica ambas migraciones, valida el upgrade nullable→NOT NULL,
 provisiona la cuenta de aplicación con el script versionado, genera una llave Ed25519 de prueba
 y valida firma → INSERT → lectura → reconstrucción → hash/firma y replay. También prueba que
@@ -4619,11 +4621,20 @@ UPDATE/DELETE fallan aunque otro principal tenga esos GRANTs, por los triggers a
 base solo expone socket Unix al proceso de prueba. Tres pruebas nuevas, cada una con su MariaDB
 efímera: el provisioning revoca los privilegios previos (`REVOKE ALL PRIVILEGES, GRANT OPTION`) y
 `SHOW GRANTS` coincide exacto con el contrato; la migración 002 falla cerrada con filas NULL aun con
-`sql_mode=''` (la fila queda intacta) y pasa con cero NULL.
+`sql_mode=''` (la fila queda intacta) y pasa con cero NULL. Para cerrar el fallo de CI #379, se
+agregaron tres pruebas unitarias sin contenedor que clasifican errores de conexión, comprueban el
+reintento acotado de fallos transitorios y aseguran que `1045 Access denied` no se reintente.
+El fallo de CI confirmó que MariaDB 12.3.3 anuncia el servidor de inicialización como `port: 0`
+y el servidor final como `port: 3306`; el detector ahora espera el segundo (o el marcador explícito
+`init process done`) antes de autenticar y consultar `SELECT 1`. Una regresión unitaria cubre ambos
+formatos. La medición real con Docker del 2026-10-09 confirmó 10 en Python 3.14.
 
 checkpoint-overlay (2026-10-07, auditor de #377): 5 -> 6 (+1: overlay a corpus no ratificado se
 rechaza antes de escribir — cero filas; la tanda de 8 eventos se reordenó para emitir el overlay
 antes de revocar la ratificación). Medido con la MariaDB efímera 12.3.3 (`--network none`).
+
+9 -> 10 el 2026-10-09: la regresión MariaDB del overlay sin ratificación quedó incluida en el
+comando exacto del workflow. Medición real con Docker: `10 passed`.
 
 ## `authority-rule-events/ratifications`
 
@@ -4642,3 +4653,90 @@ Piso nuevo de la migración: `policy/tests/test_pisos_fuera_del_workflow.py` (pe
 master 364ded9) y `policy/tests/test_comparar_pisos.py` (el comparador). 140 -> 213 -> 223 el
 2026-10-04 al agregar el comparador y sus casos, las pruebas del job aislado y las de claves duplicadas; 223 -> 227 (2026-10-04, ci/pisos-skipped-y-comentarios): +4 netas del comparador (5 pruebas de la excepción `^N passed` -> `^N' passed, M skipped`, menos 1 parámetro que deja de ser rojo). Medido en
 Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.
+
+## `authority-ledger-seal/attacks`
+
+Piso vigente (2026-10-07): `^4 passed in `, medido en hall9000 con el comando exacto del paso
+(`pytest -q tests/policy/test_authority_ledger_seal_attacks.py`) y `piso.py verificar` rc=0.
+Procedencia: Jax#377, cierre en `d082cc89` (forma final: aserción incondicional del congelado
+profundo sobre `protected_metanorms[0]` y sobre un corpus con documentos). Ataques de
+falsificación del sello de ratificación y de la proyección congelada: `replace()` no transporta
+el sello (`init=False`), la proyección congelada no muta tras sellar, y la frontera que firma
+(`append_authority_event`) re-deriva la coherencia hash/proyección antes de firmar. Cada test
+mata un mutante del arreglo (tabla mutante→prueba→aserción en la entrega de #377).
+
+## `authority-ledger-golden/vectors`
+
+Piso vigente (2026-10-07): `^7 passed in `, medido en hall9000 con el comando exacto del paso
+(`pytest -q tests/policy/test_authority_ledger_golden_vectors.py`) y `piso.py verificar` rc=0.
+Procedencia: Jax#377, cierre en `d082cc89` (parametrize con `list(zip(...))`, sin
+PytestRemovedIn10Warning). Los 6 tipos históricos de evento + el genesis: los BYTES firmados
+capturados como constantes sobre master `83f8f56b` ANTES del arreglo de sellos/proyección
+congelada, con entrada 100 % determinista (llave Ed25519 fija, ids y tiempo fijos, proyección
+sintética que ejerce el congelado profundo). El congelado no cambia la serialización: si este
+piso explota por un cambio INTENCIONAL de formato canónico, las constantes se recapturan en el
+mismo commit que lo declara; explotar sin cambio declarado es una regresión de serialización
+que rompe la verificabilidad del ledger histórico.
+
+## `authority-resolution-loader-seal/ataques`
+
+Piso exacto propio (2026-10-09, Jax#379, ronda 4) del archivo
+`tests/policy/test_authority_resolution_loader_seal.py`: antes solo contaba dentro del paso
+grande «Identity Foundation Shadow», sin número propio. 18 passed (Python 3.14.4, local):
+6 de la ronda 1 (replace, replace con contenido alterado, construcción directa, congelado
+profundo, drift del digest, sello y binding del corpus real) + 4 de subclases y método
+sombreado (definición de subclase falla, subclase que afirma estar validada, subclase con
+sello legítimo, método sombreado en la instancia) + 6 del binding campo por campo — las seis
+entradas de `_contenido_canonico`, una por caso (`normative_documents`, `policy_corpus_hash`,
+`manifest`, `authority`, `canonicalizer_identity`, `bootstrap_bundle_id`), la proyección canónica sombreada y la política de `copy`/`deepcopy`/pickle. Patrón: `^18 passed in `.
+14 -> 16 el 2026-10-07 (chore/pisos-doc-binding, sobre #379 `7bd266e7`): +2 fijando
+`canonicalizer_identity` (alterado a otra identidad plausible) y `bootstrap_bundle_id` (otro
+hash con la misma forma válida de `_HASH`, para que solo el binding lo delate); los mutantes
+que quitan cada entrada del dict mueren (medidos: cada mutante derriba solo su caso).
+Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_subclass__`» y quitar
+cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
+## `identity-foundation-shadow/policy`
+
+Patrón vigente (2026-10-09, #371 sobre #373 y #379): `^968 passed in `
+
+Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
+solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
+de la constitución es que un número compartido lo re-mide el último en llegar, y sin piso no hay
+número. Medido en hall9000: 459 (ronda 1) + 38 (ronda 2) + 43 (ronda 3: catálogo de topes, copias/pickle, nombres que esquivan, blob gigante, identidad de las listas del workflow, y las tres dedicadas de razon propia: dígito Unicode, claves de límites, not_after) de rule_authority (20 de schema — decisión R-4 de
+Fernando del 2026-10-06 y dígitos ASCII; 2 de snapshot — testigo no-dataclass; 16 de los ataques
+A–J del auditor como regresiones). El paso re-corre la misma lista en `-q | tee` como memory-b9.
+Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.
+
+r8 (2026-10-07, ronda 8 de jax#370): 574 -> 591. El runner (tests-puros, Python 3.14) dio 576 con la rama sobre
+master (que ya trae las pruebas de #368/#369/#374) y el piso decía 574; 576 +15 pruebas nuevas de la r8
+(D-4 como segmento y subcadena: 7 compuestas + 6 exactas, el contrapeso de subids legítimos y que el helper
+`catalogo_del_pin` no deje repos temporales). Medido en hall9000 con Python 3.14.4, pytest 9.1.1,
+pyyaml 6.0.3, cryptography 49.0.0 y el comando exacto del paso (`bash --noprofile --norc -eo pipefail`).
+
+r9 (2026-10-07): 591 -> 614 (+23: D-4 con sinónimos en inglés y raíces x11, `w0rkers` no se niega (límite documentado) x1, subids legítimos del catálogo real x11). Medido con Python 3.14.4 y el comando exacto del paso.
+
+r10 (2026-10-07, cierre del hallazgo del auditor en jax#370): 614 -> 637 (+23 netas: el periodo de un tope solo es un subid de la clase `frecuencia` del catalogo del pin; 1 prueba vieja se reemplaza por 20 negativas parametrizadas, 2 positivas del catalogo real y 2 de contrato). Medido con Python 3.14.4 y el comando exacto del paso.
+
+Ronda final de #370: 637 -> 657. Se añadieron las regresiones del matcher estricto y
+declaración explícita de `TestEvidenceIngester.__test__ = False`; medición exacta local
+de la lista del workflow: `657 passed in 5.23s`, cero skipped. Véase el cierre auditado
+en el registro histórico de Faro F1.1.
+
+El cierre de #379 agrega 16 casos del sello del loader de autoridad a esa lista: 657 -> 673;
+el cierre del bypass de proyección canónica agrega uno: 673 -> 674; la política de
+`copy`/`deepcopy`/pickle agrega uno: 674 -> 675; y dos regresiones del writer de
+ratificación (writer genérico e interno niegan intent caller-created) llevan 675 -> 677.
+La misma ruta se incorpora tanto al paso detallado como al piso exacto; una regresión exige
+que ambas listas coincidan. Medición local exacta en Python 3.14.4: `677 passed` en la lista
+completa, cero skipped; el CI del PR debe confirmarlo sobre el SHA publicado.
+
+El trabajo previo de providers de #373 midió 778 al combinar #370 final con providers r3;
+los cierres de auditoría y la alineación de `FormaLimites` elevaron ese árbol a 791, y el
+cierre de subclases hostiles de `str` lo dejó en 795. Esos conteos pertenecen al árbol
+anterior a #379 y no se suman a este piso.
+
+El reapilado final de #373 incorpora sus providers y regresiones de pin/clasificación a la
+lista que ya incluye los cierres de #379: `677 -> 816` (`139` pruebas netas). #371 añade
+152 pruebas de modelos/store, y el árbol apilado mide `968 passed`, cero skipped. Medición
+exacta del comando del workflow en Python 3.14.4. Las dos listas del workflow incluyen los
+archivos de providers y modelos, y se verifican idénticas.

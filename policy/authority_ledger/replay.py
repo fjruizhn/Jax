@@ -217,6 +217,22 @@ def _replay_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[A
         checkpoint_store.validate_bootstrap_receipt(receipt)
         # Use one external snapshot; a second latest() read could race a writer
         # and combine different checkpoint generations in one verification.
+        for anchored_checkpoint in anchor_rows:
+            if anchored_checkpoint.sequence == 0:
+                continue
+            if anchored_checkpoint.sequence > len(ordered):
+                raise LedgerRollbackError("DB ledger truncado antes del checkpoint externo")
+            anchored_event = ordered[anchored_checkpoint.sequence - 1]
+            expected_checkpoint = AuthorityLedgerCheckpoint(
+                "1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity,
+                anchored_event.sequence, anchored_event.event_id,
+                anchored_event.event_hash,
+            )
+            if anchored_checkpoint.projection() != expected_checkpoint.projection():
+                raise LedgerRollbackError(
+                    "checkpoint externo no coincide con evento de secuencia "
+                    f"{anchored_checkpoint.sequence}"
+                )
         anchored = anchor_rows[-1]
         if checkpoint.sequence < anchored.sequence:
             raise LedgerRollbackError("DB ledger truncado antes del checkpoint externo")

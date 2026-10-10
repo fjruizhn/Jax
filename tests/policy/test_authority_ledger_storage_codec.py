@@ -51,7 +51,7 @@ def storage_row(event, *, sequence=None, event_id=None, event_type=None, actor_i
 def sample_intents():
     corpus_hash = "sha256:" + "c" * 64
     return (
-        AuthorityEventIntent._from_validated_snapshot(corpus_hash, {"policy_corpus_hash": corpus_hash}),
+        AuthorityEventIntent(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", (), corpus_hash, {"policy_corpus_hash": corpus_hash}),
         AuthorityEventIntent(AuthorityEventType.RATIFICATION_REVOKED, "human:fernando", ratification_event_id="018cc251-f400-7000-8000-000000000002"),
         AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", ratification_event_id="018cc251-f400-7000-8000-000000000002"),
         AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
@@ -149,7 +149,7 @@ def test_decoded_ratification_cannot_be_resigned_and_appended_as_validated_candi
     }
     forged = __import__("policy.authority_ledger.serialization", fromlist=["intent_from_projection"]).intent_from_projection(projection)
 
-    with pytest.raises(AuthorityStateError, match="storage"):
+    with pytest.raises(AuthorityStateError, match="append_ratification_from_candidate"):
         append_authority_event(store, root, key, forged)
 
     assert store.events() == ()

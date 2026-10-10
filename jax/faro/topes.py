@@ -7,8 +7,11 @@ REGLAS (spec §6 y decisiones de Fernando)
 - **Con tope** (una regla vigente de `policy/faro/*.yaml`, evaluada por El Faro, nunca por quien consume): al
   llegar **falla cerrado**. Este modulo solo recibe el tope YA RESUELTO (`tope: int | None`); no lee politica ni
   ratifica nada.
-- **D-4: no hay tope de agentes** (ni de concurrencia ni de profundidad) **ni de conexiones**. Pedir un tope
-  para un recurso con esos prefijos es un error (`TopeProhibido`); medirlos sigue permitido.
+- **D-4 / R-4 (catalogo cerrado, decision de Fernando 2026-10-06): solo llevan tope las clases de
+  actos y dinero** del catalogo (`jax/faro/catalogo_topes.py`): monto de dinero, actos externos,
+  frecuencia, duracion y tokens/costo. Pedir un tope para cualquier otro recurso —incluidos
+  conexiones, concurrencia, workers, hilos, procesos y agentes, y cualquier nombre parecido— es
+  `TopeProhibido`; medirlos sigue permitido.
 - Si el almacen no se puede consultar: con tope se niega (no se sabe si cabe: `tope_no_verificable`); sin tope
   se deja pasar (no hay regla que niegue) y el resultado dice que no se pudo medir.
 - Una anotacion de bitacora que falla NO cambia la decision (como la guardia: lo que no falla abierto es el
@@ -35,21 +38,24 @@ logger = logging.getLogger(__name__)
 
 TABLA = "faro_topes"
 MAX_CANTIDAD = 2 ** 53                      # lo que un entero de JSON/float representa sin perdida
-# D-4, SEMANTICO: ningun recurso cuya palabra sea de agentes ni de conexiones lleva tope, se llame como se llame
-# (`agentes`, `subagentes`, `agentes_concurrentes`, `agente.hijos`, `enjambre.agentes`, `swarm.agents`,
-# `tokens.por_agente`...). Se mira cada palabra del nombre (separadas por `.`, `_` o `-`).
-PALABRAS_SIN_TOPE = ("agent", "subagent", "enjambre", "swarm", "conexion")
-_RE_PALABRAS = re.compile(r"[._-]+")
+# D-4 / R-4: el catalogo cerrado es la unica puerta. Una lista negra por palabras nunca cierra
+# (pasaban `multiagente.lanzados`, `subprocesos`, `parallel.calls`, `conns.db`...); fuera del
+# catalogo no hay tope, punto. Desde B-3 el catalogo NO se lee de disco: llega por parametro
+# (el snapshot evaluado lo carga del arbol verificado del pin). Importar este modulo no falla;
+# topear sin catalogo, si: sin catalogo no se topea NADA.
+from .catalogo_topes import CatalogoTopes, es_de_catalogo  # noqa: E402  (hoja, solo stdlib)
 
 
-def es_recurso_sin_tope(recurso: str) -> bool:
-    return any(p.startswith(PALABRAS_SIN_TOPE) for p in _RE_PALABRAS.split(recurso))
+def es_recurso_sin_tope(recurso: str, catalogo) -> bool:
+    """True para TODO recurso fuera del catalogo de actos y dinero (D-4 incluido).
+    Sin catalogo, TODO recurso esta sin tope."""
+    return catalogo is None or not es_de_catalogo(recurso, catalogo)
 
 _RE_TENANT = RE_TENANT      # el mismo que valida el canal de control: un tenant aceptado alli nunca rompe aqui
 _RE_RECURSO = re.compile(r"^[a-z0-9_.-]{1,48}$")
 _RE_PERIODO = re.compile(r"^[A-Za-z0-9_.:-]{1,32}$")
 _RESERVADOS = frozenset({"evento", "momento", "decision", "motivo", "tenant", "recurso", "cantidad", "usado", "tope",
-                         "periodo"})
+                         "periodo", "catalogo_oid"})
 _MAX_CONTEXTO = 16
 _MAX_VISTOS = 4096
 
@@ -70,9 +76,13 @@ class ResultadoTope:
     tope: int | None
     medido: bool            # ¿se pudo contar?
     motivo: str             # "", "tope_alcanzado", "almacen_no_disponible" o "resultado_desconocido"
+    catalogo_oid: str | None = None  # OID del catalogo sellado que decidio si el recurso admite tope
 
 
 class AlmacenTopes(Protocol):
+    async def leer(self, clave: str, periodo: str) -> int:
+        """Devuelve el contador confirmado para reconciliar un resultado incierto."""
+
     async def sumar(self, clave: str, periodo: str, cantidad: int, tope: int | None) -> tuple[bool, int]:
         """(aplicado, usado). Con `tope`, aplica SOLO si `usado + cantidad <= tope`, en una operacion atomica."""
 
@@ -131,10 +141,19 @@ def _entero(valor: object, nombre: str, minimo: int, maximo: int) -> int:
 
 
 class Topes:
-    def __init__(self, almacen: AlmacenTopes, bitacora: Bitacora, *, plazo_s: float = 5.0):
+    def __init__(self, almacen: AlmacenTopes, bitacora: Bitacora, *,
+                 plazo_s: float = 5.0, catalogo=None):
+        # r6: el catalogo se exige SELLADO (CatalogoTopes, el del snapshot): un
+        # Mapping cualquiera —leido del disco, inyectado— no abre el conteo con tope.
+        # r7, MAJOR-1: ademas REGISTRA de que pin salio (catalogo.oid_pin).
+        if catalogo is not None and not isinstance(catalogo, CatalogoTopes):
+            raise ConfigFaroInvalida(
+                "catalogo: solo el SELLADO del snapshot (CatalogoTopes), no un Mapping cualquiera")
+        self.catalogo_oid = None if catalogo is None else catalogo.oid_pin
         self._almacen = almacen
         self._bitacora = bitacora
         self._plazo_s = plazo_s
+        self._catalogo = catalogo            # B-3: del snapshot evaluado, nunca de disco
         self._vistos_sin_regla: set[tuple[str, str, str]] = set()
         self.inciertos: dict[tuple[str, str], int] = {}       # (clave, periodo) -> cantidad de conteos de resultado desconocido
 
@@ -155,11 +174,13 @@ class Topes:
         cantidad = _entero(cantidad, "cantidad", 1, MAX_CANTIDAD)
         if tope is not None:
             tope = _entero(tope, "tope", 0, MAX_CANTIDAD)
-            if es_recurso_sin_tope(recurso):
-                raise TopeProhibido(f"D-4: no hay tope de agentes ni de conexiones ({recurso!r}); solo se mide")
+            if es_recurso_sin_tope(recurso, self._catalogo):
+                raise TopeProhibido(
+                    f"D-4/R-4: {recurso!r} esta fuera del catalogo de topes (solo actos y dinero); solo se mide")
         extra = {k: (v if isinstance(v, (int, float, bool)) or v is None else str(v)[:200])
                  for k, v in list(contexto.items())[:_MAX_CONTEXTO] if k not in _RESERVADOS}
-        base = {"tenant": tenant, "recurso": recurso, "cantidad": cantidad, "periodo": periodo, "tope": tope}
+        base = {"tenant": tenant, "recurso": recurso, "cantidad": cantidad, "periodo": periodo,
+                "tope": tope, "catalogo_oid": self.catalogo_oid}
         clave = f"{tenant}|{recurso}"
         try:
             aplicado, usado = await asyncio.wait_for(self._almacen.sumar(clave, periodo, cantidad, tope), self._plazo_s)
@@ -169,16 +190,16 @@ class Topes:
             self.inciertos[(clave, periodo)] = self.inciertos.get((clave, periodo), 0) + cantidad
             await self._anotar("tope_resultado_desconocido", **extra, **base,
                                decision="permitido" if tope is None else "denegado", motivo="resultado_desconocido")
-            return ResultadoTope(tope is None, None, tope, False, "resultado_desconocido")
+            return ResultadoTope(tope is None, None, tope, False, "resultado_desconocido", self.catalogo_oid)
         except Exception as exc:  # fail-soft: con tope NIEGA (fail-closed); sin tope no hay regla que niegue (D-4), se registra y avisa
             logger.warning("almacen de topes no disponible (%s)", type(exc).__name__)
             if tope is None:
-                return ResultadoTope(True, None, None, False, "almacen_no_disponible")
+                return ResultadoTope(True, None, None, False, "almacen_no_disponible", self.catalogo_oid)
             await self._anotar("tope_no_verificable", **extra, **base, decision="denegado", motivo="almacen_no_disponible")
-            return ResultadoTope(False, None, tope, False, "almacen_no_disponible")
+            return ResultadoTope(False, None, tope, False, "almacen_no_disponible", self.catalogo_oid)
         if not aplicado:
             await self._anotar("tope_superado", **extra, **base, usado=usado, decision="denegado", motivo="tope_alcanzado")
-            return ResultadoTope(False, usado, tope, True, "tope_alcanzado")
+            return ResultadoTope(False, usado, tope, True, "tope_alcanzado", self.catalogo_oid)
         if tope is None:
             visto = (tenant, recurso, periodo)
             if visto not in self._vistos_sin_regla:
@@ -187,7 +208,7 @@ class Topes:
                 self._vistos_sin_regla.add(visto)
                 await self._anotar("tope_sin_regla", **extra, **base, usado=usado, decision="permitido",
                                    motivo="sin_regla_de_tope")
-        return ResultadoTope(True, usado, tope, True, "")
+        return ResultadoTope(True, usado, tope, True, "", self.catalogo_oid)
 
     async def reconciliar(self, *, tenant: str, recurso: str, periodo: str = "total") -> dict:
         """Lee el contador REAL y cierra lo incierto de (tenant, recurso, periodo): anota `tope_reconciliado` con lo leido
@@ -205,5 +226,5 @@ class Topes:
                 self.inciertos[(clave, periodo)] = self.inciertos.get((clave, periodo), 0) + incierto
             raise
         await self._anotar("tope_reconciliado", tenant=tenant, recurso=recurso, periodo=periodo, usado=usado, incierto=incierto,
-                           motivo="reconciliacion")
+                           catalogo_oid=self.catalogo_oid, motivo="reconciliacion")
         return {"usado": usado, "incierto": incierto}

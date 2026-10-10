@@ -28,7 +28,7 @@ from tests.policy.test_authority_ledger_events import append_authority_event
 from policy.authority_ledger.signatures import encode_public_key, public_key_bytes, public_key_fingerprint
 from policy.authority_ledger.storage import MariaDBAuthorityLedgerStore
 from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
-from tests.policy.test_authority_ledger_events import ratification_intent
+from tests.policy.test_authority_ledger_events import append_ratification
 from tests.policy.test_authority_ledger_storage_mariadb import (
     MIGRATION, _apply_migration, _ephemeral_mariadb,
 )
@@ -61,8 +61,8 @@ def test_append_rejects_state_invalid_event_before_any_write():
 
         store = MariaDBAuthorityLedgerStore(lambda: connect(database="jax_authority"))
         now = datetime(2026, 10, 7, tzinfo=timezone.utc)
-        ratification = append_authority_event(
-            store, root, key, ratification_intent(),
+        ratification = append_ratification(
+            store, root, key,
             event_id="018cc251-f400-7000-8000-000000000001", recorded_at_utc=now,
         )
         with connect() as db:
@@ -128,8 +128,8 @@ def test_overlay_a_corpus_no_ratificado_no_escribe_nada():
 
         store = MariaDBAuthorityLedgerStore(lambda: connect(database="jax_authority"))
         now = datetime(2026, 10, 7, tzinfo=timezone.utc)
-        ratification = append_authority_event(
-            store, root, key, ratification_intent(),
+        ratification = append_ratification(
+            store, root, key,
             event_id="018cc251-f400-7000-8000-000000000001", recorded_at_utc=now,
         )
         huerfano = OverlayPayload(

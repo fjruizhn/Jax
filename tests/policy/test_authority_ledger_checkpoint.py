@@ -6,10 +6,13 @@ from policy.authority_ledger.errors import (AuthorityStateError, LedgerCheckpoin
                                             LedgerIntegrityError, LedgerRollbackError,
                                             UnanchoredLedgerHeadError)
 from policy.authority_ledger.errors import CheckpointPublicationOutcomeUnknownError
-from policy.authority_ledger.models import AuthorityEvent, AuthorityEventIntent, AuthorityEventType
+from policy.authority_ledger.models import (AuthorityEvent, AuthorityEventIntent,
+                                            AuthorityEventType,
+                                            AuthorityLedgerCheckpoint)
 from policy.authority_ledger.replay import event_hash, event_unsigned_bytes
 from tests.policy.test_authority_ledger_events import verify_authority_ledger
-from tests.policy.test_authority_ledger_events import append_authority_event
+from tests.policy.test_authority_ledger_events import (append_authority_event,
+                                                        append_ratification)
 from policy.authority_ledger.service import reanchor_authority_checkpoint
 from policy.authority_ledger.signatures import sign
 from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
@@ -155,6 +158,35 @@ def test_checkpoint_changes_when_ledger_advances():
     before = verify_authority_ledger(store.get_genesis(), (), root).checkpoint.authority_ledger_checkpoint_hash
     append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"))
     assert verify_authority_ledger(store.get_genesis(), store.events(), root).checkpoint.authority_ledger_checkpoint_hash != before
+
+
+def test_verificador_rechaza_checkpoint_intermedio_falsificado_aunque_el_head_final_coincida():
+    """A verifier that only compares the final anchor accepts this forgery."""
+    store, root, key = setup_ledger()
+    anchor = store._checkpoint_store
+    for suffix in ("001", "002", "003"):
+        append_authority_event(
+            store,
+            root,
+            key,
+            AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
+            event_id=f"018cc251-f400-7000-8000-000000000{suffix}",
+        )
+
+    from policy.authority_ledger.canonical import canonical_bytes
+    rows = list(anchor.checkpoints())
+    rows[2] = AuthorityLedgerCheckpoint(
+        "1.0",
+        "JAX_AUTHORITY_LEDGER_CHECKPOINT",
+        store.get_genesis().ledger_identity,
+        2,
+        "018cc251-f400-7000-8000-0000000000ff",
+        store.events()[1].event_hash,
+    )
+    anchor.path.write_bytes(b"".join(canonical_bytes(row.projection()) + b"\n" for row in rows))
+
+    with pytest.raises(LedgerRollbackError, match="checkpoint externo.*secuencia 2"):
+        verify_authority_ledger(store.get_genesis(), store.events(), root)
 
 
 # ---------------- checkpoint tras append: fallo cerrado y reconciliación (auditor de #377)
@@ -404,9 +436,13 @@ def test_checkpoint_store_rejects_first_row_after_legacy_sequence_one(tmp_path):
 
 def test_append_uses_one_snapshot_and_stale_store_rejects_candidate_after_concurrent_revocation():
     """A concurrent revoke cannot change a candidate's replay input mid-append."""
-    from tests.policy.test_authority_ledger_events import overlay, ratification_intent
+    from tests.policy.test_authority_ledger_events import overlay
     store, root, key = setup_ledger()
-    ratification = append_authority_event(store, root, key, ratification_intent(), event_id="018cc251-f400-7000-8000-000000000001")
+    ratification = append_ratification(
+        store, root, key,
+        event_id="018cc251-f400-7000-8000-000000000001",
+        checkpoint_store=store._checkpoint_store,
+    )
     revocation = AuthorityEventIntent(AuthorityEventType.RATIFICATION_REVOKED, "human:fernando", ratification_event_id=ratification.event_id)
     racing_store = _RevokesAfterSnapshot(store, key, revocation)
     with pytest.raises(AuthorityStateError, match="append fuera de secuencia/predecesor"):

@@ -5,12 +5,12 @@ from policy.authority_ledger.effective_context import build_effective_authority_
 from policy.authority_ledger.models import AuthorityEventIntent, AuthorityEventType
 from tests.policy.test_authority_ledger_events import append_authority_event
 from policy.authority_resolution.models import EvaluationContext
-from tests.policy.test_authority_ledger_events import setup_ledger, ratification_intent
+from tests.policy.test_authority_ledger_events import append_ratification, setup_ledger
 
 
 def test_effective_context_is_not_execution_authorization():
     store, root, key = setup_ledger()
-    rat = append_authority_event(store, root, key, ratification_intent())
+    rat = append_ratification(store, root, key)
     append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", (), ratification_event_id=rat.event_id))
     context = EvaluationContext("1.0", "JAX_AUTHORITY_EVALUATION_CONTEXT", "JAX", "ALICE", "READ", ())
     effective = build_effective_authority_context(verify_authority_ledger(store.get_genesis(), store.events(), root), context, datetime(2026, 1, 1, tzinfo=timezone.utc))

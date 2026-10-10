@@ -12,13 +12,13 @@ from policy.decision_record.models import (DecisionAuthorityBinding, DecisionRes
     EffectiveAuthorityEnvelopeSnapshot, VerifiedDecisionEvaluation)
 from policy.decision_record.service import build_decision_input, build_decision_record
 from policy.decision_record.ids import new_decision_id
-from tests.policy.test_authority_ledger_events import setup_ledger, ratification_intent
+from tests.policy.test_authority_ledger_events import append_ratification, setup_ledger
 from tests.policy.test_decision_input import context, instant
 
 
 def active_state():
     store, root, key = setup_ledger()
-    rat = append_authority_event(store, root, key, ratification_intent())
+    rat = append_ratification(store, root, key)
     append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", (), ratification_event_id=rat.event_id))
     return store, root, verify_authority_ledger(store.get_genesis(), store.events(), root)
 

@@ -46,7 +46,7 @@ OVERLAY = OverlayPayload(
     target_rule_ids=("send-receipt",), exception_code="GOLDEN",
 )
 INTENTS = (
-    AuthorityEventIntent._from_validated_snapshot(HASH, PROJECTION, ("sha256:" + "ef" * 32,)),
+    AuthorityEventIntent(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", ("sha256:" + "ef" * 32,), HASH, PROJECTION),
     AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", ratification_event_id="018cc251-f400-7000-8000-000000000001"),
     AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=OVERLAY),
     AuthorityEventIntent(AuthorityEventType.OVERLAY_REVOKED, "human:fernando", overlay_id="golden-exception"),

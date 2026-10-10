@@ -1,11 +1,9 @@
-"""Ataques de falsificación del sello y la proyección congelada (falla 1 del auditor r3).
+"""Ataques contra intents caller-created y proyecciones congeladas.
 
-El sello de ratificación debe ser inalcanzable por las vías públicas de
-construcción: `dataclasses.replace` sobre un intent legítimo NO puede
-transportarlo, y la proyección congelada no puede mutarse después de sellada.
-La frontera que firma (`append_authority_event`) vuelve a derivar la
-coherencia hash/proyección antes de firmar. Cada test aquí mata un mutante
-del arreglo (ver entrega para la tabla mutante→prueba→aserción).
+`RATIFICATION_GRANTED` sólo firma por
+`append_ratification_from_candidate`: el append genérico niega aun un intent
+reconstruido por `dataclasses.replace`. La proyección que llega a serialización
+sigue congelada en profundidad. Cada test fija ese contrato.
 """
 import dataclasses
 from collections.abc import Mapping
@@ -14,22 +12,16 @@ import pytest
 
 from policy.authority_ledger.canonical import plain
 from policy.authority_ledger.errors import AuthorityStateError
-from policy.authority_ledger.models import AuthorityEventIntent, RuleRatificationGrantPayload
+from policy.authority_ledger.models import (AuthorityEventIntent, AuthorityEventType,
+                                            RuleRatificationGrantPayload)
 from tests.policy.test_authority_ledger_events import append_authority_event
 from tests.policy.test_authority_ledger_events import ratification_intent, setup_ledger
 from tests.policy._sellos_de_prueba import rule_grant_intent
 from tests.policy.test_authority_ledger_rule_ratifications import sample_grant
 
 
-def test_replace_attack_cannot_reuse_the_snapshot_seal():
-    """Ataque 1: replace() sobre un intent legítimo conservando el sello.
-
-    En master el sello viajaba en el constructor y `dataclasses.replace`
-    lo copiaba tal cual: un corpus arbitrario quedaba firmado. Con el sello
-    `init=False`, el intent reconstruido llega sin sello y la frontera que
-    firma lo rechaza. (Mutante «volver a init=True»: el replace transporta
-    el sello, el append firma y este test explota.)
-    """
+def test_generic_append_rejects_a_replaced_ratification_intent():
+    """Una reconstrucción de caller no puede usar la frontera genérica."""
     store, root, key = setup_ledger()
     base = ratification_intent()
     forged_hash = "sha256:" + "ab" * 32
@@ -39,7 +31,7 @@ def test_replace_attack_cannot_reuse_the_snapshot_seal():
         static_policy_view_projection={"policy_corpus_hash": forged_hash},
     )
     assert forged._ratification_snapshot_seal is None
-    with pytest.raises(AuthorityStateError, match="snapshot sellado"):
+    with pytest.raises(AuthorityStateError, match="append_ratification_from_candidate"):
         append_authority_event(store, root, key, forged)
     assert store.events() == ()
 
@@ -58,8 +50,8 @@ def test_rule_grant_replace_attack_cannot_reuse_the_faro_seal():
     assert store.events() == ()
 
 
-def test_projection_is_frozen_deep_after_sealing():
-    """Ataque 2: mutar `static_policy_view_projection` tras sellar.
+def test_projection_is_frozen_deep_when_the_intent_is_built():
+    """La proyección no puede mutarse después de construir el intent.
 
     En master la proyección era un dict mutable. Ahora es MappingProxyType
     hasta el fondo: ni la clave del hash ni los dicts anidados se dejan
@@ -87,7 +79,8 @@ def test_projection_is_frozen_deep_after_sealing():
     plain_projection["ordinary_documents"] = [
         {"id": "doc-a", "relationships": {"supersedes": ["doc-0"]}},
     ]
-    with_docs = AuthorityEventIntent._from_validated_snapshot(
+    with_docs = AuthorityEventIntent(
+        AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", (),
         base.policy_corpus_hash, plain_projection,
     )
     documents = with_docs.static_policy_view_projection["ordinary_documents"]
@@ -100,20 +93,13 @@ def test_projection_is_frozen_deep_after_sealing():
     assert isinstance(documents[0]["relationships"]["supersedes"], tuple)
 
 
-def test_hash_drift_after_sealing_is_recomputed_and_rejected_at_append():
-    """Ataque 3: hash que no coincide con la proyección congelada.
-
-    El constructor ya rechaza pares incoherentes, así que la única vía de
-    producir la divergencia es mutar el campo después de sellar. La frontera
-    que firma recalcula el hash desde la proyección y lo compara antes de
-    firmar. (Mutante «quitar el recálculo»: el append firma y este test
-    explota.)
-    """
+def test_generic_append_rejects_hash_drift_in_caller_intent():
+    """Ni siquiera un intent congelado y luego alterado llega a firma."""
     store, root, key = setup_ledger()
     base = ratification_intent()
     drifted = "sha256:" + "cd" * 32
     assert drifted != base.policy_corpus_hash
     object.__setattr__(base, "policy_corpus_hash", drifted)
-    with pytest.raises(AuthorityStateError, match="no coincide con la proyección"):
+    with pytest.raises(AuthorityStateError, match="append_ratification_from_candidate"):
         append_authority_event(store, root, key, base)
     assert store.events() == ()

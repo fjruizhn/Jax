@@ -248,13 +248,13 @@ def test_replay_rejects_unknown_and_duplicate_rule_ratification_revocations():
 
 @pytest.mark.parametrize("direction", ["corpus_to_rule", "rule_to_corpus"])
 def test_append_rejects_cross_type_revocations_of_real_grant_ids(direction):
-    from tests.policy.test_authority_ledger_events import ratification_intent
+    from tests.policy.test_authority_ledger_events import append_ratification
 
     store, root, key = _ledger()
     corpus_id = "018cc251-f400-7000-8000-000000000020"
     rule_id = "018cc251-f400-7000-8000-000000000021"
     if direction == "corpus_to_rule":
-        append_authority_event(store, root, key, ratification_intent(), event_id=corpus_id)
+        append_ratification(store, root, key, event_id=corpus_id)
         with pytest.raises(AuthorityStateError, match="rule ratification desconocida"):
             append_authority_event(
                 store, root, key,
