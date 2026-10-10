@@ -1,5 +1,23 @@
 # Traspaso continuo · Faro F1.1 paso 6
 
+## Actualización 2026-10-10 · corrección E2E half-close tras CI exacta
+
+- **CI exacta de `a2ed7590`:** policy run `38089606207` falló `faro-fase0` con 779
+  pasadas frente al piso 780; el test fallido era
+  `test_el_rele_con_half_close_deja_llegar_la_respuesta_antes_de_salir`. El fixture enviaba
+  `ping` sin iniciar una sesión MCP. En EOF, el dispatcher cancela solicitudes normales
+  todavía en vuelo, por lo que la prueba no ejercitaba un intercambio válido.
+- **Corrección TDD local:** el test ahora completa `initialize`, envía
+  `notifications/initialized`, manda `ping` y verifica que la respuesta corresponda al ID 8
+  después de cerrar stdin. Conserva la aserción de salida/código/diagnóstico del proceso.
+  Con el entorno fijado de Faro, la prueba pasó 30/30 repeticiones locales.
+- **Estado:** el cambio está en `tests/test_faro_puerto_e2e.py`, todavía sin commit. Requiere
+  verificación focalizada, commit firmado por Codex, push del propio PR, nueva auditoría Tier 3
+  del SHA exacto y CI completa del mismo SHA. El veredicto RECHAZADO de Tier 3 para `a2ed7590`
+  queda sustituido solo cuando la auditoría delta evalúe el SHA nuevo; no declarar listo antes.
+- **Quién decidió:** Codex corrigió el test tras reproducir el fallo y comprobar el contrato
+  del dispatcher MCP; Fernando autorizó continuar cierre/auditoría/CI de #388.
+
 ## Actualización 2026-10-10 · reapilado selectivo #388 sobre #387
 
 - **Tip y base:** Fernando confirmó #390 integrado como `250b82c` y #387 como
