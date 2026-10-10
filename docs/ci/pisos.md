@@ -4762,5 +4762,6 @@ los mutantes M5/M6 mueren con `git archive`. Incremento acumulado: 1003 -> 1038.
 
 El MINOR de Tier 3 agrega dos vectores de paridad (+2): `llamadas` y `EUR` se rechazan
 tanto en JSON Schema como en Python; con el pattern anterior, esos dos vectores fallan.
-El incremento acumulado desde master es +37; el piso total esperado se medirá en el tip
-reapilado con el comando exacto del workflow.
+El incremento acumulado desde master es +37. Medido sobre el head reapilado en Python
+3.14.4 con la lista exacta del workflow: `1040 passed`, cero skipped; `piso.py verificar`
+rc=0.

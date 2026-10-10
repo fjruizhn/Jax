@@ -1,5 +1,22 @@
 # Traspaso · feat/faro-f1.1-schema-unidades
 
+## Retoma Codex · 2026-10-09
+
+- Reapilado en worktree propio `/home/fruiz/jax/.worktrees/codex-faro-378-rebase-20261009`, rama `codex/faro-378-rebase-20261009`; la rama/worktree ZCode y el PR #378 original siguen intactos.
+- Base actual: `origin/master@da99e6e22ccd1689950ed5ef13278fbd14ffb03c`, que incluye #381 (`ec89ef1e`) y el registro documental #384. Se reaplicaron los seis commits del delta de #378 desde `4c3064a2`.
+- Conflictos resueltos preservando el workflow vigente y los cambios ya integrados de #381; el piso identity se suma a 1003 de master (+34 schema, +1 prueba de catálogo forjado, +2 paridad JSON/Python).
+- Medición exacta del paso `Identity Foundation Shadow -- piso exacto de tests CORRIDOS`, extraído del workflow, con Python 3.14.4: `1040 passed`, cero skipped; `piso.py verificar` rc=0. `ci/pisos.json`, `.github/workflows/policy.yml` y `docs/ci/pisos.md` reflejan ese conteo.
+- PR #378 original sigue OPEN, con head `4c3064a2` y base `master@8c850bce`; no se cambió su rama ni su head remoto. La rama Codex reapilada aún no está publicada ni auditada.
+- Decisión de coordinación: continuar sin esperar respuesta de GLM/ZCode, que ya terminó la revisión; preservar sus worktrees y preparar un head nuevo para revisión exacta.
+
+### Siguiente gate
+
+1. Ejecutar `git diff --check` y la suite focal `tests/policy/test_rule_authority_schema.py` sobre esta rama.
+2. Registrar esta evidencia, borrar `TRASPASO.md` y dejar el traspaso durable en `docs/historia/` antes de solicitar auditoría Tier 3 final.
+3. Publicar la rama Codex sin reescribir `feat/faro-f1.1-schema-unidades`, abrir un PR de reemplazo y esperar CI completa y auditoría exacta.
+4. Inmediatamente antes de cualquier integración, ejecutar `bin/ventana estado`, `verify-integration` para el SHA auditado y `post-merge-guard` después del merge.
+
+
 ## Objetivo
 
 Cerrar el hallazgo del auditor de #371: `policy/rule_authority/schema.py` no validaba

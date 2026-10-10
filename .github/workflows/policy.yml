@@ -2677,8 +2677,8 @@ jobs:
         # por lo que el piso combinado medido es 1003 passed, cero skipped
         # (#381 agrega checkpoint/overlay y cierra el writer caller-intent).
         # Schema-unidades (#378) añade 34 pruebas: 1003 -> 1037; r2 añade una
-        # de catálogo forjado: 1038. MINOR Tier 3 cierra paridad JSON/Python con
-        # dos vectores: el piso final se medirá en el head re-apilado.
+        # de catálogo forjado: 1038. El MINOR Tier 3 agrega dos vectores de paridad
+        # JSON/Python. Medición exacta del head reapilado: 1040 passed, cero skipped.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
