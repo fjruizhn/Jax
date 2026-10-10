@@ -4794,4 +4794,4 @@ El incremento acumulado desde master es +37. Medido sobre el head reapilado en P
 3.14.4 con la lista exacta del workflow: `1040 passed`, cero skipped; `piso.py verificar`
 rc=0.
 
-El CI exacto de `bc024578` midió `1042 passed`, cero skipped. El incremento de dos corresponde a las regresiones que prueban que el guard y `MariaDBRuleDecisionStore` rechazan un `TrustedCheckpointStore` real de Block 4. El piso queda alineado a 1042 en la corrección de esta cadena; debe confirmarlo la CI del SHA que la contiene.
+El CI exacto de `bc024578` midió `1042 passed`, cero skipped, frente al piso anterior de 1040. Las dos pruebas que elevan este conteo son `test_el_guard_nombra_el_checkpoint_de_auditoria_sin_confundirlo_con_block4` y `test_el_guard_rechaza_el_checkpoint_real_de_block4`, ambas en `test_rule_authority_providers.py`, que sí está en la lista de Identity Foundation. La aserción que pasa el checkpoint Block 4 al constructor MariaDB vive en `test_rule_authority_checkpoint.py`, fuera de esa lista, y se añadió a una prueba existente; no contribuye al +2. El piso queda alineado a 1042 en la corrección de esta cadena; debe confirmarlo la CI del SHA que la contiene.
