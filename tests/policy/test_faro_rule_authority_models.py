@@ -677,7 +677,7 @@ def test_store_record_keeps_the_stop_lease_until_the_decision_is_persisted():
 
     with leases_de_emision(
         pin=PinFijo(pin, "refs/heads/main"),
-        checkpoint=checkpoint,
+        rule_audit_checkpoint=checkpoint,
         stop=stop,
         reloj=RelojDeterminista(NOW),
         clasificacion=ClasificacionFija({}),
