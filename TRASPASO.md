@@ -28,6 +28,9 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   `/var/run/docker.sock` por permiso denegado.
 - GLM/ZCode está ejecutando revisión read-only del SHA `76c8ecd0` (checkpoint/almacenamiento
   externo); el resultado todavía no ha llegado. Kimi CLI no está disponible por límite 403.
+- Añadí regresión que forja una cadena hash-válida con un head histórico repetido. Pasa con
+  el validador vigente; mutando temporalmente esa guardia, falla como se espera. Suite de
+  checkpoint: 7 passed.
 - El checkout compartido claude-skills está sincronizado; `claude-skills-sync pull`
   informó una divergencia local de `settings.json` de Claude, sin cambios en PENDIENTES.
 
