@@ -114,7 +114,8 @@ def _final_mariadb_server_ready(logs: str) -> bool:
     if "init process done" in logs:
         return True
     return re.search(
-        r"ready for connections\.\s*Version: [^\n]*\bport:\s*'?3306'?(?=\s|$)",
+        r"ready for connections\.\s*(?:\d{4}-\d{2}-\d{2}T\S+\s+)?"
+        r"Version: [^\n]*\bport:\s*'?3306'?(?=\s|$)",
         logs,
     ) is not None
 
@@ -207,6 +208,68 @@ Version: '12.3.3-MariaDB' socket: '/run/mysqld/mysqld.sock' port: 3306 mariadb.o
     assert not _final_mariadb_server_ready(temporary)
     assert _final_mariadb_server_ready(final_server)
     assert _final_mariadb_server_ready("init process done")
+
+
+def test_final_server_detection_accepts_timestamped_final_startup() -> None:
+    timestamped_final_server = """2026-10-10T18:32:10.000000000Z mariadbd: ready for connections.
+2026-10-10T18:32:10.000000000Z Version: '12.3.3-MariaDB' socket: '/run/mysqld/mysqld.sock' port: 3306 mariadb.org
+"""
+
+    assert _final_mariadb_server_ready(timestamped_final_server)
+
+
+@pytest.mark.parametrize("code", (2003, 2013))
+def test_connect_retries_transient_mariadb_startup_errors(monkeypatch, code) -> None:
+    attempts = 0
+    connection = object()
+
+    def connect_once():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise pymysql.err.OperationalError(code, "temporary startup failure")
+        return connection
+
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    assert _connect_after_transient_mariadb_startup_error(
+        connect_once, timeout=1, retry_delay=0
+    ) is connection
+    assert attempts == 2
+
+
+def test_connect_propagates_permanent_mariadb_startup_error_without_retry(monkeypatch) -> None:
+    attempts = 0
+    failure = pymysql.err.OperationalError(1045, "Access denied")
+
+    def connect_once():
+        nonlocal attempts
+        attempts += 1
+        raise failure
+
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    with pytest.raises(pymysql.err.OperationalError, match="Access denied"):
+        _connect_after_transient_mariadb_startup_error(
+            connect_once, timeout=1, retry_delay=0
+        )
+    assert attempts == 1
+
+
+def test_connect_stops_retrying_at_the_bounded_deadline(monkeypatch) -> None:
+    attempts = 0
+
+    def connect_once():
+        nonlocal attempts
+        attempts += 1
+        raise pymysql.err.OperationalError(2003, "temporary startup failure")
+
+    monotonic_values = iter((0.0, 1.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    with pytest.raises(AssertionError, match="siguió inaccesible"):
+        _connect_after_transient_mariadb_startup_error(
+            connect_once, timeout=0.5, retry_delay=0
+        )
+    assert attempts == 1
 
 
 def test_readiness_rejects_a_socket_server_reporting_a_nonfinal_port(monkeypatch, tmp_path) -> None:
@@ -392,7 +455,7 @@ def db():
                         cursor.execute("SELECT VERSION()")
                         assert cursor.fetchone()[0].startswith("12.3.3-")
                     _apply_migration(admin)
-            except BaseException as error:
+            except Exception as error:
                 raise AssertionError(
                     f"falló la preparación de MariaDB aislada:\n"
                     f"{_container_diagnostics(docker, container)}"
