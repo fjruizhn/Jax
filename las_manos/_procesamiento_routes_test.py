@@ -402,7 +402,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         assert resultados[0]["estado"] == "rechazado"
         ingerir_mock.assert_not_called()
 
-    # -- B-5: la mutación que más importa -- medir el LOOP, no el POST ---
+    # -- B-5: el loop responde mientras la ingesta sigue bloqueada --------
     async def test_B5_el_trabajo_no_bloquea_el_loop_de_eventos(self):
         self._archivo_en_workspace("lento.pdf")
         loop = asyncio.get_running_loop()
