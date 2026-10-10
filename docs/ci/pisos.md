@@ -40,6 +40,29 @@ repositorio (`github.server_url`/`github.repository`) a `refs/pisos-base/master`
 tiene `ci/pisos.json` (el PR que lo introdujo), los pisos de la base se derivan del `policy.yml` de esa
 misma punta.
 
+## Retiros extraordinarios de pisos
+
+La desaparición sigue prohibida salvo un permiso genérico y exacto del registro versionado
+`.github/workflows/floor-retirements.json`. El registro de esta entrega está vacío: no concede
+ningún retiro. El workflow extrae el comparador desde la punta oficial de `master` y ejecuta
+esa copia, nunca la del HEAD evaluado. Descarga historia completa; shallow, objetos ausentes,
+padres no verificables o errores de Git deniegan la excepción.
+
+Cada grant tiene esquema cerrado y ata repo, PR, rama y SHA exacto de base, clave, definición
+completa del piso (entrada canónica y archivo que consume el workflow), hash SHA-256 canónico,
+merge de introducción con ambos padres y hash del diff esperado. La excepción solo se considera
+si la propia base evaluada es exactamente un merge dedicado de dos padres: parent1 es el estado
+previo, parent2 es el commit que añade solo el grant al registro, y el diff de ambos lados cambia
+únicamente el registro. Cualquier avance de `master` deja de ser esa transición y caduca el
+permiso. El diff esperado se calcula de rutas, modos y OIDs completos, no de texto parche; un
+archivo extra, cambio parcial, segundo retiro, diferencia de definición o permiso ambiguo/malformado
+conserva el rechazo ordinario. Los pisos desaparecidos se filtran solo individualmente después
+de acreditar todas esas condiciones; el permiso no autoriza otras bajas.
+
+Para usar esta capacidad en un caso futuro, el grant válido debe integrarse primero en una PR
+separada y la PR de retiro debe apuntar exactamente al merge dedicado resultante. Esta etapa no
+añade autorización real, no modifica `ci/pisos.json` ni reapila ningún rollback.
+
 ---
 
 ## `las-voces-faro-readonly/las-voces-faro-readonly`
@@ -4663,6 +4686,9 @@ Piso nuevo de la migración: `policy/tests/test_pisos_fuera_del_workflow.py` (pe
 master 364ded9) y `policy/tests/test_comparar_pisos.py` (el comparador). 140 -> 213 -> 223 el
 2026-10-04 al agregar el comparador y sus casos, las pruebas del job aislado y las de claves duplicadas; 223 -> 227 (2026-10-04, ci/pisos-skipped-y-comentarios): +4 netas del comparador (5 pruebas de la excepción `^N passed` -> `^N' passed, M skipped`, menos 1 parámetro que deja de ser rojo). Medido en
 Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.
+227 -> 233 (2026-10-10, soporte genérico de retiros): +6 pruebas para transición dedicada del
+registro, grant solo en la base exacta, hash raw de diff, fallos de historia incompleta y
+rechazo de grant en otra rama destino. Medido con el comando exacto de CI: `233 passed`.
 
 ## `authority-ledger-seal/attacks`
 

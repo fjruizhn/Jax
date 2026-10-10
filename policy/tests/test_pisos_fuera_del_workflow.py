@@ -223,20 +223,20 @@ def test_el_lector_vive_en_github_y_no_queda_copia_fuera_de_la_reserva():
 def test_ninguna_llamada_del_workflow_usa_un_lector_fuera_de_github():
     texto = WORKFLOW.read_text(encoding="utf-8")
     llamadas = re.findall(r"\S*piso\.py", texto)
-    assert llamadas and set(llamadas) == {".github/ci/piso.py"}
+    lectores = {ruta for ruta in llamadas if ruta.endswith("/piso.py")}
+    assert lectores == {".github/ci/piso.py"}
+    assert ".github/ci/comparar_pisos.py" in texto  # se extrae de base, no se ejecuta desde HEAD
 
 
 JOB_COMPARADOR = "pisos-no-bajan"
-FETCH = ('git fetch --no-tags --depth=1 "${{ github.server_url }}/${{ github.repository }}" '
-         "+refs/heads/master:refs/pisos-base/master || exit $?")
-COMPARAR = "python3 -I .github/ci/comparar_pisos.py refs/pisos-base/master || exit $?"
+COMPARAR = 'python3 -I "$GITHUB_WORKSPACE/.github/ci/comparar_pisos_base.py" refs/pisos-base/master || exit $?'
 
 
 def _job_comparador():
     return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"][JOB_COMPARADOR]
 
 
-def test_el_comparador_corre_en_un_job_aislado_con_tres_pasos_exactos():
+def test_el_comparador_corre_aislado_y_ejecuta_el_checker_extraido_de_la_base():
     """El código del PR (conftest.py, sitecustomize, un test) corre en los otros jobs y puede
     reescribir .git/config o las refs. Este job no ejecuta nada del repo: checkout, fetch, comparar."""
     job = _job_comparador()
@@ -245,21 +245,51 @@ def test_el_comparador_corre_en_un_job_aislado_con_tres_pasos_exactos():
     assert len(pasos) == 3
     assert set(pasos[0]) == {"uses", "with"} and pasos[0]["uses"].startswith("actions/checkout@")
     assert pasos[0]["with"] == {"persist-credentials": False}
-    assert set(pasos[1]) == {"name", "run"} and pasos[1]["run"].strip() == FETCH
+    assert set(pasos[1]) == {"name", "run"}
+    fetch = pasos[1]["run"]
+    assert "git fetch --no-tags --unshallow" in fetch
+    assert "git fetch --no-tags \"$REPO_URL\"" in fetch
+    assert "+refs/heads/master:refs/pisos-base/master" in fetch
+    assert 'PR_MERGE_REF="refs/pull/${{ github.event.pull_request.number }}/merge"' in fetch
+    assert '"+${PR_MERGE_REF}:refs/pisos-candidate/merge"' in fetch
+    assert "rev-parse --is-shallow-repository" in fetch and '== "false"' in fetch
+    assert "git show refs/pisos-base/master:.github/ci/comparar_pisos.py" in fetch
+    assert 'destino="$GITHUB_WORKSPACE/.github/ci/comparar_pisos_base.py"' in fetch
+    assert 'temporal=$(mktemp "$GITHUB_WORKSPACE/.github/ci/.comparar_pisos_base.XXXXXX")' in fetch
+    assert '[[ ! -L "$destino" ]]' in fetch
+    assert 'mv -fT "$temporal" "$destino"' in fetch
     assert set(pasos[2]) == {"name", "run"} and pasos[2]["run"].strip() == COMPARAR
 
 
 def test_el_job_comparador_no_instala_ni_ejecuta_codigo_del_pr():
     texto = yaml.safe_dump(_job_comparador())
-    for prohibido in ("pip", "pytest", "setup-python", "npm", "import ", "conftest", "continue-on-error", "if:"):
+    for prohibido in ("pytest", "setup-python", "npm", "import ", "conftest", "continue-on-error", "if:"):
         assert prohibido not in texto, prohibido
+
+
+def test_checker_extraido_usa_ruta_profunda_y_interfaz_posicional_legacy():
+    pasos = _job_comparador()["steps"]
+    fetch = pasos[1]["run"]
+    run = pasos[2]["run"].strip()
+    ruta = "$GITHUB_WORKSPACE/.github/ci/comparar_pisos_base.py"
+    assert 'git show refs/pisos-base/master:.github/ci/comparar_pisos.py > "$temporal"' in fetch
+    assert 'destino="' + ruta + '"' in fetch
+    assert run == f'python3 -I "{ruta}" refs/pisos-base/master || exit $?'
+    assert "--head-root" not in run and "--base-ref" not in run and "--head-ref" not in run
 
 
 def test_la_base_se_trae_de_la_url_fija_a_una_ref_propia_no_del_origin_configurado():
     run = _job_comparador()["steps"][1]["run"]
     assert "github.server_url" in run and "github.repository" in run
     assert "refs/pisos-base/master" in run
+    assert "--depth=1" not in run and "--deepen" not in run
     assert "origin" not in run
+
+
+def test_registro_de_retiros_vigente_inicia_vacio_y_con_esquema_versionado():
+    registro = RAIZ / ".github" / "workflows" / "floor-retirements.json"
+    datos = json.loads(registro.read_text(encoding="utf-8"))
+    assert datos == {"version": 1, "grants": []}
 
 
 def test_el_paso_comparador_ya_no_esta_en_el_job_de_las_pruebas():
