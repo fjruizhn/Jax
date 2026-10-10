@@ -17,6 +17,7 @@ from policy.canonicalization.errors import StrictYAMLError
 from policy.canonicalization.strict_yaml import load_strict_yaml
 from tests.policy.catalogo_pin import catalogo_del_pin
 from policy.rule_authority.errors import RuleSchemaError
+from jax.faro.catalogo_topes import CatalogoTopes
 from policy.rule_authority.schema import TTL_MAX_POR_DEFECTO, validar_regla as _validar
 
 # El catalogo de la decision de Fernando (B-3): llega del pin, nunca de un global
@@ -295,6 +296,147 @@ def test_frecuencia_sin_maximo_o_sin_ventana_rechaza() -> None:
             validar_regla(datos)
 
 
+# --------------------------- quantity.unit / amount.currency: catalogo (auditor #371)
+
+class _StrSub(str):
+    pass
+
+
+@pytest.mark.parametrize("unidad", [
+    "llamadas",            # la grafia inventada de la fixture vieja: no es un subid
+    "workers",             # D-4: infraestructura, jamas subid de actos
+    "Mensajes",            # mayuscula: el catalogo guarda el subid exacto
+    "mensajes ", " mensajes", "mensajes\n", "mensajes\u200b",   # espacios y ancho cero
+    "", 42, None, True, ["mensajes"], _StrSub("mensajes"),
+    "por_hora",            # subid de OTRA clase (frecuencia), no de actos_externos
+    "segundos",            # subid de duracion
+    "tokens",              # subid de tokens_costo
+])
+def test_cantidad_con_unidad_fuera_del_catalogo_rechaza(unidad: object) -> None:
+    datos = _regla("regla-ejemplo-tope.yaml")
+    datos["obligation_limits"]["quantity"]["unit"] = unidad
+    with pytest.raises(RuleSchemaError) as excinfo:
+        validar_regla(datos)
+    assert "quantity.unit" in str(excinfo.value)
+
+
+def _unidades_del_catalogo_real() -> list[str]:
+    raiz = Path(__file__).resolve().parents[2]
+    clases = json.loads((raiz / "policy" / "faro" / "catalogo-topes.json").read_text())["clases"]
+    return list(clases["actos_externos"])
+
+
+@pytest.mark.parametrize("unidad", _unidades_del_catalogo_real())
+def test_cantidad_con_cada_unidad_del_catalogo_real_valida(unidad: str) -> None:
+    datos = _regla("regla-ejemplo-tope.yaml")
+    datos["obligation_limits"]["quantity"]["unit"] = unidad
+    assert validar_regla(datos).obligation_limits.quantity.unit == unidad
+
+
+def test_las_unidades_legitimas_no_estan_vacias() -> None:
+    assert {"mensajes", "correos"} <= set(_unidades_del_catalogo_real())
+
+
+@pytest.mark.parametrize("moneda", [
+    "EUR",                 # ISO 4217 valida pero NO es subid de monto_dinero
+    "US\u200bD",           # USD con ancho cero: NFC lo conserva, fuera del catalogo
+    "USD ", 42, None, True, _StrSub("USD"), ["USD"],
+])
+def test_monto_con_moneda_fuera_del_catalogo_rechaza(moneda: object) -> None:
+    datos = _regla("regla-ejemplo-tope.yaml")
+    datos["obligation_limits"]["quantity"] = None
+    datos["obligation_limits"]["amount"] = {"currency": moneda, "max": 100}
+    with pytest.raises(RuleSchemaError) as excinfo:
+        validar_regla(datos)
+    assert "amount.currency" in str(excinfo.value)
+
+
+def _monedas_del_catalogo_real() -> list[str]:
+    raiz = Path(__file__).resolve().parents[2]
+    clases = json.loads((raiz / "policy" / "faro" / "catalogo-topes.json").read_text())["clases"]
+    return list(clases["monto_dinero"])
+
+
+@pytest.mark.parametrize("moneda", _monedas_del_catalogo_real())
+def test_monto_con_cada_moneda_del_catalogo_real_valida(moneda: str) -> None:
+    """La regla escribe la forma ISO (``USD``); el catalogo guarda el subid
+    (``usd``): la comparacion va tras ``lower``, como ``limites_de``."""
+    datos = _regla("regla-ejemplo-tope.yaml")
+    datos["obligation_limits"]["quantity"] = None
+    datos["obligation_limits"]["amount"] = {"currency": moneda.upper(), "max": 100}
+    regla = validar_regla(datos)
+    assert regla.obligation_limits.amount.currency == moneda.upper()
+    assert regla.obligation_limits.amount.currency.lower() == moneda
+
+
+def _sin_tope(datos: dict) -> dict:
+    # Sin ``tope`` el unico que puede negar es el chequeo de unidad/moneda: si no,
+    # ``_validar_tope`` (que tambien niega sin catalogo) enmascara el mutante.
+    datos["tope"] = None
+    return datos
+
+
+def test_cantidad_o_monto_sin_catalogo_del_pin_niega() -> None:
+    # B-3 extendido a los limites: sin catalogo sellado no hay vocabulario de
+    # unidades ni monedas. La regla base (sin quantity/amount/tope) sigue
+    # validando sin catalogo: no hay nada que cerrar. Sin tope, y con el prefijo
+    # del campo en el mensaje, para que lo afirmado sea el chequeo de ESTE helper.
+    datos_cantidad = _sin_tope(_regla("regla-ejemplo-tope.yaml"))
+    with pytest.raises(RuleSchemaError, match=r"^obligation_limits\.quantity\.unit: sin catalogo"):
+        _validar(datos_cantidad, catalogo=None)
+    datos_monto = _sin_tope(_regla("regla-ejemplo-tope.yaml"))
+    datos_monto["obligation_limits"]["quantity"] = None
+    datos_monto["obligation_limits"]["amount"] = {"currency": "USD", "max": 100}
+    with pytest.raises(RuleSchemaError, match=r"^obligation_limits\.amount\.currency: sin catalogo"):
+        _validar(datos_monto, catalogo=None)
+    with pytest.raises(RuleSchemaError,
+                       match=r"^obligation_limits\.quantity\.unit: el catalogo se exige SELLADO"):
+        _validar(datos_cantidad, catalogo={"actos_externos": ["mensajes"]})
+    _validar(_regla())          # REVERSIBLE sin limites: el catalogo no hace falta
+
+
+def test_un_catalogo_forjado_por_subclase_no_cuenta_como_sellado() -> None:
+    """``type(catalogo) is CatalogoTopes`` (como models.py): una subclase creada
+    con ``object.__new__`` salta el testigo del constructor y NO pasa, ni en el
+    helper de unidad/moneda ni en ``_validar_tope``."""
+    class Falso(CatalogoTopes):
+        pass
+    falso = object.__new__(Falso)
+    datos = _sin_tope(_regla("regla-ejemplo-tope.yaml"))
+    with pytest.raises(RuleSchemaError, match=r"^obligation_limits\.quantity\.unit: .*SELLADO"):
+        _validar(datos, catalogo=falso)
+    solo_tope = _regla("regla-ejemplo-tope.yaml")
+    solo_tope["obligation_limits"]["quantity"] = None
+    solo_tope["obligation_limits"]["frequency"] = None
+    with pytest.raises(RuleSchemaError, match=r"^tope: .*SELLADO"):
+        _validar(solo_tope, catalogo=falso)
+
+
+def test_la_unidad_y_la_moneda_salen_del_catalogo_del_pin() -> None:
+    """Un pin con otros subids los admite; los del catalogo de Fernando,
+    ausentes en ese pin, niegan — el vocabulario es dato del pin, no un global."""
+    otro = catalogo_del_pin(json.dumps(
+        {"version": 1, "decision": "x",
+         "clases": {"monto_dinero": ["eur"], "actos_externos": ["correos"],
+                    "frecuencia": ["por_hora"], "duracion": ["segundos"],
+                    "tokens_costo": ["tokens"]}}).encode())
+    datos = _regla("regla-ejemplo-tope.yaml")
+    datos["obligation_limits"]["quantity"]["unit"] = "correos"
+    datos["tope"]["resource"] = "actos_externos.correos"
+    assert _validar(datos, catalogo=otro).obligation_limits.quantity.unit == "correos"
+    datos["obligation_limits"]["quantity"]["unit"] = "mensajes"
+    with pytest.raises(RuleSchemaError):
+        _validar(datos, catalogo=otro)
+    monto = _regla("regla-ejemplo-tope.yaml")
+    monto["obligation_limits"]["quantity"] = None
+    monto["obligation_limits"]["amount"] = {"currency": "EUR", "max": 100}
+    monto["tope"]["resource"] = "actos_externos.correos"
+    assert _validar(monto, catalogo=otro).obligation_limits.amount.currency == "EUR"
+    monto["obligation_limits"]["amount"] = {"currency": "USD", "max": 100}
+    with pytest.raises(RuleSchemaError):
+        _validar(monto, catalogo=otro)
+
+
 # ------------------------------------------------------------------ tope (R-4)
 
 def test_tope_con_clase_fuera_de_vocabulario_rechaza() -> None:
@@ -477,6 +619,13 @@ def test_el_espejo_json_existe_y_sus_vocabularios_coinciden() -> None:
     tope_objeto = propiedades["tope"]["oneOf"][1]
     clases = tope_objeto["properties"]["resource_class"]["enum"]
     assert tuple(clases) == tuple(sorted(CATALOGO))          # B-3: del catalogo, no de un global
+    # Jax#378 (MINOR del auditor Tier 3): el espejo tambien cierra el vocabulario
+    # de unidad y moneda con el catalogo sellado, no solo con la forma.
+    limites = propiedades["obligation_limits"]["properties"]
+    unidades = limites["quantity"]["oneOf"][1]["properties"]["unit"]["enum"]
+    monedas = limites["amount"]["oneOf"][1]["properties"]["currency"]["enum"]
+    assert tuple(unidades) == tuple(sorted(_unidades_del_catalogo_real()))
+    assert tuple(monedas) == tuple(sorted(m.upper() for m in _monedas_del_catalogo_real()))
     assert espejo.get("additionalProperties") is False
 
 
@@ -509,6 +658,20 @@ def _validador_espejo(espejo: dict):
     return Draft202012Validator(espejo, format_checker=checker)
 
 
+def _obligante_con_unidad_inventada(datos: dict) -> None:
+    # MINOR del auditor de #378: ``llamadas`` pasa la FORMA del espejo viejo
+    # (pattern); con el enum del catalogo sellado, JSON y Python niegan igual.
+    _hacer_obligante_valida(datos)
+    datos["obligation_limits"]["quantity"]["unit"] = "llamadas"
+
+
+def _obligante_con_moneda_ausente(datos: dict) -> None:
+    # EUR es forma ISO 4217 valida ausente del catalogo: sin enum, el espejo firmaba.
+    _hacer_obligante_valida(datos)
+    datos["obligation_limits"]["quantity"] = None
+    datos["obligation_limits"]["amount"] = {"currency": "EUR", "max": 1}
+
+
 @pytest.mark.parametrize("cambio,esperado", [
     (lambda datos: datos.__setitem__("tope", None), True),
     (lambda datos: datos.__setitem__("tope", {
@@ -524,6 +687,8 @@ def _validador_espejo(espejo: dict):
         "maximum": 1, "period": "por_hora",
     }), False),
     (_hacer_obligante_valida, True),
+    (_obligante_con_unidad_inventada, False),
+    (_obligante_con_moneda_ausente, False),
     (lambda datos: datos.__setitem__("action_class", "OBLIGATING"), False),
 ])
 def test_el_espejo_json_y_python_aceptan_los_mismos_vectores_de_regla(cambio, esperado) -> None:

@@ -12,6 +12,14 @@ vocabulario cerrado) y no se deduce del nombre. Las clases de agentes, enjambres
 y conexiones no existen en el vocabulario: un tope sobre ellas no se puede ni
 expresar. El guardia semantico de ``jax/faro/topes.py`` (D-4) sigue vigente en el
 runtime; este schema duplica la lista para que la regla muera antes, al validar.
+
+Hallazgo del auditor de #371 (cerrado aqui): ``Cantidad.unit`` y
+``Monto.currency`` tambien son vocabulario del catalogo SELLADO, no texto
+libre. ``unit`` debe ser un subid de ``actos_externos`` y ``currency`` un
+subid de ``monto_dinero`` (forma ISO, comparacion tras ``lower``), igual que
+``tope.period`` con ``frecuencia``. Una regla con cantidad o monto exige el
+catalogo del pin: sin el, no hay vocabulario y niega (B-3).
+``limites_de`` sigue re-validando al evaluar (defensa en profundidad).
 """
 from __future__ import annotations
 
@@ -50,7 +58,6 @@ _RE_SUBJECT = re.compile(r"(?:human|actor):[a-z][a-z0-9-]{0,63}\Z")
 _RE_CAPABILITY = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
 _RE_OBJETIVO = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _RE_MONEDA = re.compile(r"[A-Z]{3}\Z")
-_RE_UNIDAD = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 _RE_RECURSO = re.compile(r"[a-z0-9_.-]{1,48}\Z")
 _RE_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 
@@ -101,23 +108,28 @@ def _timestamp_utc(valor: object, campo: str) -> datetime:
     return momento
 
 
-def _validar_cantidad(valor: object) -> "Cantidad":
+def _validar_cantidad(valor: object, catalogo: object) -> "Cantidad":
     datos = _objeto_cerrado(valor, "obligation_limits.quantity",
                             frozenset({"unit", "max"}))
     if "unit" not in datos or "max" not in datos:
         raise RuleSchemaError("obligation_limits.quantity: exige unit y max")
-    unidad = _nfc(datos["unit"], "obligation_limits.quantity.unit", _RE_UNIDAD)
+    unidad = _validar_subid(datos["unit"], "actos_externos",
+                            "obligation_limits.quantity.unit", catalogo)
     maximo = _entero_positivo(datos["max"], "obligation_limits.quantity.max")
     return Cantidad(unit=unidad, max=maximo)
 
 
-def _validar_monto(valor: object) -> "Monto":
+def _validar_monto(valor: object, catalogo: object) -> "Monto":
     datos = _objeto_cerrado(valor, "obligation_limits.amount", frozenset({"currency", "max"}))
     if "currency" not in datos or "max" not in datos:
         raise RuleSchemaError("obligation_limits.amount: exige currency y max")
     moneda = _nfc(datos["currency"], "obligation_limits.amount.currency", _RE_MONEDA)
-    # ISO 4217 completo se compara contra el contrato de la capability al evaluar;
-    # aqui se fija la FORMA (3 mayusculas) y el maximo en unidades menores, entero.
+    # La forma sigue siendo ISO 4217 (3 mayusculas); el catalogo cierra el
+    # VOCABULARIO: la moneda debe ser un subid de monto_dinero (la regla escribe
+    # ``USD``, el catalogo guarda ``usd`` — comparacion tras lower, como
+    # ``limites_de`` re-valida al evaluar).
+    moneda = _validar_subid(moneda, "monto_dinero", "obligation_limits.amount.currency",
+                            catalogo, tras_lower=True)
     maximo = _entero_positivo(datos["max"], "obligation_limits.amount.max")
     return Monto(currency=moneda, max=maximo)
 
@@ -143,6 +155,26 @@ def _validar_periodo(valor: object, catalogo: CatalogoTopes) -> str:
     return valor
 
 
+def _validar_subid(valor: object, clase: str, campo: str, catalogo: object, *,
+                   tras_lower: bool = False) -> str:
+    """Un subid de SU clase del catalogo SELLADO del pin, al estilo de
+    ``_validar_periodo``: ``type is str`` (una subclase con ``__eq__`` o
+    ``lower`` forjados no pasa la pertenencia), NFC y pertenencia exacta —
+    tras ``lower`` para la forma ISO de las monedas (``USD`` ↔ subid ``usd``).
+    Sin catalogo sellado no hay vocabulario que cerrar: niega (B-3)."""
+    if catalogo is None:
+        raise RuleSchemaError(f"{campo}: sin catalogo del pin no hay vocabulario (B-3)")
+    if type(catalogo) is not CatalogoTopes:
+        raise RuleSchemaError(f"{campo}: el catalogo se exige SELLADO (CatalogoTopes del pin)")
+    if type(valor) is not str or unicodedata.normalize("NFC", valor) != valor:
+        raise RuleSchemaError(f"{campo}: identificador no canonico")
+    comparado = valor.lower() if tras_lower else valor
+    if comparado not in catalogo.get(clase, ()):
+        raise RuleSchemaError(
+            f"{campo}: fuera del catalogo cerrado — debe ser un subid de la clase {clase} (R-4)")
+    return valor
+
+
 def _validar_tope(valor: object, catalogo: object) -> "Tope":
     datos = _objeto_cerrado(valor, "tope", frozenset({"resource_class", "resource",
                                                       "maximum", "period"}))
@@ -151,7 +183,7 @@ def _validar_tope(valor: object, catalogo: object) -> "Tope":
             raise RuleSchemaError(f"tope.{clave}: obligatorio")
     if catalogo is None:
         raise RuleSchemaError("tope: sin catalogo del pin no se topea nada (B-3)")
-    if not isinstance(catalogo, CatalogoTopes):          # r7, MINOR-3: sellado o nada
+    if type(catalogo) is not CatalogoTopes:          # r7, MINOR-3: sellado o nada
         raise RuleSchemaError("tope: el catalogo se exige SELLADO (CatalogoTopes del pin)")
     clase = datos["resource_class"]
     if clase not in catalogo:
@@ -276,8 +308,10 @@ def validar_regla(datos: object, *, ttl_max_seconds: int | None = None,
     for clave in ("quantity", "amount", "frequency"):
         if clave not in limites:
             raise RuleSchemaError(f"obligation_limits.{clave}: obligatorio (null si no aplica)")
-    cantidad = _validar_cantidad(limites["quantity"]) if limites.get("quantity") is not None else None
-    monto = _validar_monto(limites["amount"]) if limites.get("amount") is not None else None
+    cantidad = (_validar_cantidad(limites["quantity"], catalogo)
+                if limites.get("quantity") is not None else None)
+    monto = (_validar_monto(limites["amount"], catalogo)
+             if limites.get("amount") is not None else None)
     frecuencia = (_validar_frecuencia(limites["frequency"])
                   if limites.get("frequency") is not None else None)
 
