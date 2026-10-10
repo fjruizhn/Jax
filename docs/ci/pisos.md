@@ -116,6 +116,8 @@ Patrón vigente al migrar (2026-10-03, master 364ded9): `^671 passed`
 
 Piso actualizado 2026-10-04: `^688 passed`. Sobre el piso 683, se suman pruebas de payload hostil, timeout con cancelación, truncamiento explícito, cableado del perfil de prueba y concurrencia en peor caso; 0 skips.
 
+Piso actualizado 2026-10-09 (JAX#371, Faro F1.1 paso 4): `^780 passed`, medido en GitHub Actions sobre el head exacto `bf0a11d940af4c67a6f8b015fc454c005685316e`, sin skips. El piso anterior era 729; el aumento neto de 51 pruebas corresponde a las regresiones de leases, rotación segura, límites y avance del resumen diario en `tests/test_faro_aviso.py`.
+
 ## `faro-bitacora-db/faro-db`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^40 passed`
@@ -4688,7 +4690,7 @@ Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_
 cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-09, #373 reapilado sobre master posterior a #379): `^816 passed in `
+Patrón vigente (2026-10-09, #371 sobre #373 y #379): `^968 passed in `
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4727,6 +4729,7 @@ cierre de subclases hostiles de `str` lo dejó en 795. Esos conteos pertenecen a
 anterior a #379 y no se suman a este piso.
 
 El reapilado final de #373 incorpora sus providers y regresiones de pin/clasificación a la
-lista que ya incluye los cierres de #379: `677 -> 816` (`139` pruebas netas). Medición exacta
-del comando del workflow en Python 3.14.4: `816 passed`, cero skipped. Las dos listas del
-workflow siguen incluyendo `test_rule_authority_providers.py` y se verifican idénticas.
+lista que ya incluye los cierres de #379: `677 -> 816` (`139` pruebas netas). #371 añade
+152 pruebas de modelos/store, y el árbol apilado mide `968 passed`, cero skipped. Medición
+exacta del comando del workflow en Python 3.14.4. Las dos listas del workflow incluyen los
+archivos de providers y modelos, y se verifican idénticas.

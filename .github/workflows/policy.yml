@@ -510,8 +510,9 @@ jobs:
   # recursos de clase prohibida con subid ajeno (AUD2 x3) y catalogo de bytes
   # sueltos niegan (+4). Re-medido MAJOR-1: 728 — resultado y reconciliacion
   # durables conservan el OID del catalogo sellado (+2). El contrato de lectura
-  # de AlmacenTopes agrega una prueba de reconciliacion: piso actual 729 (+1).
-  # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 68 + topes 113 +
+  # de AlmacenTopes agrega una prueba de reconciliacion: piso 729 (+1). Re-medido
+  # 2026-10-09 en PR #371: 780 (+51), por regresiones nuevas de cola y resumen diario.
+  # (paquete 82 + puerto 87 + e2e 9 + transporte 37 + cadena 21 + requirements 7 + aviso 119 + topes 113 +
   # control 170 + lanzador 77 + acl 43 + memoria 15; desde aviso, los pasos 0.3b y 0.3c y su auditoria). Las pruebas con bwrap y uids
   # reales estan en el job `faro-jaula`; las de la base real, en `faro-bitacora-db`.
   faro-fase0:
@@ -2572,6 +2573,7 @@ jobs:
           tests/policy/test_rule_authority_snapshot.py
           tests/policy/test_rule_authority_ataques.py
           tests/policy/test_rule_authority_providers.py
+          tests/policy/test_faro_rule_authority_models.py
           tests/policy/test_shadow_manifest.py
           tests/policy/test_strict_yaml.py
           tests/policy/test_v3_array_semantics.py
@@ -2671,7 +2673,8 @@ jobs:
         # en la lista del paso anterior: piso combinado 677; ambas listas se
         # comprueban iguales en tests.
         # #373 agrega providers y cierres de clasificación/pin. Tras combinarlo
-        # con #379, la misma lista exacta mide 816 passed, cero skipped.
+        # con #379 la lista mide 816; #371 agrega los modelos en memoria (+152),
+        # por lo que el piso combinado medido es 968 passed, cero skipped.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
@@ -2685,6 +2688,7 @@ jobs:
             tests/policy/test_rule_authority_snapshot.py \
             tests/policy/test_rule_authority_ataques.py \
             tests/policy/test_rule_authority_providers.py \
+            tests/policy/test_faro_rule_authority_models.py \
             tests/policy/test_shadow_manifest.py \
             tests/policy/test_strict_yaml.py \
             tests/policy/test_v3_array_semantics.py \
