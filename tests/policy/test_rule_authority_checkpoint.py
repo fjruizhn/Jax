@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from policy.authority_ledger.canonical import canonical_bytes
+from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
 from policy.rule_authority.errors import CheckpointInvalido
 from policy.rule_authority.storage import MariaDBRuleDecisionStore
 from policy.rule_authority.trusted_checkpoint import (
@@ -174,6 +175,12 @@ def test_protocol_declara_locked_y_store_real_lo_implementa(tmp_path):
 def test_storage_mariadb_exige_checkpoint_bloqueable(tmp_path):
     with pytest.raises(TypeError, match="contrato durable bloqueable"):
         MariaDBRuleDecisionStore(lambda: None, checkpoint_store=CheckpointsEnMemoria())
+    checkpoint_block4 = TrustedCheckpointStore(
+        tmp_path / "block4-checkpoints.jsonl",
+        bootstrap_receipt_path=tmp_path / "block4-receipt.json",
+    )
+    with pytest.raises(TypeError, match="contrato durable bloqueable"):
+        MariaDBRuleDecisionStore(lambda: None, checkpoint_store=checkpoint_block4)
     MariaDBRuleDecisionStore(
         lambda: None,
         checkpoint_store=RuleAuditCheckpointStore(tmp_path / "rule-authority-checkpoint-contract.jsonl"),
