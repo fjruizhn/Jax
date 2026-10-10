@@ -8,6 +8,9 @@ Actualizar el registro histórico de coordinación del grant de retiro F1.1 con 
 - Primera auditoría Tier 3 del SHA `cf3c8b1140e2ff0156c4f74341485356dde3aef9`: RECHAZADO (1 BLOCK, 1 MAJOR). BLOCK: el archivo de traspaso seguía incluido; MAJOR: la búsqueda Restic no tenía snapshots/comando/salida reproducibles.
 - El registro histórico ahora rebaja explícitamente la búsqueda Restic anterior a reporte no verificado y documenta la comprobación en el host con hora UTC, comando, fuente y mirror JAX `master@7024529e`.
 - El test de presencia de `/etc/jax/authority/trusted-root.json` retornó 1; la búsqueda local de los tres artefactos de autoridad no encontró archivos. `jaxctl` no está en PATH, así que el ledger sigue sin verificación.
+- Hallé que `restic find --path` con cero snapshots para las rutas no prueba ausencia en otros snapshots. Detuve la búsqueda global antes de completarla y no la usaré como evidencia; el historial ahora marca el reporte Restic previo como no verificado.
+- Estado de producción: mirror de JAX `master@7024529e1ede4b3a3de92eefe4f60e3d2f567f01`; root/receipt/checkpoint no están presentes en las rutas inspeccionadas; ledger no verificado por faltar `jaxctl`.
+- Estado remoto sin cambio: #390 head `3e74c614`, #387 head `b5f70fef`, #388 head `3eac3fff`; todos siguen sin integración.
 - No se modificaron código, reglas, PRs ajenos ni producción.
 
 ## Falta
