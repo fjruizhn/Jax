@@ -285,9 +285,14 @@ no concede autoridad ni prueba el estado operativo actual.
   afirmación futura sobre `store.record()`/lease; el comentario formal precisa
   la falta de invocación del evaluador/wiring ([nota de coordinación](https://github.com/fjruizhn/Jax/pull/371#issuecomment-6091653546)).
 - La CI de `bf0a11d…` midió 780 pruebas frente al piso anterior de 729; falló
-  `faro-fase0` únicamente por ese desfase, mientras `tests-puros` pasó. El
+  `faro-fase0` únicamente por ese desfase, mientras `tests-puros` pasó
+  ([run 38006297184](https://github.com/fjruizhn/Jax/actions/runs/38006297184)). El
   cambio `c86582af06e62888df649658300600e6ce5ccf14` actualizó
   `ci/pisos.json` y `docs/ci/pisos.md` a 780. Su delta-audit exacta fue
   APROBADO CON CAMBIOS, 0 BLOCK/MAJOR y funcionalmente correcto; la CI de ese
-  SHA terminó verde. GitHub registra #371 integrado en `master` como
+  SHA terminó verde ([auditoría](https://github.com/fjruizhn/Jax/pull/371#issuecomment-6091380703),
+  [policy](https://github.com/fjruizhn/Jax/actions/runs/38007435792),
+  [secret-scan](https://github.com/fjruizhn/Jax/actions/runs/38007435691),
+  [canonical projections](https://github.com/fjruizhn/Jax/actions/runs/38007435779)).
+  GitHub registra #371 integrado en `master` como
   `8c850bcec5cd0233db5487343210c0ba96689f97`.
