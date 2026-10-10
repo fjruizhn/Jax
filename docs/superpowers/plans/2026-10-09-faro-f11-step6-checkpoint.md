@@ -65,10 +65,16 @@ integración final queda pendiente de la respuesta de Fernando sobre overlays.
   existente de decisiones puede usar el checkpoint: bloquea archivo externo antes de
   MariaDB, exige head coincidente antes de mutar, confirma después del commit, y niega
   mismatch o publicación incierta.
-- Verificación local: tests de checkpoint, providers y modelos, 289 passed; la suite
-  MariaDB colecta 14 pruebas, pero no se ejecutó porque Docker no puede abrir
-  `/var/run/docker.sock` en esta sesión.
-- Pendiente para completar el paso: decisiones `PERMIT` + `RulePermit` atómicos,
-  auditoría de consumos y kernel `evaluate`/`consume`.
-- Decisión de Fernando sobre `OVERLAY_ISSUED` pendiente; bloquea integración, no este
-  trabajo aislado.
+- Verificación inicial antes del incremento de permisos: tests de checkpoint, providers y
+  modelos, 289 passed; MariaDB coleccionaba 14 pruebas y Docker no podía abrir
+  `/var/run/docker.sock`.
+- En progreso local: se añadió migration 002 y el adapter MariaDB para emitir decisión
+  `PERMIT` + `RulePermit` en una transacción, junto con publicación del head externo; el
+  store en memoria prueba el boundary sellado e idempotencia. Las suites unitarias cercanas
+  pasan (300 tests); MariaDB solo colecciona 17 tests porque Docker no puede abrir su socket.
+- Bloqueo técnico abierto antes del wiring: la emisión todavía no comparte la misma
+  transacción/row lock con el ledger Block 4. Resolver el contrato de conexión y orden de
+  locks, implementar consumo y kernel, y validar en MariaDB CI.
+- GLM/ZCode tiene auditoría read-only en curso sobre `76c8ecd0`; no cubre los cambios
+  posteriores. La semántica `OVERLAY_ISSUED` permanece como decisión directa pendiente de
+  Fernando y bloquea integración, no el trabajo aislado.

@@ -18,13 +18,16 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   coteja el checkpoint con el audit head bloqueado antes de mutar, publica tras commit y
   falla cerrado si el head está atrasado o la publicación no se confirma.
 - Modelo `RulePermitDraft` + `RulePermit`: proyección canónica hash-bound, campos cerrados,
-  objetos profundamente inmutables; solo el helper interno del store sella un permiso
-  confiable. Ocho pruebas unitarias pasan.
-- Verificación local del incremento: `python3 -m pytest tests/policy/test_rule_authority_checkpoint.py tests/policy/test_rule_authority_providers.py tests/policy/test_faro_rule_authority_models.py -q`
-  → 289 passed; `python3 -m pytest tests/policy/test_faro_rule_permit.py -q` → 8
-  passed; `git diff --check` limpio.
-- La suite MariaDB colecciona 14 pruebas, incluidas 2 nuevas para el checkpoint, pero no
-  se ejecutó: el fixture Docker no puede abrir `/var/run/docker.sock` por permiso denegado.
+  objetos profundamente inmutables; el store solo sella un permiso asociado a una evaluación
+  sellada del kernel. El adapter en memoria aplica idempotencia exacta y rechaza reintentos
+  con otro permiso.
+- Verificación local: las suites de checkpoint, providers, modelos, permisos y store en
+  memoria pasan (`300 passed`); MariaDB colecciona 17 pruebas. `compileall` y
+  `git diff --check` pasan.
+- Las pruebas MariaDB no se ejecutaron: el fixture Docker no puede abrir
+  `/var/run/docker.sock` por permiso denegado.
+- GLM/ZCode está ejecutando revisión read-only del SHA `76c8ecd0` (checkpoint/almacenamiento
+  externo); el resultado todavía no ha llegado. Kimi CLI no está disponible por límite 403.
 - El checkout compartido claude-skills está sincronizado; `claude-skills-sync pull`
   informó una divergencia local de `settings.json` de Claude, sin cambios en PENDIENTES.
 
@@ -36,20 +39,19 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
 - El kernel de este paso debe ignorar overlays y ratificaciones del corpus; solo usa el
   grant individual de Block 4 derivado del ledger verificado.
 - No tocar el worktree `/home/fruiz/wt/jax-ledger-checkpoint` ni `codex/faro-r2`.
-- No publicar, integrar ni rebasear sobre otra base hasta acordarlo y revalidar la ventana
-  inmediatamente antes de publicar/integrar.
+- No publicar ni integrar hasta resolver la pregunta de OVERLAY, cerrar auditoría/CI y
+  revalidar la ventana inmediatamente antes de publicar/integrar. El trabajo aislado y el
+  rebase técnico pueden continuar sin decidir la semántica de OVERLAY.
 
 ## Siguiente acción exacta
 
 En este worktree, continuar TDD desde la migración `policy/rule_authority/migrations/001_rule_authority_kernel.sql`:
 
-1. Ejecutar en CI las pruebas MariaDB nuevas de mismatch, idempotencia y publicación
-   incierta; luego inyectar fallos adicionales alrededor del `fsync`.
-2. Añadir permiso + consumo atómicos, usando el mismo audit head y el lock del ledger
-   Block 4 en una transacción MariaDB.
-3. Añadir kernel `evaluate`/`consume`, carreras y migration incremental; excluir overlays.
-4. Medir local/CI, completar `TRASPASO.md`, solicitar Tier 3 sobre SHA exacto y dejar
-   listo para Fernando, sin integrar.
+1. Terminar emisión durable de decisión + permiso y validar migration/tests en MariaDB CI.
+2. Resolver la frontera transaccional compartida con el ledger Block 4; luego implementar
+   consumo atómico, carrera de doble consumo y kernel `evaluate`/`consume`, excluyendo overlays.
+3. Ejecutar las suites disponibles, registrar límites del runner, actualizar el handoff,
+   delta-auditar el SHA exacto y dejar el cambio listo para Fernando, sin integrar.
 
 ## Archivos tocados
 
@@ -57,7 +59,10 @@ En este worktree, continuar TDD desde la migración `policy/rule_authority/migra
 - `policy/rule_authority/permit.py`
 - `policy/rule_authority/__init__.py`
 - `policy/rule_authority/storage.py`
+- `policy/rule_authority/store.py`
+- `policy/rule_authority/migrations/002_enable_atomic_permits.sql`
 - `tests/policy/test_faro_rule_permit.py`
+- `tests/policy/test_faro_rule_authority_store.py`
 - `tests/policy/test_rule_authority_checkpoint.py`
 - `tests/policy/test_faro_rule_authority_storage_mariadb.py`
 - `docs/superpowers/plans/2026-10-09-faro-f11-step6-checkpoint.md`

@@ -6,7 +6,14 @@ import pytest
 
 from policy.rule_authority.errors import RuleAuthorityError
 from policy.authority_ledger.errors import AuthorityEventValidationError
-from policy.rule_authority.permit import RulePermit, RulePermitDraft, _trusted_permit
+from policy.rule_authority.permit import (
+    RulePermit,
+    RulePermitConsumption,
+    RulePermitConsumptionDraft,
+    RulePermitDraft,
+    _trusted_consumption,
+    _trusted_permit,
+)
 
 
 def _draft(**changes):
@@ -84,3 +91,22 @@ def test_roundtrip_conserva_hash_y_rechaza_hash_alterado():
     tampered["request_hash"] = "sha256:" + "f" * 64
     with pytest.raises(RuleAuthorityError, match="permit_hash"):
         _trusted_permit(tampered)
+
+
+def test_consumo_es_un_registro_sellado_y_ligado_al_request_hash():
+    draft = RulePermitConsumptionDraft(
+        permit_id="0199f8a1-8c00-7000-8000-000000000211",
+        request_hash="sha256:" + "5" * 64,
+        consumed_at_utc=datetime(2026, 10, 9, 12, 1, tzinfo=timezone.utc),
+    )
+    consumption = _trusted_consumption(draft)
+    assert consumption.permit_id == draft.permit_id
+    assert consumption.request_hash == draft.request_hash
+    assert consumption._is_store_sealed()
+    with pytest.raises(RuleAuthorityError, match="store"):
+        RulePermitConsumption(draft.projection())
+
+    tampered = dict(consumption.projection())
+    tampered["request_hash"] = "sha256:" + "f" * 64
+    with pytest.raises(RuleAuthorityError, match="consumption_hash"):
+        _trusted_consumption(tampered)
