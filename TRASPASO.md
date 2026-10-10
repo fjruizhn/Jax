@@ -1,22 +1,27 @@
 # Traspaso continuo · Faro F1.1 paso 6
 
-## Actualización 2026-10-10 · corrección E2E half-close tras CI exacta
+## Actualización 2026-10-10 · cerrar delta Tier 3 de half-close
 
 - **CI exacta de `a2ed7590`:** policy run `38089606207` falló `faro-fase0` con 779
   pasadas frente al piso 780; el test fallido era
   `test_el_rele_con_half_close_deja_llegar_la_respuesta_antes_de_salir`. El fixture enviaba
   `ping` sin iniciar una sesión MCP. En EOF, el dispatcher cancela solicitudes normales
   todavía en vuelo, por lo que la prueba no ejercitaba un intercambio válido.
-- **Corrección TDD local:** el test ahora completa `initialize`, envía
-  `notifications/initialized`, manda `ping` y verifica que la respuesta corresponda al ID 8
-  después de cerrar stdin. Conserva la aserción de salida/código/diagnóstico del proceso.
-  Con el entorno fijado de Faro, la prueba pasó 30/30 repeticiones locales.
-- **Estado:** el cambio está en `tests/test_faro_puerto_e2e.py`, todavía sin commit. Requiere
-  verificación focalizada, commit firmado por Codex, push del propio PR, nueva auditoría Tier 3
-  del SHA exacto y CI completa del mismo SHA. El veredicto RECHAZADO de Tier 3 para `a2ed7590`
-  queda sustituido solo cuando la auditoría delta evalúe el SHA nuevo; no declarar listo antes.
-- **Quién decidió:** Codex corrigió el test tras reproducir el fallo y comprobar el contrato
-  del dispatcher MCP; Fernando autorizó continuar cierre/auditoría/CI de #388.
+- **Delta Tier 3 de `7b5eee0e`:** APROBADO CON CAMBIOS, BLOCK 0, MAJOR 0, MINOR 3, LOW 0.
+  Cerró el BLOCK previo. Los tres MINOR fueron: aceptar respuestas JSON-RPC de error como
+  éxito; no demostrar que `ping` seguía en vuelo al EOF; y este handoff decía que el cambio
+  seguía sin commit aunque ya estaba publicado.
+- **Corrección TDD en curso:** la prueba ahora usa un servidor Unix controlado. Este recibe
+  initialize válido, responde con `result`, recibe `notifications/initialized` y `ping`,
+  confirma recepción al test y retiene la respuesta hasta comprobar EOF. El test cierra stdin,
+  comprueba que el relay siga vivo mientras la respuesta está retenida, libera respuesta
+  exitosa y exige `result` sin `error` para ambos pedidos. La prueba focalizada pasó una vez;
+  falta repetir 30 veces y verificar el SHA que incluya esta corrección.
+- **Estado de gates:** `7b5eee0e` está publicado en #388. Su CI exacta sigue en curso y dejará
+  de cubrir el head cuando se publique la corrección actual. Falta commit, push, delta-auditoría
+  y CI exacta verde para el nuevo SHA. No declarar listo antes de ambas.
+- **Quién decidió:** Codex implementa las tres correcciones tras la delta-auditoría Tier 3;
+  Fernando autorizó continuar cierre, auditoría y CI de #388.
 
 ## Actualización 2026-10-10 · reapilado selectivo #388 sobre #387
 
