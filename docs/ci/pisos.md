@@ -4641,13 +4641,21 @@ formatos. La medición real con Docker del 2026-10-09 confirmó 10 en Python 3.1
 
 ## `authority-rule-storage/mariadb`
 
-Piso vigente: `^12 passed in `. Medido el 2026-10-09 en hall9000 con el comando del workflow
-y MariaDB `12.3.3` efímera (`--network none`, socket Unix). Los 12 casos ejecutados comprueban
-rollback del append parcial, errores de rollback, idempotencia y binding de solicitud/hash/catálogo,
-triggers append-only, restricciones de permisos y OIDs, planes indexados y provisioning de mínimo
-privilegio para todas las cuentas homónimas. El test fuente fue portado desde el head #375
-`6ae6986af2c7fd68b4392e750d65779e5df20875`; la base vigente no contiene la implementación previa,
-por lo que no existe un código anterior ejecutable contra el que demostrar RED.
+Piso vigente: `^18 passed in `. Medido por CI run `38035001043`, SHA
+`3857b4bc84a315346eedd11a9b32640427e2099e`, con el comando del workflow y MariaDB `12.3.3`
+efímera (`--network none`, socket Unix). Los 18 casos cubren rollback del append parcial y de
+fallos de escritura, idempotencia y binding de solicitud/hash/catálogo, proyección del catálogo,
+triggers append-only, restricciones de permisos y OIDs, planes indexados, provisioning de mínimo
+privilegio y persistencia/consumo de permiso con checkpoint externo. El piso anterior de 12,
+medido el 2026-10-09, precede a la ampliación de esta suite. En la corrida previa, el fixture
+solo creaba el schema Rule Authority, pero provisioning también consulta tablas de verificación
+Block 4 en `jax_authority`. El fixture ahora aplica primero la migración `authority_ledger` en la
+misma MariaDB efímera. El run confirmó 18 passed; la corrida completa del job aún falló porque el
+piso no se había actualizado desde 12.
+
+El test fuente fue portado desde el head #375 `6ae6986af2c7fd68b4392e750d65779e5df20875`;
+la base vigente no contiene la implementación previa, por lo que no existe un código anterior
+ejecutable contra el que demostrar RED.
 
 checkpoint-overlay (2026-10-07, auditor de #377): 5 -> 6 (+1: overlay a corpus no ratificado se
 rechaza antes de escribir — cero filas; la tanda de 8 eventos se reordenó para emitir el overlay
