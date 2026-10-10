@@ -21,12 +21,16 @@
   no incorpora ni publica ese cambio.
 - Reconciliación de linaje local de #388 (solo lectura, 2026-10-10): el PR remoto continúa en
   `3eac3fff`, con merge-base `bf6b0580` frente al `HEAD` local. `git range-diff` mapea los 31
-  commits remotos: 30 son patch-equivalent; el commit inicial de checkpoint tiene patch-id
-  idéntico para plan/código/tests y difiere en `TRASPASO.md`, que ya existía en esta línea. La
-  línea local añade después el merge de #389, el soporte de pisos ya integrado y los commits
-  locales de paso 6. Esta rama local es la continuación que pretende sustituir el head viejo de
-  #388; el PR remoto no se ha actualizado. Tip oficial actual consultado: `master`=`0d6484f2`
-  (merge #391), pendiente de confirmación de Fernando antes de reapilar/publicar.
+  commits remotos: 30 son patch-equivalent; el commit inicial de checkpoint no iguala el
+  patch-id completo porque la versión remota crea `TRASPASO.md` y la local actualiza el archivo
+  que ya existía. El patch-id restringido a plan/código/tests es idéntico. La
+  comparación de árboles completos entre sus SHAs también incluye soporte de pisos integrado
+  posteriormente por #389/#391; esos cambios no pertenecen al commit de checkpoint ni se deben
+  interpretar como divergencia de su código. La línea local añade después el merge de #389,
+  dicho soporte y los commits locales de paso 6. Esta rama local es la continuación que pretende
+  continuar #388 sobre master, por instrucción directa de Fernando después del guard. Tip actual
+  confirmado por GitHub API y `git fetch`: `master`=`0d6484f2` (merge #391). La publicación sigue
+  pausada por instrucción de Fernando; no se ha actualizado el PR remoto.
 - Los commits locales `b325613e`, `eeb65d1c` y `511e83f0` no están publicados. Tier 3 GLM exacto de
   `b325613e`: NO APROBADO; BLOCK por carreras de providers contra `consume()` sin tests de
   kernel y BLOCK por falta de CI exacta/MariaDB real; MAJOR por relación de linaje/supersession
