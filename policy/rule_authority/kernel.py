@@ -339,12 +339,7 @@ class RuleAuthorityKernel:
                 return None, "OUT_OF_SCOPE"
             return {"form": "MONTO", "currency": amount.currency, "max": amount.max}, None
 
-        if (rule.action_class != ClaseCapability.REVERSIBLE.value
-                or contract.clase is not ClaseCapability.REVERSIBLE
-                or contract.forma_limites is not FormaLimites.NINGUNA
-                or request.quantity is not None or request.amount is not None):
-            return None, "OUT_OF_SCOPE"
-        return {"form": "NINGUNA"}, None
+        return None, "OUT_OF_SCOPE"
 
     @staticmethod
     def _request_from_projection(projection, catalog, expected_request_hash):

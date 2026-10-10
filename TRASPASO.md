@@ -1,6 +1,6 @@
 # Traspaso continuo · Faro F1.1 paso 6
 
-## Estado vivo 2026-10-10 · implementación local tras #389
+## Estado vivo 2026-10-10 · revisión Tier 3 del kernel local
 
 - #389 está integrado en `origin/master` como `0f9b79633f4b9ca6fdf89cfb8b1a124d5f05027d`;
   `HEAD` de esta rama tiene ese mismo SHA como merge-base. Rebase es local. La publicación
@@ -18,6 +18,13 @@
   Fernando aún no ha pasado el tip oficial para reapilar #388; su publicación continúa
   pausada. #390 es un soporte separado de prueba de grants que prepara otra sesión; esta rama
   no incorpora ni publica ese cambio.
+- El commit local `b325613e82ff1394a322366f65219f69103342fe` conserva el diff completo de
+  implementación y la firma Codex; no está publicado. Tier 3 GLM exacto: NO APROBADO, con
+  BLOCK por carreras de providers contra `consume()` sin tests de kernel, BLOCK por falta de
+  CI exacta/MariaDB real, MAJOR por relación de linaje/supersession aún sin resolución escrita
+  frente al head remoto antiguo de #388, y MAJOR por `limites_de()` que aún permite la forma
+  vacía REVERSIBLE. Este último ya se corrigió en el worktree posterior y requiere SHA/auditoría
+  nuevos.
 - Trabajo local: el kernel valida alcance/límites individuales y construye un candidato
   PERMIT con TTL limitado por configuración, regla y grant; una regla sin quantity, amount,
   frequency ni tope vuelve a fallar cerrada, conforme a la condición aceptada en Tier 3 de
@@ -30,6 +37,10 @@
   orden de locks/recovery inspeccionado, pero marcó como MAJOR la falta de carreras del kernel
   de extremo a extremo exigidas por §13, y como hallazgo histórico la relajación de reglas sin
   límites (ya restaurada). Es una revisión del diff sin commit, no auditoría Tier 3 final.
+- La respuesta Tier 3 de `b325613e` también marcó MINOR: rama `NINGUNA` muerta del kernel
+  (ya retirada en el worktree posterior), `TEXT` de migration 004 sin CHECK de forma,
+  `es_ancestro` bajo locks sin medición de retención, test ausente del invariante flock-
+  primero y prueba AST ausente. Evaluar cada punto en la auditoría siguiente.
 - Falta probar el flujo completo del kernel contra MariaDB y confirmar en CI los caminos de
   emisión y consumo. Las suites MariaDB no corrieron localmente. El SHA actual todavía no
   tiene auditoría Tier 3 ni CI exacta; no reapilar hasta recibir el tip oficial.

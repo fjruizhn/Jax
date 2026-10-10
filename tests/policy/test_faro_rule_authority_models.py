@@ -377,12 +377,10 @@ def test_limits_require_exact_sealed_catalog_type(catalogo):
         limites_de(_regla_obligating(), catalogo)
 
 
-def test_empty_limits_are_allowed_only_for_a_validated_reversible_rule():
+def test_empty_limits_are_rejected_for_a_validated_reversible_rule():
     vacia = validar_regla(_datos("regla-ejemplo.yaml"), catalogo=CATALOG)
-    limites = limites_de(vacia, CATALOG)
-    assert limites.rule_id == vacia.rule_id
-    assert limites.limites == vacia.obligation_limits
-    assert limites.tope is None
+    with pytest.raises(AuthorityEventValidationError, match="RuleLimits vacío"):
+        limites_de(vacia, CATALOG)
 
 
 @pytest.mark.parametrize("unidad", ["llamadas", "recipients", "Mensajes", "mensajes​", *FORBIDDEN])
