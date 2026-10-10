@@ -4701,12 +4701,14 @@ comando exacto del workflow. Medición real con Docker: `10 passed`.
 
 ## `authority-rule-unit/tests`
 
-Piso local `^46 passed in `, medido el 2026-10-10 con el comando del workflow sobre la rama de
+Piso local `^52 passed in `, medido el 2026-10-10 con el comando del workflow sobre la rama de
 trabajo descendiente de #389 y `PyYAML==6.0.3`, `cryptography==49.0.0`. Incluye recuperación
-durable, identidad de retry, revalidación de `consume()` y DENY/Error estable en ambos límites
-del kernel cuando una regla sin límites recibe `rule_hash`. Se ejecuta bajo Python 3.14 para
-respetar Unicode 16, fijado por el canonizador compartido. CI del SHA actualizado debe confirmar
-el piso.
+durable, identidad de retry, revalidación de `consume()`, DENY/Error estable en ambos límites
+del kernel cuando una regla sin límites recibe `rule_hash`, y carreras con barreras para cambios
+de STOP, pin y clasificación antes y durante el lease de `consume()`. Estas carreras usan el
+owner transaccional de prueba y no sustituyen la integración con MariaDB. Se ejecuta bajo Python
+3.14 para respetar Unicode 16, fijado por el canonizador compartido. CI del SHA actualizado debe
+confirmar el piso.
 Corre sin base de datos las pruebas del kernel (límites individuales y falla cerrada ante
 argumentos sin matcher/frecuencia sin contador), store en memoria y rechazo de la API MariaDB
 de emisión fuera del owner Block 4, contrato de RulePermit y

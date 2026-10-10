@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime, timezone
 from unittest.mock import Mock
 from types import SimpleNamespace
+from contextlib import contextmanager
 
 import pytest
 
@@ -20,11 +24,17 @@ from policy.rule_authority.permit import (
 )
 from policy.rule_authority.storage import MariaDBRuleDecisionStore
 from policy.authority_ledger.errors import AuthorityStateError
+from policy.authority_ledger.storage import AuthorityLedgerTransactionPurpose
 from policy.rule_authority.providers import (
-    ClaseCapability, ContratoCapability, FormaLimites,
+    ClaseCapability, ContratoCapability, EstadoStop, FormaLimites, PinActivo,
+    RepositorioConfiable,
 )
 from policy.rule_authority.schema import validar_regla
+from policy.rule_authority.snapshot import TrustedPolicyPin
 from tests.policy.catalogo_pin import catalogo_del_pin
+from tests.policy.proveedores_dobles import (
+    ClasificacionFija, PinFijo, RelojDeterminista, StopFijo,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "faro_rules"
 CLASES = {"monto_dinero": ["hnl", "usd"],
@@ -293,6 +303,165 @@ def _consumption_context(now, *, unbounded=False):
             contrato_de=lambda _capability: contract)),
     )
     return permit, request, snapshot, state, views, revision
+
+
+def _kernel_consume_harness(tmp_path, monkeypatch, *, changed_provider=None):
+    now = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
+    permit, request, snapshot, state, views, revision = _consumption_context(now)
+    pin_id = "other" if changed_provider == "pin" else "jax"
+    pin_value = TrustedPolicyPin(pin_id, revision, "d" * 40, "refs/heads/main")
+    pin = PinFijo(pin_value, "refs/heads/main", repository_path=tmp_path)
+    stop = StopFijo(activo=changed_provider == "stop", huella="sha256:stop")
+    contract = ContratoCapability(
+        identidad=("mail.send.contract.v2" if changed_provider == "classification"
+                   else "mail.send.contract.v1"),
+        version=("2" if changed_provider == "classification" else "1"),
+        clase=ClaseCapability.REVERSIBLE, unidad="mensajes", moneda=None,
+        forma_limites=FormaLimites.CANTIDAD,
+    )
+    classification = ClasificacionFija({"CAPABILITY_ID": contract})
+
+    class Owner:
+        def lock_permit_for_consumption(self, permit_id, request_hash):
+            assert permit_id == permit.permit_id
+            assert request_hash == permit.request_hash
+            return permit
+
+    owner = Owner()
+
+    class Fence:
+        @contextmanager
+        def transaction_owner(self, _store, *, purpose):
+            assert purpose is AuthorityLedgerTransactionPurpose.CONSUMPTION
+            yield owner
+
+        def verify_for_update(self, _owner, _trusted_root):
+            return state
+
+    fence = Fence()
+
+    class LedgerStore:
+        @contextmanager
+        def checkpoint_fence(self, _checkpoint):
+            yield fence
+
+    decision_store = MariaDBRuleDecisionStore(lambda: None)
+    monkeypatch.setattr(decision_store, "recover_consumption", Mock(return_value=None))
+    monkeypatch.setattr(
+        decision_store, "load_consumption_request_in_transaction",
+        lambda _owner, _catalog: request.canonical_projection(),
+    )
+    monkeypatch.setattr(
+        decision_store, "consume_permit",
+        lambda _owner, draft: _trusted_consumption(draft),
+    )
+    monkeypatch.setattr(
+        "policy.rule_authority.kernel.load_trusted_policy_snapshot",
+        lambda _path, _pin: snapshot,
+    )
+    monkeypatch.setattr(RuleAuthorityKernel, "_grant_matches", staticmethod(lambda *_args: True))
+    monkeypatch.setattr("policy.rule_authority.kernel.es_ancestro", lambda *_args: True)
+    kernel = RuleAuthorityKernel(
+        active_policy_pin_provider=pin, authority_ledger_store=LedgerStore(),
+        trusted_root=object(), trusted_checkpoint_store=object(), stop_provider=stop,
+        trusted_clock=RelojDeterminista(now),
+        capability_classification_provider=classification,
+        rule_authority_store=decision_store,
+    )
+    providers = {"pin": pin, "stop": stop, "classification": classification}
+    return kernel, providers
+
+
+def _mutate_provider(kind, providers, tmp_path):
+    provider = providers[kind]
+    if kind == "stop":
+        with provider.lease_exclusivo():
+            provider._reemplazar(EstadoStop(activo=True, huella="sha256:stop-updated"))
+    elif kind == "classification":
+        provider.republicar(
+            "CAPABILITY_ID",
+            ContratoCapability(
+                identidad="mail.send.contract.v2", version="2",
+                clase=ClaseCapability.REVERSIBLE, unidad="mensajes", moneda=None,
+                forma_limites=FormaLimites.CANTIDAD,
+            ),
+        )
+    else:
+        proc = "refs/heads/main"
+        new_pin = TrustedPolicyPin("other", "c" * 40, "d" * 40, proc)
+        binding = RepositorioConfiable(
+            repository_id="other", repository_path=tmp_path, procedencia=proc,
+        )
+        with provider.lease_exclusivo():
+            provider._reemplazar(PinActivo(new_pin, binding))
+
+
+@pytest.mark.parametrize(
+    "kind,reason",
+    [("stop", "STOP activo"),
+     ("pin", "solicitud/repositorio"),
+     ("classification", "contrato de capability")],
+)
+def test_consume_denies_provider_change_that_wins_before_its_lease(tmp_path, monkeypatch,
+                                                                    kind, reason):
+    kernel, _providers = _kernel_consume_harness(
+        tmp_path, monkeypatch, changed_provider=kind
+    )
+
+    with pytest.raises(AuthorityStateError, match=reason):
+        kernel.consume(
+            "0199f8a1-8c00-7000-8000-000000000062",
+            _request(capability="CAPABILITY_ID", objective="objetivo-ejemplo",
+                     quantity=1, quantity_unit="mensajes").request_hash,
+            "0199f8a1-8c00-7000-8000-000000000063",
+        )
+
+
+@pytest.mark.parametrize("kind", ["stop", "pin", "classification"])
+def test_consume_holds_provider_lease_until_durable_append(tmp_path, monkeypatch, kind):
+    kernel, providers = _kernel_consume_harness(tmp_path, monkeypatch)
+    validated = threading.Event()
+    release = threading.Event()
+    writer_started = threading.Event()
+    original_validate = kernel._validate_consumption_context
+
+    def pause_after_validation(**kwargs):
+        result = original_validate(**kwargs)
+        validated.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("la prueba no liberó el consumo pausado")
+        return result
+
+    monkeypatch.setattr(kernel, "_validate_consumption_context", pause_after_validation)
+    provider = providers[kind]
+
+    def update_provider():
+        writer_started.set()
+        _mutate_provider(kind, providers, tmp_path)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            consume_future = pool.submit(
+                kernel.consume,
+                "0199f8a1-8c00-7000-8000-000000000062",
+                _request(capability="CAPABILITY_ID", objective="objetivo-ejemplo",
+                         quantity=1, quantity_unit="mensajes").request_hash,
+                "0199f8a1-8c00-7000-8000-000000000064",
+            )
+            assert validated.wait(timeout=5)
+            writer_future = pool.submit(update_provider)
+            assert writer_started.wait(timeout=5)
+            deadline = time.monotonic() + 5
+            while provider.esperando() == 0 and time.monotonic() < deadline:
+                threading.Event().wait(0.001)
+            assert provider.esperando() > 0
+            assert not writer_future.done()
+            release.set()
+            consumption = consume_future.result(timeout=5)
+            writer_future.result(timeout=5)
+        assert consumption._is_store_sealed()
+    finally:
+        release.set()
 
 
 def test_consume_context_accepts_exact_current_rule_grant_scope_and_contract(monkeypatch):

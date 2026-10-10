@@ -8,8 +8,9 @@
 - El piso genérico de `archivos-de-test-en-ci/pisos` quedó en `^233 passed`; el comando
   exacto de los tres módulos dio `233 passed` localmente y coincide con CI #389 run
   `38044350914` sobre `c78080442da81a468768a7af5b2c5b748ff56b37`.
-- Reconcilié pisos afectados sobre la base integrada: `authority-rule-unit/tests` mide
-  `46 passed`; Identity Foundation Shadow midió `1044 passed` en su comando completo.
+- Reconcilié pisos afectados sobre la base integrada: `authority-rule-unit/tests` medía
+  `46 passed`; el cambio local de carreras de providers lo eleva a `52 passed` (comando exacto
+  medido el 2026-10-10). Identity Foundation Shadow midió `1044 passed` en su comando completo.
   Las suites MariaDB coleccionan 40 (Block 4) y 19 (Rule Authority); no se ejecutaron porque
   este host no puede abrir `/var/run/docker.sock`. Los pisos 40/19 y el 1044 necesitan CI
   exacta para confirmar el SHA final. `ci/pisos.json` y `docs/ci/pisos.md` reflejan estos
@@ -46,8 +47,12 @@
   emisión y consumo. Las suites MariaDB no corrieron localmente. El SHA actual todavía no
   tiene auditoría Tier 3 ni CI exacta; no reapilar hasta recibir el tip oficial.
 - Verificación disponible en el worktree posterior: el conjunto focalizado de kernel/modelos/
-  permit/store/providers/checkpoint dio `333 passed`; el job unitario exacto da `46 passed` y
-  el verificador local de piso pasa. Identity Shadow
+  permit/store/providers/checkpoint dio `333 passed`; el job unitario exacto da ahora `52 passed`.
+  Se añadieron seis casos con barreras para STOP, pin y clasificación: cambios ganadores antes
+  del lease y escritores bloqueados durante el append durable. El harness mantiene fake el owner
+  transaccional/persistencia; no cierra el BLOCK Tier 3 de MariaDB ni la carrera integral de
+  revocación/consumo. El verificador falló con el piso anterior 46; actualizarlo a 52 requiere
+  repetirlo y CI exacta aún debe confirmar el SHA final. Identity Shadow
   dio `1044 passed`; `git diff --check` y `python3 -m json.tool ci/pisos.json` pasan.
 - Siguiente acción concreta: completar pruebas de carrera end-to-end de evaluate/consume con
   providers y owner transaccional; después, recibir el tip oficial, reapilar, re-medir los pisos exactos y actualizar
