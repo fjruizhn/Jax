@@ -700,6 +700,11 @@ def _assert_least_privilege(grants: str) -> None:
     for table in IMMUTABLE_TABLES:
         assert f"GRANT SELECT, INSERT ON `JAX_RULE_AUTHORITY`.`{table.upper()}`" in grants
     assert "GRANT SELECT, UPDATE ON `JAX_RULE_AUTHORITY`.`RULE_AUTHORITY_AUDIT_HEAD`" in grants
+    for table in ("AUTHORITY_LEDGER_GENESIS", "AUTHORITY_EVENTS", "AUTHORITY_LEDGER_HEAD"):
+        assert f"GRANT SELECT ON `JAX_AUTHORITY`.`{table}`" in grants
+        assert f"`JAX_AUTHORITY`.`{table}`" not in grants.replace(
+            f"GRANT SELECT ON `JAX_AUTHORITY`.`{table}`", ""
+        )
 
 
 def _broad_account(admin, username: str, host: str, password: str) -> None:

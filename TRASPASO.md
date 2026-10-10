@@ -48,6 +48,35 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
 - El checkout compartido claude-skills está sincronizado; `claude-skills-sync pull`
   informó una divergencia local de `settings.json` de Claude, sin cambios en PENDIENTES.
 
+### Actualización 2026-10-10 · consumo compartido Block 4 / Rule Authority
+
+- HEAD local sigue en `daa98d7455741ccf793e0bf74edd154d060c360b`; su merge-base con
+  `origin/master@bf6b05809e1c3505efd7447b33685796ca42e3b6` coincide. Los cambios de las
+  rondas 5–10 permanecen sin commit en este worktree y no están publicados.
+- El fence compartido mantiene orden de flocks Block 4 → Rule Authority → BEGIN y orden
+  InnoDB permit → head Block 4 → audit head. El owner entrega el `RulePermit` completo,
+  canónico y sellado bajo lock; el store de Rule Authority es dueño de append de consumo,
+  hash-chain, commit, publicación y confirmación externa antes de devolver
+  `RulePermitConsumption`. Retry usa `permit_id + request_hash` y recupera la fila durable
+  aunque el reloj produzca otro timestamp. El resultado post-commit distingue checkpoint
+  no confirmado de fallo de cierre tras anchor confirmado.
+- El principal de Rule Authority recibe SELECT-only sobre genesis/events/head de Block 4.
+  Se añadieron cinco pruebas MariaDB cross-schema para principal/grants, retry, doble
+  consumidor, rollback de INSERT, fallo de publicación y cierre post-commit; compilan y
+  coleccionan, pero no se ejecutaron contra MariaDB porque Docker falla con
+  `permission denied` en `/var/run/docker.sock`.
+- Verificación local independiente: 8 pruebas focalizadas de fence/permit pasan; 30 pruebas
+  de store/checkpoint/codec pasan; `py_compile`, `git diff --check` y colección de las cinco
+  pruebas MariaDB pasan. La Tier 3 exacta de rondas 5–9 encontró y cerró estructuralmente
+  los contratos de orden, identidad del checkpoint, token thread/epoch, consumo durable,
+  anclaje y retry. Su único hallazgo de código fue una aserción de test con el atributo de
+  lock equivocado; ya se corrigió localmente y está pendiente de delta-audit. La suite
+  MariaDB real no se ha ejecutado. No declarar listo para wiring ni integración hasta cerrar
+  esos gates.
+- La pregunta directa a Fernando sobre si `OVERLAY_ISSUED` exige ratificación previa no
+  revocada del mismo hash y cuarentena permanente de overlays históricos inválidos sigue
+  sin respuesta. La implementación de este paso no decide esa semántica.
+
 ## Límites de autoridad y alcance
 
 - La decisión directa de Fernando sigue pendiente: si `OVERLAY_ISSUED` requiere una
@@ -64,11 +93,10 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
 
 En este worktree, continuar TDD desde la migración `policy/rule_authority/migrations/001_rule_authority_kernel.sql`:
 
-1. Terminar emisión durable de decisión + permiso y validar migration/tests en MariaDB CI.
-2. Resolver la frontera transaccional compartida con el ledger Block 4; luego implementar
-   consumo atómico, carrera de doble consumo y kernel `evaluate`/`consume`, excluyendo overlays.
-3. Ejecutar las suites disponibles, registrar límites del runner, actualizar el handoff,
-   delta-auditar el SHA exacto y dejar el cambio listo para Fernando, sin integrar.
+1. Corregir la aserción de test Tier 3 confirmada en `tests/policy/test_authority_ledger_storage_mariadb.py` y pedir delta-audit sobre el diff final.
+2. Ejecutar las cinco pruebas cross-schema contra MariaDB real con el principal provisionado; no inferir ese resultado de colección o de pruebas puras. Si el runner local sigue sin Docker, registrar el gate pendiente y ejecutar en CI apropiada antes de wiring.
+3. Completar el wiring del kernel `evaluate`/`consume`, cobertura de clasificación/STOP/expiración/revocación/cambio de capability/pin y mediciones O(n) p95/RSS/EXPLAIN.
+4. Resolver la pregunta de OVERLAY con Fernando. No publicar ni integrar mientras siga pendiente; revalidar `bin/ventana estado` inmediatamente antes de cualquier publicación o integración.
 
 ## Archivos tocados
 
@@ -76,11 +104,14 @@ En este worktree, continuar TDD desde la migración `policy/rule_authority/migra
 - `policy/rule_authority/permit.py`
 - `policy/rule_authority/__init__.py`
 - `policy/rule_authority/storage.py`
+- `policy/rule_authority/provisioning.py`
+- `policy/authority_ledger/storage.py`
 - `policy/rule_authority/store.py`
 - `policy/rule_authority/migrations/002_enable_atomic_permits.sql`
 - `tests/policy/test_faro_rule_permit.py`
 - `tests/policy/test_faro_rule_authority_store.py`
 - `tests/policy/test_rule_authority_checkpoint.py`
 - `tests/policy/test_faro_rule_authority_storage_mariadb.py`
+- `tests/policy/test_authority_ledger_storage_mariadb.py`
 - `docs/superpowers/plans/2026-10-09-faro-f11-step6-checkpoint.md`
 - `TRASPASO.md`
