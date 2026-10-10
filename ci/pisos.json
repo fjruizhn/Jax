@@ -214,8 +214,8 @@
       "mensaje": "PISO ROTO: se esperaban 18 tests CORRIDOS de los ataques al sello del loader de Block 3 (replace, construccion directa, congelado, subclases, método sombreado, binding por campo de las 6 entradas, proyección canónica sombreada y política de copia/pickle). 14 -> 16 el 2026-10-07; 16 -> 17 el 2026-10-08 por cierre de sombreado de _contenido_canonico; 17 -> 18 por cierre de copy/deepcopy/pickle."
     },
     "identity-foundation-shadow/policy": {
-      "patron": "^968 passed in ",
-      "mensaje": "PISO ROTO: se esperaban exactamente 968 tests CORRIDOS y 0 skipped de Identity Foundation Shadow (incluye providers, modelos F1.1, sellos del loader y ratificación)."
+      "patron": "^1002 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 1002 tests CORRIDOS y 0 skipped de Identity Foundation Shadow (incluye providers, modelos F1.1, sellos del loader, ratificación y unidades del schema)."
     }
   },
   "minimos": {

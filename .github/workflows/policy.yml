@@ -2675,6 +2675,10 @@ jobs:
         # #373 agrega providers y cierres de clasificación/pin. Tras combinarlo
         # con #379 la lista mide 816; #371 agrega los modelos en memoria (+152),
         # por lo que el piso combinado medido es 968 passed, cero skipped.
+        # Schema-unidades (Jax#378, hallazgo del auditor de #371, reapilado sobre
+        # master): 1002 (+34 — el schema valida quantity.unit contra actos_externos
+        # y amount.currency contra monto_dinero: 16+8 negativas, 5+2 positivas del
+        # catalogo real, 1 sin catalogo, 1 de pin alterno, 1 de no-vacio).
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
