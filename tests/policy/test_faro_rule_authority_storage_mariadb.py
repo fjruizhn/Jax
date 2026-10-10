@@ -41,6 +41,7 @@ from policy.rule_authority.trusted_checkpoint import RuleAuditCheckpointStore
 
 
 ROOT = Path(__file__).resolve().parents[2]
+AUTHORITY_LEDGER_MIGRATION = ROOT / "policy/authority_ledger/migrations/001_authority_ledger.sql"
 MIGRATION = ROOT / "policy/rule_authority/migrations/001_rule_authority_kernel.sql"
 MIGRATION_STEP6 = ROOT / "policy/rule_authority/migrations/002_enable_atomic_permits.sql"
 IMAGE = os.environ.get("JAX_RULE_AUTHORITY_TEST_MARIADB_IMAGE", "mariadb:12.3.3")
@@ -487,6 +488,11 @@ def db():
                     f"falló la preparación de MariaDB aislada:\n"
                     f"{_container_diagnostics(docker, container)}"
                 ) from error
+            with admin:
+                # Provisioning grants read-only access to Block 4's verification
+                # tables. This isolated database must include that schema too.
+                _apply_migration(admin, AUTHORITY_LEDGER_MIGRATION)
+                _apply_migration(admin)
             yield _Db(docker, socket_path, root_password)
         finally:
             subprocess.run(

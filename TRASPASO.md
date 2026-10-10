@@ -164,6 +164,33 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   para Rule Authority; ambos pisos locales se satisfacen. Esos conteos deben confirmarse en
   CI sobre el siguiente head.
 
+### Actualización 2026-10-10 · fallo de CI MariaDB Rule Authority
+
+- La corrida exacta `38033872321` sobre `e993764aa08921f96e02bc8750def3f31629f7b2`
+  terminó FAILURE solo en `tests-puros`. Los demás checks, incluido `faro-fase0` (780),
+  Rule Authority unitario (25), pisos, permisos-proyectos, canonical-projections y scan,
+  terminaron SUCCESS. Block 4 MariaDB confirmó 33 passed.
+- La suite MariaDB de Rule Authority produjo `3 failed, 3 passed, 12 errors`: el fixture
+  `tests/policy/test_faro_rule_authority_storage_mariadb.py::db` creaba solo el schema de
+  Rule Authority, mientras su provisioner otorga SELECT a las tablas de verificación de
+  Block 4 (`jax_authority.authority_ledger_genesis/events/head`). La causa fue
+  `Table 'jax_authority.authority_ledger_genesis' doesn't exist`, no un fallo transitorio.
+- Fix local, aún sin commit ni publicación: el fixture aplica primero
+  `policy/authority_ledger/migrations/001_authority_ledger.sql` y después la migración propia
+  de Rule Authority, en su misma MariaDB efímera. El intento local dirigido se bloqueó antes
+  de iniciar el contenedor por `permission denied` en `/var/run/docker.sock`; CI debe
+  confirmar el fix en un SHA nuevo.
+- Después del fix, verificación local disponible: Rule Authority unitario `25 passed`, la
+  suite MariaDB colecciona sus `18 tests`, `py_compile` y `git diff --check` pasan. No se
+  pudo ejecutar la MariaDB real localmente por el permiso del socket; estos resultados no
+  sustituyen la nueva CI.
+- Tier 3 exacta de `e993764a`: `APROBADO CON CAMBIOS`, BLOCK 0, MAJOR 1 abierto por ese
+  fallo de CI, MINOR 0, LOW 3. El veredicto no cubre el fix local. Antes de publicar el SHA
+  corregido: ejecutar pruebas disponibles, `git diff --check`, revisar el diff y consultar
+  `/home/fruiz/claude-skills/bin/ventana estado` inmediatamente antes del push. Solicitar
+  delta-audit y CI exacta nuevas; no integrar mientras la decisión OVERLAY de Fernando siga
+  pendiente.
+
 ## Límites de autoridad y alcance
 
 - La decisión directa de Fernando sigue pendiente: si `OVERLAY_ISSUED` requiere una
