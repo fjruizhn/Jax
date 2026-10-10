@@ -19,6 +19,14 @@
   Fernando aún no ha pasado el tip oficial para reapilar #388; su publicación continúa
   pausada. #390 es un soporte separado de prueba de grants que prepara otra sesión; esta rama
   no incorpora ni publica ese cambio.
+- Reconciliación de linaje local de #388 (solo lectura, 2026-10-10): el PR remoto continúa en
+  `3eac3fff`, con merge-base `bf6b0580` frente al `HEAD` local. `git range-diff` mapea los 31
+  commits remotos: 30 son patch-equivalent; el commit inicial de checkpoint tiene patch-id
+  idéntico para plan/código/tests y difiere en `TRASPASO.md`, que ya existía en esta línea. La
+  línea local añade después el merge de #389, el soporte de pisos ya integrado y los commits
+  locales de paso 6. Esta rama local es la continuación que pretende sustituir el head viejo de
+  #388; el PR remoto no se ha actualizado. Tip oficial actual consultado: `master`=`0d6484f2`
+  (merge #391), pendiente de confirmación de Fernando antes de reapilar/publicar.
 - Los commits locales `b325613e`, `eeb65d1c` y `511e83f0` no están publicados. Tier 3 GLM exacto de
   `b325613e`: NO APROBADO; BLOCK por carreras de providers contra `consume()` sin tests de
   kernel y BLOCK por falta de CI exacta/MariaDB real; MAJOR por relación de linaje/supersession
@@ -54,7 +62,7 @@
   cierra el BLOCK Tier 3 de MariaDB o la carrera integral de revocación/consumo. El delta-audit
   GLM de `d37279dc` encontró tres MINOR (liberación de barreras al fallar, observación antes del
   append y deadline de 5 s); el commit posterior `546c5d95` extiende la pausa hasta la llamada al
-  append, y el follow-up local mueve la liberación dentro del pool y amplía el deadline a 10 s.
+  append, y `d144903f` mueve la liberación dentro del pool y amplía el deadline a 10 s.
   El verificador falló con el piso anterior 46; alinear a 52 pasó localmente y CI exacta aún debe
   confirmar el SHA final. Identity Shadow
   dio `1044 passed`; `git diff --check` y `python3 -m json.tool ci/pisos.json` pasan.
