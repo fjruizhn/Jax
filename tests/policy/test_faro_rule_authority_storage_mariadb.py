@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import errno
 import os
 from pathlib import Path
+import re
 import secrets
 import shlex
 import subprocess
@@ -48,11 +50,137 @@ def _run(docker: list[str], *args: str):
     return subprocess.run([*docker, *args], check=True, capture_output=True, text=True)
 
 
+_TRANSIENT_MARIADB_STARTUP_CODES = frozenset((2002, 2003, 2006, 2013))
+_TRANSIENT_SOCKET_ERRNOS = frozenset((errno.EAGAIN, errno.ECONNREFUSED, errno.EINTR, errno.ENOENT))
+
+
+def _is_transient_mariadb_startup_error(error: BaseException) -> bool:
+    """Return true only for a socket/server transition during startup."""
+    if isinstance(error, OSError):
+        return error.errno in _TRANSIENT_SOCKET_ERRNOS
+    return (
+        isinstance(error, pymysql.err.OperationalError)
+        and bool(error.args)
+        and type(error.args[0]) is int
+        and error.args[0] in _TRANSIENT_MARIADB_STARTUP_CODES
+    )
+
+
+def _connect_after_transient_mariadb_startup_error(connect_once, *, timeout: float, retry_delay: float):
+    """Retry only transient socket/server startup failures, bounded by ``timeout``."""
+    deadline = time.monotonic() + timeout
+    last_error = None
+    while True:
+        try:
+            return connect_once()
+        except (OSError, pymysql.MySQLError) as error:
+            if not _is_transient_mariadb_startup_error(error):
+                raise
+            last_error = error
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"MariaDB siguió inaccesible tras {timeout:.0f} s: {last_error}"
+            ) from last_error
+        time.sleep(retry_delay)
+
+
+def _container_logs(docker: list[str], container: str, *, tail: int) -> str:
+    logs = subprocess.run(
+        [*docker, "logs", "--timestamps", "--tail", str(tail), container],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return logs.stdout + logs.stderr
+
+
+def _container_diagnostics(docker: list[str], container: str) -> str:
+    state = subprocess.run(
+        [*docker, "inspect", "--format", "{{json .State}}", container],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return (
+        "--- docker inspect .State ---\n"
+        f"{state.stdout}{state.stderr}\n"
+        "--- docker logs --timestamps ---\n"
+        f"{_container_logs(docker, container, tail=200)[-4000:]}"
+    )
+
+
+def _final_mariadb_server_ready(logs: str) -> bool:
+    """Recognize completed init or the final TCP listener, never port-0 init."""
+    if "init process done" in logs:
+        return True
+    return re.search(
+        r"ready for connections\.\s*(?:\d{4}-\d{2}-\d{2}T\S+\s+)?"
+        r"Version: [^\n]*\bport:\s*'?3306'?(?=\s|$)",
+        logs,
+    ) is not None
+
+
+def _wait_until_ready(
+    docker: list[str], container: str, socket_dir: str, password: str, timeout: float = 60.0
+) -> Path:
+    """Wait for the final MariaDB server, after entrypoint initialization has finished."""
+    socket_path = Path(socket_dir) / "mysqld.sock"
+    deadline = time.monotonic() + timeout
+    last_error = None
+    initialized = False
+    while time.monotonic() < deadline:
+        if not initialized:
+            initialized = _final_mariadb_server_ready(
+                _container_logs(docker, container, tail=200)
+            )
+        if initialized:
+            _run(docker, "exec", "--user=root", container, "chmod", "0755", "/run/mysqld")
+            try:
+                def connect_once():
+                    return pymysql.connect(
+                        unix_socket=str(socket_path), user="root", password=password,
+                        autocommit=False, charset="utf8mb4", connect_timeout=5,
+                    )
+
+                with _connect_after_transient_mariadb_startup_error(
+                    connect_once, timeout=min(5.0, max(0.0, deadline - time.monotonic())),
+                    retry_delay=0.25,
+                ) as probe:
+                    with probe.cursor() as cursor:
+                        cursor.execute("SELECT 1")
+                        if cursor.fetchone() != (1,):
+                            raise AssertionError("MariaDB respondió una sonda SELECT 1 inválida")
+                        cursor.execute("SELECT @@port")
+                        if cursor.fetchone() == (3306,):
+                            return socket_path
+                        last_error = AssertionError("MariaDB informó un puerto final distinto de 3306")
+            except (OSError, pymysql.MySQLError, AssertionError) as error:
+                if not _is_transient_mariadb_startup_error(error.__cause__ or error):
+                    raise
+                last_error = error
+        time.sleep(0.25)
+    raise AssertionError(
+        f"MariaDB no quedó lista en {timeout:.0f} s (init terminado: {initialized}; "
+        f"último error: {last_error})."
+    )
+
+
 def _apply_migration(connection) -> None:
     delimiter = ";"
     statement = []
+    statement_ordinal = 0
     sql = MIGRATION.read_text(encoding="utf-8")
     with connection.cursor() as cursor:
+        def execute_migration_statement(statement_text: str) -> None:
+            nonlocal statement_ordinal
+            statement_ordinal += 1
+            try:
+                cursor.execute(statement_text)
+            except pymysql.MySQLError as error:
+                raise AssertionError(
+                    f"falló la sentencia {statement_ordinal} de la migración"
+                ) from error
+
         for raw_line in sql.splitlines():
             line = raw_line.strip()
             if not line or line.startswith("--"):
@@ -63,10 +191,173 @@ def _apply_migration(connection) -> None:
             statement.append(raw_line)
             joined = "\n".join(statement).rstrip()
             if joined.endswith(delimiter):
-                cursor.execute(joined[:-len(delimiter)].strip())
+                execute_migration_statement(joined[:-len(delimiter)].strip())
                 statement = []
     assert not statement, "migración dejó SQL sin terminar"
     connection.commit()
+
+
+def test_final_server_detection_ignores_temporary_port_zero_startup() -> None:
+    temporary = """mariadbd: ready for connections.
+Version: '12.3.3-MariaDB' socket: '/run/mysqld/mysqld.sock' port: 0 mariadb.org
+"""
+    final_server = """mariadbd: ready for connections.
+Version: '12.3.3-MariaDB' socket: '/run/mysqld/mysqld.sock' port: 3306 mariadb.org
+"""
+
+    assert not _final_mariadb_server_ready(temporary)
+    assert _final_mariadb_server_ready(final_server)
+    assert _final_mariadb_server_ready("init process done")
+
+
+def test_final_server_detection_accepts_timestamped_final_startup() -> None:
+    timestamped_final_server = """2026-10-10T18:32:10.000000000Z mariadbd: ready for connections.
+2026-10-10T18:32:10.000000000Z Version: '12.3.3-MariaDB' socket: '/run/mysqld/mysqld.sock' port: 3306 mariadb.org
+"""
+
+    assert _final_mariadb_server_ready(timestamped_final_server)
+
+
+@pytest.mark.parametrize("code", (2003, 2013))
+def test_connect_retries_transient_mariadb_startup_errors(monkeypatch, code) -> None:
+    attempts = 0
+    connection = object()
+
+    def connect_once():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise pymysql.err.OperationalError(code, "temporary startup failure")
+        return connection
+
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    assert _connect_after_transient_mariadb_startup_error(
+        connect_once, timeout=1, retry_delay=0
+    ) is connection
+    assert attempts == 2
+
+
+def test_connect_propagates_permanent_mariadb_startup_error_without_retry(monkeypatch) -> None:
+    attempts = 0
+    failure = pymysql.err.OperationalError(1045, "Access denied")
+
+    def connect_once():
+        nonlocal attempts
+        attempts += 1
+        raise failure
+
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    with pytest.raises(pymysql.err.OperationalError, match="Access denied"):
+        _connect_after_transient_mariadb_startup_error(
+            connect_once, timeout=1, retry_delay=0
+        )
+    assert attempts == 1
+
+
+def test_connect_stops_retrying_at_the_bounded_deadline(monkeypatch) -> None:
+    attempts = 0
+
+    def connect_once():
+        nonlocal attempts
+        attempts += 1
+        raise pymysql.err.OperationalError(2003, "temporary startup failure")
+
+    monotonic_values = iter((0.0, 1.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    with pytest.raises(AssertionError, match="siguió inaccesible"):
+        _connect_after_transient_mariadb_startup_error(
+            connect_once, timeout=0.5, retry_delay=0
+        )
+    assert attempts == 1
+
+
+def test_readiness_rejects_a_socket_server_reporting_a_nonfinal_port(monkeypatch, tmp_path) -> None:
+    class Cursor:
+        def __init__(self):
+            self.executed = []
+            self._result = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def execute(self, statement):
+            self.executed.append(statement)
+            self._result = (1,) if statement == "SELECT 1" else (0,)
+
+        def fetchone(self):
+            return self._result
+
+    class Connection:
+        def __init__(self):
+            self.cursor_instance = Cursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def cursor(self):
+            return self.cursor_instance
+
+    connection = Connection()
+    monotonic_values = iter((0.0, 0.0, 0.0, 0.0, 1.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    monkeypatch.setattr(
+        sys.modules[__name__], "_container_logs",
+        lambda *_args, **_kwargs: "init process done",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "_run", lambda *_args: None)
+    monkeypatch.setattr(pymysql, "connect", lambda **_kwargs: connection)
+
+    with pytest.raises(AssertionError, match="puerto final distinto de 3306"):
+        _wait_until_ready(["docker"], "test-container", str(tmp_path), "test-password", timeout=0.5)
+
+    assert connection.cursor_instance.executed == ["SELECT 1", "SELECT @@port"]
+
+
+def test_migration_failure_identifies_statement_ordinal_without_retry(monkeypatch, tmp_path) -> None:
+    class Cursor:
+        def __init__(self):
+            self.executed = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def execute(self, statement):
+            self.executed.append(statement)
+            if statement == "TWO":
+                raise pymysql.err.OperationalError(2013, "connection lost")
+
+    class Connection:
+        def __init__(self):
+            self.cursor_instance = Cursor()
+            self.committed = False
+
+        def cursor(self):
+            return self.cursor_instance
+
+        def commit(self):
+            self.committed = True
+
+    migration = tmp_path / "migration.sql"
+    migration.write_text("ONE;\nTWO;\n", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "MIGRATION", migration)
+    connection = Connection()
+
+    with pytest.raises(AssertionError, match="sentencia 2"):
+        _apply_migration(connection)
+
+    assert connection.cursor_instance.executed == ["ONE", "TWO"]
+    assert not connection.committed
 
 
 def _request(
@@ -149,37 +440,26 @@ def db():
             "-e", f"MARIADB_ROOT_PASSWORD={root_password}", IMAGE,
         )
         try:
-            socket_path = Path(socket_dir) / "mysqld.sock"
-            for _ in range(90):
-                probe = subprocess.run(
-                    [*docker, "exec", container, "test", "-S", "/run/mysqld/mysqld.sock"],
-                    capture_output=True, text=True, check=False,
-                )
-                if probe.returncode == 0:
-                    break
-                time.sleep(1)
-            else:
-                pytest.fail("MariaDB no creó su socket Unix")
-            _run(docker, "exec", "--user=root", container, "chmod", "0755", "/run/mysqld")
-
-            admin = None
-            last_error = None
-            for _ in range(90):
-                try:
-                    admin = pymysql.connect(
+            try:
+                socket_path = _wait_until_ready(docker, container, socket_dir, root_password)
+                admin = _connect_after_transient_mariadb_startup_error(
+                    lambda: pymysql.connect(
                         unix_socket=str(socket_path), user="root", password=root_password,
-                        autocommit=False, charset="utf8mb4",
-                    )
-                    break
-                except (OSError, pymysql.MySQLError) as exc:
-                    last_error = exc
-                    time.sleep(1)
-            assert admin is not None, f"MariaDB no aceptó conexiones: {last_error}"
-            with admin:
-                with admin.cursor() as cursor:
-                    cursor.execute("SELECT VERSION()")
-                    assert cursor.fetchone()[0].startswith("12.3.3-")
-                _apply_migration(admin)
+                        autocommit=False, charset="utf8mb4", connect_timeout=5,
+                    ),
+                    timeout=10,
+                    retry_delay=0.25,
+                )
+                with admin:
+                    with admin.cursor() as cursor:
+                        cursor.execute("SELECT VERSION()")
+                        assert cursor.fetchone()[0].startswith("12.3.3-")
+                    _apply_migration(admin)
+            except Exception as error:
+                raise AssertionError(
+                    f"falló la preparación de MariaDB aislada:\n"
+                    f"{_container_diagnostics(docker, container)}"
+                ) from error
             yield _Db(docker, socket_path, root_password)
         finally:
             subprocess.run(
