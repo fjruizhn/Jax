@@ -57,6 +57,7 @@ from policy.rule_authority.providers import (  # noqa: E402
     leases_de_emision,
 )
 from policy.rule_authority.snapshot import TrustedPolicyPin  # noqa: E402
+from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore  # noqa: E402
 
 PROC = "refs/heads/main"
 PIN = TrustedPolicyPin("jax", "0" * 40, "1" * 40, PROC)
@@ -477,6 +478,21 @@ def test_el_guard_nombra_el_checkpoint_de_auditoria_sin_confundirlo_con_block4()
     parametros = inspect.signature(leases_de_emision).parameters
     assert "rule_audit_checkpoint" in parametros
     assert "checkpoint" not in parametros
+
+
+def test_el_guard_rechaza_el_checkpoint_real_de_block4(tmp_path) -> None:
+    checkpoint_block4 = TrustedCheckpointStore(
+        tmp_path / "block4-checkpoints.jsonl",
+        bootstrap_receipt_path=tmp_path / "block4-receipt.json",
+    )
+    from policy.rule_authority.providers import (
+        AlmacenCheckpointAuditoria,
+        AlmacenCheckpointAuditoriaBloqueable,
+    )
+
+    assert not isinstance(checkpoint_block4, AlmacenCheckpointAuditoria)
+    assert not isinstance(checkpoint_block4, AlmacenCheckpointAuditoriaBloqueable)
+    _niega("checkpoint Rule Authority: no implementa", rule_audit_checkpoint=checkpoint_block4)
 
 
 def test_a14_estres_ninguna_lectura_durante_exclusivo(intervalo_corto) -> None:
