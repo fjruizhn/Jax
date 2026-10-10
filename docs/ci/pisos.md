@@ -4690,7 +4690,7 @@ Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_
 cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-09, #371 sobre #373 y #379): `^968 passed in `
+Patrón vigente (2026-10-09, reapilado de schema-unidades Jax#378 sobre master post-#371): `^1002 passed in `
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4733,3 +4733,10 @@ lista que ya incluye los cierres de #379: `677 -> 816` (`139` pruebas netas). #3
 152 pruebas de modelos/store, y el árbol apilado mide `968 passed`, cero skipped. Medición
 exacta del comando del workflow en Python 3.14.4. Las dos listas del workflow incluyen los
 archivos de providers y modelos, y se verifican idénticas.
+
+schema-unidades (Jax#378, hallazgo del auditor de #371, reapilado el 2026-10-09 sobre master
+post-#371): 968 -> 1002 (+34: el schema valida `quantity.unit` contra `actos_externos` y
+`amount.currency` contra `monto_dinero` — 16 negativas de unit, 8 de currency (EUR es forma ISO
+valida ausente del catalogo), 5+2 positivas del catalogo real, 1 sin catalogo/sin sellar, 1 de
+pin alterno, 1 de no-vacio). Medido en hall9000 con Python 3.14 y el comando exacto del paso.
+
