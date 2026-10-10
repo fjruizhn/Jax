@@ -1,0 +1,89 @@
+id: RL01
+nombre: Relevo entre motores
+statement: >
+  Si el motor que lleva una tarea se queda sin ventana de uso (o deja de dar señal de vida),
+  otro motor puede tomar esa tarea y terminarla desde lo que el primero dejó publicado (su rama
+  y su TRASPASO.md), sin pedirle permiso a Fernando. El relevo traspasa la TAREA, nunca la
+  autoridad: cada acto del motor nuevo sigue gobernado por sus propias reglas.
+origen: >
+  Pregunta de Fernando, 2026-10-02 (hall9000): «qué pasa si durante una tarea un modelo se queda
+  sin tiempo porque sobrepasa la ventana de 5 horas, ¿podríamos hacer que otro modelo tome su
+  lugar y termine el trabajo?». Caso real del mismo día: Kimi se quedó sin ventana a mitad del
+  paso 3 de BinB (axioma-honduras PR #3), con un commit solo local en binb-lab. Redactada por
+  Mr. Hyde a pedido de Fernando («ok, y redacta la regla del relevo»).
+estado: PROPUESTA
+# PROPUESTA = no es vigente. Para serlo necesita (constitución, «Regla vigente es autorización
+# previa»): integrarse por PR, que Fernando la ratifique con su firma Ed25519 sobre el hash
+# exacto de este archivo, y que El Faro (el motor de reglas) exista para evaluarla. Hasta
+# entonces ninguna sesión la cita para cubrir un acto propio (Principio IX).
+
+clase: escritura_reversible
+# El relevo en sí no tiene efecto fuera del trabajo: retoma una rama y una línea de PENDIENTES.
+# Lo que haga el motor nuevo DESPUÉS (integrar, desplegar, actos que obligan) se rige por sus
+# propias reglas y por la constitución, igual que si lo hiciera el motor original.
+
+quien:
+  # Lo dispara el orquestador (El Faro, paso 0.7 `agentes.lanzar`), nunca un motor por su cuenta.
+  # Mientras El Faro no tenga ese paso, lo hace la sesión principal de la máquina, a mano y
+  # siguiendo esta misma regla.
+  dispara: orquestador
+  motor_saliente: "cualquier motor del ecosistema con una tarea marcada [EN CURSO: <máquina>.<motor>]"
+  motor_entrante:
+    # Orden de preferencia; se salta el que esté sin ventana, ocupado en otra tarea o sea el saliente.
+    orden: [qwen_local, codex, claude_api, kimi, glm]
+    # Qwen local primero: no tiene ventana de horas ni costo por token.
+
+capacidad: tomar_tarea_de_otro_motor
+
+objetivo:
+  # Qué tareas se pueden relevar
+  incluye: "tareas con marca [EN CURSO: …] en claude-skills/PENDIENTES.md cuyo trabajo vive en una rama de git empujada"
+  excluye:
+    - "tareas cuyo siguiente paso sea un acto de clase «obliga» (desplegar, integrar a main, tocar producción, actos SAR): el relevo llega hasta dejar el trabajo listo; ese acto espera su propia regla o a Fernando"
+    - "tareas de auditoría de escalón 3 o 4 en curso: el relevo de un auditor lo hace otro auditor de escalón igual o superior, nunca el implementador del mismo artefacto"
+    - tareas marcadas por una máquina de colaborador
+
+disparadores:
+  # Basta uno. Se mide, no se supone.
+  limite_de_uso: el CLI del motor saliente informa límite de uso (mensaje o código de salida documentado por motor)
+  sin_senal_de_vida_min: 30
+  # 30 min sin commit empujado, sin actualización de TRASPASO.md y sin proceso vivo del motor.
+
+precondiciones:
+  - la rama del saliente está empujada a origin; el entrante parte del ÚLTIMO commit empujado
+  - existe TRASPASO.md en la rama (objetivo, hecho, falta, decisiones tomadas, siguiente comando)
+  - si no hay TRASPASO.md, el entrante solo reconstruye el estado desde la rama y PENDIENTES, lo declara en su primer commit y no toma decisiones de diseño abiertas
+  - "el escalón se conserva: si el saliente implementaba, el entrante implementa; la auditoría sigue siendo de otra invocación (el que implementa no audita)"
+
+limites:
+  relevos_por_tarea_por_dia: 2
+  # Al tercer corte el mismo día no hay relevo automático: se avisa a Fernando de que la tarea
+  # no cabe en las ventanas y hay que partirla.
+  vigencia_hasta: 2026-12-31
+  # Se revisa antes de esa fecha con la experiencia real de los relevos.
+
+reversion:
+  # El trabajo del entrante va en commits nuevos sobre la misma rama; nada se reescribe.
+  - prohibido force-push y rebase de la rama del saliente
+  - si el saliente tenía trabajo SOLO local (sin empujar), al volver hace pull y concilia; nunca pisa lo del entrante
+  - "el saliente no retoma por su cuenta: la tarea es del entrante hasta que la termine o haya otro relevo"
+
+marca:
+  # La marca de PENDIENTES cambia a la del entrante, con constancia del relevo.
+  formato: "[EN CURSO: <máquina>.<motor-entrante> · relevo de <motor-saliente> <AAAA-MM-DD HH:MM>]"
+  # Se empuja en un commit que solo contiene ese cambio (regla 2 de SESIONES EN PARALELO).
+
+aviso:
+  canal: telegram
+  cuando: al instante, en cada relevo
+  contenido: tarea, motor saliente y entrante, disparador medido, SHA desde el que se retoma, y si había trabajo solo local del saliente
+  sin_relevo_posible: si ningún motor entrante está disponible, se avisa y la tarea espera; no se fuerza
+
+registro: >
+  Cada relevo deja una línea en la bitácora de El Faro (cuando exista) y en el TRASPASO.md de la
+  rama: hora, disparador, saliente, entrante, SHA.
+
+version: 0.1
+creada: 2026-10-02
+ratificacion: null
+# Se completa con el registro de ratificación de human:fernando (Block 4, Ed25519) sobre el hash de este archivo.
