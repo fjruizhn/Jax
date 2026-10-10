@@ -118,6 +118,12 @@ Piso actualizado 2026-10-04: `^688 passed`. Sobre el piso 683, se suman pruebas 
 
 Piso actualizado 2026-10-09 (JAX#371, Faro F1.1 paso 4): `^780 passed`, medido en GitHub Actions sobre el head exacto `bf0a11d940af4c67a6f8b015fc454c005685316e`, sin skips. El piso anterior era 729; el aumento neto de 51 pruebas corresponde a las regresiones de leases, rotación segura, límites y avance del resumen diario en `tests/test_faro_aviso.py`.
 
+CI 2026-10-10 sobre JAX#388 detectó que la importación del checkpoint Rule Authority usa el
+canonizador fijado a Unicode 16 y falla en Python 3.12 (UCD 15): el lote dio 779 passed y 1
+failed. El workflow de Faro se alinea ahora con Python 3.14, que suministra el UCD fijado; la
+suite completa medida en un venv limpio Python 3.14.4 dio `780 passed`, incluido el límite de
+RSS de transporte. El runner CI debe confirmar el mismo conteo en el SHA que cambia el job.
+
 ## `faro-bitacora-db/faro-db`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^40 passed`
@@ -4652,7 +4658,10 @@ comando exacto del workflow. Medición real con Docker: `10 passed`.
 
 ## `authority-rule-unit/tests`
 
-Piso inicial `^25 passed in `, medido localmente el 2026-10-10 con el comando del workflow.
+Piso inicial `^25 passed in `, medido localmente el 2026-10-10 con el comando del workflow y
+`PyYAML==6.0.3`, `cryptography==49.0.0`. Se ejecuta bajo Python 3.14 para respetar Unicode 16,
+fijado por el canonizador compartido. El venv limpio Python 3.14.4 del 2026-10-10 dio
+`25 passed`; CI del SHA actualizado debe confirmar el piso.
 Corre sin base de datos las pruebas del store en memoria, el contrato de RulePermit y el
 checkpoint externo (incluye serialización multiproceso, permisos iniciales del lock y cleanup
 de temporales abandonados). La integración MariaDB permanece en su job separado.
