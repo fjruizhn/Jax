@@ -229,8 +229,7 @@ def test_ninguna_llamada_del_workflow_usa_un_lector_fuera_de_github():
 
 
 JOB_COMPARADOR = "pisos-no-bajan"
-COMPARAR = ('python3 -I "$RUNNER_TEMP/comparar_pisos.py" --head-root "$GITHUB_WORKSPACE" '
-            "--base-ref refs/pisos-base/master --head-ref HEAD || exit $?")
+COMPARAR = 'python3 -I "$GITHUB_WORKSPACE/.github/ci/comparar_pisos_base.py" refs/pisos-base/master || exit $?'
 
 
 def _job_comparador():
@@ -255,7 +254,9 @@ def test_el_comparador_corre_aislado_y_ejecuta_el_checker_extraido_de_la_base():
     assert '"+${PR_MERGE_REF}:refs/pisos-candidate/merge"' in fetch
     assert "rev-parse --is-shallow-repository" in fetch and '== "false"' in fetch
     assert "git show refs/pisos-base/master:.github/ci/comparar_pisos.py" in fetch
-    assert '"$RUNNER_TEMP/comparar_pisos.py"' in fetch
+    assert 'destino="$GITHUB_WORKSPACE/.github/ci/comparar_pisos_base.py"' in fetch
+    assert 'temporal=$(mktemp "$GITHUB_WORKSPACE/.github/ci/.comparar_pisos_base.XXXXXX")' in fetch
+    assert 'mv -f "$temporal" "$destino"' in fetch
     assert set(pasos[2]) == {"name", "run"} and pasos[2]["run"].strip() == COMPARAR
 
 
@@ -263,6 +264,17 @@ def test_el_job_comparador_no_instala_ni_ejecuta_codigo_del_pr():
     texto = yaml.safe_dump(_job_comparador())
     for prohibido in ("pytest", "setup-python", "npm", "import ", "conftest", "continue-on-error", "if:"):
         assert prohibido not in texto, prohibido
+
+
+def test_checker_extraido_usa_ruta_profunda_y_interfaz_posicional_legacy():
+    pasos = _job_comparador()["steps"]
+    fetch = pasos[1]["run"]
+    run = pasos[2]["run"].strip()
+    ruta = "$GITHUB_WORKSPACE/.github/ci/comparar_pisos_base.py"
+    assert 'git show refs/pisos-base/master:.github/ci/comparar_pisos.py > "$temporal"' in fetch
+    assert 'destino="' + ruta + '"' in fetch
+    assert run == f'python3 -I "{ruta}" refs/pisos-base/master || exit $?'
+    assert "--head-root" not in run and "--base-ref" not in run and "--head-ref" not in run
 
 
 def test_la_base_se_trae_de_la_url_fija_a_una_ref_propia_no_del_origin_configurado():

@@ -623,6 +623,13 @@ def test_registry_solo_autoriza_en_merge_dedicado_y_diff_exacto(repo, monkeypatc
     r = _correr(repo, "--head-root", str(repo), "--base-ref", "refs/pisos-base/master",
                 "--head-ref", "refs/pisos-candidate/merge")
     assert r.returncode == 0, r.stdout + r.stderr
+    event["pull_request"]["base"]["ref"] = "release"
+    _escribir(repo, "event.json", json.dumps(event))
+    r = _correr(repo, "--head-root", str(repo), "--base-ref", "refs/pisos-base/master",
+                "--head-ref", "refs/pisos-candidate/merge")
+    assert r.returncode != 0  # el grant de master no cruza a otra rama destino
+    event["pull_request"]["base"]["ref"] = "master"
+    _escribir(repo, "event.json", json.dumps(event))
     # Aunque el candidate tree ya contenga el registro, mover la base fuera de la
     # transición exacta hace que ese grant no tenga autoridad.
     _git(repo, "update-ref", "refs/pisos-base/master", intro)

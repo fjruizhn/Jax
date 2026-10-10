@@ -4686,9 +4686,9 @@ Piso nuevo de la migración: `policy/tests/test_pisos_fuera_del_workflow.py` (pe
 master 364ded9) y `policy/tests/test_comparar_pisos.py` (el comparador). 140 -> 213 -> 223 el
 2026-10-04 al agregar el comparador y sus casos, las pruebas del job aislado y las de claves duplicadas; 223 -> 227 (2026-10-04, ci/pisos-skipped-y-comentarios): +4 netas del comparador (5 pruebas de la excepción `^N passed` -> `^N' passed, M skipped`, menos 1 parámetro que deja de ser rojo). Medido en
 Python 3.14.4. Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubría.
-227 -> 232 (2026-10-10, soporte genérico de retiros): +5 pruebas para transición dedicada del
-registro, grant solo en la base exacta, hash raw de diff y fallos de historia incompleta. Medido
-con el comando exacto de CI: `232 passed`.
+227 -> 233 (2026-10-10, soporte genérico de retiros): +6 pruebas para transición dedicada del
+registro, grant solo en la base exacta, hash raw de diff, fallos de historia incompleta y
+rechazo de grant en otra rama destino. Medido con el comando exacto de CI: `233 passed`.
 
 ## `authority-ledger-seal/attacks`
 

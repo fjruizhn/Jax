@@ -385,10 +385,16 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
             [[ "$(git rev-parse HEAD)" == "$(git rev-parse refs/pisos-candidate/merge)" ]]
           fi
-          git show refs/pisos-base/master:.github/ci/comparar_pisos.py > "$RUNNER_TEMP/comparar_pisos.py"
+          destino="$GITHUB_WORKSPACE/.github/ci/comparar_pisos_base.py"
+          [[ -d "$GITHUB_WORKSPACE/.github" && ! -L "$GITHUB_WORKSPACE/.github" ]]
+          [[ -d "$GITHUB_WORKSPACE/.github/ci" && ! -L "$GITHUB_WORKSPACE/.github/ci" ]]
+          temporal=$(mktemp "$GITHUB_WORKSPACE/.github/ci/.comparar_pisos_base.XXXXXX")
+          git show refs/pisos-base/master:.github/ci/comparar_pisos.py > "$temporal"
+          chmod 600 "$temporal"
+          mv -f "$temporal" "$destino"
       - name: Los pisos no bajan respecto de la punta de master
         run: |
-          python3 -I "$RUNNER_TEMP/comparar_pisos.py" --head-root "$GITHUB_WORKSPACE" --base-ref refs/pisos-base/master --head-ref HEAD || exit $?
+          python3 -I "$GITHUB_WORKSPACE/.github/ci/comparar_pisos_base.py" refs/pisos-base/master || exit $?
 
   ci-usa-la-mariadb-de-produccion:
     runs-on: ubuntu-latest
