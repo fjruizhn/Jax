@@ -107,6 +107,36 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   MariaDB verde. No hacer merge hasta respuesta de Fernando sobre `OVERLAY_ISSUED`; esa
   decisión no se infiere de la auditoría ni del merge de #381.
 
+### Actualización 2026-10-10 · CI #388 y correcciones de integración MariaDB
+
+- La corrida CI `38032592015` sobre el SHA `49a212b803a89dbb4c8d616316a4340cfe285129`
+  terminó `failure`. El job `tests-puros` alcanzó la suite Block 4 MariaDB y reportó
+  `28 passed, 5 failed` de 33 casos. Los fallos eran: import ausente de `ThreadPoolExecutor`,
+  tres tests de rechazo que capturaban la excepción dentro de `pytest.raises` pero no hacían
+  rollback explícito del transaction owner y luego disparaban el guard de salida, y una
+  aserción que esperaba `owner.cursor` aunque el contrato deliberadamente no publica cursor.
+  Corregí import, cleanup explícito y aserción de ausencia de cursor.
+- Medición de runner: 33 casos ejecutados/contados en
+  `tests/policy/test_authority_ledger_storage_mariadb.py` +
+  `tests/policy/test_authority_ledger_append_validation_mariadb.py` (28 pasaron, 5 fallaron).
+  Por eso se actualiza el piso `authority-ledger-mariadb/integration` de 10 a 33, pendiente
+  de confirmar 33 `passed` en CI sobre el SHA corregido. El paso Faro Rule Authority MariaDB
+  fue omitido por el fallo anterior y aún no tiene conteo de runner; no cambiar su piso 12
+  sin la corrida exacta.
+- Se agregó el job unitario `faro-rule-authority-unit` con 3 suites y piso 25. Verificación
+  local posterior al fix: 56 tests pasaron (escáneres, Bash de workflow, store, permit y
+  checkpoint); JSON, `py_compile` y `git diff --check` pasan. La suite MariaDB no se pudo
+  ejecutar localmente por permiso denegado a Docker, así que no sustituye la validación CI.
+- Fixes de test/piso/handoff están en commits locales de Codex; revisar `git log -3` para los
+  SHAs vivos. No se han publicado. El commit de cambios de escáner/job está en `f848f3c2`;
+  el siguiente commit contiene los arreglos de los 5 fallos y piso 33. PR #388 continúa draft
+  en `49a212b8`; ese SHA no incluye estos cambios.
+- Siguiente: revisar y validar `git diff`, ejecutar el verificador de ventana inmediatamente
+  antes de publicar el nuevo head de #388, y esperar CI exacta para ambos jobs MariaDB y los
+  pisos. Repetir Tier 3 sobre el SHA final. No mergear mientras Fernando no resuelva la
+  semántica de `OVERLAY_ISSUED`; tampoco habilitar wiring productivo sin el runbook de
+  reconciliación auditado para commit DB exitoso sin ancla publicada.
+
 ## Límites de autoridad y alcance
 
 - La decisión directa de Fernando sigue pendiente: si `OVERLAY_ISSUED` requiere una

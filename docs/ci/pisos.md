@@ -4613,7 +4613,11 @@ denormalizadas (incluido `previous_event_hash`), lectura histórica exacta y per
 
 ## `authority-ledger-mariadb/integration`
 
-Piso vigente (2026-10-09): `^10 passed in `. La base #377 tenía 5 pruebas en MariaDB 12.3.3 efímera
+Piso de trabajo (2026-10-10): `^33 passed in `. La corrida CI 38032592015 contó 33 casos: 28
+pasaron y 5 fallaron por un import de test ausente, tres tests que no finalizaban explícitamente
+su transaction owner después de capturar el error, y una aserción de cursor incompatible con el
+contrato sellado. Se corrigieron esos tests; la siguiente corrida del SHA actualizado debe
+confirmar 33 pasadas antes de cerrar el piso. La base #377 tenía 5 pruebas en MariaDB 12.3.3 efímera
 `--network none`; la prueba aplica ambas migraciones, valida el upgrade nullable→NOT NULL,
 provisiona la cuenta de aplicación con el script versionado, genera una llave Ed25519 de prueba
 y valida firma → INSERT → lectura → reconstrucción → hash/firma y replay. También prueba que

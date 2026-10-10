@@ -2804,7 +2804,7 @@ jobs:
           JAX_AUTHORITY_LEDGER_DOCKER_CMD: docker
         run: |
           set -o pipefail
-          # Piso 10 (2026-10-09): la regresión de overlay sin ratificación eleva en uno la suite MariaDB.
+          # Piso 33 (2026-10-10): CI midió 33 casos tras checkpoint/consumo; regresiones de manejo incluidas.
           python -m pytest -q tests/policy/test_authority_ledger_storage_mariadb.py tests/policy/test_authority_ledger_append_validation_mariadb.py 2>&1 | tee /tmp/authority-ledger-mariadb
           python3 .github/ci/piso.py verificar authority-ledger-mariadb/integration /tmp/authority-ledger-mariadb || exit $?
       - name: Faro F1.1 Rule Authority MariaDB aislada -- piso exacto

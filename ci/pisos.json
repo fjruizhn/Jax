@@ -134,8 +134,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 19 tests CORRIDOS del codec de persistencia de Block 4. Medido el 2026-10-07 en hall9000."
     },
     "authority-ledger-mariadb/integration": {
-      "patron": "^10 passed in ",
-      "mensaje": "PISO ROTO: se esperaban 10 tests CORRIDOS de la suite MariaDB aislada del ledger (incluye la regresión del overlay sin ratificación). Medido el 2026-10-09."
+      "patron": "^33 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 33 tests CORRIDOS de la suite MariaDB aislada del ledger. El runner CI del 2026-10-10 contó 33 casos (28 pasaron y 5 fallaron por errores de test/limpieza); tras corregirlos, el siguiente CI exacto debe confirmar los 33."
     },
     "authority-rule-storage/mariadb": {
       "patron": "^12 passed in ",
