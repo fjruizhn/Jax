@@ -5,8 +5,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from policy.authority_ledger.canonical import canonical_bytes
 from policy.rule_authority.errors import CheckpointInvalido
-from policy.rule_authority.trusted_checkpoint import RuleAuditCheckpointStore
+from policy.rule_authority.trusted_checkpoint import (
+    RuleAuditCheckpointStore,
+    _checkpoint_hash,
+)
 from policy.rule_authority.providers import AlmacenCheckpoints
 
 
@@ -92,6 +96,28 @@ def test_reinicio_relee_log_y_no_reinicializa_un_head_existente(tmp_path):
     second = RuleAuditCheckpointStore(path)
     assert second.head_actual() == "sha256:" + "1" * 64
     assert json.loads(path.read_text(encoding="utf-8").splitlines()[0])["sequence"] == 0
+
+
+def test_lector_rechaza_head_historico_repetido_aunque_la_cadena_sea_valida(tmp_path):
+    path = tmp_path / "audit-checkpoints.jsonl"
+    store = _bootstrapped_store(path)
+    first = "sha256:" + "1" * 64
+    store.publicar(first, anterior=store.head_actual())
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    previous = rows[-1]
+    repeated = {
+        "schema_version": previous["schema_version"],
+        "kind": previous["kind"],
+        "sequence": previous["sequence"] + 1,
+        "head": first,
+        "previous_head": first,
+        "previous_checkpoint_hash": previous["checkpoint_hash"],
+    }
+    repeated["checkpoint_hash"] = _checkpoint_hash(repeated)
+    path.write_bytes(path.read_bytes() + canonical_bytes(repeated) + b"\n")
+
+    with pytest.raises(CheckpointInvalido, match="repite un head histórico"):
+        store.head_actual()
 
 
 def test_no_se_infiere_genesis_desde_un_log_ausente_y_bootstrap_es_unico(tmp_path):
