@@ -14,10 +14,13 @@
   capturaba el error esperado sin cerrar su transaction owner; el test de carrera cambiaba
   request_id conservando el hash viejo; una expectativa de commit usaba el mensaje anterior.
 - **Delta Tier 3 exacta de `8de21634`:** RECHAZADO, BLOCK 0 / MAJOR 2 / MINOR 2 / LOW 0.
-  Encontró que solo consumo verificaba `permit.previous_record_hash == decision.record_hash`;
-  las tres rutas de recuperación de evaluación seguían confirmando el hash intermedio y podían
-  devolver una pareja no encadenada. También faltaban regresiones negativas y una carrera de
-  dos `evaluate()` idénticos; el handoff describía el contenido como local sin commit.
+  Las tres rutas omitían validar `permit.previous_record_hash == decision.record_hash`.
+  `recover_durable_evaluation` comprobaba el ancla externa del permiso final, pero no ese
+  vínculo. Las dos rutas transaccionales —recovery bajo owner y repetición idempotente— además
+  exigían erróneamente que el checkpoint externo anclara también el hash intermedio de la
+  decisión, lo que rompía la recuperación concurrente. También faltaban regresiones negativas
+  y una carrera de dos `evaluate()` idénticos; el handoff describía el contenido como local sin
+  commit.
 - **Correcciones de este delta:** `_recover_anchored_evaluation` centraliza la validación de
   evaluación PERMIT para recovery público, recovery bajo owner y repetición idempotente; la
   lectura para consumo aplica el mismo vínculo decision→permit. Exige
