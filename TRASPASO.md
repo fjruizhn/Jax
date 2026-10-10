@@ -31,6 +31,13 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   cerrado hasta reconciliación explícita y que adapters futuros deben tomar primero el
   mismo `flock`; falta runbook auditado de reconciliación antes de wiring productivo.
   Kimi CLI no está disponible por límite 403.
+- Estado remoto adicional: #385 está en la ascendencia de `master@bf6b0580`; su guard
+  `38022192036` falló solo en `tests-puros` al perder MariaDB la conexión durante
+  `SELECT VERSION()` (11 passed, 1 error). El mismo head pasó 12/12 en `pull_request`; no
+  hay causa raíz probada. Fortalecí localmente el fixture para esperar servidor listo con
+  query, reintentar solo errores de inicio transitorios y adjuntar `docker logs` si agota
+  tiempo. No ejecutable localmente por falta de permiso al socket Docker; pendiente de CI.
+  #387 revierte #385, pero su CI actual falla `pisos-no-bajan`; rama ajena, sin cambios.
 - Añadí regresión que forja una cadena hash-válida con un head histórico repetido. Pasa con
   el validador vigente; mutando temporalmente esa guardia, falla como se espera.
 - Agregué inyección de fallo de `fsync` antes de `replace` (el head viejo permanece) y de

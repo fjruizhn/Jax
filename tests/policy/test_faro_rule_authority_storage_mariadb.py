@@ -10,13 +10,16 @@ import shlex
 import subprocess
 import sys
 import tempfile
-import time
 import uuid
 
 import pymysql
 import pytest
 
 from tests.policy.catalogo_pin import catalogo_del_pin
+from tests.policy.test_authority_ledger_storage_mariadb import (
+    _connect_after_transient_mariadb_startup_error,
+    _wait_until_ready,
+)
 from policy.authority_ledger.canonical import canonical_bytes
 from policy.authority_ledger.errors import AuthorityStateError
 from policy.rule_authority.errors import CheckpointInvalido, RuleAuthorityError
@@ -176,36 +179,37 @@ def db():
             "-e", f"MARIADB_ROOT_PASSWORD={root_password}", IMAGE,
         )
         try:
-            socket_path = Path(socket_dir) / "mysqld.sock"
-            for _ in range(90):
-                probe = subprocess.run(
-                    [*docker, "exec", container, "test", "-S", "/run/mysqld/mysqld.sock"],
+            socket_path = _wait_until_ready(docker, container, socket_dir, root_password)
+
+            def connect_and_verify_admin():
+                admin = pymysql.connect(
+                    unix_socket=str(socket_path), user="root", password=root_password,
+                    autocommit=False, charset="utf8mb4", connect_timeout=5,
+                )
+                try:
+                    with admin.cursor() as cursor:
+                        cursor.execute("SELECT VERSION()")
+                        version = cursor.fetchone()[0]
+                        if not version.startswith("12.3.3-"):
+                            raise AssertionError(f"versión MariaDB inesperada: {version}")
+                    return admin
+                except Exception:
+                    admin.close()
+                    raise
+
+            try:
+                admin = _connect_after_transient_mariadb_startup_error(
+                    connect_and_verify_admin, timeout=15, retry_delay=0.25,
+                )
+            except AssertionError as exc:
+                logs = subprocess.run(
+                    [*docker, "logs", "--tail", "200", container],
                     capture_output=True, text=True, check=False,
                 )
-                if probe.returncode == 0:
-                    break
-                time.sleep(1)
-            else:
-                pytest.fail("MariaDB no creó su socket Unix")
-            _run(docker, "exec", "--user=root", container, "chmod", "0755", "/run/mysqld")
-
-            admin = None
-            last_error = None
-            for _ in range(90):
-                try:
-                    admin = pymysql.connect(
-                        unix_socket=str(socket_path), user="root", password=root_password,
-                        autocommit=False, charset="utf8mb4",
-                    )
-                    break
-                except (OSError, pymysql.MySQLError) as exc:
-                    last_error = exc
-                    time.sleep(1)
-            assert admin is not None, f"MariaDB no aceptó conexiones: {last_error}"
+                raise AssertionError(
+                    f"{exc}\n--- docker logs ---\n{logs.stdout}{logs.stderr}"
+                ) from exc
             with admin:
-                with admin.cursor() as cursor:
-                    cursor.execute("SELECT VERSION()")
-                    assert cursor.fetchone()[0].startswith("12.3.3-")
                 _apply_migration(admin)
             yield _Db(docker, socket_path, root_password)
         finally:
