@@ -403,6 +403,13 @@ def _validar_merge_grant(raiz: Path, base_ref: str, grant: dict) -> tuple[str, s
     return base_sha, baseline
 
 
+def _validar_transicion_piso(anterior: dict | None, propuesto: dict | None,
+                             aterrizado: dict | None, objetivo: dict) -> None:
+    """El merge declarado debe cambiar la definición a la autorizada, exactamente."""
+    if anterior == objetivo or propuesto != objetivo or aterrizado != objetivo:
+        raise PisosError("transición exacta de definición del piso no verificable")
+
+
 def retiro_exacto_autorizado(raiz: Path, base_ref: str, head_ref: str,
                              base: dict, head: dict, desaparecidas: set[str]) -> bool:
     if len(desaparecidas) != 1:
@@ -426,10 +433,10 @@ def retiro_exacto_autorizado(raiz: Path, base_ref: str, head_ref: str,
     if len(padres_intro) != 2 or padres_intro != esperados:
         raise PisosError("merge de introducción y padres no verificables o no coincidentes")
     _es_ancestro(raiz, intro, baseline)
-    if _definicion_piso(raiz, esperados[0], clave) is not None:
-        raise PisosError("el piso ya existía antes del merge de introducción")
-    if _definicion_piso(raiz, intro, clave) != grant["floor_definition"]:
-        raise PisosError("el merge declarado no introdujo la definición exacta del piso")
+    _validar_transicion_piso(
+        _definicion_piso(raiz, esperados[0], clave),
+        _definicion_piso(raiz, esperados[1], clave),
+        _definicion_piso(raiz, intro, clave), grant["floor_definition"])
     if clave in head["pisos"]:
         return False
     return _huella_diff_oids(raiz, base_sha, head_ref) == grant["expected_diff_sha256"]
