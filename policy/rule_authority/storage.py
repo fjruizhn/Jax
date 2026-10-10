@@ -435,14 +435,14 @@ class MariaDBRuleDecisionStore:
             if connection is not None:
                 try:
                     connection.rollback()
-                except Exception:
+                except Exception:  # fail-soft: registrar rollback fallido conserva como primario el error de estado original
                     _LOG.exception("rollback de Rule Authority PERMIT falló")
             raise
         except Exception as exc:
             if connection is not None:
                 try:
                     connection.rollback()
-                except Exception:
+                except Exception:  # fail-soft: registrar rollback fallido conserva como primario el error de persistencia original
                     _LOG.exception("rollback de Rule Authority PERMIT falló")
             raise RuleAuthorityStorageError("no se pudo persistir PERMIT + RulePermit") from exc
         finally:
