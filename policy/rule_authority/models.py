@@ -23,6 +23,7 @@ from policy.authority_ledger.ids import uuid7_text
 from .errors import RuleSchemaError
 from .schema import (MAX_CANTIDAD, Cantidad, Frecuencia, LimitesObligatorios, Monto,
                      ReglaValidada, Tope, _validar_periodo)
+from .permit import RulePermit
 
 _IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9._:-]{0,127}\Z")
 _ISO_MONEDA = re.compile(r"[A-Z]{3}\Z", re.ASCII)
@@ -30,6 +31,7 @@ _REQUEST_HASH_DOMAIN = "JAX-FARO-RULE-REQUEST"
 _REQUEST_HASH_VERSION = "2"        # v2: la identidad del catálogo (OID del pin) entra al hash
 _DENY_REASONS = frozenset({
     "AUTHORITY_INVALID",
+    "CATALOG_MISMATCH",
     "CAPABILITY_MISMATCH",
     "GRANT_INVALID",
     "OUT_OF_SCOPE",
@@ -160,9 +162,6 @@ class RuleLimits:
             raise AuthorityEventValidationError("limites debe ser LimitesObligatorios de la regla")
         if self.tope is not None and type(self.tope) is not Tope:
             raise AuthorityEventValidationError("tope debe ser el Tope de la regla")
-        if limites.quantity is None and limites.amount is None and limites.frequency is None \
-                and self.tope is None:
-            raise AuthorityEventValidationError("RuleLimits vacío")
         if limites.quantity is not None:
             if type(limites.quantity) is not Cantidad:
                 raise AuthorityEventValidationError("quantity debe ser Cantidad")
@@ -202,6 +201,17 @@ def limites_de(regla: ReglaValidada, catalogo: CatalogoTopes) -> RuleLimits:
     """Los límites de la regla validada, comprobados contra el catálogo sellado."""
     if type(regla) is not ReglaValidada:
         raise AuthorityEventValidationError("limites_de requiere una ReglaValidada")
+    if (regla.obligation_limits.quantity is not None
+            and regla.obligation_limits.amount is not None):
+        raise AuthorityEventValidationError(
+            "RuleLimits no permite quantity y amount simultáneamente"
+        )
+    if (regla.obligation_limits.quantity is None
+            and regla.obligation_limits.amount is None
+            and regla.obligation_limits.frequency is None
+            and regla.tope is None
+            and regla.action_class != "REVERSIBLE"):
+        raise AuthorityEventValidationError("RuleLimits vacío no autoriza reglas sin límites")
     limites = object.__new__(RuleLimits)       # sin __init__: no hay otra puerta
     for nombre, valor in (("catalogo", catalogo), ("limites", regla.obligation_limits),
                           ("tope", regla.tope), ("rule_id", regla.rule_id),
@@ -328,3 +338,30 @@ class RuleDecision:
         elif self.status is RuleDecisionStatus.DENY and self.reason_code == "RULE_NOT_FOUND":
             raise AuthorityEventValidationError("RULE_NOT_FOUND requiere MISSING_RULE")
         object.__setattr__(self, "decided_at_utc", _utc(self.decided_at_utc, "decided_at_utc"))
+
+
+@dataclass(frozen=True)
+class RuleEvaluationOutcome:
+    """API result containing the decision and its store-issued permit, if any.
+
+    This value is not standalone proof that a negative decision was persisted.
+    PERMIT still requires a store-sealed RulePermit.
+    """
+
+    decision: RuleDecision
+    permit: RulePermit | None
+
+    def __post_init__(self) -> None:
+        if type(self.decision) is not RuleDecision:
+            raise AuthorityEventValidationError("outcome requiere RuleDecision exacta")
+        if self.decision.status is RuleDecisionStatus.PERMIT:
+            if type(self.permit) is not RulePermit or not self.permit._is_store_sealed():
+                raise AuthorityEventValidationError("PERMIT requiere RulePermit sellado del store")
+            if (self.permit.request_id != self.decision.request_id
+                    or self.permit.request_hash != self.decision.request_hash
+                    or self.permit.rule_id != self.decision.required_rule_id
+                    or self.permit.issued_at_utc.astimezone(timezone.utc)
+                    != self.decision.decided_at_utc):
+                raise AuthorityEventValidationError("RulePermit no corresponde a la decisión")
+        elif self.permit is not None:
+            raise AuthorityEventValidationError("decisión negativa requiere permit=None")

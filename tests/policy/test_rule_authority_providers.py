@@ -12,6 +12,7 @@ Los dobles viven en ``proveedores_dobles.py`` (solo pruebas). Aqui:
 from __future__ import annotations
 
 import ast
+import inspect
 import sys
 import threading
 import time
@@ -50,17 +51,26 @@ from policy.rule_authority.providers import (  # noqa: E402
     EstadoStop,
     FormaLimites,
     PinActivo,
+    RepositorioConfiable,
     VersionMonotonica,
     VistaLease,
     exigir_contrato_de_emision,
     leases_de_emision,
 )
 from policy.rule_authority.snapshot import TrustedPolicyPin  # noqa: E402
+from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore  # noqa: E402
 
+RAIZ = Path(__file__).resolve().parents[2]
 PROC = "refs/heads/main"
 PIN = TrustedPolicyPin("jax", "0" * 40, "1" * 40, PROC)
 T0 = datetime(2026, 10, 6, 12, 0, 0, tzinfo=timezone.utc)
-RAIZ = Path(__file__).resolve().parents[2]
+
+
+def _binding(*, repository_id: str = "jax", repository_path: Path = RAIZ,
+             procedencia: str = PROC) -> RepositorioConfiable:
+    return RepositorioConfiable(repository_id=repository_id,
+                                repository_path=repository_path,
+                                procedencia=procedencia)
 
 
 class _SiempreMayor(int):
@@ -94,7 +104,7 @@ def _suite(checkpoint_publicado: bool = True, **cambios: object) -> dict:
         checkpoint.publicar("h1", anterior="")
     base: dict = {
         "pin": PinFijo(PIN, PROC),
-        "checkpoint": checkpoint,
+        "rule_audit_checkpoint": checkpoint,
         "stop": StopFijo(activo=False, huella="sha256:x"),
         "reloj": RelojDeterminista(T0),
         "clasificacion": ClasificacionFija({"CAP_X": _contrato(ClaseCapability.OBLIGATING)}),
@@ -404,6 +414,7 @@ def test_el_lease_entrega_valor_y_version_del_mismo_instante_con_la_misma_forma(
     for vista in (compartida, exclusiva):
         assert isinstance(vista, VistaLease) and isinstance(vista.version, VersionMonotonica)
         assert type(vista.valor) is PinActivo and vista.valor.pin == PIN
+        assert vista.valor.repositorio.repository_path == RAIZ
     assert type(compartida.valor) is type(exclusiva.valor)
 
 
@@ -451,8 +462,12 @@ def test_los_leases_de_emision_mantienen_las_tres_vistas_hasta_el_fin_del_contex
     suite = _suite(pin=pin, clasificacion=clasificacion, stop=stop)
     bloqueados: list[tuple[threading.Event, threading.Event, threading.Thread]] = []
 
-    with leases_de_emision(**suite) as vistas:
-        assert vistas.pin.valor == PinActivo(PIN, PROC)
+    with leases_de_emision(
+        pin=suite["pin"], stop=suite["stop"], reloj=suite["reloj"],
+        clasificacion=suite["clasificacion"],
+    ) as vistas:
+        assert vistas.pin.valor.pin == PIN
+        assert vistas.pin.valor.repositorio == _binding()
         assert vistas.clasificacion.valor.contrato_de("CAP_X").identidad == "cap-x"
         assert vistas.stop.valor == EstadoStop(activo=False, huella="sha256:x")
         for proveedor in (pin, clasificacion, stop):
@@ -470,6 +485,48 @@ def test_los_leases_de_emision_mantienen_las_tres_vistas_hasta_el_fin_del_contex
     for _entro, _soltar, hilo in bloqueados:
         hilo.join(timeout=5.0)
         assert not hilo.is_alive()
+
+
+def test_leases_de_emision_entregan_la_unica_lectura_del_reloj() -> None:
+    class RelojContado(_RelojCrudo):
+        def __init__(self) -> None:
+            super().__init__(T0)
+            self.lecturas = 0
+
+        def ahora(self) -> object:
+            self.lecturas += 1
+            return super().ahora()
+
+    reloj = RelojContado()
+    suite = _suite(reloj=reloj)
+    with leases_de_emision(
+        pin=suite["pin"], stop=suite["stop"], reloj=reloj,
+        clasificacion=suite["clasificacion"],
+    ) as vistas:
+        assert vistas.ahora_utc == T0
+        assert reloj.lecturas == 1
+    assert reloj.lecturas == 1
+
+
+def test_el_guard_nombra_el_checkpoint_de_auditoria_sin_confundirlo_con_block4() -> None:
+    parametros = inspect.signature(leases_de_emision).parameters
+    assert "rule_audit_checkpoint" not in parametros
+    assert "checkpoint" not in parametros
+
+
+def test_el_guard_rechaza_el_checkpoint_real_de_block4(tmp_path) -> None:
+    checkpoint_block4 = TrustedCheckpointStore(
+        tmp_path / "block4-checkpoints.jsonl",
+        bootstrap_receipt_path=tmp_path / "block4-receipt.json",
+    )
+    from policy.rule_authority.providers import (
+        AlmacenCheckpointAuditoria,
+        AlmacenCheckpointAuditoriaBloqueable,
+    )
+
+    assert not isinstance(checkpoint_block4, AlmacenCheckpointAuditoria)
+    assert not isinstance(checkpoint_block4, AlmacenCheckpointAuditoriaBloqueable)
+    _niega("checkpoint Rule Authority: no implementa", rule_audit_checkpoint=checkpoint_block4)
 
 
 def test_a14_estres_ninguna_lectura_durante_exclusivo(intervalo_corto) -> None:
@@ -506,6 +563,41 @@ def test_a14_estres_ninguna_lectura_durante_exclusivo(intervalo_corto) -> None:
 
 # ---------------------------------------------------------------------- pin
 
+def test_pin_activo_no_admite_ruta_sin_binding_confiable() -> None:
+    """No existe ruta de evaluacion que reciba una ruta suelta del caller.
+
+    El proveedor debe entregar un binding configurado y sellado, no el par
+    historico ``(pin, procedencia)`` que dejaba al kernel sin una raiz Git
+    confiable para cargar el snapshot.
+    """
+    with pytest.raises(TypeError):
+        PinActivo(PIN, PROC)  # type: ignore[call-arg]
+
+
+def test_produccion_expone_el_binding_confiable_de_repositorio() -> None:
+    """El tipo de ruta configurada pertenece al borde de proveedores."""
+    import policy.rule_authority.providers as providers
+
+    assert hasattr(providers, "RepositorioConfiable")
+
+
+def test_binding_configurado_exige_id_ruta_canonica_y_procedencia_del_pin() -> None:
+    activo = PinActivo(PIN, _binding())
+    assert activo.repositorio.repository_id == PIN.repositorio
+    assert activo.repositorio.repository_path == RAIZ
+    assert activo.repositorio.procedencia == PIN.procedencia
+    exigir_contrato_de_emision(**_suite(pin=_Crudo(activo)))
+
+
+def test_binding_con_id_distinto_del_pin_niega_en_el_guard() -> None:
+    _niega("repository_id del binding difiere", pin=PinFijo(PIN, PROC, repository_id="otro"))
+
+
+@pytest.mark.parametrize("ruta", [Path("."), RAIZ / "tests" / ".."])
+def test_binding_rechaza_ruta_no_canonica_o_relativa(ruta: Path) -> None:
+    with pytest.raises(ProveedorInvalido, match="absoluta y canonica"):
+        _binding(repository_path=ruta)
+
 @pytest.mark.parametrize("mala", [
     "main", "HEAD", "origin/main", "heads/main", "REFS/heads/main", " refs/heads/main",
     "refs/heads/main ", "refs/heads/main\n", "refs/heads/", "refs/heads", "refs/heads/a b",
@@ -514,14 +606,14 @@ def test_a14_estres_ninguna_lectura_durante_exclusivo(intervalo_corto) -> None:
 ])
 def test_x4_procedencia_fuera_de_la_forma_cerrada_niega(mala: str) -> None:
     pin = TrustedPolicyPin("jax", "0" * 40, "1" * 40, mala)   # el pin declara LA MISMA: solo la forma puede negar
-    _niega("forma cerrada", pin=PinFijo(pin, mala))
+    _niega("forma cerrada", pin=PinFijo(pin, PROC))
 
 
 @pytest.mark.parametrize("mala", ["refs/heads/a..b", "refs/heads/x.lock", "refs/heads/x.",
                                   "refs/heads/x.lock/y", "refs/tags/v1.", "refs/heads/a/b.lock"])
 def test_procedencia_con_dos_puntos_lock_o_punto_final_niega(mala: str) -> None:
     pin = TrustedPolicyPin("jax", "0" * 40, "1" * 40, mala)
-    _niega("forma cerrada", pin=PinFijo(pin, mala))
+    _niega("forma cerrada", pin=PinFijo(pin, PROC))
 
 
 @pytest.mark.parametrize("buena", ["refs/heads/main", "refs/tags/v1.2.3", "refs/heads/feat/faro-f1.1_x"])
@@ -532,7 +624,8 @@ def test_x4_procedencia_cerrada_pasa(buena: str) -> None:
 
 def test_x1_procedencia_sellada_distinta_de_la_del_pin_niega() -> None:
     _niega("difiere", pin=PinFijo(PIN, "refs/heads/otra"))     # ambas de forma cerrada, pero distintas
-    _niega("forma cerrada", pin=PinFijo(PIN, ""))
+    with pytest.raises(ProveedorInvalido, match="forma cerrada"):
+        _binding(procedencia="")
 
 
 def test_x1_pin_de_una_subclase_niega() -> None:
@@ -543,7 +636,7 @@ def test_x1_pin_de_una_subclase_niega() -> None:
     _niega("exactamente TrustedPolicyPin", pin=PinFijo(hijo, PROC))
 
 
-@pytest.mark.parametrize("valor", [None, (PIN, PROC), "x", object(), PinActivo(None, PROC)])  # type: ignore[arg-type]
+@pytest.mark.parametrize("valor", [None, (PIN, PROC), "x", object(), PinActivo(None, _binding())])  # type: ignore[arg-type]
 def test_vista_lease_con_valor_malo_niega_en_el_pin(valor: object) -> None:
     _niega("pin_activo", pin=_Crudo(valor))
 
@@ -804,47 +897,32 @@ def test_a13_carrera_hilos_cero_bifurcaciones(intervalo_corto) -> None:
 
 
 class _CheckpointRecorder:
-    """Checkpoint cuyo ``confirmar`` registra lo que le llaman y responde lo que se le diga."""
+    """Checkpoint estructural: toda lectura antes del flock falla la prueba."""
 
-    def __init__(self, head: object = "h1", responde: object = True, explota: bool = False) -> None:
-        self._head, self._responde, self._explota = head, responde, explota
-        self.confirmados: list[object] = []
+    def __init__(self) -> None:
+        self.lecturas: list[str] = []
 
     def head_actual(self) -> object:
-        return self._head
+        self.lecturas.append("head_actual")
+        raise AssertionError("el checkpoint se lee solo bajo el flock de transaccion")
 
     def publicar(self, head: str, *, anterior: str) -> None:
         return None
 
     def confirmar(self, head: str) -> object:
-        self.confirmados.append(head)
-        if self._explota:
-            raise OSError("log ilegible")
-        return self._responde
+        self.lecturas.append("confirmar")
+        raise AssertionError("el checkpoint se confirma solo bajo el flock de transaccion")
 
 
-def test_el_guard_llama_confirmar_con_el_head_exacto() -> None:
-    rec = _CheckpointRecorder(head="h7")
-    exigir_contrato_de_emision(**_suite(checkpoint=rec))
-    assert rec.confirmados == ["h7"]
-
-
-@pytest.mark.parametrize("responde", [False, None, "si", 1])
-def test_el_guard_niega_si_el_log_no_confirma_el_head(responde: object) -> None:
-    """Cae si el guard no llama confirmar, o lo acepta sin ser exactamente True."""
-    _niega("no contiene el head", checkpoint=_CheckpointRecorder(responde=responde))
-
-
-def test_el_guard_niega_si_confirmar_explota_o_el_head_es_ilegible() -> None:
-    _niega("confirmar no sirve", checkpoint=_CheckpointRecorder(explota=True))
-    _niega("nunca publicado", checkpoint=_CheckpointRecorder(head=""))
-    _niega("nunca publicado", checkpoint=_CheckpointRecorder(head=None))
-
-
-def test_a10_checkpoint_nunca_publicado_niega() -> None:
-    with pytest.raises(ProveedorInvalido) as excinfo:
-        exigir_contrato_de_emision(**_suite(checkpoint_publicado=False))
-    assert "nunca publicado" in str(excinfo.value)
+def test_el_preflight_y_los_leases_no_leen_el_checkpoint_de_auditoria() -> None:
+    rec = _CheckpointRecorder()
+    exigir_contrato_de_emision(**_suite(rule_audit_checkpoint=rec))
+    with leases_de_emision(
+        pin=_suite()["pin"], stop=_suite()["stop"], reloj=_suite()["reloj"],
+        clasificacion=_suite()["clasificacion"],
+    ):
+        pass
+    assert rec.lecturas == []
 
 
 # -------------------------------------------------------------------- guard
@@ -855,7 +933,7 @@ def test_el_guard_pasa_la_suite_completa() -> None:
 
 def test_a4_el_guard_niega_mocks() -> None:
     with pytest.raises(ProveedorInvalido):
-        exigir_contrato_de_emision(pin=Mock(), checkpoint=Mock(), stop=Mock(),
+        exigir_contrato_de_emision(pin=Mock(), rule_audit_checkpoint=Mock(), stop=Mock(),
                                     reloj=Mock(), clasificacion=Mock())
 
 
@@ -875,7 +953,7 @@ class _LeaseVersionTrucha(_Crudo):
 
 
 @pytest.mark.parametrize("campo,valor", [
-    ("pin", PinActivo(PIN, PROC)),
+    ("pin", PinActivo(PIN, _binding())),
     ("stop", EstadoStop(activo=False, huella="x")),
     ("clasificacion", CatalogoFijo({})),
 ])
@@ -891,7 +969,7 @@ def test_el_proveedor_sin_leases_ni_siquiera_implementa_el_protocolo(campo: str)
 
 
 def test_falta_cualquier_proveedor_niega() -> None:
-    for campo in ("pin", "checkpoint", "stop", "reloj", "clasificacion"):
+    for campo in ("pin", "rule_audit_checkpoint", "stop", "reloj", "clasificacion"):
         _niega("falta el proveedor", **{campo: None})
 
 
@@ -925,7 +1003,7 @@ class _CheckpointAtributosMuertos:
 
 
 def test_m6_el_guard_exige_publicar_y_confirmar_llamables() -> None:
-    _niega("no implementa", checkpoint=_CheckpointAtributosMuertos())
+    _niega("no implementa", rule_audit_checkpoint=_CheckpointAtributosMuertos())
 
 
 class _RelojSinMarcar:

@@ -43,9 +43,11 @@ codigo en el proceso ya perdio) — es orden, no aislamiento.
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import datetime, timedelta
 from enum import Enum
 from contextlib import AbstractContextManager, ExitStack, contextmanager
+from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping, NamedTuple, Protocol, runtime_checkable
 
@@ -172,11 +174,82 @@ class ContratoCapability:
         return hash(self._clave())
 
 
-class PinActivo(NamedTuple):
-    """Valor del lease del pin: el pin y la procedencia SELLADA por el proveedor
-    (el guard exige que coincida con la que declara el propio pin)."""
-    pin: TrustedPolicyPin
-    procedencia: str
+class RepositorioConfiable:
+    """Binding inmutable que un proveedor configura para el repositorio de policy.
+
+    La ruta se normaliza antes de entrar al proveedor y tiene que seguir siendo
+    exactamente su forma absoluta canonica. El kernel recibe este valor dentro
+    de ``PinActivo``; ningun request aporta una ruta Git.
+    """
+
+    __slots__ = ("repository_id", "repository_path", "procedencia", "_sello")
+
+    def __init__(self, *, repository_id: str, repository_path: Path,
+                 procedencia: str) -> None:
+        if (type(repository_id) is not str or not repository_id.strip()
+                or unicodedata.normalize("NFC", repository_id) != repository_id):
+            raise ProveedorInvalido("repositorio confiable: repository_id no vacio y en NFC")
+        if not isinstance(repository_path, Path):
+            raise ProveedorInvalido("repositorio confiable: repository_path debe ser Path")
+        try:
+            canonica = repository_path.resolve(strict=True)
+        except OSError as exc:
+            raise ProveedorInvalido("repositorio confiable: repository_path no resoluble") from exc
+        if not repository_path.is_absolute() or repository_path != canonica:
+            raise ProveedorInvalido(
+                "repositorio confiable: repository_path debe ser absoluta y canonica")
+        if not _procedencia_cerrada(procedencia):
+            raise ProveedorInvalido("repositorio confiable: procedencia fuera de forma cerrada")
+        object.__setattr__(self, "repository_id", repository_id)
+        object.__setattr__(self, "repository_path", canonica)
+        object.__setattr__(self, "procedencia", procedencia)
+        object.__setattr__(self, "_sello", _SELLO_REPOSITORIO_CONFIABLE)
+
+    def __setattr__(self, *_args) -> None:
+        raise RuleAuthorityError("RepositorioConfiable es inmutable")
+
+    def __delattr__(self, _nombre: str) -> None:
+        raise RuleAuthorityError("RepositorioConfiable es inmutable (sin deleters)")
+
+    def _esta_sellado(self) -> bool:
+        return self._sello is _SELLO_REPOSITORIO_CONFIABLE
+
+    def _clave(self) -> tuple[str, Path, str]:
+        return (self.repository_id, self.repository_path, self.procedencia)
+
+    def __eq__(self, otro: object) -> bool:
+        return type(otro) is RepositorioConfiable and self._clave() == otro._clave()
+
+    def __hash__(self) -> int:
+        return hash(self._clave())
+
+
+_SELLO_REPOSITORIO_CONFIABLE = object()
+
+
+class PinActivo:
+    """Valor del lease del pin y su binding Git configurado por el proveedor."""
+
+    __slots__ = ("pin", "repositorio", "_sello")
+
+    def __init__(self, pin: object, repositorio: RepositorioConfiable) -> None:
+        if type(repositorio) is not RepositorioConfiable:
+            raise TypeError("PinActivo exige RepositorioConfiable, no una ruta o procedencia suelta")
+        object.__setattr__(self, "pin", pin)
+        object.__setattr__(self, "repositorio", repositorio)
+        object.__setattr__(self, "_sello", _SELLO_PIN_ACTIVO)
+
+    def __setattr__(self, *_args) -> None:
+        raise RuleAuthorityError("PinActivo es inmutable")
+
+    def __delattr__(self, _nombre: str) -> None:
+        raise RuleAuthorityError("PinActivo es inmutable (sin deleters)")
+
+    def _esta_sellado(self) -> bool:
+        return self._sello is _SELLO_PIN_ACTIVO
+
+
+_SELLO_PIN_ACTIVO = object()
 
 
 class EstadoStop(NamedTuple):
@@ -240,6 +313,7 @@ class VistasDeEmision(NamedTuple):
     pin: VistaLease
     clasificacion: VistaLease
     stop: VistaLease
+    ahora_utc: datetime
 
 
 @runtime_checkable
@@ -283,8 +357,12 @@ class RelojConfiable(Protocol):
 
 
 @runtime_checkable
-class AlmacenCheckpoints(Protocol):
-    """Checkpoint externo monotonico y OBLIGATORIO. CAS atomica con anterior
+class AlmacenCheckpointAuditoria(Protocol):
+    """Checkpoint externo de auditoría Rule Authority, monótono y obligatorio.
+
+    No representa el checkpoint de autoridad Block 4. El loader/replay de Block 4
+    usa su propio ``TrustedCheckpointStore`` dentro de ``checkpoint_fence``.
+    CAS atomica con anterior
     exacto; idempotente SOLO con el mismo anterior Y el mismo head;
     ``confirmar(head)`` relee y responde True solo si el log durable CONTIENE
     el head exacto (§10.15, §11). La implementacion REAL persiste y hace fsync
@@ -295,6 +373,13 @@ class AlmacenCheckpoints(Protocol):
     def publicar(self, head: str, *, anterior: str) -> None: ...
 
     def confirmar(self, head: str) -> bool: ...
+
+
+@runtime_checkable
+class AlmacenCheckpointAuditoriaBloqueable(AlmacenCheckpointAuditoria, Protocol):
+    """Checkpoint RA apto para escrituras MariaDB serializadas entre procesos."""
+
+    def locked(self) -> AbstractContextManager: ...
 
 
 # ------------------------------------------------- el guard de emision/consumo
@@ -330,12 +415,21 @@ def _abrir_lease_compartido(stack: ExitStack, nombre: str, proveedor: object, va
 def _validar_pin(valor: object) -> None:
     if type(valor) is not PinActivo:
         raise ProveedorInvalido("pin_activo: el valor del lease no es PinActivo")
+    if not valor._esta_sellado():
+        raise ProveedorInvalido("pin_activo: PinActivo sin sello confiable")
     if type(valor.pin) is not TrustedPolicyPin:
         raise ProveedorInvalido("pin_activo: el pin debe ser exactamente TrustedPolicyPin")
-    if not _procedencia_cerrada(valor.procedencia):
-        raise ProveedorInvalido("pin_activo: procedencia fuera de la forma cerrada "
+    if type(valor.repositorio) is not RepositorioConfiable or not valor.repositorio._esta_sellado():
+        raise ProveedorInvalido("pin_activo: el binding debe ser RepositorioConfiable sellado")
+    if not _procedencia_cerrada(valor.pin.procedencia):
+        raise ProveedorInvalido("pin_activo: procedencia del pin fuera de la forma cerrada "
                                 "(refs/heads/<rama> o refs/tags/<tag>)")
-    if valor.procedencia != valor.pin.procedencia:
+    if not _procedencia_cerrada(valor.repositorio.procedencia):
+        raise ProveedorInvalido("pin_activo: procedencia del binding fuera de la forma cerrada "
+                                "(refs/heads/<rama> o refs/tags/<tag>)")
+    if valor.repositorio.repository_id != valor.pin.repositorio:
+        raise ProveedorInvalido("pin_activo: repository_id del binding difiere del repositorio del pin")
+    if valor.repositorio.procedencia != valor.pin.procedencia:
         raise ProveedorInvalido("pin_activo: la procedencia sellada difiere de la del pin")
 
 
@@ -351,7 +445,7 @@ def _validar_clasificacion(valor: object) -> None:
         raise ProveedorInvalido("clasificacion: el lease debe entregar el CatalogoClasificacion cerrado")
 
 
-def _validar_reloj(reloj: object) -> None:
+def _validar_reloj(reloj: object) -> datetime:
     try:
         momento = reloj.ahora()                              # type: ignore[attr-defined]
     except Exception as exc:
@@ -360,30 +454,15 @@ def _validar_reloj(reloj: object) -> None:
         raise ProveedorInvalido("reloj: ahora() no entrega datetime")
     if momento.tzinfo is None or momento.utcoffset() != timedelta(0):
         raise ProveedorInvalido("reloj: la hora debe ser UTC consciente (utcoffset == 0)")
+    return momento
 
 
-def _validar_checkpoint(checkpoint: object) -> None:
-    try:
-        head = checkpoint.head_actual()                      # type: ignore[attr-defined]
-    except Exception as exc:
-        raise ProveedorInvalido(f"checkpoint: no legible: {type(exc).__name__}") from exc
-    if not isinstance(head, str) or not head:
-        raise ProveedorInvalido("checkpoint: nunca publicado — sin head anclado no hay emision (§11)")
-    try:
-        contiene = checkpoint.confirmar(head)                # type: ignore[attr-defined]
-    except Exception as exc:
-        raise ProveedorInvalido(f"checkpoint: confirmar no sirve: {type(exc).__name__}") from exc
-    if contiene is not True:
-        raise ProveedorInvalido("checkpoint: el log no contiene el head exacto (§11)")
-
-
-def _exigir_proveedores(*, pin: object, checkpoint: object, stop: object,
-                        reloj: object, clasificacion: object) -> None:
-    """Valida la forma de las dependencias antes de tomar cualquier lease."""
+def _exigir_proveedores_de_vistas(*, pin: object, stop: object, reloj: object,
+                                  clasificacion: object) -> None:
+    """Valida las dependencias de las vistas antes de tomar cualquier lease."""
     esperados = (("pin_activo", pin, ProveedorPinActivo),
                  ("clasificacion", clasificacion, ProveedorClasificacion),
                  ("stop", stop, ProveedorStop),
-                 ("checkpoint", checkpoint, AlmacenCheckpoints),
                  ("reloj", reloj, RelojConfiable))
     for nombre, proveedor, protocolo in esperados:
         if proveedor is None:
@@ -392,9 +471,22 @@ def _exigir_proveedores(*, pin: object, checkpoint: object, stop: object,
             raise ProveedorInvalido(f"{nombre}: no implementa {protocolo.__name__}")
 
 
+def _exigir_checkpoint_estructural(checkpoint: object) -> None:
+    """Comprueba solo la interfaz; su estado se verifica bajo su flock.
+
+    ``head_actual`` y ``confirmar`` son lecturas de frontera transaccional. El
+    preflight nunca las adelanta, porque entre esa lectura y la escritura otro
+    proceso puede publicar un head distinto.
+    """
+    if checkpoint is None:
+        raise ProveedorInvalido("falta el proveedor checkpoint Rule Authority")
+    if not isinstance(checkpoint, AlmacenCheckpointAuditoria):
+        raise ProveedorInvalido("checkpoint Rule Authority: no implementa AlmacenCheckpointAuditoria")
+
+
 @contextmanager
-def leases_de_emision(*, pin: object, checkpoint: object, stop: object,
-                      reloj: object, clasificacion: object):
+def leases_de_emision(*, pin: object, stop: object, reloj: object,
+                      clasificacion: object):
     """Adquiere el borde compartido ``pin -> clasificacion -> STOP``.
 
     La evaluacion y el consumo deben mantener este contexto hasta que su
@@ -402,43 +494,48 @@ def leases_de_emision(*, pin: object, checkpoint: object, stop: object,
     orden coincide con ``ORDEN_ADQUISICION``; ``ExitStack`` libera al reves al
     salir, incluso si falla una validacion o el commit del llamador.
     """
-    _exigir_proveedores(pin=pin, checkpoint=checkpoint, stop=stop, reloj=reloj,
-                         clasificacion=clasificacion)
+    _exigir_proveedores_de_vistas(pin=pin, stop=stop, reloj=reloj,
+                                  clasificacion=clasificacion)
     with ExitStack() as stack:
         vista_pin = _abrir_lease_compartido(stack, "pin_activo", pin, _validar_pin)
         vista_clasificacion = _abrir_lease_compartido(
             stack, "clasificacion", clasificacion, _validar_clasificacion)
         vista_stop = _abrir_lease_compartido(stack, "stop", stop, _validar_stop)
-        _validar_reloj(reloj)
-        _validar_checkpoint(checkpoint)
-        yield VistasDeEmision(vista_pin, vista_clasificacion, vista_stop)
+        momento = _validar_reloj(reloj)
+        yield VistasDeEmision(vista_pin, vista_clasificacion, vista_stop, momento)
 
 
-def exigir_contrato_de_emision(*, pin: object, checkpoint: object, stop: object,
+def exigir_contrato_de_emision(*, pin: object, rule_audit_checkpoint: object, stop: object,
                                reloj: object, clasificacion: object) -> None:
     """Verifica que las dependencias pueden abrir la frontera de emision.
 
     - todos los proveedores presentes y ``isinstance`` de SU Protocolo;
     - el valor de cada lease se valida POR TIPO y DENTRO de una frontera comun;
       un Mock, un None o un STOP ilegible se niegan aqui;
-    - pin: ``type(pin) is TrustedPolicyPin``, procedencia de forma cerrada e
-      igual a la del pin; reloj UTC consciente; clasificacion como mapa cerrado
-      donde toda capability ausente niega; checkpoint publicado y confirmado.
+    - pin: ``type(pin) is TrustedPolicyPin`` y ``RepositorioConfiable`` sellado,
+      con ID, ruta canonica absoluta y procedencia igual a la del pin; reloj UTC
+      consciente; clasificacion como mapa cerrado donde toda capability ausente
+      niega; checkpoint Rule Authority con interfaz estructural valida.
 
-    Es una comprobacion de arranque compatible con los callers existentes. El
-    camino que evalua o consume una solicitud debe usar ``leases_de_emision``
-    para no soltar las vistas antes de persistir su resultado.
+    Es una comprobacion de arranque compatible con los callers existentes. No
+    lee ni confirma el checkpoint: evaluacion/consumo lo verifican bajo su
+    flock en la frontera que persiste. El camino que evalua o consume una
+    solicitud usa ``leases_de_emision`` para no soltar las vistas antes de
+    persistir su resultado.
     """
-    with leases_de_emision(pin=pin, checkpoint=checkpoint, stop=stop, reloj=reloj,
+    _exigir_checkpoint_estructural(rule_audit_checkpoint)
+    with leases_de_emision(pin=pin, stop=stop, reloj=reloj,
                            clasificacion=clasificacion):
         pass
 
 
 __all__ = [
     "ORDEN_ADQUISICION", "VersionMonotonica", "ClaseCapability",
-    "FormaLimites", "ContratoCapability", "PinActivo", "EstadoStop", "CatalogoClasificacion",
+    "FormaLimites", "ContratoCapability", "RepositorioConfiable", "PinActivo", "EstadoStop", "CatalogoClasificacion",
     "VistaLease", "VistasDeEmision", "ProveedorPinActivo", "ProveedorStop", "RelojConfiable",
-    "ProveedorClasificacion", "AlmacenCheckpoints", "leases_de_emision", "exigir_contrato_de_emision",
+    "ProveedorClasificacion", "AlmacenCheckpointAuditoria",
+    "AlmacenCheckpointAuditoriaBloqueable",
+    "leases_de_emision", "exigir_contrato_de_emision",
     "ClasificacionDesconocida", "ProveedorInvalido", "RelojInvalido", "RuleAuthorityError",
     "StopDesconocido",
 ]

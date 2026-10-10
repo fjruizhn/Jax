@@ -118,21 +118,76 @@ def test_el_rele_con_un_archivo_de_token_ilegible_falla_sin_ensuciar_stdout(tmp_
     assert r.returncode == 2 and r.stdout == b"" and b"token" in r.stderr
 
 
-def test_el_rele_con_half_close_deja_llegar_la_respuesta_antes_de_salir(montaje):
-    """El cliente cierra su stdin tras enviar el pedido: el rele cierra solo el lado de escritura del socket
-    (write_eof) y sigue copiando hasta que el Puerto responde y cierra."""
-    cfg, cfgp, ej = montaje
-
+def test_el_rele_con_half_close_deja_llegar_la_respuesta_antes_de_salir(tmp_path):
+    """El relay conserva una respuesta MCP ya en vuelo tras EOF del cliente."""
     async def caso():
-        async with servidor(cfgp, ej, cargar_paquete(cfg), Bitacora(emisores=[])) as srv:
+        ruta_socket = tmp_path / "relay.sock"
+        ruta_token = tmp_path / "relay.token"
+        ruta_token.write_text("test-token\n")
+        ping_recibido = asyncio.Event()
+        eof_recibido = asyncio.Event()
+        responder_ping = asyncio.Event()
+
+        async def atender(lector, escritor):
+            try:
+                assert await lector.readline() == b"FARO-TOKEN test-token\n"
+                inicializacion = json.loads(await lector.readline())
+                assert inicializacion["method"] == "initialize"
+                escritor.write((json.dumps({
+                    "jsonrpc": "2.0", "id": inicializacion["id"],
+                    "result": {
+                        "protocolVersion": "2025-11-25", "capabilities": {},
+                        "serverInfo": {"name": "half-close-test", "version": "1"},
+                    },
+                }) + "\n").encode())
+                await escritor.drain()
+                notificacion = json.loads(await lector.readline())
+                assert notificacion["method"] == "notifications/initialized"
+                ping = json.loads(await lector.readline())
+                assert ping["method"] == "ping" and ping["id"] == 8
+                ping_recibido.set()
+                assert await asyncio.wait_for(lector.read(), 20) == b""
+                eof_recibido.set()
+                await asyncio.wait_for(responder_ping.wait(), 20)
+                escritor.write((json.dumps({"jsonrpc": "2.0", "id": 8, "result": {}}) + "\n").encode())
+                await escritor.drain()
+            finally:
+                escritor.close()
+                await escritor.wait_closed()
+
+        servidor_falso = await asyncio.start_unix_server(atender, path=str(ruta_socket))
+        try:
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "jax.faro.relay", "--socket", str(srv.ruta_socket), "--token-file", str(srv.ruta_token),
+                sys.executable, "-m", "jax.faro.relay", "--socket", str(ruta_socket), "--token-file", str(ruta_token),
                 cwd=str(RAIZ), env={**os.environ, "PYTHONPATH": str(RAIZ)},
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
-            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 7, "method": "ping"}).encode() + b"\n")
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            proc.stdin.write((json.dumps({
+                "jsonrpc": "2.0", "id": 7, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25", "capabilities": {},
+                    "clientInfo": {"name": "half-close-test", "version": "1"},
+                },
+            }) + "\n").encode())
             await proc.stdin.drain()
+            inicializacion = json.loads(await asyncio.wait_for(proc.stdout.readline(), 20))
+            assert inicializacion["id"] == 7 and "result" in inicializacion and "error" not in inicializacion
+            proc.stdin.write((json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n").encode())
+            proc.stdin.write((json.dumps({"jsonrpc": "2.0", "id": 8, "method": "ping"}) + "\n").encode())
+            await proc.stdin.drain()
+            await asyncio.wait_for(ping_recibido.wait(), 20)
             proc.stdin.close()
+            await asyncio.wait_for(eof_recibido.wait(), 20)
+            assert proc.returncode is None, "el rele salió antes de que el Puerto respondiera al ping en vuelo"
+            responder_ping.set()
             salida = await asyncio.wait_for(proc.stdout.read(), 20)
-            assert json.loads(salida.splitlines()[0])["id"] == 7
-            assert await asyncio.wait_for(proc.wait(), 20) == 0
+            codigo = await asyncio.wait_for(proc.wait(), 20)
+            error = await proc.stderr.read()
+            assert codigo == 0, f"el rele terminó con codigo={codigo}; stderr={error.decode(errors='replace')!r}"
+            respuestas = [json.loads(line) for line in salida.splitlines()]
+            assert any(r.get("id") == 8 and "result" in r and "error" not in r for r in respuestas), (
+                f"el rele no devolvió respuesta exitosa al ping; stdout={salida!r}; stderr={error.decode(errors='replace')!r}"
+            )
+        finally:
+            servidor_falso.close()
+            await servidor_falso.wait_closed()
     asyncio.run(caso())

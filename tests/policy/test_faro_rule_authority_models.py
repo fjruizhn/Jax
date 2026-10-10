@@ -26,9 +26,11 @@ from policy.rule_authority.models import (
     RuleDecisionStatus,
     RuleEvaluation,
     RuleEvaluationRequest,
+    RuleEvaluationOutcome,
     RuleLimits,
     limites_de,
 )
+from policy.rule_authority.schema import RuleSchemaError
 from policy.rule_authority.schema import (
     MAX_CANTIDAD,
     Cantidad,
@@ -43,7 +45,6 @@ from policy.rule_authority.providers import leases_de_emision
 from policy.rule_authority.snapshot import TrustedPolicyPin
 from tests.policy.catalogo_pin import catalogo_del_pin
 from tests.policy.proveedores_dobles import (
-    CheckpointsEnMemoria,
     ClasificacionFija,
     PinFijo,
     RelojDeterminista,
@@ -161,6 +162,13 @@ def test_request_hash_is_derived_from_closed_canonical_projection():
     with pytest.raises(AuthorityEventValidationError):
         request(request_hash="sha256:" + "0" * 64)
     assert request(arguments={"nested": {}}).request_hash != request(arguments={"nested": []}).request_hash
+
+
+def test_evaluation_outcome_liga_permit_solo_a_decision_permit():
+    denied = decision()
+    with pytest.raises(AuthorityEventValidationError, match="negativa requiere permit=None"):
+        RuleEvaluationOutcome(denied, object())
+    assert RuleEvaluationOutcome(denied, None).permit is None
 
 
 def test_request_hash_includes_the_catalog_identity():
@@ -370,10 +378,23 @@ def test_limits_require_exact_sealed_catalog_type(catalogo):
         limites_de(_regla_obligating(), catalogo)
 
 
-def test_empty_limits_are_rejected():
+def test_empty_limits_are_preserved_for_a_validated_reversible_rule():
     vacia = validar_regla(_datos("regla-ejemplo.yaml"), catalogo=CATALOG)
-    with pytest.raises(AuthorityEventValidationError, match="vacío"):
-        limites_de(vacia, CATALOG)
+    limites = limites_de(vacia, CATALOG)
+
+    assert limites.limites.quantity is None
+    assert limites.limites.amount is None
+    assert limites.limites.frequency is None
+    assert limites.tope is None
+
+
+def test_reversible_rule_rejects_quantity_and_amount_together():
+    datos = _datos("regla-ejemplo.yaml")
+    datos["obligation_limits"]["quantity"] = {"unit": "mensajes", "max": 1}
+    datos["obligation_limits"]["amount"] = {"currency": "USD", "max": 1}
+
+    with pytest.raises(RuleSchemaError, match="simultáneamente"):
+        validar_regla(datos, catalogo=CATALOG)
 
 
 @pytest.mark.parametrize("unidad", ["llamadas", "recipients", "Mensajes", "mensajes​", *FORBIDDEN])
@@ -667,8 +688,6 @@ def test_store_record_keeps_the_stop_lease_until_the_decision_is_persisted():
             assert not self.entered.is_set(), "STOP se libero antes de persistir la decision"
             return super().record(submitted, recorded)
 
-    checkpoint = CheckpointsEnMemoria()
-    checkpoint.publicar("h1", anterior="")
     pin = TrustedPolicyPin("jax", "0" * 40, "1" * 40, "refs/heads/main")
     stop = StopFijo(activo=False, huella="sha256:stop")
     submitted = request()
@@ -677,7 +696,6 @@ def test_store_record_keeps_the_stop_lease_until_the_decision_is_persisted():
 
     with leases_de_emision(
         pin=PinFijo(pin, "refs/heads/main"),
-        checkpoint=checkpoint,
         stop=stop,
         reloj=RelojDeterminista(NOW),
         clasificacion=ClasificacionFija({}),
