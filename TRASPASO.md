@@ -20,6 +20,7 @@ Actualizar el registro histórico de coordinación del grant de retiro F1.1 con 
 ## Decisiones
 - Mantener #388 en su worktree de owner.
 - No generar ni sustituir la raíz confiable ausente; producción queda bloqueada hasta que exista fuente autorizada y ledger verificado.
+- Secuencia: cerrar #397; rebasar/publicar #390 sobre tip oficial, merge+guard; rebasar #387 sobre merge real #390, merge+guard; coordinar #388 con su owner; recuperar/verificar autoridad antes de producción.
 
 ## Siguiente comando
 `git -C /home/fruiz/worktrees/jax-faro-grant-handoff-refresh diff --check && git -C /home/fruiz/worktrees/jax-faro-grant-handoff-refresh diff -- docs/historia/2026-10-10-faro-floor-retirement-grant.md`

@@ -28,10 +28,12 @@ La siguiente verificación exacta debe actualizar este registro si los PR o el t
 - #388 sigue bajo el owner de su sesión; su rama y worktree están fuera de alcance.
 - Estado reportado en la primera versión del traspaso: `/etc/jax/authority/trusted-root.json` no existía en el host y dos repositorios Restic no mostraron esa ruta. No se preservó evidencia reproducible de los backups; la parte Restic queda **no verificada** y fue corregida en la actualización fechada al inicio de este documento. No crear ni sustituir una raíz.
 
-## Secuencia de cierre
+## Secuencia de cierre registrada
 
-1. Rebasar este branch sobre `master@834170c5b7443eb16e1713378ef69103595dfec2`; comprobar que solo modifica el registro de grants y recalcular simulación/hash sobre ese árbol exacto.
-3. Archivar este handoff en `docs/historia` mediante un PR separado, integrarlo con auditoría/CI/guard y quitar `TRASPASO.md` de este branch; el merge del grant debe cambiar solo el registro.
-4. Auditar Tier 3 el SHA exacto del grant; publicar/actualizar PR #390, CI verde, preflight exacto, merge dedicado y post-merge-guard.
-5. Rebasar #387 sobre el merge real #390. Reauditar SHA exacto, CI verde, preflight, merge con ventana de Fernando abierta y guard.
-6. No declarar producción lista mientras falte la raíz confiable. No tocar #388 ni fases con otro owner.
+1. Cerrar #397 con SHA limpio de `TRASPASO.md`, Tier 3, CI, verify-integration, merge y post-merge-guard.
+2. Rebasar #390 una sola vez sobre el tip oficial post-#397, quitar su `TRASPASO.md` y conservar únicamente el cambio del registry. Recalcular `expected_diff_sha256` por simulación sobre el árbol exacto; después auditoría, CI, preflight, merge dedicado y guard.
+3. Rebasar #387 sobre el merge real de #390. Revisar el revert completo y la huella de piso; reauditar, repetir CI, preflight, merge con ventana abierta y post-merge-guard.
+4. Coordinar el siguiente rebase de #388 con su owner; conservar el hardening y las regresiones de #392, combinar Step 6/7, re-medidir el piso y auditar/validar el SHA final.
+5. No desplegar mientras falten root/receipt/checkpoint válidos o no se pueda verificar el ledger. No sintetizar anclas; reanudar con la recuperación aprobada y el runbook `docs/runbooks/authority-root-recovery.md`.
+
+Esta secuencia es un traspaso histórico, no prueba del estado actual. Cada paso parte del tip oficial y de la evidencia exacta vigente.
