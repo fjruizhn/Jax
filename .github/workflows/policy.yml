@@ -2674,7 +2674,8 @@ jobs:
         # comprueban iguales en tests.
         # #373 agrega providers y cierres de clasificación/pin. Tras combinarlo
         # con #379 la lista mide 816; #371 agrega los modelos en memoria (+152),
-        # por lo que el piso combinado medido es 968 passed, cero skipped.
+        # por lo que el piso combinado medido es 1003 passed, cero skipped
+        # (#381 agrega checkpoint/overlay y cierra el writer caller-intent).
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
@@ -2780,7 +2781,7 @@ jobs:
           JAX_AUTHORITY_LEDGER_DOCKER_CMD: docker
         run: |
           set -o pipefail
-          # Piso 9: cinco casos de integración + cuatro regresiones de detección/retry del arranque.
+          # Piso 10 (2026-10-09): la regresión de overlay sin ratificación eleva en uno la suite MariaDB.
           python -m pytest -q tests/policy/test_authority_ledger_storage_mariadb.py tests/policy/test_authority_ledger_append_validation_mariadb.py 2>&1 | tee /tmp/authority-ledger-mariadb
           python3 .github/ci/piso.py verificar authority-ledger-mariadb/integration /tmp/authority-ledger-mariadb || exit $?
       - name: Block 4 rule ratification events -- piso exacto

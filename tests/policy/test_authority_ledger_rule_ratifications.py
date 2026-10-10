@@ -7,8 +7,9 @@ from policy.authority_ledger.models import (
     AuthorityEvent, AuthorityEventIntent, AuthorityEventType, AuthorityLedgerGenesis,
     RuleRatificationGrantPayload,
 )
-from policy.authority_ledger.replay import event_hash, event_unsigned_bytes, genesis_hash, verify_authority_ledger
-from policy.authority_ledger.service import append_authority_event
+from policy.authority_ledger.replay import event_hash, event_unsigned_bytes, genesis_hash
+from tests.policy.test_authority_ledger_events import verify_authority_ledger
+from tests.policy.test_authority_ledger_events import append_authority_event
 from policy.authority_ledger.serialization import intent_from_projection, intent_projection
 from policy.authority_ledger.signatures import (
     encode_public_key, public_key_bytes, public_key_fingerprint,

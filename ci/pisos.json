@@ -134,8 +134,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 19 tests CORRIDOS del codec de persistencia de Block 4. Medido el 2026-10-07 en hall9000."
     },
     "authority-ledger-mariadb/integration": {
-      "patron": "^9 passed in ",
-      "mensaje": "PISO ROTO: se esperaban 9 tests CORRIDOS de la suite MariaDB aislada del ledger (5 de storage/append + 4 de detección/reintento del servidor final)."
+      "patron": "^10 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 10 tests CORRIDOS de la suite MariaDB aislada del ledger (incluye la regresión del overlay sin ratificación). Medido el 2026-10-09."
     },
     "authority-rule-events/ratifications": {
       "patron": "^12 passed in ",
@@ -214,8 +214,8 @@
       "mensaje": "PISO ROTO: se esperaban 18 tests CORRIDOS de los ataques al sello del loader de Block 3 (replace, construccion directa, congelado, subclases, método sombreado, binding por campo de las 6 entradas, proyección canónica sombreada y política de copia/pickle). 14 -> 16 el 2026-10-07; 16 -> 17 el 2026-10-08 por cierre de sombreado de _contenido_canonico; 17 -> 18 por cierre de copy/deepcopy/pickle."
     },
     "identity-foundation-shadow/policy": {
-      "patron": "^968 passed in ",
-      "mensaje": "PISO ROTO: se esperaban exactamente 968 tests CORRIDOS y 0 skipped de Identity Foundation Shadow (incluye providers, modelos F1.1, sellos del loader y ratificación)."
+      "patron": "^1003 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 1003 tests CORRIDOS y 0 skipped de Identity Foundation Shadow (incluye providers, modelos F1.1, sellos del loader, ratificación y checkpoint)."
     }
   },
   "minimos": {

@@ -26,9 +26,11 @@ from policy.authority_ledger.models import (
     OverlayPayload, OverlayScope, OverlayType, RuleRatificationGrantPayload,
 )
 from policy.authority_ledger.replay import event_hash, genesis_hash, verify_authority_ledger
-from policy.authority_ledger.service import (append_authority_event,
-                                             append_ratification_from_candidate,
+from tests.policy.test_authority_ledger_events import append_authority_event
+from policy.authority_ledger.service import (append_ratification_from_candidate,
+                                             initialize_authority_ledger,
                                              ratification_intent_from_candidate)
+from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
 from policy.authority_ledger.signatures import encode_public_key, public_key_bytes, public_key_fingerprint
 from policy.authority_ledger.storage import MariaDBAuthorityLedgerStore
 from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
@@ -323,6 +325,13 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                 db.commit()
 
             store = MariaDBAuthorityLedgerStore(app_connect)
+            checkpoint_directory = tempfile.TemporaryDirectory(prefix="jax-ledger-checkpoint-")
+            checkpoint_store = TrustedCheckpointStore(
+                Path(checkpoint_directory.name) / "checkpoints.log",
+                bootstrap_receipt_path=Path(checkpoint_directory.name) / "bootstrap-receipt.json",
+            )
+            initialize_authority_ledger(store, genesis, root, checkpoint_store)
+            store._checkpoint_store = checkpoint_store
             with pytest.raises(pymysql.err.OperationalError):
                 with app_connect() as app:
                     with app.cursor() as cursor:
@@ -342,12 +351,15 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                 "sha256:" + "b" * 64, "c" * 40, "d" * 40,
                 "sha256:" + "e" * 64, now, None,
             )
+            # El overlay se emite ANTES de revocar la ratificación: desde el
+            # hallazgo del auditor de #377, OVERLAY_ISSUED exige ratificación
+            # vigente del corpus objetivo en ese punto del stream.
             intents = (
                 AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", ratification_event_id=corpus_event_id),
-                AuthorityEventIntent(AuthorityEventType.RATIFICATION_REVOKED, "human:fernando", ratification_event_id=corpus_event_id),
-                AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
                 AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=overlay),
                 AuthorityEventIntent(AuthorityEventType.OVERLAY_REVOKED, "human:fernando", overlay_id="test-exception"),
+                AuthorityEventIntent(AuthorityEventType.RATIFICATION_REVOKED, "human:fernando", ratification_event_id=corpus_event_id),
+                AuthorityEventIntent(AuthorityEventType.ACTIVATION_DEACTIVATED, "human:fernando"),
                 rule_grant_intent(grant),
                 AuthorityEventIntent(
                     AuthorityEventType.RULE_RATIFICATION_REVOKED, "human:fernando",
@@ -358,6 +370,7 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                 store, root, key, candidate,
                 event_id=corpus_event_id,
                 recorded_at_utc=now,
+                checkpoint_store=checkpoint_store,
             )
             events = (first,) + tuple(
                 append_authority_event(
@@ -368,7 +381,9 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
                 for index, intent in enumerate(intents, 2)
             )
             restored = store.events()
-            state = verify_authority_ledger(store.get_genesis(), restored, root)
+            state = verify_authority_ledger(
+                store.get_genesis(), restored, root, checkpoint_store
+            )
 
             assert len(restored) == 8
             assert restored == events

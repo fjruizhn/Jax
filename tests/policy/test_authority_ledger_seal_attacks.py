@@ -14,7 +14,7 @@ from policy.authority_ledger.canonical import plain
 from policy.authority_ledger.errors import AuthorityStateError
 from policy.authority_ledger.models import (AuthorityEventIntent, AuthorityEventType,
                                             RuleRatificationGrantPayload)
-from policy.authority_ledger.service import append_authority_event
+from tests.policy.test_authority_ledger_events import append_authority_event
 from tests.policy.test_authority_ledger_events import ratification_intent, setup_ledger
 from tests.policy._sellos_de_prueba import rule_grant_intent
 from tests.policy.test_authority_ledger_rule_ratifications import sample_grant

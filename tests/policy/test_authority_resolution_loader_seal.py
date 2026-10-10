@@ -36,7 +36,8 @@ def test_replace_no_transporta_el_sello_ni_el_binding():
     with pytest.raises(ResolverContractError):
         to_static_policy_view(forged)
     with pytest.raises(AuthorityStateError):
-        append_ratification_from_candidate(None, None, None, forged)
+        append_ratification_from_candidate(None, None, None, forged,
+                                           checkpoint_store=None)
 
 
 def test_replace_con_contenido_alterado_tampoco_valida():
@@ -67,7 +68,8 @@ def test_construccion_directa_no_es_corpus_valido():
     with pytest.raises(ResolverContractError):
         to_static_policy_view(unsealed)
     with pytest.raises(AuthorityStateError):
-        append_ratification_from_candidate(None, None, None, unsealed)
+        append_ratification_from_candidate(None, None, None, unsealed,
+                                           checkpoint_store=None)
 
 
 def _documento_sintetico():
@@ -128,7 +130,8 @@ def test_el_consumidor_recalcula_el_digest_del_contenido():
     with pytest.raises(ResolverContractError):
         to_static_policy_view(corpus)
     with pytest.raises(AuthorityStateError):
-        append_ratification_from_candidate(None, None, None, corpus)
+        append_ratification_from_candidate(None, None, None, corpus,
+                                           checkpoint_store=None)
 
 
 def test_el_loader_sella_y_liga_hash_y_contenido_del_corpus_real():
@@ -166,7 +169,8 @@ def _expect_deny(corpus):
     with pytest.raises(ResolverContractError):
         to_static_policy_view(corpus)
     with pytest.raises(AuthorityStateError):
-        append_ratification_from_candidate(None, None, None, corpus)
+        append_ratification_from_candidate(None, None, None, corpus,
+                                           checkpoint_store=None)
 
 
 def test_subclasear_el_corpus_falla_en_la_definicion():

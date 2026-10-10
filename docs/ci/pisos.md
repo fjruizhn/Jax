@@ -4613,7 +4613,7 @@ denormalizadas (incluido `previous_event_hash`), lectura histórica exacta y per
 
 ## `authority-ledger-mariadb/integration`
 
-Piso vigente (2026-10-08): `^9 passed in `. La base #377 tenía 5 pruebas en MariaDB 12.3.3 efímera
+Piso vigente (2026-10-09): `^10 passed in `. La base #377 tenía 5 pruebas en MariaDB 12.3.3 efímera
 `--network none`; la prueba aplica ambas migraciones, valida el upgrade nullable→NOT NULL,
 provisiona la cuenta de aplicación con el script versionado, genera una llave Ed25519 de prueba
 y valida firma → INSERT → lectura → reconstrucción → hash/firma y replay. También prueba que
@@ -4627,7 +4627,14 @@ reintento acotado de fallos transitorios y aseguran que `1045 Access denied` no 
 El fallo de CI confirmó que MariaDB 12.3.3 anuncia el servidor de inicialización como `port: 0`
 y el servidor final como `port: 3306`; el detector ahora espera el segundo (o el marcador explícito
 `init process done`) antes de autenticar y consultar `SELECT 1`. Una regresión unitaria cubre ambos
-formatos. La CI debe confirmar el total de 9 en Python 3.14.
+formatos. La medición real con Docker del 2026-10-09 confirmó 10 en Python 3.14.
+
+checkpoint-overlay (2026-10-07, auditor de #377): 5 -> 6 (+1: overlay a corpus no ratificado se
+rechaza antes de escribir — cero filas; la tanda de 8 eventos se reordenó para emitir el overlay
+antes de revocar la ratificación). Medido con la MariaDB efímera 12.3.3 (`--network none`).
+
+9 -> 10 el 2026-10-09: la regresión MariaDB del overlay sin ratificación quedó incluida en el
+comando exacto del workflow. Medición real con Docker: `10 passed`.
 
 ## `authority-rule-events/ratifications`
 
@@ -4690,7 +4697,7 @@ Mutantes que lo justifican: «isinstance», «método enlazado», «sin `__init_
 cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también en el paso grande.
 ## `identity-foundation-shadow/policy`
 
-Patrón vigente (2026-10-09, #371 sobre #373 y #379): `^968 passed in `
+Patrón vigente (2026-10-09, #381 sobre master@8c850bce): `^1003 passed in `
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla
@@ -4730,6 +4737,7 @@ anterior a #379 y no se suman a este piso.
 
 El reapilado final de #373 incorpora sus providers y regresiones de pin/clasificación a la
 lista que ya incluye los cierres de #379: `677 -> 816` (`139` pruebas netas). #371 añade
-152 pruebas de modelos/store, y el árbol apilado mide `968 passed`, cero skipped. Medición
-exacta del comando del workflow en Python 3.14.4. Las dos listas del workflow incluyen los
-archivos de providers y modelos, y se verifican idénticas.
+152 pruebas de modelos/store, y ese árbol apilado midió `968 passed`, cero skipped. #381
+añade pruebas de checkpoint/overlay y la regresión del writer caller-intent; la lista exacta
+del workflow se re-midió en Python 3.14.4: `1003 passed`, cero skipped. Las dos listas del
+workflow incluyen los archivos de providers y modelos, y se verifican idénticas.

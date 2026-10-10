@@ -1,10 +1,10 @@
+from tests.policy.test_authority_ledger_events import verify_authority_ledger
 from datetime import timezone
 
 import pytest
 
 from policy.authority_ledger.models import AuthorityEventIntent, AuthorityEventType
-from policy.authority_ledger.replay import verify_authority_ledger
-from policy.authority_ledger.service import append_authority_event
+from tests.policy.test_authority_ledger_events import append_authority_event
 from policy.decision_record.authority_binding import evaluate_decision_input
 from policy.decision_record.errors import UnverifiedAuthorityEvaluationError
 from policy.decision_record.errors import DecisionRecordIntegrityError

@@ -15,7 +15,7 @@ from .models import (AuthorityEvent, AuthorityEventType, AuthorityLedgerCheckpoi
                      OverlayPayload, OverlayType)
 from .signatures import decode_public_key, public_key_bytes, public_key_fingerprint, verify
 from .trusted_root import TrustedAuthorityRoot
-from .trusted_checkpoint import TrustedCheckpointStore
+from .trusted_checkpoint import TrustedCheckpointStore, require_trusted_checkpoint_store
 from .errors import LedgerRollbackError, UnanchoredLedgerHeadError
 
 
@@ -43,6 +43,7 @@ class ReconstructedAuthorityState:
     _latest_rule_ratifications: Mapping[str, AuthorityEvent] = field(default_factory=dict, repr=False)
     _revoked_rule_ratifications: frozenset[str] = field(default_factory=frozenset, repr=False)
     _verified_seal: object | None = None
+    quarantined_overlays: frozenset[str] = field(default_factory=frozenset)
 
     @property
     def active_policy_corpus_hash(self) -> str | None:
@@ -63,11 +64,63 @@ class ReconstructedAuthorityState:
         return event
 
 
+@dataclass(frozen=True)
+class HistoricalAuthorityState:
+    """Verified replay of a prefix; structurally distinct from current authority."""
+    ratifications: Mapping[str, AuthorityEvent]
+    revoked_ratifications: frozenset[str]
+    active_ratification_event_id: str | None
+    overlays: Mapping[str, OverlayPayload]
+    revoked_overlays: frozenset[str]
+    checkpoint: AuthorityLedgerCheckpoint
+    _rule_ratification_grants: Mapping[str, AuthorityEvent] = field(default_factory=dict, repr=False)
+    _latest_rule_ratifications: Mapping[str, AuthorityEvent] = field(default_factory=dict, repr=False)
+    _revoked_rule_ratifications: frozenset[str] = field(default_factory=frozenset, repr=False)
+    quarantined_overlays: frozenset[str] = field(default_factory=frozenset)
+    _history_seal: object | None = field(default=None, repr=False)
+
+    @property
+    def active_policy_corpus_hash(self) -> str | None:
+        if self.active_ratification_event_id is None:
+            return None
+        return self.ratifications[self.active_ratification_event_id].intent.policy_corpus_hash
+
+    def _is_verified_history(self) -> bool:
+        return self._history_seal is _HISTORY_SEAL
+
+
+_HISTORY_SEAL = object()
+
+
 _REPLAY_SEAL = object()
 
 
-def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[AuthorityEvent], trusted_root: TrustedAuthorityRoot, checkpoint_store: TrustedCheckpointStore | None = None) -> ReconstructedAuthorityState:
-    """Verify external genesis anchor before replaying a single ledger event."""
+def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[AuthorityEvent], trusted_root: TrustedAuthorityRoot, checkpoint_store: TrustedCheckpointStore) -> ReconstructedAuthorityState:
+    """Verify current authority against its mandatory external checkpoint."""
+    checkpoint_store = require_trusted_checkpoint_store(checkpoint_store)
+    # Authenticate the requested identity first so an invalid root cannot be
+    # masked by an unavailable local checkpoint artifact.
+    if trusted_root.ledger_identity != genesis.ledger_identity or trusted_root.genesis_hash != genesis_hash(genesis):
+        raise TrustedRootMismatchError("genesis no coincide con trusted root")
+    public = decode_public_key(genesis.constitutional_public_key)
+    if (trusted_root.constitutional_key_id != genesis.constitutional_key_id
+            or trusted_root.constitutional_public_key_fingerprint != public_key_fingerprint(public_key_bytes(public))):
+        raise TrustedRootMismatchError("clave constitucional no coincide con trusted root")
+    # Readers share the writer lock so a visible-but-not-durable os.replace,
+    # bootstrap receipt, or append cannot be promoted to current authority.
+    # The lock is reentrant for the writer's own pre/post-append verification.
+    with checkpoint_store.locked():
+        checkpoint_store.sync_for_verification()
+        return _replay_authority_ledger(genesis, events, trusted_root, checkpoint_store, historical=False)
+
+
+def replay_authority_history(genesis: AuthorityLedgerGenesis, events: Iterable[AuthorityEvent], trusted_root: TrustedAuthorityRoot) -> HistoricalAuthorityState:
+    """Verify historical signed history for diagnosis; never returns current authority."""
+    return _replay_authority_ledger(genesis, events, trusted_root, None, historical=True)
+
+
+def _replay_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[AuthorityEvent], trusted_root: TrustedAuthorityRoot, checkpoint_store: TrustedCheckpointStore | None, *, historical: bool):
+    """Verify the external genesis and replay an explicitly current or historical view."""
     if trusted_root.ledger_identity != genesis.ledger_identity or trusted_root.genesis_hash != genesis_hash(genesis):
         raise TrustedRootMismatchError("genesis no coincide con trusted root")
     public = decode_public_key(genesis.constitutional_public_key)
@@ -80,6 +133,7 @@ def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[Au
     revoked_ratifications: set[str] = set()
     overlays: dict[str, OverlayPayload] = {}
     revoked_overlays: set[str] = set()
+    quarantined_overlays: set[str] = set()
     rule_grants_by_event_id: dict[str, AuthorityEvent] = {}
     latest_rule_ratifications: dict[str, AuthorityEvent] = {}
     revoked_rule_ratifications: set[str] = set()
@@ -117,6 +171,14 @@ def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[Au
             assert intent.overlay is not None
             if intent.overlay.overlay_id in overlays:
                 raise AuthorityStateError("overlay_id duplicado")
+            # Historical append-only streams may contain an overlay issued
+            # before its target corpus had a live ratification.  Preserve its
+            # signed history and allow a later revoke, but quarantine it
+            # permanently: later ratification never makes it effective.
+            if not any(event.intent.policy_corpus_hash == intent.overlay.policy_corpus_hash
+                       for event_id, event in ratifications.items()
+                       if event_id not in revoked_ratifications):
+                quarantined_overlays.add(intent.overlay.overlay_id)
             overlays[intent.overlay.overlay_id] = intent.overlay
         elif intent.event_type is AuthorityEventType.OVERLAY_REVOKED:
             assert intent.overlay_id is not None
@@ -139,19 +201,58 @@ def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[Au
         previous = event.event_hash
     checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, len(ordered), ordered[-1].event_id if ordered else None, previous)
     if checkpoint_store is not None:
-        anchored = checkpoint_store.latest()
+        anchor_rows = checkpoint_store.checkpoints()
+        if (not isinstance(anchor_rows, tuple) or not anchor_rows
+                or any(type(row) is not AuthorityLedgerCheckpoint for row in anchor_rows)):
+            raise LedgerIntegrityError("checkpoint externo no devolvió una cadena válida")
+        root_projection = {"schema_version": trusted_root.schema_version, "kind": trusted_root.kind,
+            "ledger_identity": trusted_root.ledger_identity, "genesis_hash": trusted_root.genesis_hash,
+            "constitutional_key_id": trusted_root.constitutional_key_id,
+            "constitutional_public_key_fingerprint": trusted_root.constitutional_public_key_fingerprint}
+        genesis_checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, 0, None, None)
+        receipt = {"schema_version": "1.0", "kind": "JAX_AUTHORITY_LEDGER_BOOTSTRAP_RECEIPT",
+            "ledger_identity": genesis.ledger_identity, "genesis_hash": genesis_hash(genesis),
+            "trusted_root_hash": domain_hash("JAX-TRUSTED-AUTHORITY-ROOT", "1.0", root_projection),
+            "checkpoint_hash": genesis_checkpoint.authority_ledger_checkpoint_hash}
+        checkpoint_store.validate_bootstrap_receipt(receipt)
+        # Use one external snapshot; a second latest() read could race a writer
+        # and combine different checkpoint generations in one verification.
+        for anchored_checkpoint in anchor_rows:
+            if anchored_checkpoint.sequence == 0:
+                continue
+            if anchored_checkpoint.sequence > len(ordered):
+                raise LedgerRollbackError("DB ledger truncado antes del checkpoint externo")
+            anchored_event = ordered[anchored_checkpoint.sequence - 1]
+            expected_checkpoint = AuthorityLedgerCheckpoint(
+                "1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity,
+                anchored_event.sequence, anchored_event.event_id,
+                anchored_event.event_hash,
+            )
+            if anchored_checkpoint.projection() != expected_checkpoint.projection():
+                raise LedgerRollbackError(
+                    "checkpoint externo no coincide con evento de secuencia "
+                    f"{anchored_checkpoint.sequence}"
+                )
+        anchored = anchor_rows[-1]
         if checkpoint.sequence < anchored.sequence:
             raise LedgerRollbackError("DB ledger truncado antes del checkpoint externo")
         if checkpoint.sequence > anchored.sequence:
-            raise UnanchoredLedgerHeadError("DB ledger adelante de checkpoint externo")
+            raise UnanchoredLedgerHeadError(
+                "cabeza sin checkpoint: DB ledger adelante del checkpoint externo — "
+                "reconciliar re-anclando el checkpoint al head existente "
+                "(reanchor_authority_checkpoint); el head verificado no queda "
+                "inverificable para siempre")
         if checkpoint.projection() != anchored.projection():
             raise LedgerRollbackError("head DB no coincide con checkpoint externo")
-    return ReconstructedAuthorityState(
+    common = (
         MappingProxyType(dict(ratifications)), frozenset(revoked_ratifications), active,
         MappingProxyType(dict(overlays)), frozenset(revoked_overlays), checkpoint,
         MappingProxyType(dict(rule_grants_by_event_id)), MappingProxyType(dict(latest_rule_ratifications)),
-        frozenset(revoked_rule_ratifications), _REPLAY_SEAL,
+        frozenset(revoked_rule_ratifications),
     )
+    if historical:
+        return HistoricalAuthorityState(*common, quarantined_overlays=frozenset(quarantined_overlays), _history_seal=_HISTORY_SEAL)
+    return ReconstructedAuthorityState(*common, quarantined_overlays=frozenset(quarantined_overlays), _verified_seal=_REPLAY_SEAL)
 
 
 def overlay_applicability(overlay: OverlayPayload, context, evaluation_time_utc: datetime) -> OverlayApplicability:
@@ -177,12 +278,24 @@ def effective_overlays(state: ReconstructedAuthorityState, context, evaluation_t
     """Apply the frozen pairwise matrix for one explicit evaluation."""
     if not isinstance(state, ReconstructedAuthorityState) or not state._is_verified():
         raise AuthorityStateError("effective state requiere replay verificado")
+    return _select_effective_overlays(state, context, evaluation_time_utc)
+
+
+def _effective_overlays_for_history(state: HistoricalAuthorityState, context, evaluation_time_utc: datetime) -> tuple[OverlayPayload, ...]:
+    if not isinstance(state, HistoricalAuthorityState) or not state._is_verified_history():
+        raise AuthorityStateError("historical state requiere replay histórico verificado")
+    return _select_effective_overlays(state, context, evaluation_time_utc)
+
+
+def _select_effective_overlays(state, context, evaluation_time_utc: datetime) -> tuple[OverlayPayload, ...]:
     active_hash = state.active_policy_corpus_hash
     if active_hash is None:
         return ()
     candidates: list[OverlayPayload] = []
     for overlay_id, overlay in state.overlays.items():
         if overlay_id in state.revoked_overlays:
+            continue
+        if overlay_id in state.quarantined_overlays:
             continue
         if overlay.policy_corpus_hash != active_hash:
             continue
