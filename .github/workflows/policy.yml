@@ -1249,6 +1249,26 @@ jobs:
           test "$rc" -eq 1 || {
             echo "FAIL-OPEN: sin Ollama vivo el tripwire devolvio $rc, se esperaba 1."; exit 1; }
 
+  faro-rule-authority-unit:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: "."
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pytest
+      - name: Faro Rule Authority -- store, permit y checkpoint (sin DB)
+        run: |
+          set -o pipefail
+          python -m pytest -q \
+            tests/policy/test_faro_rule_authority_store.py \
+            tests/policy/test_faro_rule_permit.py \
+            tests/policy/test_rule_authority_checkpoint.py \
+            2>&1 | tee /tmp/faro-rule-authority-unit
+          python3 .github/ci/piso.py verificar authority-rule-unit/tests /tmp/faro-rule-authority-unit || exit $?
+
   governance:
     # policy/governance/ (SP1 de REFORMAS Fase 2, 2026-08-18) tenia 38 tests
     # que NO corrian en ningun job hasta el 2026-09-02. Uno estaba rojo en

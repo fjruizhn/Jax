@@ -4646,6 +4646,13 @@ antes de revocar la ratificación). Medido con la MariaDB efímera 12.3.3 (`--ne
 9 -> 10 el 2026-10-09: la regresión MariaDB del overlay sin ratificación quedó incluida en el
 comando exacto del workflow. Medición real con Docker: `10 passed`.
 
+## `authority-rule-unit/tests`
+
+Piso inicial `^25 passed in `, medido localmente el 2026-10-10 con el comando del workflow.
+Corre sin base de datos las pruebas del store en memoria, el contrato de RulePermit y el
+checkpoint externo (incluye serialización multiproceso, permisos iniciales del lock y cleanup
+de temporales abandonados). La integración MariaDB permanece en su job separado.
+
 ## `authority-rule-events/ratifications`
 
 Piso vigente (2026-10-07): `^12 passed in `. Medido con el comando exacto del workflow. Cubre

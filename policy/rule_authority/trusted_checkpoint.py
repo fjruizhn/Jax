@@ -245,7 +245,7 @@ class RuleAuditCheckpointStore:
         except OSError as exc:
             try:
                 temporary_path.unlink()
-            except FileNotFoundError:
+            except FileNotFoundError:  # fail-soft: otro limpiador ya retiró el temporal y no queda estado que recuperar
                 pass
             raise CheckpointInvalido("resultado de publicación durable desconocido") from exc
 

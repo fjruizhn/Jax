@@ -378,7 +378,7 @@ class MariaDBAuthorityLedgerTransactionOwner:
                 self._active = False
                 try:
                     self._close_resources()
-                except BaseException:
+                except BaseException:  # fail-soft: una limpieza fallida no debe ocultar el COMMIT fallido original
                     # A failed commit never becomes a committed outcome merely
                     # because cleanup also failed. Preserve the commit failure.
                     pass
@@ -386,7 +386,7 @@ class MariaDBAuthorityLedgerTransactionOwner:
         self._active = False
         try:
             self._close_resources()
-        except BaseException as exc:
+        except BaseException as exc:  # fail-closed: el caller propaga este error tras publicar el checkpoint externo
             # COMMIT already succeeded.  The external Rule Authority anchor
             # must still be attempted by the consumption store while both
             # filesystem fences remain held; it reports this as committed

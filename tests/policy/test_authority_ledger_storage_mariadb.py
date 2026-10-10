@@ -417,11 +417,11 @@ def test_rule_authority_lock_token_rejects_cross_thread_and_stale_epochs(tmp_pat
         def cross_thread_attempt():
             try:
                 store.issue_authority_ledger_lock_token(fence)
-            except Exception as exc:
+            except Exception as exc:  # fail-soft: capturar en el hilo padre permite afirmar que ambas capacidades rechazaron el cruce de hilo
                 failures.append(exc)
             try:
                 require_active_authority_ledger_lock_token(token, fence)
-            except Exception as exc:
+            except Exception as exc:  # fail-soft: capturar en el hilo padre permite afirmar que ambas capacidades rechazaron el cruce de hilo
                 failures.append(exc)
 
         thread = threading.Thread(target=cross_thread_attempt)
@@ -1255,7 +1255,7 @@ def test_transaction_fence_holds_mariadb_head_lock_until_completion(completion):
                     )
                     writer_acquired.set()
                 connection.rollback()
-            except Exception as exc:  # surfaced in the owning test thread
+            except Exception as exc:  # fail-soft: guardar el error del worker permite fallar la aserción en el hilo de pytest
                 writer_errors.append(exc)
             finally:
                 connection.close()
