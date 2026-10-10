@@ -421,18 +421,28 @@ def test_consume_denies_provider_change_that_wins_before_its_lease(tmp_path, mon
 def test_consume_holds_provider_lease_until_durable_append(tmp_path, monkeypatch, kind):
     kernel, providers = _kernel_consume_harness(tmp_path, monkeypatch)
     validated = threading.Event()
-    release = threading.Event()
+    release_validation = threading.Event()
+    append_started = threading.Event()
+    release_append = threading.Event()
     writer_started = threading.Event()
     original_validate = kernel._validate_consumption_context
+    original_append = kernel._store.consume_permit
 
     def pause_after_validation(**kwargs):
         result = original_validate(**kwargs)
         validated.set()
-        if not release.wait(timeout=5):
-            raise TimeoutError("la prueba no liberó el consumo pausado")
+        if not release_validation.wait(timeout=5):
+            raise TimeoutError("la prueba no liberó la validación pausada")
         return result
 
+    def pause_during_append(owner, draft):
+        append_started.set()
+        if not release_append.wait(timeout=5):
+            raise TimeoutError("la prueba no liberó el append pausado")
+        return original_append(owner, draft)
+
     monkeypatch.setattr(kernel, "_validate_consumption_context", pause_after_validation)
+    monkeypatch.setattr(kernel._store, "consume_permit", pause_during_append)
     provider = providers[kind]
 
     def update_provider():
@@ -456,12 +466,17 @@ def test_consume_holds_provider_lease_until_durable_append(tmp_path, monkeypatch
                 threading.Event().wait(0.001)
             assert provider.esperando() > 0
             assert not writer_future.done()
-            release.set()
+            release_validation.set()
+            assert append_started.wait(timeout=5)
+            assert provider.esperando() > 0
+            assert not writer_future.done()
+            release_append.set()
             consumption = consume_future.result(timeout=5)
             writer_future.result(timeout=5)
         assert consumption._is_store_sealed()
     finally:
-        release.set()
+        release_validation.set()
+        release_append.set()
 
 
 def test_consume_context_accepts_exact_current_rule_grant_scope_and_contract(monkeypatch):
