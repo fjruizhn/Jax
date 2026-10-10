@@ -58,12 +58,15 @@ integración final queda pendiente de la respuesta de Fernando sobre overlays.
 ## Estado
 
 - 2026-10-09: rama aislada creada desde master `bf6b0580`.
-- Primer incremento local: `RuleAuditCheckpointStore` con genesis explícito, CAS,
-  log hash-chained, exclusión `flock`, reemplazo atómico, `fsync` y relectura.
-- Verificación del incremento: tests de checkpoint, providers y modelos, 289 passed;
-  `git diff --check` limpio.
-- Pendiente para completar el paso: conectar el checkpoint a la transacción de
-  `MariaDBRuleDecisionStore`, agregar auditoría de permisos/consumos y completar
-  `evaluate`/`consume`.
+- Incremento local: `RuleAuditCheckpointStore` con genesis explícito, CAS, log
+  hash-chained, exclusión `flock`, reemplazo atómico, `fsync` y relectura. La escritura
+  existente de decisiones puede usar el checkpoint: bloquea archivo externo antes de
+  MariaDB, exige head coincidente antes de mutar, confirma después del commit, y niega
+  mismatch o publicación incierta.
+- Verificación local: tests de checkpoint, providers y modelos, 289 passed; la suite
+  MariaDB colecta 14 pruebas, pero no se ejecutó porque Docker no puede abrir
+  `/var/run/docker.sock` en esta sesión.
+- Pendiente para completar el paso: decisiones `PERMIT` + `RulePermit` atómicos,
+  auditoría de consumos y kernel `evaluate`/`consume`.
 - Decisión de Fernando sobre `OVERLAY_ISSUED` pendiente; bloquea integración, no este
   trabajo aislado.
