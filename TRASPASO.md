@@ -29,10 +29,21 @@
   comparación de árboles completos entre sus SHAs también incluye soporte de pisos integrado
   posteriormente por #389/#391; esos cambios no pertenecen al commit de checkpoint ni se deben
   interpretar como divergencia de su código. La línea local añade después el merge de #389,
-  dicho soporte y los commits locales de paso 6. Esta rama local es la continuación que pretende
-  continuar #388 sobre master, por instrucción directa de Fernando después del guard. Tip actual
+  dicho soporte y los commits locales de paso 6. Esta rama local continúa #388 sobre master,
+  por instrucción directa de Fernando después del guard. Tip actual
   confirmado por GitHub API y `git fetch`: `master`=`0d6484f2` (merge #391). No se ha actualizado
   el PR remoto por la pausa de publicación.
+- Delta-auditoría GLM/ZCode de `bb5525f2` (2026-10-10): confirmó base `0d6484f2`, rebase y
+  resolución de `TRASPASO.md`; verificó los pisos declarados y que la CI verde citada pertenece
+  al head remoto viejo. No emitió aprobación integral: conserva BLOCK por carrera E2E con owner
+  MariaDB/revocación real y por CI exacta/MariaDB sin verde; conserva los MINOR históricos de
+  migration 004, `es_ancestro` bajo locks, flock-primero y prueba AST. Consideró resuelta la
+  reconciliación de linaje bajo la instrucción directa de Fernando; la pausa de publicación es
+  un gate vigente aparte. Ese SHA era local-only y se auditó antes de este follow-up documental;
+  el nuevo commit de handoff requiere su delta-audit exacta.
+- Al auditar `bb5525f2`, el worktree estaba limpio y ninguna rama remota contenía el SHA.
+  `docker info` sigue fallando por permiso denegado en `/var/run/docker.sock`, así que las
+  suites MariaDB no se ejecutaron localmente.
 - Los commits locales `b325613e`, `eeb65d1c` y `511e83f0` no están publicados. Tier 3 GLM exacto de
   `b325613e`: NO APROBADO; BLOCK por carreras de providers contra `consume()` sin tests de
   kernel y BLOCK por falta de CI exacta/MariaDB real; MAJOR por relación de linaje/supersession
@@ -86,7 +97,7 @@ Completar en esta rama aislada el permiso `RulePermit` de un solo uso y su audit
 durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-kernel-design.md`
 §9–§15. No integrar hasta cerrar los gates y cumplir la autoridad reservada de workflows.
 
-## Estado verificado
+## Estado histórico al iniciar este worktree (antes del rebase 2026-10-10)
 
 - Rama: `codex/faro-f11-kernel-step6`.
 - Base actual: `0d6484f2f56059e9fb0d11b04de8990375ee7c53` (master posterior a #391).
