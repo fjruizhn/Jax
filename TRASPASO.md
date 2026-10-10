@@ -37,6 +37,8 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   hay causa raíz probada. Fortalecí localmente el fixture para esperar servidor listo con
   query, reintentar solo errores de inicio transitorios y adjuntar `docker logs` si agota
   tiempo. No ejecutable localmente por falta de permiso al socket Docker; pendiente de CI.
+  Las cuatro pruebas unitarias del readiness helper compartido pasan; la prueba MariaDB
+  dirigida confirma el bloqueo ambiental antes del arranque del contenedor.
   #387 revierte #385, pero su CI actual falla `pisos-no-bajan`; rama ajena, sin cambios.
 - Añadí regresión que forja una cadena hash-válida con un head histórico repetido. Pasa con
   el validador vigente; mutando temporalmente esa guardia, falla como se espera.
