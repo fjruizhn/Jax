@@ -193,16 +193,18 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
 
 ### Actualización 2026-10-10 · corrida CI del fix de fixture
 
-- CI exacta `38035001043`, SHA `3857b4bc84a315346eedd11a9b32640427e2099e`: la suite Rule
+- CI exacta `38035001043/attempts/1`, SHA `3857b4bc84a315346eedd11a9b32640427e2099e`: la suite Rule
   Authority MariaDB ejecutó `18 passed in 63.07s`. El error por falta de
   `authority_ledger_genesis` quedó resuelto al aplicar la migración Block 4 en el fixture.
   `tests-puros` sigue rojo únicamente en este paso porque el piso aún esperaba 12; elevé el
   piso en `ci/pisos.json` y `docs/ci/pisos.md` a los 18 medidos.
-- La misma CI reportó `faro-fase0`: `779 passed, 1 failed` en
+- Ese mismo intento (`38035001043/attempts/1`) reportó en `faro-fase0`:
+  `779 passed, 1 failed` en
   `test_el_rele_con_half_close_deja_llegar_la_respuesta_antes_de_salir` (`tests/test_faro_puerto_e2e.py:136`),
   con stdout vacío antes de intentar parsear la respuesta. No hay diagnóstico causal todavía;
-  no se cambia el runtime por conjetura. El rerun de ese job fue cancelado al publicarse el
-  siguiente SHA; no aportó evidencia adicional. En la CI nueva de `2d6a0f41`, fase 0 pasó.
+  no se cambia el runtime por conjetura. El intento 2 de ese run, relanzado para observar el
+  mismo SHA, fue cancelado al publicarse el SHA siguiente; no aportó evidencia adicional. En
+  la CI nueva de `2d6a0f41`, fase 0 pasó.
 - El delta-audit Tier 3 exacto de `3857b4bc` mantiene un MAJOR abierto mientras CI no cierre.
   El piso actualizado cambia el SHA: correr verificaciones locales disponibles, actualizar
   este handoff, commit Codex, consultar `/home/fruiz/claude-skills/bin/ventana estado`
