@@ -50,9 +50,9 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
 
 ### Actualización 2026-10-10 · consumo compartido Block 4 / Rule Authority
 
-- HEAD local sigue en `daa98d7455741ccf793e0bf74edd154d060c360b`; su merge-base con
-  `origin/master@bf6b05809e1c3505efd7447b33685796ca42e3b6` coincide. Los cambios de las
-  rondas 5–10 permanecen sin commit en este worktree y no están publicados.
+- HEAD local: `abe866d8eeacfcc5478b36441b6d79cb5eccab6d`, commit local no publicado. Su
+  merge-base con `origin/master@bf6b05809e1c3505efd7447b33685796ca42e3b6` coincide. Las
+  rondas 5–10 están incluidas en ese commit.
 - El fence compartido mantiene orden de flocks Block 4 → Rule Authority → BEGIN y orden
   InnoDB permit → head Block 4 → audit head. El owner entrega el `RulePermit` completo,
   canónico y sellado bajo lock; el store de Rule Authority es dueño de append de consumo,
@@ -69,10 +69,11 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   de store/checkpoint/codec pasan; `py_compile`, `git diff --check` y colección de las cinco
   pruebas MariaDB pasan. La Tier 3 exacta de rondas 5–9 encontró y cerró estructuralmente
   los contratos de orden, identidad del checkpoint, token thread/epoch, consumo durable,
-  anclaje y retry. Su único hallazgo de código fue una aserción de test con el atributo de
-  lock equivocado; ya se corrigió localmente y está pendiente de delta-audit. La suite
-  MariaDB real no se ha ejecutado. No declarar listo para wiring ni integración hasta cerrar
-  esos gates.
+  anclaje y retry. La delta-audit de `abe866d8` aprobó con cambios, sin BLOCK/MAJOR, y dejó
+  un MINOR documental: este handoff describía estado pre-commit y la corrección de lock como
+  pendiente. La aserción ya está corregida en `abe866d8`; este commit actualiza procedencia y
+  siguiente acción. Requiere nueva delta-audit. La suite MariaDB real no se ha ejecutado. No
+  declarar listo para wiring ni integración hasta cerrar esos gates.
 - La pregunta directa a Fernando sobre si `OVERLAY_ISSUED` exige ratificación previa no
   revocada del mismo hash y cuarentena permanente de overlays históricos inválidos sigue
   sin respuesta. La implementación de este paso no decide esa semántica.
@@ -91,10 +92,8 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
 
 ## Siguiente acción exacta
 
-En este worktree, continuar TDD desde la migración `policy/rule_authority/migrations/001_rule_authority_kernel.sql`:
-
-1. Corregir la aserción de test Tier 3 confirmada en `tests/policy/test_authority_ledger_storage_mariadb.py` y pedir delta-audit sobre el diff final.
-2. Ejecutar las cinco pruebas cross-schema contra MariaDB real con el principal provisionado; no inferir ese resultado de colección o de pruebas puras. Si el runner local sigue sin Docker, registrar el gate pendiente y ejecutar en CI apropiada antes de wiring.
+1. Crear SHA local nuevo con esta actualización del handoff y pedir delta-audit exacta.
+2. Ejecutar las cinco pruebas cross-schema contra MariaDB real con el principal provisionado; no inferir ese resultado de colección o de pruebas puras. Si el runner local sigue sin Docker, registrar el gate pendiente y ejecutarlas en CI apropiada antes de wiring.
 3. Completar el wiring del kernel `evaluate`/`consume`, cobertura de clasificación/STOP/expiración/revocación/cambio de capability/pin y mediciones O(n) p95/RSS/EXPLAIN.
 4. Resolver la pregunta de OVERLAY con Fernando. No publicar ni integrar mientras siga pendiente; revalidar `bin/ventana estado` inmediatamente antes de cualquier publicación o integración.
 
