@@ -402,57 +402,75 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         assert resultados[0]["estado"] == "rechazado"
         ingerir_mock.assert_not_called()
 
-    # -- B-5: la mutación que más importa -- medir el LOOP, no el POST ---
+    # -- B-5: el loop responde mientras la ingesta sigue bloqueada --------
     async def test_B5_el_trabajo_no_bloquea_el_loop_de_eventos(self):
         self._archivo_en_workspace("lento.pdf")
+        loop = asyncio.get_running_loop()
+        liberar_ingesta = threading.Event()
+        loop_respondio = asyncio.Event()
+        respondio_antes_de_liberar = []
+
+        def _registrar_respuesta_del_loop():
+            respondio_antes_de_liberar.append(not liberar_ingesta.is_set())
+            loop_respondio.set()
 
         def _ingerir_lento(origen, trabajo, *, subruta=None):
-            time.sleep(0.4)  # bloqueante DE VERDAD -- simula OCR real
+            # Si esta función corre en un worker, el event loop puede procesar
+            # el callback antes de liberar la ingesta. Si corre inline en el
+            # loop, el watchdog la libera y el callback queda marcado tarde.
+            loop.call_soon_threadsafe(_registrar_respuesta_del_loop)
+            liberar_ingesta.wait(timeout=10)
             return _ficha("z" * 64)
 
         job_id = self._crear_job()
-        retrasos: list[float] = []
-
-        async def _sondear_loop():
-            for _ in range(25):
-                t0 = time.perf_counter()
-                await asyncio.sleep(0.01)
-                retrasos.append(time.perf_counter() - t0 - 0.01)
-
+        watchdog = threading.Timer(10, liberar_ingesta.set)
+        watchdog.daemon = True
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_lento):
-            # El sondeo se crea PRIMERO y se le da tiempo real de arrancar
-            # y quedar DENTRO de su `sleep(0.01)` antes de lanzar el
-            # trabajo -- si no, un trabajo que bloquea antes de su primer
-            # `await` puede terminar ANTES de que el sondeo arranque, y el
-            # test pasa igual con una mutación que saca el `run_in_executor`
-            # (falso negativo, confirmado a mano en la ronda anterior).
-            sondeo = asyncio.create_task(_sondear_loop())
-            await asyncio.sleep(0.02)
-            await self._ejecutar(job_id, UUID_PRUEBA, ["lento.pdf"])
-            await sondeo
+            watchdog.start()
+            tarea = asyncio.create_task(
+                self._ejecutar(job_id, UUID_PRUEBA, ["lento.pdf"])
+            )
+            try:
+                await asyncio.wait_for(loop_respondio.wait(), timeout=11)
+            finally:
+                liberar_ingesta.set()
+                watchdog.cancel()
+                await tarea
 
-        peor = max(retrasos)
-        assert peor < 0.15, (
-            f"el loop de eventos se retrasó {peor:.3f}s durante el trabajo -- "
-            "el OCR no está corriendo fuera del loop"
+        assert respondio_antes_de_liberar == [True], (
+            "el event loop no procesó el callback mientras la ingesta seguía bloqueada"
         )
         assert self.store.get(job_id).status == JobStatus.COMPLETED
 
     async def test_B2_archivos_del_mismo_trabajo_se_reparten_entre_hilos(self):
         self._archivo_en_workspace("p1.pdf")
         self._archivo_en_workspace("p2.pdf")
+        barrera = threading.Barrier(2, timeout=5)
+        hilos = set()
+        lock_hilos = threading.Lock()
+        fallos_barrera = []
 
         def _ingerir_lento(origen, trabajo, *, subruta=None):
-            time.sleep(0.3)
+            with lock_hilos:
+                hilos.add(threading.get_ident())
+            try:
+                barrera.wait()
+            except threading.BrokenBarrierError as exc:
+                # La ingesta convierte excepciones en resultados de error;
+                # conservar esta evidencia permite que el assert final falle
+                # con una causa clara si los trabajos se serializan.
+                fallos_barrera.append(exc)
+                raise
             return _ficha("e" * 64)
 
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_lento):
-            t0 = time.perf_counter()
             await self._ejecutar(job_id, UUID_PRUEBA, ["p1.pdf", "p2.pdf"])
-            dt = time.perf_counter() - t0
 
-        assert dt < 0.5, f"tardó {dt:.2f}s -- no se repartió entre los dos hilos disponibles"
+        resultados = json.loads(Path(self.store.get(job_id).result_path).read_text())
+        assert not fallos_barrera, "los dos archivos no alcanzaron juntos la barrera"
+        assert len(hilos) == 2, f"se usaron {len(hilos)} hilos distintos, no dos"
+        assert [r["estado"] for r in resultados] == ["ok", "ok"]
 
     # -- outer except: nunca deja running huérfano -----------------------
     async def test_una_excepcion_catastrofica_marca_failed_no_deja_running(self):
@@ -995,23 +1013,41 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         ventana no existe."""
         self._archivo_en_workspace("a.pdf")
         ingerir_mock = AsyncMock()
-        with patch.object(rutas_mod, "_STORE", self.store), \
-             patch.object(rutas_mod, "_EXECUTOR_OCR", self.executor), \
-             patch.object(rutas_mod, "_EXECUTOR_IO", self.executor_io), \
-             patch.object(rutas_mod, "_SEMAFORO_TRABAJOS", asyncio.Semaphore(2)), \
-             patch.object(rutas_mod.proyecto_activo, "identidad_activa_del_proyecto", AsyncMock(return_value=True)), \
-             patch.object(rutas_mod.ingesta, "ingerir", ingerir_mock):
-            creado = await rutas_mod.crear_trabajo(
-                rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=["a.pdf"]), _owned_request()
-            )
-            # SIN ceder el loop: el worker todavía no dio su primera vuelta.
-            respuesta = await rutas_mod.cancelar_trabajo(creado.job_id, _owned_request())
-            for _ in range(200):
-                if self.store.get(creado.job_id).status in (
-                    JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.FAILED,
-                ):
-                    break
-                await asyncio.sleep(0.01)
+        barrera = threading.Barrier(3, timeout=10)
+        liberar_workers = threading.Event()
+
+        def _ocupar_worker_ocr():
+            barrera.wait()
+            liberar_workers.wait(timeout=10)
+
+        # Ocupar ambos hilos antes de crear el trabajo garantiza que el
+        # worker quede en cola mientras cancelar_trabajo() cede el event loop
+        # al executor de I/O. Así se prueba el caso "cancelar antes de que
+        # arranque" sin depender de qué tarea gana una carrera de scheduling.
+        ocupantes = [self.executor.submit(_ocupar_worker_ocr) for _ in range(2)]
+        try:
+            barrera.wait()
+            with patch.object(rutas_mod, "_STORE", self.store), \
+                 patch.object(rutas_mod, "_EXECUTOR_OCR", self.executor), \
+                 patch.object(rutas_mod, "_EXECUTOR_IO", self.executor_io), \
+                 patch.object(rutas_mod, "_SEMAFORO_TRABAJOS", asyncio.Semaphore(2)), \
+                 patch.object(rutas_mod.proyecto_activo, "identidad_activa_del_proyecto", AsyncMock(return_value=True)), \
+                 patch.object(rutas_mod.ingesta, "ingerir", ingerir_mock):
+                creado = await rutas_mod.crear_trabajo(
+                    rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=["a.pdf"]), _owned_request()
+                )
+                respuesta = await rutas_mod.cancelar_trabajo(creado.job_id, _owned_request())
+        finally:
+            liberar_workers.set()
+            for ocupante in ocupantes:
+                ocupante.result(timeout=10)
+
+        for _ in range(200):
+            if self.store.get(creado.job_id).status in (
+                JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.FAILED,
+            ):
+                break
+            await asyncio.sleep(0.01)
 
         assert respuesta.estado == JobStatus.CANCELLING.value, respuesta
         # CRUDO (una entrada por línea del JSONL): el código de 146e0a5/f1d4298
