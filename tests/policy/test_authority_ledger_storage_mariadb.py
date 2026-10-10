@@ -40,7 +40,8 @@ from policy.rule_authority.models import (
     RuleDecision, RuleDecisionStatus, RuleEvaluationRequest,
 )
 from policy.rule_authority.permit import (
-    RulePermitConsumptionDraft, RulePermitDraft, _permit_after_kernel_evaluation,
+    RulePermitConsumptionDraft, RulePermitDraft, _consumption_hash,
+    _permit_after_kernel_evaluation,
 )
 from policy.rule_authority.provisioning import provision_application_account as provision_rule_authority_account
 from policy.rule_authority.errors import CheckpointInvalido
@@ -49,6 +50,7 @@ from policy.rule_authority.storage import (
     MariaDBRuleDecisionStore, RuleAuthorityCommittedCheckpointError,
     RuleAuthorityCommittedCleanupError,
     RuleAuthorityStorageError,
+    _consumption_record_hash,
 )
 from policy.authority_ledger.signatures import encode_public_key, public_key_bytes, public_key_fingerprint
 from policy.authority_ledger.storage import (
@@ -970,7 +972,7 @@ def _cross_schema_permit(request: RuleEvaluationRequest) -> tuple[RuleDecision, 
 
 
 @contextlib.contextmanager
-def _initialized_cross_schema_consumption():
+def _initialized_cross_schema_consumption(*, include_retry_migration=True):
     """Both schemas plus the provisioned Rule Authority application principal."""
     with _initialized_authority_ledger() as (connect, ledger_store, root, _key, checkpoint_store):
         app_user = "jax_rule_authority_consume_test"
@@ -978,7 +980,8 @@ def _initialized_cross_schema_consumption():
         with connect() as admin:
             _apply_migration(admin, RULE_AUTHORITY_MIGRATION)
             _apply_migration(admin, RULE_AUTHORITY_STEP6_MIGRATION)
-            _apply_migration(admin, RULE_AUTHORITY_STEP6_RETRY_MIGRATION)
+            if include_retry_migration:
+                _apply_migration(admin, RULE_AUTHORITY_STEP6_RETRY_MIGRATION)
             provision_rule_authority_account(admin, app_user, app_password)
 
         def app_connect():
@@ -1068,6 +1071,95 @@ def test_cross_schema_consumption_uses_provisioned_principal_and_retries_exact_p
                         "UPDATE jax_authority.authority_ledger_head SET sequence=sequence "
                         "WHERE singleton=1"
                     )
+
+
+def test_retry_migration_preserves_legacy_consumption_and_rejects_new_identity():
+    with _initialized_cross_schema_consumption(include_retry_migration=False) as (
+        connect, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+    ):
+        decision_store = MariaDBRuleDecisionStore(app_connect, checkpoint_store=audit_checkpoint)
+        request = _cross_schema_request("0199f8a1-8c00-7000-8000-000000000920")
+        decision, permit_draft = _cross_schema_permit(request)
+        permit = decision_store.record_permit(
+            request, decision, _permit_after_kernel_evaluation(permit_draft)
+        )
+
+        # Seed a valid pre-003 row without a retry identity. Its old canonical
+        # projection and chain link must remain byte-for-byte unchanged.
+        consumed_at = datetime(2026, 10, 10, 12, 20, tzinfo=timezone.utc)
+        legacy_projection = {
+            "permit_id": permit.permit_id,
+            "request_hash": request.request_hash,
+            "consumed_at_utc": consumed_at.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        }
+        legacy_projection["consumption_hash"] = _consumption_hash(legacy_projection)
+        legacy_bytes = canonical_bytes(legacy_projection)
+        previous_hash = audit_checkpoint.head_actual()
+        record_hash = _consumption_record_hash(
+            3, permit.permit_id, previous_hash, legacy_projection,
+        )
+        with connect(database="jax_rule_authority") as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO rule_permit_consumptions "
+                    "(permit_id,request_hash,consumed_at_utc,canonical_payload,consumption_hash,"
+                    "previous_record_hash,record_hash,audit_sequence) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,3)",
+                    (permit.permit_id, request.request_hash, consumed_at.replace(tzinfo=None),
+                     legacy_bytes, legacy_projection["consumption_hash"], previous_hash,
+                     record_hash),
+                )
+                cursor.execute(
+                    "UPDATE rule_authority_audit_head SET audit_sequence=3,head_hash=%s,"
+                    "head_kind='CONSUMPTION',head_key=%s WHERE singleton=1 AND audit_sequence=2",
+                    (record_hash, permit.permit_id),
+                )
+                assert cursor.rowcount == 1
+            admin.commit()
+        audit_checkpoint.publicar(record_hash, anterior=previous_hash)
+        assert audit_checkpoint.confirmar(record_hash) is True
+
+        # Apply the additive migration after the historical row already exists.
+        with connect() as admin:
+            _apply_migration(admin, RULE_AUTHORITY_STEP6_RETRY_MIGRATION)
+        with connect(database="jax_rule_authority") as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "SELECT permit_id,request_hash,consumed_at_utc,canonical_payload,"
+                    "consumption_hash,previous_record_hash,record_hash,audit_sequence,"
+                    "consumption_request_id FROM rule_permit_consumptions WHERE permit_id=%s",
+                    (permit.permit_id,),
+                )
+                row = cursor.fetchone()
+        assert row[3] == legacy_bytes
+        assert row[4:] == (
+            legacy_projection["consumption_hash"], previous_hash, record_hash, 3, None,
+        )
+        decoded, decoded_record_hash, decoded_sequence = MariaDBRuleDecisionStore._decode_consumption_row(row)
+        assert decoded.consumption_request_id is None
+        assert canonical_bytes(dict(decoded.projection())) == legacy_bytes
+        assert (decoded_record_hash, decoded_sequence) == (record_hash, 3)
+
+        head_before_retry = audit_checkpoint.head_actual()
+        retry_with_new_id = RulePermitConsumptionDraft(
+            permit_id=permit.permit_id,
+            consumption_request_id="0199f8a1-8c00-7000-8000-000000000921",
+            request_hash=request.request_hash,
+            consumed_at_utc=datetime(2026, 10, 10, 12, 21, tzinfo=timezone.utc),
+        )
+        with pytest.raises(AuthorityStateError, match="consumption_request_id"):
+            _consume_under_verified_fence(
+                ledger_store, checkpoint_store, root, decision_store, retry_with_new_id
+            )
+        assert audit_checkpoint.head_actual() == head_before_retry
+        assert audit_checkpoint.confirmar(head_before_retry) is True
+        with connect(database="jax_rule_authority") as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "SELECT audit_sequence,head_hash,head_kind,head_key "
+                    "FROM rule_authority_audit_head WHERE singleton=1"
+                )
+                assert cursor.fetchone() == (3, record_hash, "CONSUMPTION", permit.permit_id)
 
 
 def test_cross_schema_double_consumer_is_one_durable_consumption():
