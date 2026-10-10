@@ -2676,9 +2676,10 @@ jobs:
         # con #379 la lista mide 816; #371 agrega los modelos en memoria (+152),
         # por lo que el piso combinado medido es 1003 passed, cero skipped
         # (#381 agrega checkpoint/overlay y cierra el writer caller-intent).
-        # Schema-unidades (#378, hallazgo del auditor de #371, sobre master):
-        # 1037 (+34: valida quantity.unit contra actos_externos y amount.currency
-        # contra monto_dinero; negativas, positivas del catalogo y casos de pin).
+        # Schema-unidades (#378, hallazgo del auditor de #371), sobre master con #381:
+        # 1037 (+34 de unit/currency contra catálogo sellado). Ronda 2 agrega una
+        # prueba de catálogo forjado por subclase: el piso parcial es 1038; se medirá
+        # el número final tras reapilar la paridad del espejo.
         # Exacto: una prueba que desaparezca deja pasar en silencio la forma que cubria.
         run: |
           set -o pipefail
