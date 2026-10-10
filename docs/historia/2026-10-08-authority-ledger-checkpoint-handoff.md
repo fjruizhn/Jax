@@ -263,9 +263,11 @@ preflight correspondan al mismo SHA.
   se alinearon a 1003. El verificador `piso.py` pasó.
 - Las pruebas focales (ratificación, eventos, checkpoints, overlays y sellos del
   loader) pasaron: **64 passed**. `git diff --check` quedó limpio.
-- Estado: el nuevo SHA todavía requiere push, auditoría Tier 3 exacta, CI verde
-  completa y el procedimiento de integración. El rechazo no autoriza integración
-  del SHA anterior.
+- La corrección se publicó en `dcd6155951bb6858f5dc824b40ca58d077e3a7bd`.
+  Este es un avance, no el SHA final: el commit de archivo del handoff sigue a
+  continuación y cambia el objeto que deberá auditar Sol.
+- Estado: `dcd61559` requiere auditoría Tier 3 exacta, CI verde completa y el
+  procedimiento de integración. El rechazo no autoriza integrar el SHA anterior.
 - Alternativa descartada: conservar el helper privado con validaciones adicionales;
   al aceptar payload de autoridad sigue creando otra frontera de firma. El writer
   permanece dentro del flujo público que deriva el intent del candidate validado.
