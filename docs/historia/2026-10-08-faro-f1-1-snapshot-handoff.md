@@ -272,8 +272,8 @@ no concede autoridad ni prueba el estado operativo actual.
 
 - Hubo dos auditorías Tier 3 independientes sobre el SHA exacto
   `bf0a11d940af4c67a6f8b015fc454c005685316e`. `audit_373_final` informó
-  APROBADO CON CAMBIOS, 0 BLOCK, 0 MAJOR y 2 MINOR: scan O(n) sin p95/RSS
-  (load test 0.9) y falta de presupuesto estructural futuro para
+  APROBADO CON CAMBIOS, 0 BLOCK, 0 MAJOR y 2 MINOR: escaneo de resumen O(n)
+  fuera del flock y falta de presupuesto estructural futuro para
   `RuleEvaluationRequest.arguments` ([veredicto](https://github.com/fjruizhn/Jax/pull/371#issuecomment-6091232740)).
   `audit_faro_heads` informó APROBADO funcional, 0 BLOCK, 0 MAJOR y 3 MINOR:
   scan O(n) sin p95/RSS; `tests/test_faro_aviso.py:1081–1124` no aísla reinicio
