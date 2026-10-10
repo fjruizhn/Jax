@@ -12,7 +12,9 @@ from policy.authority_ledger.errors import AuthorityStateError
 
 from .errors import RuleAuthorityStorageError
 from .models import RuleDecision, RuleDecisionStatus, RuleEvaluationRequest
-from .permit import RulePermit, RulePermitDraft, _EvaluatedPermit, _trusted_permit
+from .permit import (RulePermit, RulePermitConsumption, RulePermitConsumptionDraft,
+                     RulePermitDraft, _EvaluatedPermit, _trusted_consumption,
+                     _trusted_permit)
 
 
 _LOG = logging.getLogger(__name__)
@@ -26,6 +28,8 @@ _DECISION_FIELDS = frozenset({
 })
 _PERMIT_DOMAIN = "JAX-FARO-RULE-AUTHORITY-PERMIT-RECORD"
 _PERMIT_VERSION = "1"
+_CONSUMPTION_RECORD_DOMAIN = "JAX-FARO-RULE-AUTHORITY-CONSUMPTION-RECORD"
+_CONSUMPTION_RECORD_VERSION = "1"
 _PERMIT_FIELDS = frozenset({
     "permit_id", "request_id", "request_hash", "rule_id", "rule_path",
     "rule_blob_oid", "rule_content_hash", "policy_revision", "policy_tree_oid",
@@ -33,6 +37,24 @@ _PERMIT_FIELDS = frozenset({
     "stop_checkpoint", "capability_id", "capability_version", "capability_class",
     "capability_limits", "issued_at_utc", "expires_at_utc", "permit_hash",
 })
+
+
+class RuleAuthorityCommittedCheckpointError(RuleAuthorityStorageError):
+    """DB committed, but its required external Rule Authority anchor failed.
+
+    The operation is deliberately not reported as rolled back.  The next
+    writer compares the durable checkpoint head with the DB head and fails
+    closed until an operator reconciles the two stores.
+    """
+
+
+class RuleAuthorityCommittedCleanupError(RuleAuthorityStorageError):
+    """DB and external checkpoint committed, but local cleanup then failed.
+
+    This outcome is explicitly durable and anchored.  It is distinct from a
+    failed checkpoint publication so callers never infer an anchor mismatch
+    from a connection/cursor close error that occurred after confirmation.
+    """
 
 
 def _catalog_projection(catalog):
@@ -79,6 +101,18 @@ def _permit_record_hash(sequence: int, permit_id: str, previous_hash: str,
     return domain_hash(_PERMIT_DOMAIN, _PERMIT_VERSION, {
         "sequence": sequence,
         "record_type": "PERMIT",
+        "record_id": permit_id,
+        "previous_record_hash": previous_hash,
+        "record": projection,
+    })
+
+
+def _consumption_record_hash(sequence: int, permit_id: str, previous_hash: str | None,
+                             projection: dict[str, object]) -> str:
+    """Hash-chain entry for the single append-only consumption leaf."""
+    return domain_hash(_CONSUMPTION_RECORD_DOMAIN, _CONSUMPTION_RECORD_VERSION, {
+        "sequence": sequence,
+        "record_type": "CONSUMPTION",
         "record_id": permit_id,
         "previous_record_hash": previous_hash,
         "record": projection,
@@ -414,6 +448,185 @@ class MariaDBRuleDecisionStore:
         finally:
             if connection is not None:
                 connection.close()
+
+    def consume_permit(self, transaction_owner, consumption_draft: RulePermitConsumptionDraft
+                       ) -> RulePermitConsumption:
+        """Append the sole consumption leaf inside the verified shared transaction.
+
+        The caller supplies the owner only through the typed Block-4 fence
+        contract.  The owner validates permit → Block-4-head ordering; this
+        store owns the Rule Authority audit row, canonical payload and chain
+        update, so a caller cannot commit a permit lock with arbitrary SQL.
+        """
+        if type(consumption_draft) is not RulePermitConsumptionDraft:
+            raise TypeError("consume_permit requiere RulePermitConsumptionDraft exacto")
+        try:
+            return transaction_owner.consume_rule_permit(self, consumption_draft)
+        except (AuthorityStateError, RuleAuthorityStorageError):
+            raise
+        except Exception as exc:
+            raise RuleAuthorityStorageError("no se pudo consumir RulePermit atómicamente") from exc
+
+    def _finalize_consumption_in_transaction(self, transaction_owner, consumption_draft
+                                             ) -> RulePermitConsumption:
+        """Persist, commit, and anchor one consumption while both fences hold.
+
+        This is intentionally the only completion route.  A caller cannot get
+        a consumption object after an SQL append but before the transaction and
+        the external Rule Authority checkpoint agree on its record hash.
+        """
+        from policy.authority_ledger.storage import MariaDBAuthorityLedgerTransactionOwner
+
+        if type(transaction_owner) is not MariaDBAuthorityLedgerTransactionOwner:
+            raise AuthorityStateError("consumo requiere transaction owner MariaDB sellado")
+        if transaction_owner._rule_authority_decision_store is not self:
+            raise AuthorityStateError("transaction owner no pertenece a este decision-store")
+        if (not transaction_owner.active or not transaction_owner._verified
+                or not transaction_owner._permit_locked
+                or transaction_owner._locked_permit_identity
+                != (consumption_draft.permit_id, consumption_draft.request_hash)):
+            raise AuthorityStateError("consumo no coincide con el permit bloqueado/verificado")
+        locked_permit = transaction_owner._locked_permit
+        if (type(locked_permit) is not RulePermit
+                or locked_permit._is_store_sealed() is not True
+                or locked_permit.permit_id != consumption_draft.permit_id
+                or locked_permit.request_hash != consumption_draft.request_hash):
+            raise AuthorityStateError("consumo requiere RulePermit bloqueado, completo y sellado")
+        if self._checkpoint_store is None:
+            raise RuleAuthorityStorageError("consumo requiere checkpoint Rule Authority durable")
+
+        consumption = _trusted_consumption(consumption_draft)
+        projection = dict(consumption.projection())
+        canonical_payload = canonical_bytes(projection)
+        try:
+            audit_sequence, previous_hash = transaction_owner.lock_rule_authority_audit_head_for_update()
+            from .trusted_checkpoint import RULE_AUDIT_GENESIS_HEAD
+
+            checkpoint_head = self._checkpoint_store.head_actual()
+            expected_head = (
+                RULE_AUDIT_GENESIS_HEAD if audit_sequence == 0 and previous_hash is None
+                else previous_hash
+            )
+            if (type(expected_head) is not str or checkpoint_head != expected_head
+                    or self._checkpoint_store.confirmar(checkpoint_head) is not True):
+                raise RuleAuthorityStorageError(
+                    "checkpoint externo no coincide con el audit head DB antes del consumo"
+                )
+            sequence = audit_sequence + 1
+            cursor = transaction_owner._cursor
+            cursor.execute(
+                "SELECT permit_id,request_hash,consumed_at_utc,canonical_payload,consumption_hash,"
+                "previous_record_hash,record_hash,audit_sequence "
+                "FROM jax_rule_authority.rule_permit_consumptions "
+                "WHERE permit_id=%s FOR UPDATE",
+                (consumption.permit_id,),
+            )
+            existing = cursor.fetchone()
+            if existing is not None:
+                stored, stored_record_hash, stored_sequence = self._decode_consumption_row(existing)
+                # The public idempotency identity is exactly permit_id plus
+                # request_hash. A client retry naturally has a fresh local
+                # timestamp, so it must return the durable consumption rather
+                # than treating that timestamp as a conflicting identity.
+                if (stored.permit_id != locked_permit.permit_id
+                        or stored.request_hash != locked_permit.request_hash
+                        or stored.permit_id != consumption_draft.permit_id
+                        or stored.request_hash != consumption_draft.request_hash):
+                    raise AuthorityStateError("permit ya consumido con identidad distinta")
+                if stored_sequence > audit_sequence:
+                    raise RuleAuthorityStorageError("consumo almacenado está delante del audit head")
+                if (stored_sequence == audit_sequence
+                        and stored_record_hash != previous_hash):
+                    raise RuleAuthorityStorageError(
+                        "audit head no referencia el consumo idempotente"
+                    )
+                if self._checkpoint_store.confirmar(stored_record_hash) is not True:
+                    raise RuleAuthorityStorageError(
+                        "checkpoint externo no confirma el consumo idempotente"
+                    )
+                transaction_owner._mark_consumption_persisted()
+                close_error = transaction_owner._commit_consumption_for_store()
+                if close_error is not None:
+                    raise RuleAuthorityCommittedCleanupError(
+                        "consumo confirmado y anclado pero el cierre posterior al commit falló"
+                    ) from close_error
+                return stored
+
+            record_hash = _consumption_record_hash(
+                sequence, consumption.permit_id, previous_hash, projection
+            )
+            cursor.execute(
+                "INSERT INTO jax_rule_authority.rule_permit_consumptions "
+                "(permit_id,request_hash,consumed_at_utc,canonical_payload,consumption_hash,"
+                "previous_record_hash,record_hash,audit_sequence) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    consumption.permit_id, consumption.request_hash,
+                    consumption.consumed_at_utc.astimezone(timezone.utc).replace(tzinfo=None),
+                    canonical_payload, consumption.consumption_hash, previous_hash,
+                    record_hash, sequence,
+                ),
+            )
+            cursor.execute(
+                "UPDATE jax_rule_authority.rule_authority_audit_head "
+                "SET audit_sequence=%s,head_hash=%s,head_kind='CONSUMPTION',head_key=%s "
+                "WHERE singleton=1 AND audit_sequence=%s",
+                (sequence, record_hash, consumption.permit_id, audit_sequence),
+            )
+            if cursor.rowcount != 1:
+                raise RuleAuthorityStorageError(
+                    "audit head cambió durante el consumo RulePermit"
+                )
+            transaction_owner._mark_consumption_persisted()
+            close_error = transaction_owner._commit_consumption_for_store()
+            try:
+                self._checkpoint_store.publicar(record_hash, anterior=checkpoint_head)
+                if self._checkpoint_store.confirmar(record_hash) is not True:
+                    raise RuleAuthorityStorageError(
+                        "checkpoint externo no confirma el consumo recién publicado"
+                    )
+            except Exception as exc:
+                raise RuleAuthorityCommittedCheckpointError(
+                    "consumo confirmado en DB pero sin checkpoint externo confirmado"
+                ) from exc
+            if close_error is not None:
+                raise RuleAuthorityCommittedCleanupError(
+                    "consumo confirmado y anclado pero el cierre posterior al commit falló"
+                ) from close_error
+            return consumption
+        except (AuthorityStateError, RuleAuthorityStorageError):
+            raise
+        except Exception as exc:
+            raise RuleAuthorityStorageError("no se pudo persistir consumo RulePermit") from exc
+
+    @staticmethod
+    def _decode_consumption_row(row) -> tuple[RulePermitConsumption, str, int]:
+        (permit_id, request_hash, consumed_at, payload_bytes, consumption_hash,
+         previous_hash, record_hash, sequence) = row
+        try:
+            raw = bytes(payload_bytes)
+            payload = json.loads(raw.decode("utf-8"))
+            if type(payload) is not dict:
+                raise ValueError("proyección de consumo inválida")
+            if canonical_bytes(payload) != raw:
+                raise ValueError("proyección de consumo no canónica")
+            if (payload.get("permit_id") != permit_id
+                    or payload.get("request_hash") != request_hash
+                    or payload.get("consumption_hash") != consumption_hash):
+                raise ValueError("columnas de consumo difieren de la proyección")
+            consumption = _trusted_consumption(payload)
+            projected_time = datetime.fromisoformat(
+                payload["consumed_at_utc"].replace("Z", "+00:00")
+            )
+            if _as_utc(consumed_at) != projected_time.astimezone(timezone.utc):
+                raise ValueError("tiempo SQL de consumo no coincide")
+            if type(sequence) is not int or sequence < 1:
+                raise ValueError("secuencia de consumo inválida")
+            if _consumption_record_hash(sequence, permit_id, previous_hash, payload) != record_hash:
+                raise ValueError("record hash de consumo no coincide")
+            return consumption, record_hash, sequence
+        except Exception as exc:
+            raise RuleAuthorityStorageError("fila RulePermitConsumption inválida") from exc
 
     @staticmethod
     def _select_request(cursor, request_id: str):

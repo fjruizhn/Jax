@@ -28,6 +28,33 @@ _FIELDS = frozenset({
 })
 _GENESIS_HEAD = domain_hash(_DOMAIN, _VERSION, {"kind": "GENESIS", "sequence": 0})
 RULE_AUDIT_GENESIS_HEAD = _GENESIS_HEAD
+_AUTHORITY_LEDGER_LOCK_TOKEN_SEAL = object()
+
+
+class _AuthorityLedgerLockToken:
+    """Private proof that this store still holds its real Rule Authority flock."""
+
+    def __init__(self, store, authority_ledger_fence, owner_thread_id, epoch, seal) -> None:
+        if seal is not _AUTHORITY_LEDGER_LOCK_TOKEN_SEAL:
+            raise CheckpointInvalido("token Rule Authority solo puede emitirlo el checkpoint store")
+        self._store = store
+        self._authority_ledger_fence = authority_ledger_fence
+        self._owner_thread_id = owner_thread_id
+        self._epoch = epoch
+        self._active = True
+
+    def _matches(self, authority_ledger_fence) -> bool:
+        return (
+            self._active
+            and self._authority_ledger_fence is authority_ledger_fence
+            and self._store._depth > 0
+            and self._store._lock_thread_id == threading.get_ident()
+            and self._owner_thread_id == threading.get_ident()
+            and self._epoch == self._store._lock_epoch
+        )
+
+    def _deactivate(self) -> None:
+        self._active = False
 
 
 class RuleAuditCheckpointStore:
@@ -43,6 +70,8 @@ class RuleAuditCheckpointStore:
         self._thread_lock = threading.RLock()
         self._depth = 0
         self._lock_handle = None
+        self._lock_thread_id = None
+        self._lock_epoch = 0
 
     @property
     def lock_path(self) -> Path:
@@ -58,6 +87,8 @@ class RuleAuditCheckpointStore:
                 try:
                     os.fchmod(self._lock_handle.fileno(), 0o600)
                     fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX)
+                    self._lock_thread_id = threading.get_ident()
+                    self._lock_epoch += 1
                 except Exception:
                     self._lock_handle.close()
                     self._lock_handle = None
@@ -73,6 +104,16 @@ class RuleAuditCheckpointStore:
                     finally:
                         self._lock_handle.close()
                         self._lock_handle = None
+                        self._lock_thread_id = None
+
+    def issue_authority_ledger_lock_token(self, authority_ledger_fence):
+        """Issue a private Block 4 capability only while this real flock is held."""
+        if self._depth <= 0 or self._lock_thread_id != threading.get_ident():
+            raise CheckpointInvalido("token Block 4 exige flock Rule Authority activo")
+        return _AuthorityLedgerLockToken(
+            self, authority_ledger_fence, threading.get_ident(), self._lock_epoch,
+            _AUTHORITY_LEDGER_LOCK_TOKEN_SEAL,
+        )
 
     def head_actual(self) -> str:
         with self.locked():
@@ -250,3 +291,10 @@ def _valid_hash(value: object) -> bool:
 def _checkpoint_hash(row: dict[str, object]) -> str:
     projection = {key: value for key, value in row.items() if key != "checkpoint_hash"}
     return domain_hash(_DOMAIN, _VERSION, projection)
+
+
+def require_active_authority_ledger_lock_token(token, authority_ledger_fence) -> None:
+    """Reject every value except a live capability emitted under this store's flock."""
+    if (not isinstance(token, _AuthorityLedgerLockToken)
+            or not token._matches(authority_ledger_fence)):
+        raise CheckpointInvalido("token Rule Authority inválido o fuera de su flock")
