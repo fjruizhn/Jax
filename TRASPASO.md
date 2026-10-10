@@ -2,23 +2,25 @@
 
 ## Estado vivo 2026-10-10 · follow-up tras delta Tier 3
 
-- #389 está integrado en `origin/master` como `0f9b79633f4b9ca6fdf89cfb8b1a124d5f05027d`;
-  `HEAD` de esta rama tiene ese mismo SHA como merge-base. Rebase es local. La publicación
-  de #388 sigue pausada por instrucción de Fernando: no push, PR update ni integración.
+- #389 está integrado en `0f9b7963`; #391 quedó integrado después como `0d6484f2`.
+  `git fetch origin master` y GitHub API confirman ese tip oficial. Reapilé localmente #388
+  sobre `0d6484f2`; el rebase conservó el handoff de esta tarea cuando el primer commit chocó
+  con la eliminación de `TRASPASO.md` en #391. La publicación de #388 sigue pausada por
+  instrucción de Fernando: no push, PR update ni integración.
 - El piso genérico de `archivos-de-test-en-ci/pisos` quedó en `^233 passed`; el comando
   exacto de los tres módulos dio `233 passed` localmente y coincide con CI #389 run
   `38044350914` sobre `c78080442da81a468768a7af5b2c5b748ff56b37`.
-- Reconcilié pisos afectados sobre la base integrada: `authority-rule-unit/tests` medía
-  `46 passed`; el cambio local de carreras de providers lo eleva a `52 passed` (comando exacto
-  medido el 2026-10-10). Identity Foundation Shadow midió `1044 passed` en su comando completo.
+- Re-medí tras reapilar: `authority-rule-unit/tests` = `52 passed` (piso verificado);
+  Identity Foundation Shadow = `1044 passed` (piso verificado); `archivos-de-test-en-ci/pisos`
+  = `233 passed` (piso verificado). Los comandos unitario e Identity se tomaron del workflow;
+  el primero de Identity se adaptó de `python` a `python3` porque este host carece del alias.
   Las suites MariaDB coleccionan 40 (Block 4) y 19 (Rule Authority); no se ejecutaron porque
-  este host no puede abrir `/var/run/docker.sock`. Los pisos 40/19 y el 1044 necesitan CI
-  exacta para confirmar el SHA final. `ci/pisos.json` y `docs/ci/pisos.md` reflejan estos
-  conteos y su estado de verificación.
+  este host no puede abrir `/var/run/docker.sock`. CI exacta sigue pendiente para el SHA de
+  rebase y los pisos MariaDB.
 - El post-merge-guard exacto de #389, run `38045178033`, terminó SUCCESS (30/30 jobs).
-  Fernando aún no ha pasado el tip oficial para reapilar #388; su publicación continúa
-  pausada. #390 es un soporte separado de prueba de grants que prepara otra sesión; esta rama
-  no incorpora ni publica ese cambio.
+  #388 remoto sigue en head `3eac3fff`; sus checks verdes corresponden a ese head viejo y no
+  cubren la línea reapilada. El soporte separado de aserción de grants sigue bajo la otra
+  sesión; esta rama no incorpora ni publica ese cambio.
 - Reconciliación de linaje local de #388 (solo lectura, 2026-10-10): el PR remoto continúa en
   `3eac3fff`, con merge-base `bf6b0580` frente al `HEAD` local. `git range-diff` mapea los 31
   commits remotos: 30 son patch-equivalent; el commit inicial de checkpoint no iguala el
@@ -29,8 +31,8 @@
   interpretar como divergencia de su código. La línea local añade después el merge de #389,
   dicho soporte y los commits locales de paso 6. Esta rama local es la continuación que pretende
   continuar #388 sobre master, por instrucción directa de Fernando después del guard. Tip actual
-  confirmado por GitHub API y `git fetch`: `master`=`0d6484f2` (merge #391). La publicación sigue
-  pausada por instrucción de Fernando; no se ha actualizado el PR remoto.
+  confirmado por GitHub API y `git fetch`: `master`=`0d6484f2` (merge #391). No se ha actualizado
+  el PR remoto por la pausa de publicación.
 - Los commits locales `b325613e`, `eeb65d1c` y `511e83f0` no están publicados. Tier 3 GLM exacto de
   `b325613e`: NO APROBADO; BLOCK por carreras de providers contra `consume()` sin tests de
   kernel y BLOCK por falta de CI exacta/MariaDB real; MAJOR por relación de linaje/supersession
@@ -56,8 +58,8 @@
   `es_ancestro` bajo locks sin medición de retención, test ausente del invariante flock-
   primero y prueba AST ausente. Evaluar cada punto en la auditoría siguiente.
 - Falta probar el flujo completo del kernel contra MariaDB y confirmar en CI los caminos de
-  emisión y consumo. Las suites MariaDB no corrieron localmente. El SHA actual todavía no
-  tiene auditoría Tier 3 ni CI exacta; no reapilar hasta recibir el tip oficial.
+  emisión y consumo. Las suites MariaDB no corrieron localmente. El SHA tras rebase necesita
+  auditoría Tier 3 y CI exactas antes de cualquier publicación o integración.
 - Verificación disponible en el worktree posterior: el conjunto focalizado de kernel/modelos/
   permit/store/providers/checkpoint dio `333 passed`; el job unitario exacto da ahora `52 passed`.
   Se añadieron seis casos con barreras para STOP, pin y clasificación: cambios ganadores antes
@@ -70,9 +72,11 @@
   El verificador falló con el piso anterior 46; alinear a 52 pasó localmente y CI exacta aún debe
   confirmar el SHA final. Identity Shadow
   dio `1044 passed`; `git diff --check` y `python3 -m json.tool ci/pisos.json` pasan.
-- Siguiente acción concreta: completar pruebas de carrera end-to-end de evaluate/consume con
-  providers y owner transaccional; después, recibir el tip oficial, reapilar, re-medir los pisos exactos y actualizar
-  este handoff; resolver CI/MariaDB y pedir auditoría solo sobre un SHA completo.
+- Siguiente acción concreta: solicitar delta-audit Tier 3 del SHA final reapilado; completar
+  pruebas E2E de consume/revocación con owner MariaDB real. La publicación requiere que Fernando
+  levante la pausa; cualquier integración toca `.github/workflows/policy.yml` reservado a
+  Fernando. Tras autorización de publicación, repetir CI exacta y auditoría del SHA que se
+  publique, conservar el veredicto y cumplir `post-merge-guard`.
 
 ---
 
@@ -85,7 +89,7 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
 ## Estado verificado
 
 - Rama: `codex/faro-f11-kernel-step6`.
-- Base actual: `bf6b05809e1c3505efd7447b33685796ca42e3b6` (master posterior a #386).
+- Base actual: `0d6484f2f56059e9fb0d11b04de8990375ee7c53` (master posterior a #391).
 - Worktree: `/home/fruiz/jax/.worktrees/codex-faro-f11-kernel-step6`.
 - Incremento local: checkpoint externo hash-chained con genesis explícito, CAS por head
   anterior, lock `flock`, escritura atómica, `fsync` de archivo/directorios y relectura.
