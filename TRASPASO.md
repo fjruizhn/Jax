@@ -11,15 +11,18 @@
   Cerró el BLOCK previo. Los tres MINOR fueron: aceptar respuestas JSON-RPC de error como
   éxito; no demostrar que `ping` seguía en vuelo al EOF; y este handoff decía que el cambio
   seguía sin commit aunque ya estaba publicado.
-- **Corrección TDD en curso:** la prueba ahora usa un servidor Unix controlado. Este recibe
+- **Corrección TDD completada en `4f9006a0`:** la prueba ahora usa un servidor Unix controlado. Este recibe
   initialize válido, responde con `result`, recibe `notifications/initialized` y `ping`,
   confirma recepción al test y retiene la respuesta hasta comprobar EOF. El test cierra stdin,
   comprueba que el relay siga vivo mientras la respuesta está retenida, libera respuesta
-  exitosa y exige `result` sin `error` para ambos pedidos. La prueba focalizada pasó una vez;
-  falta repetir 30 veces y verificar el SHA que incluya esta corrección.
-- **Estado de gates:** `7b5eee0e` está publicado en #388. Su CI exacta sigue en curso y dejará
-  de cubrir el head cuando se publique la corrección actual. Falta commit, push, delta-auditoría
-  y CI exacta verde para el nuevo SHA. No declarar listo antes de ambas.
+  exitosa y exige `result` sin `error` para ambos pedidos. Pasó 30/30 repeticiones locales y la
+  auditoría Tier 3 delta exacta de `4f9006a0` aprobó con cambios (0 BLOCK, 0 MAJOR, 1 MINOR).
+  Ese MINOR era esta descripción de estado; este commit lo corrige.
+- **Estado de gates:** el cambio de código y la corrección de este handoff están comprometidos;
+  `4f9006a0` se publicó en #388. Su CI exacta (policy `38090299533`, secret scan
+  `38090299531`, canonical projections `38090299563`) debe volver a ejecutarse para el nuevo
+  SHA documental; la delta-auditoría exacta de ese SHA también está pendiente. No declarar
+  listo antes de ambas.
 - **Quién decidió:** Codex implementa las tres correcciones tras la delta-auditoría Tier 3;
   Fernando autorizó continuar cierre, auditoría y CI de #388.
 
