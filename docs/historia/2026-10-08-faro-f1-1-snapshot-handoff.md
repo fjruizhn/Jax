@@ -276,8 +276,9 @@ no concede autoridad ni prueba el estado operativo actual.
   fuera del flock y falta de presupuesto estructural futuro para
   `RuleEvaluationRequest.arguments` ([veredicto](https://github.com/fjruizhn/Jax/pull/371#issuecomment-6091232740)).
   `audit_faro_heads` informó APROBADO funcional, 0 BLOCK, 0 MAJOR y 3 MINOR:
-  scan O(n) sin p95/RSS; `tests/test_faro_aviso.py:1081–1124` no aísla reinicio
-  y procesos cortos ni LRU > 32; y `test_faro_rule_authority_models` no invoca
+  scan O(n) sin p95/RSS (load test 0.9);
+  `tests/test_faro_aviso.py:1081–1124` no aísla reinicio y procesos cortos ni
+  LRU > 32; y `test_faro_rule_authority_models` no invoca
   el evaluador/wiring futuro ([veredicto formal](https://github.com/fjruizhn/Jax/pull/371#issuecomment-6092620311)).
   Ambos informes comparten el hallazgo O(n); los otros difieren. Una nota
   intermedia parafraseó el tercer punto de `audit_faro_heads` como una
