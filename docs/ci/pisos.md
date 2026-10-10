@@ -4662,6 +4662,13 @@ y el servidor final como `port: 3306`; el detector ahora espera el segundo (o el
 `init process done`) antes de autenticar y consultar `SELECT 1`. Una regresión unitaria cubre ambos
 formatos. La medición real con Docker del 2026-10-09 confirmó 10 en Python 3.14.
 
+checkpoint-overlay (2026-10-07, auditor de #377): 5 -> 6 (+1: overlay a corpus no ratificado se
+rechaza antes de escribir — cero filas; la tanda de 8 eventos se reordenó para emitir el overlay
+antes de revocar la ratificación). Medido con la MariaDB efímera 12.3.3 (`--network none`).
+
+9 -> 10 el 2026-10-09: la regresión MariaDB del overlay sin ratificación quedó incluida en el
+comando exacto del workflow. Medición real con Docker: `10 passed`.
+
 ## `authority-rule-events/ratifications`
 
 Piso vigente (2026-10-07): `^12 passed in `. Medido con el comando exacto del workflow. Cubre
