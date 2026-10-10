@@ -211,3 +211,37 @@ preflight correspondan al mismo SHA.
   esperar CI verde y seguir el procedimiento exacto de integración siguen
   pendientes. Este archivo se archiva antes de la auditoría final según el
   runbook de traspaso continuo.
+
+## Cierre de los rechazos previos y reapilado · 2026-10-09
+
+- Fernando autorizó continuar con la recomendación: reparar #381 sobre el
+  `master` vigente y auditar un SHA nuevo antes de integrar. El auditor Tier 3
+  había rechazado `4d493b98` por dos motivos: podía reabrirse el writer genérico
+  de ratificaciones de #379 y una fila intermedia falsificada de checkpoints
+  pasaba si el head final coincidía.
+- Se reapiló el PR sobre `master@8c850bcec5cd0233db5487343210c0ba96689f97`.
+  La resolución conserva `append_ratification_from_candidate` como único
+  writer de RATIFICATION_GRANTED, con una captura `plain(view)` única y el lock
+  y checkpoint durable; `append_authority_event` y su helper interno rechazan
+  ratificaciones suministradas por caller.
+- `verify_authority_ledger` ahora recorre el snapshot validado de
+  `checkpoint_store.checkpoints()` y compara cada fila de secuencia positiva
+  con `events[sequence-1]` (identidad, evento y hash). La regresión de una fila
+  intermedia seq=2 falsa con un head posterior válido falló antes del fix
+  (`DID NOT RAISE`) y pasó tras el fix.
+- La suite MariaDB real midió **10 passed**. Por ser el último en medir, Codex
+  elevó el piso de 9 a 10 en `ci/pisos.json`, el comentario de workflow y esta
+  documentación; el verificador `piso.py` terminó con rc 0.
+- Verificación local: 42 focales de activation/ratification/seal/checkpoint,
+  39 de events/ratification/checkpoint, y 10 MariaDB pasaron; `git diff
+  --check` limpio. Para Docker se usó `sudo -n -E` porque el usuario no está
+  en el grupo `docker`.
+- El commit de reapilado `c3701553d5e8ee2c6420fa2f03e4acad35118d9e` se publicó
+  en la rama del PR. #381 ahora toma `master` como base. La CI completa y la
+  auditoría Tier 3 del SHA final aún deben terminar antes de integrar.
+- Decisión conceptual sobre overlays históricos: Fernando había escogido
+  cuarentena el 2026-10-07; se mantiene esa semántica. La corrección actual no
+  cambia bytes de la política: exige ratificación vigente para emisiones
+  nuevas y conserva cuarentena determinista de las históricas.
+- Alternativa descartada: mantener la base apilada en la rama #379; esa rama ya
+  está integrada y mantenerla como base ocultaba el writer incompatible.
