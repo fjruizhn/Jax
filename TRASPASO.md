@@ -22,7 +22,7 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   sellada del kernel. El adapter en memoria aplica idempotencia exacta y rechaza reintentos
   con otro permiso.
 - Verificación local: las suites de checkpoint, providers, modelos, permisos y store en
-  memoria pasan (`300 passed`); MariaDB colecciona 17 pruebas. `compileall` y
+  memoria pasan (`303 passed`, checkpoint 9); MariaDB colecciona 17 pruebas. `compileall` y
   `git diff --check` pasan.
 - Las pruebas MariaDB no se ejecutaron: el fixture Docker no puede abrir
   `/var/run/docker.sock` por permiso denegado.
@@ -32,8 +32,10 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   mismo `flock`; falta runbook auditado de reconciliación antes de wiring productivo.
   Kimi CLI no está disponible por límite 403.
 - Añadí regresión que forja una cadena hash-válida con un head histórico repetido. Pasa con
-  el validador vigente; mutando temporalmente esa guardia, falla como se espera. Suite de
-  checkpoint: 7 passed.
+  el validador vigente; mutando temporalmente esa guardia, falla como se espera.
+- Agregué inyección de fallo de `fsync` antes de `replace` (el head viejo permanece) y de
+  `fsync` de directorio después de `replace` (error de publicación incierta; el nuevo archivo
+  es visible). Las nueve pruebas de checkpoint y las cinco suites cercanas pasan: 303 total.
 - El checkout compartido claude-skills está sincronizado; `claude-skills-sync pull`
   informó una divergencia local de `settings.json` de Claude, sin cambios en PENDIENTES.
 
