@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import secrets
@@ -20,6 +20,7 @@ from tests.policy.catalogo_pin import catalogo_del_pin
 from policy.authority_ledger.canonical import canonical_bytes
 from policy.authority_ledger.errors import AuthorityStateError
 from policy.rule_authority.errors import CheckpointInvalido, RuleAuthorityError
+from policy.rule_authority.permit import RulePermitDraft, _permit_after_kernel_evaluation
 from policy.rule_authority.models import (
     RuleDecision,
     RuleDecisionStatus,
@@ -39,6 +40,7 @@ from policy.rule_authority.trusted_checkpoint import RuleAuditCheckpointStore
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "policy/rule_authority/migrations/001_rule_authority_kernel.sql"
+MIGRATION_STEP6 = ROOT / "policy/rule_authority/migrations/002_enable_atomic_permits.sql"
 IMAGE = os.environ.get("JAX_RULE_AUTHORITY_TEST_MARIADB_IMAGE", "mariadb:12.3.3")
 CATALOG = catalogo_del_pin()
 _CATALOG_BYTES = (ROOT / "policy/faro/catalogo-topes.json").read_bytes()
@@ -49,10 +51,10 @@ def _run(docker: list[str], *args: str):
     return subprocess.run([*docker, *args], check=True, capture_output=True, text=True)
 
 
-def _apply_migration(connection) -> None:
+def _apply_migration(connection, migration: Path = MIGRATION) -> None:
     delimiter = ";"
     statement = []
-    sql = MIGRATION.read_text(encoding="utf-8")
+    sql = migration.read_text(encoding="utf-8")
     with connection.cursor() as cursor:
         for raw_line in sql.splitlines():
             line = raw_line.strip()
@@ -106,6 +108,30 @@ def _decision(
             else None
         ),
         decided_at_utc=datetime(2026, 10, 7, 12, 0, at, tzinfo=timezone.utc),
+    )
+
+
+def _permit_draft(request, decision, permit_id="0199f8a1-8c00-7000-8000-000000000421"):
+    return RulePermitDraft(
+        permit_id=permit_id,
+        request_id=request.request_id,
+        request_hash=request.request_hash,
+        rule_id=request.rule_id,
+        rule_path="policy/faro/rule-one.yaml",
+        rule_blob_oid="a" * 40,
+        rule_content_hash="sha256:" + "2" * 64,
+        policy_revision="b" * 40,
+        policy_tree_oid="c" * 40,
+        policy_snapshot_hash="sha256:" + "3" * 64,
+        ratification_event_id="0199f8a1-8c00-7000-8000-000000000422",
+        authority_ledger_checkpoint={"sequence": 7, "head_event_hash": "sha256:" + "4" * 64},
+        stop_checkpoint={"version": 3, "fingerprint": "stop:3"},
+        capability_id=request.capability,
+        capability_version="1",
+        capability_class="OBLIGATING",
+        capability_limits={"form": "CANTIDAD", "unit": "mensajes", "max": 2},
+        issued_at_utc=decision.decided_at_utc,
+        expires_at_utc=decision.decided_at_utc + timedelta(minutes=2),
     )
 
 
@@ -787,3 +813,86 @@ def test_decision_store_cierra_si_checkpoint_atrasado_o_publicacion_desconocida(
     # because the authoritative DB head and the old external anchor disagree.
     with pytest.raises(RuleAuthorityStorageError, match="checkpoint.*head"):
         unknown_store.record(third_request, _decision(third_request))
+
+
+def test_permit_y_decision_se_persisten_atómicamente_y_reintento_reusa_head(db, app, tmp_path):
+    with db.root() as admin:
+        _apply_migration(admin, MIGRATION_STEP6)
+    checkpoint = RuleAuditCheckpointStore(tmp_path / "permit-audit.jsonl")
+    checkpoint.bootstrap()
+    store = MariaDBRuleDecisionStore(app, checkpoint_store=checkpoint)
+    request = _request("0199f8a1-8c00-7000-8000-000000000135")
+    decision = _decision(request, status=RuleDecisionStatus.PERMIT)
+    draft = _permit_draft(request, decision)
+
+    evaluated_permit = _permit_after_kernel_evaluation(draft)
+    permit = store.record_permit(request, decision, evaluated_permit)
+    assert permit._is_store_sealed()
+    assert permit.projection()["permit_hash"]
+    assert checkpoint.head_actual()
+    assert store.record_permit(request, decision, evaluated_permit).projection() == permit.projection()
+    with db.root(autocommit=True) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute("SELECT audit_sequence,head_hash FROM rule_authority_audit_head WHERE singleton=1")
+            assert cursor.fetchone()[0] == 2
+            cursor.execute("SELECT COUNT(*) FROM rule_decisions WHERE request_id=%s", (request.request_id,))
+            assert cursor.fetchone()[0] == 1
+            cursor.execute("SELECT COUNT(*) FROM rule_permits WHERE request_id=%s", (request.request_id,))
+            assert cursor.fetchone()[0] == 1
+
+
+def test_fallo_de_insert_de_permit_revierte_decision_y_head(db, app, tmp_path):
+    with db.root() as admin:
+        _apply_migration(admin, MIGRATION_STEP6)
+        with admin.cursor() as cursor:
+            cursor.execute("""
+                CREATE TRIGGER fail_rule_permit_insert BEFORE INSERT ON rule_permits
+                FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='injected permit failure'
+            """)
+        admin.commit()
+    checkpoint = RuleAuditCheckpointStore(tmp_path / "rollback-audit.jsonl")
+    checkpoint.bootstrap()
+    store = MariaDBRuleDecisionStore(app, checkpoint_store=checkpoint)
+    request = _request("0199f8a1-8c00-7000-8000-000000000136")
+    decision = _decision(request, status=RuleDecisionStatus.PERMIT)
+    with pytest.raises(RuleAuthorityStorageError):
+        store.record_permit(
+            request, decision,
+            _permit_after_kernel_evaluation(_permit_draft(request, decision)),
+        )
+
+    with db.root(autocommit=True) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute("DROP TRIGGER fail_rule_permit_insert")
+            cursor.execute("SELECT audit_sequence,head_hash FROM rule_authority_audit_head WHERE singleton=1")
+            assert cursor.fetchone() == (0, None)
+            cursor.execute("SELECT COUNT(*) FROM rule_decisions WHERE request_id=%s", (request.request_id,))
+            assert cursor.fetchone()[0] == 0
+            cursor.execute("SELECT COUNT(*) FROM rule_permits WHERE request_id=%s", (request.request_id,))
+            assert cursor.fetchone()[0] == 0
+    assert checkpoint.head_actual() == checkpoint.checkpoints()[0]["head"]
+
+
+def test_commit_de_permit_sin_anclaje_externo_no_se_reconoce_ni_reintenta(db, app, tmp_path):
+    with db.root() as admin:
+        _apply_migration(admin, MIGRATION_STEP6)
+
+    class PublicationUnknown(RuleAuditCheckpointStore):
+        def publicar(self, head: str, *, anterior: str) -> None:
+            raise CheckpointInvalido("resultado de publicación desconocido")
+
+    checkpoint = PublicationUnknown(tmp_path / "unknown-permit.jsonl")
+    checkpoint.bootstrap()
+    store = MariaDBRuleDecisionStore(app, checkpoint_store=checkpoint)
+    request = _request("0199f8a1-8c00-7000-8000-000000000137")
+    decision = _decision(request, status=RuleDecisionStatus.PERMIT)
+    draft = _permit_draft(request, decision)
+    evaluated_permit = _permit_after_kernel_evaluation(draft)
+    with pytest.raises(RuleAuthorityStorageError, match="sin checkpoint"):
+        store.record_permit(request, decision, evaluated_permit)
+    with db.root(autocommit=True) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute("SELECT audit_sequence FROM rule_authority_audit_head WHERE singleton=1")
+            assert cursor.fetchone()[0] == 2
+    with pytest.raises(RuleAuthorityStorageError, match="checkpoint.*head"):
+        store.record_permit(request, decision, evaluated_permit)

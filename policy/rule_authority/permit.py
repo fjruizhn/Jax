@@ -17,8 +17,10 @@ from .errors import RuleAuthorityError
 
 
 _SEAL = object()
+_KERNEL_SEAL = object()
 _DOMAIN = "JAX-FARO-RULE-PERMIT"
 _VERSION = "1"
+_CONSUMPTION_DOMAIN = "JAX-FARO-RULE-PERMIT-CONSUMPTION"
 _OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9._:-]{0,127}\Z")
@@ -169,6 +171,32 @@ class RulePermitDraft:
         return _plain(self._payload)
 
 
+class _EvaluatedPermit:
+    """Kernel-issued boundary token; a plain draft cannot request persistence."""
+
+    __slots__ = ("_draft", "_seal")
+
+    def __init__(self, draft: RulePermitDraft, *, _seal: object = None) -> None:
+        if _seal is not _KERNEL_SEAL or type(draft) is not RulePermitDraft:
+            raise RuleAuthorityError("solo el kernel puede presentar un permiso elegible")
+        object.__setattr__(self, "_draft", draft)
+        object.__setattr__(self, "_seal", _KERNEL_SEAL)
+
+    def __setattr__(self, *_args) -> None:
+        raise RuleAuthorityError("token de evaluación de permiso es inmutable")
+
+    def __delattr__(self, *_args) -> None:
+        raise RuleAuthorityError("token de evaluación de permiso es inmutable")
+
+    def _is_kernel_sealed(self) -> bool:
+        return self._seal is _KERNEL_SEAL
+
+
+def _permit_after_kernel_evaluation(draft: RulePermitDraft) -> _EvaluatedPermit:
+    """Private bridge for RuleAuthorityKernel; tests may exercise the adapter boundary."""
+    return _EvaluatedPermit(draft, _seal=_KERNEL_SEAL)
+
+
 class RulePermit:
     """Store-sealed permit. Drafts or decoded caller values are never trusted."""
 
@@ -208,8 +236,76 @@ class RulePermit:
         return self._seal is _SEAL
 
 
+@dataclass(frozen=True)
+class RulePermitConsumptionDraft:
+    permit_id: str
+    request_hash: str
+    consumed_at_utc: datetime
+
+    def __post_init__(self) -> None:
+        try:
+            uuid7_text(self.permit_id, "permit_id")
+        except Exception as exc:
+            raise AuthorityEventValidationError("permit_id inválido") from exc
+        if type(self.request_hash) is not str or not _SHA256.fullmatch(self.request_hash):
+            raise AuthorityEventValidationError("request_hash inválido")
+        object.__setattr__(self, "consumed_at_utc", _utc(self.consumed_at_utc, "consumed_at_utc"))
+
+    def projection(self) -> dict[str, Any]:
+        return {
+            "permit_id": self.permit_id,
+            "request_hash": self.request_hash,
+            "consumed_at_utc": self.consumed_at_utc.isoformat(
+                timespec="microseconds"
+            ).replace("+00:00", "Z"),
+        }
+
+
+class RulePermitConsumption:
+    __slots__ = ("_payload", "_seal")
+
+    def __init__(self, payload: Mapping[str, Any], *, _seal: object = None) -> None:
+        if _seal is not _SEAL:
+            raise RuleAuthorityError("RulePermitConsumption solo lo entrega el store autoritativo")
+        frozen = _freeze_json(payload, "RulePermitConsumption")
+        expected_fields = frozenset({"permit_id", "request_hash", "consumed_at_utc",
+                                     "consumption_hash"})
+        if not isinstance(frozen, Mapping) or frozenset(frozen) != expected_fields:
+            raise RuleAuthorityError("RulePermitConsumption: proyección cerrada inválida")
+        expected_hash = _consumption_hash({key: value for key, value in frozen.items()
+                                           if key != "consumption_hash"})
+        if frozen["consumption_hash"] != expected_hash:
+            raise RuleAuthorityError("RulePermitConsumption consumption_hash no coincide")
+        object.__setattr__(self, "_payload", frozen)
+        object.__setattr__(self, "_seal", _SEAL)
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._payload:
+            value = self._payload[name]
+            if name == "consumed_at_utc" and type(value) is str:
+                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return value
+        raise AttributeError(name)
+
+    def __setattr__(self, *_args) -> None:
+        raise RuleAuthorityError("RulePermitConsumption es inmutable")
+
+    def __delattr__(self, *_args) -> None:
+        raise RuleAuthorityError("RulePermitConsumption es inmutable")
+
+    def projection(self) -> Mapping[str, Any]:
+        return self._payload
+
+    def _is_store_sealed(self) -> bool:
+        return self._seal is _SEAL
+
+
 def _permit_hash(projection: Mapping[str, Any]) -> str:
     return domain_hash(_DOMAIN, _VERSION, _plain(projection))
+
+
+def _consumption_hash(projection: Mapping[str, Any]) -> str:
+    return domain_hash(_CONSUMPTION_DOMAIN, _VERSION, _plain(projection))
 
 
 def _trusted_permit(value: RulePermitDraft | Mapping[str, Any]) -> RulePermit:
@@ -240,4 +336,33 @@ def _trusted_permit(value: RulePermitDraft | Mapping[str, Any]) -> RulePermit:
     return RulePermit(payload, _seal=_SEAL)
 
 
-__all__ = ["RulePermit", "RulePermitDraft"]
+def _trusted_consumption(value: RulePermitConsumptionDraft | Mapping[str, Any]
+                         ) -> RulePermitConsumption:
+    if type(value) is RulePermitConsumptionDraft:
+        payload = value.projection()
+    elif isinstance(value, Mapping):
+        payload = dict(value)
+        stored_hash = payload.pop("consumption_hash", None)
+        expected = frozenset({"permit_id", "request_hash", "consumed_at_utc"})
+        if frozenset(payload) != expected:
+            raise RuleAuthorityError("RulePermitConsumption: proyección incompleta o con campos extra")
+        if type(payload["consumed_at_utc"]) is str:
+            try:
+                payload["consumed_at_utc"] = datetime.fromisoformat(
+                    payload["consumed_at_utc"].replace("Z", "+00:00")
+                )
+            except ValueError as exc:
+                raise RuleAuthorityError("consumed_at_utc inválido") from exc
+        draft = RulePermitConsumptionDraft(**payload)
+        payload = draft.projection()
+        computed = _consumption_hash(payload)
+        if stored_hash is not None and stored_hash != computed:
+            raise RuleAuthorityError("RulePermitConsumption consumption_hash no coincide")
+    else:
+        raise RuleAuthorityError("store requiere RulePermitConsumptionDraft o proyección cerrada")
+    payload["consumption_hash"] = _consumption_hash(payload)
+    return RulePermitConsumption(payload, _seal=_SEAL)
+
+
+__all__ = ["RulePermit", "RulePermitDraft", "RulePermitConsumption",
+           "RulePermitConsumptionDraft"]
