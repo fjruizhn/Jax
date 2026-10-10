@@ -227,6 +227,21 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   SHA nuevo, que debe recibir su propia CI y delta-audit exacta antes de presentarlo como head
   final listo. La decisión `OVERLAY_ISSUED` continúa pendiente y bloquea merge.
 
+### Seguimiento CI de trazabilidad · 2026-10-10
+
+- CI exacta `38036905805`, SHA `05dfff13715f269ff5583ce99d0b4d61129a5f2f`: 30/31 jobs
+  SUCCESS; el único fallo es `faro-fase0`. `tests-puros` terminó SUCCESS, incluidos Block 4
+  MariaDB y Rule Authority MariaDB con piso 18; canonical projections `38036905810` y
+  secret-scan `38036905796` también SUCCESS.
+- El fallo volvió a ser `test_el_rele_con_half_close_deja_llegar_la_respuesta_antes_de_salir`:
+  `779 passed, 1 failed`, stdout vacío e `IndexError` al tomar la primera línea. En `2d6a0f41`
+  el mismo test pasó; esto todavía no identifica una causa. El test no capturaba stderr ni
+  informaba el exit code del rele. Cambié solo su diagnóstico para capturar ambos y mostrar
+  evidencia si falta la respuesta. No cambiar el runtime hasta inspeccionar la salida nueva.
+- No fue posible reproducir localmente: el Python del checkout no tiene el módulo `mcp`, así
+  que la colección de `tests/test_faro_puerto_e2e.py` falla por dependencia ausente. CI exacta
+  del nuevo SHA debe confirmar la mejora diagnóstica y si el fallo persiste.
+
 ## Límites de autoridad y alcance
 
 - La decisión directa de Fernando sigue pendiente: si `OVERLAY_ISSUED` requiere una
