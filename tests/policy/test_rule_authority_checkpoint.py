@@ -235,9 +235,50 @@ def test_fallo_fsync_directorio_despues_de_replace_es_publicacion_incierta(tmp_p
     with pytest.raises(CheckpointInvalido, match="resultado de publicación durable desconocido"):
         store.publicar(new_head, anterior=genesis)
 
-    # The rename is visible, but the failed directory fsync means callers cannot
-    # treat publication as acknowledged; a fresh read must validate the file.
+    # The rename is visible to this process, but visibility alone is not a
+    # durable acknowledgement. The retry regression below checks the fsync gate.
     assert store.head_actual() == new_head
+
+
+def test_reintento_no_confirma_head_visible_hasta_reconciliar_durabilidad(tmp_path, monkeypatch):
+    store = _bootstrapped_store(tmp_path / "audit-checkpoints.jsonl")
+    genesis = store.head_actual()
+    new_head = "sha256:" + "1" * 64
+
+    def fail_directory_fsync(_path):
+        raise OSError("injected persistent directory fsync failure")
+
+    with monkeypatch.context() as failed_directory:
+        failed_directory.setattr(
+            RuleAuditCheckpointStore, "_fsync_directory", fail_directory_fsync
+        )
+        with pytest.raises(
+            CheckpointInvalido, match="resultado de publicación durable desconocido"
+        ):
+            store.publicar(new_head, anterior=genesis)
+
+        # Re-reading a rename that is visible in this process cannot prove that
+        # its directory entry survived a crash. Recovery and the identical CAS
+        # retry must fail while that durability barrier still fails.
+        with pytest.raises(CheckpointInvalido, match="durabilidad"):
+            store.confirmar(new_head)
+        with pytest.raises(CheckpointInvalido, match="durabilidad"):
+            store.publicar(new_head, anterior=genesis)
+
+    real_fsync = os.fsync
+
+    def fail_checkpoint_file_fsync(fd):
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("injected checkpoint file fsync failure")
+        real_fsync(fd)
+
+    with monkeypatch.context() as failed_file:
+        failed_file.setattr(os, "fsync", fail_checkpoint_file_fsync)
+        with pytest.raises(CheckpointInvalido, match="durabilidad"):
+            store.confirmar(new_head)
+
+    assert store.confirmar(new_head) is True
+    store.publicar(new_head, anterior=genesis)
 
 
 def test_no_se_infiere_genesis_desde_un_log_ausente_y_bootstrap_es_unico(tmp_path):

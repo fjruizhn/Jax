@@ -152,6 +152,10 @@ class RuleAuditCheckpointStore:
             current = checkpoints[-1]
             if head == current["head"]:
                 if anterior == (current["previous_head"] or ""):
+                    if not self.confirmar(head):
+                        raise CheckpointInvalido(
+                            "reintento no pudo confirmar la durabilidad del checkpoint"
+                        )
                     return
                 raise CheckpointInvalido("head repetido con anterior distinto")
             if any(row["head"] == head for row in checkpoints):
@@ -178,7 +182,16 @@ class RuleAuditCheckpointStore:
         if not _valid_hash(head):
             return False
         with self.locked():
-            return any(row["head"] == head for row in self._read_all())
+            if not any(row["head"] == head for row in self._read_all()):
+                return False
+            try:
+                self._fsync_checkpoint_file()
+                self._fsync_directory_chain(self.path.parent)
+            except (OSError, CheckpointInvalido) as exc:
+                raise CheckpointInvalido(
+                    "no se pudo confirmar la durabilidad del checkpoint"
+                ) from exc
+            return True
 
     def checkpoints(self) -> tuple[dict[str, object], ...]:
         with self.locked():
@@ -248,6 +261,19 @@ class RuleAuditCheckpointStore:
             except FileNotFoundError:  # fail-soft: otro limpiador ya retiró el temporal y no queda estado que recuperar
                 pass
             raise CheckpointInvalido("resultado de publicación durable desconocido") from exc
+
+    def _fsync_checkpoint_file(self) -> None:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(self.path, flags)
+        except OSError as exc:
+            raise CheckpointInvalido("archivo de checkpoint no disponible para fsync") from exc
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise CheckpointInvalido("checkpoint no es un archivo regular durante fsync")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def _cleanup_abandoned_temporaries(self) -> None:
         """Remove only this store's private, regular publication temp files.
