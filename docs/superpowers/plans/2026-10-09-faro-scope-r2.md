@@ -7,13 +7,18 @@ Base: `origin/master@709237f901e8ec8840f6b2b39a1a2ce88682674a`
 
 ## Estado
 
-Implementación lista en `codex/faro-r2`; pendiente reconciliar la base actual de `master`, revisión adversarial,
-auditoría Tier 3 del SHA exacto e integración por PR. No se instala ni despliega en este trabajo.
+R-2 está en implementación en `codex/faro-r2`; el cambio local agrega lease durable y recovery antes del socket.
+Faltan reauditoría adversarial, reconciliar la base actual de `master`, publicar por PR, CI exacta, auditoría Tier 3
+del SHA exacto e integración. No se instala ni despliega en este trabajo.
 
 Verificado el 2026-10-09 en systemd 259: `tests/test_faro_scope.py` — 102 passed, incluidas cuatro pruebas
 reales del user manager; comando exacto de CI `faro-fase0` — 834 passed, 4 deselected, cero skips. El caso
 `TasksMax=4K` quedó rechazado: systemd rechaza ese sufijo con `Invalid argument`; la configuración ahora
 acepta solo enteros positivos.
+
+Verificación local 2026-10-10 con el lease: selección exacta `faro-fase0` en Python 3.12 —
+863 passed, 5 deselected (`systemd_integration`), cero skips. El comparador de piso debe pasar sobre el mismo
+log; las cinco integraciones reales del user manager siguen pendientes de repetirse después del cambio.
 
 ## Objetivo
 
@@ -36,11 +41,17 @@ La prueba de freno debe matar todos los procesos de la ejecución, incluidos hij
 
 ## Decisión técnica
 
-Usar un **servicio transitorio del user manager por uid/ejecución**, con unidad `faro-jaula-u<uid>.service`, bajo el slice explícito de Faro. Un uid solo puede tener una ejecución viva según `ServidorControl`; la unidad determinista por uid también hace que systemd arbitre atómicamente dos intentos concurrentes y permite recuperar el estado tras reinicios.
+Usar un **servicio transitorio del user manager por uid/ejecución**, con unidad `faro-jaula-u<uid>-<attempt_id>.service`, bajo el slice explícito de Faro. `ServidorControl` permite una ejecución viva por uid; un lease durable exclusivo, bajo `JAX_FARO_SCOPE_STATE_DIR`, reserva el uid antes de pedir el start y conserva la identidad del intento a través de cancelaciones y reinicios. El nombre determinista de la unidad permite consultar systemd, pero no sustituye ese lease ni demuestra por sí mismo que un start pendiente haya terminado.
 
 No usar `systemd-run --user --scope` desde el futuro servicio de sistema `User=faro`: no se probó que el user manager pueda adoptar un PID que nació en `system.slice`, fuera de su subárbol. No autorizar a `faro` a administrar el system manager ni añadir un broker root en esta fase. La unidad `.service` mantiene el contrato de aislamiento y límites por cgroup; documentar la precisión de unidad como desviación del nombre `.scope` del plan 0.6 y someterla a auditoría Tier 3. Si la auditoría demuestra que el tipo `.scope` es requisito literal, detener esa integración y elevar la decisión antes de cambiar la autoridad.
 
 El servicio transitorio usa `Type=exec`, `--pipe`, `--collect`, `KillMode=control-group`, `OOMPolicy=kill` y límites finitos requeridos por configuración. No hay valores por defecto para los límites: sin los tres, el lanzamiento falla cerrado. No se limita cantidad de agentes; `TasksMax` expresa el tope de procesos/hilos como recurso del sistema operativo, conforme a D-4.
+
+**Lease y recovery R-2 (decisión técnica corregida, Codex, 2026-10-10).** El lease durable tiene esquema cerrado y etapas `PREPARED → REQUESTED → ACCEPTED → CLIENT_CLOSED`. PREPARED confirma reserva/fsync antes de cualquier llamada externa; REQUESTED confirma fsync antes de crear el cliente. ACCEPTED se persiste únicamente al observar la unidad propia con Description exacta. Solo desde ACCEPTED puede persistirse CLIENT_CLOSED tras el wait exitoso del cliente exacto. Un cliente que termina sin aceptación conserva REQUESTED: el receptor puede haber recibido una petición aunque no haya respondido. El namespace de unidades/jobs vacío no demuestra por sí solo una barrera causal.
+
+Recovery se ejecuta bajo el lock de instancia antes de abrir el socket. PREPARED se libera únicamente si namespace completo está vacío; CLIENT_CLOSED requiere reconciliación de identidad y prueba de cgroup vacío. REQUESTED o ACCEPTED sin handle conservan cuarentena por UID y no impiden admitir otros UIDs seguros. Archivos corruptos o inseguros bloquean recovery; no se borran. Un cambio de manager/epoch no libera REQUESTED: clientes huérfanos pueden conectar tarde al manager nuevo. La revisión Sol adicional debe cerrar explícitamente la prueba de ausencia de cgroups supervivientes tras un reinicio sin serialización del manager antes de publicar la implementación.
+
+0.10 debe instalar `/var/lib/faro/jaulas` persistente, propiedad de `faro:faro` y modo `0700`, configurar `JAX_FARO_SCOPE_STATE_DIR`, mantener una sola instancia y probar la barrera del supervisor sobre el cgroup completo y sus clientes. El directorio no puede estar bajo `RuntimeDirectory`. No se crea una API manual/booleana para liberar leases inciertos.
 
 ## Contrato de estado
 
@@ -50,7 +61,7 @@ El estado consultado por uid es trivalente:
 - `EMPTY`: systemd confirma que no existe unidad activa y el cgroup ya está vacío/eliminado.
 - `UNKNOWN`: manager, unidad, ControlGroup, cgroupfs o proceso no permiten concluir.
 
-Solo `EMPTY` libera. `LIVE` y `UNKNOWN` conservan/rechazan el uid. Consultar systemd por la unidad determinista incluso cuando el uid no aparece en los mapas en memoria; así un reinicio del proceso Faro no autoriza reutilizar un uid con cgroup superviviente.
+Solo `EMPTY` libera. `LIVE` y `UNKNOWN` conservan/rechazan el uid. Consultar systemd por la unidad determinista incluso cuando el uid no aparece en los mapas en memoria; así un reinicio del proceso Faro no autoriza reutilizar un uid con cgroup superviviente. La consulta sin lease cubre el namespace completo por UID, incluidos nombres legacy y por intento; una unidad/job huérfana bloquea admisión, sin adoptarla ni matarla.
 
 Orden de cierre:
 
@@ -64,11 +75,12 @@ Orden de cierre:
 
 ## Archivos previstos
 
-- `jax/faro/scope.py`: límites validados; nombre cerrado de unidad; start/wait/kill/query asíncronos sin bloquear el event loop; lectura de `ControlGroup` desde systemd, nunca deducida por concatenación; inspección de `cgroup.events`; estados `LIVE/EMPTY/UNKNOWN`.
+- `jax/faro/scope.py`: límites validados; lease durable y recovery antes de admisión; nombre cerrado de unidad; start/wait/kill/query asíncronos sin bloquear el event loop; lectura de `ControlGroup` desde systemd, nunca deducida por concatenación; inspección de `cgroup.events`; estados `LIVE/EMPTY/UNKNOWN`.
+- `jax/faro/scope_lease.py`: lease versionado por uid; directorio y archivos con permisos/propiedad exactos; creación exclusiva durable; lectura cerrada ante symlinks, entradas inesperadas o corrupción; liberación por intento exacto.
 - `jax/faro/jaula.py`: sustituir liveness basado en `Popen.returncode` por el proveedor de cgroup; ejecutar bwrap dentro de la unidad con `--pipe`.
 - `jax/faro/control.py`: callback de liveness obligatorio; revisar cada uid candidato contra systemd, aun sin reserva local; cierre que conserva uid hasta Puerto revocado y cgroup vacío.
 - `jax/faro/servicio.py`: `control(scope_manager)` no construye control sin la fuente de liveness.
-- `tests/test_faro_scope.py`: propiedades y argumentos cerrados; cgroup y unidad faltantes/desconocidos; árbol con nieto/setsid; límites efectivos; muerte del scope sin afectar hermanos; colisiones/concurrencia por uid; cancellation y fallo de manager.
+- `tests/test_faro_scope.py`: propiedades y argumentos cerrados; cgroup y unidad faltantes/desconocidos; árbol con nieto/setsid; límites efectivos; muerte del scope sin afectar hermanos; lease durable/corrupto/colisión; recuperación de unidad propia/ausente/ajena; serialización de recovery; cancelación y fallo de manager.
 - `tests/test_faro_control.py`, `tests/test_faro_lanzador.py` y golden de bwrap: adaptar a proveedor explícito; agregar regresiones de reinicio y cierre.
 - `docs/superpowers/plans/2026-10-02-faro-fase-0.md`: añadir la desviación de unidad `.service` y la precondición del user manager de `faro` para 0.10.
 - `TRASPASO.md`: estado, decisiones y pruebas por commit.
@@ -86,11 +98,11 @@ Orden de cierre:
 
 ## Fuera de alcance y dependencia
 
-- No elegir la arquitectura de red de 0.5 ni implementar proxy S-1; esa decisión sigue pendiente de Fernando.
+- No implementar proxy S-1 en este cambio R-2. La decisión técnica de red 0.5 ya fue cerrada por el coordinador con arquitectura Sol: loopback dentro de `--unshare-net` y relé a proxy UDS por ejecución; su implementación/pruebas son el siguiente cambio.
 - No instalar cuenta/user manager, `linger`, slice ni unidades persistentes de `faro`; corresponden al paso operativo 0.10 y requieren comprobación del host de destino.
 - No habilitar `agentes.lanzar`, conectores de motores, límites de producción ni despliegue. 0.7/0.8 deben reutilizar obligatoriamente este gestor y el callback.
 - La carga final de 0.9 sigue siendo requisito para fijar valores de límites y cualquier GO de producción.
 
 ## Criterio de aceptación
 
-El uid permanece ocupado mientras haya cualquier proceso en su unidad/cgroup o el estado sea desconocido; un reinicio de Faro no lo libera por perder memoria; el freno mata todos los descendientes de una ejecución sin afectar al servicio ni a otra ejecución; los tres límites se aplican en una unidad verificada antes de darla por lista; ninguna ruta productiva puede construir el canal de control o lanzar una jaula sin proveedor de liveness; CI y auditoría Tier 3 aprueban el SHA exacto.
+El uid permanece ocupado mientras haya cualquier proceso en su unidad/cgroup o el estado sea desconocido; un reinicio de Faro no lo libera por perder memoria; el socket no abre hasta completar recovery durable; el freno mata todos los descendientes de una ejecución sin afectar al servicio ni a otra ejecución; los tres límites se aplican en una unidad verificada antes de darla por lista; ninguna ruta productiva puede construir el canal de control o lanzar una jaula sin proveedor de liveness; CI y auditoría Tier 3 aprueban el SHA exacto.
