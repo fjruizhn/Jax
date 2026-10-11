@@ -54,7 +54,7 @@ from policy.rule_authority.trusted_checkpoint import RuleAuditCheckpointStore
 from policy.rule_authority.storage import (
     MariaDBRuleDecisionStore, RuleAuthorityCommittedCheckpointError,
     RuleAuthorityCommittedCleanupError,
-    RuleAuthorityStorageError,
+    RuleAuthorityDurabilityUnknown, RuleAuthorityStorageError,
     _consumption_record_hash,
 )
 from policy.authority_ledger.signatures import encode_public_key, public_key_bytes, public_key_fingerprint
@@ -1166,6 +1166,47 @@ def _kernel_permit_fixture(tmp_path, ledger_store, root, checkpoint_store,
     return kernel, request, grant_event
 
 
+def _kernel_after_checkpoint_restart(kernel, checkpoint_store, app_connect):
+    """Recreate process-owned RA stores/kernel while retaining DB and providers."""
+    return RuleAuthorityKernel(
+        active_policy_pin_provider=kernel._pin_provider,
+        authority_ledger_store=kernel._ledger_store,
+        trusted_root=kernel._trusted_root,
+        trusted_checkpoint_store=kernel._trusted_checkpoint_store,
+        stop_provider=kernel._stop_provider,
+        trusted_clock=kernel._clock,
+        capability_classification_provider=kernel._classification_provider,
+        rule_authority_store=MariaDBRuleDecisionStore(
+            app_connect, checkpoint_store=checkpoint_store,
+        ),
+        ttl_max_seconds=kernel._ttl_max_seconds,
+    )
+
+
+@contextlib.contextmanager
+def _fail_checkpoint_directory_fsync_after_replace(monkeypatch, checkpoint):
+    """Inject a persistent post-replace directory fsync failure for one log."""
+    replaced = False
+    original_replace = os.replace
+    original_fsync_directory = RuleAuditCheckpointStore._fsync_directory
+
+    def replace(source, destination):
+        nonlocal replaced
+        original_replace(source, destination)
+        if Path(destination) == checkpoint.path:
+            replaced = True
+
+    def fsync_directory(path):
+        if replaced and Path(path) == checkpoint.path.parent:
+            raise OSError("injected persistent post-replace directory fsync failure")
+        original_fsync_directory(path)
+
+    with monkeypatch.context() as injected:
+        injected.setattr(os, "replace", replace)
+        injected.setattr(RuleAuditCheckpointStore, "_fsync_directory", fsync_directory)
+        yield
+
+
 def _consume_under_verified_fence(ledger_store, checkpoint_store, root, decision_store, draft):
     with ledger_store.checkpoint_fence(checkpoint_store) as fence:
         with fence.transaction_owner(decision_store) as owner:
@@ -1642,10 +1683,11 @@ def test_cross_schema_consumption_checkpoint_failure_reports_committed_state(mon
             consumed_at_utc=datetime(2026, 10, 10, 12, 4, tzinfo=timezone.utc),
         )
 
-        with pytest.raises(RuleAuthorityCommittedCheckpointError, match="confirmado en DB"):
+        with pytest.raises(RuleAuthorityCommittedCheckpointError, match="confirmado en DB") as failure:
             _consume_under_verified_fence(
                 ledger_store, checkpoint_store, root, decision_store, draft
             )
+        assert not isinstance(failure.value, RuleAuthorityDurabilityUnknown)
 
         with connect(database="jax_rule_authority") as admin:
             with admin.cursor() as cursor:
@@ -1692,13 +1734,14 @@ def test_evaluation_checkpoint_failure_keeps_db_row_and_blocks_durable_recovery(
                 CheckpointInvalido("publicación de evaluación inyectada")
             ),
         )
-        with pytest.raises(RuleAuthorityCommittedCheckpointError, match="evaluación confirmada en DB"):
+        with pytest.raises(RuleAuthorityCommittedCheckpointError, match="evaluación confirmada en DB") as failure:
             with ledger_store.checkpoint_fence(checkpoint_store) as fence:
                 with fence.transaction_owner(
                     decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
                 ) as owner:
                     fence.verify_for_update(owner, root)
                     decision_store.record_evaluation_in_transaction(owner, request, decision, None)
+        assert not isinstance(failure.value, RuleAuthorityDurabilityUnknown)
 
         with connect(database="jax_rule_authority") as admin:
             with admin.cursor() as cursor:
@@ -1710,6 +1753,186 @@ def test_evaluation_checkpoint_failure_keeps_db_row_and_blocks_durable_recovery(
                 assert cursor.fetchone()[0] == 1
         with pytest.raises(RuleAuthorityStorageError, match="checkpoint externo no coincide"):
             decision_store.recover_durable_evaluation(request)
+
+
+def test_post_replace_fsync_unknown_fails_closed_across_kernel_restart_and_exact_retry(
+        monkeypatch, tmp_path):
+    """Committed PERMIT/consumption keys survive; restart cannot recover before fsync."""
+    with _initialized_cross_schema_consumption() as (
+        connect, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+    ):
+        kernel, request, _grant_event = _kernel_permit_fixture(
+            tmp_path, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+            request_id="0199f8a1-8c00-7000-8000-000000000970",
+            event_id="0199f8a1-8c00-7000-8000-000000000971",
+        )
+
+        # Evaluation commits its idempotency key and permit to MariaDB, then
+        # os.replace makes the new external head visible. A persistent parent
+        # directory fsync failure means this call must expose no PERMIT.
+        with _fail_checkpoint_directory_fsync_after_replace(monkeypatch, audit_checkpoint):
+            with pytest.raises(RuleAuthorityCommittedCheckpointError) as evaluation_failure:
+                kernel.evaluate(request)
+            assert isinstance(evaluation_failure.value, RuleAuthorityDurabilityUnknown)
+
+            restarted_checkpoint = RuleAuditCheckpointStore(audit_checkpoint.path)
+            restarted_kernel = _kernel_after_checkpoint_restart(
+                kernel, restarted_checkpoint, app_connect,
+            )
+            with pytest.raises(RuleAuthorityDurabilityUnknown, match="DURABILITY_UNKNOWN"):
+                restarted_kernel.evaluate(request)
+
+            with connect(database="jax_rule_authority") as admin:
+                with admin.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM rule_decisions WHERE request_id=%s",
+                        (request.request_id,),
+                    )
+                    assert cursor.fetchone()[0] == 1
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM rule_permits WHERE request_id=%s",
+                        (request.request_id,),
+                    )
+                    assert cursor.fetchone()[0] == 1
+
+        # The exact retry is recoverable only after the new process fsyncs the
+        # checkpoint file and directory, then rereads the unchanged hash chain.
+        outcome = restarted_kernel.evaluate(request)
+        assert outcome.decision.status is RuleDecisionStatus.PERMIT
+        assert outcome.permit is not None
+
+        consumption_request_id = "0199f8a1-8c00-7000-8000-000000000972"
+        with _fail_checkpoint_directory_fsync_after_replace(monkeypatch, restarted_checkpoint):
+            with pytest.raises(RuleAuthorityCommittedCheckpointError) as consumption_failure:
+                restarted_kernel.consume(
+                    outcome.permit.permit_id, request.request_hash,
+                    consumption_request_id,
+                )
+            assert isinstance(consumption_failure.value, RuleAuthorityDurabilityUnknown)
+
+            consumption_restart_checkpoint = RuleAuditCheckpointStore(
+                restarted_checkpoint.path
+            )
+            consumption_restart_kernel = _kernel_after_checkpoint_restart(
+                restarted_kernel, consumption_restart_checkpoint, app_connect,
+            )
+            with pytest.raises(RuleAuthorityDurabilityUnknown, match="DURABILITY_UNKNOWN"):
+                consumption_restart_kernel.consume(
+                    outcome.permit.permit_id, request.request_hash,
+                    consumption_request_id,
+                )
+            with pytest.raises(RuleAuthorityDurabilityUnknown, match="DURABILITY_UNKNOWN"):
+                consumption_restart_kernel.consume(
+                    outcome.permit.permit_id, request.request_hash,
+                    "0199f8a1-8c00-7000-8000-000000000973",
+                )
+
+            with connect(database="jax_rule_authority") as admin:
+                with admin.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT COUNT(*),MAX(consumption_request_id) "
+                        "FROM rule_permit_consumptions WHERE permit_id=%s",
+                        (outcome.permit.permit_id,),
+                    )
+                    assert cursor.fetchone() == (1, consumption_request_id)
+
+        recovered_consumption = consumption_restart_kernel.consume(
+            outcome.permit.permit_id, request.request_hash, consumption_request_id,
+        )
+        assert recovered_consumption.permit_id == outcome.permit.permit_id
+        assert recovered_consumption.consumption_request_id == consumption_request_id
+        with pytest.raises(AuthorityStateError, match="consumption_request_id distinto"):
+            consumption_restart_kernel.consume(
+                outcome.permit.permit_id, request.request_hash,
+                "0199f8a1-8c00-7000-8000-000000000973",
+            )
+
+        # Model the other crash outcome: the rename was visible before power
+        # loss but its directory entry was not durable, so restart sees the
+        # previously confirmed file. DB's committed head is ahead; recovery
+        # must retain the request key/rows and deny instead of reconstructing
+        # or issuing a second PERMIT from the stale external anchor.
+        lost_request = replace(
+            request, request_id="0199f8a1-8c00-7000-8000-000000000974",
+            request_hash=None,
+        )
+        previously_durable_payload = consumption_restart_checkpoint.path.read_bytes()
+        with _fail_checkpoint_directory_fsync_after_replace(
+                monkeypatch, consumption_restart_checkpoint):
+            with pytest.raises(RuleAuthorityCommittedCheckpointError):
+                consumption_restart_kernel.evaluate(lost_request)
+
+        consumption_restart_checkpoint.path.write_bytes(previously_durable_payload)
+        crash_restarted_checkpoint = RuleAuditCheckpointStore(
+            consumption_restart_checkpoint.path
+        )
+        crash_restarted_kernel = _kernel_after_checkpoint_restart(
+            consumption_restart_kernel, crash_restarted_checkpoint, app_connect,
+        )
+        with pytest.raises(RuleAuthorityStorageError, match="checkpoint externo no coincide"):
+            crash_restarted_kernel.evaluate(lost_request)
+        with connect(database="jax_rule_authority") as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM rule_decisions WHERE request_id=%s",
+                    (lost_request.request_id,),
+                )
+                assert cursor.fetchone()[0] == 1
+                cursor.execute(
+                    "SELECT COUNT(*) FROM rule_permits WHERE request_id=%s",
+                    (lost_request.request_id,),
+                )
+                assert cursor.fetchone()[0] == 1
+
+
+def test_checkpoint_lost_after_consume_crash_retains_original_attempt_and_denies_retries(
+        monkeypatch, tmp_path):
+    """If restart sees the prior head, neither retry ID can invent a recovery."""
+    with _initialized_cross_schema_consumption() as (
+        connect, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+    ):
+        kernel, request, _grant_event = _kernel_permit_fixture(
+            tmp_path, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+            request_id="0199f8a1-8c00-7000-8000-000000000975",
+            event_id="0199f8a1-8c00-7000-8000-000000000976",
+        )
+        outcome = kernel.evaluate(request)
+        assert outcome.decision.status is RuleDecisionStatus.PERMIT
+        assert outcome.permit is not None
+        consumption_request_id = "0199f8a1-8c00-7000-8000-000000000977"
+        previous_payload = audit_checkpoint.path.read_bytes()
+
+        with _fail_checkpoint_directory_fsync_after_replace(monkeypatch, audit_checkpoint):
+            with pytest.raises(RuleAuthorityCommittedCheckpointError) as failure:
+                kernel.consume(
+                    outcome.permit.permit_id, request.request_hash,
+                    consumption_request_id,
+                )
+            assert isinstance(failure.value, RuleAuthorityDurabilityUnknown)
+
+        # Simulate power loss discarding the unconfirmed directory entry.
+        audit_checkpoint.path.write_bytes(previous_payload)
+        restarted_checkpoint = RuleAuditCheckpointStore(audit_checkpoint.path)
+        restarted_kernel = _kernel_after_checkpoint_restart(
+            kernel, restarted_checkpoint, app_connect,
+        )
+        for retry_id in (
+            consumption_request_id,
+            "0199f8a1-8c00-7000-8000-000000000978",
+        ):
+            with pytest.raises(RuleAuthorityStorageError, match="checkpoint externo no coincide"):
+                restarted_kernel.consume(
+                    outcome.permit.permit_id, request.request_hash, retry_id,
+                )
+
+        with connect(database="jax_rule_authority") as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "SELECT COUNT(*),MAX(consumption_request_id) "
+                    "FROM rule_permit_consumptions WHERE permit_id=%s",
+                    (outcome.permit.permit_id,),
+                )
+                assert cursor.fetchone() == (1, consumption_request_id)
 
 
 def test_kernel_evaluate_stop_deny_persists_and_exact_retry_recovers(monkeypatch, tmp_path):

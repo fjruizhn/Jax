@@ -10,7 +10,11 @@ from .models import (
     limites_de,
 )
 from .store import InMemoryRuleDecisionStore, RuleDecisionStore
-from .storage import MariaDBRuleDecisionStore
+from .storage import (
+    MariaDBRuleDecisionStore,
+    RuleAuthorityCommittedCheckpointError,
+    RuleAuthorityDurabilityUnknown,
+)
 from .errors import RuleAuthorityStorageError
 from .permit import (RulePermit, RulePermitConsumption, RulePermitConsumptionDraft,
                      RulePermitDraft)
@@ -22,6 +26,8 @@ __all__ = [
     "RuleDecisionStatus",
     "RuleDecisionStore",
     "RuleAuthorityStorageError",
+    "RuleAuthorityCommittedCheckpointError",
+    "RuleAuthorityDurabilityUnknown",
     "RulePermit",
     "RulePermitConsumption",
     "RulePermitConsumptionDraft",

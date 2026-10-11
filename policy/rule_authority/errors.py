@@ -14,6 +14,14 @@ class RuleAuthorityStorageError(RuleAuthorityError):
     """Persistencia durable no disponible o inconsistente; nunca equivale a PERMIT."""
 
 
+class RuleAuthorityCommittedCheckpointError(RuleAuthorityStorageError):
+    """DB commit completed, but external checkpoint publication failed."""
+
+
+class RuleAuthorityDurabilityUnknown(RuleAuthorityCommittedCheckpointError):
+    """Committed DB state whose external checkpoint durability is unproven."""
+
+
 class RuleSchemaError(RuleAuthorityError):
     """Una regla no cumple el shape cerrado rule-v1 (§7 + R-4)."""
 
@@ -36,6 +44,15 @@ class StopDesconocido(RuleAuthorityError):
 class CheckpointInvalido(RuleAuthorityError):
     """El checkpoint externo rechaza retrocesos, heads conflictivos e
     idempotencias inexactas (§11)."""
+
+
+class CheckpointDurabilityUnknown(CheckpointInvalido):
+    """Un replace pudo hacerse visible, pero su durabilidad no fue demostrada.
+
+    El estado incierto no se persiste aquí: esa escritura también podría fallar.
+    Los consumidores deben reconciliar el archivo y sus directorios antes de
+    recuperar o emitir un resultado durable.
+    """
 
 
 class RelojInvalido(RuleAuthorityError):

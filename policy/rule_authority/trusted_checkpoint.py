@@ -18,7 +18,7 @@ import threading
 
 from policy.authority_ledger.canonical import canonical_bytes, domain_hash
 
-from .errors import CheckpointInvalido
+from .errors import CheckpointDurabilityUnknown, CheckpointInvalido
 
 
 _DOMAIN = "JAX-FARO-RULE-AUTHORITY-AUDIT-CHECKPOINT"
@@ -74,6 +74,11 @@ class RuleAuditCheckpointStore:
         self._lock_handle = None
         self._lock_thread_id = None
         self._lock_epoch = 0
+        # A new process cannot know whether the previous process exited after
+        # replace but before directory fsync. Require a durable confirmation
+        # before exposing or extending the existing log.
+        self._durability_unknown = True
+        self._durability_unknown_head: str | None = None
 
     @property
     def lock_path(self) -> Path:
@@ -121,7 +126,17 @@ class RuleAuditCheckpointStore:
 
     def head_actual(self) -> str:
         with self.locked():
+            unknown_head = self._durability_unknown_head
             checkpoints = self._read_all()
+            candidate = unknown_head or (
+                checkpoints[-1]["head"] if self._durability_unknown and checkpoints else None
+            )
+            if candidate is not None and not self.confirmar(candidate):
+                raise CheckpointDurabilityUnknown(
+                    "DURABILITY_UNKNOWN: checkpoint no reconciliado"
+                )
+            if not checkpoints:
+                self._durability_unknown = False
             return checkpoints[-1]["head"] if checkpoints else ""
 
     def bootstrap(self) -> None:
@@ -138,15 +153,38 @@ class RuleAuditCheckpointStore:
                 "previous_checkpoint_hash": None,
             }
             row["checkpoint_hash"] = _checkpoint_hash(row)
-            self._replace_log((row,))
+            try:
+                self._replace_log((row,))
+            except CheckpointDurabilityUnknown:
+                self._durability_unknown_head = _GENESIS_HEAD
+                self._durability_unknown = True
+                raise
             if self._read_all() != (row,):
-                raise CheckpointInvalido("bootstrap no confirmó la relectura exacta del log")
+                self._durability_unknown_head = _GENESIS_HEAD
+                self._durability_unknown = True
+                raise CheckpointDurabilityUnknown(
+                    "bootstrap no confirmó la relectura exacta durable del log"
+                )
+            self._durability_unknown = False
+            self._durability_unknown_head = None
 
     def publicar(self, head: str, *, anterior: str) -> None:
         if not _valid_hash(head) or (anterior != "" and not _valid_hash(anterior)):
             raise CheckpointInvalido("head/anterior de checkpoint inválido")
         with self.locked():
-            checkpoints = self._read_all()
+            unknown_head = self._durability_unknown_head
+            checkpoints_before = self._read_all()
+            candidate = unknown_head or (
+                checkpoints_before[-1]["head"]
+                if self._durability_unknown and checkpoints_before else None
+            )
+            if candidate is not None and not self.confirmar(candidate):
+                raise CheckpointDurabilityUnknown(
+                    "DURABILITY_UNKNOWN: publicación bloqueada hasta reconciliar checkpoint"
+                )
+            if not checkpoints_before:
+                self._durability_unknown = False
+            checkpoints = checkpoints_before
             if not checkpoints or checkpoints[0]["sequence"] != 0:
                 raise CheckpointInvalido("publicación exige bootstrap externo explícito")
             current = checkpoints[-1]
@@ -175,27 +213,69 @@ class RuleAuditCheckpointStore:
             }
             row["checkpoint_hash"] = _checkpoint_hash(row)
             expected_checkpoints = (*checkpoints, row)
-            self._replace_log(expected_checkpoints)
-            if self._read_all() != expected_checkpoints:
-                raise CheckpointInvalido(
-                    "publicación no confirmó la relectura exacta del checkpoint"
+            try:
+                self._replace_log(expected_checkpoints)
+            except CheckpointDurabilityUnknown:
+                self._durability_unknown_head = head
+                self._durability_unknown = True
+                raise
+            try:
+                observed_after_replace = self._read_all()
+            except CheckpointInvalido as exc:
+                self._durability_unknown_head = head
+                self._durability_unknown = True
+                raise CheckpointDurabilityUnknown(
+                    "publicación no pudo validar el checkpoint tras replace"
+                ) from exc
+            if observed_after_replace != expected_checkpoints:
+                self._durability_unknown_head = head
+                self._durability_unknown = True
+                raise CheckpointDurabilityUnknown(
+                    "publicación no confirmó la relectura exacta tras replace"
                 )
 
     def confirmar(self, head: str) -> bool:
         if not _valid_hash(head):
             return False
         with self.locked():
-            if not any(row["head"] == head for row in self._read_all()):
+            was_unknown = self._durability_unknown_head == head
+            try:
+                identity_observed = self._checkpoint_identity()
+                observed = self._read_all()
+            except (OSError, CheckpointInvalido) as exc:
+                if was_unknown:
+                    self._durability_unknown = True
+                    raise CheckpointDurabilityUnknown(
+                        "DURABILITY_UNKNOWN: no se pudo releer checkpoint incierto"
+                    ) from exc
+                raise
+            if not any(row["head"] == head for row in observed):
                 return False
             try:
-                self._fsync_checkpoint_file()
+                identity_before = self._fsync_checkpoint_file()
                 self._fsync_directory_chain(self.path.parent)
-                if not any(row["head"] == head for row in self._read_all()):
-                    return False
+                reconciled = self._read_all()
+                identity_after = self._checkpoint_identity()
+                if (identity_observed != identity_before or identity_before != identity_after
+                        or reconciled != observed
+                        or not any(row["head"] == head for row in reconciled)):
+                    raise CheckpointDurabilityUnknown(
+                        "identidad/hash del checkpoint cambió durante reconciliación durable"
+                    )
+            except CheckpointDurabilityUnknown:
+                self._durability_unknown_head = head
+                self._durability_unknown = True
+                raise
             except (OSError, CheckpointInvalido) as exc:
-                raise CheckpointInvalido(
-                    "no se pudo confirmar la durabilidad del checkpoint"
+                self._durability_unknown_head = head
+                self._durability_unknown = True
+                raise CheckpointDurabilityUnknown(
+                    "DURABILITY_UNKNOWN: no se pudo confirmar la durabilidad del checkpoint"
                 ) from exc
+            if self._durability_unknown_head == head:
+                self._durability_unknown_head = None
+            if reconciled and reconciled[-1]["head"] == head:
+                self._durability_unknown = False
             return True
 
     def checkpoints(self) -> tuple[dict[str, object], ...]:
@@ -251,6 +331,7 @@ class RuleAuditCheckpointStore:
             f".{self.path.name}.tmp-{secrets.token_hex(16)}"
         )
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)
+        replace_started = False
         try:
             fd = os.open(temporary_path, flags, 0o600)
             with os.fdopen(fd, "wb") as handle:
@@ -258,27 +339,51 @@ class RuleAuditCheckpointStore:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
+            # An error returned by replace can be ambiguous: the filesystem
+            # operation may have changed the name before reporting failure.
+            replace_started = True
             os.replace(temporary_path, self.path)
             self._fsync_directory_chain(self.path.parent)
-        except OSError as exc:
+        except (OSError, CheckpointInvalido) as exc:
             try:
                 temporary_path.unlink()
             except FileNotFoundError:  # fail-soft: otro limpiador ya retiró el temporal y no queda estado que recuperar
                 pass
-            raise CheckpointInvalido("resultado de publicación durable desconocido") from exc
+            except OSError:  # fail-soft: el temporal privado se limpia en la siguiente adquisición del flock
+                # A leftover private temp is cleaned on the next flock. It does
+                # not change which checkpoint head was durably published.
+                pass
+            if replace_started:
+                raise CheckpointDurabilityUnknown(
+                    "resultado de publicación durable desconocido tras replace"
+                ) from exc
+            raise CheckpointInvalido(
+                "no se pudo preparar checkpoint antes de replace"
+            ) from exc
 
-    def _fsync_checkpoint_file(self) -> None:
+    def _fsync_checkpoint_file(self) -> tuple[int, int]:
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
             fd = os.open(self.path, flags)
         except OSError as exc:
             raise CheckpointInvalido("archivo de checkpoint no disponible para fsync") from exc
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
+            file_stat = os.fstat(fd)
+            if not stat.S_ISREG(file_stat.st_mode):
                 raise CheckpointInvalido("checkpoint no es un archivo regular durante fsync")
             os.fsync(fd)
+            return file_stat.st_dev, file_stat.st_ino
         finally:
             os.close(fd)
+
+    def _checkpoint_identity(self) -> tuple[int, int]:
+        try:
+            file_stat = os.stat(self.path, follow_symlinks=False)
+        except OSError as exc:
+            raise CheckpointInvalido("identidad del checkpoint no disponible") from exc
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise CheckpointInvalido("checkpoint dejó de ser un archivo regular")
+        return file_stat.st_dev, file_stat.st_ino
 
     def _cleanup_abandoned_temporaries(self) -> None:
         """Remove only this store's private, regular publication temp files.
