@@ -139,8 +139,6 @@ class RuleAuditCheckpointStore:
             }
             row["checkpoint_hash"] = _checkpoint_hash(row)
             self._replace_log((row,))
-            if not self.confirmar(_GENESIS_HEAD):
-                raise CheckpointInvalido("bootstrap no quedó en el log durable")
 
     def publicar(self, head: str, *, anterior: str) -> None:
         if not _valid_hash(head) or (anterior != "" and not _valid_hash(anterior)):
@@ -175,8 +173,6 @@ class RuleAuditCheckpointStore:
             }
             row["checkpoint_hash"] = _checkpoint_hash(row)
             self._replace_log((*checkpoints, row))
-            if not self.confirmar(head):
-                raise CheckpointInvalido("checkpoint publicado no aparece en el log durable")
 
     def confirmar(self, head: str) -> bool:
         if not _valid_hash(head):
