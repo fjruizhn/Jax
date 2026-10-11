@@ -4652,9 +4652,9 @@ denormalizadas (incluido `previous_event_hash`), lectura histórica exacta y per
 
 ## `authority-ledger-mariadb/integration`
 
-Piso local pendiente de ejecución MariaDB (2026-10-10): `^47 passed in `. El árbol reapilado
-colecciona 47 casos tras incorporar los cierres de #396, las regresiones DENY compartidas y
-las regresiones post-replace de crash/restart para evaluación PERMIT y consumo con retención
+Piso local pendiente de ejecución MariaDB (2026-10-10): `^48 passed in `. El árbol reapilado
+colecciona 48 casos tras incorporar los cierres de #396, las regresiones DENY compartidas y
+las regresiones post-replace de crash/restart para evaluación PERMIT, cancelación y consumo con retención
 de claves. Docker no está disponible en hall9000 (`/var/run/docker.sock` denegado), así que
 el conteo de pasadas queda por confirmar en CI exacta. La corrida CI 38032592015 contó 33 casos; después
 se añadieron cinco regresiones de transaction owner/checkpoint y dos pruebas de evaluación
@@ -4721,10 +4721,12 @@ posterior detectó que faltaba proteger la relectura final del log: la publicaci
 la cadena canónica completa y el head solicitado después del rename, sin repetir `fsync`; la
 confirmación también relee después de sus barreras. Se añadió una prueba que restaura el log
 anterior entre replace y relectura y exige que publicar falle. El comando exacto del workflow
-mide ahora `59 passed` localmente tras agregar una regresión que sustituye el archivo por
+mide ahora `60 passed` localmente tras agregar una regresión que sustituye el archivo por
 otro inode con bytes idénticos entre el fsync y la relectura; la confirmación debe seguir
-fallando en `DURABILITY_UNKNOWN`. El piso sube a `^59 passed in ` en `ci/pisos.json`. La CI
-exacta del nuevo SHA debe confirmar la medición.
+fallando en `DURABILITY_UNKNOWN`. Se añadió además una regresión de cancelación `BaseException`
+posterior a `os.replace`: la API produce `CheckpointDurabilityUnknown`, el retry queda bloqueado
+si falla fsync y recupera solo tras confirmar archivo/directorio y relectura exacta. El piso sube
+a `^60 passed in ` en `ci/pisos.json`. La CI exacta del nuevo SHA debe confirmar la medición.
 Corre sin base de datos las pruebas del kernel (límites individuales y falla cerrada ante
 argumentos sin matcher/frecuencia sin contador), store en memoria y rechazo de la API MariaDB
 de emisión fuera del owner Block 4, contrato de RulePermit y

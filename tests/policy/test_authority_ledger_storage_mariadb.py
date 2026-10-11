@@ -1,6 +1,7 @@
 """Block 4 storage integration against an isolated MariaDB 12.3.3 instance."""
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
 import errno
@@ -1883,6 +1884,63 @@ def test_post_replace_fsync_unknown_fails_closed_across_kernel_restart_and_exact
                     (lost_request.request_id,),
                 )
                 assert cursor.fetchone()[0] == 1
+
+
+def test_cancelacion_post_replace_no_emite_permit_y_retry_reconcilia_fsync(
+        monkeypatch, tmp_path):
+    """Cancellation after rename is typed; exact retry waits for durable reconciliation."""
+    with _initialized_cross_schema_consumption() as (
+        connect, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+    ):
+        kernel, request, _grant_event = _kernel_permit_fixture(
+            tmp_path, ledger_store, root, checkpoint_store, audit_checkpoint, app_connect,
+            request_id="0199f8a1-8c00-7000-8000-000000000978",
+            event_id="0199f8a1-8c00-7000-8000-000000000979",
+        )
+        original_replace = os.replace
+
+        def replace_then_cancel(source, destination):
+            original_replace(source, destination)
+            if Path(destination) == audit_checkpoint.path:
+                raise asyncio.CancelledError("injected cancellation after checkpoint replace")
+
+        with monkeypatch.context() as cancelled:
+            cancelled.setattr(os, "replace", replace_then_cancel)
+            with pytest.raises(RuleAuthorityDurabilityUnknown, match="DURABILITY_UNKNOWN"):
+                kernel.evaluate(request)
+
+        with connect(database="jax_rule_authority") as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM rule_decisions WHERE request_id=%s",
+                    (request.request_id,),
+                )
+                assert cursor.fetchone()[0] == 1
+                cursor.execute(
+                    "SELECT COUNT(*) FROM rule_permits WHERE request_id=%s",
+                    (request.request_id,),
+                )
+                assert cursor.fetchone()[0] == 1
+
+        original_fsync_directory = RuleAuditCheckpointStore._fsync_directory
+
+        def fail_directory_fsync(path):
+            if Path(path) == audit_checkpoint.path.parent:
+                raise OSError("injected persistent retry directory fsync failure")
+            original_fsync_directory(path)
+
+        with monkeypatch.context() as failed_retry_fsync:
+            failed_retry_fsync.setattr(
+                RuleAuditCheckpointStore, "_fsync_directory", fail_directory_fsync,
+            )
+            with pytest.raises(RuleAuthorityDurabilityUnknown, match="DURABILITY_UNKNOWN"):
+                kernel.evaluate(request)
+
+        # The exact committed result becomes visible only after retry performs
+        # file and parent-directory fsync and validates the unchanged log.
+        outcome = kernel.evaluate(request)
+        assert outcome.decision.status is RuleDecisionStatus.PERMIT
+        assert outcome.permit is not None
 
 
 def test_checkpoint_lost_after_consume_crash_retains_original_attempt_and_denies_retries(

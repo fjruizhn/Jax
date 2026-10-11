@@ -7,6 +7,7 @@ distributed lock.
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 import fcntl
 import json
@@ -360,6 +361,26 @@ class RuleAuditCheckpointStore:
             raise CheckpointInvalido(
                 "no se pudo preparar checkpoint antes de replace"
             ) from exc
+        except asyncio.CancelledError as exc:
+            if replace_started and rows:
+                candidate_head = rows[-1].get("head")
+                if type(candidate_head) is str and _valid_hash(candidate_head):
+                    self._durability_unknown_head = candidate_head
+                    self._durability_unknown = True
+                raise CheckpointDurabilityUnknown(
+                    "DURABILITY_UNKNOWN: cancelación durante publicación tras replace"
+                ) from exc
+            raise
+        except BaseException:
+            # Preserve process-interrupt semantics, but remember that replace
+            # may already have changed the visible name. A retry must reconcile
+            # durability before it can expose this head.
+            if replace_started and rows:
+                candidate_head = rows[-1].get("head")
+                if type(candidate_head) is str and _valid_hash(candidate_head):
+                    self._durability_unknown_head = candidate_head
+                    self._durability_unknown = True
+            raise
 
     def _fsync_checkpoint_file(self) -> tuple[int, int]:
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
