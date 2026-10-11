@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import multiprocessing
 import os
@@ -279,6 +280,41 @@ def test_fallo_fsync_directorio_despues_de_replace_es_publicacion_incierta(tmp_p
     monkeypatch.undo()
     assert store.confirmar(new_head) is True
     assert store._durability_unknown_head is None
+    assert store.head_actual() == new_head
+
+
+def test_cancelacion_post_replace_marca_unknown_y_retry_exige_reconciliacion(
+        tmp_path, monkeypatch
+):
+    store = _bootstrapped_store(tmp_path / "audit-checkpoints.jsonl")
+    genesis = store.head_actual()
+    new_head = "sha256:" + "2" * 64
+    original_replace = os.replace
+
+    def replace_then_cancel(source, destination):
+        original_replace(source, destination)
+        raise asyncio.CancelledError("injected cancellation after replace")
+
+    with monkeypatch.context() as cancelled:
+        cancelled.setattr(os, "replace", replace_then_cancel)
+        with pytest.raises(CheckpointDurabilityUnknown, match="DURABILITY_UNKNOWN"):
+            store.publicar(new_head, anterior=genesis)
+
+    assert store._durability_unknown_head == new_head
+    assert store._durability_unknown is True
+
+    def fail_directory_fsync(_path):
+        raise OSError("injected persistent directory fsync failure")
+
+    with monkeypatch.context() as uncertain:
+        uncertain.setattr(
+            RuleAuditCheckpointStore, "_fsync_directory", fail_directory_fsync
+        )
+        with pytest.raises(CheckpointDurabilityUnknown, match="DURABILITY_UNKNOWN"):
+            store.publicar(new_head, anterior=genesis)
+
+    assert store._durability_unknown_head == new_head
+    assert store.publicar(new_head, anterior=genesis) is None
     assert store.head_actual() == new_head
 
 
