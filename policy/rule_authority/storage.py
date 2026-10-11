@@ -9,7 +9,10 @@ from jax.faro.catalogo_topes import CatalogoTopes
 from policy.authority_ledger.canonical import canonical_bytes, domain_hash
 from policy.authority_ledger.errors import AuthorityStateError
 
-from .errors import RuleAuthorityStorageError
+from .errors import (
+    CheckpointDurabilityUnknown, RuleAuthorityDurabilityUnknown,
+    RuleAuthorityStorageError,
+)
 from .models import RuleDecision, RuleDecisionStatus, RuleEvaluationRequest
 from .permit import (RulePermit, RulePermitConsumption, RulePermitConsumptionDraft,
                      RulePermitDraft, _EvaluatedPermit, _trusted_consumption,
@@ -41,7 +44,7 @@ _PERMIT_FIELDS = frozenset({
 _PERMIT_LEGACY_FIELDS = _PERMIT_FIELDS - {"policy_repository_id", "capability_contract_id"}
 
 
-class RuleAuthorityCommittedCheckpointError(RuleAuthorityStorageError):
+class RuleAuthorityCommittedCheckpointError(RuleAuthorityDurabilityUnknown):
     """DB committed, but its required external Rule Authority anchor failed.
 
     The operation is deliberately not reported as rolled back.  The next
@@ -217,6 +220,12 @@ class MariaDBRuleDecisionStore:
             if connection is not None:
                 connection.rollback()
             raise
+        except CheckpointDurabilityUnknown as exc:
+            if connection is not None:
+                connection.rollback()
+            raise RuleAuthorityDurabilityUnknown(
+                "DURABILITY_UNKNOWN: evaluación no se recupera antes de reconciliar checkpoint"
+            ) from exc
         except Exception as exc:
             if connection is not None:
                 connection.rollback()
@@ -425,7 +434,7 @@ class MariaDBRuleDecisionStore:
                 self._checkpoint_store.publicar(head_hash, anterior=checkpoint_head)
             except Exception as exc:
                 raise RuleAuthorityCommittedCheckpointError(
-                    "evaluación confirmada en DB pero sin checkpoint externo confirmado"
+                    "DURABILITY_UNKNOWN: evaluación confirmada en DB pero checkpoint no reconciliado"
                 ) from exc
             if close_error is not None:
                 raise RuleAuthorityCommittedCleanupError(
@@ -584,6 +593,12 @@ class MariaDBRuleDecisionStore:
             if connection is not None:
                 connection.rollback()
             raise
+        except CheckpointDurabilityUnknown as exc:
+            if connection is not None:
+                connection.rollback()
+            raise RuleAuthorityDurabilityUnknown(
+                "DURABILITY_UNKNOWN: consumo no se recupera antes de reconciliar checkpoint"
+            ) from exc
         except Exception as exc:
             if connection is not None:
                 connection.rollback()
@@ -791,7 +806,7 @@ class MariaDBRuleDecisionStore:
                 self._checkpoint_store.publicar(record_hash, anterior=checkpoint_head)
             except Exception as exc:
                 raise RuleAuthorityCommittedCheckpointError(
-                    "consumo confirmado en DB pero sin checkpoint externo confirmado"
+                    "DURABILITY_UNKNOWN: consumo confirmado en DB pero checkpoint no reconciliado"
                 ) from exc
             if close_error is not None:
                 raise RuleAuthorityCommittedCleanupError(
