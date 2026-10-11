@@ -240,6 +240,28 @@ def test_fallo_fsync_directorio_despues_de_replace_es_publicacion_incierta(tmp_p
     assert store.head_actual() == new_head
 
 
+def test_publicar_no_retorna_exito_si_relectura_final_no_contiene_el_head(
+    tmp_path, monkeypatch
+):
+    store = _bootstrapped_store(tmp_path / "audit-checkpoints.jsonl")
+    genesis = store.head_actual()
+    previous_payload = store.path.read_bytes()
+    original_replace = RuleAuditCheckpointStore._replace_log
+
+    def replace_then_restore_previous_log(instance, rows):
+        original_replace(instance, rows)
+        instance.path.write_bytes(previous_payload)
+
+    monkeypatch.setattr(
+        RuleAuditCheckpointStore, "_replace_log", replace_then_restore_previous_log
+    )
+    with pytest.raises(CheckpointInvalido, match="relectura exacta"):
+        store.publicar("sha256:" + "1" * 64, anterior=genesis)
+
+    monkeypatch.setattr(RuleAuditCheckpointStore, "_replace_log", original_replace)
+    assert store.head_actual() == genesis
+
+
 def test_reintento_no_confirma_head_visible_hasta_reconciliar_durabilidad(tmp_path, monkeypatch):
     store = _bootstrapped_store(tmp_path / "audit-checkpoints.jsonl")
     genesis = store.head_actual()

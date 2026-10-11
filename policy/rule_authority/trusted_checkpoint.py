@@ -139,6 +139,8 @@ class RuleAuditCheckpointStore:
             }
             row["checkpoint_hash"] = _checkpoint_hash(row)
             self._replace_log((row,))
+            if self._read_all() != (row,):
+                raise CheckpointInvalido("bootstrap no confirmó la relectura exacta del log")
 
     def publicar(self, head: str, *, anterior: str) -> None:
         if not _valid_hash(head) or (anterior != "" and not _valid_hash(anterior)):
@@ -172,7 +174,12 @@ class RuleAuditCheckpointStore:
                 "previous_checkpoint_hash": previous_checkpoint_hash,
             }
             row["checkpoint_hash"] = _checkpoint_hash(row)
-            self._replace_log((*checkpoints, row))
+            expected_checkpoints = (*checkpoints, row)
+            self._replace_log(expected_checkpoints)
+            if self._read_all() != expected_checkpoints:
+                raise CheckpointInvalido(
+                    "publicación no confirmó la relectura exacta del checkpoint"
+                )
 
     def confirmar(self, head: str) -> bool:
         if not _valid_hash(head):
@@ -183,6 +190,8 @@ class RuleAuditCheckpointStore:
             try:
                 self._fsync_checkpoint_file()
                 self._fsync_directory_chain(self.path.parent)
+                if not any(row["head"] == head for row in self._read_all()):
+                    return False
             except (OSError, CheckpointInvalido) as exc:
                 raise CheckpointInvalido(
                     "no se pudo confirmar la durabilidad del checkpoint"
