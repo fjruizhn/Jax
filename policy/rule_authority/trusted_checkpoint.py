@@ -349,7 +349,7 @@ class RuleAuditCheckpointStore:
                 temporary_path.unlink()
             except FileNotFoundError:  # fail-soft: otro limpiador ya retiró el temporal y no queda estado que recuperar
                 pass
-            except OSError:
+            except OSError:  # fail-soft: el temporal privado se limpia en la siguiente adquisición del flock
                 # A leftover private temp is cleaned on the next flock. It does
                 # not change which checkpoint head was durably published.
                 pass
