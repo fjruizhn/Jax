@@ -4721,7 +4721,9 @@ posterior detectó que faltaba proteger la relectura final del log: la publicaci
 la cadena canónica completa y el head solicitado después del rename, sin repetir `fsync`; la
 confirmación también relee después de sus barreras. Se añadió una prueba que restaura el log
 anterior entre replace y relectura y exige que publicar falle. El comando exacto del workflow
-mide ahora `58 passed` localmente; el piso sube a `^58 passed in ` en `ci/pisos.json`. La CI
+mide ahora `59 passed` localmente tras agregar una regresión que sustituye el archivo por
+otro inode con bytes idénticos entre el fsync y la relectura; la confirmación debe seguir
+fallando en `DURABILITY_UNKNOWN`. El piso sube a `^59 passed in ` en `ci/pisos.json`. La CI
 exacta del nuevo SHA debe confirmar la medición.
 Corre sin base de datos las pruebas del kernel (límites individuales y falla cerrada ante
 argumentos sin matcher/frecuencia sin contador), store en memoria y rechazo de la API MariaDB

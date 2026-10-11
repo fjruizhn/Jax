@@ -305,6 +305,43 @@ def test_publicar_no_retorna_exito_si_relectura_final_no_contiene_el_head(
         store.head_actual()
 
 
+def test_confirmar_rechaza_cambio_de_inode_con_mismo_hash_durante_reconciliacion(
+        tmp_path, monkeypatch
+):
+    store = _bootstrapped_store(tmp_path / "audit-checkpoints.jsonl")
+    genesis = store.head_actual()
+    new_head = "sha256:" + "1" * 64
+
+    def fail_directory_fsync(_path):
+        raise OSError("injected post-replace directory fsync failure")
+
+    with monkeypatch.context() as failed_fsync:
+        failed_fsync.setattr(
+            RuleAuditCheckpointStore, "_fsync_directory", fail_directory_fsync
+        )
+        with pytest.raises(CheckpointDurabilityUnknown):
+            store.publicar(new_head, anterior=genesis)
+
+    assert store._durability_unknown_head == new_head
+    original_fsync = store._fsync_checkpoint_file
+
+    def fsync_then_replace_with_identical_bytes():
+        identity = original_fsync()
+        replacement = store.path.with_name("checkpoint-identical-replacement.jsonl")
+        replacement.write_bytes(store.path.read_bytes())
+        os.chmod(replacement, 0o600)
+        os.replace(replacement, store.path)
+        return identity
+
+    monkeypatch.setattr(
+        store, "_fsync_checkpoint_file", fsync_then_replace_with_identical_bytes
+    )
+    with pytest.raises(CheckpointDurabilityUnknown, match="identidad/hash"):
+        store.confirmar(new_head)
+    assert store._durability_unknown_head == new_head
+    assert store._durability_unknown is True
+
+
 def test_reintento_no_confirma_head_visible_hasta_reconciliar_durabilidad(tmp_path, monkeypatch):
     store = _bootstrapped_store(tmp_path / "audit-checkpoints.jsonl")
     genesis = store.head_actual()
