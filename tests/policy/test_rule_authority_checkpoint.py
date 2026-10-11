@@ -237,8 +237,48 @@ def test_fallo_fsync_directorio_despues_de_replace_es_publicacion_incierta(tmp_p
     with pytest.raises(CheckpointDurabilityUnknown, match="desconocido tras replace"):
         store.publicar(new_head, anterior=genesis)
 
-    # The rename is visible to this process, but visibility alone is not a
-    # durable acknowledgement. The retry regression below checks the fsync gate.
+    assert store._durability_unknown_head == new_head
+    from policy.rule_authority import RuleAuthorityDurabilityUnknown as public_error
+    from policy.rule_authority.errors import RuleAuthorityDurabilityUnknown as error_type
+    assert public_error is error_type
+    from policy.rule_authority.storage import (
+        RuleAuthorityCommittedCheckpointError,
+        _confirmar_checkpoint_durable,
+        _head_actual_checkpoint_durable,
+        _publicar_checkpoint_durable,
+    )
+
+    class GenericPublicationFailure:
+        def publicar(self, _head, *, anterior):
+            raise CheckpointInvalido("fallo determinista antes de replace")
+
+    with pytest.raises(RuleAuthorityCommittedCheckpointError) as generic_failure:
+        _publicar_checkpoint_durable(
+            GenericPublicationFailure(), new_head, genesis,
+            error_message="DB committed",
+        )
+    assert not isinstance(generic_failure.value, public_error)
+
+    class UncertainConfirmation:
+        def confirmar(self, _head):
+            raise CheckpointDurabilityUnknown("fsync incierto")
+
+    with pytest.raises(public_error, match="DURABILITY_UNKNOWN"):
+        _confirmar_checkpoint_durable(UncertainConfirmation(), new_head)
+
+    class UncertainHead:
+        def head_actual(self):
+            raise CheckpointDurabilityUnknown("fsync incierto al abrir proceso")
+
+    with pytest.raises(public_error, match="DURABILITY_UNKNOWN"):
+        _head_actual_checkpoint_durable(UncertainHead())
+    # The in-process marker makes even a head read reconcile before exposing
+    # it as usable. A visible rename alone is not an acknowledgement.
+    with pytest.raises(CheckpointDurabilityUnknown):
+        store.head_actual()
+    monkeypatch.undo()
+    assert store.confirmar(new_head) is True
+    assert store._durability_unknown_head is None
     assert store.head_actual() == new_head
 
 
@@ -257,11 +297,12 @@ def test_publicar_no_retorna_exito_si_relectura_final_no_contiene_el_head(
     monkeypatch.setattr(
         RuleAuditCheckpointStore, "_replace_log", replace_then_restore_previous_log
     )
-    with pytest.raises(CheckpointInvalido, match="relectura exacta"):
+    with pytest.raises(CheckpointDurabilityUnknown, match="relectura exacta"):
         store.publicar("sha256:" + "1" * 64, anterior=genesis)
 
     monkeypatch.setattr(RuleAuditCheckpointStore, "_replace_log", original_replace)
-    assert store.head_actual() == genesis
+    with pytest.raises(CheckpointDurabilityUnknown, match="DURABILITY_UNKNOWN"):
+        store.head_actual()
 
 
 def test_reintento_no_confirma_head_visible_hasta_reconciliar_durabilidad(tmp_path, monkeypatch):
@@ -286,7 +327,8 @@ def test_reintento_no_confirma_head_visible_hasta_reconciliar_durabilidad(tmp_pa
         # still fails. Recreating the store models process restart; the DB's
         # committed head remains authoritative in the integration regression.
         restarted_store = RuleAuditCheckpointStore(store.path)
-        assert restarted_store.head_actual() == new_head
+        with pytest.raises(CheckpointDurabilityUnknown, match="DURABILITY_UNKNOWN"):
+            restarted_store.head_actual()
         with pytest.raises(CheckpointInvalido) as confirmation_failure:
             restarted_store.confirmar(new_head)
         assert isinstance(confirmation_failure.value, CheckpointDurabilityUnknown)
@@ -308,6 +350,7 @@ def test_reintento_no_confirma_head_visible_hasta_reconciliar_durabilidad(tmp_pa
         assert isinstance(file_failure.value, CheckpointDurabilityUnknown)
 
     assert restarted_store.confirmar(new_head) is True
+    assert restarted_store._durability_unknown_head is None
     restarted_store.publicar(new_head, anterior=genesis)
 
 

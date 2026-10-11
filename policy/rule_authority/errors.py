@@ -14,8 +14,12 @@ class RuleAuthorityStorageError(RuleAuthorityError):
     """Persistencia durable no disponible o inconsistente; nunca equivale a PERMIT."""
 
 
-class RuleAuthorityDurabilityUnknown(RuleAuthorityStorageError):
-    """DB puede tener el resultado, pero su checkpoint externo no fue reconciliado."""
+class RuleAuthorityCommittedCheckpointError(RuleAuthorityStorageError):
+    """DB commit completed, but external checkpoint publication failed."""
+
+
+class RuleAuthorityDurabilityUnknown(RuleAuthorityCommittedCheckpointError):
+    """Committed DB state whose external checkpoint durability is unproven."""
 
 
 class RuleSchemaError(RuleAuthorityError):

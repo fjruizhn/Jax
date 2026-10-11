@@ -10,8 +10,8 @@ from policy.authority_ledger.canonical import canonical_bytes, domain_hash
 from policy.authority_ledger.errors import AuthorityStateError
 
 from .errors import (
-    CheckpointDurabilityUnknown, RuleAuthorityDurabilityUnknown,
-    RuleAuthorityStorageError,
+    CheckpointDurabilityUnknown, RuleAuthorityCommittedCheckpointError,
+    RuleAuthorityDurabilityUnknown, RuleAuthorityStorageError,
 )
 from .models import RuleDecision, RuleDecisionStatus, RuleEvaluationRequest
 from .permit import (RulePermit, RulePermitConsumption, RulePermitConsumptionDraft,
@@ -44,13 +44,37 @@ _PERMIT_FIELDS = frozenset({
 _PERMIT_LEGACY_FIELDS = _PERMIT_FIELDS - {"policy_repository_id", "capability_contract_id"}
 
 
-class RuleAuthorityCommittedCheckpointError(RuleAuthorityDurabilityUnknown):
-    """DB committed, but its required external Rule Authority anchor failed.
+def _confirmar_checkpoint_durable(store, head: str) -> bool:
+    try:
+        return store.confirmar(head)
+    except CheckpointDurabilityUnknown as exc:
+        raise RuleAuthorityDurabilityUnknown(
+            "DURABILITY_UNKNOWN: checkpoint requiere reconciliación durable"
+        ) from exc
 
-    The operation is deliberately not reported as rolled back.  The next
-    writer compares the durable checkpoint head with the DB head and fails
-    closed until an operator reconciles the two stores.
-    """
+
+def _head_actual_checkpoint_durable(store) -> str:
+    try:
+        return store.head_actual()
+    except CheckpointDurabilityUnknown as exc:
+        raise RuleAuthorityDurabilityUnknown(
+            "DURABILITY_UNKNOWN: checkpoint no se pudo reconciliar al leer el head"
+        ) from exc
+
+
+def _publicar_checkpoint_durable(
+    store, head: str, anterior: str, *, error_message: str,
+) -> None:
+    try:
+        store.publicar(head, anterior=anterior)
+    except CheckpointDurabilityUnknown as exc:
+        raise RuleAuthorityDurabilityUnknown(
+            "DURABILITY_UNKNOWN: publicación de checkpoint no reconciliada"
+        ) from exc
+    except Exception as exc:
+        raise RuleAuthorityCommittedCheckpointError(
+            error_message
+        ) from exc
 
 
 class RuleAuthorityCommittedCleanupError(RuleAuthorityStorageError):
@@ -201,8 +225,9 @@ class MariaDBRuleDecisionStore:
                     if (not isinstance(head, tuple) or type(head[0]) is not int):
                         raise RuleAuthorityStorageError("audit head ausente o inválido")
                     expected = RULE_AUDIT_GENESIS_HEAD if head[0] == 0 and head[1] is None else head[1]
-                    if (type(expected) is not str or self._checkpoint_store.head_actual() != expected
-                            or self._checkpoint_store.confirmar(expected) is not True):
+                    if (type(expected) is not str
+                            or _head_actual_checkpoint_durable(self._checkpoint_store) != expected
+                            or _confirmar_checkpoint_durable(self._checkpoint_store, expected) is not True):
                         raise RuleAuthorityStorageError("checkpoint externo no coincide con audit head DB")
                     row = self._select_request(cursor, request.request_id)
                     if row is None:
@@ -302,13 +327,13 @@ class MariaDBRuleDecisionStore:
             audit_sequence, previous_hash = head
         else:
             audit_sequence, previous_hash = transaction_owner.lock_rule_authority_audit_head_for_update()
-        checkpoint_head = self._checkpoint_store.head_actual()
+        checkpoint_head = _head_actual_checkpoint_durable(self._checkpoint_store)
         expected_head = (
             RULE_AUDIT_GENESIS_HEAD if audit_sequence == 0 and previous_hash is None
             else previous_hash
         )
         if (type(expected_head) is not str or checkpoint_head != expected_head
-                or self._checkpoint_store.confirmar(checkpoint_head) is not True):
+                or _confirmar_checkpoint_durable(self._checkpoint_store, checkpoint_head) is not True):
             raise RuleAuthorityStorageError(
                 "checkpoint externo no coincide con el audit head DB antes de evaluar")
         return audit_sequence, previous_hash, checkpoint_head
@@ -430,12 +455,10 @@ class MariaDBRuleDecisionStore:
                 raise RuleAuthorityStorageError("audit head cambió durante la evaluación")
             transaction_owner._mark_evaluation_persisted()
             close_error = transaction_owner._commit_evaluation_for_store()
-            try:
-                self._checkpoint_store.publicar(head_hash, anterior=checkpoint_head)
-            except Exception as exc:
-                raise RuleAuthorityCommittedCheckpointError(
-                    "DURABILITY_UNKNOWN: evaluación confirmada en DB pero checkpoint no reconciliado"
-                ) from exc
+            _publicar_checkpoint_durable(
+                self._checkpoint_store, head_hash, checkpoint_head,
+                error_message="evaluación confirmada en DB pero checkpoint no confirmado",
+            )
             if close_error is not None:
                 raise RuleAuthorityCommittedCleanupError(
                     "evaluación confirmada y anclada pero el cierre posterior al commit falló"
@@ -544,7 +567,7 @@ class MariaDBRuleDecisionStore:
         if (permit_row[-3] != row[8]
                 or permit_row[-1] != row[9] + 1
                 or self._checkpoint_store is None
-                or self._checkpoint_store.confirmar(permit_row[-2]) is not True):
+                or _confirmar_checkpoint_durable(self._checkpoint_store, permit_row[-2]) is not True):
             raise RuleAuthorityStorageError(
                 "checkpoint externo no contiene RulePermit o su decisión enlazada"
             )
@@ -569,8 +592,9 @@ class MariaDBRuleDecisionStore:
                     from .trusted_checkpoint import RULE_AUDIT_GENESIS_HEAD
                     expected = (RULE_AUDIT_GENESIS_HEAD if head and head[0] == 0 and head[1] is None
                                 else (head[1] if head else None))
-                    if (type(expected) is not str or self._checkpoint_store.head_actual() != expected
-                            or self._checkpoint_store.confirmar(expected) is not True):
+                    if (type(expected) is not str
+                            or _head_actual_checkpoint_durable(self._checkpoint_store) != expected
+                            or _confirmar_checkpoint_durable(self._checkpoint_store, expected) is not True):
                         raise RuleAuthorityStorageError("checkpoint externo no coincide con audit head DB")
                     cursor.execute(
                         "SELECT permit_id,request_hash,consumed_at_utc,canonical_payload,consumption_hash,"
@@ -585,7 +609,7 @@ class MariaDBRuleDecisionStore:
                         raise AuthorityStateError("permit ya consumido con otro request_hash")
                     if consumption.consumption_request_id != consumption_request_id:
                         raise AuthorityStateError("permit ya consumido con consumption_request_id distinto")
-                    if self._checkpoint_store.confirmar(record_hash) is not True:
+                    if _confirmar_checkpoint_durable(self._checkpoint_store, record_hash) is not True:
                         raise RuleAuthorityStorageError("checkpoint no contiene consumo recuperado")
                 connection.commit()
                 return consumption
@@ -654,9 +678,12 @@ class MariaDBRuleDecisionStore:
         expected_head = (
             RULE_AUDIT_GENESIS_HEAD if audit_sequence == 0 and db_head is None else db_head
         )
-        checkpoint_head = self._checkpoint_store.head_actual() if self._checkpoint_store else None
+        checkpoint_head = (
+            _head_actual_checkpoint_durable(self._checkpoint_store)
+            if self._checkpoint_store else None
+        )
         if (type(expected_head) is not str or checkpoint_head != expected_head
-                or self._checkpoint_store.confirmar(checkpoint_head) is not True):
+                or _confirmar_checkpoint_durable(self._checkpoint_store, checkpoint_head) is not True):
             raise RuleAuthorityStorageError(
                 "checkpoint externo no coincide con el audit head DB durante recuperación"
             )
@@ -676,7 +703,7 @@ class MariaDBRuleDecisionStore:
             raise AuthorityStateError("permit ya consumido con otro request_hash")
         if consumption.consumption_request_id != consumption_request_id:
             raise AuthorityStateError("permit ya consumido con consumption_request_id distinto")
-        if self._checkpoint_store.confirmar(record_hash) is not True:
+        if _confirmar_checkpoint_durable(self._checkpoint_store, record_hash) is not True:
             raise RuleAuthorityStorageError("checkpoint no contiene consumo recuperado")
         return consumption
 
@@ -726,13 +753,13 @@ class MariaDBRuleDecisionStore:
                 audit_sequence, previous_hash = transaction_owner.lock_rule_authority_audit_head_for_update()
             from .trusted_checkpoint import RULE_AUDIT_GENESIS_HEAD
 
-            checkpoint_head = self._checkpoint_store.head_actual()
+            checkpoint_head = _head_actual_checkpoint_durable(self._checkpoint_store)
             expected_head = (
                 RULE_AUDIT_GENESIS_HEAD if audit_sequence == 0 and previous_hash is None
                 else previous_hash
             )
             if (type(expected_head) is not str or checkpoint_head != expected_head
-                    or self._checkpoint_store.confirmar(checkpoint_head) is not True):
+                    or _confirmar_checkpoint_durable(self._checkpoint_store, checkpoint_head) is not True):
                 raise RuleAuthorityStorageError(
                     "checkpoint externo no coincide con el audit head DB antes del consumo"
                 )
@@ -762,7 +789,7 @@ class MariaDBRuleDecisionStore:
                     raise RuleAuthorityStorageError(
                         "audit head no referencia el consumo idempotente"
                     )
-                if self._checkpoint_store.confirmar(stored_record_hash) is not True:
+                if _confirmar_checkpoint_durable(self._checkpoint_store, stored_record_hash) is not True:
                     raise RuleAuthorityStorageError(
                         "checkpoint externo no confirma el consumo idempotente"
                     )
@@ -802,12 +829,10 @@ class MariaDBRuleDecisionStore:
                 )
             transaction_owner._mark_consumption_persisted()
             close_error = transaction_owner._commit_consumption_for_store()
-            try:
-                self._checkpoint_store.publicar(record_hash, anterior=checkpoint_head)
-            except Exception as exc:
-                raise RuleAuthorityCommittedCheckpointError(
-                    "DURABILITY_UNKNOWN: consumo confirmado en DB pero checkpoint no reconciliado"
-                ) from exc
+            _publicar_checkpoint_durable(
+                self._checkpoint_store, record_hash, checkpoint_head,
+                error_message="consumo confirmado en DB pero checkpoint no confirmado",
+            )
             if close_error is not None:
                 raise RuleAuthorityCommittedCleanupError(
                     "consumo confirmado y anclado pero el cierre posterior al commit falló"
@@ -896,7 +921,7 @@ class MariaDBRuleDecisionStore:
                 )
             head_hash = permit_row[-2]
         if (self._checkpoint_store is None
-                or self._checkpoint_store.confirmar(head_hash) is not True):
+                or _confirmar_checkpoint_durable(self._checkpoint_store, head_hash) is not True):
             raise RuleAuthorityStorageError(
                 "checkpoint externo no contiene el head final de la evaluación durable"
             )

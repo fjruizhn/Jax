@@ -1683,10 +1683,11 @@ def test_cross_schema_consumption_checkpoint_failure_reports_committed_state(mon
             consumed_at_utc=datetime(2026, 10, 10, 12, 4, tzinfo=timezone.utc),
         )
 
-        with pytest.raises(RuleAuthorityCommittedCheckpointError, match="confirmado en DB"):
+        with pytest.raises(RuleAuthorityCommittedCheckpointError, match="confirmado en DB") as failure:
             _consume_under_verified_fence(
                 ledger_store, checkpoint_store, root, decision_store, draft
             )
+        assert not isinstance(failure.value, RuleAuthorityDurabilityUnknown)
 
         with connect(database="jax_rule_authority") as admin:
             with admin.cursor() as cursor:
@@ -1733,13 +1734,14 @@ def test_evaluation_checkpoint_failure_keeps_db_row_and_blocks_durable_recovery(
                 CheckpointInvalido("publicación de evaluación inyectada")
             ),
         )
-        with pytest.raises(RuleAuthorityCommittedCheckpointError, match="evaluación confirmada en DB"):
+        with pytest.raises(RuleAuthorityCommittedCheckpointError, match="evaluación confirmada en DB") as failure:
             with ledger_store.checkpoint_fence(checkpoint_store) as fence:
                 with fence.transaction_owner(
                     decision_store, purpose=AuthorityLedgerTransactionPurpose.EVALUATION
                 ) as owner:
                     fence.verify_for_update(owner, root)
                     decision_store.record_evaluation_in_transaction(owner, request, decision, None)
+        assert not isinstance(failure.value, RuleAuthorityDurabilityUnknown)
 
         with connect(database="jax_rule_authority") as admin:
             with admin.cursor() as cursor:
