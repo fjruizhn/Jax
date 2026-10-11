@@ -3,8 +3,9 @@
 - Fecha: 2026-10-09
 - Responsable: Codex, hall9000
 - Rama: `codex/faro-r2`
-- Base al iniciar: `origin/master@709237f901e8ec8840f6b2b39a1a2ce88682674a`; #379 se integró después como `d0c8a68f131849fb298c8cda9b5519e304088e11` y su `post-merge-guard` terminó SUCCESS. Último fetch: `origin/master@35991faa81b2d7ac5d85a5bedf67eea168e98cd7`; la rama aún no lo integra.
-- Estado: implementación y pruebas locales listas; diff aún sin commit. R-2 está implementado en la rama, pendiente de revisión adversarial, reconciliación con master, auditoría Tier 3 del SHA exacto, PR e integración.
+- Actualizado: 2026-10-11
+- Base al iniciar: `origin/master@709237f901e8ec8840f6b2b39a1a2ce88682674a`. #379/#392/#399 se integraron después; última base oficial verificada `origin/master@765406f4475ac5babb8ec6af2e6c92b91aa65344`, todavía no reapilada en esta rama.
+- Estado: implementación R-2 previa y sus pruebas siguen locales; el diff nuevo corrige la cancelación repetida y hace que el apagado espere las limpiezas. Aún no está commit/push, rebasado, auditado ni integrado.
 
 ## Implementación
 
@@ -22,6 +23,10 @@
 - Job `faro-jaula`: `11 passed`, piso verificado y cero skips. Protección de cableado de archivos de test: `7 passed`.
 - El doble de systemd cubre carreras de UID, unidad ocupada ajena, fallos de consulta, límites alterados, cancelación y orden de cierre.
 - `git diff --check` limpio. `systemctl --user list-units 'faro-jaula-u*'` vacío después de las pruebas.
+- 2026-10-11: la regresión `test_major2_cancelacion_repetida_y_materializacion_tardia_no_deja_unidad_viva` falló antes del cambio con `muertes=[]`; luego pasó con la limpieza registrada que conserva el spawn bajo cancelaciones repetidas. La prueba reproduce materialización >1 s y verifica muerte de la unidad/estado `EMPTY`.
+- 2026-10-11: prueba nueva del apagado falla antes porque `ServidorControl.__aexit__` no esperaba `ScopeManager.esperar_limpiezas`; pasa tras añadir esa espera después de cerrar las ejecuciones.
+- Con las dependencias exactas de CI (`pip install --require-hashes -r requirements-faro.txt` y `requirements-faro-ci.txt`) en `/tmp/jax-faro-r2-venv`, la selección exacta `faro-fase0` pasó: `844 passed, 5 deselected` (piso vigente 834). Cinco pruebas dirigidas de cancelación/cierre también pasaron. No se ejecutaron aún las cuatro pruebas reales del user manager.
+- Revisión Tier 3 de arquitectura actualizada solicitada; no es todavía auditoría final de SHA. GLM/ZCode agotó límite semanal el 2026-10-11; no pudo entregar la revisión concurrente.
 
 ## Mapa del Faro y coordinación
 
@@ -32,9 +37,9 @@
 
 ## Siguiente
 
-1. Revisar el diff completo contra el plan y confirmar el piso repetible.
-2. Revisar el ciclo de propiedad de una unidad ante colisión/cancelación antes de cerrar la revisión del diff.
-3. Integrar `origin/master@35991faa` en esta rama, medir de nuevo si cambia el conteo y actualizar este handoff.
-4. Commit de Codex con coautoría, push y PR propio.
-5. Auditoría Tier 3 independiente sobre el SHA exacto; corregir y repetir si cambia.
-6. Revalidar ventana, `verify-integration`, merge por PR y `post-merge-guard`. No desplegar.
+1. Revisar el diff nuevo y el informe independiente Tier 3; cerrar cualquier BLOCK/MAJOR, incluida la esquina de fallo al consultar la identidad.
+2. Revalidar #398 y #400: esperar CI exacta y `post-merge-guard`; después tomar el `origin/master` realmente vigente.
+3. Commit pequeño con coautoría Codex, actualizar este handoff y publicar la rama propia.
+4. Reapilar sobre el master actual; medir de nuevo piso y repetir exactamente `faro-fase0` más las pruebas de integración disponibles.
+5. Borrar `TRASPASO.md` antes de pedir auditoría final y registrar su contenido en la Biblioteca. Ejecutar auditoría Tier 3 independiente sobre el SHA exacto; cualquier cambio exige nueva auditoría y CI.
+6. Revalidar ventana, sello `verify-source`, `verify-integration`, merge por PR y `post-merge-guard`. No desplegar R-2: Faro sigue NO-GO de producción hasta completar 0.5/0.7/0.8/0.9/0.10 y la raíz/reglas verificadas.

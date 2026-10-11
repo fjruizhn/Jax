@@ -70,6 +70,9 @@ class FalsoScope:
             raise self.error
         return self.estados.get(uid, EstadoUnidad.EMPTY)
 
+    async def esperar_limpiezas(self) -> None:
+        return None
+
 
 def _cfg_control(tmp_path, **kw) -> ConfigControl:
     d = tmp_path / "control"
@@ -986,6 +989,33 @@ def test_block2_el_apagado_que_cancela_un_cierre_a_medias_termina_el_kill(mundo)
     assert muertes == [50001]                               # el kill corrio pese a la cancelacion
     assert esperas == [50001]                               # y la confirmacion de vacio TAMBIEN (antes no llegaba)
     assert archivos == []                                   # y el Puerto de la ejecucion quedo revocado
+
+
+def test_r2_el_apagado_espera_limpiezas_de_arranque_cancelado(mundo):
+    class ScopeConLimpiezaPendiente(FalsoScope):
+        def __init__(self):
+            super().__init__()
+            self.entro = asyncio.Event()
+            self.salir = asyncio.Event()
+
+        async def esperar_limpiezas(self):
+            self.entro.set()
+            await self.salir.wait()
+
+    scope = ScopeConLimpiezaPendiente()
+
+    async def caso():
+        cm = control(mundo, scope=scope)
+        await cm.__aenter__()
+        apagado = asyncio.create_task(cm.__aexit__(None, None, None))
+        await asyncio.sleep(0.05)
+        espero_limpieza = not apagado.done()
+        scope.salir.set()
+        await apagado
+        return scope.entro.is_set(), espero_limpieza
+
+    entro, espero_limpieza = corre(caso())
+    assert entro and espero_limpieza
 
 
 @pytest.mark.parametrize("tenant", ["con espacio", "a|b", "x" * 65, "ñandú", "t\nx", "a;b", "a/b"])

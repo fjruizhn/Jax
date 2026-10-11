@@ -280,6 +280,9 @@ class ServidorControl:
         await asyncio.gather(*list(self._cierres.values()), return_exceptions=True)
         for run_id, srv in list(self._ejecuciones.items()):
             await self._cerrar_ejecucion(run_id, srv)
+        # Un arranque cancelado puede tener aún `systemd-run` en vuelo. El gestor de unidades
+        # conserva esa limpieza como tarea propia; el apagado no termina antes de que se resuelva.
+        await self._scope.esperar_limpiezas()
         try:
             os.unlink(self.ruta_socket)
         except FileNotFoundError:  # fail-soft: ya no esta; el objetivo del cierre es que no exista

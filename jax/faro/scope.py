@@ -224,6 +224,7 @@ class ScopeManager:
         self._crear_proceso = crear_proceso if crear_proceso is not None else asyncio.create_subprocess_exec
         self._intervalo_s = intervalo_s
         self._plazo_consulta_s = plazo_consulta_s
+        self._limpiezas: set[asyncio.Task] = set()     # limpiezas de cancelacion en vuelo (MAJOR 2)
 
     # -- nombres y argv ---------------------------------------------------------------------
     def unidad(self, uid: int) -> str:
@@ -350,18 +351,20 @@ class ScopeManager:
         lista hasta VERIFICARLA activa, con los tres limites efectivos y con la DESCRIPTION de ESTE
         intento: la identidad es determinista, no se infiere por temporizacion ni por la vida del
         systemd-run propio. Lo arrancado y no verificado se mata SOLO si sigue llevando nuestra
-        Description; una unidad de otra ejecucion, jamas."""
+        Description; una unidad de otra ejecucion, jamas. La creacion del subproceso corre como TAREA
+        propia: una cancelacion nunca deja un hijo sin dueno — la limpieza termina el hijo (cierra la
+        ventana de creacion) y luego vigila por identidad, como tarea registrada que
+        `esperar_limpiezas` completa aunque la cancelacion se repita (MAJOR 2)."""
         unidad = nombre_unidad(uid)
         intento = uuid.uuid4().hex
         completo = self.argv_arrancar(uid, comando, intento=intento)
+        creacion = asyncio.create_task(self._crear_proceso(
+            *completo, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, env=entorno_consulta()))
         try:
-            proceso = await self._crear_proceso(
-                *completo, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, env=entorno_consulta())
+            proceso = await asyncio.shield(creacion)
         except asyncio.CancelledError:
-            # MAJOR 2: el hijo pudo nacer (y crear la unidad) antes de que la cancelacion llegara;
-            # la limpieza espera acotadamente a que la unidad aparezca y solo mata si es NUESTRA.
-            await self._limpiar_intento(uid, intento)
+            await self._limpiar_cancelacion(uid, intento, creacion)
             raise
         except Exception as exc:
             raise ScopeError(f"no se pudo lanzar {unidad}: {type(exc).__name__}") from exc
@@ -373,7 +376,7 @@ class ScopeManager:
         try:
             return await self._verificar(proceso, unidad, intento)
         except asyncio.CancelledError:
-            await self._matar_si_es_nuestra(uid, intento)
+            await self._limpiar_en_tarea(uid, intento, proceso)
             raise
         except _UnidadAjena as exc:
             raise ScopeError(str(exc)) from exc      # no se mata: la unidad activa es de otra ejecucion
@@ -430,13 +433,13 @@ class ScopeManager:
         no se puede identificar como nuestro no se toca) y se deja el rastro para el operador."""
         unidad = nombre_unidad(uid)
         try:
-            res = await self._consultar(unidad, ("Description",))
-            if res is None:
+            descripcion = await self._descripcion(uid)
+            if descripcion is None:
                 logger.warning("limpieza de %s: identidad no concluyente, no se mata", unidad)
                 return False
-            if res["Description"] != self.description_de_intento(intento):
+            if descripcion != self.description_de_intento(intento):
                 logger.warning("limpieza de %s: Description %r no es la del intento, no se mata",
-                               unidad, res["Description"])
+                               unidad, descripcion)
                 return False
             await self.matar(uid)
             return True
@@ -444,15 +447,93 @@ class ScopeManager:
             logger.exception("limpieza de %s no pudo concluir", unidad)
             return False
 
-    async def _limpiar_intento(self, uid: int, intento: str, *, plazo_s: float = 1.0) -> None:
-        """Cancelacion DURANTE la creacion del subproceso (MAJOR 2): el systemd-run pudo ya haber creado
-        la unidad despues del punto donde nos cancelaron. Espera acotada: si la unidad aparece con
-        NUESTRA Description, se mata; con otra identidad o sin aparecer, no se toca nada."""
-        fin = time.monotonic() + plazo_s
-        while time.monotonic() < fin:
-            if await self._matar_si_es_nuestra(uid, intento):
-                return
+    async def _limpiar_cancelacion(self, uid: int, intento: str, creacion: asyncio.Task) -> None:
+        """Entrega la limpieza a una tarea propia antes del primer await cancelable.
+
+        Una segunda cancelación del llamador puede cortar esta espera, pero no la tarea registrada:
+        ésta conserva el spawn hasta recibir su handle y luego cierra la ventana de creación antes de
+        vigilar la unidad por identidad. No se usa un timeout para declarar ausente un hijo que aún no
+        entregó su handle.
+        """
+        tarea = asyncio.create_task(self._resolver_cancelacion(uid, intento, creacion))
+        self._limpiezas.add(tarea)
+        tarea.add_done_callback(self._limpiezas.discard)
+        try:
+            await asyncio.shield(tarea)
+        except asyncio.CancelledError:
+            raise                    # la tarea registrada conserva el ownership hasta completar
+
+    async def _resolver_cancelacion(self, uid: int, intento: str, creacion: asyncio.Task) -> None:
+        """Espera el resultado real del spawn; mientras no haya handle, no es seguro concluir que no
+        habrá una unidad. Si el spawn falla, no pudo crear una unidad a través de este proceso."""
+        try:
+            proceso = await creacion
+        except Exception:
+            return
+        await self._terminar_intento(uid, intento, proceso)
+
+    async def _limpiar_en_tarea(self, uid: int, intento: str, proceso) -> None:
+        """La limpieza corre como TAREA propia y registrada: una cancelacion (incluso repetida) de quien
+        llamo no la interrumpe; se espera aqui bajo shield y, si la cancelacion llega ahi tambien,
+        `esperar_limpiezas` (o el apagado del canal de control) la completa igual."""
+        tarea = asyncio.create_task(self._terminar_intento(uid, intento, proceso))
+        self._limpiezas.add(tarea)
+        tarea.add_done_callback(self._limpiezas.discard)
+        try:
+            await asyncio.shield(tarea)
+        except asyncio.CancelledError:
+            raise                    # la tarea sigue en background; nadie la cancela
+
+    async def _terminar_intento(self, uid: int, intento: str, proceso) -> bool:
+        """Garantia de la cancelacion (MAJOR 2): al terminar, o la unidad con NUESTRA Description esta
+        muerta, o quedo concluido que no hay ni habra una unidad nuestra — el unico que podia crearla
+        es el hijo, y el hijo quedo muerto (kill+wait) ANTES de la vigilancia final por identidad.
+        Devuelve False (y lo declara en el log) solo en la esquina en que ni el handle ni la consulta
+        permiten concluir."""
+        unidad = nombre_unidad(uid)
+        nuestra = self.description_de_intento(intento)
+        fin = time.monotonic() + self._cfg.plazo_arranque_s
+        # fase 1: mientras el hijo vive, esperar a que la unidad nazca (identidad concluyente) o el hijo muera
+        while proceso is not None and getattr(proceso, "returncode", 0) is None and time.monotonic() < fin:
+            descripcion = await self._descripcion(uid)
+            if descripcion is not None:                 # concluyente: nuestra u otra
+                break
             await asyncio.sleep(self._intervalo_s)
+        # fase 2: cerrar la ventana de creacion — hijo muerto ya no puede materializar nada
+        if proceso is not None and getattr(proceso, "returncode", 0) is None:
+            with contextlib.suppress(Exception):
+                proceso.kill()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proceso.wait(), self._plazo_consulta_s)
+        # fase 3: vigilancia por identidad — un job ya encolado puede aterrizar tras la muerte del hijo
+        fin = time.monotonic() + self._cfg.plazo_arranque_s
+        while True:
+            descripcion = await self._descripcion(uid)
+            if descripcion is not None:
+                if descripcion == nuestra:
+                    try:
+                        await self.matar(uid)
+                        return True
+                    except Exception:                   # fallo explotado, no silencioso
+                        logger.exception("limpieza de %s: la unidad nuestra no se pudo matar", unidad)
+                        return False
+                return True                             # otra identidad o no-found: nada nuestro
+            if time.monotonic() >= fin:
+                logger.error("limpieza de %s: identidad no concluyente tras la muerte del hijo; "
+                             "NO se garantiza que no quede una unidad nuestra viva", unidad)
+                return False
+            await asyncio.sleep(self._intervalo_s)
+
+    async def _descripcion(self, uid: int) -> str | None:
+        """La Description que reporta systemd para la unidad del uid; None si la consulta no concluye."""
+        res = await self._consultar(nombre_unidad(uid), ("Description",))
+        return res["Description"] if res is not None else None
+
+    async def esperar_limpiezas(self) -> None:
+        """Espera a que terminen TODAS las limpiezas en vuelo (las cancelaciones repetidas dejan la
+        tarea viva; el apagado del canal de control la llama antes de salir)."""
+        if self._limpiezas:
+            await asyncio.gather(*list(self._limpiezas), return_exceptions=True)
 
     # -- muerte -----------------------------------------------------------------------------
     async def matar(self, uid: int) -> None:

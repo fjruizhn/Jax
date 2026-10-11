@@ -568,18 +568,19 @@ def test_major2_cancelada_la_creacion_del_subproceso_la_unidad_nacida_se_limpia(
     sin seguimiento."""
     async def caso():
         g = gestor(sistema)
-        adentro = asyncio.Event()
+        adentro, devolver_handle = asyncio.Event(), asyncio.Event()
 
         async def crear_lento(*argv, **kw):
             p = await sistema.crear_proceso(*argv, **kw)       # la unidad YA nacio con NUESTRA Description
             if argv[0].endswith("systemd-run"):
                 adentro.set()
-                await asyncio.Event().wait()                   # bloqueado antes de devolver el handle
+                await devolver_handle.wait()                    # unidad nacida; handle aún no entregado
             return p
         g._crear_proceso = crear_lento
         tarea = asyncio.create_task(g.arrancar(UID, ["/usr/bin/true"]))
         await asyncio.wait_for(adentro.wait(), 2)
         tarea.cancel()
+        devolver_handle.set()                                    # el spawn termina; cleanup debe matar la unidad
         try:
             await tarea
         except asyncio.CancelledError:
@@ -587,6 +588,45 @@ def test_major2_cancelada_la_creacion_del_subproceso_la_unidad_nacida_se_limpia(
         return sistema.muertes, await g.estado(UID)
     muertes, estado = corre_con_plazo(caso())
     assert muertes == [UNIDAD]                         # la unidad nacida de nuestro intento, muerta
+    assert estado is EstadoUnidad.EMPTY
+
+
+def test_major2_cancelacion_repetida_y_materializacion_tardia_no_deja_unidad_viva(sistema):
+    """La segunda cancelación no corta la limpieza y ésta conserva ownership hasta matar la unidad de
+    un systemd-run que materializa después de más de un segundo."""
+    cfg = ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128", plazo_arranque_s=5.0)
+
+    async def caso():
+        g = gestor(sistema, cfg=cfg)
+        spawn_iniciado, liberar_spawn = asyncio.Event(), asyncio.Event()
+
+        async def crear_lento(*argv, **kw):
+            if argv[0].endswith("systemd-run"):
+                spawn_iniciado.set()
+                await liberar_spawn.wait()                 # la unidad aún no existe
+            return await sistema.crear_proceso(*argv, **kw)
+
+        g._crear_proceso = crear_lento
+        tarea = asyncio.create_task(g.arrancar(UID, ["/usr/bin/true"]))
+        await asyncio.wait_for(spawn_iniciado.wait(), 2)
+        tarea.cancel()
+        await asyncio.sleep(0.08)                           # la limpieza sigue esperando el handle
+        tarea.cancel()                                       # cancelación repetida durante limpieza
+        with contextlib.suppress(asyncio.CancelledError):
+            await tarea
+        await asyncio.sleep(1.05)                            # reproducción: materialización >1s después
+        liberar_spawn.set()
+        # Esperar al spawn protegido y al contrato de cleanup; no usar demora como sincronización.
+        await asyncio.sleep(0)
+        for _ in range(100):
+            if sistema.unidades:
+                break
+            await asyncio.sleep(0.01)
+        await g.esperar_limpiezas()
+        return sistema.muertes, await g.estado(UID)
+
+    muertes, estado = corre_con_plazo(caso())
+    assert muertes == [UNIDAD]
     assert estado is EstadoUnidad.EMPTY
 
 
