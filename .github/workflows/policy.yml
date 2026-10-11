@@ -2833,7 +2833,7 @@ jobs:
           JAX_AUTHORITY_LEDGER_DOCKER_CMD: docker
         run: |
           set -o pipefail
-          # Piso de colección local 45 (2026-10-10); Docker no está disponible en hall9000. CI exacta debe confirmar las 45 pasadas.
+          # Piso de colección local 46 (2026-10-10), incluida la regresión post-replace/restart; CI exacta confirma las pasadas.
           python -m pytest -q tests/policy/test_authority_ledger_storage_mariadb.py tests/policy/test_authority_ledger_append_validation_mariadb.py 2>&1 | tee /tmp/authority-ledger-mariadb
           python3 .github/ci/piso.py verificar authority-ledger-mariadb/integration /tmp/authority-ledger-mariadb || exit $?
       - name: Faro F1.1 Rule Authority MariaDB aislada -- piso exacto

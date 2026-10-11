@@ -10,7 +10,9 @@ import pytest
 
 from policy.authority_ledger.canonical import canonical_bytes
 from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
-from policy.rule_authority.errors import CheckpointInvalido
+from policy.rule_authority.errors import (
+    CheckpointDurabilityUnknown, CheckpointInvalido,
+)
 from policy.rule_authority.storage import MariaDBRuleDecisionStore
 from policy.rule_authority.trusted_checkpoint import (
     RuleAuditCheckpointStore,
@@ -217,7 +219,7 @@ def test_fallo_fsync_del_archivo_conserva_el_head_anterior(tmp_path, monkeypatch
         raise OSError("injected file fsync failure")
 
     monkeypatch.setattr(os, "fsync", fail_fsync)
-    with pytest.raises(CheckpointInvalido, match="resultado de publicación durable desconocido"):
+    with pytest.raises(CheckpointInvalido, match="preparar checkpoint antes de replace"):
         store.publicar("sha256:" + "1" * 64, anterior=genesis)
 
     assert store.head_actual() == genesis
@@ -232,7 +234,7 @@ def test_fallo_fsync_directorio_despues_de_replace_es_publicacion_incierta(tmp_p
         raise OSError("injected directory fsync failure")
 
     monkeypatch.setattr(RuleAuditCheckpointStore, "_fsync_directory", fail_directory_fsync)
-    with pytest.raises(CheckpointInvalido, match="resultado de publicación durable desconocido"):
+    with pytest.raises(CheckpointDurabilityUnknown, match="desconocido tras replace"):
         store.publicar(new_head, anterior=genesis)
 
     # The rename is visible to this process, but visibility alone is not a
@@ -274,18 +276,23 @@ def test_reintento_no_confirma_head_visible_hasta_reconciliar_durabilidad(tmp_pa
         failed_directory.setattr(
             RuleAuditCheckpointStore, "_fsync_directory", fail_directory_fsync
         )
-        with pytest.raises(
-            CheckpointInvalido, match="resultado de publicación durable desconocido"
-        ):
+        with pytest.raises(CheckpointInvalido) as publication_failure:
             store.publicar(new_head, anterior=genesis)
+        assert isinstance(publication_failure.value, CheckpointDurabilityUnknown)
 
         # Re-reading a rename that is visible in this process cannot prove that
         # its directory entry survived a crash. Recovery and the identical CAS
-        # retry must fail while that durability barrier still fails.
-        with pytest.raises(CheckpointInvalido, match="durabilidad"):
-            store.confirmar(new_head)
-        with pytest.raises(CheckpointInvalido, match="durabilidad"):
-            store.publicar(new_head, anterior=genesis)
+        # retry from a recreated store must fail while that durability barrier
+        # still fails. Recreating the store models process restart; the DB's
+        # committed head remains authoritative in the integration regression.
+        restarted_store = RuleAuditCheckpointStore(store.path)
+        assert restarted_store.head_actual() == new_head
+        with pytest.raises(CheckpointInvalido) as confirmation_failure:
+            restarted_store.confirmar(new_head)
+        assert isinstance(confirmation_failure.value, CheckpointDurabilityUnknown)
+        with pytest.raises(CheckpointInvalido) as retry_failure:
+            restarted_store.publicar(new_head, anterior=genesis)
+        assert isinstance(retry_failure.value, CheckpointDurabilityUnknown)
 
     real_fsync = os.fsync
 
@@ -296,11 +303,12 @@ def test_reintento_no_confirma_head_visible_hasta_reconciliar_durabilidad(tmp_pa
 
     with monkeypatch.context() as failed_file:
         failed_file.setattr(os, "fsync", fail_checkpoint_file_fsync)
-        with pytest.raises(CheckpointInvalido, match="durabilidad"):
-            store.confirmar(new_head)
+        with pytest.raises(CheckpointInvalido) as file_failure:
+            restarted_store.confirmar(new_head)
+        assert isinstance(file_failure.value, CheckpointDurabilityUnknown)
 
-    assert store.confirmar(new_head) is True
-    store.publicar(new_head, anterior=genesis)
+    assert restarted_store.confirmar(new_head) is True
+    restarted_store.publicar(new_head, anterior=genesis)
 
 
 def test_no_se_infiere_genesis_desde_un_log_ausente_y_bootstrap_es_unico(tmp_path):

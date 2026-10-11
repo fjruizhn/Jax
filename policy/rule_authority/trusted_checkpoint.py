@@ -18,7 +18,7 @@ import threading
 
 from policy.authority_ledger.canonical import canonical_bytes, domain_hash
 
-from .errors import CheckpointInvalido
+from .errors import CheckpointDurabilityUnknown, CheckpointInvalido
 
 
 _DOMAIN = "JAX-FARO-RULE-AUTHORITY-AUDIT-CHECKPOINT"
@@ -140,7 +140,9 @@ class RuleAuditCheckpointStore:
             row["checkpoint_hash"] = _checkpoint_hash(row)
             self._replace_log((row,))
             if self._read_all() != (row,):
-                raise CheckpointInvalido("bootstrap no confirmó la relectura exacta del log")
+                raise CheckpointDurabilityUnknown(
+                    "bootstrap no confirmó la relectura exacta durable del log"
+                )
 
     def publicar(self, head: str, *, anterior: str) -> None:
         if not _valid_hash(head) or (anterior != "" and not _valid_hash(anterior)):
@@ -176,24 +178,36 @@ class RuleAuditCheckpointStore:
             row["checkpoint_hash"] = _checkpoint_hash(row)
             expected_checkpoints = (*checkpoints, row)
             self._replace_log(expected_checkpoints)
-            if self._read_all() != expected_checkpoints:
-                raise CheckpointInvalido(
-                    "publicación no confirmó la relectura exacta del checkpoint"
+            try:
+                observed_after_replace = self._read_all()
+            except CheckpointInvalido as exc:
+                raise CheckpointDurabilityUnknown(
+                    "publicación no pudo validar el checkpoint tras replace"
+                ) from exc
+            if observed_after_replace != expected_checkpoints:
+                raise CheckpointDurabilityUnknown(
+                    "publicación no confirmó la relectura exacta tras replace"
                 )
 
     def confirmar(self, head: str) -> bool:
         if not _valid_hash(head):
             return False
         with self.locked():
-            if not any(row["head"] == head for row in self._read_all()):
+            observed = self._read_all()
+            if not any(row["head"] == head for row in observed):
                 return False
             try:
                 self._fsync_checkpoint_file()
                 self._fsync_directory_chain(self.path.parent)
-                if not any(row["head"] == head for row in self._read_all()):
-                    return False
+                reconciled = self._read_all()
+                if reconciled != observed or not any(row["head"] == head for row in reconciled):
+                    raise CheckpointDurabilityUnknown(
+                        "checkpoint cambió durante la reconciliación durable"
+                    )
+            except CheckpointDurabilityUnknown:
+                raise
             except (OSError, CheckpointInvalido) as exc:
-                raise CheckpointInvalido(
+                raise CheckpointDurabilityUnknown(
                     "no se pudo confirmar la durabilidad del checkpoint"
                 ) from exc
             return True
@@ -251,6 +265,7 @@ class RuleAuditCheckpointStore:
             f".{self.path.name}.tmp-{secrets.token_hex(16)}"
         )
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)
+        replace_started = False
         try:
             fd = os.open(temporary_path, flags, 0o600)
             with os.fdopen(fd, "wb") as handle:
@@ -258,14 +273,27 @@ class RuleAuditCheckpointStore:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
+            # An error returned by replace can be ambiguous: the filesystem
+            # operation may have changed the name before reporting failure.
+            replace_started = True
             os.replace(temporary_path, self.path)
             self._fsync_directory_chain(self.path.parent)
-        except OSError as exc:
+        except (OSError, CheckpointInvalido) as exc:
             try:
                 temporary_path.unlink()
             except FileNotFoundError:  # fail-soft: otro limpiador ya retiró el temporal y no queda estado que recuperar
                 pass
-            raise CheckpointInvalido("resultado de publicación durable desconocido") from exc
+            except OSError:
+                # A leftover private temp is cleaned on the next flock. It does
+                # not change which checkpoint head was durably published.
+                pass
+            if replace_started:
+                raise CheckpointDurabilityUnknown(
+                    "resultado de publicación durable desconocido tras replace"
+                ) from exc
+            raise CheckpointInvalido(
+                "no se pudo preparar checkpoint antes de replace"
+            ) from exc
 
     def _fsync_checkpoint_file(self) -> None:
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)

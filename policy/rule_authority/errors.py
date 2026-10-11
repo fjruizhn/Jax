@@ -38,6 +38,15 @@ class CheckpointInvalido(RuleAuthorityError):
     idempotencias inexactas (§11)."""
 
 
+class CheckpointDurabilityUnknown(CheckpointInvalido):
+    """Un replace pudo hacerse visible, pero su durabilidad no fue demostrada.
+
+    El estado incierto no se persiste aquí: esa escritura también podría fallar.
+    Los consumidores deben reconciliar el archivo y sus directorios antes de
+    recuperar o emitir un resultado durable.
+    """
+
+
 class RelojInvalido(RuleAuthorityError):
     """El reloj entrego una hora sin timezone o invalida."""
 

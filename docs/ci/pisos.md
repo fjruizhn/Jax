@@ -4652,10 +4652,11 @@ denormalizadas (incluido `previous_event_hash`), lectura histórica exacta y per
 
 ## `authority-ledger-mariadb/integration`
 
-Piso local pendiente de ejecución MariaDB (2026-10-10): `^45 passed in `. El árbol reapilado
-colecciona 45 casos tras incorporar los cierres de #396 y las regresiones DENY compartidas;
-Docker no está disponible en hall9000 (`/var/run/docker.sock` denegado), así que el conteo de
-pasadas queda por confirmar en CI exacta. La corrida CI 38032592015 contó 33 casos; después
+Piso local pendiente de ejecución MariaDB (2026-10-10): `^46 passed in `. El árbol reapilado
+colecciona 46 casos tras incorporar los cierres de #396, las regresiones DENY compartidas y
+la regresión post-replace de crash/restart, retry y retención de clave/consumo. Docker no
+está disponible en hall9000 (`/var/run/docker.sock` denegado), así que el conteo de pasadas
+queda por confirmar en CI exacta. La corrida CI 38032592015 contó 33 casos; después
 se añadieron cinco regresiones de transaction owner/checkpoint y dos pruebas de evaluación
 DENY bajo el owner compartido (persistencia/retry y rollback). La base #377 tenía 5 pruebas en MariaDB 12.3.3 efímera
 `--network none`; la prueba aplica ambas migraciones, valida el upgrade nullable→NOT NULL,
