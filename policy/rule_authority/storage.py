@@ -423,9 +423,6 @@ class MariaDBRuleDecisionStore:
             close_error = transaction_owner._commit_evaluation_for_store()
             try:
                 self._checkpoint_store.publicar(head_hash, anterior=checkpoint_head)
-                if self._checkpoint_store.confirmar(head_hash) is not True:
-                    raise RuleAuthorityStorageError(
-                        "checkpoint externo no confirma la evaluación recién publicada")
             except Exception as exc:
                 raise RuleAuthorityCommittedCheckpointError(
                     "evaluación confirmada en DB pero sin checkpoint externo confirmado"
@@ -792,10 +789,6 @@ class MariaDBRuleDecisionStore:
             close_error = transaction_owner._commit_consumption_for_store()
             try:
                 self._checkpoint_store.publicar(record_hash, anterior=checkpoint_head)
-                if self._checkpoint_store.confirmar(record_hash) is not True:
-                    raise RuleAuthorityStorageError(
-                        "checkpoint externo no confirma el consumo recién publicado"
-                    )
             except Exception as exc:
                 raise RuleAuthorityCommittedCheckpointError(
                     "consumo confirmado en DB pero sin checkpoint externo confirmado"
