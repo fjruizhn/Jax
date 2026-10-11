@@ -581,3 +581,39 @@ durable, conforme a `docs/superpowers/specs/2026-10-05-faro-f1-1-rule-authority-
   de permit y pin, el evaluador puro, y finalmente `evaluate`/`consume` con transacción y
   pruebas de concurrencia/crash. No publicar hasta resolver la coordinación de pisos; no
   integrar sin auditoría/CI exactas y procedimiento reservado para `policy.yml`.
+
+### Fix de durabilidad del checkpoint tras `os.replace` · 2026-10-10
+
+- Tier 3 exacta del SHA `a2ed7590198e6f56d122bea898d1e0e7012f2a74` reportó BLOCK: si el
+  `fsync` del directorio falla después de `os.replace`, el nombre nuevo queda visible en el
+  proceso aunque su persistencia tras crash sea desconocida. El recovery llamaba a
+  `confirmar()`, que releía bytes sin restablecer esa barrera; el retry idéntico de
+  `publicar()` también retornaba antes de confirmarla.
+- Causa raíz verificada en `policy/rule_authority/trusted_checkpoint.py`: `confirmar()` solo
+  comprobaba presencia en `_read_all()`, y el camino CAS idempotente devolvía `None` si el
+  head/anterior coincidían. La regresión nueva primero falla en ambos comportamientos bajo
+  fallo persistente del `fsync` de directorio.
+- Fix en la rama nueva `fix/faro-rule-authority-checkpoint-durability`, sobre
+  `origin/master@164b77aa`: `confirmar()`
+  ahora exige `fsync` del archivo regular de checkpoint y de su cadena de directorios antes
+  de devolver `True`; errores cierran con `CheckpointInvalido`. La publicación CAS idéntica
+  invoca esa confirmación durable antes de devolver éxito. Así recovery puede aceptar el
+  retry solo si logra completar la reconciliación durable; no se alteró el orden de DB/lock.
+- Regresión `test_reintento_no_confirma_head_visible_hasta_reconciliar_durabilidad`: inyecta
+  fallo persistente tras `replace`, exige rechazo de `confirmar()` y del retry CAS; al
+  restaurar fsync real, confirma el head y permite retry. TDD comprobado: la prueba falló
+  primero porque `confirmar()` aceptaba el head visible y volvió a fallar al añadir la
+  aserción de retry CAS; ambos casos pasan con el fix.
+- Verificación local exacta del job unitario (store, permit, kernel y checkpoint):
+  `57 passed`; `.github/ci/piso.py verificar authority-rule-unit/tests` acepta el log. Se
+  elevó `ci/pisos.json` de 56 a 57 y se registró la medición en `docs/ci/pisos.md`. No se
+  modificó el workflow reservado.
+- Estado: el fix quedó comprometido localmente como `216d722e`, aún sin publicar; Tier 3
+  y CI exactas de la corrección siguen pendientes. El fallo half-close de `38089606207` es
+  un incidente separado: el log
+  exacto registró `779 passed, 1 failed` en
+  `test_el_rele_con_half_close_deja_llegar_la_respuesta_antes_de_salir`; este fix no cambia
+  su runtime ni declara resuelta su intermitencia.
+- Siguiente acción: solicitar Tier 3 read-only sobre el SHA final y publicar solo tras
+  `bin/ventana estado` inmediato, para obtener CI exacta; mantener separados el fallo
+  half-close y este BLOCK.
