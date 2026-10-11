@@ -142,8 +142,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 28 pruebas de persistencia Rule Authority, readiness y diagnóstico MariaDB; incluye las regresiones de #392 y siete variantes que cierran record() standalone antes de abrir DB. Recolectadas 28; confirmar las pasadas MariaDB en CI exacta."
     },
     "authority-rule-unit/tests": {
-      "patron": "^60 passed in ",
-      "mensaje": "PISO ROTO: se esperaban exactamente 60 pruebas unitarias sin DB de Rule Authority (kernel, store, permit y checkpoint), incluidas reconciliacion durable tras fsync incierto, cancelación post-replace tipada, estabilidad de inode y hash-chain, identidad de retry, rechazo de head final distinto, proyeccion historica de consumo, revalidacion de consume(), DENY tipado para reglas sin limites y carreras de STOP/pin/clasificacion contra consume(). Medido localmente con el comando exacto del workflow; confirmar por CI exacta."
+      "patron": "^61 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 61 pruebas unitarias sin DB de Rule Authority (kernel, store, permit y checkpoint), incluidas reconciliacion durable tras fsync incierto, cancelación y KeyboardInterrupt post-replace con retry bloqueado, estabilidad de inode y hash-chain, identidad de retry, rechazo de head final distinto, proyeccion historica de consumo, revalidacion de consume(), DENY tipado para reglas sin limites y carreras de STOP/pin/clasificacion contra consume(). Medido localmente con el comando exacto del workflow; confirmar por CI exacta."
     },
     "authority-rule-events/ratifications": {
       "patron": "^12 passed in ",
