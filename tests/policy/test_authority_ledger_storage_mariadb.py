@@ -2619,6 +2619,26 @@ def test_provisioning_rejects_preexisting_principal_without_adopting_privileges(
     assert any("ALL PRIVILEGES" in grant for grant in grants)
 
 
+def test_provisioning_rejects_public_identity_before_creating_target():
+    with _ephemeral_mariadb() as connect:
+        with connect() as admin:
+            _apply_migration(admin, MIGRATION)
+            with admin.cursor() as cursor:
+                cursor.execute("CREATE USER 'PUBLIC'@'%' IDENTIFIED BY 'ephemeral-test-only'")
+            admin.commit()
+        with connect(database="jax_authority") as admin:
+            from policy.authority_ledger.provisioning import provision_application_account
+            with pytest.raises(ValueError, match="PUBLIC"):
+                provision_application_account(
+                    admin, "brand_new_authority", secrets.token_urlsafe(24),
+                    host="127.0.0.1", role="reader",
+                )
+        with connect() as admin:
+            with admin.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) FROM mysql.global_priv WHERE User='brand_new_authority'")
+                assert cursor.fetchone() == (0,)
+
+
 def test_bootstrap_first_init_exact_retry_and_different_stage_fail_closed():
     """Exercise B4's actual MariaDB insert + external anchors in an isolated DB."""
     with _ephemeral_mariadb() as connect:

@@ -33,7 +33,13 @@ class _Cursor:
         if "information_schema.statistics" in self.statement:
             return list(_SCHEMA_INDEXES)
         if "information_schema.triggers" in self.statement:
-            return [(name,) for name in _SCHEMA_TRIGGERS]
+            return [(name, "SIGNAL SQLSTATE '45000'") for name in _SCHEMA_TRIGGERS]
+        if "information_schema.table_constraints" in self.statement:
+            return [
+                ("authority_ledger_genesis", "exactly_one_genesis"),
+                ("authority_events", "authority_events_append_only_sequence"),
+                ("authority_ledger_head", "authority_head_singleton"),
+            ]
         return next(self.rows)
 
     def fetchone(self):

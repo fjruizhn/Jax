@@ -108,9 +108,22 @@ def _schema_contract_error(cursor) -> str | None:
     )
     if {(table, name, int(non_unique)) for table, name, non_unique in cursor.fetchall()} != _SCHEMA_INDEXES:
         return "índices efectivos no coinciden con migración 001"
-    cursor.execute("SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema=%s", ("jax_authority",))
-    if {row[0] for row in cursor.fetchall()} != _SCHEMA_TRIGGERS:
+    cursor.execute(
+        "SELECT trigger_name,action_statement FROM information_schema.triggers WHERE trigger_schema=%s",
+        ("jax_authority",),
+    )
+    triggers = {name: statement.upper() for name, statement in cursor.fetchall()}
+    if set(triggers) != _SCHEMA_TRIGGERS or any("SIGNAL SQLSTATE '45000'" not in body for body in triggers.values()):
         return "triggers efectivos no coinciden con migración 001"
+    cursor.execute(
+        "SELECT table_name,constraint_name FROM information_schema.table_constraints "
+        "WHERE constraint_schema=%s AND constraint_type='CHECK'", ("jax_authority",),
+    )
+    checks = set(cursor.fetchall())
+    if {("authority_ledger_genesis", "exactly_one_genesis"),
+        ("authority_events", "authority_events_append_only_sequence"),
+        ("authority_ledger_head", "authority_head_singleton")} - checks:
+        return "constraints CHECK efectivas no coinciden con migración 001"
     return None
 
 
