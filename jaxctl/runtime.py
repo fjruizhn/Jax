@@ -1,6 +1,7 @@
 """Fixed, read-only composition for jaxctl. No request controls dependencies."""
 from __future__ import annotations
 import os
+import ipaddress
 from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
 from policy.enforcement_evidence.status_engine import query_control_status as _query_control_status
 
@@ -13,6 +14,37 @@ def _connection_factory():
     except (ImportError, KeyError, ValueError) as exc:
         raise UnavailableSource("MariaDB B7 composition unavailable") from exc
     return lambda: pymysql.connect(host=host,port=port,user=os.environ.get("JAX_DB_USER", ""),password=os.environ.get("JAX_DB_PASSWORD", ""),database=os.environ.get("JAX_DB_NAME", "jax_memory"),charset="utf8mb4",autocommit=False,connect_timeout=5)
+
+
+def _authority_connection_factory():
+    """Build the dedicated Block 4 connection; never fall back to JAX_DB_*.
+
+    The authority ledger is a separate trust boundary.  Missing or malformed
+    B4 wiring must therefore be reported as unavailable instead of silently
+    using the general application principal.
+    """
+    try:
+        import pymysql
+        host = os.environ["JAX_AUTHORITY_DB_HOST"]
+        port_text = os.environ["JAX_AUTHORITY_DB_PORT"]
+        user = os.environ["JAX_AUTHORITY_DB_USER"]
+        password = os.environ["JAX_AUTHORITY_DB_PASSWORD"]
+        port = int(port_text)
+    except (ImportError, KeyError, ValueError) as exc:
+        raise UnavailableSource("MariaDB B4 composition unavailable") from exc
+    if not all(isinstance(value, str) and value for value in (host, user, password)):
+        raise UnavailableSource("MariaDB B4 composition unavailable")
+    if not 1 <= port <= 65535:
+        raise UnavailableSource("MariaDB B4 composition unavailable")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise UnavailableSource("MariaDB B4 composition unavailable") from exc
+    return lambda: pymysql.connect(
+        host=host, port=port, user=user, password=password,
+        database="jax_authority", charset="utf8mb4", autocommit=False,
+        connect_timeout=5,
+    )
 
 def control_status(*, control_id, control_version, claim_level, scope, subjects, as_of_utc):
     """Read-only B7 status query; errors never become guessed CLI output."""
@@ -44,7 +76,7 @@ def decision(decision_id, replay=False):
         from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
         from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
         from policy.decision_record.replay import replay_decision
-        result=replay_decision(value, MariaDBAuthorityLedgerStore(_connection_factory()), TrustedAuthorityRoot.load(), TrustedCheckpointStore())
+        result=replay_decision(value, MariaDBAuthorityLedgerStore(_authority_connection_factory()), TrustedAuthorityRoot.load(), TrustedCheckpointStore())
         return {"classification":"AUTHORITATIVE_RUNTIME_DATA","operation":"REPLAY","source":"Block 5 historical DecisionRecord replay","status":result.status.value,"decision":value,"replay":result}
     except Exception as exc: raise UnavailableSource("Block 5 decision source unavailable") from exc
 
@@ -70,7 +102,7 @@ def authority():
         from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
         from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
         from policy.authority_ledger.replay import verify_authority_ledger
-        store=MariaDBAuthorityLedgerStore(_connection_factory())
+        store=MariaDBAuthorityLedgerStore(_authority_connection_factory())
         state=verify_authority_ledger(store.get_genesis(),store.events(),TrustedAuthorityRoot.load(),TrustedCheckpointStore())
         return {"classification":"AUTHORITATIVE_RUNTIME_DATA","source":"Block 4 authority ledger","status":"VERIFIED","authority":state}
     except Exception as exc: raise UnavailableSource("Block 4 authority source unavailable") from exc

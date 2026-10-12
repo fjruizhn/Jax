@@ -4652,6 +4652,13 @@ denormalizadas (incluido `previous_event_hash`), lectura histórica exacta y per
 
 ## `authority-ledger-mariadb/integration`
 
+2026-10-12: `48 -> 49`. Medición real: `49 passed in 122.57s` con MariaDB
+12.3.3 efímera, `--network none`, socket temporal y `JAX_AUTHORITY_LEDGER_DOCKER_CMD='sudo -n docker'`.
+La regresión nueva provisiona un lector para `127.0.0.1`, conecta por TCP
+dentro del contenedor y confirma `CURRENT_USER()` exacto, puerto 3306 y
+denegación de INSERT. La contraseña vivió en un archivo cliente 0600 del
+mount temporal, nunca en argumentos ni salida.
+
 Piso local pendiente de ejecución MariaDB (2026-10-10): `^48 passed in `. El árbol reapilado
 colecciona 48 casos tras incorporar los cierres de #396, las regresiones DENY compartidas y
 las regresiones post-replace de crash/restart para evaluación PERMIT, cancelación y consumo con retención
@@ -4806,6 +4813,11 @@ cada entrada de `_contenido_canonico` (todos mueren). El archivo sigue también 
 
 Piso local reapilado (2026-10-10): `^1045 passed in `. El conteo del CI exacto del SHA nuevo
 debe confirmarlo antes de cerrar el piso.
+
+2026-10-12, cierre B4: `1045 -> 1064`, medido con la lista exacta de este
+job y Python 3.14.4 (`1064 passed in 6.39s`, cero skipped). Incorpora los
+helpers de inspección/staging de Block 4 y la composición/provisión de su
+principal MariaDB; ambas rutas están en las dos listas idénticas del workflow.
 
 Jax#370 ronda 2 (M-5): la lista de Identity Foundation Shadow (la política sin DB, Python 3.14,
 solo pytest+pyyaml+cryptography) crecía con cada área de policy y ningún piso la pisaba — la regla

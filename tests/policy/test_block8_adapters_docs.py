@@ -58,6 +58,7 @@ def test_jaxctl_replay_invokes_block5_replay_not_load_only(monkeypatch):
     from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
     record={"decision_id":"d-1"}; called={}
     monkeypatch.setattr(runtime,"_connection_factory",lambda: (lambda: object()))
+    monkeypatch.setattr(runtime,"_authority_connection_factory",lambda: (lambda: object()))
     monkeypatch.setattr(decision_service,"load_decision",lambda store, decision_id: record)
     monkeypatch.setattr(TrustedAuthorityRoot,"load",classmethod(lambda cls: object()))
     result=type("Replay",(),{"status":type("Status",(),{"value":"REPLAY_MATCH"})()})()

@@ -150,14 +150,27 @@ class MariaDBAuthorityLedgerStore:
                 fence._active = False
 
     def get_genesis(self) -> AuthorityLedgerGenesis:
+        from .canonical import canonical_bytes
+        from .replay import genesis_hash
         from .serialization import genesis_from_projection
         with self._connect() as connection:
             cursor = connection.cursor()
-            cursor.execute("SELECT canonical_genesis FROM jax_authority.authority_ledger_genesis WHERE singleton=1")
+            cursor.execute(
+                "SELECT canonical_genesis,genesis_hash "
+                "FROM jax_authority.authority_ledger_genesis WHERE singleton=1"
+            )
             row = cursor.fetchone()
             if row is None:
                 raise AuthorityStateError("genesis ausente")
-            return genesis_from_projection(row[0])
+            if len(row) != 2:
+                raise AuthorityStateError("genesis almacenado inválido")
+            genesis = genesis_from_projection(row[0])
+            stored = row[0].encode("utf-8") if isinstance(row[0], str) else row[0]
+            if stored != canonical_bytes(genesis.projection()):
+                raise AuthorityStateError("canonical_genesis no es canónico")
+            if row[1] != genesis_hash(genesis):
+                raise AuthorityStateError("genesis hash almacenado no coincide")
+            return genesis
 
     def events(self) -> tuple[AuthorityEvent, ...]:
         from .serialization import event_from_storage_row

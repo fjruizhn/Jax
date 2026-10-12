@@ -769,7 +769,9 @@ def test_sign_insert_read_and_replay_preserve_authority_event():
             app_password = secrets.token_urlsafe(24)
             from policy.authority_ledger.provisioning import provision_application_account
             with connect() as admin:
-                provision_application_account(admin, "jax_authority_app_test", app_password)
+                provision_application_account(
+                    admin, "jax_authority_app_test", app_password, host="localhost", role="writer",
+                )
 
             trigger_password = secrets.token_urlsafe(24)
             with connect() as admin:
@@ -948,6 +950,12 @@ def _ephemeral_mariadb():
                     retry_delay=0.25,
                 )
 
+            # Extra facts for narrow tests that prove the account over TCP
+            # inside this network-none container. Existing callers still get
+            # the same one-argument connection factory.
+            connect._docker = docker
+            connect._container = container
+            connect._socket_dir = socket_dir
             yield connect
         finally:
             subprocess.run([*docker, "stop", container], capture_output=True, text=True, check=False)
@@ -2584,7 +2592,7 @@ def test_checkpoint_fence_rejects_noncanonical_genesis_bytes():
                 owner.rollback()
 
 
-def test_provisioning_revokes_preexisting_privileges_and_grants_exact_contract():
+def test_provisioning_rejects_preexisting_principal_without_adopting_privileges():
     user = "jax_authority_prov_test"
     with _ephemeral_mariadb() as connect:
         with connect() as admin:
@@ -2596,21 +2604,55 @@ def test_provisioning_revokes_preexisting_privileges_and_grants_exact_contract()
             admin.commit()
         with connect(database="jax_authority") as admin:
             from policy.authority_ledger.provisioning import provision_application_account
-            provision_application_account(admin, user, secrets.token_urlsafe(24))
+            with pytest.raises(ValueError, match="principal nuevo"):
+                provision_application_account(
+                    admin, user, secrets.token_urlsafe(24), host="localhost", role="writer",
+                )
         with connect() as admin:
             with admin.cursor() as cursor:
                 cursor.execute(f"SHOW GRANTS FOR '{user}'@'localhost'")
                 grants = [row[0] for row in cursor.fetchall()]
-    usage = [g for g in grants if g.startswith("GRANT USAGE ON *.* TO ")]
-    assert len(usage) == 1 and re.fullmatch(
-        rf"GRANT USAGE ON \*\.\* TO `{user}`@`localhost`( IDENTIFIED .*)?", usage[0]
-    ), usage
-    assert "GRANT OPTION" not in usage[0]
-    assert sorted(g for g in grants if g not in usage) == sorted([
-        f"GRANT SELECT ON `jax_authority`.`authority_ledger_genesis` TO `{user}`@`localhost`",
-        f"GRANT SELECT, INSERT ON `jax_authority`.`authority_events` TO `{user}`@`localhost`",
-        f"GRANT SELECT, UPDATE ON `jax_authority`.`authority_ledger_head` TO `{user}`@`localhost`",
-    ])
+    assert any("ALL PRIVILEGES" in grant for grant in grants)
+
+
+def test_provisioning_reader_tcp_is_exact_and_cannot_write():
+    user = "jax_authority_tcp_reader"
+    password = secrets.token_urlsafe(24)
+    with _ephemeral_mariadb() as connect:
+        with connect() as admin:
+            _apply_migration(admin, MIGRATION)
+            from policy.authority_ledger.provisioning import provision_application_account
+            provision_application_account(
+                admin, user, password, host="127.0.0.1", role="reader",
+            )
+        # The password is held only in a 0600 client configuration inside the
+        # disposable socket mount, never in docker's command line or output.
+        subprocess.run(
+            ["sudo", "-n", "chown", f"{os.getuid()}:{os.getgid()}", connect._socket_dir],
+            check=True, capture_output=True, text=True,
+        )
+        client_config = Path(connect._socket_dir) / "reader.cnf"
+        client_config.write_text(
+            f"[client]\nuser={user}\npassword={password}\ndatabase=jax_authority\n",
+            encoding="utf-8",
+        )
+        client_config.chmod(0o600)
+        result = subprocess.run(
+            [*connect._docker, "exec", connect._container, "mariadb",
+             "--defaults-extra-file=/run/mysqld/reader.cnf", "--protocol=TCP",
+             "-h", "127.0.0.1", "-N", "-e", "SELECT CURRENT_USER(), @@port"],
+            check=True, capture_output=True, text=True,
+        )
+        assert result.stdout.strip() == f"{user}@127.0.0.1\t3306"
+        denied = subprocess.run(
+            [*connect._docker, "exec", connect._container, "mariadb",
+             "--defaults-extra-file=/run/mysqld/reader.cnf", "--protocol=TCP",
+             "-h", "127.0.0.1", "-e",
+             "INSERT INTO authority_events (sequence,event_id,event_type,actor_id,canonical_intent,canonical_event,evidence_refs,event_hash,signature,recorded_at_utc) VALUES (1,'x','x','x','x','x','x','x','x',NOW())"],
+            check=False, capture_output=True, text=True,
+        )
+        assert denied.returncode != 0
+        assert "INSERT command denied" in denied.stderr
 
 
 def _insert_event(cursor, sequence, intent):

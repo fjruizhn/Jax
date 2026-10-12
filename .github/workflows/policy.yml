@@ -2667,6 +2667,8 @@ jobs:
           tests/policy/test_authority_ledger_context_hash.py
           tests/policy/test_authority_ledger_checkpoint.py
           tests/policy/test_authority_ledger_authentication.py
+          tests/policy/test_authority_ledger_bootstrap_helpers.py
+          tests/policy/test_authority_ledger_runtime_composition.py
           tests/policy/test_authority_ledger_concurrency.py
           tests/policy/test_authority_ledger_audit_corrections.py
           tests/policy/test_effective_authority_envelope.py
@@ -2787,6 +2789,8 @@ jobs:
             tests/policy/test_authority_ledger_context_hash.py \
             tests/policy/test_authority_ledger_checkpoint.py \
             tests/policy/test_authority_ledger_authentication.py \
+            tests/policy/test_authority_ledger_bootstrap_helpers.py \
+            tests/policy/test_authority_ledger_runtime_composition.py \
             tests/policy/test_authority_ledger_concurrency.py \
             tests/policy/test_authority_ledger_audit_corrections.py \
             tests/policy/test_effective_authority_envelope.py \
