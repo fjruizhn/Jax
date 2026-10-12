@@ -51,6 +51,8 @@ from .config import ConfigFaroInvalida
 logger = logging.getLogger(__name__)
 DESTINO_SOCKET = "/faro/puerto.sock"
 DESTINO_TOKEN = "/faro/token"
+DESTINO_PROXY_SOCKET = "/faro/proxy.sock"
+DESTINO_PROXY_TOKEN = "/faro/proxy.token"
 DESTINO_RELAY_RAIZ = "/faro/relay"
 DESTINO_RELAY = "/faro/relay/jax/faro/relay.py"
 RELAY_FUENTE = str(Path(_relay.__file__))
@@ -167,6 +169,13 @@ def _fuera_del_directorio_de_sockets(ruta: str, ruta_socket: str, nombre: str) -
     return ruta
 
 
+def _archivo_del_mismo_directorio(ruta: str, ruta_socket: str, nombre: str) -> str:
+    ruta = _ruta(ruta, nombre)
+    if PurePosixPath(ruta).parent != PurePosixPath(ruta_socket).parent:
+        raise ConfigFaroInvalida(f"{nombre} tiene que ser un archivo hermano del socket de la ejecucion")
+    return ruta
+
+
 def perfil_motor(ruta_socket: str, ruta_token: str, *, workspace: str, paquete: str, red: str | None,
                  relay: str | None = None) -> list[str]:
     """EL PERFIL DE MOTOR: el del rele mas lo que un motor necesita (spec §2): el workspace de la ejecucion en
@@ -184,6 +193,19 @@ def perfil_motor(ruta_socket: str, ruta_token: str, *, workspace: str, paquete: 
     return _construir(sock, _ruta(str(ruta_token), "la ruta del token"), _ruta(relay if relay is not None else RELAY_FUENTE, "la ruta del rele"),
                       {"workspace": _fuera_del_directorio_de_sockets(workspace, sock, "el workspace"),
                        "paquete": _fuera_del_directorio_de_sockets(paquete, sock, "el paquete")})
+
+
+def perfil_motor_proxy(ruta_socket: str, ruta_token: str, ruta_proxy_socket: str, ruta_proxy_token: str, *,
+                       workspace: str, paquete: str, red: str | None, relay: str | None = None) -> list[str]:
+    """Perfil de motor aislado con solo los dos inodos de SU proxy S-1.
+
+    El directorio del proxy nunca se monta: conocer otros nombres de ejecución
+    no da acceso a sus sockets o tokens.
+    """
+    base = perfil_motor(ruta_socket, ruta_token, workspace=workspace, paquete=paquete, red=red, relay=relay)
+    proxy_socket = _archivo_del_mismo_directorio(ruta_proxy_socket, ruta_socket, "el socket del proxy")
+    proxy_token = _archivo_del_mismo_directorio(ruta_proxy_token, ruta_socket, "el token del proxy")
+    return [*base, "--bind", proxy_socket, DESTINO_PROXY_SOCKET, "--ro-bind", proxy_token, DESTINO_PROXY_TOKEN]
 
 
 def _validar_comando(comando: object) -> list[str]:
