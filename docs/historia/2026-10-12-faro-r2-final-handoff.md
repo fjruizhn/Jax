@@ -7,14 +7,21 @@
 
 ## Estado vigente — 2026-10-12
 
-Actualización final local: el artefacto R-2 sigue sin integrar, CI remota final ni despliegue. Sobre
+Actualización final local: el artefacto R-2 sigue sin integrar, CI remota final ni despliegue. El runtime owner
+fix `05ba020f` se empaqueta sobre
 `origin/master@ecfe07f3c2760ed43f53e7d1e858dad8e864e7e1` (Jax#402 ya fusionado; post-merge guard SUCCESS,
-run `38272779602`), la selección exacta Python 3.14 pasó **965 passed, 6 deselected**, 60.92 s
-(`/tmp/faro-r2-integrated-py314-20261012-depack-final3.log`). Jaula real: **12 passed**
-(`/tmp/faro-r2-faro-jaula-20261012-depack-final2.log`); integración systemd: **6 passed, 163 deselected**
-(`/tmp/faro-r2-systemd-integration-20261012-depack-final3.log`); Hyde: **21 passed**; cableado: **7 passed**.
-La revisión dirigida Tier 3 cerró 0 BLOCK y 0 MAJOR; su MINOR de lifecycle del fixture fue corregido y la
-selección se repitió. Falta la auditoría integral del SHA que contiene esta actualización, CI exacta remota,
+run `38272779602`), la selección exacta Python 3.14 pasó **969 passed, 6 deselected**, 66.15 s
+(`/tmp/faro-r2-final-fase0-20261012.log`). Jaula real: **12 passed**
+(`/tmp/faro-r2-final-jaula-20261012.log`); integración systemd: **6 passed, 167 deselected**
+(`/tmp/faro-r2-final-systemd-20261012.log`); P10 no-fail-open-except: **21 passed**
+(`/tmp/faro-r2-final-p10-20261012.log`); cableado: **7 passed**. La revisión anterior fue **RECHAZADO,
+1 MAJOR** y la corrida policy `38280648134` fue CANCELLED tras el scanner P10 1/20; esos resultados son
+historia del artefacto anterior. Los cuatro cierres causales del owner están verdes en los logs actuales.
+
+El handoff de código queda READY DELIVERED para auditoría independiente del SHA final. El abort privado no fue
+enviado: no ejecutó Recovery ni liberó el flock que retiene la instancia. El snapshot de esquema CAS queda
+registrado como evidencia factual, sin convertirlo en aprobación. Fuente, backup y producción permanecieron sin
+cambios durante esta medición. Falta auditoría integral del SHA que contiene esta actualización, CI exacta remota,
 PR, integración y su guard; por ello esto no acredita producción.
 
 La recuperación R-2 incluye cuatro arranques y dos cierres explícitos. El SHA `2190d868` fue rechazado en
