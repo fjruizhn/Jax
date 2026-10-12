@@ -53,6 +53,7 @@ class Upstream:
 
 
 def _cfg(tmp_path: Path, upstream: str, **extra) -> ConfigProxyCredenciales:
+    tmp_path.mkdir(exist_ok=True)
     token = tmp_path / "token"
     token.write_text("token-prueba\n", encoding="utf-8")
     os.chmod(token, 0o400)
@@ -72,11 +73,11 @@ def _correr(coro):
     return asyncio.run(asyncio.wait_for(coro, 10))
 
 
-async def _pedir(proxy, *, modelo: str, cabeceras=(), metodo="POST", destino="/v1/messages"):
+async def _pedir(proxy, *, modelo: str, cabeceras=(), metodo="POST", destino="/v1/messages", token="token-prueba"):
     reader, writer = await asyncio.open_unix_connection(str(proxy.ruta_socket))
     conn = h11.Connection(h11.CLIENT)
     cuerpo = (f'{{"model":"{modelo}"}}').encode()
-    writer.write(b"FARO-TOKEN token-prueba\n")
+    writer.write(b"FARO-TOKEN " + token.encode() + b"\n")
     writer.write(conn.send(h11.Request(method=metodo, target=destino, headers=[("host", "faro-proxy"), ("content-type", "application/json"), ("content-length", str(len(cuerpo))), *cabeceras])))
     writer.write(conn.send(h11.Data(data=cuerpo)))
     writer.write(conn.send(h11.EndOfMessage()))
@@ -162,6 +163,24 @@ def test_cierre_no_borra_socket_reemplazado(tmp_path):
                 if os.path.lexists(proxy.ruta_socket):
                     os.unlink(proxy.ruta_socket)
     assert _correr(escenario()) is True
+
+
+def test_token_de_otra_ejecucion_no_cruza_hacia_upstream(tmp_path):
+    async def escenario():
+        async with Upstream() as up:
+            cfg_a = _cfg(tmp_path / "a", up.url)
+            os.chmod(cfg_a.ruta_token, 0o600)
+            cfg_a.ruta_token.write_text("a\n")
+            os.chmod(cfg_a.ruta_token, 0o400)
+            cfg_b = _cfg(tmp_path / "b", up.url)
+            os.chmod(cfg_b.ruta_token, 0o600)
+            cfg_b.ruta_token.write_text("b\n")
+            os.chmod(cfg_b.ruta_token, 0o400)
+            async with ServidorProxyCredenciales(cfg_a) as proxy_a, ServidorProxyCredenciales(cfg_b) as proxy_b:
+                with pytest.raises((ConnectionResetError, BrokenPipeError, h11.RemoteProtocolError)):
+                    await _pedir(proxy_a, modelo="modelo-prueba", token="b")
+                return len(up.recibidas)
+    assert _correr(escenario()) == 0
 
 
 def test_uid_distinto_se_cierra_antes_de_leer_token_o_contactar_upstream(tmp_path):
