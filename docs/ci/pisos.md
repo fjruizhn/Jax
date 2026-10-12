@@ -4721,12 +4721,14 @@ posterior detectó que faltaba proteger la relectura final del log: la publicaci
 la cadena canónica completa y el head solicitado después del rename, sin repetir `fsync`; la
 confirmación también relee después de sus barreras. Se añadió una prueba que restaura el log
 anterior entre replace y relectura y exige que publicar falle. El comando exacto del workflow
-mide ahora `60 passed` localmente tras agregar una regresión que sustituye el archivo por
+mide ahora `61 passed` localmente tras agregar regresiones que sustituyen el archivo por
 otro inode con bytes idénticos entre el fsync y la relectura; la confirmación debe seguir
 fallando en `DURABILITY_UNKNOWN`. Se añadió además una regresión de cancelación `BaseException`
 posterior a `os.replace`: la API produce `CheckpointDurabilityUnknown`, el retry queda bloqueado
-si falla fsync y recupera solo tras confirmar archivo/directorio y relectura exacta. El piso sube
-a `^60 passed in ` en `ci/pisos.json`. La CI exacta del nuevo SHA debe confirmar la medición.
+si falla fsync y recupera solo tras confirmar archivo/directorio y relectura exacta. Otra prueba
+inyecta `KeyboardInterrupt` después de `os.replace` y exige marcador incierto, retry bloqueado
+con fsync fallido y recuperación tras restablecerlo. El piso sube a `^61 passed in ` en
+`ci/pisos.json`. La CI exacta del nuevo SHA debe confirmar la medición.
 Corre sin base de datos las pruebas del kernel (límites individuales y falla cerrada ante
 argumentos sin matcher/frecuencia sin contador), store en memoria y rechazo de la API MariaDB
 de emisión fuera del owner Block 4, contrato de RulePermit y

@@ -318,6 +318,44 @@ def test_cancelacion_post_replace_marca_unknown_y_retry_exige_reconciliacion(
     assert store.head_actual() == new_head
 
 
+def test_baseexception_post_replace_conserva_unknown_hasta_reconciliar(
+        tmp_path, monkeypatch
+):
+    store = _bootstrapped_store(tmp_path / "audit-checkpoints.jsonl")
+    genesis = store.head_actual()
+    new_head = "sha256:" + "3" * 64
+    original_replace = os.replace
+
+    def replace_then_interrupt(source, destination):
+        original_replace(source, destination)
+        raise KeyboardInterrupt("injected process interruption after replace")
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(os, "replace", replace_then_interrupt)
+        with pytest.raises(KeyboardInterrupt, match="injected process interruption"):
+            store.publicar(new_head, anterior=genesis)
+
+    assert store._durability_unknown_head == new_head
+    assert store._durability_unknown is True
+
+    def fail_directory_fsync(_path):
+        raise OSError("injected persistent directory fsync failure")
+
+    with monkeypatch.context() as uncertain:
+        uncertain.setattr(
+            RuleAuditCheckpointStore, "_fsync_directory", fail_directory_fsync
+        )
+        with pytest.raises(CheckpointDurabilityUnknown, match="DURABILITY_UNKNOWN"):
+            store.publicar(new_head, anterior=genesis)
+
+    assert store._durability_unknown_head == new_head
+    assert store._durability_unknown is True
+    assert store.publicar(new_head, anterior=genesis) is None
+    assert store._durability_unknown_head is None
+    assert store._durability_unknown is False
+    assert store.head_actual() == new_head
+
+
 def test_publicar_no_retorna_exito_si_relectura_final_no_contiene_el_head(
     tmp_path, monkeypatch
 ):
