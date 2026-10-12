@@ -2661,6 +2661,47 @@ def test_provisioning_rejects_homonymous_other_host_and_role_before_dcl():
                 assert cursor.fetchone() == (0,)
 
 
+def test_provisioning_unlock_response_loss_is_unknown_and_fresh_admin_observes_state():
+    """The server applies UNLOCK but the client loses its response: never claim locked."""
+    user = "authority_unlock_loss"
+    with _ephemeral_mariadb() as connect:
+        with connect() as admin:
+            _apply_migration(admin, MIGRATION)
+
+        class CursorLoss:
+            def __init__(self, cursor):
+                self.cursor = cursor
+            def execute(self, statement, params=None):
+                result = self.cursor.execute(statement, params)
+                if statement.startswith("ALTER USER") and "ACCOUNT UNLOCK" in statement:
+                    raise pymysql.err.OperationalError(2013, "simulated response loss after server DCL")
+                return result
+            def __getattr__(self, name):
+                return getattr(self.cursor, name)
+
+        class ConnectionLoss:
+            def __init__(self, connection):
+                self.connection = connection
+            def cursor(self):
+                return CursorLoss(self.connection.cursor())
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+
+        raw = connect(database="jax_authority")
+        try:
+            from policy.authority_ledger.provisioning import provision_application_account
+            with pytest.raises(RuntimeError, match="resultado desconocido"):
+                provision_application_account(ConnectionLoss(raw), user, secrets.token_urlsafe(24),
+                                              host="127.0.0.1", role="reader")
+        finally:
+            raw.close()
+        with connect() as fresh_admin:
+            with fresh_admin.cursor() as cursor:
+                cursor.execute("SELECT JSON_VALUE(Priv, '$.account_locked') FROM mysql.global_priv WHERE User=%s AND Host=%s",
+                               (user, "127.0.0.1"))
+                assert str(cursor.fetchone()[0]).lower() in {"0", "false"}
+
+
 def test_bootstrap_first_init_exact_retry_and_different_stage_fail_closed():
     """Exercise B4's actual MariaDB insert + external anchors in an isolated DB."""
     with _ephemeral_mariadb() as connect:
