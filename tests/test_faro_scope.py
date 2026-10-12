@@ -22,6 +22,7 @@ lo tiene) esta al final.
 from __future__ import annotations
 
 import asyncio
+import threading
 import contextlib
 import os
 import re
@@ -331,12 +332,61 @@ def _timespan(us: int) -> str:
 
 @pytest.fixture
 def sistema(tmp_path):
-    return SistemaDoble(tmp_path / "cgroup")
+    doble = SistemaDoble(tmp_path / "cgroup")
+    doble.gestores_prueba = []
+    doble.tokens_instancia = {}
+    try:
+        yield doble
+    finally:
+        asyncio.run(_cerrar_gestores_prueba(doble))
+
+
+async def _cerrar_gestores_prueba(sistema) -> None:
+    """El fixture conserva el token exacto de cada manager, drena y libera sólo su lock propio.
+
+    Los casos de prueba ya cierran causalmente los attempts que ejercitan. Al acabar su loop, este
+    teardown sólo drena sus limpiezas y libera el token que adquirió ese manager: no fuerza un cierre
+    productivo ni toca un descriptor privado.
+    """
+    for g in reversed(sistema.gestores_prueba):
+        try:
+            await g.esperar_limpiezas()
+        except ScopeError:
+            # Estas regresiones dejan deliberadamente una cuarentena no concluyente; el
+            # intento queda retenido por el contrato y el fixture sólo debe soltar su lock.
+            pass
+        token = sistema.tokens_instancia.get(g)
+        if token is not None:
+            await g.liberar_instancia(token)
 
 
 def gestor(sistema, *, cfg=None, **kw) -> ScopeManager:
-    return ScopeManager(cfg or sistema.cfg, crear_proceso=sistema.crear_proceso, raiz_cgroup=sistema.raiz,
-                        intervalo_s=0.01, lease_store=LeaseStore(sistema.lease_dir), **kw)
+    g = ScopeManager(cfg or sistema.cfg, crear_proceso=sistema.crear_proceso, raiz_cgroup=sistema.raiz,
+                     intervalo_s=0.01, lease_store=LeaseStore(sistema.lease_dir), **kw)
+    adquirir, liberar = g.adquirir_instancia, g.liberar_instancia
+
+    async def adquirir_registrada():
+        token = await adquirir()
+        sistema.tokens_instancia[g] = token
+        return token
+
+    async def liberar_registrada(token):
+        await liberar(token)
+        if sistema.tokens_instancia.get(g) is token:
+            sistema.tokens_instancia.pop(g, None)
+
+    g.adquirir_instancia = adquirir_registrada
+    g.liberar_instancia = liberar_registrada
+    sistema.gestores_prueba.append(g)
+    return g
+
+
+async def arrancar_con_instancia_adquirida(g: ScopeManager, uid: int, comando):
+    """Los tests siguen el contrato real: toman ownership explícito antes de arrancar."""
+    if g._token_instancia is None:
+        token = await g.adquirir_instancia()
+        assert token is not None
+    return await g.arrancar(uid, comando)
 
 
 def transicionar_accepted(store, uid, intento, *, cgroup_path="/test-cgroup", cgroup_dev=1, cgroup_ino=1):
@@ -406,7 +456,7 @@ def test_recovery_ausencia_en_la_misma_epoch_conserva_lease(sistema):
         g = gestor(sistema)
         await g.recuperar_leases()
         blocked = await g.estado(UID)
-        await g.arrancar(UID + 1, ["/usr/bin/true"])
+        await arrancar_con_instancia_adquirida(g, UID + 1, ["/usr/bin/true"])
         return sistema.muertes, store.all(), blocked
 
     muertes, leases, blocked = correr(caso())
@@ -524,13 +574,146 @@ def test_lock_instancia_rechaza_manager_duplicado(tmp_path):
     cfg = ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128", state_dir=directorio)
     async def caso():
         primero, segundo = ScopeManager(cfg), ScopeManager(cfg)
-        await primero.adquirir_instancia()
+        token_primero = await primero.adquirir_instancia()
         with pytest.raises(ScopeError, match="instancia única"):
             await segundo.adquirir_instancia()
-        await primero.liberar_instancia()
-        await segundo.adquirir_instancia()
-        await segundo.liberar_instancia()
+        await primero.liberar_instancia(token_primero)
+        token_segundo = await segundo.adquirir_instancia()
+        await segundo.liberar_instancia(token_segundo)
     correr(caso())
+
+
+def test_lock_instancia_del_mismo_manager_no_es_reentrante_ni_un_token_ajeno_lo_libera(tmp_path):
+    directorio = tmp_path / "leases"
+    directorio.mkdir(mode=0o700)
+    cfg = ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128", state_dir=directorio)
+
+    async def caso():
+        gestor = ScopeManager(cfg)
+        propietario = await gestor.adquirir_instancia()
+        with pytest.raises(ScopeError, match="instancia única|ya adquirida"):
+            await gestor.adquirir_instancia()
+        with pytest.raises((ScopeError, TypeError)):
+            await gestor.liberar_instancia(object())
+        tercero = ScopeManager(cfg)
+        with pytest.raises(ScopeError, match="instancia única"):
+            await tercero.adquirir_instancia()
+        await gestor.liberar_instancia(propietario)
+        token_tercero = await tercero.adquirir_instancia()
+        await tercero.liberar_instancia(token_tercero)
+
+    correr(caso())
+
+
+def test_arrancar_sin_lock_previo_falla_antes_de_recovery_o_spawn(sistema):
+    async def caso():
+        g = gestor(sistema)
+        spawn_calls = []
+
+        async def spawn(uid, comando):
+            spawn_calls.append((uid, tuple(comando)))
+            return object()
+
+        g._arrancar = spawn
+        try:
+            with pytest.raises(ScopeError, match="lock de instancia adquirido"):
+                await g.arrancar(UID, ["/usr/bin/true"])
+            assert not g._leases_recuperados
+            assert spawn_calls == []
+        finally:
+            if g._token_instancia is not None:
+                await g.liberar_instancia(g._token_instancia)
+
+    correr(caso())
+
+
+def test_cancelar_adquisicion_de_instancia_espera_worker_y_no_deja_fd_ni_flock(tmp_path):
+    directorio = tmp_path / "leases"
+    directorio.mkdir(mode=0o700)
+    cfg = ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128", state_dir=directorio)
+    base = LeaseStore(directorio)
+
+    class LeaseStoreLento:
+        def __init__(self):
+            self.iniciado = threading.Event()
+            self.continuar = threading.Event()
+
+        def acquire_instance(self):
+            self.iniciado.set()
+            self.continuar.wait(timeout=3)
+            return base.acquire_instance()
+
+    async def caso():
+        lento = LeaseStoreLento()
+        gestor = ScopeManager(cfg, lease_store=lento)
+        tarea = asyncio.create_task(gestor.adquirir_instancia())
+        assert await asyncio.to_thread(lento.iniciado.wait, 2)
+        tarea.cancel()
+        await asyncio.sleep(0)
+        tarea.cancel()
+        await asyncio.sleep(0)
+        lento.continuar.set()
+        with pytest.raises(asyncio.CancelledError):
+            await tarea
+        tercero = ScopeManager(cfg)
+        token = await tercero.adquirir_instancia()
+        await tercero.liberar_instancia(token)
+
+    correr(caso())
+
+
+def test_colisiones_repetidas_de_instancia_no_acumulan_descriptores(tmp_path):
+    directorio = tmp_path / "leases"
+    directorio.mkdir(mode=0o700)
+    cfg = ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128", state_dir=directorio)
+
+    async def caso():
+        primero, competidor = ScopeManager(cfg), ScopeManager(cfg)
+        token = await primero.adquirir_instancia()
+        antes = len(os.listdir("/proc/self/fd"))
+        for _ in range(12):
+            with pytest.raises(ScopeError, match="instancia única"):
+                await competidor.adquirir_instancia()
+        despues = len(os.listdir("/proc/self/fd"))
+        await primero.liberar_instancia(token)
+        assert despues == antes
+
+    correr(caso())
+
+
+def test_lease_store_cierra_fd_si_flock_de_instancia_falla(tmp_path, monkeypatch):
+    directorio = tmp_path / "leases"
+    directorio.mkdir(mode=0o700)
+    store = LeaseStore(directorio)
+    abrir_real, cerrar_real = os.open, os.close
+    abiertos = set()
+    cerrados = set()
+
+    def open_observado(path, flags, *args, **kwargs):
+        fd = abrir_real(path, flags, *args, **kwargs)
+        if path == ".instance.lock":
+            abiertos.add(fd)
+        return fd
+
+    def close_observado(fd):
+        if fd in abiertos:
+            cerrados.add(fd)
+        return cerrar_real(fd)
+
+    monkeypatch.setattr("jax.faro.scope_lease.os.open", open_observado)
+    monkeypatch.setattr("jax.faro.scope_lease.os.close", close_observado)
+    llamadas = 0
+
+    def flock_falla_lock_archivo(_fd, _modo):
+        nonlocal llamadas
+        llamadas += 1
+        if llamadas == 2:  # la primera llamada protege el directorio durable
+            raise BlockingIOError()
+
+    monkeypatch.setattr("jax.faro.scope_lease.fcntl.flock", flock_falla_lock_archivo)
+    with pytest.raises(LeaseStoreConflict):
+        store.acquire_instance()
+    assert abiertos and abiertos <= cerrados
 
 
 def test_kill_con_attempt_stale_no_mata_unidad_distinta(sistema):
@@ -785,7 +968,7 @@ def test_control_group_devuelve_la_ruta_que_reporta_systemd(sistema):
 def test_arrancar_arranca_la_unidad_del_uid_con_el_comando_y_la_da_por_lista(sistema):
     async def caso():
         g = gestor(sistema)
-        proceso = await g.arrancar(UID, ["/usr/bin/sudo", "-n", "-u", "#50001", "--", "/usr/bin/bwrap"])
+        proceso = await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/sudo", "-n", "-u", "#50001", "--", "/usr/bin/bwrap"])
         try:
             # el comando de la unidad corre bajo env -i (allowlist cerrada) con la elevacion dentro
             assert sistema.arrancados == [(UNIDAD, ("/usr/bin/env", "-i", "/usr/bin/sudo", "-n", "-u",
@@ -813,7 +996,7 @@ def test_delegate_distinto_de_no_se_mata_exacto_y_no_se_acepta(sistema):
         sistema._crear = crear
         g = gestor(sistema)
         with pytest.raises(ScopeError):
-            await g.arrancar(UID, ["/usr/bin/true"])
+            await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         return LeaseStore(sistema.lease_dir).read(UID), sistema.muertes
 
     lease, muertes = correr(caso())
@@ -824,7 +1007,7 @@ def test_delegate_distinto_de_no_se_mata_exacto_y_no_se_acepta(sistema):
 def test_finalizar_natural_usa_handle_unico_y_libera_tras_cliente_y_empty(sistema):
     async def caso():
         g = gestor(sistema)
-        proceso = await g.arrancar(UID, ["/usr/bin/true"])
+        proceso = await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         lease = LeaseStore(sistema.lease_dir).read(UID)
         assert lease.stage.value == "ACCEPTED"
         await g.matar(UID, intento=lease.attempt_id)
@@ -839,7 +1022,7 @@ def _lease_closed_con_cgroup_poblado(sistema):
     async def caso():
         cfg = ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128", plazo_vacio_s=0.02)
         g = gestor(sistema, cfg=cfg, plazo_consulta_s=0.01)
-        proceso = await g.arrancar(UID, ["/usr/bin/sleep", "1"])
+        proceso = await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/sleep", "1"])
         lease = LeaseStore(sistema.lease_dir).read(UID)
         unidad = sistema._canon(lease.unit)
         sistema.unidades[unidad].update(activa=False, rc=255)
@@ -971,7 +1154,7 @@ def test_recovery_kill_race_reconcilia_uid_y_sigue_con_hermanas(sistema, poblada
         lease_a = None
         try:
             lease_a = store.read(UID)
-        except LeaseStoreNotFound:
+        except LeaseStoreNotFound:  # fail-soft: this negative fixture asserts the unrelated UID has no durable lease
             pass
         with pytest.raises(LeaseStoreNotFound):
             store.read(UID + 1)
@@ -1043,7 +1226,7 @@ def test_manager_restart_con_cliente_error_y_cgroup_poblado_reteniene_lease(sist
     async def caso():
         cfg = ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128", plazo_vacio_s=0.03)
         g = gestor(sistema, cfg=cfg, plazo_consulta_s=0.01)
-        proceso = await g.arrancar(UID, ["/usr/bin/true"])
+        proceso = await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         lease = LeaseStore(sistema.lease_dir).read(UID)
         assert lease.stage.value == "ACCEPTED" and lease.cgroup_path and lease.cgroup_ino
         # Simula wait de cliente con fallo y un manager que perdió el transient;
@@ -1091,7 +1274,7 @@ def test_recovery_sin_manager_no_libera_cgroup_poblado_de_client_closed(sistema)
 def test_cgroup_accepted_reemplazado_por_symlink_es_unknown_y_retenido(sistema):
     async def caso():
         g = gestor(sistema)
-        await g.arrancar(UID, ["/usr/bin/true"])
+        await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         lease = LeaseStore(sistema.lease_dir).read(UID)
         cg = sistema.raiz / lease.cgroup_path.lstrip("/")
         externo = sistema.raiz.parent / "externo"
@@ -1111,7 +1294,7 @@ def test_cgroup_accepted_reemplazado_por_symlink_es_unknown_y_retenido(sistema):
 def test_evidencia_cgroup_rechaza_traversal_inode_distinto_y_events_ilegible(sistema):
     async def caso():
         g = gestor(sistema)
-        await g.arrancar(UID, ["/usr/bin/true"])
+        await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         lease = LeaseStore(sistema.lease_dir).read(UID)
         from dataclasses import replace
         assert g._leer_cgroup_protegido("/../etc", lease) is None
@@ -1129,7 +1312,7 @@ def test_evidencia_cgroup_rechaza_traversal_inode_distinto_y_events_ilegible(sis
 def test_cerrar_uid_bloquea_drena_handle_y_suelta_solo_tras_empty(sistema):
     async def caso():
         g = gestor(sistema)
-        await g.arrancar(UID, ["/usr/bin/true"])
+        await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         g.bloquear_uid(UID)
         await g.cerrar_uid(UID)
         return sistema.muertes, LeaseStore(sistema.lease_dir).all()
@@ -1141,7 +1324,7 @@ def test_cerrar_uid_bloquea_drena_handle_y_suelta_solo_tras_empty(sistema):
 def test_finalizacion_natural_concurrente_con_cierre_comparte_handle_y_libera_una_vez(sistema):
     async def caso():
         g = gestor(sistema)
-        proceso = await g.arrancar(UID, ["/usr/bin/true"])
+        proceso = await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         intento = LeaseStore(sistema.lease_dir).read(UID).attempt_id
         liberaciones = []
         liberar = g._leases.release
@@ -1184,7 +1367,7 @@ def test_spawn_que_termina_antes_de_observar_unidad_conserva_quarantine(sistema)
         sistema.fallar_arranque = "rc"
         g = gestor(sistema)
         with pytest.raises(ScopeError):
-            await g.arrancar(UID, ["/usr/bin/true"])
+            await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         return LeaseStore(sistema.lease_dir).read(UID).stage, sistema.muertes
     stage, muertes = correr(caso())
     assert stage.value == "REQUESTED"
@@ -1210,7 +1393,7 @@ def test_peticion_en_cola_materializa_despues_de_salida_y_no_libera_requested(si
             materializada.set()
         g._crear_proceso = enviar
         with pytest.raises(ScopeError):
-            await g.arrancar(UID, ["/usr/bin/true"])
+            await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         # El primer scan ya pudo ver namespace vacío; la petición aún estaba en tránsito.
         assert LeaseStore(sistema.lease_dir).read(UID).stage.value == "REQUESTED"
         liberador.set()
@@ -1258,7 +1441,7 @@ def test_cerrar_uid_reporta_drain_roto_despues_de_cleanup_seguro(sistema):
                 proceso.stderr = StderrRoto()
             return proceso
         g._crear_proceso = crear
-        await g.arrancar(UID, ["/usr/bin/true"])
+        await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         with pytest.raises(ScopeError, match="stderr"):
             await g.cerrar_uid(UID)
         return sistema.muertes, LeaseStore(sistema.lease_dir).all()
@@ -1269,7 +1452,7 @@ def test_cerrar_uid_reporta_drain_roto_despues_de_cleanup_seguro(sistema):
 
 def test_arrancar_deja_los_tres_limites_efectivos_en_la_unidad(sistema):
     async def caso():
-        await gestor(sistema).arrancar(UID, ["/usr/bin/true"])
+        await arrancar_con_instancia_adquirida(gestor(sistema), UID, ["/usr/bin/true"])
         p = sistema.unidades[UNIDAD]["propiedades"]
         return p["MemoryMax"], p["CPUQuotaPerSecUSec"], p["TasksMax"]
     assert correr(caso()) == (str(256 * 1024 ** 2), "2s", "128")       # normalizado como systemd (bytes/timespan)
@@ -1287,7 +1470,7 @@ def test_arrancar_verifica_con_show_antes_de_dar_por_lista_la_unidad(sistema):
                 shows.append(argv)
             return await original(*argv, **kw)
         g._crear_proceso = proceso
-        await g.arrancar(UID, ["/usr/bin/true"])
+        await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         props = " ".join(a for a in shows[0] if a.startswith("--property="))
         for esperada in ("ActiveState", "ControlGroup", "Description", "Delegate", "MemoryMax",
                          "CPUQuotaPerSecUSec", "TasksMax"):
@@ -1302,7 +1485,7 @@ def test_arrancar_con_la_unidad_ocupada_por_otro_falla_y_no_la_toca(sistema):
         sistema.unidades[UNIDAD]["propiedades"]["Description"] = "FARO-R2-otra-identidad"
         g = gestor(sistema)
         try:
-            await g.arrancar(UID, ["/usr/bin/true"])
+            await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         except ScopeError as e:
             assert "namespace" in str(e)
             return await g.estado(UID), sistema.muertes
@@ -1341,13 +1524,15 @@ def test_major2_cancelada_la_creacion_del_subproceso_la_unidad_nacida_se_limpia(
                 await devolver_handle.wait()                    # unidad nacida; handle aún no entregado
             return p
         g._crear_proceso = crear_lento
+        token = await g.adquirir_instancia()
+        assert sistema.tokens_instancia[g] is token
         tarea = asyncio.create_task(g.arrancar(UID, ["/usr/bin/true"]))
         await asyncio.wait_for(adentro.wait(), 2)
         tarea.cancel()
         devolver_handle.set()                                    # el spawn termina; cleanup debe matar la unidad
         try:
             await tarea
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # fail-soft: cancellation is the expected assertion after cleanup was scheduled
             pass
         return sistema.muertes, await g.estado(UID)
     muertes, estado = corre_con_plazo(caso())
@@ -1371,6 +1556,8 @@ def test_major2_cancelacion_repetida_y_materializacion_tardia_no_deja_unidad_viv
             return await sistema.crear_proceso(*argv, **kw)
 
         g._crear_proceso = crear_lento
+        token = await g.adquirir_instancia()
+        assert sistema.tokens_instancia[g] is token
         tarea = asyncio.create_task(g.arrancar(UID, ["/usr/bin/true"]))
         await asyncio.wait_for(spawn_iniciado.wait(), 2)
         tarea.cancel()
@@ -1412,6 +1599,8 @@ def test_major2_handle_entregado_job_ausente_y_materializacion_posterior_se_reap
             return await sistema.crear_proceso(*argv, **kw)
 
         g._crear_proceso = crear_con_job
+        token = await g.adquirir_instancia()
+        assert sistema.tokens_instancia[g] is token
         tarea = asyncio.create_task(g.arrancar(UID, ["/usr/bin/true"]))
         await asyncio.wait_for(spawn_retorno.wait(), 2)
         assert await g.estado(UID) is EstadoUnidad.UNKNOWN  # el job impide declarar EMPTY
@@ -1450,13 +1639,15 @@ def test_apagado_cierra_admision_y_falla_acotado_si_spawn_no_entrega_handle(sist
             return await crear(*argv, **kw)
 
         g._crear_proceso = spawn_lento
+        token = await g.adquirir_instancia()
+        assert sistema.tokens_instancia[g] is token
         arranque = asyncio.create_task(g.arrancar(UID, ["/usr/bin/true"]))
         await asyncio.wait_for(iniciado.wait(), 1)
         with pytest.raises(ScopeError, match="no terminaron|siguen en vuelo"):
             await g.esperar_limpiezas()
         assert len(g._limpiezas) == 1  # el lanzamiento cancelado quedó bajo un reaper propio
         with pytest.raises(ScopeError, match="está cerrando"):
-            await g.arrancar(UID + 1, ["/usr/bin/true"])
+            await arrancar_con_instancia_adquirida(g, UID + 1, ["/usr/bin/true"])
         liberar.set()
         with pytest.raises(ScopeError, match="sigue en curso"):
             await asyncio.wait_for(arranque, 1)
@@ -1472,7 +1663,7 @@ def test_fallo_de_identidad_durante_cleanup_queda_visible_y_retenido(sistema):
     async def caso():
         cfg = ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128", plazo_vacio_s=0.03)
         g = gestor(sistema, cfg=cfg, plazo_consulta_s=0.01)
-        proceso = await g.arrancar(UID, ["/usr/bin/true"])
+        proceso = await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         lease = LeaseStore(sistema.lease_dir).read(UID)
         sistema.fallar_show = "rc"
         with pytest.raises(ScopeError, match="identidad"):
@@ -1501,7 +1692,7 @@ def test_spawn_que_crea_unidad_y_falla_antes_de_entregar_handle_mata_exacta_y_co
 
         g._crear_proceso = crear_y_fallar
         with pytest.raises(ScopeError):
-            await g.arrancar(UID, ["/usr/bin/true"])
+            await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         lease = LeaseStore(sistema.lease_dir).read(UID)
         return await g.estado(UID), sistema.muertes, lease, len(g._limpiezas)
 
@@ -1528,6 +1719,8 @@ def test_cancelacion_con_spawn_sin_handle_conserva_lease(sistema):
             return await sistema.crear_proceso(*argv, **kw)
 
         g._crear_proceso = crear_y_fallar
+        token = await g.adquirir_instancia()
+        assert sistema.tokens_instancia[g] is token
         arranque = asyncio.create_task(g.arrancar(UID, ["/usr/bin/true"]))
         await unidad_creada.wait()
         arranque.cancel()
@@ -1574,7 +1767,7 @@ def test_limpiezas_exitosas_se_eliminan_sin_esperar_apagado(sistema):
         g = gestor(sistema)
         for indice in range(20):
             uid = UID + indice
-            await g.arrancar(uid, ["/usr/bin/true"])
+            await arrancar_con_instancia_adquirida(g, uid, ["/usr/bin/true"])
             await g.cerrar_uid(uid)
             assert not g._limpiezas and not g._resultados_limpieza
         return len(sistema.muertes), g._leases.all()
@@ -1598,7 +1791,7 @@ def test_fallo_de_wait_no_abandona_lease_accepted(sistema):
             return proceso
 
         g._crear_proceso = crear
-        await g.arrancar(UID, ["/usr/bin/true"])
+        await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         lease = LeaseStore(sistema.lease_dir).read(UID)
         with pytest.raises(OSError, match="fallo temporal de wait"):
             await g.cerrar_uid(UID)
@@ -1631,7 +1824,7 @@ def test_arrancar_con_un_limite_efectivo_distinto_o_infinity_mata_y_falla_cerrad
             return p
         g._crear_proceso = proceso
         try:
-            await g.arrancar(UID, ["/usr/bin/true"])
+            await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         except ScopeError:
             return sistema.muertes, await g.estado(UID)
         raise AssertionError("tenia que fallar la verificacion")
@@ -1654,7 +1847,7 @@ def test_arrancar_que_no_logra_unidad_activa_en_el_plazo_mata_lo_que_haya_y_fall
             return p
         g._crear_proceso = proceso
         try:
-            await g.arrancar(UID, ["/usr/bin/true"])
+            await arrancar_con_instancia_adquirida(g, UID, ["/usr/bin/true"])
         except ScopeError:
             return sistema.intentos, sistema.muertes, await g.estado(UID)
         raise AssertionError("tenia que fallar por plazo")
@@ -1668,7 +1861,7 @@ def test_arrancar_con_systemd_run_roto_no_arranca_nada_y_falla(sistema):
 
     async def caso():
         try:
-            await gestor(sistema).arrancar(UID, ["/usr/bin/true"])
+            await arrancar_con_instancia_adquirida(gestor(sistema), UID, ["/usr/bin/true"])
         except ScopeError:
             return sistema.arrancados
         raise AssertionError("tenia que fallar")
@@ -1687,6 +1880,8 @@ def test_arrancar_cancelado_durante_la_verificacion_mata_la_unidad(sistema):
                 sistema.unidades[UNIDAD]["activa"] = False     # la verificacion no concluye: queda esperando
             return p
         g._crear_proceso = proceso
+        token = await g.adquirir_instancia()
+        assert sistema.tokens_instancia[g] is token
         tarea = asyncio.create_task(g.arrancar(UID, ["/usr/bin/true"]))
         await asyncio.sleep(0.05)                              # ya arranco, esta verificando
         tarea.cancel()
@@ -1703,6 +1898,8 @@ def test_arrancar_cancelado_durante_la_verificacion_mata_la_unidad(sistema):
 def test_dos_arranques_concurrentes_con_el_mismo_uid_dejan_una_sola_unidad(sistema):
     async def caso():
         g = gestor(sistema)
+        token = await g.adquirir_instancia()
+        assert sistema.tokens_instancia[g] is token
         resultados = await asyncio.gather(*(g.arrancar(UID, ["/usr/bin/true"]) for _ in range(2)),
                                           return_exceptions=True)
         return ([r for r in resultados if not isinstance(r, BaseException)],
@@ -1827,15 +2024,28 @@ class TestUserManagerReal:
     """Arranque, verificacion y kill REALES del user manager (medido en hall9000, systemd 259).
     Cada unidad usa un uid de prueba unico y se mata al terminar; nada queda instalado."""
 
-    UID_BASE = 50100 + (os.getpid() % 500)
+    # Aislar nombres de unidades entre corridas; ScopeManager aún comprueba el
+    # namespace completo y falla cerrado si hay una colisión real.
+    UID_BASE = 1_000_000_000 + ((time.time_ns() ^ os.getpid()) % 1_000_000_000)
     _siguiente = 0
 
     def setup_method(self):
         self._lease_dirs = []
+        self._gestores_prueba = []
+        self._tokens_instancia = {}
 
     def teardown_method(self):
+        asyncio.run(self._drenar_y_liberar_gestores())
         for directorio in self._lease_dirs:
             shutil.rmtree(directorio, ignore_errors=True)
+
+    async def _drenar_y_liberar_gestores(self):
+        for gestor in reversed(self._gestores_prueba):
+            with contextlib.suppress(ScopeError):
+                await gestor.esperar_limpiezas()
+            token = self._tokens_instancia.get(gestor)
+            if token is not None:
+                await gestor.liberar_instancia(token)
 
     def _uid(self) -> int:
         TestUserManagerReal._siguiente += 1
@@ -1844,8 +2054,24 @@ class TestUserManagerReal:
     def _gestor(self, **kw) -> ScopeManager:
         directorio = Path(tempfile.mkdtemp(prefix="faro-r2-leases-"))
         self._lease_dirs.append(directorio)
-        return ScopeManager(ConfigScope(memory_max="64M", cpu_quota="10%", tasks_max="32",
-                                       plazo_arranque_s=15.0, state_dir=directorio, **kw))
+        gestor = ScopeManager(ConfigScope(memory_max="64M", cpu_quota="10%", tasks_max="32",
+                                          plazo_arranque_s=15.0, state_dir=directorio, **kw))
+        adquirir, liberar = gestor.adquirir_instancia, gestor.liberar_instancia
+
+        async def adquirir_registrada():
+            token = await adquirir()
+            self._tokens_instancia[gestor] = token
+            return token
+
+        async def liberar_registrada(token):
+            await liberar(token)
+            if self._tokens_instancia.get(gestor) is token:
+                self._tokens_instancia.pop(gestor, None)
+
+        gestor.adquirir_instancia = adquirir_registrada
+        gestor.liberar_instancia = liberar_registrada
+        self._gestores_prueba.append(gestor)
+        return gestor
 
     @staticmethod
     async def _limpiar(g, uid):
@@ -1859,7 +2085,7 @@ class TestUserManagerReal:
         async def caso():
             with contextlib.suppress(Exception):
                 await matar_handle(g, uid)                    # una unidad colgante de otra corrida no florea esto
-            proceso = await g.arrancar(uid, ["/bin/sh", "-c", "sleep 300 & sleep 300 & sleep 300 & wait"])
+            proceso = await arrancar_con_instancia_adquirida(g, uid, ["/bin/sh", "-c", "sleep 300 & sleep 300 & sleep 300 & wait"])
             assert await g.estado(uid) is EstadoUnidad.LIVE
             cg = await g.control_group(uid)
             assert cg and Path("/sys/fs/cgroup", cg.removeprefix("/")).is_dir()
@@ -1877,8 +2103,8 @@ class TestUserManagerReal:
         a, b, g = self._uid(), self._uid() + 1000, self._gestor()
 
         async def caso():
-            proceso_a = await g.arrancar(a, ["/bin/sleep", "300"])
-            proceso_b = await g.arrancar(b, ["/bin/sleep", "300"])
+            proceso_a = await arrancar_con_instancia_adquirida(g, a, ["/bin/sleep", "300"])
+            proceso_b = await arrancar_con_instancia_adquirida(g, b, ["/bin/sleep", "300"])
             try:
                 await matar_handle(g, a)
                 await g.finalizar_natural(a, proceso_a)
@@ -1898,7 +2124,7 @@ class TestUserManagerReal:
         uid, g = self._uid(), self._gestor()
 
         async def caso():
-            proceso = await g.arrancar(uid, ["/bin/sh", "-c", "setsid /bin/sleep 300 & sleep 300"])
+            proceso = await arrancar_con_instancia_adquirida(g, uid, ["/bin/sh", "-c", "setsid /bin/sleep 300 & sleep 300"])
             await asyncio.sleep(0.3)                           # que el nieto nazca
             assert await g.estado(uid) is EstadoUnidad.LIVE
             await matar_handle(g, uid)
@@ -1918,7 +2144,7 @@ class TestUserManagerReal:
         salida = tmp_path / "env-de-la-unidad.txt"
 
         async def caso():
-            proceso = await g.arrancar(uid, ["/bin/sh", "-c", f"env > {salida}; sleep 5"])
+            proceso = await arrancar_con_instancia_adquirida(g, uid, ["/bin/sh", "-c", f"env > {salida}; sleep 5"])
             viva = await g.estado(uid)
             await matar_handle(g, uid)
             await g.finalizar_natural(uid, proceso)
@@ -1956,14 +2182,18 @@ class TestUserManagerReal:
                               ruta_token=Path(f"/run/faro/run-{uid}.token"))
 
         async def caso():
-            l = LanzadorJaula(ConfigJaula(bwrap=falso, elevar=(str(elevador), "{uid}")), Bitacora(emisores=[]), g)
-            proceso = await l.lanzar(srv, ["/usr/bin/true"])
-            viva = await l.jaula_viva(uid)                     # por el cgroup, no por el Popen
-            await matar_handle(g, uid)
-            await l.esperar_terminos()                        # watcher reap + drenaje stderr antes de cerrar el loop
-            estado = await g.estado(uid)
-            rc = proceso.returncode
-            return viva, estado, rc
+            token = await g.adquirir_instancia()
+            try:
+                l = LanzadorJaula(ConfigJaula(bwrap=falso, elevar=(str(elevador), "{uid}")), Bitacora(emisores=[]), g)
+                proceso = await l.lanzar(srv, ["/usr/bin/true"])
+                viva = await l.jaula_viva(uid)                 # por el cgroup, no por el Popen
+                await matar_handle(g, uid)
+                await l.esperar_terminos()                    # watcher reap + drenaje stderr antes de cerrar el loop
+                estado = await g.estado(uid)
+                rc = proceso.returncode
+                return viva, estado, rc
+            finally:
+                await g.liberar_instancia(token)
         try:
             viva, estado, rc = correr(caso())
         finally:
@@ -1981,7 +2211,7 @@ class TestUserManagerReal:
                    "sys.stdout.flush();sys.stderr.flush();time.sleep(.2)"]
 
         async def caso():
-            proceso = await g.arrancar(uid, comando)
+            proceso = await arrancar_con_instancia_adquirida(g, uid, comando)
             rc = await asyncio.wait_for(g.esperar_cliente(proceso), 10)
             return rc, len(proceso._faro_stderr_tail)
 

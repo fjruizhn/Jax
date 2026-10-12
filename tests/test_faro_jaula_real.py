@@ -235,6 +235,20 @@ class _ScopeSiempreVacio:
     """Doble del gestor de unidades para las pruebas de uids reales del CANAL: aqui no se ejercita 0.6,
     solo SO_PEERCRED; las unidades no existen y el doble siempre lo confirma (EMPTY)."""
 
+    def __init__(self):
+        self._token = None
+
+    async def adquirir_instancia(self):
+        self._token = object()
+        return self._token
+
+    async def liberar_instancia(self, token):
+        assert token is self._token
+        self._token = None
+
+    async def recuperar_leases(self):
+        return None
+
     async def estado(self, uid):
         return EstadoUnidad.EMPTY
 
@@ -245,6 +259,9 @@ class _ScopeSiempreVacio:
         return EstadoUnidad.EMPTY
 
     def cerrar_admision(self):
+        return None
+
+    def bloquear_uid(self, uid):
         return None
 
     async def esperar_limpiezas(self):

@@ -108,7 +108,7 @@ class Servicio:
                 resultado = cerrar()
                 if hasattr(resultado, "__await__"):
                     await resultado
-            except BaseException as exc:
+            except BaseException as exc:  # fail-soft: se agrega el fallo y se cierran los demás recursos del servicio
                 errores.append(exc)
 
         for lanzador in tuple(self.lanzadores):

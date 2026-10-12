@@ -276,24 +276,75 @@ class ScopeManager:
         self._uids_parando: set[int] = set()
         self._cerrando = False
         self._fd_instancia: int | None = None
+        self._token_instancia: object | None = None
+        self._adquisicion_instancia: asyncio.Task | None = None
         self._handles: dict[int, _ScopeHandle] = {}
         self._cuarentena: dict[int, str] = {}
 
-    async def adquirir_instancia(self) -> None:
+    async def adquirir_instancia(self) -> object:
         """Exclusión de vida completa antes de recovery/socket; flock cruza procesos."""
         if self._leases is None:
             raise ScopeError("falta almacén durable para lock exclusivo de instancia")
-        if self._fd_instancia is not None:
-            return
+        if self._fd_instancia is not None or self._adquisicion_instancia is not None:
+            raise ScopeError("la instancia única ya fue adquirida por este gestor")
+        tarea = asyncio.create_task(asyncio.to_thread(self._leases.acquire_instance))
+        self._adquisicion_instancia = tarea
         try:
-            self._fd_instancia = await asyncio.to_thread(self._leases.acquire_instance)
+            fd = await asyncio.shield(tarea)
+            token = object()
+            self._fd_instancia = fd
+            self._token_instancia = token
+            return token
+        except asyncio.CancelledError:
+            # to_thread no detiene el worker al cancelar al caller. Drenarlo y cerrar
+            # el fd que eventualmente obtuvo antes de propagar la cancelación.
+            async def drenar_y_cerrar() -> None:
+                try:
+                    fd_obtenido = await asyncio.shield(tarea)
+                except LeaseStoreError:  # fail-soft: el worker rechazó adquirir; no devolvió fd y sigue la cancelación original
+                    return
+                try:
+                    await asyncio.to_thread(os.close, fd_obtenido)
+                except OSError as exc:
+                    self._fd_instancia = fd_obtenido
+                    self._token_instancia = object()
+                    raise ScopeError("cancelación adquirió el lock pero no pudo cerrar su fd; lock retenido") from exc
+
+            limpieza = asyncio.create_task(drenar_y_cerrar())
+            while not limpieza.done():
+                try:
+                    await asyncio.shield(limpieza)
+                except asyncio.CancelledError:
+                    continue
+            limpieza.result()
+            raise
         except LeaseStoreError as exc:
             raise ScopeError("no se pudo asegurar instancia única del Faro") from exc
+        finally:
+            if self._adquisicion_instancia is tarea:
+                self._adquisicion_instancia = None
 
-    async def liberar_instancia(self) -> None:
-        if self._fd_instancia is not None:
-            os.close(self._fd_instancia)
+    async def liberar_instancia(self, propietario: object) -> None:
+        if propietario is not self._token_instancia or self._fd_instancia is None:
+            raise ScopeError("el caller no posee el lock exclusivo de instancia")
+        fd = self._fd_instancia
+        cierre = asyncio.create_task(asyncio.to_thread(os.close, fd))
+        cancelada = False
+        try:
+            await asyncio.shield(cierre)
+        except asyncio.CancelledError:
+            cancelada = True
+            while not cierre.done():
+                try:
+                    await asyncio.shield(cierre)
+                except asyncio.CancelledError:  # fail-soft: se drena el close exacto antes de propagar cancelación
+                    continue
+            cierre.result()
+        if propietario is self._token_instancia and fd == self._fd_instancia:
             self._fd_instancia = None
+            self._token_instancia = None
+        if cancelada:
+            raise asyncio.CancelledError
 
     async def recuperar_leases(self) -> None:
         """Reconcilia cuarentenas durables antes de admitir conexiones o nuevos lanzamientos.
@@ -315,7 +366,7 @@ class ScopeManager:
                     await self._reconciliar_lease_de_arranque(lease)
                 except asyncio.CancelledError:
                     raise
-                except Exception as exc:
+                except Exception as exc:  # fail-soft: se conserva ese UID en cuarentena y continúa el recovery de hermanas
                     # Un error operativo de un UID no debe impedir reconciliar las
                     # hermanas; el lease problemático queda en cuarentena durable.
                     self._cuarentena[lease.uid] = f"recovery inconcluso: {type(exc).__name__}"
@@ -347,7 +398,7 @@ class ScopeManager:
             if identidad is _EstadoIdentidad.PROPIA:
                 try:
                     await self.matar(lease.uid, intento=intento)
-                except Exception:
+                except Exception:  # fail-soft: el kill puede perder la carrera; solo identidad AUSENTE permite seguir
                     # Una unidad propia puede ser recolectada justo antes del kill.
                     # Solo la segunda observación AUSENTE permite pasar al kernel.
                     identidad = await self._identidad(lease.uid, intento)
@@ -406,7 +457,7 @@ class ScopeManager:
             # esperar su resultado y quitar solo el lease recién adquirido.
             try:
                 await asyncio.shield(tarea)
-            except LeaseStoreError:
+            except LeaseStoreError:  # fail-soft: el worker no creó lease; no se lanza systemd-run y se propaga cancelación
                 pass
             else:
                 await self._liberar_lease(uid, intento)
@@ -490,7 +541,7 @@ class ScopeManager:
             raise
         try:
             await self._esperar_drenaje_stderr(handle.proceso)
-        except BaseException as exc:
+        except BaseException as exc:  # fail-soft: el error queda guardado y el owner lo recibe tras cleanup seguro
             handle.drain_error = exc
 
     def _registrar_handle(self, uid: int, intento: str, unidad: str, proceso: object) -> _ScopeHandle:
@@ -757,7 +808,7 @@ class ScopeManager:
                     if (retenido.stage in (LeaseStage.ACCEPTED, LeaseStage.CLIENT_CLOSED)
                             and await self._estado_kernel_lease(retenido) == 1):
                         return EstadoUnidad.LIVE
-                except LeaseStoreError:
+                except LeaseStoreError:  # fail-soft: evidencia de kernel no legible es UNKNOWN y retiene el UID
                     pass
             return EstadoUnidad.UNKNOWN
         lease = None
@@ -925,6 +976,8 @@ class ScopeManager:
         """Registra cada lanzamiento antes del primer await para que el cierre lo pueda cancelar y drenar."""
         if self._cerrando:
             raise ScopeError("el gestor de unidades está cerrando; se rechazan nuevos arranques")
+        if self._fd_instancia is None or self._token_instancia is None:
+            raise ScopeError("arrancar requiere el lock de instancia adquirido previamente")
         tarea = asyncio.current_task()
         if tarea is None:
             raise RuntimeError("arrancar requiere una tarea asyncio")
@@ -933,7 +986,6 @@ class ScopeManager:
         self._arranques.add(tarea)
         self._arranques_uid.setdefault(uid, set()).add(tarea)
         try:
-            await self.adquirir_instancia()
             if not self._leases_recuperados:
                 await self.recuperar_leases()
             if not await self._namespace_vacio(uid):
@@ -1210,7 +1262,7 @@ class ScopeManager:
         try:
             _, err = await asyncio.wait_for(proceso.communicate(), 1.0)
             return err.decode(errors="replace").strip()[:200]
-        except Exception:  # solo decorar el mensaje de fallo de arranque; sin stderr no afea el error
+        except Exception:  # fail-soft: solo falta diagnóstico stderr; el error original de arranque se conserva
             return ""
 
     async def _limpiar_cancelacion(self, uid: int, intento: str, creacion: asyncio.Task) -> None:
@@ -1238,7 +1290,7 @@ class ScopeManager:
         falla después de que la solicitud externa haya podido surtir efecto."""
         try:
             proceso = await creacion
-        except Exception:
+        except Exception:  # fail-soft: spawn ambiguo va a reconciliación sin handle y permanece en cuarentena
             return await self._reconciliar_sin_handle(uid, intento)
         self._registrar_handle(uid, intento, nombre_unidad_intento(uid, intento), proceso)
         return await self._terminar_y_liberar(uid, intento, proceso)
@@ -1299,7 +1351,7 @@ class ScopeManager:
                     if handle is not None and handle.intento == intento:
                         try:
                             await self._aceptar_handle(handle)
-                        except Exception:
+                        except Exception:  # fail-soft: conserva REQUESTED, contiene la unidad exacta y no declara cierre
                             # Intento propio pero inválido: contiene la unidad exacta,
                             # conserva REQUESTED y no declara cierre causal.
                             await self.matar(uid, intento=intento)
@@ -1334,7 +1386,7 @@ class ScopeManager:
                             estado = await self.esperar_vacio(uid, intento=intento, plazo_s=self._plazo_consulta_s)
                             if estado is EstadoUnidad.EMPTY and getattr(proceso, "returncode", None) is not None:
                                 return True
-            except Exception:
+            except Exception:  # fail-soft: reaper registra error, conserva lease/UID y reintenta la observación
                 logger.exception("limpieza de %s falló; el reaper conserva el UID en cuarentena", unidad)
             logger.warning("limpieza de %s sigue inconclusa: identidad=%s job=%s; se conserva el reaper",
                            unidad, ultima_identidad.value, ultimo_trabajo)
@@ -1351,7 +1403,7 @@ class ScopeManager:
             if identidad is _EstadoIdentidad.PROPIA:
                 await self.matar(uid, intento=intento)
             vacio = await self._namespace_vacio(uid)
-        except Exception:
+        except Exception:  # fail-soft: consulta no concluyente queda en cuarentena y no autoriza liberación
             logger.exception("no se pudo inspeccionar spawn sin handle de %s", unidad)
             identidad, trabajo, vacio = _EstadoIdentidad.DESCONOCIDA, None, False
         self._cuarentena[uid] = (f"spawn sin handle: identidad={identidad.value}, job={trabajo}, namespace_empty={vacio}")
@@ -1388,7 +1440,7 @@ class ScopeManager:
             for tarea in hechos:
                 try:
                     resultado = tarea.result()
-                except BaseException as exc:
+                except BaseException as exc:  # fail-soft: se agrega al error de apagado y las demás limpiezas continúan
                     fallidas.append(type(exc).__name__)
                     continue
                 if resultado is True:
@@ -1429,7 +1481,7 @@ class ScopeManager:
         if intento is None and self._leases is not None:
             try:
                 intento = (await asyncio.to_thread(self._leases.read, uid)).attempt_id
-            except LeaseStoreNotFound:
+            except LeaseStoreNotFound:  # fail-soft: sin lease se consulta namespace; la ausencia no se presume vacía
                 pass
             except LeaseStoreError:
                 return EstadoUnidad.UNKNOWN

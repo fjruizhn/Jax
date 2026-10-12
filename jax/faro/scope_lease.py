@@ -307,20 +307,25 @@ class LeaseStore:
     def acquire_instance(self) -> int:
         """Toma el lock exclusivo de instancia y lo conserva hasta cerrar el descriptor."""
         with self._directory_abierto(exclusivo=True) as directorio_fd:
+            fd: int | None = None
+            transferido = False
             try:
                 fd = os.open(".instance.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
                              _MODO_ARCHIVO, dir_fd=directorio_fd)
                 datos = os.fstat(fd)
                 if (not stat.S_ISREG(datos.st_mode) or datos.st_uid != os.geteuid()
                         or stat.S_IMODE(datos.st_mode) != _MODO_ARCHIVO or datos.st_nlink != 1):
-                    os.close(fd)
                     raise LeaseStoreConfigurationError("lock de instancia inseguro")
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                transferido = True
                 return fd
             except BlockingIOError as exc:
                 raise LeaseStoreConflict("ya existe otra instancia activa del Faro") from exc
             except OSError as exc:
                 raise LeaseStoreError("no se pudo adquirir lock exclusivo de instancia") from exc
+            finally:
+                if fd is not None and not transferido:
+                    os.close(fd)
 
     def read(self, uid: int) -> ScopeLease:
         """Lee y valida el lease de ``uid`` sin seguir enlaces."""

@@ -181,6 +181,13 @@ log `/tmp/faro-r2-integrated-py314-20261012-rebased.log`. La jaula real dio `12 
 de systemd `6 passed, 158 deselected`; el control de cableado dio `7 passed`, cada uno en su log `-rebased` de
 `/tmp`. Esta medición se asociará al SHA auditado al cerrar el commit; no reemplaza auditoría Tier 3, CI ni guardas.
 
+Piso actualizado 2026-10-12 tras el cierre de las regresiones R-2: `^965 passed`. La selección exacta de
+`faro-fase0` en Python 3.14 terminó con 965 corridas y 6 deselected (`systemd_integration`) en 61.31 s;
+log `/tmp/faro-r2-integrated-py314-20261012-depack-final3.log`. La jaula real pasó 12 pruebas
+(`/tmp/faro-r2-faro-jaula-20261012-depack-final2.log`), la integración systemd 6
+(`/tmp/faro-r2-systemd-integration-20261012-depack-final2.log`), Hyde 21 y el cableado 7. Esta es evidencia
+local del artefacto preauditoría: CI remota, auditoría del SHA exacto e integración siguen pendientes.
+
 ## `faro-bitacora-db/faro-db`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^40 passed`

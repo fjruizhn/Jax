@@ -14,8 +14,10 @@ kernel) o inyectando las credenciales del par (`leer_credenciales`). La prueba c
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import socket
 import stat
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -28,7 +30,7 @@ from jax.faro.bitacora import Bitacora
 from jax.faro.bitacora_db import EmisorTabla, verificar_cadena
 from jax.faro.config import ConfigFaroInvalida, ConfigPuerto
 from jax.faro.control import ConfigControl, ServidorControl
-from jax.faro.scope import EstadoUnidad
+from jax.faro.scope import ConfigScope, EstadoUnidad, ScopeError, ScopeManager
 from jax.faro.servicio import arrancar
 from jax.faro.transporte import ServidorPuerto
 from tests._faro_falsos import FalsoPool, FalsoTelegram
@@ -57,6 +59,18 @@ class FalsoScope:
         self.admision_cerrada = False
         self.uid_bloqueados: list[int] = []
         self.cierres_uid: list[int] = []
+        self._propietario_instancia = None
+
+    async def adquirir_instancia(self):
+        if self._propietario_instancia is not None:
+            raise ScopeError("instancia única ya adquirida")
+        self._propietario_instancia = object()
+        return self._propietario_instancia
+
+    async def liberar_instancia(self, propietario):
+        if propietario is not self._propietario_instancia:
+            raise ScopeError("token de instancia ajeno")
+        self._propietario_instancia = None
 
     def cerrar_admision(self) -> None:
         self.admision_cerrada = True
@@ -219,6 +233,205 @@ def test_el_recovery_fallido_impide_abrir_el_socket_de_control(mundo):
     with pytest.raises(RuntimeError, match="lease corrupto"):
         corre(caso())
     assert not (_cfg_control(mundo.tmp).ruta_socket).exists()
+
+
+def test_scope_con_contrato_incompleto_falla_antes_de_crear_socket(mundo):
+    bit = Bitacora(emisores=[mundo.registros.append])
+    cfg = _cfg_control(mundo.tmp)
+    with pytest.raises(ConfigFaroInvalida, match="contrato.*scope"):
+        ServidorControl(cfg, lambda _ej: None, bit, object())
+    assert not cfg.ruta_socket.exists()
+
+
+def test_control_duplicado_con_mismo_scope_no_suelta_el_lock_del_servidor_activo(mundo):
+    leases = mundo.tmp / "leases-control"
+    leases.mkdir(mode=0o700)
+    cfg_scope = ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128", state_dir=leases)
+    scope = ScopeManager(cfg_scope)
+    bit = Bitacora(emisores=[mundo.registros.append])
+    cfg = _cfg_control(mundo.tmp)
+    primero = ServidorControl(cfg, lambda _ej: None, bit, scope)
+    segundo = ServidorControl(cfg, lambda _ej: None, bit, scope)
+
+    async def caso():
+        await primero.__aenter__()
+        with pytest.raises(ScopeError, match="instancia única"):
+            await segundo.__aenter__()
+        tercero = ScopeManager(cfg_scope)
+        with pytest.raises(ScopeError, match="instancia única"):
+            await tercero.adquirir_instancia()
+        assert primero._servidor is not None and primero._servidor.is_serving()
+        await primero.__aexit__(None, None, None)
+
+    corre(caso())
+
+
+def test_fallo_chmod_cierra_servidor_retirando_solo_su_socket_y_suelta_su_lock(mundo, monkeypatch):
+    leases = mundo.tmp / "leases-chmod"
+    leases.mkdir(mode=0o700)
+    cfg_scope = ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128", state_dir=leases)
+    scope = ScopeManager(cfg_scope)
+    cfg = _cfg_control(mundo.tmp)
+    bit = Bitacora(emisores=[mundo.registros.append])
+    srv = ServidorControl(cfg, lambda _ej: None, bit, scope)
+    chmod_real = os.chmod
+
+    def chmod_falla(path, modo):
+        if Path(path) == cfg.ruta_socket:
+            raise OSError("chmod de socket simulado")
+        return chmod_real(path, modo)
+
+    monkeypatch.setattr("jax.faro.control.os.chmod", chmod_falla)
+
+    async def caso():
+        with pytest.raises(OSError, match="chmod de socket simulado"):
+            await srv.__aenter__()
+        assert srv._servidor is None
+        assert not cfg.ruta_socket.exists()
+        tercero = ScopeManager(cfg_scope)
+        token = await tercero.adquirir_instancia()
+        await tercero.liberar_instancia(token)
+
+    corre(caso())
+
+
+def test_rollback_chmod_no_desvincula_socket_ajeno_que_reemplazo_el_propio(mundo, monkeypatch):
+    cfg = _cfg_control(mundo.tmp)
+    bit = Bitacora(emisores=[mundo.registros.append])
+    srv = ServidorControl(cfg, lambda _ej: None, bit, FalsoScope())
+    chmod_real = os.chmod
+    socket_ajeno = []
+
+    def reemplazar_y_fallar(path, modo):
+        if Path(path) == cfg.ruta_socket:
+            cfg.ruta_socket.unlink()
+            nuevo = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            nuevo.bind(str(cfg.ruta_socket))
+            socket_ajeno.append(nuevo)
+            raise OSError("chmod de socket simulado")
+        return chmod_real(path, modo)
+
+    monkeypatch.setattr("jax.faro.control.os.chmod", reemplazar_y_fallar)
+
+    async def caso():
+        with pytest.raises(OSError, match="chmod de socket simulado"):
+            await srv.__aenter__()
+        assert cfg.ruta_socket.exists()
+        assert srv._servidor is None
+
+    try:
+        corre(caso())
+    finally:
+        for sock in socket_ajeno:
+            sock.close()
+        cfg.ruta_socket.unlink(missing_ok=True)
+
+
+def test_inicio_socket_no_admite_pedido_antes_de_completar_start_serving(mundo, monkeypatch):
+    leases = mundo.tmp / "leases-start-serving"
+    leases.mkdir(mode=0o700)
+    cfg_scope = ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128", state_dir=leases)
+    scope = ScopeManager(cfg_scope)
+    consultas = []
+    estado_original = scope.estado
+
+    async def estado_contado(uid):
+        consultas.append(uid)
+        return await estado_original(uid)
+
+    scope.estado = estado_contado
+    cfg = _cfg_control(mundo.tmp)
+    bit = Bitacora(emisores=[mundo.registros.append])
+    servidores = []
+    creados = []
+    listo = asyncio.Event()
+    liberar_start = asyncio.Event()
+    start_original = asyncio.start_unix_server
+
+    class PuertoFalso:
+        def __init__(self, ejecucion):
+            self.ejecucion = ejecucion
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    def crear_puerto(ejecucion):
+        creado = PuertoFalso(ejecucion)
+        creados.append(creado)
+        return creado
+
+    srv = ServidorControl(cfg, crear_puerto, bit, scope)
+
+    async def start_controlado(callback, *, path, limit, backlog, start_serving=True):
+        server = await start_original(callback, path=path, limit=limit, backlog=backlog,
+                                      start_serving=start_serving)
+        servidores.append(server)
+        if not start_serving:
+            iniciar_real = server.start_serving
+
+            async def detener_retorno():
+                await iniciar_real()
+                listo.set()
+                await liberar_start.wait()
+
+            server.start_serving = detener_retorno
+        else:
+            listo.set()  # la API vieja ya está aceptando aunque __aenter__ aún no recibió el Server
+            await liberar_start.wait()
+        return server
+
+    monkeypatch.setattr("jax.faro.control.asyncio.start_unix_server", start_controlado)
+
+    async def caso():
+        entrada = asyncio.create_task(srv.__aenter__())
+        try:
+            await asyncio.wait_for(listo.wait(), 2)
+            lector, escritor = await asyncio.open_unix_connection(str(cfg.ruta_socket))
+            escritor.write(json.dumps(PEDIDO).encode() + b"\n")
+            await escritor.drain()
+            try:
+                respuesta = await asyncio.wait_for(lector.readline(), 2)
+            except ConnectionResetError:
+                respuesta = b""
+            escritor.close()
+            with contextlib.suppress(ConnectionResetError):
+                await escritor.wait_closed()
+            assert respuesta == b""
+            assert creados == []
+            assert consultas == []
+            assert not _eventos(mundo.registros, "control_creado")
+            entrada.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await entrada
+            assert not cfg.ruta_socket.exists()
+            assert srv._tareas == set()
+            assert srv.ejecuciones == {}
+            assert srv._uids == {}
+            tercero = ScopeManager(cfg_scope)
+            token = await tercero.adquirir_instancia()
+            await tercero.liberar_instancia(token)
+        finally:
+            liberar_start.set()
+            if not entrada.done():
+                entrada.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await entrada
+            for server in servidores:
+                server.close()
+                await server.wait_closed()
+            for tarea in tuple(srv._tareas):
+                tarea.cancel()
+            if srv._tareas:
+                await asyncio.gather(*srv._tareas, return_exceptions=True)
+            if srv._ejecuciones:
+                with contextlib.suppress(BaseException):
+                    await srv.__aexit__(None, None, None)
+            cfg.ruta_socket.unlink(missing_ok=True)
+
+    corre(caso())
 
 
 @pytest.mark.parametrize("modo", [0o755, 0o751, 0o705, 0o770, 0o775, 0o777])
@@ -1032,8 +1245,9 @@ def test_shutdown_observa_fallo_de_cierre_terminado_antes_del_snapshot(mundo):
             self.entro.set()
             raise OSError("fallo antes del snapshot de shutdown")
 
-        async def liberar_instancia(self):
+        async def liberar_instancia(self, propietario):
             self.liberaciones_instancia += 1
+            await super().liberar_instancia(propietario)
 
     scope = ScopeFallaAlCerrar()
 

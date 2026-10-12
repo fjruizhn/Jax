@@ -227,12 +227,22 @@ class ServidorControl:
             raise ConfigFaroInvalida(
                 "sin el gestor de unidades (scope de 0.6) no hay canal de control: no se puede saber si un uid"
                 " de jaula sigue ocupado (R-2)")
+        metodos_scope = (
+            "adquirir_instancia", "liberar_instancia", "recuperar_leases", "cerrar_admision",
+            "esperar_limpiezas", "bloquear_uid", "cerrar_uid", "estado",
+        )
+        faltantes = [nombre for nombre in metodos_scope if not callable(getattr(scope_manager, nombre, None))]
+        if faltantes:
+            raise ConfigFaroInvalida(f"contrato de scope incompleto: faltan métodos callable {', '.join(faltantes)}")
         self._cfg = cfg
         self._crear_puerto = crear_puerto
         self._bitacora = bitacora
         self._credenciales = leer_credenciales
         self._scope = scope_manager
         self._servidor: asyncio.AbstractServer | None = None
+        self._admision_lista = False
+        self._propietario_instancia: object | None = None
+        self._identidad_socket: tuple[int, int] | None = None
         self._tareas: set[asyncio.Task] = set()
         self._ejecuciones: dict[str, ServidorPuerto] = {}
         self._uids: dict[int, str] = {}                 # uid de jaula -> run_id de la ejecucion viva que lo usa
@@ -255,26 +265,73 @@ class ServidorControl:
 
     async def __aenter__(self) -> "ServidorControl":
         self._validar_entorno()
-        adquirir_instancia = getattr(self._scope, "adquirir_instancia", None)
-        if callable(adquirir_instancia):
-            await adquirir_instancia()
-        recuperar = getattr(self._scope, "recuperar_leases", None)
+        propietario = await self._scope.adquirir_instancia()
+        if propietario is None:
+            raise ConfigFaroInvalida("contrato de scope: adquirir_instancia no devolvió token de ownership")
+        self._propietario_instancia = propietario
         try:
-            if callable(recuperar):
-                await recuperar()                     # lock de vida antes de recovery y socket
+            await self._scope.recuperar_leases()       # lock de vida antes de recovery y socket
             if os.path.lexists(self.ruta_socket):
                 raise FileExistsError(f"ya hay un socket de control: {self.ruta_socket}")
             self._servidor = await asyncio.start_unix_server(self._atender, path=str(self.ruta_socket),
-                                                             limit=self._cfg.max_pedido, backlog=socket.SOMAXCONN)
+                                                             limit=self._cfg.max_pedido, backlog=socket.SOMAXCONN,
+                                                             start_serving=False)
+            datos = self.ruta_socket.lstat()
+            if not stat.S_ISSOCK(datos.st_mode):
+                raise ConfigFaroInvalida("el bind de control no dejó un socket propio verificable")
+            self._identidad_socket = (datos.st_dev, datos.st_ino)
             os.chmod(self.ruta_socket, MODO_SOCKET_CONTROL)
+            await self._servidor.start_serving()
+            self._admision_lista = True
             return self
-        except BaseException:
-            liberar = getattr(self._scope, "liberar_instancia", None)
-            if callable(liberar):
-                await liberar()
+        except BaseException as original:  # fail-closed: rollback propio antes de devolver el error de entrada
+            self._admision_lista = False
+            errores: list[BaseException] = []
+            if self._servidor is not None:
+                self._servidor.close()
+                try:
+                    await self._servidor.wait_closed()
+                except BaseException as exc:  # fail-soft: cleanup failure is aggregated; lock is retained until rollback is certain
+                    errores.append(exc)
+                self._servidor = None
+            tareas = tuple(self._tareas)
+            for tarea in tareas:
+                tarea.cancel()
+            if tareas:
+                resultados = await asyncio.gather(*tareas, return_exceptions=True)
+                errores.extend(x for x in resultados if isinstance(x, BaseException)
+                               and not isinstance(x, asyncio.CancelledError))
+            try:
+                self._retirar_socket_propio()
+            except BaseException as exc:  # fail-soft: unlink uncertainty is surfaced and prevents releasing the owner lock
+                errores.append(exc)
+            if not errores:
+                try:
+                    await self._scope.liberar_instancia(propietario)
+                    self._propietario_instancia = None
+                except BaseException as exc:  # fail-soft: release failure is aggregated and exact owner remains recorded
+                    errores.append(exc)
+            if errores:
+                raise BaseExceptionGroup("falló rollback de inicio del canal Faro", [original, *errores])
             raise
 
+    def _retirar_socket_propio(self) -> None:
+        identidad = self._identidad_socket
+        if identidad is None:
+            return
+        try:
+            datos = self.ruta_socket.lstat()
+        except FileNotFoundError:
+            self._identidad_socket = None
+            return
+        if not stat.S_ISSOCK(datos.st_mode) or (datos.st_dev, datos.st_ino) != identidad:
+            self._identidad_socket = None
+            return
+        self.ruta_socket.unlink()
+        self._identidad_socket = None
+
     async def __aexit__(self, *_exc) -> None:
+        self._admision_lista = False
         self._scope.cerrar_admision()
         if self._servidor is not None:
             self._servidor.close()
@@ -299,22 +356,21 @@ class ServidorControl:
             cierres = list(self._cierres.items())
             try:
                 await self._scope.esperar_limpiezas()
-            except BaseException as exc:
+            except BaseException as exc:  # fail-soft: shutdown aggregates this cleanup failure and still drains every sister
                 errores.append(exc)
             resultados = await asyncio.gather(*(tarea for _, tarea in cierres), return_exceptions=True)
             errores.extend(x for x in resultados if isinstance(x, BaseException))
             for (uid, tarea) in cierres:
                 self._retirar_cierre(uid, tarea)
         finally:
-            try:
-                os.unlink(self.ruta_socket)
-            except FileNotFoundError:  # fail-soft: ya no está; el objetivo del cierre es que no exista
-                pass
+            self._retirar_socket_propio()
         if errores:
             raise BaseExceptionGroup("falló el cierre completo del canal Faro", errores)
-        liberar = getattr(self._scope, "liberar_instancia", None)
-        if callable(liberar):
-            await liberar()
+        self._retirar_socket_propio()
+        propietario = self._propietario_instancia
+        if propietario is not None:
+            await self._scope.liberar_instancia(propietario)
+            self._propietario_instancia = None
 
     # -- anotacion ------------------------------------------------------------------------------
     async def _rechazar(self, cred, motivo: str, escritor=None, **extra) -> None:
@@ -338,6 +394,8 @@ class ServidorControl:
         tarea = asyncio.current_task()
         self._tareas.add(tarea)
         try:
+            if not self._admision_lista:
+                return  # el finally cierra el par sin leerlo ni ejecutar una operación
             cred = self._credenciales(escritor)
             if cred is None or cred[1] != self._cfg.orquestador_uid:
                 # No se lee NADA de lo que mande y no se le responde: no es el orquestador.
@@ -377,7 +435,7 @@ class ServidorControl:
             if op == "cerrar":
                 try:
                     await self._responder(escritor, {"ok": False, "error": "cierre_incompleto"})
-                except Exception:
+                except Exception:  # fail-soft: peer disconnect only hides the response; cleanup failure was logged above
                     logger.debug("el par cerró antes de recibir estado de cierre incompleto")
         finally:
             self._tareas.discard(tarea)
@@ -430,7 +488,7 @@ class ServidorControl:
             await srv.__aenter__()
             await self._bitacora.registrar("control_creado", run_id=run_id, id_correlacion=id_correlacion, uid_jaula=uid,
                                            peer_uid=cred[1], **campos)
-        except BaseException as exc:
+        except BaseException as exc:  # fail-soft: the creation error stays primary while rollback closes any started Puerto
             self._uids.pop(uid, None)
             if srv is not None:
                 try:
@@ -472,9 +530,7 @@ class ServidorControl:
         if tarea is not None:
             # Una tarea terminada todavía puede tener un resultado no observado.
             return tarea
-        bloquear = getattr(self._scope, "bloquear_uid", None)
-        if callable(bloquear):
-            bloquear(uid)
+        self._scope.bloquear_uid(uid)
         tarea = asyncio.create_task(self._revocar_y_cerrar(uid, srv))
         self._cierres[uid] = tarea
         return tarea
@@ -489,12 +545,12 @@ class ServidorControl:
         errores: list[BaseException] = []
         try:
             await srv.__aexit__(None, None, None)
-        except BaseException as exc:
+        except BaseException as exc:  # fail-soft: UID stays retained and shutdown/caller receives the grouped failure
             errores.append(exc)
             logger.exception("no se pudo revocar el Puerto del uid %s", uid)
         try:
             await self._matar_y_soltar(uid)
-        except BaseException as exc:
+        except BaseException as exc:  # fail-soft: kill/lease failure remains aggregated and the UID stays retained
             errores.append(exc)
         if errores:
             raise BaseExceptionGroup(f"cierre incompleto del uid {uid}", errores)
