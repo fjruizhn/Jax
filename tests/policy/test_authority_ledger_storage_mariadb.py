@@ -2682,6 +2682,31 @@ def test_bootstrap_existing_genesis_without_external_anchors_requires_recovery()
             assert not checkpoints.path.exists()
 
 
+def test_storage_rejects_corrupt_stored_genesis_hash():
+    with _ephemeral_mariadb() as connect:
+        with connect() as admin:
+            _apply_migration(admin, MIGRATION)
+        staged = stage_authority_genesis(
+            encode_public_key(Ed25519PrivateKey.generate().public_key()), "bootstrap-test-corrupt",
+        )
+        with connect() as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO jax_authority.authority_ledger_genesis "
+                    "(singleton,canonical_genesis,genesis_hash) VALUES (1,%s,%s)",
+                    (staged.canonical_genesis, staged.genesis_hash),
+                )
+                cursor.execute("DROP TRIGGER jax_authority.no_update_genesis")
+                cursor.execute(
+                    "UPDATE jax_authority.authority_ledger_genesis SET genesis_hash=%s WHERE singleton=1",
+                    ("sha256:" + "0" * 64,),
+                )
+            admin.commit()
+        store = MariaDBAuthorityLedgerStore(lambda: connect(database="jax_authority"))
+        with pytest.raises(AuthorityStateError, match="hash almacenado"):
+            store.get_genesis()
+
+
 def test_bootstrap_inspection_real_absent_partial_and_limited_metadata():
     with _ephemeral_mariadb() as connect:
         with tempfile.TemporaryDirectory(prefix="jax-b4-inspect-") as directory:
@@ -2717,6 +2742,27 @@ def test_bootstrap_inspection_real_absent_partial_and_limited_metadata():
             finally:
                 limited.close()
             assert result.status is BootstrapInspectionStatus.INSPECTION_UNAVAILABLE
+
+
+def test_bootstrap_inspection_rejects_effective_schema_missing_required_trigger():
+    with _ephemeral_mariadb() as connect:
+        with connect() as admin:
+            _apply_migration(admin, MIGRATION)
+            with tempfile.TemporaryDirectory(prefix="jax-b4-schema-") as directory:
+                root = Path(directory)
+                candidate = inspect_authority_bootstrap(
+                    admin, trusted_root_path=root / "trusted-root", checkpoint_path=root / "checkpoint",
+                    receipt_path=root / "receipt", trusted_owner_uid=os.getuid(),
+                )
+                assert candidate.status is BootstrapInspectionStatus.CANDIDATE
+                with admin.cursor() as cursor:
+                    cursor.execute("DROP TRIGGER jax_authority.no_delete_authority_events")
+                admin.commit()
+                result = inspect_authority_bootstrap(
+                    admin, trusted_root_path=root / "trusted-root", checkpoint_path=root / "checkpoint",
+                    receipt_path=root / "receipt", trusted_owner_uid=os.getuid(),
+                )
+                assert result.status is BootstrapInspectionStatus.RECOVERY
 
 
 def test_provisioning_reader_tcp_is_exact_and_cannot_write():

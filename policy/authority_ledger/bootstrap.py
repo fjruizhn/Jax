@@ -60,6 +60,59 @@ _TABLES = (
     "authority_ledger_head",
 )
 
+_SCHEMA_COLUMNS = {
+    "authority_ledger_genesis": {
+        "singleton": ("tinyint", "NO"), "canonical_genesis": ("longblob", "NO"),
+        "genesis_hash": ("char", "NO"),
+    },
+    "authority_events": {
+        "sequence": ("bigint", "NO"), "event_id": ("char", "NO"),
+        "event_type": ("varchar", "NO"), "actor_id": ("varchar", "NO"),
+        "canonical_intent": ("longblob", "NO"), "canonical_event": ("longblob", "NO"),
+        "evidence_refs": ("longblob", "NO"), "previous_event_hash": ("char", "YES"),
+        "event_hash": ("char", "NO"), "signature": ("text", "NO"),
+        "recorded_at_utc": ("datetime", "NO"),
+    },
+    "authority_ledger_head": {
+        "singleton": ("tinyint", "NO"), "sequence": ("bigint", "NO"),
+        "head_event_id": ("char", "YES"), "head_event_hash": ("char", "YES"),
+    },
+}
+_SCHEMA_INDEXES = {
+    ("authority_ledger_genesis", "PRIMARY", 0),
+    ("authority_ledger_genesis", "genesis_hash", 0),
+    ("authority_events", "PRIMARY", 0),
+    ("authority_events", "event_id", 0),
+    ("authority_events", "event_hash", 0),
+    ("authority_ledger_head", "PRIMARY", 0),
+}
+_SCHEMA_TRIGGERS = {"no_update_authority_events", "no_delete_authority_events", "no_update_genesis", "no_delete_genesis"}
+
+
+def _schema_contract_error(cursor) -> str | None:
+    """Compare effective metadata with migration 001's required boundary."""
+    cursor.execute(
+        "SELECT table_name,column_name,data_type,is_nullable FROM information_schema.columns "
+        "WHERE table_schema=%s AND table_name IN (%s,%s,%s)",
+        ("jax_authority", *_TABLES),
+    )
+    actual_columns: dict[str, dict[str, tuple[str, str]]] = {table: {} for table in _TABLES}
+    for table, column, data_type, nullable in cursor.fetchall():
+        actual_columns.setdefault(table, {})[column] = (data_type.lower(), nullable)
+    if actual_columns != _SCHEMA_COLUMNS:
+        return "columnas/tipos/nullability no coinciden con migración 001"
+    cursor.execute(
+        "SELECT table_name,index_name,non_unique FROM information_schema.statistics "
+        "WHERE table_schema=%s AND table_name IN (%s,%s,%s) GROUP BY table_name,index_name,non_unique",
+        ("jax_authority", *_TABLES),
+    )
+    if {(table, name, int(non_unique)) for table, name, non_unique in cursor.fetchall()} != _SCHEMA_INDEXES:
+        return "índices efectivos no coinciden con migración 001"
+    cursor.execute("SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema=%s", ("jax_authority",))
+    if {row[0] for row in cursor.fetchall()} != _SCHEMA_TRIGGERS:
+        return "triggers efectivos no coinciden con migración 001"
+    return None
+
 
 def _artifact(path: Path, *, owner_uid: int | None) -> dict[str, Any]:
     try:
@@ -289,6 +342,9 @@ def inspect_authority_bootstrap(
                                            "schema Block 4 todavía no existe")
             return BootstrapInspection(BootstrapInspectionStatus.RECOVERY, database, artifacts,
                                        "schema Block 4 parcial o material externo preexistente")
+        contract_error = _schema_contract_error(cursor)
+        if contract_error is not None:
+            return BootstrapInspection(BootstrapInspectionStatus.RECOVERY, database, artifacts, contract_error)
         cursor.execute("SELECT canonical_genesis,genesis_hash FROM jax_authority.authority_ledger_genesis WHERE singleton=1")
         genesis = cursor.fetchone()
         cursor.execute("SELECT sequence,head_event_id,head_event_hash FROM jax_authority.authority_ledger_head WHERE singleton=1")

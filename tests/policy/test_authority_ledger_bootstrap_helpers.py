@@ -5,7 +5,8 @@ import os
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from policy.authority_ledger.bootstrap import (
-    BootstrapInspectionStatus, _write_root_exclusively, inspect_authority_bootstrap,
+    BootstrapInspectionStatus, _SCHEMA_COLUMNS, _SCHEMA_INDEXES, _SCHEMA_TRIGGERS,
+    _write_root_exclusively, inspect_authority_bootstrap,
     stage_authority_genesis,
 )
 from policy.authority_ledger.signatures import encode_public_key
@@ -16,13 +17,23 @@ class _Cursor:
         self.rows = iter(rows)
         self.closed = False
         self.schema_query = False
+        self.statement = ""
         self.schema_exists = schema_exists
 
     def execute(self, statement, *_args):
+        self.statement = statement
         self.schema_query = "information_schema.schemata" in statement
         return None
 
     def fetchall(self):
+        if "information_schema.columns" in self.statement:
+            return [(table, column, data_type, nullable)
+                    for table, columns in _SCHEMA_COLUMNS.items()
+                    for column, (data_type, nullable) in columns.items()]
+        if "information_schema.statistics" in self.statement:
+            return list(_SCHEMA_INDEXES)
+        if "information_schema.triggers" in self.statement:
+            return [(name,) for name in _SCHEMA_TRIGGERS]
         return next(self.rows)
 
     def fetchone(self):
