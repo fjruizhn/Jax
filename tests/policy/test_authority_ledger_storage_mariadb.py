@@ -66,6 +66,10 @@ from policy.authority_ledger.storage import (
 )
 from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
 from policy.authority_ledger.errors import AuthorityStateError, TrustedRootMismatchError
+from policy.authority_ledger.bootstrap import (
+    BootstrapInspectionStatus, initialize_staged_authority_ledger,
+    inspect_authority_bootstrap, stage_authority_genesis,
+)
 from tests.policy._sellos_de_prueba import rule_grant_intent
 from policy.authority_resolution.candidate_loader import load_validated_candidate
 from tests.policy.catalogo_pin import catalogo_del_pin
@@ -2613,6 +2617,106 @@ def test_provisioning_rejects_preexisting_principal_without_adopting_privileges(
                 cursor.execute(f"SHOW GRANTS FOR '{user}'@'localhost'")
                 grants = [row[0] for row in cursor.fetchall()]
     assert any("ALL PRIVILEGES" in grant for grant in grants)
+
+
+def test_bootstrap_first_init_exact_retry_and_different_stage_fail_closed():
+    """Exercise B4's actual MariaDB insert + external anchors in an isolated DB."""
+    with _ephemeral_mariadb() as connect:
+        with connect() as admin:
+            _apply_migration(admin, MIGRATION)
+        staged = stage_authority_genesis(
+            encode_public_key(Ed25519PrivateKey.generate().public_key()), "bootstrap-test-1",
+        )
+        with tempfile.TemporaryDirectory(prefix="jax-b4-bootstrap-") as directory:
+            directory_path = Path(directory)
+            checkpoints = TrustedCheckpointStore(
+                directory_path / "checkpoint.log",
+                bootstrap_receipt_path=directory_path / "receipt.json",
+            )
+            store = MariaDBAuthorityLedgerStore(lambda: connect(database="jax_authority"))
+            root_path = directory_path / "trusted-root.json"
+            initialize_staged_authority_ledger(
+                store, lambda: connect(database="jax_authority"), staged, staged.trusted_root,
+                checkpoints, trusted_root_path=root_path, trusted_root_owner_uid=os.getuid(),
+            )
+            assert store.get_genesis() == staged.genesis
+            # A completed exact attempt verifies; it never reinitializes.
+            initialize_staged_authority_ledger(
+                store, lambda: connect(database="jax_authority"), staged, staged.trusted_root,
+                checkpoints, trusted_root_path=root_path, trusted_root_owner_uid=os.getuid(),
+            )
+            different = stage_authority_genesis(
+                encode_public_key(Ed25519PrivateKey.generate().public_key()), "bootstrap-test-2",
+            )
+            with pytest.raises(ValueError, match="genesis existente difiere"):
+                initialize_staged_authority_ledger(
+                    store, lambda: connect(database="jax_authority"), different, different.trusted_root,
+                    checkpoints, trusted_root_path=root_path, trusted_root_owner_uid=os.getuid(),
+                )
+
+
+def test_bootstrap_existing_genesis_without_external_anchors_requires_recovery():
+    with _ephemeral_mariadb() as connect:
+        with connect() as admin:
+            _apply_migration(admin, MIGRATION)
+        staged = stage_authority_genesis(
+            encode_public_key(Ed25519PrivateKey.generate().public_key()), "bootstrap-test-partial",
+        )
+        with connect() as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO jax_authority.authority_ledger_genesis "
+                    "(singleton,canonical_genesis,genesis_hash) VALUES (1,%s,%s)",
+                    (staged.canonical_genesis, staged.genesis_hash),
+                )
+            admin.commit()
+        with tempfile.TemporaryDirectory(prefix="jax-b4-bootstrap-partial-") as directory:
+            path = Path(directory)
+            checkpoints = TrustedCheckpointStore(path / "checkpoint.log", bootstrap_receipt_path=path / "receipt.json")
+            store = MariaDBAuthorityLedgerStore(lambda: connect(database="jax_authority"))
+            with pytest.raises(ValueError, match="parcial"):
+                initialize_staged_authority_ledger(
+                    store, lambda: connect(database="jax_authority"), staged, staged.trusted_root,
+                    checkpoints, trusted_root_path=path / "trusted-root.json", trusted_root_owner_uid=os.getuid(),
+                )
+            assert not checkpoints.path.exists()
+
+
+def test_bootstrap_inspection_real_absent_partial_and_limited_metadata():
+    with _ephemeral_mariadb() as connect:
+        with tempfile.TemporaryDirectory(prefix="jax-b4-inspect-") as directory:
+            root = Path(directory)
+            with connect() as admin:
+                absent = inspect_authority_bootstrap(
+                    admin, trusted_root_path=root / "trusted-root", checkpoint_path=root / "checkpoint",
+                    receipt_path=root / "receipt", trusted_owner_uid=os.getuid(),
+                )
+                assert absent.status is BootstrapInspectionStatus.CANDIDATE
+                with admin.cursor() as cursor:
+                    cursor.execute("CREATE SCHEMA jax_authority")
+                admin.commit()
+                partial = inspect_authority_bootstrap(
+                    admin, trusted_root_path=root / "trusted-root", checkpoint_path=root / "checkpoint",
+                    receipt_path=root / "receipt", trusted_owner_uid=os.getuid(),
+                )
+                assert partial.status is BootstrapInspectionStatus.RECOVERY
+                password = secrets.token_urlsafe(24)
+                cursor = admin.cursor()
+                cursor.execute("CREATE USER 'limited_inspect'@'localhost' IDENTIFIED BY %s", (password,))
+                cursor.close()
+                admin.commit()
+            limited = pymysql.connect(
+                unix_socket=connect._socket_dir + "/mysqld.sock", user="limited_inspect", password=password,
+                autocommit=False, charset="utf8mb4",
+            )
+            try:
+                result = inspect_authority_bootstrap(
+                    limited, trusted_root_path=root / "trusted-root", checkpoint_path=root / "checkpoint",
+                    receipt_path=root / "receipt", trusted_owner_uid=os.getuid(),
+                )
+            finally:
+                limited.close()
+            assert result.status is BootstrapInspectionStatus.INSPECTION_UNAVAILABLE
 
 
 def test_provisioning_reader_tcp_is_exact_and_cannot_write():

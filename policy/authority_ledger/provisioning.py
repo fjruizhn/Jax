@@ -111,7 +111,7 @@ def provision_application_account(
         # A rollback is only best effort for drivers that buffered non-DCL work.
         try:
             connection.rollback()
-        except Exception:
+        except Exception:  # fail-soft: DCL outcome is unknown; re-raise original failure
             pass
         raise
     finally:

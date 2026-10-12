@@ -12,17 +12,23 @@ from policy.authority_ledger.signatures import encode_public_key
 
 
 class _Cursor:
-    def __init__(self, rows):
+    def __init__(self, rows, *, schema_exists=True):
         self.rows = iter(rows)
         self.closed = False
+        self.schema_query = False
+        self.schema_exists = schema_exists
 
-    def execute(self, *_args):
+    def execute(self, statement, *_args):
+        self.schema_query = "information_schema.schemata" in statement
         return None
 
     def fetchall(self):
         return next(self.rows)
 
     def fetchone(self):
+        if self.schema_query:
+            self.schema_query = False
+            return (1 if self.schema_exists else 0,)
         return next(self.rows)
 
     def close(self):
@@ -107,14 +113,17 @@ def test_inspection_accepts_only_exact_admin_absence_after_metadata_visibility(t
         args = (1146, "table missing")
 
     class Cursor(_Cursor):
-        def execute(self, *_args):
+        def execute(self, statement, *_args):
+            if "information_schema.schemata" in statement:
+                self.schema_query = True
+                return
             if self.closed:
                 raise MissingTable()
             self.closed = True
 
     class Connection:
         def cursor(self):
-            return Cursor([[]])
+            return Cursor([[]], schema_exists=False)
 
     result = inspect_authority_bootstrap(
         Connection(), trusted_root_path=tmp_path / "root", checkpoint_path=tmp_path / "check",

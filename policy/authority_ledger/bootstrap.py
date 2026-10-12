@@ -174,6 +174,9 @@ def initialize_staged_authority_ledger(
     generate keys, signatures, approvals, or receipts; failures after a
     durable write intentionally leave material for recovery inspection.
     """
+    from .replay import verify_authority_ledger
+    from .service import initialize_authority_ledger
+
     if staged.classification != "NOT_AUTHORITY":
         raise ValueError("stage Block 4 no es material de staging")
     recomputed = stage_authority_genesis(
@@ -182,6 +185,12 @@ def initialize_staged_authority_ledger(
     if staged != recomputed or approved_root != recomputed.trusted_root:
         raise ValueError("stage/root Block 4 no coinciden exactamente")
     expected = recomputed.canonical_genesis
+    root_path = Path(trusted_root_path)
+    external_paths = (root_path, checkpoint_store.path, checkpoint_store.bootstrap_receipt_path)
+    # lstat sees a dangling/symlink artifact as material too. Any material
+    # before the DB insert belongs to recovery, never a fresh bootstrap.
+    external_present = tuple(_artifact(path, owner_uid=trusted_root_owner_uid)["state"] != "ABSENT"
+                             for path in external_paths)
     connection = connection_factory()
     cursor = None
     try:
@@ -195,6 +204,8 @@ def initialize_staged_authority_ledger(
         if events or head != (0, None, None):
             raise ValueError("Block 4 no está vacío; requiere recovery")
         if row is None:
+            if any(external_present):
+                raise ValueError("material externo preexistente; requiere recovery")
             cursor.execute(
                 "INSERT INTO jax_authority.authority_ledger_genesis (singleton,canonical_genesis,genesis_hash) VALUES (1,%s,%s)",
                 (expected, recomputed.genesis_hash),
@@ -207,21 +218,25 @@ def initialize_staged_authority_ledger(
     except Exception:
         try:
             connection.rollback()
-        except Exception:
+        except Exception:  # fail-soft: rollback is only cleanup; original failure remains fail-closed
             pass
         raise
     finally:
         if cursor is not None:
             cursor.close()
         connection.close()
-    root_path = Path(trusted_root_path)
+    if row is not None:
+        if not all(external_present):
+            raise ValueError("bootstrap parcial existente; requiere recovery")
+        if _load_existing_root(root_path, owner_uid=trusted_root_owner_uid) != approved_root:
+            raise ValueError("trusted root existente difiere; requiere recovery")
+        verify_authority_ledger(store.get_genesis(), store.events(), approved_root, checkpoint_store)
+        return
     if root_path.exists():
         if _load_existing_root(root_path, owner_uid=trusted_root_owner_uid) != approved_root:
             raise ValueError("trusted root existente difiere; requiere recovery")
     else:
         _write_root_exclusively(root_path, approved_root, owner_uid=trusted_root_owner_uid)
-    from .service import initialize_authority_ledger
-    from .replay import verify_authority_ledger
     # A complete prior attempt is only retried through the existing verifier.
     # Missing only one external artifact remains a recovery case in that boundary.
     if checkpoint_store.path.exists() and checkpoint_store.bootstrap_receipt_path.exists():
@@ -250,6 +265,12 @@ def inspect_authority_bootstrap(
     try:
         cursor = connection.cursor()
         cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name=%s",
+            ("jax_authority",),
+        )
+        schema_exists = bool(cursor.fetchone()[0])
+        database["schema_exists"] = schema_exists
+        cursor.execute(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema=%s AND table_name IN (%s,%s,%s)",
             ("jax_authority", *_TABLES),
@@ -275,17 +296,20 @@ def inspect_authority_bootstrap(
         cursor.execute("SELECT COUNT(*) FROM jax_authority.authority_events")
         event_count = cursor.fetchone()[0]
         database.update({"genesis_present": genesis is not None, "head": head, "event_count": event_count})
-    except Exception as exc:
+    except Exception as exc:  # fail-soft: every inspection error returns INSPECTION_UNAVAILABLE
         code = getattr(exc, "args", (None,))[0]
         # 1049 (unknown database) and 1146 (missing table) mean absence only
         # after a successful metadata query.  1045/1142 and every unknown
         # exception are never allowed to masquerade as an empty ledger.
-        if metadata_visible and not found and code in {1049, 1146}:
+        if metadata_visible and not schema_exists and not found and code in {1049, 1146}:
             if {value["state"] for value in artifacts.values()} == {"ABSENT"}:
                 return BootstrapInspection(BootstrapInspectionStatus.CANDIDATE, database, artifacts,
                                            "schema Block 4 ausente y visibilidad administrativa confirmada")
             return BootstrapInspection(BootstrapInspectionStatus.RECOVERY, database, artifacts,
                                        "schema ausente con material externo preexistente")
+        if metadata_visible and schema_exists and code == 1146:
+            return BootstrapInspection(BootstrapInspectionStatus.RECOVERY, database, artifacts,
+                                       "schema Block 4 parcial; requiere recovery")
         database["error"] = type(exc).__name__
         return BootstrapInspection(BootstrapInspectionStatus.INSPECTION_UNAVAILABLE, database, artifacts,
                                    "no se pudo inspeccionar MariaDB Block 4")
