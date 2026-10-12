@@ -1,14 +1,16 @@
-# Traspaso — El Faro 0.6 / R-2
+# Handoff final de rebase — El Faro 0.6 / R-2
 
 - Fecha de apertura: 2026-10-09
 - Responsable: Codex, hall9000
 - Rama: `codex/faro-r2`
-- Actualizado: 2026-10-12
+- Archivado: 2026-10-12
 
 ## Estado vigente — 2026-10-12
 
-Este encabezado reemplaza los estados operativos anteriores de este archivo; las secciones fechadas que siguen se
-conservan como historia. R-2 no está completo, integrado ni desplegado.
+Este archivo archivado reemplaza el handoff activo y conserva sus secciones fechadas como historia. El artefacto de
+código R-2 fue reapilado sobre `origin/master@ecfe07f3c2760ed43f53e7d1e858dad8e864e7e1` y validado localmente con
+955 pruebas corridas. No está integrado, no tiene CI remota final ni está desplegado. El guard de #402 seguía
+pendiente al archivarlo; auditoría Tier 3 del SHA exacto, CI y guardas son compuertas antes de cualquier integración.
 
 - Fuente de código oficial observada: `origin/master@4e1a35a7db6861912d3f937b67468d2dee2b324e`. La producción viva
   está en `e9895512`; ninguno de los dos SHA acredita por sí mismo que Faro esté habilitado.
