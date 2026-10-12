@@ -154,6 +154,10 @@ class _UnidadAjena(Exception):
     """La unidad activa bajo el nombre de este uid NO es de esta llamada (perdio la carrera): no se mata."""
 
 
+class _ArranqueDetenido(Exception):
+    """El owner observó STOP antes de entregar el handle o someter la solicitud externa."""
+
+
 @dataclass
 class _ScopeHandle:
     uid: int
@@ -167,6 +171,19 @@ class _ScopeHandle:
     materialization_seen: bool = False
     finalize_task: asyncio.Task | None = None
     close_task: asyncio.Task | None = None
+
+
+@dataclass
+class _StartOwner:
+    uid: int
+    ready: asyncio.Future
+    delivered: asyncio.Event
+    stop: asyncio.Event
+    task: asyncio.Task | None = None
+    intento: str | None = None
+    sender_invoked: bool = False
+    proceso: object | None = None
+    caller_cancelled: bool = False
 
 
 def _validar_comando(comando: object) -> list[str]:
@@ -273,6 +290,7 @@ class ScopeManager:
         self._resultados_limpieza: dict[tuple[int, str], object] = {}
         self._arranques: set[asyncio.Task] = set()
         self._arranques_uid: dict[int, set[asyncio.Task]] = {}
+        self._start_owners: dict[asyncio.Task, _StartOwner] = {}
         self._uids_parando: set[int] = set()
         self._cerrando = False
         self._fd_instancia: int | None = None
@@ -327,6 +345,10 @@ class ScopeManager:
     async def liberar_instancia(self, propietario: object) -> None:
         if propietario is not self._token_instancia or self._fd_instancia is None:
             raise ScopeError("el caller no posee el lock exclusivo de instancia")
+        if self._adquisicion_instancia is not None or any(not tarea.done() for tarea in self._start_owners):
+            raise ScopeError("no se libera el lock mientras existan owners de arranque vivos")
+        if any(not tarea.done() for tarea in self._limpiezas):
+            raise ScopeError("no se libera el lock mientras existan limpiezas vivas")
         fd = self._fd_instancia
         cierre = asyncio.create_task(asyncio.to_thread(os.close, fd))
         cancelada = False
@@ -973,31 +995,88 @@ class ScopeManager:
 
     # -- arranque ---------------------------------------------------------------------------
     async def arrancar(self, uid: int, comando: Sequence[str]) -> object:
-        """Registra cada lanzamiento antes del primer await para que el cierre lo pueda cancelar y drenar."""
+        """Publica READY y transfiere al caller solo con DELIVERED; el owner sobrevive a su cancelación."""
         if self._cerrando:
             raise ScopeError("el gestor de unidades está cerrando; se rechazan nuevos arranques")
         if self._fd_instancia is None or self._token_instancia is None:
             raise ScopeError("arrancar requiere el lock de instancia adquirido previamente")
-        tarea = asyncio.current_task()
-        if tarea is None:
-            raise RuntimeError("arrancar requiere una tarea asyncio")
         if uid in self._uids_parando or uid in self._cuarentena:
             raise ScopeError(f"uid {uid} está en STOPPING; se conserva la cuarentena")
+        loop = asyncio.get_running_loop()
+        owner = _StartOwner(uid, loop.create_future(), asyncio.Event(), asyncio.Event())
+        owner.ready.add_done_callback(lambda futuro: futuro.exception() if not futuro.cancelled() else None)
+        tarea = asyncio.create_task(self._ejecutar_owner(owner, comando))
+        owner.task = tarea
+        self._start_owners[tarea] = owner
         self._arranques.add(tarea)
         self._arranques_uid.setdefault(uid, set()).add(tarea)
         try:
+            proceso = await asyncio.shield(owner.ready)
+        except asyncio.CancelledError:
+            owner.caller_cancelled = True
+            owner.stop.set()
+            raise
+        if owner.stop.is_set():
+            raise ScopeError(f"arranque de uid {uid} se detuvo antes de DELIVERED")
+        owner.delivered.set()
+        return proceso
+
+    async def _ejecutar_owner(self, owner: _StartOwner, comando: Sequence[str]) -> None:
+        tarea = asyncio.current_task()
+        try:
+            if owner.stop.is_set():
+                raise _ArranqueDetenido("STOP antes de recuperar leases")
             if not self._leases_recuperados:
                 await self.recuperar_leases()
-            if not await self._namespace_vacio(uid):
-                raise ScopeError(f"namespace de uid {uid} ocupado o no concluyente; no se admite arranque")
-            return await self._arrancar(uid, comando)
+            if owner.stop.is_set():
+                raise _ArranqueDetenido("STOP antes de consultar el namespace")
+            if not await self._namespace_vacio(owner.uid):
+                raise ScopeError(f"namespace de uid {owner.uid} ocupado o no concluyente; no se admite arranque")
+            if owner.stop.is_set():
+                raise _ArranqueDetenido("STOP tras consultar el namespace")
+            proceso = await self._arrancar(owner.uid, comando, owner=owner)
+            owner.proceso = proceso
+            if owner.stop.is_set():
+                assert owner.intento is not None
+                await self._limpiar_en_tarea(owner.uid, owner.intento, proceso)
+                raise _ArranqueDetenido("STOP antes de READY")
+            owner.ready.set_result(proceso)
+            entrega = asyncio.create_task(owner.delivered.wait())
+            parada = asyncio.create_task(owner.stop.wait())
+            try:
+                await asyncio.wait((entrega, parada), return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for espera in (entrega, parada):
+                    if not espera.done():
+                        espera.cancel()
+                await asyncio.gather(entrega, parada, return_exceptions=True)
+            if owner.stop.is_set() and not owner.delivered.is_set():
+                assert owner.intento is not None
+                await self._limpiar_en_tarea(owner.uid, owner.intento, proceso)
+        except _ArranqueDetenido as exc:
+            if not owner.ready.done():
+                if owner.caller_cancelled:
+                    owner.ready.set_result(None)
+                else:
+                    owner.ready.set_exception(ScopeError(str(exc)))
+        except BaseException as exc:
+            if owner.intento is not None and owner.sender_invoked:
+                self._resultados_limpieza[(owner.uid, owner.intento)] = exc
+            if owner.ready.done():
+                raise
+            if owner.caller_cancelled:
+                owner.ready.set_result(None)
+                raise
+            owner.ready.set_exception(exc)
         finally:
-            self._arranques.discard(tarea)
-            activos = self._arranques_uid.get(uid)
-            if activos is not None:
-                activos.discard(tarea)
-                if not activos:
-                    self._arranques_uid.pop(uid, None)
+            if tarea is not None:
+                self._start_owners.pop(tarea, None)
+                self._arranques.discard(tarea)
+                activos = self._arranques_uid.get(owner.uid)
+                if activos is not None:
+                    activos.discard(tarea)
+                    if not activos:
+                        self._arranques_uid.pop(owner.uid, None)
 
     def bloquear_uid(self, uid: int) -> None:
         """Sin punto de suspensión: evita nuevos starts antes de cualquier operación async."""
@@ -1031,12 +1110,15 @@ class ScopeManager:
         tarea_actual = asyncio.current_task()
         actuales.discard(tarea_actual)
         for tarea in actuales:
-            if not tarea.done():
-                tarea.cancel()
+            owner = self._start_owners.get(tarea)
+            if owner is not None:
+                owner.stop.set()
         if actuales:
-            resultados = await asyncio.gather(*actuales, return_exceptions=True)
-            errores = [r for r in resultados if isinstance(r, BaseException)
-                       and not isinstance(r, asyncio.CancelledError)]
+            hechos, pendientes = await asyncio.wait(actuales, timeout=self._plazo_drenaje_s())
+            if pendientes:
+                raise ScopeError(f"owner de arranque del uid {uid} no drenó; lease retenido")
+            resultados = await asyncio.gather(*hechos, return_exceptions=True)
+            errores = [r for r in resultados if isinstance(r, BaseException)]
             if errores:
                 raise BaseExceptionGroup(f"no se drenaron arranques del uid {uid}", errores)
         # Las tareas de cleanup pertenecen a attempts concretos; no se espera a otros UIDs.
@@ -1156,32 +1238,52 @@ class ScopeManager:
         if handle.drain_error is not None:
             raise ScopeError(f"stderr de uid {uid} no se pudo drenar tras cleanup seguro") from handle.drain_error
 
-    async def _arrancar(self, uid: int, comando: Sequence[str]) -> object:
+    async def _arrancar(self, uid: int, comando: Sequence[str], *, owner: _StartOwner | None = None) -> object:
         """Arranca la unidad del uid con `comando` (la elevacion + bwrap ya van dentro) y no la da por
         lista hasta VERIFICARLA activa, con los tres limites efectivos y con la DESCRIPTION de ESTE
         intento: la identidad es determinista, no se infiere por temporizacion ni por la vida del
         systemd-run propio. Lo arrancado y no verificado se mata SOLO si sigue llevando nuestra
-        Description; una unidad de otra ejecucion, jamas. La creacion del subproceso corre como TAREA
-        propia: una cancelacion nunca deja un hijo sin dueno — la limpieza termina el hijo (cierra la
-        ventana de creacion) y luego vigila por identidad, como tarea registrada que
-        `esperar_limpiezas` completa aunque la cancelacion se repita (MAJOR 2)."""
+        Description; una unidad de otra ejecucion, jamas. En el camino productivo, el owner de vida
+        completa no se cancela: conserva cada operación de disco/manager hasta handoff o cleanup."""
         intento = uuid.uuid4().hex
+        if owner is not None:
+            owner.intento = intento
         unidad = nombre_unidad_intento(uid, intento)
         completo = self.argv_arrancar(uid, comando, intento=intento)
         await self._reservar_lease(uid, intento)
+        if owner is not None and owner.stop.is_set():
+            await self._liberar_prepared_si_vacio(uid, intento)
+            raise _ArranqueDetenido("STOP tras acquire antes de consultar el namespace")
         if not await self._namespace_vacio(uid):
             await self._liberar_lease(uid, intento)  # PREPARED prueba que no se llamó a systemd-run.
             raise ScopeError(f"namespace de uid {uid} dejó de estar vacío antes del REQUESTED")
+        if owner is not None and owner.stop.is_set():
+            await self._liberar_prepared_si_vacio(uid, intento)
+            raise _ArranqueDetenido("STOP tras la segunda consulta del namespace")
         # Una consulta/lease persistidos como PREPARED prueban que la llamada externa
         # todavía no pudo empezar. Desde aquí toda incertidumbre queda en cuarentena.
+        if owner is not None and owner.stop.is_set():
+            await self._liberar_prepared_si_vacio(uid, intento)
+            raise _ArranqueDetenido("STOP antes de persistir REQUESTED")
         await self._transicionar_lease(uid, intento, LeaseStage.PREPARED, LeaseStage.REQUESTED)
-        creacion = asyncio.create_task(self._crear_systemd_run(
-            *completo, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE, env=entorno_consulta()))
+        if owner is not None and owner.stop.is_set():
+            await self._abortar_requested_no_enviado(owner)
+            raise _ArranqueDetenido("STOP tras fsync REQUESTED antes del envío")
+        creacion = None
         try:
-            proceso = await asyncio.shield(creacion)
+            if owner is not None:
+                owner.sender_invoked = True
+                proceso = await self._crear_systemd_run(
+                    *completo, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE, env=entorno_consulta())
+            else:
+                creacion = asyncio.create_task(self._crear_systemd_run(
+                    *completo, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE, env=entorno_consulta()))
+                proceso = await asyncio.shield(creacion)
         except asyncio.CancelledError:
-            await self._limpiar_cancelacion(uid, intento, creacion)
+            if creacion is not None:
+                await self._limpiar_cancelacion(uid, intento, creacion)
             raise
         except Exception as exc:
             tarea = asyncio.create_task(self._reconciliar_sin_handle(uid, intento))
@@ -1191,8 +1293,12 @@ class ScopeManager:
             except TimeoutError as espera:
                 raise ScopeError(f"{unidad} falló al crear y su efecto externo sigue en reconciliación; UID retenido") from espera
             if resultado is not True:
+                if owner is not None and owner.stop.is_set():
+                    raise _ArranqueDetenido("STOP tras envío ambiguo; lease REQUESTED retenido") from exc
                 raise ScopeError(f"{unidad} falló al crear y no se confirmó estado seguro") from exc
             self._limpiezas.discard(tarea)
+            if owner is not None and owner.stop.is_set():
+                raise _ArranqueDetenido("STOP tras reconciliar el envío fallido") from exc
             raise ScopeError(f"no se pudo lanzar {unidad}: {type(exc).__name__}") from exc
         self._registrar_handle(uid, intento, unidad, proceso)
         if getattr(proceso, "returncode", None) is not None:
@@ -1201,9 +1307,11 @@ class ScopeManager:
             # es de OTRA ejecucion: no se toca.
             motivo = await self._error(proceso)
             await self._limpiar_en_tarea(uid, intento, proceso)
+            if owner is not None and owner.stop.is_set():
+                raise _ArranqueDetenido("STOP tras recibir handle de un envío ambiguo")
             raise ScopeError(f"{unidad} no arranco: rc={proceso.returncode} {motivo}")
         try:
-            return await self._verificar(proceso, unidad, intento)
+            verificado = await self._verificar(proceso, unidad, intento)
         except asyncio.CancelledError:
             await self._limpiar_en_tarea(uid, intento, proceso)
             raise
@@ -1211,7 +1319,37 @@ class ScopeManager:
             raise ScopeError(str(exc)) from exc      # no se mata: la unidad activa es de otra ejecucion
         except Exception as exc:
             await self._limpiar_en_tarea(uid, intento, proceso)
+            if owner is not None and owner.stop.is_set():
+                raise _ArranqueDetenido("STOP durante verificación; cleanup del handle completado") from exc
             raise ScopeError(f"{unidad} no se pudo verificar ({exc})") from exc
+        if owner is not None and owner.stop.is_set():
+            await self._limpiar_en_tarea(uid, intento, proceso)
+            raise _ArranqueDetenido("STOP tras verificar el handle y antes de READY")
+        return verificado
+
+    async def _liberar_prepared_si_vacio(self, uid: int, intento: str) -> None:
+        if not await self._namespace_vacio(uid):
+            self._cuarentena[uid] = "PREPARED detenido con namespace no vacío"
+            raise ScopeError(f"PREPARED detenido para uid {uid} sin prueba de namespace vacío")
+        await self._liberar_lease(uid, intento)
+
+    async def _abortar_requested_no_enviado(self, owner: _StartOwner) -> None:
+        """Solo el owner exacto, antes de invocar sender, puede retirar su REQUESTED no enviado."""
+        if (owner.task is not asyncio.current_task() or owner.sender_invoked or owner.intento is None
+                or self._start_owners.get(owner.task) is not owner):
+            raise ScopeError("solo el owner vivo puede abortar REQUESTED antes de invocar sender")
+        if self._leases is None:
+            raise ScopeError("falta el almacén durable de leases R-2")
+        lease = await asyncio.to_thread(self._leases.read, owner.uid)
+        if lease.attempt_id != owner.intento:
+            raise ScopeError("el lease cambió antes del abort exacto no enviado")
+        if lease.stage is LeaseStage.PREPARED:
+            await self._liberar_prepared_si_vacio(owner.uid, owner.intento)
+            return
+        if lease.stage is not LeaseStage.REQUESTED:
+            raise ScopeError(f"{lease.stage.value} no se puede abortar como no enviado")
+        await asyncio.to_thread(self._leases._abort_unsubmitted, owner.uid, owner.intento)
+        self._uids_parando.discard(owner.uid)
 
     async def _verificar(self, proceso, unidad: str, intento: str) -> object:
         fin = time.monotonic() + self._cfg.plazo_arranque_s
@@ -1310,6 +1448,10 @@ class ScopeManager:
                 return False
             await self._liberar_lease(uid, intento)
             self._handles.pop(uid, None)
+            self._cuarentena.pop(uid, None)
+            for clave in tuple(self._resultados_limpieza):
+                if clave == (uid, intento):
+                    self._resultados_limpieza.pop(clave, None)
             if handle.drain_error is not None:
                 raise ScopeError(f"stderr del cliente de uid {uid} no se pudo drenar") from handle.drain_error
         return seguro
@@ -1419,17 +1561,21 @@ class ScopeManager:
         return res["Description"] if res is not None else None
 
     async def esperar_limpiezas(self) -> None:
-        """Cierra admisión, cancela y drena lanzamientos activos, y no absorbe limpiezas inciertas."""
+        """Cierra admisión, señala STOP a owners y los drena sin cancelar sus I/O."""
         self.cerrar_admision()
         plazo = max(self._cfg.plazo_arranque_s * 2 + self._plazo_consulta_s, self._plazo_consulta_s)
         actual = asyncio.current_task()
-        arranques = [t for t in self._arranques if t is not actual and not t.done()]
+        arranques = [t for t in self._start_owners if t is not actual and not t.done()]
         for tarea in arranques:
-            tarea.cancel()
+            self._start_owners[tarea].stop.set()
         if arranques:
-            _, pendientes = await asyncio.wait(arranques, timeout=plazo)
+            hechos, pendientes = await asyncio.wait(arranques, timeout=plazo)
             if pendientes:
-                raise ScopeError("lanzamientos activos no terminaron su cancelación; apagado queda incompleto")
+                raise ScopeError("owners de arranque no completaron STOP/cleanup; apagado queda incompleto")
+            resultados = await asyncio.gather(*hechos, return_exceptions=True)
+            errores_owner = [r for r in resultados if isinstance(r, BaseException)]
+            if errores_owner:
+                raise BaseExceptionGroup("fallaron owners durante STOP/cleanup", errores_owner)
 
         while self._limpiezas:
             tareas = tuple(self._limpiezas)

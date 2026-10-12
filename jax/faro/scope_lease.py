@@ -387,6 +387,31 @@ class LeaseStore:
                 raise LeaseStoreError(f"no se pudo persistir transicion del uid {uid}") from exc
         return nuevo
 
+    def _abort_unsubmitted(self, uid: int, attempt_id: str) -> None:
+        """CAS privado del REQUESTED no enviado, invocable solo por el owner vivo del ScopeManager.
+
+        El store no ofrece un argumento booleano de caller que pueda falsificarse: ScopeManager
+        comprueba identidad de tarea y que su sender aún no se invocó antes de llegar aquí.
+        """
+        uid = _validar_uid(uid)
+        _validar_texto("attempt_id", attempt_id)
+        nombre = _nombre(uid)
+        with self._directory_abierto(exclusivo=True) as directorio_fd:
+            lease, antes = self._leer_archivo(directorio_fd, nombre)
+            if lease.attempt_id != attempt_id or lease.stage is not LeaseStage.REQUESTED:
+                raise LeaseStoreConflict("abort no enviado no coincide con REQUESTED del attempt esperado")
+            try:
+                ahora = os.stat(nombre, dir_fd=directorio_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise LeaseStoreCorrupt(f"no se pudo comprobar {nombre!r} antes de abortar") from exc
+            if (ahora.st_dev, ahora.st_ino, ahora.st_nlink) != (antes.st_dev, antes.st_ino, antes.st_nlink):
+                raise LeaseStoreCorrupt(f"{nombre!r} cambio antes del abort no enviado")
+            try:
+                os.unlink(nombre, dir_fd=directorio_fd)
+            except OSError as exc:
+                raise LeaseStoreError(f"no se pudo abortar REQUESTED no enviado para uid {uid}") from exc
+            self._fsync_directorio(directorio_fd)
+
     def all(self) -> tuple[ScopeLease, ...]:
         """Devuelve todos los leases validados; una entrada inesperada falla cerrado."""
         with self._directory_abierto(exclusivo=False) as directorio_fd:

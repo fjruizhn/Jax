@@ -138,7 +138,8 @@ class ProcFalso:
     def returncode(self) -> int | None:
         if self._argv[0].endswith("systemd-run") and self._rc == 0:
             unidad = self._sistema.unidad_de_argv(self._argv)
-            if unidad in self._sistema.trabajos:
+            unidad_solicitada = next((arg.split("=", 1)[1] for arg in self._argv if arg.startswith("--unit=")), None)
+            if unidad in self._sistema.trabajos or unidad_solicitada in self._sistema.trabajos:
                 return None
             if unidad is not None and self._sistema.viva(unidad):
                 return None                            # --pipe: no termina antes que el servicio
@@ -351,7 +352,7 @@ async def _cerrar_gestores_prueba(sistema) -> None:
     for g in reversed(sistema.gestores_prueba):
         try:
             await g.esperar_limpiezas()
-        except ScopeError:
+        except ScopeError:  # fail-soft: fixture preserves deliberate quarantine and still releases only its own instance token
             # Estas regresiones dejan deliberadamente una cuarentena no concluyente; el
             # intento queda retenido por el contrato y el fixture sólo debe soltar su lock.
             pass
@@ -658,6 +659,170 @@ def test_cancelar_adquisicion_de_instancia_espera_worker_y_no_deja_fd_ni_flock(t
         tercero = ScopeManager(cfg)
         token = await tercero.adquirir_instancia()
         await tercero.liberar_instancia(token)
+
+    correr(caso())
+
+
+def test_shutdown_drena_acquire_cancelado_dos_veces_antes_de_reconciliar_lease(sistema):
+    """El hilo real de LeaseStore.acquire no puede sobrevivir a shutdown sin owner/reconciliación."""
+    async def caso():
+        g = gestor(sistema)
+        await g.adquirir_instancia()
+        store = g._leases
+        adquirir_real = store.acquire
+        iniciado, continuar, terminado = threading.Event(), threading.Event(), threading.Event()
+
+        def adquirir_bloqueado(uid, intento, unidad):
+            iniciado.set()
+            if not continuar.wait(timeout=3):
+                raise TimeoutError("el test no liberó el worker de acquire")
+            try:
+                return adquirir_real(uid, intento, unidad)
+            finally:
+                terminado.set()
+
+        store.acquire = adquirir_bloqueado
+        arranque = asyncio.create_task(g.arrancar(UID, ["/usr/bin/true"]))
+        assert await asyncio.to_thread(iniciado.wait, 2)
+        arranque.cancel()
+        await asyncio.sleep(0)
+        arranque.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await arranque
+
+        apagado = asyncio.create_task(g.esperar_limpiezas())
+        await asyncio.sleep(0)
+        shutdown_termino_antes_del_worker = apagado.done()
+        tercero = ScopeManager(g._cfg, lease_store=LeaseStore(sistema.lease_dir))
+        lock_retenido = False
+        try:
+            with pytest.raises(ScopeError, match="owners de arranque vivos"):
+                await g.liberar_instancia(sistema.tokens_instancia[g])
+            with pytest.raises(ScopeError, match="instancia única"):
+                await tercero.adquirir_instancia()
+            lock_retenido = True
+        finally:
+            continuar.set()
+        assert await asyncio.to_thread(terminado.wait, 2)
+        await asyncio.wait_for(apagado, 2)
+        assert sistema.intentos == []
+        assert not shutdown_termino_antes_del_worker, "shutdown terminó mientras LeaseStore.acquire seguía ejecutándose"
+        assert lock_retenido
+        assert store.all() == ()  # PREPARED no enviado se reconcilia antes de devolver shutdown
+
+    correr(caso())
+
+
+def test_cancelacion_en_transicion_a_requested_no_deja_lease_sin_envio_ni_arranca_engine(sistema):
+    """Cancelar durante el fsync PREPARED→REQUESTED conserva NOT_SUBMITTED causal, no un REQUESTED huérfano."""
+    async def caso():
+        g = gestor(sistema)
+        await g.adquirir_instancia()
+        store = g._leases
+        transicionar_real = store.transition
+        iniciada, continuar, terminada = threading.Event(), threading.Event(), threading.Event()
+
+        def transicion_bloqueada(uid, intento, desde, hacia, **kw):
+            bloqueada = getattr(desde, "value", desde) == "PREPARED" and getattr(hacia, "value", hacia) == "REQUESTED"
+            if bloqueada:
+                iniciada.set()
+                if not continuar.wait(timeout=3):
+                    raise TimeoutError("el test no liberó la transición durable")
+            try:
+                return transicionar_real(uid, intento, desde, hacia, **kw)
+            finally:
+                if bloqueada:
+                    terminada.set()
+
+        store.transition = transicion_bloqueada
+        enviado = []
+        crear_real = g._crear_systemd_run
+
+        async def registrar_envio(*argv, **kw):
+            enviado.append(tuple(argv))
+            return await crear_real(*argv, **kw)
+
+        g._crear_systemd_run = registrar_envio
+        arranque = asyncio.create_task(g.arrancar(UID, ["/usr/bin/true"]))
+        assert await asyncio.to_thread(iniciada.wait, 2)
+        arranque.cancel()
+        await asyncio.sleep(0)
+        arranque.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await arranque
+
+        apagado = asyncio.create_task(g.esperar_limpiezas())
+        await asyncio.sleep(0)
+        shutdown_termino_antes_de_transicion = apagado.done()
+        continuar.set()
+        assert await asyncio.to_thread(terminada.wait, 2)
+        await asyncio.wait_for(apagado, 2)
+        leases = store.all()
+        assert not shutdown_termino_antes_de_transicion, "shutdown olvidó la transición durable que seguía en vuelo"
+        assert not enviado and not sistema.intentos
+        assert not leases or all(lease.stage.value != "REQUESTED" for lease in leases)
+
+    correr(caso())
+
+
+def test_cancelacion_durante_segunda_consulta_namespace_aborta_prepared_sin_submeter(sistema):
+    """STOP mientras se confirma el namespace posterior al lease no deja PREPARED huérfano ni llega a systemd."""
+    async def caso():
+        g = gestor(sistema)
+        await g.adquirir_instancia()
+        consulta_real = g._namespace_vacio
+        segunda_iniciada, continuar = asyncio.Event(), asyncio.Event()
+        llamadas = 0
+
+        async def namespace_bloqueado(uid):
+            nonlocal llamadas
+            llamadas += 1
+            if llamadas == 2:
+                segunda_iniciada.set()
+                await continuar.wait()
+            return await consulta_real(uid)
+
+        g._namespace_vacio = namespace_bloqueado
+        arranque = asyncio.create_task(g.arrancar(UID, ["/usr/bin/true"]))
+        await asyncio.wait_for(segunda_iniciada.wait(), 2)
+        arranque.cancel()
+        await asyncio.sleep(0)
+        arranque.cancel()
+        continuar.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await arranque
+        await g.esperar_limpiezas()
+
+        assert llamadas >= 2
+        assert sistema.intentos == [] and sistema.arrancados == []
+        assert g._leases.all() == ()  # owner observó STOP antes de REQUESTED y retiró el lease no enviado
+
+    correr(caso())
+
+
+def test_cancelacion_tras_ready_antes_de_delivered_contiene_handle_y_no_devuelve_exito(sistema):
+    """READY no transfiere ownership: cancelar antes de DELIVERED hace que el owner limpie la unidad exacta."""
+    async def caso():
+        g = gestor(sistema)
+        await g.adquirir_instancia()
+        arranque = asyncio.create_task(g.arrancar(UID, ["/usr/bin/true"]))
+        verificar_real = g._verificar
+
+        async def verificar_y_cancelar_antes_de_delivery(proceso, unidad, intento):
+            resultado = await verificar_real(proceso, unidad, intento)
+            # Se ejecuta después de que READY se publica (sin await intermedio del owner),
+            # y antes de que el wrapper reciba el resultado y marque DELIVERED.
+            asyncio.get_running_loop().call_soon(arranque.cancel)
+            return resultado
+
+        g._verificar = verificar_y_cancelar_antes_de_delivery
+        with pytest.raises(asyncio.CancelledError):
+            await arranque
+        await g.esperar_limpiezas()
+        assert sistema.muertes == [UNIDAD]
+        assert sistema.intentos == [UNIDAD]
+        assert g._leases.all() == ()
+        assert UID not in g._handles
 
     correr(caso())
 
@@ -1529,11 +1694,13 @@ def test_major2_cancelada_la_creacion_del_subproceso_la_unidad_nacida_se_limpia(
         tarea = asyncio.create_task(g.arrancar(UID, ["/usr/bin/true"]))
         await asyncio.wait_for(adentro.wait(), 2)
         tarea.cancel()
+        await asyncio.sleep(0)
         devolver_handle.set()                                    # el spawn termina; cleanup debe matar la unidad
         try:
             await tarea
         except asyncio.CancelledError:  # fail-soft: cancellation is the expected assertion after cleanup was scheduled
             pass
+        await g.esperar_limpiezas()
         return sistema.muertes, await g.estado(UID)
     muertes, estado = corre_con_plazo(caso())
     assert muertes == [UNIDAD]                         # la unidad nacida de nuestro intento, muerta
@@ -1586,7 +1753,7 @@ def test_major2_handle_entregado_job_ausente_y_materializacion_posterior_se_reap
 
     async def caso():
         g = gestor(sistema, cfg=cfg)
-        spawn_retorno, materializar = asyncio.Event(), asyncio.Event()
+        spawn_retorno, entregar_handle, materializar = asyncio.Event(), asyncio.Event(), asyncio.Event()
         argv_arranque = []
 
         async def crear_con_job(*argv, **kw):
@@ -1595,6 +1762,7 @@ def test_major2_handle_entregado_job_ausente_y_materializacion_posterior_se_reap
                 unidad, _, _ = sistema._parsear_run(argv)
                 sistema.trabajos[unidad] = ("417", "start", "waiting")
                 spawn_retorno.set()
+                await entregar_handle.wait()
                 return ProcFalso(sistema, argv)            # handle entregado; unidad aún not-found
             return await sistema.crear_proceso(*argv, **kw)
 
@@ -1605,6 +1773,8 @@ def test_major2_handle_entregado_job_ausente_y_materializacion_posterior_se_reap
         await asyncio.wait_for(spawn_retorno.wait(), 2)
         assert await g.estado(UID) is EstadoUnidad.UNKNOWN  # el job impide declarar EMPTY
         tarea.cancel()
+        await asyncio.sleep(0)
+        entregar_handle.set()
         async def job_del_manager():
             await materializar.wait()
             unidad, props, comando = sistema._parsear_run(argv_arranque)
@@ -1617,11 +1787,11 @@ def test_major2_handle_entregado_job_ausente_y_materializacion_posterior_se_reap
             await tarea
         await job
         await g.esperar_limpiezas()
-        return sistema.muertes, await g.estado(UID)
+        return sistema.muertes, await g.estado(UID), g._leases.all(), g._cuarentena
 
-    muertes, estado = corre_con_plazo(caso())
+    muertes, estado, leases, cuarentenas = corre_con_plazo(caso())
     assert muertes == [UNIDAD]
-    assert estado is EstadoUnidad.EMPTY
+    assert estado is EstadoUnidad.EMPTY, (leases, cuarentenas)
 
 
 def test_apagado_cierra_admision_y_falla_acotado_si_spawn_no_entrega_handle(sistema):
@@ -1643,13 +1813,13 @@ def test_apagado_cierra_admision_y_falla_acotado_si_spawn_no_entrega_handle(sist
         assert sistema.tokens_instancia[g] is token
         arranque = asyncio.create_task(g.arrancar(UID, ["/usr/bin/true"]))
         await asyncio.wait_for(iniciado.wait(), 1)
-        with pytest.raises(ScopeError, match="no terminaron|siguen en vuelo"):
+        with pytest.raises(ScopeError, match="owners de arranque|siguen en vuelo"):
             await g.esperar_limpiezas()
-        assert len(g._limpiezas) == 1  # el lanzamiento cancelado quedó bajo un reaper propio
+        assert any(not owner.done() for owner in g._start_owners)  # el owner conserva el spawn aún sin handle
         with pytest.raises(ScopeError, match="está cerrando"):
             await arrancar_con_instancia_adquirida(g, UID + 1, ["/usr/bin/true"])
         liberar.set()
-        with pytest.raises(ScopeError, match="sigue en curso"):
+        with pytest.raises(ScopeError, match="STOP"):
             await asyncio.wait_for(arranque, 1)
         await g.esperar_limpiezas()
         return await g.estado(UID), sistema.muertes
@@ -1730,9 +1900,8 @@ def test_cancelacion_con_spawn_sin_handle_conserva_lease(sistema):
             await arranque
         leases = LeaseStore(sistema.lease_dir).all()
         assert len(leases) == 1
-        for t in tuple(g._limpiezas):
-            t.cancel()
-        await asyncio.gather(*tuple(g._limpiezas), return_exceptions=True)
+        with pytest.raises(ScopeError, match="limpiezas"):
+            await g.esperar_limpiezas()
         return sistema.muertes, leases
 
     muertes, leases = corre_con_plazo(caso())
