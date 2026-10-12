@@ -9,23 +9,31 @@
 
 Actualización final local: el artefacto R-2 sigue sin integrar, CI remota final ni despliegue. Sobre
 `origin/master@ecfe07f3c2760ed43f53e7d1e858dad8e864e7e1` (Jax#402 ya fusionado; post-merge guard SUCCESS,
-run `38272779602`), la selección exacta Python 3.14 pasó **965 passed, 6 deselected**, 61.31 s
+run `38272779602`), la selección exacta Python 3.14 pasó **965 passed, 6 deselected**, 60.92 s
 (`/tmp/faro-r2-integrated-py314-20261012-depack-final3.log`). Jaula real: **12 passed**
 (`/tmp/faro-r2-faro-jaula-20261012-depack-final2.log`); integración systemd: **6 passed, 163 deselected**
-(`/tmp/faro-r2-systemd-integration-20261012-depack-final2.log`); Hyde: **21 passed**; cableado: **7 passed**.
+(`/tmp/faro-r2-systemd-integration-20261012-depack-final3.log`); Hyde: **21 passed**; cableado: **7 passed**.
 La revisión dirigida Tier 3 cerró 0 BLOCK y 0 MAJOR; su MINOR de lifecycle del fixture fue corregido y la
 selección se repitió. Falta la auditoría integral del SHA que contiene esta actualización, CI exacta remota,
 PR, integración y su guard; por ello esto no acredita producción.
 
-La recuperación R-2 incluye cuatro arranques y dos cierres explícitos. El primer intento de #219 fue
-RECHAZADO y su PR remoto #403 quedó cancelado; no es evidencia de fallo intermitente. La prueba real de UID
+La recuperación R-2 incluye cuatro arranques y dos cierres explícitos. El SHA `2190d868` fue rechazado en
+la revisión previa; el PR remoto #403 sigue OPEN. Sólo la corrida de policy `38274641830` sobre ese head quedó
+CANCELLED después del fallo del scanner y el rechazo; no es evidencia de fallo intermitente. La prueba real de UID
 heredado confirma origen desconocido como estado de prueba, no "flaky". En B4 productivo el esquema admin
 sigue ABSENT: el 1142 previo no acreditó esquema; el usuario exacto y la raíz externa aún requieren procedencia
 humana. Se verificó fuera del repositorio una restauración aislada del backup de despliegue (misma imagen MariaDB,
 93 tablas y 37 triggers; salida 0); no hubo mutación productiva ni se registran tokens o volcados sensibles aquí.
 
-Este archivo archivado reemplaza el handoff activo y conserva sus secciones fechadas como historia. El artefacto de
-código R-2 fue reapilado sobre `origin/master@ecfe07f3c2760ed43f53e7d1e858dad8e864e7e1` y validado localmente con
+El snapshot de #402 ahora es histórico de base: su merge es `ecfe07f3`; el head reapilado `aeb3ab10` recibió
+auditoría completa APROBADO y 33 checks verdes, seguido por el guard SUCCESS citado arriba. Esto no integra R-2
+ni modifica sus compuertas propias.
+
+## Historia previa al SHA `2190d868`
+
+Las entradas que siguen son snapshots de sus fechas de observación; no describen autoridad ni estado actual. Este
+archivo archivado conserva esas secciones sin reescribirlas. El artefacto de código R-2 fue reapilado sobre
+`origin/master@ecfe07f3c2760ed43f53e7d1e858dad8e864e7e1` y validado localmente con
 955 pruebas corridas. No está integrado, no tiene CI remota final ni está desplegado. El guard de #402 seguía
 pendiente al archivarlo; auditoría Tier 3 del SHA exacto, CI y guardas son compuertas antes de cualquier integración.
 
