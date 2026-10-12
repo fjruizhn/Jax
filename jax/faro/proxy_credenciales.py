@@ -38,7 +38,7 @@ def _credenciales_del_par(writer: asyncio.StreamWriter) -> tuple[int, int, int] 
 _MAX_CABECERA = 64 * 1024
 _MAX_CUERPO = 1024 * 1024
 _HOP = {b"connection", b"keep-alive", b"proxy-authenticate", b"proxy-authorization", b"te", b"trailer", b"transfer-encoding", b"upgrade"}
-_SECRETOS = _HOP | {b"cookie", b"set-cookie", b"authorization"}
+_SECRETOS = _HOP | {b"cookie", b"set-cookie", b"authorization", b"x-api-key", b"api-key"}
 
 
 @dataclass(frozen=True)

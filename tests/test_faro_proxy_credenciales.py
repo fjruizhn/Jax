@@ -55,11 +55,13 @@ def _cfg(tmp_path: Path, upstream: str, **extra) -> ConfigProxyCredenciales:
     token = tmp_path / "token"
     token.write_text("token-prueba\n", encoding="utf-8")
     os.chmod(token, 0o400)
+    uid = extra.pop("uid_esperado", os.geteuid())
+    mismo_uid = extra.pop("solo_pruebas_mismo_uid", True)
     return ConfigProxyCredenciales(
         ruta_socket=tmp_path / "run.proxy.sock",
         ruta_token=token,
-        uid_esperado=os.geteuid(),
-        solo_pruebas_mismo_uid=True,
+        uid_esperado=uid,
+        solo_pruebas_mismo_uid=mismo_uid,
         perfil=PerfilCredencial("claude", upstream, "/v1/messages", "clave-real-de-prueba", frozenset({"POST"}), frozenset({"modelo-prueba"})),
         **extra,
     )
@@ -116,16 +118,34 @@ def test_freno_puesto_no_contacta_upstream(tmp_path):
     assert _correr(escenario()) == (423, 0)
 
 
+def test_uid_distinto_se_cierra_antes_de_leer_token_o_contactar_upstream(tmp_path):
+    async def escenario():
+        async with Upstream() as up:
+            cfg = _cfg(tmp_path, up.url, uid_esperado=os.geteuid() + 1, solo_pruebas_mismo_uid=False)
+            async with ServidorProxyCredenciales(cfg) as proxy:
+                reader, writer = await asyncio.open_unix_connection(str(proxy.ruta_socket))
+                writer.write(b"FARO-TOKEN token-prueba\nPOST /v1/messages HTTP/1.1\r\n\r\n")
+                await writer.drain()
+                try:
+                    datos = await reader.read(1)
+                except ConnectionResetError:
+                    datos = b""
+                writer.close()
+                return datos, len(up.recibidas)
+    assert _correr(escenario()) == (b"", 0)
+
+
 def test_no_reenvia_cookie_autorizacion_ni_devuelve_set_cookie(tmp_path):
     async def escenario():
         async with Upstream() as up:
             async with ServidorProxyCredenciales(_cfg(tmp_path, up.url)) as proxy:
-                r, _ = await _pedir(proxy, modelo="modelo-prueba", cabeceras=[("cookie", "cliente=secreto"), ("authorization", "Bearer ajena")])
+                r, _ = await _pedir(proxy, modelo="modelo-prueba", cabeceras=[("cookie", "cliente=secreto"), ("authorization", "Bearer ajena"), ("x-api-key", "ajena")])
                 return r, up.recibidas[0]
     respuesta, req = _correr(escenario())
     cabeceras = dict(req.headers)
     assert respuesta.status_code == 200
     assert b"set-cookie" not in dict(respuesta.headers)
     assert b"cookie" not in cabeceras
+    assert b"x-api-key" not in cabeceras
     assert cabeceras[b"authorization"] == b"Bearer clave-real-de-prueba"
 
