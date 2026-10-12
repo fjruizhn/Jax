@@ -17,8 +17,9 @@ from jax.faro.proxy_credenciales import ConfigProxyCredenciales, ServidorProxyCr
 
 
 class Upstream:
-    def __init__(self):
+    def __init__(self, status=200):
         self.recibidas = []
+        self.status = status
 
     async def __aenter__(self):
         self.server = await asyncio.start_server(self._atender, "127.0.0.1", 0)
@@ -44,7 +45,7 @@ class Upstream:
             elif isinstance(ev, (h11.EndOfMessage, h11.ConnectionClosed)):
                 break
         self.recibidas.append(req)
-        writer.write(conn.send(h11.Response(status_code=200, headers=[("set-cookie", "sesion=secreta"), ("content-length", "2")])))
+        writer.write(conn.send(h11.Response(status_code=self.status, headers=[("set-cookie", "sesion=secreta"), ("location", "https://no-debe-seguirse.invalid"), ("content-length", "2")])))
         writer.write(conn.send(h11.Data(data=b"ok")))
         writer.write(conn.send(h11.EndOfMessage()))
         await writer.drain()
@@ -71,12 +72,12 @@ def _correr(coro):
     return asyncio.run(asyncio.wait_for(coro, 10))
 
 
-async def _pedir(proxy, *, modelo: str, cabeceras=()):
+async def _pedir(proxy, *, modelo: str, cabeceras=(), metodo="POST", destino="/v1/messages"):
     reader, writer = await asyncio.open_unix_connection(str(proxy.ruta_socket))
     conn = h11.Connection(h11.CLIENT)
     cuerpo = (f'{{"model":"{modelo}"}}').encode()
     writer.write(b"FARO-TOKEN token-prueba\n")
-    writer.write(conn.send(h11.Request(method="POST", target="/v1/messages", headers=[("host", "local"), ("content-type", "application/json"), ("content-length", str(len(cuerpo))), *cabeceras])))
+    writer.write(conn.send(h11.Request(method=metodo, target=destino, headers=[("host", "faro-proxy"), ("content-type", "application/json"), ("content-length", str(len(cuerpo))), *cabeceras])))
     writer.write(conn.send(h11.Data(data=cuerpo)))
     writer.write(conn.send(h11.EndOfMessage()))
     await writer.drain()
@@ -116,6 +117,51 @@ def test_freno_puesto_no_contacta_upstream(tmp_path):
                 r, _ = await _pedir(proxy, modelo="modelo-prueba")
                 return r.status_code, len(up.recibidas)
     assert _correr(escenario()) == (423, 0)
+
+
+@pytest.mark.parametrize("metodo,destino,cabeceras", [
+    ("CONNECT", "/v1/messages", ()),
+    ("POST", "/otra", ()),
+    ("POST", "http://ajeno.invalid/v1/messages", ()),
+    ("POST", "/v1/messages", (("upgrade", "websocket"),)),
+    ("POST", "/v1/messages", (("forwarded", "host=ajeno.invalid"),)),
+])
+def test_pedidos_de_escape_se_rechazan_antes_del_upstream(tmp_path, metodo, destino, cabeceras):
+    async def escenario():
+        async with Upstream() as up:
+            async with ServidorProxyCredenciales(_cfg(tmp_path, up.url)) as proxy:
+                r, _ = await _pedir(proxy, modelo="modelo-prueba", metodo=metodo, destino=destino, cabeceras=cabeceras)
+                return r.status_code, len(up.recibidas)
+    assert _correr(escenario()) == (403, 0)
+
+
+def test_redirect_del_upstream_no_revela_location(tmp_path):
+    async def escenario():
+        async with Upstream(status=302) as up:
+            async with ServidorProxyCredenciales(_cfg(tmp_path, up.url)) as proxy:
+                r, _ = await _pedir(proxy, modelo="modelo-prueba")
+                return r.status_code, dict(r.headers), len(up.recibidas)
+    estado, cabeceras, n = _correr(escenario())
+    assert (estado, n) == (502, 1)
+    assert b"location" not in cabeceras
+
+
+def test_cierre_no_borra_socket_reemplazado(tmp_path):
+    async def escenario():
+        async with Upstream() as up:
+            proxy = ServidorProxyCredenciales(_cfg(tmp_path, up.url))
+            await proxy.__aenter__()
+            os.unlink(proxy.ruta_socket)
+            reemplazo = await asyncio.start_unix_server(lambda r, w: None, path=str(proxy.ruta_socket))
+            try:
+                await proxy.__aexit__(None, None, None)
+                return os.path.lexists(proxy.ruta_socket)
+            finally:
+                reemplazo.close()
+                await reemplazo.wait_closed()
+                if os.path.lexists(proxy.ruta_socket):
+                    os.unlink(proxy.ruta_socket)
+    assert _correr(escenario()) is True
 
 
 def test_uid_distinto_se_cierra_antes_de_leer_token_o_contactar_upstream(tmp_path):

@@ -17,13 +17,13 @@ Fecha: 2026-10-12
 
 ```
 python3 -m pytest tests/test_faro_proxy_credenciales.py tests/test_faro_puente_http.py -q
-6 passed
+14 passed
 ```
 
 ## Pendiente antes de auditoría/publicación
 
-1. Añadir los negativos restantes del contrato S-1: uid distinto real, token de
-   otra ejecución, CONNECT/Upgrade/redirect, cierre SSE y socket reemplazado.
+1. Añadir los negativos restantes del contrato S-1: token de otra ejecución,
+   cierre SSE, límites de respuesta y procesos huérfanos del puente.
 2. Cablear configuración y ciclo de vida del servicio sin introducir secretos en
    argv, entorno de hijo o jaula.
 3. Integrar el stop con el freno y el scope R-2 ya aprobado; no inventar una

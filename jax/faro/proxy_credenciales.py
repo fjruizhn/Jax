@@ -13,6 +13,7 @@ import os
 import socket
 import stat
 import struct
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,6 +66,7 @@ class ServidorProxyCredenciales:
         self._server: asyncio.AbstractServer | None = None
         self._client: httpx.AsyncClient | None = None
         self._tasks: set[asyncio.Task] = set()
+        self._socket_identity: tuple[int, int] | None = None
 
     async def __aenter__(self):
         self._leer_token()
@@ -74,12 +76,22 @@ class ServidorProxyCredenciales:
         try:
             self._server = await asyncio.start_unix_server(self._atender, path=str(self.ruta_socket), limit=_MAX_CABECERA)
             os.chmod(self.ruta_socket, 0o600)
+            st = os.lstat(self.ruta_socket)
+            self._socket_identity = (st.st_dev, st.st_ino)
         except BaseException:
             await self.__aexit__(None, None, None)
             raise
         return self
 
     async def __aexit__(self, *_):
+        reemplazo_guardado: Path | None = None
+        try:
+            st_actual = os.lstat(self.ruta_socket)
+            if self._socket_identity is not None and (st_actual.st_dev, st_actual.st_ino) != self._socket_identity:
+                reemplazo_guardado = self.ruta_socket.with_name(f".{self.ruta_socket.name}.{uuid.uuid4().hex}.preservado")
+                os.replace(self.ruta_socket, reemplazo_guardado)
+        except FileNotFoundError:
+            pass
         if self._server is not None:
             self._server.close()
         for task in list(self._tasks):
@@ -90,14 +102,21 @@ class ServidorProxyCredenciales:
             self._server = None
         try:
             st = os.lstat(self.ruta_socket)
-            if stat.S_ISSOCK(st.st_mode):
+            if stat.S_ISSOCK(st.st_mode) and self._socket_identity == (st.st_dev, st.st_ino):
                 os.unlink(self.ruta_socket)
         except FileNotFoundError:
             pass
+        if reemplazo_guardado is not None:
+            try:
+                if not os.path.lexists(self.ruta_socket):
+                    os.replace(reemplazo_guardado, self.ruta_socket)
+            except FileNotFoundError:
+                pass
         if self._client is not None:
             await self._client.aclose()
             self._client = None
         self._token = b""
+        self._socket_identity = None
 
     def _leer_token(self) -> None:
         try:
@@ -146,7 +165,9 @@ class ServidorProxyCredenciales:
         if target != self.cfg.perfil.ruta or "://" in target or "?" in target or "#" in target:
             raise PermissionError("ruta")
         headers = {k.lower(): v for k, v in req.headers}
-        if b"upgrade" in headers or b"connection" in headers or b"proxy-authorization" in headers:
+        if (headers.get(b"host") != b"faro-proxy" or b"upgrade" in headers or b"connection" in headers
+                or b"proxy-authorization" in headers or b"forwarded" in headers
+                or b"x-forwarded-host" in headers or b"x-forwarded-proto" in headers):
             raise PermissionError("upgrade")
         try:
             document = json.loads(body)
