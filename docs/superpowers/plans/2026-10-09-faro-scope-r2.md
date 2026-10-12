@@ -8,11 +8,11 @@ Base: `origin/master@709237f901e8ec8840f6b2b39a1a2ce88682674a`
 ## Estado
 
 R-2 está en implementación en `codex/faro-r2`; el cambio local agrega lease durable y recovery antes del socket.
-La selección CI extendida más reciente corrió en Python 3.14 y obtuvo `904 passed, 6 deselected` en 60.55 s
-(`/tmp/faro-r2-integrated-py314-20261012-final.log`); la jaula real obtuvo `12 passed` y las seis integraciones
-reales de systemd `6 passed, 158 deselected` en sus logs fechados de `/tmp`. Es evidencia local anterior al rebase,
-no una aprobación: la auditoría Tier 3 previa tenía 1 BLOCK y 2 MAJOR, sus correcciones necesitan auditoría nueva;
-faltan
+Tras rebase sobre `origin/master@ecfe07f3`, la selección CI extendida más reciente corrió en Python 3.14 y obtuvo
+`955 passed, 6 deselected` en 60.79 s (`/tmp/faro-r2-integrated-py314-20261012-rebased.log`); la jaula real obtuvo
+`12 passed`, las seis integraciones reales de systemd `6 passed, 158 deselected` y el cableado `7 passed` en sus
+logs `-rebased` de `/tmp`. No es una aprobación: la auditoría Tier 3 previa tenía 1 BLOCK y 2 MAJOR, sus correcciones
+necesitan auditoría nueva; faltan
 commit, reconciliar la base oficial que resulte tras Jax#402 (reapilado por su owner en
 `aeb3ab10f3c6ffb9070307526f351da8e700b9cf`, aún pendiente de auditoría/CI exactas), volver a medir el piso,
 auditoría adversarial del SHA exacto, CI exacta, integración y guardas. No se instala ni despliega en este trabajo.

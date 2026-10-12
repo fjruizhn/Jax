@@ -11,10 +11,11 @@ despliegue. Reconsultar las fuentes vivas antes de operar.
 - Jax#402 fue reapilado y publicado por su owner en `aeb3ab10f3c6ffb9070307526f351da8e700b9cf`. Los 33/33 checks y
   la auditoría Tier 3 APROBADO correspondían al head anterior `669558b4`; la auditoría nueva y CI exacta estaban
   pendientes sobre el head reapilado antes de su preflight y guard. Ese estado no acredita la integración de R-2.
-- La selección CI extendida local de R-2 en Python 3.14 obtuvo `904 passed, 6 deselected` en 60.55 s; log:
-  `/tmp/faro-r2-integrated-py314-20261012-final.log`. La jaula real obtuvo `12 passed` y las seis integraciones
-  reales de systemd `6 passed, 158 deselected`, con logs fechados equivalentes en `/tmp`. Sigue sin ser una corrida
-  final: faltaban rebase, medición del piso, auditoría del SHA exacto, CI final, merge y post-merge guard.
+- Tras reapilar R-2 sobre `origin/master@ecfe07f3`, la selección CI exacta local en Python 3.14 obtuvo
+  `955 passed, 6 deselected` en 60.79 s; log `/tmp/faro-r2-integrated-py314-20261012-rebased.log`. La jaula real
+  obtuvo `12 passed`, las seis integraciones reales de systemd `6 passed, 158 deselected` y el cableado `7 passed`,
+  en sus logs `-rebased` de `/tmp`. Sigue sin ser evidencia final: faltaban auditoría del SHA exacto, CI remota,
+  merge y post-merge guard.
 - R-2 aplica el contrato v3 de cuatro estados (`PREPARED`, `REQUESTED`, `ACCEPTED`, `CLIENT_CLOSED`). La liberación
   exige cierre del emisor, namespace vacío y evidencia kernel del mismo cgroup (`ruta`, `st_dev`, `st_ino`); un cambio
   de epoch del manager no libera un lease. La unidad debe mantener `Delegate=no`.

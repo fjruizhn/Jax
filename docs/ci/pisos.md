@@ -175,6 +175,12 @@ selección exacta de `faro-fase0`: 904 corridas, 6 deselected (`systemd_integrat
 `12 passed` (`/tmp/faro-r2-faro-jaula-20261012-final.log`). Es evidencia previa al rebase: repetir CI exacta,
 pisos y auditoría sobre el SHA final antes de integrar.
 
+Piso actualizado 2026-10-12 tras rebase sobre `origin/master@ecfe07f3`: `^955 passed`. Medido con el comando
+exacto de `faro-fase0` en el entorno Python 3.14 real: 955 corridas, 6 deselected (`systemd_integration`), 60.79 s;
+log `/tmp/faro-r2-integrated-py314-20261012-rebased.log`. La jaula real dio `12 passed` y las seis integraciones
+de systemd `6 passed, 158 deselected`; el control de cableado dio `7 passed`, cada uno en su log `-rebased` de
+`/tmp`. Esta medición se asociará al SHA auditado al cerrar el commit; no reemplaza auditoría Tier 3, CI ni guardas.
+
 ## `faro-bitacora-db/faro-db`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^40 passed`

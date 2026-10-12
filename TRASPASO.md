@@ -20,12 +20,14 @@ conservan como historia. R-2 no está completo, integrado ni desplegado.
   cambio de epoch. La aceptación conserva ruta de cgroup y su identidad `st_dev/st_ino`; el release exige cierre del
   emisor, evidencia kernel del mismo inode y namespace vacío. La unidad productiva debe usar `Delegate=no` y la
   jaula no puede migrar su cgroup.
-- Verificación local final previa al rebase: selección CI extendida en Python 3.14, **904 passed, 6 deselected**,
-  en 60.55 s (`/tmp/faro-r2-integrated-py314-20261012-final.log`); jaula real, **12 passed**
-  (`/tmp/faro-r2-faro-jaula-20261012-final.log`); e integración systemd real, **6 passed, 158 deselected**
-  (`/tmp/faro-r2-systemd-integration-20261012-final.log`). Es evidencia WIP: todavía faltan rebase, nueva medición
-  del piso, auditoría del SHA exacto, CI final, integración y post-merge guard. Los conteos de scope (151) y control
-  (182) son pruebas dirigidas previas, no verificación final posterior al rebase.
+- Rebase local terminado sobre `origin/master@ecfe07f3c2760ed43f53e7d1e858dad8e864e7e1`. Verificación local
+  posterior al rebase, Python 3.14: selección CI exacta **955 passed, 6 deselected**, 60.79 s
+  (`/tmp/faro-r2-integrated-py314-20261012-rebased.log`); jaula real, **12 passed**
+  (`/tmp/faro-r2-faro-jaula-20261012-rebased.log`); integración systemd real, **6 passed, 158 deselected**
+  (`/tmp/faro-r2-systemd-integration-20261012-rebased.log`); cableado, **7 passed**
+  (`/tmp/faro-r2-wireados-20261012-rebased.log`). Falta asociar esta evidencia al SHA del commit, auditoría Tier 3
+  exacta, CI remota, integración y post-merge guard. Los conteos de scope (151) y control (182) son pruebas dirigidas
+  previas, no verificación final independiente.
 - La auditoría Tier 3 previa señaló **1 BLOCK y 2 MAJOR**; las correcciones están en este WIP y requieren auditoría
   adversarial nueva sobre el SHA exacto. No presentar las pruebas locales ni el contrato como aprobación de integración.
 - Block 4 sigue no disponible: `jaxctl authority --json` devolvió `UNAVAILABLE`; el diagnóstico de ledger conserva
