@@ -46,6 +46,7 @@ class ScopeDoble:
         self.proceso = proceso if proceso is not None else _Proc(0)
         self.estados = estados or {}
         self.muertes: list[int] = []
+        self.finalizados: list[tuple[int, object]] = []
 
     async def arrancar(self, uid, comando):
         if self.error is not None:
@@ -61,6 +62,10 @@ class ScopeDoble:
 
     async def esperar_vacio(self, uid, *, plazo_s=None):
         return self.estados.get(uid, EstadoUnidad.EMPTY)
+
+    async def finalizar_natural(self, uid, proceso):
+        self.finalizados.append((uid, proceso))
+        return await proceso.wait()
 
 
 class _Proc:
@@ -471,6 +476,46 @@ def test_minor7_si_no_se_puede_anotar_el_termino_no_se_cae_nada(bwrap):
         l = LanzadorJaula(_cfg(bwrap), Bitacora(emisores=[emisor]), ScopeDoble(proceso=_Proc(0)))
         await l.lanzar(_srv(), ["/usr/bin/true"])
         await l.esperar_terminos()
+    corre(caso())
+
+
+def test_r2_el_vigia_usa_el_cierre_causal_y_no_retiene_la_tarea_terminada(bwrap):
+    scope = ScopeDoble(proceso=_Proc(0))
+
+    async def caso():
+        l = _lanzador(bwrap, scope=scope)
+        proceso = await l.lanzar(_srv(), ["/usr/bin/true"])
+        await asyncio.gather(*tuple(l._vigias), return_exceptions=True)
+        assert l._vigias == set()
+        await l.esperar_terminos()
+        return proceso
+
+    assert corre(caso()) is scope.proceso
+    assert scope.finalizados == [(UID_JAULA, scope.proceso)]
+
+
+def test_r2_el_lanzador_cerrado_rechaza_otro_lanzamiento(bwrap):
+    async def caso():
+        l = _lanzador(bwrap)
+        await l.cerrar()
+        with pytest.raises(ConfigFaroInvalida, match="cerrado"):
+            await l.lanzar(_srv(), ["/usr/bin/true"])
+    corre(caso())
+
+
+def test_r2_el_error_del_cierre_causal_se_conserva_aunque_el_vigia_ya_termino(bwrap):
+    class ScopeConFallo(ScopeDoble):
+        async def finalizar_natural(self, uid, proceso):
+            raise OSError("stderr roto")
+
+    async def caso():
+        l = _lanzador(bwrap, scope=ScopeConFallo())
+        await l.lanzar(_srv(), ["/usr/bin/true"])
+        await asyncio.gather(*tuple(l._vigias), return_exceptions=True)
+        assert l._vigias == set()
+        with pytest.raises(BaseExceptionGroup, match="waiter/drenaje") as exc:
+            await l.cerrar()
+        assert any(isinstance(error, OSError) for error in exc.value.exceptions)
     corre(caso())
 
 

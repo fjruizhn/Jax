@@ -51,7 +51,36 @@ class FalsoScope:
         self.muertes: list[int] = []
         self.esperas: list[int] = []
         self.error: Exception | None = None          # si se pone, toda consulta revienta
+        self.error_cierre: Exception | None = None
+        self.error_recuperacion: Exception | None = None
         self.al_matar = None                          # callable(uid): espiar el mundo en el momento del kill
+        self.admision_cerrada = False
+        self.uid_bloqueados: list[int] = []
+        self.cierres_uid: list[int] = []
+
+    def cerrar_admision(self) -> None:
+        self.admision_cerrada = True
+
+    def bloquear_uid(self, uid: int) -> None:
+        self.uid_bloqueados.append(uid)
+
+    async def cerrar_uid(self, uid: int) -> None:
+        self.cierres_uid.append(uid)
+        self.esperas.append(uid)                       # close incluye el wait causal del cliente/unidad
+        if self.error_cierre is not None:
+            raise self.error_cierre
+        self.muertes.append(uid)
+        if self.al_matar is not None:
+            self.al_matar(uid)
+        self.estados[uid] = EstadoUnidad.EMPTY
+
+    async def recuperar_leases(self) -> None:
+        if self.error_recuperacion is not None:
+            raise self.error_recuperacion
+        self.recuperacion_terminada = True
+
+    async def liberar(self, uid: int) -> None:
+        return None
 
     async def estado(self, uid: int) -> EstadoUnidad:
         self.consultas.append(uid)
@@ -177,6 +206,19 @@ def test_el_socket_de_control_es_0660_y_su_directorio_no_admite_a_otros(mundo):
         async with control(mundo) as srv:
             return stat.S_IMODE(os.stat(srv.ruta_socket).st_mode)
     assert corre(caso()) == 0o660
+
+
+def test_el_recovery_fallido_impide_abrir_el_socket_de_control(mundo):
+    scope = FalsoScope()
+    scope.error_recuperacion = RuntimeError("lease corrupto")
+
+    async def caso():
+        async with control(mundo, scope=scope):
+            raise AssertionError("no se debe abrir el canal")
+
+    with pytest.raises(RuntimeError, match="lease corrupto"):
+        corre(caso())
+    assert not (_cfg_control(mundo.tmp).ruta_socket).exists()
 
 
 @pytest.mark.parametrize("modo", [0o755, 0o751, 0o705, 0o770, 0o775, 0o777])
@@ -831,8 +873,10 @@ def test_minor2_el_uid_no_se_libera_mientras_su_unidad_siga_viva(mundo):
         async with control(mundo, scope=scope) as srv:
             a = await pedir(srv.ruta_socket, PEDIDO)
             scope.estados[50001] = EstadoUnidad.LIVE       # al cerrar, la unidad sigue poblada
+            scope.error_cierre = OSError("kill no confirmó EMPTY")
             await pedir(srv.ruta_socket, {"op": "cerrar", "run_id": a["run_id"]})
             b = await pedir(srv.ruta_socket, PEDIDO)        # la unidad sigue viva: el uid sigue ocupado
+            scope.error_cierre = None
             scope.estados[50001] = EstadoUnidad.EMPTY       # murio hasta el ultimo nieto
             c = await pedir(srv.ruta_socket, PEDIDO)        # confirmado EMPTY: se libera
             return a, b, c
@@ -929,6 +973,7 @@ def test_r2_el_cierre_con_la_unidad_aun_viva_o_desconocida_mantiene_el_uid(mundo
             async with control(mundo, scope=scope) as srv:
                 a = await pedir(srv.ruta_socket, PEDIDO)
                 scope.estados[50001] = estado               # al cerrar, la unidad no se confirma vacia
+                scope.error_cierre = OSError("no se pudo certificar EMPTY")
                 await pedir(srv.ruta_socket, {"op": "cerrar", "run_id": a["run_id"]})
                 return await pedir(srv.ruta_socket, PEDIDO)
         assert corre(caso()) == {"ok": False, "error": "uid_jaula_en_uso" if estado is EstadoUnidad.LIVE
@@ -937,7 +982,8 @@ def test_r2_el_cierre_con_la_unidad_aun_viva_o_desconocida_mantiene_el_uid(mundo
 
 def test_r2_el_fallo_del_kill_no_impide_el_cierre_ni_la_retencion(mundo):
     class ScopeQueNoMata(FalsoScope):
-        async def matar(self, uid):
+        async def cerrar_uid(self, uid):
+            self.cierres_uid.append(uid)
             self.muertes.append(uid)
             raise OSError("systemctl kill fallo")
 
@@ -951,7 +997,84 @@ def test_r2_el_fallo_del_kill_no_impide_el_cierre_ni_la_retencion(mundo):
             b = await pedir(srv.ruta_socket, PEDIDO)
             return c, b
     c, b = corre(caso())
-    assert c["ok"] and b == {"ok": False, "error": "uid_jaula_en_uso"}   # cerrado, pero el uid retenido
+    assert c == {"ok": False, "error": "cierre_incompleto"}
+    assert b == {"ok": False, "error": "uid_jaula_en_uso"}   # el UID queda retenido
+
+
+def test_shutdown_limpia_hermanas_aunque_falle_una(mundo):
+    class ScopeConUnaFalla(FalsoScope):
+        async def cerrar_uid(self, uid):
+            self.cierres_uid.append(uid)
+            if uid == 50002:
+                raise OSError("fallo deliberado de B")
+
+    scope = ScopeConUnaFalla()
+    async def caso():
+        cm = control(mundo, scope=scope)
+        srv = await cm.__aenter__()
+        await pedir(srv.ruta_socket, PEDIDO)
+        await pedir(srv.ruta_socket, {**PEDIDO, "uid_jaula": 50002, "tenant": "t-second"})
+        with pytest.raises(BaseExceptionGroup, match="cierre completo"):
+            await cm.__aexit__(None, None, None)
+    corre(caso())
+    assert sorted(scope.cierres_uid) == [50001, 50002]
+
+
+def test_shutdown_observa_fallo_de_cierre_terminado_antes_del_snapshot(mundo):
+    class ScopeFallaAlCerrar(FalsoScope):
+        def __init__(self):
+            super().__init__()
+            self.entro = asyncio.Event()
+            self.liberaciones_instancia = 0
+
+        async def cerrar_uid(self, uid):
+            self.cierres_uid.append(uid)
+            self.entro.set()
+            raise OSError("fallo antes del snapshot de shutdown")
+
+        async def liberar_instancia(self):
+            self.liberaciones_instancia += 1
+
+    scope = ScopeFallaAlCerrar()
+
+    async def caso():
+        cm = control(mundo, scope=scope)
+        srv = await cm.__aenter__()
+        creado = await pedir(srv.ruta_socket, PEDIDO)
+        run_id = creado["run_id"]
+        tareas_capturadas = []
+        programar = srv._programar_cierre
+
+        def capturar(uid, puerto_srv):
+            tarea = programar(uid, puerto_srv)
+            tareas_capturadas.append(tarea)
+            return tarea
+
+        srv._programar_cierre = capturar
+        cierre_conexion = asyncio.create_task(
+            srv._cerrar_ejecucion(run_id, srv._ejecuciones[run_id]))
+        await asyncio.wait_for(scope.entro.wait(), 5)
+        cierre_conexion.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cierre_conexion
+        # La tarea propia completa con error antes de que shutdown tome su snapshot.
+        tarea = tareas_capturadas[0]
+        async with asyncio.timeout(5):
+            while not tarea.done():
+                await asyncio.sleep(0)
+        try:
+            with pytest.raises(BaseExceptionGroup, match="cierre completo") as error:
+                await cm.__aexit__(None, None, None)
+        finally:
+            await asyncio.gather(tarea, return_exceptions=True)
+        return srv, run_id, error.value
+
+    srv, run_id, error = corre(caso())
+    assert error.subgroup(OSError) is not None
+    assert srv._retenidos == {50001}
+    assert srv._uids == {50001: run_id}
+    assert srv._cierres == {}
+    assert scope.liberaciones_instancia == 0
 
 
 def test_block2_el_apagado_que_cancela_un_cierre_a_medias_termina_el_kill(mundo):
@@ -964,10 +1087,10 @@ def test_block2_el_apagado_que_cancela_un_cierre_a_medias_termina_el_kill(mundo)
             self.entro = asyncio.Event()
             self.salir = asyncio.Event()
 
-        async def matar(self, uid):
-            self.muertes.append(uid)
+        async def cerrar_uid(self, uid):
             self.entro.set()
-            await self.salir.wait()                # kill lento: la cancelacion del apagado cae aqui
+            await self.salir.wait()                # cierre lento: la cancelacion del apagado cae aqui
+            await super().cerrar_uid(uid)
 
     scope = ScopeLento()
 
@@ -976,18 +1099,17 @@ def test_block2_el_apagado_que_cancela_un_cierre_a_medias_termina_el_kill(mundo)
         srv = await cm.__aenter__()
         r = await pedir(srv.ruta_socket, PEDIDO)
         cierre = asyncio.create_task(pedir(srv.ruta_socket, {"op": "cerrar", "run_id": r["run_id"]}))
-        await asyncio.wait_for(scope.entro.wait(), 5)        # el kill ya esta en vuelo en la conexion
+        await asyncio.wait_for(scope.entro.wait(), 5)        # el cierre ya está en vuelo en la conexión
 
         async def soltar():
             await asyncio.sleep(0.05)
             scope.salir.set()
-        asyncio.create_task(soltar())                        # libera el kill lento durante el apagado
+        asyncio.create_task(soltar())                        # libera el cierre lento durante el apagado
         await cm.__aexit__(None, None, None)                 # apagado: cancela la conexion `cerrar`
         cierre.cancel()
-        return list(scope.muertes), list(scope.esperas), sorted(p.name for p in mundo.cfg_puerto.socket_dir.iterdir())
-    muertes, esperas, archivos = corre(caso())
-    assert muertes == [50001]                               # el kill corrio pese a la cancelacion
-    assert esperas == [50001]                               # y la confirmacion de vacio TAMBIEN (antes no llegaba)
+        return list(scope.cierres_uid), list(scope.esperas), sorted(p.name for p in mundo.cfg_puerto.socket_dir.iterdir())
+    cierres, esperas, archivos = corre(caso())
+    assert cierres == [50001]                               # el cierre corrió pese a la cancelación
     assert archivos == []                                   # y el Puerto de la ejecucion quedo revocado
 
 

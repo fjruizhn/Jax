@@ -55,7 +55,7 @@ from pathlib import Path
 from .bitacora import Bitacora
 from .config import ConfigFaroInvalida
 from .identidad import RE_TENANT, Ejecucion
-from .scope import EstadoUnidad
+from .scope import EstadoUnidad, ScopeError
 from .transporte import ServidorPuerto, credenciales_del_par
 
 logger = logging.getLogger(__name__)
@@ -255,14 +255,27 @@ class ServidorControl:
 
     async def __aenter__(self) -> "ServidorControl":
         self._validar_entorno()
-        if os.path.lexists(self.ruta_socket):
-            raise FileExistsError(f"ya hay un socket de control: {self.ruta_socket}")
-        self._servidor = await asyncio.start_unix_server(self._atender, path=str(self.ruta_socket),
-                                                         limit=self._cfg.max_pedido, backlog=socket.SOMAXCONN)
-        os.chmod(self.ruta_socket, MODO_SOCKET_CONTROL)
-        return self
+        adquirir_instancia = getattr(self._scope, "adquirir_instancia", None)
+        if callable(adquirir_instancia):
+            await adquirir_instancia()
+        recuperar = getattr(self._scope, "recuperar_leases", None)
+        try:
+            if callable(recuperar):
+                await recuperar()                     # lock de vida antes de recovery y socket
+            if os.path.lexists(self.ruta_socket):
+                raise FileExistsError(f"ya hay un socket de control: {self.ruta_socket}")
+            self._servidor = await asyncio.start_unix_server(self._atender, path=str(self.ruta_socket),
+                                                             limit=self._cfg.max_pedido, backlog=socket.SOMAXCONN)
+            os.chmod(self.ruta_socket, MODO_SOCKET_CONTROL)
+            return self
+        except BaseException:
+            liberar = getattr(self._scope, "liberar_instancia", None)
+            if callable(liberar):
+                await liberar()
+            raise
 
     async def __aexit__(self, *_exc) -> None:
+        self._scope.cerrar_admision()
         if self._servidor is not None:
             self._servidor.close()
         for t in list(self._tareas):
@@ -274,19 +287,34 @@ class ServidorControl:
             except TimeoutError:  # fail-soft: el apagado no puede colgarse; ya se cancelaron todas las tareas
                 logger.warning("el cierre del canal de control no termino en 5s: se sigue con el apagado")
             self._servidor = None
-        # BLOCK 2: los cierres que el apagado cancelo a mitad (la peticion `cerrar` corria en una
-        # conexion) se completan AQUI: la tarea de kill+confirmacion es propia y no muere con la
-        # conexion. Antes de cerrar las ejecuciones que quedaron vivas, se espera lo ya en vuelo.
-        await asyncio.gather(*list(self._cierres.values()), return_exceptions=True)
-        for run_id, srv in list(self._ejecuciones.items()):
-            await self._cerrar_ejecucion(run_id, srv)
-        # Un arranque cancelado puede tener aún `systemd-run` en vuelo. El gestor de unidades
-        # conserva esa limpieza como tarea propia; el apagado no termina antes de que se resuelva.
-        await self._scope.esperar_limpiezas()
+        # Programa cierres de todas las ejecuciones antes de esperar al primer Puerto.
+        errores: list[BaseException] = []
         try:
-            os.unlink(self.ruta_socket)
-        except FileNotFoundError:  # fail-soft: ya no esta; el objetivo del cierre es que no exista
-            pass
+            pendientes = list(self._ejecuciones.items())
+            for run_id, srv in pendientes:
+                self._ejecuciones.pop(run_id, None)
+                uid = srv.ejecucion.uid_esperado
+                self._retenidos.add(uid)
+                self._programar_cierre(uid, srv)
+            cierres = list(self._cierres.items())
+            try:
+                await self._scope.esperar_limpiezas()
+            except BaseException as exc:
+                errores.append(exc)
+            resultados = await asyncio.gather(*(tarea for _, tarea in cierres), return_exceptions=True)
+            errores.extend(x for x in resultados if isinstance(x, BaseException))
+            for (uid, tarea) in cierres:
+                self._retirar_cierre(uid, tarea)
+        finally:
+            try:
+                os.unlink(self.ruta_socket)
+            except FileNotFoundError:  # fail-soft: ya no está; el objetivo del cierre es que no exista
+                pass
+        if errores:
+            raise BaseExceptionGroup("falló el cierre completo del canal Faro", errores)
+        liberar = getattr(self._scope, "liberar_instancia", None)
+        if callable(liberar):
+            await liberar()
 
     # -- anotacion ------------------------------------------------------------------------------
     async def _rechazar(self, cred, motivo: str, escritor=None, **extra) -> None:
@@ -344,8 +372,13 @@ class ServidorControl:
             await self._responder(escritor, respuesta)
         except asyncio.CancelledError:
             raise
-        except Exception:  # fail-closed: la conexion se cierra sin respuesta; el error queda en el log
+        except Exception:  # fail-closed: los errores de cleanup se informan de forma explícita al peer
             logger.exception("el canal de control termino una conexion con error")
+            if op == "cerrar":
+                try:
+                    await self._responder(escritor, {"ok": False, "error": "cierre_incompleto"})
+                except Exception:
+                    logger.debug("el par cerró antes de recibir estado de cierre incompleto")
         finally:
             self._tareas.discard(tarea)
             escritor.close()
@@ -423,33 +456,55 @@ class ServidorControl:
         self._ejecuciones.pop(run_id, None)
         uid = srv.ejecucion.uid_esperado
         self._retenidos.add(uid)                    # 1. cerrandose: el uid NO se libera todavia
+        tarea = self._programar_cierre(uid, srv)
         try:
-            await srv.__aexit__(None, None, None)   # 2. primero el Puerto de esa ejecucion
-        except Exception:  # fail-soft: el cierre sigue; el socket de esa ejecucion ya no se atiende
-            logger.exception("no se pudo cerrar bien el Puerto de %s", run_id)
+            await asyncio.shield(tarea)              # cancelada la conexión: el resultado sigue registrado
+        except asyncio.CancelledError:
+            raise                                    # shutdown será quien recoja el resultado
+        except BaseException:
+            self._retirar_cierre(uid, tarea)         # el caller observó el error; conservar UID retenido
+            raise
+        else:
+            self._retirar_cierre(uid, tarea)         # el caller observó el éxito
+
+    def _programar_cierre(self, uid: int, srv: ServidorPuerto) -> asyncio.Task:
         tarea = self._cierres.get(uid)
-        if tarea is None or tarea.done():
-            tarea = asyncio.create_task(self._matar_y_soltar(uid))
-            self._cierres[uid] = tarea
-        await asyncio.shield(tarea)                 # cancelada la conexion, la tarea sigue y __aexit__ la espera
+        if tarea is not None:
+            # Una tarea terminada todavía puede tener un resultado no observado.
+            return tarea
+        bloquear = getattr(self._scope, "bloquear_uid", None)
+        if callable(bloquear):
+            bloquear(uid)
+        tarea = asyncio.create_task(self._revocar_y_cerrar(uid, srv))
+        self._cierres[uid] = tarea
+        return tarea
+
+    def _retirar_cierre(self, uid: int, tarea: asyncio.Task) -> None:
+        """Retira solo la tarea cuyo resultado exacto observó este caller."""
+        if self._cierres.get(uid) is tarea:
+            self._cierres.pop(uid, None)
+
+    async def _revocar_y_cerrar(self, uid: int, srv: ServidorPuerto) -> None:
+        """La propiedad del cierre queda registrada antes del primer await cancelable."""
+        errores: list[BaseException] = []
+        try:
+            await srv.__aexit__(None, None, None)
+        except BaseException as exc:
+            errores.append(exc)
+            logger.exception("no se pudo revocar el Puerto del uid %s", uid)
+        try:
+            await self._matar_y_soltar(uid)
+        except BaseException as exc:
+            errores.append(exc)
+        if errores:
+            raise BaseExceptionGroup(f"cierre incompleto del uid {uid}", errores)
 
     async def _matar_y_soltar(self, uid: int) -> None:
         """3. SIGKILL a todos los procesos de la unidad + 4. confirmacion de vacio + 5. liberacion.
         Corre como tarea propia: una CancelledError de la conexion NO la interrumpe a mitad."""
-        try:
-            await self._scope.matar(uid)            # 3. SIGKILL a todos los procesos de su unidad
-        except Exception:  # fail-soft: el estado decide; un kill fallido nunca libera el uid
-            logger.exception("no se pudo matar la unidad del uid %s", uid)
-        try:
-            estado = await self._scope.esperar_vacio(uid)   # 4. confirmacion de vacio
-        except Exception:  # fail-closed: sin confirmacion no hay liberacion
-            logger.exception("no se pudo confirmar el vacio de la unidad del uid %s", uid)
-            estado = EstadoUnidad.UNKNOWN
-        finally:
-            self._cierres.pop(uid, None)
-        if estado is EstadoUnidad.EMPTY:            # 5. solo ahora se suelta; la reutilizacion pasa por otra consulta
-            self._retenidos.discard(uid)
-            self._uids.pop(uid, None)
+        await self._scope.cerrar_uid(uid)
+        self._retenidos.discard(uid)
+        self._uids.pop(uid, None)
 
     async def _cerrar(self, cred, pedido: Mapping) -> dict:
         run_id = pedido.get("run_id")

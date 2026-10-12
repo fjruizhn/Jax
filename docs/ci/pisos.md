@@ -157,6 +157,24 @@ failed. El workflow de Faro se alinea ahora con Python 3.14, que suministra el U
 suite completa medida en un venv limpio Python 3.14.4 dio `780 passed`, incluido el límite de
 RSS de transporte. El runner CI debe confirmar el mismo conteo en el SHA que cambia el job.
 
+Piso actualizado 2026-10-11: `^850 passed`. Medido en hall9000 con el comando exacto del workflow. Incluye seis pruebas nuevas de R-2 para trabajos systemd en cola, materialización tardía, apagado con admisión cerrada, spawn sin handle, errores de identidad/kill/wait, y reconciliación de un spawn cuyo efecto externo ocurrió antes de fallar. Total: 850 corridas, 5 deselected (`systemd_integration`), cero skips; las 5 pruebas de integración con el user manager real pasan aparte.
+
+Piso actualizado 2026-10-10: `^863 passed`. Repetido el comando exacto del workflow tras añadir lease durable, recovery previo al socket, cancelación de spawn sin handle y regresiones de serialización/corrupción. Total: 863 corridas, 6 deselected (`systemd_integration`), cero skips; las seis integraciones reales pasaron aparte.
+
+Piso actualizado 2026-10-10: `^868 passed`. Medido con el comando exacto del workflow tras ligar unidad, kill y liberación al intento, bloquear recovery ambiguo y continuar el shutdown por todas las ejecuciones aun si una falla. Total: 868 corridas, 6 deselected (`systemd_integration`), cero skips; las seis integraciones reales pasaron aparte.
+
+Piso actualizado 2026-10-12: `^890 passed`. Medición pre-rebase en Python 3.14 con la selección exacta de
+`faro-fase0`: 890 corridas, 6 deselected (`systemd_integration`), 60.72 s; log
+`/tmp/faro-r2-integrated-py314-20261012.log`. Incluye las regresiones R-2 de contrato v3. Debe volver a medirse
+tras el rebase final sobre el master oficial; esta subida no sustituye auditoría del SHA exacto, CI ni guardas.
+
+Piso actualizado 2026-10-12: `^904 passed`. Repetición local final previa al rebase, en Python 3.14 y con la
+selección exacta de `faro-fase0`: 904 corridas, 6 deselected (`systemd_integration`), 60.55 s; log
+`/tmp/faro-r2-integrated-py314-20261012-final.log`. Las seis integraciones reales de systemd pasaron aparte
+(`6 passed, 158 deselected`, `/tmp/faro-r2-systemd-integration-20261012-final.log`) y la jaula real mantuvo
+`12 passed` (`/tmp/faro-r2-faro-jaula-20261012-final.log`). Es evidencia previa al rebase: repetir CI exacta,
+pisos y auditoría sobre el SHA final antes de integrar.
+
 ## `faro-bitacora-db/faro-db`
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^40 passed`
@@ -168,6 +186,11 @@ Sin historia anotada en el workflow.
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^11 passed`
 
 Sin historia anotada en el workflow.
+
+Piso actualizado 2026-10-12: `^12 passed`. Medido en `tests/test_faro_jaula_real.py` (12 passed, 1.12 s), log
+`/tmp/faro-r2-faro-jaula.log`. La prueba adicional ejecuta la cadena real `sudo -u #uid → bwrap` y exige
+`NoNewPrivs=1`, capacidades efectivas vacías y ausencia de cgroupfs/descriptores de cgroup dentro de la jaula.
+Es evidencia pre-rebase; repetir la suite exacta antes de integrar.
 
 ## `memory-b9-regression/casos`
 

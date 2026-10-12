@@ -38,16 +38,16 @@
       "mensaje": "PISO ROTO: se esperaban 251 tests CORRIDOS de cli_sandbox."
     },
     "faro-fase0/faro": {
-      "patron": "^780 passed",
-      "mensaje": "PISO ROTO: se esperaban 780 tests CORRIDOS del Faro."
+      "patron": "^904 passed",
+      "mensaje": "PISO ROTO: se esperaban 904 tests CORRIDOS del Faro."
     },
     "faro-bitacora-db/faro-db": {
       "patron": "^40 passed",
       "mensaje": "PISO ROTO: se esperaban 40 tests CORRIDOS de la bitacora y los topes del Faro."
     },
     "faro-jaula/faro-jaula": {
-      "patron": "^11 passed",
-      "mensaje": "PISO ROTO: se esperaban 11 tests CORRIDOS de la jaula del Faro."
+      "patron": "^12 passed",
+      "mensaje": "PISO ROTO: se esperaban 12 tests CORRIDOS de la jaula del Faro."
     },
     "facet-health-io/out": {
       "patron": "^27 passed",

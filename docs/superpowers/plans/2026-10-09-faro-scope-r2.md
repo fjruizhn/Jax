@@ -1,15 +1,21 @@
 # El Faro 0.6 y R-2: unidad cgroup por ejecución
 
-Fecha: 2026-10-09  
-Estado: plan de implementación  
-Rama: `codex/faro-r2`  
+Fecha: 2026-10-09
+Estado vigente al 2026-10-12: implementación local WIP; no integrado ni desplegado
+Rama: `codex/faro-r2`
 Base: `origin/master@709237f901e8ec8840f6b2b39a1a2ce88682674a`
 
 ## Estado
 
 R-2 está en implementación en `codex/faro-r2`; el cambio local agrega lease durable y recovery antes del socket.
-Faltan reauditoría adversarial, reconciliar la base actual de `master`, publicar por PR, CI exacta, auditoría Tier 3
-del SHA exacto e integración. No se instala ni despliega en este trabajo.
+La selección CI extendida más reciente corrió en Python 3.14 y obtuvo `904 passed, 6 deselected` en 60.55 s
+(`/tmp/faro-r2-integrated-py314-20261012-final.log`); la jaula real obtuvo `12 passed` y las seis integraciones
+reales de systemd `6 passed, 158 deselected` en sus logs fechados de `/tmp`. Es evidencia local anterior al rebase,
+no una aprobación: la auditoría Tier 3 previa tenía 1 BLOCK y 2 MAJOR, sus correcciones necesitan auditoría nueva;
+faltan
+commit, reconciliar la base oficial que resulte tras Jax#402 (reapilado por su owner en
+`aeb3ab10f3c6ffb9070307526f351da8e700b9cf`, aún pendiente de auditoría/CI exactas), volver a medir el piso,
+auditoría adversarial del SHA exacto, CI exacta, integración y guardas. No se instala ni despliega en este trabajo.
 
 Verificado el 2026-10-09 en systemd 259: `tests/test_faro_scope.py` — 102 passed, incluidas cuatro pruebas
 reales del user manager; comando exacto de CI `faro-fase0` — 834 passed, 4 deselected, cero skips. El caso
@@ -47,11 +53,16 @@ No usar `systemd-run --user --scope` desde el futuro servicio de sistema `User=f
 
 El servicio transitorio usa `Type=exec`, `--pipe`, `--collect`, `KillMode=control-group`, `OOMPolicy=kill` y límites finitos requeridos por configuración. No hay valores por defecto para los límites: sin los tres, el lanzamiento falla cerrado. No se limita cantidad de agentes; `TasksMax` expresa el tope de procesos/hilos como recurso del sistema operativo, conforme a D-4.
 
-**Lease y recovery R-2 (decisión técnica corregida, Codex, 2026-10-10).** El lease durable tiene esquema cerrado y etapas `PREPARED → REQUESTED → ACCEPTED → CLIENT_CLOSED`. PREPARED confirma reserva/fsync antes de cualquier llamada externa; REQUESTED confirma fsync antes de crear el cliente. ACCEPTED se persiste únicamente al observar la unidad propia con Description exacta. Solo desde ACCEPTED puede persistirse CLIENT_CLOSED tras el wait exitoso del cliente exacto. Un cliente que termina sin aceptación conserva REQUESTED: el receptor puede haber recibido una petición aunque no haya respondido. El namespace de unidades/jobs vacío no demuestra por sí solo una barrera causal.
+**Lease y recovery R-2, contrato v3 (decisión técnica corregida, Codex, 2026-10-10; estado WIP al 2026-10-12).** El lease durable tiene esquema cerrado y etapas `PREPARED → REQUESTED → ACCEPTED → CLIENT_CLOSED`. PREPARED confirma reserva/fsync antes de cualquier llamada externa; REQUESTED confirma fsync antes de crear el cliente. ACCEPTED se persiste únicamente al observar la unidad propia con Description exacta y conserva la ruta de cgroup junto con la identidad kernel `st_dev/st_ino`. Solo desde ACCEPTED puede persistirse CLIENT_CLOSED tras el wait exitoso del cliente exacto. Un cliente que termina sin aceptación conserva REQUESTED: el receptor puede haber recibido una petición aunque no haya respondido. El namespace de unidades/jobs vacío no demuestra por sí solo una barrera causal.
 
 Recovery se ejecuta bajo el lock de instancia antes de abrir el socket. PREPARED se libera únicamente si namespace completo está vacío; CLIENT_CLOSED requiere reconciliación de identidad y prueba de cgroup vacío. REQUESTED o ACCEPTED sin handle conservan cuarentena por UID y no impiden admitir otros UIDs seguros. Archivos corruptos o inseguros bloquean recovery; no se borran. Un cambio de manager/epoch no libera REQUESTED: clientes huérfanos pueden conectar tarde al manager nuevo. La revisión Sol adicional debe cerrar explícitamente la prueba de ausencia de cgroups supervivientes tras un reinicio sin serialización del manager antes de publicar la implementación.
 
-0.10 debe instalar `/var/lib/faro/jaulas` persistente, propiedad de `faro:faro` y modo `0700`, configurar `JAX_FARO_SCOPE_STATE_DIR`, mantener una sola instancia y probar la barrera del supervisor sobre el cgroup completo y sus clientes. El directorio no puede estar bajo `RuntimeDirectory`. No se crea una API manual/booleana para liberar leases inciertos.
+El release exige cierre causal del emisor, evidencia kernel del mismo inode y namespace vacío; una época nueva del
+manager nunca la sustituye. La unidad productiva debe fijar `Delegate=no` para que la jaula no migre su cgroup. 0.10
+debe instalar `/var/lib/faro/jaulas` persistente, propiedad de `faro:faro` y modo `0700`, configurar
+`JAX_FARO_SCOPE_STATE_DIR`, mantener una sola instancia y probar la barrera del supervisor sobre el cgroup completo y
+sus clientes. El directorio no puede estar bajo `RuntimeDirectory`. No se crea una API manual/booleana para liberar
+leases inciertos.
 
 ## Contrato de estado
 

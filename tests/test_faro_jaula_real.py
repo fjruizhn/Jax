@@ -244,6 +244,15 @@ class _ScopeSiempreVacio:
     async def esperar_vacio(self, uid, *, plazo_s=None):
         return EstadoUnidad.EMPTY
 
+    def cerrar_admision(self):
+        return None
+
+    async def esperar_limpiezas(self):
+        return None
+
+    async def cerrar_uid(self, uid):
+        return None
+
 
 def _control(mundo, registros):
     d = mundo.base / "control"
@@ -330,6 +339,44 @@ print(json.dumps(r))
 """
 
 
+SONDA_PRIVILEGIOS_CGROUP = r"""
+import json, os
+
+estado = {}
+with open("/proc/self/status", encoding="utf-8") as f:
+    for linea in f:
+        if ":" in linea:
+            clave, valor = linea.split(":", 1)
+            estado[clave] = valor.strip()
+
+tipos_montaje = []
+with open("/proc/self/mountinfo", encoding="utf-8") as f:
+    for linea in f:
+        partes = linea.rstrip("\n").split(" - ", 1)
+        if len(partes) == 2:
+            tipos_montaje.append(partes[1].split()[0])
+
+fds_cgroup = []
+for fd in os.listdir("/proc/self/fd"):
+    try:
+        destino = os.readlink(f"/proc/self/fd/{fd}")
+    except FileNotFoundError:
+        # El descriptor puede cerrarse entre listdir y readlink; no es evidencia de un fd cgroup.
+        continue
+    if destino == "/sys/fs/cgroup" or destino.startswith("/sys/fs/cgroup/"):
+        fds_cgroup.append(destino)
+
+print(json.dumps({
+    "uid": os.getuid(),
+    "no_new_privs": estado.get("NoNewPrivs"),
+    "cap_eff": estado.get("CapEff"),
+    "cgroup2_montado": "cgroup2" in tipos_montaje,
+    "cgroup_visible": os.path.exists("/sys/fs/cgroup"),
+    "fds_cgroup": fds_cgroup,
+}))
+"""
+
+
 def _correr_bwrap(argv_montajes_, comando, **kw):
     return subprocess.run([shutil.which("bwrap"), *argv_montajes_, "--", *comando], capture_output=True, text=True, timeout=60, **kw)
 
@@ -350,6 +397,42 @@ def test_la_jaula_ve_solo_su_socket_su_token_y_el_rele(mundo, requiere_bwrap):
     assert vista["socket_dir_existe"] is False and "run" not in vista["raiz"]       # el directorio de sockets NO esta en la jaula
     assert vista["escribir_token"] != "ok" and vista["escribir_usr"] != "ok" and vista["escribir_relay"] != "ok"
     assert set(vista["env"]) - {"LC_CTYPE", "PWD"} == {"HOME", "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONPATH"}    # entorno minimo (LC_CTYPE lo pone Python, PWD bwrap)
+
+
+def test_bwrap_real_con_uid_de_jaula_no_tiene_privilegios_ni_cgroupfs(mundo, requiere_sudo, requiere_bwrap):
+    """La cadena productiva sudo -> bwrap conserva NNP, no tiene caps ni cgroupfs.
+
+    Sin una migración de cgroup dentro de la jaula, que el path no exista después del exact wait puede usarse
+    como una prueba del árbol muerto: ningún descriptor del proceso queda apuntando al cgroup del host.
+    """
+    relay = mundo.base / "relay-privilegios.py"
+    shutil.copy(RAIZ / "jax" / "faro" / "relay.py", relay)
+    relay.chmod(0o644)
+
+    async def caso():
+        bit = Bitacora(emisores=[])
+        async with ServidorPuerto(mundo.cfg_puerto, ejecucion(uid_esperado=NOBODY), mundo.cargado, bit) as srv:
+            argv = [
+                "sudo", "-n", "-u", f"#{NOBODY}", "--", shutil.which("bwrap"),
+                *argv_montajes(str(srv.ruta_socket), str(srv.ruta_token), relay=str(relay)), "--",
+                "/usr/bin/python3", "-c", SONDA_PRIVILEGIOS_CGROUP,
+            ]
+            proceso = await asyncio.create_subprocess_exec(
+                *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            salida, error = await asyncio.wait_for(proceso.communicate(), 30)
+            return proceso.returncode, salida.decode(), error.decode()
+
+    rc, salida, error = corre(caso())
+    assert rc == 0, error
+    sonda = json.loads(salida)
+    assert sonda == {
+        "uid": NOBODY,
+        "no_new_privs": "1",
+        "cap_eff": "0000000000000000",
+        "cgroup2_montado": False,
+        "cgroup_visible": False,
+        "fds_cgroup": [],
+    }
 
 
 def _params_jaula(sock, tok):
