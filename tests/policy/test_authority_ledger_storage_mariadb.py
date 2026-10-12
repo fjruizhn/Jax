@@ -2716,16 +2716,17 @@ def test_bootstrap_first_init_exact_retry_and_different_stage_fail_closed():
                 directory_path / "checkpoint.log",
                 bootstrap_receipt_path=directory_path / "receipt.json",
             )
-            store = MariaDBAuthorityLedgerStore(lambda: connect(database="jax_authority"))
+            factory = lambda: connect(database="jax_authority")
+            store = MariaDBAuthorityLedgerStore(factory)
             root_path = directory_path / "trusted-root.json"
             initialize_staged_authority_ledger(
-                store, lambda: connect(database="jax_authority"), staged, staged.trusted_root,
+                store, factory, staged, staged.trusted_root,
                 checkpoints, trusted_root_path=root_path, trusted_root_owner_uid=os.getuid(),
             )
             assert store.get_genesis() == staged.genesis
             # A completed exact attempt verifies; it never reinitializes.
             initialize_staged_authority_ledger(
-                store, lambda: connect(database="jax_authority"), staged, staged.trusted_root,
+                store, factory, staged, staged.trusted_root,
                 checkpoints, trusted_root_path=root_path, trusted_root_owner_uid=os.getuid(),
             )
             different = stage_authority_genesis(
@@ -2733,7 +2734,7 @@ def test_bootstrap_first_init_exact_retry_and_different_stage_fail_closed():
             )
             with pytest.raises(ValueError, match="genesis existente difiere"):
                 initialize_staged_authority_ledger(
-                    store, lambda: connect(database="jax_authority"), different, different.trusted_root,
+                    store, factory, different, different.trusted_root,
                     checkpoints, trusted_root_path=root_path, trusted_root_owner_uid=os.getuid(),
                 )
 
@@ -2756,10 +2757,11 @@ def test_bootstrap_existing_genesis_without_external_anchors_requires_recovery()
         with tempfile.TemporaryDirectory(prefix="jax-b4-bootstrap-partial-") as directory:
             path = Path(directory)
             checkpoints = TrustedCheckpointStore(path / "checkpoint.log", bootstrap_receipt_path=path / "receipt.json")
-            store = MariaDBAuthorityLedgerStore(lambda: connect(database="jax_authority"))
+            factory = lambda: connect(database="jax_authority")
+            store = MariaDBAuthorityLedgerStore(factory)
             with pytest.raises(ValueError, match="parcial"):
                 initialize_staged_authority_ledger(
-                    store, lambda: connect(database="jax_authority"), staged, staged.trusted_root,
+                    store, factory, staged, staged.trusted_root,
                     checkpoints, trusted_root_path=path / "trusted-root.json", trusted_root_owner_uid=os.getuid(),
                 )
             assert not checkpoints.path.exists()
@@ -2781,10 +2783,11 @@ def test_bootstrap_rejects_nonempty_head_history_without_external_anchors():
         with tempfile.TemporaryDirectory(prefix="jax-b4-bootstrap-history-") as directory:
             path = Path(directory)
             checkpoints = TrustedCheckpointStore(path / "checkpoint.log", bootstrap_receipt_path=path / "receipt.json")
-            store = MariaDBAuthorityLedgerStore(lambda: connect(database="jax_authority"))
+            factory = lambda: connect(database="jax_authority")
+            store = MariaDBAuthorityLedgerStore(factory)
             with pytest.raises(ValueError, match="no está vacío"):
                 initialize_staged_authority_ledger(
-                    store, lambda: connect(database="jax_authority"), staged, staged.trusted_root,
+                    store, factory, staged, staged.trusted_root,
                     checkpoints, trusted_root_path=path / "trusted-root.json", trusted_root_owner_uid=os.getuid(),
                 )
             assert not checkpoints.path.exists()

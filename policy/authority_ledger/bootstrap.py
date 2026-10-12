@@ -243,6 +243,12 @@ def initialize_staged_authority_ledger(
     from .replay import verify_authority_ledger
     from .service import initialize_authority_ledger
 
+    # The DB observation/insert path and the ledger verifier must use one
+    # deployment boundary. A substituted factory can inspect one authority and
+    # initialize another.
+    if getattr(store, "_connect", None) is not connection_factory:
+        raise ValueError("bootstrap requiere la misma factory del MariaDBAuthorityLedgerStore")
+
     if staged.classification != "NOT_AUTHORITY":
         raise ValueError("stage Block 4 no es material de staging")
     recomputed = stage_authority_genesis(
