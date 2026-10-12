@@ -50,12 +50,15 @@ class ConfigProxyCredenciales:
     perfil: PerfilCredencial
     solo_pruebas_mismo_uid: bool = False
     freno: Callable[[], bool] = field(default=lambda: False, repr=False, compare=False)
+    max_respuesta_bytes: int = 16 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if not self.ruta_socket.is_absolute() or not self.ruta_token.is_absolute():
             raise ConfigFaroInvalida("socket y token del proxy deben ser rutas absolutas")
         if self.uid_esperado in (0, os.geteuid()) and not self.solo_pruebas_mismo_uid:
             raise ConfigFaroInvalida("el uid del motor debe diferir del servicio del proxy")
+        if not isinstance(self.max_respuesta_bytes, int) or self.max_respuesta_bytes < 1:
+            raise ConfigFaroInvalida("el limite de respuesta del proxy debe ser positivo")
 
 
 class ServidorProxyCredenciales:
@@ -186,6 +189,11 @@ class ServidorProxyCredenciales:
         request = self._client.build_request(req.method.decode(), self.cfg.perfil.upstream + self.cfg.perfil.ruta, headers=headers, content=body)
         response = await self._client.send(request, stream=True)
         if 300 <= response.status_code < 400:
+            await response.aclose()
+            await self._respuesta(conn, writer, 502)
+            return
+        content_length = response.headers.get("content-length")
+        if content_length is not None and int(content_length) > self.cfg.max_respuesta_bytes:
             await response.aclose()
             await self._respuesta(conn, writer, 502)
             return

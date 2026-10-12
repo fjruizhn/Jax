@@ -147,6 +147,15 @@ def test_redirect_del_upstream_no_revela_location(tmp_path):
     assert b"location" not in cabeceras
 
 
+def test_respuesta_mayor_al_limite_no_sale_de_proxy(tmp_path):
+    async def escenario():
+        async with Upstream() as up:
+            async with ServidorProxyCredenciales(_cfg(tmp_path, up.url, max_respuesta_bytes=1)) as proxy:
+                r, _ = await _pedir(proxy, modelo="modelo-prueba")
+                return r.status_code, len(up.recibidas)
+    assert _correr(escenario()) == (502, 1)
+
+
 def test_cierre_no_borra_socket_reemplazado(tmp_path):
     async def escenario():
         async with Upstream() as up:
