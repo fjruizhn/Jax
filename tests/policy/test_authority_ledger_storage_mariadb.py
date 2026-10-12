@@ -2639,6 +2639,28 @@ def test_provisioning_rejects_public_identity_before_creating_target():
                 assert cursor.fetchone() == (0,)
 
 
+def test_provisioning_rejects_homonymous_other_host_and_role_before_dcl():
+    user = "authority_homonym"
+    with _ephemeral_mariadb() as connect:
+        with connect() as admin:
+            _apply_migration(admin, MIGRATION)
+            with admin.cursor() as cursor:
+                cursor.execute(f"CREATE USER '{user}'@'localhost' IDENTIFIED BY 'ephemeral-test-only'")
+                cursor.execute("CREATE ROLE authority_test_role")
+                cursor.execute(f"GRANT authority_test_role TO '{user}'@'localhost'")
+            admin.commit()
+        with connect(database="jax_authority") as admin:
+            from policy.authority_ledger.provisioning import provision_application_account
+            with pytest.raises(ValueError, match="principal nuevo"):
+                provision_application_account(
+                    admin, user, secrets.token_urlsafe(24), host="127.0.0.1", role="reader",
+                )
+        with connect() as admin:
+            with admin.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) FROM mysql.global_priv WHERE User=%s AND Host='127.0.0.1'", (user,))
+                assert cursor.fetchone() == (0,)
+
+
 def test_bootstrap_first_init_exact_retry_and_different_stage_fail_closed():
     """Exercise B4's actual MariaDB insert + external anchors in an isolated DB."""
     with _ephemeral_mariadb() as connect:
@@ -2695,6 +2717,31 @@ def test_bootstrap_existing_genesis_without_external_anchors_requires_recovery()
             checkpoints = TrustedCheckpointStore(path / "checkpoint.log", bootstrap_receipt_path=path / "receipt.json")
             store = MariaDBAuthorityLedgerStore(lambda: connect(database="jax_authority"))
             with pytest.raises(ValueError, match="parcial"):
+                initialize_staged_authority_ledger(
+                    store, lambda: connect(database="jax_authority"), staged, staged.trusted_root,
+                    checkpoints, trusted_root_path=path / "trusted-root.json", trusted_root_owner_uid=os.getuid(),
+                )
+            assert not checkpoints.path.exists()
+
+
+def test_bootstrap_rejects_nonempty_head_history_without_external_anchors():
+    with _ephemeral_mariadb() as connect:
+        with connect() as admin:
+            _apply_migration(admin, MIGRATION)
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE jax_authority.authority_ledger_head SET sequence=1,head_event_id=%s,head_event_hash=%s WHERE singleton=1",
+                    ("event-existing", "sha256:" + "a" * 64),
+                )
+            admin.commit()
+        staged = stage_authority_genesis(
+            encode_public_key(Ed25519PrivateKey.generate().public_key()), "bootstrap-test-history",
+        )
+        with tempfile.TemporaryDirectory(prefix="jax-b4-bootstrap-history-") as directory:
+            path = Path(directory)
+            checkpoints = TrustedCheckpointStore(path / "checkpoint.log", bootstrap_receipt_path=path / "receipt.json")
+            store = MariaDBAuthorityLedgerStore(lambda: connect(database="jax_authority"))
+            with pytest.raises(ValueError, match="no está vacío"):
                 initialize_staged_authority_ledger(
                     store, lambda: connect(database="jax_authority"), staged, staged.trusted_root,
                     checkpoints, trusted_root_path=path / "trusted-root.json", trusted_root_owner_uid=os.getuid(),
