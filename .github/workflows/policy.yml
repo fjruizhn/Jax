@@ -453,13 +453,12 @@ jobs:
           python -m pytest -q policy/tests/test_ejecutor_lanza_solo_con_contratos.py 2>&1 | tee /tmp/lanza
           python3 .github/ci/piso.py verificar no-naked-claude-subprocess/lanza /tmp/lanza || exit $?
 
-  # El scanner de arriba (no-naked-claude-subprocess) protege que nadie
-  # lance `claude` fuera de hyde_sandbox.py -- pero hasta 2026-08-25 la
-  # COSA PROTEGIDA no se verificaba nunca en CI. _hyde_sandbox_test.py
-  # (escrito en Task 1 del plan de gobernanza de subprocess) prueba
+  # OP#251 (2026-10-14): hyde_sandbox.py, _hyde_sandbox_test.py (que probaba
   # run_sandboxed_claude(), incluido un test real de dos procesos de SO
-  # contra el flock(2) cross-proceso. Sin PYTHONPATH: hyde_sandbox.py y su
-  # test viven los dos en el root del repo.
+  # contra el flock(2) cross-proceso) y la golden de wrap se retiraron
+  # completos. El sandbox vigente es cli_sandbox.py y lo exige el scanner de
+  # arriba (no-naked-claude-subprocess). Este job queda ROJO anunciando el
+  # retiro hasta que Fernando coordine workflow, pisos y fixture.
   hyde-sandbox-unit:
     runs-on: ubuntu-latest
     steps:
@@ -1035,32 +1034,13 @@ jobs:
   # los dos tests de monotonic. Verificado, no supuesto.
   # Contenimiento del sandbox de Hyde, EJERCITADO.
   #
-  # POR QUE EXISTE. hyde_sandbox.py afirma propiedades de seguridad (repos en
-  # solo-lectura, $HOME real no expuesto, entorno del padre no heredado) que se
-  # verificaron UNA VEZ a mano al escribirlo (2026-08-23) y nunca mas.
-  # `_hyde_sandbox_test.py`, el unico test que existia, cubre el flock y los
-  # timeouts -- la SERIALIZACION, no el CONFINAMIENTO. Cambiar un --ro-bind por
-  # un --bind no rompia ningun test: el sandbox seguia arrancando, Hyde seguia
-  # funcionando, y el confinamiento se perdia en silencio.
-  #
-  # Los tests EJECUTAN ataques reales adentro del sandbox y, cuando el ataque es
-  # una escritura, afirman SOBRE EL HOST -- un `touch` puede "fallar" y aun asi
-  # haber dejado el archivo. Se auto-verifican por mutacion: cambiando
-  # --ro-bind por --bind caen 3 (verificado, no supuesto).
-  #
-  # CORREGIDO 2026-09-27 (segunda auditoria adversarial sobre el fix del token
-  # OAuth de Hyde): esta linea decia "quitando --clearenv caen 2" -- desde B-1
-  # de esa auditoria, bwrap ya NO usa --clearenv/--setenv en absoluto (la
-  # frontera de entorno paso a ser el `env=` que run_sandboxed_claude pasa a
-  # create_subprocess_exec, ver hyde_sandbox.py), asi que esa mutacion ya no
-  # existe. La equivalente hoy -- quitar ese `env=` o fusionarlo con
-  # os.environ en run_sandboxed_claude -- se verifico a mano (las dos
-  # variantes): pone en rojo **1** test, y solo en
-  # _hyde_sandbox_test.py::RunSandboxedClaudeWrappingTest, nunca en
-  # _hyde_containment_test.py -- su Caja.correr llama a wrap_hyde_command
-  # DIRECTO, sin pasar por run_sandboxed_claude, asi que este job (que solo
-  # corre _hyde_containment_test.py) no puede ejercitar esa propiedad; la
-  # ejercita el job hyde-sandbox-unit, mas abajo.
+  # OP#251 (2026-10-14): hyde_sandbox.py y su test de confinamiento
+  # (_hyde_containment_test.py, que ejecutaba ataques reales adentro del
+  # sandbox y afirmaba SOBRE EL HOST, con auto-verificacion por mutacion)
+  # se retiraron completos: este job queda ROJO anunciando el retiro hasta
+  # que Fernando coordine workflow, pisos y fixture. El confinamiento
+  # vigente de los CLIs es el de cli_sandbox.py, exigido por el scanner
+  # no-naked-claude-subprocess.
   #
   # bubblewrap no viene en el runner. Y en Ubuntu 23.10+ AppArmor bloquea los
   # user namespaces sin privilegios, que es justamente lo que bwrap necesita:

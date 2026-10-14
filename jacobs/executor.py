@@ -1050,7 +1050,7 @@ async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool | _SinEs
             # El freno en vuelo (2026-09-16, frente B): antes un step ya lanzado
             # seguía hasta terminar la ola aunque el kill switch estuviera
             # puesto. Si el freno APARECE, se cancela en <= 250 ms:
-            # run_sandboxed_claude mata a Hyde y _invoke_motor cancela el job
+            # el lanzador sandboxeado mata al CLI y _invoke_motor cancela el job
             # en LAS MANOS. InterruptorActivado cae en el except general de
             # abajo, así que queda _fail_step con "killed_by_switch". Un
             # timeout de este wait_for (o una cancelación externa de este

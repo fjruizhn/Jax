@@ -6,13 +6,15 @@ Spec: docs/superpowers/specs/2026-10-01-facetas-por-suscripcion-design.md
 (§1 arquitectura, §3 historial, §4 errores, §D titular, §E/§G paso 1).
 Decisiones de Fernando 2026-10-01: D-2 (solo user_id 1 y 8), D-4 (Hyde migra a
 este nucleo solo si la golden `_hyde_wrap_golden_test.py` queda identica byte a
-byte), D-5 (compuerta de titular).
+byte), D-5 (compuerta de titular). Esa migracion nunca llego: OP#251 (2026-10-14)
+retiro hyde_sandbox.py y su golden completos; este nucleo quedo como unico
+punto de entrada de los CLIs.
 
 QUE HAY ACA
 
 1. NUCLEO COMUN, sin saber de ningun CLI en particular: `argv_base` (argv de
    bwrap), `env_minimo`, `flock_compartido_adquirir`/`flock_liberar` y `ejecutar` (el
-   unico `create_subprocess_exec` del modulo). `hyde_sandbox` lo usa tal cual.
+   unico `create_subprocess_exec` del modulo).
 2. PERFILES en codigo (`PERFILES`): claude, codex, kimi. La base solo elegira
    una CLAVE de perfil; nunca una ruta de binario ni flags (la confianza sigue
    a quien escribio el valor).
@@ -24,7 +26,8 @@ QUE HAY ACA
    la salida estructurada y clasifica los errores por evento + exit code.
 5. `transporte_efectivo`: el transporte que se deriva del proveedor.
 
-ENTORNO (misma disciplina que hyde_sandbox, B-1 de la auditoria 2026-09-27):
+ENTORNO (disciplina B-1 de la auditoria 2026-09-27; nacio en hyde_sandbox,
+retirado en OP#251):
 la frontera es el `env=` de `asyncio.create_subprocess_exec`, que recibe el
 diccionario de `env_minimo` TAL CUAL, nunca fusionado con os.environ. El argv
 no lleva ningun secreto: se lee por /proc/<pid>/cmdline. El system prompt y la
@@ -55,8 +58,11 @@ root, cambiarlas exige reiniciar):
                               host la pone en /run/jax-locks/cli y la siembra con
                               tmpfiles.d (`d /run/jax-locks/cli 0700 <usuario> -`). Debe
                               ser del euid y sin escritura de grupo/otros. Estos locks
-                              son por euid (un solo usuario por CLI); el de Hyde, que
-                              comparten dos usuarios, va por grupo en hyde_sandbox
+                              son por euid (un solo usuario por CLI). El lock
+                              compartido entre usuarios distintos
+                              (`flock_compartido_adquirir`, que nacio para el
+                              lock de Hyde) quedo sin llamador al retirar
+                              hyde_sandbox en OP#251
   JAX_CLI_MAX_PROMPT_CHARS    tope del prompt (default 32000); `max_chars` del llamador solo
                               puede bajarlo (min)
   JAX_CLI_FEATURES_REINTENTO_S  segundos entre reintentos de `features list` tras un timeout
@@ -131,9 +137,7 @@ class SandboxUnavailable(ErrorCLI):
     """bwrap no disponible o no ejecutable en runtime. Fail-closed (P10):
     el llamador NO debe atrapar esto para degradar a ejecución sin
     sandbox -- el CLI simplemente no arranca. Es un ErrorCLI para que el log
-    de `run_cli` lo registre con su `clase` (auditoria 2026-10-02, MAJOR-2);
-    Hyde importa esta misma clase y la atrapa igual que antes (sigue siendo
-    una Exception)."""
+    de `run_cli` lo registre con su `clase` (auditoria 2026-10-02, MAJOR-2)."""
     clase = "SandboxUnavailable"
 
 
@@ -496,7 +500,8 @@ def argv_confinado_cli(
     # un `echo x > /etc/x` funciona dentro del sandbox. Se remonta solo lectura
     # DESPUES de crear todos los puntos de montaje; /tmp y el $HOME son tmpfs
     # propios y siguen escribibles. (No se agrega a `argv_base`: el argv de
-    # Hyde esta congelado por la golden, D-4.)
+    # Hyde estuvo congelado por la golden mientras hyde_sandbox existio, D-4;
+    # modulo y golden se retiraron juntos en OP#251.)
     argv += ["--remount-ro", "/", "--chdir", "/work", "--"]
     argv += cmd
     return argv
@@ -957,9 +962,10 @@ class Perfil:
 _HOME_CLI = "/home/cli-sandbox"
 
 PERFILES: dict[str, Perfil] = {
-    # Hyde (con herramientas) sigue por hyde_sandbox; `claude` esta aca para que
-    # el nucleo y los tests tengan UNA tabla de perfiles, pero `run_cli` lo
-    # rechaza (adenda §E: "claude sigue cerrado").
+    # `claude` esta aca para que el nucleo y los tests tengan UNA tabla de
+    # perfiles, pero `run_cli` lo rechaza (adenda §E: "claude sigue cerrado").
+    # El lanzamiento con herramientas de Hyde corria por hyde_sandbox, retirado
+    # en OP#251.
     "claude": Perfil(nombre="claude", via_run_cli=False, home_sandbox="/home/hyde-sandbox"),
     "codex": Perfil(
         nombre="codex", via_run_cli=True, home_sandbox=_HOME_CLI,
@@ -1428,8 +1434,9 @@ def armar_conversacion(historial, mensaje: str, max_chars: int, nonce: Optional[
 
 
 # --------------------------------------------------------------------------
-# Locks por perfil (N ranuras). NO comparten directorio ni nombre con el de
-# Hyde: un Thot en curso no espera a Hyde.
+# Locks por perfil (N ranuras). NO comparten directorio ni nombre con otros
+# locks: un Thot en curso no espera a nadie. (Nacio separado del lock de
+# Hyde, retirado junto a hyde_sandbox en OP#251.)
 # --------------------------------------------------------------------------
 
 def _lock_dir() -> Path:

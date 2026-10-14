@@ -19,8 +19,8 @@ que la cuenta no puede quitar:
   misión de humo contra la VM desechable). Lo que se tapa (en hall9000,
   20-systemd-ssh-proxy.conf: `.host`, `unix/*`, `vsock/*`, `machine/*`) no es ninguna
   máquina del inventario; `destinos` las rechazaría igual.
-SP2 reemplaza esta jaula por el perfil `ejecutor` de hyde_sandbox y conserva estos
-montajes.
+SP2 iba a reemplazar esta jaula por el perfil `ejecutor` de hyde_sandbox conservando
+estos montajes; hyde_sandbox se retiró en OP#251 antes de que SP2 existiera.
 
 La llave del cerebro viaja por stdin (`read -r K`), nunca en argv: `ps` la vería.
 
