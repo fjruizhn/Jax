@@ -6,8 +6,9 @@ con `--allowedTools Bash`. Una futura edicion que quitara el `raise` habria resu
 camino sin que ninguna prueba lo notara.
 
 Puros: se sustituyen por falsos `cli_sandbox.ejecutar` (el nucleo que lanza el subproceso) y
-`asyncio.create_subprocess_exec`, y se exige que nunca se llamen. T16 retiro tambien
-`hyde_sandbox.run_sandboxed_claude`: ya no hay funcion que lance `claude` con ese confinamiento.
+`asyncio.create_subprocess_exec`, y se exige que nunca se llamen. T16 retiro
+`hyde_sandbox.run_sandboxed_claude` y OP#251 retiro el modulo completo: ya no hay funcion
+que lance `claude` con ese confinamiento, ni modulo que revivir.
 """
 from __future__ import annotations
 
@@ -33,9 +34,11 @@ def test_invoke_hyde_lanza_la_clase_real_y_ningun_subproceso_se_lanza():
     subproceso.assert_not_called()
 
 
-def test_run_sandboxed_claude_ya_no_existe():
-    import hyde_sandbox
-    assert not hasattr(hyde_sandbox, "run_sandboxed_claude")
+def test_hyde_sandbox_ya_no_existe():
+    # OP#251 retiro el modulo completo; la via vigente para lanzar CLIs es
+    # cli_sandbox.py. Si alguien lo revive, este guardia se pone rojo.
+    import importlib.util
+    assert importlib.util.find_spec("hyde_sandbox") is None
 
 
 def test_el_cuerpo_que_armaba_el_claude_ya_no_existe():
