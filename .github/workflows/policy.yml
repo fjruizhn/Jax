@@ -453,36 +453,6 @@ jobs:
           python -m pytest -q policy/tests/test_ejecutor_lanza_solo_con_contratos.py 2>&1 | tee /tmp/lanza
           python3 .github/ci/piso.py verificar no-naked-claude-subprocess/lanza /tmp/lanza || exit $?
 
-  # OP#251 (2026-10-14): hyde_sandbox.py, _hyde_sandbox_test.py (que probaba
-  # run_sandboxed_claude(), incluido un test real de dos procesos de SO
-  # contra el flock(2) cross-proceso) y la golden de wrap se retiraron
-  # completos. El sandbox vigente es cli_sandbox.py y lo exige el scanner de
-  # arriba (no-naked-claude-subprocess). Este job queda ROJO anunciando el
-  # retiro hasta que Fernando coordine workflow, pisos y fixture.
-  hyde-sandbox-unit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install pytest
-      - run: python -m pytest _hyde_sandbox_test.py -v
-      # Piso exacto (MINOR-34, auditoria del SHA 174da8c): 11 tests, medido 2026-10-02 con Python
-      # 3.12. Sin esto, borrar `LlamadaAlLockCompartidoTest` (la que prueba que
-      # run_sandboxed_claude toma el lock compartido) dejaba el job en verde.
-      - run: |
-          python -m pytest _hyde_sandbox_test.py -q 2>&1 | tee /tmp/hydesb
-          python3 .github/ci/piso.py verificar hyde-sandbox-unit/hydesb /tmp/hydesb || exit $?
-      # Golden de wrap_hyde_command (D-4, facetas-por-suscripcion, 2026-10-01):
-      # el argv y el env de Hyde congelados ANTES de que pase al nucleo comun
-      # cli_sandbox. Piso exacto: 3 tests (coincide con la golden, la fixture no
-      # cambio, cubre los tres escenarios). Medido 2026-10-01: 3 passed.
-      - run: python -m pytest _hyde_wrap_golden_test.py -v
-      - run: |
-          python -m pytest _hyde_wrap_golden_test.py -q 2>&1 | tee /tmp/golden
-          python3 .github/ci/piso.py verificar hyde-sandbox-unit/golden /tmp/golden || exit $?
-
   # cli_sandbox: nucleo comun del confinamiento de CLIs de suscripcion
   # (facetas-por-suscripcion, 2026-10-01, paso 1). El archivo mezcla logica pura
   # con CONTENCION REAL (ataques dentro de bwrap): sin bwrap la clase se
@@ -494,6 +464,11 @@ jobs:
   # 2026-10-02 (reauditoria del SHA 9a5d618, MINOR-22..29 y el tope de `canary`): 239 passed.
   # 2026-10-02 (auditoria del SHA 174da8c, MINOR-31/32/33/36: el log cubre los 8 campos, el
   # `clave=valor` falso, el timeout de `features list` transitorio y el hint de EACCES): 251 passed.
+  # 2026-10-14 (OP#251, retiro completo de hyde_sandbox): 244 -- las 7 pruebas del
+  # lock de Hyde se retiraron con el modulo (la cobertura del lock compartido vive
+  # en LocksCompartidosTest, sobre cli_sandbox) y 250 con los +6 puertos de los
+  # ataques reales de _hyde_containment_test.py a ContencionRealTest, medido en
+  # hall9000 con Python 3.12.
   cli-sandbox-unit:
     runs-on: ubuntu-latest
     steps:
@@ -1032,45 +1007,6 @@ jobs:
   # `fetched_at` en `_entrada_sellada` (que es el modo de falla silencioso de
   # este arreglo: comparar un mtime contra time.monotonic()) se ponen en rojo
   # los dos tests de monotonic. Verificado, no supuesto.
-  # Contenimiento del sandbox de Hyde, EJERCITADO.
-  #
-  # OP#251 (2026-10-14): hyde_sandbox.py y su test de confinamiento
-  # (_hyde_containment_test.py, que ejecutaba ataques reales adentro del
-  # sandbox y afirmaba SOBRE EL HOST, con auto-verificacion por mutacion)
-  # se retiraron completos: este job queda ROJO anunciando el retiro hasta
-  # que Fernando coordine workflow, pisos y fixture. El confinamiento
-  # vigente de los CLIs es el de cli_sandbox.py, exigido por el scanner
-  # no-naked-claude-subprocess.
-  #
-  # bubblewrap no viene en el runner. Y en Ubuntu 23.10+ AppArmor bloquea los
-  # user namespaces sin privilegios, que es justamente lo que bwrap necesita:
-  # se baja el sysctl, tolerando que no exista en kernels donde no aplica.
-  hyde-containment:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install pytest
-      - name: Instalar bubblewrap y habilitar user namespaces
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
-            echo "(sysctl ausente en este kernel -- no aplica)"
-          bwrap --version
-      - run: python -m pytest _hyde_containment_test.py -v
-      # El archivo entero se auto-saltea si falta bwrap (skipif de modulo), y un
-      # skip masivo se ve igual que verde. Se exige el numero real.
-      #
-      # Piso subido de 14 a 21 el 2026-09-27 (fix del token OAuth de Hyde,
-      # segunda auditoria adversarial): 7 tests nuevos de la credencial
-      # (CLAUDE_CODE_OAUTH_TOKEN vs REAL_CREDENTIALS, ver hyde_sandbox.py) --
-      # medido dos veces contra el arbol real, sin DB de por medio.
-      - run: |
-          python -m pytest _hyde_containment_test.py -q 2>&1 | tee /tmp/hyde
-          python3 .github/ci/piso.py verificar hyde-containment/hyde /tmp/hyde || exit $?
-
   facet-resolver-seal:
     runs-on: ubuntu-latest
     steps:
@@ -1420,10 +1356,10 @@ jobs:
       # de tests/test_ejecutor_contratos_cuenta_axioma.py (pedido explícito del
       # coordinador: "un test tiene que ejecutar bwrap de verdad") se saltan solas si
       # bwrap no está -- pero un skip masivo se ve igual que verde (mismo criterio que
-      # hyde-containment, más abajo, que ya resolvió este mismo problema para su propio
-      # archivo). Mismos dos pasos que ese job: bubblewrap no viene en el runner, y en
-      # Ubuntu 23.10+ AppArmor bloquea los user namespaces sin privilegios, que es
-      # justamente lo que bwrap necesita.
+      # cli-sandbox-unit, más arriba, que ya resolvió este mismo problema para su
+      # propio archivo). Mismos dos pasos que ese job: bubblewrap no viene en el
+      # runner, y en Ubuntu 23.10+ AppArmor bloquea los user namespaces sin
+      # privilegios, que es justamente lo que bwrap necesita.
       #
       # `exch` (PR #260, CI en rojo -- ronda 3 de este PR lo usaba, medido sólo en
       # hall9000, nunca contra un runner real hasta que se abrió el PR). Verificado de
