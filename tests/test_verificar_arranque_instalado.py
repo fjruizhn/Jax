@@ -13,7 +13,8 @@ que TODOS los tests de aquí, incluidos los que sólo usan RAIZ_PRUEBA bajo
 
 Frentes cubiertos:
 
-(a) RAIZ_PRUEBA con un árbol de 35 archivos completo y correcto -> 0.
+(a) RAIZ_PRUEBA con un árbol de todos los archivos del manifiesto,
+    completo y correcto -> 0.
 (b) RAIZ_PRUEBA con cada intruso real reproducido en las rondas 2, 3 y 5
     de la auditoría (fragmento y drop-in de más, en cada una de las 12
     rutas de systemd-analyze unit-paths que aplica, incluidas
@@ -95,6 +96,12 @@ from manifiesto_arranque import ROOT, leer_manifiesto
 SCRIPT = ROOT / "ops" / "verificar-arranque-instalado.sh"
 SYSTEMCTL_FALSO = ROOT / "tests" / "fixtures" / "systemctl-falso-para-pruebas.sh"
 
+# El conteo se DERIVA del manifiesto (el árbol de (a) se construye desde
+# leer_manifiesto() y el guion reporta su propio conteo): un literal aquí
+# caducaría en silencio con cada fila que el manifiesto gane o pierda
+# (OP#251 retiró locks.conf: 35 -> 34).
+N_ARCHIVOS_MANIFIESTO = len(leer_manifiesto())
+
 # Los tests con systemctl de mentira necesitan que jax-las-manos.service
 # esté REALMENTE instalado y correcto en /etc (para que el disco, que no
 # pasa por el systemctl falso, coincida con el manifiesto) -- eso es
@@ -120,7 +127,7 @@ def _es_ejecutable(repo_abs: Path) -> bool:
 
 
 def _construir_arbol_completo(destino: Path) -> None:
-    """Los 35 archivos del manifiesto, copiados byte a byte bajo `destino`
+    """Todos los archivos del manifiesto, copiados byte a byte bajo `destino`
     con dueño/modo reales -- exactamente lo que RAIZ_PRUEBA espera
     encontrar para dar 0."""
     for repo_abs, instalada in leer_manifiesto():
@@ -164,7 +171,7 @@ def test_arbol_completo_da_cero(tmp_path):
     _construir_arbol_completo(tmp_path)
     resultado = _correr(tmp_path)
     assert resultado.returncode == 0, resultado.stderr
-    assert "35 archivos" in resultado.stdout
+    assert f"{N_ARCHIVOS_MANIFIESTO} archivos" in resultado.stdout
 
 
 def test_un_guion_de_sbin_sin_extension_exige_755(tmp_path):
@@ -408,7 +415,7 @@ def test_produccion_ignora_systemctl_de_prueba_aunque_este_puesta():
     `SYSTEMCTL_DE_PRUEBA` apuntando al systemctl de mentira en modo
     "falla" (que, si se leyera, haría fallar TODO con "SYSTEMCTL SHOW
     FALLÓ"): el resultado tiene que ser IDÉNTICO al de correr sin esa
-    variable -- rc=0, 35 archivos.
+    variable -- rc=0, todos los archivos del manifiesto.
 
     **Prueba de mutación**: en una COPIA del guion se cambió la rama de
     producción para que leyera `SYSTEMCTL_CMD="${SYSTEMCTL_DE_PRUEBA:-$SYSTEMCTL_CMD}"`
@@ -424,7 +431,7 @@ def test_produccion_ignora_systemctl_de_prueba_aunque_este_puesta():
         f"producción con SYSTEMCTL_DE_PRUEBA puesta (modo falla) tiene que dar 0 igual -- "
         f"si falla, la variable se está leyendo en producción. stdout={resultado.stdout!r} stderr={resultado.stderr!r}"
     )
-    assert "35 archivos" in resultado.stdout, resultado.stdout
+    assert f"{N_ARCHIVOS_MANIFIESTO} archivos" in resultado.stdout, resultado.stdout
 
 
 def test_raiz_prueba_que_resuelve_a_raiz_activa_la_capa_cargado():

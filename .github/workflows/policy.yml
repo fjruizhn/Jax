@@ -469,6 +469,10 @@ jobs:
   # en LocksCompartidosTest, sobre cli_sandbox) y 250 con los +6 puertos de los
   # ataques reales de _hyde_containment_test.py a ContencionRealTest, medido en
   # hall9000 con Python 3.12.
+  # 2026-10-14 (OP#251 seguimiento, auditoria del merge 494305da): 234 --
+  # LocksCompartidosTest (16 pruebas) se retiro junto a flock_compartido_adquirir,
+  # que quedo sin llamador al retirar hyde_sandbox: ya no hay lock compartido
+  # entre usuarios. Medido en hall9000.
   cli-sandbox-unit:
     runs-on: ubuntu-latest
     steps:

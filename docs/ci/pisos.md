@@ -117,7 +117,7 @@ Sin historia anotada en el workflow.
 
 ## `hyde-sandbox-unit/hydesb`
 
-**RETIRADO (2026-10-14, OP#251):** `hyde_sandbox.py` se retiró completo; el job `hyde-sandbox-unit` y esta clave de piso se eliminaron de `policy.yml` y `ci/pisos.json`. La cobertura del lock compartido sigue viva en `LocksCompartidosTest` (`_cli_sandbox_test.py`, piso `cli-sandbox-unit/clisb`).
+**RETIRADO (2026-10-14, OP#251):** `hyde_sandbox.py` se retiró completo; el job `hyde-sandbox-unit` y esta clave de piso se eliminaron de `policy.yml` y `ci/pisos.json`. La cobertura del lock compartido siguió viva en `LocksCompartidosTest` (`_cli_sandbox_test.py`, piso `cli-sandbox-unit/clisb`) — hasta el seguimiento de esa OP (auditoría del merge `494305da`), que también la retiró junto a `flock_compartido_adquirir` (ver `cli-sandbox-unit/clisb`).
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^6 passed`
 
@@ -146,6 +146,8 @@ Sin historia anotada en el workflow.
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^251 passed`
 
 2026-10-14 (OP#251, retiro completo de `hyde_sandbox`): `^251 passed` → `^250 passed`. 251 − 7 pruebas del lock de Hyde retiradas con el módulo (la cobertura del lock compartido sigue viva aquí mismo, en `LocksCompartidosTest`, sobre `cli_sandbox`) + 6 ataques reales portados de `_hyde_containment_test.py` a `ContencionRealTest` = 250. Medido local en hall9000 con Python 3.12: `250 passed`, 0 skipped.
+
+2026-10-14 (OP#251 seguimiento, auditoría del merge `494305da`): `^250 passed` → `^234 passed`. −16 pruebas de `LocksCompartidosTest`, retirada completa junto a su primitiva `flock_compartido_adquirir`, que quedó sin llamador al retirar `hyde_sandbox`: ya no hay lock compartido entre usuarios (el «sigue viva» de la entrada anterior quedó desfasado con este retiro). Medido local en hall9000: `234 passed`, 0 skipped.
 
 ## `faro-fase0/faro`
 
