@@ -29,14 +29,15 @@ Contrato:
 
 Por qué credencial y no SO_PEERCRED: Hyde, jax-platform y LAS MANOS corren
 todos como `fruiz`; el uid del par no distingue a Hyde de la plataforma. Lo que
-sí los distingue es lo que cada uno puede LEER: la jaula de Hyde no monta
-/etc/jax y en su propio espacio de PIDs (no ve el /proc/<pid>/environ de los
-servicios). Desde el 2026-09-27 (B-1, auditoría adversarial) la jaula ya NO
-corre con `--clearenv`: la frontera de entorno es el `env=` mínimo que
-`hyde_sandbox.run_sandboxed_claude` pasa explícito, sin fusionar con
-`os.environ`, a `create_subprocess_exec` (ver hyde_sandbox.py) -- el efecto
-es el mismo (los secretos de `/etc/jax/.env` de este proceso no le llegan a
-Hyde), pero por el `env=`, no por una bandera dentro del argv de bwrap.
+sí los distingue es lo que cada uno puede LEER: la jaula de Hyde (hyde_sandbox,
+retirado en OP#251) no montaba /etc/jax y corría en su propio espacio de PIDs
+(no veía el /proc/<pid>/environ de los servicios). Desde el 2026-09-27 (B-1,
+auditoría adversarial) esa jaula dejó de usar `--clearenv`: la frontera de
+entorno es el `env=` mínimo que el lanzador pasa explícito, sin fusionar con
+`os.environ`, a `create_subprocess_exec` (entonces
+`hyde_sandbox.run_sandboxed_claude`; hoy cli_sandbox.py) -- el efecto
+es el mismo (los secretos de `/etc/jax/.env` de este proceso no le llegan al
+CLI encerrado), pero por el `env=`, no por una bandera dentro del argv de bwrap.
 
 Sin caché nueva: las credenciales se leen una vez al construir el middleware.
 Cambiarlas exige reiniciar LAS MANOS y jax-platform (van en el mismo .env).

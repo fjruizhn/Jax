@@ -13,9 +13,17 @@ extractor independiente del que escribió los datos (yaml.safe_load + regex sobr
      al de la fotografía, y el mínimo del B9 mayor o igual a 102.
 
 La regla es genérica (vale para cada clave de la fotografía): un piso que SUBE no hace fallar estas
-pruebas, y el número de pruebas no cambia (importa: el piso de `archivos-de-test-en-ci/pisos` cuenta
-estas pruebas). Que ningún piso baje lo cubre también el job `pisos-no-bajan` (ver docs/ci/pisos.md).
+pruebas, y el número de pruebas solo cambia por las diferencias esperadas declaradas abajo con
+nombre (importa: el piso de `archivos-de-test-en-ci/pisos` cuenta estas pruebas). Que ningún piso
+baje lo cubre también el job `pisos-no-bajan` (ver docs/ci/pisos.md).
 Un paso que se renombre a propósito sí las hace fallar por diseño.
+
+Diferencias esperadas por OP#251 (GO de Fernando 2026-10-14 18:40, retiro completo de
+hyde_sandbox.py), con el criterio del precedente 186e8ed1 — declaradas por nombre, en el mismo
+commit que su causa, sin comodines: los jobs `hyde-sandbox-unit` e `hyde-containment` (con sus
+3 pisos de la fotografía) están ausentes, y `cli-sandbox-unit/clisb` baja de 251 a 250 medidos
+(−7 pruebas del lock de Hyde retiradas con el módulo, +6 ataques reales portados a
+ContencionRealTest). Todo lo demás sigue siendo idéntico a la fotografía.
 """
 from __future__ import annotations
 
@@ -35,17 +43,32 @@ LLAMADA = re.compile(r"python3 \.github/ci/piso\.py verificar (\S+) (\S+)")
 
 JOBS_NUEVOS = ["pisos-no-bajan", "faro-rule-authority-unit"]
 
+# Diferencias esperadas por OP#251 (GO de Fernando 2026-10-14 18:40): retiro completo de
+# hyde_sandbox.py. Por nombre, sin comodines; el job `pisos-no-bajan` sigue cubriendo todo
+# lo que no esté declarado aquí (la baja de N de clisb la aprobó Fernando de forma explícita,
+# decisión de Hyde 2026-10-14 19:31).
+JOBS_RETIRADOS_OP251 = [
+    "hyde-sandbox-unit",  # job retirado con el módulo; el lock compartido vive en LocksCompartidosTest (clisb)
+    "hyde-containment",   # job retirado; sus ataques reales viven en ContencionRealTest (clisb)
+]
+# Única baja de N declarada: 251 − 7 pruebas del lock de Hyde (retiradas con el módulo)
+# + 6 ataques portados a ContencionRealTest = 250 medidos (desglose en docs/ci/pisos.md).
+N_ESPERADO_OP251 = {"cli-sandbox-unit/clisb": 250}
+
+JOBS_FOTO_ACTIVOS = sorted(set(FOTO["jobs"]) - set(JOBS_RETIRADOS_OP251))
+PISOS_FOTO_ACTIVOS = [p for p in FOTO["pisos"] if p["job"] not in JOBS_RETIRADOS_OP251]
+
 
 def test_los_jobs_son_los_mismos_mas_el_comparador():
-    assert sorted(ACTUAL["jobs"]) == sorted([*FOTO["jobs"], *JOBS_NUEVOS])
+    assert sorted(ACTUAL["jobs"]) == sorted([*JOBS_FOTO_ACTIVOS, *JOBS_NUEVOS])
 
 
-@pytest.mark.parametrize("jid", sorted(FOTO["jobs"]))
+@pytest.mark.parametrize("jid", JOBS_FOTO_ACTIVOS)
 def test_nombre_del_job_identico(jid):
     assert ACTUAL["jobs"][jid].get("name") == FOTO["jobs"][jid]["name"]
 
 
-@pytest.mark.parametrize("jid", sorted(FOTO["jobs"]))
+@pytest.mark.parametrize("jid", JOBS_FOTO_ACTIVOS)
 def test_los_pasos_de_master_siguen_con_su_nombre_y_orden(jid):
     ahora = [s.get("name") for s in ACTUAL["jobs"][jid]["steps"]]
     antes = FOTO["jobs"][jid]["pasos"]
@@ -67,12 +90,13 @@ def _partes(patron: str) -> tuple[str, int, int | None]:
     return forma, int(n.group()), (int(m.group()) if m is not None else None)
 
 
-@pytest.mark.parametrize("piso", FOTO["pisos"], ids=lambda p: f"{p['job']}#{p['paso']}")
+@pytest.mark.parametrize("piso", PISOS_FOTO_ACTIVOS, ids=lambda p: f"{p['job']}#{p['paso']}")
 def test_piso_de_master_existe_con_su_forma_y_no_bajo(piso):
     """Regla GENÉRICA para cada clave de la fotografía (nadie amplía una lista cuando un piso sube): la clave existe
     en ci/pisos.json y el paso la llama una vez con el mismo archivo temporal; el patrón tiene la MISMA forma; N (passed)
     del head >= el de la fotografía; M (skipped) del head <= el de la fotografía, si la forma lo tiene. El valor exacto
-    ya no se compara byte a byte: subir un piso es legítimo y que ninguno baje lo cubre también `pisos-no-bajan`."""
+    ya no se compara byte a byte: subir un piso es legítimo y que ninguno baje lo cubre también `pisos-no-bajan`.
+    Única excepción a «N nunca baja»: N_ESPERADO_OP251 (OP#251), que fija el número EXACTO, no un tope."""
     paso = ACTUAL["jobs"][piso["job"]]["steps"][piso["paso"]]
     llamadas = LLAMADA.findall(paso["run"])
     assert len(llamadas) == 1, "el paso que tenía un piso tiene que llamar exactamente una vez a piso.py"
@@ -86,15 +110,22 @@ def test_piso_de_master_existe_con_su_forma_y_no_bajo(piso):
     endurece = forma_antes == "^<N> passed" and forma_ahora == "^<N> passed, <M> skipped"
     assert endurece or forma_ahora == forma_antes, \
         f"cambió la forma del patrón: {piso['patron']!r} -> {entrada['patron']!r}"
-    assert n_ahora >= n_antes, f"N (passed) bajó de {n_antes} a {n_ahora}"
+    if clave in N_ESPERADO_OP251:
+        # OP#251: única baja de N declarada — número EXACTO, no un «>=» flojo.
+        assert n_ahora == N_ESPERADO_OP251[clave], \
+            f"{clave}: OP#251 fijó {N_ESPERADO_OP251[clave]} y el patrón marca {n_ahora}"
+    else:
+        assert n_ahora >= n_antes, f"N (passed) bajó de {n_antes} a {n_ahora}"
     if m_antes is not None:
         assert m_ahora is not None and m_ahora <= m_antes, f"M (skipped) subió de {m_antes} a {m_ahora}"
     assert entrada["mensaje"].strip(), "el piso no tiene mensaje"
 
 
-def test_los_42_pisos_de_master_tienen_cada_uno_su_clave():
-    migrados = {LLAMADA.findall(ACTUAL["jobs"][p["job"]]["steps"][p["paso"]]["run"])[0][0] for p in FOTO["pisos"]}
-    assert len(migrados) == len(FOTO["pisos"]) == 42
+def test_los_pisos_de_master_tienen_cada_uno_su_clave():
+    """42 en la fotografía menos los 3 pisos de los jobs retirados por OP#251 (declarados
+    arriba): cada piso vivo de master sigue migrado, con su clave única, en su mismo paso."""
+    migrados = {LLAMADA.findall(ACTUAL["jobs"][p["job"]]["steps"][p["paso"]]["run"])[0][0] for p in PISOS_FOTO_ACTIVOS}
+    assert len(migrados) == len(PISOS_FOTO_ACTIVOS) == 39
 
 
 def test_minimo_del_b9_no_bajo_de_el_de_master():

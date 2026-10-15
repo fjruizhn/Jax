@@ -4,7 +4,7 @@
 docs/superpowers/specs/2026-10-01-facetas-por-suscripcion-design.md (§1, §5,
 §D, §G paso 1).
 
-Se prueba con DOS clases de test, igual que Hyde:
+Se prueba con DOS clases de test:
   - logica pura / subproceso simulado (asyncio.create_subprocess_exec
     parcheado): argv, env, titular, recorte, clasificacion de errores;
   - contencion real con bwrap de verdad (se saltan solas si el host no puede
@@ -40,11 +40,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import cli_sandbox
-import hyde_sandbox
 
-# constantes de Hyde tal como las define el modulo (setUp las parchea a un tmp)
-_HYDE_LOCK_DIR_REAL = hyde_sandbox.HYDE_LOCK_DIR
-_HYDE_LOCK_GROUP_REAL = hyde_sandbox.HYDE_LOCK_GROUP
 # originales, antes de que setUp parchee `_consultar_usuario` con un doble
 _CONSULTAR_REAL = cli_sandbox._consultar_usuario
 # el perfil de codex TAL COMO LO DEFINE EL MODULO (setUp lo reemplaza por una copia
@@ -163,18 +159,6 @@ class _Entorno(unittest.IsolatedAsyncioTestCase):
         p2 = patch.object(cli_sandbox, "_BWRAP_BIN", str(self.fake_bwrap))
         p2.start()
         self.addCleanup(p2.stop)
-        # El lock de Hyde es COMPARTIDO (MAJOR-14): directorio y grupo son constantes
-        # del codigo; los tests las parchean a un directorio propio y al grupo del
-        # que corre el test (sin root no hay dueno root: `uid_esperado` se inyecta).
-        self.hyde_lock_dir = t / "hyde-locks"
-        self.hyde_lock_dir.mkdir(mode=0o750)
-        os.chmod(self.hyde_lock_dir, 0o750)
-        p2b = patch.multiple(
-            hyde_sandbox, HYDE_LOCK_DIR=str(self.hyde_lock_dir),
-            HYDE_LOCK_GROUP=grp.getgrgid(os.getgid()).gr_name,
-        )
-        p2b.start()
-        self.addCleanup(p2b.stop)
         self.addCleanup(self.tmp.cleanup)
         self.usuarios = {1: dict(tenant_id=1, status="active", deleted_at=None),
                          8: dict(tenant_id=1, status="active", deleted_at=None),
@@ -206,12 +190,6 @@ class _Entorno(unittest.IsolatedAsyncioTestCase):
         })
         p5.start()
         self.addCleanup(p5.stop)
-
-    def sembrar_lock_hyde(self, ws):
-        """Hace lo que hace tmpfiles.d en el host: crea el archivo del lock de `ws`."""
-        ruta = hyde_sandbox._lock_path_for_workspace(ws)
-        os.close(os.open(ruta, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640))
-        return ruta
 
     async def titular(self, uid=1, tenant=1, ep="chat"):
         return await cli_sandbox.exigir_titular(uid, tenant, ep)
@@ -547,12 +525,12 @@ class TitularInfalsificableTest(_Entorno):
 # ------------------------------------------------------------------ transporte
 
 class SymlinkLasManosTest(unittest.TestCase):
-    def test_las_manos_ve_el_mismo_modulo_que_hyde_sandbox(self):
+    def test_las_manos_ve_el_mismo_modulo_que_la_raiz(self):
         raiz = Path(cli_sandbox.__file__).resolve().parent
         enlace = raiz / "las_manos" / "cli_sandbox.py"
         self.assertTrue(enlace.is_symlink())
         self.assertEqual(enlace.resolve(), (raiz / "cli_sandbox.py").resolve())
-        self.assertEqual(os.readlink(enlace), os.readlink(raiz / "las_manos" / "hyde_sandbox.py").replace("hyde_sandbox", "cli_sandbox"))
+        self.assertEqual(os.readlink(enlace), "../cli_sandbox.py")
 
 
 class TransporteEfectivoTest(unittest.TestCase):
@@ -584,10 +562,10 @@ class PerfilesTest(_Entorno):
     def test_los_tres_perfiles_existen(self):
         self.assertEqual(set(cli_sandbox.PERFILES), {"claude", "codex", "kimi"})
 
-    def test_claude_no_pasa_por_run_cli_y_su_home_coincide_con_hyde(self):
+    def test_claude_no_pasa_por_run_cli_y_su_home_es_el_de_hyde_sandbox(self):
         p = cli_sandbox.PERFILES["claude"]
         self.assertFalse(p.via_run_cli)
-        self.assertEqual(p.home_sandbox, hyde_sandbox.SANDBOX_HOME)
+        self.assertEqual(p.home_sandbox, "/home/hyde-sandbox")
 
     async def test_run_cli_rechaza_claude(self):
         with self.assertRaises(cli_sandbox.PerfilNoSoportado):
@@ -1926,9 +1904,8 @@ class LogDeRunCliTest(_Entorno):
                     timeout=5, titular=None, correlation_id="c", entry_point="chat")
         self.assertIn("clase=TitularNoAutorizado", "\n".join(cm.output))
 
-    def test_sandbox_unavailable_es_un_error_cli_y_hyde_comparte_la_clase(self):
+    def test_sandbox_unavailable_es_un_error_cli(self):
         self.assertTrue(issubclass(cli_sandbox.SandboxUnavailable, cli_sandbox.ErrorCLI))
-        self.assertIs(hyde_sandbox.SandboxUnavailable, cli_sandbox.SandboxUnavailable)
         self.assertEqual(cli_sandbox.SandboxUnavailable.clase, "SandboxUnavailable")
 
 
@@ -2052,21 +2029,6 @@ class EventLoopLibreTest(_Entorno):
 # ----------------------------------------------------------------------- locks
 
 class LocksTest(_Entorno):
-    async def test_el_lock_de_hyde_no_bloquea_a_los_perfiles(self):
-        with tempfile.TemporaryDirectory() as ws:
-            self.sembrar_lock_hyde(ws)
-            fh = hyde_sandbox._acquire_cross_process_lock(ws, timeout=2, uid_esperado=os.getuid())
-            try:
-                res, _, _ = await asyncio.wait_for(self.correr("codex"), 5)
-                self.assertEqual(res.texto, "hola desde codex")
-            finally:
-                hyde_sandbox._release_cross_process_lock(fh)
-
-    async def test_hyde_no_comparte_directorio_de_locks_con_los_perfiles(self):
-        with tempfile.TemporaryDirectory() as ws:
-            hyde = hyde_sandbox._lock_path_for_workspace(ws)
-        self.assertNotEqual(hyde.parent, Path(os.environ["JAX_CLI_LOCK_DIR"]))
-
     async def test_ranuras_acotan_la_concurrencia_y_el_exceso_da_locktimeout(self):
         proc_lento = _FakeProc(_CODEX_OK, demora=1.5)
         titular = await self.titular()
@@ -2418,62 +2380,20 @@ class LocksSegurosTest(_Entorno):
         fh, _ = cli_sandbox._ranura_adquirir("kimi", 2, 1)
         cli_sandbox.flock_liberar(fh)
 
-    async def test_el_lock_de_hyde_tampoco_sigue_symlinks(self):
-        ruta = self.hyde_lock_dir / "ws.lock"
-        os.symlink(self.victima, ruta)
-        with patch.object(hyde_sandbox, "_lock_path_for_workspace", return_value=ruta):
-            with self.assertRaises(cli_sandbox.SandboxUnavailable):
-                hyde_sandbox._acquire_cross_process_lock("/ws", timeout=1, uid_esperado=os.getuid())
-        self.assertEqual(self.victima.read_text(), "NO-TRUNCAR")
-
-    async def test_el_lock_de_hyde_rechaza_un_directorio_con_escritura_de_otros(self):
-        os.chmod(self.hyde_lock_dir, 0o777)
-        with tempfile.TemporaryDirectory() as ws:
-            self.sembrar_lock_hyde(ws)
-            with self.assertRaises(cli_sandbox.SandboxUnavailable):
-                hyde_sandbox._acquire_cross_process_lock(ws, timeout=1, uid_esperado=os.getuid())
-
-    async def test_el_lock_de_hyde_sano_sigue_funcionando(self):
-        with tempfile.TemporaryDirectory() as ws:
-            self.sembrar_lock_hyde(ws)
-            fh = hyde_sandbox._acquire_cross_process_lock(ws, timeout=1, uid_esperado=os.getuid())
-            try:
-                with self.assertRaises(TimeoutError):
-                    hyde_sandbox._acquire_cross_process_lock(ws, timeout=0.2, uid_esperado=os.getuid())
-            finally:
-                hyde_sandbox._release_cross_process_lock(fh)
-
-    async def test_el_lock_de_hyde_sin_sembrar_falla_cerrado_con_la_linea_de_tmpfiles(self):
-        with tempfile.TemporaryDirectory() as ws:
-            nombre = hyde_sandbox._lock_path_for_workspace(ws).name
-            with self.assertRaises(cli_sandbox.SandboxUnavailable) as c:
-                hyde_sandbox._acquire_cross_process_lock(ws, timeout=1, uid_esperado=os.getuid())
-        self.assertIn(
-            f"f {self.hyde_lock_dir}/{nombre} 0640 root {hyde_sandbox.HYDE_LOCK_GROUP} -", str(c.exception))
-        self.assertEqual(list(self.hyde_lock_dir.iterdir()), [], "no se crea nada")
-
-    async def test_lo_viejo_del_lock_de_hyde_se_borro(self):
+    async def test_lo_viejo_del_lock_compartido_se_borro(self):
         # JAX_HYDE_LOCK_DIR ya no es configuracion y el lock de un solo usuario
         # (`flock_adquirir`, por euid) ya no lo usa nadie: no quedan como codigo muerto
-        for nombre in ("HYDE_LOCK_DIR_ENV", "_CLAUDE_SUBPROCESS_LOCK_DIR_NAME"):
-            self.assertFalse(hasattr(hyde_sandbox, nombre), nombre)
         self.assertFalse(hasattr(cli_sandbox, "flock_adquirir"))
-        self.assertNotIn("JAX_HYDE_LOCK_DIR", inspect.getsource(hyde_sandbox))
-
-    async def test_el_directorio_y_el_grupo_de_hyde_son_constantes_y_no_salen_del_entorno(self):
-        self.assertEqual(_HYDE_LOCK_DIR_REAL, "/run/jax-locks/hyde")
-        self.assertEqual(_HYDE_LOCK_GROUP_REAL, "jax-cli-lock")
-        with patch.dict(os.environ, {"JAX_HYDE_LOCK_DIR": "/tmp/otro"}):
-            with tempfile.TemporaryDirectory() as ws:
-                self.assertEqual(hyde_sandbox._lock_path_for_workspace(ws).parent, self.hyde_lock_dir)
+        self.assertNotIn("JAX_HYDE_LOCK_DIR", inspect.getsource(cli_sandbox))
 
 
 class LocksCompartidosTest(unittest.TestCase):
-    """MAJOR-14 (auditoria 2026-10-02, ronda 2): el lock de Hyde lo comparten
-    procesos de usuarios DISTINTOS (las_manos/jaxsvc y el REPL/fruiz), asi que el
-    dueno es root y el acceso es por GRUPO: el directorio y el archivo son de root,
-    del grupo del lock y sin escritura de grupo ni de otros; el archivo se abre
-    SOLO LECTURA, sin O_CREAT (lo siembra tmpfiles.d)."""
+    """MAJOR-14 (auditoria 2026-10-02, ronda 2): el lock compartido lo usan
+    procesos de usuarios DISTINTOS, asi que el dueno es root y el acceso es
+    por GRUPO: el directorio y el archivo son de root, del grupo del lock y sin
+    escritura de grupo ni de otros; el archivo se abre SOLO LECTURA, sin
+    O_CREAT (lo siembra tmpfiles.d). Nacio para el lock de Hyde
+    (hyde_sandbox, retirado en OP#251); la primitiva queda como nucleo comun."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -3060,10 +2980,10 @@ class ContencionRealTest(unittest.TestCase):
         self.afuera = t / "afuera"
         self.afuera.mkdir()
 
-    def correr(self, sh):
+    def correr(self, sh, binds_ro=()):
         argv = cli_sandbox.argv_confinado_cli(
             shutil.which("bwrap"), work_host=str(self.work), home_sandbox="/home/cli-sandbox",
-            binds_rw=[(str(self.cred), "/home/cli-sandbox/.cred")], binds_ro=[],
+            binds_rw=[(str(self.cred), "/home/cli-sandbox/.cred")], binds_ro=list(binds_ro),
             cmd=["/bin/sh", "-c", sh])
         env = cli_sandbox.env_minimo("/home/cli-sandbox")
         return subprocess.run(argv, env=env, capture_output=True, text=True, timeout=20)
@@ -3106,6 +3026,62 @@ class ContencionRealTest(unittest.TestCase):
                                capture_output=True, text=True, timeout=20)
         self.assertNotIn("NO-DEBE-CRUZAR", r.stdout)
         self.assertIn("HOME=/home/cli-sandbox", r.stdout)
+
+    # Puertos de los ataques reales de _hyde_containment_test.py, retirado con
+    # hyde_sandbox (OP#251): los que aqui no tenian contraparte se trasladaron
+    # tal cual, afirmando sobre el HOST cuando el ataque deja huella en el.
+    def test_un_archivo_existente_del_bind_ro_no_se_modifica(self):
+        r = self.correr("echo cambio > /work/sistema.md 2>/dev/null; cat /work/sistema.md")
+        self.assertNotIn("cambio", r.stdout)
+        self.assertIn("hola", r.stdout)
+        self.assertEqual((self.work / "sistema.md").read_text(), "hola")
+
+    def test_no_se_puede_borrar_del_bind_ro(self):
+        r = self.correr("rm /work/sistema.md 2>/dev/null; [ -e /work/sistema.md ] && echo SIGUE")
+        self.assertIn("SIGUE", r.stdout)
+        self.assertTrue((self.work / "sistema.md").exists())
+
+    def test_un_segundo_bind_ro_tambien_es_solo_lectura_y_se_puede_leer(self):
+        otro = Path(self.tmp.name) / "repo"
+        otro.mkdir()
+        (otro / "notas.txt").write_text("contenido-real")
+        r = self.correr(
+            "cat /lectura/notas.txt; echo x > /lectura/nuevo 2>/dev/null; "
+            "echo y > /lectura/notas.txt 2>/dev/null; rm /lectura/notas.txt 2>/dev/null; "
+            "[ -e /lectura/nuevo ] && echo CREADO; echo fin",
+            binds_ro=[(str(otro), "/lectura")])
+        self.assertIn("contenido-real", r.stdout)  # positivo: lo bindeado si se LEER
+        self.assertNotIn("CREADO", r.stdout)
+        self.assertFalse((otro / "nuevo").exists())
+        self.assertEqual((otro / "notas.txt").read_text(), "contenido-real")
+
+    def test_un_archivo_del_host_fuera_de_los_binds_no_es_legible(self):
+        (self.afuera / "secreto.env").write_text("SECRETO-AFUERA=1")
+        r = self.correr(
+            f"cat /work/sistema.md; cat {self.afuera}/secreto.env 2>/dev/null; echo fin")
+        self.assertIn("hola", r.stdout)  # control positivo: cat si funciona dentro
+        self.assertNotIn("SECRETO-AFUERA", r.stdout)
+
+    def test_el_home_y_el_tmp_no_persisten_entre_corridas(self):
+        r1 = self.correr(
+            "echo marca > /home/cli-sandbox/marca && cat /home/cli-sandbox/marca && "
+            "echo tmp > /tmp/marca-tmp")
+        self.assertIn("marca", r1.stdout)  # la primera corrida si escribio
+        r2 = self.correr(
+            "[ -e /home/cli-sandbox/marca ] && echo PERSISTE1; "
+            "[ -e /tmp/marca-tmp ] && echo PERSISTE2; echo fin")
+        self.assertNotIn("PERSISTE", r2.stdout)
+        self.assertIn("fin", r2.stdout)
+
+    def test_el_entorno_es_exactamente_el_minimo(self):
+        with patch.dict(os.environ, {"SECRETO_DEL_PADRE": "NO-DEBE-CRUZAR", "OTRA_CUALQUIERA": "x"}):
+            r = self.correr("/usr/bin/env")
+        claves = {l.split("=", 1)[0] for l in r.stdout.splitlines() if "=" in l}
+        # PWD lo pone el propio /bin/sh tras el --chdir de bwrap: solo vale si es
+        # /work; si fuera el del host (el checkout), seria fuga del padre.
+        self.assertEqual(claves, {"HOME", "PATH", "LANG", "PWD"}, r.stdout)
+        self.assertIn("PWD=/work", r.stdout)
+        self.assertNotIn("NO-DEBE-CRUZAR", r.stdout)
 
 
 if __name__ == "__main__":

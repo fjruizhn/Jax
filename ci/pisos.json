@@ -25,17 +25,9 @@
       "patron": "^5 passed",
       "mensaje": "PISO ROTO: se esperaban 5 tests CORRIDOS."
     },
-    "hyde-sandbox-unit/hydesb": {
-      "patron": "^6 passed",
-      "mensaje": "PISO ROTO: se esperaban 6 tests CORRIDOS de hyde_sandbox."
-    },
-    "hyde-sandbox-unit/golden": {
-      "patron": "^3 passed",
-      "mensaje": "PISO ROTO: se esperaban 3 tests CORRIDOS de la golden de Hyde."
-    },
     "cli-sandbox-unit/clisb": {
-      "patron": "^251 passed",
-      "mensaje": "PISO ROTO: se esperaban 251 tests CORRIDOS de cli_sandbox."
+      "patron": "^250 passed",
+      "mensaje": "PISO ROTO: se esperaban 250 tests CORRIDOS de cli_sandbox. OP#251 (2026-10-14): 251-7 pruebas del lock de Hyde retiradas con el modulo (la cobertura del lock compartido vive en LocksCompartidosTest) +6 ataques de contencion portados de _hyde_containment_test.py; medido 250 passed, 0 skipped en hall9000."
     },
     "faro-fase0/faro": {
       "patron": "^780 passed",
@@ -64,10 +56,6 @@
     "memory-vector-zero-io/out": {
       "patron": "^223 passed",
       "mensaje": "PISO ROTO: se esperaban 223 tests CORRIDOS (no skipeados)."
-    },
-    "hyde-containment/hyde": {
-      "patron": "^21 passed",
-      "mensaje": "PISO ROTO: se esperaban 21 tests CORRIDOS (no skipeados)."
     },
     "facet-resolver-seal/seal": {
       "patron": "^13 passed",
@@ -106,8 +94,8 @@
       "mensaje": "PISO ROTO: se esperaban 214 tests CORRIDOS de F2-E-SR3."
     },
     "governance/f2e-sr3-source": {
-      "patron": "^166 passed",
-      "mensaje": "PISO ROTO: se esperaban 166 tests CORRIDOS de F2-E-SR3 source/auth/routing."
+      "patron": "^165 passed",
+      "mensaje": "PISO ROTO: se esperaban 165 tests CORRIDOS de F2-E-SR3 source/auth/routing. OP#251 (2026-10-14): 166-1, se retiro test_la_jaula_de_hyde_no_recibe_la_credencial, que probaba el modulo hyde_sandbox retirado."
     },
     "governance/gov": {
       "patron": "^264 passed",
@@ -122,8 +110,8 @@
       "mensaje": "PISO ROTO: se esperaban exactamente 15 tests CORRIDOS de F2-E structured projection."
     },
     "tests-puros/out": {
-      "patron": "^3888 passed, 45 skipped",
-      "mensaje": "PISO ROTO: se esperaban 3888 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Re-medido el 2026-10-06 (ronda 15 de JAX#357) sobre la MEZCLA de la rama con origin/master (36dafaa2) por recoleccion con la lista exacta de 195 archivos del paso 'Piso exacto', sin JAX_DB_HOST: 3934 recolectadas = 3888 passed + 45 skipped + 1 xfailed (3841 de la rama + 35 de #362 + 12 de la ronda 15), a confirmar en el runner; 435d1ede recolecta 3814 con la misma lista."
+      "patron": "^3887 passed, 45 skipped",
+      "mensaje": "PISO ROTO: se esperaban 3888 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Re-medido el 2026-10-06 (ronda 15 de JAX#357) sobre la MEZCLA de la rama con origin/master (36dafaa2) por recoleccion con la lista exacta de 195 archivos del paso 'Piso exacto', sin JAX_DB_HOST: 3934 recolectadas = 3888 passed + 45 skipped + 1 xfailed (3841 de la rama + 35 de #362 + 12 de la ronda 15), a confirmar en el runner; 435d1ede recolecta 3814 con la misma lista. OP#251 (2026-10-14): 3888-1=3887 passed con la misma lista de archivos; -1 test_la_jaula_de_hyde_no_recibe_la_credencial (tests/test_las_manos_auth_servicio.py), que probaba el modulo hyde_sandbox retirado."
     },
     "tests-puros/arranque_instalado": {
       "patron": "^46 passed, 9 skipped",
@@ -206,8 +194,8 @@
       "mensaje": "PISO ROTO: se esperaban 306 tests CORRIDOS (no skipeados) y exactamente 1 skipped."
     },
     "archivos-de-test-en-ci/pisos": {
-      "patron": "^238 passed",
-      "mensaje": "PISO ROTO: se esperaban 238 tests CORRIDOS de los pisos fuera del workflow."
+      "patron": "^231 passed",
+      "mensaje": "PISO ROTO: se esperaban 231 tests CORRIDOS de los pisos fuera del workflow."
     },
     "authority-ledger-seal/attacks": {
       "patron": "^4 passed in ",

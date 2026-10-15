@@ -165,7 +165,7 @@ def test_correr_cancela_lo_que_corre_cuando_aparece_el_freno(monkeypatch, tmp_pa
         try:
             await asyncio.sleep(30)
         except asyncio.CancelledError:
-            # Lo que hace hyde_sandbox.run_sandboxed_claude: proc.kill().
+            # Lo que hace el lanzador sandboxeado (cli_sandbox.py): proc.kill().
             limpieza.append("cancelada")
             raise
 
@@ -196,7 +196,7 @@ def test_correr_espera_la_limpieza_interna_ante_un_timeout_externo(monkeypatch, 
     Antes, el `finally` de `correr_con_interruptor` pedía la cancelación de
     la tarea interna pero no la esperaba: un `asyncio.wait_for` externo (el
     de `_run_one_step`) podía capturar `TimeoutError` con la limpieza de
-    `run_sandboxed_claude`/`_invoke_motor` todavía en curso. Con el freno
+    `_invoke_motor` todavía en curso. Con el freno
     NUNCA puesto -- este test no lo activa -- para que el timeout externo sea
     la única causa de la cancelación.
     """

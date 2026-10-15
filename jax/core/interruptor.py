@@ -27,8 +27,9 @@ Reglas:
   os.link, que falla si ya existe) y `borrar_pausa` lo quita; los dos
   sincronizan el directorio.
 - `correr_con_interruptor` (sólo jax) corre una corrutina y la cancela si el
-  freno aparece; `hyde_sandbox.run_sandboxed_claude` mata su proceso al
-  recibir la cancelación.
+  freno aparece; el lanzador sandboxeado del CLI mata su proceso al recibir
+  la cancelación (antes `hyde_sandbox.run_sandboxed_claude`; hoy
+  cli_sandbox.py).
 
 En memoria de Jairo Urbina.
 """
@@ -182,7 +183,7 @@ async def correr_con_interruptor(corrutina, *, intervalo: float = INTERVALO_DE_S
         # (asyncio.wait_for en _run_one_step) o una cancelación externa de
         # ESTA corrutina también pasan por acá, y si solo pedimos la
         # cancelación sin esperarla, la limpieza real del dispatch interno
-        # (run_sandboxed_claude matando a Hyde, _invoke_motor cancelando el
+        # (el lanzador sandboxeado matando al CLI, _invoke_motor cancelando el
         # job en LAS MANOS) puede seguir en curso cuando el error ya se
         # propagó y _fail_step ya corrió. gather() con return_exceptions
         # espera esa limpieza sin tragarse la CancelledError externa: no la

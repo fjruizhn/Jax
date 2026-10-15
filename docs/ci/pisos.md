@@ -117,6 +117,8 @@ Sin historia anotada en el workflow.
 
 ## `hyde-sandbox-unit/hydesb`
 
+**RETIRADO (2026-10-14, OP#251):** `hyde_sandbox.py` se retiró completo; el job `hyde-sandbox-unit` y esta clave de piso se eliminaron de `policy.yml` y `ci/pisos.json`. La cobertura del lock compartido sigue viva en `LocksCompartidosTest` (`_cli_sandbox_test.py`, piso `cli-sandbox-unit/clisb`).
+
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^6 passed`
 
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
@@ -133,6 +135,8 @@ Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 ## `hyde-sandbox-unit/golden`
 
+**RETIRADO (2026-10-14, OP#251):** junto con `hyde_sandbox.py` completo; el job y la clave de piso se eliminaron de `policy.yml` y `ci/pisos.json`.
+
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^3 passed`
 
 Sin historia anotada en el workflow.
@@ -141,7 +145,7 @@ Sin historia anotada en el workflow.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^251 passed`
 
-Sin historia anotada en el workflow.
+2026-10-14 (OP#251, retiro completo de `hyde_sandbox`): `^251 passed` → `^250 passed`. 251 − 7 pruebas del lock de Hyde retiradas con el módulo (la cobertura del lock compartido sigue viva aquí mismo, en `LocksCompartidosTest`, sobre `cli_sandbox`) + 6 ataques reales portados de `_hyde_containment_test.py` a `ContencionRealTest` = 250. Medido local en hall9000 con Python 3.12: `250 passed`, 0 skipped.
 
 ## `faro-fase0/faro`
 
@@ -755,6 +759,8 @@ en la prueba del adaptador persistente; medido en Actions para PR #305.
 
 ## `hyde-containment/hyde`
 
+**RETIRADO (2026-10-14, OP#251):** junto con `hyde_sandbox.py` completo; el job y la clave de piso se eliminaron de `policy.yml` y `ci/pisos.json`. Los ataques reales de ese job que no tenían contraparte se portaron a `ContencionRealTest` (`_cli_sandbox_test.py`, piso `cli-sandbox-unit/clisb`).
+
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^21 passed`
 
 Sin historia anotada en el workflow.
@@ -853,6 +859,8 @@ Jax#338 (2026-10-04): `^156 passed` → `^164 passed`, +8 en las_manos/_procesam
 
 2026-10-06 (cierre de #362): `^164 passed` → `^166 passed`, +2 netas en `tests/test_las_manos_auth_servicio.py` (la identidad `jacobs` pierde `/motor/dispatch` y `/motor/job/*`: 3 pruebas de 403 + 1 de que conserva solo `/jacobs/pipeline`, menos 2 filas de `test_declarar_otra_identidad_se_rechaza`). Medido LOCAL en hall9000 con el comando exacto de tres archivos (`166 passed`). Esos +2 ya estaban contados en `tests-puros/out`, que corre el mismo archivo: el archivo cae en DOS pisos y la tanda anterior solo ajusto uno. Revisados todos los pasos de `policy.yml` que corren archivos tocados desde ea428368 (`auth_servicio`, `human_gate`, `arranque`, `invoke_motor_*`, `config_entorno`, `cliente_http`, `dispatch_step_reroute`, `plan_facetas`, `_arbitro_test`): solo este paso (fuera de `tests-puros/out`) corre uno de ellos; los otros pasos de `governance` (10 a 13) siguen en `^264`, `^15` y `^10`, medidos local.
 
+2026-10-14 (OP#251, retiro de `hyde_sandbox`): `^166 passed` → `^165 passed`, −1 `test_la_jaula_de_hyde_no_recibe_la_credencial` (`tests/test_las_manos_auth_servicio.py`), que probaba el módulo retirado (lo importaba y llamaba `wrap_hyde_command`). Medido LOCAL en hall9000 con el comando exacto de tres archivos (`165 passed`). El mismo test cae también en `tests-puros/out` (3888 → 3887).
+
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 ```text
@@ -948,6 +956,12 @@ para conservar byte a byte el registro de la migración de pisos.
 matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
 sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
 piso se vuelve a fijar desde los **3537 de master**.
+
+3888 -> 3887 (2026-10-14, OP#251, retiro de `hyde_sandbox`): −1 `test_la_jaula_de_hyde_no_recibe_la_credencial`
+(`tests/test_las_manos_auth_servicio.py`), que probaba el módulo retirado (lo importaba y llamaba
+`wrap_hyde_command`); misma lista de archivos. El mismo test cae también en
+`governance/f2e-sr3-source` (166 → 165). Medido LOCAL en hall9000 (3887 passed); los 45 skipped solo
+son verificables en el runner (local: 3). A confirmar en el runner.
 
 3876 -> 3888 (2026-10-06, JAX#357 ronda 15): +12 en `tests/test_docker_rm_sin_fuga_de_volumenes.py`
 (de 307 a 319): prueba diferencial de que `_hallazgos_de_cadenas_de_master` cuenta exactamente lo que
@@ -4745,8 +4759,10 @@ Antes: 8.
 
 ## `archivos-de-test-en-ci/pisos`
 
-Patrón local reapilado (2026-10-10): `^238 passed`. Medido con los tres módulos exactos del job
-en Python 3.14.4; falta confirmación de CI para el SHA final de #388. La medición CI `^233 passed`
+Patrón local reapilado (2026-10-14, OP#251): `^231 passed`. Medido con los tres módulos exactos del
+job en Python 3.14.4 tras declarar las diferencias esperadas en la prueba de migración; la corrida
+CI en Python 3.12 debe confirmarlo antes de integrar. Patrón anterior `^238 passed` (2026-10-10),
+medido con los mismos módulos. La medición CI `^233 passed`
 en run `38044350914` corresponde al SHA histórico `c78080442da81a468768a7af5b2c5b748ff56b37`.
 
 Piso nuevo de la migración: `policy/tests/test_pisos_fuera_del_workflow.py` (permanente),
@@ -4761,6 +4777,17 @@ rechazo de grant en otra rama destino. Medido con el comando exacto de CI: `233 
 aceptar creación/reemplazo exactos y rechazar estados anterior/propuesto/aterrizado incorrectos;
 el escenario de integración del grant ahora cubre también reemplazo de una definición previa
 (+1 parámetro). Medición local con el comando exacto de CI en Python 3.14.4: `238 passed`; la
+corrida CI en Python 3.12 debe confirmarlo antes de integrar.
+238 -> 231 (2026-10-14, OP#251, retiro completo de hyde_sandbox; GO de Fernando 18:40): la prueba
+de migración declara por nombre las diferencias esperadas (criterio del precedente 186e8ed1): los
+jobs `hyde-sandbox-unit` e `hyde-containment` retirados y `cli-sandbox-unit/clisb` 251 -> 250.
+Desaparecen exactamente 7 casos parametrizados (2 `nombre[...]`, 2 `pasos[...]`, 3 `piso[...]` de
+esos jobs); los otros 3 fallos del run 38663432336 (`test_los_jobs_son_los_mismos`,
+`piso[cli-sandbox-unit#5]` por la baja de N declarada y la prueba de conteo) pasan con la
+excepción declarada — por eso 231 y no 228: los 10 fallos del run no eran 10 pruebas retiradas.
+La baja de pisos que esto refleja la aprobó Fernando de forma explícita (el rojo de
+`pisos-no-bajan` se acepta en la integración; decisión de Hyde 2026-10-14 19:31). Medido con el
+comando exacto del job en Python 3.14.4: `231 passed`, visto antes en rojo contra `^238`; la
 corrida CI en Python 3.12 debe confirmarlo antes de integrar.
 
 ## `authority-ledger-seal/attacks`
