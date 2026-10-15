@@ -2,8 +2,10 @@
 """Gobernanza de sub-agentes de Claude Code (DEUDA.md, "Sub-agentes de
 Claude Code sin gobernanza real"): el UNICO punto de entrada aprobado
 para lanzar `claude` como subproceso es cli_sandbox.py -- aplica el
-sandbox de bwrap y el lock cross-proceso (flock(2)) que serializa las
-invocaciones entre el proceso de las_manos y el del REPL. El modulo
+sandbox de bwrap y sus locks de ranura por perfil (flock(2), mismo
+euid); el lock compartido entre las_manos y el REPL que aqui se citaba
+se retiro con hyde_sandbox en OP#251 y su primitiva, ya sin llamador,
+en el seguimiento (2026-10-14). El modulo
 aprobado original era hyde_sandbox.py::run_sandboxed_claude(); OP#251 lo
 retiró completo y el nombre viejo ya no exime nada (ver
 test_hyde_sandbox_ya_no_exime_ningun_subprocess_desnudo).
@@ -145,7 +147,8 @@ EXCLUDE_DIR_NAMES = {
 #
 # _cli_sandbox_test.py es el archivo de tests DEDICADO del modulo aprobado.
 # Sus llamadas reales a subprocess ejercitan el confinamiento con binarios
-# falsos -- nunca lanzan `claude`. La exencion es de ESE nombre exacto en
+# falsos o, en ContencionRealTest, con bwrap real de verdad -- nunca
+# lanzan `claude`. La exencion es de ESE nombre exacto en
 # el root, no de "cualquier test": un *_test.py generico que lance `claude`
 # sigue siendo violacion.
 #
