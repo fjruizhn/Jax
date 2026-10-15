@@ -16,8 +16,9 @@ usar `claude setup-token` de la cuenta Max, sin API key, viene de Fernando
   activos. El journal del 15-oct mostró sincronizaciones `ok=True`, sin
   proveedores fallidos.
 - `claude setup-token` exigió autenticación interactiva en navegador. Fernando
-  terminó el flujo en su terminal y guardó el token dos veces mediante
-  `/srv/jax-prod/jax-platform/ops/guardar-token-claude.sh` a las 12:55 CST.
+  terminó el flujo en su terminal y pegó el token dos veces para confirmar;
+  `/srv/jax-prod/jax-platform/ops/guardar-token-claude.sh` lo guardó una vez,
+  a las 12:55 CST.
   El script produjo `/etc/jax/.env.bak-20261015-125537` antes de sustituir
   el archivo. No se registró el valor del token.
 - Después del cambio, `/etc/jax/.env` conservó `root:jaxsvc` y modo `640`.
@@ -33,6 +34,9 @@ usar `claude setup-token` de la cuenta Max, sin API key, viene de Fernando
   proceso coincidió exactamente con el archivo, sin imprimirla. El journal
   de ambas unidades no mostró advertencias tras el reinicio. El timer del
   catálogo siguió activo.
+- La corrida del timer a las 13:01:36 CST terminó `ok=True`, sin proveedores
+  fallidos ni saltados. Registró `programado_no_toca`: por cadencia no hizo
+  una consulta nueva a Anthropic; esa validación la cubre el HTTP 200 anterior.
 
 Fuente de estas observaciones: `stat`, `systemctl show`, `/proc/<pid>/environ`
 (comparación en memoria), `journalctl`, restauración temporal y respuesta HTTP
