@@ -4759,8 +4759,10 @@ Antes: 8.
 
 ## `archivos-de-test-en-ci/pisos`
 
-Patrón local reapilado (2026-10-10): `^238 passed`. Medido con los tres módulos exactos del job
-en Python 3.14.4; falta confirmación de CI para el SHA final de #388. La medición CI `^233 passed`
+Patrón local reapilado (2026-10-14, OP#251): `^231 passed`. Medido con los tres módulos exactos del
+job en Python 3.14.4 tras declarar las diferencias esperadas en la prueba de migración; la corrida
+CI en Python 3.12 debe confirmarlo antes de integrar. Patrón anterior `^238 passed` (2026-10-10),
+medido con los mismos módulos. La medición CI `^233 passed`
 en run `38044350914` corresponde al SHA histórico `c78080442da81a468768a7af5b2c5b748ff56b37`.
 
 Piso nuevo de la migración: `policy/tests/test_pisos_fuera_del_workflow.py` (permanente),
@@ -4775,6 +4777,17 @@ rechazo de grant en otra rama destino. Medido con el comando exacto de CI: `233 
 aceptar creación/reemplazo exactos y rechazar estados anterior/propuesto/aterrizado incorrectos;
 el escenario de integración del grant ahora cubre también reemplazo de una definición previa
 (+1 parámetro). Medición local con el comando exacto de CI en Python 3.14.4: `238 passed`; la
+corrida CI en Python 3.12 debe confirmarlo antes de integrar.
+238 -> 231 (2026-10-14, OP#251, retiro completo de hyde_sandbox; GO de Fernando 18:40): la prueba
+de migración declara por nombre las diferencias esperadas (criterio del precedente 186e8ed1): los
+jobs `hyde-sandbox-unit` e `hyde-containment` retirados y `cli-sandbox-unit/clisb` 251 -> 250.
+Desaparecen exactamente 7 casos parametrizados (2 `nombre[...]`, 2 `pasos[...]`, 3 `piso[...]` de
+esos jobs); los otros 3 fallos del run 38663432336 (`test_los_jobs_son_los_mismos`,
+`piso[cli-sandbox-unit#5]` por la baja de N declarada y la prueba de conteo) pasan con la
+excepción declarada — por eso 231 y no 228: los 10 fallos del run no eran 10 pruebas retiradas.
+La baja de pisos que esto refleja la aprobó Fernando de forma explícita (el rojo de
+`pisos-no-bajan` se acepta en la integración; decisión de Hyde 2026-10-14 19:31). Medido con el
+comando exacto del job en Python 3.14.4: `231 passed`, visto antes en rojo contra `^238`; la
 corrida CI en Python 3.12 debe confirmarlo antes de integrar.
 
 ## `authority-ledger-seal/attacks`
