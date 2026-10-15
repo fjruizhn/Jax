@@ -2980,10 +2980,10 @@ class ContencionRealTest(unittest.TestCase):
         self.afuera = t / "afuera"
         self.afuera.mkdir()
 
-    def correr(self, sh):
+    def correr(self, sh, binds_ro=()):
         argv = cli_sandbox.argv_confinado_cli(
             shutil.which("bwrap"), work_host=str(self.work), home_sandbox="/home/cli-sandbox",
-            binds_rw=[(str(self.cred), "/home/cli-sandbox/.cred")], binds_ro=[],
+            binds_rw=[(str(self.cred), "/home/cli-sandbox/.cred")], binds_ro=list(binds_ro),
             cmd=["/bin/sh", "-c", sh])
         env = cli_sandbox.env_minimo("/home/cli-sandbox")
         return subprocess.run(argv, env=env, capture_output=True, text=True, timeout=20)
@@ -3026,6 +3026,62 @@ class ContencionRealTest(unittest.TestCase):
                                capture_output=True, text=True, timeout=20)
         self.assertNotIn("NO-DEBE-CRUZAR", r.stdout)
         self.assertIn("HOME=/home/cli-sandbox", r.stdout)
+
+    # Puertos de los ataques reales de _hyde_containment_test.py, retirado con
+    # hyde_sandbox (OP#251): los que aqui no tenian contraparte se trasladaron
+    # tal cual, afirmando sobre el HOST cuando el ataque deja huella en el.
+    def test_un_archivo_existente_del_bind_ro_no_se_modifica(self):
+        r = self.correr("echo cambio > /work/sistema.md 2>/dev/null; cat /work/sistema.md")
+        self.assertNotIn("cambio", r.stdout)
+        self.assertIn("hola", r.stdout)
+        self.assertEqual((self.work / "sistema.md").read_text(), "hola")
+
+    def test_no_se_puede_borrar_del_bind_ro(self):
+        r = self.correr("rm /work/sistema.md 2>/dev/null; [ -e /work/sistema.md ] && echo SIGUE")
+        self.assertIn("SIGUE", r.stdout)
+        self.assertTrue((self.work / "sistema.md").exists())
+
+    def test_un_segundo_bind_ro_tambien_es_solo_lectura_y_se_puede_leer(self):
+        otro = Path(self.tmp.name) / "repo"
+        otro.mkdir()
+        (otro / "notas.txt").write_text("contenido-real")
+        r = self.correr(
+            "cat /lectura/notas.txt; echo x > /lectura/nuevo 2>/dev/null; "
+            "echo y > /lectura/notas.txt 2>/dev/null; rm /lectura/notas.txt 2>/dev/null; "
+            "[ -e /lectura/nuevo ] && echo CREADO; echo fin",
+            binds_ro=[(str(otro), "/lectura")])
+        self.assertIn("contenido-real", r.stdout)  # positivo: lo bindeado si se LEER
+        self.assertNotIn("CREADO", r.stdout)
+        self.assertFalse((otro / "nuevo").exists())
+        self.assertEqual((otro / "notas.txt").read_text(), "contenido-real")
+
+    def test_un_archivo_del_host_fuera_de_los_binds_no_es_legible(self):
+        (self.afuera / "secreto.env").write_text("SECRETO-AFUERA=1")
+        r = self.correr(
+            f"cat /work/sistema.md; cat {self.afuera}/secreto.env 2>/dev/null; echo fin")
+        self.assertIn("hola", r.stdout)  # control positivo: cat si funciona dentro
+        self.assertNotIn("SECRETO-AFUERA", r.stdout)
+
+    def test_el_home_y_el_tmp_no_persisten_entre_corridas(self):
+        r1 = self.correr(
+            "echo marca > /home/cli-sandbox/marca && cat /home/cli-sandbox/marca && "
+            "echo tmp > /tmp/marca-tmp")
+        self.assertIn("marca", r1.stdout)  # la primera corrida si escribio
+        r2 = self.correr(
+            "[ -e /home/cli-sandbox/marca ] && echo PERSISTE1; "
+            "[ -e /tmp/marca-tmp ] && echo PERSISTE2; echo fin")
+        self.assertNotIn("PERSISTE", r2.stdout)
+        self.assertIn("fin", r2.stdout)
+
+    def test_el_entorno_es_exactamente_el_minimo(self):
+        with patch.dict(os.environ, {"SECRETO_DEL_PADRE": "NO-DEBE-CRUZAR", "OTRA_CUALQUIERA": "x"}):
+            r = self.correr("/usr/bin/env")
+        claves = {l.split("=", 1)[0] for l in r.stdout.splitlines() if "=" in l}
+        # PWD lo pone el propio /bin/sh tras el --chdir de bwrap: solo vale si es
+        # /work; si fuera el del host (el checkout), seria fuga del padre.
+        self.assertEqual(claves, {"HOME", "PATH", "LANG", "PWD"}, r.stdout)
+        self.assertIn("PWD=/work", r.stdout)
+        self.assertNotIn("NO-DEBE-CRUZAR", r.stdout)
 
 
 if __name__ == "__main__":
