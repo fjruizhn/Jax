@@ -24,6 +24,11 @@ commit que su causa, sin comodines: los jobs `hyde-sandbox-unit` e `hyde-contain
 3 pisos de la fotografía) están ausentes, y `cli-sandbox-unit/clisb` baja de 251 a 250 medidos
 (−7 pruebas del lock de Hyde retiradas con el módulo, +6 ataques reales portados a
 ContencionRealTest). Todo lo demás sigue siendo idéntico a la fotografía.
+
+El seguimiento de esa OP (2026-10-14, auditoría del merge `494305da`) declara una segunda
+baja de `cli-sandbox-unit/clisb`: 250 → 234 medidos (−16 pruebas de `LocksCompartidosTest`,
+retiradas con su primitiva `flock_compartido_adquirir`, que quedó sin llamador al retirar
+`hyde_sandbox`: ya no hay lock compartido entre usuarios).
 """
 from __future__ import annotations
 
@@ -48,12 +53,15 @@ JOBS_NUEVOS = ["pisos-no-bajan", "faro-rule-authority-unit"]
 # lo que no esté declarado aquí (la baja de N de clisb la aprobó Fernando de forma explícita,
 # decisión de Hyde 2026-10-14 19:31).
 JOBS_RETIRADOS_OP251 = [
-    "hyde-sandbox-unit",  # job retirado con el módulo; el lock compartido vive en LocksCompartidosTest (clisb)
+    "hyde-sandbox-unit",  # job retirado con el módulo y su lock compartido (la cobertura que
+                         # quedaba, LocksCompartidosTest, se retiró en el seguimiento de OP#251)
     "hyde-containment",   # job retirado; sus ataques reales viven en ContencionRealTest (clisb)
 ]
 # Única baja de N declarada: 251 − 7 pruebas del lock de Hyde (retiradas con el módulo)
-# + 6 ataques portados a ContencionRealTest = 250 medidos (desglose en docs/ci/pisos.md).
-N_ESPERADO_OP251 = {"cli-sandbox-unit/clisb": 250}
+# + 6 ataques portados a ContencionRealTest = 250; el seguimiento (auditoría del merge
+# 494305da) retiró otras 16 — LocksCompartidosTest, con `flock_compartido_adquirir`, ya
+# sin llamador — y 250 − 16 = 234 medidos (desglose en docs/ci/pisos.md).
+N_ESPERADO_OP251 = {"cli-sandbox-unit/clisb": 234}
 
 JOBS_FOTO_ACTIVOS = sorted(set(FOTO["jobs"]) - set(JOBS_RETIRADOS_OP251))
 PISOS_FOTO_ACTIVOS = [p for p in FOTO["pisos"] if p["job"] not in JOBS_RETIRADOS_OP251]
