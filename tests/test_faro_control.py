@@ -14,8 +14,10 @@ kernel) o inyectando las credenciales del par (`leer_credenciales`). La prueba c
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import socket
 import stat
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -28,6 +30,7 @@ from jax.faro.bitacora import Bitacora
 from jax.faro.bitacora_db import EmisorTabla, verificar_cadena
 from jax.faro.config import ConfigFaroInvalida, ConfigPuerto
 from jax.faro.control import ConfigControl, ServidorControl
+from jax.faro.scope import ConfigScope, EstadoUnidad, ScopeError, ScopeManager
 from jax.faro.servicio import arrancar
 from jax.faro.transporte import ServidorPuerto
 from tests._faro_falsos import FalsoPool, FalsoTelegram
@@ -38,6 +41,80 @@ UID = os.getuid()
 JAULA_MIN, JAULA_MAX = 50000, 50050
 PEDIDO = {"op": "crear", "usuario": "u-real", "tenant": "t-real", "faceta": "hyde", "motor": "codex",
           "pipeline": "p-real", "entry_point": "repl", "uid_jaula": 50001}
+
+
+class FalsoScope:
+    """El doble EXPLICITO del gestor de unidades (0.6/R-2): sin el no hay canal de control, y un uid sin
+    estado concluyente (UNKNOWN) retiene. `estados` mapea uid -> EstadoUnidad; lo que no esta, EMPTY."""
+
+    def __init__(self, estados: dict[int, EstadoUnidad] | None = None):
+        self.estados = dict(estados or {})
+        self.consultas: list[int] = []
+        self.muertes: list[int] = []
+        self.esperas: list[int] = []
+        self.error: Exception | None = None          # si se pone, toda consulta revienta
+        self.error_cierre: Exception | None = None
+        self.error_recuperacion: Exception | None = None
+        self.al_matar = None                          # callable(uid): espiar el mundo en el momento del kill
+        self.admision_cerrada = False
+        self.uid_bloqueados: list[int] = []
+        self.cierres_uid: list[int] = []
+        self._propietario_instancia = None
+
+    async def adquirir_instancia(self):
+        if self._propietario_instancia is not None:
+            raise ScopeError("instancia única ya adquirida")
+        self._propietario_instancia = object()
+        return self._propietario_instancia
+
+    async def liberar_instancia(self, propietario):
+        if propietario is not self._propietario_instancia:
+            raise ScopeError("token de instancia ajeno")
+        self._propietario_instancia = None
+
+    def cerrar_admision(self) -> None:
+        self.admision_cerrada = True
+
+    def bloquear_uid(self, uid: int) -> None:
+        self.uid_bloqueados.append(uid)
+
+    async def cerrar_uid(self, uid: int) -> None:
+        self.cierres_uid.append(uid)
+        self.esperas.append(uid)                       # close incluye el wait causal del cliente/unidad
+        if self.error_cierre is not None:
+            raise self.error_cierre
+        self.muertes.append(uid)
+        if self.al_matar is not None:
+            self.al_matar(uid)
+        self.estados[uid] = EstadoUnidad.EMPTY
+
+    async def recuperar_leases(self) -> None:
+        if self.error_recuperacion is not None:
+            raise self.error_recuperacion
+        self.recuperacion_terminada = True
+
+    async def liberar(self, uid: int) -> None:
+        return None
+
+    async def estado(self, uid: int) -> EstadoUnidad:
+        self.consultas.append(uid)
+        if self.error is not None:
+            raise self.error
+        return self.estados.get(uid, EstadoUnidad.EMPTY)
+
+    async def matar(self, uid: int) -> None:
+        self.muertes.append(uid)
+        if self.al_matar is not None:
+            self.al_matar(uid)
+
+    async def esperar_vacio(self, uid: int, *, plazo_s: float | None = None) -> EstadoUnidad:
+        self.esperas.append(uid)
+        if self.error is not None:
+            raise self.error
+        return self.estados.get(uid, EstadoUnidad.EMPTY)
+
+    async def esperar_limpiezas(self) -> None:
+        return None
 
 
 def _cfg_control(tmp_path, **kw) -> ConfigControl:
@@ -61,13 +138,13 @@ def mundo(tmp_path):
 
 
 @asynccontextmanager
-async def control(mundo, *, cfg=None, bitacora=None, **kw):
+async def control(mundo, *, cfg=None, bitacora=None, scope=None, **kw):
     bit = bitacora if bitacora is not None else Bitacora(emisores=[mundo.registros.append])
     cfg = cfg or _cfg_control(mundo.tmp)
 
     def crear_puerto(ej):
         return ServidorPuerto(mundo.cfg_puerto, ej, mundo.cargado, bit)
-    async with ServidorControl(cfg, crear_puerto, bit, **kw) as srv:
+    async with ServidorControl(cfg, crear_puerto, bit, scope if scope is not None else FalsoScope(), **kw) as srv:
         srv.calls = crear_puerto
         yield srv
 
@@ -143,6 +220,218 @@ def test_el_socket_de_control_es_0660_y_su_directorio_no_admite_a_otros(mundo):
         async with control(mundo) as srv:
             return stat.S_IMODE(os.stat(srv.ruta_socket).st_mode)
     assert corre(caso()) == 0o660
+
+
+def test_el_recovery_fallido_impide_abrir_el_socket_de_control(mundo):
+    scope = FalsoScope()
+    scope.error_recuperacion = RuntimeError("lease corrupto")
+
+    async def caso():
+        async with control(mundo, scope=scope):
+            raise AssertionError("no se debe abrir el canal")
+
+    with pytest.raises(RuntimeError, match="lease corrupto"):
+        corre(caso())
+    assert not (_cfg_control(mundo.tmp).ruta_socket).exists()
+
+
+def test_scope_con_contrato_incompleto_falla_antes_de_crear_socket(mundo):
+    bit = Bitacora(emisores=[mundo.registros.append])
+    cfg = _cfg_control(mundo.tmp)
+    with pytest.raises(ConfigFaroInvalida, match="contrato.*scope"):
+        ServidorControl(cfg, lambda _ej: None, bit, object())
+    assert not cfg.ruta_socket.exists()
+
+
+def test_control_duplicado_con_mismo_scope_no_suelta_el_lock_del_servidor_activo(mundo):
+    leases = mundo.tmp / "leases-control"
+    leases.mkdir(mode=0o700)
+    cfg_scope = ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128", state_dir=leases)
+    scope = ScopeManager(cfg_scope)
+    bit = Bitacora(emisores=[mundo.registros.append])
+    cfg = _cfg_control(mundo.tmp)
+    primero = ServidorControl(cfg, lambda _ej: None, bit, scope)
+    segundo = ServidorControl(cfg, lambda _ej: None, bit, scope)
+
+    async def caso():
+        await primero.__aenter__()
+        with pytest.raises(ScopeError, match="instancia única"):
+            await segundo.__aenter__()
+        tercero = ScopeManager(cfg_scope)
+        with pytest.raises(ScopeError, match="instancia única"):
+            await tercero.adquirir_instancia()
+        assert primero._servidor is not None and primero._servidor.is_serving()
+        await primero.__aexit__(None, None, None)
+
+    corre(caso())
+
+
+def test_fallo_chmod_cierra_servidor_retirando_solo_su_socket_y_suelta_su_lock(mundo, monkeypatch):
+    leases = mundo.tmp / "leases-chmod"
+    leases.mkdir(mode=0o700)
+    cfg_scope = ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128", state_dir=leases)
+    scope = ScopeManager(cfg_scope)
+    cfg = _cfg_control(mundo.tmp)
+    bit = Bitacora(emisores=[mundo.registros.append])
+    srv = ServidorControl(cfg, lambda _ej: None, bit, scope)
+    chmod_real = os.chmod
+
+    def chmod_falla(path, modo):
+        if Path(path) == cfg.ruta_socket:
+            raise OSError("chmod de socket simulado")
+        return chmod_real(path, modo)
+
+    monkeypatch.setattr("jax.faro.control.os.chmod", chmod_falla)
+
+    async def caso():
+        with pytest.raises(OSError, match="chmod de socket simulado"):
+            await srv.__aenter__()
+        assert srv._servidor is None
+        assert not cfg.ruta_socket.exists()
+        tercero = ScopeManager(cfg_scope)
+        token = await tercero.adquirir_instancia()
+        await tercero.liberar_instancia(token)
+
+    corre(caso())
+
+
+def test_rollback_chmod_no_desvincula_socket_ajeno_que_reemplazo_el_propio(mundo, monkeypatch):
+    cfg = _cfg_control(mundo.tmp)
+    bit = Bitacora(emisores=[mundo.registros.append])
+    srv = ServidorControl(cfg, lambda _ej: None, bit, FalsoScope())
+    chmod_real = os.chmod
+    socket_ajeno = []
+
+    def reemplazar_y_fallar(path, modo):
+        if Path(path) == cfg.ruta_socket:
+            cfg.ruta_socket.unlink()
+            nuevo = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            nuevo.bind(str(cfg.ruta_socket))
+            socket_ajeno.append(nuevo)
+            raise OSError("chmod de socket simulado")
+        return chmod_real(path, modo)
+
+    monkeypatch.setattr("jax.faro.control.os.chmod", reemplazar_y_fallar)
+
+    async def caso():
+        with pytest.raises(OSError, match="chmod de socket simulado"):
+            await srv.__aenter__()
+        assert cfg.ruta_socket.exists()
+        assert srv._servidor is None
+
+    try:
+        corre(caso())
+    finally:
+        for sock in socket_ajeno:
+            sock.close()
+        cfg.ruta_socket.unlink(missing_ok=True)
+
+
+def test_inicio_socket_no_admite_pedido_antes_de_completar_start_serving(mundo, monkeypatch):
+    leases = mundo.tmp / "leases-start-serving"
+    leases.mkdir(mode=0o700)
+    cfg_scope = ConfigScope(memory_max="256M", cpu_quota="200%", tasks_max="128", state_dir=leases)
+    scope = ScopeManager(cfg_scope)
+    consultas = []
+    estado_original = scope.estado
+
+    async def estado_contado(uid):
+        consultas.append(uid)
+        return await estado_original(uid)
+
+    scope.estado = estado_contado
+    cfg = _cfg_control(mundo.tmp)
+    bit = Bitacora(emisores=[mundo.registros.append])
+    servidores = []
+    creados = []
+    listo = asyncio.Event()
+    liberar_start = asyncio.Event()
+    start_original = asyncio.start_unix_server
+
+    class PuertoFalso:
+        def __init__(self, ejecucion):
+            self.ejecucion = ejecucion
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    def crear_puerto(ejecucion):
+        creado = PuertoFalso(ejecucion)
+        creados.append(creado)
+        return creado
+
+    srv = ServidorControl(cfg, crear_puerto, bit, scope)
+
+    async def start_controlado(callback, *, path, limit, backlog, start_serving=True):
+        server = await start_original(callback, path=path, limit=limit, backlog=backlog,
+                                      start_serving=start_serving)
+        servidores.append(server)
+        if not start_serving:
+            iniciar_real = server.start_serving
+
+            async def detener_retorno():
+                await iniciar_real()
+                listo.set()
+                await liberar_start.wait()
+
+            server.start_serving = detener_retorno
+        else:
+            listo.set()  # la API vieja ya está aceptando aunque __aenter__ aún no recibió el Server
+            await liberar_start.wait()
+        return server
+
+    monkeypatch.setattr("jax.faro.control.asyncio.start_unix_server", start_controlado)
+
+    async def caso():
+        entrada = asyncio.create_task(srv.__aenter__())
+        try:
+            await asyncio.wait_for(listo.wait(), 2)
+            lector, escritor = await asyncio.open_unix_connection(str(cfg.ruta_socket))
+            escritor.write(json.dumps(PEDIDO).encode() + b"\n")
+            await escritor.drain()
+            try:
+                respuesta = await asyncio.wait_for(lector.readline(), 2)
+            except ConnectionResetError:
+                respuesta = b""
+            escritor.close()
+            with contextlib.suppress(ConnectionResetError):
+                await escritor.wait_closed()
+            assert respuesta == b""
+            assert creados == []
+            assert consultas == []
+            assert not _eventos(mundo.registros, "control_creado")
+            entrada.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await entrada
+            assert not cfg.ruta_socket.exists()
+            assert srv._tareas == set()
+            assert srv.ejecuciones == {}
+            assert srv._uids == {}
+            tercero = ScopeManager(cfg_scope)
+            token = await tercero.adquirir_instancia()
+            await tercero.liberar_instancia(token)
+        finally:
+            liberar_start.set()
+            if not entrada.done():
+                entrada.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await entrada
+            for server in servidores:
+                server.close()
+                await server.wait_closed()
+            for tarea in tuple(srv._tareas):
+                tarea.cancel()
+            if srv._tareas:
+                await asyncio.gather(*srv._tareas, return_exceptions=True)
+            if srv._ejecuciones:
+                with contextlib.suppress(BaseException):
+                    await srv.__aexit__(None, None, None)
+            cfg.ruta_socket.unlink(missing_ok=True)
+
+    corre(caso())
 
 
 @pytest.mark.parametrize("modo", [0o755, 0o751, 0o705, 0o770, 0o775, 0o777])
@@ -538,7 +827,7 @@ def test_un_puerto_que_no_se_puede_crear_rechaza_y_no_deja_reservado_el_uid(mund
             if estado["romper"]:
                 raise ConfigFaroInvalida("el directorio de sockets no sirve")
             return ServidorPuerto(mundo.cfg_puerto, ej, mundo.cargado, bit)
-        async with ServidorControl(_cfg_control(mundo.tmp), crear_puerto, bit) as srv:
+        async with ServidorControl(_cfg_control(mundo.tmp), crear_puerto, bit, FalsoScope()) as srv:
             mal = await pedir(srv.ruta_socket, PEDIDO)
             estado["romper"] = False
             bien = await pedir(srv.ruta_socket, PEDIDO)
@@ -576,7 +865,7 @@ def test_el_servicio_arranca_con_el_aviso_como_observador_y_el_control_sirve_eje
         s = await arrancar(entorno, crear_pool=_fabrica(pool), solo_pruebas_mismo_uid=True)
         try:
             assert isinstance(s.avisador, Avisador) and s.avisador in s.bitacora.observadores
-            async with s.control() as srv:
+            async with s.control(FalsoScope()) as srv:
                 r = await pedir(srv.ruta_socket, PEDIDO)
                 assert r["ok"] and srv.ejecuciones[r["run_id"]].presupuesto is s.presupuesto
                 await pedir(srv.ruta_socket, {"op": "cerrar", "run_id": r["run_id"]})
@@ -651,7 +940,7 @@ def test_el_servicio_arrancado_avisa_de_verdad_por_http_un_rechazo_del_canal_de_
         async def caso():
             s = await arrancar(entorno, crear_pool=_fabrica(FalsoPool()), solo_pruebas_mismo_uid=True)
             try:
-                async with s.control() as srv:
+                async with s.control(FalsoScope()) as srv:
                     r = await pedir(srv.ruta_socket, {**PEDIDO, "uid_jaula": 1})
                     assert r["error"] == "uid_jaula_invalido"
                     assert await asyncio.to_thread(tg.esperar, 1, 5.0)
@@ -660,6 +949,44 @@ def test_el_servicio_arrancado_avisa_de_verdad_por_http_un_rechazo_del_canal_de_
         corre(caso())
     assert "RECHAZADO" in tg.textos()[0] and "uid_jaula_invalido" in tg.textos()[0]
     assert tg.recibidos[0]["chat_id"] == "1" and tg.recibidos[0]["ruta"] == "/bottoken-de-prueba/sendMessage"
+
+
+def test_r2_el_servicio_no_construye_el_control_sin_el_gestor_de_unidades(entorno):
+    async def caso():
+        s = await arrancar(entorno, crear_pool=_fabrica(), solo_pruebas_mismo_uid=True)
+        try:
+            with pytest.raises(ConfigFaroInvalida, match="scope|unidad"):
+                s.control(None)
+        finally:
+            await s.cerrar()
+    corre(caso())
+
+
+def test_major1_el_servicio_tiene_un_solo_gestor_y_el_lanzador_lo_comparte(entorno, tmp_path):
+    """MAJOR 1: no hay dos proveedores de vida por uid. `control(scope)` adopta EL gestor del servicio;
+    un gestor distinto se rechaza, y el lanzador se construye solo sobre ese mismo gestor."""
+    from jax.faro.jaula import ConfigJaula
+    bwrap = tmp_path / "bwrap"
+    bwrap.write_text("#!/bin/sh\nexit 0\n")
+    bwrap.chmod(0o755)
+    cfg_jaula = ConfigJaula(bwrap=bwrap, elevar=("/usr/bin/sudo", "-n", "-u", "#{uid}", "--"))
+
+    async def caso():
+        s = await arrancar(entorno, crear_pool=_fabrica(), solo_pruebas_mismo_uid=True)
+        try:
+            with pytest.raises(ConfigFaroInvalida, match="control|gestor"):
+                s.crear_lanzador(cfg_jaula)                   # sin control(scope) previo no hay gestor
+            gestor = FalsoScope()
+            async with s.control(gestor) as srv:
+                assert srv._scope is gestor
+                lanzador = s.crear_lanzador(cfg_jaula)
+                assert lanzador._scope is gestor              # EL MISMO objeto, no otro igual
+            with pytest.raises(ConfigFaroInvalida, match="UNA sola|unico|dos"):
+                s.control(FalsoScope())                       # un segundo gestor distinto: no entra
+            s.control(gestor)                                 # el mismo gestor siempre vale
+        finally:
+            await s.cerrar()
+    corre(caso())
 
 
 def test_si_la_sonda_falla_tampoco_queda_el_avisador_corriendo(entorno):
@@ -752,28 +1079,279 @@ def test_minor1_el_rechazo_por_fallo_de_la_bitacora_lleva_run_id_e_id_de_correla
     assert r["run_id"] == rech[0]["run_id"]                                                  # y el orquestador lo sabe
 
 
-def test_minor2_el_uid_no_se_libera_mientras_la_jaula_siga_viva(mundo):
-    viva = {50001}
+def test_minor2_el_uid_no_se_libera_mientras_su_unidad_siga_viva(mundo):
+    scope = FalsoScope()                                   # al crear, la unidad del uid no existe: EMPTY
 
     async def caso():
-        async with control(mundo, jaula_viva=lambda uid: uid in viva) as srv:
+        async with control(mundo, scope=scope) as srv:
             a = await pedir(srv.ruta_socket, PEDIDO)
+            scope.estados[50001] = EstadoUnidad.LIVE       # al cerrar, la unidad sigue poblada
+            scope.error_cierre = OSError("kill no confirmó EMPTY")
             await pedir(srv.ruta_socket, {"op": "cerrar", "run_id": a["run_id"]})
-            b = await pedir(srv.ruta_socket, PEDIDO)                    # la jaula sigue viva: el uid sigue ocupado
-            viva.clear()
-            c = await pedir(srv.ruta_socket, PEDIDO)                    # ya murio: se libera
+            b = await pedir(srv.ruta_socket, PEDIDO)        # la unidad sigue viva: el uid sigue ocupado
+            scope.error_cierre = None
+            scope.estados[50001] = EstadoUnidad.EMPTY       # murio hasta el ultimo nieto
+            c = await pedir(srv.ruta_socket, PEDIDO)        # confirmado EMPTY: se libera
             return a, b, c
     a, b, c = corre(caso())
     assert a["ok"] and b == {"ok": False, "error": "uid_jaula_en_uso"} and c["ok"]
+    assert scope.muertes and scope.esperas                  # el cierre mato la unidad y espero el vacio
 
 
-def test_minor2_sin_gancho_el_uid_se_libera_al_cerrar(mundo):
+def test_r2_sin_proveedor_de_unidad_no_hay_canal_de_control(mundo):
+    """R-2: el gancho ya no es opcional; ninguna ruta productiva construye el control sin el."""
     async def caso():
-        async with control(mundo) as srv:
+        with pytest.raises(ConfigFaroInvalida, match="scope|unidad"):
+            ServidorControl(_cfg_control(mundo.tmp), lambda ej: None, Bitacora(emisores=[]), None)
+    corre(caso())
+
+
+# --------------------------------------------------------------------------- #
+# R-2: el estado vive en systemd, no en la memoria del Faro                    #
+# --------------------------------------------------------------------------- #
+
+def test_r2_un_reinicio_del_faro_no_libera_un_uid_con_cgroup_superviviente(mundo):
+    """El caso central de R-2: el mapa en memoria esta VACIO (el Faro reinicio) pero systemd sigue
+    reportando procesos en la unidad de ese uid. El uid NO se reutiliza."""
+    scope = FalsoScope({50001: EstadoUnidad.LIVE})
+
+    async def caso():
+        async with control(mundo, scope=scope) as srv:      # mapa vacio: nada reservado localmente
             a = await pedir(srv.ruta_socket, PEDIDO)
-            await pedir(srv.ruta_socket, {"op": "cerrar", "run_id": a["run_id"]})
-            return await pedir(srv.ruta_socket, PEDIDO)
-    assert corre(caso())["ok"]
+            scope.estados[50001] = EstadoUnidad.EMPTY       # el cgroup quedo vacio y systemd lo confirma
+            b = await pedir(srv.ruta_socket, PEDIDO)
+            return a, b, srv.ejecuciones
+    a, b, ejecuciones = corre(caso())
+    assert a == {"ok": False, "error": "uid_jaula_en_uso"} and b["ok"] and len(ejecuciones) == 1
+    assert 50001 in scope.consultas                         # se miro systemd, no solo el mapa local
+
+
+def test_r2_un_estado_desconocido_rechaza_el_uid_y_es_fallo_cerrado(mundo):
+    scope = FalsoScope({50001: EstadoUnidad.UNKNOWN})
+
+    async def caso():
+        async with control(mundo, scope=scope) as srv:
+            r = await pedir(srv.ruta_socket, PEDIDO)
+            return r, srv.ejecuciones
+    r, ejecuciones = corre(caso())
+    assert r == {"ok": False, "error": "uid_jaula_desconocido"} and ejecuciones == {}
+    assert _eventos(mundo.registros, "control_rechazado")[0]["motivo"] == "uid_jaula_desconocido"
+
+
+def test_r2_si_la_consulta_al_scope_falla_el_crear_rechaza_sin_dejar_nada_reservado(mundo):
+    scope = FalsoScope()
+    scope.error = OSError("systemd no responde")
+
+    async def caso():
+        async with control(mundo, scope=scope) as srv:
+            r = await pedir(srv.ruta_socket, PEDIDO)
+            scope.error = None
+            despues = await pedir(srv.ruta_socket, PEDIDO)  # sin la consulta rota, el mismo uid pasa
+            return r, despues, srv.ejecuciones
+    r, despues, _ = corre(caso())
+    assert r == {"ok": False, "error": "uid_jaula_desconocido"} and despues["ok"]
+    assert not any(motivo.get("motivo") == "no_se_pudo_crear_o_anotar"
+                   for motivo in _eventos(mundo.registros, "control_rechazado"))
+
+
+def test_r2_el_cierre_revoca_el_puerto_antes_de_matar_y_mata_solo_esa_unidad(mundo):
+    scope = FalsoScope()
+    vista_al_matar = {}
+    scope.al_matar = lambda uid: vista_al_matar.update(
+        {uid: sorted(p.name for p in mundo.cfg_puerto.socket_dir.iterdir())})
+
+    async def caso():
+        async with control(mundo, scope=scope) as srv:
+            a = await pedir(srv.ruta_socket, PEDIDO)
+            b = await pedir(srv.ruta_socket, {**PEDIDO, "uid_jaula": 50002})
+            c = await pedir(srv.ruta_socket, {"op": "cerrar", "run_id": a["run_id"]})
+            # se mide DENTRO del contexto: al salir, el apagado cierra (como debe) a la hermana tambien
+            return a, b, c, dict(srv.ejecuciones), list(scope.muertes), list(scope.esperas), dict(vista_al_matar)
+    a, b, c, ejecuciones, muertes, esperas, vista = corre(caso())
+    assert a["ok"] and b["ok"] and c["ok"]
+    # al matar, el Puerto de ESA ejecucion ya no existe (revocado ANTES del kill); la hermana, intacta
+    assert f"{a['run_id']}.sock" not in vista[50001] and f"{a['run_id']}.token" not in vista[50001]
+    assert f"{b['run_id']}.sock" in vista[50001]
+    assert 50002 not in vista                               # a la hermana no se la toco
+    assert muertes == [50001]                               # solo muere la unidad de ese uid
+    assert esperas == [50001]
+    assert list(ejecuciones) == [b["run_id"]]               # la hermana sigue viva
+
+
+def test_r2_el_cierre_con_la_unidad_aun_viva_o_desconocida_mantiene_el_uid(mundo):
+    for estado in (EstadoUnidad.LIVE, EstadoUnidad.UNKNOWN):
+        scope = FalsoScope()
+
+        async def caso():
+            async with control(mundo, scope=scope) as srv:
+                a = await pedir(srv.ruta_socket, PEDIDO)
+                scope.estados[50001] = estado               # al cerrar, la unidad no se confirma vacia
+                scope.error_cierre = OSError("no se pudo certificar EMPTY")
+                await pedir(srv.ruta_socket, {"op": "cerrar", "run_id": a["run_id"]})
+                return await pedir(srv.ruta_socket, PEDIDO)
+        assert corre(caso()) == {"ok": False, "error": "uid_jaula_en_uso" if estado is EstadoUnidad.LIVE
+                                 else "uid_jaula_desconocido"}
+
+
+def test_r2_el_fallo_del_kill_no_impide_el_cierre_ni_la_retencion(mundo):
+    class ScopeQueNoMata(FalsoScope):
+        async def cerrar_uid(self, uid):
+            self.cierres_uid.append(uid)
+            self.muertes.append(uid)
+            raise OSError("systemctl kill fallo")
+
+    scope = ScopeQueNoMata()
+
+    async def caso():
+        async with control(mundo, scope=scope) as srv:
+            a = await pedir(srv.ruta_socket, PEDIDO)
+            scope.estados[50001] = EstadoUnidad.LIVE        # y el kill que debia vaciarla fallo
+            c = await pedir(srv.ruta_socket, {"op": "cerrar", "run_id": a["run_id"]})
+            b = await pedir(srv.ruta_socket, PEDIDO)
+            return c, b
+    c, b = corre(caso())
+    assert c == {"ok": False, "error": "cierre_incompleto"}
+    assert b == {"ok": False, "error": "uid_jaula_en_uso"}   # el UID queda retenido
+
+
+def test_shutdown_limpia_hermanas_aunque_falle_una(mundo):
+    class ScopeConUnaFalla(FalsoScope):
+        async def cerrar_uid(self, uid):
+            self.cierres_uid.append(uid)
+            if uid == 50002:
+                raise OSError("fallo deliberado de B")
+
+    scope = ScopeConUnaFalla()
+    async def caso():
+        cm = control(mundo, scope=scope)
+        srv = await cm.__aenter__()
+        await pedir(srv.ruta_socket, PEDIDO)
+        await pedir(srv.ruta_socket, {**PEDIDO, "uid_jaula": 50002, "tenant": "t-second"})
+        with pytest.raises(BaseExceptionGroup, match="cierre completo"):
+            await cm.__aexit__(None, None, None)
+    corre(caso())
+    assert sorted(scope.cierres_uid) == [50001, 50002]
+
+
+def test_shutdown_observa_fallo_de_cierre_terminado_antes_del_snapshot(mundo):
+    class ScopeFallaAlCerrar(FalsoScope):
+        def __init__(self):
+            super().__init__()
+            self.entro = asyncio.Event()
+            self.liberaciones_instancia = 0
+
+        async def cerrar_uid(self, uid):
+            self.cierres_uid.append(uid)
+            self.entro.set()
+            raise OSError("fallo antes del snapshot de shutdown")
+
+        async def liberar_instancia(self, propietario):
+            self.liberaciones_instancia += 1
+            await super().liberar_instancia(propietario)
+
+    scope = ScopeFallaAlCerrar()
+
+    async def caso():
+        cm = control(mundo, scope=scope)
+        srv = await cm.__aenter__()
+        creado = await pedir(srv.ruta_socket, PEDIDO)
+        run_id = creado["run_id"]
+        tareas_capturadas = []
+        programar = srv._programar_cierre
+
+        def capturar(uid, puerto_srv):
+            tarea = programar(uid, puerto_srv)
+            tareas_capturadas.append(tarea)
+            return tarea
+
+        srv._programar_cierre = capturar
+        cierre_conexion = asyncio.create_task(
+            srv._cerrar_ejecucion(run_id, srv._ejecuciones[run_id]))
+        await asyncio.wait_for(scope.entro.wait(), 5)
+        cierre_conexion.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cierre_conexion
+        # La tarea propia completa con error antes de que shutdown tome su snapshot.
+        tarea = tareas_capturadas[0]
+        async with asyncio.timeout(5):
+            while not tarea.done():
+                await asyncio.sleep(0)
+        try:
+            with pytest.raises(BaseExceptionGroup, match="cierre completo") as error:
+                await cm.__aexit__(None, None, None)
+        finally:
+            await asyncio.gather(tarea, return_exceptions=True)
+        return srv, run_id, error.value
+
+    srv, run_id, error = corre(caso())
+    assert error.subgroup(OSError) is not None
+    assert srv._retenidos == {50001}
+    assert srv._uids == {50001: run_id}
+    assert srv._cierres == {}
+    assert scope.liberaciones_instancia == 0
+
+
+def test_block2_el_apagado_que_cancela_un_cierre_a_medias_termina_el_kill(mundo):
+    """El caso exacto del BLOCK 2: la peticion `cerrar` corre en una conexion; el apagado cancela esa
+    conexion mientras el kill esta en vuelo. La tarea de kill+confirmacion es propia y el apagado la
+    espera: la unidad muere y se confirma el vacio antes de salir."""
+    class ScopeLento(FalsoScope):
+        def __init__(self):
+            super().__init__()
+            self.entro = asyncio.Event()
+            self.salir = asyncio.Event()
+
+        async def cerrar_uid(self, uid):
+            self.entro.set()
+            await self.salir.wait()                # cierre lento: la cancelacion del apagado cae aqui
+            await super().cerrar_uid(uid)
+
+    scope = ScopeLento()
+
+    async def caso():
+        cm = control(mundo, scope=scope)
+        srv = await cm.__aenter__()
+        r = await pedir(srv.ruta_socket, PEDIDO)
+        cierre = asyncio.create_task(pedir(srv.ruta_socket, {"op": "cerrar", "run_id": r["run_id"]}))
+        await asyncio.wait_for(scope.entro.wait(), 5)        # el cierre ya está en vuelo en la conexión
+
+        async def soltar():
+            await asyncio.sleep(0.05)
+            scope.salir.set()
+        asyncio.create_task(soltar())                        # libera el cierre lento durante el apagado
+        await cm.__aexit__(None, None, None)                 # apagado: cancela la conexion `cerrar`
+        cierre.cancel()
+        return list(scope.cierres_uid), list(scope.esperas), sorted(p.name for p in mundo.cfg_puerto.socket_dir.iterdir())
+    cierres, esperas, archivos = corre(caso())
+    assert cierres == [50001]                               # el cierre corrió pese a la cancelación
+    assert archivos == []                                   # y el Puerto de la ejecucion quedo revocado
+
+
+def test_r2_el_apagado_espera_limpiezas_de_arranque_cancelado(mundo):
+    class ScopeConLimpiezaPendiente(FalsoScope):
+        def __init__(self):
+            super().__init__()
+            self.entro = asyncio.Event()
+            self.salir = asyncio.Event()
+
+        async def esperar_limpiezas(self):
+            self.entro.set()
+            await self.salir.wait()
+
+    scope = ScopeConLimpiezaPendiente()
+
+    async def caso():
+        cm = control(mundo, scope=scope)
+        await cm.__aenter__()
+        apagado = asyncio.create_task(cm.__aexit__(None, None, None))
+        await asyncio.sleep(0.05)
+        espero_limpieza = not apagado.done()
+        scope.salir.set()
+        await apagado
+        return scope.entro.is_set(), espero_limpieza
+
+    entro, espero_limpieza = corre(caso())
+    assert entro and espero_limpieza
 
 
 @pytest.mark.parametrize("tenant", ["con espacio", "a|b", "x" * 65, "ñandú", "t\nx", "a;b", "a/b"])

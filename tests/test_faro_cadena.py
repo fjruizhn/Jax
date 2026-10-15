@@ -259,3 +259,42 @@ def test_el_servicio_tiene_un_solo_presupuesto_para_todas_sus_ejecuciones(entorn
         assert s.presupuesto.total == s.cfg_puerto.presupuesto_bytes
         await s.cerrar()
     corre(caso())
+
+
+def test_r2_el_cierre_del_servicio_drena_lanzadores_y_cierra_todos_los_recursos_aun_si_un_vigia_falla(entorno):
+    class Recurso:
+        def __init__(self, nombre, *, falla=None):
+            self.nombre, self.falla, self.eventos = nombre, falla, []
+
+        async def cerrar(self):
+            self.eventos.append(f"{self.nombre}:cerrar")
+            if self.falla is not None:
+                raise self.falla
+
+        def close(self):
+            self.eventos.append(f"{self.nombre}:close")
+            if self.falla is not None:
+                raise self.falla
+
+        async def wait_closed(self):
+            self.eventos.append(f"{self.nombre}:wait_closed")
+
+    async def caso():
+        s = await arrancar(entorno, crear_pool=_fabrica(), solo_pruebas_mismo_uid=True)
+        fallido = Recurso("lanzador-fallido", falla=OSError("stderr roto"))
+        sano = Recurso("lanzador-sano")
+        aviso = Recurso("avisador")
+        memoria = Recurso("memoria")
+        base = Recurso("base")
+        s.lanzadores.update({fallido, sano})
+        s.avisador, s.pool_memoria, s.pool = aviso, memoria, base
+        with pytest.raises(BaseExceptionGroup) as exc:
+            await s.cerrar()
+        assert any(isinstance(error, OSError) and str(error) == "stderr roto" for error in exc.value.exceptions)
+        return fallido.eventos, sano.eventos, aviso.eventos, memoria.eventos, base.eventos
+
+    fallido, sano, aviso, memoria, base = corre(caso())
+    assert fallido == ["lanzador-fallido:cerrar"] and sano == ["lanzador-sano:cerrar"]
+    assert aviso == ["avisador:cerrar"]
+    assert memoria == ["memoria:close", "memoria:wait_closed"]
+    assert base == ["base:close", "base:wait_closed"]

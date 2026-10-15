@@ -30,16 +30,16 @@
       "mensaje": "PISO ROTO: se esperaban 234 tests CORRIDOS de cli_sandbox. OP#251 (2026-10-14): 251-7 pruebas del lock de Hyde retiradas con el modulo +6 ataques de contencion portados de _hyde_containment_test.py = 250. OP#251 seguimiento (2026-10-14, auditoria del merge 494305da): -16 pruebas de LocksCompartidosTest, retirada con flock_compartido_adquirir (quedo sin llamador al retirar hyde_sandbox); medido 234 passed, 0 skipped en hall9000."
     },
     "faro-fase0/faro": {
-      "patron": "^780 passed",
-      "mensaje": "PISO ROTO: se esperaban 780 tests CORRIDOS del Faro."
+      "patron": "^969 passed",
+      "mensaje": "PISO ROTO: se esperaban 969 tests CORRIDOS del Faro."
     },
     "faro-bitacora-db/faro-db": {
       "patron": "^40 passed",
       "mensaje": "PISO ROTO: se esperaban 40 tests CORRIDOS de la bitacora y los topes del Faro."
     },
     "faro-jaula/faro-jaula": {
-      "patron": "^11 passed",
-      "mensaje": "PISO ROTO: se esperaban 11 tests CORRIDOS de la jaula del Faro."
+      "patron": "^12 passed",
+      "mensaje": "PISO ROTO: se esperaban 12 tests CORRIDOS de la jaula del Faro."
     },
     "facet-health-io/out": {
       "patron": "^27 passed",
