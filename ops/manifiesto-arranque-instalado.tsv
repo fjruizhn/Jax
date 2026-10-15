@@ -7,7 +7,6 @@ config/systemd/jax-las-manos.service.d/checkout-de-produccion.conf	/etc/systemd/
 config/systemd/jax-las-manos.service.d/z-pythonpath.conf	/etc/systemd/system/jax-las-manos.service.d/z-pythonpath.conf	jax	-
 config/systemd/jax-las-manos.service.d/cuenta-de-servicio.conf	/etc/systemd/system/jax-las-manos.service.d/cuenta-de-servicio.conf	jax	-
 config/systemd/jax-las-manos.service.d/esperar-db.conf	/etc/systemd/system/jax-las-manos.service.d/esperar-db.conf	jax-platform	ops/mariadb-12.3/systemd/esperar-db.conf
-config/systemd/jax-las-manos.service.d/locks.conf	/etc/systemd/system/jax-las-manos.service.d/locks.conf	jax	-
 ops/ejecutor/jax-ejecutor-proxy.service	/etc/systemd/system/jax-ejecutor-proxy.service	jax	-
 ops/ejecutor/jax-ejecutor-proxy.service.d/checkout-de-produccion.conf	/etc/systemd/system/jax-ejecutor-proxy.service.d/checkout-de-produccion.conf	jax	-
 ops/ejecutor/jax-ejecutor-proxy.service.d/cuenta-de-servicio.conf	/etc/systemd/system/jax-ejecutor-proxy.service.d/cuenta-de-servicio.conf	jax	-
