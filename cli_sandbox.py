@@ -304,26 +304,6 @@ def _abrir_lock(dir_fd: int, nombre: str):
     return os.fdopen(fd, "r+")
 
 
-def _esperar_flock(fh, timeout: float, descripcion: str, detalle: str, ruta: str):
-    """BLOQUEANTE. Sondea `flock(LOCK_EX | LOCK_NB)` sobre `fh` hasta `timeout`;
-    agotado, cierra `fh` y lanza TimeoutError (falla cerrado: no se lanza sin
-    exclusion mutua real). flock(2) vale igual sobre un fd de solo lectura."""
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return fh
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                fh.close()
-                raise TimeoutError(
-                    f"no se pudo adquirir el lock cross-proceso de {descripcion} "
-                    f"en {timeout}s ({ruta}) -- {detalle} "
-                    "Fail-closed: no se lanza sin exclusion mutua real."
-                )
-            time.sleep(_LOCK_POLL_S)
-
-
 def flock_liberar(fh) -> None:
     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
     fh.close()
