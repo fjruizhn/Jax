@@ -33,6 +33,7 @@ from jacobs.policy import (
     CupoAgotado,
 )
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
+from jacobs.office_contract import CLASSIC_EXECUTION_CONTRACT, OFFICE_EXECUTION_CONTRACT, OfficePhase
 
 try:
     # LAS MANOS produccion (cwd=las_manos, uvicorn) y jobs con PYTHONPATH
@@ -966,6 +967,15 @@ _INDICES: list[tuple[str, str, str, bool]] = [
     ("jacobs_pipelines", "idx_jacobs_pipelines_duenio",
      "CREATE INDEX idx_jacobs_pipelines_duenio ON jacobs_pipelines "
      "(user_id, tenant_id, created_at) ALGORITHM=INPLACE LOCK=NONE", True),
+    ("jacobs_pipelines", "idx_jacobs_office_phase",
+     "CREATE INDEX idx_jacobs_office_phase ON jacobs_pipelines "
+     "(execution_contract, office_phase, updated_at) ALGORITHM=INPLACE LOCK=NONE", True),
+    ("jacobs_pipelines", "uq_jacobs_office_client_request",
+     "CREATE UNIQUE INDEX uq_jacobs_office_client_request ON jacobs_pipelines "
+     "(invoked_by, tenant_id, client_request_id) ALGORITHM=INPLACE LOCK=NONE", True),
+    ("jacobs_pipelines", "uq_jacobs_office_stage",
+     "CREATE UNIQUE INDEX uq_jacobs_office_stage ON jacobs_pipelines "
+     "(execution_contract, tenant_id, office_stage_id) ALGORITHM=INPLACE LOCK=NONE", True),
     # idx_events_pipeline_tipo (2026-09-17, Ruling R20, LAS CUATRO #1): la
     # Mesa (jax-platform backend/api/pipelines.py::sql_eventos_de_causa) lee
     # la causa de aborto de hasta 50 pipelines con
@@ -1305,7 +1315,45 @@ async def _retirar_indices(cur) -> None:
 #: es la baranda mecánica que evita que las dos copias se desincronicen).
 #: Fuente única para `_verificar_expresion_visible` -- el chequeo de drift
 #: de MINOR-A (fix round 2, revisión del coordinador, 2026-09-22).
-_EXPRESION_VISIBLE = "status NOT IN ('discarded','hidden') AND owner_ack_at IS NOT NULL"
+_EXPRESION_VISIBLE = "status NOT IN ('discarded','hidden') AND owner_ack_at IS NOT NULL AND execution_contract = 'CLASSIC'"
+_EXPRESION_VISIBLE_ANTERIOR = "status NOT IN ('discarded','hidden') AND owner_ack_at IS NOT NULL"
+
+# The information-schema comparison accepts only this full invariant (modulo
+# MariaDB's presentation whitespace/backticks).  A CHECK with a familiar
+# column name is not evidence that phase/status/code snapshots are protected.
+_OFFICE_BINDING_CHECK_CLAUSE = """
+COALESCE(
+ BINARY execution_contract IN ('CLASSIC','OFFICE_V1') AND
+ (
+  (BINARY execution_contract='CLASSIC' AND office_job_id IS NULL AND office_stage_id IS NULL
+   AND office_project_id IS NULL AND client_request_id IS NULL AND request_sha256 IS NULL
+   AND office_phase IS NULL AND office_rejection_code IS NULL AND office_accepted_cost_usd IS NULL)
+  OR
+  (BINARY execution_contract='OFFICE_V1' AND office_job_id IS NOT NULL AND office_stage_id IS NOT NULL
+   AND office_project_id IS NOT NULL AND office_project_id > 0 AND client_request_id IS NOT NULL
+   AND request_sha256 IS NOT NULL AND BINARY request_sha256 REGEXP '^[0-9a-f]{64}$'
+   AND office_phase IS NOT NULL AND
+   (
+    (BINARY office_phase IN ('RESERVED','PREFLIGHT_IN_FLIGHT','READY','DELIVERY_IN_FLIGHT')
+     AND BINARY status='running' AND office_rejection_code IS NULL)
+    OR (BINARY office_phase='RECEIPT_STORED' AND BINARY status='completed' AND office_rejection_code IS NULL)
+    OR (BINARY office_phase='FAILED' AND BINARY status='failed' AND office_rejection_code IS NOT NULL AND CHAR_LENGTH(office_rejection_code) > 0)
+    OR (BINARY office_phase='CANCELLED_REVOKED' AND BINARY status='aborted' AND office_rejection_code IS NOT NULL AND CHAR_LENGTH(office_rejection_code) > 0)
+    OR (BINARY office_phase='OUTCOME_UNKNOWN' AND BINARY status='outcome_unknown' AND office_rejection_code IS NOT NULL AND CHAR_LENGTH(office_rejection_code) > 0)
+   )
+   AND office_accepted_cost_usd IS NOT NULL AND office_accepted_cost_usd >= 0
+   AND costo_max_aceptado_usd IS NULL)
+ ), FALSE)
+"""
+
+# MariaDB 12.3.3 measurement from information_schema.CHECK_CONSTRAINTS after
+# adding `_OFFICE_BINDING_CHECK_CLAUSE` to the disposable 33991 fixture.
+# Keep it separate from the DDL source: MariaDB renders BINARY as CAST(... AS
+# CHAR CHARSET binary), elides selected parentheses, and renders FALSE as 0.
+# This is an exact semantic contract, not a token-presence heuristic.
+_OFFICE_BINDING_CHECK_INFORMATION_SCHEMA = """
+coalesce(cast(`execution_contract` as char charset binary) in ('CLASSIC','OFFICE_V1') and (cast(`execution_contract` as char charset binary) = 'CLASSIC' and `office_job_id` is null and `office_stage_id` is null and `office_project_id` is null and `client_request_id` is null and `request_sha256` is null and `office_phase` is null and `office_rejection_code` is null and `office_accepted_cost_usd` is null or cast(`execution_contract` as char charset binary) = 'OFFICE_V1' and `office_job_id` is not null and `office_stage_id` is not null and `office_project_id` is not null and `office_project_id` > 0 and `client_request_id` is not null and `request_sha256` is not null and cast(`request_sha256` as char charset binary) regexp '^[0-9a-f]{64}$' and `office_phase` is not null and (cast(`office_phase` as char charset binary) in ('RESERVED','PREFLIGHT_IN_FLIGHT','READY','DELIVERY_IN_FLIGHT') and cast(`status` as char charset binary) = 'running' and `office_rejection_code` is null or cast(`office_phase` as char charset binary) = 'RECEIPT_STORED' and cast(`status` as char charset binary) = 'completed' and `office_rejection_code` is null or cast(`office_phase` as char charset binary) = 'FAILED' and cast(`status` as char charset binary) = 'failed' and `office_rejection_code` is not null and char_length(`office_rejection_code`) > 0 or cast(`office_phase` as char charset binary) = 'CANCELLED_REVOKED' and cast(`status` as char charset binary) = 'aborted' and `office_rejection_code` is not null and char_length(`office_rejection_code`) > 0 or cast(`office_phase` as char charset binary) = 'OUTCOME_UNKNOWN' and cast(`status` as char charset binary) = 'outcome_unknown' and `office_rejection_code` is not null and char_length(`office_rejection_code`) > 0) and `office_accepted_cost_usd` is not null and `office_accepted_cost_usd` >= 0 and `costo_max_aceptado_usd` is null),0)
+"""
 
 
 def _normalizar_expresion_generada(expr: str) -> str:
@@ -1320,6 +1368,11 @@ def _normalizar_expresion_generada(expr: str) -> str:
     corrida de espacios/saltos de línea a uno solo y recorta los bordes --
     más simple que una regexp para el mismo efecto, sin importar `re`."""
     return " ".join(expr.replace("`", "").split()).lower()
+
+
+def _normalizar_check_clause(expr: str) -> str:
+    """Normalize only whitespace and identifier quoting, never semantics."""
+    return " ".join(expr.replace("`", "").split())
 
 
 async def _verificar_expresion_visible(cur) -> None:
@@ -1379,6 +1432,8 @@ async def _verificar_expresion_visible(cur) -> None:
             "recrear los dos con el DDL de esta versión) antes de que este "
             "proceso pueda arrancar contra esta base."
         )
+
+
     encontrada = _normalizar_expresion_generada(fila[0])
     esperada = _normalizar_expresion_generada(_EXPRESION_VISIBLE)
     if encontrada != esperada:
@@ -1399,6 +1454,28 @@ async def _verificar_expresion_visible(cur) -> None:
             "con el DDL de esta versión) antes de que este proceso pueda "
             "arrancar contra esta base."
         )
+
+
+async def _migrar_visible_para_office(cur) -> None:
+    """Rebuild only the known legacy generated visibility column, bounded."""
+    await cur.execute("SELECT GENERATION_EXPRESSION FROM information_schema.COLUMNS "
+                      "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jacobs_pipelines' AND COLUMN_NAME='visible'")
+    row = await cur.fetchone()
+    if not row or row[0] is None:
+        return
+    actual = _normalizar_expresion_generada(row[0])
+    if actual == _normalizar_expresion_generada(_EXPRESION_VISIBLE):
+        return
+    if actual != _normalizar_expresion_generada(_EXPRESION_VISIBLE_ANTERIOR):
+        await _verificar_expresion_visible(cur)
+        return
+    await _ddl_acotado(cur, "DROP INDEX idx_pipelines_visibles ON jacobs_pipelines")
+    await _ddl_acotado(cur, "ALTER TABLE jacobs_pipelines DROP COLUMN visible, ALGORITHM=INPLACE, LOCK=SHARED")
+    ok = await _ddl_acotado(cur, "ALTER TABLE jacobs_pipelines ADD COLUMN visible TINYINT(1) GENERATED ALWAYS AS "
+                             "(status NOT IN ('discarded','hidden') AND owner_ack_at IS NOT NULL AND execution_contract = 'CLASSIC') "
+                             "VIRTUAL, ALGORITHM=INPLACE, LOCK=SHARED")
+    if not ok:
+        raise RuntimeError("timed out rebuilding Office-safe classic visibility")
 
 
 async def _agregar_columna_acotada(cur, tabla: str, columna: str, ddl: str) -> None:
@@ -1608,6 +1685,28 @@ async def init_tables() -> None:
                     "descartado_por VARCHAR(50) NULL, ALGORITHM=INSTANT", True),
                 ("descartado_at", "ALTER TABLE jacobs_pipelines ADD COLUMN "
                     "descartado_at DOUBLE NULL, ALGORITHM=INSTANT", True),
+                # Office V1 execution remains opaque to Jacobs.  These
+                # bindings intentionally contain no prompt, output, schema or
+                # provider URL.  Defaults preserve every historical row as
+                # CLASSIC during an idempotent upgrade.
+                ("execution_contract", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "execution_contract VARCHAR(20) NOT NULL DEFAULT 'CLASSIC', ALGORITHM=INPLACE, LOCK=SHARED", True),
+                ("office_job_id", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "office_job_id VARCHAR(36) NULL, ALGORITHM=INPLACE, LOCK=SHARED", True),
+                ("office_stage_id", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "office_stage_id VARCHAR(36) NULL, ALGORITHM=INPLACE, LOCK=SHARED", True),
+                ("office_project_id", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "office_project_id BIGINT NULL, ALGORITHM=INPLACE, LOCK=SHARED", True),
+                ("client_request_id", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "client_request_id VARCHAR(36) NULL, ALGORITHM=INPLACE, LOCK=SHARED", True),
+                ("request_sha256", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "request_sha256 CHAR(64) NULL, ALGORITHM=INPLACE, LOCK=SHARED", True),
+                ("office_phase", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "office_phase VARCHAR(32) NULL, ALGORITHM=INPLACE, LOCK=SHARED", True),
+                ("office_rejection_code", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "office_rejection_code VARCHAR(96) NULL, ALGORITHM=INPLACE, LOCK=SHARED", True),
+                ("office_accepted_cost_usd", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "office_accepted_cost_usd DECIMAL(14,6) NULL, ALGORITHM=INPLACE, LOCK=SHARED", True),
                 # Task 1-bis (2026-09-22, Ruling 18 del ledger de
                 # descartar-pipelines): el listado principal de jax-platform
                 # (SQL_PIPELINES_DEL_USUARIO) filtra
@@ -1683,7 +1782,7 @@ async def init_tables() -> None:
                 ("visible", "ALTER TABLE jacobs_pipelines ADD COLUMN "
                     "visible TINYINT(1) GENERATED ALWAYS AS "
                     "(status NOT IN ('discarded','hidden') "
-                    "AND owner_ack_at IS NOT NULL) VIRTUAL, "
+                    "AND owner_ack_at IS NOT NULL AND execution_contract = 'CLASSIC') VIRTUAL, "
                     "ALGORITHM=INSTANT", True),
             ]:
                 await cur.execute(
@@ -1699,12 +1798,42 @@ async def init_tables() -> None:
                     # otra columna de esta lista necesita este chequeo (son
                     # todas columnas comunes: existir alcanza).
                     if col == "visible":
+                        await _migrar_visible_para_office(cur)
                         await _verificar_expresion_visible(cur)
                     continue
                 if acotado:
                     await _agregar_columna_acotada(cur, "jacobs_pipelines", col, ddl)
                 else:
                     await cur.execute(ddl)
+            # Database-level discriminator/binding contract.  Existing rows
+            # were defaulted to CLASSIC before this point; an invalid legacy
+            # row stops the upgrade rather than becoming an Office bypass.
+            await cur.execute(
+                "SELECT COLUMN_TYPE FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jacobs_pipelines' "
+                "AND COLUMN_NAME='office_accepted_cost_usd'"
+            )
+            money_column = await cur.fetchone()
+            if not money_column or (money_column[0] or "").lower() != "decimal(14,6)":
+                raise RuntimeError("Office accepted budget must remain DECIMAL(14,6)")
+            await cur.execute(
+                "SELECT CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS "
+                "WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME='chk_jacobs_office_binding'"
+            )
+            binding_row = await cur.fetchone()
+            binding_check = bool(
+                binding_row and _normalizar_check_clause(binding_row[0] or "") ==
+                _normalizar_check_clause(_OFFICE_BINDING_CHECK_INFORMATION_SCHEMA)
+            )
+            if binding_row and not binding_check:
+                ok = await _ddl_acotado(cur, "ALTER TABLE jacobs_pipelines DROP CONSTRAINT chk_jacobs_office_binding")
+                if not ok:
+                    raise RuntimeError("timed out upgrading Office binding constraint")
+            if not binding_check:
+                ok = await _ddl_acotado(cur, "ALTER TABLE jacobs_pipelines ADD CONSTRAINT chk_jacobs_office_binding CHECK (" +
+                    _OFFICE_BINDING_CHECK_CLAUSE + ")")
+                if not ok:
+                    raise RuntimeError("timed out adding Office binding constraint")
             await cur.execute(_DDL_JACOBS_STEPS)
             for col, ddl in [
                 ("motor", "ALTER TABLE jacobs_steps ADD COLUMN motor VARCHAR(30) NULL"),
@@ -1859,6 +1988,103 @@ async def pipeline_get(pipeline_id: str) -> Pipeline | None:
     if not row:
         return None
     return _row_to_pipeline(row)
+
+
+@dataclass(frozen=True)
+class OfficePipelineSnapshot:
+    pipeline_id: str
+    run_epoch: int
+    status: PipelineStatus
+    phase: OfficePhase
+    request_sha256: str
+    office_stage_id: str
+    client_request_id: str
+
+
+async def office_pipeline_by_client_request(tenant_id: int, client_request_id: str) -> OfficePipelineSnapshot | None:
+    """Read the idempotency binding by its unique key; no content leaves SQL."""
+    async with conexion_del_pool() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT pipeline_id, run_epoch, status, office_phase, request_sha256, "
+                "office_stage_id, client_request_id FROM jacobs_pipelines "
+                "WHERE invoked_by='plataforma' AND tenant_id=%s AND client_request_id=%s "
+                "AND execution_contract=%s",
+                (tenant_id, client_request_id, OFFICE_EXECUTION_CONTRACT),
+            )
+            row = await cur.fetchone()
+    if not row:
+        return None
+    try:
+        return OfficePipelineSnapshot(
+            pipeline_id=row["pipeline_id"], run_epoch=int(row["run_epoch"]),
+            status=PipelineStatus(row["status"]), phase=OfficePhase(row["office_phase"]),
+            request_sha256=row["request_sha256"], office_stage_id=row["office_stage_id"],
+            client_request_id=row["client_request_id"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("invalid opaque Office pipeline binding") from exc
+
+
+async def office_pipeline_by_stage(tenant_id: int, office_stage_id: str) -> OfficePipelineSnapshot | None:
+    async with conexion_del_pool() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT pipeline_id, run_epoch, status, office_phase, request_sha256, "
+                "office_stage_id, client_request_id FROM jacobs_pipelines "
+                "WHERE tenant_id=%s AND office_stage_id=%s AND execution_contract=%s",
+                (tenant_id, office_stage_id, OFFICE_EXECUTION_CONTRACT),
+            )
+            row = await cur.fetchone()
+    if not row:
+        return None
+    try:
+        return OfficePipelineSnapshot(
+            pipeline_id=row["pipeline_id"], run_epoch=int(row["run_epoch"]),
+            status=PipelineStatus(row["status"]), phase=OfficePhase(row["office_phase"]),
+            request_sha256=row["request_sha256"], office_stage_id=row["office_stage_id"],
+            client_request_id=row["client_request_id"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("invalid opaque Office stage binding") from exc
+
+
+async def office_transition_phase(
+    pipeline_id: str, epoch: int, from_phase: OfficePhase, to_phase: OfficePhase,
+    *, rejection_code: str | None = None,
+) -> bool:
+    """One epoch-fenced phase transition.  No transition can revive a stale run."""
+    transitions = {
+        OfficePhase.RESERVED: {OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED},
+        OfficePhase.PREFLIGHT_IN_FLIGHT: {OfficePhase.READY, OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED, OfficePhase.OUTCOME_UNKNOWN},
+        OfficePhase.READY: {OfficePhase.DELIVERY_IN_FLIGHT, OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED},
+        OfficePhase.DELIVERY_IN_FLIGHT: {OfficePhase.RECEIPT_STORED, OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED, OfficePhase.OUTCOME_UNKNOWN},
+    }
+    if to_phase not in transitions.get(from_phase, set()):
+        raise ValueError(f"invalid Office phase transition {from_phase.value}->{to_phase.value}")
+    terminal = {
+        OfficePhase.RECEIPT_STORED: PipelineStatus.completed,
+        OfficePhase.FAILED: PipelineStatus.failed,
+        OfficePhase.CANCELLED_REVOKED: PipelineStatus.aborted,
+        OfficePhase.OUTCOME_UNKNOWN: PipelineStatus.outcome_unknown,
+    }
+    required_status = terminal.get(to_phase)
+    phases_with_code = {
+        OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED, OfficePhase.OUTCOME_UNKNOWN,
+    }
+    if (to_phase in phases_with_code and not rejection_code) or (to_phase not in phases_with_code and rejection_code is not None):
+        raise ValueError("Office phase determines rejection-code presence")
+    target_status = required_status.value if required_status else None
+    async with conexion() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE jacobs_pipelines SET office_phase=%s, status=COALESCE(%s,status), "
+                "office_rejection_code=%s, updated_at=%s WHERE pipeline_id=%s "
+                "AND execution_contract=%s AND run_epoch=%s AND office_phase=%s AND status='running'",
+                (to_phase.value, target_status, rejection_code, time.time(), pipeline_id,
+                 OFFICE_EXECUTION_CONTRACT, epoch, from_phase.value),
+            )
+            return cur.rowcount == 1
 
 
 @dataclass(frozen=True)
@@ -2574,6 +2800,13 @@ def _row_to_pipeline(row: dict) -> Pipeline:
     ctx_raw = row.get("context_refs") or "{}"
     ctx = json.loads(ctx_raw) if isinstance(ctx_raw, str) else ctx_raw
 
+    execution_contract = row.get("execution_contract")
+    if execution_contract not in (CLASSIC_EXECUTION_CONTRACT, OFFICE_EXECUTION_CONTRACT):
+        raise RuntimeError("unknown or empty pipeline execution contract")
+    if execution_contract == OFFICE_EXECUTION_CONTRACT and any(row.get(key) in (None, "") for key in (
+        "office_job_id", "office_stage_id", "office_project_id", "client_request_id", "request_sha256", "office_phase", "office_accepted_cost_usd",
+    )):
+        raise RuntimeError("incomplete opaque Office pipeline binding")
     return Pipeline(
         pipeline_id=row["pipeline_id"],
         name=row["name"],
@@ -2595,6 +2828,15 @@ def _row_to_pipeline(row: dict) -> Pipeline:
         # anterior a esta ronda.
         costo_max_aceptado_usd=row.get("costo_max_aceptado_usd"),
         devoluciones=int(row.get("devoluciones") or 0),
+        execution_contract=execution_contract,
+        office_job_id=row.get("office_job_id"),
+        office_stage_id=row.get("office_stage_id"),
+        office_project_id=row.get("office_project_id"),
+        client_request_id=row.get("client_request_id"),
+        request_sha256=row.get("request_sha256"),
+        office_phase=row.get("office_phase"),
+        office_rejection_code=row.get("office_rejection_code"),
+        office_accepted_cost_usd=row.get("office_accepted_cost_usd"),
         mode=row["mode"],
         status=PipelineStatus(row["status"]),
         plan=steps,

@@ -71,11 +71,15 @@ import asyncio
 import json
 import logging
 import random
+import time
+import uuid
+from dataclasses import dataclass
 
 import aiomysql
 
 from jacobs import store
 from jacobs.models import Pipeline, PipelineStatus
+from jacobs.office_contract import OFFICE_EXECUTION_CONTRACT, OfficePhase, OfficeRunRequest
 from jacobs.policy import (
     ESTADOS_QUE_OCUPAN_CUPO,
     ESTADOS_SIN_CUPO,
@@ -172,7 +176,95 @@ __all__ = [
     "ContencionAlReservar", "CupoAgotado", "ESTADOS_QUE_OCUPAN_CUPO", "ESTADOS_SIN_CUPO",
     "reservar_cupo", "completar_reserva", "soltar_reserva", "activos",
     "SQL_RESERVAR", "parametros_de_reserva",
+    "reservar_office_v1", "OfficeReservation",
 ]
+
+
+@dataclass(frozen=True)
+class OfficeReservation:
+    pipeline_id: str
+    created: bool
+    conflict: bool = False
+
+
+# The capacity predicate and the INSERT are one statement.  There is no
+# observable moment where an idempotency row exists without consuming capacity.
+SQL_RESERVAR_OFFICE = f"""
+INSERT INTO jacobs_pipelines
+ (pipeline_id,name,invoked_by,mode,status,plan,current_step_index,max_steps,
+  context_refs,created_at,updated_at,user_id,tenant_id,execution_contract,
+  office_job_id,office_stage_id,office_project_id,client_request_id,
+  request_sha256,office_phase,office_accepted_cost_usd)
+SELECT %s,'office-v1','plataforma','autonomous','running','[]',0,1,'{{}}',
+ %s,%s,%s,%s,'OFFICE_V1',%s,%s,%s,%s,%s,'RESERVED',%s
+FROM DUAL WHERE (SELECT COUNT(*) FROM jacobs_pipelines
+ WHERE status IN ({SQL_ESTADOS_VIVOS})) < %s
+"""
+
+
+async def reservar_office_v1(request: OfficeRunRequest, *, pipeline_id: str | None = None,
+                             limite: int | None = None) -> OfficeReservation | None:
+    """Reserve a V1 pipeline atomically, returning an exact replay or conflict.
+
+    The caller gets no generic Pipeline constructor: all nonopaque fields are
+    fixed here, and no public classic request can select this discriminator.
+    """
+    pid = pipeline_id or str(uuid.uuid4())
+    ceiling = MAX_PARALLEL_PIPELINES if limite is None else limite
+    now = time.time()
+    params = (pid, now, now, str(request.usage_user_id), str(request.tenant_id),
+              str(request.office_job_id), str(request.office_stage_id), request.project_id,
+              str(request.client_request_id), request.request_sha256, request.accepted_cost_usd, ceiling)
+    expected = 0.0
+    for attempt in range(MAX_REINTENTOS_DEADLOCK):
+        try:
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    try:
+                        await cur.execute(SQL_RESERVAR_OFFICE, params)
+                    except aiomysql.IntegrityError:
+                        # Do not acquire a second pool slot while this one is
+                        # held: pool size one is valid and duplicate traffic
+                        # must not deadlock itself.
+                        await cur.execute(
+                            "SELECT pipeline_id, request_sha256, client_request_id FROM jacobs_pipelines "
+                            "WHERE execution_contract='OFFICE_V1' AND tenant_id=%s "
+                            "AND client_request_id=%s",
+                            (str(request.tenant_id), str(request.client_request_id)),
+                        )
+                        existing = await cur.fetchone()
+                        if existing is not None:
+                            # A same-key conflict always reports the canonical
+                            # idempotency row, never an unrelated stage row.
+                            return OfficeReservation(existing[0], False,
+                                                    existing[1] != request.request_sha256)
+                        await cur.execute(
+                            "SELECT pipeline_id FROM jacobs_pipelines "
+                            "WHERE execution_contract='OFFICE_V1' AND tenant_id=%s AND office_stage_id=%s",
+                            (str(request.tenant_id), str(request.office_stage_id)),
+                        )
+                        if await cur.fetchone() is not None:
+                            return OfficeReservation(pid, False, True)
+                        raise
+                    if cur.rowcount == 1:
+                        return OfficeReservation(pid, True)
+            # A full cupo is intentionally distinguishable from replay.  Check
+            # the idempotency key after the failed conditional insert.
+            existing = await store.office_pipeline_by_client_request(
+                request.tenant_id, str(request.client_request_id))
+            if existing is not None:
+                return OfficeReservation(existing.pipeline_id, False,
+                                        existing.request_sha256 != request.request_sha256)
+            return None
+        except aiomysql.OperationalError as exc:
+            if exc.args[0] != _DEADLOCK:
+                raise
+            wait = min(random.uniform(0.001, 0.005) * (2 ** attempt), ESPERA_MAXIMA_SEGUNDOS)
+            if expected + wait > PRESUPUESTO_DE_ESPERA_SEGUNDOS:
+                raise ContencionAlReservar(attempt + 1, expected) from exc
+            await asyncio.sleep(wait)
+            expected += wait
+    raise ContencionAlReservar(MAX_REINTENTOS_DEADLOCK, expected)
 
 
 def parametros_de_reserva(p: Pipeline, limite: int) -> tuple:

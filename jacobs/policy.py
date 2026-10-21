@@ -53,6 +53,7 @@ ESTADOS_SIN_CUPO = (
     PipelineStatus.disputed,
     # 2026-09-22 (spec descartar-pipelines): descartado y oculto son terminales.
     PipelineStatus.discarded, PipelineStatus.hidden,
+    PipelineStatus.outcome_unknown,
 )
 
 #: La lista para un `IN (...)` de SQL. Literal y no parámetros: son valores del

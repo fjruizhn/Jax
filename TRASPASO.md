@@ -21,3 +21,5 @@ Task3fixround2final: linkedresultCHECKv4 withSQLNULLclosedpreflight+constraint; 
 CoreTask3 APROBADO Sol exactaeb7278de923ba3417e52e13ec77d01d8bfcd879,72testsindependent; .2consumerTask2JXPnotified. NoOfficeidentities/invitesenabled. CoreJacobsopaqueadapterplanningnewTask4 stillnotimplemented.
 
 CoreTask4Jacobs architecture persisted office-execution.md after Solanalysis + rootread actualproviderGoogletools/defaultrawerrorpaths. V1singlecallno-tools directtransport policy/opaqueerrors beforepersistence and receipts-only; deliveryslices4A/4B/4C, staysdisableduntilJXPpair/callbacks/storagecomplete. Next4Apurecontract/schema/atomiccupo notexecutionactivation.
+
+Task4Afoundationsfrozenafterrootprecheck/freshTier2completion: exactOfficeDECIMAL14,6 budget/strictrequests/atomiccupo+deterministicreplay/pool1/strictCHECK/phaseCAS andtruthfulunknownterminal. Root159passed2.18s228warnings4subtests; exactSHAauditnext. OriginalworkercontexttransferredtosameTask4Awithoutreset. No route/provider/receiptwiringenabled;4B/C mandatory. Sourceexecution-foundationsreview.

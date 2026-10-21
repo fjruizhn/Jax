@@ -63,6 +63,7 @@ class PipelineStatus(str, Enum):
     # superadmin lo ocultó (restaurable). Ninguno borra filas.
     discarded   = "discarded"
     hidden      = "hidden"
+    outcome_unknown = "outcome_unknown"
 
 
 class StepStatus(str, Enum):
@@ -161,6 +162,18 @@ class Pipeline(BaseModel):
     # §3.3: cuántas veces YA devolvió el árbitro este pipeline. Contra el
     # tope de axioma_config.jacobs.tope_devoluciones (store.get_tope_devoluciones).
     devoluciones:       int = 0
+    # Office fields are opaque bindings only.  Classic creation deliberately
+    # keeps the discriminator at CLASSIC and cannot opt into Office through a
+    # public PipelineCreateRequest.
+    execution_contract: str = "CLASSIC"
+    office_job_id: str | None = None
+    office_stage_id: str | None = None
+    office_project_id: int | None = None
+    client_request_id: str | None = None
+    request_sha256: str | None = None
+    office_phase: str | None = None
+    office_rejection_code: str | None = None
+    office_accepted_cost_usd: Decimal | None = None
     # dedication: interno, no expuesto en API
 
 
