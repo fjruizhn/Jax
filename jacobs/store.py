@@ -35,7 +35,7 @@ from jacobs.policy import (
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 from jacobs.office_contract import (
     CLASSIC_EXECUTION_CONTRACT, OFFICE_EXECUTION_CONTRACT, OFFICE_REJECTION_CODES,
-    OfficePhase, OfficeRejectionCode,
+    OfficePhase,
 )
 
 try:
@@ -2145,13 +2145,14 @@ async def office_transition_phase(
     phases_with_code = {
         OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED, OfficePhase.OUTCOME_UNKNOWN,
     }
+    if rejection_code is not None and (
+        not isinstance(rejection_code, str) or rejection_code not in OFFICE_REJECTION_CODES
+    ):
+        # Never construct Enum(value): its ValueError retains the untrusted
+        # value and can leak it through an exception chain or traceback.
+        raise ValueError("unknown Office rejection code") from None
     if (to_phase in phases_with_code and not rejection_code) or (to_phase not in phases_with_code and rejection_code is not None):
         raise ValueError("Office phase determines rejection-code presence")
-    if rejection_code is not None:
-        try:
-            OfficeRejectionCode(rejection_code)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("unknown Office rejection code") from exc
     target_status = required_status.value if required_status else None
     async with conexion() as conn:
         async with conn.cursor() as cur:

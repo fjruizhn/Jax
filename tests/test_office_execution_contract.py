@@ -1,11 +1,14 @@
 from decimal import Decimal
+import asyncio
+import traceback
 import uuid
 
 import pytest
 from pydantic import ValidationError
 
+from jacobs import store
 from jacobs.office_contract import (
-    OFFICE_RUNTIME_POLICY, OFFICE_WORK_CONTRACT_VERSION, OfficeRunRequest, OfficeRuntimePolicy,
+    OFFICE_RUNTIME_POLICY, OFFICE_WORK_CONTRACT_VERSION, OfficePhase, OfficeRunRequest, OfficeRuntimePolicy,
     deterministic_correlation_id, deterministic_step_id, office_request_digest,
 )
 
@@ -85,3 +88,29 @@ def test_strict_json_claim_types_and_exact_money(field, value):
     claims[field] = value
     with pytest.raises(ValidationError):
         OfficeRunRequest(**claims)
+
+
+def test_unknown_office_rejection_code_is_opaque_before_any_database_work(monkeypatch, caplog):
+    sentinel = "SENTINEL_UNTRUSTED_OFFICE_REJECTION"
+    connection_called = False
+
+    def unexpected_connection():
+        nonlocal connection_called
+        connection_called = True
+        raise AssertionError("rejection validation must precede database work")
+
+    monkeypatch.setattr(store, "conexion", unexpected_connection)
+    caplog.set_level("DEBUG")
+    for untrusted in (sentinel, 7, []):
+        with pytest.raises(ValueError) as caught:
+            asyncio.run(store.office_transition_phase(
+                "unused", 0, OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.FAILED,
+                rejection_code=untrusted,
+            ))
+        assert str(caught.value) == "unknown Office rejection code"
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        rendered = "".join(traceback.format_exception(caught.type, caught.value, caught.tb))
+        assert sentinel not in rendered
+    assert not connection_called
+    assert sentinel not in caplog.text
