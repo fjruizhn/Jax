@@ -90,6 +90,9 @@ _CHK_MEMBERSHIP_ORIGIN = "chk_jax_project_membership_origin"
 _CHK_MEMBERSHIP_ORIGIN_V2 = "chk_jax_project_membership_origin_v2"
 _CHK_MEMBERSHIP_PRE_ADMIN = "chk_jax_project_membership_pre_admin"
 _CHK_NAMESPACE_MEMBERSHIP_EXECUTION = "chk_jax_namespace_membership_mutation_execution"
+_CHK_NAMESPACE_MEMBERSHIP_RESULT = "chk_jax_namespace_membership_mutation_result"
+_CHK_NAMESPACE_MEMBERSHIP_RESULT_V2 = "chk_jax_namespace_membership_mutation_result_v2"
+_UQ_NAMESPACE_MEMBERSHIP_INVITATION = "uq_jax_namespace_membership_mutation_invitation"
 _IDX_MEMBERSHIP_USER_LIST = "idx_jax_project_membership_user_list"
 #: Ronda 4, MAJOR MJ-2: `jax_users` is platform-owned (jax-platform's own
 #: migrations create the table), but the admin-set read this module needs
@@ -305,8 +308,8 @@ async def _apply_project_lifecycle_migration(cursor: Any) -> None:
         "CONSTRAINT chk_jax_namespace_membership_mutation_execution CHECK "
         "((execution_kind='INTERACTIVE_USER' AND invitation_id IS NULL) OR "
         "(execution_kind='INVITATION_ACCEPTANCE' AND invitation_id IS NOT NULL)), "
-        "CONSTRAINT chk_jax_namespace_membership_mutation_result CHECK "
-        "(project_role IN ('VIEWER','CONTRIBUTOR') AND status IN ('ACTIVE','REVOKED') AND changed=1)"
+        "CONSTRAINT chk_jax_namespace_membership_mutation_result_v2 CHECK "
+        "(project_role IN ('VIEWER','CONTRIBUTOR','REVIEWER','OWNER') AND status IN ('ACTIVE','REVOKED') AND changed=1)"
         ") ENGINE=InnoDB")
     if await _column_type(cursor, "jax_namespace_membership_mutation_request", "execution_kind") is None:
         await cursor.execute(
@@ -322,6 +325,34 @@ async def _apply_project_lifecycle_migration(cursor: Any) -> None:
             + _CHK_NAMESPACE_MEMBERSHIP_EXECUTION + " CHECK "
             "((execution_kind='INTERACTIVE_USER' AND invitation_id IS NULL) OR "
             "(execution_kind='INVITATION_ACCEPTANCE' AND invitation_id IS NOT NULL))")
+    # A revoke records the canonical role that already exists on the stored
+    # membership.  Historical OFFICE rows may legitimately be REVIEWER or
+    # OWNER, even though grants from this adapter are deliberately restricted
+    # to CONTRIBUTOR/VIEWER.  Widen the result constraint without rewriting
+    # history so cleanup itself cannot strand authority rows.
+    if not await _check_constraint_exists(cursor, _CHK_NAMESPACE_MEMBERSHIP_RESULT_V2):
+        await cursor.execute(
+            "ALTER TABLE jax_namespace_membership_mutation_request ADD CONSTRAINT "
+            + _CHK_NAMESPACE_MEMBERSHIP_RESULT_V2 + " CHECK "
+            "(project_role IN ('VIEWER','CONTRIBUTOR','REVIEWER','OWNER') "
+            "AND status IN ('ACTIVE','REVOKED') AND changed=1)")
+    if await _check_constraint_exists(cursor, _CHK_NAMESPACE_MEMBERSHIP_RESULT):
+        await cursor.execute(
+            "ALTER TABLE jax_namespace_membership_mutation_request DROP CONSTRAINT "
+            + _CHK_NAMESPACE_MEMBERSHIP_RESULT)
+    # One invitation capability has exactly one durable consumption.  Check
+    # old data before installing the unique key: a conflicting upgrade stops
+    # closed and preserves the historical rows for human repair.
+    if not await _index_exists(cursor, "jax_namespace_membership_mutation_request", _UQ_NAMESPACE_MEMBERSHIP_INVITATION):
+        await cursor.execute(
+            "SELECT namespace,invitation_id,COUNT(*) AS n "
+            "FROM jax_namespace_membership_mutation_request "
+            "WHERE invitation_id IS NOT NULL GROUP BY namespace,invitation_id HAVING COUNT(*)>1")
+        if await cursor.fetchone() is not None:
+            raise RuntimeError("cannot upgrade membership mutation requests: duplicate invitation consumption")
+        await cursor.execute(
+            "CREATE UNIQUE INDEX " + _UQ_NAMESPACE_MEMBERSHIP_INVITATION + " "
+            "ON jax_namespace_membership_mutation_request (namespace,invitation_id)")
     # 005g
     current_type = await _column_type(cursor, "projects", "status")
     if current_type is not None and "hidden" not in current_type:

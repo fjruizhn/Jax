@@ -443,6 +443,14 @@ async def test_migracion_apply_apply_revert_apply_y_falla_cerrado_con_historia_o
                     "(namespace,idempotency_key,operation,actor_user_id,target_tenant_id,project_id,target_user_id,member_kind,request_digest,execution_kind,invitation_id,membership_id,event_id,project_role,status,changed,created_at) "
                     "VALUES ('OFFICE_CONFIDENTIAL',UUID(),'GRANT_OFFICE_MEMBER',%s,%s,%s,%s,'EXTERNAL_CLIENT',REPEAT('a',64),'INVITATION_ACCEPTANCE',UUID(),%s,@office_event,'VIEWER','ACTIVE',1,NOW(6))",
                     (office_user, office_tenant, office_project, office_user, office_membership))
+                await cur.execute("DROP INDEX uq_jax_namespace_membership_mutation_invitation ON jax_namespace_membership_mutation_request")
+                await cur.execute(
+                    "INSERT INTO jax_namespace_membership_mutation_request "
+                    "(namespace,idempotency_key,operation,actor_user_id,target_tenant_id,project_id,target_user_id,member_kind,request_digest,execution_kind,invitation_id,membership_id,event_id,project_role,status,changed,created_at) "
+                    "SELECT namespace,UUID(),operation,actor_user_id,target_tenant_id,project_id,target_user_id,member_kind,REPEAT('b',64),execution_kind,invitation_id,membership_id,event_id,project_role,status,changed,NOW(6) "
+                    "FROM jax_namespace_membership_mutation_request LIMIT 1")
+                with pytest.raises(RuntimeError, match="duplicate invitation consumption"):
+                    await apply_project_authority_migration(cur)
                 with pytest.raises(RuntimeError, match="Office membership mutation requests"):
                     await revert_project_lifecycle_migration(cur)
         finally:
@@ -654,6 +662,9 @@ async def test_office_membership_replays_locks_rolls_back_and_keeps_capability_p
     assert provenance == [{"actor_principal": f"office-invitation:{invitation_id}", "actor_type": "CAPABILITY",
                            "execution_kind": "INVITATION_ACCEPTANCE", "invitation_id": invitation_id,
                            "project_role": "VIEWER"}]
+    created_by = await _sql("SELECT created_by FROM jax_project_membership WHERE membership_id=%s",
+                            (capability.membership_id,), fetch=True)
+    assert created_by == [{"created_by": f"office-invitation:{invitation_id}"}]
 
     # Same key binds every authority input, including kind and capability.
     with pytest.raises(IdempotencyKeyConflict):
@@ -670,7 +681,7 @@ async def test_office_membership_replays_locks_rolls_back_and_keeps_capability_p
     race_key = str(uuid.uuid4())
     auth.race_target = race_target
 
-    async def racer():
+    async def racer(race_member, race_idempotency_key, race_execution=None):
         pool = await _pool(maxsize=1)
         try:
             async with pool.acquire() as conn:
@@ -679,9 +690,9 @@ async def test_office_membership_replays_locks_rolls_back_and_keeps_capability_p
                     async with conn.cursor() as cur:
                         value = await api.grant_namespaced_member_in_transaction(
                             cur, actor_user_id=actor, target_tenant_id=tenant, project_id=project,
-                            target_user_id=race_target, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
-                            member_kind=NamespacedMemberKind.EXTERNAL_CLIENT, idempotency_key=race_key,
-                            authorizer=auth)
+                                target_user_id=race_member, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+                                member_kind=NamespacedMemberKind.EXTERNAL_CLIENT, idempotency_key=race_idempotency_key,
+                                authorizer=auth, execution=race_execution)
                     await conn.commit()
                     return value
                 except Exception:
@@ -690,9 +701,9 @@ async def test_office_membership_replays_locks_rolls_back_and_keeps_capability_p
         finally:
             pool.close(); await pool.wait_closed()
 
-    first = asyncio.create_task(racer())
+    first = asyncio.create_task(racer(race_target, race_key))
     await asyncio.wait_for(auth.race_entered.wait(), timeout=5)
-    second = asyncio.create_task(racer())
+    second = asyncio.create_task(racer(race_target, race_key))
     await asyncio.sleep(0)
     auth.race_release.set()
     raced = await asyncio.wait_for(asyncio.gather(first, second), timeout=10)
@@ -703,6 +714,31 @@ async def test_office_membership_replays_locks_rolls_back_and_keeps_capability_p
         "(SELECT COUNT(*) FROM jax_namespace_membership_mutation_request WHERE namespace='OFFICE_CONFIDENTIAL' AND idempotency_key=%s) AS r",
         (project, race_target, project, race_target, race_key), fetch=True)
     assert rows == [{"m": 1, "e": 1, "r": 1}]
+
+    # Two different request keys cannot consume the same invitation.  The
+    # unique durable binding is the final race backstop; only one capability
+    # mutation, event and request remain after both caller transactions end.
+    invitation_race_target = await _crear_usuario(tenant)
+    await _sql("UPDATE jax_users SET account_class='EXTERNAL_CLIENT' WHERE user_id=%s", (invitation_race_target,))
+    invitation_race = NamespaceMembershipExecution(
+        NamespaceMembershipExecutionKind.INVITATION_ACCEPTANCE, str(uuid.uuid4()))
+    auth.race_target = invitation_race_target
+    auth.race_entered = asyncio.Event()
+    auth.race_release = asyncio.Event()
+    first = asyncio.create_task(racer(invitation_race_target, str(uuid.uuid4()), invitation_race))
+    await asyncio.wait_for(auth.race_entered.wait(), timeout=5)
+    second = asyncio.create_task(racer(invitation_race_target, str(uuid.uuid4()), invitation_race))
+    await asyncio.sleep(0)
+    auth.race_release.set()
+    invitation_raced = await asyncio.wait_for(asyncio.gather(first, second, return_exceptions=True), timeout=10)
+    assert sum(not isinstance(value, Exception) for value in invitation_raced) == 1
+    assert sum(isinstance(value, IdempotencyKeyConflict) for value in invitation_raced) == 1
+    invitation_rows = await _sql(
+        "SELECT (SELECT COUNT(*) FROM jax_project_membership WHERE project_id=%s AND user_id=%s) AS m, "
+        "(SELECT COUNT(*) FROM jax_project_membership_event WHERE project_id=%s AND target_user_id=%s) AS e, "
+        "(SELECT COUNT(*) FROM jax_namespace_membership_mutation_request WHERE namespace='OFFICE_CONFIDENTIAL' AND invitation_id=%s) AS r",
+        (project, invitation_race_target, project, invitation_race_target, invitation_race.invitation_id), fetch=True)
+    assert invitation_rows == [{"m": 1, "e": 1, "r": 1}]
 
     # Classic mutators retain their CLASSIC-only boundary even when the same
     # caller happens to be Office staff.  They cannot write Office rows.
@@ -722,13 +758,21 @@ async def test_office_membership_replays_locks_rolls_back_and_keeps_capability_p
     await _sql("UPDATE jax_users SET status='inactive' WHERE user_id=%s", (external,))
     cleanup = await mutate(api.revoke_namespaced_member_in_transaction, key=str(uuid.uuid4()), target=external)
     assert cleanup.status == "REVOKED"
-    foreign_tenant = await _crear_tenant("office-member-foreign")
-    foreign_target = await _crear_usuario(foreign_tenant)
-    await _sql("UPDATE jax_users SET account_class='EXTERNAL_CLIENT' WHERE user_id=%s", (foreign_target,))
     with pytest.raises(ProjectStateConflict):
         await mutate(api.grant_namespaced_member_in_transaction, key=str(uuid.uuid4()), target=race_target,
                      kind=NamespacedMemberKind.EXTERNAL_CLIENT)
     await _sql("UPDATE jax_project_scope SET status='ACTIVE' WHERE project_id=%s", (project,))
+    await _sql("UPDATE jax_users SET status='active' WHERE user_id=%s", (external,))
+    with pytest.raises(IdempotencyKeyConflict):
+        await mutate(api.grant_namespaced_member_in_transaction, key=str(uuid.uuid4()), target=external,
+                     kind=NamespacedMemberKind.EXTERNAL_CLIENT, execution=cap)
+    invite_counts = await _sql(
+        "SELECT COUNT(*) AS n FROM jax_namespace_membership_mutation_request "
+        "WHERE namespace='OFFICE_CONFIDENTIAL' AND invitation_id=%s", (invitation_id,), fetch=True)
+    assert invite_counts == [{"n": 1}]
+    foreign_tenant = await _crear_tenant("office-member-foreign")
+    foreign_target = await _crear_usuario(foreign_tenant)
+    await _sql("UPDATE jax_users SET account_class='EXTERNAL_CLIENT' WHERE user_id=%s", (foreign_target,))
     with pytest.raises(TargetUserNotEligible):
         await mutate(api.grant_namespaced_member_in_transaction, key=str(uuid.uuid4()), target=foreign_target,
                      kind=NamespacedMemberKind.EXTERNAL_CLIENT)
@@ -762,6 +806,13 @@ async def test_office_membership_replays_locks_rolls_back_and_keeps_capability_p
     with pytest.raises(IdempotencyKeyConflict):
         await mutate(api.grant_namespaced_member_in_transaction, key=capability_key, target=external,
                      kind=NamespacedMemberKind.INTERNAL, execution=cap)
+
+    # A legacy elevated Office membership can be cleaned without violating the
+    # request-result constraint. Grants above remain fixed by the adapter.
+    elevated = await _crear_usuario(tenant)
+    await _crear_membresia(project, tenant, elevated, role="REVIEWER", origin="OFFICE")
+    elevated_revoke = await mutate(api.revoke_namespaced_member_in_transaction, key=str(uuid.uuid4()), target=elevated)
+    assert elevated_revoke.project_role is ProjectRole.REVIEWER and elevated_revoke.status == "REVOKED"
 
 def test_bootstrap_no_acepta_tenant_id_como_parametro():
     import inspect

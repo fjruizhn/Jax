@@ -113,6 +113,7 @@ async def test_office_membership_uses_the_callers_cursor_and_records_a_typed_gra
     assert authorizer.calls[0][0] is cursor
     assert authorizer.calls[0][1]["execution"] == NamespaceMembershipExecution(
         NamespaceMembershipExecutionKind.INTERACTIVE_USER)
+    assert authorizer.calls[0][1]["idempotency_key"]
     assert any("grant_origin='OFFICE'" in sql or "'OFFICE'" in sql for sql, _ in cursor.calls)
     assert not any("BEGIN" in sql.upper() or "COMMIT" in sql.upper() or "ROLLBACK" in sql.upper()
                    for sql, _ in cursor.calls)
@@ -131,6 +132,29 @@ async def test_office_membership_rejects_invalid_execution_before_sql(execution)
             namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
             member_kind=NamespacedMemberKind.EXTERNAL_CLIENT, idempotency_key=str(uuid.uuid4()),
             authorizer=MembershipAuthorizer(), execution=execution)
+
+
+@pytest.mark.asyncio
+async def test_capability_membership_binds_canonical_key_and_truthful_created_by():
+    invitation_id = str(uuid.uuid4())
+    key = str(uuid.uuid4())
+    cursor = Cursor([
+        {"tenant_id": 4, "status": "ACTIVE"},
+        {"tenant_id": 8, "status": "ACTIVE", "account_class": "OFFICE_INTERNAL"},
+        {"tenant_id": 4, "status": "ACTIVE", "account_class": "EXTERNAL_CLIENT"},
+        {"tenant_id": 4, "status": "ACTIVE", "authorization_namespace": "OFFICE_CONFIDENTIAL"},
+        None, None, None,
+    ])
+    authorizer = MembershipAuthorizer()
+    await ProjectAuthorityAdmin(object()).grant_namespaced_member_in_transaction(
+        cursor, actor_user_id=8, target_tenant_id=4, project_id=17, target_user_id=9,
+        namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+        member_kind=NamespacedMemberKind.EXTERNAL_CLIENT, idempotency_key=key,
+        authorizer=authorizer,
+        execution=NamespaceMembershipExecution(NamespaceMembershipExecutionKind.INVITATION_ACCEPTANCE, invitation_id))
+    assert authorizer.calls[0][1]["idempotency_key"] == key
+    insert_args = next(args for sql, args in cursor.calls if "INSERT INTO jax_project_membership" in sql)
+    assert insert_args[-1] == f"office-invitation:{invitation_id}"
 
 
 def _new_store():

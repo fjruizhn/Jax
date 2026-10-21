@@ -348,6 +348,7 @@ class NamespaceMembershipMutationAuthorizer(Protocol):
         project_id: int, target_user_id: int, namespace: ProjectNamespace,
         operation: NamespaceMembershipOperation,
         member_kind: NamespacedMemberKind | None,
+        idempotency_key: str,
         execution: NamespaceMembershipExecution,
     ) -> None: ...
 
@@ -818,6 +819,19 @@ class ProjectAuthorityAdmin:
              project_id, target_user_id,
              tenant_id, old_role, new_role, old_status, new_status, request_id, trace_id))
 
+    @staticmethod
+    def _namespaced_membership_created_by(*, actor_user_id: int,
+                                          execution: NamespaceMembershipExecution) -> str:
+        """Keep membership provenance consistent with its canonical event.
+
+        Invitation acceptance has no interactive issuer session, so storing
+        ``office:<issuer>`` would falsely describe the bearer as that user.
+        The immutable request still records the canonical authority actor.
+        """
+        if execution.kind is NamespaceMembershipExecutionKind.INVITATION_ACCEPTANCE:
+            return f"office-invitation:{execution.invitation_id}"
+        return f"user:{actor_user_id}"
+
     async def _mutate_namespaced_member_in_transaction(
         self, cur: Any, *, actor_user_id: int, target_tenant_id: int, project_id: int,
         target_user_id: int, namespace: ProjectNamespace,
@@ -902,7 +916,8 @@ class ProjectAuthorityAdmin:
             await authorizer.authorize_membership_in_transaction(
                 cur, actor_user_id=actor_user_id, target_tenant_id=target_tenant_id,
                 project_id=project_id, target_user_id=target_user_id, namespace=namespace,
-                operation=operation, member_kind=member_kind, execution=execution)
+                operation=operation, member_kind=member_kind, idempotency_key=idempotency_key,
+                execution=execution)
             await cur.execute(
                 "SELECT operation,actor_user_id,target_tenant_id,project_id,target_user_id,member_kind,request_digest,"
                 "execution_kind,invitation_id,membership_id,event_id,project_role,status,changed FROM jax_namespace_membership_mutation_request "
@@ -917,6 +932,14 @@ class ProjectAuthorityAdmin:
                     bool(self._value(existing, "changed", 13)), project_id, target_user_id,
                     ProjectRole(str(self._value(existing, "project_role", 11))),
                     str(self._value(existing, "status", 12)), True)
+            if execution.kind is NamespaceMembershipExecutionKind.INVITATION_ACCEPTANCE:
+                await cur.execute(
+                    "SELECT idempotency_key FROM jax_namespace_membership_mutation_request "
+                    "WHERE namespace=%s AND invitation_id=%s FOR UPDATE",
+                    (namespace.value, execution.invitation_id))
+                invitation_request = await cur.fetchone()
+                if invitation_request:
+                    raise IdempotencyKeyConflict("invitation acceptance was already consumed")
             await cur.execute(
                 "SELECT membership_id,project_role,status FROM jax_project_membership "
                 "WHERE project_id=%s AND user_id=%s FOR UPDATE", (project_id, target_user_id))
@@ -935,7 +958,8 @@ class ProjectAuthorityAdmin:
                     await cur.execute(
                         "INSERT INTO jax_project_membership (membership_id,project_id,tenant_id,user_id,project_role,status,"
                         "grant_origin,created_at,created_by,updated_at) VALUES (%s,%s,%s,%s,%s,'ACTIVE','OFFICE',NOW(6),%s,NOW(6))",
-                        (membership_id, project_id, target_tenant_id, target_user_id, role.value, f"office:{actor_user_id}"))
+                        (membership_id, project_id, target_tenant_id, target_user_id, role.value,
+                         self._namespaced_membership_created_by(actor_user_id=actor_user_id, execution=execution)))
                 old_role, old_status, status = (None, None, "ACTIVE") if not membership else (
                     str(self._value(membership, "project_role", 1)), str(self._value(membership, "status", 2)), "ACTIVE")
             else:
