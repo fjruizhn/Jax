@@ -33,7 +33,10 @@ from jacobs.policy import (
     CupoAgotado,
 )
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
-from jacobs.office_contract import CLASSIC_EXECUTION_CONTRACT, OFFICE_EXECUTION_CONTRACT, OfficePhase
+from jacobs.office_contract import (
+    CLASSIC_EXECUTION_CONTRACT, OFFICE_EXECUTION_CONTRACT, OFFICE_REJECTION_CODES,
+    OfficePhase, OfficeRejectionCode,
+)
 
 try:
     # LAS MANOS produccion (cwd=las_manos, uvicorn) y jobs con PYTHONPATH
@@ -1050,6 +1053,27 @@ _INDICES: list[tuple[str, str, str, bool]] = [
      "(user_id, tenant_id, visible, created_at) ALGORITHM=INPLACE LOCK=NONE", True),
 ]
 
+_OFFICE_CORRECTNESS_INDICES = {
+    ("jacobs_pipelines", "uq_jacobs_office_client_request"): ("invoked_by", "tenant_id", "client_request_id"),
+    ("jacobs_pipelines", "uq_jacobs_office_stage"): ("execution_contract", "tenant_id", "office_stage_id"),
+}
+
+
+async def _verificar_indice_office_correcto(cur, tabla: str, indice: str) -> bool:
+    """A same-name index is usable only if it is the exact uniqueness gate."""
+    esperado = _OFFICE_CORRECTNESS_INDICES[(tabla, indice)]
+    await cur.execute(
+        "SELECT COLUMN_NAME, NON_UNIQUE, SUB_PART, IGNORED FROM information_schema.STATISTICS "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s ORDER BY SEQ_IN_INDEX",
+        (tabla, indice),
+    )
+    rows = await cur.fetchall()
+    return bool(rows) and tuple(row[0] for row in rows) == esperado and all(
+        # MariaDB 12.3.3 has no STATISTICS.EXPRESSION and no functional-index
+        # syntax; a NULL COLUMN_NAME is nevertheless rejected explicitly.
+        row[0] is not None and row[1] == 0 and row[2] is None and row[3] == "NO" for row in rows
+    )
+
 # --- Indices RETIRADOS -------------------------------------------------------
 # (tabla, indice retirado, indice que lo reemplaza, prefijo de columnas que el
 # reemplazo tiene que tener). `init_tables()` los borra DESPUES de crear los de
@@ -1321,7 +1345,8 @@ _EXPRESION_VISIBLE_ANTERIOR = "status NOT IN ('discarded','hidden') AND owner_ac
 # The information-schema comparison accepts only this full invariant (modulo
 # MariaDB's presentation whitespace/backticks).  A CHECK with a familiar
 # column name is not evidence that phase/status/code snapshots are protected.
-_OFFICE_BINDING_CHECK_CLAUSE = """
+_OFFICE_REJECTION_CODES_SQL = ",".join(repr(code) for code in OFFICE_REJECTION_CODES)
+_OFFICE_BINDING_CHECK_CLAUSE = f"""
 COALESCE(
  BINARY execution_contract IN ('CLASSIC','OFFICE_V1') AND
  (
@@ -1329,17 +1354,24 @@ COALESCE(
    AND office_project_id IS NULL AND client_request_id IS NULL AND request_sha256 IS NULL
    AND office_phase IS NULL AND office_rejection_code IS NULL AND office_accepted_cost_usd IS NULL)
   OR
-  (BINARY execution_contract='OFFICE_V1' AND office_job_id IS NOT NULL AND office_stage_id IS NOT NULL
+  (BINARY execution_contract='OFFICE_V1' AND BINARY invoked_by='plataforma' AND BINARY mode='autonomous'
+   AND BINARY name='office-v1' AND max_steps=1 AND current_step_index=0
+   AND JSON_TYPE(plan)='ARRAY' AND JSON_LENGTH(plan)=0 AND JSON_TYPE(context_refs)='OBJECT' AND JSON_LENGTH(context_refs)=0
+   AND BINARY pipeline_id REGEXP '^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$'
+   AND BINARY tenant_id REGEXP '^[1-9][0-9]*$' AND BINARY user_id REGEXP '^[1-9][0-9]*$'
+   AND office_job_id IS NOT NULL AND BINARY office_job_id REGEXP '^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$'
+   AND office_stage_id IS NOT NULL AND BINARY office_stage_id REGEXP '^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$'
+   AND client_request_id IS NOT NULL AND BINARY client_request_id REGEXP '^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$'
    AND office_project_id IS NOT NULL AND office_project_id > 0 AND client_request_id IS NOT NULL
-   AND request_sha256 IS NOT NULL AND BINARY request_sha256 REGEXP '^[0-9a-f]{64}$'
+   AND request_sha256 IS NOT NULL AND BINARY request_sha256 REGEXP '^[0-9a-f]{{64}}$'
    AND office_phase IS NOT NULL AND
    (
     (BINARY office_phase IN ('RESERVED','PREFLIGHT_IN_FLIGHT','READY','DELIVERY_IN_FLIGHT')
      AND BINARY status='running' AND office_rejection_code IS NULL)
     OR (BINARY office_phase='RECEIPT_STORED' AND BINARY status='completed' AND office_rejection_code IS NULL)
-    OR (BINARY office_phase='FAILED' AND BINARY status='failed' AND office_rejection_code IS NOT NULL AND CHAR_LENGTH(office_rejection_code) > 0)
-    OR (BINARY office_phase='CANCELLED_REVOKED' AND BINARY status='aborted' AND office_rejection_code IS NOT NULL AND CHAR_LENGTH(office_rejection_code) > 0)
-    OR (BINARY office_phase='OUTCOME_UNKNOWN' AND BINARY status='outcome_unknown' AND office_rejection_code IS NOT NULL AND CHAR_LENGTH(office_rejection_code) > 0)
+    OR (BINARY office_phase='FAILED' AND BINARY status='failed' AND BINARY office_rejection_code IN ({_OFFICE_REJECTION_CODES_SQL}))
+    OR (BINARY office_phase='CANCELLED_REVOKED' AND BINARY status='aborted' AND BINARY office_rejection_code IN ({_OFFICE_REJECTION_CODES_SQL}))
+    OR (BINARY office_phase='OUTCOME_UNKNOWN' AND BINARY status='outcome_unknown' AND BINARY office_rejection_code IN ({_OFFICE_REJECTION_CODES_SQL}))
    )
    AND office_accepted_cost_usd IS NOT NULL AND office_accepted_cost_usd >= 0
    AND costo_max_aceptado_usd IS NULL)
@@ -1354,6 +1386,21 @@ COALESCE(
 _OFFICE_BINDING_CHECK_INFORMATION_SCHEMA = """
 coalesce(cast(`execution_contract` as char charset binary) in ('CLASSIC','OFFICE_V1') and (cast(`execution_contract` as char charset binary) = 'CLASSIC' and `office_job_id` is null and `office_stage_id` is null and `office_project_id` is null and `client_request_id` is null and `request_sha256` is null and `office_phase` is null and `office_rejection_code` is null and `office_accepted_cost_usd` is null or cast(`execution_contract` as char charset binary) = 'OFFICE_V1' and `office_job_id` is not null and `office_stage_id` is not null and `office_project_id` is not null and `office_project_id` > 0 and `client_request_id` is not null and `request_sha256` is not null and cast(`request_sha256` as char charset binary) regexp '^[0-9a-f]{64}$' and `office_phase` is not null and (cast(`office_phase` as char charset binary) in ('RESERVED','PREFLIGHT_IN_FLIGHT','READY','DELIVERY_IN_FLIGHT') and cast(`status` as char charset binary) = 'running' and `office_rejection_code` is null or cast(`office_phase` as char charset binary) = 'RECEIPT_STORED' and cast(`status` as char charset binary) = 'completed' and `office_rejection_code` is null or cast(`office_phase` as char charset binary) = 'FAILED' and cast(`status` as char charset binary) = 'failed' and `office_rejection_code` is not null and char_length(`office_rejection_code`) > 0 or cast(`office_phase` as char charset binary) = 'CANCELLED_REVOKED' and cast(`status` as char charset binary) = 'aborted' and `office_rejection_code` is not null and char_length(`office_rejection_code`) > 0 or cast(`office_phase` as char charset binary) = 'OUTCOME_UNKNOWN' and cast(`status` as char charset binary) = 'outcome_unknown' and `office_rejection_code` is not null and char_length(`office_rejection_code`) > 0) and `office_accepted_cost_usd` is not null and `office_accepted_cost_usd` >= 0 and `costo_max_aceptado_usd` is null),0)
 """
+_OFFICE_BINDING_CHECK_INFORMATION_SCHEMA = _OFFICE_BINDING_CHECK_INFORMATION_SCHEMA.replace(
+    "and `office_job_id` is not null",
+    "and cast(`invoked_by` as char charset binary) = 'plataforma' and cast(`mode` as char charset binary) = 'autonomous' and cast(`name` as char charset binary) = 'office-v1' and `max_steps` = 1 and `current_step_index` = 0 and json_type(`plan`) = 'ARRAY' and json_length(`plan`) = 0 and json_type(`context_refs`) = 'OBJECT' and json_length(`context_refs`) = 0 and cast(`pipeline_id` as char charset binary) regexp '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' and cast(`tenant_id` as char charset binary) regexp '^[1-9][0-9]*$' and cast(`user_id` as char charset binary) regexp '^[1-9][0-9]*$' and `office_job_id` is not null",
+    1,
+).replace(
+    "and `office_stage_id` is not null and `office_project_id`",
+    "and cast(`office_job_id` as char charset binary) regexp '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' and `office_stage_id` is not null and cast(`office_stage_id` as char charset binary) regexp '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' and `client_request_id` is not null and cast(`client_request_id` as char charset binary) regexp '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' and `office_project_id`",
+    1,
+).replace("char_length(`office_rejection_code`) > 0", f"cast(`office_rejection_code` as char charset binary) in ({_OFFICE_REJECTION_CODES_SQL})")
+_OFFICE_BINDING_CHECK_INFORMATION_SCHEMA = _OFFICE_BINDING_CHECK_INFORMATION_SCHEMA.replace(
+    "and cast(`office_rejection_code` as char charset binary) in", "and `office_rejection_code` is not null and cast(`office_rejection_code` as char charset binary) in"
+)
+_OFFICE_BINDING_CHECK_INFORMATION_SCHEMA = _OFFICE_BINDING_CHECK_INFORMATION_SCHEMA.replace(
+    "and cast(`office_rejection_code` as char charset binary) in", "and `office_rejection_code` is not null and cast(`office_rejection_code` as char charset binary) in"
+)
 
 
 def _normalizar_expresion_generada(expr: str) -> str:
@@ -1371,8 +1418,15 @@ def _normalizar_expresion_generada(expr: str) -> str:
 
 
 def _normalizar_check_clause(expr: str) -> str:
-    """Normalize only whitespace and identifier quoting, never semantics."""
-    return " ".join(expr.replace("`", "").split())
+    """Normalize only whitespace, identifier quoting and idempotent NULL guards."""
+    normalized = " ".join(expr.replace("`", "").split())
+    duplicate = "office_rejection_code is not null and office_rejection_code is not null"
+    while duplicate in normalized:
+        normalized = normalized.replace(duplicate, "office_rejection_code is not null")
+    # `x IN (...)` is NULL/false in CHECK just like the redundant explicit
+    # guard MariaDB may emit; deleting only that tautological guard preserves
+    # every operator group and literal.
+    return normalized.replace("office_rejection_code is not null and ", "")
 
 
 async def _verificar_expresion_visible(cur) -> None:
@@ -1469,8 +1523,12 @@ async def _migrar_visible_para_office(cur) -> None:
     if actual != _normalizar_expresion_generada(_EXPRESION_VISIBLE_ANTERIOR):
         await _verificar_expresion_visible(cur)
         return
-    await _ddl_acotado(cur, "DROP INDEX idx_pipelines_visibles ON jacobs_pipelines")
-    await _ddl_acotado(cur, "ALTER TABLE jacobs_pipelines DROP COLUMN visible, ALGORITHM=INPLACE, LOCK=SHARED")
+    await cur.execute("SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jacobs_pipelines' AND INDEX_NAME='idx_pipelines_visibles'")
+    if (await cur.fetchone())[0]:
+        if not await _ddl_acotado(cur, "DROP INDEX idx_pipelines_visibles ON jacobs_pipelines"):
+            raise RuntimeError("timed out dropping legacy visible index")
+    if not await _ddl_acotado(cur, "ALTER TABLE jacobs_pipelines DROP COLUMN visible, ALGORITHM=INPLACE, LOCK=SHARED"):
+        raise RuntimeError("timed out dropping legacy visible column")
     ok = await _ddl_acotado(cur, "ALTER TABLE jacobs_pipelines ADD COLUMN visible TINYINT(1) GENERATED ALWAYS AS "
                              "(status NOT IN ('discarded','hidden') AND owner_ack_at IS NOT NULL AND execution_contract = 'CLASSIC') "
                              "VIRTUAL, ALGORITHM=INPLACE, LOCK=SHARED")
@@ -1938,9 +1996,16 @@ async def init_tables() -> None:
                 )
                 (existe,) = await cur.fetchone()
                 if existe:
+                    if (tabla, indice) in _OFFICE_CORRECTNESS_INDICES and not await _verificar_indice_office_correcto(cur, tabla, indice):
+                        raise RuntimeError(f"Office correctness index {indice} has an invalid definition")
                     continue
                 if acotado:
-                    await _crear_indice_acotado(cur, tabla, indice, ddl)
+                    creado = await _crear_indice_acotado(cur, tabla, indice, ddl)
+                    if (tabla, indice) in _OFFICE_CORRECTNESS_INDICES:
+                        if not creado:
+                            raise RuntimeError(f"timed out creating required Office correctness index {indice}")
+                        if not await _verificar_indice_office_correcto(cur, tabla, indice):
+                            raise RuntimeError(f"Office correctness index {indice} was not created exactly")
                 else:
                     await cur.execute(ddl)
 
@@ -2054,11 +2119,19 @@ async def office_transition_phase(
     *, rejection_code: str | None = None,
 ) -> bool:
     """One epoch-fenced phase transition.  No transition can revive a stale run."""
-    transitions = {
+    # The durable phase graph includes delivery/receipt, but generic 4A has
+    # neither a running-step fence nor a receipt proof.  4C must expose those
+    # two atomic evidence-bearing transitions; this helper fails closed.
+    future_transitions = {
         OfficePhase.RESERVED: {OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED},
         OfficePhase.PREFLIGHT_IN_FLIGHT: {OfficePhase.READY, OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED, OfficePhase.OUTCOME_UNKNOWN},
         OfficePhase.READY: {OfficePhase.DELIVERY_IN_FLIGHT, OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED},
         OfficePhase.DELIVERY_IN_FLIGHT: {OfficePhase.RECEIPT_STORED, OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED, OfficePhase.OUTCOME_UNKNOWN},
+    }
+    transitions = {
+        OfficePhase.RESERVED: future_transitions[OfficePhase.RESERVED],
+        OfficePhase.PREFLIGHT_IN_FLIGHT: future_transitions[OfficePhase.PREFLIGHT_IN_FLIGHT],
+        OfficePhase.READY: {OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED},
     }
     if to_phase not in transitions.get(from_phase, set()):
         raise ValueError(f"invalid Office phase transition {from_phase.value}->{to_phase.value}")
@@ -2074,6 +2147,11 @@ async def office_transition_phase(
     }
     if (to_phase in phases_with_code and not rejection_code) or (to_phase not in phases_with_code and rejection_code is not None):
         raise ValueError("Office phase determines rejection-code presence")
+    if rejection_code is not None:
+        try:
+            OfficeRejectionCode(rejection_code)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("unknown Office rejection code") from exc
     target_status = required_status.value if required_status else None
     async with conexion() as conn:
         async with conn.cursor() as cur:
@@ -2234,7 +2312,7 @@ def _sql_candidatos_del_reaper(n_estados: int) -> str:
     return (
         "SELECT p.*, (SELECT MAX(s.timeout_seconds) FROM jacobs_steps s "
         "WHERE s.pipeline_id = p.pipeline_id AND s.status = 'running') AS max_timeout_en_curso "
-        f"FROM jacobs_pipelines p WHERE p.status IN ({estados})"
+        f"FROM jacobs_pipelines p WHERE p.execution_contract='CLASSIC' AND p.status IN ({estados})"
     )
 
 

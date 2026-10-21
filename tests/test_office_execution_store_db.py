@@ -169,13 +169,8 @@ def test_office_phase_edges_are_epoch_fenced_and_terminal_states_do_not_revive()
             ((OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.FAILED), "OFFICE_PREFLIGHT_FAILED"),
             ((OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.CANCELLED_REVOKED), "OFFICE_REVOKED"),
             ((OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.OUTCOME_UNKNOWN), "OFFICE_PREFLIGHT_UNKNOWN"),
-            ((OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.READY, OfficePhase.DELIVERY_IN_FLIGHT), None),
             ((OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.READY, OfficePhase.FAILED), "OFFICE_EXECUTION_FAILED"),
             ((OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.READY, OfficePhase.CANCELLED_REVOKED), "OFFICE_REVOKED"),
-            ((OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.READY, OfficePhase.DELIVERY_IN_FLIGHT, OfficePhase.RECEIPT_STORED), None),
-            ((OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.READY, OfficePhase.DELIVERY_IN_FLIGHT, OfficePhase.FAILED), "OFFICE_EXECUTION_FAILED"),
-            ((OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.READY, OfficePhase.DELIVERY_IN_FLIGHT, OfficePhase.CANCELLED_REVOKED), "OFFICE_REVOKED"),
-            ((OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.READY, OfficePhase.DELIVERY_IN_FLIGHT, OfficePhase.OUTCOME_UNKNOWN), "OFFICE_DELIVERY_OUTCOME_UNKNOWN"),
         ]
         ids = []
         try:
@@ -200,6 +195,18 @@ def test_office_phase_edges_are_epoch_fenced_and_terminal_states_do_not_revive()
             ])
             assert winners.count(True) == 1
             assert not await store.office_transition_phase(concurrent.pipeline_id, 1, OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.READY)
+            ready = await cupo.reservar_office_v1(_request(), limite=10000)
+            assert ready and ready.created
+            ids.append(ready.pipeline_id)
+            assert await store.office_transition_phase(ready.pipeline_id, 0, OfficePhase.RESERVED, OfficePhase.PREFLIGHT_IN_FLIGHT)
+            assert await store.office_transition_phase(ready.pipeline_id, 0, OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.READY)
+            with pytest.raises(ValueError):
+                await store.office_transition_phase(ready.pipeline_id, 0, OfficePhase.READY, OfficePhase.DELIVERY_IN_FLIGHT)
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("UPDATE jacobs_pipelines SET office_phase='DELIVERY_IN_FLIGHT' WHERE pipeline_id=%s", (ready.pipeline_id,))
+            with pytest.raises(ValueError):
+                await store.office_transition_phase(ready.pipeline_id, 0, OfficePhase.DELIVERY_IN_FLIGHT, OfficePhase.RECEIPT_STORED)
         finally:
             await _clean(ids)
             await store.cerrar_pool()
@@ -220,9 +227,15 @@ def test_office_database_check_enforces_full_snapshot_and_fails_closed_on_invali
                         "UPDATE jacobs_pipelines SET office_phase='reserved' WHERE pipeline_id=%s",
                         "UPDATE jacobs_pipelines SET status='pending' WHERE pipeline_id=%s",
                         "UPDATE jacobs_pipelines SET office_phase='FAILED', status='failed', office_rejection_code=NULL WHERE pipeline_id=%s",
+                        "UPDATE jacobs_pipelines SET office_phase='FAILED', status='failed', office_rejection_code='SENTINEL_OFFICE_CONTENT' WHERE pipeline_id=%s",
                         "UPDATE jacobs_pipelines SET office_phase='RECEIPT_STORED', status='completed', office_rejection_code='UNEXPECTED' WHERE pipeline_id=%s",
                         "UPDATE jacobs_pipelines SET office_phase='OUTCOME_UNKNOWN', status='outcome_unknown', office_rejection_code=NULL WHERE pipeline_id=%s",
                         "UPDATE jacobs_pipelines SET costo_max_aceptado_usd=1 WHERE pipeline_id=%s",
+                        "UPDATE jacobs_pipelines SET invoked_by='other' WHERE pipeline_id=%s",
+                        "UPDATE jacobs_pipelines SET mode='supervised' WHERE pipeline_id=%s",
+                        "UPDATE jacobs_pipelines SET max_steps=2 WHERE pipeline_id=%s",
+                        "UPDATE jacobs_pipelines SET tenant_id='0' WHERE pipeline_id=%s",
+                        "UPDATE jacobs_pipelines SET office_job_id='ABC' WHERE pipeline_id=%s",
                     ):
                         with pytest.raises(aiomysql.Error):
                             await cur.execute(sql, (pid,))
@@ -252,5 +265,147 @@ def test_office_database_check_enforces_full_snapshot_and_fails_closed_on_invali
             await store.init_tables()
         finally:
             await _clean([pid])
+            await store.cerrar_pool()
+    asyncio.run(run())
+
+
+def test_reaper_candidates_exclude_aged_office_and_keep_classic():
+    async def run():
+        await store.init_tables()
+        office = await cupo.reservar_office_v1(_request(), limite=10000)
+        assert office and office.created
+        classic = str(uuid.uuid4())
+        try:
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("UPDATE jacobs_pipelines SET created_at=0, updated_at=0 WHERE pipeline_id=%s", (office.pipeline_id,))
+                    await cur.execute(
+                        "INSERT INTO jacobs_pipelines (pipeline_id,name,invoked_by,mode,status,plan,current_step_index,max_steps,context_refs,created_at,updated_at) VALUES (%s,'classic-reaper','plataforma','autonomous','running','[]',0,1,'{}',0,0)",
+                        (classic,),
+                    )
+            candidates = await store.candidatos_del_reaper([PipelineStatus.running])
+            ids = {pipeline.pipeline_id for pipeline, _timeout in candidates}
+            assert classic in ids
+            assert office.pipeline_id not in ids
+        finally:
+            await _clean([office.pipeline_id, classic])
+            await store.cerrar_pool()
+    asyncio.run(run())
+
+
+def test_same_name_nonunique_office_idempotency_index_fails_closed():
+    async def run():
+        await store.init_tables()
+        try:
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("DROP INDEX uq_jacobs_office_client_request ON jacobs_pipelines")
+                    await cur.execute("CREATE INDEX uq_jacobs_office_client_request ON jacobs_pipelines (invoked_by, tenant_id, client_request_id)")
+            with pytest.raises(RuntimeError, match="correctness index"):
+                await store.init_tables()
+        finally:
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("DROP INDEX IF EXISTS uq_jacobs_office_client_request ON jacobs_pipelines")
+            await store.init_tables()
+            await store.cerrar_pool()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("index,columns,unique", [
+    # Same names do not establish the index contract: both column order and
+    # full-column uniqueness are part of the durable idempotency/CAS gates.
+    ("uq_jacobs_office_client_request", "invoked_by, client_request_id, tenant_id", True),
+    ("uq_jacobs_office_stage", "execution_contract, tenant_id, office_project_id", True),
+    ("uq_jacobs_office_client_request", "invoked_by, tenant_id, client_request_id", False),
+    ("uq_jacobs_office_stage", "execution_contract, tenant_id, office_stage_id", False),
+    ("uq_jacobs_office_client_request", "invoked_by, tenant_id(1), client_request_id", True),
+    ("uq_jacobs_office_stage", "execution_contract, tenant_id, office_stage_id(1)", True),
+])
+def test_every_office_correctness_index_requires_exact_order_and_uniqueness(index, columns, unique):
+    async def run():
+        await store.init_tables()
+        try:
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(f"DROP INDEX {index} ON jacobs_pipelines")
+                    await cur.execute(f"CREATE {'UNIQUE ' if unique else ''}INDEX {index} ON jacobs_pipelines ({columns})")
+            with pytest.raises(RuntimeError, match="correctness index"):
+                await store.init_tables()
+        finally:
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(f"DROP INDEX IF EXISTS {index} ON jacobs_pipelines")
+            await store.init_tables()
+            await store.cerrar_pool()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("index", ["uq_jacobs_office_client_request", "uq_jacobs_office_stage"])
+def test_required_office_index_creation_timeout_fails_closed(monkeypatch, index):
+    async def run():
+        await store.init_tables()
+        try:
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(f"DROP INDEX {index} ON jacobs_pipelines")
+            real = store._crear_indice_acotado
+            async def timeout(cur, table, name, ddl):
+                if name == index:
+                    return False
+                return await real(cur, table, name, ddl)
+            monkeypatch.setattr(store, "_crear_indice_acotado", timeout)
+            with pytest.raises(RuntimeError, match="timed out creating required Office correctness index"):
+                await store.init_tables()
+            monkeypatch.setattr(store, "_crear_indice_acotado", real)
+            await store.init_tables()
+        finally:
+            monkeypatch.setattr(store, "_crear_indice_acotado", real)
+            await store.cerrar_pool()
+    asyncio.run(run())
+
+
+def test_visible_legacy_missing_index_and_each_bounded_timeout_resume(monkeypatch):
+    async def canonical():
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT GENERATION_EXPRESSION FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jacobs_pipelines' AND COLUMN_NAME='visible'")
+                expression = (await cur.fetchone())[0]
+                await cur.execute("SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jacobs_pipelines' AND INDEX_NAME='idx_pipelines_visibles'")
+                indexed = (await cur.fetchone())[0]
+        assert store._normalizar_expresion_generada(expression) == store._normalizar_expresion_generada(store._EXPRESION_VISIBLE)
+        assert indexed == "user_id,tenant_id,visible,created_at"
+
+    async def legacy(with_index):
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("DROP INDEX IF EXISTS idx_pipelines_visibles ON jacobs_pipelines")
+                await cur.execute("ALTER TABLE jacobs_pipelines DROP COLUMN visible, ALGORITHM=INPLACE, LOCK=SHARED")
+                await cur.execute("ALTER TABLE jacobs_pipelines ADD COLUMN visible TINYINT(1) GENERATED ALWAYS AS (status NOT IN ('discarded','hidden') AND owner_ack_at IS NOT NULL) VIRTUAL, ALGORITHM=INPLACE, LOCK=SHARED")
+                if with_index:
+                    await cur.execute("CREATE INDEX idx_pipelines_visibles ON jacobs_pipelines (user_id, tenant_id, visible, created_at) ALGORITHM=INPLACE LOCK=NONE")
+
+    async def run():
+        await store.init_tables()
+        real = store._ddl_acotado
+        try:
+            for needle, indexed in (("DROP INDEX idx_pipelines_visibles", True), ("DROP COLUMN visible", False), ("ADD COLUMN visible", False)):
+                await legacy(indexed)
+                async def timeout(cur, ddl, needle=needle):
+                    if needle in ddl:
+                        return False
+                    return await real(cur, ddl)
+                monkeypatch.setattr(store, "_ddl_acotado", timeout)
+                with pytest.raises(RuntimeError, match="timed out"):
+                    await store.init_tables()
+                monkeypatch.setattr(store, "_ddl_acotado", real)
+                await store.init_tables()
+                await canonical()
+            await legacy(False)
+            await store.init_tables()
+            await canonical()
+        finally:
+            monkeypatch.setattr(store, "_ddl_acotado", real)
+            await store.init_tables()
             await store.cerrar_pool()
     asyncio.run(run())
