@@ -37,6 +37,18 @@ from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus, faceta_eje
 from jacobs.plan import CapabilityUnbound
 from jacobs.policy import check_kill_switch
 from jacobs.usage_writer import record_direct_usage
+from jacobs.office_runtime import (
+    OfficeCapabilityContext,
+    OfficeExecutionError,
+    assert_office_transport,
+    ensure_office_http_log_privacy,
+    map_office_exception,
+    office_http_log_scope,
+    office_http_status_error,
+    runtime_policy_for_pipeline,
+    validate_office_capability_timeout,
+)
+from jacobs.office_contract import OfficeRejectionCode, OfficeRuntimePolicy
 from policy.execution_control.errors import (
     DirectHydeGovernedExecutionForbiddenError, GovernedExecutionRequiredError,
 )
@@ -390,10 +402,14 @@ def _texto_o_truncado(data: dict, transporte: str) -> str:
     return texto
 
 
-async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
+async def _invoke_http_gemini(
+    f: "ResolvedFacet", prompt: str, timeout: int, *, runtime_policy: OfficeRuntimePolicy | None = None,
+) -> dict:
     """Formato Gemini + grounding required_web. Transporte, no faceta —
     hoy solo hipatia lo usa, pero cualquier facet con transport=http_gemini
     entra aca sin codigo nuevo."""
+    if runtime_policy is not None:
+        return await _invoke_http_gemini_office(f, prompt, timeout, runtime_policy)
     model = f.model
     # Ruling T6-6 (2026-09-15): la key va en la cabecera x-goog-api-key, NO en
     # `?key=`. httpx loguea la URL entera en INFO en cada pedido y la mete en
@@ -485,13 +501,54 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
     }
 
 
-async def _invoke_http_openai_compat(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
+async def _invoke_http_gemini_office(
+    f: "ResolvedFacet", prompt: str, timeout: int, runtime_policy: OfficeRuntimePolicy,
+) -> dict:
+    """One no-tools Gemini generation.  Never builds sources or follows redirects."""
+    assert_office_transport(runtime_policy, f.transport)
+    ensure_office_http_log_privacy()
+    url = f"{f.base_url}/models/{f.model}:generateContent"
+    headers = {"x-goog-api-key": f.credential}
+    payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
+    try:
+        with office_http_log_scope():
+            resp = await obtener_cliente_http().post(
+                url, headers=headers, json=payload, timeout=timeout, follow_redirects=False,
+            )
+            if resp.status_code != 200:
+                raise office_http_status_error(resp.status_code)
+            data = resp.json()
+            texto = _texto_o_truncado(data, "gemini")
+            usage = data.get("usageMetadata") or {}
+    except asyncio.CancelledError:
+        raise
+    except PasoTruncado as exc:
+        raise OfficeExecutionError(
+            OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED, provider_call_made=True,
+            tokens_in=exc.tokens_in, tokens_out=exc.tokens_out,
+        ) from None
+    except OfficeExecutionError:
+        raise
+    except Exception as exc:
+        raise map_office_exception(exc, provider_call_made=True) from None
+    await record_resolved_version_safe(f.key, data.get("modelVersion"))
+    return {"success": True, "facet": f.key, "model": f.model, "result": texto,
+            "sources": [], "queries": [], "grounded": False,
+            "tokens_in": usage.get("promptTokenCount", 0),
+            "tokens_out": usage.get("candidatesTokenCount", 0)}
+
+
+async def _invoke_http_openai_compat(
+    f: "ResolvedFacet", prompt: str, timeout: int, *, runtime_policy: OfficeRuntimePolicy | None = None,
+) -> dict:
     """Formato chat/completions estilo OpenAI. Transporte, no faceta —
     jekyll/thot/ada convergen aca (antes eran 3 copias casi identicas con
     URL/modelo/persona hardcodeados). Sin streaming: jekyll/thot ya lo
     probaban sin streaming; ada pierde SSE a cambio de una sola funcion
     para las 3 (simplificacion deliberada, el contenido final es
     equivalente, solo cambia como se ensambla)."""
+    if runtime_policy is not None:
+        return await _invoke_http_openai_compat_office(f, prompt, timeout, runtime_policy)
     url = f"{f.base_url}/chat/completions"
     headers = {"Authorization": f"Bearer {f.credential}", "Content-Type": "application/json"}
     messages = []
@@ -534,7 +591,46 @@ async def _invoke_http_openai_compat(f: "ResolvedFacet", prompt: str, timeout: i
     }
 
 
-async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
+async def _invoke_http_openai_compat_office(
+    f: "ResolvedFacet", prompt: str, timeout: int, runtime_policy: OfficeRuntimePolicy,
+) -> dict:
+    assert_office_transport(runtime_policy, f.transport)
+    ensure_office_http_log_privacy()
+    try:
+        messages = ([{"role": "system", "content": f.persona}] if f.persona else [])
+        messages.append({"role": "user", "content": prompt})
+        payload = {"model": f.model, "messages": messages, "stream": False,
+                   **await limite_de_salida(f.transport, f.provider_id, f.model)}
+        with office_http_log_scope():
+            resp = await obtener_cliente_http().post(
+                f"{f.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {f.credential}", "Content-Type": "application/json"},
+                json=payload, timeout=timeout, follow_redirects=False,
+            )
+            if resp.status_code != 200:
+                raise office_http_status_error(resp.status_code)
+            data = resp.json()
+            texto = _texto_o_truncado(data, "openai_compat")
+            usage = data.get("usage") or {}
+    except asyncio.CancelledError:
+        raise
+    except PasoTruncado as exc:
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED,
+                                  provider_call_made=True, tokens_in=exc.tokens_in,
+                                  tokens_out=exc.tokens_out) from None
+    except OfficeExecutionError:
+        raise
+    except Exception as exc:
+        raise map_office_exception(exc, provider_call_made=True) from None
+    await record_resolved_version_safe(f.key, data.get("model"))
+    return {"success": True, "facet": f.key, "model": f.model, "result": texto,
+            "tokens_in": usage.get("prompt_tokens", 0),
+            "tokens_out": usage.get("completion_tokens", 0)}
+
+
+async def _invoke_ollama(
+    f: "ResolvedFacet", prompt: str, timeout: int, *, runtime_policy: OfficeRuntimePolicy | None = None,
+) -> dict:
     """Ollama local — razonamiento local. Modelo desde facet_binding, ya no
     hardcodeado (ver plan.py::_llm_plan, mismo patron). f.base_url
     ("http://localhost:11434/v1") es para el path OpenAI-compat generico
@@ -557,6 +653,8 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     mantiene en ~76.7 tok/s con 1, 2 y 3 requests concurrentes y lo unico
     que crece es la espera en cola. Veredicto y que lo reabre:
     docs/superpowers/specs/2026-08-25-gpu-concurrency-resultado.md"""
+    if runtime_policy is not None:
+        return await _invoke_ollama_office(f, prompt, timeout, runtime_policy)
     # PR-K ronda 2 (M3): límite de salida de la fila de `model`, como
     # options.num_predict de /api/chat (github.com/ollama/ollama docs/api.md).
     # Antes no mandaba ninguno. Sin contrato, el step falla con el UPDATE.
@@ -591,6 +689,37 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
         "tokens_in":  tokens_in,
         "tokens_out": tokens_out,
     }
+
+
+async def _invoke_ollama_office(
+    f: "ResolvedFacet", prompt: str, timeout: int, runtime_policy: OfficeRuntimePolicy,
+) -> dict:
+    assert_office_transport(runtime_policy, f.transport)
+    ensure_office_http_log_privacy()
+    try:
+        payload = {"model": f.model, "messages": [{"role": "user", "content": prompt}], "stream": False,
+                   **await limite_de_salida(f.transport, f.provider_id, f.model)}
+        with office_http_log_scope():
+            resp = await obtener_cliente_http().post(
+                OLLAMA_URL, json=payload, timeout=timeout, follow_redirects=False,
+            )
+            if resp.status_code != 200:
+                raise office_http_status_error(resp.status_code)
+            data = resp.json()
+            texto = _texto_o_truncado(data, "ollama")
+    except asyncio.CancelledError:
+        raise
+    except PasoTruncado as exc:
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED,
+                                  provider_call_made=True, tokens_in=exc.tokens_in,
+                                  tokens_out=exc.tokens_out) from None
+    except OfficeExecutionError:
+        raise
+    except Exception as exc:
+        raise map_office_exception(exc, provider_call_made=True) from None
+    await record_resolved_version_safe(f.key, data.get("model"))
+    return {"success": True, "facet": f.key, "model": f.model, "result": texto,
+            "tokens_in": data.get("prompt_eval_count", 0), "tokens_out": data.get("eval_count", 0)}
 
 
 async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
@@ -788,6 +917,8 @@ async def validate_capability(step: Step) -> CapabilityUnbound | str | None:
 
 async def _despachar_transporte_directo(
     step: Step, pipeline: Pipeline, f: "ResolvedFacet", prompt: str, timeout: int,
+    *, runtime_policy: OfficeRuntimePolicy | None = None,
+    office_capability_context: OfficeCapabilityContext | None = None,
 ) -> dict:
     """El despacho de los tres transportes HTTP directos (gemini,
     openai_compat, ollama), extraído de `_dispatch_step` para poder probarlo
@@ -804,13 +935,31 @@ async def _despachar_transporte_directo(
     siendo fail-soft por su cuenta (sin identidad no escribe; error de DB
     solo loguea) -- nunca puede romper un step ya exitoso, y acá tampoco
     puede tapar el fallo de un step truncado."""
+    if runtime_policy is not None:
+        await validate_office_capability_timeout(office_capability_context, timeout)
+        assert_office_transport(runtime_policy, f.transport)
     try:
         if f.transport == "http_gemini":
-            result = await _invoke_http_gemini(f, prompt, timeout)
+            result = (await _invoke_http_gemini(f, prompt, timeout, runtime_policy=runtime_policy)
+                      if runtime_policy is not None else await _invoke_http_gemini(f, prompt, timeout))
         elif f.transport == "http_openai_compat":
-            result = await _invoke_http_openai_compat(f, prompt, timeout)
+            result = (await _invoke_http_openai_compat(f, prompt, timeout, runtime_policy=runtime_policy)
+                      if runtime_policy is not None else await _invoke_http_openai_compat(f, prompt, timeout))
+        elif f.transport == "ollama":
+            result = (await _invoke_ollama(f, prompt, timeout, runtime_policy=runtime_policy)
+                      if runtime_policy is not None else await _invoke_ollama(f, prompt, timeout))
+        elif runtime_policy is not None:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
         else:
-            result = await _invoke_ollama(f, prompt, timeout)
+            raise ValueError(f"Transporte directo desconocido: {f.transport}")
+    except OfficeExecutionError as exc:
+        if exc.code == OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED:
+            await record_direct_usage(
+                pipeline.user_id, pipeline.tenant_id, step.facet,
+                f.provider_id, f.model, exc.tokens_in, exc.tokens_out,
+                pipeline_id=pipeline.pipeline_id,
+            )
+        raise
     except PasoTruncado as exc:
         await record_direct_usage(
             pipeline.user_id, pipeline.tenant_id, step.facet,
@@ -831,6 +980,7 @@ async def _despachar_transporte_directo(
 
 async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     """Selecciona el worker correcto según la faceta."""
+    runtime_policy = runtime_policy_for_pipeline(pipeline)
     # Ensamble mecánico: NO pasa por ningún LLM. Concatena los módulos ya generados.
     if step.capability == "assemble":
         return _assemble_mechanical(step, pipeline)
@@ -924,6 +1074,8 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     # _run_one_step la captura igual que cualquier otra excepcion — el step
     # falla con motivo explicito, nunca un default silencioso.
     if step.facet in _MOTOR_FACETS:
+        if runtime_policy is not None:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
         # Task 1 (2026-09-18, historial-y-arreglos-de-pipeline): este camino
         # NO pasa por resolve_facet(). Hasta la ronda de arreglo 1 (mismo
         # día), MotorJobView no traía el model_id real -- worker.py SÍ lo
@@ -946,14 +1098,21 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     # chat.py (Tasks 1-4); esto cubre el MISMO transporte cuando lo dispara un
     # pipeline de Jacobs en vez de un chat directo.
     if f.transport in ("http_gemini", "http_openai_compat", "ollama"):
-        return await _despachar_transporte_directo(step, pipeline, f, prompt, timeout)
+        return await _despachar_transporte_directo(
+            step, pipeline, f, prompt, timeout, runtime_policy=runtime_policy,
+            office_capability_context=(OfficeCapabilityContext(step.capability) if runtime_policy else None),
+        )
     if f.transport == "subprocess":
+        if runtime_policy is not None:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
         # Llegamos aquí solo si Fernando aprobó vía /approve-step (gate de
         # aprobación intacto, no tocado en esta misión).
         result = await _invoke_hyde(f, prompt, timeout)
         result["approved"] = True
         return result
 
+    if runtime_policy is not None:
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
     raise ValueError(f"Transporte desconocido para facet '{step.facet}': '{f.transport}'")
 
 

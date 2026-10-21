@@ -31,3 +31,5 @@ Task4Around1RECHAZADOd4356004 all6priorclosed,newEnumcauseleak. Round2closedmemb
 Task4ACOMPLETE SolAPROBADO79d6197d952a7a5f19d9af93e8a55fc88d151154, allinitial6+newchainleakclosed. Task4Bno-tools/opaqueproviders+probes architectureloggingrefinementpending;4Cstilldisabled.
 
 Task4Barchitectureclosed: sourcepinnedHTTPloggerinventory+ContextVarscopedfilter, no-tools/one-call/opaqueerrorpolicy; bounded4B1directthen4B2probe sameowner. Bindingoffice-runtime-policy.md, beforeimplementationcheckpoint. Task4Aapproved79d6197d. Latestuserconstitutionstamp75a570 replaces18d173, verify-sourcebeforeintegrationpending.
+
+2026-10-20 Task4B1 checkpoint: direct invokers/private policy implemented; root84passed0.68s mocked transports only. Scoped exactSHA review pending; 4B2 preflight/sonda not implemented and no Office execution route enabled.
