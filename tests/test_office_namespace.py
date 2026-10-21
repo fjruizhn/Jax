@@ -4,7 +4,11 @@ import pytest
 
 from jax.memory.b9 import ScopeContext
 from jax.memory.b9 import AuthorizationDenied
-from jax.memory.project_authority import ProjectAuthorityAdmin, ProjectAuthorityError
+from jax.memory.project_authority import (
+    OFFICE_NAMESPACE_CONTRACT_VERSION,
+    ProjectAuthorityAdmin,
+    ProjectAuthorityError,
+)
 from jax.memory.scope_authority import MariaDBScopeAuthorityResolver, ProjectNamespace
 
 
@@ -67,6 +71,11 @@ class DuplicateStore:
     async def mutation(self, _operation):
         self.mutations += 1
         raise _DuplicateKeyError(1062, "unrelated unique constraint")
+
+
+def test_office_namespace_contract_marker_identifies_the_reviewed_resolver_contract():
+    """Catches JXP enabling Office features against a different resolver contract."""
+    assert OFFICE_NAMESPACE_CONTRACT_VERSION == "office-namespace.1"
 
 
 def _new_store():

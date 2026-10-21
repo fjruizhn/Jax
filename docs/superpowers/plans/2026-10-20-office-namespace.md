@@ -43,3 +43,13 @@
 ## Plan self-review / ledger
 
 Only one implementation owner touches all shared files. Migration defines the enum column consumed by resolvers; creation consumes the same enum and transaction protocol. Tests above cover the five review-focus cases. No downstream capability is enabled in this slice; subsequent JXP schema/API/MFA/UI plans consume this exact contract.
+
+### Task 2: Paired namespace contract marker
+
+**Files:** jax/memory/project_authority.py and tests/test_office_namespace.py only.
+
+**Interfaces:** Export `OFFICE_NAMESPACE_CONTRACT_VERSION = "office-namespace.1"` from project_authority, identifying the reviewed CLASSIC/Office resolver, transactional creation and legacy LAS MANOS isolation contract. This is a compatibility marker, not a permission or an alternative authorization path. JXP startup compares the exact marker before enabling Office features.
+
+- [ ] Write a failing unit test importing and requiring the exact marker; implement the constant without changing authority/migrations or existing APIs.
+- [ ] Run focused namespace unit tests and classic input-validation regressions.
+- [ ] Parent verifies and commits; independent exact-SHA scoped review before JXP consumes the marker.

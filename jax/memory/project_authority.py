@@ -87,6 +87,10 @@ from .scope_authority import (ProjectLifecycle, ProjectNamespace, ProjectRole,
 
 _logger = logging.getLogger(__name__)
 
+#: Compatibility marker for JXP's reviewed CLASSIC/Office resolver,
+#: transactional creation, and legacy LAS MANOS isolation contract.
+OFFICE_NAMESPACE_CONTRACT_VERSION = "office-namespace.1"
+
 
 # --------------------------------------------------------------------------
 # Errors. Every one carries a stable `code` a caller (the platform's HTTP
