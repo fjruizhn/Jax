@@ -9,3 +9,5 @@ VERDAD OPERACIONAL: implementación Tier2 verificada por raíz: 50 pruebas enfoc
 Fixround1: raíz58passed67warnings0.43s; LASMANOSCLASSIC, downgradeguard y pruebasreales ampliadas. Evidencia docs/superpowers/reviews/2026-10-20-office-namespace-evidence.md. Dictamen anterior RECHAZADO28c1cb3e; corrección requiere scopedrereview exactSHA.
 
 2026-10-20 · Task2 marker de compatibilidad namespace `office-namespace.1` añadido sin cambiar autoridad. Raíz12pruebasnamespace/inputvalidation0.11s; dictamen independiente pendiente antes de consumir desde JXP. Fuente: prueba y diff local, Codex.
+
+2026-10-20 · Task3 adaptermembership misma transacción diseñado antes de invitacionesJXP, contratooffice-membership.md yplanTask3. Separaprotocolo de creación; grantrolfijoOffice/revokepermite limpieza dormant actualautorizada; marcadorprevistooffice-namespace.2. Todavía sinimplementación. Raízdecidió trasarquitecturaSol office_workflow_contract. Preservarclásico/LASMANOS yrollbackconOfficehistoria.

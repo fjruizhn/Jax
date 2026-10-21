@@ -53,3 +53,14 @@ Only one implementation owner touches all shared files. Migration defines the en
 - [ ] Write a failing unit test importing and requiring the exact marker; implement the constant without changing authority/migrations or existing APIs.
 - [ ] Run focused namespace unit tests and classic input-validation regressions.
 - [ ] Parent verifies and commits; independent exact-SHA scoped review before JXP consumes the marker.
+
+### Task 3: Same-transaction Office membership adapter
+
+**Files:** jax/memory/project_authority.py, project_authority_migrations.py, relatednamespace tests. Specification docs/superpowers/specs/2026-10-20-office-membership.md is binding. Root owns docs.
+
+**Interfaces:** typedgrant/revokecallback and immutable result in spec; existingcreation/classic APIs unchanged. Marker office-namespace.2, membershiporiginOFFICE, idempotencyrecord/eventsin callertransaction. Grantactiveonly, revokecan cleaninactive/archivedscope withcurrentexplicitadminauthority.
+
+- [ ] Read specification; add focused RED tests for the new adapter and regression matrix.
+- [ ] Implement minimal transactional methods and migration; no nested transaction, rawJXPSQL bypass, permissionscache or genericProjectRoleinput.
+- [ ] Run unit+realMariaDB33991 tests, rollback/concurrency/idempotency/upgrade/classicregressions, EXPLAIN actualqueries.
+- [ ] Report task-3-report.md; parent independently verifies, commits, pushes and exactSHA Solreview before JXP consumes newmethod/version.
