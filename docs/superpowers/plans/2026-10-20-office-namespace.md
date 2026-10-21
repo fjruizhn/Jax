@@ -1,0 +1,45 @@
+# Office Namespace Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Provide a fail-closed confidential project namespace and transactional creation hook for Virtual Office.
+
+**Architecture:** Preserve classic JAX authority. Add a namespace boundary and trusted same-transaction authorization adapter; JXP owns office identity and grants.
+
+**Tech Stack:** Existing Python, aiomysql and MariaDB12.3.3; no new dependency.
+
+**Spec:** docs/superpowers/specs/2026-10-20-office-namespace.md
+
+## Global Constraints
+
+- CLASSIC/OFFICE_CONFIDENTIAL; existing rows remain CLASSIC.
+- No policy/Faro/workflow edits, live DB, services or user provisioning.
+- Namespaced idempotency reauthorizes and binds actor+tenant+payload.
+- Test DB only isolated33991, async existing pool, no permission cache.
+- Codex parent alone publishes; commits carry Co-Authored-By Codex.
+
+## Review Focus
+
+- Actor changes while replaying an idempotency key: conflict, no leaked ID.
+- Permission revoked before replay: authorization fails, no cached success.
+- Legacy query lacking namespace filter: confidential project invisible.
+- Failure between project and scope inserts: rollback all rows.
+- Two concurrent identical creations: one project and stable replay.
+
+---
+
+### Task 1: Namespace and atomic namespaced creation
+
+**Files:** Modify jax/memory/project_authority_migrations.py, scope_authority.py, project_queries.py, project_authority.py, __init__.py. Tests in tests/test_office_namespace.py and tests/test_office_namespace_mariadb.py; retain current project permission tests.
+
+**Interfaces:** Consumes existing ProjectAuthorityAdmin/pool/CreatedProject. Produces ProjectNamespace, NamespaceMutationAuthorizer, create_namespaced_project with signatures in spec; existing API signatures remain compatible.
+
+- [ ] Write failing tests for schema/idempotent migration, classic/confidential resolver matrix, callback transaction, replay binding, rollback and concurrent creation.
+- [ ] Run focused tests; capture expected failures before code.
+- [ ] Implement guarded DDL, namespace checks and shared private row creation. Trace existing project consumers for bypasses; do not alter unrelated paths.
+- [ ] Run focused unit tests and real MariaDB tests in disposable33991. Add EXPLAIN evidence and bounded contention measurement. Check classic project regressions.
+- [ ] Parent independently verifies, commits and pushes with updated TRASPASO. Sol reviews exact SHA before JXP consumes new capability.
+
+## Plan self-review / ledger
+
+Only one implementation owner touches all shared files. Migration defines the enum column consumed by resolvers; creation consumes the same enum and transaction protocol. Tests above cover the five review-focus cases. No downstream capability is enabled in this slice; subsequent JXP schema/API/MFA/UI plans consume this exact contract.
