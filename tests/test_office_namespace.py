@@ -6,6 +6,10 @@ from jax.memory.b9 import ScopeContext
 from jax.memory.b9 import AuthorizationDenied
 from jax.memory.project_authority import (
     OFFICE_NAMESPACE_CONTRACT_VERSION,
+    NamespacedMemberKind,
+    NamespaceMembershipExecution,
+    NamespaceMembershipExecutionKind,
+    NamespaceMembershipOperation,
     ProjectAuthorityAdmin,
     ProjectAuthorityError,
 )
@@ -75,7 +79,58 @@ class DuplicateStore:
 
 def test_office_namespace_contract_marker_identifies_the_reviewed_resolver_contract():
     """Catches JXP enabling Office features against a different resolver contract."""
-    assert OFFICE_NAMESPACE_CONTRACT_VERSION == "office-namespace.1"
+    assert OFFICE_NAMESPACE_CONTRACT_VERSION == "office-namespace.2"
+
+
+class MembershipAuthorizer:
+    def __init__(self):
+        self.calls = []
+
+    async def authorize_membership_in_transaction(self, cursor, **kwargs):
+        self.calls.append((cursor, kwargs))
+
+
+@pytest.mark.asyncio
+async def test_office_membership_uses_the_callers_cursor_and_records_a_typed_grant():
+    """The adapter must be same-transaction: it cannot call store.mutation,
+    nor manufacture a classic role from caller input."""
+    cursor = Cursor([
+        {"tenant_id": 4, "status": "ACTIVE"},
+        {"tenant_id": 8, "status": "ACTIVE", "account_class": "OFFICE_INTERNAL"},
+        {"tenant_id": 4, "status": "ACTIVE", "account_class": "EXTERNAL_CLIENT"},
+        {"tenant_id": 4, "status": "ACTIVE", "authorization_namespace": "OFFICE_CONFIDENTIAL"},
+        None, None,
+    ])
+    authorizer = MembershipAuthorizer()
+    result = await ProjectAuthorityAdmin(object()).grant_namespaced_member_in_transaction(
+        cursor, actor_user_id=8, target_tenant_id=4, project_id=17, target_user_id=9,
+        namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+        member_kind=NamespacedMemberKind.EXTERNAL_CLIENT, idempotency_key=str(uuid.uuid4()),
+        authorizer=authorizer, request_id="r", trace_id="t")
+
+    assert result.changed is True and result.replayed is False
+    assert result.project_role.value == "VIEWER" and result.status == "ACTIVE"
+    assert authorizer.calls[0][0] is cursor
+    assert authorizer.calls[0][1]["execution"] == NamespaceMembershipExecution(
+        NamespaceMembershipExecutionKind.INTERACTIVE_USER)
+    assert any("grant_origin='OFFICE'" in sql or "'OFFICE'" in sql for sql, _ in cursor.calls)
+    assert not any("BEGIN" in sql.upper() or "COMMIT" in sql.upper() or "ROLLBACK" in sql.upper()
+                   for sql, _ in cursor.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("execution", [
+    NamespaceMembershipExecution(NamespaceMembershipExecutionKind.INTERACTIVE_USER, str(uuid.uuid4())),
+    NamespaceMembershipExecution(NamespaceMembershipExecutionKind.INVITATION_ACCEPTANCE),
+    NamespaceMembershipExecution(NamespaceMembershipExecutionKind.INVITATION_ACCEPTANCE, "not-a-uuid"),
+])
+async def test_office_membership_rejects_invalid_execution_before_sql(execution):
+    with pytest.raises(AuthorizationDenied):
+        await ProjectAuthorityAdmin(object()).grant_namespaced_member_in_transaction(
+            Cursor([]), actor_user_id=8, target_tenant_id=4, project_id=17, target_user_id=9,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+            member_kind=NamespacedMemberKind.EXTERNAL_CLIENT, idempotency_key=str(uuid.uuid4()),
+            authorizer=MembershipAuthorizer(), execution=execution)
 
 
 def _new_store():

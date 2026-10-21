@@ -78,6 +78,7 @@ import time
 import unicodedata
 import uuid as uuid_module
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Awaitable, Callable, Protocol
 
 from .b9 import (AuthorizationDenied, MutationAuthorizationRequest, ScopeContext,
@@ -89,7 +90,7 @@ _logger = logging.getLogger(__name__)
 
 #: Compatibility marker for JXP's reviewed CLASSIC/Office resolver,
 #: transactional creation, and legacy LAS MANOS isolation contract.
-OFFICE_NAMESPACE_CONTRACT_VERSION = "office-namespace.1"
+OFFICE_NAMESPACE_CONTRACT_VERSION = "office-namespace.2"
 
 
 # --------------------------------------------------------------------------
@@ -147,6 +148,27 @@ class IdempotencyKeyConflict(ProjectAuthorityError):
 
 class InvalidIdempotencyKey(ProjectAuthorityError):
     code = "clave_invalida"
+
+
+class NamespacedMemberKind(str, Enum):
+    INTERNAL = "INTERNAL"
+    EXTERNAL_CLIENT = "EXTERNAL_CLIENT"
+
+
+class NamespaceMembershipOperation(str, Enum):
+    GRANT_OFFICE_MEMBER = "GRANT_OFFICE_MEMBER"
+    REVOKE_OFFICE_MEMBER = "REVOKE_OFFICE_MEMBER"
+
+
+class NamespaceMembershipExecutionKind(str, Enum):
+    INTERACTIVE_USER = "INTERACTIVE_USER"
+    INVITATION_ACCEPTANCE = "INVITATION_ACCEPTANCE"
+
+
+@dataclass(frozen=True)
+class NamespaceMembershipExecution:
+    kind: NamespaceMembershipExecutionKind
+    invitation_id: str | None = None
 
 
 class ReservedProjectIdRange(ProjectAuthorityError):
@@ -312,6 +334,34 @@ class NamespaceMutationAuthorizer(Protocol):
     async def authorize_in_transaction(self, cursor: Any, *, actor_user_id: int,
                                        target_tenant_id: int, namespace: ProjectNamespace,
                                        operation: str) -> None: ...
+
+
+class NamespaceMembershipMutationAuthorizer(Protocol):
+    """Trusted JXP adapter for a specific Office membership mutation.
+
+    This boundary deliberately accepts no request callback and no classic
+    ``ProjectRole``.  The adapter is responsible for current Office authority;
+    this module owns the canonical membership and audit mutation.
+    """
+    async def authorize_membership_in_transaction(
+        self, cursor: Any, *, actor_user_id: int, target_tenant_id: int,
+        project_id: int, target_user_id: int, namespace: ProjectNamespace,
+        operation: NamespaceMembershipOperation,
+        member_kind: NamespacedMemberKind | None,
+        execution: NamespaceMembershipExecution,
+    ) -> None: ...
+
+
+@dataclass(frozen=True)
+class NamespacedMembershipResult:
+    membership_id: str
+    event_id: str
+    changed: bool
+    project_id: int
+    target_user_id: int
+    project_role: ProjectRole
+    status: str
+    replayed: bool
 
 
 @dataclass(frozen=True)
@@ -713,6 +763,238 @@ class ProjectAuthorityAdmin:
                 raise _wrap_unexpected_db_error(exc) from exc
 
         return await run(0)
+
+    @staticmethod
+    def _require_positive_id(value: Any, field: str) -> int:
+        if type(value) is not int or value <= 0:
+            raise AuthorizationDenied(f"{field} must be a positive integer")
+        return value
+
+    @staticmethod
+    def _namespace_membership_digest(*, actor_user_id: int, target_tenant_id: int,
+                                     project_id: int, target_user_id: int,
+                                     operation: NamespaceMembershipOperation,
+                                     member_kind: NamespacedMemberKind | None,
+                                     execution: NamespaceMembershipExecution) -> str:
+        payload = {"a": actor_user_id, "t": target_tenant_id, "p": project_id,
+                   "u": target_user_id, "ns": ProjectNamespace.OFFICE_CONFIDENTIAL.value,
+                   "op": operation.value, "k": member_kind.value if member_kind else None,
+                   "x": execution.kind.value, "i": execution.invitation_id}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _validate_membership_execution(execution: NamespaceMembershipExecution | None) -> NamespaceMembershipExecution:
+        execution = execution or NamespaceMembershipExecution(NamespaceMembershipExecutionKind.INTERACTIVE_USER)
+        if not isinstance(execution, NamespaceMembershipExecution) or not isinstance(execution.kind, NamespaceMembershipExecutionKind):
+            raise AuthorizationDenied("namespaced membership execution is invalid")
+        if execution.kind is NamespaceMembershipExecutionKind.INTERACTIVE_USER:
+            if execution.invitation_id is not None:
+                raise AuthorizationDenied("interactive execution must not carry an invitation id")
+        elif execution.kind is NamespaceMembershipExecutionKind.INVITATION_ACCEPTANCE:
+            try:
+                _validate_idempotency_key(execution.invitation_id)  # same canonical UUID contract
+            except InvalidIdempotencyKey as exc:
+                raise AuthorizationDenied("invitation execution requires a canonical invitation UUID") from exc
+        else:
+            raise AuthorizationDenied("unknown namespaced membership execution")
+        return execution
+
+    @staticmethod
+    async def _namespaced_membership_event(
+        cur: Any, *, event_id: str, operation: NamespaceMembershipOperation,
+        actor_user_id: int, project_id: int, target_user_id: int, tenant_id: int,
+        old_role: str | None, new_role: str | None, old_status: str | None,
+        new_status: str | None, request_id: str | None, trace_id: str | None,
+        execution: NamespaceMembershipExecution,
+    ) -> None:
+        await cur.execute(
+            "INSERT INTO jax_project_membership_event (event_id,operation,actor_principal,actor_type,"
+            "project_id,target_user_id,tenant_id,old_project_role,new_project_role,old_status,new_status,"
+            "occurred_at,request_id,trace_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(6),%s,%s)",
+            (event_id, operation.value,
+             (f"user:{actor_user_id}" if execution.kind is NamespaceMembershipExecutionKind.INTERACTIVE_USER
+              else f"office-invitation:{execution.invitation_id}"),
+             ("USER" if execution.kind is NamespaceMembershipExecutionKind.INTERACTIVE_USER else "CAPABILITY"),
+             project_id, target_user_id,
+             tenant_id, old_role, new_role, old_status, new_status, request_id, trace_id))
+
+    async def _mutate_namespaced_member_in_transaction(
+        self, cur: Any, *, actor_user_id: int, target_tenant_id: int, project_id: int,
+        target_user_id: int, namespace: ProjectNamespace,
+        operation: NamespaceMembershipOperation, member_kind: NamespacedMemberKind | None,
+        idempotency_key: str, authorizer: NamespaceMembershipMutationAuthorizer,
+        request_id: str | None, trace_id: str | None, execution: NamespaceMembershipExecution | None,
+    ) -> NamespacedMembershipResult:
+        """Shared caller-owned Office mutation.  It never opens a transaction.
+
+        Lock order is tenant, actor, target, scope, trusted JXP authority,
+        idempotency record, then target membership.  In particular, authority
+        runs before every replay lookup, so an old idempotency key is never an
+        authority bypass.
+        """
+        if namespace is not ProjectNamespace.OFFICE_CONFIDENTIAL:
+            raise AuthorizationDenied("namespaced membership only accepts OFFICE_CONFIDENTIAL")
+        actor_user_id = self._require_positive_id(actor_user_id, "actor_user_id")
+        target_tenant_id = self._require_positive_id(target_tenant_id, "target_tenant_id")
+        project_id = self._require_positive_id(project_id, "project_id")
+        target_user_id = self._require_positive_id(target_user_id, "target_user_id")
+        if actor_user_id == target_user_id:
+            raise AuthorizationDenied("Office membership administration requires a different actor and target")
+        if operation is NamespaceMembershipOperation.GRANT_OFFICE_MEMBER:
+            if not isinstance(member_kind, NamespacedMemberKind):
+                raise AuthorizationDenied("grant requires a namespaced member kind")
+        elif operation is NamespaceMembershipOperation.REVOKE_OFFICE_MEMBER:
+            if member_kind is not None:
+                raise AuthorizationDenied("revoke does not accept a member kind")
+        else:
+            raise AuthorizationDenied("unknown namespaced membership operation")
+        if not callable(getattr(authorizer, "authorize_membership_in_transaction", None)):
+            raise AuthorizationDenied("namespaced membership requires a trusted transaction authorizer")
+        _validate_idempotency_key(idempotency_key)
+        execution = self._validate_membership_execution(execution)
+        digest = self._namespace_membership_digest(
+            actor_user_id=actor_user_id, target_tenant_id=target_tenant_id, project_id=project_id,
+            target_user_id=target_user_id, operation=operation, member_kind=member_kind, execution=execution)
+        try:
+            # This is also the transaction's tenant mutex.  Grant needs an
+            # active target tenant; revoke intentionally leaves an inactive
+            # tenant for the trusted JXP adapter to authorize as cleanup.
+            await cur.execute("SELECT tenant_id,status FROM jax_tenants WHERE tenant_id=%s FOR UPDATE", (target_tenant_id,))
+            tenant = await cur.fetchone()
+            if not tenant:
+                raise ProjectNotVisible("tenant does not exist")
+            if (operation is NamespaceMembershipOperation.GRANT_OFFICE_MEMBER
+                    and str(self._value(tenant, "status", 1) or "").upper() != "ACTIVE"):
+                raise ProjectStateConflict("Office membership grants require an active tenant")
+            await cur.execute("SELECT tenant_id,status,account_class FROM jax_users WHERE user_id=%s FOR UPDATE", (actor_user_id,))
+            actor = await cur.fetchone()
+            if (not actor or str(self._value(actor, "status", 1) or "").upper() != "ACTIVE"
+                    or str(self._value(actor, "account_class", 2) or "").upper() not in {"INTERNAL", "OFFICE_INTERNAL"}):
+                raise AuthorizationDenied("actor is not an active Office staff user")
+            await cur.execute(
+                "SELECT tenant_id,status,account_class FROM jax_users WHERE user_id=%s AND tenant_id=%s FOR UPDATE",
+                (target_user_id, target_tenant_id))
+            target = await cur.fetchone()
+            if not target:
+                raise TargetUserNotEligible("target user does not belong to the target tenant")
+            await cur.execute(
+                "SELECT tenant_id,status,authorization_namespace FROM jax_project_scope WHERE project_id=%s FOR UPDATE",
+                (project_id,))
+            scope = await cur.fetchone()
+            if (not scope or int(self._value(scope, "tenant_id", 0)) != target_tenant_id
+                    or str(self._value(scope, "authorization_namespace", 2) or "").upper()
+                    != ProjectNamespace.OFFICE_CONFIDENTIAL.value):
+                raise ProjectNotVisible("Office project scope is unavailable")
+            lifecycle = str(self._value(scope, "status", 1) or "").upper()
+            if lifecycle not in {"ACTIVE", "ARCHIVED", "HIDDEN", "DISABLED"}:
+                raise ProjectStateConflict("Office project lifecycle is unknown")
+            if operation is NamespaceMembershipOperation.GRANT_OFFICE_MEMBER and lifecycle != "ACTIVE":
+                raise ProjectStateConflict("Office membership grants require an active project")
+            if (operation is NamespaceMembershipOperation.GRANT_OFFICE_MEMBER
+                    and str(self._value(target, "status", 1) or "").upper() != "ACTIVE"):
+                raise TargetUserNotEligible("grant target is not active")
+            if operation is NamespaceMembershipOperation.GRANT_OFFICE_MEMBER:
+                account_class = str(self._value(target, "account_class", 2) or "").upper()
+                expected_classes = ({"INTERNAL", "OFFICE_INTERNAL"}
+                                    if member_kind is NamespacedMemberKind.INTERNAL else {"EXTERNAL_CLIENT"})
+                if account_class not in expected_classes:
+                    raise TargetUserNotEligible("member kind does not match the target account class")
+            await authorizer.authorize_membership_in_transaction(
+                cur, actor_user_id=actor_user_id, target_tenant_id=target_tenant_id,
+                project_id=project_id, target_user_id=target_user_id, namespace=namespace,
+                operation=operation, member_kind=member_kind, execution=execution)
+            await cur.execute(
+                "SELECT operation,actor_user_id,target_tenant_id,project_id,target_user_id,member_kind,request_digest,"
+                "execution_kind,invitation_id,membership_id,event_id,project_role,status,changed FROM jax_namespace_membership_mutation_request "
+                "WHERE namespace=%s AND idempotency_key=%s FOR UPDATE", (namespace.value, idempotency_key))
+            existing = await cur.fetchone()
+            if existing:
+                if (str(self._value(existing, "request_digest", 6)) != digest
+                        or str(self._value(existing, "operation", 0)) != operation.value):
+                    raise IdempotencyKeyConflict("idempotency key already used with a different request")
+                return NamespacedMembershipResult(
+                    str(self._value(existing, "membership_id", 9)), str(self._value(existing, "event_id", 10)),
+                    bool(self._value(existing, "changed", 13)), project_id, target_user_id,
+                    ProjectRole(str(self._value(existing, "project_role", 11))),
+                    str(self._value(existing, "status", 12)), True)
+            await cur.execute(
+                "SELECT membership_id,project_role,status FROM jax_project_membership "
+                "WHERE project_id=%s AND user_id=%s FOR UPDATE", (project_id, target_user_id))
+            membership = await cur.fetchone()
+            if operation is NamespaceMembershipOperation.GRANT_OFFICE_MEMBER:
+                role = ProjectRole.CONTRIBUTOR if member_kind is NamespacedMemberKind.INTERNAL else ProjectRole.VIEWER
+                if membership and str(self._value(membership, "status", 2)).upper() == "ACTIVE":
+                    raise AlreadyMember("Office membership already active")
+                membership_id = str(self._value(membership, "membership_id", 0)) if membership else _uuid7()
+                if membership:
+                    await cur.execute(
+                        "UPDATE jax_project_membership SET project_role=%s,status='ACTIVE',grant_origin='OFFICE',"
+                        "pre_admin_role=NULL,pre_admin_status=NULL,version=version+1,updated_at=NOW(6) "
+                        "WHERE project_id=%s AND user_id=%s", (role.value, project_id, target_user_id))
+                else:
+                    await cur.execute(
+                        "INSERT INTO jax_project_membership (membership_id,project_id,tenant_id,user_id,project_role,status,"
+                        "grant_origin,created_at,created_by,updated_at) VALUES (%s,%s,%s,%s,%s,'ACTIVE','OFFICE',NOW(6),%s,NOW(6))",
+                        (membership_id, project_id, target_tenant_id, target_user_id, role.value, f"office:{actor_user_id}"))
+                old_role, old_status, status = (None, None, "ACTIVE") if not membership else (
+                    str(self._value(membership, "project_role", 1)), str(self._value(membership, "status", 2)), "ACTIVE")
+            else:
+                if not membership or str(self._value(membership, "status", 2)).upper() != "ACTIVE":
+                    raise MemberNotFound("Office membership is missing")
+                membership_id = str(self._value(membership, "membership_id", 0))
+                role = ProjectRole(str(self._value(membership, "project_role", 1)).upper())
+                old_role, old_status, status = role.value, "ACTIVE", "REVOKED"
+                await cur.execute(
+                    "UPDATE jax_project_membership SET status='REVOKED',pre_admin_role=NULL,pre_admin_status=NULL,"
+                    "version=version+1,updated_at=NOW(6) WHERE project_id=%s AND user_id=%s",
+                    (project_id, target_user_id))
+            event_id = _uuid7()
+            await self._namespaced_membership_event(
+                cur, event_id=event_id, operation=operation, actor_user_id=actor_user_id,
+                project_id=project_id, target_user_id=target_user_id, tenant_id=target_tenant_id,
+                old_role=old_role, new_role=role.value, old_status=old_status, new_status=status,
+                request_id=request_id, trace_id=trace_id, execution=execution)
+            await cur.execute(
+                "INSERT INTO jax_namespace_membership_mutation_request "
+                "(namespace,idempotency_key,operation,actor_user_id,target_tenant_id,project_id,target_user_id,member_kind,"
+                "request_digest,execution_kind,invitation_id,membership_id,event_id,project_role,status,changed,created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1,NOW(6))",
+                (namespace.value, idempotency_key, operation.value, actor_user_id, target_tenant_id, project_id,
+                 target_user_id, member_kind.value if member_kind else None, digest, execution.kind.value,
+                 execution.invitation_id, membership_id, event_id,
+                 role.value, status))
+            return NamespacedMembershipResult(membership_id, event_id, True, project_id, target_user_id, role, status, False)
+        except ProjectAuthorityError:
+            raise
+        except Exception as exc:
+            raise _wrap_unexpected_db_error(exc) from exc
+
+    async def grant_namespaced_member_in_transaction(self, cursor: Any, *, actor_user_id: int,
+                                                       target_tenant_id: int, project_id: int,
+                                                       target_user_id: int, namespace: ProjectNamespace,
+                                                       member_kind: NamespacedMemberKind, idempotency_key: str,
+                                                       authorizer: NamespaceMembershipMutationAuthorizer,
+                                                       request_id: str | None = None,
+                                                       trace_id: str | None = None,
+                                                       execution: NamespaceMembershipExecution | None = None) -> NamespacedMembershipResult:
+        return await self._mutate_namespaced_member_in_transaction(
+            cursor, actor_user_id=actor_user_id, target_tenant_id=target_tenant_id, project_id=project_id,
+            target_user_id=target_user_id, namespace=namespace,
+            operation=NamespaceMembershipOperation.GRANT_OFFICE_MEMBER, member_kind=member_kind,
+            idempotency_key=idempotency_key, authorizer=authorizer, request_id=request_id, trace_id=trace_id, execution=execution)
+
+    async def revoke_namespaced_member_in_transaction(self, cursor: Any, *, actor_user_id: int,
+                                                        target_tenant_id: int, project_id: int,
+                                                        target_user_id: int, namespace: ProjectNamespace,
+                                                        idempotency_key: str, authorizer: NamespaceMembershipMutationAuthorizer,
+                                                        request_id: str | None = None,
+                                                        trace_id: str | None = None,
+                                                        execution: NamespaceMembershipExecution | None = None) -> NamespacedMembershipResult:
+        return await self._mutate_namespaced_member_in_transaction(
+            cursor, actor_user_id=actor_user_id, target_tenant_id=target_tenant_id, project_id=project_id,
+            target_user_id=target_user_id, namespace=namespace,
+            operation=NamespaceMembershipOperation.REVOKE_OFFICE_MEMBER, member_kind=None,
+            idempotency_key=idempotency_key, authorizer=authorizer, request_id=request_id, trace_id=trace_id, execution=execution)
 
     async def bootstrap_existing_project(self, request: MutationAuthorizationRequest, project_id: int, *,
                                          owner_user_id: int) -> bool:

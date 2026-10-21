@@ -11,3 +11,5 @@ Fixround1: raíz58passed67warnings0.43s; LASMANOSCLASSIC, downgradeguard y prueb
 2026-10-20 · Task2 marker de compatibilidad namespace `office-namespace.1` añadido sin cambiar autoridad. Raíz12pruebasnamespace/inputvalidation0.11s; dictamen independiente pendiente antes de consumir desde JXP. Fuente: prueba y diff local, Codex.
 
 2026-10-20 · Task3 adaptermembership misma transacción diseñado antes de invitacionesJXP, contratooffice-membership.md yplanTask3. Separaprotocolo de creación; grantrolfijoOffice/revokepermite limpieza dormant actualautorizada; marcadorprevistooffice-namespace.2. Todavía sinimplementación. Raízdecidió trasarquitecturaSol office_workflow_contract. Preservarclásico/LASMANOS yrollbackconOfficehistoria.
+
+Task3membership congelada: adaptergrant/revoke caller-ownedtransaction, fixedroles, durableidempotency/replaycurrentauth and truthfulcapabilityprovenance; freshTier2completedrealrace/rollback/replaymatrix. Raíz67passed0.84s en33991. Fuente reviews/2026-10-20-office-membership-evidence.md. No consumir office-namespace.2 hasta dictamenSol exactSHA. Deadlock1213retryable requiere retrytransactioncallerconmismakey, nosilentloop.

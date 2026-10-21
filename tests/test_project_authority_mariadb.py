@@ -36,13 +36,15 @@ from jax.memory.project_authority import (
     AlreadyMember, IdempotencyKeyConflict, InvalidIdempotencyKey, LastOwnerRequired,
     LEGACY_PROJECT_TENANT_ID, MemberNotFound, ProjectAuthorityAdmin, ProjectAuthorityError,
     ProjectNotVisible, ProjectRoleInsufficient, ProjectStateConflict, ReservedProjectIdRange,
-    TargetUserNotEligible, TenantAdminMembershipProtected,
+    TargetUserNotEligible, TenantAdminMembershipProtected, NamespacedMemberKind,
+    NamespaceMembershipExecution, NamespaceMembershipExecutionKind,
+    NamespaceMembershipOperation,
 )
 from jax.memory.project_authority_migrations import (
     apply_project_authority_migration, revert_project_lifecycle_migration,
 )
 from jax.memory.scope_authority import (
-    MariaDBScopeAuthorityResolver, ProjectLifecycle, ProjectRole, TENANT_ADMIN_ROLES,
+    MariaDBScopeAuthorityResolver, ProjectLifecycle, ProjectNamespace, ProjectRole, TENANT_ADMIN_ROLES,
 )
 
 _DB = os.getenv("JAX_DB_NAME", "")
@@ -92,6 +94,14 @@ async def _ensure_schema(db_name: str) -> None:
             if not await cur.fetchone():
                 await cur.execute(_projects_ddl())
             await apply_project_authority_migration(cur)
+            # This is JXP-owned runtime identity data.  The Office adapter
+            # must not silently treat a missing column as INTERNAL; the test
+            # fixture creates it explicitly for this contract.
+            await cur.execute(
+                "SELECT COUNT(*) AS n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
+                "AND TABLE_NAME='jax_users' AND COLUMN_NAME='account_class'")
+            if (await cur.fetchone())[0] == 0:
+                await cur.execute("ALTER TABLE jax_users ADD COLUMN account_class VARCHAR(32) NULL")
     finally:
         conn.close()
 
@@ -336,14 +346,14 @@ async def _contar_eventos_de_sincronizacion(project_id: int, user_id: int) -> in
 
 # --------------------------------------------------------------------------
 # 1. Migration: apply -> apply (idempotent) -> revert -> apply. The bajada
-#    fails closed with an ARCHIVED row present. Own throw-away database:
+#    fails closed when Office history is present. Own throw-away database:
 #    running this against the shared session DB would rip out columns the
 #    other 12 tests depend on.
 # --------------------------------------------------------------------------
 
 @requiere_db_de_prueba
 @asincrono
-async def test_migracion_apply_apply_revert_apply_y_falla_cerrado_con_fila_archivada():
+async def test_migracion_apply_apply_revert_apply_y_falla_cerrado_con_historia_office():
     mig_db = f"{_DB}_mig{uuid.uuid4().hex[:8]}"
     assert es_base_de_test(mig_db)
     setup_conn = await aiomysql.connect(
@@ -372,7 +382,7 @@ async def test_migracion_apply_apply_revert_apply_y_falla_cerrado_con_fila_archi
                     snap = {}
                     for table in ("jax_project_scope", "jax_project_membership",
                                   "jax_project_membership_event", "jax_project_creation_request",
-                                  "jax_namespace_project_creation_request", "projects",
+                                  "jax_namespace_project_creation_request", "jax_namespace_membership_mutation_request", "projects",
                                   "jax_users"):
                         await cur.execute(f"SHOW CREATE TABLE `{table}`")
                         row = await cur.fetchone()
@@ -389,6 +399,8 @@ async def test_migracion_apply_apply_revert_apply_y_falla_cerrado_con_fila_archi
                 assert await cur.fetchone() is None
                 await cur.execute("SHOW TABLES LIKE 'jax_namespace_project_creation_request'")
                 assert await cur.fetchone() is None
+                await cur.execute("SHOW TABLES LIKE 'jax_namespace_membership_mutation_request'")
+                assert await cur.fetchone() is None
                 await cur.execute("SHOW COLUMNS FROM jax_project_scope LIKE 'authorization_namespace'")
                 assert await cur.fetchone() is None
                 await cur.execute("SHOW INDEX FROM jax_users WHERE Key_name='idx_jax_users_tenant_email'")
@@ -401,14 +413,37 @@ async def test_migracion_apply_apply_revert_apply_y_falla_cerrado_con_fila_archi
                 await apply_project_authority_migration(cur)  # revert -> apply
                 assert await _snapshot() == snap1
 
-                await cur.execute("INSERT INTO jax_tenants (name,plan,status) VALUES ('t','personal','active')")
-                tenant_id = cur.lastrowid
-                await cur.execute("INSERT INTO projects (project_uuid,name,status) VALUES (UUID(),'p','archived')")
-                project_id = cur.lastrowid
+                # A durable Office mutation record also blocks rollback even
+                # when its referenced scope is legacy CLASSIC.  This directly
+                # exercises the request-history guard rather than relying on
+                # the earlier non-CLASSIC-scope guard.
+                await cur.execute("INSERT INTO jax_tenants (name,plan,status) VALUES ('office-history','personal','active')")
+                office_tenant = cur.lastrowid
+                await cur.execute(
+                    "INSERT INTO jax_users (tenant_id,email,password_hash,role,status) VALUES "
+                    "(%s,'office-history@test.invalid','x','operator','active')", (office_tenant,))
+                office_user = cur.lastrowid
+                await cur.execute("INSERT INTO projects (project_uuid,name,status) VALUES (UUID(),'office-history','active')")
+                office_project = cur.lastrowid
                 await cur.execute(
                     "INSERT INTO jax_project_scope (project_id,tenant_id,status,created_at,created_by,updated_at) "
-                    "VALUES (%s,%s,'ARCHIVED',NOW(6),'test',NOW(6))", (project_id, tenant_id))
-                with pytest.raises(RuntimeError):
+                    "VALUES (%s,%s,'ACTIVE',NOW(6),'test',NOW(6))", (office_project, office_tenant))
+                await cur.execute(
+                    "INSERT INTO jax_project_membership (membership_id,project_id,tenant_id,user_id,project_role,status,grant_origin,created_at,created_by,updated_at) "
+                    "VALUES (UUID(),%s,%s,%s,'VIEWER','ACTIVE','OFFICE',NOW(6),'test',NOW(6))",
+                    (office_project, office_tenant, office_user))
+                await cur.execute(
+                    "INSERT INTO jax_project_membership_event (event_id,operation,actor_principal,actor_type,project_id,target_user_id,tenant_id,new_project_role,new_status,occurred_at) "
+                    "VALUES (@office_event := UUID(),'GRANT_OFFICE_MEMBER','office-invitation:fixture','CAPABILITY',%s,%s,%s,'VIEWER','ACTIVE',NOW(6))",
+                    (office_project, office_user, office_tenant))
+                await cur.execute("SELECT membership_id FROM jax_project_membership WHERE project_id=%s", (office_project,))
+                office_membership = (await cur.fetchone())["membership_id"]
+                await cur.execute(
+                    "INSERT INTO jax_namespace_membership_mutation_request "
+                    "(namespace,idempotency_key,operation,actor_user_id,target_tenant_id,project_id,target_user_id,member_kind,request_digest,execution_kind,invitation_id,membership_id,event_id,project_role,status,changed,created_at) "
+                    "VALUES ('OFFICE_CONFIDENTIAL',UUID(),'GRANT_OFFICE_MEMBER',%s,%s,%s,%s,'EXTERNAL_CLIENT',REPEAT('a',64),'INVITATION_ACCEPTANCE',UUID(),%s,@office_event,'VIEWER','ACTIVE',1,NOW(6))",
+                    (office_user, office_tenant, office_project, office_user, office_membership))
+                with pytest.raises(RuntimeError, match="Office membership mutation requests"):
                     await revert_project_lifecycle_migration(cur)
         finally:
             conn.close()
@@ -423,6 +458,310 @@ async def test_migracion_apply_apply_revert_apply_y_falla_cerrado_con_fila_archi
 # --------------------------------------------------------------------------
 # 2. Section 3-bis.
 # --------------------------------------------------------------------------
+
+@requiere_db_de_prueba
+@asincrono
+async def test_office_membership_same_transaction_grant_replay_and_revoke():
+    """Exercises the caller-owned Office path against disposable MariaDB.
+    The authorizer sees the exact cursor and is called again for replay."""
+    tenant = await _crear_tenant("office-member")
+    actor = await _crear_usuario(tenant)
+    target = await _crear_usuario(tenant)
+    project = await _crear_proyecto_activo(tenant, name="office")
+    await _sql("UPDATE jax_users SET account_class='OFFICE_INTERNAL' WHERE user_id=%s", (actor,))
+    await _sql("UPDATE jax_users SET account_class='EXTERNAL_CLIENT' WHERE user_id=%s", (target,))
+    # Scope is created here rather than through a classic API, whose explicit
+    # CLASSIC filter is itself part of the isolation contract.
+    await _sql(
+        "INSERT INTO jax_project_scope (project_id,tenant_id,authorization_namespace,status,created_at,created_by,updated_at) "
+        "VALUES (%s,%s,'OFFICE_CONFIDENTIAL','ACTIVE',NOW(6),'test',NOW(6))", (project, tenant))
+
+    class Authorizer:
+        def __init__(self): self.cursors = []
+        async def authorize_membership_in_transaction(self, cursor, **kwargs):
+            assert isinstance(kwargs["operation"], NamespaceMembershipOperation)
+            self.cursors.append(cursor)
+
+    pool = await _pool()
+    auth = Authorizer()
+    key = str(uuid.uuid4())
+    try:
+        async with pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor() as cur:
+                    api = ProjectAuthorityAdmin(object())
+                    granted = await api.grant_namespaced_member_in_transaction(
+                        cur, actor_user_id=actor, target_tenant_id=tenant, project_id=project,
+                        target_user_id=target, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+                        member_kind=NamespacedMemberKind.EXTERNAL_CLIENT, idempotency_key=key, authorizer=auth)
+                    replay = await api.grant_namespaced_member_in_transaction(
+                        cur, actor_user_id=actor, target_tenant_id=tenant, project_id=project,
+                        target_user_id=target, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+                        member_kind=NamespacedMemberKind.EXTERNAL_CLIENT, idempotency_key=key, authorizer=auth)
+                    await cur.execute(
+                        "EXPLAIN SELECT operation,request_digest,membership_id,event_id,project_role,status,changed "
+                        "FROM jax_namespace_membership_mutation_request WHERE namespace=%s AND idempotency_key=%s FOR UPDATE",
+                        ("OFFICE_CONFIDENTIAL", key))
+                    explain = await cur.fetchone()
+                await conn.commit()
+            except Exception:
+                await conn.rollback(); raise
+    finally:
+        pool.close(); await pool.wait_closed()
+    assert granted.changed and not granted.replayed
+    assert replay.replayed and replay.membership_id == granted.membership_id
+    assert len(auth.cursors) == 2
+    assert explain["key"] == "PRIMARY"
+    rows = await _sql("SELECT project_role,status,grant_origin FROM jax_project_membership WHERE membership_id=%s",
+                      (granted.membership_id,), fetch=True)
+    assert rows == [{"project_role": "VIEWER", "status": "ACTIVE", "grant_origin": "OFFICE"}]
+    revoke_key = str(uuid.uuid4())
+    pool = await _pool()
+    try:
+        async with pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor() as cur:
+                    revoked = await ProjectAuthorityAdmin(object()).revoke_namespaced_member_in_transaction(
+                        cur, actor_user_id=actor, target_tenant_id=tenant, project_id=project,
+                        target_user_id=target, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+                        idempotency_key=revoke_key, authorizer=auth)
+                await conn.commit()
+            except Exception:
+                await conn.rollback(); raise
+    finally:
+        pool.close(); await pool.wait_closed()
+    assert revoked.status == "REVOKED" and revoked.project_role.value == "VIEWER"
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_office_membership_replays_locks_rolls_back_and_keeps_capability_provenance():
+    """Exercise the Office adapter with two real connections and its durable
+    replay semantics.  The tenant row is the intentional mutex: both callers
+    begin before the gate opens, but exactly one creates the mutation."""
+    tenant = await _crear_tenant("office-member-matrix")
+    actor = await _crear_usuario(tenant)
+    internal = await _crear_usuario(tenant)
+    external = await _crear_usuario(tenant)
+    project = await _crear_proyecto_activo(tenant, name="office-matrix")
+    await _sql("UPDATE jax_users SET account_class='OFFICE_INTERNAL' WHERE user_id IN (%s,%s)",
+               (actor, internal))
+    await _sql("UPDATE jax_users SET account_class='EXTERNAL_CLIENT' WHERE user_id=%s", (external,))
+    await _sql(
+        "INSERT INTO jax_project_scope (project_id,tenant_id,authorization_namespace,status,created_at,created_by,updated_at) "
+        "VALUES (%s,%s,'OFFICE_CONFIDENTIAL','ACTIVE',NOW(6),'test',NOW(6))", (project, tenant))
+
+    class Authorizer:
+        def __init__(self):
+            self.calls = 0; self.denied = False
+            self.race_target = None
+            self.race_entered = asyncio.Event()
+            self.race_release = asyncio.Event()
+        async def authorize_membership_in_transaction(self, cursor, **kwargs):
+            self.calls += 1
+            if self.denied:
+                raise AuthorizationDenied("current Office authority was revoked")
+            if kwargs["target_user_id"] == self.race_target and not self.race_entered.is_set():
+                self.race_entered.set()
+                await self.race_release.wait()
+
+    api = ProjectAuthorityAdmin(object())
+    auth = Authorizer()
+
+    async def mutate(method, *, key, target, kind=None, execution=None, commit=True,
+                     actor_id=None, project_id=None, tenant_id=None):
+        pool = await _pool(maxsize=1)
+        try:
+            async with pool.acquire() as conn:
+                await conn.begin()
+                try:
+                    async with conn.cursor() as cur:
+                        kwargs = dict(actor_user_id=actor if actor_id is None else actor_id,
+                                      target_tenant_id=tenant if tenant_id is None else tenant_id,
+                                      project_id=project if project_id is None else project_id,
+                                      target_user_id=target, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+                                      idempotency_key=key, authorizer=auth, execution=execution)
+                        if kind is not None:
+                            kwargs["member_kind"] = kind
+                        result = await method(cur, **kwargs)
+                    if commit:
+                        await conn.commit()
+                    else:
+                        await conn.rollback()
+                    return result
+                except Exception:
+                    await conn.rollback()
+                    raise
+        finally:
+            pool.close(); await pool.wait_closed()
+
+    # A caller rollback removes the membership, append-only event and durable
+    # idempotency request together; a later retry is a new mutation.
+    rollback_key = str(uuid.uuid4())
+    await mutate(api.grant_namespaced_member_in_transaction, key=rollback_key, target=internal,
+                 kind=NamespacedMemberKind.INTERNAL, commit=False)
+    counts = await _sql(
+        "SELECT (SELECT COUNT(*) FROM jax_project_membership WHERE project_id=%s AND user_id=%s) AS m, "
+        "(SELECT COUNT(*) FROM jax_project_membership_event WHERE project_id=%s AND target_user_id=%s) AS e, "
+        "(SELECT COUNT(*) FROM jax_namespace_membership_mutation_request WHERE namespace='OFFICE_CONFIDENTIAL' AND idempotency_key=%s) AS r",
+        (project, internal, project, internal, rollback_key), fetch=True)
+    assert counts == [{"m": 0, "e": 0, "r": 0}]
+
+    grant_key = str(uuid.uuid4())
+    granted = await mutate(api.grant_namespaced_member_in_transaction, key=grant_key, target=internal,
+                           kind=NamespacedMemberKind.INTERNAL)
+    assert granted.project_role is ProjectRole.CONTRIBUTOR
+    revoked = await mutate(api.revoke_namespaced_member_in_transaction, key=str(uuid.uuid4()), target=internal)
+    assert revoked.status == "REVOKED"
+    replay_grant = await mutate(api.grant_namespaced_member_in_transaction, key=grant_key, target=internal,
+                                kind=NamespacedMemberKind.INTERNAL)
+    assert replay_grant.replayed and replay_grant.status == "ACTIVE"
+    state = await _sql("SELECT status FROM jax_project_membership WHERE membership_id=%s", (granted.membership_id,), fetch=True)
+    assert state == [{"status": "REVOKED"}]
+
+    regrant_key = str(uuid.uuid4())
+    regranted = await mutate(api.grant_namespaced_member_in_transaction, key=regrant_key, target=internal,
+                             kind=NamespacedMemberKind.INTERNAL)
+    revoke_key = str(uuid.uuid4())
+    revoked = await mutate(api.revoke_namespaced_member_in_transaction, key=revoke_key, target=internal)
+    await mutate(api.grant_namespaced_member_in_transaction, key=str(uuid.uuid4()), target=internal,
+                 kind=NamespacedMemberKind.INTERNAL)
+    replay_revoke = await mutate(api.revoke_namespaced_member_in_transaction, key=revoke_key, target=internal)
+    assert replay_revoke.replayed and replay_revoke.membership_id == regranted.membership_id
+    state = await _sql("SELECT status FROM jax_project_membership WHERE membership_id=%s", (regranted.membership_id,), fetch=True)
+    assert state == [{"status": "ACTIVE"}]
+
+    # Authority is rechecked before replay lookup, even with a previously
+    # successful key.  No prior result leaks when the adapter denies.
+    auth.denied = True
+    with pytest.raises(AuthorizationDenied):
+        await mutate(api.grant_namespaced_member_in_transaction, key=grant_key, target=internal,
+                     kind=NamespacedMemberKind.INTERNAL)
+    auth.denied = False
+
+    # The capability execution is durable and carries no forged user actor.
+    capability_key = str(uuid.uuid4())
+    invitation_id = str(uuid.uuid4())
+    cap = NamespaceMembershipExecution(NamespaceMembershipExecutionKind.INVITATION_ACCEPTANCE, invitation_id)
+    capability = await mutate(api.grant_namespaced_member_in_transaction, key=capability_key, target=external,
+                              kind=NamespacedMemberKind.EXTERNAL_CLIENT, execution=cap)
+    provenance = await _sql(
+        "SELECT e.actor_principal,e.actor_type,r.execution_kind,r.invitation_id,r.project_role "
+        "FROM jax_project_membership_event e JOIN jax_namespace_membership_mutation_request r ON r.event_id=e.event_id "
+        "WHERE r.namespace='OFFICE_CONFIDENTIAL' AND r.idempotency_key=%s", (capability_key,), fetch=True)
+    assert provenance == [{"actor_principal": f"office-invitation:{invitation_id}", "actor_type": "CAPABILITY",
+                           "execution_kind": "INVITATION_ACCEPTANCE", "invitation_id": invitation_id,
+                           "project_role": "VIEWER"}]
+
+    # Same key binds every authority input, including kind and capability.
+    with pytest.raises(IdempotencyKeyConflict):
+        await mutate(api.grant_namespaced_member_in_transaction, key=capability_key, target=external,
+                     kind=NamespacedMemberKind.EXTERNAL_CLIENT)
+    with pytest.raises(TargetUserNotEligible):
+        await mutate(api.grant_namespaced_member_in_transaction, key=str(uuid.uuid4()), target=external,
+                     kind=NamespacedMemberKind.INTERNAL)
+
+    # Two connections overlap on the same idempotency key.  The result is one
+    # event/request/membership and one exact replay, never duplicate writes.
+    race_target = await _crear_usuario(tenant)
+    await _sql("UPDATE jax_users SET account_class='EXTERNAL_CLIENT' WHERE user_id=%s", (race_target,))
+    race_key = str(uuid.uuid4())
+    auth.race_target = race_target
+
+    async def racer():
+        pool = await _pool(maxsize=1)
+        try:
+            async with pool.acquire() as conn:
+                await conn.begin()
+                try:
+                    async with conn.cursor() as cur:
+                        value = await api.grant_namespaced_member_in_transaction(
+                            cur, actor_user_id=actor, target_tenant_id=tenant, project_id=project,
+                            target_user_id=race_target, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+                            member_kind=NamespacedMemberKind.EXTERNAL_CLIENT, idempotency_key=race_key,
+                            authorizer=auth)
+                    await conn.commit()
+                    return value
+                except Exception:
+                    await conn.rollback()
+                    raise
+        finally:
+            pool.close(); await pool.wait_closed()
+
+    first = asyncio.create_task(racer())
+    await asyncio.wait_for(auth.race_entered.wait(), timeout=5)
+    second = asyncio.create_task(racer())
+    await asyncio.sleep(0)
+    auth.race_release.set()
+    raced = await asyncio.wait_for(asyncio.gather(first, second), timeout=10)
+    assert {value.replayed for value in raced} == {False, True}
+    rows = await _sql(
+        "SELECT (SELECT COUNT(*) FROM jax_project_membership WHERE project_id=%s AND user_id=%s) AS m, "
+        "(SELECT COUNT(*) FROM jax_project_membership_event WHERE project_id=%s AND target_user_id=%s) AS e, "
+        "(SELECT COUNT(*) FROM jax_namespace_membership_mutation_request WHERE namespace='OFFICE_CONFIDENTIAL' AND idempotency_key=%s) AS r",
+        (project, race_target, project, race_target, race_key), fetch=True)
+    assert rows == [{"m": 1, "e": 1, "r": 1}]
+
+    # Classic mutators retain their CLASSIC-only boundary even when the same
+    # caller happens to be Office staff.  They cannot write Office rows.
+    classic_pool = await _pool()
+    try:
+        with pytest.raises(ProjectNotVisible):
+            await _admin(classic_pool).grant_member(
+                _request(_scope(actor, tenant, project), "GRANT_MEMBER"), project,
+                email="never-office-classic@test.invalid", role=ProjectRole.VIEWER)
+    finally:
+        classic_pool.close(); await classic_pool.wait_closed()
+
+    # Revoke is deliberate cleanup: an archived scope and inactive target do
+    # not strand a previously granted Office membership.  Grant remains
+    # fail-closed for an inactive tenant or a target from another tenant.
+    await _sql("UPDATE jax_project_scope SET status='ARCHIVED' WHERE project_id=%s", (project,))
+    await _sql("UPDATE jax_users SET status='inactive' WHERE user_id=%s", (external,))
+    cleanup = await mutate(api.revoke_namespaced_member_in_transaction, key=str(uuid.uuid4()), target=external)
+    assert cleanup.status == "REVOKED"
+    foreign_tenant = await _crear_tenant("office-member-foreign")
+    foreign_target = await _crear_usuario(foreign_tenant)
+    await _sql("UPDATE jax_users SET account_class='EXTERNAL_CLIENT' WHERE user_id=%s", (foreign_target,))
+    with pytest.raises(ProjectStateConflict):
+        await mutate(api.grant_namespaced_member_in_transaction, key=str(uuid.uuid4()), target=race_target,
+                     kind=NamespacedMemberKind.EXTERNAL_CLIENT)
+    await _sql("UPDATE jax_project_scope SET status='ACTIVE' WHERE project_id=%s", (project,))
+    with pytest.raises(TargetUserNotEligible):
+        await mutate(api.grant_namespaced_member_in_transaction, key=str(uuid.uuid4()), target=foreign_target,
+                     kind=NamespacedMemberKind.EXTERNAL_CLIENT)
+
+    # A reused key never silently changes actor, project, target, kind or
+    # bearer provenance.  Each alternative is otherwise a valid Office
+    # request, so the observed failure is the idempotency binding itself.
+    actor_two = await _crear_usuario(tenant)
+    other_target = await _crear_usuario(tenant)
+    other_project = await _crear_proyecto_activo(tenant, name="office-other")
+    await _sql("UPDATE jax_users SET account_class='OFFICE_INTERNAL' WHERE user_id IN (%s,%s)",
+               (actor_two, other_target))
+    await _sql(
+        "INSERT INTO jax_project_scope (project_id,tenant_id,authorization_namespace,status,created_at,created_by,updated_at) "
+        "VALUES (%s,%s,'OFFICE_CONFIDENTIAL','ACTIVE',NOW(6),'test',NOW(6))", (other_project, tenant))
+    for kwargs in (
+        {"actor_id": actor_two},
+        {"project_id": other_project},
+        {"target": other_target},
+    ):
+        with pytest.raises(IdempotencyKeyConflict):
+            await mutate(api.grant_namespaced_member_in_transaction, key=grant_key,
+                         target=kwargs.pop("target", internal), kind=NamespacedMemberKind.INTERNAL, **kwargs)
+    await _sql("UPDATE jax_users SET status='active',account_class='EXTERNAL_CLIENT' WHERE user_id=%s", (external,))
+    for execution in (None,
+                      NamespaceMembershipExecution(NamespaceMembershipExecutionKind.INVITATION_ACCEPTANCE, str(uuid.uuid4()))):
+        with pytest.raises(IdempotencyKeyConflict):
+            await mutate(api.grant_namespaced_member_in_transaction, key=capability_key, target=external,
+                         kind=NamespacedMemberKind.EXTERNAL_CLIENT, execution=execution)
+    await _sql("UPDATE jax_users SET account_class='OFFICE_INTERNAL' WHERE user_id=%s", (external,))
+    with pytest.raises(IdempotencyKeyConflict):
+        await mutate(api.grant_namespaced_member_in_transaction, key=capability_key, target=external,
+                     kind=NamespacedMemberKind.INTERNAL, execution=cap)
 
 def test_bootstrap_no_acepta_tenant_id_como_parametro():
     import inspect

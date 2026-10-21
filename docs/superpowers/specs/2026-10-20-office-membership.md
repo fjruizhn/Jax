@@ -32,7 +32,7 @@ Despuésdeautorizaractual: mismakey/digest retornaregistroexacto sin modificar m
 
 Orden: targettenant FORUPDATE → invitaciónsiaplica (caller) → actoruser → targetuserexistente → scope → perfil/delegación/grant/membershipactor (callback) → requestidempotencia → membershiptarget → grant/relationtarget(caller) → audit/event → aceptación(caller). Calleraceptación toma tenantmutexprimero y locks compatibles antesdecrearusuario/calladapter; usuario totalmente nuevo no tiene rowcontendible previa. Reusarprimitivasprivadas dondecompatible, noresolverclásicoque niegaOffice.
 
-Evento canónico jax_project_membership_event: operaciónGRANT_OFFICE_MEMBER/REVOKE_OFFICE_MEMBER, actor_principaluser:{id},actor_typeUSER, project/tenant/targetexactos, transiciónrol/status, request/trace. JXP registra fundamento de autorización ensuledger enmismatransacción; noinventar pseudousuario. Nuevo tipoorigenOffice no da autoridadclásica: consumidoresclásicos siguenfiltrandoCLASSIC.
+Evento canónico jax_project_membership_event: operaciónGRANT_OFFICE_MEMBER/REVOKE_OFFICE_MEMBER, actor_principaluser:{id},tipo según ejecución descrita abajo, project/tenant/targetexactos, transiciónrol/status, request/trace. JXP registra fundamento de autorización ensuledger enmismatransacción; noinventar pseudousuario. Nuevo tipoorigenOffice no da autoridadclásica: consumidoresclásicos siguenfiltrandoCLASSIC.
 
 ## Versión y migración
 
@@ -41,3 +41,11 @@ OFFICE_NAMESPACE_CONTRACT_VERSION pasaoffice-namespace.2. Creaciónrootactual pe
 ## Pruebas
 
 Unit yMariaDB real33991 desechable: callbackmismocursor sincommit, grant/revokemapeo/locks/actor/target/tenant/scope/clase, revokeinactivoarchivado ydenyunknownstate, actualauthorizationbeforeeveryreplay, conflicto por actor/target/kind, replaynoresurrect/no revocar regrantposterior, AlreadyMember/MemberNotFound nuevoskeys, fallo trasmembership/event/request rollbacktodo, dos concurrentessamekey una mutación/event, clásico grant/revokecontinúanrechazandoOffice, creationnoowner, migrationupgrade/rollbacksafe. La columnaaccount_class perteneceJXP: fixturela preparaexplícita paraesteadapter; runtimeausentenoseasumeINTERNAL. EXPLAIN consultasrealesíndices y noI/O bloqueante/caché depermisos.
+
+## Procedencia de aceptación por capacidad
+
+RefinamientoCodex/Sol previo a habilitaraceptación: el invitador es fundamento de autoridad, no usuario interactivo presente24h después. Añadir NamespaceMembershipExecutionKind INTERACTIVE_USER|INVITATION_ACCEPTANCE y dataclassfrozen NamespaceMembershipExecution(kind,invitation_id=None), validada estrictamente; invitation_idUUIDcanónico obligatorio solo INVITATION_ACCEPTANCE. Métodosgrant/revoke aceptan execution opcional por defecto INTERACTIVE_USER; callback tipado recibeexecution. No campo libre actor_principal. JXP construye execution desde invitaciónbloqueadaypruebavalidada, nunca directamente delbody. Coreconservaactor_user_idcomoautoridadcanónica a revalidar.
+
+Evento INTERACTIVE_USER: actor_principaluser:{actor_user_id},actor_typeUSER. Evento INVITATION_ACCEPTANCE: actor_principaloffice-invitation:{invitation_id},actor_typeCAPABILITY; authority_actor_user_id canónico se conserva en requestledger FK, ligado inequívocamente por event_id. Puedeañadirsecampo directo nullableeventoparafacilitarlectura, sinreescribirhistorialogenérico. Digestidempotencia liga ejecución+invitationID; misma key cambiandoejecuciónconflicto. Replayconservaprocedenciaoriginal. Ningúnpseudousuario ni mint de sesiónnueva, core no importa ni lee tablasOfficeinvitation; callbackJXP verifica esacapacidad eissueractual bajo mismatransacción.
+
+Pruebas adicionales: evento de bearer identificaCAPABILITY y usuariofundamentoactual; interactivoidénticoapiusual; UUID/mode inválidosrechazados; ejecución/invitationID distinto con mismakeyconflicto ynoescrituras.
