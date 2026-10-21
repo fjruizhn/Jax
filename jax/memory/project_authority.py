@@ -784,18 +784,33 @@ class ProjectAuthorityAdmin:
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
     @staticmethod
+    def _canonical_membership_uuid(value: str, field: str) -> str:
+        """Canonicalize membership-bound UUIDs before any authority call.
+
+        The legacy generic validator intentionally accepts upper-case UUIDs
+        for compatibility.  Membership idempotency and capability provenance
+        cannot use two spellings for one identity, so this boundary passes a
+        single lower-case canonical value to the adapter, digest and SQL.
+        """
+        try:
+            _validate_idempotency_key(value)
+        except InvalidIdempotencyKey as exc:
+            raise AuthorizationDenied(f"{field} requires a canonical UUID") from exc
+        return str(uuid_module.UUID(value))
+
+    @staticmethod
     def _validate_membership_execution(execution: NamespaceMembershipExecution | None) -> NamespaceMembershipExecution:
-        execution = execution or NamespaceMembershipExecution(NamespaceMembershipExecutionKind.INTERACTIVE_USER)
+        if execution is None:
+            execution = NamespaceMembershipExecution(NamespaceMembershipExecutionKind.INTERACTIVE_USER)
         if not isinstance(execution, NamespaceMembershipExecution) or not isinstance(execution.kind, NamespaceMembershipExecutionKind):
             raise AuthorizationDenied("namespaced membership execution is invalid")
         if execution.kind is NamespaceMembershipExecutionKind.INTERACTIVE_USER:
             if execution.invitation_id is not None:
                 raise AuthorizationDenied("interactive execution must not carry an invitation id")
         elif execution.kind is NamespaceMembershipExecutionKind.INVITATION_ACCEPTANCE:
-            try:
-                _validate_idempotency_key(execution.invitation_id)  # same canonical UUID contract
-            except InvalidIdempotencyKey as exc:
-                raise AuthorizationDenied("invitation execution requires a canonical invitation UUID") from exc
+            return NamespaceMembershipExecution(
+                execution.kind,
+                ProjectAuthorityAdmin._canonical_membership_uuid(execution.invitation_id, "invitation execution"))
         else:
             raise AuthorizationDenied("unknown namespaced membership execution")
         return execution
@@ -864,7 +879,7 @@ class ProjectAuthorityAdmin:
             raise AuthorizationDenied("unknown namespaced membership operation")
         if not callable(getattr(authorizer, "authorize_membership_in_transaction", None)):
             raise AuthorizationDenied("namespaced membership requires a trusted transaction authorizer")
-        _validate_idempotency_key(idempotency_key)
+        idempotency_key = self._canonical_membership_uuid(idempotency_key, "idempotency_key")
         execution = self._validate_membership_execution(execution)
         digest = self._namespace_membership_digest(
             actor_user_id=actor_user_id, target_tenant_id=target_tenant_id, project_id=project_id,

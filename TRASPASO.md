@@ -15,3 +15,5 @@ Fixround1: raíz58passed67warnings0.43s; LASMANOSCLASSIC, downgradeguard y prueb
 Task3membership congelada: adaptergrant/revoke caller-ownedtransaction, fixedroles, durableidempotency/replaycurrentauth and truthfulcapabilityprovenance; freshTier2completedrealrace/rollback/replaymatrix. Raíz67passed0.84s en33991. Fuente reviews/2026-10-20-office-membership-evidence.md. No consumir office-namespace.2 hasta dictamenSol exactSHA. Deadlock1213retryable requiere retrytransactioncallerconmismakey, nosilentloop.
 
 Task3fixround1 frozeconsumptionbinding/elevatedrolerevoke/truthfulcreated_by afterRECHAZADO5f757ef6. Root68passed0.73s19warnings; source reviewsoffice-membership-round1. ExactSHAreviewnext, .2stillnotconsumableuntilgate. AGENTSlateststamp e02ae9864475f57b8c242140c262c700ac030ad3 received; verify-sourcebeforeintegrationstillrequired.
+
+Task3fixround2final: linkedresultCHECKv4 withSQLNULLclosedpreflight+constraint; canonicalUUIDbeforecallback/digest/SQL; strictNoneonlyexecutiondefault. Root72passed0.77s19warnings. ExactSHAreviewnext; no .2consumptionuntilclean. Source office-membership-round2.

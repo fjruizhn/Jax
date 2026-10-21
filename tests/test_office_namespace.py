@@ -121,6 +121,10 @@ async def test_office_membership_uses_the_callers_cursor_and_records_a_typed_gra
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("execution", [
+    False,
+    0,
+    "",
+    [],
     NamespaceMembershipExecution(NamespaceMembershipExecutionKind.INTERACTIVE_USER, str(uuid.uuid4())),
     NamespaceMembershipExecution(NamespaceMembershipExecutionKind.INVITATION_ACCEPTANCE),
     NamespaceMembershipExecution(NamespaceMembershipExecutionKind.INVITATION_ACCEPTANCE, "not-a-uuid"),
@@ -136,8 +140,8 @@ async def test_office_membership_rejects_invalid_execution_before_sql(execution)
 
 @pytest.mark.asyncio
 async def test_capability_membership_binds_canonical_key_and_truthful_created_by():
-    invitation_id = str(uuid.uuid4())
-    key = str(uuid.uuid4())
+    invitation_id = str(uuid.uuid4()).upper()
+    key = str(uuid.uuid4()).upper()
     cursor = Cursor([
         {"tenant_id": 4, "status": "ACTIVE"},
         {"tenant_id": 8, "status": "ACTIVE", "account_class": "OFFICE_INTERNAL"},
@@ -152,9 +156,9 @@ async def test_capability_membership_binds_canonical_key_and_truthful_created_by
         member_kind=NamespacedMemberKind.EXTERNAL_CLIENT, idempotency_key=key,
         authorizer=authorizer,
         execution=NamespaceMembershipExecution(NamespaceMembershipExecutionKind.INVITATION_ACCEPTANCE, invitation_id))
-    assert authorizer.calls[0][1]["idempotency_key"] == key
+    assert authorizer.calls[0][1]["idempotency_key"] == key.lower()
     insert_args = next(args for sql, args in cursor.calls if "INSERT INTO jax_project_membership" in sql)
-    assert insert_args[-1] == f"office-invitation:{invitation_id}"
+    assert insert_args[-1] == f"office-invitation:{invitation_id.lower()}"
 
 
 def _new_store():

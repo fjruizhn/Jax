@@ -443,6 +443,38 @@ async def test_migracion_apply_apply_revert_apply_y_falla_cerrado_con_historia_o
                     "(namespace,idempotency_key,operation,actor_user_id,target_tenant_id,project_id,target_user_id,member_kind,request_digest,execution_kind,invitation_id,membership_id,event_id,project_role,status,changed,created_at) "
                     "VALUES ('OFFICE_CONFIDENTIAL',UUID(),'GRANT_OFFICE_MEMBER',%s,%s,%s,%s,'EXTERNAL_CLIENT',REPEAT('a',64),'INVITATION_ACCEPTANCE',UUID(),%s,@office_event,'VIEWER','ACTIVE',1,NOW(6))",
                     (office_user, office_tenant, office_project, office_user, office_membership))
+                # CHECK v3 ties operation, kind, role and status together.
+                # These otherwise FK-valid rows must never enter history.
+                for operation, kind, role, status, execution_kind, invitation in (
+                    ("GRANT_OFFICE_MEMBER", "INTERNAL", "OWNER", "ACTIVE", "INTERACTIVE_USER", None),
+                    ("GRANT_OFFICE_MEMBER", "INTERNAL", "REVIEWER", "REVOKED", "INTERACTIVE_USER", None),
+                    ("GRANT_OFFICE_MEMBER", None, "CONTRIBUTOR", "ACTIVE", "INTERACTIVE_USER", None),
+                    ("REVOKE_OFFICE_MEMBER", None, "VIEWER", "ACTIVE", "INTERACTIVE_USER", None),
+                ):
+                    with pytest.raises(aiomysql.Error):
+                        await cur.execute(
+                            "INSERT INTO jax_namespace_membership_mutation_request "
+                            "(namespace,idempotency_key,operation,actor_user_id,target_tenant_id,project_id,target_user_id,member_kind,request_digest,execution_kind,invitation_id,membership_id,event_id,project_role,status,changed,created_at) "
+                            "VALUES ('OFFICE_CONFIDENTIAL',UUID(),%s,%s,%s,%s,%s,%s,REPEAT('c',64),%s,%s,%s,@office_event,%s,%s,1,NOW(6))",
+                            (operation, office_user, office_tenant, office_project, office_user, kind,
+                             execution_kind, invitation, office_membership, role, status))
+                # Simulate an upgrade from v3: remove the new CHECK, retain an
+                # impossible legacy request, and prove apply refuses before it
+                # recreates the constraint or rewrites any history.
+                await cur.execute(
+                    "ALTER TABLE jax_namespace_membership_mutation_request "
+                    "DROP CONSTRAINT chk_jax_namespace_membership_mutation_result_v4")
+                await cur.execute(
+                    "INSERT INTO jax_namespace_membership_mutation_request "
+                    "(namespace,idempotency_key,operation,actor_user_id,target_tenant_id,project_id,target_user_id,member_kind,request_digest,execution_kind,invitation_id,membership_id,event_id,project_role,status,changed,created_at) "
+                    "SELECT namespace,UUID(),'GRANT_OFFICE_MEMBER',actor_user_id,target_tenant_id,project_id,target_user_id,NULL,REPEAT('d',64),'INTERACTIVE_USER',NULL,membership_id,event_id,'CONTRIBUTOR','ACTIVE',1,NOW(6) "
+                    "FROM jax_namespace_membership_mutation_request LIMIT 1")
+                with pytest.raises(RuntimeError, match="impossible operation result"):
+                    await apply_project_authority_migration(cur)
+                await cur.execute(
+                    "DELETE FROM jax_namespace_membership_mutation_request "
+                    "WHERE request_digest=REPEAT('d',64)")
+                await apply_project_authority_migration(cur)
                 await cur.execute("DROP INDEX uq_jax_namespace_membership_mutation_invitation ON jax_namespace_membership_mutation_request")
                 await cur.execute(
                     "INSERT INTO jax_namespace_membership_mutation_request "
@@ -564,11 +596,13 @@ async def test_office_membership_replays_locks_rolls_back_and_keeps_capability_p
     class Authorizer:
         def __init__(self):
             self.calls = 0; self.denied = False
+            self.idempotency_keys = []
             self.race_target = None
             self.race_entered = asyncio.Event()
             self.race_release = asyncio.Event()
         async def authorize_membership_in_transaction(self, cursor, **kwargs):
             self.calls += 1
+            self.idempotency_keys.append(kwargs["idempotency_key"])
             if self.denied:
                 raise AuthorizationDenied("current Office authority was revoked")
             if kwargs["target_user_id"] == self.race_target and not self.race_entered.is_set():
@@ -665,6 +699,20 @@ async def test_office_membership_replays_locks_rolls_back_and_keeps_capability_p
     created_by = await _sql("SELECT created_by FROM jax_project_membership WHERE membership_id=%s",
                             (capability.membership_id,), fetch=True)
     assert created_by == [{"created_by": f"office-invitation:{invitation_id}"}]
+
+    upper_target = await _crear_usuario(tenant)
+    await _sql("UPDATE jax_users SET account_class='EXTERNAL_CLIENT' WHERE user_id=%s", (upper_target,))
+    upper_key = str(uuid.uuid4()).upper()
+    upper_invitation = str(uuid.uuid4()).upper()
+    upper_execution = NamespaceMembershipExecution(
+        NamespaceMembershipExecutionKind.INVITATION_ACCEPTANCE, upper_invitation)
+    await mutate(api.grant_namespaced_member_in_transaction, key=upper_key, target=upper_target,
+                 kind=NamespacedMemberKind.EXTERNAL_CLIENT, execution=upper_execution)
+    canonical_uuid_rows = await _sql(
+        "SELECT idempotency_key,invitation_id FROM jax_namespace_membership_mutation_request "
+        "WHERE namespace='OFFICE_CONFIDENTIAL' AND idempotency_key=%s", (upper_key.lower(),), fetch=True)
+    assert canonical_uuid_rows == [{"idempotency_key": upper_key.lower(), "invitation_id": upper_invitation.lower()}]
+    assert auth.idempotency_keys[-1] == upper_key.lower()
 
     # Same key binds every authority input, including kind and capability.
     with pytest.raises(IdempotencyKeyConflict):
