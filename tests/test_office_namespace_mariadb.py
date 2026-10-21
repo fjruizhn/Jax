@@ -16,8 +16,10 @@ import pytest
 from base_de_test import es_base_de_test
 from jax.core.db_connect_config import db_connect_timeout_seconds
 from jax.memory.project_authority import (IdempotencyKeyConflict,
-                                          ProjectAuthorityAdmin)
-from jax.memory.project_authority_migrations import apply_project_authority_migration
+                                          ProjectAuthorityAdmin,
+                                          ProjectAuthorityError)
+from jax.memory.project_authority_migrations import (apply_project_authority_migration,
+                                                      revert_project_lifecycle_migration)
 from jax.memory.scope_authority import (MariaDBScopeAuthorityResolver,
                                         ProjectLifecycle, ProjectNamespace)
 from jax.memory.b9_mariadb import MariaDBB9Store
@@ -188,6 +190,8 @@ async def test_office_same_key_concurrency_creates_one_project_and_stable_replay
             create(str(uuid.uuid4()), f"different-{index}") for index in range(8)
         ])
         assert len({result.project_id for result, _ in different}) == 8
+        different_p95 = sorted(duration for _, duration in different)[math.ceil(len(different) * .95) - 1]
+        print(f"office namespace contention: same_key_p95={p95:.6f}s different_key_p95={different_p95:.6f}s")
     finally:
         pool.close(); await pool.wait_closed()
         await _drop(name)
@@ -235,6 +239,106 @@ async def test_classic_resolvers_queries_and_admin_mutations_deny_office_scope()
         request = MutationAuthorizationRequest(scope, "SET_PROJECT_LIFECYCLE", Visibility.PROJECT_SHARED)
         with pytest.raises(Exception, match="namespace"):
             await api.set_project_lifecycle(request, created.project_id, ProjectLifecycle.ARCHIVED)
+    finally:
+        pool.close(); await pool.wait_closed()
+        await _drop(name)
+
+
+@requires_test_db
+@_async
+async def test_namespace_rollback_fails_before_ddl_when_office_data_exists():
+    """Catches a legacy rollback deleting Office scope/request contract data."""
+    name = f"{_DB}_office_{uuid.uuid4().hex[:10]}"
+    assert es_base_de_test(name)
+    tenant_id, actor_id = await _setup(name)
+    pool = await aiomysql.create_pool(db=name, autocommit=True, minsize=1, maxsize=2,
+                                      cursorclass=aiomysql.DictCursor,
+                                      connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        await ProjectAuthorityAdmin(MariaDBB9Store(pool)).create_namespaced_project(
+            actor_user_id=actor_id, target_tenant_id=tenant_id,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, name="Office", description=None,
+            idempotency_key=str(uuid.uuid4()), authorizer=_Authorizer())
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                with pytest.raises(RuntimeError, match="non-CLASSIC"):
+                    await revert_project_lifecycle_migration(cur)
+                await cur.execute("SHOW COLUMNS FROM jax_project_scope LIKE 'authorization_namespace'")
+                assert await cur.fetchone() is not None
+                await cur.execute("SHOW TABLES LIKE 'jax_namespace_project_creation_request'")
+                assert await cur.fetchone() is not None
+                # The request guard independently protects data if a manual
+                # repair mislabeled the Office scope as CLASSIC.
+                await cur.execute(
+                    "UPDATE jax_project_scope SET authorization_namespace='CLASSIC'")
+                with pytest.raises(RuntimeError, match="namespace project creation requests"):
+                    await revert_project_lifecycle_migration(cur)
+                await cur.execute("SHOW COLUMNS FROM jax_project_scope LIKE 'authorization_namespace'")
+                assert await cur.fetchone() is not None
+    finally:
+        pool.close(); await pool.wait_closed()
+        await _drop(name)
+
+
+@requires_test_db
+@_async
+async def test_upgrade_existing_classic_scope_backfills_namespace_without_changing_row():
+    """Catches an upgrade that rewrites or leaves legacy scope rows unbound."""
+    name = f"{_DB}_office_{uuid.uuid4().hex[:10]}"
+    assert es_base_de_test(name)
+    root = await aiomysql.connect(autocommit=True, connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        async with root.cursor() as cur:
+            await cur.execute(f"CREATE DATABASE `{name}`")
+    finally:
+        root.close()
+    conn = await aiomysql.connect(db=name, autocommit=True, cursorclass=aiomysql.DictCursor,
+                                  connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute("CREATE TABLE jax_tenants (tenant_id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL, plan VARCHAR(20), status VARCHAR(20))")
+            await cur.execute("CREATE TABLE jax_users (user_id INT AUTO_INCREMENT PRIMARY KEY, tenant_id INT NOT NULL, email VARCHAR(320) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL, role VARCHAR(20), status VARCHAR(20))")
+            await cur.execute(_projects_ddl())
+            await cur.execute("CREATE TABLE jax_project_scope (project_id INT NOT NULL PRIMARY KEY, tenant_id INT NOT NULL, status VARCHAR(16) NOT NULL, created_at DATETIME(6) NOT NULL, created_by VARCHAR(128) NOT NULL, updated_at DATETIME(6) NOT NULL, UNIQUE KEY uq_jax_project_scope_project_tenant (project_id,tenant_id))")
+            await cur.execute("INSERT INTO jax_tenants (name,plan,status) VALUES ('legacy','personal','active')")
+            tenant_id = cur.lastrowid
+            await cur.execute("INSERT INTO projects (project_uuid,name,status) VALUES (UUID(),'legacy','active')")
+            project_id = cur.lastrowid
+            await cur.execute("INSERT INTO jax_project_scope (project_id,tenant_id,status,created_at,created_by,updated_at) VALUES (%s,%s,'ACTIVE',NOW(6),'legacy',NOW(6))", (project_id, tenant_id))
+            await apply_project_authority_migration(cur)
+            await cur.execute("SELECT tenant_id,status,created_by,authorization_namespace FROM jax_project_scope WHERE project_id=%s", (project_id,))
+            row = await cur.fetchone()
+            assert row == {"tenant_id": tenant_id, "status": "ACTIVE", "created_by": "legacy", "authorization_namespace": "CLASSIC"}
+    finally:
+        conn.close()
+        await _drop(name)
+
+
+@requires_test_db
+@_async
+async def test_real_scope_insert_failure_rolls_back_project_and_namespace_request():
+    """Catches a confidential create that publishes a project before scope."""
+    name = f"{_DB}_office_{uuid.uuid4().hex[:10]}"
+    assert es_base_de_test(name)
+    tenant_id, actor_id = await _setup(name)
+    pool = await aiomysql.create_pool(db=name, autocommit=True, minsize=1, maxsize=2,
+                                      cursorclass=aiomysql.DictCursor,
+                                      connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("CREATE TRIGGER fail_office_scope BEFORE INSERT ON jax_project_scope FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='forced scope failure'")
+        with pytest.raises(ProjectAuthorityError) as failure:
+            await ProjectAuthorityAdmin(MariaDBB9Store(pool)).create_namespaced_project(
+                actor_user_id=actor_id, target_tenant_id=tenant_id,
+                namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, name="Office", description=None,
+                idempotency_key=str(uuid.uuid4()), authorizer=_Authorizer())
+        assert failure.value.code == "error_de_base_de_datos"
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                for table in ("projects", "jax_project_scope", "jax_namespace_project_creation_request"):
+                    await cur.execute(f"SELECT COUNT(*) AS n FROM `{table}`")
+                    assert (await cur.fetchone())["n"] == 0
     finally:
         pool.close(); await pool.wait_closed()
         await _drop(name)

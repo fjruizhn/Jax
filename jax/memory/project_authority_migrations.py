@@ -193,14 +193,10 @@ async def _apply_project_lifecycle_migration(cursor: Any) -> None:
     is individually guarded so a second call is a no-op (`apply -> apply`
     idempotence, per the plan's migration test).
     """
-    # 005a/005b: widen the CHECK, then drop the old one -- in that order, so
-    # the table is never left without a status CHECK at all.
-    if not await _check_constraint_exists(cursor, _CHK_SCOPE_STATUS_V2):
-        await cursor.execute(
-            "ALTER TABLE jax_project_scope ADD CONSTRAINT " + _CHK_SCOPE_STATUS_V2 + " "
-            "CHECK (status IN ('ACTIVE','ARCHIVED','HIDDEN','DISABLED'))")
-    if await _check_constraint_exists(cursor, _CHK_SCOPE_STATUS_V1):
-        await cursor.execute("ALTER TABLE jax_project_scope DROP CONSTRAINT " + _CHK_SCOPE_STATUS_V1)
+    # Namespace comes before the lifecycle CHECK. That ordering matches a fresh
+    # authority schema and keeps apply -> revert -> apply structurally stable.
+    # Adding the NOT NULL column with its default backfills all legacy scopes as
+    # CLASSIC without rewriting their identity or lifecycle data.
     if await _column_type(cursor, "jax_project_scope", "authorization_namespace") is None:
         await cursor.execute(
             "ALTER TABLE jax_project_scope ADD COLUMN authorization_namespace "
@@ -213,6 +209,14 @@ async def _apply_project_lifecycle_migration(cursor: Any) -> None:
         await cursor.execute(
             "CREATE INDEX " + _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT + " "
             "ON jax_project_scope (authorization_namespace, tenant_id, status, project_id)")
+    # 005a/005b: widen the CHECK, then drop the old one -- in that order, so
+    # the table is never left without a status CHECK at all.
+    if not await _check_constraint_exists(cursor, _CHK_SCOPE_STATUS_V2):
+        await cursor.execute(
+            "ALTER TABLE jax_project_scope ADD CONSTRAINT " + _CHK_SCOPE_STATUS_V2 + " "
+            "CHECK (status IN ('ACTIVE','ARCHIVED','HIDDEN','DISABLED'))")
+    if await _check_constraint_exists(cursor, _CHK_SCOPE_STATUS_V1):
+        await cursor.execute("ALTER TABLE jax_project_scope DROP CONSTRAINT " + _CHK_SCOPE_STATUS_V1)
     # 005c
     if await _column_type(cursor, "jax_project_membership", "grant_origin") is None:
         await cursor.execute(
@@ -289,6 +293,21 @@ async def revert_project_lifecycle_migration(cursor: Any) -> None:
     old constraint rejects. Loses the TENANT_ADMIN/pre_admin_* provenance on
     every membership row -- there is no way back from that once run.
     """
+    # Namespace data belongs to the Office authority contract. A legacy 005
+    # rollback must never erase it or leave its request references dangling.
+    # These checks run before every DDL statement below.
+    if await _column_type(cursor, "jax_project_scope", "authorization_namespace") is not None:
+        await cursor.execute(
+            "SELECT COUNT(*) AS n FROM jax_project_scope WHERE authorization_namespace<>'CLASSIC'")
+        if _scalar(await cursor.fetchone()) > 0:
+            raise RuntimeError(
+                "cannot revert migration 005: non-CLASSIC project scopes require the namespace contract")
+    await cursor.execute("SHOW TABLES LIKE 'jax_namespace_project_creation_request'")
+    if await cursor.fetchone() is not None:
+        await cursor.execute("SELECT COUNT(*) AS n FROM jax_namespace_project_creation_request")
+        if _scalar(await cursor.fetchone()) > 0:
+            raise RuntimeError(
+                "cannot revert migration 005: namespace project creation requests require the namespace contract")
     await cursor.execute(
         "SELECT COUNT(*) AS n FROM jax_project_scope WHERE status IN ('ARCHIVED','HIDDEN')")
     if _scalar(await cursor.fetchone()) > 0:
@@ -317,7 +336,15 @@ async def revert_project_lifecycle_migration(cursor: Any) -> None:
     if await _check_constraint_exists(cursor, _CHK_SCOPE_STATUS_V2):
         await cursor.execute("ALTER TABLE jax_project_scope DROP CONSTRAINT " + _CHK_SCOPE_STATUS_V2)
     await cursor.execute("DROP TABLE IF EXISTS project_documents")
+    await cursor.execute("DROP TABLE IF EXISTS jax_namespace_project_creation_request")
     await cursor.execute("DROP TABLE IF EXISTS jax_project_creation_request")
+    if await _index_exists(cursor, "jax_project_scope", _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT):
+        await cursor.execute(
+            "DROP INDEX " + _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT + " ON jax_project_scope")
+    if await _check_constraint_exists(cursor, _CHK_SCOPE_NAMESPACE):
+        await cursor.execute("ALTER TABLE jax_project_scope DROP CONSTRAINT " + _CHK_SCOPE_NAMESPACE)
+    if await _column_type(cursor, "jax_project_scope", "authorization_namespace") is not None:
+        await cursor.execute("ALTER TABLE jax_project_scope DROP COLUMN authorization_namespace")
     if await _index_exists(cursor, "jax_project_membership", _IDX_MEMBERSHIP_USER_LIST):
         await cursor.execute("DROP INDEX " + _IDX_MEMBERSHIP_USER_LIST + " ON jax_project_membership")
     if await _index_exists(cursor, "jax_users", _IDX_USERS_TENANT_ROLE_STATUS):
