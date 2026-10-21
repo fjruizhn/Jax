@@ -68,3 +68,5 @@ Only one implementation owner touches all shared files. Migration defines the en
 ## Task 4: Opaque Office execution on Jacobs
 
 Binding spec docs/superpowers/specs/2026-10-20-office-execution.md, Solarchitecture+roottransportreview. Deliver bounded sequentialslices4Acontracts/store/cupo/classicvisibility,4Bno-tools+opaqueerrors/probes,4Ccallbacks/executor/route. Reuseallcanonicalgovernance; no extraqueue/executor, no rawOfficecontentdurableclassic, disableduntilpairedJXPgates. Explicitownership per slice and exactSHAaudit. Doesnotmodify namespaceTask1-3authority or enableproduction.
+
+Task4Bdeliverysplit sameTier2owner4B1directinvokers/scopedlogs then4B2probe/preflight/coalescing; bindingoffice-runtime-policy.md, exactSHArevieweach.4Cstillmandatory/unexposed.
