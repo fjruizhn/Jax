@@ -17,3 +17,7 @@ Task3membership congelada: adaptergrant/revoke caller-ownedtransaction, fixedrol
 Task3fixround1 frozeconsumptionbinding/elevatedrolerevoke/truthfulcreated_by afterRECHAZADO5f757ef6. Root68passed0.73s19warnings; source reviewsoffice-membership-round1. ExactSHAreviewnext, .2stillnotconsumableuntilgate. AGENTSlateststamp e02ae9864475f57b8c242140c262c700ac030ad3 received; verify-sourcebeforeintegrationstillrequired.
 
 Task3fixround2final: linkedresultCHECKv4 withSQLNULLclosedpreflight+constraint; canonicalUUIDbeforecallback/digest/SQL; strictNoneonlyexecutiondefault. Root72passed0.77s19warnings. ExactSHAreviewnext; no .2consumptionuntilclean. Source office-membership-round2.
+
+CoreTask3 APROBADO Sol exactaeb7278de923ba3417e52e13ec77d01d8bfcd879,72testsindependent; .2consumerTask2JXPnotified. NoOfficeidentities/invitesenabled. CoreJacobsopaqueadapterplanningnewTask4 stillnotimplemented.
+
+CoreTask4Jacobs architecture persisted office-execution.md after Solanalysis + rootread actualproviderGoogletools/defaultrawerrorpaths. V1singlecallno-tools directtransport policy/opaqueerrors beforepersistence and receipts-only; deliveryslices4A/4B/4C, staysdisableduntilJXPpair/callbacks/storagecomplete. Next4Apurecontract/schema/atomiccupo notexecutionactivation.

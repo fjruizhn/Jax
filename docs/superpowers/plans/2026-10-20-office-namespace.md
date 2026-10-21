@@ -64,3 +64,7 @@ Only one implementation owner touches all shared files. Migration defines the en
 - [ ] Implement minimal transactional methods and migration; no nested transaction, rawJXPSQL bypass, permissionscache or genericProjectRoleinput.
 - [ ] Run unit+realMariaDB33991 tests, rollback/concurrency/idempotency/upgrade/classicregressions, EXPLAIN actualqueries.
 - [ ] Report task-3-report.md; parent independently verifies, commits, pushes and exactSHA Solreview before JXP consumes newmethod/version.
+
+## Task 4: Opaque Office execution on Jacobs
+
+Binding spec docs/superpowers/specs/2026-10-20-office-execution.md, Solarchitecture+roottransportreview. Deliver bounded sequentialslices4Acontracts/store/cupo/classicvisibility,4Bno-tools+opaqueerrors/probes,4Ccallbacks/executor/route. Reuseallcanonicalgovernance; no extraqueue/executor, no rawOfficecontentdurableclassic, disableduntilpairedJXPgates. Explicitownership per slice and exactSHAaudit. Doesnotmodify namespaceTask1-3authority or enableproduction.
