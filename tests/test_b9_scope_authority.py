@@ -71,7 +71,11 @@ async def test_missing_inactive_or_wrong_tenant_membership_fails_closed(row):
 
 @pytest.mark.asyncio
 async def test_project_claim_and_delegation_fail_closed_without_authoritative_sources():
-    resolver = MariaDBScopeAuthorityResolver(Pool({"tenant_id": "t1", "status": "active", "role": "admin"}))
+    resolver = MariaDBScopeAuthorityResolver(SequentialPool([
+        {"tenant_id": "t1", "status": "active", "role": "admin"},
+        {"tenant_id": "t1", "status": "ACTIVE", "authorization_namespace": "CLASSIC"},
+        None,
+    ]))
     with pytest.raises(ScopeDenied, match="project membership"):
         await resolver.resolve_scope(scope(project="p1"))
     with pytest.raises(ScopeDenied, match="delegation"):
@@ -110,7 +114,7 @@ async def test_service_cannot_copy_subject_membership_or_global_reviewer_authori
     # not query it and therefore cannot inherit it by copying subject_user_id.
     resolver = MariaDBScopeAuthorityResolver(SequentialPool([
         {"tenant_id": "t1", "status": "ACTIVE", "role": "admin"},
-        {"tenant_id": "t1", "status": "ACTIVE"},
+        {"tenant_id": "t1", "status": "ACTIVE", "authorization_namespace": "CLASSIC"},
         {"membership_id": "m1", "tenant_id": "t1", "user_id": "u1", "project_role": "OWNER", "status": "ACTIVE"},
     ]))
     service = ScopeContext("service:memory-extraction", "SERVICE", "u1", "t1", "p1", calling_component="memory-extraction")
@@ -131,7 +135,7 @@ async def test_fabricated_project_authorization_is_not_authority():
     requested = ScopeContext("u1", "USER", "u1", "t1", "p1", project_authorization=fake)
     resolver = MariaDBScopeAuthorityResolver(SequentialPool([
         {"tenant_id": "t1", "status": "ACTIVE", "role": "member"},
-        {"tenant_id": "t1", "status": "ACTIVE"},
+        {"tenant_id": "t1", "status": "ACTIVE", "authorization_namespace": "CLASSIC"},
         None,
     ]))
     with pytest.raises(ScopeDenied, match="membership is missing"):
@@ -155,7 +159,7 @@ async def test_transaction_resolver_rechecks_current_membership_with_locks():
     class Cur:
         def __init__(self): self.rows = [
             {"tenant_id": "t1", "status": "ACTIVE", "role": "member"},
-            {"tenant_id": "t1", "status": "ACTIVE"},
+            {"tenant_id": "t1", "status": "ACTIVE", "authorization_namespace": "CLASSIC"},
             {"membership_id": "m", "tenant_id": "t1", "user_id": "u1", "project_role": "REVIEWER", "status": "ACTIVE"},
         ]; self.calls=[]
         async def execute(self, sql, args): self.calls.append(sql)

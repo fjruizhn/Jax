@@ -17,6 +17,7 @@ PROJECT_AUTHORITY_DDL = (
     """CREATE TABLE IF NOT EXISTS jax_project_scope (
       project_id INT NOT NULL,
       tenant_id INT NOT NULL,
+      authorization_namespace VARCHAR(32) NOT NULL DEFAULT 'CLASSIC',
       status VARCHAR(16) NOT NULL,
       created_at DATETIME(6) NOT NULL,
       created_by VARCHAR(128) NOT NULL,
@@ -25,9 +26,11 @@ PROJECT_AUTHORITY_DDL = (
       PRIMARY KEY (project_id),
       UNIQUE KEY uq_jax_project_scope_project_tenant (project_id, tenant_id),
       KEY idx_jax_project_scope_tenant_status (tenant_id, status),
+      KEY idx_jax_project_scope_namespace_tenant_status_project (authorization_namespace, tenant_id, status, project_id),
       CONSTRAINT fk_jax_project_scope_project FOREIGN KEY (project_id) REFERENCES projects(id),
       CONSTRAINT fk_jax_project_scope_tenant FOREIGN KEY (tenant_id) REFERENCES jax_tenants(tenant_id),
-      CONSTRAINT chk_jax_project_scope_status CHECK (status IN ('ACTIVE','DISABLED'))
+      CONSTRAINT chk_jax_project_scope_status CHECK (status IN ('ACTIVE','DISABLED')),
+      CONSTRAINT chk_jax_project_scope_namespace CHECK (authorization_namespace IN ('CLASSIC','OFFICE_CONFIDENTIAL'))
     ) ENGINE=InnoDB""",
     """CREATE TABLE IF NOT EXISTS jax_project_membership (
       membership_id CHAR(36) NOT NULL,
@@ -102,6 +105,8 @@ _IDX_USERS_TENANT_ROLE_STATUS = "idx_jax_users_tenant_role_status"
 #: `idx_jax_users_tenant_role_status`: this module is the only reader that
 #: needs it, and it is guarded so a re-run is a no-op.
 _IDX_USERS_TENANT_EMAIL = "idx_jax_users_tenant_email"
+_CHK_SCOPE_NAMESPACE = "chk_jax_project_scope_namespace"
+_IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT = "idx_jax_project_scope_namespace_tenant_status_project"
 
 _LEGACY_STATUS_ENUM = "ENUM('planning','active','paused','completed','archived')"
 _LIFECYCLE_STATUS_ENUM = ("ENUM('planning','active','paused','completed','archived','hidden','disabled') "
@@ -196,12 +201,29 @@ async def _apply_project_lifecycle_migration(cursor: Any) -> None:
             "CHECK (status IN ('ACTIVE','ARCHIVED','HIDDEN','DISABLED'))")
     if await _check_constraint_exists(cursor, _CHK_SCOPE_STATUS_V1):
         await cursor.execute("ALTER TABLE jax_project_scope DROP CONSTRAINT " + _CHK_SCOPE_STATUS_V1)
+    if await _column_type(cursor, "jax_project_scope", "authorization_namespace") is None:
+        await cursor.execute(
+            "ALTER TABLE jax_project_scope ADD COLUMN authorization_namespace "
+            "VARCHAR(32) NOT NULL DEFAULT 'CLASSIC' AFTER tenant_id")
+    if not await _check_constraint_exists(cursor, _CHK_SCOPE_NAMESPACE):
+        await cursor.execute(
+            "ALTER TABLE jax_project_scope ADD CONSTRAINT " + _CHK_SCOPE_NAMESPACE + " "
+            "CHECK (authorization_namespace IN ('CLASSIC','OFFICE_CONFIDENTIAL'))")
+    if not await _index_exists(cursor, "jax_project_scope", _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT):
+        await cursor.execute(
+            "CREATE INDEX " + _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT + " "
+            "ON jax_project_scope (authorization_namespace, tenant_id, status, project_id)")
     # 005c
-    await cursor.execute(
-        "ALTER TABLE jax_project_membership "
-        "ADD COLUMN IF NOT EXISTS grant_origin VARCHAR(16) NOT NULL DEFAULT 'EXPLICIT' AFTER status, "
-        "ADD COLUMN IF NOT EXISTS pre_admin_role VARCHAR(16) NULL AFTER grant_origin, "
-        "ADD COLUMN IF NOT EXISTS pre_admin_status VARCHAR(16) NULL AFTER pre_admin_role")
+    if await _column_type(cursor, "jax_project_membership", "grant_origin") is None:
+        await cursor.execute(
+            "ALTER TABLE jax_project_membership ADD COLUMN grant_origin "
+            "VARCHAR(16) NOT NULL DEFAULT 'EXPLICIT' AFTER status")
+    if await _column_type(cursor, "jax_project_membership", "pre_admin_role") is None:
+        await cursor.execute(
+            "ALTER TABLE jax_project_membership ADD COLUMN pre_admin_role VARCHAR(16) NULL AFTER grant_origin")
+    if await _column_type(cursor, "jax_project_membership", "pre_admin_status") is None:
+        await cursor.execute(
+            "ALTER TABLE jax_project_membership ADD COLUMN pre_admin_status VARCHAR(16) NULL AFTER pre_admin_role")
     # 005d
     if not await _check_constraint_exists(cursor, _CHK_MEMBERSHIP_ORIGIN):
         await cursor.execute(
@@ -228,6 +250,17 @@ async def _apply_project_lifecycle_migration(cursor: Any) -> None:
         "CONSTRAINT fk_jax_project_creation_request_scope FOREIGN KEY (project_id, tenant_id) "
         "REFERENCES jax_project_scope(project_id, tenant_id), "
         "CONSTRAINT fk_jax_project_creation_request_user FOREIGN KEY (user_id) REFERENCES jax_users(user_id)"
+        ") ENGINE=InnoDB")
+    await cursor.execute(
+        "CREATE TABLE IF NOT EXISTS jax_namespace_project_creation_request ("
+        "namespace VARCHAR(32) NOT NULL, idempotency_key CHAR(36) NOT NULL, actor_user_id INT NOT NULL, "
+        "target_tenant_id INT NOT NULL, request_digest CHAR(64) NOT NULL, project_id INT NOT NULL, "
+        "created_at DATETIME(6) NOT NULL, PRIMARY KEY (namespace,idempotency_key), "
+        "KEY idx_jax_namespace_project_creation_request_tenant_actor_created "
+        "(target_tenant_id,actor_user_id,created_at), "
+        "CONSTRAINT fk_jax_namespace_project_creation_request_scope FOREIGN KEY (project_id,target_tenant_id) "
+        "REFERENCES jax_project_scope(project_id,tenant_id), "
+        "CONSTRAINT fk_jax_namespace_project_creation_request_actor FOREIGN KEY (actor_user_id) REFERENCES jax_users(user_id)"
         ") ENGINE=InnoDB")
     # 005g
     current_type = await _column_type(cursor, "projects", "status")

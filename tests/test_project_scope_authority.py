@@ -26,8 +26,8 @@ class Pool:
 
 def requested(tenant="1",project="9",user="7"):
     return ScopeContext(f"user:{user}","USER",user,tenant,project)
-def rows(*, project_status="ACTIVE", membership_status="ACTIVE", membership_tenant="1", role="CONTRIBUTOR"):
-    return [{"tenant_id":1,"status":"ACTIVE","role":"admin"}, {"tenant_id":1,"status":project_status}, {"membership_id":"m","tenant_id":membership_tenant,"user_id":7,"project_role":role,"status":membership_status}]
+def rows(*, project_status="ACTIVE", membership_status="ACTIVE", membership_tenant="1", role="CONTRIBUTOR", namespace="CLASSIC"):
+    return [{"tenant_id":1,"status":"ACTIVE","role":"admin"}, {"tenant_id":1,"status":project_status,"authorization_namespace":namespace}, {"membership_id":"m","tenant_id":membership_tenant,"user_id":7,"project_role":role,"status":membership_status}]
 
 @pytest.mark.asyncio
 async def test_active_matching_project_membership_resolves_and_allows_write():
@@ -51,7 +51,7 @@ async def test_viewer_cannot_write_or_verify_even_when_global_role_is_admin():
 
 @pytest.mark.asyncio
 async def test_requested_project_id_does_not_bypass_membership_lookup():
-    pool=Pool([{"tenant_id":1,"status":"ACTIVE","role":"admin"},{"tenant_id":1,"status":"ACTIVE"},None])
+    pool=Pool([{"tenant_id":1,"status":"ACTIVE","role":"admin"},{"tenant_id":1,"status":"ACTIVE","authorization_namespace":"CLASSIC"},None])
     with pytest.raises(ScopeDenied,match="missing"): await MariaDBScopeAuthorityResolver(pool).resolve_scope(requested())
 
 

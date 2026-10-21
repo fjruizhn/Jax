@@ -30,7 +30,7 @@
 
 ### Task 1: Namespace and atomic namespaced creation
 
-**Files:** Modify jax/memory/project_authority_migrations.py, scope_authority.py, project_queries.py, project_authority.py, __init__.py. Tests in tests/test_office_namespace.py and tests/test_office_namespace_mariadb.py; retain current project permission tests.
+**Files:** Modify jax/memory/project_authority_migrations.py, scope_authority.py, project_queries.py, project_authority.py, __init__.py. Tests in tests/test_office_namespace.py and tests/test_office_namespace_mariadb.py; retain current tests/test_project_scope_authority.py, tests/test_b9_scope_authority.py and tests/test_project_authority_input_validation.py (baseline27 passing).
 
 **Interfaces:** Consumes existing ProjectAuthorityAdmin/pool/CreatedProject. Produces ProjectNamespace, NamespaceMutationAuthorizer, create_namespaced_project with signatures in spec; existing API signatures remain compatible.
 

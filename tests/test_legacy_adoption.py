@@ -37,6 +37,15 @@ def test_conflicting_reference_or_unbound_project_quarantined():
     assert classify(source=source)[0]=="PROJECT_SCOPE_UNBOUND"
 
 
+def test_office_project_is_not_a_classic_adoption_destination():
+    source=row(); source["project_id"] = 9001
+    projects={"9001":{"project_id":9001,"tenant_id":7,"status":"ACTIVE",
+                      "authorization_namespace":"OFFICE_CONFIDENTIAL"}}
+    reason, destination = adoption.classify("facts", source, owner(), projects, {}, (),
+                                            observed_at=datetime(2026,9,26))
+    assert reason == "PROJECT_SCOPE_UNBOUND" and destination is None
+
+
 def test_superseded_expired_and_completed_never_revived():
     source=row();source["expires_at"]="2000-01-01T00:00:00"
     assert classify(source=source)[0]=="EXPIRED"

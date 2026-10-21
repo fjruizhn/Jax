@@ -1,0 +1,240 @@
+"""Disposable-MariaDB coverage for Office namespace migration and creation."""
+from __future__ import annotations
+
+import asyncio
+import functools
+import os
+import re
+import math
+import time
+import uuid
+from pathlib import Path
+
+import aiomysql
+import pytest
+
+from base_de_test import es_base_de_test
+from jax.core.db_connect_config import db_connect_timeout_seconds
+from jax.memory.project_authority import (IdempotencyKeyConflict,
+                                          ProjectAuthorityAdmin)
+from jax.memory.project_authority_migrations import apply_project_authority_migration
+from jax.memory.scope_authority import (MariaDBScopeAuthorityResolver,
+                                        ProjectLifecycle, ProjectNamespace)
+from jax.memory.b9_mariadb import MariaDBB9Store
+from jax.memory.b9 import MutationAuthorizationRequest, ScopeContext, ScopeDenied, Visibility
+from jax.memory.project_queries import (ProjectView, get_project_for_user,
+                                        list_project_members, list_projects_for_user)
+
+
+_DB = os.getenv("JAX_DB_NAME", "")
+requires_test_db = pytest.mark.skipif(
+    not os.getenv("JAX_DB_HOST") or not es_base_de_test(_DB),
+    reason="needs disposable MariaDB and JAX_DB_NAME")
+_SCHEMA = Path(__file__).resolve().parents[1] / "jax_memory_schema.sql"
+
+
+def _async(fn):
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        return asyncio.run(fn(*args, **kwargs))
+    return wrapped
+
+
+def _params():
+    return {"host": os.environ["JAX_DB_HOST"], "port": int(os.environ["JAX_DB_PORT"]),
+            "user": os.environ["JAX_DB_USER"], "password": os.environ["JAX_DB_PASSWORD"]}
+
+
+def _projects_ddl() -> str:
+    match = re.search(r"CREATE TABLE `projects` \(.*?\n\)[^;\n]*", _SCHEMA.read_text(), re.S)
+    assert match
+    return match.group(0)
+
+
+class _Authorizer:
+    def __init__(self, *, allow=True):
+        self.allow = allow
+        self.cursors = []
+
+    async def authorize_in_transaction(self, cursor, **kwargs):
+        self.cursors.append((cursor, kwargs))
+        if not self.allow:
+            raise PermissionError("revoked")
+
+
+async def _setup(name: str):
+    root = await aiomysql.connect(autocommit=True, connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        async with root.cursor() as cur:
+            await cur.execute(f"CREATE DATABASE `{name}`")
+    finally:
+        root.close()
+    conn = await aiomysql.connect(db=name, autocommit=True, connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute("CREATE TABLE jax_tenants (tenant_id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL, plan VARCHAR(20), status VARCHAR(20))")
+            await cur.execute("CREATE TABLE jax_users (user_id INT AUTO_INCREMENT PRIMARY KEY, tenant_id INT NOT NULL, email VARCHAR(320) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL, role VARCHAR(20), status VARCHAR(20))")
+            await cur.execute(_projects_ddl())
+            await apply_project_authority_migration(cur)
+            await apply_project_authority_migration(cur)
+            await cur.execute("INSERT INTO jax_tenants (name,plan,status) VALUES ('office','personal','active')")
+            tenant_id = cur.lastrowid
+            await cur.execute("INSERT INTO jax_users (tenant_id,email,password_hash,role,status) VALUES (%s,'office@test.invalid','x','operator','active')", (tenant_id,))
+            return tenant_id, cur.lastrowid
+    finally:
+        conn.close()
+
+
+async def _drop(name: str):
+    conn = await aiomysql.connect(autocommit=True, connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(f"DROP DATABASE IF EXISTS `{name}`")
+    finally:
+        conn.close()
+
+
+@requires_test_db
+@_async
+async def test_office_namespace_migration_creation_replay_rollback_and_index():
+    name = f"{_DB}_office_{uuid.uuid4().hex[:10]}"
+    assert es_base_de_test(name)
+    tenant_id, actor_id = await _setup(name)
+    pool = await aiomysql.create_pool(db=name, autocommit=True, minsize=1, maxsize=4,
+                                      cursorclass=aiomysql.DictCursor,
+                                      connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        api = ProjectAuthorityAdmin(MariaDBB9Store(pool))
+        auth = _Authorizer()
+        key = str(uuid.uuid4())
+        created = await api.create_namespaced_project(
+            actor_user_id=actor_id, target_tenant_id=tenant_id,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, name="Office", description="private",
+            idempotency_key=key, authorizer=auth)
+        replay = await api.create_namespaced_project(
+            actor_user_id=actor_id, target_tenant_id=tenant_id,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, name="Office", description="private",
+            idempotency_key=key, authorizer=auth)
+        assert created.created and not replay.created and replay.project_id == created.project_id
+        assert len(auth.cursors) == 2 and auth.cursors[0][0] is not None
+        with pytest.raises(IdempotencyKeyConflict):
+            await api.create_namespaced_project(
+                actor_user_id=actor_id, target_tenant_id=tenant_id,
+                namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, name="changed", description="private",
+                idempotency_key=key, authorizer=auth)
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO jax_users (tenant_id,email,password_hash,role,status) VALUES (%s,'other@test.invalid','x','operator','active')",
+                    (tenant_id,))
+                other_actor_id = cur.lastrowid
+        with pytest.raises(IdempotencyKeyConflict):
+            await api.create_namespaced_project(
+                actor_user_id=other_actor_id, target_tenant_id=tenant_id,
+                namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, name="Office", description="private",
+                idempotency_key=key, authorizer=auth)
+        denied = _Authorizer(allow=False)
+        with pytest.raises(PermissionError):
+            await api.create_namespaced_project(
+                actor_user_id=actor_id, target_tenant_id=tenant_id,
+                namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, name="denied", description=None,
+                idempotency_key=str(uuid.uuid4()), authorizer=denied)
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT authorization_namespace FROM jax_project_scope WHERE project_id=%s", (created.project_id,))
+                assert (await cur.fetchone())["authorization_namespace"] == "OFFICE_CONFIDENTIAL"
+                await cur.execute("SELECT COUNT(*) AS n FROM jax_project_membership WHERE project_id=%s", (created.project_id,))
+                assert (await cur.fetchone())["n"] == 0
+                await cur.execute("SELECT COUNT(*) AS n FROM projects WHERE name='denied'")
+                assert (await cur.fetchone())["n"] == 0
+                await cur.execute("EXPLAIN SELECT project_id FROM jax_project_scope WHERE authorization_namespace='CLASSIC' AND tenant_id=%s AND status='ACTIVE' ORDER BY project_id", (tenant_id,))
+                plan = await cur.fetchone()
+                assert plan["key"] == "idx_jax_project_scope_namespace_tenant_status_project"
+    finally:
+        pool.close(); await pool.wait_closed()
+        await _drop(name)
+
+
+@requires_test_db
+@_async
+async def test_office_same_key_concurrency_creates_one_project_and_stable_replay():
+    """Catches duplicate-key handling that leaves concurrent retries failing."""
+    name = f"{_DB}_office_{uuid.uuid4().hex[:10]}"
+    assert es_base_de_test(name)
+    tenant_id, actor_id = await _setup(name)
+    pool = await aiomysql.create_pool(db=name, autocommit=True, minsize=1, maxsize=4,
+                                      cursorclass=aiomysql.DictCursor,
+                                      connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        api = ProjectAuthorityAdmin(MariaDBB9Store(pool))
+        key = str(uuid.uuid4())
+        async def create(key, project_name):
+            started = time.monotonic()
+            result = await api.create_namespaced_project(
+                actor_user_id=actor_id, target_tenant_id=tenant_id,
+                namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, name=project_name, description=None,
+                idempotency_key=key, authorizer=_Authorizer())
+            return result, time.monotonic() - started
+
+        results = await asyncio.gather(*[create(key, "same") for _ in range(8)])
+        projects, durations = zip(*results)
+        elapsed = max(durations)
+        p95 = sorted(durations)[math.ceil(len(durations) * .95) - 1]
+        assert len({result.project_id for result in projects}) == 1
+        assert sum(result.created for result in projects) == 1
+        # These measurements make a contention regression visible in output.
+        assert p95 < 10, f"same-key p95 exceeded bounded test window: {p95:.3f}s (max {elapsed:.3f}s)"
+        different = await asyncio.gather(*[
+            create(str(uuid.uuid4()), f"different-{index}") for index in range(8)
+        ])
+        assert len({result.project_id for result, _ in different}) == 8
+    finally:
+        pool.close(); await pool.wait_closed()
+        await _drop(name)
+
+
+@requires_test_db
+@_async
+async def test_classic_resolvers_queries_and_admin_mutations_deny_office_scope():
+    """Catches an Office scope inheriting a manually present classic OWNER."""
+    name = f"{_DB}_office_{uuid.uuid4().hex[:10]}"
+    assert es_base_de_test(name)
+    tenant_id, actor_id = await _setup(name)
+    pool = await aiomysql.create_pool(db=name, autocommit=True, minsize=1, maxsize=4,
+                                      cursorclass=aiomysql.DictCursor,
+                                      connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        api = ProjectAuthorityAdmin(MariaDBB9Store(pool))
+        created = await api.create_namespaced_project(
+            actor_user_id=actor_id, target_tenant_id=tenant_id,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, name="Office", description=None,
+            idempotency_key=str(uuid.uuid4()), authorizer=_Authorizer())
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO jax_project_membership (membership_id,project_id,tenant_id,user_id,project_role,status,grant_origin,created_at,created_by,updated_at) "
+                    "VALUES (UUID(),%s,%s,%s,'OWNER','ACTIVE','EXPLICIT',NOW(6),'test',NOW(6))",
+                    (created.project_id, tenant_id, actor_id))
+        scope = ScopeContext(f"user:{actor_id}", "USER", str(actor_id), str(tenant_id), str(created.project_id))
+        resolver = MariaDBScopeAuthorityResolver(pool)
+        with pytest.raises(ScopeDenied, match="namespace"):
+            await resolver.resolve_project_scope(scope)
+        with pytest.raises(ScopeDenied, match="namespace"):
+            await resolver.resolve_project_read(scope)
+        with pytest.raises(ScopeDenied, match="namespace"):
+            await resolver.resolve_mutation(scope, "CREATE", Visibility.PROJECT_SHARED)
+        assert await list_projects_for_user(pool, tenant_id=tenant_id, user_id=actor_id,
+                                            view=ProjectView.ACTIVOS, before_id=None, limit=10) == []
+        with pytest.raises(Exception):
+            await get_project_for_user(pool, tenant_id=tenant_id, user_id=actor_id, project_id=created.project_id)
+        with pytest.raises(Exception):
+            await list_project_members(pool, tenant_id=tenant_id, user_id=actor_id, project_id=created.project_id)
+        request = MutationAuthorizationRequest(scope, "RENAME_PROJECT", Visibility.PROJECT_SHARED)
+        with pytest.raises(Exception, match="namespace"):
+            await api.rename_project(request, created.project_id, name="forbidden", description=None)
+        request = MutationAuthorizationRequest(scope, "SET_PROJECT_LIFECYCLE", Visibility.PROJECT_SHARED)
+        with pytest.raises(Exception, match="namespace"):
+            await api.set_project_lifecycle(request, created.project_id, ProjectLifecycle.ARCHIVED)
+    finally:
+        pool.close(); await pool.wait_closed()
+        await _drop(name)
