@@ -47,3 +47,5 @@ Task4ACOMPLETE SolAPROBADO79d6197d952a7a5f19d9af93e8a55fc88d151154, allinitial6+
 Task4Barchitectureclosed: sourcepinnedHTTPloggerinventory+ContextVarscopedfilter, no-tools/one-call/opaqueerrorpolicy; bounded4B1directthen4B2probe sameowner. Bindingoffice-runtime-policy.md, beforeimplementationcheckpoint. Task4Aapproved79d6197d. Latestuserconstitutionstamp75a570 replaces18d173, verify-sourcebeforeintegrationpending.
 
 2026-10-20 Task4B1 checkpoint: direct invokers/private policy implemented; root84passed0.68s mocked transports only. Scoped exactSHA review pending; 4B2 preflight/sonda not implemented and no Office execution route enabled.
+
+2026-10-21 · Codex:4B1 APROBADO exact56be8bed porjax_direct_audit.4B2 a9bdf9f0 RECHAZADO porjax_probe_audit (Hyde bypass, unknownusage accounting, forgedpolicy, phase). Fixround1 root151focusedpassed5.96s noDB/provider. Exactsingletonpolicy+Hydeearlydeny+phasePREFLIGHT+usageestimationclosedpaths; scopedexactSHAreviewnext.4Cdisabled. No productwriteruntilreviewresult.

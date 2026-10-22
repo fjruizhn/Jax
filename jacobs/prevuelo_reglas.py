@@ -20,6 +20,7 @@ from decimal import ROUND_CEILING, Decimal
 from contrato_dispatch import ModelDispatchConfigError, _max_output_tokens_value, errores_del_contrato
 
 from jacobs.models import Step
+from jacobs.office_runtime import require_office_runtime_policy
 
 REGLAS = frozenset({
     "tope_insuficiente", "sin_contrato_de_salida", "credencial_ausente",
@@ -177,7 +178,7 @@ def llamadas_max(d: Despacho, max_iteraciones: int, *, runtime_policy=None) -> i
     if runtime_policy is not None:
         # OFFICE_V1 has exactly one authorized generation call.  This private
         # keyword is only supplied by the server-derived pipeline contract.
-        return runtime_policy.generation_calls
+        return require_office_runtime_policy(runtime_policy).generation_calls
     if d.via_motor:
         if d.tiene_herramientas:
             return max_iteraciones

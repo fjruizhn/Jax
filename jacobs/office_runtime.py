@@ -51,6 +51,7 @@ class OfficeExecutionError(RuntimeError):
         exception_classname: str | None = None,
         tokens_in: int = 0,
         tokens_out: int = 0,
+        usage_measured: bool = True,
     ) -> None:
         super().__init__(code.value)
         self.code = code
@@ -61,6 +62,17 @@ class OfficeExecutionError(RuntimeError):
         self.exception_classname = exception_classname
         self.tokens_in = tokens_in
         self.tokens_out = tokens_out
+        self.usage_measured = usage_measured
+
+
+def require_office_runtime_policy(policy: object) -> OfficeRuntimePolicy:
+    """The private Office switch is the one immutable server-derived object."""
+    if policy is not OFFICE_RUNTIME_POLICY:
+        raise OfficeExecutionError(
+            OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED,
+            phase=OfficeErrorPhase.PREFLIGHT,
+        )
+    return OFFICE_RUNTIME_POLICY
 
 
 def stable_office_error(
@@ -75,6 +87,7 @@ def stable_office_error(
         exception_classname=error.exception_classname,
         tokens_in=error.tokens_in,
         tokens_out=error.tokens_out,
+        usage_measured=error.usage_measured,
     )
 
 
@@ -92,10 +105,11 @@ _MODEL_VERSION = re.compile(r"^[A-Za-z0-9._:/-]{1,128}$")
 _MAX_USAGE_TOKENS = 2**63 - 1
 
 
-def _response_invalid(tokens_in: int = 0, tokens_out: int = 0) -> OfficeExecutionError:
+def _response_invalid(tokens_in: int = 0, tokens_out: int = 0, *, usage_measured: bool = True) -> OfficeExecutionError:
     return OfficeExecutionError(
         OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID,
         tokens_in=tokens_in, tokens_out=tokens_out,
+        usage_measured=usage_measured,
     )
 
 
@@ -111,7 +125,7 @@ def _usage_pair(container: object, input_key: str, output_key: str) -> tuple[int
     if container is None:
         return 0, 0
     if type(container) is not dict:
-        raise _response_invalid()
+        raise _response_invalid(usage_measured=False)
     tokens_in = container.get(input_key, 0)
     tokens_out = container.get(output_key, 0)
     valid_in = type(tokens_in) is int and 0 <= tokens_in <= _MAX_USAGE_TOKENS
@@ -119,7 +133,7 @@ def _usage_pair(container: object, input_key: str, output_key: str) -> tuple[int
     safe_in = tokens_in if valid_in else 0
     safe_out = tokens_out if valid_out else 0
     if not valid_in or not valid_out:
-        raise _response_invalid(safe_in, safe_out)
+        raise _response_invalid(safe_in, safe_out, usage_measured=False)
     return safe_in, safe_out
 
 
@@ -194,9 +208,9 @@ async def validate_office_capability_timeout(
 ) -> None:
     """Use the current capability catalog and its canonical fallback ceiling."""
     if context is None or type(context.capability) is not str or not context.capability:
-        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED)
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED, phase=OfficeErrorPhase.PREFLIGHT)
     if type(timeout) is not int or timeout <= 0:
-        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED)
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED, phase=OfficeErrorPhase.PREFLIGHT)
 
     # Deferred imports avoid executor -> runtime -> store import cycles.
     from jacobs import store
@@ -205,15 +219,16 @@ async def validate_office_capability_timeout(
     governance = await store.get_motor_governance()
     capabilities = governance.get("capabilities") if isinstance(governance, dict) else None
     if not isinstance(capabilities, dict):
-        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED)
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED, phase=OfficeErrorPhase.PREFLIGHT)
     ceiling, _source = _techo_segundos(capabilities, context.capability)
     if timeout > ceiling:
-        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED)
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED, phase=OfficeErrorPhase.PREFLIGHT)
 
 
 def assert_office_transport(policy: OfficeRuntimePolicy, transport: str) -> None:
+    require_office_runtime_policy(policy)
     if transport not in policy.allowed_transports:
-        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED, phase=OfficeErrorPhase.PREFLIGHT)
 
 
 def map_office_exception(exc: BaseException, *, provider_call_made: bool) -> OfficeExecutionError:
@@ -248,7 +263,7 @@ def office_http_status_error(status_code: int) -> OfficeExecutionError:
         code = OfficeRejectionCode.OFFICE_PROVIDER_UNAVAILABLE
     else:
         code = OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID
-    return OfficeExecutionError(code, provider_call_made=True)
+    return OfficeExecutionError(code, provider_call_made=True, usage_measured=False)
 
 
 _office_http_context: contextvars.ContextVar[bool] = contextvars.ContextVar(

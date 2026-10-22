@@ -48,8 +48,8 @@ from jacobs.prevuelo_reglas import (
     evaluar_paso,
 )
 from jacobs.office_runtime import (
-    OfficeCapabilityContext, OfficeExecutionError, assert_office_transport,
-    validate_office_capability_timeout,
+    OfficeCapabilityContext, OfficeErrorPhase, OfficeExecutionError, assert_office_transport,
+    require_office_runtime_policy, validate_office_capability_timeout,
 )
 from jacobs.office_contract import OfficeRejectionCode
 
@@ -213,14 +213,16 @@ async def prevuelo(
     tenant_id: str | None = None,
     runtime_policy=None,
 ) -> Veredicto:
+    if runtime_policy is not None:
+        runtime_policy = require_office_runtime_policy(runtime_policy)
     por_indice = {s.step_index: s for s in pasos}
     indices = sorted(por_indice) if pendientes is None else sorted(pendientes)
 
     costos: list[CostoPaso] = []
     evaluables: list[Step] = []
     for i in indices:
-        if runtime_policy is not None and por_indice[i].capability == "assemble":
-            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
+        if runtime_policy is not None and (por_indice[i].capability == "assemble" or por_indice[i].facet == "hyde"):
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED, phase=OfficeErrorPhase.PREFLIGHT)
         corto = costo_sin_evaluar(por_indice[i])
         if corto is None:
             evaluables.append(por_indice[i])

@@ -77,9 +77,9 @@ from jacobs import facet_health, prevuelo_config
 from jacobs.prevuelo_reglas import Despacho
 from jacobs.usage_writer import record_direct_usage
 from jacobs.office_runtime import (
-    OfficeExecutionError, assert_office_transport, ensure_office_http_log_privacy,
+    OfficeErrorPhase, OfficeExecutionError, assert_office_transport, ensure_office_http_log_privacy,
     map_office_exception, office_http_log_scope, office_http_status_error,
-    parse_office_provider_response, stable_office_error,
+    parse_office_provider_response, require_office_runtime_policy, stable_office_error,
 )
 from jacobs.office_contract import OfficeRejectionCode
 
@@ -173,7 +173,21 @@ def _office_probe_result(data: object, transport: str) -> ResultadoSonda:
     # Probe quality/truncation is deliberately not a health failure: a valid
     # 2xx response establishes reachability.  Only its validated counters
     # cross this boundary.
-    return ResultadoSonda(True, None, parsed.tokens_in, parsed.tokens_out, uso_medido=True)
+    usage_key, input_key, output_key = {
+        "http_gemini": ("usageMetadata", "promptTokenCount", "candidatesTokenCount"),
+        "http_openai_compat": ("usage", "prompt_tokens", "completion_tokens"),
+        "ollama": (None, "prompt_eval_count", "eval_count"),
+    }[transport]
+    usage = data if usage_key is None else data.get(usage_key)
+    # Defaults in the provider schema make a missing field numerically safe
+    # for parsing, but they are not evidence that the provider measured usage.
+    # Only explicit, strict counters (including a real zero) avoid conservative
+    # estimated accounting.
+    measured = (
+        type(usage) is dict
+        and all(type(usage.get(key)) is int and usage[key] >= 0 for key in (input_key, output_key))
+    )
+    return ResultadoSonda(True, None, parsed.tokens_in, parsed.tokens_out, uso_medido=measured)
 
 
 def _office_probe_failure(
@@ -185,7 +199,7 @@ def _office_probe_failure(
     )
     return ResultadoSonda(
         False, _office_health_detail(error), error.tokens_in, error.tokens_out,
-        uso_medido=uso_medido,
+        uso_medido=uso_medido and error.usage_measured,
     )
 
 
@@ -206,6 +220,7 @@ async def _post(url: str, headers: dict, payload: dict, timeout: int, secretos: 
     # por sonda -- un AsyncClient por llamada deja un socket en TIME_WAIT cada
     # vez y es lo que el frente E cerró en todos los caminos de salida.
     if runtime_policy is not None:
+        require_office_runtime_policy(runtime_policy)
         ensure_office_http_log_privacy()
         error = None
         sent = False
@@ -251,8 +266,12 @@ async def _preparar(clave: str, d: Despacho, *, runtime_policy=None):
     mensajes = [{"role": "user", "content": MENSAJE_DE_SONDA}]
 
     if runtime_policy is not None:
+        runtime_policy = require_office_runtime_policy(runtime_policy)
         if d.via_motor:
-            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
+            raise OfficeExecutionError(
+                OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED,
+                phase=OfficeErrorPhase.PREFLIGHT,
+            )
         assert_office_transport(runtime_policy, d.transporte)
     if d.via_motor:
         # El MISMO cliente que worker.py usa para despachar el motor.
@@ -408,6 +427,8 @@ async def sondear(clave: str, d: Despacho, *, user_id: str | None = None,
                   tenant_id: str | None = None, runtime_policy=None) -> ResultadoSonda:
     timeout = prevuelo_config.sonda_timeout_s()
     try:
+        if runtime_policy is not None:
+            runtime_policy = require_office_runtime_policy(runtime_policy)
         llamada = await _preparar(clave, d, runtime_policy=runtime_policy)
     except OfficeExecutionError as exc:
         resultado = _office_probe_failure(exc, provider_call_made=False)
@@ -440,8 +461,11 @@ async def sondear(clave: str, d: Despacho, *, user_id: str | None = None,
     try:
         resultado = await asyncio.wait_for(llamada(timeout), timeout=timeout + MARGEN_DE_WAIT_FOR_S)
     except OfficeExecutionError as exc:
-        resultado = _office_probe_failure(exc, provider_call_made=exc.provider_call_made)
-        cobrable = resultado.uso_medido and exc.provider_call_made
+        resultado = _office_probe_failure(
+            exc, provider_call_made=exc.provider_call_made,
+            uso_medido=exc.usage_measured,
+        )
+        cobrable = exc.provider_call_made and exc.exception_classname != "HTTP_4XX"
     except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
         if runtime_policy is not None:
             resultado = _office_probe_failure(exc, provider_call_made=True, uso_medido=False)

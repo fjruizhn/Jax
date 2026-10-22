@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -31,6 +32,33 @@ def test_office_preflight_limits_gemini_to_one_generation_call():
 
 def test_classic_gemini_keeps_its_historical_grounding_retry_budget():
     assert llamadas_max(_dispatch(), max_iteraciones=9) == 2
+
+
+def test_only_the_immutable_office_policy_can_enable_office_helpers():
+    from jacobs.office_runtime import OfficeErrorPhase, OfficeExecutionError, assert_office_transport
+
+    forged = SimpleNamespace(generation_calls=99, allowed_transports=frozenset({"subprocess"}))
+    with pytest.raises(OfficeExecutionError) as raised:
+        llamadas_max(_dispatch(), max_iteraciones=9, runtime_policy=forged)
+    assert raised.value.phase is OfficeErrorPhase.PREFLIGHT
+    with pytest.raises(OfficeExecutionError):
+        assert_office_transport(forged, "subprocess")
+
+
+def test_office_hyde_shortcut_is_rejected_before_catalog_or_probe(monkeypatch):
+    from jacobs import prevuelo
+    from jacobs.models import Step
+    from jacobs.office_runtime import OfficeErrorPhase, OfficeExecutionError
+
+    async def run():
+        with pytest.raises(OfficeExecutionError) as raised:
+            await prevuelo.prevuelo([
+                Step(pipeline_id="p", step_index=0, facet="hyde", capability="execute", input={}),
+            ], {"objective": "o"}, runtime_policy=OFFICE_RUNTIME_POLICY)
+        return raised.value
+
+    error = asyncio.run(run())
+    assert error.phase is OfficeErrorPhase.PREFLIGHT
 
 
 @pytest.mark.parametrize("transport", ["subprocess", "unknown", "motor"])
@@ -105,6 +133,89 @@ def test_office_probe_payloads_are_tool_free_and_use_shared_mock_client(monkeypa
     assert len(captured) == 1
     payload = json.loads(captured[0].content)
     assert not ({"tools", "google_search", "tool_choice", "functions", "function_call"} & payload.keys())
+
+
+@pytest.mark.parametrize(
+    ("transport", "response"),
+    [
+        ("http_gemini", {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}),
+        ("http_openai_compat", {"choices": [{"message": {"content": "ok"}}]}),
+        ("ollama", {"message": {"content": "ok"}}),
+    ],
+)
+def test_office_probe_missing_usage_is_conservatively_unmeasured(transport, response):
+    from jacobs.sonda import _office_probe_result
+
+    result = _office_probe_result(response, transport)
+    assert result.ok and not result.uso_medido and result.tokens_in == result.tokens_out == 0
+
+
+@pytest.mark.parametrize(
+    ("transport", "response"),
+    [
+        ("http_gemini", {"candidates": [{"content": {"parts": [{"text": "ok"}]}}], "usageMetadata": None}),
+        ("http_openai_compat", {"choices": [{"message": {"content": "ok"}}], "usage": {}}),
+        ("ollama", {"message": {"content": "ok"}}),
+    ],
+)
+def test_office_probe_null_or_empty_usage_is_conservatively_unmeasured(transport, response):
+    from jacobs.sonda import _office_probe_result
+
+    assert not _office_probe_result(response, transport).uso_medido
+
+
+@pytest.mark.parametrize(
+    ("transport", "response"),
+    [
+        ("http_gemini", {"candidates": [{"content": {"parts": [{"text": "ok"}]}}], "usageMetadata": {"promptTokenCount": 0, "candidatesTokenCount": 0}}),
+        ("http_openai_compat", {"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 0, "completion_tokens": 0}}),
+        ("ollama", {"message": {"content": "ok"}, "prompt_eval_count": 0, "eval_count": 0}),
+    ],
+)
+def test_office_probe_explicit_zero_usage_is_measured(transport, response):
+    from jacobs.sonda import _office_probe_result
+
+    assert _office_probe_result(response, transport).uso_medido
+
+
+@pytest.mark.parametrize(
+    ("transport", "response"),
+    [
+        ("http_gemini", {"usageMetadata": {"promptTokenCount": "bad", "candidatesTokenCount": "bad"}}),
+        ("http_openai_compat", {"usage": {"prompt_tokens": "bad", "completion_tokens": "bad"}}),
+        ("ollama", {"prompt_eval_count": "bad", "eval_count": "bad"}),
+    ],
+)
+def test_office_probe_all_invalid_usage_is_unmeasured(transport, response):
+    from jacobs.office_runtime import OfficeExecutionError, parse_office_provider_response
+
+    with pytest.raises(OfficeExecutionError) as raised:
+        parse_office_provider_response(response, transport)
+    assert not raised.value.usage_measured
+
+
+@pytest.mark.parametrize(("status", "expected_calls"), [(400, 0), (503, 1)])
+def test_office_http_error_usage_only_estimates_calls_that_may_have_charged(monkeypatch, status, expected_calls):
+    from facet_resolver import ResolvedFacet
+    from jacobs import sonda
+
+    async def handler(request):
+        return httpx.Response(status, text="private provider body")
+
+    facet = ResolvedFacet("office-facet", "provider", "https://private.invalid/v1", "model", "key", "http_openai_compat", None, None)
+    usage = AsyncMock()
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            monkeypatch.setattr(sonda, "obtener_cliente_http", lambda: client)
+            monkeypatch.setattr(sonda, "resolve_facet", AsyncMock(return_value=facet))
+            monkeypatch.setattr(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock())
+            monkeypatch.setattr(sonda, "record_direct_usage", usage)
+            return await sonda.sondear("office-facet", _dispatch(transporte="http_openai_compat"), runtime_policy=OFFICE_RUNTIME_POLICY)
+
+    result = asyncio.run(run())
+    assert result.detalle == ("provider_http_4xx" if status == 400 else "provider_http_5xx")
+    assert not result.uso_medido and usage.await_count == expected_calls
 
 
 @pytest.mark.parametrize(
