@@ -58,7 +58,7 @@ Only one implementation owner touches all shared files. Migration defines the en
 
 **Files:** jax/memory/project_authority.py, project_authority_migrations.py, relatednamespace tests. Specification docs/superpowers/specs/2026-10-20-office-membership.md is binding. Root owns docs.
 
-**Interfaces:** typedgrant/revokecallback and immutable result in spec; existingcreation/classic APIs unchanged. Marker office-namespace.2, membershiporiginOFFICE, idempotencyrecord/eventsin callertransaction. Grantactiveonly, revokecan cleaninactive/archivedscope withcurrentexplicitadminauthority.
+**Interfaces:** typedgrant/revokecallback and immutable result in spec; existingcreation/classic APIs unchanged. Marker office-namespace.3, membershiporiginOFFICE, idempotencyrecord/eventsin callertransaction. Grantactiveonly, revokecan cleaninactive/archivedscope withcurrentexplicitadminauthority.
 
 - [ ] Read specification; add focused RED tests for the new adapter and regression matrix.
 - [ ] Implement minimal transactional methods and migration; no nested transaction, rawJXPSQL bypass, permissionscache or genericProjectRoleinput.
