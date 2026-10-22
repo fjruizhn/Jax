@@ -403,6 +403,10 @@ async def test_migracion_apply_apply_revert_apply_y_falla_cerrado_con_historia_o
                 assert await cur.fetchone() is None
                 await cur.execute("SHOW COLUMNS FROM jax_project_scope LIKE 'authorization_namespace'")
                 assert await cur.fetchone() is None
+                await cur.execute(
+                    "SHOW INDEX FROM jax_project_scope "
+                    "WHERE Key_name='idx_jax_project_scope_namespace_status_project'")
+                assert await cur.fetchone() is None
                 await cur.execute("SHOW INDEX FROM jax_users WHERE Key_name='idx_jax_users_tenant_email'")
                 assert await cur.fetchone() is None  # E1.1: la reversion simetrica lo quita
                 await cur.execute(

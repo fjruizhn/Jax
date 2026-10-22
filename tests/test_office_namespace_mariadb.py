@@ -209,6 +209,85 @@ async def test_office_namespace_migration_creation_replay_rollback_and_index():
 
 @requires_test_db
 @_async
+async def test_office_root_list_uses_cross_tenant_namespace_status_cursor_index():
+    """The root Office list must not walk scopes from unrelated tenants.
+
+    The exact JXP query joins its authoritative scope to the deployed
+    ``projects`` table.  The legacy namespace/tenant/status/project index has
+    a tenant gap, so it cannot both apply ``status`` and provide the cursor
+    order for a cross-tenant root list.  Seed a deliberately skewed Office
+    population, observe that plan without the new index, then re-run the real
+    idempotent migration and require its range plan.
+    """
+    name = f"{_DB}_office_list_{uuid.uuid4().hex[:10]}"
+    assert es_base_de_test(name)
+    tenant_id, _actor_id = await _setup(name)
+    conn = await aiomysql.connect(
+        db=name, autocommit=True, cursorclass=aiomysql.DictCursor,
+        connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        async with conn.cursor() as cur:
+            tenant_ids = [tenant_id]
+            for number in range(3):
+                await cur.execute(
+                    "INSERT INTO jax_tenants (name,plan,status) VALUES (%s,'personal','active')",
+                    (f"office-list-{number}",))
+                tenant_ids.append(cur.lastrowid)
+
+            # 240 older Office rows and 2,000 Classic rows make the post-cursor
+            # Office page selective while preserving a realistic mixed schema.
+            # ``projects`` is the deployed DDL read by _projects_ddl(), never
+            # a hand-made projection of it.
+            for number in range(2240):
+                namespace = "OFFICE_CONFIDENTIAL" if number < 240 else "CLASSIC"
+                await cur.execute(
+                    "INSERT INTO projects (project_uuid,name,status) VALUES (UUID(),%s,'active')",
+                    (f"list-{number}",))
+                project_id = cur.lastrowid
+                await cur.execute(
+                    "INSERT INTO jax_project_scope "
+                    "(project_id,tenant_id,authorization_namespace,status,created_at,created_by,updated_at) "
+                    "VALUES (%s,%s,%s,'ACTIVE',NOW(6),'test',NOW(6))",
+                    (project_id, tenant_ids[number % len(tenant_ids)], namespace))
+
+            await cur.execute(
+                "SELECT project_id FROM jax_project_scope "
+                "WHERE authorization_namespace='OFFICE_CONFIDENTIAL' "
+                "ORDER BY project_id LIMIT 1 OFFSET 220")
+            cursor_id = (await cur.fetchone())["project_id"]
+            query = (
+                "SELECT p.id,p.name,p.description,s.tenant_id FROM projects p "
+                "JOIN jax_project_scope s ON s.project_id=p.id "
+                "WHERE s.authorization_namespace='OFFICE_CONFIDENTIAL' AND s.status='ACTIVE' "
+                "AND p.id>%s ORDER BY p.id LIMIT %s")
+
+            await cur.execute(
+                "DROP INDEX idx_jax_project_scope_namespace_status_project ON jax_project_scope")
+            await cur.execute("EXPLAIN " + query, (cursor_id, 25))
+            before = await cur.fetchall()
+            await apply_project_authority_migration(cur)
+            await cur.execute("EXPLAIN " + query, (cursor_id, 25))
+            after = await cur.fetchall()
+
+            before_scope = next(row for row in before if row["table"] == "s")
+            after_scope = next(row for row in after if row["table"] == "s")
+            extra = str(after_scope.get("Extra") or "")
+            assert after_scope["key"] == "idx_jax_project_scope_namespace_status_project"
+            assert after_scope["type"] == "range"
+            assert int(after_scope["rows"]) < int(before_scope["rows"])
+            assert "Using filesort" not in extra
+            assert "Using temporary" not in extra
+            print(
+                "office root-list explain: "
+                f"before(key={before_scope['key']},type={before_scope['type']},rows={before_scope['rows']}) "
+                f"after(key={after_scope['key']},type={after_scope['type']},rows={after_scope['rows']},extra={extra!r})")
+    finally:
+        conn.close()
+        await _drop(name)
+
+
+@requires_test_db
+@_async
 async def test_office_same_key_concurrency_creates_one_project_and_stable_replay():
     """Catches duplicate-key handling that leaves concurrent retries failing."""
     name = f"{_DB}_office_{uuid.uuid4().hex[:10]}"

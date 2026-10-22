@@ -27,6 +27,7 @@ PROJECT_AUTHORITY_DDL = (
       UNIQUE KEY uq_jax_project_scope_project_tenant (project_id, tenant_id),
       KEY idx_jax_project_scope_tenant_status (tenant_id, status),
       KEY idx_jax_project_scope_namespace_tenant_status_project (authorization_namespace, tenant_id, status, project_id),
+      KEY idx_jax_project_scope_namespace_status_project (authorization_namespace, status, project_id),
       CONSTRAINT fk_jax_project_scope_project FOREIGN KEY (project_id) REFERENCES projects(id),
       CONSTRAINT fk_jax_project_scope_tenant FOREIGN KEY (tenant_id) REFERENCES jax_tenants(tenant_id),
       CONSTRAINT chk_jax_project_scope_status CHECK (status IN ('ACTIVE','DISABLED')),
@@ -114,6 +115,10 @@ _IDX_USERS_TENANT_ROLE_STATUS = "idx_jax_users_tenant_role_status"
 _IDX_USERS_TENANT_EMAIL = "idx_jax_users_tenant_email"
 _CHK_SCOPE_NAMESPACE = "chk_jax_project_scope_namespace"
 _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT = "idx_jax_project_scope_namespace_tenant_status_project"
+# The Office root list spans tenants.  Its predicates and cursor ordering are
+# namespace/status/project_id, so the tenant-scoped index above cannot serve
+# it without a gap between the equality predicates and the ordered cursor.
+_IDX_SCOPE_NAMESPACE_STATUS_PROJECT = "idx_jax_project_scope_namespace_status_project"
 
 _LEGACY_STATUS_ENUM = "ENUM('planning','active','paused','completed','archived')"
 _LIFECYCLE_STATUS_ENUM = ("ENUM('planning','active','paused','completed','archived','hidden','disabled') "
@@ -216,6 +221,10 @@ async def _apply_project_lifecycle_migration(cursor: Any) -> None:
         await cursor.execute(
             "CREATE INDEX " + _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT + " "
             "ON jax_project_scope (authorization_namespace, tenant_id, status, project_id)")
+    if not await _index_exists(cursor, "jax_project_scope", _IDX_SCOPE_NAMESPACE_STATUS_PROJECT):
+        await cursor.execute(
+            "CREATE INDEX " + _IDX_SCOPE_NAMESPACE_STATUS_PROJECT + " "
+            "ON jax_project_scope (authorization_namespace, status, project_id)")
     # 005a/005b: widen the CHECK, then drop the old one -- in that order, so
     # the table is never left without a status CHECK at all.
     if not await _check_constraint_exists(cursor, _CHK_SCOPE_STATUS_V2):
@@ -449,6 +458,9 @@ async def revert_project_lifecycle_migration(cursor: Any) -> None:
     if await _index_exists(cursor, "jax_project_scope", _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT):
         await cursor.execute(
             "DROP INDEX " + _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT + " ON jax_project_scope")
+    if await _index_exists(cursor, "jax_project_scope", _IDX_SCOPE_NAMESPACE_STATUS_PROJECT):
+        await cursor.execute(
+            "DROP INDEX " + _IDX_SCOPE_NAMESPACE_STATUS_PROJECT + " ON jax_project_scope")
     if await _check_constraint_exists(cursor, _CHK_SCOPE_NAMESPACE):
         await cursor.execute("ALTER TABLE jax_project_scope DROP CONSTRAINT " + _CHK_SCOPE_NAMESPACE)
     if await _column_type(cursor, "jax_project_scope", "authorization_namespace") is not None:
