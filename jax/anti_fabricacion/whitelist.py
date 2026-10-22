@@ -32,6 +32,13 @@ en el mismo commit que la crea).
     contra otro proceso). Lo que cuesta cada uso es una consulta agregada
     (EXPLAIN: `type=ALL` con `key=TABLE_SCHEMA`, "Scanned 1 database", sin
     filesort ni temporary; ~750 columnas) más `git rev-parse` y `git status`.
+  * Consultas opcionales (EXPLAIN 2026-10-22, MariaDB 12.3): claves de
+    capability/facet/motor y `model_id` son lecturas completas de tablas de 4 a
+    269 filas, sin WHERE ni ORDER BY; el modo se lee por clave primaria
+    (`const table`). Corren solo cuando la clave del memo cambia; OJO: si el repo de
+    trabajo está sucio por un proceso que lo escribe sin parar (hoy el daemon de
+    Ruflo en `.claude-flow/`), `git status` cambia en cada job y el memo casi nunca
+    acierta: cada job paga estas consultas (milisegundos, medido).
   * Caché de `ast`: por SHA de blob (`_CACHE_AST`). Un blob con el mismo SHA
     tiene el mismo contenido: no hay nada que invalidar. Tope blando: si pasa de
     `_TOPE_CACHE_AST` entradas se vacía entera (se repuebla en el siguiente job).
