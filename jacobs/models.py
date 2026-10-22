@@ -74,6 +74,8 @@ class StepStatus(str, Enum):
     skipped             = "skipped"
     blocked             = "blocked"
     blocked_human_gate  = "blocked_human_gate"
+    cancelled_revoked   = "cancelled_revoked"
+    outcome_unknown     = "outcome_unknown"
 
 
 # `invoked_by` es un ROL de quien pide, no el nombre de una persona (tanda A,

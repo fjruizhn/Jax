@@ -1271,5 +1271,10 @@ async def get_pipeline_results(pipeline_id: str) -> dict:
 
 @router.get("/pipeline/{pipeline_id}/events")
 async def get_events(pipeline_id: str) -> dict:
+    # Events alone cannot establish Classic existence: an Office row is
+    # intentionally filtered from the Classic reader and would otherwise look
+    # like a valid empty event stream.
+    if not await store.pipeline_get(pipeline_id):
+        raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' no encontrado")
     events = await store.events_by_pipeline(pipeline_id)
     return {"pipeline_id": pipeline_id, "events": events}

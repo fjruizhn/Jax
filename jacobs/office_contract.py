@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-from typing import Mapping
+from typing import Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -33,6 +33,7 @@ class OfficePhase(str, Enum):
 
 
 class OfficeRejectionCode(str, Enum):
+    OFFICE_INPUT_STALE = "OFFICE_INPUT_STALE"
     OFFICE_RUNTIME_POLICY_DENIED = "OFFICE_RUNTIME_POLICY_DENIED"
     OFFICE_PROVIDER_REJECTED = "OFFICE_PROVIDER_REJECTED"
     OFFICE_PROVIDER_UNAVAILABLE = "OFFICE_PROVIDER_UNAVAILABLE"
@@ -48,6 +49,234 @@ class OfficeRejectionCode(str, Enum):
 
 
 OFFICE_REJECTION_CODES = tuple(code.value for code in OfficeRejectionCode)
+
+
+def office_utf8_sha256(value: str) -> str:
+    """Digest an opaque provider/JXP string without interpreting its content."""
+    if type(value) is not str:
+        raise ValueError("Office content must be a JSON string")
+    try:
+        return hashlib.sha256(value.encode("utf-8", errors="strict")).hexdigest()
+    except UnicodeError:
+        raise ValueError("Office content is not strict UTF-8") from None
+
+
+def _canonical_uuid(value: object, field: str) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{field} must be a canonical UUID string")
+    try:
+        parsed = uuid.UUID(value)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError(f"{field} must be a canonical UUID string") from exc
+    if str(parsed) != value:
+        raise ValueError(f"{field} must be a canonical UUID string")
+    return value
+
+
+def _sha256(value: object, field: str) -> str:
+    if type(value) is not str or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+        raise ValueError(f"{field} must be lowercase sha256")
+    return value
+
+
+class _OfficeEnvelope(BaseModel):
+    """Strict, immutable callback binding shared by every callback DTO."""
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    contract_version: Literal["office-work.1"]
+    pipeline_id: str
+    run_epoch: int = Field(ge=0)
+    step_id: str
+    correlation_id: str
+    request_sha256: str
+
+    @field_validator("pipeline_id", "step_id", "correlation_id", mode="before")
+    @classmethod
+    def _ids(cls, value: object, info) -> str:
+        return _canonical_uuid(value, info.field_name)
+
+    @field_validator("run_epoch", mode="before")
+    @classmethod
+    def _epoch(cls, value: object) -> int:
+        if type(value) is not int or value < 0:
+            raise ValueError("run_epoch must be a nonnegative JSON integer")
+        return value
+
+    @field_validator("request_sha256", mode="before")
+    @classmethod
+    def _request_hash(cls, value: object) -> str:
+        return _sha256(value, "request_sha256")
+
+    @model_validator(mode="after")
+    def _deterministic_ids(self) -> "_OfficeEnvelope":
+        if self.step_id != deterministic_step_id(self.pipeline_id) or self.correlation_id != deterministic_correlation_id(self.pipeline_id):
+            raise ValueError("Office callback IDs do not bind the pipeline")
+        return self
+
+
+class OfficeMaterializeRequest(_OfficeEnvelope):
+    phase: Literal["PREFLIGHT", "EXECUTION"]
+
+
+class OfficeMaterializedResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    outcome: Literal["MATERIALIZED"]
+    prompt: str
+    materialization_sha256: str
+    binding_version: int = Field(gt=0)
+    contract_version: Literal["office-work.1"]
+
+    @field_validator("prompt", mode="before")
+    @classmethod
+    def _prompt(cls, value: object) -> str:
+        if type(value) is not str:
+            raise ValueError("prompt must be a JSON string")
+        # Force strict UTF-8 now; no normalization or parsing occurs.
+        office_utf8_sha256(value)
+        return value
+
+    @field_validator("materialization_sha256", mode="before")
+    @classmethod
+    def _materialization_hash(cls, value: object) -> str:
+        return _sha256(value, "materialization_sha256")
+
+    @field_validator("binding_version", mode="before")
+    @classmethod
+    def _binding_version(cls, value: object) -> int:
+        if type(value) is not int or value <= 0:
+            raise ValueError("binding_version must be a positive JSON integer")
+        return value
+
+    @model_validator(mode="after")
+    def _digest_matches_prompt(self) -> "OfficeMaterializedResponse":
+        if self.materialization_sha256 != office_utf8_sha256(self.prompt):
+            raise ValueError("materialization digest does not match prompt")
+        return self
+
+
+class OfficeMaterializeCancelledResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    outcome: Literal["CANCELLED_REVOKED", "INPUT_STALE"]
+    contract_version: Literal["office-work.1"]
+
+
+class OfficeCompleteRequest(_OfficeEnvelope):
+    output_json: str
+    output_sha256: str
+    modelo_real: str
+
+    @field_validator("output_json", mode="before")
+    @classmethod
+    def _opaque_output(cls, value: object) -> str:
+        if type(value) is not str:
+            raise ValueError("output_json must be a JSON string")
+        office_utf8_sha256(value)
+        return value
+
+    @field_validator("output_sha256", mode="before")
+    @classmethod
+    def _output_hash(cls, value: object) -> str:
+        return _sha256(value, "output_sha256")
+
+    @field_validator("modelo_real", mode="before")
+    @classmethod
+    def _model_token(cls, value: object) -> str:
+        if type(value) is not str or not value or len(value) > 128 or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-" for c in value):
+            raise ValueError("modelo_real must be a safe model token")
+        return value
+
+    @model_validator(mode="after")
+    def _digest_matches_output(self) -> "OfficeCompleteRequest":
+        if self.output_sha256 != office_utf8_sha256(self.output_json):
+            raise ValueError("output digest does not match output_json")
+        return self
+
+
+class OfficeReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    receipt_id: str
+    effect_kind: str
+    effect_id: str
+    output_sha256: str
+    office_stage_version: int = Field(gt=0)
+
+    @field_validator("receipt_id", mode="before")
+    @classmethod
+    def _receipt_id(cls, value: object) -> str:
+        return _canonical_uuid(value, "receipt_id")
+
+    @field_validator("effect_kind", mode="before")
+    @classmethod
+    def _effect_kind(cls, value: object) -> str:
+        if type(value) is not str or not value or len(value) > 48 or not value[0].isupper() or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for c in value):
+            raise ValueError("effect_kind must be an ASCII stable token")
+        return value
+
+    @field_validator("effect_id", mode="before")
+    @classmethod
+    def _effect_id(cls, value: object) -> str:
+        allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-"
+        if type(value) is not str or not value or len(value) > 128 or value[0] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789" or any(c not in allowed for c in value):
+            raise ValueError("effect_id must be an ASCII receipt id")
+        return value
+
+    @field_validator("output_sha256", mode="before")
+    @classmethod
+    def _receipt_hash(cls, value: object) -> str:
+        return _sha256(value, "output_sha256")
+
+    @field_validator("office_stage_version", mode="before")
+    @classmethod
+    def _stage_version(cls, value: object) -> int:
+        if type(value) is not int or value <= 0:
+            raise ValueError("office_stage_version must be a positive JSON integer")
+        return value
+
+
+class OfficeCompleteStoredResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    outcome: Literal["STORED"]
+    receipt: OfficeReceipt
+    contract_version: Literal["office-work.1"]
+
+
+class OfficeCompleteCancelledResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    outcome: Literal["CANCELLED_REVOKED"]
+    contract_version: Literal["office-work.1"]
+
+
+class OfficeFailRequest(_OfficeEnvelope):
+    phase: Literal["PREFLIGHT", "GENERATION", "DELIVERY"]
+    code: OfficeRejectionCode
+    model_invoked: bool
+    output_sha256: str | None = None
+
+    @field_validator("model_invoked", mode="before")
+    @classmethod
+    def _invoked(cls, value: object) -> bool:
+        if type(value) is not bool:
+            raise ValueError("model_invoked must be a JSON boolean")
+        return value
+
+    @field_validator("output_sha256", mode="before")
+    @classmethod
+    def _optional_output_hash(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        return _sha256(value, "output_sha256")
+
+
+class OfficeFailResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    outcome: Literal["FAILED", "CANCELLED_REVOKED", "OUTCOME_UNKNOWN"]
+    contract_version: Literal["office-work.1"]
+
+
+class OfficeAlreadyCompletedResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    outcome: Literal["ALREADY_COMPLETED"]
+    receipt: OfficeReceipt
+    contract_version: Literal["office-work.1"]
 
 
 class OfficeRunRequest(BaseModel):

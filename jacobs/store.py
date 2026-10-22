@@ -35,7 +35,8 @@ from jacobs.policy import (
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 from jacobs.office_contract import (
     CLASSIC_EXECUTION_CONTRACT, OFFICE_EXECUTION_CONTRACT, OFFICE_REJECTION_CODES,
-    OfficePhase,
+    OfficePhase, OfficeReceipt, OfficeRunRequest, deterministic_correlation_id,
+    deterministic_step_id,
 )
 
 try:
@@ -1398,6 +1399,14 @@ _OFFICE_BINDING_CHECK_INFORMATION_SCHEMA = _OFFICE_BINDING_CHECK_INFORMATION_SCH
 _OFFICE_BINDING_CHECK_INFORMATION_SCHEMA = _OFFICE_BINDING_CHECK_INFORMATION_SCHEMA.replace(
     "and cast(`office_rejection_code` as char charset binary) in", "and `office_rejection_code` is not null and cast(`office_rejection_code` as char charset binary) in"
 )
+
+# 4A used this constraint name and clause.  4C1 must expand first: a running
+# process may observe either known clause, but never an unverified gap.
+_OFFICE_BINDING_CHECK_V1_CLAUSE = _OFFICE_BINDING_CHECK_CLAUSE.replace("'OFFICE_INPUT_STALE',", "")
+_OFFICE_BINDING_CHECK_V1_INFORMATION_SCHEMA = _OFFICE_BINDING_CHECK_INFORMATION_SCHEMA.replace(
+    "'OFFICE_INPUT_STALE',", "")
+_OFFICE_BINDING_CHECK_V1_NAME = "chk_jacobs_office_binding"
+_OFFICE_BINDING_CHECK_V2_NAME = "chk_jacobs_office_binding_v2"
 _OFFICE_BINDING_CHECK_INFORMATION_SCHEMA = _OFFICE_BINDING_CHECK_INFORMATION_SCHEMA.replace(
     "and cast(`office_rejection_code` as char charset binary) in", "and `office_rejection_code` is not null and cast(`office_rejection_code` as char charset binary) in"
 )
@@ -1427,6 +1436,41 @@ def _normalizar_check_clause(expr: str) -> str:
     # guard MariaDB may emit; deleting only that tautological guard preserves
     # every operator group and literal.
     return normalized.replace("office_rejection_code is not null and ", "")
+
+
+async def _migrar_check_office_v2(cur) -> None:
+    """Resumable expand/verify/contract upgrade for the Office CHECK."""
+    await cur.execute(
+        "SELECT CONSTRAINT_NAME,CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS "
+        "WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME IN (%s,%s)",
+        (_OFFICE_BINDING_CHECK_V1_NAME, _OFFICE_BINDING_CHECK_V2_NAME),
+    )
+    rows = {row[0]: row[1] for row in await cur.fetchall()}
+    normalized = {name: _normalizar_check_clause(clause or "") for name, clause in rows.items()}
+    old = _normalizar_check_clause(_OFFICE_BINDING_CHECK_V1_INFORMATION_SCHEMA)
+    new = _normalizar_check_clause(_OFFICE_BINDING_CHECK_INFORMATION_SCHEMA)
+    if any((name == _OFFICE_BINDING_CHECK_V1_NAME and clause != old) or
+           (name == _OFFICE_BINDING_CHECK_V2_NAME and clause != new)
+           for name, clause in normalized.items()):
+        raise RuntimeError("unknown Office binding constraint content")
+    if _OFFICE_BINDING_CHECK_V2_NAME not in rows:
+        ok = await _ddl_acotado(cur, "ALTER TABLE jacobs_pipelines ADD CONSTRAINT " +
+                                _OFFICE_BINDING_CHECK_V2_NAME + " CHECK (" +
+                                _OFFICE_BINDING_CHECK_CLAUSE + ")")
+        if not ok:
+            raise RuntimeError("timed out adding Office binding v2 constraint")
+        await cur.execute(
+            "SELECT CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS "
+            "WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME=%s",
+            (_OFFICE_BINDING_CHECK_V2_NAME,),
+        )
+        verified = await cur.fetchone()
+        if not verified or _normalizar_check_clause(verified[0] or "") != new:
+            raise RuntimeError("Office binding v2 constraint was not created exactly")
+    if _OFFICE_BINDING_CHECK_V1_NAME in rows:
+        ok = await _ddl_acotado(cur, "ALTER TABLE jacobs_pipelines DROP CONSTRAINT " + _OFFICE_BINDING_CHECK_V1_NAME)
+        if not ok:
+            raise RuntimeError("timed out contracting legacy Office binding constraint")
 
 
 async def _verificar_expresion_visible(cur) -> None:
@@ -1874,24 +1918,7 @@ async def init_tables() -> None:
             money_column = await cur.fetchone()
             if not money_column or (money_column[0] or "").lower() != "decimal(14,6)":
                 raise RuntimeError("Office accepted budget must remain DECIMAL(14,6)")
-            await cur.execute(
-                "SELECT CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS "
-                "WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME='chk_jacobs_office_binding'"
-            )
-            binding_row = await cur.fetchone()
-            binding_check = bool(
-                binding_row and _normalizar_check_clause(binding_row[0] or "") ==
-                _normalizar_check_clause(_OFFICE_BINDING_CHECK_INFORMATION_SCHEMA)
-            )
-            if binding_row and not binding_check:
-                ok = await _ddl_acotado(cur, "ALTER TABLE jacobs_pipelines DROP CONSTRAINT chk_jacobs_office_binding")
-                if not ok:
-                    raise RuntimeError("timed out upgrading Office binding constraint")
-            if not binding_check:
-                ok = await _ddl_acotado(cur, "ALTER TABLE jacobs_pipelines ADD CONSTRAINT chk_jacobs_office_binding CHECK (" +
-                    _OFFICE_BINDING_CHECK_CLAUSE + ")")
-                if not ok:
-                    raise RuntimeError("timed out adding Office binding constraint")
+            await _migrar_check_office_v2(cur)
             await cur.execute(_DDL_JACOBS_STEPS)
             for col, ddl in [
                 ("motor", "ALTER TABLE jacobs_steps ADD COLUMN motor VARCHAR(30) NULL"),
@@ -2047,7 +2074,8 @@ async def pipeline_get(pipeline_id: str) -> Pipeline | None:
     async with conexion_del_pool() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
-                "SELECT * FROM jacobs_pipelines WHERE pipeline_id=%s", (pipeline_id,)
+                "SELECT * FROM jacobs_pipelines WHERE pipeline_id=%s AND execution_contract=%s",
+                (pipeline_id, CLASSIC_EXECUTION_CONTRACT),
             )
             row = await cur.fetchone()
     if not row:
@@ -2064,6 +2092,58 @@ class OfficePipelineSnapshot:
     request_sha256: str
     office_stage_id: str
     client_request_id: str
+
+
+@dataclass(frozen=True)
+class OfficeExecutionSnapshot:
+    """Named opaque Office reader; Classic code must never use this shape."""
+    pipeline_id: str
+    run_epoch: int
+    phase: OfficePhase
+    request_sha256: str
+    office_job_id: str
+    office_stage_id: str
+    office_project_id: int
+    client_request_id: str
+    tenant_id: str
+    user_id: str
+    accepted_cost_usd: Decimal
+    step_id: str
+    correlation_id: str
+    facet: str
+    capability: str
+    timeout_seconds: int
+    materialization_sha256: str | None
+    binding_version: int | None
+    receipt: OfficeReceipt | None
+
+
+async def office_execution_snapshot(pipeline_id: str) -> OfficeExecutionSnapshot | None:
+    async with conexion_del_pool() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT p.pipeline_id,p.run_epoch,p.office_phase,p.request_sha256,p.office_job_id,p.office_stage_id,"
+                "p.office_project_id,p.client_request_id,p.tenant_id,p.user_id,p.office_accepted_cost_usd,"
+                "s.step_id,s.trace_id,s.facet,s.capability,s.timeout_seconds,s.input_ref,s.output_ref "
+                "FROM jacobs_pipelines p JOIN jacobs_steps s ON s.pipeline_id=p.pipeline_id AND s.step_index=0 "
+                "WHERE p.pipeline_id=%s AND p.execution_contract=%s",
+                (pipeline_id, OFFICE_EXECUTION_CONTRACT),
+            )
+            row = await cur.fetchone()
+    if not row:
+        return None
+    try:
+        return OfficeExecutionSnapshot(pipeline_id=row["pipeline_id"], run_epoch=int(row["run_epoch"]),
+            phase=OfficePhase(row["office_phase"]), request_sha256=row["request_sha256"],
+            office_job_id=row["office_job_id"], office_stage_id=row["office_stage_id"],
+            office_project_id=int(row["office_project_id"]), client_request_id=row["client_request_id"],
+            tenant_id=row["tenant_id"], user_id=row["user_id"], accepted_cost_usd=Decimal(str(row["office_accepted_cost_usd"])),
+            step_id=row["step_id"], correlation_id=row["trace_id"], facet=row["facet"], capability=row["capability"],
+            timeout_seconds=int(row["timeout_seconds"]), materialization_sha256=(json.loads(row["input_ref"] or "{}").get("office_materialization_sha256")),
+            binding_version=(json.loads(row["input_ref"] or "{}").get("binding_version")),
+            receipt=(OfficeReceipt(**json.loads((row["output_ref"] or "inline:{}")[7:]).get("office_receipt")) if row["output_ref"] else None))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("invalid opaque Office execution snapshot") from exc
 
 
 async def office_pipeline_by_client_request(tenant_id: int, client_request_id: str) -> OfficePipelineSnapshot | None:
@@ -2166,6 +2246,143 @@ async def office_transition_phase(
             return cur.rowcount == 1
 
 
+async def _office_event(cur, pipeline_id: str, step_id: str, event_type: str, payload: dict[str, object]) -> None:
+    """Append only opaque Office audit facts while holding the Office TX."""
+    await cur.execute(
+        "INSERT INTO jacobs_events (pipeline_id,step_id,event_type,payload,ts) VALUES (%s,%s,%s,%s,%s)",
+        (pipeline_id, step_id, event_type, json.dumps(payload, ensure_ascii=True), time.time()),
+    )
+
+
+async def office_prepare_step(pipeline_id: str, request: OfficeRunRequest) -> bool:
+    """Create/re-read the deterministic opaque step after its exact reservation."""
+    step_id, correlation = deterministic_step_id(pipeline_id), deterministic_correlation_id(pipeline_id)
+    async with conexion(desechable=True) as conn:
+        async with transaccion(conn):
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT * FROM jacobs_pipelines WHERE pipeline_id=%s AND execution_contract=%s FOR UPDATE", (pipeline_id, OFFICE_EXECUTION_CONTRACT))
+                p = await cur.fetchone()
+                if not p or p["office_phase"] != OfficePhase.RESERVED.value or p["status"] != PipelineStatus.running.value:
+                    return False
+                expected = (str(request.office_job_id), str(request.office_stage_id), request.project_id,
+                            str(request.client_request_id), request.request_sha256)
+                actual = (p["office_job_id"], p["office_stage_id"], p["office_project_id"], p["client_request_id"], p["request_sha256"])
+                if actual != expected:
+                    raise ValueError("Office reservation binding mismatch")
+                await cur.execute("SELECT * FROM jacobs_steps WHERE pipeline_id=%s AND step_index=0 FOR UPDATE", (pipeline_id,))
+                s = await cur.fetchone()
+                if s:
+                    return (s["step_id"] == step_id and s["trace_id"] == correlation and s["status"] == StepStatus.pending.value
+                            and s["facet"] == request.facet and s["capability"] == request.capability
+                            and s["timeout_seconds"] == request.timeout_seconds and s["retries_allowed"] == 0
+                            and not bool(s["skip_on_fail"]) and (s.get("input_ref") or "{}") == "{}"
+                            and s.get("output_ref") is None and s.get("modelo_real") is None
+                            and s.get("error") is None and (s.get("depends_on") or "[]") == "[]")
+                await cur.execute(
+                    "INSERT INTO jacobs_steps (step_id,pipeline_id,step_index,facet,capability,input_ref,output_ref,status,timeout_seconds,retries_allowed,skip_on_fail,trace_id) VALUES (%s,%s,0,%s,%s,'{}',NULL,'pending',%s,0,0,%s)",
+                    (step_id, pipeline_id, request.facet, request.capability, request.timeout_seconds, correlation),
+                )
+                await _office_event(cur, pipeline_id, step_id, "OFFICE_STEP_PREPARED", {"phase": "RESERVED"})
+                return True
+
+
+async def _office_claim(pipeline_id: str, epoch: int, step_id: str, *, phase: OfficePhase,
+                        next_phase: OfficePhase, step_status: StepStatus, event: str) -> bool:
+    if step_id != deterministic_step_id(pipeline_id):
+        raise ValueError("Office step ID does not bind pipeline")
+    async with conexion(desechable=True) as conn:
+        async with transaccion(conn):
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT pipeline_id FROM jacobs_pipelines WHERE pipeline_id=%s AND execution_contract=%s AND run_epoch=%s AND office_phase=%s AND status='running' FOR UPDATE", (pipeline_id, OFFICE_EXECUTION_CONTRACT, epoch, phase.value))
+                if not await cur.fetchone(): return False
+                await cur.execute("SELECT step_id,trace_id,status FROM jacobs_steps WHERE step_id=%s AND pipeline_id=%s AND step_index=0 FOR UPDATE", (step_id, pipeline_id))
+                step = await cur.fetchone()
+                if not step or step["trace_id"] != deterministic_correlation_id(pipeline_id) or step["status"] != StepStatus.pending.value:
+                    raise RuntimeError("Office claim step binding mismatch")
+                await cur.execute("UPDATE jacobs_pipelines SET office_phase=%s,updated_at=%s WHERE pipeline_id=%s", (next_phase.value, time.time(), pipeline_id))
+                if step_status is StepStatus.running:
+                    await cur.execute("UPDATE jacobs_steps SET status='running',started_at=%s WHERE step_id=%s AND pipeline_id=%s AND step_index=0 AND status='pending'", (time.time(), step_id, pipeline_id))
+                    if cur.rowcount != 1:
+                        raise RuntimeError("Office step claim lost after pipeline phase claim")
+                await _office_event(cur, pipeline_id, step_id, event, {"phase": next_phase.value})
+                return True
+
+
+async def office_claim_preflight(pipeline_id: str, epoch: int, step_id: str) -> bool:
+    return await _office_claim(pipeline_id, epoch, step_id, phase=OfficePhase.RESERVED,
+                               next_phase=OfficePhase.PREFLIGHT_IN_FLIGHT, step_status=StepStatus.pending,
+                               event="OFFICE_PREFLIGHT_CLAIMED")
+
+
+async def office_mark_ready(pipeline_id: str, epoch: int, step_id: str, materialization_sha256: str, binding_version: int) -> bool:
+    if not isinstance(binding_version, int) or isinstance(binding_version, bool) or binding_version <= 0:
+        raise ValueError("invalid Office binding version")
+    if not isinstance(materialization_sha256, str) or len(materialization_sha256) != 64 or any(c not in "0123456789abcdef" for c in materialization_sha256):
+        raise ValueError("invalid Office materialization digest")
+    input_ref = json.dumps({"office_materialization_sha256": materialization_sha256, "binding_version": binding_version}, separators=(",", ":"))
+    async with conexion(desechable=True) as conn:
+        async with transaccion(conn):
+            async with conn.cursor() as cur:
+                await cur.execute("UPDATE jacobs_pipelines SET office_phase='READY',updated_at=%s WHERE pipeline_id=%s AND execution_contract=%s AND run_epoch=%s AND office_phase='PREFLIGHT_IN_FLIGHT' AND status='running'", (time.time(), pipeline_id, OFFICE_EXECUTION_CONTRACT, epoch))
+                if cur.rowcount != 1: return False
+                await cur.execute("UPDATE jacobs_steps SET input_ref=%s WHERE step_id=%s AND pipeline_id=%s AND step_index=0 AND status='pending' AND (input_ref IS NULL OR input_ref='{}')", (input_ref, step_id, pipeline_id))
+                if cur.rowcount != 1: raise RuntimeError("Office ready step mismatch")
+                await _office_event(cur, pipeline_id, step_id, "OFFICE_READY", {"phase": "READY", "materialization_sha256": materialization_sha256})
+                return True
+
+
+async def office_claim_delivery(pipeline_id: str, epoch: int, step_id: str) -> bool:
+    return await _office_claim(pipeline_id, epoch, step_id, phase=OfficePhase.READY,
+                               next_phase=OfficePhase.DELIVERY_IN_FLIGHT, step_status=StepStatus.running,
+                               event="OFFICE_DELIVERY_CLAIMED")
+
+
+async def office_store_receipt(pipeline_id: str, epoch: int, step_id: str, receipt: OfficeReceipt,
+                               modelo_real: str, receipt_ref: str | None = None) -> bool:
+    receipt_json = json.dumps({"office_receipt": receipt.model_dump(mode="json")}, sort_keys=True,
+                              separators=(",", ":"), ensure_ascii=True)
+    canonical_ref = "inline:" + receipt_json
+    if receipt_ref is not None and receipt_ref != canonical_ref:
+        raise ValueError("Office receipt reference must be canonical and receipt-only")
+    if not isinstance(modelo_real, str) or not modelo_real or len(modelo_real) > 128:
+        raise ValueError("invalid Office model token")
+    async with conexion(desechable=True) as conn:
+        async with transaccion(conn):
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT pipeline_id FROM jacobs_pipelines WHERE pipeline_id=%s AND execution_contract=%s AND run_epoch=%s AND office_phase='DELIVERY_IN_FLIGHT' AND status='running' FOR UPDATE", (pipeline_id, OFFICE_EXECUTION_CONTRACT, epoch))
+                if not await cur.fetchone(): return False
+                await cur.execute("SELECT step_id FROM jacobs_steps WHERE step_id=%s AND pipeline_id=%s AND step_index=0 AND status='running' FOR UPDATE", (step_id, pipeline_id))
+                if not await cur.fetchone(): raise RuntimeError("Office receipt step mismatch")
+                await cur.execute("UPDATE jacobs_steps SET status='completed',output_ref=%s,modelo_real=%s,finished_at=%s,error=NULL WHERE step_id=%s", (canonical_ref, modelo_real, time.time(), step_id))
+                await cur.execute("UPDATE jacobs_pipelines SET office_phase='RECEIPT_STORED',status='completed',updated_at=%s WHERE pipeline_id=%s", (time.time(), pipeline_id))
+                await _office_event(cur, pipeline_id, step_id, "OFFICE_RECEIPT_STORED", {"phase": "RECEIPT_STORED", "receipt_id": receipt.receipt_id, "output_sha256": receipt.output_sha256})
+                return True
+
+
+async def office_finish_terminal(pipeline_id: str, epoch: int, step_id: str, from_phase: OfficePhase,
+                                 code: str, terminal: OfficePhase) -> bool:
+    """Atomically persist a truthful terminal Office outcome; terminals never exit."""
+    targets = {
+        OfficePhase.FAILED: (PipelineStatus.failed, StepStatus.failed),
+        OfficePhase.CANCELLED_REVOKED: (PipelineStatus.aborted, StepStatus.cancelled_revoked),
+        OfficePhase.OUTCOME_UNKNOWN: (PipelineStatus.outcome_unknown, StepStatus.outcome_unknown),
+    }
+    if terminal not in targets or code not in OFFICE_REJECTION_CODES:
+        raise ValueError("invalid Office terminal outcome")
+    if from_phase in {OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED, OfficePhase.OUTCOME_UNKNOWN, OfficePhase.RECEIPT_STORED}:
+        raise ValueError("Office terminal phase has no exit")
+    pipeline_status, step_status = targets[terminal]
+    async with conexion(desechable=True) as conn:
+        async with transaccion(conn):
+            async with conn.cursor() as cur:
+                await cur.execute("UPDATE jacobs_pipelines SET office_phase=%s,status=%s,office_rejection_code=%s,updated_at=%s WHERE pipeline_id=%s AND execution_contract=%s AND run_epoch=%s AND office_phase=%s AND status='running'", (terminal.value, pipeline_status.value, code, time.time(), pipeline_id, OFFICE_EXECUTION_CONTRACT, epoch, from_phase.value))
+                if cur.rowcount != 1: return False
+                await cur.execute("UPDATE jacobs_steps SET status=%s,error=%s,finished_at=%s WHERE step_id=%s AND pipeline_id=%s AND step_index=0 AND status IN ('pending','running')", (step_status.value, code, time.time(), step_id, pipeline_id))
+                if cur.rowcount != 1: raise RuntimeError("Office terminal step mismatch")
+                await _office_event(cur, pipeline_id, step_id, "OFFICE_TERMINAL", {"phase": terminal.value, "code": code})
+                return True
+
+
 @dataclass(frozen=True)
 class PipelineStatusSnapshot:
     """Minimal immutable canonical observation for governed pipeline status."""
@@ -2190,7 +2407,8 @@ async def pipeline_status_snapshots(pipeline_ids: Sequence[str]) -> Mapping[str,
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 "SELECT pipeline_id, user_id, tenant_id, status FROM jacobs_pipelines "
-                f"WHERE pipeline_id IN ({placeholders})", ids)
+                f"WHERE execution_contract=%s AND pipeline_id IN ({placeholders})",
+                (CLASSIC_EXECUTION_CONTRACT, *ids))
             rows = await cur.fetchall()
     observed_at = datetime.now(timezone.utc)
     snapshots: dict[str, PipelineStatusSnapshot] = {}
@@ -2224,7 +2442,7 @@ _STEP_STATUS_SNAPSHOT_SQL = """
            p.status AS pipeline_status
       FROM jacobs_steps AS s
       JOIN jacobs_pipelines AS p ON p.pipeline_id = s.pipeline_id
-     WHERE s.step_id = %s
+     WHERE s.step_id = %s AND p.execution_contract = 'CLASSIC'
 """
 
 
@@ -2970,8 +3188,10 @@ async def steps_by_pipeline(pipeline_id: str) -> list[Step]:
     async with conexion_del_pool() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
-                "SELECT * FROM jacobs_steps WHERE pipeline_id=%s ORDER BY step_index",
-                (pipeline_id,),
+                "SELECT s.* FROM jacobs_steps AS s JOIN jacobs_pipelines AS p "
+                "ON p.pipeline_id=s.pipeline_id WHERE s.pipeline_id=%s "
+                "AND p.execution_contract=%s ORDER BY s.step_index",
+                (pipeline_id, CLASSIC_EXECUTION_CONTRACT),
             )
             rows = await cur.fetchall()
     result = []
@@ -3480,8 +3700,10 @@ async def events_by_pipeline(pipeline_id: str) -> list[dict[str, Any]]:
     async with conexion_del_pool() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
-                "SELECT * FROM jacobs_events WHERE pipeline_id=%s ORDER BY id",
-                (pipeline_id,),
+                "SELECT e.* FROM jacobs_events AS e JOIN jacobs_pipelines AS p "
+                "ON p.pipeline_id=e.pipeline_id WHERE e.pipeline_id=%s "
+                "AND p.execution_contract=%s ORDER BY e.id",
+                (pipeline_id, CLASSIC_EXECUTION_CONTRACT),
             )
             rows = await cur.fetchall()
     result = []

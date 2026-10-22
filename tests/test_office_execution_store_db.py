@@ -12,7 +12,8 @@ import aiomysql
 from jacobs import cupo, store
 from jacobs.models import PipelineStatus
 from jacobs.office_contract import (
-    OFFICE_WORK_CONTRACT_VERSION, OfficePhase, OfficeRunRequest, canonical_usd, office_request_digest,
+    OFFICE_WORK_CONTRACT_VERSION, OfficePhase, OfficeReceipt, OfficeRunRequest, canonical_usd,
+    deterministic_step_id, office_request_digest,
 )
 
 
@@ -77,6 +78,108 @@ def test_office_reservation_replay_conflict_and_epoch_cas_are_real_db():
         finally:
             await _clean([pid])
             await store.cerrar_pool()
+    asyncio.run(run())
+
+
+def test_office_opaque_delivery_store_is_atomic_and_only_one_claim_wins():
+    """Catches a callback path persisting content, splitting receipt/event, or double-delivering."""
+    async def run():
+        await store.init_tables()
+        request = _request()
+        reserved = await cupo.reservar_office_v1(request, limite=10000)
+        assert reserved and reserved.created
+        pid, step_id = reserved.pipeline_id, deterministic_step_id(reserved.pipeline_id)
+        try:
+            assert await store.office_prepare_step(pid, request)
+            assert await store.office_prepare_step(pid, request)  # exact replay only
+            claims = await asyncio.gather(*[store.office_claim_preflight(pid, 0, step_id) for _ in range(2)])
+            assert claims.count(True) == 1
+            assert await store.office_mark_ready(pid, 0, step_id, "b" * 64, 1)
+            delivery = await asyncio.gather(*[store.office_claim_delivery(pid, 0, step_id) for _ in range(2)])
+            assert delivery.count(True) == 1
+            receipt = OfficeReceipt(receipt_id=str(uuid.uuid4()), effect_kind="NOTE_CREATED",
+                                    effect_id="note:1", output_sha256="c" * 64,
+                                    office_stage_version=1)
+            assert await store.office_store_receipt(pid, 0, step_id, receipt, "gemini-2.5-pro")
+            snapshot = await store.office_execution_snapshot(pid)
+            assert snapshot and snapshot.step_id == step_id and snapshot.correlation_id
+            assert snapshot.materialization_sha256 == "b" * 64 and snapshot.receipt == receipt
+            with pytest.raises(ValueError, match="terminal phase has no exit"):
+                await store.office_finish_terminal(pid, 0, step_id, OfficePhase.RECEIPT_STORED,
+                                                   "OFFICE_EXECUTION_FAILED", OfficePhase.FAILED)
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT office_phase,status FROM jacobs_pipelines WHERE pipeline_id=%s", (pid,))
+                    assert await cur.fetchone() == ("RECEIPT_STORED", "completed")
+                    await cur.execute("SELECT input_ref,output_ref,status FROM jacobs_steps WHERE step_id=%s", (step_id,))
+                    input_ref, output_ref, status = await cur.fetchone()
+                    assert "office_materialization_sha256" in input_ref and "prompt" not in input_ref
+                    assert output_ref.startswith("inline:") and receipt.receipt_id in output_ref and status == "completed"
+        finally:
+            await _clean([pid])
+            await store.cerrar_pool()
+    asyncio.run(run())
+
+
+def test_office_binding_check_expand_contract_recovers_old_and_both_states():
+    """Catches dropping the legacy CHECK before a verified v2 replacement exists."""
+    async def names():
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT CONSTRAINT_NAME FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME IN ('chk_jacobs_office_binding','chk_jacobs_office_binding_v2')")
+                return {row[0] for row in await cur.fetchall()}
+    async def run():
+        await store.init_tables()
+        try:
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("ALTER TABLE jacobs_pipelines ADD CONSTRAINT chk_jacobs_office_binding CHECK (" + store._OFFICE_BINDING_CHECK_V1_CLAUSE + ")")
+            await store.init_tables()
+            assert await names() == {"chk_jacobs_office_binding_v2"}
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("ALTER TABLE jacobs_pipelines DROP CONSTRAINT chk_jacobs_office_binding_v2")
+                    await cur.execute("ALTER TABLE jacobs_pipelines ADD CONSTRAINT chk_jacobs_office_binding CHECK (" + store._OFFICE_BINDING_CHECK_V1_CLAUSE + ")")
+            await store.init_tables()
+            assert await names() == {"chk_jacobs_office_binding_v2"}
+        finally:
+            await store.init_tables()
+            await store.cerrar_pool()
+    asyncio.run(run())
+
+
+def test_office_store_rolls_back_when_opaque_event_insert_fails(monkeypatch):
+    """Catches a phase/step commit surviving its required opaque audit event."""
+    async def run():
+        await store.init_tables(); request = _request(); reserved = await cupo.reservar_office_v1(request, limite=10000)
+        pid = reserved.pipeline_id; step = deterministic_step_id(pid)
+        try:
+            assert await store.office_prepare_step(pid, request)
+            assert await store.office_claim_preflight(pid, 0, step)
+            async def broken(*_args): raise RuntimeError("event failure")
+            monkeypatch.setattr(store, "_office_event", broken)
+            with pytest.raises(RuntimeError, match="event failure"):
+                await store.office_mark_ready(pid, 0, step, "d" * 64, 1)
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT office_phase FROM jacobs_pipelines WHERE pipeline_id=%s", (pid,)); assert (await cur.fetchone())[0] == "PREFLIGHT_IN_FLIGHT"
+                    await cur.execute("SELECT input_ref FROM jacobs_steps WHERE step_id=%s", (step,)); assert (await cur.fetchone())[0] == "{}"
+        finally:
+            await _clean([pid]); await store.cerrar_pool()
+    asyncio.run(run())
+
+
+def test_office_claim_rejects_stale_epoch_and_wrong_deterministic_step():
+    async def run():
+        await store.init_tables(); request = _request(); reserved = await cupo.reservar_office_v1(request, limite=10000)
+        pid = reserved.pipeline_id; step = deterministic_step_id(pid)
+        try:
+            assert await store.office_prepare_step(pid, request)
+            assert not await store.office_claim_preflight(pid, 1, step)
+            with pytest.raises(ValueError, match="step ID"):
+                await store.office_claim_preflight(pid, 0, str(uuid.uuid4()))
+        finally:
+            await _clean([pid]); await store.cerrar_pool()
     asyncio.run(run())
 
 
@@ -241,18 +344,20 @@ def test_office_database_check_enforces_full_snapshot_and_fails_closed_on_invali
                             await cur.execute(sql, (pid,))
                     await cur.execute(
                         "SELECT CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS "
-                        "WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME='chk_jacobs_office_binding'"
+                        "WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME='chk_jacobs_office_binding_v2'"
                     )
                     check = (await cur.fetchone())[0]
                     assert store._normalizar_check_clause(check) == store._normalizar_check_clause(store._OFFICE_BINDING_CHECK_INFORMATION_SCHEMA)
-                    await cur.execute("ALTER TABLE jacobs_pipelines DROP CONSTRAINT chk_jacobs_office_binding")
-                    await cur.execute("ALTER TABLE jacobs_pipelines ADD CONSTRAINT chk_jacobs_office_binding CHECK (office_project_id IS NULL OR office_project_id IS NOT NULL)")
+                    await cur.execute("ALTER TABLE jacobs_pipelines DROP CONSTRAINT chk_jacobs_office_binding_v2")
+                    await cur.execute("ALTER TABLE jacobs_pipelines ADD CONSTRAINT chk_jacobs_office_binding_v2 CHECK (office_project_id IS NULL OR office_project_id IS NOT NULL)")
                     await cur.execute("UPDATE jacobs_pipelines SET status='pending' WHERE pipeline_id=%s", (pid,))
-            with pytest.raises(aiomysql.Error):
+            with pytest.raises(RuntimeError, match="unknown Office binding constraint content"):
                 await store.init_tables()
             async with store.conexion() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute("UPDATE jacobs_pipelines SET status='running' WHERE pipeline_id=%s", (pid,))
+                    await cur.execute("ALTER TABLE jacobs_pipelines DROP CONSTRAINT chk_jacobs_office_binding_v2")
+                    await cur.execute("ALTER TABLE jacobs_pipelines ADD CONSTRAINT chk_jacobs_office_binding_v2 CHECK (" + store._OFFICE_BINDING_CHECK_CLAUSE + ")")
             await store.init_tables()
             async with store.conexion() as conn:
                 async with conn.cursor() as cur:

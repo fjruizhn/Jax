@@ -1,0 +1,87 @@
+{
+  "schema": "jax_memory_test_office_c1",
+  "queries": {
+    "SELECT * FROM jacobs_pipelines WHERE pipeline_id=%s AND execution_contract=%s FOR UPDATE": [
+      {
+        "id": 1,
+        "select_type": "SIMPLE",
+        "table": "jacobs_pipelines",
+        "type": "const",
+        "possible_keys": "PRIMARY,uq_jacobs_office_stage,idx_jacobs_office_phase",
+        "key": "PRIMARY",
+        "key_len": "146",
+        "ref": "const",
+        "rows": "1",
+        "Extra": ""
+      }
+    ],
+    "SELECT * FROM jacobs_steps WHERE pipeline_id=%s AND step_index=0 FOR UPDATE": [
+      {
+        "id": 1,
+        "select_type": "SIMPLE",
+        "table": "jacobs_steps",
+        "type": "ref",
+        "possible_keys": "idx_steps_pipeline",
+        "key": "idx_steps_pipeline",
+        "key_len": "146",
+        "ref": "const",
+        "rows": "1",
+        "Extra": "Using index condition; Using where"
+      }
+    ],
+    "SELECT p.pipeline_id,p.run_epoch,p.office_phase,p.request_sha256,p.office_job_id,p.office_stage_id,p.office_project_id,p.client_request_id,p.tenant_id,p.user_id,p.office_accepted_cost_usd,s.step_id,s.trace_id,s.facet,s.capability,s.timeout_seconds,s.input_ref,s.output_ref FROM jacobs_pipelines p JOIN jacobs_steps s ON s.pipeline_id=p.pipeline_id AND s.step_index=0 WHERE p.pipeline_id=%s AND p.execution_contract=%s": [
+      {
+        "id": 1,
+        "select_type": "SIMPLE",
+        "table": "p",
+        "type": "const",
+        "possible_keys": "PRIMARY,uq_jacobs_office_stage,idx_jacobs_office_phase",
+        "key": "PRIMARY",
+        "key_len": "146",
+        "ref": "const",
+        "rows": "1",
+        "Extra": ""
+      },
+      {
+        "id": 1,
+        "select_type": "SIMPLE",
+        "table": "s",
+        "type": "ref",
+        "possible_keys": "idx_steps_pipeline",
+        "key": "idx_steps_pipeline",
+        "key_len": "146",
+        "ref": "const",
+        "rows": "1",
+        "Extra": "Using index condition; Using where"
+      }
+    ],
+    "SELECT pipeline_id FROM jacobs_pipelines WHERE pipeline_id=%s AND execution_contract=%s AND run_epoch=%s AND office_phase=%s AND status='running' FOR UPDATE": [
+      {
+        "id": 1,
+        "select_type": "SIMPLE",
+        "table": "jacobs_pipelines",
+        "type": "const",
+        "possible_keys": "PRIMARY,uq_jacobs_office_stage,idx_jacobs_office_phase,idx_pipelines_ocultos",
+        "key": "PRIMARY",
+        "key_len": "146",
+        "ref": "const",
+        "rows": "1",
+        "Extra": ""
+      }
+    ],
+    "SELECT step_id,trace_id,status FROM jacobs_steps WHERE step_id=%s AND pipeline_id=%s AND step_index=0 FOR UPDATE": [
+      {
+        "id": 1,
+        "select_type": "SIMPLE",
+        "table": "jacobs_steps",
+        "type": "const",
+        "possible_keys": "PRIMARY,idx_steps_pipeline",
+        "key": "PRIMARY",
+        "key_len": "146",
+        "ref": "const",
+        "rows": "1",
+        "Extra": ""
+      }
+    ]
+  }
+}
