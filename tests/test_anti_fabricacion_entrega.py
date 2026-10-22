@@ -112,3 +112,16 @@ def test_base_de_datos_caida_da_2_y_nunca_0(mod, repo, tmp_path):
     async def esquema():
         raise ConnectionError("db caida")
     assert _correr(mod, repo, "Modifiqué `a.py`.", tmp_path, db=(huella, esquema)) == 2
+
+
+def test_un_archivo_borrado_por_la_rama_no_es_propio(mod, repo, tmp_path):
+    """MINOR 11: decir que se «modificó» un archivo que la rama borró es afirmar algo falso."""
+    _g(repo, "rm", "-q", "docs/x.md")
+    _g(repo, "commit", "-q", "-m", "borra")
+    assert _correr(mod, repo, "Modifiqué `docs/x.md`.", tmp_path) == 1
+    assert _correr(mod, repo, "Modifiqué `b.py`.", tmp_path) == 0
+
+
+def test_el_docstring_de_la_entrega_no_promete_simbolos():
+    texto = _RUTA.read_text(encoding="utf-8").split('"""')[1]
+    assert "símbolos" not in texto

@@ -30,6 +30,33 @@ from motor_registry.job_store import JobStore
 
 ANTI_FABRICACION_REAL = True
 
+
+def _conectar_con(valor):
+    """Conexión falsa a axioma_config que devuelve una fila (`valor`) o ninguna (None)."""
+    class Cur:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def execute(self, sql, args=None):
+            pass
+
+        async def fetchone(self):
+            return None if valor is None else (valor,)
+
+    class Conn:
+        def cursor(self):
+            return Cur()
+
+        def close(self):
+            pass
+
+    async def conectar():
+        return Conn()
+    return conectar
+
 _CFG = {
     "motors": {
         "kimi": {
@@ -91,6 +118,8 @@ class WorkerEstructuraTest(unittest.IsolatedAsyncioTestCase):
         import contrato_dispatch
         import anti_fabricacion.whitelist as wl_mod
         wl_mod._MEMO.clear()
+        getattr(worker, "_AF_AVISOS_DETECTOR", {}).clear()      # el enfriamiento de avisos es estado del proceso
+        setattr(worker, "_AF_AVISO_CLAVE_HECHO", False)         # idem el aviso de clave de modo ausente
         for p in (
             patch.object(contrato_dispatch, "_leer_contrato", AsyncMock(return_value=("max_tokens", 131072))),
             patch.object(worker, "resolve_credential", AsyncMock(return_value="sk-fake")),
@@ -108,14 +137,20 @@ class WorkerEstructuraTest(unittest.IsolatedAsyncioTestCase):
         self.catalog = MotorCatalog(_CFG)
         self.telegram = AsyncMock(return_value={"ok": True, "message_id": 1, "error": None})
 
-    async def _correr(self, content, *, modo, esquema_cae=False, pipeline_id="pl-1"):
+    async def _correr(self, content, *, modo, esquema_cae=False, pipeline_id="pl-1", fuentes=None, fila=None,
+                      raiz=None):
         from anti_fabricacion.consecuencia import Modo
         job_id = self.store.create(caller="jacobs", capability="code_patch", motor="kimi", trace_id="t",
                                    prompt="arregla bodegas", recursion_depth=0, pipeline_id=pipeline_id)
-        conexion = patch("anti_fabricacion.consecuencia._db_conn", AsyncMock(side_effect=ConnectionError("config ilegible")), create=True)
+        if fila is not None:
+            conexion = patch("anti_fabricacion.consecuencia._db_conn", _conectar_con(fila[0]), create=True)
+        else:
+            conexion = patch("anti_fabricacion.consecuencia._db_conn", AsyncMock(side_effect=ConnectionError("config ilegible")), create=True)
         leer = patch("anti_fabricacion.consecuencia.leer_modo", AsyncMock(return_value=Modo(modo))) if modo else conexion
+        from contextlib import nullcontext
         with leer, \
-             patch("anti_fabricacion.whitelist.fuentes_por_defecto", lambda *a, **k: _fuentes(esquema_cae)), \
+             (patch("motor_registry.tool_authority.WORKSPACE_ROOT", raiz) if raiz else nullcontext()), \
+             patch("anti_fabricacion.whitelist.fuentes_por_defecto", fuentes or (lambda *a, **k: _fuentes(esquema_cae))), \
              patch("jacobs.reaper.send_telegram_alert", self.telegram), \
              patch("httpx.AsyncClient.post", AsyncMock(return_value=_resp(content))) as post:
             await worker.run(job_id=job_id, motor="kimi", capability="code_patch", prompt="arregla bodegas",
@@ -194,7 +229,8 @@ class WorkerEstructuraTest(unittest.IsolatedAsyncioTestCase):
             assert len(eventos) == 1, (modo, eventos)
             e = eventos[0]
             assert (e["job_id"], e["motor"], e["capability"], e["pipeline_id"]) == (job_id, "kimi", "code_patch", "pl-1")
-            assert e["endpoint"] and e["modo"] == modo
+            assert e["endpoint"] == "/motor/governed-dispatch" and e["trace_id"] == "t" and e["modo"] == modo
+            assert "usos_nuevo" in e and "usos_hipotesis" in e
             assert self.telegram.await_count == 1, (modo, self.telegram.await_args_list)
             assert "services/bodegas.py" in self.telegram.await_args.args[0]
 
@@ -202,6 +238,85 @@ class WorkerEstructuraTest(unittest.IsolatedAsyncioTestCase):
         await self._correr(_REAL, modo="duro")
         assert self.telegram.await_count == 0
         assert not [e for e in self._auditoria() if e.get("event") == "ESTRUCTURA_SIN_RESPALDO"]
+
+    # --- Auditoría única sobre 2da939db -------------------------------------------------
+
+    async def test_el_camino_real_del_worker_lee_git_aunque_el_dueno_sea_otro(self):
+        """BLOCK 1: sin parchear `fuentes_por_defecto` salvo la base, con un git que se niega
+        («dubious ownership») si la invocación no trae safe.directory."""
+        import dataclasses
+        import shutil
+        import subprocess
+        import sys
+        import anti_fabricacion.whitelist as wl_mod
+        ws = Path(self._tmp.name) / "ws"
+        ws.mkdir()
+        env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@t", "PATH": "/usr/bin:/bin"}
+        for a in (("init", "-q"), ("-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x")):
+            subprocess.run(["git", "-C", str(ws), *a], check=True, capture_output=True, env=env)
+        (ws / "jax").mkdir()
+        (ws / "jax" / "x.py").write_text("X = 1\n")
+        subprocess.run(["git", "-C", str(ws), "add", "-A"], check=True, capture_output=True, env=env)
+        subprocess.run(["git", "-C", str(ws), "commit", "-q", "-m", "y"], check=True, capture_output=True, env=env)
+        shim_dir = Path(self._tmp.name) / "shim"
+        shim_dir.mkdir()
+        shim = shim_dir / "git"
+        shim.write_text(
+            "#!" + sys.executable + "\nimport os, sys\na = sys.argv[1:]\n"
+            "d = a[a.index('-C') + 1] if '-C' in a else None\n"
+            "if 'safe.directory=' + str(d) not in a:\n"
+            "    sys.stderr.write('fatal: detected dubious ownership in repository at ' + str(d) + '\\n'); sys.exit(128)\n"
+            f"os.execv({shutil.which('git')!r}, ['git'] + a)\n")
+        shim.chmod(0o755)
+        real_fp = wl_mod.fuentes_por_defecto
+        fuentes_db = _fuentes(False)
+
+        def fp(raiz, **k):
+            f = real_fp(raiz, **{**k, "jax_checkout": None})
+            return dataclasses.replace(f, huella=fuentes_db.huella, esquema=fuentes_db.esquema,
+                                       rutas_app=None, claves=None, modelos=None)
+        with patch.dict(os.environ, {"PATH": f"{shim_dir}:{os.environ['PATH']}"}):
+            job_id, post = await self._correr(_REAL, modo="sombra", fuentes=fp, raiz=ws)
+        s = self.store._index[job_id]
+        assert s["status"] == "completed" and s["_estructura"]["estado"] == "limpio", s
+
+    # MAJOR 5: la rama «verificar lanza» no puede borrarse sin que esto se ponga rojo
+    async def test_si_verificar_lanza_en_duro_el_job_falla(self):
+        with patch("anti_fabricacion.estructura.verificar", side_effect=RuntimeError("bug del detector")):
+            job_id, _ = await self._correr(_REAL, modo="duro")
+        s = self.store._index[job_id]
+        assert s["status"] == "failed" and "detector_no_disponible" in s["error"] and "bug del detector" in s["error"], s
+        assert not s.get("result_path")
+
+    async def test_si_verificar_lanza_en_sombra_el_job_sigue_sin_veredicto_y_avisa(self):
+        with patch("anti_fabricacion.estructura.verificar", side_effect=RuntimeError("bug del detector")):
+            job_id, _ = await self._correr(_REAL, modo="sombra")
+        s = self.store._index[job_id]
+        assert s["status"] == "completed" and s["_estructura"]["estado"] == "no_corrio", s
+        assert self.telegram.await_count == 1
+
+    # MAJOR 4: la clave de modo ausente no es silenciosa
+    async def test_clave_de_modo_ausente_avisa_una_sola_vez_por_proceso(self):
+        await self._correr(_REAL, modo=None, fila=(None,))
+        await self._correr(_REAL, modo=None, fila=(None,))
+        textos = [c.args[0] for c in self.telegram.await_args_list]
+        assert len([t for t in textos if "anti_fabricacion.modo" in t]) == 1, textos
+
+    async def test_clave_de_modo_presente_no_avisa(self):
+        await self._correr(_REAL, modo=None, fila=("sombra",))
+        assert self.telegram.await_count == 0
+
+    # MINOR 8: un detector caído no inunda Telegram
+    async def test_el_aviso_de_detector_caido_se_enfria_por_motivo(self):
+        reloj = {"t": 1000.0}
+        with patch.object(worker, "_ahora", lambda: reloj["t"], create=True):
+            await self._correr(_REAL, modo="sombra", esquema_cae=True)
+            await self._correr(_REAL, modo="sombra", esquema_cae=True)
+            assert self.telegram.await_count == 1, "el segundo aviso, dentro de la ventana, se calla"
+            reloj["t"] += 901
+            await self._correr(_REAL, modo="sombra", esquema_cae=True)
+            assert self.telegram.await_count == 2, "pasada la ventana vuelve a avisar"
 
 
 if __name__ == "__main__":

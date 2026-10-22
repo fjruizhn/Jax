@@ -457,3 +457,86 @@ def test_nuevo_como_prefijo_de_linea_o_vineta_vale_como_propuesta(texto):
 def test_nuevo_a_mitad_de_linea_o_en_otra_linea_no_exime():
     assert _v("no es nuevo: services/bodegas.py").estado == MARCADO
     assert _v("- nuevo: services/a.py\n- services/b.py").estado == MARCADO
+
+
+# --- Auditoría única sobre 2da939db -----------------------------------------------------------
+
+def test_un_archivo_con_extension_conocida_nunca_es_tabla_columna():
+    """MAJOR 2: `errors.py`, `provider.py`, `motor.py` tienen un nombre base igual a una tabla real."""
+    wl = _wl(tablas=frozenset({"errors", "provider", "motor", "jacobs_steps"}))
+    for texto in ("Edité errors.py", "Edité `provider.py`", "Leí motor.py.", "Mira `motor.md` y `errors.json`",
+                  "Abrí provider.sql, motor.sh y motor.toml"):
+        v = _v(texto, wl=wl)
+        assert v.estado == LIMPIO and not v.items, (texto, [i.candidato for i in v.items])
+    # una tabla.columna de verdad sigue marcándose
+    assert _v("Leí `motor.columna_falsa`", wl=wl).estado == MARCADO
+
+
+def test_un_nombre_sin_directorio_no_es_candidato_de_ruta():
+    wl = _wl(archivos=frozenset({"jax/core/x.py"}))
+    assert _v("Edité `inexistente.py` y bodegas.py", wl=wl).estado == LIMPIO
+
+
+def test_una_columna_que_se_llama_como_una_extension_sigue_siendo_valida():
+    wl = _wl(tablas=frozenset({"t"}), pares=frozenset({"t.json"}))
+    assert _v("Leí `t.json`", wl=wl).estado == LIMPIO
+
+
+def test_una_entrada_enorme_no_se_revisa_y_es_no_verificable():
+    """MINOR 6: tope de bytes de entrada."""
+    from jax.anti_fabricacion.estructura import MAX_BYTES_ENTRADA
+    assert MAX_BYTES_ENTRADA == 256 * 1024
+    v = _v("Edité services/bodegas.py. " * 20000)
+    assert v.estado == NO_VERIFICABLE and "tamano" in v.no_verificables and not v.items
+
+
+@pytest.mark.parametrize("patologico", [
+    "a." * 120000, "a/" * 120000, "```x\n" * 50000, "`" * 250000, "a" * 250000, ":" * 250000,
+    "a.service " * 25000, "http://" * 35000, "- nuevo: " * 25000, "(" * 250000, "jacobs_steps." * 18000,
+], ids=["puntos", "barras", "vallas", "backticks", "letras", "dos_puntos", "unidades", "urls", "nuevo", "parentesis", "tabla"])
+def test_ninguna_entrada_dentro_del_tope_tarda_mas_de_unos_segundos(patologico):
+    """MINOR 6: sin backtracking catastrófico, medido."""
+    import time
+    t = time.monotonic()
+    _v(patologico[:256 * 1024])
+    assert time.monotonic() - t < 3.0
+
+
+def test_el_tope_de_unbacked_claims_cuenta_el_total():
+    """MINOR 7."""
+    texto = " ".join(f"`falta/n{i}.py`" for i in range(150))
+    v = _v(texto)
+    d = aplicar(v, Modo.SOMBRA)
+    assert len(d.guardar["_unbacked_claims"]) == 100 and d.guardar["_unbacked_claims_total"] == 150
+    assert d.guardar["_estructura"]["items_total"] == 150
+
+
+def test_el_veredicto_cuenta_cuantas_veces_se_uso_nuevo_y_la_pregunta_como_escape():
+    """13: para ver en la fase sombra si un modelo aprende a abusarlos."""
+    texto = ("- nuevo: a/uno.py — x\n- nuevo: a/dos.py\nCrea `nuevo: a/tres.py`.\n"
+             "¿Existirá `a/cuatro.py`? ¿O `a/cinco.py`?\nHay `a/seis.py`.")
+    v = _v(texto)
+    d = v.como_dict()
+    assert d["usos_nuevo"] == 3 and d["usos_hipotesis"] == 2, d
+    assert [i.candidato for i in v.items] == ["a/seis.py"]
+    assert _v("nada").como_dict()["usos_nuevo"] == 0
+
+
+def test_el_aviso_y_el_audit_llevan_los_contadores():
+    from jax.anti_fabricacion.consecuencia import mensaje_aviso
+    v = _v("- nuevo: a/uno.py\nHay `a/seis.py`.")
+    assert "nuevo" in mensaje_aviso(job_id="j", motor="m", capability="c", veredicto=v, modo=Modo.SOMBRA, pipeline_id=None)
+
+
+def test_leer_modo_reporta_por_que_cayo_a_duro():
+    motivos: list[str] = []
+    assert asyncio.run(leer_modo(_conectar(None), motivos=motivos)) == Modo.DURO
+    assert motivos and "falta" in motivos[0]
+    m2: list[str] = []
+    assert asyncio.run(leer_modo(_conectar(falla=True), motivos=m2)) == Modo.DURO and m2
+    m3: list[str] = []
+    assert asyncio.run(leer_modo(_conectar(("quizas",)), motivos=m3)) == Modo.DURO and m3
+    m4: list[str] = []
+    assert asyncio.run(leer_modo(_conectar(("sombra",)), motivos=m4)) == Modo.SOMBRA and not m4
+    m5: list[str] = []
+    assert asyncio.run(leer_modo(_conectar(("duro",)), motivos=m5)) == Modo.DURO and not m5

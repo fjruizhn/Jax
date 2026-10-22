@@ -346,3 +346,96 @@ def test_checkout_de_jax_es_fuente_opcional_con_solo_git_ls_files(tmp_path):
     wl_mod._MEMO.clear()
     wl2 = _correr(derivar(m.fuentes(codigo_jax=cae)))
     assert "jax_checkout" in wl2.no_disponibles
+
+
+# --- Auditoría única sobre 2da939db -----------------------------------------------------------
+
+def _shim_dubious_ownership(tmp_path, monkeypatch):
+    """Un `git` falso que responde «dubious ownership» (rc=128) salvo que la invocación
+    lleve `-c safe.directory=<el mismo directorio de -C>`: la condición de producción
+    (LAS MANOS corre como otro usuario que el dueño del workspace), simulada."""
+    import shutil
+    real = shutil.which("git")
+    bin_ = tmp_path / "shimbin"
+    bin_.mkdir()
+    shim = bin_ / "git"
+    shim.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        "a = sys.argv[1:]\n"
+        "d = a[a.index('-C') + 1] if '-C' in a else None\n"
+        "if 'safe.directory=' + str(d) not in a:\n"
+        "    sys.stderr.write('fatal: detected dubious ownership in repository at ' + str(d) + '\\n')\n"
+        "    sys.exit(128)\n"
+        f"os.execv({real!r}, ['git'] + a)\n")
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_}:{os.environ['PATH']}")
+
+
+def test_leer_git_funciona_aunque_git_vea_un_dueno_distinto(tmp_path, monkeypatch):
+    """BLOCK 1: sin `-c safe.directory=<ruta>` por invocación, git sale con rc=128 y el
+    detector queda no disponible en TODOS los jobs."""
+    repo = tmp_path / "ws"
+    repo.mkdir()
+    _repo(repo)
+    _shim_dubious_ownership(tmp_path, monkeypatch)
+    estado = wl_mod.leer_git(repo)
+    assert estado.entradas and len(estado.head) == 40
+    assert asyncio.run(wl_mod.rutas_de_checkout(repo))
+
+
+def test_el_directorio_seguro_es_el_de_la_invocacion_no_un_comodin(tmp_path, monkeypatch):
+    repo = tmp_path / "ws"
+    repo.mkdir()
+    _repo(repo)
+    seen = []
+    real = subprocess.run
+
+    def espia(cmd, *a, **k):
+        seen.append(cmd)
+        return real(cmd, *a, **k)
+    monkeypatch.setattr(wl_mod.subprocess, "run", espia)
+    wl_mod.leer_git(repo)
+    assert seen and all(f"safe.directory={repo}" in c for c in seen), seen
+    assert not any("safe.directory=*" in c for c in seen)
+
+
+def test_crear_un_archivo_dentro_de_un_directorio_no_versionado_cambia_la_huella(tmp_path):
+    """MAJOR 3: `status` colapsa un directorio no versionado en una sola línea; con
+    --untracked-files=all cada archivo cuenta."""
+    _repo(tmp_path)
+    h0 = wl_mod.leer_git(tmp_path).status_hash
+    (tmp_path / "nuevo").mkdir()
+    (tmp_path / "nuevo" / "uno.py").write_text("A = 1\n")
+    h1 = wl_mod.leer_git(tmp_path).status_hash
+    (tmp_path / "nuevo" / "dos.py").write_text("B = 1\n")
+    h2 = wl_mod.leer_git(tmp_path).status_hash
+    (tmp_path / "nuevo" / "dos.py").unlink()
+    h3 = wl_mod.leer_git(tmp_path).status_hash
+    assert len({h0, h1, h2}) == 3 and h3 == h1
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "x.js").write_text("1")
+    assert wl_mod.leer_git(tmp_path).status_hash == h1, "las exclusiones se siguen respetando"
+
+
+def test_simbolos_caidos_son_opcionales_y_se_declaran():
+    m = Mundo()
+
+    async def simbolos(_e):
+        raise RuntimeError("ast roto")
+    f = m.fuentes()
+    import dataclasses
+    f = dataclasses.replace(f, simbolos=simbolos)
+    wl = _correr(derivar(f))
+    assert "simbolos" in wl.no_disponibles
+
+
+def test_las_consultas_extra_de_sql_caidas_son_opcionales_y_se_declaran():
+    m = Mundo()
+    base = m.fuentes()
+
+    async def esquema():
+        return EsquemaDB(columnas=(("jacobs_steps", "status"),), faltan=frozenset({"sql"}))
+    import dataclasses
+    wl = _correr(derivar(dataclasses.replace(base, esquema=esquema)))
+    assert "sql" in wl.no_disponibles and "jacobs_steps.status" in wl.pares
