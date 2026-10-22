@@ -318,6 +318,18 @@ class WorkerEstructuraTest(unittest.IsolatedAsyncioTestCase):
             await self._correr(_REAL, modo="sombra", esquema_cae=True)
             assert self.telegram.await_count == 2, "pasada la ventana vuelve a avisar"
 
+    # --- Cierre (lista cerrada sobre bcfb6750) ------------------------------------------
+
+    async def test_duro_con_una_salida_demasiado_grande_falla_y_sombra_la_deja_visible(self):
+        grande = json.dumps({"diff": "", "files_modified": [], "description": "x" * (300 * 1024)})
+        job_id, _ = await self._correr(grande, modo="duro")
+        s = self.store._index[job_id]
+        assert s["status"] == "failed" and s["error"] == "salida demasiado grande para verificar", s
+        assert not s.get("result_path")
+        job_id, _ = await self._correr(grande, modo="sombra")
+        s = self.store._index[job_id]
+        assert s["status"] == "completed" and s["_estructura"]["estado"] == "no_verificable", s
+
 
 if __name__ == "__main__":
     unittest.main()

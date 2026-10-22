@@ -540,3 +540,16 @@ def test_leer_modo_reporta_por_que_cayo_a_duro():
     assert asyncio.run(leer_modo(_conectar(("sombra",)), motivos=m4)) == Modo.SOMBRA and not m4
     m5: list[str] = []
     assert asyncio.run(leer_modo(_conectar(("duro",)), motivos=m5)) == Modo.DURO and not m5
+
+
+# --- Cierre (lista cerrada sobre bcfb6750) -----------------------------------------------
+
+def test_salida_demasiado_grande_en_duro_es_una_falla_y_en_sombra_queda_visible():
+    v = _v("Edité jax/core/x.py. " * 20000)
+    assert v.estado == NO_VERIFICABLE and "tamano" in v.no_verificables
+    d = aplicar(v, Modo.DURO)
+    assert d.fallar and d.error == "salida demasiado grande para verificar"
+    s = aplicar(v, Modo.SOMBRA)
+    assert not s.fallar and s.guardar["_estructura"]["estado"] == NO_VERIFICABLE
+    # otros no_verificable NO fallan en duro
+    assert not aplicar(_v("`/services/x`", wl=_wl(rutas_app=frozenset(), no_disponibles=frozenset({"rutas_app"}))), Modo.DURO).fallar
