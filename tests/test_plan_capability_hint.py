@@ -32,24 +32,24 @@ def _gov(motors: dict, caps: dict) -> dict:
 class CapabilityHintTest(unittest.TestCase):
     def test_regla_fija_nombra_al_unico_motor_con_tool_access(self):
         governance = _gov(
-            motors={"jax_local": True, "kimi": False},
+            motors={"ada": True, "kimi": True},
             caps={
-                "jax_local": {"file_read", "file_write", "generate"},
+                "ada": {"file_read", "file_write", "generate"},
                 "kimi": {"file_read", "file_write", "implementation"},
             },
         )
         hint = _build_capability_hint(governance)
         regla, _, resto = hint.partition("Capabilities reales")
-        assert "motor en: jax_local" in regla
+        assert "motor en: ada" in regla
         assert "kimi" not in regla
 
     def test_regla_fija_lista_todos_los_motores_con_tool_access_si_hay_mas_de_uno(self):
         governance = _gov(
-            motors={"jax_local": True, "kimi": True},
-            caps={"jax_local": {"file_write"}, "kimi": {"file_write"}},
+            motors={"ada": True, "hipatia": True},
+            caps={"ada": {"file_write"}, "hipatia": {"file_write"}},
         )
         hint = _build_capability_hint(governance)
-        assert "motor en: jax_local, kimi" in hint
+        assert "motor en: ada, hipatia" in hint
 
     def test_sin_ningun_motor_con_tool_access_advierte_no_planificar_file_ops(self):
         governance = _gov(motors={"kimi": False}, caps={"kimi": {"generate"}})
@@ -59,12 +59,12 @@ class CapabilityHintTest(unittest.TestCase):
 
     def test_mapa_dinamico_excluye_file_read_write_y_lista_capacidades_reales(self):
         governance = _gov(
-            motors={"kimi": False},
+            motors={"kimi": True},
             caps={"kimi": {"file_read", "file_write", "critique", "bug_hunt"}},
         )
         hint = _build_capability_hint(governance)
-        linea_kimi = next(l for l in hint.splitlines() if l.startswith("- kimi:"))
-        assert linea_kimi == "- kimi: bug_hunt, critique"
+        assert "- kimi:" not in hint
+        assert "Capabilities reales" not in hint
 
     def test_motor_sin_capacidades_no_file_no_aparece_en_el_mapa_dinamico(self):
         governance = _gov(
@@ -81,20 +81,15 @@ class CapabilityHintContraDBRealTest(unittest.IsolatedAsyncioTestCase):
     arriba. Corre contra jax_memory real (mismo criterio que
     test_plan_validation.py), sin mutar nada (solo SELECT)."""
 
-    async def test_hint_contra_governance_real_nombra_a_los_tres_motores_con_tools(self):
-        """Task 5 (2026-09-18): jax_local dejó de ser el único -- `ada`/
-        `kimi` subieron a has_tool_access=1 (medido con una llamada real
-        contra su proveedor: los dos llaman a read_file). `thot` se queda
-        afuera (su proveedor rechaza function tools con reasoning_effort, y
-        es la faceta árbitro). `_build_capability_hint` lee `motors` tal
-        cual viene de `motor.has_tool_access` -- no filtra por MOTOR_FACETS
-        -- así que `ada` aparece en la regla aunque hoy no esté en
-        MOTOR_FACETS (jacobs/models.py) y su dispatch HTTP-directo
-        (executor.py) todavía no consulte esta columna."""
+    async def test_hint_contra_governance_real_solo_nombra_facetas_con_dispatch_gobernado(self):
+        """El hint omite motores cuyo despacho por pipeline no está gobernado,
+        aunque la tabla de gobernanza indique que tienen herramientas."""
         governance = await _store.get_motor_governance()
         hint = _build_capability_hint(governance)
         regla, _, _ = hint.partition("Capabilities reales")
-        assert "motor en: ada, jax_local, kimi" in regla
+        assert "motor en: ada" in regla
+        assert "jax_local" not in regla
+        assert "kimi" not in regla
         assert "thot" not in regla
 
 

@@ -19,9 +19,12 @@ En honor al Prof. Raúl Jacobs.
 from __future__ import annotations
 
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from jacobs.models import Step
-from jacobs.plan import PlanBuilder, PlanRejected, _validate_plan_capabilities
+from jacobs.plan import (
+    MotorGobernadoNoDisponible, PlanBuilder, PlanRejected, _validate_plan_capabilities,
+)
 
 
 def _step(step_index, facet, capability, motor=None, depends_on=None):
@@ -88,9 +91,15 @@ class PlanValidationTest(unittest.IsolatedAsyncioTestCase):
         await _validate_plan_capabilities(steps)  # no debe lanzar
 
     async def test_rechaza_capability_ausente_de_capability_motor(self):
+        governance = {
+            "motors": {"kimi": True},
+            "capabilities": {},
+            "facets": frozenset(),
+            "arbitro_faceta": None,
+        }
         steps = [_step(0, facet="kimi", capability="capability-que-no-existe")]
         with self.assertRaises(PlanRejected) as ctx:
-            await _validate_plan_capabilities(steps)
+            await _validate_plan_capabilities(steps, governance)
         assert "capability-que-no-existe" in str(ctx.exception)
         assert "capability_motor" in str(ctx.exception)
 
@@ -102,35 +111,45 @@ class PlanValidationTest(unittest.IsolatedAsyncioTestCase):
         steps = [_step(0, facet="hipatia", capability="cualquier-cosa-inventada")]
         await _validate_plan_capabilities(steps)  # no debe lanzar
 
-    async def test_build_con_steps_spec_propaga_el_rechazo_antes_de_devolver_el_plan(self):
-        """Task 5 (2026-09-18): el step original (kimi/file_write) ya no
-        sirve para este test -- kimi ganó has_tool_access, así que ese plan
-        AHORA es válido (justo el comportamiento que Task 5 buscaba). Se
-        usa una capability inexistente para seguir probando lo que este
-        test realmente verifica: que build() propaga el rechazo antes de
-        persistir, sin importar cuál sea la violación."""
+    async def test_build_rechaza_motor_no_gobernado_antes_de_persistir(self):
+        """La compuerta nueva rechaza explícitamente un motor legacy antes
+        de cualquier validación posterior o persistencia."""
         builder = PlanBuilder()
-        with self.assertRaises(PlanRejected):
-            await builder.build(
-                pipeline_id="test-pipeline-2",
-                objective="objetivo de prueba",
-                steps_spec=[{"facet": "kimi", "capability": "capability-que-no-existe", "prompt": "x"}],
-            )
+        from jacobs import store
+
+        governance = {"capabilities": {}, "facets": frozenset({"kimi"}), "arbitro_faceta": None}
+        with patch.object(store, "get_motor_governance", AsyncMock(return_value=governance)):
+            with self.assertRaises(MotorGobernadoNoDisponible) as ctx:
+                await builder.build(
+                    pipeline_id="test-pipeline-2",
+                    objective="objetivo de prueba",
+                    steps_spec=[{"facet": "kimi", "capability": "file_write", "prompt": "x"}],
+                )
+        assert ctx.exception.code == "motor_gobernado_no_disponible"
+        assert "requiere ejecución gobernada por paso no disponible" in str(ctx.exception)
 
     async def test_cleanroom_ahora_bloquea_en_vez_de_solo_advertir(self):
         """T3: antes _check_cleanroom solo emitía logger.warning. Un plan
         donde un facet audita su propio trabajo debe rechazarse igual que un
         plan con capability/motor inejecutable."""
         builder = PlanBuilder()
-        with self.assertRaises(PlanRejected) as ctx:
-            await builder.build(
-                pipeline_id="test-pipeline-3",
-                objective="objetivo de prueba",
-                steps_spec=[
-                    {"facet": "kimi", "capability": "implementation", "prompt": "x"},
-                    {"facet": "kimi", "capability": "critique", "prompt": "y", "depends_on": [0]},
-                ],
-            )
+        from jacobs import store
+
+        governance = {
+            "capabilities": {},
+            "facets": frozenset({"ada", "thot"}),
+            "arbitro_faceta": "thot",
+        }
+        with patch.object(store, "get_motor_governance", AsyncMock(return_value=governance)):
+            with self.assertRaises(PlanRejected) as ctx:
+                await builder.build(
+                    pipeline_id="test-pipeline-3",
+                    objective="objetivo de prueba",
+                    steps_spec=[
+                        {"facet": "ada", "capability": "implementation", "prompt": "x"},
+                        {"facet": "ada", "capability": "critique", "prompt": "y", "depends_on": [0]},
+                    ],
+                )
         msg = str(ctx.exception).lower()
         assert "mismo facet" in msg or "cleanroom" in msg
 

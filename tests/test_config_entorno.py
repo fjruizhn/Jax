@@ -77,19 +77,28 @@ def _proceso_limpio(codigo: str, **entorno) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, timeout=120)
 
 
-def test_jacobs_toma_las_urls_del_entorno():
+def test_jacobs_toma_la_url_de_ollama_del_entorno():
     r = _proceso_limpio(
-        "from jacobs import executor, plan; print(executor.LAS_MANOS_BASE, executor.OLLAMA_URL, plan.OLLAMA_URL)",
-        LAS_MANOS_URL="http://las-manos.test:7777/", JAX_OLLAMA_URL="http://ollama.test:11434")
+        "from jacobs import executor, plan; print(executor.OLLAMA_URL, plan.OLLAMA_URL)",
+        JAX_OLLAMA_URL="http://ollama.test:11434")
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split() == ["http://las-manos.test:7777", "http://ollama.test:11434/api/chat",
-                                "http://ollama.test:11434/api/chat"]
+    assert r.stdout.split() == ["http://ollama.test:11434/api/chat", "http://ollama.test:11434/api/chat"]
 
 
-def test_jacobs_no_arranca_sin_LAS_MANOS_URL():
-    r = _proceso_limpio("from jacobs import executor", LAS_MANOS_URL=None)
+def test_jacobs_no_depende_de_LAS_MANOS_URL():
+    """Jacobs ya no le habla a LAS MANOS por HTTP (el despacho de motores esta
+    cerrado: 410 / GovernedExecutionRequiredError): no tiene URL que exigir ni
+    constante que la guarde. Antes arrancaba solo si la variable estaba."""
+    r = _proceso_limpio(
+        "from jacobs import executor; print(hasattr(executor, 'LAS_MANOS_BASE'))", LAS_MANOS_URL=None)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["False"]
+
+
+def test_jacobs_no_arranca_sin_JAX_OLLAMA_URL():
+    r = _proceso_limpio("from jacobs import executor", JAX_OLLAMA_URL=None)
     assert r.returncode != 0
-    assert "LAS_MANOS_URL" in r.stderr
+    assert "JAX_OLLAMA_URL" in r.stderr
 
 
 def test_la_memoria_sin_JAX_OLLAMA_URL_falla_visible(monkeypatch):
@@ -120,16 +129,6 @@ def test_la_memoria_pide_el_embedding_a_JAX_OLLAMA_URL(monkeypatch):
     assert urls == ["http://ollama.test:11434/api/embed"]
 
 
-def test_el_musculo_local_no_tiene_url_por_defecto_y_el_repl_la_toma_del_entorno(monkeypatch):
-    from jax.core.main import build_muscles
-    from jax.muscles.ollama_muscle import OllamaMuscle
-    assert inspect.signature(OllamaMuscle.__init__).parameters["api_url"].default is inspect.Parameter.empty
-    monkeypatch.setenv("JAX_OLLAMA_URL", "http://ollama.test:11434")
-    cfg = {"jax": {"timeout_seconds": 10}, "personalities": {"jax_local": {
-        "type": "ollama", "provider": "ollama", "model_default": "q", "models_allowed": ["q"], "system_prompt": "s"}}}
-    assert build_muscles(cfg)["jax_local"].api_url == "http://ollama.test:11434/api/chat"
-
-
 @pytest.mark.parametrize("proveedor, metodo", [
     ("deepseek", "_call_deepseek"), ("openai", "_call_openai"), ("gemini", "_call_gemini"),
 ])
@@ -151,7 +150,7 @@ def test_sin_url_del_catalogo_el_musculo_http_no_despacha(proveedor, metodo):
 
 
 _SIN_URLS_LITERALES = ("jacobs/executor.py", "jacobs/plan.py", "jax/memory/db.py",
-                       "jax/muscles/base.py", "jax/muscles/ollama_muscle.py")
+                       "jax/muscles/base.py")
 
 
 def _urls_literales(fuente: str) -> list[int]:

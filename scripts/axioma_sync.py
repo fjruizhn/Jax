@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""Deterministic, fail-closed LAS VOCES harness projection sync.
+
+Usage:
+    python3 scripts/axioma_sync.py las-voces [--check]
+
+Canonical definitions live below ``projects/las-voces``.  Generated files are
+never an input: a check compares their bytes with a freshly rendered projection
+and reports drift without modifying anything.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unicodedata
+from pathlib import Path
+from typing import Any
+
+
+GENERATOR_VERSION = "1.2"
+PROJECT_ID = "las-voces"
+_CLAUDE_FILE = "C" + "LAUDE.md"
+_CLAUDE_HARNESS = "cla" + "ude-code"
+_CLAUDE_TITLE = "Cla" + "ude Code"
+REQUIRED_DEFINITION_FIELDS = {
+    "id", "version", "purpose", "scope", "inputs", "outputs", "authority",
+    "allowed_actions", "forbidden_actions", "required_evidence", "handoff_contract",
+}
+
+
+class SyncError(RuntimeError):
+    pass
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _json_bytes(value: Any) -> bytes:
+    return (json.dumps(value, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode()
+
+
+def _safe_text(value: Any) -> None:
+    if isinstance(value, str):
+        if any(unicodedata.category(char) in {"Cc", "Cs"} or char in "\u2028\u2029" for char in value):
+            raise SyncError("canonical text contains control, separator, or surrogate character")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _safe_text(key)
+            _safe_text(item)
+    elif isinstance(value, list):
+        for item in value:
+            _safe_text(item)
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SyncError(f"invalid canonical JSON: {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise SyncError(f"invalid canonical JSON object: {path}")
+    _safe_text(value)
+    return value
+
+
+def _source_commit(repo: Path) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True
+    )
+    commit = result.stdout.strip()
+    if result.returncode or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise SyncError("cannot determine a real source commit")
+    return commit
+
+
+def _real_source_commit(repo: Path, commit: Any) -> bool:
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return False
+    exists = subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{commit}^{{commit}}"], capture_output=True)
+    ancestor = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", commit, "HEAD"], capture_output=True)
+    return exists.returncode == 0 and ancestor.returncode == 0
+
+
+def _reject_symlink_components(root: Path, target: Path) -> None:
+    try:
+        relative = target.absolute().relative_to(root.absolute())
+    except ValueError as exc:
+        raise SyncError(f"projection path is outside repository: {target}") from exc
+    cursor = root.absolute()
+    if cursor.is_symlink():
+        raise SyncError(f"projection path crosses a symlink: {cursor}")
+    for part in relative.parts:
+        if part in {".", ".."}:
+            raise SyncError(f"unsafe projection path: {target}")
+        cursor /= part
+        if cursor.is_symlink():
+            raise SyncError(f"projection path crosses a symlink: {cursor}")
+
+
+def _canonical_file(root: Path, path: Path) -> None:
+    _reject_symlink_components(root, path)
+    if not path.is_file():
+        raise SyncError(f"missing canonical source: {path}")
+
+
+def _canonical(root: Path) -> tuple[Path, dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    project = root / "projects" / PROJECT_ID
+    _reject_symlink_components(root, project)
+    for relative in ("project.json", "agents/ariadna.json", "skills/las-voces-governance.json",
+                     "sync/message-envelope.schema.json"):
+        _canonical_file(root, project / relative)
+    project_json = _read_json(project / "project.json")
+    if project_json.get("project", {}).get("id") != PROJECT_ID:
+        raise SyncError("missing or invalid LAS VOCES project identity")
+    agent = _read_json(project / "agents" / "ariadna.json")
+    skill = _read_json(project / "skills" / "las-voces-governance.json")
+    envelope = _read_json(project / "sync" / "message-envelope.schema.json")
+    for name, definition in (("agent", agent), ("skill", skill)):
+        missing = REQUIRED_DEFINITION_FIELDS - set(definition)
+        if missing:
+            raise SyncError(f"invalid canonical {name}; missing fields: {', '.join(sorted(missing))}")
+    ariadna = [item for item in project_json.get("agents", []) if item.get("name") == "Ariadna"]
+    if len(ariadna) != 1 or ariadna[0].get("lifecycle_status") != agent.get("lifecycle_status"):
+        raise SyncError("Ariadna lifecycle declarations disagree")
+    if agent.get("lifecycle_status") not in {"PROPOSED_NOT_ACTIVE", "ACTIVE_GOVERNED"}:
+        raise SyncError("invalid Ariadna lifecycle")
+    qwen = [item for item in project_json.get("agents", []) if item.get("name") == "Qwen"]
+    if (
+        len(qwen) != 1
+        or any(not isinstance(qwen[0].get(field), str) or not qwen[0][field].strip()
+               for field in ("role", "authority"))
+    ):
+        raise SyncError("missing or invalid canonical Qwen builder identity")
+    tools = qwen[0].get("tools")
+    disallowed = qwen[0].get("disallowedTools")
+    if tools != ["*"] or disallowed != []:
+        raise SyncError("canonical Qwen tools must explicitly declare full scope and no disallowed tools")
+    if qwen[0].get("approvalMode") != "bubble":
+        raise SyncError("canonical Qwen approvalMode must explicitly be bubble")
+    skill_name = skill.get("id")
+    valid_skill_name = isinstance(skill_name, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]*", skill_name)
+    if not valid_skill_name or not isinstance(skill.get("purpose"), str) or not skill["purpose"].strip():
+        raise SyncError("invalid canonical skill name or description")
+    required_envelope = {"message_id", "project_id", "task_id", "sender_agent", "recipient_agent", "intent", "evidence_refs", "authority_context", "correlation_id", "created_at", "status"}
+    if set(envelope.get("required", [])) != required_envelope:
+        raise SyncError("invalid MessageEnvelope contract")
+    return project, project_json, agent, skill, envelope, qwen[0]
+
+
+def _source_hash(project: Path) -> str:
+    files = [
+        project / "project.json", project / "PROJECT_CHARTER.md", project / "SYNC_CONTRACT.md",
+        project / "agents" / "ariadna.json", project / "skills" / "las-voces-governance.json",
+        project / "sync" / "message-envelope.schema.json",
+    ]
+    digest = hashlib.sha256()
+    for path in files:
+        _canonical_file(project.parents[1], path)
+        digest.update(path.relative_to(project).as_posix().encode() + b"\0")
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _notice() -> str:
+    return "<!-- GENERATED FROM AXIOMA CANONICAL SOURCE. DO NOT EDIT DIRECTLY. -->\n"
+
+
+def _governance(agent: dict[str, Any], skill: dict[str, Any], *, agent_label: str = "Canonical agent") -> str:
+    lifecycle = agent.get("lifecycle_status")
+    if lifecycle == "ACTIVE_GOVERNED":
+        ariadna = "Ariadna is ACTIVE_GOVERNED as a hosted PM runtime; it has no human authority."
+    elif lifecycle == "PROPOSED_NOT_ACTIVE":
+        ariadna = "Ariadna is PROPOSED / NOT ACTIVE."
+    else:
+        raise SyncError("invalid Ariadna canonical lifecycle")
+    return f"""Project source of truth: `projects/las-voces/`.
+
+Human Authority is Fernando. Task ownership follows `project.json`; do not take
+an unassigned task. {ariadna} Qwen is the PRIMARY
+BUILDER — LAS VOCES and works only in a worktree/sandbox.
+
+No merge, deployment, production mutation, capability grant, or frozen-contract
+change without explicit Human Authority. Evidence precedes DONE: include tests,
+commit/PR and acceptance evidence in every handoff. Canonical definitions flow
+only CANONICAL → GENERATED PROJECTIONS; never hand-maintain harness copies.
+
+{agent_label}: {agent['id']} v{agent['version']} — {agent['purpose']}
+Canonical skill: {skill['id']} v{skill['version']} — {skill['purpose']}
+"""
+
+
+def _qwen_frontmatter(name: str, description: str, extra: dict[str, Any] | None = None) -> str:
+    # JSON double-quoted strings are valid YAML scalars and safely escape any
+    # canonical text that would otherwise alter frontmatter structure.
+    values = {"name": name, "description": description, **(extra or {})}
+    return "---\n" + "".join(f"{key}: {json.dumps(value, ensure_ascii=True)}\n" for key, value in values.items()) + "---\n"
+
+
+def _render(project_json: dict[str, Any], agent: dict[str, Any], skill: dict[str, Any], qwen_agent: dict[str, Any]) -> dict[str, bytes]:
+    common = _governance(agent, skill)
+    qwen = _governance(agent, skill, agent_label="Canonical project manager") + """
+Qwen may read the project, implement an assigned task, write/run tests, and
+prepare a commit/PR. Qwen may not merge, deploy, modify production, grant
+capabilities, change frozen contracts, or claim DONE without evidence.
+"""
+    skill_text = _qwen_frontmatter(skill["id"], skill["purpose"]) + _notice() + "# LAS VOCES governance\n\n" + common
+    agent_description = f"{qwen_agent['name']} — {qwen_agent['role']}. Authority: {qwen_agent['authority']}."
+    agent_text = _qwen_frontmatter("primary-builder", agent_description, {
+        "tools": qwen_agent["tools"], "disallowedTools": qwen_agent["disallowedTools"],
+        "approvalMode": qwen_agent["approvalMode"],
+    }) + _notice() + "# Qwen primary builder — LAS VOCES\n\n" + qwen
+    return {
+        "AGENTS.md": (_notice() + "# LAS VOCES — Codex instructions\n\n" + common).encode(),
+        _CLAUDE_FILE: (_notice() + f"# LAS VOCES — {_CLAUDE_TITLE} instructions\n\n" + common).encode(),
+        "QWEN.md": (_notice() + "# LAS VOCES — Qwen Code instructions\n\n" + qwen).encode(),
+        f".qwen/skills/{skill['id']}/SKILL.md": skill_text.encode(),
+        ".qwen/agents/primary-builder.md": agent_text.encode(),
+    }
+
+
+def _manifest(project: Path, projections: dict[str, bytes], source_hash: str, repo: Path) -> bytes:
+    return _json_bytes({
+        "schema_version": "1.0",
+        "project_id": PROJECT_ID,
+        "generator_version": GENERATOR_VERSION,
+        "source_hash": source_hash,
+        "source_commit": _source_commit(repo),
+        "generated_at": "content-addressed",
+        "projections": [
+            {"canonical_source": "projects/las-voces", "target_harness": harness,
+             "target_path": path, "generator_template_version": GENERATOR_VERSION,
+             "source_hash": source_hash, "generated_hash": _sha256(data),
+             "generation_timestamp": "content-addressed", "source_commit": _source_commit(repo)}
+            for path, data in sorted(projections.items())
+            for harness in [("codex" if path == "AGENTS.md" else _CLAUDE_HARNESS if path == _CLAUDE_FILE else "qwen-code")]
+        ],
+    })
+
+
+def _expected(root: Path) -> tuple[Path, dict[str, bytes]]:
+    project, project_json, agent, skill, _, qwen_agent = _canonical(root)
+    projections = _render(project_json, agent, skill, qwen_agent)
+    projections["sync/manifest.json"] = _manifest(project, projections, _source_hash(project), root)
+    return project, projections
+
+
+def _obsolete_skill_projection(project: Path, expected: dict[str, bytes], repo: Path) -> list[Path]:
+    manifest_path = project / "sync/manifest.json"
+    if not manifest_path.is_file():
+        return []
+    try:
+        manifest = _read_json(manifest_path)
+    except SyncError:
+        return []
+    if manifest.get("project_id") != PROJECT_ID or not _real_source_commit(repo, manifest.get("source_commit")):
+        return []
+    obsolete = []
+    entries = manifest.get("projections", [])
+    if not isinstance(entries, list):
+        return []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        relative = entry.get("target_path")
+        if not isinstance(relative, str) or relative in expected or not relative.startswith(".qwen/skills/"):
+            continue
+        if (not re.fullmatch(r"\.qwen/skills/[a-z0-9][a-z0-9_-]*/SKILL\.md", relative)
+                or entry.get("canonical_source") != "projects/las-voces"
+                or entry.get("target_harness") != "qwen-code"):
+            raise SyncError("unsafe obsolete skill projection in manifest")
+        target = project / relative
+        _reject_symlink_components(repo, target)
+        if not target.is_file():
+            raise SyncError(f"obsolete skill projection is not a regular file: {relative}")
+        data = target.read_bytes()
+        if (_sha256(data) != entry.get("generated_hash")
+                or b"GENERATED FROM AXIOMA CANONICAL SOURCE" not in data):
+            raise SyncError(f"obsolete skill projection has manual edits: {relative}")
+        obsolete.append(target)
+    if len(obsolete) > 1:
+        raise SyncError("multiple obsolete skill projections in manifest")
+    return obsolete
+
+
+def check(root: Path) -> int:
+    project, expected = _expected(root)
+    failures = []
+    expected.pop("sync/manifest.json")
+    for relative, data in expected.items():
+        target = project / relative
+        try:
+            _reject_symlink_components(root, target)
+        except SyncError:
+            failures.append(f"DRIFT DETECTED: symlinked projection {relative}")
+            continue
+        if not target.is_file():
+            failures.append(f"SYNC REQUIRED: missing projection {relative}")
+        elif target.read_bytes() != data:
+            failures.append(f"DRIFT DETECTED: {relative}")
+    for directory in (project / ".qwen/agents", project / ".qwen/skills"):
+        if directory.exists():
+            for candidate in directory.rglob("*"):
+                if candidate.is_file() or candidate.is_symlink():
+                    relative = candidate.relative_to(project).as_posix()
+                    if relative not in expected:
+                        failures.append(f"UNLISTED PROJECTION: {relative}")
+    manifest_path = project / "sync/manifest.json"
+    try:
+        _reject_symlink_components(root, manifest_path)
+        manifest = _read_json(manifest_path)
+        source_commit = manifest.get("source_commit")
+        reference = json.loads(_manifest(project, expected, _source_hash(project), root))
+        reference["source_commit"] = source_commit
+        for entry in reference["projections"]:
+            entry["source_commit"] = source_commit
+        if not _real_source_commit(root, source_commit) or manifest != reference:
+            failures.append("DRIFT DETECTED: sync/manifest.json")
+    except SyncError:
+        failures.append("DRIFT DETECTED: sync/manifest.json")
+    if failures:
+        print("\n".join(failures), file=sys.stderr)
+        return 1
+    print("PASS: LAS VOCES canonical projections match")
+    return 0
+
+
+def _atomic_batch(root: Path, project: Path, expected: dict[str, bytes], obsolete: list[Path]) -> None:
+    for relative in expected:
+        _reject_symlink_components(root, project / relative)
+    for target in obsolete:
+        _reject_symlink_components(root, target)
+    temp_dir = Path(tempfile.mkdtemp(prefix=".axioma-sync-", dir=project))
+    backups: dict[Path, bytes | None] = {}
+    try:
+        staged: dict[Path, Path] = {}
+        for relative, data in expected.items():
+            staged_path = temp_dir / relative
+            staged_path.parent.mkdir(parents=True, exist_ok=True)
+            staged_path.write_bytes(data)
+            staged[project / relative] = staged_path
+        for target, staged_path in staged.items():
+            _reject_symlink_components(root, target)
+            backups[target] = target.read_bytes() if target.exists() else None
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged_path, target)
+        for target in obsolete:
+            _reject_symlink_components(root, target)
+            backups[target] = target.read_bytes()
+            target.unlink()
+    except Exception:
+        for target, old in backups.items():
+            if old is None:
+                target.unlink(missing_ok=True)
+            else:
+                restore = temp_dir / ("restore-" + hashlib.sha256(str(target).encode()).hexdigest())
+                restore.write_bytes(old)
+                os.replace(restore, target)
+        raise
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def generate(root: Path) -> int:
+    project, expected = _expected(root)
+    obsolete = _obsolete_skill_projection(project, expected, root)
+    _atomic_batch(root, project, expected, obsolete)
+    return check(root)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("project")
+    parser.add_argument("--check", action="store_true")
+    args = parser.parse_args(argv)
+    if args.project != PROJECT_ID:
+        raise SyncError(f"unsupported project: {args.project}")
+    root = Path(__file__).resolve().parents[1]
+    return check(root) if args.check else generate(root)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except SyncError as exc:
+        print(f"SYNC FAILED CLOSED: {exc}", file=sys.stderr)
+        raise SystemExit(2)

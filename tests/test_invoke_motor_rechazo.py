@@ -14,42 +14,46 @@ En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
-import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from base_de_test import exigir_base_de_test  # noqa: E402
 
 exigir_base_de_test()
 
 from jacobs.executor import _invoke_motor  # noqa: E402
+from policy.execution_control.errors import GovernedExecutionRequiredError  # noqa: E402
 from jacobs.models import Pipeline, Step  # noqa: E402
 
-_REASON = "timeout_seconds=900 excede el techo de 'generate' (5 min = 300s)"
-
-
-class _Resp:
-    status_code = 202
-
-    def json(self):
-        return {"job_id": "j1", "status": "rejected", "rejected_reason": _REASON}
-
-    def raise_for_status(self):
-        pass
-
-
 class InvokeMotorRechazoTest(unittest.IsolatedAsyncioTestCase):
-    async def test_el_rechazo_falla_con_su_motivo_real(self):
-        async def fake_post(client_self, url, **kw):
-            return _Resp()
-
+    async def test_motor_sin_ejecucion_gobernada_no_hace_http(self):
         step = Step(facet="kimi", capability="generate", motor="kimi")
         pipeline = Pipeline(name="t", invoked_by="t", user_id="1", tenant_id="1", mode="dry_run")
-        with patch("httpx.AsyncClient.post", fake_post):
-            with self.assertRaises(RuntimeError) as ctx:
+        cliente = Mock()
+        cliente.post = AsyncMock(side_effect=AssertionError("no debe despachar al Motor Registry"))
+        with patch("jacobs.executor.obtener_cliente_http", return_value=cliente) as obtener_cliente:
+            with self.assertRaises(GovernedExecutionRequiredError):
                 await _invoke_motor(step, pipeline, timeout=900)
+        obtener_cliente.assert_not_called()
+        cliente.post.assert_not_awaited()
 
-        assert _REASON in str(ctx.exception), str(ctx.exception)
+
+class CodigoMuertoDelDespachoLegacyTest(unittest.TestCase):
+    """E2b-1a MINOR 3 (auditoria #362): el despacho directo a LAS MANOS esta
+    cerrado; el codigo que lo sostenia (polling, lectura de resultado,
+    cancelacion, `_rechazado`) quedo inalcanzable y se borro. Mismo riesgo que
+    advierte `_invoke_hyde`: quien lo resucite sin que nada lo note reabre un
+    camino sin gobernar. Si hace falta de nuevo, va con ejecucion gobernada."""
+
+    def test_executor_ya_no_tiene_el_polling_ni_la_cancelacion_de_motor_jobs(self):
+        from jacobs import executor
+        for nombre in ("_read_motor_result", "_cancel_motor_job", "MOTOR_POLL_INTERVAL"):
+            self.assertFalse(hasattr(executor, nombre), nombre)
+
+    def test_las_manos_dispatch_ya_no_tiene_el_cuerpo_legacy(self):
+        from motor_registry import routes
+        self.assertFalse(hasattr(routes, "_rechazado"))
+        self.assertFalse(hasattr(routes, "human_gate"))
 
 
 if __name__ == "__main__":

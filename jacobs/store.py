@@ -15,8 +15,10 @@ import time
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, AsyncIterator, Iterator
+from types import MappingProxyType
+from typing import Any, AsyncIterator, Iterator, Mapping, Sequence
 
 import aiomysql
 from pymysql import err as _pymysql_err
@@ -1857,6 +1859,92 @@ async def pipeline_get(pipeline_id: str) -> Pipeline | None:
     if not row:
         return None
     return _row_to_pipeline(row)
+
+
+@dataclass(frozen=True)
+class PipelineStatusSnapshot:
+    """Minimal immutable canonical observation for governed pipeline status."""
+    pipeline_id: str
+    tenant_id: str | None
+    user_id: str | None
+    status: PipelineStatus
+    observed_at: datetime
+
+
+async def pipeline_status_snapshots(pipeline_ids: Sequence[str]) -> Mapping[str, PipelineStatusSnapshot]:
+    """Read at most one governed page by PRIMARY KEY and timestamp it post-fetch."""
+    if isinstance(pipeline_ids, (str, bytes)):
+        raise ValueError("pipeline status batch requires a sequence of pipeline identifiers")
+    ids = tuple(pipeline_ids)
+    if not 1 <= len(ids) <= 50 or any(not isinstance(item, str) or not item for item in ids):
+        raise ValueError("pipeline status batch requires one to fifty nonempty identifiers")
+    if len(set(ids)) != len(ids):
+        raise ValueError("pipeline status batch cannot contain duplicate identifiers")
+    placeholders = ",".join(("%s",) * len(ids))
+    async with conexion_del_pool() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT pipeline_id, user_id, tenant_id, status FROM jacobs_pipelines "
+                f"WHERE pipeline_id IN ({placeholders})", ids)
+            rows = await cur.fetchall()
+    observed_at = datetime.now(timezone.utc)
+    snapshots: dict[str, PipelineStatusSnapshot] = {}
+    for row in rows:
+        pipeline_id = row.get("pipeline_id")
+        if not isinstance(pipeline_id, str) or pipeline_id not in ids or pipeline_id in snapshots:
+            raise ValueError("canonical pipeline status batch returned an invalid identity")
+        snapshots[pipeline_id] = PipelineStatusSnapshot(
+            pipeline_id=pipeline_id, tenant_id=row.get("tenant_id"), user_id=row.get("user_id"),
+            status=PipelineStatus(row.get("status")), observed_at=observed_at)
+    return MappingProxyType(snapshots)
+
+
+@dataclass(frozen=True)
+class StepStatusSnapshot:
+    """One canonical step row plus its joined, acknowledged pipeline owner."""
+
+    step_id: str
+    status: str
+    pipeline_id: str
+    tenant_id: str | None
+    user_id: str | None
+    owner_ack_at: float | None
+    pipeline_status: str
+    observed_at: datetime
+
+
+_STEP_STATUS_SNAPSHOT_SQL = """
+    SELECT s.step_id, s.status, s.pipeline_id,
+           p.tenant_id, p.user_id, p.owner_ack_at,
+           p.status AS pipeline_status
+      FROM jacobs_steps AS s
+      JOIN jacobs_pipelines AS p ON p.pipeline_id = s.pipeline_id
+     WHERE s.step_id = %s
+"""
+
+
+async def step_status_snapshot(step_id: str) -> StepStatusSnapshot | None:
+    """Read step state and pipeline ownership from one canonical SQL snapshot.
+
+    The INNER JOIN makes an orphaned step unavailable. The resolver performs
+    owner acknowledgment, visibility, enum, and request-scope checks against
+    this immutable result; no Platform projection participates.
+    """
+    if not isinstance(step_id, str) or not step_id.strip():
+        raise ValueError("step_id must be a non-empty string")
+    async with conexion_del_pool() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(_STEP_STATUS_SNAPSHOT_SQL, (step_id,))
+            row = await cur.fetchone()
+            observed_at = datetime.now(timezone.utc)
+    if row is None:
+        return None
+    return StepStatusSnapshot(
+        step_id=row["step_id"], status=row["status"], pipeline_id=row["pipeline_id"],
+        tenant_id=row["tenant_id"], user_id=row["user_id"],
+        owner_ack_at=row["owner_ack_at"], pipeline_status=row["pipeline_status"],
+        observed_at=observed_at,
+    )
 
 
 async def pipeline_status_previo(pipeline_id: str) -> str | None:

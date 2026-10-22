@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""El camino de entrada más simple: `procesar(proyecto, rutas) -> dict`, y su
+"""El camino de entrada más simple: `procesar(project_uuid, rutas) -> dict`, y su
 línea de comandos. `procesamiento/` ya está terminado y auditado (jax#252,
 252 tests, en verde) -- este guion es lo único que hoy lo pone a trabajar.
 
 Estructura de salida -- el trabajo es el PROYECTO:
 
-    $JAX_WORKSPACE_DIR/proyectos/<slug-del-proyecto>/
+    $JAX_WORKSPACE_DIR/proyectos/<project_uuid>/
         fuente/      <- los originales (subcarpeta de origen conservada)
         procesado/   <- lo que ya produce `procesamiento.ingesta`
 
@@ -22,6 +22,10 @@ Dos reglas de recorrido:
      archivos no se listan ni se ingieren. Son corridas viejas de este
      mismo sistema (`_extractos/`, `_extractos_ocr/`), no material fuente:
      ingerirlas sería procesar nuestros propios extractos.
+
+El guion NO habla con la base (es manual, lo corre `fruiz`): el operador es
+responsable de que el uuid sea de un proyecto real y ACTIVE. El endpoint de
+LAS MANOS sí lo verifica; este camino manual no.
 
 Lo que este guion NO hace, a propósito (fuera del encargo, no se agrega de
 paso): no escribe `proyecto.json`, no toca permisos, no vigila carpetas, no
@@ -44,13 +48,17 @@ from procesamiento import ingesta
 
 _NOMBRE_FICHA = "ficha.json"
 
+# E2a: misma regla que `las_manos/procesamiento_routes.py::_UUID_CANONICO`.
+_UUID_CANONICO = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
 
 def _slug(texto: str) -> str:
     """Minúsculas, sin acentos, sin caracteres que no sean `[a-z0-9]`
     (reemplazados por un único `-`), sin guiones al borde. Se usa TANTO
-    para el nombre del proyecto (`proyectos/<slug>/`) como para cada
-    componente de subcarpeta dentro de `fuente/` -- mismo criterio en los
-    dos lugares, una sola función."""
+    para cada componente de subcarpeta dentro de `fuente/`. (El proyecto ya
+    no se slugifica: su carpeta es `proyectos/<project_uuid>/`.)"""
     sin_acentos = (
         unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode("ascii")
     )
@@ -136,17 +144,18 @@ def _resumen(documentos: list[dict], tiempo_total_s: float) -> dict:
     }
 
 
-def procesar(proyecto: str, rutas: list[Path]) -> dict:
+def procesar(project_uuid: str, rutas: list[Path]) -> dict:
     """Ingiere `rutas` (archivos y/o carpetas) contra el proyecto
-    `proyecto`, conservando subcarpetas y saltando las que empiezan con
+    `project_uuid` (UUID canónico; `ValueError` si no lo es), conservando subcarpetas y saltando las que empiezan con
     `_`. Devuelve el informe completo -- documento por documento y el
     resumen. No lanza por un documento individual que falle: la ficha de
     `ingesta.ingerir` YA declara `error`/`sin_extractor` sin excepción
     (fallo cerrado del propio núcleo, ver `procesamiento/resultado.py`);
     lo que sí puede propagar es un error de jail (ruta fuera del
     workspace), que es una condición real del llamador, no de un documento."""
-    slug = _slug(proyecto)
-    trabajo = tool_authority.WORKSPACE_ROOT / "proyectos" / slug
+    if not _UUID_CANONICO.fullmatch(project_uuid):
+        raise ValueError(f"project_uuid no es un UUID canónico: {project_uuid!r}")
+    trabajo = tool_authority.WORKSPACE_ROOT / "proyectos" / project_uuid
 
     documentos: list[dict] = []
     t_inicio = time.perf_counter()
@@ -162,8 +171,7 @@ def procesar(proyecto: str, rutas: list[Path]) -> dict:
     tiempo_total_s = time.perf_counter() - t_inicio
 
     return {
-        "proyecto": proyecto,
-        "slug": slug,
+        "project_uuid": project_uuid,
         "trabajo": str(trabajo),
         "documentos": documentos,
         "resumen": _resumen(documentos, tiempo_total_s),
@@ -176,7 +184,7 @@ def _miles(n: int) -> str:
 
 def _imprimir_informe(r: dict) -> None:
     print("=" * 100)
-    print(f"PROCESAMIENTO -- proyecto '{r['proyecto']}' (slug: {r['slug']})")
+    print(f"PROCESAMIENTO -- proyecto {r['project_uuid']}")
     print(f"Trabajo: {r['trabajo']}")
     print("=" * 100)
     encabezado = (
@@ -203,13 +211,24 @@ def _imprimir_informe(r: dict) -> None:
     print(f"Tiempo total:         {s['tiempo_total_s']}s")
 
 
+def _uuid_canonico(valor: str) -> str:
+    if not _UUID_CANONICO.fullmatch(valor):
+        raise argparse.ArgumentTypeError(f"no es un UUID canónico: {valor!r}")
+    return valor
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("proyecto", help="nombre del proyecto -- se slugifica para el nombre de carpeta")
+    p.add_argument(
+        "--project-uuid", required=True, type=_uuid_canonico,
+        help="UUID canónico del proyecto (minúsculas, 36 caracteres) -- es el nombre de la "
+             "carpeta de trabajo. Este guion no consulta la base: tú respondes de que sea de "
+             "un proyecto real y ACTIVE",
+    )
     p.add_argument("rutas", nargs="+", type=Path, help="archivo(s) o carpeta(s) a ingerir")
     a = p.parse_args()
 
-    r = procesar(a.proyecto, a.rutas)
+    r = procesar(a.project_uuid, a.rutas)
     _imprimir_informe(r)
     return 0
 

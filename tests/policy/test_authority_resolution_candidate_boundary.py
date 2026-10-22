@@ -22,17 +22,23 @@ def test_candidate_result_never_grants_execution():
     assert all(value not in {"ACTIVE", "RATIFIED", "AUTHORIZED"} for value in result.__dict__.values())
 
 
-def test_public_constructor_rejects_forged_hash_with_valid_content():
+def test_public_constructor_yields_an_object_every_consumer_rejects():
+    # Desde que el sello es init=False, el constructor ya no rechaza: produce
+    # un objeto SIN sello cuya única puerta es el loader. Los consumidores son
+    # los que niegan (ver también los ataques de test_authority_resolution_loader_seal.py).
     corpus = load_validated_candidate(ROOT)
-    with pytest.raises(InvalidValidatedCorpusError):
-        ValidatedCandidateCorpus(
-            "sha256:" + "f" * 64,
-            corpus.canonicalizer_identity,
-            corpus.bootstrap_bundle_id,
-            corpus.authority,
-            corpus.manifest,
-            corpus.normative_documents,
-        )
+    unsealed = ValidatedCandidateCorpus(
+        "sha256:" + "f" * 64,
+        corpus.canonicalizer_identity,
+        corpus.bootstrap_bundle_id,
+        corpus.authority,
+        corpus.manifest,
+        corpus.normative_documents,
+    )
+    assert unsealed._loader_seal is None
+    assert not unsealed._was_loader_validated()
+    with pytest.raises(ResolverContractError):
+        to_static_policy_view(unsealed)
 
 
 def test_real_candidate_loader_keeps_the_c14n3_validated_identity():

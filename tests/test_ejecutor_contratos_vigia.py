@@ -110,6 +110,31 @@ def test_auditor_ilegible_frena(tmp_path):
     assert _pausa(cfg)["motivo"] == "auditor_ilegible"
 
 
+@pytest.mark.parametrize("codigo", ["proveedor_fallo", "json_invalido"])
+def test_la_pausa_por_auditor_ilegible_lleva_el_motivo(tmp_path, codigo):
+    """El vigia puede salir con rc=0 y su stderr no llega a la bitacora: el motivo (codigo constante
+    de AuditorIlegible, nunca la excepcion de origen) viaja en la propia pausa, que la mision lee."""
+    ruta, desde = _registro(tmp_path, ["uptime"])
+
+    async def auditar(lote):
+        raise A.AuditorIlegible(codigo)
+
+    cfg = _cfg(tmp_path, ruta, desde, lote_max=1)
+    _correr(cfg, auditar)
+    assert _pausa(cfg)["motivo"] == "auditor_ilegible" and _pausa(cfg)["detalle"] == codigo
+
+
+def test_las_otras_pausas_no_llevan_detalle(tmp_path):
+    ruta, desde = _registro(tmp_path, ["uptime"])
+
+    async def auditar(lote):
+        raise RuntimeError("secreto-que-no-debe-salir")
+
+    cfg = _cfg(tmp_path, ruta, desde, lote_max=1)
+    _correr(cfg, auditar)
+    assert "detalle" not in _pausa(cfg) and "secreto" not in cfg.pausa.read_text()
+
+
 def test_auditor_que_revienta_frena(tmp_path):
     ruta, desde = _registro(tmp_path, ["uptime"])
 

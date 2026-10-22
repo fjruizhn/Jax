@@ -36,7 +36,7 @@ def test_un_pdf_sin_capa_de_texto_cae_en_ocr_y_no_en_pdfplumber(
         llamadas.append("deteccion")
         return False
 
-    def falso_ocr(origen, idioma="spa"):
+    def falso_ocr(origen, idioma="spa", camino=None):
         llamadas.append("ocr")
         return Resultado(
             estado="ok", salidas={"texto.txt": "leido por ocr"},
@@ -71,7 +71,7 @@ def test_un_pdf_con_texto_no_paga_ocr(tmp_path: Path, monkeypatch):
         ),
     )
 
-    def no_debe_llamarse(origen, idioma="spa"):
+    def no_debe_llamarse(origen, idioma="spa", camino=None):
         raise AssertionError("no se paga OCR si el PDF ya tenia texto")
 
     monkeypatch.setattr(ocr, "extraer", no_debe_llamarse)
@@ -96,7 +96,7 @@ def test_un_xlsx_no_paga_ocr(tmp_path: Path, monkeypatch):
         ),
     )
 
-    def no_debe_llamarse(origen, idioma="spa"):
+    def no_debe_llamarse(origen, idioma="spa", camino=None):
         raise AssertionError("un xlsx no debe pasar por OCR")
 
     monkeypatch.setattr(ocr, "extraer", no_debe_llamarse)
@@ -167,7 +167,9 @@ def test_import_compuerta_no_explota_sin_python_docx(tmp_path: Path, monkeypatch
     archivo = tmp_path / "informe.docx"
     archivo.write_bytes(b"PK\x03\x04 lo que sea")
     r = modulo.extraer(archivo)
-    assert r.estado == "sin_extractor"
+    # jax-14 (2026-10-03): python-docx esta declarado -> su falta es 'error', no 'sin_extractor'.
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "dependencia_no_instalada"
     assert r.salidas == {}
 
 
@@ -179,7 +181,7 @@ def test_una_imagen_no_pasa_por_pdfplumber(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(
         ocr, "extraer",
-        lambda origen, idioma="spa": Resultado(
+        lambda origen, idioma="spa", camino=None: Resultado(
             estado="ok", salidas={"texto.txt": "leido"}, detalle={},
             extractor="tesseract", version="5.5.0",
         ),
@@ -218,7 +220,7 @@ def test_cada_extension_de_imagenes_rutea_a_ocr(tmp_path: Path, monkeypatch, ext
 
     monkeypatch.setattr(
         ocr, "extraer",
-        lambda origen, idioma="spa": Resultado(
+        lambda origen, idioma="spa", camino=None: Resultado(
             estado="ok", salidas={"texto.txt": "leido"}, detalle={},
             extractor="tesseract", version="5.5.0",
         ),
@@ -306,7 +308,7 @@ def test_pdf_nativo_renombrado_png_va_por_el_camino_del_pdf(tmp_path: Path, monk
 
     monkeypatch.setattr(pdf, "tiene_capa_de_texto", contada)
 
-    def no_debe_llamarse(origen, idioma="spa"):
+    def no_debe_llamarse(origen, idioma="spa", camino=None):
         raise AssertionError("un PDF nativo con texto no debe pagar OCR")
 
     monkeypatch.setattr(ocr, "extraer", no_debe_llamarse)
@@ -351,7 +353,7 @@ def test_imagen_real_renombrada_va_por_ocr_y_marca_extension_enganosa(
     """Misma idea que el PDF de I-3, ahora del lado de la imagen: una PNG
     real (firma `\\x89PNG` de verdad) con extensión `.docx` encima tiene
     que resolver igual por OCR (el contenido manda) y declarar el
-    engaño -- sin este caso, mutar la tupla `_FIRMAS_IMAGEN` (por ejemplo
+    engaño -- sin este caso, mutar la tupla `ocr._FIRMAS_IMAGEN` (por ejemplo
     sacando la firma de PNG) queda absorbido en silencio por el respaldo
     de extensión cuando la extensión SÍ es una de `IMAGENES` (como en
     `test_una_imagen_no_pasa_por_pdfplumber`, que usa `.png` real): acá la
@@ -362,7 +364,7 @@ def test_imagen_real_renombrada_va_por_ocr_y_marca_extension_enganosa(
 
     monkeypatch.setattr(
         ocr, "extraer",
-        lambda origen, idioma="spa": Resultado(
+        lambda origen, idioma="spa", camino=None: Resultado(
             estado="ok", salidas={"texto.txt": "leido"}, detalle={},
             extractor="tesseract", version="5.5.0",
         ),
@@ -400,7 +402,7 @@ def test_webp_real_renombrado_va_por_ocr_y_marca_extension_enganosa(
 
     monkeypatch.setattr(
         ocr, "extraer",
-        lambda origen, idioma="spa": Resultado(
+        lambda origen, idioma="spa", camino=None: Resultado(
             estado="ok", salidas={"texto.txt": "leido"}, detalle={},
             extractor="tesseract", version="5.5.0",
         ),
@@ -421,9 +423,9 @@ def test_webp_real_renombrado_va_por_ocr_y_marca_extension_enganosa(
     assert r.detalle["extension_enganosa"] == {"nombre": ".docx", "contenido": "imagen"}
 
 
-def test_pdf_nativo_sin_pdfplumber_da_sin_extractor_no_ocr(tmp_path: Path, monkeypatch):
+def test_pdf_nativo_sin_pdfplumber_da_error_no_ocr_ni_sin_extractor(tmp_path: Path, monkeypatch):
     """C-2 (final-hallazgos.md, ronda de cierre): sin `pdfplumber`
-    instalado, un PDF NATIVO tiene que salir `sin_extractor` -- NUNCA
+    instalado, un PDF NATIVO tiene que salir `error` (jax-14; antes `sin_extractor`) -- NUNCA
     rutear a OCR (que devolvería `estado='ok'` con las cifras DESTRUIDAS,
     medido: 0 de 8 cifras). Mismo tratamiento que un `.docx` sin
     `python-docx` (`test_import_compuerta_no_explota_sin_python_docx`)."""
@@ -431,7 +433,7 @@ def test_pdf_nativo_sin_pdfplumber_da_sin_extractor_no_ocr(tmp_path: Path, monke
 
     from procesamiento.extractores import ocr
 
-    def no_debe_llamarse(origen, idioma="spa"):
+    def no_debe_llamarse(origen, idioma="spa", camino=None):
         raise AssertionError(
             "sin pdfplumber, un PDF nativo NO debe pagar OCR -- OCR produce "
             "'ok' con las cifras destruidas, no una alternativa honesta"
@@ -443,7 +445,8 @@ def test_pdf_nativo_sin_pdfplumber_da_sin_extractor_no_ocr(tmp_path: Path, monke
     archivo = _pdf_nativo(tmp_path / "estado.pdf")
     r = compuerta.extraer(archivo)
 
-    assert r.estado == "sin_extractor"
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "dependencia_no_instalada"
     assert r.salidas == {}
 
 
@@ -472,7 +475,7 @@ def test_pdf_con_extension_pero_contenido_no_decisivo_usa_respaldo_por_extension
         ),
     )
 
-    def no_debe_llamarse(origen, idioma="spa"):
+    def no_debe_llamarse(origen, idioma="spa", camino=None):
         raise AssertionError("con tiene_capa_de_texto=True no se paga OCR")
 
     monkeypatch.setattr(ocr, "extraer", no_debe_llamarse)
@@ -480,3 +483,136 @@ def test_pdf_con_extension_pero_contenido_no_decisivo_usa_respaldo_por_extension
     archivo = tmp_path / "cabecera-rota.pdf"
     archivo.write_bytes(b"contenido generico sin firma reconocida")
     assert compuerta.extraer(archivo).estado == "ok"
+
+
+# (nombre, contenido, tiene extractor): una muestra de cada tipo, incluidos los casos en que
+# el contenido manda sobre la extension y el OLE2 antiguo.
+_MUESTRAS_TIENE_EXTRACTOR = [
+    ("a.pdf", b"%PDF-1.4 x", True),
+    ("pdf-con-otro-nombre.dat", b"%PDF-1.4 x", True),
+    ("a.png", b"\x89PNG\r\n\x1a\n", True),
+    ("imagen-con-otro-nombre.bin", b"\xff\xd8\xff\xe0 jpeg", True),
+    ("a.webp", b"RIFF\x00\x00\x00\x00WEBPVP8 ", True),
+    ("a.xlsx", b"PK\x03\x04 zip ambiguo", True),
+    ("a.docx", b"PK\x03\x04 zip ambiguo", True),
+    ("viejo.xls", bytes.fromhex("D0CF11E0A1B11AE1") + b"\x00" * 8, False),
+    ("a.xyz", b"contenido cualquiera", False),
+    ("sin-extension", b"texto plano", False),
+    ("a.csv", b"a,b\n1,2\n", False),
+]
+
+
+@pytest.mark.parametrize("nombre,contenido,esperado", _MUESTRAS_TIENE_EXTRACTOR)
+def test_tiene_extractor_es_lo_mismo_que_extraer_no_dice_sin_extractor(
+    tmp_path: Path, monkeypatch, nombre, contenido, esperado
+):
+    """`tiene_extractor` es una copia de la decision de `extraer` (la usa el guion de LACTOVI
+    para elegir `en_cola` o `sin_extractor`): si divergen, una fila queda en cola para siempre o
+    se descarta un archivo procesable. Los extractores reales se reemplazan por un `ok` para
+    comparar solo el ENRUTADO, sin OCR ni dependencias pesadas."""
+    from procesamiento.extractores import excel, ocr, pdf, word
+    from procesamiento.resultado import Resultado
+
+    def falso(*_a, **_k):
+        return Resultado(estado="ok", salidas={"texto.txt": "x"}, detalle={}, extractor="falso", version="0")
+
+    for modulo in (excel, ocr, pdf, word):
+        monkeypatch.setattr(modulo, "extraer", falso)
+    monkeypatch.setattr(pdf, "tiene_capa_de_texto", lambda _o: True)
+
+    archivo = tmp_path / nombre
+    archivo.write_bytes(contenido)
+
+    assert compuerta.tiene_extractor(archivo) is esperado
+    assert compuerta.tiene_extractor(archivo) == (compuerta.extraer(archivo).estado != "sin_extractor")
+
+
+def test_pdf_con_pdfplumber_roto_da_dependencia_rota_y_no_propaga(tmp_path: Path, monkeypatch):
+    """jax-14 MINOR-2: un ImportError que no es ModuleNotFoundError (pdfplumber
+    presente pero roto) tampoco puede escapar crudo de `compuerta.extraer`, ni
+    rutear a OCR: es `error` con `dependencia_rota`."""
+    import builtins
+    import sys
+
+    archivo = _pdf_nativo(tmp_path / "estado.pdf")
+    original = builtins.__import__
+
+    def roto(nombre, *a, **k):
+        if nombre == "pdfplumber":
+            raise ImportError("simbolo no definido (instalacion rota)")
+        return original(nombre, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", roto)
+    monkeypatch.delitem(sys.modules, "pdfplumber", raising=False)
+    r = compuerta.extraer(archivo)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "dependencia_rota"
+
+
+def _extensiones_de_imagen_que_el_ocr_acepta() -> set[str]:
+    """Las extensiones (registradas en Pillow) de cada formato cuyo contenido el
+    OCR acepta como imagen por su firma: se guarda una imagen chica en cada
+    formato que Pillow sabe escribir y se le pregunta a `ocr.tipo_por_cabecera`.
+    Sale de los datos, no de una lista escrita a mano (Jax#338 ronda 17)."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    from procesamiento.extractores import ocr
+
+    Image.init()
+    por_formato: dict[str, set[str]] = {}
+    for extension, formato in Image.registered_extensions().items():
+        por_formato.setdefault(formato, set()).add(extension)
+    extensiones: set[str] = set()
+    for formato in sorted(Image.SAVE):
+        salida = BytesIO()
+        try:
+            Image.new("RGB", (16, 16), "white").save(salida, format=formato)
+        except Exception:  # fail-soft: formatos que Pillow no puede escribir aca (EPS sin ghostscript, modos no admitidos); no son imagenes que se puedan probar
+            continue
+        if ocr.tipo_por_cabecera(salida.getvalue()[:1024]) == "imagen":
+            extensiones |= por_formato.get(formato, set())
+    assert {".png", ".jpg", ".gif", ".webp", ".tif", ".bmp"} <= extensiones, extensiones
+    return extensiones
+
+
+def test_la_compuerta_reconoce_por_extension_cada_imagen_que_el_ocr_acepta():
+    """La lista de extensiones de imagen de la compuerta y la del freno de
+    dependencias salen de la MISMA fuente (`procesamiento.tipos_imagen`), y
+    cubren todo formato cuya firma el OCR acepta (ronda 17)."""
+    from procesamiento import dependencias
+
+    faltan = sorted(_extensiones_de_imagen_que_el_ocr_acepta() - set(compuerta.IMAGENES))
+    assert faltan == []
+    assert set(compuerta.IMAGENES) == set(dependencias.EXTENSIONES_POR_PAQUETE["pillow"])
+
+
+
+def _en_hilo_con_plazo(funcion, fifo, plazo=5.0):
+    """Corre `funcion()` en un hilo con plazo. Si se cuelga (un `open()`
+    bloqueante en el FIFO espera un escritor), abre el extremo de escritura
+    para liberarlo y falla."""
+    import os
+    import threading
+
+    resultado: list = []
+    hilo = threading.Thread(target=lambda: resultado.append(funcion()), daemon=True)
+    hilo.start()
+    hilo.join(plazo)
+    if hilo.is_alive():
+        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(fd)
+        hilo.join(plazo)
+        raise AssertionError("se colgo leyendo un FIFO")
+    return resultado[0]
+
+
+def test_la_compuerta_no_se_cuelga_leyendo_la_cabecera_de_un_fifo(tmp_path):
+    """Ronda 19: la compuerta lee la cabecera sin bloquear; un FIFO no es un
+    archivo regular y el contenido no decide (decide la extension)."""
+    import os
+
+    fifo = tmp_path / "tuberia.png"
+    os.mkfifo(fifo)
+    assert _en_hilo_con_plazo(lambda: compuerta._tipo_por_contenido(fifo), fifo) is None

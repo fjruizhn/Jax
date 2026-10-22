@@ -1,13 +1,13 @@
 """Replay immutable decision records against their recorded ledger checkpoint."""
 from __future__ import annotations
 
-from policy.authority_ledger.replay import verify_authority_ledger
+from policy.authority_ledger.replay import replay_authority_history, verify_authority_ledger
 
-from .authority_binding import evaluate_decision_input
+from policy.authority_ledger.effective_context import _build_historical_authority_envelope
 from .errors import (DecisionEvidenceUnavailableError, HistoricalAuthorityUnavailableError,
     HistoricalCheckpointMismatchError, UnsupportedResolverError)
 from .models import (DecisionReplayDifference, DecisionReplayResult, DecisionReplayStatus,
-    DecisionRecord, DecisionResult)
+    DecisionRecord, DecisionResult, EffectiveAuthorityEnvelopeSnapshot)
 from .serialization import result_projection
 from .service import _verify_evidence
 
@@ -37,16 +37,22 @@ def replay_decision(record: DecisionRecord, authority_store, trusted_root, check
             raise HistoricalCheckpointMismatchError("checkpoint no pertenece a cadena anclada")
     elif checkpoint.head_event_id is not None or checkpoint.head_event_hash is not None:
         raise HistoricalCheckpointMismatchError("checkpoint genesis inválido")
-    historical = verify_authority_ledger(genesis, prefix, trusted_root)
+    historical = replay_authority_history(genesis, prefix, trusted_root)
     if historical.checkpoint.projection() != checkpoint.projection() or historical.checkpoint.authority_ledger_checkpoint_hash != binding.authority_ledger_checkpoint_hash:
         raise HistoricalCheckpointMismatchError("replay no reconstruyó checkpoint grabado")
-    replayed = evaluate_decision_input(historical, record.decision_input).result
+    if not historical._is_verified_history():
+        raise HistoricalAuthorityUnavailableError("history replay no verificado")
+    envelope = _build_historical_authority_envelope(historical, record.decision_input.evaluation_context,
+        record.decision_input.evaluation_time_utc)
+    from .models import DecisionResult
+    replayed = DecisionResult("1.0", "JAX_DECISION_RESULT", "EFFECTIVE_AUTHORITY_ANALYSIS_ONLY",
+        EffectiveAuthorityEnvelopeSnapshot.from_envelope(envelope))
     old = record.result.effective_authority_envelope
     new = replayed.effective_authority_envelope
     differences = []
     if old.active_policy_corpus_hash != new.active_policy_corpus_hash: differences.append(DecisionReplayDifference.ACTIVE_POLICY_CORPUS_HASH_MISMATCH)
     if old.effective_authority_context_hash != new.effective_authority_context_hash: differences.append(DecisionReplayDifference.EFFECTIVE_AUTHORITY_CONTEXT_HASH_MISMATCH)
-    if result_projection(DecisionResult("1.0", "JAX_DECISION_RESULT", "EFFECTIVE_AUTHORITY_ANALYSIS_ONLY", old)) != result_projection(DecisionResult("1.0", "JAX_DECISION_RESULT", "EFFECTIVE_AUTHORITY_ANALYSIS_ONLY", new)):
+    if result_projection(DecisionResult("1.0", "JAX_DECISION_RESULT", "EFFECTIVE_AUTHORITY_ANALYSIS_ONLY", old)) != result_projection(replayed):
         differences.append(DecisionReplayDifference.EFFECTIVE_ENVELOPE_MISMATCH)
     status = DecisionReplayStatus.REPLAY_MATCH if not differences else DecisionReplayStatus.REPLAY_DIVERGENCE
     return DecisionReplayResult("1.0", "JAX_DECISION_REPLAY_RESULT", record.decision_id, record.decision_record_hash,

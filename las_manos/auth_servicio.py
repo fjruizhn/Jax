@@ -29,9 +29,15 @@ Contrato:
 
 Por qué credencial y no SO_PEERCRED: Hyde, jax-platform y LAS MANOS corren
 todos como `fruiz`; el uid del par no distingue a Hyde de la plataforma. Lo que
-sí los distingue es lo que cada uno puede LEER: la jaula de Hyde no monta
-/etc/jax, corre con `--clearenv` y en su propio espacio de PIDs (no ve el
-/proc/<pid>/environ de los servicios).
+sí los distingue es lo que cada uno puede LEER: la jaula de Hyde (hyde_sandbox,
+retirado en OP#251) no montaba /etc/jax y corría en su propio espacio de PIDs
+(no veía el /proc/<pid>/environ de los servicios). Desde el 2026-09-27 (B-1,
+auditoría adversarial) esa jaula dejó de usar `--clearenv`: la frontera de
+entorno es el `env=` mínimo que el lanzador pasa explícito, sin fusionar con
+`os.environ`, a `create_subprocess_exec` (entonces
+`hyde_sandbox.run_sandboxed_claude`; hoy cli_sandbox.py) -- el efecto
+es el mismo (los secretos de `/etc/jax/.env` de este proceso no le llegan al
+CLI encerrado), pero por el `env=`, no por una bandera dentro del argv de bwrap.
 
 Sin caché nueva: las credenciales se leen una vez al construir el middleware.
 Cambiarlas exige reiniciar LAS MANOS y jax-platform (van en el mismo .env).
@@ -48,6 +54,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from processing_ownership import ProcessingOwnershipError, processing_ownership_from_headers
 
 from config_entorno import EntornoInvalido
 
@@ -78,6 +85,10 @@ CODIGO_SIN_CREDENCIAL = "credencial_de_servicio_invalida"
 CODIGO_RUTA_NO_PERMITIDA = "ruta_no_permitida_para_la_identidad"
 CODIGO_IDENTIDAD_DECLARADA = "identidad_declarada_no_coincide"
 CODIGO_CUERPO_ILEGIBLE = "cuerpo_ilegible"
+# Ownership authentication is a retryable service-boundary failure for the
+# Processing dispatcher. It is intentionally distinct from malformed JSON,
+# which the existing dispatcher treats as a definitive document error.
+CODIGO_PROCESSING_OWNERSHIP_INVALID = "processing_ownership_invalid"
 
 
 @dataclass(frozen=True)
@@ -117,13 +128,12 @@ PERMISOS: dict[str, Permiso] = {
             "caller": frozenset({"jax_platform_chat"}),
         },
     ),
-    # El propio proceso de LAS MANOS: Jacobs despacha pasos a motores y Ada
-    # crea sub-pipelines (con su token de un solo uso). Nunca aprueba ni reanuda.
+    # El propio proceso de LAS MANOS: Ada crea sub-pipelines (con su token de un
+    # solo uso). Jacobs ya NO despacha pasos a motores ni consulta/cancela motor
+    # jobs (despacho legacy cerrado, 410; sin esos pedidos en el arbol), asi que
+    # esos permisos se retiraron. Nunca aprueba ni reanuda.
     IDENTIDAD_JACOBS: Permiso(
         rutas=(
-            ("POST", re.compile(r"/motor/dispatch")),
-            ("GET", re.compile(rf"/motor/job/{_SEGMENTO}")),
-            ("POST", re.compile(rf"/motor/job/{_SEGMENTO}/cancel")),
             ("POST", re.compile(r"/jacobs/pipeline")),
         ),
         declarables={
@@ -221,6 +231,14 @@ class CredencialDeServicio:
         permiso = PERMISOS[identidad]
         if not permiso.admite_ruta(metodo, path):
             return await _responder(send, 403, CODIGO_RUTA_NO_PERMITIDA)
+        ownership = None
+        if path == "/procesamiento/trabajos" or path.startswith("/procesamiento/trabajos/"):
+            if identidad != IDENTIDAD_PLATAFORMA:
+                return await _responder(send, 403, CODIGO_RUTA_NO_PERMITIDA)
+            try:
+                ownership = processing_ownership_from_headers(scope.get("headers", []))
+            except ProcessingOwnershipError:
+                return await _responder(send, 403, CODIGO_PROCESSING_OWNERSHIP_INVALID)
 
         cuerpo = await _leer_cuerpo(receive)
         if cuerpo.strip():
@@ -234,6 +252,8 @@ class CredencialDeServicio:
                         return await _responder(send, 403, CODIGO_IDENTIDAD_DECLARADA)
 
         scope.setdefault("state", {})["identidad_servicio"] = identidad
+        if ownership is not None:
+            scope["state"]["processing_ownership"] = ownership
         return await self.app(scope, _reproducir(cuerpo, receive), send)
 
 

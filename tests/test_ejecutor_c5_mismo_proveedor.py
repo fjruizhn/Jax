@@ -42,6 +42,7 @@ _FILAS_BASE = {
     "ejecutor.c5_lote_max": "20",
     "ejecutor.c5_intervalo_s": "15",
     "ejecutor.c5_max_tokens": "4000",
+    "ejecutor.c5_tope_s": "400",
     "ejecutor.c5_auditor_admite_datos_de_clientes": "false",
 }
 

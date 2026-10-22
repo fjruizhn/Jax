@@ -34,6 +34,7 @@ import ast
 import asyncio
 import json
 import secrets
+import sys
 import tempfile
 import threading
 import time
@@ -44,14 +45,28 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 import procesamiento_routes as rutas_mod
 from auth_servicio import ENCABEZADO, IDENTIDAD_JACOBS, IDENTIDAD_PLATAFORMA, proteger
 from motor_registry import tool_authority
 from motor_registry.job_store import JobStore
 from motor_registry.models import JobStatus
+from processing_job_store import ProcessingJobStore
+from processing_ownership import ProcessingOwnershipContext
 from procesamiento.ficha import Ficha
 from procesamiento_routes import router
+
+
+#: E2a: LAS MANOS trabaja por `project_uuid` (UUID canónico, 36 caracteres).
+UUID_PRUEBA = "0192f1d2-7c3a-7b4e-9a10-3f5e2d1c0b9a"
+OWNER = ProcessingOwnershipContext("processing-owner.1", "1", "2", "3")
+
+
+class _ProcessingJobStoreFixture(ProcessingJobStore):
+    """Legacy worker fixtures have no HTTP envelope; keep their test data owned."""
+    def create(self, **kwargs):
+        return super().create(ownership=kwargs.pop("ownership", OWNER), **kwargs)
 
 
 def _ficha(sha256: str, estado: str = "ok", extractor: str = "pdf") -> Ficha:
@@ -84,7 +99,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.workspace = Path(self._tmpdir.name) / "workspace"
         self.workspace.mkdir()
-        self.store = JobStore(str(Path(self._tmpdir.name) / "jobs.jsonl"))
+        self.store = _ProcessingJobStoreFixture(str(Path(self._tmpdir.name) / "jobs.jsonl"))
         self._parche_workspace = patch.object(
             tool_authority, "WORKSPACE_ROOT", self.workspace.resolve()
         )
@@ -135,7 +150,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
 
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_falso):
-            await self._ejecutar(job_id, "Proyecto Uno", ["doc.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["doc.pdf"])
 
         job = self.store.get(job_id)
         assert job.status == JobStatus.COMPLETED, job
@@ -145,7 +160,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         assert r["estado"] == "ok"
         assert r["extractor"] == "pdf"
         assert r["extracto_bytes"] > 0
-        assert r["carpeta_procesado"] == f"proyectos/proyecto-uno/procesado/{'a' * 64}"
+        assert r["carpeta_procesado"] == f"proyectos/{UUID_PRUEBA}/procesado/{'a' * 64}"
         assert "contenido secreto" not in json.dumps(r)
         assert set(r) == {"archivo", "estado", "extractor", "extracto_bytes", "carpeta_procesado", "error"}
 
@@ -154,7 +169,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", ingerir_mock):
             await self._ejecutar(
-                job_id, "proy", ["/etc/passwd", "../fuera-del-workspace.txt"],
+                job_id, UUID_PRUEBA, ["/etc/passwd", "../fuera-del-workspace.txt"],
             )
         job = self.store.get(job_id)
         assert job.status == JobStatus.COMPLETED, job
@@ -179,7 +194,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_falso):
             await self._ejecutar(
-                job_id, "proy", ["sano1.pdf", "archivo\x00malo.pdf", "sano2.pdf"],
+                job_id, UUID_PRUEBA, ["sano1.pdf", "archivo\x00malo.pdf", "sano2.pdf"],
             )
 
         job = self.store.get(job_id)
@@ -209,7 +224,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
 
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_falso):
-            await self._ejecutar(job_id, "proy", ["uno.pdf", "dos.pdf", "tres.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["uno.pdf", "dos.pdf", "tres.pdf"])
 
         job = self.store.get(job_id)
         assert job.status == JobStatus.COMPLETED, f"un archivo roto tumbó el lote entero: {job}"
@@ -242,7 +257,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
 
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_falso) as ingerir_mock:
-            await self._ejecutar(job_id, "proy", ["sano1.pdf", ruta_mala, "sano2.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["sano1.pdf", ruta_mala, "sano2.pdf"])
 
         job = self.store.get(job_id)
         assert job.status == JobStatus.COMPLETED, (
@@ -346,7 +361,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             await semaforo.acquire()
             tarea = asyncio.create_task(
                 rutas_mod._ejecutar_trabajo(
-                    job_id, "p", ["a.pdf"], store=self.store,
+                    job_id, UUID_PRUEBA, ["a.pdf"], store=self.store,
                     executor=executor_1_hilo, executor_io=self.executor_io, semaforo=semaforo,
                 )
             )
@@ -373,71 +388,89 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.store, "update", side_effect=_update_espiado), \
              patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("f" * 64)):
             self._archivo_en_workspace("a.pdf")
-            await self._ejecutar(job_id, "p", ["a.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["a.pdf"])
 
         assert vistos == [JobStatus.RUNNING.value, JobStatus.COMPLETED.value], vistos
 
     async def test_ruta_ausente_dentro_del_jail_se_rechaza_no_revienta(self):
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir") as ingerir_mock:
-            await self._ejecutar(job_id, "proy", ["no-existe.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["no-existe.pdf"])
         job = self.store.get(job_id)
         assert job.status == JobStatus.COMPLETED
         resultados = json.loads(Path(job.result_path).read_text())
         assert resultados[0]["estado"] == "rechazado"
         ingerir_mock.assert_not_called()
 
-    # -- B-5: la mutación que más importa -- medir el LOOP, no el POST ---
+    # -- B-5: el loop responde mientras la ingesta sigue bloqueada --------
     async def test_B5_el_trabajo_no_bloquea_el_loop_de_eventos(self):
         self._archivo_en_workspace("lento.pdf")
+        loop = asyncio.get_running_loop()
+        liberar_ingesta = threading.Event()
+        loop_respondio = asyncio.Event()
+        respondio_antes_de_liberar = []
+
+        def _registrar_respuesta_del_loop():
+            respondio_antes_de_liberar.append(not liberar_ingesta.is_set())
+            loop_respondio.set()
 
         def _ingerir_lento(origen, trabajo, *, subruta=None):
-            time.sleep(0.4)  # bloqueante DE VERDAD -- simula OCR real
+            # Si esta función corre en un worker, el event loop puede procesar
+            # el callback antes de liberar la ingesta. Si corre inline en el
+            # loop, el watchdog la libera y el callback queda marcado tarde.
+            loop.call_soon_threadsafe(_registrar_respuesta_del_loop)
+            liberar_ingesta.wait(timeout=10)
             return _ficha("z" * 64)
 
         job_id = self._crear_job()
-        retrasos: list[float] = []
-
-        async def _sondear_loop():
-            for _ in range(25):
-                t0 = time.perf_counter()
-                await asyncio.sleep(0.01)
-                retrasos.append(time.perf_counter() - t0 - 0.01)
-
+        watchdog = threading.Timer(10, liberar_ingesta.set)
+        watchdog.daemon = True
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_lento):
-            # El sondeo se crea PRIMERO y se le da tiempo real de arrancar
-            # y quedar DENTRO de su `sleep(0.01)` antes de lanzar el
-            # trabajo -- si no, un trabajo que bloquea antes de su primer
-            # `await` puede terminar ANTES de que el sondeo arranque, y el
-            # test pasa igual con una mutación que saca el `run_in_executor`
-            # (falso negativo, confirmado a mano en la ronda anterior).
-            sondeo = asyncio.create_task(_sondear_loop())
-            await asyncio.sleep(0.02)
-            await self._ejecutar(job_id, "p", ["lento.pdf"])
-            await sondeo
+            watchdog.start()
+            tarea = asyncio.create_task(
+                self._ejecutar(job_id, UUID_PRUEBA, ["lento.pdf"])
+            )
+            try:
+                await asyncio.wait_for(loop_respondio.wait(), timeout=11)
+            finally:
+                liberar_ingesta.set()
+                watchdog.cancel()
+                await tarea
 
-        peor = max(retrasos)
-        assert peor < 0.15, (
-            f"el loop de eventos se retrasó {peor:.3f}s durante el trabajo -- "
-            "el OCR no está corriendo fuera del loop"
+        assert respondio_antes_de_liberar == [True], (
+            "el event loop no procesó el callback mientras la ingesta seguía bloqueada"
         )
         assert self.store.get(job_id).status == JobStatus.COMPLETED
 
     async def test_B2_archivos_del_mismo_trabajo_se_reparten_entre_hilos(self):
         self._archivo_en_workspace("p1.pdf")
         self._archivo_en_workspace("p2.pdf")
+        barrera = threading.Barrier(2, timeout=5)
+        hilos = set()
+        lock_hilos = threading.Lock()
+        fallos_barrera = []
 
         def _ingerir_lento(origen, trabajo, *, subruta=None):
-            time.sleep(0.3)
+            with lock_hilos:
+                hilos.add(threading.get_ident())
+            try:
+                barrera.wait()
+            except threading.BrokenBarrierError as exc:
+                # La ingesta convierte excepciones en resultados de error;
+                # conservar esta evidencia permite que el assert final falle
+                # con una causa clara si los trabajos se serializan.
+                fallos_barrera.append(exc)
+                raise
             return _ficha("e" * 64)
 
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_lento):
-            t0 = time.perf_counter()
-            await self._ejecutar(job_id, "p", ["p1.pdf", "p2.pdf"])
-            dt = time.perf_counter() - t0
+            await self._ejecutar(job_id, UUID_PRUEBA, ["p1.pdf", "p2.pdf"])
 
-        assert dt < 0.5, f"tardó {dt:.2f}s -- no se repartió entre los dos hilos disponibles"
+        resultados = json.loads(Path(self.store.get(job_id).result_path).read_text())
+        assert not fallos_barrera, "los dos archivos no alcanzaron juntos la barrera"
+        assert len(hilos) == 2, f"se usaron {len(hilos)} hilos distintos, no dos"
+        assert [r["estado"] for r in resultados] == ["ok", "ok"]
 
     # -- outer except: nunca deja running huérfano -----------------------
     async def test_una_excepcion_catastrofica_marca_failed_no_deja_running(self):
@@ -445,7 +478,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("9" * 64)), \
              patch.object(self.store, "write_result", side_effect=RuntimeError("disco lleno")):
-            await self._ejecutar(job_id, "p", ["a.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["a.pdf"])
 
         job = self.store.get(job_id)
         assert job.status == JobStatus.FAILED, job
@@ -458,7 +491,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("1" * 64)), \
              patch.object(self.store, "write_result", side_effect=RuntimeError("boom")):
-            await self._ejecutar(job_id, "p", ["a.pdf"], semaforo=semaforo)
+            await self._ejecutar(job_id, UUID_PRUEBA, ["a.pdf"], semaforo=semaforo)
 
         assert not semaforo.locked(), "el semáforo quedó tomado tras un trabajo que falló"
 
@@ -467,20 +500,20 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         self._archivo_en_workspace("a.pdf")
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("2" * 64)):
-            await self._ejecutar(job_id, "p", ["a.pdf"], semaforo=semaforo)
+            await self._ejecutar(job_id, UUID_PRUEBA, ["a.pdf"], semaforo=semaforo)
 
         assert not semaforo.locked()
 
     # -- B-6: el principal se registra ------------------------------------
-    async def test_B6_usuario_llega_al_job_como_caller(self):
+    async def test_B6_owner_user_is_the_immutable_job_caller(self):
         job_id = self.store.create(
             caller="ana@cliente.com", capability="ingesta_archivos",
             motor="n/a", trace_id="t", prompt="n/a", recursion_depth=0,
         )
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("3" * 64)):
             self._archivo_en_workspace("a.pdf")
-            await self._ejecutar(job_id, "p", ["a.pdf"])
-        assert self.store.get(job_id).caller == "ana@cliente.com"
+            await self._ejecutar(job_id, UUID_PRUEBA, ["a.pdf"])
+        assert self.store.get(job_id).caller == "user:2"
 
     # -- B-3: reconciliación al arrancar (ronda anterior, sin cambios) -----
     def test_B3_reconciliar_marca_failed_lo_que_quedo_pending_running_o_cancelling(self):
@@ -584,7 +617,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         self._archivo_en_workspace("a.pdf")
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("7" * 64)):
-            await self._ejecutar(job_id, "p", ["a.pdf"], executor=espia)
+            await self._ejecutar(job_id, UUID_PRUEBA, ["a.pdf"], executor=espia)
         assert espia.llamado, (
             "el trabajo no pasó por el executor de OCR dedicado -- "
             "¿se cambió run_in_executor(executor, …) por run_in_executor(None, …)?"
@@ -596,7 +629,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         self._archivo_en_workspace("a.pdf")
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("8" * 64)):
-            await self._ejecutar(job_id, "p", ["a.pdf"], executor_io=espia)
+            await self._ejecutar(job_id, UUID_PRUEBA, ["a.pdf"], executor_io=espia)
         assert espia.llamado, (
             "escribir el resultado no pasó por el executor de E/S dedicado"
         )
@@ -692,7 +725,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             await semaforo.acquire()
             tarea = asyncio.create_task(
                 rutas_mod._ejecutar_trabajo(
-                    job_id, "p", ["primero.pdf", "segundo.pdf"], store=self.store,
+                    job_id, UUID_PRUEBA, ["primero.pdf", "segundo.pdf"], store=self.store,
                     executor=executor_1_hilo, executor_io=self.executor_io, semaforo=semaforo,
                 )
             )
@@ -742,7 +775,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             await semaforo.acquire()
             tarea = asyncio.create_task(
                 rutas_mod._ejecutar_trabajo(
-                    job_id, "p", ["nunca.pdf"], store=self.store,
+                    job_id, UUID_PRUEBA, ["nunca.pdf"], store=self.store,
                     executor=executor_1_hilo, executor_io=self.executor_io, semaforo=semaforo,
                 )
             )
@@ -822,7 +855,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             await semaforo.acquire()
             tarea = asyncio.create_task(
                 rutas_mod._ejecutar_trabajo(
-                    job_id, "p", ["a.pdf"], store=self.store,
+                    job_id, UUID_PRUEBA, ["a.pdf"], store=self.store,
                     executor=executor_1_hilo, executor_io=self.executor_io, semaforo=semaforo,
                 )
             )
@@ -835,12 +868,18 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             liberador = threading.Timer(0.3, seguir.set)  # suelta el lock en 0,3 s, desde otro hilo
             liberador.start()
             self.addCleanup(liberador.cancel)
-            respuesta = await rutas_mod.cancelar_trabajo(job_id)
+            respuesta = await rutas_mod.cancelar_trabajo(job_id, _owned_request())
             sondeando = False
             await sondeo
             await tarea
 
-        assert respuesta.estado == JobStatus.CANCELLING.value, respuesta
+        # Once the lock is released, the worker can finish and persist
+        # CANCELLED before this coroutine serializes its response. Both are
+        # valid snapshots; the monotone history below is the cancellation
+        # invariant this test is intended to protect.
+        assert respuesta.estado in (
+            JobStatus.CANCELLING.value, JobStatus.CANCELLED.value,
+        ), respuesta
         historial = self._historial_de_estados(job_id)
         assert historial == [
             JobStatus.PENDING.value, JobStatus.RUNNING.value,
@@ -873,7 +912,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             await semaforo.acquire()
             tarea = asyncio.create_task(
                 rutas_mod._ejecutar_trabajo(
-                    job_id, "p", ["en-cola.pdf"], store=self.store,
+                    job_id, UUID_PRUEBA, ["en-cola.pdf"], store=self.store,
                     executor=executor_1_hilo, executor_io=self.executor_io, semaforo=semaforo,
                 )
             )
@@ -947,7 +986,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         self._archivo_en_workspace("sano.pdf")
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("8" * 64)) as ingerir_mock:
-            await self._ejecutar(job_id, "proy", ["sano.pdf", "Crédito\udcff.pdf"])
+            await self._ejecutar(job_id, UUID_PRUEBA, ["sano.pdf", "Crédito\udcff.pdf"])
 
         job = self.store.get(job_id)
         assert job.status == JobStatus.COMPLETED, f"tilde + surrogate tumbó el lote: {job}"
@@ -974,22 +1013,41 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         ventana no existe."""
         self._archivo_en_workspace("a.pdf")
         ingerir_mock = AsyncMock()
-        with patch.object(rutas_mod, "_STORE", self.store), \
-             patch.object(rutas_mod, "_EXECUTOR_OCR", self.executor), \
-             patch.object(rutas_mod, "_EXECUTOR_IO", self.executor_io), \
-             patch.object(rutas_mod, "_SEMAFORO_TRABAJOS", asyncio.Semaphore(2)), \
-             patch.object(rutas_mod.ingesta, "ingerir", ingerir_mock):
-            creado = await rutas_mod.crear_trabajo(
-                rutas_mod.TrabajoRequest(proyecto="p", rutas=["a.pdf"], usuario="ana@cliente.com")
-            )
-            # SIN ceder el loop: el worker todavía no dio su primera vuelta.
-            respuesta = await rutas_mod.cancelar_trabajo(creado.job_id)
-            for _ in range(200):
-                if self.store.get(creado.job_id).status in (
-                    JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.FAILED,
-                ):
-                    break
-                await asyncio.sleep(0.01)
+        barrera = threading.Barrier(3, timeout=10)
+        liberar_workers = threading.Event()
+
+        def _ocupar_worker_ocr():
+            barrera.wait()
+            liberar_workers.wait(timeout=10)
+
+        # Ocupar ambos hilos antes de crear el trabajo garantiza que el
+        # worker quede en cola mientras cancelar_trabajo() cede el event loop
+        # al executor de I/O. Así se prueba el caso "cancelar antes de que
+        # arranque" sin depender de qué tarea gana una carrera de scheduling.
+        ocupantes = [self.executor.submit(_ocupar_worker_ocr) for _ in range(2)]
+        try:
+            barrera.wait()
+            with patch.object(rutas_mod, "_STORE", self.store), \
+                 patch.object(rutas_mod, "_EXECUTOR_OCR", self.executor), \
+                 patch.object(rutas_mod, "_EXECUTOR_IO", self.executor_io), \
+                 patch.object(rutas_mod, "_SEMAFORO_TRABAJOS", asyncio.Semaphore(2)), \
+                 patch.object(rutas_mod.proyecto_activo, "identidad_activa_del_proyecto", AsyncMock(return_value=True)), \
+                 patch.object(rutas_mod.ingesta, "ingerir", ingerir_mock):
+                creado = await rutas_mod.crear_trabajo(
+                    rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=["a.pdf"]), _owned_request()
+                )
+                respuesta = await rutas_mod.cancelar_trabajo(creado.job_id, _owned_request())
+        finally:
+            liberar_workers.set()
+            for ocupante in ocupantes:
+                ocupante.result(timeout=10)
+
+        for _ in range(200):
+            if self.store.get(creado.job_id).status in (
+                JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.FAILED,
+            ):
+                break
+            await asyncio.sleep(0.01)
 
         assert respuesta.estado == JobStatus.CANCELLING.value, respuesta
         # CRUDO (una entrada por línea del JSONL): el código de 146e0a5/f1d4298
@@ -1023,14 +1081,71 @@ def _app(**kw) -> FastAPI:
 
 
 def _h(identidad: str | None) -> dict[str, str]:
-    return {ENCABEZADO: CRED[identidad]} if identidad else {}
+    headers = {ENCABEZADO: CRED[identidad]} if identidad else {}
+    if identidad == IDENTIDAD_PLATAFORMA:
+        headers.update({
+            "X-Jax-Processing-Owner-Version": OWNER.version,
+            "X-Jax-Processing-Tenant-Id": OWNER.tenant_id,
+            "X-Jax-Processing-User-Id": OWNER.user_id,
+            "X-Jax-Processing-Project-Id": OWNER.project_id,
+        })
+    return headers
+
+
+def _owned_request() -> Request:
+    return Request({"type": "http", "state": {"processing_ownership": OWNER}})
+
+
+import contextlib
+import importlib
+import os
+
+import pytest
+
+from procesamiento import dependencias
+import aviso_extractores
+
+_ESTADO_REAL = dependencias.estado
+
+
+@pytest.fixture(autouse=True)
+def _extractores_instalados_por_defecto(monkeypatch):
+    """jax-14: el job `governance` de CI NO instala requirements-archivos.txt, asi
+    que `dependencias.estado()` real daria 503 en TODO POST. Salvo las pruebas
+    del freno (que fijan su propio estado con `_estado_sin_modulos`/`_estado_falta`),
+    el estado es "todo ok" -- estas pruebas miden el endpoint, no el venv."""
+    monkeypatch.setattr(dependencias, "estado", lambda *a, **k: {"ok": True, "faltan": [], "motivos": {}})
+    aviso_extractores._reiniciar()
+    yield
+    aviso_extractores._reiniciar()
+
+
+@contextlib.contextmanager
+def _estado_sin_modulos(*modulos, error=ModuleNotFoundError):
+    """El `estado()` REAL, con un importador controlado: solo `modulos` fallan; el
+    resto "se importa". Asi las pruebas valen igual con o sin las dependencias
+    en el interprete (el job `governance` no las instala)."""
+    def importador(nombre):
+        if nombre in modulos:
+            raise error(f"simulado: {nombre}")
+        return object()
+
+    with patch.object(dependencias, "estado", lambda *a, **k: _ESTADO_REAL(importador=importador)):
+        yield
+
+
+@contextlib.contextmanager
+def _estado_falta(*paquetes):
+    estado = {"ok": False, "faltan": sorted(paquetes), "motivos": {p: "ModuleNotFoundError" for p in paquetes}}
+    with patch.object(dependencias, "estado", lambda *a, **k: estado):
+        yield
 
 
 class TrabajoHTTPTest(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmpdir.cleanup)
-        self.store = JobStore(str(Path(self._tmpdir.name) / "jobs.jsonl"))
+        self.store = _ProcessingJobStoreFixture(str(Path(self._tmpdir.name) / "jobs.jsonl"))
         self._parche_store = patch.object(rutas_mod, "_STORE", self.store)
         self._parche_store.start()
         self.addCleanup(self._parche_store.stop)
@@ -1047,10 +1162,374 @@ class TrabajoHTTPTest(unittest.TestCase):
         self._parche_controles.start()
         self.addCleanup(self._parche_controles.stop)
 
+        # E2a: el proyecto tiene que existir y estar ACTIVE (si no, 422).
+        self._parche_activo = patch.object(
+            rutas_mod.proyecto_activo, "identidad_activa_del_proyecto", AsyncMock(return_value=True))
+        self._parche_activo.start()
+        self.addCleanup(self._parche_activo.stop)
+
     def _post(self, c, **overrides):
-        cuerpo = {"proyecto": "p", "rutas": ["a.pdf"], "usuario": "ana@cliente.com"}
+        cuerpo = {"project_uuid": UUID_PRUEBA, "rutas": ["a.pdf"]}
         cuerpo.update(overrides)
         return c.post("/procesamiento/trabajos", json=cuerpo, headers=_h(IDENTIDAD_PLATAFORMA))
+
+    def test_processing_ownership_rejections_are_retryable_and_do_not_append(self):
+        body = {"project_uuid": UUID_PRUEBA, "rutas": [], "usuario": "legacy"}
+        invalid_headers = [
+            {ENCABEZADO: CRED[IDENTIDAD_PLATAFORMA]},
+            {**_h(IDENTIDAD_PLATAFORMA), "X-Jax-Processing-Tenant-Id": "03"},
+            {**_h(IDENTIDAD_PLATAFORMA), "X-Jax-Processing-Unknown": "x"},
+        ]
+        with TestClient(_app()) as client:
+            for headers in invalid_headers:
+                response = client.post("/procesamiento/trabajos", json=body, headers=headers)
+                assert response.status_code == 403, response.text
+                assert response.json()["detail"]["code"] == "processing_ownership_invalid"
+                assert self.store._index == {}
+
+            # Starlette preserves raw duplicate headers through the ASGI
+            # scope, so this proves the middleware rejects the ambiguous
+            # envelope before Pydantic or the store runs.
+            duplicate_headers = list(_h(IDENTIDAD_PLATAFORMA).items()) + [
+                ("X-Jax-Processing-Tenant-Id", OWNER.tenant_id),
+            ]
+            response = client.send(client.build_request(
+                "POST", "/procesamiento/trabajos", json=body, headers=duplicate_headers,
+            ))
+            assert response.status_code == 403, response.text
+            assert response.json()["detail"]["code"] == "processing_ownership_invalid"
+            assert self.store._index == {}
+
+    def test_body_usuario_with_valid_owner_is_extra_forbidden(self):
+        with TestClient(_app()) as client:
+            response = self._post(client, usuario="legacy")
+        assert response.status_code == 422, response.text
+        assert self.store._index == {}
+
+    # -- jax-14 (2026-10-03): freno de dependencias de extraccion ----------
+    # El fixture autouse del modulo fija `dependencias.estado` en "todo ok"; estas
+    # pruebas fijan el suyo: `_estado_sin_modulos(...)` es el estado REAL con un importador
+    # controlado (vale con o sin las dependencias en el interprete), `_estado_falta(...)` uno sintetico.
+    def test_post_con_pdf_y_pdfplumber_ausente_da_503_con_faltan_y_tipos_y_no_crea_trabajo(self):
+        with _estado_sin_modulos("pdfplumber"), TestClient(_app()) as client:
+            response = self._post(client, rutas=["a.pdf"])
+        assert response.status_code == 503, response.text
+        detail = response.json()["detail"]
+        assert detail["code"] == "extractores_no_disponibles"
+        assert detail["faltan"] == ["pdfplumber"]
+        assert detail["tipos"] == [".pdf"]
+        assert self.store._index == {}
+
+    def test_post_503_por_cada_tipo_afectado(self):
+        casos = {"docx": ("python-docx", "b.docx"), "openpyxl": ("openpyxl", "c.xlsx")}
+        for modulo, (paquete, ruta) in casos.items():
+            with _estado_sin_modulos(modulo), TestClient(_app()) as client:
+                response = self._post(client, rutas=[ruta])
+            assert response.status_code == 503, (modulo, response.text)
+            assert response.json()["detail"]["faltan"] == [paquete]
+
+    def test_post_lote_solo_de_imagenes_con_pdfplumber_ausente_sigue_admitiendo(self):
+        async def _noop(*args, **kwargs):
+            return None
+
+        with _estado_falta("pdfplumber"), patch.object(rutas_mod, "_ejecutar_trabajo", _noop), \
+             TestClient(_app()) as client:
+            response = self._post(client, rutas=["a.png", "b.jpg"])
+        assert response.status_code == 202, response.text
+
+    def test_post_lote_mixto_con_un_pdf_y_pdfplumber_ausente_da_503(self):
+        with _estado_falta("pdfplumber"), TestClient(_app()) as client:
+            response = self._post(client, rutas=["a.png", "b.pdf"])
+        assert response.status_code == 503, response.text
+
+    def test_post_sin_pillow_una_imagen_con_firma_llamada_foto_da_503(self):
+        """Jax#338 ronda 18 (MAJOR de Sol r17): el freno decide como la compuerta,
+        por la FIRMA del contenido (leido a traves del jail); un PNG llamado
+        `foto` frena el lote igual que un `.png`. Sin Pillow en la prueba: el job
+        `governance` no la instala, y el freno solo lee la firma."""
+        foto = Path(self._tmpdir.name) / "foto"
+        foto.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+
+        async def _noop(*args, **kwargs):
+            return None
+
+        with _estado_falta("pillow"), patch.object(rutas_mod, "_ejecutar_trabajo", _noop), \
+             patch.object(rutas_mod.tool_authority, "resolve_jailed_path", return_value=(foto, "")), \
+             TestClient(_app()) as client:
+            response = self._post(client, rutas=["foto"])
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"]["faltan"] == ["pillow"]
+        assert self.store._index == {}
+
+    def test_post_lote_sobre_el_maximo_con_dependencia_faltante_da_422_sin_leer_cabeceras(self):
+        """Jax#338 ronda 18: las validaciones baratas (cantidad maxima de rutas,
+        formato del project_uuid) van ANTES de que el freno lea cabeceras."""
+        leidas: list = []
+
+        def abrir_espia(ruta):
+            leidas.append(ruta)
+            return None
+
+        with _estado_falta("pillow"), patch.object(rutas_mod, "_ruta_del_jail", abrir_espia), \
+             patch.object(rutas_mod, "_MAX_RUTAS_POR_TRABAJO", 2), TestClient(_app()) as client:
+            response = self._post(client, rutas=["a.png", "b.png", "c.png"])
+        assert response.status_code == 422, response.text
+        assert leidas == [], "el freno leyo cabeceras de un lote que se rechaza por tamano"
+        assert self.store._index == {}
+
+    def test_post_project_uuid_invalido_con_dependencia_faltante_da_422_sin_leer_cabeceras(self):
+        leidas: list = []
+
+        def abrir_espia(ruta):
+            leidas.append(ruta)
+            return None
+
+        with _estado_falta("pillow"), patch.object(rutas_mod, "_ruta_del_jail", abrir_espia), \
+             TestClient(_app()) as client:
+            response = self._post(client, project_uuid="no-es-un-uuid", rutas=["a.png"])
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"]["code"] == "project_uuid_invalido"
+        assert leidas == []
+
+    def test_post_paquete_faltante_sin_mapa_bloquea_todos_los_tipos(self):
+        with _estado_falta("linea-no-reconocida:3"), TestClient(_app()) as client:
+            response = self._post(client, rutas=["a.png"])
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"]["tipos"] == ["*"]
+
+    def test_post_503_por_extractores_ocurre_antes_del_acquire_del_semaforo(self):
+        """MINOR-4: un espia sobre el semaforo. Si el 503 se mueve DESPUES del
+        acquire, `acquire` se llama y esta prueba falla (cupo tomado y, segun
+        el camino, filtrado)."""
+        espia = Mock()
+        espia.locked = Mock(return_value=False)
+        espia.acquire = AsyncMock()
+        espia.release = Mock()
+        with _estado_falta("pdfplumber"), patch.object(rutas_mod, "_SEMAFORO_TRABAJOS", espia), \
+             TestClient(_app()) as client:
+            for _ in range(3):
+                assert self._post(client, rutas=["a.pdf"]).status_code == 503
+        espia.acquire.assert_not_called()
+
+    def test_post_con_todo_instalado_sigue_admitiendo(self):
+        async def _noop(*args, **kwargs):
+            return None
+
+        with patch.object(rutas_mod, "_ejecutar_trabajo", _noop), TestClient(_app()) as client:
+            response = self._post(client)
+        assert response.status_code == 202, response.text
+
+    def test_un_importador_que_lanza_attributeerror_da_503_y_health_200_y_el_arranque_no_cae(self):
+        import server
+
+        def importador(nombre, *a, **k):
+            if nombre == "pdfplumber":
+                raise AttributeError("a medio instalar")
+            return object()
+
+        with patch.object(dependencias, "estado", lambda *a, **k: _ESTADO_REAL(importador=importador)):
+            with TestClient(_app()) as client:
+                post = self._post(client, rutas=["a.pdf"])
+            with patch.object(server._salud, "estado", AsyncMock(return_value={"ok": True, "fallos": []})):
+                health = TestClient(server.app).get("/health")
+            with patch("jacobs.reaper.send_telegram_alert", AsyncMock(return_value={"ok": True})):
+                self._arrancar_servidor()  # no lanza: el servicio arranca igual
+        assert post.status_code == 503, post.text
+        assert post.json()["detail"]["code"] == "extractores_no_disponibles"
+        assert health.status_code == 200, health.text
+        ext = health.json()["extractores"]
+        assert ext["ok"] is False and ext["faltan"] == ["pdfplumber"]
+        assert ext["motivos"] == {"pdfplumber": "AttributeError"}
+
+    def test_health_informa_el_estado_de_los_extractores_sin_dejar_de_dar_200(self):
+        import server
+
+        with patch.object(server._salud, "estado", AsyncMock(return_value={"ok": True, "fallos": []})):
+            with _estado_sin_modulos("docx"):
+                # sin `with`: no corre el startup (necesita MariaDB real)
+                roto = TestClient(server.app).get("/health")
+            sano = TestClient(server.app).get("/health")
+        assert roto.status_code == 200, roto.text
+        assert roto.json()["extractores"]["ok"] is False
+        assert roto.json()["extractores"]["faltan"] == ["python-docx"]
+        assert sano.status_code == 200, sano.text
+        assert sano.json()["extractores"] == {"ok": True, "faltan": [], "motivos": {}}
+
+    def _arrancar_servidor(self):
+        import server
+
+        async def _arrancar():
+            for handler in server.app.router.on_startup:
+                await handler()
+            # deja correr la tarea fire-and-forget del aviso
+            await asyncio.sleep(0)
+            await asyncio.gather(*list(aviso_extractores._TAREAS))
+
+        with patch.object(server, "_configure_b7_trusted_runtime"), \
+             patch("jacobs.subpipelines.config_subpipelines"), \
+             patch.object(server.jacobs_store, "tamanio_pool"), \
+             patch.object(server.jacobs_store, "init_tables", AsyncMock()), \
+             patch("procesamiento_idempotencia.init_tabla", AsyncMock()), \
+             patch("motor_registry.routes.init_motor_catalog", AsyncMock()), \
+             patch("jacobs.reaper.reap_orphaned_pipelines", AsyncMock()), \
+             patch("jacobs.reaper.start_reaper_loop", AsyncMock()), \
+             patch.object(rutas_mod, "reconciliar_trabajos_huerfanos", Mock(return_value=0)):
+            asyncio.run(_arrancar())
+
+    def test_el_arranque_loguea_error_y_avisa_si_faltan_extractores_y_no_se_cae(self):
+        enviar = AsyncMock(return_value={"ok": True, "message_id": 1, "error": None})
+        with _estado_falta("pdfplumber"), patch("jacobs.reaper.send_telegram_alert", enviar):
+            with self.assertLogs(level="ERROR") as capturado:
+                self._arrancar_servidor()
+        mensajes = [r.getMessage() for r in capturado.records]
+        assert any("pdfplumber" in m and "extractores" in m for m in mensajes), mensajes
+        enviar.assert_awaited_once()
+        assert "pdfplumber" in enviar.await_args.args[0]
+
+    def test_el_arranque_con_todo_ok_no_avisa(self):
+        enviar = AsyncMock()
+        with patch("jacobs.reaper.send_telegram_alert", enviar):
+            self._arrancar_servidor()
+        enviar.assert_not_awaited()
+
+    def test_el_aviso_desde_el_post_sale_una_vez_por_hora(self):
+        enviar = AsyncMock(return_value={"ok": True, "message_id": 1, "error": None})
+        reloj = [1000.0]
+        with _estado_falta("pdfplumber"), patch("jacobs.reaper.send_telegram_alert", enviar), \
+             patch.object(aviso_extractores, "_reloj", lambda: reloj[0]), TestClient(_app()) as client:
+            assert self._post(client, rutas=["a.pdf"]).status_code == 503
+            time.sleep(0.2)
+            reloj[0] += 1800
+            assert self._post(client, rutas=["a.pdf"]).status_code == 503
+            time.sleep(0.2)
+            primera = enviar.await_count
+            reloj[0] += 1801  # ya pasó más de una hora desde el primero
+            assert self._post(client, rutas=["a.pdf"]).status_code == 503
+            time.sleep(0.2)
+        assert primera == 1, "la segunda dentro de la hora NO avisa"
+        assert enviar.await_count == 2
+
+    def test_el_texto_realmente_enviado_no_lleva_las_rutas_del_lote(self):
+        """MINOR-N4: se afirma sobre lo que recibio `send_telegram_alert`, no sobre
+        un texto armado por la propia prueba. Si `mensaje()` metiera rutas, falla."""
+        enviar = AsyncMock(return_value={"ok": True, "message_id": 1, "error": None})
+        rutas = ["secreto-del-cliente.pdf", "carpeta/balance-confidencial.pdf"]
+        with _estado_falta("pdfplumber"), patch("jacobs.reaper.send_telegram_alert", enviar), \
+             TestClient(_app()) as client:
+            r = self._post(client, rutas=rutas)
+            time.sleep(0.2)
+        assert r.status_code == 503, r.text
+        enviar.assert_awaited_once()
+        enviado = enviar.await_args.args[0]
+        assert "pdfplumber" in enviado
+        for ruta in rutas:
+            assert ruta not in enviado and Path(ruta).stem not in enviado
+
+    def test_sin_credenciales_de_telegram_el_503_no_rompe(self):
+        with _estado_falta("pdfplumber"), \
+             patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""}), \
+             TestClient(_app()) as client:
+            r = self._post(client, rutas=["a.pdf"])
+            time.sleep(0.2)
+        assert r.status_code == 503, r.text
+
+    def test_el_log_del_503_sale_como_mucho_una_vez_por_minuto(self):
+        reloj = [9000.0]
+        with _estado_falta("pdfplumber"), patch("jacobs.reaper.send_telegram_alert", AsyncMock()), \
+             patch.object(aviso_extractores, "_reloj", lambda: reloj[0]), TestClient(_app()) as client:
+            with self.assertLogs(rutas_mod.logger, level="ERROR") as capturado:
+                for _ in range(5):
+                    self._post(client, rutas=["a.pdf"])
+                reloj[0] += 61
+                self._post(client, rutas=["a.pdf"])
+        rechazos = [r for r in capturado.records if "rechazado" in r.getMessage()]
+        assert len(rechazos) == 2
+
+    def test_el_error_con_codigo_de_la_ficha_llega_en_el_resultado_del_archivo(self):
+        ficha = Mock(estado="error", extractor="pdf", sha256="a" * 64, detalle={"codigo": "dependencia_no_instalada"})
+        with tempfile.TemporaryDirectory() as tmp:
+            archivo = Path(tmp) / "x.pdf"
+            archivo.write_bytes(b"%PDF-1.4")
+            with patch.object(rutas_mod.tool_authority, "resolve_jailed_path", return_value=(archivo, "")), \
+                 patch.object(rutas_mod.ingesta, "ingerir", return_value=ficha), \
+                 patch.object(rutas_mod.ingesta, "ruta_procesado", return_value=Path(tmp) / "nada"), \
+                 patch.object(rutas_mod.tool_authority, "WORKSPACE_ROOT", Path(tmp)):
+                r = rutas_mod._procesar_una_ruta(Path(tmp), "x.pdf")
+        assert r.estado == "error"
+        assert r.error == "dependencia_no_instalada"
+
+    def _error_de_ficha(self, detalle):
+        ficha = Mock(estado="error", extractor="tesseract", sha256="a" * 64, detalle=detalle)
+        with tempfile.TemporaryDirectory() as tmp:
+            archivo = Path(tmp) / "x.gif"
+            archivo.write_bytes(b"GIF89a")
+            with patch.object(rutas_mod.tool_authority, "resolve_jailed_path", return_value=(archivo, "")), \
+                 patch.object(rutas_mod.ingesta, "ingerir", return_value=ficha), \
+                 patch.object(rutas_mod.ingesta, "ruta_procesado", return_value=Path(tmp) / "nada"), \
+                 patch.object(rutas_mod.tool_authority, "WORKSPACE_ROOT", Path(tmp)):
+                return rutas_mod._procesar_una_ruta(Path(tmp), "x.gif")
+
+    def test_formato_no_soportado_viaja_con_su_formato_en_el_error(self):
+        r = self._error_de_ficha({"codigo": "formato_no_soportado", "formato": "gif_animado"})
+        assert r.estado == "error"
+        assert r.error == "formato_no_soportado:gif_animado"
+
+    def test_png_animado_es_un_formato_estable_del_contrato(self):
+        """Jax#338 ronda 18: `png_animado` viaja como los otros formatos (pasa la
+        validacion `[a-z0-9_]{1,40}`)."""
+        r = self._error_de_ficha({"codigo": "formato_no_soportado", "formato": "png_animado"})
+        assert r.error == "formato_no_soportado:png_animado"
+
+    def test_formato_no_soportado_sin_formato_viaja_solo_el_codigo(self):
+        r = self._error_de_ficha({"codigo": "formato_no_soportado"})
+        assert r.error == "formato_no_soportado"
+
+    def test_el_formato_solo_se_agrega_a_formato_no_soportado_y_se_valida(self):
+        assert self._error_de_ficha({"codigo": "archivo_ilegible", "formato": "gif_animado"}).error == "archivo_ilegible"
+        # una ficha cacheada con un `formato` raro no mete texto libre en el error
+        assert self._error_de_ficha(
+            {"codigo": "formato_no_soportado", "formato": "x; DROP\nTABLE"}
+        ).error == "formato_no_soportado"
+
+    def test_n29_un_salto_de_linea_al_final_del_formato_no_se_acepta(self):
+        """`$` coincide antes de un `\\n` final: con `fullmatch` no."""
+        for valor in ("gif_animado\n", "gif_animado\r\n", "\ngif_animado", "gif animado"):
+            r = self._error_de_ficha({"codigo": "formato_no_soportado", "formato": valor})
+            assert r.error == "formato_no_soportado", repr(valor)
+        assert self._error_de_ficha(
+            {"codigo": "formato_no_soportado", "formato": "gif_animado"}).error == "formato_no_soportado:gif_animado"
+
+    def test_b6_persists_authenticated_human_uploader_as_caller(self):
+        async def _noop(*args, **kwargs):
+            return None
+
+        with patch.object(rutas_mod, "_ejecutar_trabajo", _noop), TestClient(_app()) as client:
+            response = self._post(client)
+        assert response.status_code == 202, response.text
+        assert self.store.get(response.json()["job_id"]).caller == "user:2"
+
+    def test_get_and_cancel_require_each_exact_owner_dimension_without_mutation(self):
+        job_id = self.store.create(
+            caller="x", capability="x", motor="n/a", trace_id="t", prompt="", recursion_depth=0,
+        )
+        with TestClient(_app()) as client:
+            # The exact authenticated owner retains normal read access.
+            control = client.get(f"/procesamiento/trabajos/{job_id}", headers=_h(IDENTIDAD_PLATAFORMA))
+            assert control.status_code == 200, control.text
+
+            for header, wrong_value in (
+                ("X-Jax-Processing-Tenant-Id", "9"),
+                ("X-Jax-Processing-User-Id", "9"),
+                ("X-Jax-Processing-Project-Id", "9"),
+            ):
+                wrong_owner = {**_h(IDENTIDAD_PLATAFORMA), header: wrong_value}
+                before = len(Path(self.store._path).read_text().splitlines())
+                get_response = client.get(f"/procesamiento/trabajos/{job_id}", headers=wrong_owner)
+                cancel_response = client.post(f"/procesamiento/trabajos/{job_id}/cancel", headers=wrong_owner)
+                assert get_response.status_code == 404, get_response.text
+                assert cancel_response.status_code == 404, cancel_response.text
+                assert len(Path(self.store._path).read_text().splitlines()) == before
+                assert self.store.get(job_id).status == JobStatus.PENDING
 
     # -- N-1: el permiso siempre vuelve --------------------------------------
     def test_N1_falla_al_crear_el_job_no_deja_el_semaforo_agotado(self):
@@ -1065,17 +1544,17 @@ class TrabajoHTTPTest(unittest.TestCase):
         async def _correr():
             with patch.object(self.store, "create", side_effect=RuntimeError("boom -- create() reventó")):
                 for _ in range(2):  # tamaño real del semáforo de prueba
-                    req = rutas_mod.TrabajoRequest(proyecto="p", rutas=[], usuario="ana@cliente.com")
+                    req = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[])
                     with self.assertRaises(RuntimeError):
-                        await rutas_mod.crear_trabajo(req)
+                        await rutas_mod.crear_trabajo(req, _owned_request())
 
             assert not self._semaforo_test.locked(), (
                 "el semáforo quedó agotado tras dos pedidos rotos -- DoS de N requests"
             )
             # y un pedido LIMPIO subsiguiente se admite normalmente
-            req_limpio = rutas_mod.TrabajoRequest(proyecto="p", rutas=[], usuario="ana@cliente.com")
+            req_limpio = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[])
             with patch.object(rutas_mod, "_ejecutar_trabajo", AsyncMock()):
-                respuesta = await rutas_mod.crear_trabajo(req_limpio)
+                respuesta = await rutas_mod.crear_trabajo(req_limpio, _owned_request())
             assert respuesta.job_id
 
         asyncio.run(_correr())
@@ -1088,9 +1567,11 @@ class TrabajoHTTPTest(unittest.TestCase):
         agotado, pero no evitaba el registro huérfano). Ahora se rechaza
         EN LA ADMISIÓN, antes de tocar el semáforo siquiera: 422 limpio,
         ningún job creado."""
-        proyecto_malo = "p\udcff"
+        # E2a: el `project_uuid` con un surrogate lo rechaza la regex del UUID
+        # canónico, en la admisión: 422 `project_uuid_invalido`, nunca 500.
+        proyecto_malo = UUID_PRUEBA[:-1] + "\udcff"
         cuerpo_json = json.dumps(
-            {"proyecto": proyecto_malo, "rutas": [], "usuario": "ana@cliente.com"},
+            {"project_uuid": proyecto_malo, "rutas": []},
             ensure_ascii=True,
         ).encode("ascii")
         with TestClient(_app(), raise_server_exceptions=False) as c:
@@ -1099,6 +1580,7 @@ class TrabajoHTTPTest(unittest.TestCase):
                 headers={**_h(IDENTIDAD_PLATAFORMA), "content-type": "application/json"},
             )
             assert r.status_code == 422, r.text
+            assert r.json()["detail"]["code"] == "project_uuid_invalido", r.text
             assert not self._semaforo_test.locked(), (
                 "el semáforo se tocó aunque el proyecto se rechazó en la admisión"
             )
@@ -1152,33 +1634,32 @@ class TrabajoHTTPTest(unittest.TestCase):
         assert cuerpo["resultados"] == resultados
 
     # -- B-6: principal obligatorio, no vacío, con tope --------------------
-    def test_B6_usuario_obligatorio_falta_es_422(self):
+    def test_B6_usuario_no_es_requerido(self):
         with TestClient(_app()) as c:
             r = c.post(
-                "/procesamiento/trabajos", json={"proyecto": "p", "rutas": []},
+                "/procesamiento/trabajos", json={"project_uuid": UUID_PRUEBA, "rutas": []},
                 headers=_h(IDENTIDAD_PLATAFORMA),
             )
-        assert r.status_code == 422, r.text
+        assert r.status_code == 202, r.text
 
-    def test_B6_usuario_vacio_es_422(self):
+    def test_B6_usuario_vacio_es_extra_422(self):
         with TestClient(_app()) as c:
             r = self._post(c, usuario="")
         assert r.status_code == 422, r.text
 
-    def test_B6_usuario_muy_largo_es_422(self):
+    def test_B6_usuario_muy_largo_es_extra_422(self):
         with TestClient(_app()) as c:
             r = self._post(c, usuario="x" * 300)
         assert r.status_code == 422, r.text
 
-    def test_B6_usuario_se_registra_como_caller_del_job(self):
+    def test_B6_usuario_no_puede_elegir_caller(self):
         async def _noop(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None, control=None):
             return None
 
         with patch.object(rutas_mod, "_ejecutar_trabajo", _noop), TestClient(_app()) as c:
             r = self._post(c, usuario="carlos@cliente.com")
-            job_id = r.json()["job_id"]
 
-        assert self.store.get(job_id).caller == "carlos@cliente.com"
+        assert r.status_code == 422, r.text
 
     # -- B-2: admisión ------------------------------------------------------
     def test_B2_demasiadas_rutas_es_422_y_no_crea_job(self):
@@ -1221,9 +1702,9 @@ class TrabajoHTTPTest(unittest.TestCase):
         async def _correr():
             with patch.object(rutas_mod.job_tasks, "register", side_effect=RuntimeError("boom -- register() reventó")), \
                  patch.object(rutas_mod, "_ejecutar_trabajo", _worker_que_libera):
-                req = rutas_mod.TrabajoRequest(proyecto="p", rutas=[], usuario="ana@cliente.com")
+                req = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[])
                 with self.assertRaises(RuntimeError):
-                    await rutas_mod.crear_trabajo(req)
+                    await rutas_mod.crear_trabajo(req, _owned_request())
                 await asyncio.sleep(0.05)  # deja correr la tarea ya creada (que se libera sola)
 
         asyncio.run(_correr())
@@ -1241,10 +1722,10 @@ class TrabajoHTTPTest(unittest.TestCase):
             raise RuntimeError("boom -- create_task")
 
         async def _correr():
-            req = rutas_mod.TrabajoRequest(proyecto="p", rutas=[], usuario="ana@cliente.com")
+            req = rutas_mod.TrabajoRequest(project_uuid=UUID_PRUEBA, rutas=[])
             with patch.object(rutas_mod.asyncio, "create_task", side_effect=_create_task_que_falla):
                 with self.assertRaises(RuntimeError):
-                    await rutas_mod.crear_trabajo(req)
+                    await rutas_mod.crear_trabajo(req, _owned_request())
 
         asyncio.run(_correr())
         assert len(self.store._index) == 1, "el job tendría que haberse creado antes del fallo"
@@ -1438,6 +1919,7 @@ class TrabajoHTTPTest(unittest.TestCase):
              patch("jacobs.subpipelines.config_subpipelines"), \
              patch.object(server.jacobs_store, "tamanio_pool"), \
              patch.object(server.jacobs_store, "init_tables", AsyncMock()), \
+             patch("procesamiento_idempotencia.init_tabla", AsyncMock()), \
              patch("motor_registry.routes.init_motor_catalog", AsyncMock()), \
              patch("jacobs.reaper.reap_orphaned_pipelines", AsyncMock()), \
              patch("jacobs.reaper.start_reaper_loop", AsyncMock()), \
@@ -1452,11 +1934,11 @@ class TrabajoHTTPTest(unittest.TestCase):
             r_plat = self._post(c)
             r_jacobs = c.post(
                 "/procesamiento/trabajos",
-                json={"proyecto": "p", "rutas": [], "usuario": "a"},
+                json={"project_uuid": UUID_PRUEBA, "rutas": [], "usuario": "a"},
                 headers=_h(IDENTIDAD_JACOBS),
             )
             r_sin_credencial = c.post(
-                "/procesamiento/trabajos", json={"proyecto": "p", "rutas": [], "usuario": "a"},
+                "/procesamiento/trabajos", json={"project_uuid": UUID_PRUEBA, "rutas": [], "usuario": "a"},
             )
         assert r_plat.status_code == 202, r_plat.text
         assert r_jacobs.status_code == 403, r_jacobs.text
@@ -1470,6 +1952,149 @@ class TrabajoHTTPTest(unittest.TestCase):
         with TestClient(_app()) as c:
             r = c.post(f"/procesamiento/trabajos/{job_id}/cancel", headers=_h(IDENTIDAD_JACOBS))
         assert r.status_code == 403, r.text
+
+
+# ===========================================================================
+#  Grupo 3 -- E2a: LAS MANOS trabaja por `project_uuid`, solo proyectos ACTIVE
+# ===========================================================================
+class ProjectUuidTest(unittest.TestCase):
+    UUID = UUID_PRUEBA
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.store = _ProcessingJobStoreFixture(str(Path(self._tmpdir.name) / "jobs.jsonl"))
+        self.semaforo = asyncio.Semaphore(2)
+        for parche in (
+            patch.object(rutas_mod, "_STORE", self.store),
+            patch.object(rutas_mod, "_SEMAFORO_TRABAJOS", self.semaforo),
+            patch.dict(rutas_mod._CONTROLES, clear=True),
+        ):
+            parche.start()
+            self.addCleanup(parche.stop)
+        self.cabeceras_plataforma = _h(IDENTIDAD_PLATAFORMA)
+
+    def _post(self, cuerpo, estado="ACTIVE"):
+        with patch.object(rutas_mod.proyecto_activo, "identidad_activa_del_proyecto", AsyncMock(return_value=estado == "ACTIVE")), \
+             patch.object(rutas_mod, "_ejecutar_trabajo", AsyncMock()), \
+             TestClient(_app()) as c:
+            return c.post("/procesamiento/trabajos", json=cuerpo, headers=self.cabeceras_plataforma)
+
+    def test_proyecto_viejo_por_nombre_da_422(self):
+        r = self._post({"proyecto": "lacteos", "rutas": ["a.pdf"]})
+        self.assertEqual(r.status_code, 422)
+
+    def test_uuid_no_canonico_da_422_con_codigo(self):
+        # 36 caracteres, pasa el largo de pydantic, no es un UUID.
+        for malo in ("../../etc" + "x" * 27, self.UUID.upper(), "z" * 36):
+            r = self._post({"project_uuid": malo, "rutas": ["a.pdf"]})
+            self.assertEqual(r.status_code, 422, malo)
+            self.assertEqual(r.json()["detail"]["code"], "project_uuid_invalido", malo)
+
+    def test_uuid_de_otro_largo_da_422(self):
+        r = self._post({"project_uuid": "../../etc", "rutas": ["a.pdf"]})
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.json()["detail"]["code"], "project_uuid_invalido")
+
+    def test_base_caida_da_503_sin_job_ni_cupo(self):
+        # Si `estado_del_proyecto` lanza (base caida, timeout) no es un 500 anonimo ni un
+        # proyecto "no activo": es 503 con codigo estable, sin job creado y sin tomar cupo.
+        with patch.object(rutas_mod.proyecto_activo, "identidad_activa_del_proyecto",
+                          AsyncMock(side_effect=ConnectionError("base caida"))), \
+             patch.object(rutas_mod, "_ejecutar_trabajo", AsyncMock()) as ejecutar, \
+             TestClient(_app()) as c:
+            r = c.post("/procesamiento/trabajos",
+                       json={"project_uuid": self.UUID, "rutas": ["a.pdf"]},
+                       headers=self.cabeceras_plataforma)
+        self.assertEqual(r.status_code, 503, r.text)
+        self.assertEqual(r.json()["detail"]["code"], "base_no_disponible")
+        self.assertFalse(self.semaforo.locked())
+        self.assertEqual(self.semaforo._value, 2)      # no tomo ningun permiso
+        self.assertEqual(self.store._index, {})        # no creo job
+        ejecutar.assert_not_called()
+
+    def test_trabajo_de_rechaza_lo_que_no_es_uuid_canonico(self):
+        for malo in ("p", "../../etc", self.UUID.upper(), "medicion-aislamiento", ""):
+            with self.assertRaises(ValueError, msg=malo):
+                rutas_mod._trabajo_de(malo)
+
+    def test_proyecto_archivado_da_422_y_no_toma_cupo(self):
+        r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"]}, estado="ARCHIVED")
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.json()["detail"]["code"], "proyecto_no_activo")
+        self.assertFalse(self.semaforo.locked())
+        self.assertEqual(self.semaforo._value, 2)
+        self.assertEqual(len(self.store._index), 0, "no debería haberse creado ningún job")
+
+    def test_proyecto_oculto_o_deshabilitado_da_422(self):
+        for estado in ("HIDDEN", "DISABLED"):
+            r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"]}, estado=estado)
+            self.assertEqual(r.status_code, 422, estado)
+            self.assertEqual(r.json()["detail"]["code"], "proyecto_no_activo", estado)
+
+    def test_proyecto_inexistente_da_422(self):
+        r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"]}, estado=None)
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.json()["detail"]["code"], "proyecto_no_activo")
+
+    def test_proyecto_activo_admite_y_guarda_el_uuid(self):
+        r = self._post({"project_uuid": self.UUID, "rutas": ["a.pdf"]})
+        self.assertEqual(r.status_code, 202, r.text)
+        self.assertEqual(self.store._index[r.json()["job_id"]]["proyecto"], self.UUID)
+
+    def test_carpeta_del_trabajo_es_el_uuid(self):
+        self.assertEqual(rutas_mod._trabajo_de(self.UUID),
+                         tool_authority.WORKSPACE_ROOT / "proyectos" / self.UUID)
+
+
+# -- jax-14 ronda 2, MINOR-N2: las variables de intervalo nunca tumban el import ----------
+def _recargar_aviso(**entorno):
+    with patch.dict(os.environ, entorno):
+        return importlib.reload(aviso_extractores)
+
+
+@pytest.fixture
+def _aviso_restaurado():
+    yield
+    importlib.reload(aviso_extractores)  # entorno limpio: vuelven los valores por defecto
+
+
+def test_valor_no_numerico_usa_el_default_sin_lanzar_y_el_import_no_cae(_aviso_restaurado, caplog):
+    with caplog.at_level("WARNING", logger="las_manos.aviso_extractores"):
+        mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S="1h", JAX_PROCESAMIENTO_LOG_EXTRACTORES_S="abc")
+    assert mod.INTERVALO_AVISO_S == 3600.0
+    assert mod.INTERVALO_LOG_S == 60.0
+    avisos = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S" in a for a in avisos), avisos
+
+
+@pytest.mark.parametrize("valor", ["0", "-5", "nan", "inf", "-inf"])
+def test_cero_negativo_o_no_finito_se_acota_al_minimo_o_al_default(_aviso_restaurado, valor):
+    mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S=valor, JAX_PROCESAMIENTO_LOG_EXTRACTORES_S=valor)
+    assert mod.INTERVALO_AVISO_S >= 60.0
+    assert mod.INTERVALO_LOG_S >= 10.0
+    assert mod.INTERVALO_AVISO_S < float("inf") and mod.INTERVALO_LOG_S < float("inf")
+
+
+def test_los_minimos_son_60_para_el_aviso_y_10_para_el_log(_aviso_restaurado):
+    mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S="1", JAX_PROCESAMIENTO_LOG_EXTRACTORES_S="1")
+    assert (mod.INTERVALO_AVISO_S, mod.INTERVALO_LOG_S) == (60.0, 10.0)
+
+
+def test_un_valor_enorme_se_baja_al_techo_con_warning(_aviso_restaurado, caplog):
+    """MINOR-N5: sin techo, 1e28 (o una confusion de unidades) apagaria el aviso del POST
+    mientras viva el proceso."""
+    with caplog.at_level("WARNING", logger="las_manos.aviso_extractores"):
+        mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S="1e28", JAX_PROCESAMIENTO_LOG_EXTRACTORES_S="1e28")
+    assert (mod.INTERVALO_AVISO_S, mod.INTERVALO_LOG_S) == (86400.0, 3600.0)
+    avisos = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S" in a for a in avisos), avisos
+    assert any("JAX_PROCESAMIENTO_LOG_EXTRACTORES_S" in a for a in avisos), avisos
+
+
+def test_un_valor_valido_por_encima_del_minimo_se_respeta(_aviso_restaurado):
+    mod = _recargar_aviso(JAX_PROCESAMIENTO_AVISO_EXTRACTORES_S="7200", JAX_PROCESAMIENTO_LOG_EXTRACTORES_S="30")
+    assert (mod.INTERVALO_AVISO_S, mod.INTERVALO_LOG_S) == (7200.0, 30.0)
 
 
 if __name__ == "__main__":

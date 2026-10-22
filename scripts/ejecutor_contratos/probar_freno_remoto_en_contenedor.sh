@@ -44,7 +44,7 @@ paso() { echo "== $*"; }
 limpiar() {
   set +e
   sudo systemctl stop "$UNIDAD_PRUEBA" 2>/dev/null
-  sudo docker rm -f "$NOMBRE_CONTENEDOR" >/dev/null 2>&1
+  sudo docker rm -fv "$NOMBRE_CONTENEDOR" >/dev/null 2>&1
   [ -z "$IP" ] || sudo nft delete element inet ejecutor_cerco destinos_ssh "{ $IP . $PUERTO }" 2>/dev/null
   sudo nft list set inet ejecutor_cerco destinos_ssh > "$TMP/cerco-despues.txt"
   cmp "$TMP/cerco-antes.txt" "$TMP/cerco-despues.txt" && echo "restaurado=cerco cmp=ok"

@@ -1,0 +1,17 @@
+{
+  "model": {
+    "generationConfig": {
+      "contextWindowSize": 131072
+    }
+  },
+  "mcpServers": {
+    "faro-readonly": {
+      "command": "python3",
+      "args": ["authority/faro_readonly_mcp.py"],
+      "cwd": ".",
+      "includeTools": ["skills.buscar", "skills.leer", "agentes.listar"],
+      "trust": false
+    }
+  },
+  "$version": 4
+}

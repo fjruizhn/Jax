@@ -3,7 +3,11 @@
 Description=JAX — Worker de memoria (destila facts/decisiones/pendientes con scope de dos niveles)
 After=network.target docker.service
 Wants=docker.service
+OnFailure=aviso-fallo@%n.service
 
+# Códigos de salida (auditoría Jax#354): 0 = sano; 1 = fallo general (extracción, conexión, configuración
+# inválida); 2 = solo hay jobs QUARANTINED/UNKNOWN esperando a una persona (--atascados / --reencolar).
+# aviso-fallo distingue el incidente por ExecMainStatus. Ver docs/runbooks/memoria-cola-atascada.md.
 [Service]
 Type=oneshot
 User=jaxsvc

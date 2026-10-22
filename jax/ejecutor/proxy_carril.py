@@ -46,6 +46,30 @@ Configuración (sin defaults para lo que decide a dónde va el tráfico):
                               desalojaría el de la Mesa (SP3, 2026-09-17)
   JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS  tope de `max_tokens` por petición (obligatoria,
                               entero > 0). Más → 403. La cuenta: §6.3 del spec de Fase 2
+  JAX_PROXY_CARRIL_PENSAMIENTO  `apagado` o `libre`, exactamente (obligatoria; otro valor o
+                              ausencia → no arranca). Con `apagado`, lo que se reenvía de un
+                              POST /v1/messages ya validado lleva `"thinking": {"type":
+                              "disabled"}`, SOBRESCRIBIENDO el del cliente: Claude Code no
+                              manda `disabled`, y qwen3.8 con el pensamiento libre gasta todo
+                              `max_tokens` pensando (medido 2026-10-03, Ollama 0.34.3: 227
+                              tokens y 8 s contra 13 tokens y 0,6 s). Decisión de Fernando
+                              2026-10-03. Con `libre` el cuerpo pasa byte a byte. La validación
+                              (modelo, salida, freno, resultados) corre SIEMPRE sobre el cuerpo
+                              original; la reescritura es lo último antes de reenviar, y si
+                              falla no se reenvía (502 `reescritura_fallo`, con `x-should-retry: false`). La
+                              reescritura aplica SOLO a la entrada del Ejecutor; la del socket
+                              jaxqwen (`atender_jaxqwen`) sigue byte a byte aunque diga
+                              `apagado`. En las DOS entradas se rechaza (403) un pedido de
+                              mensajes con claves repetidas tras el plegado de Go, o con un campo
+                              conocido escrito con otra capitalización (403 `pedido_ambiguo`), en
+                              el primer nivel, en cada objeto de `messages[]`, en cada bloque de
+                              `content` (recursivo en el `content` de un tool_result) y en cada
+                              objeto de `tools[]`; ver `lectura.cargar_pedido`. Go (Ollama)
+                              empareja claves sin distinguir mayúsculas, C3 no. También en las
+                              dos entradas: 403 `herramienta_de_servidor` si `tools` trae algo con
+                              `type` distinto de ausente o `custom` (búsqueda web de Ollama), o si algún bloque de
+                              `messages[].content[]` es de servidor (`server_tool_use`, `web_search*`,
+                              `web_fetch*`, `*_tool_result` que no sea `tool_result`)
 
 C3 (registro intocable, decisión D-SP1-2 del índice de SP1): cada `tool_use` que
 el cerebro pide se anota en el registro ANTES de reenviar el trozo que lo completa,
@@ -79,6 +103,19 @@ re-chequeo después de cada punto de suspensión del cliente HTTP (connect, cada
 leído), que hoy no existe — no se cerró en esta ronda; queda como límite conocido, no como
 deuda silenciada.
 
+PARADA (SIGTERM/SIGINT; incidente del 2026-10-04): antes no había manejador, el proceso moría
+sin pasar por el cierre y el socket Unix de jaxqwen quedaba en /run; `arrancar` se niega a pisar
+lo que haya en esa ruta y el proxy entraba en bucle de fallos tras cada stop/restart. Ahora, al
+recibir la señal: (1) se deja de escuchar en LAS DOS entradas (TCP y Unix) y se borra el socket
+propio, al instante; (2) las conexiones en vuelo tienen TOPE_VACIADO_S (10 s) para terminar;
+(3) pasado el tope se abortan las que sigan abiertas; (4) se cierran el cliente HTTP y el
+registro (con su lock: un `anotar` en vuelo termina antes, y uno posterior levanta
+OSError("registro_cerrado")); (5) el proceso sale con código 0 (systemd: "Deactivated
+successfully"; `Restart=on-failure` no lo relanza). La unidad lleva TimeoutStopSec=30, mayor que
+el tope. Con SIGKILL (o un apagón) nada de esto corre y el socket puede quedar: al arrancar,
+`_despejar_socket_huerfano` borra el socket PROPIO sin oyente, y solo ese (ver su docstring).
+El directorio del socket debe ser de este euid o de root y sin escritura de grupo/otros.
+
 Corre con:  python -m jax.ejecutor.proxy_carril
 """
 from __future__ import annotations
@@ -88,6 +125,10 @@ import collections
 import json
 import logging
 import os
+import signal
+import socket
+import stat
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -124,7 +165,21 @@ RUTA_NO_PERMITIDA = "ruta_no_permitida"
 EJECUTOR_PAUSADO = "ejecutor_pausado"
 VIGIA_SIN_LATIDO = "vigia_sin_latido"
 MODELO_NO_PERMITIDO = "modelo_no_permitido"
+#: Un objeto del pedido que Go (Ollama) leería distinto que Python/C3: claves repetidas tras el
+#: plegado, o un campo conocido con otra capitalización. Ver `lectura.cargar_pedido`.
+PEDIDO_AMBIGUO = "pedido_ambiguo"
+#: El pedido trae una herramienta DE SERVIDOR (`type` distinto de ausente o `custom`:
+#: `web_search_*`, `web_fetch_*`, ...). Ollama 0.34.3 las atiende del lado del servidor (búsqueda
+#: web) y el proxy es la jaula del Ejecutor: ningún dato de misión sale de hall9000. Se rechaza,
+#: no se quita en silencio.
+HERRAMIENTA_DE_SERVIDOR = "herramienta_de_servidor"
 SALIDA_NO_PERMITIDA = "salida_no_permitida"
+#: Fail-closed: con el pensamiento apagado, el cuerpo no se pudo reescribir; no se reenvía.
+REESCRITURA_FALLO = "reescritura_fallo"
+PENSAMIENTO_APAGADO = "apagado"
+PENSAMIENTO_LIBRE = "libre"
+_CLAVES_DE_PENSAMIENTO_PLEGADAS = frozenset({lectura.plegar(c) for c in ("thinking", "think", "reasoning_effort")})
+_PENSAMIENTOS = frozenset({PENSAMIENTO_APAGADO, PENSAMIENTO_LIBRE})
 #: Fail-closed: el re-chequeo del freno AL TOMAR el carril (dentro de la sección crítica,
 #: un flock entre procesos) no pudo terminar a tiempo. Mismo criterio que
 #: `InterruptorSinConfigurar` en `_freno_puesto_ahora`: no saber si el freno está puesto
@@ -141,6 +196,12 @@ _RESULTADOS_RECORDADOS = 10000
 
 _HOST_POR_OMISION = "127.0.0.1"
 _LEER_BYTES = 65536
+# Tope de vaciado de la parada ordenada: tras dejar de escuchar, las conexiones en vuelo tienen este
+# tiempo para terminar; pasado, se abortan. Una sola conexión colgada (cabeceras a medias) no debe
+# mantener vivo el proceso hasta el SIGKILL de systemd. TimeoutStopSec de la unidad es MAYOR (30 s).
+TOPE_VACIADO_S = 10.0
+_GRACIA_ABORTO_S = 2.0  # tras abortar, lo que se espera a que asyncio cierre los transportes
+_SONDEO_S = 2.0  # tope del connect() de prueba al socket huérfano; agotarlo = fallar cerrado
 
 #: Cabeceras de salto (RFC 9110 §7.6.1) y las que el proxy recalcula. `accept-encoding`
 #: lo pone SIEMPRE el proxy en `identity`: un cuerpo comprimido no se puede leer al pasar.
@@ -183,6 +244,10 @@ class Config:
     latido_max_s: float
     modelo: str
     max_salida_tokens: int
+    pensamiento: str  # PENSAMIENTO_APAGADO | PENSAMIENTO_LIBRE; sin valor por omisión a propósito
+    jaxqwen_socket: Path | None = None
+    jaxqwen_uid: int | None = None
+    jaxqwen_gid: int | None = None
 
 
 def config_desde_entorno(env=None) -> Config:
@@ -225,6 +290,24 @@ def config_desde_entorno(env=None) -> Config:
     latido_max_s = numero(pausa_c5.VARIABLE_LATIDO_MAX_S, float)
     if not latido_max_s > 0 or latido_max_s == float("inf"):
         raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", pausa_c5.VARIABLE_LATIDO_MAX_S),)))
+    jaxqwen_socket_raw = env.get("JAX_PROXY_CARRIL_JAXQWEN_SOCKET", "").strip()
+    uid_raw = env.get("JAX_PROXY_CARRIL_JAXQWEN_UID", "").strip()
+    gid_raw = env.get("JAX_PROXY_CARRIL_JAXQWEN_GID", "").strip()
+    if any((jaxqwen_socket_raw, uid_raw, gid_raw)) and not all((jaxqwen_socket_raw, uid_raw, gid_raw)):
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_*"),)))
+    jaxqwen_socket = Path(jaxqwen_socket_raw) if jaxqwen_socket_raw else None
+    if jaxqwen_socket is not None and (not jaxqwen_socket.is_absolute() or len(os.fsencode(jaxqwen_socket)) >= 104):
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_SOCKET"),)))
+    try:
+        jaxqwen_uid = int(uid_raw) if uid_raw else None
+        jaxqwen_gid = int(gid_raw) if gid_raw else None
+    except ValueError as exc:
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_UID/GID"),))) from exc
+    if jaxqwen_uid is not None and (jaxqwen_uid < 1 or jaxqwen_gid is None or jaxqwen_gid < 1):
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_UID/GID"),)))
+    pensamiento = obligatoria("JAX_PROXY_CARRIL_PENSAMIENTO")
+    if pensamiento not in _PENSAMIENTOS:
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_PENSAMIENTO"),)))
     return Config(
         upstream=upstream.rstrip("/"),
         raiz=Path(obligatoria("JAX_PROXY_CARRIL_RAIZ")),
@@ -237,6 +320,8 @@ def config_desde_entorno(env=None) -> Config:
         latido_max_s=latido_max_s,
         modelo=obligatoria("JAX_PROXY_CARRIL_MODELO"),
         max_salida_tokens=positivo("JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS"),
+        pensamiento=pensamiento,
+        jaxqwen_socket=jaxqwen_socket, jaxqwen_uid=jaxqwen_uid, jaxqwen_gid=jaxqwen_gid,
     )
 
 
@@ -289,7 +374,9 @@ def _fuera_de_limites(cuerpo: bytes, cfg: Config) -> str | None:
     """¿La petición de mensajes pide otro modelo o más salida que el tope? Devuelve el
     código, o None si está dentro. Lo que no se puede leer, no está dentro (fail-closed)."""
     try:
-        pedido = json.loads(cuerpo)
+        pedido = lectura.cargar_pedido(cuerpo)
+    except lectura.PedidoAmbiguo:  # claves que Go leería distinto que C3: 403 con código propio
+        return PEDIDO_AMBIGUO
     except (ValueError, UnicodeDecodeError):  # fail-soft: no se reenvía; un cuerpo ilegible se trata como modelo no permitido (403)
         return MODELO_NO_PERMITIDO
     if not isinstance(pedido, dict) or pedido.get("model") != cfg.modelo:
@@ -297,7 +384,42 @@ def _fuera_de_limites(cuerpo: bytes, cfg: Config) -> str | None:
     salida = pedido.get("max_tokens")
     if type(salida) is not int or not 0 < salida <= cfg.max_salida_tokens:
         return SALIDA_NO_PERMITIDA
+    if _con_herramienta_de_servidor(pedido.get("tools")) or lectura.bloque_de_servidor(pedido):
+        return HERRAMIENTA_DE_SERVIDOR
     return None
+
+
+def _con_herramienta_de_servidor(herramientas) -> bool:
+    """¿`tools` trae algo que no sea una herramienta de cliente normal (sin `type`, o `type` ==
+    "custom")? Cubre `web_search*` y `web_fetch*` y cualquier otro `type` de servidor. Lo que no
+    se puede leer como lista de objetos, no está dentro (fail-closed). Sin `tools`, no hay nada."""
+    if herramientas is None:
+        return False
+    if not isinstance(herramientas, list):
+        return True
+    for herramienta in herramientas:
+        if not isinstance(herramienta, dict):
+            return True
+        if "type" in herramienta and herramienta["type"] != "custom":
+            return True
+    return False
+
+
+def _con_pensamiento_apagado(cuerpo: bytes) -> bytes:
+    """El cuerpo que se reenvía con el pensamiento apagado: el mismo pedido con `thinking`
+    forzado a `disabled`, pisando el del cliente. Antes se borra de primer nivel toda clave que
+    Ollama (Go: `encoding/json` empareja sin distinguir mayúsculas; su binario además lee
+    `think` y `reasoning_effort`) pudiera leer como pensamiento, tras el plegado de Go (`lectura.plegar`). Se serializa con
+    `ensure_ascii=True`: un surrogate suelto (escape ud83d sin su par) no se puede codificar en UTF-8 y
+    reventaría la reescritura. Lanza si no es un objeto JSON legible (ya se validó antes; esto
+    es el cinturón: lo que no se puede reescribir no se reenvía)."""
+    pedido = json.loads(cuerpo)
+    if not isinstance(pedido, dict):
+        raise ValueError("el pedido no es un objeto")
+    for clave in [k for k in pedido if lectura.plegar(k) in _CLAVES_DE_PENSAMIENTO_PLEGADAS]:
+        del pedido[clave]
+    pedido["thinking"] = {"type": "disabled"}
+    return json.dumps(pedido, ensure_ascii=True, separators=(",", ":")).encode("ascii")
 
 
 def _ruta_sin_query(destino: bytes) -> str:
@@ -317,10 +439,44 @@ class _Proxy:
         # y no con obtener_cliente_http(): cerrar el del proceso al apagar el
         # proxy cerraría el de cualquier otro usuario del mismo loop.
         self.cliente = crear_cliente_http()
+        # Conexiones abiertas (TCP y Unix), para poder abortar las que sigan colgadas al agotarse
+        # el tope de vaciado de la parada ordenada.
+        self._conexiones: set[asyncio.StreamWriter] = set()
+
     async def cerrar(self) -> None:
         await self.cliente.aclose()
 
-    async def atender(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    def abortar_conexiones(self) -> int:
+        """Corta de golpe (RST, sin cierre ordenado) lo que siga abierto; devuelve cuántas."""
+        pendientes = list(self._conexiones)
+        for w in pendientes:
+            w.transport.abort()
+        return len(pendientes)
+
+    @staticmethod
+    def _peer_uid_permitido(sock, expected_uid: int) -> bool:
+        """Authenticate the dedicated local caller; uid/name fields in HTTP are ignored."""
+        try:
+            raw = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            _pid, uid, _gid = struct.unpack("3i", raw)
+            return uid == expected_uid
+        except (AttributeError, OSError, struct.error):
+            return False
+
+    async def atender(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                      imponer_pensamiento: bool = True) -> None:
+        self._conexiones.add(writer)
+        try:
+            await self._atender(reader, writer, imponer_pensamiento)
+        finally:
+            self._conexiones.discard(writer)
+
+    async def _atender(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                       imponer_pensamiento: bool) -> None:
+        """`imponer_pensamiento=False` es la entrada de jaxqwen (socket Unix): ahí el cuerpo sigue
+        byte a byte aunque la config diga `apagado` (decisión de jax-14, 2026-10-03: el
+        pensamiento apagado es del cerebro del Ejecutor, no de Qwen/jaxqwen). La validación
+        —incluida la de claves ambiguas— corre igual en las dos entradas."""
         conn = h11.Connection(h11.SERVER)
         try:
             try:
@@ -331,7 +487,8 @@ class _Proxy:
             if peticion is None:
                 return
             en_vuelo = asyncio.Event()
-            trabajo = asyncio.create_task(self._reenviar(conn, writer, peticion, cuerpo, en_vuelo))
+            trabajo = asyncio.create_task(self._reenviar(conn, writer, peticion, cuerpo, en_vuelo,
+                                                         imponer_pensamiento))
             vigia = asyncio.create_task(_esperar_cierre(reader))
             # C4: el freno vigila sólo lo que ya está en vuelo. Antes, `_reenviar` mira el
             # freno él mismo DESPUÉS de anotar los resultados: lo que ya corrió no se pierde.
@@ -414,7 +571,7 @@ class _Proxy:
                 self._resultados_anotados.popitem(last=False)
 
     async def _reenviar(self, conn, writer, peticion: h11.Request, cuerpo: bytes,
-                        en_vuelo: asyncio.Event | None = None) -> None:
+                        en_vuelo: asyncio.Event | None = None, imponer_pensamiento: bool = True) -> None:
         metodo = peticion.method.decode("latin-1")
         ruta = _ruta_sin_query(peticion.target)
         de_mensajes = metodo == "POST" and ruta in _RUTAS_DE_MENSAJES
@@ -497,11 +654,25 @@ class _Proxy:
                     await _responder_error(conn, writer, 423, Motivo(frenado),
                                            extra=((b"x-should-retry", b"false"),), metodo=metodo)
                     return
+                # Pensamiento apagado: lo ÚLTIMO antes de reenviar, tras todas las validaciones
+                # (hechas sobre el cuerpo original del cliente). Content-Length y Transfer-Encoding
+                # ya están en `_NO_REENVIAR`: httpx fija el Content-Length del cuerpo nuevo.
+                a_enviar, nota = cuerpo, None
+                if de_mensajes and imponer_pensamiento and self.cfg.pensamiento == PENSAMIENTO_APAGADO:
+                    try:
+                        a_enviar = _con_pensamiento_apagado(cuerpo)
+                    except (ValueError, TypeError, RecursionError, UnicodeError) as exc:
+                        log.error("proxy_carril %s metodo=%s ruta=%s tipo=%s",
+                                  REESCRITURA_FALLO, metodo, ruta, type(exc).__name__)
+                        await _responder_error(conn, writer, 502, Motivo(REESCRITURA_FALLO),
+                                               extra=((b"x-should-retry", b"false"),), metodo=metodo)
+                        return
+                    nota = f"pensamiento={PENSAMIENTO_APAGADO}"
                 cabeceras = [(k, v) for k, v in peticion.headers if k.lower() not in _NO_REENVIAR]
                 cabeceras.append((b"accept-encoding", b"identity"))
                 solicitud = self.cliente.build_request(
                     metodo, self.cfg.upstream + peticion.target.decode("latin-1"),
-                    headers=cabeceras, content=cuerpo,
+                    headers=cabeceras, content=a_enviar,
                     # Sin tope de lectura: el primer byte puede tardar lo que
                     # tarde la cola de Ollama; el corte lo decide el cliente, y
                     # el proxy lo ve. Por petición: el default del cliente es 5 s.
@@ -514,7 +685,7 @@ class _Proxy:
                     await _responder_error(conn, writer, 502, Motivo(UPSTREAM_INALCANZABLE), metodo=metodo)
                     return
                 try:
-                    await self._devolver(conn, writer, respuesta, metodo, ruta, de_mensajes)
+                    await self._devolver(conn, writer, respuesta, metodo, ruta, de_mensajes, nota)
                 finally:
                     await respuesta.aclose()
         except EsperaAgotada as exc:
@@ -528,7 +699,8 @@ class _Proxy:
             if not tomado:  # se fue por el tope, o lo cancelaron esperando: la cola baja igual
                 _ESPERANDO_CARRIL -= 1
 
-    async def _devolver(self, conn, writer, respuesta, metodo: str, ruta: str, de_mensajes: bool) -> None:
+    async def _devolver(self, conn, writer, respuesta, metodo: str, ruta: str, de_mensajes: bool,
+                        nota: str | None = None) -> None:
         codificacion = respuesta.headers.get("content-encoding", "identity").strip().lower()
         if codificacion not in ("", "identity"):
             log.error("proxy_carril %s metodo=%s ruta=%s codificacion=%s", REGISTRO_ILEGIBLE, metodo, ruta, codificacion)
@@ -569,12 +741,14 @@ class _Proxy:
                                            extra=((b"x-should-retry", b"false"),), metodo=metodo)
                     return
             await _enviar(conn, writer, inicio)
-            log.info("proxy_carril peticion metodo=%s ruta=%s estado=%d", metodo, ruta, respuesta.status_code)
+            log.info("proxy_carril peticion metodo=%s ruta=%s estado=%d%s", metodo, ruta, respuesta.status_code,
+                 f" {nota}" if nota else "")
             await _enviar(conn, writer, h11.Data(data=crudo))
             await _enviar(conn, writer, h11.EndOfMessage())
             return
         await _enviar(conn, writer, inicio)
-        log.info("proxy_carril peticion metodo=%s ruta=%s estado=%d", metodo, ruta, respuesta.status_code)
+        log.info("proxy_carril peticion metodo=%s ruta=%s estado=%d%s", metodo, ruta, respuesta.status_code,
+                 f" {nota}" if nota else "")
         lector = lectura.LectorSSE()
         try:
             async for trozo in respuesta.aiter_raw():
@@ -636,8 +810,13 @@ class Servidor:
     """El servidor escuchando y el cliente HTTP compartido, que vive lo que
     vive el servidor."""
 
-    def __init__(self, servidor: asyncio.Server, proxy: _Proxy) -> None:
+    def __init__(self, servidor: asyncio.Server, proxy: _Proxy, servidor_jaxqwen: asyncio.Server | None = None,
+                 socket_jaxqwen: Path | None = None) -> None:
         self._servidor = servidor
+        self._servidor_jaxqwen = servidor_jaxqwen
+        self._socket_jaxqwen = socket_jaxqwen
+        # (st_dev, st_ino) del socket que creamos: solo ese objeto se borra, nunca "lo que haya en la ruta".
+        self._identidad_socket = _identidad_socket(socket_jaxqwen) if socket_jaxqwen is not None else None
         self._proxy = proxy
 
     @property
@@ -645,12 +824,48 @@ class Servidor:
         return self._servidor.sockets
 
     def close(self) -> None:
+        """Deja de escuchar en las DOS entradas y borra el socket propio, ya. No espera a nadie."""
         self._servidor.close()
+        if self._servidor_jaxqwen is not None:
+            self._servidor_jaxqwen.close()
+            # wait_closed espera a las conexiones en vuelo; si systemd agota TimeoutStopSec y manda
+            # SIGKILL durante esa espera, un socket aún en disco quedaría huérfano Y aceptando.
+            self._borrar_socket_propio()
+
+    def _borrar_socket_propio(self) -> None:
+        if self._socket_jaxqwen is not None:
+            _borrar_si_es_nuestro(self._socket_jaxqwen, self._identidad_socket)
+            self._socket_jaxqwen = None  # una sola vez
+
+    async def _esperar_servidores(self) -> None:
+        await self._servidor.wait_closed()
+        if self._servidor_jaxqwen is not None:
+            await self._servidor_jaxqwen.wait_closed()
 
     async def wait_closed(self) -> None:
-        await self._servidor.wait_closed()
+        await self._esperar_servidores()
+        self._borrar_socket_propio()
         await self._proxy.cerrar()
         self._proxy.registro.cerrar()
+
+    async def apagar(self, tope_s: float = TOPE_VACIADO_S) -> None:
+        """Parada ordenada: 1) dejar de escuchar en las dos entradas y borrar el socket; 2) dar
+        `tope_s` a las conexiones en vuelo; 3) pasado el tope, abortar las que sigan; 4) cerrar
+        proxy y registro. Nunca espera sin límite."""
+        self.close()
+        try:
+            try:
+                await asyncio.wait_for(self._esperar_servidores(), tope_s)
+            except TimeoutError:
+                n = self._proxy.abortar_conexiones()
+                log.warning("proxy_carril vaciado_agotado tope_s=%s conexiones_abortadas=%d", tope_s, n)
+                try:
+                    await asyncio.wait_for(self._esperar_servidores(), _GRACIA_ABORTO_S)
+                except TimeoutError:
+                    log.error("proxy_carril vaciado_sin_cerrar_tras_abortar")
+        finally:
+            await self._proxy.cerrar()
+            self._proxy.registro.cerrar()
 
     async def serve_forever(self) -> None:
         try:
@@ -660,25 +875,179 @@ class Servidor:
             await self.wait_closed()
 
 
+def _identidad_socket(ruta: Path) -> tuple | None:
+    """(st_dev, st_ino) de `ruta` SIN seguir enlaces; None si no existe o no es un socket."""
+    try:
+        st = os.lstat(ruta)
+    except FileNotFoundError:
+        return None
+    return (st.st_dev, st.st_ino) if stat.S_ISSOCK(st.st_mode) else None
+
+
+def _borrar_si_es_nuestro(ruta: Path, identidad: tuple | None) -> None:
+    """Borra `ruta` solo si sigue siendo el socket que creamos (mismo dev/ino). Si fue reemplazado
+    por otro, no se toca. Mismo límite que `_despejar_socket_huerfano`: entre el lstat y el unlink
+    queda una ventana que POSIX no deja cerrar."""
+    actual = _identidad_socket(ruta)
+    if actual is None:
+        return
+    if actual != identidad:
+        log.warning("proxy_carril socket_reemplazado_no_se_borra ruta=%s", ruta)
+        return
+    ruta.unlink(missing_ok=True)
+
+
+def _config_invalida_socket() -> ConfigInvalida:
+    return ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_SOCKET"),)))
+
+
+def _sondear_oyente(ruta: Path) -> None:
+    """connect() de prueba. Vuelve normal SOLO si nadie escucha (ECONNREFUSED); cualquier otro
+    resultado (conexión lograda, ENOENT, EACCES, tiempo agotado...) levanta y el llamador falla cerrado."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as prueba:
+        prueba.settimeout(_SONDEO_S)
+        try:
+            prueba.connect(str(ruta))
+        except ConnectionRefusedError:
+            return
+    raise OSError("hay_oyente")
+
+
+def _huella_socket(ruta: Path) -> tuple | None:
+    """Identidad del objeto en `ruta` SIN seguir enlaces; None si no es un socket nuestro."""
+    st = os.lstat(ruta)
+    if not stat.S_ISSOCK(st.st_mode) or st.st_uid != os.geteuid():
+        return None
+    return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _despejar_socket_huerfano(ruta: Path) -> None:
+    """Deja `ruta` libre para el bind si y solo si es un socket PROPIO SIN oyente; si no existe, no
+    hace nada. Cualquier otra cosa (enlace, archivo, otro tipo, otro uid, alguien escuchando, un
+    error inesperado) levanta ConfigInvalida y NO borra nada: igual que antes de esta limpieza.
+
+    Carrera (connect -> unlink): POSIX no tiene un unlink condicional, así que no hay garantía
+    total. Se reduce así: la huella (dev, ino, mtime_ns, ctime_ns) se toma antes del connect y se
+    vuelve a tomar justo antes del unlink; si cambió, alguien reemplazó el socket (un bind nuevo
+    crea un inodo nuevo) y NO se borra. Queda la ventana de microsegundos entre ese segundo
+    lstat y el unlink. No es explotable con el despliegue: el directorio es 0750 jaxsvc:jaxqwen-proxy
+    (el chequeo del padre rechaza escritura de grupo/otros), así que solo el uid dueño puede crear
+    o reemplazar entradas, y el único otro candidato a hacer bind ahí es una segunda instancia
+    de este mismo proxy, que systemd no lanza mientras la primera corre (Type=simple, una unidad).
+
+    Límite conocido: un socket propio que hizo bind y NUNCA listen también da ECONNREFUSED y cuenta
+    como huérfano. Hoy no puede darse: el único creador es `asyncio.start_unix_server`, que hace
+    bind y listen en la misma llamada síncrona del loop (sin await en medio), y nada más escribe
+    en ese directorio. Si algún día otro componente crea sockets ahí, este criterio hay que revisarlo."""
+    try:
+        antes = _huella_socket(ruta)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise _config_invalida_socket() from None
+    if antes is None:
+        raise _config_invalida_socket()
+    try:
+        _sondear_oyente(ruta)
+        if _huella_socket(ruta) != antes:
+            raise _config_invalida_socket()
+        ruta.unlink()
+    except ConfigInvalida:
+        raise
+    except OSError:  # oyente, ENOENT entre medio, permisos, tiempo agotado: nada se borra
+        raise _config_invalida_socket() from None
+    log.warning("proxy_carril socket_huerfano_limpiado ruta=%s", ruta)
+
+
+def _padre_valido(parent: Path) -> bool:
+    """El directorio del socket: no es un enlace, es un directorio, sin escritura de grupo/otros y
+    de este euid o de root (el modo solo no basta: un directorio ajeno 0755 deja a su dueño
+    crear y reemplazar entradas)."""
+    if parent.is_symlink() or not parent.is_dir():
+        return False
+    st = parent.stat()
+    return not st.st_mode & 0o022 and st.st_uid in (os.geteuid(), 0)
+
+
 async def arrancar(cfg: Config) -> Servidor:
     interruptor.ruta_del_interruptor()  # InterruptorSinConfigurar: sin saber dónde está el freno, no hay cerebro
+    if cfg.jaxqwen_socket is not None:
+        parent = cfg.jaxqwen_socket.parent
+        if not _padre_valido(parent):
+            raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_JAXQWEN_SOCKET"),)))
+        await asyncio.to_thread(_despejar_socket_huerfano, cfg.jaxqwen_socket)
     # Un registro que no cuadra NO se abre (RegistroCorrupto): sin registro no hay cerebro.
     registro = await asyncio.to_thread(Registro, cfg.registro)
+    proxy = None
+    servidor = None
+    servidor_jaxqwen = None
+    identidad = None
     try:
         await asyncio.to_thread(registro.anotar, {"evento": "registro_abierto", "pid": os.getpid()})
         proxy = _Proxy(cfg, registro)
         servidor = await asyncio.start_server(proxy.atender, cfg.host, cfg.puerto)
+        if cfg.jaxqwen_socket is not None:
+            path = cfg.jaxqwen_socket
+            async def atender_jaxqwen(reader, writer):
+                sock = writer.get_extra_info("socket")
+                if not proxy._peer_uid_permitido(sock, cfg.jaxqwen_uid):
+                    log.warning("proxy_carril identidad_m2m_rechazada")
+                    await _cerrar(writer)
+                    return
+                await proxy.atender(reader, writer, imponer_pensamiento=False)
+
+            servidor_jaxqwen = await asyncio.start_unix_server(atender_jaxqwen, path=str(path))
+            identidad = _identidad_socket(path)
+            os.chmod(path, 0o660, follow_symlinks=False)
+            os.chown(path, -1, cfg.jaxqwen_gid, follow_symlinks=False)
     except BaseException:
+        if servidor_jaxqwen is not None:
+            servidor_jaxqwen.close()
+            await servidor_jaxqwen.wait_closed()
+            if cfg.jaxqwen_socket is not None:
+                _borrar_si_es_nuestro(cfg.jaxqwen_socket, identidad)
+        if servidor is not None:
+            servidor.close()
+            await servidor.wait_closed()
+        if proxy is not None:
+            await proxy.cerrar()
         registro.cerrar()
         raise
-    return Servidor(servidor, proxy)
+    return Servidor(servidor, proxy, servidor_jaxqwen,
+                    cfg.jaxqwen_socket if servidor_jaxqwen is not None else None)
 
 
 async def _principal() -> None:
     cfg = config_desde_entorno()
     servidor = await arrancar(cfg)
     log.info("proxy_carril escuchando host=%s puerto=%d", cfg.host, cfg.puerto)
-    await servidor.serve_forever()
+    await _servir_hasta_la_senal(servidor)
+
+
+async def _servir_hasta_la_senal(servidor: Servidor) -> None:
+    """SIGTERM/SIGINT = parada ordenada: `Servidor.apagar` deja de escuchar en las dos entradas
+    y borra el socket al instante, da TOPE_VACIADO_S a lo que está en vuelo, aborta lo que siga y
+    cierra proxy y registro. Vuelve normal (salida 0: systemd marca "Deactivated successfully" y
+    Restart=on-failure no lo relanza). Solo la primera señal cuenta; las siguientes no
+    interrumpen el cierre en curso. Los servidores ya sirven desde `arrancar`: aquí solo se espera
+    la señal."""
+    loop = asyncio.get_running_loop()
+    parada = asyncio.Event()
+
+    def parar() -> None:
+        if not parada.is_set():
+            log.info("proxy_carril parada_ordenada")
+            parada.set()
+
+    senales = (signal.SIGTERM, signal.SIGINT)
+    for sig in senales:
+        loop.add_signal_handler(sig, parar)
+    try:
+        await parada.wait()
+        await servidor.apagar()
+    finally:
+        for sig in senales:
+            loop.remove_signal_handler(sig)
 
 
 if __name__ == "__main__":

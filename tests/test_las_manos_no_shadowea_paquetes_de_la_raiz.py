@@ -15,14 +15,13 @@ rompe el arranque real exactamente igual, y sin este test nadie se entera
 hasta el próximo despliegue roto.
 
 **La excepción real, y por qué se verifica por INODO y no por nombre.** Hoy
-la intersección es `{hyde_sandbox, jacobs}` -- pero NO son shadows: son
-symlinks al MISMO archivo físico
-(`las_manos/hyde_sandbox.py -> ../hyde_sandbox.py`,
-`las_manos/jacobs -> ../jacobs`). Permitirlos por NOMBRE sería una
-allowlist ciega: el día que alguien reemplace el symlink por un archivo de
-contenido distinto (mismo nombre, ya no el mismo archivo), la excepción
-seguiría verde sin razón para seguir viva. Por eso el chequeo resuelve
-symlinks (`Path.resolve()`) y compara la ruta REAL, no el nombre.
+la intersección es `{cli_sandbox, jacobs}` -- pero NO son shadows: son
+symlinks al MISMO archivo físico (`las_manos/jacobs -> ../jacobs`).
+Permitirlos por NOMBRE sería una allowlist ciega: el día que alguien
+reemplace el symlink por un archivo de contenido distinto (mismo nombre, ya
+no el mismo archivo), la excepción seguiría verde sin razón para seguir
+viva. Por eso el chequeo resuelve symlinks (`Path.resolve()`) y compara la
+ruta REAL, no el nombre.
 
 **Por qué "rastreado por git" y no una lista de exclusiones a mano.** Un
 checkout limpio de producción nunca tiene `las_manos/__pycache__/` ni
@@ -46,7 +45,7 @@ LAS_MANOS = RAIZ / "las_manos"
 #: archivo físico (symlink) -- no un shadow. Se verifica por inodo/ruta
 #: real en el test, esto sólo dice CUÁLES nombres tienen permiso de
 #: intentarlo.
-PERMITIDOS_POR_SYMLINK = frozenset({"hyde_sandbox", "jacobs"})
+PERMITIDOS_POR_SYMLINK = frozenset({"cli_sandbox", "jacobs"})
 
 
 def _rastreado_en_un_checkout_limpio(ruta: Path) -> bool:

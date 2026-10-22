@@ -38,6 +38,7 @@ import io
 import re
 from pathlib import Path
 
+from procesamiento.dependencias import codigo_de_import
 from procesamiento.resultado import Resultado
 
 EXTRACTOR = "openpyxl"
@@ -112,11 +113,14 @@ def _formulas_sin_valor(hoja_valores, hoja_cruda) -> int:
 def extraer(origen: Path) -> Resultado:
     try:
         import openpyxl
-    except ModuleNotFoundError as exc:
+    except ImportError as exc:
+        # jax-14: openpyxl esta DECLARADO en requirements-archivos.txt; su falta
+        # es un despliegue roto, no "tipo sin extractor" -> error con codigo.
         return Resultado(
-            estado="sin_extractor", salidas={}, extractor=EXTRACTOR,
+            estado="error", salidas={}, extractor=EXTRACTOR,
             version="sin instalar",
-            detalle={"razon": f"openpyxl no esta instalado: {exc}"},
+            detalle={"codigo": codigo_de_import(exc),
+                     "razon": f"openpyxl no esta instalado: {exc}"},
         )
 
     try:

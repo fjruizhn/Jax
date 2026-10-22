@@ -50,6 +50,14 @@ from pathlib import Path
 from typing import Any
 
 from jacobs.store import event_append
+try:
+    # Bare primero, por consistencia con los otros symlinks de las_manos/ (via
+    # las_manos/workspace_dir.py). En produccion jax.core TAMBIEN es importable
+    # (drop-in z-pythonpath.conf, PYTHONPATH=/srv/jax-prod/jax); el calificado
+    # cubre el REPL/CI con solo la raiz del repo en sys.path.
+    from workspace_dir import workspace_dir
+except ImportError:
+    from jax.core.workspace_dir import workspace_dir
 from motor_registry.catalog import MotorCatalog
 
 logger = logging.getLogger("motor_registry.tool_authority")
@@ -58,10 +66,15 @@ logger = logging.getLogger("motor_registry.tool_authority")
 # valor que jacobs/executor.py::HYDE_WORKSPACE_DIR y
 # jax/muscles/subprocess_muscle.py. No se importa executor.py directamente
 # (módulo pesado, trae dependencias de pipeline que este gate no necesita);
-# los 3 call sites leen la misma env var en vez de repetir el literal (ver
-# DEUDA.md -- mismo patrón de "múltiples fuentes de verdad" de Bloque 3,
-# aplicado acá al path, no al vocabulario de capabilities).
-WORKSPACE_ROOT = Path(os.getenv("JAX_WORKSPACE_DIR", "/home/fruiz/jax-workspace")).resolve()
+# los call sites leen la misma env var con `workspace_dir()` (jax/core/
+# workspace_dir.py, liviano) en vez de repetir el literal (ver DEUDA.md --
+# mismo patrón de "múltiples fuentes de verdad" de Bloque 3, aplicado acá al
+# path, no al vocabulario de capabilities).
+# SIN valor por defecto (2026-10-03, el workspace se movió a
+# /srv/jax-data/jax-workspace): si la variable falta, este módulo no se
+# importa y el proceso no arranca. Es fallar cerrado a propósito -- un default
+# escribiría en silencio en otro lugar y partiría los datos.
+WORKSPACE_ROOT = workspace_dir()
 
 # tool_name -> capability key. Nunca un nombre de función libre -- si un
 # tool nuevo se declara en tools_catalog.py sin agregarlo acá, queda
@@ -555,6 +568,19 @@ async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Pat
     try:
         fd, tmp_path = tempfile.mkstemp(dir=str(resolved.parent), prefix=f".{resolved.name}.", suffix=".tmp")
         try:
+            # B1 (auditoría 2026-09-25 de ops/permisos_proyectos.py): mkstemp() crea el
+            # archivo en 0600 explícito. Bajo un directorio con ACL POSIX por defecto (el
+            # workspace de proyectos/ la tiene, spec 2026-09-22 §5), el algoritmo de
+            # creación de ACL interseca el modo PEDIDO con la ACL por defecto -- 0600 pide
+            # grupo=0, así que el archivo final queda con máscara ACL 0 para el grupo por
+            # más que el texto de la ACL siga mostrando "rwx": el permiso EFECTIVO es
+            # "---", verificado empíricamente en hall9000. os.fchmod ANTES de os.replace
+            # deja pedido 0660 (rw para dueño y grupo, NADA para otros -- MINOR m-c, ronda 2:
+            # 0664 dejaba el archivo legible por cualquiera fuera de proyectos/, donde no
+            # hay ACL por defecto que lo recorte), que la ACL por defecto ya no reduce a
+            # cero dentro de proyectos/ -- así el archivo final queda escribible por el
+            # grupo del workspace como se espera, no sólo por su dueño.
+            os.fchmod(fd, 0o660)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(content)
             os.replace(tmp_path, resolved)

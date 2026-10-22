@@ -280,6 +280,15 @@ async def _jacobs_init() -> None:
 
     await jacobs_store.init_tables()
 
+    # Idempotencia de POST /procesamiento/trabajos: la tabla de claves se crea aqui (CREATE TABLE IF NOT
+    # EXISTS, repetible) y la config se valida al arrancar: un valor invalido tumba el arranque, no el
+    # primer pedido con clave.
+    import procesamiento_idempotencia
+    procesamiento_idempotencia.ttl_segundos()
+    procesamiento_idempotencia.gracia_segundos()
+    procesamiento_idempotencia.espera_ms()
+    await procesamiento_idempotencia.init_tabla()
+
     from motor_registry.routes import init_motor_catalog
     await init_motor_catalog()
 
@@ -298,6 +307,19 @@ async def _jacobs_init() -> None:
     # reconcilia estados "en vuelo").
     from procesamiento_routes import reconciliar_trabajos_huerfanos
     reconciliar_trabajos_huerfanos()
+
+    # jax-14 (2026-10-03): si faltan las dependencias de extraccion, avisar fuerte
+    # en el arranque. El servicio NO se cae (tiene otras capacidades): el POST de
+    # procesamiento responde 503 y /health lo informa.
+    _extractores = await asyncio.to_thread(_dependencias.estado)
+    if not _extractores["ok"]:
+        logging.getLogger("las_manos.procesamiento").error(
+            "extractores de archivos NO disponibles, faltan %s: el procesamiento de "
+            "PDF/DOCX/XLSX responde 503 hasta instalar requirements-archivos.txt",
+            _extractores["faltan"],
+        )
+        # y por Telegram (canal que ya existe); fire-and-forget, no rompe sin credenciales
+        _aviso_extractores.avisar_al_arrancar(_extractores["faltan"])
 
     # El chequeo de consistencia codigo-vs-DB de timeouts se ELIMINO el
     # 2026-09-01 al deduplicar: existia para comparar `_CAPABILITY_TIMEOUT_SECONDS`
@@ -382,6 +404,8 @@ async def envelope_structural_rejection(request: Request, exc: RequestValidation
 # SALTABAN en silencio. El test que demuestra que /health puede ponerse rojo no
 # corria justo donde importa.
 from salud import Salud, comprobar_audit, comprobar_base  # noqa: E402
+from procesamiento import dependencias as _dependencias  # noqa: E402
+import aviso_extractores as _aviso_extractores  # noqa: E402
 
 _salud = Salud({
     "base de datos": lambda: comprobar_base(jacobs_store.conexion),
@@ -405,6 +429,8 @@ async def health(response: Response) -> dict:
         "status": "alive" if estado["ok"] else "degraded",
         "kill_switch_active": _kill_switch_active(),
         "problemas": estado["fallos"],
+        # jax-14: informa, NO degrada -- LAS MANOS tiene otras capacidades.
+        "extractores": await asyncio.to_thread(_dependencias.estado),
         "comprobado_hace_s": _salud.comprobado_hace(),
         "cache_ttl_s": _salud._ttl,
     }

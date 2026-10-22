@@ -7,10 +7,15 @@ MISMO body de OpenAI-compat por HTTP -- 'ollama' es sólo la etiqueta que usa el
 local sin credencial gestionada (mismo motivo que la faceta 'jax_local': facet_resolver
 exime de `credential` a los transportes 'ollama'/'subprocess'; pedirle una llave a un
 Ollama que no la usa sería inventar un secreto de mentira). Otro transporte →
-AuditorNoSoportado, y el arranque se niega. Error del proveedor, red caída, tope vencido
-o forma inesperada → AuditorIlegible("proveedor_fallo"): quien llama frena. La excepción
+AuditorNoSoportado, y el arranque se niega. Error del proveedor, red caída
+o forma inesperada → AuditorIlegible("proveedor_fallo"), y el plazo vencido →
+AuditorIlegible("proveedor_plazo"): quien llama frena en los dos casos. La excepción
 de origen NO se encadena: un error HTTP puede traer la llave o el cuerpo. Cliente HTTP
 compartido (E-24).
+
+`tope_s` es OBLIGATORIO y sale de `axioma_config` (`ejecutor.c5_tope_s`, ver
+`eleccion_c5.ConfigC5.tope_s`): sin valor por omision, un consumidor que lo olvide no corre
+en vez de heredar un plazo escrito en codigo.
 """
 from __future__ import annotations
 
@@ -34,7 +39,7 @@ def instrucciones() -> str:
     return _INSTRUCCIONES.read_text(encoding="utf-8")
 
 
-async def auditar(lote: A.Lote, *, faceta, max_tokens: int, cliente=None, tope_s: float = 120.0) -> A.Revision:
+async def auditar(lote: A.Lote, *, faceta, max_tokens: int, tope_s: float, cliente=None) -> A.Revision:
     if faceta.transport not in TRANSPORTES_SOPORTADOS:
         raise AuditorNoSoportado(faceta.transport)
     cliente = cliente or obtener_cliente_http()
@@ -51,6 +56,10 @@ async def auditar(lote: A.Lote, *, faceta, max_tokens: int, cliente=None, tope_s
                                headers=cabeceras, timeout=tope_s)
         r.raise_for_status()
         texto = r.json()["choices"][0]["message"]["content"]
+    except httpx.TimeoutException:
+        # Plazo vencido: distinto de "el proveedor fallo" (la cola detras del cerebro en la unica
+        # ranura de la GPU es la causa conocida). Para quien llama es lo mismo: falla cerrado.
+        raise A.AuditorIlegible("proveedor_plazo") from None
     except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
         raise A.AuditorIlegible("proveedor_fallo") from None
     return A.interpretar(lote, texto)

@@ -54,19 +54,23 @@ INICIO_DE_SESION = time.time()
 
 os.environ["JAX_USAGE_SPOOL_DIR"] = tempfile.mkdtemp(prefix="jax-test-respaldo-uso-")
 
-#: E-21 (2026-09-16): jacobs/executor.py y plan.py leen LAS_MANOS_URL y
-#: JAX_OLLAMA_URL al importarse y NO arrancan sin ellas (fail-closed). Se fijan
-#: acá, antes de cualquier import. NO con los valores de producción: un test
-#: que olvide parchear el transporte le pegaría a LAS MANOS o al Ollama vivos.
-#: El dominio `.invalid` (RFC 6761) nunca resuelve, así que ese olvido falla con
-#: un error de DNS; el valor sigue siendo una URL válida y estable para las
-#: aserciones de ruta. tests/test_config_entorno.py lo vigila.
+#: E-21 (2026-09-16): jacobs/plan.py y executor.py leen JAX_OLLAMA_URL al
+#: importarse y NO arrancan sin ella (fail-closed). Desde el cierre de #362
+#: jacobs/executor.py YA NO lee LAS_MANOS_URL (Jacobs no le hace pedidos HTTP a
+#: LAS MANOS; tests/test_config_entorno.py::test_jacobs_no_depende_de_LAS_MANOS_URL
+#: lo fija): se sigue fijando acá porque otros módulos y pruebas la leen
+#: (p. ej. el arranque de LAS MANOS). Se fijan antes de cualquier import. NO con
+#: los valores de producción: un test que olvide parchear el transporte le
+#: pegaría a LAS MANOS o al Ollama vivos. El dominio `.invalid` (RFC 6761) nunca
+#: resuelve, así que ese olvido falla con un error de DNS; el valor sigue siendo
+#: una URL válida y estable para las aserciones de ruta.
+#: tests/test_config_entorno.py lo vigila.
 os.environ["LAS_MANOS_URL"] = "http://las-manos.invalid:7777"
 os.environ["JAX_OLLAMA_URL"] = "http://ollama.invalid:11434"
 
-#: 2026-09-17 (autenticación de servicio de LAS MANOS): jacobs/executor.py manda
-#: la credencial `jacobs` en cada pedido a LAS MANOS y server.py no arranca sin
-#: las dos. Valores de prueba generados por sesión, NUNCA los de /etc/jax/.env.
+#: 2026-09-17 (autenticación de servicio de LAS MANOS): server.py no arranca sin las
+#: credenciales de servicio (jacobs/executor.py ya no manda ninguna: no le hace
+#: pedidos a LAS MANOS). Valores de prueba generados por sesión, NUNCA los de /etc/jax/.env.
 import secrets as _secrets  # noqa: E402
 os.environ["JAX_LAS_MANOS_CREDENCIAL_PLATAFORMA"] = _secrets.token_urlsafe(32)
 os.environ["JAX_LAS_MANOS_CREDENCIAL_JACOBS"] = _secrets.token_urlsafe(32)
@@ -113,6 +117,15 @@ os.environ["JAX_FACET_SEAL_PATH"] = os.path.join(
 # Asignación y no setdefault, a propósito.
 os.environ["JAX_KILL_SWITCH_PATH"] = os.path.join(
     tempfile.mkdtemp(prefix="jax-test-interruptor-"), "PAUSE")
+
+#: 2026-10-03: JAX_WORKSPACE_DIR no tiene valor por defecto (falla cerrado:
+#: jax/core/workspace_dir.py). tool_authority.py y jacobs/executor.py la leen al
+#: importarse y NO arrancan sin ella, asi que se fija aca, antes de cualquier
+#: import, en un temporal -- nunca el workspace real. Asignacion directa y no
+#: `setdefault`, como las demas: un .env de produccion sourceado antes de pytest
+#: no puede apuntar la suite al workspace vivo. Un test que necesite otra raiz
+#: sigue usando `monkeypatch.setenv`. tests/test_workspace_dir.py lo vigila.
+os.environ["JAX_WORKSPACE_DIR"] = tempfile.mkdtemp(prefix="jax-test-workspace-")
 
 #: La base de tests de ESTA sesión (decisión de Fernando, 2026-09-17).
 #: Tres sesiones de Claude compartían `jax_memory_test` y se pisaban de
@@ -165,7 +178,7 @@ FRENO_EXISTIA_AL_INICIO = os.path.lexists(FRENO_DE_PRODUCCION)
 HEREDADA_EXISTIA_AL_INICIO = os.path.lexists(HEREDADA_DE_PRODUCCION)
 
 #: Los objetos módulo del interruptor. Son DOS distintos para el mismo archivo:
-#: `jax.core.interruptor` (REPL, `jax --task`) e `interruptor` pelado vía el
+#: `jax.core.interruptor` (el paquete jax; el REPL y `jax --task` se retiraron en T16) e `interruptor` pelado vía el
 #: symlink de las_manos (LAS MANOS, Jacobs). Cada uno tiene su RUTA_HEREDADA.
 MODULOS_DEL_INTERRUPTOR = ("jax.core.interruptor", "interruptor")
 

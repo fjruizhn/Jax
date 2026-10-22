@@ -179,7 +179,7 @@ async def principal(maquina: str) -> int:
             auditor_f, _, _ = await eleccion_c5.elegir_y_resolver_auditor(
                 conn, cfg=cfg, hosts_mision=frozenset({maquina}), resolve_facet=resolve_facet)
         revision = await auditor_cliente.auditar(A.Lote(texto_mision, (), A.afirmaciones_auditables(entrega), A.maquinas_de(p.hosts, frozenset({maquina}))),
-                                                 faceta=auditor_f, max_tokens=cfg.max_tokens)
+                                                 faceta=auditor_f, max_tokens=cfg.max_tokens, tope_s=cfg.tope_s)
         final_entrega = A.aplicar_revision(entrega, revision)
         for a in final_entrega.respaldadas:
             dice(("afirmacion", "entregada"), ("proposito", a.proposito), ("dato", a.dato), ("maquina", a.maquina),

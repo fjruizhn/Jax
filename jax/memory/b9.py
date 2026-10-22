@@ -57,6 +57,20 @@ class Visibility(str, Enum):
 class Lifecycle(str, Enum):
     ACTIVE="ACTIVE"; VERIFIED="VERIFIED"; SUPERSEDED="SUPERSEDED"; EXPIRED="EXPIRED"; TOMBSTONED="TOMBSTONED"; PURGED="PURGED"
 
+class AuditStatus(str, Enum):
+    """Orthogonal model/source audit state; never lifecycle or authority."""
+    NOT_AUDITED="NOT_AUDITED"; SOURCE_AUDITED="SOURCE_AUDITED"; MODEL_AUDITED="MODEL_AUDITED"
+    AUDIT_INCONCLUSIVE="AUDIT_INCONCLUSIVE"; AUDIT_REJECTED="AUDIT_REJECTED"; AUDIT_REVOKED="AUDIT_REVOKED"
+
+
+_PROVENANCE_RISK={"COMPLETE":0,"LEGACY_PROVENANCE_INCOMPLETE":1,"REVIEW_REQUIRED":2,
+                  "UNRESOLVED":3,"CORRECTED":4,"REVOKED":5,"TOMBSTONED":6,"PURGED":7}
+def worst_provenance_status(statuses: Iterable[str]) -> str:
+    """Derived material cannot claim better provenance than any source."""
+    values=tuple(statuses)
+    if not values: return "COMPLETE"
+    return max(values,key=lambda value:_PROVENANCE_RISK.get(value,2))
+
 class EventKind(str, Enum):
     CREATE="CREATE"; VERIFY="VERIFY"; CORRECT="CORRECT"; SUPERSEDE="SUPERSEDE"; EXPIRE="EXPIRE"; TOMBSTONE="TOMBSTONE"; CONTENT_PURGE="CONTENT_PURGE"; RE_SCOPE="RE_SCOPE"; SYNTHESIZE="SYNTHESIZE"; RE_EMBED="RE_EMBED"; IMPORT_LEGACY="IMPORT_LEGACY"; COMPENSATE="COMPENSATE"
 
@@ -581,6 +595,8 @@ class MemoryAPI:
         obj=self._store.objects[memory_id]; old=self._store.revisions[memory_id][-1]
         self._canonical_for_mutation(memory_id)
         auth=self._authorize(scope,"VERIFY",old.visibility)
+        if scope.actor_type != "USER":
+            raise AuthorizationDenied("only an authenticated human user may verify memory")
         if obj.tenant_id != scope.tenant_id or not auth.resolved_roles.intersection({"memory_reviewer","memory_admin"}):
             raise AuthorizationDenied("verification requires resolved reviewer authority")
         if old.lifecycle not in {Lifecycle.ACTIVE, Lifecycle.VERIFIED}:
@@ -601,7 +617,11 @@ class MemoryAPI:
                 self._canonical_for_mutation(memory_id)
                 obj=s.objects[memory_id]; revision=s.revisions[memory_id][-1]
                 self._assert_read_scope(scope,obj,revision)
-                if obj.kind not in SYNTHESIS_SOURCE_KINDS or revision.lifecycle not in {Lifecycle.ACTIVE,Lifecycle.VERIFIED} or revision.payload is None:
+                # Keep the reference contract identical to the durable
+                # adapter: derived material may only use a currently human
+                # verified source. ACTIVE is retrievable history, never a
+                # trusted synthesis input.
+                if obj.kind not in SYNTHESIS_SOURCE_KINDS or revision.lifecycle is not Lifecycle.VERIFIED or revision.payload is None:
                     raise ScopeDenied("source revision is ineligible for synthesis")
                 sources.append(revision)
             effective_scope={(r.visibility,r.user_id,r.project_id) for r in sources}
@@ -609,7 +629,7 @@ class MemoryAPI:
             visibility,user_id,project_id=effective_scope.pop()
             auth=self._authorize(scope,"SYNTHESIZE",visibility)
             now=time.time(); mid,rid=_uuid7(),_uuid7(); obj=MemoryObject(mid,ObjectKind.SYNTHESIS,scope.tenant_id,now)
-            rev=MemoryRevision(rid,mid,_digest(content),visibility,user_id,project_id,Lifecycle.ACTIVE,now,content,"COMPLETE")
+            rev=MemoryRevision(rid,mid,_digest(content),visibility,user_id,project_id,Lifecycle.ACTIVE,now,content,worst_provenance_status(r.provenance_status for r in sources))
             prov=MemoryProvenance(_uuid7(),rid,tuple(x.revision_id for x in sources),"synthesis",transformation_version,scope.actor_principal,scope.actor_type,scope.subject_user_id,provider,model,now)
             event=self._event(scope,auth,mid,rid,EventKind.SYNTHESIZE,now,{"derivation_depth":1})
             s._commit(obj,rev,prov,event); return mid
@@ -672,7 +692,20 @@ class MemoryAPI:
         rev=self._store.revisions[memory_id][-1]
         self._assert_read_scope(scope, obj, rev)
         if rev.lifecycle in {Lifecycle.TOMBSTONED,Lifecycle.PURGED} or rev.payload is None: raise ScopeDenied("memory payload unavailable")
-        return MemoryEnvelope(obj,rev,tuple(self._store.provenance.get(rev.revision_id,())),tuple(references),{})
+        provenance=tuple(self._store.provenance.get(rev.revision_id,()))
+        if obj.kind is ObjectKind.SYNTHESIS:
+            sources=tuple(source for item in provenance for source in item.source_revisions)
+            if not sources:
+                raise ScopeDenied("synthesis lacks immutable source lineage")
+            for source_id in sources:
+                source_memory=next((mid for mid,revisions in self._store.revisions.items()
+                                    if any(item.revision_id == source_id for item in revisions)),None)
+                if source_memory is None:
+                    raise ScopeDenied("synthesis source is unavailable")
+                source=self._store.revisions[source_memory][-1]
+                if source.revision_id != source_id or source.lifecycle is not Lifecycle.VERIFIED or source.payload is None:
+                    raise ScopeDenied("synthesis source is no longer eligible")
+        return MemoryEnvelope(obj,rev,provenance,tuple(references),{})
 
     def retrieve(self, scope: ScopeContext, *, visibility: Visibility | None=None,
                  project_id: str | None=None) -> tuple[MemoryEnvelope, ...]:
@@ -692,7 +725,12 @@ class MemoryAPI:
             if rev.visibility is Visibility.USER_PRIVATE and rev.user_id != scope.subject_user_id: continue
             if rev.project_id is not None and (not scope.project_id or rev.project_id != scope.project_id): continue
             if rev.lifecycle in {Lifecycle.TOMBSTONED,Lifecycle.PURGED,Lifecycle.EXPIRED} or rev.payload is None: continue
-            results.append(self.envelope(scope,memory_id))
+            try:
+                results.append(self.envelope(scope,memory_id))
+            except ScopeDenied:
+                # A derived object whose exact source was invalidated is not
+                # an error in the rest of the scoped historical collection.
+                continue
         return tuple(results)
 
     def record_embedding(self, scope: ScopeContext, memory_id: str, identity: EmbeddingSpaceIdentity,

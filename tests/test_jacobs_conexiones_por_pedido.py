@@ -234,9 +234,10 @@ def _sitio() -> str:
 
 
 class _Base:
-    def __init__(self, status: str, pasos: str):
+    def __init__(self, status: str, pasos: str, mode: str = "autonomous"):
         self.status = status
         self.pasos = pasos
+        self.mode = mode
         self.aperturas: list[tuple[str, str, bool]] = []  # (via, sitio, found_rows)
         self.escrituras: list[tuple[str, object, str]] = []  # CONFIRMADAS: (sql, params, sitio de la conexión)
         self.conexiones: list = []
@@ -267,7 +268,7 @@ class _Base:
     def fila_pipeline(self):
         return {
             "pipeline_id": PID, "name": "t", "invoked_by": "plataforma", "user_id": None,
-            "tenant_id": None, "owner_ack_at": None, "run_epoch": 0, "mode": "autonomous",
+            "tenant_id": None, "owner_ack_at": None, "run_epoch": 0, "mode": self.mode,
             "status": self.status, "plan": "[]", "current_step_index": 1, "max_steps": 20,
             "context_refs": json.dumps({"objective": "o", "step_0_ref": REF}),
             "created_at": 1.0, "updated_at": 1.0,
@@ -281,13 +282,13 @@ class _Base:
         return (
             {**comun, "step_id": "s0", "step_index": 0, "facet": "jekyll", "output_ref": REF,
              "status": "completed", "depends_on": "[]"},
-            {**comun, "step_id": "s1", "step_index": 1, "facet": "hyde", "output_ref": None,
+            {**comun, "step_id": "s1", "step_index": 1, "facet": "ada", "output_ref": None,
              "status": self.pasos, "depends_on": "[0]"},
         )
 
 
 def _veredicto_ok():
-    costo = CostoPaso(1, "hyde", None, 1, 0, 0, Decimal("0"), "acotado")
+    costo = CostoPaso(1, "ada", None, 1, 0, 0, Decimal("0"), "acotado")
     return Veredicto(ok=True, violaciones=(), costo_max_usd=Decimal("0"),
                      pasos_costo=(costo,), sondeadas=())
 
@@ -318,8 +319,8 @@ def entorno(monkeypatch):
         monkeypatch.setattr(modulo, "check_kill_switch", lambda: False)
     monkeypatch.setattr(pv.sonda, "sondear", AsyncMock(side_effect=AssertionError("sin sondas")))
 
-    def armar(status="aborted", pasos="failed"):
-        base = _Base(status, pasos)
+    def armar(status="aborted", pasos="failed", mode="autonomous"):
+        base = _Base(status, pasos, mode)
         monkeypatch.setattr(aiomysql, "connect", base.directa)
         monkeypatch.setattr(aiomysql.pool, "connect", base.del_pool)
         return base
@@ -427,7 +428,7 @@ def test_resume_solo_abre_la_escritura_condicional_de_la_epoca(entorno, monkeypa
 def test_approve_step_solo_abre_la_escritura_condicional_de_la_epoca(entorno, monkeypatch):
     """Expected contra 2fd3778: además, directas de pipeline_get,
     steps_by_pipeline, event_append y step_upsert."""
-    base = entorno(status="interrupted", pasos="blocked_human_gate")
+    base = entorno(status="interrupted", pasos="blocked_human_gate", mode="supervised")
     monkeypatch.setattr(routes, "prevuelo", _prevuelo_que_lee_del_pool)
     assert _medir(base, _pedido_approve) == [("directa", "pipeline_tomar_epoca", True)]
 

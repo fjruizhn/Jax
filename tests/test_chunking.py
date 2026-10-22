@@ -34,3 +34,10 @@ def test_chunks_reconstruct_original_lines():
     chunks = _chunk_conversation(conv)
     reconstruido = "\n".join(chunks)
     assert reconstruido == conv
+
+
+def test_chunk_boundaries_preserve_empty_lines_and_trailing_newline():
+    conv = "alpha\n\nbeta\n"
+    chunks = _chunk_conversation(conv, max_chars=5)
+    assert "\n".join(chunks) == conv
+    assert all(len(chunk) <= 5 for chunk in chunks)

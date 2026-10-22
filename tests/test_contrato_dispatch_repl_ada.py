@@ -171,14 +171,6 @@ class ReplFailClosedTest(_Base):
     async def test_fila_inexistente_falla(self):
         await self._falla(None, "no está en el catálogo")
 
-    async def test_el_repl_muestra_el_update_entero(self):
-        # humanizar_error recortaba a 160 caracteres: el UPDATE no se veía.
-        from jax.core.main import humanizar_error
-        err = await self._falla((None, 393216), "UPDATE model SET max_tokens_param")
-        visible = humanizar_error("Jekyll", err)
-        self.assertIn("UPDATE model SET max_tokens_param='max_tokens'", visible)
-        self.assertIn("WHERE model_id='deepseek-flash'", visible)
-
 
 class NoOpenAICompatTest(_Base):
     async def test_gemini_no_lleva_max_tokens_ni_lee_el_contrato(self):
@@ -419,11 +411,12 @@ class PlanSinModeloLiteralTest(unittest.TestCase):
                 if isinstance(n, ast.Constant) and isinstance(n.value, str)
                 and self.PATRON.search(n.value.lower())]
 
-    def test_plan_py_y_main_py_no_tienen_nombres_de_modelo_literales(self):
-        # Ronda 2 (M4): también jax/core/main.py (el modelo pesado era literal).
+    def test_plan_py_no_tiene_nombres_de_modelo_literales(self):
+        # Ronda 2 (M4) vigilaba tambien jax/core/main.py (el modelo pesado era
+        # literal); T16 (2026-10-02) lo retiro con el REPL.
         from pathlib import Path
         raiz = Path(__file__).resolve().parents[1]
-        for rel in ("jacobs/plan.py", "jax/core/main.py"):
+        for rel in ("jacobs/plan.py",):
             fuente = (raiz / rel).read_text(encoding="utf-8")
             self.assertEqual(self._literales(fuente), [], rel)
 
@@ -435,72 +428,6 @@ class PlanSinModeloLiteralTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Ronda 2
 # ---------------------------------------------------------------------------
-
-def _cfg_repl(personalidades):
-    return {"jax": {"timeout_seconds": 10}, "personalities": personalidades}
-
-
-class ReplProveedorDelModeloTest(_Base):
-    """I1: el REPL despacha al proveedor y la URL del MODELO del binding, nunca
-    a la URL del proveedor que dice config.toml."""
-
-    def _muscle(self, registro, personalidad):
-        from jax.core.main import build_muscles
-        from jax.core.registro_facetas import aplicar_registro
-        cfg = _cfg_repl({"jekyll": {"system_prompt": "s", **personalidad}})
-        aplicar_registro(cfg, registro)
-        return build_muscles(cfg)["jekyll"]
-
-    async def test_binding_de_otro_proveedor_despacha_a_la_url_del_modelo(self):
-        self.arrancar(("max_completion_tokens", 128000))
-        m = self._muscle(
-            {"jekyll": {"model": "gpt-x", "models_allowed": ["gpt-x"], "transport": "http_openai_compat",
-                        "provider_modelo": "openai", "base_url_modelo": "https://api.openai.example/v1"}},
-            {"type": "http", "provider": "deepseek", "model_default": "deepseek-flash",
-             "models_allowed": ["deepseek-flash"]},
-        )
-        await m.invoke("hola")
-        self.assertEqual(self.cap.urls, ["https://api.openai.example/v1/chat/completions"])
-        self.leer.assert_awaited_once_with("openai", "gpt-x")
-        self.assertEqual(self.cap.bodies[0]["max_completion_tokens"], 128000)
-
-    async def test_proveedor_no_configurado_da_error_visible_y_no_despacha(self):
-        self.arrancar(("max_tokens", 1))
-        m = self._muscle(
-            {"jekyll": {"model": "claude-x", "models_allowed": ["claude-x"], "transport": "subprocess",
-                        "provider_modelo": "anthropic", "base_url_modelo": None}},
-            {"type": "http", "provider": "deepseek", "model_default": "deepseek-flash",
-             "models_allowed": ["deepseek-flash"]},
-        )
-        with self.assertRaises(base.DispatchConfigMuscleError) as ctx:
-            await m.invoke("hola")
-        self.assertIn("subprocess", str(ctx.exception))
-        self.assertEqual(self.cap.bodies, [], "nunca a la URL del TOML")
-        self.leer.assert_not_awaited()
-
-
-class OllamaNumPredictTest(_Base):
-    """M3: los caminos Ollama nativos mandan options.num_predict del contrato."""
-
-    async def test_ollama_muscle_manda_num_predict_de_la_fila(self):
-        from jax.muscles.ollama_muscle import OllamaMuscle
-        self.arrancar((None, 4096))
-        m = OllamaMuscle("jax_local", "qwen-x", ["qwen-x"], "s", 10, api_url="http://ollama.example/api/chat")
-        m.provider_id = "ollama"
-        await m.invoke("hola")
-        self.assertEqual(self.cap.bodies[0]["options"], {"num_predict": 4096})
-        self.leer.assert_awaited_once_with("ollama", "qwen-x")
-
-    async def test_ollama_muscle_sin_tope_no_despacha(self):
-        from jax.muscles.ollama_muscle import OllamaMuscle
-        self.arrancar((None, None))
-        m = OllamaMuscle("jax_local", "qwen-x", ["qwen-x"], "s", 10, api_url="http://ollama.example/api/chat")
-        m.provider_id = "ollama"
-        with self.assertRaises(base.DispatchConfigMuscleError) as ctx:
-            await m.invoke("hola")
-        self.assertIn("UPDATE model SET max_output_tokens", str(ctx.exception))
-        self.assertEqual(self.cap.bodies, [])
-
 
 class JacobsOllamaNumPredictTest(unittest.IsolatedAsyncioTestCase):
     def arrancar(self, fila):
@@ -551,37 +478,6 @@ class JacobsOllamaNumPredictTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.cap.bodies, [])
 
 
-class ModoPesadoTest(unittest.TestCase):
-    """M4: el modelo pesado es configuración y tiene que estar en el catálogo."""
-
-    def _cfg(self, **modo):
-        return {"jax": {"modo_pesado": modo},
-                "personalities": {"jekyll": {"models_allowed": ["base-1", "pesado-1"]}}}
-
-    def test_sale_de_la_configuracion(self):
-        from jax.core.main import resolver_modo_pesado
-        self.assertEqual(resolver_modo_pesado(self._cfg(faceta="jekyll", modelo="pesado-1")),
-                         ("jekyll", "pesado-1", ""))
-
-    def test_modelo_fuera_del_catalogo_no_se_activa(self):
-        from jax.core.main import resolver_modo_pesado
-        faceta, modelo, motivo = resolver_modo_pesado(self._cfg(faceta="jekyll", modelo="otro"))
-        self.assertIsNone(faceta)
-        self.assertIn("no está entre los modelos permitidos", motivo)
-
-    def test_sin_configuracion_lo_dice(self):
-        from jax.core.main import resolver_modo_pesado
-        self.assertIn("no configurado", resolver_modo_pesado({"jax": {}, "personalities": {}})[2])
-
-    def test_config_toml_lo_declara(self):
-        import tomllib
-        from pathlib import Path
-        cfg = tomllib.loads((Path(__file__).resolve().parents[1] / "config" / "config.toml").read_text(encoding="utf-8"))
-        modo = cfg["jax"]["modo_pesado"]
-        self.assertIn(modo["faceta"], cfg["personalities"])
-        self.assertTrue(modo["modelo"])
-
-
 # ---------------------------------------------------------------------------
 # Ronda 3
 # ---------------------------------------------------------------------------
@@ -607,119 +503,6 @@ class TopeDeColumnaDePRLTest(_Base):
         with self.assertRaises(cd.ModelDispatchConfigError):
             await cd.limite_de_salida("http_openai_compat", "deepseek", "m")
         self.assertEqual(cd._MAX_OUTPUT_TOKENS_TOPE_COLUMNA, 2 ** 31 - 1)
-
-
-class ClasificadorDelRouterTest(unittest.IsolatedAsyncioTestCase):
-    """N2b: el clasificador del REPL nunca lanza, pero un contrato roto ya no
-    se traga en silencio: WARNING con el motivo."""
-
-    def _router(self, error):
-        from jax.core.router import Router
-        clasificador = AsyncMock()
-        clasificador.invoke = AsyncMock(side_effect=error)
-        return Router(classifier=clasificador)
-
-    async def test_contrato_roto_deja_warning_con_el_update(self):
-        err = base.DispatchConfigMuscleError(
-            "[jax_local] dispatch abortado: modelo 'q': UPDATE model SET max_output_tokens=<tope>")
-        with self.assertLogs("jax.router", level="WARNING") as logs:
-            self.assertIsNone(await self._router(err)._classify("hola"))
-        self.assertIn("UPDATE model SET max_output_tokens", "\n".join(logs.output))
-
-    async def test_otra_falla_tambien_deja_rastro_pero_con_freno(self):
-        """DECISION REVERTIDA el 2026-09-16 por Fernando, tras la auditoria P10.
-
-        Este test afirmaba lo contrario —— se llamaba
-        `test_otra_falla_sigue_cayendo_al_default_sin_ruido` y exigia
-        `assertNoLogs`—— y la intencion era buena: separar la senal accionable
-        (un contrato de dispatch roto, que trae el UPDATE que hay que correr)
-        del ruido de un fallo de red transitorio.
-
-        Lo que esa distincion no cubria: un fallo de red TRANSITORIO es ruido,
-        pero uno PERMANENTE —— Ollama caido, el clasificador roto—— degrada el
-        100 % del ruteo automatico a la faceta por defecto, indefinidamente y
-        sin una sola linea que lo diga. Nadie se entera de que el router dejo
-        de clasificar.
-
-        El freno resuelve las dos cosas a la vez: se avisa la primera vez y
-        despues cada _CLASIFICADOR_CADA_N, asi que un clasificador en bucle no
-        inunda el log —— un log inundado se deja de leer, que es otra forma de
-        callar—— pero la degradacion permanente si deja rastro, con el contador
-        de cuantas veces fallo. Lo fija test_no_inunda_el_log en
-        tests/test_degradaciones_declaradas.py.
-
-        El test no se borro: se reescribio en su contrario, que es como esta
-        casa cambia una decision fijada."""
-        with self.assertLogs("jax.router", level="WARNING") as logs:
-            self.assertIsNone(await self._router(RuntimeError("red caida"))._classify("hola"))
-        salida = "\n".join(logs.output)
-        self.assertIn("clasificador del router caido", salida)
-        self.assertIn("NO esta clasificando", salida)
-
-    async def test_el_contrato_roto_sigue_distinguiendose_de_una_falla_cualquiera(self):
-        """La distincion original NO se perdio: el contrato roto sigue trayendo
-        el UPDATE accionable, y una falla cualquiera no lo inventa."""
-        err = base.DispatchConfigMuscleError(
-            "[jax_local] dispatch abortado: modelo 'q': UPDATE model SET max_output_tokens=<tope>")
-        with self.assertLogs("jax.router", level="WARNING") as contrato:
-            await self._router(err)._classify("hola")
-        with self.assertLogs("jax.router", level="WARNING") as cualquiera:
-            await self._router(RuntimeError("red caida"))._classify("hola")
-        self.assertIn("UPDATE model SET", "\n".join(contrato.output))
-        self.assertNotIn("UPDATE model SET", "\n".join(cualquiera.output))
-
-
-class UrlRealPorCaminoTest(_Base):
-    """N4: con la provider.base_url de producción, cada camino llama al
-    endpoint que corresponde y el parámetro del límite sigue a ESE endpoint."""
-
-    def test_repl_http_arma_chat_completions_desde_la_base_url_real(self):
-        from jax.core.registro_facetas import aplicar_registro
-        for provider_id, clave in (("deepseek", "deepseek"), ("moonshot", "kimi"),
-                                   ("openai", "openai"), ("zhipu", "zhipu")):
-            with self.subTest(provider_id):
-                cfg = {"personalities": {"f": {"type": "http", "provider": "x", "model_default": "m",
-                                               "models_allowed": ["m"]}}}
-                aplicar_registro(cfg, {"f": {"model": "m", "models_allowed": ["m"],
-                                             "transport": "http_openai_compat",
-                                             "provider_modelo": provider_id,
-                                             "base_url_modelo": _BASE_URL_PROD[provider_id]}})
-                self.assertEqual(cfg["personalities"]["f"]["api_url"],
-                                 _BASE_URL_PROD[provider_id] + "/chat/completions")
-                self.assertEqual(cfg["personalities"]["f"]["provider"], clave)
-
-    async def test_repl_gemini_arma_generate_content_desde_la_base_url_real(self):
-        from jax.core.main import build_muscles
-        from jax.core.registro_facetas import aplicar_registro
-        self.arrancar(("max_tokens", 1))
-        cfg = _cfg_repl({"hipatia": {"type": "http", "provider": "gemini", "model_default": "g",
-                                     "models_allowed": ["g"], "system_prompt": "s"}})
-        aplicar_registro(cfg, {"hipatia": {"model": "gemini-x", "models_allowed": ["gemini-x"],
-                                           "transport": "http_gemini", "provider_modelo": "gemini",
-                                           "base_url_modelo": _BASE_URL_PROD["gemini"]}})
-        await build_muscles(cfg)["hipatia"].invoke("hola")
-        # Ruling T6-6 (2026-09-15): la key va en la cabecera x-goog-api-key,
-        # nunca en la URL (httpx loguea la URL entera en INFO).
-        self.assertEqual(
-            self.cap.urls[0],
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-x:generateContent")
-        self.assertIn("x-goog-api-key", self.cap.headers[0] or {})
-        self.assertNotIn("max_tokens", self.cap.bodies[0])
-
-    async def test_repl_ollama_usa_el_endpoint_nativo_del_entorno_y_num_predict(self):
-        from jax.core.main import build_muscles
-        from jax.core.registro_facetas import aplicar_registro
-        self.arrancar((None, 262144))
-        nativo = "http://ollama.invalid:11434/api/chat"  # JAX_OLLAMA_URL del conftest + /api/chat
-        cfg = _cfg_repl({"jax_local": {"type": "ollama", "provider": "ollama", "model_default": "q",
-                                       "models_allowed": ["q"], "system_prompt": "s"}})
-        aplicar_registro(cfg, {"jax_local": {"model": "qwen-x", "models_allowed": ["qwen-x"],
-                                             "transport": "ollama", "provider_modelo": "ollama",
-                                             "base_url_modelo": _BASE_URL_PROD["ollama"]}})
-        await build_muscles(cfg)["jax_local"].invoke("hola")
-        self.assertEqual(self.cap.urls, [nativo])
-        self.assertEqual(self.cap.bodies[0]["options"], {"num_predict": 262144})
-        self.assertNotIn("max_tokens", self.cap.bodies[0])
 
 
 class UrlRealJacobsYMotorTest(unittest.IsolatedAsyncioTestCase):

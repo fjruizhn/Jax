@@ -105,8 +105,9 @@ class DispatchConfigMuscleError(MuscleInvocationError, ModelDispatchConfigError)
 
 class Muscle(ABC):
     # PR-K ronda 2 (I1): motivo por el que esta faceta NO puede despachar
-    # (su binding no coincide con el camino que arma config.toml). Lo pone
-    # build_muscles desde registro_facetas.aplicar_registro. Vacío = despacha.
+    # (su binding no coincide con el camino que arma config.toml). Lo ponía
+    # el REPL (build_muscles/aplicar_registro, retirados en T16); hoy nadie lo
+    # asigna, así que siempre es vacío = despacha.
     dispatch_bloqueado: str = ""
 
     def __init__(
@@ -392,7 +393,7 @@ class HttpMuscle(Muscle):
     ) -> str:
         api_key = await self._resolve_api_key()
         # PR-K ronda 2 (I1): la URL base sale del proveedor del modelo en el
-        # catálogo (registro_facetas.aplicar_registro la pone en api_url).
+        # catálogo (se pasa como api_url al construir el músculo; ver url_del_proveedor).
         base = self._url_del_catalogo()
         # Ruling T6-6 (2026-09-15): la key va en la cabecera x-goog-api-key,
         # NO en `?key=` (httpx loguea la URL entera en INFO y la mete en

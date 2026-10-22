@@ -229,11 +229,9 @@ _RESOLVERS: dict[str, Callable[["claims.Claim", ValidationContext], Verdict]] = 
 }
 _UNIMPLEMENTED_REASONS: dict[str, str] = {
     "ENGINE_STATUS": (
-        "ENGINE_STATUS: sin fuente de verdad en el dominio de jax. La "
-        "tabla 'model' de jax-platform tiene semántica distinta "
-        "(disponibilidad del provider, no salud del motor). Ver "
-        "REFORMAS-v3 §3.1.3 y el spec de gobernanza, sección 'Por qué "
-        "solo dos resolvers reales'."
+        "ENGINE_STATUS: el validador legado no acredita estado actual. "
+        "La única ruta acreditada es ResolverRegistry con el binding "
+        "explícito de fuente de salud del servidor."
     ),
     "FACET_EXISTS": (
         "FACET_EXISTS: sin fuente ni consumidor identificado esta "
@@ -251,8 +249,24 @@ _UNIMPLEMENTED_REASONS: dict[str, str] = {
         "explícitamente'."
     ),
     "JOB_STATUS": (
-        "JOB_STATUS: sin fuente ni consumidor identificado esta ronda. "
-        "Ver spec de gobernanza, 'Fuera de alcance, explícitamente'."
+        "JOB_STATUS: el validador legado no acredita estado actual. "
+        "La única ruta acreditada es ResolverRegistry con el binding "
+        "explícito de Motor Registry JobStore."
+    ),
+    "PIPELINE_STATUS": (
+        "PIPELINE_STATUS: el validador legado no acredita estado actual. "
+        "La única ruta acreditada es ResolverRegistry con el binding "
+        "explícito del almacén canónico de Jacobs."
+    ),
+    "STEP_STATUS": (
+        "STEP_STATUS: el validador legado no acredita estado actual. "
+        "La única ruta acreditada es ResolverRegistry con el binding "
+        "explícito de persistencia canónica de pasos Jacobs."
+    ),
+    "FACET_RUNTIME_STATUS": (
+        "FACET_RUNTIME_STATUS: el validador legado no acredita estado actual. "
+        "La única ruta acreditada es ResolverRegistry con el binding "
+        "explícito del estado transitorio de JAX Platform."
     ),
     "MEMORY_ENTRY_EXISTS": (
         "MEMORY_ENTRY_EXISTS: sin fuente ni consumidor identificado "
@@ -260,6 +274,11 @@ _UNIMPLEMENTED_REASONS: dict[str, str] = {
         "explícitamente'."
     ),
 }
+
+# STEP_STATUS solo se acredita mediante el contrato F2-B ResolverRegistry.
+# El validator legado debe vetarlo incluso si alguien registra aquí por error
+# un resolver local en _RESOLVERS.
+_RESOLVER_REGISTRY_ONLY = frozenset({"STEP_STATUS"})
 
 
 def verdict_sin_grounding(
@@ -342,6 +361,13 @@ def validate(
                 f"Args esperados {sorted(spec.args)}, "
                 f"recibidos {sorted(claim.args.keys())}."
             ),
+        )
+
+    if claim.predicate in _RESOLVER_REGISTRY_ONLY:
+        return Verdict(
+            status="RESOLVER_NOT_IMPLEMENTED",
+            predicate=claim.predicate,
+            detail=_UNIMPLEMENTED_REASONS[claim.predicate],
         )
 
     resolver = _RESOLVERS.get(claim.predicate)

@@ -18,6 +18,18 @@ class UnanchoredLedgerHeadError(LedgerIntegrityError):
     pass
 
 
+class LedgerCheckpointError(LedgerIntegrityError):
+    """The event is in the DB, but checkpoint publication is known not to have happened."""
+
+
+class LedgerAlreadyInitializedError(LedgerIntegrityError):
+    """Bootstrap was requested for a ledger with existing trust artifacts."""
+
+
+class CheckpointPublicationOutcomeUnknownError(LedgerIntegrityError):
+    """Checkpoint replacement may have completed, but durability/readback is unproven."""
+
+
 class TrustedRootMismatchError(LedgerIntegrityError):
     pass
 

@@ -113,6 +113,33 @@ class AuditorIlegible(ValueError):
         self.codigo = codigo
 
 
+#: Los codigos constantes con que `AuditorIlegible` se levanta en este paquete. Son la unica lista de
+#: valores que la traza de la mision acepta como `detalle` de una pausa (ver `detalle_conocido`).
+CODIGOS_ILEGIBLE = frozenset({
+    "proveedor_fallo", "proveedor_plazo", "json_invalido", "forma_invalida", "tipo_desconocido",
+    "cita_paso_inexistente", "cita_afirmacion_inexistente", "veredicto_desconocido", "veredicto_duplicado"})
+DETALLE_INVALIDO = "detalle_invalido"
+DETALLE_NO_COPIADO = "detalle_no_copiado"
+
+
+def detalle_conocido(valor) -> str:
+    """El `detalle` de una pausa viene de un archivo que escribe otro proceso: solo se copia a la
+    bitacora si es uno de `CODIGOS_ILEGIBLE` (largo acotado por construccion). Cualquier otra cosa --
+    otro tipo, otro texto, uno largo -- se registra como `detalle_invalido`, sin copiarla."""
+    if isinstance(valor, str) and valor in CODIGOS_ILEGIBLE:
+        return valor
+    return DETALLE_INVALIDO
+
+
+def detalle_de_pausa(origen, valor) -> str:
+    """Lo que se registra del `detalle` de una pausa segun quien la puso. SOLO `origen == "c5"` tiene un
+    vocabulario conocido (`detalle_conocido`); el `detalle` de cualquier otro origen (la huella, con su diff en
+    una lista, etc.) puede traer contenido crudo y no se copia: se registra el rotulo neutro `detalle_no_copiado`."""
+    if origen == "c5":
+        return detalle_conocido(valor)
+    return DETALLE_NO_COPIADO
+
+
 def id_de(posicion: int) -> str:
     return f"a{posicion + 1}"
 

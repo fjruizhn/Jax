@@ -1,0 +1,220 @@
+{
+  "version": 1,
+  "pisos": {
+    "las-voces-faro-readonly/las-voces-faro-readonly": {
+      "patron": "^24 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 24 tests CORRIDOS."
+    },
+    "archivos-de-test-en-ci/wireados": {
+      "patron": "^7 passed",
+      "mensaje": "PISO ROTO: se esperaban 7 tests CORRIDOS."
+    },
+    "no-naked-claude-subprocess/scanner": {
+      "patron": "^54 passed",
+      "mensaje": "PISO ROTO: se esperaban 54 tests CORRIDOS del scanner."
+    },
+    "no-naked-claude-subprocess/titular": {
+      "patron": "^9 passed",
+      "mensaje": "PISO ROTO: se esperaban 9 tests CORRIDOS del control de Titular."
+    },
+    "no-naked-claude-subprocess/arranque": {
+      "patron": "^7 passed",
+      "mensaje": "PISO ROTO: se esperaban 7 tests CORRIDOS del control de preparar_arranque."
+    },
+    "no-naked-claude-subprocess/lanza": {
+      "patron": "^5 passed",
+      "mensaje": "PISO ROTO: se esperaban 5 tests CORRIDOS."
+    },
+    "cli-sandbox-unit/clisb": {
+      "patron": "^234 passed",
+      "mensaje": "PISO ROTO: se esperaban 234 tests CORRIDOS de cli_sandbox. OP#251 (2026-10-14): 251-7 pruebas del lock de Hyde retiradas con el modulo +6 ataques de contencion portados de _hyde_containment_test.py = 250. OP#251 seguimiento (2026-10-14, auditoria del merge 494305da): -16 pruebas de LocksCompartidosTest, retirada con flock_compartido_adquirir (quedo sin llamador al retirar hyde_sandbox); medido 234 passed, 0 skipped en hall9000."
+    },
+    "faro-fase0/faro": {
+      "patron": "^780 passed",
+      "mensaje": "PISO ROTO: se esperaban 780 tests CORRIDOS del Faro."
+    },
+    "faro-bitacora-db/faro-db": {
+      "patron": "^40 passed",
+      "mensaje": "PISO ROTO: se esperaban 40 tests CORRIDOS de la bitacora y los topes del Faro."
+    },
+    "faro-jaula/faro-jaula": {
+      "patron": "^11 passed",
+      "mensaje": "PISO ROTO: se esperaban 11 tests CORRIDOS de la jaula del Faro."
+    },
+    "facet-health-io/out": {
+      "patron": "^27 passed",
+      "mensaje": "PISO ROTO: se esperaban 27 tests CORRIDOS (no skipeados)."
+    },
+    "pipeline-results-historial-db/out": {
+      "patron": "^2 passed",
+      "mensaje": "PISO ROTO: se esperaban 2 tests CORRIDOS (no skipeados)."
+    },
+    "subpipeline-contrato-db/out": {
+      "patron": "^295 passed",
+      "mensaje": "PISO ROTO: se esperaban 295 tests CORRIDOS (no skipeados)."
+    },
+    "memory-vector-zero-io/out": {
+      "patron": "^223 passed",
+      "mensaje": "PISO ROTO: se esperaban 223 tests CORRIDOS (no skipeados)."
+    },
+    "facet-resolver-seal/seal": {
+      "patron": "^13 passed",
+      "mensaje": "PISO ROTO: se esperaban 13 tests CORRIDOS (no skipeados)."
+    },
+    "plan-timeout-ceiling/ptc": {
+      "patron": "^16 passed",
+      "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS."
+    },
+    "mirror-sync/ms": {
+      "patron": "^37 passed",
+      "mensaje": "PISO ROTO: se esperaban 37 tests CORRIDOS."
+    },
+    "mirror-sync/cu": {
+      "patron": "^22 passed",
+      "mensaje": "PISO ROTO: se esperaban 22 tests CORRIDOS y 0 skipped."
+    },
+    "mirror-sync/ks": {
+      "patron": "^2 passed in",
+      "mensaje": "PISO ROTO: se esperaban 2 tests CORRIDOS y 0 skipped."
+    },
+    "ollama-num-parallel/onp": {
+      "patron": "^33 passed",
+      "mensaje": "PISO ROTO: se esperaban 33 tests CORRIDOS."
+    },
+    "governance/f2e-sr": {
+      "patron": "^19 passed",
+      "mensaje": "PISO ROTO: se esperaban 19 tests CORRIDOS de F2-E-SR source integrity."
+    },
+    "governance/f2e-sr2": {
+      "patron": "^26 passed",
+      "mensaje": "PISO ROTO: se esperaban exactamente 26 regresiones STEP_STATUS ejecutadas."
+    },
+    "governance/f2e-sr3": {
+      "patron": "^214 passed",
+      "mensaje": "PISO ROTO: se esperaban 214 tests CORRIDOS de F2-E-SR3."
+    },
+    "governance/f2e-sr3-source": {
+      "patron": "^165 passed",
+      "mensaje": "PISO ROTO: se esperaban 165 tests CORRIDOS de F2-E-SR3 source/auth/routing. OP#251 (2026-10-14): 166-1, se retiro test_la_jaula_de_hyde_no_recibe_la_credencial, que probaba el modulo hyde_sandbox retirado."
+    },
+    "governance/gov": {
+      "patron": "^264 passed",
+      "mensaje": "PISO ROTO: se esperaban 264 tests CORRIDOS."
+    },
+    "governance/f2e-external-output": {
+      "patron": "^10 passed",
+      "mensaje": "PISO ROTO: se esperaban 10 tests CORRIDOS de la frontera de salida externa F2-E."
+    },
+    "governance/f2e-structured-projection": {
+      "patron": "^15 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 15 tests CORRIDOS de F2-E structured projection."
+    },
+    "tests-puros/out": {
+      "patron": "^3887 passed, 45 skipped",
+      "mensaje": "PISO ROTO: se esperaban 3887 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Re-medido el 2026-10-06 (ronda 15 de JAX#357) sobre la MEZCLA de la rama con origin/master (36dafaa2) por recoleccion con la lista exacta de 195 archivos del paso 'Piso exacto', sin JAX_DB_HOST: 3934 recolectadas = 3888 passed + 45 skipped + 1 xfailed (3841 de la rama + 35 de #362 + 12 de la ronda 15), a confirmar en el runner; 435d1ede recolecta 3814 con la misma lista. OP#251 (2026-10-14): 3888-1=3887 passed con la misma lista de archivos; -1 test_la_jaula_de_hyde_no_recibe_la_credencial (tests/test_las_manos_auth_servicio.py), que probaba el modulo hyde_sandbox retirado."
+    },
+    "tests-puros/arranque_instalado": {
+      "patron": "^46 passed, 9 skipped",
+      "mensaje": "PISO ROTO: se esperaban 46 tests CORRIDOS y exactamente 9 skipped (6 que exigen el host de produccion /srv/jax-prod/jax y 3 espejos que exigen el checkout del repo dueno) de los guiones de arranque de systemd."
+    },
+    "authority-ledger-codec/codec": {
+      "patron": "^19 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 19 tests CORRIDOS del codec de persistencia de Block 4. Medido el 2026-10-07 en hall9000."
+    },
+    "authority-ledger-mariadb/integration": {
+      "patron": "^48 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 48 tests CORRIDOS de la suite MariaDB aislada del ledger tras agregar regresiones post-replace de crash/restart para evaluación PERMIT, cancelación y consumo con retención de claves. Recolectadas 48; confirmar las pasadas en CI exacta."
+    },
+    "authority-rule-storage/mariadb": {
+      "patron": "^28 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 28 pruebas de persistencia Rule Authority, readiness y diagnóstico MariaDB; incluye las regresiones de #392 y siete variantes que cierran record() standalone antes de abrir DB. Recolectadas 28; confirmar las pasadas MariaDB en CI exacta."
+    },
+    "authority-rule-unit/tests": {
+      "patron": "^61 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 61 pruebas unitarias sin DB de Rule Authority (kernel, store, permit y checkpoint), incluidas reconciliacion durable tras fsync incierto, cancelación y KeyboardInterrupt post-replace con retry bloqueado, estabilidad de inode y hash-chain, identidad de retry, rechazo de head final distinto, proyeccion historica de consumo, revalidacion de consume(), DENY tipado para reglas sin limites y carreras de STOP/pin/clasificacion contra consume(). Medido localmente con el comando exacto del workflow; confirmar por CI exacta."
+    },
+    "authority-rule-events/ratifications": {
+      "patron": "^12 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 12 pruebas de payload, codec y replay de ratificaciones Faro individuales. Medido el 2026-10-07 en hall9000."
+    },
+    "tests-puros/ficha_tests": {
+      "patron": "^16 passed",
+      "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS de procesamiento/_ficha_test.py -- el tipo que fija el fallo cerrado de toda la ronda."
+    },
+    "tests-puros/resultado_tests": {
+      "patron": "^16 passed",
+      "mensaje": "PISO ROTO: se esperaban 16 tests CORRIDOS de procesamiento/_resultado_test.py -- el tipo que fija el fallo cerrado de toda la ronda."
+    },
+    "tests-puros/excel_tests": {
+      "patron": "^14 passed",
+      "mensaje": "PISO ROTO: se esperaban 14 tests CORRIDOS (no skipeados) del extractor de Excel. Si esto da '... skipped', openpyxl no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."
+    },
+    "tests-puros/pdf_tests": {
+      "patron": "^23 passed",
+      "mensaje": "PISO ROTO: se esperaban 23 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."
+    },
+    "tests-puros/ocr_tests": {
+      "patron": "^219 passed, 2 skipped",
+      "mensaje": "PISO ROTO: se esperaban 219 tests CORRIDOS del extractor de OCR (en el runner, mas 2 skipped: las 2 imagenes reales de LACTOVI, solo en hall9000). Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."
+    },
+    "tests-puros/word_tests": {
+      "patron": "^23 passed",
+      "mensaje": "PISO ROTO: se esperaban 23 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."
+    },
+    "tests-puros/compuerta_tests": {
+      "patron": "^42 passed",
+      "mensaje": "PISO ROTO: se esperaban 42 tests CORRIDOS de la compuerta."
+    },
+    "tests-puros/ingesta_tests": {
+      "patron": "^52 passed",
+      "mensaje": "PISO ROTO: se esperaban 52 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."
+    },
+    "tests-puros/medir_utilidad_tests": {
+      "patron": "^11 passed",
+      "mensaje": "PISO ROTO: se esperaban 11 tests CORRIDOS del medidor de utilidad. Si esto da '... skipped', openpyxl no se instalo."
+    },
+    "tests-puros/procesar_archivos_tests": {
+      "patron": "^12 passed",
+      "mensaje": "PISO ROTO: se esperaban 12 tests CORRIDOS del guion de procesar_archivos. Si esto da '... skipped', openpyxl no se instalo."
+    },
+    "tests-puros/procesamiento_routes_tests": {
+      "patron": "^103 passed",
+      "mensaje": "PISO ROTO: se esperaban 103 tests CORRIDOS del endpoint de Procesamiento."
+    },
+    "tests-puros/dependencias_tests": {
+      "patron": "^38 passed",
+      "mensaje": "PISO ROTO: se esperaban 38 tests CORRIDOS (no skipeados) del freno de dependencias."
+    },
+    "jacobs-gobernanza-db/out": {
+      "patron": "^219 passed",
+      "mensaje": "PISO ROTO: se esperaban 219 tests CORRIDOS."
+    },
+    "permisos-proyectos/permisos_proyectos": {
+      "patron": "^306 passed, 1 skipped",
+      "mensaje": "PISO ROTO: se esperaban 306 tests CORRIDOS (no skipeados) y exactamente 1 skipped."
+    },
+    "archivos-de-test-en-ci/pisos": {
+      "patron": "^231 passed",
+      "mensaje": "PISO ROTO: se esperaban 231 tests CORRIDOS de los pisos fuera del workflow."
+    },
+    "authority-ledger-seal/attacks": {
+      "patron": "^4 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 4 tests CORRIDOS de los ataques de sello (replace, replace Faro, congelado profundo, drift de hash)."
+    },
+    "authority-ledger-golden/vectors": {
+      "patron": "^7 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 7 tests CORRIDOS del vector dorado (6 tipos históricos + genesis). Si cambió el formato canónico a propósito, recaptura las constantes en el mismo commit."
+    },
+    "authority-resolution-loader-seal/ataques": {
+      "patron": "^18 passed in ",
+      "mensaje": "PISO ROTO: se esperaban 18 tests CORRIDOS de los ataques al sello del loader de Block 3 (replace, construccion directa, congelado, subclases, método sombreado, binding por campo de las 6 entradas, proyección canónica sombreada y política de copia/pickle). 14 -> 16 el 2026-10-07; 16 -> 17 el 2026-10-08 por cierre de sombreado de _contenido_canonico; 17 -> 18 por cierre de copy/deepcopy/pickle."
+    },
+    "identity-foundation-shadow/policy": {
+      "patron": "^1045 passed in ",
+      "mensaje": "PISO ROTO: se esperaban exactamente 1045 tests CORRIDOS y 0 skipped de Identity Foundation Shadow, medidos localmente sobre #388 reapilado el 2026-10-10; CI exacta debe confirmar este conteo."
+    }
+  },
+  "minimos": {
+    "memory-b9-regression/casos": 194
+  }
+}

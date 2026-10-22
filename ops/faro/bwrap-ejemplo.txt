@@ -1,0 +1,80 @@
+# ops/faro/bwrap-ejemplo.txt -- GENERADO por jax.faro.jaula.ejemplo(); tests/test_faro_lanzador.py vigila que no se
+# desvie del codigo (si cambia el argv, se regenera con:  python -c "from jax.faro.jaula import ejemplo; print(end=ejemplo())").
+#
+# El argv de bwrap de UNA ejecucion (plan 0.3c). <run_id> y <uid_jaula> los pone el lanzador; la elevacion
+# (JAX_FARO_JAULA_ELEVAR) es lo que da a la jaula su uid propio, distinto del de `faro` y del de root.
+# La jaula recibe por bind de archivo SOLO su socket, su token y el rele; el directorio /run/faro no se monta.
+# Dentro, el cliente MCP lanza:  python -m jax.faro.relay --socket /faro/puerto.sock --token-file /faro/token
+#
+# Quien corre bwrap con el uid de la jaula abre sus dos fuentes en /run/faro (0700 de `faro`) gracias a una ACL por
+# ejecucion que pone el Puerto (jax/faro/acl.py): directorio --x, socket rw-, token r--, solo para ese uid.
+# El perfil de motor deja la RED como decision pendiente de 0.5/0.6 (aqui, aislada: sin red).
+# La regla de sudoers que da la elevacion: ops/faro/sudoers-jaula-ejemplo.
+#
+# --- PERFIL DEL RELE (jaula minima: solo el rele contra su Puerto) ---
+/usr/bin/sudo -n -u '#<uid_jaula>' -- \
+  /usr/bin/bwrap \
+  --unshare-pid \
+  --unshare-ipc \
+  --unshare-uts \
+  --unshare-net \
+  --unshare-cgroup-try \
+  --die-with-parent \
+  --new-session \
+  --clearenv \
+  --proc /proc \
+  --dev /dev \
+  --tmpfs /tmp \
+  --ro-bind /usr /usr \
+  --symlink usr/bin /bin \
+  --symlink usr/lib /lib \
+  --symlink usr/lib64 /lib64 \
+  --bind '/run/faro/<run_id>.sock' /faro/puerto.sock \
+  --ro-bind '/run/faro/<run_id>.token' /faro/token \
+  --ro-bind '<ruta de jax/faro/relay.py>' /faro/relay/jax/faro/relay.py \
+  --setenv PATH /usr/bin:/bin \
+  --setenv HOME /tmp \
+  --setenv PYTHONPATH /faro/relay \
+  --setenv PYTHONDONTWRITEBYTECODE 1 \
+  --chdir /tmp \
+  -- \
+  /usr/bin/python3 -m jax.faro.relay --socket /faro/puerto.sock --token-file /faro/token
+
+# --- PERFIL DE MOTOR (workspace rw, $HOME tmpfs, paquete ro, /etc minimo; red AISLADA: decision pendiente de 0.5/0.6) ---
+/usr/bin/sudo -n -u '#<uid_jaula>' -- \
+  /usr/bin/bwrap \
+  --unshare-pid \
+  --unshare-ipc \
+  --unshare-uts \
+  --unshare-net \
+  --unshare-cgroup-try \
+  --die-with-parent \
+  --new-session \
+  --clearenv \
+  --proc /proc \
+  --dev /dev \
+  --tmpfs /tmp \
+  --tmpfs /home/jaula \
+  --ro-bind /usr /usr \
+  --symlink usr/bin /bin \
+  --symlink usr/lib /lib \
+  --symlink usr/lib64 /lib64 \
+  --ro-bind /etc/ssl /etc/ssl \
+  --ro-bind /etc/ca-certificates /etc/ca-certificates \
+  --ro-bind /etc/resolv.conf /etc/resolv.conf \
+  --ro-bind /etc/hosts /etc/hosts \
+  --ro-bind /etc/passwd /etc/passwd \
+  --ro-bind /etc/group /etc/group \
+  --ro-bind /etc/nsswitch.conf /etc/nsswitch.conf \
+  --bind '/run/faro/<run_id>.sock' /faro/puerto.sock \
+  --ro-bind '/run/faro/<run_id>.token' /faro/token \
+  --ro-bind '<ruta de jax/faro/relay.py>' /faro/relay/jax/faro/relay.py \
+  --bind '<workspace de la ejecucion>' /work \
+  --ro-bind '<paquete del ecosistema>' /faro/paquete \
+  --setenv PATH /usr/bin:/bin \
+  --setenv HOME /home/jaula \
+  --setenv PYTHONPATH /faro/relay \
+  --setenv PYTHONDONTWRITEBYTECODE 1 \
+  --chdir /work \
+  -- \
+  <el motor> <sus argumentos>

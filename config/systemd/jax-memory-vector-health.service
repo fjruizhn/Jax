@@ -1,13 +1,18 @@
 [Unit]
 Description=JAX B9 vector health check
 After=network-online.target mariadb.service
+OnFailure=aviso-fallo@%n.service
 
+# Códigos de salida (auditoría Jax#354): 0 = sano; 1 = faltan vectores o fallo general (Ollama no responde);
+# 3 = el tripwire pide volver a medir el recall del HNSW de messages (messages creció 10x; el 2 es del worker).
+# aviso-fallo distingue el incidente por ExecMainStatus. Ver docs/runbooks/memoria-cola-atascada.md.
 [Service]
 Type=oneshot
 User=jaxsvc
 Group=jaxsvc
 WorkingDirectory=/srv/jax-prod/jax
 EnvironmentFile=/etc/jax/.env
+ExecStartPre=/usr/local/sbin/jax-checkout-de-produccion-sano.sh /srv/jax-prod/jax
 ExecStart=/srv/jax-prod/jax/.venv/bin/python -m jax.memory.embedding_worker --health
 StandardOutput=journal
 StandardError=journal

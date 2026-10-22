@@ -1,0 +1,682 @@
+[
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "ssh \"$HOST\" \"docker rm -f $C\""
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "ssh host 'docker rm -f x'"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "bash -c \"docker rm -f x\""
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "sh -c 'docker rm -f \"$1\"' _ x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "su - svc -c \"docker rm -f x\""
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "eval \"docker rm -f $c\""
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "timeout 30 bash -lc \"docker rm -f x\""
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "watch -n1 \"docker rm -f x\""
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "ssh h \"docker rm -f $C"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "  \"docker rm -f $C\""
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker 'rm' -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker \"rm\" -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker rm \"-f\" x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker $OPTS rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker ${HOST_ARGS} rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker \"${args[@]}\" rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker $CTX container rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker compose $COMPOSE_FILES rm -f"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker compose \"${files[@]}\" rm -f svc"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker compose $FILES rm -fs"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "$DOCKER $FLAGS rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker -Dl debug rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker -DH tcp://x rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker -DHtcp://x rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker -Dc ctx rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker --log-level=debug --debug rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker compose --workdir /x rm -f svc"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker compose --project-name=p rm -f"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker compose --dry-run rm -f"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker compose --compatibility -f x rm -f"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker compose --all-resources rm -f"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker compose --verbose rm -f"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker compose -f x.yml --profile a --profile b rm -fsv"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker-compose rm -f"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker-compose -f x.yml rm -f"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "/usr/local/bin/docker-compose rm -f"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker rm ${c#*/} -f"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker rm x#y -f"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker -H ssh://u@h rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "nice -n 10 docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "ionice -c3 docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "doas docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "command docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "exec docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "time docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "stdbuf -oL docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "sudo -u docker -g docker docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "sudo --user=docker docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "sudo -udocker docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "ssh -l docker host docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "ssh -ldocker host docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "ssh -J docker-jump docker-host docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "ssh -i ~/.ssh/docker docker docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "ssh docker docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "ssh docker exec rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "ssh -tt docker-host sudo docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "xargs -I{} docker rm -f {}"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "xargs -n1 -P4 docker rm -f"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "parallel docker rm -f ::: a b"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "find . -exec docker rm -f {} \\;"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker ps -q | xargs docker container rm --force"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "for c in $L; do docker rm -f $c; done"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "while read c; do docker rm -f \"$c\"; done"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "! docker rm -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker rm -f x &>/dev/null"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker rm x >/dev/null 2>&1 --force"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker rm x 1>&2 -f"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker rm x <&0 -f"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker rm -f x|cat"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "(docker rm -f x)"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "$(docker rm -f x)"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "`docker rm -f x`"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker rm -t 5 -f x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker rm --force --link x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker exec -it c rm -f /x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker run --rm img rm -f /x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker -H tcp://x run img rm -f /x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker context rm -f c"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker buildx rm -f b"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker plugin rm -f p"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker stack rm s"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker compose exec -T svc rm -f /x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker compose run --rm svc rm -f /x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker container exec c rm -f /x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "echo docker; rm -f /x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "shell",
+    "source": "docker ps && rm -f /x"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"docker\", *opts, \"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[*docker, *global_opts, \"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"docker\", host_args, \"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"docker-compose\", \"-f\", \"x.yml\", \"rm\", \"-f\"]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"docker-compose\", \"-p\", p, \"rm\", \"-f\", \"-s\"]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"docker-compose\", \"rm\", \"-f\"]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"docker\", \"compose\", \"--workdir\", \"/x\", \"rm\", \"-f\"]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"docker\", \"compose\", *files, \"rm\", \"-f\"]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"docker\", \"compose\", \"-f\", f, \"--dry-run\", \"rm\", \"-f\"]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"docker\", \"-Dl\", \"debug\", \"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "cmd + [\"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "base_cmd + [\"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "self._cli() + [\"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[*cli, \"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"ssh\", host, \"docker rm -f x\"]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"bash\", \"-c\", \"docker rm -f \" + n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"bash\", \"-c\", f\"docker rm -f {n}\"]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "subprocess.run(\"docker rm \" + n + \" -f\", shell=True)"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "\"docker rm -f %s\" % n"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "\"docker rm -f {}\".format(n)"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"timeout\", \"30\", \"docker\", \"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"nice\", \"docker\", \"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"ssh\", \"-l\", \"docker\", host, \"docker\", \"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"ssh\", \"-J\", \"docker-jump\", \"docker-host\", \"docker\", \"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"sudo\", \"--user=docker\", \"docker\", \"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"sudo\", \"-udocker\", \"docker\", \"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[DOCKER_BIN, \"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[shutil.which(\"docker\"), \"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[docker_path, \"--host\", h, \"rm\", \"-f\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "(\"docker\", \"container\", \"rm\", \"--force\", n)"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"docker\", \"rm\", \"--force=true\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"docker\", \"rm\", n, \"--force\"]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"docker\", \"rm\", \"-f\", \"--volumes=false\", n]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"docker\", \"exec\", c, \"rm\", \"-f\", p]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"docker\", \"-H\", h, \"exec\", c, \"rm\", \"-f\", p]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"docker\", \"context\", \"rm\", \"-f\", c]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"git\", \"rm\", \"-f\", p]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"rm\", \"-f\", \"docker.sock\"]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"rm\", \"-f\", docker_tmp]"
+  },
+  {
+    "origin": "auditor-126",
+    "kind": "python",
+    "source": "[\"sudo\", \"rm\", \"-f\", \"/var/lib/docker/x\"]"
+  },
+  {
+    "origin": "auditor-10",
+    "kind": "python",
+    "source": "subprocess.run(f'ssh {h} \"docker rm -f {c}\"', shell=True)"
+  },
+  {
+    "origin": "auditor-10",
+    "kind": "python",
+    "source": "subprocess.run('ssh h \"docker rm -f x\"', shell=True)"
+  },
+  {
+    "origin": "auditor-10",
+    "kind": "python",
+    "source": "os.system(\"bash -c 'docker rm -f x'\")"
+  },
+  {
+    "origin": "auditor-10",
+    "kind": "python",
+    "source": "[\"ssh\", h, \"sh -c 'docker rm -f x'\"]"
+  },
+  {
+    "origin": "auditor-10",
+    "kind": "python",
+    "source": "cmd = 'sudo sh -c \"docker rm -f x\"'"
+  },
+  {
+    "origin": "auditor-10",
+    "kind": "shell",
+    "source": "ssh $H \"cd /x && docker rm -f $C\""
+  },
+  {
+    "origin": "auditor-10",
+    "kind": "shell",
+    "source": "ssh $H 'docker stop x && docker rm -f x'"
+  },
+  {
+    "origin": "auditor-10",
+    "kind": "shell",
+    "source": "docker rm -f x # \"quoted\""
+  },
+  {
+    "origin": "auditor-10",
+    "kind": "shell",
+    "source": "echo \"docker rm -f x\""
+  },
+  {
+    "origin": "auditor-10",
+    "kind": "shell",
+    "source": "ssh h docker rm -f \"$(cat f)\""
+  }
+]

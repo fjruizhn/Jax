@@ -9,7 +9,7 @@ Filosofia de diseno (contrato firmado por Claude + DeepSeek + Hipatia):
     es un "plus", nunca un punto de falla. Igual que el kill switch.
   - Pool pequeno (1-5 conexiones), autocommit.
   - Fire-and-forget al guardar: no agrega latencia a la respuesta de JAX.
-  - Alcance: start/save/end/health_check. La extraccion de hechos
+  - Alcance: start/save/end. La extraccion de hechos
     (worker batch) es una pieza aparte, no esta.
 
 En memoria de Jairo Urbina.
@@ -514,8 +514,10 @@ class MemoryDB:
 
     def __init__(self):
         # None = todavia no se intento conectar. True/False = resultado de la
-        # ultima migracion. Lo lee health_check(): un esquema a medias NO es
-        # una base sana, aunque responda al SELECT.
+        # ultima migracion. Un esquema a medias NO es una base sana, aunque
+        # responda al SELECT. Hoy solo se LEE dentro de connect() (decide el log de
+        # esquema atrasado y el rechazo del modo worker); health_check(), que lo
+        # exponia, se retiro en T16 por no tener consumidor.
         self.schema_ok: Optional[bool] = None
         self.pool: Optional[aiomysql.Pool] = None
         self.config: dict = {}
@@ -530,7 +532,8 @@ class MemoryDB:
     # Ciclo de vida del pool
     # --------------------------------------------------------
     async def connect(self, host: str, user: str, password: str,
-                      database: str, port: int | None = None) -> bool:
+                      database: str, port: int | None = None, *,
+                      migrate_schema: bool = True) -> bool:
         """Inicializa el pool. Devuelve True si conecto, False si fallo
         (sin lanzar excepcion: JAX debe arrancar aunque la memoria falle)."""
         if port is None:
@@ -607,20 +610,89 @@ class MemoryDB:
             # describe como "una migracion a medias que se ve como JAX se olvido
             # de todo". Y todo JAX seguia arrancando como si el esquema
             # estuviera al dia, con una unica linea de log que nadie mira.
-            self.schema_ok = await ensure_schema(self.pool)
+            self.schema_ok = (await ensure_schema(self.pool) if migrate_schema
+                              else await self.check_schema_readiness())
+            if not migrate_schema and not self.schema_ok:
+                logger.error("MemoryDB worker schema readiness failed; deployment migration required")
+                self.pool.close()
+                await self.pool.wait_closed()
+                self.pool=None
+                return False
             if not self.schema_ok:
                 logger.error(
                     "MemoryDB: el esquema NO esta al dia y no se pudo completar la "
                     "migracion. La base responde, pero puede faltar una columna o un "
                     "backfill: la busqueda por scope (user_id/project_id) puede devolver "
-                    "MENOS de lo que hay, sin error. health_check() devuelve False "
+                    "MENOS de lo que hay, sin error. self.schema_ok queda en False "
                     "mientras dure. Revisar el error de la migracion, arriba."
                 )
             return True
         except Exception as e:  # fail-soft: no se traga el fallo, se reporta como return False y self.pool=None; el caller decide si arranca sin memoria (JAX debe arrancar aunque la DB no responda)
             logger.error(f"MemoryDB no pudo conectar: {e}")
+            if self.pool is not None:
+                self.pool.close()
+                await self.pool.wait_closed()
             self.pool = None
             return False
+
+    async def check_schema_readiness(self) -> bool:
+        """Read-only worker schema contract; never performs installation/backfill.
+
+        Missing tables/columns are a failed deployment, not permission for a
+        timer to mutate schema or fabricate legacy ownership at startup.
+        """
+        required={
+            'conversations':{'id','conversation_uuid','tenant_id','user_id','project_id','ended_at','memory_processed','memory_processed_at'},
+            'messages':{'id','conversation_id','turn_number','role','content','user_id','project_id',EMBED.column},
+            'facts':{'id','fact_text','user_id','project_id','verified_by','superseded_by_user',EMBED.column},
+            'memory_objects':{'memory_id','object_kind','tenant_id','legacy_source_type','legacy_source_namespace','legacy_source_key'},
+            'memory_revisions':{'tenant_id','revision_id','memory_id','content_digest','visibility','user_id','project_id','lifecycle_state','prior_revision_id'},
+            'memory_revision_payloads':{'revision_id','payload'},
+            'memory_provenance':{'provenance_id','revision_id','source_revisions','limitations'},
+            'memory_events':{'event_id','memory_id','revision_id','event_kind','actor_principal','authority_source','request_id','trace_id'},
+            'memory_projections':{'memory_id','current_revision_id','current_verification_state','canonical_history_digest','reconciliation_required'},
+            'memory_legacy_bindings':{'tenant_id','legacy_source_type','legacy_source_namespace','legacy_source_key','memory_id','binding_state'},
+            'embedding_spaces':{'embedding_space_id','dimension'},
+            'embedding_generations':{'generation_id','revision_id','embedding_space_id','embedding_payload'},
+            'memory_extraction_jobs':{'conversation_id','state','claim_token','lease_until','attempts','next_attempt_at','input_digest','frozen_output','output_digest','request_id','trace_id','run_id'},
+            'memory_extraction_results':{'conversation_id','item_index','content_digest','memory_id','revision_id'},
+            'memory_synthesis_jobs':{'job_key','tenant_id','user_id','project_id','source_revision_ids','transformation_version','state','claim_token','frozen_output','lease_until'},
+            'memory_synthesis_job_items':{'job_key','item_key','memory_id'},
+        }
+        if self.pool is None: return False
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT TABLE_NAME,COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE()")
+                actual={}
+                for table,column in await cur.fetchall(): actual.setdefault(table,set()).add(column)
+                if not all(columns.issubset(actual.get(table,set())) for table,columns in required.items()): return False
+                await cur.execute("SELECT TABLE_NAME,INDEX_NAME,SEQ_IN_INDEX,COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND NON_UNIQUE=0 ORDER BY TABLE_NAME,INDEX_NAME,SEQ_IN_INDEX")
+                unique={}
+                for table,index,position,column in await cur.fetchall():
+                    unique.setdefault(table,{}).setdefault(index,[]).append(column)
+                await cur.execute("SELECT TABLE_NAME,INDEX_NAME,COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() ORDER BY TABLE_NAME,INDEX_NAME,SEQ_IN_INDEX")
+                ordered_indexes={}
+                for table,index,column in await cur.fetchall():
+                    ordered_indexes.setdefault(table,{}).setdefault(index,[]).append(column)
+                required_ordered={
+                    'memory_revisions':[
+                        ('tenant_id','visibility','user_id','project_id','created_at','revision_id'),
+                        ('tenant_id','visibility','project_id','created_at','revision_id')],
+                    'memory_provenance':[('revision_id','created_at','provenance_id')]}
+                if not all(expected in {tuple(parts) for parts in ordered_indexes.get(table,{}).values()} for table,expectations in required_ordered.items() for expected in expectations): return False
+                await cur.execute("SELECT COLUMN_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='memory_revisions' AND CONSTRAINT_NAME='fk_memory_revision_tenant' AND REFERENCED_TABLE_NAME='memory_objects' ORDER BY ORDINAL_POSITION")
+                if tuple(await cur.fetchall())!=(('memory_id','memory_id'),('tenant_id','tenant_id')): return False
+                await cur.execute("SELECT ACTION_TIMING,EVENT_MANIPULATION FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME='memory_revision_tenant_compat' AND EVENT_OBJECT_TABLE='memory_revisions'")
+                if await cur.fetchone()!=('BEFORE','INSERT'): return False
+        required_unique={
+            'memory_extraction_jobs':('conversation_id',),
+            'memory_extraction_results':('conversation_id','item_index'),
+            'memory_synthesis_jobs':('job_key',),
+            'memory_synthesis_job_items':('job_key','item_key'),
+            'memory_legacy_bindings':('tenant_id','legacy_source_type','legacy_source_namespace','legacy_source_key'),
+            'memory_objects':('tenant_id','legacy_source_type','legacy_source_namespace','legacy_source_key'),
+        }
+        return all(columns in {tuple(parts) for parts in unique.get(table,{}).values()} for table,columns in required_unique.items())
 
     async def close(self):
         """Cierra el pool tras esperar las tareas pendientes de guardado."""
@@ -642,30 +714,6 @@ class MemoryDB:
     @property
     def is_connected(self) -> bool:
         return self.pool is not None
-
-    # --------------------------------------------------------
-    # Health check (incluye verificacion de VECTOR)
-    # --------------------------------------------------------
-    @db_error_handler
-    async def health_check(self) -> Optional[bool]:
-        """Verifica que la base responde, que VECTOR funciona y que el esquema
-        esta al dia.
-
-        El esquema entra aca a proposito (2026-09-16): una base que responde
-        pero a la que le falta una columna o un backfill NO esta sana -- sirve
-        menos datos de los que tiene y no da error. Un flag que nadie consulta
-        es el mismo defecto que se acaba de arreglar en jacobs/reaper.py
-        (`error: True` escrito y jamas leido), asi que este se lee aqui.
-        """
-        if not self.pool:
-            return None
-        if self.schema_ok is False:
-            return False
-        async with self.pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute("SELECT VEC_ToText(VEC_FromText('[1,2,3]'))")
-                row = await cur.fetchone()
-                return row is not None
 
     # --------------------------------------------------------
     # Embeddings (vectorizacion via Ollama local)
@@ -928,18 +976,24 @@ class MemoryDB:
     @db_error_handler
     async def get_conversation_messages(self, conv_id: int) -> Optional[list]:
         """Trae los mensajes de una conversacion, en orden.
-        Retorna lista de dicts {role, content} o None si fallo."""
+        Retorna identidad inmutable de turno, rol y contenido o None si fallo.
+
+        Los ids no son decorativos: la extracción B9 debe poder conservar y
+        revalidar la procedencia de cada item, incluso cuando se procesa por
+        fragmentos.
+        """
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT role, content FROM messages "
-                    "WHERE conversation_id = %s ORDER BY turn_number ASC",
+                    "SELECT id, turn_number, role, content FROM messages "
+                    "WHERE conversation_id = %s ORDER BY turn_number ASC, id ASC",
                     (conv_id,),
                 )
                 rows = await cur.fetchall()
-                return [{"role": r[0], "content": r[1]} for r in rows]
+                return [{"message_id": r[0], "turn_number": r[1],
+                         "role": r[2], "content": r[3]} for r in rows]
 
     @db_error_handler
     async def get_last_session_messages(self, limit: int = 20) -> Optional[list]:
@@ -959,7 +1013,7 @@ class MemoryDB:
                 last_conv_id = row[0]
                 await cur.execute(
                     "SELECT role, content FROM messages "
-                    "WHERE conversation_id = %s ORDER BY turn_number DESC LIMIT %s",
+                    "WHERE conversation_id = %s ORDER BY turn_number DESC, id DESC LIMIT %s",
                     (last_conv_id, limit)
                 )
                 rows = await cur.fetchall()
@@ -1986,15 +2040,32 @@ class MemoryDB:
 
     @db_error_handler
     async def delete_fact(self, fact_id: int) -> Optional[bool]:
-        """Borra un fact. Irreversible — el caller debe confirmar antes."""
+        """Borra un fact legado solo si no tiene una adopción B9 activa.
+
+        La fila ``facts`` no guarda tenant; se obtiene bajo bloqueo desde su
+        dueño antes de consultar el enlace B9. Así un borrado legado nunca
+        deja una memoria B9 semánticamente activa sin su origen.
+        """
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                affected = await cur.execute(
-                    "DELETE FROM facts WHERE id = %s", (fact_id,)
-                )
-                return affected > 0
+            await conn.begin()
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT f.id,u.tenant_id FROM facts f JOIN jax_users u ON u.user_id=f.user_id WHERE f.id=%s FOR UPDATE", (fact_id,))
+                    owner=await cur.fetchone()
+                    if not owner:
+                        await conn.rollback(); return False
+                    tenant_id=owner[1]
+                    await cur.execute("SELECT binding_state FROM memory_legacy_bindings WHERE tenant_id=%s AND legacy_source_type='facts' AND legacy_source_namespace='legacy' AND legacy_source_key=%s FOR UPDATE", (str(tenant_id),str(fact_id)))
+                    binding=await cur.fetchone()
+                    if binding and binding[0]=='ACTIVE':
+                        raise RuntimeError("legacy fact has active B9 binding")
+                    await cur.execute("DELETE FROM facts WHERE id=%s", (fact_id,))
+                    await conn.commit(); return cur.rowcount > 0
+            except BaseException:
+                await conn.rollback()
+                raise
 
     @db_error_handler
     async def get_fact_text(self, fact_id: int) -> Optional[str]:

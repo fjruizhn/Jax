@@ -60,7 +60,7 @@ from redaccion import recortar_redactado
 from jacobs import store
 from jacobs.executor import RefIlegible, _load_ref
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
-from jacobs.plan import PlanBuilder
+from jacobs.plan import MotorGobernadoNoDisponible, PlanBuilder, validar_facetas_ejecutables
 from jacobs.prevuelo import prevuelo
 from jacobs.prevuelo_reglas import formatear_usd
 from jacobs.veredicto import DECISION_DEVOLVER, VeredictoArbitro, parsear_veredicto
@@ -269,6 +269,14 @@ async def evaluar_y_devolver(pipeline: Pipeline) -> tuple[str, dict]:
         return RESULTADO_COMPLETAR, {}
 
     afectados = sorted(pasos_afectados(pipeline.plan, veredicto.paso))
+    try:
+        validar_facetas_ejecutables(pipeline.plan, set(afectados))
+    except MotorGobernadoNoDisponible as exc:
+        await store.event_append(pipeline.pipeline_id, "DEVOLUCION_MOTOR_GOBERNADO_NO_DISPONIBLE", {
+            "paso": veredicto.paso, "motivo": str(exc),
+            "violations": [v.to_dict() for v in exc.violations],
+        }, step_id=arbitro.step_id)
+        return RESULTADO_COMPLETAR, {}
     estimado = await prevuelo(
         pipeline.plan, pipeline.context, pendientes=set(afectados),
         user_id=pipeline.user_id, tenant_id=pipeline.tenant_id,

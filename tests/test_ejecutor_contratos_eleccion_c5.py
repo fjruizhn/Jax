@@ -8,7 +8,7 @@ from jax.ejecutor.contratos.fallo import Fallo
 
 FILAS = {"ejecutor.cerebro_faceta": "ejecutor", "ejecutor.auditor_faceta": "thot",
          "ejecutor.auditor_faceta_local": "auditor_local", "ejecutor.c5_lote_max": "20",
-         "ejecutor.c5_intervalo_s": "15", "ejecutor.c5_max_tokens": "4000",
+         "ejecutor.c5_intervalo_s": "15", "ejecutor.c5_max_tokens": "4000", "ejecutor.c5_tope_s": "400",
          "ejecutor.c5_auditor_admite_datos_de_clientes": "false",
          # Compuerta del mismo proveedor (2026-09-20): obligatoria y CERRADA, que es
          # como nace. Estos tests siguen midiendo el comportamiento estricto.
@@ -17,12 +17,16 @@ FILAS = {"ejecutor.cerebro_faceta": "ejecutor", "ejecutor.auditor_faceta": "thot
 
 def test_config_desde_filas():
     assert E.config_desde_filas(FILAS) == E.ConfigC5("ejecutor", "thot", "auditor_local", 20, 15.0, 4000,
-                                                    False, False)
+                                                    400, False, False)
 
 
 @pytest.mark.parametrize("clave, valor", [("ejecutor.c5_lote_max", "0"), ("ejecutor.c5_intervalo_s", "x"),
                                           ("ejecutor.c5_intervalo_s", "nan"), ("ejecutor.c5_intervalo_s", "inf"),
                                           ("ejecutor.c5_max_tokens", "-1"),
+                                          ("ejecutor.c5_tope_s", "0"), ("ejecutor.c5_tope_s", "-5"),
+                                          ("ejecutor.c5_tope_s", "x"), ("ejecutor.c5_tope_s", "nan"),
+                                          ("ejecutor.c5_tope_s", "1.5"), ("ejecutor.c5_tope_s", "601"),
+                                          ("ejecutor.c5_tope_s", "100000"), ("ejecutor.c5_tope_s", ""),
                                           ("ejecutor.c5_auditor_admite_datos_de_clientes", "si"),
                                           ("ejecutor.c5_auditor_admite_datos_de_clientes", "True"),
                                           ("ejecutor.auditor_faceta", ""),
@@ -35,6 +39,26 @@ def test_config_invalida(clave, valor):
 def test_config_incompleta():
     with pytest.raises(ValueError):
         E.config_desde_filas({k: v for k, v in FILAS.items() if k != "ejecutor.c5_max_tokens"})
+
+
+def test_config_sin_tope_s_es_incompleta():
+    """El plazo del auditor es obligatorio como las demas claves c5: sin la fila, la mision
+    no arranca (falla cerrado), no cae en un 120 s escrito en codigo."""
+    with pytest.raises(ValueError) as e:
+        E.config_desde_filas({k: v for k, v in FILAS.items() if k != "ejecutor.c5_tope_s"})
+    assert e.value.args == ("config_c5_incompleta", ["ejecutor.c5_tope_s"])
+
+
+def test_tope_s_acepta_el_techo_y_rechaza_uno_mas():
+    assert E.config_desde_filas({**FILAS, "ejecutor.c5_tope_s": "600"}).tope_s == 600
+    assert E.config_desde_filas({**FILAS, "ejecutor.c5_tope_s": "1"}).tope_s == 1
+    with pytest.raises(ValueError) as e:
+        E.config_desde_filas({**FILAS, "ejecutor.c5_tope_s": str(E.TOPE_S_MAX + 1)})
+    assert e.value.args[0] == "config_c5_invalida" and E.TOPE_S_MAX == 600
+
+
+def test_tope_s_esta_en_CLAVES():
+    assert "ejecutor.c5_tope_s" in E.CLAVES
 
 
 def _validar(**cambios):

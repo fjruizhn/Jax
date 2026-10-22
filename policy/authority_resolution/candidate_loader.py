@@ -18,6 +18,7 @@ from .models import (
     FrozenNormativeDocument, FrozenNormativeSources, FrozenPrecedence,
     FrozenRelationships, FrozenScope, ProtectedConstraint,
     ValidatedCandidateCorpus, ValidatedManifestBinding, ValidatedMember,
+    _VALIDATED_CANDIDATE_SEAL, _digest_contenido,
 )
 
 def _authority(value, bootstrap) -> FrozenAuthorityMetaContract:
@@ -120,11 +121,21 @@ def load_validated_candidate(repo_root: Path) -> ValidatedCandidateCorpus:
                 doc = load_strict_yaml(snapshot_root / PurePosixPath(member["path"]))
                 docs.append(_document(doc, bootstrap))
             docs.sort(key=lambda x: x.id)
-            return ValidatedCandidateCorpus._from_validated_snapshot(
+            # Sólo esta ruta llega después de validar el snapshot C14N/3. No
+            # existe una fábrica reutilizable en el modelo que acepte campos
+            # arbitrarios y entregue un candidate sellado.
+            corpus = ValidatedCandidateCorpus(
                 report["policy_corpus_hash"], report["canonicalizer_identity"],
                 report["bootstrap_bundle_id"], _authority(authority, bootstrap),
                 ValidatedManifestBinding(manifest["id"], authority["id"], tuple(sorted(members, key=lambda x: x.id))),
                 tuple(docs),
             )
+            object.__setattr__(corpus, "_loader_seal", _VALIDATED_CANDIDATE_SEAL)
+            object.__setattr__(
+                corpus,
+                "_content_binding",
+                _digest_contenido(ValidatedCandidateCorpus._contenido_canonico(corpus)),
+            )
+            return corpus
     except (CanonicalizationError, OSError) as exc:
         raise InvalidValidatedCorpusError("no se pudo cargar corpus candidato validado") from exc

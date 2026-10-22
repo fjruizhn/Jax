@@ -1,6 +1,7 @@
 """Canonical bytes and domain-separated SHA-256 primitives for Block 4."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 from dataclasses import asdict
 from enum import Enum
@@ -12,11 +13,10 @@ from policy.canonicalization.canonical_json import canonical_json_bytes
 def plain(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
-    if isinstance(value, tuple):
+    if isinstance(value, (tuple, list)):
         return [plain(item) for item in value]
-    if isinstance(value, list):
-        return [plain(item) for item in value]
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
+        # Covers dicts and frozen MappingProxyType projections identically.
         return {key: plain(item) for key, item in value.items()}
     if hasattr(value, "__dataclass_fields__"):
         return plain(asdict(value))

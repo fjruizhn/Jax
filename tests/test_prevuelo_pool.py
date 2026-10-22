@@ -162,7 +162,7 @@ def _plan():
     # los dos lectores del catálogo en un mismo pre-vuelo.
     return [
         Step(pipeline_id="p", step_index=0, facet="jekyll", capability="research", input={"prompt": "x"}),
-        Step(pipeline_id="p", step_index=1, facet="kimi", capability="generate", input={"prompt": "x"}),
+        Step(pipeline_id="p", step_index=1, facet="ada", capability="generate", input={"prompt": "x"}),
     ]
 
 

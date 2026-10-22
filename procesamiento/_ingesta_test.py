@@ -33,9 +33,15 @@ sólo un mapa hallazgo -> test:
       test_I6_nombre_largo_con_colision_no_revienta
   I-7 (trabajo sin jail) -> test_I7_trabajo_fuera_del_workspace_se_rechaza
 """
+import io
 import json
+import os
+import re
+import shutil
 import threading
 import time
+import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -59,11 +65,57 @@ def _workspace_root_es_tmp(tmp_path, monkeypatch):
 
 
 def _libro(destino: Path, valor: int = 100) -> Path:
+    """Libro determinista: mismo valor => mismos bytes, se guarde cuando se guarde.
+
+    openpyxl graba la hora en docProps/core.xml y en cada entrada del zip; se fijan las dos."""
+    fija = datetime(2026, 1, 1)
     wb = openpyxl.Workbook()
+    wb.properties.created = fija  # `modified` lo pisa openpyxl al guardar: se fija abajo en el XML
     wb.active["A1"] = "ACTIVOS"
     wb.active["B1"] = valor
-    wb.save(destino)
+    crudo = io.BytesIO()
+    wb.save(crudo)
+    salida = io.BytesIO()
+    with zipfile.ZipFile(crudo) as zin, zipfile.ZipFile(salida, "w", zipfile.ZIP_DEFLATED) as zout:
+        for entrada in zin.infolist():
+            datos = zin.read(entrada.filename)
+            if entrada.filename == "docProps/core.xml":
+                # openpyxl pisa `modified` con la hora actual al guardar.
+                datos, n = re.subn(rb"(<dcterms:modified[^>]*>)[^<]*(</dcterms:modified>)",
+                                   rb"\g<1>2026-01-01T00:00:00Z\g<2>", datos)
+                assert n == 1, "docProps/core.xml sin dcterms:modified: _libro dejaria de ser determinista"
+            fija_zip = zipfile.ZipInfo(entrada.filename, date_time=(2026, 1, 1, 0, 0, 0))
+            fija_zip.compress_type = zipfile.ZIP_DEFLATED
+            zout.writestr(fija_zip, datos)
+    destino.write_bytes(salida.getvalue())
     return destino
+
+
+def test_libro_es_determinista(tmp_path: Path, monkeypatch):
+    """`_libro` promete mismo valor => mismos bytes aunque openpyxl y zipfile vean otra hora."""
+    import datetime as dt
+    import types
+
+    import openpyxl.writer.excel as escritor
+
+    reloj = {"ahora": dt.datetime(2030, 5, 6, 7, 8, 9)}
+
+    class _Fecha(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return reloj["ahora"].replace(tzinfo=tz)
+
+    monkeypatch.setattr(escritor, "datetime", types.SimpleNamespace(datetime=_Fecha, timezone=dt.timezone))
+    # `created` toma su valor por defecto en openpyxl/packaging/core.py (`created or now`).
+    import openpyxl.packaging.core as nucleo
+
+    monkeypatch.setattr(nucleo, "datetime", types.SimpleNamespace(datetime=_Fecha, timezone=dt.timezone))
+    monkeypatch.setattr(time, "time", lambda: reloj["ahora"].timestamp())
+    a = _libro(tmp_path / "a.xlsx", valor=100).read_bytes()
+    reloj["ahora"] = dt.datetime(2031, 1, 2, 3, 4, 6)
+    b = _libro(tmp_path / "b.xlsx", valor=100).read_bytes()
+    assert a == b
+    assert a != _libro(tmp_path / "c.xlsx", valor=999).read_bytes()
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +254,11 @@ def test_mismo_nombre_y_mismo_contenido_no_duplica_en_fuente(tmp_path: Path):
     carpeta_a.mkdir()
     carpeta_b.mkdir()
     origen_a = _libro(carpeta_a / "balance.xlsx", valor=100)
-    origen_b = _libro(carpeta_b / "balance.xlsx", valor=100)
+    # Mismos BYTES, explicito: la prueba trata de una huella identica y no depende de que
+    # `_libro` sea determinista (la version anterior generaba dos libros y fallaba al azar en
+    # CI, run 37529009314; `_libro` ya fija la hora, ver test_libro_es_determinista).
+    origen_b = carpeta_b / "balance.xlsx"
+    shutil.copyfile(origen_a, origen_b)
 
     primera = ingesta.ingerir(origen_a, trabajo)
     segunda = ingesta.ingerir(origen_b, trabajo)
@@ -1382,3 +1438,139 @@ def test_subruta_mismo_contenido_en_dos_subcarpetas_no_reextrae(tmp_path: Path, 
 
     assert ficha2.estado == "ok"
     assert (trabajo / "fuente" / "estados-financieros" / "EEFF.xlsx").is_file()
+
+
+# ---------------------------------------------------------------------------
+# E2a T4 (MAJOR-1 de la revision): un origen que YA vive dentro de
+# `<trabajo>/fuente/` se procesa en el lugar. Antes se copiaba a la raiz de
+# `fuente/` (duplicaba datos del cliente y cambiaba los sha de LACTOVI).
+# ---------------------------------------------------------------------------
+def test_origen_dentro_de_fuente_se_procesa_en_el_lugar_sin_copia(tmp_path: Path):
+    trabajo = tmp_path / "trabajo"
+    sub = trabajo / "fuente" / "sub"
+    sub.mkdir(parents=True)
+    origen = _libro(sub / "x.xlsx")
+    antes = sorted(p.relative_to(trabajo / "fuente") for p in (trabajo / "fuente").rglob("*"))
+
+    ficha = ingesta.ingerir(origen, trabajo)
+
+    assert ficha.estado == "ok"
+    assert Path(ficha.origen) == Path("fuente/sub/x.xlsx")
+    assert not (trabajo / "fuente" / "x.xlsx").exists()
+    despues = sorted(p.relative_to(trabajo / "fuente") for p in (trabajo / "fuente").rglob("*"))
+    assert despues == antes                                     # ni una copia, ni un temporal
+    assert (trabajo / "procesado" / ficha.sha256 / "ficha.json").is_file()
+
+
+def test_symlink_dentro_de_fuente_que_apunta_afuera_no_se_usa_en_el_lugar(tmp_path: Path, tmp_path_factory):
+    afuera = tmp_path_factory.mktemp("afuera-del-workspace")
+    real = _libro(afuera / "real.xlsx")
+    trabajo = tmp_path / "trabajo"
+    (trabajo / "fuente").mkdir(parents=True)
+    enlace = trabajo / "fuente" / "enlace.xlsx"
+    enlace.symlink_to(real)
+
+    ficha = ingesta.ingerir(enlace, trabajo)
+
+    # Igual que antes del cambio: el enlace queda intacto y el contenido entra como archivo regular propio.
+    assert enlace.is_symlink() and enlace.resolve() == real.resolve()
+    destino = trabajo / ficha.origen
+    assert destino.is_file() and not destino.is_symlink() and destino.name != "enlace.xlsx"
+
+
+def test_origen_fuera_de_fuente_con_nombre_igual_a_uno_de_adentro_no_pisa(tmp_path: Path):
+    trabajo = tmp_path / "trabajo"
+    sub = trabajo / "fuente" / "sub"
+    sub.mkdir(parents=True)
+    dentro = _libro(sub / "x.xlsx", valor=1)
+    contenido_dentro = dentro.read_bytes()
+    fuera = _libro(tmp_path / "x.xlsx", valor=2)
+
+    ficha = ingesta.ingerir(fuera, trabajo)
+
+    assert dentro.read_bytes() == contenido_dentro               # no se pisa (C-3)
+    assert ficha.sha256 == sha256_de(fuera)
+    assert (trabajo / ficha.origen).read_bytes() == fuera.read_bytes()
+    assert Path(ficha.origen) != Path("fuente/sub/x.xlsx")
+
+
+def test_symlink_de_directorio_mas_punto_punto_no_envenena_el_cache(tmp_path: Path):
+    """ROTURA-1 (ronda 2 de E2a T4): `fuente/lnk/../x.xlsx` con `lnk` -> `OTRO/fuente/d`.
+    El kernel resuelve `lnk/..` a `OTRO/fuente`; una normalizacion lexica lo vera como
+    `fuente/x.xlsx`. La huella y lo extraido tienen que ser del MISMO archivo."""
+    trabajo = tmp_path / "trabajo"
+    otro = tmp_path / "otro"
+    (trabajo / "fuente").mkdir(parents=True)
+    (otro / "fuente" / "d").mkdir(parents=True)
+    propio = _libro(trabajo / "fuente" / "x.xlsx", valor=1)
+    ajeno = _libro(otro / "fuente" / "x.xlsx", valor=2)
+    assert sha256_de(propio) != sha256_de(ajeno)
+    (trabajo / "fuente" / "lnk").symlink_to(otro / "fuente" / "d")
+    origen = trabajo / "fuente" / "lnk" / ".." / "x.xlsx"
+    assert os.path.samefile(origen, ajeno)                      # el kernel resuelve a OTRO
+
+    ficha = ingesta.ingerir(origen, trabajo)
+
+    assert sha256_de(trabajo / ficha.origen) == ficha.sha256     # ficha coherente con lo que apunta
+    assert ficha.sha256 == sha256_de(ajeno)                      # se ingirio lo que el kernel abrio
+    assert (trabajo / "fuente" / "x.xlsx").read_bytes() == propio.read_bytes()   # el propio, intacto
+    assert Path(ficha.origen) != Path("fuente/x.xlsx")
+
+
+# -- Jax#338 ronda 19: ningun FIFO cuelga la ingesta ---------------------------
+def _sin_colgarse(funcion, fifo, plazo=5.0):
+    """Corre `funcion()` en un hilo con plazo y devuelve lo que devolvio o la
+    excepcion que lanzo. Si se cuelga (un `open()` bloqueante en el FIFO espera
+    un escritor), abre el extremo de escritura para liberarlo y falla."""
+    import os
+    import threading
+
+    resultado: list = []
+
+    def correr():
+        try:
+            resultado.append(funcion())
+        except Exception as exc:  # fail-soft: la prueba registra la excepcion para afirmar sobre ella
+            resultado.append(exc)
+
+    hilo = threading.Thread(target=correr, daemon=True)
+    hilo.start()
+    hilo.join(plazo)
+    if hilo.is_alive():
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        hilo.join(plazo)
+        raise AssertionError("se colgo leyendo un FIFO")
+    return resultado[0]
+
+
+def test_ingerir_un_fifo_no_se_cuelga_y_lo_rechaza_sin_copiar(tmp_path: Path):
+    import os
+
+    fifo = tmp_path / "tuberia.xlsx"
+    os.mkfifo(fifo)
+    trabajo = tmp_path / "trabajo"
+    r = _sin_colgarse(lambda: ingesta.ingerir(fifo, trabajo), fifo)
+    assert isinstance(r, ValueError) and "no es un archivo regular" in str(r), r
+    fuente = trabajo / "fuente"
+    assert not fuente.exists() or list(fuente.iterdir()) == [], "no se copia nada (ni queda el temporal)"
+
+
+def test_sha256_de_un_fifo_no_se_cuelga(tmp_path: Path):
+    import os
+
+    fifo = tmp_path / "tuberia"
+    os.mkfifo(fifo)
+    r = _sin_colgarse(lambda: sha256_de(fifo), fifo)
+    assert isinstance(r, ValueError) and "no es un archivo regular" in str(r), r
+
+
+def test_asegurar_en_fuente_copia_y_calcula_la_huella_desde_el_mismo_descriptor(tmp_path: Path):
+    """Control: un archivo regular se copia completo y la huella devuelta es
+    la de esos mismos bytes."""
+    origen = tmp_path / "doc.bin"
+    origen.write_bytes(b"contenido " * 50_000)
+    fuente = tmp_path / "trabajo" / "fuente"
+    fuente.mkdir(parents=True)
+    destino, huella = ingesta._asegurar_en_fuente(origen, fuente)
+    assert destino.read_bytes() == origen.read_bytes()
+    assert huella == sha256_de(origen) == sha256_de(destino)

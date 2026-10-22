@@ -28,6 +28,11 @@ from jax.ejecutor.contratos.fallo import Fallo
 
 CLAVES = ("ejecutor.cerebro_faceta", "ejecutor.auditor_faceta", "ejecutor.auditor_faceta_local",
           "ejecutor.c5_lote_max", "ejecutor.c5_intervalo_s", "ejecutor.c5_max_tokens",
+          # Plazo (segundos enteros, > 0) de UNA llamada al auditor. Obligatorio, sin valor por
+          # omision en codigo: el auditor local comparte la unica ranura de la GPU con el cerebro
+          # (OLLAMA_NUM_PARALLEL=1), asi que su peticion hace COLA detras de una del cerebro que
+          # puede tardar mas de 2 min -- con 120 s fijos se cortaba el 2026-10-03 (mision 6f00c8ce).
+          "ejecutor.c5_tope_s",
           "ejecutor.c5_auditor_admite_datos_de_clientes",
           # Compuerta del MISMO proveedor (2026-09-20). Nace cerrada; abrirla es
           # DECISIÓN de Fernando y queda en axioma_config_audit con actor, fecha e IP.
@@ -38,6 +43,16 @@ SQL_CONFIG = ("SELECT config_key, config_value FROM axioma_config WHERE config_k
 SQL_HOSTS = "SELECT nombre, con_datos_de_clientes FROM ejecutor_host WHERE activo = 1 AND nombre IN ({})"
 
 
+#: Techo del plazo del auditor (`ejecutor.c5_tope_s`), en segundos. Por que 600 y no "lo que el admin
+#: quiera": con `JAX_EJECUTOR_VIGIA_ESPERA_S=420` (medido en /etc/jax/.env, 2026-10-03) el arranque del
+#: vigia corre 3 canarios de C5 en serie, cada uno con este plazo como maximo, asi que con un plazo
+#: grande la ESPERA del vigia (mision_servicio) sigue siendo el freno del arranque: el plazo no puede
+#: crecer sin limite y dejar una mision colgada mientras la espera ya no manda. Ademas el presupuesto de
+#: cierre del vigia se deriva de este valor (mision_servicio.presupuesto_cierre_s). Pasar de 600 es
+#: config_c5_invalida: falla cerrado, la mision no arranca.
+TOPE_S_MAX = 600
+
+
 @dataclass(frozen=True)
 class ConfigC5:
     cerebro_faceta: str
@@ -46,6 +61,7 @@ class ConfigC5:
     lote_max: int
     intervalo_s: float
     max_tokens: int
+    tope_s: int
     admite_datos_de_clientes: bool
     admite_mismo_proveedor: bool
 
@@ -63,12 +79,12 @@ def config_desde_filas(filas: dict) -> ConfigC5:
     mismo = filas["ejecutor.c5_auditor_admite_mismo_proveedor"].strip()
     if mismo not in ("true", "false"):
         raise ValueError("config_c5_invalida", "ejecutor.c5_auditor_admite_mismo_proveedor")
-    lote, intervalo, tokens = (int(filas["ejecutor.c5_lote_max"]), float(filas["ejecutor.c5_intervalo_s"]),
-                               int(filas["ejecutor.c5_max_tokens"]))
-    if lote <= 0 or not math.isfinite(intervalo) or intervalo <= 0 or tokens <= 0:
+    lote, intervalo, tokens, tope = (int(filas["ejecutor.c5_lote_max"]), float(filas["ejecutor.c5_intervalo_s"]),
+                                     int(filas["ejecutor.c5_max_tokens"]), int(filas["ejecutor.c5_tope_s"]))
+    if lote <= 0 or not math.isfinite(intervalo) or intervalo <= 0 or tokens <= 0 or not 0 < tope <= TOPE_S_MAX:
         raise ValueError("config_c5_invalida", "numeros")
     return ConfigC5(filas["ejecutor.cerebro_faceta"].strip(), filas["ejecutor.auditor_faceta"].strip(),
-                    filas["ejecutor.auditor_faceta_local"].strip(), lote, intervalo, tokens,
+                    filas["ejecutor.auditor_faceta_local"].strip(), lote, intervalo, tokens, tope,
                     admite == "true", mismo == "true")
 
 

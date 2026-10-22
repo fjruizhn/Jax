@@ -37,6 +37,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import auth_servicio
+from processing_ownership import ProcessingOwnershipError, processing_ownership_from_headers
 from auth_servicio import (
     ENCABEZADO, IDENTIDAD_JACOBS, IDENTIDAD_PLATAFORMA, VARIABLES,
     cargar_credenciales, proteger,
@@ -55,6 +56,19 @@ CRED = {
 
 def _credenciales() -> dict[str, bytes]:
     return {k: v.encode("ascii") for k, v in CRED.items()}
+
+
+def test_processing_owner_headers_are_closed_and_canonical():
+    headers = [(b"x-jax-processing-owner-version", b"processing-owner.1"),
+               (b"x-jax-processing-tenant-id", b"1"), (b"x-jax-processing-user-id", b"2"),
+               (b"x-jax-processing-project-id", b"3")]
+    assert processing_ownership_from_headers(headers).project_id == "3"
+    with pytest.raises(ProcessingOwnershipError):
+        processing_ownership_from_headers(headers + [(b"x-jax-processing-tenant-id", b"1")])
+    with pytest.raises(ProcessingOwnershipError):
+        processing_ownership_from_headers(headers[:-1])
+    with pytest.raises(ProcessingOwnershipError):
+        processing_ownership_from_headers(headers[:-1] + [(b"x-jax-processing-project-id", b"03")])
 
 
 def _app() -> FastAPI:
@@ -209,8 +223,6 @@ def test_la_ruta_nueva_bajo_jacobs_es_solo_de_la_plataforma():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("identidad,ruta,cuerpo", [
-    (IDENTIDAD_JACOBS, "/motor/dispatch", {"caller": "hyde", "capability": "code", "prompt": "x"}),
-    (IDENTIDAD_JACOBS, "/motor/dispatch", {"caller": "jax_platform_chat", "capability": "code", "prompt": "x"}),
     (IDENTIDAD_JACOBS, "/jacobs/pipeline", {"invoked_by": "plataforma"}),
     (IDENTIDAD_JACOBS, "/jacobs/pipeline", {"invoked_by": "jax_local"}),
     (IDENTIDAD_PLATAFORMA, "/jacobs/pipeline", {"invoked_by": "ada"}),
@@ -222,6 +234,26 @@ def test_declarar_otra_identidad_se_rechaza(identidad, ruta, cuerpo):
         r = c.post(ruta, json=cuerpo, headers=_h(identidad))
     assert r.status_code == 403, r.text
     assert r.json() == {"detail": {"code": auth_servicio.CODIGO_IDENTIDAD_DECLARADA}}
+
+
+@pytest.mark.parametrize("metodo,ruta", [
+    ("post", "/motor/dispatch"),
+    ("get", "/motor/job/j1"),
+    ("post", "/motor/job/j1/cancel"),
+])
+def test_jacobs_ya_no_tiene_permiso_sobre_los_motores(metodo, ruta):
+    """Jacobs no despacha motores (despacho legacy cerrado, 410) ni consulta o
+    cancela motor jobs: nada del arbol usa esas rutas con la credencial
+    `jacobs`. Un permiso que nadie usa es superficie sin dueno: 403 de ruta."""
+    with TestClient(_app()) as c:
+        r = getattr(c, metodo)(ruta, headers=_h(IDENTIDAD_JACOBS))
+    assert r.status_code == 403, r.text
+    assert r.json() == {"detail": {"code": auth_servicio.CODIGO_RUTA_NO_PERMITIDA}}
+
+
+def test_jacobs_conserva_solo_el_pipeline_de_sub_pipelines():
+    permiso = auth_servicio.PERMISOS[IDENTIDAD_JACOBS]
+    assert [(m, p.pattern) for m, p in permiso.rutas] == [("POST", "/jacobs/pipeline")]
 
 
 def test_la_plataforma_no_despacha_motores():
@@ -294,19 +326,27 @@ def test_server_instala_la_proteccion_al_importar():
     assert len(llamadas) == 1, "server.py tiene que llamar proteger(app) a nivel de módulo"
 
 
-def test_jacobs_presenta_su_credencial_en_cada_pedido_a_las_manos():
-    arbol = ast.parse((RAIZ / "jacobs" / "executor.py").read_text(encoding="utf-8"))
-    pedidos = []
-    for n in ast.walk(arbol):
-        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                and n.func.attr in {"get", "post", "put", "delete"} and n.args
-                and "LAS_MANOS_BASE" in ast.unparse(n.args[0])):
-            pedidos.append(n)
-    assert len(pedidos) >= 3
-    for n in pedidos:
-        headers = [k for k in n.keywords if k.arg == "headers"]
-        assert headers and ast.unparse(headers[0].value) == "encabezado_propio(IDENTIDAD_JACOBS)", \
-            ast.unparse(n)
+def test_jacobs_ya_no_hace_ningun_pedido_http_a_las_manos():
+    """Pipeline no despacha motores directamente (despacho legacy cerrado, 410): el
+    ultimo pedido a LAS MANOS era la cancelacion de un motor job, borrada con el
+    resto del codigo muerto. Se fija el comportamiento, no una constante: ningun
+    modulo de jacobs/ hace un pedido HTTP que apunte a LAS MANOS ni presenta su
+    credencial. Si vuelve un pedido, vuelve con ejecucion gobernada y esta prueba
+    se reescribe a proposito."""
+    hallazgos = []
+    for p in sorted((RAIZ / "jacobs").glob("*.py")):
+        if p.name.endswith("_test.py"):
+            continue
+        fuente = p.read_text(encoding="utf-8")
+        for n in ast.walk(ast.parse(fuente)):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr in {"get", "post", "put", "delete", "request", "stream"} and n.args):
+                destino = ast.unparse(n.args[0]).lower()
+                if any(m in destino for m in ("las_manos", "/motor/", "7777")):
+                    hallazgos.append(f"{p.name}:{n.lineno} {ast.unparse(n)[:80]}")
+        if "auth_servicio" in fuente or "encabezado_propio" in fuente:
+            hallazgos.append(f"{p.name}: usa la credencial de servicio de LAS MANOS")
+    assert hallazgos == []
 
 
 def test_encabezado_propio_sale_del_entorno_y_falla_cerrado(monkeypatch):
@@ -316,58 +356,3 @@ def test_encabezado_propio_sale_del_entorno_y_falla_cerrado(monkeypatch):
     monkeypatch.delenv(VARIABLES[IDENTIDAD_JACOBS])
     with pytest.raises(EntornoInvalido):
         auth_servicio.encabezado_propio(IDENTIDAD_JACOBS)
-
-
-def test_la_jaula_de_hyde_no_recibe_la_credencial(monkeypatch, tmp_path):
-    """Hyde corre como fruiz igual que los servicios: lo único que lo separa de
-    la credencial es la jaula. Entorno limpio, PID propio, sin /etc/jax.
-
-    Se prueba sobre el argv que arma la función REAL (`wrap_hyde_command`), sin
-    ejecutar bwrap: el runner de CI no lo tiene. Lo único que se sustituye es la
-    ruta del binario (un ejecutable vacío, para pasar el chequeo fail-closed de
-    existencia) y el directorio del template de $HOME (el real vive bajo
-    /home/fruiz, que en el runner no existe). La forma de la jaula no cambia.
-    """
-    import hyde_sandbox
-
-    bwrap_falso = tmp_path / "bwrap"
-    bwrap_falso.write_text("#!/bin/sh\nexit 99\n", encoding="ascii")
-    bwrap_falso.chmod(0o755)
-    monkeypatch.setattr(hyde_sandbox, "_BWRAP_BIN", str(bwrap_falso))
-    monkeypatch.setattr(hyde_sandbox, "_TEMPLATE_DIR", tmp_path / "home-template")
-    # El proceso padre TIENE las credenciales en su entorno, como LAS MANOS.
-    for identidad, variable in VARIABLES.items():
-        monkeypatch.setenv(variable, CRED[identidad])
-
-    workspace = tmp_path / "workspace"
-    argv = hyde_sandbox.wrap_hyde_command(["claude", "-p"], str(workspace))
-    assert argv[0] == str(bwrap_falso) and argv[-2:] == ["claude", "-p"]
-    jaula = argv[:argv.index("--")]
-
-    # (a) entorno limpio y namespaces propios.
-    assert "--clearenv" in jaula
-    assert "--unshare-all" in jaula and "--proc" in jaula
-    # --clearenv antes de cualquier --setenv: bwrap aplica en orden.
-    setenvs = [i for i, a in enumerate(jaula) if a == "--setenv"]
-    assert setenvs and jaula.index("--clearenv") < min(setenvs)
-
-    # (b) ningún montaje de /etc/jax ni de /etc/jax/.env (ni de /etc entero).
-    montajes = {"--bind", "--ro-bind", "--dev-bind", "--bind-try", "--ro-bind-try",
-                "--dev-bind-try", "--file", "--bind-data", "--ro-bind-data"}
-    for i, a in enumerate(jaula):
-        if a in montajes:
-            origen, destino = jaula[i + 1], jaula[i + 2]
-            for ruta in (origen, destino):
-                assert ruta.rstrip("/") not in ("/etc", "/etc/jax"), jaula[i:i + 3]
-                assert not ruta.startswith("/etc/jax"), jaula[i:i + 3]
-    for arg in argv:
-        assert "/etc/jax" not in arg, arg
-        assert not any(v in arg for v in CRED.values()), "credencial en el argv de la jaula"
-
-    # (c) --setenv es la única vía de entrada de variables tras --clearenv:
-    # ninguna JAX_LAS_MANOS_CREDENCIAL_* (ni otra JAX_*) entra por ahí.
-    seteadas = {jaula[i + 1] for i in setenvs}
-    assert seteadas == {"HOME", "PATH", "LANG"}, seteadas
-    assert not any(v.startswith("JAX_LAS_MANOS_CREDENCIAL_") for v in seteadas)
-    assert all(v.startswith("JAX_LAS_MANOS_CREDENCIAL_") for v in VARIABLES.values())
-    assert seteadas.isdisjoint(VARIABLES.values())

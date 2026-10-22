@@ -1,11 +1,14 @@
 """Frozen value objects used by the pure authority resolver."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
+import hashlib
 import re
 import unicodedata
 from typing import Mapping
+
+from policy.canonicalization.canonical_json import canonical_json_bytes
 
 from .errors import InvalidEvaluationContextError, InvalidValidatedCorpusError, ResolverContractError
 
@@ -13,6 +16,14 @@ _ID = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _DOC_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _VALIDATED_CANDIDATE_SEAL = object()
+
+
+def _tupla_congelada(values: object, campo: str) -> tuple:
+    """Colección aceptada como tuple/list y devuelta SIEMPRE como tuple: el
+    árbol de un corpus sellado no guarda nada mutable (congelado profundo)."""
+    if not isinstance(values, (tuple, list)):
+        raise ResolverContractError(f"{campo}: colección inválida")
+    return tuple(values)
 
 class ApplicabilityState(str, Enum):
     APPLICABLE = "APPLICABLE"
@@ -105,10 +116,19 @@ class FrozenScope:
     actions: tuple[str, ...]
     conditions_all: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "subjects", _tupla_congelada(self.subjects, "scope.subjects"))
+        object.__setattr__(self, "actions", _tupla_congelada(self.actions, "scope.actions"))
+        object.__setattr__(self, "conditions_all", _tupla_congelada(self.conditions_all, "scope.conditions_all"))
+
 @dataclass(frozen=True)
 class FrozenRelationships:
     supersedes: tuple[str, ...]
     superseded_by: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "supersedes", _tupla_congelada(self.supersedes, "relationships.supersedes"))
+        object.__setattr__(self, "superseded_by", _tupla_congelada(self.superseded_by, "relationships.superseded_by"))
 
 @dataclass(frozen=True)
 class FrozenNormativeDocument:
@@ -145,6 +165,10 @@ class FrozenPrecedence:
     equal_rank_conflict: str
     unresolved_conflict: str
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "ordered_document_layers",
+                           _tupla_congelada(self.ordered_document_layers, "precedence.ordered_document_layers"))
+
 @dataclass(frozen=True)
 class FrozenNormativeSources:
     permitted_document_classes: tuple[str, ...]
@@ -152,6 +176,10 @@ class FrozenNormativeSources:
     document_self_classification_authoritative: bool
     legacy_status_is_normative_force: bool
     unlisted_documents_have_normative_force: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "permitted_document_classes",
+                           _tupla_congelada(self.permitted_document_classes, "normative_sources.permitted_document_classes"))
 
 @dataclass(frozen=True)
 class FrozenExternalConstraints:
@@ -184,10 +212,12 @@ class FrozenAuthorityMetaContract:
             raise ResolverContractError("Meta-Contract fuera de JAX")
         if self.precedence.authority_meta_contract != "ROOT_META_LEVEL":
             raise ResolverContractError("Meta-Contract no es root")
-        if tuple(self.precedence.ordered_document_layers) != ("PROTECTED_METANORM", *_LAYERS):
+        if self.precedence.ordered_document_layers != ("PROTECTED_METANORM", *_LAYERS):
             raise ResolverContractError("precedencia inválida")
-        if tuple(self.normative_sources.permitted_document_classes) != _LAYERS:
+        if self.normative_sources.permitted_document_classes != _LAYERS:
             raise ResolverContractError("clases normativas inválidas")
+        object.__setattr__(self, "protected_metanorms",
+                           _tupla_congelada(self.protected_metanorms, "protected_metanorms"))
         ids = tuple(x.id for x in self.protected_metanorms)
         if ids != tuple(sorted(ids)) or len(ids) != len(set(ids)) or any(x.non_waivable is not True for x in self.protected_metanorms):
             raise ResolverContractError("protected metanorms inválidas")
@@ -208,6 +238,29 @@ class ValidatedManifestBinding:
     authority_id: str
     members: tuple[ValidatedMember, ...]
 
+    def __post_init__(self) -> None:
+        members = _tupla_congelada(self.members, "manifest.members")
+        if any(not isinstance(member, ValidatedMember) for member in members):
+            raise ResolverContractError("manifest no atómico")
+        object.__setattr__(self, "members", members)
+
+
+def _valor_plano(value: object) -> object:
+    """asdict conserva tuples; el modelo canónico de C14N/3 solo admite
+    list/dict/escalares — plana el árbol antes del digest."""
+    if isinstance(value, (tuple, list)):
+        return [_valor_plano(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _valor_plano(item) for key, item in value.items()}
+    return value
+
+
+def _digest_contenido(contenido: Mapping[str, object]) -> str:
+    return "sha256:" + hashlib.sha256(
+        b"JAX-VALIDATED-CORPUS-CONTENT\0" + canonical_json_bytes(_valor_plano(contenido))
+    ).hexdigest()
+
+
 @dataclass(frozen=True)
 class ValidatedCandidateCorpus:
     policy_corpus_hash: str
@@ -216,46 +269,88 @@ class ValidatedCandidateCorpus:
     authority: FrozenAuthorityMetaContract
     manifest: ValidatedManifestBinding
     normative_documents: tuple[FrozenNormativeDocument, ...]
-    _loader_seal: object | None = field(default=None, repr=False, compare=False)
+    _loader_seal: object | None = field(default=None, init=False, repr=False, compare=False)
+    _content_binding: str | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        raise TypeError("ValidatedCandidateCorpus no se subclasea: la validación no se delega al objeto")
 
     def __post_init__(self) -> None:
-        if self._loader_seal is not _VALIDATED_CANDIDATE_SEAL:
-            raise InvalidValidatedCorpusError(
-                "ValidatedCandidateCorpus sólo puede originarse en el loader"
-            )
         if not _HASH.fullmatch(self.policy_corpus_hash) or not _HASH.fullmatch(self.bootstrap_bundle_id):
             raise InvalidValidatedCorpusError("hash inválido")
         if self.canonicalizer_identity != "JAX-POLICY-C14N/3":
             raise InvalidValidatedCorpusError("canonicalizer inválido")
         if not isinstance(self.authority, FrozenAuthorityMetaContract) or not isinstance(self.manifest, ValidatedManifestBinding):
             raise InvalidValidatedCorpusError("corpus no atómico")
-        ids = tuple(d.id for d in self.normative_documents)
+        documentos = _tupla_congelada(self.normative_documents, "normative_documents")
+        if any(not isinstance(documento, FrozenNormativeDocument) for documento in documentos):
+            raise InvalidValidatedCorpusError("documento no congelado")
+        object.__setattr__(self, "normative_documents", documentos)
+        ids = tuple(d.id for d in documentos)
         if ids != tuple(sorted(ids)) or len(ids) != len(set(ids)):
             raise InvalidValidatedCorpusError("documentos no ordenados o duplicados")
 
-    @classmethod
-    def _from_validated_snapshot(
-        cls,
+    def _contenido_canonico(self) -> dict:
+        return self._contenido_canonico_desde_campos(
+            self.policy_corpus_hash,
+            self.canonicalizer_identity,
+            self.bootstrap_bundle_id,
+            self.authority,
+            self.manifest,
+            self.normative_documents,
+        )
+
+    @staticmethod
+    def _contenido_canonico_desde_campos(
         policy_corpus_hash: str,
         canonicalizer_identity: str,
         bootstrap_bundle_id: str,
         authority: FrozenAuthorityMetaContract,
         manifest: ValidatedManifestBinding,
         normative_documents: tuple[FrozenNormativeDocument, ...],
-    ) -> "ValidatedCandidateCorpus":
-        """Internal factory: only the loader owns the validation capability."""
-        return cls(
-            policy_corpus_hash,
-            canonicalizer_identity,
-            bootstrap_bundle_id,
-            authority,
-            manifest,
-            normative_documents,
-            _VALIDATED_CANDIDATE_SEAL,
-        )
+    ) -> dict:
+        """Proyección de binding, sin crear ni sellar un candidate.
+
+        El loader y los consumidores capturan los seis campos una vez y usan
+        esta misma proyección. Así el check del sello no puede validar un
+        objeto y luego construir una vista desde lecturas distintas.
+        """
+        return {
+            "policy_corpus_hash": policy_corpus_hash,
+            "canonicalizer_identity": canonicalizer_identity,
+            "bootstrap_bundle_id": bootstrap_bundle_id,
+            "authority": asdict(authority),
+            "manifest": asdict(manifest),
+            "normative_documents": [asdict(documento) for documento in normative_documents],
+        }
+
+    def __copy__(self) -> "ValidatedCandidateCorpus":
+        return self
+
+    def __deepcopy__(self, memo: dict[int, object]) -> "ValidatedCandidateCorpus":
+        memo[id(self)] = self
+        return self
+
+    def __reduce_ex__(self, protocol: int):
+        raise TypeError("ValidatedCandidateCorpus no se serializa")
 
     def _was_loader_validated(self) -> bool:
-        return self._loader_seal is _VALIDATED_CANDIDATE_SEAL
+        """Sello del loader Y digest del contenido re-derivado y comparado.
+
+        NO recalcula el ``policy_corpus_hash`` de C14N/3: ese digest cubre los
+        ARCHIVOS del snapshot, no el modelo. Compara el digest estampado por el
+        loader contra el mismo digest recalculado sobre el contenido congelado
+        ACTUAL — la comparación de campos que la frontera consumidora puede
+        hacer de verdad.
+        """
+        if self._loader_seal is not _VALIDATED_CANDIDATE_SEAL:
+            return False
+        binding = getattr(self, "_content_binding", None)
+        # No se despacha por la instancia: evita que una sombra accidental o
+        # una subclase altere la proyección evaluada. Esto no pretende aislar
+        # Python hostil dentro del mismo proceso: quien puede mutar memoria o
+        # importar sentinelas internos ya está fuera del límite de confianza.
+        return binding == _digest_contenido(ValidatedCandidateCorpus._contenido_canonico(self))
 
 @dataclass(frozen=True)
 class ValidatedStaticPolicyView:

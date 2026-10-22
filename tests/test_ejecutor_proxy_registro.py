@@ -135,7 +135,7 @@ def test_registro_corrupto_no_arranca(tmp_path):
     cfg = proxy_carril.Config(upstream="http://127.0.0.1:9", raiz=tmp_path, tope_s=1, host="127.0.0.1", puerto=0,
                               registro=tmp_path / "registro.jsonl", pausa=tmp_path / "PAUSA",
                               latido=tmp_path / "latido", latido_max_s=60, modelo=MODELO_PERMITIDO,
-                              max_salida_tokens=MAX_SALIDA_TOKENS)
+                              max_salida_tokens=MAX_SALIDA_TOKENS, pensamiento="libre")
     with pytest.raises(R.RegistroCorrupto):
         _correr(proxy_carril.arrancar(cfg))
 

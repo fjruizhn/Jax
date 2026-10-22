@@ -106,7 +106,7 @@ async def principal(args) -> int:
         admite_mismo_proveedor=cfg.admite_mismo_proveedor)]
 
     async def auditar(lote):
-        return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens)
+        return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens, tope_s=cfg.tope_s)
 
     aciertos = 0
     for i in range(args.corridas):

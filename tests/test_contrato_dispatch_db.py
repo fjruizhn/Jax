@@ -89,30 +89,3 @@ def test_la_consulta_usa_la_clave_unica():
     assert filas[0]["key"] == "uk_provider_model", filas
     extra = filas[0].get("Extra") or ""
     assert "filesort" not in extra and "temporary" not in extra, filas
-
-
-def test_cargar_registro_trae_transporte_proveedor_y_url_del_modelo():
-    """PR-K ronda 2 (I1): la 2da consulta de cargar_registro contra el esquema
-    real. Ronda 4: sin fijar qué modelo siembra la semilla -- se compara contra
-    lo que dicen facet, model y provider para el binding de jekyll."""
-    from jax.core.registro_facetas import cargar_registro
-
-    async def esperado():
-        conn = await _db_conn()
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT f.transport, m.provider_id, p.base_url FROM facet_binding b "
-                    "JOIN facet f ON f.`key` = b.facet_key JOIN model m ON m.id = b.model_ref "
-                    "JOIN provider p ON p.id = m.provider_id "
-                    "WHERE b.facet_key = 'jekyll' AND b.role = 'primary'"
-                )
-                return await cur.fetchone()
-        finally:
-            conn.close()
-
-    transporte, provider_id, base_url = asyncio.run(esperado())
-    jekyll = asyncio.run(cargar_registro())["jekyll"]
-    assert (jekyll["transport"], jekyll["provider_modelo"], jekyll["base_url_modelo"]) == \
-        (transporte, provider_id, base_url), jekyll
-    assert base_url, "la semilla de provider tiene que traer la base_url de jekyll"

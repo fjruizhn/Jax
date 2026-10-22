@@ -34,7 +34,9 @@ from jacobs.models import (
     StepStatus,
     validar_costo_max_aceptado,
 )
-from jacobs.plan import PlanBuilder, PlanRejected
+from jacobs.plan import (
+    MotorGobernadoNoDisponible, PlanBuilder, PlanRejected, validar_facetas_ejecutables,
+)
 from jacobs.prevuelo import prevuelo
 from jacobs.prevuelo_reglas import Veredicto, formatear_usd
 from jacobs.policy import (
@@ -96,11 +98,24 @@ async def _build_plan_or_reject(
             max_steps=max_steps, steps_spec=steps_spec,
         )
     except PlanRejected as exc:
+        # MINOR 5 (auditoria #362): un plan que sale del propio LLM solo se
+        # puede validar DESPUES de la llamada; ese gasto no se evita antes del
+        # 422, pero queda dicho en el evento para que no pase por ejecucion.
+        evento = {
+            "violations": [v.to_dict() for v in exc.violations],
+            "origen_plan": "planificador" if not steps_spec else "pasos_explicitos",
+            "planificador_consultado": not steps_spec,
+        }
+        if isinstance(exc, MotorGobernadoNoDisponible):
+            evento["code"] = exc.code
         await store.event_append(
-            pipeline_id, "PLAN_REJECTED",
-            {"violations": [v.to_dict() for v in exc.violations]},
+            pipeline_id, "PLAN_REJECTED", evento,
         )
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if isinstance(exc, MotorGobernadoNoDisponible):
+            detail = {"code": exc.code, "detalle": str(exc)}
+        else:
+            detail = str(exc)
+        raise HTTPException(status_code=422, detail=detail) from exc
 
 
 def _motivo_redactado(exc: Exception) -> str:
@@ -122,6 +137,11 @@ async def _prevuelo_o_503(
     """Spec 2026-09-17 §8: sin pre-vuelo no se crea ni se continúa. Un error
     (DB caída, catálogo ilegible) es 503 prevuelo_no_disponible, nunca un 500
     genérico ni un pase libre."""
+    indices = set(pendientes) if pendientes is not None else None
+    try:
+        validar_facetas_ejecutables(steps, indices)
+    except MotorGobernadoNoDisponible as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "detalle": str(exc)}) from exc
     try:
         return await prevuelo(steps, contexto, pendientes=pendientes,
                               user_id=user_id, tenant_id=tenant_id)
@@ -255,7 +275,7 @@ async def preflight(req: PreflightRequest) -> dict:
         )
     except PlanRejected as exc:
         raise HTTPException(status_code=422, detail={
-            "code": "plan_rechazado",
+            "code": getattr(exc, "code", "plan_rechazado"),
             "detalle": str(exc),
         }) from exc
     except Exception as exc:  # fail-closed: build() con pasos explícitos sólo lee la gobernanza de la base; si no puede, no hay pre-vuelo (spec §8: 503, nunca 500 genérico ni veredicto)

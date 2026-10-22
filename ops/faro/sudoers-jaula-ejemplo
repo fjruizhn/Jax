@@ -1,0 +1,13 @@
+# ops/faro/sudoers-jaula-ejemplo -- GENERADO por jax.faro.jaula.ejemplo_sudoers(); una prueba vigila que no se desvie.
+# Va en /etc/sudoers.d/ (validar con `visudo -cf`). El servicio puede correr SOLO bwrap y SOLO como los uids
+# del rango de jaulas (JAX_FARO_JAULA_UID_MIN..MAX): nunca como el administrador ni como una cuenta real.
+# sudoers no tiene rangos numericos: se enumeran los uids.
+#
+# CUENTAS DE JAULA: sudo resuelve `-u '#<uid>'` contra la base de cuentas y rechaza un uid sin cuenta
+# (`sudo: unknown user #<uid>`; medido con sudo 1.9.17). Hay que hacer UNA de dos cosas:
+#   a) crear una cuenta de sistema por cada uid del rango (sin shell ni home), o
+#   b) descomentar la linea siguiente: con `runas_allow_unknown_id` sudo acepta un uid sin cuenta, y lo que
+#      limita a quien puede ser el servicio sigue siendo el Runas_Alias de abajo, no la existencia de la cuenta.
+# Defaults:faro runas_allow_unknown_id
+Runas_Alias JAULAS = #50000, #50001, #50002, #50003, #50004, #50005, #50006, #50007
+faro ALL=(JAULAS) NOPASSWD: /usr/bin/bwrap

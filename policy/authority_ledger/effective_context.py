@@ -10,7 +10,8 @@ from policy.authority_resolution.models import (FrozenAuthorityMetaContract, Fro
 
 from .errors import AuthorityStateError
 from .models import EffectiveAuthorityContext, EffectiveAuthorityEnvelope
-from .replay import ReconstructedAuthorityState, effective_overlays
+from .replay import (HistoricalAuthorityState, ReconstructedAuthorityState,
+                     _effective_overlays_for_history, effective_overlays)
 
 
 def build_effective_authority_context(state: ReconstructedAuthorityState, context, evaluation_time_utc: datetime) -> EffectiveAuthorityContext:
@@ -21,6 +22,27 @@ def build_effective_authority_context(state: ReconstructedAuthorityState, contex
     if evaluation_time_utc.tzinfo is None:
         raise AuthorityStateError("evaluation_time_utc debe ser timezone-aware")
     return EffectiveAuthorityContext("1.0", "JAX_EFFECTIVE_AUTHORITY_CONTEXT", state.active_policy_corpus_hash, "JAX-AUTHORITY-RESOLVER/1", "1.0", effective_overlays(state, context, evaluation_time_utc.astimezone(timezone.utc)))
+
+
+def _build_historical_authority_envelope(state: HistoricalAuthorityState, context, evaluation_time_utc: datetime) -> EffectiveAuthorityEnvelope:
+    """Replay-only path; deliberately not accepted by current authority APIs."""
+    if not isinstance(state, HistoricalAuthorityState) or not state._is_verified_history():
+        raise AuthorityStateError("historical state no verificado")
+    if state.active_policy_corpus_hash is None or state.active_ratification_event_id is None:
+        raise AuthorityStateError("no hay ratificación histórica activa")
+    if evaluation_time_utc.tzinfo is None:
+        raise AuthorityStateError("evaluation_time_utc debe ser timezone-aware")
+    effective = EffectiveAuthorityContext("1.0", "JAX_EFFECTIVE_AUTHORITY_CONTEXT", state.active_policy_corpus_hash,
+        "JAX-AUTHORITY-RESOLVER/1", "1.0", _effective_overlays_for_history(state, context, evaluation_time_utc.astimezone(timezone.utc)))
+    intent = state.ratifications[state.active_ratification_event_id].intent
+    static_policy_view = _snapshot_view(intent.static_policy_view_projection)
+    if static_policy_view.policy_corpus_hash != effective.active_policy_corpus_hash:
+        raise AuthorityStateError("snapshot histórico no corresponde al corpus activo")
+    resolution = resolve_static_authority(static_policy_view, context)
+    overlays = tuple(sorted(x.overlay_id for x in effective.effective_overlays))
+    return EffectiveAuthorityEnvelope("1.0", "JAX_EFFECTIVE_AUTHORITY_ENVELOPE", resolution,
+        effective.active_policy_corpus_hash, effective.effective_authority_context_hash,
+        state.checkpoint.authority_ledger_checkpoint_hash, overlays, "EFFECTIVE_STATIC_AUTHORITY_ONLY")
 
 
 def _snapshot_view(projection) -> ValidatedStaticPolicyView:

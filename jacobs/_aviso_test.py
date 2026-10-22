@@ -2,17 +2,12 @@
 """Task 6 (2026-09-18, historial-y-arreglos-de-pipeline): aviso por Telegram
 cuando un pipeline termina.
 
-`send_telegram_alert` (jacobs/reaper.py:82) ya existe, nunca lanza y degrada
-a `ok=False` sin TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID -- se reusa, no se
-escribe un segundo cliente de Telegram.
+`send_telegram_alert` (jacobs/reaper.py:82) ya existe, no se escribe un
+segundo cliente de Telegram. El texto pasa por la frontera compartida F2-C/D.
 
-Ruling 4 del ledger de esta ronda (progress.md, 2026-09-18):
-TELEGRAM_CHAT_ID es UNO SOLO para todo el sistema (reaper.py:96-97) -- con
-más de un usuario, el aviso de cualquiera llega al mismo chat. El mensaje
-lleva SOLO nombre, estado y enlace, NUNCA contenido del pipeline.
-
-Sin DB, sin red: `send_telegram_alert` se reemplaza con un doble en TODOS
-estos tests (ningún test manda un Telegram de verdad).
+Tests de la frontera de transporte: `send_telegram_alert` se reemplaza con
+un doble (ningún test manda un Telegram de verdad). La composición F2-A/B/C
+real está cubierta en `_governed_aviso_test.py`.
 
 Corre con:
   cd /home/fruiz/worktrees/jax-historial && PYTHONPATH=.:las_manos python -m pytest -v jacobs/_aviso_test.py
@@ -23,34 +18,74 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
 
-from jacobs.aviso import avisar_fin_pipeline, mensaje_de_fin
+from jacobs.aviso import avisar_fin_pipeline
 
 
-def test_el_mensaje_no_lleva_contenido_del_pipeline():
-    """TELEGRAM_CHAT_ID es uno solo: el contenido no sale por ahi."""
-    texto = mensaje_de_fin(pipeline_id="abc-123", nombre="ERP",
-                           estado="completed", salida="SECRETO DEL CLIENTE")
-    assert "SECRETO DEL CLIENTE" not in texto
-    assert "abc-123" in texto and "ERP" in texto
+def _composicion_estatica_de_prueba(monkeypatch, texto="Aviso gobernado de prueba."):
+    from jacobs import governed_aviso
+    from policy.governance.governed_renderer import RenderContext, WebChatGovernanceAdapter
+    from policy.governance.response import GovernanceReceipt, ResponseScope
+
+    scope = ResponseScope("test", "tenant-test", None, "user-test", "service:test",
+        "operator", "jacobs-aviso", "request-test", "trace-test")
+    receipt = GovernanceReceipt("policy-test", "vocabulary-test", "sha256:" + "a" * 64,
+        "validator-test", "renderer-test")
+    envelope = WebChatGovernanceAdapter(scope, receipt, producer="jacobs-aviso").seal_non_governed_candidate(
+        response_id="response-test", candidate_text=texto)
+    context = RenderContext(None, now=lambda: datetime.now(timezone.utc))
+
+    async def compose(*, pipeline_id, requested_status):
+        assert pipeline_id == "abc-123"
+        assert requested_status in {"completed", "aborted"}
+        return envelope, context
+
+    monkeypatch.setattr(governed_aviso, "compose_pipeline_notice", compose)
 
 
-def test_el_enlace_sale_de_una_variable_de_entorno_no_hardcodeada(monkeypatch):
-    monkeypatch.setenv("JAX_FRONTEND_ORIGIN", "https://mi-dominio.invalid")
+def test_el_aviso_no_interpola_nombre_ni_estado_del_llamador(monkeypatch):
+    _composicion_estatica_de_prueba(monkeypatch, "Aviso gobernado.")
+    telegram = AsyncMock(return_value={"ok": True, "message_id": 7})
+    monkeypatch.setattr("jacobs.reaper.send_telegram_alert", telegram)
+
+    async def escenario():
+        await avisar_fin_pipeline(
+            pipeline_id="abc-123", nombre="SECRETO DEL CLIENTE", estado="completed")
+
+    asyncio.run(escenario())
+    telegram.assert_awaited_once_with("Aviso gobernado.")
+
+
+def test_configuracion_de_enlace_no_muta_el_texto_renderizado(monkeypatch):
+    monkeypatch.setenv("JAX_FRONTEND_ORIGIN", "https://malicioso.invalid")
     monkeypatch.setenv("JAX_PIPELINE_DETAIL_PATH", "/x/{pipeline_id}")
-    texto = mensaje_de_fin(pipeline_id="abc-123", nombre="ERP", estado="completed")
-    assert "https://mi-dominio.invalid/x/abc-123" in texto
+    _composicion_estatica_de_prueba(monkeypatch, "Texto F2-C fijo.")
+    telegram = AsyncMock(return_value={"ok": True, "message_id": 7})
+    monkeypatch.setattr("jacobs.reaper.send_telegram_alert", telegram)
+
+    async def escenario():
+        await avisar_fin_pipeline(pipeline_id="abc-123", nombre="ERP", estado="completed")
+
+    asyncio.run(escenario())
+    telegram.assert_awaited_once_with("Texto F2-C fijo.")
 
 
-def test_sin_variables_de_entorno_usa_un_default_razonable(monkeypatch):
+def test_sin_variables_de_entorno_el_aviso_sigue_siendo_salida_gobernada(monkeypatch):
     monkeypatch.delenv("JAX_FRONTEND_ORIGIN", raising=False)
     monkeypatch.delenv("JAX_PIPELINE_DETAIL_PATH", raising=False)
-    texto = mensaje_de_fin(pipeline_id="abc-123", nombre="ERP", estado="completed")
-    assert "abc-123" in texto
-    assert "http" in texto  # hay ALGUN enlace, sin que la funcion explote
+    _composicion_estatica_de_prueba(monkeypatch, "Salida gobernada sin URL.")
+    telegram = AsyncMock(return_value={"ok": True, "message_id": 7})
+    monkeypatch.setattr("jacobs.reaper.send_telegram_alert", telegram)
+
+    async def escenario():
+        await avisar_fin_pipeline(pipeline_id="abc-123", nombre="ERP", estado="completed")
+
+    asyncio.run(escenario())
+    telegram.assert_awaited_once_with("Salida gobernada sin URL.")
 
 
 def test_avisar_fin_pipeline_no_espera_la_respuesta_de_telegram(monkeypatch):
@@ -63,6 +98,7 @@ def test_avisar_fin_pipeline_no_espera_la_respuesta_de_telegram(monkeypatch):
         await liberar.wait()
         return {"ok": True, "message_id": 1, "error": None}
 
+    _composicion_estatica_de_prueba(monkeypatch)
     monkeypatch.setattr("jacobs.reaper.send_telegram_alert", AsyncMock(side_effect=_lento))
 
     async def escenario():
@@ -81,6 +117,7 @@ def test_avisar_fin_pipeline_no_espera_la_respuesta_de_telegram(monkeypatch):
 def test_avisar_fin_pipeline_fail_soft_si_telegram_lanza(monkeypatch, caplog):
     """Un fallo de red/Telegram no puede subir al llamador -- fail-soft con
     rastro: no se traga en silencio, queda en el log."""
+    _composicion_estatica_de_prueba(monkeypatch)
     monkeypatch.setattr(
         "jacobs.reaper.send_telegram_alert",
         AsyncMock(side_effect=RuntimeError("red caida")),
@@ -99,6 +136,7 @@ def test_avisar_fin_pipeline_registra_el_rechazo_de_telegram(monkeypatch, caplog
     """send_telegram_alert nunca lanza -- cuando degrada a ok=False (token
     rotado, chat_id invalido, TELEGRAM_BOT_TOKEN sin setear), tambien queda
     en el log: no alcanza con "no lanzo" para considerarlo entregado."""
+    _composicion_estatica_de_prueba(monkeypatch)
     monkeypatch.setattr(
         "jacobs.reaper.send_telegram_alert",
         AsyncMock(return_value={"ok": False, "message_id": None, "error": "TELEGRAM_BOT_TOKEN/CHAT_ID no configurados"}),
@@ -111,7 +149,7 @@ def test_avisar_fin_pipeline_registra_el_rechazo_de_telegram(monkeypatch, caplog
     with caplog.at_level(logging.ERROR, logger="jacobs.aviso"):
         asyncio.run(escenario())
     assert "abc-123" in caplog.text
-    assert "no configurados" in caplog.text
+    assert "TRANSPORT_OUTCOME_UNKNOWN" in caplog.text
 
 
 def test_avisar_fin_pipeline_deja_rastro_si_lo_cancelan(monkeypatch, caplog):
@@ -125,6 +163,7 @@ def test_avisar_fin_pipeline_deja_rastro_si_lo_cancelan(monkeypatch, caplog):
     async def _cancelado(mensaje):
         raise asyncio.CancelledError()
 
+    _composicion_estatica_de_prueba(monkeypatch)
     monkeypatch.setattr("jacobs.reaper.send_telegram_alert", AsyncMock(side_effect=_cancelado))
 
     async def escenario():
@@ -139,6 +178,7 @@ def test_avisar_fin_pipeline_deja_rastro_si_lo_cancelan(monkeypatch, caplog):
 
 
 def test_avisar_fin_pipeline_manda_el_mensaje_correcto(monkeypatch):
+    _composicion_estatica_de_prueba(monkeypatch, "Aviso F2-C enviado.")
     doble = AsyncMock(return_value={"ok": True, "message_id": 7, "error": None})
     monkeypatch.setattr("jacobs.reaper.send_telegram_alert", doble)
 
@@ -149,4 +189,4 @@ def test_avisar_fin_pipeline_manda_el_mensaje_correcto(monkeypatch):
     asyncio.run(escenario())
     doble.assert_awaited_once()
     (mensaje,), _ = doble.call_args
-    assert "abc-123" in mensaje and "ERP" in mensaje
+    assert mensaje == "Aviso F2-C enviado."

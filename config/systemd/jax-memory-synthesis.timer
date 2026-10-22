@@ -2,7 +2,8 @@
 Description=Schedule JAX B9 memory synthesis
 
 [Timer]
-OnCalendar=hourly
+# 04:30 diario, como en produccion (hall9000): cada corrida paga DeepSeek; cada hora era 24x el gasto.
+OnCalendar=*-*-* 04:30:00
 Persistent=true
 Unit=jax-memory-synthesis.service
 

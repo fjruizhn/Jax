@@ -65,27 +65,26 @@ def test_resume_doble_el_segundo_recibe_409_y_no_lanza():
     upsert.assert_not_awaited()
 
 
-def test_approve_step_persiste_las_marcas_de_hyde_al_tomar_la_epoca():
-    tomar, bg = AsyncMock(return_value=8), BackgroundTasks()
+def test_approve_step_rechaza_hyde_sin_tomar_la_epoca():
+    tomar, upsert, bg = AsyncMock(return_value=8), AsyncMock(), BackgroundTasks()
     with patch.object(routes.cupo, "activos", AsyncMock(return_value=0)), \
          patch.object(routes.store, "pipeline_get", AsyncMock(return_value=_interrumpido(epoca=7))), \
          patch.object(routes.store, "steps_by_pipeline", AsyncMock(return_value=[_paso_hyde()])), \
          patch.object(routes.store, "pipeline_tomar_epoca", tomar, create=True), \
          patch.object(routes.store, "pipeline_update_status", AsyncMock()), \
-         patch.object(routes.store, "step_upsert", AsyncMock()), \
+         patch.object(routes.store, "step_upsert", upsert), \
          patch.object(routes.store, "event_append", AsyncMock()), \
          patch.object(routes, "check_kill_switch", return_value=False):
-        r = asyncio.run(routes.approve_step(
-            "p1", routes.ApproveStepRequest(invoked_by="plataforma"), bg))
-    tomar.assert_awaited_once()
-    args = tomar.await_args.args
-    assert args[:3] == ("p1", 7, (PipelineStatus.interrupted,))
-    assert args[3]["hyde_approved_s-hyde"] is True
-    assert r["run_epoch"] == 8
-    assert bg.tasks[0].args[0].run_epoch == 8
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(routes.approve_step(
+                "p1", routes.ApproveStepRequest(invoked_by="plataforma"), bg))
+    assert e.value.status_code == 422
+    assert e.value.detail["code"] == "motor_gobernado_no_disponible"
+    tomar.assert_not_awaited()
+    upsert.assert_not_awaited()
 
 
-def test_approve_step_doble_409_sin_tocar_pasos():
+def test_approve_step_hyde_no_llega_a_carrera_de_epoca():
     bg, upsert = BackgroundTasks(), AsyncMock()
     with patch.object(routes.cupo, "activos", AsyncMock(return_value=0)), \
          patch.object(routes.store, "pipeline_get", AsyncMock(return_value=_interrumpido())), \
@@ -97,7 +96,8 @@ def test_approve_step_doble_409_sin_tocar_pasos():
          patch.object(routes, "check_kill_switch", return_value=False), \
          pytest.raises(HTTPException) as e:
         asyncio.run(routes.approve_step("p1", routes.ApproveStepRequest(invoked_by="plataforma"), bg))
-    assert e.value.status_code == 409
+    assert e.value.status_code == 422
+    assert e.value.detail["code"] == "motor_gobernado_no_disponible"
     assert bg.tasks == []
     upsert.assert_not_awaited()
 
@@ -136,6 +136,10 @@ def _interrumpido_con(contexto, modo="autonomous"):
                     run_epoch=3, user_id="7", tenant_id="1")
 
 
+def _modo(endpoint):
+    return "supervised" if endpoint == "approve" else "autonomous"
+
+
 def _llamar(endpoint, pipeline, pasos, prevuelo, tomar=None, eventos=None, upsert=None):
     bg = BackgroundTasks()
     tomar = tomar or AsyncMock(return_value=4)
@@ -158,10 +162,12 @@ def _llamar(endpoint, pipeline, pasos, prevuelo, tomar=None, eventos=None, upser
 
 @pytest.mark.parametrize("endpoint", ["resume", "approve"])
 def test_prevuelo_rechazado_da_422_sin_tomar_la_epoca_ni_tocar_pasos(endpoint):
-    pasos = [_paso(0, facet="hyde", status=StepStatus.blocked_human_gate), _paso(1, depends_on=[0])]
+    pasos = [_paso(0, facet="ada"), _paso(1, depends_on=[0])]
+    if endpoint == "approve":
+        pasos[0].status = StepStatus.blocked_human_gate
     tomar, eventos, upsert = AsyncMock(return_value=4), AsyncMock(), AsyncMock()
     with pytest.raises(HTTPException) as e:
-        _llamar(endpoint, _interrumpido_con({}), pasos, AsyncMock(return_value=_veredicto(ok=False)),
+        _llamar(endpoint, _interrumpido_con({}, modo=_modo(endpoint)), pasos, AsyncMock(return_value=_veredicto(ok=False)),
                 tomar=tomar, eventos=eventos, upsert=upsert)
     assert e.value.status_code == 422
     assert e.value.detail["code"] == "prevuelo_rechazado"
@@ -176,10 +182,12 @@ def test_prevuelo_rechazado_da_422_sin_tomar_la_epoca_ni_tocar_pasos(endpoint):
 
 @pytest.mark.parametrize("endpoint", ["resume", "approve"])
 def test_prevuelo_que_no_puede_correr_da_503_sin_tomar_la_epoca(endpoint):
-    pasos = [_paso(0, facet="hyde", status=StepStatus.blocked_human_gate), _paso(1, depends_on=[0])]
+    pasos = [_paso(0, facet="ada"), _paso(1, depends_on=[0])]
+    if endpoint == "approve":
+        pasos[0].status = StepStatus.blocked_human_gate
     tomar = AsyncMock(return_value=4)
     with pytest.raises(HTTPException) as e:
-        _llamar(endpoint, _interrumpido_con({}), pasos,
+        _llamar(endpoint, _interrumpido_con({}, modo=_modo(endpoint)), pasos,
                 AsyncMock(side_effect=OSError("base caída password=hunter2")), tomar=tomar)
     assert e.value.status_code == 503
     assert e.value.detail["code"] == "prevuelo_no_disponible"
@@ -189,8 +197,10 @@ def test_prevuelo_que_no_puede_correr_da_503_sin_tomar_la_epoca(endpoint):
 
 @pytest.mark.parametrize("endpoint", ["resume", "approve"])
 def test_respuesta_200_suma_el_costo_del_prevuelo(endpoint):
-    pasos = [_paso(0, facet="hyde", status=StepStatus.blocked_human_gate), _paso(1, depends_on=[0])]
-    r, bg = _llamar(endpoint, _interrumpido_con({}), pasos, AsyncMock(return_value=_veredicto()))
+    pasos = [_paso(0, facet="ada"), _paso(1, depends_on=[0])]
+    if endpoint == "approve":
+        pasos[0].status = StepStatus.blocked_human_gate
+    r, bg = _llamar(endpoint, _interrumpido_con({}, modo=_modo(endpoint)), pasos, AsyncMock(return_value=_veredicto()))
     assert r["costo_max_usd"] == "0.123457"
     assert r["pasos_costo"] == [_veredicto().pasos_costo[0].to_dict()]
     assert r["run_epoch"] == 4 and bg.tasks[0].args[0].run_epoch == 4
@@ -213,16 +223,15 @@ def test_resume_evalua_los_pasos_sin_ref_legible_con_contexto_sin_sus_refs():
 def test_approve_step_evalua_la_ola_completa_no_solo_el_paso_aprobado():
     pasos = [
         _paso(0),
-        _paso(1, facet="hyde", status=StepStatus.blocked_human_gate, depends_on=[0]),
+        _paso(1, facet="ada", status=StepStatus.blocked_human_gate, depends_on=[0]),
         _paso(2, depends_on=[1]),
         _paso(3, depends_on=[0]),
     ]
-    pipeline = _interrumpido_con({"step_0_ref": _REF_OK})
+    pipeline = _interrumpido_con({"step_0_ref": _REF_OK}, modo="supervised")
     prevuelo = AsyncMock(return_value=_veredicto())
     _llamar("approve", pipeline, pasos, prevuelo)
     prevuelo.assert_awaited_once()
     assert prevuelo.await_args.kwargs["pendientes"] == {1, 2, 3}
-    assert prevuelo.await_args.args[1].get("hyde_approved_s1") is True
 
 
 # ---------------------------------------------------------------------------
@@ -259,17 +268,17 @@ def test_resume_sin_refs_ilegibles_no_reescribe_el_contexto():
     upsert.assert_not_awaited()
 
 
-def test_approve_quita_la_ref_ilegible_y_conserva_la_marca_de_hyde():
+def test_approve_quita_la_ref_ilegible_en_faceta_ejecutable():
     pasos = [_paso(0, status=StepStatus.completed),
-             _paso(1, facet="hyde", status=StepStatus.blocked_human_gate, depends_on=[0])]
+             _paso(1, facet="ada", status=StepStatus.blocked_human_gate, depends_on=[0])]
     pasos[0].output_ref = _REF_ROTA
-    pipeline = _interrumpido_con({"step_0_ref": _REF_ROTA})
+    pipeline = _interrumpido_con({"step_0_ref": _REF_ROTA}, modo="supervised")
     tomar, upsert = AsyncMock(return_value=4), AsyncMock()
     r, bg = _llamar("approve", pipeline, pasos, AsyncMock(return_value=_veredicto()), tomar=tomar, upsert=upsert)
     guardado = tomar.await_args.args[3]
-    assert "step_0_ref" not in guardado and guardado.get("hyde_approved_s1") is True
+    assert "step_0_ref" not in guardado
     lanzado = bg.tasks[0].args[0]
-    assert "step_0_ref" not in lanzado.context and lanzado.context.get("hyde_approved_s1") is True
+    assert "step_0_ref" not in lanzado.context
     assert lanzado.plan[0].status == StepStatus.pending and lanzado.plan[0].output_ref is None
     assert sorted(c.args[0].step_index for c in upsert.await_args_list) == [0, 1]
 
@@ -280,9 +289,9 @@ def test_approve_quita_la_ref_ilegible_y_conserva_la_marca_de_hyde():
 @pytest.mark.parametrize("endpoint", ["resume", "approve"])
 def test_carrera_perdida_con_ref_ilegible_da_409_sin_tocar_pasos(endpoint):
     pasos = [_paso(0, status=StepStatus.completed),
-             _paso(1, facet="hyde", status=StepStatus.blocked_human_gate, depends_on=[0])]
+             _paso(1, facet="ada", depends_on=[0])]
     pasos[0].output_ref = _REF_ROTA
-    pipeline = _interrumpido_con({"step_0_ref": _REF_ROTA})
+    pipeline = _interrumpido_con({"step_0_ref": _REF_ROTA}, modo="supervised")
     upsert = AsyncMock()
     with pytest.raises(HTTPException) as e:
         _llamar(endpoint, pipeline, pasos, AsyncMock(return_value=_veredicto()),
@@ -292,30 +301,27 @@ def test_carrera_perdida_con_ref_ilegible_da_409_sin_tocar_pasos(endpoint):
     assert pasos[0].status == StepStatus.completed and pasos[0].output_ref == _REF_ROTA
 
 
-# Ruling R37: un paso hyde que se rehace porque su ref no se lee pierde su
-# hyde_approved_<step_id> (desvío 10, como continue): la aprobación humana de
-# una corrida no autoriza la siguiente. approve-step conserva la que está
-# dando AHORA.
+# Con una faceta ejecutable, rehacer un paso por referencia ilegible no debe
+# conservar una aprobación de Hyde obsoleta en el contexto.
 
-def test_resume_quita_la_aprobacion_de_hyde_del_paso_que_se_rehace():
-    pasos = [_paso(0, facet="hyde", status=StepStatus.completed), _paso(1, depends_on=[0])]
+def test_resume_reinicia_la_referencia_ilegible_de_faceta_ejecutable():
+    pasos = [_paso(0, facet="ada", status=StepStatus.completed), _paso(1, depends_on=[0])]
     pasos[0].output_ref = _REF_ROTA
-    pipeline = _interrumpido_con({"step_0_ref": _REF_ROTA, "hyde_approved_s0": True})
+    pipeline = _interrumpido_con({"step_0_ref": _REF_ROTA})
     tomar = AsyncMock(return_value=4)
     r, bg = _llamar("resume", pipeline, pasos, AsyncMock(return_value=_veredicto()), tomar=tomar)
     guardado = tomar.await_args.args[3]
-    assert "step_0_ref" not in guardado and "hyde_approved_s0" not in guardado
-    assert "hyde_approved_s0" not in bg.tasks[0].args[0].context
+    assert "step_0_ref" not in guardado
+    assert "step_0_ref" not in bg.tasks[0].args[0].context
 
 
-def test_approve_quita_la_aprobacion_vieja_y_conserva_la_que_da_ahora():
-    pasos = [_paso(0, facet="hyde", status=StepStatus.completed),
-             _paso(1, facet="hyde", status=StepStatus.blocked_human_gate, depends_on=[0])]
+def test_approve_quita_la_ref_ilegible_y_reinicia_el_paso():
+    pasos = [_paso(0, facet="ada", status=StepStatus.completed),
+             _paso(1, facet="ada", status=StepStatus.blocked_human_gate, depends_on=[0])]
     pasos[0].output_ref = _REF_ROTA
-    pipeline = _interrumpido_con({"step_0_ref": _REF_ROTA, "hyde_approved_s0": True})
+    pipeline = _interrumpido_con({"step_0_ref": _REF_ROTA}, modo="supervised")
     tomar = AsyncMock(return_value=4)
     r, bg = _llamar("approve", pipeline, pasos, AsyncMock(return_value=_veredicto()), tomar=tomar)
     guardado = tomar.await_args.args[3]
-    assert "hyde_approved_s0" not in guardado
-    assert guardado.get("hyde_approved_s1") is True
-    assert bg.tasks[0].args[0].context.get("hyde_approved_s1") is True
+    assert "step_0_ref" not in guardado
+    assert "step_0_ref" not in bg.tasks[0].args[0].context

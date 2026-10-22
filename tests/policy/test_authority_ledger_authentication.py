@@ -1,10 +1,10 @@
+from tests.policy.test_authority_ledger_events import verify_authority_ledger
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from policy.authority_ledger.errors import AuthorityStateError, TrustedRootMismatchError
 from policy.authority_ledger.models import AuthorityEventIntent, AuthorityEventType
-from policy.authority_ledger.replay import verify_authority_ledger
-from policy.authority_ledger.service import append_authority_event
+from tests.policy.test_authority_ledger_events import append_authority_event
 from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
 from tests.policy.test_authority_ledger_events import setup_ledger
 

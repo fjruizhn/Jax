@@ -114,3 +114,24 @@ def test_un_evento_no_puede_pisar_la_cadena(tmp_path):
     reg.anotar({"evento": "x", "n": 999, "prev": "falso"})
     reg.cerrar()
     assert R.verificar_cadena(tmp_path / "registro.jsonl").ok is True
+
+
+def test_cerrar_toma_el_lock_es_idempotente_y_un_anotar_posterior_falla_explicito(tmp_path):
+    """MINOR-1: cerrar() no cierra el fd con un anotar a medias (write..fsync); tras cerrar, anotar
+    levanta, nunca pierde el evento en silencio."""
+    reg = R.Registro(tmp_path / "registro.jsonl")
+    reg.anotar({"evento": "antes"})
+    reg._lock.acquire()  # simula un anotar en vuelo que tiene el lock
+    cierre = threading.Thread(target=reg.cerrar)
+    cierre.start()
+    try:
+        cierre.join(0.3)
+        assert cierre.is_alive(), "cerrar() no esperó al lock: cerraría el fd bajo un anotar en vuelo"
+    finally:
+        reg._lock.release()
+    cierre.join(5)
+    assert not cierre.is_alive()
+    reg.cerrar()  # idempotente: no hay doble close del fd
+    with pytest.raises(OSError, match="registro_cerrado"):
+        reg.anotar({"evento": "despues"})
+    assert R.verificar_cadena(tmp_path / "registro.jsonl") == R.Verificacion(True, 1, None, None)

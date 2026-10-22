@@ -1,36 +1,14 @@
 """
-JAX 2.0 — Router (híbrido: reglas + clasificador LLM).
+JAX 2.0 — Tablas del router que comparte la Mesa web.
 
-Decide QUE faceta de JAX responde. No invoca musculos: solo decide.
-Comportamiento modelado segun JAX 1.0 (descrito por Fernando):
+T16 (2026-10-02): se retiro el REPL y con el la clase `Router` (decidia que
+faceta respondia). Quedan solo las tablas que otros consumen:
 
-  - Por defecto: modo AUTO. Lee el texto y rutea por reglas de dominio.
-    Cada respuesta se etiqueta con la faceta que contesto.
-  - INVOCAR y FIJAR: "trae a X" / "llama a X" / "dame a X" / "modo X"
-    fija esa faceta (modo MANUAL): todo va ahi hasta despedirla.
-  - DESPEDIR: "adios" vuelve a modo AUTO (JAX local retoma).
-  - EASTER EGG: "IDE1990" se chequea ANTES que todo. Suelta la frase de
-    Jairo Urbina (texto).
-
-Orden de prioridad (estricto, importa):
-  1) IDE1990   2) adios   3) invocar faceta
-  4) si manual -> faceta fija   5) si auto -> reglas de dominio
-  6) si las reglas no deciden -> CLASIFICADOR LLM (lo ambiguo)
-
-CAPA HIBRIDA (paso 6): cuando ninguna keyword matchea (ej. "hablame de
-las pinturas de Magritte" — no dice "pintura" ni "arte"), en vez de caer
-ciego al default, se le pregunta a un clasificador LLM a que dominio
-pertenece. Lo OBVIO (pasos 1-5) sigue instantaneo y sin costo; el
-clasificador solo entra en lo ambiguo.
-
-  - Clasificador actual: LOCAL (jax_local / qwen2.5:7b en la GPU). Medido
-    en hall9000: ~200 ms por clasificacion. El ruteo no sale a la nube.
-  - FALLBACK: si el clasificador falla o devuelve algo invalido, cae a
-    JAX local. El router NUNCA se rompe por el clasificador.
-  - MIGRACION: hecha el 4 de junio de 2026 — de DeepSeek a jax_local via
-    set_classifier(). Si manana hay un modelo local mas potente, se
-    reemplaza igual: el router no cambia; solo cambia quien juzga.
-
+  - ALIASES: nombres de faceta tolerantes a typos (jax/memory/db.py los usa para
+    reconocer vocativos).
+  - Las keywords de auto-ruteo, el desempate y el easter egg IDE1990, que la Mesa
+    web copia (jax-platform backend/api/chat.py) y vigila la familia
+    `router_keywords` de scripts/check_mirror_sync.py. NO se tocan en una sola copia.
 
 En memoria de Jairo Urbina.
 """
@@ -39,46 +17,13 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
-import logging
-from jax.core.contrato_dispatch import ModelDispatchConfigError
 
-logger = logging.getLogger("jax.router")
-
-# Cada cuantos fallos del clasificador se repite el aviso. Uno por turno
-# inundaria el log, y un log inundado se deja de leer; callar del todo fue el
-# defecto que esto arregla.
-_CLASIFICADOR_CADA_N = 20
 
 def _sin_tildes(s: str) -> str:
     """Quita tildes para matching robusto (trae=traé, adios=adiós).
     Solo afecta la comparacion interna; el mensaje viaja intacto."""
     nfkd = unicodedata.normalize("NFKD", s)
     return "".join(c for c in nfkd if not unicodedata.combining(c))
-
-# FALLBACK de arranque, NO fuente de verdad: main.py:async main() sobrescribe
-# LABELS/ICONS/VALID_FACETAS/AUTO_FACETAS con los valores reales de la tabla
-# `facet` (Bloque C, load_facet_registry()) apenas arranca el REPL. Solo se
-# usan estos valores hardcodeados si la DB no respondio al boot — para que
-# el REPL nunca se rompa por eso. Ver jax-platform/docs/fase2-facetas-diseno.md C1.4.
-LABELS = {
-    "hyde": "Mr. Hyde",
-    "jekyll": "Dr. Jekyll",
-    "hipatia": "Hipatia",
-    "jax_local": "JAX",
-    "thot": "Thot",
-    "kimi": "Kimi",
-    "ada": "Ada",
-}
-ICONS = {
-    "hyde": "🔧",
-    "jekyll": "🧠",
-    "hipatia": "🔍",
-    "jax_local": "🏠",
-    "thot": "📜",
-    "kimi": "⚙️",
-    "ada": "⚛️",
-}
 
 # CONSERVADO deliberadamente (C1.4): parsing de input del REPL (typos
 # foneticos como "jeckyll"), no es dato de identidad ni de comportamiento —
@@ -101,20 +46,6 @@ ALIASES = {
     "kimi": "kimi",
     "ada": "ada",
 }
-
-INVOKE_VERBS = ("trae", "traer", "llama", "llamar", "dame", "traeme",
-                "traete", "invoca", "invocar", "pasame", "modo", "quiero a",
-                "quiero hablar con", "hablar con")
-
-# Saludos puros: si el mensaje es SOLO un saludo corto, va directo a JAX
-# local sin gastar una llamada al clasificador. Clave: debe ser saludo PURO
-# ("hola maje"), no "hola, diseñame una app" (eso lleva intencion y sigue
-# el flujo normal). Por eso se exige mensaje corto y sin sustancia extra.
-GREETINGS = (
-    "hola", "buenas", "buenos dias", "buenas tardes", "buenas noches",
-    "que onda", "que tal", "que hay", "como estas", "como va",
-    "saludos", "hey", "ey", "buenas maje", "que pasa", "epa",
-)
 
 # Easter egg: IDE1990 como palabra propia. Lo copia la Mesa web
 # (jax-platform backend/api/chat.py) y lo vigila la familia `router_keywords`
@@ -211,16 +142,6 @@ ADA_STRONG = frozenset((
     "complejidad", "maquina de estados",
 ))
 
-# FALLBACK de arranque (ver nota junto a LABELS arriba) — facetas validas
-# para invocacion explicita (incluye hyde).
-VALID_FACETAS = ("hyde", "jekyll", "hipatia", "jax_local", "thot", "kimi", "ada")
-
-# FALLBACK de arranque — facetas del auto-routing (hyde excluido: es
-# ejecutor, no conversador; esta exclusion SI es logica de negocio real,
-# se conserva incluso cuando la DB responde: load_facet_registry() ya
-# filtra por facet.auto_selectable, que hyde tiene en FALSE en el seed).
-AUTO_FACETAS = ("jax_local", "kimi", "hipatia", "jekyll", "thot", "ada")
-
 # CONSERVADO (C1.4): heuristica de ruteo automatico por palabra clave —
 # politica de negocio (que faceta gana un empate de scoring), no identidad
 # de facetas. Distinto concepto de "que facetas existen".
@@ -234,222 +155,3 @@ _KW_SETS = {
     "thot":    (THOT_KW,    THOT_STRONG),
     "ada":     (ADA_KW,     ADA_STRONG),
 }
-
-# Prompt del clasificador — 6 facetas, hyde nunca elegible.
-CLASSIFIER_PROMPT = (
-    "Sos un clasificador de intencion. Responde con UNA SOLA PALABRA eligiendo la faceta:\n"
-    "- jax_local = charla casual, saludos, conversacion cotidiana, nada de lo de abajo.\n"
-    "- kimi = codigo, programacion, implementacion, debugging, infraestructura tecnica.\n"
-    "- hipatia = investigacion, buscar info actual, noticias, fuentes, hechos verificables.\n"
-    "- jekyll = humanidades, arte, literatura, filosofia, musica, interpretacion, reflexion.\n"
-    "- thot = auditoria critica, riesgos, fallas, vulnerabilidades, revision adversarial.\n"
-    "- ada = formalizacion, logica, algoritmos, demostraciones, matematica, invariantes, complejidad.\n"
-    "Si dudas: interpretacion->jekyll; critica/riesgo->thot; formalizacion/demostracion->ada;\n"
-    "codigo/implementacion->kimi; actualidad/fuentes->hipatia.\n"
-    "NUNCA elijas hyde (es ejecutor, no conversador).\n"
-    "Mensaje:\n{texto}\n"
-    "Responde SOLO con: jax_local, kimi, hipatia, jekyll, thot o ada"
-)
-
-
-@dataclass
-class RouteDecision:
-    """Resultado del router."""
-    kind: str          # "easter_egg" | "say" | "route"
-    personality: str | None = None
-    text: str | None = None
-    mode_changed: str | None = None
-    via: str | None = None   # "keyword" | "clasificador" | "default" (debug)
-
-
-class Router:
-    def __init__(self, default_personality: str = "jax_local",
-                 classifier=None, debug: bool = False) -> None:
-        self.default_personality = default_personality
-        self.mode = "auto"
-        self.fixed: str | None = None
-        # Muscle usado como clasificador (un HttpMuscle de DeepSeek).
-        # Si es None, el router se comporta como el clasico (solo keywords).
-        self.classifier = classifier
-        self.debug = debug
-        # Cuantas veces fallo el clasificador desde el arranque. Es el dato que
-        # convierte "algo raro pasa con el ruteo" en un numero.
-        self._fallos_clasificador = 0
-
-    def set_classifier(self, muscle) -> None:
-        """Inyecta el muscle clasificador. El dia de manana, pasar aqui un
-        muscle local (qwen) en vez del de DeepSeek — el router no cambia."""
-        self.classifier = muscle
-
-    def _match_faceta(self, text: str) -> str | None:
-        for alias in sorted(ALIASES, key=len, reverse=True):
-            if re.search(rf"\b{re.escape(alias)}\b", text):
-                return ALIASES[alias]
-        return None
-
-    def label(self, personality: str) -> str:
-        return f"{ICONS.get(personality, '')} {LABELS.get(personality, personality)}".strip()
-
-    def _is_greeting(self, text: str) -> bool:
-        """True si el texto es un saludo PURO y corto (atajable sin clasificar).
-        Quita signos y se fija que lo que queda sea solo palabras de saludo.
-        'hola maje' -> True. 'hola, diseñame una app' -> False (tiene sustancia)."""
-        # Limpiar signos de puntuacion comunes
-        limpio = re.sub(r"[¡!¿?.,;:]", " ", text)
-        palabras = limpio.split()
-        # Un saludo puro es corto: hasta 4 palabras (ej. "buenas tardes maje jax")
-        if not palabras or len(palabras) > 4:
-            return False
-        # Construir set de palabras de saludo (descompone "buenos dias" en tokens)
-        tokens_saludo = set()
-        for g in GREETINGS:
-            tokens_saludo.update(g.split())
-        # Palabras de confianza permitidas junto al saludo (no agregan intencion)
-        tokens_saludo.update({"maje", "jax", "vos", "y", "mae"})
-        # Es saludo puro si TODAS las palabras son de saludo/confianza
-        return all(p in tokens_saludo for p in palabras)
-
-    def _keyword_route(self, text: str) -> str | None:
-        """Scoring multi-keyword con umbral. Hyde nunca es destino.
-
-        Regla:
-        - score[f] = n° de keywords de f que matchean en text.
-        - top = faceta con mayor score (desempate: _TIEBREAK).
-        - score >= 2 → enrutar a top.
-        - score == 1 y keyword STRONG → enrutar a top.
-        - else → None (el caller cae al clasificador LLM).
-        """
-        scores: dict[str, int] = {}
-        hit_strong: dict[str, bool] = {}
-
-        for faceta, (kws, strong) in _KW_SETS.items():
-            score = 0
-            is_strong = False
-            for kw in kws:
-                if " " in kw:
-                    hit = kw in text
-                else:
-                    hit = bool(re.search(rf"\b{re.escape(kw)}\b", text))
-                if hit:
-                    score += 1
-                    if kw in strong:
-                        is_strong = True
-            scores[faceta] = score
-            hit_strong[faceta] = is_strong
-
-        max_score = max(scores.values())
-        if max_score == 0:
-            return None
-
-        top: str | None = None
-        for faceta in _TIEBREAK:
-            if scores[faceta] == max_score:
-                top = faceta
-                break
-
-        if top is None:
-            return None
-
-        if max_score >= 2:
-            return top
-        if max_score == 1 and hit_strong[top]:
-            return top
-        return None
-
-    async def _classify(self, user_text: str) -> str | None:
-        """Pregunta al clasificador LLM. Devuelve faceta valida o None.
-        NUNCA lanza: cualquier fallo -> None (el caller cae a default)."""
-        if not self.classifier:
-            return None
-        try:
-            prompt = CLASSIFIER_PROMPT.format(texto=user_text)
-            # decorate=False: clasificacion interna, sin etiqueta de autoridad
-            # (si no, el sello de jax_local contaminaria el parseo de faceta).
-            raw = await self.classifier.invoke(prompt, decorate=False)
-            # Limpiar: el modelo puede responder "jekyll." o "Es jekyll".
-            cleaned = raw.strip().lower()
-            for faceta in AUTO_FACETAS:
-                if faceta in cleaned:
-                    return faceta
-            return None  # devolvio algo que no es faceta valida
-        except ModelDispatchConfigError as exc:
-            # PR-K ronda 3 (N2b): un contrato de dispatch roto en la fila del
-            # modelo del clasificador NO es ruido de red: se sigue cayendo al
-            # default (el router nunca lanza), pero con el motivo y el UPDATE
-            # a la vista, no tragado en silencio.
-            logger.warning("clasificador del router sin contrato de dispatch: %s", exc)
-            return None
-        except Exception as exc:  # fail-soft: el router NUNCA lanza -- pero ya no calla: se cuenta y se reporta
-            # ARREGLADO 2026-09-16. Antes: `return None` sin una linea de log.
-            # Con Ollama caido o el clasificador roto, el 100 % del ruteo
-            # automatico degradaba a la faceta por defecto indefinidamente y no
-            # quedaba ni un rastro. El handler hermano de arriba
-            # (ModelDispatchConfigError) SI logueaba, justamente porque se
-            # decidio que "no tragado en silencio" valia; este se habia quedado
-            # fuera de esa decision.
-            #
-            # Se cuenta y se reporta con freno: la primera vez y despues cada
-            # _CLASIFICADOR_CADA_N, para que un clasificador en bucle no inunde
-            # el log —— un log inundado se deja de leer, que es otra forma de
-            # callar.
-            self._fallos_clasificador += 1
-            n = self._fallos_clasificador
-            if n == 1 or n % _CLASIFICADOR_CADA_N == 0:
-                logger.warning(
-                    "clasificador del router caido (%s: %s) -- se rutea a la faceta por "
-                    "defecto. Fallo %d vez(ces) desde el arranque; mientras dure, el "
-                    "ruteo automatico NO esta clasificando.",
-                    type(exc).__name__, exc, n,
-                )
-            return None
-
-    async def route(self, user_text: str) -> RouteDecision:
-        text = _sin_tildes(user_text.lower().strip())
-
-        # 1) EASTER EGG — antes que todo.
-        if es_easter_egg(user_text):
-            return RouteDecision(kind="easter_egg", text=EASTER_EGG_TEXT)
-
-        # 2) DESPEDIR — "adios" vuelve a auto.
-        if "adios" in text:
-            self.mode = "auto"
-            self.fixed = None
-            return RouteDecision(
-                kind="say",
-                text="Hasta luego. Vuelvo a modo automatico.",
-                mode_changed="auto",
-            )
-
-        # 3) INVOCAR Y FIJAR.
-        if any(re.search(rf"\b{re.escape(v)}\b", text) for v in INVOKE_VERBS):
-            faceta = self._match_faceta(text)
-            if faceta:
-                self.mode = "manual"
-                self.fixed = faceta
-                return RouteDecision(
-                    kind="say",
-                    text=f"Listo, hablas con {self.label(faceta)}. "
-                         f"Deci 'adios' para volver a automatico.",
-                    mode_changed="manual",
-                )
-
-        # 4) MODO MANUAL — faceta fija.
-        if self.mode == "manual" and self.fixed:
-            return RouteDecision(kind="route", personality=self.fixed, via="manual")
-
-        # 5) MODO AUTO — primero, atajo de saludos puros (sin clasificar).
-        if self._is_greeting(text):
-            return RouteDecision(kind="route", personality="jax_local", via="saludo")
-
-        # 5b) reglas de dominio (lo obvio, instantaneo).
-        faceta = self._keyword_route(text)
-        if faceta:
-            return RouteDecision(kind="route", personality=faceta, via="keyword")
-
-        # 6) CAPA HIBRIDA — ninguna keyword decidio. Preguntar al clasificador.
-        faceta = await self._classify(user_text)
-        if faceta:
-            return RouteDecision(kind="route", personality=faceta, via="clasificador")
-
-        # Default: JAX local (clasificador no disponible o sin decision clara).
-        return RouteDecision(kind="route", personality=self.default_personality, via="default")

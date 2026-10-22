@@ -1,0 +1,4 @@
+{"concurrency": 1, "requests": 50, "rps": 24.4, "p50_ms": 40.65, "p95_ms": 48.94, "max_ms": 58.23, "elapsed_s": 2.05}
+{"concurrency": 5, "requests": 50, "rps": 25.65, "p50_ms": 195.58, "p95_ms": 205.48, "max_ms": 206.25, "elapsed_s": 1.95}
+{"concurrency": 10, "requests": 50, "rps": 25.99, "p50_ms": 373.82, "p95_ms": 410.14, "max_ms": 411.54, "elapsed_s": 1.92}
+{"concurrency": 25, "requests": 50, "rps": 25.33, "p50_ms": 971.37, "p95_ms": 1002.86, "max_ms": 1004.22, "elapsed_s": 1.97}

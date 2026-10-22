@@ -190,13 +190,12 @@ def test_los_pasos_a_correr_quedan_pendientes_limpios():
         StepStatus.pending, None, None, None, None)
 
 
-def test_reasignar_cambia_la_faceta_y_recalcula_el_motor():
+def test_reasignar_motor_sin_dispatch_gobernado_rechaza_antes_de_prevuelo():
     with _entorno() as m:
-        _continuar(reasignar={"2": "kimi"})
-        paso = m["tx"].await_args.args[3][0]
-        evento = m["tx"].await_args.kwargs["evento_payload"]
-    assert (paso.facet, paso.motor) == ("kimi", "kimi")
-    assert evento["reasignados"] == {"2": {"de": "jekyll", "a": "kimi"}}
+        e = _rechazo(reasignar={"2": "kimi"})
+        m["tx"].assert_not_awaited()
+        m["prevuelo"].assert_not_awaited()
+    assert (e.status_code, e.code) == (422, "motor_gobernado_no_disponible")
     with _entorno() as m:
         _continuar(reasignar={"2": "thot"})
         paso = m["tx"].await_args.args[3][0]
@@ -301,6 +300,17 @@ def test_el_prevuelo_solo_mira_los_pendientes():
         kw = m["prevuelo"].await_args.kwargs
     assert kw["pendientes"] == {2}
     assert (kw["user_id"], kw["tenant_id"]) == ("7", "1")
+
+
+def test_continuar_rechaza_faceta_sin_dispatch_gobernado_antes_del_prevuelo():
+    pasos = _pasos()
+    pasos[2].facet = "kimi"
+    with _entorno(pasos=pasos) as m:
+        resultado = asyncio.run(continuar.previsualizar("p1", "plataforma"))
+    assert resultado["continuable"] is False
+    assert resultado["motivo"]["code"] == "motor_gobernado_no_disponible"
+    m["prevuelo"].assert_not_awaited()
+    m["tx"].assert_not_awaited()
 
 
 def test_el_prevuelo_no_recibe_refs_de_pasos_a_rehacer():

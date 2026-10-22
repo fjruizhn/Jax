@@ -101,8 +101,79 @@ def test_corre_todas_en_orden_aunque_falle_la_primera(tmp_path):
 
     pruebas = {n: prueba(n) for n in AR._ORDEN}
     pruebas["instalacion"] = prueba("instalacion", Fallo("arranque", "instalado_distinto_del_repo"))
-    asyncio.run(AR.verificar_contratos(_ctx(tmp_path), pruebas))
+    # tipo="codigo": si no, "codigo" se salta (no es turno de código) y no aparecería en `vistas`.
+    asyncio.run(AR.verificar_contratos(_ctx(tmp_path, tipo="codigo"), pruebas))
     assert vistas == list(AR._ORDEN)
+
+
+# --- codigo: contrato de arranque (Tarea 12 Step 2) --------------------------
+
+def test_verificar_token_github_ausente():
+    assert AR.verificar_token_github({}) == (Fallo("codigo", "sin_token_github"),)
+
+
+def test_verificar_token_github_vacio():
+    assert AR.verificar_token_github({"JAX_GITHUB_TOKEN": "   "}) == (Fallo("codigo", "sin_token_github"),)
+
+
+def test_verificar_token_github_presente():
+    assert AR.verificar_token_github({"JAX_GITHUB_TOKEN": "github_pat_" + "A" * 60}) == ()
+
+
+def test_codigo_sin_token_no_arranca_sin_tocar_la_red(tmp_path):
+    async def solo_token():
+        return AR.verificar_token_github({})
+
+    with pytest.raises(AR.ContratosNoVerificados) as e:
+        asyncio.run(AR.exigir_contratos(_ctx(tmp_path, tipo="codigo"), _vivas(codigo=solo_token)))
+    assert e.value.fallos == (Fallo("codigo", "sin_token_github"),)
+
+
+def test_codigo_con_token_la_prueba_pasa(tmp_path):
+    async def solo_token():
+        return AR.verificar_token_github({"JAX_GITHUB_TOKEN": "github_pat_" + "A" * 60})
+
+    asyncio.run(AR.exigir_contratos(_ctx(tmp_path, tipo="codigo"), _vivas(codigo=solo_token)))
+
+
+def test_codigo_no_corre_fuera_de_un_turno_de_codigo(tmp_path):
+    async def rota():
+        raise AssertionError("codigo no debia correr fuera de un turno de codigo")
+
+    # tipo=None (default): "codigo" ni se evalúa, aunque esté rota.
+    asyncio.run(AR.exigir_contratos(_ctx(tmp_path), _vivas(codigo=rota)))
+
+
+# --- codigo: pruebas_reales corre también el canario (Tarea 13) --------------
+
+def test_pruebas_reales_codigo_corre_el_canario_con_token(tmp_path, monkeypatch):
+    from jax.ejecutor.contratos import canario_codigo
+
+    llamado = []
+
+    async def falso(cuenta, *, correr=None):
+        llamado.append(cuenta)
+        return (Fallo("codigo", "el_canario_corrio"),)
+
+    monkeypatch.setattr(canario_codigo, "verificar_codigo", falso)
+    monkeypatch.setenv("JAX_GITHUB_TOKEN", "github_pat_" + "A" * 60)
+    ctx = _ctx(tmp_path, tipo="codigo")
+    fallos = asyncio.run(AR.pruebas_reales(ctx)["codigo"]())
+    assert fallos == (Fallo("codigo", "el_canario_corrio"),)
+    assert llamado == [ctx.cuenta]
+
+
+def test_pruebas_reales_codigo_no_corre_el_canario_sin_token(tmp_path, monkeypatch):
+    from jax.ejecutor.contratos import canario_codigo
+
+    async def explota(cuenta, *, correr=None):
+        raise AssertionError("el canario no debia correr sin token")
+
+    monkeypatch.setattr(canario_codigo, "verificar_codigo", explota)
+    monkeypatch.delenv("JAX_GITHUB_TOKEN", raising=False)
+    ctx = _ctx(tmp_path, tipo="codigo")
+    fallos = asyncio.run(AR.pruebas_reales(ctx)["codigo"]())
+    assert fallos == (Fallo("codigo", "sin_token_github"),)
 
 
 # --- contexto ----------------------------------------------------------------
@@ -339,7 +410,13 @@ def test_instalacion_con_la_unidad_del_freno_cambiada(tmp_path, monkeypatch):
 
 
 def test_pruebas_reales_cubren_el_orden(tmp_path):
-    assert set(AR.pruebas_reales(_ctx(tmp_path))) == set(AR._ORDEN)
+    # "codigo" solo corre para turnos de código (tipo="codigo"); fuera de eso, pruebas_reales
+    # no la incluye y verificar_contratos la salta -- ver la sección "codigo" más abajo.
+    assert set(AR.pruebas_reales(_ctx(tmp_path))) == set(AR._ORDEN) - {"codigo"}
+
+
+def test_pruebas_reales_de_un_turno_de_codigo_cubren_el_orden_completo(tmp_path):
+    assert set(AR.pruebas_reales(_ctx(tmp_path, tipo="codigo"))) == set(AR._ORDEN)
 
 
 # --- instalación: CLAUDE.md y skills (2026-09-22) -----------------------------
@@ -622,3 +699,40 @@ def test_alcance_sin_maquinas_que_cerrar_no_entra_a_la_cuenta(tmp_path):
         raise AssertionError("no tenía que entrar")
 
     assert asyncio.run(AR.verificar_alcance(_ctx(tmp_path), (), correr=correr)) == ()
+
+
+def test_el_canario_de_arranque_audita_con_el_plazo_de_axioma_config(tmp_path, monkeypatch):
+    """`ejecutor.c5_tope_s` (cfg.tope_s) llega a auditor_cliente.auditar desde el arranque (p_c5)."""
+    import jacobs.store as jstore
+    from jax.ejecutor.contratos import auditor_cliente, canario_c5
+
+    class _Conexion:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    async def leer_config(conn):
+        return AR.eleccion_c5.ConfigC5("x", "y", "z", 5, 1.0, 100, 333, False, False)
+
+    async def eleccion(conn, *, hosts_mision, cfg, resolve_facet):
+        return "faceta-fake", ()
+
+    vistas = {}
+
+    async def auditar_falso(lote, **kw):
+        vistas.update(kw)
+
+    async def verificar_c5_falso(auditar):
+        await auditar("lote")
+        return ()
+
+    monkeypatch.setattr(jstore, "conexion", lambda **kw: _Conexion())
+    monkeypatch.setattr(AR.eleccion_c5, "leer_config", leer_config)
+    monkeypatch.setattr(AR, "eleccion_del_auditor", eleccion)
+    monkeypatch.setattr(AR, "verificar_c5_estatico", lambda ctx: ())
+    monkeypatch.setattr(auditor_cliente, "auditar", auditar_falso)
+    monkeypatch.setattr(canario_c5, "verificar_c5", verificar_c5_falso)
+    assert asyncio.run(AR.pruebas_reales(_ctx(tmp_path))["c5"]()) == ()
+    assert vistas == {"faceta": "faceta-fake", "max_tokens": 100, "tope_s": 333}

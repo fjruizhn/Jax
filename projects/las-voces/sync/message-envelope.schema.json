@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "authority_context": {"type": "object"}, "correlation_id": {"type": "string"},
+    "created_at": {"format": "date-time", "type": "string"}, "evidence_refs": {"items": {"type": "string"}, "type": "array"},
+    "intent": {"type": "string"}, "message_id": {"type": "string"}, "project_id": {"const": "las-voces"},
+    "recipient_agent": {"type": "string"}, "sender_agent": {"type": "string"}, "status": {"type": "string"}, "task_id": {"type": "string"}
+  },
+  "required": ["message_id", "project_id", "task_id", "sender_agent", "recipient_agent", "intent", "evidence_refs", "authority_context", "correlation_id", "created_at", "status"],
+  "title": "LAS VOCES future MessageEnvelope contract",
+  "type": "object"
+}

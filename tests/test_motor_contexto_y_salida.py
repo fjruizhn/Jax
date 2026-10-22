@@ -40,6 +40,7 @@ exigir_base_de_test()
 
 from jacobs import executor  # noqa: E402
 from jacobs.models import Pipeline, Step  # noqa: E402
+from policy.execution_control.errors import GovernedExecutionRequiredError  # noqa: E402
 from motor_registry import worker  # noqa: E402
 from motor_registry.catalog import MotorCatalog  # noqa: E402
 from motor_registry.job_store import JobStore  # noqa: E402
@@ -101,38 +102,22 @@ class ContextoLlegaAlMotorTest(unittest.IsolatedAsyncioTestCase):
                             mode="dry_run", plan=plan,
                             context={"objective": "un ERP",
                                      "step_0_ref": "inline:" + json.dumps({"result": "PLAN UNIFICADO X"})})
-        seen = {}
-
-        async def fake_invoke(step, pipeline, timeout, prompt=None):
-            seen["prompt"] = prompt
-            return {"success": True, "result": "ok"}
-
+        from policy.execution_control.errors import GovernedExecutionRequiredError
         with patch.object(executor, "validate_capability", AsyncMock(return_value=None)), \
-             patch.object(executor, "_invoke_motor", fake_invoke):
+             patch("httpx.AsyncClient.post") as post, self.assertRaises(GovernedExecutionRequiredError):
             await executor._dispatch_step(plan[1], pipeline)
-
-        assert seen.get("prompt"), "el motor no recibió el prompt armado"
-        assert "PLAN UNIFICADO X" in seen["prompt"], "la salida de la dependencia no llegó al motor"
-        assert "PRODUCE EL ENTREGABLE" in seen["prompt"]
+        post.assert_not_awaited()
 
     async def test_invoke_motor_manda_el_prompt_recibido_tal_cual(self):
         captured = {}
 
-        async def fake_post(client_self, url, json=None, **kw):
-            captured["payload"] = json
-            return _Resp({"job_id": "j1", "status": "pending"})
-
-        async def fake_get(client_self, url, **kw):
-            return _Resp({"status": "completed", "result_summary": "ok"})
-
         step = Step(facet="kimi", capability="generate", motor="kimi", input={"prompt": "SOLO LA TAREA"})
         pipeline = Pipeline(name="t", invoked_by="t", user_id="1", tenant_id="1", mode="dry_run")
         armado = "REGLA...\nSalidas de las dependencias...\nTu tarea: SOLO LA TAREA"
-        with patch("httpx.AsyncClient.post", fake_post), patch("httpx.AsyncClient.get", fake_get), \
-             patch.object(executor, "MOTOR_POLL_INTERVAL", 0.01):
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as post, \
+             self.assertRaises(GovernedExecutionRequiredError):
             await executor._invoke_motor(step, pipeline, timeout=5, prompt=armado)
-
-        assert captured["payload"]["prompt"] == armado, captured["payload"]["prompt"]
+        post.assert_not_awaited()
 
 
 class SalidaCompletaEnJacobsTest(unittest.IsolatedAsyncioTestCase):
@@ -145,22 +130,17 @@ class SalidaCompletaEnJacobsTest(unittest.IsolatedAsyncioTestCase):
 
         step = Step(facet="kimi", capability="generate", motor="kimi", input={"prompt": "x"})
         pipeline = Pipeline(name="t", invoked_by="t", user_id="1", tenant_id="1", mode="dry_run")
-        with patch("httpx.AsyncClient.post", fake_post), patch("httpx.AsyncClient.get", fake_get), \
-             patch.object(executor, "MOTOR_POLL_INTERVAL", 0.01):
+        with patch("httpx.AsyncClient.post", fake_post), patch("httpx.AsyncClient.get", fake_get):
             return await executor._invoke_motor(step, pipeline, timeout=5, prompt="p")
 
     async def test_devuelve_la_salida_completa_del_archivo_del_job(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "j1.md"
-            path.write_text(_LARGO, encoding="utf-8")
-            result = await self._run({"status": "completed", "result_summary": _LARGO[:200],
-                                      "result_path": str(path)})
-        assert result["result"] == _LARGO, len(result["result"])
+        with self.assertRaises(GovernedExecutionRequiredError):
+            await self._run({"status": "completed", "result_summary": _LARGO[:200]})
 
     async def test_sin_archivo_cae_al_resumen(self):
         """Jobs anteriores a este arreglo no tienen result_path."""
-        result = await self._run({"status": "completed", "result_summary": "resumen viejo"})
-        assert result["result"] == "resumen viejo"
+        with self.assertRaises(GovernedExecutionRequiredError):
+            await self._run({"status": "completed", "result_summary": "resumen viejo"})
 
 
 # ---------------------------------------------------------------- LAS MANOS

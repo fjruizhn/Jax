@@ -90,10 +90,21 @@ _TENANT = 990_040
 # This I/O module bootstraps the memory tables itself because the CI MariaDB
 # service is empty.  B9's scope query now intentionally resolves the tenant
 # from the DB-backed user row, so the fixture must provide that authority too.
+_IDENTITY_DDL_TENANT = """
+CREATE TABLE IF NOT EXISTS jax_tenants (
+    tenant_id BIGINT NOT NULL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    plan VARCHAR(20) NOT NULL,
+    status VARCHAR(20) NOT NULL
+)
+"""
+
 _IDENTITY_DDL = """
 CREATE TABLE IF NOT EXISTS jax_users (
     user_id BIGINT NOT NULL PRIMARY KEY,
     tenant_id BIGINT NOT NULL,
+    email VARCHAR(320) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
     status VARCHAR(32) NOT NULL,
     role VARCHAR(32) NOT NULL
 )
@@ -138,6 +149,22 @@ _DDL = _esquema_memoria.ddl()
 
 async def _preparar() -> list[str]:
     creadas = []
+    # El tenant tiene que EXISTIR antes del INSERT en jax_users: el
+    # esquema real tiene una FK jax_users.tenant_id -> jax_tenants(tenant_id)
+    # (2026-09-26: bug descubierto en rojo -- este fixture nunca creaba la
+    # fila del tenant, y solo "funcionaba" contra una base que ya la
+    # tuviera por otro lado).
+    existe_tenant = await _sql(
+        "SELECT 1 FROM information_schema.TABLES "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'jax_tenants'", fetch=True)
+    if not existe_tenant:
+        await _sql(_IDENTITY_DDL_TENANT)
+        creadas.append("jax_tenants")
+    await _sql(
+        "INSERT INTO jax_tenants (tenant_id, name, plan, status) VALUES "
+        "(%s, 'Test caducidad', 'personal', 'active') "
+        "ON DUPLICATE KEY UPDATE name=VALUES(name)",
+        (_TENANT,))
     existe_usuario = await _sql(
         "SELECT 1 FROM information_schema.TABLES "
         "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'jax_users'", fetch=True)
@@ -145,9 +172,11 @@ async def _preparar() -> list[str]:
         await _sql(_IDENTITY_DDL)
         creadas.append("jax_users")
     await _sql(
-        "INSERT INTO jax_users (user_id, tenant_id, status, role) VALUES (%s, %s, 'active', 'viewer') "
-        "ON DUPLICATE KEY UPDATE tenant_id=VALUES(tenant_id), status='active', role='viewer'",
-        (_USER, _TENANT))
+        "INSERT INTO jax_users (user_id, tenant_id, email, password_hash, status, role) VALUES "
+        "(%s, %s, %s, %s, 'active', 'viewer') "
+        "ON DUPLICATE KEY UPDATE tenant_id=VALUES(tenant_id), email=VALUES(email), "
+        "status='active', role='viewer'",
+        (_USER, _TENANT, f"user-{_USER}@test.invalid", "x"))
     for nombre, ddl in _DDL.items():
         existe = await _sql(
             "SELECT 1 FROM information_schema.TABLES "
@@ -170,7 +199,10 @@ def limpio():
     async def _teardown():
         await _limpiar()
         await _sql("DELETE FROM jax_users WHERE user_id = %s", (_USER,))
-        for nombre in reversed([*list(_DDL), "jax_users"]):
+        await _sql("DELETE FROM jax_tenants WHERE tenant_id = %s", (_TENANT,))
+        # jax_users antes que jax_tenants (le apunta por FK); las tablas de
+        # memoria en su orden reverso de creacion, como ya estaba.
+        for nombre in reversed([*list(_DDL), "jax_tenants", "jax_users"]):
             if nombre in creadas:
                 await _sql(f"DROP TABLE {nombre}")
     asyncio.run(_teardown())

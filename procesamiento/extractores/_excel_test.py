@@ -285,16 +285,18 @@ def test_una_chartsheet_no_desaparece_en_silencio(tmp_path: Path):
     assert r.detalle["no_tabulares"] == ["grafico"]
 
 
-def test_extraer_sin_openpyxl_instalado_da_sin_extractor(tmp_path: Path, monkeypatch):
-    """Menor 3 de task-4-hallazgos.md (deuda heredada, pagada junto con el
-    mismo defecto en pdf.py): un `ModuleNotFoundError` crudo no es un
-    resultado -- existe el estado 'sin_extractor' justo para esto."""
+def test_extraer_sin_openpyxl_instalado_da_error_no_sin_extractor(tmp_path: Path, monkeypatch):
+    """Menor 3 de task-4-hallazgos.md: un `ModuleNotFoundError` crudo no es un
+    resultado. jax-14 (2026-10-03): y tampoco es 'sin_extractor' -- openpyxl
+    esta DECLARADO en requirements-archivos.txt, asi que su falta es un
+    despliegue roto (error, con codigo), no un tipo sin extractor."""
     import sys
 
     monkeypatch.setitem(sys.modules, "openpyxl", None)
     origen = _libro_de_seis_hojas(tmp_path / "eeff.xlsx")
     r = excel.extraer(origen)
-    assert r.estado == "sin_extractor"
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "dependencia_no_instalada"
     assert r.salidas == {}
 
 
@@ -318,3 +320,26 @@ def test_version_no_revienta_si_openpyxl_no_esta_instalado(monkeypatch):
     monkeypatch.setitem(sys.modules, "openpyxl", None)
     version = excel._version()
     assert version is None
+
+
+import sys  # noqa: E402
+
+
+def test_un_importerror_que_no_es_modulenotfound_da_dependencia_rota(tmp_path: Path, monkeypatch):
+    """jax-14 MINOR-2: `dependencia_no_instalada` es SOLO para ModuleNotFoundError;
+    una dependencia presente pero rota (ImportError de otro tipo) es `dependencia_rota`."""
+    import builtins
+
+    archivo = _libro_de_seis_hojas(tmp_path / "eeff.xlsx")
+    original = builtins.__import__
+
+    def roto(nombre, *a, **k):
+        if nombre == "openpyxl" or nombre.startswith("openpyxl."):
+            raise ImportError("simbolo no definido (instalacion rota)")
+        return original(nombre, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", roto)
+    monkeypatch.delitem(sys.modules, "openpyxl", raising=False)
+    r = excel.extraer(archivo)
+    assert r.estado == "error"
+    assert r.detalle["codigo"] == "dependencia_rota"

@@ -168,6 +168,36 @@ def _destinos(comando, hosts, local, profundidad):
     return tocados or {local}
 
 
+def ssh_no_literal(comando: str) -> bool:
+    """¿Algún segmento corre `ssh` por una ruta (`/usr/bin/ssh`, `./ssh`) o con `PATH=` reasignado
+    delante? Entonces el programa puede ser cualquier cosa local que imprime lo que quiere.
+
+    Solo para la CITA (MINOR-2 de la auditoría de la Tarea 9): la salida de ese comando no se le
+    acredita a una máquina remota. `destinos()` -- lo que ven C1/C2 -- no cambia: allí `/usr/bin/ssh`
+    sigue contando como remoto, que es la dirección segura para el gancho. Ilegible = True."""
+    try:
+        segmentos = list(_segmentos(_palabras(comando)))
+    except ComandoIlegible:
+        return True
+    for segmento in segmentos:
+        i, path_reasignado = 0, False
+        while i < len(segmento):
+            palabra = segmento[i]
+            base = os.path.basename(palabra)
+            if _ASIGNACION.match(palabra):
+                path_reasignado = path_reasignado or palabra.startswith("PATH=")
+                i += 1
+            elif base == "timeout":
+                i = _saltar_opciones(segmento, i + 1, frozenset("sk")) + 1
+            elif base in _PREFIJOS:
+                i = _saltar_opciones(segmento, i + 1, _PREFIJOS[base])
+            else:
+                if base == "ssh" and (palabra != "ssh" or path_reasignado):
+                    return True
+                break
+    return False
+
+
 def destinos(comando: str, hosts) -> frozenset[str]:
     hosts = tuple(hosts)
     locales = [h.nombre for h in hosts if h.es_local]

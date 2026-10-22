@@ -94,7 +94,7 @@ def test_step_en_vuelo_se_corta_al_poner_el_freno(tmp_path, monkeypatch):
             try:
                 await asyncio.sleep(30)
             except asyncio.CancelledError:
-                cancelado.append(True)  # run_sandboxed_claude mata el proceso acá
+                cancelado.append(True)  # el lanzador sandboxeado mata el proceso acá
                 raise
 
         async def fail_step(pipeline, step, i, error):

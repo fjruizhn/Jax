@@ -53,10 +53,17 @@ class ConfigVigia:
     maquinas: tuple  # auditor.Maquina de la misión: los lotes las llevan al auditor
 
 
-def _pausar(motivo: str, paso: int | None, cfg: ConfigVigia) -> None:
-    puesta = P.poner_pausa(cfg.pausa, {"origen": "c5", "motivo": motivo, "paso": paso,
-                                       "registro": str(cfg.registro), "desde_byte": cfg.desde_byte})
-    log.critical("vigia pausa motivo=%s paso=%s nueva=%s", motivo, paso, puesta)
+def _pausar(motivo: str, paso: int | None, cfg: ConfigVigia, detalle: str | None = None) -> None:
+    """`detalle` es el CODIGO constante que explica el motivo (hoy: el de AuditorIlegible, p. ej.
+    proveedor_fallo o json_invalido). Va en la propia pausa porque el stderr del vigia solo llega
+    a la bitacora de la mision si el vigia muere mal, y este sale con rc=0. Nunca el texto ni la
+    excepcion de origen: pueden traer la llave o el cuerpo HTTP."""
+    datos = {"origen": "c5", "motivo": motivo, "paso": paso,
+             "registro": str(cfg.registro), "desde_byte": cfg.desde_byte}
+    if detalle is not None:
+        datos["detalle"] = detalle
+    puesta = P.poner_pausa(cfg.pausa, datos)
+    log.critical("vigia pausa motivo=%s paso=%s detalle=%s nueva=%s", motivo, paso, detalle, puesta)
 
 
 def _leer_desde(ruta: Path, desde: int) -> bytes:
@@ -136,7 +143,7 @@ async def vigilar(cfg: ConfigVigia, auditar, fin: asyncio.Event, *, pausar=None,
                     revision = await auditar(lote)
                 except A.AuditorIlegible as exc:
                     log.error("vigia auditor_ilegible codigo=%s", exc.codigo)
-                    await asyncio.to_thread(pausar, "auditor_ilegible", None, cfg)
+                    await asyncio.to_thread(pausar, "auditor_ilegible", None, cfg, exc.codigo)
                     continue
                 except Exception as exc:  # fail-soft: el vigía no se cae por el auditor; FRENA (pausa auditor_caido) y sigue leyendo
                     log.error("vigia auditor_caido tipo=%s", type(exc).__name__)

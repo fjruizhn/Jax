@@ -38,6 +38,10 @@ PERMITIDOS = {
     "scripts/ejecutor_contratos/probar_c6.py":
         "Igual que probar_c4: un `sleep` centinela para probar la revocacion de C6. No "
         "produce salida que signifique algo.",
+    "jax/faro/git_objetos.py":
+        "`git cat-file` recorre objetos del pin y su stderr no participa en la decisión. "
+        "Se descarta para evitar capturar o bloquear por salida no acotada; se valida "
+        "el código de salida y el caller recibe un error tipado que falla cerrado.",
 }
 
 _DEVNULL = re.compile(r"stderr\s*=\s*(?:asyncio\.)?subprocess\.DEVNULL")

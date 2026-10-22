@@ -38,10 +38,14 @@ CAPABILITY_AVAILABLE_SPEC = loaders.PredicateSpec(
 ENGINE_STATUS_SPEC = loaders.PredicateSpec(
     name="ENGINE_STATUS", args=("name", "status"), source_of_truth="Health check"
 )
+STEP_STATUS_SPEC = loaders.PredicateSpec(
+    name="STEP_STATUS", args=("step_id", "status"), source_of_truth="Jacobs canonical step store"
+)
 PREDICATES = {
     "FILE_EXISTS": FILE_EXISTS_SPEC,
     "CAPABILITY_AVAILABLE": CAPABILITY_AVAILABLE_SPEC,
     "ENGINE_STATUS": ENGINE_STATUS_SPEC,
+    "STEP_STATUS": STEP_STATUS_SPEC,
 }
 
 
@@ -95,6 +99,23 @@ def test_engine_status_is_resolver_not_implemented_never_valid():
     assert verdict.status == "RESOLVER_NOT_IMPLEMENTED"
     assert verdict.status != "VALID"
     assert "ENGINE_STATUS" in verdict.detail
+
+
+def test_step_status_is_vetoed_by_legacy_validator(monkeypatch):
+    def _legacy_resolver_that_would_accredit(claim, ctx):
+        return validator.Verdict(
+            status="VALID", predicate=claim.predicate, detail="forbidden legacy accreditation"
+        )
+
+    monkeypatch.setitem(validator._RESOLVERS, "STEP_STATUS", _legacy_resolver_that_would_accredit)
+    claim = _claim(
+        predicate="STEP_STATUS",
+        args={"step_id": "step-123", "status": "completed"},
+    )
+    verdict = validator.validate(claim, PREDICATES, _empty_ctx())
+    assert verdict.status == "RESOLVER_NOT_IMPLEMENTED"
+    assert verdict.status != "VALID"
+    assert "ResolverRegistry" in verdict.detail
 
 
 def test_file_exists_rejects_path_outside_allowlist_without_touching_disk(monkeypatch):
