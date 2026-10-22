@@ -37,3 +37,7 @@ Probar DTOestricto/hashtextual; DB2claims1winner/rollback/epoch/terminal; sentin
 ## Código INPUT_STALE y upgrade
 
 Ruling Codex conSol delivery_path: conservar código nuevoOFFICE_INPUT_STALE porque cambios de fuentes no son runtimepolicydenial. Upgrade CHECK binding_v2 por expand/contract: inspecciónexactaold/new, ADD+verifynew antesDROPold, estadosfresh/old/both/new reanudables, desconocido failclosed. CosteDDLaditivo+verificación, sinampliarautoridad;4C1loimplementaantesdehabilitarcallbacks.
+
+## Accepted POST response (4C2, Codex+Sol delivery_path)
+
+2026-10-21 DECISIÓN técnica: HTTP201/200/202 usa OfficeRunResponse estricta frozen/extra=forbid con solo contract_version literaloffice-work.1,pipeline_id UUIDcanónico,run_epoch intestricto>=0,phase OfficePhase. 409 no expone ID canónico;422/503 devuelvencódigoestable sincontenido. Cierra el único detalle de wire no fijado antes del consumidor JXP5. CosteDTOpequeño+pruebadeconsumidor; no endpointdepolling ni protocolo extra. Lectores delrunner/recovery se fijan siempre a Office+running+READY, sinparámetro callerphase.
