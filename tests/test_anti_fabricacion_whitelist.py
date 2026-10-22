@@ -216,3 +216,30 @@ def test_lector_de_git_real_cambia_con_el_status(tmp_path):
 def test_lector_de_git_en_un_directorio_que_no_es_repo_levanta(tmp_path):
     with pytest.raises(DetectorNoDisponible):
         wl_mod.leer_git(tmp_path)
+
+
+# --- LAS MANOS importa el paquete PELADO (cwd las_manos/, sin la raíz del repo en el path) ----
+
+def test_las_manos_importa_el_paquete_y_el_worker_sin_la_raiz_del_repo(tmp_path):
+    """LAS MANOS arranca con cwd=las_manos/, donde `jax.` NO es importable. Un
+    `from jax.anti_fabricacion import ...` en worker.py daría verde en CI
+    (PYTHONPATH=.:las_manos) y rompería el arranque real: por eso el worker importa
+    el symlink `las_manos/anti_fabricacion` y el paquete usa solo imports relativos."""
+    import os
+    import sys
+    from pathlib import Path
+
+    raiz = Path(__file__).resolve().parents[1]
+    assert (raiz / "las_manos" / "anti_fabricacion").is_symlink()
+    assert (raiz / "las_manos" / "anti_fabricacion").resolve() == (raiz / "jax" / "anti_fabricacion").resolve()
+    entorno = {"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp"),
+               "PYTHONPATH": str(raiz / "las_manos"), "PYTHONDONTWRITEBYTECODE": "1",
+               "JAX_WORKSPACE_DIR": str(tmp_path)}
+    codigo = ("import sys\n"
+              "import motor_registry.worker as w\n"
+              "assert w._af_whitelist.__name__ == 'anti_fabricacion.whitelist', w._af_whitelist.__name__\n"
+              "print('importado')\n")
+    r = subprocess.run([sys.executable, "-c", codigo], cwd=raiz / "las_manos", env=entorno,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr[-800:]
+    assert r.stdout.strip() == "importado"

@@ -959,6 +959,16 @@ matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
 sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
 piso se vuelve a fijar desde los **3537 de master**.
 
+3887 -> 3963 (2026-10-22, anti-fabricacion capas 2 y 4): +76 en cuatro archivos nuevos del paso 'Piso
+exacto' (`tests/test_anti_fabricacion_whitelist.py` 16, `tests/test_anti_fabricacion_estructura.py` 42,
+`tests/test_anti_fabricacion_entrega.py` 9, `las_manos/_worker_estructura_test.py` 9). Medido LOCAL en
+hall9000, con el comando literal del paso (`PYTHONPATH=.:las_manos`, sin `JAX_DB_HOST`) sobre `origin/master`
+(031f7b7b) y sobre la rama: 3927 passed, 3 skipped, 3 xfailed -> 4002 passed (+75, medido antes de sumar el
+test de import pelado) y +1 de ese test = +76. **Es medicion local, NO del runner**: los 45 skipped solo
+se verifican alli (local: 3), asi que el 3963 y el "45 skipped" quedan a confirmar en la primera corrida
+de CI. Ningun test nuevo salta. Ningun otro piso cambia: `tests-puros` es el unico job que corre
+`worker.py` y los cuatro archivos nuevos.
+
 3888 -> 3887 (2026-10-14, OP#251, retiro de `hyde_sandbox`): −1 `test_la_jaula_de_hyde_no_recibe_la_credencial`
 (`tests/test_las_manos_auth_servicio.py`), que probaba el módulo retirado (lo importaba y llamaba
 `wrap_hyde_command`); misma lista de archivos. El mismo test cae también en

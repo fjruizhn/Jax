@@ -1722,6 +1722,10 @@ jobs:
           tests/test_jacobs_descarte.py
           tests/test_store_columna_descarte_acotada.py
           tests/test_workspace_dir.py
+          tests/test_anti_fabricacion_whitelist.py
+          tests/test_anti_fabricacion_estructura.py
+          tests/test_anti_fabricacion_entrega.py
+          las_manos/_worker_estructura_test.py
       - name: Publicar fallos de tests puros
         if: failure()
         run: |
@@ -1912,6 +1916,10 @@ jobs:
             tests/test_jacobs_descarte.py \
             tests/test_store_columna_descarte_acotada.py \
             tests/test_workspace_dir.py \
+            tests/test_anti_fabricacion_whitelist.py \
+            tests/test_anti_fabricacion_estructura.py \
+            tests/test_anti_fabricacion_entrega.py \
+            las_manos/_worker_estructura_test.py \
             2>&1 | tee /tmp/out
           python3 .github/ci/piso.py verificar tests-puros/out /tmp/out || exit $?
 
