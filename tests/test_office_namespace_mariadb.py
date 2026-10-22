@@ -64,6 +64,56 @@ class _Authorizer:
             raise PermissionError("revoked")
 
 
+class _FirstHintBarrier:
+    """Stops only the first two actor hint reads before either takes a lock."""
+    def __init__(self):
+        self._barrier = asyncio.Barrier(2)
+        self.arrivals = 0
+
+    async def wait(self):
+        self.arrivals += 1
+        if self.arrivals <= 2:
+            await self._barrier.wait()
+
+
+class _BarrierCursor:
+    def __init__(self, cursor, barrier):
+        self._cursor = cursor
+        self._barrier = barrier
+
+    async def execute(self, sql, args=None):
+        result = await self._cursor.execute(sql, args)
+        if sql == "SELECT tenant_id FROM jax_users WHERE user_id=%s":
+            await self._barrier.wait()
+        return result
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class _ObservedBarrierStore(MariaDBB9Store):
+    """Real mutation boundary plus raw DB-error observation for this test."""
+    def __init__(self, pool, barrier, raw_errnos):
+        super().__init__(pool)
+        self._barrier = barrier
+        self._raw_errnos = raw_errnos
+
+    async def mutation(self, operation):
+        async with self._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor() as cur:
+                    value = await operation(_BarrierCursor(cur, self._barrier))
+                await conn.commit()
+                return value
+            except BaseException as exc:
+                args = getattr(exc, "args", ()) or ()
+                if args and isinstance(args[0], int):
+                    self._raw_errnos.append(args[0])
+                await conn.rollback()
+                raise
+
+
 async def _setup(name: str):
     root = await aiomysql.connect(autocommit=True, connect_timeout=db_connect_timeout_seconds(), **_params())
     try:
@@ -192,6 +242,63 @@ async def test_office_same_key_concurrency_creates_one_project_and_stable_replay
         assert len({result.project_id for result, _ in different}) == 8
         different_p95 = sorted(duration for _, duration in different)[math.ceil(len(different) * .95) - 1]
         print(f"office namespace contention: same_key_p95={p95:.6f}s different_key_p95={different_p95:.6f}s")
+    finally:
+        pool.close(); await pool.wait_closed()
+        await _drop(name)
+
+
+@requires_test_db
+@_async
+async def test_office_cross_tenant_creates_use_canonical_lock_order_without_deadlock():
+    """Opposite directions overlap after the hint yet never hit 1213/1205."""
+    name = f"{_DB}_office_{uuid.uuid4().hex[:10]}"
+    assert es_base_de_test(name)
+    low_tenant_id, low_actor_id = await _setup(name)
+    root = await aiomysql.connect(db=name, autocommit=True, cursorclass=aiomysql.DictCursor,
+                                  connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        async with root.cursor() as cur:
+            await cur.execute("INSERT INTO jax_tenants (name,plan,status) VALUES ('other','personal','active')")
+            high_tenant_id = cur.lastrowid
+            await cur.execute(
+                "INSERT INTO jax_users (tenant_id,email,password_hash,role,status) VALUES (%s,'other-actor@test.invalid','x','operator','active')",
+                (high_tenant_id,))
+            high_actor_id = cur.lastrowid
+            await cur.execute("EXPLAIN SELECT tenant_id FROM jax_users WHERE user_id=%s", (low_actor_id,))
+            assert (await cur.fetchone())["key"] == "PRIMARY"
+    finally:
+        root.close()
+    pool = await aiomysql.create_pool(db=name, autocommit=True, minsize=1, maxsize=4,
+                                      cursorclass=aiomysql.DictCursor,
+                                      connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        barrier = _FirstHintBarrier()
+        raw_errnos = []
+        api = ProjectAuthorityAdmin(_ObservedBarrierStore(pool, barrier, raw_errnos))
+
+        async def create(actor_id, target_id, label, authorizer):
+            return await api.create_namespaced_project(
+                actor_user_id=actor_id, target_tenant_id=target_id,
+                namespace=ProjectNamespace.OFFICE_CONFIDENTIAL, name=label, description=None,
+                idempotency_key=str(uuid.uuid4()), authorizer=authorizer)
+
+        low_authorizer, high_authorizer = _Authorizer(), _Authorizer()
+        first, second = await asyncio.gather(
+            create(low_actor_id, high_tenant_id, "low-to-high", low_authorizer),
+            create(high_actor_id, low_tenant_id, "high-to-low", high_authorizer),
+        )
+        assert barrier.arrivals >= 2
+        assert not ({1213, 1205} & set(raw_errnos)), raw_errnos
+        assert first.created and second.created and first.project_id != second.project_id
+        assert len(low_authorizer.cursors) == len(high_authorizer.cursors) == 1
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT tenant_id,authorization_namespace FROM jax_project_scope WHERE project_id IN (%s,%s) ORDER BY project_id",
+                    (first.project_id, second.project_id))
+                rows = await cur.fetchall()
+                assert {row["tenant_id"] for row in rows} == {low_tenant_id, high_tenant_id}
+                assert {row["authorization_namespace"] for row in rows} == {"OFFICE_CONFIDENTIAL"}
     finally:
         pool.close(); await pool.wait_closed()
         await _drop(name)

@@ -245,6 +245,20 @@ def _is_raw_db_error(exc: Exception) -> bool:
 #: `ProjectAuthorityRetryable`, never to the generic DB-error wrapper.
 _RETRYABLE_MYSQL_ERRNOS = frozenset({1213, 1205})
 _NAMESPACE_CREATE_MAX_CONTENTION_RETRIES = 4
+# MariaDB can return ER_CHECKREAD (1020) when a transaction's initial plain
+# actor-tenant hint predates a concurrent idempotency insert.  It is the same
+# fresh-transaction condition as the duplicate replay path, not an authority
+# decision and never leaves effects committed.
+_NAMESPACE_CREATE_FRESH_TRANSACTION_ERRNOS = _RETRYABLE_MYSQL_ERRNOS | frozenset({1020})
+
+
+class _NamespaceCreateActorTenantDrift(Exception):
+    """The actor moved tenants between the non-locking hint and its row lock.
+
+    This is private transaction control flow: opening a new transaction is
+    required because the originally ordered tenant lock set cannot safely be
+    extended with the newly observed tenant.
+    """
 
 
 def _wrap_unexpected_db_error(exc: Exception) -> Exception:
@@ -706,10 +720,24 @@ class ProjectAuthorityAdmin:
             digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
         async def op(cur: Any) -> CreatedProject:
-            # The target-tenant mutex matches classic project creation and
-            # serializes scope/project inserts before they can deadlock on
-            # InnoDB's auto-increment and foreign-key locks.
-            await self._lock_tenant(cur, target_tenant_id)
+            # The plain PK lookup is only a lock-order hint.  Authority still
+            # belongs entirely to the trusted authorizer after the actor row
+            # has been locked and rechecked below.
+            await cur.execute("SELECT tenant_id FROM jax_users WHERE user_id=%s", (actor_user_id,))
+            actor_hint = await cur.fetchone()
+            if not actor_hint:
+                raise ProjectNotVisible("actor does not exist")
+            hinted_tenant_id = int(self._value(actor_hint, "tenant_id", 0))
+            # Lock every affected tenant in one canonical order.  A same-
+            # tenant actor/target intentionally takes this lock only once.
+            for tenant_id in sorted({hinted_tenant_id, target_tenant_id}):
+                await self._lock_tenant(cur, tenant_id)
+            await cur.execute("SELECT tenant_id FROM jax_users WHERE user_id=%s FOR UPDATE", (actor_user_id,))
+            actor = await cur.fetchone()
+            if not actor:
+                raise ProjectNotVisible("actor does not exist")
+            if int(self._value(actor, "tenant_id", 0)) != hinted_tenant_id:
+                raise _NamespaceCreateActorTenantDrift()
             await authorizer.authorize_in_transaction(
                 cur, actor_user_id=actor_user_id, target_tenant_id=target_tenant_id,
                 namespace=namespace, operation="CREATE_OFFICE_PROJECT")
@@ -745,6 +773,12 @@ class ProjectAuthorityAdmin:
             try:
                 return await self._store.mutation(op)
             except Exception as exc:
+                if isinstance(exc, _NamespaceCreateActorTenantDrift):
+                    if attempt < _NAMESPACE_CREATE_MAX_CONTENTION_RETRIES:
+                        await asyncio.sleep(0)
+                        return await run(attempt + 1)
+                    raise ProjectAuthorityRetryable(
+                        "namespace creation actor tenant changed; retry") from exc
                 if _is_duplicate_key_error(exc):
                     if attempt < _NAMESPACE_CREATE_MAX_CONTENTION_RETRIES:
                         # The target-tenant lock normally makes this a replay;
@@ -756,7 +790,7 @@ class ProjectAuthorityAdmin:
                         "namespace project creation duplicate conflict",
                         code="namespace_creation_conflict") from exc
                 errno = (getattr(exc, "args", ()) or (None,))[0]
-                if errno in _RETRYABLE_MYSQL_ERRNOS and attempt < _NAMESPACE_CREATE_MAX_CONTENTION_RETRIES:
+                if errno in _NAMESPACE_CREATE_FRESH_TRANSACTION_ERRNOS and attempt < _NAMESPACE_CREATE_MAX_CONTENTION_RETRIES:
                     # Yield the event loop before opening a fresh transaction;
                     # the next pass reauthorizes and then reads the winner.
                     await asyncio.sleep(0)

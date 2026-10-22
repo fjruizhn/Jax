@@ -12,6 +12,7 @@ from jax.memory.project_authority import (
     NamespaceMembershipOperation,
     ProjectAuthorityAdmin,
     ProjectAuthorityError,
+    ProjectAuthorityRetryable,
 )
 from jax.memory.scope_authority import MariaDBScopeAuthorityResolver, ProjectNamespace
 
@@ -39,6 +40,18 @@ class Store:
 
     def acquire(self):
         return _Acquire(self)
+
+
+class FreshTransactionStore:
+    """One cursor per mutation, so a retry cannot reuse transaction state."""
+    def __init__(self, row_sets):
+        self.cursors = [Cursor(rows) for rows in row_sets]
+        self.mutations = 0
+
+    async def mutation(self, operation):
+        cursor = self.cursors[self.mutations]
+        self.mutations += 1
+        return await operation(cursor)
 
 
 class _Acquire:
@@ -70,11 +83,30 @@ class _DuplicateKeyError(Exception):
 _DuplicateKeyError.__module__ = "pymysql.err"
 
 
+class _CheckReadError(Exception):
+    pass
+
+
+_CheckReadError.__module__ = "pymysql.err"
+
+
 class DuplicateStore:
     def __init__(self): self.mutations = 0
     async def mutation(self, _operation):
         self.mutations += 1
         raise _DuplicateKeyError(1062, "unrelated unique constraint")
+
+
+class CheckReadThenStore:
+    def __init__(self, rows):
+        self.cursor = Cursor(rows)
+        self.mutations = 0
+
+    async def mutation(self, operation):
+        self.mutations += 1
+        if self.mutations == 1:
+            raise _CheckReadError(1020, "record changed")
+        return await operation(self.cursor)
 
 
 def test_office_namespace_contract_marker_identifies_the_reviewed_resolver_contract():
@@ -162,8 +194,8 @@ async def test_capability_membership_binds_canonical_key_and_truthful_created_by
 
 
 def _new_store():
-    # tenant lock, idempotency lookup, LAST_INSERT_ID.
-    return Store([{"tenant_id": 4}, None, {"id": 17}])
+    # actor hint, tenant lock, canonical actor lock, idempotency lookup, LAST_INSERT_ID.
+    return Store([{"tenant_id": 4}, {"tenant_id": 4}, {"tenant_id": 4}, None, {"id": 17}])
 
 
 @pytest.mark.asyncio
@@ -184,6 +216,7 @@ async def test_office_creation_authorizes_and_inserts_confidential_scope_in_one_
     scope = next((args for sql, args in store.cursor.calls if "INSERT INTO jax_project_scope" in sql), None)
     assert scope is not None and scope[1] == 4 and scope[2] == "OFFICE_CONFIDENTIAL"
     assert not any("jax_project_membership" in sql for sql, _ in store.cursor.calls)
+    assert [args for sql, args in store.cursor.calls if "FROM jax_tenants" in sql] == [(4,)]
 
 
 @pytest.mark.asyncio
@@ -192,7 +225,10 @@ async def test_office_replay_reauthorizes_and_rejects_actor_or_payload_change_wi
     accepts a key bound to a different actor/payload."""
     key = str(uuid.uuid4())
     authorizer = Authorizer()
-    matching = Store([{"tenant_id": 4}, {"actor_user_id": 7, "target_tenant_id": 4, "request_digest": "wrong", "project_id": 17}])
+    matching = Store([
+        {"tenant_id": 4}, {"tenant_id": 4}, {"tenant_id": 4},
+        {"actor_user_id": 7, "target_tenant_id": 4, "request_digest": "wrong", "project_id": 17},
+    ])
     with pytest.raises(Exception):
         await ProjectAuthorityAdmin(matching).create_namespaced_project(
             actor_user_id=7, target_tenant_id=4, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
@@ -257,4 +293,83 @@ async def test_namespaced_creation_bounds_a_stable_duplicate_constraint():
             name="Office", description=None, idempotency_key=str(uuid.uuid4()), authorizer=Authorizer())
     assert error.value.code == "namespace_creation_conflict"
     assert store.mutations == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("actor_tenant", "target_tenant", "expected_locks"), [
+    (4, 9, [(4,), (9,)]),
+    (9, 4, [(4,), (9,)]),
+    (4, 4, [(4,)]),
+])
+async def test_namespaced_creation_locks_actor_and_target_tenants_in_canonical_order(
+    actor_tenant, target_tenant, expected_locks,
+):
+    store = Store([
+        {"tenant_id": actor_tenant}, *[{"tenant_id": tenant} for tenant, in expected_locks],
+        {"tenant_id": actor_tenant},
+        None, {"id": 17},
+    ])
+    await ProjectAuthorityAdmin(store).create_namespaced_project(
+        actor_user_id=7, target_tenant_id=target_tenant, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+        name="Office", description=None, idempotency_key=str(uuid.uuid4()), authorizer=Authorizer())
+    tenant_locks = [args for sql, args in store.cursor.calls if "FROM jax_tenants" in sql]
+    assert tenant_locks == expected_locks
+    actor_selects = [sql for sql, _ in store.cursor.calls if "FROM jax_users WHERE user_id=%s" in sql]
+    assert actor_selects == [
+        "SELECT tenant_id FROM jax_users WHERE user_id=%s",
+        "SELECT tenant_id FROM jax_users WHERE user_id=%s FOR UPDATE",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_namespaced_creation_missing_actor_denies_before_tenant_lock_or_authorizer():
+    store = Store([None])
+    authorizer = Authorizer()
+    with pytest.raises(Exception, match="actor does not exist"):
+        await ProjectAuthorityAdmin(store).create_namespaced_project(
+            actor_user_id=7, target_tenant_id=4, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+            name="Office", description=None, idempotency_key=str(uuid.uuid4()), authorizer=authorizer)
+    assert not authorizer.calls
+    assert not any("jax_tenants" in sql for sql, _ in store.cursor.calls)
+
+
+@pytest.mark.asyncio
+async def test_namespaced_creation_actor_tenant_drift_retries_in_a_fresh_transaction_before_authorizing():
+    store = FreshTransactionStore([
+        [{"tenant_id": 4}, {"tenant_id": 4}, {"tenant_id": 9}, {"tenant_id": 9}],
+        [{"tenant_id": 9}, {"tenant_id": 4}, {"tenant_id": 9}, {"tenant_id": 9}, None, {"id": 17}],
+    ])
+    authorizer = Authorizer()
+    created = await ProjectAuthorityAdmin(store).create_namespaced_project(
+        actor_user_id=7, target_tenant_id=4, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+        name="Office", description=None, idempotency_key=str(uuid.uuid4()), authorizer=authorizer)
+    assert created.created and store.mutations == 2
+    assert len(authorizer.calls) == 1 and authorizer.calls[0][0] is store.cursors[1]
+    first_locks = [args for sql, args in store.cursors[0].calls if "FROM jax_tenants" in sql]
+    second_locks = [args for sql, args in store.cursors[1].calls if "FROM jax_tenants" in sql]
+    assert first_locks == [(4,)] and second_locks == [(4,), (9,)]
+
+
+@pytest.mark.asyncio
+async def test_namespaced_creation_actor_tenant_drift_exhaustion_is_stable_retryable():
+    row_sets = [[{"tenant_id": 4}, {"tenant_id": 4}, {"tenant_id": 9}]] * 5
+    store = FreshTransactionStore(row_sets)
+    with pytest.raises(ProjectAuthorityRetryable) as failure:
+        await ProjectAuthorityAdmin(store).create_namespaced_project(
+            actor_user_id=7, target_tenant_id=4, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+            name="Office", description=None, idempotency_key=str(uuid.uuid4()), authorizer=Authorizer())
+    assert failure.value.code == "reintentar"
+    assert str(failure.value) == "namespace creation actor tenant changed; retry"
+    assert store.mutations == 5
+
+
+@pytest.mark.asyncio
+async def test_namespaced_creation_checkread_retries_with_a_fresh_transaction():
+    store = CheckReadThenStore([{"tenant_id": 4}, {"tenant_id": 4}, {"tenant_id": 4}, None, {"id": 17}])
+    authorizer = Authorizer()
+    result = await ProjectAuthorityAdmin(store).create_namespaced_project(
+        actor_user_id=7, target_tenant_id=4, namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+        name="Office", description=None, idempotency_key=str(uuid.uuid4()), authorizer=authorizer)
+    assert result.created and store.mutations == 2
+    assert len(authorizer.calls) == 1 and authorizer.calls[0][0] is store.cursor
 
