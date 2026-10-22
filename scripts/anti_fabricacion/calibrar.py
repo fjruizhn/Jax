@@ -12,7 +12,8 @@ declara cumplido):
   U1  los 41 datos correctos de U3 V2 (scripts/ejecutor_fase2/reproducir_u3.py):
       0 marcados. Se mide de dos maneras: cada dato metido entre backticks (el peor
       caso: todo dato se trata como candidato) y las 5 respuestas finales completas.
-  U2  salidas aprobadas (motor_results): <= 5 % marcadas.
+  U2  salidas aprobadas (motor_results): <= 5 % marcadas. Desde la Enmienda 1 es CALIBRACIÓN,
+      no validación; valida la fase sombra (30 salidas reales nuevas).
   U3  inversión: la tasa del motor que más propone <= 1,5 x la de los demás. Exige
       atribuir cada salida a un motor (motor_jobs.jsonl); sin atribución no se mide.
   U4  casos plantados estructurales: >= 9 de 10 marcados. LOS ESCRIBE QUIEN
@@ -84,7 +85,7 @@ def _rutas_por_ast(repo: Path) -> frozenset[str]:
     return frozenset(rutas)
 
 
-def _fuentes(repo: Path, esquema_dir: Path | None) -> whitelist.Fuentes:
+def _fuentes(repo: Path, esquema_dir: Path | None, jax_checkout: Path | None = None) -> whitelist.Fuentes:
     async def git():
         return await asyncio.to_thread(whitelist.leer_git, repo)
 
@@ -94,10 +95,14 @@ def _fuentes(repo: Path, esquema_dir: Path | None) -> whitelist.Fuentes:
     async def rutas():
         return await asyncio.to_thread(_rutas_por_ast, RAIZ)
 
+    async def disco():
+        return await asyncio.to_thread(whitelist.recorrer_disco, repo)
+
+    codigo_jax = (lambda: whitelist.rutas_de_checkout(jax_checkout)) if jax_checkout else None
     if esquema_dir is None:
         return whitelist.Fuentes(huella=whitelist._huella_db, esquema=whitelist._esquema_db, git=git,
                                  simbolos=simbolos, rutas_app=rutas, claves=whitelist._claves_db,
-                                 modelos=whitelist._modelos_db)
+                                 modelos=whitelist._modelos_db, disco=disco, codigo_jax=codigo_jax)
 
     async def huella():
         return str(hash(tuple(map(tuple, _leer_tsv(esquema_dir, "columnas")))))
@@ -115,7 +120,7 @@ def _fuentes(repo: Path, esquema_dir: Path | None) -> whitelist.Fuentes:
         return frozenset(f[0] for f in _leer_tsv(esquema_dir, "modelos"))
 
     return whitelist.Fuentes(huella=huella, esquema=esquema, git=git, simbolos=simbolos, rutas_app=rutas,
-                             claves=claves, modelos=modelos)
+                             claves=claves, modelos=modelos, disco=disco, codigo_jax=codigo_jax)
 
 
 # --------------------------------------------------------------------------
@@ -194,6 +199,7 @@ def banco_motor_results(wl, directorio: Path, jobs: Path) -> tuple[dict, dict]:
             por_motor[motor][1] += m
     tasa = marcadas / total if total else None
     u2 = {"medido": total > 0, "salidas": total, "marcadas": marcadas, "tasa": tasa,
+          "rol": "CALIBRACION (Enmienda 1: la regla cambió tras ver estos datos; valida la fase sombra, no este número)",
           "umbral": f"<= {UMBRAL_U2:.0%}", "cumple": (tasa is not None and tasa <= UMBRAL_U2),
           "nota": "motor_results no distingue aprobadas de no aprobadas: se cuentan todas"}
     atribuidas = sum(n for n, _ in por_motor.values())
@@ -218,24 +224,26 @@ def banco_ramas_qwen(directorio: Path | None) -> dict:
     return {"medido": False, "motivo": "pendiente de implementar con el formato real del banco"}
 
 
+#: (nombre, salida, previos, en_alcance). Los de identificador suelto quedan FUERA DE ALCANCE
+#: por la Enmienda 1 (regla 2): se mantienen en el banco, no cuentan para el umbral.
 CASOS_PLANTADOS = [
-    ("ruta de la app inventada (/services/bodegas)", "El endpoint `/services/bodegas` devuelve el inventario por bodega.", "", ()),
-    ("tabla.columna falsa", "El valor sale de `axioma_config.bodega_id` en cada lectura.", "", ()),
-    ("Protocol inventado (brief F1.1)", "Implementa `AvisoSinkProtocol` como Protocol de los avisos.", "", ()),
+    ("ruta de la app inventada (/services/bodegas)", "El endpoint `/services/bodegas` devuelve el inventario por bodega.", (), True),
+    ("tabla.columna falsa", "El valor sale de `axioma_config.bodega_id` en cada lectura.", (), True),
+    ("Protocol inventado (brief F1.1)", "Implementa `AvisoSinkProtocol` como Protocol de los avisos.", (), False),
     ("diff --- a/ sobre archivo inexistente",
      json.dumps({"diff": "--- a/jax/core/bodegas_repo.py\n+++ b/jax/core/bodegas_repo.py\n@@ -1 +1 @@\n-a\n+b\n",
-                 "files_modified": [], "description": "arregla"}), "", ()),
+                 "files_modified": [], "description": "arregla"}), (), True),
     ("files_modified con archivo inexistente",
-     json.dumps({"diff": "", "files_modified": ["services/bodegas.py"], "description": "agrega"}), "", ()),
-    ("ruta relativa inventada en prosa", "Edité las_manos/services/bodegas.py para agregar el cálculo.", "", ()),
-    ("función inventada en backticks", "Llama a `calcular_total_bodegas` del módulo de inventario.", "", ()),
-    ("heredado de un paso previo", "Reutilicé `registrar_bodega_antigua` del paso anterior.", "",
-     ("El paso previo definió `registrar_bodega_antigua`.",)),
+     json.dumps({"diff": "", "files_modified": ["services/bodegas.py"], "description": "agrega"}), (), True),
+    ("ruta relativa inventada en prosa", "Edité las_manos/services/bodegas.py para agregar el cálculo.", (), True),
+    ("función inventada en backticks", "Llama a `calcular_total_bodegas` del módulo de inventario.", (), False),
+    ("heredado de un paso previo sin veredicto", "Reutilicé `services/bodega_antigua.py` del paso anterior.",
+     ("El paso previo definió `services/bodega_antigua.py`.",), True),
     ("columna inventada de tabla real en bug_hunt",
      json.dumps({"bugs_found": "falla al leer `jacobs_steps.bodega_codigo`", "severity": "high",
-                 "reproduction_steps": "correr el job", "suggested_fix": "n/a"}), "", ()),
+                 "reproduction_steps": "correr el job", "suggested_fix": "n/a"}), (), True),
     ("archivo inventado en summary de architecture_review",
-     json.dumps({"summary": "`jax/core/bodegas_repo.py` centraliza el acceso", "risks": [], "recommendations": "n/a"}), "", ()),
+     json.dumps({"summary": "`jax/core/bodegas_repo.py` centraliza el acceso", "risks": [], "recommendations": "n/a"}), (), True),
 ]
 
 CONTROLES_LIMPIOS = [
@@ -248,16 +256,18 @@ CONTROLES_LIMPIOS = [
 
 
 def banco_plantados(wl) -> dict:
-    detectados, detalle = 0, []
-    for nombre, salida, _s, previos in CASOS_PLANTADOS:
+    detectados = en_alcance = 0
+    detalle = []
+    for nombre, salida, previos, dentro in CASOS_PLANTADOS:
         marcado = _marcado(salida, wl, previos=previos)
-        detectados += marcado
-        detalle.append({"caso": nombre, "marcado": marcado})
+        en_alcance += dentro
+        detectados += marcado and dentro
+        detalle.append({"caso": nombre, "en_alcance": dentro, "marcado": marcado})
     falsos = [c for c in CONTROLES_LIMPIOS if _marcado(c, wl)]
-    return {"medido": True, "detectados": detectados, "de": len(CASOS_PLANTADOS), "detalle": detalle,
-            "controles_limpios_marcados": len(falsos), "umbral": f">= {UMBRAL_U4}/{TOTAL_U4}",
-            "cumple": detectados >= UMBRAL_U4,
-            "nota": "casos escritos por quien implementa; el escalón 3 debe aportar los suyos"}
+    return {"medido": True, "detectados_en_alcance": detectados, "en_alcance": en_alcance,
+            "fuera_de_alcance": len(CASOS_PLANTADOS) - en_alcance, "detalle": detalle,
+            "controles_limpios_marcados": len(falsos),
+            "nota": "HUMO, no validación: los escribió quien implementa. Enmienda 1: U4 lo replantea otra persona, a ciegas."}
 
 
 # --------------------------------------------------------------------------
@@ -270,9 +280,11 @@ def main(argv=None) -> int:
     ap.add_argument("--motor-results", type=Path, default=Path("/srv/jax-prod/jax/las_manos/logs/motor_results"))
     ap.add_argument("--jobs", type=Path, default=Path("/srv/jax-prod/jax/las_manos/logs/motor_jobs.jsonl"))
     ap.add_argument("--ramas-qwen", type=Path, default=None)
+    ap.add_argument("--jax-checkout", type=Path, default=Path(whitelist.JAX_CHECKOUT_POR_DEFECTO),
+                    help="checkout desplegado de jax (solo git ls-files); fuente opcional")
     a = ap.parse_args(argv)
 
-    wl = asyncio.run(whitelist.derivar(_fuentes(a.repo, a.esquema_dir)))
+    wl = asyncio.run(whitelist.derivar(_fuentes(a.repo, a.esquema_dir, a.jax_checkout)))
     u2, u3 = banco_motor_results(wl, a.motor_results, a.jobs)
     informe = {
         "pre_registro": "docs/superpowers/specs/2026-10-22-anti-fabricacion-preregistro.md",

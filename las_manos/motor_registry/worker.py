@@ -441,6 +441,20 @@ async def _notify_estructura(*, job_id: str, motor: str, capability: str, pipeli
         logger.error("job %s: aviso de estructura sin respaldo no se pudo entregar: %s", job_id, result["error"])
 
 
+async def _notify_detector_caido(*, job_id: str, motor: str, capability: str, modo, detalle: str) -> None:
+    """Aviso inmediato de que el detector de estructura no pudo mirar un job. En
+    sombra el job sigue y su salida NO cuenta entre las 30 de la fase; en duro el
+    job ya no llega al motor."""
+    from jacobs.reaper import send_telegram_alert
+    consecuencia = ("el job FALLÓ antes de llamar al motor" if modo == _af_consecuencia.Modo.DURO
+                    else "modo sombra: el job sigue, sin veredicto, y no cuenta entre las 30 salidas")
+    result = await send_telegram_alert(
+        f"🔴 JAX anti-fabricación: detector de estructura NO disponible en job {job_id} ({motor}/{capability}); "
+        f"{consecuencia}.\n{detalle[:300]}")
+    if not result["ok"]:
+        logger.error("job %s: aviso de detector caído no se pudo entregar: %s", job_id, result["error"])
+
+
 def _auditar_estructura(**campos: Any) -> None:
     """Evento en audit.jsonl. Síncrono (abre y escribe un archivo): el worker lo
     llama con asyncio.to_thread. La ruta se lee AL EMITIR, no al importar. Fail-soft
@@ -541,10 +555,14 @@ async def _correr_trabajo(
     try:
         from motor_registry.tool_authority import WORKSPACE_ROOT as _raiz_workspace
         af_wl = await _af_whitelist.derivar(_af_whitelist.fuentes_por_defecto(
-            _raiz_workspace, herramientas=[t["function"]["name"] for t in TOOLS_CATALOG]))
+            _raiz_workspace, herramientas=[t["function"]["name"] for t in TOOLS_CATALOG],
+            jax_checkout=os.environ.get("JAX_ANTI_FAB_JAX_CHECKOUT", _af_whitelist.JAX_CHECKOUT_POR_DEFECTO)))
     except Exception as exc:  # fail-closed: cualquier fallo del detector (DetectorNoDisponible o un bug) cuenta como detector caído
         af_error_detector = f"{type(exc).__name__}: {exc}"
         logger.error("job %s: detector de estructura no disponible: %s", job_id, af_error_detector)
+    if af_wl is None:
+        await _notify_detector_caido(job_id=job_id, motor=motor, capability=capability, modo=af_modo,
+                                     detalle=af_error_detector or "")
     if af_wl is None and af_modo == _af_consecuencia.Modo.DURO:
         store.update(
             job_id,
@@ -1190,6 +1208,7 @@ async def _correr_trabajo(
         except Exception as exc:  # fail-closed: un fallo del detector no se lee como limpio (en duro, FAILED)
             af_fallo = f"{type(exc).__name__}: {exc}"
             logger.exception("job %s: el detector de estructura falló sobre la salida", job_id)
+            await _notify_detector_caido(job_id=job_id, motor=motor, capability=capability, modo=af_modo, detalle=af_fallo)
     decision = _af_consecuencia.aplicar(veredicto, af_modo)
     if af_fallo and af_wl is not None and af_modo == _af_consecuencia.Modo.DURO:
         decision = _af_consecuencia.Decision(

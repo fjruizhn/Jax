@@ -11,11 +11,12 @@ CANALES.
     revisa; un campo que no figura no se revisa (límite declarado).
   * Diff: `--- a/X` afirma X; `--- /dev/null` + `+++ b/Y` propone Y. Lo que el
     diff define (`+def`, `+class`, `+CREATE TABLE`, `+CONSTANTE =`) es propio.
-  * Texto libre: SOLO backticks, forma de ruta (con barra y extensión conocida,
-    o primera componente igual a una carpeta del repo, o absoluta), `tabla.columna`
-    con la izquierda tabla real y `*.service|timer` (systemd: fuera de v1, se
-    declara). La prosa nunca es candidata: una palabra suelta fuera de backticks
-    NO se revisa. Es un límite declarado.
+  * Texto libre y campos que afirman: SOLO 4 formas (Enmienda 1, regla 2): rutas con
+    «/» (y extensión conocida, o primera componente igual a una carpeta del repo, o
+    absoluta), `tabla.columna` con la izquierda tabla real, `*.service|timer` (systemd:
+    fuera de v1, se declara) y las rutas de `files_modified` y «--- a/». La prosa nunca
+    es candidata. Un identificador suelto en backticks (sin «/» ni «.») y un nombre de
+    archivo sin directorio NO son candidatos.
 
 PROPUESTO / HIPÓTESIS. Propuesto = lo que el job escribió (`propias`), lo que su
 diff define, o lo marcado `nuevo:` en backticks. Hipótesis = candidato dentro de
@@ -23,10 +24,14 @@ una oración que termina en «?».
 
 CORPUS CONFIABLE. Solo texto de persona o del sistema (objetivo, definición de la
 capability). La salida de otro modelo NUNCA respalda: un candidato que solo se ve
-en `previos` (pasos anteriores) es `heredado`, que no es limpio.
+en `previos` (pasos anteriores) es `heredado`. Enmienda 1, regla 3: si el job de origen
+tiene veredicto propio guardado (`Previo.veredicto`), el heredado es `no_verificable`
+(visible, nunca limpio, no falla en duro); si no hay origen o no tiene veredicto, es
+`marcado`.
 
 LÍMITES DECLARADOS (lo que este detector NO ve; no son olvidos).
-  * Una palabra suelta en prosa, sin backticks y sin barra, no se revisa.
+  * Una palabra o identificador suelto, con o sin backticks, no se revisa: «`bodegas` es una
+    tabla» no se atrapa (los casos de ese tipo de U4 quedan «fuera de alcance»).
   * Una ruta absoluta cuya primera componente existe en `/` (`/etc`, `/srv`, `/home`...)
     se SALTA: `/srv/jax-data/jax-workspace/services/bodegas.py` pasa limpio. Este
     detector responde por el repo y la app, no por el sistema de archivos.
@@ -72,7 +77,6 @@ _MAX_CANDIDATO = 200
 _MAX_ITEMS = 100
 
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-_CAMELCASE = re.compile(r"[A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*\Z|[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+\Z")
 _SPAN = re.compile(r"`([^`\n]+)`")
 _URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://\S+")
 _RUTA_BARE = re.compile(r"(?<![\w/.:@~$-])((?:/|\./|\.\./)?[\w.@+-]+(?:/[\w.@+-]+)+/?)")
@@ -101,7 +105,7 @@ class Previo:
 @dataclass(frozen=True)
 class Item:
     candidato: str
-    tipo: str      # ruta | ruta_abs | tabla_columna | simbolo
+    tipo: str      # ruta | ruta_abs | tabla_columna
     canal: str     # afirma | texto | diff
     clase: str     # sin_respaldo | heredado
     motivo: str
@@ -127,6 +131,8 @@ class Veredicto:
             "no_verificables": list(self.no_verificables),
             "fuera_de_alcance": list(self.fuera_de_alcance),
             "motivo": self.motivo,
+            # el detector no llegó a mirar: esta salida no cuenta entre las 30 de la fase sombra
+            "cuenta_para_sombra": self.estado != NO_CORRIO,
         }
 
 
@@ -253,15 +259,8 @@ def _clasificar_span(s: str, wl: Whitelist, exts: frozenset[str], raices: frozen
         izq, _, der = s.partition(".")
         if izq in wl.tablas and _IDENT.match(der):
             return ("tabla_columna", s)
-        r = _normalizar_ruta(s)
-        if r.startswith("."):
-            return None  # dotfile suelto: configuración de la máquina, no una afirmación sobre el repo
-        if _RUTA_CHARS.match(r) and PurePosixPath(r).suffix.lower() in exts:
-            return ("ruta", r)
-        return None
-    if _IDENT.match(s) and not s.startswith("__"):
-        if "_" in s.strip("_") or _CAMELCASE.match(s):
-            return ("simbolo", s)
+    # Enmienda 1, regla 2: un identificador suelto (sin «/») o un nombre de archivo sin
+    # directorio NO es candidato. Límite declarado: «`bodegas` es una tabla» no se atrapa.
     return None
 
 
@@ -346,10 +345,6 @@ def _existe_ruta_app(r: str, wl: Whitelist) -> bool:
     return False
 
 
-def _existe_simbolo(s: str, conocidos: frozenset[str], wl: Whitelist) -> bool:
-    return s in conocidos or s.upper() in wl.sql or s.lower() in wl.sql
-
-
 def _parece_ruta(x: str) -> bool:
     return "/" in x or "." in x
 
@@ -375,7 +370,7 @@ def verificar(
     corpus_confiable: str | Sequence[str],
     propias: Collection[str],
     *,
-    previos: Sequence[str] = (),
+    previos: Sequence[str | Previo] = (),
     schema: str = "",
 ) -> Veredicto:
     """Veredicto de estructura de `salida`.
@@ -388,7 +383,7 @@ def verificar(
     segs = _segmentos(salida or "", schema)
     cands, propuestos_diff, fuera = _candidatos(segs, wl)
     propios_total = set(propuestos_diff) | {str(p) for p in propias}
-    conocidos = wl.simbolos | wl.tablas | wl.columnas | wl.claves | wl.modelos
+    previos_p = [x if isinstance(x, Previo) else Previo(str(x)) for x in previos]
 
     items: list[Item] = []
     hipotesis: list[str] = []
@@ -427,20 +422,27 @@ def verificar(
                 continue
         elif c.tipo == "tabla_columna":
             existe = c.texto in wl.pares
-        else:
-            existe = _existe_simbolo(c.texto, conocidos, wl)
         vistos.add(clave)
         if existe or _en_texto(c.texto, confiable):
             continue
-        clase = HEREDADO if _en_texto(c.texto, previos) else SIN_RESPALDO
+        if c.tipo == "ruta":
+            # el árbol en disco o el checkout de jax no se pudieron ver enteros: no se acusa
+            falta = [k for k in ("archivos", "jax_checkout") if k in wl.no_disponibles]
+            if falta:
+                no_verificables.update(falta)
+                continue
+        origen = [pr for pr in previos_p if c.texto in pr.texto]
+        if origen and all(pr.veredicto for pr in origen):
+            no_verificables.add("heredado")   # regla 3: el origen tiene veredicto propio guardado
+            continue
+        clase = HEREDADO if origen else SIN_RESPALDO
         motivo = {
             "ruta": "no existe en git ls-files del repo de trabajo",
             "ruta_abs": "no es una ruta del repo ni de la app LAS MANOS",
             "tabla_columna": "no existe en information_schema de la base",
-            "simbolo": "no existe en el código versionado ni en el esquema",
         }[c.tipo]
         if clase == HEREDADO:
-            motivo += "; solo aparece en la salida de un paso previo (otro modelo no respalda)"
+            motivo += "; solo aparece en la salida de un paso previo sin veredicto propio (otro modelo no respalda)"
         items.append(Item(c.texto[:_MAX_CANDIDATO], c.tipo, c.canal, clase, motivo))
 
     estado = MARCADO if items else (NO_VERIFICABLE if no_verificables else LIMPIO)

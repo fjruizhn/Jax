@@ -35,10 +35,16 @@ en el mismo commit que la crea).
   * Consultas opcionales (EXPLAIN 2026-10-22, MariaDB 12.3): claves de
     capability/facet/motor y `model_id` son lecturas completas de tablas de 4 a
     269 filas, sin WHERE ni ORDER BY; el modo se lee por clave primaria
-    (`const table`). Corren solo cuando la clave del memo cambia; OJO: si el repo de
-    trabajo está sucio por un proceso que lo escribe sin parar (hoy el daemon de
-    Ruflo, en su directorio de estado), `git status` cambia en cada job y el memo casi nunca
-    acierta: cada job paga estas consultas (milisegundos, medido).
+    (`const table`). Corren solo cuando la clave del memo cambia.
+  * Raíces (Enmienda 1): workspace = `git ls-files` + árbol en disco (mismo encierro
+    de tool_authority: nada fuera de la raíz, sin seguir enlaces; EXCLUSIONES; tope de
+    TOPE_ENTRADAS, y si se pasa la categoría `archivos` es no_verificable). Los no
+    versionados aportan SOLO la ruta; los símbolos (ast) salen solo de versionados. El
+    checkout desplegado de jax es fuente opcional: solo `git ls-files`. La huella de
+    `git status` descarta lo que está bajo EXCLUSIONES (el daemon de Ruflo escribe en
+    `.claude-flow/` sin parar y antes invalidaba el memo en cada job), y usa
+    `--ignored` para que un archivo nuevo ignorado por git también invalide. El SHA del
+    checkout de jax no está en la clave: cambia con un despliegue, que reinicia el proceso.
   * Caché de `ast`: por SHA de blob (`_CACHE_AST`). Un blob con el mismo SHA
     tiene el mismo contenido: no hay nada que invalidar. Tope blando: si pasa de
     `_TOPE_CACHE_AST` entradas se vacía entera (se repuebla en el siguiente job).
@@ -83,6 +89,18 @@ _TOPE_CACHE_AST = 20000
 #: Un .py más grande que esto no se parsea (no es código escrito a mano).
 _MAX_BYTES_PY = 2 * 1024 * 1024
 _TIMEOUT_GIT_S = 30
+
+#: Enmienda 1 (2026-10-22), regla 1: UNA constante de exclusiones, compartida por el
+#: recorrido del árbol en disco y por la huella de `git status` (regla 6). Son
+#: directorios de estado/dependencias que cambian solos (el daemon de Ruflo escribe
+#: en `.claude-flow/` sin parar) y no son afirmaciones sobre el trabajo.
+EXCLUSIONES = frozenset({".git", ".claude-flow", "node_modules", ".venv", "__pycache__"})
+#: Tope de entradas del recorrido en disco. Si se pasa, la categoría `archivos` es
+#: `no_verificable`: nunca se da por limpio un árbol que no se pudo ver entero.
+TOPE_ENTRADAS = 20000
+#: Checkout desplegado de jax (fuente OPCIONAL de rutas). Se lee con `git ls-files`,
+#: sin recorrer el disco. Lo fija el worker (con override por entorno).
+JAX_CHECKOUT_POR_DEFECTO = "/srv/jax-prod/jax"
 
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
@@ -134,6 +152,10 @@ class Fuentes:
     rutas_app: Callable[[], Awaitable[frozenset[str]]] | None = None
     claves: Callable[[], Awaitable[frozenset[str]]] | None = None
     modelos: Callable[[], Awaitable[frozenset[str]]] | None = None
+    #: árbol en disco del workspace: (rutas relativas, truncado por el tope). None = no se pidió.
+    disco: Callable[[], Awaitable[tuple[frozenset[str], bool]]] | None = None
+    #: `git ls-files` del checkout desplegado de jax. None = no se pidió.
+    codigo_jax: Callable[[], Awaitable[frozenset[str]]] | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +199,60 @@ def _git(raiz: Path, *args: str) -> bytes:
     return r.stdout
 
 
+def _excluido(ruta: str) -> bool:
+    return any(parte in EXCLUSIONES for parte in ruta.split("/"))
+
+
+def _estado_sin_exclusiones(salida: bytes) -> bytes:
+    """`git status --porcelain -z` sin las rutas bajo EXCLUSIONES (regla 6): lo que
+    cambia dentro de `.claude-flow/` no invalida el memo. Un renombre/copia trae un
+    registro extra (la ruta de origen) que se descarta junto con el suyo."""
+    registros = salida.split(b"\0")
+    kept, i = [], 0
+    while i < len(registros):
+        r = registros[i]
+        i += 1
+        if not r:
+            continue
+        ruta = r[3:].decode("utf-8", "replace")
+        origen = None
+        if r[:1] in (b"R", b"C") or r[1:2] in (b"R", b"C"):
+            origen = registros[i].decode("utf-8", "replace") if i < len(registros) else ""
+            i += 1
+        if _excluido(ruta) or (origen is not None and _excluido(origen)):
+            continue
+        kept.append(r + (b"\0" + origen.encode() if origen is not None else b""))
+    return b"\0".join(kept)
+
+
+def recorrer_disco(raiz) -> tuple[frozenset[str], bool]:
+    """Rutas (relativas, con «/») de los archivos visibles bajo `raiz`, con el mismo
+    encierro de tool_authority: nada fuera de `raiz` y sin seguir enlaces (un enlace,
+    a archivo o a directorio, no aporta ninguna ruta). Salta EXCLUSIONES. Devuelve
+    (rutas, truncado): si hay más de TOPE_ENTRADAS archivos, corta y lo dice."""
+    raiz_real = os.path.realpath(raiz)
+    rutas: set[str] = set()
+    for actual, dirs, archivos in os.walk(raiz_real, followlinks=False):
+        if os.path.realpath(actual) != actual and not os.path.realpath(actual).startswith(raiz_real + os.sep):
+            dirs[:] = []
+            continue
+        dirs[:] = [d for d in dirs if d not in EXCLUSIONES and not os.path.islink(os.path.join(actual, d))]
+        for nombre in archivos:
+            completo = os.path.join(actual, nombre)
+            if os.path.islink(completo) or nombre in EXCLUSIONES:
+                continue
+            rutas.add(os.path.relpath(completo, raiz_real).replace(os.sep, "/"))
+            if len(rutas) > TOPE_ENTRADAS:
+                return frozenset(rutas), True
+    return frozenset(rutas), False
+
+
+async def rutas_de_checkout(raiz) -> frozenset[str]:
+    """`git ls-files` de un checkout (el desplegado de jax). Solo rutas versionadas."""
+    salida = await asyncio.to_thread(_git, Path(raiz), "ls-files", "-z")
+    return frozenset(r.decode("utf-8", "replace") for r in salida.split(b"\0") if r)
+
+
 def leer_git(raiz) -> EstadoGit:
     """HEAD, hash de `git status --porcelain` y `git ls-files -s` de `raiz`."""
     raiz = Path(raiz)
@@ -185,7 +261,7 @@ def leer_git(raiz) -> EstadoGit:
         head = _git(raiz, "rev-parse", "HEAD").decode().strip()
     except DetectorNoDisponible:
         head = "(sin commits)"  # repo recién creado: válido, con lista de archivos vacía o solo del índice
-    estado = hashlib.sha1(_git(raiz, "status", "--porcelain", "-z")).hexdigest()
+    estado = hashlib.sha1(_estado_sin_exclusiones(_git(raiz, "status", "--porcelain", "-z", "--ignored"))).hexdigest()
     entradas = []
     for registro in _git(raiz, "ls-files", "-s", "-z").split(b"\0"):
         if not registro:
@@ -322,7 +398,7 @@ async def _rutas_de_la_app() -> frozenset[str]:
     return frozenset(r.path for r in rutas if isinstance(getattr(r, "path", None), str))
 
 
-def fuentes_por_defecto(raiz_repo, rutas_app=None, herramientas: Iterable[str] = ()) -> Fuentes:
+def fuentes_por_defecto(raiz_repo, rutas_app=None, herramientas: Iterable[str] = (), jax_checkout=None) -> Fuentes:
     """Fuentes reales: base por aiomysql, git y ast en hilo. `herramientas` son
     los nombres de `TOOLS_CATALOG`, que el worker conoce y este paquete no puede
     importar (no es importable desde ambos lados)."""
@@ -338,9 +414,14 @@ def fuentes_por_defecto(raiz_repo, rutas_app=None, herramientas: Iterable[str] =
     async def claves() -> frozenset[str]:
         return herramientas | await _claves_db()
 
+    async def disco() -> tuple[frozenset[str], bool]:
+        return await asyncio.to_thread(recorrer_disco, raiz)
+
+    codigo_jax = (lambda: rutas_de_checkout(jax_checkout)) if jax_checkout else None
     return Fuentes(
         huella=_huella_db, esquema=_esquema_db, git=git, simbolos=simbolos,
         rutas_app=rutas_app or _rutas_de_la_app, claves=claves, modelos=_modelos_db,
+        disco=disco, codigo_jax=codigo_jax,
     )
 
 
@@ -403,7 +484,22 @@ async def derivar(fuentes: Fuentes) -> Whitelist:
         raices = frozenset()
         no_disponibles.add("raices_fs")
 
-    archivos = frozenset(ruta for _sha, ruta in git.entradas)
+    archivos = frozenset(ruta for _sha, ruta in git.entradas)   # versionados: de ellos salen los símbolos
+    if fuentes.disco is not None:
+        try:
+            en_disco, truncado = await fuentes.disco()
+            archivos |= frozenset(en_disco)     # no versionados: SOLO la ruta
+            if truncado:
+                no_disponibles.add("archivos")
+        except Exception as exc:  # fail-soft: declarado, sin el árbol en disco la categoría archivos pasa a no_verificable
+            logger.warning("anti_fabricacion: árbol en disco no disponible: %s: %s", type(exc).__name__, exc)
+            no_disponibles.add("archivos")
+    if fuentes.codigo_jax is not None:
+        try:
+            archivos |= frozenset(await fuentes.codigo_jax())
+        except Exception as exc:  # fail-soft: declarado, sin el checkout de jax las rutas no halladas pasan a no_verificable
+            logger.warning("anti_fabricacion: checkout de jax no disponible: %s: %s", type(exc).__name__, exc)
+            no_disponibles.add("jax_checkout")
     wl = Whitelist(
         tablas=frozenset(t for t, _c in esquema.columnas),
         columnas=frozenset(c for _t, c in esquema.columnas),
