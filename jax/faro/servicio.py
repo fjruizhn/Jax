@@ -26,7 +26,7 @@ import logging
 import os
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .aviso import Avisador, ConfigAviso, leer_credenciales
 from .bitacora import Bitacora, emisor_logger
@@ -34,6 +34,7 @@ from .bitacora_db import ConfigBitacoraDB, EmisorTabla, crear_pool
 from .config import ConfigFaro, ConfigFaroInvalida, ConfigMemoria, ConfigPuerto
 from .control import ConfigControl, ServidorControl, validar_directorio_control
 from .identidad import Ejecucion
+from .jaula import LanzadorJaula
 from .logs import asegurar_logging
 from .paquete import PaqueteCargado, cargar_paquete
 from .transporte import PresupuestoBytes, ServidorPuerto
@@ -59,11 +60,40 @@ class Servicio:
     cfg_memoria: ConfigMemoria | None = None
     pool_memoria: object | None = None
     adaptador_memoria: AdaptadorMemoria | None = None
+    #: EL gestor de unidades del servicio (MAJOR 1): control y lanzador comparten ESTA instancia; no hay
+    #: dos proveedores de vida por uid. Lo adopta el primer `control(scope)` y a partir de ahi es fijo.
+    gestor_unidades: object = None
+    lanzadores: set[LanzadorJaula] = field(default_factory=set)
 
-    def control(self, jaula_viva=None) -> ServidorControl:
+    def control(self, scope_manager) -> ServidorControl:
         """El canal de control autenticado (0.3c): el unico lugar donde nace una `Ejecucion`. Se usa con
-        `async with servicio.control() as c:`; sus ejecuciones comparten el UNICO presupuesto del servicio."""
-        return ServidorControl(self.cfg_control, self.crear_puerto, self.bitacora, jaula_viva=jaula_viva)
+        `async with servicio.control(scope) as c:`; sus ejecuciones comparten el UNICO presupuesto del
+        servicio. `scope_manager` (el gestor de unidades de 0.6, scope.py) es OBLIGATORIO (R-2) y es EL
+        MISMO para todo el servicio: sin el no se construye el canal, y un segundo gestor distinto se
+        rechaza — consultar la vida de un uid con un gestor y lanzar con otro partiria R-2 por la mitad."""
+        if scope_manager is None:
+            raise ConfigFaroInvalida(
+                "Servicio.control exige el gestor de unidades (scope de 0.6): sin proveedor de liveness no"
+                " hay canal de control (R-2)")
+        if self.gestor_unidades is None:
+            self.gestor_unidades = scope_manager
+        elif scope_manager is not self.gestor_unidades:
+            raise ConfigFaroInvalida(
+                "este Servicio ya tiene su gestor de unidades: control y lanzador comparten UNA sola"
+                " instancia (R-2); pasar otro gestor partiria la verdad del uid en dos")
+        return ServidorControl(self.cfg_control, self.crear_puerto, self.bitacora, self.gestor_unidades)
+
+    def crear_lanzador(self, cfg_jaula, **kw) -> "LanzadorJaula":
+        """El lanzador de jaulas del servicio: se construye SOBRE el gestor de unidades ya adoptado por
+        `control` — nunca sobre otro. Sin `control(scope)` previo no hay lanzador (nadie lanzaria con el
+        gestor que el canal no conoce)."""
+        if self.gestor_unidades is None:
+            raise ConfigFaroInvalida(
+                "no hay gestor de unidades: Servicio.control(scope) lo fija primero; el lanzador se"
+                " construye siempre sobre EL gestor del canal (R-2)")
+        lanzador = LanzadorJaula.desde_control(cfg_jaula, self.bitacora, self.gestor_unidades, self.cfg_control, **kw)
+        self.lanzadores.add(lanzador)
+        return lanzador
 
     def crear_puerto(self, ejecucion: Ejecucion) -> ServidorPuerto:
         return ServidorPuerto(self.cfg_puerto, ejecucion, self.paquete, self.bitacora, presupuesto=self.presupuesto,
@@ -71,13 +101,27 @@ class Servicio:
                               adaptador_memoria=self.adaptador_memoria)
 
     async def cerrar(self) -> None:
+        errores: list[BaseException] = []
+
+        async def intentar(cerrar) -> None:
+            try:
+                resultado = cerrar()
+                if hasattr(resultado, "__await__"):
+                    await resultado
+            except BaseException as exc:  # fail-soft: se agrega el fallo y se cierran los demás recursos del servicio
+                errores.append(exc)
+
+        for lanzador in tuple(self.lanzadores):
+            await intentar(lanzador.cerrar)
         if self.avisador is not None:
-            await self.avisador.cerrar()        # entrega lo pendiente (con plazo) y nunca lanza
+            await intentar(self.avisador.cerrar)
         if self.pool_memoria is not None:
-            self.pool_memoria.close()
-            await self.pool_memoria.wait_closed()
-        self.pool.close()
-        await self.pool.wait_closed()
+            await intentar(self.pool_memoria.close)
+            await intentar(self.pool_memoria.wait_closed)
+        await intentar(self.pool.close)
+        await intentar(self.pool.wait_closed)
+        if errores:
+            raise BaseExceptionGroup("falló el cierre de recursos del servicio", errores)
 
 
 async def arrancar(env: Mapping[str, str], *, crear_pool: Callable = crear_pool,
