@@ -1048,10 +1048,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pytest
-      - run: python -m pytest tests/test_rutas_de_produccion.py tests/test_rutas_de_produccion_verificador.py -v
+      - run: python -m pytest tests/test_rutas_de_produccion.py tests/test_rutas_de_produccion_verificador.py tests/test_rutas_de_produccion_reversion.py -v
       - name: Piso exacto de tests CORRIDOS (no skipeados)
         run: |
-          python -m pytest -q tests/test_rutas_de_produccion.py tests/test_rutas_de_produccion_verificador.py 2>&1 | tee /tmp/rutas_de_produccion
+          python -m pytest -q tests/test_rutas_de_produccion.py tests/test_rutas_de_produccion_verificador.py tests/test_rutas_de_produccion_reversion.py 2>&1 | tee /tmp/rutas_de_produccion
           python3 .github/ci/piso.py verificar rutas-de-produccion-fuera-del-checkout-de-trabajo/rutas_de_produccion /tmp/rutas_de_produccion || exit $?
 
   # Sello de invalidacion cross-proceso del cache de facet_resolver (Q3,

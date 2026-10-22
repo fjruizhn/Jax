@@ -4906,8 +4906,9 @@ Son las pruebas de `las_manos/_server_audit_log_entorno_test.py`: sin `JAX_AUDIT
 
 ## `rutas-de-produccion-fuera-del-checkout-de-trabajo/rutas_de_produccion`
 
-Patrón: `^62 passed, 4 skipped`. Nació en jax#277 y llegó a `ci/pisos.json` el 2026-10-21.
-Cuenta `tests/test_rutas_de_produccion.py` más `tests/test_rutas_de_produccion_verificador.py`.
+Patrón: `^88 passed, 4 skipped`. Nació en jax#277 y llegó a `ci/pisos.json` el 2026-10-21.
+Cuenta `tests/test_rutas_de_produccion.py`, `tests/test_rutas_de_produccion_verificador.py` y
+`tests/test_rutas_de_produccion_reversion.py`.
 Las 4 saltadas solo corren en el host de producción de jax (si existe `/srv/jax-prod/jax`):
 `test_verificar_rutas_de_produccion_da_cero_en_produccion` y las tres que llaman al
 `sudo -n -u jaxsvc` real.
@@ -4929,3 +4930,11 @@ Las 4 saltadas solo corren en el host de producción de jax (si existe `/srv/jax
   B), más 1 de que un error de parseo no muestra el valor de la línea. Las saltadas siguen en 4.
   Local, con el `sudo` falso al frente del PATH: 63 passed y 3 fallidas, las 3 de las 4 que el
   runner salta; con sudo real en hall9000: 66 passed.
+- 2026-10-21, re-auditoría de jax#277 sobre `10e8e518`: 62 -> 88 (+26). Una prueba nueva del
+  verificador: un «nombre» que no es identificador no se muestra (MINOR-A). Y entra
+  `tests/test_rutas_de_produccion_reversion.py`, con 25 pruebas: corre los bloques de la Reversión
+  del runbook en un sandbox sin root, modelando que fruiz no ve `/var/log/jax/las_manos` sin
+  sudo. Contra el runbook de `10e8e518` fallan 10 de esas 25. Necesita bash y rsync; si faltan,
+  el módulo se salta entero y el piso no cuadra (falla visible, no verde por vacío).
+  Local con sudo real: 92 passed. Con el sudo falso: 88 passed y 4 fallidas, que son las 4 que el
+  runner salta.

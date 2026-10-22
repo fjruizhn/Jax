@@ -731,12 +731,16 @@ vista, el bloque ABORTA. «No se sabe» nunca se trata como «no corrió».
 
 **La secuencia (preámbulo + R1-R5) se probó de punta a punta el 2026-09-25
 en `/tmp`, con `sudo unshare --mount`, reproduciendo el estado real
-posterior al corte** (incluido el `chattr +i` del Paso 9). **Los cambios del
-2026-10-21** (MARCAS, aborto ante «no se sabe» en R2/R3, R4 solo con tres
-claves) se probaron sin root, con las rutas cambiadas a un directorio
-temporal y `sudo` reemplazado por una función que ejecuta sin privilegios:
-eso prueba la lógica de cada rama, no los permisos. La próxima vez que haga
-falta revertir, ensayar antes con `unshare` como el 25-sep.
+posterior al corte** (incluido el `chattr +i` del Paso 9). **Desde el 2026-10-21 la
+lógica de estos bloques la prueba el CI:** `tests/test_rutas_de_produccion_reversion.py`
+corre el preámbulo, R2, R3 y R4 tal como están escritos aquí, en un sandbox
+sin root. Reescribe toda ruta real (y no corre un bloque al que le quede
+una), y `sudo` es una función que modela lo que fruiz ve de verdad: sin
+sudo, `/var/log/jax/las_manos` (jaxsvc:jaxsvc 0750) no existe para él.
+Prueba la lógica y la visibilidad, no los permisos de root (chown, chattr).
+La próxima vez que haga falta revertir, ensayar antes con `unshare`, como el
+25-sep. **Si se edita un bloque de la Reversión, esas pruebas tienen que
+seguir pasando.**
 
 ```bash
 (
@@ -748,7 +752,7 @@ if [ ! -f "$MARCAS/rutas-prod.TS" ]; then
 fi
 TS="$(cat "$MARCAS/rutas-prod.TS")"
 BACKUP="/etc/jax/.env.backup-pre-rutas-de-produccion-${TS}"
-if [ ! -f "$BACKUP" ]; then
+if ! sudo test -f "$BACKUP"; then
   echo "ABORTAR REVERSION: no existe $BACKUP -- no hay de donde restaurar"
   exit 1
 fi
@@ -790,7 +794,10 @@ MARCAS=/home/fruiz/admin-ecosistema/jax-rutas-produccion
 OLD=/home/fruiz/jax/las_manos/logs/audit.jsonl
 NEW=/var/log/jax/las_manos/audit.jsonl
 
-if [ ! -f "$NEW" ]; then
+# sudo test, no [ -f ]: /var/log/jax/las_manos es jaxsvc:jaxsvc 0750 y fruiz
+# no esta en el grupo -- sin sudo, [ -f "$NEW" ] da falso AUNQUE EXISTA y R2
+# se saltaba en silencio (2026-10-21, re-auditoria de jax#277, MAJOR-1').
+if ! sudo test -f "$NEW"; then
   echo "R2: $NEW no existe -- el Paso 5 nunca copio el audit log, nada que anexar"
 elif [ ! -f "$MARCAS/rutas-prod.N0" ]; then
   # El Paso 5 escribe N0 ANTES de copiar: audit log nuevo sin N0 no es
@@ -855,7 +862,11 @@ if [ -f "$MARCAS/rutas-prod.paso4-completo" ]; then
   # el archivo, salió intacto.
   sudo rsync -aHAX --ignore-existing --numeric-ids /srv/jax-data/repo/ /home/fruiz/jax/repo/
   echo "R3 OK: sincronizado de vuelta (sólo lo nuevo; nada preexistente se tocó)"
-elif [ -z "$(sudo find /srv/jax-data/repo -mindepth 1 -print -quit 2>/dev/null)" ]; then
+elif ! CONTENIDO="$(sudo find /srv/jax-data/repo -mindepth 1 -print -quit)"; then
+  # find que falla (sin montar, sudo que no corre) no es «vacio»: no se sabe.
+  echo "ABORTAR: no se pudo listar /srv/jax-data/repo -- no se sabe si el Paso 4 corrio"
+  exit 1
+elif [ -z "$CONTENIDO" ]; then
   echo "R3: no existe $MARCAS/rutas-prod.paso4-completo y /srv/jax-data/repo esta vacio -- el Paso 4 nunca corrio, nada que sincronizar"
 else
   echo "ABORTAR: falta $MARCAS/rutas-prod.paso4-completo pero /srv/jax-data/repo tiene datos -- no se sabe si el Paso 4 termino; revisar a mano"
@@ -880,7 +891,7 @@ set -euo pipefail
 MARCAS=/home/fruiz/admin-ecosistema/jax-rutas-produccion
 TS="$(cat "$MARCAS/rutas-prod.TS")"
 BACKUP="/etc/jax/.env.backup-pre-rutas-de-produccion-${TS}"
-[ -f "$BACKUP" ] || { echo "ABORTAR: no existe $BACKUP"; exit 1; }
+sudo test -f "$BACKUP" || { echo "ABORTAR: no existe $BACKUP"; exit 1; }
 
 # python3 -I: no carga nada del directorio actual. Lee los dos archivos como
 # root y escribe el temporal con umask 077; no imprime ningun valor (las tres
@@ -888,18 +899,20 @@ BACKUP="/etc/jax/.env.backup-pre-rutas-de-produccion-${TS}"
 sudo python3 -I -c '
 import os, re, sys
 CLAVES = ("JAX_CONFIG_PATH", "JAX_AUDIT_LOG_PATH", "JAX_REPO_BASE")
-respaldo = open(sys.argv[1], encoding="utf-8").read()
-vivo = open("/etc/jax/.env", encoding="utf-8").read()
+respaldo = open(sys.argv[1], encoding="utf-8", newline="").read()
+vivo = open("/etc/jax/.env", encoding="utf-8", newline="").read()
 viejas = {}
 for c in CLAVES:
-    r = [l for l in respaldo.splitlines() if l.startswith(c + "=")]
+    r = [l.rstrip("\r") for l in respaldo.splitlines() if l.startswith(c + "=")]
     v = [l for l in vivo.splitlines() if l.startswith(c + "=")]
     if len(r) != 1 or len(v) != 1:
         sys.exit(f"ABORTAR: {c} aparece {len(r)} vez/veces en el respaldo y {len(v)} en el vivo; se esperaba 1 y 1")
     viejas[c] = r[0]
-salida = [next((viejas[c] for c in CLAVES if l.startswith(c + "=")), l) for l in vivo.split("\n")]
+# una linea con CRLF conserva su \r: solo cambia el valor de las 3 claves
+salida = [next((viejas[c] + ("\r" if l.endswith("\r") else "") for c in CLAVES if l.startswith(c + "=")), l)
+          for l in vivo.split("\n")]
 os.umask(0o077)
-with open("/etc/jax/.env.tmp", "w", encoding="utf-8") as f:
+with open("/etc/jax/.env.tmp", "w", encoding="utf-8", newline="") as f:
     f.write("\n".join(salida))
 ' "$BACKUP"
 sudo chown root:jaxsvc /etc/jax/.env.tmp
@@ -911,15 +924,19 @@ if [ "$MODO_TMP" != "root:jaxsvc 640" ]; then
   exit 1
 fi
 
-DIFF_TMP="$(diff -U0 <(sudo cat /etc/jax/.env) <(sudo cat /etc/jax/.env.tmp) || true)"
-echo "$DIFF_TMP"
-N_LINEAS_DE_CAMBIO="$(printf '%s\n' "$DIFF_TMP" | grep -cE '^[+-][^+-]' || true)"
-FUERA_DE_LAS_3="$(printf '%s\n' "$DIFF_TMP" | grep -E '^[+-][^+-]' | grep -cvE '^[+-]JAX_(CONFIG_PATH|AUDIT_LOG_PATH|REPO_BASE)=' || true)"
+# Cada linea cambiada sale como «-texto» o «+texto», tambien las vacias o las
+# que empiezan con +/- (con -U0 y '^[+-][^+-]' esas no se contaban). Nada de
+# esto se imprime hasta validar: si el diff trae otra clave, puede ser un secreto.
+DIFF_TMP="$(diff --unchanged-line-format= --old-line-format='-%L' --new-line-format='+%L' \
+  <(sudo cat /etc/jax/.env) <(sudo cat /etc/jax/.env.tmp) || true)"
+N_LINEAS_DE_CAMBIO="$(printf '%s' "$DIFF_TMP" | grep -c '' || true)"
+FUERA_DE_LAS_3="$(printf '%s' "$DIFF_TMP" | grep -cvE '^[+-]JAX_(CONFIG_PATH|AUDIT_LOG_PATH|REPO_BASE)=' || true)"
 if [ "$N_LINEAS_DE_CAMBIO" -ne 6 ] || [ "$FUERA_DE_LAS_3" -ne 0 ]; then
-  echo "ABORTAR: el diff tiene $N_LINEAS_DE_CAMBIO lineas de cambio ($FUERA_DE_LAS_3 fuera de las 3 claves); se esperaban exactamente 6, todas de las 3 claves."
+  echo "ABORTAR: el diff tiene $N_LINEAS_DE_CAMBIO lineas de cambio ($FUERA_DE_LAS_3 fuera de las 3 claves); se esperaban exactamente 6, todas de las 3 claves. No se muestra el diff: puede traer secretos."
   sudo rm -f /etc/jax/.env.tmp
   exit 1
 fi
+echo "$DIFF_TMP"
 echo "diff OK: exactamente las 3 claves vuelven a su valor del respaldo, nada mas"
 
 sudo mv /etc/jax/.env.tmp /etc/jax/.env
