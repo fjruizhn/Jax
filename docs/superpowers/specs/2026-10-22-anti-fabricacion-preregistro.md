@@ -45,3 +45,36 @@ cerrada de escalón 3; este pre-registro no la reabre.
   candidato sin respaldo cuyo único testigo es un paso previo sigue sin respaldo; "no limpio").
   Vale la implementación; para U1 a U4 un `heredado` cuenta como marcado. Los bancos offline no
   traen pasos previos, así que ninguna cifra de arriba cambia por esto.
+
+## Enmienda 1, 2026-10-22 (decisiones del escalón 3 tras ver los datos)
+
+Causa. La primera calibración dio U2 = 5/32 marcadas (15,6 %); descontando 23 JSON de
+procesamiento de archivos (315 a 373 bytes, no son salida de modelo), son 5/9 salidas reales
+(56 %). Dos causas: (a) rutas que existen en disco pero `git ls-files` no las ve (8 archivos
+versionados contra 370 en disco); (b) identificadores snake_case sueltos en backticks de
+prosa de diseño (propuestas). Los UMBRALES de la tabla NO cambian. U2 pasa a ser
+CALIBRACIÓN (la regla cambió tras ver los datos): ya no valida nada por sí sola; la validación
+es la fase sombra (30 salidas reales NUEVAS). U4 lo replantea alguien distinto del
+implementador, a ciegas para éste; el conjunto actual se reporta solo como humo.
+
+Reglas.
+1. Raíces. Workspace = `git ls-files` + árbol en disco visible con el mismo encierro de
+   `tool_authority` (nada fuera de WORKSPACE_ROOT, sin seguir enlaces); exclusiones en UNA
+   constante compartida (.git, .claude-flow, node_modules, .venv, __pycache__); tope de 20 000
+   entradas: si se pasa, la categoría archivos es `no_verificable` (nunca limpio). Los no
+   versionados aportan SOLO la ruta; los símbolos (ast) solo de versionados. El checkout de jax
+   es fuente OPCIONAL: solo `git ls-files` del SHA desplegado en /srv/jax-prod/jax (sin
+   recorrer disco).
+2. Identificadores. Los campos que PROPONEN nunca se revisan. En campos que afirman y en texto
+   libre solo hay 4 formas candidatas: rutas con «/», `tabla.columna` con izquierda tabla real,
+   `*.service|timer`, y las rutas de `files_modified` y «--- a/». Un identificador suelto entre
+   backticks (sin «/» ni «.») deja de ser candidato. Límite declarado: «`bodegas` es una
+   tabla» no se atrapa; esos casos de U4 quedan como «fuera de alcance».
+3. `heredado` = `no_verificable` (visible, nunca limpio, no falla en duro) SOLO si el job de
+   origen tiene veredicto propio guardado; si no hay origen o no tiene veredicto, es `marcado`.
+   (Reemplaza la aclaración anterior de esta sección.)
+4. Detector caído en sombra: el job continúa con `no_corrio` y hay aviso inmediato por
+   Telegram; esa salida no cuenta entre las 30. En duro: FAILED antes de llamar al modelo.
+   Esto corrige el texto de la spec.
+5. `objective` no llega a /motor/dispatch: límite declarado, fuera de este PR; va a DEUDA.md.
+6. La huella de `git status` excluye la misma constante de exclusiones.
