@@ -9,7 +9,12 @@ los `.py` versionados. Opcionales: rutas de la app LAS MANOS (en proceso),
 claves de las tablas capability/facet/motor + herramientas, y los `model_id` de
 la tabla `model`. Fuera de v1: systemd y las rutas de jax-platform.
 
-OBLIGATORIAS vs OPCIONALES. Si una fuente obligatoria (huella, esquema, git)
+OBLIGATORIAS vs OPCIONALES. Obligatorias son las que el veredicto USA: la huella, las
+columnas de `information_schema` (tablas y pares `tabla.columna`) y git (rutas
+versionadas). Todo lo demás (funciones/palabras/motores/charsets SQL, símbolos de `ast`,
+claves, modelos, rutas de la app, árbol en disco, checkout de jax) es OPCIONAL: se deriva
+para trazabilidad y para el día que el identificador suelto entre en alcance, pero hoy ningún
+veredicto lo consume, y si cae se declara en `no_disponibles`. Si una fuente obligatoria
 no responde, `derivar` levanta `DetectorNoDisponible`: JAMÁS devuelve una lista
 vacía, porque una whitelist vacía marcaría TODO (o, peor, un detector que cae
 en silencio dejaría pasar todo). Una fuente opcional caída se declara en
@@ -134,6 +139,8 @@ class EsquemaDB:
     palabras: frozenset[str] = frozenset()
     motores: frozenset[str] = frozenset()
     charsets: frozenset[str] = frozenset()
+    #: categorías opcionales que no se pudieron leer (p. ej. "sql"): se declaran, no se tiran
+    faltan: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -187,7 +194,10 @@ _CACHE_AST: dict[str, frozenset[str]] = {}
 def _git(raiz: Path, *args: str) -> bytes:
     try:
         r = subprocess.run(
-            ["git", "-c", "core.fsmonitor=false", "-C", str(raiz), *args],
+            # `safe.directory` por INVOCACIÓN y solo para esta ruta (convención de
+            # ops/instalar-dropins-de-servicio.sh): LAS MANOS corre como otro usuario que
+            # el dueño del workspace y sin esto git sale con rc=128 («dubious ownership»).
+            ["git", "-c", "core.fsmonitor=false", "-c", f"safe.directory={raiz}", "-C", str(raiz), *args],
             capture_output=True, timeout=_TIMEOUT_GIT_S,
             # status sin lock de índice: no compite con el commit del job
             env={**os.environ, "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"},
@@ -262,7 +272,7 @@ def leer_git(raiz) -> EstadoGit:
         head = _git(raiz, "rev-parse", "HEAD").decode().strip()
     except DetectorNoDisponible:
         head = "(sin commits)"  # repo recién creado: válido, con lista de archivos vacía o solo del índice
-    estado = hashlib.sha1(_estado_sin_exclusiones(_git(raiz, "status", "--porcelain", "-z", "--ignored"))).hexdigest()
+    estado = hashlib.sha1(_estado_sin_exclusiones(_git(raiz, "status", "--porcelain", "-z", "--ignored", "--untracked-files=all"))).hexdigest()
     entradas = []
     for registro in _git(raiz, "ls-files", "-s", "-z").split(b"\0"):
         if not registro:
@@ -371,13 +381,17 @@ async def _esquema_db() -> EsquemaDB:
     def unicos(filas):
         return frozenset(str(f[0]) for f in filas if f[0])
 
-    return EsquemaDB(
-        columnas=tuple((str(t), str(c)) for t, c in columnas),
-        funciones=unicos(await _consulta(SQL_FUNCIONES)),
-        palabras=unicos(await _consulta(SQL_PALABRAS)),
-        motores=unicos(await _consulta(SQL_MOTORES)),
-        charsets=unicos(await _consulta(SQL_CHARSETS)),
-    )
+    extras: dict[str, frozenset[str]] = {}
+    faltan: set[str] = set()
+    for nombre, sql in (("funciones", SQL_FUNCIONES), ("palabras", SQL_PALABRAS),
+                        ("motores", SQL_MOTORES), ("charsets", SQL_CHARSETS)):
+        try:
+            extras[nombre] = unicos(await _consulta(sql))
+        except Exception as exc:  # fail-soft: declarado, el veredicto no usa el vocabulario SQL; se declara «sql» en no_disponibles
+            logger.warning("anti_fabricacion: information_schema %s no disponible: %s: %s", nombre, type(exc).__name__, exc)
+            extras[nombre] = frozenset()
+            faltan.add("sql")
+    return EsquemaDB(columnas=tuple((str(t), str(c)) for t, c in columnas), faltan=frozenset(faltan), **extras)
 
 
 async def _claves_db() -> frozenset[str]:
@@ -461,13 +475,21 @@ async def derivar(fuentes: Fuentes) -> Whitelist:
 
     try:
         esquema = await fuentes.esquema()
-        simbolos = await fuentes.simbolos(git) if fuentes.simbolos else frozenset()
     except DetectorNoDisponible:
         raise
-    except Exception as exc:  # fail-closed: esquema/símbolos son obligatorios; nunca una whitelist vacía
+    except Exception as exc:  # fail-closed: las columnas (tablas y pares) son obligatorias; nunca una whitelist vacía
         raise DetectorNoDisponible(f"fuente obligatoria caída (esquema): {type(exc).__name__}: {exc}") from exc
 
-    no_disponibles: set[str] = set()
+    no_disponibles: set[str] = set(esquema.faltan)
+    simbolos: frozenset[str] = frozenset()
+    if fuentes.simbolos is not None:
+        try:
+            simbolos = frozenset(await fuentes.simbolos(git))
+        except Exception as exc:  # fail-soft: declarado, los símbolos no entran hoy en ningún veredicto (identificador suelto fuera de v1)
+            logger.warning("anti_fabricacion: símbolos no disponibles: %s: %s", type(exc).__name__, exc)
+            no_disponibles.add("simbolos")
+    else:
+        no_disponibles.add("simbolos")
     opcionales: dict[str, frozenset[str]] = {}
     for nombre in ("rutas_app", "claves", "modelos"):
         fuente = getattr(fuentes, nombre)
