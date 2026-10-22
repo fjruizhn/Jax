@@ -20,6 +20,8 @@ def test_callback_config_requires_explicit_pair_gate(monkeypatch):
     monkeypatch.delenv("JAX_OFFICE_EXECUTION_ENABLED", raising=False)
     monkeypatch.delenv("JAX_OFFICE_PAIRED_CONTRACT_VERSION", raising=False)
     from jacobs.office_callbacks import OfficeCallbackConfigurationError, office_callback_config
+    from jacobs import office_callbacks
+    office_callbacks.clear_office_callback_config_cache()
 
     with pytest.raises(OfficeCallbackConfigurationError):
         office_callback_config()
@@ -87,6 +89,7 @@ def test_ready_replay_returns_200_and_schedules_existing_runner_once():
     runner = SimpleNamespace(pipeline_id=snap.pipeline_id)
     with patch.object(routes, "office_callback_config"), patch.object(routes, "check_kill_switch", return_value=False), \
          patch.object(routes.cupo, "reservar_office_v1", AsyncMock(return_value=OfficeReservation(snap.pipeline_id, False))), \
+         patch.object(routes.store, "office_prepare_step", AsyncMock(return_value=False)), \
          patch.object(routes.store, "office_execution_snapshot", AsyncMock(return_value=snap)), \
          patch.object(routes.store, "office_pipeline_for_runner", AsyncMock(return_value=runner)), \
          patch.object(routes, "run_pipeline", AsyncMock()) as execute:
@@ -98,7 +101,7 @@ def test_ready_replay_returns_200_and_schedules_existing_runner_once():
 
 
 @pytest.mark.parametrize("phase,status", [
-    ("RESERVED", 202), ("PREFLIGHT_IN_FLIGHT", 202), ("DELIVERY_IN_FLIGHT", 202),
+    ("PREFLIGHT_IN_FLIGHT", 202), ("DELIVERY_IN_FLIGHT", 202),
 ])
 def test_inflight_replay_never_runs_probe_or_runner(phase, status):
     from jacobs.cupo import OfficeReservation
@@ -106,6 +109,7 @@ def test_inflight_replay_never_runs_probe_or_runner(phase, status):
     snap = _snapshot(OfficePhase(phase))
     with patch.object(routes, "office_callback_config"), patch.object(routes, "check_kill_switch", return_value=False), \
          patch.object(routes.cupo, "reservar_office_v1", AsyncMock(return_value=OfficeReservation(snap.pipeline_id, False))), \
+         patch.object(routes.store, "office_prepare_step", AsyncMock(return_value=False)), \
          patch.object(routes.store, "office_execution_snapshot", AsyncMock(return_value=snap)), \
          patch.object(routes, "prevuelo", AsyncMock(side_effect=AssertionError("probe"))), \
          patch.object(routes, "run_pipeline", AsyncMock(side_effect=AssertionError("runner"))):
@@ -120,6 +124,8 @@ def test_inflight_replay_never_runs_probe_or_runner(phase, status):
     ("JAX_OFFICE_CALLBACK_BASE_URL", "https://example.test/?q=1"),
     ("JAX_OFFICE_CALLBACK_TIMEOUT_SECONDS", "0"),
     ("JAX_OFFICE_CALLBACK_MAX_RESPONSE_BYTES", "-1"),
+    ("JAX_OFFICE_CALLBACK_BASE_URL", "http://[::1"),
+    ("JAX_OFFICE_CALLBACK_BASE_URL", "https:///missing-host"),
 ])
 def test_callback_config_rejects_unsafe_or_unbounded_values(monkeypatch, key, value):
     from jacobs import office_callbacks
@@ -133,6 +139,72 @@ def test_callback_config_rejects_unsafe_or_unbounded_values(monkeypatch, key, va
     with patch.object(office_callbacks, "encabezado_propio", return_value={"X": "secret"}), \
          pytest.raises(office_callbacks.OfficeCallbackConfigurationError):
         office_callbacks.office_callback_config()
+
+
+def test_fail_serializes_the_registered_enum_value(monkeypatch):
+    """A real DTO rejects enum objects; the wire must contain its stable value."""
+    from jacobs import office_callbacks
+    from jacobs.office_contract import OfficeRejectionCode, OfficeFailRequest
+    captured = {}
+
+    async def post(path, payload, accepted):
+        captured["payload"] = payload
+        return SimpleNamespace(outcome="FAILED")
+
+    monkeypatch.setattr(office_callbacks, "_post", post)
+    pipeline_id = str(uuid.uuid4())
+    from jacobs.office_contract import deterministic_step_id, deterministic_correlation_id
+    snapshot = SimpleNamespace(pipeline_id=pipeline_id, run_epoch=0,
+        step_id=deterministic_step_id(pipeline_id), correlation_id=deterministic_correlation_id(pipeline_id), request_sha256="a" * 64,
+        office_stage_id=str(uuid.uuid4()))
+    asyncio.run(office_callbacks.fail(snapshot, "GENERATION", OfficeRejectionCode.OFFICE_EXECUTION_FAILED, False))
+    assert isinstance(captured["payload"], OfficeFailRequest)
+    assert captured["payload"].code is OfficeRejectionCode.OFFICE_EXECUTION_FAILED
+
+
+@pytest.mark.parametrize("status", [409, 422, 503, 200])
+def test_complete_any_post_attempt_failure_is_ambiguous(monkeypatch, status):
+    """Complete never treats an HTTP/body acknowledgement as pre-commit proof."""
+    from jacobs import office_callbacks
+    pipeline_id = str(uuid.uuid4())
+    from jacobs.office_contract import deterministic_step_id, deterministic_correlation_id
+    snapshot = SimpleNamespace(pipeline_id=pipeline_id, run_epoch=0,
+        step_id=deterministic_step_id(pipeline_id), correlation_id=deterministic_correlation_id(pipeline_id),
+        request_sha256="a" * 64, office_stage_id=str(uuid.uuid4()))
+    async def post(*args):
+        raise office_callbacks.OfficeCallbackError("OFFICE_CALLBACK_RESPONSE_INVALID", ambiguous=status >= 500)
+    monkeypatch.setattr(office_callbacks, "_post", post)
+    with pytest.raises(office_callbacks.OfficeCallbackError) as caught:
+        asyncio.run(office_callbacks.complete(snapshot, "output", "catalog-model"))
+    assert caught.value.ambiguous and caught.value.effect_may_have_committed
+
+
+@pytest.mark.parametrize("phase,invoked,outcome", [
+    ("GENERATION", False, "FAILED"), ("GENERATION", True, "OUTCOME_UNKNOWN"),
+    ("DELIVERY", True, "CANCELLED_REVOKED"),
+])
+def test_fail_uses_real_httpx_dto_and_preserves_phase_invocation_and_outcome(monkeypatch, phase, invoked, outcome):
+    from jacobs import office_callbacks
+    from jacobs.office_contract import OfficeRejectionCode
+    _callback_env(monkeypatch); office_callbacks.clear_office_callback_config_cache()
+    pipeline_id = str(uuid.uuid4())
+    from jacobs.office_contract import deterministic_step_id, deterministic_correlation_id
+    snapshot = SimpleNamespace(pipeline_id=pipeline_id, run_epoch=0,
+        step_id=deterministic_step_id(pipeline_id), correlation_id=deterministic_correlation_id(pipeline_id),
+        request_sha256="a" * 64, office_stage_id=str(uuid.uuid4()))
+    seen = {}
+    async def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"outcome": outcome, "contract_version": OFFICE_WORK_CONTRACT_VERSION})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            monkeypatch.setattr(office_callbacks, "obtener_cliente_http", lambda: client)
+            monkeypatch.setattr(office_callbacks, "encabezado_propio", lambda identity: {"X": "secret"})
+            monkeypatch.setattr(office_callbacks, "ensure_office_http_log_privacy", lambda: None)
+            result = await office_callbacks.fail(snapshot, phase, OfficeRejectionCode.OFFICE_EXECUTION_FAILED, invoked)
+        return result
+    assert asyncio.run(run()).outcome == outcome
+    assert seen["phase"] == phase and seen["model_invoked"] is invoked and seen["code"] == "OFFICE_EXECUTION_FAILED"
 
 
 class _FakeResponse:

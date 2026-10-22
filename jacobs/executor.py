@@ -39,6 +39,8 @@ from jacobs.policy import check_kill_switch
 from jacobs.usage_writer import record_direct_usage
 from jacobs.office_runtime import (
     OfficeCapabilityContext,
+    OfficeErrorPhase,
+    OfficeErrorOutcome,
     OfficeExecutionError,
     assert_office_transport,
     ensure_office_http_log_privacy,
@@ -1004,7 +1006,7 @@ async def _despachar_transporte_directo(
     return result
 
 
-async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
+async def _dispatch_step(step: Step, pipeline: Pipeline, office_prompt: str | None = None) -> dict:
     """Selecciona el worker correcto según la faceta."""
     runtime_policy = runtime_policy_for_pipeline(pipeline)
     # Ensamble mecánico: NO pasa por ningún LLM. Concatena los módulos ya generados.
@@ -1025,6 +1027,20 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     original_facet = step.facet
     tried_facets = {step.facet}
     cap_error = await validate_capability(step)
+    if runtime_policy is not None:
+        # Office has one canonical admission path.  It never reroutes a
+        # capability or emits Classic events/prose after a denial.
+        if cap_error is not None:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED)
+        if type(office_prompt) is not str:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED)
+        f = await resolve_facet(step.facet)
+        step.modelo_real = f.model
+        return await _despachar_transporte_directo(
+            step, pipeline, f, office_prompt, step.timeout_seconds,
+            runtime_policy=runtime_policy,
+            office_capability_context=OfficeCapabilityContext(step.capability),
+        )
     while isinstance(cap_error, CapabilityUnbound):
         # El reroute SOLO puede apuntar a facets que el predicado único
         # (jacobs.models.faceta_ejecutable_en_pipeline: lista blanca HTTP, el
@@ -1368,76 +1384,149 @@ async def _correr_office_pipeline(pipeline: Pipeline) -> None:
     snapshot = await store.office_execution_snapshot(pipeline.pipeline_id)
     if snapshot is None or snapshot.phase is not OfficePhase.READY:
         return
+    # A kill must leave durable READY untouched: recovery may resume only after
+    # the switch is cleared, and neither materialization nor the provider runs.
+    if check_kill_switch():
+        return
+    output: str | None = None
+    modelo_real: str | None = None
+    claimed_delivery = False
     try:
         materialized = await office_materialize(snapshot, "EXECUTION")
         if materialized.outcome != "MATERIALIZED":
-            await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
-                                               OfficePhase.READY, OfficeRejectionCode.OFFICE_REVOKED.value,
-                                               OfficePhase.CANCELLED_REVOKED)
+            if materialized.outcome == "CANCELLED_REVOKED":
+                await _office_terminal_with_ack(snapshot, OfficePhase.READY,
+                                                 OfficeRejectionCode.OFFICE_REVOKED,
+                                                 OfficePhase.CANCELLED_REVOKED)
+            elif materialized.outcome == "INPUT_STALE":
+                await _office_terminal_with_ack(snapshot, OfficePhase.READY,
+                                                 OfficeRejectionCode.OFFICE_INPUT_STALE,
+                                                 OfficePhase.FAILED)
+            else:
+                await _office_terminal_with_ack(snapshot, OfficePhase.READY,
+                                                 OfficeRejectionCode.OFFICE_EXECUTION_FAILED,
+                                                 OfficePhase.FAILED)
             return
         if (materialized.materialization_sha256 != snapshot.materialization_sha256
                 or materialized.binding_version != snapshot.binding_version):
-            await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
-                                               OfficePhase.READY, OfficeRejectionCode.OFFICE_INPUT_STALE.value,
-                                               OfficePhase.FAILED)
+            await _office_terminal_with_ack(snapshot, OfficePhase.READY,
+                                             OfficeRejectionCode.OFFICE_INPUT_STALE, OfficePhase.FAILED)
             return
         if not await store.office_claim_delivery(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id):
+            await store.office_execution_snapshot(snapshot.pipeline_id)
             return
+        claimed_delivery = True
         step = Step(step_id=snapshot.step_id, pipeline_id=snapshot.pipeline_id, step_index=0,
                     facet=snapshot.facet, capability=snapshot.capability,
                     timeout_seconds=snapshot.timeout_seconds, trace_id=snapshot.correlation_id)
-        result = await _dispatch_office_step(step, pipeline, materialized.prompt)
+        result = await _dispatch_step(step, pipeline, materialized.prompt)
         output = result.get("result")
         if type(output) is not str:
             raise OfficeExecutionError(OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID,
                                       provider_call_made=True)
-        response = await office_complete(snapshot, output, str(result.get("model") or step.modelo_real or "unknown"))
+        modelo_real = step.modelo_real
+        if type(modelo_real) is not str or not modelo_real:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID,
+                                       provider_call_made=True)
+        output_sha256 = office_utf8_sha256(output)
+        response = await office_complete(snapshot, output, modelo_real)
         if response.outcome == "STORED":
-            await store.office_store_receipt(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
-                                             response.receipt, str(result.get("model") or step.modelo_real or "unknown"))
+            if response.receipt.output_sha256 != output_sha256:
+                raise OfficeExecutionError(OfficeRejectionCode.OFFICE_DELIVERY_OUTCOME_UNKNOWN,
+                                           phase=OfficeErrorPhase.DELIVERY,
+                                           outcome=OfficeErrorOutcome.OUTCOME_UNKNOWN,
+                                           provider_call_made=True)
+            try:
+                stored = await store.office_store_receipt(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                                          response.receipt, modelo_real)
+            except Exception:
+                stored = False
+            if not stored and not await _office_receipt_reread(snapshot, response.receipt, modelo_real):
+                await _office_failure(snapshot, OfficeRejectionCode.OFFICE_DELIVERY_OUTCOME_UNKNOWN, True,
+                                      output_sha256, from_phase=OfficePhase.DELIVERY_IN_FLIGHT,
+                                      model_real=modelo_real, fail_phase=OfficeErrorPhase.DELIVERY.value,
+                                      ambiguous=True)
         else:
-            await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
-                                               OfficePhase.DELIVERY_IN_FLIGHT, OfficeRejectionCode.OFFICE_REVOKED.value,
-                                               OfficePhase.CANCELLED_REVOKED)
+            await _office_terminal_with_ack(snapshot, OfficePhase.DELIVERY_IN_FLIGHT,
+                                             OfficeRejectionCode.OFFICE_REVOKED,
+                                             OfficePhase.CANCELLED_REVOKED)
     except OfficeExecutionError as exc:
         await _office_failure(snapshot, exc.code, exc.provider_call_made,
-                              office_utf8_sha256(output) if 'output' in locals() and type(output) is str else None)
+                              office_utf8_sha256(output) if type(output) is str else None,
+                              from_phase=(OfficePhase.DELIVERY_IN_FLIGHT if claimed_delivery else OfficePhase.READY),
+                              model_real=modelo_real,
+                              fail_phase=exc.phase.value,
+                              ambiguous=exc.outcome is OfficeErrorOutcome.OUTCOME_UNKNOWN)
     except OfficeCallbackError as exc:
+        if output is None:
+            # Materialization transport/body ambiguity happened before claim;
+            # durable READY is the recovery record and provider is untouched.
+            return
         await _office_failure(snapshot, OfficeRejectionCode.OFFICE_DELIVERY_OUTCOME_UNKNOWN,
-                              True, office_utf8_sha256(output) if 'output' in locals() and type(output) is str else None,
-                              ambiguous=exc.ambiguous)
+                              True, office_utf8_sha256(output) if type(output) is str else None,
+                              from_phase=OfficePhase.DELIVERY_IN_FLIGHT, model_real=modelo_real,
+                              fail_phase=OfficeErrorPhase.DELIVERY.value,
+                              ambiguous=True)
     except Exception:
-        await _office_failure(snapshot, OfficeRejectionCode.OFFICE_EXECUTION_FAILED, False, None)
+        await _office_failure(snapshot, OfficeRejectionCode.OFFICE_EXECUTION_FAILED,
+                              claimed_delivery, office_utf8_sha256(output) if type(output) is str else None,
+                              from_phase=(OfficePhase.DELIVERY_IN_FLIGHT if claimed_delivery else OfficePhase.READY),
+                              model_real=modelo_real,
+                              fail_phase=OfficeErrorPhase.GENERATION.value,
+                              ambiguous=claimed_delivery)
 
 
 async def _office_failure(snapshot, code: OfficeRejectionCode, model_invoked: bool,
-                          output_sha256: str | None, *, ambiguous: bool = False) -> None:
+                          output_sha256: str | None, *, from_phase: OfficePhase,
+                          model_real: str | None, fail_phase: str,
+                          ambiguous: bool = False) -> None:
     terminal = OfficePhase.OUTCOME_UNKNOWN if ambiguous else OfficePhase.FAILED
+    # PRE-CLAIM READY has no delivery side effect and must never call /fail.
+    if from_phase is OfficePhase.READY:
+        await _office_terminal_with_ack(snapshot, from_phase, code, terminal)
+        return
     try:
-        outcome = await office_fail(snapshot, "DELIVERY", code, model_invoked, output_sha256)
+        outcome = await office_fail(snapshot, fail_phase, code, model_invoked, output_sha256)
         if outcome.outcome == "ALREADY_COMPLETED":
-            await store.office_store_receipt(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
-                                             outcome.receipt, "reconciled")
-            return
+            if type(model_real) is str and output_sha256 == outcome.receipt.output_sha256:
+                if await store.office_store_receipt(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                                    outcome.receipt, model_real) or await _office_receipt_reread(snapshot, outcome.receipt, model_real):
+                    return
+            terminal = OfficePhase.OUTCOME_UNKNOWN
         if outcome.outcome == "CANCELLED_REVOKED":
             terminal = OfficePhase.CANCELLED_REVOKED
-    except OfficeCallbackError as exc:
-        if exc.ambiguous:
+        elif outcome.outcome == "FAILED":
+            # A typed callback refusal is authoritative even when the failed
+            # delivery request itself was ambiguous.
+            terminal = OfficePhase.FAILED
+        elif outcome.outcome == "OUTCOME_UNKNOWN":
             terminal = OfficePhase.OUTCOME_UNKNOWN
-    await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
-                                       OfficePhase.DELIVERY_IN_FLIGHT, code.value, terminal)
+    except OfficeCallbackError as exc:
+        terminal = OfficePhase.OUTCOME_UNKNOWN
+    except Exception:
+        terminal = OfficePhase.OUTCOME_UNKNOWN
+    await _office_terminal_with_ack(snapshot, from_phase, code, terminal)
 
 
-async def _dispatch_office_step(step: Step, pipeline: Pipeline, prompt: str) -> dict:
-    """One direct HTTP generation: no Classic context, tools, queue or artifacts."""
-    f = await resolve_facet(step.facet)
-    step.modelo_real = f.model
-    if f.transport not in {"http_gemini", "http_openai_compat", "ollama"}:
-        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
-    return await _despachar_transporte_directo(
-        step, pipeline, f, prompt, step.timeout_seconds, runtime_policy=runtime_policy_for_pipeline(pipeline),
-        office_capability_context=OfficeCapabilityContext(step.capability),
-    )
+async def _office_receipt_reread(snapshot, receipt, modelo_real: str) -> bool:
+    current = await store.office_execution_snapshot(snapshot.pipeline_id)
+    return bool(current and current.phase is OfficePhase.RECEIPT_STORED
+                and current.receipt == receipt and current.modelo_real == modelo_real)
+
+
+async def _office_terminal_with_ack(snapshot, from_phase: OfficePhase,
+                                    code: OfficeRejectionCode, terminal: OfficePhase) -> bool:
+    """A false/raised terminal acknowledgement is accepted only on exact reread."""
+    try:
+        written = await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch,
+                                                     snapshot.step_id, from_phase,
+                                                     code.value, terminal)
+    except Exception:
+        written = False
+    if written:
+        return True
+    current = await store.office_execution_snapshot(snapshot.pipeline_id)
+    return bool(current and current.phase is terminal and current.rejection_code == code.value)
 
 
 async def _correr_pipeline(pipeline: Pipeline) -> None:

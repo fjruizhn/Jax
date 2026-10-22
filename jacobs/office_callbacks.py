@@ -28,10 +28,12 @@ class OfficeCallbackConfigurationError(RuntimeError):
 
 class OfficeCallbackError(RuntimeError):
     """Content-free callback failure with a stable classification."""
-    def __init__(self, code: str, *, ambiguous: bool = False) -> None:
+    def __init__(self, code: str, *, ambiguous: bool = False,
+                 effect_may_have_committed: bool = False) -> None:
         super().__init__(code)
         self.code = code
         self.ambiguous = ambiguous
+        self.effect_may_have_committed = effect_may_have_committed
 
 
 @dataclass(frozen=True)
@@ -59,9 +61,13 @@ def office_callback_config() -> OfficeCallbackConfig:
     if os.getenv("JAX_OFFICE_PAIRED_CONTRACT_VERSION") != OFFICE_WORK_CONTRACT_VERSION:
         raise OfficeCallbackConfigurationError("OFFICE_PAIR_GATE_DISABLED")
     base = os.getenv("JAX_OFFICE_CALLBACK_BASE_URL", "")
-    parsed = urlsplit(base)
-    if (parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username
-            or parsed.password or parsed.query or parsed.fragment):
+    try:
+        parsed = urlsplit(base)
+        hostname, port = parsed.hostname, parsed.port
+    except ValueError:
+        raise OfficeCallbackConfigurationError("OFFICE_CALLBACK_CONFIG_INVALID") from None
+    if (parsed.scheme not in {"http", "https"} or not parsed.netloc or not hostname or port is not None and port <= 0
+            or parsed.username or parsed.password or parsed.query or parsed.fragment):
         raise OfficeCallbackConfigurationError("OFFICE_CALLBACK_CONFIG_INVALID")
     try:
         encabezado_propio(IDENTIDAD_JACOBS)
@@ -146,14 +152,20 @@ async def complete(snapshot, output_json: str, modelo_real: str):
         pipeline_id=snapshot.pipeline_id, run_epoch=snapshot.run_epoch, step_id=snapshot.step_id,
         correlation_id=snapshot.correlation_id, request_sha256=snapshot.request_sha256,
         output_json=output_json, output_sha256=office_utf8_sha256(output_json), modelo_real=modelo_real)
-    return await _post(f"/internal/virtual-office/stages/{snapshot.office_stage_id}/complete", request,
-                       (OfficeCompleteStoredResponse, OfficeCompleteCancelledResponse))
+    try:
+        return await _post(f"/internal/virtual-office/stages/{snapshot.office_stage_id}/complete", request,
+                           (OfficeCompleteStoredResponse, OfficeCompleteCancelledResponse))
+    except OfficeCallbackError as exc:
+        # Once complete has been attempted even a 4xx or malformed 2xx may have
+        # committed the Office effect; reconciliation is the only truthful path.
+        raise OfficeCallbackError(exc.code, ambiguous=True, effect_may_have_committed=True) from None
 
 
 async def fail(snapshot, phase: str, code, model_invoked: bool, output_sha256: str | None = None):
     request = OfficeFailRequest(contract_version=OFFICE_WORK_CONTRACT_VERSION,
         pipeline_id=snapshot.pipeline_id, run_epoch=snapshot.run_epoch, step_id=snapshot.step_id,
         correlation_id=snapshot.correlation_id, request_sha256=snapshot.request_sha256,
-        phase=phase, code=code, model_invoked=model_invoked, output_sha256=output_sha256)
+        phase=phase, code=code.value if hasattr(code, "value") else code,
+        model_invoked=model_invoked, output_sha256=output_sha256)
     return await _post(f"/internal/virtual-office/stages/{snapshot.office_stage_id}/fail", request,
                        (OfficeFailResponse, OfficeAlreadyCompletedResponse))

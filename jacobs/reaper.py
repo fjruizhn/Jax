@@ -236,9 +236,19 @@ async def reap_orphaned_pipelines() -> list[dict]:
 _office_tasks: set[asyncio.Task] = set()
 
 
-def _remember_office_task(task: asyncio.Task) -> None:
+def _remember_office_task(task: asyncio.Task, pipeline_id: str) -> None:
     _office_tasks.add(task)
-    task.add_done_callback(_office_tasks.discard)
+    def _done(done: asyncio.Task) -> None:
+        _office_tasks.discard(done)
+        try:
+            error = done.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            # IDs and exception classes only: Office content never reaches logs.
+            logger.error("Office READY task failed pipeline=%s exception=%s", pipeline_id,
+                         type(error).__name__)
+    task.add_done_callback(_done)
 
 
 async def schedule_ready_office_pipelines(limit: int = 100) -> int:
@@ -251,7 +261,7 @@ async def schedule_ready_office_pipelines(limit: int = 100) -> int:
     from jacobs.executor import run_pipeline
     rows = await store.office_ready_pipelines(limit)
     for pipeline in rows:
-        _remember_office_task(asyncio.create_task(run_pipeline(pipeline)))
+        _remember_office_task(asyncio.create_task(run_pipeline(pipeline)), pipeline.pipeline_id)
     return len(rows)
 
 
@@ -530,6 +540,10 @@ async def start_reaper_loop() -> None:
                 await reap_orphaned_pipelines()
         except Exception:  # fail-soft: loop de limpieza en background, mismo patron que jax-platform/jax_engine/owner_cleanup.py -- nunca debe tumbar el proceso, el proximo ciclo reintenta
             logger.warning("Reaper: barrido periódico falló", exc_info=True)
+        try:
+            await schedule_ready_office_pipelines()
+        except Exception:
+            logger.warning("Reaper: recuperación Office READY falló", exc_info=True)
         try:
             await check_facet_health()
         except Exception:  # fail-soft: loop de fondo, mismo patron que el barrido de arriba -- nunca debe tumbar el proceso, el proximo ciclo (300s) reintenta

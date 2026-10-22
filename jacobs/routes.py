@@ -54,10 +54,34 @@ from jacobs.office_contract import (
     OFFICE_WORK_CONTRACT_VERSION, OfficePhase,
     OfficeRejectionCode, OfficeRunRequest, OfficeRunResponse,
 )
-from jacobs.office_callbacks import OfficeCallbackConfigurationError, materialize, office_callback_config
+from jacobs.office_callbacks import OfficeCallbackConfigurationError, fail as office_fail, materialize, office_callback_config
 from jacobs.office_runtime import OFFICE_RUNTIME_POLICY, OfficeExecutionError
 
 router = APIRouter(prefix="/jacobs", tags=["jacobs"])
+
+
+async def _finish_office_preflight_failure(snapshot, code: OfficeRejectionCode,
+                                           default_terminal: OfficePhase) -> None:
+    """Reconcile a preflight failure through the paired fail callback once."""
+    terminal = default_terminal
+    terminal_code = code
+    try:
+        failure = await office_fail(snapshot, "PREFLIGHT", code, False)
+        if failure.outcome == "FAILED":
+            terminal = OfficePhase.FAILED
+        elif failure.outcome == "CANCELLED_REVOKED":
+            terminal = OfficePhase.CANCELLED_REVOKED
+            terminal_code = OfficeRejectionCode.OFFICE_REVOKED
+        elif failure.outcome in {"OUTCOME_UNKNOWN", "ALREADY_COMPLETED"}:
+            # Preflight cannot truthfully manufacture a provider receipt.
+            terminal = OfficePhase.OUTCOME_UNKNOWN
+            terminal_code = OfficeRejectionCode.OFFICE_PREFLIGHT_UNKNOWN
+    except Exception:
+        terminal = OfficePhase.OUTCOME_UNKNOWN
+        terminal_code = OfficeRejectionCode.OFFICE_PREFLIGHT_UNKNOWN
+    await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                       OfficePhase.PREFLIGHT_IN_FLIGHT,
+                                       terminal_code.value, terminal)
 
 
 def _office_response(snapshot) -> dict:
@@ -88,46 +112,57 @@ async def office_v1_run(req: OfficeRunRequest, request: Request, background: Bac
         raise HTTPException(status_code=422, detail={"code": "office_cupo_agotado"})
     if reservation.conflict:
         raise HTTPException(status_code=409, detail={"code": "office_request_conflict"})
-    snapshot = await store.office_execution_snapshot(reservation.pipeline_id)
+    # Reservation intentionally has no step.  Both the creator and a replay
+    # repair the deterministic step before any joined snapshot or paid probe.
+    if not await store.office_prepare_step(reservation.pipeline_id, req):
+        snapshot = await store.office_execution_snapshot(reservation.pipeline_id)
+        if snapshot is None:
+            raise HTTPException(status_code=503, detail={"code": "office_prepare_unknown"})
+    else:
+        snapshot = await store.office_execution_snapshot(reservation.pipeline_id)
     if snapshot is None:
         raise HTTPException(status_code=503, detail={"code": "office_reservation_unknown"})
-    # A replay that observes the original reservation is safe but never
-    # restarts preparation or the paid preflight probe.
-    if reservation.created and snapshot.phase is OfficePhase.RESERVED:
-        if not await store.office_prepare_step(snapshot.pipeline_id, req):
-            raise HTTPException(status_code=503, detail={"code": "office_prepare_unknown"})
-        snapshot = await store.office_execution_snapshot(snapshot.pipeline_id)
-        if snapshot is None:
-            raise HTTPException(status_code=503, detail={"code": "office_reservation_unknown"})
-        if await store.office_claim_preflight(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id):
-            step = Step(step_id=snapshot.step_id, pipeline_id=snapshot.pipeline_id, step_index=0,
-                        facet=snapshot.facet, capability=snapshot.capability,
-                        timeout_seconds=snapshot.timeout_seconds, trace_id=snapshot.correlation_id)
-            try:
+    if snapshot.phase is OfficePhase.RESERVED and await store.office_claim_preflight(
+            snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id):
+        try:
+            # JXP materializes and reauthorizes before any preflight probe.
+            callback = await materialize(snapshot, "PREFLIGHT")
+            if callback.outcome != "MATERIALIZED":
+                if callback.outcome == "CANCELLED_REVOKED":
+                    await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                                       OfficePhase.PREFLIGHT_IN_FLIGHT,
+                                                       OfficeRejectionCode.OFFICE_REVOKED.value,
+                                                       OfficePhase.CANCELLED_REVOKED)
+                else:
+                    # INPUT_STALE or an unrecognized materialization protocol
+                    # response has no safe cancellation semantics.
+                    await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                                       OfficeRejectionCode.OFFICE_PREFLIGHT_UNKNOWN.value,
+                                                       OfficePhase.OUTCOME_UNKNOWN)
+            else:
+                step = Step(step_id=snapshot.step_id, pipeline_id=snapshot.pipeline_id, step_index=0,
+                            facet=snapshot.facet, capability=snapshot.capability,
+                            timeout_seconds=snapshot.timeout_seconds, trace_id=snapshot.correlation_id,
+                            input={"prompt": callback.prompt})
                 verdict = await prevuelo([step], {}, user_id=snapshot.user_id, tenant_id=snapshot.tenant_id,
                                          runtime_policy=OFFICE_RUNTIME_POLICY)
                 if not verdict.ok or verdict.costo_max_usd > snapshot.accepted_cost_usd:
-                    await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
-                                                       OfficePhase.PREFLIGHT_IN_FLIGHT,
-                                                       OfficeRejectionCode.OFFICE_PREFLIGHT_FAILED.value, OfficePhase.FAILED)
+                    # A known preflight refusal is durable JXP history before
+                    # local terminal state; no model was invoked.
+                    await _finish_office_preflight_failure(
+                        snapshot, OfficeRejectionCode.OFFICE_PREFLIGHT_FAILED, OfficePhase.FAILED)
                 else:
-                    current = await store.office_execution_snapshot(snapshot.pipeline_id)
-                    if current is not None:
-                        callback = await materialize(current, "PREFLIGHT")
-                        if callback.outcome == "MATERIALIZED":
-                            await store.office_mark_ready(current.pipeline_id, current.run_epoch, current.step_id,
-                                                         callback.materialization_sha256, callback.binding_version)
-                        else:
-                            await store.office_finish_terminal(current.pipeline_id, current.run_epoch, current.step_id,
-                                                               OfficePhase.PREFLIGHT_IN_FLIGHT,
-                                                               OfficeRejectionCode.OFFICE_REVOKED.value, OfficePhase.CANCELLED_REVOKED)
-            except OfficeExecutionError as exc:
-                await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
-                                                   OfficePhase.PREFLIGHT_IN_FLIGHT, exc.code.value, OfficePhase.FAILED)
-            except Exception:
-                await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
-                                                   OfficePhase.PREFLIGHT_IN_FLIGHT,
-                                                   OfficeRejectionCode.OFFICE_PREFLIGHT_UNKNOWN.value, OfficePhase.OUTCOME_UNKNOWN)
+                    await store.office_mark_ready(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                                 callback.materialization_sha256, callback.binding_version)
+        except OfficeExecutionError as exc:
+            await _finish_office_preflight_failure(
+                snapshot, exc.code,
+                OfficePhase.OUTCOME_UNKNOWN if exc.outcome.value == "OUTCOME_UNKNOWN" else OfficePhase.FAILED)
+        except Exception:
+            await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                               OfficePhase.PREFLIGHT_IN_FLIGHT,
+                                               OfficeRejectionCode.OFFICE_PREFLIGHT_UNKNOWN.value,
+                                               OfficePhase.OUTCOME_UNKNOWN)
     snapshot = await store.office_execution_snapshot(reservation.pipeline_id)
     if snapshot is None:
         raise HTTPException(status_code=503, detail={"code": "office_reservation_unknown"})

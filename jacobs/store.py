@@ -2116,15 +2116,17 @@ class OfficeExecutionSnapshot:
     materialization_sha256: str | None
     binding_version: int | None
     receipt: OfficeReceipt | None
+    modelo_real: str | None
+    rejection_code: str | None
 
 
 async def office_execution_snapshot(pipeline_id: str) -> OfficeExecutionSnapshot | None:
     async with conexion_del_pool() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
-                "SELECT p.pipeline_id,p.run_epoch,p.office_phase,p.request_sha256,p.office_job_id,p.office_stage_id,"
+                "SELECT p.pipeline_id,p.run_epoch,p.office_phase,p.office_rejection_code,p.request_sha256,p.office_job_id,p.office_stage_id,"
                 "p.office_project_id,p.client_request_id,p.tenant_id,p.user_id,p.office_accepted_cost_usd,"
-                "s.step_id,s.trace_id,s.facet,s.capability,s.timeout_seconds,s.input_ref,s.output_ref "
+                "s.step_id,s.trace_id,s.facet,s.capability,s.timeout_seconds,s.input_ref,s.output_ref,s.modelo_real "
                 "FROM jacobs_pipelines p JOIN jacobs_steps s ON s.pipeline_id=p.pipeline_id AND s.step_index=0 "
                 "WHERE p.pipeline_id=%s AND p.execution_contract=%s",
                 (pipeline_id, OFFICE_EXECUTION_CONTRACT),
@@ -2134,14 +2136,15 @@ async def office_execution_snapshot(pipeline_id: str) -> OfficeExecutionSnapshot
         return None
     try:
         return OfficeExecutionSnapshot(pipeline_id=row["pipeline_id"], run_epoch=int(row["run_epoch"]),
-            phase=OfficePhase(row["office_phase"]), request_sha256=row["request_sha256"],
+            phase=OfficePhase(row["office_phase"]), rejection_code=row["office_rejection_code"], request_sha256=row["request_sha256"],
             office_job_id=row["office_job_id"], office_stage_id=row["office_stage_id"],
             office_project_id=int(row["office_project_id"]), client_request_id=row["client_request_id"],
             tenant_id=row["tenant_id"], user_id=row["user_id"], accepted_cost_usd=Decimal(str(row["office_accepted_cost_usd"])),
             step_id=row["step_id"], correlation_id=row["trace_id"], facet=row["facet"], capability=row["capability"],
             timeout_seconds=int(row["timeout_seconds"]), materialization_sha256=(json.loads(row["input_ref"] or "{}").get("office_materialization_sha256")),
             binding_version=(json.loads(row["input_ref"] or "{}").get("binding_version")),
-            receipt=(OfficeReceipt(**json.loads((row["output_ref"] or "inline:{}")[7:]).get("office_receipt")) if row["output_ref"] else None))
+            receipt=(OfficeReceipt(**json.loads((row["output_ref"] or "inline:{}")[7:]).get("office_receipt")) if row["output_ref"] else None),
+            modelo_real=row["modelo_real"])
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError("invalid opaque Office execution snapshot") from exc
 

@@ -109,8 +109,14 @@ def _despacho(step: Step, catalogo: Catalogo, motor: MotorResuelto | None) -> tu
     ), ""
 
 
-def _chars_de_entrada(step: Step, pasos: list[Step], contexto: dict, d: Despacho) -> int:
+def _chars_de_entrada(step: Step, pasos: list[Step], contexto: dict, d: Despacho, *, office: bool = False) -> int:
     """SÍNCRONA (lee artifacts de disco): se llama por asyncio.to_thread."""
+    if office:
+        prompt = step.input.get("prompt") if type(step.input) is dict else None
+        if type(prompt) is not str:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED,
+                                       phase=OfficeErrorPhase.PREFLIGHT)
+        return len(prompt) + len(d.persona or "")
     peor = dict(contexto)
     for j in range(step.step_index):
         if not peor.get(f"step_{j}_ref"):
@@ -261,7 +267,8 @@ async def prevuelo(
             await validate_office_capability_timeout(
                 OfficeCapabilityContext(step.capability), step.timeout_seconds,
                 phase=OfficeErrorPhase.PREFLIGHT)
-        chars = 0 if d is None else await asyncio.to_thread(_chars_de_entrada, step, pasos, contexto, d)
+        chars = 0 if d is None else await asyncio.to_thread(
+            _chars_de_entrada, step, pasos, contexto, d, office=runtime_policy is not None)
         propias, costo = evaluar_paso(
             step.step_index, step.facet, d,
             min_output_tokens=catalogo.min_output_tokens.get(step.capability, 0),
