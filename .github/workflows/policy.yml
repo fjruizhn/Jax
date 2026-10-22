@@ -1725,6 +1725,7 @@ jobs:
           tests/test_anti_fabricacion_whitelist.py
           tests/test_anti_fabricacion_estructura.py
           tests/test_anti_fabricacion_entrega.py
+          tests/test_anti_fabricacion_activacion.py
           las_manos/_worker_estructura_test.py
       - name: Publicar fallos de tests puros
         if: failure()
@@ -1919,6 +1920,7 @@ jobs:
             tests/test_anti_fabricacion_whitelist.py \
             tests/test_anti_fabricacion_estructura.py \
             tests/test_anti_fabricacion_entrega.py \
+            tests/test_anti_fabricacion_activacion.py \
             las_manos/_worker_estructura_test.py \
             2>&1 | tee /tmp/out
           python3 .github/ci/piso.py verificar tests-puros/out /tmp/out || exit $?

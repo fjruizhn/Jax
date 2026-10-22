@@ -247,8 +247,12 @@ class AuditLog:
         capability: str,
         pipeline_id: str | None,
         endpoint: str,
+        trace_id: str | None,
         modo: str,
         items: list[dict],
+        items_total: int = 0,
+        usos_nuevo: int = 0,
+        usos_hipotesis: int = 0,
         environment: str = "production",
         traffic_class: str = "unknown",
         test_run_id: str | None = None,
@@ -261,9 +265,14 @@ class AuditLog:
             "motor":       motor,
             "capability":  capability,
             "pipeline_id": pipeline_id,
-            "endpoint":    endpoint,
+            "endpoint":    endpoint,    # el punto de entrada REAL del job (no la URL del motor)
+            "trace_id":    trace_id,
             "modo":        modo,
             "items":       items,
+            "items_total": items_total,
+            # cuántas veces la salida se escapó por `nuevo:` o por «?» (fase sombra: ¿abuso aprendido?)
+            "usos_nuevo":  usos_nuevo,
+            "usos_hipotesis": usos_hipotesis,
             **self._forensics(environment, traffic_class, test_run_id),
         })
 

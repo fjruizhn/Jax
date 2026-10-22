@@ -255,8 +255,8 @@ class WorkerEstructuraTest(unittest.IsolatedAsyncioTestCase):
                "GIT_COMMITTER_EMAIL": "t@t", "PATH": "/usr/bin:/bin"}
         for a in (("init", "-q"), ("-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x")):
             subprocess.run(["git", "-C", str(ws), *a], check=True, capture_output=True, env=env)
-        (ws / "jax").mkdir()
-        (ws / "jax" / "x.py").write_text("X = 1\n")
+        (ws / "jax" / "core").mkdir(parents=True)
+        (ws / "jax" / "core" / "x.py").write_text("X = 1\n")
         subprocess.run(["git", "-C", str(ws), "add", "-A"], check=True, capture_output=True, env=env)
         subprocess.run(["git", "-C", str(ws), "commit", "-q", "-m", "y"], check=True, capture_output=True, env=env)
         shim_dir = Path(self._tmp.name) / "shim"

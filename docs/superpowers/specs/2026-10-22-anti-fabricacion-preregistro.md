@@ -102,3 +102,18 @@ Reglas.
    esa línea nombra es propuesto.
 5. `tabla.columna` con tabla real y columna inexistente dentro de un campo que afirma nunca
    sale limpia; una prueba la ejercita en cada campo declarado como afirma.
+
+## Notas de historial y riesgo residual (auditoría única sobre 2da939db, 2026-10-22)
+
+- **Historial.** El commit `536eb27d` mezcló código (`calibrar.py` y el ajuste del detector para
+  dotfiles) con la enmienda y la aclaración del pre-registro. No se reescribe el historial: esta
+  nota lo declara. El cambio de código y el de la enmienda de ese commit se revisan por separado
+  en su diff.
+- **Escapes del detector.** Un candidato queda exento si va marcado `nuevo:` (en backticks o como
+  prefijo de línea) o si está en una oración que termina en «?». Son escapes legítimos y abusables
+  (un modelo puede aprender a ponerlos para pasar). Desde esta enmienda cada veredicto cuenta
+  cuántos candidatos eximió cada uno (`usos_nuevo`, `usos_hipotesis`, en `_estructura` del JSONL
+  del job, en el evento `ESTRUCTURA_SIN_RESPALDO` y en el aviso). En la fase sombra, el escalón 3
+  que clasifica las marcas mira también esos dos contadores en las salidas LIMPIAS: una subida
+  sostenida sin motivo de la tarea es señal de abuso y se trata como hallazgo.
+

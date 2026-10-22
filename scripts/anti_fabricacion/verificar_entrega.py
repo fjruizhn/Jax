@@ -3,8 +3,8 @@
 
     verificar_entrega.py --repo <repo> --base <ref> --informe <archivo>
 
-Contrasta lo que el INFORME de la entrega afirma (archivos, tablas, columnas,
-símbolos) con la whitelist derivada del repo en su HEAD y de `information_schema`
+Contrasta lo que el INFORME de la entrega afirma (rutas con «/», `tabla.columna` y
+unidades `*.service|timer`) con la whitelist derivada del repo en su HEAD y de `information_schema`
 de la base de la conexión (JAX_DB_*). Lo que la propia rama escribió (archivos
 cambiados entre `base` y HEAD, y lo que su diff define) es propuesta, no
 afirmación. No hay corpus confiable ni pasos previos: el informe es salida de un
@@ -47,9 +47,10 @@ def _analizar_argumentos(argv):
 
 
 def _diff_de_la_rama(repo: Path, base: str) -> tuple[list[str], str]:
-    """(archivos cambiados, diff completo) entre `base` y HEAD."""
+    """(archivos cambiados que SIGUEN existiendo, diff completo) entre `base` y HEAD. Un archivo
+    que la rama borró no es «propio»: decir que se modificó sería afirmar algo falso."""
     whitelist._git(repo, "rev-parse", "--verify", f"{base}^{{commit}}")
-    nombres = whitelist._git(repo, "diff", "--name-only", "-z", base, "HEAD").decode("utf-8", "replace")
+    nombres = whitelist._git(repo, "diff", "--name-only", "--diff-filter=d", "-z", base, "HEAD").decode("utf-8", "replace")
     diff = whitelist._git(repo, "diff", "--no-color", "--no-ext-diff", base, "HEAD").decode("utf-8", "replace")
     return [n for n in nombres.split("\0") if n], diff
 

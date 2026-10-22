@@ -441,10 +441,48 @@ async def _notify_estructura(*, job_id: str, motor: str, capability: str, pipeli
         logger.error("job %s: aviso de estructura sin respaldo no se pudo entregar: %s", job_id, result["error"])
 
 
+_ahora = time.monotonic   # costura de prueba: el reloj del enfriamiento de avisos
+#: Enfriamiento de avisos (MINOR 8): un detector caído afecta a TODOS los jobs; un aviso por
+#: motivo y por ventana, no uno por job. Estado del proceso (se pierde al reiniciar).
+_AF_VENTANA_AVISO_S = float(os.getenv("MOTOR_ANTI_FABRICACION_VENTANA_AVISO_S", "900"))
+_AF_AVISOS_DETECTOR: dict[str, float] = {}
+#: El aviso de «la clave de modo falta y rige duro por omisión» se da una vez por proceso.
+_AF_AVISO_CLAVE_HECHO = False
+
+
+def _toca_avisar_detector(motivo: str) -> bool:
+    ahora = _ahora()
+    clave = motivo[:60]
+    ultimo = _AF_AVISOS_DETECTOR.get(clave)
+    if ultimo is not None and ahora - ultimo < _AF_VENTANA_AVISO_S:
+        return False
+    _AF_AVISOS_DETECTOR[clave] = ahora
+    return True
+
+
+async def _notify_clave_de_modo(motivos: list[str]) -> None:
+    """Una vez por proceso: el modo salió `duro` POR OMISIÓN (clave ausente, inválida o base
+    ilegible). Visible, no silencioso: con la clave sin sembrar, todo falso positivo falla un job."""
+    global _AF_AVISO_CLAVE_HECHO
+    if _AF_AVISO_CLAVE_HECHO:
+        return
+    _AF_AVISO_CLAVE_HECHO = True
+    logger.error("anti_fabricacion: modo 'duro' POR OMISIÓN (%s). Ver docs/runbooks/anti-fabricacion-activacion.md", "; ".join(motivos))
+    from jacobs.reaper import send_telegram_alert
+    result = await send_telegram_alert(
+        "🔴 JAX anti-fabricación: el modo salió 'duro' por omisión (" + "; ".join(motivos) +
+        "). Sembrar anti_fabricacion.modo='sombra' antes de seguir (docs/runbooks/anti-fabricacion-activacion.md).")
+    if not result["ok"]:
+        logger.error("aviso de clave de modo ausente no se pudo entregar: %s", result["error"])
+
+
 async def _notify_detector_caido(*, job_id: str, motor: str, capability: str, modo, detalle: str) -> None:
     """Aviso inmediato de que el detector de estructura no pudo mirar un job. En
     sombra el job sigue y su salida NO cuenta entre las 30 de la fase; en duro el
     job ya no llega al motor."""
+    if not _toca_avisar_detector(detalle):
+        logger.warning("job %s: detector de estructura caído (aviso ya dado en la ventana): %s", job_id, detalle[:200])
+        return
     from jacobs.reaper import send_telegram_alert
     consecuencia = ("el job FALLÓ antes de llamar al motor" if modo == _af_consecuencia.Modo.DURO
                     else "modo sombra: el job sigue, sin veredicto, y no cuenta entre las 30 salidas")
@@ -497,6 +535,7 @@ async def run(
     caller: str | None = None,
     timeout_seconds: int | None = None,
     pipeline_id: str | None = None,
+    entrada: str = "/motor/governed-dispatch",
 ) -> None:
     """Corre un job del Motor Registry (ver _correr_trabajo).
 
@@ -513,7 +552,7 @@ async def run(
             job_id=job_id, motor=motor, capability=capability, prompt=prompt,
             context=context, store=store, catalog=catalog, kill_switch_path=kill_switch_path,
             user_id=user_id, tenant_id=tenant_id, caller=caller, timeout_seconds=timeout_seconds,
-            pipeline_id=pipeline_id,
+            pipeline_id=pipeline_id, entrada=entrada,
         )
 
 
@@ -532,6 +571,7 @@ async def _correr_trabajo(
     caller: str | None = None,
     timeout_seconds: int | None = None,
     pipeline_id: str | None = None,
+    entrada: str = "/motor/governed-dispatch",
 ) -> None:
     store.update(job_id, status=JobStatus.RUNNING.value, started_at=time.time())
 
@@ -549,7 +589,10 @@ async def _correr_trabajo(
     # Una fuente obligatoria caída en modo duro es FAILED `detector_no_disponible`
     # sin ninguna llamada de transporte; en sombra el job sigue y el veredicto
     # queda `no_corrio` (la sombra observa, no puede tumbar el servicio).
-    af_modo = await _af_consecuencia.leer_modo()
+    af_motivos: list[str] = []
+    af_modo = await _af_consecuencia.leer_modo(motivos=af_motivos)
+    if af_motivos:
+        await _notify_clave_de_modo(af_motivos)
     af_wl = None
     af_error_detector: str | None = None
     try:
@@ -1217,7 +1260,9 @@ async def _correr_trabajo(
     if decision.avisar:
         await asyncio.to_thread(
             _auditar_estructura, job_id=job_id, motor=motor, capability=capability, pipeline_id=pipeline_id,
-            endpoint=motor_entry.api_url, modo=af_modo.value, items=decision.guardar["_unbacked_claims"])
+            endpoint=entrada, trace_id=(store.get(job_id).trace_id if store.get(job_id) else None), modo=af_modo.value,
+            items=decision.guardar["_unbacked_claims"], items_total=decision.guardar["_unbacked_claims_total"],
+            usos_nuevo=veredicto.usos_nuevo, usos_hipotesis=veredicto.usos_hipotesis)
         await _notify_estructura(job_id=job_id, motor=motor, capability=capability, pipeline_id=pipeline_id,
                                  veredicto=veredicto, modo=af_modo)
     if decision.fallar:

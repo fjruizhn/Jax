@@ -116,6 +116,9 @@ def test_base_de_datos_caida_da_2_y_nunca_0(mod, repo, tmp_path):
 
 def test_un_archivo_borrado_por_la_rama_no_es_propio(mod, repo, tmp_path):
     """MINOR 11: decir que se «modificó» un archivo que la rama borró es afirmar algo falso."""
+    (repo / "docs" / "y.md").write_text("otro\n")   # `docs/` sigue siendo una carpeta del repo
+    _g(repo, "add", "-A")
+    _g(repo, "commit", "-q", "-m", "otro")
     _g(repo, "rm", "-q", "docs/x.md")
     _g(repo, "commit", "-q", "-m", "borra")
     assert _correr(mod, repo, "Modifiqué `docs/x.md`.", tmp_path) == 1

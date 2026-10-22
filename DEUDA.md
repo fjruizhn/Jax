@@ -24,9 +24,11 @@ su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
 
-- [ ] **2026-10-22 · anti-fabricación: `context["objective"]` no llega a `/motor/dispatch`.** El
+- [ ] **2026-10-22 · anti-fabricación: `context["objective"]` no llega al worker por el camino vivo.** El
   detector de estructura (`jax/anti_fabricacion/`, `worker.py`) toma como corpus confiable el
-  objetivo de la persona, pero el `context` que recibe el worker por `/motor/dispatch` no lo trae
+  objetivo de la persona, pero el `context` que recibe el worker no lo trae (el coordinador lo declaró
+  ausente; NO verificado contra `request.projection()["context"]` de `/motor/governed-dispatch`, el único
+  camino vivo: `/motor/dispatch` responde 410)
   (el `objective` vive en el contexto del pipeline de Jacobs, `jacobs/routes.py`). Hoy el corpus
   confiable es solo el nombre de la capability y sus `forbidden_paths`, y el prompt entero entra
   como `previos` (sin veredicto de origen => heredado = marcado). Efecto: un archivo real que la

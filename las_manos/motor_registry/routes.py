@@ -242,7 +242,8 @@ async def governed_dispatch(req: GovernedDispatchRequest) -> MotorDispatchRespon
         capability=request.capability, prompt=request.prompt, context=request.projection()["context"],
         store=_STORE, catalog=_CATALOG, kill_switch_path=str(route), user_id=request.user_id,
         tenant_id=request.tenant_id, caller=request.authenticated_caller_id,
-        timeout_seconds=request.timeout_seconds, pipeline_id=None))
+        timeout_seconds=request.timeout_seconds, pipeline_id=None,
+        entrada="/motor/governed-dispatch"))
     task.add_done_callback(lambda t: _ingest_governed_worker_completion(
         t, execution_id=record.execution_id, job_id=job_id))
     job_tasks.register(job_id, task)
