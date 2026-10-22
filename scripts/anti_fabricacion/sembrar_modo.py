@@ -43,7 +43,7 @@ SQL_CAMBIAR = "UPDATE axioma_config SET config_value = %s WHERE config_key = %s"
 SQL_AUDITORIA = ("INSERT INTO axioma_config_audit (ts, actor_user_id, config_key, valor_anterior, valor_nuevo, origen, ip) "
                  "VALUES (%s, %s, %s, %s, %s, %s, %s)")
 SQL_ACTOR = ("SELECT user_id FROM jax_users WHERE deleted_at IS NULL AND "
-             "(user_id = %s OR email = %s OR email LIKE %s)")
+             "(user_id = %s OR email = %s OR SUBSTRING_INDEX(email, '@', 1) = %s)")
 ORIGEN_AUDITORIA = "config"
 
 
@@ -59,7 +59,7 @@ async def _leer(cur) -> str | None:
 
 async def _resolver_actor(cur, actor: str) -> int:
     como_id = int(actor) if actor.isdigit() else -1
-    await cur.execute(SQL_ACTOR, (como_id, actor, actor + "@%"))
+    await cur.execute(SQL_ACTOR, (como_id, actor, actor))
     filas = await cur.fetchall()
     ids = {int(f[0]) for f in filas}
     if len(ids) != 1:

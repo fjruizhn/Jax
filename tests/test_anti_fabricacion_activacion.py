@@ -154,6 +154,15 @@ def test_un_actor_que_no_existe_o_es_ambiguo_aborta_sin_escribir(mod):
     assert not any(q.startswith(("UPDATE", "INSERT")) for q, _ in log)
 
 
+def test_el_actor_por_parte_local_no_usa_comodines(mod):
+    # `f_ruiz` no debe resolver a `fxruiz@...`: LIKE trataría `_` y `%` como comodines.
+    log = []
+    assert mod.main(["--modo", "duro", "--actor", "f_ruiz", "--motivo", "x"], conectar=_conectar(log, ("sombra",))) == 0
+    consulta = [(q, a) for q, a in log if "FROM jax_users" in q]
+    assert consulta and "LIKE" not in consulta[0][0]
+    assert all("%" not in str(x) for x in consulta[0][1])
+
+
 def test_verificar_sale_0_si_la_clave_es_valida_y_1_si_falta_o_es_invalida(mod):
     assert mod.main(["--verificar"], conectar=_conectar([], ("sombra",))) == 0
     assert mod.main(["--verificar"], conectar=_conectar([], ("duro",))) == 0
