@@ -10,6 +10,10 @@ Round2followup: rootprecheck detectó contadorentrada inválido/salida válida a
 
 Round3testonly: Solaed46adc APROBADO implementación/spec peroRECHAZADOevidencia. Concurrentebarrerareal emitía solohttpx, no seisloggers comoafirmabainforme. Se corrigióafirmación yprueba emite6desdeamboscontextos, verificamessage/args/tracebackformateado, Classicvisible. Root1test0.14s. Auditoríaescopadaexacta antes4B2; no cambiosproductivos.
 
+Task4B1COMPLETE: SolAPROBADO exact56be8bed69800a0565f02293ccbc54e1b14f1d51 spec+quality, sinhallazgosabiertos. Task4B2mismoconstructor enimplementación(preflight/probe/coalescing/health), aúnnogate ni4C. Interfazprevia/rootprivacycorrections preservadas.
+
+Task4B2congelado:3módulos+regresiónpropia,111pruebasenharnessaislado. Rootprecheck cerrórawprobeusage/metadata yramaserrordetalladas. Reporteverificadoendocs/superpowers/reviews/2026-10-21-office-probe-policy.md; exactSHAauditsiguienteantes4C. NoDB/proveedor/prod; JXP3A2esquemaaúnenprecheckseparado.
+
 Fernando autorizó iniciar desarrollos. Rama propia codex/office-namespace-20261020, base98d42f2a; JXP par en codex/virtual-office-20261020. Marca c3d2c999 publicada.
 
 Spec/plan docs/superpowers/{specs,plans}/2026-10-20-office-namespace.md. Sol resolvió usar autoridad global SOLO de Office en JXP, no GLOBAL_FULL_ACCESS para Axioma clásico/Faro. Este repo implementa namespace y creación autorizada atómica, sin habilitar API ni clientes por sí solo.

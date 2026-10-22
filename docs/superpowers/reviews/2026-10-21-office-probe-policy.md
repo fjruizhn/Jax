@@ -1,0 +1,9 @@
+# Office4B2 preflight/probe policy · OP345
+
+2026-10-21 · Codex. Baseline4B1 independent SolAPROBADO56be8bed. New private optional policy propagates through preflight rules, orchestration, probes and coalescing; ClassicNone preserves historical behavior. Office admits one generation call, checks transport and current capability ceiling before probes, rechecks resolved transport, partitions in-flight probes by error-detail policy and uses sharedHTTP/no redirects/no tools.
+
+Root precheck corrected two initial omissions before checkpoint: raw probe response usage/shape/model metadata still bypassed4B1 validation, and several prepare/generic/outer-timeout branches still used Classic detailed errors. The final candidate uses the same strict provider-response parser before health/usage, retains independently valid known counters, maps all Office error branches to closed stable detail, and propagates cancellation. Office health/usage writer failures log closed codes/classes without provider content. Probe success may intentionally truncate its tiny output; this does not bypass response/usage validation.
+
+Tier2 reported111focused tests5.57s; parent independently reruns the same scope: test_office_preflight_policy.py,test_prevuelo_sonda.py,test_office_runtime_policy.py, using the private isolated harness. Tests cover all three shared-client payloads, malformed response/metadata/usage sentinels, closed health taxonomy, preparation/outer timeout/cancellation, actual coalescing partition and previous4B1 privacy regressions. No DB/provider/production operations. Compilation and diffcheck pass. Exact-SHA scoped review is next;4C execution and public routes remain disabled.
+
+Parent completed that independent run: **111passed in5.62s**, zero failures. This verifies the frozen candidate only, not4C or live provider availability.

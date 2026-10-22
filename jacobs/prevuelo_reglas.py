@@ -170,10 +170,14 @@ def tope_efectivo(d: Despacho) -> tuple[int, str]:
     return d.max_output_tokens, "model.max_output_tokens"
 
 
-def llamadas_max(d: Despacho, max_iteraciones: int) -> int:
+def llamadas_max(d: Despacho, max_iteraciones: int, *, runtime_policy=None) -> int:
     """Desvío 2 del plan. Motor: el bucle de worker.py está acotado por
     MOTOR_TOOL_LOOP_MAX_ITERATIONS y el reintento de schema es una iteración
     de ese bucle. HTTP gemini: _invoke_http_gemini reintenta sin grounding."""
+    if runtime_policy is not None:
+        # OFFICE_V1 has exactly one authorized generation call.  This private
+        # keyword is only supplied by the server-derived pipeline contract.
+        return runtime_policy.generation_calls
     if d.via_motor:
         if d.tiene_herramientas:
             return max_iteraciones
@@ -241,6 +245,7 @@ def evaluar_paso(
     chars_por_token: int,
     max_iteraciones: int,
     detalle_inexistente: str = "",
+    runtime_policy=None,
 ) -> tuple[list[Violacion], CostoPaso]:
     if d is None:
         detalle = detalle_inexistente or f"la faceta '{faceta}' no tiene fila activa con binding primario"
@@ -257,7 +262,7 @@ def evaluar_paso(
 
     violaciones: list[Violacion] = []
     tokens_in = tokens_de_entrada(chars_entrada, chars_por_token)
-    llamadas = llamadas_max(d, max_iteraciones)
+    llamadas = llamadas_max(d, max_iteraciones, runtime_policy=runtime_policy)
 
     errores = errores_de_contrato(d)
     tokens_out = 0
