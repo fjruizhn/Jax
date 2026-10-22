@@ -264,6 +264,16 @@ class _NamespaceCreateActorTenantDrift(Exception):
     """
 
 
+class _NamespaceMetadataContention(Exception):
+    """Private control flow for a retryable Office metadata transaction.
+
+    MariaDB may report ER_CHECKREAD (1020) after one writer changes the
+    locked project row.  The enclosing store has rolled the transaction back;
+    a fresh transaction reauthorizes, rereads current state, and either writes
+    one event or observes the desired final state as the documented no-op.
+    """
+
+
 def _wrap_unexpected_db_error(exc: Exception) -> Exception:
     """Ronda 3, MINOR 2 / ronda 4, MINOR 2: no raw DB error may leak past
     this module's public API -- a CHECK/FK violation this code should have
@@ -922,9 +932,21 @@ class ProjectAuthorityAdmin:
             except ProjectAuthorityError:
                 raise
             except Exception as exc:
+                errno = (getattr(exc, "args", ()) or (None,))[0]
+                if _is_raw_db_error(exc) and (errno == 1020 or errno in _RETRYABLE_MYSQL_ERRNOS):
+                    raise _NamespaceMetadataContention() from exc
                 raise _wrap_unexpected_db_error(exc) from exc
 
-        return await self._store.mutation(op)
+        async def run(attempt: int) -> UpdatedNamespacedProjectMetadata:
+            try:
+                return await self._store.mutation(op)
+            except _NamespaceMetadataContention as exc:
+                if attempt < _NAMESPACE_CREATE_MAX_CONTENTION_RETRIES:
+                    await asyncio.sleep(0)
+                    return await run(attempt + 1)
+                raise ProjectAuthorityRetryable("office metadata contention, retry") from exc
+
+        return await run(0)
 
     @staticmethod
     def _require_positive_id(value: Any, field: str) -> int:

@@ -217,6 +217,49 @@ async def test_office_metadata_update_rejects_classic_namespace_before_transacti
 
 
 @pytest.mark.asyncio
+async def test_office_metadata_update_retries_checkread_in_a_fresh_transaction_without_event_duplication():
+    class FailingUpdateCursor(Cursor):
+        def __init__(self, rows):
+            super().__init__(rows)
+            self.failed = False
+
+        async def execute(self, sql, args=()):
+            if "UPDATE projects SET name=%s,description=%s" in sql and not self.failed:
+                self.failed = True
+                raise _CheckReadError(1020, "record changed")
+            await super().execute(sql, args)
+
+    rows = [
+        {"tenant_id": 4},
+        {"tenant_id": 4, "status": "ACTIVE"},
+        {"tenant_id": 4, "status": "ACTIVE"},
+        {"tenant_id": 4, "status": "ACTIVE", "authorization_namespace": "OFFICE_CONFIDENTIAL"},
+        {"name": "before", "description": None},
+    ]
+    first, second = FailingUpdateCursor(rows), Cursor(rows)
+
+    class RetryStore:
+        def __init__(self):
+            self.cursors = [first, second]
+            self.mutations = 0
+
+        async def mutation(self, operation):
+            cursor = self.cursors[self.mutations]
+            self.mutations += 1
+            return await operation(cursor)
+
+    authorizer = Authorizer()
+    result = await ProjectAuthorityAdmin(RetryStore()).update_namespaced_project_metadata(
+        actor_user_id=7, target_tenant_id=4, project_id=17,
+        namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+        name="after", description=None, authorizer=authorizer)
+    assert result.changed
+    assert len(authorizer.calls) == 2
+    assert not any("jax_project_membership_event" in sql for sql, _ in first.calls)
+    assert sum("jax_project_membership_event" in sql for sql, _ in second.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_office_metadata_update_revoke_has_no_effect_or_event():
     class Revoked(Authorizer):
         async def authorize_in_transaction(self, *args, **kwargs):
