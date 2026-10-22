@@ -180,21 +180,10 @@ def _office_probe_result(data: object, transport: str) -> ResultadoSonda:
     # Probe quality/truncation is deliberately not a health failure: a valid
     # 2xx response establishes reachability.  Only its validated counters
     # cross this boundary.
-    usage_key, input_key, output_key = {
-        "http_gemini": ("usageMetadata", "promptTokenCount", "candidatesTokenCount"),
-        "http_openai_compat": ("usage", "prompt_tokens", "completion_tokens"),
-        "ollama": (None, "prompt_eval_count", "eval_count"),
-    }[transport]
-    usage = data if usage_key is None else data.get(usage_key)
-    # Defaults in the provider schema make a missing field numerically safe
-    # for parsing, but they are not evidence that the provider measured usage.
-    # Only explicit, strict counters (including a real zero) avoid conservative
-    # estimated accounting.
-    measured = (
-        type(usage) is dict
-        and all(type(usage.get(key)) is int and usage[key] >= 0 for key in (input_key, output_key))
+    return ResultadoSonda(
+        True, None, parsed.tokens_in, parsed.tokens_out,
+        uso_medido=parsed.usage_measured,
     )
-    return ResultadoSonda(True, None, parsed.tokens_in, parsed.tokens_out, uso_medido=measured)
 
 
 def _office_probe_failure(
@@ -418,7 +407,16 @@ async def _registrar(clave: str, d: Despacho, r: ResultadoSonda, outcome: str,
                 raise
             logger.warning("pre-vuelo Office: no se pudo registrar uso (%s)", "usage_error")
     elif not r.uso_medido:
-        tokens_in, tokens_out = _uso_estimado(d)
+        estimated_in, estimated_out = _uso_estimado(d)
+        if runtime_policy is None:
+            # Classic has historically recorded the estimate pair exactly.
+            tokens_in, tokens_out = estimated_in, estimated_out
+        else:
+            # A malformed peer counter makes the charge uncertain, but a
+            # verified sibling remains a lower bound and must never be
+            # replaced by a smaller estimate.
+            tokens_in = max(r.tokens_in, estimated_in)
+            tokens_out = max(r.tokens_out, estimated_out)
         try:
             await record_direct_usage(
                 user_id, tenant_id, clave, d.provider_id, d.modelo, tokens_in, tokens_out,

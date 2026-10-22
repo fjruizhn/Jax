@@ -102,6 +102,7 @@ class OfficeProviderResponse:
     tokens_in: int
     tokens_out: int
     truncated: bool
+    usage_measured: bool
 
 
 _MODEL_VERSION = re.compile(r"^[A-Za-z0-9._:/-]{1,128}$")
@@ -159,7 +160,7 @@ def parse_office_provider_response(data: object, transport: str) -> OfficeProvid
             raise _response_invalid(tokens_in, tokens_out, usage_measured=usage_measured)
         _validate_optional_model(data.get("model"), tokens_in, tokens_out, usage_measured=usage_measured)
         return OfficeProviderResponse(
-            message["content"], tokens_in, tokens_out, reason == "length",
+            message["content"], tokens_in, tokens_out, reason == "length", usage_measured,
         )
     if transport == "ollama":
         tokens_in, tokens_out, usage_measured = _usage_pair(data, "prompt_eval_count", "eval_count")
@@ -169,7 +170,7 @@ def parse_office_provider_response(data: object, transport: str) -> OfficeProvid
             raise _response_invalid(tokens_in, tokens_out, usage_measured=usage_measured)
         _validate_optional_model(data.get("model"), tokens_in, tokens_out, usage_measured=usage_measured)
         return OfficeProviderResponse(
-            message["content"], tokens_in, tokens_out, reason == "length",
+            message["content"], tokens_in, tokens_out, reason == "length", usage_measured,
         )
     if transport == "http_gemini":
         tokens_in, tokens_out, usage_measured = _usage_pair(data.get("usageMetadata"), "promptTokenCount", "candidatesTokenCount")
@@ -186,7 +187,7 @@ def parse_office_provider_response(data: object, transport: str) -> OfficeProvid
             raise _response_invalid(tokens_in, tokens_out, usage_measured=usage_measured)
         _validate_optional_model(data.get("modelVersion"), tokens_in, tokens_out, usage_measured=usage_measured)
         return OfficeProviderResponse(
-            "".join(part["text"] for part in parts), tokens_in, tokens_out, reason == "MAX_TOKENS",
+            "".join(part["text"] for part in parts), tokens_in, tokens_out, reason == "MAX_TOKENS", usage_measured,
         )
     raise _response_invalid()
 

@@ -33,3 +33,7 @@ CrashREADY puede reprogramarse por runnerexistente y CAS. In-flight ambiguo jam�
 Lectoresclassic pipeline_get, steps_by_pipeline, events_by_pipeline, pipeline/step_status_snapshots deben filtrar CLASSIC; Office usa lectores nombrados. Toda rutaresultados/events/mutaciones/CLIrelaunch consideraOffice inexistente antes de leerStep/ref/evento. JXPSQLdirecto también filtra por separado.
 
 Probar DTOestricto/hashtextual; DB2claims1winner/rollback/epoch/terminal; sentinelcontenido ausente enpipelines/steps/events/repo/artifacts/logs/excepciones; receipt-onlysave; revocaciónantes/después conservausage; completadorespuesta perdida→failALREADY_COMPLETED1efecto; failambiguo→UNKNOWN; READYreinicio1llamada vsDELIVERYreinicio0; classicrutas/CLIigual. Mock/inprocesscallbacks, nunca proveedor o producción. EXPLAINreal y carga antes deenable.
+
+## Código INPUT_STALE y upgrade
+
+Ruling Codex conSol delivery_path: conservar código nuevoOFFICE_INPUT_STALE porque cambios de fuentes no son runtimepolicydenial. Upgrade CHECK binding_v2 por expand/contract: inspecciónexactaold/new, ADD+verifynew antesDROPold, estadosfresh/old/both/new reanudables, desconocido failclosed. CosteDDLaditivo+verificación, sinampliarautoridad;4C1loimplementaantesdehabilitarcallbacks.

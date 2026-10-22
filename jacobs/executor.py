@@ -538,7 +538,8 @@ async def _invoke_http_gemini_office(
         raise error
     if response.truncated:
         raise OfficeExecutionError(OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED, provider_call_made=True,
-                                  tokens_in=response.tokens_in, tokens_out=response.tokens_out)
+                                  tokens_in=response.tokens_in, tokens_out=response.tokens_out,
+                                  usage_measured=response.usage_measured)
     return {"success": True, "facet": f.key, "model": f.model, "result": response.text,
             "sources": [], "queries": [], "grounded": False,
             "tokens_in": response.tokens_in, "tokens_out": response.tokens_out}
@@ -635,7 +636,8 @@ async def _invoke_http_openai_compat_office(
         raise error
     if response.truncated:
         raise OfficeExecutionError(OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED, provider_call_made=True,
-                                  tokens_in=response.tokens_in, tokens_out=response.tokens_out)
+                                  tokens_in=response.tokens_in, tokens_out=response.tokens_out,
+                                  usage_measured=response.usage_measured)
     return {"success": True, "facet": f.key, "model": f.model, "result": response.text,
             "tokens_in": response.tokens_in, "tokens_out": response.tokens_out}
 
@@ -737,7 +739,8 @@ async def _invoke_ollama_office(
         raise error
     if response.truncated:
         raise OfficeExecutionError(OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED, provider_call_made=True,
-                                  tokens_in=response.tokens_in, tokens_out=response.tokens_out)
+                                  tokens_in=response.tokens_in, tokens_out=response.tokens_out,
+                                  usage_measured=response.usage_measured)
     return {"success": True, "facet": f.key, "model": f.model, "result": response.text,
             "tokens_in": response.tokens_in, "tokens_out": response.tokens_out}
 

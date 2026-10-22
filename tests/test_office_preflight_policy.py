@@ -264,6 +264,24 @@ def test_office_mocktransport_read_timeout_is_unmeasured_and_estimated(monkeypat
     assert usage.await_args.kwargs["request_type"] == "preflight_probe_est"
 
 
+def test_classic_unmeasured_probe_keeps_its_historical_estimate_pair(monkeypatch):
+    from jacobs import sonda
+
+    usage = AsyncMock()
+
+    async def run():
+        monkeypatch.setattr(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock())
+        monkeypatch.setattr(sonda, "record_direct_usage", usage)
+        monkeypatch.setattr(sonda, "_uso_estimado", lambda d: (11, 16))
+        await sonda._registrar(
+            "office-facet", _dispatch(), sonda.ResultadoSonda(False, "classic", 13, 17, uso_medido=False),
+            "provider_error", None, None, llamada_cobrable=True,
+        )
+
+    asyncio.run(run())
+    assert usage.await_args.args[5:7] == (11, 16)
+
+
 @pytest.mark.parametrize(("status", "expected_calls"), [(400, 0), (503, 1)])
 def test_office_http_error_usage_only_estimates_calls_that_may_have_charged(monkeypatch, status, expected_calls):
     from facet_resolver import ResolvedFacet
@@ -319,6 +337,8 @@ def test_office_probe_rejects_raw_shape_and_usage_before_durable_helpers(monkeyp
     assert (result.ok, result.detalle, result.tokens_in, result.tokens_out) == (False, "config_error", 13, 0)
     assert "sentinel" not in repr(result)
     assert "sentinel" not in repr(health.await_args) and "sentinel" not in repr(usage.await_args)
+    assert usage.await_args.kwargs["request_type"] == "preflight_probe_est"
+    assert usage.await_args.args[5] >= result.tokens_in and usage.await_args.args[6] >= result.tokens_out
 
 
 def test_office_probe_prepare_and_outer_timeout_errors_are_opaque(monkeypatch):

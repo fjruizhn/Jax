@@ -75,3 +75,25 @@ coverage verifies both call contexts.  A parser failure after Office probe HTTP
 is cloned with `PREFLIGHT`, while retaining its truthful post-call marker.
 Focused isolated suite: **155 passed in 5.99s**; compilation and diff check
 passed.
+
+## Review-fix round 3 · 2026-10-21
+
+Usage provenance now lives on `OfficeProviderResponse`, rather than the
+error-class default.  All three direct Office invokers copy it into truncation
+errors; full provider usage remains measured while unknown metadata remains
+unmeasured.  Probe estimated accounting now takes the per-counter maximum of
+verified partial usage and the conservative estimate, so it never replaces a
+real `13` with a lower estimate.
+
+The added tests cover full measured/truncated Gemini/OpenAI/Ollama parser
+responses and full probe writer preservation for partial counters.  The prior
+155 result was a worktree validation after a parent packaging omission; the
+committed candidate then contained 154 tests.  This round's worktree command
+passes **158 tests in 6.01s**, plus compilation and diff check.
+
+## Final Classic compatibility precheck · 2026-10-21
+
+Partial-counter preservation is Office-only.  Classic `runtime_policy=None`
+continues to write the historical estimated pair exactly; a focused regression
+asserts this boundary.  Focused isolated suite: **159 passed in 5.99s**;
+compilation and diff check passed.

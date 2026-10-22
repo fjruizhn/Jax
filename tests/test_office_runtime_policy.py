@@ -13,6 +13,7 @@ import jacobs.office_runtime as runtime
 from jacobs.office_contract import OFFICE_RUNTIME_POLICY
 from jacobs.office_runtime import (
     OfficeCapabilityContext,
+    OfficeErrorPhase,
     OfficeExecutionError,
     OfficeRejectionCode,
     ensure_office_http_log_privacy,
@@ -320,6 +321,20 @@ def test_zero_usage_is_a_valid_counter_value():
     assert (response.tokens_in, response.tokens_out) == (0, 0)
 
 
+@pytest.mark.parametrize(
+    ("transport", "payload"),
+    [
+        ("http_gemini", {"candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "MAX_TOKENS"}], "usageMetadata": {"promptTokenCount": 13, "candidatesTokenCount": 17}}),
+        ("http_openai_compat", {"choices": [{"message": {"content": "ok"}, "finish_reason": "length"}], "usage": {"prompt_tokens": 13, "completion_tokens": 17}}),
+        ("ollama", {"message": {"content": "ok"}, "done_reason": "length", "prompt_eval_count": 13, "eval_count": 17}),
+    ],
+)
+def test_full_provider_usage_provenance_survives_truncation(transport, payload):
+    response = runtime.parse_office_provider_response(payload, transport)
+    assert response.truncated and response.usage_measured
+    assert (response.tokens_in, response.tokens_out) == (13, 17)
+
+
 @pytest.mark.asyncio
 async def test_office_assemble_is_denied_before_mechanical_assembly(monkeypatch):
     """Office stages admit only direct no-tools transports; Classic assembly remains elsewhere."""
@@ -516,6 +531,11 @@ async def test_catalog_timeout_ceiling_is_current_and_has_no_unknown_bypass(monk
     with pytest.raises(OfficeExecutionError) as raised:
         await runtime.validate_office_capability_timeout(OfficeCapabilityContext("research"), 61)
     assert raised.value.code is OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED
+    assert raised.value.phase is OfficeErrorPhase.GENERATION
+    with pytest.raises(OfficeExecutionError) as raised:
+        await runtime.validate_office_capability_timeout(
+            OfficeCapabilityContext("research"), 61, phase=OfficeErrorPhase.PREFLIGHT)
+    assert raised.value.phase is OfficeErrorPhase.PREFLIGHT
 
 
 def test_version_mismatch_denies_before_any_office_http(monkeypatch):
