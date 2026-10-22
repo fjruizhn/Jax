@@ -9,7 +9,8 @@ from pydantic import ValidationError
 from jacobs import store
 from jacobs.office_contract import (
     OFFICE_RUNTIME_POLICY, OFFICE_WORK_CONTRACT_VERSION, OfficePhase, OfficeRunRequest, OfficeRuntimePolicy,
-    deterministic_correlation_id, deterministic_step_id, office_request_digest,
+    OfficeCompleteRequest, OfficeMaterializedResponse, OfficeReceipt,
+    deterministic_correlation_id, deterministic_step_id, office_request_digest, office_utf8_sha256,
 )
 
 
@@ -107,10 +108,32 @@ def test_unknown_office_rejection_code_is_opaque_before_any_database_work(monkey
                 "unused", 0, OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.FAILED,
                 rejection_code=untrusted,
             ))
-        assert str(caught.value) == "unknown Office rejection code"
+        assert str(caught.value) == "generic Office phase transitions are disabled"
         assert caught.value.__cause__ is None
         assert caught.value.__context__ is None
         rendered = "".join(traceback.format_exception(caught.type, caught.value, caught.tb))
         assert sentinel not in rendered
     assert not connection_called
     assert sentinel not in caplog.text
+
+
+def test_callback_dtos_are_strict_and_preserve_opaque_provider_bytes():
+    pipeline_id = str(uuid.uuid4())
+    envelope = {
+        "contract_version": OFFICE_WORK_CONTRACT_VERSION, "pipeline_id": pipeline_id,
+        "run_epoch": 0, "step_id": deterministic_step_id(pipeline_id),
+        "correlation_id": deterministic_correlation_id(pipeline_id), "request_sha256": "a" * 64,
+    }
+    raw = '{"x":"\\u00e9"}\n'
+    request = OfficeCompleteRequest(**envelope, output_json=raw,
+        output_sha256=office_utf8_sha256(raw), modelo_real="catalog/model-v1")
+    assert request.output_json == raw
+    with pytest.raises(ValidationError):
+        OfficeCompleteRequest(**envelope, output_json=raw, output_sha256=office_utf8_sha256(raw), modelo_real="catalog/model", extra="no")
+    with pytest.raises(ValidationError):
+        OfficeCompleteRequest(**envelope, output_json=raw, output_sha256="a" * 64, modelo_real="catalog/model")
+    with pytest.raises(ValidationError):
+        OfficeMaterializedResponse(outcome="MATERIALIZED", prompt="SENTINEL_PRIVATE_PROMPT", materialization_sha256="a" * 64, binding_version=True, contract_version=OFFICE_WORK_CONTRACT_VERSION)
+    with pytest.raises(ValidationError) as caught:
+        OfficeReceipt(receipt_id=str(uuid.uuid4()).upper(), effect_kind="NOTE_CREATED", effect_id="note:1", output_sha256="a" * 64, office_stage_version=1)
+    assert "NOTE_CREATED" not in str(caught.value)

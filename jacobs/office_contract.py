@@ -180,7 +180,7 @@ class OfficeCompleteRequest(_OfficeEnvelope):
     @field_validator("modelo_real", mode="before")
     @classmethod
     def _model_token(cls, value: object) -> str:
-        if type(value) is not str or not value or len(value) > 128 or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-" for c in value):
+        if type(value) is not str or not value or len(value) > 128 or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:/-" for c in value):
             raise ValueError("modelo_real must be a safe model token")
         return value
 
@@ -192,7 +192,7 @@ class OfficeCompleteRequest(_OfficeEnvelope):
 
 
 class OfficeReceipt(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     receipt_id: str
     effect_kind: str
     effect_id: str
@@ -257,6 +257,16 @@ class OfficeFailRequest(_OfficeEnvelope):
         if type(value) is not bool:
             raise ValueError("model_invoked must be a JSON boolean")
         return value
+
+    @field_validator("code", mode="before")
+    @classmethod
+    def _code(cls, value: object) -> OfficeRejectionCode:
+        if type(value) is not str:
+            raise ValueError("code must be a stable JSON string")
+        try:
+            return OfficeRejectionCode(value)
+        except ValueError:
+            raise ValueError("code is not a registered Office stable code") from None
 
     @field_validator("output_sha256", mode="before")
     @classmethod

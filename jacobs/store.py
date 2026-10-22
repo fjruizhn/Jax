@@ -2198,52 +2198,13 @@ async def office_transition_phase(
     pipeline_id: str, epoch: int, from_phase: OfficePhase, to_phase: OfficePhase,
     *, rejection_code: str | None = None,
 ) -> bool:
-    """One epoch-fenced phase transition.  No transition can revive a stale run."""
-    # The durable phase graph includes delivery/receipt, but generic 4A has
-    # neither a running-step fence nor a receipt proof.  4C must expose those
-    # two atomic evidence-bearing transitions; this helper fails closed.
-    future_transitions = {
-        OfficePhase.RESERVED: {OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED},
-        OfficePhase.PREFLIGHT_IN_FLIGHT: {OfficePhase.READY, OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED, OfficePhase.OUTCOME_UNKNOWN},
-        OfficePhase.READY: {OfficePhase.DELIVERY_IN_FLIGHT, OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED},
-        OfficePhase.DELIVERY_IN_FLIGHT: {OfficePhase.RECEIPT_STORED, OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED, OfficePhase.OUTCOME_UNKNOWN},
-    }
-    transitions = {
-        OfficePhase.RESERVED: future_transitions[OfficePhase.RESERVED],
-        OfficePhase.PREFLIGHT_IN_FLIGHT: future_transitions[OfficePhase.PREFLIGHT_IN_FLIGHT],
-        OfficePhase.READY: {OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED},
-    }
-    if to_phase not in transitions.get(from_phase, set()):
-        raise ValueError(f"invalid Office phase transition {from_phase.value}->{to_phase.value}")
-    terminal = {
-        OfficePhase.RECEIPT_STORED: PipelineStatus.completed,
-        OfficePhase.FAILED: PipelineStatus.failed,
-        OfficePhase.CANCELLED_REVOKED: PipelineStatus.aborted,
-        OfficePhase.OUTCOME_UNKNOWN: PipelineStatus.outcome_unknown,
-    }
-    required_status = terminal.get(to_phase)
-    phases_with_code = {
-        OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED, OfficePhase.OUTCOME_UNKNOWN,
-    }
-    if rejection_code is not None and (
-        not isinstance(rejection_code, str) or rejection_code not in OFFICE_REJECTION_CODES
-    ):
-        # Never construct Enum(value): its ValueError retains the untrusted
-        # value and can leak it through an exception chain or traceback.
-        raise ValueError("unknown Office rejection code") from None
-    if (to_phase in phases_with_code and not rejection_code) or (to_phase not in phases_with_code and rejection_code is not None):
-        raise ValueError("Office phase determines rejection-code presence")
-    target_status = required_status.value if required_status else None
-    async with conexion() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "UPDATE jacobs_pipelines SET office_phase=%s, status=COALESCE(%s,status), "
-                "office_rejection_code=%s, updated_at=%s WHERE pipeline_id=%s "
-                "AND execution_contract=%s AND run_epoch=%s AND office_phase=%s AND status='running'",
-                (to_phase.value, target_status, rejection_code, time.time(), pipeline_id,
-                 OFFICE_EXECUTION_CONTRACT, epoch, from_phase.value),
-            )
-            return cur.rowcount == 1
+    """Fail closed: Office transitions require their dedicated proof-bearing APIs.
+
+    Compatibility callers cannot use a generic phase graph because it lacks
+    the deterministic step, persisted binding, receipt, and event guarantees
+    enforced by the dedicated Office transition functions.
+    """
+    raise ValueError("generic Office phase transitions are disabled")
 
 
 async def _office_event(cur, pipeline_id: str, step_id: str, event_type: str, payload: dict[str, object]) -> None:
@@ -2332,19 +2293,76 @@ async def office_mark_ready(pipeline_id: str, epoch: int, step_id: str, material
 
 
 async def office_claim_delivery(pipeline_id: str, epoch: int, step_id: str) -> bool:
-    return await _office_claim(pipeline_id, epoch, step_id, phase=OfficePhase.READY,
-                               next_phase=OfficePhase.DELIVERY_IN_FLIGHT, step_status=StepStatus.running,
-                               event="OFFICE_DELIVERY_CLAIMED")
+    """Claim delivery only while the exact preflight binding remains locked.
+
+    A read before the claim transaction permitted a concurrent writer to change
+    ``input_ref`` between validation and the phase transition.  The binding is
+    therefore read and validated under the same pipeline-then-step locks as
+    the claim itself.
+    """
+    if step_id != deterministic_step_id(pipeline_id):
+        raise ValueError("Office step ID does not bind pipeline")
+    async with conexion(desechable=True) as conn:
+        async with transaccion(conn):
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    "SELECT pipeline_id FROM jacobs_pipelines WHERE pipeline_id=%s "
+                    "AND execution_contract=%s AND run_epoch=%s AND office_phase=%s "
+                    "AND status='running' FOR UPDATE",
+                    (pipeline_id, OFFICE_EXECUTION_CONTRACT, epoch, OfficePhase.READY.value),
+                )
+                if not await cur.fetchone():
+                    return False
+                await cur.execute(
+                    "SELECT step_id,trace_id,status,input_ref FROM jacobs_steps WHERE step_id=%s "
+                    "AND pipeline_id=%s AND step_index=0 FOR UPDATE",
+                    (step_id, pipeline_id),
+                )
+                step = await cur.fetchone()
+                if (not step or step["trace_id"] != deterministic_correlation_id(pipeline_id)
+                        or step["status"] != StepStatus.pending.value):
+                    raise RuntimeError("Office delivery step binding mismatch")
+                try:
+                    binding = json.loads(step.get("input_ref") or "")
+                except (TypeError, json.JSONDecodeError):
+                    return False
+                digest = binding.get("office_materialization_sha256") if type(binding) is dict else None
+                version = binding.get("binding_version") if type(binding) is dict else None
+                if (set(binding) != {"office_materialization_sha256", "binding_version"}
+                        or type(digest) is not str or len(digest) != 64
+                        or any(c not in "0123456789abcdef" for c in digest)
+                        or type(version) is not int or version <= 0):
+                    return False
+                await cur.execute(
+                    "UPDATE jacobs_pipelines SET office_phase=%s,updated_at=%s WHERE pipeline_id=%s",
+                    (OfficePhase.DELIVERY_IN_FLIGHT.value, time.time(), pipeline_id),
+                )
+                await cur.execute(
+                    "UPDATE jacobs_steps SET status='running',started_at=%s WHERE step_id=%s "
+                    "AND pipeline_id=%s AND step_index=0 AND status='pending'",
+                    (time.time(), step_id, pipeline_id),
+                )
+                if cur.rowcount != 1:
+                    raise RuntimeError("Office delivery claim lost after pipeline phase claim")
+                await _office_event(cur, pipeline_id, step_id, "OFFICE_DELIVERY_CLAIMED",
+                                    {"phase": OfficePhase.DELIVERY_IN_FLIGHT.value})
+                return True
 
 
 async def office_store_receipt(pipeline_id: str, epoch: int, step_id: str, receipt: OfficeReceipt,
                                modelo_real: str, receipt_ref: str | None = None) -> bool:
+    if type(receipt) is not OfficeReceipt:
+        raise ValueError("invalid Office receipt")
+    try:
+        receipt = OfficeReceipt.model_validate(receipt.model_dump(mode="json"))
+    except Exception:
+        raise ValueError("invalid Office receipt") from None
     receipt_json = json.dumps({"office_receipt": receipt.model_dump(mode="json")}, sort_keys=True,
                               separators=(",", ":"), ensure_ascii=True)
     canonical_ref = "inline:" + receipt_json
     if receipt_ref is not None and receipt_ref != canonical_ref:
         raise ValueError("Office receipt reference must be canonical and receipt-only")
-    if not isinstance(modelo_real, str) or not modelo_real or len(modelo_real) > 128:
+    if not isinstance(modelo_real, str) or not modelo_real or len(modelo_real) > 128 or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:/-" for c in modelo_real):
         raise ValueError("invalid Office model token")
     async with conexion(desechable=True) as conn:
         async with transaccion(conn):
@@ -2369,7 +2387,13 @@ async def office_finish_terminal(pipeline_id: str, epoch: int, step_id: str, fro
     }
     if terminal not in targets or code not in OFFICE_REJECTION_CODES:
         raise ValueError("invalid Office terminal outcome")
-    if from_phase in {OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED, OfficePhase.OUTCOME_UNKNOWN, OfficePhase.RECEIPT_STORED}:
+    allowed = {
+        OfficePhase.RESERVED: {OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED},
+        OfficePhase.PREFLIGHT_IN_FLIGHT: {OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED, OfficePhase.OUTCOME_UNKNOWN},
+        OfficePhase.READY: {OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED},
+        OfficePhase.DELIVERY_IN_FLIGHT: {OfficePhase.FAILED, OfficePhase.CANCELLED_REVOKED, OfficePhase.OUTCOME_UNKNOWN},
+    }
+    if terminal not in allowed.get(from_phase, set()):
         raise ValueError("Office terminal phase has no exit")
     pipeline_status, step_status = targets[terminal]
     async with conexion(desechable=True) as conn:

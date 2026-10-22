@@ -1,94 +1,77 @@
-"""The callback boundary accepts only immutable, text-opaque envelopes."""
+"""Classic HTTP/CLI gates must not expose an Office row, even before its step exists."""
 from __future__ import annotations
 
-import hashlib
+import asyncio
 import uuid
 
-import pytest
-from pydantic import ValidationError
-from fastapi import HTTPException
-from unittest.mock import AsyncMock, patch
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
-from jacobs.office_contract import (
-    OFFICE_WORK_CONTRACT_VERSION,
-    OfficeCompleteRequest,
-    OfficeMaterializeRequest,
-    OfficeMaterializedResponse,
-    deterministic_correlation_id,
-    deterministic_step_id,
-    office_utf8_sha256,
-)
+from jacobs import cupo, routes, store
+from jacobs.office_contract import OFFICE_WORK_CONTRACT_VERSION, OfficeRunRequest, office_request_digest
 
 
-def _binding(**changes):
-    pipeline_id = str(uuid.uuid4())
-    values = {
+def _request() -> OfficeRunRequest:
+    data = {
         "contract_version": OFFICE_WORK_CONTRACT_VERSION,
-        "pipeline_id": pipeline_id,
-        "run_epoch": 0,
-        "step_id": deterministic_step_id(pipeline_id),
-        "correlation_id": deterministic_correlation_id(pipeline_id),
-        "request_sha256": "a" * 64,
+        "office_job_id": uuid.uuid4(), "office_stage_id": uuid.uuid4(),
+        "client_request_id": uuid.uuid4(), "project_id": 701, "tenant_id": 702,
+        "usage_user_id": 703, "facet": "hipatia", "capability": "design",
+        "timeout_seconds": 60, "accepted_cost_usd": "0.010000",
     }
-    values.update(changes)
-    return values
+    data["request_sha256"] = office_request_digest(data)
+    return OfficeRunRequest(**data)
 
 
-def test_complete_request_preserves_provider_text_and_checks_its_exact_utf8_digest():
-    """Catches a JSON parse/trim/normalization changing provider bytes."""
-    raw = '{\n  "café": [1, 2] \n}'
-    request = OfficeCompleteRequest(**_binding(
-        output_json=raw,
-        output_sha256=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
-        modelo_real="gemini-2.5-pro",
-    ))
-    assert request.output_json == raw
-    assert request.output_sha256 == hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    with pytest.raises(ValidationError):
-        OfficeCompleteRequest(**_binding(
-            output_json='{"café":[1,2]}', output_sha256=request.output_sha256,
-            modelo_real="gemini-2.5-pro",
-        ))
+def _app() -> FastAPI:
+    app = FastAPI()
+    app.include_router(routes.router)
+    return app
 
 
-@pytest.mark.parametrize("raw", ["not-json\n", "{\"a\":1}", "{ \"a\": 1 }", "é", "é\n"])
-def test_provider_text_hash_distinguishes_exact_unicode_whitespace_and_non_json(raw):
-    """Catches treating output as a domain JSON document before JXP does."""
-    assert office_utf8_sha256(raw) == hashlib.sha256(raw.encode("utf-8", errors="strict")).hexdigest()
+def test_classic_routes_hide_office_row_without_step_and_leave_no_events():
+    async def reserve():
+        await store.init_tables()
+        result = await cupo.reservar_office_v1(_request(), limite=10000)
+        await store.cerrar_pool()
+        return result.pipeline_id
 
+    async def state(pid):
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT office_phase,status FROM jacobs_pipelines WHERE pipeline_id=%s", (pid,))
+                pipeline = await cur.fetchone()
+                await cur.execute("SELECT COUNT(*) FROM jacobs_steps WHERE pipeline_id=%s", (pid,)); steps = (await cur.fetchone())[0]
+                await cur.execute("SELECT COUNT(*) FROM jacobs_events WHERE pipeline_id=%s", (pid,)); events = (await cur.fetchone())[0]
+        await store.cerrar_pool()
+        return pipeline, steps, events
 
-def test_callback_envelopes_reject_coercion_extra_keys_and_noncanonical_ids():
-    """Catches permissive callback parsing that would weaken the persisted binding."""
-    with pytest.raises(ValidationError):
-        OfficeMaterializeRequest(**_binding(run_epoch=True, phase="PREFLIGHT"))
-    with pytest.raises(ValidationError):
-        OfficeMaterializeRequest(**_binding(pipeline_id=str(uuid.uuid4()).upper(), phase="PREFLIGHT"))
-    with pytest.raises(ValidationError):
-        OfficeMaterializeRequest(**_binding(phase="PREFLIGHT", unexpected="x"))
-
-
-def test_materialized_prompt_must_match_exact_utf8_digest_without_leaking_text():
-    """Catches accepting a materialization whose stored digest is unrelated to its prompt."""
-    raw = "instrucción\n"
-    response = OfficeMaterializedResponse(
-        outcome="MATERIALIZED", prompt=raw, materialization_sha256=office_utf8_sha256(raw),
-        binding_version=1, contract_version=OFFICE_WORK_CONTRACT_VERSION,
-    )
-    assert response.prompt == raw
-    with pytest.raises(ValidationError) as caught:
-        OfficeMaterializedResponse(
-            outcome="MATERIALIZED", prompt="other", materialization_sha256=response.materialization_sha256,
-            binding_version=1, contract_version=OFFICE_WORK_CONTRACT_VERSION,
-        )
-    assert raw not in str(caught.value)
-
-
-def test_classic_events_returns_404_before_the_events_reader_for_office_id():
-    """Catches the former 200 empty list disclosure shape for an Office pipeline."""
-    from jacobs import routes
-    with patch.object(routes.store, "pipeline_get", AsyncMock(return_value=None)), \
-         patch.object(routes.store, "events_by_pipeline", AsyncMock()) as events:
-        with pytest.raises(HTTPException) as caught:
-            import asyncio; asyncio.run(routes.get_events(str(uuid.uuid4())))
-    assert caught.value.status_code == 404
-    events.assert_not_awaited()
+    pid = asyncio.run(reserve())
+    before = asyncio.run(state(pid))
+    try:
+        requests = [
+            ("get", f"/jacobs/pipeline/{pid}", None),
+            ("get", f"/jacobs/pipeline/{pid}/results", None),
+            ("get", f"/jacobs/pipeline/{pid}/events", None),
+            ("post", f"/jacobs/pipeline/{pid}/cancel", None),
+            ("post", f"/jacobs/pipeline/{pid}/discard", {"user_id": "u"}),
+            ("post", f"/jacobs/pipeline/{pid}/recover", {"user_id": "u"}),
+            ("post", f"/jacobs/pipeline/{pid}/hide", {"user_id": "u"}),
+            ("post", f"/jacobs/pipeline/{pid}/restore", {"user_id": "u"}),
+            ("post", f"/jacobs/pipeline/{pid}/resume", {"invoked_by": "plataforma"}),
+            ("post", f"/jacobs/pipeline/{pid}/continue", {"invoked_by": "plataforma"}),
+            ("post", f"/jacobs/pipeline/{pid}/continue/preflight", {"invoked_by": "plataforma"}),
+            ("post", f"/jacobs/pipeline/{pid}/approve-step", {"invoked_by": "plataforma"}),
+        ]
+        with TestClient(_app(), raise_server_exceptions=False) as client:
+            for method, path, body in requests:
+                response = client.request(method.upper(), path, json=body)
+                assert response.status_code == 404, (method, path, response.text)
+        assert asyncio.run(state(pid)) == before
+    finally:
+        async def clean():
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("DELETE FROM jacobs_pipelines WHERE pipeline_id=%s", (pid,))
+            await store.cerrar_pool()
+        asyncio.run(clean())
