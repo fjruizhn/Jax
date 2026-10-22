@@ -13,6 +13,7 @@ from jax.memory.project_authority import (
     ProjectAuthorityAdmin,
     ProjectAuthorityError,
     ProjectAuthorityRetryable,
+    UpdatedNamespacedProjectMetadata,
 )
 from jax.memory.scope_authority import MariaDBScopeAuthorityResolver, ProjectNamespace
 
@@ -134,6 +135,110 @@ class MembershipAuthorizer:
 
     async def authorize_membership_in_transaction(self, cursor, **kwargs):
         self.calls.append((cursor, kwargs))
+
+
+@pytest.mark.asyncio
+async def test_office_metadata_update_locks_and_reauthorizes_in_one_transaction():
+    cursor = Cursor([
+        {"tenant_id": 4},
+        {"tenant_id": 4, "status": "ACTIVE"},
+        {"tenant_id": 4, "status": "ACTIVE"},
+        {"tenant_id": 4, "status": "ACTIVE", "authorization_namespace": "OFFICE_CONFIDENTIAL"},
+        {"name": "before", "description": None},
+    ])
+    store = Store([])
+    store.cursor = cursor
+    authorizer = Authorizer()
+
+    result = await ProjectAuthorityAdmin(store).update_namespaced_project_metadata(
+        actor_user_id=7, target_tenant_id=4, project_id=17,
+        namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+        name="  Cafe\u0301  ", description="descripcio\u0301n", authorizer=authorizer)
+
+    assert result == UpdatedNamespacedProjectMetadata(
+        17, 4, ProjectNamespace.OFFICE_CONFIDENTIAL, "Café", "descripción", True)
+    assert store.mutations == 1
+    assert authorizer.calls == [(cursor, 7, 4, ProjectNamespace.OFFICE_CONFIDENTIAL,
+                                 "UPDATE_OFFICE_PROJECT_METADATA")]
+    statements = [sql for sql, _ in cursor.calls]
+    assert statements.index("SELECT tenant_id,status FROM jax_tenants WHERE tenant_id=%s FOR UPDATE") < \
+        statements.index("SELECT tenant_id,status FROM jax_users WHERE user_id=%s FOR UPDATE") < \
+        statements.index("SELECT tenant_id,status,authorization_namespace FROM jax_project_scope WHERE project_id=%s FOR UPDATE") < \
+        statements.index("SELECT name,description FROM projects WHERE id=%s FOR UPDATE")
+    assert any("UPDATE projects SET name=%s,description=%s" in sql for sql in statements)
+    assert any("UPDATE_OFFICE_PROJECT_METADATA" in args for sql, args in cursor.calls
+               if "jax_project_membership_event" in sql)
+
+
+@pytest.mark.asyncio
+async def test_office_metadata_update_noop_is_idempotent_without_event():
+    cursor = Cursor([
+        {"tenant_id": 4},
+        {"tenant_id": 4, "status": "ACTIVE"},
+        {"tenant_id": 4, "status": "ACTIVE"},
+        {"tenant_id": 4, "status": "ACTIVE", "authorization_namespace": "OFFICE_CONFIDENTIAL"},
+        {"name": "Office", "description": "private"},
+    ])
+    store = Store([]); store.cursor = cursor
+    authorizer = Authorizer()
+    result = await ProjectAuthorityAdmin(store).update_namespaced_project_metadata(
+        actor_user_id=7, target_tenant_id=4, project_id=17,
+        namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+        name="Office", description="private", authorizer=authorizer)
+    assert result.changed is False
+    assert len(authorizer.calls) == 1
+    assert not any("UPDATE projects" in sql or "jax_project_membership_event" in sql
+                   for sql, _ in cursor.calls)
+
+
+@pytest.mark.asyncio
+async def test_office_metadata_update_denies_inactive_tenant_before_authorizer_or_project():
+    cursor = Cursor([{"tenant_id": 4}, {"tenant_id": 4, "status": "DISABLED"}])
+    store = Store([]); store.cursor = cursor
+    authorizer = Authorizer()
+    with pytest.raises(ProjectAuthorityError, match="tenant is not active"):
+        await ProjectAuthorityAdmin(store).update_namespaced_project_metadata(
+            actor_user_id=7, target_tenant_id=4, project_id=17,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+            name="Office", description=None, authorizer=authorizer)
+    assert not authorizer.calls
+    assert not any("FROM projects" in sql for sql, _ in cursor.calls)
+
+
+@pytest.mark.asyncio
+async def test_office_metadata_update_rejects_classic_namespace_before_transaction():
+    store = Store([])
+    with pytest.raises(AuthorizationDenied, match="OFFICE_CONFIDENTIAL"):
+        await ProjectAuthorityAdmin(store).update_namespaced_project_metadata(
+            actor_user_id=7, target_tenant_id=4, project_id=17,
+            namespace=ProjectNamespace.CLASSIC,
+            name="Office", description=None, authorizer=Authorizer())
+    assert store.mutations == 0
+
+
+@pytest.mark.asyncio
+async def test_office_metadata_update_revoke_has_no_effect_or_event():
+    class Revoked(Authorizer):
+        async def authorize_in_transaction(self, *args, **kwargs):
+            await super().authorize_in_transaction(*args, **kwargs)
+            raise PermissionError("revoked")
+
+    cursor = Cursor([
+        {"tenant_id": 4},
+        {"tenant_id": 4, "status": "ACTIVE"},
+        {"tenant_id": 4, "status": "ACTIVE"},
+        {"tenant_id": 4, "status": "ACTIVE", "authorization_namespace": "OFFICE_CONFIDENTIAL"},
+    ])
+    store = Store([]); store.cursor = cursor
+    authorizer = Revoked()
+    with pytest.raises(PermissionError, match="revoked"):
+        await ProjectAuthorityAdmin(store).update_namespaced_project_metadata(
+            actor_user_id=7, target_tenant_id=4, project_id=17,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+            name="Office", description=None, authorizer=authorizer)
+    assert len(authorizer.calls) == 1
+    assert not any("FROM projects" in sql or "UPDATE projects" in sql
+                   or "jax_project_membership_event" in sql for sql, _ in cursor.calls)
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,8 @@ from base_de_test import es_base_de_test
 from jax.core.db_connect_config import db_connect_timeout_seconds
 from jax.memory.project_authority import (IdempotencyKeyConflict,
                                           ProjectAuthorityAdmin,
-                                          ProjectAuthorityError)
+                                          ProjectAuthorityError,
+                                          ProjectNotVisible)
 from jax.memory.project_authority_migrations import (apply_project_authority_migration,
                                                       revert_project_lifecycle_migration)
 from jax.memory.scope_authority import (MariaDBScopeAuthorityResolver,
@@ -468,6 +469,94 @@ async def test_office_cross_tenant_creates_use_canonical_lock_order_without_dead
                 rows = await cur.fetchall()
                 assert {row["tenant_id"] for row in rows} == {low_tenant_id, high_tenant_id}
                 assert {row["authorization_namespace"] for row in rows} == {"OFFICE_CONFIDENTIAL"}
+    finally:
+        pool.close(); await pool.wait_closed()
+        await _drop(name)
+
+
+@requires_test_db
+@_async
+async def test_office_metadata_update_real_db_noop_revocation_and_inactive_tenant():
+    name = f"{_DB}_office_{uuid.uuid4().hex[:10]}"
+    assert es_base_de_test(name)
+    tenant_id, actor_id = await _setup(name)
+    pool = await aiomysql.create_pool(db=name, autocommit=True, minsize=1, maxsize=3,
+                                      cursorclass=aiomysql.DictCursor,
+                                      connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        api = ProjectAuthorityAdmin(MariaDBB9Store(pool))
+        project = await api.create_namespaced_project(
+            actor_user_id=actor_id, target_tenant_id=tenant_id,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+            name="Office", description=None, idempotency_key=str(uuid.uuid4()), authorizer=_Authorizer())
+        changed = await api.update_namespaced_project_metadata(
+            actor_user_id=actor_id, target_tenant_id=tenant_id, project_id=project.project_id,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+            name="  Cafe\u0301  ", description="descripcio\u0301n", authorizer=_Authorizer())
+        assert changed.changed and changed.name == "Café" and changed.description == "descripción"
+        noop = await api.update_namespaced_project_metadata(
+            actor_user_id=actor_id, target_tenant_id=tenant_id, project_id=project.project_id,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+            name="Café", description="descripción", authorizer=_Authorizer())
+        assert not noop.changed
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT COUNT(*) AS n FROM jax_project_membership_event "
+                    "WHERE project_id=%s AND operation='UPDATE_OFFICE_PROJECT_METADATA'", (project.project_id,))
+                assert (await cur.fetchone())["n"] == 1
+        with pytest.raises(PermissionError, match="revoked"):
+            await api.update_namespaced_project_metadata(
+                actor_user_id=actor_id, target_tenant_id=tenant_id, project_id=project.project_id,
+                namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+                name="blocked", description=None, authorizer=_Authorizer(allow=False))
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT name FROM projects WHERE id=%s", (project.project_id,))
+                assert (await cur.fetchone())["name"] == "Café"
+                await cur.execute("UPDATE jax_tenants SET status='disabled' WHERE tenant_id=%s", (tenant_id,))
+        with pytest.raises(ProjectNotVisible, match="tenant is not active"):
+            await api.update_namespaced_project_metadata(
+                actor_user_id=actor_id, target_tenant_id=tenant_id, project_id=project.project_id,
+                namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+                name="blocked", description=None, authorizer=_Authorizer())
+    finally:
+        pool.close(); await pool.wait_closed()
+        await _drop(name)
+
+
+@requires_test_db
+@_async
+async def test_office_metadata_update_real_db_serializes_concurrent_writers():
+    name = f"{_DB}_office_{uuid.uuid4().hex[:10]}"
+    assert es_base_de_test(name)
+    tenant_id, actor_id = await _setup(name)
+    pool = await aiomysql.create_pool(db=name, autocommit=True, minsize=1, maxsize=4,
+                                      cursorclass=aiomysql.DictCursor,
+                                      connect_timeout=db_connect_timeout_seconds(), **_params())
+    try:
+        api = ProjectAuthorityAdmin(MariaDBB9Store(pool))
+        project = await api.create_namespaced_project(
+            actor_user_id=actor_id, target_tenant_id=tenant_id,
+            namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+            name="Office", description=None, idempotency_key=str(uuid.uuid4()), authorizer=_Authorizer())
+
+        async def update(name):
+            return await api.update_namespaced_project_metadata(
+                actor_user_id=actor_id, target_tenant_id=tenant_id, project_id=project.project_id,
+                namespace=ProjectNamespace.OFFICE_CONFIDENTIAL,
+                name=name, description=None, authorizer=_Authorizer())
+
+        first, second = await asyncio.gather(update("first"), update("second"))
+        assert first.changed and second.changed
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT name FROM projects WHERE id=%s", (project.project_id,))
+                assert (await cur.fetchone())["name"] in {"first", "second"}
+                await cur.execute(
+                    "SELECT COUNT(*) AS n FROM jax_project_membership_event "
+                    "WHERE project_id=%s AND operation='UPDATE_OFFICE_PROJECT_METADATA'", (project.project_id,))
+                assert (await cur.fetchone())["n"] == 2
     finally:
         pool.close(); await pool.wait_closed()
         await _drop(name)

@@ -346,6 +346,23 @@ class CreatedProject:
     created: bool
 
 
+@dataclass(frozen=True)
+class UpdatedNamespacedProjectMetadata:
+    """Result of an Office-only project metadata mutation.
+
+    ``version`` deliberately is not returned: the existing namespace contract
+    has no metadata concurrency token.  The row locks below serialize writers;
+    adding a pretend CAS token here would create a second, incompatible
+    contract for JXP.
+    """
+    project_id: int
+    tenant_id: int
+    namespace: ProjectNamespace
+    name: str
+    description: str | None
+    changed: bool
+
+
 class NamespaceMutationAuthorizer(Protocol):
     """Trusted server-side Office authority adapter."""
     async def authorize_in_transaction(self, cursor: Any, *, actor_user_id: int,
@@ -804,6 +821,110 @@ class ProjectAuthorityAdmin:
                 raise _wrap_unexpected_db_error(exc) from exc
 
         return await run(0)
+
+    async def update_namespaced_project_metadata(
+        self, *, actor_user_id: int, target_tenant_id: int, project_id: int,
+        namespace: ProjectNamespace, name: str, description: str | None,
+        authorizer: NamespaceMutationAuthorizer,
+    ) -> UpdatedNamespacedProjectMetadata:
+        """Update metadata for a confidential Office project transactionally.
+
+        JXP supplies the trusted Office authorizer.  This method owns the
+        canonical project/scope rows and never routes an Office mutation
+        through classic membership resolution.  It has no caller-provided
+        version token because the namespace contract does not define one;
+        ``tenant -> actor -> scope -> projects`` locks serialize writers and a
+        matching final state is a no-op with no duplicate audit event.
+        """
+        if namespace is not ProjectNamespace.OFFICE_CONFIDENTIAL:
+            raise AuthorizationDenied("namespaced metadata only accepts OFFICE_CONFIDENTIAL")
+        for value, field in ((actor_user_id, "actor_user_id"),
+                             (target_tenant_id, "target_tenant_id"),
+                             (project_id, "project_id")):
+            if type(value) is not int or value <= 0:
+                raise AuthorizationDenied(f"{field} must be a positive integer")
+        if not isinstance(name, str):
+            raise AuthorizationDenied("project name must be text")
+        if description is not None and not isinstance(description, str):
+            raise AuthorizationDenied("project description must be text")
+        if not callable(getattr(authorizer, "authorize_in_transaction", None)):
+            raise AuthorizationDenied("namespaced metadata requires a trusted transaction authorizer")
+        normalized_name = unicodedata.normalize("NFC", name).strip()
+        normalized_description = (unicodedata.normalize("NFC", description)
+                                  if description is not None else None)
+        if not (1 <= len(normalized_name) <= 255):
+            raise AuthorizationDenied("project name must be 1-255 characters")
+        if normalized_description is not None and len(normalized_description) > 2000:
+            raise AuthorizationDenied("project description must be <= 2000 characters")
+
+        async def op(cur: Any) -> UpdatedNamespacedProjectMetadata:
+            try:
+                # The actor's tenant is a lock-order hint only.  The Office
+                # authorizer decides cross-tenant authority in this same
+                # transaction after the actor row is locked.
+                await cur.execute("SELECT tenant_id FROM jax_users WHERE user_id=%s", (actor_user_id,))
+                hint = await cur.fetchone()
+                if not hint:
+                    raise ProjectNotVisible("actor does not exist")
+                hinted_tenant_id = int(self._value(hint, "tenant_id", 0))
+                for tenant_id in sorted({hinted_tenant_id, target_tenant_id}):
+                    await cur.execute(
+                        "SELECT tenant_id,status FROM jax_tenants WHERE tenant_id=%s FOR UPDATE", (tenant_id,))
+                    tenant = await cur.fetchone()
+                    if not tenant or str(self._value(tenant, "status", 1) or "").upper() != "ACTIVE":
+                        raise ProjectNotVisible("tenant is not active")
+                await cur.execute(
+                    "SELECT tenant_id,status FROM jax_users WHERE user_id=%s FOR UPDATE", (actor_user_id,))
+                actor = await cur.fetchone()
+                if not actor or str(self._value(actor, "status", 1) or "").upper() != "ACTIVE":
+                    raise ProjectNotVisible("actor is not active")
+                if int(self._value(actor, "tenant_id", 0)) != hinted_tenant_id:
+                    raise ProjectAuthorityRetryable("metadata actor tenant changed; retry")
+                await cur.execute(
+                    "SELECT tenant_id,status,authorization_namespace FROM jax_project_scope "
+                    "WHERE project_id=%s FOR UPDATE", (project_id,))
+                scope = await cur.fetchone()
+                if not scope:
+                    raise ProjectNotVisible("project scope does not exist")
+                if int(self._value(scope, "tenant_id", 0)) != target_tenant_id:
+                    raise ProjectNotVisible("project belongs to a different tenant")
+                if str(self._value(scope, "authorization_namespace", 2) or "").upper() != namespace.value:
+                    raise ProjectNotVisible("project namespace does not match")
+                if str(self._value(scope, "status", 1) or "").upper() != "ACTIVE":
+                    raise ProjectStateConflict("project is not active")
+                await authorizer.authorize_in_transaction(
+                    cur, actor_user_id=actor_user_id, target_tenant_id=target_tenant_id,
+                    namespace=namespace, operation="UPDATE_OFFICE_PROJECT_METADATA")
+                await cur.execute("SELECT name,description FROM projects WHERE id=%s FOR UPDATE", (project_id,))
+                current = await cur.fetchone()
+                if not current:
+                    raise ProjectNotVisible("project does not exist")
+                if (self._value(current, "name", 0) == normalized_name
+                        and self._value(current, "description", 1) == normalized_description):
+                    return UpdatedNamespacedProjectMetadata(
+                        project_id, target_tenant_id, namespace, normalized_name,
+                        normalized_description, False)
+                await cur.execute("UPDATE projects SET name=%s,description=%s WHERE id=%s",
+                                  (normalized_name, normalized_description, project_id))
+                # Existing append-only project event storage is the durable
+                # audit path for canonical project mutations.  The actor is a
+                # real JAX user id; no Office role or browser claim is forged.
+                await cur.execute(
+                    "INSERT INTO jax_project_membership_event (event_id,operation,actor_principal,actor_type,"
+                    "project_id,target_user_id,tenant_id,old_project_role,new_project_role,old_status,new_status,"
+                    "occurred_at,request_id,trace_id) VALUES (%s,%s,%s,'USER',%s,NULL,%s,NULL,NULL,'ACTIVE','ACTIVE',"
+                    "NOW(6),NULL,NULL)",
+                    (_uuid7(), "UPDATE_OFFICE_PROJECT_METADATA", f"user:{actor_user_id}", project_id,
+                     target_tenant_id))
+                return UpdatedNamespacedProjectMetadata(
+                    project_id, target_tenant_id, namespace, normalized_name,
+                    normalized_description, True)
+            except ProjectAuthorityError:
+                raise
+            except Exception as exc:
+                raise _wrap_unexpected_db_error(exc) from exc
+
+        return await self._store.mutation(op)
 
     @staticmethod
     def _require_positive_id(value: Any, field: str) -> int:
