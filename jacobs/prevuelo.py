@@ -214,7 +214,7 @@ async def prevuelo(
     runtime_policy=None,
 ) -> Veredicto:
     if runtime_policy is not None:
-        runtime_policy = require_office_runtime_policy(runtime_policy)
+        runtime_policy = require_office_runtime_policy(runtime_policy, phase=OfficeErrorPhase.PREFLIGHT)
     por_indice = {s.step_index: s for s in pasos}
     indices = sorted(por_indice) if pendientes is None else sorted(pendientes)
 
@@ -253,10 +253,14 @@ async def prevuelo(
         d, detalle = _despacho(step, catalogo, motores.get(step.step_index))
         if runtime_policy is not None:
             if d is None or d.via_motor:
-                raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
-            assert_office_transport(runtime_policy, d.transporte)
+                raise OfficeExecutionError(
+                    OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED,
+                    phase=OfficeErrorPhase.PREFLIGHT,
+                )
+            assert_office_transport(runtime_policy, d.transporte, phase=OfficeErrorPhase.PREFLIGHT)
             await validate_office_capability_timeout(
-                OfficeCapabilityContext(step.capability), step.timeout_seconds)
+                OfficeCapabilityContext(step.capability), step.timeout_seconds,
+                phase=OfficeErrorPhase.PREFLIGHT)
         chars = 0 if d is None else await asyncio.to_thread(_chars_de_entrada, step, pasos, contexto, d)
         propias, costo = evaluar_paso(
             step.step_index, step.facet, d,

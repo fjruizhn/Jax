@@ -49,3 +49,5 @@ Task4Barchitectureclosed: sourcepinnedHTTPloggerinventory+ContextVarscopedfilter
 2026-10-20 Task4B1 checkpoint: direct invokers/private policy implemented; root84passed0.68s mocked transports only. Scoped exactSHA review pending; 4B2 preflight/sonda not implemented and no Office execution route enabled.
 
 2026-10-21 · Codex:4B1 APROBADO exact56be8bed porjax_direct_audit.4B2 a9bdf9f0 RECHAZADO porjax_probe_audit (Hyde bypass, unknownusage accounting, forgedpolicy, phase). Fixround1 root151focusedpassed5.96s noDB/provider. Exactsingletonpolicy+Hydeearlydeny+phasePREFLIGHT+usageestimationclosedpaths; scopedexactSHAreviewnext.4Cdisabled. No productwriteruntilreviewresult.
+
+2026-10-21 · Task4B2fixround2 closes knownparser/posttimeout accounting andphasecontext; root154tests5.97s then77changedphase/runtimecases0.23s afterfinalphasefix. ScopedexactSHAreviewnext. Future4C1/4C2 boundaries documented, rawoutputmustremainexactstring notcanonicalJSON. No4Cproductenabled.

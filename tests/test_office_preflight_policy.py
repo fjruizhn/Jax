@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from jacobs.office_contract import OFFICE_RUNTIME_POLICY
-from jacobs.prevuelo_reglas import Despacho, llamadas_max
+from jacobs.prevuelo_reglas import Despacho, evaluar_paso, llamadas_max
 
 
 def _dispatch(**overrides):
@@ -40,9 +40,14 @@ def test_only_the_immutable_office_policy_can_enable_office_helpers():
     forged = SimpleNamespace(generation_calls=99, allowed_transports=frozenset({"subprocess"}))
     with pytest.raises(OfficeExecutionError) as raised:
         llamadas_max(_dispatch(), max_iteraciones=9, runtime_policy=forged)
-    assert raised.value.phase is OfficeErrorPhase.PREFLIGHT
+    assert raised.value.phase is OfficeErrorPhase.GENERATION
     with pytest.raises(OfficeExecutionError):
         assert_office_transport(forged, "subprocess")
+    with pytest.raises(OfficeExecutionError) as raised:
+        evaluar_paso(0, "office-facet", _dispatch(transporte="subprocess"), min_output_tokens=0,
+                     credencial_activa=True, chars_entrada=0, chars_por_token=1,
+                     max_iteraciones=1, runtime_policy=forged)
+    assert raised.value.phase is OfficeErrorPhase.PREFLIGHT
 
 
 def test_office_hyde_shortcut_is_rejected_before_catalog_or_probe(monkeypatch):
@@ -192,6 +197,71 @@ def test_office_probe_all_invalid_usage_is_unmeasured(transport, response):
     with pytest.raises(OfficeExecutionError) as raised:
         parse_office_provider_response(response, transport)
     assert not raised.value.usage_measured
+
+
+def test_office_probe_parser_failure_is_preflight_phase_after_http():
+    from jacobs.office_runtime import OfficeErrorPhase, OfficeExecutionError
+    from jacobs.sonda import _office_probe_result
+
+    with pytest.raises(OfficeExecutionError) as raised:
+        _office_probe_result({"choices": []}, "http_openai_compat")
+    assert raised.value.phase is OfficeErrorPhase.PREFLIGHT and raised.value.provider_call_made
+
+
+@pytest.mark.parametrize(
+    ("response", "request_type", "expected_tokens"),
+    [
+        ({"choices": [], "usage": {"prompt_tokens": 13, "completion_tokens": 17}}, "preflight_probe", (13, 17)),
+        ({"choices": []}, "preflight_probe_est", None),
+    ],
+)
+def test_office_post_parse_failure_preserves_real_usage_or_estimates_unknown(monkeypatch, response, request_type, expected_tokens):
+    """Exercise post → parser → sondear → real usage writer, not a helper."""
+    from facet_resolver import ResolvedFacet
+    from jacobs import sonda
+
+    async def handler(request):
+        return httpx.Response(200, json=response)
+
+    facet = ResolvedFacet("office-facet", "provider", "https://private.invalid/v1", "model", "key", "http_openai_compat", None, None)
+    usage = AsyncMock()
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            monkeypatch.setattr(sonda, "obtener_cliente_http", lambda: client)
+            monkeypatch.setattr(sonda, "resolve_facet", AsyncMock(return_value=facet))
+            monkeypatch.setattr(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock())
+            monkeypatch.setattr(sonda, "record_direct_usage", usage)
+            return await sonda.sondear("office-facet", _dispatch(transporte="http_openai_compat"), runtime_policy=OFFICE_RUNTIME_POLICY)
+
+    result = asyncio.run(run())
+    assert result.detalle == "config_error"
+    assert usage.await_args.kwargs["request_type"] == request_type
+    if expected_tokens is not None:
+        assert (result.tokens_in, result.tokens_out) == expected_tokens
+
+
+def test_office_mocktransport_read_timeout_is_unmeasured_and_estimated(monkeypatch):
+    from facet_resolver import ResolvedFacet
+    from jacobs import sonda
+
+    async def handler(request):
+        raise httpx.ReadTimeout("private timeout", request=request)
+
+    facet = ResolvedFacet("office-facet", "provider", "https://private.invalid/v1", "model", "key", "http_openai_compat", None, None)
+    usage = AsyncMock()
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            monkeypatch.setattr(sonda, "obtener_cliente_http", lambda: client)
+            monkeypatch.setattr(sonda, "resolve_facet", AsyncMock(return_value=facet))
+            monkeypatch.setattr(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock())
+            monkeypatch.setattr(sonda, "record_direct_usage", usage)
+            return await sonda.sondear("office-facet", _dispatch(transporte="http_openai_compat"), runtime_policy=OFFICE_RUNTIME_POLICY)
+
+    result = asyncio.run(run())
+    assert result.detalle == "provider_timeout" and not result.uso_medido
+    assert usage.await_args.kwargs["request_type"] == "preflight_probe_est"
 
 
 @pytest.mark.parametrize(("status", "expected_calls"), [(400, 0), (503, 1)])

@@ -20,7 +20,7 @@ from decimal import ROUND_CEILING, Decimal
 from contrato_dispatch import ModelDispatchConfigError, _max_output_tokens_value, errores_del_contrato
 
 from jacobs.models import Step
-from jacobs.office_runtime import require_office_runtime_policy
+from jacobs.office_runtime import OfficeErrorPhase, require_office_runtime_policy
 
 REGLAS = frozenset({
     "tope_insuficiente", "sin_contrato_de_salida", "credencial_ausente",
@@ -248,6 +248,8 @@ def evaluar_paso(
     detalle_inexistente: str = "",
     runtime_policy=None,
 ) -> tuple[list[Violacion], CostoPaso]:
+    if runtime_policy is not None:
+        runtime_policy = require_office_runtime_policy(runtime_policy, phase=OfficeErrorPhase.PREFLIGHT)
     if d is None:
         detalle = detalle_inexistente or f"la faceta '{faceta}' no tiene fila activa con binding primario"
         return ([Violacion(paso, faceta, "faceta_inexistente", detalle)],

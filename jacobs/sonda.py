@@ -169,7 +169,14 @@ def _office_health_detail(error: OfficeExecutionError) -> str:
 
 def _office_probe_result(data: object, transport: str) -> ResultadoSonda:
     """Validate all provider data before health or usage can observe it."""
-    parsed = parse_office_provider_response(data, transport)
+    try:
+        parsed = parse_office_provider_response(data, transport)
+    except OfficeExecutionError as exc:
+        # Parsing is after a successful HTTP response, so accounting must not
+        # mistake a malformed payload for a request that never left Jacobs.
+        raise stable_office_error(
+            exc, provider_call_made=True, phase=OfficeErrorPhase.PREFLIGHT,
+        ) from None
     # Probe quality/truncation is deliberately not a health failure: a valid
     # 2xx response establishes reachability.  Only its validated counters
     # cross this boundary.
@@ -266,13 +273,13 @@ async def _preparar(clave: str, d: Despacho, *, runtime_policy=None):
     mensajes = [{"role": "user", "content": MENSAJE_DE_SONDA}]
 
     if runtime_policy is not None:
-        runtime_policy = require_office_runtime_policy(runtime_policy)
+        runtime_policy = require_office_runtime_policy(runtime_policy, phase=OfficeErrorPhase.PREFLIGHT)
         if d.via_motor:
             raise OfficeExecutionError(
                 OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED,
                 phase=OfficeErrorPhase.PREFLIGHT,
             )
-        assert_office_transport(runtime_policy, d.transporte)
+        assert_office_transport(runtime_policy, d.transporte, phase=OfficeErrorPhase.PREFLIGHT)
     if d.via_motor:
         # El MISMO cliente que worker.py usa para despachar el motor.
         from motor_registry import worker
@@ -324,7 +331,7 @@ async def _preparar(clave: str, d: Despacho, *, runtime_policy=None):
 
     f = await resolve_facet(clave)
     if runtime_policy is not None:
-        assert_office_transport(runtime_policy, f.transport)
+        assert_office_transport(runtime_policy, f.transport, phase=OfficeErrorPhase.PREFLIGHT)
 
     if f.transport == "http_gemini":
         async def _llamada(timeout: int) -> ResultadoSonda:
@@ -428,7 +435,7 @@ async def sondear(clave: str, d: Despacho, *, user_id: str | None = None,
     timeout = prevuelo_config.sonda_timeout_s()
     try:
         if runtime_policy is not None:
-            runtime_policy = require_office_runtime_policy(runtime_policy)
+            runtime_policy = require_office_runtime_policy(runtime_policy, phase=OfficeErrorPhase.PREFLIGHT)
         llamada = await _preparar(clave, d, runtime_policy=runtime_policy)
     except OfficeExecutionError as exc:
         resultado = _office_probe_failure(exc, provider_call_made=False)

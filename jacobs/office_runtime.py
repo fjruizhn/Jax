@@ -51,7 +51,7 @@ class OfficeExecutionError(RuntimeError):
         exception_classname: str | None = None,
         tokens_in: int = 0,
         tokens_out: int = 0,
-        usage_measured: bool = True,
+        usage_measured: bool = False,
     ) -> None:
         super().__init__(code.value)
         self.code = code
@@ -65,23 +65,26 @@ class OfficeExecutionError(RuntimeError):
         self.usage_measured = usage_measured
 
 
-def require_office_runtime_policy(policy: object) -> OfficeRuntimePolicy:
+def require_office_runtime_policy(
+    policy: object, *, phase: OfficeErrorPhase = OfficeErrorPhase.GENERATION,
+) -> OfficeRuntimePolicy:
     """The private Office switch is the one immutable server-derived object."""
     if policy is not OFFICE_RUNTIME_POLICY:
         raise OfficeExecutionError(
             OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED,
-            phase=OfficeErrorPhase.PREFLIGHT,
+            phase=phase,
         )
     return OFFICE_RUNTIME_POLICY
 
 
 def stable_office_error(
     error: OfficeExecutionError, *, provider_call_made: bool | None = None,
+    phase: OfficeErrorPhase | None = None,
 ) -> OfficeExecutionError:
     """Copy only stable fields, deliberately dropping traceback and raw frames."""
     return OfficeExecutionError(
         error.code,
-        phase=error.phase,
+        phase=error.phase if phase is None else phase,
         outcome=error.outcome,
         provider_call_made=error.provider_call_made if provider_call_made is None else provider_call_made,
         exception_classname=error.exception_classname,
@@ -105,7 +108,7 @@ _MODEL_VERSION = re.compile(r"^[A-Za-z0-9._:/-]{1,128}$")
 _MAX_USAGE_TOKENS = 2**63 - 1
 
 
-def _response_invalid(tokens_in: int = 0, tokens_out: int = 0, *, usage_measured: bool = True) -> OfficeExecutionError:
+def _response_invalid(tokens_in: int = 0, tokens_out: int = 0, *, usage_measured: bool = False) -> OfficeExecutionError:
     return OfficeExecutionError(
         OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID,
         tokens_in=tokens_in, tokens_out=tokens_out,
@@ -113,17 +116,17 @@ def _response_invalid(tokens_in: int = 0, tokens_out: int = 0, *, usage_measured
     )
 
 
-def _validate_optional_model(value: object, tokens_in: int, tokens_out: int) -> None:
+def _validate_optional_model(value: object, tokens_in: int, tokens_out: int, *, usage_measured: bool) -> None:
     if value is None:
         return
     if type(value) is not str or not _MODEL_VERSION.fullmatch(value):
-        raise _response_invalid(tokens_in, tokens_out)
+        raise _response_invalid(tokens_in, tokens_out, usage_measured=usage_measured)
 
 
-def _usage_pair(container: object, input_key: str, output_key: str) -> tuple[int, int]:
+def _usage_pair(container: object, input_key: str, output_key: str) -> tuple[int, int, bool]:
     """Validate both counters before rejecting either, retaining safe partial usage."""
     if container is None:
-        return 0, 0
+        return 0, 0, False
     if type(container) is not dict:
         raise _response_invalid(usage_measured=False)
     tokens_in = container.get(input_key, 0)
@@ -134,7 +137,8 @@ def _usage_pair(container: object, input_key: str, output_key: str) -> tuple[int
     safe_out = tokens_out if valid_out else 0
     if not valid_in or not valid_out:
         raise _response_invalid(safe_in, safe_out, usage_measured=False)
-    return safe_in, safe_out
+    measured = input_key in container and output_key in container
+    return safe_in, safe_out, measured
 
 
 def parse_office_provider_response(data: object, transport: str) -> OfficeProviderResponse:
@@ -142,45 +146,45 @@ def parse_office_provider_response(data: object, transport: str) -> OfficeProvid
     if type(data) is not dict:
         raise _response_invalid()
     if transport == "http_openai_compat":
-        tokens_in, tokens_out = _usage_pair(data.get("usage"), "prompt_tokens", "completion_tokens")
+        tokens_in, tokens_out, usage_measured = _usage_pair(data.get("usage"), "prompt_tokens", "completion_tokens")
         choices = data.get("choices")
         if type(choices) is not list or not choices or type(choices[0]) is not dict:
-            raise _response_invalid(tokens_in, tokens_out)
+            raise _response_invalid(tokens_in, tokens_out, usage_measured=usage_measured)
         choice = choices[0]
         message = choice.get("message")
         if type(message) is not dict or type(message.get("content")) is not str:
-            raise _response_invalid(tokens_in, tokens_out)
+            raise _response_invalid(tokens_in, tokens_out, usage_measured=usage_measured)
         reason = choice.get("finish_reason")
         if reason is not None and type(reason) is not str:
-            raise _response_invalid(tokens_in, tokens_out)
-        _validate_optional_model(data.get("model"), tokens_in, tokens_out)
+            raise _response_invalid(tokens_in, tokens_out, usage_measured=usage_measured)
+        _validate_optional_model(data.get("model"), tokens_in, tokens_out, usage_measured=usage_measured)
         return OfficeProviderResponse(
             message["content"], tokens_in, tokens_out, reason == "length",
         )
     if transport == "ollama":
-        tokens_in, tokens_out = _usage_pair(data, "prompt_eval_count", "eval_count")
+        tokens_in, tokens_out, usage_measured = _usage_pair(data, "prompt_eval_count", "eval_count")
         message = data.get("message")
         reason = data.get("done_reason")
         if type(message) is not dict or type(message.get("content")) is not str or (reason is not None and type(reason) is not str):
-            raise _response_invalid(tokens_in, tokens_out)
-        _validate_optional_model(data.get("model"), tokens_in, tokens_out)
+            raise _response_invalid(tokens_in, tokens_out, usage_measured=usage_measured)
+        _validate_optional_model(data.get("model"), tokens_in, tokens_out, usage_measured=usage_measured)
         return OfficeProviderResponse(
             message["content"], tokens_in, tokens_out, reason == "length",
         )
     if transport == "http_gemini":
-        tokens_in, tokens_out = _usage_pair(data.get("usageMetadata"), "promptTokenCount", "candidatesTokenCount")
+        tokens_in, tokens_out, usage_measured = _usage_pair(data.get("usageMetadata"), "promptTokenCount", "candidatesTokenCount")
         candidates = data.get("candidates")
         if type(candidates) is not list or not candidates or type(candidates[0]) is not dict:
-            raise _response_invalid(tokens_in, tokens_out)
+            raise _response_invalid(tokens_in, tokens_out, usage_measured=usage_measured)
         candidate = candidates[0]
         content = candidate.get("content")
         parts = content.get("parts") if type(content) is dict else None
         if type(parts) is not list or not parts or any(type(part) is not dict or type(part.get("text")) is not str for part in parts):
-            raise _response_invalid(tokens_in, tokens_out)
+            raise _response_invalid(tokens_in, tokens_out, usage_measured=usage_measured)
         reason = candidate.get("finishReason")
         if reason is not None and type(reason) is not str:
-            raise _response_invalid(tokens_in, tokens_out)
-        _validate_optional_model(data.get("modelVersion"), tokens_in, tokens_out)
+            raise _response_invalid(tokens_in, tokens_out, usage_measured=usage_measured)
+        _validate_optional_model(data.get("modelVersion"), tokens_in, tokens_out, usage_measured=usage_measured)
         return OfficeProviderResponse(
             "".join(part["text"] for part in parts), tokens_in, tokens_out, reason == "MAX_TOKENS",
         )
@@ -205,12 +209,13 @@ def runtime_policy_for_pipeline(pipeline: object) -> OfficeRuntimePolicy | None:
 
 async def validate_office_capability_timeout(
     context: OfficeCapabilityContext | None, timeout: int,
+    *, phase: OfficeErrorPhase = OfficeErrorPhase.GENERATION,
 ) -> None:
     """Use the current capability catalog and its canonical fallback ceiling."""
     if context is None or type(context.capability) is not str or not context.capability:
-        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED, phase=OfficeErrorPhase.PREFLIGHT)
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED, phase=phase)
     if type(timeout) is not int or timeout <= 0:
-        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED, phase=OfficeErrorPhase.PREFLIGHT)
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED, phase=phase)
 
     # Deferred imports avoid executor -> runtime -> store import cycles.
     from jacobs import store
@@ -219,16 +224,18 @@ async def validate_office_capability_timeout(
     governance = await store.get_motor_governance()
     capabilities = governance.get("capabilities") if isinstance(governance, dict) else None
     if not isinstance(capabilities, dict):
-        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED, phase=OfficeErrorPhase.PREFLIGHT)
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED, phase=phase)
     ceiling, _source = _techo_segundos(capabilities, context.capability)
     if timeout > ceiling:
-        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED, phase=OfficeErrorPhase.PREFLIGHT)
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED, phase=phase)
 
 
-def assert_office_transport(policy: OfficeRuntimePolicy, transport: str) -> None:
-    require_office_runtime_policy(policy)
+def assert_office_transport(
+    policy: OfficeRuntimePolicy, transport: str, *, phase: OfficeErrorPhase = OfficeErrorPhase.GENERATION,
+) -> None:
+    require_office_runtime_policy(policy, phase=phase)
     if transport not in policy.allowed_transports:
-        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED, phase=OfficeErrorPhase.PREFLIGHT)
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED, phase=phase)
 
 
 def map_office_exception(exc: BaseException, *, provider_call_made: bool) -> OfficeExecutionError:

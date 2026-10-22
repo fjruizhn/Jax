@@ -70,3 +70,5 @@ Only one implementation owner touches all shared files. Migration defines the en
 Binding spec docs/superpowers/specs/2026-10-20-office-execution.md, Solarchitecture+roottransportreview. Deliver bounded sequentialslices4Acontracts/store/cupo/classicvisibility,4Bno-tools+opaqueerrors/probes,4Ccallbacks/executor/route. Reuseallcanonicalgovernance; no extraqueue/executor, no rawOfficecontentdurableclassic, disableduntilpairedJXPgates. Explicitownership per slice and exactSHAaudit. Doesnotmodify namespaceTask1-3authority or enableproduction.
 
 Task4Bdeliverysplit sameTier2owner4B1directinvokers/scopedlogs then4B2probe/preflight/coalescing; bindingoffice-runtime-policy.md, exactSHArevieweach.4Cstillmandatory/unexposed.
+
+Task4C se entrega4C1 DTO/storeatómico/aislamientoclassic sinrutaOffice ni llamadas, luego4C2 callback/config/route/runner/recovery. Contratovinculante adicional docs/superpowers/specs/2026-10-21-office-callback-boundary.md. Cada checkpoint revisiónexacta independiente; mismaobligación4C,no capacidadhabilitadaantesdelparJXP.

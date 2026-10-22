@@ -48,3 +48,30 @@ The Office motor-preparation denial now explicitly has `PREFLIGHT` phase.
 Focused isolated coverage adds null/empty/all-invalid and explicit-zero usage
 for Gemini/OpenAI/Ollama.  Result: **151 passed in 5.99s**, compilation and
 diff check passed.
+
+## Review-fix round 2 · 2026-10-21
+
+Parser failures now retain whether usage was actually complete and measured.
+The three probe closures mark parser failures as post-HTTP (`provider_call_made`
+true), so valid `13/17` counters from a malformed 2xx response reach the real
+usage writer.  A malformed response without usage and a `MockTransport`
+`ReadTimeout` are unmeasured and use conservative estimated accounting.
+
+`evaluar_paso()` validates the Office policy before its subprocess shortcut.
+Runtime policy/transport helpers now accept an explicit phase context and
+default to `GENERATION`; preflight callers pass `PREFLIGHT`.  This avoids
+mislabeling direct generation denials while preserving preflight semantics.
+
+Focused full-path tests cover shared AsyncClient → MockTransport → parser →
+sondear → usage writer for valid partial usage, absent usage, and ReadTimeout.
+Focused isolated suite: **154 passed in 5.99s**; compilation and diff check
+passed.
+
+## Final phase-context precheck · 2026-10-21
+
+`validate_office_capability_timeout()` now accepts an explicit phase and
+defaults to `GENERATION`; `prevuelo` supplies `PREFLIGHT`.  Its excessive-timeout
+coverage verifies both call contexts.  A parser failure after Office probe HTTP
+is cloned with `PREFLIGHT`, while retaining its truthful post-call marker.
+Focused isolated suite: **155 passed in 5.99s**; compilation and diff check
+passed.
