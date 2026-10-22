@@ -390,10 +390,21 @@ def _por_canal(canal):
     return [(s, c) for s, m in ov.CANALES_POR_SCHEMA.items() for c in m[canal]]
 
 
+def _rutas_de(schema):
+    import importlib
+    return importlib.import_module("las_manos.motor_registry.output_validator").CANALES_POR_SCHEMA[schema]["rutas"]
+
+
+def test_files_modified_con_puntuacion_o_vacio():
+    assert _v(_patch(["jax/core/x.py"]), schema="code_patch.v1").estado == LIMPIO
+    v = _v(_patch(["services/bodegas.py,"]), schema="code_patch.v1")
+    assert [i.candidato for i in v.items] == ["services/bodegas.py"]
+
+
 def test_en_todo_campo_que_afirma_una_tabla_columna_falsa_y_una_ruta_falsa_se_marcan():
     for schema, campo in _por_canal("afirma"):
-        if campo == "human_review_needed":
-            continue
+        if campo == "human_review_needed" or campo in _rutas_de(schema):
+            continue   # booleano sin texto / lista de rutas (probada aparte)
         for texto in ("Falla al leer `jacobs_steps.columna_x`.", "Leí (jacobs_steps.columna_x), no existe.",
                       "Abrí las_manos/no_existe_jamas.py: falla."):
             v = _v(_payload(schema, campo, texto), schema=schema)

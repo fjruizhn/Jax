@@ -39,29 +39,46 @@ SCHEMAS: dict[str, list[str]] = {
 }
 
 # Canales de revision anti-fabricacion (capa 2, jax/anti_fabricacion/estructura.py).
-# Que se revisa lo decide el CANAL de cada campo, no los verbos del texto:
-#   afirma -> el campo AFIRMA hechos sobre lo que ya existe: se contrasta con la
-#             whitelist derivada (archivos, tablas, columnas, simbolos).
-#   rutas  -> subconjunto de lo anterior cuyos items SON rutas (lista de rutas).
-#   propone-> el campo PROPONE trabajo futuro: lo que nombra puede no existir aun
-#             y no se revisa.
-#   diff   -> el campo es un diff: `--- a/X` afirma X, `--- /dev/null` propone.
-# Un campo de SCHEMAS que no figura en ningun canal (steps, tests, risks,
-# severity, description, human_review_needed) no se revisa: es un limite
-# declarado, no un olvido. tests/test_anti_fabricacion_estructura.py vigila que
-# cada campo de este mapa exista en su schema.
+# Que se revisa lo decide el CANAL de cada campo, no los verbos del texto. Regla
+# (Enmienda 2 del pre-registro): lo que dice «hice / lei / existe / encontre / falla»
+# AFIRMA; lo que dice «habria que / recomiendo / riesgo futuro» PROPONE; un campo que
+# mezcla, AFIRMA (fail cerrado). TODO campo de TODO schema se declara, uno por uno:
+#
+#   schema                  campo                  canal    por que
+#   code_swarm.v1           plan                   propone  plan de trabajo futuro
+#                           steps                  afirma   pasos hechos/encontrados (mezcla -> afirma)
+#                           patches                diff     diffs: `--- a/X` afirma, `--- /dev/null` propone
+#                           tests                  afirma   pruebas escritas o corridas
+#                           risk_notes             propone  riesgos a futuro
+#                           human_review_needed    afirma   booleano (sin texto que revisar)
+#   code_patch.v1           diff                   diff     idem patches
+#                           files_modified         afirma   rutas tocadas (ademas en `rutas`)
+#                           description            afirma   lo que el parche hizo
+#   architecture_review.v1  summary                afirma   lo leido/encontrado
+#                           risks                  afirma   riesgos encontrados en lo que existe (mezcla -> afirma)
+#                           recommendations        propone  recomendaciones
+#   bug_hunt.v1             bugs_found             afirma   lo encontrado
+#                           severity               afirma   calificacion de lo encontrado
+#                           reproduction_steps     afirma   lo ejecutado para reproducir
+#                           suggested_fix          propone  arreglo propuesto
+#
+# `rutas` es el subconjunto de `afirma` cuyos items SON rutas (lista de rutas).
+# tests/test_anti_fabricacion_estructura.py exige que cada campo de SCHEMAS figure en
+# exactamente un canal (afirma/propone/diff).
 CANALES_POR_SCHEMA: dict[str, dict[str, tuple[str, ...]]] = {
     "code_swarm.v1": {
-        "afirma": (), "rutas": (), "propone": ("plan", "risk_notes"), "diff": ("patches",),
+        "afirma": ("steps", "tests", "human_review_needed"), "rutas": (),
+        "propone": ("plan", "risk_notes"), "diff": ("patches",),
     },
     "code_patch.v1": {
-        "afirma": ("files_modified",), "rutas": ("files_modified",), "propone": (), "diff": ("diff",),
+        "afirma": ("files_modified", "description"), "rutas": ("files_modified",), "propone": (), "diff": ("diff",),
     },
     "architecture_review.v1": {
-        "afirma": ("summary",), "rutas": (), "propone": ("recommendations",), "diff": (),
+        "afirma": ("summary", "risks"), "rutas": (), "propone": ("recommendations",), "diff": (),
     },
     "bug_hunt.v1": {
-        "afirma": ("bugs_found", "reproduction_steps"), "rutas": (), "propone": ("suggested_fix",), "diff": (),
+        "afirma": ("bugs_found", "severity", "reproduction_steps"), "rutas": (),
+        "propone": ("suggested_fix",), "diff": (),
     },
 }
 

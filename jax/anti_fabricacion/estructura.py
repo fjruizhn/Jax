@@ -13,8 +13,8 @@ CANALES.
     diff define (`+def`, `+class`, `+CREATE TABLE`, `+CONSTANTE =`) es propio.
   * Texto libre y campos que afirman: SOLO 4 formas (Enmienda 1, regla 2): rutas con
     «/» (y extensión conocida, o primera componente igual a una carpeta del repo, o
-    absoluta), `tabla.columna` con la izquierda tabla real, `*.service|timer` (systemd:
-    fuera de v1, se declara) y las rutas de `files_modified` y «--- a/». La prosa nunca
+    absoluta), `tabla.columna` con la izquierda tabla real, `*.service|timer` (sin fuente en
+    vivo: solo cuenta lo versionado, si no es no_verificable) y las rutas de `files_modified` y «--- a/». La prosa nunca
     es candidata. Un identificador suelto en backticks (sin «/» ni «.») y un nombre de
     archivo sin directorio NO son candidatos.
 
@@ -36,7 +36,8 @@ LÍMITES DECLARADOS (lo que este detector NO ve; no son olvidos).
     se SALTA: `/srv/jax-data/jax-workspace/services/bodegas.py` pasa limpio. Este
     detector responde por el repo y la app, no por el sistema de archivos.
   * Los campos de un schema que no figuran en `CANALES_POR_SCHEMA` no se revisan.
-  * systemd y las rutas de jax-platform están fuera de v1 (`fuera_de_alcance`).
+  * systemd: sin fuente en vivo en v1; una unidad que el repo versionado no tiene es
+    `no_verificable` (Enmienda 2). Las rutas de jax-platform están fuera de v1.
   * `corpus_confiable` solo respalda lo que la persona o el sistema dijeron. En el
     worker, hoy, eso es el nombre de la capability, sus `forbidden_paths` y
     `context["objective"]` si viene; `/motor/dispatch` no manda `objective`, así que
@@ -81,7 +82,8 @@ _SPAN = re.compile(r"`([^`\n]+)`")
 _URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://\S+")
 _RUTA_BARE = re.compile(r"(?<![\w/.:@~$-])((?:/|\./|\.\./)?[\w.@+-]+(?:/[\w.@+-]+)+/?)")
 _PAR_BARE = re.compile(r"(?<![\w/.@-])([A-Za-z_]\w*)\.([A-Za-z_]\w*)\b")
-_SERVICIO_BARE = re.compile(r"(?<![\w/.@-])[\w@-]+\.(?:service|timer)\b")
+_SERVICIO_BARE = re.compile(r"(?<![\w/.@-])([\w@.-]+\.(?:service|timer))(?![\w-])")
+_NUEVO_LINEA = re.compile(r"^\s*(?:[-*•+]\s*|\d+[.)]\s*)?nuevo\s*:", re.IGNORECASE)
 _RUTA_CHARS = re.compile(r"[\w.@+-]+(?:/[\w.@+-]+)*/?\Z")
 _VALLA = re.compile(r"```([A-Za-z0-9_+-]*)[^\n]*\n(.*?)```", re.DOTALL)
 _DIFF_A = re.compile(r"^--- a/(\S+)", re.MULTILINE)
@@ -105,7 +107,7 @@ class Previo:
 @dataclass(frozen=True)
 class Item:
     candidato: str
-    tipo: str      # ruta | ruta_abs | tabla_columna
+    tipo: str      # ruta | ruta_abs | tabla_columna | servicio
     canal: str     # afirma | texto | diff
     clase: str     # sin_respaldo | heredado
     motivo: str
@@ -218,11 +220,18 @@ def _sin_hunks(texto: str) -> str:
     return "\n".join(salida)
 
 
+_PUNTUACION_FINAL = ".,;:)]}'\"!?»”’>"
+_PUNTUACION_INICIAL = "(['\"«“‘<"
+
+
 def _normalizar_ruta(r: str) -> str:
-    r = _REF_LINEA.sub("", r.strip().strip("\"'"))
+    """La ruta sin la puntuación que la rodea en la prosa (punto final, coma, dos
+    puntos, paréntesis, comillas, signos) ni la referencia `:linea`."""
+    r = r.strip().lstrip(_PUNTUACION_INICIAL).rstrip(_PUNTUACION_FINAL)
+    r = _REF_LINEA.sub("", r).rstrip(_PUNTUACION_FINAL)
     while r.startswith("./"):
         r = r[2:]
-    return r.rstrip(",;:)")
+    return r
 
 
 def _es_forma_de_ruta(p: str, exts: frozenset[str], raices: frozenset[str]) -> bool:
@@ -246,7 +255,7 @@ def _clasificar_span(s: str, wl: Whitelist, exts: frozenset[str], raices: frozen
     if not s or len(s) > _MAX_CANDIDATO or re.search(r"\s", s):
         return None
     if re.search(r"\.(?:service|timer)\Z", s):
-        return ("systemd", s)
+        return ("servicio", _normalizar_ruta(s))
     if s.startswith("/") and _RUTA_CHARS.match(s.lstrip("/") or "x"):
         r = _normalizar_ruta(s)
         return ("ruta_abs", r) if len(r) > 1 and "*" not in r and "{" not in r else None
@@ -290,35 +299,34 @@ def _candidatos(segs, wl: Whitelist) -> tuple[list[_Cand], list[str], set[str]]:
         if canal == "diff":
             continue
         prosa = _sin_hunks(texto_sin_vallas)
-        for oracion in _ORACIONES.split(prosa):
-            if not oracion.strip():
-                continue
-            hipotesis = oracion.rstrip().rstrip("\"')]»”").endswith("?")
-            for span in _SPAN.findall(oracion):
-                nuevo = False
-                if span.strip().lower().startswith("nuevo:"):
-                    span, nuevo = span.strip()[6:].strip(), True
-                    if span:
-                        propuestos.append(span)
-                clase = _clasificar_span(span, wl, exts, raices)
-                if clase is None:
+        for linea in prosa.split("\n"):
+            nuevo_linea = bool(_NUEVO_LINEA.match(linea))   # Enmienda 2, regla 4
+            for oracion in _ORACIONES.split(linea):
+                if not oracion.strip():
                     continue
-                tipo, cand = clase
-                if tipo == "systemd":
-                    fuera.add("systemd")
-                    continue
-                cands.append(_Cand(cand, tipo, canal if canal != "texto" else "texto", hipotesis, nuevo))
-            fuera_de_spans = _URL.sub(" ", _SPAN.sub(" ", oracion))
-            if _SERVICIO_BARE.search(fuera_de_spans):
-                fuera.add("systemd")
-            for m in _RUTA_BARE.finditer(fuera_de_spans):
-                r = _normalizar_ruta(m.group(1))
-                if _RUTA_CHARS.match(r) and _es_forma_de_ruta(r, exts, raices):
-                    cands.append(_Cand(r, "ruta_abs" if r.startswith("/") else "ruta", "texto", hipotesis))
-            sin_rutas = _RUTA_BARE.sub(" ", fuera_de_spans)
-            for m in _PAR_BARE.finditer(sin_rutas):
-                if m.group(1) in wl.tablas:
-                    cands.append(_Cand(f"{m.group(1)}.{m.group(2)}", "tabla_columna", "texto", hipotesis))
+                hipotesis = oracion.rstrip().rstrip("\"')]»”").endswith("?")
+                for span in _SPAN.findall(oracion):
+                    nuevo = nuevo_linea
+                    if span.strip().lower().startswith("nuevo:"):
+                        span, nuevo = span.strip()[6:].strip(), True
+                        if span:
+                            propuestos.append(span)
+                    clase = _clasificar_span(span, wl, exts, raices)
+                    if clase is None:
+                        continue
+                    tipo, cand = clase
+                    cands.append(_Cand(cand, tipo, canal, hipotesis, nuevo))
+                fuera_de_spans = _URL.sub(" ", _SPAN.sub(" ", oracion))
+                for m in _SERVICIO_BARE.finditer(fuera_de_spans):
+                    cands.append(_Cand(_normalizar_ruta(m.group(1)), "servicio", "texto", hipotesis, nuevo_linea))
+                for m in _RUTA_BARE.finditer(fuera_de_spans):
+                    r = _normalizar_ruta(m.group(1))
+                    if _RUTA_CHARS.match(r) and _es_forma_de_ruta(r, exts, raices):
+                        cands.append(_Cand(r, "ruta_abs" if r.startswith("/") else "ruta", "texto", hipotesis, nuevo_linea))
+                sin_rutas = _RUTA_BARE.sub(" ", fuera_de_spans)
+                for m in _PAR_BARE.finditer(sin_rutas):
+                    if m.group(1) in wl.tablas:
+                        cands.append(_Cand(f"{m.group(1)}.{m.group(2)}", "tabla_columna", "texto", hipotesis, nuevo_linea))
     return cands, propuestos, fuera
 
 
@@ -383,6 +391,7 @@ def verificar(
     segs = _segmentos(salida or "", schema)
     cands, propuestos_diff, fuera = _candidatos(segs, wl)
     propios_total = set(propuestos_diff) | {str(p) for p in propias}
+    unidades = {a.rsplit("/", 1)[-1] for a in wl.archivos if a.endswith((".service", ".timer"))}
     previos_p = [x if isinstance(x, Previo) else Previo(str(x)) for x in previos]
 
     items: list[Item] = []
@@ -418,6 +427,14 @@ def verificar(
             existe = _existe_ruta(c.texto.lstrip("/"), wl) or _existe_ruta_app(c.texto, wl)
             if not existe and "rutas_app" in wl.no_disponibles:
                 no_verificables.add("rutas_app")
+                vistos.add(clave)
+                continue
+        elif c.tipo == "servicio":
+            # Enmienda 2, regla 1: sin fuente en vivo, solo cuenta una unidad versionada en el repo;
+            # si no está, no_verificable (visible, ni limpia ni acusada)
+            existe = c.texto in unidades
+            if not existe and not _en_texto(c.texto, confiable):
+                no_verificables.add("systemd")
                 vistos.add(clave)
                 continue
         elif c.tipo == "tabla_columna":
