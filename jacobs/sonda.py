@@ -76,6 +76,12 @@ from redaccion import recortar_redactado
 from jacobs import facet_health, prevuelo_config
 from jacobs.prevuelo_reglas import Despacho
 from jacobs.usage_writer import record_direct_usage
+from jacobs.office_runtime import (
+    OfficeErrorPhase, OfficeExecutionError, assert_office_transport, ensure_office_http_log_privacy,
+    map_office_exception, office_http_log_scope, office_http_status_error,
+    parse_office_provider_response, require_office_runtime_policy, stable_office_error,
+)
+from jacobs.office_contract import OfficeRejectionCode
 
 logger = logging.getLogger("jacobs.sonda")
 
@@ -148,6 +154,51 @@ class _FallaDePreparacion(Exception):
     DB) NO se atrapa acá: se propaga fuera de sondear()."""
 
 
+def _office_health_detail(error: OfficeExecutionError) -> str:
+    """Return the closed, content-free Office health classification."""
+    if error.exception_classname == "HTTP_4XX":
+        return "provider_http_4xx"
+    if error.exception_classname == "HTTP_5XX":
+        return "provider_http_5xx"
+    if error.code == OfficeRejectionCode.OFFICE_PROVIDER_TIMEOUT:
+        return "provider_timeout"
+    if error.code == OfficeRejectionCode.OFFICE_PROVIDER_UNAVAILABLE:
+        return "transport_error"
+    return "config_error"
+
+
+def _office_probe_result(data: object, transport: str) -> ResultadoSonda:
+    """Validate all provider data before health or usage can observe it."""
+    try:
+        parsed = parse_office_provider_response(data, transport)
+    except OfficeExecutionError as exc:
+        # Parsing is after a successful HTTP response, so accounting must not
+        # mistake a malformed payload for a request that never left Jacobs.
+        raise stable_office_error(
+            exc, provider_call_made=True, phase=OfficeErrorPhase.PREFLIGHT,
+        ) from None
+    # Probe quality/truncation is deliberately not a health failure: a valid
+    # 2xx response establishes reachability.  Only its validated counters
+    # cross this boundary.
+    return ResultadoSonda(
+        True, None, parsed.tokens_in, parsed.tokens_out,
+        uso_medido=parsed.usage_measured,
+    )
+
+
+def _office_probe_failure(
+    exc: BaseException, *, provider_call_made: bool, uso_medido: bool = True,
+) -> ResultadoSonda:
+    error = stable_office_error(
+        map_office_exception(exc, provider_call_made=provider_call_made),
+        provider_call_made=provider_call_made if not isinstance(exc, OfficeExecutionError) else None,
+    )
+    return ResultadoSonda(
+        False, _office_health_detail(error), error.tokens_in, error.tokens_out,
+        uso_medido=uso_medido and error.usage_measured,
+    )
+
+
 def _tope(d: Despacho) -> int:
     """Ruling R15: el mismo menor-de-tres que worker._limite_del_motor --
     config, catálogo y (sólo via motor, y sólo si el motor declara uno
@@ -160,10 +211,36 @@ def _tope(d: Despacho) -> int:
     return limite
 
 
-async def _post(url: str, headers: dict, payload: dict, timeout: int, secretos: list[str]) -> dict:
+async def _post(url: str, headers: dict, payload: dict, timeout: int, secretos: list[str], *, runtime_policy=None) -> dict:
     # E-24 (merge 2026-09-17): el cliente HTTP COMPARTIDO del proceso, no uno
     # por sonda -- un AsyncClient por llamada deja un socket en TIME_WAIT cada
     # vez y es lo que el frente E cerró en todos los caminos de salida.
+    if runtime_policy is not None:
+        require_office_runtime_policy(runtime_policy)
+        ensure_office_http_log_privacy()
+        error = None
+        sent = False
+        resp = None
+        try:
+            post = obtener_cliente_http().post
+            with office_http_log_scope():
+                sent = True
+                resp = await post(url, headers=headers, json=payload, timeout=timeout, follow_redirects=False)
+                if not 200 <= resp.status_code < 300:
+                    status_error = office_http_status_error(resp.status_code)
+                    status_error.exception_classname = "HTTP_4XX" if resp.status_code < 500 else "HTTP_5XX"
+                    raise status_error
+                data = resp.json()
+        except asyncio.CancelledError:
+            raise
+        except OfficeExecutionError as exc:
+            error = stable_office_error(exc, provider_call_made=exc.provider_call_made or sent)
+        except Exception as exc:
+            error = map_office_exception(exc, provider_call_made=sent)
+        if error is not None:
+            resp = None
+            raise error
+        return data
     resp = await obtener_cliente_http().post(url, headers=headers, json=payload, timeout=timeout)
     if not 200 <= resp.status_code < 300:
         raise _RespuestaNoExitosa(
@@ -173,7 +250,7 @@ async def _post(url: str, headers: dict, payload: dict, timeout: int, secretos: 
     return resp.json()
 
 
-async def _preparar(clave: str, d: Despacho):
+async def _preparar(clave: str, d: Despacho, *, runtime_policy=None):
     """Resuelve todo lo que la llamada real necesita (faceta o credencial del
     motor) y devuelve un cerrado (closure) `async def (timeout) -> ResultadoSonda`
     que HACE la llamada. Nada de esto corre bajo el timeout de la sonda --
@@ -184,6 +261,14 @@ async def _preparar(clave: str, d: Despacho):
     limite = _tope(d)
     mensajes = [{"role": "user", "content": MENSAJE_DE_SONDA}]
 
+    if runtime_policy is not None:
+        runtime_policy = require_office_runtime_policy(runtime_policy, phase=OfficeErrorPhase.PREFLIGHT)
+        if d.via_motor:
+            raise OfficeExecutionError(
+                OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED,
+                phase=OfficeErrorPhase.PREFLIGHT,
+            )
+        assert_office_transport(runtime_policy, d.transporte, phase=OfficeErrorPhase.PREFLIGHT)
     if d.via_motor:
         # El MISMO cliente que worker.py usa para despachar el motor.
         from motor_registry import worker
@@ -234,6 +319,8 @@ async def _preparar(clave: str, d: Despacho):
         return _llamada
 
     f = await resolve_facet(clave)
+    if runtime_policy is not None:
+        assert_office_transport(runtime_policy, f.transport, phase=OfficeErrorPhase.PREFLIGHT)
 
     if f.transport == "http_gemini":
         async def _llamada(timeout: int) -> ResultadoSonda:
@@ -242,8 +329,10 @@ async def _preparar(clave: str, d: Despacho):
                 {"x-goog-api-key": f.credential},
                 {"contents": [{"role": "user", "parts": [{"text": MENSAJE_DE_SONDA}]}],
                  "generationConfig": {"maxOutputTokens": limite}},
-                timeout, [f.credential],
+                timeout, [f.credential], runtime_policy=runtime_policy,
             )
+            if runtime_policy is not None:
+                return _office_probe_result(data, f.transport)
             uso = data.get("usageMetadata") or {}
             return ResultadoSonda(True, None, uso.get("promptTokenCount", 0), uso.get("candidatesTokenCount", 0),
                                   uso_medido=bool(uso))
@@ -255,8 +344,10 @@ async def _preparar(clave: str, d: Despacho):
                 f"{f.base_url}/chat/completions",
                 {"Authorization": f"Bearer {f.credential}", "Content-Type": "application/json"},
                 {"model": f.model, "messages": mensajes, "stream": False, d.max_tokens_param: limite},
-                timeout, [f.credential],
+                timeout, [f.credential], runtime_policy=runtime_policy,
             )
+            if runtime_policy is not None:
+                return _office_probe_result(data, f.transport)
             uso = data.get("usage") or {}
             return ResultadoSonda(True, None, uso.get("prompt_tokens", 0), uso.get("completion_tokens", 0),
                                   uso_medido=bool(uso))
@@ -269,8 +360,10 @@ async def _preparar(clave: str, d: Despacho):
             data = await _post(
                 OLLAMA_URL, {},
                 {"model": f.model, "messages": mensajes, "stream": False, "options": {"num_predict": limite}},
-                timeout, [],
+                timeout, [], runtime_policy=runtime_policy,
             )
+            if runtime_policy is not None:
+                return _office_probe_result(data, f.transport)
             return ResultadoSonda(True, None, data.get("prompt_eval_count", 0), data.get("eval_count", 0),
                                   uso_medido="prompt_eval_count" in data or "eval_count" in data)
         return _llamada
@@ -286,7 +379,8 @@ def _uso_estimado(d: Despacho) -> tuple[int, int]:
 
 
 async def _registrar(clave: str, d: Despacho, r: ResultadoSonda, outcome: str,
-                     user_id: str | None, tenant_id: str | None, *, llamada_cobrable: bool) -> None:
+                     user_id: str | None, tenant_id: str | None, *, llamada_cobrable: bool,
+                     runtime_policy=None) -> None:
     global _registros_perdidos
     try:
         await facet_health.registrar_evento_de_sonda(clave, outcome, r.detalle, time.time())
@@ -295,46 +389,105 @@ async def _registrar(clave: str, d: Despacho, r: ResultadoSonda, outcome: str,
         logger.warning(
             "pre-vuelo: no se pudo registrar la sonda de '%s' en facet_health_event (%s); "
             "van %d registros perdidos",
-            clave, recortar_redactado(f"{type(exc).__name__}: {exc}", _LARGO_DETALLE), _registros_perdidos,
+            clave,
+            type(exc).__name__ if runtime_policy is not None else recortar_redactado(
+                f"{type(exc).__name__}: {exc}", _LARGO_DETALLE),
+            _registros_perdidos,
         )
     if not llamada_cobrable:
         return
     if r.uso_medido and (r.tokens_in or r.tokens_out):
-        await record_direct_usage(
-            user_id, tenant_id, clave, d.provider_id, d.modelo, r.tokens_in, r.tokens_out,
-            request_type=REQUEST_TYPE_SONDA,
-        )
+        try:
+            await record_direct_usage(
+                user_id, tenant_id, clave, d.provider_id, d.modelo, r.tokens_in, r.tokens_out,
+                request_type=REQUEST_TYPE_SONDA,
+            )
+        except Exception:
+            if runtime_policy is None:
+                raise
+            logger.warning("pre-vuelo Office: no se pudo registrar uso (%s)", "usage_error")
     elif not r.uso_medido:
-        tokens_in, tokens_out = _uso_estimado(d)
-        await record_direct_usage(
-            user_id, tenant_id, clave, d.provider_id, d.modelo, tokens_in, tokens_out,
-            request_type=REQUEST_TYPE_SONDA_ESTIMADA,
-        )
+        estimated_in, estimated_out = _uso_estimado(d)
+        if runtime_policy is None:
+            # Classic has historically recorded the estimate pair exactly.
+            tokens_in, tokens_out = estimated_in, estimated_out
+        else:
+            # A malformed peer counter makes the charge uncertain, but a
+            # verified sibling remains a lower bound and must never be
+            # replaced by a smaller estimate.
+            tokens_in = max(r.tokens_in, estimated_in)
+            tokens_out = max(r.tokens_out, estimated_out)
+        try:
+            await record_direct_usage(
+                user_id, tenant_id, clave, d.provider_id, d.modelo, tokens_in, tokens_out,
+                request_type=REQUEST_TYPE_SONDA_ESTIMADA,
+            )
+        except Exception:
+            if runtime_policy is None:
+                raise
+            logger.warning("pre-vuelo Office: no se pudo registrar uso (%s)", "usage_error")
 
 
 async def sondear(clave: str, d: Despacho, *, user_id: str | None = None,
-                  tenant_id: str | None = None) -> ResultadoSonda:
+                  tenant_id: str | None = None, runtime_policy=None) -> ResultadoSonda:
     timeout = prevuelo_config.sonda_timeout_s()
     try:
-        llamada = await _preparar(clave, d)
+        if runtime_policy is not None:
+            runtime_policy = require_office_runtime_policy(runtime_policy, phase=OfficeErrorPhase.PREFLIGHT)
+        llamada = await _preparar(clave, d, runtime_policy=runtime_policy)
+    except OfficeExecutionError as exc:
+        resultado = _office_probe_failure(exc, provider_call_made=False)
+        await _registrar(clave, d, resultado, "config_error", user_id, tenant_id,
+                         llamada_cobrable=False, runtime_policy=runtime_policy)
+        return resultado
     except _FallaDePreparacion as exc:
+        if runtime_policy is not None:
+            resultado = _office_probe_failure(exc, provider_call_made=False)
+            await _registrar(clave, d, resultado, "config_error", user_id, tenant_id,
+                             llamada_cobrable=False, runtime_policy=runtime_policy)
+            return resultado
         resultado = ResultadoSonda(False, recortar_redactado(
             f"la sonda no pudo preparar la llamada: {exc}", _LARGO_DETALLE))
         await _registrar(clave, d, resultado, "config_error", user_id, tenant_id, llamada_cobrable=False)
         return resultado
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if runtime_policy is not None:
+            resultado = _office_probe_failure(exc, provider_call_made=False)
+            await _registrar(clave, d, resultado, "config_error", user_id, tenant_id,
+                             llamada_cobrable=False, runtime_policy=runtime_policy)
+            return resultado
+        raise
 
     # F4 + pasada final R34: se registra uso estimado si el pedido pudo SALIR
     # (_pudo_cobrarse); ver el docstring del módulo.
     cobrable = True
     try:
         resultado = await asyncio.wait_for(llamada(timeout), timeout=timeout + MARGEN_DE_WAIT_FOR_S)
+    except OfficeExecutionError as exc:
+        resultado = _office_probe_failure(
+            exc, provider_call_made=exc.provider_call_made,
+            uso_medido=exc.usage_measured,
+        )
+        cobrable = exc.provider_call_made and exc.exception_classname != "HTTP_4XX"
     except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
-        resultado = ResultadoSonda(False, f"timeout de sonda ({timeout}s)", uso_medido=False)
-        cobrable = _pudo_cobrarse(exc)
+        if runtime_policy is not None:
+            resultado = _office_probe_failure(exc, provider_call_made=True, uso_medido=False)
+            cobrable = True
+        else:
+            resultado = ResultadoSonda(False, f"timeout de sonda ({timeout}s)", uso_medido=False)
+            cobrable = _pudo_cobrarse(exc)
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:  # fail-closed: una sonda que no completó la llamada al proveedor da faceta_caida, nunca sana; el motivo redactado viaja en el veredicto
-        resultado = ResultadoSonda(False, recortar_redactado(f"{type(exc).__name__}: {exc}", _LARGO_DETALLE),
-                                   uso_medido=False)
-        cobrable = _pudo_cobrarse(exc)
+        if runtime_policy is not None:
+            resultado = _office_probe_failure(exc, provider_call_made=True, uso_medido=False)
+            cobrable = True
+        else:
+            resultado = ResultadoSonda(False, recortar_redactado(f"{type(exc).__name__}: {exc}", _LARGO_DETALLE),
+                                       uso_medido=False)
+            cobrable = _pudo_cobrarse(exc)
     await _registrar(clave, d, resultado, "ok" if resultado.ok else "provider_error", user_id, tenant_id,
-                     llamada_cobrable=cobrable)
+                     llamada_cobrable=cobrable, runtime_policy=runtime_policy)
     return resultado

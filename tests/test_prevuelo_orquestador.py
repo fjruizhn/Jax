@@ -452,7 +452,7 @@ def test_un_vuelo_de_un_loop_cerrado_no_se_reusa_y_se_vuelve_a_sondear(monkeypat
     try:
         viejo.create_task(pv.prevuelo([_paso(0, "jekyll")], {"objective": "o"}))
         viejo.run_until_complete(asyncio.sleep(0.05))
-        assert llamadas == ["jekyll"] and "jekyll" in pv._sondas_en_vuelo
+        assert llamadas == ["jekyll"] and ("jekyll", "CLASSIC_DETAIL") in pv._sondas_en_vuelo
     finally:
         viejo.close()  # sin cancelar ni esperar: el peor caso
 

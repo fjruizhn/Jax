@@ -13,7 +13,7 @@ import time
 import uuid
 from decimal import Decimal
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
 from pydantic import BaseModel, Field, model_validator
 
 from redaccion import recortar_redactado
@@ -50,8 +50,137 @@ from jacobs.policy import (
 from jacobs.subpipelines import (
     ConsumoRechazado, Motivo, consumir_token_subpipeline, hash_token, token_ref,
 )
+from jacobs.office_contract import (
+    OFFICE_WORK_CONTRACT_VERSION, OfficePhase,
+    OfficeRejectionCode, OfficeRunRequest, OfficeRunResponse,
+)
+from jacobs.office_callbacks import OfficeCallbackConfigurationError, fail as office_fail, materialize, office_callback_config
+from jacobs.office_runtime import OFFICE_RUNTIME_POLICY, OfficeExecutionError
 
 router = APIRouter(prefix="/jacobs", tags=["jacobs"])
+
+
+async def _finish_office_preflight_failure(snapshot, code: OfficeRejectionCode,
+                                           default_terminal: OfficePhase) -> None:
+    """Reconcile a preflight failure through the paired fail callback once."""
+    terminal = default_terminal
+    terminal_code = code
+    try:
+        failure = await office_fail(snapshot, "PREFLIGHT", code, False)
+        if failure.outcome == "FAILED":
+            terminal = OfficePhase.FAILED
+        elif failure.outcome == "CANCELLED_REVOKED":
+            terminal = OfficePhase.CANCELLED_REVOKED
+            terminal_code = OfficeRejectionCode.OFFICE_REVOKED
+        elif failure.outcome in {"OUTCOME_UNKNOWN", "ALREADY_COMPLETED"}:
+            # Preflight cannot truthfully manufacture a provider receipt.
+            terminal = OfficePhase.OUTCOME_UNKNOWN
+            terminal_code = OfficeRejectionCode.OFFICE_PREFLIGHT_UNKNOWN
+    except Exception:
+        terminal = OfficePhase.OUTCOME_UNKNOWN
+        terminal_code = OfficeRejectionCode.OFFICE_PREFLIGHT_UNKNOWN
+    await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                       OfficePhase.PREFLIGHT_IN_FLIGHT,
+                                       terminal_code.value, terminal)
+
+
+def _office_response(snapshot) -> dict:
+    return OfficeRunResponse(contract_version=OFFICE_WORK_CONTRACT_VERSION,
+                             pipeline_id=snapshot.pipeline_id, run_epoch=snapshot.run_epoch,
+                             phase=snapshot.phase).model_dump(mode="json")
+
+
+@router.post("/office-v1/runs", status_code=201)
+async def office_v1_run(req: OfficeRunRequest, request: Request, background: BackgroundTasks, response: Response) -> dict:
+    """Reserve, preflight and materialize one opaque Office stage.
+
+    The identity and paired callback gate deliberately precede any cupo write.
+    """
+    if getattr(request.state, "identidad_servicio", None) != "plataforma":
+        raise HTTPException(status_code=403, detail={"code": "office_service_identity_required"})
+    if check_kill_switch():
+        raise HTTPException(status_code=423, detail={"code": "kill_switch_activo"})
+    try:
+        office_callback_config()
+    except OfficeCallbackConfigurationError as exc:
+        raise HTTPException(status_code=503, detail={"code": str(exc)}) from None
+    try:
+        reservation = await cupo.reservar_office_v1(req, limite=MAX_PARALLEL_PIPELINES)
+    except ContencionAlReservar as exc:
+        raise _contencion_503(exc) from exc
+    if reservation is None:
+        raise HTTPException(status_code=422, detail={"code": "office_cupo_agotado"})
+    if reservation.conflict:
+        raise HTTPException(status_code=409, detail={"code": "office_request_conflict"})
+    # Reservation intentionally has no step.  Both the creator and a replay
+    # repair the deterministic step before any joined snapshot or paid probe.
+    if not await store.office_prepare_step(reservation.pipeline_id, req):
+        snapshot = await store.office_execution_snapshot(reservation.pipeline_id)
+        if snapshot is None:
+            raise HTTPException(status_code=503, detail={"code": "office_prepare_unknown"})
+    else:
+        snapshot = await store.office_execution_snapshot(reservation.pipeline_id)
+    if snapshot is None:
+        raise HTTPException(status_code=503, detail={"code": "office_reservation_unknown"})
+    if snapshot.phase is OfficePhase.RESERVED and await store.office_claim_preflight(
+            snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id):
+        try:
+            # JXP materializes and reauthorizes before any preflight probe.
+            callback = await materialize(snapshot, "PREFLIGHT")
+            if callback.outcome != "MATERIALIZED":
+                if callback.outcome == "CANCELLED_REVOKED":
+                    await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                                       OfficePhase.PREFLIGHT_IN_FLIGHT,
+                                                       OfficeRejectionCode.OFFICE_REVOKED.value,
+                                                       OfficePhase.CANCELLED_REVOKED)
+                else:
+                    # INPUT_STALE or an unrecognized materialization protocol
+                    # response has no safe cancellation semantics.
+                    await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                                       OfficeRejectionCode.OFFICE_PREFLIGHT_UNKNOWN.value,
+                                                       OfficePhase.OUTCOME_UNKNOWN)
+            else:
+                step = Step(step_id=snapshot.step_id, pipeline_id=snapshot.pipeline_id, step_index=0,
+                            facet=snapshot.facet, capability=snapshot.capability,
+                            timeout_seconds=snapshot.timeout_seconds, trace_id=snapshot.correlation_id,
+                            input={"prompt": callback.prompt})
+                verdict = await prevuelo([step], {}, user_id=snapshot.user_id, tenant_id=snapshot.tenant_id,
+                                         runtime_policy=OFFICE_RUNTIME_POLICY)
+                if not verdict.ok or verdict.costo_max_usd > snapshot.accepted_cost_usd:
+                    # A known preflight refusal is durable JXP history before
+                    # local terminal state; no model was invoked.
+                    await _finish_office_preflight_failure(
+                        snapshot, OfficeRejectionCode.OFFICE_PREFLIGHT_FAILED, OfficePhase.FAILED)
+                else:
+                    await store.office_mark_ready(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                                 callback.materialization_sha256, callback.binding_version)
+        except OfficeExecutionError as exc:
+            await _finish_office_preflight_failure(
+                snapshot, exc.code,
+                OfficePhase.OUTCOME_UNKNOWN if exc.outcome.value == "OUTCOME_UNKNOWN" else OfficePhase.FAILED)
+        except Exception:
+            await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                               OfficePhase.PREFLIGHT_IN_FLIGHT,
+                                               OfficeRejectionCode.OFFICE_PREFLIGHT_UNKNOWN.value,
+                                               OfficePhase.OUTCOME_UNKNOWN)
+    snapshot = await store.office_execution_snapshot(reservation.pipeline_id)
+    if snapshot is None:
+        raise HTTPException(status_code=503, detail={"code": "office_reservation_unknown"})
+    if snapshot.phase is OfficePhase.READY:
+        pipeline = await store.office_pipeline_for_runner(snapshot.pipeline_id)
+        if pipeline is not None:
+            background.add_task(run_pipeline, pipeline)
+        response.status_code = 201 if reservation.created else 200
+        return _office_response(snapshot)
+    if snapshot.phase in {OfficePhase.RESERVED, OfficePhase.PREFLIGHT_IN_FLIGHT, OfficePhase.DELIVERY_IN_FLIGHT}:
+        response.status_code = 202
+        return _office_response(snapshot)
+    if snapshot.phase is OfficePhase.RECEIPT_STORED:
+        response.status_code = 200
+        return _office_response(snapshot)
+    if snapshot.phase is OfficePhase.OUTCOME_UNKNOWN:
+        raise HTTPException(status_code=503, detail={"code": "office_outcome_unknown"})
+    raise HTTPException(status_code=422, detail={"code": snapshot.phase.value.lower()})
 
 # Añadido 2026-09-16: `_resolve_ref` tragaba el fallo de lectura sin dejar
 # rastro. Un error que no se registra en ningún lado no existe para nadie.
@@ -1271,5 +1400,10 @@ async def get_pipeline_results(pipeline_id: str) -> dict:
 
 @router.get("/pipeline/{pipeline_id}/events")
 async def get_events(pipeline_id: str) -> dict:
+    # Events alone cannot establish Classic existence: an Office row is
+    # intentionally filtered from the Classic reader and would otherwise look
+    # like a valid empty event stream.
+    if not await store.pipeline_get(pipeline_id):
+        raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' no encontrado")
     events = await store.events_by_pipeline(pipeline_id)
     return {"pipeline_id": pipeline_id, "events": events}

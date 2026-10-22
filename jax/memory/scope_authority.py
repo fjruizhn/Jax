@@ -24,6 +24,25 @@ class ProjectLifecycle(str, Enum):
     ACTIVE="ACTIVE"; ARCHIVED="ARCHIVED"; HIDDEN="HIDDEN"; DISABLED="DISABLED"
 
 
+class ProjectNamespace(str, Enum):
+    CLASSIC = "CLASSIC"
+    OFFICE_CONFIDENTIAL = "OFFICE_CONFIDENTIAL"
+
+
+def _is_classic_namespace(row: Any, name: str = "authorization_namespace", pos: int = 2) -> bool:
+    """Classic consumers fail closed for a persisted non-classic namespace.
+
+    A missing or unknown value is denied too. The persistent column is NOT
+    NULL, and accepting a malformed/future value would turn a migration or
+    data-corruption error into classic authority.
+    """
+    if isinstance(row, Mapping):
+        namespace = row.get(name)
+    else:
+        namespace = row[pos] if len(row) > pos else None
+    return str(namespace or "").upper() == ProjectNamespace.CLASSIC.value
+
+
 @dataclass(frozen=True)
 class ProjectScopeAuthorization:
     project_id: str; tenant_id: str; subject_user_id: str; membership_id: str | None
@@ -141,10 +160,11 @@ class MariaDBScopeAuthorityResolver:
         return str(status),str(role or "").lower()
 
     async def _project_membership_cur(self, cur: Any, requested: ScopeContext) -> tuple[ScopeContext, ProjectRole]:
-        await cur.execute("SELECT tenant_id,status FROM jax_project_scope WHERE project_id=%s FOR UPDATE",(requested.project_id,))
+        await cur.execute("SELECT tenant_id,status,authorization_namespace FROM jax_project_scope WHERE project_id=%s FOR UPDATE",(requested.project_id,))
         project=await cur.fetchone()
         if not project: raise ScopeDenied("PROJECT_SCOPE_UNBOUND")
         tenant,status=self._value(project,"tenant_id",0),str(self._value(project,"status",1) or "").upper()
+        if not _is_classic_namespace(project): raise ScopeDenied("project namespace is not available to classic authority")
         if str(tenant)!=str(requested.tenant_id): raise ScopeDenied("project tenant mismatch")
         if status!="ACTIVE": raise ScopeDenied("project scope is disabled")
         await cur.execute("SELECT membership_id,tenant_id,user_id,project_role,status FROM jax_project_membership WHERE project_id=%s AND user_id=%s FOR UPDATE",(requested.project_id,requested.subject_user_id))
@@ -162,9 +182,10 @@ class MariaDBScopeAuthorityResolver:
         """Resolve active scope; no row means legacy PROJECT_SCOPE_UNBOUND."""
         self._require_subject(requested); await self._tenant_user(requested)
         if not requested.project_id: raise ScopeDenied("project id is required for project scope resolution")
-        project=await self._one("SELECT tenant_id,status FROM jax_project_scope WHERE project_id=%s LIMIT 1",(requested.project_id,))
+        project=await self._one("SELECT tenant_id,status,authorization_namespace FROM jax_project_scope WHERE project_id=%s LIMIT 1",(requested.project_id,))
         if not project: raise ScopeDenied("PROJECT_SCOPE_UNBOUND")
         tenant,status=self._value(project,"tenant_id",0),str(self._value(project,"status",1) or "").upper()
+        if not _is_classic_namespace(project): raise ScopeDenied("project namespace is not available to classic authority")
         if str(tenant)!=str(requested.tenant_id): raise ScopeDenied("project tenant mismatch")
         if status!="ACTIVE": raise ScopeDenied("project scope is disabled")
         member=await self._one("SELECT membership_id,tenant_id,user_id,project_role,status FROM jax_project_membership WHERE project_id=%s AND user_id=%s LIMIT 1",(requested.project_id,requested.subject_user_id))
@@ -189,9 +210,10 @@ class MariaDBScopeAuthorityResolver:
         _require_human_subject(requested)
         if not requested.project_id: raise ScopeDenied("project id is required for project read resolution")
         _, role = await self._tenant_user(requested)
-        project = await self._one("SELECT tenant_id,status FROM jax_project_scope WHERE project_id=%s LIMIT 1",(requested.project_id,))
+        project = await self._one("SELECT tenant_id,status,authorization_namespace FROM jax_project_scope WHERE project_id=%s LIMIT 1",(requested.project_id,))
         if not project: raise ScopeDenied("PROJECT_SCOPE_UNBOUND")
         tenant, status = self._value(project,"tenant_id",0), str(self._value(project,"status",1) or "").upper()
+        if not _is_classic_namespace(project): raise ScopeDenied("project namespace is not available to classic authority")
         if str(tenant)!=str(requested.tenant_id): raise ScopeDenied("project tenant mismatch")
         member = await self._one(
             "SELECT project_role,status,grant_origin FROM jax_project_membership WHERE project_id=%s AND user_id=%s LIMIT 1",
@@ -244,11 +266,11 @@ class MariaDBScopeAuthorityResolver:
         await self._tenant_user(requested)
         resolved = requested
         if requested.project_id:
-            project = await self._one("SELECT tenant_id,status FROM jax_project_scope WHERE project_id=%s LIMIT 1",(requested.project_id,))
+            project = await self._one("SELECT tenant_id,status,authorization_namespace FROM jax_project_scope WHERE project_id=%s LIMIT 1",(requested.project_id,))
             if not project:
                 raise ScopeDenied("PROJECT_SCOPE_UNBOUND")
             tenant,status=self._value(project,"tenant_id",0),str(self._value(project,"status",1) or "").upper()
-            if str(tenant) != str(requested.tenant_id) or status != "ACTIVE":
+            if not _is_classic_namespace(project) or str(tenant) != str(requested.tenant_id) or status != "ACTIVE":
                 raise ScopeDenied("project scope is inactive or tenant-mismatched")
             # This has no membership/role.  It records the narrow service
             # decision so scope shape can be carried to persistence, where it
@@ -286,11 +308,11 @@ class MariaDBScopeAuthorityResolver:
                 raise AuthorizationDenied("service operation is not permitted by fixed policy")
             resolved=scope
             if scope.project_id:
-                await cur.execute("SELECT tenant_id,status FROM jax_project_scope WHERE project_id=%s FOR UPDATE",(scope.project_id,))
+                await cur.execute("SELECT tenant_id,status,authorization_namespace FROM jax_project_scope WHERE project_id=%s FOR UPDATE",(scope.project_id,))
                 project=await cur.fetchone()
                 if not project: raise ScopeDenied("PROJECT_SCOPE_UNBOUND")
                 tenant,status=self._value(project,"tenant_id",0),str(self._value(project,"status",1) or "").upper()
-                if str(tenant)!=str(scope.tenant_id) or status!="ACTIVE": raise ScopeDenied("project scope is inactive or tenant-mismatched")
+                if not _is_classic_namespace(project) or str(tenant)!=str(scope.tenant_id) or status!="ACTIVE": raise ScopeDenied("project scope is inactive or tenant-mismatched")
                 resolved=replace(scope,project_authorization=ProjectScopeAuthorization(str(scope.project_id),str(tenant),str(scope.subject_user_id),None,None,"SERVICE_POLICY",status,time.time()))
             elif target_visibility is Visibility.PROJECT_SHARED:
                 raise ScopeDenied("project shared service operation requires a project scope")

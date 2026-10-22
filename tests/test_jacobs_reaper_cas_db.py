@@ -195,10 +195,39 @@ def test_explain_de_la_consulta_del_barrido():
     idx_steps_pipeline (ref por pipeline_id; el filtro por status corre sobre a
     lo sumo 20 pasos, el tope duro de un plan)."""
     async def todo():
-        sql = store._sql_candidatos_del_reaper(3)
-        conn = await store.conexion_dedicada()
+        await store.init_tables()
+        marker = uuid.uuid4().hex
+        propios: list[str] = []
         try:
+            # The shared C1 database can be dominated by a handful of Office
+            # rows.  Give the optimizer the production-shaped Classic skew:
+            # several hundred terminal rows and only the three live statuses
+            # requested by the actual reaper query.
+            terminales = (PipelineStatus.completed, PipelineStatus.failed,
+                           PipelineStatus.aborted, PipelineStatus.expired,
+                           PipelineStatus.disputed, PipelineStatus.discarded,
+                           PipelineStatus.hidden)
+            ahora = time.time()
+            for i in range(350):
+                pid = str(uuid.uuid4()); propios.append(pid)
+                await store.pipeline_create(Pipeline(
+                    pipeline_id=pid, name=f"reaper-explain-{marker}-{i}",
+                    invoked_by="plataforma", mode="autonomous",
+                    status=terminales[i % len(terminales)],
+                    created_at=ahora, updated_at=ahora,
+                ))
+            for estado in (PipelineStatus.pending, PipelineStatus.running, PipelineStatus.interrupted):
+                pid = str(uuid.uuid4()); propios.append(pid)
+                await store.pipeline_create(Pipeline(
+                    pipeline_id=pid, name=f"reaper-explain-{marker}-{estado.value}",
+                    invoked_by="plataforma", mode="autonomous", status=estado,
+                    created_at=ahora, updated_at=ahora,
+                ))
+            conn = await store.conexion_dedicada()
+            sql = store._sql_candidatos_del_reaper(3)
             async with conn.cursor() as cur:
+                await cur.execute("ANALYZE TABLE jacobs_pipelines")
+                await cur.fetchall()
                 await cur.execute("EXPLAIN " + sql, ("pending", "running", "interrupted"))
                 cols = [d[0] for d in cur.description]
                 filas = [dict(zip(cols, r)) for r in await cur.fetchall()]
@@ -210,7 +239,11 @@ def test_explain_de_la_consulta_del_barrido():
                     primera = fila[0] if fila else None
                 return filas, primera
         finally:
-            conn.close()
+            if 'conn' in locals():
+                conn.close()
+            if propios:
+                placeholders = ",".join(["%s"] * len(propios))
+                await _ejecutar(f"DELETE FROM jacobs_pipelines WHERE pipeline_id IN ({placeholders})", propios)
     filas, primera = asyncio.run(todo())
     por_tabla = {f["table"]: f for f in filas}
     assert set(por_tabla) == {"p", "s"}, filas

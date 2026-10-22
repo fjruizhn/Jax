@@ -37,6 +37,23 @@ from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus, faceta_eje
 from jacobs.plan import CapabilityUnbound
 from jacobs.policy import check_kill_switch
 from jacobs.usage_writer import record_direct_usage
+from jacobs.office_runtime import (
+    OfficeCapabilityContext,
+    OfficeErrorPhase,
+    OfficeErrorOutcome,
+    OfficeExecutionError,
+    assert_office_transport,
+    ensure_office_http_log_privacy,
+    map_office_exception,
+    office_http_log_scope,
+    office_http_status_error,
+    parse_office_provider_response,
+    runtime_policy_for_pipeline,
+    stable_office_error,
+    validate_office_capability_timeout,
+)
+from jacobs.office_contract import OFFICE_EXECUTION_CONTRACT, OfficePhase, OfficeRejectionCode, OfficeRuntimePolicy, office_utf8_sha256
+from jacobs.office_callbacks import OfficeCallbackError, complete as office_complete, fail as office_fail, materialize as office_materialize
 from policy.execution_control.errors import (
     DirectHydeGovernedExecutionForbiddenError, GovernedExecutionRequiredError,
 )
@@ -390,10 +407,14 @@ def _texto_o_truncado(data: dict, transporte: str) -> str:
     return texto
 
 
-async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
+async def _invoke_http_gemini(
+    f: "ResolvedFacet", prompt: str, timeout: int, *, runtime_policy: OfficeRuntimePolicy | None = None,
+) -> dict:
     """Formato Gemini + grounding required_web. Transporte, no faceta —
     hoy solo hipatia lo usa, pero cualquier facet con transport=http_gemini
     entra aca sin codigo nuevo."""
+    if runtime_policy is not None:
+        return await _invoke_http_gemini_office(f, prompt, timeout, runtime_policy)
     model = f.model
     # Ruling T6-6 (2026-09-15): la key va en la cabecera x-goog-api-key, NO en
     # `?key=`. httpx loguea la URL entera en INFO en cada pedido y la mete en
@@ -485,13 +506,59 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
     }
 
 
-async def _invoke_http_openai_compat(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
+async def _invoke_http_gemini_office(
+    f: "ResolvedFacet", prompt: str, timeout: int, runtime_policy: OfficeRuntimePolicy,
+) -> dict:
+    """One no-tools Gemini generation.  Never builds sources or follows redirects."""
+    assert_office_transport(runtime_policy, f.transport)
+    ensure_office_http_log_privacy()
+    url = f"{f.base_url}/models/{f.model}:generateContent"
+    headers = {"x-goog-api-key": f.credential}
+    payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
+    error: OfficeExecutionError | None = None
+    transport_started = False
+    resp = None
+    post = None
+    try:
+        post = obtener_cliente_http().post
+        with office_http_log_scope():
+            transport_started = True
+            resp = await post(
+                url, headers=headers, json=payload, timeout=timeout, follow_redirects=False,
+            )
+            if resp.status_code != 200:
+                raise office_http_status_error(resp.status_code)
+            response = parse_office_provider_response(resp.json(), "http_gemini")
+    except asyncio.CancelledError:
+        raise
+    except OfficeExecutionError as exc:
+        error = stable_office_error(exc, provider_call_made=exc.provider_call_made or transport_started)
+    except Exception as exc:
+        error = map_office_exception(exc, provider_call_made=transport_started)
+    if error is not None:
+        resp = None
+        payload = None
+        raise error
+    if response.truncated:
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED, provider_call_made=True,
+                                  tokens_in=response.tokens_in, tokens_out=response.tokens_out,
+                                  usage_measured=response.usage_measured)
+    return {"success": True, "facet": f.key, "model": f.model, "result": response.text,
+            "sources": [], "queries": [], "grounded": False,
+            "tokens_in": response.tokens_in, "tokens_out": response.tokens_out}
+
+
+async def _invoke_http_openai_compat(
+    f: "ResolvedFacet", prompt: str, timeout: int, *, runtime_policy: OfficeRuntimePolicy | None = None,
+) -> dict:
     """Formato chat/completions estilo OpenAI. Transporte, no faceta —
     jekyll/thot/ada convergen aca (antes eran 3 copias casi identicas con
     URL/modelo/persona hardcodeados). Sin streaming: jekyll/thot ya lo
     probaban sin streaming; ada pierde SSE a cambio de una sola funcion
     para las 3 (simplificacion deliberada, el contenido final es
     equivalente, solo cambia como se ensambla)."""
+    if runtime_policy is not None:
+        return await _invoke_http_openai_compat_office(f, prompt, timeout, runtime_policy)
     url = f"{f.base_url}/chat/completions"
     headers = {"Authorization": f"Bearer {f.credential}", "Content-Type": "application/json"}
     messages = []
@@ -534,7 +601,53 @@ async def _invoke_http_openai_compat(f: "ResolvedFacet", prompt: str, timeout: i
     }
 
 
-async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
+async def _invoke_http_openai_compat_office(
+    f: "ResolvedFacet", prompt: str, timeout: int, runtime_policy: OfficeRuntimePolicy,
+) -> dict:
+    assert_office_transport(runtime_policy, f.transport)
+    ensure_office_http_log_privacy()
+    error: OfficeExecutionError | None = None
+    transport_started = False
+    payload = None
+    resp = None
+    post = None
+    try:
+        messages = ([{"role": "system", "content": f.persona}] if f.persona else [])
+        messages.append({"role": "user", "content": prompt})
+        payload = {"model": f.model, "messages": messages, "stream": False,
+                   **await limite_de_salida(f.transport, f.provider_id, f.model)}
+        post = obtener_cliente_http().post
+        with office_http_log_scope():
+            transport_started = True
+            resp = await post(
+                f"{f.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {f.credential}", "Content-Type": "application/json"},
+                json=payload, timeout=timeout, follow_redirects=False,
+            )
+            if resp.status_code != 200:
+                raise office_http_status_error(resp.status_code)
+            response = parse_office_provider_response(resp.json(), "http_openai_compat")
+    except asyncio.CancelledError:
+        raise
+    except OfficeExecutionError as exc:
+        error = stable_office_error(exc, provider_call_made=exc.provider_call_made or transport_started)
+    except Exception as exc:
+        error = map_office_exception(exc, provider_call_made=transport_started)
+    if error is not None:
+        resp = None
+        payload = None
+        raise error
+    if response.truncated:
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED, provider_call_made=True,
+                                  tokens_in=response.tokens_in, tokens_out=response.tokens_out,
+                                  usage_measured=response.usage_measured)
+    return {"success": True, "facet": f.key, "model": f.model, "result": response.text,
+            "tokens_in": response.tokens_in, "tokens_out": response.tokens_out}
+
+
+async def _invoke_ollama(
+    f: "ResolvedFacet", prompt: str, timeout: int, *, runtime_policy: OfficeRuntimePolicy | None = None,
+) -> dict:
     """Ollama local — razonamiento local. Modelo desde facet_binding, ya no
     hardcodeado (ver plan.py::_llm_plan, mismo patron). f.base_url
     ("http://localhost:11434/v1") es para el path OpenAI-compat generico
@@ -557,6 +670,8 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     mantiene en ~76.7 tok/s con 1, 2 y 3 requests concurrentes y lo unico
     que crece es la espera en cola. Veredicto y que lo reabre:
     docs/superpowers/specs/2026-08-25-gpu-concurrency-resultado.md"""
+    if runtime_policy is not None:
+        return await _invoke_ollama_office(f, prompt, timeout, runtime_policy)
     # PR-K ronda 2 (M3): límite de salida de la fila de `model`, como
     # options.num_predict de /api/chat (github.com/ollama/ollama docs/api.md).
     # Antes no mandaba ninguno. Sin contrato, el step falla con el UPDATE.
@@ -591,6 +706,46 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
         "tokens_in":  tokens_in,
         "tokens_out": tokens_out,
     }
+
+
+async def _invoke_ollama_office(
+    f: "ResolvedFacet", prompt: str, timeout: int, runtime_policy: OfficeRuntimePolicy,
+) -> dict:
+    assert_office_transport(runtime_policy, f.transport)
+    ensure_office_http_log_privacy()
+    error: OfficeExecutionError | None = None
+    transport_started = False
+    payload = None
+    resp = None
+    post = None
+    try:
+        payload = {"model": f.model, "messages": [{"role": "user", "content": prompt}], "stream": False,
+                   **await limite_de_salida(f.transport, f.provider_id, f.model)}
+        post = obtener_cliente_http().post
+        with office_http_log_scope():
+            transport_started = True
+            resp = await post(
+                OLLAMA_URL, json=payload, timeout=timeout, follow_redirects=False,
+            )
+            if resp.status_code != 200:
+                raise office_http_status_error(resp.status_code)
+            response = parse_office_provider_response(resp.json(), "ollama")
+    except asyncio.CancelledError:
+        raise
+    except OfficeExecutionError as exc:
+        error = stable_office_error(exc, provider_call_made=exc.provider_call_made or transport_started)
+    except Exception as exc:
+        error = map_office_exception(exc, provider_call_made=transport_started)
+    if error is not None:
+        resp = None
+        payload = None
+        raise error
+    if response.truncated:
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED, provider_call_made=True,
+                                  tokens_in=response.tokens_in, tokens_out=response.tokens_out,
+                                  usage_measured=response.usage_measured)
+    return {"success": True, "facet": f.key, "model": f.model, "result": response.text,
+            "tokens_in": response.tokens_in, "tokens_out": response.tokens_out}
 
 
 async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
@@ -788,6 +943,8 @@ async def validate_capability(step: Step) -> CapabilityUnbound | str | None:
 
 async def _despachar_transporte_directo(
     step: Step, pipeline: Pipeline, f: "ResolvedFacet", prompt: str, timeout: int,
+    *, runtime_policy: OfficeRuntimePolicy | None = None,
+    office_capability_context: OfficeCapabilityContext | None = None,
 ) -> dict:
     """El despacho de los tres transportes HTTP directos (gemini,
     openai_compat, ollama), extraído de `_dispatch_step` para poder probarlo
@@ -804,13 +961,33 @@ async def _despachar_transporte_directo(
     siendo fail-soft por su cuenta (sin identidad no escribe; error de DB
     solo loguea) -- nunca puede romper un step ya exitoso, y acá tampoco
     puede tapar el fallo de un step truncado."""
+    if runtime_policy is not None:
+        await validate_office_capability_timeout(office_capability_context, timeout)
+        assert_office_transport(runtime_policy, f.transport)
     try:
         if f.transport == "http_gemini":
-            result = await _invoke_http_gemini(f, prompt, timeout)
+            result = (await _invoke_http_gemini(f, prompt, timeout, runtime_policy=runtime_policy)
+                      if runtime_policy is not None else await _invoke_http_gemini(f, prompt, timeout))
         elif f.transport == "http_openai_compat":
-            result = await _invoke_http_openai_compat(f, prompt, timeout)
+            result = (await _invoke_http_openai_compat(f, prompt, timeout, runtime_policy=runtime_policy)
+                      if runtime_policy is not None else await _invoke_http_openai_compat(f, prompt, timeout))
+        elif f.transport == "ollama":
+            result = (await _invoke_ollama(f, prompt, timeout, runtime_policy=runtime_policy)
+                      if runtime_policy is not None else await _invoke_ollama(f, prompt, timeout))
+        elif runtime_policy is not None:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
         else:
-            result = await _invoke_ollama(f, prompt, timeout)
+            raise ValueError(f"Transporte directo desconocido: {f.transport}")
+    except OfficeExecutionError as exc:
+        if exc.code == OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED or (
+            runtime_policy is not None and exc.provider_call_made
+        ):
+            await record_direct_usage(
+                pipeline.user_id, pipeline.tenant_id, step.facet,
+                f.provider_id, f.model, exc.tokens_in, exc.tokens_out,
+                pipeline_id=pipeline.pipeline_id,
+            )
+        raise
     except PasoTruncado as exc:
         await record_direct_usage(
             pipeline.user_id, pipeline.tenant_id, step.facet,
@@ -829,10 +1006,13 @@ async def _despachar_transporte_directo(
     return result
 
 
-async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
+async def _dispatch_step(step: Step, pipeline: Pipeline, office_prompt: str | None = None) -> dict:
     """Selecciona el worker correcto según la faceta."""
+    runtime_policy = runtime_policy_for_pipeline(pipeline)
     # Ensamble mecánico: NO pasa por ningún LLM. Concatena los módulos ya generados.
     if step.capability == "assemble":
+        if runtime_policy is not None:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
         return _assemble_mechanical(step, pipeline)
 
     # FASE A §3.4: validación uniforme del contrato ANTES de rutear por facet.
@@ -847,6 +1027,20 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     original_facet = step.facet
     tried_facets = {step.facet}
     cap_error = await validate_capability(step)
+    if runtime_policy is not None:
+        # Office has one canonical admission path.  It never reroutes a
+        # capability or emits Classic events/prose after a denial.
+        if cap_error is not None:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED)
+        if type(office_prompt) is not str:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED)
+        f = await resolve_facet(step.facet)
+        step.modelo_real = f.model
+        return await _despachar_transporte_directo(
+            step, pipeline, f, office_prompt, step.timeout_seconds,
+            runtime_policy=runtime_policy,
+            office_capability_context=OfficeCapabilityContext(step.capability),
+        )
     while isinstance(cap_error, CapabilityUnbound):
         # El reroute SOLO puede apuntar a facets que el predicado único
         # (jacobs.models.faceta_ejecutable_en_pipeline: lista blanca HTTP, el
@@ -924,6 +1118,8 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     # _run_one_step la captura igual que cualquier otra excepcion — el step
     # falla con motivo explicito, nunca un default silencioso.
     if step.facet in _MOTOR_FACETS:
+        if runtime_policy is not None:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
         # Task 1 (2026-09-18, historial-y-arreglos-de-pipeline): este camino
         # NO pasa por resolve_facet(). Hasta la ronda de arreglo 1 (mismo
         # día), MotorJobView no traía el model_id real -- worker.py SÍ lo
@@ -946,14 +1142,21 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     # chat.py (Tasks 1-4); esto cubre el MISMO transporte cuando lo dispara un
     # pipeline de Jacobs en vez de un chat directo.
     if f.transport in ("http_gemini", "http_openai_compat", "ollama"):
-        return await _despachar_transporte_directo(step, pipeline, f, prompt, timeout)
+        return await _despachar_transporte_directo(
+            step, pipeline, f, prompt, timeout, runtime_policy=runtime_policy,
+            office_capability_context=(OfficeCapabilityContext(step.capability) if runtime_policy else None),
+        )
     if f.transport == "subprocess":
+        if runtime_policy is not None:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
         # Llegamos aquí solo si Fernando aprobó vía /approve-step (gate de
         # aprobación intacto, no tocado en esta misión).
         result = await _invoke_hyde(f, prompt, timeout)
         result["approved"] = True
         return result
 
+    if runtime_policy is not None:
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
     raise ValueError(f"Transporte desconocido para facet '{step.facet}': '{f.transport}'")
 
 
@@ -1176,6 +1379,164 @@ async def run_pipeline(pipeline: Pipeline) -> None:
         await _correr_pipeline(pipeline)
 
 
+async def _correr_office_pipeline(pipeline: Pipeline) -> None:
+    """The Office runner is deliberately isolated before every Classic write."""
+    snapshot = await store.office_execution_snapshot(pipeline.pipeline_id)
+    if snapshot is None or snapshot.phase is not OfficePhase.READY:
+        return
+    # A kill must leave durable READY untouched: recovery may resume only after
+    # the switch is cleared, and neither materialization nor the provider runs.
+    if check_kill_switch():
+        return
+    output: str | None = None
+    output_sha256: str | None = None
+    modelo_real: str | None = None
+    claimed_delivery = False
+    try:
+        materialized = await office_materialize(snapshot, "EXECUTION")
+        if materialized.outcome != "MATERIALIZED":
+            if materialized.outcome == "CANCELLED_REVOKED":
+                await _office_terminal_with_ack(snapshot, OfficePhase.READY,
+                                                 OfficeRejectionCode.OFFICE_REVOKED,
+                                                 OfficePhase.CANCELLED_REVOKED)
+            elif materialized.outcome == "INPUT_STALE":
+                await _office_terminal_with_ack(snapshot, OfficePhase.READY,
+                                                 OfficeRejectionCode.OFFICE_INPUT_STALE,
+                                                 OfficePhase.FAILED)
+            else:
+                await _office_terminal_with_ack(snapshot, OfficePhase.READY,
+                                                 OfficeRejectionCode.OFFICE_EXECUTION_FAILED,
+                                                 OfficePhase.FAILED)
+            return
+        if (materialized.materialization_sha256 != snapshot.materialization_sha256
+                or materialized.binding_version != snapshot.binding_version):
+            await _office_terminal_with_ack(snapshot, OfficePhase.READY,
+                                             OfficeRejectionCode.OFFICE_INPUT_STALE, OfficePhase.FAILED)
+            return
+        if not await store.office_claim_delivery(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id):
+            await store.office_execution_snapshot(snapshot.pipeline_id)
+            return
+        claimed_delivery = True
+        step = Step(step_id=snapshot.step_id, pipeline_id=snapshot.pipeline_id, step_index=0,
+                    facet=snapshot.facet, capability=snapshot.capability,
+                    timeout_seconds=snapshot.timeout_seconds, trace_id=snapshot.correlation_id)
+        result = await _dispatch_step(step, pipeline, materialized.prompt)
+        output = result.get("result")
+        if type(output) is not str:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID,
+                                      provider_call_made=True)
+        modelo_real = step.modelo_real
+        if type(modelo_real) is not str or not modelo_real:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID,
+                                       provider_call_made=True)
+        try:
+            output_sha256 = office_utf8_sha256(output)
+        except ValueError:
+            raise OfficeExecutionError(
+                OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID,
+                phase=OfficeErrorPhase.GENERATION,
+                provider_call_made=True,
+            ) from None
+        response = await office_complete(snapshot, output, modelo_real)
+        if response.outcome == "STORED":
+            if response.receipt.output_sha256 != output_sha256:
+                raise OfficeExecutionError(OfficeRejectionCode.OFFICE_DELIVERY_OUTCOME_UNKNOWN,
+                                           phase=OfficeErrorPhase.DELIVERY,
+                                           outcome=OfficeErrorOutcome.OUTCOME_UNKNOWN,
+                                           provider_call_made=True)
+            try:
+                stored = await store.office_store_receipt(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                                          response.receipt, modelo_real)
+            except Exception:
+                stored = False
+            if not stored and not await _office_receipt_reread(snapshot, response.receipt, modelo_real):
+                await _office_failure(snapshot, OfficeRejectionCode.OFFICE_DELIVERY_OUTCOME_UNKNOWN, True,
+                                      output_sha256, from_phase=OfficePhase.DELIVERY_IN_FLIGHT,
+                                      model_real=modelo_real, fail_phase=OfficeErrorPhase.DELIVERY.value,
+                                      ambiguous=True)
+        else:
+            await _office_terminal_with_ack(snapshot, OfficePhase.DELIVERY_IN_FLIGHT,
+                                             OfficeRejectionCode.OFFICE_REVOKED,
+                                             OfficePhase.CANCELLED_REVOKED)
+    except OfficeExecutionError as exc:
+        await _office_failure(snapshot, exc.code, exc.provider_call_made,
+                              output_sha256,
+                              from_phase=(OfficePhase.DELIVERY_IN_FLIGHT if claimed_delivery else OfficePhase.READY),
+                              model_real=modelo_real,
+                              fail_phase=exc.phase.value,
+                              ambiguous=exc.outcome is OfficeErrorOutcome.OUTCOME_UNKNOWN)
+    except OfficeCallbackError as exc:
+        if output is None:
+            # Materialization transport/body ambiguity happened before claim;
+            # durable READY is the recovery record and provider is untouched.
+            return
+        await _office_failure(snapshot, OfficeRejectionCode.OFFICE_DELIVERY_OUTCOME_UNKNOWN,
+                              True, output_sha256,
+                              from_phase=OfficePhase.DELIVERY_IN_FLIGHT, model_real=modelo_real,
+                              fail_phase=OfficeErrorPhase.DELIVERY.value,
+                              ambiguous=True)
+    except Exception:
+        await _office_failure(snapshot, OfficeRejectionCode.OFFICE_EXECUTION_FAILED,
+                              claimed_delivery, output_sha256,
+                              from_phase=(OfficePhase.DELIVERY_IN_FLIGHT if claimed_delivery else OfficePhase.READY),
+                              model_real=modelo_real,
+                              fail_phase=OfficeErrorPhase.GENERATION.value,
+                              ambiguous=claimed_delivery)
+
+
+async def _office_failure(snapshot, code: OfficeRejectionCode, model_invoked: bool,
+                          output_sha256: str | None, *, from_phase: OfficePhase,
+                          model_real: str | None, fail_phase: str,
+                          ambiguous: bool = False) -> None:
+    terminal = OfficePhase.OUTCOME_UNKNOWN if ambiguous else OfficePhase.FAILED
+    # PRE-CLAIM READY has no delivery side effect and must never call /fail.
+    if from_phase is OfficePhase.READY:
+        await _office_terminal_with_ack(snapshot, from_phase, code, terminal)
+        return
+    try:
+        outcome = await office_fail(snapshot, fail_phase, code, model_invoked, output_sha256)
+        if outcome.outcome == "ALREADY_COMPLETED":
+            if type(model_real) is str and output_sha256 == outcome.receipt.output_sha256:
+                if await store.office_store_receipt(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                                    outcome.receipt, model_real) or await _office_receipt_reread(snapshot, outcome.receipt, model_real):
+                    return
+            terminal = OfficePhase.OUTCOME_UNKNOWN
+        if outcome.outcome == "CANCELLED_REVOKED":
+            terminal = OfficePhase.CANCELLED_REVOKED
+        elif outcome.outcome == "FAILED":
+            # A typed callback refusal is authoritative even when the failed
+            # delivery request itself was ambiguous.
+            terminal = OfficePhase.FAILED
+        elif outcome.outcome == "OUTCOME_UNKNOWN":
+            terminal = OfficePhase.OUTCOME_UNKNOWN
+    except OfficeCallbackError as exc:
+        terminal = OfficePhase.OUTCOME_UNKNOWN
+    except Exception:
+        terminal = OfficePhase.OUTCOME_UNKNOWN
+    await _office_terminal_with_ack(snapshot, from_phase, code, terminal)
+
+
+async def _office_receipt_reread(snapshot, receipt, modelo_real: str) -> bool:
+    current = await store.office_execution_snapshot(snapshot.pipeline_id)
+    return bool(current and current.phase is OfficePhase.RECEIPT_STORED
+                and current.receipt == receipt and current.modelo_real == modelo_real)
+
+
+async def _office_terminal_with_ack(snapshot, from_phase: OfficePhase,
+                                    code: OfficeRejectionCode, terminal: OfficePhase) -> bool:
+    """A false/raised terminal acknowledgement is accepted only on exact reread."""
+    try:
+        written = await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch,
+                                                     snapshot.step_id, from_phase,
+                                                     code.value, terminal)
+    except Exception:
+        written = False
+    if written:
+        return True
+    current = await store.office_execution_snapshot(snapshot.pipeline_id)
+    return bool(current and current.phase is terminal and current.rejection_code == code.value)
+
+
 async def _correr_pipeline(pipeline: Pipeline) -> None:
     """
     Ejecuta el pipeline por OLAS topológicas. Dentro de cada ola, los steps
@@ -1195,6 +1556,12 @@ async def _correr_pipeline(pipeline: Pipeline) -> None:
     """
     pipeline_id = pipeline.pipeline_id
     epoca = pipeline.run_epoch
+
+    if pipeline.execution_contract == OFFICE_EXECUTION_CONTRACT:
+        await _correr_office_pipeline(pipeline)
+        return
+    if pipeline.execution_contract != "CLASSIC":
+        raise RuntimeError("unknown execution contract")
 
     if pipeline.mode == "dry_run":
         if not await store.pipeline_update_status_si_epoca(

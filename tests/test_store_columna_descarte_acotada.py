@@ -57,7 +57,11 @@ _DDL = ("ALTER TABLE jacobs_pipelines ADD COLUMN "
 # jax-platform va a LEERLA para su listado principal: mismo criterio de
 # CONTRATO que las otras tres (algo de afuera depende de que exista), así
 # que también va acotada y fail-closed.
-_COLUMNAS_CONTRATO = ("status_previo", "descartado_por", "descartado_at", "visible")
+_COLUMNAS_CONTRATO = (
+    "status_previo", "descartado_por", "descartado_at", "visible",
+    "execution_contract", "office_job_id", "office_stage_id", "office_project_id",
+    "client_request_id", "request_sha256", "office_phase", "office_rejection_code", "office_accepted_cost_usd",
+)
 
 # Columnas viejas: su comportamiento NO debe cambiar (siguen sin acotar).
 _COLUMNAS_VIEJAS_SIN_ACOTAR = (
@@ -182,7 +186,7 @@ class CarreraDeVisibleLlamaAlDriftCheckTest(unittest.IsolatedAsyncioTestCase):
     _DDL_VISIBLE = ("ALTER TABLE jacobs_pipelines ADD COLUMN "
                      "visible TINYINT(1) GENERATED ALWAYS AS "
                      "(status NOT IN ('discarded','hidden') "
-                     "AND owner_ack_at IS NOT NULL) VIRTUAL, "
+                     "AND owner_ack_at IS NOT NULL AND execution_contract = 'CLASSIC') VIRTUAL, "
                      "ALGORITHM=INSTANT")
 
     async def test_otro_proceso_creo_la_misma_expresion_no_es_fallo(self):
@@ -332,7 +336,7 @@ class NormalizarExpresionGeneradaTest(unittest.TestCase):
         # SHOW/information_schema tal cual se midió contra jax_memory_test:
         # backticks en los identificadores, palabras clave en minúscula,
         # los literales de string sin tocar.
-        devuelta = "`status` not in ('discarded','hidden') and `owner_ack_at` is not null"
+        devuelta = "`status` not in ('discarded','hidden') and `owner_ack_at` is not null and `execution_contract` = 'CLASSIC'"
         self.assertEqual(
             store._normalizar_expresion_generada(devuelta),
             store._normalizar_expresion_generada(store._EXPRESION_VISIBLE),
@@ -344,10 +348,10 @@ class NormalizarExpresionGeneradaTest(unittest.TestCase):
         distinto del que MariaDB termina guardando -- normalizar tiene que
         absorber eso, no sólo lo que ya viene canónico de information_schema."""
         variantes = [
-            "status NOT IN ('discarded','hidden') AND owner_ack_at IS NOT NULL",
-            "status   not in  ('discarded','hidden')    and owner_ack_at is not null",
-            "STATUS NOT IN ('discarded','hidden') AND OWNER_ACK_AT IS NOT NULL",
-            "\n  status NOT IN ('discarded','hidden')\n  AND owner_ack_at IS NOT NULL  \n",
+            "status NOT IN ('discarded','hidden') AND owner_ack_at IS NOT NULL AND execution_contract = 'CLASSIC'",
+            "status   not in  ('discarded','hidden')    and owner_ack_at is not null and execution_contract = 'classic'",
+            "STATUS NOT IN ('discarded','hidden') AND OWNER_ACK_AT IS NOT NULL AND EXECUTION_CONTRACT = 'CLASSIC'",
+            "\n  status NOT IN ('discarded','hidden')\n  AND owner_ack_at IS NOT NULL AND execution_contract = 'CLASSIC'  \n",
         ]
         esperada = store._normalizar_expresion_generada(store._EXPRESION_VISIBLE)
         for variante in variantes:

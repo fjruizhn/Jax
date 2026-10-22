@@ -1,0 +1,77 @@
+# OP343 / OP345 · Office namespace · Codex · 2026-10-20
+
+2026-10-21 · HISTORIA / reanudación por Codex autorizada expresamente por Fernando. HEAD52d54dc1 limpio, revisión independiente Sol jax_direct_audit sobre4B1 en curso; paquete review-19a18f56..52d54dc1.diff creado. No ejecución Office habilitada. Restan4B2 preflight/sonda y4C executor/callbacks antes del par JXP. Harness efímero perdido con reinicio, se reconstruye privado en loopback33991. No servicios ni datos productivos modificados.
+
+Task4B1 round1: SolRECHAZADO52d54dc1 con seis hallazgos; corregidos por Tier2 jax_invoker_fix, parent60pruebas0.57s. Metadata modelo proveedor validada pero nunca persiste en catálogoOffice; errores opacos, uso numérico conservado, frontera transporte veraz, assembleOffice denegado. ScopedSol siguiente antes4B2; brief4B2 preparado. Arquitectura final delivery_path confirma no rediseño;4C debe filtrar lectores clásicos pipeline_get/status_snapshots/step/events y CLI antes de habilitar pasosOffice, además de callbacks/recibos ya especificados.
+
+Task4B1round2: scopedSolRECHAZADO3ac9feac por tres residuales (uso parcialmenteválido/getterPoolTimeout/evidenciaconcurrente). MismaTier2corrige; root65pruebas0.58s. Congelado para nuevaauditoríaexacta; no4B2hastaaprobar. JXP3A1SolAPROBADOec09e22, su3A2enimplementaciónseparada.
+
+Round2followup: rootprecheck detectó contadorentrada inválido/salida válida aúnperdido. Tier2_collectbothantesderechazar,35focalizadas; mismaronda2 y revisión3ac9..headconamboscommits, noresetdelcap. Gate4B2pendiente.
+
+Round3testonly: Solaed46adc APROBADO implementación/spec peroRECHAZADOevidencia. Concurrentebarrerareal emitía solohttpx, no seisloggers comoafirmabainforme. Se corrigióafirmación yprueba emite6desdeamboscontextos, verificamessage/args/tracebackformateado, Classicvisible. Root1test0.14s. Auditoríaescopadaexacta antes4B2; no cambiosproductivos.
+
+Task4B1COMPLETE: SolAPROBADO exact56be8bed69800a0565f02293ccbc54e1b14f1d51 spec+quality, sinhallazgosabiertos. Task4B2mismoconstructor enimplementación(preflight/probe/coalescing/health), aúnnogate ni4C. Interfazprevia/rootprivacycorrections preservadas.
+
+Task4B2congelado:3módulos+regresiónpropia,111pruebasenharnessaislado. Rootprecheck cerrórawprobeusage/metadata yramaserrordetalladas. Reporteverificadoendocs/superpowers/reviews/2026-10-21-office-probe-policy.md; exactSHAauditsiguienteantes4C. NoDB/proveedor/prod; JXP3A2esquemaaúnenprecheckseparado.
+
+Fernando autorizó iniciar desarrollos. Rama propia codex/office-namespace-20261020, base98d42f2a; JXP par en codex/virtual-office-20261020. Marca c3d2c999 publicada.
+
+Spec/plan docs/superpowers/{specs,plans}/2026-10-20-office-namespace.md. Sol resolvió usar autoridad global SOLO de Office en JXP, no GLOBAL_FULL_ACCESS para Axioma clásico/Faro. Este repo implementa namespace y creación autorizada atómica, sin habilitar API ni clientes por sí solo.
+
+VERDAD OPERACIONAL: implementación Tier2 verificada por raíz: 50 pruebas enfocadas pasan, incluidas 3 reales MariaDB12.3.3 aislada33991. Namespace CLASSIC en consumidores y creación Office transaccional, idempotencia con actor y reintentos acotados. Harness CI=true solo selecciona DB desechable; sin GITHUB_ACTIONS ni override productivo. Pendiente inmediato: revisión Sol sobre SHA exacto; no consumir API nueva antes del gate. No tocar producción ni otros worktrees. Siguiente lectura: cat docs/superpowers/plans/2026-10-20-office-namespace.md.
+
+Fixround1: raíz58passed67warnings0.43s; LASMANOSCLASSIC, downgradeguard y pruebasreales ampliadas. Evidencia docs/superpowers/reviews/2026-10-20-office-namespace-evidence.md. Dictamen anterior RECHAZADO28c1cb3e; corrección requiere scopedrereview exactSHA.
+
+2026-10-20 · Task2 marker de compatibilidad namespace `office-namespace.1` añadido sin cambiar autoridad. Raíz12pruebasnamespace/inputvalidation0.11s; dictamen independiente pendiente antes de consumir desde JXP. Fuente: prueba y diff local, Codex.
+
+2026-10-20 · Task3 adaptermembership misma transacción diseñado antes de invitacionesJXP, contratooffice-membership.md yplanTask3. Separaprotocolo de creación; grantrolfijoOffice/revokepermite limpieza dormant actualautorizada; marcadorprevistooffice-namespace.2. Todavía sinimplementación. Raízdecidió trasarquitecturaSol office_workflow_contract. Preservarclásico/LASMANOS yrollbackconOfficehistoria.
+
+Task3membership congelada: adaptergrant/revoke caller-ownedtransaction, fixedroles, durableidempotency/replaycurrentauth and truthfulcapabilityprovenance; freshTier2completedrealrace/rollback/replaymatrix. Raíz67passed0.84s en33991. Fuente reviews/2026-10-20-office-membership-evidence.md. No consumir office-namespace.2 hasta dictamenSol exactSHA. Deadlock1213retryable requiere retrytransactioncallerconmismakey, nosilentloop.
+
+Task3fixround1 frozeconsumptionbinding/elevatedrolerevoke/truthfulcreated_by afterRECHAZADO5f757ef6. Root68passed0.73s19warnings; source reviewsoffice-membership-round1. ExactSHAreviewnext, .2stillnotconsumableuntilgate. AGENTSlateststamp e02ae9864475f57b8c242140c262c700ac030ad3 received; verify-sourcebeforeintegrationstillrequired.
+
+Task3fixround2final: linkedresultCHECKv4 withSQLNULLclosedpreflight+constraint; canonicalUUIDbeforecallback/digest/SQL; strictNoneonlyexecutiondefault. Root72passed0.77s19warnings. ExactSHAreviewnext; no .2consumptionuntilclean. Source office-membership-round2.
+
+CoreTask3 APROBADO Sol exactaeb7278de923ba3417e52e13ec77d01d8bfcd879,72testsindependent; .2consumerTask2JXPnotified. NoOfficeidentities/invitesenabled. CoreJacobsopaqueadapterplanningnewTask4 stillnotimplemented.
+
+CoreTask4Jacobs architecture persisted office-execution.md after Solanalysis + rootread actualproviderGoogletools/defaultrawerrorpaths. V1singlecallno-tools directtransport policy/opaqueerrors beforepersistence and receipts-only; deliveryslices4A/4B/4C, staysdisableduntilJXPpair/callbacks/storagecomplete. Next4Apurecontract/schema/atomiccupo notexecutionactivation.
+
+Task4Afoundationsfrozenafterrootprecheck/freshTier2completion: exactOfficeDECIMAL14,6 budget/strictrequests/atomiccupo+deterministicreplay/pool1/strictCHECK/phaseCAS andtruthfulunknownterminal. Root159passed2.18s228warnings4subtests; exactSHAauditnext. OriginalworkercontexttransferredtosameTask4Awithoutreset. No route/provider/receiptwiringenabled;4B/C mandatory. Sourceexecution-foundationsreview.
+
+Task4AfirstSolRECHAZADO565d3d42: deliveryproofbypass, failopenuniqueindexes, arbitraryrejectioncontent, incompletefixedbindingCHECK, classicreaperpickup andnonresumablevisiblemigration. Fixround1/5 closesgenericdeliveryuntil4C, exactindexes/closedcodes/fullbindings/CLASSICreaper/resumableDDLandmatrix. Root170passed2.80s283warnings4subtests; scopedexactSHAreviewnext.
+
+Task4Around1RECHAZADOd4356004 all6priorclosed,newEnumcauseleak. Round2closedmembership/typebeforeDB+fromNone, puretraceback/logsentinels root41focusedpassed0.71s; worker171requiredpassed2.76s. ScopedexactSHAreviewnext, noexecutionenabled.
+
+Task4ACOMPLETE SolAPROBADO79d6197d952a7a5f19d9af93e8a55fc88d151154, allinitial6+newchainleakclosed. Task4Bno-tools/opaqueproviders+probes architectureloggingrefinementpending;4Cstilldisabled.
+
+Task4Barchitectureclosed: sourcepinnedHTTPloggerinventory+ContextVarscopedfilter, no-tools/one-call/opaqueerrorpolicy; bounded4B1directthen4B2probe sameowner. Bindingoffice-runtime-policy.md, beforeimplementationcheckpoint. Task4Aapproved79d6197d. Latestuserconstitutionstamp75a570 replaces18d173, verify-sourcebeforeintegrationpending.
+
+2026-10-20 Task4B1 checkpoint: direct invokers/private policy implemented; root84passed0.68s mocked transports only. Scoped exactSHA review pending; 4B2 preflight/sonda not implemented and no Office execution route enabled.
+
+2026-10-21 · Codex:4B1 APROBADO exact56be8bed porjax_direct_audit.4B2 a9bdf9f0 RECHAZADO porjax_probe_audit (Hyde bypass, unknownusage accounting, forgedpolicy, phase). Fixround1 root151focusedpassed5.96s noDB/provider. Exactsingletonpolicy+Hydeearlydeny+phasePREFLIGHT+usageestimationclosedpaths; scopedexactSHAreviewnext.4Cdisabled. No productwriteruntilreviewresult.
+
+2026-10-21 · Task4B2fixround2 closes knownparser/posttimeout accounting andphasecontext; root154tests5.97s then77changedphase/runtimecases0.23s afterfinalphasefix. ScopedexactSHAreviewnext. Future4C1/4C2 boundaries documented, rawoutputmustremainexactstring notcanonicalJSON. No4Cproductenabled.
+
+2026-10-21 · 4B2fixround3: explicitproviderusageprovenance +3truncationpaths, Officepartialestimateneverbelowknowncounter, ClassicNoneexactlegacybehavior. Root158tests5.97s then43preflightcases0.17s afterClassicfinalfix. ParentCORRECTION: previousb1dbe9dcpackagingomittedmodifiedtests/test_office_runtime_policy.py, so155worktreeclaimwasnot154casecommittedartifact; thischeckpointincludesallownedtestsandcorrectedreport. ScopedexactSHAauditnext. Currentuserconstitution871c68e0b43e4015e18e46132659a152156bc452.
+
+2026-10-21 · Task4C1candidate DTO/exacttextdigest/storeCAS/Classicreadisolation, root80tests0.92s121warnings onNEWisolatedschemajax_memory_test_office_c1 (privatecv-office-c1-run-tests.py, samecontainer33991); JXPjax_memory_test independent. Root5actualEXPLAINindexednofilesort/temp. ExactSHAauditnext; noOfficeexecutionroute/callbackenabledbefore4C2+JXP5. Last4B2gateAPROBADO67ac28ba.
+
+2026-10-21 · C1fixround1candidate: originalconductfix+freshsoleTier2actualfaultmatrix, root107passed1.14s191warnings then1phasegate0.12safterdeadgenericbodyremoval. Dedicateddeliveryvalidatesbindingunderlocks; genericwritesdenied; receiptcanonicalvalidation/terminalgraph/DTOprivacystrict;6transitionfaultrollback andschemaADDambiguity/Officeclassicroutecases. ScopedexactSHAauditnext,4C2notstarted.
+
+2026-10-21 · C1 c7d42b0 spec APROBADO/calidadRECHAZADO por5matrixpendiente, producto hallazgos1-4cerrados. Fix2/5 test-only: office_delivery_matrix_finish añadióDTO/recibos/transiciones pero volvióaentregarparcial; congelado. Fresh c1_remaining_sql_cli únicowriter completafresh/neitherCHECK, invalidexistingrowADD y CLIrealOffice, preservatodoWIPprevio. RulingCodex: office_prepare_step boolFalse es rechazo válido al replayadulterado, noexigereescribircontratoaexcepción; pruebaFalse+sinmutación/evento y replaycorrectoTrue. 4C2 esperagate; delivery_pathSolreadonly prepara mapa de integración sobrecontratocongelado. DB C1 propia jax_memory_test_office_c1, no tocarJXPsharedschema.
+
+C1 COMPLETE: spec+qualityAPROBADO9eb3b747bcaefff863e641c1205f0c8f820b0e8a poroffice_atomic_delivery_audit, hallazgos1-5cerrados. 4C2bindingmap Sol delivery_path aceptado, safeacceptedresponseDTO congelado en callback-boundary y brief detallado. SiguienteúnicoescritorTier2office_callback_runner4c2. GatepairfalsehastaJXP5.
+
+4C2candidatecheckpoint onlyUNAPPROVED: writerreturnedpartialseveraltimes then175passes; root175passed1.41s butmanualsourcefoundmultiplebindingviolations. office_callback_runner4c2frozen; exactSHAadversarialauditnextthenfixround1. Pairgatefalse. Noassumptiontestsprovecontractcompleteness. Filesnewcallback/routes/runner/recoveryunexposedinproduction.
+
+2026-10-22 · Codex · Task4C2 fix1/5 checkpoint: closes initial Sol seven BLOCK/three MAJOR findings using canonical dispatch/preflight, repairable RESERVED snapshots, phase-aware failure and receipt reconciliation, kill-switch, periodic READY recovery and opaque callback errors. Sole Tier2 writer office_runner_fix1 frozen. Root independently repeated exact broad matrix: 330 passed, 316 warnings, 7.57s on disposable C1 schema; git diff --check clean. Realistic reaper EXPLAIN test seeds 350 own terminal Classic rows and three candidates, retains strict status-leading range/index assertions and cleans up; no production query/index change (Sol delivery_path ruling). Tracked evidence: docs/superpowers/reviews/2026-10-22-office-callbacks-fix1-tier2.md. NOT audit-approved or deployed; pair gate remains false until JXP5. Next: exact-SHA Sol spec+quality rereview against initial audit and reconciliation binding; no new generation/consumer capability before clean verdict. Root also delivered GLM OP351 reply and took OP352 platform selector assignment, with Office integration still pending. Current constitution stamp53723287d4df3ea9399daef3cd0e703a65d9a471; final integration must verify-source against current default.
+
+2026-10-22 · Codex · Task4C2 fix2/5 frozen: Sol rejected adf2db70 on strict UTF-8 surrogate leaving DELIVERY_IN_FLIGHT; all ten original defects otherwise closed. Root recorded verdict in callbacks-audit-fix1.md. Tier2 now computes output hash once and maps invalid UTF-8 to stable GENERATION/provider-called failure; handlers reuse hash variable, never recurse into failed hashing. Real parser+store outcomes and real HTTP complete ambiguity matrix added. Root independently337passed331warnings7.71s, diff check clean. Exact-SHA Sol re-review next; no new protocol/schema, pairgate false, no production mutation. This remains same Task4C2 cap, not a reset.
+
+Task4C2 COMPLETE: delivery_path Sol SPEC APROBADO / QUALITY APROBADO exact86858c9b972b5b2f97dace668d7575730495efb2, zeroopenfindings. Separate3C1producerprerequisite nowfrozen: private create_namespaced_project actor-tenant hint→ascending distinct tenantlocks→lockedactor recheck→unchangedauthorizer; drift freshboundedtransaction/stable retry,1020 fresh-replay retry scopedcreateonly. Public .2/signature/authority unchanged. Rootindependent422passed405warnings10.15s including namespace/Classicprojectauthority/337Office suites; realDBbarrierobservesrawerrnos no1213/1205; lower/higher/same traces+1020freshretry. Spec/review docs2026-10-22-office-create-lock-order. Next exactSHA Solaudit beforeJXP3C1projectroute consumes. JXPbootstrap/admincontinuesindependently, no production.
+
+Corecreate prerequisite fix1/5: Sol SPEC APROBADO/QUALITYRECHAZADO67be370e for1020fatalexhaustion/nonDBretry+staledocinvariant. Correctedcreate-only rawdrivercheck, boundedretrythenstaticreintentar, nonDB1020oneattemptnegative, invariantprose. Root424passed405warnings9.37s; exactSHA rereview next, JXP3C1projectcreatecontinuesgated. No changes to approved4C2scope/marker/API/authority.
+
+2026-10-22 · Core create prerequisite COMPLETE: scoped Sol `office_3c_boundary` SPEC+QUALITY APROBADO, zero open findings on exact `3e5566c4baf4d128c5c723ea0c52e39c9b1ad7ab`. Root actual-MariaDB selected C1 matrix 424 passed/405 fixture warnings/9.37 s. Final evidence `docs/superpowers/reviews/2026-10-22-office-create-lock-order-final-verdict.md`. JXP Task 3C1 producer gate OPEN on this SHA; administration consumer still WIP and must receive its own review. No deployment or production mutation.
+
+2026-10-22 · Codex · Índice de lista confidencial global para consulta Office de root, rama de desarrollo. Índice `(authorization_namespace,status,project_id)` en DDL/migración/rollback; EXPLAIN privado con 240 scopes Office y 2000 Classic pasó de 240 filas + filesort a 19 filas sin filesort/temporary. La primera auditoría Sol de df22d4c0 rechazó la validación solo por nombre; la segunda de 818eb4c9 rechazó la omisión de `SUB_PART` que aceptaba índices prefijados. Se corrigió con lectura ordenada de information_schema.STATISTICS y rechazo de índice homónimo de forma distinta o prefijada antes de DDL, también en rollback. Root repitió 61 pruebas C1 con MariaDB aislada y diff limpio. Falta auditoría Sol del SHA nuevo; no consumir como prerequisito aprobado ni tocar producción.

@@ -17,6 +17,7 @@ PROJECT_AUTHORITY_DDL = (
     """CREATE TABLE IF NOT EXISTS jax_project_scope (
       project_id INT NOT NULL,
       tenant_id INT NOT NULL,
+      authorization_namespace VARCHAR(32) NOT NULL DEFAULT 'CLASSIC',
       status VARCHAR(16) NOT NULL,
       created_at DATETIME(6) NOT NULL,
       created_by VARCHAR(128) NOT NULL,
@@ -25,9 +26,12 @@ PROJECT_AUTHORITY_DDL = (
       PRIMARY KEY (project_id),
       UNIQUE KEY uq_jax_project_scope_project_tenant (project_id, tenant_id),
       KEY idx_jax_project_scope_tenant_status (tenant_id, status),
+      KEY idx_jax_project_scope_namespace_tenant_status_project (authorization_namespace, tenant_id, status, project_id),
+      KEY idx_jax_project_scope_namespace_status_project (authorization_namespace, status, project_id),
       CONSTRAINT fk_jax_project_scope_project FOREIGN KEY (project_id) REFERENCES projects(id),
       CONSTRAINT fk_jax_project_scope_tenant FOREIGN KEY (tenant_id) REFERENCES jax_tenants(tenant_id),
-      CONSTRAINT chk_jax_project_scope_status CHECK (status IN ('ACTIVE','DISABLED'))
+      CONSTRAINT chk_jax_project_scope_status CHECK (status IN ('ACTIVE','DISABLED')),
+      CONSTRAINT chk_jax_project_scope_namespace CHECK (authorization_namespace IN ('CLASSIC','OFFICE_CONFIDENTIAL'))
     ) ENGINE=InnoDB""",
     """CREATE TABLE IF NOT EXISTS jax_project_membership (
       membership_id CHAR(36) NOT NULL,
@@ -84,7 +88,14 @@ PROJECT_AUTHORITY_DDL = (
 _CHK_SCOPE_STATUS_V1 = "chk_jax_project_scope_status"
 _CHK_SCOPE_STATUS_V2 = "chk_jax_project_scope_status_v2"
 _CHK_MEMBERSHIP_ORIGIN = "chk_jax_project_membership_origin"
+_CHK_MEMBERSHIP_ORIGIN_V2 = "chk_jax_project_membership_origin_v2"
 _CHK_MEMBERSHIP_PRE_ADMIN = "chk_jax_project_membership_pre_admin"
+_CHK_NAMESPACE_MEMBERSHIP_EXECUTION = "chk_jax_namespace_membership_mutation_execution"
+_CHK_NAMESPACE_MEMBERSHIP_RESULT = "chk_jax_namespace_membership_mutation_result"
+_CHK_NAMESPACE_MEMBERSHIP_RESULT_V2 = "chk_jax_namespace_membership_mutation_result_v2"
+_CHK_NAMESPACE_MEMBERSHIP_RESULT_V3 = "chk_jax_namespace_membership_mutation_result_v3"
+_CHK_NAMESPACE_MEMBERSHIP_RESULT_V4 = "chk_jax_namespace_membership_mutation_result_v4"
+_UQ_NAMESPACE_MEMBERSHIP_INVITATION = "uq_jax_namespace_membership_mutation_invitation"
 _IDX_MEMBERSHIP_USER_LIST = "idx_jax_project_membership_user_list"
 #: Ronda 4, MAJOR MJ-2: `jax_users` is platform-owned (jax-platform's own
 #: migrations create the table), but the admin-set read this module needs
@@ -102,6 +113,12 @@ _IDX_USERS_TENANT_ROLE_STATUS = "idx_jax_users_tenant_role_status"
 #: `idx_jax_users_tenant_role_status`: this module is the only reader that
 #: needs it, and it is guarded so a re-run is a no-op.
 _IDX_USERS_TENANT_EMAIL = "idx_jax_users_tenant_email"
+_CHK_SCOPE_NAMESPACE = "chk_jax_project_scope_namespace"
+_IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT = "idx_jax_project_scope_namespace_tenant_status_project"
+# The Office root list spans tenants.  Its predicates and cursor ordering are
+# namespace/status/project_id, so the tenant-scoped index above cannot serve
+# it without a gap between the equality predicates and the ordered cursor.
+_IDX_SCOPE_NAMESPACE_STATUS_PROJECT = "idx_jax_project_scope_namespace_status_project"
 
 _LEGACY_STATUS_ENUM = "ENUM('planning','active','paused','completed','archived')"
 _LIFECYCLE_STATUS_ENUM = ("ENUM('planning','active','paused','completed','archived','hidden','disabled') "
@@ -161,6 +178,47 @@ async def _index_exists(cursor: Any, table: str, name: str) -> bool:
     return _scalar(await cursor.fetchone()) > 0
 
 
+def _field(row: Any, name: str, position: int) -> Any:
+    return row.get(name) if isinstance(row, dict) else row[position]
+
+
+async def _index_shape(cursor: Any, table: str, name: str,
+                       columns: tuple[str, ...]) -> str:
+    """Return ``absent``, ``exact``, or ``drifted`` for a managed index.
+
+    Index names are part of this migration's schema contract.  Treating a
+    same-name index with another order, prefix length, type, uniqueness, or ignored state as
+    installed would silently defeat a bounded Office list; replacing it would
+    mutate an index this migration does not own.  MariaDB versions before the
+    ``IGNORED`` metadata column are handled without selecting that column.
+    """
+    await cursor.execute(
+        "SELECT COUNT(*) AS n FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA='information_schema' AND TABLE_NAME='STATISTICS' "
+        "AND COLUMN_NAME='IGNORED'")
+    has_ignored_metadata = _scalar(await cursor.fetchone()) > 0
+    select = "COLUMN_NAME,SUB_PART,NON_UNIQUE,INDEX_TYPE"
+    if has_ignored_metadata:
+        select += ",IGNORED"
+    await cursor.execute(
+        "SELECT " + select + " FROM information_schema.STATISTICS "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s "
+        "ORDER BY SEQ_IN_INDEX", (table, name))
+    rows = await cursor.fetchall()
+    if not rows:
+        return "absent"
+    actual_columns = tuple(str(_field(row, "COLUMN_NAME", 0)) for row in rows)
+    btree_non_unique_full_columns = all(
+        _field(row, "SUB_PART", 1) is None
+        and int(_field(row, "NON_UNIQUE", 2)) == 1
+        and str(_field(row, "INDEX_TYPE", 3)).upper() == "BTREE"
+        for row in rows)
+    not_ignored = (not has_ignored_metadata or all(
+        str(_field(row, "IGNORED", 4)).upper() in ("", "0", "NO", "FALSE")
+        for row in rows))
+    return "exact" if actual_columns == columns and btree_non_unique_full_columns and not_ignored else "drifted"
+
+
 async def _column_type(cursor: Any, table: str, column: str) -> str | None:
     await cursor.execute(
         "SELECT COLUMN_TYPE FROM information_schema.COLUMNS "
@@ -188,6 +246,36 @@ async def _apply_project_lifecycle_migration(cursor: Any) -> None:
     is individually guarded so a second call is a no-op (`apply -> apply`
     idempotence, per the plan's migration test).
     """
+    # A managed same-name index with a foreign definition is schema drift, not
+    # an invitation to mutate this database.  Check before this function's
+    # first ALTER so the failed upgrade remains observational.
+    office_list_index = await _index_shape(
+        cursor, "jax_project_scope", _IDX_SCOPE_NAMESPACE_STATUS_PROJECT,
+        ("authorization_namespace", "status", "project_id"))
+    if office_list_index == "drifted":
+        raise RuntimeError(
+            "cannot upgrade project authority: " + _IDX_SCOPE_NAMESPACE_STATUS_PROJECT
+            + " has an unexpected definition")
+    # Namespace comes before the lifecycle CHECK. That ordering matches a fresh
+    # authority schema and keeps apply -> revert -> apply structurally stable.
+    # Adding the NOT NULL column with its default backfills all legacy scopes as
+    # CLASSIC without rewriting their identity or lifecycle data.
+    if await _column_type(cursor, "jax_project_scope", "authorization_namespace") is None:
+        await cursor.execute(
+            "ALTER TABLE jax_project_scope ADD COLUMN authorization_namespace "
+            "VARCHAR(32) NOT NULL DEFAULT 'CLASSIC' AFTER tenant_id")
+    if not await _check_constraint_exists(cursor, _CHK_SCOPE_NAMESPACE):
+        await cursor.execute(
+            "ALTER TABLE jax_project_scope ADD CONSTRAINT " + _CHK_SCOPE_NAMESPACE + " "
+            "CHECK (authorization_namespace IN ('CLASSIC','OFFICE_CONFIDENTIAL'))")
+    if not await _index_exists(cursor, "jax_project_scope", _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT):
+        await cursor.execute(
+            "CREATE INDEX " + _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT + " "
+            "ON jax_project_scope (authorization_namespace, tenant_id, status, project_id)")
+    if office_list_index == "absent":
+        await cursor.execute(
+            "CREATE INDEX " + _IDX_SCOPE_NAMESPACE_STATUS_PROJECT + " "
+            "ON jax_project_scope (authorization_namespace, status, project_id)")
     # 005a/005b: widen the CHECK, then drop the old one -- in that order, so
     # the table is never left without a status CHECK at all.
     if not await _check_constraint_exists(cursor, _CHK_SCOPE_STATUS_V2):
@@ -197,16 +285,33 @@ async def _apply_project_lifecycle_migration(cursor: Any) -> None:
     if await _check_constraint_exists(cursor, _CHK_SCOPE_STATUS_V1):
         await cursor.execute("ALTER TABLE jax_project_scope DROP CONSTRAINT " + _CHK_SCOPE_STATUS_V1)
     # 005c
-    await cursor.execute(
-        "ALTER TABLE jax_project_membership "
-        "ADD COLUMN IF NOT EXISTS grant_origin VARCHAR(16) NOT NULL DEFAULT 'EXPLICIT' AFTER status, "
-        "ADD COLUMN IF NOT EXISTS pre_admin_role VARCHAR(16) NULL AFTER grant_origin, "
-        "ADD COLUMN IF NOT EXISTS pre_admin_status VARCHAR(16) NULL AFTER pre_admin_role")
+    if await _column_type(cursor, "jax_project_membership", "grant_origin") is None:
+        await cursor.execute(
+            "ALTER TABLE jax_project_membership ADD COLUMN grant_origin "
+            "VARCHAR(16) NOT NULL DEFAULT 'EXPLICIT' AFTER status")
+    if await _column_type(cursor, "jax_project_membership", "pre_admin_role") is None:
+        await cursor.execute(
+            "ALTER TABLE jax_project_membership ADD COLUMN pre_admin_role VARCHAR(16) NULL AFTER grant_origin")
+    if await _column_type(cursor, "jax_project_membership", "pre_admin_status") is None:
+        await cursor.execute(
+            "ALTER TABLE jax_project_membership ADD COLUMN pre_admin_status VARCHAR(16) NULL AFTER pre_admin_role")
     # 005d
-    if not await _check_constraint_exists(cursor, _CHK_MEMBERSHIP_ORIGIN):
+    # On an already-upgraded database only V2 exists.  Recreating V1 there
+    # would reject valid OFFICE rows before we get a chance to inspect it.
+    if (not await _check_constraint_exists(cursor, _CHK_MEMBERSHIP_ORIGIN)
+            and not await _check_constraint_exists(cursor, _CHK_MEMBERSHIP_ORIGIN_V2)):
         await cursor.execute(
             "ALTER TABLE jax_project_membership ADD CONSTRAINT " + _CHK_MEMBERSHIP_ORIGIN + " "
             "CHECK (grant_origin IN ('EXPLICIT','CREATOR','TENANT_ADMIN'))")
+    # Office memberships are a distinct provenance.  Add the widening CHECK
+    # before dropping the legacy one so apply never leaves the table without
+    # a provenance constraint and legacy rows need no rewrite.
+    if not await _check_constraint_exists(cursor, _CHK_MEMBERSHIP_ORIGIN_V2):
+        await cursor.execute(
+            "ALTER TABLE jax_project_membership ADD CONSTRAINT " + _CHK_MEMBERSHIP_ORIGIN_V2 + " "
+            "CHECK (grant_origin IN ('EXPLICIT','CREATOR','TENANT_ADMIN','OFFICE'))")
+    if await _check_constraint_exists(cursor, _CHK_MEMBERSHIP_ORIGIN):
+        await cursor.execute("ALTER TABLE jax_project_membership DROP CONSTRAINT " + _CHK_MEMBERSHIP_ORIGIN)
     if not await _check_constraint_exists(cursor, _CHK_MEMBERSHIP_PRE_ADMIN):
         await cursor.execute(
             "ALTER TABLE jax_project_membership ADD CONSTRAINT " + _CHK_MEMBERSHIP_PRE_ADMIN + " CHECK ("
@@ -229,6 +334,99 @@ async def _apply_project_lifecycle_migration(cursor: Any) -> None:
         "REFERENCES jax_project_scope(project_id, tenant_id), "
         "CONSTRAINT fk_jax_project_creation_request_user FOREIGN KEY (user_id) REFERENCES jax_users(user_id)"
         ") ENGINE=InnoDB")
+    await cursor.execute(
+        "CREATE TABLE IF NOT EXISTS jax_namespace_project_creation_request ("
+        "namespace VARCHAR(32) NOT NULL, idempotency_key CHAR(36) NOT NULL, actor_user_id INT NOT NULL, "
+        "target_tenant_id INT NOT NULL, request_digest CHAR(64) NOT NULL, project_id INT NOT NULL, "
+        "created_at DATETIME(6) NOT NULL, PRIMARY KEY (namespace,idempotency_key), "
+        "KEY idx_jax_namespace_project_creation_request_tenant_actor_created "
+        "(target_tenant_id,actor_user_id,created_at), "
+        "CONSTRAINT fk_jax_namespace_project_creation_request_scope FOREIGN KEY (project_id,target_tenant_id) "
+        "REFERENCES jax_project_scope(project_id,tenant_id), "
+        "CONSTRAINT fk_jax_namespace_project_creation_request_actor FOREIGN KEY (actor_user_id) REFERENCES jax_users(user_id)"
+        ") ENGINE=InnoDB")
+    await cursor.execute(
+        "CREATE TABLE IF NOT EXISTS jax_namespace_membership_mutation_request ("
+        "namespace VARCHAR(32) NOT NULL, idempotency_key CHAR(36) NOT NULL, operation VARCHAR(32) NOT NULL, "
+        "actor_user_id INT NOT NULL, target_tenant_id INT NOT NULL, project_id INT NOT NULL, target_user_id INT NOT NULL, "
+        "member_kind VARCHAR(32) NULL, request_digest CHAR(64) NOT NULL, execution_kind VARCHAR(32) NOT NULL DEFAULT 'INTERACTIVE_USER', "
+        "invitation_id CHAR(36) NULL, membership_id CHAR(36) NOT NULL, "
+        "event_id CHAR(36) NOT NULL, project_role VARCHAR(16) NOT NULL, status VARCHAR(16) NOT NULL, changed TINYINT(1) NOT NULL, "
+        "created_at DATETIME(6) NOT NULL, PRIMARY KEY (namespace,idempotency_key), "
+        "KEY idx_jax_namespace_membership_mutation_target (target_tenant_id,project_id,target_user_id,created_at), "
+        "CONSTRAINT fk_jax_namespace_membership_mutation_scope FOREIGN KEY (project_id,target_tenant_id) "
+        "REFERENCES jax_project_scope(project_id,tenant_id), "
+        "CONSTRAINT fk_jax_namespace_membership_mutation_actor FOREIGN KEY (actor_user_id) REFERENCES jax_users(user_id), "
+        "CONSTRAINT fk_jax_namespace_membership_mutation_target_user FOREIGN KEY (target_user_id) REFERENCES jax_users(user_id), "
+        "CONSTRAINT fk_jax_namespace_membership_mutation_membership FOREIGN KEY (membership_id) "
+        "REFERENCES jax_project_membership(membership_id), "
+        "CONSTRAINT fk_jax_namespace_membership_mutation_event FOREIGN KEY (event_id) "
+        "REFERENCES jax_project_membership_event(event_id), "
+        "CONSTRAINT chk_jax_namespace_membership_mutation_operation CHECK "
+        "(operation IN ('GRANT_OFFICE_MEMBER','REVOKE_OFFICE_MEMBER')), "
+        "CONSTRAINT chk_jax_namespace_membership_mutation_kind CHECK "
+        "((operation='GRANT_OFFICE_MEMBER' AND member_kind IN ('INTERNAL','EXTERNAL_CLIENT')) OR "
+        "(operation='REVOKE_OFFICE_MEMBER' AND member_kind IS NULL)), "
+        "CONSTRAINT chk_jax_namespace_membership_mutation_execution CHECK "
+        "((execution_kind='INTERACTIVE_USER' AND invitation_id IS NULL) OR "
+        "(execution_kind='INVITATION_ACCEPTANCE' AND invitation_id IS NOT NULL)), "
+        "CONSTRAINT chk_jax_namespace_membership_mutation_result_v4 CHECK ("
+        "((operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='INTERNAL' AND project_role='CONTRIBUTOR' AND status='ACTIVE') OR "
+        "(operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='EXTERNAL_CLIENT' AND project_role='VIEWER' AND status='ACTIVE') OR "
+        "(operation='REVOKE_OFFICE_MEMBER' AND member_kind IS NULL AND project_role IN ('VIEWER','CONTRIBUTOR','REVIEWER','OWNER') AND status='REVOKED')) "
+        "AND changed=1)"
+        ") ENGINE=InnoDB")
+    if await _column_type(cursor, "jax_namespace_membership_mutation_request", "execution_kind") is None:
+        await cursor.execute(
+            "ALTER TABLE jax_namespace_membership_mutation_request ADD COLUMN execution_kind "
+            "VARCHAR(32) NOT NULL DEFAULT 'INTERACTIVE_USER' AFTER request_digest")
+    if await _column_type(cursor, "jax_namespace_membership_mutation_request", "invitation_id") is None:
+        await cursor.execute(
+            "ALTER TABLE jax_namespace_membership_mutation_request ADD COLUMN invitation_id CHAR(36) NULL "
+            "AFTER execution_kind")
+    if not await _check_constraint_exists(cursor, _CHK_NAMESPACE_MEMBERSHIP_EXECUTION):
+        await cursor.execute(
+            "ALTER TABLE jax_namespace_membership_mutation_request ADD CONSTRAINT "
+            + _CHK_NAMESPACE_MEMBERSHIP_EXECUTION + " CHECK "
+            "((execution_kind='INTERACTIVE_USER' AND invitation_id IS NULL) OR "
+            "(execution_kind='INVITATION_ACCEPTANCE' AND invitation_id IS NOT NULL))")
+    # A grant's fixed kind/role/status tuple and a revoke's recorded historic
+    # role are one linked invariant.  Existing impossible records indicate a
+    # prior contract breach; stop before DDL rather than rewriting evidence.
+    if not await _check_constraint_exists(cursor, _CHK_NAMESPACE_MEMBERSHIP_RESULT_V4):
+        await cursor.execute(
+            "SELECT 1 FROM jax_namespace_membership_mutation_request WHERE COALESCE(("
+            "(operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='INTERNAL' AND project_role='CONTRIBUTOR' AND status='ACTIVE' AND changed=1) OR "
+            "(operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='EXTERNAL_CLIENT' AND project_role='VIEWER' AND status='ACTIVE' AND changed=1) OR "
+            "(operation='REVOKE_OFFICE_MEMBER' AND member_kind IS NULL AND project_role IN ('VIEWER','CONTRIBUTOR','REVIEWER','OWNER') AND status='REVOKED' AND changed=1)"
+            "),FALSE)=FALSE LIMIT 1")
+        if await cursor.fetchone() is not None:
+            raise RuntimeError("cannot upgrade membership mutation requests: impossible operation result")
+        await cursor.execute(
+            "ALTER TABLE jax_namespace_membership_mutation_request ADD CONSTRAINT "
+            + _CHK_NAMESPACE_MEMBERSHIP_RESULT_V4 + " CHECK ("
+            "((operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='INTERNAL' AND project_role='CONTRIBUTOR' AND status='ACTIVE') OR "
+            "(operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='EXTERNAL_CLIENT' AND project_role='VIEWER' AND status='ACTIVE') OR "
+            "(operation='REVOKE_OFFICE_MEMBER' AND member_kind IS NULL AND project_role IN ('VIEWER','CONTRIBUTOR','REVIEWER','OWNER') AND status='REVOKED')) "
+            "AND changed=1)")
+    for name in (_CHK_NAMESPACE_MEMBERSHIP_RESULT, _CHK_NAMESPACE_MEMBERSHIP_RESULT_V2,
+                 _CHK_NAMESPACE_MEMBERSHIP_RESULT_V3):
+        if await _check_constraint_exists(cursor, name):
+            await cursor.execute(
+                "ALTER TABLE jax_namespace_membership_mutation_request DROP CONSTRAINT " + name)
+    # One invitation capability has exactly one durable consumption.  Check
+    # old data before installing the unique key: a conflicting upgrade stops
+    # closed and preserves the historical rows for human repair.
+    if not await _index_exists(cursor, "jax_namespace_membership_mutation_request", _UQ_NAMESPACE_MEMBERSHIP_INVITATION):
+        await cursor.execute(
+            "SELECT namespace,invitation_id,COUNT(*) AS n "
+            "FROM jax_namespace_membership_mutation_request "
+            "WHERE invitation_id IS NOT NULL GROUP BY namespace,invitation_id HAVING COUNT(*)>1")
+        if await cursor.fetchone() is not None:
+            raise RuntimeError("cannot upgrade membership mutation requests: duplicate invitation consumption")
+        await cursor.execute(
+            "CREATE UNIQUE INDEX " + _UQ_NAMESPACE_MEMBERSHIP_INVITATION + " "
+            "ON jax_namespace_membership_mutation_request (namespace,invitation_id)")
     # 005g
     current_type = await _column_type(cursor, "projects", "status")
     if current_type is not None and "hidden" not in current_type:
@@ -256,6 +454,34 @@ async def revert_project_lifecycle_migration(cursor: Any) -> None:
     old constraint rejects. Loses the TENANT_ADMIN/pre_admin_* provenance on
     every membership row -- there is no way back from that once run.
     """
+    # Namespace data belongs to the Office authority contract. A legacy 005
+    # rollback must never erase it or leave its request references dangling.
+    # These checks run before every DDL statement below.
+    if await _column_type(cursor, "jax_project_scope", "authorization_namespace") is not None:
+        await cursor.execute(
+            "SELECT COUNT(*) AS n FROM jax_project_scope WHERE authorization_namespace<>'CLASSIC'")
+        if _scalar(await cursor.fetchone()) > 0:
+            raise RuntimeError(
+                "cannot revert migration 005: non-CLASSIC project scopes require the namespace contract")
+    office_list_index = await _index_shape(
+        cursor, "jax_project_scope", _IDX_SCOPE_NAMESPACE_STATUS_PROJECT,
+        ("authorization_namespace", "status", "project_id"))
+    if office_list_index == "drifted":
+        raise RuntimeError(
+            "cannot revert migration 005: " + _IDX_SCOPE_NAMESPACE_STATUS_PROJECT
+            + " has an unexpected definition")
+    await cursor.execute("SHOW TABLES LIKE 'jax_namespace_project_creation_request'")
+    if await cursor.fetchone() is not None:
+        await cursor.execute("SELECT COUNT(*) AS n FROM jax_namespace_project_creation_request")
+        if _scalar(await cursor.fetchone()) > 0:
+            raise RuntimeError(
+                "cannot revert migration 005: namespace project creation requests require the namespace contract")
+    await cursor.execute("SHOW TABLES LIKE 'jax_namespace_membership_mutation_request'")
+    if await cursor.fetchone() is not None:
+        await cursor.execute("SELECT COUNT(*) AS n FROM jax_namespace_membership_mutation_request WHERE namespace='OFFICE_CONFIDENTIAL'")
+        if _scalar(await cursor.fetchone()) > 0:
+            raise RuntimeError(
+                "cannot revert migration 005: Office membership mutation requests require the namespace contract")
     await cursor.execute(
         "SELECT COUNT(*) AS n FROM jax_project_scope WHERE status IN ('ARCHIVED','HIDDEN')")
     if _scalar(await cursor.fetchone()) > 0:
@@ -284,14 +510,33 @@ async def revert_project_lifecycle_migration(cursor: Any) -> None:
     if await _check_constraint_exists(cursor, _CHK_SCOPE_STATUS_V2):
         await cursor.execute("ALTER TABLE jax_project_scope DROP CONSTRAINT " + _CHK_SCOPE_STATUS_V2)
     await cursor.execute("DROP TABLE IF EXISTS project_documents")
+    await cursor.execute("DROP TABLE IF EXISTS jax_namespace_project_creation_request")
+    await cursor.execute("DROP TABLE IF EXISTS jax_namespace_membership_mutation_request")
     await cursor.execute("DROP TABLE IF EXISTS jax_project_creation_request")
+    if await _index_exists(cursor, "jax_project_scope", _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT):
+        await cursor.execute(
+            "DROP INDEX " + _IDX_SCOPE_NAMESPACE_TENANT_STATUS_PROJECT + " ON jax_project_scope")
+    if office_list_index == "exact":
+        await cursor.execute(
+            "DROP INDEX " + _IDX_SCOPE_NAMESPACE_STATUS_PROJECT + " ON jax_project_scope")
+    if await _check_constraint_exists(cursor, _CHK_SCOPE_NAMESPACE):
+        await cursor.execute("ALTER TABLE jax_project_scope DROP CONSTRAINT " + _CHK_SCOPE_NAMESPACE)
+    if await _column_type(cursor, "jax_project_scope", "authorization_namespace") is not None:
+        await cursor.execute("ALTER TABLE jax_project_scope DROP COLUMN authorization_namespace")
     if await _index_exists(cursor, "jax_project_membership", _IDX_MEMBERSHIP_USER_LIST):
         await cursor.execute("DROP INDEX " + _IDX_MEMBERSHIP_USER_LIST + " ON jax_project_membership")
     if await _index_exists(cursor, "jax_users", _IDX_USERS_TENANT_ROLE_STATUS):
         await cursor.execute("DROP INDEX " + _IDX_USERS_TENANT_ROLE_STATUS + " ON jax_users")
     if await _index_exists(cursor, "jax_users", _IDX_USERS_TENANT_EMAIL):
         await cursor.execute("DROP INDEX " + _IDX_USERS_TENANT_EMAIL + " ON jax_users")
-    for name in (_CHK_MEMBERSHIP_ORIGIN, _CHK_MEMBERSHIP_PRE_ADMIN):
+    # Restore the old provenance CHECK before dropping the Office-aware one.
+    # The early Office-scope/request guards above ensure no OFFICE membership
+    # survives this rollback.
+    if not await _check_constraint_exists(cursor, _CHK_MEMBERSHIP_ORIGIN):
+        await cursor.execute(
+            "ALTER TABLE jax_project_membership ADD CONSTRAINT " + _CHK_MEMBERSHIP_ORIGIN + " "
+            "CHECK (grant_origin IN ('EXPLICIT','CREATOR','TENANT_ADMIN'))")
+    for name in (_CHK_MEMBERSHIP_ORIGIN_V2, _CHK_MEMBERSHIP_PRE_ADMIN):
         if await _check_constraint_exists(cursor, name):
             await cursor.execute("ALTER TABLE jax_project_membership DROP CONSTRAINT " + name)
     await cursor.execute(

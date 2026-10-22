@@ -297,6 +297,8 @@ async def _jacobs_init() -> None:
     # + timer periódico en background para lo que se genera en caliente.
     from jacobs.reaper import reap_orphaned_pipelines, start_reaper_loop
     await reap_orphaned_pipelines()
+    from jacobs.reaper import schedule_ready_office_pipelines
+    await schedule_ready_office_pipelines()
     asyncio.create_task(start_reaper_loop())
 
     # B-3 (2026-09-21, ronda de arreglo del endpoint de Procesamiento de

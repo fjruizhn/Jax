@@ -35,6 +35,7 @@ _SQL_LISTA = (
     "JOIN jax_project_scope s ON s.project_id=m.project_id AND s.tenant_id=m.tenant_id "
     "JOIN projects p ON p.id=m.project_id "
     "WHERE m.tenant_id=%s AND m.user_id=%s AND m.status='ACTIVE' AND s.status=%s "
+    "AND s.authorization_namespace='CLASSIC' "
     "AND (%s IS NULL OR m.project_id < %s) "
     "ORDER BY m.project_id DESC LIMIT %s"
 )
@@ -82,7 +83,8 @@ async def _proyecto_visible(cur: Any, tenant_id: int, user_id: int, project_id: 
         "FROM jax_project_membership m "
         "JOIN jax_project_scope s ON s.project_id=m.project_id AND s.tenant_id=m.tenant_id "
         "JOIN projects p ON p.id=m.project_id "
-        "WHERE m.project_id=%s AND m.tenant_id=%s AND m.user_id=%s AND m.status='ACTIVE'",
+        "WHERE m.project_id=%s AND m.tenant_id=%s AND m.user_id=%s AND m.status='ACTIVE' "
+        "AND s.authorization_namespace='CLASSIC'",
         (project_id, tenant_id, user_id))
     row = await cur.fetchone()
     if not row:

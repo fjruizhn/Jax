@@ -47,6 +47,11 @@ from jacobs.prevuelo_reglas import (
     costo_sin_evaluar,
     evaluar_paso,
 )
+from jacobs.office_runtime import (
+    OfficeCapabilityContext, OfficeErrorPhase, OfficeExecutionError, assert_office_transport,
+    require_office_runtime_policy, validate_office_capability_timeout,
+)
+from jacobs.office_contract import OfficeRejectionCode
 
 # Largo de un uuid real: el contexto de identidad del Motor Registry lo incluye.
 _TASK_ID_DE_MEDIDA = "00000000-0000-0000-0000-000000000000"
@@ -104,8 +109,14 @@ def _despacho(step: Step, catalogo: Catalogo, motor: MotorResuelto | None) -> tu
     ), ""
 
 
-def _chars_de_entrada(step: Step, pasos: list[Step], contexto: dict, d: Despacho) -> int:
+def _chars_de_entrada(step: Step, pasos: list[Step], contexto: dict, d: Despacho, *, office: bool = False) -> int:
     """SÍNCRONA (lee artifacts de disco): se llama por asyncio.to_thread."""
+    if office:
+        prompt = step.input.get("prompt") if type(step.input) is dict else None
+        if type(prompt) is not str:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED,
+                                       phase=OfficeErrorPhase.PREFLIGHT)
+        return len(prompt) + len(d.persona or "")
     peor = dict(contexto)
     for j in range(step.step_index):
         if not peor.get(f"step_{j}_ref"):
@@ -137,27 +148,29 @@ class _Vuelo:
 # resultado, excepción o cancelación (done callback). El dato fresco para
 # después lo guarda facet_health_event. El uso de la sonda compartida queda
 # atribuido a la identidad del primer pre-vuelo que la lanzó.
-_sondas_en_vuelo: dict[str, _Vuelo] = {}
+_sondas_en_vuelo: dict[tuple[str, str], _Vuelo] = {}
 
 
-def _olvidar_vuelo(clave: str, vuelo: _Vuelo) -> None:
+def _olvidar_vuelo(clave: tuple[str, str], vuelo: _Vuelo) -> None:
     if _sondas_en_vuelo.get(clave) is vuelo:
         del _sondas_en_vuelo[clave]
 
 
 async def _sondear_una_vez(clave: str, d: Despacho, user_id: str | None,
-                           tenant_id: str | None):
+                           tenant_id: str | None, *, runtime_policy=None):
     """Se suma al vuelo en curso de `clave` o lanza uno. La sonda corre en su
     propia tarea (shield): cancelar a UNO de los que esperan no la corta para
     los demás; si se cancelan TODOS, se cancela y se espera (no queda tarea
     huérfana). Una excepción de la sonda llega a todos."""
     loop = asyncio.get_running_loop()
-    vuelo = _sondas_en_vuelo.get(clave)
+    key = (clave, "STABLE_CODE_ONLY" if runtime_policy is not None else "CLASSIC_DETAIL")
+    vuelo = _sondas_en_vuelo.get(key)
     if vuelo is None or vuelo.loop is not loop or vuelo.tarea.done():
-        tarea = asyncio.ensure_future(sonda.sondear(clave, d, user_id=user_id, tenant_id=tenant_id))
+        tarea = asyncio.ensure_future(sonda.sondear(
+            clave, d, user_id=user_id, tenant_id=tenant_id, runtime_policy=runtime_policy))
         vuelo = _Vuelo(loop, tarea)
-        _sondas_en_vuelo[clave] = vuelo
-        tarea.add_done_callback(lambda _t, c=clave, v=vuelo: _olvidar_vuelo(c, v))
+        _sondas_en_vuelo[key] = vuelo
+        tarea.add_done_callback(lambda _t, c=key, v=vuelo: _olvidar_vuelo(c, v))
     vuelo.esperando += 1
     try:
         return await asyncio.shield(vuelo.tarea)
@@ -167,13 +180,13 @@ async def _sondear_una_vez(clave: str, d: Despacho, user_id: str | None,
             # Fuera del registro ANTES de cancelar: un pre-vuelo que llega
             # mientras esta cancelación termina lanza su propia sonda en vez
             # de sumarse a una que ya no va a responder.
-            _olvidar_vuelo(clave, vuelo)
+            _olvidar_vuelo(key, vuelo)
             vuelo.tarea.cancel()
             await asyncio.wait({vuelo.tarea})
 
 
 async def _sondear_todas(a_sondear: dict[str, Despacho], claves: list[str],
-                         user_id: str | None, tenant_id: str | None) -> list:
+                         user_id: str | None, tenant_id: str | None, *, runtime_policy=None) -> list:
     """`asyncio.gather` sin `return_exceptions`: la primera sonda que revienta
     (Ruling R13/R16 de Task 7 -- DB caída al resolver, nunca `faceta_caida`)
     tiene que salir de acá tal cual, para que el llamador responda 503
@@ -185,7 +198,7 @@ async def _sondear_todas(a_sondear: dict[str, Despacho], claves: list[str],
     `return_exceptions=True`, así ESA espera no puede volver a reventar)
     antes de relanzar la excepción original."""
     tareas = [
-        asyncio.ensure_future(_sondear_una_vez(c, a_sondear[c], user_id, tenant_id))
+        asyncio.ensure_future(_sondear_una_vez(c, a_sondear[c], user_id, tenant_id, runtime_policy=runtime_policy))
         for c in claves
     ]
     try:
@@ -204,13 +217,18 @@ async def prevuelo(
     pendientes: set[int] | None = None,
     user_id: str | None = None,
     tenant_id: str | None = None,
+    runtime_policy=None,
 ) -> Veredicto:
+    if runtime_policy is not None:
+        runtime_policy = require_office_runtime_policy(runtime_policy, phase=OfficeErrorPhase.PREFLIGHT)
     por_indice = {s.step_index: s for s in pasos}
     indices = sorted(por_indice) if pendientes is None else sorted(pendientes)
 
     costos: list[CostoPaso] = []
     evaluables: list[Step] = []
     for i in indices:
+        if runtime_policy is not None and (por_indice[i].capability == "assemble" or por_indice[i].facet == "hyde"):
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED, phase=OfficeErrorPhase.PREFLIGHT)
         corto = costo_sin_evaluar(por_indice[i])
         if corto is None:
             evaluables.append(por_indice[i])
@@ -239,13 +257,25 @@ async def prevuelo(
     despachables: dict[int, Despacho] = {}
     for step in evaluables:
         d, detalle = _despacho(step, catalogo, motores.get(step.step_index))
-        chars = 0 if d is None else await asyncio.to_thread(_chars_de_entrada, step, pasos, contexto, d)
+        if runtime_policy is not None:
+            if d is None or d.via_motor:
+                raise OfficeExecutionError(
+                    OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED,
+                    phase=OfficeErrorPhase.PREFLIGHT,
+                )
+            assert_office_transport(runtime_policy, d.transporte, phase=OfficeErrorPhase.PREFLIGHT)
+            await validate_office_capability_timeout(
+                OfficeCapabilityContext(step.capability), step.timeout_seconds,
+                phase=OfficeErrorPhase.PREFLIGHT)
+        chars = 0 if d is None else await asyncio.to_thread(
+            _chars_de_entrada, step, pasos, contexto, d, office=runtime_policy is not None)
         propias, costo = evaluar_paso(
             step.step_index, step.facet, d,
             min_output_tokens=catalogo.min_output_tokens.get(step.capability, 0),
             credencial_activa=d is not None and d.provider_id in catalogo.proveedores_con_credencial,
             chars_entrada=chars, chars_por_token=chars_por_token,
             max_iteraciones=max_iteraciones, detalle_inexistente=detalle,
+            runtime_policy=runtime_policy,
         )
         violaciones += propias
         costos.append(costo)
@@ -257,7 +287,7 @@ async def prevuelo(
         if salud_de_proveedor(catalogo.salud.get(d.clave_salud), ahora) == "sondear":
             a_sondear.setdefault(d.clave_salud, d)
     claves = sorted(a_sondear)
-    resultados = await _sondear_todas(a_sondear, claves, user_id, tenant_id)
+    resultados = await _sondear_todas(a_sondear, claves, user_id, tenant_id, runtime_policy=runtime_policy)
     caidas = {c: r for c, r in zip(claves, resultados) if not r.ok}
     for i, d in sorted(despachables.items()):
         r = caidas.get(d.clave_salud)
