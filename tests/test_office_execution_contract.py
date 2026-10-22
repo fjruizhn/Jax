@@ -9,7 +9,9 @@ from pydantic import ValidationError
 from jacobs import store
 from jacobs.office_contract import (
     OFFICE_RUNTIME_POLICY, OFFICE_WORK_CONTRACT_VERSION, OfficePhase, OfficeRunRequest, OfficeRuntimePolicy,
-    OfficeCompleteRequest, OfficeMaterializedResponse, OfficeReceipt,
+    OfficeAlreadyCompletedResponse, OfficeCompleteCancelledResponse, OfficeCompleteRequest,
+    OfficeCompleteStoredResponse, OfficeFailRequest, OfficeFailResponse,
+    OfficeMaterializeCancelledResponse, OfficeMaterializedResponse, OfficeReceipt,
     deterministic_correlation_id, deterministic_step_id, office_request_digest, office_utf8_sha256,
 )
 
@@ -137,3 +139,41 @@ def test_callback_dtos_are_strict_and_preserve_opaque_provider_bytes():
     with pytest.raises(ValidationError) as caught:
         OfficeReceipt(receipt_id=str(uuid.uuid4()).upper(), effect_kind="NOTE_CREATED", effect_id="note:1", output_sha256="a" * 64, office_stage_version=1)
     assert "NOTE_CREATED" not in str(caught.value)
+
+
+def test_callback_result_variants_and_failure_input_are_strict_and_private():
+    receipt = {"receipt_id": str(uuid.uuid4()), "effect_kind": "NOTE_CREATED", "effect_id": "note:1", "output_sha256": "a" * 64, "office_stage_version": 1}
+    assert OfficeMaterializeCancelledResponse(outcome="INPUT_STALE", contract_version=OFFICE_WORK_CONTRACT_VERSION)
+    assert OfficeCompleteCancelledResponse(outcome="CANCELLED_REVOKED", contract_version=OFFICE_WORK_CONTRACT_VERSION)
+    assert OfficeCompleteStoredResponse(outcome="STORED", receipt=receipt, contract_version=OFFICE_WORK_CONTRACT_VERSION)
+    assert OfficeAlreadyCompletedResponse(outcome="ALREADY_COMPLETED", receipt=receipt, contract_version=OFFICE_WORK_CONTRACT_VERSION)
+    assert OfficeFailResponse(outcome="OUTCOME_UNKNOWN", contract_version=OFFICE_WORK_CONTRACT_VERSION)
+    for model, values in (
+        (OfficeCompleteStoredResponse, {"outcome": "STORED", "contract_version": OFFICE_WORK_CONTRACT_VERSION}),
+        (OfficeCompleteCancelledResponse, {"outcome": "CANCELLED_REVOKED", "receipt": receipt, "contract_version": OFFICE_WORK_CONTRACT_VERSION}),
+        (OfficeFailResponse, {"outcome": "FAILED", "contract_version": OFFICE_WORK_CONTRACT_VERSION, "code": "leak"}),
+    ):
+        with pytest.raises(ValidationError): model(**values)
+    pid = str(uuid.uuid4())
+    envelope = {"contract_version": OFFICE_WORK_CONTRACT_VERSION, "pipeline_id": pid, "run_epoch": 0,
+                "step_id": deterministic_step_id(pid), "correlation_id": deterministic_correlation_id(pid), "request_sha256": "a" * 64}
+    sentinel = "SENTINEL_PROVIDER_OUTPUT"
+    for bad in (b"bytes", sentinel + "\ud800"):
+        with pytest.raises(ValidationError) as caught:
+            OfficeFailRequest(**envelope, phase="DELIVERY", code="OFFICE_EXECUTION_FAILED", model_invoked=False, output_sha256=bad)
+        assert sentinel not in str(caught.value)
+    with pytest.raises(ValidationError):
+        OfficeFailRequest(**envelope, phase="DELIVERY", code=b"OFFICE_EXECUTION_FAILED", model_invoked=False)
+    with pytest.raises(ValidationError) as caught:
+        OfficeCompleteRequest(**envelope, output_json=sentinel + "\ud800", output_sha256="a" * 64, modelo_real="catalog/model")
+    assert sentinel not in str(caught.value)
+    with pytest.raises(ValidationError) as caught:
+        OfficeMaterializedResponse(outcome="MATERIALIZED", prompt=sentinel + "\ud800", materialization_sha256="a" * 64, binding_version=1, contract_version=OFFICE_WORK_CONTRACT_VERSION)
+    assert sentinel not in str(caught.value)
+
+
+def test_opaque_hashes_are_byte_exact_and_reject_surrogates():
+    values = ['{"a":1}', '{ "a": 1 }', '{"a":1}\n', '{"a":1,"b":2}', '{"b":2,"a":1}', 'not-json']
+    assert len({office_utf8_sha256(value) for value in values}) == len(values)
+    with pytest.raises(ValueError, match="strict UTF-8"):
+        office_utf8_sha256("\ud800")
