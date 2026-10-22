@@ -4,6 +4,10 @@
 
 ### Round2 · partial usage and pre-send provenance
 
+### Explicit evidence correction and round3
+
+The earlier claim that the concurrent barrier exercised all six emitters was incorrect: its initial implementation emitted only httpx; the six-emitter repair test was separate. Sol accepted implementation/spec at aed46adc but rejected that evidence gap. The same real overlap barrier now emits URL/header/prompt/output/error-body sentinels from all six loggers in both Office and Classic tasks, inspects messages/args/formatted exception text, and preserves visible Classic controls. Parent independently ran the targeted case:1passed0.14s. This test-only correction changes no production behavior; scoped exact-SHA review follows.
+
 Parent precheck also required the reverse partial-usage case (input invalid/output valid). The follow-up collects both counters before any rejection, retaining every independently validated value. It is part of this same round2 review range, not a new cap or separate approval. Focused Office tests include both permutations for all three transports plus bool/negative/zero controls.
 
 ScopedSol rejected3ac9feac for valid usage lost when its paired counter is invalid, client getter/PoolTimeout incorrectly marked sent, and incomplete concurrent filter evidence. Tier2 now independently validates counters while preserving any trustworthy value, binds the shared client/post before transport start, and classifies pool wait as known/no-call. The concurrency regression actually overlaps Office and Classic through async Events and exercises all six emitters; a separate real next-call check removes/repairs their filters. Parent independently reran65focused tests in0.58s. Exact-SHA re-review follows; no routes/providers enabled.

@@ -344,13 +344,30 @@ async def test_shared_client_keeps_office_logs_scoped_while_classic_remains_visi
     allow_office = asyncio.Event()
     classic_seen = asyncio.Event()
 
+    private = (
+        "sentinel-office-url", "sentinel-office-header", "sentinel-office-prompt",
+        "sentinel-office-output", "sentinel-office-errorbody",
+    )
+    classic_values = (
+        "classic-visible-url", "classic-visible-header", "classic-visible-prompt",
+        "classic-visible-output", "classic-visible-errorbody",
+    )
+
+    def emit_all(values):
+        for name in runtime._FILTER_LOGGERS:
+            logging.getLogger(name).debug(
+                "url=%s header=%s prompt=%s output=%s",
+                *values[:4], exc_info=RuntimeError(values[4]),
+            )
+
     async def handler(request: httpx.Request) -> httpx.Response:
         if "sentinel-office-url" in str(request.url):
             office_paused.set()
+            emit_all(private)
             await allow_office.wait()
         else:
+            emit_all(classic_values)
             classic_seen.set()
-        logging.getLogger("httpx").debug("request=%s header=%s", str(request.url), request.headers.get("authorization"))
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -373,10 +390,16 @@ async def test_shared_client_keeps_office_logs_scoped_while_classic_remains_visi
         allow_office.set()
         await asyncio.gather(office_task, classic_task)
     await client.aclose()
-    rendered = "\n".join(record.getMessage() for record in caplog.records)
-    assert "sentinel-office-url" not in rendered
-    assert "sentinel-office-header" not in rendered
-    assert "classic-visible.invalid" in rendered
+    formatter = logging.Formatter()
+    rendered = "\n".join(
+        "\n".join((
+            record.getMessage(), repr(record.args),
+            formatter.formatException(record.exc_info) if record.exc_info else "",
+        ))
+        for record in caplog.records
+    )
+    assert all(value not in rendered for value in private)
+    assert all(value in rendered for value in classic_values)
 
 
 @pytest.mark.asyncio
