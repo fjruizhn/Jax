@@ -680,17 +680,18 @@ def test_error_de_parseo_no_muestra_el_valor():
     assert len(errores) == 2
     for h in errores:
         assert "secreto" not in h.motivo
-    assert "JAX_DB_PASSWORD" in errores[0].motivo and "X_API_KEY" in errores[1].motivo
+    assert [h.clave for h in errores] == ["línea 1", "línea 2"]
 
 
 def test_error_de_parseo_no_muestra_un_nombre_que_no_es_identificador():
     """Lo que hay antes del primer `=` en una línea de base64 (cuerpo de un
     valor multilínea) o en `sk-live-…=x` es el secreto, no un nombre."""
     entorno, errores = parsear_env(
-        "  MC4CAQAwBQYDK2VwBCIEIL+q/7ZsecretoNmAa9==\n sk-live-SECRETO=x\n")
-    assert len(errores) == 2
+        "  MC4CAQAwBQYDK2VwBCIEIL+q/7ZsecretoNmAa9==\n sk-live-SECRETO=x\n"
+        "  QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0secreto==\nghp_TOKENsecreto123 = x\n")
+    assert len(errores) == 4
     for h in errores:
-        assert "secreto" not in h.motivo.lower() and "MC4CAQ" not in h.motivo, h.motivo
+        assert "secreto" not in h.motivo.lower() and "MC4CAQ" not in h.motivo and "QUJD" not in h.motivo, h.motivo
 
 
 # --- Ronda 4, MINOR-6: mock puro (corre en CUALQUIER CI, sin sudo/jaxsvc) --

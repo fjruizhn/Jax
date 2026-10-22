@@ -927,12 +927,20 @@ fi
 # Cada linea cambiada sale como «-texto» o «+texto», tambien las vacias o las
 # que empiezan con +/- (con -U0 y '^[+-][^+-]' esas no se contaban). Nada de
 # esto se imprime hasta validar: si el diff trae otra clave, puede ser un secreto.
+# El `; echo` termina la ultima linea de los dos lados: sin eso, un .env sin
+# salto final pega el «-» y el «+» de esa linea en una sola (MINOR-E).
 DIFF_TMP="$(diff --unchanged-line-format= --old-line-format='-%L' --new-line-format='+%L' \
-  <(sudo cat /etc/jax/.env) <(sudo cat /etc/jax/.env.tmp) || true)"
+  <(sudo cat /etc/jax/.env; echo) <(sudo cat /etc/jax/.env.tmp; echo) || true)"
 N_LINEAS_DE_CAMBIO="$(printf '%s' "$DIFF_TMP" | grep -c '' || true)"
 FUERA_DE_LAS_3="$(printf '%s' "$DIFF_TMP" | grep -cvE '^[+-]JAX_(CONFIG_PATH|AUDIT_LOG_PATH|REPO_BASE)=' || true)"
-if [ "$N_LINEAS_DE_CAMBIO" -ne 6 ] || [ "$FUERA_DE_LAS_3" -ne 0 ]; then
-  echo "ABORTAR: el diff tiene $N_LINEAS_DE_CAMBIO lineas de cambio ($FUERA_DE_LAS_3 fuera de las 3 claves); se esperaban exactamente 6, todas de las 3 claves. No se muestra el diff: puede traer secretos."
+# Y un par por clave: exactamente un «-» y un «+» de cada una.
+PARES_MAL=0
+for C in JAX_CONFIG_PATH JAX_AUDIT_LOG_PATH JAX_REPO_BASE; do
+  [ "$(printf '%s' "$DIFF_TMP" | grep -c "^-$C=" || true)" -eq 1 ] || PARES_MAL=$((PARES_MAL + 1))
+  [ "$(printf '%s' "$DIFF_TMP" | grep -c "^+$C=" || true)" -eq 1 ] || PARES_MAL=$((PARES_MAL + 1))
+done
+if [ "$N_LINEAS_DE_CAMBIO" -ne 6 ] || [ "$FUERA_DE_LAS_3" -ne 0 ] || [ "$PARES_MAL" -ne 0 ]; then
+  echo "ABORTAR: el diff tiene $N_LINEAS_DE_CAMBIO lineas de cambio ($FUERA_DE_LAS_3 fuera de las 3 claves, $PARES_MAL pares que no cuadran); se esperaban exactamente 6, un -/+ por clave. No se muestra el diff: puede traer secretos."
   sudo rm -f /etc/jax/.env.tmp
   exit 1
 fi

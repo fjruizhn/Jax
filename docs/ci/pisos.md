@@ -4906,7 +4906,7 @@ Son las pruebas de `las_manos/_server_audit_log_entorno_test.py`: sin `JAX_AUDIT
 
 ## `rutas-de-produccion-fuera-del-checkout-de-trabajo/rutas_de_produccion`
 
-Patrón: `^88 passed, 4 skipped`. Nació en jax#277 y llegó a `ci/pisos.json` el 2026-10-21.
+Patrón: `^90 passed, 4 skipped`. Nació en jax#277 y llegó a `ci/pisos.json` el 2026-10-21.
 Cuenta `tests/test_rutas_de_produccion.py`, `tests/test_rutas_de_produccion_verificador.py` y
 `tests/test_rutas_de_produccion_reversion.py`.
 Las 4 saltadas solo corren en el host de producción de jax (si existe `/srv/jax-prod/jax`):
@@ -4938,3 +4938,7 @@ Las 4 saltadas solo corren en el host de producción de jax (si existe `/srv/jax
   el módulo se salta entero y el piso no cuadra (falla visible, no verde por vacío).
   Local con sudo real: 92 passed. Con el sudo falso: 88 passed y 4 fallidas, que son las 4 que el
   runner salta.
+- 2026-10-21, tercera ronda de jax#277 sobre `2297a5d7`: 88 -> 90 (+2). Una prueba de R4 con un
+  `.env` sin salto de línea final (MINOR-E) y otra que exige `sudo` en todo uso del audit log nuevo
+  en R2, porque el modelo de visibilidad del sandbox solo intercepta `[` y `test`. Local con sudo
+  real: 94 passed. Con el sudo falso realista: 90 passed y 4 fallidas, las 4 que el runner salta.

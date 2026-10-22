@@ -158,18 +158,13 @@ class Hallazgo:
 
 
 def _describir_sin_valor(linea: str) -> str:
-    """Describe una línea del `.env` SIN su valor (2026-10-21, auditoría de
-    jax#277, MINOR-1): el reporte sale por la terminal y, si lo corre un
-    agente, queda en su transcripción -- una línea mal formada puede ser la
-    de una contraseña. Solo el nombre (lo que hay antes del primer `=`,
-    recortado) y el largo total."""
-    nombre = linea.split("=", 1)[0].strip() if "=" in linea else ""
-    # Solo se muestra si es un identificador de shell: lo que hay antes del
-    # primer `=` en una línea de base64 o en `sk-live-…=x` ES el secreto
-    # (re-auditoría de jax#277, MINOR-A).
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", nombre):
-        return f"sin nombre de variable reconocible, {len(linea)} caracteres (contenido omitido)"
-    return f"nombre {nombre!r}, {len(linea)} caracteres (valor omitido)"
+    """Describe una línea del `.env` mal formada SIN nada de su contenido
+    (auditoría de jax#277, MINOR-1 y MINOR-A): el reporte sale por la
+    terminal y, si lo corre un agente, queda en su transcripción. Ni siquiera
+    el «nombre»: en una línea de base64 o en `ghp_…= x`, lo que hay antes del
+    `=` ES el secreto, y un filtro de identificador no lo distingue. Solo el
+    largo; el número de línea ya va en la clave del Hallazgo."""
+    return f"{len(linea)} caracteres (contenido omitido)"
 
 
 def parsear_env(texto: str) -> tuple[dict[str, list[str]], list[Hallazgo]]:

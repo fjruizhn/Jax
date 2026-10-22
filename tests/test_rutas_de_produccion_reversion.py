@@ -239,12 +239,30 @@ def test_r4_sin_una_clave_en_el_vivo_aborta_sin_mostrar_secretos(sb):
     assert "rotada" not in out
 
 
+def test_r4_con_env_sin_salto_final(sb):
+    """MINOR-E: un .env sin salto de línea final no rompe el conteo del diff."""
+    e = sb / "etc-jax/.env"
+    e.write_text(e.read_text().replace("JAX_CLAVE_NUEVA=despues-del-corte\n", "")
+                 .rstrip("\n"))  # la última línea es JAX_REPO_BASE, sin \n
+    rc, out = _correr("R4", sb)
+    assert rc == 0 and "diff OK" in out, out
+    assert e.read_text().endswith("JAX_REPO_BASE=/home/fruiz/jax/repo")
+
+
 # --- estático: nada de «no se ve» leído como «no existe» -------------------------
+# Límite declarado: el modelo de visibilidad solo intercepta `[` y `test`. Un
+# cmp/cat/head sin sudo sobre /var/log/jax/las_manos pasaría aquí y fallaría en
+# el host; por eso la prueba de abajo exige sudo en todo uso de $NEW.
+
+def test_r2_todo_uso_del_audit_nuevo_va_con_sudo():
+    for l in BLOQUES["R2"].splitlines():
+        if "$NEW" in l and not l.lstrip().startswith(("#", "echo", "NEW=")) and "sudo" not in l:
+            pytest.fail(f"uso de $NEW sin sudo: {l}")
 
 @pytest.mark.parametrize("nombre", ["PRE", "R2", "R3", "R4"])
 def test_sin_pruebas_de_existencia_sin_sudo_fuera_de_marcas(nombre):
     malas = [l for l in BLOQUES[nombre].splitlines()
-             if not l.lstrip().startswith("#") and re.search(r"\[ !? ?-[fdes] ", l)
+             if not l.lstrip().startswith("#") and re.search(r"\[\[? !? ?-[a-zA-Z] ", l)
              and "$MARCAS/" not in l and "$CONTENIDO" not in l]
     assert not malas, malas
 
