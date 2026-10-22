@@ -71,10 +71,14 @@ class _CursorContext:
 class Authorizer:
     def __init__(self):
         self.calls = []
+        self.project_ids = []
+        self.call_statement_counts = []
 
     async def authorize_in_transaction(self, cursor, *, actor_user_id, target_tenant_id,
-                                       namespace, operation):
+                                       namespace, operation, project_id=None):
         self.calls.append((cursor, actor_user_id, target_tenant_id, namespace, operation))
+        self.project_ids.append(project_id)
+        self.call_statement_counts.append(len(cursor.calls))
 
 
 class _DuplicateKeyError(Exception):
@@ -160,11 +164,13 @@ async def test_office_metadata_update_locks_and_reauthorizes_in_one_transaction(
     assert store.mutations == 1
     assert authorizer.calls == [(cursor, 7, 4, ProjectNamespace.OFFICE_CONFIDENTIAL,
                                  "UPDATE_OFFICE_PROJECT_METADATA")]
+    assert authorizer.project_ids == [17]
     statements = [sql for sql, _ in cursor.calls]
     assert statements.index("SELECT tenant_id,status FROM jax_tenants WHERE tenant_id=%s FOR UPDATE") < \
         statements.index("SELECT tenant_id,status FROM jax_users WHERE user_id=%s FOR UPDATE") < \
         statements.index("SELECT tenant_id,status,authorization_namespace FROM jax_project_scope WHERE project_id=%s FOR UPDATE") < \
         statements.index("SELECT name,description FROM projects WHERE id=%s FOR UPDATE")
+    assert authorizer.call_statement_counts == [3]
     assert any("UPDATE projects SET name=%s,description=%s" in sql for sql in statements)
     assert any("UPDATE_OFFICE_PROJECT_METADATA" in args for sql, args in cursor.calls
                if "jax_project_membership_event" in sql)

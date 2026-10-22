@@ -16,7 +16,7 @@ from .project_authority import (AlreadyMember, CreatedProject, IdempotencyKeyCon
                                 ProjectAuthorityRetryable, ProjectNotVisible, ProjectRoleInsufficient,
                                 ProjectStateConflict, ReservedProjectIdRange, TargetUserNotEligible,
                                 NamespaceMutationAuthorizer, TenantAdminMembershipProtected,
-                                UpdatedNamespacedProjectMetadata)
+                                NamespaceProjectMetadataAuthorizer, UpdatedNamespacedProjectMetadata)
 
 __all__ = (
     "MemoryAPI", "MemoryEnvelope", "PromptMemoryContext", "ScopeContext", "DesignatedSourceResolver",
@@ -27,5 +27,5 @@ __all__ = (
     "ProjectRoleInsufficient", "ProjectStateConflict", "LastOwnerRequired", "TenantAdminMembershipProtected",
     "AlreadyMember", "MemberNotFound", "TargetUserNotEligible", "IdempotencyKeyConflict",
     "InvalidIdempotencyKey", "ReservedProjectIdRange", "CreatedProject", "NamespaceMutationAuthorizer",
-    "UpdatedNamespacedProjectMetadata",
+    "NamespaceProjectMetadataAuthorizer", "UpdatedNamespacedProjectMetadata",
 )

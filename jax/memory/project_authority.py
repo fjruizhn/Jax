@@ -380,6 +380,19 @@ class NamespaceMutationAuthorizer(Protocol):
                                        operation: str) -> None: ...
 
 
+class NamespaceProjectMetadataAuthorizer(Protocol):
+    """Trusted Office authority adapter for one canonical project.
+
+    Creation has no project id until JAX creates it, so it deliberately keeps
+    the narrower ``NamespaceMutationAuthorizer`` contract.  Metadata mutation
+    must provide the exact target so the Office adapter can reserve and
+    recheck MANAGE_PROJECT authority for that project in this transaction.
+    """
+    async def authorize_in_transaction(self, cursor: Any, *, actor_user_id: int,
+                                       target_tenant_id: int, project_id: int,
+                                       namespace: ProjectNamespace, operation: str) -> None: ...
+
+
 class NamespaceMembershipMutationAuthorizer(Protocol):
     """Trusted JXP adapter for a specific Office membership mutation.
 
@@ -835,7 +848,7 @@ class ProjectAuthorityAdmin:
     async def update_namespaced_project_metadata(
         self, *, actor_user_id: int, target_tenant_id: int, project_id: int,
         namespace: ProjectNamespace, name: str, description: str | None,
-        authorizer: NamespaceMutationAuthorizer,
+        authorizer: NamespaceProjectMetadataAuthorizer,
     ) -> UpdatedNamespacedProjectMetadata:
         """Update metadata for a confidential Office project transactionally.
 
@@ -890,6 +903,14 @@ class ProjectAuthorityAdmin:
                     raise ProjectNotVisible("actor is not active")
                 if int(self._value(actor, "tenant_id", 0)) != hinted_tenant_id:
                     raise ProjectAuthorityRetryable("metadata actor tenant changed; retry")
+                # Office owns the actor/profile authority.  It receives the
+                # exact canonical project id and runs before JAX takes the
+                # scope lock, preserving tenant -> actor/profile -> scope ->
+                # projects order across both modules.
+                await authorizer.authorize_in_transaction(
+                    cur, actor_user_id=actor_user_id, target_tenant_id=target_tenant_id,
+                    project_id=project_id, namespace=namespace,
+                    operation="UPDATE_OFFICE_PROJECT_METADATA")
                 await cur.execute(
                     "SELECT tenant_id,status,authorization_namespace FROM jax_project_scope "
                     "WHERE project_id=%s FOR UPDATE", (project_id,))
@@ -902,9 +923,6 @@ class ProjectAuthorityAdmin:
                     raise ProjectNotVisible("project namespace does not match")
                 if str(self._value(scope, "status", 1) or "").upper() != "ACTIVE":
                     raise ProjectStateConflict("project is not active")
-                await authorizer.authorize_in_transaction(
-                    cur, actor_user_id=actor_user_id, target_tenant_id=target_tenant_id,
-                    namespace=namespace, operation="UPDATE_OFFICE_PROJECT_METADATA")
                 await cur.execute("SELECT name,description FROM projects WHERE id=%s FOR UPDATE", (project_id,))
                 current = await cur.fetchone()
                 if not current:
