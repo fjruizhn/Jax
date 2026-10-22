@@ -11,7 +11,6 @@ to this module documents why 005 does not repeat it).
 """
 from __future__ import annotations
 
-import re
 from typing import Any
 
 PROJECT_AUTHORITY_DDL = (
@@ -147,6 +146,60 @@ _MANAGED_CHECKS = {
     _CHK_NAMESPACE_MEMBERSHIP_RESULT_V4: "((operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='INTERNAL' AND project_role='CONTRIBUTOR' AND status='ACTIVE') OR (operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='EXTERNAL_CLIENT' AND project_role='VIEWER' AND status='ACTIVE') OR (operation='REVOKE_OFFICE_MEMBER' AND member_kind IS NULL AND project_role IN ('VIEWER','CONTRIBUTOR','REVIEWER','OWNER') AND status='REVOKED')) AND changed=1",
 }
 
+
+def _normalize_check_clause(value: Any) -> str:
+    """Normalize MariaDB's formatting without changing SQL string literals.
+
+    ``information_schema`` may add whitespace, identifier quoting, omit
+    redundant grouping parentheses, and add a character-set introducer such
+    as ``_utf8mb4'ACTIVE'``.  Those are display details.  A generic regex is
+    unsafe here: it also rewrites the bytes in a quoted value, so a different
+    authorization value can appear canonical.
+    """
+    text = str(value)
+    normalized: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(text):
+        char = text[index]
+        if quote is not None:
+            normalized.append(char)
+            if char == "\\" and index + 1 < len(text):
+                index += 1
+                normalized.append(text[index])
+            elif char == quote:
+                if index + 1 < len(text) and text[index + 1] == quote:
+                    index += 1
+                    normalized.append(text[index])
+                else:
+                    quote = None
+            index += 1
+            continue
+        if char in ("'", '"'):
+            quote = char
+            normalized.append(char)
+            index += 1
+            continue
+        # INFORMATION_SCHEMA also drops grouping parentheses that do not
+        # change MariaDB's AND/OR precedence.  Ignore that display formatting
+        # only while outside a literal.
+        if char.isspace() or char in "`()":
+            index += 1
+            continue
+        # MariaDB may place a charset introducer immediately before a string
+        # literal.  It is metadata only in that syntactic position; retain it
+        # everywhere else, particularly in a quoted authorization value.
+        if text[index:index + 8].upper() == "_UTF8MB4":
+            next_index = index + 8
+            while next_index < len(text) and text[next_index].isspace():
+                next_index += 1
+            if next_index < len(text) and text[next_index] in ("'", '"'):
+                index = next_index
+                continue
+        normalized.append(char.upper())
+        index += 1
+    return "".join(normalized)
+
 _LEGACY_STATUS_ENUM = "ENUM('planning','active','paused','completed','archived')"
 _LIFECYCLE_STATUS_ENUM = ("ENUM('planning','active','paused','completed','archived','hidden','disabled') "
                           "DEFAULT 'planning'")
@@ -205,8 +258,7 @@ async def _check_constraint_exists(cursor: Any, name: str) -> bool:
         # information_schema (for example ``_utf8mb4'ACTIVE'``); it does not
         # change the CHECK semantics and must not make a fresh schema look
         # drifted.
-        normalize = lambda value: re.sub(r"_UTF8MB4|[\s`]+", "", str(value).upper())
-        if normalize(actual) != normalize(expected):
+        if _normalize_check_clause(actual) != _normalize_check_clause(expected):
             raise RuntimeError(f"cannot migrate project authority: {name} has an unexpected CHECK expression")
     return True
 

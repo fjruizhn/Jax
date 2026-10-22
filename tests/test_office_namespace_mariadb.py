@@ -397,6 +397,20 @@ async def test_migration_rejects_same_name_check_and_unique_index_drift_before_d
                 await apply_project_authority_migration(cur)
             await cur.execute("SHOW CREATE TABLE jax_project_scope")
             assert (await cur.fetchone())["Create Table"] == before
+            # Formatting outside a literal is harmless; changing bytes inside
+            # an authorization value is not.  These all fooled the former
+            # regex normalizer, which stripped whitespace/backticks/charset
+            # tokens without recognizing SQL quotes.
+            for altered_value in (
+                "OFFICE CONFIDENTIAL",
+                "OFFICE`CONFIDENTIAL",
+                "OFFICE_CONFIDENTIAL_utf8mb4",
+            ):
+                await cur.execute("ALTER TABLE jax_project_scope DROP CONSTRAINT chk_jax_project_scope_namespace")
+                await cur.execute("ALTER TABLE jax_project_scope ADD CONSTRAINT chk_jax_project_scope_namespace "
+                                  "CHECK (authorization_namespace IN ('CLASSIC',%s))", (altered_value,))
+                with pytest.raises(RuntimeError, match="unexpected CHECK expression"):
+                    await apply_project_authority_migration(cur)
             await cur.execute("ALTER TABLE jax_project_scope DROP CONSTRAINT chk_jax_project_scope_namespace")
             await cur.execute("ALTER TABLE jax_project_scope ADD CONSTRAINT chk_jax_project_scope_namespace "
                               "CHECK (authorization_namespace IN ('CLASSIC','OFFICE_CONFIDENTIAL'))")

@@ -254,7 +254,7 @@ async def _estado_alcance(pool, project_id: int) -> str | None:
     return str(fila["status"]).upper() if fila else None
 
 
-async def _exigir_alcance_classic_en_transaccion(cursor, project_id: int) -> None:
+async def _exigir_alcance_classic_en_transaccion(cursor, project_id: int, *, require_active: bool = False) -> None:
     """Lock the authoritative scope before this legacy tool changes data or disk.
 
     LACTOVI is a CLASSIC-only migration tool.  A status-only read is not an
@@ -263,13 +263,15 @@ async def _exigir_alcance_classic_en_transaccion(cursor, project_id: int) -> Non
     concurrent namespace change cannot create a classic-document write path.
     """
     await cursor.execute(
-        "SELECT authorization_namespace FROM jax_project_scope WHERE project_id=%s FOR UPDATE",
+        "SELECT authorization_namespace,status FROM jax_project_scope WHERE project_id=%s FOR UPDATE",
         (project_id,))
     fila = await cursor.fetchone()
     namespace = None if fila is None else str(fila["authorization_namespace"]).upper()
     if namespace != ProjectNamespace.CLASSIC.value:
         raise EstadoImpide(
             f"el proyecto {project_id} no pertenece al namespace CLASSIC; LACTOVI no modifica Office")
+    if require_active and str(fila["status"]).upper() != "ACTIVE":
+        raise EstadoImpide(f"el proyecto {project_id} esta {fila['status']}, no ACTIVE; no se registro nada")
 
 
 _INSERT = ("INSERT IGNORE INTO project_documents (project_id,sha256,nombre_original,ruta_entrada,"
@@ -337,7 +339,7 @@ async def _registrar(pool, project_id: int, filas: list[dict], *, exigir_classic
         try:
             if exigir_classic:
                 async with conn.cursor() as cur:
-                    await _exigir_alcance_classic_en_transaccion(cur, project_id)
+                    await _exigir_alcance_classic_en_transaccion(cur, project_id, require_active=True)
             insertadas = await _insertar(conn, project_id, filas)
         except BaseException:
             await conn.rollback()

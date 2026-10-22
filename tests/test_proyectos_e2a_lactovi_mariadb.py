@@ -15,6 +15,7 @@ import importlib.util
 import json
 import os
 import stat
+import threading
 import uuid
 from pathlib import Path
 
@@ -402,6 +403,38 @@ async def test_completar_no_escribe_documentos_en_un_proyecto_office(tmp_path, c
     await _sql("UPDATE jax_project_scope SET authorization_namespace='OFFICE_CONFIDENTIAL' WHERE project_id=%s", (pid,))
     assert await asyncio.to_thread(_completar, Path(resultado["mapa"])) == 1
     assert "namespace CLASSIC" in capsys.readouterr().err
+    assert len(await _filas(pid)) == 0
+
+
+@requiere_servidor
+@asincrono
+async def test_completar_revalida_active_bajo_el_candado_antes_de_insertar(tmp_path, capsys, monkeypatch):
+    """Archiving after the preliminary read cannot race a document write."""
+    dueno = await _dueno()
+    _armar(tmp_path)
+    assert await asyncio.to_thread(_correr, tmp_path, dueno, "--aplicar") == 0
+    resultado = _salida(capsys)
+    pid = resultado["project_id"]
+    await _sql("DELETE FROM project_documents WHERE project_id=%s", (pid,))
+    real_planear = lactovi._planear
+    leyo_estado = threading.Event()
+    continuar = threading.Event()
+
+    def detener_tras_la_lectura(base):
+        plan = real_planear(base)
+        leyo_estado.set()
+        assert continuar.wait(timeout=5)
+        return plan
+
+    monkeypatch.setattr(lactovi, "_planear", detener_tras_la_lectura)
+    tarea = asyncio.create_task(asyncio.to_thread(_completar, Path(resultado["mapa"])))
+    try:
+        assert await asyncio.to_thread(leyo_estado.wait, 5)
+        await _sql("UPDATE jax_project_scope SET status='ARCHIVED' WHERE project_id=%s", (pid,))
+    finally:
+        continuar.set()
+    assert await tarea == 1
+    assert "no ACTIVE" in capsys.readouterr().err
     assert len(await _filas(pid)) == 0
 
 
