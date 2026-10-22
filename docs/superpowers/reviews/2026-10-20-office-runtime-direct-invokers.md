@@ -2,6 +2,10 @@
 
 ## Correction round1 · 2026-10-21 · Codex
 
+### Round2 · partial usage and pre-send provenance
+
+ScopedSol rejected3ac9feac for valid usage lost when its paired counter is invalid, client getter/PoolTimeout incorrectly marked sent, and incomplete concurrent filter evidence. Tier2 now independently validates counters while preserving any trustworthy value, binds the shared client/post before transport start, and classifies pool wait as known/no-call. The concurrency regression actually overlaps Office and Classic through async Events and exercises all six emitters; a separate real next-call check removes/repairs their filters. Parent independently reran65focused tests in0.58s. Exact-SHA re-review follows; no routes/providers enabled.
+
 Independent Sol rejected52d54dc1 for untrusted provider metadata entering catalog/usage, hidden JSON exception context, permissive empty response shapes, incorrect timeout/call provenance, Office assemble bypass and incomplete transport/log/cancellation evidence. A cohesive Tier2 wave validates provider response shape and numeric usage, preserves known usage on stable errors, and never forwards provider-controlled model/version observations to durable catalog helpers for Office. Trusted resolved f.model remains authoritative; Classic observation behavior stays unchanged. Error raising leaves the raw exception handler and clones stable errors without their raw traceback; connect failure is known/no-call, read timeout after transport start is OUTCOME_UNKNOWN. Office assemble denies before work.
 
 Parent independently ran focused runtime policy, truncation, Gemini-header and source compatibility files: **60passed in0.57s**. SharedAsyncClient/MockTransport, true cancellation and filter-failure regressions are included. This is fix evidence pending scoped exact-SHA Sol review;4B2/4C and public execution remain disabled.

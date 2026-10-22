@@ -224,6 +224,41 @@ async def test_office_pre_post_configuration_error_does_not_claim_a_provider_cal
 
 
 @pytest.mark.asyncio
+async def test_office_client_getter_failure_does_not_claim_a_provider_call(monkeypatch):
+    from jacobs import executor
+
+    def broken_client():
+        raise RuntimeError("sentinel-client-getter")
+
+    monkeypatch.setattr(executor, "obtener_cliente_http", broken_client)
+    monkeypatch.setattr(executor, "limite_de_salida", AsyncMock(return_value={"max_tokens": 9}))
+    with pytest.raises(OfficeExecutionError) as raised:
+        await executor._invoke_http_openai_compat(
+            _Facet("http_openai_compat"), "sentinel-prompt", 5, runtime_policy=OFFICE_RUNTIME_POLICY,
+        )
+    assert raised.value.provider_call_made is False
+    assert raised.value.outcome.value == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_office_pool_timeout_before_send_is_known_not_called(monkeypatch):
+    from jacobs import executor
+
+    async def pool_timeout(*args, **kwargs):
+        raise httpx.PoolTimeout("sentinel-pool")
+
+    monkeypatch.setattr(executor, "obtener_cliente_http", lambda: type("C", (), {"post": pool_timeout})())
+    monkeypatch.setattr(executor, "limite_de_salida", AsyncMock(return_value={"max_tokens": 9}))
+    with pytest.raises(OfficeExecutionError) as raised:
+        await executor._invoke_http_openai_compat(
+            _Facet("http_openai_compat"), "sentinel-prompt", 5, runtime_policy=OFFICE_RUNTIME_POLICY,
+        )
+    assert raised.value.code is OfficeRejectionCode.OFFICE_PROVIDER_UNAVAILABLE
+    assert raised.value.provider_call_made is False
+    assert raised.value.outcome.value == "FAILED"
+
+
+@pytest.mark.asyncio
 async def test_office_read_timeout_after_transport_start_is_outcome_unknown(monkeypatch):
     """A read timeout may follow an accepted provider request, so it is not retry-safe."""
     from jacobs import executor
@@ -249,14 +284,19 @@ def test_office_connect_failure_is_a_known_non_delivery_outcome():
     assert error.outcome.value == "FAILED"
 
 
-def test_valid_usage_survives_a_later_office_response_shape_rejection():
+@pytest.mark.parametrize(
+    ("transport", "payload", "expected"),
+    [
+        ("http_openai_compat", {"choices": [], "usage": {"prompt_tokens": 13, "completion_tokens": "bad"}}, (13, 0)),
+        ("ollama", {"message": {}, "prompt_eval_count": 14, "eval_count": "bad"}, (14, 0)),
+        ("http_gemini", {"candidates": [], "usageMetadata": {"promptTokenCount": 15, "candidatesTokenCount": "bad"}}, (15, 0)),
+    ],
+)
+def test_valid_usage_survives_a_later_or_sibling_counter_rejection(transport, payload, expected):
     with pytest.raises(OfficeExecutionError) as raised:
-        runtime.parse_office_provider_response(
-            {"choices": [], "usage": {"prompt_tokens": 13, "completion_tokens": 21}},
-            "http_openai_compat",
-        )
+        runtime.parse_office_provider_response(payload, transport)
     assert raised.value.code is OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID
-    assert (raised.value.tokens_in, raised.value.tokens_out) == (13, 21)
+    assert (raised.value.tokens_in, raised.value.tokens_out) == expected
 
 
 @pytest.mark.asyncio
@@ -279,7 +319,16 @@ async def test_shared_client_keeps_office_logs_scoped_while_classic_remains_visi
     """One real shared AsyncClient serves concurrent Office and Classic calls safely."""
     from jacobs import executor
 
+    office_paused = asyncio.Event()
+    allow_office = asyncio.Event()
+    classic_seen = asyncio.Event()
+
     async def handler(request: httpx.Request) -> httpx.Response:
+        if "sentinel-office-url" in str(request.url):
+            office_paused.set()
+            await allow_office.wait()
+        else:
+            classic_seen.set()
         logging.getLogger("httpx").debug("request=%s header=%s", str(request.url), request.headers.get("authorization"))
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
 
@@ -294,15 +343,45 @@ async def test_shared_client_keeps_office_logs_scoped_while_classic_remains_visi
     classic.base_url = "https://classic-visible.invalid/v1"
     classic.credential = "classic-header"
     with caplog.at_level(logging.DEBUG):
-        await asyncio.gather(
-            executor._invoke_http_openai_compat(office, "sentinel-office-prompt", 5, runtime_policy=OFFICE_RUNTIME_POLICY),
-            executor._invoke_http_openai_compat(classic, "classic-prompt", 5),
-        )
+        office_task = asyncio.create_task(executor._invoke_http_openai_compat(
+            office, "sentinel-office-prompt", 5, runtime_policy=OFFICE_RUNTIME_POLICY,
+        ))
+        await office_paused.wait()
+        classic_task = asyncio.create_task(executor._invoke_http_openai_compat(classic, "classic-prompt", 5))
+        await classic_seen.wait()
+        allow_office.set()
+        await asyncio.gather(office_task, classic_task)
     await client.aclose()
     rendered = "\n".join(record.getMessage() for record in caplog.records)
     assert "sentinel-office-url" not in rendered
     assert "sentinel-office-header" not in rendered
     assert "classic-visible.invalid" in rendered
+
+
+@pytest.mark.asyncio
+async def test_next_office_call_repairs_removed_filters_on_all_emitters(monkeypatch, caplog):
+    from jacobs import executor
+
+    for name in runtime._FILTER_LOGGERS:
+        target = logging.getLogger(name)
+        while runtime._FILTER in target.filters:
+            target.removeFilter(runtime._FILTER)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        for name in runtime._FILTER_LOGGERS:
+            logging.getLogger(name).debug("sentinel-repaired-filter")
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(executor, "obtener_cliente_http", lambda: client)
+    monkeypatch.setattr(executor, "limite_de_salida", AsyncMock(return_value={"max_tokens": 9}))
+    with caplog.at_level(logging.DEBUG):
+        await executor._invoke_http_openai_compat(
+            _Facet("http_openai_compat"), "sentinel-prompt", 5, runtime_policy=OFFICE_RUNTIME_POLICY,
+        )
+    await client.aclose()
+    assert all(runtime._FILTER in logging.getLogger(name).filters for name in runtime._FILTER_LOGGERS)
+    assert "sentinel-repaired-filter" not in "\n".join(record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.asyncio

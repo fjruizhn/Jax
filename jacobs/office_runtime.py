@@ -106,14 +106,14 @@ def _validate_optional_model(value: object, tokens_in: int, tokens_out: int) -> 
         raise _response_invalid(tokens_in, tokens_out)
 
 
-def _usage_value(container: object, key: str) -> int:
+def _usage_value(container: object, key: str, *, tokens_in: int = 0, tokens_out: int = 0) -> int:
     if container is None:
         return 0
     if type(container) is not dict:
-        raise _response_invalid()
+        raise _response_invalid(tokens_in, tokens_out)
     value = container.get(key, 0)
     if type(value) is not int or value < 0 or value > _MAX_USAGE_TOKENS:
-        raise _response_invalid()
+        raise _response_invalid(tokens_in, tokens_out)
     return value
 
 
@@ -123,7 +123,7 @@ def parse_office_provider_response(data: object, transport: str) -> OfficeProvid
         raise _response_invalid()
     if transport == "http_openai_compat":
         tokens_in = _usage_value(data.get("usage"), "prompt_tokens")
-        tokens_out = _usage_value(data.get("usage"), "completion_tokens")
+        tokens_out = _usage_value(data.get("usage"), "completion_tokens", tokens_in=tokens_in)
         choices = data.get("choices")
         if type(choices) is not list or not choices or type(choices[0]) is not dict:
             raise _response_invalid(tokens_in, tokens_out)
@@ -140,7 +140,7 @@ def parse_office_provider_response(data: object, transport: str) -> OfficeProvid
         )
     if transport == "ollama":
         tokens_in = _usage_value(data, "prompt_eval_count")
-        tokens_out = _usage_value(data, "eval_count")
+        tokens_out = _usage_value(data, "eval_count", tokens_in=tokens_in)
         message = data.get("message")
         reason = data.get("done_reason")
         if type(message) is not dict or type(message.get("content")) is not str or (reason is not None and type(reason) is not str):
@@ -151,7 +151,7 @@ def parse_office_provider_response(data: object, transport: str) -> OfficeProvid
         )
     if transport == "http_gemini":
         tokens_in = _usage_value(data.get("usageMetadata"), "promptTokenCount")
-        tokens_out = _usage_value(data.get("usageMetadata"), "candidatesTokenCount")
+        tokens_out = _usage_value(data.get("usageMetadata"), "candidatesTokenCount", tokens_in=tokens_in)
         candidates = data.get("candidates")
         if type(candidates) is not list or not candidates or type(candidates[0]) is not dict:
             raise _response_invalid(tokens_in, tokens_out)
@@ -218,7 +218,7 @@ def map_office_exception(exc: BaseException, *, provider_call_made: bool) -> Off
     if isinstance(exc, OfficeExecutionError):
         return exc
     outcome = OfficeErrorOutcome.FAILED
-    if isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError)):
+    if isinstance(exc, (httpx.PoolTimeout, httpx.ConnectTimeout, httpx.ConnectError)):
         code = OfficeRejectionCode.OFFICE_PROVIDER_UNAVAILABLE
         outcome = OfficeErrorOutcome.FAILED
     elif isinstance(exc, asyncio.TimeoutError) or isinstance(exc, httpx.TimeoutException):
@@ -232,7 +232,7 @@ def map_office_exception(exc: BaseException, *, provider_call_made: bool) -> Off
         code = OfficeRejectionCode.OFFICE_EXECUTION_FAILED
     return OfficeExecutionError(
         code,
-        provider_call_made=False if isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError)) else provider_call_made,
+        provider_call_made=False if isinstance(exc, (httpx.PoolTimeout, httpx.ConnectTimeout, httpx.ConnectError)) else provider_call_made,
         outcome=outcome,
         exception_classname=type(exc).__name__,
     )

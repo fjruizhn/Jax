@@ -4,6 +4,8 @@
 
 Task4B1 round1: SolRECHAZADO52d54dc1 con seis hallazgos; corregidos por Tier2 jax_invoker_fix, parent60pruebas0.57s. Metadata modelo proveedor validada pero nunca persiste en catálogoOffice; errores opacos, uso numérico conservado, frontera transporte veraz, assembleOffice denegado. ScopedSol siguiente antes4B2; brief4B2 preparado. Arquitectura final delivery_path confirma no rediseño;4C debe filtrar lectores clásicos pipeline_get/status_snapshots/step/events y CLI antes de habilitar pasosOffice, además de callbacks/recibos ya especificados.
 
+Task4B1round2: scopedSolRECHAZADO3ac9feac por tres residuales (uso parcialmenteválido/getterPoolTimeout/evidenciaconcurrente). MismaTier2corrige; root65pruebas0.58s. Congelado para nuevaauditoríaexacta; no4B2hastaaprobar. JXP3A1SolAPROBADOec09e22, su3A2enimplementaciónseparada.
+
 Fernando autorizó iniciar desarrollos. Rama propia codex/office-namespace-20261020, base98d42f2a; JXP par en codex/virtual-office-20261020. Marca c3d2c999 publicada.
 
 Spec/plan docs/superpowers/{specs,plans}/2026-10-20-office-namespace.md. Sol resolvió usar autoridad global SOLO de Office en JXP, no GLOBAL_FULL_ACCESS para Axioma clásico/Faro. Este repo implementa namespace y creación autorizada atómica, sin habilitar API ni clientes por sí solo.

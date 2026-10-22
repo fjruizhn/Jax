@@ -515,10 +515,12 @@ async def _invoke_http_gemini_office(
     error: OfficeExecutionError | None = None
     transport_started = False
     resp = None
+    post = None
     try:
+        post = obtener_cliente_http().post
         with office_http_log_scope():
             transport_started = True
-            resp = await obtener_cliente_http().post(
+            resp = await post(
                 url, headers=headers, json=payload, timeout=timeout, follow_redirects=False,
             )
             if resp.status_code != 200:
@@ -604,14 +606,16 @@ async def _invoke_http_openai_compat_office(
     transport_started = False
     payload = None
     resp = None
+    post = None
     try:
         messages = ([{"role": "system", "content": f.persona}] if f.persona else [])
         messages.append({"role": "user", "content": prompt})
         payload = {"model": f.model, "messages": messages, "stream": False,
                    **await limite_de_salida(f.transport, f.provider_id, f.model)}
+        post = obtener_cliente_http().post
         with office_http_log_scope():
             transport_started = True
-            resp = await obtener_cliente_http().post(
+            resp = await post(
                 f"{f.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {f.credential}", "Content-Type": "application/json"},
                 json=payload, timeout=timeout, follow_redirects=False,
@@ -708,12 +712,14 @@ async def _invoke_ollama_office(
     transport_started = False
     payload = None
     resp = None
+    post = None
     try:
         payload = {"model": f.model, "messages": [{"role": "user", "content": prompt}], "stream": False,
                    **await limite_de_salida(f.transport, f.provider_id, f.model)}
+        post = obtener_cliente_http().post
         with office_http_log_scope():
             transport_started = True
-            resp = await obtener_cliente_http().post(
+            resp = await post(
                 OLLAMA_URL, json=payload, timeout=timeout, follow_redirects=False,
             )
             if resp.status_code != 200:
