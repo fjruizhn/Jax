@@ -159,6 +159,27 @@ class OfficeMaterializeCancelledResponse(BaseModel):
     contract_version: Literal["office-work.1"]
 
 
+class OfficeRunResponse(BaseModel):
+    """The only successful/in-progress public Office run representation."""
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    contract_version: Literal["office-work.1"]
+    pipeline_id: str
+    run_epoch: int = Field(ge=0)
+    phase: OfficePhase
+
+    @field_validator("pipeline_id", mode="before")
+    @classmethod
+    def _pipeline_id(cls, value: object) -> str:
+        return _canonical_uuid(value, "pipeline_id")
+
+    @field_validator("run_epoch", mode="before")
+    @classmethod
+    def _strict_epoch(cls, value: object) -> int:
+        if type(value) is not int or value < 0:
+            raise ValueError("run_epoch must be a nonnegative JSON integer")
+        return value
+
+
 class OfficeCompleteRequest(_OfficeEnvelope):
     output_json: str
     output_sha256: str

@@ -50,7 +50,8 @@ from jacobs.office_runtime import (
     stable_office_error,
     validate_office_capability_timeout,
 )
-from jacobs.office_contract import OfficeRejectionCode, OfficeRuntimePolicy
+from jacobs.office_contract import OFFICE_EXECUTION_CONTRACT, OfficePhase, OfficeRejectionCode, OfficeRuntimePolicy, office_utf8_sha256
+from jacobs.office_callbacks import OfficeCallbackError, complete as office_complete, fail as office_fail, materialize as office_materialize
 from policy.execution_control.errors import (
     DirectHydeGovernedExecutionForbiddenError, GovernedExecutionRequiredError,
 )
@@ -1362,6 +1363,83 @@ async def run_pipeline(pipeline: Pipeline) -> None:
         await _correr_pipeline(pipeline)
 
 
+async def _correr_office_pipeline(pipeline: Pipeline) -> None:
+    """The Office runner is deliberately isolated before every Classic write."""
+    snapshot = await store.office_execution_snapshot(pipeline.pipeline_id)
+    if snapshot is None or snapshot.phase is not OfficePhase.READY:
+        return
+    try:
+        materialized = await office_materialize(snapshot, "EXECUTION")
+        if materialized.outcome != "MATERIALIZED":
+            await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                               OfficePhase.READY, OfficeRejectionCode.OFFICE_REVOKED.value,
+                                               OfficePhase.CANCELLED_REVOKED)
+            return
+        if (materialized.materialization_sha256 != snapshot.materialization_sha256
+                or materialized.binding_version != snapshot.binding_version):
+            await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                               OfficePhase.READY, OfficeRejectionCode.OFFICE_INPUT_STALE.value,
+                                               OfficePhase.FAILED)
+            return
+        if not await store.office_claim_delivery(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id):
+            return
+        step = Step(step_id=snapshot.step_id, pipeline_id=snapshot.pipeline_id, step_index=0,
+                    facet=snapshot.facet, capability=snapshot.capability,
+                    timeout_seconds=snapshot.timeout_seconds, trace_id=snapshot.correlation_id)
+        result = await _dispatch_office_step(step, pipeline, materialized.prompt)
+        output = result.get("result")
+        if type(output) is not str:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID,
+                                      provider_call_made=True)
+        response = await office_complete(snapshot, output, str(result.get("model") or step.modelo_real or "unknown"))
+        if response.outcome == "STORED":
+            await store.office_store_receipt(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                             response.receipt, str(result.get("model") or step.modelo_real or "unknown"))
+        else:
+            await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                               OfficePhase.DELIVERY_IN_FLIGHT, OfficeRejectionCode.OFFICE_REVOKED.value,
+                                               OfficePhase.CANCELLED_REVOKED)
+    except OfficeExecutionError as exc:
+        await _office_failure(snapshot, exc.code, exc.provider_call_made,
+                              office_utf8_sha256(output) if 'output' in locals() and type(output) is str else None)
+    except OfficeCallbackError as exc:
+        await _office_failure(snapshot, OfficeRejectionCode.OFFICE_DELIVERY_OUTCOME_UNKNOWN,
+                              True, office_utf8_sha256(output) if 'output' in locals() and type(output) is str else None,
+                              ambiguous=exc.ambiguous)
+    except Exception:
+        await _office_failure(snapshot, OfficeRejectionCode.OFFICE_EXECUTION_FAILED, False, None)
+
+
+async def _office_failure(snapshot, code: OfficeRejectionCode, model_invoked: bool,
+                          output_sha256: str | None, *, ambiguous: bool = False) -> None:
+    terminal = OfficePhase.OUTCOME_UNKNOWN if ambiguous else OfficePhase.FAILED
+    try:
+        outcome = await office_fail(snapshot, "DELIVERY", code, model_invoked, output_sha256)
+        if outcome.outcome == "ALREADY_COMPLETED":
+            await store.office_store_receipt(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                             outcome.receipt, "reconciled")
+            return
+        if outcome.outcome == "CANCELLED_REVOKED":
+            terminal = OfficePhase.CANCELLED_REVOKED
+    except OfficeCallbackError as exc:
+        if exc.ambiguous:
+            terminal = OfficePhase.OUTCOME_UNKNOWN
+    await store.office_finish_terminal(snapshot.pipeline_id, snapshot.run_epoch, snapshot.step_id,
+                                       OfficePhase.DELIVERY_IN_FLIGHT, code.value, terminal)
+
+
+async def _dispatch_office_step(step: Step, pipeline: Pipeline, prompt: str) -> dict:
+    """One direct HTTP generation: no Classic context, tools, queue or artifacts."""
+    f = await resolve_facet(step.facet)
+    step.modelo_real = f.model
+    if f.transport not in {"http_gemini", "http_openai_compat", "ollama"}:
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
+    return await _despachar_transporte_directo(
+        step, pipeline, f, prompt, step.timeout_seconds, runtime_policy=runtime_policy_for_pipeline(pipeline),
+        office_capability_context=OfficeCapabilityContext(step.capability),
+    )
+
+
 async def _correr_pipeline(pipeline: Pipeline) -> None:
     """
     Ejecuta el pipeline por OLAS topológicas. Dentro de cada ola, los steps
@@ -1381,6 +1459,12 @@ async def _correr_pipeline(pipeline: Pipeline) -> None:
     """
     pipeline_id = pipeline.pipeline_id
     epoca = pipeline.run_epoch
+
+    if pipeline.execution_contract == OFFICE_EXECUTION_CONTRACT:
+        await _correr_office_pipeline(pipeline)
+        return
+    if pipeline.execution_contract != "CLASSIC":
+        raise RuntimeError("unknown execution contract")
 
     if pipeline.mode == "dry_run":
         if not await store.pipeline_update_status_si_epoca(

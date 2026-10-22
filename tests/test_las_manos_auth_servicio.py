@@ -344,7 +344,11 @@ def test_jacobs_ya_no_hace_ningun_pedido_http_a_las_manos():
                 destino = ast.unparse(n.args[0]).lower()
                 if any(m in destino for m in ("las_manos", "/motor/", "7777")):
                     hallazgos.append(f"{p.name}:{n.lineno} {ast.unparse(n)[:80]}")
-        if "auth_servicio" in fuente or "encabezado_propio" in fuente:
+        # Office callbacks authenticate to the paired JXP service with the
+        # existing Jacobs identity.  That is a bounded outbound callback, not
+        # a request back into LAS MANOS; all other Jacobs modules remain
+        # forbidden from presenting a LAS MANOS service credential.
+        if p.name != "office_callbacks.py" and ("auth_servicio" in fuente or "encabezado_propio" in fuente):
             hallazgos.append(f"{p.name}: usa la credencial de servicio de LAS MANOS")
     assert hallazgos == []
 

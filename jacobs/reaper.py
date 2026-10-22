@@ -233,6 +233,28 @@ async def reap_orphaned_pipelines() -> list[dict]:
     return reaped
 
 
+_office_tasks: set[asyncio.Task] = set()
+
+
+def _remember_office_task(task: asyncio.Task) -> None:
+    _office_tasks.add(task)
+    task.add_done_callback(_office_tasks.discard)
+
+
+async def schedule_ready_office_pipelines(limit: int = 100) -> int:
+    """Schedule only durable READY Office work while the pair gate is active."""
+    try:
+        from jacobs.office_callbacks import office_callback_config
+        office_callback_config()
+    except Exception:
+        return 0
+    from jacobs.executor import run_pipeline
+    rows = await store.office_ready_pipelines(limit)
+    for pipeline in rows:
+        _remember_office_task(asyncio.create_task(run_pipeline(pipeline)))
+    return len(rows)
+
+
 # ----------------------------------------------------------------
 #  T3 (2026-08-22, auditoria usage_writer) -- reconciliación
 #  motor_jobs.jsonl vs axioma_usage. La única forma de saber que la

@@ -2146,6 +2146,34 @@ async def office_execution_snapshot(pipeline_id: str) -> OfficeExecutionSnapshot
         raise RuntimeError("invalid opaque Office execution snapshot") from exc
 
 
+async def office_pipeline_for_runner(pipeline_id: str) -> Pipeline | None:
+    """Named reader: a runner can see only an exact READY Office row."""
+    async with conexion_del_pool() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT * FROM jacobs_pipelines WHERE pipeline_id=%s AND execution_contract=%s "
+                "AND status='running' AND office_phase=%s",
+                (pipeline_id, OFFICE_EXECUTION_CONTRACT, OfficePhase.READY.value),
+            )
+            row = await cur.fetchone()
+    return _row_to_pipeline(row) if row else None
+
+
+async def office_ready_pipelines(limit: int) -> list[Pipeline]:
+    """Bounded recovery reader; no caller-controlled Office phase exists."""
+    if type(limit) is not int or limit <= 0 or limit > 1000:
+        raise ValueError("invalid Office recovery limit")
+    async with conexion_del_pool() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT * FROM jacobs_pipelines WHERE execution_contract=%s AND status='running' "
+                "AND office_phase=%s ORDER BY updated_at ASC LIMIT %s",
+                (OFFICE_EXECUTION_CONTRACT, OfficePhase.READY.value, limit),
+            )
+            rows = await cur.fetchall()
+    return [_row_to_pipeline(row) for row in rows]
+
+
 async def office_pipeline_by_client_request(tenant_id: int, client_request_id: str) -> OfficePipelineSnapshot | None:
     """Read the idempotency binding by its unique key; no content leaves SQL."""
     async with conexion_del_pool() as conn:

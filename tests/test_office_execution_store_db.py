@@ -95,6 +95,35 @@ def test_office_reservation_replay_conflict_and_epoch_cas_are_real_db():
     asyncio.run(run())
 
 
+def test_ready_office_recovery_reader_uses_phase_index_without_filesort():
+    async def run():
+        await store.init_tables()
+        request = _request()
+        reserved = await cupo.reservar_office_v1(request, limite=10000)
+        assert reserved and reserved.created
+        pid, step_id = reserved.pipeline_id, deterministic_step_id(reserved.pipeline_id)
+        try:
+            assert await store.office_prepare_step(pid, request)
+            assert await store.office_claim_preflight(pid, 0, step_id)
+            assert await store.office_mark_ready(pid, 0, step_id, "b" * 64, 1)
+            rows = await store.office_ready_pipelines(10)
+            assert [row.pipeline_id for row in rows] == [pid]
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "EXPLAIN SELECT * FROM jacobs_pipelines WHERE execution_contract=%s "
+                        "AND status='running' AND office_phase=%s ORDER BY updated_at ASC LIMIT %s",
+                        ("OFFICE_V1", "READY", 10),
+                    )
+                    plan = await cur.fetchone()
+            assert plan[3] != "ALL", plan
+            assert "filesort" not in str(plan[-1]).lower(), plan
+        finally:
+            await _clean([pid])
+            await store.cerrar_pool()
+    asyncio.run(run())
+
+
 def test_office_opaque_delivery_store_is_atomic_and_only_one_claim_wins():
     """Catches a callback path persisting content, splitting receipt/event, or double-delivering."""
     async def run():
