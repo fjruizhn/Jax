@@ -250,7 +250,7 @@ class AuditLog:
         modo: str,
         items: list[dict],
         environment: str = "production",
-        traffic_class: str = "production",
+        traffic_class: str = "unknown",
         test_run_id: str | None = None,
     ) -> None:
         """Un job del Motor Registry afirmó estructura sin respaldo (anti-

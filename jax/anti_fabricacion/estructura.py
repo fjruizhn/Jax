@@ -25,6 +25,22 @@ CORPUS CONFIABLE. Solo texto de persona o del sistema (objetivo, definición de 
 capability). La salida de otro modelo NUNCA respalda: un candidato que solo se ve
 en `previos` (pasos anteriores) es `heredado`, que no es limpio.
 
+LÍMITES DECLARADOS (lo que este detector NO ve; no son olvidos).
+  * Una palabra suelta en prosa, sin backticks y sin barra, no se revisa.
+  * Una ruta absoluta cuya primera componente existe en `/` (`/etc`, `/srv`, `/home`...)
+    se SALTA: `/srv/jax-data/jax-workspace/services/bodegas.py` pasa limpio. Este
+    detector responde por el repo y la app, no por el sistema de archivos.
+  * Los campos de un schema que no figuran en `CANALES_POR_SCHEMA` no se revisan.
+  * systemd y las rutas de jax-platform están fuera de v1 (`fuera_de_alcance`).
+  * `corpus_confiable` solo respalda lo que la persona o el sistema dijeron. En el
+    worker, hoy, eso es el nombre de la capability, sus `forbidden_paths` y
+    `context["objective"]` si viene; `/motor/dispatch` no manda `objective`, así que
+    en la práctica el prompt entero entra como `previos`: un operador que despacha
+    directo y nombra un archivo real en su prompt no lo respalda por eso (lo respalda
+    la whitelist, si existe).
+  * La whitelist de archivos es `git ls-files`: un archivo que existe en disco pero
+    no está versionado cuenta como inexistente.
+
 ESTADOS: limpio / marcado / no_verificable (una fuente opcional cayó para esa
 categoría: visible, no pasa limpio, no acusa) / no_corrio.
 """
