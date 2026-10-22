@@ -10,6 +10,7 @@ import asyncio
 import contextvars
 import importlib.metadata
 import logging
+import re
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -62,6 +63,113 @@ class OfficeExecutionError(RuntimeError):
         self.tokens_out = tokens_out
 
 
+def stable_office_error(
+    error: OfficeExecutionError, *, provider_call_made: bool | None = None,
+) -> OfficeExecutionError:
+    """Copy only stable fields, deliberately dropping traceback and raw frames."""
+    return OfficeExecutionError(
+        error.code,
+        phase=error.phase,
+        outcome=error.outcome,
+        provider_call_made=error.provider_call_made if provider_call_made is None else provider_call_made,
+        exception_classname=error.exception_classname,
+        tokens_in=error.tokens_in,
+        tokens_out=error.tokens_out,
+    )
+
+
+@dataclass(frozen=True)
+class OfficeProviderResponse:
+    """Validated provider data safe for Office helpers and accounting."""
+
+    text: str
+    tokens_in: int
+    tokens_out: int
+    truncated: bool
+
+
+_MODEL_VERSION = re.compile(r"^[A-Za-z0-9._:/-]{1,128}$")
+_MAX_USAGE_TOKENS = 2**63 - 1
+
+
+def _response_invalid(tokens_in: int = 0, tokens_out: int = 0) -> OfficeExecutionError:
+    return OfficeExecutionError(
+        OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID,
+        tokens_in=tokens_in, tokens_out=tokens_out,
+    )
+
+
+def _validate_optional_model(value: object, tokens_in: int, tokens_out: int) -> None:
+    if value is None:
+        return
+    if type(value) is not str or not _MODEL_VERSION.fullmatch(value):
+        raise _response_invalid(tokens_in, tokens_out)
+
+
+def _usage_value(container: object, key: str) -> int:
+    if container is None:
+        return 0
+    if type(container) is not dict:
+        raise _response_invalid()
+    value = container.get(key, 0)
+    if type(value) is not int or value < 0 or value > _MAX_USAGE_TOKENS:
+        raise _response_invalid()
+    return value
+
+
+def parse_office_provider_response(data: object, transport: str) -> OfficeProviderResponse:
+    """Reject malformed provider JSON before it reaches any durable helper."""
+    if type(data) is not dict:
+        raise _response_invalid()
+    if transport == "http_openai_compat":
+        tokens_in = _usage_value(data.get("usage"), "prompt_tokens")
+        tokens_out = _usage_value(data.get("usage"), "completion_tokens")
+        choices = data.get("choices")
+        if type(choices) is not list or not choices or type(choices[0]) is not dict:
+            raise _response_invalid(tokens_in, tokens_out)
+        choice = choices[0]
+        message = choice.get("message")
+        if type(message) is not dict or type(message.get("content")) is not str:
+            raise _response_invalid(tokens_in, tokens_out)
+        reason = choice.get("finish_reason")
+        if reason is not None and type(reason) is not str:
+            raise _response_invalid(tokens_in, tokens_out)
+        _validate_optional_model(data.get("model"), tokens_in, tokens_out)
+        return OfficeProviderResponse(
+            message["content"], tokens_in, tokens_out, reason == "length",
+        )
+    if transport == "ollama":
+        tokens_in = _usage_value(data, "prompt_eval_count")
+        tokens_out = _usage_value(data, "eval_count")
+        message = data.get("message")
+        reason = data.get("done_reason")
+        if type(message) is not dict or type(message.get("content")) is not str or (reason is not None and type(reason) is not str):
+            raise _response_invalid(tokens_in, tokens_out)
+        _validate_optional_model(data.get("model"), tokens_in, tokens_out)
+        return OfficeProviderResponse(
+            message["content"], tokens_in, tokens_out, reason == "length",
+        )
+    if transport == "http_gemini":
+        tokens_in = _usage_value(data.get("usageMetadata"), "promptTokenCount")
+        tokens_out = _usage_value(data.get("usageMetadata"), "candidatesTokenCount")
+        candidates = data.get("candidates")
+        if type(candidates) is not list or not candidates or type(candidates[0]) is not dict:
+            raise _response_invalid(tokens_in, tokens_out)
+        candidate = candidates[0]
+        content = candidate.get("content")
+        parts = content.get("parts") if type(content) is dict else None
+        if type(parts) is not list or not parts or any(type(part) is not dict or type(part.get("text")) is not str for part in parts):
+            raise _response_invalid(tokens_in, tokens_out)
+        reason = candidate.get("finishReason")
+        if reason is not None and type(reason) is not str:
+            raise _response_invalid(tokens_in, tokens_out)
+        _validate_optional_model(data.get("modelVersion"), tokens_in, tokens_out)
+        return OfficeProviderResponse(
+            "".join(part["text"] for part in parts), tokens_in, tokens_out, reason == "MAX_TOKENS",
+        )
+    raise _response_invalid()
+
+
 @dataclass(frozen=True)
 class OfficeCapabilityContext:
     """Internal binding required before an Office direct call is allowed."""
@@ -109,8 +217,13 @@ def map_office_exception(exc: BaseException, *, provider_call_made: bool) -> Off
     """Turn provider failures into code-only errors without retaining cause data."""
     if isinstance(exc, OfficeExecutionError):
         return exc
-    if isinstance(exc, asyncio.TimeoutError) or isinstance(exc, httpx.TimeoutException):
+    outcome = OfficeErrorOutcome.FAILED
+    if isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError)):
+        code = OfficeRejectionCode.OFFICE_PROVIDER_UNAVAILABLE
+        outcome = OfficeErrorOutcome.FAILED
+    elif isinstance(exc, asyncio.TimeoutError) or isinstance(exc, httpx.TimeoutException):
         code = OfficeRejectionCode.OFFICE_PROVIDER_TIMEOUT
+        outcome = OfficeErrorOutcome.OUTCOME_UNKNOWN if provider_call_made else OfficeErrorOutcome.FAILED
     elif isinstance(exc, (httpx.ConnectError, httpx.NetworkError, httpx.RequestError)):
         code = OfficeRejectionCode.OFFICE_PROVIDER_UNAVAILABLE
     elif isinstance(exc, (ValueError, TypeError, KeyError, IndexError)):
@@ -119,7 +232,8 @@ def map_office_exception(exc: BaseException, *, provider_call_made: bool) -> Off
         code = OfficeRejectionCode.OFFICE_EXECUTION_FAILED
     return OfficeExecutionError(
         code,
-        provider_call_made=provider_call_made,
+        provider_call_made=False if isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError)) else provider_call_made,
+        outcome=outcome,
         exception_classname=type(exc).__name__,
     )
 

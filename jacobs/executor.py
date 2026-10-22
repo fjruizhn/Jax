@@ -45,7 +45,9 @@ from jacobs.office_runtime import (
     map_office_exception,
     office_http_log_scope,
     office_http_status_error,
+    parse_office_provider_response,
     runtime_policy_for_pipeline,
+    stable_office_error,
     validate_office_capability_timeout,
 )
 from jacobs.office_contract import OfficeRejectionCode, OfficeRuntimePolicy
@@ -510,32 +512,34 @@ async def _invoke_http_gemini_office(
     url = f"{f.base_url}/models/{f.model}:generateContent"
     headers = {"x-goog-api-key": f.credential}
     payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
+    error: OfficeExecutionError | None = None
+    transport_started = False
+    resp = None
     try:
         with office_http_log_scope():
+            transport_started = True
             resp = await obtener_cliente_http().post(
                 url, headers=headers, json=payload, timeout=timeout, follow_redirects=False,
             )
             if resp.status_code != 200:
                 raise office_http_status_error(resp.status_code)
-            data = resp.json()
-            texto = _texto_o_truncado(data, "gemini")
-            usage = data.get("usageMetadata") or {}
+            response = parse_office_provider_response(resp.json(), "http_gemini")
     except asyncio.CancelledError:
         raise
-    except PasoTruncado as exc:
-        raise OfficeExecutionError(
-            OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED, provider_call_made=True,
-            tokens_in=exc.tokens_in, tokens_out=exc.tokens_out,
-        ) from None
-    except OfficeExecutionError:
-        raise
+    except OfficeExecutionError as exc:
+        error = stable_office_error(exc, provider_call_made=exc.provider_call_made or transport_started)
     except Exception as exc:
-        raise map_office_exception(exc, provider_call_made=True) from None
-    await record_resolved_version_safe(f.key, data.get("modelVersion"))
-    return {"success": True, "facet": f.key, "model": f.model, "result": texto,
+        error = map_office_exception(exc, provider_call_made=transport_started)
+    if error is not None:
+        resp = None
+        payload = None
+        raise error
+    if response.truncated:
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED, provider_call_made=True,
+                                  tokens_in=response.tokens_in, tokens_out=response.tokens_out)
+    return {"success": True, "facet": f.key, "model": f.model, "result": response.text,
             "sources": [], "queries": [], "grounded": False,
-            "tokens_in": usage.get("promptTokenCount", 0),
-            "tokens_out": usage.get("candidatesTokenCount", 0)}
+            "tokens_in": response.tokens_in, "tokens_out": response.tokens_out}
 
 
 async def _invoke_http_openai_compat(
@@ -596,12 +600,17 @@ async def _invoke_http_openai_compat_office(
 ) -> dict:
     assert_office_transport(runtime_policy, f.transport)
     ensure_office_http_log_privacy()
+    error: OfficeExecutionError | None = None
+    transport_started = False
+    payload = None
+    resp = None
     try:
         messages = ([{"role": "system", "content": f.persona}] if f.persona else [])
         messages.append({"role": "user", "content": prompt})
         payload = {"model": f.model, "messages": messages, "stream": False,
                    **await limite_de_salida(f.transport, f.provider_id, f.model)}
         with office_http_log_scope():
+            transport_started = True
             resp = await obtener_cliente_http().post(
                 f"{f.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {f.credential}", "Content-Type": "application/json"},
@@ -609,23 +618,22 @@ async def _invoke_http_openai_compat_office(
             )
             if resp.status_code != 200:
                 raise office_http_status_error(resp.status_code)
-            data = resp.json()
-            texto = _texto_o_truncado(data, "openai_compat")
-            usage = data.get("usage") or {}
+            response = parse_office_provider_response(resp.json(), "http_openai_compat")
     except asyncio.CancelledError:
         raise
-    except PasoTruncado as exc:
-        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED,
-                                  provider_call_made=True, tokens_in=exc.tokens_in,
-                                  tokens_out=exc.tokens_out) from None
-    except OfficeExecutionError:
-        raise
+    except OfficeExecutionError as exc:
+        error = stable_office_error(exc, provider_call_made=exc.provider_call_made or transport_started)
     except Exception as exc:
-        raise map_office_exception(exc, provider_call_made=True) from None
-    await record_resolved_version_safe(f.key, data.get("model"))
-    return {"success": True, "facet": f.key, "model": f.model, "result": texto,
-            "tokens_in": usage.get("prompt_tokens", 0),
-            "tokens_out": usage.get("completion_tokens", 0)}
+        error = map_office_exception(exc, provider_call_made=transport_started)
+    if error is not None:
+        resp = None
+        payload = None
+        raise error
+    if response.truncated:
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED, provider_call_made=True,
+                                  tokens_in=response.tokens_in, tokens_out=response.tokens_out)
+    return {"success": True, "facet": f.key, "model": f.model, "result": response.text,
+            "tokens_in": response.tokens_in, "tokens_out": response.tokens_out}
 
 
 async def _invoke_ollama(
@@ -696,30 +704,36 @@ async def _invoke_ollama_office(
 ) -> dict:
     assert_office_transport(runtime_policy, f.transport)
     ensure_office_http_log_privacy()
+    error: OfficeExecutionError | None = None
+    transport_started = False
+    payload = None
+    resp = None
     try:
         payload = {"model": f.model, "messages": [{"role": "user", "content": prompt}], "stream": False,
                    **await limite_de_salida(f.transport, f.provider_id, f.model)}
         with office_http_log_scope():
+            transport_started = True
             resp = await obtener_cliente_http().post(
                 OLLAMA_URL, json=payload, timeout=timeout, follow_redirects=False,
             )
             if resp.status_code != 200:
                 raise office_http_status_error(resp.status_code)
-            data = resp.json()
-            texto = _texto_o_truncado(data, "ollama")
+            response = parse_office_provider_response(resp.json(), "ollama")
     except asyncio.CancelledError:
         raise
-    except PasoTruncado as exc:
-        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED,
-                                  provider_call_made=True, tokens_in=exc.tokens_in,
-                                  tokens_out=exc.tokens_out) from None
-    except OfficeExecutionError:
-        raise
+    except OfficeExecutionError as exc:
+        error = stable_office_error(exc, provider_call_made=exc.provider_call_made or transport_started)
     except Exception as exc:
-        raise map_office_exception(exc, provider_call_made=True) from None
-    await record_resolved_version_safe(f.key, data.get("model"))
-    return {"success": True, "facet": f.key, "model": f.model, "result": texto,
-            "tokens_in": data.get("prompt_eval_count", 0), "tokens_out": data.get("eval_count", 0)}
+        error = map_office_exception(exc, provider_call_made=transport_started)
+    if error is not None:
+        resp = None
+        payload = None
+        raise error
+    if response.truncated:
+        raise OfficeExecutionError(OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED, provider_call_made=True,
+                                  tokens_in=response.tokens_in, tokens_out=response.tokens_out)
+    return {"success": True, "facet": f.key, "model": f.model, "result": response.text,
+            "tokens_in": response.tokens_in, "tokens_out": response.tokens_out}
 
 
 async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
@@ -953,7 +967,9 @@ async def _despachar_transporte_directo(
         else:
             raise ValueError(f"Transporte directo desconocido: {f.transport}")
     except OfficeExecutionError as exc:
-        if exc.code == OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED:
+        if exc.code == OfficeRejectionCode.OFFICE_OUTPUT_TRUNCATED or (
+            runtime_policy is not None and exc.provider_call_made
+        ):
             await record_direct_usage(
                 pipeline.user_id, pipeline.tenant_id, step.facet,
                 f.provider_id, f.model, exc.tokens_in, exc.tokens_out,
@@ -983,6 +999,8 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     runtime_policy = runtime_policy_for_pipeline(pipeline)
     # Ensamble mecánico: NO pasa por ningún LLM. Concatena los módulos ya generados.
     if step.capability == "assemble":
+        if runtime_policy is not None:
+            raise OfficeExecutionError(OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED)
         return _assemble_mechanical(step, pipeline)
 
     # FASE A §3.4: validación uniforme del contrato ANTES de rutear por facet.

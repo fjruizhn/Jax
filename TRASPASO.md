@@ -1,5 +1,9 @@
 # OP343 / OP345 · Office namespace · Codex · 2026-10-20
 
+2026-10-21 · HISTORIA / reanudación por Codex autorizada expresamente por Fernando. HEAD52d54dc1 limpio, revisión independiente Sol jax_direct_audit sobre4B1 en curso; paquete review-19a18f56..52d54dc1.diff creado. No ejecución Office habilitada. Restan4B2 preflight/sonda y4C executor/callbacks antes del par JXP. Harness efímero perdido con reinicio, se reconstruye privado en loopback33991. No servicios ni datos productivos modificados.
+
+Task4B1 round1: SolRECHAZADO52d54dc1 con seis hallazgos; corregidos por Tier2 jax_invoker_fix, parent60pruebas0.57s. Metadata modelo proveedor validada pero nunca persiste en catálogoOffice; errores opacos, uso numérico conservado, frontera transporte veraz, assembleOffice denegado. ScopedSol siguiente antes4B2; brief4B2 preparado. Arquitectura final delivery_path confirma no rediseño;4C debe filtrar lectores clásicos pipeline_get/status_snapshots/step/events y CLI antes de habilitar pasosOffice, además de callbacks/recibos ya especificados.
+
 Fernando autorizó iniciar desarrollos. Rama propia codex/office-namespace-20261020, base98d42f2a; JXP par en codex/virtual-office-20261020. Marca c3d2c999 publicada.
 
 Spec/plan docs/superpowers/{specs,plans}/2026-10-20-office-namespace.md. Sol resolvió usar autoridad global SOLO de Office en JXP, no GLOBAL_FULL_ACCESS para Axioma clásico/Faro. Este repo implementa namespace y creación autorizada atómica, sin habilitar API ni clientes por sí solo.

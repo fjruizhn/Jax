@@ -58,7 +58,8 @@ async def test_office_direct_payloads_are_tool_free_and_do_not_redirect(monkeypa
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True)
     monkeypatch.setattr(executor, "obtener_cliente_http", lambda: client)
-    monkeypatch.setattr(executor, "record_resolved_version_safe", AsyncMock())
+    resolved = AsyncMock()
+    monkeypatch.setattr(executor, "record_resolved_version_safe", resolved)
     monkeypatch.setattr(executor, "limite_de_salida", AsyncMock(return_value={"max_tokens": 9}))
     facet = _Facet(transport)
 
@@ -71,6 +72,7 @@ async def test_office_direct_payloads_are_tool_free_and_do_not_redirect(monkeypa
     await client.aclose()
 
     assert result["result"] == "output"
+    resolved.assert_not_awaited()
     assert len(seen) == 1
     body = json.loads(seen[0].content)
     assert not ({"tools", "google_search", "tool_choice", "functions", "function_call"} & body.keys())
@@ -98,6 +100,249 @@ async def test_office_provider_error_is_opaque(monkeypatch):
     assert str(exc) == "OFFICE_PROVIDER_REJECTED"
     assert exc.__cause__ is None and exc.__context__ is None
     assert "sentinel" not in repr(exc)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transport", "payload"),
+    [
+        ("http_gemini", {"candidates": [], "modelVersion": "sentinel-private-model"}),
+        ("http_openai_compat", {"choices": [], "model": "sentinel-private-model"}),
+        ("ollama", {"message": {}, "model": "sentinel-private-model"}),
+    ],
+)
+async def test_office_rejects_malformed_response_before_metadata_helpers(monkeypatch, transport, payload):
+    """Provider-controlled fields never reach catalog or usage helpers before shape validation."""
+    from jacobs import executor
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    resolved = AsyncMock()
+    monkeypatch.setattr(executor, "obtener_cliente_http", lambda: client)
+    monkeypatch.setattr(executor, "record_resolved_version_safe", resolved)
+    monkeypatch.setattr(executor, "limite_de_salida", AsyncMock(return_value={"max_tokens": 9}))
+    invoke = {
+        "http_gemini": executor._invoke_http_gemini,
+        "http_openai_compat": executor._invoke_http_openai_compat,
+        "ollama": executor._invoke_ollama,
+    }[transport]
+
+    with pytest.raises(OfficeExecutionError) as raised:
+        await invoke(_Facet(transport), "sentinel-prompt", 5, runtime_policy=OFFICE_RUNTIME_POLICY)
+    await client.aclose()
+
+    assert raised.value.code is OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
+    resolved.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_office_rejects_response_metadata_that_cannot_be_safely_accounted(monkeypatch):
+    """Non-integer usage cannot enter the usage writer or a durable spool."""
+    from jacobs import executor
+
+    payload = {
+        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+        "model": "allowed-model-v1",
+        "usage": {"prompt_tokens": "sentinel-private-usage", "completion_tokens": 1},
+    }
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)))
+    monkeypatch.setattr(executor, "obtener_cliente_http", lambda: client)
+    monkeypatch.setattr(executor, "record_resolved_version_safe", AsyncMock())
+    monkeypatch.setattr(executor, "limite_de_salida", AsyncMock(return_value={"max_tokens": 9}))
+    with pytest.raises(OfficeExecutionError) as raised:
+        await executor._invoke_http_openai_compat(
+            _Facet("http_openai_compat"), "sentinel-prompt", 5, runtime_policy=OFFICE_RUNTIME_POLICY,
+        )
+    await client.aclose()
+    assert raised.value.code is OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID
+    assert "sentinel-private-usage" not in repr(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_office_rejects_invalid_model_metadata_before_catalog_recording(monkeypatch):
+    from jacobs import executor
+
+    payload = {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "model": "not a model"}
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)))
+    resolved = AsyncMock()
+    monkeypatch.setattr(executor, "obtener_cliente_http", lambda: client)
+    monkeypatch.setattr(executor, "record_resolved_version_safe", resolved)
+    monkeypatch.setattr(executor, "limite_de_salida", AsyncMock(return_value={"max_tokens": 9}))
+    with pytest.raises(OfficeExecutionError) as raised:
+        await executor._invoke_http_openai_compat(
+            _Facet("http_openai_compat"), "sentinel-prompt", 5, runtime_policy=OFFICE_RUNTIME_POLICY,
+        )
+    await client.aclose()
+    assert raised.value.code is OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID
+    resolved.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_office_raw_json_exception_has_no_retained_context(monkeypatch):
+    """Mapping after the raw except must not retain JSONDecodeError.doc."""
+    from jacobs import executor
+
+    class BrokenResponse:
+        status_code = 200
+
+        def json(self):
+            raise json.JSONDecodeError("bad", "sentinel-private-body", 0)
+
+    class Client:
+        async def post(self, *args, **kwargs):
+            return BrokenResponse()
+
+    monkeypatch.setattr(executor, "obtener_cliente_http", Client)
+    monkeypatch.setattr(executor, "limite_de_salida", AsyncMock(return_value={"max_tokens": 9}))
+    with pytest.raises(OfficeExecutionError) as raised:
+        await executor._invoke_http_openai_compat(
+            _Facet("http_openai_compat"), "sentinel-prompt", 5, runtime_policy=OFFICE_RUNTIME_POLICY,
+        )
+    assert raised.value.code is OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
+    assert "sentinel-private-body" not in repr(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_office_pre_post_configuration_error_does_not_claim_a_provider_call(monkeypatch):
+    """A local output-limit failure happens before POST and has a known failed outcome."""
+    from jacobs import executor
+
+    post = AsyncMock(side_effect=AssertionError("must not POST"))
+    monkeypatch.setattr(executor, "obtener_cliente_http", lambda: type("C", (), {"post": post})())
+    monkeypatch.setattr(executor, "limite_de_salida", AsyncMock(side_effect=ValueError("sentinel-config")))
+    with pytest.raises(OfficeExecutionError) as raised:
+        await executor._invoke_http_openai_compat(
+            _Facet("http_openai_compat"), "sentinel-prompt", 5, runtime_policy=OFFICE_RUNTIME_POLICY,
+        )
+    assert raised.value.provider_call_made is False
+    assert raised.value.outcome.value == "FAILED"
+    post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_office_read_timeout_after_transport_start_is_outcome_unknown(monkeypatch):
+    """A read timeout may follow an accepted provider request, so it is not retry-safe."""
+    from jacobs import executor
+
+    async def timed_out(*args, **kwargs):
+        raise httpx.ReadTimeout("sentinel-timeout")
+
+    monkeypatch.setattr(executor, "obtener_cliente_http", lambda: type("C", (), {"post": timed_out})())
+    monkeypatch.setattr(executor, "limite_de_salida", AsyncMock(return_value={"max_tokens": 9}))
+    with pytest.raises(OfficeExecutionError) as raised:
+        await executor._invoke_http_openai_compat(
+            _Facet("http_openai_compat"), "sentinel-prompt", 5, runtime_policy=OFFICE_RUNTIME_POLICY,
+        )
+    assert raised.value.code is OfficeRejectionCode.OFFICE_PROVIDER_TIMEOUT
+    assert raised.value.provider_call_made is True
+    assert raised.value.outcome.value == "OUTCOME_UNKNOWN"
+
+
+def test_office_connect_failure_is_a_known_non_delivery_outcome():
+    error = runtime.map_office_exception(httpx.ConnectError("sentinel-connect"), provider_call_made=True)
+    assert error.code is OfficeRejectionCode.OFFICE_PROVIDER_UNAVAILABLE
+    assert error.provider_call_made is False
+    assert error.outcome.value == "FAILED"
+
+
+def test_valid_usage_survives_a_later_office_response_shape_rejection():
+    with pytest.raises(OfficeExecutionError) as raised:
+        runtime.parse_office_provider_response(
+            {"choices": [], "usage": {"prompt_tokens": 13, "completion_tokens": 21}},
+            "http_openai_compat",
+        )
+    assert raised.value.code is OfficeRejectionCode.OFFICE_PROVIDER_RESPONSE_INVALID
+    assert (raised.value.tokens_in, raised.value.tokens_out) == (13, 21)
+
+
+@pytest.mark.asyncio
+async def test_office_assemble_is_denied_before_mechanical_assembly(monkeypatch):
+    """Office stages admit only direct no-tools transports; Classic assembly remains elsewhere."""
+    from jacobs import executor
+
+    assembled = AsyncMock(side_effect=AssertionError("Office must not assemble"))
+    monkeypatch.setattr(executor, "_assemble_mechanical", assembled)
+    step = type("Step", (), {"capability": "assemble"})()
+    pipeline = _Pipeline("OFFICE_V1")
+    with pytest.raises(OfficeExecutionError) as raised:
+        await executor._dispatch_step(step, pipeline)
+    assert raised.value.code is OfficeRejectionCode.OFFICE_TRANSPORT_NOT_ALLOWED
+    assembled.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_shared_client_keeps_office_logs_scoped_while_classic_remains_visible(monkeypatch, caplog):
+    """One real shared AsyncClient serves concurrent Office and Classic calls safely."""
+    from jacobs import executor
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        logging.getLogger("httpx").debug("request=%s header=%s", str(request.url), request.headers.get("authorization"))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(executor, "obtener_cliente_http", lambda: client)
+    monkeypatch.setattr(executor, "limite_de_salida", AsyncMock(return_value={"max_tokens": 9}))
+    monkeypatch.setattr(executor, "record_resolved_version_safe", AsyncMock())
+    office = _Facet("http_openai_compat")
+    office.base_url = "https://sentinel-office-url.invalid/v1"
+    office.credential = "sentinel-office-header"
+    classic = _Facet("http_openai_compat")
+    classic.base_url = "https://classic-visible.invalid/v1"
+    classic.credential = "classic-header"
+    with caplog.at_level(logging.DEBUG):
+        await asyncio.gather(
+            executor._invoke_http_openai_compat(office, "sentinel-office-prompt", 5, runtime_policy=OFFICE_RUNTIME_POLICY),
+            executor._invoke_http_openai_compat(classic, "classic-prompt", 5),
+        )
+    await client.aclose()
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    assert "sentinel-office-url" not in rendered
+    assert "sentinel-office-header" not in rendered
+    assert "classic-visible.invalid" in rendered
+
+
+@pytest.mark.asyncio
+async def test_office_cancellation_resets_the_log_scope_for_the_shared_client(monkeypatch):
+    """Cancellation is re-raised and cannot suppress the next Classic HTTP log."""
+    from jacobs import executor
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_post(*args, **kwargs):
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(executor, "obtener_cliente_http", lambda: type("C", (), {"post": blocked_post})())
+    monkeypatch.setattr(executor, "limite_de_salida", AsyncMock(return_value={"max_tokens": 9}))
+    task = asyncio.create_task(executor._invoke_http_openai_compat(
+        _Facet("http_openai_compat"), "sentinel-cancel-prompt", 5, runtime_policy=OFFICE_RUNTIME_POLICY,
+    ))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    seen: list[str] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            seen.append(record.getMessage())
+
+    target = logging.getLogger("httpx")
+    handler = Capture()
+    target.addHandler(handler)
+    previous = target.level
+    target.setLevel(logging.DEBUG)
+    try:
+        target.debug("classic-visible-after-cancel")
+    finally:
+        target.removeHandler(handler)
+        target.setLevel(previous)
+    assert seen == ["classic-visible-after-cancel"]
 
 
 def test_policy_is_discriminator_only_and_unknown_fails_closed():
@@ -152,6 +397,21 @@ async def test_catalog_timeout_ceiling_is_current_and_has_no_unknown_bypass(monk
 
 def test_version_mismatch_denies_before_any_office_http(monkeypatch):
     monkeypatch.setattr(runtime.importlib.metadata, "version", lambda _: "not-audited")
+    with pytest.raises(OfficeExecutionError) as raised:
+        runtime.ensure_office_http_log_privacy()
+    assert raised.value.code is OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED
+
+
+def test_filter_install_failure_fails_closed(monkeypatch):
+    class BrokenLogger:
+        filters: list[logging.Filter] = []
+
+        def addFilter(self, filter):
+            raise RuntimeError("sentinel-filter-install")
+
+    original_get_logger = runtime.logging.getLogger
+    monkeypatch.setattr(runtime.importlib.metadata, "version", lambda name: {"httpx": "0.28.1", "httpcore": "1.0.9"}[name])
+    monkeypatch.setattr(runtime.logging, "getLogger", lambda name=None: original_get_logger() if name is None else BrokenLogger())
     with pytest.raises(OfficeExecutionError) as raised:
         runtime.ensure_office_http_log_privacy()
     assert raised.value.code is OfficeRejectionCode.OFFICE_RUNTIME_POLICY_DENIED
