@@ -37,7 +37,7 @@ en el mismo commit que la crea).
     269 filas, sin WHERE ni ORDER BY; el modo se lee por clave primaria
     (`const table`). Corren solo cuando la clave del memo cambia; OJO: si el repo de
     trabajo está sucio por un proceso que lo escribe sin parar (hoy el daemon de
-    Ruflo en `.claude-flow/`), `git status` cambia en cada job y el memo casi nunca
+    Ruflo, en su directorio de estado), `git status` cambia en cada job y el memo casi nunca
     acierta: cada job paga estas consultas (milisegundos, medido).
   * Caché de `ast`: por SHA de blob (`_CACHE_AST`). Un blob con el mismo SHA
     tiene el mismo contenido: no hay nada que invalidar. Tope blando: si pasa de
@@ -394,12 +394,12 @@ async def derivar(fuentes: Fuentes) -> Whitelist:
             continue
         try:
             opcionales[nombre] = frozenset(await fuente())
-        except Exception as exc:  # fail-soft DECLARADO: la categoría pasa a no_verificable, visible en el veredicto
+        except Exception as exc:  # fail-soft: declarado, la categoría pasa a no_verificable, visible en el veredicto
             logger.warning("anti_fabricacion: fuente opcional %s caída: %s: %s", nombre, type(exc).__name__, exc)
             no_disponibles.add(nombre)
     try:
         raices = await asyncio.to_thread(_raices_fs)
-    except OSError:  # fail-soft DECLARADO: sin raíces del sistema no se distingue una ruta de la app de una del sistema
+    except OSError:  # fail-soft: declarado, sin raíces del sistema no se distingue una ruta de la app de una del sistema
         raices = frozenset()
         no_disponibles.add("raices_fs")
 
