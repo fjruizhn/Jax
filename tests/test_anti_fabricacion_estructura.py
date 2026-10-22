@@ -80,7 +80,9 @@ def test_bug_hunt_afirma_bugs_y_pasos_y_propone_el_arreglo():
 
 
 def test_cada_campo_del_mapa_de_canales_existe_en_su_schema():
-    from motor_registry import output_validator as ov
+    from jax.anti_fabricacion.estructura import CANALES_POR_SCHEMA  # noqa: F401  (misma fuente que usa el detector)
+    import importlib
+    ov = importlib.import_module("las_manos.motor_registry.output_validator")
     assert set(ov.CANALES_POR_SCHEMA) == {"code_swarm.v1", "code_patch.v1", "architecture_review.v1", "bug_hunt.v1"}
     for schema, canales in ov.CANALES_POR_SCHEMA.items():
         for canal, campos in canales.items():
@@ -114,8 +116,8 @@ def test_diff_sin_schema_en_texto_libre_tambien_se_lee_como_diff():
 
 
 def test_lo_que_el_diff_define_es_propio():
-    diff = ("--- /dev/null\n+++ b/n.py\n@@ -0,0 +1,3 @@\n+class Nueva:\n+    pass\n+def hacer():\n+    pass\n")
-    v = _v(diff + "\nUsa `Nueva` y `hacer`.")
+    diff = ("--- /dev/null\n+++ b/n.py\n@@ -0,0 +1,3 @@\n+class NuevaClase:\n+    pass\n+def hacer_cosa():\n+    pass\n")
+    v = _v(diff + "\nUsa `NuevaClase` y `hacer_cosa`.")
     assert v.estado == LIMPIO
 
 

@@ -38,6 +38,33 @@ SCHEMAS: dict[str, list[str]] = {
     ],
 }
 
+# Canales de revision anti-fabricacion (capa 2, jax/anti_fabricacion/estructura.py).
+# Que se revisa lo decide el CANAL de cada campo, no los verbos del texto:
+#   afirma -> el campo AFIRMA hechos sobre lo que ya existe: se contrasta con la
+#             whitelist derivada (archivos, tablas, columnas, simbolos).
+#   rutas  -> subconjunto de lo anterior cuyos items SON rutas (lista de rutas).
+#   propone-> el campo PROPONE trabajo futuro: lo que nombra puede no existir aun
+#             y no se revisa.
+#   diff   -> el campo es un diff: `--- a/X` afirma X, `--- /dev/null` propone.
+# Un campo de SCHEMAS que no figura en ningun canal (steps, tests, risks,
+# severity, description, human_review_needed) no se revisa: es un limite
+# declarado, no un olvido. tests/test_anti_fabricacion_estructura.py vigila que
+# cada campo de este mapa exista en su schema.
+CANALES_POR_SCHEMA: dict[str, dict[str, tuple[str, ...]]] = {
+    "code_swarm.v1": {
+        "afirma": (), "rutas": (), "propone": ("plan", "risk_notes"), "diff": ("patches",),
+    },
+    "code_patch.v1": {
+        "afirma": ("files_modified",), "rutas": ("files_modified",), "propone": (), "diff": ("diff",),
+    },
+    "architecture_review.v1": {
+        "afirma": ("summary",), "rutas": (), "propone": ("recommendations",), "diff": (),
+    },
+    "bug_hunt.v1": {
+        "afirma": ("bugs_found", "reproduction_steps"), "rutas": (), "propone": ("suggested_fix",), "diff": (),
+    },
+}
+
 # Schemas declarados HOY en capability.output_schema (DB de produccion,
 # verificado 2026-08-25) pero sin validacion de campos implementada --
 # fail-open EXPLICITO y ACOTADO a esta lista (deuda registrada, no un
