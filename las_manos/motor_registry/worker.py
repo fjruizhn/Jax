@@ -59,6 +59,13 @@ from motor_registry.models import JobStatus
 from interruptor import interruptor_activo
 from motor_registry.output_validator import validate
 from motor_registry.tools_catalog import TOOLS_CATALOG
+# Anti-fabricación (capas 2 y 4). Import PELADO: `las_manos/anti_fabricacion` es un
+# symlink a `jax/anti_fabricacion`, igual que `jacobs`; LAS MANOS corre con
+# cwd=las_manos/, donde `jax.` no es importable. Los tests parchean los atributos
+# de estos módulos (no copias locales): por eso se usan como módulo.
+from anti_fabricacion import consecuencia as _af_consecuencia
+from anti_fabricacion import estructura as _af_estructura
+from anti_fabricacion import whitelist as _af_whitelist
 
 logger = logging.getLogger(__name__)
 
@@ -423,6 +430,30 @@ async def _notify_failed_with_writes(*, job_id: str, files_written: list[dict], 
         logger.error("job %s: notificación de fallo-con-escrituras no se pudo entregar: %s", job_id, result["error"])
 
 
+async def _notify_estructura(*, job_id: str, motor: str, capability: str, pipeline_id: str | None,
+                             veredicto, modo) -> None:
+    """Aviso INMEDIATO de un job con estructura sin respaldo (ambos modos)."""
+    from jacobs.reaper import send_telegram_alert
+    message = _af_consecuencia.mensaje_aviso(
+        job_id=job_id, motor=motor, capability=capability, veredicto=veredicto, modo=modo, pipeline_id=pipeline_id)
+    result = await send_telegram_alert(message)
+    if not result["ok"]:
+        logger.error("job %s: aviso de estructura sin respaldo no se pudo entregar: %s", job_id, result["error"])
+
+
+def _auditar_estructura(**campos: Any) -> None:
+    """Evento en audit.jsonl. Síncrono (abre y escribe un archivo): el worker lo
+    llama con asyncio.to_thread. La ruta se lee AL EMITIR, no al importar. Fail-soft
+    a propósito: no poder escribir la auditoría no cambia el desenlace del job (el
+    rastro principal es `_estructura` en el JSONL del job) pero queda en ERROR."""
+    try:
+        from audit import AuditLog
+        from config_entorno import ruta_absoluta_requerida
+        AuditLog(str(ruta_absoluta_requerida("JAX_AUDIT_LOG_PATH"))).log_estructura(**campos)
+    except Exception:  # fail-soft: ver docstring; el job ya tiene su veredicto guardado
+        logger.exception("job %s: no se pudo escribir ESTRUCTURA_SIN_RESPALDO en audit.jsonl", campos.get("job_id"))
+
+
 def _humanize_error(exc: Exception) -> str:
     if isinstance(exc, httpx.TimeoutException):
         return "Timeout al llamar a la API del motor — la respuesta tardó demasiado"
@@ -497,6 +528,32 @@ async def _correr_trabajo(
             status=JobStatus.FAILED.value,
             finished_at=time.time(),
             error="killed_by_switch — PAUSE detectado antes de iniciar",
+        )
+        return
+
+    # Anti-fabricación (capas 2 y 4): modo y whitelist ANTES de llamar al motor.
+    # Una fuente obligatoria caída en modo duro es FAILED `detector_no_disponible`
+    # sin ninguna llamada de transporte; en sombra el job sigue y el veredicto
+    # queda `no_corrio` (la sombra observa, no puede tumbar el servicio).
+    af_modo = await _af_consecuencia.leer_modo()
+    af_wl = None
+    af_error_detector: str | None = None
+    try:
+        from motor_registry.tool_authority import WORKSPACE_ROOT as _raiz_workspace
+        af_wl = await _af_whitelist.derivar(_af_whitelist.fuentes_por_defecto(
+            _raiz_workspace, herramientas=[t["function"]["name"] for t in TOOLS_CATALOG]))
+    except Exception as exc:  # fail-closed: cualquier fallo del detector (DetectorNoDisponible o un bug) cuenta como detector caído
+        af_error_detector = f"{type(exc).__name__}: {exc}"
+        logger.error("job %s: detector de estructura no disponible: %s", job_id, af_error_detector)
+    if af_wl is None and af_modo == _af_consecuencia.Modo.DURO:
+        store.update(
+            job_id,
+            status=JobStatus.FAILED.value,
+            finished_at=time.time(),
+            error=f"{_af_consecuencia.ERROR_DETECTOR}: {af_error_detector}",
+            estructura_veredicto=_af_estructura.NO_CORRIO,
+            _estructura=_af_estructura.no_corrio(_af_consecuencia.ERROR_DETECTOR).como_dict(),
+            _unbacked_claims=[],
         )
         return
 
@@ -1117,6 +1174,46 @@ async def _correr_trabajo(
         await _report_usage("cancelled")
         return
 
+    # Anti-fabricación (capa 2 + capa 4): contraste de la salida con la whitelist.
+    # Después de validate() y ANTES de escribir result_path / marcar COMPLETED.
+    cap_forbidden = list(getattr(cap_entry, "forbidden_paths", None) or []) if cap_entry else []
+    objetivo = context.get("objective")
+    corpus_confiable = [capability] + cap_forbidden + ([objetivo] if isinstance(objetivo, str) else [])
+    propias = [f["path"] for f in files_written if f.get("path")]
+    af_fallo = af_error_detector  # None si la whitelist se derivó bien
+    veredicto = _af_estructura.no_corrio(_af_consecuencia.ERROR_DETECTOR)
+    if af_wl is not None:
+        try:
+            veredicto = await asyncio.to_thread(
+                _af_estructura.verificar, content or "", af_wl, corpus_confiable, propias,
+                previos=[prompt], schema=output_schema or "")
+        except Exception as exc:  # fail-closed: un fallo del detector no se lee como limpio (en duro, FAILED)
+            af_fallo = f"{type(exc).__name__}: {exc}"
+            logger.exception("job %s: el detector de estructura falló sobre la salida", job_id)
+    decision = _af_consecuencia.aplicar(veredicto, af_modo)
+    if af_fallo and af_wl is not None and af_modo == _af_consecuencia.Modo.DURO:
+        decision = _af_consecuencia.Decision(
+            modo=af_modo, fallar=True, guardar=decision.guardar,
+            error=f"{_af_consecuencia.ERROR_DETECTOR}: {af_fallo}")
+    if decision.avisar:
+        await asyncio.to_thread(
+            _auditar_estructura, job_id=job_id, motor=motor, capability=capability, pipeline_id=pipeline_id,
+            endpoint=motor_entry.api_url, modo=af_modo.value, items=decision.guardar["_unbacked_claims"])
+        await _notify_estructura(job_id=job_id, motor=motor, capability=capability, pipeline_id=pipeline_id,
+                                 veredicto=veredicto, modo=af_modo)
+    if decision.fallar:
+        store.update(
+            job_id, status=JobStatus.FAILED.value, finished_at=time.time(), error=decision.error,
+            estructura_veredicto=veredicto.estado,
+            _finish_reason=finish_reason,
+            _usage={"prompt_tokens": cumulative_prompt_tokens, "completion_tokens": cumulative_completion_tokens},
+            _tool_loop_iterations=iteration, _tool_loop_history=tool_loop_history,
+            _files_written=files_written, **decision.guardar,
+        )
+        await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="estructura sin respaldo")
+        await _report_usage("failed")
+        return
+
     # La salida completa, en su archivo: result_summary son 200 caracteres y
     # era todo lo que quedaba (E2E de la cadena, 1bb0da78, 2026-09-12).
     result_path = await asyncio.to_thread(store.write_result, job_id, content or "")
@@ -1137,6 +1234,8 @@ async def _correr_trabajo(
         _tool_loop_iterations=iteration,
         _tool_loop_history=tool_loop_history,
         _files_written=files_written,
+        estructura_veredicto=veredicto.estado,
+        **decision.guardar,
     )
 
     # T1.b (2026-08-22, auditoria usage_writer): antes había un bloque

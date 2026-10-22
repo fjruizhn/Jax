@@ -236,6 +236,30 @@ def _telegram_no_manda_de_verdad(monkeypatch):
     )
 
 
+#: 2026-10-22 (anti-fabricación, capas 2 y 4): desde que `worker.py` deriva una
+#: whitelist (information_schema + git) y lee `axioma_config` ANTES de llamar al
+#: motor, CADA test que corre `worker.run` pasaría por la base. Sin DB, el
+#: detector cae (`detector_no_disponible`) y el job nace FAILED; con `JAX_DB_HOST`
+#: puesto, abriría conexión desde un test unitario. Se sustituye por un detector
+#: neutro y en `sombra` (no cambia el estado de ningún job): la whitelist vacía no
+#: es una fuente real, solo evita I/O. Los tests que ejercitan el detector de
+#: verdad (`las_manos/_worker_estructura_test.py`) declaran
+#: `ANTI_FABRICACION_REAL = True` a nivel de módulo y inyectan sus propias fuentes.
+@pytest.fixture(autouse=True)
+def _anti_fabricacion_neutra(request, monkeypatch):
+    if getattr(request.module, "ANTI_FABRICACION_REAL", False):
+        return
+    try:
+        from anti_fabricacion import consecuencia as _consecuencia
+        from anti_fabricacion import whitelist as _whitelist
+    except ImportError:
+        # sin las_manos en sys.path el worker no se puede importar: nada que sustituir
+        return
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(_consecuencia, "leer_modo", AsyncMock(return_value=_consecuencia.Modo.SOMBRA))
+    monkeypatch.setattr(_whitelist, "derivar", AsyncMock(return_value=_whitelist.Whitelist()))
+
+
 def archivos_nuevos_en(directorio: Path, desde: float) -> list[Path]:
     """Los archivos de `directorio` (y sus subdirectorios, que es donde
     `cola_uso` manda los corruptos) con mtime igual o posterior a `desde`.

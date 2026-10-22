@@ -239,6 +239,34 @@ class AuditLog:
             **self._forensics(environment, traffic_class, test_run_id),
         })
 
+    def log_estructura(
+        self,
+        *,
+        job_id: str,
+        motor: str,
+        capability: str,
+        pipeline_id: str | None,
+        endpoint: str,
+        modo: str,
+        items: list[dict],
+        environment: str = "production",
+        traffic_class: str = "production",
+        test_run_id: str | None = None,
+    ) -> None:
+        """Un job del Motor Registry afirmó estructura sin respaldo (anti-
+        fabricación, capa 4). Se escribe en AMBOS modos (duro y sombra)."""
+        self._write({
+            "event":       "ESTRUCTURA_SIN_RESPALDO",
+            "job_id":      job_id,
+            "motor":       motor,
+            "capability":  capability,
+            "pipeline_id": pipeline_id,
+            "endpoint":    endpoint,
+            "modo":        modo,
+            "items":       items,
+            **self._forensics(environment, traffic_class, test_run_id),
+        })
+
     def tail(self, n: int = 50) -> list[dict]:
         """Devuelve los últimos N eventos — para /audit_log_read."""
         if not self.log_path.exists():
