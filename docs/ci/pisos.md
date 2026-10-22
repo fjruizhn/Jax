@@ -272,6 +272,17 @@ Sin historia anotada en el workflow.
 
 Patrón vigente al migrar (2026-10-03, master 364ded9): `^295 passed`
 
+310 → 314 (2026-10-22, JAX#409): +4 regresiones MariaDB del namespace Office:
+una rechaza un `CHECK` o índice único homónimo antes de DDL y tres impiden que
+la herramienta clásica escriba, mueva o revierta documentos de un proyecto
+Office. Medición verificada en el paso **Piso exacto de tests CORRIDOS** de
+`subpipeline-contrato-db`: run `39787825306`, job `119855755685`, SHA
+`e5a7b5eaf8c49229718b6d5af67ffca7593d9790`, `314 passed, 787 warnings, 51
+subtests passed`. Repetida tras corregir la forma soportada del patrón en run
+`39791846169`, job `119870307070`, SHA
+`62b4eaff2470e40cdb9f15a520a59023fa4a05e9`, con la misma medición; ambos jobs
+terminaron en `success`.
+
 Historia (comentarios que estaban sobre el piso en `policy.yml`):
 
 ```text
@@ -958,6 +969,18 @@ para conservar byte a byte el registro de la migración de pisos.
 matriz parametrizada de esa ronda se retiró al volver al scanner de `68557946`;
 sus exclusiones de `docker exec/run` suprimían marcas que master sí hacía. El
 piso se vuelve a fijar desde los **3537 de master**.
+
+3922 → 3923 (2026-10-22, JAX#409): +1 regresión pura para que la normalización
+del `CHECK` del namespace Office conserve la agrupación booleana y los bytes de
+literales e identificadores delimitados. El paso **Piso exacto de tests
+CORRIDOS** de `tests-puros` midió `3923 passed, 45 skipped, 1 xfailed` en run
+`39787825306`, job `119855755998`, SHA
+`e5a7b5eaf8c49229718b6d5af67ffca7593d9790`; ese job terminó fallido únicamente
+porque aún tenía el piso anterior de 3922. La medición se repitió con el patrón
+corregido en run `39791846169`, job `119870307190`, SHA
+`62b4eaff2470e40cdb9f15a520a59023fa4a05e9`, y terminó en `success`. El parser
+exige solamente `3923 passed, 45 skipped`; `1 xfailed` es una observación de
+esas dos ejecuciones, no una condición del piso.
 
 3888 -> 3887 (2026-10-14, OP#251, retiro de `hyde_sandbox`): −1 `test_la_jaula_de_hyde_no_recibe_la_credencial`
 (`tests/test_las_manos_auth_servicio.py`), que probaba el módulo retirado (lo importaba y llamaba

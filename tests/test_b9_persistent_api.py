@@ -496,7 +496,7 @@ async def _b9_ci_test_pool(*, authority=False, legacy=False):
         if authority:
             tables+=(
                 "CREATE TEMPORARY TABLE jax_users (user_id VARCHAR(128), tenant_id VARCHAR(128), status VARCHAR(16), role VARCHAR(32), PRIMARY KEY (user_id,tenant_id))",
-                "CREATE TEMPORARY TABLE jax_project_scope (project_id VARCHAR(128) PRIMARY KEY, tenant_id VARCHAR(128), status VARCHAR(16))",
+                "CREATE TEMPORARY TABLE jax_project_scope (project_id VARCHAR(128) PRIMARY KEY, tenant_id VARCHAR(128), status VARCHAR(16), authorization_namespace VARCHAR(32) NOT NULL DEFAULT 'CLASSIC')",
                 "CREATE TEMPORARY TABLE jax_project_membership (membership_id CHAR(36) PRIMARY KEY, project_id VARCHAR(128), tenant_id VARCHAR(128), user_id VARCHAR(128), project_role VARCHAR(16), status VARCHAR(16))",
             )
         if legacy:
@@ -516,7 +516,7 @@ async def _seed_project_membership(pool):
         async with conn.cursor() as cur:
             await cur.execute("INSERT INTO jax_users VALUES (%s,%s,'ACTIVE','member')",("user-1","tenant-1"))
             for project, role in (("project-a","CONTRIBUTOR"),("project-b","VIEWER")):
-                await cur.execute("INSERT INTO jax_project_scope VALUES (%s,%s,'ACTIVE')",(project,"tenant-1"))
+                await cur.execute("INSERT INTO jax_project_scope VALUES (%s,%s,'ACTIVE','CLASSIC')",(project,"tenant-1"))
                 await cur.execute("INSERT INTO jax_project_membership VALUES (%s,%s,%s,%s,%s,'ACTIVE')",
                                   ("membership-"+project,project,"tenant-1","user-1",role))
         await conn.commit()
