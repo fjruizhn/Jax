@@ -1,6 +1,7 @@
 """Whitelist derivada por job (esqueleto de la interfaz; la implementación viene en el commit siguiente)."""
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
@@ -48,6 +49,7 @@ class Whitelist:
     rutas_app: frozenset[str] = frozenset()
     claves: frozenset[str] = frozenset()
     modelos: frozenset[str] = frozenset()
+    raices_fs: frozenset[str] = frozenset()
     no_disponibles: frozenset[str] = field(default_factory=frozenset)
     clave_cache: tuple[str, str, str] = ("", "", "")
 
@@ -58,3 +60,15 @@ async def derivar(fuentes: Fuentes) -> Whitelist:
 
 def fuentes_por_defecto(raiz_repo, rutas_app=None) -> Fuentes:
     raise NotImplementedError
+
+
+_MEMO: "OrderedDict[tuple[str, str, str], Whitelist]" = OrderedDict()
+_CACHE_AST: dict[str, frozenset[str]] = {}
+
+
+def simbolos_de_archivos(raiz, entradas) -> frozenset[str]:
+    return frozenset()
+
+
+def leer_git(raiz) -> EstadoGit:
+    return EstadoGit()

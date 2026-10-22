@@ -45,3 +45,7 @@ def verificar(
     schema: str = "",
 ) -> Veredicto:
     return Veredicto(estado=LIMPIO)
+
+
+def no_corrio(motivo: str) -> Veredicto:
+    return Veredicto(estado=LIMPIO, motivo=motivo)
