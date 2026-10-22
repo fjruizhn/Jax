@@ -83,12 +83,14 @@ os.environ["JAX_REPO_BASE"] = tempfile.mkdtemp(prefix="jax-test-repo-")
 
 #: 2026-09-18 (detector de cobertura, hallazgo real: FileNotFoundError/
 #: PermissionError en las_manos/motor_registry/_authorize_facet_endpoint_test.py
-#: y cualquier otro test que importe `server`). `las_manos/config.toml` trae
-#: `audit_log` como ruta absoluta del home de producción
-#: (/home/fruiz/jax/las_manos/logs/audit.jsonl); `server.py` la lee al
-#: importarse y `AuditLog.__init__` le hace `mkdir` -- en cualquier checkout
-#: que no sea exactamente /home/fruiz/jax (cualquier runner de CI, este
-#: worktree incluido) eso revienta antes de que corra un solo test. Mismo
+#: y cualquier otro test que importe `server`). Hasta el 2026-10-21
+#: `las_manos/config.toml` traía `audit_log` como ruta absoluta del home
+#: (/home/fruiz/jax/las_manos/logs/audit.jsonl) y `server.py` caía ahí si
+#: faltaba la variable; `AuditLog.__init__` le hacía `mkdir` y reventaba en
+#: cualquier checkout que no fuera /home/fruiz/jax. Desde jax#277 `server.py`
+#: exige JAX_AUDIT_LOG_PATH (`ruta_absoluta_requerida`, EntornoInvalido si
+#: falta) y config.toml ya no trae la clave: sin esta línea, importar
+#: `server` falla cerrado en vez de escribir en un lugar adivinado. Mismo
 #: criterio que el resto de este archivo: se fija en tiempo de IMPORT, antes
 #: de que nada pueda importar `server`. tests/test_prevuelo_pool.py ya
 #: documentaba el mismo bug con un monkeypatch local de AuditLog.__init__

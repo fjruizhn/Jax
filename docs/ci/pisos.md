@@ -4896,3 +4896,49 @@ El incremento acumulado desde master es +37. Medido sobre el head reapilado en P
 rc=0.
 
 El CI exacto de `bc024578` midió `1042 passed`, cero skipped, frente al piso anterior de 1040. En la base local reapilada, el comando completo midió 1044; el delta local de pruebas de providers/modelos explica el +2 adicional. Se actualiza el patrón a 1044, pendiente de confirmación CI del SHA final.
+
+## `audit-log-path-sin-default-silencioso/audit_log_entorno`
+
+Patrón: `^4 passed`. Nació en jax#277 (ops/rutas-de-produccion) y se integró con master
+el 2026-10-21, ya en `ci/pisos.json`. Medido el 2026-09-25 en un venv limpio, sin DB: 4 passed.
+Son las pruebas de `las_manos/_server_audit_log_entorno_test.py`: sin `JAX_AUDIT_LOG_PATH`,
+`import server` falla con `EntornoInvalido`, y `config.toml` ya no trae `audit_log`.
+
+## `rutas-de-produccion-fuera-del-checkout-de-trabajo/rutas_de_produccion`
+
+Patrón: `^90 passed, 4 skipped`. Nació en jax#277 y llegó a `ci/pisos.json` el 2026-10-21.
+Cuenta `tests/test_rutas_de_produccion.py`, `tests/test_rutas_de_produccion_verificador.py` y
+`tests/test_rutas_de_produccion_reversion.py`.
+Las 4 saltadas solo corren en el host de producción de jax (si existe `/srv/jax-prod/jax`):
+`test_verificar_rutas_de_produccion_da_cero_en_produccion` y las tres que llaman al
+`sudo -n -u jaxsvc` real.
+
+- 2026-09-25: 4 passed, 1 skipped. Medido en hall9000 con `sudo unshare --mount` tapando
+  `/srv/jax-prod`, el mismo método que jax#274.
+- 2026-09-25, rondas 1 a 4 de la auditoría de jax#277: el verificador pasó a Python
+  (`ops/rutas_de_produccion_verificador.py`), con 56 passed y 4 skipped.
+- 2026-10-21: el job estaba rojo en el runner desde la ronda 4 (`a5975508`).
+  `verificar_fase_a` tenía un default que corría `sudo` real para `realpath -m`, y una prueba no
+  lo reemplazaba. Ahora el parámetro es obligatorio (`e49e29b0`) y el número no cambia.
+  Comprobado en hall9000 con un `sudo` que siempre falla al frente del PATH, como en el runner:
+  57 passed y 3 fallidas, que son 3 de las 4 que el runner salta. La cuarta
+  (`test_jaxsvc_puede_leer_da_false_para_ruta_absoluta_inexistente`) pasaba igual con ese `sudo`
+  falso: no distinguía un «no» de `test` de un error (auditoría de jax#277, MINOR-2).
+- 2026-10-21, auditoría de escalón 3 de jax#277: 56 -> 62 (+6). Entran el caso 6 partido en dos
+  (`JAX_WORKSPACE_DIR` ya no es excepción: bajo /home falla, en /srv/jax-data pasa) y 4 pruebas de
+  «no se pudo comprobar» frente a «no puede» (rc=2 de `test`, sudo con stderr, rc=1 limpio y Fase
+  B), más 1 de que un error de parseo no muestra el valor de la línea. Las saltadas siguen en 4.
+  Local, con el `sudo` falso al frente del PATH: 63 passed y 3 fallidas, las 3 de las 4 que el
+  runner salta; con sudo real en hall9000: 66 passed.
+- 2026-10-21, re-auditoría de jax#277 sobre `10e8e518`: 62 -> 88 (+26). Una prueba nueva del
+  verificador: un «nombre» que no es identificador no se muestra (MINOR-A). Y entra
+  `tests/test_rutas_de_produccion_reversion.py`, con 25 pruebas: corre los bloques de la Reversión
+  del runbook en un sandbox sin root, modelando que fruiz no ve `/var/log/jax/las_manos` sin
+  sudo. Contra el runbook de `10e8e518` fallan 10 de esas 25. Necesita bash y rsync; si faltan,
+  el módulo se salta entero y el piso no cuadra (falla visible, no verde por vacío).
+  Local con sudo real: 92 passed. Con el sudo falso: 88 passed y 4 fallidas, que son las 4 que el
+  runner salta.
+- 2026-10-21, tercera ronda de jax#277 sobre `2297a5d7`: 88 -> 90 (+2). Una prueba de R4 con un
+  `.env` sin salto de línea final (MINOR-E) y otra que exige `sudo` en todo uso del audit log nuevo
+  en R2, porque el modelo de visibilidad del sandbox solo intercepta `[` y `test`. Local con sudo
+  real: 94 passed. Con el sudo falso realista: 90 passed y 4 fallidas, las 4 que el runner salta.

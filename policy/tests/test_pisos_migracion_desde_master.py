@@ -46,7 +46,14 @@ DATOS = json.loads((RAIZ / "ci" / "pisos.json").read_text(encoding="utf-8"))
 LLAMADA = re.compile(r"python3 \.github/ci/piso\.py verificar (\S+) (\S+)")
 
 
-JOBS_NUEVOS = ["pisos-no-bajan", "faro-rule-authority-unit"]
+# jax#277 (ops/rutas-de-produccion, 2026-09-25; integrado con master el 2026-10-21):
+# dos jobs nuevos con sus pisos en ci/pisos.json desde el principio.
+JOBS_NUEVOS = [
+    "pisos-no-bajan",
+    "faro-rule-authority-unit",
+    "audit-log-path-sin-default-silencioso",
+    "rutas-de-produccion-fuera-del-checkout-de-trabajo",
+]
 
 # Diferencias esperadas por OP#251 (GO de Fernando 2026-10-14 18:40): retiro completo de
 # hyde_sandbox.py. Por nombre, sin comodines; el job `pisos-no-bajan` sigue cubriendo todo
