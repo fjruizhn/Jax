@@ -139,7 +139,7 @@ def test_linea_indentada_es_error_de_parseo_con_numero_de_linea():
     assert "indentada" in errores[0].motivo or "=" in errores[0].motivo
     # Y ese error tiene que tirar abajo la verificación completa, no sólo
     # quedar reportado y ser ignorado por el llamador.
-    resultado = verificar_fase_a(entorno, _resolver_identidad(), errores_de_parseo=errores)
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), errores_de_parseo=errores, resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
     assert any("línea 2" in h.clave for h in resultado.problemas)
 
@@ -152,7 +152,7 @@ def test_espacio_junto_al_igual_es_error_de_parseo_con_numero_de_linea():
     entorno, errores = parsear_env(texto)
     assert len(errores) == 1
     assert "línea 2" in errores[0].clave
-    resultado = verificar_fase_a(entorno, _resolver_identidad(), errores_de_parseo=errores)
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), errores_de_parseo=errores, resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
 
 
@@ -182,7 +182,7 @@ def test_un_error_de_parseo_lejos_de_las_claves_en_alcance_igual_tira_todo_abajo
     )
     entorno, errores = parsear_env(texto)
     assert len(errores) == 1
-    resultado = verificar_fase_a(entorno, _resolver_identidad(), errores_de_parseo=errores)
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), errores_de_parseo=errores, resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok, "un error de parseo en una clave ajena tiene que igual invalidar todo"
 
 
@@ -191,7 +191,7 @@ def test_un_error_de_parseo_lejos_de_las_claves_en_alcance_igual_tira_todo_abajo
 def test_caso_1_clave_en_alcance_ausente():
     entorno = dict(ENTORNO_SANO)
     del entorno["JAX_REPO_BASE"]
-    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
     claves_con_problema = {h.clave for h in resultado.problemas}
     assert "JAX_REPO_BASE" in claves_con_problema
@@ -204,7 +204,7 @@ def test_caso_1_clave_en_alcance_ausente():
 def test_caso_2_valor_vacio():
     entorno = dict(ENTORNO_SANO)
     entorno["JAX_AUDIT_LOG_PATH"] = [""]
-    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
     motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_AUDIT_LOG_PATH")
     assert "vacío" in motivo
@@ -215,14 +215,14 @@ def test_caso_2_valor_vacio():
 def test_caso_3_comillas_valor_sano_pasa():
     entorno = dict(ENTORNO_SANO)
     entorno["JAX_CONFIG_PATH"] = ['"/srv/jax-prod/jax/config/config.toml"']
-    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert resultado.ok, resultado.problemas
 
 
 def test_caso_3_comillas_ambiguas_falla():
     entorno = dict(ENTORNO_SANO)
     entorno["JAX_CONFIG_PATH"] = ['"/srv/jax-prod/jax/config/config.toml']  # sin cerrar
-    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
     motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_CONFIG_PATH")
     assert "ambigu" in motivo.lower() or "interpretable" in motivo.lower()
@@ -239,7 +239,7 @@ def test_caso_4_espacios_junto_al_igual_via_parsear_env_es_error_de_parseo():
     entorno, errores = parsear_env(texto)
     assert "JAX_CONFIG_PATH" not in entorno
     assert len(errores) == 1
-    resultado = verificar_fase_a(entorno, _resolver_identidad(), errores_de_parseo=errores)
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), errores_de_parseo=errores, resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
 
 
@@ -249,7 +249,7 @@ def test_caso_5_symlink_a_home_fruiz_jax_se_atrapa_por_la_ruta_real():
     entorno = dict(ENTORNO_SANO)
     entorno["JAX_REPO_BASE"] = ["/srv/jax-data/repo-symlink"]
     resolver = _resolver_identidad({"/srv/jax-data/repo-symlink": "/home/fruiz/jax/repo"})
-    resultado = verificar_fase_a(entorno, resolver)
+    resultado = verificar_fase_a(entorno, resolver, resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
     motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_REPO_BASE")
     assert "/home/fruiz/jax/repo" in motivo
@@ -260,7 +260,7 @@ def test_caso_5_ruta_que_no_resuelve_ni_existe_es_falla():
 
     def resolver_none(ruta):
         return None if ruta == ENTORNO_SANO["JAX_REPO_BASE"][0] else ruta
-    resultado = verificar_fase_a(entorno, resolver_none)
+    resultado = verificar_fase_a(entorno, resolver_none, resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
     motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_REPO_BASE")
     assert "no se pudo resolver" in motivo
@@ -274,7 +274,7 @@ def test_caso_6_workspace_dir_bajo_home_es_excepcion_declarada_no_pasa_por_accid
 
     entorno = dict(ENTORNO_SANO)
     entorno["JAX_WORKSPACE_DIR"] = ["/home/fruiz/jax-workspace"]
-    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert resultado.ok, resultado.problemas
 
     excepciones_de_prueba = dict(EXCEPCIONES_FASE_A)
@@ -283,7 +283,7 @@ def test_caso_6_workspace_dir_bajo_home_es_excepcion_declarada_no_pasa_por_accid
     original = mod.EXCEPCIONES_FASE_A
     try:
         mod.EXCEPCIONES_FASE_A = excepciones_de_prueba
-        resultado_sin_excepcion = verificar_fase_a(entorno, _resolver_identidad())
+        resultado_sin_excepcion = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     finally:
         mod.EXCEPCIONES_FASE_A = original
     assert not resultado_sin_excepcion.ok, (
@@ -307,7 +307,7 @@ def test_jax_kill_switch_path_ausente_pasa_pero_bajo_home_falla():
 
     def resolver_ausente(ruta):
         return None if ruta == "/etc/jax/interruptor/PAUSE" else ruta
-    resultado = verificar_fase_a(entorno_ausente, resolver_ausente)
+    resultado = verificar_fase_a(entorno_ausente, resolver_ausente, resolver_permitiendo_ausente=_resolver_identidad())
     assert resultado.ok, resultado.problemas
 
     entorno_bajo_home = dict(ENTORNO_SANO)
@@ -315,7 +315,7 @@ def test_jax_kill_switch_path_ausente_pasa_pero_bajo_home_falla():
 
     def resolver_ausente_bajo_home(ruta):
         return None if ruta == "/home/fruiz/PAUSE" else ruta
-    resultado_home = verificar_fase_a(entorno_bajo_home, resolver_ausente_bajo_home)
+    resultado_home = verificar_fase_a(entorno_bajo_home, resolver_ausente_bajo_home, resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado_home.ok, "JAX_KILL_SWITCH_PATH bajo /home/ (aunque ausente) tendria que fallar"
     motivo = next(h.motivo for h in resultado_home.problemas if h.clave == "JAX_KILL_SWITCH_PATH")
     assert "/home/" in motivo
@@ -324,7 +324,7 @@ def test_jax_kill_switch_path_ausente_pasa_pero_bajo_home_falla():
 def test_cualquier_otra_ruta_bajo_home_sin_excepcion_falla():
     entorno = dict(ENTORNO_SANO)
     entorno["JAX_UNA_CLAVE_NUEVA_DIR"] = ["/home/otrousuario/algo"]
-    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
     motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_UNA_CLAVE_NUEVA_DIR")
     assert "/home/" in motivo
@@ -338,7 +338,7 @@ def test_clave_en_alcance_duplicada_falla():
         "/srv/jax-prod/jax/config/config.toml",
         "/srv/jax-prod/jax/config/otro.toml",
     ]
-    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
     motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_CONFIG_PATH")
     assert "duplicada" in motivo
@@ -350,7 +350,7 @@ def test_clave_fuera_de_alcance_duplicada_tambien_falla():
     alcance. Ahora también es FALLA."""
     entorno = dict(ENTORNO_SANO)
     entorno["JAX_OTRA_RUTA_DIR"] = ["/srv/algo", "/srv/otro"]
-    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
     motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_OTRA_RUTA_DIR")
     assert "duplicada" in motivo
@@ -359,7 +359,7 @@ def test_clave_fuera_de_alcance_duplicada_tambien_falla():
 def test_clave_fuera_de_alcance_ambigua_tambien_falla():
     entorno = dict(ENTORNO_SANO)
     entorno["JAX_OTRA_RUTA_DIR"] = ['"sin cerrar']
-    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
     motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_OTRA_RUTA_DIR")
     assert "ambigu" in motivo.lower() or "interpretable" in motivo.lower()
@@ -371,7 +371,7 @@ def test_clave_fuera_de_alcance_con_realpath_fallido_tambien_falla():
 
     def resolver_none(ruta):
         return None if ruta == "/srv/no-existe" else ruta
-    resultado = verificar_fase_a(entorno, resolver_none)
+    resultado = verificar_fase_a(entorno, resolver_none, resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
     motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_OTRA_RUTA_DIR")
     assert "no se pudo resolver" in motivo
@@ -386,7 +386,7 @@ def test_permitidos_por_clave_es_especifico_no_compartido():
     assert PERMITIDOS_POR_CLAVE["JAX_CONFIG_PATH"] != PERMITIDOS_POR_CLAVE["JAX_REPO_BASE"]
     entorno = dict(ENTORNO_SANO)
     entorno["JAX_CONFIG_PATH"] = ["/srv/jax-data/repo/config.toml"]  # destino de REPO_BASE, no el suyo
-    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
     motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_CONFIG_PATH")
     assert "no está bajo ninguno" in motivo
@@ -398,14 +398,14 @@ def test_repo_base_no_confunde_con_directorio_hermano_de_nombre_parecido():
     dejado pasar."""
     entorno = dict(ENTORNO_SANO)
     entorno["JAX_REPO_BASE"] = ["/srv/jax-data/repo-otro-nombre"]
-    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
 
 
 # --- Caso feliz --------------------------------------------------------------
 
 def test_entorno_sano_pasa_fase_a():
-    resultado = verificar_fase_a(ENTORNO_SANO, _resolver_identidad())
+    resultado = verificar_fase_a(ENTORNO_SANO, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert resultado.ok, resultado.problemas
     assert resultado.revisadas == len(KEYS_EN_ALCANCE)
 
@@ -713,7 +713,7 @@ def test_kill_switch_ruta_relativa_falla_con_hallazgo():
     ANTES de llegar a ningún resolver."""
     entorno = dict(ENTORNO_SANO)
     entorno["JAX_KILL_SWITCH_PATH"] = ["PAUSE"]
-    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
     motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_KILL_SWITCH_PATH")
     assert "absoluta" in motivo
@@ -740,7 +740,7 @@ def test_clave_en_alcance_no_absoluta_da_hallazgo_no_traceback():
     # No debe levantar ninguna excepción -- si _valor_unico_normalizado no
     # atrapara esto, jaxsvc_puede_leer (llamado indirectamente si Fase A
     # diera ok) levantaría ValueError sin capturar.
-    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
     motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_CONFIG_PATH")
     assert "absoluta" in motivo
@@ -749,7 +749,7 @@ def test_clave_en_alcance_no_absoluta_da_hallazgo_no_traceback():
 def test_clave_fuera_de_alcance_no_absoluta_da_hallazgo_no_traceback():
     entorno = dict(ENTORNO_SANO)
     entorno["JAX_OTRA_RUTA_DIR"] = ["relativo/tambien"]
-    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    resultado = verificar_fase_a(entorno, _resolver_identidad(), resolver_permitiendo_ausente=_resolver_identidad())
     assert not resultado.ok
     motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_OTRA_RUTA_DIR")
     assert "absoluta" in motivo

@@ -280,7 +280,8 @@ def verificar_fase_a(
     entorno: dict[str, list[str]],
     resolver: Callable[[str], str | None],
     errores_de_parseo: list[Hallazgo] | None = None,
-    resolver_permitiendo_ausente: Callable[[str], str | None] | None = None,
+    *,
+    resolver_permitiendo_ausente: Callable[[str], str | None],
 ) -> ResultadoFaseA:
     """`resolver(ruta_cruda) -> ruta_real | None`. En producción,
     `resolver_como_jaxsvc` (sudo -n -u jaxsvc realpath -e). En tests, un
@@ -301,8 +302,11 @@ def verificar_fase_a(
           saltaban en silencio con `continue`, dejando un hueco fail-open
           para cualquier clave de ruta futura que no fuera una de las tres
           en alcance."""
-    if resolver_permitiendo_ausente is None:
-        resolver_permitiendo_ausente = resolver_como_jaxsvc_permitiendo_ausente
+    # `resolver_permitiendo_ausente` es obligatorio y sin default (2026-10-21):
+    # con default a `resolver_como_jaxsvc_permitiendo_ausente`, un test que lo
+    # omitía corría `sudo -n -u jaxsvc realpath -m` de verdad -- pasaba en
+    # hall9000 (jaxsvc existe) y fallaba en el runner de CI. Mismo contrato que
+    # `resolver`: quien llama declara la fuente de la verdad.
 
     resultado = ResultadoFaseA()
     resultado.problemas.extend(errores_de_parseo or [])
@@ -551,7 +555,9 @@ def verificar(texto_env: str) -> tuple[bool, str]:
     """(ok, reporte). `ok=False` con CUALQUIER problema de Fase A, Fase B o
     Fase C (errores de parseo incluidos, vía Fase A)."""
     entorno, errores_de_parseo = parsear_env(texto_env)
-    fase_a = verificar_fase_a(entorno, resolver_como_jaxsvc, errores_de_parseo)
+    fase_a = verificar_fase_a(
+        entorno, resolver_como_jaxsvc, errores_de_parseo,
+        resolver_permitiendo_ausente=resolver_como_jaxsvc_permitiendo_ausente)
     fase_b = verificar_fase_b(entorno, _ejecutar_sudo_real) if fase_a.ok else ResultadoFaseB()
     fase_c = verificar_fase_c(resolver_como_jaxsvc)
 
