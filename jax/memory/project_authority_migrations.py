@@ -139,22 +139,21 @@ _MANAGED_CHECKS = {
     _CHK_SCOPE_NAMESPACE: "authorization_namespace IN ('CLASSIC','OFFICE_CONFIDENTIAL')",
     _CHK_MEMBERSHIP_ORIGIN: "grant_origin IN ('EXPLICIT','CREATOR','TENANT_ADMIN')",
     _CHK_MEMBERSHIP_ORIGIN_V2: "grant_origin IN ('EXPLICIT','CREATOR','TENANT_ADMIN','OFFICE')",
-    _CHK_MEMBERSHIP_PRE_ADMIN: "(pre_admin_role IS NULL AND pre_admin_status IS NULL) OR (grant_origin='TENANT_ADMIN' AND pre_admin_role IN ('VIEWER','CONTRIBUTOR','REVIEWER','OWNER') AND pre_admin_status IN ('ACTIVE','REVOKED'))",
-    _CHK_NAMESPACE_MEMBERSHIP_EXECUTION: "(execution_kind='INTERACTIVE_USER' AND invitation_id IS NULL) OR (execution_kind='INVITATION_ACCEPTANCE' AND invitation_id IS NOT NULL)",
+    _CHK_MEMBERSHIP_PRE_ADMIN: "pre_admin_role IS NULL AND pre_admin_status IS NULL OR grant_origin='TENANT_ADMIN' AND pre_admin_role IN ('VIEWER','CONTRIBUTOR','REVIEWER','OWNER') AND pre_admin_status IN ('ACTIVE','REVOKED')",
+    _CHK_NAMESPACE_MEMBERSHIP_EXECUTION: "execution_kind='INTERACTIVE_USER' AND invitation_id IS NULL OR execution_kind='INVITATION_ACCEPTANCE' AND invitation_id IS NOT NULL",
     _CHK_NAMESPACE_MEMBERSHIP_RESULT: "project_role IN ('VIEWER','CONTRIBUTOR') AND status IN ('ACTIVE','REVOKED') AND changed=1",
     _CHK_NAMESPACE_MEMBERSHIP_RESULT_V2: "project_role IN ('VIEWER','CONTRIBUTOR','REVIEWER','OWNER') AND status IN ('ACTIVE','REVOKED') AND changed=1",
-    _CHK_NAMESPACE_MEMBERSHIP_RESULT_V4: "((operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='INTERNAL' AND project_role='CONTRIBUTOR' AND status='ACTIVE') OR (operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='EXTERNAL_CLIENT' AND project_role='VIEWER' AND status='ACTIVE') OR (operation='REVOKE_OFFICE_MEMBER' AND member_kind IS NULL AND project_role IN ('VIEWER','CONTRIBUTOR','REVIEWER','OWNER') AND status='REVOKED')) AND changed=1",
+    _CHK_NAMESPACE_MEMBERSHIP_RESULT_V4: "(operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='INTERNAL' AND project_role='CONTRIBUTOR' AND status='ACTIVE' OR operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='EXTERNAL_CLIENT' AND project_role='VIEWER' AND status='ACTIVE' OR operation='REVOKE_OFFICE_MEMBER' AND member_kind IS NULL AND project_role IN ('VIEWER','CONTRIBUTOR','REVIEWER','OWNER') AND status='REVOKED') AND changed=1",
 }
 
 
 def _normalize_check_clause(value: Any) -> str:
     """Normalize MariaDB's formatting without changing SQL string literals.
 
-    ``information_schema`` may add whitespace, identifier quoting, omit
-    redundant grouping parentheses, and add a character-set introducer such
-    as ``_utf8mb4'ACTIVE'``.  Those are display details.  A generic regex is
-    unsafe here: it also rewrites the bytes in a quoted value, so a different
-    authorization value can appear canonical.
+    ``information_schema`` may add whitespace, identifier quoting, and a
+    character-set introducer such as ``_utf8mb4'ACTIVE'``.  Those are display
+    details.  A generic regex is unsafe here: it also rewrites the bytes in a
+    quoted value, so a different authorization value can appear canonical.
     """
     text = str(value)
     normalized: list[str] = []
@@ -180,10 +179,7 @@ def _normalize_check_clause(value: Any) -> str:
             normalized.append(char)
             index += 1
             continue
-        # INFORMATION_SCHEMA also drops grouping parentheses that do not
-        # change MariaDB's AND/OR precedence.  Ignore that display formatting
-        # only while outside a literal.
-        if char.isspace() or char in "`()":
+        if char.isspace() or char == "`":
             index += 1
             continue
         # MariaDB may place a charset introducer immediately before a string

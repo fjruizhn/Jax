@@ -15,6 +15,11 @@ from jax.memory.project_authority import (
     ProjectAuthorityRetryable,
     UpdatedNamespacedProjectMetadata,
 )
+from jax.memory.project_authority_migrations import (
+    _CHK_NAMESPACE_MEMBERSHIP_RESULT_V4,
+    _MANAGED_CHECKS,
+    _normalize_check_clause,
+)
 from jax.memory.scope_authority import MariaDBScopeAuthorityResolver, ProjectNamespace
 
 
@@ -28,6 +33,22 @@ class Cursor:
 
     async def fetchone(self):
         return self.rows.pop(0) if self.rows else None
+
+
+def test_check_normalization_preserves_boolean_grouping_and_literal_bytes():
+    expected = _MANAGED_CHECKS[_CHK_NAMESPACE_MEMBERSHIP_RESULT_V4]
+    altered_precedence = (
+        "operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='INTERNAL' "
+        "AND project_role='CONTRIBUTOR' AND status='ACTIVE' OR "
+        "operation='GRANT_OFFICE_MEMBER' AND member_kind IS NOT NULL AND member_kind='EXTERNAL_CLIENT' "
+        "AND project_role='VIEWER' AND status='ACTIVE' OR "
+        "(operation='REVOKE_OFFICE_MEMBER' AND member_kind IS NULL AND "
+        "project_role IN ('VIEWER','CONTRIBUTOR','REVIEWER','OWNER') AND status='REVOKED' AND changed=1)"
+    )
+    assert _normalize_check_clause(expected) != _normalize_check_clause(altered_precedence)
+    assert _normalize_check_clause("state IN ('ACT IVE')") != _normalize_check_clause("state IN ('ACTIVE')")
+    assert _normalize_check_clause("state IN ('ACT`IVE')") != _normalize_check_clause("state IN ('ACTIVE')")
+    assert _normalize_check_clause("state IN ('_utf8mb4ACTIVE')") != _normalize_check_clause("state IN ('ACTIVE')")
 
 
 class Store:
